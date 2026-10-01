@@ -27,6 +27,8 @@ describe "Formatter on iyi" do
   assert_iyi_format "module m\n\nimport app/greeter::*"
   assert_iyi_format "module m\n\nimport std/list::{List}"
   assert_iyi_format "module m\n\nimport std/list::{List, Cons}"
+  assert_iyi_format "module m\n\nimport std/list ::{List}", "module m\n\nimport std/list::{List}"
+  assert_iyi_format "module m\n\nimport app/greeter ::*", "module m\n\nimport app/greeter::*"
   # An `import X::*` alone loads the module and names what it brings; the
   # parser makes the scope half beside it, and the formatter writes what the
   # source says, so the file keeps the one line.
@@ -78,9 +80,15 @@ describe "Formatter on iyi" do
 
   # Errors: propagation, recovery, and the panic that takes no default.
   assert_iyi_format "module m\n\nvalue = read(path)!"
+  # A short block's call can propagate: `&.close!`, `&.size!.succ`.
+  assert_iyi_format "module m\n\nxs.each(&.close!)"
+  assert_iyi_format "module m\n\nxs.map(&.size!.succ)"
   assert_iyi_format "module m\n\nvalue = read(path).or(0)"
   assert_iyi_format "module m\n\nvalue = read(path).or_panic"
   assert_iyi_format "module m\n\ndef f : Nil\n  defer close(handle)\nend"
+  # Recovery on the line under its call, as a call chain is broken.
+  assert_iyi_format "module m\n\nvalue = read(path)\n  .or(0)"
+  assert_iyi_format "module m\n\nvalue = read(path)\n  .or_panic"
 
   # And the list itself, held against the parser's, because a case per
   # declaration only helps while the cases are all of them. `parse_pub` is

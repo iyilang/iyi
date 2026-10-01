@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`fmt` keeps a heredoc's last blank line and a sign written apart.**
+  A line of spaces just above a heredoc's terminator is an empty line of
+  the string, and `fmt` trimmed it, so `<<-EOS\n  a\n  \n  EOS` went
+  from "a\n\n" to "a\n". And `- 1.abs`, which is `-(1.abs)`, became
+  `-1.abs`, which is `(-1).abs`; `- -1` became `--1` and `- 1_u8` became
+  `-1_u8`, neither of which parses. Both came from the other compiler's
+  formatter, whose specs pinned the heredoc trim; those specs now pin
+  the meaning.
+- **`fmt` no longer raises on three spellings the parser accepts:**
+  `.or(0)` or `.or_panic` on the line under its call, `&.succ!` and
+  `&.size!.succ` as a block, and a space or `\` line break before an
+  import's `::`. Found by 160,000 mutants of every `.iyi` file in the
+  tree and of 94 snippets, formatted twice and parsed back.
+
 - **A tuple with an element that cannot exist is stored without a
   compiler crash.** After `return nil if x.nil?` with `x` always nil,
   `{x, 1}` is a `Tuple(NoReturn, Int32)`, and storing it - `pairs << pr`

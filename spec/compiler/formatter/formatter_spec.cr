@@ -1070,6 +1070,13 @@ describe Iyi::Formatter do
   assert_format "+ 1", "+1"
   assert_format "&- 1", "&-1"
   assert_format "&+ 1", "&+1"
+  # iyi: a sign apart from a number is not the number's sign.
+  assert_format "- 1.abs"
+  assert_format "+ 1.abs"
+  assert_format "- -1"
+  assert_format "- - 1", "- -1"
+  assert_format "- 1_u8"
+  assert_format "- 1_u8.succ"
   assert_format "a-1", "a - 1"
   assert_format "a+1", "a + 1"
   assert_format "a&-1", "a &- 1"
@@ -2013,10 +2020,15 @@ describe Iyi::Formatter do
   assert_format "<<-HTML\n  hello \n  HTML"
   assert_format "<<-HTML\n  hello \n  world   \n  HTML"
   assert_format "  <<-HTML   \n    hello \n    world   \n    HTML", "<<-HTML\n  hello \n  world   \n  HTML"
-  assert_format "<<-HTML\n  hello\n  \n  HTML", "<<-HTML\n  hello\n\n  HTML"
+  # iyi: a line of spaces just above the terminator is an empty line of the
+  # string ("hello\n\n"), where an empty line there is none ("hello\n"), so
+  # the spaces stay.
+  assert_format "<<-HTML\n  hello\n  \n  HTML"
   assert_format "<<-HTML\n  hello\n   \n  HTML"
-  assert_format "<<-HTML\n   hello\n  \n   HTML", "<<-HTML\n   hello\n\n   HTML"
-  assert_format "<<-HTML\n   hello\n   \n   HTML", "<<-HTML\n   hello\n\n   HTML"
+  assert_format "<<-HTML\n   hello\n  \n   HTML"
+  assert_format "<<-HTML\n   hello\n   \n   HTML"
+  assert_format "<<-HTML\n  hello\n\n  HTML"
+  assert_format "  <<-HTML\n    hello\n    \n    HTML", "<<-HTML\n  hello\n  \n  HTML"
   assert_format "<<-HTML\n   hello\n    \n   HTML"
   assert_format "  <<-HTML\n    hello \n    world   \n    HTML", "<<-HTML\n  hello \n  world   \n  HTML"
 

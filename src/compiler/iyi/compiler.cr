@@ -249,16 +249,25 @@ module Iyi
     # Raises `InvalidByteSequenceError` if the source code is not
     # valid UTF-8.
     def compile(source : Source | Array(Source), output_filename : String) : Result
-      # iyi: IV.6 read backwards, for every build and not only the server's.
-      # A module's path is its file's path, so an entry whose header ends
-      # its own path names the project root above both, and `import a/b`
-      # from `<root>/x/y.iyi` resolves the way a build from the root would.
-      # A tool that knows better has set the root already; an entry whose
-      # header and path disagree, or that has none, keeps the entry-dir rule.
+      adopt_header_root(source)
+      compile_configure_program(source, output_filename) { }
+    end
+
+    # iyi: IV.6 read backwards, for every build and not only the server's.
+    # A module's path is its file's path, so an entry whose header ends
+    # its own path names the project root above both, and `import a/b`
+    # from `<root>/x/y.iyi` resolves the way a build from the root would.
+    # A tool that knows better has set the root already; an entry whose
+    # header and path disagree, or that has none, keeps the entry-dir rule.
+    #
+    # Asked by the front end alone as well (`top_level_semantic`): it was
+    # asked in `compile` only, so `iyi tool dependencies app/main.iyi` and
+    # `tool hierarchy` of it answered "can't find module 'app/util'" about
+    # the import `run` and `check` of the same file resolve.
+    private def adopt_header_root(source : Source | Array(Source)) : Nil
       if @iyi_header_root.nil? && (entry = source.is_a?(Source) ? source : source.first?)
         @iyi_header_root = Compiler.header_root_of(entry.filename, entry.code)
       end
-      compile_configure_program(source, output_filename) { }
     end
 
     # iyi: the directory a workspace keeps its artifacts in.
@@ -2951,6 +2960,7 @@ module Iyi
     # valid UTF-8.
     def top_level_semantic(source : Source | Array(Source)) : Result
       source = [source] unless source.is_a?(Array)
+      adopt_header_root(source)
       program = new_program(source)
       node = parse program, source
       node, _ = program.top_level_semantic(node)

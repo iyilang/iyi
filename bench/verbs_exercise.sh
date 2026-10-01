@@ -281,6 +281,18 @@ if [ HDR/APP/MAIN.IYI -ef hdr/app/main.iyi ]; then
     status=1
   fi
 fi
+# The front end alone reads the same root (`Compiler#adopt_header_root`).
+# `tool dependencies` and `tool hierarchy` never asked the header, and of
+# the file `run` builds just above both said "can't find module 'app/util'".
+"$IYI" tool dependencies hdr/app/main.iyi > hdr_deps.out 2>&1; deps_code=$?
+"$IYI" tool hierarchy hdr/app/main.iyi > hdr_hier.out 2>&1; hier_code=$?
+if [ "$deps_code" -eq 0 ] && grep -q 'util\.iyi' hdr_deps.out && [ "$hier_code" -eq 0 ]; then
+  echo "  tool dependencies and tool hierarchy of a module: resolve its imports"
+else
+  echo "  tool dependencies and tool hierarchy of a module: exit $deps_code and $hier_code"
+  grep -h -m1 "^Error" hdr_deps.out hdr_hier.out
+  status=1
+fi
 # A byte order mark, which a Windows editor may put at the front of a
 # file. The lexer skips it; the three readings of a header did not, so a
 # module saved with one ran as a script and its import beside the header

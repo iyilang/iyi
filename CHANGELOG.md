@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`iyi tool dependencies` and `iyi tool hierarchy` resolve a module's
+  imports from the root its header names.** The root was read from the
+  entry's header only on the way to a build, and these two verbs stop before
+  one: of `hdr/app/main.iyi`, which declares `module app/main` and imports
+  `app/util`, both exited 1 with "can't find module 'app/util'" while `run`
+  printed 42. The front end reads the root now as a build does.
+  `bench/verbs_exercise.sh` checks both; the old compiler exited 1 at the
+  import.
+
 - **An entry reached through an 8.3 short name finds the root its header
   names.** The root was found by matching the end of the entry's path
   against its header's module path, and `...\APPLIC~1\main.iyi` never ends

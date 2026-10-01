@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **Sets of small integers spread as hash keys.** `Set#hash` summed its
+  members' hashes, and an `Int32`'s hash is the value, so `{1, 4}` and
+  `{2, 3}` hashed alike, the 11,175 sets `{i, j}` with i < j < 150 had 297
+  hashes between them, and inserting 79,800 such sets as `Hash` keys took
+  1,313 ms against 17 ms for the same pairs as arrays. Each member's hash
+  goes through splitmix64's finaliser before the sum now, which still
+  ignores order, and the size is folded in after: the 11,175 sets have
+  11,175 hashes, 79,800 keys take 96 ms and 319,600 take 395 ms.
+  `bench/std_set_exercise.iyi` checks the spread, and its gate proves a
+  plain sum is caught; the old module hashed `{1, 4}` and `{2, 3}` both to
+  5.
+
 - **An adaptor advances the `ListIterator` it was built on.** `ListIterator`
   was a struct, copied into each adaptor, so `it.first(2).to_a` and then
   `it.to_a` gave `[1, 2]` and `[1, 2, 3, 4]`, the bug the sources of

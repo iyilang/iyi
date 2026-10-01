@@ -63,6 +63,22 @@ lookup = {} of Set(Int32) => String
 lookup[[1, 2].to_set] = "pair"
 assert_equal("a set as a hash key", lookup[[2, 1].to_set], "pair")
 assert_true("== sees a different member of the same size", !(a == [1, 2, 3, 9].to_set))
+# Mixed before the sum: the members' hashes summed as they were put a set
+# of small integers at their total, `Int32#hash` being the value, so
+# {1, 4} and {2, 3} were one key and these 11,175 sets had 297 hashes.
+assert_true("{1, 4} and {2, 3} hash apart", [1, 4].to_set.hash != [2, 3].to_set.hash)
+spread = Set(Int32).new
+low = 0
+while low < 150
+  high = low + 1
+  while high < 150
+    spread << [low, high].to_set.hash
+    high = high + 1
+  end
+  low = low + 1
+end
+assert_true("two-member sets spread", spread.size * 100 >= 11175 * 99)
+puts "set: the 11,175 sets {i, j} of 0...150 have at least 99% distinct hashes"
 
 puts "set: building"
 built = Set(String).new

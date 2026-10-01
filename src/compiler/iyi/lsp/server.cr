@@ -253,10 +253,15 @@ module Iyi::Lsp
     # The set is bounded: a cancel that arrived too late names an id
     # that was already answered, and its key would otherwise live
     # forever.
+    #
+    # Params that are not an object name nothing, and the cancel is
+    # dropped: `["x"]["id"]?` raised here, outside `handle`'s rescue, and
+    # `$/cancelRequest` with params `["x"]`, `"x"` or `5` ended the worker
+    # with the compiler-bug banner.
     private def sweep_cancels : Nil
       @inbox.reject! do |queued|
         next false unless queued["method"]?.try(&.as_s?) == "$/cancelRequest"
-        if cancel_id = queued["params"]?.try(&.["id"]?)
+        if cancel_id = queued["params"]?.try(&.as_h?).try(&.["id"]?)
           @cancelled << cancel_id.to_json
         end
         true

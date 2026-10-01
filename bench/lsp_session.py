@@ -2075,6 +2075,19 @@ def main():
          ids == [rid] and reply.get("error", {}).get("code") == -32800,
          f"answer: {reply.get('error', reply.get('result'))!r}")
 
+    # 70g. A `$/cancelRequest` whose params are not an object names nothing
+    #      and is dropped. `["x"]`, `"x"` and `5` raised in the worker's own
+    #      loop, outside every rescue: the compiler-bug banner on stderr,
+    #      the worker gone, and the next request answered -32603.
+    survived = []
+    for odd in (["x"], "x", 5):
+        c.send("$/cancelRequest", odd, wait=False)
+        reply = c.send("textDocument/hover", {"textDocument": {"uri": app_uri},
+                                              "position": {"line": 0, "character": 0}})
+        survived.append("error" not in reply)
+    step("70g", "a cancel whose params are not an object is dropped",
+         survived == [True] * 3, f"answered after each: {survived}")
+
     # 39. a typing burst is one verdict: six didChanges drained
     #     together coalesce into one compile, and the verdict is the
     #     final text's. One write again, for the same reason.

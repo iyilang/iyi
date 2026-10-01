@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **A `$/cancelRequest` whose params are not an object is dropped, and the
+  worker goes on.** Its params were indexed for `id` outside every rescue,
+  so `["x"]`, `"x"` or `5` ended the worker with "you've found a bug in
+  the iyi compiler", and through `iyi lsp` the next request answered
+  -32603 "did not survive it" from a fresh worker with none of the old
+  one's state. `bench/lsp_session.py` step 70g sends all three; the old
+  server failed the hover after each.
+
 - **Moving a module saved with a byte order mark moves its `module` header
   too.** `\uFEFFmodule calc/lexer` never started with `module `, so
   willRenameFiles edited every importer to `calc/scanner` and gave the

@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A regex compiles in a task at every nesting it accepts.** Groups
+  could nest 1,000 deep, a cap sized for the main stack's 8 MiB, and
+  each level is five frames of the parser: a task compiling 213 nested
+  groups in a plain build overflowed its 256 KiB stack (552 with
+  `--release`), and the panic ended the whole process. The cap is 100
+  now, which leaves a plain build's task about half its stack, and the
+  101st level is refused with "groups nested past 100".
+  `bench/std_regex_exercise.iyi` compiles 100 nested groups, alternations
+  and counts among them, in a task and has 101 refused; the old module
+  compiled the 101.
+
 - **A regex search of a long alternation runs in a task.** The epsilon
   closure recursed a frame per split, and an alternation chains a split
   per word: `\b(?:w0|w1|...|w889)\b`, searched in a task in a plain

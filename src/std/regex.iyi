@@ -939,7 +939,11 @@ class RxCompiler
       end
     end
     @depth = @depth + 1
-    raise "regex: groups nested past 1000 in /#{@pat}/" if @depth > 1000
+    # A level of nesting is five frames of this parser, and a task's stack
+    # is 256 KiB: at a cap of 1000, sized for the main stack, a task
+    # compiling `(` * 213 in a plain build overflowed it and the panic
+    # killed the process. 100 leaves that task half its stack.
+    raise "regex: groups nested past 100 in /#{@pat}/" if @depth > 100
     inner = parse_alt
     @depth = @depth - 1
     raise "regex: unmatched '(' in /#{@pat}/" unless @i < @n && peek == 41_u8

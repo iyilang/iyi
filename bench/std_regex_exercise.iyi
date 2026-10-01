@@ -202,6 +202,35 @@ if args.size > 0
   puts "  #{cases} pattern/subject pairs: find, scan, split and replace agree"
 end
 
+# What compiling *pattern* in a task is refused with, or "compiled".
+def refusal(pattern : String) : String
+  said = "compiled"
+  group do |g|
+    attempt = g.spawn { Regex.compile(pattern).find("") || "" }
+    outcome = attempt.value
+    said = outcome.message.to_s if outcome.is_a?(Panicked)
+    0
+  end
+  said
+end
+
+# A group is five frames of the parser, and a task's stack is 256 KiB:
+# under a cap of 1000, a task compiling 213 nested groups in a plain build
+# overflowed it and the panic ended the process. The deepest nesting the
+# cap allows, alternatives and counts among it, compiles in a task.
+puts "\n== the deepest nesting, compiled in a task"
+deepest = ""
+group do |g|
+  attempt = g.spawn { Regex.compile("(?:b|" * 100 + "a" + "){1}" * 10 + ")" * 90).find("xay") || "nil" }
+  outcome = attempt.value
+  deepest = outcome.is_a?(Panicked) ? outcome.message.to_s : outcome
+  0
+end
+assert_str "a", deepest, "100 nested groups compile in a task"
+too_deep = refusal("(" * 101 + "a" + ")" * 101)
+assert_true too_deep.includes?("regex: groups nested past 100"), "101 are refused, not #{too_deep.inspect}"
+puts "  100 nested groups compile in a task, and 101 are refused"
+
 puts "\n== the text side"
 bd = Regex.compile("B|D")
 assert_str("a(x)c(x)e", "aBcDe".gsub(bd, "(x)"), "String#gsub with a pattern")

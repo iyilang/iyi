@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`sprintf`'s `%.Ns` and `%%` take time linear in the text.** A string
+  precision kept its characters one at a time onto a string of its own, and
+  `sprintf` added every piece of its result to the whole result so far, so
+  both copied the text once per character or per piece: in a plain build
+  `%.100000s` of a 200,000-character string took 13,063 ms and a format of
+  100,000 `%%` 12,479 ms, four times as long for every doubling. The
+  characters a precision keeps and the pieces of the result are now written
+  into one `String::Builder` each; the same two take 3 ms and 2 ms.
+  `bench/format_exercise.iyi` holds `%.5000s` and 5,000 `%%` under 1,000,000
+  allocated bytes each; the old module allocated 12,635,202 bytes for the
+  first.
+
 - **`BigDecimal` compares and hashes values far apart in size at once.**
   `<=>` (and so `==`, `!=` and `<`) aligned the two scales by multiplying
   by `10 ** gap` even when the magnitudes plainly differed, and `hash`

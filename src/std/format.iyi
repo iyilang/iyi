@@ -690,18 +690,24 @@ module ::IyiFormat
   # `%-10s` is a column: counted in bytes, a multi-byte string came out
   # short by one space per extra byte, and a precision cut a character in
   # half. The prelude's `ljust`/`rjust` decided the same thing.
+  #
+  # The characters a precision keeps are written into one buffer, as
+  # `each_char` decodes them and `size` counts them: added one at a time
+  # onto a string of their own, the text was copied once per character,
+  # and `%.800000s` of a megabyte took 12.8 s, four times as long for
+  # every doubling.
   def self.format_string_arg(str : String, minus : Bool, width : Int32, precision : Int32) : String
     res = str
     if precision >= 0 && res.size > precision
-      kept = ""
+      kept = String::Builder.new
       taken = 0
       res.each_char do |c|
         if taken < precision
-          kept = kept + c.to_s
+          kept << c
           taken = taken + 1
         end
       end
-      res = kept
+      res = kept.to_s
     end
     if res.size < width
       pad = " " * (width - res.size)
@@ -989,7 +995,9 @@ pub def sprintf(format_string : String, *args : *T) : String forall T
   format_bytesize = format_string.bytesize
   format_ptr = format_string.to_unsafe
   arg_index = 0
-  result = ""
+  # Written into one buffer: `result = result + piece` copied the whole
+  # result once per piece, and a `%%` is a piece.
+  result = String::Builder.new(format_bytesize)
 
   while index < format_bytesize
     byte = format_ptr[index]

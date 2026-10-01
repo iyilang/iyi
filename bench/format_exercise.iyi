@@ -147,6 +147,30 @@ raise "format: precision string width failed" if p12 != "   cin"
 p13 = sprintf("%-6.3s", "cinnabar")
 raise "format: precision string left-aligned failed" if p13 != "cin   "
 
+# A precision counts characters and writes the ones it keeps into one
+# buffer, and `sprintf` writes its pieces into one buffer. A character
+# at a time onto a string of its own, `%.5000s` allocated 12,635,202
+# bytes, and `%%` five thousand times 12,564,999, the text copied once
+# per character or per piece: `%.100000s` took 13 s. The bytes are the
+# check.
+p18 = sprintf("[%.3s|%.2s|%4.1s]", "héllo", "😀😀😀", "éa")
+raise "format: precision string of several bytes failed: #{p18}" if p18 != "[hél|😀😀|   é]"
+{% unless flag?(:gc_none) || flag?(:gc_boehm) %}
+  long_text = "x" * 10000
+  percents = "%%" * 5000
+  GC.disable
+  cut_before = GC.stats.bytes_since_collection
+  cut = sprintf("%.5000s", long_text)
+  cut_bytes = GC.stats.bytes_since_collection - cut_before
+  percents_before = GC.stats.bytes_since_collection
+  percents_out = sprintf(percents)
+  percents_bytes = GC.stats.bytes_since_collection - percents_before
+  GC.enable
+  raise "format: a %.5000s costs #{cut_bytes} bytes, past 1000000" if cut_bytes > 1000000_u64 || cut.bytesize != 5000
+  raise "format: %% five thousand times costs #{percents_bytes} bytes, past 1000000" if percents_bytes > 1000000_u64 || percents_out.bytesize != 5000
+  puts "    precision: %.5000s and %% five thousand times allocate under 1000000 bytes"
+{% end %}
+
 puts "    precision: integer minimum digits, string truncation, and float rounding verified"
 
 # 5. Base: decimal, hex, octal, binary, with and without alternate form '#'.

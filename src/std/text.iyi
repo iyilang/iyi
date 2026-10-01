@@ -3,8 +3,9 @@
 # Answers the two architectural questions:
 #
 # 1. UTF-8 and byte indexing convention:
-#    iyi's `String#size` counts UTF-8 code points (via continuation-byte
-#    scanning in `src/iyi/string.iyi`), while `bytesize` counts raw bytes.
+#    iyi's `String#size` counts UTF-8 code points (decoded in
+#    `src/iyi/string.iyi`, a byte that begins none counted as one U+FFFD),
+#    while `bytesize` counts raw bytes.
 #    Following the prelude's established convention, all string indexing
 #    (`[]`, `[start, count]`), slice operations, and search offsets
 #    (`index`, `rindex`, `sub`, `gsub`, `split`, `count`) are strictly
@@ -305,17 +306,17 @@ class ::String
 
     # Characters, and the limit counts them as it counts any other piece:
     # `"abc".split("", 2)` is `["a", "bc"]`. An empty string is one empty
-    # piece, as it is with any other separator.
+    # piece, as it is with any other separator. A byte that begins no
+    # character is a U+FFFD piece and the rest starts at the byte after it:
+    # it moved on by the bytes of the character written, and 80 61 62 split
+    # in two was C2 80 and `b`, the `a` lost.
     if separator.empty?
       return [self] if empty?
       pieces = [] of String
-      at = 0
-      each_char do |c|
-        break if limit > 1 && pieces.size == limit - 1
-        pieces << c.to_s
-        at = at + c.bytesize
+      each_point do |point, at|
+        return pieces << byte_slice(at, bytesize - at) if limit > 1 && pieces.size == limit - 1
+        pieces << (point < 0 ? '\uFFFD' : point.unsafe_chr).to_s
       end
-      pieces << byte_slice(at, bytesize - at) if at < bytesize
       return pieces
     end
 
@@ -673,32 +674,19 @@ class ::String
     end
   end
 
-  # A run of one character becomes one of it, the characters compared by
-  # their bytes. A byte at a time, `"耀".squeeze` (E8 80 80) dropped a
+  # A run of one character becomes one of it, a character being what
+  # `each_char` yields, so a run of bytes that begin none is one U+FFFD, as
+  # in the other library; grouped by their `10xxxxxx` bytes, C3 41 came back
+  # as it was. A byte at a time, `"耀".squeeze` (E8 80 80) dropped a
   # continuation byte and answered two bytes that are not a string, and
   # `"éé"` stayed two.
   def squeeze : String
-    return self if bytesize <= 1
-    source = to_unsafe
     String.build(bytesize) do |io|
-      previous = 0
-      previous_width = 0
-      at = 0
-      while at < bytesize
-        width = 1
-        while at + width < bytesize && (source[at + width] & 0xC0_u8) == 0x80_u8
-          width = width + 1
-        end
-        same = width == previous_width
-        k = 0
-        while same && k < width
-          same = source[previous + k] == source[at + k]
-          k = k + 1
-        end
-        io.write(source + at, width) unless same
-        previous = at
-        previous_width = width
-        at = at + width
+      previous = -1
+      each_point do |point|
+        point = 0xFFFD if point < 0
+        io << point.unsafe_chr unless point == previous
+        previous = point
       end
     end
   end

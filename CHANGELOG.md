@@ -142,6 +142,28 @@
 
 ### Fixed
 
+- **A byte that begins no UTF-8 character is one U+FFFD to `size`,
+  `each_char` and `chars`, and never takes the bytes after it.**
+  `each_char` took the one to three bytes after a lead byte whatever they
+  were, and `size` counted every byte that is not `10xxxxxx`, so the two
+  disagreed and text came back changed: C3 41 was the one character
+  U+00C1 and `delete("z")` wrote C3 81, a quote after a lone C3 was
+  swallowed, E2 82 was `size` 1 and two characters, Latin-1 `caf` E9
+  through `delete("a")` became UTF-8 `cf` C3 A9, and 80 61 62 split by
+  `""` with a limit of 2 was C2 80 and `b`, the `a` lost. Both now read
+  one decoder with the other library's rule - a lead byte without its
+  continuation bytes, a lone continuation byte, an overlong form, a
+  surrogate or a value past U+10FFFF is one byte and one U+FFFD - so
+  `delete`, `squeeze`, `tr` past ASCII and `split("")` write EF BF BD
+  for it, as Crystal 1.21 does, and `split("", limit)` starts the rest
+  at the byte after it. `squeeze` with no argument compares the same
+  characters, and writes U+FFFD where it kept C3 41 as it was.
+  On 4,000 random byte strings `size`, `chars`, `delete`, `squeeze`,
+  `split("", 2)` and `gsub("", "-")` answer what Crystal 1.21 does.
+  bench/std_text_exercise checks each, and its .sh proves the checks fail
+  with the old continuation test; the old prelude failed at "utf8: a lead
+  byte without its continuation is one U+FFFD".
+
 - **`sprintf` writes a float past `Int64` under an integer verb as its exact
   integer, and refuses NaN, the infinities, a width or precision past
   `Int32` and a `%g` precision past 401 by name.** `%d` of 1e30, `%d` of NaN

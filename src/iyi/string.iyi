@@ -53,16 +53,26 @@ class String
     {% end %}
   end
 
-  # UTF-8 continuation bytes are `10xxxxxx`; every other byte starts a
-  # character. That is the whole of the decoding this prelude does.
-  protected def self.character_count(buffer : Pointer(UInt8), bytesize : Int32) : Int32
-    count = 0
+  # Each character's code point and the byte it starts at, by the other
+  # library's rule: a lead byte without the `10xxxxxx` bytes it calls for,
+  # one of those alone, an overlong form, a surrogate or a value past
+  # U+10FFFF is -1, one byte long, and `each_char` yields it as U+FFFD.
+  private def each_point(& : Int32, Int32 -> Nil) : Nil
     index = 0
-    while index < bytesize
-      count = count + 1 if (buffer[index] & 192_u8) != 128_u8
-      index = index + 1
+    while index < @bytesize
+      lead = to_unsafe[index].to_i32
+      width = lead < 0xC2 || lead > 0xF4 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4
+      point = width > 1 ? lead & (0x7F >> width) : lead < 0x80 ? lead : -1
+      k = 1
+      while k < width && point >= 0
+        byte = index + k < @bytesize ? to_unsafe[index + k].to_i32 : 0
+        point = (byte & 0xC0) == 0x80 ? (point << 6) | (byte & 0x3F) : -1
+        k = k + 1
+      end
+      point = -1 if width > 1 && (point < (1 << (5 * width - 4)) || point > 0x10FFFF || (point >= 0xD800 && point < 0xE000))
+      yield point, index
+      index = index + (point < 0 ? 1 : width)
     end
-    count
   end
 
   def bytesize : Int32
@@ -76,12 +86,14 @@ class String
   # code — `to_json`'s result printed correctly here and answered `size` 0.
   #
   # No error, a wrong number, and the layout is shared on purpose (SPEC.md
-  # Part V item 12), so the invariant has to be shared too.
+  # Part V item 12), so the invariant has to be shared too. The count is
+  # of what `each_char` yields, a byte that begins no character one U+FFFD.
   def size : Int32
     return @length if @length > 0 || @bytesize == 0
 
-    @length = String.character_count(to_unsafe, @bytesize)
-    @length
+    count = 0
+    each_point { count = count + 1 }
+    @length = count
   end
 
   def empty? : Bool
@@ -116,34 +128,11 @@ class String
   # convention `samples/iyi/calc` scans with; a character is a unit only
   # where a character is what was asked for.
   #
-  # A byte that begins no sequence, or a sequence the string is too short to
-  # hold, is yielded as itself: this decodes, it does not validate.
+  # A byte that begins no character is one U+FFFD, as in the other library.
+  # A lead byte took the bytes after it whatever they were: C3 41 was the one
+  # character U+00C1 at `size` 2, and `"a" C3 '"'` swallowed the quote.
   def each_char(& : Char -> Nil) : Nil
-    index = 0
-    while index < @bytesize
-      lead = to_unsafe[index].to_i32
-      if (lead & 0x80) == 0
-        yield lead.unsafe_chr
-        index = index + 1
-      elsif (lead & 0xE0) == 0xC0 && index + 1 < @bytesize
-        yield (((lead & 0x1F) << 6) | (to_unsafe[index + 1].to_i32 & 0x3F)).unsafe_chr
-        index = index + 2
-      elsif (lead & 0xF0) == 0xE0 && index + 2 < @bytesize
-        yield (((lead & 0x0F) << 12) |
-               ((to_unsafe[index + 1].to_i32 & 0x3F) << 6) |
-               (to_unsafe[index + 2].to_i32 & 0x3F)).unsafe_chr
-        index = index + 3
-      elsif (lead & 0xF8) == 0xF0 && index + 3 < @bytesize
-        yield (((lead & 0x07) << 18) |
-               ((to_unsafe[index + 1].to_i32 & 0x3F) << 12) |
-               ((to_unsafe[index + 2].to_i32 & 0x3F) << 6) |
-               (to_unsafe[index + 3].to_i32 & 0x3F)).unsafe_chr
-        index = index + 4
-      else
-        yield lead.unsafe_chr
-        index = index + 1
-      end
-    end
+    each_point { |point| yield point < 0 ? '\uFFFD' : point.unsafe_chr }
   end
 
   def []?(index : Int32) : Char?

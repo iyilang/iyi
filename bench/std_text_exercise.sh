@@ -155,9 +155,11 @@ prove_fails "chomp of a newline only a newline" chomp_nl "string: chomp newline"
 prove_fails "split blind to vertical tab" split_vt "string: split vertical tab and form feed" \
   's/^      if b.ascii_whitespace?$/      if b.whitespace?/'
 prove_fails "empty separator ignores the limit" split_limit "string: split empty separator limit" \
-  '/^        break if limit > 1 \&\& pieces.size == limit - 1$/d'
+  '/^        return pieces << byte_slice(at, bytesize - at) if limit > 1 \&\& pieces.size == limit - 1$/d'
 prove_fails "squeeze writes a byte of each character" squeeze_byte "string: squeeze" \
-  's/^        io.write(source + at, width) unless same$/        io.write(source + at, 1) unless same/'
+  's/^        io << point.unsafe_chr unless point == previous$/        io.write_byte(point.to_u8) unless point == previous/'
+prove_fails "squeeze writes no U+FFFD for a byte that begins no character" squeeze_lone "utf8: tr and squeeze write U+FFFD" \
+  's/^        point = 0xFFFD if point < 0$/        point = 0x3F if point < 0/'
 prove_fails "each_line drops a final cr" line_cr "utf8: each_line final cr" \
   's/^      yield byte_slice(start, bytesize - start)$/      yield byte_slice(start, source[bytesize - 1] == 13_u8 ? bytesize - start - 1 : bytesize - start)/'
 
@@ -234,9 +236,14 @@ prove_fails_prelude "an uncounted string answered as it is" no_count "utf8: char
 prove_fails_prelude "char utf8 encoding broken" no_encode "utf8: char to_s" \
   's/buffer\[1\] = (0x80 | (point \& 0x3F)).to_u8/buffer[1] = 0_u8/'
 
-# 9. And the decoder the same string's `size` already agrees with
-prove_fails_prelude "utf8 each_char decoding broken" no_decode "utf8: chars size" \
-  's/index = index + 2$/index = index + 1/'
+# 9. And the decoder `size`, `each_char` and `squeeze` share, which a run
+# of `é` is the first check to read
+prove_fails_prelude "utf8 decoding broken" no_decode "string: squeeze multi-byte run" \
+  's/^      index = index + (point < 0 ? 1 : width)$/      index = index + 1/'
+# A lead byte takes only the `10xxxxxx` bytes after it, or is one U+FFFD:
+# it took the next bytes whatever they were, and C3 41 was one character.
+prove_fails_prelude "a lead byte takes any byte after it" no_continuation "utf8: a lead byte without its continuation" \
+  's/^        point = (byte \& 0xC0) == 0x80 ? (point << 6) | (byte \& 0x3F) : -1$/        point = (point << 6) | (byte \& 0x3F)/'
 
 # 10. Padding measured in bytes again, which is what it did
 prove_fails_prelude "padding width in bytes" no_width "utf8: ljust width" \

@@ -195,6 +195,11 @@ prove_fails "range end broken" broken_range "assertion failed for range exclusiv
 # 9. Array source copied into its adaptor (a struct again)
 prove_fails "array source copied" copied_source "assertion failed for adaptor shares its array source" \
   's/^pub class ArrayIterator(T)/pub struct ArrayIterator(T)/'
+
+# 10. An adaptor that keeps a count copied into the adaptor built on it (a
+#     struct again, as every stateful adaptor was)
+prove_fails "take copied into its adaptor" copied_take "assertion failed for take keeps its count" \
+  's/^pub class TakeIterator(I, T)/pub struct TakeIterator(I, T)/'
 echo
 if [ "$status" -eq 0 ]; then
   echo "Iterator: all 27 sections pass plain and release, and each check is"

@@ -347,7 +347,14 @@ end
 # its source by value, and a struct source was copied into it, so
 # `it.first(2).to_a` and then `it.to_a` gave [1, 2] and [1, 2, 3, 4] where
 # the other library gives [1, 2] and [3, 4]. Shared, the adaptor's pulls
-# are the source's. The adaptors stay structs.
+# are the source's. An adaptor that keeps a count, a flag or a buffer is
+# the source of whatever is built on it, so it is a class for the same
+# reason: as a struct it was copied too, and `t = it.take(3)`,
+# `t.first(2).to_a` and then `t.to_a` gave [3, 4, 5] where the other
+# library gives [3], `each_cons` handed its first window out again and
+# `step` and `with_index` restarted their strides and counts. An adaptor
+# that keeps only its sources, a block or a size stays a struct: a copy of
+# it pulls from the same place.
 pub class ArrayIterator(T)
   def initialize(@array : Array(T))
     @index = 0
@@ -563,7 +570,7 @@ impl Iterator for RejectIterator(I, T) forall I, T
   end
 end
 
-pub struct TakeIterator(I, T)
+pub class TakeIterator(I, T)
   def initialize(@iter : I, @n : Int32)
     @count = 0
   end
@@ -601,7 +608,7 @@ impl Iterator for TakeIterator(I, T) forall I, T
   end
 end
 
-pub struct TakeWhileIterator(I, T)
+pub class TakeWhileIterator(I, T)
   def initialize(@iter : I, @func : T -> Bool)
     @done = false
   end
@@ -639,7 +646,7 @@ impl Iterator for TakeWhileIterator(I, T) forall I, T
   end
 end
 
-pub struct SkipIterator(I, T)
+pub class SkipIterator(I, T)
   def initialize(@iter : I, @n : Int32)
     @skipped = 0
   end
@@ -671,7 +678,7 @@ impl Iterator for SkipIterator(I, T) forall I, T
   end
 end
 
-pub struct SkipWhileIterator(I, T)
+pub class SkipWhileIterator(I, T)
   def initialize(@iter : I, @func : T -> Bool)
     @skipping = true
   end
@@ -742,7 +749,7 @@ impl Iterator for ZipIterator(I1, T1, I2, T2) forall I1, T1, I2, T2
   end
 end
 
-pub struct ChainIterator(I1, I2, T)
+pub class ChainIterator(I1, I2, T)
   def initialize(@iter1 : I1, @iter2 : I2)
     @first_done = false
   end
@@ -774,7 +781,7 @@ impl Iterator for ChainIterator(I1, I2, T) forall I1, I2, T
   end
 end
 
-pub struct FlatMapIterator(I, T, U)
+pub class FlatMapIterator(I, T, U)
   def initialize(@iter : I, @func : T -> Array(U))
     @current_sub = [] of U
     @current_idx = 0
@@ -858,7 +865,7 @@ impl Iterator for SliceIterator(I, T) forall I, T
   end
 end
 
-pub struct ConsIterator(I, T)
+pub class ConsIterator(I, T)
   def initialize(@iter : I, @n : Int32)
     @window = [] of T
     @started = false
@@ -913,7 +920,7 @@ impl Iterator for ConsIterator(I, T) forall I, T
   end
 end
 
-pub struct WithIndexIterator(I, T)
+pub class WithIndexIterator(I, T)
   def initialize(@iter : I, @offset : Int32)
     @index = @offset
   end
@@ -945,7 +952,7 @@ impl Iterator for WithIndexIterator(I, T) forall I, T
   end
 end
 
-pub struct CycleIterator(I, T)
+pub class CycleIterator(I, T)
   def initialize(@iter : I)
     @cache = [] of T
     @cached = false
@@ -1003,7 +1010,7 @@ impl Iterator for CycleIterator(I, T) forall I, T
   end
 end
 
-pub struct CycleNIterator(I, T)
+pub class CycleNIterator(I, T)
   def initialize(@iter : I, @n : Int32)
     @cache = [] of T
     @cached = false
@@ -1070,7 +1077,7 @@ impl Iterator for CycleNIterator(I, T) forall I, T
   end
 end
 
-pub struct StepIterator(I, T)
+pub class StepIterator(I, T)
   def initialize(@iter : I, @by : Int32)
     @first = true
   end

@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **An iterator adaptor advances the adaptor it was built on.** `take`,
+  `first(n)`, `skip`, `take_while`, `skip_while`, `with_index`, `flat_map`,
+  `each_cons`, `step`, `cycle`, `cycle(n)` and `chain` built structs that
+  kept a count, a flag or a buffer, and an adaptor built on one copied it:
+  after `t = it.take(3)` over 1..6, `t.first(2).to_a` and then `t.to_a` gave
+  `[1, 2]` and `[3, 4, 5]` where Crystal gives `[3]`, `each_cons(2)` handed
+  `[1, 2]` out again, and `step(2)` restarted its stride, `[2, 4, 6]` where
+  Crystal gives `[3, 5, 7]`. Each is a class now, as the sources are; `map`,
+  `select`, `reject`, `compact_map`, `zip` and `each_slice` keep only their
+  sources and a block or a size, and stay structs. `cycle` resumes where its
+  last pull left it, `[2, 3, 1]` after four of `[1, 2, 3]`, where Crystal,
+  whose cycle is a struct, starts again at `[1, 2, 3]`.
+  `bench/std_iterator_exercise.iyi` checks every one, and its gate proves
+  the check fails with `TakeIterator` a struct again; the old module
+  answered `[1, 2] [3, 4, 5]`.
+
 - **`JSON.to_json` refuses a Hash with two keys written as one text,
   naming both, where it wrote the key twice.** A key that is not a String
   is written by its `to_s`, and `nil` as `"null"`, so `{nil => 1, "null"

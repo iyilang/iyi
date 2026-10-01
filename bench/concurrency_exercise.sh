@@ -19,7 +19,8 @@
 #      on Windows it is kernel32 and the C runtime's DLLs, read off the
 #      import table with dumpbin.
 #   3. A deadlocked program — every fiber blocked, nothing to wake one —
-#      exits 1 with the deadlock named, rather than hanging.
+#      exits 1 with the deadlock named, rather than hanging; and one found
+#      in a task's park is named once, with every cleanup run.
 #   4. A group whose spelling would compile sequentially still interleaves:
 #      step 1's first property, called out because III.4.8 refused the
 #      sequential imitation by name; this step proves the check *can* fail
@@ -236,6 +237,88 @@ if [ "$status" -ne 1 ]; then
   exit 1
 fi
 grep -q 'deadlock' deadlock.txt || { echo "died without naming the deadlock:"; cat deadlock.txt; exit 1; }
+
+# ── 3a. A deadlock found in a task's park is named once ───────────────────
+# The deadlock was raised on the stack of whichever fiber's park found it,
+# mostly a task's, and that task went through its boundary a second time:
+# a worker that panicked, or finished without sending, while its owner
+# waited on the channel printed the deadlock 182 times and then "stack
+# overflow"; two tasks waiting on each other ended the process without
+# the owner's cleanups. It is the root fiber's panic now, on its own stack.
+step "a deadlock found in a task's park is named once, and every cleanup runs"
+cat > taskdeadlock.iyi <<'IYI'
+module taskdeadlock
+
+def compute(n : Int32) : Int32
+  [1, 2, 3][n]
+end
+
+# The owner waits on a channel (`panicked`, `finished`) or on the
+# worker's value (`value`) when the deadlock is found.
+def waits(how : String) : Nil
+  defer STDERR.puts("cleanup: owner")
+  result = Channel(Int32).new
+  group do |g|
+    worker = g.spawn do
+      defer STDERR.puts("cleanup: worker")
+      result.send(compute(7)) if how == "panicked"
+      result.receive if how == "value"
+      0
+    end
+    if how == "value"
+      worker.value
+    else
+      result.receive
+    end
+  end
+end
+
+# Two tasks wait on each other while the owner waits in the group's join.
+def crossed : Nil
+  defer STDERR.puts("cleanup: owner")
+  a = Channel(Int32).new
+  b = Channel(Int32).new
+  group do |g|
+    g.spawn do
+      defer STDERR.puts("cleanup: task a")
+      a.receive
+      b.send(1)
+      0
+    end
+    g.spawn do
+      defer STDERR.puts("cleanup: task b")
+      b.receive
+      a.send(1)
+      0
+    end
+  end
+end
+
+if Program.args[0] == "crossed"
+  crossed
+else
+  waits(Program.args[0])
+end
+IYI
+if ! "$IYI" build taskdeadlock.iyi -o taskdeadlock > build-taskdeadlock.log 2>&1; then
+  echo "task deadlock probe failed to build:"
+  tail -5 build-taskdeadlock.log
+  exit 1
+fi
+for shape in panicked finished value crossed; do
+  timeout 30 ./taskdeadlock "$shape" > "taskdeadlock-$shape.txt" 2>&1
+  code=$?
+  want=2; [ "$shape" = crossed ] && want=3
+  reports=$(grep -c 'deadlock' "taskdeadlock-$shape.txt")
+  cleanups=$(grep -c '^cleanup: ' "taskdeadlock-$shape.txt")
+  if [ "$code" -ne 1 ] || [ "$reports" -ne 1 ] || [ "$cleanups" -ne "$want" ] ||
+     grep -q 'stack overflow' "taskdeadlock-$shape.txt"; then
+    echo "a deadlock beside a $shape task exited $code, named $reports times, with $cleanups of $want cleanups run:"
+    sort "taskdeadlock-$shape.txt" | uniq -c | head -8
+    exit 1
+  fi
+  echo "  $shape: named once, exit 1, all $want cleanups run"
+done
 
 # ── 3b. An owner that exits or panics does not wait out its tasks ─────────
 # `exit` ends the process and its tasks with it, and a panicking owner

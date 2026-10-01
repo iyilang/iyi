@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **A deadlock found while a task's stack runs is named once, and every
+  cleanup runs.** The deadlock was raised on the stack of whichever
+  fiber's park found it, mostly a task's, parked or already finished,
+  and that task went through its boundary a second time. A worker that
+  panicked, or finished without sending, while its owner waited on the
+  channel printed the deadlock 182 or 183 times and then "stack
+  overflow"; an owner reading a stuck task's `value`, or joining two
+  tasks that waited on each other, exited 1 before its own cleanups ran
+  (and before one of the two tasks' cleanups). The deadlock is the root
+  fiber's panic now, raised on its own stack: its cleanups run, a group
+  join it was waiting in cancels that group's tasks and runs their
+  cleanups, and a second deadlock found in that drain is not printed
+  again. `bench/concurrency_exercise.sh` runs the four shapes and wants
+  one report, exit 1 and every cleanup; the old runtime printed the
+  report 182 times for the first.
+
 - **Any number of fibers can read one task's `value` while it runs.**
   The task kept one joiner, and a second fiber reading the value of a
   task still running panicked "task already has a joiner", which the

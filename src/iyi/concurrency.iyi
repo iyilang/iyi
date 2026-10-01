@@ -436,9 +436,15 @@ class IyiFiber
   # `next_joiner` the rest, chained through the waiters themselves. One
   # field held one joiner, and a second fiber reading the same running
   # task's `value` panicked "task already has a joiner" - a rule written
-  # nowhere, and one a read after the task finished never met.
+  # nowhere, and one a read after the task finished never met. `awaited`
+  # is the task a fiber waits on in that chain, and `joining` the group
+  # whose join it waits in, so a deadlock can take it off either one.
   property joiner : IyiFiber?
   property next_joiner : IyiFiber?
+  property awaited : IyiFiber?
+  property joining : IyiGroup?
+  # Woken to report a deadlock on its own stack (`IyiScheduler.deadlock`).
+  property deadlocked : Bool
 
   # The registry link and the stack's high end, for the collector's root
   # walk (GC_DESIGN.md Stage 3): a parked fiber's live values sit between
@@ -541,6 +547,9 @@ class IyiFiber
     @next_child = nil
     @joiner = nil
     @next_joiner = nil
+    @awaited = nil
+    @joining = nil
+    @deadlocked = false
     @deadline = 0_i64
     @io_timed = false
     @timed_out = false
@@ -864,6 +873,10 @@ class IyiSchedulerState
   property dying : IyiFiber?
   property stack_pool : UInt64
 
+  # The thread's own fiber, the one with no task above it: a deadlock is
+  # reported on its stack, whichever fiber's park found it.
+  property root : IyiFiber?
+
   {% if flag?(:win32) %}
     # Windows' deadline: the timer this thread arms for the nearest
     # sleeper, and the two handles it waits on — the completion port and
@@ -983,6 +996,7 @@ class IyiScheduler
       main.stack_top = top
     {% end %}
     state.current = main
+    state.root = main
     register(main)
     main
   end
@@ -1245,6 +1259,7 @@ class IyiScheduler
     # Back on this fiber's own stack, which is the first moment a stack
     # somebody else finished with can be taken back.
     reap_dying
+    deadlock if previous.deadlocked
   end
 
   # The trampoline lands here on a fresh fiber's first resume.
@@ -1607,6 +1622,7 @@ class IyiScheduler
   def self.join(fiber : IyiFiber) : Nil
     while fiber.state != IyiFiberState::Done
       me = current
+      me.awaited = fiber
       me.next_joiner = fiber.joiner
       fiber.joiner = me
       me.state = IyiFiberState::Joining
@@ -1632,10 +1648,33 @@ class IyiScheduler
     while true
       following = waiter.next_joiner
       waiter.next_joiner = nil
+      waiter.awaited = nil
       enqueue(waiter)
       break unless following.is_a?(IyiFiber)
       waiter = following
     end
+  end
+
+  # *fiber* off the chain of the task it waits on.
+  def self.leave_joiners(task : IyiFiber, fiber : IyiFiber) : Nil
+    fiber.awaited = nil
+    head = task.joiner
+    return unless head.is_a?(IyiFiber)
+    if head.object_id == fiber.object_id
+      task.joiner = fiber.next_joiner
+    else
+      walk = head
+      while true
+        following = walk.next_joiner
+        break unless following.is_a?(IyiFiber)
+        if following.object_id == fiber.object_id
+          walk.next_joiner = fiber.next_joiner
+          break
+        end
+        walk = following
+      end
+    end
+    fiber.next_joiner = nil
   end
 
   # III.4.2: cancellation reaches a *blocked* fiber. Whatever the fiber is
@@ -1690,13 +1729,48 @@ class IyiScheduler
 
   # ── The poller ───────────────────────────────────────────────────────
 
+  DEADLOCK = "deadlock: every fiber is blocked and nothing can wake one"
+
+  # A deadlock is the root fiber's panic, raised on the root's own stack.
+  # It was raised on the stack of whichever fiber's park found it, mostly
+  # a task's, parked or already done, and that task went through its
+  # boundary a second time: its group counted it twice, and the next park
+  # found the deadlock again - 182 reports, then "stack overflow" - or the
+  # group cancelling it enqueued the dying task, which switched to itself
+  # and exited 1 without the owner's cleanups. The root is taken off what
+  # it waits on, so nothing wakes it there again, and woken to report it.
+  def self.deadlock_found : Nil
+    root = state.root
+    deadlock unless root.is_a?(IyiFiber)
+    task = root.awaited
+    leave_joiners(task, root) if task.is_a?(IyiFiber)
+    group = root.joining
+    group.forget_joiner if group.is_a?(IyiGroup)
+    deadlock if root.object_id == current.object_id
+    root.deadlocked = true
+    enqueue(root)
+  end
+
+  # On the root's stack. A second deadlock in the drain of the first, a
+  # cleanup waiting on tasks cancellation does not reach, is the same news
+  # and goes on through the drain without being printed again.
+  def self.deadlock : NoReturn
+    fiber = current
+    fiber.deadlocked = false
+    panic_current(DEADLOCK) if fiber.panicked && fiber.panic_message == DEADLOCK
+    raise DEADLOCK
+  end
+
   def self.wait_for_events : Nil
     sleep_head = state.sleep_head
     quiet = state.io_head.is_a?(Nil) && sleep_head.is_a?(Nil)
     {% if flag?(:win32) %}
       quiet = quiet && !IyiStdinReader.waiting?
     {% end %}
-    raise "deadlock: every fiber is blocked and nothing can wake one" if quiet
+    if quiet
+      deadlock_found
+      return
+    end
 
     timeout = -1_i64
     {% if flag?(:win32) %}
@@ -2140,11 +2214,25 @@ class IyiScheduler
   # which is the promise `defer` makes.
   def self.panic_current(message : String) : NoReturn
     fiber = current
+    # A fiber past its boundary has nothing left to run, and a second pass
+    # through it counts the task twice in its group: the runtime's own
+    # raise is the only one that can come from there, and it ends the run.
+    __iyi_exit(1) if fiber.state == IyiFiberState::Done
+    # The running fiber, whichever park the runtime raised in: a group
+    # cancelling its children must not enqueue the one that is dying.
+    fiber.state = IyiFiberState::Running
+    again = fiber.panicked
     # Marked before the drain: a boundary the drain itself reaches — a
     # deferred `g.join`, above all — must see that its owner is already
     # dying and keep quiet rather than re-raise into the unwind.
     fiber.panicked = true
     fiber.panic_message = message
+    # A deadlock found while this fiber waited in a group's join: that join
+    # is a cleanup already off the list, and it is finished here as a
+    # panicking owner's, its tasks cancelled and their cleanups run.
+    group = fiber.joining
+    fiber.joining = nil
+    group.join if group.is_a?(IyiGroup) && !again
 
     while true
       node = fiber.defers
@@ -2607,8 +2695,10 @@ class IyiGroup
     while @live > 0
       me = IyiScheduler.current
       @joiner = me
+      me.joining = self
       me.state = IyiFiberState::Joining
       IyiScheduler.reschedule
+      me.joining = nil
     end
     # The boundary owes a re-raise for any panic *nobody read*: a bug
     # observed through its handle already became a `Panicked` value
@@ -2625,6 +2715,13 @@ class IyiGroup
       end
       child = child.next_child
     end
+  end
+
+  # :nodoc: — the owner taken out of this join by a deadlock
+  # (`IyiScheduler.deadlock_found`), so no task finishing later wakes it
+  # in whatever it waits on next.
+  def forget_joiner : Nil
+    @joiner = nil
   end
 
   # Cancel every task still live. The group's own tool; a failing child

@@ -829,4 +829,97 @@ fail("burst: #{burst_tops.size} of 2000 tasks ran") if burst_tops.size != 2000
 fail("burst: 2000 spawned tasks ran on #{burst_distinct.size} stacks") if burst_distinct.size > 8
 puts "2000 spawned tasks ran on #{burst_distinct.size} stacks"
 
+# ── 21. A busy run queue still lets the clock and the poller in ──────────
+#
+# Both were looked at only when the run queue was empty, and a yield keeps
+# it full: a task polling a flag with `sleep(0)` spun 20,000,000 times
+# while the task sleeping 10 ms to set it never woke, and a `sleep(50)`
+# beside a channel ping-pong woke when the ping-pong stopped by itself. A
+# 200 ms bound, generous for the emulated arm; a wait that starves runs
+# into the loops' own 2 s cap instead, and is named.
+spin_started = __iyi_monotonic_ns
+spin_flag = false
+spin_seen = -1_i64
+group do |g|
+  g.spawn do
+    sleep(10)
+    spin_flag = true
+    0
+  end
+  g.spawn do
+    spins = 0
+    while !spin_flag
+      spins = spins + 1
+      break if spins % 1024 == 0 && elapsed_ms(spin_started) >= 2000
+      sleep(0)
+    end
+    spin_seen = elapsed_ms(spin_started)
+    0
+  end
+end
+fail("starvation: a 10 ms sleeper beside a sleep(0) loop woke after #{spin_seen} ms, over the 200 ms bound") if spin_seen >= 200
+
+busy_ping = Channel(Int32).new
+busy_pong = Channel(Int32).new
+busy_stop = false
+busy_started = __iyi_monotonic_ns
+busy_woke = -1_i64
+group do |g|
+  g.spawn do
+    sleep(50)
+    busy_woke = elapsed_ms(busy_started)
+    busy_stop = true
+    0
+  end
+  g.spawn do
+    rounds = 0
+    while !busy_stop
+      busy_ping.send(rounds)
+      busy_pong.receive
+      rounds = rounds + 1
+      break if rounds % 1024 == 0 && elapsed_ms(busy_started) >= 2000
+    end
+    busy_ping.close
+    0
+  end
+  g.spawn do
+    while true
+      v = busy_ping.receive
+      break unless v.is_a?(Int32)
+      busy_pong.send(v)
+    end
+    0
+  end
+end
+fail("starvation: a 50 ms sleeper beside a channel ping-pong woke after #{busy_woke} ms, over the 200 ms bound") if busy_woke >= 200
+
+busy_fds = make_pipe
+byte_seen = false
+byte_started = __iyi_monotonic_ns
+byte_after = -1_i64
+group do |g|
+  g.spawn do
+    buffer = Pointer(UInt8).malloc(1_u64)
+    iyi_read(busy_fds[0], buffer.as(Void*), 1_u64)
+    byte_seen = true
+    0
+  end
+  g.spawn do
+    byte = Pointer(UInt8).malloc(1_u64)
+    byte.value = 9_u8
+    byte_started = __iyi_monotonic_ns
+    __iyi_write(busy_fds[1], byte.as(Void*), 1_u64)
+    spins = 0
+    while !byte_seen
+      spins = spins + 1
+      break if spins % 1024 == 0 && elapsed_ms(byte_started) >= 2000
+      sleep(0)
+    end
+    byte_after = elapsed_ms(byte_started)
+    0
+  end
+end
+fail("starvation: a byte written to a pipe beside a sleep(0) loop was read after #{byte_after} ms, over the 200 ms bound") if byte_after >= 200
+puts "a sleep(0) loop and a channel ping-pong let a sleeper and a pipe's reader in, under the 200 ms bound"
+
 puts "concurrency exercise: every property held"

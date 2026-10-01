@@ -876,6 +876,11 @@ class IyiSchedulerState
   # The thread's own fiber, the one with no task above it: a deadlock is
   # reported on its stack, whichever fiber's park found it.
   property root : IyiFiber?
+  # Parks counted, and when the poller was last asked without waiting, so
+  # it is asked even while the run queue never empties
+  # (`IyiScheduler.reschedule`).
+  property parks : UInt64
+  property polled_at : Int64
 
   {% if flag?(:win32) %}
     # Windows' deadline: the timer this thread arms for the nearest
@@ -916,6 +921,8 @@ class IyiSchedulerState
     @events = Pointer(UInt8).new(0_u64)
     @stack_pool = 0_u64
     @sleep_seq = 0_u64
+    @parks = 0_u64
+    @polled_at = 0_i64
     @io_slots = nil
   end
 end
@@ -1187,8 +1194,7 @@ class IyiScheduler
     state.run_tail = fiber
   end
 
-  def self.dequeue : IyiFiber?
-    state = self.state
+  def self.dequeue(state : IyiSchedulerState) : IyiFiber?
     head = state.run_head
     return nil unless head.is_a?(IyiFiber)
     state.run_head = head.next_run
@@ -1201,15 +1207,50 @@ class IyiScheduler
   # set) and run something else. Returns when this fiber is switched back
   # in — possibly without a switch at all, when the wait ended before
   # anything else got to run.
+  #
+  # Every `POLL_EVERY`th park looks at the clock as well, and at the poller
+  # once `POLL_IO_NS` have passed since it last looked, without waiting.
+  # Both were looked at only once the run queue was empty, and a yield
+  # keeps it full: a task polling a flag with `sleep(0)` spun 20,000,000
+  # times in 666-813 ms while the task sleeping 10 ms to set it never woke,
+  # and a `sleep(50)` beside a channel ping-pong woke after 545-669 ms, when
+  # the ping-pong had stopped by itself. The poller is a system call, and
+  # asked every 256 parks it put 15 ns on a 90 ns round trip beside a parked
+  # `accept`; the clock alone is not measurable there.
+  POLL_EVERY =     256_u64
+  POLL_IO_NS = 1000000_i64
+
   def self.reschedule : Nil
+    st = state
+    parks = st.parks &+ 1_u64
+    st.parks = parks
+    poll_now(st) if parks % POLL_EVERY == 0_u64
     while true
-      fiber = dequeue
+      fiber = dequeue(st)
       if fiber.is_a?(IyiFiber)
         switch_to(fiber)
         return
       end
-      wait_for_events
+      wait_for_events(true)
     end
+  end
+
+  # The expired sleepers and, when its time has come, the poller's news,
+  # without waiting; nothing at all when nobody waits on either.
+  def self.poll_now(st : IyiSchedulerState) : Nil
+    io = !st.io_head.is_a?(Nil)
+    {% if flag?(:win32) %}
+      io = io || IyiStdinReader.waiting?
+    {% end %}
+    if io
+      now = __iyi_monotonic_ns
+      if now - st.polled_at >= POLL_IO_NS
+        st.polled_at = now
+        wait_for_events(false)
+        return
+      end
+    end
+    wake_expired_sleepers
   end
 
   # How a spawned fiber's stack is made, installed by the first spawn
@@ -1761,22 +1802,25 @@ class IyiScheduler
     raise DEADLOCK
   end
 
-  def self.wait_for_events : Nil
+  # Waits for the next event when *blocking*, and otherwise takes what has
+  # arrived already (`poll_now`).
+  def self.wait_for_events(blocking : Bool) : Nil
     sleep_head = state.sleep_head
-    quiet = state.io_head.is_a?(Nil) && sleep_head.is_a?(Nil)
-    {% if flag?(:win32) %}
-      quiet = quiet && !IyiStdinReader.waiting?
-    {% end %}
-    if quiet
-      deadlock_found
-      return
-    end
-
-    timeout = -1_i64
+    timeout = blocking ? -1_i64 : 0_i64
     {% if flag?(:win32) %}
       gap_ns = -1_i64
     {% end %}
-    if sleep_head.is_a?(IyiFiber)
+    if blocking
+      quiet = state.io_head.is_a?(Nil) && sleep_head.is_a?(Nil)
+      {% if flag?(:win32) %}
+        quiet = quiet && !IyiStdinReader.waiting?
+      {% end %}
+      if quiet
+        deadlock_found
+        return
+      end
+    end
+    if blocking && sleep_head.is_a?(IyiFiber)
       now = __iyi_monotonic_ns
       gap = sleep_head.deadline - now
       gap = 0_i64 if gap < 0
@@ -1795,9 +1839,10 @@ class IyiScheduler
       port = Pointer(Void).new(pollfd.to_u64)
 
       # No deadline to keep, or a Windows that refused the timer: the
-      # port's own wait, blocking or rounded up to the tick as before.
+      # port's own wait, blocking or rounded up to the tick as before. Not
+      # waiting, the drain below is the whole of it.
       timer = gap_ns < 0 ? -1_i64 : deadline_timer
-      if timer <= 0
+      if timer <= 0 && blocking
         LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), timeout_ms)
         if overlapped_ptr.address != 0_u64 && overlapped_ptr.address == IyiStdinReader.overlapped_address
           IyiStdinReader.delivered
@@ -1808,7 +1853,7 @@ class IyiScheduler
             enqueue(fiber)
           end
         end
-      else
+      elsif timer > 0
         # A due time in hundred-nanosecond units, negative for "from
         # now"; a gap of zero is an absolute time already past, which
         # signals at once. The drain below takes whatever the port has,
@@ -1909,6 +1954,7 @@ class IyiScheduler
   end
 
   def self.wake_expired_sleepers : Nil
+    return if state.sleep_head.is_a?(Nil)
     now = __iyi_monotonic_ns
     while true
       head = state.sleep_head

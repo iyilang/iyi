@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **A busy run queue lets sleepers and the poller in.** The clock and
+  the poller were asked only when no fiber was runnable, and `sleep(0)`
+  puts its caller straight back: a task polling a flag with `sleep(0)`
+  spun 20,000,000 times in 666-813 ms while the task sleeping 10 ms to
+  set it never woke, and a `sleep(50)` beside a channel ping-pong woke
+  after 545-669 ms, when the ping-pong had stopped by itself. Every
+  256th park looks at the clock now, and at the poller once a
+  millisecond has passed since it last did, without waiting: the two
+  sleepers wake after 10 ms and 50 ms. A channel round trip and a
+  yield cost what they did, alone and beside a parked sleeper or
+  `accept`: 72-100 ns and 11-13 ns before, 74-87 ns and 11-14 ns after
+  (release, best of three, four runs each).
+  `bench/concurrency_exercise.iyi` holds a sleeper beside a `sleep(0)`
+  loop, one beside a ping-pong and a pipe's reader beside a `sleep(0)`
+  loop to 200 ms; the old runtime ran each into the loops' 2 s cap.
+
 - **A deadlock found while a task's stack runs is named once, and every
   cleanup runs.** The deadlock was raised on the stack of whichever
   fiber's park found it, mostly a task's, parked or already finished,

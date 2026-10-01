@@ -1109,8 +1109,24 @@ class Iyi::Command
       # so the old program is moved aside - it goes on running - and the
       # new one written where it was.
       {% if flag?(:win32) %}
-        unless compiler.cross_compile? || Iyi.move_aside_if_busy(output_filename)
-          abort! "#{output_filename} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+        unless compiler.cross_compile?
+          # And the program database the MSVC linker writes beside it,
+          # first, so a refusal leaves the program as it was. A `.pdb` a
+          # debugger holds open, or a read-only one from an extracted tree,
+          # failed the link after the whole compile - "LNK1201: error writing
+          # to program database", exit status 1201, the linker's command line
+          # - and the linker deleted the program on its way out.
+          {% if flag?(:msvc) %}
+            unless compiler.debug.none?
+              pdb = "#{output_filename.rchop(::Path[output_filename].extension)}.pdb"
+              unless Iyi.move_aside_if_busy(pdb)
+                abort! "#{pdb} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+              end
+            end
+          {% end %}
+          unless Iyi.move_aside_if_busy(output_filename)
+            abort! "#{output_filename} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+          end
         end
       {% end %}
     end

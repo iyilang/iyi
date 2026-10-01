@@ -476,6 +476,39 @@ case "$(uname -s)" in
     else
       echo "  the busy program did not build:"; sed -n '1,3p' busy.log; status=1
     fi
+    # And the program database the linker writes beside it, which was
+    # never asked about: a read-only `.pdb`, as an extracted tree leaves
+    # one, failed the link after the whole compile - "LNK1201: error
+    # writing to program database", exit status 1201 - and the linker
+    # deleted the program on its way out. It is moved aside like the
+    # program; one held open, which cannot be moved, is refused before
+    # anything is compiled, and the program is left as it was.
+    printf 'module busy\n\nputs "third"\n' > busy/third.iyi
+    if "$IYI" build -o busy/db.exe busy/quick.iyi > pdb.log 2>&1 && [ -f busy/db.pdb ]; then
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib +R "$(cygpath -w busy/db.pdb)"
+      "$IYI" build -o busy/db.exe busy/third.iyi > pdb.log 2>&1; rebuilt=$?
+      said="$(busy/db.exe 2>&1 | tr -d '\r')"
+      if [ "$rebuilt" -eq 0 ] && [ "$said" = "third" ]; then
+        echo "  a program whose .pdb is read-only: the .pdb moved aside, the new program runs"
+      else
+        echo "  a program whose .pdb is read-only: build $rebuilt, it said '$said'"; sed -n '1,3p' pdb.log; status=1
+      fi
+      for f in busy/db.pdb*; do MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib -R "$(cygpath -w "$f")"; done
+      powershell -NoProfile -Command "\$f = [IO.File]::Open('$(cygpath -w "$WORK/busy/db.pdb")', 'Open', 'Read', 'None'); \
+        New-Item -ItemType File '$(cygpath -w "$WORK/busy/held")' | Out-Null; \$i = 0; \
+        while (-not (Test-Path '$(cygpath -w "$WORK/busy/release")') -and \$i -lt 600) { Start-Sleep -Milliseconds 100; \$i++ }; \
+        \$f.Close()" > /dev/null 2>&1 &
+      holder=$!
+      i=0
+      while [ ! -f busy/held ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+      refuses "a program whose .pdb is held open" "db.pdb is in use and cannot be replaced or moved aside" -- \
+        "$IYI" build -o busy/db.exe busy/quick.iyi
+      said="$(busy/db.exe 2>&1 | tr -d '\r')"
+      [ "$said" = "third" ] || { echo "  the refused build lost the program: it said '$said'"; status=1; }
+      touch busy/release; wait "$holder" 2>/dev/null
+    else
+      echo "  the program with a .pdb did not build:"; sed -n '1,3p' pdb.log; status=1
+    fi
     # A directory the program fits in and the write probe does not: the
     # probe's name, `.iyi-write-probe-<pid>`, is longer than `m.exe`, and
     # near MAX_PATH the probe failed and was told as "no permission to

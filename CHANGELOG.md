@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A build whose `.pdb` is read-only moves it aside, one held open is
+  refused before compiling, and neither loses the program.** Only the
+  program was asked about, not the program database the MSVC linker writes
+  beside it, so a read-only `db.pdb` failed the link after the whole compile
+  with "LNK1201: error writing to program database", exit status 1201 and
+  the linker's command line, and the linker deleted `db.exe` on its way out.
+  The `.pdb` is moved to `db.pdb.old` the way the program is, and one that
+  cannot be moved is refused first with "db.pdb is in use and cannot be
+  replaced or moved aside". `bench/verbs_exercise.sh` checks both on
+  Windows; the old compiler left only `db.pdb` in the directory.
+
 - **`iyi tool dependencies` and `iyi tool hierarchy` resolve a module's
   imports from the root its header names.** The root was read from the
   entry's header only on the way to a build, and these two verbs stop before

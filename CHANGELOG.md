@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **A regex refusal names backreferences, recursion and comments for
+  what they are, and `[[:digit:]]` is RE2's digit class.** `(?P=n)` and
+  `(?P>n)` were refused as "not a group name", `\k<n>` as an "unknown
+  escape '\k'", and `(?1)`, `(?+1)`, `(?&n)` and `(?#note)` as "inline
+  flags"; `[[:digit:]]+` was the bytes `[`, `:` and the letters, and
+  found ":]]" in "[[:digit:]]x 5" where RE2 finds "5". `(?P=n)`,
+  `\k<n>`, `\k{n}`, `\k'n'`, `\g<1>`, `\g{1}` and `\g1` are refused as
+  backreferences now, `(?1)`, `(?+1)`, `(?-1)`, `(?&n)` and `(?P>n)` as
+  recursion, and `(?#..)` as a comment, as RE2 refuses it. Inside a class
+  the fourteen ASCII classes RE2 names - alnum, alpha, ascii, blank,
+  cntrl, digit, graph, lower, print, punct, space, upper, word, xdigit -
+  and their `[:^x:]` negations are read as RE2 reads them, and a name it
+  does not have is refused. `bench/std_regex_exercise.iyi` checks each
+  sentence, and each class and its negation over the 128 ASCII bytes;
+  the old module answered "not a group name" for `(?P=n)`.
+
 - **A regex compiles in a task at every nesting it accepts.** Groups
   could nest 1,000 deep, a cap sized for the main stack's 8 MiB, and
   each level is five frames of the parser: a task compiling 213 nested

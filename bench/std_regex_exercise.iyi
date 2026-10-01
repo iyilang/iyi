@@ -260,4 +260,57 @@ assert_str "[cgt]gggtaaa|tttaccc[acg]", /[cgt]gggtaaa|tttaccc[acg]/.source, "a l
 assert_str "c+d", /#{pat}d/.source, "and an interpolated one the text it was compiled from"
 puts "  match, scan, escapes, a loop, an interpolation and the source"
 
+# Refused for what they are: `(?P=n)` was "not a group name", `\k<n>` an
+# "unknown escape", and `(?1)` and `(?#..)` "inline flags".
+puts "\n== a refusal names its reason"
+["(?P=n)", "(?<n>a)\\k<n>", "(?<n>a)\\k{n}", "(?<n>a)\\k'n'", "(a)\\g<1>", "(a)\\g{1}", "(a)\\g1"].each do |pattern|
+  said = refusal(pattern)
+  assert_true said.includes?("regex: backreferences are refused"), "/#{pattern}/ is a backreference, not #{said.inspect}"
+end
+["(?1)", "(?+1)", "(?-1)", "(?&n)", "(?P>n)", "(?R)"].each do |pattern|
+  said = refusal(pattern)
+  assert_true said.includes?("regex: recursion is refused"), "/#{pattern}/ is recursion, not #{said.inspect}"
+end
+comment = refusal("a(?#note)")
+assert_true comment.includes?("regex: comments are refused"), "(?#note) is a comment, not #{comment.inspect}"
+assert_true refusal("(?-i)a").includes?("regex: inline flags are refused"), "(?-i) is still a flag"
+assert_true refusal("\\kx").includes?("regex: unknown escape '\\k'"), "and \\k alone an unknown escape"
+puts "  backreferences, recursion and comments, each by name"
+
+# RE2's ASCII classes, by name inside a class. Read as bytes,
+# `[[:digit:]]+` found ":]]" in "[[:digit:]]x 5".
+puts "\n== POSIX classes"
+
+def bytes(lo : Int32, hi : Int32) : String
+  String.new(hi - lo + 1) do |dst|
+    c = lo
+    while c <= hi
+      dst[c - lo] = c.to_u8
+      c = c + 1
+    end
+  end
+end
+
+ascii = bytes(0, 127)
+upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+lower = "abcdefghijklmnopqrstuvwxyz"
+{
+  "alnum" => "0123456789" + upper + lower, "alpha" => upper + lower, "ascii" => ascii,
+  "blank" => "\t ", "cntrl" => bytes(0, 31) + bytes(127, 127), "digit" => "0123456789",
+  "graph" => bytes(33, 126), "lower" => lower, "print" => bytes(32, 126),
+  "punct" => "!\"\#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", "space" => bytes(9, 13) + " ",
+  "upper" => upper, "word" => "0123456789" + upper + "_" + lower,
+  "xdigit" => "0123456789ABCDEFabcdef",
+}.each do |name, members|
+  assert_str members, Regex.compile("[[:#{name}:]]").scan(ascii).join, "[:#{name}:] over ASCII"
+  assert_true Regex.compile("[[:^#{name}:]]").scan(ascii).join.bytesize == 128 - members.bytesize, "[:^#{name}:] is the rest"
+end
+assert_str "5", Regex.compile("[[:digit:]]+").find("[[:digit:]]x 5") || "", "[[:digit:]] is a digit"
+assert_str "12-3", Regex.compile("[[:digit:]-]+").find("ab12-3c") || "", "a class beside a byte"
+assert_str "é", Regex.compile("[[:^ascii:]]+").find("café") || "", "a negation takes the bytes past ASCII, as \\D does"
+assert_str "[:a", Regex.compile("[[:a]+").find("x[:a") || "", "a [: with no :] is the byte ["
+unknown = refusal("[[:foo:]]")
+assert_true unknown.includes?("regex: unknown class '[:foo:]'"), "a name RE2 does not have is refused, not #{unknown.inspect}"
+puts "  the 14 classes RE2 names and their negations"
+
 puts "\nALL CHECKS PASSED"

@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **A block's own captured variable and a later variable of the same name
+  each keep their own closure cell.** A variable assigned and captured
+  inside a block (by a proc, or by a task's block), and one of the same
+  name the enclosing method or top level assigns after that block and also
+  captures, are two variables; the code generator let the outer one's cell
+  overwrite the block's when it set up a closure, and the compiler died
+  with "BUG: trying to downcast Int32 <- String" for
+  `[1].each { |i| doomed = i; -> { doomed + 1 }.call }` followed by
+  `doomed = "late"; -> { doomed.size }.call`, and with "IyiTask(Int32) <-
+  Channel(Int32)" for a task handle in one `group` and a channel of the
+  same name in a later one. The nearest scope's cell wins now: the first
+  program prints 2 and 4. `bench/concurrency_exercise.iyi` section 22
+  checks both shapes; the old compiler crashed building them.
+
 - **A float's unchecked conversion to an integer saturates, the same in a
   debug and a `--release` build: past the range it is the nearest bound,
   and NaN is 0.** It was LLVM's bare `fptosi`/`fptoui`, undefined outside

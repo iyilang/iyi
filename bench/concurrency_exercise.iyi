@@ -1120,4 +1120,45 @@ end
 fail("starvation: a byte written to a pipe beside a sleep(0) loop was read after #{byte_after} ms, over the 200 ms bound") if byte_after >= 200
 puts "a sleep(0) loop and a channel ping-pong let a sleeper and a pipe's reader in, under the 200 ms bound"
 
+# ── 22. A block's own captured variable keeps its own cell ──────────────
+#
+# A task handle held by a group's block and read by a sibling task, and a
+# channel the program names the same after that block: two variables, so
+# two cells. The compiler gave every closure the later variable's cell,
+# and died building this with "BUG: trying to downcast IyiTask(Int32) <-
+# Channel(Int32)"; a proc reading a block's own Int32 beside a later String
+# of the same name died the same way.
+held = 0
+group do |g|
+  twin = g.spawn do
+    41
+  end
+  g.spawn do
+    value = twin.value
+    held = value.is_a?(Int32) ? value : -1
+    0
+  end
+end
+twin = Channel(Int32).new
+passed = 0
+group do |g|
+  g.spawn do
+    twin.send(7)
+    0
+  end
+  g.spawn do
+    value = twin.receive
+    passed = value.is_a?(Int32) ? value : -1
+    0
+  end
+end
+fail("a block's own task handle read #{held} and the later channel passed #{passed}, not 41 and 7") unless held == 41 && passed == 7
+[2].each do |n|
+  named = n
+  fail("a proc read a block's own variable as #{-> { named + 1 }.call}, not 3") unless -> { named + 1 }.call == 3
+end
+named = "late"
+fail("a proc read the later variable's size as #{-> { named.size }.call}, not 4") unless -> { named.size }.call == 4
+puts "a block's own captured variable and a later one of the same name keep a cell each"
+
 puts "concurrency exercise: every property held"

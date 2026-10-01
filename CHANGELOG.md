@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A single's floored division is the floor of its quotient past 2^23.**
+  `Float32#//` ran the double's recipe in 24 bits, where taking the
+  remainder off the dividend rounds, and the quotient came out one over:
+  `-170277296.0_f32 // -13.303335_f32` was 12799595.0 and
+  `-4.1095315e20_f32 // -25514022535168.0_f32` 16106953.0, so `divmod`
+  gave q * y + r = -170277309.3 for x = -170277296.0 (13 of 3,361 random
+  pairs, every one past 2^23). It is the double's floored division,
+  narrowed, now: 12799594.0 and 16106952.0, Python's answers on the same
+  singles. `bench/std_float_exercise.iyi` checks both quotients and that
+  divmod; the old module answered 12799595.0.
+
 - **`Float32.zero`, `Int64.multiplicative_identity` and a sum of singles
   compile with std/number alone.** std/number gave every number
   `self.zero` as `new(0)` and `multiplicative_identity` as `new(1)`, and no

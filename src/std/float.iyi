@@ -298,17 +298,27 @@ import std/number
       # so the division is of a multiple of the divisor; it can still round,
       # so the quotient is floored and nudged up past a half. A zero
       # quotient has the sign of the division.
+      #
+      # A single's is the double's, narrowed. Run in 24 bits, `self - r`
+      # can round once the quotient is past 2^23, and the division then
+      # floored to the next integer: `-170277296.0_f32 // -13.303335_f32`
+      # was 12799595.0 for 12799594.0, and `divmod`'s q * y + r missed x by
+      # 13.3.
       def //(other : {{ name.id }}) : {{ name.id }}
-        raise "division by zero" if other == 0.0{{ sfx.id }}
-        r = remainder(other)
-        q = (self - r) / other
-        if r != 0.0{{ sfx.id }} && (r < 0.0{{ sfx.id }}) != (other < 0.0{{ sfx.id }})
-          q = q - 1.0{{ sfx.id }}
-        end
-        return q if q != q
-        return self / other * 0.0{{ sfx.id }} if q == 0.0{{ sfx.id }}
-        f = q.floor
-        q - f > 0.5{{ sfx.id }} ? f + 1.0{{ sfx.id }} : f
+        {% if name == "Float32" %}
+          (to_f64 // other.to_f64).to_f32
+        {% else %}
+          raise "division by zero" if other == 0.0
+          r = remainder(other)
+          q = (self - r) / other
+          if r != 0.0 && (r < 0.0) != (other < 0.0)
+            q = q - 1.0
+          end
+          return q if q != q
+          return self / other * 0.0 if q == 0.0
+          f = q.floor
+          q - f > 0.5 ? f + 1.0 : f
+        {% end %}
       end
 
       # Toward zero. Past 2^{{ f[2] }} every value is an integer already and is

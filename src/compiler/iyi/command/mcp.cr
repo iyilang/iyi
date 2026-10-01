@@ -51,6 +51,18 @@ class Iyi::Command
           next
         end
 
+      # A line that parses and is not an object - a batch array, `42`, a
+      # string - is not a request. Every field below is read with `[]?`,
+      # which raises on what is not an object, so each of these killed the
+      # server with "Expected Hash for #[]?(key : String), not
+      # Array(JSON::Any)" and "you've found a bug". MCP sends no batches
+      # since 2025-06-18, so one is refused like any other non-object.
+      unless message.as_h?
+        STDOUT.puts %({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "invalid request: #{message.as_a? ? "a batch is not served; send one message per line" : "a message is a JSON object"}"}})
+        STDOUT.flush
+        next
+      end
+
       id = message["id"]?
       method = message["method"]?.try(&.as_s?)
 
@@ -61,6 +73,19 @@ class Iyi::Command
       if method.nil? && id
         STDOUT.puts %({"jsonrpc": "2.0", "id": #{id.to_json}, "error": {"code": -32600, "message": "invalid request: no method"}})
         STDOUT.flush
+        next
+      end
+
+      # `params`, and a tool call's `arguments`, are objects when they are
+      # there at all (JSON-RPC 2.0 §4.2); one that is not an object, an
+      # array or a number, was dug into and killed the server the same way.
+      params = message["params"]?
+      arguments = params.try(&.as_h?).try(&.["arguments"]?)
+      if (params && !params.as_h?) || (method == "tools/call" && arguments && !arguments.as_h?)
+        if id
+          STDOUT.puts %({"jsonrpc": "2.0", "id": #{id.to_json}, "error": {"code": -32602, "message": "invalid params: #{params.try(&.as_h?) ? "arguments" : "params"} is an object when it is given"}})
+          STDOUT.flush
+        end
         next
       end
 

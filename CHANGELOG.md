@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`iyi mcp` answers a line that is not a request object, and keeps
+  serving.** Every field was read with `[]?`, which raises on what is not
+  an object, so a batch array, `42`, `"x"`, `"params":[1]` or
+  `"arguments":[1]` ended the server with "Expected Hash for #[]?(key :
+  String), not Array(JSON::Any)", a backtrace and "you've found a bug in
+  the iyi compiler". A message that is not an object is -32600 Invalid
+  Request now, with a null id - a batch too, which MCP stopped sending in
+  2025-06-18 - and `params` or `arguments` that are not objects are -32602
+  Invalid params. `bench/agent_loop.py` sends all four and then a ping;
+  the old server died on the first.
+
 - **`iyi fix` says what the remaining error is when its chain ends in a
   type's trace.** `undefined method 'abss' for Int32` carries an `Int32
   trace:` frame with no message under it, and the deepest message was

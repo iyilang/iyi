@@ -656,6 +656,33 @@ def main():
     step("mcp tells a non-request from an unknown method",
          methodless.get("error", {}).get("code") == -32600,
          repr(methodless)[:90])
+    # A line that parses and is not an object. Every field was read with
+    # `[]?`, which raises on what is not an object, so a batch array, `42`,
+    # or `params` and `arguments` that are not objects killed the server
+    # with "you've found a bug in the iyi compiler". Each is answered now,
+    # and the server goes on.
+    def raw(message):
+        # A server that died on the line before has closed its stdin, and
+        # that is a step that fails, not a gate that throws.
+        try:
+            server.stdin.write(message + "\n")
+            server.stdin.flush()
+        except OSError:
+            return None
+        line = server.stdout.readline()
+        return json.loads(line) if line else None
+    answers = [
+        raw(json.dumps([{"jsonrpc": "2.0", "id": 14, "method": "ping"}])),
+        raw("42"),
+        raw(json.dumps({"jsonrpc": "2.0", "id": 15, "method": "tools/call", "params": [1]})),
+        raw(json.dumps({"jsonrpc": "2.0", "id": 16, "method": "tools/call",
+                        "params": {"name": "check", "arguments": [1]}})),
+        raw(json.dumps({"jsonrpc": "2.0", "id": 17, "method": "ping"})),
+    ]
+    codes = [answer and (answer.get("error", {}).get("code"), answer.get("id")) for answer in answers]
+    step("mcp refuses what is not a request object, and keeps serving",
+         codes == [(-32600, None), (-32600, None), (-32602, 15), (-32602, 16), (None, 17)],
+         repr(codes))
 
     # The binary renamed under the running server, which is what rebuilding
     # it does on Windows: a running program cannot be replaced there, so

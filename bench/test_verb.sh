@@ -162,12 +162,17 @@ step "a flag is a flag, and a directory is not a changed file"
 [ $? -eq 1 ] && grep -q 'is a directory, not a changed file' dir.txt ||
   { echo "a directory was accepted as a changed file:"; cat dir.txt; exit 1; }
 
-step "a timeout is a wait, so zero and less are refused"
+step "a timeout is a wait, so zero, less and more than a clock holds are refused"
 # `--timeout 0` and `--timeout -1` were taken, and every test came back
 # "hung: killed at -1.0s" - a verdict about the flag, printed as one about
-# the tests, and a run an agent computing its budget could produce.
-for wait in 0 -1 inf nan; do
-  "$IYI" test --timeout "$wait" . > wait.txt 2>&1
+# the tests, and a run an agent computing its budget could produce. And
+# one past what the clock counts went wrong after the test was built:
+# `1e300` overflowed the span the wait becomes, "Arithmetic overflow
+# (OverflowError)" and "you've found a bug", and `9.3e14` hung a run of
+# tests that end at once past a minute on Windows, though not every time
+# (hence the `timeout`).
+for wait in 0 -1 inf nan 1e300 9.3e14; do
+  timeout 120 "$IYI" test --timeout "$wait" . > wait.txt 2>&1
   [ $? -eq 1 ] && grep -q -- "$wait is not a wait" wait.txt ||
     { echo "--timeout $wait was taken as a deadline:"; cat wait.txt; exit 1; }
 done

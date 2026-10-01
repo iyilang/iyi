@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`iyi test --timeout` refuses a wait past what the clock can count.**
+  Only a wait that was not finite or not positive was refused, so `--timeout
+  1e300` built the tests and then died of "Arithmetic overflow
+  (OverflowError)" from `span.cr:567` and "you've found a bug in the iyi
+  compiler"; and 9.3e14, 9.2e15 and 4.6e18 each hung a run of tests that end
+  at once past a minute on Windows in one measurement, though not in the
+  next. A wait is held to 922,337,203,684 s, what Windows' waitable timer
+  counts in 100 ns ticks, and past it the flag is refused with the sentence
+  `0` and `nan` get: "--timeout takes seconds to wait, and 1e300 is not a
+  wait". `bench/test_verb.sh` checks 1e300 and 9.3e14; the old compiler
+  crashed at the first and ran the tests for the second.
+
 - **`iyi test` runs a test once however many ways it is named.** The file
   list was made unique as strings, so a test the directory walk found and
   the caller named again was built and run again: `iyi test --json .

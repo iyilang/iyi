@@ -1469,7 +1469,7 @@ pub class IyiSocket
       addresses = uninitialized LibWs2_32::AcceptAddresses
       received = 0_i32
       size = __sys_addr_size(family)
-      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s), 1)
       answered = post.call(s, client, pointerof(addresses).as(Void*), 0,
         size + 16, size + 16, pointerof(received), ov.as(Void*))
       if answered == 0
@@ -1606,7 +1606,7 @@ pub class IyiSocket
       # the kernel reads it after the post, and the fiber is parked in
       # between.
       descriptor = LibWs2_32::WSABuf.new(len: len.to_i32, buf: buf)
-      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s), 4)
       sent = 0_i32
       answered = LibWs2_32.WSASend(s, pointerof(descriptor), 1, pointerof(sent), 0, ov.as(Void*),
         Pointer(Void).new(0_u64))

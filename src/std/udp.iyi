@@ -916,7 +916,7 @@ pub class UdpSocket
       descriptor = LibWs2_32::WSABuf.new(len: capacity, buf: buf)
       flags = 0_i32
       received = 0_i32
-      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s), 1)
       answered = LibWs2_32.WSARecvFrom(s, pointerof(descriptor), 1, pointerof(received),
         pointerof(flags), addr.as(Void*), addrlen.as(Pointer(Int32)), ov.as(Void*),
         Pointer(Void).new(0_u64))

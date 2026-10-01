@@ -851,7 +851,7 @@ class ProcessChild
       while offset < text.bytesize
         chunk = text.bytesize - offset
         chunk = 65536 if chunk > 65536
-        ov = IyiScheduler.arm_overlapped_current(handle)
+        ov = IyiScheduler.arm_overlapped_current(handle, 4)
         written = 0
         put = 0_i64
         if ::LibC.WriteFile(handle, (text.to_unsafe + offset.to_i64).as(Void*), chunk, pointerof(written), ov.as(Void*)) != 0

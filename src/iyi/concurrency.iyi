@@ -455,6 +455,9 @@ class IyiFiber
   # and OUT bits, which the registration is the union of.
   property wait_dir : Int32
   property wait_handle : Void*
+  # What the posted operation on `wait_handle` does: 1 reads, 4 writes, 0
+  # neither (a connect), as `wait_posix` numbers the two directions.
+  property io_direction : Int32
   property wait_overlapped : Pointer(UInt8)
   property io_bytes_read : Int64
 
@@ -543,6 +546,7 @@ class IyiFiber
     @prev_child = nil
     @stack_top = 0_u64
     @wait_handle = Pointer(Void).new(0_u64)
+    @io_direction = 0
     @wait_overlapped = Pointer(UInt8).malloc(32_u64)
     @io_bytes_read = 0_i64
   end
@@ -1297,8 +1301,23 @@ class IyiScheduler
   # operation. Between the two the caller makes exactly one overlapped
   # call, and reads `GetLastError` itself: ERROR_IO_PENDING (997) means
   # park, anything else means the call answered on the spot.
-  def self.arm_overlapped_current(handle : Void*) : Pointer(UInt8)
+  #
+  # *direction* is the rule `wait_posix` keeps on POSIX: one fiber reading a
+  # handle and one writing it, and a second in the same direction refused.
+  # Windows posted both and let them race - two readers took the bytes in
+  # turns, which a program written there panicked over everywhere else.
+  def self.arm_overlapped_current(handle : Void*, direction : Int32 = 0) : Pointer(UInt8)
     fiber = current
+    if direction != 0
+      other = state.io_head
+      while other.is_a?(IyiFiber)
+        if other.wait_handle.address == handle.address && other.io_direction == direction
+          raise "two fibers #{direction == 1 ? "reading" : "writing"} one fd"
+        end
+        other = other.next_io
+      end
+    end
+    fiber.io_direction = direction
     LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32)
     LibC.SetFileCompletionNotificationModes(handle, 1_u8)
 
@@ -1370,7 +1389,7 @@ class IyiScheduler
       handle = Pointer(Void).new(fd.to_i64.to_u64)
     end
 
-    ov = arm_overlapped_current(handle)
+    ov = arm_overlapped_current(handle, 1)
 
     read_bytes = uninitialized Int32
     ok = LibC.ReadFile(handle, buffer, count.to_i32, pointerof(read_bytes), ov.as(Void*))

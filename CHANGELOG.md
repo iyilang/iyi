@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **Two fibers reading one socket, or two writing it, are refused on
+  Windows as on Linux and darwin.** `std/socket` says so, and the POSIX
+  wait refuses the second fiber ("two fibers reading one fd"); Windows
+  posted both operations and let them race, two readers taking the bytes
+  in turns, so a program written there panicked everywhere else. A posted
+  read, receive or accept on a handle that already has a parked one in
+  the same direction is refused now, and so is a second write.
+  `bench/socket_exercise.sh` starts two readers on one socket; the old
+  runtime let both in.
+
 - **`URI#to_s` writes userinfo's sub-delims as they were.** Userinfo may
   hold `!$&'()*+,;=` (RFC 3986 §3.2.1), and the user and password were
   re-encoded keeping only unreserved bytes: `http://user;type=a@h/` came
@@ -13723,7 +13733,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,228-line library and nothing else. Every other
+  written against iyi's own 19,247-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

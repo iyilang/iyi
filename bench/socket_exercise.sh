@@ -128,6 +128,33 @@ else
   echo "  recv(-1): exits 1 at \"$(grep -m1 'negative count' "$WORK/negative.out" | sed 's/^iyi: panic: //')\""
 fi
 
+echo "== two fibers reading one socket are refused"
+# On every platform: the readiness one of them is woken for is not the
+# other's. Windows posted both reads and let them take the bytes in turns,
+# so a program written there panicked everywhere else.
+cat > "$WORK/readers.iyi" <<'IYI'
+module main
+
+import std/socket::{IyiSocket}
+
+l = IyiSocket.listen("127.0.0.1", 0)
+c = IyiSocket.connect("127.0.0.1", l.local_port).or_panic
+a = l.accept.or_panic
+group do |g|
+  g.spawn { a.read(16); 0 }
+  g.spawn { a.read(16); 0 }
+  0
+end
+puts "two readers were let in"
+IYI
+if timeout -k 5 60 "$IYI" run "$WORK/readers.iyi" > "$WORK/readers.out" 2>&1; then
+  echo "  two readers were let in"; status=1
+elif ! grep -q "two fibers reading one fd" "$WORK/readers.out"; then
+  echo "  two readers were refused, but not by name:"; sed 's/^/    /' "$WORK/readers.out"; status=1
+else
+  echo "  two readers: exits 1 at \"$(grep -m1 'two fibers' "$WORK/readers.out" | sed 's/^iyi: panic: //')\""
+fi
+
 echo
 echo "== the checks fail when the socket mechanism is broken"
 prove_fails() {

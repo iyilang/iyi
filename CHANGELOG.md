@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`Server.serve` returns when its listener closes beside an idle
+  keep-alive client.** Its doc says the close ends `serve`, and a
+  connection waiting for its next request kept the group's join waiting
+  for as long as the client stayed: a client that sat idle three seconds
+  held `serve` three seconds, and one that never left held it forever. A
+  connection between requests is closed when the listener is, and one
+  answering a request does not wait for another after it.
+  `bench/std_http_exercise.iyi` closes a listener beside an idle client;
+  the old server returned 3,001 ms later.
+
 - **Two fibers reading one socket, or two writing it, are refused on
   Windows as on Linux and darwin.** `std/socket` says so, and the POSIX
   wait refuses the second fiber ("two fibers reading one fd"); Windows

@@ -288,7 +288,7 @@ mutate "a server that parses the body so far after every read" 'wanted = parsed.
 mutate "a server that parses a chunked body again after every read" 'if head = parsed.chunked' 'if head = nil.as(Request?)'
 mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
 mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
-mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler)' '          accepted = client
+mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle)' '          accepted = client
           g.spawn do
             handle(accepted, handler)
             0

@@ -110,7 +110,11 @@ pub struct Server
 
   # Serve `listener` until it is closed. The block runs on the
   # connection's fiber, once per request; what it answers is written back.
+  # The close ends a connection waiting for its next request too, and one
+  # that is answering ends when its answer is written: a keep-alive client
+  # that sat idle kept `serve` from returning for as long as it stayed.
   def self.serve(listener : IyiSocket, &handler : Request -> Response) : Nil
+    idle = {} of UInt64 => IyiSocket
     group do |g|
       pause = 5
       while !listener.closed?
@@ -125,9 +129,10 @@ pub struct Server
           pause = pause * 2 if pause < 1000
         in IyiSocket
           pause = 5
-          spawn_handler(g, client, handler)
+          spawn_handler(g, client, handler, listener, idle)
         end
       end
+      idle.each { |_, waiting| waiting.close }
       0
     end
   end
@@ -138,9 +143,9 @@ pub struct Server
   # ran: connections that arrived together were served by several tasks at
   # once - "two fibers reading one fd" - and the others by none, and their
   # clients waited forever.
-  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response)) : Nil
+  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, IyiSocket)) : Nil
     g.spawn do
-      handle(client, handler)
+      handle(client, handler, listener, idle)
       0
     end
   end
@@ -148,7 +153,11 @@ pub struct Server
   # One connection: requests until the client is done. A request that is
   # not HTTP is answered 400 and the connection closed, since the bytes
   # after it cannot be trusted to be a request either.
-  def self.handle(client : IyiSocket, handler : Proc(Request, Response)) : Nil
+  #
+  # Under `serve`, *listener* and *idle*: a connection between requests is
+  # in *idle* while it waits, for `serve` to close once the listener is,
+  # and it does not wait for another once the listener is closed.
+  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, IyiSocket)? = nil) : Nil
     defer client.close
     buffer = ""
     continued = false
@@ -196,7 +205,16 @@ pub struct Server
         continued = true
         return unless client.write("HTTP/1.1 100 Continue\r\n\r\n").is_a?(Int32)
       end
-      case chunk = client.read(65536)
+      # Between requests the connection is idle: under `serve`, not waited
+      # on once the listener is closed, and closed by `serve` if it is.
+      between = buffer.bytesize == 0
+      if between
+        return if listener && listener.closed?
+        idle[client.object_id] = client if idle
+      end
+      chunk = client.read(65536)
+      idle.delete(client.object_id) if between && idle
+      case chunk
       in Cancelled, SocketError
         return
       in String

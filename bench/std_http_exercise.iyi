@@ -275,6 +275,16 @@ assert_str "GET /a/b ?x=1 Host=example.com; \"\" keep", server_reads("GET http:/
 assert_str "OPTIONS / ?-  \"\" keep", server_reads("OPTIONS HTTP://example.com HTTP/1.1\r\n\r\n"), "an absolute-form target with no path is /"
 puts "  a 204 and a 304 carry nothing, and an absolute-form target is read for its path"
 
+# A status line is written only as the client half reads it: a reason
+# with a CRLF went out as a header of its own, `Set-Cookie: admin=1`, and
+# 2000 as `HTTP/1.1 2000 Server Error`, which `parse_response` refuses.
+assert_str "refused: HTTP: the reason contains a line break", answer { Server.format_response(Response.new(200, "OK\r\nSet-Cookie: admin=1", {} of String => String, "hi"), false, false) }, "a reason with a CRLF is not written"
+assert_str "refused: HTTP: the reason contains a control character", answer { Server.format_response(Response.new(200, "O\u0000K", {} of String => String, ""), false, false) }, "a reason with a NUL is not written"
+assert_str "refused: HTTP: not a status: 2000", answer { Server.format_response(Response.new(2000, "x"), false, false) }, "a four-digit status is not written"
+assert_str "refused: HTTP: not a status: 99", answer { Server.format_response(Response.new(99, "x"), false, false) }, "a status under 100 is not written"
+assert_str "999 Server Error Content-Length=1;Connection=close; \"x\"", client_reads(Server.format_response(Response.new(999, "x"), false, true)), "999 is a status, and read back as written"
+puts "  a status outside 100 to 999, or a reason with a line break, is not written"
+
 puts "\n== over a socket"
 # The server runs on a thread, and a thread's block may capture only what
 # is Share (III.4.4): the listener's descriptor is a number, and what the

@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **`Server.format_response` refuses a status outside 100 to 999, and a
+  reason with a line break or a control character, before writing.** The
+  status line went out unchecked: `Response.new(200, "OK\r\nSet-Cookie:
+  admin=1", {} of String => String, "hi")` was written as `HTTP/1.1 200
+  OK\r\nSet-Cookie: admin=1\r\n...`, which a client reads as a header;
+  `Response.new(2000, "x")` as `HTTP/1.1 2000 Server Error` and
+  `Response.new(99, "x")` as `HTTP/1.1 99 Informational`, status lines
+  the module's own client refuses ("HTTP: not a status line"); and a NUL
+  in the reason was written as it came. Each is refused now as a header
+  value is: "HTTP: not a status: 2000", "HTTP: the reason contains a line
+  break", "HTTP: the reason contains a control character".
+  `bench/std_http_exercise.iyi` checks the four and that 999 reads back as
+  written; the old module wrote `HTTP/1.1 200 OK\r\nSet-Cookie: admin=1`.
+
 - **A `Content-Length` past 2147483647 is refused as too large, on the
   server and in the client, rather than as "not a number".** `content_length`
   read the digits with `to_i?`, which answers nil past Int32: a request

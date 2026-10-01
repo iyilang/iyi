@@ -304,6 +304,10 @@ mutate "control characters let into a field value" 'return "header #{name} conta
 mutate "control characters let into a request target" 'target.bytesize == 0 || HTTP.control?(target)' 'target.bytesize == 0'
 mutate "a control character written into a request" 'raise "HTTP: header #{name} contains a control character" if control?(value)' ''
 mutate "a control character written into an answer" 'raise "HTTP: header #{name} contains a control character" if HTTP.control?(value)' ''
+mutate "a status written outside 100 to 999" 'unless response.status >= 100 && response.status <= 999' 'unless true'
+mutate "a reason written with a line break in it" '    raise "HTTP: the reason contains a line break" if HTTP.has_break?(response.reason)
+    raise "HTTP: the reason contains a control character" if HTTP.control?(response.reason)
+' ''
 mutate "control characters let into a reason" 'raise "HTTP: not a status line: #{line}" if control?(reason)' ''
 mutate "repeated fields told apart by case" 'key = name.downcase' 'key = name'
 mutate "two lengths that differ read as the first" 'return nil unless trim(part) == first' 'return nil if false'

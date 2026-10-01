@@ -354,6 +354,13 @@ pub struct Server
   # next answer, and `Content-Length: 0` on a 304 told a cache that the
   # resource had become empty.
   def self.format_response(response : Response, head : Bool, close : Bool) : String
+    # A status line the client half reads as written, refused otherwise as
+    # a request's lines are: `Response.new(200, "OK\r\nSet-Cookie: a=1",
+    # ...)` went out with a header of its own in the reason, and 2000 as
+    # `HTTP/1.1 2000 Server Error`, which `parse_response` refuses.
+    raise "HTTP: not a status: #{response.status}" unless response.status >= 100 && response.status <= 999
+    raise "HTTP: the reason contains a line break" if HTTP.has_break?(response.reason)
+    raise "HTTP: the reason contains a control character" if HTTP.control?(response.reason)
     text = "HTTP/1.1 #{response.status} #{response.reason}\r\n"
     has_length = false
     response.headers.each do |name, value|

@@ -124,6 +124,8 @@ refuses "a header value with a line break" header_break "HTTP: header X-A contai
   'HTTP.format_request("GET", "/", "127.0.0.1", "", {"X-A" => "1\r\nX-B: 2"})'
 refuses "a header the request writes itself" header_own "is the request.s own header" \
   'HTTP.format_request("GET", "/", "127.0.0.1", "", {"content-length" => "5"})'
+refuses "a caller's Transfer-Encoding" header_te "a request's body goes with its length" \
+  'HTTP.format_request("POST", "/", "127.0.0.1", "abc", {"Transfer-Encoding" => "chunked"})'
 refuses "https" scheme_tls "HTTP: TLS is not in 0.x" \
   'HTTP.get("https://127.0.0.1/").or_panic.status'
 refuses "a Content-Length that is not a number" length_text "HTTP: Content-Length is not a number" \

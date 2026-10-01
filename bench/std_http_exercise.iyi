@@ -163,6 +163,13 @@ req = HTTP.format_request("DELETE", "/items/1", "127.0.0.1")
 assert_true !req.includes?("Content-Length"), "a DELETE with no body has no length"
 puts "  Content-Length follows the method and the body"
 
+# A request's body goes with its length, so a caller's Transfer-Encoding
+# is not sent: written beside `Content-Length: 3` over "abc", unchunked,
+# it hung against the module's own server, which read "abc" as a chunk
+# size and waited for the rest of it.
+assert_str "refused: HTTP: Transfer-Encoding is not sent; a request's body goes with its length", answer { HTTP.format_request("POST", "/", "127.0.0.1", "abc", {"Transfer-Encoding" => "chunked"}) }, "a caller's Transfer-Encoding is not sent"
+puts "  a caller's Transfer-Encoding is refused, the body going with its length"
+
 puts "\n== response"
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nhi!\n")
 assert_true resp.status == 200, "status"

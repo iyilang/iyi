@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`HTTP.format_request` refuses a caller's `Transfer-Encoding`, as it
+  refuses a caller's `Content-Length`.** A request's body is always written
+  with its length, so `{"Transfer-Encoding" => "chunked"}` went out beside
+  `Content-Length: 3` over an unchunked "abc" - a pair RFC 9112 §6.2
+  forbids, and the shape request smuggling takes - and `HTTP.post` with it
+  hung against the module's own server, which read "abc" as an unfinished
+  chunk size and waited for the rest (killed at 20 s). It is refused before
+  anything is written, with "HTTP: Transfer-Encoding is not sent; a
+  request's body goes with its length". `bench/std_http_exercise.iyi` checks
+  it and the `.sh` refuses it in a program of its own; the old module wrote
+  the request.
+
 
 
 - **On Windows `Dir.glob` of a `\\?\` path globs the directory it

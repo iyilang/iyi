@@ -414,6 +414,12 @@ pub struct HTTP
       if same_name?(name, "Host") || same_name?(name, "Connection") || same_name?(name, "Content-Length")
         raise "HTTP: #{name} is the request's own header"
       end
+      # A request's body goes with its length, never chunked: a caller's
+      # `Transfer-Encoding: chunked` was written beside `Content-Length`,
+      # a pair RFC 9112 §6.2 forbids, over a body that was not chunked, and
+      # the module's own server, which reads the chunks first, took "abc"
+      # for an unfinished chunk size and waited for the rest.
+      raise "HTTP: #{name} is not sent; a request's body goes with its length" if same_name?(name, "Transfer-Encoding")
       req = req + name + ": " + value + "\r\n"
     end
     if body.bytesize > 0 || same_name?(method, "POST") || same_name?(method, "PUT") || same_name?(method, "PATCH")

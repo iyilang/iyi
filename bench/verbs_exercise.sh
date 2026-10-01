@@ -347,6 +347,26 @@ for f in lit here interp; do
     echo "  fmt changed a formatted CRLF file ($f):"; od -c "crlf/$f.iyi" | sed -n '1,6p'; status=1
   fi
 done
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # A module reached through an 8.3 short name, which only the file
+    # system can spell out: `APPLIC~1\main.iyi` never ended with its
+    # header's `applications_dir/main.iyi`, so it found no root, and `run`,
+    # `check` and `test` of it said "can't find module
+    # 'applications_dir/util'".
+    mkdir -p short/applications_dir
+    printf 'module applications_dir/util\n\npub def answer : Int32\n  42\nend\n' > short/applications_dir/util.iyi
+    printf 'module applications_dir/main\n\nimport applications_dir/util::{answer}\n\nputs answer\n' > short/applications_dir/main.iyi
+    spelled="$(cygpath -d "$WORK/short/applications_dir/main.iyi")"
+    if [ "$spelled" = "$(cygpath -w "$WORK/short/applications_dir/main.iyi")" ]; then
+      echo "  a module reached through an 8.3 name: this volume makes none, unmeasured"
+    elif "$IYI" run "$spelled" > short.out 2>&1 && grep -qx 42 short.out; then
+      echo "  a module reached through an 8.3 name: resolves its imports"
+    else
+      echo "  a module reached through an 8.3 name did not run:"; grep -m1 "^Error" short.out || sed -n '1,3p' short.out; status=1
+    fi
+    ;;
+esac
 # A file fmt may not write is the file system's refusal, not a formatter
 # bug: a read-only file - common on Windows, a locked checkout or an
 # extracted archive - was reported as "there's a bug formatting", with a

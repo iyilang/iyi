@@ -219,6 +219,23 @@ module Iyi
     {% end %}
   end
 
+  # iyi: *path* with each 8.3 short name in it spelled out, on Windows,
+  # when the file is there; *path* otherwise. Only the file system knows
+  # `APPLIC~1` is `applications_dir`.
+  def self.long_path(path : String) : String
+    {% if flag?(:win32) %}
+      wide = Crystal::System.to_wstr(path)
+      buffer = Slice(UInt16).new(260)
+      length = LibC.GetLongPathNameW(wide, buffer, buffer.size)
+      if length >= buffer.size
+        buffer = Slice(UInt16).new(length)
+        length = LibC.GetLongPathNameW(wide, buffer, buffer.size)
+      end
+      return String.from_utf16(buffer[0, length]) if 0 < length < buffer.size
+    {% end %}
+    path
+  end
+
   # iyi: `path_key` of the file's real path, when there is a file: Windows
   # has one more spelling a string cannot fold, the 8.3 short name - a CI
   # runner's temporary directory is `C:\Users\RUNNER~1\...` to `mktemp`
@@ -226,20 +243,9 @@ module Iyi
   # system knows the two are one. A path that is not there keeps its own.
   def self.file_key(path : String) : String
     return path_key(path) unless File.exists?(path)
-    real = File.realpath(path)
-    {% if flag?(:win32) %}
-      # `realpath` there is `GetFullPathNameW`, which keeps a short name
-      # as it is; `GetLongPathNameW` spells every component out.
-      wide = Crystal::System.to_wstr(real)
-      buffer = Slice(UInt16).new(260)
-      length = LibC.GetLongPathNameW(wide, buffer, buffer.size)
-      if length >= buffer.size
-        buffer = Slice(UInt16).new(length)
-        length = LibC.GetLongPathNameW(wide, buffer, buffer.size)
-      end
-      real = String.from_utf16(buffer[0, length]) if 0 < length < buffer.size
-    {% end %}
-    path_key(real)
+    # `realpath` on Windows is `GetFullPathNameW`, which keeps a short name
+    # as it is; `long_path` spells every component out.
+    path_key(long_path(File.realpath(path)))
   rescue File::Error
     path_key(path)
   end

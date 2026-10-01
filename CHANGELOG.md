@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **An entry reached through an 8.3 short name finds the root its header
+  names.** The root was found by matching the end of the entry's path
+  against its header's module path, and `...\APPLIC~1\main.iyi` never ends
+  with `applications_dir/main.iyi`, so `run`, `check`, `test` and `mod
+  context` of it said "can't find module 'applications_dir/util'" where the
+  long spelling printed 42. The match is retried against the long spelling,
+  which only the file system knows (`GetLongPathNameW`, which `--affected`
+  already asked through `Iyi.file_key`). `bench/verbs_exercise.sh` runs a
+  module through its short name on Windows; the old compiler stopped at the
+  import.
+
 - **A path spelled `\\?\C:\...`, `\\.\C:\...` or `\\?\UNC\server\share\...`
   names the file it names: `fmt --check` and `test` walk it, `--affected`
   matches it, and `run`, `build` and `test` build it.** Rust's

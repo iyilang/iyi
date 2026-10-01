@@ -309,7 +309,17 @@ module Iyi
       # And asked the way the file system compares: on Windows `APP\main.iyi`
       # is `app/main.iyi`, and a path typed in another case found no root
       # and then no module its header's imports named.
-      return nil unless Iyi.path_key(::Path[path].to_posix.to_s).ends_with?(Iyi.path_key(suffix))
+      unless Iyi.path_key(::Path[path].to_posix.to_s).ends_with?(Iyi.path_key(suffix))
+        # And asked of the long spelling, which only the file system knows:
+        # `APPLIC~1\main.iyi` is `applications_dir\main.iyi`, and an entry
+        # reached through the 8.3 name - a CI runner's `RUNNER~1`, a working
+        # directory a `cmd` window spelled short - found no root, and `run`,
+        # `check` and `test` of it said "can't find module
+        # 'applications_dir/util'" where the long spelling printed 42.
+        long = Iyi.long_path(File.expand_path(path))
+        return nil unless Iyi.path_key(::Path[long].to_posix.to_s).ends_with?(Iyi.path_key(suffix))
+        path = long
+      end
       root = path[0, path.size - suffix.size]
       root.empty? ? "/" : root
     end

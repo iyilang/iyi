@@ -692,10 +692,16 @@ pub class Parser
       skip_blank_lines
       break if @line >= @starts.size
       if marker?(@line, 46_u8)
-        pos = skip_blank(@starts[@line] + 3)
-        expect_line_end(pos)
-        return nil if @error
-        @line = @line + 1
+        # A document's end may be marked more than once, as libyaml reads
+        # it: the second `...` was refused as "a document end marker with
+        # no document".
+        while @line < @starts.size && marker?(@line, 46_u8)
+          pos = skip_blank(@starts[@line] + 3)
+          expect_line_end(pos)
+          return nil if @error
+          @line = @line + 1
+          skip_blank_lines
+        end
         implicit_allowed = true
       elsif !marker?(@line, 45_u8)
         refuse_stray(@line)

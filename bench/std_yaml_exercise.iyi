@@ -137,6 +137,10 @@ puts "  alias, merge, explicit key wins either side of <<, properties on a root 
 puts "\n== streams and typed keys"
 docs = YAML.parse_all("1\n---\n2\n")
 assert_true(docs.size == 2 && docs[0].as_i == 1_i64 && docs[1].as_i == 2_i64, "two documents")
+# A document's end marked twice is one end, as libyaml reads it: the
+# second `...` was refused as "a document end marker with no document".
+marked = Parser.new("a: 1\n...\n...\n---\nb\n").parse_all
+assert_true(!marked.nil? && marked.size == 2 && marked[1].as_s == "b", "a document's end may be marked more than once")
 keys = YAML.parse("1: one\ntrue: x\n")
 assert_str("one", keys[Any.new(1_i64)].as_s, "integer key")
 # The core schema's integer is `[-+]?[0-9]+`: `0777` is 777, as the header

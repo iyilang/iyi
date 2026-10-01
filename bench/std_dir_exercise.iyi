@@ -411,6 +411,12 @@ puts "  deletion outcomes for empty and non-empty paths"
   Dir.mkdir_p(prefixed)
   assert_true Dir.exists?(sandbox + "/prefixed/two/three"), "mkdir_p makes every segment of a \\\\?\\ path"
 
+  # A `\\?\` pattern globs the directory it names: the scan for a wildcard
+  # stopped at that `?`, and the walk began at `\\` and answered `[]`.
+  verbatim = Dir.glob("\\\\?\\" + backslashed(sandbox) + "\\regular_*.txt")
+  assert_true verbatim == ["\\\\?\\" + backslashed(sandbox) + "\\regular_file.txt"], "a \\\\?\\ pattern globs: #{verbatim.inspect}"
+  puts "  a \\\\?\\ pattern globs the directory it names"
+
   # The device namespace's `\\.\` names what `\\?\` names, and past 248
   # characters it was taken for a share, `\\?\UNC\.\C:\...`, which names
   # nothing: a long directory spelled with it did not exist.

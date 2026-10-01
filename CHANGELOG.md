@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **On Windows `Dir.glob` of a `\\?\` path globs the directory it
+  names.** The scan for the pattern's first wildcard stopped at the `?`
+  of `\\?\`, so the walk began at `\\` and a `\\?\` pattern answered
+  `[]` while `Dir.children` listed the directory. A leading `\\?\` or
+  `\\.\` is read as spelling now. `bench/std_dir_exercise.iyi` globs
+  its sandbox through `\\?\`; the old module answered `[]`.
+
 - **`Dir.glob`'s `**` does not walk through a link, and goes as deep
   as the tree does.** It followed a junction or symlink back up the
   tree at every level, and only a cap of 64 levels ended the walk: with

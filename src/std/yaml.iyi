@@ -36,7 +36,9 @@
 #     way: `1: one` has the `Int64` key 1, `true: x` the `Bool` key true.
 #
 # What it refuses, each with a sentence that says where:
-#   a tab in indentation, a control character, a quoted string that does
+#   a UTF-16 stream (named by its byte order mark), a tab in indentation,
+#   a control character (C0, DEL or C1, but tab and U+0085) or the
+#   noncharacter U+FFFE or U+FFFF, anywhere, a quoted string that does
 #   not close, a flow collection that does not close, an unknown escape or
 #   an escape that names a surrogate, a mapping entry or sequence entry at
 #   an indentation that belongs to nothing, text after a value on its
@@ -706,18 +708,21 @@ pub class Parser
   # ------------------------------------------------------------------
   # Lines
 
-  # The first control character is remembered and refused once every
+  # The first character the stream may not hold raw (a control or a
+  # noncharacter: see `unprintable`) is remembered and refused once every
   # line is known, since the sentence needs the line table to say where.
   private def split_lines : Nil
     at = 0
     at = 3 if @size >= 3 && @bytes[0] == 0xEF_u8 && @bytes[1] == 0xBB_u8 && @bytes[2] == 0xBF_u8
     control = -1
+    point = 0
     while at <= @size
       start = at
       while at < @size && @bytes[at] != 10_u8 && @bytes[at] != 13_u8
         b = @bytes[at]
-        if control < 0 && ((b < 32_u8 && b != 9_u8) || b == 127_u8)
-          control = at
+        if control < 0 && (b < 32_u8 || b == 127_u8 || b == 0xC2_u8 || b == 0xEF_u8)
+          point = unprintable(at)
+          control = at if point >= 0
         end
         at = at + 1
       end
@@ -742,17 +747,40 @@ pub class Parser
         break
       end
     end
-    if control >= 0
-      b = @bytes[control].to_i32
+    # A UTF-16 stream opens with its byte order mark, FF FE or FE FF -
+    # what Windows PowerShell 5.1's `Out-File` and `>` write - and was
+    # refused as "control character U+0000" at its first ASCII character.
+    if @size >= 2 && ((@bytes[0] == 0xFF_u8 && @bytes[1] == 0xFE_u8) || (@bytes[0] == 0xFE_u8 && @bytes[1] == 0xFF_u8))
+      fail("encoding 'UTF-16' is not supported: the input is read as UTF-8", 0)
+    elsif control >= 0
       digits = "0123456789ABCDEF"
       name = String.new(4) do |t|
-        t[0] = 48_u8
-        t[1] = 48_u8
-        t[2] = digits.to_unsafe[b >> 4]
-        t[3] = digits.to_unsafe[b & 15]
+        t[0] = digits.to_unsafe[(point >> 12) & 15]
+        t[1] = digits.to_unsafe[(point >> 8) & 15]
+        t[2] = digits.to_unsafe[(point >> 4) & 15]
+        t[3] = digits.to_unsafe[point & 15]
       end
-      fail("control character U+#{name} is not allowed", control)
+      what = point >= 0xFFFE ? "noncharacter" : "control character"
+      fail("#{what} U+#{name} is not allowed", control)
     end
+  end
+
+  # The code point at `pos` if it is one a stream may not hold raw, or -1:
+  # a C0 control but tab, DEL, a C1 control but U+0085 (a line break to a
+  # 1.1 reader, text to 1.2), and the noncharacters U+FFFE and U+FFFF, as
+  # libyaml refuses them. The C1 controls and U+FFFE were read as text, so
+  # `a: b\u009B31mc` held a terminal escape the header said was refused.
+  private def unprintable(pos : Int32) : Int32
+    b = @bytes[pos]
+    return b.to_i32 if (b < 32_u8 && b != 9_u8) || b == 127_u8
+    if b == 0xC2_u8 && pos + 1 < @size
+      c = @bytes[pos + 1]
+      return c.to_i32 if c >= 0x80_u8 && c <= 0x9F_u8 && c != 0x85_u8
+    elsif b == 0xEF_u8 && pos + 2 < @size && @bytes[pos + 1] == 0xBF_u8
+      d = @bytes[pos + 2]
+      return d.to_i32 - 0xBE + 0xFFFE if d == 0xBE_u8 || d == 0xBF_u8
+    end
+    -1
   end
 
   private def indent_of(line : Int32) : Int32

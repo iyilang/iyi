@@ -177,6 +177,20 @@ refused("&a [*a]\n", "cyclic alias *a at line 1, column 5")
 refused("&a {b: *a}\n", "cyclic alias *a at line 1, column 8")
 refused("a: b\u0001c\n", "control character U+0001 is not allowed at line 1, column 5")
 refused("a: b\u007Fc\n", "control character U+007F is not allowed at line 1, column 5")
+# A C1 control and the noncharacters U+FFFE and U+FFFF, which the header
+# said were refused and libyaml refuses, were read as text: `\u009B` is a
+# terminal's escape. U+0085 is text to a 1.2 reader.
+refused("c1: b\u0080c\n", "control character U+0080 is not allowed at line 1, column 6")
+refused("c1: \"b\u009B31mc\"\n", "control character U+009B is not allowed at line 1, column 7")
+refused("nc: b\uFFFEc\n", "noncharacter U+FFFE is not allowed at line 1, column 6")
+assert_str("b\u0085c", YAML.parse("a: b\u0085c\n")["a"].as_s, "U+0085 is text, as YAML 1.2 reads it")
+# A UTF-16 stream (Windows PowerShell 5.1's `Out-File` and `>`) is named
+# by its byte order mark; it was "control character U+0000".
+["\xFF\xFEa\0:\0 \0x\0", "\xFE\xFF\0a\0:\0 \0x"].each do |wide|
+  wide_parser = Parser.new(wide)
+  assert_true(wide_parser.parse_all.nil?, "a UTF-16 stream is refused")
+  assert_str("encoding 'UTF-16' is not supported: the input is read as UTF-8 at line 1, column 1", wide_parser.error || "", "a UTF-16 stream is named by its byte order mark")
+end
 refused("a:\n    b: 1\n  c: 2\n", "bad indentation of a mapping entry at line 3, column 3")
 refused("  a: 1\n b: 2\n", "bad indentation of a mapping entry at line 2, column 2")
 refused("a:\n    - 1\n  - 2\n", "bad indentation of a sequence entry at line 3, column 3")

@@ -235,6 +235,15 @@ prove_caught flowentry "'? a' and '- a' read as text in a flow collection" \
 prove_caught escapes "the dump writes a byte order mark and C1 controls raw" \
   "a byte order mark is escaped when dumped" \
   $'size : Int32) : Int32\n    b = bytes[i]' $'size : Int32) : Int32\n    return -1\n    b = bytes[i]'
+prove_caught c1 "a C1 control is read as text" \
+  'accepted "c1: b' \
+  $'      return c.to_i32 if c >= 0x80_u8 && c <= 0x9F_u8 && c != 0x85_u8\n' ''
+prove_caught noncharacter "a noncharacter is read as text" \
+  'accepted "nc: b' \
+  $'      return d.to_i32 - 0xBE + 0xFFFE if d == 0xBE_u8 || d == 0xBF_u8\n' ''
+prove_caught utf16 "a UTF-16 stream is refused for its first zero byte" \
+  "a UTF-16 stream is named by its byte order mark" \
+  'if @size >= 2 && ((@bytes[0] == 0xFF_u8' 'if false && ((@bytes[0] == 0xFF_u8'
 prove_caught eofbreak "a block scalar ending the stream gets a line feed it lacks" \
   "a literal entry ending the stream without a line break keeps no line feed it lacks" \
   'final = lines.size > 0 && @ends[last_content] < @size' 'final = lines.size > 0'

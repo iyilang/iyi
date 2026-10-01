@@ -26,6 +26,13 @@ enum Port : Int32
 end
 
 @[Flags]
+enum Access
+  Read      = 1
+  Write     = 2
+  ReadWrite = 3
+end
+
+@[Flags]
 enum Mode
   Read
   Write
@@ -139,6 +146,13 @@ assert_true((both & Mode::Write) == Mode::Write, "flags: &")
 assert_str(both.to_s, "Read | Write", "flags: to_s joins the bits")
 assert_str(Mode::None.to_s, "None", "flags: to_s of nothing")
 assert_str(Mode::Read.to_s, "Read", "flags: to_s of one bit")
+# Bits no member names are written as a number, as Crystal's are, where
+# they were dropped: 9 printed "Read". And a member whose value is the whole
+# answers with its own name, its bits not listed again beside it: a
+# `ReadWrite = 3` printed "Read | Write | ReadWrite".
+assert_str(Mode.new(9).to_s, "Read | 8", "flags: to_s names the bits no member has")
+assert_str(Access.new(3).to_s, "ReadWrite", "flags: to_s of a member that is several bits")
+assert_str(Access.new(7).to_s, "Read | Write | 4", "flags: and its bits once each beside the rest")
 assert_int(Mode.values.size, 3, "flags: values skips None and All")
 assert_true(Mode::None.none?, "flags: none?")
 

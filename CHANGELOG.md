@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **A flags enum prints bits no member names, and a member that is
+  several bits by its own name.** `Mode.new(9)` of `Read = 1` printed
+  "Read", the 8 dropped; and with a `ReadWrite = 3` member, `3` printed
+  "Read | Write | ReadWrite", the same bits named twice. A value a member
+  has is that member's name now, each other bit is named once, and what
+  is left is written as a number: "Read | 8" and "ReadWrite", as Crystal
+  prints them. `bench/enum_exercise.iyi` checks both; the old prelude
+  printed "Read".
+
 - **`max_by`, `min_by` and `minmax_by` answer a nil element.** The plain forms took the nil that their `?` forms answer for "nothing" as meaning nothing, so on any `Enumerable` but `Array` (which has its own) a nil element that won raised. `[nil, nil].max_by` panicked "max_by of an empty collection", `[nil, 4]` with the nil keyed lowest panicked "min_by of an empty collection", and `minmax_by` of `[nil, 3]` panicked "minmax_by of an empty collection". Whether anything was seen is now a flag, as it is for `reduce?`, and an empty collection still raises. The std exercise checks all three on a `List(Int32?)`, and proves that each check fails with its nil test put back.
 
 - **`Indexable#join` is linear.** It added each element to the text so far, copying that text once per element: 20,000 elements took 1.8 s where the same array's `join` took 1 ms, and 40,000 took 7.5 s. It writes into one builder now, as `Array#join` does. The indexable exercise's `MinimalSeq` never reached this method, because it is also `Enumerable` and so gets that trait's `join`. The exercise therefore adds a type that is `Indexable` and nothing else, checks its `join` against the array's, and holds a `join` of 20,000 to twenty times the array's time plus 200 ms. The old method stops the gate at "20,000 elements took 1726 ms".

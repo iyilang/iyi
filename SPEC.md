@@ -2628,7 +2628,9 @@ shareable cannot be captured by a spawned block or sent over a channel.
 **Built, as written, with the obligations below met.** `Iyi::Share`
 (`src/compiler/iyi/semantic/share.cr`) decides a type structurally: a
 field is mutable if any method other than `initialize` assigns it, by any
-spelling, or a setter `field=` is defined for it — III.4.7's mechanical
+spelling (the structural scan reads the type's own methods, those its
+superclasses and included modules give it, and macro code as it expands on
+the type), or a setter `field=` is defined for it — III.4.7's mechanical
 rule, on the compiler's own AST rather than the count's — and every
 field's type must be shareable in turn: integers, floats, `Bool`, `Char`,
 `Nil`, `Symbol` and enums are; `Pointer` is raw memory and is not;

@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **A field assigned by an included module's method, or by macro code
+  in a method, makes the type not Share.** The scan for a field assigned
+  outside `initialize` walked the class and its superclasses and read each
+  body as written: a `bump` given by `include Bump`, and one whose `@n +=
+  1` sat inside `{% if true %}` or in a macro the method called, each
+  compiled, and two threads bumping the counter two million times each
+  counted 2336841 and 2343960 of 4000000. The scan reads every ancestor
+  now, and macro code as what it expands to on the type (an expansion that
+  needs a `forall` variable is read in the instances the typer kept), and
+  each program is refused with "Counter's field @n is assigned in
+  `bump`". `bench/thread_exercise.sh` step 6 builds all three; the old
+  compiler built them.
+
 - **A method a derive generates cannot ask the program-wide type
   questions either.** The refusal held only while the derive's macro ran,
   and a macro escaped into the method it generated, `\{{

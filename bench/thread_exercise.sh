@@ -478,6 +478,60 @@ if ! grep -q "captures \`items : Array(Int32)\`, which is not Share" build-unsha
 fi
 printf '  refused: %s\n' "$(grep -m1 'is not Share' build-unshared.log | sed 's/^Error: //')"
 
+# The structural scan for an assigned field reads every method the type
+# has, not only the ones its class and superclasses declare, and reads
+# macro code as what it expands to. A `bump` from an included `module`, and
+# one whose `@n += 1` sat inside `{% if true %}` or in a macro it called,
+# each compiled, and two threads bumping the counter two million times each
+# counted 2336841 and 2343960 of 4000000; each is refused by its field now.
+step "failure proof: a field assigned by a mixin's method or by macro code is not Share"
+for shape in mixin macro_if macro_call; do
+  case "$shape" in
+    mixin) bump='include Bump' ;;
+    macro_if) bump='def bump : Nil
+    {% if true %}
+      @n += 1
+    {% end %}
+  end' ;;
+    macro_call) bump='macro incr
+    @n += 1
+  end
+
+  def bump : Nil
+    incr
+  end' ;;
+  esac
+  cat > "assigned_$shape.iyi" <<IYI
+module Bump
+  def bump : Nil
+    @n += 1
+  end
+end
+
+class Counter
+  $bump
+
+  def initialize
+    @n = 0_i64
+  end
+end
+
+c = Counter.new
+t = IyiThread.start do
+  c.bump
+  nil
+end
+t.join
+IYI
+  if "$IYI" build "assigned_$shape.iyi" -o "assigned_$shape" > "build-assigned-$shape.log" 2>&1; then
+    echo "a counter bumped by $shape code compiled:"; cat "build-assigned-$shape.log"; exit 1
+  fi
+  if ! grep -q "Counter's field @n is assigned in \`bump\`" "build-assigned-$shape.log"; then
+    echo "the $shape refusal did not name the field:"; cat "build-assigned-$shape.log"; exit 1
+  fi
+done
+echo "  refused by its field three ways: a mixin's method, {% if %} and a macro call"
+
 # ── 6b. A captured local is one cell, and nothing assigns it after the start
 # A Share type makes a value safe to read from two threads, not a variable
 # safe to write: a captured local is one cell both threads reach. `count`

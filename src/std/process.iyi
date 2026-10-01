@@ -87,10 +87,9 @@ module std/process
     fun waitpid(pid : Int32, status : Int32*, options : Int32) : Int32
     fun kill(pid : Int32, signal : Int32) : Int32
     fun access(path : UInt8*, mode : Int32) : Int32
-    # `stat`, arm64's 64-bit-inode call, not `stat64`: std/file binds
-    # stat64 to its own `Stat`, and one symbol bound with two signatures
-    # did not compile beside std/file or std/dir.
-    fun stat(path : UInt8*, buf : Void*) : Int32
+    # stat64 with `Void*`, std/file's own spelling: one C symbol bound with
+    # two signatures is refused, and beside std/file this did not compile.
+    fun stat = stat64(path : UInt8*, buf : Void*) : Int32
     fun _NSGetExecutablePath(buf : UInt8*, bufsize : UInt32*) : Int32
   end
 {% elsif flag?(:win32) %}

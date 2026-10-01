@@ -78,7 +78,8 @@
   descriptors was refused as "permission denied"; it is EMFILE. And the
   module did not compile beside `std/bool` on any target - it wrote bare
   `Bool` - nor on darwin beside `std/file` or `std/dir`, which bind
-  `stat64` with another signature; it binds `stat`. 130,000 argument
+  `stat64` with another signature; both bind it with `Void*` now, so
+  darwin's floor gains no symbol. 130,000 argument
   lists, 30,000 environments, every exit code and signal, and pipes to 6
   MiB against Python's `subprocess` found nothing else; the process
   exercise checks each and proves the three runtime fixes fail undone.

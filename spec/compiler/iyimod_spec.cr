@@ -563,6 +563,7 @@ describe Iyi::IyiMod do
         pub enum Mode
           Read
           Write
+          Append
         end
 
         pub def loudest : Level
@@ -2198,6 +2199,7 @@ describe Iyi::IyiMod do
         enum Mode
           Read
           Write
+          Append
         end
 
         pub struct Holder
@@ -2227,7 +2229,7 @@ describe Iyi::IyiMod do
         Iyi::IyiMod.declarations(Iyi::IyiMod.read(File.join("mods", "boot", "kinds.iyimod")), io)
       end
       declarations.should contain "private enum Kind : Int32\n  Small = 3\n  Large = 9\nend"
-      declarations.should contain "@[Flags]\nprivate enum Mode : Int32\n  Read = 1\n  Write = 2\nend"
+      declarations.should contain "@[Flags]\nprivate enum Mode : Int32\n  Read = 1\n  Write = 2\n  Append = 4\nend"
 
       File.delete "boot/kinds.iyi"
 

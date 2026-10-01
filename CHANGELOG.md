@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`Unicode.downcase` with `CaseOptions::Turkic` lowers `I` and a combining
+  dot above to `i` when marks of other classes sit between them, so the NFD
+  and NFC of `İ` with a dot below agree.** Only the code point right after
+  the `I` was checked for U+0307, while SpecialCasing's After_I and
+  Before_Dot let any mark whose combining class is neither 0 nor 230
+  intervene: `"I\u0323\u0307"`, the NFD of `"\u0130\u0323"`, gave U+0131
+  U+0323 U+0307 where its NFC form gave U+0069 U+0323. Marks of other
+  classes are now looked through and kept, and both forms give U+0069
+  U+0323; a class-230 mark between still keeps the `I` dotless.
+  `bench/std_unicode_exercise.iyi` checks both forms; the old module
+  answered U+0131 U+0323 U+0307 for the NFD one.
+
 - **A Windows panic's backtrace starts at the function that raised.**
   `raise` asked `RtlCaptureStackBackTrace` to skip two frames, but the
   collector is not a frame of its own, so the second skipped was the
@@ -13884,7 +13896,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,247-line library and nothing else. Every other
+  written against iyi's own 19,245-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

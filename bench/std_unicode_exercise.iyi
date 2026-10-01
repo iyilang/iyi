@@ -42,6 +42,13 @@ assert_str "ı", Unicode.downcase("I", turkic), "turkic downcase of an ascii str
 # taken in; one character at a time it was `ı` with the dot over it.
 assert_str "i", Unicode.downcase("I\u0307", turkic), "turkic downcase of I with a combining dot"
 assert_str "ix", Unicode.downcase("I\u0307X", turkic), "and what follows it is lowered as before"
+# Marks of a class other than 0 and 230 may sit between the `I` and the dot
+# (After_I and Before_Dot): the NFD of `İ` with a dot below lowers like its
+# NFC form. Looking only at the next code point it was `ı`, U+0323, U+0307.
+assert_str "i\u0323", Unicode.downcase("I\u0323\u0307", turkic), "turkic downcase of I, a dot below, then a dot above"
+assert_str "i\u0323", Unicode.downcase("\u0130\u0323", turkic), "turkic downcase of the NFC form, İ and a dot below"
+assert_str "ı\u0301\u0307", Unicode.downcase("I\u0301\u0307", turkic), "a mark of class 230 between keeps the I dotless"
+puts "  turkic I takes in a dot above past marks of other classes"
 assert_str "İÜ", Unicode.upcase("iü", turkic), "turkic upcase beside a non-ascii letter"
 assert_str "I", Unicode.upcase("i"), "plain upcase of i"
 # The titlecase digraphs have no row in the upcase table; their uppercase

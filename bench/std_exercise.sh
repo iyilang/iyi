@@ -511,6 +511,40 @@ else
 fi
 
 echo
+echo "== every std module together, beside std/bool, on every platform"
+# `module std/bool` declares the namespace `Std::Bool`, and inside every
+# other std module a bare `Bool` then names it rather than the type: a
+# program importing std/bool with std/socket, std/udp, std/http, std/debug
+# or std/process did not compile, each on some target. One program that
+# imports every module, typechecked for each target, is the check.
+together="$WORK/together"
+mkdir -p "$together"
+{
+  for module in "$REPO"/src/std/*.iyi; do
+    echo "import std/$(basename "$module" .iyi)"
+  done
+  echo 'puts 1'
+} > "$together/all.iyi"
+apart=""
+for target in "" x86_64-windows-msvc aarch64-darwin aarch64-linux-gnu x86_64-linux-musl; do
+  if [ -n "$target" ]; then
+    flags=(--no-codegen --target "$target")
+  else
+    flags=(--no-codegen)
+  fi
+  if ! (cd "$together" && "$IYI" build "${flags[@]}" -o all all.iyi) > "$together/${target:-host}.log" 2>&1; then
+    apart="$apart ${target:-host}"
+    echo "  ${target:-host}: $(grep -m1 -E 'Error|BUG' "$together/${target:-host}.log" | cut -c1-160)"
+  fi
+done
+if [ -n "$apart" ]; then
+  echo "  FAIL: every std module does not compile together on:$apart"
+  status=1
+else
+  echo "  every std module compiles beside every other, std/bool among them, on five targets"
+fi
+
+echo
 echo "== discovering and running sibling std exercises"
 found_siblings=0
 for sibling in "$REPO"/bench/std_*_exercise.sh; do

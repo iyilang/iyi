@@ -269,7 +269,7 @@ class ProcessChild
     @errors : Pointer(Void) = Pointer(Void).new(0_u64)
     # The job the child runs in, so ending it ends what it started too.
     @job : Pointer(Void) = Pointer(Void).new(0_u64)
-    @@serial = Atomic(UInt64).new(0_u64)
+    @@serial = ::Atomic(UInt64).new(0_u64)
   {% else %}
     @pid : Int32 = 0
     @input : Int32 = -1

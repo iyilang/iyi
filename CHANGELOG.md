@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **Every std module compiles beside every other.** `module std/bool`
+  declares the namespace `Std::Bool`, and inside another std module a
+  bare `Bool` then named it rather than the type: a program importing
+  `std/bool` with `std/socket`, `std/udp`, `std/http` or (on Windows)
+  `std/debug` did not compile - "must return Std::Bool but it is
+  returning Bool". On Windows `std/atomic` did the same to `std/process`
+  and `std/signal`'s `Atomic(UInt64)`. Each writes `::Bool` and
+  `::Atomic` now, as `std/json` and `std/steppable` already did, and the
+  std gate typechecks one program importing every module for the host,
+  Windows, darwin, aarch64 Linux and musl.
+
 - **Six answers of the prelude's `String`, `Char` and integers are the
   other library's.** On text that is not UTF-8, `String#size` counted a
   lone continuation byte as nothing and a cut-short sequence as one

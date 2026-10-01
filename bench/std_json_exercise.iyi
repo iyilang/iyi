@@ -426,7 +426,27 @@ floats = JSON.from_json("{\"a\": 1.5, \"b\": 2}", Hash(String, Float64))
 assert_true(floats["a"] == 1.5 && floats["b"] == 2.0, "Hash(String, Float64)")
 strings = JSON.from_json("{\"k\": [\"v\", \"w\"]}", Hash(String, Array(String)))
 assert_true(strings["k"][1] == "w", "Hash(String, Array(String))")
-puts "  nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String, Any, arrays, hashes and a ToJSON struct"
+
+# A type that admits nil: alone, in an array, as a hash's values and in a
+# derived field. Each was refused at compile time: `(Int32 | Nil).new` on
+# the way in, and on the way out the union matched against `ToJSON` as one
+# type, where `write_or_null` now takes the nil out first.
+struct Tagged
+  getter tags : Array(String?)
+
+  derive serializable
+end
+
+assert_true(JSON.from_json("null", Int32?).nil? && JSON.from_json("5", Int32?) == 5, "Int32? from null and from 5")
+maybe_ints = JSON.from_json("[1, null]", Array(Int32?))
+assert_true(maybe_ints.size == 2 && maybe_ints[0] == 1 && maybe_ints[1].nil?, "Array(Int32?)")
+assert_text("[1,null]", JSON.to_json(maybe_ints), "Array(Int32?) written")
+maybe_strings = JSON.from_json("{\"a\": null, \"b\": \"x\"}", Hash(String, String?))
+assert_text("{\"a\":null,\"b\":\"x\"}", JSON.to_json(maybe_strings), "Hash(String, String?) read and written")
+assert_text("1", JSON.to_json(1.as(Int32?)), "an Int32? holding 1")
+assert_text("null", JSON.to_json(nil.as(Int32?)), "an Int32? holding nil")
+assert_text("{\"tags\":[\"a\",null]}", Tagged.from_json("{\"tags\": [\"a\", null]}").to_json, "a derived Array(String?) field")
+puts "  nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String, Any, arrays, hashes, a ToJSON struct and each of them or nil"
 
 puts "\n== derive serializable"
 

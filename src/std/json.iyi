@@ -2305,10 +2305,23 @@ pub struct JSON
 
   # Any value `write_value` knows: `nil`, a `Bool`, a prelude integer, a
   # `Float64`, a `String`, an `Any`, an `Array` or `Hash` of those, or a type
-  # that implements `ToJSON`.
+  # that implements `ToJSON`; each of them or `nil`.
   def self.to_json(obj : T) : String forall T
     build do |b|
-      write_value(obj, b)
+      write_or_null(obj, b)
+    end
+  end
+
+  # A value that may be nil, written as `null` or as what it holds. Handed
+  # to `write_value` whole, `Int32 | Nil` was matched against the `ToJSON`
+  # overload as one type and refused at compile time, so
+  # `JSON.to_json([1, nil] of Int32?)` and a `Hash(String, String?)` did not
+  # build; with the nil taken out here the rest dispatches as it would alone.
+  private def self.write_or_null(val, b : Builder) : Nil
+    if val.nil?
+      b.null
+    else
+      write_value(val, b)
     end
   end
 
@@ -2350,7 +2363,7 @@ pub struct JSON
 
   def self.write_value(val : Array(T), b : Builder) : Nil forall T
     b.array do
-      val.each { |e| write_value(e, b) }
+      val.each { |e| write_or_null(e, b) }
     end
   end
 
@@ -2360,7 +2373,7 @@ pub struct JSON
     b.object do
       val.each do |k, v|
         b.field(key_text(k))
-        write_value(v, b)
+        write_or_null(v, b)
       end
     end
   end
@@ -2493,8 +2506,16 @@ pub struct JSON
   end
 
   # A type that reads itself: the `initialize(pull)` a `derive
-  # serializable` wrote.
+  # serializable` wrote. A type that admits nil reads `null` as the nil and
+  # anything else as the other type (`x || raise`, as the derive asks it),
+  # the way `write_or_null` writes it. That was `T.new(pull)` too, and
+  # `Int32 | Nil` has no such `new`, so `JSON.from_json("5", Int32?)` and
+  # `Array(Int32?)` did not build.
   def self.read_value(pull : PullParser, type : T.class) : T forall T
-    T.new(pull)
+    {% if T.nilable? %}
+      pull.read_null? ? nil : read_value(pull, typeof(nil.as(T) || raise("")))
+    {% else %}
+      T.new(pull)
+    {% end %}
   end
 end

@@ -598,6 +598,20 @@ module Iyi::Lsp
           respond_error(id, -32602, "#{ex.file}: #{reason}")
         when IO::Error
           respond_error(id, -32602, ex.os_error.try(&.message) || ex.message.to_s)
+        when TypeCastError
+          # `as_s` on a uri that is 7 or a newName that is 5: a value of the
+          # request in the wrong JSON type (a position's numbers are read by
+          # `position_of`, which says so itself). Answered -32603 with the
+          # cast's own site, "Cast from Int64 to String failed, at
+          # C:\Users\...\src\json\any.cr:248:5" - the server's fault, and the
+          # build machine's paths. A cast from no JSON type is the server's
+          # own, and stays -32603.
+          reason = ex.message.to_s.partition(", at ")[0]
+          if JSON_TYPES.any? { |json_type| reason.starts_with?("Cast from #{json_type} to ") }
+            respond_error(id, -32602, "the request's params are not the shape #{method} takes: #{reason}")
+          else
+            respond_error(id, -32603, ex.message.to_s)
+          end
         when KeyError
           # `params["textDocument"]` on a request that carried none. The
           # JSON library's wording is `Missing hash key: "textDocument"`.
@@ -1202,8 +1216,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -1319,8 +1332,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       lines = text.lines
       line_text = lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
@@ -1382,8 +1394,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
 
       # Everything below is in codepoints; the wire's UTF-16 enters and
@@ -1688,8 +1699,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       target = Location.new(path, line0 + 1, Lsp.column_of(line_text, char))
 
@@ -1946,8 +1956,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -1977,8 +1986,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -2012,8 +2020,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       lines = text.lines
       line_text = lines[line0]? || ""
       target = Location.new(path, line0 + 1, Lsp.column_of(line_text, char))
@@ -2062,9 +2069,9 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
-      target = Location.new(path, line0 + 1, Lsp.column_of(line_text, params["position"]["character"].as_i))
+      target = Location.new(path, line0 + 1, Lsp.column_of(line_text, char))
       visitor = @analysis.references_at(path, text, overrides_for(path), target)
       !!visitor && visitor.taken?(name)
     end
@@ -2074,9 +2081,9 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       text = text_of(uri)
       lines = text.lines
-      line0 = params["position"]["line"].as_i
+      line0, char = position_of(params["position"])
       line_text = lines[line0]? || ""
-      target = Location.new(path_of(uri), line0 + 1, Lsp.column_of(line_text, params["position"]["character"].as_i))
+      target = Location.new(path_of(uri), line0 + 1, Lsp.column_of(line_text, char))
       local_sites(text, path_of(uri), target, lines)
     end
 
@@ -2111,8 +2118,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       lines = text.lines
       line_text = lines[line0]? || ""
       cursor = Lsp.column_of(line_text, char) - 1
@@ -2490,8 +2496,8 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      from_line = params["range"]["start"]["line"].as_i + 1
-      to_line = params["range"]["end"]["line"].as_i + 1
+      from_line = position_of(params["range"]["start"])[0] + 1
+      to_line = position_of(params["range"]["end"])[0] + 1
 
       hints = @analysis.inlay_hints_at(path, text, overrides_for(path), from_line, to_line)
       return respond_null(id) if hints.empty?
@@ -2804,8 +2810,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -2839,8 +2844,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -2999,8 +3003,7 @@ module Iyi::Lsp
       respond(id) do |json|
         json.array do
           params["positions"].as_a.each do |position|
-            line0 = position["line"].as_i
-            char = position["character"].as_i
+            line0, char = position_of(position)
             line_text = lines[line0]? || ""
             column = Lsp.column_of(line_text, char)
 
@@ -3141,8 +3144,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -3655,6 +3657,36 @@ module Iyi::Lsp
         end
       end
     end
+
+    # Past every line and every character a text the server reads can
+    # have: a frame is at most 64 MiB, and a file of 2^30 lines is a
+    # gigabyte of newlines.
+    WIRE_INDEX_LIMIT = 1 << 30
+
+    # A position off the wire as {line, character}, 0-based.
+    private def position_of(position : JSON::Any) : {Int32, Int32}
+      {wire_index(position["line"]), wire_index(position["character"])}
+    end
+
+    # One of a position's numbers. LSP's uinteger runs to 2^31 - 1, and
+    # `line0 + 1` on that overflowed: hover, rename and nine more at line
+    # 2147483647 answered -32603 "Arithmetic overflow" where line 999 of
+    # a seven-line file answers null. Held at a bound past any text, the
+    # number is still past the end and answered as such. A number that is
+    # not a non-negative integer (`"6"`, `6.0`, `-1`) is the client's
+    # mistake: the two were -32603 "Cast from String to Int+ failed" and
+    # "Cast from Float64", with the cast's source path.
+    private def wire_index(value : JSON::Any) : Int32
+      number = value.raw
+      unless number.is_a?(Int64) && number >= 0
+        raise BadParams.new("a position's line and character are integers from 0, not #{value.to_json}")
+      end
+      {number, WIRE_INDEX_LIMIT.to_i64}.min.to_i32
+    end
+
+    # What a JSON value can be, spelled as a failed cast names its type
+    # (see `handle`; a position goes through `position_of`).
+    JSON_TYPES = ["Nil", "Bool", "Int64", "Float64", "String", "Array(JSON::Any)", "Hash(String, JSON::Any)"]
 
     # Every open buffer except the one being compiled, keyed by the path
     # its file would have — the compiler reads these before the disk, so

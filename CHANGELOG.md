@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A position at LSP's largest line is answered, and params of the wrong
+  JSON type are invalid params.** Hover, definition, completion, rename
+  and seven more at line 2147483647 answered -32603 "Arithmetic
+  overflow", where line 999 answers null; a line of "6" or 6.0, a uri of
+  7 or a newName of 5 answered -32603 "Cast from String to Int+ failed, at
+  C:\Users\...\src\json\any.cr:178:5", naming the build machine's files. A
+  position past every line is answered as past the end now, and a
+  misshapen value is -32602 "the request's params are not the shape ...
+  takes" (a negative position too). `bench/lsp_session.py` step 70j checks
+  five requests at the largest line and three misshapen ones; the old
+  server failed all eight.
+
 - **A diagnostic's related locations are placed in UTF-16 units.** Their
   column went out as the codepoint column, so the "instantiating
   'f(Int32)'" note for an `f(1)` behind two emoji pointed at character 10,

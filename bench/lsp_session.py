@@ -2637,6 +2637,31 @@ def main():
          and "iyi.nonesuch" in reply["error"]["message"],
          json.dumps(reply.get("error"))[:80])
 
+    # 70j. A position is read as the protocol's uinteger, and anything else
+    #      is the client's mistake. Hover, completion and nine more at line
+    #      2147483647 answered -32603 "Arithmetic overflow" where line 999
+    #      answers null, and a line that is "6", a uri that is 7 or a
+    #      newName that is 5 was -32603 "Cast from ... failed, at
+    #      C:\...\src\json\any.cr:178:5", the build machine's path included.
+    #      Positions go through the server's `position_of` now.
+    edge = {"line": 2 ** 31 - 1, "character": 0}
+    answers = [c.send(m, {"textDocument": {"uri": app_uri}, "position": edge})
+               for m in ("textDocument/hover", "textDocument/definition",
+                         "textDocument/documentHighlight", "textDocument/completion")]
+    answers.append(c.send("textDocument/references", {"textDocument": {"uri": app_uri}, "position": edge, "context": {"includeDeclaration": True}}))
+    overflowed = [a["error"]["message"] for a in answers if "error" in a]
+    misshapen = [c.send("textDocument/hover", {"textDocument": {"uri": app_uri},
+                                               "position": {"line": "6", "character": 0}}),
+                 c.send("textDocument/hover", {"textDocument": {"uri": 7},
+                                               "position": {"line": 0, "character": 0}}),
+                 c.send("textDocument/rename", {"textDocument": {"uri": app_uri},
+                                                "position": {"line": 0, "character": 0}, "newName": 5})]
+    codes = [(a.get("error") or {}).get("code") for a in misshapen]
+    leaked = [a["error"]["message"] for a in misshapen if "any.cr" in (a.get("error") or {}).get("message", "")]
+    step("70j", "a position past the end is answered, a misshapen one is invalid params",
+         not overflowed and codes == [-32602] * 3 and not leaked,
+         f"overflowed {overflowed[:1]}, codes {codes}, leaked {len(leaked)}")
+
     # 52i. A hover inside `x.or(0)`: the `or` tests a variable of the
     # compiler's own, and the cursor context looked it up among the names
     # it had recorded, which leave those out - a KeyError the server

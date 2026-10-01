@@ -207,20 +207,12 @@ struct ::StaticArray(T, N)
     StaticArray(U, N).new { |i| yield to_unsafe[i], off + i }
   end
 
-  # In-place stable sort using insertion sort (efficient for small stack arrays).
+  # Sorted by `Array#sort_in_place`, the stable merge sort, and copied
+  # back. It was an insertion sort of its own, quadratic: 8,000 elements in
+  # reverse order took 31,996,000 comparisons where the array's sort takes
+  # under 100,000. Equal elements keep their order, as they did.
   def sort_in_place : self
-    i = 1
-    while i < N
-      val = to_unsafe[i]
-      j = i - 1
-      while j >= 0 && to_unsafe[j] > val
-        to_unsafe[j + 1] = to_unsafe[j]
-        j -= 1
-      end
-      to_unsafe[j + 1] = val
-      i += 1
-    end
-    self
+    sort_in_place { |a, b| a > b ? 1 : 0 }
   end
 
   # Returns a new sorted static array.
@@ -230,17 +222,16 @@ struct ::StaticArray(T, N)
     ary
   end
 
-  # In-place sort with custom block comparator.
+  # In-place sort with custom block comparator, by the same merge sort.
   def sort_in_place(&block : (T, T) -> Int32) : self
-    i = 1
-    while i < N
-      val = to_unsafe[i]
-      j = i - 1
-      while j >= 0 && yield(to_unsafe[j], val) > 0
-        to_unsafe[j + 1] = to_unsafe[j]
-        j -= 1
-      end
-      to_unsafe[j + 1] = val
+    write_back(to_a.sort_in_place { |a, b| yield a, b })
+  end
+
+  # Puts *sorted*, this array's elements in their new order, back in place.
+  private def write_back(sorted : Array(T)) : self
+    i = 0
+    sorted.each do |value|
+      to_unsafe[i] = value
       i += 1
     end
     self
@@ -274,8 +265,11 @@ struct ::StaticArray(T, N)
     ary
   end
 
+  # Each key computed once, by `Array#sort_in_place_by`, the merge sort of
+  # key and element pairs: a comparison of `yield(a) <=> yield(b)` computed
+  # it twice per comparison, 63,992,000 times for 8,000 elements.
   def sort_by_in_place(&block : T -> _) : self
-    sort_in_place { |a, b| yield(a) <=> yield(b) }
+    write_back(to_a.sort_in_place_by { |e| yield e })
   end
 
   def unstable_sort_by(&block : T -> _) : StaticArray(T, N)

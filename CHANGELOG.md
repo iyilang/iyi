@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`StaticArray#sort`, `sort_by` and their in-place forms make
+  O(n log n) comparisons, and `sort_by` computes each key once.** They were
+  an insertion sort of the module's own: 8,000 elements in reverse order
+  took 31,996,000 comparisons, and `sort_by` compared `yield(a) <=>
+  yield(b)`, computing 63,992,000 keys. They sort through `Array`'s stable
+  merge sort now and write the result back: 95,456 comparisons for the
+  same input, and `sort_by` goes through `Array#sort_in_place_by`, one key
+  per element. Equal elements keep their order, as before.
+  `bench/std_static_array_exercise.iyi` sorts 1,000 reversed elements in at
+  most 20,000 comparisons (10,404 now) with 1,000 keys; the old module took
+  499,500 comparisons there, and with only `sort_by` put back it asked for
+  20,808 keys.
+
 - **A `Slice` equals only a slice of its own element type, as an `Array`
   does.** `==` took any `Slice(U)`, and numbers equal across types hash
   apart, so `Slice[-1, -2]` of `Int32` and of `Int64` were `==` with

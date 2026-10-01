@@ -85,4 +85,34 @@ assert_true keyed.size == 22500 && keyed[pair(149, 17)]? == 2533, "a grid table 
 assert_true keyed_ns <= tupled_ns * 20 + 200_000_000_i64, "hash table: 22500 keys took #{keyed_ns // 1000000} ms where tuples took #{tupled_ns // 1000000} ms"
 puts "  22500 distinct hashes, and a table of them within the bound"
 
+puts "\n== sort"
+# Through the array's merge sort. Its own insertion sort took 499,500
+# comparisons for 1,000 elements in reverse order, and `sort_by` asked for
+# a key twice per comparison, 999,000 times. Counted rather than timed, so
+# the bounds hold on any machine. A thousand, not more: an optimised build
+# with 8,000-element arrays copied by value had not finished compiling
+# after two and a half minutes.
+backwards = StaticArray(Int32, 1000).new { |i| 1000 - i }
+comparisons = 0
+backwards.sort_in_place do |a, b|
+  comparisons += 1
+  a <=> b
+end
+in_order = true
+backwards.each_with_index { |value, i| in_order = false unless value == i + 1 }
+assert_true in_order, "sort_in_place of 1,000 reversed elements puts them in order"
+assert_true comparisons <= 20000, "sort_in_place of 1,000 reversed elements took #{comparisons} comparisons"
+key_calls = 0
+by_key = StaticArray(Int32, 1000).new { |i| i }.sort_by do |value|
+  key_calls += 1
+  0 - value
+end
+assert_true by_key[0] == 999 && by_key[999] == 0, "sort_by orders by the key"
+assert_true key_calls == 1000, "sort_by asked for #{key_calls} keys for 1,000 elements"
+pairs = StaticArray({Int32, Int32}, 6).new { |i| {i % 2, i} }
+assert_str "StaticArray[{0, 0}, {0, 2}, {0, 4}, {1, 1}, {1, 3}, {1, 5}]", pairs.sort_by { |p| p[0] }.to_s, "sort_by keeps equal keys in order"
+assert_str "StaticArray[{0, 0}, {0, 2}, {0, 4}, {1, 1}, {1, 3}, {1, 5}]", pairs.sort { |a, b| a[0] <=> b[0] }.to_s, "sort keeps equal elements in order"
+assert_str "StaticArray[0, 1, 2, 3, 4]", StaticArray(Int32, 5).new { |i| (i * 3) % 5 }.sort.to_s, "sort without a block"
+puts "  1,000 elements in at most 20,000 comparisons, one key each, stable"
+
 puts "\nALL CHECKS PASSED"

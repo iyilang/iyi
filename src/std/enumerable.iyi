@@ -377,10 +377,17 @@ pub trait Enumerable
     best
   end
 
+  # Whether anything was seen is a flag, as in `reduce?`, not the nil the
+  # `?` form answers: a nil element is an element, and `[nil, nil]` keyed
+  # by anything raised "max_by of an empty collection".
   def max_by(& : Elem -> U) : Elem forall U : Comparable
-    found = max_by? { |e| yield e }
-    return found unless found.nil?
-    raise "max_by of an empty collection"
+    seen = false
+    found = max_by? do |e|
+      seen = true
+      yield e
+    end
+    raise "max_by of an empty collection" unless seen
+    found.as(Elem)
   end
 
   def group_by(& : Elem -> U) : Hash(U, Array(Elem)) forall U : Hashable
@@ -615,10 +622,16 @@ pub trait Enumerable
     best
   end
 
+  # The flag `max_by` keeps: `[nil, 4]` keyed with the nil lowest raised
+  # "min_by of an empty collection" instead of answering nil.
   def min_by(& : Elem -> U) : Elem forall U : Comparable
-    found = min_by? { |e| yield e }
-    return found unless found.nil?
-    raise "min_by of an empty collection"
+    seen = false
+    found = min_by? do |e|
+      seen = true
+      yield e
+    end
+    raise "min_by of an empty collection" unless seen
+    found.as(Elem)
   end
 
   def max_of?(& : Elem -> U) : U? forall U : Comparable
@@ -693,14 +706,16 @@ pub trait Enumerable
     {min_elem, max_elem}
   end
 
+  # The same flag: `[nil, 3]` keyed with the nil lowest has the pair
+  # `{nil, 3}`, and raised "minmax_by of an empty collection" for it.
   def minmax_by(& : Elem -> U) : Tuple(Elem, Elem) forall U : Comparable
-    pair = minmax_by? { |e| yield e }
-    low = pair[0]
-    high = pair[1]
-    if low.nil? || high.nil?
-      raise "minmax_by of an empty collection"
+    seen = false
+    pair = minmax_by? do |e|
+      seen = true
+      yield e
     end
-    {low, high}
+    raise "minmax_by of an empty collection" unless seen
+    {pair[0].as(Elem), pair[1].as(Elem)}
   end
 
   def minmax_of?(& : Elem -> U) : Tuple(U?, U?) forall U : Comparable

@@ -188,6 +188,15 @@ prove_fails "chunk_while joins the element after a nil" nil_chunk_while "enumera
 prove_fails "reduce? restarts at a nil" nil_reduce "enumerable.iyi" "enum: reduce? from a nil element" \
   's/acc = found ? (yield acc\.as(Elem), e) : e/acc = acc.nil? ? e : (yield acc.as(Elem), e)/'
 
+# 16-18. The plain forms of max_by, min_by and minmax_by: the nil their `?`
+#     forms answer read as "empty" again, which a nil element that won is not.
+prove_fails "max_by refuses a nil that won" nil_max_by "enumerable.iyi" "max_by of an empty collection" \
+  's/raise "max_by of an empty collection" unless seen/raise "max_by of an empty collection" if found.nil?/'
+prove_fails "min_by refuses a nil that won" nil_min_by "enumerable.iyi" "min_by of an empty collection" \
+  's/raise "min_by of an empty collection" unless seen/raise "min_by of an empty collection" if found.nil?/'
+prove_fails "minmax_by refuses a nil end" nil_minmax_by "enumerable.iyi" "minmax_by of an empty collection" \
+  's/raise "minmax_by of an empty collection" unless seen/raise "minmax_by of an empty collection" if pair[0].nil? || pair[1].nil?/'
+
 echo
 echo "== one mistake, one sentence, whichever tower answers"
 # `first` of an empty receiver, a negative count and a zero step used to be

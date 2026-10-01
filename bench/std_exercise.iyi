@@ -416,6 +416,16 @@ assert_eq(nil_chunks.size, 3, "enum: chunk_while after a nil element")
 nil_fold = ([nil, 2] of Int32?).reduce? { |acc, x| (acc || 0) + (x || 0) + 10 }
 assert_true(nil_fold == 12, "enum: reduce? from a nil element")
 
+# And the plain `max_by`, `min_by` and `minmax_by`, which took the nil their
+# `?` forms answer for "nothing" as nothing: a nil element that won raised
+# "max_by of an empty collection". A `List`, because `Array` has a `max_by`
+# and a `min_by` of its own in the prelude.
+nil_list = List.new([nil, 4] of Int32?)
+assert_true(nil_list.max_by { |x| x.nil? ? 9 : x }.nil?, "enum: max_by of a nil element")
+assert_true(nil_list.min_by { |x| x.nil? ? 0 : x }.nil?, "enum: min_by of a nil element")
+nil_ends = nil_list.minmax_by { |x| x.nil? ? 0 : x }
+assert_true(nil_ends[0].nil? && nil_ends[1] == 4, "enum: minmax_by of a nil element")
+
 puts "== std/list: immutable sequence"
 list = List.new([10, 20, 30]).appended(40)
 assert_eq(list.size, 4, "list: size")

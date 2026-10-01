@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A `protected` method is out of reach of another module under the
+  same root.** The namespace climb that decides `protected` went past the
+  module to the path segment its siblings share: `mm/lib` and `mm/u3` are
+  `Mm::Lib` and `Mm::U3`, so `Dog.new.prot` in `mm/u3` called `mm/lib`'s
+  `protected def prot` and printed "prot", where a module under another
+  root was refused. A module unit is a namespace of its own now, so the
+  call is refused with "protected method 'prot' called for
+  Mm::Lib::Dog", and the module's own code still calls it.
+  `spec/compiler/iyi_import_spec.cr` checks both; the old compiler raised
+  nothing.
+
 - **A shift the compiler folds is 0 past its type's width for every
   count, not only past 256.** The width was read off the number union the
   folder holds a value in, 32 bytes, so a count from the type's own width

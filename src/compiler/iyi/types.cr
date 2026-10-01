@@ -475,6 +475,11 @@ module Iyi
 
     private def top_namespace(type)
       type = type.generic_type if type.is_a?(GenericInstanceType)
+      # iyi: a module unit is a namespace of its own, so the climb stops at
+      # one. Above it is only the path its siblings share: `mm/lib` and
+      # `mm/u3` are `Mm::Lib` and `Mm::U3`, both under `Mm`, and a top-level
+      # `Dog.new.prot` in `mm/u3` called `mm/lib`'s `protected def prot`.
+      return type if type.iyi_unit?
 
       namespace = case type
                   when NamedType

@@ -25,7 +25,7 @@ module std/udp
 
 pub import std/slice
 import std/slice::{Bytes, Slice}
-import std/socket::{IPv4Address, IPv6Address, IyiSocket}
+import std/socket::{IPv4Address, IPv6Address, IyiSocket, SocketError}
 
 pub alias Bytes = Std::Slice::Bytes
 # The address types, their parsers and the `sockaddr_in`/`sockaddr_in6`
@@ -121,16 +121,25 @@ pub class UdpSocket
 
   # Binds a UDP socket to the specified host and port.
   # Automatically detects whether host is an IPv4 or IPv6 address.
+  #
+  # Without SO_REUSEADDR, on every platform. It waives TIME_WAIT for a
+  # listener, and a datagram port never has one; what it does to a
+  # datagram socket on Linux is let a second socket bind the same address
+  # and port while the first holds it, and unicast then reaches only one
+  # of them. The POSIX arms asked for it and the win32 arm did not, so a
+  # second bind of a held port failed on Windows, measured, and went
+  # through on Linux [INFERENCE: not run here].
   def self.bind(host : String, port : Int32) : UdpSocket
     addr, addrlen, family = make_sockaddr(host, port)
     fd = __sys_socket(family)
     raise "cannot create UDP socket" if fd < 0
 
-    __sys_set_reuseaddr(fd)
-
-    if __sys_bind(fd, addr, addrlen) < 0
+    bound = __sys_bind(fd, addr, addrlen)
+    if bound < 0
+      # Read before the close, which may leave its own errno.
+      why = refusal(bound.to_i64, false)
       IyiSocket.__sys_close(fd)
-      raise "cannot bind UDP socket to #{IyiSocket.endpoint(host, port)}"
+      raise "cannot bind UDP socket to #{IyiSocket.endpoint(host, port)}: #{why}"
     end
 
     UdpSocket.new(fd, family)
@@ -150,11 +159,7 @@ pub class UdpSocket
 
   # Sends bytes to a destination host and port.
   def send_to(bytes : Bytes, host : String, port : Int32) : Int32
-    check_open
-    addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
-    res = UdpSocket.__sys_sendto(@fd, bytes.to_unsafe, bytes.size.to_u64, 0, addr, addrlen)
-    raise "cannot send to #{IyiSocket.endpoint(host, port)}" if res < 0_i64
-    res.to_i32
+    send_to(bytes.to_unsafe, bytes.size, host, port)
   end
 
   # Sends string contents as a datagram to a destination host and port.
@@ -167,9 +172,14 @@ pub class UdpSocket
     check_open
     raise "negative count: #{count}" if count < 0
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
-    res = UdpSocket.__sys_sendto(@fd, buffer, count.to_u64, 0, addr, addrlen)
-    raise "cannot send to #{IyiSocket.endpoint(host, port)}" if res < 0_i64
-    res.to_i32
+    while true
+      res = UdpSocket.__sys_sendto(@fd, buffer, count.to_u64, 0, addr, addrlen)
+      return res.to_i32 if res >= 0_i64
+      # The report a refused earlier datagram left, taken by this call
+      # and gone after it: see `__is_refused`. The datagram is sent again.
+      next if UdpSocket.__is_refused(res)
+      raise "cannot send to #{IyiSocket.endpoint(host, port)}: #{UdpSocket.refusal(res, true)}"
+    end
   end
 
   # --- Receiving Datagrams ---
@@ -193,7 +203,7 @@ pub class UdpSocket
       # more than it asked for died on one platform only.
       return capacity if UdpSocket.__is_msgsize(count)
       raise "cannot receive from UDP socket: it has no address yet - bind it, or send from it first" if UdpSocket.__is_unbound(count)
-      raise "cannot receive from UDP socket" unless UdpSocket.__is_eagain(count)
+      raise "cannot receive from UDP socket: #{UdpSocket.refusal(count, false)}" unless UdpSocket.__is_eagain(count)
       {% if flag?(:win32) %}
         # Windows' readable-wait is destructive on a datagram socket: the
         # zero-byte overlapped read the scheduler posts takes the datagram
@@ -217,11 +227,11 @@ pub class UdpSocket
     len = 28_u32
     while true
       count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))
-      next if count < 0_i64 && UdpSocket.__is_eintr(count)
+      next if count < 0_i64 && (UdpSocket.__is_eintr(count) || UdpSocket.__is_refused(count))
       return count.to_i32 if count >= 0_i64
       return capacity if UdpSocket.__is_msgsize(count)
       return nil if UdpSocket.__is_eagain(count) || UdpSocket.__is_unbound(count)
-      raise "cannot receive from UDP socket"
+      raise "cannot receive from UDP socket: #{UdpSocket.refusal(count, false)}"
     end
   end
 
@@ -294,15 +304,18 @@ pub class UdpSocket
     check_open
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
     res = UdpSocket.__sys_connect(@fd, addr, addrlen)
-    raise "cannot connect UDP socket to #{IyiSocket.endpoint(host, port)}" if res < 0
+    raise "cannot connect UDP socket to #{IyiSocket.endpoint(host, port)}: #{UdpSocket.refusal(res.to_i64, false)}" if res < 0
   end
 
   # Sends bytes to the connected peer.
   def send(bytes : Bytes) : Int32
     check_open
-    res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64)
-    raise "cannot send on UDP socket" if res < 0_i64
-    res.to_i32
+    while true
+      res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64)
+      return res.to_i32 if res >= 0_i64
+      next if UdpSocket.__is_refused(res)
+      raise "cannot send on UDP socket: #{UdpSocket.refusal(res, true)}"
+    end
   end
 
   # Sends string to the connected peer.
@@ -427,6 +440,30 @@ pub class UdpSocket
       ip = IyiSocket.parse_ip(host)
       {IyiSocket.make_sockaddr_in(ip, port), SOCKADDR_IN_SIZE, 2}
     end
+  end
+
+  # Why a call failed: `std/socket`'s sentence for the platform's
+  # number (`SocketError#reason`), and the refusals only a datagram meets
+  # named as well. Each refusal was a fixed sentence that dropped the
+  # number, so a broadcast, a datagram past 65,507 bytes, a port in use
+  # and an IPv6 address from an IPv4 socket all said only "cannot send to
+  # H:P" or "cannot bind UDP socket to H:P" - measured on Windows.
+  def self.refusal(res : Int64, sending : Bool) : String
+    code = IyiSocket.__sys_code(res)
+    # EACCES, EMSGSIZE and EAFNOSUPPORT, in the platform's numbers.
+    denied = {% if flag?(:win32) %} 10013 {% else %} 13 {% end %}
+    too_large = {% if flag?(:win32) %} 10040 {% elsif flag?(:darwin) %} 40 {% else %} 90 {% end %}
+    other_family = {% if flag?(:win32) %} 10047 {% elsif flag?(:darwin) %} 47 {% else %} 97 {% end %}
+    # And Winsock's WSAEFAULT, its answer to an address too short for the
+    # socket's family: an IPv4 one given to an IPv6 socket, measured.
+    too_short = {% if flag?(:win32) %} 10014 {% else %} -1 {% end %}
+    # A send that fails for its destination is one to a broadcast
+    # address from a socket without SO_BROADCAST: Winsock's answer,
+    # measured, and the one sendto(2) names for POSIX.
+    return "the destination is a broadcast address, and the socket does not have SO_BROADCAST set" if sending && code == denied
+    return "the datagram is too large to send: IPv4 carries at most 65,507 bytes in one" if code == too_large
+    return "the address is not of the socket's family (IPv4 and IPv6 do not mix)" if code == other_family || code == too_short
+    SocketError.new("", code).reason
   end
 
   def self.format_address(addr : Pointer(UInt8)) : Tuple(String, Int32)
@@ -922,7 +959,7 @@ pub class UdpSocket
         Pointer(Void).new(0_u64))
       return received if answered == 0
       err = LibWs2_32.WSAGetLastError
-      raise "cannot receive from UDP socket" if err != ERROR_IO_PENDING
+      raise "cannot receive from UDP socket: #{refusal(-(err.to_i64), false)}" if err != ERROR_IO_PENDING
       parked = IyiScheduler.park_overlapped_current
       if parked.is_a?(Cancelled)
         # `CancelIoEx` is a request, not an end: the descriptor above, the

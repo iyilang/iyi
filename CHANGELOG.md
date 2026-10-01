@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **A UDP bind, send, connect or receive that fails says why.** Each
+  failure was a fixed sentence that dropped the platform's number, the
+  way a TCP bind once did: a port in use was "cannot bind UDP socket to
+  127.0.0.1:61640", and a broadcast without SO_BROADCAST, a
+  65,508-byte datagram and an IPv6 address from an IPv4 socket were
+  "cannot send to 255.255.255.255:9", "cannot send to 127.0.0.1:9"
+  and "cannot send to [::1]:9". The reason follows now, in
+  `SocketError#reason`'s words ("the address is in use"), and the three
+  only a datagram meets are named: "the destination is a broadcast
+  address, and the socket does not have SO_BROADCAST set", "the
+  datagram is too large to send", "the address is not of the socket's
+  family". `bench/std_udp_exercise.sh` requires each sentence; the old
+  module gave none. The Linux and darwin numbers are read from their
+  errno tables, not run [INFERENCE].
+
 - **`localhost` is resolved in any case and with one trailing dot.**
   `IyiSocket.parse_ip`, which `connect`, `listen`, `UdpSocket` and
   `HTTP.request` all reach, matched the host against `"localhost"`

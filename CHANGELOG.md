@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **`std/log`'s header says what `DefaultFormatter` writes at the root.**
+  It still said the root's line leaves out the source and its ` - `,
+  though the entry for `Severity::None` above says it was corrected. The
+  formatter writes `... INFO - message`, leaving out the source and its
+  `: `, and the header says so now. `bench/std_log_exercise.iyi` asserts
+  the root's line ends ` INFO - up`.
+
 - **`INI.build` refuses a key that opens with U+FEFF.** `INI.parse`
   reads past a U+FEFF at the front of the text as a byte order mark, and
   `build` writes the top-level keys first, so `{"" => {"\uFEFFkey" =>

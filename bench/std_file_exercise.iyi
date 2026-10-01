@@ -58,6 +58,12 @@ f_nonexistent = sandbox + "/std_file_ex_nonexistent_xyz.txt"
 assert_true !File.exists?(f_nonexistent), "nonexistent file does not exist"
 assert_true File.info?(f_nonexistent).nil?, "info? on nonexistent returns nil"
 assert_true !File.empty?(f_nonexistent), "empty? on a missing path is false"
+{% if flag?(:win32) %}
+  # A DOS device is a character device, there to `info?` as it is to
+  # `exists?`: `info?("NUL")` was nil.
+  device = File.info?("NUL")
+  assert_true device ? device.type.character_device? && device.size == 0_i64 : false, "info? of NUL is a character device"
+{% end %}
 puts "  exists, size, and empty verified"
 
 puts "\n== line-wise reading"

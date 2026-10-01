@@ -784,11 +784,21 @@ class ::File
       data = uninitialized Std::File::LibKernel32::WIN32_FILE_ATTRIBUTE_DATA
       # 0 is GetFileExInfoStandard, the one level this call answers.
       if Std::File::LibKernel32.GetFileAttributesExW(wpath, 0, pointerof(data)) == 0
+        refused = Std::File::LibKernel32.GetLastError
+        # A DOS device - `NUL`, `CON`, a port that is there - refuses it as
+        # a parameter (ERROR_INVALID_PARAMETER, 87), and `info?` answered
+        # nil about the `NUL` `exists?` said was there. The prelude's
+        # attributes open the device to see, and what is there is a
+        # character device: no size, time or identity, mode 0o666 as
+        # `/dev/null`.
+        if refused == 87 && __iyi_path_attributes(sys_path(p)) != -1
+          return Info.new(0_i64, Permissions.new(0o666), Type::CharacterDevice, Flags.new(0), 0_i64, "0", "0")
+        end
         # A file another process holds without sharing refuses the call
         # (ERROR_SHARING_VIOLATION, 32), and `info` said "File not found"
         # about `pagefile.sys`. Its directory entry carries the same
         # fields, in the same order, for its first 36 bytes.
-        return nil unless Std::File::LibKernel32.GetLastError == 32
+        return nil unless refused == 32
         entry = Pointer(UInt8).malloc(592_u64) # WIN32_FIND_DATAW
         found = Std::File::LibKernel32.FindFirstFileW(wpath, entry.as(Void*))
         return nil if found.address == 0xFFFFFFFFFFFFFFFF_u64

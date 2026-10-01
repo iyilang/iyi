@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`File.info?` of a DOS device on Windows answers a character device.**
+  `GetFileAttributesExW` refuses `NUL`, `CON` and a port that is there with
+  ERROR_INVALID_PARAMETER, and `info?("NUL")` was nil while `exists?("NUL")`
+  was true. That refusal now asks the prelude's attributes, which open the
+  device to see, and a device answers as a character device of size 0, mode
+  0o666 as `/dev/null`. `bench/std_file_exercise.iyi` asks `info?("NUL")`;
+  the old module answered nil.
+
 - **`File.symlink` on Windows decides a file or directory link from the
   target as the link will resolve it.** It read a relative target against
   the working directory, so a link made in another directory took the kind

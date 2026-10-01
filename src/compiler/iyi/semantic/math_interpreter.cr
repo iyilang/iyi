@@ -60,6 +60,7 @@ struct Iyi::MathInterpreter
       when 1
         left = interpret(obj)
         right = interpret(node.args.first)
+        iyi = MathInterpreter.iyi_rules?(@path_lookup.program, node.location)
 
         case node.name
         when "+"  then left + right
@@ -70,13 +71,13 @@ struct Iyi::MathInterpreter
         when "&*" then left &* right
           # MathInterpreter only works with Integer and left / right : Float
           # when "/"  then left / right
-        when "//" then left // right
+        when "//" then iyi ? left.tdiv(right) : left // right
         when "&"  then left & right
         when "|"  then left | right
         when "^"  then left ^ right
-        when "<<" then left << right
-        when ">>" then left >> right
-        when "%"  then left % right
+        when "<<" then iyi ? MathInterpreter.iyi_shl(left, right) : left << right
+        when ">>" then iyi ? MathInterpreter.iyi_shr(left, right) : left >> right
+        when "%"  then iyi ? left.remainder(right) : left % right
         else
           interpret_call_macro(node)
         end
@@ -93,6 +94,34 @@ struct Iyi::MathInterpreter
   def interpret_call_macro(node : Call)
     interpret_call_macro?(node) ||
       node.raise("invalid constant value")
+  end
+
+  # iyi: an operator folded at compile time answers what it answers at run
+  # time, so a constant, an enum value, a StaticArray size and a macro say
+  # the same as the line that computes it. The folding used the host's
+  # operators, which are the other library's: `X = -7 // 2` was -4,
+  # `-7 % 2` was 1 and `8 << -1` was 4, where iyi's integers (number.iyi,
+  # std/int.iyi) truncate, take the dividend's sign and answer 0 for a
+  # negative count: -3, -1 and 0. That held for every constant, because
+  # codegen folds any integer constant it can. A source of the other
+  # language, or one built against the other library (`--crystal`), runs
+  # that library's operators and keeps its rules.
+  def self.iyi_rules?(program : Program, location : Location?) : Bool
+    program.iyi_prelude? && Lexer.iyi_source?(location.try(&.filename))
+  end
+
+  # A count below zero or past the width shifts every bit out.
+  def self.iyi_shl(value : Int, count : Int)
+    count < 0 || count >= sizeof(typeof(value)) * 8 ? value.class.zero : value.unsafe_shl(count)
+  end
+
+  # The same, and a negative value keeps its sign bit: -1.
+  def self.iyi_shr(value : Int, count : Int)
+    if count < 0 || count >= sizeof(typeof(value)) * 8
+      value < 0 ? ~value.class.zero : value.class.zero
+    else
+      value.unsafe_shr(count)
+    end
   end
 
   def interpret_call_macro?(node : Call)

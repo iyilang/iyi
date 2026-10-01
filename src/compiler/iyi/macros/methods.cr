@@ -541,11 +541,17 @@ module Iyi
       when "/"
         num_bin_op(method, args, named_args, block) { |me, other| me / other }
       when "//"
-        num_bin_op(method, args, named_args, block) { |me, other| me // other }
+        # iyi: `{{ -7 // 2 }}` written in an iyi source is -3, as the line
+        # that computes it at run time; it was -4 (`MathInterpreter.iyi_rules?`).
+        iyi = MathInterpreter.iyi_rules?(interpreter.program, name_loc)
+        num_bin_op(method, args, named_args, block) do |me, other|
+          iyi && me.is_a?(Int) && other.is_a?(Int) ? me.tdiv(other) : me // other
+        end
       when "**"
         num_bin_op(method, args, named_args, block) { |me, other| me ** other }
       when "%"
-        int_bin_op(method, args, named_args, block) { |me, other| me % other }
+        iyi = MathInterpreter.iyi_rules?(interpreter.program, name_loc)
+        int_bin_op(method, args, named_args, block) { |me, other| iyi ? me.remainder(other) : me % other }
       when "&"
         int_bin_op(method, args, named_args, block) { |me, other| me & other }
       when "|"
@@ -553,9 +559,11 @@ module Iyi
       when "^"
         int_bin_op(method, args, named_args, block) { |me, other| me ^ other }
       when "<<"
-        int_bin_op(method, args, named_args, block) { |me, other| me << other }
+        iyi = MathInterpreter.iyi_rules?(interpreter.program, name_loc)
+        int_bin_op(method, args, named_args, block) { |me, other| iyi ? MathInterpreter.iyi_shl(me, other) : me << other }
       when ">>"
-        int_bin_op(method, args, named_args, block) { |me, other| me >> other }
+        iyi = MathInterpreter.iyi_rules?(interpreter.program, name_loc)
+        int_bin_op(method, args, named_args, block) { |me, other| iyi ? MathInterpreter.iyi_shr(me, other) : me >> other }
       when "~"
         interpret_check_args do
           num = to_number

@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **A constant, an enum value, a StaticArray's size and a macro fold `//`,
+  `%` and the shifts by iyi's rules, so they agree with the line that
+  computes the same expression.** The compiler folded them with the other
+  library's floored operators: `X = -7 // 2` was -4 beside the -3 the same
+  expression gives at run time, `-7 % 2` was 1 (run time -1), `7 % -2` was
+  -1 (1), `8 << -1` was 4 (0) and `-8 >> 40` was 0 (-1); enum members took
+  the same values, `{{ -7 // 2 }}` was -4, and a `StaticArray(Int32, N)`
+  with `N = -7 % 3 + 3` was 20 bytes, five elements, where the expression
+  is 2 at run time. Every integer constant was affected, because codegen
+  folds any constant it can. An operator written in an iyi source built
+  against iyi's prelude now folds truncating, with the dividend's sign, and
+  a shift by a negative count or past the width is 0 (-1 for a negative
+  value shifted right); a `.cr` source, and any source under `--crystal`,
+  keeps the other library's rules, which its run time uses too.
+  `bench/number_exercise.iyi` checks the constant, enum, StaticArray and
+  macro forms; the old compiler answered -4 where -3 was expected.
+
 - **A `Time` refused after its nanosecond carry names the second count
   that was refused.** The message named the count before the carry:
   `Time.unix(67767976233532799, 999999999) + Span.nanoseconds(1)`

@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`Process.run`'s `env:` block on Windows is sorted by name, as Windows
+  keeps its own.** It was sorted by its upper-cased `NAME=VALUE` text, and
+  the `=` sorted with the name: a name character below it - a digit, `(`,
+  `-`, `.` - put a longer name before its prefix, so a child read
+  `IYI_ORDER(X) IYI_ORDER1 IYI_ORDER iyi_order_` in that order and
+  `ProgramFiles(x86)` before `ProgramFiles`. Windows' own lookups tolerated
+  the order where the hunt tried them; the comment promised a block sorted
+  by name. The names are compared alone now, ordinally and case folded
+  (`CompareStringOrdinal`). `bench/std_process_exercise.iyi` reads the order
+  a child's block holds; the old module answered the order above.
+
 - **A program `Process.run` starts on Windows may start one of its own
   outside its job, as it may from a shell, and is in the job before it
   runs.** Each child runs in a job of its own so that a cancel ends what it

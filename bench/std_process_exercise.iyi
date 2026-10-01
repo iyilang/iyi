@@ -115,6 +115,10 @@ if mode = args[0]?
       stdout.write("#{Program.env(args[index]) || "<unset>"}\n")
       index = index + 1
     end
+  when "envorder"
+    # The names that begin with *args[1]*, in the order the block holds:
+    # sorted by name, as `env:` lays it out.
+    stdout.write(ENV.keys.select { |name| name.upcase.starts_with?(args[1]) }.join(" ") + "\n")
   when "sleep"
     sleep(args[1].to_i)
     stdout.write("woke\n")
@@ -253,6 +257,13 @@ group do |g|
     cased = ran(Process.run(me, ["env", "IYI_PROCESS_PROBE"], env: {"iyi_process_probe" => "lower"}), "env: cased")
     fail("a name in another case: the child read #{cased.stdout.inspect}") unless cased.stdout == "lower\n"
     puts "  a name in another case is the same variable"
+    # Sorted by name, as Windows keeps its own block. The whole
+    # `NAME=VALUE` text was sorted, and the `=` with it: the child read
+    # IYI_ORDER(X) IYI_ORDER1 IYI_ORDER iyi_order_.
+    ordered = ran(Process.run(me, ["envorder", "IYI_ORDER"],
+      env: {"IYI_ORDER1" => "b", "iyi_order_" => "d", "IYI_ORDER" => "a", "IYI_ORDER(X)" => "c"}), "env: order")
+    fail("the child's block held #{ordered.stdout.inspect}") unless ordered.stdout == "IYI_ORDER IYI_ORDER(X) IYI_ORDER1 iyi_order_\n"
+    puts "  the block is sorted by name: #{ordered.stdout.chomp('\n')}"
   {% end %}
 
   puts "== a child that stops reading"

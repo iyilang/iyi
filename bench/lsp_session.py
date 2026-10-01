@@ -2633,6 +2633,15 @@ def main():
          and "Missing hash key" not in reply["error"]["message"],
          json.dumps(reply.get("error"))[:80])
 
+    # 70m. A uri that names a directory is said to be one: Windows answered
+    #      "Access is denied.", the reason its CreateFile gives and not the
+    #      fact that holds.
+    reply = c.send("textDocument/hover", {"textDocument": {"uri": file_uri(work)},
+                                          "position": {"line": 0, "character": 0}})
+    step("70m", "a directory uri is said to be one",
+         reply.get("error", {}).get("code") == -32602 and "Is a directory" in reply["error"]["message"],
+         json.dumps(reply.get("error"))[:80])
+
     # 52b. The client's other mistakes, each with the protocol's own code:
     # a request with no params at all was -32603 "Nil assertion failed"
     # (the server blaming itself for the client's omission), one whose

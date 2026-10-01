@@ -3651,8 +3651,17 @@ module Iyi::Lsp
       {% end %}
     end
 
+    # A directory is said to be one, in one sentence on every platform:
+    # reading it answered with the OS's reason, which on Windows is
+    # "Access is denied." - a fact about permissions, and not the one
+    # that holds.
     private def text_of(uri : String) : String
-      @documents[uri]? || File.read(path_of(uri))
+      if text = @documents[uri]?
+        return text
+      end
+      path = path_of(uri)
+      raise BadParams.new("#{path}: Is a directory") if Dir.exists?(path)
+      File.read(path)
     end
 
     private def range(json : JSON::Builder, l0 : Int32, c0 : Int32, l1 : Int32, c1 : Int32) : Nil

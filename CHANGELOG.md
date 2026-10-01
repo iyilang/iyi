@@ -142,6 +142,12 @@
 
 ### Fixed
 
+- **A request about a directory says it is one, on every platform.** On
+  Windows reading it answered -32602 "...\ws9: Access is denied.", the
+  reason `CreateFile` gives and not the fact. It is "...\ws9: Is a
+  directory" now. `bench/lsp_session.py` step 70m checks it; the old
+  server answered "Access is denied.".
+
 - **The outline names a file's module as its header writes it, and a
   symbol's selection is its name.** The module symbol was `Calc::Lexer`, a
   spelling `module calc/lexer` does not have, selecting the keyword's

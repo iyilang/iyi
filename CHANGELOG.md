@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **A workspace file that cannot be read is skipped, and workspace/symbol
+  takes time linear in the workspace.** One `.iyi` file held open by a
+  process that shares nothing, or whose ACL denies reading, failed
+  workspace symbols, completion, references, rename and workspace
+  diagnostics with -32602 "locked.iyi: The process cannot access the file
+  because it is being used by another process." (or "Access is denied.").
+  It is skipped now, as a directory that will not list already was. And
+  workspace/symbol checked each file against every path already listed: a
+  query that matched nothing took 344 ms over 500 files and 3,031 ms over
+  2,000; it takes 140 ms and 516 ms now. `bench/lsp_session.py` steps 70c
+  and 70d check both, the second as 2,000 files under six times 500's; the
+  old server failed all five requests and took 8.8 times as long.
+
 - **One `.iyi` file that is not UTF-8 is a diagnostic on that file, and
   the rest of the workspace is unaffected.** `Compiler#parse` printed its
   refusal and called `exit 1`, and the language server compiles in its own

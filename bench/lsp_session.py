@@ -1197,6 +1197,84 @@ def main():
          multi_files == ["app.iyi", "greet.iyi"] and announced == ["announce"],
          f"rename edited {multi_files}, workspace/symbol found {announced}")
 
+    # 70c. A workspace file the server may not read is skipped, as a directory
+    #      that will not list is. One held open by a process that shares
+    #      nothing failed workspace symbols, completion, references, rename
+    #      and workspace diagnostics with -32602 "locked.iyi: The process
+    #      cannot access the file because it is being used by another
+    #      process."; one whose ACL denies reading, with "Access is denied.".
+    locked_root = tempfile.mkdtemp(prefix="iyi-lsp-locked")
+    locked_files = {"greet.iyi": "module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n",
+                    "app.iyi": "module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\n",
+                    "locked.iyi": "module locked\n\nputs 1\n"}
+    for name, body in locked_files.items():
+        with open(os.path.join(locked_root, name), "w", newline="") as f:
+            f.write(body)
+    locked = os.path.join(locked_root, "locked.iyi")
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.restype = ctypes.c_void_p
+        kernel32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                         ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        held = kernel32.CreateFileW(locked, 0x80000000, 0, None, 3, 0x80, None)  # read, share nothing
+        release = lambda: kernel32.CloseHandle(held)
+    else:
+        os.chmod(locked, 0)
+        release = lambda: os.chmod(locked, 0o644)
+    try:
+        open(locked).close()
+        unreadable = False  # root reads anything
+    except OSError:
+        unreadable = True
+    lk = Client()
+    lk.send("initialize", {"rootUri": file_uri(locked_root), "capabilities": {}})
+    lk.send("initialized", {}, wait=False)
+    locked_app = file_uri(os.path.join(locked_root, "app.iyi"))
+    lk.send("textDocument/didOpen", {"textDocument": {"uri": locked_app, "languageId": "iyi", "version": 1,
+                                                       "text": locked_files["app.iyi"]}}, wait=False)
+    lk.diagnostics(locked_app)
+    at_shout = {"textDocument": {"uri": locked_app}, "position": {"line": 4, "character": 6}}
+    asks = [("workspace/symbol", {"query": "sh"}),
+            ("textDocument/completion", {"textDocument": {"uri": locked_app}, "position": {"line": 4, "character": 7}}),
+            ("textDocument/references", dict(at_shout, context={"includeDeclaration": True})),
+            ("textDocument/rename", dict(at_shout, newName="yell")),
+            ("workspace/diagnostic", {"previousResultIds": []})]
+    failed = [method for method, params in asks if "error" in lk.send(method, params)]
+    lk.send("shutdown", {})
+    lk.send("exit", {}, wait=False)
+    lk.proc.wait(timeout=10)
+    release()
+    step("70c", "a workspace file the server may not read is skipped",
+         not failed, f"failed {failed}" if unreadable else "skipped: this user reads every file")
+
+    # 70d. and workspace/symbol lists the workspace in linear time. Each
+    #      file was checked against every path already listed: a query that
+    #      matched nothing took 344 ms over 500 files and 3,031 ms over
+    #      2,000, nine times as long for four times the files.
+    def symbol_seconds(count):
+        root = tempfile.mkdtemp(prefix=f"iyi-lsp-symbols{count}")
+        for i in range(count):
+            with open(os.path.join(root, f"m{i:04d}.iyi"), "w", newline="") as f:
+                f.write(f"module m{i:04d}\n\npub def f{i}(x : Int32) : Int32\n  x\nend\n")
+        s = Client()
+        s.send("initialize", {"rootUri": file_uri(root), "capabilities": {}})
+        s.send("initialized", {}, wait=False)
+        best = None
+        for query in ("zzqqzz", "zzqqzy", "zzqqzx"):
+            started = time.monotonic()
+            s.send("workspace/symbol", {"query": query})
+            took = time.monotonic() - started
+            best = took if best is None else min(best, took)
+        s.send("shutdown", {})
+        s.send("exit", {}, wait=False)
+        s.proc.wait(timeout=10)
+        return best
+    small, large = symbol_seconds(500), symbol_seconds(2000)
+    step("70d", "workspace/symbol takes time linear in the workspace", large < 6 * small,
+         "2,000 files held under six times 500's")
+
     # 18k. The URIs an answer names are URIs: the client's own for a file
     #      it has open, and for any other one a percent-encoded URI that
     #      names that file. The path went behind `file:///` as it stood,

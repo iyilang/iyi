@@ -958,7 +958,15 @@ module Iyi::Lsp
         return respond_cancelled(id) if @cancelled.delete(id.to_json)
         return respond_retrigger(id) if waiting_request?(id)
 
-        answers << {uri, result_id, compile_rows(uri, result_id)}
+        # A file the server may not read has no verdict, and is left out as
+        # the walk leaves out a directory it may not list.
+        rows =
+          begin
+            compile_rows(uri, result_id)
+          rescue IO::Error
+            next
+          end
+        answers << {uri, result_id, rows}
       end
 
       respond(id) do |json|
@@ -1170,7 +1178,9 @@ module Iyi::Lsp
       if (cached = @header_cache[file]?) && cached[0] == info.size && cached[1] == info.modification_time
         return {cached[2], cached[3]}
       end
-      text = File.read(file)
+      # A file the server may not read has no header here, and is not kept:
+      # taking the read permission away leaves the size and time as they were.
+      return {nil, [] of String} unless text = workspace_text(file)
       header = Exports.header_of(text)
       imports = imports_of(text)
       @header_cache[file] = {info.size, info.modification_time, header, imports}
@@ -1715,10 +1725,35 @@ module Iyi::Lsp
         # this file is spelled its way (`%3A`, `%20`), and open buffers
         # are already in the list above, with their unsaved text.
         next if document_text(file)
-        entries << {file, File.read(file)}
+        next unless text = workspace_text(file)
+        entries << {file, text}
         break if entries.size >= 200
       end
       entries
+    end
+
+    # A workspace file's text, or nil where it cannot be read: the walk
+    # skips a directory it may not list, and a file it may not read is
+    # skipped the same way. One such file - access denied, or held open
+    # by a process that shares nothing - failed workspace symbols,
+    # completion, references, rename and workspace diagnostics alike,
+    # -32602 "locked.iyi: Access is denied.", blaming the client.
+    private def workspace_text(file : String) : String?
+      File.read(file)
+    rescue IO::Error
+      nil
+    end
+
+    # The key `same_path?` compares by, for a set. Asking `same_path?` of
+    # every path already listed made the workspace-symbol walk quadratic: a
+    # query that matched nothing took 344 ms over 500 files and 3,031 ms
+    # over 2,000. (A file that cannot be read is skipped there too.)
+    private def path_key(path : String) : String
+      {% if flag?(:win32) %}
+        fs_path(path).downcase
+      {% else %}
+        path
+      {% end %}
     end
 
     # The entries whose import graph reaches any of `files`: those files'
@@ -2212,14 +2247,16 @@ module Iyi::Lsp
       query = params["query"]?.try(&.as_s?) || ""
 
       paths = @documents.keys.map { |doc_uri| path_of(doc_uri) }
+      listed = paths.map { |known| path_key(known) }.to_set
       each_workspace_file(with_lib: false) do |file, _|
-        paths << file unless paths.any? { |known| same_path?(known, file) }
+        paths << file if listed.add?(path_key(file))
         break if paths.size >= 2000
       end
 
       results = [] of {String, Int32, String, Int32, Int32, Int32, String?}
       paths.each do |file|
-        text = document_text(file) || (File.file?(file) ? File.read(file) : nil)
+        # A file the server may not read has no symbols to offer.
+        text = document_text(file) || workspace_text(file)
         next unless text
         collect_workspace_symbols(Outline.build(text, file), file, text.lines, query, nil, results)
         break if results.size >= 400
@@ -3426,10 +3463,20 @@ module Iyi::Lsp
         if workspace_directory?(path)
           next if name == "lib" && !with_lib
           walk_workspace(path, in_lib || name == "lib", with_lib, manifests, limit, found)
-        elsif (manifests ? name.in?(Mod::Installer::MANIFEST, Mod::Sum::FILE) : name.ends_with?(".iyi")) && File.file?(path)
+        elsif (manifests ? name.in?(Mod::Installer::MANIFEST, Mod::Sum::FILE) : name.ends_with?(".iyi")) && listed_file?(path)
           found << {path, in_lib}
         end
       end
+    end
+
+    # A file to list, skipped like a directory that will not list when the
+    # server may not read it: `File.file?` opens it for its attributes, and a file
+    # whose ACL denies reading raised from the walk, failing every
+    # workspace question with -32602 "locked.iyi: Access is denied.".
+    private def listed_file?(path : String) : Bool
+      File.file?(path)
+    rescue File::Error
+      false
     end
 
     # A directory to walk into: a real one, not a link to one.

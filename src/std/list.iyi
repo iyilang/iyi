@@ -206,7 +206,12 @@ end
 # And the lazy half, for the same reason `std/slice` has one: a `List` could
 # only reach the iterator tower through `to_a`, which copies the sequence
 # the type exists to hand around without copying.
-pub struct ListIterator(T)
+#
+# A class, as `ArrayIterator` is (std/iterator.iyi): an adaptor keeps its
+# source by value, and this struct was copied into it, so
+# `it.first(2).to_a` and then `it.to_a` gave [1, 2] and [1, 2, 3, 4] where
+# an iterator over an array gives [1, 2] and [3, 4].
+pub class ListIterator(T)
   def initialize(@list : List(T))
     @index = 0
   end

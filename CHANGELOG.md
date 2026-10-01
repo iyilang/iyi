@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **An adaptor advances the `ListIterator` it was built on.** `ListIterator`
+  was a struct, copied into each adaptor, so `it.first(2).to_a` and then
+  `it.to_a` gave `[1, 2]` and `[1, 2, 3, 4]`, the bug the sources of
+  `Iterator.of` had, where an array's iterator gives `[1, 2]` and `[3, 4]`.
+  It is a class now, as `ArrayIterator` is. `bench/std_exercise.iyi` checks
+  it; the old module answered `[1, 2] [1, 2, 3, 4]`.
+
 - **An iterator adaptor advances the adaptor it was built on.** `take`,
   `first(n)`, `skip`, `take_while`, `skip_while`, `with_index`, `flat_map`,
   `each_cons`, `step`, `cycle`, `cycle(n)` and `chain` built structs that

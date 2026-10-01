@@ -464,6 +464,12 @@ assert_str(List.new([10, 20]).to_s, "List[10, 20]", "list: prints its elements")
 assert_eq(list[0], 10, "list: [] indexes")
 assert_eq(list[-1], 40, "list: [] counts from the end")
 assert_true(list[9]?.nil?, "list: []? answers nil past the end")
+# An adaptor advances the `ListIterator` it was built on, as it does an
+# array's: the list's iterator was a struct, copied into the adaptor, and
+# the rest of the list read [1, 2, 3, 4] again after two were taken.
+listed = ListIterator.new(List.new([1, 2, 3, 4]))
+listed_head = listed.first(2).to_a
+assert_str("#{listed_head} #{listed.to_a}", "[1, 2] [3, 4]", "list: an adaptor advances its ListIterator")
 # A list copies the caller's array once, at the boundary, and an append
 # copies the list once. `appended` wrote 4n words for an n-element list:
 # `dup`, the copy grown to twice its size by `<<`, and the constructor's

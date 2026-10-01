@@ -246,7 +246,12 @@ refuses "a second gzip member cut short" gzip_member_cut "gzip: the stream is sh
 
 echo
 echo "== proving the checks can fail when the module is broken"
+mutations=0
 mutate() { # mutate <label> <old> <new>
+  # A binary of its own each: on Windows the last one's file can still be
+  # held a moment after it ended, and the next link over it failed with
+  # LNK1104.
+  mutations=$((mutations + 1))
   local label="$1" old="$2" new="$3"
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
@@ -264,11 +269,11 @@ PY
     status=1
   # Build first, then run: a patch that does not compile would also "fail",
   # and that proves nothing about whether the exercise catches the break.
-  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/mut.bin" "$REPO/bench/std_compress_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/mut-$mutations.bin" "$REPO/bench/std_compress_exercise.iyi" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the broken copy did not compile"
     sed -n '1,6p' "$WORK/mut.out"
     status=1
-  elif "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
+  elif "$WORK/mut-$mutations.bin" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else

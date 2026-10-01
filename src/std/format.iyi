@@ -731,6 +731,10 @@ module ::IyiFormat
            code_point(val)
          when UInt8
            code_point(val.to_i64)
+         when UInt64
+           # `UInt16` and `UInt32` arrive here widened, and all three were
+           # the first character of their digits: `%c` of 65_u32 was "6".
+           code_point(val)
          else
            first = ' '
            taken = false

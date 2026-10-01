@@ -415,6 +415,38 @@ t4 = sprintf("[%X|%b|%.0d]", 340282366920938463463374607431768211455_u128, 5_u12
 raise "format: UInt128 failed: #{t4}" if t4 != "[FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF|101|]"
 c1 = sprintf("[%c|%c|%c|%3c]", 0xE9, "é", 0x1F600, 65)
 raise "format: %c of a code point failed: #{c1}" if c1 != "[é|é|😀|  A]"
+# `%c` of a `UInt16`, `UInt32` or `UInt64` is its code point too: all
+# three were the first character of their digits, `%c` of 65_u32 "6", and
+# past the last code point `%c` of 0x110000_u32 was "1".
+c2 = sprintf("[%c|%c|%c]", 65_u32, 233_u16, 0x1F600_u64)
+raise "format: %c of an unsigned code point failed: #{c2}" if c2 != "[A|é|😀]"
+c3 = refusal { sprintf("%c", 0x110000_u32) }
+raise "format: %c past the last code point was #{c3.inspect}" if c3 != "%c of 1114112: not a Unicode code point"
+# `%s` and `%p` of a `Float32` are its own text: widened first, 0.1_f32
+# was 0.10000000149011612.
+t5 = sprintf("[%s|%p|%-4s]", 0.1_f32, 0.1_f32, 1.5_f32)
+raise "format: Float32 text failed: #{t5}" if t5 != "[0.1|0.1|1.5 ]"
+# `%u` is the word's bits at the word's own width: `%u` of -5_i8 and of
+# -5_i16 printed 18446744073709551611, an `Int64`'s, and of -5_i128 -5.
+t6 = sprintf("[%u|%u|%u|%d]", -5_i8, -5_i16, -5_i128, -5_i16)
+raise "format: unsigned of a narrow or wide word failed: #{t6}" if t6 != "[251|65531|340282366920938463463374607431768211451|-5]"
 puts "    tower: Int8 to UInt128 and Float32, and %c of any code point"
+
+# A float past an `Int64` under an integer verb is its own integer, every
+# digit, as Python writes it; NaN, a width or precision past an `Int32`
+# and a `%g` precision past its limit are refused by name. All four
+# panicked "arithmetic overflow", and `%.402g` was refused as "at most
+# 400, not 401", neither of which is `%g`'s.
+t7 = sprintf("[%d|%x|%.3d]", 1e30, -1e30, 9223372036854775808.0)
+raise "format: a float past Int64 failed: #{t7}" if t7 != "[1000000000000000019884624838656|-c9f2c9cd04675000000000000|9223372036854775808]"
+r1 = refusal { sprintf("%d", 0.0 / 0.0) }
+raise "format: %d of NaN was #{r1.inspect}" if r1 != "%d wants a finite number, and NaN is not one"
+r2 = refusal { sprintf("%99999999999d", 1) }
+raise "format: a width past Int32 was #{r2.inspect}" if r2 != "width must be at most 2147483647, not 99999999999"
+r3 = refusal { sprintf("%.99999999999s", "a") }
+raise "format: a precision past Int32 was #{r3.inspect}" if r3 != "precision must be at most 2147483647, not 99999999999"
+r4 = refusal { sprintf("%.402g", 0.1) }
+raise "format: %.402g was #{r4.inspect}" if r4 != "precision must be at most 401, not 402"
+puts "    integer verbs: a float past Int64 is its own integer; NaN, a field past Int32 and %g past 401 digits are refused by name"
 
 puts "    all format checks passed"

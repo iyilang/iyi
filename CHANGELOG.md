@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`%c` of a `UInt16`, `UInt32` or `UInt64` is the character at that code
+  point.** Only `Char`, `Int32`, `Int64` and `UInt8` were read as code
+  points, and the three unsigned types (`UInt16` and `UInt32` widened to
+  `UInt64` first) fell through to the first character of their digits:
+  `sprintf("%c", 65_u32)` was "6", `%c` of 233_u16 "2", and `%c` of
+  0x110000_u32, past the last code point, "1". They are code points now, and
+  a value past U+10FFFF or a surrogate is refused with the module's
+  sentence, "%c of 1114112: not a Unicode code point".
+  `bench/format_exercise.iyi` checks 65_u32, 233_u16 and 0x1F600_u64 and the
+  refusal; the old module answered [6|2|1].
+
 - **`sprintf`'s `%.Ns` and `%%` take time linear in the text.** A string
   precision kept its characters one at a time onto a string of its own, and
   `sprintf` added every piece of its result to the whole result so far, so

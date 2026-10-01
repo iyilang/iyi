@@ -769,8 +769,26 @@ class Iyi::CodeGenVisitor
     if checked
       overflow = codegen_out_of_range(to_type, from_type, arg)
       codegen_raise_overflow_cond(overflow)
+      return float_to_int from_type, to_type, arg
     end
-    float_to_int from_type, to_type, arg
+
+    # iyi: the unchecked form saturates: past the range it is the nearest
+    # bound, and NaN is 0. Plain `fptosi`/`fptoui` is poison there, and the
+    # optimiser folds a known operand to it: `1e10.unsafe_to_i32` printed
+    # -2147483648 in a debug build and 140697949809896 under --release, a
+    # different number on each run and not an Int32 at all. The instruction
+    # x86 runs is no answer either (300.0 to UInt8 was 44, -1.0 to UInt64
+    # 18446744073709551615 in debug and 0 in release). Saturating is the one
+    # defined answer, the same in every build mode and on every target, and
+    # what aarch64's own conversion does.
+    signed = to_type.signed? ? "si" : "ui"
+    int_type = llvm_type(to_type)
+    float_type = llvm_type(from_type)
+    fun_name = "llvm.fpto#{signed}.sat.i#{to_type.bytes * 8}.f#{from_type.bytes * 8}"
+    llvm_fun = fetch_typed_fun(@llvm_mod, fun_name) do
+      LLVM::Type.function([float_type], int_type)
+    end
+    builder.call(llvm_fun.type, llvm_fun.func, [arg])
   end
 
   def codegen_convert(from_type : FloatType, to_type : FloatType, arg, *, checked : Bool)

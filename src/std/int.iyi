@@ -286,8 +286,10 @@ module std/int
     {% end %}
 
     # The conversions to the integers the prelude does not reach. The
-    # unchecked form is the instruction, for every target; the checked
-    # form truncates first and refuses what the truncation does not hold:
+    # unchecked form saturates, as the prelude's does - past the range it is
+    # the nearest bound and NaN is 0, in every build and on every target -
+    # but for the two 128-bit ones below; the checked form truncates first
+    # and refuses what the truncation does not hold:
     # `127.9.to_i8` is 127 and `(-0.5).to_u16` is 0, where the range was
     # once checked on the untruncated value and both were refused. NaN and
     # the infinities are refused. The prelude's own five (`to_i`, `to_i32`,

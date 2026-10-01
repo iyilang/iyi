@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **A float's unchecked conversion to an integer saturates, the same in a
+  debug and a `--release` build: past the range it is the nearest bound,
+  and NaN is 0.** It was LLVM's bare `fptosi`/`fptoui`, undefined outside
+  the range, so the answer depended on the build and on whether the operand
+  was known: a debug build gave `1e10.unsafe_to_i32` as -2147483648 and
+  `300.0.unsafe_to_u8` as 44, and `--release` folded a known operand to
+  garbage, 140697949809896 for an Int32 on one run and 140699726359784 on
+  the next, while the prelude promised "the same instruction without the
+  check". It lowers to `llvm.fptosi.sat`/`llvm.fptoui.sat` now: 2147483647,
+  -2147483648, 0 for NaN, 255 and 0 for a byte, 0 for -1.0 as a UInt64, in
+  both builds, and `src/iyi/primitives.iyi` and `std/int` say so (the
+  128-bit two in `std/int` are software and answer only what fits).
+  `bench/number_exercise.iyi` checks seven such values plain and optimised;
+  the old compiler printed `-2147483648 -2147483648 -2147483648 40 40
+  2435568026688 10000000000` in a debug build and `22 2385387373608
+  2385353118440 0 0 18446744073709551615 10000000000` under `--release`.
+
 - **A constant, an enum value, a StaticArray's size and a macro fold `//`,
   `%` and the shifts by iyi's rules, so they agree with the line that
   computes the same expression.** The compiler folded them with the other

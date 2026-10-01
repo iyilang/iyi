@@ -215,5 +215,18 @@ assert_int(4294967295_u64.unsafe_to_i32, -1, "number: unchecked reinterprets the
 # conversion panics on it rather than answering.
 assert_true((-1_i64).unsafe_to_u64 == 18446744073709551615_u64,
   "number: unchecked makes -1 the widest value")
+# A float the type does not hold, unchecked, saturates: the nearest bound,
+# and NaN is 0, in this run and the optimised one alike. It was the bare
+# conversion, which LLVM leaves undefined there: debug answered
+# `1e10.unsafe_to_i32` with -2147483648 and `300.0.unsafe_to_u8` with 44,
+# and --release folded the known operand to garbage - 140697949809896 for
+# an Int32, a different number on every run. Compared as the text printed,
+# because the optimiser may take any comparison of such a value as true.
+big = 1e10
+unchecked = [big.unsafe_to_i32.to_s, (0.0 - big).unsafe_to_i32.to_s, nan.unsafe_to_i32.to_s,
+             300.0.unsafe_to_u8.to_s, (-1.0).unsafe_to_u8.to_s, (-1.0).unsafe_to_u64.to_s,
+             big.unsafe_to_i64.to_s]
+assert_str(unchecked.join(" "), "2147483647 -2147483648 0 255 0 0 10000000000",
+  "number: an unchecked float saturates, NaN is 0, and one that fits is itself")
 
 puts "all number checks passed"

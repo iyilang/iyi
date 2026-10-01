@@ -1,5 +1,14 @@
 # Timing a block: wall-clock ips and bm, built on std/time.
 #
+# Wall clock only. The other library also prints the CPU time a block took
+# (`bm`'s user, system and total columns) and the bytes it allocated per
+# call (`ips`'s B/op); nothing here reads the process's CPU time, and the
+# collector keeps no lifetime allocation total (`std/gc`'s
+# `bytes_since_collection` starts again at every collection). Both printed
+# as zeros, whatever the block did: 0.000000 user for a million additions,
+# 0B/op for a block that builds an array. They are not printed now, and
+# `Tms` and `IPS::Entry` have no field for them.
+#
 module std/benchmark
 
 pub import std/time
@@ -12,18 +21,10 @@ import std/format::{sprintf, printf}
 pub class Benchmark
   module BM
     class Tms
-      getter utime : Float64
-      getter stime : Float64
-      getter cutime : Float64
-      getter cstime : Float64
       getter real : Float64
       getter label : String
 
-      def initialize(@utime : Float64, @stime : Float64, @cutime : Float64, @cstime : Float64, @real : Float64, @label : String = "")
-      end
-
-      def total : Float64
-        utime + stime + cutime + cstime
+      def initialize(@real : Float64, @label : String = "")
       end
 
       def to_s(io) : Nil
@@ -31,7 +32,7 @@ pub class Benchmark
       end
 
       def to_s : String
-        Std::Format.sprintf("  %.6f   %.6f   %.6f (  %.6f)", utime, stime, total, real)
+        Std::Format.sprintf("(  %.6f)", real)
       end
     end
 
@@ -50,7 +51,7 @@ pub class Benchmark
         if @label_width > 0
           print " " * @label_width
         end
-        puts "       user     system      total        real"
+        puts "        real"
 
         @reports.each do |report|
           label, block = report
@@ -77,7 +78,6 @@ pub class Benchmark
       property stddev : Float64 = 0.0
       property relative_stddev : Float64 = 0.0
       property slower : Float64 = 1.0
-      property bytes_per_op : UInt64 = 0_u64
 
       @ran : Bool = false
 
@@ -89,7 +89,6 @@ pub class Benchmark
         @stddev = 0.0
         @relative_stddev = 0.0
         @slower = 1.0
-        @bytes_per_op = 0_u64
       end
 
       def ran? : Bool
@@ -187,8 +186,13 @@ pub class Benchmark
         @items = [] of Entry
       end
 
-      def self.new(calculation = 5, warmup = 2, interactive = false)
-        new(Time.seconds(calculation.to_i64), Time.seconds(warmup.to_i64), !!interactive)
+      # Seconds as integers, as the other library takes them. It asked
+      # `Time.seconds`, which `Time` (an instant) does not have, so
+      # `Job.new(1, 1)` did not compile; a length of time is a `Span`. The
+      # answer is named: a program built from this module's artifact read
+      # a method with none as one that answers nil.
+      def self.new(calculation = 5, warmup = 2, interactive = false) : Job
+        new(Std::Time::Span.seconds(calculation.to_i64), Std::Time::Span.seconds(warmup.to_i64), !!interactive)
       end
 
       def report(label : String = "", &action : ->) : Entry
@@ -211,14 +215,12 @@ pub class Benchmark
         ran.each do |item|
           diff = max_label - item.label.size
           pad = diff > 0 ? (" " * diff) : ""
-          b_op = Std::Format.sprintf("%dB/op", item.bytes_per_op)
-          Std::Format.printf("%s%s %s (%s) (±%5.2f%%)  %s  %s\n",
+          Std::Format.printf("%s%s %s (%s) (±%5.2f%%)  %s\n",
             pad,
             item.label,
             item.human_mean,
             item.human_iteration_time,
             item.relative_stddev,
-            b_op,
             item.human_compare)
         end
       end
@@ -246,19 +248,14 @@ pub class Benchmark
       private def run_calculation : Nil
         @items.each do |item|
           measurements = [] of Float64
-          bytes = 0_i64
-          cycles = 0_i64
 
           t0 = Std::Time::Time.monotonic
           target = t0 + @calculation_time
 
           while true
             sub_t0 = Std::Time::Time.monotonic
-            bytes_taken = 0_i64
             item.call_for_100ms
             sub_t1 = Std::Time::Time.monotonic
-            bytes += bytes_taken
-            cycles += item.cycles
             sec = (sub_t1 - sub_t0).total_seconds
             sec = 0.000001 if sec <= 0.0
             measurements << (item.cycles.to_f / sec)
@@ -266,7 +263,6 @@ pub class Benchmark
           end
 
           item.calculate_stats(measurements)
-          item.bytes_per_op = cycles > 0 ? (bytes.to_f / cycles.to_f).to_u64 : 0_u64
         end
       end
 
@@ -308,7 +304,7 @@ pub class Benchmark
     yield
     t1 = Std::Time::Time.monotonic
     real = (t1 - t0).total_seconds
-    BM::Tms.new(0.0, 0.0, 0.0, 0.0, real, label)
+    BM::Tms.new(real, label)
   end
 
   def self.realtime(& : -> Nil) : Std::Time::Span

@@ -47,6 +47,7 @@ end
 
 import std/dir::{Dir}
 import std/file::{File}
+import std/gc::{GC}
 
 def clean_tree(dir_path : String) : Nil
   return unless Dir.exists?(dir_path)
@@ -209,10 +210,58 @@ Dir.cd(listing_dir)
 dotted = Dir.glob("./*.txt").sorted
 Dir.cd(here)
 assert_true dotted == ["./file_a.txt", "./file_b.txt"], "./*.txt answers the names under ./: #{dotted.inspect}"
+# The rest of the pattern language: braces, classes, escapes, a trailing
+# separator for directories, and `**` that walks past hidden names - each
+# was literal text or found nothing, and `**/*.txt` found hidden files.
+braced = Dir.glob(listing_dir + "/file_{a,b}.{txt,md}").sorted
+assert_true braced == [listing_dir + "/file_a.txt", listing_dir + "/file_b.txt"], "glob: braces choose among names: #{braced.inspect}"
+assert_true Dir.glob(listing_dir + "/file_[a].txt") == [listing_dir + "/file_a.txt"], "glob: a class picks one character"
+assert_true Dir.glob(listing_dir + "/file_[^a].txt") == [listing_dir + "/file_b.txt"], "glob: a negated class"
+dirs = Dir.glob(listing_dir + "/*/")
+assert_true dirs == [listing_dir + "/nested_dir/"], "glob: a trailing separator answers directories with it: #{dirs.inspect}"
+File.write(listing_dir + "/nested_dir/inner/.secret.txt", "s")
+deep_txt = Dir.glob(listing_dir + "/**/*.txt").sorted
+assert_true deep_txt.size == 4 && !deep_txt.any? { |p| p.includes?(".secret") }, "glob: ** passes over hidden names: #{deep_txt.inspect}"
+File.delete(listing_dir + "/nested_dir/inner/.secret.txt")
 File.delete(listing_dir + "/nested_dir/inner/deep.txt")
 File.delete(listing_dir + "/nested_dir/one.txt")
 Dir.delete(listing_dir + "/nested_dir/inner")
 puts "  glob matching, hidden names, recursion, and empty results"
+
+puts "\n== a directory read across a collection"
+# The stream's 32 KB buffer was referenced only by an address in an Int64
+# block, which the collector never scans: a collection in the middle of a
+# walk freed it, the next directory opened took the same memory, and the
+# first walk read its records - a record length of zero, and `read` never
+# moved past it. Every name must be the directory's own, and the walk end.
+walked = sandbox + "/walked"
+Dir.mkdir(walked)
+Dir.mkdir(walked + "_other")
+File.write(walked + "_other/a_name_from_elsewhere", "")
+own = {} of String => Bool
+index = 0
+while index < 300
+  name = "entry_#{index}_" + "n" * 40
+  File.write(walked + "/" + name, "")
+  own[name] = true
+  index = index + 1
+end
+walk_seen = 0
+foreign = 0
+Dir.each_child(walked) do |name|
+  walk_seen = walk_seen + 1
+  foreign = foreign + 1 unless own.has_key?(name)
+  if walk_seen % 20 == 0
+    GC.collect
+    Dir.children(walked + "_other")
+  end
+end
+assert_true walk_seen == 300 && foreign == 0, "a walk across collections reads its own 300 names (#{walk_seen}, #{foreign} foreign)"
+own.keys.each { |name| File.delete(walked + "/" + name) }
+File.delete(walked + "_other/a_name_from_elsewhere")
+Dir.delete(walked)
+Dir.delete(walked + "_other")
+puts "  every name the directory's own, across collections and another directory's reads"
 
 puts "\n== current working directory and cd"
 current_before = Dir.current

@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A directory walk keeps its buffer across a collection.** On Linux a
+  directory stream's 32 KB buffer was referenced only by an address kept
+  in an `Int64` block, which the collector does not scan, and on Windows
+  the find data the same way: a collection in the middle of a walk freed
+  it, the next directory opened took the same memory, and the first walk
+  read that one's records - in the end a record length of zero, and
+  `Dir#read` never moved past it. A program that walked a tree while
+  allocating hung, one run in two in the glob fuzz below. The stream is
+  allocated as pointers now, so the collector scans it; the dir exercise
+  walks 300 names across collections and another directory's reads, and
+  proves the walk does not end with the stream back in an `Int64` block.
+- **`Dir.glob` speaks the pattern language `File.match?` does.** It
+  matched each path whole with `*` and `?` alone: `*.{cr,iyi}`, `[xy].*`
+  and `\*` were literal text, `t/*/` and `t/**/` found nothing, and
+  `**/*.cr` found hidden files. It is the other library's walk now, a
+  segment at a time: braces expanded first, a literal segment joined
+  without a listing, `**` any number of directories, every other segment
+  matched by `File.match?`, a name starting with `.` hidden from every
+  wildcard, a symlink not walked into, a trailing separator answering
+  directories. 15,000 patterns over random trees with links agree with
+  Crystal's `Dir.glob` but one, `./**/.a`, which Crystal answers empty
+  and this answers with every `.a` named. A path is still joined with the
+  separator the pattern writes. The exercise checks each part, and three
+  proofs break braces, the trailing separator and the hidden rule.
+
 ## 0.16.1 — 2026-10-01
 
 **`Math` answers the correctly rounded double.** `sin`, `cos`, `tan`,

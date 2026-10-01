@@ -86,7 +86,8 @@ for phrase in "== create, exists and file paths" \
               "== list entries and dot entries policy" \
               "== glob star, recursive, hidden, and no-match" \
               "== current working directory and cd" \
-              "== delete empty and non-empty directories"; do
+              "== delete empty and non-empty directories" \
+              "== a directory read across a collection"; do
   if ! grep -q "$phrase" "$WORK/dir-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -141,10 +142,10 @@ if [ -z "$PY" ]; then
 elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/dir.iyi").read_text()
-old = "glob_match(pattern.to_unsafe, 0, pattern.bytesize, name.to_unsafe, 0, name.bytesize)"
+old = "next unless File.match?(name, seg)"
 if old not in src:
     raise SystemExit("glob patch site missing")
-Path("$WORK/patched_glob/std/dir.iyi").write_text(src.replace(old, "false", 1))
+Path("$WORK/patched_glob/std/dir.iyi").write_text(src.replace(old, "next", 1))
 PY
 then
   echo "  the glob patch did not apply"
@@ -155,6 +156,58 @@ elif IYI_PATH="$WORK/patched_glob${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI
 else
   echo "  dead glob matcher is caught"
 fi
+
+echo
+echo "== proving the other glob and walk checks can fail"
+# dir_broken <label> <name> <old> <new> <phrase>: the exercise built against
+# a copy with one change, under a clock - a freed directory buffer is a
+# walk that never ends - and it must fail at the check that names it, or,
+# for the walk, not finish.
+dir_broken() {
+  if [ -z "$PY" ]; then
+    echo "  $1: no python3 on this machine, so the proof is unmeasured"
+    return
+  fi
+  mkdir -p "$WORK/$2/std"
+  if ! OLD="$3" NEW="$4" "$PY" - "$REPO/src/std/dir.iyi" "$WORK/$2/std/dir.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1]).read()
+assert src.count(os.environ["OLD"]) == 1
+open(sys.argv[2], "w").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+  then
+    echo "  $1: the patch did not apply"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$2${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$2/program" "$REPO/bench/std_dir_exercise.iyi" >"$WORK/$2/build.log" 2>&1; then
+    echo "  $1: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/$2/build.log" | sed 's/^/    /'
+    status=1
+    return
+  fi
+  timeout 120 "$WORK/$2/program" >"$WORK/$2/out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $1: the exercise PASSED on a broken module"
+    status=1
+  elif [ "$code" -eq 124 ] || grep -q "$5" "$WORK/$2/out"; then
+    echo "  $1: caught"
+  else
+    echo "  $1: failed, but not at its check"
+    tail -3 "$WORK/$2/out" | sed 's/^/    /'
+    status=1
+  fi
+}
+dir_broken "braces left unexpanded" no_braces '      elsif c == 123_u8' '      elsif c == 0_u8' "glob: braces choose among names"
+dir_broken "a trailing separator ignored" no_tail '      tail = glob_sep?(bytes[n - 1]) ? sep : nil' '      tail = nil' "glob: a trailing separator answers directories"
+dir_broken "** into hidden directories" hidden_walk '      yield name unless name.starts_with?('"'"'.'"'"')' '      yield name' "glob \* skips hidden names"
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    dir_broken "a find buffer the collector does not scan" stream_atomic '      stream = Pointer(Pointer(UInt8)).malloc(3_u64).as(Pointer(Int64))' '      stream = Pointer(Int64).malloc(3_u64)' "a walk across collections reads its own" ;;
+  Linux)
+    dir_broken "a directory buffer the collector does not scan" stream_atomic '      stream = Pointer(Pointer(UInt8)).malloc(4_u64).as(Pointer(Int64))' '      stream = Pointer(Int64).malloc(4_u64)' "a walk across collections reads its own" ;;
+esac
 
 echo
 echo "== what dir operations refuse"

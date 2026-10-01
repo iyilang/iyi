@@ -153,6 +153,11 @@ assert_str(Mode::Read.to_s, "Read", "flags: to_s of one bit")
 assert_str(Mode.new(9).to_s, "Read | 8", "flags: to_s names the bits no member has")
 assert_str(Access.new(3).to_s, "ReadWrite", "flags: to_s of a member that is several bits")
 assert_str(Access.new(7).to_s, "Read | Write | 4", "flags: and its bits once each beside the rest")
+# Every bit is `All`, a member the compiler adds the way it adds `None`, and
+# it answers with that name as the other library's does: it printed
+# "Read | Write | Append".
+assert_str(Mode::All.to_s, "All", "flags: to_s of every bit is All")
+assert_str((Mode::Read | Mode::Write | Mode::Append).to_s, "All", "flags: every bit set by hand is All")
 assert_int(Mode.values.size, 3, "flags: values skips None and All")
 assert_true(Mode::None.none?, "flags: none?")
 

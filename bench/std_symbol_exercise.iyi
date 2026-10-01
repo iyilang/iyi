@@ -151,6 +151,17 @@ assert_str ":sort!", :sort!.inspect, "inspect bang identifier unquoted"
 assert_str ":empty?", :empty?.inspect, "inspect question identifier unquoted"
 assert_str ":\"a\\\"b\"", :"a\"b".inspect, "inspect escapes inner quote"
 assert_str ":\"a\\nb\"", :"a\nb".inspect, "inspect escapes newline"
+# Escaped as the other library's `String#inspect` escapes: the named
+# controls by name, any other control and DEL as `\u00XX`, and `#{` so it
+# does not read as interpolation. A raw escape byte went out as itself.
+assert_str ":\"a\\eb\"", :"a\eb".inspect, "inspect escapes an escape byte"
+assert_str ":\"\\a\\b\\f\\v\"", :"\a\b\f\v".inspect, "inspect escapes the named controls"
+assert_str ":\"x\\u0001y\\u001Fz\\u007F\"", :"x\u0001y\u001fz\u007f".inspect, "inspect writes other controls as \\u00XX"
+assert_str ":\"nul\\u0000x\"", :"nul\0x".inspect, "inspect writes NUL as \\u0000"
+assert_str ":\"h\\\#{x}\"", :"h\#{x}".inspect, "inspect escapes interpolation"
+assert_str ":\"a#b\"", :"a#b".inspect, "inspect leaves a lone #"
+assert_str ":\"é\\\"\"", :"é\"".inspect, "inspect escapes after a letter past ASCII"
+assert_str "\"a\\eb\"", Symbol.quote_for_named_argument("a\eb"), "quote_for_named_argument escapes the same way"
 puts "  needs_quotes?, needs_quotes_for_named_argument? and quote_for_named_argument"
 
 puts "\nALL CHECKS PASSED"

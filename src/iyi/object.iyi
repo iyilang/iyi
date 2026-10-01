@@ -142,15 +142,15 @@ struct Tuple
     value.hash
   end
 
+  # A first member in braces of its own is spaced off, `{ {1, 2}, 3 }`, as the other library's is.
   def to_s : String
-    result = "{"
+    pad = {% if T.size > 0 %} self[0].is_a?(Tuple) || self[0].is_a?(NamedTuple) || self[0].is_a?(Hash) ? " " : "" {% else %} "" {% end %}
+    result = "{" + pad
     {% for i in 0...T.size %}
-      {% if i > 0 %}
-        result = result + ", "
-      {% end %}
+      result = result + ", " if {{i}} > 0
       result = result + self[{{i}}].inspect
     {% end %}
-    result + "}"
+    result + pad + "}"
   end
 
   def inspect : String

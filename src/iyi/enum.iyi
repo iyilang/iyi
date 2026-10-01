@@ -51,11 +51,11 @@ struct Enum
   # `Level.new(9).to_s` is `"9"`, which is what a value off a wire prints as.
   #
   # A flags enum answers with a member's name when one has its value (`None`
-  # for zero), else the names of the bits it holds, each bit named once, and
-  # the bits no member names as a number: `Read | 8`, as Crystal's does.
+  # for zero, `All` for every bit, which was skipped), else the names of the
+  # bits it holds, each named once, and the rest as a number: `Read | 8`.
   def to_s : String
     {% if @type.annotation(Flags) %}
-      {% for member in @type.constants %}{% unless member.stringify == "All" %}return {{ member.stringify }} if value == {{ @type.constant(member) }}; {% end %}{% end %}
+      {% for member in @type.constants %}return {{ member.stringify }} if value == {{ @type.constant(member) }}; {% end %}
       text, left = "", value
       {% for member in @type.constants %}
         {% unless member.stringify == "None" || member.stringify == "All" %}

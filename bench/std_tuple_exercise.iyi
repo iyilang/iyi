@@ -83,5 +83,20 @@ quoted.each { |k, v| walked << "#{k}=#{v}" }
 assert_str "content-type=text/plain x y=1 plain=2", walked.join(" "), "each with quoted keys"
 assert_str "{\"1a\": 1, \"_\": 2, a_1: 3}", {"1a": 1, "_": 2, a_1: 3}.to_s, "to_s quotes a leading digit and a lone _"
 puts "  quoted keys print, compare, walk and answer"
+# A key with a letter past ASCII is quoted too, as the other library's
+# rule says: only an ASCII letter, digit or `_` goes unquoted.
+assert_str "{\"é\": 1, \"aé\": 2, a1: 3}", {"é": 1, "aé": 2, a1: 3}.to_s, "to_s quotes a key with a letter past ASCII"
+puts "  a key past ASCII is quoted"
+
+puts "\n== builders on the empty tuple"
+# `map`, `+` and `reverse` wrote their result as a brace literal, and for
+# the empty tuple that is `{ }`, an empty hash: none of these compiled.
+assert_str "{}", Tuple.new.reverse.to_s, "reverse of the empty tuple"
+assert_str "{}", Tuple.new.map { |x| x }.to_s, "map of the empty tuple"
+assert_str "{}", (Tuple.new + Tuple.new).to_s, "+ of two empty tuples"
+assert_str "{'c', \"a\", 1}", {1, "a", 'c'}.reverse.to_s, "reverse of a triple"
+assert_str "{2, 4}", {1, 2}.map { |x| x * 2 }.to_s, "map of a pair"
+assert_str "{1, \"a\"}", ({1} + {"a"}).to_s, "+ of two singles"
+puts "  map, + and reverse of the empty tuple, and of tuples with members"
 
 puts "\nALL CHECKS PASSED"

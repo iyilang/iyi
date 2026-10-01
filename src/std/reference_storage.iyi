@@ -49,18 +49,22 @@ pub struct ReferenceStorage(T) < Value
     false
   end
 
-  # Wrapping mix: checked `h * 31` panics with `arithmetic overflow` as
-  # soon as `instance_sizeof(T)` is more than a few bytes (a constructed
-  # `Point` is 8).
+  # Field by field, exactly as `==` compares: a class field by its
+  # identity, any other by its own `hash`, mixed with a wrapping step
+  # (checked `h * 31` panicked once `instance_sizeof(T)` passed a few
+  # bytes). Mixing the raw bytes disagreed with `==`: a `Float64` field
+  # holding `0.0` and one holding `-0.0` compare equal and differ in their
+  # sign bit, and a `String?` field compares by content while its bytes
+  # are the pointer, so equal storages hashed apart.
   def hash : Int32
     h = 0
-    ptr = pointerof(@type_id).as(Pointer(UInt8))
-    i = 0
-    sz = instance_sizeof(T)
-    while i < sz
-      h = (h &* 31) ^ ptr[i].to_i32
-      i = i + 1
-    end
+    {% for ivar in T.instance_vars %}
+      {% if ivar.type.class? %}
+        h = (h &* 31) ^ to_reference.@{{ivar.id}}.object_id.hash
+      {% else %}
+        h = (h &* 31) ^ to_reference.@{{ivar.id}}.hash
+      {% end %}
+    {% end %}
     h
   end
 

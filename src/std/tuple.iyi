@@ -92,38 +92,43 @@ struct ::Tuple
   end
 
   # Returns a new Tuple with each element mapped through the block.
+  #
+  # This one, `+` and `reverse` build with `Tuple.new(...)` rather than a
+  # brace literal, as the other library does: for the empty tuple the
+  # literal expanded to `{ }`, which is an empty hash, and
+  # `Tuple.new.reverse` did not compile.
   def map(&)
     {% begin %}
-      {
+      Tuple.new(
         {% for i in 0...T.size %}
-          yield(self[{{i}}]),
+          (yield self[{{i}}]),
         {% end %}
-      }
+      )
     {% end %}
   end
 
   # Concatenates two tuples.
   def +(other : Tuple(*U)) forall U
     {% begin %}
-      {
+      Tuple.new(
         {% for i in 0...T.size %}
           self[{{i}}],
         {% end %}
         {% for i in 0...U.size %}
           other[{{i}}],
         {% end %}
-      }
+      )
     {% end %}
   end
 
   # Reverses elements in tuple.
   def reverse
     {% begin %}
-      {
+      Tuple.new(
         {% for i in 1..T.size %}
           self[{{T.size - i}}],
         {% end %}
-      }
+      )
     {% end %}
   end
 end
@@ -230,7 +235,8 @@ struct ::NamedTuple
 
   # The rule the other library's `Symbol.needs_quotes_for_named_argument?`
   # states: a key needs quotes when it is empty or `_`, starts with a digit,
-  # or holds an ASCII byte that is not a letter, digit or `_`.
+  # or holds any byte that is not an ASCII letter, digit or `_` - a
+  # non-ASCII letter included, so `{"é": 1}` prints with its quotes.
   private def quoted_key(key : String) : String
     return key.inspect if key.empty? || key == "_"
     bytes = key.to_unsafe
@@ -240,7 +246,7 @@ struct ::NamedTuple
       digit = b >= 48_u8 && b <= 57_u8
       return key.inspect if i == 0 && digit
       word = digit || (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || b == 95_u8
-      return key.inspect if b < 128_u8 && !word
+      return key.inspect unless word
       i = i + 1
     end
     key

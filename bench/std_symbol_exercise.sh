@@ -171,6 +171,24 @@ prove_fails "needs_quotes? quotes a legal bang identifier" quoted_bang \
   'last_byte == 33_u8 || last_byte == 63_u8' \
   'false'
 
+# The escapes the other library's inspect writes, each dropped in turn: a
+# control with no name of its own left raw, the escape byte without its
+# name, and `#{` left to read as interpolation.
+prove_fails "inspect leaves a bare control raw" raw_control \
+  "ASSERTION FAILED: inspect writes other controls as" \
+  'elsif byte < 32_u8 || byte == 127_u8' \
+  'elsif false'
+
+prove_fails "inspect writes the escape byte by number" unnamed_escape \
+  "ASSERTION FAILED: inspect escapes an escape byte" \
+  'elsif byte == 27_u8' \
+  'elsif byte == 26_u8'
+
+prove_fails "inspect leaves #{ to interpolate" raw_interpolation \
+  "ASSERTION FAILED: inspect escapes interpolation" \
+  'string.to_unsafe[index + 1] == 123_u8' \
+  'string.to_unsafe[index + 1] == 0_u8'
+
 echo
 if [ "$status" -ne 0 ]; then
   echo "the std/symbol exercise did not hold"

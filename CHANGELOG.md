@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **Seven answers of tuples, symbols, enums and `ReferenceStorage`.**
+  `Tuple#map`, `+` and `reverse` did not compile for the empty tuple -
+  the macro wrote `{ }`, an empty hash literal. A tuple whose first member
+  prints in braces printed `{{1, 2}, 3}`, which reads back as a macro;
+  it is `{ {1, 2}, 3 }`, as Crystal prints it. `NamedTuple#to_s` left a
+  key with letters past ASCII bare; `Symbol#inspect` wrote control bytes
+  raw and left `#{` to interpolate. `Mode::All.to_s` of a flags enum
+  spelled out every bit, where Crystal answers `All`. `std/enum` did not
+  import `std/int`, so an enum over `Int8`, `Int16`, `UInt16` or `UInt32`
+  compared, printed and converted wrongly or did not compile. And
+  `ReferenceStorage#hash` mixed the raw bytes where `==` compares fields,
+  so two equal storages - `0.0` and `-0.0`, or two equal strings - hashed
+  apart and a `Hash` missed one. 100,000 operation sequences against
+  Crystal and Python found these and none after, `Set`, `Heap`, `Box`,
+  `Atomic` under eight threads and `Bool` agreeing; each exercise checks
+  its fix and proves it fails.
+
 - **A reset after a full read is a reset, and a connected UDP socket
   outlives a peer that is not there.** A TCP read whose first receive
   filled the 4 KB buffer asked again, and dropped that receive's error

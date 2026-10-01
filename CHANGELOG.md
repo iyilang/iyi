@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **A large socket write on Windows parks when the peer is not reading,
+  and keeps its deadline.** Winsock takes a whole buffer of any size
+  while what it holds is under the send buffer's size, so one `write` of
+  a gigabyte to a peer that never read went to a single `send`, which
+  took it: 5.2 s with no other task running and `write_timeout_ms` never
+  consulted. Sends go 256 KB at a time now, and the second finds the
+  buffer full and parks, as on Linux. `bench/socket_exercise.iyi` writes
+  64 MB with a 300 ms deadline beside a 50 ms sleep; the old module wrote
+  all of it and answered 67108864.
+
 - **A default written on a `getter` or `property` is the field's.** The
   macros declared `@port : Int32` from `getter port : Int32 = 8080` and
   dropped the `= 8080`, so a constructor that left the field alone did not

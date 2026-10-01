@@ -377,6 +377,36 @@ raise "timeout: the write answered #{t_last.inspect}" unless t_last.is_a?(Socket
 t_client.close
 t_conn.close unless t_conn.closed?
 t_server.close
+# One write of 64 MB to a peer that never reads parks when the kernel's
+# buffer is full, as every other write does, and keeps its deadline: on
+# Windows the whole buffer went to one `send`, which took it, held the
+# thread while it copied and never consulted the deadline - a gigabyte
+# took 5.2 s with nothing else running.
+b_server = IyiSocket.listen("127.0.0.1", 0)
+b_client = IyiSocket.connect("127.0.0.1", b_server.local_port).or_panic
+b_conn = b_server.accept.or_panic
+b_client.write_timeout_ms = 300
+b_big = "b" * 67108864
+b_answer = "unwritten"
+b_sibling_ms = -1_i64
+b_started = __iyi_monotonic_ns
+group do |g|
+  g.spawn do
+    w = b_client.write(b_big)
+    b_answer = w.is_a?(SocketError) && w.timed_out? ? "timed out" : w.inspect
+    0
+  end
+  g.spawn do
+    sleep(50)
+    b_sibling_ms = (__iyi_monotonic_ns - b_started) // 1000000_i64
+    0
+  end
+end
+raise "timeout: a 64 MB write to a peer that never reads answered #{b_answer}" unless b_answer == "timed out"
+raise "timeout: a 64 MB write held its thread: a 50 ms sleep beside it woke at #{b_sibling_ms} ms" if b_sibling_ms > 1000
+b_client.close
+b_conn.close
+b_server.close
 puts "timeout: ok"
 
 # 11. A reader parked on a socket keeps nothing of what it last read. The

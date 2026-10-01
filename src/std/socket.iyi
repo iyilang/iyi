@@ -1575,6 +1575,13 @@ pub class IyiSocket
 
     def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       s = __sys_handle(fd)
+      # A bounded piece at a time. Winsock takes a whole buffer of any size
+      # while what it holds is under the send buffer's size, so one send of
+      # a gigabyte to a peer that never reads was taken whole: 5.2 s with no
+      # other task running and the write's deadline never consulted. In
+      # pieces, the second finds the buffer full and the send parks, as
+      # the POSIX arms do.
+      len = SEND_PIECE if len > SEND_PIECE
       n = LibWs2_32.send(s, buf.as(Void*), len.to_i32, 0)
       return n.to_i64 if n >= 0
       err = LibWs2_32.WSAGetLastError
@@ -1587,6 +1594,8 @@ pub class IyiSocket
       # at all. So the send is the wait.
       __sys_send_posted(s, buf, len, ms)
     end
+
+    SEND_PIECE = 262144_u64
 
     # The send as the wait, with the write's deadline on it: a deadline
     # that comes first cancels the send, and the cancellation's completion

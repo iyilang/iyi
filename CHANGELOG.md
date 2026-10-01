@@ -142,6 +142,51 @@
 
 ### Fixed
 
+- **`Server.serve` holds a request's body at what has arrived of it, not at
+  the length its head declares.** At a body's second read it made a builder
+  of the whole declared length: a head with `Content-Length: 67108864` and
+  two bytes after it cost the server 67,112,395 bytes, and six such
+  connections took it from 193 to 643 MB private. The reads are kept as they
+  arrive and joined once the last is in: six such connections take the
+  server from 193 to 257 MB now, and thirty to 274 MB.
+  `bench/std_http_exercise.iyi` counts what the two bytes cost the server,
+  under 1 MB (0 bytes counted now); the old module allocated 67,112,395.
+
+- **A request head that arrives a piece at a time costs the server its
+  length, not its length squared.** Each read was added to the head so far
+  and all of it searched again for its end: a 1 MB head in 128-byte pieces
+  took 8.78 s of the server's CPU, where the same head in one write took
+  0.06 s, and beside four such clients an ordinary request waited up to 16.5
+  s. Each read is searched once, with the three bytes before it, and kept in
+  one builder (`HTTP.read_head`): the 1 MB head in 128-byte pieces takes
+  0.20 s, and beside four of them an ordinary request waited at most 27 ms.
+  `bench/std_http_exercise.iyi` sends a 256 KB head in 1 KB pieces and
+  counts what the server allocates, under 8 MB (3,475,385 bytes now); the
+  old module allocated 36,170,244.
+
+- **The listener's close ends `serve` beside a client partway through a
+  request.** Only a connection between requests was closed with the
+  listener: one whose client had sent one byte of a request, part of its
+  head, or part of a body of a stated length or of a chunked one was waited
+  on, and `serve` was still running 5 s after the close, returning only when
+  the client left. Every read now waits with the connection where `serve`
+  closes it, and none starts once the listener is closed: in each of the
+  four cases `serve` returns at once. `bench/std_http_exercise.iyi` closes a
+  listener beside an idle client and four partway through a request that
+  leave three seconds later; the old module returned 2,800 ms after the
+  close, when they left.
+
+- **Requests that arrive together are parsed where they lie in the read.**
+  Each was cut off the front of the buffer, and the rest of the read copied
+  again inside the parse, so a request cost what came after it: 2,000 to
+  32,000 requests in one write cost the server 0.24 to 0.27 ms each, where
+  one at a time they cost 0.06 ms. The server keeps an offset into what has
+  arrived and moves what is left to the front once, before the next read:
+  the same bursts cost 0.024 to 0.036 ms a request.
+  `bench/std_http_exercise.iyi` writes a thousand requests at once and
+  counts what each allocates, under 8 KB (1,437 bytes now); the old module
+  allocated 35,406.
+
 - **The server answers 400 to an HTTP/1.1 request without `Host`, to any
   request with two `Host` lines or with one that is not a host, and an
   absolute-form target's authority is the request's `Host`.** RFC 9112 §3.2

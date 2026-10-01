@@ -285,12 +285,24 @@ PY
 }
 mutate "a status parsed as zero" '{code, reason}' '{0, reason}'
 mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca + 0_u8 if ca >= 65_u8 && ca <= 90_u8'
-mutate "a chunked body left as it came" 'body = decode_chunked(body) if' 'body = body + "" if'
+mutate "a chunked body left as it came" 'body = decode_chunked(body)' 'body = body + ""'
 mutate "a server that forgets keep-alive" 'wrote.is_a?(Int32) && !close' 'wrote.is_a?(Int32) && false'
 mutate "Connection read as one value" 'HTTP.has_token?(conn, "close")' 'HTTP.same_name?(HTTP.trim(conn), "close")'
 mutate "a server that answers every request 200" 'Response.new(400, reason' 'Response.new(200, reason'
-mutate "a server that parses the body so far after every read" 'wanted = parsed.wanted' 'wanted = 0'
-mutate "a server that parses a chunked body again after every read" 'if head = parsed.chunked' 'if head = nil.as(Request?)'
+mutate "a server that parses the body so far after every read" 'while have < wanted' 'while have < rest.bytesize + 1'
+mutate "a server that parses a chunked body again after every read" '        read = HTTP.read_chunked(buffer, parsed.consumed, MAX_BODY) { wait_read(client, listener, idle) }' '        more = wait_read(client, listener, idle)
+        return unless more
+        buffer = buffer + more
+        next if more.bytesize > 0
+        read = HTTP.read_chunked(buffer, parsed.consumed, MAX_BODY) { wait_read(client, listener, idle) }'
+mutate "a server that holds a body at its declared length, not at what has arrived" 'have = have + more.bytesize' 'have = have + more.bytesize
+      String::Builder.new(wanted) if pieces.size == 2'
+mutate "a server that adds each read to the head so far and searches all of it" '        text, ends = HTTP.read_head(rest, 0, MAX_HEAD) { wait_read(client, listener, idle) }' '        more = wait_read(client, listener, idle)
+        return unless more
+        text = rest + more
+        ends = HTTP.find_headers_end(text)'
+mutate "a server that waits on a client partway through a body" 'got = read_body(client, rest, wanted, listener, idle)' 'got = read_body(client, rest, wanted, listener, nil)'
+mutate "a server that cuts each request off the front of the read" 'start = parsed.consumed' 'buffer = buffer[parsed.consumed, buffer.bytesize - parsed.consumed]'
 mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
 mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
 mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle)' '          accepted = client

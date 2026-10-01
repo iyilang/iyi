@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`String#lines` keeps a last `\r` that no `\n` follows.** It took
+  `\r` off every piece, so `"a\nb\r".lines` was `["a", "b"]` while
+  std/text's `each_line` gave `["a", "b\r"]`. Only a line that `\n`
+  ended loses its `\r` now, which is Crystal 1.21's answer. bench/
+  io_exercise checks it with `"\r".lines` and `"a\r\n\r".lines`; the
+  old prelude failed at "lines: a last \r with no \n after it was
+  dropped".
+
 - **`gsub("", replacement)` and `gsub("") { }` in std/text write the
   replacement before every character and at the end.** Both answered the
   string unchanged - `"abc".gsub("", "-")` was `"abc"` - while

@@ -392,11 +392,14 @@ class String
   # The lines of a text, blank ones included, a final newline ending the last
   # line; `\r\n` ends one too, as in Crystal - a Windows file's lines kept the
   # `\r`, and `"1\r\n".lines[0].to_i` panicked where `File.read_lines` read 1.
+  # A last `\r` with no `\n` after it stays, as `each_line` keeps it:
+  # `"a\nb\r".lines` was `["a", "b"]`.
   def lines : Array(String)
     return [] of String if bytesize == 0
     pieces = split('\n')
-    pieces.pop if pieces.last.empty?
-    pieces.map { |line| line.chomp('\r') }
+    tail = pieces.pop
+    pieces = pieces.map { |line| line.chomp('\r') }
+    tail.empty? ? pieces : pieces << tail
   end
 
   private def byte_slice(start : Int32, count : Int32) : String

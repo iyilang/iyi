@@ -531,15 +531,22 @@ struct ::Int
     (self & mask) == mask
   end
 
+  # Euclid on the side of zero where every magnitude fits, as `Math.gcd`
+  # works: the non-positive side for a signed type, its minimum included.
+  # Taking `abs` first refused the minimum, and `(-2147483648).gcd(6)`
+  # panicked "arithmetic overflow" where `Math.gcd` answered 2. Only
+  # gcd(minimum, 0), whose answer does not fit, overflows.
   def gcd(other : self) : self
-    a = abs
-    b = other.abs
+    zero = self - self
+    signed = zero &- 1 < zero
+    a = signed && self > 0 ? zero - self : self
+    b = signed && other > 0 ? zero - other : other
     while b != 0
       t = b
       b = a % b
       a = t
     end
-    a
+    signed ? zero - a : a
   end
 
   def lcm(other : self) : self

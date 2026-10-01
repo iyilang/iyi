@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`Int#gcd` answers for a type's minimum whenever the answer fits.** It
+  took both magnitudes first, and `abs` of the minimum overflows:
+  `(-2147483648).gcd(6)` panicked "arithmetic overflow" where
+  `Math.gcd(-2147483648, 6)` answers 2, and so did `(-128_i8).gcd(96_i8)`,
+  `Int64::MIN.gcd(12)` and `Int128::MIN.gcd(-6)`. It runs Euclid on the
+  non-positive side now, as `Math.gcd` does: 2, 32, 4 and 2. Only
+  gcd(minimum, 0), whose answer does not fit, still overflows.
+  `bench/std_int_exercise.iyi` checks the minimum of Int8, Int32, Int64
+  and Int128; the old module panicked "arithmetic overflow".
+
 - **`String#to_f?` reads "-NaN" and "+NaN" as `to_f` does.** The
   nil-answering form special-cased "NaN" and the three spellings of an
   infinity, so `"-NaN".to_f?` and `"+NaN".to_f?` were nil where `to_f`

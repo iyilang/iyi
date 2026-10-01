@@ -156,4 +156,15 @@ assert_true List(Int8).new([1_i8, 2_i8, 3_i8]).sum == 6_i8, "i8 sum"
 assert_true List(UInt16).new([] of UInt16).sum == 0_u16, "u16 empty sum"
 puts "  Comparable and Num for the rest of the tower"
 
+# A type's minimum has a gcd whenever the answer fits, as `Math.gcd`
+# answers: `abs` came first and refused it, so `(-2147483648).gcd(6)`
+# panicked "arithmetic overflow" where Math.gcd gave 2.
+puts "\n== gcd"
+assert_true (-2147483648).gcd(6) == 2 && 6.gcd(-2147483648) == 2, "Int32::MIN and 6"
+assert_true (-128_i8).gcd(96_i8) == 32_i8, "Int8::MIN and 96"
+assert_true (-9223372036854775808_i64).gcd(12_i64) == 4_i64, "Int64::MIN and 12"
+assert_true (-170141183460469231731687303715884105728_i128).gcd(-6_i128) == 2_i128, "Int128::MIN and -6"
+assert_true 12.gcd(-18) == 6 && 0.gcd(-5) == 5 && 255_u8.gcd(85_u8) == 85_u8, "the ordinary answers stay"
+puts "  a minimum's gcd, where it fits"
+
 puts "\nALL CHECKS PASSED"

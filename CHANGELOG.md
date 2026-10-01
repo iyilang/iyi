@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **A Windows `Path` compares case-insensitively in every script when the
+  program runs on Windows, as its file systems fold a name.** Only ASCII
+  letters were folded: `Path.windows("C:\\Ä") == Path.windows("c:\\ä")` was
+  false for what NTFS holds as one file. A name with a letter past ASCII is
+  folded by `LCMapStringEx`'s uppercase without linguistic casing, measured
+  to make the same classes as `CompareStringOrdinal`'s on every BMP code
+  unit, and a surrogate pair is left as written, as both leave it; `==`,
+  `hash`, `<=>` and `relative_to` read the same fold, and an all-ASCII name
+  compares as before. Built for another platform, ASCII alone is folded
+  still, as the module's header now says. `bench/std_path_exercise.iyi`
+  checks equality, the hash, `relative_to` and order; the old module
+  answered false.
+
 - **`File.touch` on Windows refuses a second a file time cannot hold, by
   name.** A FILETIME counts 100-nanosecond ticks from 1601 to the year
   30828: `touch(path, 1_000_000_000_000)` - any second past 910692730085 -

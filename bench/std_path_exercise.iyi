@@ -231,6 +231,19 @@ assert_str("foo:\\bar", Path.windows("foo:").join("bar").to_s, "only a bare driv
 # `/` and `\` are one separator to `==` and to a hash as well.
 assert_true(Path.windows("C:/a") == Path.windows("C:\\a"), "/ and \\ are one separator in ==")
 assert_true(h[Path.windows("c:/a")]? == 1, "and in the hash")
+{% if flag?(:win32) %}
+  # In every script, as NTFS folds a name: ASCII alone was folded, and
+  # `C:\Ä` and `c:\ä` were two paths for one file. In the hash, in
+  # `relative_to`'s parts and in order too; and a fold is a letter for a
+  # letter, so `ß` is not `SS`.
+  assert_true(Path.windows("C:\\\u00c4") == Path.windows("c:\\\u00e4"), "windows names fold case beyond ASCII")
+  h[Path.windows("C:\\\u00c4\u0416")] = 2
+  assert_true(h[Path.windows("c:/\u00e4\u0436")]? == 2, "and the hash folds them")
+  assert_str("c", Path.windows("C:\\\u00c4b\\c").relative_to(Path.windows("c:\\\u00e4B")).to_s, "relative_to folds them")
+  assert_true(Path.windows("C:\\\u00c4\\a") < Path.windows("c:\\\u00e4\\b"), "a folded name orders by what follows")
+  assert_true(Path.windows("\u00df") != Path.windows("SS"), "a fold is one letter for one")
+  puts "  windows names fold case in every script"
+{% end %}
 puts "  drive, root, UNC, rooted, normalize, conversions, case folding verified"
 
 puts "\n== path comparison via Comparable"

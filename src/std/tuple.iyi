@@ -92,38 +92,43 @@ struct ::Tuple
   end
 
   # Returns a new Tuple with each element mapped through the block.
+  #
+  # This, `+`, `reverse`, and `NamedTuple#keys` and `#values` build with
+  # `Tuple.new(...)`, not braces: with no members `{ }` is an empty hash
+  # literal, so on the empty tuple each failed to compile with "for empty
+  # hashes use '{} of KeyType => ValueType'".
   def map(&)
     {% begin %}
-      {
+      Tuple.new(
         {% for i in 0...T.size %}
           yield(self[{{i}}]),
         {% end %}
-      }
+      )
     {% end %}
   end
 
   # Concatenates two tuples.
   def +(other : Tuple(*U)) forall U
     {% begin %}
-      {
+      Tuple.new(
         {% for i in 0...T.size %}
           self[{{i}}],
         {% end %}
         {% for i in 0...U.size %}
           other[{{i}}],
         {% end %}
-      }
+      )
     {% end %}
   end
 
   # Reverses elements in tuple.
   def reverse
     {% begin %}
-      {
+      Tuple.new(
         {% for i in 1..T.size %}
           self[{{T.size - i}}],
         {% end %}
-      }
+      )
     {% end %}
   end
 end
@@ -221,25 +226,27 @@ struct ::NamedTuple
     {% end %}
   end
 
-  # Returns a Tuple containing the key symbols in order.
+  # Returns a Tuple containing the key symbols in order. Built with
+  # `Tuple.new`, as `Tuple#map` is: for the named tuple with no keys,
+  # braces are an empty hash literal.
   def keys
     {% begin %}
-      {
+      Tuple.new(
         {% for key in T.keys %}
           {{key.symbolize}},
         {% end %}
-      }
+      )
     {% end %}
   end
 
   # Returns a Tuple containing the values in order.
   def values
     {% begin %}
-      {
+      Tuple.new(
         {% for key in T.keys %}
           self[{{key.symbolize}}],
         {% end %}
-      }
+      )
     {% end %}
   end
 

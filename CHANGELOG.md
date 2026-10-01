@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **The empty tuple reverses, maps and adds, the empty named tuple has
+  `keys` and `values`, and `Tuple.new.to_a` prints.** `Tuple#reverse`,
+  `#map`, `#+` and `NamedTuple#keys` and `#values` built their result as a
+  brace literal, which with no members is `{ }`, an empty hash: each
+  failed to compile with "for empty hashes use '{} of KeyType =>
+  ValueType'". They build with `Tuple.new(...)` now, and print `{}`.
+  `Array#to_s` of an `Array(NoReturn)`, which `Tuple.new.to_a` is, failed
+  with "can't infer block return type"; the inspected text is cast to
+  `String` and it prints `[]`. `bench/std_tuple_exercise.iyi` and
+  `bench/std_named_tuple_exercise.iyi` check each; with the old module or
+  the old prelude they do not compile.
+
 - **`StaticArray` and `BitArray` take an `Int64` index past `Int32`:
   `[]?` answers nil, `[]` refuses with the module's sentence, and `fill`,
   `index`, `rindex` and `StaticArray#rotate_in_place` answer.** Each

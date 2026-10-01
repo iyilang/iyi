@@ -59,7 +59,21 @@ empty_a = Tuple.new.to_a
 assert_true empty_a.size == 0 && empty_a.empty?, "to_a of the empty tuple is empty"
 assert_str "Array(NoReturn)", typeof(empty_a).to_s, "to_a of the empty tuple"
 assert_str "[1, \"a\"]", {1, "a"}.to_a.to_s, "to_a of a pair"
+# And printed: `Array(NoReturn)#to_s` failed to compile with "can't infer
+# block return type", the union of no types being no type for the block.
+assert_str "[]", empty_a.to_s, "to_a of the empty tuple, printed"
 puts "  the empty tuple and a pair"
+
+puts "\n== the empty tuple"
+# Built with braces, which with no members are `{ }`, an empty hash
+# literal: each of these failed to compile with "for empty hashes use '{}
+# of KeyType => ValueType'".
+assert_str "{}", Tuple.new.reverse.to_s, "reverse of the empty tuple"
+assert_str "{}", Tuple.new.map { |x| x }.to_s, "map of the empty tuple"
+assert_str "{}", (Tuple.new + Tuple.new).to_s, "the empty tuple plus the empty tuple"
+assert_str "{\"a\", 1}", {1, "a"}.reverse.to_s, "reverse of a pair"
+assert_str "{1, \"b\", 2.5}", ({1} + {"b", 2.5}).to_s, "a single plus a pair"
+puts "  reverse, map and + of nothing"
 
 puts "\n== first"
 assert_true ({7, 8}).first == 7, "first"

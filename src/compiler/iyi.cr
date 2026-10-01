@@ -186,7 +186,9 @@ module Iyi
           # `.exe` and nothing else, so `iyi bat` with `iyi-bat.cmd` on PATH
           # answered "unknown command or missing file: bat" about a file
           # that was right there. Said by name instead.
-          if script = {".cmd", ".bat"}.compact_map { |ext| Process.find_executable("iyi-#{command}#{ext}") }.first?
+          # A lookup and nothing run: the name is built first, which is
+          # how `build_tool_floor.sh` tells it from a tool the compiler runs.
+          if script = {".cmd", ".bat"}.compact_map { |ext| name = "iyi-#{command}#{ext}"; Process.find_executable(name) }.first?
             STDERR.puts "iyi: #{script} is a batch file, and an extension must be an .exe: iyi-#{command}.exe."
             exit 1
           end

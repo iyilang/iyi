@@ -142,6 +142,32 @@
 
 ### Fixed
 
+- **`sprintf` writes a float past `Int64` under an integer verb as its exact
+  integer, and refuses NaN, the infinities, a width or precision past
+  `Int32` and a `%g` precision past 401 by name.** `%d` of 1e30, `%d` of NaN
+  and `%99999999999d` all panicked "arithmetic overflow", from the float's
+  `to_i64` and from the width's `Int32` parse, and `%.402g` was refused as
+  "precision must be at most 400, not 401", which names neither the
+  precision written nor `%g`'s limit. A float outside `Int64` is now written
+  from its own integer, f * 2^e, as Python writes it: `%d` of 1e30 is
+  1000000000000000019884624838656 and `%x` of -1e30
+  -c9f2c9cd04675000000000000. NaN and the infinities are refused with "%d
+  wants a finite number, and NaN is not one", a width or precision past
+  2147483647 with "width must be at most 2147483647, not 99999999999", and
+  `%.402g` with "precision must be at most 401, not 402".
+  `bench/format_exercise.iyi` checks the digits and the four refusals; the
+  old module panicked "arithmetic overflow" at the first.
+
+- **`%u` of a negative `Int8`, `Int16` or `Int128` is the word's bits at its
+  own width.** `Int8` and `Int16` were widened to `Int64` first, so `%u` of
+  -5_i8 and of -5_i16 printed 18446744073709551611, and an `Int128` was
+  written with its sign, `%u` of -5_i128 printing -5, where the module's own
+  rule (an `Int32` masked to 32 bits, an `Int64` read as a `UInt64`) gives
+  251, 65531 and 340282366920938463463374607431768211451. They are masked to
+  their own width now, and a negative `Int128` is read as a `UInt128`.
+  `bench/format_exercise.iyi` checks all three; the old module answered
+  [18446744073709551611|18446744073709551611|-5].
+
 - **`%s` and `%p` of a `Float32` print the `Float32`'s own text.** A
   `Float32` was widened to a `Float64` before the verb was read, so `%s` and
   `%p` printed the double's digits: `sprintf("%s", 0.1_f32)` was

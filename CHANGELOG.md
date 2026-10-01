@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **`iyi migrate` migrates a CRLF or byte-order-marked tree as it
+  migrates the LF one.** Lines were split on `\n` and every rule is
+  anchored with `$`, so in a CRLF file `module Shop\r` was never peeled
+  as a wrapper, and a mark in front of line 1 hid its `require` and was
+  copied into the middle of a module (`undefined method '\uFEFFrequire'`).
+  The bench fixture, eight files that become eight modules that all
+  compile, became "8 files → 4 modules" and "2 of 4 modules compile" as
+  CRLF, and "0 of 8 modules compile" with a mark. A checkout without the
+  repository's `*.cr eol=lf` hands the verb exactly that. A source is read
+  without its mark and with CRLF folded, and each module, its sidecar
+  too, is written with its first source file's line ending.
+  `bench/migrate_gate.sh` migrates the fixture as CRLF and as marked and
+  compares each module with the LF tree's; the old verb failed both.
+
 - **`iyi mcp` answers a line that is not a request object, and keeps
   serving.** Every field was read with `[]?`, which raises on what is not
   an object, so a batch array, `42`, `"x"`, `"params":[1]` or

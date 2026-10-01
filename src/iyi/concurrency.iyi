@@ -1124,14 +1124,52 @@ class IyiScheduler
   # it with nothing printed (`thread_exercise`, once in sixty runs there).
   # Only a fiber the registry holds is unlinked - `unregister` of one it
   # does not would rewrite the head.
+  #
+  # And what the scheduler made for the thread goes with it: the poller,
+  # Windows' deadline timer, the stacks in the pool, and the state on the
+  # roots' list. None of it was ever given back, and a thread that slept
+  # once left two handles: a thousand of them, run and joined one after
+  # another, took the process from 60 handles to 2,061, and a thousand
+  # that each ran four tasks kept 259 MiB of stacks committed after they
+  # had all ended.
   def self.retire_thread : Nil
     state = @@state
     return if state.is_a?(Nil)
     main = state.current
-    return unless main.is_a?(IyiFiber)
-    head = @@all_head
-    linked = main.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == main.object_id)
-    unregister(main) if linked
+    if main.is_a?(IyiFiber)
+      head = @@all_head
+      linked = main.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == main.object_id)
+      unregister(main) if linked
+    end
+    reap_dying
+    __iyi_close(state.pollfd) if state.pollfd > 0_i64
+    {% if flag?(:win32) %}
+      __iyi_close(state.deadline_timer) if state.deadline_timer > 0_i64
+    {% end %}
+    base = state.stack_pool
+    while base != 0_u64
+      following = Pointer(UInt64).new(base + IyiFiber::STACK_BYTES - 8_u64).value
+      __iyi_munmap(base, IyiFiber::STACK_BYTES)
+      base = following
+    end
+    state.stack_pool = 0_u64
+    IyiRuntimeLock.lock
+    previous : IyiSchedulerState? = nil
+    cursor = @@states_head
+    while cursor.is_a?(IyiSchedulerState)
+      if cursor.object_id == state.object_id
+        if previous.is_a?(IyiSchedulerState)
+          previous.next_state = state.next_state
+        else
+          @@states_head = state.next_state
+        end
+        break
+      end
+      previous = cursor
+      cursor = cursor.next_state
+    end
+    IyiRuntimeLock.unlock
+    @@state = nil
   end
 
   # The top of the fiber stack holding `address`, 0 when no fiber's

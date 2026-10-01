@@ -254,6 +254,33 @@
     registered
   end
 
+  # This thread's scheduler and every other one still on the roots' list.
+  def scheduler_states : Int32
+    states = 0
+    state = IyiScheduler.first_state
+    while state.is_a?(IyiSchedulerState)
+      states = states + 1
+      state = state.next_state
+    end
+    states
+  end
+
+  {% if flag?(:win32) %}
+    lib LibC
+      fun GetProcessHandleCount(process : Void*, count : Int32*) : Int32
+    end
+  {% end %}
+
+  # The process's open handles on Windows; 0 elsewhere, where the check
+  # that reads it has nothing to compare.
+  def process_handles : Int32
+    handles = 0
+    {% if flag?(:win32) %}
+      LibC.GetProcessHandleCount(LibC.GetCurrentProcess, pointerof(handles))
+    {% end %}
+    handles
+  end
+
   args = Program.args
   count = args.size > 0 ? args[0].to_i : 8
   fail("at least one thread") if count < 1
@@ -298,6 +325,32 @@
   stopped = IyiThread.stopped
   fail("collections ran but no thread was ever stopped by one") if stops == 0_u64 || stopped == 0_u64
   puts "threads: #{count} threads, #{Tally.allocations.value.get.to_i64} allocations, #{collections.to_i64} collections; #{stops.to_i64} stops parked #{stopped.to_i64} threads; every live list intact, by checksum and by the sweep's flag"
+
+  # ── 1b. A finished thread gives its scheduler back ─────────────────────
+  # A thread's scheduler makes a poller, on Windows a deadline timer, and
+  # stacks for its tasks, and kept them all, with its state on the roots'
+  # list, after the thread was gone: a thousand threads that each slept
+  # once left 2,001 handles behind them. Two hundred threads that each
+  # sleep in four tasks leave the list where it was, and Windows' handle
+  # count within 20 of it.
+  states_before = scheduler_states
+  handles_before = process_handles
+  index = 0
+  while index < 200
+    worker = IyiThread.start do
+      group do |g|
+        4.times { g.spawn { sleep(1); 0 } }
+      end
+      nil
+    end
+    worker.join
+    index = index + 1
+  end
+  states_left = scheduler_states - states_before
+  fail("teardown: 200 finished threads left #{states_left} scheduler states on the roots' list") if states_left != 0
+  handles_left = process_handles - handles_before
+  fail("teardown: 200 finished threads left #{handles_left} handles open") if handles_left > 20
+  puts "teardown: 200 finished threads gave their schedulers back"
 
   # ── 2. The price: allocations per second per thread ────────────────────
   # Each thread allocates a fixed count from its own cache with the

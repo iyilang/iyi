@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **A finished `IyiThread` gives its scheduler back: the poller, the
+  deadline timer, the pooled task stacks and the state.** None of them was
+  released: 1,000 threads run and joined one after another, each sleeping
+  once, took the process from 60 handles to 2,061, and 1,000 that each ran
+  four tasks kept 259 MiB more committed after they had ended (3,000: 583
+  MiB), against 85 MiB (93) for threads that ran no task. A thread's
+  retirement now closes its completion port and timer, unmaps every stack in
+  its pool and unlinks its state from the roots' list: the same runs end at
+  54 handles from 53, and at 101 MiB (3,000: 109 MiB) against the control's
+  85 (93). Linux's epoll fd and darwin's kqueue are closed the same way
+  [INFERENCE: not run], and darwin's thread floor names `close` for it,
+  which the cross-compiled object asks for now and did not before.
+  `bench/thread_exercise.iyi` runs 200 such threads and requires the state
+  list where it was and Windows' handle count within 20 of it; the old
+  runtime answered "left 200 scheduler states on the roots' list", and with
+  only the two closes taken out "left 400 handles open".
+
 - **Standard input can be read from any `IyiThread` on Windows.** Standard
   input's reader thread posted every line to the completion port of the
   first thread that read it, and woke the one waiter the process kept: after

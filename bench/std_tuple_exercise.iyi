@@ -84,4 +84,24 @@ assert_str "content-type=text/plain x y=1 plain=2", walked.join(" "), "each with
 assert_str "{\"1a\": 1, \"_\": 2, a_1: 3}", {"1a": 1, "_": 2, a_1: 3}.to_s, "to_s quotes a leading digit and a lone _"
 puts "  quoted keys print, compare, walk and answer"
 
+puts "\n== equality across union members"
+# Any tuple of the size, member by member where one type holds the other:
+# `==` took `self`, which `{1, 2}` matched for `{1, y}` (y : Int32?) and
+# `{1, y}` did not for `{1, 2}`, so the pair was equal one way only and a
+# `case` over them did not match. Named tuples the same, by name.
+y = Program.args.size > 100 ? nil : 2
+assert_true ({1, y}) == ({1, 2}) && ({1, 2}) == ({1, y}), "{1, y} and {1, 2} are equal both ways"
+matched = false
+case {1, y}
+when {1, 2}
+  matched = true
+end
+assert_true matched, "case {1, y} when {1, 2} matches"
+assert_true ({a: 1, b: y}) == ({a: 1, b: 2}) && ({a: 1, b: 2}) == ({a: 1, b: y}), "{a: 1, b: y} and {a: 1, b: 2} are equal both ways"
+assert_true ({b: 2, a: 1}) == ({a: 1, b: y}), "a named tuple equal whichever order the keys were written in"
+# Unrelated member types stay unequal, as they hash apart.
+assert_true ({-1}) != ({-1_i64}) && ({a: -1}) != ({a: -1_i64}), "Int32 and Int64 members are unequal"
+assert_true ({1, 2}) != ({1, 2, 3}) && ({a: 1}) != ({a: 1, b: 2}) && ({a: 1}) != ({b: 1}), "another size or other keys are unequal"
+puts "  {1, y} == {1, 2} both ways, a case over them matches, named alike"
+
 puts "\nALL CHECKS PASSED"

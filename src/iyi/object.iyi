@@ -116,13 +116,14 @@ struct Tuple
   # own result answered no, and a `case` over a tuple matched nothing,
   # because a `when` is `===` and `===` is `==`.
   #
-  # Restricted to `self`, so two tuples of different shapes are unequal
-  # rather than a compile error.
-  def ==(other : self) : Bool
-    {% for i in 0...T.size %}
-      return false unless self[{{i}}] == other[{{i}}]
+  # Any tuple its size, member by member where one type holds the other:
+  # `self` took `{1, 2}` for `{1, y}` (y : Int32?) and not back, so `case
+  # {1, y} when {1, 2}` missed. `{-1}` and `{-1_i64}` hash apart: unequal.
+  def ==(other : Tuple(*U)) : Bool forall U
+    {% for i in 0...(T.size == U.size ? T.size : 0) %}
+      return false unless {{ T[i] <= U[i] || U[i] <= T[i] }} && self[{{i}}] == other[{{i}}]
     {% end %}
-    true
+    {{ T.size == U.size }}
   end
 
   # And hashing follows equality, or the agreement above buys nothing: a key

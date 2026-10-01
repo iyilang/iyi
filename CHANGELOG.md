@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`{1, 2} == {1, y}` is true when `y : Int32?` holds 2, as
+  `{1, y} == {1, 2}` was, and a `case` over the pair matches; named tuples
+  alike.** `Tuple#==` (src/iyi/object.iyi) and `std/tuple`'s
+  `NamedTuple#==` took `self`, which a tuple with narrower members matched
+  and one with wider members did not, so the reverse fell to `Object#==`
+  and answered false, and `case {1, y} when {1, 2}` did not match. Both
+  take any tuple now and compare member by member where one member's type
+  holds the other's; a named tuple compares its keys sorted, then its
+  values in that order. `{-1} == {-1_i64}` stays false, since the two hash
+  apart. `bench/std_tuple_exercise.iyi` checks both directions, the `case`
+  and the named pair; the old prelude answered false for `{1, 2} == {1, y}`
+  and the old module false for `{a: 1, b: 2} == {a: 1, b: y}`.
+
 - **An adaptor built on a `SliceIterator` advances it.** `SliceIterator`
   was a struct, so `first(2)` took a copy and the source started again:
   `it.first(2).to_a` and then `it.to_a` gave [1, 2] and [1, 2, 3, 4], where

@@ -142,6 +142,24 @@
 
 ### Fixed
 
+- **`iyi lsp` survives a didOpen, didChange, didClose or didSave of the
+  wrong shape, and skips a change it cannot read rather than the frame it
+  came in.** The proxy read the four notifications that carry a buffer as
+  the protocol spells them, outside every rescue: a didOpen with no text
+  ("Missing hash key: \"text\""), a didOpen whose uri is a number, a
+  didChange with no contentChanges, a change with no text or whose line
+  is 0.5 or 2^40 ("Cast from Float64 to Int+ failed", "Arithmetic
+  overflow"), and params that are null, a string or an array each ended
+  the session with exit 1, and the next request read end of file. The
+  worker alone survived them by dropping the whole frame, so a readable
+  change after an unreadable one in the same frame was lost. The proxy
+  reads each field by its shape now and forwards every frame as before,
+  and `Text.apply` hands back the text unchanged for a change it cannot
+  read, in both processes, so their buffers still agree. Steps 60b and
+  60c of `bench/lsp_session.py` check it; the old server ended the
+  session at the first of the ten frames, and the old worker pulled no
+  diagnostic for the readable change.
+
 - **The empty tuple reverses, maps and adds, the empty named tuple has
   `keys` and `values`, and `Tuple.new.to_a` prints.** `Tuple#reverse`,
   `#map`, `#+` and `NamedTuple#keys` and `#values` built their result as a

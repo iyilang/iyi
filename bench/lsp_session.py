@@ -2366,6 +2366,67 @@ def main():
          "error" not in reply,
          json.dumps(reply.get("error") or reply.get("result"))[:80])
 
+    # 60b. The proxy keeps a copy of every open buffer, and it read the
+    #      four notifications that carry one as the protocol spells them:
+    #      any other shape raised outside every rescue and the session
+    #      ended with exit 1 - a didOpen with no text ("Missing hash key"),
+    #      a change whose line is 0.5 or 2^40 ("Cast from Float64",
+    #      "Arithmetic overflow"), a didSave whose params are a string
+    #      ("Expected Hash"). The worker alone had survived every one. Each
+    #      is sent here, and the hover after it must be answered.
+    mal = os.path.join(work, "mal.iyi")
+    with open(mal, "w") as f:
+        f.write("module mal\n\nputs 1\n")
+    mal_uri = file_uri(mal)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": mal_uri, "languageId": "iyi",
+                             "version": 1, "text": "module mal\n\nputs 1\n"}}, wait=False)
+    c.diagnostics(mal_uri)
+    here = {"uri": mal_uri, "version": 2}
+    origin = {"line": 0, "character": 0}
+    far = {"line": 2 ** 40, "character": 0}
+    misshapen = [
+        ("textDocument/didOpen", {"textDocument": {"uri": mal_uri, "languageId": "iyi", "version": 1}}),
+        ("textDocument/didOpen", {"textDocument": {"uri": 5, "text": "x"}}),
+        ("textDocument/didOpen", None),
+        ("textDocument/didChange", {"textDocument": here}),
+        ("textDocument/didChange", {"textDocument": here, "contentChanges": [
+            {"range": {"start": origin, "end": origin}}]}),
+        ("textDocument/didChange", {"textDocument": here, "contentChanges": [
+            {"range": {"start": {"line": 0.5, "character": 0}, "end": origin}, "text": "x"}]}),
+        ("textDocument/didChange", {"textDocument": here, "contentChanges": [
+            {"range": {"start": far, "end": far}, "text": "x"}]}),
+        ("textDocument/didChange", "oops"),
+        ("textDocument/didClose", [1]),
+        ("textDocument/didSave", "x"),
+    ]
+    held = 0
+    for method, params in misshapen:
+        try:
+            c.send(method, params, wait=False)
+            reply = c.send("textDocument/hover", {
+                "textDocument": {"uri": mal_uri}, "position": {"line": 2, "character": 0}})
+        except (SystemExit, OSError):
+            break
+        if "error" in reply:
+            break
+        held += 1
+    step("60b", "a buffer notification of the wrong shape does not end the session",
+         held == len(misshapen), f"{held} of {len(misshapen)} answered after")
+
+    # 60c. and a change that cannot be read is skipped, not the frame it
+    #      came in: the worker raised on it and dropped the whole frame, so
+    #      the readable change after it was lost too.
+    span = {"start": {"line": 2, "character": 5}, "end": {"line": 2, "character": 6}}
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": mal_uri, "version": 30},
+            "contentChanges": [{"range": span}, {"range": span, "text": "nope"}]}, wait=False)
+    reply = c.send("textDocument/diagnostic", {"textDocument": {"uri": mal_uri}})
+    items = (reply.get("result") or {}).get("items", [])
+    step("60c", "a change that cannot be read is skipped, and the next one applies",
+         [d["range"]["start"]["line"] for d in items if "nope" in d["message"]] == [2],
+         f"{len(items)} item(s): {items and items[0]['message'][:50]}")
+
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has
     # for it rather than an empty result.

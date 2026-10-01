@@ -11,19 +11,39 @@ module Iyi::Lsp::Text
 
   # One contentChange: a range in wire units replaced by new text, or
   # the whole document when the range is absent.
+  #
+  # A change of the wrong shape is skipped and the text comes back as it
+  # was. `change["text"].as_s` and `range[…]["line"].as_i` raised on a
+  # change with no text, a line of 0.5 and a line of 2^40 ("Missing hash
+  # key", "Cast from Float64", "Arithmetic overflow"); the worker rescued
+  # that and dropped the frame, the proxy did not and the session ended
+  # with exit 1. Both keep a buffer with this, so skipping here is
+  # skipping in both, and the two buffers still agree.
   def apply(text : String, change : JSON::Any) : String
-    new_text = change["text"].as_s
-    range = change["range"]?
-    return new_text unless range
+    return text unless new_text = change.as_h?.try(&.["text"]?).try(&.as_s?)
+    return new_text unless range = change["range"]?
+    return text unless (start = position(range, "start")) && (finish = position(range, "end"))
 
-    start_offset = offset_at(text, range["start"]["line"].as_i, range["start"]["character"].as_i)
-    end_offset = offset_at(text, range["end"]["line"].as_i, range["end"]["character"].as_i)
+    start_offset = offset_at(text, *start)
+    end_offset = offset_at(text, *finish)
     end_offset = start_offset if end_offset < start_offset
     String.build(text.bytesize + new_text.bytesize) do |io|
       io.write text.to_slice[0, start_offset]
       io << new_text
       io.write text.to_slice[end_offset, text.bytesize - end_offset]
     end
+  end
+
+  # A range's `start` or `end` as line and character, or nil where it is
+  # the wrong shape: not two integers a position can hold. The protocol's
+  # uinteger stops at 2^31 - 1, which is also where `Int32` does.
+  private def position(range : JSON::Any, key : String) : {Int32, Int32}?
+    return unless point = range.as_h?.try(&.[key]?).try(&.as_h?)
+    line = point["line"]?.try(&.raw)
+    character = point["character"]?.try(&.raw)
+    return unless line.is_a?(Int64) && character.is_a?(Int64)
+    return unless Int32::MIN <= line <= Int32::MAX && Int32::MIN <= character <= Int32::MAX
+    {line.to_i32, character.to_i32}
   end
 
   # Byte offset of an LSP position: 0-based line, UTF-16 character.

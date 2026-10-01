@@ -240,24 +240,32 @@ module Iyi::Lsp
 
       # The proxy reads what it has to keep and nothing else. Every
       # frame still reaches the worker below, so a method this case
-      # does not name is not a method this proxy has to know.
+      # does not name is not a method this proxy has to know — and a
+      # frame of the wrong shape is kept by nobody here and refused by
+      # the worker. These were read as the protocol spells them, and any
+      # other shape raised outside every rescue: a didOpen with no text
+      # ("Missing hash key"), a didSave whose params were a string
+      # ("Expected Hash"), a didChange with no contentChanges each ended
+      # the session with exit 1, where the worker alone had survived
+      # them all.
       case method
       when "initialize", "initialized"
         # Kept for a successor to be handed, and kept *after* the frame
         # is forwarded (below): a worker spawned by this very frame must
         # not also be handed a replay of it.
       when "textDocument/didOpen"
-        if params && (document = params["textDocument"]?)
-          uri = document["uri"].as_s
-          @documents[uri] = document["text"].as_s
+        document = params.try(&.as_h?).try(&.["textDocument"]?).try(&.as_h?)
+        if document && (uri = document["uri"]?.try(&.as_s?)) &&
+           (text = document["text"]?.try(&.as_s?))
+          @documents[uri] = text
           @versions[uri] = document["version"]?.try(&.as_i64?) || 0_i64
           @focus = uri
         end
       when "textDocument/didChange"
-        if params && (uri = params.dig?("textDocument", "uri").try(&.as_s?))
+        if params && (uri = uri_of(params)) && (first = changes_of(params))
           text = @documents[uri]? || ""
           changes = [] of JSON::Any
-          params["contentChanges"].as_a.each do |change|
+          first.each do |change|
             text = Text.apply(text, change)
             changes << change
           end
@@ -274,11 +282,13 @@ module Iyi::Lsp
             break unless queued = @pending.first?
             other = parse(queued).try(&.as_h?)
             break unless other && other["method"]?.try(&.as_s?) == "textDocument/didChange"
-            other_params = other["params"]
-            break unless other_params.dig?("textDocument", "uri").try(&.as_s?) == uri
+            # One of the wrong shape ends the burst, and reaches the
+            # worker on its own, as it came.
+            break unless (other_params = other["params"]?) && uri_of(other_params) == uri &&
+                         (more = changes_of(other_params))
             @pending.shift
             newest = other_params
-            other_params["contentChanges"].as_a.each do |change|
+            more.each do |change|
               text = Text.apply(text, change)
               changes << change
             end
@@ -291,9 +301,10 @@ module Iyi::Lsp
           return
         end
       when "textDocument/didSave"
-        @focus = params.try(&.dig?("textDocument", "uri")).try(&.as_s?) || @focus
+        # Params of the wrong shape name no file, and the focus stays.
+        @focus = uri_of(params) || @focus
       when "textDocument/didClose"
-        if uri = params.try(&.dig?("textDocument", "uri")).try(&.as_s?)
+        if uri = uri_of(params)
           @documents.delete(uri)
           @focus = nil if @focus == uri
         end
@@ -354,6 +365,17 @@ module Iyi::Lsp
           break
         end
       end
+    end
+
+    # The `textDocument.uri` a notification names, or nil where its
+    # params are the wrong shape to have one.
+    private def uri_of(params : JSON::Any?) : String?
+      params.try(&.as_h?).try(&.["textDocument"]?).try(&.as_h?).try(&.["uri"]?).try(&.as_s?)
+    end
+
+    # A didChange's `contentChanges`, or nil where they are not a list.
+    private def changes_of(params : JSON::Any?) : Array(JSON::Any)?
+      params.try(&.as_h?).try(&.["contentChanges"]?).try(&.as_a?)
     end
 
     # One `didChange` carrying a burst's changes in order, addressed to

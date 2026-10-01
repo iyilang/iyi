@@ -115,8 +115,23 @@ pub struct Complex
     Complex.new(@real, -@imag)
   end
 
+  # `conj / abs2`, as the other library inverts, wherever `abs2` is a
+  # normal float; past that it overflowed or underflowed, and the inverse
+  # of 1e-170 was `Infinity + NaNi` and of 1e170 `0.0 - 0.0i`. There the
+  # conjugate is scaled as the division scales it (Smith's), which keeps
+  # its zeros' signs.
   def inv : Complex
-    conj / abs2
+    d = abs2
+    return conj / d if zero? || d.nan? || (d >= Float64::MIN_POSITIVE && d <= Float64::MAX)
+    if @imag.abs < @real.abs
+      r = @imag / @real
+      e = @real + r * @imag
+      Complex.new(1.0 / e, -r / e)
+    else
+      r = @real / @imag
+      e = @imag + r * @real
+      Complex.new(r / e, -1.0 / e)
+    end
   end
 
   def + : Complex
@@ -220,8 +235,11 @@ pub struct Complex
     Complex.new(@real.round(digits), @imag.round(digits))
   end
 
+  # A real exponent keeps its imaginary zero: `r * sin(0.0)` was NaN once
+  # `r` overflowed, so e^710 and e^Infinity were `Infinity + NaNi`.
   def exp : Complex
     r = Math.exp(@real)
+    return Complex.new(r, @imag) if @imag == 0.0
     Complex.new(r * Math.cos(@imag), r * Math.sin(@imag))
   end
 
@@ -229,20 +247,34 @@ pub struct Complex
     Complex.new(Math.log(abs), phase)
   end
 
+  # A part past an eighth of `Float64::MAX` is rooted a sixteenth of the
+  # way down and the root doubled twice: `2.0 * (r + @real)` overflowed,
+  # and the root of 1e308 + 1e308i was `Infinity + 0.0i`. A power of two
+  # scales each step exactly, so the root is the one the steps would
+  # answer had they not overflowed.
   def sqrt : Complex
-    r = abs
-    re = if @real >= 0.0
-           0.5 * Math.sqrt(2.0 * (r + @real))
+    x = @real
+    y = @imag
+    scale = 1.0
+    big = Float64::MAX / 8.0
+    if x.abs > big || y.abs > big
+      x = x / 16.0
+      y = y / 16.0
+      scale = 4.0
+    end
+    r = Math.hypot(x, y)
+    re = if x >= 0.0
+           0.5 * Math.sqrt(2.0 * (r + x))
          else
-           @imag.abs / Math.sqrt(2.0 * (r - @real))
+           y.abs / Math.sqrt(2.0 * (r - x))
          end
-    im = if @real <= 0.0
-           0.5 * Math.sqrt(2.0 * (r - @real))
+    im = if x <= 0.0
+           0.5 * Math.sqrt(2.0 * (r - x))
          else
-           @imag.abs / Math.sqrt(2.0 * (r + @real))
+           y.abs / Math.sqrt(2.0 * (r + x))
          end
     # Negated: `0.0 - im` lost the sign of an imaginary part that underflowed.
-    Complex.new(re, @imag >= 0.0 ? im : -im)
+    Complex.new(scale * re, scale * (y >= 0.0 ? im : -im))
   end
 end
 

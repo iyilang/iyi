@@ -216,7 +216,7 @@ prove_fails "each_cons copied" copied_cons "assertion failed for an each_cons sh
 
 # 16. Take counts only the pulls that answered
 prove_fails "take leaves an empty pull uncounted" take_uncounted "assertion failed for a take counts an empty pull" \
-  '/^pub class TakeIterator\|^impl Iterator for TakeIterator/,/^end/s/^      @iter\.next$/      took = @iter.next; @count = @count - 1 if took.nil?; took/'
+  '/^pub class TakeIterator/,/^pub class TakeWhileIterator/s/^      @iter\.next$/      took = @iter.next; @count = @count - 1 if took.nil?; took/'
 echo
 if [ "$status" -eq 0 ]; then
   echo "Iterator: all 27 sections pass plain and release, and each check is"

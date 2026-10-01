@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **A typed `group ... end!` that reuses one variable for two spawns
+  answers both tasks.** Each tuple slot read the author's variable after
+  the join, so `t = g.spawn { work(1) }` then `t = g.spawn { work(2) }`
+  answered `{2, 2}`, and when the first task answered an error the group
+  still answered `{2, 2}`, the error lost. Each spawn is bound to a
+  hidden handle of its own and the author's variable is assigned from
+  it, so the two answer `{1, 2}` and the first task's error.
+  `bench/concurrency_exercise.iyi` reuses one name both ways; the old
+  compiler answered "got 2, 2".
+
 - **A `defer` in a struct method reads and writes the struct as it is, a
   variable it names still narrows, and a cleanup that would leave its
   `defer` is refused.** The cleanup ran only as the proc the panic walk

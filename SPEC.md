@@ -2955,14 +2955,16 @@ to the same block with the extraction appended (hygienic names throughout):
 
 ```
 group do |g|
-  x = g.spawn { read(a) }
-  y = g.spawn { read(b) }
+  %h1 = g.spawn { read(a) }
+  x = %h1
+  %h2 = g.spawn { read(b) }
+  y = %h2
   g.join
-  %v1 = x.value
+  %v1 = %h1.value
   if %v1.is_a?(::Error)
     %v1
   else
-    %v2 = y.value
+    %v2 = %h2.value
     if %v2.is_a?(::Error)
       %v2
     else
@@ -2971,6 +2973,11 @@ group do |g|
   end
 end
 ```
+
+Each slot reads a handle of its own, `%h1` and `%h2`. Reading the
+author's `x` and `y` instead let one name reused for both spawns read the
+last task twice: `{2, 2}` for `{1, 2}`, and a failing first task's error
+was lost.
 
 **The correction: the block stays a block.** The first build inlined the
 block's statements into the caller, and the gate's own `task.value`

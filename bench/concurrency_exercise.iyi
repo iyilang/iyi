@@ -854,6 +854,33 @@ broken = fetch_pair(true)
 fail("typed group: the failure did not leave as the error") unless broken.is_a?(TaskFailed)
 puts "a typed group's first failure left as the error"
 
+# One variable for both spawns is still two slots, each read through a
+# handle of its own (`%h1`, `%h2`). Each slot read the author's variable
+# after the join, so both read the last task: {2, 2}, and a failing first
+# task's error was lost.
+def fetch_reused(fail_first : Bool) : Tuple(Int32, Int32) | TaskFailed | Cancelled | Panicked
+  group do |g|
+    t = g.spawn do
+      slept = sleep(10)
+      slept.is_a?(Cancelled) ? slept : (fail_first ? TaskFailed.new : 21)
+    end
+    t = g.spawn do
+      slept = sleep(20)
+      slept.is_a?(Cancelled) ? slept : 2
+    end
+  end!
+end
+
+reused = fetch_reused(false)
+case reused
+in Tuple(Int32, Int32) then fail("typed group, one name reused: got #{it[0]}, #{it[1]}") unless it[0] == 21 && it[1] == 2
+in TaskFailed          then fail("typed group, one name reused: failed on the success path")
+in Cancelled           then fail("typed group, one name reused: cancelled on the success path")
+in Panicked            then fail("typed group, one name reused: panicked on the success path")
+end
+fail("typed group, one name reused: the first task's failure was lost") unless fetch_reused(true).is_a?(TaskFailed)
+puts "a typed group reusing one name for two spawns kept both slots and the first failure"
+
 # ── 18. A dynamic group keeps the general form ───────────────────────────
 #
 # A spawn in a loop has no arity, so the group stays `Nil` and handles

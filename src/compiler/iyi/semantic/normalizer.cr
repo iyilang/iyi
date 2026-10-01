@@ -170,14 +170,16 @@ module Iyi
     # To:
     #
     #     group do |g|
-    #       x = g.spawn { read(a) }
-    #       y = g.spawn { read(b) }
+    #       %h1 = g.spawn { read(a) }
+    #       x = %h1
+    #       %h2 = g.spawn { read(b) }
+    #       y = %h2
     #       g.join
-    #       %v1 = x.value
+    #       %v1 = %h1.value
     #       if %v1.is_a?(::Error)
     #         %v1
     #       else
-    #         %v2 = y.value
+    #         %v2 = %h2.value
     #         if %v2.is_a?(::Error)
     #           %v2
     #         else
@@ -196,6 +198,11 @@ module Iyi
     # union of what the branches answer. The method's deferred join stays
     # — a `return` between two spawns still joins — and finds nothing live
     # after the appended one, which costs a comparison.
+    #
+    # Each slot reads a handle of its own (`%h1`, `%h2`), never the author's
+    # variable: one name reused for two spawns (`t = g.spawn {..}` twice)
+    # read the last task twice, answering {2, 2} for {1, 2} and losing the
+    # first task's error.
     #
     # What qualifies is what the section says: the block's parameter is used
     # as the receiver of direct `spawn` statements and *nowhere else*. A
@@ -219,13 +226,12 @@ module Iyi
       statements.each do |statement|
         spawn_call = iyi_direct_spawn(statement, group_param.name)
         if spawn_call.is_a?(Call)
+          # `%h1 = g.spawn {..}`, and the author's `x = %h1` after it.
+          handle = Var.new(program.new_temp_var_name).at(statement)
+          handles << handle
+          rewritten << Assign.new(handle.clone, spawn_call).at(statement)
           if statement.is_a?(Assign) && !statement.target.is_a?(Underscore)
-            handles << statement.target
-            rewritten << statement
-          else
-            handle = Var.new(program.new_temp_var_name).at(statement)
-            handles << handle
-            rewritten << Assign.new(handle.clone, spawn_call).at(statement)
+            rewritten << Assign.new(statement.target, handle.clone).at(statement)
           end
         else
           # Any other use of the group parameter anywhere in the statement

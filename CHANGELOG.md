@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **A float literal passed to a `Float32` parameter is rounded once.**
+  The call converted the double the literal was typed as, so a decimal a
+  hair past halfway between two singles landed on the tie and rounded
+  the wrong way: `take(1.00000005960464477539062500001)` was 1.0, where
+  the `_f32` suffix and `x : Float32 = ...` both read 1.0000001. The
+  codegen spec checks it and failed before.
+
 - **Integer literals the compiler compares are compared exactly.** It
   compared them as doubles, which hold 53 bits, so a `case` refused
   `when 36028797018963967_u64` beside `when 36028797018963968_u64` as a

@@ -61,6 +61,19 @@ describe "Code gen: automatic cast" do
       CODE
   end
 
+  # iyi: 1 + 2^-24 is halfway between 1.0 and the single after it, and the
+  # decimal below is a hair past it, so its single is the one after. Read as
+  # a double first it is the midpoint itself, and the tie went to 1.0.
+  it "casts literal float (Float64 -> Float32) rounding the decimal once" do
+    run(<<-CODE).to_b.should be_true
+      def foo(x : Float32)
+        x
+      end
+
+      foo(1.00000005960464477539062500001) == 1.00000005960464477539062500001_f32 && foo(1.00000005960464477539062500001) != 1.0_f32
+      CODE
+  end
+
   it "casts symbol literal to enum" do
     run(<<-CODE).to_i.should eq(2)
       :four

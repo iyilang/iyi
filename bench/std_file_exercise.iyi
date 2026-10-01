@@ -16,6 +16,8 @@ end
 import std/file::{File}
 import std/dir::{Dir}
 import std/gc::{GC}
+# For TMPDIR, TEMP and TMP unset around `File.tempfile`'s GetTempPathW.
+import std/env::{ENV}
 
 # The sandbox is the argument, then IYI_FILE_SANDBOX, then the platform's
 # own temporary directory. It was `/tmp` last, which is not a directory on
@@ -314,6 +316,18 @@ File.delete(kept_at)
   # share named `?`.
   drive_root = (Program.cwd || "C:\\")[0, 3]
   assert_true File.real_path(drive_root) == drive_root, "the real path of #{drive_root} is #{File.real_path(drive_root)}"
+  # With TMPDIR, TEMP and TMP all unset, both ask Windows (GetTempPathW):
+  # `tempfile` alone kept the literal `C:\Windows\Temp`, beside a
+  # `Dir.tempdir` in the user's profile.
+  unset = ["TMPDIR", "TEMP", "TMP"]
+  kept_values = unset.map { |name| ENV[name]? }
+  unset.each { |name| ENV[name] = nil }
+  bare = File.tempfile("std_file_ex")
+  bare_dir = Dir.tempdir
+  unset.each_with_index { |name, index| ENV[name] = kept_values[index] }
+  File.delete(bare)
+  assert_str bare_dir, File.dirname(bare), "with no TMPDIR, TEMP or TMP, tempfile makes its file in Dir.tempdir"
+  puts "  tempfile asks Windows where Dir.tempdir does"
 {% end %}
 File.delete(ta)
 File.delete(tb)

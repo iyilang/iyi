@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`File.tempfile` and `Dir.tempdir` name one directory on Windows when
+  TMPDIR, TEMP and TMP are all unset.** `Dir.tempdir` asked `GetTempPathW`,
+  and `File.tempfile` kept the literal `C:\Windows\Temp`, where its comment
+  promised the order `Dir.tempdir` reads: measured, the file was made in
+  `C:\Windows\Temp` while `Dir.tempdir` answered `C:\Users\dogru`. Both ask
+  Windows now. `bench/std_file_exercise.iyi` unsets the three and compares
+  the two; the old module answered `C:\Windows\Temp`.
+
 - **Renaming a file onto its own hard link on Windows leaves both names, as
   POSIX `rename` does.** `MoveFileExW` replaced the second link with the
   first, so `File.rename(a, b)` with `b` a hard link of `a` left `b` alone.

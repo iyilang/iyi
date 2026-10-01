@@ -131,6 +131,8 @@ import std/path::{Path}
     fun GetSystemTimeAsFileTime(time : Int64*) : Void
     fun SetFilePointerEx(handle : Void*, distance : Int64, new_pointer : Int64*, method : Int32) : Int32
     fun SetEndOfFile(handle : Void*) : Int32
+    # Where Windows says scratch files go, which `Dir.tempdir` asks too.
+    fun GetTempPathW(buffer_count : Int32, buffer : UInt16*) : Int32
     # What a link points at, and where a path really goes. Both were
     # missing, and both answers were made up rather than asked for:
     # `readlink` returned the empty string for every link on this
@@ -1860,7 +1862,13 @@ class ::File
     end
     if tmpdir.empty?
       {% if flag?(:win32) %}
-        tmpdir = "C:\\Windows\\Temp"
+        # Windows' own answer, as `Dir.tempdir` asks it. This alone kept the
+        # literal: with TMPDIR, TEMP and TMP unset, the file was made in
+        # `C:\Windows\Temp` while `Dir.tempdir` answered `C:\Users\dogru`.
+        wide = Pointer(UInt16).malloc(4096_u64)
+        chars = Std::File::LibKernel32.GetTempPathW(4096, wide)
+        size = chars > 0 && chars <= 4096 ? __iyi_utf8_size_from_wide(wide) : 0
+        tmpdir = size > 1 ? String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(wide, t, size) } : "C:\\Windows\\Temp"
       {% else %}
         tmpdir = "/tmp"
       {% end %}

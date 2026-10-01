@@ -701,15 +701,21 @@ class String::Builder
     String.new(@bytesize) { |buffer| buffer.copy_from(@buffer, @bytesize) }
   end
 
+  # In Int64, so a build doubles past 1 GiB up to the 2147483647 bytes a
+  # string holds and is refused past them as `*` is: in Int32, doubling
+  # 1 GiB panicked a 1.2 GB build with "arithmetic overflow".
   private def reserve(extra : Int32) : Nil
-    needed = @bytesize + extra
-    return if needed <= @capacity
-    capacity = @capacity
+    needed = @bytesize.to_i64 + extra.to_i64
+    return if needed <= @capacity.to_i64
+    raise "a string of #{@bytesize} bytes and #{extra} more is past the " \
+          "2147483647 bytes a string holds" if needed > 2147483647_i64
+    capacity = @capacity.to_i64
     while capacity < needed
       capacity = capacity * 2
     end
+    capacity = 2147483647_i64 if capacity > 2147483647_i64
     @buffer = @buffer.realloc(capacity.to_u64)
-    @capacity = capacity
+    @capacity = capacity.to_i32
   end
 end
 

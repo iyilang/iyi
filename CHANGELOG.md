@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`String.build` makes a string past 1 GiB, and refuses one past
+  2,147,483,647 bytes by name.** The builder doubled its capacity as an
+  `Int32`, so two 600 MB halves, or 1,073,741,825 bytes into one
+  builder, panicked with "arithmetic overflow", as did a write that took
+  it past 2,147,483,647 bytes; `Regex#replace`, `tr` and `join` build
+  through it. It sums and doubles in `Int64` now, capped at the
+  2,147,483,647 bytes a string holds - the 1.2 GB string builds - and a
+  write past them panics with "a string of 2 bytes and 2147483647 more
+  is past the 2147483647 bytes a string holds", the sentence `String#*`
+  has. bench/std_text_exercise.sh builds 1,073,741,826 bytes and
+  checks the refusal; the old prelude answered "arithmetic overflow" to
+  both.
+
 - **`String#lines` keeps a last `\r` that no `\n` follows.** It took
   `\r` off every piece, so `"a\nb\r".lines` was `["a", "b"]` while
   std/text's `each_line` gave `["a", "b\r"]`. Only a line that `\n`

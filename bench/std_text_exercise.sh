@@ -298,6 +298,26 @@ panics_with "a repeat that does not fit" mul_overflow \
 panics_with "a negative slice count" slice_negative "negative count: -1" '"abc"[0, -1]'
 panics_with "an index past the end" index_past \
   "out of range for a string of 3 bytes" '"abc"[9]'
+# A build doubled its capacity in Int32, so growing past 1 GiB and a write
+# past 2147483647 bytes both panicked with "arithmetic overflow". It grows
+# to that limit and refuses past it with the sentence `*` has.
+panics_with "a build that does not fit" build_overflow \
+  "past the 2147483647 bytes a string holds" \
+  'String.build { |io| io << "ab"; io.write("x".to_unsafe, 2147483647) }'
+printf 'module main\n\nbig = ("a" * 1025) * 1047553\nio = String::Builder.new\nio << big << "b"\nputs io.bytesize\n' > "$WORK/build_gib.iyi"
+if "$IYI" build -o "$WORK/build_gib" "$WORK/build_gib.iyi" > "$WORK/build_gib.build" 2>&1; then
+  gib="$("$WORK/build_gib" 2>&1 | sed -n '1p')"
+  if [ "$gib" = "1073741826" ]; then
+    echo "  a build past 1 GiB: 1073741826 bytes"
+  else
+    echo "  a build past 1 GiB: answered '$gib', not 1073741826"
+    status=1
+  fi
+else
+  echo "  a build past 1 GiB: the program did not build"
+  sed -n '1,10p' "$WORK/build_gib.build"
+  status=1
+fi
 
 echo
 echo "== what std/text refuses, which is a panic with its own sentence"

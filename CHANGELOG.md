@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **After `shutdown`, `iyi lsp` refuses every request but `exit` for as
+  long as the session lasts.** The proxy retired an idle worker after two
+  quiet seconds even past `shutdown`, and handed its successor only the
+  handshake: a hover right after `shutdown` was -32600, the same hover
+  after a 3.5 s pause was answered in full, and a fresh worker was
+  started for a session that was ending. Nothing is retired or warmed
+  past `shutdown` now, and a worker started because the last one died is
+  handed the client's `shutdown` after the handshake. Steps 60d and 60e
+  of `bench/lsp_session.py` check both; the old server answered the hover
+  after the pause with a result (`null` at that position), and so did the
+  successor of a killed worker.
+
 - **`iyi lsp` survives a didOpen, didChange, didClose or didSave of the
   wrong shape, and skips a change it cannot read rather than the frame it
   came in.** The proxy read the four notifications that carry a buffer as

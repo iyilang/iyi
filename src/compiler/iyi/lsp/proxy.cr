@@ -132,6 +132,12 @@ module Iyi::Lsp
     @versions = {} of String => Int64
     @clean = {} of String => String
     @shut_down = false
+    # The client's `shutdown`, kept verbatim like the handshake and for
+    # the same reason: the refusal of every request after it but `exit`
+    # lives in the worker, and a successor never told of it answered as
+    # if none had come. Kept after the frame is forwarded, as the
+    # handshake is, so a worker this frame spawned is not also handed it.
+    @shutdown_frame : Bytes?
     @running = true
     @private_id = 0
     getter exit_code = 0
@@ -204,8 +210,10 @@ module Iyi::Lsp
           # reading. Spend it on a fresh worker rather than on their
           # next keystroke - or, when the last one was replaced on the
           # memory bound mid-traffic, on the warm-up that retirement
-          # left for the quiet.
-          if (worker = @worker) && worker.idle?
+          # left for the quiet. Past `shutdown` there is no next
+          # keystroke, and nothing is warmed or replaced (`retire`,
+          # `@shutdown_frame`).
+          if !@shut_down && (worker = @worker) && worker.idle?
             if @warm_pending
               @warm_pending = false
               # A successor that has worked since the memory bound made
@@ -332,6 +340,7 @@ module Iyi::Lsp
       case method
       when "initialize"  then @initialize_frame = body
       when "initialized" then @initialized_frame = body
+      when "shutdown"    then @shutdown_frame = body
       end
     end
 
@@ -524,7 +533,14 @@ module Iyi::Lsp
     # buffers now and warmed at the next quiet (`@warm_pending`), because
     # a warm-up sent first is a compile the next request waits behind -
     # 0.8 s for an unchanged workspace pull that compiles nothing.
+    #
+    # Past `shutdown` nothing is retired: there is no keystroke left to
+    # save a compile for. The refusal of every request but `exit` lives in
+    # the worker, and the successor was not told (`@shutdown_frame`): a
+    # hover right after `shutdown` was -32600, the same hover after a 3.5 s
+    # pause was answered in full by a fresh worker.
     private def retire(warm_now : Bool = true) : Nil
+      return if @shut_down
       return unless old = @worker
       return unless successor = spawn_worker
       @worker = successor
@@ -566,6 +582,14 @@ module Iyi::Lsp
       end
       if frame = @initialized_frame
         write_frame(worker, frame)
+      end
+      # A successor started past `shutdown` - its predecessor died, and
+      # the next request needs someone to refuse it - is told the session
+      # is over, and that is all it is told. Without it a request after a
+      # dead worker's `shutdown` was answered as if none had come.
+      if frame = @shutdown_frame
+        write_frame(worker, frame)
+        return
       end
       adopt(worker)
       if warm_now

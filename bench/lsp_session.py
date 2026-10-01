@@ -2436,6 +2436,34 @@ def main():
     step(53, "after shutdown, a request is refused rather than half answered",
          reply.get("error", {}).get("code") == -32600,
          json.dumps(reply.get("error"))[:80])
+
+    # 60d. and still after a pause. The proxy replaced a worker after two
+    #      quiet seconds, and the successor had not been told of the
+    #      shutdown: the same hover after a 3.5 s pause was answered in
+    #      full. 60e. A successor started because the worker died is handed
+    #      the client's `shutdown` (`Proxy@shutdown_frame`). Where the
+    #      workers cannot be listed, 60e is unmeasured.
+    time.sleep(3)
+    reply = c.send("textDocument/hover", {
+        "textDocument": {"uri": app_uri}, "position": {"line": 0, "character": 0}})
+    step("60d", "after shutdown and a quiet pause, a request is still refused",
+         reply.get("error", {}).get("code") == -32600,
+         json.dumps(reply.get("error") or reply.get("result"))[:80])
+    import signal
+    workers = children(c.proc.pid)
+    for pid in workers:
+        os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+    # The request the dead worker held is told so (-32603); the one after
+    # it reaches the successor.
+    for _ in range(3):
+        reply = c.send("textDocument/hover", {
+            "textDocument": {"uri": app_uri}, "position": {"line": 0, "character": 0}})
+        if reply.get("error", {}).get("code") != -32603:
+            break
+    step("60e", "and after the worker is gone, a request is still refused",
+         not workers or reply.get("error", {}).get("code") == -32600,
+         f"{len(workers) or 'unmeasured'} worker(s) killed, then "
+         + json.dumps(reply.get("error") or reply.get("result"))[:60])
     c.send("exit", {}, wait=False)
     step(54, "shutdown then exit", c.proc.wait(timeout=10) == 0)
 

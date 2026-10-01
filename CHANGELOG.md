@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`File.rename` on Windows replaces a destination that is read-only and
+  open.** Either alone was replaced, each by its own retry; together, the
+  attribute's retry could not replace a file somebody had open, and the
+  POSIX-semantics rename that can did not ignore the attribute: measured,
+  "Cannot rename .../rename_fresh.txt to .../rename_both.txt: Windows error
+  5: Access is denied". That rename passes
+  FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE (Windows 10 1809) now, and asks
+  again without it where a system refuses the flag as a parameter
+  [INFERENCE: no such system was run]. `bench/std_file_exercise.iyi` renames
+  onto a read-only file a reader holds; the old module panicked with the
+  sentence above.
+
 - **`Process.run`'s `env:` block on Windows is sorted by name, as Windows
   keeps its own.** It was sorted by its upper-cased `NAME=VALUE` text, and
   the `=` sorted with the name: a name character below it - a digit, `(`,

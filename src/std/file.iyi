@@ -1106,13 +1106,23 @@ class ::File
       # link opened as itself (BACKUP_SEMANTICS | OPEN_REPARSE_POINT).
       handle = Std::File::LibKernel32.CreateFileW(old_wide, 0x10000, 0x7, Pointer(Void).new(0_u64), 3, 0x2200000, Pointer(Void).new(0_u64))
       return false if handle.address == 0xFFFFFFFFFFFFFFFF_u64
+      # And FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE (0x40), Windows 10
+      # 1809's: a destination read-only and open refused this too, and
+      # the attribute's retry in `rename` cannot help while it is open -
+      # measured, "Access is denied" where either alone was replaced. A
+      # system without the flag refuses it as a parameter
+      # (ERROR_INVALID_PARAMETER, 87) and is asked without it.
       size = 20 + chars * 2 + 2
       info = Pointer(UInt8).malloc(size.to_u64)
-      info.as(Pointer(UInt32)).value = 0x3_u32
+      info.as(Pointer(UInt32)).value = 0x43_u32
       (info + 8).as(Pointer(UInt64)).value = 0_u64
       (info + 16).as(Pointer(UInt32)).value = (chars * 2).to_u32
       (info + 20).as(Pointer(UInt16)).copy_from(target, chars + 1)
       done = Std::File::LibKernel32.SetFileInformationByHandle(handle, 22, info.as(Void*), size.to_u32) != 0
+      if !done && Std::File::LibKernel32.GetLastError == 87
+        info.as(Pointer(UInt32)).value = 0x3_u32
+        done = Std::File::LibKernel32.SetFileInformationByHandle(handle, 22, info.as(Void*), size.to_u32) != 0
+      end
       Std::File::LibKernel32.CloseHandle(handle)
       done
     end

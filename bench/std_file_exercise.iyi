@@ -178,6 +178,22 @@ assert_true !File.exists?(fresh_name), "the renamed file's old name is gone"
 File.delete(held_name)
 puts "  a destination somebody has open is replaced by a rename"
 
+# And a destination that is both: read-only, and open. Windows refused it
+# "Access is denied" where either alone was replaced - the attribute's
+# retry cannot replace a file that is open, and the replacement that can
+# did not ignore the attribute.
+both_name = sandbox + "/rename_both.txt"
+File.write(both_name, "old contents")
+File.write(fresh_name, "new contents")
+File.chmod(both_name, 0o444)
+holder = File.open(both_name, "r")
+File.rename(fresh_name, both_name)
+holder.close
+assert_str "new contents", File.read(both_name), "a read-only destination somebody has open is replaced"
+File.chmod(both_name, 0o644)
+File.delete(both_name)
+puts "  and one that is read-only and open at once"
+
 puts "\n== directory and file queries"
 assert_true File.exists?(sandbox), "sandbox directory exists"
 assert_true File.directory?(sandbox), "sandbox is a directory"

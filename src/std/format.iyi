@@ -764,12 +764,19 @@ module ::IyiFormat
     # or `Float32` panicked "wants a number". A value is widened without
     # loss; an `Int128` or `UInt128` is written from its own digits.
     case val
-    when Int8, Int16
-      return format_arg(val.to_i64, verb, minus, plus, space, zero, hash, width, precision)
+    when Int8
+      # `%u` is the word's bits at the word's own width, as an `Int32`'s
+      # are below: widened first, `%u` of -5_i8 and of -5_i16 printed
+      # 18446744073709551611, the bits of an `Int64`.
+      return format_arg(verb == 'u' ? val.to_i64 & 255_i64 : val.to_i64, verb, minus, plus, space, zero, hash, width, precision)
+    when Int16
+      return format_arg(verb == 'u' ? val.to_i64 & 65535_i64 : val.to_i64, verb, minus, plus, space, zero, hash, width, precision)
     when UInt16, UInt32
       return format_arg(val.to_u64, verb, minus, plus, space, zero, hash, width, precision)
     when Float32
-      return format_arg(val.to_f64, verb, minus, plus, space, zero, hash, width, precision)
+      # Widened for a number's verbs only: `%s` and `%p` are the value's
+      # own text, and the double's was 0.10000000149011612 for 0.1_f32.
+      return format_arg(val.to_f64, verb, minus, plus, space, zero, hash, width, precision) unless verb == 's' || verb == 'p'
     when Int128, UInt128
       return format_wide(val, verb, minus, plus, space, zero, hash, width, precision)
     end

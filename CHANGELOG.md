@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`%s` and `%p` of a `Float32` print the `Float32`'s own text.** A
+  `Float32` was widened to a `Float64` before the verb was read, so `%s` and
+  `%p` printed the double's digits: `sprintf("%s", 0.1_f32)` was
+  0.10000000149011612 where `"#{0.1_f32}"` is 0.1. It is widened for the
+  numeric verbs only now, and `%s` and `%p` answer 0.1.
+  `bench/format_exercise.iyi` checks `%s`, `%p` and `%-4s`; the old module
+  answered [0.10000000149011612|0.10000000149011612|1.5 ].
+
 - **`%c` of a `UInt16`, `UInt32` or `UInt64` is the character at that code
   point.** Only `Char`, `Int32`, `Int64` and `UInt8` were read as code
   points, and the three unsigned types (`UInt16` and `UInt32` widened to

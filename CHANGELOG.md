@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`CSV.build` quotes a first field that opens with U+FEFF.**
+  `CSV.parse` reads past a byte order mark at the front of the text, and
+  `build` wrote such a field bare there, so `[["\uFEFFid", "x"],
+  ["\uFEFFb"]]` read back as `[["id", "x"], ["\uFEFFb"]]`: the first
+  field lost its U+FEFF, the same field elsewhere kept it. That one field
+  is quoted now, the text opens with `"` and the mark is the field's;
+  nothing else is quoted for it. `bench/std_csv_exercise.iyi`
+  round-trips the rows; the old module answered `[["id", "x"], ...]`.
+
 - **`std/log`'s header says what `DefaultFormatter` writes at the root.**
   It still said the root's line leaves out the source and its ` - `,
   though the entry for `Severity::None` above says it was corrected. The

@@ -30,7 +30,12 @@ puts "  rows, quotes, build"
 # A byte order mark, which Excel writes into every "CSV UTF-8" file, is not
 # the first field's: `row[0] == "id"` was false.
 assert_str "id", CSV.parse("\uFEFFid,name\r\n1,a\r\n")[0][0], "a header behind a byte order mark"
-puts "  a byte order mark"
+# A first field that opens with U+FEFF is the field's, not a mark: written
+# bare it was read past, and `[["\uFEFFid"]]` came back `[["id"]]`.
+marked = [["\uFEFFid", "x"], ["\uFEFFb"]]
+assert_str marked.inspect, CSV.parse(CSV.build(marked)).inspect, "a first field opening with U+FEFF round trips"
+assert_str "\"\uFEFFid\",x\n\uFEFFb", CSV.build(marked), "only the first field is quoted for its U+FEFF"
+puts "  a byte order mark, read past and written as a field's"
 
 # A UTF-16 document (Windows PowerShell 5.1's `Out-File` and `>`) is
 # refused by its byte order mark; it read as fields with a NUL between

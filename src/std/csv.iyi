@@ -99,6 +99,14 @@ pub struct CSV
         # no fields, or as nothing at the end: quoted, it is the field.
         io << "\"\"" if fields.size == 1 && fields[0].empty?
         c = 0
+        # A U+FEFF at the front of the text is read past as a byte order
+        # mark, so a first field opening with one came back without it:
+        # `[["\uFEFFid"]]` read back as `[["id"]]`. Quoted, the text opens
+        # with `"` and the mark is the field's.
+        if r == 0 && fields.size > 0 && fields[0].starts_with?('\uFEFF')
+          io << quote(fields[0])
+          c = 1
+        end
         while c < fields.size
           io << ',' if c > 0
           io << escape(fields[c])
@@ -132,6 +140,14 @@ pub struct CSV
       i = i + 1
     end
     return field unless need
+    quote(field)
+  end
+
+  # Always quoted: a field that holds a separator, or a first field that
+  # opens with U+FEFF.
+  private def self.quote(field : String) : String
+    p = field.to_unsafe
+    n = field.bytesize
     extra = 2
     i = 0
     while i < n

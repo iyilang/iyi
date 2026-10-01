@@ -625,7 +625,18 @@ pub class Parser
   @expanded : Int64
   @anchor_sizes : Hash(String, Int64)
   @open_sizes : Array(Int64)
+  # Collections open now, and per anchor how deep its value nests: the
+  # deepest `@peak` reached while it was open, past the depth it opened
+  # at. An alias counts as its anchor's value written out in its place,
+  # as a merge written out is counted, so `@depth` plus that is what
+  # DEPTH_LIMIT bounds. Counting only the text, `aN: &aN [*aN-1]` was
+  # two levels a line and N as built: 110 such lines parsed in a task,
+  # and `==` on the last value then took the process down with a stack
+  # overflow.
   @depth : Int32
+  @peak : Int32
+  @anchor_depths : Hash(String, Int32)
+  @open_peaks : Array(Int32)
   @buffer : ByteBuffer
 
   def initialize(text : String)
@@ -644,6 +655,9 @@ pub class Parser
     @anchor_sizes = Hash(String, Int64).new
     @open_sizes = [] of Int64
     @depth = 0
+    @peak = 0
+    @anchor_depths = Hash(String, Int32).new
+    @open_peaks = [] of Int32
     @buffer = ByteBuffer.new
     split_lines
   end
@@ -687,6 +701,7 @@ pub class Parser
       # document starts here or on a later blank-free line.
       @anchors = Hash(String, Any).new
       @anchor_sizes = Hash(String, Int64).new
+      @anchor_depths = Hash(String, Int32).new
       docs << node
       implicit_allowed = false
       skip_blank_lines
@@ -2068,23 +2083,29 @@ pub class Parser
     return if name.nil?
     @open_anchors << name
     @open_sizes << @nodes
+    @open_peaks << @peak
+    @peak = @depth
   end
 
   private def close_anchor(name : String?, value : Any) : Nil
     return if name.nil?
     started = @nodes
+    peak = @peak
     if @open_anchors.size > 0
       @open_anchors.pop
       started = @open_sizes.pop
+      outer = @open_peaks.pop
+      @peak = outer if outer > @peak
     end
     return if @error
     @anchors[name] = value
     @anchor_sizes[name] = @nodes - started
+    @anchor_depths[name] = peak - @depth
   end
 
   # The anchored value, shared; the nodes it holds count as read again,
   # and once aliases have added ALIAS_NODE_LIMIT nodes the stream is
-  # refused rather than built.
+  # refused rather than built. Its levels count from where it is read.
   private def resolve_alias(name : String, pos : Int32) : Any
     if name.empty?
       fail("an alias with no name", pos)
@@ -2099,6 +2120,12 @@ pub class Parser
       fail("unknown anchor *#{name}", pos)
       return Any.new(nil)
     end
+    deepest = @depth + @anchor_depths[name]
+    if deepest > DEPTH_LIMIT
+      fail("nesting deeper than #{DEPTH_LIMIT} levels", pos)
+      return Any.new(nil)
+    end
+    @peak = deepest if deepest > @peak
     size = @anchor_sizes[name]
     @nodes = @nodes + size
     @expanded = @expanded + size
@@ -2111,6 +2138,7 @@ pub class Parser
 
   private def enter(pos : Int32) : Nil
     @depth = @depth + 1
+    @peak = @depth if @depth > @peak
     fail("nesting deeper than #{DEPTH_LIMIT} levels", pos) if @depth > DEPTH_LIMIT
   end
 

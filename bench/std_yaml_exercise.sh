@@ -238,6 +238,9 @@ prove_caught hash "a '#' starts a flow scalar" \
 prove_caught flowentry "'? a' and '- a' read as text in a flow collection" \
   'accepted "[? a]' \
   'elsif (b == 63_u8 || b == 45_u8) && (pos + 1' 'elsif false && (b == 63_u8 || b == 45_u8) && (pos + 1'
+prove_caught aliasdepth "an alias's levels are not counted against the limit" \
+  'accepted "a0: &a0 x' \
+  'if deepest > DEPTH_LIMIT' 'if deepest > DEPTH_LIMIT && false'
 prove_caught escapes "the dump writes a byte order mark and C1 controls raw" \
   "a byte order mark is escaped when dumped" \
   $'size : Int32) : Int32\n    b = bytes[i]' $'size : Int32) : Int32\n    return -1\n    b = bytes[i]'

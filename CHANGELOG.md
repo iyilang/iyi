@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **A YAML alias counts its anchor's levels against the nesting limit.** The
+  limit counted nesting as the text writes it, and an alias added its
+  anchor's nodes to the expansion count but not its depth: a chain
+  `aN: &aN [*aN-1]` is two levels a line and N as built, so 110 such lines
+  (1.9 KB) parsed inside a task, and `==` on the last value then died of
+  "stack overflow", which took the process with it. An alias counts as its
+  anchor's value written out where it is read, so the chain of 100 links is
+  refused with "nesting deeper than 100 levels at line 101, column 14" and
+  the chain of 110 likewise, which its task's group receives as a `Panicked`
+  value. `bench/std_yaml_exercise.iyi` refuses the 100-link chain and
+  parses, compares, prints, hashes and dumps the 99-link one in a task; the
+  old module accepted the 100-link chain.
+
 - **`in_groups_of` refuses a size below one in its own sentence.** It handed
   the size to `each_slice`, so `[1, 2, 3].in_groups_of(0, 0)` panicked with
   "slice size must be positive", from a call the reader never wrote. It says

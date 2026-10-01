@@ -218,6 +218,17 @@ refused("[- a]\n", "a sequence entry is not allowed here at line 1, column 2")
 laughs = "a: &a [x,x,x,x,x,x,x,x,x,x]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c,*c]\ne: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d,*d]\nf: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e,*e]\ng: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f,*f]\nh: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g,*g]\ni: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h,*h]\n"
 refused(laughs, "alias expansion past 1,000,000 nodes at line 6, column 29")
 refused("[" * 101 + "]" * 101, "nesting deeper than 100 levels at line 1, column 101")
+# An alias counts its anchor's levels where it is read: `aN: &aN [*aN-1]`
+# is two levels a line as written and N as built, and 110 such lines
+# parsed in a task whose `==` then took the process down with a stack
+# overflow. The chain to `a99` is as deep as the limit allows.
+chained = "a0: &a0 x\n"
+link = 1
+while link < 100
+  chained = chained + "a#{link}: &a#{link} [*a#{link - 1}]\n"
+  link = link + 1
+end
+refused(chained + "a100: &a100 [*a99]\n", "nesting deeper than 100 levels at line 101, column 14")
 # The deepest document read is one a task can use: parse, compare, print,
 # hash and dump. At a limit of 256 a task died of a stack overflow parsing
 # 256 nested sequences and comparing 128, and the process with it.
@@ -226,7 +237,7 @@ deepest_map = "{a: " * 100 + "1" + "}" * 100
 in_task = false
 group do |g|
   g.spawn do
-    [deepest_seq, deepest_map].each do |deepest|
+    [deepest_seq, deepest_map, chained].each do |deepest|
       one = YAML.parse(deepest)
       raise "ASSERTION FAILED: the deepest document does not equal itself in a task" unless one == YAML.parse(deepest)
       one.inspect

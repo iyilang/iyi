@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- **A child process gets three descriptors, and none of the parent's
+  signal handlers.** On Linux `Process.run` exec'd with every descriptor
+  the program had open and not marked close-on-exec - the poller's
+  epoll, a `File`, a listening socket - so a child held a port its parent
+  had closed and could not bind again; the child closes all but 0, 1 and
+  2 now, as Crystal's does and as the module's Windows arm already did.
+  A TERM sent to a child between its clone and its exec ran the parent's
+  handler in the child, which wrote into the parent's signal pipe: the
+  parent's `Signal.wait(TERM)` answered a signal nobody sent it. Signals
+  are blocked across the clone, and the child resets every handler
+  before it unblocks. A pipe that could not be made for lack of
+  descriptors was refused as "permission denied"; it is EMFILE. And the
+  module did not compile beside `std/bool` on any target - it wrote bare
+  `Bool` - nor on darwin beside `std/file` or `std/dir`, which bind
+  `stat64` with another signature; it binds `stat`. 130,000 argument
+  lists, 30,000 environments, every exit code and signal, and pipes to 6
+  MiB against Python's `subprocess` found nothing else; the process
+  exercise checks each and proves the three runtime fixes fail undone.
+
 - **A directory walk keeps its buffer across a collection.** On Linux a
   directory stream's 32 KB buffer was referenced only by an address kept
   in an `Int64` block, which the collector does not scan, and on Windows

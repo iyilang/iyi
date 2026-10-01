@@ -17,7 +17,16 @@
 #   * a cancelled run ends its child: the kill taken out - the run answers
 #     Cancelled only once its child has slept its 20 seconds out;
 #   * on Linux and darwin, a write to a child that stopped reading answers
-#     EPIPE: with SIGPIPE left alone, the signal ends this program (141).
+#     EPIPE: with SIGPIPE left alone, the signal ends this program (141);
+#   * on Linux, the child holds its three streams and nothing else: with
+#     close_range taken out it holds this program's open file and epoll;
+#   * on Linux, a TERM sent to a child before its execve is the child's:
+#     with this program's handlers left in place in the child, the
+#     child's TERM wakes this program's Signal.wait;
+#   * on Linux, a pipe that could not be made is its errno: answered
+#     EACCES, a program out of descriptors is told "permission denied".
+# And that a program importing std/process and std/bool builds: a bare
+# `Bool` in the module named std/bool's module, and it did not.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -128,12 +137,33 @@ if [ "$PLATFORM" = windows ]; then
   grep -q "a working directory Windows will not take" "$WORK/process-plain.out" || { echo "  missing: the long working directory"; status=1; }
 else
   grep -q "signal 9, exit code 137" "$WORK/process-plain.out" || { echo "  missing: the signalled child"; status=1; }
+  if [ "$PLATFORM" = linux ]; then
+    for phrase in "none of this program's descriptors" \
+                  "refused with EMFILE" \
+                  "children started under a stream of TERMs"; do
+      grep -q "$phrase" "$WORK/process-plain.out" || { echo "  missing: $phrase"; status=1; }
+    done
+  fi
 fi
 [ "$status" -eq 0 ] && echo "  sections reported"
 
 echo
 echo "== the same program with optimisation on (--release)"
 build_and_run "release" process-release --release >/dev/null
+
+echo
+echo "== std/process compiles beside std/bool"
+# A bare `Bool` in std/process named std/bool's module once both were
+# imported, and a program importing the two did not compile.
+printf 'module beside_bool\nimport std/process::{Process}\nimport std/bool\nputs Process.executable.nil? ^ true\n' \
+  >"$WORK/beside_bool.iyi"
+if "$IYI" build -o "$WORK/beside_bool" "$WORK/beside_bool.iyi" >"$WORK/beside_bool.log" 2>&1; then
+  echo "  built"
+else
+  echo "  std/process beside std/bool: build failed"
+  tail -5 "$WORK/beside_bool.log" | sed 's/^/    /'
+  status=1
+fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
@@ -230,6 +260,16 @@ else
       prove blocking "the end awaited by a blocking wait4, as on a kernel before 5.3" "a sibling ticked" \
         "pidfd = __iyi_conc_syscall3(SYS_PIDFD_OPEN, @pid.to_i64, 0_i64, 0_i64)" "pidfd = -1_i64" \
         "WNOHANG        =   1_i64" "WNOHANG        =   0_i64"
+      prove inheriting "the child's other descriptors left open" "the child held" \
+        "        if __iyi_conc_syscall3(SYS_CLOSE_RANGE, 3_i64, 0xFFFFFFFF_i64, 4_i64) < 0_i64 # CLOSE_RANGE_CLOEXEC" \
+        "        if false"
+      prove handlers "this program's handlers left in place in the child" "heard a TERM sent to a child" \
+        "            if actions[0] > 1_u64 # neither SIG_DFL (0) nor SIG_IGN (1)" "            if false"
+      prove misnumbered "a pipe's failure answered EACCES" "not refused with EMFILE" \
+        "              return ProcessError.new(command, made)
+" \
+        "              return ProcessError.new(command, EACCES)
+"
       ;;
   esac
 

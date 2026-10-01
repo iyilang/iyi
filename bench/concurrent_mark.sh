@@ -113,14 +113,14 @@ Gaps.setup
 count = IyiThread.core_count.to_i32
 deadline = IyiMark.now_ns + 1000000000_u64
 threads = [] of IyiThread
-i = 1
-while i < count
-  k = i
+# Each thread's index is its block call's own: a captured local `k = i`
+# reassigned by a `while` was one cell every thread read, and a late reader
+# could see the next index (SPEC.md III.4.4 refuses it now).
+(count - 1).times do |j|
   threads << IyiThread.start do
-    watch(k, deadline)
+    watch(j + 1, deadline)
     nil
   end
-  i = i + 1
 end
 watch(0, deadline)
 threads.each { |t| t.join }

@@ -2648,7 +2648,16 @@ channel that crosses threads. Held by `spec/compiler/semantic/iyi_spec.cr`
 trusted generic refused by its argument, `self`), by
 `spec/compiler/iyimod_spec.cr` (the marker written, read and refused
 across an artifact) and by `bench/thread_exercise.sh`'s last step, a
-program that must not compile.
+program that must not compile. A `Share` type makes a value safe to read
+from two threads, not a variable safe to write, and a captured local is
+one cell both threads reach: a local the block assigns, or that its
+starter assigns after the start, or in a loop or block that starts the
+thread again, is refused by name (`` `count` is assigned here, after the
+thread has started ``). A local assigned before the start, or a block's
+own local, which is a new cell on every call, is captured as before.
+`count` added to by a thread and by its starter two million times each
+had compiled and counted 2684265 one run and 4000000 the next.
+`bench/thread_exercise.sh` step 6b holds it.
 
 This is Rust's `Send`/`Sync` **without** ownership or borrowing, and it is worth
 being exact about what that buys and what it does not. It rules out data races,

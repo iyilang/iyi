@@ -11,6 +11,7 @@ module Iyi
     def cleanup(node, inside_def = false)
       transformer = self.cleanup_transformer
       transformer.inside_def! if inside_def
+      transformer.top_level = node unless inside_def
       node = node.transform(transformer)
       puts node if ENV["AFTER"]? == "1"
       node
@@ -68,6 +69,10 @@ module Iyi
 
     # The current method we are processing
     @current_def : Def?
+
+    # iyi: the program's top-level code, where a captured top-level
+    # variable's assignments are looked for (`check_thread_capture_assigned_once`).
+    property top_level : ASTNode?
 
     def initialize(@program : Program)
       @transformed = Set(Def).new.compare_by_identity
@@ -679,6 +684,7 @@ module Iyi
           if why = Iyi::Share.reason(type)
             captured.raise "the block IyiThread.start runs on another thread captures `#{captured.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.4)"
           end
+          check_thread_capture_assigned_once(node, captured, meta, a_def)
         end
       end
 
@@ -690,6 +696,159 @@ module Iyi
             end
           end
         end
+      end
+    end
+
+    # iyi: a captured local is one cell on the heap, and the thread and the
+    # code that started it both reach that cell. A Share type makes the
+    # value safe to read from two threads, not the cell safe to write: `count
+    # = 0`, a thread adding to `count` two million times and its starter
+    # doing the same compiled, and printed 2684265, 2355445 and 4000000 on
+    # three runs. The cell is safe when nothing assigns it once the thread
+    # can read it: not the thread's block, nothing after the start, nothing
+    # in a loop or a block that starts the thread again, and no block or
+    # proc that may run later. A variable the typer never saw assigned
+    # after a closure took it, in a `while`, or from a block or a proc is
+    # not `mutably_closured`, and needs no walk.
+    def check_thread_capture_assigned_once(start : Call, captured : Var, meta : MetaVar, a_def : Def)
+      return unless meta.mutably_closured?
+
+      name = captured.name
+      inside = CaptureAssignments.new(@program, meta, nil, a_def.vars)
+      a_def.body.accept inside
+      if first = inside.assigns.first?
+        first[0].raise "the block IyiThread.start runs on another thread assigns `#{name}`, a local of the code that started the thread, so the two threads share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic` or behind a `Mutex`"
+      end
+
+      scope = meta.context
+      body, vars = case scope
+                   when Def, Block then {scope.body, scope.vars}
+                   else                 {@top_level, @program.vars}
+                   end
+      outside = CaptureAssignments.new(@program, meta, start, vars)
+      body.try &.accept(outside)
+      line = start.location.try(&.line_number)
+      advice = "so the thread and the code that started it share one mutable cell: a data race (SPEC.md III.4.4). " \
+               "Capture a local that is assigned once (a block's own locals are new on every call), " \
+               "or keep the value in an `Atomic` or behind a `Mutex`"
+      # Not found, or found assigned nowhere: the walk does not know this
+      # scope, and the typer's answer stands.
+      unless outside.found_start? && !outside.assigns.empty?
+        captured.raise "the block IyiThread.start runs on another thread captures `#{name}`, which is assigned again after the capture, or inside a loop or a block, #{advice}"
+      end
+
+      outside.assigns.each do |assign, regions, after|
+        why =
+          if regions.any? { |region| outside.start_regions.any?(&.same?(region)) }
+            "in a loop or a block that starts the thread again"
+          elsif regions.any? { |region| region.is_a?(ProcLiteral) || (region.is_a?(Block) && region.fun_literal) }
+            "in a block or a proc that may run after the thread has started"
+          elsif after
+            "after the thread has started"
+          end
+        next unless why
+        assign.raise "`#{name}` is assigned here, #{why}, and the block IyiThread.start runs on another thread (line #{line}) captures it, #{advice}"
+      end
+    end
+
+    # The assignments to one variable in a body, each with the loops,
+    # blocks and procs around it and whether it comes after the call that
+    # starts the thread. A name is the variable only where the innermost
+    # scope's table says so: a block's own variable of the same name is
+    # another cell.
+    class CaptureAssignments < Visitor
+      getter assigns = [] of {ASTNode, Array(ASTNode), Bool}
+      getter start_regions = [] of ASTNode
+      getter? found_start = false
+
+      def initialize(@program : Program, @meta : MetaVar, @start : Call?, vars : MetaVars?)
+        @regions = [] of ASTNode
+        @scopes = [vars] of MetaVars?
+      end
+
+      def visit(node : Call)
+        if node.same?(@start)
+          @found_start = true
+          @start_regions = @regions.dup
+          return false
+        end
+        if expanded = node.expanded
+          expanded.accept self
+          return false
+        end
+        true
+      end
+
+      def visit(node : While)
+        @regions << node
+        true
+      end
+
+      def end_visit(node : While)
+        @regions.pop
+      end
+
+      def visit(node : Block)
+        @regions << node
+        @scopes << node.vars
+        true
+      end
+
+      def end_visit(node : Block)
+        @scopes.pop
+        @regions.pop
+      end
+
+      def visit(node : ProcLiteral)
+        @regions << node
+        @scopes << node.def.vars
+        node.def.body.accept self
+        @scopes.pop
+        @regions.pop
+        false
+      end
+
+      def visit(node : FileNode)
+        @scopes << @program.file_module?(node.filename).try(&.vars)
+        node.node.accept self
+        @scopes.pop
+        false
+      end
+
+      def visit(node : MultiAssign)
+        if expanded = node.expanded
+          expanded.accept self
+          return false
+        end
+        true
+      end
+
+      def end_visit(node : MultiAssign)
+        node.targets.each { |target| note(node, target) } unless node.expanded
+      end
+
+      def end_visit(node : Assign)
+        note(node, node.target)
+      end
+
+      def end_visit(node : TypeDeclaration)
+        note(node, node.var) if node.value
+      end
+
+      # A method's body is not this scope's code. A module's is: an iyi
+      # file's top level is the body of the `module` its header names.
+      def visit(node : Def | Macro | LibDef | AnnotationDef)
+        false
+      end
+
+      def visit(node : ASTNode)
+        true
+      end
+
+      private def note(node : ASTNode, target : ASTNode) : Nil
+        return unless target.is_a?(Var)
+        return unless @scopes.last.try(&.[target.name]?).same?(@meta)
+        @assigns << {node, @regions.dup, @found_start}
       end
     end
 

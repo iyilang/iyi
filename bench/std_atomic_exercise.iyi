@@ -193,12 +193,14 @@ puts "  #{THREADS} threads, #{PER_THREAD} rounds each of add_relaxed, add_acq_re
 puts "== release publishes, acquire sees"
 # The writer fills the payload with a relaxed store, then raises the flag
 # with a release store; the reader spins on an acquire load of the flag,
-# and the payload it then reads is whole. Fifty handoffs.
-handoffs = 0
-while handoffs < 50
+# and the payload it then reads is whole. Fifty handoffs, each a block call
+# of its own: every captured local, that call's `box` and `handoff`, is
+# assigned once (SPEC.md III.4.4). A `while` reusing one `box` and one
+# counter for every round no longer compiles.
+50.times do |handoff|
   box = Shared.new
   writer = IyiThread.start do
-    box.payload.set_relaxed(0xDEADBEEF_u64 + handoffs.to_u64)
+    box.payload.set_relaxed(0xDEADBEEF_u64 + handoff.to_u64)
     box.flag.set_release(1_u8)
     nil
   end
@@ -206,9 +208,8 @@ while handoffs < 50
   while box.flag.get_acquire == 0_u8
     spins += 1_i64
   end
-  check(box.payload.get_relaxed == 0xDEADBEEF_u64 + handoffs.to_u64, "payload whole after the flag was seen (handoff #{handoffs})")
+  check(box.payload.get_relaxed == 0xDEADBEEF_u64 + handoff.to_u64, "payload whole after the flag was seen (handoff #{handoff})")
   writer.join
-  handoffs += 1
 end
 puts "  50 handoffs: the payload was whole every time the acquire load saw the release store"
 

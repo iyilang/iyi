@@ -142,6 +142,24 @@
 
 ### Fixed
 
+- **A local captured by an `IyiThread` block that the block assigns, or
+  that its starter assigns after the start or in a loop around it, is a
+  compile error naming the variable (SPEC.md III.4.4).** The thread gate
+  asked only whether a captured variable's type was `Share`, but a captured
+  local is one heap cell both threads reach: `count = 0`, a thread adding 1
+  two million times and its starter doing the same, compiled and counted
+  2340491, 2475832, 2548260 and 2388146 on four runs. The block's
+  assignment is refused now with "the block IyiThread.start runs on another
+  thread assigns `count`, a local of the code that started the thread, so
+  the two threads share one mutable cell", and the starter's with
+  "`limit` is assigned here, after the thread has started"; a local
+  assigned only before the start, or a block's own local, a new cell on
+  every call, is captured as before. `bench/std_atomic_exercise.iyi`'s
+  handoff loop and `bench/concurrent_mark.sh`'s clock watchers reused one
+  cell across a `while`'s rounds and capture a `times` block's own now.
+  `bench/thread_exercise.sh` step 6b checks both refusals and the legal
+  forms; the old compiler built the racing program.
+
 - **A block's own captured variable and a later variable of the same name
   each keep their own closure cell.** A variable assigned and captured
   inside a block (by a proc, or by a task's block), and one of the same

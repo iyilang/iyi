@@ -34,7 +34,9 @@
 #      node on a free list.
 #   6. Failure proof: a block that captures a value whose type is not
 #      `Share` (SPEC.md III.4.4) does not compile, and the error names the
-#      variable, its type and the field that made it mutable.
+#      variable, its type and the field that made it mutable. Nor does a
+#      captured local the thread's block assigns, or its starter assigns
+#      after the start: one cell two threads write (6b).
 #   7. On Windows, a program whose main thread ends while another thread's
 #      collections stop it ends, two hundred runs of two hundred; and with
 #      the end put back into the C runtime's `exit` a run never ends, and
@@ -475,6 +477,68 @@ if ! grep -q "captures \`items : Array(Int32)\`, which is not Share" build-unsha
   echo "the refusal did not name the capture:"; cat build-unshared.log; exit 1
 fi
 printf '  refused: %s\n' "$(grep -m1 'is not Share' build-unshared.log | sed 's/^Error: //')"
+
+# ── 6b. A captured local is one cell, and nothing assigns it after the start
+# A Share type makes a value safe to read from two threads, not a variable
+# safe to write: a captured local is one cell both threads reach. `count`
+# added to two million times by a thread and two million by its starter
+# compiled, and counted 2684265, 2355445 and 4000000 on three runs. The
+# block assigning it, and the starter assigning it after the start, are
+# refused by name now; a local assigned before the start, and a block's
+# own local captured on each call, still build and run.
+step "failure proof: a captured local the thread or its starter assigns does not compile"
+cat > raced.iyi <<'IYI'
+count = 0
+t = IyiThread.start do
+  2000000.times { count += 1 }
+  nil
+end
+2000000.times { count += 1 }
+t.join
+puts count
+IYI
+cat > reassigned.iyi <<'IYI'
+limit = 1
+t = IyiThread.start do
+  puts limit
+  nil
+end
+limit = 2
+t.join
+IYI
+cat > assigned_before.iyi <<'IYI'
+total = 0
+[1, 2, 3].each { |v| total += v }
+3.times do |i|
+  part = total * 10 + i
+  t = IyiThread.start do
+    puts part
+    nil
+  end
+  t.join
+end
+IYI
+if "$IYI" build raced.iyi -o raced > build-raced.log 2>&1; then
+  echo "a thread assigning a captured local compiled:"; cat build-raced.log; exit 1
+fi
+if ! grep -q "assigns \`count\`, a local of the code that started the thread" build-raced.log; then
+  echo "the refusal did not name the variable:"; cat build-raced.log; exit 1
+fi
+printf '  refused: %s\n' "$(grep -m1 'assigns `count`' build-raced.log | sed 's/^Error: //')"
+if "$IYI" build reassigned.iyi -o reassigned > build-reassigned.log 2>&1; then
+  echo "a captured local assigned after the thread started compiled:"; cat build-reassigned.log; exit 1
+fi
+if ! grep -q "\`limit\` is assigned here, after the thread has started" build-reassigned.log; then
+  echo "the refusal did not name the variable:"; cat build-reassigned.log; exit 1
+fi
+printf '  refused: %s\n' "$(grep -m1 'is assigned here' build-reassigned.log | sed 's/^Error: //')"
+if ! "$IYI" build assigned_before.iyi -o assigned_before > build-assigned-before.log 2>&1; then
+  echo "locals assigned before the start were refused:"; cat build-assigned-before.log; exit 1
+fi
+if [ "$(./assigned_before | tr -d '\r' | tr '\n' ' ')" != "60 61 62 " ]; then
+  echo "locals assigned before the start built, but read:"; ./assigned_before; exit 1
+fi
+echo "  a local assigned before the start, and a block's own local, still build and read 60 61 62"
 
 # ── 7. Windows: a program ends while a collection stops it ────────────────
 # A thread runs collections back to back - each one stops the main thread -

@@ -747,7 +747,9 @@ class Iyi::Command
         end
 
         opts.on("--x86-asm-syntax att|intel", "X86 dialect for --emit=asm: AT&T (default), Intel") do |value|
-          case value = LLVM::InlineAsmDialect.parse?(value)
+          # `dialect`, not `value`: the parse wrote over the word it read,
+          # and the refusal said "Invalid value `` for x86-asm-syntax".
+          case dialect = LLVM::InlineAsmDialect.parse?(value)
           in Nil
             abort! "Invalid value `#{value}` for x86-asm-syntax", :USAGE_ERROR
           in .att?

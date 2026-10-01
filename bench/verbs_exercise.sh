@@ -241,6 +241,10 @@ else
 fi
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
+# The refusal of an `--x86-asm-syntax` wrote over the value it refused
+# before printing it: "Invalid value `` for x86-asm-syntax".
+refuses "an --x86-asm-syntax that is neither" "Invalid value \`x\` for x86-asm-syntax" -- \
+  "$IYI" build --x86-asm-syntax x -o "$WORK/asm" good.iyi
 # Two `iyi run`s at once of programs with one basename. The runner linked
 # into one executable per basename, and Windows will not write over one
 # that is running: the second failed with `LNK1104: cannot open file

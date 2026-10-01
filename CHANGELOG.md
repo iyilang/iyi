@@ -142,6 +142,12 @@
 
 ### Fixed
 
+- **The `--x86-asm-syntax` refusal names the value it refuses.** The parse
+  wrote over the word before the message printed it: "Invalid value `` for
+  x86-asm-syntax". It says "Invalid value `x` for x86-asm-syntax" now.
+  `bench/verbs_exercise.sh` checks the sentence; the old compiler printed
+  the empty one.
+
 - **`--mcpu` with a CPU LLVM does not know is refused before anything is
   compiled.** It was handed to LLVM unchecked: `iyi build --mcpu nonesuch`
   printed "'nonesuch' is not a recognized processor for this target

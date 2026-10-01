@@ -1931,6 +1931,16 @@ module Iyi
       end
 
       if typed_def.captured_block?
+        # iyi: the same for a `!` in a block kept as a proc — a task's body,
+        # most often. It said "can't return from captured block, use next",
+        # about a `return` nobody wrote.
+        if node.from_propagate?
+          node.raise <<-MSG
+            `!` can't propagate out of a block that runs as a proc
+
+            `!` in a block returns from the method the block is written in (SPEC.md III.1.2), and this block is captured: it is kept and called later, maybe by a task, after that method may have returned. Answer the error as the block's value, `next` it, and read it where the value arrives, through `task.value` or the typed group; or handle it here.
+            MSG
+        end
         node.raise "can't return from captured block, use next"
       end
 

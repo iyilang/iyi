@@ -400,6 +400,43 @@ if [ "$code" -ne 0 ] || ! grep -q '^saw the flag after 1 spins' yielding.txt; th
   exit 1
 fi
 
+# ── 3d. A `!` in a task's body is refused as itself ───────────────────────
+# A task's block runs as a proc, so there is no method frame for its `!` to
+# return from. The refusal said "can't return from captured block, use
+# next", about a `return` nobody wrote; it names `!` and the way out now.
+step "a \`!\` in a task's body is refused with its own sentence"
+cat > bang_task.iyi <<'IYI'
+module bang_task
+
+struct Missing
+  def initialize
+  end
+end
+
+impl Error for Missing
+  def message : String
+    "missing"
+  end
+end
+
+def lookup(k : String) : Int32 | Missing
+  k.size > 1 ? k.size : Missing.new
+end
+
+group do |g|
+  t = g.spawn { lookup("ab")! }
+end
+IYI
+if "$IYI" build bang_task.iyi -o bang_task > build-bang.log 2>&1; then
+  echo "a \`!\` in a task's body compiled"
+  exit 1
+fi
+if ! grep -q "can't propagate out of a block that runs as a proc" build-bang.log; then
+  echo "a \`!\` in a task's body was refused, but not as itself:"
+  tail -8 build-bang.log
+  exit 1
+fi
+
 # ── 4. Failure proof: the interleaving assert is reachable ────────────────
 step "failure proof: a wrong order is refused"
 sed 's/== "bababa"/== "aaabbb"/' "$REPO/bench/concurrency_exercise.iyi" > misordered.iyi

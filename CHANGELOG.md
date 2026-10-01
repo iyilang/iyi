@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **A `!` in a block kept as a proc - a task's body, most often - is
+  refused as itself.** `!` expands to a `return`, and the captured-block
+  check reported that: "can't return from captured block, use next",
+  about a `return` nobody wrote. The refusal says "`!` can't propagate
+  out of a block that runs as a proc", and how to answer the error
+  instead: `next` it and read it through `task.value` or the typed
+  group, or handle it there. `bench/concurrency_exercise.sh` builds a
+  task body with a `!`; the old compiler gave the `return` sentence.
+
 - **A typed `group ... end!` that reuses one variable for two spawns
   answers both tasks.** Each tuple slot read the author's variable after
   the join, so `t = g.spawn { work(1) }` then `t = g.spawn { work(2) }`

@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **A default written on a `getter` or `property` is the field's.** The
+  macros declared `@port : Int32` from `getter port : Int32 = 8080` and
+  dropped the `= 8080`, so a constructor that left the field alone did not
+  compile ("doesn't explicitly initialize instance variable '@port'") and
+  the default never existed. The declaration is written whole now, as
+  Crystal's macros write it. `bench/value_exercise.iyi` reads a default
+  through each; the old prelude did not compile it.
+
 - **A UDP receive cancelled on Windows keeps the datagram that landed.**
   The receive there is a posted operation, and it takes the datagram off
   the socket when it completes; cancelled as one landed, the call waited

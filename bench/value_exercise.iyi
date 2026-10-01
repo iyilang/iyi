@@ -172,6 +172,25 @@ assert_int(yielded_twice { LATER_WORDS.size }, 6, "constant: read in a block bef
 LATER_WORDS << "d"
 assert_int(LATER_WORDS.size, 4, "constant: initialised once, the same array at every read")
 
+# A field's default, written on its `getter` or `property`, is the
+# field's: the macros declared `@port : Int32` and dropped the `= 8080`, so
+# a constructor that left the field alone did not compile ("doesn't
+# explicitly initialize @port") and the default never existed.
+class Served
+  getter port : Int32 = 8080
+  property host : String = "localhost"
+  getter name : String
+
+  def initialize(@name : String)
+  end
+end
+
+served = Served.new("api")
+assert_int(served.port, 8080, "getter: a field's default is its value")
+assert_str(served.host, "localhost", "property: a field's default is its value")
+served.host = "example"
+assert_str(served.host, "example", "property: and is written over")
+
 puts "all value checks passed"
 
 LATER_WORDS = ["a", "b", "c"]

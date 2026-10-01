@@ -654,4 +654,27 @@ else
 fi
 cd "$WORK" || exit 1
 
+# A doc comment is the same text whatever the file's line endings. Each
+# doc line of a CRLF file kept its `\r`: `iyi doc` printed `# Second
+# paragraph.\r` among LF lines, and `mod context --json` shipped
+# "Doubles *x*.\r\n\r\nSecond paragraph.\r" - the grounding an agent reads
+# differed on a Windows checkout.
+mkdir -p "$WORK/endings/lf" "$WORK/endings/crlf"
+cd "$WORK/endings" || exit 1
+printf 'module lib\n\n# Doubles *x*.\n#\n# Second paragraph.\npub def twice(x : Int32) : Int32\n  x * 2\nend\n' > lf/lib.iyi
+awk '{ printf "%s\r\n", $0 }' lf/lib.iyi > crlf/lib.iyi
+for ending in lf crlf; do
+  printf 'module use\n\nimport lib::{twice}\n\nputs twice(1)\n' > "$ending/use.iyi"
+  (cd "$ending" && "$IYI" doc lib.iyi > "../$ending.doc" 2>&1 && "$IYI" mod context --json use.iyi > "../$ending.json" 2>&1)
+done
+if cmp -s lf.doc crlf.doc && grep -qF '"doc":"Doubles *x*.\n\nSecond paragraph."' crlf.json; then
+  echo "a CRLF file's doc comments read as the LF file's, in doc and in the context pack"
+else
+  echo "FAIL: a CRLF file's doc comments differ from the LF file's"
+  od -c crlf.doc | sed -n '1,4p' | sed 's/^/  /'
+  grep -o '"doc":"[^"]*"' crlf.json | head -2 | sed 's/^/  /'
+  status=1
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

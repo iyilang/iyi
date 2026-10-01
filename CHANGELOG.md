@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **A CRLF file's doc comments read as the LF file's.** Each doc line
+  was cut at its `\n` and kept the `\r` before it, so `iyi doc` printed
+  `# Second paragraph.\r` among LF lines, and `mod context --json`
+  shipped `"Doubles *x*.\r\n\r\nSecond paragraph.\r"` where the LF file
+  gives `"Doubles *x*.\n\nSecond paragraph."`. The `\r` is dropped now.
+  `bench/mod_context.sh` compares `iyi doc` of the two files and reads
+  the pack's doc; the old compiler kept the `\r`.
+
 - **`iyi fix` folds a `using` into its import in a CRLF file as in an LF
   one.** The blank line above a removed line was looked for as `\n`, and
   in CRLF the character there is `\r`, so the extra blank line stayed:

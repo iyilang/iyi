@@ -1150,7 +1150,14 @@ module Iyi
         @token.doc_buffer = doc_buffer = IO::Memory.new
       end
 
-      doc_buffer.write slice_range(start_pos)
+      # iyi: without the `\r` a CRLF line ends in, which the slice keeps
+      # because `skip_comment` stops at the `\n`: `iyi doc` and `mod context
+      # --json` of a CRLF file shipped `"Doubles *x*.\r\n\r\nSecond
+      # paragraph.\r"`, where the LF copy says `"Doubles *x*.\n\nSecond
+      # paragraph."`.
+      line = slice_range(start_pos)
+      line = line[0, line.size - 1] if line.size > 0 && line[line.size - 1] == '\r'.ord
+      doc_buffer.write line
     end
 
     def skip_comment

@@ -514,7 +514,14 @@ pub struct HTTP
     response = Response.new(status, reason, headers, "")
     return response if head || status == 204 || status == 304 || (status >= 100 && status < 200)
     if te = response.header("Transfer-Encoding")
-      body = decode_chunked(body) if same_name?(trim(te), "chunked")
+      # Chunked, once and last, is the coding this client decodes (RFC 9112
+      # §6.3): `gzip, chunked` and two `chunked` lines were taken for no
+      # coding at all, and the chunks came back as the body of a 200,
+      # framing and all.
+      if refused = coding_refused(te)
+        raise "HTTP: " + refused
+      end
+      body = decode_chunked(body)
     elsif cl = response.header("Content-Length")
       n = content_length(cl)
       raise "HTTP: Content-Length is not a number: #{cl.inspect}" unless n
@@ -527,6 +534,23 @@ pub struct HTTP
       body = body[0, length] if length < body.bytesize
     end
     Response.new(status, reason, headers, body)
+  end
+
+  # Why an answer's `Transfer-Encoding` is not one this client decodes,
+  # nil when it is `chunked` alone: it undoes no other coding, and chunked
+  # twice is a body framed twice. An empty list element is no coding (RFC
+  # 9110 §5.6.1).
+  private def self.coding_refused(te : String) : String?
+    chunked = 0
+    te.split(',').each do |part|
+      coding = trim(part)
+      next if coding.bytesize == 0
+      return "transfer coding #{coding.inspect} is not one this client decodes" unless same_name?(coding, "chunked")
+      chunked = chunked + 1
+    end
+    return "Transfer-Encoding #{te.inspect} names no coding this client decodes" if chunked == 0
+    return "Transfer-Encoding #{te.inspect} is chunked twice" if chunked > 1
+    nil
   end
 
   # The field lines after the first, or why they are not fields. A name

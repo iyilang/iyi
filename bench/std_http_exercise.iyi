@@ -190,6 +190,14 @@ resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\
 assert_str "abcdefg", resp.body, "a chunked body arrives joined"
 puts "  a chunked body is joined, extensions and trailers dropped"
 
+# Chunked, once and last, is the coding this client decodes (RFC 9112
+# §6.3), and any other is refused: `gzip, chunked` and two `chunked`
+# lines were taken for no coding, and the chunks came back as the body.
+assert_str "refused: HTTP: transfer coding \"gzip\" is not one this client decodes", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n"), "a coding the client cannot undo is refused"
+assert_str "refused: HTTP: Transfer-Encoding \"chunked, chunked\" is chunked twice", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n"), "and so is a body chunked twice"
+assert_str "200 OK Transfer-Encoding=Chunked,; \"hi\"", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked,\r\n\r\n2\r\nhi\r\n0\r\n\r\n"), "chunked in any case, beside an empty element, is chunked"
+puts "  chunked alone is decoded, and a coding this client cannot undo is refused"
+
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n", true)
 assert_str "", resp.body, "a HEAD answer has the headers of a body it does not carry"
 assert_str "99", resp.header("Content-Length") || "", "and the length is still readable"

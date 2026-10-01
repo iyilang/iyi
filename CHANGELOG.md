@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **The client decodes an answer whose only transfer coding is `chunked`,
+  and refuses any other.** The `Transfer-Encoding` value was compared whole
+  with "chunked", so `gzip, chunked`, two `chunked` lines and `Chunked,`
+  came back as a 200 whose body was the chunks with their framing,
+  `"2\r\nhi\r\n0\r\n\r\n"`. The value is read as a list now (RFC 9112 §6.3,
+  RFC 9110 §5.6.1): `chunked` alone, in any case and beside empty elements,
+  is decoded, and a coding the client cannot undo, or chunked twice, is
+  refused - "HTTP: transfer coding \"gzip\" is not one this client decodes".
+  `bench/std_http_exercise.iyi` checks the three; the old module answered
+  the framing as the body.
+
 - **`Server.serve` holds a request's body at what has arrived of it, not at
   the length its head declares.** At a body's second read it made a builder
   of the whole declared length: a head with `Content-Length: 67108864` and

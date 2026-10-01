@@ -310,6 +310,8 @@ mutate "a server whose tasks share the accept loop's variable" '          spawn_
             handle(accepted, handler)
             0
           end'
+mutate "a coding this client cannot undo read as chunked" 'return "transfer coding #{coding.inspect} is not one this client decodes" unless same_name?(coding, "chunked")' 'next unless same_name?(coding, "chunked")'
+mutate "a body chunked twice decoded as if once" 'return "Transfer-Encoding #{te.inspect} is chunked twice" if chunked > 1' ''
 mutate "a length past Int32's read as no number" 'return 2147483648_i64 if n > 2147483647_i64' 'return nil if n > 2147483647_i64'
 mutate "a socket read that takes all it may read from the heap" 'if count < first || max_bytes == first' 'if false' socket.iyi
 mutate "a malformed chunked body that raises in the server" 'return "not a chunk size: #{size_text.inspect}" unless size' 'raise "HTTP: not a chunk size: #{size_text.inspect}" unless size'

@@ -295,6 +295,13 @@ module Iyi::Lsp
       when "textDocument/didClose"
         if uri = params.try(&.dig?("textDocument", "uri")).try(&.as_s?)
           @documents.delete(uri)
+          # iyi: the version and the last clean text go with the buffer.
+          # Kept, a session that opened and closed files held the clean
+          # text of every one it ever opened, and a reopened buffer that
+          # did not compile was handed to a successor seeded with the
+          # text from before it was closed.
+          @versions.delete(uri)
+          @clean.delete(uri)
           @focus = nil if @focus == uri
         end
       when "shutdown"

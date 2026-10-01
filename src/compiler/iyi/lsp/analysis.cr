@@ -51,6 +51,9 @@ module Iyi::Lsp
     # in the tab being typed in. A document past the bound simply
     # compiles again when it is next asked about.
     @last_good = {} of String => Compiler::Result
+    # The text each of those was compiled from, which `aligned` lays over
+    # the buffer as it is now.
+    @last_good_text = {} of String => String
     @open = Set(String).new
     @seed = {} of String => String
     KEEP = 8
@@ -105,8 +108,10 @@ module Iyi::Lsp
     def close(path : String) : Nil
       @open.delete(path)
       @last_good.delete(path)
+      @last_good_text.delete(path)
       @seed.delete(path)
       @memo = @memo_key = nil if @memo_key.try(&.[0]) == path
+      @aligned = @aligned_key = nil if @aligned_key.try(&.[0]) == path
     end
 
     private def compile(path : String, text : String, overrides : Hash(String, String)) : {Compiler::Result?, Array(Diag)}
@@ -157,7 +162,11 @@ module Iyi::Lsp
       if @open.includes?(path)
         @last_good.delete(path)
         @last_good[path] = result
-        @last_good.shift if @last_good.size > KEEP
+        @last_good_text[path] = text
+        if @last_good.size > KEEP
+          evicted, _ = @last_good.shift
+          @last_good_text.delete(evicted)
+        end
         # The handover's text has nothing left to offer once this
         # buffer has a program of its own again.
         @seed.delete(path)
@@ -182,7 +191,7 @@ module Iyi::Lsp
       result, _ = check(path, text, overrides)
       return result if result
       if cached = @last_good[path]?
-        return cached
+        return aligned(path, text, overrides) || cached
       end
       # Kept until one of the two compiles works: dropping it on a try
       # that failed — a sibling buffer mid-edit is enough — would spend
@@ -197,6 +206,28 @@ module Iyi::Lsp
         end
       end
       nil
+    end
+
+    # iyi: the last good program, with its text laid over the buffer's
+    # lines (`Lsp.rebase`). Answered from the last good program as it
+    # was, every position below a line the person added or removed was
+    # read against the wrong line: press Enter, type half a statement,
+    # and hover, definition and highlight below it answered about the
+    # line above, their ranges a line off. One compile per buffer text,
+    # and only once a question needs the fallback; nil where the two
+    # cannot be aligned, and the caller answers as it did.
+    @aligned_key : {String, UInt64, UInt64}?
+    @aligned : Compiler::Result?
+
+    private def aligned(path : String, text : String, overrides : Hash(String, String)) : Compiler::Result?
+      return nil unless good = @last_good_text[path]?
+      key = {path, text.hash, overrides.hash}
+      return @aligned if @aligned_key == key
+      @aligned_key = key
+      @aligned = nil
+      return nil unless candidate = Lsp.rebase(good, text)
+      return @aligned = @last_good[path]? if candidate == good
+      @aligned = compile(path, candidate, overrides)[0]
     end
 
     def context_at(path : String, text : String, overrides : Hash(String, String), line : Int32, column : Int32) : ContextResult?
@@ -313,7 +344,7 @@ module Iyi::Lsp
       if receiver
         if type = scope[receiver]?
           collect_defs_named(type, name, defs, include_private: false)
-        elsif receiver[0]?.try(&.ascii_uppercase?) && (type = result.program.types[receiver]?)
+        elsif receiver[0]?.try(&.ascii_uppercase?) && (type = receiver_type(result, path, scope, receiver))
           # `Point.new(` — a call on the type itself answers from its
           # metaclass, where `new` and the class methods live.
           collect_defs_named(type.metaclass, name, defs, include_private: false)
@@ -329,12 +360,16 @@ module Iyi::Lsp
       # module; the typed graph does not. A call by this name that the
       # last good compile already bound knows its overloads exactly.
       if defs.empty?
-        defs = CallsNamedVisitor.new(path, name).process(result)
+        defs = CallsNamedVisitor.new(path, name, receiver).process(result)
       end
 
       seen = Set({String, Int32, Int32}).new
       signatures = [] of Signature
       defs.each do |a_def|
+        # iyi: a call with named arguments binds a def the compiler wrote
+        # for it, `new:path:router(path __temp_3a19 : String, ...)`; its
+        # name and parameters are nobody's spelling.
+        next unless a_def.name == name
         location = a_def.location
         next unless location
         next unless seen.add?({location.filename.to_s, location.line_number, location.column_number})
@@ -581,6 +616,18 @@ module Iyi::Lsp
       end
     end
 
+    # iyi: the type a capitalised receiver names, looked up where the cursor
+    # is rather than at the top level only. A module file's types live in
+    # the module its header opens, so `program.types["Words"]` found none of
+    # them and every `Words.new(` fell through to `CallsNamedVisitor`.
+    private def receiver_type(result : Compiler::Result, path : String, scope : Hash(String, Type), receiver : String) : Type?
+      if found = result.program.types[receiver]?
+        return found
+      end
+      within = scope["self"]? || unit_self_of(result, path)
+      within.try(&.instance_type.lookup_path(receiver.split("::"))).as?(Type)
+    end
+
     # One entry per name, nearest ancestor wins — the same order a call
     # resolves in. `initialize` is `new`'s business and compiler-internal
     # names are nobody's.
@@ -718,7 +765,10 @@ module Iyi::Lsp
     getter defs = [] of Def
     @target_location : Location
 
-    def initialize(@file : String, @name : String)
+    # iyi: *receiver* is the text before the `.`, nil for a bare call. A
+    # call on another receiver is another callee: with every `new` in the
+    # file taken, `Words.new(` offered `Nums`' constructor too.
+    def initialize(@file : String, @name : String, @receiver : String? = nil)
       @target_location = Location.new(@file, 1, 1)
     end
 
@@ -733,15 +783,52 @@ module Iyi::Lsp
     end
 
     def visit(node : Call)
-      if node.name == @name && node.location.try(&.filename) == @file
+      if node.name == @name && node.location.try(&.filename) == @file && same_receiver?(node.obj)
         node.target_defs.try &.each { |target| @defs << target }
       end
       true
     end
 
+    private def same_receiver?(obj : ASTNode?) : Bool
+      receiver = @receiver
+      # No receiver text is a bare call or one the text cannot spell
+      # (`[1, 2].zip(`): either way nothing to tell calls apart by.
+      return true unless receiver
+      return false unless obj
+      written = obj.to_s
+      written == receiver || written.ends_with?(".#{receiver}") || written.ends_with?("::#{receiver}")
+    end
+
     def visit(node)
       true
     end
+  end
+
+  # iyi: *good* laid over *now*'s lines. The lines the two share at the
+  # start and at the end stay where *now* has them, and the lines between
+  # are *good*'s, padded with blank lines to *now*'s count, so every
+  # position outside the edit names the same line in both. Nil where
+  # *good* has more lines there than *now*: removed lines cannot be put
+  # back without moving the ones after them.
+  def self.rebase(good : String, now : String) : String?
+    good_lines = good.split('\n')
+    now_lines = now.split('\n')
+    limit = {good_lines.size, now_lines.size}.min
+    prefix = 0
+    while prefix < limit && good_lines[prefix] == now_lines[prefix]
+      prefix += 1
+    end
+    suffix = 0
+    while suffix < limit - prefix && good_lines[good_lines.size - 1 - suffix] == now_lines[now_lines.size - 1 - suffix]
+      suffix += 1
+    end
+    inner = good_lines.size - prefix - suffix
+    room = now_lines.size - prefix - suffix
+    return nil if inner > room
+    lines = good_lines[0, prefix + inner]
+    (room - inner).times { lines << "" }
+    lines.concat good_lines[good_lines.size - suffix, suffix]
+    lines.join('\n')
   end
 
   # ── The location treaty: iyi columns ↔ LSP characters ─────────────────

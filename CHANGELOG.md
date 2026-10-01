@@ -4,6 +4,26 @@
 
 ### Fixed
 
+- **The language server answers about the line the cursor is on while a
+  buffer does not compile.** It answered from the last program that did,
+  at the buffer's current line numbers, so after Enter and half a
+  statement, definition and highlight below it named what was a line
+  away; the last good text is now laid over the buffer's lines first.
+- **Rename and references keep to one method.** Every `getter` in the
+  program was one method to them, because a macro-written def was keyed
+  by its macro's position: renaming `p.x` rewrote `p.y`. And `new` made
+  from `initialize` shared its key, so renaming `Point.new` turned
+  `def initialize(` into `make make(`. Both renames are refused now,
+  and renaming `initialize` touches its name alone.
+- **Signature help counts the arguments that are there and names the
+  right type.** Commas in a string, an array or a comment counted as
+  arguments, and `Nums.new(` in a module file offered every type's
+  constructor, compiler-written ones included.
+- **An outline selects the name.** `def self.make`, an `enum` and an
+  `impl` selected text beside their names, and a range's end was counted
+  in code points rather than UTF-16. The server also forgets a closed
+  buffer's text. Found by 441,870 requests and 9,891 edits over 197 files.
+
 - **A module header inside a body is an error.** `module bar` inside a
   `class`, an `if` or a `begin` parsed as a header and was dropped
   without a word - its `def`s went to the class - and inside a `begin`

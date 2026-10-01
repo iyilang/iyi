@@ -398,6 +398,138 @@ def package_fixture(home):
     return path, text, os.path.join(home, "cache")
 
 
+def opened(c, work, name, text):
+    """Write *name* under *work*, open it, and wait for its verdict."""
+    path = os.path.join(work, name)
+    with open(path, "w") as f:
+        f.write(text)
+    uri = file_uri(path)
+    c.send("textDocument/didOpen", {"textDocument": {
+        "uri": uri, "languageId": "iyi", "version": 1, "text": text}}, wait=False)
+    c.diagnostics(uri)
+    return uri
+
+
+def at(text, line, needle, nth=0):
+    """The UTF-16 character of the *nth* *needle* on *line* of *text*."""
+    row = text.split("\n")[line]
+    index = -1
+    for _ in range(nth + 1):
+        index = row.index(needle, index + 1)
+    return len(row[:index].encode("utf-16-le")) // 2
+
+
+def span_text(text, rng):
+    row = text.split("\n")[rng["start"]["line"]]
+    units = row.encode("utf-16-le")
+    return units[2 * rng["start"]["character"]:2 * rng["end"]["character"]].decode("utf-16-le")
+
+
+def fuzz_steps(c, work):
+    """What a fuzz over the library and the samples found: 441,870
+    requests from positions nobody chose. Each step failed before its fix."""
+
+    # 52j. Every `getter` was one method. A def a macro writes is keyed by
+    # its file, and the file of every expansion was "expanded macro:
+    # getter", at the same line and column: references to `p.x` listed
+    # `p.y` and `n.first`, and a rename rewrote all three.
+    getters = ("module getters\n\nstruct Point\n  getter x : Int32\n  getter y : Int32\n\n"
+               "  def initialize(@x : Int32, @y : Int32)\n  end\nend\n\n"
+               "struct Name\n  getter first : String\n\n  def initialize(@first : String)\n  end\nend\n\n"
+               "p = Point.new(1, 2)\nn = Name.new(\"a\")\nputs p.x\nputs p.y\nputs n.first\n")
+    uri = opened(c, work, "getters.iyi", getters)
+    reply = c.send("textDocument/references", {
+        "textDocument": {"uri": uri}, "position": {"line": 19, "character": 7},
+        "context": {"includeDeclaration": True}})
+    texts = {span_text(getters, loc["range"]) for loc in reply.get("result") or []}
+    step("52j", "references to one getter are that getter's alone", texts == {"x"}, str(sorted(texts)))
+    reply = c.send("textDocument/rename", {
+        "textDocument": {"uri": uri}, "position": {"line": 19, "character": 7}, "newName": "xx"})
+    step("52k", "a getter is not renamed from a call, which would leave the getter behind",
+         reply.get("error", {}).get("code") == -32803, json.dumps(reply)[:100])
+
+    # 52l. A `new` the compiler makes from `initialize` carries the
+    # initialize's location, so the two were one def: renaming
+    # `Point.new` wrote the new name over `def initialize`, keyword and
+    # name, and renaming `initialize` rewrote the `def` and the `.new`.
+    reply = c.send("textDocument/rename", {
+        "textDocument": {"uri": uri}, "position": {"line": 17, "character": 10}, "newName": "make"})
+    step("52l", "`new` made from initialize is refused a rename",
+         reply.get("error", {}).get("code") == -32803, json.dumps(reply)[:100])
+    reply = c.send("textDocument/rename", {
+        "textDocument": {"uri": uri}, "position": {"line": 6, "character": 8}, "newName": "setup"})
+    edits = [span_text(getters, e["range"])
+             for e in (reply.get("result") or {}).get("changes", {}).get(uri, [])]
+    step("52m", "renaming initialize touches its name and nothing else", edits == ["initialize"], str(edits))
+
+    # 52n. Signature help counted every `,` walking back to the `(`:
+    # inside a string, an array, a hash. `pair(1, "x, y"` was on the
+    # third parameter of a two-parameter method.
+    sig = ("module sig\n\nstruct Words\n  def initialize(@a : Array(String))\n  end\nend\n\n"
+           "struct Nums\n  def initialize(@a : Array(Int32))\n  end\nend\n\n"
+           "def pair(a : Int32, b : String) : String\n  \"#{a}#{b}\"\nend\n\n"
+           "w = Words.new([\"pear\", \"fig\", \"plum\"])\nn = Nums.new([3, 1, 4])\n"
+           "puts pair(1, \"x, y\")\nputs [1, 2].zip([\"a\", \"b\"])\n")
+    uri = opened(c, work, "sig.iyi", sig)
+
+    def helped(line, needle):
+        return c.send("textDocument/signatureHelp", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": at(sig, line, needle)}}).get("result") or {}
+    in_string = helped(18, ")").get("activeParameter")
+    in_array = helped(19, "\"b").get("activeParameter")
+    step("52n", "commas in a string or an array are not arguments",
+         in_string == 1 and in_array == 0, f"pair: {in_string}, zip: {in_array}")
+
+    # 52o. `Nums.new(` in a module file: the type was looked up at the top
+    # level only, where a module's types are not, and the fallback took
+    # every call named `new` in the file - `Words`' constructor first.
+    labels = [s["label"] for s in helped(17, "4").get("signatures", [])]
+    step("52o", "a constructor's signatures are its own type's", labels == ["new(a : Array(Int32))"], str(labels))
+
+    # 52p. The outline's selection is the name as written: it was the
+    # listed name's length from the name's start (`self.encode` covered
+    # `encode(v`) or from the keyword (`enum Level` covered `enum `).
+    outline = ("module outline\n\nenum Level\n  Low\n  High\nend\n\nstruct Box\n"
+               "  def self.make(v : Int32) : Box\n    Box.new\n  end\nend # 🎉\n")
+    uri = opened(c, work, "outline.iyi", outline)
+    reply = c.send("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+    found = {}
+
+    def walk(symbols):
+        for s in symbols or []:
+            found[s["name"]] = (span_text(outline, s["selectionRange"]), s["range"])
+            walk(s.get("children"))
+    walk(reply.get("result"))
+    named = {name: written for name, (written, _) in found.items()}
+    box_end = found.get("Box", (None, {"end": {}}))[1]["end"].get("character")
+    step("52p", "a symbol's selection is its written name, and its range ends in UTF-16",
+         named.get("self.make") == "make" and named.get("Level") == "Level" and box_end == 8,
+         f"{named} Box ends at {box_end}")
+
+    # 52q. A buffer that stops compiling is answered from the last program
+    # that did, and that program's lines were read as the buffer's: press
+    # Enter above a call, type half a call, and definition on `greet`
+    # landed on `def shout`, the line below's callee.
+    stale = ("module stale\n\ndef greet(name : String) : String\n  \"hi #{name}\"\nend\n\n"
+             "def shout(name : String) : String\n  name.upcase\nend\n\n"
+             "a = greet(\"x\")\nb = shout(\"y\")\nputs a\nputs b\n")
+    uri = opened(c, work, "stale.iyi", stale)
+    c.send("textDocument/didChange", {
+        "textDocument": {"uri": uri, "version": 2},
+        "contentChanges": [{"range": {"start": {"line": 10, "character": 0},
+                                      "end": {"line": 10, "character": 0}},
+                            "text": "c = greet(\n"}]}, wait=False)
+    c.diagnostics(uri)
+    lines = []
+    for line in (11, 12):
+        reply = c.send("textDocument/definition", {
+            "textDocument": {"uri": uri}, "position": {"line": line, "character": 4}})
+        lines.append([loc["range"]["start"]["line"] for loc in reply.get("result") or []])
+    step("52q", "below a line being typed, definition still names the callee written there",
+         lines == [[2], [6]], str(lines))
+
+
 def main():
     watchdog(180)
     # Set before the server starts, because a child inherits the environment
@@ -2365,6 +2497,8 @@ def main():
     step("52i", "a hover inside an `or` is answered, not refused",
          "error" not in reply,
          json.dumps(reply.get("error") or reply.get("result"))[:80])
+
+    fuzz_steps(c, work)
 
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has

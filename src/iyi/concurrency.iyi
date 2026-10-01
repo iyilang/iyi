@@ -917,6 +917,9 @@ class IyiSchedulerState
     # an assignment inside a macro conditional is not counted either.
     @deadline_timer : Int64 = 0_i64
     @wait_handles : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+    # The fiber on this thread waiting for standard input's reader, which
+    # posts to this thread's port (`IyiStdinReader.read`).
+    property stdin_waiter : IyiFiber?
 
     def deadline_timer : Int64
       @deadline_timer
@@ -2388,8 +2391,6 @@ end
     PAGE       = 65536_u64
 
     @@page : UInt64 = 0_u64
-    @@waiter : IyiFiber? = nil
-    @@answer : Int64 = 0_i64
 
     def self.word(offset : UInt64) : Pointer(Atomic(UInt64))
       Pointer(Atomic(UInt64)).new(@@page + offset)
@@ -2401,12 +2402,13 @@ end
       @@page == 0_u64 ? 0_u64 : @@page + OVERLAPPED
     end
 
+    # This scheduler's: the fiber asking, on the thread that asked.
     def self.waiting? : Bool
-      @@waiter.is_a?(IyiFiber)
+      IyiScheduler.state.stdin_waiter.is_a?(IyiFiber)
     end
 
     def self.waiter?(fiber : IyiFiber) : Bool
-      waiter = @@waiter
+      waiter = IyiScheduler.state.stdin_waiter
       waiter.is_a?(IyiFiber) && waiter.sp_slot.address == fiber.sp_slot.address
     end
 
@@ -2418,34 +2420,56 @@ end
       kind == 2 || kind == 3
     end
 
+    # Under the runtime lock, and the page published only once its words
+    # are written, the thread made suspended (4) until then: two threads'
+    # first reads would otherwise each make a reader, and one that saw the
+    # page early would ring a doorbell not made yet.
     def self.start(handle : Void*) : Nil
-      @@page = __iyi_mmap(PAGE).address
-      word(W_HANDLE).value.set(handle.address)
-      word(W_PORT).value.set(IyiScheduler.pollfd.to_u64)
-      word(W_DOORBELL).value.set(LibC.CreateSemaphoreW(nil, 0_i32, 1_i32, nil).address)
-      entry = ->(argument : UInt64) { IyiStdinReader.run(argument) }
-      thread = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(Pointer(UInt64).new(pointerof(entry).address).value),
-        Pointer(Void).new(0_u64), 0_i32, nil)
-      raise "CreateThread failed for standard input's reader" if thread.address == 0_u64
-      word(W_THREAD).value.set(thread.address)
+      IyiRuntimeLock.lock
+      if @@page == 0_u64
+        page = __iyi_mmap(PAGE).address
+        Pointer(UInt64).new(page + W_HANDLE).value = handle.address
+        Pointer(UInt64).new(page + W_DOORBELL).value = LibC.CreateSemaphoreW(nil, 0_i32, 1_i32, nil).address
+        entry = ->(argument : UInt64) { IyiStdinReader.run(argument) }
+        thread = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(Pointer(UInt64).new(pointerof(entry).address).value),
+          Pointer(Void).new(0_u64), 4_i32, nil)
+        if thread.address != 0_u64
+          Pointer(UInt64).new(page + W_THREAD).value = thread.address
+          @@page = page
+          LibC.ResumeThread(thread)
+        end
+      end
+      IyiRuntimeLock.unlock
+      raise "CreateThread failed for standard input's reader" if @@page == 0_u64
     end
 
+    # Any thread's fiber may ask, one read at a time in the process: the
+    # claim is the state's own IDLE to ASKED, and the port to post to and
+    # the fiber to wake are the asking scheduler's. They were the first
+    # reader's: the port was set once, at the start, and the waiter was
+    # one for the process, so a second `IyiThread` reading stdin had its
+    # line posted to the main thread's port. A main thread joining it
+    # never took the post and the program hung; one polling took it and
+    # switched onto the other thread's fiber, an access violation, 3 runs
+    # in 3 each.
     def self.read(handle : Void*, console : Bool, buffer : Void*, count : UInt64, ms : Int32) : Int64 | Cancelled
       fiber = IyiScheduler.current
       return Cancelled.new if fiber.cancelled
-      raise "two fibers reading standard input" if waiting?
       start(handle) if @@page == 0_u64
-      @@waiter = fiber
+      raise "two fibers reading standard input" unless word(W_STATE).value.compare_and_set(IDLE, ASKED)[1]
+      st = IyiScheduler.state
+      st.stdin_waiter = fiber
+      fiber.io_bytes_read = 0_i64
       word(W_BUFFER).value.set(buffer.address)
       word(W_COUNT).value.set(count)
       word(W_CONSOLE).value.set(console ? 1_u64 : 0_u64)
-      word(W_STATE).value.set(ASKED)
+      word(W_PORT).value.set(IyiScheduler.pollfd.to_u64)
       LibC.ReleaseSemaphore(Pointer(Void).new(word(W_DOORBELL).value.get), 1_i32, nil)
       deadline = ms
       withdrawn = false
-      while word(W_STATE).value.get != IDLE
+      while st.stdin_waiter.is_a?(IyiFiber)
         IyiScheduler.park_stdin_current(deadline)
-        next if word(W_STATE).value.get == IDLE
+        next unless st.stdin_waiter.is_a?(IyiFiber)
         # Woken with the read still the thread's: a cancellation. A
         # deadline withdraws the read from the poller and wakes nobody
         # until the post (`IyiScheduler.wake_expired_sleepers`).
@@ -2453,8 +2477,7 @@ end
         withdrawn = true
         deadline = -1
       end
-      @@waiter = nil
-      answer = @@answer
+      answer = fiber.io_bytes_read
       return answer if answer > 0_i64
       return Cancelled.new if fiber.cancelled
       answer
@@ -2484,13 +2507,17 @@ end
       end
     end
 
-    # The post taken off the port: the answer to the fiber, and the next
-    # read free to be asked.
+    # The post taken off the asking scheduler's port: the answer to its
+    # fiber, and the next read free to be asked - by any thread, so the
+    # bytes are read off the page first.
     def self.delivered : Nil
-      @@answer = word(W_BYTES).value.get.to_i64
+      st = IyiScheduler.state
+      waiter = st.stdin_waiter
+      bytes = word(W_BYTES).value.get.to_i64
+      st.stdin_waiter = nil
       word(W_STATE).value.set(IDLE)
-      waiter = @@waiter
       return unless waiter.is_a?(IyiFiber)
+      waiter.io_bytes_read = bytes
       IyiScheduler.untime(waiter)
       IyiScheduler.enqueue(waiter) if waiter.state == IyiFiberState::WaitingIo
     end

@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **Standard input can be read from any `IyiThread` on Windows.** Standard
+  input's reader thread posted every line to the completion port of the
+  first thread that read it, and woke the one waiter the process kept: after
+  the main thread had read a line, a line read on a second thread hung while
+  the main thread joined it, and crashed with an access violation
+  (0xC0000005) while the main thread polled, 3 runs in 3 each. Each read now
+  names its own scheduler's port and waits as that scheduler's fiber, one
+  read at a time in the process, and the reader is started under the runtime
+  lock. `bench/stdin_park.iyi` reads its last line on an `IyiThread` while
+  the main thread polls; the old runtime answered "another thread's read of
+  standard input had not answered in 10 s".
+
 - **`wait_readable(fd, ms)` answers what it found, and on Windows a wait on
   a standard-input pipe keeps its deadline.** The answer was a flag only a
   wait that parked reset: after one wait had timed out, a pipe already

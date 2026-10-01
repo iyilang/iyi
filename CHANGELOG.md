@@ -1005,6 +1005,16 @@
   and `d/**/*.txt` answered `d/x.txt`. `bench/std_dir_exercise.iyi`
   globs through one and two wildcard segments and from `./`; the old
   module answered `[]` for the first.
+- **The cursor sweep fits its CI job again.** `bench/lsp_positions.py`
+  asks its questions every 200 lines of each std module, and each
+  question compiles the module, so a module costs its size squared:
+  `std/math` grew to 12,000 lines with CORE-MATH's functions and took 938
+  seconds alone, and the "Samples, from source and from artifacts" job
+  ran past its hour three runs in a row. A module past 4,800 lines is
+  swept with its stride scaled to its size now, every shape still sampled
+  across it - math in 232 seconds; every other module is asked as
+  before, and every answer is still a real one.
+
 - **Seeking a stream with no descriptor refuses on Windows too.** A
   `Memory` reached through `IyiIO#pos=` or `seek` has the handle -1, and
   Windows' conversion of it panicked "arithmetic overflow" where Linux's

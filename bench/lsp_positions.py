@@ -94,6 +94,9 @@ RSS_CEILING_MB = 1024
 FAILURES: list[str] = []
 
 
+# The size past which a module is swept more thinly (`questions`).
+MODULE_LINES = 2400
+
 MACRO_LINE = re.compile(r"\{%")
 ASSIGNMENT = re.compile(r"^\s*[\w, ]+ = [^=]")
 
@@ -141,7 +144,13 @@ def questions(path: Path, stride: int) -> list[tuple[str, dict, str]]:
                  {"textDocument": {"uri": uri},
                   "range": {"start": {"line": 0, "character": 0},
                             "end": {"line": len(lines), "character": 0}}}, path.name))
-    for index, (line_no, column) in enumerate(positions(lines, stride)):
+    # A question costs a compile of the module, so a module's sweep costs
+    # its positions times its size: square in its lines. `std/math`, 12,000
+    # lines once CORE-MATH's functions came in, cost 938 s alone here and
+    # put the CI job past its hour. A module is asked as often as one of
+    # MODULE_LINES lines would be, every shape still sampled across it.
+    module_stride = stride * max(1, len(lines) // MODULE_LINES)
+    for index, (line_no, column) in enumerate(positions(lines, module_stride)):
         params = {"textDocument": {"uri": uri},
                   "position": {"line": line_no, "character": column}}
         where = f"{path.name}:{line_no + 1}:{column + 1}"

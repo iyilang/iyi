@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **`UdpSocket#local_address` of a socket that has not sent answers the
+  any-address.** Windows refuses `getsockname` on an unbound UDP socket
+  (WSAEINVAL), and `local_address` panicked "cannot get local address"
+  where `local_port` of the same socket answered 0. It answers `0.0.0.0`,
+  or `::` for an IPv6 socket, as POSIX does. `bench/std_udp_exercise.iyi`
+  asks an unbound client; the old module panicked.
+
 - **A socket's refusal names an IPv6 peer in its brackets.** Messages
   wrote the peer as `host:port`, so a refused connect to `::1` said
   "cannot connect to ::1:57456" - an address with no port - and one to

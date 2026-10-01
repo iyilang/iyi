@@ -344,6 +344,10 @@ pub class UdpSocket
     addr = Pointer(UInt8).malloc(28_u64)
     len = 28_u32
     res = UdpSocket.__sys_getsockname(@fd, addr, pointerof(len))
+    # Unbound, the family's any-address, as POSIX answers it and as
+    # `local_port` answers 0: Windows refuses the call (WSAEINVAL), and
+    # this panicked "cannot get local address".
+    return @family == AF_INET6 ? "::" : "0.0.0.0" if res < 0 && UdpSocket.__unbound_now?
     raise "cannot get local address" if res < 0
 
     host, _ = UdpSocket.format_address(addr)

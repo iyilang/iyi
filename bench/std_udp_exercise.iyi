@@ -48,6 +48,9 @@ client = UdpSocket.client
 # panicked there, "cannot receive from UDP socket".
 assert_true client.receive_from?.nil?, "an unbound client has nothing queued"
 assert_int 0, client.local_port, "an unbound client's port is 0"
+# And its address the any-address: Windows refuses the call, and this
+# panicked "cannot get local address" where the port answered 0.
+assert_str "0.0.0.0", client.local_address, "an unbound client's address is the any-address"
 sent = client.send_to("ping loopback", "127.0.0.1", server_port)
 assert_int 13, sent, "sent byte count"
 

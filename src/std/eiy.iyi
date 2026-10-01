@@ -518,19 +518,25 @@ pub struct Eiy
     {{ run("./eiy/process", @caller.first.filename || "", filename, io_name.id.stringify) }}
   end
 
-  # The template at *filename*, rendered to a `String`.
+  # The template at *filename*, rendered to a `String`. The buffer's name
+  # is fresh per expansion: it was `__buf__`, and a template that
+  # renders another reassigned it, so `A<%= Eiy.render("inner.eiy") %>B`
+  # gave `iB`, the outer text lost.
   macro render(filename)
     begin
-      __buf__ = ::Std::Eiy::Eiy::Buffer.new
-      ::Std::Eiy::Eiy.embed({{filename}}, __buf__)
-      __buf__.to_s
+      %buf = ::Std::Eiy::Eiy::Buffer.new
+      ::Std::Eiy::Eiy.embed({{filename}}, %buf)
+      %buf.to_s
     end
   end
 
-  # Defines `to_s(io)` and `to_s` from the template at *filename*.
+  # Defines `to_s(io)` and `to_s` from the template at *filename*. The
+  # parameter is `__io__`, as `Eiy.process_string`'s default names it: named
+  # `io`, it hid a method `io` of the class, and `<%= io %>` printed the
+  # buffer to itself.
   macro def_to_s(filename)
-    def to_s(io) : Nil
-      ::Std::Eiy::Eiy.embed({{filename}}, io)
+    def to_s(__io__) : Nil
+      ::Std::Eiy::Eiy.embed({{filename}}, __io__)
     end
 
     def to_s : String

@@ -17,6 +17,8 @@
 #   * Refusals: a template with an open tag and a template that is not there
 #     are refused at build time with their sentences; the runtime API panics
 #     with the same sentences.
+#   * A template that renders another keeps the text around it, and
+#     `def_to_s` leaves a class's own `io` to the template.
 #   * Dependency floor: the exercise binary adds no symbol and no library.
 #
 # Needs `make` for bin/iyi, plus `nm`, and `otool` on Darwin or `readelf` on Linux.
@@ -229,6 +231,48 @@ eiy_build_refuses "a template that is not there" no_such_template "cannot read $
 # line and column, not in the generated source.
 printf 'ok\n  x <%%= nonexistent_thing %%>\n' > "$WORK/bad_name.eiy"
 eiy_build_refuses "a name the template does not have" bad_name "bad_name.eiy:2:9"
+
+echo
+echo "== templates that render templates, and a class's own io"
+eiy_renders() { # eiy_renders <label> <name> <expected output> <program after the import>
+  local label="$1" name="$2" expected="$3" body="$4"
+  printf 'module main\n\nimport std/eiy::{Eiy}\n%s\n' "$body" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  local got
+  got="$("$WORK/$name" 2>&1)"
+  if [ "$got" != "$expected" ]; then
+    echo "  $label: printed '$got', not '$expected'"
+    status=1
+    return
+  fi
+  printf '  %s: %s\n' "$label" "$got"
+}
+# The buffer `render` collects into was `__buf__`, and the inner render
+# reassigned the outer one's: the program printed `iB`.
+printf 'i' > "$WORK/inner.eiy"
+printf 'A<%%= Eiy.render("inner.eiy") %%>B' > "$WORK/outer.eiy"
+eiy_renders "a template that renders another" nested "AiB" '
+puts Eiy.render("outer.eiy")'
+# `def_to_s`'s parameter was `io`, so `<%= io %>` in `to_s(io)` printed
+# the buffer into itself (`io=io=`) where the class's own `io` was meant.
+printf 'io=<%%= io %%>' > "$WORK/own_io.eiy"
+eiy_renders "def_to_s in a class with a method io" own_io "io=field io=field" '
+class Holder
+  def io : String
+    "field"
+  end
+
+  Eiy.def_to_s("own_io.eiy")
+end
+
+buffer = Eiy::Buffer.new
+Holder.new.to_s(buffer)
+puts "#{Holder.new.to_s} #{buffer.to_s}"'
 
 echo
 echo "== what the runtime API refuses"

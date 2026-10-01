@@ -142,6 +142,8 @@
 
 ### Fixed
 
+- **`Eiy.render` nested in a template keeps the outer text, and `Eiy.def_to_s` leaves a class's own `io` to the template.** `render` collected into a variable named `__buf__`, and a template that rendered another reassigned it, so `A<%= Eiy.render("inner.eiy") %>B` gave `iB`. `def_to_s` named its parameter `io`, which hid a method `io` of the class: in `to_s(io)`, `<%= io %>` printed the buffer into itself (`io=io=`), while `to_s` gave `io=my-io-field`. The buffer is now a fresh macro variable, and the parameter is `__io__`, the name the other library's ECR uses. `bench/std_eiy_exercise.sh` builds both from templates it writes and expects `AiB` and `io=field io=field`. The old module printed `iB` and `io=field io=io=`.
+
 - **A Hash's keys that share their low bits are not one run of probes.**
   The table picked a key's slot from its hash's low bits as they were,
   and an Int's hash is the Int: keys that were multiples of 65536 all had

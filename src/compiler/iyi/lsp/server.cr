@@ -819,11 +819,15 @@ module Iyi::Lsp
           json.field "relatedInformation" do
             json.array do
               diag.related.each do |(file, line, col, msg)|
+                # In wire units, as every other range is: the codepoint
+                # column went out as it was, and an `f(1)` behind two emoji
+                # was placed at character 10, where the editor has it at 12.
+                character = col > 0 ? Lsp.character_of(read_line(file, line), col) : 0
                 json.object do
                   json.field "location" do
                     json.object do
                       json.field "uri", uri_of(file)
-                      json.field "range" { range(json, line - 1, col > 0 ? col - 1 : 0, line - 1, col > 0 ? col - 1 : 0) }
+                      json.field "range" { range(json, line - 1, character, line - 1, character) }
                     end
                   end
                   json.field "message", msg

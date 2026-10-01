@@ -506,6 +506,20 @@ def main():
     step(5, "hover names the type", "loud : String" in value,
          value.replace("\n", " "))
 
+    # 70i. A diagnostic's relatedInformation is in wire units like its
+    #      range: the "instantiating" note for an `f(1)` behind two emoji
+    #      went out at character 10, the codepoint column, where the
+    #      editor has the call at 12.
+    related_uri = file_uri(os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-related"), "related.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": related_uri, "languageId": "iyi", "version": 1,
+                             "text": 'module related\n\ndef f(x)\n  x.nope\nend\n\ns = "\U0001F600\U0001F600"; f(1)\n'}},
+           wait=False)
+    notes = [(r["location"]["range"]["start"]["line"], r["location"]["range"]["start"]["character"])
+             for d in c.diagnostics(related_uri)["diagnostics"] for r in d.get("relatedInformation", [])]
+    c.send("textDocument/didClose", {"textDocument": {"uri": related_uri}}, wait=False)
+    step("70i", "relatedInformation is in UTF-16 units", (6, 12) in notes, f"notes at {notes}")
+
     # 6. definition on the call jumps into the sibling module's def.
     reply = c.send("textDocument/definition",
                    {"textDocument": {"uri": app_uri},

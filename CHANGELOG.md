@@ -142,6 +142,12 @@
 
 ### Fixed
 
+- **A diagnostic's related locations are placed in UTF-16 units.** Their
+  column went out as the codepoint column, so the "instantiating
+  'f(Int32)'" note for an `f(1)` behind two emoji pointed at character 10,
+  `; f(1)`, where the call is at 12. `bench/lsp_session.py` step 70i checks
+  it; the old server answered 10.
+
 - **A quick fix is still offered after an idle pause, in every open file.**
   Quick fixes were read from the verdicts this worker had published, and a
   worker replaced after two quiet seconds compiles only the focused file:

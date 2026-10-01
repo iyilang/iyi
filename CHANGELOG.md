@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`read_bytes(count)` on a file allocates what arrives, not the
+  count.** `IyiIO#read_bytes` allocated `count` bytes before it read
+  anything, the bug std/io's `Reader` had: reading a 10-byte file with a
+  count of 1,500,000,000 peaked at 1,595 MB and took 10.7 s. The buffer
+  starts at the stream's own buffer size and doubles with what arrives,
+  up to the count, as `Reader#read_bytes` does: the same read peaks at
+  160 MB, what a count of 10 peaks at, in 0.48 s.
+  bench/io_exercise.iyi asks 100 MB of a 36-byte file and counts what
+  the collector handed out; the old prelude allocated 100,017,068
+  bytes.
+
 - **On Windows `File.exists?` is false for a DOS device that is not
   there.** Windows answers the attributes of every DOS device name with
   0x20, present or not, and the prelude took that for existence:

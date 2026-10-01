@@ -87,18 +87,27 @@ class IyiIO
     @read_limit
   end
 
+  # The buffer grows with what arrives, up to `count`, as std/io's
+  # `Reader#read_bytes` does: allocated whole first, 10 bytes read with a
+  # count of 1,500,000,000 took 1.6 GB. It starts at the stream's buffer,
+  # the most one piece is, so one doubling holds the next piece.
   def read_bytes(count : Int32) : String
     raise "cannot read from closed IO" if @closed
     return "" if count <= 0
 
-    result_buf = Pointer(UInt8).malloc(count.to_u64)
     total_read = 0
+    result_cap = count < @read_capacity ? count : @read_capacity
+    result_buf = Pointer(UInt8).malloc(result_cap.to_u64)
 
     while total_read < count
       avail = @read_limit - @read_pos
       if avail > 0
         needed = count - total_read
         to_copy = avail < needed ? avail : needed
+        if total_read + to_copy > result_cap
+          result_cap = count - result_cap < result_cap ? count : result_cap * 2
+          result_buf = result_buf.realloc(result_cap.to_u64)
+        end
         (result_buf + total_read).copy_from(@read_buffer + @read_pos, to_copy)
         total_read = total_read + to_copy
         @read_pos = @read_pos + to_copy

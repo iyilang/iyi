@@ -88,6 +88,24 @@ raise "eof: expected eof? to remain true" unless io_eof.eof?
 io_eof.close
 puts "eof: ok"
 
+# 4a. `read_bytes` grows with what arrives, up to the count: the count is a
+# most, and it was allocated whole before the read - 10 bytes read with a
+# count of 1,500,000,000 took 1.6 GB. Here 100 MB are asked of 36 bytes,
+# counted by the collector, which the other allocators do not count.
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+  File.write(path, sample_text)
+  io_most = File.open(path, "r", 4096)
+  IyiMark.auto = false
+  most_before = IyiMark.allocated_since
+  most = io_most.read_bytes(100_000_000)
+  most_bytes = IyiMark.allocated_since - most_before
+  IyiMark.auto = true
+  io_most.close
+  raise "read_bytes: a count of 100000000 read #{most.bytesize} bytes, not the 36 there are" unless most == sample_text
+  raise "read_bytes: a count of 100000000 allocated #{most_bytes} bytes to read 36" if most_bytes > 1_000_000_u64
+  puts "read_bytes: a large count allocates what is read"
+{% end %}
+
 # 4b. `read_all` reads the rest of a file in large pieces, not through the
 # stream's own buffer a buffer at a time: 4 MB through a 4 KB buffer was
 # 1,024 reads and as many copies. Linux counts a process's reads in

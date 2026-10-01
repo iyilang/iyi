@@ -814,6 +814,41 @@ def main():
          fix is not None and "loud.upcase" in applied and clean,
          f"{len(actions)} action(s), quickfix applied and clean")
 
+    # 70h. A quick fix is still offered after an idle replacement, for every
+    #      open file and not only the one last edited. The successor is
+    #      handed the buffers and compiles the focused one, and the other's
+    #      verdict, still on screen, had no fix behind it: "Change to
+    #      'upcase'" before a three-second pause, [] after it.
+    quick_root = tempfile.mkdtemp(prefix="iyi-lsp-quickfix")
+    quick = {"a.iyi": 'module a\n\nloud = "x"\nputs loud.upcsae\n',
+             "b.iyi": 'module b\n\nquiet = "y"\nputs quiet.downcsae\n'}
+    for name, body in quick.items():
+        with open(os.path.join(quick_root, name), "w", newline="") as f:
+            f.write(body)
+    q = Client()
+    q.send("initialize", {"rootUri": file_uri(quick_root), "capabilities": {}})
+    q.send("initialized", {}, wait=False)
+    quick_diags = {}
+    for name, body in quick.items():
+        uri = file_uri(os.path.join(quick_root, name))
+        q.send("textDocument/didOpen", {"textDocument": {"uri": uri, "languageId": "iyi",
+                                                          "version": 1, "text": body}}, wait=False)
+        quick_diags[name] = (uri, q.diagnostics(uri)["diagnostics"])
+
+    def quick_fixes():
+        uri, diags = quick_diags["a.iyi"]
+        reply = q.send("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": diags[0]["range"],
+                                                   "context": {"diagnostics": diags}})
+        return [a["title"] for a in reply.get("result") or []]
+    before = quick_fixes()
+    time.sleep(3)  # the proxy replaces a worker after two quiet seconds
+    after = quick_fixes()
+    q.send("shutdown", {})
+    q.send("exit", {}, wait=False)
+    q.proc.wait(timeout=10)
+    step("70h", "a quick fix outlives an idle replacement in every open file",
+         before == after == ["Change to 'upcase'"], f"before {before}, after {after}")
+
     # 17. signatureHelp, asked right after the `(` lands — the buffer
     #     has no syntax there; the overload comes off the typed graph.
     c.send("textDocument/didChange",

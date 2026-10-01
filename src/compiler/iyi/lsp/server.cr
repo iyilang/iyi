@@ -2530,6 +2530,13 @@ module Iyi::Lsp
       to = params["range"]["end"]["line"].as_i
       only = params["context"]?.try(&.["only"]?).try(&.as_a?.try(&.compact_map(&.as_s?)))
 
+      # A buffer this worker was handed (`iyi/adopt`) has a verdict on the
+      # client's screen and none stored here: the successor compiles only
+      # the focused file, and every other open file's quick fix was gone
+      # after an idle replacement - `a.iyi` offered "Change to 'upcase'"
+      # before a 3 s pause and nothing after it. Compiled here instead,
+      # which is the verdict that is on screen.
+      diagnostic_rows(uri) if action_wanted?(only, "quickfix") && !@published.has_key?(uri)
       actions = (@published[uri]? || [] of {Int32, Int32, Int32, String, String?}).compact_map do |(line0, start_ch, end_ch, message, suggestion)|
         next unless action_wanted?(only, "quickfix")
         next unless line0 >= from && line0 <= to && end_ch > start_ch

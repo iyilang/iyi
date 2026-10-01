@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **A quick fix is still offered after an idle pause, in every open file.**
+  Quick fixes were read from the verdicts this worker had published, and a
+  worker replaced after two quiet seconds compiles only the focused file:
+  `a.iyi` offered "Change to 'upcase'" before a three-second pause and
+  nothing after it while its diagnostic stayed on screen. codeAction
+  compiles the verdict when it has none stored. `bench/lsp_session.py`
+  step 70h checks before and after the pause; the old server answered []
+  after it.
+
 - **A `$/cancelRequest` whose params are not an object is dropped, and the
   worker goes on.** Its params were indexed for `id` outside every rescue,
   so `["x"]`, `"x"` or `5` ended the worker with "you've found a bug in

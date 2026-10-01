@@ -24,9 +24,10 @@ module Iyi::Lsp
       items = [] of Item
       collect(parsed, module_path, items)
       items
-    rescue CodeError
+    rescue CodeError | InvalidByteSequenceError
       # Mid-edit a workspace file may not parse; it simply offers
-      # nothing until it does.
+      # nothing until it does. Nor does one that is not UTF-8: it raised
+      # past this, and completing `sho` in any other file answered -32603.
       [] of Item
     end
 

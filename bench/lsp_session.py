@@ -1268,6 +1268,43 @@ def main():
     step(20, "workspace/symbol finds the def across the project",
          hit is not None, f"{len(syms)} symbol(s)")
 
+    # 70b. A module whose bytes are not UTF-8 - saved as Windows-1254 - is a
+    #      diagnostic, and only its own. The in-process compile exited on
+    #      it: its hover and diagnostic pull answered -32603 "did not
+    #      survive it", and workspace symbols and completion in every other
+    #      file -32603 "Unexpected byte 0xfe".
+    legacy_root = tempfile.mkdtemp(prefix="iyi-lsp-legacy")
+    legacy_app_text = "module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\nputs sho\n"
+    with open(os.path.join(legacy_root, "greet.iyi"), "w", newline="") as f:
+        f.write("module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n")
+    with open(os.path.join(legacy_root, "app.iyi"), "w", newline="") as f:
+        f.write(legacy_app_text)
+    with open(os.path.join(legacy_root, "legacy.iyi"), "wb") as f:
+        f.write("module legacy\n\n# şarkı söyle\npub def şık : String\n  \"ğüş\"\nend\n".encode("cp1254"))
+    lg = Client()
+    lg.send("initialize", {"rootUri": file_uri(legacy_root), "capabilities": {}})
+    lg.send("initialized", {}, wait=False)
+    legacy_app = file_uri(os.path.join(legacy_root, "app.iyi"))
+    legacy_uri = file_uri(os.path.join(legacy_root, "legacy.iyi"))
+    lg.send("textDocument/didOpen", {"textDocument": {"uri": legacy_app, "languageId": "iyi", "version": 1,
+                                                       "text": legacy_app_text}}, wait=False)
+    lg.diagnostics(legacy_app)
+    pulled = lg.send("textDocument/diagnostic", {"textDocument": {"uri": legacy_uri}})
+    symbols = lg.send("workspace/symbol", {"query": "shout"})
+    offered = lg.send("textDocument/completion", {"textDocument": {"uri": legacy_app},
+                                                  "position": {"line": 5, "character": 8}})
+    outline = lg.send("textDocument/documentSymbol", {"textDocument": {"uri": legacy_uri}})
+    lg.send("shutdown", {})
+    lg.send("exit", {}, wait=False)
+    lg.proc.wait(timeout=10)
+    errors = [r["error"]["message"][:60] for r in (pulled, symbols, offered, outline) if "error" in r]
+    said = [d["message"] for d in (pulled.get("result") or {}).get("items", [])]
+    labels = [i["label"] for i in (offered.get("result") or {}).get("items", [])]
+    step("70b", "a module that is not UTF-8 is its own diagnostic, and nobody else's",
+         not errors and any("not a valid iyi source file" in m for m in said) and "shout" in labels
+         and [s["name"] for s in symbols.get("result") or []] == ["shout"],
+         f"errors {errors}, said {[m[:50] for m in said]}")
+
     # 21. prepareRename: the range and placeholder before the input box.
     reply = c.send("textDocument/prepareRename",
                    {"textDocument": {"uri": greet_uri},

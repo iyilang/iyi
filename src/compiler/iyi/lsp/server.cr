@@ -1993,7 +1993,9 @@ module Iyi::Lsp
       parser = Parser.new(text)
       parser.filename = path
       LocalSites.at(parser.parse, target, lines)
-    rescue CodeError
+    rescue CodeError | InvalidByteSequenceError
+      # A buffer that does not parse has no locals to find, and nor does
+      # one whose bytes are not UTF-8.
       nil
     end
 
@@ -2126,7 +2128,9 @@ module Iyi::Lsp
       formatted =
         begin
           Iyi.as_written(path_of(uri), text, Iyi.format(text, filename: path_of(uri)))
-        rescue CodeError
+        rescue CodeError | InvalidByteSequenceError
+          # Nor does one that is not UTF-8, which was -32603 for the
+          # lexer's "Unexpected byte 0xfe at position 17".
           return respond_null(id)
         end
       return respond(id) { |json| json.array { } } if formatted == text
@@ -2863,6 +2867,9 @@ module Iyi::Lsp
       path = path_of(uri)
       text = text_of(uri)
       lines = text.lines
+      # No tree to expand in a buffer whose bytes are not UTF-8: the parse
+      # below raised for one, and the request failed with -32603.
+      return respond_null(id) unless text.valid_encoding?
 
       parsed =
         begin
@@ -3140,7 +3147,9 @@ module Iyi::Lsp
       parser = Parser.new(text)
       parser.filename = path
       first_statement(parser.parse)
-    rescue CodeError
+    rescue CodeError | InvalidByteSequenceError
+      # Nothing to run in a buffer that does not parse, or whose bytes are
+      # not UTF-8.
       nil
     end
 

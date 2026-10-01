@@ -30,9 +30,12 @@ module Iyi::Lsp
       parser = Parser.new(text)
       parser.filename = path
       walk(parser.parse)
-    rescue CodeError
+    rescue CodeError | InvalidByteSequenceError
       # Mid-edit the file may not even parse; an empty outline is the
-      # honest answer and the diagnostics channel already says why.
+      # honest answer and the diagnostics channel already says why. A
+      # file whose bytes are not UTF-8 (one saved as Windows-1254) has no
+      # outline either: it raised past this, and workspace symbols failed
+      # for every file in the workspace with -32603 "Unexpected byte 0xfe".
       [] of Sym
     end
 

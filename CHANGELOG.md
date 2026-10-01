@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **One `.iyi` file that is not UTF-8 is a diagnostic on that file, and
+  the rest of the workspace is unaffected.** `Compiler#parse` printed its
+  refusal and called `exit 1`, and the language server compiles in its own
+  worker: a file saved as Windows-1254 ended the worker on its hover and
+  its diagnostic pull (-32603 "the compile this request ran in did not
+  survive it: it exited with 1"), and workspace symbols and completion of
+  `sho` in any other file answered -32603 "Unexpected byte 0xfe at
+  position 17, malformed UTF-8", as did its outline, folding, tokens and
+  formatting. Compiled in process the refusal is raised, and the file's
+  pull says "file 'legacy.iyi' is not a valid iyi source file: Unexpected
+  byte 0xfe..."; the parse-only answers skip it. `iyi build` prints and
+  exits as before. `bench/lsp_session.py` step 70b checks the pull, the
+  symbols, the completion and the outline; the old server failed all four.
+
 - **References and rename asked at a call reach every importer, as they do
   asked at the def.** Every other entry's compile was given the cursor's
   own place, which only a compile holding the cursor's file can match: with

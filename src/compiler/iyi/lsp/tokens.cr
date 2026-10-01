@@ -38,6 +38,9 @@ module Iyi::Lsp
       scanner = Scanner.new(text, path)
       scanner.scan
       scanner.toks
+    rescue InvalidByteSequenceError
+      # The lexer refuses a first byte that is not UTF-8 as it starts.
+      [] of Tok
     end
 
     private class Scanner
@@ -55,10 +58,11 @@ module Iyi::Lsp
 
       def scan : Nil
         scan_normal(break_on_rcurly: false)
-      rescue CodeError
+      rescue CodeError | InvalidByteSequenceError
         # The lexer has no recovery: an unterminated literal raises and
         # the spans collected so far are the honest answer. The
-        # diagnostics channel already names the break.
+        # diagnostics channel already names the break. A byte that is
+        # not UTF-8 raises the same way, and the request failed with -32603.
       end
 
       private def scan_normal(break_on_rcurly : Bool) : Nil

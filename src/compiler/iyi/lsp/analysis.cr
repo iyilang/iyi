@@ -129,6 +129,9 @@ module Iyi::Lsp
       root = Compiler.header_root_of(path, text)
       compiler.iyi_project_root = root
       compiler.stderr = IO::Memory.new
+      # A buffer that is not UTF-8 is a diagnostic here, not the end of
+      # the worker (`Compiler#parse`).
+      compiler.iyi_in_process = true
 
       # iyi: the artifacts, where a workspace has them. A library arrives as
       # `.iyimod` files and no source (III.7), and the server compiled

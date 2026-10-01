@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every log section reported"
-for phrase in "== info" "== child"; do
+for phrase in "== info" "== child" "== empty segments"; do
   if ! grep -q "$phrase" "$WORK/log-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1

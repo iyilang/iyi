@@ -223,14 +223,16 @@ pub class Logger
   end
 
   # The logger for *child_name* under this one, created on first ask;
-  # `"a.b"` is the child `b` of the child `a`.
+  # `"a.b"` is the child `b` of the child `a`. An empty segment names no
+  # logger: `".a"` and `"a..b"` are `"a"` and `"a.b"`, and `"."` is this
+  # one. Each `""` was a child of its own, so `Log.for(".a")` was a second
+  # logger with the source `a` that did not follow `Log.for("a").level=`.
   def for(child_name : String) : Logger
     return self if child_name.empty?
 
-    parts = child_name.split('.')
     current = self
-    parts.each do |part|
-      current = current.get_or_create_child(part)
+    child_name.split('.').each do |part|
+      current = current.get_or_create_child(part) unless part.empty?
     end
     current
   end

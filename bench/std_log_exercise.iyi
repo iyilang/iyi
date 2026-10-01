@@ -28,6 +28,21 @@ child = Log.for("db.pool")
 assert_str "db.pool", child.source, "source"
 puts "  Log.for keeps the dotted source"
 
+puts "\n== empty segments"
+# An empty segment names no logger: `.quiet` is `quiet`, `a..b` is `a.b`
+# and `.` is the root. Each `""` was a child of its own, so `.quiet` was a
+# second logger with the source `quiet`, and it wrote an Info entry past
+# the Error level `quiet` was set to.
+dotted = MemoryBackend.new
+Log.setup(Severity::Info, dotted)
+Log.for("quiet").level = Severity::Error
+Log.for(".quiet").info "dropped"
+assert_true dotted.entries.empty?, "Log.for(\".quiet\") follows Log.for(\"quiet\").level= (#{dotted.entries.size} written)"
+assert_true Log.for(".quiet").object_id == Log.for("quiet").object_id, "Log.for(\".quiet\") is Log.for(\"quiet\")"
+assert_true Log.for("db..pool.").object_id == Log.for("db.pool").object_id, "Log.for(\"db..pool.\") is Log.for(\"db.pool\")"
+assert_true Log.for(".").object_id == Log.root.object_id, "Log.for(\".\") is the root"
+puts "  an empty segment names no logger of its own"
+
 puts "\n== none"
 # None silences: a logger set to it wrote an entry logged at None, and a
 # logger at any level wrote one. And the root's line keeps its " - ".

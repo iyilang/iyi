@@ -267,7 +267,7 @@ PY
     echo "  $label: the broken copy did not compile"
     sed -n '1,6p' "$WORK/mut.out"
     status=1
-  elif timeout 120 "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
+  elif timeout -k 5 120 "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else

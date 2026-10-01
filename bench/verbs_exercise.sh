@@ -641,6 +641,19 @@ elif ! (cd "$WORK/mig" && "$IYI" fix .) 2>&1 | grep -q "3 files: 0 rewritten, ev
 else
   echo "  fix over a directory: every using rewritten in one run, and the second run changes nothing"
 fi
+# A `using` folded into its import in a CRLF file left two blank lines
+# where the LF file is left one - only `\n` was a blank line's ending - and
+# `fmt --check` then refused the file the rewrite had written.
+mkdir -p "$WORK/crlfusing/app"
+printf 'module app/greeter\n\npub def polite : String\n  "hi"\nend\n' > "$WORK/crlfusing/app/greeter.iyi"
+printf 'module app/main\r\n\r\nimport app/greeter\r\n\r\nusing app/greeter::{polite}\r\n\r\nputs polite\r\n' > "$WORK/crlfusing/app/main.iyi"
+printf 'module app/main\r\n\r\nimport app/greeter::{polite}\r\n\r\nputs polite\r\n' > "$WORK/crlfusing/main.want"
+(cd "$WORK/crlfusing" && "$IYI" fix app/main.iyi && "$IYI" fmt --check app/main.iyi) > "$WORK/crlfusing.txt" 2>&1; crlf_code=$?
+if [ "$crlf_code" -eq 0 ] && cmp -s "$WORK/crlfusing/app/main.iyi" "$WORK/crlfusing/main.want"; then
+  echo "  fix folds a using in a CRLF file as in an LF one, and fmt --check agrees"
+else
+  echo "  fix of a using in a CRLF file (exit $crlf_code):"; sed 's/^/    /' "$WORK/crlfusing.txt" | head -3; status=1
+fi
 # And the flag that was being dropped is read now, from either side.
 if "$IYI" fix good.iyi --json | head -1 | grep -q '^{'; then
   echo "  fix reads --json after the file, too"

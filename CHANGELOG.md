@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`iyi fix` folds a `using` into its import in a CRLF file as in an LF
+  one.** The blank line above a removed line was looked for as `\n`, and
+  in CRLF the character there is `\r`, so the extra blank line stayed:
+  `{polite}\r\n\r\n\r\nputs polite` where the LF file gets
+  `{polite}\n\nputs polite`, and `iyi fmt --check` then refused the file
+  `fix` had written ("formatting '.\app\main.iyi' produced changes"). A
+  blank line ends `\n` or `\r\n` now, above and below.
+  `bench/verbs_exercise.sh` fixes a CRLF file and runs `fmt --check` on
+  it; the old compiler left the two blank lines.
+
 - **`iyi migrate` migrates a CRLF or byte-order-marked tree as it
   migrates the LF one.** Lines were split on `\n` and every rule is
   anchored with `$`, so in a CRLF file `module Shop\r` was never peeled

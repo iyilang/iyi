@@ -1437,6 +1437,13 @@ class ::File
       # `File.chmod(path, 0o444)` left `File.writable?` answering true and
       # the next `File.write` succeeded, so a program that asked for a
       # file to be unwritable was told it had been.
+      #
+      # On a directory the bit is not a write bit, and Windows has none:
+      # measured, a directory carrying it still took a new file, gave one
+      # up and was renamed, and refused only its own removal (which
+      # `Dir.delete` clears it for). It is set all the same, for the
+      # scripts that call this on any path; `info` then reports 0o555 for
+      # a directory that `writable?` rightly calls writable.
       attrs = __iyi_path_attributes(sys_path(p))
       raise "Cannot chmod #{p}: #{win_error}" if attrs == -1
       wanted = mode & 0o200 == 0 ? attrs | 0x1 : attrs & ~0x1

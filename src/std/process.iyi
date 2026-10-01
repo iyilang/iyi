@@ -84,7 +84,11 @@ module std/process
     fun waitpid(pid : Int32, status : Int32*, options : Int32) : Int32
     fun kill(pid : Int32, signal : Int32) : Int32
     fun access(path : UInt8*, mode : Int32) : Int32
-    fun stat = stat64(path : UInt8*, buf : Void*) : Int32
+    # `stat`, not `stat64` - one symbol on arm64, with the 64-bit inode -
+    # because std/file binds `stat64` with its own struct, and a program
+    # importing both (std/dir imports std/file) was refused on darwin as
+    # "fun redefinition with different signature".
+    fun process_stat = stat(path : UInt8*, buf : Void*) : Int32
     fun _NSGetExecutablePath(buf : UInt8*, bufsize : UInt32*) : Int32
   end
 {% elsif flag?(:win32) %}
@@ -1042,7 +1046,7 @@ class ProcessChild
         c = c_text(path)
         return errno if LibC.access(c, 1) != 0 # X_OK
         buffer = Pointer(UInt64).malloc(32_u64)
-        return errno if LibC.stat(c, buffer.as(Void*)) != 0
+        return errno if LibC.process_stat(c, buffer.as(Void*)) != 0
         # st_mode is the low half of the word at byte 4.
         mode = Pointer(Int32).new(buffer.address + 4_u64).value & 0xF000
         mode == 0x8000 ? 0 : EACCES
@@ -1050,7 +1054,7 @@ class ProcessChild
 
       def self.directory?(path : String) : Bool
         buffer = Pointer(UInt64).malloc(32_u64)
-        return false if LibC.stat(c_text(path), buffer.as(Void*)) != 0
+        return false if LibC.process_stat(c_text(path), buffer.as(Void*)) != 0
         Pointer(Int32).new(buffer.address + 4_u64).value & 0xF000 == 0x4000
       end
 

@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **Integer literals the compiler compares are compared exactly.** It
+  compared them as doubles, which hold 53 bits, so a `case` refused
+  `when 36028797018963967_u64` beside `when 36028797018963968_u64` as a
+  duplicate, and the macro `9007199254740993 == 9007199254740992`
+  answered true, as `includes?` did. The parser and macro specs check
+  both and failed before.
+
 - **A `--release` build that writes artifacts writes their object code,
   and a `--release` build reads them.** `--release` forced one LLVM
   module, so with `--emit-iyimod` no type had a unit of its own and every

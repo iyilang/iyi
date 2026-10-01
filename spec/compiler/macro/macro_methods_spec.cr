@@ -139,6 +139,15 @@ module Iyi
         assert_macro "{%if 1 == 2%}hello{%else%}bye{%end%}", "bye"
       end
 
+      # iyi: integer literals compared as doubles, which have 53 bits.
+      it "executes == on integers a double cannot tell apart" do
+        assert_macro "{{9007199254740993 == 9007199254740992}} {{[9007199254740993].includes?(9007199254740992)}} {{9007199254740993 == 9007199254740993}}", "false false true"
+      end
+
+      it "executes == on floats spelled two ways" do
+        assert_macro "{{1.0 == 1.00}}", "true"
+      end
+
       it "executes != on numbers (true)" do
         assert_macro "{%if 1 != 2%}hello{%else%}bye{%end%}", "hello"
       end

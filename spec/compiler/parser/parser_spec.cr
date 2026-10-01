@@ -2897,6 +2897,11 @@ module Iyi
     assert_syntax_error %(case x; when 1..2; 2; when 1..2; end), "duplicate when 1..2 in case"
     assert_syntax_error %(case x; when /x/; 2; when /x/; end), "duplicate when /x/ in case"
     assert_syntax_error %(case x; when X; 2; when X; end), "duplicate when X in case"
+    # iyi: two integers a double cannot tell apart are two whens.
+    it "accepts whens on integers a double cannot tell apart" do
+      node = parse("case x; when 36028797018963967_u64; 1; when 36028797018963968_u64; 2; end").as(Case)
+      node.whens.size.should eq(2)
+    end
     assert_syntax_error "case x; when _; end", "'when _' is not supported, use 'else' block instead"
     assert_syntax_error "case x; when 1; when _; end", "'when _' is not supported, use 'else' block instead"
     assert_syntax_error "case x; when 1, _; end", "'when _' is not supported, use 'else' block instead"

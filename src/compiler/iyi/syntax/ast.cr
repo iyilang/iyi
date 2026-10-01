@@ -458,8 +458,18 @@ module Iyi
       NumberLiteral.new(@value, @kind)
     end
 
-    def_equals value.to_f64, kind
-    def_hash value, kind
+    # Integers are equal by value: `value.to_f64` has 53 bits, so 2^55 - 1
+    # and 2^55 were one literal - a `case` refused the pair as a duplicate
+    # `when`, and the macro `==` answered true. `<=>` is already exact. The
+    # hash follows the same key, so equal literals hash alike.
+    def ==(other : self)
+      kind == other.kind && (self <=> other) == 0
+    end
+
+    def hash(hasher)
+      hasher = kind.hash(hasher)
+      kind.signed_int? || kind.unsigned_int? ? integer_value.hash(hasher) : value.to_f64.hash(hasher)
+    end
 
     def pretty_print(pp) : Nil
       pp_type(pp, "NumberLiteral[", "]") do

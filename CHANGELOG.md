@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A regex search of a long alternation runs in a task.** The epsilon
+  closure recursed a frame per split, and an alternation chains a split
+  per word: `\b(?:w0|w1|...|w889)\b`, searched in a task in a plain
+  build, overflowed the task's 256 KiB stack (880 words did not; 1,700
+  overflowed it with `--release`), and the panic ended the whole process
+  rather than the task. On the main stack 35,000 words did the same
+  (66,000 with `--release`). The closure walks a stack of its own now,
+  out1's states before out2's as before, so the answer stays
+  leftmost-first. `bench/std_regex_exercise.iyi` searches 5,000 words in
+  a task and 70,000 on the main stack; the old module died of "stack
+  overflow" at the first.
+
 - **`String.build` makes a string past 1 GiB, and refuses one past
   2,147,483,647 bytes by name.** The builder doubled its capacity as an
   `Int32`, so two 600 MB halves, or 1,073,741,825 bytes into one

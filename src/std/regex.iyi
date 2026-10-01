@@ -486,6 +486,8 @@ class RxRun
   @nxt_size : Int32
   @seen : Pointer(Int32)
   @gen : Int32
+  # The closure's own stack of the states it has still to visit.
+  @todo : Pointer(Int32)
 
   def initialize(@nfa : RxNfa, text : String)
     @src = text.to_unsafe
@@ -504,6 +506,9 @@ class RxRun
       i = i + 1
     end
     @gen = 0
+    # A closure takes each state once and pushes at most its two outs, so
+    # twice the states bound its stack.
+    @todo = Pointer(Int32).malloc(count * 2_u64)
   end
 
   # `whole`: anchored at `from`, and only a match reaching the text's end
@@ -562,30 +567,49 @@ class RxRun
   end
 
   # The epsilon closure of `s`, in priority order: out1 before out2. Into
-  # the next list when `nxt`, else the current one.
+  # the next list when `nxt`, else the current one. Walked on a stack of
+  # its own, out2 pushed under out1 so all of out1's closure comes first,
+  # as the recursion visited it: recursing one frame per split, an
+  # alternation of 890 words overflowed a task's 256 KiB stack in a plain
+  # build (1,700 with --release) and 35,000 the main one's 8 MiB (66,000),
+  # and the panic killed the process.
   private def add(nxt : Bool, s : Int32, start : Int32, pos : Int32) : Nil
-    return if s < 0 || @seen[s] == @gen
-    @seen[s] = @gen
-    k = @nfa.kind[s]
-    if k == 3
-      add(nxt, @nfa.out1[s], start, pos)
-      add(nxt, @nfa.out2[s], start, pos)
-    elsif k == 5
-      add(nxt, @nfa.out1[s], start, pos) if pos == 0
-    elsif k == 6
-      add(nxt, @nfa.out1[s], start, pos) if pos == @n
-    elsif k == 7
-      add(nxt, @nfa.out1[s], start, pos) if boundary?(pos)
-    elsif k == 8
-      add(nxt, @nfa.out1[s], start, pos) unless boundary?(pos)
-    elsif nxt
-      @nxt_state[@nxt_size] = s
-      @nxt_start[@nxt_size] = start
-      @nxt_size = @nxt_size + 1
-    else
-      @cur_state[@cur_size] = s
-      @cur_start[@cur_size] = start
-      @cur_size = @cur_size + 1
+    todo = @todo
+    todo[0] = s
+    top = 1
+    while top > 0
+      top = top - 1
+      t = todo[top]
+      next if t < 0 || @seen[t] == @gen
+      @seen[t] = @gen
+      k = @nfa.kind[t]
+      if k == 3
+        todo[top] = @nfa.out2[t]
+        todo[top + 1] = @nfa.out1[t]
+        top = top + 2
+      elsif k >= 5 && k <= 8
+        holds = if k == 5
+                  pos == 0
+                elsif k == 6
+                  pos == @n
+                elsif k == 7
+                  boundary?(pos)
+                else
+                  !boundary?(pos)
+                end
+        if holds
+          todo[top] = @nfa.out1[t]
+          top = top + 1
+        end
+      elsif nxt
+        @nxt_state[@nxt_size] = t
+        @nxt_start[@nxt_size] = start
+        @nxt_size = @nxt_size + 1
+      else
+        @cur_state[@cur_size] = t
+        @cur_start[@cur_size] = start
+        @cur_size = @cur_size + 1
+      end
     end
   end
 

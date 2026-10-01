@@ -305,9 +305,11 @@ PY
 }
 mutate "a match state that never cuts" 'match_end = pos
             break' 'match_end = pos'
-mutate "out2 preferred over out1" '      add(nxt, @nfa.out1[s], start, pos)
-      add(nxt, @nfa.out2[s], start, pos)' '      add(nxt, @nfa.out2[s], start, pos)
-      add(nxt, @nfa.out1[s], start, pos)'
+# The closure walks its own stack, out2 pushed under out1 so out1's states
+# come first; pushed the other way, `a|ab` answers `ab`.
+mutate "out2 preferred over out1" '        todo[top] = @nfa.out2[t]
+        todo[top + 1] = @nfa.out1[t]' '        todo[top] = @nfa.out1[t]
+        todo[top + 1] = @nfa.out2[t]'
 mutate "an empty match that eats a byte" '        pos = a
         forbid = a' '        pos = a + 1
         forbid = -1'

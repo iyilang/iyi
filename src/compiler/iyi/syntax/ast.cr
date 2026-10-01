@@ -463,12 +463,35 @@ module Iyi
     # `when`, and the macro `==` answered true. `<=>` is already exact. The
     # hash follows the same key, so equal literals hash alike.
     def ==(other : self)
-      kind == other.kind && (self <=> other) == 0
+      return false unless kind == other.kind
+      if kind.signed_int? || kind.unsigned_int?
+        integer_value == other.integer_value
+      elsif (mine = float_value?) && (theirs = other.float_value?)
+        mine == theirs
+      else
+        value == other.value
+      end
     end
 
     def hash(hasher)
       hasher = kind.hash(hasher)
-      kind.signed_int? || kind.unsigned_int? ? integer_value.hash(hasher) : value.to_f64.hash(hasher)
+      if kind.signed_int? || kind.unsigned_int?
+        integer_value.hash(hasher)
+      elsif float = float_value?
+        float.hash(hasher)
+      else
+        value.hash(hasher)
+      end
+    end
+
+    # iyi: a float literal's value, or nil when it is out of Float64's range.
+    # `1e400` parses, and `==` and `hash` raised `ArgumentError` on it: the
+    # parser's check for a duplicate `when` puts the literals in a set, so
+    # `case x when 1e400 ... end` was an unhandled exception in the parser,
+    # in `fmt` and in the compiler alike. Out of range, the text is the
+    # value; `<=>` still raises, for the macro interpreter to report.
+    protected def float_value? : Float64?
+      value.to_f64?
     end
 
     def pretty_print(pp) : Nil

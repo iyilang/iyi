@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A module header inside a body is an error.** `module bar` inside a
+  `class`, an `if` or a `begin` parsed as a header and was dropped
+  without a word - its `def`s went to the class - and inside a `begin`
+  it was taken for the file's own header and the `begin` left the tree.
+  It is refused now, pointing at `module Bar`.
+- **`when 1e400` is parsed.** A float literal past a double's range
+  raised `ArgumentError` out of the parser, through the duplicate-when
+  check's hash; it has been since the exact integer equality above, and
+  in the other compiler too.
+
 - **`fmt` keeps a heredoc's last blank line and a sign written apart.**
   A line of spaces just above a heredoc's terminator is an empty line of
   the string, and `fmt` trimmed it, so `<<-EOS\n  a\n  \n  EOS` went

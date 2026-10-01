@@ -2902,6 +2902,13 @@ module Iyi
       node = parse("case x; when 36028797018963967_u64; 1; when 36028797018963968_u64; 2; end").as(Case)
       node.whens.size.should eq(2)
     end
+    # iyi: a float literal past Float64's range is still a literal a set of
+    # whens can hold; its hash raised `ArgumentError` in the parser.
+    it "accepts a when on a float literal out of Float64's range" do
+      node = parse("case x; when 1e400; 1; when 2.0; 2; end").as(Case)
+      node.whens.size.should eq(2)
+    end
+    assert_syntax_error "case x; when 1e400; 2; when 1e400; end", "duplicate when 1e400 in case"
     assert_syntax_error "case x; when _; end", "'when _' is not supported, use 'else' block instead"
     assert_syntax_error "case x; when 1; when _; end", "'when _' is not supported, use 'else' block instead"
     assert_syntax_error "case x; when 1, _; end", "'when _' is not supported, use 'else' block instead"
@@ -4291,6 +4298,12 @@ end").as(ClassDef)
       # the first, and the second had no artifact at all.
       assert_syntax_error "module app/one\nmodule app/two", "a file declares one module"
       assert_syntax_error "module app/one\n\nputs 1\n\nmodule app/two", "a file declares one module"
+      # iyi: and the header is the file's first line. Inside a body it was
+      # read as a header and dropped; inside a `begin` around the file it was
+      # taken for the file's and the `begin` went missing.
+      assert_syntax_error "class Foo\n  module bar\nend", "`module bar` is a module header"
+      assert_syntax_error "if x\n  module bar\nend", "`module bar` is a module header"
+      assert_syntax_error "begin\n  module bar\n  puts 1\nend", "`module bar` is a module header"
 
       # A segment that *starts* with a keyword leaves the lexer through an
       # early return which skips the reset of `@slash_is_regex`, so the `/`

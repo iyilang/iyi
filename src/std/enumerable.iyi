@@ -593,7 +593,11 @@ pub trait Enumerable
     acc
   end
 
+  # Refused under its own name, as `minmax` below is: delegated, a size of
+  # zero was refused with `each_slice`'s sentence, "slice size must be
+  # positive", from a call the reader never wrote.
   def in_groups_of(n : Int32, filler : Elem) : Array(Array(Elem))
+    raise "group size must be positive" if n <= 0
     groups = each_slice(n)
     last = groups.last?
     if last

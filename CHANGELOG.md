@@ -142,6 +142,12 @@
 
 ### Fixed
 
+- **`in_groups_of` refuses a size below one in its own sentence.** It handed
+  the size to `each_slice`, so `[1, 2, 3].in_groups_of(0, 0)` panicked with
+  "slice size must be positive", from a call the reader never wrote. It says
+  "group size must be positive" now. `bench/std_exercise.sh` checks the
+  sentence; the old module panicked with `each_slice`'s.
+
 - **`Iterator#zip` and `#chain` refuse a non-iterator at the call, and a
   chain of two element types yields both.** Their `O` was unbounded, so
   `Iterator.of([1, 2]).zip([10, 20])` was refused from inside

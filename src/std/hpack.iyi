@@ -224,9 +224,22 @@ pub class DynamicTable
   getter size : Int32
   getter entries : Array(HeaderField)
 
+  # A table is made within the limit it is resized within: made above it,
+  # an encoder's table outgrew the peer's, and an Encoder made with 8192
+  # sent blocks a default Decoder refused ("Index 121 out of range (max:
+  # 103)") while `set_max_size(8192)` on it was refused.
   def initialize(@max_size : Int32 = 4096, @settings_max_size : Int32 = 4096)
+    if err = DynamicTable.size_error(@max_size, @settings_max_size)
+      raise err.message
+    end
     @size = 0
     @entries = [] of HeaderField
+  end
+
+  def self.size_error(new_max : Int32, limit : Int32) : HpackError?
+    return HpackError.new("Negative dynamic table size: #{new_max}") if new_max < 0
+    return HpackError.new("Dynamic table size #{new_max} exceeds protocol limit #{limit}") if new_max > limit
+    nil
   end
 
   def length : Int32
@@ -238,11 +251,8 @@ pub class DynamicTable
   end
 
   def set_max_size(new_max : Int32) : Nil | HpackError
-    if new_max < 0
-      return HpackError.new("Negative dynamic table size: #{new_max}")
-    end
-    if new_max > @settings_max_size
-      return HpackError.new("Dynamic table size #{new_max} exceeds protocol limit #{@settings_max_size}")
+    if err = DynamicTable.size_error(new_max, @settings_max_size)
+      return err
     end
     @max_size = new_max
     evict_to_fit

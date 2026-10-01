@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`std/hpack`'s `Encoder.new`, `Decoder.new` and `DynamicTable.new`
+  refuse a table size above the protocol limit, or below zero, as
+  `set_max_table_size` does.** Only the setter checked: `Encoder.new
+  (max_table_size: 8192)` was taken while `set_max_table_size(8192)`
+  answered "Dynamic table size 8192 exceeds protocol limit 4096", and
+  the encoder's table then outgrew its peer's, so a default `Decoder`
+  refused its second block with "Index 121 out of range (max: 103)".
+  The constructors now raise with the setter's sentence ("Negative
+  dynamic table size: -1" for a negative size).
+  `bench/std_hpack_exercise.sh` builds all three and expects the
+  sentence; the old module ran each to exit 0.
+
 - **`Server.serve` returns when its listener closes beside an idle
   keep-alive client.** Its doc says the close ends `serve`, and a
   connection waiting for its next request kept the group's join waiting

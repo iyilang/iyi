@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **`String#to_f?` reads "-NaN" and "+NaN" as `to_f` does.** The
+  nil-answering form special-cased "NaN" and the three spellings of an
+  infinity, so `"-NaN".to_f?` and `"+NaN".to_f?` were nil where `to_f`
+  answers NaN, the only disagreement between the two across 17,181
+  strings. Both signed spellings are NaN now.
+  `bench/std_text_exercise.iyi` checks them; the old module answered nil.
+
 - **`BigInt#to_s` is no longer quadratic in the length.** The split
   print divides by a power of the chunk half the value's length, and
   that division was long division: a release build printed 190,849,

@@ -66,6 +66,10 @@ raise "string: to_f? leading dot" unless ".5".to_f? == 0.5
 raise "string: to_f? trailing dot" unless "7.".to_f? == 7.0
 nan_val = "NaN".to_f?
 raise "string: to_f? nan" unless nan_val && nan_val != nan_val
+# A sign before NaN, as `to_f` reads it: "-NaN" and "+NaN" were nil here.
+minus_nan = "-NaN".to_f?
+plus_nan = "+NaN".to_f?
+raise "string: to_f? signed nan" unless minus_nan && minus_nan != minus_nan && plus_nan && plus_nan != plus_nan
 raise "string: to_f? invalid text" unless "bad".to_f?.nil?
 raise "string: to_f? double dot" unless "1.2.3".to_f?.nil?
 raise "string: to_f? double sign" unless "--5".to_f?.nil?

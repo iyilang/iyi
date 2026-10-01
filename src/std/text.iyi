@@ -992,7 +992,9 @@ class ::String
 
   def to_f? : Float64?
     return nil if empty?
-    return to_f if self == "NaN" || self == "Infinity" || self == "-Infinity" || self == "+Infinity"
+    # `to_f` reads a sign before either word, NaN's too: "-NaN" and "+NaN"
+    # were NaN there and nil here.
+    return to_f if self == "NaN" || self == "-NaN" || self == "+NaN" || self == "Infinity" || self == "-Infinity" || self == "+Infinity"
 
     bytes = to_unsafe
     size = bytesize

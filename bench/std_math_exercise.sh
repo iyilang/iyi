@@ -681,12 +681,22 @@ if [ -n "$ORACLE_CM" ]; then
   mutate "hypot's square without its low part" '    dx2 = fma(x, x, x2 * -1.0)' '    dx2 = 0.0'
   mutate "atan2's quotient without the divisor's low part" '    zl = rdh * (fma(dh, zh * -1.0, nh) + (nl - (nh * rdh) * dl))' '    zl = rdh * (fma(dh, zh * -1.0, nh) + nl)'
   mutate "atan2's slow product left unnormalised" '      rex = rex &- 1_i64' '      rex = rex &- 0_i64'
-  mutate "fma as a product and a sum" '      soft_fma(a, b, c)' '      a * b + c' '      fuses == 1' '      false'
-  mutate "the software fma's fast path without its round to odd" '      if err != 0.0
+  # The software arm runs where the processor's instruction can be
+  # refused: x86_64, whose proofs refuse it in the prelude. aarch64 always
+  # fuses with its own instruction and never reaches `soft_fma`, so there
+  # a break in it changes nothing - the proofs had read "caught" there only
+  # while the oracle's files were compiled as source.
+  case "$(uname -m)" in
+    x86_64 | amd64 | AMD64)
+      mutate "fma as a product and a sum" '      soft_fma(a, b, c)' '      a * b + c' '      fuses == 1' '      false'
+      mutate "the software fma's fast path without its round to odd" '      if err != 0.0
         bits = IyiFloatText.bits_of(v)' '      if false
         bits = IyiFloatText.bits_of(v)' '      fuses == 1' '      false'
-  mutate "fma's product not shifted to z's side" '          rhi = rhi.unsafe_shr(d.to_u64)' '          rhi = rhi &+ 0_u64' '      fuses == 1' '      false'
-  mutate "a single's fma rounded twice" '        bits = bits | 1_u64' '        bits = bits &+ 0_u64' '      fuses == 1' '      false'
+      mutate "fma's product not shifted to z's side" '          rhi = rhi.unsafe_shr(d.to_u64)' '          rhi = rhi &+ 0_u64' '      fuses == 1' '      false'
+      mutate "a single's fma rounded twice" '        bits = bits | 1_u64' '        bits = bits &+ 0_u64' '      fuses == 1' '      false' ;;
+    *)
+      echo "  the software fma's four proofs: not run here, because $(uname -m) fuses with its own instruction and never runs the software arm" ;;
+  esac
   # And the instruction with its operands in the wrong order, b * c + a,
   # where the instruction is what runs.
   if [ "$(uname -s) $(uname -m)" = "Linux x86_64" ] && grep -qw fma /proc/cpuinfo; then

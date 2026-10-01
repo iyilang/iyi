@@ -350,7 +350,13 @@
   program itself fails - a check or a panic - and the four break their
   terms as `x * 1.0`. With the proofs real, all fifty are caught but one,
   atan2's middle carry, whose 2^-64 error the answers never showed; it is
-  replaced by the slow product left unnormalised, which they do.
+  replaced by the slow product left unnormalised, which they do. The
+  software fma's four proofs run where the software arm can: on x86_64,
+  whose instruction the proofs refuse; aarch64 always fuses and never
+  reaches it, and on darwin arm64 they now say so, where they had read
+  "caught" only while the oracle's files were compiled as source. Run
+  real, the darwin gate also compared every CORE-MATH function for the
+  first time, and they agree.
 
 - **`std/compress` refuses an incomplete Huffman code, and reads every
   gzip member.** A dynamic block whose literal/length, distance or

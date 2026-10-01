@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **`IYI_PATH` holding `$ORIGIN` alone is the compiler's own directory.**
+  The expansion read the character after `$ORIGIN` without asking whether
+  there was one: `IYI_PATH=<src>;$ORIGIN` died of "Index out of bounds
+  (IndexError)" from `iyi_path.cr:54` and "you've found a bug in the iyi
+  compiler". It expands to the directory now, and the build goes on.
+  `bench/verbs_exercise.sh` builds with it; the old compiler crashed.
+
 - **`iyi test --timeout` refuses a wait past what the clock can count.**
   Only a wait that was not finite or not positive was refused, so `--timeout
   1e300` built the tests and then died of "Arithmetic overflow

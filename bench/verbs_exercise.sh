@@ -729,6 +729,20 @@ else
   sed -n '1,8p' "$WORK/emptypath.txt"
   status=1
 fi
+# `$ORIGIN` on its own, the compiler's directory: the expansion read the
+# character after the name without asking whether there was one, and an
+# `IYI_PATH` holding it died of "Index out of bounds (IndexError)" and
+# "you've found a bug in the iyi compiler".
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) sep=';' ;;
+  *) sep=':' ;;
+esac
+env IYI_PATH="$REPO/src$sep\$ORIGIN" "$IYI" build -o origin good.iyi > "$WORK/origin.txt" 2>&1
+if [ "$(./origin 2>&1 | tr -d '\r')" = "ok" ] && ! has_trace "$WORK/origin.txt"; then
+  echo "  a search path holding \$ORIGIN alone: builds"
+else
+  echo "  a search path holding \$ORIGIN alone:"; sed -n '1,3p' "$WORK/origin.txt"; status=1
+fi
 # And `-o` naming the source itself - one word, typed twice. It read the
 # source, built it, and linked the executable over it: the program's only
 # copy was 12 KB of ELF, exit 0. The module a program imports is the same

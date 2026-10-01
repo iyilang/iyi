@@ -176,6 +176,11 @@ open_lexer = Eiy::Lexer.new("çay <%% never")
 assert_true(open_lexer.next_token.string?, "text before the open tag lexes")
 assert_true(open_lexer.next_token?.nil?, "next_token? answers nil at the open tag")
 assert_text("unterminated <%% tag at line 1, column 5", open_lexer.error || "(no error)", "the lexer's sentence")
+# Text that is not UTF-8 (Latin-1 `é` is the byte 0xE9) is written as an
+# escape, and UTF-8 as itself. Spliced in raw, the byte made the generated
+# source invalid UTF-8, and the compiler stopped on it.
+latin = Eiy.process_string("caf\xE9 \xC3\xA7 \xC3", "", "out")
+assert_text("out.print(\"caf\\xE9 \u00E7 \\xC3\")\n", latin, "a Latin-1 byte, not UTF-8, written as an escape")
 puts "  generated source exact; process_file, locate, process_string? and the lexer's error all answer"
 
 puts "ALL CHECKS PASSED"

@@ -142,6 +142,8 @@
 
 ### Fixed
 
+- **An eiy template that is not UTF-8 builds.** A Latin-1 template's `é` (0xE9) went into the generated source raw, and the compiler stopped on it with an InvalidByteSequenceError trace. Each byte that is not part of a well-formed UTF-8 sequence is now written as `\xHH`, so the rendered text keeps the template's own bytes (`caf\xE9 1`), and UTF-8 is still written as itself. `bench/std_eiy_exercise.iyi` checks the generated source of `caf\xE9 ç \xC3`, and `bench/std_eiy_exercise.sh` renders a Latin-1 template byte for byte. The old module wrote the bytes raw, and that build stopped with the trace.
+
 - **`Eiy.render` nested in a template keeps the outer text, and `Eiy.def_to_s` leaves a class's own `io` to the template.** `render` collected into a variable named `__buf__`, and a template that rendered another reassigned it, so `A<%= Eiy.render("inner.eiy") %>B` gave `iB`. `def_to_s` named its parameter `io`, which hid a method `io` of the class: in `to_s(io)`, `<%= io %>` printed the buffer into itself (`io=io=`), while `to_s` gave `io=my-io-field`. The buffer is now a fresh macro variable, and the parameter is `__io__`, the name the other library's ECR uses. `bench/std_eiy_exercise.sh` builds both from templates it writes and expects `AiB` and `io=field io=field`. The old module printed `iB` and `io=field io=io=`.
 
 - **A Hash's keys that share their low bits are not one run of probes.**

@@ -7,7 +7,8 @@
 #   * `Eiy.render`, `Eiy.embed` and `Eiy.def_to_s` of bench/std_eiy_exercise.eiy
 #     (output tags, `if`, a block, `<%-`/`-%>` trimming, a comment, an escaped
 #     tag, quotes, backslashes, `#{` and UTF-8 text) print the expected text
-#     byte for byte, plain and with --release.
+#     byte for byte, plain and with --release; so does a Latin-1 template,
+#     its bytes as they are.
 #   * `Eiy::Lexer` token types, values, flags and positions; the generated
 #     source of `process_string`, exactly; `process_file`, `locate`, and the
 #     nil-answering pair.
@@ -306,6 +307,16 @@ eiy_panics_with "an open output tag, lexed" open_lexed "unterminated <%= tag at 
   '(l = Eiy::Lexer.new("a\n<%= b"); l.next_token; l.next_token).value'
 eiy_panics_with "a template file that is not there, processed" open_file "cannot read /nowhere/t.eiy" \
   'Eiy.process_file("/nowhere/t.eiy")'
+
+echo
+echo "== a Latin-1 template"
+# Its 0xE9 went into the generated source raw, and the compiler stopped on
+# it with an InvalidByteSequenceError trace.
+printf 'caf\351 <%%= 1 %%>' > "$WORK/latin1.eiy"
+eiy_renders "a Latin-1 template, rendered byte for byte" latin1 "99,97,102,233,32,49" '
+import std/text
+
+puts Eiy.render("latin1.eiy").bytes.map(&.to_s).join(",")'
 
 # ---------------------------------------------------------------------------
 # Dependency floor audit

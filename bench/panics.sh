@@ -435,6 +435,16 @@ $out"
     frames="$(echo "$out" | grep -cE "inner[^ ]* at .*named\.iyi:")"
     [ "$frames" -ge 2 ] || fail "the trace named $frames frames of the recursion, wanted at least 2:
 $out"
+    # And the first frame is the function that raised, at the raise's own
+    # line. Windows skipped two frames where only `raise` is above it, and
+    # dropped this one: the trace began at the caller, line 7.
+    case "$(uname -s)" in
+      MINGW* | MSYS* | CYGWIN* | Windows_NT)
+        echo "$out" | grep -qE "^0 +inner at .*named\.iyi:6$" ||
+          fail "the trace does not start at the function that raised, named.iyi:6:
+$out"
+        ;;
+    esac
     step "a panic names its callers where the program imported a resolver"
     ;;
   *)

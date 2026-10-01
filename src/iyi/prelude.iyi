@@ -8969,12 +8969,12 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
     callstack = uninitialized Void*[64]
     count = LibC.backtrace(pointerof(callstack).as(Void**), 64)
   {% elsif flag?(:win32) && flag?(:x86_64) %}
-    # Captured before anything is printed, and two frames skipped: this
-    # function and the kernel's own collector. Sixty-four is what the
-    # darwin arm asks for, so a resolver written against one works on the
-    # other.
+    # Captured before anything is printed, skipping this function alone,
+    # as darwin does: the collector is not a frame of its own, and two
+    # skipped dropped the function that raised. Sixty-four is what the
+    # darwin arm asks for, so a resolver written against one works on both.
     callstack = uninitialized Void*[64]
-    count = LibC.RtlCaptureStackBackTrace(2, 64, pointerof(callstack).as(Void**), Pointer(Int32).new(0_u64)) & 0xFFFF
+    count = LibC.RtlCaptureStackBackTrace(1, 64, pointerof(callstack).as(Void**), Pointer(Int32).new(0_u64)) & 0xFFFF
   {% end %}
   __iyi_say("iyi: panic: ")
   __iyi_say(message)

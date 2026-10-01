@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **A Windows panic's backtrace starts at the function that raised.**
+  `raise` asked `RtlCaptureStackBackTrace` to skip two frames, but the
+  collector is not a frame of its own, so the second skipped was the
+  function that raised: a panic in `level_c` called from `level_b`
+  printed `0   level_b at ...:9` first and named no frame at the raise.
+  It skips `raise` alone now, as the darwin arm does, and frame 0 is
+  `level_c` at the raise's line. `bench/panics.sh` requires the raising
+  function's frame first on Windows; the old prelude began the trace at
+  `inner at named.iyi:7`, the caller, where the raise is line 6.
+
 - **On Windows a second fiber waiting on `Signal.wait` beside the first
   is refused, as on Linux and darwin.** The park wrote its overlapped
   slot over the parked waiter's: two waiters and two Ctrl-Breaks woke

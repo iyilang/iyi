@@ -80,7 +80,7 @@ fi
 
 echo
 echo "== every udp section reported"
-for phrase in "== address parsing" "== bind to port 0 and loopback exchange" "== connected sockets" "== maximum datagram size" "== nothing queued: the ? variants answer nil, and a bounded wait ends" "== socket lifecycle and close"; do
+for phrase in "== address parsing" "== bind to port 0 and loopback exchange" "== connected sockets" "== maximum datagram size" "== nothing queued: the ? variants answer nil, and a bounded wait ends" "== a connected peer that refused" "== socket lifecycle and close"; do
   if ! grep -q "$phrase" "$WORK/udp-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1

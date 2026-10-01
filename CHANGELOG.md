@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **A connected UDP socket whose peer is gone answers as on Windows:
+  the next send goes and nothing is queued.** Linux and BSD report the
+  peer's ICMP port-unreachable to a connected datagram socket's next
+  send or receive as ECONNREFUSED (udp(7)), and the module's comment
+  said POSIX never reports it, so `send`, `send_to`, `receive?` and
+  `receive` raised "cannot send on UDP socket" or "cannot receive from
+  UDP socket" there [INFERENCE: not run on Linux]; Windows, which has
+  the report turned off, answered 1 and nil, measured. A receive reads
+  the report as nothing queued and a send sends again now.
+  `bench/std_udp_exercise.iyi` sends twice to a port nobody holds and
+  asks for nil; the old module, with Windows' report left on to stand
+  in for Linux's, panicked "cannot receive from UDP socket", and the
+  new one under the same change passed.
+
 - **A UDP port belongs to its first binder on Linux too.** `UdpSocket.bind`
   set SO_REUSEADDR on Linux and darwin, which waives TIME_WAIT, a state
   a datagram port never has; what it does to a datagram socket on Linux

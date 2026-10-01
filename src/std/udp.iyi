@@ -192,7 +192,7 @@ pub class UdpSocket
     while true
       raise "socket is closed" if @fd < 0
       count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))
-      next if count < 0_i64 && UdpSocket.__is_eintr(count)
+      next if count < 0_i64 && (UdpSocket.__is_eintr(count) || UdpSocket.__is_refused(count))
       return count.to_i32 if count >= 0_i64
       # A datagram larger than the buffer. POSIX fills the buffer, drops
       # the rest and answers the bytes it wrote; Winsock refuses the call
@@ -782,6 +782,19 @@ pub class UdpSocket
       false
     end
 
+    # ECONNREFUSED: the ICMP port-unreachable a *connected* datagram
+    # socket's earlier send provoked, which Linux and BSD report to the
+    # next send or receive on it (udp(7)) and then forget; an unconnected
+    # one is never told. It is something the peer did, not a failure of
+    # this socket, so the shared bodies read it as nothing queued and send
+    # again. Read as a failure, the next `send` or `receive?` panicked
+    # here, where Windows, which has the report turned off, answered the
+    # byte count and nil - measured there; not run here [INFERENCE]. A
+    # `poll_read` the report wakes still answers true [INFERENCE], and
+    # the `receive?` after it nil.
+    def self.__is_refused(res : Int64) : Bool
+      res == -111_i64
+    end
   {% elsif flag?(:win32) %}
     # AF_INET6 is 23 here, not Linux's 10 and not darwin's 30; the other
     # option numbers are Winsock's own too. `MSG_DONTWAIT` is 0 because
@@ -885,10 +898,11 @@ pub class UdpSocket
       # on it answers WSAECONNRESET instead of "nothing queued", and since
       # only WSAEWOULDBLOCK is read as that below, the receive panicked and
       # a server died of its first stale peer. Measured: a socket that sent
-      # to dead port 9 answered -10054 to the next `recvfrom`. POSIX never
-      # reports this, which is why the shared bodies have no case for it, so
-      # the report is turned off here rather than taught to them — the cure
-      # Windows itself offers.
+      # to dead port 9 answered -10054 to the next `recvfrom`. POSIX tells
+      # only a *connected* one, and the shared bodies read that as nothing
+      # queued (`__is_refused`); here a posted receive would end on it as
+      # well, so the report is turned off rather than taught to them — the
+      # cure Windows itself offers.
       off = 0_i32
       returned = 0_i32
       LibWs2_32.WSAIoctl(s, SIO_UDP_CONNRESET, pointerof(off).as(Void*), 4,
@@ -1149,6 +1163,10 @@ pub class UdpSocket
     # No such refusal: a datagram larger than the buffer fills it, the
     # rest is dropped and the length answered is what fit.
     def self.__is_msgsize(res : Int64) : Bool
+      false
+    end
+
+    def self.__is_refused(res : Int64) : Bool
       false
     end
   {% end %}

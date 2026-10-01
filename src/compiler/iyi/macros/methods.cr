@@ -2443,8 +2443,12 @@ module Iyi
     # type is not a fact the type's own module can carry, so a derive that read
     # one would generate different code depending on what else was compiled, and
     # could not be cached against the declaration. R-5 forbids them.
+    #
+    # A def the derive generated is its code as well. Its macros expand when
+    # it is typed, after the derive has returned: `\{{ Base.all_subclasses }}`
+    # in one answered `A,B` beside a `B` declared after the derived struct.
     def self.refuse_in_derive(interpreter : MacroInterpreter, method : String) : Nil
-      return unless interpreter.program.expanding_derive?
+      return unless interpreter.program.expanding_derive? || interpreter.iyi_derive_def?
 
       raise Iyi::TypeException.new(
         "`#{method}` is not available to a derive: it answers with the whole " \

@@ -300,6 +300,45 @@ describe "Semantic: iyi derive" do
     end
   end
 
+  # The derive's expansion is not all of its code: a macro escaped into a
+  # method it generates expands when that method is typed, after the derive
+  # has returned. It answered `A,B` beside a `B` declared below the derived
+  # type, the program-wide answer the rule above refuses.
+  it "refuses the program-wide type questions in a method a derive generated" do
+    with_iyi_modules({
+      "app/derives.iyi" => <<-IYI,
+        module app/derives
+
+        pub macro kinds(declaration)
+          def kinds : Int32
+            \\{{ Base.all_subclasses.size }}
+          end
+        end
+        IYI
+      "main.iyi" => <<-IYI,
+        module app/main
+
+        import app/derives::*
+
+        class Base
+        end
+
+        pub struct Holder
+          def initialize
+          end
+
+          derive kinds
+        end
+
+        Holder.new.kinds
+        IYI
+    }) do
+      expect_raises(Iyi::TypeException, /`all_subclasses` is not available to a derive/) do
+        semantic_iyi("main.iyi")
+      end
+    end
+  end
+
   it "leaves the program-wide type questions to an ordinary macro" do
     with_iyi_modules({
       "main.iyi" => <<-IYI,

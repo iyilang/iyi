@@ -2285,6 +2285,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       end
 
       if call_expanded = call.expanded
+        call_expanded.accept IyiDeriveMarker.new
         generated << call_expanded
       end
       first_macro ||= call.expanded_macro
@@ -2295,6 +2296,25 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # first and the expansions carry the rest.
     node.expanded = generated.size == 1 ? generated.first : Expressions.new(generated)
     node.expanded_macro = first_macro
+  end
+
+  # iyi: every def a derive generated, through the macros its expansion
+  # called, marked as the derive's code (`Def#iyi_from_derive?`). The flag
+  # above is off by the time a macro in one of their bodies expands.
+  private class IyiDeriveMarker < Visitor
+    def visit(node : Def) : Bool
+      node.iyi_from_derive = true
+      true
+    end
+
+    def visit(node : Call | ExpandableNode) : Bool
+      node.expanded.try &.accept self
+      true
+    end
+
+    def visit(node : ASTNode) : Bool
+      true
+    end
   end
 
   # The bounded facts R-5 lets a derive read: the declaration's own name, and

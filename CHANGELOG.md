@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **A method a derive generates cannot ask the program-wide type
+  questions either.** The refusal held only while the derive's macro ran,
+  and a macro escaped into the method it generated, `\{{
+  Base.all_subclasses }}`, expanded when the method was typed, after the
+  flag was off: it answered "Dv::UEscaped::A,Dv::UEscaped::B", `B`
+  declared below the derived type. Every def a derive generates is marked
+  now, and `all_subclasses`, `subclasses` and `includers` raise in a macro
+  inside one as they do in the derive. `spec/compiler/iyi_derive_spec.cr`
+  checks it; the old compiler raised nothing.
+
 - **A second `impl T for S` of a trait without associated types is
   refused.** It was accepted, and its methods replaced the first one's
   without a word: two impls answering `f` with 1 and 2 printed 2. The

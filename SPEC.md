@@ -1349,12 +1349,16 @@ is the narrow one: a derive reads upwards, and says so when something it cannot
 read is below it. The example at the top of this section was written the other
 way round before this was built, and is now written the way the language works.
 
-**The program-wide questions are refused for the length of the expansion.**
-Handing over a type hands over everything a macro may ask a type, and
-`all_subclasses`, `subclasses` and `includers` answer with the whole program
-rather than with a declaration. A derive that read one would generate different
-code depending on what else was compiled, which is the caching promise this
-section rests on, so inside a derive they raise. Outside one they are untouched.
+**The program-wide questions are refused for the length of the expansion, and
+in the methods it generates.** Handing over a type hands over everything a
+macro may ask a type, and `all_subclasses`, `subclasses` and `includers` answer
+with the whole program rather than with a declaration. A derive that read one
+would generate different code depending on what else was compiled, which is the
+caching promise this section rests on, so inside a derive they raise. A macro
+in a method the derive generated expands when that method is typed, after the
+derive has returned, so it raises there too: `\{{ Base.all_subclasses }}`
+escaped into a generated method had answered `A,B`, `B` declared below the
+derived type. Outside a derive they are untouched.
 
 **Several names on one line.** `derive named, counted` runs each macro in turn,
 left to right, each reading the same declaration. A name that is not an

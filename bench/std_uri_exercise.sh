@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every uri section reported"
-for phrase in "== parse" "== refuse" "== encode"; do
+for phrase in "== parse" "== refuse" "== dot segments" "== hash" "== encode"; do
   if ! grep -q "$phrase" "$WORK/uri-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1

@@ -78,6 +78,33 @@ assert_str "", form["%"], "a lone % is a key"
 assert_str "", form["e"], "a key with no value"
 puts "  a malformed escape in a query is read, not refused"
 
+puts "\n== dot segments"
+# RFC 3986 section 5.4's examples, normal and abnormal.
+base = URI.parse("http://a/b/c/d;p?q")
+[{"g", "http://a/b/c/g"}, {"./g", "http://a/b/c/g"}, {"g/", "http://a/b/c/g/"}, {"/g", "http://a/g"},
+ {".", "http://a/b/c/"}, {"./", "http://a/b/c/"}, {"..", "http://a/b/"}, {"../", "http://a/b/"},
+ {"../g", "http://a/b/g"}, {"../..", "http://a/"}, {"../../g", "http://a/g"}, {"../../../g", "http://a/g"},
+ {"/./g", "http://a/g"}, {"/../g", "http://a/g"}, {"g.", "http://a/b/c/g."}, {".g", "http://a/b/c/.g"},
+ {"g..", "http://a/b/c/g.."}, {"..g", "http://a/b/c/..g"}, {"./../g", "http://a/b/g"}, {"./g/.", "http://a/b/c/g/"},
+ {"g/./h", "http://a/b/c/g/h"}, {"g/../h", "http://a/b/c/h"}, {"g;x=1/./y", "http://a/b/c/g;x=1/y"},
+ {"g;x=1/../y", "http://a/b/c/y"}].each do |pair|
+  assert_str pair[1], base.resolve(pair[0]).to_s, "#{pair[0]} resolves"
+end
+# Linear in the path: each step sliced the rest of the path into a new
+# string, and 132 KB of `/a/./b/../c` took 21 s to normalize under `iyi run`
+# where splitting it took 4 ms. A bound, not a benchmark: twenty times the
+# split and 200 ms over.
+long = "/a/./b/../c" * 12000
+started = __iyi_monotonic_ns
+pieces = long.split('/')
+split_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+removed = URI.remove_dot_segments(long)
+removed_ns = __iyi_monotonic_ns - started
+assert_true pieces.size == 60001 && removed == "/a/c" * 12000, "132 KB of dot segments come out right"
+assert_true removed_ns <= split_ns * 20 + 200_000_000_i64, "dot segments: 132 KB took #{removed_ns // 1000000} ms where splitting it took #{split_ns // 1000000} ms"
+puts "  section 5.4's examples, and 132 KB within twenty times its split and 200 ms"
+
 puts "\n== encode"
 assert_str "peter+%2B+paul", URI.encode("peter + paul", space_to_plus: true), "a '+' is %2B once a space is '+'"
 assert_str " +", URI.decode(URI.encode(" +", space_to_plus: true), plus_to_space: true), "encode with space_to_plus is undone by decode"

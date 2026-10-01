@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`URI.remove_dot_segments`, and `resolve` and `normalize` with it,
+  take time in proportion to the path.** Each step sliced the rest of the
+  path into a new string, so the time grew with the square of the path's
+  length: 132 KB of `/a/./b/../c` took 12.8 s in a release build and 19
+  to 21 s under `iyi run`, where splitting it at its slashes took 3 to
+  4 ms. The input buffer of RFC 3986 §5.2.4 is a cursor into the path
+  now: the same path takes 2 ms in a release build, and 200,000
+  generated paths of `.`, `..` and other segments come out as they did.
+  `bench/std_uri_exercise.iyi` resolves section 5.4's 24 examples and
+  bounds the 132 KB path at twenty times its split and 200 ms; the old
+  module took 19,187 ms there.
+
 - **`Time`, `Time::Span`, `DayOfWeek`, `UUID` and `URI` hash as they
   compare.** Each wrote `==` and no `hash`, so each hashed to its type,
   `Object#hash`'s default, and every key of a `Hash` or `Set` of them went

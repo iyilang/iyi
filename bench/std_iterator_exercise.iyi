@@ -272,5 +272,18 @@ it_keys = Iterator.of_keys(hash_src)
 hash_src["d"] = 4
 assert_equal("of_keys snapshot", it_keys.count.to_s, "3")
 assert_equal("of_keys empty", Iterator.of_keys({} of String => Int32).count.to_s, "0")
+# An adaptor pulls from the source it was built on, not from a copy: what
+# is left of the source is what the adaptor left, as in the other library.
+# The sources were structs, copied into the adaptor, and the rest read [1,
+# 2, 3, 4] again.
+array_shared = Iterator.of([1, 2, 3, 4])
+array_head = array_shared.first(2).to_a
+assert_equal("adaptor shares its array source", "#{array_head} #{array_shared.to_a}", "[1, 2] [3, 4]")
+range_shared = Iterator.of(1..5)
+range_head = range_shared.skip(1).first(1).to_a
+assert_equal("adaptor shares its range source", "#{range_head} #{range_shared.to_a}", "[2] [3, 4, 5]")
+entries_shared = Iterator.of_entries(hash_src)
+entries_head = entries_shared.map { |kv| kv[0] }.first(3).to_a
+assert_equal("adaptor shares its hash source", "#{entries_head} #{entries_shared.to_a}", "[\"a\", \"b\", \"c\"] [{\"d\", 4}]")
 
 puts "all iterator checks passed"

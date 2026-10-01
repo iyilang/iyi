@@ -11,21 +11,27 @@ module ::Levenshtein
   def self.distance(string1 : String, string2 : String) : Int32
     return 0 if string1 == string2
 
-    s_size = string1.size
-    t_size = string2.size
-
-    return t_size if s_size == 0
-    return s_size if t_size == 0
-
-    if t_size > s_size
-      string1, string2 = string2, string1
-      t_size, s_size = s_size, t_size
-    end
-
-    costs = Array(Int32).new(t_size + 1) { |i| i }
-    last_cost = 0
-
+    # One byte is one character when no byte continues another, and the
+    # rows walk bytes. Otherwise they walk `chars`, and the counts are the
+    # arrays' own: `String#size` counts the bytes that start a character,
+    # which for invalid UTF-8 is not how many `chars` yields - three
+    # continuation bytes read at run time have size 0 and three characters,
+    # so their distance to "日x" was the empty string's 2, not 3, and a
+    # truncated "\xE6\x97" walked one of its two characters.
     if string1.bytesize == string1.size && string2.bytesize == string2.size
+      s_size = string1.bytesize
+      t_size = string2.bytesize
+
+      return t_size if s_size == 0
+      return s_size if t_size == 0
+
+      if t_size > s_size
+        string1, string2 = string2, string1
+        t_size, s_size = s_size, t_size
+      end
+
+      costs = Array(Int32).new(t_size + 1) { |i| i }
+      last_cost = 0
       s = string1.to_unsafe
       t = string2.to_unsafe
 
@@ -53,6 +59,19 @@ module ::Levenshtein
     else
       chars1 = string1.chars
       chars2 = string2.chars
+      s_size = chars1.size
+      t_size = chars2.size
+
+      return t_size if s_size == 0
+      return s_size if t_size == 0
+
+      if t_size > s_size
+        chars1, chars2 = chars2, chars1
+        t_size, s_size = s_size, t_size
+      end
+
+      costs = Array(Int32).new(t_size + 1) { |i| i }
+      last_cost = 0
 
       i = 0
       while i < s_size

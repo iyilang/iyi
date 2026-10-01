@@ -4,7 +4,8 @@
 #     bash bench/std_levenshtein_exercise.sh
 #
 # Proves the exercise holds plain and --release, that all sections report,
-# and that a broken distance calculation is caught.
+# and that a broken distance calculation is caught, invalid UTF-8 measured
+# by `String#size` among them.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -198,6 +199,30 @@ PY
     status=1
   else
     echo "  a method the prelude does not have is caught"
+  fi
+fi
+
+# Mutation 5: invalid UTF-8 measured by String#size, not by its chars
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  mkdir -p "$WORK/patched5/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/levenshtein.iyi").read_text()
+old = 's_size = chars1.size\n      t_size = chars2.size'
+if old not in src:
+    raise SystemExit("patch site missing: chars1.size")
+Path("$WORK/patched5/std/levenshtein.iyi").write_text(src.replace(old, 's_size = string1.size\n      t_size = string2.size', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the size patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched5${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_levenshtein_exercise.iyi" >"$WORK/mut5.out" 2>&1; then
+    echo "  the exercise PASSED with invalid UTF-8 measured by size"
+    status=1
+  else
+    echo "  invalid UTF-8 measured by String#size is caught"
   fi
 fi
 

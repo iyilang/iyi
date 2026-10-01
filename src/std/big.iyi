@@ -1335,14 +1335,15 @@ pub struct BigInt
   # half to exactly the digits that power stands for, so its leading zeros
   # are kept. Dividing by one chunk at a time is a hardware division per
   # limb per nine digits, n^2 / 9 of them; the split does that only for the
-  # short pieces at the bottom and multiplies its way through the rest.
+  # short pieces at the bottom and multiplies its way through the rest,
+  # dividing by `divmod_recursive`.
   protected def append_digits(radix : UInt64, chunk : UInt64, per : Int32, powers : Array(BigInt), level : Int32, width : Int32, sink : Array(UInt8)) : Nil
     if level >= 0 && @limbs.size >= DIGITS_SPLIT_LIMBS
       if cmp_abs(powers[level]) < 0
         append_digits(radix, chunk, per, powers, level - 1, width, sink)
       else
         split = per.unsafe_shl(level)
-        halves = divmod(powers[level])
+        halves = divmod_recursive(powers[level])
         halves[1].append_digits(radix, chunk, per, powers, level - 1, split, sink)
         halves[0].append_digits(radix, chunk, per, powers, level - 1, width > 0 ? width - split : 0, sink)
       end
@@ -1376,6 +1377,103 @@ pub struct BigInt
     while sink.size < start + width
       sink << 48_u8
     end
+  end
+
+  # Below this many bits of quotient `divmod`'s long division answers. It
+  # is as fast as the recursion below up to a divisor of 65,536 bits and
+  # slower past it: 53 ms to 45 at 262,144 bits.
+  DIVIDE_SPLIT_BITS = 16384
+
+  # The quotient and remainder of this value, not negative, by `divisor`,
+  # positive, for the time a few products of half the length take: long
+  # division costs the product of the two lengths, and the split print
+  # divides by a power half as long as the value, so `to_s` was quadratic -
+  # 787 ms for 381,698 digits and 3,107 ms for twice as many. Burnikel and
+  # Ziegler's recursive division, in the form Python's `_pylong` writes it,
+  # by bits. A value past twice the divisor's length has its top divided
+  # first, as long division takes a digit at a time; the rest is shifted so
+  # that the divisor's length halves evenly down to where long division is
+  # the faster, and the remainder shifted back.
+  protected def divmod_recursive(divisor : BigInt) : Tuple(BigInt, BigInt)
+    n = BigInt.bit_length(divisor)
+    high = self >> n
+    if high.cmp_abs(divisor) >= 0
+      q, r = high.divmod_recursive(divisor)
+      low, r = ((r << n) + bits(0, n)).divmod_recursive(divisor)
+      return {(q << n) + low, r}
+    end
+    m = n
+    k = 0
+    while m > DIVIDE_SPLIT_BITS
+      m = (m + 1) >> 1
+      k = k + 1
+    end
+    pad = (m << k) - n
+    q, r = (self << pad).div_two_by_one(divisor << pad, m << k)
+    {q, r >> pad}
+  end
+
+  # This value, under `divisor * 2^n`, by `divisor`, exactly `n` bits long
+  # and `n` even until it is short enough for long division: the top
+  # `n + n/2` bits by the divisor, then the remainder and the next `n/2`.
+  # Each is a division by the divisor's top half, a product by its bottom
+  # half, and at most two corrections, the divisor's top bit being set.
+  protected def div_two_by_one(divisor : BigInt, n : Int32) : Tuple(BigInt, BigInt)
+    return divmod(divisor) if BigInt.bit_length(self) - n <= DIVIDE_SPLIT_BITS
+    half = n >> 1
+    top = divisor >> half
+    bottom = divisor.bits(0, half)
+    high, r = (self >> n).div_three_by_two(bits(half, half), divisor, top, bottom, half)
+    low, r = r.div_three_by_two(bits(0, half), divisor, top, bottom, half)
+    {(high << half) + low, r}
+  end
+
+  # This value's `2n` bits and `low`'s `n` by `b`, `top` and `bottom` its
+  # halves of `n` bits each.
+  protected def div_three_by_two(low : BigInt, b : BigInt, top : BigInt, bottom : BigInt, n : Int32) : Tuple(BigInt, BigInt)
+    if (self >> n).cmp_abs(top) == 0
+      q = (BigInt.one << n) - BigInt.one
+      r = self - (top << n) + top
+    else
+      q, r = div_two_by_one(top, n)
+    end
+    r = (r << n) + low - q * bottom
+    while r.negative?
+      q = q - BigInt.one
+      r = r + b
+    end
+    {q, r}
+  end
+
+  # `count` bits of this value, not negative, from bit `from` up, in one
+  # copy.
+  protected def bits(from : Int32, count : Int32) : BigInt
+    size = (count + 31) >> 5
+    res = Array(UInt64).new(size)
+    start = from >> 5
+    shift = (from & 31).to_u64
+    i = 0
+    while i < size
+      j = start + i
+      lo = j < @limbs.size ? @limbs[j] : 0_u64
+      hi = j + 1 < @limbs.size ? @limbs[j + 1] : 0_u64
+      res << ((lo.unsafe_shr(shift) | hi.unsafe_shl(32_u64 - shift)) & 0xFFFFFFFF_u64)
+      i = i + 1
+    end
+    res[size - 1] = res[size - 1] & (1_u64.unsafe_shl((count & 31).to_u64) - 1_u64) if count & 31 != 0
+    BigInt.new(1, res)
+  end
+
+  # The bits |value| takes to write.
+  protected def self.bit_length(value : BigInt) : Int32
+    return 0 if value.zero?
+    top = value.limbs.last
+    bits = (value.limbs.size - 1) * 32
+    while top > 0_u64
+      top = top.unsafe_shr(1_u64)
+      bits = bits + 1
+    end
+    bits
   end
 
   def to_s : String
@@ -2011,7 +2109,7 @@ pub struct BigRational
     return 0.0 if zero?
     a = @numerator.abs
     b = @denominator
-    diff = BigRational.bit_length(a) - BigRational.bit_length(b)
+    diff = BigInt.bit_length(a) - BigInt.bit_length(b)
     shift = (diff > -1021 ? diff : -1021) - 55
     qr = shift >= 0 ? a.divmod(b << shift) : (a << (0 - shift)).divmod(b)
     q = qr[0].to_i64
@@ -2034,18 +2132,6 @@ pub struct BigRational
       e = e - step
     end
     negative? ? f * -1.0 : f
-  end
-
-  # The bits |value| takes to write.
-  protected def self.bit_length(value : BigInt) : Int32
-    return 0 if value.zero?
-    top = value.limbs.last
-    bits = (value.limbs.size - 1) * 32
-    while top > 0_u64
-      top = top.unsafe_shr(1_u64)
-      bits = bits + 1
-    end
-    bits
   end
 
   # A rational is stored reduced, so equal values have equal parts.

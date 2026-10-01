@@ -554,6 +554,24 @@ end
 
 puts "    base round trips: every base 2..36 parses what it printed, digits oracle-checked"
 
+# And in time. The split divides by a power of the chunk half the value's
+# length, and long division costs the product of the lengths: printing
+# was quadratic, and 3 ** 600000's 286,273 digits took 3.1 s to print in
+# a plain build where parsing them back took 0.5, a ratio that grows with
+# the length. The recursive division keeps a print within a small
+# multiple of the parse, which multiplies its way up through the same
+# powers: about two in a plain build, under one and a half in a release.
+huge = BigInt.new(3_i64) ** 600000
+huge_started = __iyi_monotonic_ns
+huge_text = huge.to_s
+huge_printed = __iyi_monotonic_ns
+raise "base: a long value parses back" unless BigInt.new(huge_text) == huge
+huge_parsed = __iyi_monotonic_ns
+print_ms = (huge_printed - huge_started) // 1000000
+parse_ms = (huge_parsed - huge_printed) // 1000000
+raise "base: printing a long value costs what parsing it does" unless print_ms < parse_ms * 4
+puts "    long print: 3 ** 600000 prints in under four times its parse"
+
 # Trailing zeros are counted once and divided out once: one divmod by ten
 # per zero made the hash of `1.` and 40,000 zeros, and `3.div(3, 40000)`,
 # take 725 ms each. Counting prints the digits, so this runs after printing

@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **`BigInt#to_s` is no longer quadratic in the length.** The split
+  print divides by a power of the chunk half the value's length, and
+  that division was long division: a release build printed 190,849,
+  381,698 and 763,396 digits in 202, 787 and 3,107 ms, four times per
+  doubling, against 0.16.0's "in time near their length". Past 16,384
+  bits of quotient the split divides recursively now (Burnikel and
+  Ziegler's division, as Python's `_pylong` writes it): 122, 405 and
+  1,329 ms, about what parsing them back takes (103, 312 and 994 ms).
+  Neither is linear yet: both grow about 3.3 times per doubling, with the
+  Karatsuba products underneath. `bench/std_big_exercise.iyi` requires
+  3 ** 600000 to print in under four times its parse, and the `.sh`
+  proves long division fails that; the old module took 6.6 times its
+  parse in a plain build (3,131 ms to 473).
+
 - **`Complex#sqrt` reads the sign of a zero imaginary part.** It tested
   `y >= 0.0`, true for -0.0, so `Complex.new(-4.0, -0.0).sqrt` was
   `0.0 + 2.0i`, above the branch cut, where the module's own

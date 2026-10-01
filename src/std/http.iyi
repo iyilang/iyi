@@ -284,6 +284,22 @@ pub struct Server
               in Hash(String, String)
                 fields
               end
+    # Host (RFC 9112 §3.2): an HTTP/1.1 request names one, no request names
+    # two, and what it names is a host; a server answers 400 otherwise. This
+    # one served a request with no Host, and handed the block two as one,
+    # `Host: a` and `Host: b` read as "a, b".
+    hosts = 0
+    lines.each do |line|
+      hosts = hosts + 1 if line.bytesize > 4 && line.to_unsafe[4] == 58_u8 && HTTP.same_name?(line[0, 4], "Host")
+    end
+    return ParsedRequest.new(nil, "Host on #{hosts} lines", true, 0) if hosts > 1
+    return ParsedRequest.new(nil, "an HTTP/1.1 request without Host", true, 0) if hosts == 0 && version == "HTTP/1.1"
+    host_name = "Host"
+    headers.each do |name, value|
+      next unless HTTP.same_name?(name, "Host")
+      return ParsedRequest.new(nil, "not a host: #{value.inspect}", true, 0) unless HTTP.host?(value)
+      host_name = name
+    end
     # The absolute form (RFC 9112 §3.2.2), which a server must accept,
     # names the path after the authority: `http://h/x?q` is path `/x` and
     # query `q`, as the other library reads it, where the block was handed
@@ -295,6 +311,12 @@ pub struct Server
       while after_authority < target.bytesize && p[after_authority] != 47_u8 && p[after_authority] != 63_u8
         after_authority = after_authority + 1
       end
+      # And its authority is the host, whatever the Host line says: `GET
+      # http://b/` under `Host: a` asks b. The block reads it as the Host;
+      # it was handed the line's, and had no way to the target's.
+      named = target[authority, after_authority - authority]
+      return ParsedRequest.new(nil, "not a host: #{named.inspect}", true, 0) unless named.bytesize > 0 && HTTP.host?(named)
+      headers[host_name] = named
       origin = target[after_authority, target.bytesize - after_authority]
       origin = "/" + origin if origin.bytesize == 0 || origin.starts_with?("?")
     end
@@ -787,6 +809,28 @@ pub struct HTTP
     return 7 if target.bytesize >= 7 && same_name?(target[0, 7], "http://")
     return 8 if target.bytesize >= 8 && same_name?(target[0, 8], "https://")
     nil
+  end
+
+  # A Host value - the `a` of `Host: a` - or an absolute-form target's
+  # authority, made of what a host and its port are spelled with (RFC 3986
+  # §3.2.2, §3.2.3): a name, an IPv4 address or an IPv6 one in brackets,
+  # and digits after a colon. Empty is one too, for a target with no
+  # authority (RFC 9112 §3.2). A blank, a `/`, an `@` - the bytes another
+  # host or a path begins with - are not.
+  def self.host?(text : String) : Bool
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      c = p[i]
+      letter = (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8)
+      digit = c >= 48_u8 && c <= 57_u8
+      # ! $ % & ' ( ) * + , - . : ; = [ ] _ ~
+      mark = c == 33_u8 || (c >= 36_u8 && c <= 46_u8) || c == 58_u8 || c == 59_u8 ||
+             c == 61_u8 || c == 91_u8 || c == 93_u8 || c == 95_u8 || c == 126_u8
+      return false unless letter || digit || mark
+      i = i + 1
+    end
+    true
   end
 
   private def self.find_crlf(text : String, from : Int32) : Int32?

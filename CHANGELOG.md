@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **The server answers 400 to an HTTP/1.1 request without `Host`, to any
+  request with two `Host` lines or with one that is not a host, and an
+  absolute-form target's authority is the request's `Host`.** RFC 9112 §3.2
+  requires the 400s, and the server served each: `GET / HTTP/1.1` with no
+  Host, `Host: a` and `Host: b` handed to the block as "a, b", `Host: a/b`
+  as it came. `GET http://other:8080/echo?q` under `Host: a` handed the
+  block "a" and no way to the authority the target names, which §3.2.2 has a
+  server use; the block reads "other:8080" as the Host now, and an authority
+  with a user in it (`http://u@h/`) is a 400. An HTTP/1.0 request still
+  needs no Host, and an empty one is a Host, for a target with no authority.
+  `bench/std_http_exercise.iyi` checks each; the old module answered them
+  all as requests.
+
 - **The client unfolds a folded header line in an answer; the server still
   refuses one.** `parse_fields`, shared by both halves, refused a line that
   begins with a blank, so an answer with obs-fold - `X-A: a` and then ` b` -

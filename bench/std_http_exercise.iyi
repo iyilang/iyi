@@ -224,8 +224,8 @@ assert_str "HTTP: the body ended after 7 of its 100 bytes", short, "a short body
 puts "  a body short of its Content-Length is refused"
 
 # A length past Int32's is a length too large, not "not a number".
-assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nContent-Length: 3000000000\r\n\r\n"), "a 3 GB request is too large"
-assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nContent-Length: 99999999999999999999999\r\n\r\n"), "and so is one past Int64's"
+assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3000000000\r\n\r\n"), "a 3 GB request is too large"
+assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 99999999999999999999999\r\n\r\n"), "and so is one past Int64's"
 assert_str "refused: HTTP: Content-Length \"3000000000\" is past the 2147483647 bytes a string holds", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\nabc"), "a 3 GB answer is too large"
 assert_str "refused: HTTP: the body ended after 3 of its 2147483647 bytes", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 2147483647\r\n\r\nabc"), "Int32's last is a length"
 puts "  a Content-Length past Int32's is refused as too large on both sides"
@@ -235,10 +235,10 @@ puts "\n== messages at the edges"
 # A chunked body that is not one is a request that is not HTTP: a 400.
 # `chunked_end` raised, the connection's task panicked with no answer
 # written, and `serve` panicked with it when its listener closed.
-assert_str "400 chunked body: not a chunk size: \"zz\"", server_reads("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"), "a chunk size that is not hexadecimal is a 400"
-assert_str "400 chunked body: a chunk is not followed by CRLF", server_reads("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcXY"), "a chunk without its CRLF is a 400"
+assert_str "400 chunked body: not a chunk size: \"zz\"", server_reads("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"), "a chunk size that is not hexadecimal is a 400"
+assert_str "400 chunked body: a chunk is not followed by CRLF", server_reads("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcXY"), "a chunk without its CRLF is a 400"
 # A chunk size near 2^31: where it ends passed Int32's, and the sum panicked.
-assert_str "more", server_reads("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n7fffffff\r\nab"), "a 2 GB chunk not here yet is waited for"
+assert_str "more", server_reads("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n7fffffff\r\nab"), "a 2 GB chunk not here yet is waited for"
 assert_str "refused: HTTP: chunked body ends inside a chunk", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7fffffff\r\nab"), "a 2 GB chunk cut short is refused as cut"
 puts "  a chunked body that is not one is a 400, and a 2 GB chunk size is a size"
 
@@ -269,29 +269,29 @@ puts "  a caller's Content-Length is the body's except on a HEAD or a 304, and i
 # §5.3). The Hash kept the last line of a name spelled the same and the
 # first of one spelled otherwise: two different lengths were read as
 # whichever came first, and `Accept: a`, `accept: b`, `Accept: c` as "c".
-assert_str "400 Content-Length is not a number: \"3, 10\"", server_reads("POST / HTTP/1.1\r\nContent-Length: 3\r\ncontent-length: 10\r\n\r\nabcdefghij"), "two different lengths are a 400"
-assert_str "POST / ?- Content-Length=3, 3; \"abc\" keep", server_reads("POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc"), "one length said twice is that length"
-assert_str "GET / ?- Accept=a, b, c; \"\" keep", server_reads("GET / HTTP/1.1\r\nAccept: a\r\naccept: b\r\nAccept: c\r\n\r\n"), "a repeated field is its values joined"
+assert_str "400 Content-Length is not a number: \"3, 10\"", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\ncontent-length: 10\r\n\r\nabcdefghij"), "two different lengths are a 400"
+assert_str "POST / ?- Host=a;Content-Length=3, 3; \"abc\" keep", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc"), "one length said twice is that length"
+assert_str "GET / ?- Host=a;Accept=a, b, c; \"\" keep", server_reads("GET / HTTP/1.1\r\nHost: a\r\nAccept: a\r\naccept: b\r\nAccept: c\r\n\r\n"), "a repeated field is its values joined"
 assert_str "200 OK X-A=1, 2;Content-Length=2; \"hi\"", client_reads("HTTP/1.1 200 OK\r\nX-A: 1\r\nx-a: 2\r\nContent-Length: 2\r\n\r\nhi"), "and so in an answer"
 # A length is digits and nothing else (RFC 9110 §8.6): `+3` was 3.
-assert_str "400 Content-Length is not a number: \"+3\"", server_reads("POST / HTTP/1.1\r\nContent-Length: +3\r\n\r\nabc"), "a signed length is a 400"
+assert_str "400 Content-Length is not a number: \"+3\"", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: +3\r\n\r\nabc"), "a signed length is a 400"
 puts "  a repeated field is one field, and two lengths that differ, or a signed one, are refused"
 
 # Chunks with a length beside them, or in HTTP/1.0, are read by the chunks
 # and the connection closed after (RFC 9112 §6.1, §6.3): a reader ahead of
 # this one may have taken the length.
-assert_str "POST / ?- Content-Length=5;Transfer-Encoding=chunked; \"\" close", server_reads("POST / HTTP/1.1\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"), "chunks and a length close the connection"
+assert_str "POST / ?- Host=a;Content-Length=5;Transfer-Encoding=chunked; \"\" close", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"), "chunks and a length close the connection"
 assert_str "POST / ?- Connection=keep-alive;Transfer-Encoding=chunked; \"\" close", server_reads("POST / HTTP/1.0\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"), "chunks in HTTP/1.0 close the connection"
 puts "  chunks beside a length, or in HTTP/1.0, close the connection"
 
 # `Connection` is a list of options (RFC 9110 §7.6.1), read by `has_token?`:
 # `close, TE` and two `close` lines kept the connection open, answered
 # `keep-alive`.
-assert_str "GET / ?- Connection=close, TE; \"\" close", server_reads("GET / HTTP/1.1\r\nConnection: close, TE\r\n\r\n"), "close first in the list closes"
-assert_str "GET / ?- Connection=TE, Close; \"\" close", server_reads("GET / HTTP/1.1\r\nConnection: TE, Close\r\n\r\n"), "close last in the list closes"
-assert_str "GET / ?- Connection=close, close; \"\" close", server_reads("GET / HTTP/1.1\r\nConnection: close\r\nConnection: close\r\n\r\n"), "close said twice closes"
+assert_str "GET / ?- Host=a;Connection=close, TE; \"\" close", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: close, TE\r\n\r\n"), "close first in the list closes"
+assert_str "GET / ?- Host=a;Connection=TE, Close; \"\" close", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: TE, Close\r\n\r\n"), "close last in the list closes"
+assert_str "GET / ?- Host=a;Connection=close, close; \"\" close", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\nConnection: close\r\n\r\n"), "close said twice closes"
 assert_str "GET / ?- Connection=TE, keep-alive; \"\" keep", server_reads("GET / HTTP/1.0\r\nConnection: TE, keep-alive\r\n\r\n"), "an HTTP/1.0 keep-alive in a list keeps"
-assert_str "GET / ?- Connection=TE; \"\" keep", server_reads("GET / HTTP/1.1\r\nConnection: TE\r\n\r\n"), "a list without close keeps"
+assert_str "GET / ?- Host=a;Connection=TE; \"\" keep", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: TE\r\n\r\n"), "a list without close keeps"
 puts "  Connection is read as a list of options: close anywhere closes"
 
 # A status line is `HTTP/` DIGIT "." DIGIT and three digits from 100.
@@ -309,8 +309,22 @@ assert_str "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n", Server.form
 # The absolute form a server must accept (RFC 9112 §3.2.2) is read for
 # its path, as the other library reads it.
 assert_str "GET /a/b ?x=1 Host=example.com; \"\" keep", server_reads("GET http://example.com/a/b?x=1 HTTP/1.1\r\nHost: example.com\r\n\r\n"), "an absolute-form target's path"
-assert_str "OPTIONS / ?-  \"\" keep", server_reads("OPTIONS HTTP://example.com HTTP/1.1\r\n\r\n"), "an absolute-form target with no path is /"
+assert_str "OPTIONS / ?- Host=example.com; \"\" keep", server_reads("OPTIONS HTTP://example.com HTTP/1.1\r\nHost: a\r\n\r\n"), "an absolute-form target with no path is /"
 puts "  a 204 and a 304 carry nothing, and an absolute-form target is read for its path"
+
+# Host (RFC 9112 §3.2): an HTTP/1.1 request names one, no request names
+# two, and what it names is a host, or the answer is 400. The server
+# served a request with none, and handed the block `Host: a` and `Host:
+# b` as "a, b". An absolute-form target's authority is the host (§3.2.2):
+# the block was handed the Host line's.
+assert_str "400 an HTTP/1.1 request without Host", server_reads("GET / HTTP/1.1\r\n\r\n"), "an HTTP/1.1 request names its host"
+assert_str "GET / ?-  \"\" close", server_reads("GET / HTTP/1.0\r\n\r\n"), "an HTTP/1.0 one need not"
+assert_str "400 Host on 2 lines", server_reads("GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"), "a request names one host"
+assert_str "400 not a host: \"a/b\"", server_reads("GET / HTTP/1.1\r\nHost: a/b\r\n\r\n"), "and what it names is a host"
+assert_str "GET / ?- Host=; \"\" keep", server_reads("GET / HTTP/1.1\r\nHost:\r\n\r\n"), "an empty Host is one, for a target with no authority"
+assert_str "GET /echo ?q Host=other:8080; \"\" keep", server_reads("GET http://other:8080/echo?q HTTP/1.1\r\nHost: a\r\n\r\n"), "an absolute-form target's authority is the host"
+assert_str "400 not a host: \"u@h\"", server_reads("GET http://u@h/ HTTP/1.1\r\nHost: a\r\n\r\n"), "and an authority with a user in it is none"
+puts "  a request names one host, an HTTP/1.1 one must, and an absolute-form target's authority is it"
 
 # A status line is written only as the client half reads it: a reason
 # with a CRLF went out as a header of its own, `Set-Cookie: admin=1`, and

@@ -314,6 +314,10 @@ mutate "a reason written with a line break in it" '    raise "HTTP: the reason c
     raise "HTTP: the reason contains a control character" if HTTP.control?(response.reason)
 ' ''
 mutate "control characters let into a reason" 'raise "HTTP: not a status line: #{line}" if control?(reason)' ''
+mutate "Host: a and Host: b on one request served as one" 'return ParsedRequest.new(nil, "Host on #{hosts} lines", true, 0) if hosts > 1' ''
+mutate "an HTTP/1.1 request with no Host served" 'hosts == 0 && version == "HTTP/1.1"' 'false'
+mutate "a Host that is not a host served" 'unless HTTP.host?(value)' 'if false'
+mutate "an absolute-form target's authority left for the Host line's" 'headers[host_name] = named' ''
 mutate "repeated fields told apart by case" 'key = name.downcase' 'key = name'
 mutate "two lengths that differ read as the first" 'return nil unless trim(part) == first' 'return nil if false'
 mutate "chunks beside a length that keep the connection" 'close = true if stub.header("Content-Length") || version == "HTTP/1.0"' 'close = true if false'

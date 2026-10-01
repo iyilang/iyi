@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`Complex#sqrt` reads the sign of a zero imaginary part.** It tested
+  `y >= 0.0`, true for -0.0, so `Complex.new(-4.0, -0.0).sqrt` was
+  `0.0 + 2.0i`, above the branch cut, where the module's own
+  `(z.log / 2.0).exp` (1.2e-16 - 2.0i), C99's `csqrt` and Python's cmath
+  (`0.0 - 2.0i`) put it below; the root of 0 - 0i was 0 + 0i (6 of 409
+  inputs, all with an imaginary -0.0). The root takes the imaginary
+  part's sign bit now, and agrees in sign with cmath on all 409.
+  `bench/std_complex_exercise.iyi` checks both roots and the `.sh` proves
+  the old test is caught; the old module answered `0.0 + 2.0i`.
+
 - **A single's floored division is the floor of its quotient past 2^23.**
   `Float32#//` ran the double's recipe in 24 bits, where taking the
   remainder off the dividend rounds, and the quotient came out one over:

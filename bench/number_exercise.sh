@@ -341,6 +341,13 @@ prove_fails "the unchecked conversion checked" checked_unsafe primitives.iyi \
   "arithmetic overflow" \
   's/^        @\[::Primitive(:unchecked_convert)\]$/        @[::Primitive(:convert)]/'
 
+# 10. A 64-bit integer against a double by the instruction's rounding
+#     again: the integer made a double first, in both operand orders, and
+#     the operators and `std/int`'s `<=>` no longer agree.
+prove_fails "int64 against a double rounded first" i64_rounded primitives.iyi \
+  "number: int64 against a double is exact" \
+  's/^              (self - unsafe_mod(2048)).to_f64 - other + unsafe_mod(2048).to_f64 {{ op.id }} 0.0$/              to_f64 {{ op.id }} other/'
+
 echo
 echo "== and the check that keeps the processor out of it"
 

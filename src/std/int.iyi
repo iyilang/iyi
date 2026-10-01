@@ -27,8 +27,7 @@
 # Against a double every integer compares exactly, `<=>` included:
 # `9007199254740993_i128 == 9007199254740992.0` is false. The prelude's own
 # four (`Int32`, `Int64`, `UInt8`, `UInt64`) keep the prelude's `==` family,
-# which rounds `Int64` and `UInt64` to the double first; their `<=>` here
-# is exact.
+# which is exact as well and agrees with their `<=>` here.
 module std/int
 
 {% begin %}
@@ -248,7 +247,7 @@ module std/int
       # edges, then its floor - one of the type, once inside them - against
       # the value, then its fraction decides a tie. NaN is after every
       # number, as `Float64#<=>` places it. The prelude's `Int64 == Float64`
-      # is not exact, and is the prelude's to mend; this one is.
+      # is exact too, and agrees with this on every number.
       def <=>(other : Float64) : Int32
         return -1 if other != other
         return -1 if other >= {{ float_limits[from[0]].id }}

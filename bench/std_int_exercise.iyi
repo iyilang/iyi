@@ -32,8 +32,8 @@ puts "  popcount and bit_length"
 
 # A wide integer compared with a double is compared exactly, not rounded
 # to a double first: `9007199254740993_i128 == 9007199254740992.0` was
-# true. The prelude's own `Int64 == Float64` is the prelude's to mend;
-# `Int64#<=>(Float64)` here is exact.
+# true. The prelude's own `Int64 == Float64` is exact as well, and agrees
+# with `Int64#<=>(Float64)` here.
 puts "\n== comparison with doubles"
 assert_true !(9007199254740993_i128 == 9007199254740992.0), "2^53 + 1 == 2^53"
 assert_true 9007199254740993_i128 != 9007199254740992.0, "2^53 + 1 != 2^53"
@@ -51,6 +51,9 @@ assert_true (9007199254740993_i64 <=> 9007199254740992.0) == 1, "Int64 <=> a dou
 assert_true (9223372036854775807_i64 <=> 9223372036854775808.0) == -1, "Int64::MAX <=> 2^63"
 assert_true (18446744073709551615_u64 <=> 18446744073709551616.0) == -1, "UInt64::MAX <=> 2^64"
 assert_true (2147483647 <=> 2147483647.5) == -1 && (200_u8 <=> 200.0) == 0, "the narrow spaceship"
+assert_true 9007199254740993_i64 > 9007199254740992.0 && 9223372036854775807_i64 < 9223372036854775808.0 &&
+            9223372036854775808.0 > 9223372036854775807_i64 && 18446744073709551615_u64 < 18446744073709551616.0,
+  "the prelude's Int64 and UInt64 operators agree with <=>"
 nan = 0.0 / 0.0
 assert_true (5_u128 <=> nan) == -1, "<=> places NaN after every number"
 assert_true !(5_u128 == nan) && 5_u128 != nan && !(5_u128 < nan) && !(5_u128 >= nan), "NaN is ordered against nothing"

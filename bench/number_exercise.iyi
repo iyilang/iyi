@@ -135,6 +135,23 @@ assert_true(-0.0 == 0.0, "number: negative zero equals zero")
 assert_true((nan < 1.0) == false, "number: nan is not less")
 assert_true((nan > 1.0) == false, "number: nan is not greater")
 
+# A 64-bit integer against a double compares the two values, in either
+# order. The instruction rounded the integer to a double first, so
+# `9007199254740993_i64 == 9007199254740992.0` was true and the largest
+# `Int64` and `UInt64` were not under 2^63 and 2^64, where `std/int`'s
+# `<=>` said they were; now the two agree. NaN is still unordered against
+# one.
+odd = 9007199254740993_i64
+assert_true(odd != 9007199254740992.0 && 9007199254740992.0 != odd && !(odd == 9007199254740992.0) &&
+            odd > 9007199254740992.0 && 9007199254740992.0 < odd && 9007199254740994.0 >= odd,
+  "number: int64 against a double is exact")
+assert_true(9223372036854775807_i64 < 9223372036854775808.0 && 9223372036854775808.0 > 9223372036854775807_i64 &&
+            18446744073709551615_u64 < 18446744073709551616.0 && !(18446744073709551616.0 <= 18446744073709551615_u64),
+  "number: the widest integers are under 2^63 and 2^64")
+assert_true(-1_i64 > -1.0000000000000002 && -9223372036854775808_i64 == -9223372036854775808.0 &&
+            0_u64 == -0.0 && 9007199254740993_u64 <= 9007199254740994.0 && odd != nan && !(odd <= nan) && !(nan > odd),
+  "number: int64 against a double at its other edges")
+
 floats = {} of Float64 => String
 floats[0.0] = "zero"
 assert_str(floats[-0.0]? || "missing", "zero", "number: negative zero finds zero")

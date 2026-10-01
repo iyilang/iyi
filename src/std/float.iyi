@@ -110,9 +110,9 @@ import std/number
 
     # Against an integer, exact: on the double the single is exactly,
     # which holds every integer under 64 bits exactly too, and through
-    # std/int's exact `<=>` for the wider ones - the prelude's own `Int64 ==
-    # Float64` is not exact. `16777217 == 16777216.0_f32` was true, the
-    # integer rounded to a single first.
+    # std/int's exact `<=>` for the wider ones, which the prelude's
+    # `Int64 == Float64` agrees with. `16777217 == 16777216.0_f32` was true,
+    # the integer rounded to a single first.
     {% for int in ints %}
       {% if wide_ints.includes?(int) %}
         {% for pair in [{"==", "c == 0"}, {"!=", "c != 0"}, {"<", "c == 1"}, {"<=", "c == 1 || c == 0"}, {">", "c == -1"}, {">=", "c == -1 || c == 0"}] %}

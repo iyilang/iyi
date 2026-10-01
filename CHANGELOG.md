@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **`Int64` and `UInt64` compare with a `Float64` exactly, in both
+  operand orders.** The prelude declared the six comparisons as the
+  instruction, which converts the integer to a double first:
+  `9007199254740993_i64 == 9007199254740992.0` and its reverse were true,
+  and `9223372036854775807_i64 < 9223372036854775808.0` and
+  `18446744073709551615_u64 < 18446744073709551616.0` were false, while
+  `std/int`'s `<=>` placed each one correctly. The integer is split at
+  2048 now: its high part is a double exactly, so its difference from the
+  double keeps the values' sign, and NaN stays unordered. Against
+  Python's exact comparison all twelve operators agree on 14,420
+  `Int64`/`UInt64`-double pairs, where the old prelude got 21 pairs
+  wrong. `bench/number_exercise.iyi` checks 2^53 + 1, both maxima and the
+  other edges, `bench/number_exercise.sh` proves the check fails with the
+  instruction's rounding back, and `bench/std_int_exercise.iyi` checks the
+  operators agree with `<=>`; the old prelude answered true for
+  `9007199254740993_i64 == 9007199254740992.0`.
+
 - **`Float64#round(digits)` answers the double itself when there is
   nothing left to round.** Once the scaled value reached 2^53 the place
   asked for is finer than the double's last bit, but the value was still

@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **A `select` loop beside an idle channel keeps no memory per message.**
+  A select parks a node in every arm's channel, and a losing arm's node
+  stayed in that channel's queue until something walked it off the
+  head: a loop selecting over a busy channel and an idle one left a node
+  in the idle one's queue for every park, 3,125 KiB more kept after
+  200,000 messages and 30 MiB after two million, freed only when the
+  idle channel was used. The queues are linked both ways now, a woken
+  select takes every arm's node out, and a receive or send woken without
+  its value takes its own: 200,000 messages keep 1.6 KiB more. The loop
+  got cheaper with it, 80-94 ns a message before and 67-76 after, and a
+  select answering a ping-pong 153-178 ns a round trip before and
+  124-135 after; a buffered round trip measured 77-82 ns before and
+  82-86 after (release, fastest and median of ten runs).
+  `bench/concurrency_exercise.iyi` holds 200,000 messages to 256 KiB;
+  the old runtime kept 3,125 KiB there (4,688 KiB with the rendezvous
+  fix above).
+
 - **A rendezvous send is delivered to the receive it woke.** A send that
   found a receiver parked put its value in the channel and answered
   `nil`, delivered, on the word of the wake. A `select` woken that way

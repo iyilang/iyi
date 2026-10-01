@@ -668,7 +668,11 @@ puts "select with nothing ready took its else"
       tasks.times do |i|
         spawn_ring_member(g, chans[i], chans[(i + 1) % tasks], done)
       end
-      chans[0].send(passes)
+      # The last member parks on this channel before this send has read
+      # its receipt, so a node handed out again too early is read here as
+      # refused - and taken out of the queue under the last member's send.
+      started = chans[0].send(passes)
+      fail("receipt: the ring's first send was taken and read as refused") unless started.is_a?(Nil)
       done.receive
       chans.each(&.close)
       0
@@ -744,6 +748,10 @@ group do |g|
   g.spawn do
     answer = receipt.send(1)
     first_answer = answer.is_a?(Nil) ? "delivered" : "refused"
+    # Named here, not after the join: a sender that reads its delivered
+    # value as refused takes its node out of the queue, the node is the
+    # second sender's by then, and the third task would wait for ever.
+    fail("receipt: the first sender's delivered value read as #{first_answer}") unless first_answer == "delivered"
     0
   end
   g.spawn do
@@ -761,8 +769,58 @@ group do |g|
     0
   end
 end
-fail("receipt: the first sender's delivered value read as #{first_answer}") unless first_answer == "delivered"
 puts "a parked sender's receipt survived the next sender's park"
+
+# ── 16d. A select's losing arms leave their queues ──────────────────────
+#
+# A select parks a node in every arm's channel, and a losing arm's node
+# stayed in its queue until something walked it off the head: a loop
+# selecting over a busy channel and an idle one left a node in the idle
+# one's queue for every park, kept until the idle channel was used. The
+# woken select takes every node out, so 200,000 messages through such a
+# loop may leave at most 256 KiB more kept by a collection than before.
+# Asked halfway through 400,000, because the closing send to the idle
+# channel walks its queue and empties it.
+{% unless flag?(:gc_none) || flag?(:gc_boehm) %}
+  def select_kept_bytes(rounds : Int32) : UInt64
+    work = Channel(Int32).new
+    quit = Channel(Int32).new
+    grown = 0_u64
+    GC.collect
+    before = GC.stats.bytes_kept_by_last_sweep
+    group do |g|
+      g.spawn do
+        rounds.times { |i| work.send(i) }
+        quit.send(0)
+        0
+      end
+      g.spawn do
+        taken = 0
+        while taken >= 0
+          select
+          when v = work.receive
+            taken = taken + 1
+            if taken == rounds // 2
+              GC.collect
+              after = GC.stats.bytes_kept_by_last_sweep
+              grown = after > before ? after - before : 0_u64
+            end
+          when q = quit.receive
+            taken = -1
+          end
+        end
+        0
+      end
+    end
+    grown
+  end
+
+  select_grown = select_kept_bytes(400000)
+  if select_grown > 256_u64 * 1024_u64
+    fail("select: 200000 selects beside an idle channel left #{select_grown // 1024_u64} KiB more kept")
+  end
+  puts "200000 selects beside an idle channel kept under 256 KiB more"
+{% end %}
 
 # ── 17. The typed group — III.4.9 ────────────────────────────────────────
 #

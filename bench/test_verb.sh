@@ -144,6 +144,16 @@ grep -qE '[0-9]+ passed, 0 failed$' off.txt ||
 grep -q '"affected_not_found":\["nope.iyi"\]' off.json ||
   { echo "the data says nothing about it:"; cat off.json; exit 1; }
 
+step "a test named more than once runs once"
+# The list was made unique as strings, so a test the directory walk found
+# and the caller named again in two more spellings was built and run three
+# times and counted as three passes.
+"$IYI" test --json . add_test.iyi "$WORK/add_test.iyi" > once.json 2>&1
+"$IYI" test --json . > all.json 2>&1
+passed() { grep -oE '"passed": ?[0-9]+' "$1" | grep -oE '[0-9]+$'; }
+[ -n "$(passed all.json)" ] && [ "$(passed once.json)" = "$(passed all.json)" ] ||
+  { echo "a test named again was counted again: $(passed once.json) passes where the directory has $(passed all.json)"; cat once.json; exit 1; }
+
 step "a flag is a flag, and a directory is not a changed file"
 "$IYI" test --nonesuch . > flag.txt 2>&1
 [ $? -eq 1 ] && grep -q 'unknown flag --nonesuch' flag.txt ||

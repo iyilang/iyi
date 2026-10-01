@@ -89,7 +89,10 @@ class Iyi::Command
         abort! "no such file or directory: #{path}", :USAGE_ERROR
       end
     end
-    files.uniq!.sort!
+    # One run per file, however many ways it was spelled: the list was made
+    # unique as strings, so `iyi test . app\x_test.iyi app/x_test.iyi`
+    # built and ran one test three times and reported "passed":3.
+    files.uniq! { |file| Iyi.file_key(File.expand_path(file)) }.sort!
 
     if files.empty?
       abort! "no *_test.iyi found. A test is a plain iyi program that exits non-zero to fail", :USAGE_ERROR

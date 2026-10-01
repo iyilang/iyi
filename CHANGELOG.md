@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`iyi test` runs a test once however many ways it is named.** The file
+  list was made unique as strings, so a test the directory walk found and
+  the caller named again was built and run again: `iyi test --json .
+  add_test.iyi <dir>/add_test.iyi` reported "passed":4 in a directory of two
+  tests. Files are compared by `Iyi.file_key` now, and the same line reports
+  "passed":2. `bench/test_verb.sh` checks it; the old compiler counted every
+  spelling.
+
 - **The `--x86-asm-syntax` refusal names the value it refuses.** The parse
   wrote over the word before the message printed it: "Invalid value `` for
   x86-asm-syntax". It says "Invalid value `x` for x86-asm-syntax" now.

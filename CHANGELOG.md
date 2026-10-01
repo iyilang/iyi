@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`Gzip.decompress` refuses a header with a reserved flag (FLG bits
+  5-7) set, as RFC 1952 requires and zlib does.** Only the four known
+  flags were tested, so a header with FLG 0x20, 0x40 or 0x80 was read
+  past and the member decompressed ("hello" back where zlib says
+  "unknown header flags set"). It now raises "gzip: a reserved header
+  flag is set (FLG 32)". `bench/std_compress_exercise.sh` lists it
+  among what a stream refuses, by name; the old module answered
+  instead of refusing.
+
 - **`std/hpack`'s `Encoder.new`, `Decoder.new` and `DynamicTable.new`
   refuse a table size above the protocol limit, or below zero, as
   `set_max_table_size` does.** Only the setter checked: `Encoder.new

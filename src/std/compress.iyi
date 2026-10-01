@@ -717,6 +717,10 @@ pub struct Gzip
     raise "gzip: not a gzip stream" unless h[0] == 0x1f_u8 && h[1] == 0x8b_u8
     raise "gzip: not a deflate stream (method #{h[2]})" unless h[2] == 8_u8
     flags = h[3].to_i32
+    # RFC 1952 2.3.1.2: a reserved flag set is an error, as zlib makes it
+    # ("unknown header flags set"); with FLG 0x20, 0x40 or 0x80 the
+    # header was read past and the member decompressed.
+    raise "gzip: a reserved header flag is set (FLG #{flags})" unless (flags & 0xe0) == 0
     pos = start + 10
     if (flags & 4) != 0 # FEXTRA
       raise "gzip: the stream ends inside its header" if data.bytesize < pos + 2

@@ -202,6 +202,11 @@ refused("\"\\uD800\"\n", "surrogate code point \\uD800 in escape at line 1, colu
 refused("- a: b: c\n", "a mapping value is not allowed here at line 1, column 7")
 refused("!<tag:yaml.org,2002:foo> 1\n", "unknown tag !<tag:yaml.org,2002:foo> at line 1, column 1")
 refused("a: - b\n", "a sequence entry is not allowed here at line 1, column 4")
+# A plain key starts as a plain value must: `]: 1`, `}: 1` and `,: 1`
+# were read as the keys "]", "}" and ",".
+refused("]: 1\n", "a scalar cannot start with ']' at line 1, column 1")
+refused("a:\n  }: 1\n", "a scalar cannot start with '}' at line 2, column 3")
+refused(",: 1\n", "a scalar cannot start with ',' at line 1, column 1")
 refused("a: b # c\n  d\n", "unexpected content at line 2, column 3")
 refused("[1,#c\n]\n", "a value was expected at line 1, column 4")
 refused("[? a]\n", "an explicit '?' key is not supported at line 1, column 2")

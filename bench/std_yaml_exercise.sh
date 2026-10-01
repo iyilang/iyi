@@ -189,6 +189,9 @@ prove_caught qplain "a plain scalar may not start with '?'" \
 prove_caught entry "'- b' after a key reads as text" \
   'accepted "a: - b' \
   'if b == 45_u8 && lone' 'if b == 45_u8 && lone && false'
+prove_caught bracketkey "a key may start with what a scalar cannot start with" \
+  'accepted "]: 1' \
+  'elsif plain_first_refused?(b)' 'elsif false && plain_first_refused?(b)'
 prove_caught folded "a folded scalar drops its leading empty lines" \
   "a folded scalar keeps its leading empty lines" \
   $'first = false\n          while blanks > 0' $'first = false\n          while blanks > 0 && false'

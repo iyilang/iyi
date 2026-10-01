@@ -1085,6 +1085,13 @@ pub class Parser
     value
   end
 
+  # `@` and `` ` `` are reserved, `%` starts a directive, and `]`, `}` and
+  # `,` end or part flow entries: a scalar cannot start with one, a value
+  # or a key.
+  private def plain_first_refused?(b : UInt8) : Bool
+    b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 93_u8 || b == 125_u8 || b == 44_u8
+  end
+
   private def parse_inline_value(pos : Int32, parent : Int32, tag : String?) : Any
     @nodes = @nodes + 1
     b = @bytes[pos]
@@ -1122,7 +1129,7 @@ pub class Parser
     # `- b` after a key is a sequence entry where none may start (it was
     # read as the text "- b").
     lone = pos + 1 >= @ends[@line] || blank_byte?(@bytes[pos + 1])
-    if b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 93_u8 || b == 125_u8 || b == 44_u8 || (b == 63_u8 && lone)
+    if plain_first_refused?(b) || (b == 63_u8 && lone)
       fail("a scalar cannot start with '#{b.unsafe_chr}'", pos)
       return Any.new(nil)
     end
@@ -1214,6 +1221,9 @@ pub class Parser
         key = Any.new(parse_quoted(key_pos, indent, false))
       elsif b == 42_u8 || b == 38_u8 || b == 33_u8
         fail("an alias, anchor or tag as a mapping key is not supported", key_pos)
+      elsif plain_first_refused?(b)
+        # `]: 1`, `}: 1` and `,: 1` were read as the keys "]", "}" and ",".
+        fail("a scalar cannot start with '#{b.unsafe_chr}'", key_pos)
       else
         finish = colon
         while finish > key_pos && blank_byte?(@bytes[finish - 1])

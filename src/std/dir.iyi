@@ -102,7 +102,15 @@ import std/env::{ENV}
       result
     end
 
-    # The stream: four words — descriptor, buffer address, read position, fill.
+    # The stream: one block, three words - descriptor, read position, fill -
+    # and the records `getdents64` writes behind them, from byte HEAD. The
+    # records were a second block whose address the stream kept as an
+    # integer in the first, which the collector does not read as a
+    # reference, so the buffer was freed while the directory was open and
+    # the kernel wrote the next records into whatever had the memory then
+    # (measured on Windows, whose stream had the same shape).
+    HEAD = 24_i64
+
     def self.opendir(name : UInt8*) : Void*
       # x86_64: O_DIRECTORY 00200000 | O_CLOEXEC 02000000 = 0x90000
       # aarch64: O_DIRECTORY (1<<14)=0x4000 | O_CLOEXEC 02000000 = 0x84000
@@ -113,38 +121,38 @@ import std/env::{ENV}
         fd = __iyi_openat(name, 0x84000, 0)
       {% end %}
       return Pointer(Void).new(0_u64) if fd < 0_i64
-      stream = Pointer(Int64).malloc(4_u64)
-      stream[0] = fd
-      stream[1] = Pointer(UInt8).malloc(BUFFER.to_u64).address.to_i64
-      stream[2] = 0_i64
-      stream[3] = 0_i64
+      stream = Pointer(UInt8).malloc((HEAD + BUFFER).to_u64)
+      words = stream.as(Int64*)
+      words[0] = fd
+      words[1] = 0_i64
+      words[2] = 0_i64
       stream.as(Void*)
     end
 
     def self.readdir(dirp : Void*) : Void*
-      stream = dirp.as(Int64*)
-      if stream[2] >= stream[3]
-        n = sys(SYS_GETDENTS64, stream[0], stream[1], BUFFER)
+      words = dirp.as(Int64*)
+      records = dirp.as(UInt8*) + HEAD
+      if words[1] >= words[2]
+        n = sys(SYS_GETDENTS64, words[0], records.address.to_i64, BUFFER)
         return Pointer(Void).new(0_u64) if n <= 0_i64
-        stream[2] = 0_i64
-        stream[3] = n
+        words[1] = 0_i64
+        words[2] = n
       end
-      record = Pointer(UInt8).new(stream[1].to_u64) + stream[2]
-      stream[2] = stream[2] + record[16].to_i64 + (record[17].to_i64 << 8)
+      record = records + words[1]
+      words[1] = words[1] + record[16].to_i64 + (record[17].to_i64 << 8)
       record.as(Void*)
     end
 
     def self.closedir(dirp : Void*) : Int32
-      stream = dirp.as(Int64*)
-      __iyi_close(stream[0])
+      __iyi_close(dirp.as(Int64*)[0])
       0
     end
 
     def self.rewinddir(dirp : Void*) : Nil
-      stream = dirp.as(Int64*)
-      sys(SYS_LSEEK, stream[0], 0_i64, 0_i64)
-      stream[2] = 0_i64
-      stream[3] = 0_i64
+      words = dirp.as(Int64*)
+      sys(SYS_LSEEK, words[0], 0_i64, 0_i64)
+      words[1] = 0_i64
+      words[2] = 0_i64
     end
 
     def self.getcwd(buf : UInt8*, size : UInt64) : UInt8*
@@ -195,25 +203,29 @@ pub class Dir
       end
       p.as(Void*)
     {% elsif flag?(:win32) %}
-      # The stream: three words — the find handle, the WIN32_FIND_DATAW the
-      # kernel writes into, and whether the name already sitting in it is
-      # still owed to a reader. FindFirstFileW fetches the first entry while
-      # it opens the search, so that first name has to be remembered here or
-      # the first `read` would skip it. The shape is the POSIX arm's: a
-      # malloc'd block behind the `Void*` the class holds.
-      find_data = Pointer(UInt8).malloc(WIN32_FIND_DATAW_BYTES.to_u64)
+      # The stream: one block, two words - the find handle, and whether the
+      # name already sitting in the buffer is still owed to a reader - and
+      # the WIN32_FIND_DATAW the kernel writes into behind them, from byte
+      # 16. FindFirstFileW fetches the first entry while it opens the
+      # search, so that first name has to be remembered here or the first
+      # `read` would skip it. The buffer was a block of its own, its address
+      # kept as an integer in the stream, which the collector does not read
+      # as a reference: the next collection freed it with the directory
+      # open, and FindNextFileW wrote each entry into whatever had the
+      # memory then - measured, a live String came to hold an entry's name,
+      # and `Dir.glob` over 4,000 files died of a memory fault.
       pattern = Dir.find_pattern(dir_path)
       if pattern.address == 0_u64
         raise "Cannot open directory: #{dir_path}"
       end
-      handle = LibKernel32.FindFirstFileW(pattern, find_data.as(Void*))
+      stream = Pointer(UInt8).malloc((16 + WIN32_FIND_DATAW_BYTES).to_u64)
+      handle = LibKernel32.FindFirstFileW(pattern, (stream + 16).as(Void*))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
         raise "Cannot open directory: #{dir_path}"
       end
-      stream = Pointer(Int64).malloc(3_u64)
-      stream[0] = handle.address.to_i64
-      stream[1] = find_data.address.to_i64
-      stream[2] = 1_i64
+      words = stream.as(Int64*)
+      words[0] = handle.address.to_i64
+      words[1] = 1_i64
       stream.as(Void*)
     {% else %}
       Pointer(Void).new(0_u64)
@@ -241,20 +253,21 @@ pub class Dir
       end
     {% elsif flag?(:win32) %}
       stream = @handle.as(Int64*)
+      find_data = (@handle.as(UInt8*) + 16).as(Void*)
       while true
-        if stream[2] == 0_i64
-          if LibKernel32.FindNextFileW(Pointer(Void).new(stream[0].to_u64), Pointer(Void).new(stream[1].to_u64)) == 0
+        if stream[1] == 0_i64
+          if LibKernel32.FindNextFileW(Pointer(Void).new(stream[0].to_u64), find_data) == 0
             return nil
           end
         end
-        stream[2] = 0_i64
+        stream[1] = 0_i64
 
         # `cFileName` sits at byte 44 of WIN32_FIND_DATAW, the way the linux
         # record's name sits at byte 19 — UTF-16 there, so the name is decoded
         # rather than copied out. `.` and `..` come back as they do from
         # `readdir`: the callers that do not want them filter them themselves,
         # and `children` reads the same on every platform because of it.
-        name_ptr = Pointer(UInt16).new(stream[1].to_u64 + 44_u64)
+        name_ptr = (find_data.as(UInt8*) + 44).as(UInt16*)
 
         # The size counts the terminator, which a String does not carry in
         # its length but does have room for behind it. A name Windows will
@@ -289,12 +302,12 @@ pub class Dir
       if pattern.address == 0_u64
         raise "Cannot rewind directory: #{@path}"
       end
-      handle = LibKernel32.FindFirstFileW(pattern, Pointer(Void).new(stream[1].to_u64))
+      handle = LibKernel32.FindFirstFileW(pattern, (@handle.as(UInt8*) + 16).as(Void*))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
         raise "Cannot rewind directory: #{@path}"
       end
       stream[0] = handle.address.to_i64
-      stream[2] = 1_i64
+      stream[1] = 1_i64
     {% end %}
     self
   end

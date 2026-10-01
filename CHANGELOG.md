@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **An open `Dir` keeps its entry buffer across a collection.** The
+  buffer `FindNextFileW` writes each entry into was a block of its own,
+  kept by its address as an integer inside the stream, which the
+  collector does not read as a reference: a collection with a directory
+  open freed it, and the next entries were written into whatever had
+  the memory then. Measured on Windows, a 600-byte String made after a
+  collection came to hold `entry_0199.txt`, and ten `Dir.glob` walks
+  of 4,000 files died of a memory fault in every run. The buffer is
+  part of the stream's own block now, on Linux too, whose `getdents64`
+  buffer had the same shape [INFERENCE: not run on Linux].
+  `bench/std_dir_exercise.iyi` reads a directory and walks a glob
+  across collections and checks the strings made meanwhile; the old
+  module died of a memory fault there in 3 runs of 3.
+
 - **`File.read`, `read_all` and `read_line` read past 1 GiB, and refuse
   past 2,147,483,647 bytes by name.** `IyiIO#read_all` and `read_line`
   doubled an `Int32` capacity, and doubling 1 GiB overflowed:

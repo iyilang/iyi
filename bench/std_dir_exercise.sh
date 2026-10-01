@@ -84,6 +84,7 @@ echo "== every dir section reported"
 for phrase in "== create, exists and file paths" \
               "== nested creation with mkdir_p" \
               "== list entries and dot entries policy" \
+              "== entries read across a collection" \
               "== glob star, recursive, hidden, and no-match" \
               "== current working directory and cd" \
               "== delete empty and non-empty directories"; do

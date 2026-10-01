@@ -47,6 +47,7 @@ end
 
 import std/dir::{Dir}
 import std/file::{File}
+import std/gc::{GC}
 
 def clean_tree(dir_path : String) : Nil
   return unless Dir.exists?(dir_path)
@@ -59,6 +60,21 @@ def clean_tree(dir_path : String) : Nil
       File.delete(full)
     end
   end
+end
+
+# How many of *fill* are still *byte* and nothing else.
+def filled(fill : Array(String), byte : UInt8) : Int32
+  intact = 0
+  fill.each do |text|
+    same = true
+    i = 0
+    while i < text.bytesize
+      same = false if text.to_unsafe[i] != byte
+      i = i + 1
+    end
+    intact = intact + 1 if same
+  end
+  intact
 end
 
 saved_orig = Dir.current
@@ -176,6 +192,57 @@ assert_true d_manual.closed?, "d_manual is closed after close call"
 d_manual.close
 assert_true d_manual.closed?, "d_manual remains closed after idempotent close"
 puts "  entries, children, and dot entry filtering policies"
+
+puts "\n== entries read across a collection"
+# The buffer an open directory reads entries into is the stream's own
+# memory. It was a block the stream kept by its address as an integer,
+# which the collector does not read as a reference: a collection with the
+# directory open freed it, and the next entries were written into what had
+# the memory then - measured on Windows, a live String came to hold an
+# entry's name, and `Dir.glob` over 4,000 files died of a memory fault.
+# Strings the size of each platform's buffer, 592 bytes on Windows and 32
+# KiB on Linux, are made after each collection to take that memory.
+many_dir = sandbox + "/many"
+Dir.mkdir(many_dir)
+200.times { |i| File.write(many_dir + "/entry_#{i}.txt", "") }
+small_fill = [] of String
+large_fill = [] of String
+seen = [] of String
+reader = Dir.new(many_dir)
+if first_seen = reader.read
+  seen << first_seen
+end
+GC.collect
+2000.times { small_fill << "A" * 600 }
+8.times { large_fill << "B" * 32800 }
+while name_seen = reader.read
+  seen << name_seen
+end
+reader.close
+entry_names = 0
+seen.each { |name| entry_names = entry_names + 1 if name.starts_with?("entry_") && name.ends_with?(".txt") }
+assert_true seen.size == 202 && entry_names == 200, "every entry is read across a collection: #{seen.size} names, #{entry_names} entries"
+
+tree = sandbox + "/tree"
+8.times do |i|
+  Dir.mkdir_p(tree + "/d#{i}/e")
+  6.times { |j| File.write(tree + "/d#{i}/e/f#{j}.txt", "") }
+end
+walked = 0
+3.times do
+  Dir.glob(tree + "/**/*.txt") do |_|
+    walked = walked + 1
+    if walked % 7 == 0
+      GC.collect
+      8.times { small_fill << "A" * 600 }
+      large_fill << "B" * 32800
+    end
+  end
+end
+assert_true walked == 144, "three globs across collections find 48 files each: #{walked}"
+assert_true filled(small_fill, 65_u8) == small_fill.size && filled(large_fill, 66_u8) == large_fill.size,
+  "no string made with a directory open was written over: #{small_fill.size - filled(small_fill, 65_u8)} and #{large_fill.size - filled(large_fill, 66_u8)}"
+puts "  a directory read and a glob walked across collections, nothing written over"
 
 puts "\n== glob star, recursive, hidden, and no-match"
 File.write(listing_dir + "/.hidden_glob", "h")

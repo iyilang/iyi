@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`Slice(Bool).new(3, true)` is three trues.** `read_only` was
+  positional in every `Slice.new`, so with `Bool` elements the value bound
+  to it: the call built `Slice[false, false, false]`, read-only. It is
+  named-only now, as in the other library, the pointer constructor
+  included, and `StaticArray#to_slice`, which passed it positionally, names
+  it. `bench/std_slice_exercise.iyi` builds the slice; the old module
+  answered `Slice[false, false, false]` with `read_only?` true.
+
 - **`{1, 2} == {1, y}` is true when `y : Int32?` holds 2, as
   `{1, y} == {1, 2}` was, and a `case` over the pair matches; named tuples
   alike.** `Tuple#==` (src/iyi/object.iyi) and `std/tuple`'s

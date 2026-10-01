@@ -30,13 +30,17 @@ pub struct Slice(T)
   end
 
   # Creates a slice wrapping *pointer* bounded by *size*.
-  def initialize(@pointer : Pointer(T), size : Int32, @read_only : Bool = false)
+  #
+  # `read_only` is named in this and every `Slice.new`, as in the other
+  # library. Positional, it took the value's place when `T` is `Bool`:
+  # `Slice(Bool).new(3, true)` was `Slice[false, false, false]`, read-only.
+  def initialize(@pointer : Pointer(T), size : Int32, *, @read_only : Bool = false)
     raise "negative size: #{size}" if size < 0
     @size = size
   end
 
   # Allocates a slice of *size* elements on the heap.
-  def self.new(size : Int32, read_only : Bool = false) : self
+  def self.new(size : Int32, *, read_only : Bool = false) : self
     raise "negative size: #{size}" if size < 0
     pointer = size == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(size.to_u64)
     new(pointer, size, read_only: read_only)
@@ -48,7 +52,7 @@ pub struct Slice(T)
   # element type is left to the value or the block, `self` is still the
   # unbound `Slice(T)` while the body builds `Slice(Int32)`, so
   # `Slice.new(3) { |i| i + 1 }` and `Slice.new(3, 7)` did not compile.
-  def self.new(size : Int32, value : T, read_only : Bool = false) : Slice(T)
+  def self.new(size : Int32, value : T, *, read_only : Bool = false) : Slice(T)
     raise "negative size: #{size}" if size < 0
     pointer = size == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(size.to_u64)
     slice = new(pointer, size, read_only: false)
@@ -68,7 +72,7 @@ pub struct Slice(T)
     new(pointer, size, read_only: false)
   end
 
-  def self.new(size : Int32, read_only : Bool, & : Int32 -> T) : Slice(T)
+  def self.new(size : Int32, *, read_only : Bool, & : Int32 -> T) : Slice(T)
     raise "negative size: #{size}" if size < 0
     pointer = size == 0 ? Pointer(T).new(0_u64) : Pointer(T).malloc(size.to_u64)
     i = 0

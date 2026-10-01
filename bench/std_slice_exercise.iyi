@@ -60,6 +60,13 @@ def main : Nil
     raise "inferred new: expected Slice[1, 2, 3] Slice[7, 7] Slice[0, 2] read-only"
   end
 
+  # `read_only` is named, as in the other library: positional, it took the
+  # value's place when the elements are `Bool`, and this was three falses,
+  # read-only.
+  bools = Slice(Bool).new(3, true)
+  puts "Bool value new: #{bools} read_only?=#{bools.read_only?}"
+  raise "Bool value new: expected Slice[true, true, true], writable" unless bools.to_s == "Slice[true, true, true]" && !bools.read_only?
+
   puts "bytesize: #{s_block.bytesize} (expected #{5 * sizeof(Int32)})"
   puts "to_unsafe: #{s_block.to_unsafe.address > 0_u64}"
 

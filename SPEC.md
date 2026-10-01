@@ -3367,19 +3367,28 @@ initialiser is last by construction and so cannot precede a module that imports
 it. A cycle is now an error naming the cycle, which is the same accident rule 1
 stopped relying on above, and the one IV.4's coherence proof rests on.
 
-**2. Between independent modules the order is *unobservable*, not merely
-unspecified.** This is the rule worth having, and the compilation model already
-pays for it: a module can only name what it imports (R-1), can only reach what
-that module exports (R-2), and cannot reopen anything (R-3). So a module's
-initialiser has nothing of an unrelated module to look at, and no program can
-tell which of two independent modules went first. The tiebreak therefore does
-not need specifying. There is no experiment that could detect it.
+**2. Between independent modules the order is *unspecified*, and a program
+that depends on it is wrong.** The compilation model narrows what could depend
+on it: a module can only name what it imports (R-1), can only reach what that
+module exports (R-2), and cannot reopen anything (R-3). So a module's
+initialiser has nothing of an unrelated module to look at. It does have what
+both modules import. This rule used to say the order was *unobservable*, that
+no program could tell which of two independent modules went first and no
+experiment could detect it, and four small modules do. `io/a` and
+`io/b` each import `io/c`, and each initialiser is one call, `Log.add("a")`
+and `Log.add("b")`, appending to a class variable `io/c` declares; the entry
+module's `puts Log.items.join(",")` printed `b,a` in debug builds under
+`IYI_INIT_SEED=1` and `4`, and `a,b` under 2, 3 and 6 and in a release build.
+Nothing refuses such an initialiser. Refusing it would mean knowing which
+calls write another module's state, which is rule 5's direction and is not
+built. The tiebreak is still left unspecified, on purpose: an output that
+changes with it is the bug.
 
-A rule nobody can observe is a rule that rots, so **debug builds shuffle the
-order of independent modules. Built.** This is Go's own trick: map iteration was
-randomised precisely to stop programs depending on an order the specification
-never promised, and Go went further there than in its own `init`, which is
-ordered by file name and therefore depends on one.
+A rule a program can break without a word is a rule that rots, so **debug
+builds shuffle the order of independent modules. Built.** This is Go's own
+trick: map iteration was randomised precisely to stop programs depending on an
+order the specification never promised, and Go went further there than in its
+own `init`, which is ordered by file name and therefore depends on one.
 
 The compiler walks the DAG the way Kahn's algorithm does and picks at random
 among the modules whose imports have all been placed, so no two debug builds of
@@ -3394,10 +3403,11 @@ other, and their initialisers are declarations with nothing to observe. What it
 does establish is that the reordering is safe. The tree the compiler hands the
 rest of the pipeline is still one it types and generates code for, and that no
 sample was quietly relying on load order. Evidence for what the rule *catches*
-needs a program whose modules do work at initialisation, and there is not one
-yet; III.4.5 is the reason to expect there never will be many, since
-module-level mutable state is not shareable and an initialiser mostly computes
-constants.
+is the program under rule 2, whose unspecified order printed both ways across
+five seeds: its modules do work at initialisation, into a class variable they
+share.
+III.4.5 is the reason to expect few such programs, since module-level mutable
+state is not shareable and an initialiser mostly computes constants.
 
 **Rule 1 was accidental, and now is not. Built.** `import` used to expand the
 imported file *in place*, splicing its nodes where the directive stood, so a
@@ -8012,10 +8022,11 @@ Named honestly, so nobody mistakes this draft for complete.
 3. ~~Trait default methods.~~ **Settled by II.6**: traits supply bodies, with
    their own type parameters and conditional `where` bounds.
 4. ~~**Module initialisation order.**~~ **Specified in III.5**: DAG order, a
-   relative order between independent modules that is unobservable rather than
-   merely unspecified, no `init()`, no import for side effects, and
-   initialisation that may not fail. All but "no import for side effects" are
-   built, the shuffle that keeps the unobservable order unobservable included.
+   relative order between independent modules that is unspecified (two
+   initialisers writing a module both import can show it), no `init()`, no
+   import for side effects, and initialisation that may not fail. All but "no
+   import for side effects" are built, the shuffle that shows a program
+   depending on the unspecified order included.
    That last one is the only rule here with a cost and no measurement.
 5. ~~**Concurrency semantics.**~~ **Specified in III.4**: structured
    concurrency so a leak is unrepresentable, cancellation owned by the scope

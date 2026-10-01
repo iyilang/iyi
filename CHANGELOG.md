@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **SPEC.md III.5 rule 2 says the order of independent modules is
+  unspecified, not unobservable.** It said no program could tell which of
+  two independent modules initialised first, and two modules that each
+  append to a class variable of a third they both import can: the entry
+  module printed "b,a" in debug builds under `IYI_INIT_SEED=1` and `4`
+  and "a,b" under 2, 3 and 6 and in a release build. The rule says the
+  order is unspecified now, and that output which changes with it is the
+  bug the debug shuffle shows; nothing refuses such an initialiser, which
+  is rule 5's direction and is not built.
+
 - **`getter retries = 3` and `property label = "first"` declare the
   field with its default.** The macros' untyped branch handled a bare name
   only, so the default expanded to `def retries = 3` and failed inside the

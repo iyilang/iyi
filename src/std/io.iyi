@@ -173,14 +173,24 @@ pub class Memory < IyiIO
     @bytesize == 0
   end
 
-  # The cursor, in bytes from the start.
-  def pos : Int32
-    @pos
+  # The cursor, in bytes from the start. Int64, as a file's position is:
+  # with `std/file` imported every `IyiIO` has a `pos : Int64`, and a
+  # narrower answer here made `pos` on any `IyiIO` fail to compile.
+  def pos : Int64
+    @pos.to_i64
   end
 
   def pos=(position : Int32) : Nil
     raise "position #{position} out of range for #{@bytesize} bytes" if position < 0 || position > @bytesize
     @pos = position
+  end
+
+  # The cursor moved through an `IyiIO`: the stream's own position, not
+  # the descriptor's that `std/file` would move.
+  def pos=(position : Int64) : Int64
+    raise "position #{position} out of range for #{@bytesize} bytes" if position < 0_i64 || position > @bytesize.to_i64
+    @pos = position.to_i32
+    position
   end
 
   def rewind : Nil
@@ -255,8 +265,10 @@ pub class Memory < IyiIO
     @pos = stop
 
     len = stop - start
-    if chomp
-      len = len - 1 if len > 0 && @buffer[start + len - 1] == 10_u8
+    # A `\r` is a line end only before the `\n`: a last line that ends in
+    # one at the end of the stream keeps it, as the other library's does.
+    if chomp && len > 0 && @buffer[start + len - 1] == 10_u8
+      len = len - 1
       len = len - 1 if len > 0 && @buffer[start + len - 1] == 13_u8
     end
     String.new(len) do |target|
@@ -299,13 +311,21 @@ abstract class Reader < IyiIO
   def close : Nil
   end
 
+  # The buffer grows with what arrives, up to `count`: a count is a most,
+  # and `Sized#read_all` asks for its whole limit, so allocating it up
+  # front took 2 GB to read two bytes under a limit of Int32::MAX.
   def read_bytes(count : Int32) : String
     raise "negative count: #{count}" if count < 0
-    buffer = Pointer(UInt8).malloc(count.to_u64)
+    capacity = count < 256 ? count : 256
+    buffer = Pointer(UInt8).malloc(capacity.to_u64)
     filled = 0
     while filled < count
       b = read_byte
       break unless b
+      if filled == capacity
+        capacity = count - capacity < capacity ? count : capacity * 2
+        buffer = buffer.realloc(capacity.to_u64)
+      end
       buffer[filled] = b
       filled = filled + 1
     end
@@ -347,8 +367,8 @@ abstract class Reader < IyiIO
     return nil if filled == 0
 
     len = filled
-    if chomp
-      len = len - 1 if len > 0 && buffer[len - 1] == 10_u8
+    if chomp && buffer[len - 1] == 10_u8
+      len = len - 1
       len = len - 1 if len > 0 && buffer[len - 1] == 13_u8
     end
     String.new(len) do |target|
@@ -384,10 +404,36 @@ pub class Sized < Reader
     b
   end
 
+  # The inner stream is asked for at most 64 KB at a time: a descriptor
+  # stream's `read_bytes` allocates the whole count before it reads, and
+  # `read_all` under a limit of Int32::MAX took 2 GB to read two bytes.
   def read_bytes(count : Int32) : String
     raise "negative count: #{count}" if count < 0
     take = count < @remaining ? count : @remaining
-    chunk = @io.read_bytes(take)
+    return read_piece(take) if take <= 65536
+
+    capacity = 65536
+    buffer = Pointer(UInt8).malloc(capacity.to_u64)
+    filled = 0
+    while filled < take
+      want = take - filled
+      want = 65536 if want > 65536
+      chunk = read_piece(want)
+      break if chunk.bytesize == 0
+      if filled + chunk.bytesize > capacity
+        capacity = take - capacity < capacity ? take : capacity * 2
+        buffer = buffer.realloc(capacity.to_u64)
+      end
+      (buffer + filled).copy_from(chunk.to_unsafe, chunk.bytesize)
+      filled = filled + chunk.bytesize
+    end
+    String.new(filled) do |target|
+      target.copy_from(buffer, filled)
+    end
+  end
+
+  private def read_piece(want : Int32) : String
+    chunk = @io.read_bytes(want)
     @remaining = @remaining - chunk.bytesize
     chunk
   end
@@ -427,40 +473,47 @@ pub class Delimited < Reader
     @delimiter
   end
 
+  # Exact, as the prelude's is: the inner stream is read until a content
+  # byte is held or the delimiter (or the end) is met. Answering from the
+  # inner stream alone said "not yet" with nothing but the delimiter left,
+  # and the next read answered nil.
   def eof? : Bool
-    return false if @out_pos < @out_len
-    return true if @finished
-    return false if @matched > 0
-    @io.eof?
+    while @out_pos >= @out_len
+      return true if @finished
+      pull
+    end
+    false
   end
 
   def read_byte : UInt8?
-    while true
-      if @out_pos < @out_len
-        b = @out[@out_pos]
-        @out_pos = @out_pos + 1
-        return b
-      end
+    while @out_pos >= @out_len
       return nil if @finished
+      pull
+    end
+    b = @out[@out_pos]
+    @out_pos = @out_pos + 1
+    b
+  end
 
-      @out_pos = 0
-      @out_len = 0
-      b = @io.read_byte
-      if b
-        feed(b)
-      else
-        # The stream ended holding a prefix of the delimiter: those bytes
-        # were content after all.
-        @finished = true
-        held = @matched
-        @matched = 0
-        i = 0
-        while i < held
-          @out[i] = @delimiter.to_unsafe[i]
-          i = i + 1
-        end
-        @out_len = held
+  # One byte of the inner stream into the held content, or the end.
+  private def pull : Nil
+    @out_pos = 0
+    @out_len = 0
+    b = @io.read_byte
+    if b
+      feed(b)
+    else
+      # The stream ended holding a prefix of the delimiter: those bytes
+      # were content after all.
+      @finished = true
+      held = @matched
+      @matched = 0
+      i = 0
+      while i < held
+        @out[i] = @delimiter.to_unsafe[i]
+        i = i + 1
       end
+      @out_len = held
     end
   end
 

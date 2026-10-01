@@ -14,7 +14,10 @@
 #     same bytes.
 #   * The Delimited and Sized answers on UTF-8 input are the exact bytes.
 #   * Negative proofs: a patched copy of the module that breaks the two's
-#     complement, the delimiter match, or the line end is caught by name.
+#     complement, the delimiter match, the line end, a CR that ends the
+#     stream (Memory, a reader, and the prelude's file lines), a Delimited's
+#     eof, a Memory's position through an `IyiIO`, or a count read whole is
+#     caught by name.
 #   * What the module refuses: a negative count, a position past the buffer, a
 #     write to a reader, a read from a writer, a decode that runs out of bytes,
 #     malformed UTF-8 (a stray continuation byte, a lead byte that is not one,
@@ -277,15 +280,20 @@ done
 # Negative failure proofs
 # ---------------------------------------------------------------------------
 
-patched_fails() { # patched_fails <label> <dir> <check phrase> <python replacement expression>
-  local label="$1" dir="$2" phrase="$3" replacement="$4"
+patched_fails() { # patched_fails <label> <dir> <check phrase> <python replacement expression> [module under src/, std/io.iyi by default]
+  local label="$1" dir="$2" phrase="$3" replacement="$4" module="${5:-std/io.iyi}"
   if [ -z "$PY" ]; then
     echo "  $label: skipped, no working python3 to make the broken copy with"
     return 0
   fi
-  mkdir -p "$WORK/$dir/std"
-  cp "$REPO/src/std/io.iyi" "$WORK/$dir/std/io.iyi"
-  "$PY" - "$WORK/$dir/std/io.iyi" "$replacement" <<'PY'
+  # A lone prelude file ahead on the search path is not read; a copy of
+  # the whole prelude is, so a prelude module is broken in a copy of all.
+  mkdir -p "$(dirname "$WORK/$dir/$module")"
+  case "$module" in
+    iyi/*) cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi" ;;
+    *) cp "$REPO/src/$module" "$WORK/$dir/$module" ;;
+  esac
+  "$PY" - "$WORK/$dir/$module" "$replacement" <<'PY'
 import sys
 path, replacement = sys.argv[1], sys.argv[2]
 old, new = replacement.split("=>", 1)
@@ -332,7 +340,64 @@ patched_fails "held prefix dropped on mismatch" patched_delim "a partial match t
 echo
 echo "== negative proof: a line end that is not dropped is caught"
 patched_fails "chomp drops the last byte instead" patched_chomp "gets(chomp) drops the line end" \
-  '      len = len - 1 if len > 0 && @buffer[start + len - 1] == 10_u8=>      len = len - 1 if len > 0 && @buffer[start + len - 1] != 10_u8'
+  '    if chomp && len > 0 && @buffer[start + len - 1] == 10_u8=>    if chomp && len > 0 && @buffer[start + len - 1] != 10_u8'
+
+echo
+echo "== negative proof: a CR that ends the stream and is dropped is caught"
+patched_fails "Memory chomps a lone CR" patched_cr_memory "chomp keeps a CR that ends the stream" \
+  '    if chomp && len > 0 && @buffer[start + len - 1] == 10_u8
+      len = len - 1
+      len = len - 1 if len > 0 && @buffer[start + len - 1] == 13_u8
+    end=>    if chomp
+      len = len - 1 if len > 0 && @buffer[start + len - 1] == 10_u8
+      len = len - 1 if len > 0 && @buffer[start + len - 1] == 13_u8
+    end'
+patched_fails "a reader chomps a lone CR" patched_cr_reader "lines(chomp) on a Sized keeps a CR that ends it" \
+  '    if chomp && buffer[len - 1] == 10_u8
+      len = len - 1
+      len = len - 1 if len > 0 && buffer[len - 1] == 13_u8
+    end=>    if chomp
+      len = len - 1 if len > 0 && buffer[len - 1] == 10_u8
+      len = len - 1 if len > 0 && buffer[len - 1] == 13_u8
+    end'
+# The descriptor stream's lines are the prelude's `read_line`, so its copy
+# is the one broken.
+patched_fails "a file chomps a lone CR" patched_cr_file "lines(chomp) on a file keeps a CR that ends it" \
+  '    if chomp && line_len > 0 && line_buf[line_len - 1] == 10_u8
+      len = line_len - 1
+      len = len - 1 if len > 0 && line_buf[len - 1] == 13_u8=>    if chomp
+      len = line_len
+      len = len - 1 if len > 0 && line_buf[len - 1] == 10_u8
+      len = len - 1 if len > 0 && line_buf[len - 1] == 13_u8' \
+  iyi/io.iyi
+
+echo
+echo "== negative proof: a Delimited that answers eof from its inner stream is caught"
+patched_fails "eof? without looking ahead" patched_delim_eof "a Delimited with only its delimiter left is at eof" \
+  '  def eof? : Bool
+    while @out_pos >= @out_len
+      return true if @finished
+      pull
+    end
+    false
+  end=>  def eof? : Bool
+    return false if @out_pos < @out_len
+    return true if @finished
+    return false if @matched > 0
+    @io.eof?
+  end'
+
+echo
+echo "== negative proof: a Memory position that is the descriptor's is caught"
+patched_fails "pos= through an IyiIO not overridden" patched_pos "cannot seek to 4 (Set)" \
+  '  def pos=(position : Int64) : Int64=>  def unused_pos=(position : Int64) : Int64'
+
+echo
+echo "== negative proof: a count allocated whole is caught"
+patched_fails "a reader allocates the count" patched_most_reader "a large count allocates what is read, not the count" \
+  '    capacity = count < 256 ? count : 256=>    capacity = count'
+patched_fails "a Sized asks for its whole limit" patched_most_sized "a large count allocates what is read, not the count" \
+  '    return read_piece(take) if take <= 65536=>    return read_piece(take)'
 
 echo
 echo "== negative proof: a Sized that ignores its limit is caught"
@@ -500,7 +565,9 @@ case "$(uname -s)" in
     # The base is every darwin program's (bench/floor_base.sh); the socket
     # and file names beside it are what this exercise's binary asks for on
     # top, each libSystem's, which the `allowed_libs` check below proves.
-    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect getsockname listen open recv send setsockopt socket unlink"
+    # `lseek` is std/file's `pos`, which the exercise asks a file for to
+    # prove std/io's `Memory#pos` answers the same type.
+    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect getsockname listen lseek open recv send setsockopt socket unlink"
     ;;
 esac
 if [ -n "$DUMPBIN" ]; then

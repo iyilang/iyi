@@ -249,9 +249,9 @@ class IyiIO
 
     return nil if line_len == 0 && @eof
 
-    if chomp
-      len = line_len
-      len = len - 1 if len > 0 && line_buf[len - 1] == 10_u8
+    # A `\r` ends a line only before a `\n`; a final lone one is kept.
+    if chomp && line_len > 0 && line_buf[line_len - 1] == 10_u8
+      len = line_len - 1
       len = len - 1 if len > 0 && line_buf[len - 1] == 13_u8
       String.new(len) do |target|
         target.copy_from(line_buf, len)

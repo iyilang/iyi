@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **`std/io` keeps a final `\r`, knows a spent `Delimited`, and reads a
+  large limit without allocating it.** `read_line(chomp)` stripped a `\r`
+  that ended the stream with no `\n` after it - on a `Memory`, on a
+  `Sized` or `Delimited`, and in the prelude's reader for files and pipes
+  whose last line spans buffers - where only a `\r\n` is a line ending,
+  as `std/text`'s `each_line` already reads it. `Delimited#eof?` said
+  false with only the delimiter left, and the next read answered nil.
+  `Sized` over a limit of 2^31-1 asked its inner stream for the whole
+  limit and allocated it: 1.5 GB and 4 seconds to read two bytes; reads
+  go 64 KB at a time now. And `Memory#pos` answered Int32 where
+  `std/file`'s `IyiIO#pos` is Int64, so a program importing both did not
+  compile. 200,000 random operation scripts against the other library's
+  `IO` found these and none after; the io exercise checks each and proves
+  each check fails with its fix undone.
+
 - **The math oracle scales into the subnormals itself.** glibc's erfc
   rounds a subnormal result with glibc's own `__ldexp`, which rounds
   once; the oracle had it call the platform's `ldexp`, and on darwin

@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- **Six answers of the prelude's `String`, `Char` and integers are the
+  other library's.** On text that is not UTF-8, `String#size` counted a
+  lone continuation byte as nothing and a cut-short sequence as one
+  character, `each_char` decoded what it should have refused, and a
+  built string and a literal of the same bytes had different sizes - so
+  `rjust` padded to the wrong width; both count one character per byte
+  that does not begin a well-formed sequence now. `Char#whitespace?` left
+  out `\v` and `\f`, so `strip` kept them; `chomp('\n')` left the `\r`
+  of `\r\n`; `lines` dropped a final lone `\r`. `8 >> -2` was 0 where a
+  negative count shifts the other way (32), in the prelude's Int32 and
+  Int64 and in `std/int`'s other widths; and `233.chr` panicked, though
+  `'é'.ord` is 233 - `chr` takes every code point but the surrogates. 600,000
+  cases of `String`, `Char`, the integers, `Array`, `Hash`, `Set` and
+  `Range` against Crystal found these, and the collections and ranges
+  nothing; the library stays under its 3,734-line ceiling (3,732). The
+  number, int and text exercises check each and prove each check fails
+  with its fix undone.
+
 - **A child process gets three descriptors, and none of the parent's
   signal handlers.** On Linux `Process.run` exec'd with every descriptor
   the program had open and not marked close-on-exec - the poller's
@@ -13921,7 +13939,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,247-line library and nothing else. Every other
+  written against iyi's own 19,246-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

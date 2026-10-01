@@ -53,35 +53,43 @@ class String
     {% end %}
   end
 
-  # UTF-8 continuation bytes are `10xxxxxx`; every other byte starts a
-  # character. That is the whole of the decoding this prelude does.
-  protected def self.character_count(buffer : Pointer(UInt8), bytesize : Int32) : Int32
-    count = 0
-    index = 0
-    while index < bytesize
-      count = count + 1 if (buffer[index] & 192_u8) != 128_u8
-      index = index + 1
-    end
-    count
+  # The bytes of the character at *at*: 2 to 4 for a well-formed sequence,
+  # 1 for ASCII and for each byte of one that is overlong, a surrogate, past
+  # U+10FFFF, cut short or not continued - the other library's reading, and
+  # the compiler's for a literal's `size`. `size` and `each_char` both step
+  # by it: counting lead bytes made `"\xC3a"` two to `size` and one to
+  # `each_char`, and `"\x80"` built here 0 where its literal is 1.
+  private def char_width(at : Int32) : Int32
+    lead = to_unsafe[at]
+    return 1 if lead < 0xC2_u8 || lead > 0xF4_u8
+    width = lead < 0xE0_u8 ? 2 : (lead < 0xF0_u8 ? 3 : 4)
+    return 1 if at + width > @bytesize
+    second = to_unsafe[at + 1]
+    return 1 if second < (lead == 0xE0_u8 ? 0xA0_u8 : (lead == 0xF0_u8 ? 0x90_u8 : 0x80_u8))
+    return 1 if second > (lead == 0xED_u8 ? 0x9F_u8 : (lead == 0xF4_u8 ? 0x8F_u8 : 0xBF_u8))
+    return 1 if width > 2 && (to_unsafe[at + 2] & 0xC0_u8) != 0x80_u8
+    return 1 if width > 3 && (to_unsafe[at + 3] & 0xC0_u8) != 0x80_u8
+    width
   end
 
   def bytesize : Int32
     @bytesize
   end
 
-  # Crystal reads `@length == 0` on a non-empty string as "not counted yet" and
-  # scans; a string it builds without knowing the count leaves the field at
-  # zero. This prelude used to return the field, which was right for every
-  # string it makes itself and wrong for one that arrived from Crystal's own
-  # code — `to_json`'s result printed correctly here and answered `size` 0.
-  #
-  # No error, a wrong number, and the layout is shared on purpose (SPEC.md
-  # Part V item 12), so the invariant has to be shared too.
+  # A zero `@length` on a non-empty string is "not counted yet", which is
+  # how the other library's own code leaves a string it builds: `to_json`'s
+  # result answered `size` 0 here while the field was returned as it stood.
+  # The layout is shared on purpose (SPEC.md Part V item 12), so the
+  # invariant is too.
   def size : Int32
     return @length if @length > 0 || @bytesize == 0
-
-    @length = String.character_count(to_unsafe, @bytesize)
-    @length
+    count = 0
+    index = 0
+    while index < @bytesize
+      index = index + char_width(index)
+      count = count + 1
+    end
+    @length = count
   end
 
   def empty? : Bool
@@ -116,33 +124,21 @@ class String
   # convention `samples/iyi/calc` scans with; a character is a unit only
   # where a character is what was asked for.
   #
-  # A byte that begins no sequence, or a sequence the string is too short to
-  # hold, is yielded as itself: this decodes, it does not validate.
+  # A byte that starts no well-formed sequence (`char_width` says 1) is
+  # yielded as itself: this decodes, it does not validate.
   def each_char(& : Char -> Nil) : Nil
     index = 0
     while index < @bytesize
-      lead = to_unsafe[index].to_i32
-      if (lead & 0x80) == 0
-        yield lead.unsafe_chr
-        index = index + 1
-      elsif (lead & 0xE0) == 0xC0 && index + 1 < @bytesize
-        yield (((lead & 0x1F) << 6) | (to_unsafe[index + 1].to_i32 & 0x3F)).unsafe_chr
-        index = index + 2
-      elsif (lead & 0xF0) == 0xE0 && index + 2 < @bytesize
-        yield (((lead & 0x0F) << 12) |
-               ((to_unsafe[index + 1].to_i32 & 0x3F) << 6) |
-               (to_unsafe[index + 2].to_i32 & 0x3F)).unsafe_chr
-        index = index + 3
-      elsif (lead & 0xF8) == 0xF0 && index + 3 < @bytesize
-        yield (((lead & 0x07) << 18) |
-               ((to_unsafe[index + 1].to_i32 & 0x3F) << 12) |
-               ((to_unsafe[index + 2].to_i32 & 0x3F) << 6) |
-               (to_unsafe[index + 3].to_i32 & 0x3F)).unsafe_chr
-        index = index + 4
-      else
-        yield lead.unsafe_chr
-        index = index + 1
+      width = char_width(index)
+      point = to_unsafe[index].to_i32
+      point = point & (0xFF >> (width + 1)) if width > 1
+      k = 1
+      while k < width
+        point = (point << 6) | (to_unsafe[index + k].to_i32 & 0x3F)
+        k = k + 1
       end
+      yield point.unsafe_chr
+      index = index + width
     end
   end
 
@@ -320,8 +316,10 @@ class String
     starts_with?(char.to_s)
   end
 
+  # `'\n'` is a line's end, so it takes the `\r` before it, or a lone `\r`
+  # in its place, as the other library's does: `"a\r\n".chomp('\n')` is "a".
   def chomp(char : Char) : String
-    text = char.to_s
+    text = char == '\n' ? (ends_with?("\r\n") ? "\r\n" : (ends_with?("\r") ? "\r" : "\n")) : char.to_s
     return self unless ends_with?(text)
     byte_slice(0, bytesize - text.bytesize)
   end
@@ -401,13 +399,13 @@ class String
   end
 
   # The lines of a text, blank ones included, a final newline ending the last
-  # line; `\r\n` ends one too, as in Crystal - a Windows file's lines kept the
-  # `\r`, and `"1\r\n".lines[0].to_i` panicked where `File.read_lines` read 1.
+  # line; `\r\n` ends one too, and a last `\r` with no `\n` after it is kept:
+  # `"1\r\n".lines[0].to_i` panicked where `File.read_lines` read 1.
   def lines : Array(String)
     return [] of String if bytesize == 0
     pieces = split('\n')
-    pieces.pop if pieces.last.empty?
-    pieces.map { |line| line.chomp('\r') }
+    tail = pieces.pop
+    pieces.map { |line| line.chomp('\r') }.concat(tail.empty? ? [] of String : [tail])
   end
 
   private def byte_slice(start : Int32, count : Int32) : String
@@ -610,8 +608,8 @@ struct Char
   end
 
   # The classes a word counter asks about, ASCII's: a letter is one of the
-  # fifty-two, a digit one of the ten, whitespace the space, tab and the
-  # line breaks.
+  # fifty-two, a digit one of the ten, whitespace the space and `\t`, `\n`,
+  # `\v`, `\f`, `\r`, as the other library's ASCII test has it.
   def letter? : Bool
     (self >= 'a' && self <= 'z') || (self >= 'A' && self <= 'Z')
   end
@@ -625,7 +623,7 @@ struct Char
   end
 
   def whitespace? : Bool
-    self == ' ' || self == '\t' || self == '\n' || self == '\r'
+    self == ' ' || (self >= '\t' && self <= '\r')
   end
 end
 

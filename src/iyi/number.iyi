@@ -66,14 +66,15 @@ struct Int32
   end
 
   # Shifts, and the magnitude: what a bit of arithmetic past the four
-  # operators asks for first. A shift by the width or more answers zero,
-  # which the processor does not promise.
+  # operators asks for first. A shift by the width or more answers zero (the
+  # sign, for a negative shifted right), which the processor does not
+  # promise, and a negative count shifts the other way, as `8 >> -2` is 32.
   def <<(count : Int32) : Int32
-    count >= 32 || count < 0 ? 0 : unsafe_shl(count)
+    count < 0 ? self >> (0 - count) : (count >= 32 ? 0 : unsafe_shl(count))
   end
 
   def >>(count : Int32) : Int32
-    count >= 32 || count < 0 ? (self < 0 ? -1 : 0) : unsafe_shr(count)
+    count < 0 ? self << (0 - count) : (count >= 32 ? (self < 0 ? -1 : 0) : unsafe_shr(count))
   end
 
   def abs : Int32
@@ -104,10 +105,10 @@ struct Int32
     end
   end
 
-  # The character with this code, ASCII: the other half of `Char#ord`.
+  # The character with this code point: the other half of `Char#ord`.
   def chr : Char
-    raise "#{self} is out of char range" if self < 0 || self > 127
-    to_u8.unsafe_chr
+    raise "#{self} is out of char range" if self < 0 || self > 0x10FFFF || (self >= 0xD800 && self <= 0xDFFF)
+    unsafe_chr
   end
 
   def even? : Bool
@@ -236,11 +237,11 @@ struct Int64
   end
 
   def <<(count : Int32) : Int64
-    count >= 64 || count < 0 ? 0_i64 : unsafe_shl(count.to_i64)
+    count < 0 ? self >> (0 - count) : (count >= 64 ? 0_i64 : unsafe_shl(count.to_i64))
   end
 
   def >>(count : Int32) : Int64
-    count >= 64 || count < 0 ? (self < 0_i64 ? -1_i64 : 0_i64) : unsafe_shr(count.to_i64)
+    count < 0 ? self << (0 - count) : (count >= 64 ? (self < 0_i64 ? -1_i64 : 0_i64) : unsafe_shr(count.to_i64))
   end
 
   def abs : Int64

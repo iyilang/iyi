@@ -180,6 +180,31 @@ PY
   else
     printf '  unchecked conversions checked: exits at "%s"\n' "$(grep -m1 'arithmetic overflow' "$WORK/checked.out" | sed 's/^iyi: panic: //')"
   fi
+
+  # A negative shift count answering zero again, as it did: the signed
+  # `>>` patched, so `8_i16 >> -2` is 0 and the shift check has to say so.
+  mkdir -p "$WORK/shift/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/int.iyi").read_text()
+old = "count < 0 ? self << (0 - count) : (count >= {{ bits }} ? (self < 0"
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/shift/std/int.iyi").write_text(src.replace(old, "count < 0 ? 0_{{ suffix.id }} : (count >= {{ bits }} ? (self < 0", 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the shift patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/shift${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_int_exercise.iyi" >"$WORK/shift.out" 2>&1; then
+    echo "  the exercise PASSED with a negative shift count answering zero"
+    status=1
+  elif ! grep -q "a negative shift count shifts the other way" "$WORK/shift.out"; then
+    echo "  a negative shift count answering zero failed, but not at its check:"
+    sed -n '1,3p' "$WORK/shift.out"
+    status=1
+  else
+    printf '  a negative shift count answering zero: exits at "%s"\n' "$(grep -m1 'a negative shift count' "$WORK/shift.out" | sed 's/^iyi: panic: //')"
+  fi
 fi
 
 echo

@@ -28,7 +28,13 @@ puts "  UInt16, Int8, UInt32 add"
 puts "\n== bits"
 assert_true 3_u16.popcount == 2, "popcount 0b11"
 assert_true 1_u16.bit_length == 1, "bit_length"
-puts "  popcount and bit_length"
+# A negative count shifts the other way, as the prelude's `Int32` does and
+# the other library's tower does: it answered 0 (or -1, shifting a negative
+# right), so `8_i16 >> -2` was 0. Past the width it is still 0, or the sign.
+assert_true (8_i16 >> -2) == 32_i16 && (8_i16 << -2) == 2_i16, "a negative shift count shifts the other way"
+assert_true (8_u32 >> -2) == 32_u32 && (8_u32 << -2) == 2_u32 && (-8_i8 >> -1) == -16_i8, "a negative count, unsigned and narrow"
+assert_true (-8_i16 >> 16) == -1_i16 && (8_u16 << 16) == 0_u16, "past the width"
+puts "  popcount, bit_length and shifts"
 
 # A wide integer compared with a double is compared exactly, not rounded
 # to a double first: `9007199254740993_i128 == 9007199254740992.0` was

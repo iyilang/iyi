@@ -134,9 +134,8 @@ end
 
 class ::String
   # The whitespace `blank?`, `lstrip` and `rstrip` look through is the one
-  # `Char#ascii_whitespace?` names, `\v` and `\f` included. `strip` with no
-  # argument is the prelude's, and stops at `\r`: `lstrip.rstrip` is the
-  # one that agrees with these.
+  # `Char#ascii_whitespace?` names, `\v` and `\f` included - the prelude's
+  # `whitespace?`, so `strip` with no argument agrees with these.
   def blank? : Bool
     i = 0
     while i < bytesize

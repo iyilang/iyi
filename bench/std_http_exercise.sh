@@ -241,7 +241,12 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+mutations=0
 mutate() { # mutate <label> <old> <new> [module, http.iyi by default]
+  # A binary of its own each: on Windows the last one's file can still be
+  # held a moment after it ended, and the next link over it failed with
+  # LNK1104 - three of thirty mutations here, whichever came after.
+  mutations=$((mutations + 1))
   local label="$1" old="$2" new="$3" module="${4:-http.iyi}"
   if [ -z "$PY" ]; then
     echo "  $label: skipped, no working python3 to make the broken copy with"
@@ -263,11 +268,11 @@ PY
     status=1
   # Build first, then run: a patch that does not compile would also "fail",
   # and that proves nothing about whether the exercise catches the break.
-  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut.bin" "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut-$mutations.bin" "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the broken copy did not compile"
     sed -n '1,6p' "$WORK/mut.out"
     status=1
-  elif timeout -k 5 120 "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
+  elif timeout -k 5 120 "$WORK/mut-$mutations.bin" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else

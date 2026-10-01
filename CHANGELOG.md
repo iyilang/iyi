@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **A `Time` refused after its nanosecond carry names the second count
+  that was refused.** The message named the count before the carry:
+  `Time.unix(67767976233532799, 999999999) + Span.nanoseconds(1)`
+  panicked "year out of range: 67767976233532799 seconds from the epoch
+  ...", a second `Time.unix` had just accepted. It names
+  67767976233532800 now, and a sum that wraps past an Int64 as the sum
+  (`9223372036854775807 + 1`). `bench/std_time_exercise.sh` asks for
+  the count; the old module named 67767976233532799.
+
 - **`Time#to_unix_ms` answers the lowest milliseconds an Int64 holds.**
   The top edge was checked to the millisecond and the bottom one to the
   second: all of `-9223372036854776` was refused though 808 of its

@@ -370,14 +370,21 @@ pub struct Time
   MAX_SECONDS =  67767976233532799_i64
 
   def initialize(@seconds : Int64, nanoseconds : Int32 = 0)
-    sec = @seconds &+ (nanoseconds.to_i64 // 1000000000_i64)
+    carry = nanoseconds.to_i64 // 1000000000_i64
     nsec = (nanoseconds.to_i64 % 1000000000_i64).to_i32
     if nsec < 0
-      sec = sec &- 1_i64
+      carry = carry - 1_i64
       nsec = nsec + 1000000000
     end
+    sec = @seconds &+ carry
     if sec < MIN_SECONDS || sec > MAX_SECONDS
-      raise "year out of range: #{@seconds} seconds from the epoch is past the years an Int32 holds"
+      # The count after the carry is the one refused, so it is the one named.
+      # The message named the count before it, and `Time.unix(MAX_SECONDS,
+      # 999999999) + 1ns` was refused naming 67767976233532799, a second the
+      # module had just accepted. A sum that wrapped is named as the sum.
+      wrapped = (carry > 0_i64 && sec < @seconds) || (carry < 0_i64 && sec > @seconds)
+      count = wrapped ? "#{@seconds} #{carry > 0_i64 ? "+" : "-"} #{carry.abs}" : sec.to_s
+      raise "year out of range: #{count} seconds from the epoch is past the years an Int32 holds"
     end
     @seconds = sec
     @nanoseconds = nsec

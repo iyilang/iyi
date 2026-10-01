@@ -282,6 +282,10 @@ time_panics_with "the last Int64 second" unix_max "year out of range" \
   'Time.unix(9223372036854775807_i64).year'
 time_panics_with "the first Int64 second" unix_min "year out of range" \
   'Time.unix(-9223372036854775808_i64).to_rfc3339'
+# A refusal after the carry names the count after it: it named the count
+# before, a second the module had just accepted.
+time_panics_with "the last second's last nanosecond and one more" max_carry "year out of range: 67767976233532800 seconds from the epoch" \
+  '(Time.unix(67767976233532799_i64, 999999999) + Span.nanoseconds(1_i64)).to_rfc3339'
 time_panics_with "a span sum past Int64" span_add "Span overflows" \
   'Span.seconds(9223372036854775807_i64) + Span.seconds(1_i64)'
 time_panics_with "a day count past Int64 seconds" span_days "Span overflows" \

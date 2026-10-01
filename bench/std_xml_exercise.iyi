@@ -316,6 +316,16 @@ assert_true(Std::Xml.parse("\u{FEFF}<a/>").root.name == "a", "a byte order mark 
 assert_true(Std::Xml.parse("<a b=\"x\ty\nz\"/>").root["b"] == "x y z", "attribute value normalisation")
 assert_true(Std::Xml.parse("<a b='say \"hi\"'/>").root["b"] == "say \"hi\"", "single-quoted attribute")
 assert_true(Std::Xml.parse("<a>\r\nx\ry</a>").root.text == "\nx\ny", "line ends normalised in text")
+# Names are read by code point (XML 1.0 fifth edition, [4] and [4a]): any
+# byte past 0x7F used to start and continue one, so `<a×b/>` was an element
+# named "a×b" and `<·a/>` one named "·a".
+refused("<a\u{D7}b/>", "expected whitespace before the next attribute of <a> at line 1, column 3")
+refused("<a\u{A0}/>", "expected whitespace before the next attribute of <a> at line 1, column 3")
+refused("<\u{B7}a/>", "expected a name, found U+00B7 at line 1, column 2")
+refused("<a \u{300}b=\"1\"/>", "expected a name, found U+0300 at line 1, column 4")
+refused("<p:\u{B7}a xmlns:p=\"u\"/>", "'p:\u{B7}a' is not a qualified name: a name is 'local' or 'prefix:local' at line 1, column 1")
+refused("<!DOCTYPE a [<!ENTITY e \"&a\u{3000};\">]><a/>", "'&a\u{3000};' is not a reference: 'a\u{3000}' is not a name at line 1, column 26")
+assert_equal("a\u{B7}\u{300}\u{203F}-.1\u{10000}", Std::Xml.parse("<a\u{B7}\u{300}\u{203F}-.1\u{10000}/>").root.name, "U+00B7, a combining mark and U+203F continue a name")
 puts "  every refusal names what was refused, and where"
 
 # ---------------------------------------------------------------------------

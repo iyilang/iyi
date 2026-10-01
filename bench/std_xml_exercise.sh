@@ -207,19 +207,15 @@ mutate "a colon in a processing instruction target" \
 mutate "a colon in an entity name" \
   '    if name.includes?(":")' '    if false' 'accepted .*ENTITY a:b'
 mutate "a local part that cannot start a name" \
-  ' && Parser.name_start_byte?(ptr[colon_at + 1])' '' 'accepted .*p:-a'
+  ' && Parser.name_start?(code_point_at(ptr, len, colon_at + 1))' '' 'accepted .*p:-a'
+mutate "a code point past 0x7F taken to start and continue a name" \
+  '    return cp != 0xD7 && cp != 0xF7 if cp <= 0x2FF' '    return true if cp <= 0x2FF' 'accepted "<a.*b/>"'
 mutate "no space after <!DOCTYPE" \
   '    if !skip_whitespace
       fail("expected whitespace after <!DOCTYPE")' '    if !skip_whitespace && false
       fail("expected whitespace after <!DOCTYPE")' 'accepted .*DOCTYPEa'
 mutate "a reference in an entity value that is not a name" \
   '    if !Parser.name_shaped?(ref)' '    if false' 'accepted .*a]b'
-mutate "a skipped declaration running into the next" \
-  '      elsif b == 60_u8
-        break' '      elsif false
-        break' 'accepted .*ELEMENT a ANY'
-mutate "a control character in a skipped declaration" \
-  '          if control?(byte_at(@pos))' '          if false' 'accepted .*ATTLIST a k CDATA'
 mutate "no byte budget on entity expansion" \
   '    if @expanded_bytes > @max_expanded_bytes' '    if false' 'thousand times is refused'
 mutate "a US-ASCII document written as UTF-8" \

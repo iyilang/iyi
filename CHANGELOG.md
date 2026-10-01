@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`std/xml` reads a name by code point, as XML 1.0 (fifth edition)
+  defines one, so `<a×b/>` and `<·a/>` are refused.** Any byte past 0x7F
+  both started and continued a name: `<a×b/>` parsed as an element named
+  "a×b", a no-break space or U+3000 after a name became part of it, and
+  `<·a/>`, `<\u0300a/>`, `<a b×="1"/>` and `<a ·b="1"/>` were taken, where
+  expat refuses each. The scanners decode the character and test
+  productions [4] and [4a]: `<a×b/>` is "expected whitespace before the
+  next attribute of <a>" now and `<·a/>` "expected a name, found U+00B7".
+  `<été/>` and `<中文/>` read as before, and U+FEFF and U+10000, which the
+  fifth edition allows in a name and expat does not, are taken.
+  `bench/std_xml_exercise.iyi` refuses six such names; the old module
+  accepted `<a×b/>`.
+
 - **A CRLF file's doc comments read as the LF file's.** Each doc line
   was cut at its `\n` and kept the `\r` before it, so `iyi doc` printed
   `# Second paragraph.\r` among LF lines, and `mod context --json`

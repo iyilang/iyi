@@ -38,8 +38,9 @@
 #     is not digits, a dot and digits;
 #   * a raw `<` in an attribute value, an attribute given twice - by one
 #     spelling or through two prefixes bound to the same uri - a namespace
-#     prefix nobody declared, a name with a colon first, last or twice or a
-#     local part that cannot start a name, a colon in an entity name or a
+#     prefix nobody declared, a code point a name cannot hold (XML 1.0, fifth
+#     edition: `<a×b/>`, `<·a/>`), a name with a colon first, last or twice
+#     or a local part that cannot start a name, a colon in an entity name or a
 #     processing instruction target, a declaration of the `xmlns` prefix or
 #     of `xml` to another uri, the `xml` or `xmlns` uri bound to any other
 #     prefix or to the default namespace, an unquoted value, a second root
@@ -1637,11 +1638,16 @@ pub class Parser
     if @pos >= @len
       fail("expected a name, found the end of the input")
     else
-      b = byte_at(@pos)
-      found = b >= 32_u8 && b < 127_u8 ? "'#{b.unsafe_chr}'" : "U+#{Parser.hex4(b.to_i32)}"
-      fail("expected a name, found #{found}")
+      fail("expected a name, found #{found_here}")
     end
     ""
+  end
+
+  # The character at the cursor, for a sentence: `'x'`, or its code point
+  # (`U+00B7`) where it does not print as itself.
+  private def found_here : String
+    cp = code_point_at(@input.to_unsafe, @len, @pos)
+    cp >= 32 && cp < 127 ? "'#{cp.unsafe_chr}'" : "U+#{Parser.hex4(cp)}"
   end
 
   # An element or attribute name is `local` or `prefix:local`, with neither
@@ -1663,43 +1669,69 @@ pub class Parser
       i = i + 1
     end
     return true if colons == 0
-    if colons == 1 && ptr[0] != 58_u8 && ptr[len - 1] != 58_u8 && Parser.name_start_byte?(ptr[colon_at + 1])
+    if colons == 1 && ptr[0] != 58_u8 && ptr[len - 1] != 58_u8 && Parser.name_start?(code_point_at(ptr, len, colon_at + 1))
       return true
     end
     fail_at(line, col, "'#{name}' is not a qualified name: a name is 'local' or 'prefix:local'")
     false
   end
 
-  # ASCII letters, `_` and `:` start a name; digits, `-` and `.` continue
-  # one; any byte of a non-ASCII character does both.
-  protected def self.name_start_byte?(b : UInt8) : Bool
-    (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || b == 95_u8 || b == 58_u8 || b >= 128_u8
+  # XML 1.0 (fifth edition), production [4]: the characters that start a
+  # name, by code point. Any byte past 0x7F was taken as starting and
+  # continuing one, so `<a×b/>` read as an element named "a×b", a no-break
+  # space after a name became part of it, and `<·a/>` was an element.
+  protected def self.name_start?(cp : Int32) : Bool
+    return (cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp == 95 || cp == 58 if cp < 0xC0
+    return cp != 0xD7 && cp != 0xF7 if cp <= 0x2FF
+    return cp != 0x37E if cp >= 0x370 && cp <= 0x1FFF
+    (cp >= 0x200C && cp <= 0x200D) || (cp >= 0x2070 && cp <= 0x218F) || (cp >= 0x2C00 && cp <= 0x2FEF) ||
+      (cp >= 0x3001 && cp <= 0xD7FF) || (cp >= 0xF900 && cp <= 0xFDCF) || (cp >= 0xFDF0 && cp <= 0xFFFD) ||
+      (cp >= 0x10000 && cp <= 0xEFFFF)
   end
 
-  protected def self.name_byte?(b : UInt8) : Bool
-    name_start_byte?(b) || (b >= 48_u8 && b <= 57_u8) || b == 45_u8 || b == 46_u8
+  # Production [4a]: digits, `-`, `.`, U+00B7, the combining marks
+  # U+0300-036F and U+203F-2040 continue a name without starting one.
+  protected def self.name_char?(cp : Int32) : Bool
+    return true if name_start?(cp)
+    (cp >= 48 && cp <= 57) || cp == 45 || cp == 46 || cp == 0xB7 || (cp >= 0x300 && cp <= 0x36F) || cp == 0x203F || cp == 0x2040
   end
 
   # Whether all of *text* is one name.
   protected def self.name_shaped?(text : String) : Bool
     ptr = text.to_unsafe
     len = text.bytesize
-    return false if len == 0 || !name_start_byte?(ptr[0])
-    i = 1
+    return false if len == 0
+    i = 0
     while i < len
-      return false unless name_byte?(ptr[i])
-      i = i + 1
+      cp = code_point_at(ptr, len, i)
+      return false unless i == 0 ? name_start?(cp) : name_char?(cp)
+      i = i + utf8_width(ptr[i])
     end
     true
   end
 
-  private def parse_name? : String?
-    return nil if @pos >= @len
-    return nil unless Parser.name_start_byte?(byte_at(@pos))
+  # A name, or with *token* a name token (production [7]), which any
+  # character that continues a name may start.
+  private def parse_name?(token : Bool = false) : String?
+    ptr = @input.to_unsafe
     start = @pos
-    while @pos < @len && Parser.name_byte?(byte_at(@pos))
-      step
+    while @pos < @len
+      cp = code_point_at(ptr, @len, @pos)
+      break unless @pos == start && !token ? Parser.name_start?(cp) : Parser.name_char?(cp)
+      width = utf8_width(ptr[@pos])
+      while width > 0 && !failed?
+        step
+        width = width - 1
+      end
     end
+    # A byte that is not part of a character ends the name where it stands
+    # and is refused there for what it is, as it was when it was read as
+    # part of the name.
+    if @pos == @bad_at
+      step
+      return nil
+    end
+    return nil if failed? || @pos == start
     slice_from(start)
   end
 end
@@ -1720,6 +1752,30 @@ pub def xml_char?(cp : Int32) : Bool
   return true if cp >= 0x20 && cp <= 0xD7FF
   return true if cp >= 0xE000 && cp <= 0xFFFD
   cp >= 0x10000 && cp <= 0x10FFFF
+end
+
+# The code point the UTF-8 character at byte *i* of *ptr* (*len* bytes)
+# encodes, or -1 where the bytes there are not one; the parser refuses
+# those where its cursor reaches them.
+def code_point_at(ptr : Pointer(UInt8), len : Int32, i : Int32) : Int32
+  b = ptr[i]
+  return b.to_i32 if b < 0x80_u8
+  n = utf8_width(b)
+  return -1 if b < 0xC2_u8 || i + n > len
+  cp = (b & (n == 2 ? 0x1F_u8 : (n == 3 ? 0x0F_u8 : 0x07_u8))).to_i32
+  k = 1
+  while k < n
+    c = ptr[i + k]
+    return -1 if (c & 0xC0_u8) != 0x80_u8
+    cp = (cp << 6) | (c & 0x3F_u8).to_i32
+    k = k + 1
+  end
+  cp
+end
+
+# How many bytes the UTF-8 character that starts with *b* takes.
+def utf8_width(b : UInt8) : Int32
+  b < 0x80_u8 ? 1 : (b >= 0xF0_u8 ? 4 : (b >= 0xE0_u8 ? 3 : 2))
 end
 
 # *text* as character data: `&`, `<`, `>` and `\r` become references,

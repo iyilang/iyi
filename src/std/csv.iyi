@@ -5,9 +5,10 @@
 # a comma. Lines end at LF, CRLF or a lone CR, and a blank line is a row
 # of no fields, as in the other library. `CSV.build` writes the same
 # contract: a field is quoted when it holds a comma, a quote or a
-# line break, and a row of one empty field is written `""`. A quote
-# without its pair is `unterminated quoted field`. A byte order mark is
-# read past, and a UTF-16 document is refused by its.
+# line break, a row of one empty field is written `""`, and a last row
+# of no fields is ended with a line break. A quote without its pair is
+# `unterminated quoted field`. A byte order mark is read past, and a
+# UTF-16 document is refused by its.
 
 module std/csv
 
@@ -105,6 +106,11 @@ pub struct CSV
         end
         r = r + 1
       end
+      # A document's last line break ends a row rather than starting one,
+      # so a last row of no fields - the empty text after the last `\n` -
+      # was read back as nothing: `[["a"], []]` came back `[["a"]]`, and
+      # `[[]]` came back `[]`. Its line is ended.
+      io << '\n' if rows.size > 0 && rows[rows.size - 1].empty?
     end
   end
 

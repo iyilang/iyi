@@ -58,6 +58,14 @@ assert_str "[[\"a\"], [\"\"]]", CSV.parse("a\n\"\"").inspect, "a last line of on
 lone = [[""], ["a"], [""]]
 assert_str "\"\"\na\n\"\"", CSV.build(lone), "a row of one empty field is written quoted"
 assert_str lone.inspect, CSV.parse(CSV.build(lone)).inspect, "a row of one empty field round trips"
-puts "  lone CR, blank line, quoted empty field, both ways"
+# A last row of no fields was the empty text after the last line break,
+# which reads back as nothing: `[["a"], []]` came back `[["a"]]`, and
+# `[[]]` came back `[]`.
+[[["a"], [] of String], [[] of String], [["a"], [] of String, [] of String], [[] of String, ["b"]]].each do |empty_last|
+  assert_str empty_last.inspect, CSV.parse(CSV.build(empty_last)).inspect, "a last row of no fields round trips: #{empty_last.inspect}"
+end
+assert_str "a\n\n", CSV.build([["a"], [] of String]), "a last row of no fields is ended"
+assert_str "", CSV.build([] of Array(String)), "no rows are no text"
+puts "  lone CR, blank line, quoted empty field, last row of no fields, both ways"
 
 puts "\nALL CHECKS PASSED"

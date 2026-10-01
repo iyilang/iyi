@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`CSV.build` writes a last row of no fields so that it reads back.**
+  Rows were joined by line breaks with none after the last, and a
+  document's last line break ends a row rather than starting one, so a
+  last row of no fields was the empty text after it and read back as
+  nothing: `[["a"], []]` was written `"a\n"` and read back `[["a"]]`,
+  `[[]]` was written `""` and read back `[]`, and `[["a"], [], []]` lost
+  one of its two. Such a row's line is ended now (`"a\n\n"`, `"\n"`), and
+  every other document is written as before. `bench/std_csv_exercise.iyi`
+  round-trips all three; the old module answered `[["a"]]`.
+
 - **`std/xml` reads `<!ELEMENT>`, `<!ATTLIST>` and `<!NOTATION>` by their
   XML 1.0 productions: a malformed one is refused, an attribute's default
   is given to an element without it, and a value whose declared type is

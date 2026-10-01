@@ -83,4 +83,17 @@ qi, ri = 7.divmod(2)
 assert_true qi == 3 && ri == 1, "divmod(7, 2) is (3, 1)"
 puts "  divmod on both floats is floored, as its // and % are"
 
+# A number's identities are its literals. `Number.zero` and
+# `multiplicative_identity` called `new(0)` and `new(1)`, which no number
+# has: `Float32.zero`, `Int64.multiplicative_identity` and
+# `[1.5_f32, 2.25_f32].sum`, which asks `Float32.zero`, failed to compile.
+puts "\n== identities"
+assert_true [1.5_f32, 2.25_f32].sum == 3.75_f32 && ([] of Float32).sum == 0.0_f32, "a single's sum"
+assert_true [1_i8, 2_i8].sum == 3_i8 && ([] of UInt16).sum == 0_u16, "an Int8's sum and a UInt16's"
+assert_true Float32.zero == 0.0_f32 && Float32.multiplicative_identity == 1.0_f32, "the single's identities"
+assert_true Float64.additive_identity == 0.0 && Float64.multiplicative_identity == 1.0, "the double's identities"
+assert_true Int32.multiplicative_identity == 1 && Int64.multiplicative_identity == 1_i64, "the prelude integers' ones"
+assert_true Int8.zero == 0_i8 && Int16.additive_identity == 0_i16 && UInt128.multiplicative_identity == 1_u128, "the rest of the tower's"
+puts "  every number's zero and one are its literals"
+
 puts "\nALL CHECKS PASSED"

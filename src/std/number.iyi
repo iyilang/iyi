@@ -8,9 +8,16 @@ pub enum RoundingMode
   ToNegative
 end
 
+# A number's zero and one are its literals, `0_i8` and `1_f32`: the
+# suffix is the type's first letter and its width, the digits after the
+# `t` of `Int` or `Float`. They were `new(0)` and `new(1)`, and no number
+# has a `new`, so `Float32.zero`, `[1.5_f32, 2.25_f32].sum` with std/float
+# alone and `Int64.multiplicative_identity` failed to compile, in this
+# file. The prelude's zeros (src/iyi/number.iyi) and std/traits' are the
+# type's own and come first.
 struct ::Number
   def self.zero : self
-    new(0)
+    {{ ("0_" + @type.name.stringify[0..0].downcase + @type.name.stringify.split("t").last).id }}
   end
 
   def self.additive_identity : self
@@ -18,7 +25,7 @@ struct ::Number
   end
 
   def self.multiplicative_identity : self
-    new(1)
+    {{ ("1_" + @type.name.stringify[0..0].downcase + @type.name.stringify.split("t").last).id }}
   end
 
   def + : self

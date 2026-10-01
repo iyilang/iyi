@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`Float32.zero`, `Int64.multiplicative_identity` and a sum of singles
+  compile with std/number alone.** std/number gave every number
+  `self.zero` as `new(0)` and `multiplicative_identity` as `new(1)`, and no
+  number has a `new`: `[1.5_f32, 2.25_f32].sum` with only `import
+  std/float`, `Float32.zero` and `Float64.multiplicative_identity` failed
+  with "undefined method 'new' for Float32.class" at
+  src/std/number.iyi:13, inside the library. Each is the type's literal
+  now, `0_f32` or `1_i64`, and the prelude's and std/traits' own zeros
+  still come first. `bench/std_number_exercise.iyi` checks the singles'
+  sum, both floats' identities and the tower's; the old module did not
+  compile it.
+
 - **A request about a directory says it is one, on every platform.** On
   Windows reading it answered -32602 "...\ws9: Access is denied.", the
   reason `CreateFile` gives and not the fact. It is "...\ws9: Is a

@@ -2088,6 +2088,32 @@ def main():
          new_using == "import calc/lexer::{token, glyph}",
          f"edit: {new_using!r}")
 
+    # 70k. The auto-import line is written in the buffer's own line ending:
+    #      a CRLF buffer was handed `import greet::{shout}\n`, and a client
+    #      that applies an edit as written makes the file mixed.
+    crlf_root = tempfile.mkdtemp(prefix="iyi-lsp-crlf")
+    crlf_app_text = "module app\r\n\r\nputs sho\r\n"
+    with open(os.path.join(crlf_root, "greet.iyi"), "w", newline="") as f:
+        f.write("module greet\r\n\r\npub def shout(s : String) : String\r\n  s.upcase\r\nend\r\n")
+    with open(os.path.join(crlf_root, "app.iyi"), "w", newline="") as f:
+        f.write(crlf_app_text)
+    cr = Client()
+    cr.send("initialize", {"rootUri": file_uri(crlf_root), "capabilities": {}})
+    cr.send("initialized", {}, wait=False)
+    crlf_app = file_uri(os.path.join(crlf_root, "app.iyi"))
+    cr.send("textDocument/didOpen", {"textDocument": {"uri": crlf_app, "languageId": "iyi", "version": 1,
+                                                       "text": crlf_app_text}}, wait=False)
+    cr.diagnostics(crlf_app)
+    reply = cr.send("textDocument/completion", {"textDocument": {"uri": crlf_app},
+                                                "position": {"line": 2, "character": 8}})
+    cr.send("shutdown", {})
+    cr.send("exit", {}, wait=False)
+    cr.proc.wait(timeout=10)
+    texts = [e["newText"] for i in (reply.get("result") or {}).get("items", []) if i["label"] == "shout"
+             for e in i.get("additionalTextEdits", [])]
+    step("70k", "an auto-import into a CRLF buffer ends its line in CRLF",
+         texts == ["import greet::{shout}\r\n"], f"edits {texts!r}")
+
     # 37. fuzzy ranks below prefix but still answers: `ucs` finds
     #     upcase on the receiver, tiered after any prefix match.
     fuzzy_text = app_text.replace("\n  loud\n", "\n  loud.ucs\n")

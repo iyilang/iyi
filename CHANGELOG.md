@@ -142,6 +142,12 @@
 
 ### Fixed
 
+- **Auto-import completion writes its `import` line in the buffer's own
+  line ending.** A CRLF buffer was handed `import greet::{shout}\n`, and a
+  client that applies edits as written made the file mixed; organize
+  imports and formatting already kept CRLF. `bench/lsp_session.py` step
+  70k checks it; the old server answered `\n`.
+
 - **A position at LSP's largest line is answered, and params of the wrong
   JSON type are invalid params.** Hover, definition, completion, rename
   and seven more at line 2147483647 answered -32603 "Arithmetic

@@ -1560,7 +1560,11 @@ module Iyi::Lsp
       end
 
       anchor = (last_import || header_index || -1) + 1
-      [{anchor, 0, 0, "import #{module_path}::{#{name}}\n"}]
+      # In the buffer's own line ending, as organize-imports and formatting
+      # answer: a CRLF buffer was handed `import greet::{shout}\n`, and a
+      # client that applies edits as written made the file mixed.
+      ending = Iyi.crlf?(text) ? "\r\n" : "\n"
+      [{anchor, 0, 0, "import #{module_path}::{#{name}}#{ending}"}]
     end
 
     private def name_char?(ch : Char?) : Bool

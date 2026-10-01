@@ -14,6 +14,10 @@
   check's hash; it has been since the exact integer equality above, and
   in the other compiler too.
 
+- **`fmt` keeps the end of a line inside a string.** It trimmed every
+  line, so `"b   ⏎c"` lost its spaces and a `%(...)` written with CRLF
+  lost the `\r`: the string changed. Lines that end inside a string are
+  kept as written now. The other compiler's formatter does the same.
 - **`fmt` keeps a heredoc's last blank line and a sign written apart.**
   A line of spaces just above a heredoc's terminator is an empty line of
   the string, and `fmt` trimmed it, so `<<-EOS\n  a\n  \n  EOS` went

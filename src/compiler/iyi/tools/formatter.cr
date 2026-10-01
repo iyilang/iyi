@@ -644,6 +644,16 @@ module Iyi
     private def write_sanitized_string_body(escape, no_rstrip = false)
       body = @token.invalid_escape ? @token.value.as(String) : @token.raw
       body = Lexer.escape_forbidden_characters(body) if escape
+      # iyi: a line that ends inside a string ends in the string's own bytes:
+      # `"b   ⏎c"` is "b   \nc", and trimming the line took the spaces (or
+      # a `\r` before the line feed) out of the string. Only those lines are
+      # kept as written; the line the string closes on is still trimmed.
+      if !no_rstrip && body.includes?('\n')
+        first_line = @line
+        write body
+        (first_line...@line).each { |line| @no_rstrip_lines.add line }
+        return
+      end
       write body, no_rstrip: no_rstrip
     end
 

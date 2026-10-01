@@ -82,6 +82,11 @@ describe Iyi::Formatter do
   assert_format %(%{hello})
   assert_format %("hel\\nlo")
   assert_format %("hel\nlo")
+  # iyi: a line that ends inside a string ends in the string's bytes.
+  assert_format %("hel   \nlo")
+  assert_format %("a \#{"b   \nc"} d")
+  assert_format "%(a\r\nb)"
+  assert_format %(x = "a\n  b"   ), %(x = "a\n  b")
 
   assert_format "[] of Foo"
   assert_format "[\n]   of   \n   Foo  ", "[] of Foo"

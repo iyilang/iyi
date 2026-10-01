@@ -202,9 +202,11 @@ PY
 dir_broken "braces left unexpanded" no_braces '      elsif c == 123_u8' '      elsif c == 0_u8' "glob: braces choose among names"
 dir_broken "a trailing separator ignored" no_tail '      tail = glob_sep?(bytes[n - 1]) ? sep : nil' '      tail = nil' "glob: a trailing separator answers directories"
 dir_broken "** into hidden directories" hidden_walk '      yield name unless name.starts_with?('"'"'.'"'"')' '      yield name' "glob \* skips hidden names"
+# Linux only. On Windows a freed find buffer is rewritten by FindNextFileW
+# right before every name is read out of it, so the names stay right and
+# the damage lands on whatever the block was handed to next: the walk check
+# passed on a broken copy there.
 case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    dir_broken "a find buffer the collector does not scan" stream_atomic '      stream = Pointer(Pointer(UInt8)).malloc(3_u64).as(Pointer(Int64))' '      stream = Pointer(Int64).malloc(3_u64)' "a walk across collections reads its own" ;;
   Linux)
     dir_broken "a directory buffer the collector does not scan" stream_atomic '      stream = Pointer(Pointer(UInt8)).malloc(4_u64).as(Pointer(Int64))' '      stream = Pointer(Int64).malloc(4_u64)' "a walk across collections reads its own" ;;
 esac

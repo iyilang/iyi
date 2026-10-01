@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **On Windows a path that is not UTF-8 is refused, not spelled with
+  U+FFFD.** The prelude converted a path with `MultiByteToWideChar`
+  flags 0, which never fails: each byte that is not UTF-8 became U+FFFD,
+  so `File.write("x\xFF.txt", "first")` and then
+  `File.write("x\xFE.txt", "second")` wrote one file, `x\uFFFD.txt`,
+  and reading `x\xFF.txt` back answered "second"; `File.touch("t\xC3.txt")`
+  made a file, and every "the path is not valid UTF-8" refusal in
+  std/file was unreachable. The conversion passes MB_ERR_INVALID_CHARS
+  now, as the environment's already did: `File.write`, `touch`, `read`
+  and `delete` refuse with "cannot write", "cannot read" and "cannot
+  delete"; `rename`, `link`, `symlink`, `truncate`, `real_path` and
+  `readlink` with their "not valid UTF-8" sentence; `chmod`,
+  `Dir.mkdir`, `cd`, `children` and `delete` refuse too; and
+  `File.exists?`, `Dir.exists?` and `File.info?` answer that nothing is
+  there. bench/io_exercise.iyi asks `File.exists?` of a `\xFF` name
+  beside the file spelled with U+FFFD; the old prelude answered true.
+
 - **`File.tempfile` on Windows refuses a name that is not UTF-8 with the
   module's sentence.** Its exclusive create handed the conversion's answer
   to `CreateFileW` unchecked; with the conversion refusing such text, the

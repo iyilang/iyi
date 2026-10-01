@@ -134,6 +134,18 @@ raise "lines: CRLF numbers did not read as numbers" unless crlf_lines[0].to_i + 
 raise "lines: a last \\r with no \\n after it was dropped" unless "a\nb\r".lines == ["a", "b\r"] && "\r".lines == ["\r"] && "a\r\n\r".lines == ["a", "\r"]
 puts "lines: ok"
 
+# 7. On Windows a path that is not UTF-8 names nothing. Converted without
+# MB_ERR_INVALID_CHARS, each bad byte became U+FFFD, so `\xFF` named the
+# file spelled with U+FFFD, and two such names were one file.
+{% if flag?(:win32) %}
+  replaced = "bench-io-exercise-\uFFFD.txt"
+  File.write(replaced, "replacement")
+  spelled = File.exists?("bench-io-exercise-\xFF.txt")
+  File.delete(replaced)
+  raise "names: a path that is not UTF-8 named #{replaced}" if spelled
+  puts "names: ok"
+{% end %}
+
 # Cleanup
 File.delete(path) if File.exists?(path)
 File.delete(flush_path) if File.exists?(flush_path)

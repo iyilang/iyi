@@ -864,10 +864,13 @@ end
   IYI_WIN_PATH_LIMIT = 248
 
   def __iyi_wide_path(path : UInt8*) : UInt16*
-    needed = LibC.MultiByteToWideChar(65001, 0, path, -1, Pointer(UInt16).new(0_u64), 0)
+    # MB_ERR_INVALID_CHARS (8) refuses text that is not UTF-8 (null): with
+    # 0, each bad byte became U+FFFD, `x\xFF.txt` and `x\xFE.txt` were one
+    # file, and the second write replaced the first.
+    needed = LibC.MultiByteToWideChar(65001, 8, path, -1, Pointer(UInt16).new(0_u64), 0)
     return Pointer(UInt16).new(0_u64) if needed <= 0
     wide = Pointer(UInt16).malloc(needed.to_u64)
-    return Pointer(UInt16).new(0_u64) if LibC.MultiByteToWideChar(65001, 0, path, -1, wide, needed) <= 0
+    return Pointer(UInt16).new(0_u64) if LibC.MultiByteToWideChar(65001, 8, path, -1, wide, needed) <= 0
     # `needed` counts the terminator; the length does not.
     # The limit is on the path Windows resolves, not on the text handed in:
     # `needed` measures a relative name without the current directory in
@@ -9119,15 +9122,15 @@ end
   # `WideCharToMultiByte` at CP_UTF8 (65001), the same pair
   # `__iyi_wide_path` and `__iyi_utf8_size_from_wide` put a path through.
   #
-  # Two differences from those, both of them the environment's. The flags
-  # are strict — MB_ERR_INVALID_CHARS (8) and WC_ERR_INVALID_CHARS (128) —
-  # where a path passes 0: with 0, bytes that are not UTF-8 become U+FFFD
-  # and a lone surrogate in a value becomes U+FFFD too, so what comes back
-  # is a half-converted string that no longer matches the name it was asked
-  # for, and nil is the honest answer for both. And the count is explicit
-  # rather than `-1`: a name in `GetEnvironmentStringsW`'s block is the
-  # slice in front of the first `=` and carries no terminator of its own,
-  # which a NUL-terminated-only conversion cannot express.
+  # The flags are as strict as a path's - MB_ERR_INVALID_CHARS (8) and
+  # WC_ERR_INVALID_CHARS (128) - for the same reason: with 0, bytes that
+  # are not UTF-8 and a lone surrogate in a value both become U+FFFD, a
+  # string that no longer matches the name it was asked for, and nil is
+  # the honest answer. The one difference is the environment's: the count
+  # is explicit rather than `-1`, because a name in
+  # `GetEnvironmentStringsW`'s block is the slice in front of the first `=`
+  # and carries no terminator of its own, which a NUL-terminated-only
+  # conversion cannot express.
   #
   # Windows documents a zero count as a failed call, so the empty string is
   # answered here rather than asked about — a variable whose value is `""`

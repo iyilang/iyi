@@ -108,6 +108,14 @@ File.touch(f1)
 assert_str "overwritten content", File.read(f1), "touch does not truncate"
 File.touch(f1, 1_i64)
 assert_true File.info(f1).modification_time == 1_i64, "touch sets the given unix time"
+{% if flag?(:win32) %}
+  # The first and last seconds a Windows file time holds are set and read
+  # back; one past either is refused (bench/std_file_exercise.sh).
+  File.touch(f1, 910692730085_i64)
+  assert_true File.info(f1).modification_time == 910692730085_i64, "touch sets the last second a FILETIME holds"
+  File.touch(f1, -11644473599_i64)
+  assert_true File.info(f1).modification_time == -11644473599_i64, "touch sets the first second a FILETIME holds"
+{% end %}
 File.touch(f1)
 puts "  truncation and overwrite verified"
 

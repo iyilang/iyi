@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`File.touch` on Windows refuses a second a file time cannot hold, by
+  name.** A FILETIME counts 100-nanosecond ticks from 1601 to the year
+  30828: `touch(path, 1_000_000_000_000)` - any second past 910692730085 -
+  panicked "arithmetic overflow" after it had made the file, and the second
+  before 1601, -11644473600, is the tick count 0, which Windows reads as
+  "leave the time alone": that touch answered, and the file kept the time it
+  was made at. Both are refused before anything is made, with the range in
+  the sentence, and the first and last seconds of the range are set and read
+  back. `bench/std_file_exercise.sh` and `bench/std_file_exercise.iyi` check
+  both ends; the old module overflowed at 910692730086 and answered at
+  -11644473600.
+
 - **`File.tempfile` and `Dir.tempdir` name one directory on Windows when
   TMPDIR, TEMP and TMP are all unset.** `Dir.tempdir` asked `GetTempPathW`,
   and `File.tempfile` kept the literal `C:\Windows\Temp`, where its comment

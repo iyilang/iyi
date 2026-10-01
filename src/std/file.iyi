@@ -1034,6 +1034,17 @@ class ::File
   # microseconds, zero.
   def self.touch(path : String | Path, time : Int64 = 0_i64) : Nil
     p = path.to_s
+    {% if flag?(:win32) %}
+      # A FILETIME counts 100-nanosecond ticks from 1601 up to 2^63, the
+      # year 30828, and a tick count of 0 is "leave the time as it is".
+      # A second past that range overflowed the count below: measured,
+      # `touch(path, 1_000_000_000_000)` panicked "arithmetic overflow",
+      # after the file was made. Refused first, and by name.
+      if time < -11644473599_i64 || time > 910692730085_i64
+        raise "Cannot touch #{p}: #{time} is not a second a Windows file time holds, " \
+              "which runs from -11644473599 (1601) to 910692730085 (30828)"
+      end
+    {% end %}
     File.write(p, "") unless File.exists?(p)
     {% if flag?(:linux) %}
       if Std::File::LibC.utimensat(sys_path(p), time) != 0

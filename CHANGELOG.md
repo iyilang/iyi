@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **On Windows a second fiber waiting on `Signal.wait` beside the first
+  is refused, as on Linux and darwin.** The park wrote its overlapped
+  slot over the parked waiter's: two waiters and two Ctrl-Breaks woke
+  the second only, the first never woke and the group never joined.
+  The second park now panics with the poller's own "two fibers reading
+  one fd", which is the module's stated rule of one waiter at a time.
+  `bench/std_signal_exercise.sh` runs two waiters in a child process;
+  the old module hung there until the gate's 30-second timeout killed
+  it (exit 124).
+
 - **`Gzip.decompress` refuses a header with a reserved flag (FLG bits
   5-7) set, as RFC 1952 requires and zlib does.** Only the four known
   flags were tested, so a header with FLG 0x20, 0x40 or 0x80 was read

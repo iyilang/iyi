@@ -5,7 +5,8 @@
 #
 # Proves the exercise holds plain and --release; that on Linux and darwin a
 # TERM sent from outside reaches the waiting fiber and the process ends on
-# its own last line, where without the module the same TERM kills it; and
+# its own last line, where without the module the same TERM kills it; that
+# a second fiber waiting beside the first is refused by name; and
 # that a broken module is caught both ways: a wait that never takes an
 # arrival, and a handler never installed.
 set -u
@@ -253,6 +254,39 @@ PY
     sed 's/^/    /' "$WORK/break.out"
     status=1
   fi
+fi
+
+# One fiber waits at a time, on every platform: Linux and darwin refuse a
+# second reader of the pipe in the poller, and Windows refuses a second
+# park on the one overlapped slot the console handler posts to. Windows
+# let the second park write its slot over the first's, and the first never
+# woke, not even on the next Ctrl-Break. In a child of its own, because
+# the refusal is a panic and the exercise must not print one.
+echo
+echo "== two fibers waiting at once are refused"
+cat > "$WORK/waiters.iyi" <<'IYI'
+module main
+
+import std/signal::{Signal}
+
+group do |g|
+  g.spawn { Signal.wait(Signal::INT); 0 }
+  g.spawn { Signal.wait(Signal::INT); 0 }
+  0
+end
+puts "two waiters were let in"
+IYI
+if ! "$IYI" build -o "$WORK/waiters" "$WORK/waiters.iyi" >"$WORK/waiters.build.log" 2>&1; then
+  echo "  waiters: build failed"
+  tail -12 "$WORK/waiters.build.log" | sed 's/^/    /'
+  status=1
+elif timeout -k 5 30 "$WORK/waiters" >"$WORK/waiters.out" 2>&1; then
+  echo "  two waiters were let in"; status=1
+elif ! grep -q "two fibers reading one fd" "$WORK/waiters.out"; then
+  echo "  two waiters were refused, but not by name (or hung, and were killed):"
+  sed 's/^/    /' "$WORK/waiters.out"; status=1
+else
+  echo "  two waiters: exits 1 at \"$(grep -m1 'two fibers' "$WORK/waiters.out" | sed 's/^iyi: panic: //')\""
 fi
 
 echo

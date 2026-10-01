@@ -241,6 +241,13 @@ module Iyi::Lsp
 
     private def dispatch(body : Bytes) : Nil
       message = parse(body)
+      # A lone surrogate escape is valid JSON the JSON library refuses
+      # (`Text.mend`). The mended frame is the one kept and the one the
+      # worker is handed, so the buffer it opens is the buffer here.
+      if message.nil? && (mended = Text.mend(body))
+        body = mended
+        message = parse(body)
+      end
       table = message.try(&.as_h?)
       method = table.try(&.["method"]?).try(&.as_s?)
       params = table.try(&.["params"]?)

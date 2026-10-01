@@ -2276,6 +2276,39 @@ def main():
          parse_error["error"]["code"] == -32700 and parse_error["id"] is None,
          json.dumps(parse_error)[:80])
 
+    # 60a. A lone surrogate escape - `\ud83d`, half an emoji, which an
+    #      editor's buffer can hold and `JSON.stringify` writes as is - is
+    #      valid JSON the JSON library refuses, and it was answered as the
+    #      frame above is: a didOpen carrying one got -32700 and the buffer
+    #      never opened, so every answer after it read the disk. It opens
+    #      now with U+FFFD in the surrogate's place, one UTF-16 unit as the
+    #      surrogate was, so the columns after it still land: `nope` is at
+    #      character 10. The proxy mends the frame it hands on, and the
+    #      worker alone mends its own.
+    sur = os.path.join(work, "sur.iyi")
+    with open(sur, "w") as f:
+        f.write("module sur\n\nputs 1\n")
+    sur_uri = file_uri(sur)
+
+    def surrogate_verdict(client):
+        client.send("textDocument/didOpen",
+                    {"textDocument": {"uri": sur_uri, "languageId": "iyi", "version": 1,
+                                      "text": 'module sur\n\nputs "\ud83d", nope\n'}}, wait=False)
+        reply = client.send("textDocument/diagnostic", {"textDocument": {"uri": sur_uri}})
+        return [(d["range"]["start"]["line"], d["range"]["start"]["character"])
+                for d in (reply.get("result") or {}).get("items", []) if "nope" in d["message"]]
+    proxied = surrogate_verdict(c)
+    w = Client(("lsp", "--worker"))
+    w.send("initialize", {"rootUri": file_uri(work), "capabilities": {}})
+    w.send("initialized", {}, wait=False)
+    alone = surrogate_verdict(w)
+    w.send("shutdown", {})
+    w.send("exit", {}, wait=False)
+    w.proc.wait(timeout=10)
+    step("60a", "a lone surrogate in a buffer is U+FFFD, and the buffer opens",
+         proxied == [(2, 10)] and alone == [(2, 10)],
+         f"proxy {proxied}, worker alone {alone}")
+
     reply = c.send("textDocument/hover", {
         "textDocument": {"uri": file_uri(os.path.join(work, "nope.iyi"))},
         "position": {"line": 0, "character": 0}})

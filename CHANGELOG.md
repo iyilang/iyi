@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **A buffer holding a lone surrogate escape opens, with U+FFFD in its
+  place.** `\ud83d` with no low half is valid JSON, an editor's buffer can
+  hold one and `JSON.stringify` writes it as is, but no UTF-8 string can,
+  and the JSON library refused the frame: a didOpen carrying one was
+  answered -32700 and the document never opened, so every later answer
+  read the file on disk. The proxy and the worker read such a frame again
+  with each lone surrogate written as `\ufffd` (`Lsp::Text.mend`), one
+  UTF-16 unit as the surrogate was, so the columns after it still match
+  the editor's. Step 60a of `bench/lsp_session.py` opens one through `iyi
+  lsp` and through `iyi lsp --worker`; the old server pulled no diagnostic
+  for the buffer's `nope` (it read the clean text on disk), and finds it
+  now on the third line at UTF-16 character 10.
+
 - **After `shutdown`, `iyi lsp` refuses every request but `exit` for as
   long as the session lasts.** The proxy retired an idle worker after two
   quiet seconds even past `shutdown`, and handed its successor only the

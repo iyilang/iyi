@@ -307,6 +307,17 @@ module Iyi::Lsp
           rescue
             nil
           end
+        # A lone surrogate escape (`\ud83d`) is JSON no UTF-8 string can
+        # hold, and the library refused the frame it was in; `Text.mend`
+        # writes it as U+FFFD and the frame is read again.
+        if parsed.nil? && (mended = Text.mend(body))
+          parsed =
+            begin
+              JSON.parse(String.new(mended))
+            rescue
+              nil
+            end
+        end
         # JSON, but not a message: `[]` parsed, and `message["method"]?`
         # on an array raised outside every rescue - one frame took the
         # server down with a backtrace. The loop reads a message as an

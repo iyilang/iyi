@@ -67,4 +67,58 @@ module Iyi::Lsp::Text
     end
     reader.pos
   end
+
+  # A frame's body with every lone UTF-16 surrogate escape (`\ud83d` with
+  # no low half after it, or a low half alone) written as `\ufffd`, or
+  # nil where it has none. The escape is valid JSON, an editor's buffer
+  # can hold one (half an emoji, deleted mid-pair), and `JSON.stringify`
+  # writes it as is - but no UTF-8 string can hold it, and the JSON
+  # library refused the whole frame: a didOpen carrying one was answered
+  # -32700 and never opened, and every later answer read the disk. U+FFFD
+  # is one UTF-16 unit, as the surrogate was, so the editor's positions
+  # still land on the same characters.
+  #
+  # Every backslash in a JSON text is inside a string, so no string
+  # state is kept: an escape is two bytes, or six for `\uXXXX`, and
+  # `\\u` is a backslash followed by text.
+  def mend(body : Bytes) : Bytes?
+    mended = nil
+    copied = 0
+    i = 0
+    while i < body.size
+      unless body[i] == '\\'.ord
+        i += 1
+        next
+      end
+      unit = body[i + 1]? == 'u'.ord ? hex_unit(body, i + 2) : nil
+      unless unit && 0xD800 <= unit <= 0xDFFF
+        i += unit ? 6 : 2
+        next
+      end
+      if unit <= 0xDBFF && body[i + 6]? == '\\'.ord && body[i + 7]? == 'u'.ord &&
+         (low = hex_unit(body, i + 8)) && 0xDC00 <= low <= 0xDFFF
+        i += 12
+        next
+      end
+      mended ||= IO::Memory.new(body.size)
+      mended.write body[copied, i - copied]
+      mended << "\\ufffd"
+      i += 6
+      copied = i
+    end
+    return unless mended
+    mended.write body[copied, body.size - copied]
+    mended.to_slice
+  end
+
+  # The four hex digits at *at*, or nil where there are not four.
+  private def hex_unit(body : Bytes, at : Int32) : Int32?
+    return unless at + 4 <= body.size
+    unit = 0
+    4.times do |k|
+      return unless digit = body[at + k].unsafe_chr.to_i?(16)
+      unit = unit << 4 | digit
+    end
+    unit
+  end
 end

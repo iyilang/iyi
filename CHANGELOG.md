@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **`wait_readable(fd, ms)` answers what it found, and on Windows a wait on
+  a standard-input pipe keeps its deadline.** The answer was a flag only a
+  wait that parked reset: after one wait had timed out, a pipe already
+  holding three bytes was answered false after 0 ms, and so was a stdin pipe
+  with a line in it; and Windows answered a wait on a stdin pipe with
+  nothing in it true at once. Every wait starts the flag false now, and a
+  wait on a stdin pipe is a zero-byte read on standard input's reader
+  thread, which parks until bytes or the end come or the deadline withdraws
+  it. A console's standard input is still ready at once: its line read waits
+  for Enter either way. `bench/concurrency_exercise.iyi` and
+  `bench/stdin_park.iyi` (run by `concurrency_exercise.sh`) check both; the
+  old runtime answered "on one holding three bytes false" and "true after 0
+  ms, against a 200 ms deadline". The same early answer on Linux, for a
+  regular file, goes with it [INFERENCE: by reading `wait_posix`, not run].
+
 - **A cancelled read on Windows answers the bytes it had already taken, and
   nothing is written into its buffer after it returns.** `iyi_read` on a
   handle read through the completion port answered `Cancelled` as soon as

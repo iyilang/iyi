@@ -1442,14 +1442,17 @@ class IyiScheduler
     if fd == 0_i32 || fd == 0_i64
       handle = LibC.GetStdHandle(-10)
       # A pipe or a console waits, and is read by a thread of its own; a
-      # zero-byte read is a question about readiness, which a console
-      # would answer by taking a character, so it is answered here. A disk
+      # zero-byte read is a question about readiness, which the thread asks
+      # a pipe the way it reads one, and a console would answer by taking
+      # a character: a console is ready at once, which is this platform's
+      # limit, since what its line reads waits for Enter either way. A disk
       # file answers at once and is read where it is asked, without an
       # OVERLAPPED: on a handle not opened for one, its offset is where the
       # read starts, and every read would start at 0.
       return __iyi_read(0_i64, buffer, count) unless IyiStdinReader.waits?(handle)
-      return 0_i64 if count == 0_u64
-      return IyiStdinReader.read(handle, IyiConsole.console?(0_i64, handle), buffer, count, ms)
+      console = IyiConsole.console?(0_i64, handle)
+      return 0_i64 if count == 0_u64 && console
+      return IyiStdinReader.read(handle, console, buffer, count, ms)
     elsif fd == 1_i32 || fd == 1_i64
       handle = LibC.GetStdHandle(-11)
     elsif fd == 2_i32 || fd == 2_i64
@@ -1510,9 +1513,13 @@ class IyiScheduler
   end
 
   # The same wait with a deadline *ms* milliseconds away, -1 for none:
-  # true when *fd* is readable, false when the deadline came first.
+  # true when *fd* is readable, false when the deadline came first. The
+  # flag starts false here, not at the arm: a wait answered before arming
+  # read the last one's, and after one timed-out wait a pipe holding three
+  # bytes, or stdin with a line in it, was "timed out" after 0 ms.
   def self.wait_readable_current(fd : Int32 | Int64, ms : Int32) : Bool | Cancelled
     fiber = current
+    fiber.timed_out = false
     return Cancelled.new if fiber.cancelled
     {% if flag?(:win32) %}
       res = read_current(fd, Pointer(Void).new(0_u64), 0_u64, ms)
@@ -1543,6 +1550,7 @@ class IyiScheduler
   # its own deadline - so it answers true at once.
   def self.wait_writable_current(fd : Int32 | Int64, ms : Int32) : Bool | Cancelled
     fiber = current
+    fiber.timed_out = false
     return Cancelled.new if fiber.cancelled
     {% if flag?(:win32) %}
       true

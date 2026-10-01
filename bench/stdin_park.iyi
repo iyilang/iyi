@@ -1,8 +1,11 @@
 # A fiber reading standard input parks: SPEC.md III.4.8 named that call as
 # the one that had to stop being a blocking syscall. bench/concurrency_exercise.sh
 # feeds this a pipe - a line a second after the program has started, and
-# one two seconds later, twice - and asks three things of it:
+# one two seconds later, twice - and asks four things of it:
 #
+#   0. A wait for readiness keeps its deadline. With nothing in the pipe,
+#      `wait_readable(0, 200)` answers false when the 200 ms are up; on
+#      Windows it answered true at once.
 #   1. The reader parks. A sibling ticking every 100 ms ticks while the
 #      first line is on its way; a read that held the thread let it tick
 #      none.
@@ -42,6 +45,13 @@ end
 if ready = Program.env("STDIN_PARK_READY")
   File.write(ready, "")
 end
+
+# ── 0. A readiness wait keeps its deadline ──────────────────────────────
+waited_from = __iyi_monotonic_ns
+early = wait_readable(0, 200)
+waited = elapsed_ms(waited_from)
+fail("a wait on standard input with nothing in it answered #{early} after #{waited} ms, against a 200 ms deadline") unless early == false && waited >= 190
+puts "a wait on stdin with nothing in it kept its 200 ms deadline"
 
 # ── 1. The reader parks ──────────────────────────────────────────────────
 ticks = 0

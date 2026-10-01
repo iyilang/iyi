@@ -354,6 +354,18 @@ end
 fail("a cancelled read's buffer was written after its answer: #{kept_at_answer}, then #{kept_later}") unless kept_later == kept_at_answer
 puts "a read cancelled after its bytes came kept them"
 
+# ── 5c. A wait answered before it parks says what it found ──────────────
+# `wait_readable(fd, ms)` answered the flag the last timed-out wait left:
+# on Windows a pipe already holding three bytes completes the zero-byte
+# read at once, and after one empty-pipe wait had timed out it answered
+# false, after 0 ms. A regular file on Linux answers before the arm too.
+stale_fds = make_pipe
+stale_quiet = wait_readable(stale_fds[0].to_i32, 50)
+__iyi_write(stale_fds[1], "abc".to_unsafe.as(Void*), 3_u64)
+stale_holding = wait_readable(stale_fds[0].to_i32, 300)
+fail("a wait on an empty pipe answered #{stale_quiet}, and then on one holding three bytes #{stale_holding}") unless stale_quiet == false && stale_holding == true
+puts "a wait after a timed-out one found the bytes waiting"
+
 # ── 6. A closed channel drains, then refuses, and wakes the parked ──────
 late = Channel(Int32).new(1)
 closed_saw = ""

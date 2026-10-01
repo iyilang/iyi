@@ -142,6 +142,12 @@
 
 ### Fixed
 
+- **`UdpSocket#send_to` takes an IPv6 literal in brackets.** `"[::1]"`,
+  which `IyiSocket.connect` takes and a URL writes, was refused with
+  "'[' is not a hex digit". The brackets are read past now.
+  `bench/std_udp_exercise.iyi` sends a datagram to `[::1]`; the old module
+  refused the address.
+
 - **`UdpSocket#local_address` of a socket that has not sent answers the
   any-address.** Windows refuses `getsockname` on an unbound UDP socket
   (WSAEINVAL), and `local_address` panicked "cannot get local address"

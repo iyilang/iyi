@@ -157,4 +157,15 @@ assert_true server.closed?, "server is closed"
 assert_int -1, server.to_unsafe, "closed server fd is -1"
 puts "  close marks socket closed and invalidates fd"
 
+# An IPv6 literal in brackets, as a URL and `IyiSocket.connect` write it:
+# it was "'[' is not a hex digit".
+six = UdpSocket.bind("::1", 0)
+six_client = UdpSocket.client_v6
+six_client.send_to("over six", "[::1]", six.local_port)
+six_dg = six.receive_datagram.or_panic
+assert_str "over six", six_dg.text, "a datagram sent to [::1]"
+six_client.close
+six.close
+puts "  an unbound client's address, and a datagram to [::1]"
+
 puts "\nALL CHECKS PASSED"

@@ -417,6 +417,10 @@ pub class UdpSocket
 
   def self.make_sockaddr(host : String, port : Int32) : Tuple(Pointer(UInt8), SockLen, Int32)
     raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+    # An IPv6 literal in its brackets too, as `IyiSocket.connect` reads
+    # one: `"[::1]"` was "'[' is not a hex digit".
+    size = host.bytesize
+    host = host[1, size - 2] if size >= 2 && host[0] == '[' && host[size - 1] == ']'
     if host.includes?(":")
       {IyiSocket.make_sockaddr_in6(IyiSocket.parse_ipv6(host), port), SOCKADDR_IN6_SIZE, AF_INET6}
     else

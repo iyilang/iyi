@@ -72,8 +72,13 @@ struct ::Tuple
   end
 
   # Converts the tuple into an Array typed as the union of all element types.
+  # The empty tuple's is `[] of NoReturn`, the union of no types: the
+  # `typeof` below had no argument there, and `Tuple.new.to_a` did not
+  # compile.
   def to_a
-    {% begin %}
+    {% if T.size == 0 %}
+      [] of NoReturn
+    {% else %}
       arr = [] of typeof(
         {% for i in 0...T.size %}
           self[{{i}}],
@@ -124,6 +129,22 @@ struct ::Tuple
 end
 
 struct ::NamedTuple
+  # Hashing follows the `==` below, mixed as `Tuple#hash` mixes the members
+  # (src/iyi/object.iyi). `Object#hash` answered the type's id, so
+  # `{a: 1}` and `{a: 2}` hashed alike and 20,000 keys took 1.4 s to insert
+  # where the same pairs as tuples took 1 ms. The values go in by sorted
+  # key, because `==` matches by name: `{x: 1, y: 2} == {y: 2, x: 1}`, so
+  # the two have to hash alike although their types list the keys in
+  # another order.
+  def hash : Int32
+    value = 0x9E3779B97F4A7C15_u64
+    {% for key in T.keys.sort_by { |k| k.stringify } %}
+      value = (value ^ self[{{key.symbolize}}].hash.to_i64.unsafe_to_u64) &* 0x100000001B3_u64
+      value = value ^ value.unsafe_shr(29_u64)
+    {% end %}
+    value.hash
+  end
+
   # Number of key-value pairs in the named tuple.
   def size : Int32
     {{ T.keys.size }}
@@ -135,9 +156,15 @@ struct ::NamedTuple
   end
 
   # Returns true if the named tuple contains the given key symbol.
+  #
+  # The keys here and below are written with `symbolize`, never as
+  # `:{{key.id}}`: a quoted key such as `"content-type"` or `"x y"` pasted
+  # that way is `:content-type`, a symbol minus a call, or `:x y`, which
+  # does not parse, so every one of these methods failed to compile for
+  # such a key. `std/named_tuple` already wrote them this way.
   def has_key?(key : Symbol) : Bool
     {% for k in T.keys %}
-      return true if key == :{{k.id}}
+      return true if key == {{k.symbolize}}
     {% end %}
     false
   end
@@ -145,7 +172,7 @@ struct ::NamedTuple
   # Compares corresponding values for equality.
   def ==(other : self) : Bool
     {% for key in T.keys %}
-      return false unless self[:{{key.id}}] == other[:{{key.id}}]
+      return false unless self[{{key.symbolize}}] == other[{{key.symbolize}}]
     {% end %}
     true
   end
@@ -158,14 +185,14 @@ struct ::NamedTuple
   # Yields each key symbol and corresponding value.
   def each(&) : Nil
     {% for key in T.keys %}
-      yield :{{key.id}}, self[:{{key.id}}]
+      yield {{key.symbolize}}, self[{{key.symbolize}}]
     {% end %}
   end
 
   # Yields each value in order.
   def each_value(&) : Nil
     {% for key in T.keys %}
-      yield self[:{{key.id}}]
+      yield self[{{key.symbolize}}]
     {% end %}
   end
 
@@ -174,7 +201,7 @@ struct ::NamedTuple
     {% begin %}
       {
         {% for key in T.keys %}
-          :{{key.id}},
+          {{key.symbolize}},
         {% end %}
       }
     {% end %}
@@ -185,19 +212,38 @@ struct ::NamedTuple
     {% begin %}
       {
         {% for key in T.keys %}
-          self[:{{key.id}}],
+          self[{{key.symbolize}}],
         {% end %}
       }
     {% end %}
   end
 
-  # String representation: `{name: "Alice", age: 30}`.
+  # String representation: `{name: "Alice", age: 30}`. A key that is not a
+  # name is quoted, as it is written: `{"content-type": "text/plain"}`.
   def to_s : String
     parts = [] of String
     {% for key in T.keys %}
-      parts << "{{key.id}}: " + self[:{{key.id}}].inspect
+      parts << quoted_key({{key.stringify}}) + ": " + self[{{key.symbolize}}].inspect
     {% end %}
     "{" + parts.join(", ") + "}"
+  end
+
+  # The rule the other library's `Symbol.needs_quotes_for_named_argument?`
+  # states: a key needs quotes when it is empty or `_`, starts with a digit,
+  # or holds an ASCII byte that is not a letter, digit or `_`.
+  private def quoted_key(key : String) : String
+    return key.inspect if key.empty? || key == "_"
+    bytes = key.to_unsafe
+    i = 0
+    while i < key.bytesize
+      b = bytes[i]
+      digit = b >= 48_u8 && b <= 57_u8
+      return key.inspect if i == 0 && digit
+      word = digit || (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || b == 95_u8
+      return key.inspect if b < 128_u8 && !word
+      i = i + 1
+    end
+    key
   end
 
   def inspect : String

@@ -15,16 +15,73 @@ end
 
 import std/tuple
 
+puts "== named hash"
+# `==` without a `hash`, so `Object#hash` gave every value of one named
+# tuple type its type's id: `{a: 1}` and `{a: 2}` hashed alike, and 20,000
+# keys took 1.4 s to insert where the same pairs as tuples took 1 ms.
+assert_true ({a: 1}).hash != ({a: 2}).hash, "{a: 1} and {a: 2} hash apart"
+# `==` matches by name, so the order the keys were written in is not part
+# of the value and cannot be part of the hash.
+assert_true ({x: 1, y: 2}) == ({y: 2, x: 1}), "== whichever order the keys were written in"
+assert_true ({x: 1, y: 2}).hash == ({y: 2, x: 1}).hash, "hash: one hash whichever order the keys were written in"
+by_order = {} of NamedTuple(x: Int32, y: Int32) => Int32
+by_order[{x: 1, y: 2}] = 12
+assert_true by_order[{y: 2, x: 1}]? == 12, "a key written in the other order is found"
+grid_hashes = {} of Int32 => Bool
+150.times { |x| 150.times { |y| grid_hashes[{x: x, y: y}.hash] = true } }
+assert_true grid_hashes.size == 22500, "hash spread: a 150 by 150 grid had #{grid_hashes.size} distinct hashes of 22500"
+started = __iyi_monotonic_ns
+named = {} of NamedTuple(x: Int32, y: Int32) => Int32
+150.times { |x| 150.times { |y| named[{x: x, y: y}] = x * y } }
+named_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+plain = {} of {Int32, Int32} => Int32
+150.times { |x| 150.times { |y| plain[{x, y}] = x * y } }
+plain_ns = __iyi_monotonic_ns - started
+assert_true named.size == 22500 && named[{x: 149, y: 17}]? == 2533, "a grid table fills and answers"
+# A bound, not a benchmark: twenty times the tuples' time and 200 ms over.
+# The type's id took 1.6 s for this grid.
+assert_true named_ns <= plain_ns * 20 + 200_000_000_i64, "hash table: 22500 keys took #{named_ns // 1000000} ms where tuples took #{plain_ns // 1000000} ms"
+puts "  22500 distinct hashes, and a table of them within the bound"
+puts
+
 puts "== size"
 assert_true ({1, 2}).size == 2, "pair"
 assert_true ({1, 2, 3}).size == 3, "triple"
 assert_true ({1, 2}).empty? == false, "not empty"
 puts "  size (prelude) and empty?"
 
+puts "\n== to_a"
+# The empty tuple's array has no element type, so it is the union of none,
+# as the other library's is: the `typeof` that names the union had no
+# argument there, and this did not compile.
+empty_a = Tuple.new.to_a
+assert_true empty_a.size == 0 && empty_a.empty?, "to_a of the empty tuple is empty"
+assert_str "Array(NoReturn)", typeof(empty_a).to_s, "to_a of the empty tuple"
+assert_str "[1, \"a\"]", {1, "a"}.to_a.to_s, "to_a of a pair"
+puts "  the empty tuple and a pair"
+
 puts "\n== first"
 assert_true ({7, 8}).first == 7, "first"
 assert_true ({7, 8}).last == 8, "last"
 assert_true ({1, 2}) == ({1, 2}), "equal"
 puts "  first, last, =="
+
+puts "\n== named keys"
+# A key that is not a name was pasted as `:{{key.id}}` - `:content-type`
+# and `:x y` - so `to_s`, `==`, `each`, `keys`, `values` and `has_key?`
+# did not compile for it. Quoted where it is printed, as it is written.
+quoted = {"content-type": "text/plain", "x y": 1, plain: 2}
+assert_str "{\"content-type\": \"text/plain\", \"x y\": 1, plain: 2}", quoted.to_s, "to_s quotes a key that is not a name"
+assert_true quoted == {"content-type": "text/plain", "x y": 1, plain: 2}, "== with quoted keys"
+assert_true quoted != {"content-type": "text/html", "x y": 1, plain: 2}, "!= with quoted keys"
+assert_true quoted.has_key?(:"x y") && !quoted.has_key?(:x), "has_key? with quoted keys"
+assert_str "{\"text/plain\", 1, 2}", quoted.values.to_s, "values with quoted keys"
+assert_true quoted.keys.size == 3 && quoted.keys[0] == :"content-type", "keys with quoted keys"
+walked = [] of String
+quoted.each { |k, v| walked << "#{k}=#{v}" }
+assert_str "content-type=text/plain x y=1 plain=2", walked.join(" "), "each with quoted keys"
+assert_str "{\"1a\": 1, \"_\": 2, a_1: 3}", {"1a": 1, "_": 2, a_1: 3}.to_s, "to_s quotes a leading digit and a lone _"
+puts "  quoted keys print, compare, walk and answer"
 
 puts "\nALL CHECKS PASSED"

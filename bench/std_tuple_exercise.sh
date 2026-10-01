@@ -115,6 +115,53 @@ PY
   fi
 fi
 
+# Each further break is built before it is run: a broken copy that does not
+# compile also "fails", and proves nothing about the check.
+prove_fails() { # prove_fails <label> <name> <phrase> <old> <new>
+  local label="$1" name="$2" phrase="$3" old="$4" new="$5"
+  if [ -z "$PY" ]; then
+    echo "  $label: skipped, no working python3"
+    return
+  fi
+  mkdir -p "$WORK/$name/std"
+  if ! "$PY" - "$old" "$new" <<PY
+import sys
+from pathlib import Path
+src = Path("$REPO/src/std/tuple.iyi").read_text()
+old, new = sys.argv[1], sys.argv[2]
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/$name/std/tuple.iyi").write_text(src.replace(old, new, 1))
+PY
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$name/program" "$REPO/bench/std_tuple_exercise.iyi" >"$WORK/$name/build.log" 2>&1; then
+    echo "  $label: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/$name/build.log"
+    status=1
+  elif "$WORK/$name/program" >"$WORK/$name/out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -qF -- "$phrase" "$WORK/$name/out"; then
+    echo "  $label: failed, but not at '$phrase'"
+    sed -n '$p' "$WORK/$name/out"
+    status=1
+  else
+    printf '  %s: caught at "%s"\n' "$label" "$(grep -m1 -F -- "$phrase" "$WORK/$name/out" | sed 's/^iyi: panic: //')"
+  fi
+}
+
+# The named tuple's `hash` renamed out of the way is the module as it was:
+# `Object#hash`, the type's id, for every value of the type. And the keys
+# taken in the order the type lists them, which `==` does not care about.
+prove_fails "a named tuple hashing to its type's id again" broken_named_hash "ASSERTION FAILED: {a: 1} and {a: 2} hash apart" \
+  '  def hash : Int32' '  def hash_unused : Int32'
+prove_fails "a named tuple hashed in the order its type lists the keys" broken_named_order "ASSERTION FAILED: hash: one hash whichever order" \
+  '{% for key in T.keys.sort_by { |k| k.stringify } %}' '{% for key in T.keys %}'
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/tuple exercise holds"

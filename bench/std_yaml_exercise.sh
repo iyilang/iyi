@@ -234,6 +234,9 @@ prove_caught flowempty "properties over nothing in a flow collection are refused
 prove_caught comment "a plain scalar folds on past a comment" \
   'accepted "a: b # c' \
   'break if skip_blank(@flow_end) < @ends[@line]' 'break if skip_blank(@flow_end) < @ends[@line] && false'
+prove_caught dashtext "a plain scalar's next line may not start with '- '" \
+  "a plain scalar's next line may start with '- '" \
+  $'      if key_colon(look) >= 0\n' $'      if sequence_entry?(look)\n        fail("bad indentation of a sequence entry", @heads[look])\n        break\n      end\n      if key_colon(look) >= 0\n'
 prove_caught intkey "an Int32 never reaches an integer key" \
   "an Int32 reaches an integer key through []? and dig?" \
   $'    return self[Any.new(index)] if kind == KIND_HASH\n    as_a[index]\n  end\n\n  def []?(index : Int32) : Any?\n    return self[Any.new(index)]? if kind == KIND_HASH\n' \

@@ -1421,10 +1421,9 @@ pub class Parser
         fail("tab used for indentation", @heads[look])
         break
       end
-      if sequence_entry?(look)
-        fail("bad indentation of a sequence entry", @heads[look])
-        break
-      end
+      # A plain scalar's next line may start `- `, as text: the value of
+      # `key: a\n  - b` is "a - b", where it was refused as "bad
+      # indentation of a sequence entry".
       if key_colon(look) >= 0
         fail("bad indentation of a mapping entry", @heads[look])
         break

@@ -79,6 +79,11 @@ assert_str("a b", reads("\"a \\\n  b\"", "blanks before an escaped line break st
 assert_str("a\nb", reads("\"a\\\n\n  b\"", "an empty line after an escaped line break is a line feed").as_s, "an empty line after an escaped line break is a line feed")
 assert_str("b", reads("[\"a\":b]", "a quoted key in a flow sequence takes an adjacent ':'")[0]["a"].as_s, "a quoted key in a flow sequence takes an adjacent ':'")
 assert_str("a b", reads("[a\n b]", "a plain scalar folds across lines in a flow collection")[0].as_s, "a plain scalar folds across lines in a flow collection")
+# A plain scalar's next line may start with `- `, as text: it was refused
+# as "bad indentation of a sequence entry".
+assert_str("a - b", reads("key: a\n  - b\n", "a plain scalar's next line may start with '- '")["key"].as_s, "a plain scalar's next line may start with '- '")
+assert_str("single multiline - sequence entry", reads("- single multiline\n - sequence entry\n", "a plain entry's next line may start with '- '")[0].as_s, "a plain entry's next line may start with '- '")
+puts "  a plain scalar's next line may start with '- ', as text"
 assert_str("", reads("a: !!str\n", "a tag over an empty node tags the empty scalar")["a"].as_s, "a tag over an empty node tags the empty scalar")
 assert_true(reads("- !!null\n", "!!null over an empty node is null")[0].null?, "!!null over an empty node is null")
 assert_str("1", reads("a: !!str\n  1\n", "a tag alone on its line applies to the text below as written")["a"].as_s, "a tag alone on its line applies to the text below as written")

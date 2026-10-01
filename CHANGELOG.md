@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **A YAML plain scalar's next line may start with `- `.** A continuation
+  line indented past its parent was refused when it looked like a sequence
+  entry, where a plain scalar reads it as text: `key: a\n  - b\n` and
+  `- single multiline\n - sequence entry\n` (yaml-test-suite AB8U) gave "bad
+  indentation of a sequence entry". They read "a - b" and "single
+  multiline - sequence entry" now, as PyYAML and ruamel do;
+  `key: a\n  - b: c` is still refused, as "a mapping value is not allowed
+  here". `bench/std_yaml_exercise.iyi` reads both; the old module refused
+  the first.
+
 - **A tab after a YAML block scalar's indentation is text.** The indentation
   was detected over spaces and tabs, so a first line `  \techo hi` set three
   columns, ended its own scalar and was refused:

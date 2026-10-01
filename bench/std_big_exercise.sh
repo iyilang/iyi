@@ -367,9 +367,10 @@ prove_fails "bigint hash ignores limbs" no_hash_limbs "hash: neighbour differs" 
 prove_fails "bigint hash ignores sign" no_hash_sign "hash: negative differs" \
   's/h = (h ^ (@sign + 1)\.to_u64) &\* 1099511628211_u64/h = h ^ 0_u64/'
 
-# 11. BigDecimal hash forgets to normalise the scale (1.10 != 1.1 as keys)
+# 11. BigDecimal hash keeps the trailing zeros, so 1.10 and 1.1 (or 1e1000000
+# and 1 followed by a million zeros) differ as keys
 prove_fails "decimal hash skips normalisation" no_dec_norm "hash: decimal scale agreement" \
-  's/n = normalized/n = self/'
+  's/stripped = strip_zeros(2147483647)/stripped = {@value, 0}/'
 
 # 12. Division truncates instead of rounding
 prove_fails "decimal division truncates" no_dec_round "decimal: div rounds half away" \

@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`BigDecimal` compares and hashes values far apart in size at once.**
+  `<=>` (and so `==`, `!=` and `<`) aligned the two scales by multiplying
+  by `10 ** gap` even when the magnitudes plainly differed, and `hash`
+  multiplied a negative scale out: `1e-1000000 < 1` took 2,548 ms,
+  `1e1000000 == 1` 2,471 ms and `BigDecimal.new("1e1000000").hash`
+  2,771 ms. `<=>` now orders values whose leading digits sit apart, from
+  the limb count and the scale, and aligns only when they may be equal;
+  `hash` hashes the digits without their trailing zeros and the exponent
+  that goes with them, so `1.10`, `1.1` and `11e-1` still hash alike. Each
+  of the three takes under 0.03 ms now. `bench/std_big_exercise.iyi` does
+  five such comparisons and the hash under 50 ms; the old module took
+  14,330 ms there.
+
 - **`BigDecimal#normalized` strips trailing zeros with one division, so
   hashing `1.` and 40,000 zeros, or `3.div(3, 40000)`, takes milliseconds.**
   It divided by ten once per zero, and `hash` and exact `div` both call it:

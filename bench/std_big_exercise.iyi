@@ -467,6 +467,21 @@ zeros_ms = (__iyi_monotonic_ns - zeros_started) // 1000000
 raise "decimal: 1e50000 printed #{wide.bytesize} characters" unless wide.bytesize == 50001 && wide.ends_with?("00")
 raise "decimal: 1e-50000 printed #{narrow.bytesize} characters" unless narrow.bytesize == 50002 && narrow.starts_with?("0.00")
 raise "decimal: 1e50000 and 1e-50000 took #{zeros_ms} ms to print" unless zeros_ms < 1000
+# Comparing and hashing look at where the leading digit sits before they
+# align or multiply out a scale: aligning built 10^1000000, and
+# `1e-1000000 < 1`, `1e1000000 == 1` and `1e1000000.hash` took 2.4 s each.
+far_small = BigDecimal.new("1e-1000000")
+far_large = BigDecimal.new("1e1000000")
+far_one = BigDecimal.new("1")
+far_started = __iyi_monotonic_ns
+far_answers = [far_small < far_one, far_large == far_one, far_large > far_one, -far_large < -far_one, far_small > -far_large]
+far_hash = far_large.hash
+far_ms = (__iyi_monotonic_ns - far_started) // 1000000
+raise "decimal: far exponents ordered #{far_answers}" unless far_answers == [true, false, true, true, true]
+raise "decimal: far exponents took #{far_ms} ms to compare and hash" unless far_ms < 50
+raise "decimal: hash with an exponent" unless BigDecimal.new("25e3").hash == BigDecimal.new("25000.00").hash && far_hash != far_one.hash
+raise "decimal: close magnitudes" unless BigDecimal.new("9.99") < BigDecimal.new("10") && BigDecimal.new("4294967296") > BigDecimal.new("4294967295.999") && BigDecimal.new("1e9") == BigDecimal.new("1000000000.0")
+puts "    decimal magnitudes: 1e-1000000 < 1, 1e1000000 == 1 and its hash under 50 ms"
 
 rat_pairs = [
   ["6/4", "1/6"], ["-3/-9", "2/3"], ["3/-9", "1/2"], ["1/3", "1/6"], ["2/3", "4/9"],

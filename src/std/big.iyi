@@ -1796,11 +1796,24 @@ pub struct BigDecimal
     to_big_i.to_i32
   end
 
-  # The same value at another scale is the same key: `1.10` and `1.1` hash
-  # alike because `==` says they are equal.
+  # Bounds on the place of the leading digit, from the limb count alone:
+  # 10^(lo - 1) <= |self| < 10^hi. 30102 and 30103 in 100,000 bracket
+  # log10(2) for each 32-bit limb.
+  protected def magnitude_bounds : Tuple(Int64, Int64)
+    limbs = @value.limbs.size.to_i64
+    lo = (32_i64 * (limbs - 1_i64) * 30102_i64) // 100000_i64 + 1_i64 - @scale.to_i64
+    hi = (32_i64 * limbs * 30103_i64) // 100000_i64 + 1_i64 - @scale.to_i64
+    {lo, hi}
+  end
+
+  # The same value at another scale is the same key: `1.10`, `1.1` and
+  # `11e-1` hash alike because `==` says they are equal. The digits without
+  # their trailing zeros and the exponent that goes with them name the value;
+  # multiplying a negative scale out made `1e1000000.hash` take 2.6 s.
   def hash : Int32
-    n = normalized
-    n.value.hash &* 31 &+ n.scale
+    return BigInt.zero.hash if zero?
+    stripped = strip_zeros(2147483647)
+    stripped[0].hash &* 31 &+ (@scale &- stripped[1])
   end
 end
 
@@ -1809,6 +1822,15 @@ impl Comparable for BigDecimal
     if @value.sign != other.value.sign
       return @value.sign < other.value.sign ? -1 : 1
     end
+    return 0 if zero?
+    # Values whose leading digits sit apart are ordered before aligning:
+    # aligning first built 10^1000000, and `1e-1000000 < 1` and
+    # `1e1000000 == 1` took 2.4 s each. Bounds that overlap keep the scales
+    # within the digit counts.
+    mine = magnitude_bounds
+    theirs = other.magnitude_bounds
+    return -@value.sign if mine[1] < theirs[0]
+    return @value.sign if theirs[1] < mine[0]
     tup = BigDecimal.align(self, other)
     (tup[0] <=> tup[1])
   end

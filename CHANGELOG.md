@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`YAML::Any` sequences and mappings hash so that keys spread.** A
+  sequence hashed as `31 * h + item`, a mapping as a sum of
+  `31 * key + value`, and an integer as its own low bits: a 150 by 150 grid
+  of `[i, j]` had 4,769 hashes and one of `{x: i, y: j}` 299, `{a: 1, b: 2}`
+  hashed as `{a: 2, b: 1}` and -1 as 0, and 40,000 such mappings took 987 ms
+  to insert as `Hash` keys. A sequence hashes as an `Array` does now, a
+  mapping sums a mixed hash of each pair, and an integer hashes as an
+  `Int64`; `==` is unchanged and a mapping's hash still ignores its order.
+  Both grids have 22,500 hashes and the 40,000 inserts take 19 ms.
+  `bench/std_yaml_exercise.iyi` requires 22,000 of each grid; the old module
+  had 4,769 and 299.
+
 - **A YAML alias counts its anchor's levels against the nesting limit.** The
   limit counted nesting as the text writes it, and an alias added its
   anchor's nodes to the expansion count but not its depth: a chain

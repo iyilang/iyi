@@ -256,6 +256,9 @@ prove_caught utf16 "a UTF-16 stream is refused for its first zero byte" \
 prove_caught eofbreak "a block scalar ending the stream gets a line feed it lacks" \
   "a literal entry ending the stream without a line break keeps no line feed it lacks" \
   'final = lines.size > 0 && @ends[last_content] < @size' 'final = lines.size > 0'
+prove_caught maphash "a mapping's hash sums its pairs unmixed" \
+  "a 150 by 150 grid of mappings has at least 22,000 hashes" \
+  'value = value &+ {key, item}.hash' 'value = value &+ ((key.hash &* 31) &+ item.hash)'
 
 echo
 if [ "$status" -eq 0 ]; then

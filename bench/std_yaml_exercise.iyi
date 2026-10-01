@@ -163,6 +163,27 @@ assert_str("x", YAML.parse("a:\n  1: x\n").dig("a", 1).as_s, "dig walks to an in
 h = Hash(Any, Int32).new
 h[YAML.parse("a: 1")] = 7
 assert_true(h[YAML.parse("a: 1")]? == 7, "Any hashes with ==")
+# A sequence hashes as an Array does and a mapping by its pairs mixed:
+# `31 * h + item` and a sum of `31 * key + value` gave a 150 by 150 grid
+# of [i, j] 4,769 hashes and of {x: i, y: j} 299, and {a: 1, b: 2} the
+# hash of {a: 2, b: 1}.
+seq_hashes = Hash(Int32, Bool).new
+map_hashes = Hash(Int32, Bool).new
+gi = 0
+while gi < 150
+  gj = 0
+  while gj < 150
+    seq_hashes[Any.new([Any.new(gi), Any.new(gj)] of Any).hash] = true
+    map_hashes[Any.new({Any.new("x") => Any.new(gi), Any.new("y") => Any.new(gj)} of Any => Any).hash] = true
+    gj = gj + 1
+  end
+  gi = gi + 1
+end
+assert_true(seq_hashes.size >= 22000, "a 150 by 150 grid of sequences has at least 22,000 hashes, not #{seq_hashes.size}")
+assert_true(map_hashes.size >= 22000, "a 150 by 150 grid of mappings has at least 22,000 hashes, not #{map_hashes.size}")
+swapped = YAML.parse("{a: 1, b: 2}").hash != YAML.parse("{a: 2, b: 1}").hash
+assert_true(swapped && YAML.parse("{a: 1, b: 2}").hash == YAML.parse("{b: 2, a: 1}").hash, "a mapping's hash follows its pairs, not their order")
+puts "  a 150 by 150 grid of sequences and of mappings has at least 22,000 hashes each"
 puts "  parse_all, integer and boolean keys, Any as a Hash key"
 
 puts "\n== what the reader refuses"

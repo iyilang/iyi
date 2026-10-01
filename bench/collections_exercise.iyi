@@ -395,6 +395,18 @@ pair_hashes = [] of Int32
 assert_int(spread(pair_hashes), 90000, "hash: a 300 by 300 grid of arrays spreads")
 assert_true([1, 2].hash == [1, 2].hash && [1, 2] == [1, 2], "hash: equal arrays hash alike")
 
+# Distinct hashes that share their low bits are not one slot either: an
+# Int's hash is itself, the table took the slot from the low bits as they
+# were, and keys that were multiples of 65536 made one run of probes -
+# 20,000 of them took a second to insert, where consecutive keys take a
+# millisecond. The hash is mixed before its bits pick the slot.
+shared_started = __iyi_monotonic_ns
+shared = {} of Int32 => Int32
+20000.times { |k| shared[k &* 65536] = k }
+shared_ms = (__iyi_monotonic_ns - shared_started) // 1000000
+assert_true(shared.size == 20000 && shared[19999 &* 65536]? == 19999, "hash: multiples of 65536 all kept")
+assert_true(shared_ms < 250, "hash: 20,000 keys that share their low bits insert in #{shared_ms} ms, not a second")
+
 # A class instance is itself, and a set of them finds each one: `Object#==`
 # answered false, so an instance did not equal itself and a `Set` never
 # found what was added to it. A class that says what equal means keeps

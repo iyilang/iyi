@@ -2168,6 +2168,14 @@ pub struct Unicode
     index = from
     while index < source.size
       cp = source[index]
+      # The Turkic `I` with a combining dot above is the dotted `i`, the
+      # dot taken in (SpecialCasing's After_I and Not_Before_Dot): one
+      # character at a time it was `ı` and the dot left over it.
+      if cp == 0x49 && options.turkic? && index + 1 < source.size && source[index + 1] == 0x307
+        points << 0x69
+        index = index + 2
+        next
+      end
       if cp == 0x3A3 && !options.ascii? && !options.fold? && final_sigma?(source, index)
         points << 0x3C2
       else

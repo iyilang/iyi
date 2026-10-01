@@ -106,7 +106,7 @@ describe "Semantic: iyi import" do
 
       # Both importers still record the edge, because the second one adds no
       # initialiser and does constrain where the first one's may be moved to.
-      importers = program.iyi_module_imports.select { |_, edges| edges.any?(&.ends_with?("app/base.iyi")) }
+      importers = program.iyi_module_imports.select { |_, edges| edges.any?(&.ends_with?(File.join("app", "base.iyi"))) }
       importers.size.should eq 2
     end
   end
@@ -122,7 +122,7 @@ describe "Semantic: iyi import" do
       }) do
         program = semantic_iyi("main.iyi")
         program.iyi_module_paths.values.should eq ["app/dep"]
-        importers = program.iyi_module_imports.select { |_, edges| edges.any?(&.ends_with?("app/dep.iyi")) }
+        importers = program.iyi_module_imports.select { |_, edges| edges.any?(&.ends_with?(File.join("app", "dep.iyi"))) }
         importers.keys.map { |file| File.basename(file) }.should eq ["main.iyi"]
       end
     end
@@ -243,6 +243,21 @@ describe "Semantic: iyi import" do
         expect_raises(Iyi::TypeException, /declares `Box` and does not mark it `pub`/) do
           semantic_iyi("main.iyi")
         end
+      end
+    end
+
+    # An imported name called with arguments none of its defs takes is
+    # that def's mismatch: it was "undefined method" and a hint to import
+    # the very name the file had imported.
+    it "says an imported name was called with arguments its defs do not take" do
+      with_iyi_modules({
+        "main.iyi"    => "module app/main\n\nimport app/dep::{value}\n\nvalue(\"x\")\n",
+        "app/dep.iyi" => "module app/dep\n\npub def value(n : Int32) : Int32\n  n\nend\n",
+      }) do
+        error = expect_raises(Iyi::TypeException, /expected argument #1 to 'App::Dep\.value' to be Int32, not String/) do
+          semantic_iyi("main.iyi")
+        end
+        error.message.to_s.should_not contain("brought it into scope")
       end
     end
 

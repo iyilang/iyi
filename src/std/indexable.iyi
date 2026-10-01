@@ -353,17 +353,19 @@ pub trait Indexable
   # ---- conversion and formatting -------------------------------------------
 
   # Joins element string representations with the specified separator.
+  #
+  # Into one builder, as `Array#join` writes: adding each element to the
+  # text so far copied that text once per element, and 20,000 elements
+  # took 1.8 s where the same array's `join` took 1 ms.
   def join(separator : String = "") : String
-    result = ""
-    first = true
-    i = 0
-    while i < size
-      result = result + separator unless first
-      result = result + unsafe_fetch(i).to_s
-      first = false
-      i = i + 1
+    String.build do |io|
+      i = 0
+      while i < size
+        io << separator if i > 0
+        io << unsafe_fetch(i).to_s
+        i = i + 1
+      end
     end
-    result
   end
 
   # Copies elements into a newly allocated Array with pre-allocated capacity.

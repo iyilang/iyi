@@ -115,13 +115,24 @@ module Iyi::Lsp
       @current = nil
     end
 
+    # A call that sits where the def it calls is written is one the
+    # compiler made, not the person: incoming calls to any def listed the
+    # def's own file as a caller, at the def's own line, beside the real
+    # ones.
     def visit(node : Call)
       name_location = node.name_location
       if name_location && (file = name_location.filename).is_a?(String) &&
-         node.target_defs.try &.any? { |target| key?(target.location) }
+         (targets = node.target_defs) && targets.any? { |target| key?(target.location) } &&
+         targets.none? { |target| same_place?(target.location, name_location) }
         record name_location, file, node.name.size
       end
       true
+    end
+
+    private def same_place?(one : Location?, other : Location) : Bool
+      return false unless one
+      one.line_number == other.line_number && one.column_number == other.column_number &&
+        Location.same_file?(one.filename.to_s, other.filename.to_s)
     end
 
     def visit(node)

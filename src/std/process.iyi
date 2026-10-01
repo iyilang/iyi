@@ -89,6 +89,10 @@ module std/process
   end
 {% elsif flag?(:win32) %}
   lib LibKernel32
+    fun CreateJobObjectW(attributes : Void*, name : UInt16*) : Void*
+    fun AssignProcessToJobObject(job : Void*, process : Void*) : Int32
+    fun TerminateJobObject(job : Void*, exit_code : UInt32) : Int32
+    fun CompareStringOrdinal(one : UInt16*, one_length : Int32, other : UInt16*, other_length : Int32, ignore_case : Int32) : Int32
     fun CreateProcessW(application : UInt16*, command_line : UInt16*, process_attributes : Void*,
                        thread_attributes : Void*, inherit_handles : Int32, creation_flags : Int32,
                        environment : Void*, current_directory : UInt16*, startup_info : Void*,
@@ -166,6 +170,7 @@ pub struct ProcessError
     return "permission denied" if denied?
     {% if flag?(:win32) %}
       return "not a program Windows can run" if @code == 193
+      return "the command line is past Windows' 32,767 characters" if @code == 206
     {% else %}
       return "not a format this system can run" if @code == 8
     {% end %}
@@ -205,6 +210,17 @@ pub struct Process
     raise "Process.run: the command is empty" if command.empty?
     ProcessChild.check_text(command, "the command")
     args.each { |arg| ProcessChild.check_text(arg, "an argument") }
+    # A child started in another directory does not inherit a `PWD` that
+    # names this one: `Path#expand` reads `PWD` first, and the child
+    # expanded its relative paths here. Removed, the child reads its own
+    # directory - unless *env* says what `PWD` is.
+    if chdir && Program.env("PWD") && !(env && env.has_key?("PWD"))
+      moved = {"PWD" => nil} of String => String?
+      if given = env
+        given.each { |name, value| moved[name] = value }
+      end
+      env = moved
+    end
     environment = ProcessChild.environment(env)
     if directory = chdir
       ProcessChild.check_text(directory, "the directory")
@@ -245,6 +261,8 @@ class ProcessChild
     @input : Pointer(Void) = Pointer(Void).new(0_u64)
     @output : Pointer(Void) = Pointer(Void).new(0_u64)
     @errors : Pointer(Void) = Pointer(Void).new(0_u64)
+    # The job the child runs in, so ending it ends what it started too.
+    @job : Pointer(Void) = Pointer(Void).new(0_u64)
     @@serial = Atomic(UInt64).new(0_u64)
   {% else %}
     @pid : Int32 = 0
@@ -327,9 +345,18 @@ class ProcessChild
     {% end %}
   end
 
+  # On Windows as Windows compares two names, case folded in every script:
+  # `ÇAY` and `çay` are one variable there, and folding ASCII alone left
+  # `env: {"çay" => ...}` beside the variable it meant to replace or
+  # remove.
   def self.same_name?(one : String, other : String) : Bool
     {% if flag?(:win32) %}
-      one.upcase == other.upcase
+      return true if one.upcase == other.upcase
+      wide_one = __iyi_win_env_wide(one.to_unsafe, one.bytesize)
+      wide_other = __iyi_win_env_wide(other.to_unsafe, other.bytesize)
+      return false if wide_one.address == 0_u64 || wide_other.address == 0_u64
+      # CSTR_EQUAL, lengths from the terminators.
+      LibKernel32.CompareStringOrdinal(wide_one, -1, wide_other, -1, 1) == 2
     {% else %}
       one == other
     {% end %}
@@ -456,20 +483,25 @@ class ProcessChild
     def self.find(command : String) : String | ProcessError
       if separator?(command)
         found = candidate(command)
-        return ProcessError.new(command, NOT_FOUND) unless found
+        return ProcessError.new(command, batch_beside?(command) ? BATCH : NOT_FOUND) unless found
         return batch?(found) ? ProcessError.new(command, BATCH) : found
       end
       path = Program.env("PATH") || ""
+      shim = false
       path.split(';').each do |entry|
         directory = entry
-        directory = directory[1, directory.size - 2] if directory.size >= 2 && directory.starts_with?('"') && directory.ends_with?("\"")
+        # In bytes, as `[]` counts: in characters, a quoted entry with `ü`
+        # in it lost a byte off its end per such character, and named no
+        # directory.
+        directory = directory[1, directory.bytesize - 2] if directory.bytesize >= 2 && directory.starts_with?('"') && directory.ends_with?("\"")
         next if directory.empty?
         joined = directory.ends_with?("\\") || directory.ends_with?("/") ? "#{directory}#{command}" : "#{directory}\\#{command}"
         if found = candidate(joined)
           return batch?(found) ? ProcessError.new(command, BATCH) : found
         end
+        shim = true if !shim && batch_beside?(joined)
       end
-      ProcessError.new(command, NOT_FOUND)
+      ProcessError.new(command, shim ? BATCH : NOT_FOUND)
     end
 
     # The file a name means, as `CreateProcessW` would: itself when its last
@@ -481,6 +513,15 @@ class ProcessChild
       return "#{name}.exe" if file?("#{name}.exe")
       return "#{name}.com" if file?("#{name}.com")
       nil
+    end
+
+    # Whether a `.cmd` or `.bat` of *name* is there: asked once nothing ran,
+    # so a program of the name anywhere on `PATH` still wins, as
+    # `CreateProcessW`'s own search has it. npm, yarn and code are `.cmd`
+    # shims, and a name whose only match was one was "no such program"
+    # where the answer is the batch-file sentence.
+    def self.batch_beside?(name : String) : Bool
+      !extension?(name) && (file?("#{name}.cmd") || file?("#{name}.bat"))
     end
 
     def self.extension?(name : String) : Bool
@@ -616,10 +657,20 @@ class ProcessChild
       end
       text = line.to_s
       wide_line = __iyi_win_env_wide(text.to_unsafe, text.bytesize)
+      # Windows' command line is UTF-16, and text that is not UTF-8 has no
+      # spelling in it. The conversion answered null for it, and a null
+      # line is Windows' cue to use the program's name alone: the child ran
+      # with no arguments at all, and the run said it went well.
+      raise "Process.run: the command or an argument is not valid UTF-8, which a Windows command line cannot carry" if wide_line.address == 0_u64
       wide_path = __iyi_wide_path(path.to_unsafe)
       wide_directory = Pointer(UInt16).new(0_u64)
       if directory = chdir
         wide_directory = __iyi_wide_path(directory.to_unsafe)
+      end
+      # Before any handle is made, so a refusal leaves none behind.
+      block = Pointer(UInt16).new(0_u64)
+      if entries = environment
+        block = ProcessChild.environment_block(entries)
       end
 
       theirs = Pointer(Pointer(Void)).malloc(3_u64)
@@ -699,12 +750,8 @@ class ProcessChild
       # bInheritHandles, and EXTENDED_STARTUPINFO_PRESENT. The environment
       # is this process's own block, which `ENV[]=` writes, unless `env:`
       # gave one, which is UTF-16 (CREATE_UNICODE_ENVIRONMENT).
-      block = Pointer(UInt16).new(0_u64)
       flags = 0x00080000
-      if entries = environment
-        block = ProcessChild.environment_block(entries)
-        flags = flags | 0x400
-      end
+      flags = flags | 0x400 if environment
       made_it = LibKernel32.CreateProcessW(wide_path, wide_line, Pointer(Void).new(0_u64), Pointer(Void).new(0_u64),
         count > 0 ? 1 : 0, flags, block.as(Void*), wide_directory, info.as(Void*), answer.as(Void*))
       failed = made_it == 0 ? ::LibC.GetLastError : 0
@@ -723,6 +770,18 @@ class ProcessChild
         return ProcessError.new(command, failed, failed == ERROR_DIRECTORY ? chdir : nil)
       end
       @process = Pointer(Void).new(answer[0])
+      # In a job of its own: a cancelled run ended the child alone, and a
+      # program it had started - a shell's command, a server's worker -
+      # went on running, where the top of this file promises a task that
+      # stops leaves no program running. Without a job, the child alone.
+      job = LibKernel32.CreateJobObjectW(Pointer(Void).new(0_u64), Pointer(UInt16).new(0_u64))
+      if job.address != 0_u64
+        if LibKernel32.AssignProcessToJobObject(job, @process) != 0
+          @job = job
+        else
+          ::LibC.CloseHandle(job)
+        end
+      end
       ::LibC.CloseHandle(Pointer(Void).new(answer[1]))
       nil
     end
@@ -730,7 +789,13 @@ class ProcessChild
     # `NAME=VALUE`, NUL after each, and a NUL after the last: an empty
     # environment is the two NULs alone.
     def self.environment_block(entries : Array(String)) : Pointer(UInt16)
-      wides = entries.map { |entry| __iyi_win_env_wide(entry.to_unsafe, entry.bytesize) }
+      # A name or value that is not UTF-8 converted to null, and the length
+      # below read address 0: the program died of a memory fault.
+      wides = entries.map do |entry|
+        wide = __iyi_win_env_wide(entry.to_unsafe, entry.bytesize)
+        raise "Process.run: an environment name or value is not valid UTF-8" if wide.address == 0_u64
+        wide
+      end
       total = 1
       lengths = wides.map do |wide|
         length = 0
@@ -786,7 +851,7 @@ class ProcessChild
       while offset < text.bytesize
         chunk = text.bytesize - offset
         chunk = 65536 if chunk > 65536
-        ov = IyiScheduler.arm_overlapped_current(handle)
+        ov = IyiScheduler.arm_overlapped_current(handle, 4)
         written = 0
         put = 0_i64
         if ::LibC.WriteFile(handle, (text.to_unsafe + offset.to_i64).as(Void*), chunk, pointerof(written), ov.as(Void*)) != 0
@@ -879,7 +944,12 @@ class ProcessChild
     end
 
     def kill : Nil
-      ::LibC.TerminateProcess(@process, 1) unless @ended
+      return if @ended
+      if @job.address != 0_u64
+        LibKernel32.TerminateJobObject(@job, 1)
+      else
+        ::LibC.TerminateProcess(@process, 1)
+      end
     end
 
     # After a kill, or a wait that could not be parked: the end is near.
@@ -893,6 +963,8 @@ class ProcessChild
       ::LibC.CloseHandle(@output) if @output.address != 0_u64
       ::LibC.CloseHandle(@errors) if @errors.address != 0_u64
       ::LibC.CloseHandle(@process) if @process.address != 0_u64
+      ::LibC.CloseHandle(@job) if @job.address != 0_u64
+      @job = Pointer(Void).new(0_u64)
       @input = Pointer(Void).new(0_u64)
       @output = Pointer(Void).new(0_u64)
       @errors = Pointer(Void).new(0_u64)

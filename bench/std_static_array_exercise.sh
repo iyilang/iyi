@@ -154,10 +154,36 @@ PY
   fi
 }
 
+# The text grown by `+` a piece at a time again, as `to_s` was written: the
+# bound beside `to_a.to_s` catches it.
+prove_fails "to_s grown by + again" broken_to_s "ASSERTION FAILED: to_s: 10,000 elements took" \
+  '    String.build do |io|
+      io << "StaticArray["
+      i = 0
+      while i < N
+        io << ", " if i > 0
+        io << to_unsafe[i].inspect
+        i += 1
+      end
+      io << "]"
+    end' '    res = "StaticArray["
+    i = 0
+    while i < N
+      res = res + ", " if i > 0
+      res = res + to_unsafe[i].inspect
+      i += 1
+    end
+    res + "]"'
+
 prove_fails "<=> answering the other way" broken_cmp "ASSERTION FAILED: <=> is lexicographic" \
   '      return cmp if cmp != 0' '      return 0 - cmp if cmp != 0'
 prove_fails "fill ending at s + c again" broken_fill_end "arithmetic overflow" \
   '    limit = (c > N - s) ? N : (s + c)' '    limit = (s + c > N) ? N : (s + c)'
+
+# The method renamed out of the way is the module as it was: no `hash` of
+# its own, so `Object#hash`, the type's id, for every value.
+prove_fails "hash answering the type's id again" broken_hash "ASSERTION FAILED: hash spread" \
+  '  def hash : Int32' '  def hash_unused : Int32'
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -9,7 +9,7 @@
 #     monotonic readings with zero new symbols beyond what concurrency already links.
 #   * On Linux, raw `clock_gettime` syscalls (228 on x86_64, 113 on aarch64)
 #     issue direct kernel requests with zero libc symbols.
-#   * On Windows, kernel32's `GetSystemTimeAsFileTime` and `QueryPerformanceCounter`
+#   * On Windows, kernel32's `GetSystemTimePreciseAsFileTime` and `QueryPerformanceCounter`
 #     provide nanosecond-scale wall and monotonic time.
 #   * On wasm32-wasi, WASI import `__wasi_clock_time_get` provides both clocks.
 #
@@ -425,14 +425,18 @@ pub struct Time
 
   {% elsif flag?(:windows) %}
     lib LibKernel32
-      fun GetSystemTimeAsFileTime(time : Int64*) : Void
+      fun GetSystemTimePreciseAsFileTime(time : Int64*) : Void
       fun QueryPerformanceCounter(count : Int64*) : Int32
       fun QueryPerformanceFrequency(freq : Int64*) : Int32
     end
 
     def self.wall_clock_nanoseconds : UInt64
       filetime = uninitialized Int64
-      LibKernel32.GetSystemTimeAsFileTime(pointerof(filetime))
+      # The precise one, as Crystal reads: `GetSystemTimeAsFileTime` moves
+      # once per timer tick, measured at 0.7 ms to 15.6 ms, so two readings
+      # a few hundred microseconds apart were the same instant and a span
+      # between them was zero.
+      LibKernel32.GetSystemTimePreciseAsFileTime(pointerof(filetime))
       epoch_diff = 116444736000000000_i64
       unix_100ns = filetime - epoch_diff
       unix_100ns.to_u64 * 100_u64
@@ -697,8 +701,16 @@ pub struct Time
     @seconds
   end
 
+  # Refused with the module's sentence past the milliseconds an Int64
+  # holds, some 292 million years either side of 1970, where the multiply
+  # was the prelude's bare "arithmetic overflow" for a year `Time.utc`
+  # accepts, 300,000,000.
   def to_unix_ms : Int64
-    @seconds * 1000_i64 + (@nanoseconds // 1000000).to_i64
+    ms = (@nanoseconds // 1000000).to_i64
+    if @seconds > 9223372036854775_i64 || @seconds < -9223372036854775_i64 || (@seconds == 9223372036854775_i64 && ms > 807_i64)
+      raise "time out of range: #{@seconds} seconds from the epoch is past the milliseconds an Int64 holds"
+    end
+    @seconds * 1000_i64 + ms
   end
 
   def to_unix_f : Float64
@@ -933,7 +945,10 @@ pub struct Time
       end
       offset_sec = sign * (oh.to_i64 * 3600_i64 + om.to_i64 * 60_i64)
     else
-      raise "invalid timezone designator in RFC 3339: #{tz_char}"
+      # The character whole: its lead byte on its own was `Â` for `²`.
+      str[idx, len - idx].each_char do |char|
+        raise "invalid timezone designator in RFC 3339: #{char}"
+      end
     end
 
     # The offset ends the string. `...Zjunk` and `...+05:30:00` both parsed,

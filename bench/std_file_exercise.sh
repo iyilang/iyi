@@ -562,13 +562,35 @@ PY
         status=1
       fi
     fi
+    # A file the system holds without sharing refuses every attribute call
+    # - an ordinary exclusive open does not; the paging file does - and
+    # `File.exists?` said false and `File.info` "File not found" about a
+    # file `dir` lists. Asked of the paging file of whichever drive has one.
+    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.exists?(Program.args[0])} #{File.file?(Program.args[0])} #{File.size(Program.args[0]) > 0}"\n' > "$WORK/held.iyi"
+    paging=""
+    for drive in C D E; do
+      [ -e "/$(echo $drive | tr 'A-Z' 'a-z')/pagefile.sys" ] && { paging="$drive:/pagefile.sys"; break; }
+    done
+    if [ -z "$paging" ]; then
+      echo "  no paging file on C:, D: or E:, so a file the system holds is unmeasured"
+    elif ! "$IYI" build -o "$WORK/held" "$WORK/held.iyi" > "$WORK/held.build" 2>&1; then
+      echo "  the held-file program did not build"; sed -n '1,10p' "$WORK/held.build"; status=1
+    else
+      answer="$("$WORK/held" "$paging" 2>&1)"
+      if [ "$answer" = "true true true" ]; then
+        echo "  $paging, held by the system, exists, is a file, and has a size"
+      else
+        echo "  $paging, held by the system, answered exists?/file?/size: $answer"
+        status=1
+      fi
+    fi
     # A reparse point is a link only by its tag. Every one was `Symlink`,
     # so an app execution alias - what `WindowsApps` holds - and a cloud
     # placeholder answered `file? false`; and a junction whose directory is
     # gone answered a followed `info?` with the link itself, where POSIX
     # `stat` of a dangling link is an error.
-    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.file?(Program.args[0])} #{File.symlink?(Program.args[0])}"\n' > "$WORK/reparse_kind.iyi"
-    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.symlink?(Program.args[0])} #{File.info?(Program.args[0]).nil?}"\n' > "$WORK/dangling.iyi"
+    printf 'module main\n\nimport std/file::{File}\n\nputs "#{File.file?(Program.args[0])} #{File.symlink?(Program.args[0])} #{File.executable?(Program.args[0])} #{File.real_path(Program.args[0]).downcase.ends_with?(File.basename(Program.args[0]).downcase)}"\n' > "$WORK/reparse_kind.iyi"
+    printf 'module main\n\nimport std/file::{File}\nimport std/dir::{Dir}\n\nputs "#{File.symlink?(Program.args[0])} #{File.info?(Program.args[0]).nil?} #{File.exists?(Program.args[0])} #{Dir.exists?(Program.args[0])}"\n' > "$WORK/dangling.iyi"
     if ! "$IYI" build -o "$WORK/reparse_kind" "$WORK/reparse_kind.iyi" > "$WORK/reparse_kind.build" 2>&1 ||
        ! "$IYI" build -o "$WORK/dangling" "$WORK/dangling.iyi" > "$WORK/dangling.build" 2>&1; then
       echo "  the reparse programs did not build"; sed -n '1,10p' "$WORK/reparse_kind.build" "$WORK/dangling.build"; status=1
@@ -582,10 +604,13 @@ PY
         echo "  no app execution alias on this machine, so their kind is unmeasured"
       else
         answer="$("$WORK/reparse_kind" "$alias_exe" 2>&1)"
-        if [ "$answer" = "true false" ]; then
-          echo "  an app execution alias is a file, not a link"
+        # And the program it is: `executable?` said false of what
+        # `Process.run` runs, and `real_path` panicked - the alias does
+        # not open as data (ERROR_CANT_ACCESS_FILE, 1920).
+        if [ "$answer" = "true false true true" ]; then
+          echo "  an app execution alias is a file, not a link, is executable, and is its own real path"
         else
-          echo "  an app execution alias ($alias_exe) answered file?/symlink? $answer"
+          echo "  an app execution alias ($alias_exe) answered file?/symlink?/executable?/real_path $answer"
           status=1
         fi
       fi
@@ -593,11 +618,35 @@ PY
       MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/dangling_junction")" "$(cygpath -w "$WORK/gone_target")" > /dev/null
       rmdir "$WORK/gone_target"
       answer="$("$WORK/dangling" "$WORK/dangling_junction" 2>&1)"
-      if [ "$answer" = "true true" ]; then
-        echo "  a junction to nothing is a link, and following it answers nothing"
+      # And it does not exist, as POSIX `stat` of a dangling link fails:
+      # `File.exists?` and `Dir.exists?` said true while `File.directory?`
+      # said false and `Dir.children` panicked.
+      if [ "$answer" = "true true false false" ]; then
+        echo "  a junction to nothing is a link, following it answers nothing, and it does not exist"
       else
-        echo "  a junction to nothing answered symlink?/info?.nil? $answer"
+        echo "  a junction to nothing answered symlink?/info?.nil?/exists?/Dir.exists? $answer"
         status=1
+      fi
+      # A junction to a volume's GUID path reads back as one: the NT prefix
+      # came off whatever followed it, and `Volume{...}\x` is a relative
+      # path to nowhere.
+      printf 'module main\n\nimport std/file::{File}\n\nputs File.readlink(Program.args[0])\n' > "$WORK/readlink.iyi"
+      volume="$(MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" mountvol "$(cygpath -w "$WORK" | cut -c1-3)" /L 2>/dev/null | tr -d ' \r' | head -1)"
+      if [ -z "$volume" ]; then
+        echo "  mountvol names no volume here, so a junction to one is unmeasured"
+      elif ! "$IYI" build -o "$WORK/readlink" "$WORK/readlink.iyi" > "$WORK/readlink.build" 2>&1; then
+        echo "  the readlink program did not build"; sed -n '1,5p' "$WORK/readlink.build"; status=1
+      else
+        mkdir -p "$WORK/by_volume"
+        target="${volume}$(cygpath -w "$WORK/by_volume" | cut -c4-)"
+        MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/volume_junction")" "$target" > /dev/null
+        read_back="$("$WORK/readlink" "$WORK/volume_junction" 2>&1 | tr -d '\r')"
+        if [ "$read_back" = "$target" ]; then
+          echo "  a junction to a volume's GUID path reads back as that path"
+        else
+          echo "  a junction to $target read back as $read_back"
+          status=1
+        fi
       fi
     fi
     ;;

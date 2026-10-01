@@ -208,8 +208,13 @@ jobs:
     runs-on: ubuntu-24.04
     # Measured: 43 and 44 minutes on master's runs of 2026-09-29, 38 and a
     # cancellation at 45 on the next branch's - a budget the job had grown
-    # into, so a slow runner ended it in whatever step it had reached.
-    timeout-minutes: 60
+    # into, so a slow runner ended it in whatever step it had reached. At 60
+    # it happened again: master's runs of 2026-09-30 and 10-01 were cancelled
+    # at 60 in five of six, the sixth took 37, and windows-0.17.0's took 37
+    # and 51. `lsp_positions.py`, which asks a cursor question every 200
+    # lines of every module in `src/std` and grows with it, took 15, 16 and
+    # 23 minutes in those that finished and 28 to 31 in those cancelled.
+    timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
     name: "Samples, from source and from artifacts"

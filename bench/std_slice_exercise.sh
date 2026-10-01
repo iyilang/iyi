@@ -229,4 +229,18 @@ prove_fails "inclusive end past Int32" "fail_range_top" "arithmetic overflow" \
 prove_fails "read-only dup filled through copy_from" "fail_ro_dup" "cannot write to read-only target Slice" \
   's/ptr.copy_from(@pointer, @size) if @size > 0/Slice(T).new(ptr, @size, read_only: @read_only).copy_from(self) if @size > 0/'
 
+# 7. Broken hash: the struct's own `31 * h + x` put back in front of the
+#    trait's, and a grid of slices runs together again
+prove_fails "a hash that clusters" "fail_hash" "hash spread: a 150 by 150 grid of slices had" \
+  '/^  # And hashing follows equality, or the `==` above buys nothing/i\
+  def hash : Int32\
+    h = @size\
+    i = 0\
+    while i < @size\
+      h = (31 \&* h) \&+ @pointer[i].hash\
+      i = i + 1\
+    end\
+    h\
+  end'
+
 exit "$status"

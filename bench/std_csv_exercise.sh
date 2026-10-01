@@ -114,7 +114,12 @@ fi
 
 # Each fix undone in a copy: the exercise must fail at the check written
 # for it - not at an earlier one, and not by failing to compile.
+mutations=0
 broken() { # broken <label> <old> <new> <phrase>
+  # A binary of its own each: on Windows the last one's file can still be
+  # held a moment after it ended, and the next link over it failed with
+  # LNK1104.
+  mutations=$((mutations + 1))
   local label="$1" phrase="$4"
   if [ -z "$PY" ]; then
     echo "  $label: no python3 on this machine, so the broken-module proof is unmeasured"
@@ -134,11 +139,11 @@ PY
   then
     echo "  $label: the patch did not apply"
     status=1
-  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/mut.bin" "$REPO/bench/std_csv_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/mut-$mutations.bin" "$REPO/bench/std_csv_exercise.iyi" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the broken copy did not compile"
     sed -n '1,6p' "$WORK/mut.out"
     status=1
-  elif "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
+  elif "$WORK/mut-$mutations.bin" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   elif ! grep -qF -- "$phrase" "$WORK/mut.out"; then

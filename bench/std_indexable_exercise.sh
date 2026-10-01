@@ -207,7 +207,24 @@ prove_fails "delete_if compaction" broken_delete_if "expected .1,3,5,99., got" \
 prove_fails "sample with a negative seed" broken_seed "assertion failed: sample with a negative seed" \
   's/seed\.to_i64\.unsafe_to_u64/seed.to_i64.abs.unsafe_to_u64/'
 
-# 8. Put the fill refusal back on `offset + count`: the probe for a huge
+# 8. Put join back on `result = result + ...`, which copies the text so far
+#    once per element: the linear-time bound beside `Array#join` catches it.
+prove_fails "join grown by + again" broken_join "indexable join in linear time" \
+  '/^  def join(separator : String = "") : String$/,/^  end$/c\
+  def join(separator : String = "") : String\
+    result = ""\
+    first = true\
+    i = 0\
+    while i < size\
+      result = result + separator unless first\
+      result = result + unsafe_fetch(i).to_s\
+      first = false\
+      i = i + 1\
+    end\
+    result\
+  end'
+
+# 9. Put the fill refusal back on `offset + count`: the probe for a huge
 #    count then reads "arithmetic overflow", not its sentence. A probe mode
 #    is not reached by `prove_fails`, so the broken copy is built here and
 #    the probe run against it must fail.

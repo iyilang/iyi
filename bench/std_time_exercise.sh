@@ -260,6 +260,12 @@ time_panics_with "a 99:99 offset" parse_tz99 "invalid timezone offset in RFC 333
   'Time.parse_rfc3339("2024-02-29T12:00:00+99:99").to_rfc3339'
 time_panics_with "a 24:00 offset" parse_tz24 "invalid timezone offset in RFC 3339 string: 24:00" \
   'Time.parse_rfc3339("2024-02-29T12:00:00+24:00").to_rfc3339'
+# A designator of several bytes is named whole: its lead byte alone, as a
+# character of its own, was `Â` for `²`.
+time_panics_with "milliseconds past an Int64" unix_ms_far "is past the milliseconds an Int64 holds" \
+  'Time.utc(300000000, 1, 1).to_unix_ms'
+time_panics_with "a designator of two bytes" parse_tz_utf8 "invalid timezone designator in RFC 3339: ²" \
+  'Time.parse_rfc3339("2024-02-29T12:30:45²Z").to_rfc3339'
 time_panics_with "a year past Int32, parsed" parse_y2g "year out of range in RFC 3339 string" \
   'Time.parse_rfc3339("2147483648-01-01T00:00:00Z").to_rfc3339'
 time_panics_with "a year past Int32, from the epoch" unix_1e17 "year out of range" \

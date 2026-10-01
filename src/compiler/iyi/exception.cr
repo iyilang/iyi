@@ -183,10 +183,20 @@ module Iyi
       " #{line_number} | "
     end
 
-    def append_error_indicator(io, offset, column_number, size = 0)
+    # *before* is the text of the shown line in front of the column, when
+    # there is one: its tabs are written as tabs, so the caret lands under
+    # the column a terminal put the character in. Counted as one column
+    # each, a tab inside the line left the caret 17 columns short of the
+    # `nope` two tabs had pushed to 34.
+    def append_error_indicator(io, offset, column_number, size = 0, before : String? = nil)
       size ||= 0
       io << '\n'
-      io << (" " * (offset + column_number - 1))
+      if before
+        io << (" " * offset)
+        before.each_char { |char| io << (char == '\t' ? '\t' : ' ') }
+      else
+        io << (" " * (offset + column_number - 1))
+      end
       with_color.green.bold.surround(io) do
         io << '^'
         if size > 0
@@ -227,7 +237,8 @@ module Iyi
 
         io << "\n\n"
         io << colorize(decorator).dim << colorize(lstripped_line.chomp).bold
-        append_error_indicator(io, decorator.size, final_column_number, size || 0)
+        before = lstripped_line[0, (final_column_number - 1).clamp(0, lstripped_line.size)]
+        append_error_indicator(io, decorator.size, final_column_number, size || 0, before)
       end
     end
 

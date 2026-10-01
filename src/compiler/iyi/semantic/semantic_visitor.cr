@@ -463,9 +463,14 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # the same name in the consuming project is not it.
     inside_package = !@iyi_package_stack.empty?
 
+    # Each in the platform's spelling (`Iyi.native_path`): the module path's
+    # `/` went into the file name as it was, and on Windows every place an
+    # imported file is named - a diagnostic, `check -f json`, `fix --json`
+    # - named `C:\proj\app/deep/util.iyi`, which a tool matching paths
+    # does not match to `C:\proj\app\deep\util.iyi`.
     if !inside_package && (root = project_root)
-      candidates << File.join(root, "#{path}.iyi")
-      candidates << File.join(root, "#{path}.cr")
+      candidates << Iyi.native_path(File.join(root, "#{path}.iyi"))
+      candidates << Iyi.native_path(File.join(root, "#{path}.cr"))
     end
 
     # Then the root the entry's own header names, if its path ends with it
@@ -474,13 +479,13 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # the way a build from the project root would. After the entry's
     # directory, never instead of it.
     if !inside_package && (header_root = @program.iyi_header_root)
-      candidates << File.join(header_root, "#{path}.iyi")
-      candidates << File.join(header_root, "#{path}.cr")
+      candidates << Iyi.native_path(File.join(header_root, "#{path}.iyi"))
+      candidates << Iyi.native_path(File.join(header_root, "#{path}.cr"))
     end
 
     @program.iyi_path.entries.each do |entry|
-      candidates << File.join(entry, "#{path}.iyi")
-      candidates << File.join(entry, "#{path}.cr")
+      candidates << Iyi.native_path(File.join(entry, "#{path}.iyi"))
+      candidates << Iyi.native_path(File.join(entry, "#{path}.cr"))
     end
 
     candidates.find do |candidate|
@@ -527,7 +532,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     prefix = dir == "." ? "" : "#{dir}/"
     siblings = [] of String
     roots.each do |root|
-      Dir.glob(::Path[root].to_posix.join(dir, "*.iyi")) do |file|
+      Dir.glob(Iyi.glob_root(root).join(dir, "*.iyi")) do |file|
         siblings << prefix + File.basename(file, ".iyi")
       end
     end

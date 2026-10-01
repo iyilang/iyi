@@ -130,7 +130,7 @@ pub class UdpSocket
 
     if __sys_bind(fd, addr, addrlen) < 0
       IyiSocket.__sys_close(fd)
-      raise "cannot bind UDP socket to #{host}:#{port}"
+      raise "cannot bind UDP socket to #{IyiSocket.endpoint(host, port)}"
     end
 
     UdpSocket.new(fd, family)
@@ -153,7 +153,7 @@ pub class UdpSocket
     check_open
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
     res = UdpSocket.__sys_sendto(@fd, bytes.to_unsafe, bytes.size.to_u64, 0, addr, addrlen)
-    raise "cannot send to #{host}:#{port}" if res < 0_i64
+    raise "cannot send to #{IyiSocket.endpoint(host, port)}" if res < 0_i64
     res.to_i32
   end
 
@@ -168,7 +168,7 @@ pub class UdpSocket
     raise "negative count: #{count}" if count < 0
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
     res = UdpSocket.__sys_sendto(@fd, buffer, count.to_u64, 0, addr, addrlen)
-    raise "cannot send to #{host}:#{port}" if res < 0_i64
+    raise "cannot send to #{IyiSocket.endpoint(host, port)}" if res < 0_i64
     res.to_i32
   end
 
@@ -294,7 +294,7 @@ pub class UdpSocket
     check_open
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
     res = UdpSocket.__sys_connect(@fd, addr, addrlen)
-    raise "cannot connect UDP socket to #{host}:#{port}" if res < 0
+    raise "cannot connect UDP socket to #{IyiSocket.endpoint(host, port)}" if res < 0
   end
 
   # Sends bytes to the connected peer.
@@ -344,6 +344,10 @@ pub class UdpSocket
     addr = Pointer(UInt8).malloc(28_u64)
     len = 28_u32
     res = UdpSocket.__sys_getsockname(@fd, addr, pointerof(len))
+    # Unbound, the family's any-address, as POSIX answers it and as
+    # `local_port` answers 0: Windows refuses the call (WSAEINVAL), and
+    # this panicked "cannot get local address".
+    return @family == AF_INET6 ? "::" : "0.0.0.0" if res < 0 && UdpSocket.__unbound_now?
     raise "cannot get local address" if res < 0
 
     host, _ = UdpSocket.format_address(addr)
@@ -413,6 +417,10 @@ pub class UdpSocket
 
   def self.make_sockaddr(host : String, port : Int32) : Tuple(Pointer(UInt8), SockLen, Int32)
     raise "port #{port} is not a port: 0 to 65535" if port < 0 || port > 65535
+    # An IPv6 literal in its brackets too, as `IyiSocket.connect` reads
+    # one: `"[::1]"` was "'[' is not a hex digit".
+    size = host.bytesize
+    host = host[1, size - 2] if size >= 2 && host[0] == '[' && host[size - 1] == ']'
     if host.includes?(":")
       {IyiSocket.make_sockaddr_in6(IyiSocket.parse_ipv6(host), port), SOCKADDR_IN6_SIZE, AF_INET6}
     else
@@ -908,7 +916,7 @@ pub class UdpSocket
       descriptor = LibWs2_32::WSABuf.new(len: capacity, buf: buf)
       flags = 0_i32
       received = 0_i32
-      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s), 1)
       answered = LibWs2_32.WSARecvFrom(s, pointerof(descriptor), 1, pointerof(received),
         pointerof(flags), addr.as(Void*), addrlen.as(Pointer(Int32)), ov.as(Void*),
         Pointer(Void).new(0_u64))
@@ -924,9 +932,15 @@ pub class UdpSocket
         # kernel writing into a frame that is gone and an OVERLAPPED the
         # collector may already have handed to somebody else, so the
         # operation is waited out first — see `__sys_overlapped_await` for
-        # what that wait has to be here. No datagram arrived that the caller
-        # can have, which is what `Cancelled` says.
-        __sys_overlapped_await(s, ov)
+        # what that wait has to be here. And what it ended with decides the
+        # answer: a datagram that arrived before the cancel did is in the
+        # buffer and gone from the socket, so it is the caller's. Answered
+        # `Cancelled` on the flag alone, it was dropped: a sibling that sent
+        # a datagram and then failed lost it, 300 rounds in 300, where the
+        # POSIX arm's wait consumes nothing and the datagram stays queued.
+        waited = __sys_overlapped_await(s, ov)
+        return waited.to_i32 if waited >= 0_i64
+        return capacity if __is_msgsize(waited)
         return Cancelled.new
       end
       # The socket was closed under the park: a close does complete a posted

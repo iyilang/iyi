@@ -222,6 +222,13 @@ wide = IyiSocket.listen("::", 0)
 four = IyiSocket.connect("127.0.0.1", wide.local_port)
 raise "ipv6: an IPv4 connect reached a listener on ::" unless four.is_a?(SocketError)
 wide.close
+# A refusal names an IPv6 peer in its brackets: `::1:57456` was an address
+# with no port.
+gone = IyiSocket.listen("::1", 0)
+gone_port = gone.local_port
+gone.close
+refused6 = IyiSocket.connect("::1", gone_port)
+raise "ipv6: a refused connect answered #{refused6.inspect}" unless refused6.is_a?(SocketError) && refused6.operation.includes?("[::1]:#{gone_port}")
 {"2001:DB8:0:0:1:0:0:1" => "2001:db8::1:0:0:1",
  "2001:db8:0:1:1:1:1:1" => "2001:db8:0:1:1:1:1:1",
  "0:0:1:0:0:0:1:0"      => "0:0:1::1:0",
@@ -370,6 +377,36 @@ raise "timeout: the write answered #{t_last.inspect}" unless t_last.is_a?(Socket
 t_client.close
 t_conn.close unless t_conn.closed?
 t_server.close
+# One write of 64 MB to a peer that never reads parks when the kernel's
+# buffer is full, as every other write does, and keeps its deadline: on
+# Windows the whole buffer went to one `send`, which took it, held the
+# thread while it copied and never consulted the deadline - a gigabyte
+# took 5.2 s with nothing else running.
+b_server = IyiSocket.listen("127.0.0.1", 0)
+b_client = IyiSocket.connect("127.0.0.1", b_server.local_port).or_panic
+b_conn = b_server.accept.or_panic
+b_client.write_timeout_ms = 300
+b_big = "b" * 67108864
+b_answer = "unwritten"
+b_sibling_ms = -1_i64
+b_started = __iyi_monotonic_ns
+group do |g|
+  g.spawn do
+    w = b_client.write(b_big)
+    b_answer = w.is_a?(SocketError) && w.timed_out? ? "timed out" : w.inspect
+    0
+  end
+  g.spawn do
+    sleep(50)
+    b_sibling_ms = (__iyi_monotonic_ns - b_started) // 1000000_i64
+    0
+  end
+end
+raise "timeout: a 64 MB write to a peer that never reads answered #{b_answer}" unless b_answer == "timed out"
+raise "timeout: a 64 MB write held its thread: a 50 ms sleep beside it woke at #{b_sibling_ms} ms" if b_sibling_ms > 1000
+b_client.close
+b_conn.close
+b_server.close
 puts "timeout: ok"
 
 # 11. A reader parked on a socket keeps nothing of what it last read. The

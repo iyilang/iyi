@@ -311,12 +311,13 @@ class Iyi::Command
       compiler.emit_iyimod = emit_dir
       compiler.stdout = IO::Memory.new
       compiler.stderr = IO::Memory.new
-      previous_path = ENV["IYI_PATH"]?
+      # The module's root is where the entry's import is resolved first, as
+      # a project's root is. It travelled as the front of `IYI_PATH`, which
+      # is split on `;` on Windows (`:` elsewhere): a project in `a;b`
+      # arrived as two entries that are not directories, and `iyi doc`
+      # answered "can't find module" about a module `iyi run` builds.
+      compiler.iyi_project_root = module_root
       begin
-        # `IyiPath` splits this back apart on `Process::PATH_DELIMITER`,
-        # and on Windows that is `;`: a colon-joined list arrives as one
-        # entry with a drive letter in the middle of it.
-        ENV["IYI_PATH"] = ([module_root] + (previous_path ? [previous_path] : IyiPath.default_paths)).join(Process::PATH_DELIMITER)
         compiler.compile(
           Compiler::Source.new(entry, File.read(entry)),
           File.join(emit_dir, "unused"))
@@ -329,12 +330,14 @@ class Iyi::Command
         # importing "twoheaders"` where `iyi run` answered `a file declares
         # one module, and this one already declares 'main'`.
         deepest = Iyi.deepest_error(ex)
+        # Removed here: `abort!` exits, and an exit runs no `ensure`, so
+        # every `iyi doc` of a module that does not compile left an
+        # `iyi-doc-*` directory in the temporary directory.
+        FileUtils.rm_rf(emit_dir)
         abort! "#{filename} does not compile alone: #{deepest.message.to_s.lines.first?}", :USAGE_ERROR
-      ensure
-        previous_path ? (ENV["IYI_PATH"] = previous_path) : ENV.delete("IYI_PATH")
       end
 
-      Dir.glob(::Path[emit_dir].to_posix.join("**", "*.iyimod")) do |candidate|
+      Dir.glob(Iyi.glob_root(emit_dir).join("**", "*.iyimod")) do |candidate|
         begin
           artifact = IyiMod.read(candidate)
           if artifact.module_name == module_name
@@ -345,6 +348,7 @@ class Iyi::Command
           next
         end
       end
+      FileUtils.rm_rf(emit_dir)
       abort! "compiled, but no artifact carries module '#{module_name}'", :USAGE_ERROR
     ensure
       FileUtils.rm_rf(emit_dir)

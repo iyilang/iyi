@@ -120,7 +120,10 @@ module Iyi::Mod
 
     private def self.collect_files(root : String, prefix : String, into : Array(String)) : Nil
       Dir.each_child(File.join(root, prefix)) do |entry|
-        relative = prefix.empty? ? entry : File.join(prefix, entry)
+        # With `/` on every platform: the path is hashed, and `File.join`
+        # spelled it with `\` on Windows, so a package with a directory in
+        # it hashed one way there and another everywhere else.
+        relative = prefix.empty? ? entry : "#{prefix}/#{entry}"
         full = File.join(root, relative)
         # Asked of the name and not of what it points at: `File.directory?`
         # follows a link, so a directory link was walked *through* — into

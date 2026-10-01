@@ -27,6 +27,24 @@ built = CSV.build(quoted)
 assert_true built.includes?("a,b"), "build keeps comma field"
 puts "  rows, quotes, build"
 
+# A byte order mark, which Excel writes into every "CSV UTF-8" file, is not
+# the first field's: `row[0] == "id"` was false.
+assert_str "id", CSV.parse("\uFEFFid,name\r\n1,a\r\n")[0][0], "a header behind a byte order mark"
+puts "  a byte order mark"
+
+# A UTF-16 document (Windows PowerShell 5.1's `Out-File` and `>`) is
+# refused by its byte order mark; it read as fields with a NUL between
+# every two letters, and no error.
+said = "parsed"
+group do |g|
+  attempt = g.spawn { CSV.parse("\xFF\xFE\"\0N\0\"\0\r\0\n\0") }
+  outcome = attempt.value
+  said = outcome.message.to_s if outcome.is_a?(Panicked)
+  0
+end
+assert_true said.includes?("UTF-16"), "a UTF-16 document is refused, not #{said.inspect}"
+puts "  a UTF-16 document is refused"
+
 puts "\n== line ends and empty fields"
 # A lone CR ends a line, as in the other library: it was dropped, and the
 # text either side of it ran into one field (`a"b"`).

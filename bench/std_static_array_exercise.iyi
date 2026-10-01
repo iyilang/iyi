@@ -26,6 +26,20 @@ a[1] = 4
 assert_true a[1] == 4, "put"
 puts "  put"
 
+puts "\n== to_s"
+# The text was grown by `+` a piece at a time, copying all of it per
+# element: 10,000 elements took 1.4 s where `to_a.to_s` took 1 ms.
+big = StaticArray(Int32, 10000).new { |i| i }
+started = __iyi_monotonic_ns
+big_text = big.to_s
+text_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+array_text = big.to_a.to_s
+array_ns = __iyi_monotonic_ns - started
+assert_true big_text == "StaticArray" + array_text, "to_s of 10,000 elements matches the array's"
+assert_true text_ns <= array_ns * 20 + 200_000_000_i64, "to_s: 10,000 elements took #{text_ns // 1000000} ms where to_a.to_s took #{array_ns // 1000000} ms"
+puts "  10,000 elements as to_a.to_s writes them, within the bound"
+
 puts "\n== compare"
 # `<=>` forwarded to a `Slice#<=>` that does not exist, so this section did
 # not compile. Lexicographic, element by element.
@@ -41,5 +55,34 @@ f = StaticArray(Int32, 4).new(0)
 f.fill(7, 1, 2147483647)
 assert_str "StaticArray[0, 7, 7, 7]", f.to_s, "fill with a count to the top of Int32"
 puts "  a huge count runs to the end"
+
+puts "\n== hash"
+
+# Built with `new` and a block rather than the `StaticArray[...]` macro,
+# which a program reading this module as an artifact does not have.
+def pair(x : Int32, y : Int32) : StaticArray(Int32, 2)
+  StaticArray(Int32, 2).new { |i| i == 0 ? x : y }
+end
+
+# There was only the other library's `hash(hasher)`, so `Object#hash` gave
+# every `StaticArray(Int32, 2)` its type's id: one slot for all of them, and
+# 40,000 keys took 13 s to insert where the same pairs as tuples took 3 ms.
+assert_true pair(1, 2).hash == pair(1, 2).hash, "equal arrays hash alike"
+grid_hashes = {} of Int32 => Bool
+150.times { |x| 150.times { |y| grid_hashes[pair(x, y).hash] = true } }
+assert_true grid_hashes.size == 22500, "hash spread: a 150 by 150 grid had #{grid_hashes.size} distinct hashes of 22500"
+started = __iyi_monotonic_ns
+keyed = {} of StaticArray(Int32, 2) => Int32
+150.times { |x| 150.times { |y| keyed[pair(x, y)] = x * y } }
+keyed_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+tupled = {} of {Int32, Int32} => Int32
+150.times { |x| 150.times { |y| tupled[{x, y}] = x * y } }
+tupled_ns = __iyi_monotonic_ns - started
+assert_true keyed.size == 22500 && keyed[pair(149, 17)]? == 2533, "a grid table fills and answers"
+# A bound, not a benchmark: twenty times the tuples' time and 200 ms over.
+# The type's id took 3.7 s for this grid.
+assert_true keyed_ns <= tupled_ns * 20 + 200_000_000_i64, "hash table: 22500 keys took #{keyed_ns // 1000000} ms where tuples took #{tupled_ns // 1000000} ms"
+puts "  22500 distinct hashes, and a table of them within the bound"
 
 puts "\nALL CHECKS PASSED"

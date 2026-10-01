@@ -77,6 +77,17 @@ assert_str("", reads("a: !!str\n", "a tag over an empty node tags the empty scal
 assert_true(reads("- !!null\n", "!!null over an empty node is null")[0].null?, "!!null over an empty node is null")
 assert_str("1", reads("a: !!str\n  1\n", "a tag alone on its line applies to the text below as written")["a"].as_s, "a tag alone on its line applies to the text below as written")
 assert_str("", reads("[!!str ]", "properties over nothing in a flow collection are the empty scalar")[0].as_s, "properties over nothing in a flow collection are the empty scalar")
+# A quoted scalar's folding trims its blanks in place: it copied all it had
+# read at every line end, and 20,000 lines took 4.9 s where the same bytes
+# on one line took 5 ms.
+quoted_lines = "xxxxxxxxxx\n" * 20000
+quoted_started = __iyi_monotonic_ns
+double_lines = reads("\"" + quoted_lines + "\"", "a double-quoted scalar of 20,000 lines")
+single_lines = reads("'" + quoted_lines + "'", "a single-quoted scalar of 20,000 lines")
+quoted_ms = (__iyi_monotonic_ns - quoted_started) // 1000000
+assert_true(double_lines.as_s == "xxxxxxxxxx " * 20000 && single_lines == double_lines, "quoted scalars of 20,000 lines fold to one line each")
+assert_true(quoted_ms < 1000, "quoted scalars of 20,000 lines read in under a second, not #{quoted_ms} ms")
+puts "  a double- and a single-quoted scalar of 20,000 lines read in under a second"
 puts "  integers, floats, null, 1.2 strings, quotes, folded, literal and verbatim tags"
 puts "  '?' plain starts, block scalar blank lines and chomping, quoted folding, flow folding, tags over nothing"
 
@@ -87,6 +98,13 @@ assert_true(YAML.dump(doc).starts_with?("a: 1"), "dump is block YAML")
 assert_true(YAML.parse(YAML.dump(Any.new(nil))).null?, "dumped null")
 assert_str("\"- a\"\n", YAML.dump(Any.new("- a")), "a string that looks like a sequence entry is quoted")
 assert_str("\"? a\"\n", YAML.dump(Any.new("? a")), "a string that looks like an explicit key is quoted")
+# `?x` was dumped bare, which the reader refuses, and a leading byte order
+# mark bare, which the reader skips: neither read back to what was dumped.
+["?x", "\uFEFFmarked"].each do |text|
+  assert_true(YAML.parse(YAML.dump(Any.new(text))) == Any.new(text), "#{text.inspect} reads back from its dump")
+  keyed = Any.new({Any.new(text) => Any.new(text)} of Any => Any)
+  assert_true(YAML.parse(YAML.dump(keyed)) == keyed, "#{text.inspect} as a key and a value reads back")
+end
 assert_str("- a", YAML.parse(YAML.dump(Any.new([Any.new("- a")] of Any)))[0].as_s, "an entry-like string reads back inside a sequence")
 merge_key = YAML.parse("\"<<\": 1\n")
 assert_str("\"<<\": 1\n", YAML.dump(merge_key), "the merge key is quoted when dumped as a plain key")
@@ -119,9 +137,29 @@ puts "  alias, merge, explicit key wins either side of <<, properties on a root 
 puts "\n== streams and typed keys"
 docs = YAML.parse_all("1\n---\n2\n")
 assert_true(docs.size == 2 && docs[0].as_i == 1_i64 && docs[1].as_i == 2_i64, "two documents")
+# A document's end marked twice is one end, as libyaml reads it: the
+# second `...` was refused as "a document end marker with no document".
+marked = Parser.new("a: 1\n...\n...\n---\nb\n").parse_all
+assert_true(!marked.nil? && marked.size == 2 && marked[1].as_s == "b", "a document's end may be marked more than once")
 keys = YAML.parse("1: one\ntrue: x\n")
 assert_str("one", keys[Any.new(1_i64)].as_s, "integer key")
+# The core schema's integer is `[-+]?[0-9]+`: `0777` is 777, as the header
+# says now - it said a string, and a program trusting it compared a string.
+# Keep chomping keeps the line breaks the text has, and the stream's end
+# after its last one is not another: `|+` added one at the end of a file.
+kept = {"a: |+\n  x\n" => "x\n", "a: |+\n  x\n\n" => "x\n\n", "a: >+\n  x\n" => "x\n", "a: |+\r\n  x\r\n" => "x\n", "a: |\n  x\n" => "x\n", "a: |-\n  x\n" => "x"}
+kept.each do |text, value|
+  assert_str(value, YAML.parse(text)["a"].as_s, "#{text.inspect} keeps what it has")
+end
+assert_true(YAML.parse("0777\n") == Any.new(777_i64) && YAML.parse("0o17\n") == Any.new(15_i64), "0777 is 777, 0o17 is 15")
 assert_str("x", keys[Any.new(true)].as_s, "boolean key")
+# An Int32 reaches an integer key as `Any.new(1)` does: `keys[1]` panicked
+# "expected a sequence, not a mapping", and `[]?` and `dig?` answered nil.
+by_index = keys[1]?
+dug = keys.dig?(1)
+assert_true(!by_index.nil? && by_index.as_s == "one" && !dug.nil? && dug.as_s == "one", "an Int32 reaches an integer key through []? and dig?")
+assert_str("one", keys[1].as_s, "an Int32 reaches an integer key through []")
+assert_str("x", YAML.parse("a:\n  1: x\n").dig("a", 1).as_s, "dig walks to an integer key")
 h = Hash(Any, Int32).new
 h[YAML.parse("a: 1")] = 7
 assert_true(h[YAML.parse("a: 1")]? == 7, "Any hashes with ==")
@@ -135,11 +173,28 @@ refused("{a: 1, a: 2}\n", "duplicate key \"a\" at line 1, column 8")
 refused("[1, 1", "unterminated flow sequence at line 1, column 1")
 refused("*nope\n", "unknown anchor *nope at line 1, column 1")
 refused("\"\\q\"\n", "unknown escape '\\q' at line 1, column 2")
+# A Windows path in double quotes: `\U` is an escape, short of its eight
+# digits, and was reported as unknown.
+refused("path: \"C:\\Users\\bob\"\n", "escape '\\U' wants 8 hexadecimal digits: a backslash in double quotes is '\\\\', or single-quote the scalar at line 1, column 10")
 refused("? a: 1\n", "an explicit '?' key is not supported at line 1, column 1")
 refused("&a [*a]\n", "cyclic alias *a at line 1, column 5")
 refused("&a {b: *a}\n", "cyclic alias *a at line 1, column 8")
 refused("a: b\u0001c\n", "control character U+0001 is not allowed at line 1, column 5")
 refused("a: b\u007Fc\n", "control character U+007F is not allowed at line 1, column 5")
+# A C1 control and the noncharacters U+FFFE and U+FFFF, which the header
+# said were refused and libyaml refuses, were read as text: `\u009B` is a
+# terminal's escape. U+0085 is text to a 1.2 reader.
+refused("c1: b\u0080c\n", "control character U+0080 is not allowed at line 1, column 6")
+refused("c1: \"b\u009B31mc\"\n", "control character U+009B is not allowed at line 1, column 7")
+refused("nc: b\uFFFEc\n", "noncharacter U+FFFE is not allowed at line 1, column 6")
+assert_str("b\u0085c", YAML.parse("a: b\u0085c\n")["a"].as_s, "U+0085 is text, as YAML 1.2 reads it")
+# A UTF-16 stream (Windows PowerShell 5.1's `Out-File` and `>`) is named
+# by its byte order mark; it was "control character U+0000".
+["\xFF\xFEa\0:\0 \0x\0", "\xFE\xFF\0a\0:\0 \0x"].each do |wide|
+  wide_parser = Parser.new(wide)
+  assert_true(wide_parser.parse_all.nil?, "a UTF-16 stream is refused")
+  assert_str("encoding 'UTF-16' is not supported: the input is read as UTF-8 at line 1, column 1", wide_parser.error || "", "a UTF-16 stream is named by its byte order mark")
+end
 refused("a:\n    b: 1\n  c: 2\n", "bad indentation of a mapping entry at line 3, column 3")
 refused("  a: 1\n b: 2\n", "bad indentation of a mapping entry at line 2, column 2")
 refused("a:\n    - 1\n  - 2\n", "bad indentation of a sequence entry at line 3, column 3")
@@ -151,12 +206,38 @@ refused("\"\\uD800\"\n", "surrogate code point \\uD800 in escape at line 1, colu
 refused("- a: b: c\n", "a mapping value is not allowed here at line 1, column 7")
 refused("!<tag:yaml.org,2002:foo> 1\n", "unknown tag !<tag:yaml.org,2002:foo> at line 1, column 1")
 refused("a: - b\n", "a sequence entry is not allowed here at line 1, column 4")
+# A plain key starts as a plain value must: `]: 1`, `}: 1` and `,: 1`
+# were read as the keys "]", "}" and ",".
+refused("]: 1\n", "a scalar cannot start with ']' at line 1, column 1")
+refused("a:\n  }: 1\n", "a scalar cannot start with '}' at line 2, column 3")
+refused(",: 1\n", "a scalar cannot start with ',' at line 1, column 1")
 refused("a: b # c\n  d\n", "unexpected content at line 2, column 3")
 refused("[1,#c\n]\n", "a value was expected at line 1, column 4")
 refused("[? a]\n", "an explicit '?' key is not supported at line 1, column 2")
 refused("[- a]\n", "a sequence entry is not allowed here at line 1, column 2")
 laughs = "a: &a [x,x,x,x,x,x,x,x,x,x]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c,*c]\ne: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d,*d]\nf: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e,*e]\ng: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f,*f]\nh: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g,*g]\ni: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h,*h]\n"
 refused(laughs, "alias expansion past 1,000,000 nodes at line 6, column 29")
+refused("[" * 101 + "]" * 101, "nesting deeper than 100 levels at line 1, column 101")
+# The deepest document read is one a task can use: parse, compare, print,
+# hash and dump. At a limit of 256 a task died of a stack overflow parsing
+# 256 nested sequences and comparing 128, and the process with it.
+deepest_seq = "[" * 100 + "]" * 100
+deepest_map = "{a: " * 100 + "1" + "}" * 100
+in_task = false
+group do |g|
+  g.spawn do
+    [deepest_seq, deepest_map].each do |deepest|
+      one = YAML.parse(deepest)
+      raise "ASSERTION FAILED: the deepest document does not equal itself in a task" unless one == YAML.parse(deepest)
+      one.inspect
+      one.hash
+      raise "ASSERTION FAILED: the deepest document does not dump back in a task" unless YAML.parse(YAML.dump(one)) == one
+    end
+    in_task = true
+    0
+  end
+end
+assert_true in_task, "the deepest document is parsed, compared, printed, hashed and dumped in a task"
 puts "  duplicate keys, quotes, tabs, flow, aliases, escapes, explicit keys, cycles,"
 puts "  control characters, stray entries, directives, tags, surrogates, alias expansion"
 puts "  entries after a key, text after a comment, '#', '?' and '-' starting a flow node"

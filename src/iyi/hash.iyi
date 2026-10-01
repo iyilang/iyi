@@ -175,12 +175,12 @@ class Hash(K, V)
     @index[slot_for(key)]
   end
 
-  # The index slot this key belongs in: the one pointing at its entry, or,
-  # when it has none, the first tombstone the probe passed or the free slot
-  # it stopped at.
+  # The index slot this key belongs in: its entry's, or the first tombstone
+  # or free slot the probe met. The hash is mixed first: an Int's is itself,
+  # and multiples of 65536 shared low bits, 20,000 of them 9.5 s to insert.
   private def slot_for(key : K) : Int32
     mask = @capacity * 2 - 1
-    slot = key.hash & mask
+    slot = ((h = key.hash &* -1640531535) ^ h.unsafe_shr(16)) & mask
     tombstone = -1
     while (entry = @index[slot]) != -1
       if entry == -2

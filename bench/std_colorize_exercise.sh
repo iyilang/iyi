@@ -139,6 +139,45 @@ else
   echo "  a broken colorize is caught"
 fi
 
+# A terminal on standard output and a file on standard error: the answer
+# is one for the program and text is painted before anyone knows which
+# stream it goes to, so both must be terminals, as Crystal's
+# `on_tty_only!` asks. With standard output alone asked, `prog 2> err.log`
+# from a terminal wrote escapes into err.log. Measured on Windows, where
+# Python can give a program a console of its own.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo
+    echo "== a console on standard output, a file on standard error"
+    printf 'module main\n\nimport std/colorize::{Colorize}\n\nputs "out".colorize.red.to_s\nSTDERR.puts "err".colorize.red.to_s\n' > "$WORK/split.iyi"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the split is unmeasured"
+    elif ! "$IYI" build -o "$WORK/split" "$WORK/split.iyi" > "$WORK/split.build" 2>&1; then
+      echo "  the split program did not build"; sed -n '1,10p' "$WORK/split.build"; status=1
+    else
+      cat > "$WORK/split.py" <<'PY'
+import os, subprocess, sys
+program, err = sys.argv[1], sys.argv[2]
+if os.environ.get("SPLIT_INNER") != "1":
+    info = subprocess.STARTUPINFO(); info.dwFlags = 1; info.wShowWindow = 0
+    env = dict(os.environ, SPLIT_INNER="1")
+    env.pop("TERM", None); env.pop("NO_COLOR", None)
+    subprocess.Popen([sys.executable, __file__] + sys.argv[1:], env=env, creationflags=0x10, startupinfo=info).wait(timeout=60)
+    sys.exit(0)
+with open(err, "wb") as f:
+    subprocess.call([program], stderr=f)
+PY
+      "$PY" "$WORK/split.py" "$WORK/split.exe" "$WORK/split.err" > "$WORK/split.out" 2>&1
+      if [ ! -s "$WORK/split.err" ]; then
+        echo "  no console here, or the program wrote nothing, so the split is unmeasured"; cat "$WORK/split.out"
+      elif grep -q $'\x1b' "$WORK/split.err"; then
+        echo "  escapes were written into the file on standard error:"; od -c "$WORK/split.err" | sed -n '1,3p'; status=1
+      else
+        echo "  the file on standard error holds plain text: $(tr -d '\r' < "$WORK/split.err")"
+      fi
+    fi
+    ;;
+esac
 # A copy of the module with each replacement made, or the reason it could
 # not be: `broken_copy DIR OLD NEW [OLD NEW]...`.
 broken_copy() {

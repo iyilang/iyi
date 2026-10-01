@@ -14,6 +14,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/benchmark::{Benchmark}
+import std/time::{Span}
 
 puts "== measure"
 tms = Benchmark.measure("spin") do
@@ -26,6 +27,28 @@ assert_str "spin", tms.label, "label"
 assert_true tms.real >= 0.0, "real"
 span = Benchmark.realtime { 1 }
 assert_true span.total_seconds >= 0.0, "realtime"
-puts "  measure label and non-negative real time"
+# Wall clock only: the user, system and total columns printed 0.000000
+# whatever the block did, and are not printed now.
+assert_true !tms.to_s.includes?("0.000000   0.000000"), "measure prints no CPU columns it did not measure: #{tms.to_s}"
+puts "  measure label and non-negative real time, and no CPU columns"
+
+puts "\n== integer seconds, and only what is measured"
+# Seconds as integers, as the other library takes them: it asked
+# `Time.seconds`, and `Job.new(1, 1)` did not compile.
+job = Benchmark::IPS::Job.new(1, 1)
+assert_true job.items.empty?, "a job from integer seconds"
+# The shell checks what bm and ips print: a real time, and no user,
+# system or B/op column, which printed zeros whatever the block did. A
+# time differs on every run, and this program's output is compared run
+# for run, so they print only when the shell asks.
+if Program.args[0]? == "print"
+  Benchmark.bm do |x|
+    x.report("a block") { 1 }
+  end
+  Benchmark.ips(Span.milliseconds(30), Span.milliseconds(10)) do |x|
+    x.report("an array") { [1, 2, 3].size }
+  end
+end
+puts "  integer seconds build a job"
 
 puts "\nALL CHECKS PASSED"

@@ -16,18 +16,27 @@
 # text: top-level keys first, then each section as `[name]`, its keys and
 # one blank line. `space` chooses `key = value` over `key=value` and is
 # false unless asked, so `parse(build(x))` and `build(parse(text))` round
-# trip for text written the compact way. The IO form takes the IO first,
-# the way `io.write` reads, and calls only `write`.
+# trip for text written the compact way. What `parse` would read back as
+# something else is refused rather than written: a line break in a name
+# or a value, a `]` in a section's name, a key that is empty, holds `=`
+# or opens with `#`, `;` or `[`, and blanks at either end of a key or a
+# value. INI has no escapes, so the one honest answer is the panic. The
+# IO form takes the IO first, the way `io.write` reads, and calls only
+# `write`.
 
 module std/ini
 
 pub struct INI
+  # Past a byte order mark, which Windows PowerShell 5.1's `Set-Content
+  # -Encoding UTF8` and older Notepad write: it panicked "expected
+  # declaration at line 1, column 8" at a `[section]` behind one, and the
+  # first key of a file without a section kept it and never matched.
   def self.parse(string : String) : Hash(String, Hash(String, String))
-    parse_lines(string.lines)
+    parse_lines(string.lchop('\uFEFF').lines)
   end
 
   def self.parse(io : IO) : Hash(String, Hash(String, String))
-    parse_lines(io.read_all.lines)
+    parse(io.read_all)
   end
 
   private def self.parse_lines(lines : Array(String)) : Hash(String, Hash(String, String))
@@ -116,6 +125,22 @@ pub struct INI
   def self.build(ini : Hash(String, Hash(String, String)), space : Bool = false) : String
     parts = [] of String
     delim = space ? " = " : "="
+    # Written verbatim, a value holding a line break wrote lines of its
+    # own: `"hello\r\n[admin]\r\nrole=root"` read back as a section
+    # `admin` with a key `role`, and a padded value came back unpadded.
+    ini.each do |section, properties|
+      if why = unwritable_section(section)
+        raise "INI.build: section #{section.inspect} cannot be written: #{why}"
+      end
+      properties.each do |key, value|
+        if why = unwritable_key(key)
+          raise "INI.build: key #{key.inspect} in section #{section.inspect} cannot be written: #{why}"
+        end
+        if why = unwritable_value(value)
+          raise "INI.build: the value of #{key.inspect} in section #{section.inspect} cannot be written: #{why}"
+        end
+      end
+    end
 
     if top = ini[""]?
       top.each do |key, value|
@@ -144,5 +169,30 @@ pub struct INI
 
   def self.build(io : IO, ini : Hash(String, Hash(String, String)), space : Bool = false) : Nil
     io.write(build(ini, space))
+  end
+
+  private def self.unwritable_section(name : String) : String?
+    return "it holds a line break" if line_break?(name)
+    return "it holds `]`" if name.includes?("]")
+    nil
+  end
+
+  private def self.unwritable_key(key : String) : String?
+    return "it is empty" if key.empty?
+    return "it holds a line break" if line_break?(key)
+    return "it holds `=`" if key.includes?("=")
+    return "it opens with #{key[0].inspect}, which starts a comment or a section" if key.starts_with?("#") || key.starts_with?(";") || key.starts_with?("[")
+    return "blanks at either end are not read back" if key != key.strip
+    nil
+  end
+
+  private def self.unwritable_value(value : String) : String?
+    return "it holds a line break" if line_break?(value)
+    return "blanks at either end are not read back" if value != value.strip
+    nil
+  end
+
+  private def self.line_break?(text : String) : Bool
+    text.includes?("\n") || text.includes?("\r")
   end
 end

@@ -87,14 +87,18 @@ fun __iyi_ctx_swap(current : Pointer(UInt64), target : Pointer(UInt64)) : Nil
          movups %xmm15, 144(%rsp)
          movq %gs:0x08, %r8
          movq %gs:0x10, %r9
+         movq %gs:0x1478, %r10
          pushq %r8
          pushq %r9
+         pushq %r10
          movq %rsp, (%rcx)
          movq (%rdx), %rsp
+         popq %r10
          popq %r9
          popq %r8
          movq %r8, %gs:0x08
          movq %r9, %gs:0x10
+         movq %r10, %gs:0x1478
          movups 0(%rsp), %xmm6
          movups 16(%rsp), %xmm7
          movups 32(%rsp), %xmm8
@@ -451,6 +455,9 @@ class IyiFiber
   # and OUT bits, which the registration is the union of.
   property wait_dir : Int32
   property wait_handle : Void*
+  # What the posted operation on `wait_handle` does: 1 reads, 4 writes, 0
+  # neither (a connect), as `wait_posix` numbers the two directions.
+  property io_direction : Int32
   property wait_overlapped : Pointer(UInt8)
   property io_bytes_read : Int64
 
@@ -481,11 +488,12 @@ class IyiFiber
     # it has to stand on the stack that faulted. Windows has no
     # `sigaltstack`: a vectored handler runs where the fault happened, so a
     # fiber whose stack ran out had nowhere to print from and the process
-    # died of a bare access violation. The stack therefore ends in three
-    # parts rather than one — from `base` up: one uncommitted page, the
-    # hard wall a frame that jumped the guard lands in; `GUARD_SLACK`
-    # committed bytes, which is the handler's room; and one committed page
-    # carrying PAGE_GUARD, which is what the program trips on.
+    # died of a bare access violation. The stack's bottom is therefore in
+    # two parts - from `base` up: one uncommitted page, the hard wall a
+    # frame that jumped everything lands in, and `GUARD_SLACK` and a page
+    # committed, which is the handler's room; the kernel's growth of the
+    # stack stops above them (`map_stack`), and answers there with
+    # STATUS_STACK_OVERFLOW.
     #
     # 16 KB because that is what `SetThreadStackGuarantee` reserves for the
     # same handler on a thread's own stack, and it is measured rather than
@@ -498,6 +506,13 @@ class IyiFiber
     # is the handler walking off the bottom of the guard page into the
     # page nobody committed.
     GUARD_SLACK = 16384_u64
+
+    # What a new stack starts with committed at its top; the kernel commits
+    # the rest a page at a time as the fiber reaches it. The whole 256 KiB
+    # was committed up front, and Windows charges committed memory to the
+    # commit limit whether it is touched or not: 10,000 tasks held 2,690
+    # MiB, and at 40,000 the commit ran out and each new task panicked.
+    INITIAL_COMMIT = 16384_u64
   {% end %}
 
   def initialize
@@ -531,6 +546,7 @@ class IyiFiber
     @prev_child = nil
     @stack_top = 0_u64
     @wait_handle = Pointer(Void).new(0_u64)
+    @io_direction = 0
     @wait_overlapped = Pointer(UInt8).malloc(32_u64)
     @io_bytes_read = 0_i64
   end
@@ -577,24 +593,26 @@ class IyiFiber
       base_ptr = LibC.VirtualAlloc(nil, STACK_BYTES, 0x2000_i32, 1_i32)
       raise "VirtualAlloc reserve failed" if base_ptr.address == 0_u64
       base = base_ptr.address
-      committed = LibC.VirtualAlloc(Pointer(Void).new(base + PAGE), STACK_BYTES - PAGE, 0x1000_i32, 4_i32)
+      # A stack the way Windows makes a thread's, from the top down: the
+      # top INITIAL_COMMIT committed, and one PAGE_GUARD page (0x4 | 0x100)
+      # under it. The switch installs this stack's bounds in the TEB -
+      # StackBase, StackLimit and DeallocationStack - so a touch of the
+      # guard page is the kernel's to answer as for any thread: it commits
+      # that page, moves the guard one down, and lowers StackLimit. Only
+      # the pages a fiber reaches are ever committed.
+      top = base + STACK_BYTES
+      committed = LibC.VirtualAlloc(Pointer(Void).new(top - INITIAL_COMMIT - PAGE), INITIAL_COMMIT + PAGE, 0x1000_i32, 4_i32)
       raise "VirtualAlloc commit failed" if committed.address == 0_u64
-      # The trip wire: PAGE_READWRITE | PAGE_GUARD (0x4 | 0x100) on the one
-      # page above the slack. Windows raises STATUS_GUARD_PAGE_VIOLATION
-      # the first time anything touches it and clears the attribute in the
-      # same breath, so the handler that runs next has this page *and* the
-      # slack under it committed and writable — which is the whole point,
-      # and the difference from the uncommitted page below, where a handler
-      # would fault again and the process would die without a word.
-      #
-      # Armed here and not in `settle_stack`: a stack comes back to the
-      # pool only from a fiber that finished, and a fiber that trips this
-      # guard never finishes — the handler exits the process. So a pooled
-      # stack's guard is still armed, and re-arming on every fiber start
-      # would be a syscall per connection for a page nobody disarmed.
       old = uninitialized Int32
-      armed = LibC.VirtualProtect(Pointer(Void).new(base + PAGE + GUARD_SLACK), PAGE, 0x104_i32, pointerof(old))
+      armed = LibC.VirtualProtect(Pointer(Void).new(top - INITIAL_COMMIT - PAGE), PAGE, 0x104_i32, pointerof(old))
       raise "VirtualProtect for the fiber stack's guard page failed" if armed == 0
+      # And the handler's room, committed at the bottom where the kernel
+      # will not grow: DeallocationStack names the byte above it (see
+      # `settle_stack`), so the kernel answers STATUS_STACK_OVERFLOW there
+      # and the fault handler stands on this. One uncommitted page stays
+      # under it, the wall a frame that stepped over everything lands on.
+      slack = LibC.VirtualAlloc(Pointer(Void).new(base + PAGE), GUARD_SLACK + PAGE, 0x1000_i32, 4_i32)
+      raise "VirtualAlloc commit failed" if slack.address == 0_u64
     {% elsif flag?(:darwin) %}
       # libSystem's mmap: MAP_PRIVATE|MAP_ANON is 0x1002 here rather
       # than Linux's 0x22, and failure is MAP_FAILED (every bit set)
@@ -623,21 +641,21 @@ class IyiFiber
       ret_slot = entry_sp - 8_u64
       Pointer(UInt64).new(ret_slot).value = __iyi_fiber_entry_address
 
-      # The two TEB words, ten xmm registers (twenty words) and eight
+      # The three TEB words, ten xmm registers (twenty words) and eight
       # integer registers, in the order the switch pops them.
-      saved = ret_slot - 240_u64
-      # The TEB's StackLimit the switch installs, and it is the *usable*
-      # low end now: above the uncommitted page, above the handler's slack
-      # and above the guard page, because that is the first byte the
-      # program may have. Left at `base + PAGE` it named memory the
-      # program must not reach, and anything reading the limit — a Windows
-      # API asked on a fiber, the collector's `stack_base` — was told the
-      # stack was 20 KB longer than it is.
+      saved = ret_slot - 248_u64
+      # DeallocationStack: the lowest byte the kernel may grow the stack
+      # into, above the handler's committed room (`map_stack`).
       Pointer(UInt64).new(saved + 0_u64).value = base + PAGE + GUARD_SLACK + PAGE
-      Pointer(UInt64).new(saved + 8_u64).value = top
+      # StackLimit: the committed low end the stack starts with, above the
+      # guard page. A stack back from the pool may have grown lower, and a
+      # limit above what is committed only makes a large frame's probes
+      # touch pages that are already there.
+      Pointer(UInt64).new(saved + 8_u64).value = top - INITIAL_COMMIT
+      Pointer(UInt64).new(saved + 16_u64).value = top
       index = 0_i64
       while index < 28_i64
-        Pointer(UInt64).new(saved + 16_u64 + index * 8_u64).value = 0_u64
+        Pointer(UInt64).new(saved + 24_u64 + index * 8_u64).value = 0_u64
         index = index + 1
       end
       @sp = saved
@@ -883,6 +901,18 @@ class IyiSchedulerState
 end
 
 class IyiScheduler
+  # Set by `exit`: the process is ending, and a group's join owes it no
+  # wait (`IyiGroup#join`).
+  @@exiting = false
+
+  def self.exiting? : Bool
+    @@exiting
+  end
+
+  def self.exiting=(value : Bool) : Nil
+    @@exiting = value
+  end
+
   @[ThreadLocal]
   @@state : IyiSchedulerState?
   @@states_head : IyiSchedulerState?
@@ -1074,23 +1104,26 @@ class IyiScheduler
     # faults a fiber's edge can raise both arrive at the same handler and
     # it has to tell them apart by address:
     #
-    #   * a guard-page violation on the PAGE_GUARD page `map_stack` armed,
-    #     which is the ordinary way a fiber runs out; and
-    #   * an access violation in the uncommitted page under the slack,
+    #   * STATUS_STACK_OVERFLOW, which the kernel answers when the stack it
+    #     grows a guard page at a time reaches the handler's room at its
+    #     bottom (`map_stack`) - the ordinary way a fiber runs out; and
+    #   * an access violation in the uncommitted page under that room,
     #     which is a frame big enough to step over the guard page whole.
     #
-    # The range is therefore the reservation's first page, the slack and
-    # the guard page — everything below the limit `settle_stack` installs.
-    # The slack itself is committed and never faults, so including it
-    # costs nothing and means a handler that overran its own room still
-    # says what happened rather than calling it a memory fault.
+    # The range is therefore the whole reservation: the pages the kernel
+    # had not grown into when the fault came, the wall and the room.
+    # Including the room, which is committed and never faults, means a
+    # handler that overran it still says what happened rather than
+    # calling it a memory fault.
     def self.fiber_guard_hit?(address : UInt64) : Bool
       fiber = @@all_head
       while fiber.is_a?(IyiFiber)
         top = fiber.stack_top
         if top != 0
+          # Anywhere in the reservation: the pages the kernel had not grown
+          # into yet as well as the wall and the slack at its bottom.
           low = top - IyiFiber::STACK_BYTES
-          return true if address >= low && address < low + IyiFiber::PAGE + IyiFiber::GUARD_SLACK + IyiFiber::PAGE
+          return true if address >= low && address < top
         end
         fiber = fiber.next_fiber
       end
@@ -1186,14 +1219,22 @@ class IyiScheduler
   # switched to.
   def self.switch_to(fiber : IyiFiber) : Nil
     previous = current
-    fiber.state = IyiFiberState::Running
-    return if fiber.sp_slot.address == previous.sp_slot.address
+    if fiber.sp_slot.address == previous.sp_slot.address
+      fiber.state = IyiFiberState::Running
+      return
+    end
     if fiber.saved_sp == 0_u64
       maker = @@stack_maker
       maker.call(fiber) unless maker.is_a?(Nil)
     end
     state.current = fiber
     __iyi_ctx_swap(previous.sp_slot, fiber.sp_slot)
+    # Running from here, on its own stack, and not before: the collector's
+    # fiber walk skips the running fiber, whose stack the thread's own scan
+    # covers from its sp, and a fiber marked running before the switch got
+    # there was covered by neither - a thread another thread stopped in
+    # between had what only that fiber's stack named freed under it.
+    current.state = IyiFiberState::Running
     # Back on this fiber's own stack, which is the first moment a stack
     # somebody else finished with can be taken back.
     reap_dying
@@ -1201,10 +1242,11 @@ class IyiScheduler
 
   # The trampoline lands here on a fresh fiber's first resume.
   def self.run_spawned_fiber : Nil
+    fiber = current
+    fiber.state = IyiFiberState::Running
     # A fresh fiber is also a successor: the switch that got here
     # returned into the trampoline rather than into `switch_to`.
     reap_dying
-    fiber = current
     body = fiber.proc
     body.call unless body.is_a?(Nil)
     fiber.state = IyiFiberState::Done
@@ -1227,7 +1269,15 @@ class IyiScheduler
   def self.sleep_current(ms : Int32) : Nil | Cancelled
     fiber = current
     return Cancelled.new if fiber.cancelled
-    return nil if ms <= 0
+    if ms <= 0
+      # A yield: to the back of the run queue, so every task already
+      # runnable runs first. It returned at once, and a task polling with
+      # `sleep(0)` spun 50 million times while the task that would have
+      # set its flag never ran - the runtime has no other way to yield.
+      enqueue(fiber)
+      reschedule
+      return fiber.cancelled ? Cancelled.new : nil
+    end
     fiber.deadline = __iyi_monotonic_ns + ms.to_i64 * 1000000_i64
     fiber.state = IyiFiberState::Sleeping
     sleep_insert(fiber)
@@ -1251,8 +1301,23 @@ class IyiScheduler
   # operation. Between the two the caller makes exactly one overlapped
   # call, and reads `GetLastError` itself: ERROR_IO_PENDING (997) means
   # park, anything else means the call answered on the spot.
-  def self.arm_overlapped_current(handle : Void*) : Pointer(UInt8)
+  #
+  # *direction* is the rule `wait_posix` keeps on POSIX: one fiber reading a
+  # handle and one writing it, and a second in the same direction refused.
+  # Windows posted both and let them race - two readers took the bytes in
+  # turns, which a program written there panicked over everywhere else.
+  def self.arm_overlapped_current(handle : Void*, direction : Int32 = 0) : Pointer(UInt8)
     fiber = current
+    if direction != 0
+      other = state.io_head
+      while other.is_a?(IyiFiber)
+        if other.wait_handle.address == handle.address && other.io_direction == direction
+          raise "two fibers #{direction == 1 ? "reading" : "writing"} one fd"
+        end
+        other = other.next_io
+      end
+    end
+    fiber.io_direction = direction
     LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32)
     LibC.SetFileCompletionNotificationModes(handle, 1_u8)
 
@@ -1324,7 +1389,7 @@ class IyiScheduler
       handle = Pointer(Void).new(fd.to_i64.to_u64)
     end
 
-    ov = arm_overlapped_current(handle)
+    ov = arm_overlapped_current(handle, 1)
 
     read_bytes = uninitialized Int32
     ok = LibC.ReadFile(handle, buffer, count.to_i32, pointerof(read_bytes), ov.as(Void*))
@@ -2299,6 +2364,7 @@ end
 # runtime's own `__iyi_exit`, which skipped the cleanups too.
 def exit(status : Int32 = 0) : NoReturn
   fiber = IyiScheduler.current
+  IyiScheduler.exiting = true
   while true
     node = fiber.defers
     break unless node.is_a?(IyiDeferNode)
@@ -2312,7 +2378,8 @@ end
 
 # Park for *ms* milliseconds. `Cancelled` when the group said stop —
 # immediately if it already had, which is what lets `!` drain a cancelled
-# task through every later wait it would have done.
+# task through every later wait it would have done. Zero or less is a
+# yield: every task already runnable runs before this one goes on.
 def sleep(ms : Int32) : Nil | Cancelled
   IyiScheduler.sleep_current(ms)
 end
@@ -2502,6 +2569,16 @@ class IyiGroup
   # every task has finished, and `defer` is what guarantees "cannot":
   # a `return` out of the block still runs this.
   def join : Nil
+    # An `exit` runs this task's cleanups and ends the process, the other
+    # tasks with it: a group's join is one of those cleanups, and it waited
+    # for every task - `exit(4)` beside a sibling's minute-long sleep took
+    # the minute.
+    return if IyiScheduler.exiting?
+    # An owner leaving on a panic stops what it started before it waits for
+    # it, as a failing child stops its siblings: the panic was printed and
+    # the program went on running until a parked accept loop or a long
+    # sleep beside it ended by itself, which a server's never does.
+    cancel_children if IyiScheduler.current.panicked
     while @live > 0
       me = IyiScheduler.current
       @joiner = me

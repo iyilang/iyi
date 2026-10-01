@@ -400,14 +400,14 @@ class String
     pieces
   end
 
-  # The lines of a text, blank ones included; a final newline ends the last
-  # line rather than opening an empty one, which is what a file ending in a
-  # newline means.
+  # The lines of a text, blank ones included, a final newline ending the last
+  # line; `\r\n` ends one too, as in Crystal - a Windows file's lines kept the
+  # `\r`, and `"1\r\n".lines[0].to_i` panicked where `File.read_lines` read 1.
   def lines : Array(String)
     return [] of String if bytesize == 0
     pieces = split('\n')
     pieces.pop if pieces.last.empty?
-    pieces
+    pieces.map { |line| line.chomp('\r') }
   end
 
   private def byte_slice(start : Int32, count : Int32) : String

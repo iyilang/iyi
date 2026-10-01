@@ -193,12 +193,37 @@ glob_deep = Dir.glob(listing_dir + "/**/*.txt")
 assert_true glob_deep.size == 2, "recursive glob finds both txt files"
 assert_true Dir.glob(listing_dir + "/no_such_pattern_*").empty?, "no-match glob is empty"
 assert_true Dir[listing_dir + "/*.txt"].size == 2, "Dir[] is glob"
+# A wildcard before the last segment, and a pattern that starts `./`:
+# both answered `[]`. And a path spelled with the pattern's separator, on
+# every walk: on Windows one answered `\` and the other `/`.
+Dir.mkdir(listing_dir + "/nested_dir/inner")
+File.write(listing_dir + "/nested_dir/inner/deep.txt", "d")
+File.write(listing_dir + "/nested_dir/one.txt", "o")
+middle = Dir.glob(listing_dir + "/nest*/*.txt")
+assert_true middle.size == 1 && middle[0] == listing_dir + "/nested_dir/one.txt", "a wildcard in a middle segment finds nested_dir/one.txt: #{middle.inspect}"
+two_down = Dir.glob(listing_dir + "/*/*/deep.txt")
+assert_true two_down.size == 1 && two_down[0] == listing_dir + "/nested_dir/inner/deep.txt", "two wildcard segments find deep.txt: #{two_down.inspect}"
+assert_str listing_dir + "/file_a.txt", Dir.glob(listing_dir + "/file_a.*")[0], "a match is spelled with the pattern's own separator"
+here = Dir.current
+Dir.cd(listing_dir)
+dotted = Dir.glob("./*.txt").sorted
+Dir.cd(here)
+assert_true dotted == ["./file_a.txt", "./file_b.txt"], "./*.txt answers the names under ./: #{dotted.inspect}"
+File.delete(listing_dir + "/nested_dir/inner/deep.txt")
+File.delete(listing_dir + "/nested_dir/one.txt")
+Dir.delete(listing_dir + "/nested_dir/inner")
 puts "  glob matching, hidden names, recursion, and empty results"
 
 puts "\n== current working directory and cd"
 current_before = Dir.current
 Dir.cd(sub_created) do
   assert_str slashed(sub_created), slashed(Dir.current), "Dir.current inside cd block matches target"
+  # A relative path expands under the directory the program is in, not
+  # under the one `PWD` named when it started: `Dir.cd` left `PWD` behind,
+  # and `expand_path` reads it first.
+  if Program.env("PWD")
+    assert_str slashed(sub_created) + "/x", slashed(File.expand_path("x")), "expand_path after Dir.cd is under the new directory"
+  end
 end
 assert_str current_before, Dir.current, "Dir.current restored after cd block"
 puts "  temporary directory change with automatic restore"
@@ -270,6 +295,16 @@ puts "  deletion outcomes for empty and non-empty paths"
   Dir.mkdir_p(prefixed)
   assert_true Dir.exists?(sandbox + "/prefixed/two/three"), "mkdir_p makes every segment of a \\\\?\\ path"
 
+  # The device namespace's `\\.\` names what `\\?\` names, and past 248
+  # characters it was taken for a share, `\\?\UNC\.\C:\...`, which names
+  # nothing: a long directory spelled with it did not exist.
+  long_dir = backslashed(sandbox) + "\\" + ("d" * 60) + "\\" + ("e" * 60) + "\\" + ("f" * 60) + "\\" + ("g" * 60)
+  Dir.mkdir_p("\\\\?\\" + long_dir)
+  File.write("\\\\?\\" + long_dir + "\\long.txt", "deep")
+  assert_true long_dir.bytesize > 248, "the long directory is past the limit: #{long_dir.bytesize}"
+  assert_true Dir.exists?("\\\\.\\" + long_dir), "a long directory spelled with \\\\.\\ exists"
+  assert_str "deep", File.read("\\\\.\\" + long_dir + "\\long.txt"), "a long file spelled with \\\\.\\ reads"
+
   # A drive's root keeps the separator that makes it the root.
   assert_str "C:\\", Dir.without_trailing_separator("C:\\"), "a drive's root keeps its separator"
   assert_str "C:\\tmp", Dir.without_trailing_separator("C:\\tmp\\"), "any other directory drops it"
@@ -280,5 +315,17 @@ puts "  deletion outcomes for empty and non-empty paths"
 clean_tree(sandbox)
 Dir.delete?(sandbox)
 assert_true !Dir.exists?(sandbox), "sandbox removed after exercise"
+
+# An empty path names no directory, as POSIX `opendir("")` fails: on
+# Windows it listed the current drive's root while `Dir.exists?("")` said
+# false.
+listed = "listed"
+group do |g|
+  empty = g.spawn { Dir.children(""); 0 }
+  outcome = empty.value
+  listed = outcome.is_a?(Panicked) ? outcome.message.to_s : "listed"
+  0
+end
+assert_true !Dir.exists?("") && listed.includes?("Cannot open directory"), "Dir.children(\"\") is refused, not #{listed}"
 
 puts "\nALL CHECKS PASSED"

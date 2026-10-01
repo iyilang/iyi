@@ -367,5 +367,5 @@ end
 quick_checks.each_value &.sort_by! &.low
 
 output = ECR.render "#{__DIR__}/unicode_data.ecr"
-output = Crystal.format(output)
+output = Iyi.format(output)
 File.write("#{__DIR__}/../src/unicode/data.cr", output)

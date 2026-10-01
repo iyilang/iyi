@@ -38,6 +38,10 @@ puts "\n== case"
 turkic = Unicode::CaseOptions::Turkic
 assert_str "İ", Unicode.upcase("i", turkic), "turkic upcase of an ascii string"
 assert_str "ı", Unicode.downcase("I", turkic), "turkic downcase of an ascii string"
+# The Turkic `I` with a combining dot above is the dotted `i`, the dot
+# taken in; one character at a time it was `ı` with the dot over it.
+assert_str "i", Unicode.downcase("I\u0307", turkic), "turkic downcase of I with a combining dot"
+assert_str "ix", Unicode.downcase("I\u0307X", turkic), "and what follows it is lowered as before"
 assert_str "İÜ", Unicode.upcase("iü", turkic), "turkic upcase beside a non-ascii letter"
 assert_str "I", Unicode.upcase("i"), "plain upcase of i"
 # The titlecase digraphs have no row in the upcase table; their uppercase
@@ -54,6 +58,9 @@ assert_str "ᾈ", Unicode.capitalize("ᾀ"), "titlecase of alpha with psili and 
 assert_str "ᾼ", Unicode.capitalize("ᾳ"), "titlecase of alpha with ypogegrammeni"
 # The first letter is still before the rest when the final sigma is decided.
 assert_str "Ας", Unicode.capitalize("ΑΣ"), "final sigma after the capitalized letter"
+# And a letter whose titlecase is its multi-point uppercase keeps it.
+assert_str "\u02BCN", Unicode.capitalize("\u0149"), "capitalize of n preceded by apostrophe is its uppercase"
+assert_str "\u0399\u0308\u0301", Unicode.capitalize("\u0390"), "capitalize of iota with dialytika and tonos is its uppercase"
 puts "  one-code-point titlecase and the final sigma after the first letter"
 
 puts "\nALL CHECKS PASSED"

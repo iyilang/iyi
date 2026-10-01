@@ -7,7 +7,7 @@
 #
 # A check that cannot fail is not a check. This script proves failure across
 # each capability: infinite sequence consumption, pipeline laziness, map,
-# select, skip, zip, chain, and flat_map.
+# select, skip, zip, chain, flat_map, and a source shared with its adaptor.
 #
 # Exits non-zero if any check fails.
 
@@ -191,6 +191,10 @@ prove_fails "flat_map flattening broken" broken_flat_map "assertion failed for f
 # 8. Range iterator broken (yields the exclusive end)
 prove_fails "range end broken" broken_range "assertion failed for range exclusive" \
   's/elsif !@range\.exclusive? \&\& val == @range\.end/elsif val == @range.end/'
+
+# 9. Array source copied into its adaptor (a struct again)
+prove_fails "array source copied" copied_source "assertion failed for adaptor shares its array source" \
+  's/^pub class ArrayIterator(T)/pub struct ArrayIterator(T)/'
 echo
 if [ "$status" -eq 0 ]; then
   echo "Iterator: all 27 sections pass plain and release, and each check is"

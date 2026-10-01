@@ -124,6 +124,14 @@ lines_written = File.read(path)
 raise "puts: a line that ends was ended again (#{lines_written.bytesize} bytes, not 13)" unless lines_written == "ends\nopen\n\n5\n"
 puts "puts: ok"
 
+# 6. `lines` ends a line at `\r\n` as at `\n`, as Crystal's does: a Windows
+# text's lines kept the `\r`, and summing a file of numbers panicked on
+# "1\r" where `File.read_lines` read 1. A `\r` inside a line stays.
+crlf_lines = "1\r\n2\r\n\r\na\rb\n3".lines
+raise "lines: CRLF text read as #{crlf_lines.size} lines, not 5, or kept a \\r" unless crlf_lines == ["1", "2", "", "a\rb", "3"]
+raise "lines: CRLF numbers did not read as numbers" unless crlf_lines[0].to_i + crlf_lines[1].to_i == 3
+puts "lines: ok"
+
 # Cleanup
 File.delete(path) if File.exists?(path)
 File.delete(flush_path) if File.exists?(flush_path)

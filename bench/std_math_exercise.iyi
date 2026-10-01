@@ -261,7 +261,16 @@ assert_true Math.gcd(6, -2147483648) == 2, "gcd(6, Int32::MIN)"
 assert_true Math.gcd(-9223372036854775808_i64, 6_i64) == 2_i64, "gcd(Int64::MIN, 6)"
 assert_true Math.gcd(12, 18) == 6, "gcd(12, 18)"
 assert_true Math.lcm(-4, 6) == 12, "lcm(-4, 6)"
-puts "  fma rounds once; min/max symmetric in NaN and the zeros; gcd at the minimum"
+# An unsigned pair: it has no unary minus, and both failed to compile in
+# math.iyi. Euclid keeps to its side of zero, past Int64 included.
+assert_true Math.gcd(12_u32, 18_u32) == 6_u32, "gcd of UInt32s"
+assert_true Math.gcd(18446744073709551615_u64, 5_u64) == 5_u64, "gcd of UInt64s past Int64"
+assert_true Math.lcm(4_u64, 6_u64) == 12_u64, "lcm of UInt64s"
+assert_true Math.gcd(255_u8, 85_u8) == 85_u8 && Math.lcm(0_u8, 3_u8) == 0_u8, "gcd and lcm of UInt8s"
+# Two widths take one type, and a literal takes the other argument's; a
+# pair of widths failed inside math.iyi, where no `%` takes both.
+assert_true Math.gcd(4, 6_i64) == 2 && Math.gcd(6_i64, 4) == 2_i64, "gcd with a literal of another width"
+puts "  fma rounds once; min/max symmetric in NaN and the zeros; gcd at the minimum and unsigned"
 
 # The other library's integer and exponent helpers, with C's answers at
 # the edges: ilogb of zero and NaN is the least Int32, of an infinity the

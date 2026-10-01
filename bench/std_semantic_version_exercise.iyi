@@ -51,4 +51,10 @@ assert_true SemanticVersion.parse("1.0.0-99999999999") < SemanticVersion.parse("
 assert_true SemanticVersion.parse("1.0.0-2147483647") < SemanticVersion.parse("1.0.0-2147483648"), "Int32::MAX before the number after it"
 puts "  -1, -0 and numbers past Int32 ordered as the standard says"
 
+# A version read from a Windows file ends in CRLF, and the one trailing
+# line break the header tolerates is that, too.
+assert_str "1.4.2", SemanticVersion.parse("1.4.2\r\n").to_s, "CRLF"
+assert_true SemanticVersion.parse?("1.4.2\r").nil?, "a lone CR is not a line break"
+puts "  1.4.2 read from a CRLF file"
+
 puts "\nALL CHECKS PASSED"

@@ -189,6 +189,9 @@ prove_caught qplain "a plain scalar may not start with '?'" \
 prove_caught entry "'- b' after a key reads as text" \
   'accepted "a: - b' \
   'if b == 45_u8 && lone' 'if b == 45_u8 && lone && false'
+prove_caught bracketkey "a key may start with what a scalar cannot start with" \
+  'accepted "]: 1' \
+  'elsif plain_first_refused?(b)' 'elsif false && plain_first_refused?(b)'
 prove_caught folded "a folded scalar drops its leading empty lines" \
   "a folded scalar keeps its leading empty lines" \
   $'first = false\n          while blanks > 0' $'first = false\n          while blanks > 0 && false'
@@ -201,6 +204,9 @@ prove_caught keep "the line after the stream's last line break is kept" \
 prove_caught esctab "folding trims escaped blanks" \
   "an escaped tab before a folded line break stays" \
   'trim_trailing_blanks(hard)' 'trim_trailing_blanks(0)'
+prove_caught foldcopy "folding copies a quoted scalar to trim it, not in place" \
+  "quoted scalars of 20,000 lines read in under a second" \
+  $'    count = @buffer.size\n    while count > floor' $'    text = @buffer.to_s\n    count = text.bytesize\n    @buffer.clear\n    @buffer.append(text.to_unsafe, count)\n    while count > floor'
 prove_caught escbreak "an escaped line break folds like a plain one" \
   "blanks before an escaped line break stay" \
   'next_quoted_line(opener, parent, flow, true)' 'next_quoted_line(opener, parent, flow, false)'
@@ -210,6 +216,9 @@ prove_caught jsonkey "a quoted key in a flow sequence needs a blank after ':'" \
 prove_caught flowfold "a plain scalar in a flow collection stops at its line end" \
   "a plain scalar folds across lines in a flow collection" \
   'while skip_blank(stop) >= @ends[@line]' 'while skip_blank(stop) >= @ends[@line] && false'
+prove_caught docend "a document's end marked more than once is refused" \
+  "a document's end may be marked more than once" \
+  $'          skip_blank_lines\n        end\n        implicit_allowed = true' $'          break\n        end\n        implicit_allowed = true'
 prove_caught tagbelow "a scalar tag alone on its line applies to the resolved node below" \
   "a tag over an empty node tags the empty scalar" \
   'if tag.nil? || tag == "!!seq" || tag == "!!map"' 'if true'
@@ -219,6 +228,10 @@ prove_caught flowempty "properties over nothing in a flow collection are refused
 prove_caught comment "a plain scalar folds on past a comment" \
   'accepted "a: b # c' \
   'break if skip_blank(@flow_end) < @ends[@line]' 'break if skip_blank(@flow_end) < @ends[@line] && false'
+prove_caught intkey "an Int32 never reaches an integer key" \
+  "an Int32 reaches an integer key through []? and dig?" \
+  $'    return self[Any.new(index)] if kind == KIND_HASH\n    as_a[index]\n  end\n\n  def []?(index : Int32) : Any?\n    return self[Any.new(index)]? if kind == KIND_HASH\n' \
+  $'    as_a[index]\n  end\n\n  def []?(index : Int32) : Any?\n'
 prove_caught hash "a '#' starts a flow scalar" \
   'accepted "[1,#c' \
   '|| b == 62_u8 || b == 35_u8' '|| b == 62_u8'
@@ -228,6 +241,15 @@ prove_caught flowentry "'? a' and '- a' read as text in a flow collection" \
 prove_caught escapes "the dump writes a byte order mark and C1 controls raw" \
   "a byte order mark is escaped when dumped" \
   $'size : Int32) : Int32\n    b = bytes[i]' $'size : Int32) : Int32\n    return -1\n    b = bytes[i]'
+prove_caught c1 "a C1 control is read as text" \
+  'accepted "c1: b' \
+  $'      return c.to_i32 if c >= 0x80_u8 && c <= 0x9F_u8 && c != 0x85_u8\n' ''
+prove_caught noncharacter "a noncharacter is read as text" \
+  'accepted "nc: b' \
+  $'      return d.to_i32 - 0xBE + 0xFFFE if d == 0xBE_u8 || d == 0xBF_u8\n' ''
+prove_caught utf16 "a UTF-16 stream is refused for its first zero byte" \
+  "a UTF-16 stream is named by its byte order mark" \
+  'if @size >= 2 && ((@bytes[0] == 0xFF_u8' 'if false && ((@bytes[0] == 0xFF_u8'
 prove_caught eofbreak "a block scalar ending the stream gets a line feed it lacks" \
   "a literal entry ending the stream without a line break keeps no line feed it lacks" \
   'final = lines.size > 0 && @ends[last_content] < @size' 'final = lines.size > 0'

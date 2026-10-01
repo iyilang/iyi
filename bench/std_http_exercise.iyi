@@ -195,6 +195,18 @@ resp = HTTP.parse_response("HTTP/1.0 500\r\n\r\n")
 assert_true resp.status == 500 && resp.reason == "", "a status line with no reason"
 puts "  HEAD, 204 and a status with no reason"
 
+# A body short of its Content-Length is a connection that ended early, as
+# a chunked body cut inside a chunk is: it was a whole 200 with the part
+# that came, a cut-off download read as a good one.
+short = "answered"
+group do |g|
+  cut = g.spawn { HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\npartial"); 0 }
+  outcome = cut.value
+  short = outcome.is_a?(Panicked) ? outcome.message.to_s : "answered"
+  0
+end
+assert_str "HTTP: the body ended after 7 of its 100 bytes", short, "a short body is refused"
+puts "  a body short of its Content-Length is refused"
 puts "\n== messages at the edges"
 # Each refusal below is a raise, caught as its task's value: the panic
 # lines it prints are those refusals.
@@ -227,7 +239,9 @@ assert_str "400 Content-Length is not a number: \"3, 10\"", server_reads("POST /
 assert_str "POST / ?- Content-Length=3, 3; \"abc\" keep", server_reads("POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc"), "one length said twice is that length"
 assert_str "GET / ?- Accept=a, b, c; \"\" keep", server_reads("GET / HTTP/1.1\r\nAccept: a\r\naccept: b\r\nAccept: c\r\n\r\n"), "a repeated field is its values joined"
 assert_str "200 OK X-A=1, 2;Content-Length=2; \"hi\"", client_reads("HTTP/1.1 200 OK\r\nX-A: 1\r\nx-a: 2\r\nContent-Length: 2\r\n\r\nhi"), "and so in an answer"
-puts "  a repeated field is one field, and two lengths that differ are refused"
+# A length is digits and nothing else (RFC 9110 §8.6): `+3` was 3.
+assert_str "400 Content-Length is not a number: \"+3\"", server_reads("POST / HTTP/1.1\r\nContent-Length: +3\r\n\r\nabc"), "a signed length is a 400"
+puts "  a repeated field is one field, and two lengths that differ, or a signed one, are refused"
 
 # Chunks with a length beside them, or in HTTP/1.0, are read by the chunks
 # and the connection closed after (RFC 9112 §6.1, §6.3): a reader ahead of
@@ -319,6 +333,57 @@ server.join
 listener.close
 puts "  get, post, head, put, delete: five verbs, five connections, and what the server read is what each wrote"
 
+# An IPv6 literal's Host line keeps the URL's brackets: without them it
+# was `Host: ::1:<port>`, which no server can split into host and port.
+v6 = IyiSocket.listen("::1", 0)
+v6_port = v6.local_port
+v6_fd = v6.to_unsafe
+v6_server = IyiThread.start do
+  l = IyiSocket.new(v6_fd)
+  conn = l.accept.or_panic
+  saw = read_request(conn).or_panic
+  conn.write("HTTP/1.1 200 OK\r\nContent-Length: #{saw.bytesize}\r\n\r\n" + saw)
+  conn.close
+  nil
+end
+# Written in capitals, as RFC 3986 lets a scheme be: it was "only http://".
+r = HTTP.get("HTTP://[::1]:#{v6_port}/six").or_panic
+assert_true r.body.includes?("Host: [::1]:#{v6_port}\r\n"), "an IPv6 Host keeps its brackets: #{r.body.inspect}"
+v6_server.join
+v6.close
+puts "  an IPv6 literal's Host line keeps its brackets, under a scheme in capitals"
+
+# The listener's close ends `serve`, a connection idle between requests
+# with it: a keep-alive client that sat idle kept `serve` from returning
+# for as long as it stayed - here the three seconds it sleeps.
+idle_listener = IyiSocket.listen("127.0.0.1", 0)
+idle_port = idle_listener.local_port
+idle_closed = 0_i64
+idle_returned = 0_i64
+group do |g|
+  g.spawn do
+    Server.serve(idle_listener) do |req|
+      idle_listener.close if req.path == "/stop"
+      Response.new(200, "ok")
+    end
+    idle_returned = __iyi_monotonic_ns
+    0
+  end
+  g.spawn do
+    keeper = IyiSocket.connect("127.0.0.1", idle_port).or_panic
+    keeper.write("GET /a HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    keeper.read(256)
+    idle_closed = __iyi_monotonic_ns
+    HTTP.get("http://127.0.0.1:#{idle_port}/stop").or_panic
+    sleep(3000)
+    keeper.close
+    0
+  end
+end
+idle_ms = (idle_returned - idle_closed) // 1000000_i64
+assert_true idle_ms < 2000, "serve returns when its listener closes beside an idle keep-alive client, not #{idle_ms} ms later"
+puts "  the listener's close ends serve beside an idle keep-alive client"
+
 puts "\n== the server, from a raw socket"
 # What the server does with the wire: keep-alive across requests, a
 # chunked request body, HEAD, a request that is not HTTP, and `Connection:
@@ -334,6 +399,8 @@ group do |g|
         Response.new(200, req.body, {"X-Query" => req.query || "-", "X-Agent" => req.header("user-agent") || "-"})
       elsif req.path == "/nothing"
         Response.new(204)
+      elsif req.path == "/size"
+        Response.new(200, req.body.bytesize.to_s)
       elsif req.path == "/stop"
         listener.close
         Response.new(200, "bye")
@@ -450,15 +517,31 @@ group do |g|
     upload_ms = (__iyi_monotonic_ns - upload_started) // 1000000_i64
     assert_true r10.status == 200 && r10.body == upload, "a 24 MB upload echoed whole (#{r10.body.bytesize} bytes)"
     assert_true upload_ms < 4000, "a 24 MB upload is read, not re-read: it took #{upload_ms} ms"
+    # The same for a chunked body, which is decoded as it arrives: it was
+    # added to what came before and parsed again after every read, and
+    # 16 MB in 64 KB chunks took 8.8 s where this takes a tenth of one.
+    framed = String::Builder.new(16900000)
+    framed << "POST /size HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+    piece = "c" * 65536
+    256.times { framed << "10000\r\n" << piece << "\r\n" }
+    framed << "0\r\n\r\n"
+    chunked_started = __iyi_monotonic_ns
+    up = IyiSocket.connect("127.0.0.1", sport).or_panic
+    up.write(framed.to_s).or_panic
+    r12 = HTTP.parse_response(read_response(up))
+    chunked_ms = (__iyi_monotonic_ns - chunked_started) // 1000000_i64
+    up.close
+    assert_true r12.status == 200 && r12.body == "16777216", "a 16 MB chunked upload arrived whole (#{r12.body} bytes)"
+    assert_true chunked_ms < 4000, "a 16 MB chunked upload is decoded as it arrives: it took #{chunked_ms} ms"
     r9 = HTTP.get("http://127.0.0.1:#{sport}/stop").or_panic
     assert_str "bye", r9.body, "the block closed the listener"
     0
   end
 end
-assert_true seen_paths.size == 212, "the block ran 212 times (the 400s never reached it), not #{seen_paths.size}"
+assert_true seen_paths.size == 213, "the block ran 213 times (the 400s never reached it), not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, 201 lean requests, 100-continue both ways, a 24 MB upload, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, 201 lean requests, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
 
 puts "\n== a burst of connections"
 # Twenty connections waiting, each with its request written, when the

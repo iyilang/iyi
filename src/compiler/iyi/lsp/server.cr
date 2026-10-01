@@ -73,7 +73,7 @@ module Iyi::Lsp
     # The last published diagnostics, kept for codeAction to read back:
     # {line0, start_ch, end_ch, message, suggestion} per document.
     @published = {} of String => Array({Int32, Int32, Int32, String, String?})
-    @root : String?
+    @roots = [] of String
     @running = true
     # Set by `shutdown`. After it, the protocol says every request but
     # `exit` is answered -32600: a client that keeps asking is asking a
@@ -398,7 +398,7 @@ module Iyi::Lsp
         respond_error(nil, -32600, "invalid request: the frame's body is JSON but not an object")
       when "initialize"
         @initialized = true
-        @root = root_of(params)
+        @roots = roots_of(params)
         @snippets = params.try(&.dig?("capabilities", "textDocument", "completion", "completionItem", "snippetSupport")).try(&.as_bool?) == true
         respond(id.not_nil!) { |json| capabilities(json) }
       when "initialized"
@@ -479,7 +479,12 @@ module Iyi::Lsp
         @documents.delete(uri)
         @versions.delete(uri)
         @published.delete(uri)
-        @analysis.close(path_of(uri))
+        # Not while the file is open under another spelling of it: the
+        # analysis is kept by path, and closing one spelling dropped the
+        # other's last good result - completion and hover went empty in the
+        # buffer still open.
+        closed = path_of(uri)
+        @analysis.close(closed) unless @documents.each_key.any? { |open| same_path?(path_of(open), closed) }
       when "textDocument/hover"
         on_hover(id.not_nil!, params.not_nil!)
       when "textDocument/definition"
@@ -901,22 +906,10 @@ module Iyi::Lsp
       end
 
       uris = @documents.keys.dup
-      if root = @root
-        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
-          file = fs_path(file)
-          # Read as posix before the skip tests: a glob yields the platform's
-          # own separators, so a backslashed path went past `/.` and `/lib/`
-          # and the `.git` and `lib` trees were indexed anyway.
-          #
-          # And the posix reading is what the URI is built from — a `file://`
-          # URI has one separator, and this side's spelling has to be the one
-          # `path_of` hands back for a buffer the client named.
-          posix = ::Path[file].to_posix.to_s
-          next if posix.includes?("/.") || posix.includes?("/lib/")
-          uri = uri_of(file)
-          uris << uri unless uris.includes?(uri)
-          break if uris.size >= 200
-        end
+      each_workspace_file(with_lib: false) do |file, _|
+        uri = uri_of(file)
+        uris << uri unless uris.includes?(uri)
+        break if uris.size >= 200
       end
 
       # The verdicts first, and *interruptibly*, because this is the one
@@ -1075,14 +1068,11 @@ module Iyi::Lsp
       end
 
       outside = 0_u64
-      if root = @root
-        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
-          file = fs_path(file)
-          posix = ::Path[file].to_posix.to_s
-          next if posix.includes?("/.")
+      unless @roots.empty?
+        each_workspace_file(with_lib: true) do |file, in_lib|
           info = File.info?(file)
           next unless info
-          if posix.includes?("/lib/")
+          if in_lib
             outside = outside &* prime &+ stable(file) &+ stamp_of(info)
             next
           end
@@ -1094,7 +1084,7 @@ module Iyi::Lsp
           header, imports = header_and_imports(file, info)
           nodes[file] = Node.new(stamp_of(info), header, imports)
         end
-        Dir.glob(::Path[root].to_posix.join("**", "iyi.mod"), ::Path[root].to_posix.join("**", "iyi.sum")) do |file|
+        each_workspace_file(with_lib: true, manifests: true) do |file, _|
           info = File.info?(file)
           next unless info
           outside = outside &* prime &+ stable(file) &+ stamp_of(info)
@@ -1111,9 +1101,10 @@ module Iyi::Lsp
           replacements.each_value do |target|
             local = File.expand_path(target, File.dirname(file))
             next unless Dir.exists?(local)
-            Dir.glob(::Path[local].to_posix.join("**", "*.iyi"), ::Path[local].to_posix.join("iyi.mod")) do |replaced|
-              replaced = fs_path(replaced)
-              next if ::Path[replaced].to_posix.to_s.includes?("/.")
+            replaced_files = workspace_files(local, with_lib: true).map(&.[0])
+            manifest = File.join(local, Mod::Installer::MANIFEST)
+            replaced_files << manifest if File.file?(manifest)
+            replaced_files.each do |replaced|
               if replaced_info = File.info?(replaced)
                 outside = outside &* prime &+ stable(replaced) &+ stamp_of(replaced_info)
               end
@@ -1705,18 +1696,13 @@ module Iyi::Lsp
     # workspace" an ordinary request rather than an index.
     private def workspace_entries : Array({String, String})
       entries = @documents.map { |doc_uri, doc_text| {path_of(doc_uri), doc_text} }
-      if root = @root
-        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
-          file = fs_path(file)
-          posix = ::Path[file].to_posix.to_s
-          next if posix.includes?("/.") || posix.includes?("/lib/")
-          # By path, not by a URI rebuilt from it: an editor's own URI for
-          # this file is spelled its way (`%3A`, `%20`), and open buffers
-          # are already in the list above, with their unsaved text.
-          next if document_text(file)
-          entries << {file, File.read(file)}
-          break if entries.size >= 200
-        end
+      each_workspace_file(with_lib: false) do |file, _|
+        # By path, not by a URI rebuilt from it: an editor's own URI for
+        # this file is spelled its way (`%3A`, `%20`), and open buffers
+        # are already in the list above, with their unsaved text.
+        next if document_text(file)
+        entries << {file, File.read(file)}
+        break if entries.size >= 200
       end
       entries
     end
@@ -1784,12 +1770,14 @@ module Iyi::Lsp
       end
     end
 
+    # A name by the lexer's own rule (`Lexer.ident_start?`): `şarkı` and
+    # `söyle` are names the compiler takes, and rename refused them.
     private def valid_name?(name : String) : Bool
       return false if name.empty?
-      return false unless name[0].ascii_letter? || name[0] == '_'
+      return false unless Iyi::Lexer.ident_start?(name[0])
       body = name.ends_with?('?') || name.ends_with?('!') ? name.rchop : name
       return false if body.empty?
-      body.each_char.all? { |ch| ch.alphanumeric? || ch == '_' }
+      body.each_char.all? { |ch| Iyi::Lexer.ident_part?(ch) }
     end
 
     # ── Document symbols ─────────────────────────────────────────────────
@@ -1970,10 +1958,13 @@ module Iyi::Lsp
 
     # A variable's name: a lower-case letter or `_` first, letters, digits
     # and `_` after, no `?` or `!`, and not a keyword.
+    # Not a constant: the lexer reads a name that starts upper or title
+    # case as one, in any script.
     private def valid_local?(name : String) : Bool
       return false if name.empty? || KEYWORDS.includes?(name)
-      return false unless name[0].ascii_lowercase? || name[0] == '_'
-      name.each_char.all? { |ch| ch.ascii_alphanumeric? || ch == '_' }
+      first = name[0]
+      return false unless Iyi::Lexer.ident_start?(first) && !first.uppercase? && !first.titlecase?
+      name.each_char.all? { |ch| Iyi::Lexer.ident_part?(ch) }
     end
 
     private def local_sites(text : String, path : String, target : Location, lines : Array(String)) : LocalSites?
@@ -2107,9 +2098,12 @@ module Iyi::Lsp
     private def on_formatting(id : JSON::Any, params : JSON::Any) : Nil
       uri = params["textDocument"]["uri"].as_s
       text = text_of(uri)
+      # In the buffer's own line endings, as `iyi format` writes a file: a
+      # formatted CRLF buffer was answered with a whole-document edit to
+      # LF, and every save in an editor that formats on save rewrote it.
       formatted =
         begin
-          Iyi.format(text, filename: path_of(uri))
+          Iyi.as_written(path_of(uri), text, Iyi.format(text, filename: path_of(uri)))
         rescue CodeError
           return respond_null(id)
         end
@@ -2192,14 +2186,9 @@ module Iyi::Lsp
       query = params["query"]?.try(&.as_s?) || ""
 
       paths = @documents.keys.map { |doc_uri| path_of(doc_uri) }
-      if root = @root
-        Dir.glob(::Path[root].to_posix.join("**", "*.iyi")) do |file|
-          file = fs_path(file)
-          posix = ::Path[file].to_posix.to_s
-          next if posix.includes?("/.") || posix.includes?("/lib/")
-          paths << file unless paths.includes?(file)
-          break if paths.size >= 2000
-        end
+      each_workspace_file(with_lib: false) do |file, _|
+        paths << file unless paths.any? { |known| same_path?(known, file) }
+        break if paths.size >= 2000
       end
 
       results = [] of {String, Int32, String, Int32, Int32, Int32, String?}
@@ -2539,9 +2528,13 @@ module Iyi::Lsp
       end
       return nil unless first && last
 
+      # The buffer's own line ending between the lines it writes: joined
+      # with `\n` alone, organizing a CRLF buffer's imports left LF lines
+      # in it.
+      ending = Iyi.crlf?(text) ? "\r\n" : "\n"
       organized = String.build do |io|
         modules.uniq!.sort!.each_with_index do |mod, index|
-          io << '\n' unless index.zero?
+          io << ending unless index.zero?
           io << "import " << mod
           if globs.includes?(mod)
             io << "::*"
@@ -2551,7 +2544,7 @@ module Iyi::Lsp
         end
       end
 
-      current = lines[first..last].join('\n')
+      current = lines[first..last].join(ending)
       return nil if current == organized
       {first, last, organized}
     end
@@ -2602,7 +2595,7 @@ module Iyi::Lsp
         (edits[uri_of(old_path)] ||= [] of {Int32, Int32, Int32, String})
           .concat module_mention_edits(text, old_mod, new_mod)
         workspace_entries.each do |(entry_path, entry_text)|
-          next if entry_path == old_path
+          next if same_path?(entry_path, old_path)
           mentions = module_mention_edits(entry_text, old_mod, new_mod)
           next if mentions.empty?
           (edits[uri_of(entry_path)] ||= [] of {Int32, Int32, Int32, String})
@@ -3072,21 +3065,21 @@ module Iyi::Lsp
     # The arithmetic is `Text`'s: the proxy in front of this server keeps
     # the same buffers and has to apply the same changes.
 
-    # The workspace root the client named at initialize, for
-    # workspace/symbol to glob under.
-    private def root_of(params : JSON::Any?) : String?
-      return nil unless params
+    # The workspace's folders the client named at initialize, every one:
+    # only the first was walked, so in a multi-root workspace a rename in
+    # the second folder left its importers calling the old name, and
+    # workspace/symbol knew none of its defs. `rootUri` and `rootPath` are
+    # the older clients' one folder.
+    private def roots_of(params : JSON::Any?) : Array(String)
+      return [] of String unless params
       if folders = params["workspaceFolders"]?.try(&.as_a?)
-        if first = folders.first?
-          if folder_uri = first["uri"]?.try(&.as_s?)
-            return path_of(folder_uri)
-          end
-        end
+        roots = folders.compact_map { |folder| folder["uri"]?.try(&.as_s?).try { |folder_uri| path_of(folder_uri) } }
+        return roots unless roots.empty?
       end
       if root_uri = params["rootUri"]?.try(&.as_s?)
-        return path_of(root_uri)
+        return [path_of(root_uri)]
       end
-      params["rootPath"]?.try(&.as_s?)
+      params["rootPath"]?.try(&.as_s?).try { |path| [path] } || [] of String
     end
 
     # ── Code lens and its command ────────────────────────────────────────
@@ -3197,7 +3190,24 @@ module Iyi::Lsp
       path = path_of(uri)
 
       scratch = nil
-      if (text = @documents[uri]?) && (!File.file?(path) || File.read(path) != text)
+      scratch_dir = nil
+      if !uri.starts_with?("file:")
+        # A buffer with no file behind it - VS Code's `untitled:` - runs
+        # from a directory of its own. Beside the server's working
+        # directory its scratch name held the scheme's `:`, which NTFS
+        # reads as a stream's name: the run failed "The directory name is
+        # invalid" and left an empty `.untitled` file behind.
+        text = @documents[uri]? || raise BadParams.new("#{uri} is not open, and names no file")
+        scratch_dir = File.join(Dir.tempdir, "iyi-lsp-#{Random::Secure.hex(8)}")
+        Dir.mkdir(scratch_dir)
+        tail = uri[Math.max(uri.rindex(':') || -1, uri.rindex('/') || -1) + 1..]
+        name = String.build do |io|
+          tail.each_char { |char| io << (char.ascii_alphanumeric? || char == '-' || char == '_' ? char : '_') }
+        end
+        scratch = File.join(scratch_dir, "#{name.empty? ? "untitled" : name}.iyi")
+        File.write(scratch, text)
+        path = scratch
+      elsif (text = @documents[uri]?) && (!File.file?(path) || File.read(path) != text)
         scratch = File.join(File.dirname(path), ".#{File.basename(path, ".iyi")}.iyi-lsp.iyi")
         File.write(scratch, text)
         path = scratch
@@ -3217,12 +3227,12 @@ module Iyi::Lsp
         error: Process::Redirect::Pipe)
 
       @running_verbs += 1
-      spawn { supervise_verb(id, process, scratch) }
+      spawn { supervise_verb(id, process, scratch, scratch_dir) }
     end
 
     # The verb, watched from its own fiber: the loop is free the whole
     # time, and the answer joins the queue when the program is done.
-    private def supervise_verb(id : JSON::Any, process : Process, scratch : String?) : Nil
+    private def supervise_verb(id : JSON::Any, process : Process, scratch : String?, scratch_dir : String?) : Nil
       output = IO::Memory.new
       error = IO::Memory.new
       spawn { capture(process.output, output) }
@@ -3271,6 +3281,7 @@ module Iyi::Lsp
     ensure
       @running_verbs -= 1
       File.delete(scratch) if scratch && File.file?(scratch)
+      Dir.delete(scratch_dir) if scratch_dir && Dir.exists?(scratch_dir)
     end
 
     # What one run may say into a session that outlives it. A program
@@ -3333,6 +3344,74 @@ module Iyi::Lsp
     # other two (steps 9, 31c and 32 of `bench/lsp_session.py`, the first
     # times it ran there). Everything that enters as a path goes through
     # here first.
+    # The workspace's `.iyi` files under *root*, each with whether it sits
+    # under a `lib` directory - a dependency's checkout - and without those
+    # when *with_lib* is false. A directory whose name starts with `.` is
+    # not the project's (`.git`, an editor's own), and is skipped.
+    #
+    # Asked of the names below the root, not of the whole path: the walks
+    # tested `/.` and `/lib/` against the absolute path, so a project under
+    # `~/.config`, `C:\Users\me\.work` or any `lib` directory had every file
+    # skipped - references and rename silently missed the importers, and a
+    # rename left a program that did not compile. A directory that will not
+    # list is skipped rather than failing the request (an ACL'd junction in
+    # a home directory failed every workspace question with -32602), and a
+    # link to a directory is not followed: a junction loop listed the same
+    # files dozens of times under paths too long to open.
+    #
+    # With *manifests*, the `iyi.mod` and `iyi.sum` files instead.
+    # Every folder's files, a file under two folders (one nested in the
+    # other) once.
+    private def each_workspace_file(*, with_lib : Bool, manifests : Bool = false, & : String, Bool ->) : Nil
+      seen = Set(String).new
+      @roots.each do |root|
+        workspace_files(root, with_lib: with_lib, manifests: manifests).each do |(file, in_lib)|
+          {% if flag?(:win32) %}
+            next unless seen.add?(file.downcase)
+          {% else %}
+            next unless seen.add?(file)
+          {% end %}
+          yield file, in_lib
+        end
+      end
+    end
+
+    private def workspace_files(root : String, *, with_lib : Bool, limit : Int32 = 2000, manifests : Bool = false) : Array({String, Bool})
+      found = [] of {String, Bool}
+      walk_workspace(fs_path(root), false, with_lib, manifests, limit, found)
+      found
+    end
+
+    private def walk_workspace(dir : String, in_lib : Bool, with_lib : Bool, manifests : Bool, limit : Int32, found : Array({String, Bool})) : Nil
+      names = begin
+        Dir.children(dir)
+      rescue File::Error
+        return
+      end
+      names.sort!.each do |name|
+        return if found.size >= limit
+        next if name.starts_with?('.')
+        path = File.join(dir, name)
+        if workspace_directory?(path)
+          next if name == "lib" && !with_lib
+          walk_workspace(path, in_lib || name == "lib", with_lib, manifests, limit, found)
+        elsif (manifests ? name.in?(Mod::Installer::MANIFEST, Mod::Sum::FILE) : name.ends_with?(".iyi")) && File.file?(path)
+          found << {path, in_lib}
+        end
+      end
+    end
+
+    # A directory to walk into: a real one, not a link to one.
+    private def workspace_directory?(path : String) : Bool
+      {% if flag?(:win32) %}
+        attributes = LibC.GetFileAttributesW(Crystal::System.to_wstr(path))
+        attributes != LibC::INVALID_FILE_ATTRIBUTES && attributes.bits_set?(LibC::FILE_ATTRIBUTE_DIRECTORY) &&
+          !attributes.bits_set?(LibC::FILE_ATTRIBUTE_REPARSE_POINT)
+      {% else %}
+        !!File.info?(path, follow_symlinks: false).try(&.directory?)
+      {% end %}
+    end
+
     private def fs_path(path : String) : String
       {% if flag?(:win32) %}
         path.tr("/", "\\")
@@ -3346,19 +3425,56 @@ module Iyi::Lsp
       {% if flag?(:win32) %}
         if path.size > 2 && path[0] == '/' && path[2] == ':'
           path = path.lchop('/')
+        elsif uri.starts_with?("file://") && !path.starts_with?('/') && !path.starts_with?("localhost/") &&
+              !(path.size > 1 && path[1] == ':')
+          # `file://server/share/x`: the authority is a server, and the
+          # path is a UNC one. Read as `server\share\x` it was relative to
+          # the server's own directory, and a workspace on a share found
+          # none of its modules. A drive is not a server: `file://C:/x` is
+          # a spelling some clients send for `file:///C:/x`, and read as a
+          # share it named `\\C:\x`, which is nothing.
+          path = "//" + path
         end
         path = path.tr("/", "\\")
       {% end %}
       path
     end
 
+    # The URI for *path*: the client's own, when the file is open under
+    # one - so an answer names the file the way the editor does, and two
+    # spellings of one file are never both in a response - and otherwise
+    # one built the way RFC 8089 spells it, percent-encoded. It was the
+    # path behind `file:///` as it stood: `#` and `%` in a directory's
+    # name made a URI that named another file (`C#proj/greet.iyi` is the
+    # fragment `proj/greet.iyi` of `C`), and a space or `ğ` made one no
+    # client's spelling ever equalled, so an editor did not recognise the
+    # files an answer named.
     private def uri_of(path : String) : String
+      @documents.each_key do |uri|
+        return uri if same_path?(path_of(uri), path)
+      end
       {% if flag?(:win32) %}
         posix = path.tr("\\", "/")
-        return "file:///" + posix if posix.size > 1 && posix[1] == ':'
-        "file://" + posix
+        if posix.size > 1 && posix[1] == ':'
+          "file:///" + posix[0, 2] + URI.encode_path(posix[2..])
+        elsif posix.starts_with?("//")
+          "file:" + URI.encode_path(posix)
+        else
+          "file://" + URI.encode_path(posix)
+        end
       {% else %}
-        "file://" + path
+        "file://" + URI.encode_path(path)
+      {% end %}
+    end
+
+    # One file under two spellings: on Windows the separators and the case
+    # are the file system's to ignore, and a path from the resolver mixes
+    # `\` with a module path's `/`.
+    private def same_path?(one : String, other : String) : Bool
+      {% if flag?(:win32) %}
+        fs_path(one).compare(fs_path(other), case_insensitive: true) == 0
+      {% else %}
+        one == other
       {% end %}
     end
 
@@ -3395,12 +3511,7 @@ module Iyi::Lsp
     # on Windows without regard to case, which is what the filesystem does.
     private def document_text(filename : String) : String?
       @documents.each do |uri, text|
-        doc_path = path_of(uri)
-        {% if flag?(:win32) %}
-          return text if doc_path.compare(filename, case_insensitive: true) == 0
-        {% else %}
-          return text if doc_path == filename
-        {% end %}
+        return text if same_path?(path_of(uri), filename)
       end
       nil
     end
@@ -3409,7 +3520,7 @@ module Iyi::Lsp
       overrides = {} of String => String
       @documents.each do |uri, text|
         doc_path = path_of(uri)
-        overrides[doc_path] = text unless doc_path == path
+        overrides[doc_path] = text unless same_path?(doc_path, path)
       end
       overrides
     end

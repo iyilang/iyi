@@ -241,7 +241,12 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
+mutations=0
 mutate() { # mutate <label> <old> <new> [module, http.iyi by default]
+  # A binary of its own each: on Windows the last one's file can still be
+  # held a moment after it ended, and the next link over it failed with
+  # LNK1104 - three of thirty mutations here, whichever came after.
+  mutations=$((mutations + 1))
   local label="$1" old="$2" new="$3" module="${4:-http.iyi}"
   if [ -z "$PY" ]; then
     echo "  $label: skipped, no working python3 to make the broken copy with"
@@ -263,11 +268,11 @@ PY
     status=1
   # Build first, then run: a patch that does not compile would also "fail",
   # and that proves nothing about whether the exercise catches the break.
-  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut.bin" "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut-$mutations.bin" "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the broken copy did not compile"
     sed -n '1,6p' "$WORK/mut.out"
     status=1
-  elif timeout 120 "$WORK/mut.bin" >"$WORK/mut.out" 2>&1; then
+  elif timeout -k 5 120 "$WORK/mut-$mutations.bin" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
   else
@@ -277,12 +282,13 @@ PY
 mutate "a status parsed as zero" '{code, reason}' '{0, reason}'
 mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca + 0_u8 if ca >= 65_u8 && ca <= 90_u8'
 mutate "a chunked body left as it came" 'body = decode_chunked(body) if' 'body = body + "" if'
-mutate "a server that forgets keep-alive" 'return if parsed.close' 'return if true'
+mutate "a server that forgets keep-alive" 'wrote.is_a?(Int32) && !close' 'wrote.is_a?(Int32) && false'
 mutate "a server that answers every request 200" 'Response.new(400, reason' 'Response.new(200, reason'
 mutate "a server that parses the body so far after every read" 'wanted = parsed.wanted' 'wanted = 0'
+mutate "a server that parses a chunked body again after every read" 'if head = parsed.chunked' 'if head = nil.as(Request?)'
 mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
 mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
-mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler)' '          accepted = client
+mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle)' '          accepted = client
           g.spawn do
             handle(accepted, handler)
             0

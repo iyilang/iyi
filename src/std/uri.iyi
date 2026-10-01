@@ -310,15 +310,17 @@ pub class URI
   end
 
   # `userinfo@host:port`, the userinfo percent-encoded (a space is `%20`)
-  # and the host written as stored.
+  # and the host written as stored. The sub-delims userinfo may hold stay
+  # as written: encoded, `user;type=a` came back `user%3Btype%3Da`, and
+  # RFC 3986 section 2.2 counts that a different URI.
   def authority : String?
     return nil unless @host || @user || @port
 
     parts = [] of String
     if u = @user
-      u_enc = URI.encode_www_form(u, space_to_plus: false)
+      u_enc = URI.encode_userinfo(u)
       if p = @password
-        p_enc = URI.encode_www_form(p, space_to_plus: false)
+        p_enc = URI.encode_userinfo(p)
         parts << (u_enc + ":" + p_enc + "@")
       else
         parts << (u_enc + "@")
@@ -356,6 +358,11 @@ pub class URI
       end
     elsif @path.starts_with?("//")
       parts << "/."
+    elsif @scheme.nil? && colon_in_first_segment?
+      # RFC 3986 section 4.2: a relative path whose first segment holds a
+      # colon is written behind `./`, or it reads back as a scheme - a
+      # Windows path, `C:/Users/x`, came back with the scheme `C`.
+      parts << "./"
     end
 
     parts << @path
@@ -368,6 +375,17 @@ pub class URI
       parts << ("#" + f)
     end
     parts.join("")
+  end
+
+  private def colon_in_first_segment? : Bool
+    at = 0
+    while at < @path.bytesize
+      byte = @path.to_unsafe[at]
+      return false if byte == 47_u8
+      return true if byte == 58_u8
+      at = at + 1
+    end
+    false
   end
 
   def dup : URI
@@ -467,9 +485,10 @@ pub class URI
   private def self.keep?(b : UInt8, level : Int32) : Bool
     return true if unreserved?(b)
     case level
-    when 0 then reserved?(b) # encode: RFC 3986 reserved characters pass
-    when 1 then b == 47_u8   # encode_path: '/' separates segments
-    else        false        # encode_path_segment, encode_www_form
+    when 0 then reserved?(b)  # encode: RFC 3986 reserved characters pass
+    when 1 then b == 47_u8    # encode_path: '/' separates segments
+    when 3 then sub_delim?(b) # encode_userinfo: RFC 3986 section 3.2.1
+    else        false         # encode_path_segment, encode_www_form
     end
   end
 
@@ -509,6 +528,13 @@ pub class URI
   # Encodes a path, keeping `/` between its segments.
   def self.encode_path(str : String) : String
     percent_encode(str, 1, false)
+  end
+
+  # Encodes a user or a password for the authority: unreserved bytes and
+  # the sub-delims, which RFC 3986 section 3.2.1 lets userinfo hold, pass;
+  # `:`, which separates the two, and `@`, which ends them, do not.
+  def self.encode_userinfo(str : String) : String
+    percent_encode(str, 3, false)
   end
 
   # Encodes one path segment: only unreserved bytes pass.

@@ -189,6 +189,8 @@ pub struct SemanticVersion
     stop = str.bytesize
 
     stop -= 1 if stop > 0 && bytes[stop - 1] == 10_u8 # '\n'
+    # And its `\r`: a version read from a Windows file ends in CRLF.
+    stop -= 1 if stop > 0 && bytes[stop - 1] == 13_u8 && stop < str.bytesize
 
     major_end = scan_field(bytes, 0, stop)
     return nil unless major_end

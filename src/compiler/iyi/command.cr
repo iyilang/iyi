@@ -516,6 +516,21 @@ class Iyi::Command
     end
   end
 
+  # iyi: a Windows exit code the program chose, where `Process::Status`
+  # sees an abnormal end. Every code with the top two bits set reads as an
+  # NTSTATUS error to it, and a program's `exit(-1)` is 0xFFFFFFFF: `iyi
+  # run` said "terminated abnormally, the cause is unknown" and exited 1
+  # where the program itself exits -1. A status the system raises has the
+  # customer bit (29) clear; one with it set is an application's - a
+  # program's small negative code, or a runtime's own exception code - and
+  # is passed on as the exit code it is.
+  def self.application_code?(status : Process::Status) : Int32?
+    {% if flag?(:win32) %}
+      code = status.system_exit_status
+      code.to_i32! if code & 0x20000000_u32 != 0
+    {% end %}
+  end
+
   private def execute(output_filename, run_args, compiler, *, error_on_exit = false)
     time = @time && !@progress_tracker.stats?
     status, elapsed_time = @progress_tracker.stage("Execute") do
@@ -580,7 +595,7 @@ class Iyi::Command
       puts "Execute: #{elapsed_time}"
     end
 
-    if (exit_code = status.exit_code?) && !error_on_exit
+    if (exit_code = status.exit_code? || Command.application_code?(status)) && !error_on_exit
       exit exit_code
     end
 
@@ -1085,6 +1100,19 @@ class Iyi::Command
       unless Iyi.writable_directory?(directory)
         abort! "#{directory} will not take #{File.basename(output_filename)}: no permission to write there", :USAGE_ERROR
       end
+
+      # Windows will not write over a program that is running, nor over a
+      # read-only file, and the linker said so only after the whole
+      # compile: "LNK1104: cannot open file", exit status 1104, and the
+      # linker's command line on stderr. It does let the file be renamed,
+      # which is how `make -f Makefile.win` replaces a running `iyi.exe`,
+      # so the old program is moved aside - it goes on running - and the
+      # new one written where it was.
+      {% if flag?(:win32) %}
+        unless compiler.cross_compile? || Iyi.move_aside_if_busy(output_filename)
+          abort! "#{output_filename} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+        end
+      {% end %}
     end
 
     if run

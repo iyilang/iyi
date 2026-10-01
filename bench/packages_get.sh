@@ -652,6 +652,35 @@ printf 'module example.test/user/lapp\nrequire example.test/user/libr v1.1.0 rea
 grep -q "\`Files\` is not something a package reaches" lim4.log || fail "a word that is not a reach was not refused: $(cat lim4.log)"
 [ "$status" -eq 0 ] && echo "  reaches nothing: v1.0.0 builds, v1.1.0 refused as std/socket, C with nothing written; widened: allowed and kept"
 
+step "a package's sum is the same on every platform"
+# SHA-1 over each file's path and committed bytes (sum.cr), so the sum is
+# the tag's and not the machine's: on Windows the path of a file in a
+# directory went in with `\`, and the bytes were the checkout's, which
+# Git for Windows' default `core.autocrlf=true` writes with CRLF - an
+# `iyi.sum` made on Linux was refused there as tampering. Recomputed here
+# from the tag itself, with a global git config that asks for CRLF.
+mkrepo "$WORK/work/libn"
+mkdir -p "$WORK/work/libn/sub"
+printf 'module example.test/user/libn\n' > "$WORK/work/libn/iyi.mod"
+printf 'module libn\n\npub def two : Int32\n  2\nend\n' > "$WORK/work/libn/libn.iyi"
+printf 'module libn/sub/extra\n\npub def three : Int32\n  3\nend\n' > "$WORK/work/libn/sub/extra.iyi"
+git -C "$WORK/work/libn" add -A && git -C "$WORK/work/libn" commit -qm one
+git init -q --bare "$WORK/mirror/example.test/user/libn"
+(cd "$WORK" && publish libn v1.0.0)
+expected="$(
+  cd "$WORK/work/libn" &&
+  for f in $(git ls-tree -r --name-only v1.0.0 | LC_ALL=C sort); do
+    printf '%s\0' "$f"; git show "v1.0.0:$f"; printf '\0'
+  done | sha1sum | cut -c1-40
+)"
+printf '[core]\n\tautocrlf = true\n' > "$WORK/crlf.gitconfig"
+mkdir -p "$WORK/napp" && cd "$WORK/napp" || exit 1
+printf 'module example.test/user/napp\n' > iyi.mod
+GIT_CONFIG_GLOBAL="$WORK/crlf.gitconfig" "$IYI" get example.test/user/libn > sum.log 2>&1 || fail "get libn failed: $(cat sum.log)"
+got="$(awk '$1 == "example.test/user/libn" { print $3 }' iyi.sum)"
+[ "$got" = "s1:$expected" ] || fail "libn's sum is $got, where the tag's bytes and paths make s1:$expected"
+[ "$status" -eq 0 ] && echo "  s1:$expected, from the tag's paths and bytes, with a CRLF-asking git"
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "iyi get: every step held"

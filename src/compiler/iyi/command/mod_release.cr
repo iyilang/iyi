@@ -236,7 +236,7 @@ class Iyi::Command
     end
 
     surfaces = {} of String => Array(String)
-    Dir.glob(::Path[emit].to_posix.join("**", "*.iyimod")) do |candidate|
+    Dir.glob(Iyi.glob_root(emit).join("**", "*.iyimod")) do |candidate|
       artifact = IyiMod.read(candidate) rescue next
       next unless modules.includes?(artifact.module_name)
       surfaces[artifact.module_name] = iyi_export_lines(artifact)

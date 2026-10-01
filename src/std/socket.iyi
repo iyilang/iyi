@@ -310,7 +310,14 @@ pub class IyiSocket
 
   def self.connect(host : String, port : Int32) : IyiSocket | Cancelled | SocketError
     addr, family = sockaddr(host, port)
-    connect_to(addr, family, "#{host}:#{port}")
+    connect_to(addr, family, endpoint(host, port))
+  end
+
+  # *host* and *port* as a message names them: an IPv6 literal in its
+  # brackets, as a URL writes it. Bare, `::1:57456` was an address with
+  # no port, and `ff02::1:80` another address altogether.
+  def self.endpoint(host : String, port : Int32) : String
+    host.includes?(":") && !host.starts_with?("[") ? "[#{host}]:#{port}" : "#{host}:#{port}"
   end
 
   # The stream socket listening at *path*.
@@ -535,7 +542,7 @@ pub class IyiSocket
     if bound < 0
       code = __sys_code(bound.to_i64)
       __sys_close(fd)
-      raise "cannot bind socket to #{host}:#{port}: #{SocketError.new("bind", code).reason}"
+      raise "cannot bind socket to #{endpoint(host, port)}: #{SocketError.new("bind", code).reason}"
     end
 
     if __sys_listen(fd, backlog) < 0
@@ -1462,7 +1469,7 @@ pub class IyiSocket
       addresses = uninitialized LibWs2_32::AcceptAddresses
       received = 0_i32
       size = __sys_addr_size(family)
-      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s), 1)
       answered = post.call(s, client, pointerof(addresses).as(Void*), 0,
         size + 16, size + 16, pointerof(received), ov.as(Void*))
       if answered == 0
@@ -1568,6 +1575,13 @@ pub class IyiSocket
 
     def self.__sys_send(fd : Int32, buf : Pointer(UInt8), len : UInt64, ms : Int32) : Int64
       s = __sys_handle(fd)
+      # A bounded piece at a time. Winsock takes a whole buffer of any size
+      # while what it holds is under the send buffer's size, so one send of
+      # a gigabyte to a peer that never reads was taken whole: 5.2 s with no
+      # other task running and the write's deadline never consulted. In
+      # pieces, the second finds the buffer full and the send parks, as
+      # the POSIX arms do.
+      len = SEND_PIECE if len > SEND_PIECE
       n = LibWs2_32.send(s, buf.as(Void*), len.to_i32, 0)
       return n.to_i64 if n >= 0
       err = LibWs2_32.WSAGetLastError
@@ -1581,6 +1595,8 @@ pub class IyiSocket
       __sys_send_posted(s, buf, len, ms)
     end
 
+    SEND_PIECE = 262144_u64
+
     # The send as the wait, with the write's deadline on it: a deadline
     # that comes first cancels the send, and the cancellation's completion
     # wakes this frame, so what the send did is known when it returns.
@@ -1590,7 +1606,7 @@ pub class IyiSocket
       # the kernel reads it after the post, and the fiber is parked in
       # between.
       descriptor = LibWs2_32::WSABuf.new(len: len.to_i32, buf: buf)
-      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s))
+      ov = IyiScheduler.arm_overlapped_current(Pointer(Void).new(s), 4)
       sent = 0_i32
       answered = LibWs2_32.WSASend(s, pointerof(descriptor), 1, pointerof(sent), 0, ov.as(Void*),
         Pointer(Void).new(0_u64))

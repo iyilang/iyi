@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Exercises `std/benchmark`: wall-clock measure of a block.
+# Exercises `std/benchmark`: wall-clock measure of a block, and that bm
+# and ips print only what they measured.
 #
 #     bash bench/std_benchmark_exercise.sh
 set -u
@@ -73,13 +74,36 @@ fi
 
 echo
 echo "== every benchmark section reported"
-for phrase in "== measure"; do
+for phrase in "== measure" "== integer seconds, and only what is measured"; do
   if ! grep -q "$phrase" "$WORK/benchmark-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
   fi
 done
 [ "$status" -eq 0 ] && echo "  sections reported"
+
+# bm and ips print to the program's output, which the program cannot read
+# back: the user, system and total columns and ips's B/op printed zeros
+# whatever the block did, and neither is measured, so neither is printed.
+# The program prints them when asked (`print`): a time is not the same
+# twice, and its plain output is compared run for run elsewhere.
+unmeasured_columns() { # unmeasured_columns <output>: 0 when one printed
+  grep -q "B/op\|user  *system" "$1"
+}
+echo
+echo "== bm and ips print a real time and no unmeasured column"
+"$WORK/benchmark-plain" print >"$WORK/printed.out" 2>&1
+sed 's/^/  /' "$WORK/printed.out" | grep -v "^  ==\|^    \|^  $\|ALL CHECKS"
+if unmeasured_columns "$WORK/printed.out"; then
+  echo "  a column this module does not measure was printed:"
+  grep "B/op\|user  *system" "$WORK/printed.out" | sed 's/^/    /'
+  status=1
+elif ! grep -q "^ *real$" "$WORK/printed.out" || ! grep -q "^a block  *(  [0-9.]*)$" "$WORK/printed.out" || ! grep -q "^an array .*fastest$" "$WORK/printed.out"; then
+  echo "  bm's or ips's line is missing"
+  status=1
+else
+  echo "  bm's real time and ips's rate, nothing else"
+fi
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -91,26 +115,42 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-mkdir -p "$WORK/patched/std"
-if [ -z "$PY" ]; then
-  echo "  no python3 on this machine, so the broken-module proof is unmeasured"
-elif ! "$PY" - <<PY
+# prove <label> <old> <new> [output]: the exercise, run on a copy with
+# <old> made <new>, has to fail - or, given `output`, print a column this
+# module does not measure, which only this script can see.
+prove() {
+  local label="$1" old="$2" new="$3" how="${4:-exit}"
+  if [ -z "$PY" ]; then
+    echo "  $label: no python3 on this machine, so the proof is unmeasured"
+    return 0
+  fi
+  rm -rf "$WORK/patched" && mkdir -p "$WORK/patched/std"
+  if ! OLD="$old" NEW="$new" "$PY" - <<PY
+import os
 from pathlib import Path
 src = Path("$REPO/src/std/benchmark.iyi").read_text()
-old = 'BM::Tms.new(0.0, 0.0, 0.0, 0.0, real, label)'
-if old not in src:
+if os.environ["OLD"] not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/patched/std/benchmark.iyi").write_text(src.replace(old, 'BM::Tms.new(0.0, 0.0, 0.0, 0.0, real, "")', 1))
+Path("$WORK/patched/std/benchmark.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
 PY
-then
-  echo "  the patch did not apply"
-  status=1
-elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_benchmark_exercise.iyi" >"$WORK/mut.out" 2>&1; then
-  echo "  the exercise PASSED on a broken module"
-  status=1
-else
-  echo "  a broken benchmark is caught"
-fi
+  then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_benchmark_exercise.iyi" -- print >"$WORK/mut.out" 2>&1; then
+    if [ "$how" = output ] && unmeasured_columns "$WORK/mut.out"; then
+      echo "  $label: caught"
+    else
+      echo "  $label: the exercise PASSED on a broken module"
+      status=1
+    fi
+  else
+    echo "  $label: caught"
+  fi
+}
+prove "a measure without its label" 'BM::Tms.new(real, label)' 'BM::Tms.new(real, "")'
+prove "integer seconds asked of Time" 'new(Std::Time::Span.seconds(calculation.to_i64), Std::Time::Span.seconds(warmup.to_i64)' 'new(Time.seconds(calculation.to_i64), Time.seconds(warmup.to_i64)'
+prove "zeros for the CPU time" 'Std::Format.sprintf("(  %.6f)", real)' 'Std::Format.sprintf("  0.000000   0.000000   0.000000 (  %.6f)", real)'
+prove "zeros for the bytes per call" '            item.human_compare)' '            "0B/op  " + item.human_compare)' output
 
 echo
 if [ "$status" -eq 0 ]; then

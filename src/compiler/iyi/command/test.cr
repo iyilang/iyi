@@ -82,7 +82,7 @@ class Iyi::Command
         # The pattern is built in posix form because a backslash is an escape
         # character in a glob, not a separator: `C:\dir\**\*_test.iyi` matched
         # nothing, so `iyi test` in a directory of tests found no tests.
-        Dir.glob(::Path[path].to_posix.join("**", "*_test.iyi")) { |file| files << file }
+        Dir.glob(Iyi.glob_root(path).join("**", "*_test.iyi")) { |file| files << file }
       elsif File.file?(path)
         files << path
       else
@@ -277,6 +277,8 @@ class Iyi::Command
       end
 
       process = Process.new(binary, output: output, error: output)
+      tree = TestTree.new(process)
+      running = tree
       done = ::Channel(Process::Status).new
       spawn { done.send(process.wait) }
       select
@@ -292,11 +294,18 @@ class Iyi::Command
         end
         {file: file, status: verdict, seconds: elapsed(started), output: status.success? ? "" : evidence}
       when timeout(deadline.seconds)
-        process.terminate(graceful: false)
+        # The test and whatever it started: its output is copied through
+        # a pipe, and `wait` waits for that pipe's end, which a child the
+        # test started holds open. Only the test was killed, so a test
+        # that ran `ping -n 25` answered "hung: killed at 3.0s" after 25
+        # seconds, with the pings printed after the kill, and one whose
+        # child never ends hung `iyi test` for good.
+        tree.terminate
         done.receive
         {file: file, status: "hung: killed at #{deadline}s", seconds: elapsed(started), output: output.to_s}
       end
     ensure
+      running.try &.close
       File.delete?(binary)
       # And what the link wrote beside it: MSVC's `.pdb`, and on darwin the
       # `.dwarf` dsymutil makes, which the new check found there too.
@@ -304,6 +313,57 @@ class Iyi::Command
         File.delete?(binary.rchop(".exe") + ".pdb")
       {% elsif flag?(:darwin) %}
         File.delete?("#{binary}.dwarf")
+      {% end %}
+    end
+  end
+
+  # A test's program and what it starts, ended together: on Windows a job
+  # object the program is put in as soon as it runs; elsewhere the program
+  # alone. [INFERENCE] A child a test starts on Linux or darwin outlives
+  # the kill and holds the pipe the same way; unmeasured there.
+  private class TestTree
+    @process : Process
+    {% if flag?(:win32) %}
+      @job : LibC::HANDLE = LibC::HANDLE.null
+    {% end %}
+
+    def initialize(@process : Process)
+      {% if flag?(:win32) %}
+        job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
+        return if job.null?
+        # PROCESS_TERMINATE | PROCESS_SET_QUOTA, what assigning asks for.
+        handle = LibC.OpenProcess(0x0001_u32 | 0x0100_u32, 0, @process.pid.to_u32)
+        if handle.null?
+          LibC.CloseHandle(job)
+          return
+        end
+        assigned = LibC.AssignProcessToJobObject(job, handle)
+        LibC.CloseHandle(handle)
+        if assigned == 0
+          LibC.CloseHandle(job)
+          return
+        end
+        @job = job
+      {% end %}
+    end
+
+    def terminate : Nil
+      {% if flag?(:win32) %}
+        unless @job.null?
+          LibC.TerminateJobObject(@job, 1)
+          LibC.CloseHandle(@job)
+          @job = LibC::HANDLE.null
+          return
+        end
+      {% end %}
+      @process.terminate(graceful: false)
+    end
+
+    # The job's handle, once the test is over; closing it ends nothing.
+    def close : Nil
+      {% if flag?(:win32) %}
+        LibC.CloseHandle(@job) unless @job.null?
+        @job = LibC::HANDLE.null
       {% end %}
     end
   end

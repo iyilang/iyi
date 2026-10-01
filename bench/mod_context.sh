@@ -486,6 +486,19 @@ elif ! grep -q "undefined method 'nonesuch_helper'" broken.txt; then
 else
   echo "a module that does not compile is answered with the reason it does not"
 fi
+# And `iyi doc` of it leaves nothing behind: it compiles in a scratch
+# directory it removes in an `ensure`, and the refusal exits, which runs
+# no `ensure` - every such doc left an `iyi-doc-*` directory in TEMP.
+scratch="$WORK/doc-tmp"
+mkdir -p "$scratch"
+TMPDIR="$scratch" TEMP="$(cygpath -w "$scratch" 2>/dev/null || echo "$scratch")" TMP="$(cygpath -w "$scratch" 2>/dev/null || echo "$scratch")" \
+  "$IYI" doc kit/all > broken_doc.txt 2>&1
+if [ -n "$(ls -A "$scratch")" ]; then
+  echo "FAIL: iyi doc of a module that does not compile left $(ls "$scratch" | head -1) behind"
+  status=1
+else
+  echo "iyi doc of a module that does not compile leaves no scratch directory"
+fi
 cd "$WORK" || exit 1
 
 # And what a facade hands on. `pub import` is a promise to the consumer:
@@ -578,6 +591,47 @@ elif "$IYI" mod dump mods/m/netty.iyimod | sed -n '/^libs/,/^[a-z]/p' | grep -q 
 else
   echo "FAIL: the artifact's object code calls LibMathy and its libs do not say so"
   "$IYI" mod dump mods/m/netty.iyimod | grep -n '^libs\|^object code' | sed 's/^/  /'
+  status=1
+fi
+cd "$WORK" || exit 1
+
+# An entry below its project's root, `app/main.iyi` declaring `module
+# app/main`: its import of `app/util` is resolved from above `app`, as a
+# build resolves it, and not reported as not resolving, exit 0.
+mkdir -p "$WORK/headed/app"
+cd "$WORK/headed" || exit 1
+printf 'module app/util\n\npub def answer : Int32\n  42\nend\n' > app/util.iyi
+printf 'module app/main\n\nimport app/util::{answer}\n\nputs answer\n' > app/main.iyi
+unset IYI_PATH
+"$IYI" mod context app/main.iyi > headed.txt 2>&1
+if grep -q "does not resolve" headed.txt || ! grep -q "pub def answer : Int32" headed.txt; then
+  echo "FAIL: an entry below its root did not ground its import by the header's root"
+  sed -n '1,4p' headed.txt | sed 's/^/  /'
+  status=1
+else
+  echo "an entry below its root grounds its imports from the root its header names"
+fi
+cd "$WORK" || exit 1
+
+# A project whose directory's name holds the platform's path-list
+# separator: the module's root travelled as the front of `IYI_PATH`, and
+# `a;b` (`a:b` elsewhere) arrived as two entries, so `iyi doc` and `mod
+# context` answered "can't find module" about a module `iyi run` builds.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) listed="$WORK/semi;colon" ;;
+  *) listed="$WORK/semi:colon" ;;
+esac
+mkdir -p "$listed/app"
+cd "$listed" || exit 1
+printf 'module app/lib\n\npub def value : Int32\n  7\nend\n' > app/lib.iyi
+printf 'import app/lib::{value}\n\nputs value\n' > user.iyi
+"$IYI" doc app/lib > listed_doc.txt 2>&1
+"$IYI" mod context user.iyi > listed_ctx.txt 2>&1
+if grep -q "pub def value : Int32" listed_doc.txt && grep -q "pub def value : Int32" listed_ctx.txt; then
+  echo "a project in $(basename "$listed") is documented and grounded"
+else
+  echo "FAIL: a project in $(basename "$listed"): doc and mod context answered"
+  sed -n '1,2p' listed_doc.txt listed_ctx.txt | sed 's/^/  /'
   status=1
 fi
 cd "$WORK" || exit 1

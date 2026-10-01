@@ -714,7 +714,8 @@ mutate "ilogb one past the exponent" '    frexp(value)[1] - 1' '    frexp(value)
 mutate "erf of a single answered as a double" '  def self.erf(value : Float32) : Float32
     erf(value.to_f64).to_f32' '  def self.erf(value : Float32) : Float64
     erf(value.to_f64)'
-mutate "gcd on the positive side" 'x = a > 0 ? -a : a' 'x = a.abs'
+mutate "gcd on the positive side" 'x = signed && a > 0 ? zero - a : a' 'x = a.abs'
+mutate "gcd of an unsigned pair on the negative side" 'signed = zero &- 1 < zero' 'signed = true'
 
 echo
 if [ "$status" -eq 0 ]; then

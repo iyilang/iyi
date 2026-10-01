@@ -1,5 +1,6 @@
-# Exercises `std/complex`: Complex abs, arithmetic, exp, a zero's sign,
-# division at the ends of the range, sign, hashing and equality.
+# Exercises `std/complex`: Complex abs, arithmetic, exp and roots at the
+# top of the range, a zero's sign, division and inverses at the ends of
+# the range, sign, hashing and equality.
 #
 # Run via:
 #     ./bin/iyi run bench/std_complex_exercise.iyi
@@ -27,7 +28,11 @@ s = z + Complex.new(1.0, 1.0)
 assert_true s.real == 4.0 && s.imag == 5.0, "add"
 e = Complex.new(0.0, 0.0).exp
 assert_true e.real == 1.0 && e.imag == 0.0, "e^0"
-puts "  add and e^0"
+assert_str "Infinity + 0.0i", Complex.new(710.0, 0.0).exp.to_s, "e to a real power past the range keeps its imaginary zero"
+assert_str "Infinity + 0.0i", Complex.new(1.0 / 0.0, 0.0).exp.to_s, "e to the real infinity keeps its imaginary zero"
+assert_str "1.09868411346781e+154 + 4.5508986056222734e+153i", Complex.new(1.0e308, 1.0e308).sqrt.to_s, "the root of a value near the top of the range"
+assert_str "4.5508986056222734e+153 + 1.09868411346781e+154i", Complex.new(-1.0e308, 1.0e308).sqrt.to_s, "the root of a negative value near the top of the range"
+puts "  add, e^0, e to a real power past the range, and a root near the top of it"
 
 # Every expected value below is what the other library's Complex answers
 # for the same call.
@@ -44,7 +49,13 @@ puts "\n== division"
 assert_str "1.0e-200 + 0.0i", (Complex.new(1.0, 1.0) / Complex.new(1.0e200, 1.0e200)).to_s, "a divisor whose abs2 overflows"
 assert_str "1.0e+200 + 0.0i", (Complex.new(1.0, 1.0) / Complex.new(1.0e-200, 1.0e-200)).to_s, "a divisor whose abs2 underflows"
 assert_str "0.6000000000000001 - 1.2000000000000002i", (3 / Complex.new(1.0, 2.0)).to_s, "a number over a complex is times its inverse"
-puts "  a quotient at either end of the range, and a number's as the other library rounds it"
+# The other library's own `inv` answers `Infinity + NaNi` and `0.0 - 0.0i`
+# here; these are its `conj / abs2` without the over- and underflow, the
+# conjugate's zero sign kept.
+assert_str "1.0e+170 - 0.0i", Complex.new(1.0e-170, 0.0).inv.to_s, "the inverse of a value whose abs2 underflows"
+assert_str "1.0e-170 - 0.0i", Complex.new(1.0e170, 0.0).inv.to_s, "the inverse of a value whose abs2 overflows"
+assert_str "5.0e+169 - 5.0e+169i", (1 / Complex.new(1.0e-170, 1.0e-170)).to_s, "a number over a complex whose abs2 underflows"
+puts "  a quotient and an inverse at either end of the range, and a number's as the other library rounds it"
 
 puts "\n== sign"
 assert_str "1.0 + 0.0i", Complex.new(1.0 / 0.0, 1.0).sign.to_s, "an infinite part's sign is its axis"

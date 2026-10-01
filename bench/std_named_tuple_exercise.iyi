@@ -154,6 +154,14 @@ box_nt = {item: box}
 cloned_nt = box_nt.clone
 assert_true cloned_nt[:item].val == 42, "clone value preserved"
 assert_true cloned_nt[:item] != box_nt[:item], "clone creates distinct instance"
+# A value with no `clone` of its own is kept as it is: asking every value
+# for `clone` refused `{a: 1, b: "two"}`, since the prelude gives `clone`
+# to neither `Int32` nor `String`, and this did not compile.
+plain_nt = {a: 1, b: "two"}
+plain_clone = plain_nt.clone
+assert_true plain_clone == plain_nt, "clone of plain values"
+mixed_clone = {n: 7, item: box}.clone
+assert_true mixed_clone[:n] == 7 && mixed_clone[:item].val == 42 && mixed_clone[:item] != box, "clone of a plain value beside a cloneable one"
 puts "  merge, reverse_merge, to_a, to_h, and clone"
 
 puts "\n== edges"

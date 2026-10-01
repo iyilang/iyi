@@ -82,6 +82,23 @@ module Iyi
   # Swapped rather than normalised: `Path#normalize` also collapses `./` and
   # `//`, which would change what a POSIX build prints, and `Path#to_native`
   # translates no separators at all — it only relabels the kind.
+  # iyi: *dir* as the literal start of a glob pattern: posix, since a
+  # backslash is an escape in a pattern and not a separator, and with the
+  # pattern's own characters escaped, since a directory's name is a name.
+  # `proj [v2]` and `x{a,b}` were read as a character class and a brace,
+  # matched nothing, and `iyi test` found no tests there while `iyi fmt
+  # --check` passed having checked nothing.
+  def self.glob_root(dir : String | ::Path) : ::Path
+    posix = ::Path[dir].to_posix.to_s
+    escaped = String.build do |io|
+      posix.each_char do |char|
+        io << '\\' if char.in?('*', '?', '[', ']', '{', '}')
+        io << char
+      end
+    end
+    ::Path.posix(escaped)
+  end
+
   def self.native_path(path : String) : String
     {% if flag?(:win32) %}
       return path.tr("/", "\\") if path.includes?('/')
@@ -129,13 +146,43 @@ module Iyi
   # new file answered yes, and `-o` there came back as the linker's
   # LNK1104 after a whole compilation. So Windows is asked by making a
   # file, which is the question.
+  # iyi: on Windows, *path* made free for a new file: false only when it is
+  # there, cannot be opened for writing - a running program, a read-only
+  # file - and cannot be renamed either. Moved to `*.old`, or `*.old-<pid>`
+  # when an earlier one is still running and cannot be deleted.
+  def self.move_aside_if_busy(path : String) : Bool
+    return true unless File.file?(path)
+    begin
+      File.open(path, "r+") { }
+      return true
+    rescue File::Error
+    end
+    aside = "#{path}.old"
+    begin
+      File.delete(aside) if File.exists?(aside)
+    rescue File::Error
+      aside = "#{path}.old-#{Process.pid}"
+    end
+    File.rename(path, aside)
+    true
+  rescue File::Error
+    false
+  end
+
   def self.writable_directory?(directory : String) : Bool
     {% if flag?(:win32) %}
       probe = File.join(directory, ".iyi-write-probe-#{Process.pid}")
       begin
         File.write(probe, "")
-      rescue File::Error
+      rescue File::AccessDeniedError
         return false
+      rescue File::Error
+        # Not a refusal: the probe's own name is longer than the output's,
+        # and in a directory near MAX_PATH it was the probe that did not
+        # fit - "no permission to write there", from a directory that
+        # takes the program, and only for a five-digit process id. The
+        # linker answers for the file itself.
+        return true
       end
       File.delete?(probe)
       true

@@ -180,6 +180,13 @@ pull.skip
 assert_true(pull.kind.eof?, "skip over objects whose keys repeat only across objects")
 assert_text("{\"x\":[1],\"y\":{\"x\":2}}", JSON.from_json("{\"x\": [1], \"y\": {\"x\": 2}}", Any).to_json, "read_any with a key repeated in a nested object")
 assert_text("[1,{\"a\":[]}]", JSON.build { |b| PullParser.new("[1, {\"a\": []}]").read_raw(b) }, "read_raw into a builder")
+# A number goes through read_raw as the text it was read from. Rebuilt from
+# the Int64 or Float64 it parsed to, `1E+2` came back as `100.0` and a
+# UInt64 id past Int64 as `1.8446744073709552e+19`, which did not read
+# back as a UInt64.
+assert_text("[12345678901234567890,1E+2,0.1,-0,1.50]", PullParser.new("[12345678901234567890, 1E+2, 0.1, -0, 1.50]").read_raw, "read_raw writes a number as its own text")
+id_text = PullParser.new("{\"id\": 18446744073709551615}").read_raw
+assert_true(JSON.from_json(id_text, Hash(String, UInt64))["id"] == 18446744073709551615_u64, "a UInt64 id read back through read_raw: #{id_text}")
 puts "  read_object/read_array/read_x, skip, on_key, read_raw, read_any and locations"
 
 # An object with more keys than the pull parser scans (32) keeps its keys
@@ -419,7 +426,27 @@ floats = JSON.from_json("{\"a\": 1.5, \"b\": 2}", Hash(String, Float64))
 assert_true(floats["a"] == 1.5 && floats["b"] == 2.0, "Hash(String, Float64)")
 strings = JSON.from_json("{\"k\": [\"v\", \"w\"]}", Hash(String, Array(String)))
 assert_true(strings["k"][1] == "w", "Hash(String, Array(String))")
-puts "  nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String, Any, arrays, hashes and a ToJSON struct"
+
+# A type that admits nil: alone, in an array, as a hash's values and in a
+# derived field. Each was refused at compile time: `(Int32 | Nil).new` on
+# the way in, and on the way out the union matched against `ToJSON` as one
+# type, where `write_or_null` now takes the nil out first.
+struct Tagged
+  getter tags : Array(String?)
+
+  derive serializable
+end
+
+assert_true(JSON.from_json("null", Int32?).nil? && JSON.from_json("5", Int32?) == 5, "Int32? from null and from 5")
+maybe_ints = JSON.from_json("[1, null]", Array(Int32?))
+assert_true(maybe_ints.size == 2 && maybe_ints[0] == 1 && maybe_ints[1].nil?, "Array(Int32?)")
+assert_text("[1,null]", JSON.to_json(maybe_ints), "Array(Int32?) written")
+maybe_strings = JSON.from_json("{\"a\": null, \"b\": \"x\"}", Hash(String, String?))
+assert_text("{\"a\":null,\"b\":\"x\"}", JSON.to_json(maybe_strings), "Hash(String, String?) read and written")
+assert_text("1", JSON.to_json(1.as(Int32?)), "an Int32? holding 1")
+assert_text("null", JSON.to_json(nil.as(Int32?)), "an Int32? holding nil")
+assert_text("{\"tags\":[\"a\",null]}", Tagged.from_json("{\"tags\": [\"a\", null]}").to_json, "a derived Array(String?) field")
+puts "  nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String, Any, arrays, hashes, a ToJSON struct and each of them or nil"
 
 puts "\n== derive serializable"
 
@@ -448,6 +475,20 @@ struct Places
   derive serializable
 end
 
+# Fields written with defaults, as `JSON::Serializable` reads them: on a
+# missing key a field keeps its default, and a key that is there wins,
+# `null` included. The port was refused by name and the host overwritten
+# with nil.
+struct Listener
+  @port : Int32 = 8080
+  @host : String? = "localhost"
+  getter port
+  getter host
+  getter name : String
+
+  derive serializable
+end
+
 place = Place.from_json("{\"x\": 1.5, \"extra\": [1, {\"deep\": null}], \"name\": \"a\", \"y\": -2}")
 assert_true place.x == 1.5 && place.y == -2.0 && place.name == "a" && place.note.nil?, "a derived type read, an unknown key passed over"
 assert_text "{\"x\":1.5,\"y\":-2.0,\"name\":\"a\",\"note\":null}", place.to_json, "a derived type written, a nil field as null"
@@ -469,7 +510,10 @@ group do |g|
   refusal = answer.message if answer.is_a?(Panicked)
 end
 assert_true refusal.includes?("JSON for Place has no key \"name\""), "a missing field refused by name: #{refusal}"
-puts "  read, written and round-tripped: nested, arrays, hashes, nil, unknown keys, a missing key refused"
+assert_text "{\"port\":1,\"host\":\"localhost\",\"name\":\"x\"}", Listener.from_json("{\"name\": \"x\", \"port\": 1}").to_json, "a nilable field keeps its default for a missing key"
+assert_text "{\"port\":8080,\"host\":\"localhost\",\"name\":\"x\"}", Listener.from_json("{\"name\": \"x\"}").to_json, "a field keeps its default for a missing key"
+assert_text "{\"port\":2,\"host\":null,\"name\":\"x\"}", Listener.from_json("{\"host\": null, \"name\": \"x\", \"port\": 2}").to_json, "a key that is there wins over the default, null included"
+puts "  read, written and round-tripped: nested, arrays, hashes, nil, unknown keys, defaults, a missing key refused"
 
 # ---------------------------------------------------------------------------
 # Refusals
@@ -526,9 +570,29 @@ refused_with("{\"a\":", "unexpected end of input at line 1, column 6")
 refused_with("]", "unexpected ']' at line 1, column 1")
 refused_with(":", "unexpected ':' at line 1, column 1")
 refused_with("[\"\u00e9\u00e9\", 1 x]", "bare identifier 'x' at line 1, column 10")
-deep_text = "[" * 513 + "]" * 513
-refused_with(deep_text, "nesting depth of 513 exceeds maximum depth 512 at line 1, column 513")
-assert_true(JSON.parse("[" * 512 + "]" * 512).size == 1, "512 levels are read")
+deep_text = "[" * 257 + "]" * 257
+refused_with(deep_text, "nesting depth of 257 exceeds maximum depth 256 at line 1, column 257")
+assert_true(JSON.parse("[" * 256 + "]" * 256).size == 1, "256 levels are read")
+# And in a task, whose stack is 256 KB: the deepest document read is one a
+# task can parse, compare and print. At 512 a task died of a stack
+# overflow at 480 levels, and `==` at 334, and the whole process with it.
+deepest_array = "[" * 256 + "]" * 256
+deepest_object = "{\"a\":" * 256 + "1" + "}" * 256
+in_task = false
+group do |g|
+  g.spawn do
+    [deepest_array, deepest_object].each do |deepest|
+      one = JSON.parse(deepest)
+      raise "ASSERTION FAILED: the deepest document does not equal itself in a task" unless one == JSON.parse(deepest)
+      raise "ASSERTION FAILED: the deepest document does not print back in a task" unless one.to_json == deepest
+      one.hash
+      one.inspect
+    end
+    in_task = true
+    0
+  end
+end
+assert_true(in_task, "the deepest document is parsed, compared, printed and hashed in a task")
 puts "  #{52} malformed inputs, each refused with its sentence and location"
 
 # ---------------------------------------------------------------------------

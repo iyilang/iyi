@@ -127,7 +127,8 @@ module Crystal::System::File
         end
 
         case find_data.dwReserved0
-        when LibC::IO_REPARSE_TAG_SYMLINK
+        when LibC::IO_REPARSE_TAG_SYMLINK, LibC::IO_REPARSE_TAG_MOUNT_POINT
+          # iyi: a junction too (see `Dir#data_to_entry`).
           return ::File::Info.new(find_data) unless follow_symlinks
         when LibC::IO_REPARSE_TAG_AF_UNIX
           return ::File::Info.new(find_data)
@@ -403,6 +404,20 @@ module Crystal::System::File
               name = name[4..]
             end
             return {name, is_relative}
+          elsif reparse_data.value.reparseTag == LibC::IO_REPARSE_TAG_MOUNT_POINT
+            # iyi: a junction's target, which is always absolute: its
+            # print name when set, its substitute name less the NT prefix
+            # otherwise.
+            mount_data = reparse_data.value.dummyUnionName.mountPointReparseBuffer
+            path_buffer = reparse_data.value.dummyUnionName.mountPointReparseBuffer.pathBuffer.to_unsafe.as(UInt8*)
+            if (name_len = mount_data.printNameLength) > 0
+              name_ptr = path_buffer + mount_data.printNameOffset
+              return {String.from_utf16(Slice.new(name_ptr, name_len).unsafe_slice_of(UInt16)), false}
+            end
+            name_ptr = path_buffer + mount_data.substituteNameOffset
+            name = String.from_utf16(Slice.new(name_ptr, mount_data.substituteNameLength).unsafe_slice_of(UInt16))
+            name = name[4..] if name.starts_with?(%q(\??\)) && name[5]? == ':'
+            return {name, false}
           else
             # not a symlink (e.g. IO_REPARSE_TAG_AF_UNIX)
             return nil

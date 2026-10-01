@@ -379,6 +379,13 @@ str_ba[1] = true
 str_ba[3] = true
 assert_equal_str("to_s format", str_ba.to_s, "BitArray[0101]")
 assert_equal_str("inspect format", str_ba.inspect, "BitArray[0101]")
+# Printed into one builder: a string grown by a character per bit was
+# copied per bit, and 200,000 bits took 46 s.
+wide_started = __iyi_monotonic_ns
+wide_text = BitArray.new(200000).to_s
+wide_ms = (__iyi_monotonic_ns - wide_started) // 1000000
+assert_true("200,000 bits print whole", wide_text.bytesize == 200010)
+assert_true("200,000 bits print in under a second, not #{wide_ms} ms", wide_ms < 1000)
 
 # to_slice
 slice_ba = BitArray.new(16)

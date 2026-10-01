@@ -343,7 +343,12 @@ end
 # Adaptor implementations
 # ---------------------------------------------------------------------------
 
-pub struct ArrayIterator(T)
+# The sources are classes, as the other library's are: an adaptor keeps
+# its source by value, and a struct source was copied into it, so
+# `it.first(2).to_a` and then `it.to_a` gave [1, 2] and [1, 2, 3, 4] where
+# the other library gives [1, 2] and [3, 4]. Shared, the adaptor's pulls
+# are the source's. The adaptors stay structs.
+pub class ArrayIterator(T)
   def initialize(@array : Array(T))
     @index = 0
   end
@@ -377,7 +382,7 @@ end
 # `Range#each` does, and stops at the end rather than stepping past it:
 # on an inclusive range whose end is the type's largest value, the step
 # after the last element would overflow.
-pub struct RangeIterator(B, E)
+pub class RangeIterator(B, E)
   @range : Range(B, E)
   @current : B
   @done : Bool
@@ -412,7 +417,7 @@ end
 # array per call, so asking per element was a copy of the table per step —
 # and then walks that snapshot, so a hash that changes under the iterator
 # does not change what it yields.
-pub struct KeyIterator(K, V)
+pub class KeyIterator(K, V)
   @keys : Array(K)
   @index : Int32
 
@@ -433,7 +438,7 @@ impl Iterator for KeyIterator(K, V) forall K, V
   end
 end
 
-pub struct ValueIterator(K, V)
+pub class ValueIterator(K, V)
   @values : Array(V)
   @index : Int32
 
@@ -454,7 +459,7 @@ impl Iterator for ValueIterator(K, V) forall K, V
   end
 end
 
-pub struct EntryIterator(K, V)
+pub class EntryIterator(K, V)
   @keys : Array(K)
   @values : Array(V)
   @index : Int32

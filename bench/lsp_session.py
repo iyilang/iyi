@@ -1110,6 +1110,144 @@ def main():
     for uri in (nest_lib_uri, nest_use_uri):
         c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
 
+    # 18j. Where the project sits is not what it holds. The workspace walk
+    #      skipped a file whose absolute path had `/.` or `/lib/` in it -
+    #      meant for `.git` and a dependency's `lib` inside the root - so a
+    #      project under `~/.config` or any `lib` directory had no files:
+    #      a rename edited the def and left its importer calling a name
+    #      that no longer exists. A server of its own, rooted there.
+    for parent in (".outer", "lib"):
+        proj = os.path.join(work, "placed", parent, "proj")
+        os.makedirs(proj)
+        placed_lib = os.path.join(proj, "greet.iyi")
+        placed_text = "module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n"
+        with open(placed_lib, "w", newline="") as f:
+            f.write(placed_text)
+        with open(os.path.join(proj, "app.iyi"), "w", newline="") as f:
+            f.write("module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\n")
+        # And on Windows two junctions the walk has to step past: one back
+        # to the root, which it followed until the paths were too long to
+        # open, and one this user may not list, which failed every
+        # workspace question with -32602 "Access is denied".
+        denied = None
+        if os.name == "nt" and parent == "lib":
+            subprocess.run(["cmd", "/c", "mklink", "/J", os.path.join(proj, "loop"), proj], capture_output=True)
+            os.makedirs(os.path.join(work, "placed", "elsewhere"))
+            denied = os.path.join(proj, "legacy")
+            subprocess.run(["cmd", "/c", "mklink", "/J", denied, os.path.join(work, "placed", "elsewhere")], capture_output=True)
+            subprocess.run(["icacls", denied, "/deny", os.environ["USERNAME"] + ":(RD)", "/L"], capture_output=True)
+        e = Client()
+        e.send("initialize", {"rootUri": file_uri(proj), "capabilities": {}})
+        e.send("initialized", {}, wait=False)
+        placed_uri = file_uri(placed_lib)
+        e.send("textDocument/didOpen",
+               {"textDocument": {"uri": placed_uri, "languageId": "iyi",
+                                 "version": 1, "text": placed_text}}, wait=False)
+        e.diagnostics(placed_uri)
+        placed = (e.send("textDocument/rename",
+                         {"textDocument": {"uri": placed_uri},
+                          "position": {"line": 2, "character": 9},
+                          "newName": "holler"}).get("result") or {}).get("changes", {})
+        placed_files = sorted(u.rsplit("/", 1)[-1] for u in placed)
+        e.send("shutdown", {})
+        e.send("exit", {}, wait=False)
+        e.proc.wait(timeout=10)
+        if denied:
+            subprocess.run(["icacls", denied, "/remove:d", os.environ["USERNAME"], "/L"], capture_output=True)
+            for junction in (denied, os.path.join(proj, "loop")):
+                os.rmdir(junction)
+        step(f"18j{parent}", f"a project under a `{parent}` directory renames into its importer",
+             placed_files == ["app.iyi", "greet.iyi"],
+             f"rename edited {placed_files}")
+
+    # 18m. A multi-root workspace is every folder, not the first: a rename
+    #      in the second folder left its importer calling the old name, and
+    #      workspace/symbol knew nothing of it.
+    folders = [os.path.join(work, "roots", name) for name in ("first", "second")]
+    for folder in folders:
+        os.makedirs(folder)
+    with open(os.path.join(folders[0], "other.iyi"), "w", newline="") as f:
+        f.write("module other\n\nputs 1\n")
+    second_lib = os.path.join(folders[1], "greet.iyi")
+    second_text = "module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n"
+    with open(second_lib, "w", newline="") as f:
+        f.write(second_text)
+    with open(os.path.join(folders[1], "app.iyi"), "w", newline="") as f:
+        f.write("module app\n\nimport greet::{shout}\n\ndef announce : String\n  shout(\"a\")\nend\n\nputs announce\n")
+    e = Client()
+    e.send("initialize", {"rootUri": file_uri(folders[0]), "capabilities": {},
+                          "workspaceFolders": [{"uri": file_uri(folder), "name": os.path.basename(folder)}
+                                               for folder in folders]})
+    e.send("initialized", {}, wait=False)
+    second_uri = file_uri(second_lib)
+    e.send("textDocument/didOpen",
+           {"textDocument": {"uri": second_uri, "languageId": "iyi",
+                             "version": 1, "text": second_text}}, wait=False)
+    e.diagnostics(second_uri)
+    multi = (e.send("textDocument/rename",
+                    {"textDocument": {"uri": second_uri},
+                     "position": {"line": 2, "character": 9},
+                     "newName": "holler"}).get("result") or {}).get("changes", {})
+    multi_files = sorted(u.rsplit("/", 1)[-1] for u in multi)
+    announced = [sym["name"] for sym in e.send("workspace/symbol", {"query": "announce"}).get("result") or []]
+    e.send("shutdown", {})
+    e.send("exit", {}, wait=False)
+    e.proc.wait(timeout=10)
+    step("18m", "a multi-root workspace is every folder, not the first",
+         multi_files == ["app.iyi", "greet.iyi"] and announced == ["announce"],
+         f"rename edited {multi_files}, workspace/symbol found {announced}")
+
+    # 18k. The URIs an answer names are URIs: the client's own for a file
+    #      it has open, and for any other one a percent-encoded URI that
+    #      names that file. The path went behind `file:///` as it stood,
+    #      so `#` made the rest of the path a fragment, `%41` decoded to
+    #      another name, and a space never equalled the spelling an editor
+    #      sent - here VS Code's, `c%3A` and all.
+    from urllib.parse import quote
+    odd = os.path.join(work, "odd #1 50%41 \u011f")
+    os.makedirs(odd)
+    odd_lib = os.path.join(odd, "greet.iyi")
+    odd_app = os.path.join(odd, "app.iyi")
+    with open(odd_lib, "w", newline="") as f:
+        f.write("module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n")
+    odd_app_text = "module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\n"
+    with open(odd_app, "w", newline="") as f:
+        f.write(odd_app_text)
+    absolute = os.path.abspath(odd_app).replace("\\", "/")
+    if os.name == "nt":
+        vscode_uri = "file:///" + absolute[0].lower() + "%3A" + quote(absolute[2:])
+    else:
+        vscode_uri = "file://" + quote(absolute)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": vscode_uri, "languageId": "iyi",
+                             "version": 1, "text": odd_app_text}}, wait=False)
+    c.diagnostics(vscode_uri)
+    at_call = {"textDocument": {"uri": vscode_uri}, "position": {"line": 4, "character": 6}}
+    found = c.send("textDocument/definition", at_call).get("result") or []
+    found_uri = found[0]["uri"] if found else ""
+    renamed = (c.send("textDocument/rename", dict(at_call, newName="holler")).get("result") or {}).get("changes", {})
+    keys = sorted(renamed)
+    others = [k for k in keys if k != vscode_uri]
+    step("18k", "answers name files by the client's URI, or by an encoded one",
+         found_uri != "" and uri_path(found_uri) == uri_path(file_uri(odd_lib)) and os.path.exists(uri_path(found_uri)) and
+         vscode_uri in keys and len(keys) == 2 and
+         all(os.path.exists(uri_path(k)) for k in others),
+         f"definition {found_uri!r}, rename keys {keys}")
+    c.send("textDocument/didClose", {"textDocument": {"uri": vscode_uri}}, wait=False)
+    # And a file on a share: `file://server/share/...` names a UNC path.
+    #  Its authority was read as the path's first segment, relative to the
+    #  server's own directory, and the module beside it was not found.
+    share = r"\\127.0.0.1\C$"
+    if os.name == "nt" and os.path.splitdrive(odd_app)[0].upper() == "C:" and os.path.exists(share):
+        unc_uri = pathlib.Path(share + odd_app[2:]).as_uri()
+        c.send("textDocument/didOpen",
+               {"textDocument": {"uri": unc_uri, "languageId": "iyi",
+                                 "version": 1, "text": odd_app_text}}, wait=False)
+        unc_diags = [d["message"][:60] for d in c.diagnostics(unc_uri)["diagnostics"]]
+        c.send("textDocument/didClose", {"textDocument": {"uri": unc_uri}}, wait=False)
+        step("18k-unc", "a file on a share finds the module beside it", unc_diags == [],
+             f"{unc_uri}: {unc_diags}")
+
     # 19. foldingRange: the def folds off the outline, the import
     #     header off the text.
     reply = c.send("textDocument/foldingRange",
@@ -1206,6 +1344,88 @@ def main():
          formatted.count("\n") == sloppy.count("\n"),
          "one whole-document edit, call tightened")
 
+    # 25c. A CRLF buffer formats in CRLF, as `iyi format` writes a file:
+    #      a formatted one needs no edit, and a sloppy one's edit keeps
+    #      every line's `\r\n`. The server answered both with LF, a
+    #      whole-document rewrite on every save. And an edit whose range
+    #      runs past a line's end stops before its `\r`, which the spec
+    #      says and the server's offsets did not: the buffer lost the `\r`
+    #      and stopped matching the editor's.
+    crlf_path = os.path.join(work, "crlf.iyi")
+    crlf_text = "module crlf\r\n\r\nputs 1\r\nputs 2\r\n"
+    crlf_uri = file_uri(crlf_path)
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": crlf_uri, "languageId": "iyi",
+                             "version": 1, "text": crlf_text}}, wait=False)
+    c.diagnostics(crlf_uri)
+    fmt = {"textDocument": {"uri": crlf_uri}, "options": {"tabSize": 2, "insertSpaces": True}}
+    clean = c.send("textDocument/formatting", fmt)["result"]
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": crlf_uri, "version": 2},
+            "contentChanges": [{"range": {"start": {"line": 2, "character": 5},
+                                          "end": {"line": 2, "character": 100}},
+                                "text": "3"}]}, wait=False)
+    c.diagnostics(crlf_uri)
+    after_edit = c.send("textDocument/formatting", fmt)["result"]
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": crlf_uri, "version": 3},
+            "contentChanges": [{"text": "module crlf\r\n\r\nputs(  3 )\r\nputs 2\r\n"}]}, wait=False)
+    c.diagnostics(crlf_uri)
+    sloppy_edits = c.send("textDocument/formatting", fmt)["result"] or []
+    sloppy_text = sloppy_edits[0]["newText"] if sloppy_edits else ""
+    step("25c", "a CRLF buffer formats in CRLF, and an edit past a line's end keeps its \\r",
+         clean == [] and after_edit == [] and
+         sloppy_text.count("\r\n") == 4 and sloppy_text.count("\n") == 4,
+         f"formatted: {clean!r}, after the edit: {len(after_edit or [])} edit(s), "
+         f"sloppy: {sloppy_text!r}")
+    c.send("textDocument/didClose", {"textDocument": {"uri": crlf_uri}}, wait=False)
+
+    # 25d. Rename takes the names the compiler takes: `şarkı` for a local,
+    #      `söyle` for a def, and back from one to ASCII. It refused every
+    #      non-ASCII name ("'şarkı' is not an iyi variable name"), where
+    #      `def söyle(şarkı : String)` compiles. A name the lexer reads as a
+    #      constant, `Şarkı`, is still refused for a local.
+    def applied(text, edits):
+        lines = text.split("\n")
+        for e in sorted(edits, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True):
+            r = e["range"]
+            line = lines[r["start"]["line"]]
+            lines[r["start"]["line"]] = line[:r["start"]["character"]] + e["newText"] + line[r["end"]["character"]:]
+        return "\n".join(lines)
+    uni_path = os.path.join(work, "uni.iyi")
+    uni_uri = file_uri(uni_path)
+    uni_text = 'module uni\n\ndef sing(song : String) : String\n  song + song\nend\n\nputs sing("la")\n'
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": uni_uri, "languageId": "iyi",
+                             "version": 1, "text": uni_text}}, wait=False)
+    c.diagnostics(uni_uri)
+    def renamed(line, character, name):
+        reply = c.send("textDocument/rename",
+                       {"textDocument": {"uri": uni_uri},
+                        "position": {"line": line, "character": character},
+                        "newName": name})
+        return reply.get("result"), reply.get("error")
+    to_local, _ = renamed(3, 3, "şarkı")
+    step_one = applied(uni_text, (to_local or {}).get("changes", {}).get(uni_uri, []))
+    to_def, _ = renamed(6, 6, "söyle")
+    step_two = applied(step_one, (to_def or {}).get("changes", {}).get(uni_uri, []))
+    c.send("textDocument/didChange",
+           {"textDocument": {"uri": uni_uri, "version": 2},
+            "contentChanges": [{"text": step_two}]}, wait=False)
+    uni_diags = c.diagnostics(uni_uri)["diagnostics"]
+    back, _ = renamed(3, 4, "tune")
+    step_three = applied(step_two, (back or {}).get("changes", {}).get(uni_uri, []))
+    _, constant = renamed(3, 4, "Şarkı")
+    step("25d", "rename takes the names the compiler takes, in any script",
+         step_two == 'module uni\n\ndef söyle(şarkı : String) : String\n  şarkı + şarkı\nend\n\nputs söyle("la")\n' and
+         not uni_diags and
+         step_three == step_two.replace("şarkı", "tune") and
+         constant is not None,
+         # ascii(): a runner's console may be cp1252, which has no `ş`.
+         f"after two renames {ascii(step_two)}, diagnostics {ascii(uni_diags)}, back {ascii(step_three)}, "
+         f"the constant-cased name refused: {constant is not None}")
+    c.send("textDocument/didClose", {"textDocument": {"uri": uni_uri}}, wait=False)
+
     # 25b. and formatting a buffer that imports a package. The host segment
     #      is one segment to the parser and three tokens to the lexer, and
     #      the formatter fell behind its own stream on it — raising a plain
@@ -1299,6 +1519,19 @@ def main():
          paint_item is not None and paint_item["name"] == "paint" and
          "render" in callers and "paint" in callees,
          f"paint <- {callers}, render -> {callees}")
+
+    # 28b. and a def's callers are the calls the person wrote: `render`
+    #      is called once, at the file's last line. Incoming calls to any
+    #      def also listed the def's own file as a caller at the def's own
+    #      line - a call the compiler made there.
+    render_callers = []
+    if render_items:
+        reply = c.send("callHierarchy/incomingCalls", {"item": render_items[0]})
+        render_callers = [(e["from"]["name"], [r["start"]["line"] for r in e["fromRanges"]])
+                          for e in reply["result"] or []]
+    step("28b", "a def's incoming calls are the calls written",
+         [lines for _, lines in render_callers] == [[19]],
+         f"render <- {render_callers}")
 
     # 29. selectionRange: expand from inside the string literal, out
     #     through the def, to the file — strictly nested.
@@ -1784,6 +2017,30 @@ def main():
          f"answered in {waited * 1000:.0f} ms while the program slept, "
          f"then the run said {ran.get('output', '').split()[-1]!r}")
 
+    # 43c. and a buffer with no file behind it runs, and leaves nothing
+    #      behind. VS Code's `untitled:` buffer was run from a scratch
+    #      file beside the server's working directory whose name held the
+    #      scheme's `:`, which NTFS reads as a stream's name: the run
+    #      failed "The directory name is invalid" and left an empty
+    #      `.untitled` there.
+    untitled_uri = "untitled:Untitled-1"
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": untitled_uri, "languageId": "iyi",
+                             "version": 1,
+                             "text": 'module scratch\n\nputs "from nowhere"\n'}},
+           wait=False)
+    c.diagnostics(untitled_uri)
+    ran = c.send("workspace/executeCommand",
+                 {"command": "iyi.run", "arguments": [untitled_uri]})["result"] or {}
+    stray = [n for n in os.listdir(os.getcwd()) if n.startswith(".untitled")]
+    step("43c", "a buffer with no file behind it runs, and leaves nothing behind",
+         ran.get("ok") and ran.get("output", "").strip() == "from nowhere" and not stray,
+         f"ok {ran.get('ok')}, output {ran.get('output', '')!r}, "
+         f"error {ran.get('error', '')[:160]!r}, left {stray}")
+    for name in stray:
+        os.remove(os.path.join(os.getcwd(), name))
+    c.send("textDocument/didClose", {"textDocument": {"uri": untitled_uri}}, wait=False)
+
     # 44. snippet completion: a callable with parameters lands with the
     #     cursor inside its parentheses, because initialize said the
     #     client renders snippets.
@@ -1807,18 +2064,27 @@ def main():
     # 45. semantic tokens delta: one appended line moves a few
     #     integers, not the file's whole stream, and the splice
     #     reconstructs exactly what a full answer says.
-    reply = c.send("textDocument/semanticTokens/full",
-                   {"textDocument": {"uri": shapes_uri}})
-    first = reply["result"]
-    c.send("textDocument/didChange",
-           {"textDocument": {"uri": shapes_uri, "version": 2},
-            "contentChanges": [{"text": shapes_text + "# renk\n"}]},
-           wait=False)
-    c.diagnostics(shapes_uri)
-    reply = c.send("textDocument/semanticTokens/full/delta",
-                   {"textDocument": {"uri": shapes_uri},
-                    "previousResultId": first["resultId"]})
-    delta = reply["result"]
+    #     The proxy retires a worker that has grown, between any two
+    #     requests, and a fresh worker knows no earlier resultId: its full
+    #     answer then is the protocol's fallback, not a failure. So a full
+    #     answer where a delta was asked is asked again, once.
+    retired = 0
+    for attempt in range(2):
+        reply = c.send("textDocument/semanticTokens/full",
+                       {"textDocument": {"uri": shapes_uri}})
+        first = reply["result"]
+        c.send("textDocument/didChange",
+               {"textDocument": {"uri": shapes_uri, "version": 2 + attempt},
+                "contentChanges": [{"text": shapes_text + "# renk\n" * (attempt + 1)}]},
+               wait=False)
+        c.diagnostics(shapes_uri)
+        reply = c.send("textDocument/semanticTokens/full/delta",
+                       {"textDocument": {"uri": shapes_uri},
+                        "previousResultId": first["resultId"]})
+        delta = reply["result"]
+        if "data" not in delta:
+            break
+        retired += 1
     rebuilt = list(first["data"])
     for e in delta.get("edits", []):
         rebuilt[e["start"]:e["start"] + e["deleteCount"]] = e["data"]
@@ -1828,7 +2094,7 @@ def main():
     step(45, "semantic token deltas splice to the full answer",
          "edits" in delta and "data" not in delta and rebuilt == fresh,
          f"{len(delta.get('edits', []))} edit(s) over "
-         f"{len(first['data'])} ints")
+         f"{len(first['data'])} ints, {retired} full answer(s) first")
 
     # 46. the binary is rebuilt under the running session, and the
     #     session holds: `make iyi` unlinks the executable, which makes
@@ -1863,9 +2129,10 @@ def main():
         held = (reply.get("result") or {}).get("kind") == "full"
         step(46, "a rebuilt binary does not lobotomise the session",
              held and "error" not in reply,
-             "compiled with the executable moved aside, as a rebuild does"
-             if os.name == "nt" else
-             "compiled with the executable unlinked; $ORIGIN was pinned")
+             ("compiled with the executable moved aside, as a rebuild does"
+              if os.name == "nt" else
+              "compiled with the executable unlinked; $ORIGIN was pinned") +
+             ("" if held and "error" not in reply else f"; answered {json.dumps(reply)[:400]}"))
     else:
         step(46, "a rebuilt binary does not lobotomise the session", True,
              f"skipped: {binary} not present under this runner")

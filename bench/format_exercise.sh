@@ -71,7 +71,7 @@ fi
 
 echo
 echo "== every format section reported"
-for phrase in "width:" "alignment:" "zero pad:" "precision:" "base:" "negative:" "boundary:" "general:"; do
+for phrase in "width:" "alignment:" "zero pad:" "precision:" "base:" "negative:" "boundary:" "general:" "tower:"; do
   grep -q "$phrase" "$WORK/format-plain.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1

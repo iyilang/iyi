@@ -218,6 +218,52 @@ PY
         [ "$status" -eq 0 ] && echo "  a long line reads whole, and Ctrl+Z then Enter ends the input"
       fi
     fi
+
+    # 7. The console's mode after the program: writing to a console turns
+    #    VT processing on, and the console outlives the program - it was
+    #    left on for whatever ran there next, where the C runtime's own
+    #    teardown, and Crystal's, put the mode back. Python gives a console
+    #    of its own to a copy of itself, sets the mode without VT (3), runs
+    #    the program in it and reads the mode after.
+    echo
+    echo "== the console's mode after the program"
+    printf 'module main\n\nputs "hello"\nSTDERR.puts "there"\n' > "$WORK/vtmode.iyi"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the mode is unmeasured"
+    elif ! "$IYI" build -o "$WORK/vtmode" "$WORK/vtmode.iyi" > "$WORK/vtmode.build" 2>&1; then
+      echo "  the mode program did not build"; sed -n '1,10p' "$WORK/vtmode.build"; status=1
+    else
+      cat > "$WORK/vtmode.py" <<'PY'
+import ctypes, os, subprocess, sys
+from ctypes import wintypes
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.CreateFileW.restype = wintypes.HANDLE
+program, result = sys.argv[1], sys.argv[2]
+if os.environ.get("VTMODE_INNER") != "1":
+    info = subprocess.STARTUPINFO(); info.dwFlags = 1; info.wShowWindow = 0
+    inner = subprocess.Popen([sys.executable, __file__] + sys.argv[1:],
+                             env=dict(os.environ, VTMODE_INNER="1"), creationflags=0x10, startupinfo=info)
+    inner.wait(timeout=60)
+    print(open(result).read() if os.path.exists(result) else "UNMEASURED: the inner copy wrote nothing")
+    sys.exit(0)
+conout = k32.CreateFileW("CONOUT$", 0xC0000000, 3, None, 3, 0, None)
+mode = wintypes.DWORD()
+k32.SetConsoleMode(conout, 3)
+k32.GetConsoleMode(conout, ctypes.byref(mode))
+before = mode.value
+subprocess.call([program])
+k32.GetConsoleMode(conout, ctypes.byref(mode))
+open(result, "w").write(f"before {before} after {mode.value}\n")
+PY
+      "$PY" "$WORK/vtmode.py" "$WORK/vtmode.exe" "$WORK/vtmode.result" > "$WORK/vtmode.out" 2>&1
+      if grep -q '^UNMEASURED' "$WORK/vtmode.out"; then
+        echo "  no console here, so the mode is unmeasured: $(cat "$WORK/vtmode.out")"
+      elif grep -qx 'before 3 after 3' "$WORK/vtmode.out"; then
+        echo "  the console's mode is what it was before the program: 3"
+      else
+        echo "  the program left the console's mode changed:"; sed 's/^/    /' "$WORK/vtmode.out"; status=1
+      fi
+    fi
     ;;
 esac
 

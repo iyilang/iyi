@@ -206,6 +206,23 @@ printf 'module deep\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\npu
 refuses "a program that ran out of stack" "stack overflow" -- "$IYI" run deep.iyi
 printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
+# A program's own exit status is `iyi run`'s, a negative one too. On
+# Windows `exit(-1)` is 0xFFFFFFFF, which the runner took for an abnormal
+# end: "terminated abnormally, the cause is unknown", and exit 1.
+# Compared with the program's own status as this shell reads it, which
+# is not 255 everywhere: Git's shell on Windows reads 0xFFFFFFFF as 127.
+printf 'module neg\n\nexit(-1)\n' > neg.iyi
+"$IYI" build -o neg neg.iyi > neg.build 2>&1
+./neg > /dev/null 2>&1
+own_code=$?
+"$IYI" run neg.iyi > neg.out 2>&1
+neg_code=$?
+if [ "$neg_code" -eq "$own_code" ] && [ ! -s neg.out ]; then
+  echo "  a program's exit(-1): the runner exits with its status ($own_code here), and says nothing"
+else
+  echo "  a program's exit(-1): the program exits $own_code, the runner $neg_code, saying: $(head -c 200 neg.out)"
+  status=1
+fi
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
 # Two `iyi run`s at once of programs with one basename. The runner linked
@@ -309,6 +326,114 @@ for f in lit here interp; do
     echo "  fmt changed a formatted CRLF file ($f):"; od -c "crlf/$f.iyi" | sed -n '1,6p'; status=1
   fi
 done
+# A file fmt may not write is the file system's refusal, not a formatter
+# bug: a read-only file - common on Windows, a locked checkout or an
+# extracted archive - was reported as "there's a bug formatting", with a
+# request to file one.
+mkdir -p locked
+printf 'module locked\n\nputs(  1 )\n' > locked/sloppy.iyi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib +R "$(cygpath -w locked/sloppy.iyi)" ;;
+  *) chmod a-w locked/sloppy.iyi ;;
+esac
+if [ -w locked/sloppy.iyi ] && [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ]; then
+  echo "  fmt of a read-only file: root writes anything, unmeasured"
+elif "$IYI" fmt locked/sloppy.iyi > locked.out 2>&1; then
+  echo "  fmt of a read-only file answered success:"; sed -n '1,3p' locked.out; status=1
+elif grep -q "cannot write" locked.out && ! grep -q "bug" locked.out; then
+  echo "  fmt of a read-only file: $(tr -d '\r' < locked.out | head -1)"
+else
+  echo "  fmt of a read-only file:"; sed -n '1,3p' locked.out; status=1
+fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib -R "$(cygpath -w locked/sloppy.iyi)" ;;
+  *) chmod u+w locked/sloppy.iyi ;;
+esac
+# A directory given to `test` and `fmt` is a name, not a pattern: `proj
+# [v2]` and `x{a,b}` were read as a character class and a brace, and on
+# Windows a share's root, `\\server\share`, was looked for under the
+# current drive's root - the tests were not found, and `fmt --check`
+# passed having checked nothing. And a junction back to the project was
+# walked through, until the path was too long to open.
+for dir in "proj [v2]" "x{a,b}"; do
+  mkdir -p "rooted/$dir"
+  printf 'module messy\n\nx=1\n' > "rooted/$dir/messy.iyi"
+  printf 'module fails_test\n\nexit(1)\n' > "rooted/$dir/fails_test.iyi"
+done
+roots=("rooted/proj [v2]" "rooted/x{a,b}")
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    share="$(cygpath -w "$WORK/rooted/proj [v2]")"
+    share="\\\\127.0.0.1\\${share:0:1}\$${share:2}"
+    [ -d "$share" ] && roots+=("$share")
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/rooted/x{a,b}/loop")" "$(cygpath -w "$WORK/rooted/x{a,b}")" > /dev/null
+    ;;
+esac
+for root in "${roots[@]}"; do
+  "$IYI" fmt --check "$root" > rooted.fmt 2>&1; fmt_code=$?
+  "$IYI" test "$root" > rooted.test 2>&1; test_code=$?
+  if [ "$fmt_code" -eq 1 ] && [ "$(grep -c 'produced changes' rooted.fmt)" = "1" ] &&
+     [ "$test_code" -eq 1 ] && grep -q "0 passed, 1 failed" rooted.test; then
+    echo "  fmt --check and test of $root: the one messy file and the one failing test"
+  else
+    echo "  fmt --check and test of $root: fmt $fmt_code, test $test_code"; sed -n '1,3p' rooted.fmt rooted.test; status=1
+  fi
+done
+[ -e "rooted/x{a,b}/loop" ] && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c rmdir "$(cygpath -w "$WORK/rooted/x{a,b}/loop")"
+# `lib` is left alone however the directory is named: the exclude was
+# compared as a string prefix, and `fmt --check .` walked to `./lib/x.iyi`,
+# which never starts with `lib`, and checked what a bare `fmt --check`
+# leaves alone.
+mkdir -p excl/lib excl/src
+printf 'module messy\n\nx=1\n' > excl/lib/messy.iyi
+printf 'module messy\n\nx=1\n' > excl/src/messy.iyi
+(cd excl && "$IYI" fmt --check . > ../excl.out 2>&1)
+if grep -q 'src.messy.iyi' excl.out && ! grep -q 'lib.messy.iyi' excl.out; then
+  echo "  fmt --check . leaves lib alone, as fmt --check does"
+else
+  echo "  fmt --check . and lib:"; sed -n '1,3p' excl.out; status=1
+fi
+# A program rebuilt while it runs, the everyday Windows loop: Windows will
+# not write over a running program, and the linker said so after the whole
+# compile - "LNK1104: cannot open file", exit status 1104. The running one
+# is moved aside, and the new one is written where it was.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    mkdir -p busy
+    printf 'module busy\n\nsleep(8000)\n' > busy/slow.iyi
+    printf 'module busy\n\nputs "second"\n' > busy/quick.iyi
+    if "$IYI" build -o busy/prog.exe busy/slow.iyi > busy.log 2>&1; then
+      busy/prog.exe &
+      running=$!
+      sleep 1
+      "$IYI" build -o busy/prog.exe busy/quick.iyi > busy.log 2>&1; rebuilt=$?
+      said="$(busy/prog.exe 2>&1 | tr -d '\r')"
+      if [ "$rebuilt" -eq 0 ] && [ "$said" = "second" ]; then
+        echo "  a program rebuilt while it runs: the running one moved aside, the new one runs"
+      else
+        echo "  a program rebuilt while it runs: build $rebuilt, it said '$said'"; sed -n '1,3p' busy.log; status=1
+      fi
+      kill "$running" 2>/dev/null; wait "$running" 2>/dev/null
+    else
+      echo "  the busy program did not build:"; sed -n '1,3p' busy.log; status=1
+    fi
+    # A directory the program fits in and the write probe does not: the
+    # probe's name, `.iyi-write-probe-<pid>`, is longer than `m.exe`, and
+    # near MAX_PATH the probe failed and was told as "no permission to
+    # write there" - for five-digit process ids only. 245 characters: the
+    # probe does not fit whatever the pid, the program does.
+    deep="$WORK"
+    while [ ${#deep} -lt 233 ]; do deep="$deep/dddddddddd"; done
+    deep="$deep/$(printf '%*s' $((245 - ${#deep} - 1)) '' | tr ' ' 'e')"
+    mkdir -p "$deep" && printf 'module m\n\nputs "deep"\n' > "$deep/m.iyi"
+    (cd "$deep" && "$IYI" build m.iyi > "$WORK/deep.log" 2>&1); deep_code=$?
+    if [ "$deep_code" -eq 0 ] && [ -f "$deep/m.exe" ]; then
+      echo "  a build in a ${#deep}-character directory writes its program there"
+    else
+      echo "  a build in a ${#deep}-character directory: exit $deep_code"; sed -n '1,3p' "$WORK/deep.log"; status=1
+    fi
+    ;;
+esac
 # A target whose back end the compiler's LLVM does not carry. Windows' is
 # Crystal's own Windows package, X86 and AArch64 only, and `--target
 # wasm32-wasi` there answered "you've found a bug in the iyi compiler"
@@ -880,6 +1005,20 @@ if "$IYI" mod context user.iyi --json | head -1 | grep -q '^{'; then
 else
   echo "  mod context --json after the path did not print JSON:"
   "$IYI" mod context user.iyi --json | sed -n '1,2p'
+  status=1
+fi
+# The caret under a line with tabs inside it: every character before the
+# column was counted as one space, so two tabs that pushed `nope` to
+# column 34 left the caret at 17. The caret line carries the shown line's
+# tabs now, and a terminal expands both the same way.
+printf 'module tabbed\n\nx = 1\nputs(\tx,\t\tx.nope)\n' > tabbed.iyi
+"$IYI" check tabbed.iyi > tabbed.out 2>&1
+caret_line="$(grep -A1 '^ 4 | ' tabbed.out | sed -n '2p')"
+if [ "$caret_line" = "$(printf '          \t  \t\t  ^---')" ]; then
+  echo "  the caret under a line with tabs carries the line's tabs"
+else
+  echo "  the caret under a line with tabs is not under the column:"
+  sed -n '1,8p' tabbed.out | cat -A
   status=1
 fi
 refuses "doc on bytes that are not text" "not a valid iyi source file" -- \

@@ -6,8 +6,9 @@
 # Proves the exercise holds plain and --release, that all sections report,
 # and proves the checks can fail when the module is broken:
 # a broken step calculation, an ignored exclusive boundary, an unchecked
-# step direction, a broken block-iterator trait default, and an add-first
-# overflow at Int32 MAX.
+# step direction, a broken block-iterator trait default, an add-first
+# overflow at Int32 MAX, a double that adds first below zero, a NaN
+# compared as a number, and a zero step let through.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -163,6 +164,9 @@ end" "impl Steppable for Float64
 end"
 prove_fails "overflow-safe gap compare" mut5 "gap = ((limit - @step) <=> @current)" "tmp = @current + @step
     gap = ((limit - @step) <=> @current)"
+prove_fails "doubles subtract below zero" mut7 "use_sub = @current.is_a?(::Float) || " "use_sub = "
+prove_fails "NaN orders against nothing" mut8 "if unordered?(limit) || unordered?(@current) || unordered?(@step)" "if false"
+prove_fails "zero step refused" mut9 "if !at_limit && !(@step > 0)" "if false && !(@step > 0)"
 
 echo
 if [ "$status" -ne 0 ]; then

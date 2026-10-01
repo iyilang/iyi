@@ -36,7 +36,9 @@
 #     way: `1: one` has the `Int64` key 1, `true: x` the `Bool` key true.
 #
 # What it refuses, each with a sentence that says where:
-#   a tab in indentation, a control character, a quoted string that does
+#   a UTF-16 stream (named by its byte order mark), a tab in indentation,
+#   a control character (C0, DEL or C1, but tab and U+0085) or the
+#   noncharacter U+FFFE or U+FFFF, anywhere, a quoted string that does
 #   not close, a flow collection that does not close, an unknown escape or
 #   an escape that names a surrogate, a mapping entry or sequence entry at
 #   an indentation that belongs to nothing, text after a value on its
@@ -236,11 +238,16 @@ pub struct Any
     self[Any.new(key)]?
   end
 
+  # An Int32 indexes a sequence and reaches an integer key of a mapping:
+  # `1: one` has the `Int64` key 1, and `doc[1]` panicked "expected a
+  # sequence, not a mapping" while `[]?` and `dig?` answered nil.
   def [](index : Int32) : Any
+    return self[Any.new(index)] if kind == KIND_HASH
     as_a[index]
   end
 
   def []?(index : Int32) : Any?
+    return self[Any.new(index)]? if kind == KIND_HASH
     a = as_a?
     return nil if a.nil?
     a[index]?
@@ -422,6 +429,16 @@ class ByteBuffer
     @size = @size + count
   end
 
+  # The byte at `index`, which is below `size`.
+  def [](index : Int32) : UInt8
+    @bytes[index]
+  end
+
+  # Keeps the first `count` bytes, in place.
+  def truncate(count : Int32) : Nil
+    @size = count if count < @size
+  end
+
   def spaces(count : Int32) : Nil
     while count > 0
       self << 32_u8
@@ -576,7 +593,13 @@ end
 # Reads one stream. Every failure is recorded once in `@error` and every
 # loop returns as soon as one is recorded; nothing is raised inside.
 pub class Parser
-  DEPTH_LIMIT = 256
+  # Deep enough for any document a person wrote, and shallow enough for a
+  # task's 256 KB stack: at 256 a task parsing a 256-deep flow sequence,
+  # or comparing two 128 deep, died of a stack overflow that took the
+  # whole process - a config a server reads in a handler, say. At 100 a
+  # plain build parses, compares, prints, hashes and dumps the deepest in
+  # a task with room to spare.
+  DEPTH_LIMIT = 100
   # How many nodes aliases may add to a stream, counted as they are
   # expanded; the sentence below spells the same number.
   ALIAS_NODE_LIMIT = 1_000_000_i64
@@ -669,10 +692,16 @@ pub class Parser
       skip_blank_lines
       break if @line >= @starts.size
       if marker?(@line, 46_u8)
-        pos = skip_blank(@starts[@line] + 3)
-        expect_line_end(pos)
-        return nil if @error
-        @line = @line + 1
+        # A document's end may be marked more than once, as libyaml reads
+        # it: the second `...` was refused as "a document end marker with
+        # no document".
+        while @line < @starts.size && marker?(@line, 46_u8)
+          pos = skip_blank(@starts[@line] + 3)
+          expect_line_end(pos)
+          return nil if @error
+          @line = @line + 1
+          skip_blank_lines
+        end
         implicit_allowed = true
       elsif !marker?(@line, 45_u8)
         refuse_stray(@line)
@@ -685,18 +714,21 @@ pub class Parser
   # ------------------------------------------------------------------
   # Lines
 
-  # The first control character is remembered and refused once every
+  # The first character the stream may not hold raw (a control or a
+  # noncharacter: see `unprintable`) is remembered and refused once every
   # line is known, since the sentence needs the line table to say where.
   private def split_lines : Nil
     at = 0
     at = 3 if @size >= 3 && @bytes[0] == 0xEF_u8 && @bytes[1] == 0xBB_u8 && @bytes[2] == 0xBF_u8
     control = -1
+    point = 0
     while at <= @size
       start = at
       while at < @size && @bytes[at] != 10_u8 && @bytes[at] != 13_u8
         b = @bytes[at]
-        if control < 0 && ((b < 32_u8 && b != 9_u8) || b == 127_u8)
-          control = at
+        if control < 0 && (b < 32_u8 || b == 127_u8 || b == 0xC2_u8 || b == 0xEF_u8)
+          point = unprintable(at)
+          control = at if point >= 0
         end
         at = at + 1
       end
@@ -721,17 +753,40 @@ pub class Parser
         break
       end
     end
-    if control >= 0
-      b = @bytes[control].to_i32
+    # A UTF-16 stream opens with its byte order mark, FF FE or FE FF -
+    # what Windows PowerShell 5.1's `Out-File` and `>` write - and was
+    # refused as "control character U+0000" at its first ASCII character.
+    if @size >= 2 && ((@bytes[0] == 0xFF_u8 && @bytes[1] == 0xFE_u8) || (@bytes[0] == 0xFE_u8 && @bytes[1] == 0xFF_u8))
+      fail("encoding 'UTF-16' is not supported: the input is read as UTF-8", 0)
+    elsif control >= 0
       digits = "0123456789ABCDEF"
       name = String.new(4) do |t|
-        t[0] = 48_u8
-        t[1] = 48_u8
-        t[2] = digits.to_unsafe[b >> 4]
-        t[3] = digits.to_unsafe[b & 15]
+        t[0] = digits.to_unsafe[(point >> 12) & 15]
+        t[1] = digits.to_unsafe[(point >> 8) & 15]
+        t[2] = digits.to_unsafe[(point >> 4) & 15]
+        t[3] = digits.to_unsafe[point & 15]
       end
-      fail("control character U+#{name} is not allowed", control)
+      what = point >= 0xFFFE ? "noncharacter" : "control character"
+      fail("#{what} U+#{name} is not allowed", control)
     end
+  end
+
+  # The code point at `pos` if it is one a stream may not hold raw, or -1:
+  # a C0 control but tab, DEL, a C1 control but U+0085 (a line break to a
+  # 1.1 reader, text to 1.2), and the noncharacters U+FFFE and U+FFFF, as
+  # libyaml refuses them. The C1 controls and U+FFFE were read as text, so
+  # `a: b\u009B31mc` held a terminal escape the header said was refused.
+  private def unprintable(pos : Int32) : Int32
+    b = @bytes[pos]
+    return b.to_i32 if (b < 32_u8 && b != 9_u8) || b == 127_u8
+    if b == 0xC2_u8 && pos + 1 < @size
+      c = @bytes[pos + 1]
+      return c.to_i32 if c >= 0x80_u8 && c <= 0x9F_u8 && c != 0x85_u8
+    elsif b == 0xEF_u8 && pos + 2 < @size && @bytes[pos + 1] == 0xBF_u8
+      d = @bytes[pos + 2]
+      return d.to_i32 - 0xBE + 0xFFFE if d == 0xBE_u8 || d == 0xBF_u8
+    end
+    -1
   end
 
   private def indent_of(line : Int32) : Int32
@@ -1036,6 +1091,13 @@ pub class Parser
     value
   end
 
+  # `@` and `` ` `` are reserved, `%` starts a directive, and `]`, `}` and
+  # `,` end or part flow entries: a scalar cannot start with one, a value
+  # or a key.
+  private def plain_first_refused?(b : UInt8) : Bool
+    b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 93_u8 || b == 125_u8 || b == 44_u8
+  end
+
   private def parse_inline_value(pos : Int32, parent : Int32, tag : String?) : Any
     @nodes = @nodes + 1
     b = @bytes[pos]
@@ -1073,7 +1135,7 @@ pub class Parser
     # `- b` after a key is a sequence entry where none may start (it was
     # read as the text "- b").
     lone = pos + 1 >= @ends[@line] || blank_byte?(@bytes[pos + 1])
-    if b == 64_u8 || b == 96_u8 || b == 37_u8 || b == 93_u8 || b == 125_u8 || b == 44_u8 || (b == 63_u8 && lone)
+    if plain_first_refused?(b) || (b == 63_u8 && lone)
       fail("a scalar cannot start with '#{b.unsafe_chr}'", pos)
       return Any.new(nil)
     end
@@ -1165,6 +1227,9 @@ pub class Parser
         key = Any.new(parse_quoted(key_pos, indent, false))
       elsif b == 42_u8 || b == 38_u8 || b == 33_u8
         fail("an alias, anchor or tag as a mapping key is not supported", key_pos)
+      elsif plain_first_refused?(b)
+        # `]: 1`, `}: 1` and `,: 1` were read as the keys "]", "}" and ",".
+        fail("a scalar cannot start with '#{b.unsafe_chr}'", key_pos)
       else
         finish = colon
         while finish > key_pos && blank_byte?(@bytes[finish - 1])
@@ -1467,17 +1532,16 @@ pub class Parser
     skip_blank(@starts[look])
   end
 
-  # Drops the blanks the buffer ends with, back to `floor` at most.
+  # Drops the blanks the buffer ends with, back to `floor` at most, and
+  # in place: it was rebuilt through `to_s` at every line end, a copy of
+  # the whole scalar so far, and a quoted scalar of 20,000 lines took 4.9
+  # seconds to read where the same bytes on one line took 5 ms.
   private def trim_trailing_blanks(floor : Int32) : Nil
-    # The buffer has no pop; rebuild without trailing blanks.
-    text = @buffer.to_s
-    count = text.bytesize
-    while count > floor && blank_byte?(text.to_unsafe[count - 1])
+    count = @buffer.size
+    while count > floor && blank_byte?(@buffer[count - 1])
       count = count - 1
     end
-    return if count == text.bytesize
-    @buffer.clear
-    @buffer.append(text.to_unsafe, count)
+    @buffer.truncate(count)
   end
 
   # `at` is the backslash; appends the escape and answers where it ends.
@@ -1536,17 +1600,20 @@ pub class Parser
       fail("unknown escape '\\#{e.unsafe_chr}'", at)
       return at + 2
     end
+    # Short of its digits, the escape says what it wants: `"C:\Users\bob"`
+    # - a Windows path - was "unknown escape '\U'", which `\U` is not.
+    wants = "escape '\\#{e.unsafe_chr}' wants #{digits} hexadecimal digits: a backslash in double quotes is '\\\\', or single-quote the scalar"
     point = 0
     i = 0
     while i < digits
       p = at + 2 + i
       if p >= @ends[@line]
-        fail("unknown escape '\\#{e.unsafe_chr}'", at)
+        fail(wants, at)
         return at + 2
       end
       d = @bytes[p].unsafe_chr.to_i?(16)
       if d.nil?
-        fail("unknown escape '\\#{e.unsafe_chr}'", at)
+        fail(wants, at)
         return at + 2
       end
       point = point * 16 + d
@@ -2163,7 +2230,12 @@ class Emitter
     bytes = text.to_unsafe
     first = bytes[0]
     return false if blank_byte?(first) || blank_byte?(bytes[size - 1])
-    if first == 45_u8 || first == 63_u8 || first == 58_u8
+    # `?` is quoted whatever follows it: the reader refuses a plain scalar
+    # that starts with one, so `?x` dumped bare did not read back. And a
+    # byte order mark first, which the reader skips at a stream's start.
+    return false if first == 63_u8
+    return false if size >= 3 && first == 0xEF_u8 && bytes[1] == 0xBB_u8 && bytes[2] == 0xBF_u8
+    if first == 45_u8 || first == 58_u8
       return false if size == 1 || blank_byte?(bytes[1])
     elsif indicator?(first)
       return false

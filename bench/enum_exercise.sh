@@ -245,7 +245,7 @@ prove_fails "to_s without names" no_to_s "enum: to_s first member" \
 #    distribution, and the check that sees it is the one asking two members to
 #    hash apart.
 prove_fails "hash collapsed" no_hash "enum: members hash apart" \
-  's/^    value.to_i32$/    0/'
+  's/^    value.hash$/    0/'
 
 # 5. `includes?` asking equality instead of membership, which is what a flags
 #    enum's question methods go through.

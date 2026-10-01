@@ -95,6 +95,12 @@ if mode = args[0]?
     stdout.write("woke\n")
   when "deaf"
     stdout.write("not reading\n")
+  when "parent"
+    # Starts itself to write *args[1]* in 1.5 seconds, and waits for it.
+    Process.run(Process.executable || "", ["late", args[1]], capture: false)
+  when "late"
+    sleep(1500)
+    File.write(args[1], "the grandchild outlived the cancel\n")
   else
     fail("no child mode #{mode}")
   end
@@ -203,6 +209,17 @@ group do |g|
   fail("env: changed this program's own IYI_PROCESS_GIVEN") unless Program.env("IYI_PROCESS_GIVEN").nil?
   fail("env: removed this program's own IYI_PROCESS_PROBE") unless Program.env("IYI_PROCESS_PROBE") == "değer-日本"
   puts "  one variable given and one removed, for the child alone"
+  # A child started elsewhere does not inherit a `PWD` naming here, which
+  # `Path#expand` reads first: the child expanded its relative paths in
+  # the parent's directory. Unless `env:` says what `PWD` is.
+  ENV["PWD"] = Program.cwd || "/somewhere"
+  moved = ran(Process.run(me, ["env", "PWD"], chdir: directory_of(me)), "env")
+  fail("a child started elsewhere read PWD #{moved.stdout.inspect}") unless moved.stdout == "<unset>\n"
+  told_pwd = ran(Process.run(me, ["env", "PWD"], chdir: directory_of(me), env: {"PWD" => "/given"}), "env")
+  fail("a PWD given to it read #{told_pwd.stdout.inspect}") unless told_pwd.stdout == "/given\n"
+  stayed = ran(Process.run(me, ["env", "PWD"]), "env")
+  fail("a child started here read PWD #{stayed.stdout.inspect}") unless stayed.stdout == "#{Program.env("PWD")}\n"
+  puts "  and does not read a PWD naming this program's directory"
   {% if flag?(:win32) %}
     # One variable, as Windows has it: a name given in another case
     # replaces it rather than standing beside it.
@@ -265,6 +282,22 @@ group do |g|
   fail("the run answered #{outcome}") unless outcome == "cancelled"
   fail("the cancelled run took #{waited} ms: its child was not ended") unless waited < 10000
   puts "  answered Cancelled, with its child ended"
+  {% if flag?(:win32) %}
+    # And what the child started: only the child was ended, and its own
+    # child went on and wrote its file.
+    marker = "#{directory_of(me)}\\iyi-process-grandchild.txt"
+    File.delete(marker) if File.exists?(marker)
+    group do |h|
+      h.spawn { Process.run(me, ["parent", marker]); 0 }
+      h.spawn do
+        sleep(500)
+        TaskFailed.new
+      end
+    end
+    sleep(2500)
+    fail("a cancelled run's grandchild went on: #{File.read(marker)}") if File.exists?(marker)
+    puts "  and what the child had started"
+  {% end %}
 
   {% if flag?(:win32) %}
     puts "== a batch file is refused"
@@ -272,11 +305,78 @@ group do |g|
     File.write(batch, "@echo ran\r\n")
     refused = Process.run(batch)
     File.delete(batch)
+    batch_reason = ""
     case refused
     when ProcessError
+      batch_reason = refused.reason
       puts "  #{refused.reason}"
     else
       fail("a batch file was not refused")
+    end
+    # And by its bare name on PATH, as npm's and code's `.cmd` shims are
+    # found: it was "no such program", about a program that is there.
+    File.write(batch, "@echo ran\r\n")
+    kept_for_shim = Program.env("PATH") || ""
+    ENV["PATH"] = "#{directory_of(me)};#{kept_for_shim}"
+    shimmed = Process.run("iyi-process-probe")
+    ENV["PATH"] = kept_for_shim
+    File.delete(batch)
+    case shimmed
+    when ProcessError
+      fail("a .cmd found by its name was #{shimmed.reason}") unless shimmed.reason == batch_reason
+      puts "  and found by its bare name on PATH, the same"
+    else
+      fail("a .cmd found by its name was run")
+    end
+
+    puts "== a variable's name is one name in any case, in any script"
+    # `ÇAY` and `çay` are one variable on Windows; ASCII folding left
+    # `env: {"çay" => ...}` beside the variable it meant to replace.
+    ENV["IYI_ÇAY"] = "old"
+    folded = ran(Process.run(me, ["env", "IYI_ÇAY"], env: {"IYI_çay" => "new"}), "env")
+    removed = ran(Process.run(me, ["env", "IYI_ÇAY"], env: {"IYI_çay" => nil}), "env")
+    ENV.delete("IYI_ÇAY")
+    fail("a name in another case, replaced: #{folded.stdout.inspect}") unless folded.stdout == "new\n"
+    fail("a name in another case, removed: #{removed.stdout.inspect}") unless removed.stdout == "<unset>\n"
+    puts "  IYI_çay replaced and removed IYI_ÇAY"
+
+    puts "== text a Windows command line cannot carry is refused"
+    # Not UTF-8, an argument has no UTF-16 spelling: the conversion was
+    # null, and a null command line is Windows' cue to run the program
+    # with no arguments at all - it ran, and the run said it went well. In
+    # `env:`, the block's length was read at address 0.
+    not_utf8 = "caf\xE9"
+    said = [] of String
+    group do |h|
+      told_arg = h.spawn { Process.run(me, ["argv", "one", not_utf8]); 0 }
+      told_env = h.spawn { Process.run(me, ["env", "IYI_NOT_UTF8"], env: {"IYI_NOT_UTF8" => not_utf8}); 0 }
+      [told_arg.value, told_env.value].each do |outcome|
+        said << (outcome.is_a?(Panicked) ? outcome.message.to_s : "ran")
+      end
+      0
+    end
+    fail("an argument that is not UTF-8: #{said[0]}") unless said[0].includes?("not valid UTF-8")
+    fail("an environment value that is not UTF-8: #{said[1]}") unless said[1].includes?("not valid UTF-8")
+    puts "  #{said[0]}"
+
+    puts "== a quoted PATH entry with a non-ASCII name is searched"
+    # Its quotes were cut off by a count of characters, and `[]` counts
+    # bytes: every `ü` cost the name a byte off its end.
+    quoted = "#{directory_of(me)}\\iyi ünï dir"
+    Dir.mkdir_p(quoted)
+    File.write("#{quoted}\\iyi-process-ünï.exe", File.read(me))
+    kept_path = Program.env("PATH") || ""
+    ENV["PATH"] = "\"#{quoted}\";#{kept_path}"
+    found = Process.run("iyi-process-ünï", ["env", "IYI_PROCESS_PROBE"])
+    ENV["PATH"] = kept_path
+    case found
+    when ProcessResult
+      fail("the program found on a quoted entry said #{found.stdout.inspect}") unless found.stdout == "değer-日本\n"
+      puts "  found and ran from #{quoted}"
+    when ProcessError
+      fail("a quoted PATH entry was not searched: #{found.message}")
+    else
+      fail("the quoted PATH run answered Cancelled")
     end
 
     puts "== a working directory Windows will not take is named for what it is"

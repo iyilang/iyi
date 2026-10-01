@@ -816,6 +816,14 @@ pub class Parser
 
   private def parse_document : Document
     doc = Document.new
+    # A UTF-16 file opens with its byte order mark, FF FE or FE FF - what
+    # Windows PowerShell 5.1's `Out-File`, `>` and `Export-Clixml` write -
+    # and was read as UTF-8 until the first `<`: "text outside the root
+    # element at line 1, column 1", about a document that has none.
+    if @len >= 2 && ((byte_at(0) == 0xFF_u8 && byte_at(1) == 0xFE_u8) || (byte_at(0) == 0xFE_u8 && byte_at(1) == 0xFF_u8))
+      fail_at(1, 1, "encoding 'UTF-16' is not supported: the input is read as UTF-8")
+      return doc
+    end
     @pos = 3 if match?("\u{FEFF}")
     if match?("<?xml") && @pos + 5 < @len && whitespace_byte?(byte_at(@pos + 5))
       parse_xml_declaration(doc)

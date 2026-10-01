@@ -50,22 +50,22 @@ struct Enum
   # The member's name, and the value's digits where no member has it —
   # `Level.new(9).to_s` is `"9"`, which is what a value off a wire prints as.
   #
-  # A flags enum answers with the names of the bits it holds, joined, and
-  # `None` for zero: that is what the annotation means, and the compiler has
-  # already added those two members.
+  # A flags enum answers with a member's name when one has its value (`None`
+  # for zero), else the names of the bits it holds, each bit named once, and
+  # the bits no member names as a number: `Read | 8`, as Crystal's does.
   def to_s : String
     {% if @type.annotation(Flags) %}
-      return "None" if value == 0
-      text = ""
+      {% for member in @type.constants %}{% unless member.stringify == "All" %}return {{ member.stringify }} if value == {{ @type.constant(member) }}; {% end %}{% end %}
+      text, left = "", value
       {% for member in @type.constants %}
         {% unless member.stringify == "None" || member.stringify == "All" %}
-          if value & {{ @type.constant(member) }} == {{ @type.constant(member) }}
-            text = text + " | " unless text == ""
-            text = text + {{ member.stringify }}
+          if {{ @type.constant(member) }} != 0 && left & {{ @type.constant(member) }} == {{ @type.constant(member) }}
+            text = text + (text == "" ? "" : " | ") + {{ member.stringify }}
+            left = left ^ {{ @type.constant(member) }}
           end
         {% end %}
       {% end %}
-      text == "" ? value.to_s : text
+      left == 0 ? text : (text == "" ? left.to_s : text + " | " + left.to_s)
     {% else %}
       {% for member in @type.constants %}
         return {{ member.stringify }} if value == {{ @type.constant(member) }}
@@ -83,9 +83,9 @@ struct Enum
   end
 
   # A key in a `Hash` is hashed and then compared, so a type used as one owes
-  # both (`src/iyi/hash.iyi`). The value is the whole of what a member is.
+  # both (`src/iyi/hash.iyi`). The value's own hash: `to_i32` panicked past it.
   def hash : Int32
-    value.to_i32
+    value.hash
   end
 
   # Whether every bit of *other* is in this one, which is what a `@[Flags]`
@@ -150,7 +150,7 @@ struct Enum
   # has it. `new` takes any value of the base type by design — that is how an
   # enum comes back from C or off a wire — and this is the question that asks
   # whether the one in hand is a member.
-  def self.from_value?(value : Int32) : self?
+  def self.from_value?(value : Int) : self?
     {% for member in @type.constants %}
       {% unless @type.annotation(Flags) && member.stringify == "All" %}
         return self.new({{ @type.constant(member) }}) if value == {{ @type.constant(member) }}

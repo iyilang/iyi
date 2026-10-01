@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Exercises `std/complex`: Complex abs, arithmetic, exp, a zero's sign,
-# division at the ends of the range, sign, hashing and equality.
+# Exercises `std/complex`: Complex abs, arithmetic, exp and roots at the
+# top of the range, a zero's sign, division and inverses at the ends of
+# the range, sign, hashing and equality.
 #
 #     bash bench/std_complex_exercise.sh
 set -u
@@ -130,7 +131,7 @@ else
   # `abs` breaks the first check; every other label puts back one thing
   # this module got wrong, and the check written for it has to be the one
   # that fails - a copy caught somewhere else proves nothing about it.
-  for label in abs to_s conj negate minus root divide over sign hash equal cis zero; do
+  for label in abs to_s conj negate minus root divide over inv exp bigroot sign hash equal cis zero; do
     rm -rf "$WORK/patched" && mkdir -p "$WORK/patched/std"
     if ! PROOF="$label" "$PY" - <<PY
 import os
@@ -146,13 +147,16 @@ proofs = {
     "conj": ("Complex.new(@real, -@imag)", "Complex.new(@real, 0.0 - @imag)"),
     "negate": ("Complex.new(-@real, -@imag)", "Complex.new(0.0 - @real, 0.0 - @imag)"),
     "minus": ("to_f64 - other.real, -other.imag", "to_f64 - other.real, 0.0 - other.imag"),
-    "root": ("@imag >= 0.0 ? im : -im", "@imag >= 0.0 ? im : 0.0 - im"),
+    "root": ("y >= 0.0 ? im : -im", "y >= 0.0 ? im : 0.0 - im"),
     "divide": ("  def /(other : Complex) : Complex\n",
                "  def /(other : Complex) : Complex\n"
                "    d = other.abs2\n"
                '    raise "Division by zero" if d == 0.0\n'
                "    return Complex.new((@real * other.real + @imag * other.imag) / d, (@imag * other.real - @real * other.imag) / d)\n"),
     "over": ("self * other.inv", "Std::Complex::Complex.new(self, 0) / other"),
+    "inv": ("return conj / d if zero? || d.nan? || (d >= Float64::MIN_POSITIVE && d <= Float64::MAX)", "return conj / d"),
+    "exp": ("    return Complex.new(r, @imag) if @imag == 0.0\n", ""),
+    "bigroot": ("    if x.abs > big || y.abs > big\n", "    if false\n"),
     "sign": ("    return self if zero?\n",
              "    return self if zero?\n    mag = abs\n    return Complex.new(@real / mag, @imag / mag)\n"),
     "hash": ("    h = @real.hash\n    return h if @imag == 0.0\n"
@@ -182,6 +186,9 @@ PY
       root) want="a root's underflowed imaginary part keeps its sign" ;;
       divide) want="a divisor whose abs2 overflows" ;;
       over) want="a number over a complex is times its inverse" ;;
+      inv) want="the inverse of a value whose abs2 underflows" ;;
+      exp) want="e to a real power past the range keeps its imaginary zero" ;;
+      bigroot) want="the root of a value near the top of the range" ;;
       sign) want="an infinite part's sign is its axis" ;;
       hash) want="a real complex hashes as its real part" ;;
       equal) want="a number equals its complex" ;;

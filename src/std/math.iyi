@@ -11832,21 +11832,31 @@ pub struct Math
     bessely(order, value.to_f64)
   end
 
-  # Euclid on the non-positive side, where every magnitude fits, the
-  # type's minimum included: gcd(-2147483648, 6) is 2. Only gcd(minimum,
-  # 0), whose answer does not fit, overflows.
-  def self.gcd(a : ::Int, b : ::Int) : ::Int
-    x = a > 0 ? -a : a
-    y = b > 0 ? -b : b
+  # Euclid on the side of zero where every magnitude fits: the non-positive
+  # side for a signed type, its minimum included - gcd(-2147483648, 6) is 2
+  # - and the non-negative side, the only one there is, for an unsigned
+  # type. Only gcd(minimum, 0), whose answer does not fit, overflows. The
+  # two arguments are one type, as `%` takes one: the signature took any
+  # two integers, and an unsigned pair (it has no unary minus) or a pair of
+  # widths (no `%` between them) failed to compile inside this method. A
+  # pair of widths is refused at the call now, and a literal takes the
+  # other argument's type.
+  def self.gcd(a : T, b : T) : T forall T
+    {% raise "Math.gcd takes two integers of one type, not #{T}" unless T < ::Int %}
+    zero = a - a
+    signed = zero &- 1 < zero
+    x = signed && a > 0 ? zero - a : a
+    y = signed && b > 0 ? zero - b : b
     while y != 0
       t = y
       y = x % y
       x = t
     end
-    -x
+    signed ? zero - x : x
   end
 
-  def self.lcm(a : ::Int, b : ::Int) : ::Int
+  def self.lcm(a : T, b : T) : T forall T
+    {% raise "Math.lcm takes two integers of one type, not #{T}" unless T < ::Int %}
     return (a - a) if a == 0 || b == 0
     (a.abs // gcd(a, b)) * b.abs
   end

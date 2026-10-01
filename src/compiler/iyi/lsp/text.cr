@@ -37,7 +37,11 @@ module Iyi::Lsp::Text
     units = 0
     while units < character && reader.pos < text.bytesize
       ch = reader.current_char
-      break if ch == '\n'
+      # A character past the line's end is the line's end (LSP 3.17), and
+      # a CRLF line ends before its `\r`: stopping at `\n` alone let an
+      # edit's range past the end take the `\r`, and the server's buffer
+      # stopped matching the editor's.
+      break if ch == '\n' || (ch == '\r' && reader.peek_next_char == '\n')
       units += ch.ord >= 0x10000 ? 2 : 1
       reader.next_char
     end

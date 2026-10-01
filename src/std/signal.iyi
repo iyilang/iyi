@@ -83,6 +83,9 @@ class SignalWaiter
     @@arrived = Atomic(UInt64).new(0_u64)
     @@port = Atomic(UInt64).new(0_u64)
     @@slot = Atomic(UInt64).new(0_u64)
+    # The signals some `wait` has named, one bit each: the handler answers
+    # for these alone.
+    @@named = Atomic(UInt64).new(0_u64)
   {% else %}
     @@read_fd = -1
     @@write_fd = -1
@@ -123,6 +126,7 @@ class SignalWaiter
 
   {% if flag?(:win32) %}
     private def self.install(wanted : UInt64) : Nil
+      @@named.set(@@named.get | wanted)
       return if @@installed != 0_u64
       @@installed = 1_u64
       # Touched here, on the program's own thread, so the handler's thread
@@ -147,8 +151,15 @@ class SignalWaiter
     # return. The program's own `exit` ends this thread with the rest, and
     # the program has until Windows' deadline to reach it - Go's answer to
     # the same rule.
+    #
+    # A signal no `wait` has named is not this handler's: it answers 0, and
+    # the next handler - Windows' own, in the end - takes its default. The
+    # one handler answered every event, so waiting for TERM alone swallowed
+    # Ctrl-C and Ctrl-Break, and waiting for INT alone held a closing
+    # console for Windows' five seconds.
     def self.console_event(event : Int32) : Int32
       signal = event <= 1 ? 2 : 15
+      return 0 if @@named.get & 1_u64.unsafe_shl(signal.to_u64) == 0_u64
       @@arrived.add(1_u64.unsafe_shl(signal.to_u64))
       slot = @@slot.swap(0_u64)
       if slot != 0_u64

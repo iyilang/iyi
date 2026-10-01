@@ -13,7 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/log::{Log, MemoryBackend, Severity}
+import std/log::{Log, MemoryBackend, Severity, DefaultFormatter, Entry}
 
 puts "== info"
 mem = MemoryBackend.new
@@ -38,5 +38,20 @@ assert_str "db..pool", Log.for("db..pool").source, "a doubled dot"
 assert_str "db.", Log.for("db.").source, "a trailing dot"
 assert_true Log.for(".db").object_id != Log.for("db").object_id, ".db and db are two loggers"
 puts "  Log.for keeps leading, doubled and trailing dots in the source"
+
+puts "\n== none"
+# None silences: a logger set to it wrote an entry logged at None, and a
+# logger at any level wrote one. And the root's line keeps its " - ".
+quiet = MemoryBackend.new
+Log.setup(Severity::None, quiet)
+hushed = Log.for("hushed")
+hushed.log(Severity::None, "hush")
+hushed.fatal "hush"
+Log.setup(Severity::Trace, quiet)
+hushed.log(Severity::None, "hush")
+assert_true quiet.entries.empty?, "nothing is written at None, nor to a logger set to it (#{quiet.entries.size} were)"
+root_line = DefaultFormatter.new.format(Entry.new("", Severity::Info, "up"))
+assert_true root_line.ends_with?(" INFO - up"), "the root's line: #{root_line}"
+puts "  None writes nothing"
 
 puts "\nALL CHECKS PASSED"

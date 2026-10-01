@@ -162,6 +162,13 @@ assert_true g.bytesize == 23 && g.to_unsafe[0] == 0x1f_u8 && g.to_unsafe[1] == 0
 assert_true g.to_unsafe[15] == 0xc2_u8 && g.to_unsafe[16] == 0x41_u8 && g.to_unsafe[17] == 0x24_u8 && g.to_unsafe[18] == 0x35_u8, "the CRC-32 of abc is 352441c2, little-endian"
 assert_true g.to_unsafe[19] == 3_u8 && g.to_unsafe[20] == 0_u8 && g.to_unsafe[22] == 0_u8, "the length of abc"
 puts "  empty, stored, and the two envelopes byte for byte"
+# A gzip file is a series of members, which is what `cat a.gz b.gz`
+# makes: every member is read, zero padding after the last is taken as
+# gzip takes it, and only the first member came back before.
+joined = Gzip.compress("first\n") + Gzip.compress("second\n") + Gzip.compress("")
+assert_true Gzip.decompress(joined) == "first\nsecond\n", "every member of a concatenated gzip file"
+assert_true Gzip.decompress(Gzip.compress("first\n") + "\0\0\0\0") == "first\n", "zero padding after the last member"
+puts "  a gzip file of three members, and one padded with zeros"
 
 args = Program.args
 if args.size > 0

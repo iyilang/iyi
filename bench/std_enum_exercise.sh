@@ -175,7 +175,7 @@ prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
 prove_fails "each yields None and All" each_all "flags each walks the members, not None or All" \
   's/    values.each { |member| yield member }/    {% for member in @type.constants %}\n      yield new({{@type.constant(member)}})\n    {% end %}/'
 prove_fails "valid? accepts everything" valid_all "plain: a member is valid, 9 is not" \
-  's/    !from_value?(val.value.to_i32).nil?/    true/'
+  's/    !from_value?(val.value).nil?/    true/'
 prove_fails "+ steps backwards" plus_back "Info + 1 is Warn" \
   's/    self.class.new(value + other)/    self.class.new(value - other)/'
 

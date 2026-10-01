@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## 0.16.1 — 2026-10-01
+
+**`Math` answers the correctly rounded double.** `sin`, `cos`, `tan`,
+`atan`, `asin`, `acos`, `atan2`, `hypot` and `cbrt` are CORE-MATH's;
+`erf`, `erfc`, `asinh`, `acosh`, `atanh`, `lgamma` and `tgamma` are the
+CORE-MATH routines glibc 2.43 ships, and `sinh`, `cosh`, `tanh` and the
+Bessel functions glibc's fdlibm - each held by the math gate to its
+reference bit for bit, on Linux, Windows and darwin arm64. `sin(1e300)`
+was 0.0. `fma` rounds once, and without FMA hardware is three to four
+times as fast; `bessely0`, `bessely1`, `besselj`, `bessely`, `isqrt`,
+`pw2ceil`, `ilogb`, `logb`, `scalbn` and `scalbln` arrive. A result can
+differ from 0.16.0's in its last bit, and `gamma(±0)` is ±infinity.
+
+**About a hundred and ninety fixes, most of them found by comparing the
+library with Python, Crystal and the RFCs on millions of inputs**, each
+with a check in its module's exercise that is proven to fail without it.
+An HTTP server could be killed by a malformed chunked body and took two
+conflicting `Content-Length`s; one XML entity expanded to a gigabyte;
+`SemanticVersion` comparisons recursed forever; and a program outgrowing
+a large buffer beside a running mark could fault. **Some answers
+change:** `File.match?` speaks the full pattern language - `*` stays
+inside a segment, and `[`, `{`, `**` and `\` are syntax; `OptionParser`
+runs a short bundle (`-vq`) and sends `-q=1` to `invalid_option`;
+`CSV.parse` reads a blank line as an empty row; `UUID.parse` refuses a
+hyphen out of place; `Gzip.decompress` reads every member; HTTP refuses
+control bytes in a field and an interim `100` is no longer the response.
+
+**Windows** gains the process, path, link, console, signal and language
+server fixes of its branch. `.iyimod` is still v54, so 0.16.0's
+artifacts are rebuilt only because the compiler's version is in their
+identity.
+
 ### Added
 
 - **`Math.bessely0`, `bessely1`, `besselj` and `bessely`, and `besselj0`

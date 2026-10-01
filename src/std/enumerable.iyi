@@ -675,9 +675,19 @@ pub trait Enumerable
     raise "min_of of an empty collection"
   end
 
+  # One walk, as `minmax_of?` below takes: `min?` and then `max?` walked the
+  # collection twice, so a source that can be read once (a pipe, a
+  # generator) answered {1, nil} for [3, 1, 4, 1, 5] and `minmax` refused
+  # it as empty.
   def minmax? : Tuple(Elem?, Elem?) where Elem : Comparable
-    low = min?
-    high = max?
+    low = nil
+    high = nil
+    each do |e|
+      cur_low = low
+      low = e if cur_low.nil? || (e <=> cur_low) < 0
+      cur_high = high
+      high = e if cur_high.nil? || (e <=> cur_high) > 0
+    end
     {low, high}
   end
 

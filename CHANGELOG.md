@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`Enumerable#minmax?` and `#minmax` walk the collection once.** They were
+  `min?` and then `max?`, two walks, so a source that can be read once (a
+  pipe, a generator) answered `{1, nil}` for `[3, 1, 4, 1, 5]`, and `minmax`
+  refused it with "minmax of an empty collection". Crystal answers `{1, 5}`
+  in one walk, as `minmax_by?` already did here, and both take one walk now.
+  `bench/std_exercise.iyi` checks them on a source that drains as it is
+  walked; the old module answered `{1, nil}` after two walks.
+
 - **`Enumerable#find_value` answers the first truthy block result.** It took
   the first non-nil one, `false` included, so
   `[1, 2, 3, 4].find_value { |i| i > 2 }` answered false where Crystal

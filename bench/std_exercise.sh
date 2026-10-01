@@ -322,7 +322,10 @@ foreign=""
 for source in "$REPO"/src/std/*.iyi; do
   name="$(basename "$source" .iyi)"
   case "$name" in
-    socket|time|debug|file|dir|udp|random|signal|process)
+    # `std/path` folds a Windows name's case the way NTFS does, which is
+    # the platform's own table (LCMapStringEx); ASCII alone called `C:\Ä`
+    # and `c:\ä` two names.
+    socket|time|debug|file|dir|udp|random|signal|process|path)
       # Named libraries only: a `lib` block of platform bindings is the
       # exemption, an `@[Link]` to something the platform does not supply is
       # not covered by it.

@@ -408,11 +408,16 @@ pub struct Eiy
 
         suppress_trailing_whitespace(token, suppress_trailing)
 
-        parts << "#<loc:push>"
-        append_loc(parts, filename, line_number, column_number)
-        parts << " " unless str_val.starts_with?(' ')
-        parts << str_val
-        parts << "\n#<loc:pop>\n"
+        # `<%# note %>` is a comment as a whole, over two lines as over one.
+        # Spliced in as code, only its first line was one: `<%# a\nputs 1 %>`
+        # ran `puts 1`.
+        unless str_val.starts_with?('#')
+          parts << "#<loc:push>"
+          append_loc(parts, filename, line_number, column_number)
+          parts << " " unless str_val.starts_with?(' ')
+          parts << str_val
+          parts << "\n#<loc:pop>\n"
+        end
       elsif token.eof?
         break
       end

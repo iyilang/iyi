@@ -2,7 +2,8 @@ Merhaba <%= name %>!
 <%- if show -%>
   shown: <%= 1 + 2 %> "quoted" \ #{raw} <tag>
 <%- end -%>
-<%# a comment, printed nowhere -%>
+<%# a comment over two lines, printed nowhere, its second line run nowhere:
+items << "the comment ran" -%>
 <%% not a tag %>
 <% items.each do |item| -%>
   - <%= item %> (<%= item.bytesize %> bytes)

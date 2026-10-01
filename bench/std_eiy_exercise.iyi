@@ -2,8 +2,9 @@
 #
 # Proves:
 #   * `Eiy.render` of bench/std_eiy_exercise.eiy — output tags, `if`, a block,
-#     `<%-` and `-%>` trimming, a comment, an escaped tag, quotes, backslashes,
-#     `#{` and UTF-8 text — is the expected text, byte for byte.
+#     `<%-` and `-%>` trimming, a comment over two lines, an escaped tag,
+#     quotes, backslashes, `#{` and UTF-8 text — is the expected text, byte
+#     for byte.
 #   * `Eiy.embed` into an `Eiy::Buffer` and into `stdout` prints the same text.
 #   * `Eiy.def_to_s` in a class defines `to_s` and `to_s(io)` from the template.
 #   * `Eiy::Lexer` token types, values, trimming flags and positions, with the
@@ -155,6 +156,10 @@ generated_expected = "out.print(\"a \\\"q\\\" \\\\ \\\#{b\\t\\n\")\n" \
                      "out.print(\"d\")\n" \
                      "#<loc:push>#<loc:\"t.eiy\",2,23> end \n#<loc:pop>\n"
 assert_text(generated_expected, generated, "process_string output")
+# A comment is a comment to its last line; spliced in as code, its second
+# line ran.
+commented = Eiy.process_string("a<%# one\ntwo -%>\nb", "t.eiy", "out")
+assert_text("out.print(\"a\")\nout.print(\"b\")\n", commented, "a comment over two lines generates nothing")
 
 template_path = Eiy.locate("std_eiy_exercise.eiy", __FILE__)
 # The directory part comes from `__FILE__`, so it carries whatever separator

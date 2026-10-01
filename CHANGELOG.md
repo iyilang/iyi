@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **The math oracle scales into the subnormals itself.** glibc's erfc
+  rounds a subnormal result with glibc's own `__ldexp`, which rounds
+  once; the oracle had it call the platform's `ldexp`, and on darwin
+  arm64 - the first run where the CORE-MATH part built there - erfc of
+  26.62825219194711 came back an ulp below the correctly rounded
+  2.41698865125757e-310 that iyi answers and mpmath confirms, and the
+  gate failed iyi for it. The oracle carries musl's `scalbn` (MIT), whose
+  last multiply is its only rounding, so its answers are glibc's on every
+  platform; on Linux all 32 comparisons are unchanged.
+
 - **`Eiy` templates: bytes that are not UTF-8, comments over lines, and
   nested renders.** Template text with a byte like Latin-1 `\xE9` went
   into the generated string literal as it was, and the compiler stopped

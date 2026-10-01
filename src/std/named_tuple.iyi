@@ -107,17 +107,25 @@ struct ::NamedTuple
     reverse_merge(other)
   end
 
-  # Deep clone of this named tuple.
+  # Deep clone of this named tuple, as far as the values allow: each value
+  # whose type has `clone` is cloned and any other is kept as it is.
+  # Asking every value for `clone` refused `{a: 1, b: "x"}`: the prelude
+  # gives `clone` to neither `Int32` nor `String`, so only a named tuple of
+  # values that all had one compiled.
   def clone
     {% if T.keys.size == 0 %}
       NamedTuple.new
     {% else %}
       NamedTuple.new(
         {% for k in T.keys %}
-          {{k.stringify}}: self[{{k.symbolize}}].clone,
+          {{k.stringify}}: clone_value(self[{{k.symbolize}}]),
         {% end %}
       )
     {% end %}
+  end
+
+  private def clone_value(value)
+    value.responds_to?(:clone) ? value.clone : value
   end
 
   # Converts this named tuple into an Array of {Symbol, Value} pairs.

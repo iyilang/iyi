@@ -251,6 +251,20 @@ else
   echo "  a program's exit(-1): the program exits $own_code, the runner $neg_code, saying: $(head -c 200 neg.out)"
   status=1
 fi
+# The job `iyi run` holds its program in lets a child break away from it,
+# as a shell does: the program's own CREATE_BREAKAWAY_FROM_JOB start was
+# refused with "Access is denied" (error 5) under `iyi run` alone.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    away=$("$IYI" run "$REPO/bench/std_process_exercise.iyi" -- breakaway 2>&1 | tail -1)
+    if [ "$away" = "started" ]; then
+      echo "  a program under iyi run starts a child that breaks away from the runner's job"
+    else
+      echo "  a program under iyi run could not start a child away from the runner's job: $away"
+      status=1
+    fi
+    ;;
+esac
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
 # The refusal of an `--x86-asm-syntax` wrote over the value it refused

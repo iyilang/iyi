@@ -625,11 +625,17 @@ class Iyi::Command
     # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, which winnt.cr does not spell.
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000_u32
 
+    # JOB_OBJECT_LIMIT_BREAKAWAY_OK: a child the program starts with
+    # CREATE_BREAKAWAY_FROM_JOB leaves the job, as it does when the program
+    # is run from a shell. Without it that start was refused with "Access is
+    # denied" under `iyi run` alone.
+    JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x0800_u32
+
     private def kill_child_with_runner(process)
       job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
       return if job.null?
       limits = LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION.new
-      limits.basicLimitInformation.limitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+      limits.basicLimitInformation.limitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
       if LibC.SetInformationJobObject(job, LibC::JOBOBJECTINFOCLASS::ExtendedLimitInformation,
            pointerof(limits).as(Void*),
            sizeof(LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION).to_u32) == 0

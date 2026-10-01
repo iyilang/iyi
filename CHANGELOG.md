@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **A program under `iyi run` on Windows may start a child that breaks
+  away from the runner's job.** The job `iyi run` holds its program in,
+  so a stopped runner ends it, did not allow breakaway, and a program's
+  own `CREATE_BREAKAWAY_FROM_JOB` start was refused with "Access is
+  denied" there while it worked from any shell. The job allows it now,
+  as `Process.run`'s job does. `bench/verbs_exercise.sh` runs a program
+  that starts such a child under `iyi run`; the old runner answered
+  "refused: error 5".
+
 - **`HTTP.request` reads an answer as far as its framing says, and no
   further.** It read to the server's close, so a whole answer that the
   server reset after came back as `SocketError` ("cannot read from socket:

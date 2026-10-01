@@ -47,6 +47,18 @@ def main : Nil
   s_ro = Slice(Int32).new(3, read_only: true) { |i| i * 5 }
   puts "read only?: #{s_ro.read_only?} #{s_block.read_only?}"
 
+  # The element type left to the value or the block, as `Array.new` takes
+  # it: these three were declared `: self`, which here is the unbound
+  # `Slice(T)`, rather than `: Slice(T)` as `Array.new` is `: Array(T)`, and
+  # none of them compiled.
+  inferred = Slice.new(3) { |i| i + 1 }
+  inferred_value = Slice.new(2, 7)
+  inferred_ro = Slice.new(2, read_only: true) { |i| i * 2 }
+  puts "inferred new: #{inferred} #{inferred_value} #{inferred_ro} read_only?=#{inferred_ro.read_only?}"
+  unless inferred.to_s == "Slice[1, 2, 3]" && inferred_value.to_s == "Slice[7, 7]" && inferred_ro.to_s == "Slice[0, 2]" && inferred_ro.read_only?
+    raise "inferred new: expected Slice[1, 2, 3] Slice[7, 7] Slice[0, 2] read-only"
+  end
+
   puts "bytesize: #{s_block.bytesize} (expected #{5 * sizeof(Int32)})"
   puts "to_unsafe: #{s_block.to_unsafe.address > 0_u64}"
 

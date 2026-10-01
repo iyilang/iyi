@@ -130,6 +130,18 @@ refuses "a processing instruction given ?> by text=" pi_set "'?>' is not allowed
   '(n = Node.new_pi("p", "a"); n.text = "?>"; n).to_xml'
 refuses "text= on a document" document_text "a document has no text of its own" \
   '(d = Document.new; d.text = "x"; d).to_xml'
+# A name, a comment and a processing instruction have no character
+# references, so in a document declared US-ASCII one holding a character
+# past U+007F is refused at to_xml; it was written as UTF-8, which the
+# module's own parser then refused as "not US-ASCII".
+refuses "a comment past ASCII in a US-ASCII document" ascii_comment "U+00E9 cannot be written in a comment of a document declared US-ASCII" \
+  '(d = Document.new(encoding: "US-ASCII"); d.add_child(Node.new_comment("caf\u{E9}")); d).to_xml'
+refuses "a processing instruction past ASCII in a US-ASCII document" ascii_pi "U+00E9 cannot be written in a processing instruction of a document declared US-ASCII" \
+  '(d = Document.new(encoding: "US-ASCII"); d.add_child(Node.new_pi("p", "caf\u{E9}")); d).to_xml'
+refuses "an element name past ASCII in a US-ASCII document" ascii_element "cannot be written in a document declared US-ASCII" \
+  '(d = Document.new(encoding: "US-ASCII"); d.add_child(Node.new_element("caf\u{E9}")); d).to_xml'
+refuses "an attribute name past ASCII in a US-ASCII document" ascii_attribute "cannot be written in a document declared US-ASCII" \
+  '(d = Document.new(encoding: "US-ASCII"); e = Node.new_element("r"); e.set_attribute("\u{E9}", "1"); d.add_child(e); d).to_xml'
 
 echo
 echo "== proving the checks can fail when the module is broken"
@@ -174,7 +186,9 @@ mutate "a name with two colons accepted" \
 mutate "the xmlns prefix declared" \
   '        elsif ns_prefix == "xmlns"' '        elsif false' 'accepted .*xmlns:xmlns'
 mutate "CDATA written whole" \
-  '      serialize_cdata_body(buf)' '      buf << @content' 'splits the section'
+  '      serialize_cdata_body(buf, ascii)' '      buf << @content' 'splits the section'
+mutate "a character past U+007F written raw in the CDATA of a US-ASCII document" \
+  '      elsif ascii && ptr[i] >= 0x80_u8' '      elsif false' 'in the CDATA of a US-ASCII document'
 mutate "text= dropped on an element" \
   '      add_child(Node.new_text(value))' '      nil' 'text= replaces'
 mutate "an entity's '<' read as text in an attribute value" \

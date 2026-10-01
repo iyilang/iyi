@@ -19,11 +19,12 @@
 # the start of the next (and a carriage return in it as `&#13;` between two),
 # namespace declarations before attributes, an empty element as `<a/>`, and a
 # newline after the declaration and after every top-level node; a document
-# declared US-ASCII has every other character in its text and attribute
-# values written as a decimal reference. A comment or a processing
-# instruction has no such escape, so `--` in a comment, a comment ending in
-# `-`, and `?>` in a processing instruction are refused when the node is made
-# or its text set.
+# declared US-ASCII (or `ascii`) has every other character in its text,
+# attribute values and CDATA written as a decimal reference. A comment or a
+# processing instruction has no such escape, so `--` in a comment, a comment
+# ending in `-`, and `?>` in a processing instruction are refused when the
+# node is made or its text set; in a document declared US-ASCII, `to_xml`
+# refuses a character past U+007F in one of them or in a name.
 #
 # What it refuses, each with the line and column:
 #   * an undeclared entity (`&bogus;`), an unterminated one (`&amp` without
@@ -461,19 +462,26 @@ pub class Node
 
   # With *ascii* (a document declared US-ASCII), a character past U+007F in
   # text or an attribute value is written as a character reference: written
-  # as its UTF-8 bytes, it made a document no other parser reads.
+  # as its UTF-8 bytes, it made a document no other parser reads. A name, a
+  # comment and a processing instruction have no references, so one holding
+  # such a character is refused; it was written as UTF-8, and this module's
+  # own parser refused the result ("byte 0xC3 is not US-ASCII, the declared
+  # encoding").
   protected def serialize_node(buf : Array(String), ascii : Bool = false) : Nil
     if @node_type.element?
+      refuse_non_ascii_name(@name) if ascii
       buf << "<"
       buf << @name
       ns_i = 0
       while ns_i < @namespaces.size
+        refuse_non_ascii_name("xmlns:#{@namespaces[ns_i].prefix}") if ascii
         buf << " "
         buf << @namespaces[ns_i].to_s(ascii)
         ns_i = ns_i + 1
       end
       attr_i = 0
       while attr_i < @attributes.size
+        refuse_non_ascii_name(@attributes[attr_i].name) if ascii
         buf << " "
         buf << @attributes[attr_i].to_s(ascii)
         attr_i = attr_i + 1
@@ -495,13 +503,18 @@ pub class Node
       buf << Std::Xml.escape(@content, ascii)
     elsif @node_type.cdata?
       buf << "<![CDATA["
-      serialize_cdata_body(buf)
+      serialize_cdata_body(buf, ascii)
       buf << "]]>"
     elsif @node_type.comment?
+      refuse_non_ascii_content("a comment") if ascii
       buf << "<!--"
       buf << @content
       buf << "-->"
     elsif @node_type.pi?
+      if ascii
+        refuse_non_ascii_name(@name)
+        refuse_non_ascii_content("a processing instruction")
+      end
       buf << "<?"
       buf << @name
       if !@content.empty?
@@ -519,12 +532,44 @@ pub class Node
     end
   end
 
+  private def refuse_non_ascii_name(name : String) : Nil
+    raise "the name '#{name}' cannot be written in a document declared US-ASCII" if Node.first_non_ascii(name) >= 0
+  end
+
+  private def refuse_non_ascii_content(what : String) : Nil
+    cp = Node.first_non_ascii(@content)
+    raise "U+#{cp.to_s(16).upcase.rjust(4, '0')} cannot be written in #{what} of a document declared US-ASCII" if cp >= 0
+  end
+
+  # The first character past U+007F in *text*, decoded, or -1.
+  protected def self.first_non_ascii(text : String) : Int32
+    ptr = text.to_unsafe
+    len = text.bytesize
+    i = 0
+    while i < len && ptr[i] < 0x80_u8
+      i = i + 1
+    end
+    return -1 if i == len
+    b = ptr[i]
+    n = b >= 0xF0_u8 ? 4 : (b >= 0xE0_u8 ? 3 : (b >= 0xC0_u8 ? 2 : 1))
+    return b.to_i32 if n == 1 || i + n > len
+    cp = (b & (n == 2 ? 0x1F_u8 : (n == 3 ? 0x0F_u8 : 0x07_u8))).to_i32
+    k = 1
+    while k < n
+      cp = (cp << 6) | (ptr[i + k] & 0x3F_u8).to_i32
+      k = k + 1
+    end
+    cp
+  end
+
   # A CDATA section has no escape either, so `]]>` in its content is written
   # as two sections, `...]]` and `>...`, which read back as the one run. A
   # carriage return is written between two sections as `&#13;`: kept raw in
-  # the section, it read back as a newline.
-  private def serialize_cdata_body(buf : Array(String)) : Nil
-    if !@content.includes?("]]>") && !@content.includes?("\r")
+  # the section, it read back as a newline. With *ascii*, so is a character
+  # past U+007F, as `&#N;`: it was written raw, as UTF-8 bytes, in a
+  # document declared US-ASCII.
+  private def serialize_cdata_body(buf : Array(String), ascii : Bool) : Nil
+    if !@content.includes?("]]>") && !@content.includes?("\r") && (!ascii || Node.first_non_ascii(@content) < 0)
       buf << @content
       return
     end
@@ -543,6 +588,16 @@ pub class Node
         buf << "]]>&#13;<![CDATA["
         run_start = i + 1
         i = i + 1
+      elsif ascii && ptr[i] >= 0x80_u8
+        buf << @content[run_start, i - run_start]
+        run_start = i
+        while i < len && ptr[i] >= 0x80_u8
+          i = i + 1
+        end
+        buf << "]]>"
+        buf << Std::Xml.escape(@content[run_start, i - run_start], true)
+        buf << "<![CDATA["
+        run_start = i
       else
         i = i + 1
       end

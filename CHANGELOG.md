@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **A document declared US-ASCII writes a character past U+007F in CDATA
+  as a reference, and `to_xml` refuses one in a comment, a processing
+  instruction or a name.** CDATA was written as UTF-8 whatever the
+  declared encoding: `<r><![CDATA[café]]></r>` given `encoding =
+  "US-ASCII"` came out as `<![CDATA[café]]>`, which the module's own
+  parser then refused ("byte 0xC3 is not US-ASCII, the declared encoding
+  at line 2, column 16"), and a comment "café" the same way. CDATA now
+  closes around such a character as it does around a carriage return,
+  `<![CDATA[caf]]>&#233;<![CDATA[]]>`, which reads back as "café"; a
+  comment, a processing instruction or a name has no reference to write,
+  so `to_xml` raises "U+00E9 cannot be written in a comment of a document
+  declared US-ASCII" (or "the name 'café' cannot be written ...").
+  `bench/std_xml_exercise.iyi` writes and rereads such CDATA and
+  `bench/std_xml_exercise.sh` expects the four refusals; the old module
+  wrote `<![CDATA[café 😀é]]>`.
+
 - **`std/xml` reads a name by code point, as XML 1.0 (fifth edition)
   defines one, so `<a×b/>` and `<·a/>` are refused.** Any byte past 0x7F
   both started and continued a name: `<a×b/>` parsed as an element named

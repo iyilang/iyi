@@ -178,6 +178,15 @@ assert_equal("<a><![CDATA[x]]>&#13;<![CDATA[y]]></a>", carriage.to_xml, "a carri
 assert_equal("x\ry", Std::Xml.parse(carriage.to_xml).root.text, "and reads back as a carriage return")
 ascii = Std::Xml.parse("<?xml version=\"1.0\" encoding=\"US-ASCII\"?><a xmlns:p=\"urn:&#xE9;\" b=\"&#233;\">&#x1F600;</a>")
 assert_equal("<?xml version=\"1.0\" encoding=\"US-ASCII\"?>\n<a xmlns:p=\"urn:&#233;\" b=\"&#233;\">&#128512;</a>\n", ascii.to_xml, "a US-ASCII document writes every other character as a reference")
+# CDATA has no escape either, so in a US-ASCII document a character past
+# U+007F in it is written as a reference between two sections, as a
+# carriage return is; it was written raw, as UTF-8, and the parser refused
+# the document it had written ("byte 0xC3 is not US-ASCII").
+ascii_cdata = Std::Xml.parse("<r><![CDATA[caf\u{E9} \u{1F600}\u{E9}]]></r>")
+ascii_cdata.encoding = "US-ASCII"
+assert_equal("<?xml version=\"1.0\" encoding=\"US-ASCII\"?>\n<r><![CDATA[caf]]>&#233;<![CDATA[ ]]>&#128512;&#233;<![CDATA[]]></r>\n", ascii_cdata.to_xml, "a non-ASCII character in the CDATA of a US-ASCII document is written as a reference between two sections")
+assert_equal("caf\u{E9} \u{1F600}\u{E9}", Std::Xml.parse(ascii_cdata.to_xml).root.text, "and reads back as the one run")
+puts "  a US-ASCII document writes a character past U+007F in CDATA as a reference between two sections"
 assert_true(Std::Xml.parse("<a xmlns:xml=\"http://www.w3.org/XML/1998/namespace\" xmlns:x=\"u\" xmlns:y=\"v\" x:k=\"1\" y:k=\"2\"/>").root.attributes.size == 2, "the xml prefix may be declared to its own uri; one local name in two namespaces is two attributes")
 puts "  the document reads, navigates and writes back as itself: #{written.bytesize} bytes, #{menu.children.size} child nodes"
 

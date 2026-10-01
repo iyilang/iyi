@@ -246,6 +246,10 @@ time_panics_with "fraction digits the format cannot print" frac12 "fraction_digi
   'Time.utc(2024, 1, 1).to_rfc3339(12)'
 time_panics_with "an eighth day of the week" dow8 "invalid day of week: 8" \
   'DayOfWeek.new(8).to_s'
+# A millisecond and a nanosecond past one second between them carried into
+# the next second, day and year in silence.
+time_panics_with "a fraction past one second" utc_frac "invalid millisecond + nanosecond: 999 ms and 999999999 ns are past one second" \
+  'Time.utc(2024, 12, 31, 23, 59, 59, 999, 999999999).to_rfc3339(9)'
 # Text after the offset was never looked at: `...Zjunk` and `...+05:30:00`
 # parsed. An offset is 00..23 hours and 00..59 minutes: `+99:99` moved the
 # instant four days in silence. A year no Int32 holds is refused with the

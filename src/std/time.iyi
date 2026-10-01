@@ -539,14 +539,18 @@ pub struct Time
     if nanosecond < 0 || nanosecond > 999999999
       raise "invalid nanosecond: #{nanosecond}"
     end
-
+    # The two are one fraction of the second written: past it they carried
+    # into the next second in silence, and `Time.utc(2024, 12, 31, 23, 59, 59,
+    # 999, 999999999)` answered 2025-01-01T00:00:00.998999999Z, a date nobody
+    # wrote, where the same constructor refuses a 60th second.
     total_ns = millisecond.to_i64 * 1000000_i64 + nanosecond.to_i64
-    extra_sec = total_ns // 1000000000_i64
-    nano_rem = (total_ns % 1000000000_i64).to_i32
+    if total_ns > 999999999_i64
+      raise "invalid millisecond + nanosecond: #{millisecond} ms and #{nanosecond} ns are past one second"
+    end
 
     days = days_from_civil(year.to_i64, month, day)
-    sec = days * 86400_i64 + hour.to_i64 * 3600_i64 + minute.to_i64 * 60_i64 + second.to_i64 + extra_sec
-    new(sec, nano_rem)
+    sec = days * 86400_i64 + hour.to_i64 * 3600_i64 + minute.to_i64 * 60_i64 + second.to_i64
+    new(sec, total_ns.to_i32)
   end
 
   def self.new(year : Int32, month : Int32, day : Int32, hour : Int32 = 0, minute : Int32 = 0, second : Int32 = 0, millisecond : Int32 = 0, nanosecond : Int32 = 0) : Time

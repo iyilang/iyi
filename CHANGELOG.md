@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`Time.utc` refuses a millisecond and a nanosecond that pass one
+  second between them.** Each was checked on its own and their sum was
+  carried into the next second in silence: `Time.utc(2024, 12, 31, 23,
+  59, 59, 999, 999_999_999)` answered `2025-01-01T00:00:00.998999999Z`,
+  a second, day and year nobody wrote, where the same constructor
+  refuses a 60th second. It is "invalid millisecond + nanosecond: 999 ms
+  and 999999999 ns are past one second" now. `bench/std_time_exercise.sh`
+  asks for the sentence; the old module answered the 2025 date.
+
 - **`URI#to_s` writes userinfo's escapes as they were.** `parse` decoded
   the user and the password and `to_s` re-encoded them, sub-delims left
   bare, so a sub-delim that had been escaped came back bare:

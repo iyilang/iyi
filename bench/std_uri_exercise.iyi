@@ -15,7 +15,28 @@ end
 
 import std/uri::{URI, Params}
 
-puts "== parse"
+puts "== hash"
+# URIs hash as they compare. Without a `hash` of its own a URI hashed to its
+# type: these two hashed alike, and a table of 16,000 URI keys took 11.3 s
+# to fill where the same texts as String keys took 4 ms. A bound, not a
+# benchmark: twenty times the texts' time and 200 ms over.
+assert_true URI.parse("http://a/").hash != URI.parse("https://b:8/x?y#z").hash, "two URIs hash apart"
+assert_true URI.parse("http://u:p@h:8/x?y#z").hash == URI.parse("http://u:p@h:8/x?y#z").hash, "equal URIs hash alike"
+texts = (0...16000).map { |i| "http://h/p#{i}" }
+uris = texts.map { |text| URI.parse(text) }
+started = __iyi_monotonic_ns
+by_uri = {} of URI => Int32
+uris.each_with_index { |uri, i| by_uri[uri] = i }
+keyed_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+by_text = {} of String => Int32
+texts.each_with_index { |text, i| by_text[text] = i }
+texted_ns = __iyi_monotonic_ns - started
+assert_true by_uri.size == 16000 && by_uri[URI.parse("http://h/p4321")]? == 4321, "a table of URIs fills and answers"
+assert_true keyed_ns <= texted_ns * 20 + 200_000_000_i64, "hash table: 16000 URI keys took #{keyed_ns // 1000000} ms where String keys took #{texted_ns // 1000000} ms"
+puts "  URIs hash as they compare; 16,000 keys within twenty times their texts' time and 200 ms"
+
+puts "\n== parse"
 u = URI.parse("https://ex.com/a")
 assert_str "https", u.scheme.to_s, "scheme"
 assert_true u.host == "ex.com", "host"

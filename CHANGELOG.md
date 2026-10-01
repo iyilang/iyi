@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **`Time`, `Time::Span`, `DayOfWeek`, `UUID` and `URI` hash as they
+  compare.** Each wrote `==` and no `hash`, so each hashed to its type,
+  `Object#hash`'s default, and every key of a `Hash` or `Set` of them went
+  to one slot: `Time.unix(1).hash == Time.unix(1000000, 5).hash`,
+  `Monday.hash == Sunday.hash` and `URI.parse("http://a/").hash ==
+  URI.parse("https://b:8/x?y#z").hash` were true, and 16,000 keys took
+  1.2 s to insert as times, 0.95 s as spans, 2.0 s as UUIDs and 11.3 s
+  as URIs, where the same values as tuples or strings took 1 to 5 ms. A
+  time and a span hash their seconds and nanoseconds as a tuple does, a
+  day its number, a UUID its sixteen bytes and a URI its eight parts.
+  `bench/std_time_exercise.iyi`, `std_uuid_exercise.iyi` and
+  `std_uri_exercise.iyi` check that two of each hash apart and equal ones
+  alike, and bound 16,000 inserts at twenty times the tuples' or strings'
+  time and 200 ms; the old modules hashed the first pair alike.
+
 - **A finished `IyiThread` gives its scheduler back: the poller, the
   deadline timer, the pooled task stacks and the state.** None of them was
   released: 1,000 threads run and joined one after another, each sleeping

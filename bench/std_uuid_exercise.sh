@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every uuid section reported"
-for phrase in "== parse"; do
+for phrase in "== parse" "== hash"; do
   if ! grep -q "$phrase" "$WORK/uuid-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1

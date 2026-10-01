@@ -55,6 +55,13 @@ pub struct DayOfWeek
     @value == other.value
   end
 
+  # Hashing follows `==`. Without it a day hashed to its type, `Object#hash`'s
+  # default: `Monday.hash == Sunday.hash`, and every day a table held went to
+  # one slot.
+  def hash : Int32
+    @value
+  end
+
   def monday? : Bool
     @value == 1
   end
@@ -297,6 +304,14 @@ pub struct Span
 
   def ==(other : Span) : Bool
     @seconds == other.@seconds && @nanoseconds == other.@nanoseconds
+  end
+
+  # Hashing follows `==`, the two parts mixed as a tuple's members are. Without
+  # it every span hashed to its type: `Span.seconds(1).hash ==
+  # Span.days(9).hash`, and a table of 16,000 spans took 0.95 s to fill where
+  # the same pairs as tuples took 1 ms.
+  def hash : Int32
+    {@seconds, @nanoseconds}.hash
   end
 
   def to_s : String
@@ -768,6 +783,13 @@ pub struct Time
 
   def ==(other : Time) : Bool
     @seconds == other.seconds && @nanoseconds == other.nanoseconds
+  end
+
+  # Hashing follows `==`, as `Span`'s does. Without it every time hashed to its
+  # type: `Time.unix(1).hash == Time.unix(1000000, 5).hash`, and a table of
+  # 16,000 times took 1.2 s to fill where the same pairs as tuples took 1 ms.
+  def hash : Int32
+    {@seconds, @nanoseconds}.hash
   end
 
   # ---------------------------------------------------------------------------

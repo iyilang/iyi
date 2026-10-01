@@ -121,13 +121,13 @@ build_and_run "std_time" exercise-time "$REPO/bench/std_time_exercise.iyi"
 
 echo
 echo "== every time check reported"
-for check in "known-value table" "leap-year rules" "scattered roundtrip" "platform clocks" "span construction" "RFC 3339" "time comparison" "ALL CHECKS PASSED"; do
+for check in "known-value table" "leap-year rules" "scattered roundtrip" "platform clocks" "span construction" "RFC 3339" "time comparison" "hash keys" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-time.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339 and Comparable all reported"
+[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339, Comparable and hash keys all reported"
 
 # ---------------------------------------------------------------------------
 # Negative failure proofs

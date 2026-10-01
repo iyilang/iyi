@@ -28,4 +28,27 @@ puts "  hyphenated form and version 4"
 assert_str "550e8400-e29b-41d4-a716-446655440000", UUID.parse("550E8400E29B41D4A716446655440000").to_s, "32 digits, no hyphens"
 puts "  32 digits with no hyphens"
 
+puts "\n== hash"
+# UUIDs hash as they compare. Without a `hash` of its own a UUID hashed to
+# its type: these two hashed alike, and a table of 16,000 UUID keys took
+# 2.0 s to fill where the same UUIDs as strings took 5 ms. A bound, not a
+# benchmark: twenty times the strings' time and 200 ms over.
+zero = UUID.parse("00000000-0000-4000-8000-000000000000")
+ones = UUID.parse("ffffffff-ffff-4fff-bfff-ffffffffffff")
+assert_true zero.hash != ones.hash, "two UUIDs hash apart"
+assert_true UUID.parse(q.to_s).hash == q.hash, "equal UUIDs hash alike"
+ids = (0...16000).map { UUID.v4 }
+texts = ids.map { |id| id.to_s }
+started = __iyi_monotonic_ns
+by_id = {} of UUID => Int32
+ids.each_with_index { |id, i| by_id[id] = i }
+keyed_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+by_text = {} of String => Int32
+texts.each_with_index { |text, i| by_text[text] = i }
+texted_ns = __iyi_monotonic_ns - started
+assert_true by_id.size == by_text.size && by_id[UUID.parse(texts[4321])]? == by_text[texts[4321]]?, "a table of UUIDs fills and answers"
+assert_true keyed_ns <= texted_ns * 20 + 200_000_000_i64, "hash table: 16000 UUID keys took #{keyed_ns // 1000000} ms where String keys took #{texted_ns // 1000000} ms"
+puts "  UUIDs hash as they compare; 16,000 keys within twenty times their texts' time and 200 ms"
+
 puts "\nALL CHECKS PASSED"

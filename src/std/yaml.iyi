@@ -19,7 +19,7 @@
 #     A key the mapping spells itself wins over a merged one, wherever it is
 #     spelled; among merged mappings the first wins.
 #   * The core-schema tags `!!str`, `!!int`, `!!float`, `!!bool`, `!!null`,
-#     `!!seq` and `!!map`; any other tag is refused.
+#     `!!seq` and `!!map`, on a value or a key; any other tag is refused.
 #   * Streams: `%YAML` and `%TAG` directives are skipped, `---` opens a
 #     document and `...` ends one. `parse_all` answers every document;
 #     `parse` answers the first (nil for an empty stream) after checking the
@@ -42,12 +42,14 @@
 #   not close, a flow collection that does not close, an unknown escape or
 #   an escape that names a surrogate, a mapping entry or sequence entry at
 #   an indentation that belongs to nothing, text after a value on its
-#   line, a value whose text is not a node, a duplicate key (the second
-#   spelling of a key is a mistake, not an override), an alias to an
-#   anchor that is not defined or is still being built (a cycle), aliases
-#   that together expand to more than ALIAS_NODE_LIMIT nodes (the
-#   "billion laughs" stream), a merge whose value is not a mapping or a
-#   sequence of mappings, an explicit `?` key, an anchor on a key, a tag it
+#   line, a value whose text is not a node, a duplicate key, a second `<<`
+#   among them (the second spelling of a key is a mistake, not an
+#   override; `<<: [*a, *b]` merges two), an alias to an anchor that is
+#   not defined or is still being built (a cycle), aliases that together
+#   expand to more than ALIAS_NODE_LIMIT nodes (the "billion laughs"
+#   stream), a merge whose value is not a mapping or a sequence of
+#   mappings, an explicit `?` key, an anchor or an alias on a block
+#   mapping's key (a flow mapping's key may carry either), a tag it
 #   does not know (the verbatim `!<tag:yaml.org,2002:str>` spellings of
 #   the core tags are known), a directive not followed by `---`, and
 #   nesting past DEPTH_LIMIT levels.
@@ -1091,15 +1093,17 @@ pub class Parser
         end
       end
     else
-      if pos != anchor_pos
-        # Properties in front of what would otherwise be a key: `&a k: v`.
+      unless anchor.nil?
+        # An anchor in front of what would otherwise be a key: `&a k: v`.
         # key_colon looks from the line's head; look from the properties.
+        # A tag alone goes on, as tags on keys are read: `k: !!str x: y`
+        # is a mapping value where none may be, below.
         saved = @heads[@line]
         @heads[@line] = anchor_pos
         is_key = key_colon(@line) >= 0
         @heads[@line] = saved
         if is_key
-          fail("an anchor or tag on a mapping key is not supported", anchor_pos)
+          fail("an anchor on a mapping key is not supported", anchor_pos)
           return Any.new(nil)
         end
       end
@@ -1154,8 +1158,14 @@ pub class Parser
     # `- b` after a key is a sequence entry where none may start (it was
     # read as the text "- b").
     lone = pos + 1 >= @ends[@line] || blank_byte?(@bytes[pos + 1])
-    if plain_first_refused?(b) || (b == 63_u8 && lone)
+    if plain_first_refused?(b)
       fail("a scalar cannot start with '#{b.unsafe_chr}'", pos)
+      return Any.new(nil)
+    end
+    # `? a` is an explicit key, as on a mapping's later lines; on the
+    # first it was refused as "a scalar cannot start with '?'".
+    if b == 63_u8 && lone
+      fail("an explicit '?' key is not supported", pos)
       return Any.new(nil)
     end
     if b == 45_u8 && lone
@@ -1211,6 +1221,7 @@ pub class Parser
     @nodes = @nodes + 1
     pairs = Hash(Any, Any).new
     spelled = Hash(Any, Bool).new
+    merged = false
     result = Any.new(pairs)
     enter(@heads[@line])
     return result if @error
@@ -1232,8 +1243,8 @@ pub class Parser
       end
       colon = key_colon(@line)
       if colon < 0
-        if @bytes[key_pos] == 38_u8 || @bytes[key_pos] == 33_u8
-          fail("an anchor or tag on a mapping key is not supported", key_pos)
+        if @bytes[key_pos] == 38_u8
+          fail("an anchor on a mapping key is not supported", key_pos)
         else
           fail("expected a mapping key", key_pos)
         end
@@ -1241,24 +1252,46 @@ pub class Parser
       end
       merge = false
       key = Any.new(nil)
-      b = @bytes[key_pos]
-      if b == 34_u8 || b == 39_u8
-        key = Any.new(parse_quoted(key_pos, indent, false))
-      elsif b == 42_u8 || b == 38_u8 || b == 33_u8
-        fail("an alias, anchor or tag as a mapping key is not supported", key_pos)
-      elsif plain_first_refused?(b)
-        # `]: 1`, `}: 1` and `,: 1` were read as the keys "]", "}" and ",".
-        fail("a scalar cannot start with '#{b.unsafe_chr}'", key_pos)
-      else
-        finish = colon
-        while finish > key_pos && blank_byte?(@bytes[finish - 1])
-          finish = finish - 1
-        end
-        text = String.new(finish - key_pos) { |t| t.copy_from(@bytes + key_pos, finish - key_pos) }
-        merge = text == "<<"
-        key = Scalar.resolve(text)
+      # A core tag on a key is read as on a value: `!!str a: b` was
+      # refused as "an alias, anchor or tag as a mapping key", where the
+      # header refused only an anchor; PyYAML and ruamel read {a: b}.
+      tag = nil.as(String?)
+      text_pos = key_pos
+      while @error.nil? && @bytes[text_pos] == 33_u8
+        finish = tag_end(text_pos, @ends[@line])
+        tag = tag_text(text_pos, finish)
+        fail("unknown tag #{tag}", text_pos) unless known_tag?(tag)
+        text_pos = skip_blank(finish)
       end
       break if @error
+      b = @bytes[text_pos]
+      if b == 34_u8 || b == 39_u8
+        key = Any.new(parse_quoted(text_pos, indent, false))
+      elsif b == 42_u8
+        fail("an alias as a mapping key is not supported", text_pos)
+      elsif b == 38_u8
+        fail("an anchor on a mapping key is not supported", text_pos)
+      elsif plain_first_refused?(b)
+        # `]: 1`, `}: 1` and `,: 1` were read as the keys "]", "}" and ",".
+        fail("a scalar cannot start with '#{b.unsafe_chr}'", text_pos)
+      else
+        finish = colon
+        while finish > text_pos && blank_byte?(@bytes[finish - 1])
+          finish = finish - 1
+        end
+        text = String.new(finish - text_pos) { |t| t.copy_from(@bytes + text_pos, finish - text_pos) }
+        merge = tag.nil? && text == "<<"
+        key = tag.nil? ? Scalar.resolve(text) : Any.new(text)
+      end
+      key = apply_tag(tag, key, key_pos)
+      break if @error
+      # `<<` is spelled once, as any key is: a second merged as well,
+      # where ruamel refuses it, and `<<: [*a, *b]` merges two.
+      if merge && merged
+        fail("duplicate key #{key.inspect}", key_pos)
+        break
+      end
+      merged = merged || merge
       if !merge && spelled.has_key?(key)
         fail("duplicate key #{key.inspect}", key_pos)
         break
@@ -1893,6 +1926,7 @@ pub class Parser
   private def parse_flow_mapping(opener : Int32) : Any
     pairs = Hash(Any, Any).new
     spelled = Hash(Any, Bool).new
+    merged = false
     result = Any.new(pairs)
     enter(opener)
     return result if @error
@@ -1925,6 +1959,12 @@ pub class Parser
         fail("a collection cannot be a mapping key", key_pos)
         break
       end
+      # `<<` is spelled once here too, as in a block mapping.
+      if merge && merged
+        fail("duplicate key #{key.inspect}", key_pos)
+        break
+      end
+      merged = merged || merge
       if !merge && spelled.has_key?(key)
         fail("duplicate key #{key.inspect}", key_pos)
         break

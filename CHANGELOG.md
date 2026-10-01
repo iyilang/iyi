@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **YAML reads a core tag on a block mapping key, and its key refusals say
+  what the header lists.** `!!str a: b` was refused as "an alias, anchor or
+  tag as a mapping key is not supported", though the header supports the
+  core tags and refused only an anchor on a key; it reads {"a" => "b"} now
+  and `!!str 1: 2` has the string key "1", as PyYAML and ruamel read them.
+  `? a` on a document's first line was "a scalar cannot start with '?'" and
+  is the header's "an explicit '?' key is not supported"; an anchor on a key
+  is "an anchor on a mapping key is not supported" and an alias key "an
+  alias as a mapping key is not supported". A second `<<` in one mapping
+  merged as well, where every other key spelled twice is refused and ruamel
+  refuses it too; it is `duplicate key "<<"` now, and `<<: [*a, *b]` merges
+  two. The header says a flow mapping's key may carry an anchor or alias, as
+  it could. `bench/std_yaml_exercise.iyi` checks each; the old module
+  refused the tagged key.
+
 - **A YAML plain scalar's next line may start with `- `.** A continuation
   line indented past its parent was refused when it looked like a sequence
   entry, where a plain scalar reads it as text: `key: a\n  - b\n` and

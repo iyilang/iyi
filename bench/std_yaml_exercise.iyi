@@ -172,6 +172,11 @@ kept.each do |text, value|
 end
 assert_true(YAML.parse("0777\n") == Any.new(777_i64) && YAML.parse("0o17\n") == Any.new(15_i64), "0777 is 777, 0o17 is 15")
 assert_str("x", keys[Any.new(true)].as_s, "boolean key")
+# A core tag on a key is read as on a value: `!!str a: b` was refused as
+# "an alias, anchor or tag as a mapping key is not supported", where the
+# header refused only an anchor on a key.
+assert_str("{\"a\" => \"b\", \"1\" => 2}", reads("!!str a: b\n!!str 1: 2\n", "a core tag on a key is read").inspect, "a core tag on a key is read")
+puts "  a core tag on a key: !!str 1 is the string key \"1\""
 # An Int32 reaches an integer key as `Any.new(1)` does: `keys[1]` panicked
 # "expected a sequence, not a mapping", and `[]?` and `dig?` answered nil.
 by_index = keys[1]?
@@ -217,6 +222,13 @@ refused("\"\\q\"\n", "unknown escape '\\q' at line 1, column 2")
 # digits, and was reported as unknown.
 refused("path: \"C:\\Users\\bob\"\n", "escape '\\U' wants 8 hexadecimal digits: a backslash in double quotes is '\\\\', or single-quote the scalar at line 1, column 10")
 refused("? a: 1\n", "an explicit '?' key is not supported at line 1, column 1")
+# The sentences say what the header lists: `? a` on a first line was "a
+# scalar cannot start with '?'", an anchor on a key "an alias, anchor or
+# tag as a mapping key", and a second `<<` merged as well where a second
+# spelling of any other key is refused.
+refused("? lone\n: b\n", "an explicit '?' key is not supported at line 1, column 1")
+refused("&a k: v\n", "an anchor on a mapping key is not supported at line 1, column 1")
+refused("merged:\n  <<: {a: 1}\n  <<: {b: 2}\n", "duplicate key \"<<\" at line 3, column 3")
 refused("&a [*a]\n", "cyclic alias *a at line 1, column 5")
 refused("&a {b: *a}\n", "cyclic alias *a at line 1, column 8")
 refused("a: b\u0001c\n", "control character U+0001 is not allowed at line 1, column 5")

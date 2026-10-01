@@ -185,7 +185,16 @@ PY
 
 prove_caught qplain "a plain scalar may not start with '?'" \
   "a plain scalar may start with '?'" \
-  '(b == 63_u8 && lone)' 'b == 63_u8'
+  'if b == 63_u8 && lone' 'if b == 63_u8'
+prove_caught keytag "a core tag on a key is refused" \
+  "a core tag on a key is read" \
+  '      while @error.nil? && @bytes[text_pos] == 33_u8' $'      fail("an alias, anchor or tag as a mapping key is not supported", key_pos) if @bytes[key_pos] == 33_u8\n      while @error.nil? && @bytes[text_pos] == 33_u8'
+prove_caught loneq "a lone '?' line is refused as a scalar" \
+  'refusal of "? lone' \
+  $'if b == 63_u8 && lone\n      fail("an explicit \'?\' key is not supported", pos)' $'if b == 63_u8 && lone\n      fail("a scalar cannot start with \'?\'", pos)'
+prove_caught mergedup "a second '<<' merges as well" \
+  'accepted "merged:' \
+  'if merge && merged' 'if merge && merged && false'
 prove_caught entry "'- b' after a key reads as text" \
   'accepted "a: - b' \
   'if b == 45_u8 && lone' 'if b == 45_u8 && lone && false'

@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **`URI#to_s` writes userinfo's escapes as they were.** `parse` decoded
+  the user and the password and `to_s` re-encoded them, sub-delims left
+  bare, so a sub-delim that had been escaped came back bare:
+  `http://u%3Btype%3Da@h/` came back `http://u;type=a@h/` and
+  `http://a%2Cb:c%3Dd@h/` came back `http://a,b:c=d@h/`, which RFC 3986
+  §2.2 counts different URIs, and `http://é:ü@h/` came back
+  `http://%C3%A9:%C3%BC@h/`, though the host and path keep raw bytes. The
+  userinfo is kept as written now and `user` and `password` decode it;
+  what `user=`, `password=`, `userinfo=` and the constructor are given is
+  encoded as before, and `user;type=a` still round-trips bare. `==`
+  compares the userinfo as written, so the escaped and the bare
+  `u;type=a` are no longer equal. `bench/std_uri_exercise.iyi`
+  round-trips the three through `parse`, `dup` and `resolve`; the old
+  module answered `http://u;type=a@h/`.
+
 - **`URI.remove_dot_segments`, and `resolve` and `normalize` with it,
   take time in proportion to the path.** Each step sliced the rest of the
   path into a new string, so the time grew with the square of the path's

@@ -64,6 +64,24 @@ puts "  a colon in a relative path's first segment"
 end
 puts "  userinfo keeps its sub-delims"
 
+# And so are its escapes: the user and the password were decoded by
+# `parse` and re-encoded by `to_s`, so `u%3Btype%3Da@h` came back
+# `u;type=a@h` - two URIs to section 2.2 - and `é` came back `%C3%A9`. The
+# getters decode, and what a setter is given is encoded.
+["http://u%3Btype%3Da@h/", "http://a%2Cb:c%3Dd@h/", "http://é:ü@h/"].each do |text|
+  assert_str text, URI.parse(text).to_s, "#{text} round-trips"
+  assert_str text, URI.parse(text).dup.to_s, "#{text} round-trips through dup"
+end
+escaped = URI.parse("http://u%3Btype%3Da@h/a")
+assert_str "u;type=a", escaped.user.to_s, "the user getter decodes"
+assert_true escaped != URI.parse("http://u;type=a@h/a"), "an escaped and a bare sub-delim are two URIs"
+assert_str "http://u%3Btype%3Da@h/c", escaped.resolve("c").to_s, "resolve keeps the userinfo as written"
+given = URI.parse("http://h/")
+given.user = "a@b"
+assert_str "http://a%40b@h/", given.to_s, "a user given to the setter is encoded"
+assert_str "a@b", given.user.to_s, "and read back decoded"
+puts "  userinfo keeps its escapes"
+
 puts "\n== refuse"
 assert_true URI.parse?("https://ex.com/a b").nil?, "space refused"
 puts "  a space in the reference is refused"

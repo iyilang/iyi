@@ -1586,11 +1586,12 @@ module Iyi::Lsp
     # its own scope, and refused when the new name is already one there.
     private def on_rename(id : JSON::Any, params : JSON::Any) : Nil
       new_name = params["newName"].as_s
+      path = path_of(params["textDocument"]["uri"].as_s)
       if local = local_at(params)
         if local.instance_var?
           raise Refused.new("#{local.name} is not renamed on its own: its accessors carry the name as methods")
         end
-        unless valid_local?(new_name)
+        unless valid_local?(new_name) && lexed_name(new_name, path)
           raise Refused.new("'#{new_name}' is not an iyi variable name")
         end
         if local.taken?(new_name, text_of(params["textDocument"]["uri"].as_s).lines)
@@ -1598,7 +1599,7 @@ module Iyi::Lsp
         end
         references, declarations = local.split
       else
-        unless valid_name?(new_name)
+        unless valid_name?(new_name) && lexed_name(new_name, path)
           raise Refused.new("'#{new_name}' is not an iyi method name")
         end
         if def_name_taken?(params, new_name)
@@ -1624,6 +1625,9 @@ module Iyi::Lsp
         (by_file[filename] ||= [] of {Int32, Int32, Int32}) << {location.line_number - 1, start_ch, end_ch}
       end
       by_file.each_value(&.uniq!)
+      if lexed_name(new_name, path).is_a?(Keyword)
+        by_file.each { |filename, edits| refuse_unparsable(filename, edits, new_name) }
+      end
 
       respond(id) do |json|
         json.object do
@@ -1835,6 +1839,60 @@ module Iyi::Lsp
       body = name.ends_with?('?') || name.ends_with?('!') ? name.rchop : name
       return false if body.empty?
       body.each_char.all? { |ch| Iyi::Lexer.ident_part?(ch) }
+    end
+
+    # What the lexer of the file *name* goes into reads it as, when that is
+    # one identifier and nothing after it: the name itself, or the keyword
+    # it is. Nil for a constant, `_`, `__FILE__`, two words, an operator.
+    #
+    # A new name has to be one, because the lexer is what reads it back.
+    # Judged by its characters, `Hi` (a constant) and `_` were taken for a
+    # def, and `_` and `__LINE__` for a variable, and each was applied and
+    # left an error: 'unexpected token: "("', "expecting a name after
+    # 'def', not '_'", "can't read from _". A keyword is one identifier
+    # too, and the parser judges it (`refuse_unparsable`).
+    private def lexed_name(name : String, path : String) : String | Keyword | Nil
+      lexer = Lexer.new(name)
+      lexer.filename = path
+      token = lexer.next_token
+      return unless token.type.ident? && token.value.to_s == name
+      value = token.value
+      return unless lexer.next_token.type.eof?
+      case value
+      when String, Keyword then value
+      end
+    rescue CodeError | InvalidByteSequenceError
+      nil
+    end
+
+    # A keyword is a name in some places and not in others: `type`, `for`
+    # and `of` make variables that compile, and `do`, `typeof` and
+    # `abstract` make a file that does not parse. A list can only be wrong
+    # one way or the other - the variables' list missed those three and
+    # twenty more, and a def had none, so `end` and `nil` were taken for
+    # one - so the parser is asked: each edited file is read again with
+    # the rename in it, and a rename that leaves a file that parsed
+    # unparsable is refused.
+    private def refuse_unparsable(filename : String, edits : Array({Int32, Int32, Int32}), new_name : String) : Nil
+      text = document_text(filename) || (File.read(filename) if File.file?(filename))
+      return unless text && parses?(text, filename)
+      edited = text
+      edits.sort.reverse_each do |(line0, start_ch, end_ch)|
+        from = Text.offset_at(edited, line0, start_ch)
+        to = Text.offset_at(edited, line0, end_ch)
+        edited = edited.byte_slice(0, from) + new_name + edited.byte_slice(to, edited.bytesize - to)
+      end
+      return if parses?(edited, filename)
+      raise Refused.new("'#{new_name}' is a word iyi keeps for itself where the name is used: #{Exports.header_of(text) || filename} would not parse after the rename")
+    end
+
+    private def parses?(text : String, filename : String) : Bool
+      parser = Parser.new(text)
+      parser.filename = filename
+      parser.parse
+      true
+    rescue CodeError | InvalidByteSequenceError
+      false
     end
 
     # ── Document symbols ─────────────────────────────────────────────────

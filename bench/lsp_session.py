@@ -1541,6 +1541,32 @@ def main():
          f"the constant-cased name refused: {constant is not None}")
     c.send("textDocument/didClose", {"textDocument": {"uri": uni_uri}}, wait=False)
 
+    # 70e. A rename onto a word the lexer does not read as a plain name is
+    #      refused, and a keyword is judged by the parser where it lands.
+    #      `end`, `nil`, `Hi` and `_` were taken for a def, and `do`,
+    #      `typeof`, `abstract`, `__LINE__` and `_` for a variable, each
+    #      applied and each leaving an error. The server asks the lexer
+    #      (`lexed_name`) and parses the result; `type` still renames.
+    names_path = os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-names"), "names.iyi")
+    names_text = "module names\n\ndef hi(n : Int32) : Int32\n  n + 1\nend\n\nputs hi(2)\nv = 3\nputs v\n"
+    with open(names_path, "w", newline="") as f:
+        f.write(names_text)
+    names_uri = file_uri(names_path)
+    c.send("textDocument/didOpen", {"textDocument": {"uri": names_uri, "languageId": "iyi", "version": 1,
+                                                      "text": names_text}}, wait=False)
+    c.diagnostics(names_uri)
+
+    def rename_code(line, name):
+        reply = c.send("textDocument/rename", {"textDocument": {"uri": names_uri},
+                                               "position": {"line": line, "character": 5}, "newName": name})
+        return (reply.get("error") or {}).get("code", "applied")
+    refusals = [rename_code(6, w) for w in ("end", "nil", "Hi", "_")] + \
+        [rename_code(8, w) for w in ("do", "typeof", "abstract", "__LINE__", "_")]
+    kept = [rename_code(8, "type"), rename_code(6, "hey")]
+    c.send("textDocument/didClose", {"textDocument": {"uri": names_uri}}, wait=False)
+    step("70e", "a rename onto a reserved word is refused, a name is not",
+         refusals == [-32803] * 9 and kept == ["applied", "applied"], f"refused {refusals}, kept {kept}")
+
     # 25b. and formatting a buffer that imports a package. The host segment
     #      is one segment to the parser and three tokens to the lexer, and
     #      the formatter fell behind its own stream on it — raising a plain

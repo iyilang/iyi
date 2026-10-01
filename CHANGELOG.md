@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **Rename refuses reserved words, `_`, magic constants and capitalised
+  def names, and still takes a keyword that is a name where it lands.** A
+  def was renamed to `end`, `nil`, `Hi` or `_`, and a variable to `do`,
+  `typeof`, `abstract`, `__LINE__`, `_` and twenty other words, each
+  leaving a file that did not parse ("unexpected 'end'", 'unexpected
+  token: "("', "can't read from _"). The new name is now read by the lexer
+  and has to be one identifier; a keyword is refused when a file the rename
+  edits would no longer parse, so `type`, `for` and `of` still rename a
+  variable. `bench/lsp_session.py` step 70e checks nine refusals and two
+  renames; the old server applied all nine.
+
 - **A workspace file that cannot be read is skipped, and workspace/symbol
   takes time linear in the workspace.** One `.iyi` file held open by a
   process that shares nothing, or whose ACL denies reading, failed

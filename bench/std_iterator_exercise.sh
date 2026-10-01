@@ -7,7 +7,9 @@
 #
 # A check that cannot fail is not a check. This script proves failure across
 # each capability: infinite sequence consumption, pipeline laziness, map,
-# select, skip, zip, chain, flat_map, and a source shared with its adaptor.
+# select, skip, zip, chain, flat_map, a source shared with its adaptor, a
+# zip that pulls past its first source, a counting adaptor copied into the
+# adaptor built on it, and a take that leaves an empty pull uncounted.
 #
 # Exits non-zero if any check fails.
 
@@ -178,7 +180,7 @@ prove_fails "skip count broken" broken_skip "assertion failed for skip" \
 
 # 5. Zip broken (prematurely halts pairing)
 prove_fails "zip pairing broken" broken_zip "assertion failed for zip" \
-  's/item1 = @iter1\.next/item1 = nil/'
+  's/return nil if item2\.nil?/return nil/'
 
 # 6. Chain broken (skips first iterator directly to second)
 prove_fails "chain sequence broken" broken_chain "assertion failed for chain" \
@@ -195,6 +197,26 @@ prove_fails "range end broken" broken_range "assertion failed for range exclusiv
 # 9. Array source copied into its adaptor (a struct again)
 prove_fails "array source copied" copied_source "assertion failed for adaptor shares its array source" \
   's/^pub class ArrayIterator(T)/pub struct ArrayIterator(T)/'
+
+# 10. Zip pulls its second source after the first ran out
+prove_fails "zip over-pulls" zip_overpull "assertion failed for zip leaves the second source's rest" \
+  's/^    return nil if item1\.nil?$/    item2 = @iter2.next if item1.nil?\n    return nil if item1.nil?/'
+
+# 11-15. A counting adaptor copied into its own adaptor (a struct again)
+prove_fails "skip copied" copied_skip "assertion failed for a skip shares its count" \
+  's/^pub class SkipIterator(I, T)/pub struct SkipIterator(I, T)/'
+prove_fails "take copied" copied_take "assertion failed for a take shares its count" \
+  's/^pub class TakeIterator(I, T)/pub struct TakeIterator(I, T)/'
+prove_fails "with_index copied" copied_with_index "assertion failed for a with_index shares its index" \
+  's/^pub class WithIndexIterator(I, T)/pub struct WithIndexIterator(I, T)/'
+prove_fails "step copied" copied_step "assertion failed for a step shares its stride" \
+  's/^pub class StepIterator(I, T)/pub struct StepIterator(I, T)/'
+prove_fails "each_cons copied" copied_cons "assertion failed for an each_cons shares its window" \
+  's/^pub class ConsIterator(I, T)/pub struct ConsIterator(I, T)/'
+
+# 16. Take counts only the pulls that answered
+prove_fails "take leaves an empty pull uncounted" take_uncounted "assertion failed for a take counts an empty pull" \
+  '/^pub class TakeIterator\|^impl Iterator for TakeIterator/,/^end/s/^      @iter\.next$/      took = @iter.next; @count = @count - 1 if took.nil?; took/'
 echo
 if [ "$status" -eq 0 ]; then
   echo "Iterator: all 27 sections pass plain and release, and each check is"

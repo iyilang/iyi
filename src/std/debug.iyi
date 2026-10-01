@@ -128,8 +128,11 @@ struct DwarfResolver
       line_range = (version >= 4 ? (cu_cursor + 14).value : (cu_cursor + 13).value).to_i32
       opcode_base = (version >= 4 ? (cu_cursor + 15).value : (cu_cursor + 14).value).to_i32
 
-      # Directories
-      cursor = cu_cursor + 16_i64 + (opcode_base - 1).to_i64
+      # Directories, after the opcode lengths. Version 4 added a byte
+      # (maximum_operations_per_instruction) ahead of them; a version 2 or
+      # 3 table starts one byte earlier, and reading it from 16 took its
+      # first file name for a directory and named every frame `??`.
+      cursor = cu_cursor + (version >= 4 ? 16_i64 : 15_i64) + (opcode_base - 1).to_i64
       dirs = [] of String
       dirs << ""
       while cursor.value != 0_u8

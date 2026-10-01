@@ -285,5 +285,36 @@ assert_equal("adaptor shares its range source", "#{range_head} #{range_shared.to
 entries_shared = Iterator.of_entries(hash_src)
 entries_head = entries_shared.map { |kv| kv[0] }.first(3).to_a
 assert_equal("adaptor shares its hash source", "#{entries_head} #{entries_shared.to_a}", "[\"a\", \"b\", \"c\"] [{\"d\", 4}]")
+# A zip pulls its second source only after the first answered: pulled
+# regardless, the pair that never came took the longer source's next
+# element with it.
+zip_rest = Iterator.of([10, 20, 30])
+zip_pairs = Iterator.of([1, 2]).zip(zip_rest).to_a
+assert_equal("zip leaves the second source's rest", "#{zip_pairs} #{zip_rest.to_a}", "[{1, 10}, {2, 20}] [30]")
+# And an adaptor that counts is shared with what is built on it, as in
+# the other library. A struct, it was copied into `first`, and the rest
+# skipped, took, indexed and strode again from the start.
+skip_shared = Iterator.of([1, 2, 3, 4, 5]).skip(2)
+skip_head = skip_shared.first(1).to_a
+assert_equal("a skip shares its count", "#{skip_head} #{skip_shared.to_a}", "[3] [4, 5]")
+take_shared = Iterator.of([1, 2, 3, 4, 5]).take(3)
+take_head = take_shared.first(1).to_a
+assert_equal("a take shares its count", "#{take_head} #{take_shared.to_a}", "[1] [2, 3]")
+index_shared = Iterator.of([5, 6, 7]).with_index
+index_head = index_shared.first(1).to_a
+assert_equal("a with_index shares its index", "#{index_head} #{index_shared.to_a}", "[{5, 0}] [{6, 1}, {7, 2}]")
+step_shared = Iterator.of([1, 2, 3, 4, 5, 6]).step(2)
+step_head = step_shared.first(1).to_a
+assert_equal("a step shares its stride", "#{step_head} #{step_shared.to_a}", "[1] [3, 5]")
+cons_shared = Iterator.of([1, 2]).each_cons(2)
+cons_head = cons_shared.first(1).to_a
+assert_equal("an each_cons shares its window", "#{cons_head} #{cons_shared.to_a}", "[[1, 2]] []")
+# A take counts the pull that came back empty: uncounted, asking again
+# pulled the zip again, and the zip its counter a third time.
+take_counter = InfiniteCounter.new
+take_twice = take_counter.zip(Iterator.of([9])).take(2)
+take_once = take_twice.to_a
+take_again = take_twice.to_a
+assert_equal("a take counts an empty pull", "#{take_once} #{take_again} #{take_counter.pull_count}", "[{0, 9}] [] 2")
 
 puts "all iterator checks passed"

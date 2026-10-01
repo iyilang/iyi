@@ -483,8 +483,11 @@ end
 # a concrete collection provides its own iterator constructor and names this
 # type twice as one that should, and then the only route from a slice to a
 # lazy chain was `fs.to_a` — copying the whole sequence, which is the cost
-# the tower exists to avoid.
-pub struct SliceIterator(T)
+# the tower exists to avoid. A class, as `std/iterator`'s own sources
+# are: an adaptor keeps its source by value, and a struct source was
+# copied into it, so `it.first(2).to_a` and then `it.to_a` gave [1, 2] and
+# the whole slice again.
+pub class SliceIterator(T)
   def initialize(@slice : Slice(T))
     @index = 0
   end

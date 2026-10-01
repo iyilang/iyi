@@ -4,6 +4,28 @@
 
 ### Fixed
 
+- **An iterator adaptor that counts shares its count.** `take`, `skip`,
+  the two whiles, `chain`, `flat_map`, `each_cons`, `with_index`,
+  `cycle(n)` and `step` were structs, and `first(n)` takes its receiver
+  by value, so the copy kept its own count over the shared source:
+  `s = it.skip(2)`, `s.first(1)`, `s.to_a` skipped twice. They are
+  classes, as `ListIterator` and `SliceIterator` are now for the same
+  reason (`it.first(2)` then `it.to_a` gave the whole list again).
+  `zip` pulls its second source only once the first answers, as the
+  other library does: it took an element from a shared source for a
+  pair that never came. And `take` counts an empty pull, so a finished
+  pipeline is not pulled, and its blocks run, once more. Found by
+  4,700 random lazy chains counting block runs against Crystal.
+- **A float `step` with an infinite step ends.** `0.0.step(to: inf,
+  by: inf)` yielded infinity forever and `inf.step(to: 0.0, by: -inf)`
+  yielded a NaN, because the room left was NaN and the prelude's `<=>`
+  sorts NaN above every number.
+- **`abort("bye\n")` writes one newline,** as `puts` does; it wrote two.
+- **`std/debug` reads a version 2 or 3 DWARF line table.** It looked for
+  the directories one byte late, past version 4's extra field, and named
+  the frames of such a unit `??`; reachable on darwin when a dSYM holds
+  one.
+
 - **A float literal passed to a `Float32` parameter is rounded once.**
   The call converted the double the literal was typed as, so a decimal a
   hair past halfway between two singles landed on the tie and rounded

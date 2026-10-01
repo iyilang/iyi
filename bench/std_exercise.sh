@@ -179,6 +179,12 @@ prove_fails "an append that copies twice" no_owning "list.iyi" "list: an append 
 prove_fails "a list that keeps the caller's array" no_copy "list.iyi" "list: the caller's array is not the list's" \
   's/@items = items.dup/@items = items/'
 
+# 12b. A list's iterator copied into the adaptor built on it (a struct again).
+prove_fails "a list iterator copied into its adaptor" copied_list_iter "list.iyi" "list: an adaptor shares its iterator" \
+  's/^pub class ListIterator(T)/pub struct ListIterator(T)/'
+prove_fails "a slice iterator copied into its adaptor" copied_slice_iter "slice.iyi" "slice: an adaptor shares its iterator" \
+  's/^pub class SliceIterator(T)/pub struct SliceIterator(T)/'
+
 # 13-15. A nil element read back as "no previous element": the nil test
 #     each of the three used before the flag, put back.
 prove_fails "each_cons_pair skips the pair after a nil" nil_cons_pair "enumerable.iyi" "enum: each_cons_pair after a nil element" \

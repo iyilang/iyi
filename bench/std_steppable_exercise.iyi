@@ -255,6 +255,12 @@ assert_equal("Float64 from below zero short of an exclusive limit", "[-2.9, -2.2
 nan = 0.0 / 0.0
 assert_equal("Float64 to a NaN limit", "[]", 0.0.step(to: nan, by: 1.0).take(5).to_a.to_s)
 assert_equal("Float64 from a NaN", "[]", nan.step(to: 5.0, by: 1.0).take(5).to_a.to_s)
+# An infinite step against an infinite end leaves NaN room, or a NaN next
+# value. Read as a number, the first walk stepped inf forever and the
+# second yielded a NaN, which lies between no two ends.
+inf = 1.0 / 0.0
+assert_equal("Float64 by inf to inf", "[0.0]", 0.0.step(to: inf, by: inf).take(5).to_a.to_s)
+assert_equal("Float64 from inf down by -inf", "[Infinity]", inf.step(to: 0.0, by: 0.0 - inf).take(5).to_a.to_s)
 puts "  Int32, Int64 and Float64 step, as the other library counts"
 
 puts "\nALL CHECKS PASSED"

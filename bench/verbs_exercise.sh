@@ -188,6 +188,22 @@ refuses "the session that was removed" "unknown command" -- "$IYI" repl
 refuses "spec, which is iyi test here" "\`iyi test\` runs them" -- "$IYI" spec
 refuses "eval, which has no evaluator here" "\`iyi run\` it" -- "$IYI" eval "puts 1"
 refuses "an unknown flag" "Invalid option" -- "$IYI" build --nonesuch good.iyi
+# `--mcpu` was handed to LLVM unchecked: an unknown name was warned about
+# once per codegen thread, the lines running into each other, and the
+# build died in LLVM's `abort()` - "64-bit code requested on a subtarget
+# that doesn't support it!", exit 0xC0000409 on Windows. A name it knows
+# is still taken.
+refuses "an --mcpu LLVM does not know" "is not a CPU LLVM knows" -- \
+  "$IYI" build --mcpu nonesuch -o "$WORK/mcpu_bad" good.iyi
+case "$(uname -m)" in
+  x86_64 | amd64)
+    if "$IYI" build --mcpu x86-64 -o mcpu_ok good.iyi > mcpu.log 2>&1 && [ "$(./mcpu_ok | tr -d '\r')" = "ok" ]; then
+      echo "  an --mcpu LLVM knows: builds and runs"
+    else
+      echo "  an --mcpu LLVM knows did not build:"; sed -n '1,3p' mcpu.log; status=1
+    fi
+    ;;
+esac
 refuses "a file that is not there" "no such file" -- "$IYI" run "$WORK/nope.iyi"
 # One sentence for one mistake, from every verb that takes a file: this was
 # "no such file" about a path that is right there, so the reader ran `ls`,

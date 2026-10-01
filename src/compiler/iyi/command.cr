@@ -1077,6 +1077,7 @@ class Iyi::Command
     end
 
     abort! "maximum number of threads cannot be lower than 1", :USAGE_ERROR if compiler.n_threads < 1
+    validate_mcpu(compiler)
 
     if !compiler.no_codegen? && !run && Dir.exists?(output_filename)
       abort! "can't use `#{output_filename}` as output filename because it's a directory", :USAGE_ERROR
@@ -1241,6 +1242,40 @@ class Iyi::Command
     target_specific_opts(opts, compiler)
     setup_compiler_warning_options(opts, compiler)
     opts.invalid_option { }
+  end
+
+  # iyi: whether LLVM knows the `--mcpu` it was given, asked before anything
+  # is compiled. It was handed over unchecked, and an unknown name reached
+  # each codegen thread: `iyi build --mcpu nonesuch` printed "'nonesuch' is
+  # not a recognized processor for this target" once per thread, the lines
+  # running into each other, then "LLVM ERROR: 64-bit code requested on a
+  # subtarget that doesn't support it!", and died in `abort()`, exit
+  # 0xC0000409 on Windows. LLVM's C interface has no question for this, and
+  # its one list of the names is what `--mcpu help` prints to stderr as a
+  # target machine is made; so a child of this binary is asked for that list,
+  # for this target. When it cannot answer, LLVM is left to answer as before.
+  private def validate_mcpu(compiler) : Nil
+    cpu = compiler.mcpu
+    return if cpu.nil? || cpu.empty? || cpu == LLVM.host_cpu_name
+    return unless exe = Process.executable_path
+    listing = IO::Memory.new
+    Process.run(exe, ["build", "--target", compiler.codegen_target.to_s, "--mcpu", "help"],
+      env: {"IYI_OPTS" => nil, "CRYSTAL_OPTS" => nil}, error: listing)
+    # "Available CPUs for this target:", a blank line, one `  name - what`
+    # a line, and "Available features for this target:" after them.
+    known = [] of String
+    listed = false
+    listing.to_s.each_line do |line|
+      if line.starts_with?("Available")
+        break if listed
+        listed = true
+      elsif listed && !line.blank?
+        known << line.strip.split(' ', 2).first
+      end
+    end
+    return if known.empty? || known.includes?(cpu)
+    abort! "--mcpu #{cpu} is not a CPU LLVM knows for #{compiler.codegen_target}; `--mcpu help` lists the ones it does", :USAGE_ERROR
+  rescue IO::Error
   end
 
   private def target_specific_opts(opts, compiler)

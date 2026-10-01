@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`--mcpu` with a CPU LLVM does not know is refused before anything is
+  compiled.** It was handed to LLVM unchecked: `iyi build --mcpu nonesuch`
+  printed "'nonesuch' is not a recognized processor for this target
+  (ignoring processor)" once per codegen thread, 18 lines running into each
+  other, then "LLVM ERROR: 64-bit code requested on a subtarget that doesn't
+  support it!", and died in `abort()`. The name is checked against the list
+  `--mcpu help` prints for the target and refused with "--mcpu nonesuch is
+  not a CPU LLVM knows for x86_64-pc-windows-msvc; `--mcpu help` lists the
+  ones it does"; `--mcpu x86-64` still builds. `bench/verbs_exercise.sh`
+  checks both; the old compiler aborted.
+
 - **A build whose `.pdb` is read-only moves it aside, one held open is
   refused before compiling, and neither loses the program.** Only the
   program was asked about, not the program database the MSVC linker writes

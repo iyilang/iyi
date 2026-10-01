@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`getter retries = 3` and `property label = "first"` declare the
+  field with its default.** The macros' untyped branch handled a bare name
+  only, so the default expanded to `def retries = 3` and failed inside the
+  prelude with "unexpected token: \"=\"". The default is the field's
+  initialiser now, `@retries = 3`, with the reader beside it and, for
+  `property`, the setter. `bench/value_exercise.iyi` checks a number, an
+  array and a string written over; the old prelude failed with that parse
+  error.
+
 - **A captured local the starter reassigns inside `{% if %}` or `{% for
   %}` after the thread starts is refused.** The walk for assignments after
   the start read macro code as its text, so the line was never seen: a

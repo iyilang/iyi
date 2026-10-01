@@ -8,7 +8,9 @@
 # with no boundary above it exits 1 after its defers ran, `exit` ends
 # with the status it is given after the calling task's defers, and
 # `.or_panic` is a real panic. The no-panic path rides the same registry and is
-# asserted unchanged.
+# asserted unchanged, and on it a cleanup is the scope's own code: it reads
+# a struct method's `self` live, keeps a variable's narrowing (the panic
+# walk's `iyi_defer` proc reads it live too), and cannot leave its `defer`.
 set -euo pipefail
 
 IYI=${IYI:-./bin/iyi}
@@ -262,6 +264,95 @@ expected=$(printf 'body ran\nclose b\nclose a\n2\nclose b\nclose a\n1')
 [ "$out" = "$expected" ] || fail "normal-path output was:
 $out"
 step "the no-panic path is unchanged: LIFO on fall-through and on return"
+
+# ── 6b. on an ordinary exit the cleanup is the scope's own code: in a
+#      struct method it reads and writes the live struct, and a variable
+#      it names still narrows. Run only as a proc, it read a copy of
+#      `self` made at entry (`defer saw 0`), its write was lost (3, not
+#      100), and a later `x = x.size` stopped compiling. The panic walk's
+#      copy, the proc the compiler marks `iyi_defer`, still reads the
+#      variable as it is when the task dies ──────────────────────────────
+cat > "$work/live.iyi" <<'EOF'
+module live
+
+struct Counter
+  getter n : Int32
+
+  def initialize
+    @n = 0
+  end
+
+  def run : Int32
+    @n = 1
+    defer puts "defer saw #{@n}"
+    @n = 2
+    @n
+  end
+
+  def close : Nil
+    defer @n = 100
+    @n = 3
+  end
+end
+
+def grow(v : Int32 | String, fail : Bool) : Int32
+  x = v
+  defer puts "x was #{x}"
+  if x.is_a?(String)
+    x = x.size
+  end
+  raise "grew" if fail
+  x + 1
+end
+
+# One cleanup per iteration, run as each iteration ends, so it reads the
+# counter after that iteration's increment.
+def rounds : Nil
+  k = 0
+  while k < 2
+    defer puts "round #{k}"
+    k += 1
+  end
+end
+
+c = Counter.new
+puts c.run
+c.close
+puts c.n
+puts grow("hello", false)
+puts grow(4, false)
+rounds
+group do |g|
+  t = g.spawn { grow("hello", true) }
+  puts(t.value.is_a?(Panicked) ? "panicked" : "did not panic")
+end
+EOF
+set +e
+out=$("$IYI" run "$work/live.iyi" 2>"$work/live.err")
+code=$?
+set -e
+[ "$code" = 0 ] || fail "live-struct exit was $code, wanted 0: $out $(cat "$work/live.err")"
+expected=$(printf 'defer saw 2\n2\n100\nx was 5\n6\nx was 4\n5\nround 1\nround 2\nx was 5\npanicked')
+[ "$out" = "$expected" ] || fail "a defer did not see the live scope:
+$out"
+step "a defer sees the live struct and keeps its narrowing; the panic walk reads it live"
+
+# ── 6c. a cleanup cannot leave its `defer`: inside the proc a `return`
+#      ended the cleanup and nothing said so (`defer return 7` answered 1)
+cat > "$work/leave_defer.iyi" <<'EOF'
+module leave_defer
+
+def answer : Int32
+  defer return 7
+  1
+end
+
+puts answer
+EOF
+run "$work/leave_defer.iyi"
+[ "$code" != 0 ] || fail "\`defer return 7\` compiled and answered: $out"
+echo "$out" | grep -q "\`return\` can't leave a \`defer\`" || fail "\`defer return\` was refused, but not as leaving the defer: $out"
+step "a return out of a defer is refused as leaving it"
 
 # ── 7. an arithmetic overflow is a panic like any other: the trap
 #      routes through the registry, so a task's overflow dies at the

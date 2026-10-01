@@ -142,6 +142,29 @@
 
 ### Fixed
 
+- **A `defer` in a struct method reads and writes the struct as it is, a
+  variable it names still narrows, and a cleanup that would leave its
+  `defer` is refused.** The cleanup ran only as the proc the panic walk
+  holds, and a proc is a closure: in a struct method it read a copy of
+  `self` made at entry, so `@n = 1; defer puts @n; @n = 2` printed 0 and
+  `defer @n = 100` left `@n` at 3 (a class printed 2 and kept 100); a
+  variable it named stopped narrowing, so `x = x.size` under `if
+  x.is_a?(String)` failed with "undefined method 'size' for Int32
+  (compile-time type is (Int32 | String))"; and `defer return 7`
+  answered 1 and said nothing. An ordinary exit runs the cleanup inline
+  in the `ensure` now, after disarming and popping the registered copy,
+  which only the panic walk runs and which no longer costs a variable
+  its narrowing; `return`, `next` and `break` out of a cleanup are
+  refused with "`return` can't leave a `defer`". The panic walk's copy
+  still reads a struct method's `self` as it was at entry. A cleanup
+  that names no variable and no `self` now costs a closure for its
+  disarm flag: a call with `defer nothing` took 11.2 ns and takes 14.9
+  (best of 15, release); with a variable named, 16.0 and 17.0.
+  `bench/panics.sh` checks the struct, the narrowing, a panic reading
+  the narrowed variable, one cleanup per loop iteration and the
+  refusal; the old compiler refused the narrowing, and without it
+  printed 0 and 3 and compiled the `return`.
+
 - **A `select` loop beside an idle channel keeps no memory per message.**
   A select parks a node in every arm's channel, and a losing arm's node
   stayed in that channel's queue until something walked it off the

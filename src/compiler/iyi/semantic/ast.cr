@@ -475,22 +475,33 @@ module Iyi
     # Can be Var or MetaVar.
     property(local_vars) { [] of ASTNode }
 
+    # iyi: closured so far by nothing but `defer`'s panic-walk proc
+    # (`Def#iyi_defer?`). That proc runs when the frame never resumes, so
+    # it cannot change the variable under a narrowing: reads outside it
+    # stay in `local_vars`, unbound, until an ordinary closure arrives, and
+    # the proc's own reads wait in `iyi_defer_local_vars`. Before this a
+    # `defer x` made a later `x = x.size` unbind every `is_a?` on `x`.
+    getter? iyi_defer_only = false
+    property(iyi_defer_local_vars) { [] of ASTNode }
+
     def initialize(@name : String, @type : Type? = nil)
     end
 
-    # Marks this variable as closured.
-    def mark_as_closured
+    # Marks this variable as closured; *by_defer* when every proc it is
+    # captured through is a `defer`'s.
+    def mark_as_closured(by_defer : Bool = false)
+      @iyi_defer_only = (!@closured || @iyi_defer_only) && by_defer
       @closured = true
 
       return unless mutably_closured?
 
-      local_vars = @local_vars
-      return unless local_vars
-
       # If a meta var is not readonly and it became a closure we must
       # bind all previously related local vars to it so that
       # they get all types assigned to it.
-      local_vars.each &.bind_to self
+      @iyi_defer_local_vars.try &.each &.bind_to self
+      return if @iyi_defer_only
+
+      @local_vars.try &.each &.bind_to self
     end
 
     # True if this variable belongs to the given context

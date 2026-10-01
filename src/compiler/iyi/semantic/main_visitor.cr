@@ -93,6 +93,9 @@ module Iyi
     # ```
     property last_block_kind : BlockKind = :none
     property? inside_ensure : Bool = false
+    # iyi: inside the `ensure` a `defer` lowers to, where the cleanup runs
+    # inline on an ordinary exit (normalizer.cr's `apply_defers`).
+    property? inside_iyi_defer : Bool = false
     property? inside_constant = false
     property file_module : FileModule?
 
@@ -1161,6 +1164,7 @@ module Iyi
 
       block_visitor.last_block_kind = :block
       block_visitor.inside_ensure = inside_ensure?
+      block_visitor.inside_iyi_defer = inside_iyi_defer?
 
       node.body.accept block_visitor
 
@@ -1900,6 +1904,10 @@ module Iyi
     end
 
     def visit(node : Return)
+      if inside_iyi_defer? || @typed_def.try(&.iyi_defer?)
+        iyi_defer_exit(node, node.from_propagate? ? "!" : "return")
+      end
+
       if inside_ensure?
         node.raise "can't return from ensure"
       end
@@ -2507,6 +2515,7 @@ module Iyi
 
     def end_visit(node : Break)
       if last_block_kind.ensure?
+        iyi_defer_exit(node, "break") if inside_iyi_defer?
         node.raise "can't use break inside ensure"
       end
 
@@ -2523,6 +2532,7 @@ module Iyi
         break_vars.push @vars.dup
         target_while.bind_to(node_exp_or_nil_literal(node))
       else
+        iyi_defer_exit(node, "break") if @typed_def.try &.iyi_defer?
         if @typed_def.try &.captured_block?
           node.raise "can't break from captured block, try using `next`."
         end
@@ -2537,6 +2547,7 @@ module Iyi
 
     def end_visit(node : Next)
       if last_block_kind.ensure?
+        iyi_defer_exit(node, "next") if inside_iyi_defer?
         node.raise "can't use next inside ensure"
       end
 
@@ -2553,6 +2564,7 @@ module Iyi
         bind_vars @vars, @while_vars
       else
         typed_def = @typed_def
+        iyi_defer_exit(node, "next") if typed_def.try &.iyi_defer?
         if typed_def && typed_def.captured_block?
           node.target = typed_def
           typed_def.bind_to(node_exp_or_nil_literal(node))
@@ -2564,6 +2576,18 @@ module Iyi
       node.type = @program.no_return
 
       @unreachable = true
+    end
+
+    # iyi: a `return`, `!`, `next` or `break` leaving a `defer`'s cleanup.
+    # Inside the panic walk's proc a `return` ended the cleanup and nothing
+    # said so (`defer return 7` answered 1); inline in the `ensure` it was
+    # the other library's sentence about an `ensure` nobody wrote.
+    private def iyi_defer_exit(node : ASTNode, keyword : String) : NoReturn
+      node.raise <<-MSG
+        `#{keyword}` can't leave a `defer`
+
+        A `defer` runs while its scope is already being left — by a return, by `!`, by a panic — so its cleanup has no answer of its own to give and nowhere to jump to. Let it run to its end, and answer from the scope. See SPEC.md III.1.4.
+        MSG
     end
 
     def with_block_kind(kind : BlockKind, &)
@@ -3196,7 +3220,9 @@ module Iyi
           before_ensure_vars = @vars.dup
 
           with_block_kind :ensure do
+            old_inside_iyi_defer, @inside_iyi_defer = @inside_iyi_defer, @inside_iyi_defer || node.iyi_defer?
             node_ensure.accept self
+            @inside_iyi_defer = old_inside_iyi_defer
           end
 
           @vars = after_handler_vars
@@ -3558,18 +3584,21 @@ module Iyi
       # we detect a closure in an assignment. So that logic needs to be replicated here,
       # and it must happen before we actually mark is as closured.
       var.mutably_closured = true if mark_as_mutably_closured
-      var.mark_as_closured
 
       # Go up and mark proc literal defs as closured until we get
       # to the context where the variable is defined
+      # iyi: noting whether every proc on the way is a `defer`'s.
+      by_defer = true
       visitor = self
       while visitor
         visitor_context = visitor.closure_context
         break if visitor_context == var_context
 
+        by_defer = false unless visitor_context.is_a?(Def) && visitor_context.iyi_defer?
         visitor_context.closure = true if visitor_context.is_a?(Def)
         visitor = visitor.parent
       end
+      var.mark_as_closured(by_defer)
     end
 
     def check_self_closured
@@ -3816,11 +3845,26 @@ module Iyi
     # Otherwise, add it to the local vars so that they could be
     # bond later on, if the meta_var stops being readonly.
     def check_mutably_closured(meta_var, var)
-      if meta_var.closured? && meta_var.mutably_closured?
+      defer_read = iyi_defer_read?(meta_var)
+      if meta_var.closured? && meta_var.mutably_closured? && (defer_read || !meta_var.iyi_defer_only?)
         var.bind_to(meta_var)
+      elsif defer_read
+        meta_var.iyi_defer_local_vars << var
       else
         meta_var.local_vars << var
       end
+    end
+
+    # iyi: this read is inside `defer`'s panic-walk proc, of a variable from
+    # outside it. The proc may run at any point of the scope, so the read
+    # gets every type the variable is ever assigned; the scope's own reads
+    # keep their narrowing (`MetaVar#iyi_defer_only?`).
+    private def iyi_defer_read?(meta_var) : Bool
+      context = closure_context
+      return false unless context.is_a?(Def) && context.iyi_defer?
+      var_context = meta_var.context
+      var_context = var_context.context if var_context.is_a?(Block)
+      !context.same?(var_context)
     end
 
     def visit(node : When | Unless | Until | MacroLiteral | OpAssign)

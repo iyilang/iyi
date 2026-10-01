@@ -1586,6 +1586,12 @@ module Iyi
     # matches none of its cases and falls off the end of one.
     property? iyi_open_travel = false
 
+    # iyi: the proc `defer` registers for the panic walk (normalizer.cr's
+    # `apply_defers`). It runs only when its frame will never resume, so a
+    # variable it captures keeps narrowing outside it, and a `return`,
+    # `next` or `break` leaving it is refused as leaving the `defer`.
+    property? iyi_defer = false
+
     property? macro_def : Bool
     property? calls_super = false
     property? calls_initialize = false
@@ -1626,6 +1632,7 @@ module Iyi
       # of one is still that method's code.
       a_def.iyi_origin = iyi_origin
       a_def.iyi_open_travel = iyi_open_travel?
+      a_def.iyi_defer = iyi_defer?
       a_def.name_location = name_location
       a_def.visibility = visibility
       a_def.free_var_bounds = @free_var_bounds.clone

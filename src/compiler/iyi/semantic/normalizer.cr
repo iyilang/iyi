@@ -82,21 +82,32 @@ module Iyi
     # To:
     #
     #     a
-    #     __iyi_defer_push(-> { x })
+    #     %live = true
+    #     __iyi_defer_push(-> { x if %live; nil })
     #     begin
     #       b
     #     ensure
+    #       %live = false
     #       __iyi_defer_pop_run
+    #       x
     #     end
     #
-    # The cleanup is written once, as a proc the runtime holds. Every
-    # ordinary exit — falling off the end, a `return`, `!` expanding to
-    # a `return` (III.1.2) — reaches the `ensure`, which pops the proc
-    # and runs it. A panic reaches none of them: `raise` never unwinds
-    # (there is no unwinder to link, by design), so the panic path in
-    # the prelude walks the same registry and runs what was never
-    # popped. One list, two readers, and `defer`'s promise holds on
-    # every exit including the one that is a bug.
+    # Every ordinary exit — falling off the end, a `return`, `!` expanding
+    # to a `return` (III.1.2) — reaches the `ensure`, which runs the
+    # cleanup there, inline, as the scope's own code. A panic reaches none
+    # of them: `raise` never unwinds (there is no unwinder to link, by
+    # design), so the cleanup is also registered, as a proc the runtime
+    # holds, and the panic path walks the registry and runs what was never
+    # popped. The ordinary exit disarms its proc before popping it, so the
+    # registry stays balanced and the cleanup runs once.
+    #
+    # The proc used to be the only copy, run by the pop too, and a proc is
+    # a closure: in a struct method it read a copy of `self` made at entry
+    # (`defer puts @n` printed 0 after `@n = 2`) and wrote into that copy,
+    # and every variable it named stopped narrowing. Inline, the cleanup is
+    # typed and run as an `ensure` is; the proc runs only when the frame
+    # never resumes, which is what lets the semantic pass keep a captured
+    # variable's narrowing (`Def#iyi_defer?`).
     #
     # **LIFO falls out of the nesting** twice over: a second `defer`
     # expands inside the first one's body, so its push is later and its
@@ -117,15 +128,21 @@ module Iyi
       head = exps[0...index]
 
       if program.iyi_prelude?
+        live = Var.new(program.new_temp_var_name).at(deferred)
         # The trailing `nil` pins the proc to `-> Nil`: a proc literal
         # does not coerce its return the way a block restriction does,
         # and a cleanup's value is nobody's.
-        cleanup_body = Expressions.new([deferred.exp, NilLiteral.new.at(deferred)] of ASTNode).at(deferred)
-        proc_literal = ProcLiteral.new(Def.new("->", [] of Arg, cleanup_body)).at(deferred)
-        push = Call.global("__iyi_defer_push", proc_literal).at(deferred)
+        armed = If.new(live.clone, deferred.exp.clone).at(deferred)
+        cleanup_body = Expressions.new([armed, NilLiteral.new.at(deferred)] of ASTNode).at(deferred)
+        cleanup = Def.new("->", [] of Arg, cleanup_body).at(deferred)
+        cleanup.iyi_defer = true
+        push = Call.global("__iyi_defer_push", ProcLiteral.new(cleanup).at(deferred)).at(deferred)
         pop = Call.new(nil, "__iyi_defer_pop_run", global: true).at(deferred)
+        disarm = Assign.new(live.clone, BoolLiteral.new(false).at(deferred)).at(deferred)
+        ordinary_exit = Expressions.new([disarm, pop, deferred.exp] of ASTNode).at(deferred)
+        head << Assign.new(live.clone, BoolLiteral.new(true).at(deferred)).at(deferred)
         head << push
-        head << ExceptionHandler.new(rest, ensure: pop).at(deferred).tap(&.iyi_defer=(true))
+        head << ExceptionHandler.new(rest, ensure: ordinary_exit).at(deferred).tap(&.iyi_defer=(true))
       else
         # Crystal's prelude has a real unwinder, so the classic shape —
         # the cleanup inline in the `ensure` — already runs on a panic.

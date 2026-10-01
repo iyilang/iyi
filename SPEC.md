@@ -2229,23 +2229,37 @@ registered cleanup around the rest of its scope:
 
 ```
 a                       a
-defer x        ⟶        __iyi_defer_push(-> { x })
-b                       begin
+defer x        ⟶        %live = true
+b                       __iyi_defer_push(-> { x if %live; nil })
+                        begin
                           b
                         ensure
+                          %live = false
                           __iyi_defer_pop_run
+                          x
                         end
 ```
 
-The cleanup is written once, as a proc the runtime holds on the current
-task. Every ordinary exit reaches the `ensure` — falling off the end, a
-`return`, `!` expanding to a `return` (III.1.2) — which pops the proc
-and runs it. A panic reaches none of them, and does not need to: the
-panic path walks the same registry and runs whatever was never popped.
-One list, two readers, and the promise holds on every exit including
-the one that is a bug. What changed against `begin`/`ensure` is still
-where the cleanup is *written*: at the acquisition, which is the entire
-ergonomic point.
+Every ordinary exit reaches the `ensure` — falling off the end, a
+`return`, `!` expanding to a `return` (III.1.2) — and runs the cleanup
+there, inline, as the scope's own code; it disarms and pops the
+registered copy first, so the cleanup runs once. A panic reaches none of
+them, and does not need to: the cleanup is also a proc the runtime holds
+on the current task, and the panic path walks that registry and runs
+whatever was never popped. One list, and the promise holds on every exit
+including the one that is a bug. The proc used to be the only copy, and a
+proc is a closure: in a struct method it read a copy of `self` made at
+entry and wrote into that copy, and every variable it named stopped
+narrowing. Inline, the cleanup reads the scope as it is, and since its
+proc runs only when the frame never resumes (the compiler marks its def
+`iyi_defer`), a variable it names keeps its narrowing. The panic walk's
+copy still reads a struct method's `self` as it was at entry. Nor may a
+cleanup leave its `defer`: a `return`, `next` or `break` that would is
+refused (`` `return` can't leave a `defer` ``), because the scope is
+already being left and the cleanup has no answer of its own; inside the
+proc a `return` used to end the cleanup and nothing said so. What
+changed against `begin`/`ensure` is still where the cleanup is
+*written*: at the acquisition, which is the entire ergonomic point.
 
 Two questions Part V.8 left open, both answered by Go's answers:
 

@@ -142,6 +142,25 @@
 
 ### Fixed
 
+- **`Float64#round(digits)` answers the double itself when there is
+  nothing left to round.** Once the scaled value reached 2^53 the place
+  asked for is finer than the double's last bit, but the value was still
+  divided back by `10.0 ** digits`, and moved:
+  `0.8173247445520655.round(17)` was 0.8173247445520654,
+  `(-0.05).round(300)` was -0.049999999999999996 and
+  `1.0e-10.round(300)` was 1.0000000000000002e-10 (`10.0 ** 300` is
+  1.0000000000000006e+300). It answers the double from 2^53 up now. From
+  2^52 to 2^53 the place can still be the coarser one, so that band is
+  scaled back as before: `6.6913684712834005.round(15)` is
+  6.691368471283401, as Python answers. Against Python's `round` over
+  10,000 value-place pairs the mismatches fell from 755 to 259, none of
+  them new; the 256 under 2^53 are the scaled value's own rounding
+  (`(-0.05).round(1)` is -0.0 where Python answers -0.1) and scales past
+  10^22, which no double holds, and the other 3 are 5e-324 at 309, 320
+  and 323 places, whose scale is infinite. `bench/number_exercise.iyi`
+  checks both sides of 2^53 and `bench/number_exercise.sh` proves each
+  check fails; the old prelude answered 0.8173247445520654.
+
 - **`Int#gcd` answers for a type's minimum whenever the answer fits.** It
   took both magnitudes first, and `abs` of the minimum overflows:
   `(-2147483648).gcd(6)` panicked "arithmetic overflow" where

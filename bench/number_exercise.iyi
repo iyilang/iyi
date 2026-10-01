@@ -176,6 +176,15 @@ assert_true(0.49999999999999994.round == 0.0, "number: round reads the fraction,
 assert_true(2.5.round == 2.0 && 3.5.round == 4.0, "number: a tie rounds to the even integer")
 assert_true((-2.5).round == -2.0 && (-3.5).round == -4.0, "number: round is symmetric")
 assert_true(25.0.round(-1) == 20.0 && 1234.0.round(-2) == 1200.0, "number: round to tens and hundreds")
+# Past 2^53 the scaled value has nothing left to round, and the double is
+# its own answer, as Python's `round` keeps it. Scaled back, it moved:
+# 0.8173247445520655 to 17 places was 0.8173247445520654, and -0.05 to 300
+# places -0.049999999999999996. Under 2^53 the place can still be coarser
+# than the double's last bit, and 6.6913684712834005 to 15 places moves.
+assert_true(0.8173247445520655.round(17) == 0.8173247445520655 && (-0.05).round(300) == -0.05 &&
+            1.0e-10.round(300) == 1.0e-10,
+  "number: round keeps a double with nothing left to round")
+assert_true(6.6913684712834005.round(15) == 6.691368471283401, "number: round still rounds under 2^53")
 
 # The shortest text at the ends of the range, where the printer's numbers
 # are largest - each is sized to the double in hand, and grows past the

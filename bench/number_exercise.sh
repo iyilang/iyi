@@ -320,6 +320,18 @@ prove_fails "negative places ignored" places_round float.iyi \
   "number: round to tens and hundreds" \
   's/^    return round if digits == 0$/    return round if digits <= 0/'
 
+# 8f. A scaled value past 2^53 scaled back again, which moved a double
+#     that had nothing left to round.
+prove_fails "round scales back what has nothing to round" round_drift float.iyi \
+  "number: round keeps a double with nothing left to round" \
+  's/^      return self unless scaled.abs < 9007199254740992.0$/      return self if scaled * 0.0 != 0.0/'
+
+# 8g. The double kept from 2^52 instead, where the place can still be
+#     coarser than its last bit.
+prove_fails "round keeps from 2^52" round_band float.iyi \
+  "number: round still rounds under 2^53" \
+  's/^      return self unless scaled.abs < 9007199254740992.0$/      return self unless scaled.abs < 4503599627370496.0/'
+
 # 9. And the unchecked conversions made checked, which is what the prelude
 #    had before `unsafe_to_u8` was a name: the instruction is the point, so
 #    a checked one panics where the exercise asserted a value. Anchored on

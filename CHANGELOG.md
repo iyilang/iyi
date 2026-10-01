@@ -142,6 +142,24 @@
 
 ### Fixed
 
+- **A `JSON::Any` array or object is a key that spreads.** `Any#hash`
+  combined an array's elements as `31 * h + e` and an object's pairs as
+  the sum of `31 * k.hash + v.hash`, with an integer hashing as itself:
+  `[1,0]` and `[0,31]` hashed alike, as did `{"a":1,"b":2}` and
+  `{"a":2,"b":1}`, a 150 by 150 grid had 4,769 hashes as arrays and 299
+  as objects for its 22,500 values, and 160,000 objects `{"x":i,"y":j}`
+  took 18,223 ms to go into a `Hash(Any, Bool)` (26 s in the hunt's run).
+  An array now hashes as an `Array` does, and an object sums its pairs,
+  each pair's two hashes packed into one word and put through splitmix64's
+  finaliser; an integer hashes by `Int64#hash`. The grid has 22,500
+  hashes each way and the 160,000 objects key a Hash in 103 to 113 ms.
+  Equality is unchanged: a whole float still hashes as the integer it
+  equals, and key order still does not matter.
+  `bench/std_json_exercise.iyi` checks both pairs, the grid's counts and a
+  2,000 ms bound on the 160,000 inserts; the old module failed "[1,0] and
+  [0,31] hash apart", and with that check taken out had 4,769 and 299
+  hashes for the grid and took 18,223 ms for the inserts.
+
 - **A local captured by an `IyiThread` block that the block assigns, or
   that its starter assigns after the start or in a loop around it, is a
   compile error naming the variable (SPEC.md III.4.4).** The thread gate

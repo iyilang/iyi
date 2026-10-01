@@ -538,39 +538,36 @@ pub struct Any
     elsif s = as_s?
       s.hash
     elsif i = as_i64?
-      integer_hash(i)
+      i.hash
     elsif f = float_value?
       if f >= -9223372036854775808.0 && f < 9223372036854775808.0
         t = f.to_i64
-        return integer_hash(t) if t.to_f64 == f
+        return t.hash if t.to_f64 == f
       end
       bits = IyiFloatText.bits_of(f)
       ((bits ^ bits.unsafe_shr(32_u64)) & 0x7FFFFFFF_u64).to_i32
     elsif a = as_a?
-      value = 17
-      idx = 0
-      while idx < a.size
-        value = (value &* 31) &+ a[idx].hash
-        idx = idx + 1
-      end
-      value
+      # As an `Array` hashes. It was `31 * h + e`, an integer hashing as
+      # itself: `[1,0]` and `[0,31]` hashed alike, and a 150 by 150 grid of
+      # `[i, j]` had 4,769 hashes for its 22,500 values.
+      a.hash
     elsif h = as_h?
-      value = 0
-      keys = h.keys
-      idx = 0
-      while idx < keys.size
-        k = keys[idx]
-        value = value &+ ((k.hash &* 31) &+ h[k].hash)
-        idx = idx + 1
+      # A sum over the pairs, each pair's two hashes packed into one word and
+      # put through splitmix64's finaliser, so the terms share no structure
+      # the sum could cancel. It was the sum of `31 * k.hash + v.hash`:
+      # `{"a":1,"b":2}` and `{"a":2,"b":1}` hashed alike, and 160,000 objects
+      # `{"x":i,"y":j}` took 26 s to go into a `Hash(Any, Bool)`.
+      value = 0x9E3779B97F4A7C15_u64 ^ h.size.to_i64.unsafe_to_u64
+      h.each do |k, v|
+        pair = k.hash.to_i64.unsafe_to_u64.unsafe_shl(32_u64) | (v.hash.to_i64.unsafe_to_u64 & 0xFFFFFFFF_u64)
+        pair = (pair ^ pair.unsafe_shr(30_u64)) &* 0xBF58476D1CE4E5B9_u64
+        pair = (pair ^ pair.unsafe_shr(27_u64)) &* 0x94D049BB133111EB_u64
+        value = value &+ (pair ^ pair.unsafe_shr(31_u64))
       end
-      value
+      value.hash
     else
       0
     end
-  end
-
-  private def integer_hash(i : Int64) : Int32
-    ((i ^ (i >> 32)) & 0x7FFFFFFF_i64).to_i32
   end
 
   def to_json : String

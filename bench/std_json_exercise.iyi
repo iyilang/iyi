@@ -366,6 +366,38 @@ assert_true(counts.size == 4, "Any as a hash key: four distinct values")
 assert_true(counts[JSON.parse("1")] == 2 && counts[JSON.parse("[1]")] == 2 && counts[JSON.parse("{\"a\":[1]}")] == 2, "each equal pair counted twice")
 puts "  #{same.size} equal pairs hash alike, #{different.size} unequal pairs differ, Any keys a Hash"
 
+# And a key that spreads. An array hashed as `31 * h + e` and an object as
+# the sum of `31 * k.hash + v.hash`, an integer hashing as itself: `[1,0]`
+# and `[0,31]` were one hash, `{"a":1,"b":2}` and `{"a":2,"b":1}` another,
+# a 150 by 150 grid had 4,769 hashes as arrays and 299 as objects for its
+# 22,500 values, and 160,000 objects took 26 s to go into a Hash.
+assert_true(JSON.parse("[1,0]").hash != JSON.parse("[0,31]").hash, "[1,0] and [0,31] hash apart")
+assert_true(JSON.parse("{\"a\":1,\"b\":2}").hash != JSON.parse("{\"a\":2,\"b\":1}").hash, "values swapped between keys hash apart")
+grid_arrays = {} of Int32 => Bool
+grid_objects = {} of Int32 => Bool
+objects = Array(Any).new(160000)
+400.times do |i|
+  400.times do |j|
+    fields = {} of String => Any
+    fields["x"] = Any.new(i)
+    fields["y"] = Any.new(j)
+    object = Any.new(fields)
+    objects << object
+    if i < 150 && j < 150
+      grid_arrays[Any.new([Any.new(i), Any.new(j)] of Any).hash] = true
+      grid_objects[object.hash] = true
+    end
+  end
+end
+assert_true(grid_arrays.size >= 22400 && grid_objects.size >= 22400, "a 150 by 150 grid has #{grid_arrays.size} array and #{grid_objects.size} object hashes for 22,500 values")
+keyed_started = __iyi_monotonic_ns
+keyed = {} of Any => Bool
+objects.each { |o| keyed[o] = true }
+keyed_ms = (__iyi_monotonic_ns - keyed_started) // 1000000
+assert_true(keyed.size == 160000, "160,000 distinct objects are 160,000 keys")
+assert_true(keyed_ms < 2000, "160,000 objects took #{keyed_ms} ms to go into a Hash, not under 2,000")
+puts "  arrays and objects hash apart: 22,400 hashes of a 150 by 150 grid at least, 160,000 objects keyed under 2,000 ms"
+
 # ---------------------------------------------------------------------------
 # to_json and from_json over prelude values and a ToJSON type
 # ---------------------------------------------------------------------------

@@ -276,7 +276,7 @@ esac
 # 8. An IPv6 address written without its `::`, or a family forgotten.
 prove_fails "ipv6 written uncompressed" badsix "ipv6:" \
   '{ sub(/best_size = 1$/, "best_size = 8"); print }'
-prove_fails "an IPv6 socket made as IPv4" badfamily "cannot bind socket to ::1:0" \
+prove_fails "an IPv6 socket made as IPv4" badfamily "cannot bind socket to \[::1\]:0" \
   '{ sub(/return \{make_sockaddr_in6\(parse_ipv6\(host\), port\), AF_INET6\}/, "return {make_sockaddr_in6(parse_ipv6(host), port), AF_INET}"); print }'
 
 # 9. A unix listener whose close leaves its file: the path cannot be bound

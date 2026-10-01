@@ -222,6 +222,13 @@ wide = IyiSocket.listen("::", 0)
 four = IyiSocket.connect("127.0.0.1", wide.local_port)
 raise "ipv6: an IPv4 connect reached a listener on ::" unless four.is_a?(SocketError)
 wide.close
+# A refusal names an IPv6 peer in its brackets: `::1:57456` was an address
+# with no port.
+gone = IyiSocket.listen("::1", 0)
+gone_port = gone.local_port
+gone.close
+refused6 = IyiSocket.connect("::1", gone_port)
+raise "ipv6: a refused connect answered #{refused6.inspect}" unless refused6.is_a?(SocketError) && refused6.operation.includes?("[::1]:#{gone_port}")
 {"2001:DB8:0:0:1:0:0:1" => "2001:db8::1:0:0:1",
  "2001:db8:0:1:1:1:1:1" => "2001:db8:0:1:1:1:1:1",
  "0:0:1:0:0:0:1:0"      => "0:0:1::1:0",

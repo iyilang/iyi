@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **A socket's refusal names an IPv6 peer in its brackets.** Messages
+  wrote the peer as `host:port`, so a refused connect to `::1` said
+  "cannot connect to ::1:57456" - an address with no port - and one to
+  `ff02::1` port 80 said `ff02::1:80`, another address altogether. An IPv6
+  literal is written `[::1]:57456` now, as a URL writes it, in
+  `IyiSocket.connect`, `listen` and every `UdpSocket` refusal.
+  `bench/socket_exercise.iyi` checks a refused connect's message; the old
+  module wrote the bare address.
+
 - **`Server.serve` reads a chunked request body in time linear in its
   size.** A chunked body has no length up front, so each read was added to
   what came before and the whole request parsed again: a copy of the body

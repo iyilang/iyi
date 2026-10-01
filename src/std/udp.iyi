@@ -130,7 +130,7 @@ pub class UdpSocket
 
     if __sys_bind(fd, addr, addrlen) < 0
       IyiSocket.__sys_close(fd)
-      raise "cannot bind UDP socket to #{host}:#{port}"
+      raise "cannot bind UDP socket to #{IyiSocket.endpoint(host, port)}"
     end
 
     UdpSocket.new(fd, family)
@@ -153,7 +153,7 @@ pub class UdpSocket
     check_open
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
     res = UdpSocket.__sys_sendto(@fd, bytes.to_unsafe, bytes.size.to_u64, 0, addr, addrlen)
-    raise "cannot send to #{host}:#{port}" if res < 0_i64
+    raise "cannot send to #{IyiSocket.endpoint(host, port)}" if res < 0_i64
     res.to_i32
   end
 
@@ -168,7 +168,7 @@ pub class UdpSocket
     raise "negative count: #{count}" if count < 0
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
     res = UdpSocket.__sys_sendto(@fd, buffer, count.to_u64, 0, addr, addrlen)
-    raise "cannot send to #{host}:#{port}" if res < 0_i64
+    raise "cannot send to #{IyiSocket.endpoint(host, port)}" if res < 0_i64
     res.to_i32
   end
 
@@ -294,7 +294,7 @@ pub class UdpSocket
     check_open
     addr, addrlen, _ = UdpSocket.make_sockaddr(host, port)
     res = UdpSocket.__sys_connect(@fd, addr, addrlen)
-    raise "cannot connect UDP socket to #{host}:#{port}" if res < 0
+    raise "cannot connect UDP socket to #{IyiSocket.endpoint(host, port)}" if res < 0
   end
 
   # Sends bytes to the connected peer.

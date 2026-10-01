@@ -310,7 +310,14 @@ pub class IyiSocket
 
   def self.connect(host : String, port : Int32) : IyiSocket | Cancelled | SocketError
     addr, family = sockaddr(host, port)
-    connect_to(addr, family, "#{host}:#{port}")
+    connect_to(addr, family, endpoint(host, port))
+  end
+
+  # *host* and *port* as a message names them: an IPv6 literal in its
+  # brackets, as a URL writes it. Bare, `::1:57456` was an address with
+  # no port, and `ff02::1:80` another address altogether.
+  def self.endpoint(host : String, port : Int32) : String
+    host.includes?(":") && !host.starts_with?("[") ? "[#{host}]:#{port}" : "#{host}:#{port}"
   end
 
   # The stream socket listening at *path*.
@@ -535,7 +542,7 @@ pub class IyiSocket
     if bound < 0
       code = __sys_code(bound.to_i64)
       __sys_close(fd)
-      raise "cannot bind socket to #{host}:#{port}: #{SocketError.new("bind", code).reason}"
+      raise "cannot bind socket to #{endpoint(host, port)}: #{SocketError.new("bind", code).reason}"
     end
 
     if __sys_listen(fd, backlog) < 0

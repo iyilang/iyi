@@ -932,9 +932,15 @@ pub class UdpSocket
         # kernel writing into a frame that is gone and an OVERLAPPED the
         # collector may already have handed to somebody else, so the
         # operation is waited out first — see `__sys_overlapped_await` for
-        # what that wait has to be here. No datagram arrived that the caller
-        # can have, which is what `Cancelled` says.
-        __sys_overlapped_await(s, ov)
+        # what that wait has to be here. And what it ended with decides the
+        # answer: a datagram that arrived before the cancel did is in the
+        # buffer and gone from the socket, so it is the caller's. Answered
+        # `Cancelled` on the flag alone, it was dropped: a sibling that sent
+        # a datagram and then failed lost it, 300 rounds in 300, where the
+        # POSIX arm's wait consumes nothing and the datagram stays queued.
+        waited = __sys_overlapped_await(s, ov)
+        return waited.to_i32 if waited >= 0_i64
+        return capacity if __is_msgsize(waited)
         return Cancelled.new
       end
       # The socket was closed under the park: a close does complete a posted

@@ -168,4 +168,45 @@ six_client.close
 six.close
 puts "  an unbound client's address, and a datagram to [::1]"
 
+# A receive cancelled while its datagram lands: the datagram is the
+# receiver's, or still queued for the next receive, and never gone. On
+# Windows the receive is a posted operation that takes the datagram, and a
+# cancel answered on the flag alone dropped it - 300 rounds in 300.
+struct SenderFailed
+end
+
+impl Error for SenderFailed
+  def message : String
+    "the sender failed after sending"
+  end
+end
+
+lander = UdpSocket.bind("127.0.0.1", 0)
+lander_port = lander.local_port
+sender = UdpSocket.bind("127.0.0.1", 0)
+kept = 0
+rounds = 50
+rounds.times do |round|
+  took = false
+  group do |g|
+    g.spawn do
+      took = true unless lander.receive_from(100).is_a?(Cancelled)
+      0
+    end
+    g.spawn do
+      sender.send_to("round #{round}", "127.0.0.1", lander_port)
+      SenderFailed.new
+    end
+  end
+  unless took
+    sleep(2)
+    took = !lander.receive_from?(100).nil?
+  end
+  kept = kept + 1 if took
+end
+lander.close
+sender.close
+assert_int rounds, kept, "every datagram sent beside a cancelled receive is received or still queued"
+puts "  a cancelled receive loses no datagram"
+
 puts "\nALL CHECKS PASSED"

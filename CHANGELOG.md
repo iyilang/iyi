@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **A UDP receive cancelled on Windows keeps the datagram that landed.**
+  The receive there is a posted operation, and it takes the datagram off
+  the socket when it completes; cancelled as one landed, the call waited
+  the operation out and answered `Cancelled` on the flag alone, and the
+  datagram was gone - a sibling that sent one and then failed lost it in
+  300 rounds of 300, where the POSIX wait consumes nothing and the
+  datagram stays queued. A datagram the operation took is the caller's
+  now. `bench/std_udp_exercise.iyi` sends beside 50 cancelled receives and
+  finds every datagram; the old module lost them.
+
 - **`HTTP.get("HTTP://host/")` is a request.** A scheme is read in any
   case (RFC 3986 §3.1), and the client compared it with `http` as written:
   `HTTP://127.0.0.1:8080/hello` panicked "HTTP: only http://".

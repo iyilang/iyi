@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **Renaming a file onto its own hard link on Windows leaves both names, as
+  POSIX `rename` does.** `MoveFileExW` replaced the second link with the
+  first, so `File.rename(a, b)` with `b` a hard link of `a` left `b` alone.
+  Two names that open as one file - one volume, one file index - and answer
+  two final paths are left as they are now; a name and its spelling in
+  another case are one directory entry and are still renamed.
+  `bench/std_file_exercise.iyi` renames onto a hard link and asks for both
+  names, and renames a linked file into another case and back; the old
+  module lost the first name.
+
 - **`File.rename` on Windows replaces a destination that is read-only and
   open.** Either alone was replaced, each by its own retry; together, the
   attribute's retry could not replace a file somebody had open, and the

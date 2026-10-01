@@ -1145,6 +1145,10 @@ class ::File
       if old_wide.address == 0_u64 || new_wide.address == 0_u64
         raise "Cannot rename #{o} to #{n}: a path is not valid UTF-8"
       end
+      # MoveFileExW replaced the second link with the first, and the first
+      # name was gone: measured, renaming `a` onto its own hard link `b`
+      # left `b` alone, where POSIX leaves both.
+      return if two_links?(old_wide, new_wide)
       if Std::File::LibKernel32.MoveFileExW(old_wide, new_wide, 0x3_u32) == 0
         # A destination that exists *and* is read-only refuses the
         # replacement with ERROR_ACCESS_DENIED, where posix `rename`
@@ -1169,6 +1173,47 @@ class ::File
       end
     {% end %}
   end
+
+  {% if flag?(:win32) %}
+    # Whether *new_wide* is its file's own hard link beside *old_wide*:
+    # two directory entries of one file, which POSIX `rename` leaves as
+    # they are. Opened as themselves, they answer one volume and file
+    # index; and a handle's final path is the name it was opened by, in
+    # the case the directory keeps, so two links answer two paths where a
+    # name and its spelling in another case answer one.
+    private def self.two_links?(old_wide : UInt16*, new_wide : UInt16*) : Bool
+      nothing = Pointer(Void).new(0_u64)
+      one = Std::File::LibKernel32.CreateFileW(old_wide, 0, 0x7, nothing, 3, 0x2200000, nothing)
+      return false if one.address == 0xFFFFFFFFFFFFFFFF_u64
+      other = Std::File::LibKernel32.CreateFileW(new_wide, 0, 0x7, nothing, 3, 0x2200000, nothing)
+      links = false
+      if other.address != 0xFFFFFFFFFFFFFFFF_u64
+        mine = uninitialized Std::File::LibKernel32::BY_HANDLE_FILE_INFORMATION
+        theirs = uninitialized Std::File::LibKernel32::BY_HANDLE_FILE_INFORMATION
+        if Std::File::LibKernel32.GetFileInformationByHandle(one, pointerof(mine)) != 0 &&
+           Std::File::LibKernel32.GetFileInformationByHandle(other, pointerof(theirs)) != 0 &&
+           mine.nNumberOfLinks > 1_u32 && mine.dwVolumeSerialNumber == theirs.dwVolumeSerialNumber &&
+           mine.nFileIndexHigh == theirs.nFileIndexHigh && mine.nFileIndexLow == theirs.nFileIndexLow
+          room = 32768
+          one_name = Pointer(UInt16).malloc(room.to_u64)
+          other_name = Pointer(UInt16).malloc(room.to_u64)
+          one_size = Std::File::LibKernel32.GetFinalPathNameByHandleW(one, one_name, room, 0)
+          other_size = Std::File::LibKernel32.GetFinalPathNameByHandleW(other, other_name, room, 0)
+          if one_size > 0 && one_size < room && other_size > 0 && other_size < room
+            links = one_size != other_size
+            index = 0
+            while !links && index < one_size
+              links = one_name[index] != other_name[index]
+              index = index + 1
+            end
+          end
+        end
+        Std::File::LibKernel32.CloseHandle(other)
+      end
+      Std::File::LibKernel32.CloseHandle(one)
+      links
+    end
+  {% end %}
 
   def self.link(old_path : String | Path, new_path : String | Path) : Nil
     o = old_path.to_s

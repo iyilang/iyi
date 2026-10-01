@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A Hash's keys that share their low bits are not one run of probes.**
+  The table picked a key's slot from its hash's low bits as they were,
+  and an Int's hash is the Int: keys that were multiples of 65536 all had
+  the same low bits, and 20,000 of them took a second to insert (9.5 s in
+  a YAML mapping) where 20,000 consecutive keys took a millisecond. The
+  hash is mixed before its bits pick the slot: the same keys insert in a
+  millisecond. `bench/collections_exercise.iyi` inserts them under 250 ms;
+  the old prelude took 980 ms there. Its proof that a delete leaves a
+  tombstone is caught a check earlier now, where deleted integer keys
+  collide.
+
 - **`Complex#inv`, `exp` and `sqrt` answer at the ends of the range.** `inv` was `conj / abs2`, and `abs2` underflows below 1e-162 and overflows above 1e154. So the inverse of 1e-170 was `Infinity + NaNi`, of 1e170 `0.0 - 0.0i`, and `1 / Complex.new(1e-170, 1e-170)` went the same way. Wherever `abs2` is a normal float, `inv` is still exactly the other library's `conj / abs2`. Past that, it scales the conjugate as the division scales it (Smith's), which keeps the zeros' signs: `1.0e+170 - 0.0i`. `exp` multiplied an overflowed `e^x` by `sin(0.0)`, so `exp(710+0i)` and `exp(inf+0i)` were `Infinity + NaNi`. A real exponent now keeps its imaginary zero. `sqrt` overflowed in `2.0 * (r + x)`, and the root of 1e308 + 1e308i was `Infinity + 0.0i`. A part past `Float64::MAX / 8` is now rooted a sixteenth of the way down and the result doubled twice, exact in powers of two. The answer is cmath's, `1.09868411346781e+154 + 4.5508986056222734e+153i`. `bench/std_complex_exercise.iyi` checks each one, and the complex gate proves each check fails with its fix undone. The old module answered `Infinity + NaNi`, `Infinity + 0.0i` and `Infinity + NaNi` there.
 
 - **A YAML document's end may be marked more than once.** After a document, the second `...` of `a: 1\n...\n...\n` was refused with "a document end marker with no document at line 3, column 1". libyaml reads `[{a: 1}]`. Every `...` after a document now ends it again. A `...` with no document before it is still refused, as libyaml refuses it. `bench/std_yaml_exercise.iyi` reads `a: 1\n...\n...\n---\nb\n` as two documents. The old module refused it.

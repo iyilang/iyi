@@ -223,7 +223,7 @@ prove_fails "a rewritten key appends" double_write hash.iyi \
 # 3. A delete that frees its index slot rather than leaving a tombstone: a
 #    key that probed past the deleted one is no longer found.
 prove_fails "a delete frees its slot" freed_slot hash.iyi \
-  "hash: its neighbour survives" \
+  "hash: the rest are findable" \
   's/^    @index\[slot\] = -2$/    @index[slot] = -1/'
 
 # 4. `each` walking the gone entries as well as the live ones.

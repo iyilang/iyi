@@ -1005,6 +1005,14 @@
   and `d/**/*.txt` answered `d/x.txt`. `bench/std_dir_exercise.iyi`
   globs through one and two wildcard segments and from `./`; the old
   module answered `[]` for the first.
+- **Seeking a stream with no descriptor refuses on Windows too.** A
+  `Memory` reached through `IyiIO#pos=` or `seek` has the handle -1, and
+  Windows' conversion of it panicked "arithmetic overflow" where Linux's
+  kernel answers EBADF and the seek refuses in its sentence, "cannot seek
+  to 4 (Set)". A negative handle is EBADF on every platform now. The io
+  gate's proof that `Memory#pos=` overrides the descriptor's caught it on
+  the Windows runner.
+
 - **`File.match?` speaks the pattern language it is named for.** It knew
   `*` and `?` and nothing else, byte by byte: `*` crossed separators, so
   `a/b.txt` matched `*.txt`; `?` took one byte of a two-byte character;

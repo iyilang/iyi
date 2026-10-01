@@ -409,6 +409,35 @@ server.join
 listener.close
 puts "  get, post, head, put, delete: five verbs, five connections, and what the server read is what each wrote"
 
+# An answer is read as far as its framing says, and no further: read to
+# the server's close, one from a server that held the connection open was
+# waited on until it closed - here the three seconds it waits, each. (A
+# whole answer the server resets after is `bench/std_http_exercise.sh`'s.)
+whole = IyiSocket.listen("127.0.0.1", 0)
+whole_port = whole.local_port
+whole_fd = whole.to_unsafe
+whole_server = IyiThread.start do
+  l = IyiSocket.new(whole_fd)
+  2.times do |i|
+    conn = l.accept.or_panic
+    read_request(conn).or_panic
+    conn.write(i == 0 ? "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi" : "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n").or_panic
+    conn.read_timeout_ms = 3000
+    conn.read(16)
+    conn.close
+  end
+  nil
+end
+whole_started = __iyi_monotonic_ns
+r = HTTP.get("http://127.0.0.1:#{whole_port}/held").or_panic
+held_chunks = HTTP.get("http://127.0.0.1:#{whole_port}/held-chunks").or_panic
+whole_ms = (__iyi_monotonic_ns - whole_started) // 1000000_i64
+assert_true r.body == "hi" && held_chunks.body == "hi", "the answers on held connections: #{r.body.inspect}, #{held_chunks.body.inspect}"
+assert_true whole_ms < 1500, "an answer is read to its length or its last chunk, not to a close three seconds later: #{whole_ms} ms"
+whole_server.join
+whole.close
+puts "  an answer is read to its length or its last chunk, under 1.5 s from a server that holds the connection 3 s"
+
 # An IPv6 literal's Host line keeps the URL's brackets: without them it
 # was `Host: ::1:<port>`, which no server can split into host and port.
 v6 = IyiSocket.listen("::1", 0)

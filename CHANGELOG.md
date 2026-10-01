@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`HTTP.request` reads an answer as far as its framing says, and no
+  further.** It read to the server's close, so a whole answer that the
+  server reset after came back as `SocketError` ("cannot read from socket:
+  the connection was reset by the peer"), where Python's http.client answers
+  the 200, and an answer from a server that held the connection open waited
+  for the close: 3,002 ms for a 2-byte body. The head is read as it arrives,
+  past interim answers, then the body to its `Content-Length` or its last
+  chunk; to the close only when it has neither, and not at all for a HEAD, a
+  1xx, 204 or 304. `bench/std_http_exercise.iyi` reads two answers from a
+  server that holds each connection 3 s, and the `.sh` one the server resets
+  300 ms after it; the old module took 6,003 ms for the two and answered
+  `SocketError` for the third.
+
 - **The client decodes an answer whose only transfer coding is `chunked`,
   and refuses any other.** The `Transfer-Encoding` value was compared whole
   with "chunked", so `gzip, chunked`, two `chunked` lines and `Chunked,`

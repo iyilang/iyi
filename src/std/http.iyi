@@ -721,11 +721,14 @@ pub struct HTTP
     lines
   end
 
-  # One request, one answer, one connection: the answer is read to the
-  # server's close, which `Connection: close` asks for. The socket parks
-  # under the runtime, so a request from a task answers `Cancelled` when
-  # the task is; a refused or reset connection answers `SocketError`; `!`
-  # passes either up, `.or_panic` refuses it.
+  # One request, one answer, one connection, which `Connection: close`
+  # asks the server to close. The answer is read as far as its framing
+  # says (RFC 9112 §6.3) - its length, its last chunk, or its head alone
+  # for a `HEAD`, a 1xx, 204 or 304 - and to the server's close only when it
+  # has neither a length nor chunks. The socket parks under the runtime,
+  # so a request from a task answers `Cancelled` when the task is; a
+  # refused or reset connection answers `SocketError`; `!` passes either
+  # up, `.or_panic` refuses it.
   def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String = "") : Response | Cancelled | SocketError
     uri = URI.parse(url)
     scheme = uri.scheme
@@ -751,15 +754,67 @@ pub struct HTTP
     sock = IyiSocket.connect(host, port)!
     defer sock.close
     sock.write(text)!
-    # Into one builder, in large reads: adding each 4 KB read to the answer
-    # so far copied it once per read, and a 24 MB answer took minutes.
-    answer = String::Builder.new
-    while true
-      chunk = sock.read(65536)!
-      break if chunk.bytesize == 0
-      answer << chunk
+    head = same_name?(method, "HEAD")
+    # Read to the close, an answer the server reset after it was whole came
+    # back as `SocketError`, and one from a server that held the connection
+    # open waited for it: a 2-byte body took 3 s. Nothing past what its
+    # framing says is read.
+    failed = nil.as(Cancelled | SocketError | Nil)
+    reader = -> do
+      read = sock.read(65536)
+      failed = read unless read.is_a?(String)
+      read.is_a?(String) && read.bytesize > 0 ? read : nil
     end
-    parse_response(answer.to_s, same_name?(method, "HEAD"))
+    got = ""
+    at = 0
+    while true
+      got, ends = read_head(got, at, 2147483647) { reader.call }
+      if failure = failed
+        return failure
+      end
+      # The connection ended before a head did: refused as it was, or the
+      # interim answer it ended after is the answer.
+      return parse_response(got, head) unless ends
+      body_start = ends + 4
+      final = parse_response(got[0, body_start], true)
+      status = final.status
+      if status >= 100 && status < 200 && status != 101
+        at = body_start
+        next
+      end
+      return final if head || status == 204 || status == 304 || status == 101
+      if te = final.header("Transfer-Encoding")
+        if refused = coding_refused(te)
+          raise "HTTP: " + refused
+        end
+        read = read_chunked(got, body_start, 2147483647) { reader.call }
+        if failure = failed
+          return failure
+        end
+        raise "HTTP: chunked body ends before its last chunk" if read.nil?
+        raise "HTTP: " + read if read.is_a?(String)
+        body, _ = read
+        return Response.new(status, final.reason, final.headers, body)
+      end
+      need = 9223372036854775807_i64
+      if cl = final.header("Content-Length")
+        n = content_length(cl)
+        # Not a length, or past what a string holds: refused as it was.
+        return parse_response(got, head) unless n && n <= 2147483647_i64
+        need = body_start.to_i64 + n
+      end
+      # Into one builder, in large reads: adding each 4 KB read to the
+      # answer so far copied it once per read, and a 24 MB answer took
+      # minutes.
+      answer = String::Builder.new
+      answer << got
+      while answer.bytesize.to_i64 < need
+        chunk = sock.read(65536)!
+        break if chunk.bytesize == 0
+        answer << chunk
+      end
+      return parse_response(answer.to_s, head)
+    end
   end
 
   def self.get(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError

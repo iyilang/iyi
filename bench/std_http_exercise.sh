@@ -217,6 +217,65 @@ else
 fi
 
 echo
+echo "== the client against a server that resets the connection after a whole answer"
+# Read to the close, `HTTP.get` answered `SocketError` ("the connection was
+# reset by the peer") for a whole 200 that the server reset 300 ms after
+# it, where Python's http.client answers the 200: an answer is read as far
+# as its framing says, and what the connection does after it is not read.
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3 to reset the connection with"
+else
+  cat > "$WORK/reset_client.iyi" <<'IYI'
+module main
+
+import std/http::{HTTP, Response}
+import std/socket::{SocketError}
+
+case got = HTTP.get("http://127.0.0.1:#{Program.args[0]}/x")
+in Response
+  puts "#{got.status} #{got.body}"
+in SocketError
+  puts "SocketError: #{got.message}"
+in Cancelled
+  puts "Cancelled"
+end
+IYI
+  if ! "$IYI" build -o "$WORK/reset_client" "$WORK/reset_client.iyi" > "$WORK/reset_client.build" 2>&1; then
+    echo "  the client did not build"
+    sed -n '1,8p' "$WORK/reset_client.build"
+    status=1
+  else
+    "$PY" - > "$WORK/reset.server.out" 2>&1 <<'PY' &
+import socket, struct, sys, time
+ls = socket.socket()
+ls.bind(("127.0.0.1", 0))
+ls.listen(1)
+print(ls.getsockname()[1], flush=True)
+c, _ = ls.accept()
+data = b""
+while b"\r\n\r\n" not in data:
+    data += c.recv(65536)
+c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+time.sleep(0.3)
+# A close with no lingering is a reset, on every platform.
+linger = struct.pack("HH", 1, 0) if sys.platform == "win32" else struct.pack("ii", 1, 0)
+c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+c.close()
+PY
+    reset_pid=$!
+    rport=$(await_port "$WORK/reset.server.out" "$reset_pid")
+    said=$(timeout 30 "$WORK/reset_client" "$rport" 2>&1)
+    wait "$reset_pid" 2>/dev/null
+    if [ "$said" = "200 hi" ]; then
+      echo "  a whole 200 that the server resets after is the 200"
+    else
+      echo "  the client answered: $said"
+      status=1
+    fi
+  fi
+fi
+
+echo
 echo "== the server under load"
 if command -v wrk >/dev/null 2>&1; then
   "$IYI" build --release -o "$WORK/server-release" "$REPO/bench/std_http_server.iyi" >"$WORK/server-release.build.log" 2>&1
@@ -339,6 +398,8 @@ mutate "a signed or low status read as one" 'code_text.bytesize == 3 && digits?(
 mutate "any version under HTTP/" 'sp1 && sp1 == 8 && digits?(line[5, 1]) && line.to_unsafe[6] == 46_u8 && digits?(line[7, 1])' 'sp1'
 mutate "an interim answer taken for the answer" 'break unless status >= 100 && status < 200 && status != 101 && start < text.bytesize' 'break'
 mutate "a 204 written with a body and a length" 'bodiless = (response.status >= 100 && response.status < 200) || response.status == 204 || response.status == 304' 'bodiless = false'
+mutate "a client that reads an answer with a length to the close" 'while answer.bytesize.to_i64 < need' 'while true'
+mutate "a client that reads a chunked answer to the close" 'if te = final.header("Transfer-Encoding")' 'if te = nil.as(String?)'
 mutate "an absolute-form target handed on whole" 'if authority = HTTP.absolute_form(target)' 'if authority = nil.as(Int32?)'
 mutate "a caller's length written beside a body it does not measure" 'unless head || response.status == 304' 'unless true'
 mutate "a caller's chunked framing written beside a length" 'raise "HTTP: #{name} is not written; the body goes with its length" if HTTP.same_name?(name, "Transfer-Encoding")' ''

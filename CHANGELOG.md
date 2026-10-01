@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **An adaptor built on a `SliceIterator` advances it.** `SliceIterator`
+  was a struct, so `first(2)` took a copy and the source started again:
+  `it.first(2).to_a` and then `it.to_a` gave [1, 2] and [1, 2, 3, 4], where
+  an `ArrayIterator` gives [1, 2] and [3, 4]. It is a class now, as
+  `ArrayIterator` is. `bench/std_slice_exercise.iyi` takes two through
+  `first(2)` and checks the rest; the old module answered [3, 6] and then
+  [3, 6, 9, 12, 15].
+
 - **YAML reads a core tag on a block mapping key, and its key refusals say
   what the header lists.** `!!str a: b` was refused as "an alias, anchor or
   tag as a mapping key is not supported", though the header supports the

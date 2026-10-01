@@ -3,7 +3,8 @@
 
 module bench/std_slice_exercise
 
-import std/slice::{Slice}
+import std/iterator::{Iterator}
+import std/slice::{Slice, SliceIterator}
 
 alias Bytes = Std::Slice::Bytes
 
@@ -258,6 +259,14 @@ def main : Nil
     ewi_indices << idx
   end
   puts "each_with_index: #{ewi_indices.to_s}"
+
+  # The iterator is a class, so an adaptor shares it: a struct was copied
+  # into `first(2)`, and the source then started again at 3, 6.
+  shared = SliceIterator.new(enum_s)
+  taken = shared.first(2).to_a
+  rest = shared.to_a
+  puts "iterator after first(2): #{taken} then #{rest}"
+  raise "iterator after first(2): expected [3, 6] then [9, 12, 15]" unless taken == [3, 6] && rest == [9, 12, 15]
 
   puts "== gc liveness verification"
   sub = make_interior_slice

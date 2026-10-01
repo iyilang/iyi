@@ -484,7 +484,12 @@ end
 # type twice as one that should, and then the only route from a slice to a
 # lazy chain was `fs.to_a` — copying the whole sequence, which is the cost
 # the tower exists to avoid.
-pub struct SliceIterator(T)
+#
+# A class, as `ArrayIterator` is (std/iterator): an adaptor keeps its source
+# by value, and a struct source was copied into it, so `it.first(2).to_a`
+# and then `it.to_a` gave [1, 2] and [1, 2, 3, 4] where an array's iterator
+# gives [1, 2] and [3, 4].
+pub class SliceIterator(T)
   def initialize(@slice : Slice(T))
     @index = 0
   end

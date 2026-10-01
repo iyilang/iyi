@@ -141,6 +141,18 @@ cp mods/app/lib.iyimod lib.good
 echo
 echo "== what the command line refuses"
 refuses "an unknown verb" "unknown command" -- "$IYI" frobnicate
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # An extension written as a batch file, the shape npm's shims take on
+    # Windows: the lookup is `CreateProcess`'s and appends `.exe` only, so
+    # `iyi batonly` with `iyi-batonly.cmd` on PATH said "unknown command or
+    # missing file" about a file that was there.
+    mkdir -p extbin
+    printf '@echo batonly %%*\r\n' > extbin/iyi-batonly.cmd
+    refuses "an extension that is a batch file" "iyi-batonly.cmd is a batch file" -- \
+      env PATH="$(cygpath -u "$WORK/extbin"):$PATH" "$IYI" batonly x
+    ;;
+esac
 # `help nonesuch` printed the whole usage and exited 0 - "yes, that is a
 # command" - and `help build` did the same, as if the verb had no help of
 # its own. `version extra` dropped the word.

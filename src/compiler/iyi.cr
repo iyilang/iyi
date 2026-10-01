@@ -180,6 +180,17 @@ module Iyi
         # extension point was never reached from `iyi`.
         Iyi::Command.run(options)
       else
+        {% if flag?(:win32) %}
+          # An extension written as a batch file, the shape npm's shims
+          # take on Windows: the lookup is `CreateProcess`'s, which appends
+          # `.exe` and nothing else, so `iyi bat` with `iyi-bat.cmd` on PATH
+          # answered "unknown command or missing file: bat" about a file
+          # that was right there. Said by name instead.
+          if script = {".cmd", ".bat"}.compact_map { |ext| Process.find_executable("iyi-#{command}#{ext}") }.first?
+            STDERR.puts "iyi: #{script} is a batch file, and an extension must be an .exe: iyi-#{command}.exe."
+            exit 1
+          end
+        {% end %}
         STDERR.puts "iyi: unknown command or missing file: #{command}"
         STDERR.puts "Run `iyi help` for what there is."
         exit 1

@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`iyi foo` with only `iyi-foo.cmd` or `iyi-foo.bat` on PATH says the
+  extension is a batch file.** The lookup is `CreateProcess`'s, which
+  appends `.exe` and nothing else, so an npm-style shim was "iyi: unknown
+  command or missing file: batonly" about a file that was there. It says
+  "iyi: C:\...\iyi-batonly.cmd is a batch file, and an extension must be an
+  .exe: iyi-batonly.exe." now. `bench/verbs_exercise.sh` checks it on
+  Windows; the old compiler said the command did not exist.
+
 - **`IYI_PATH` holding `$ORIGIN` alone is the compiler's own directory.**
   The expansion read the character after `$ORIGIN` without asking whether
   there was one: `IYI_PATH=<src>;$ORIGIN` died of "Index out of bounds

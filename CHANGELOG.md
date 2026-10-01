@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A captured local the starter reassigns inside `{% if %}` or `{% for
+  %}` after the thread starts is refused.** The walk for assignments after
+  the start read macro code as its text, so the line was never seen: a
+  thread reading a captured `Int64 | Float64` its starter kept
+  reassigning that way compiled and counted 243585 torn reads in a debug
+  build, a type tag from one write beside the payload of the other. The
+  walk reads the expansion now, and the line is refused as the same line
+  outside a macro is ("`limit` is assigned here, after the thread has
+  started"). `bench/thread_exercise.sh` step 6b checks both forms; the old
+  compiler built them.
+
 - **A field assigned by an included module's method, or by macro code
   in a method, makes the type not Share.** The scan for a field assigned
   outside `initialize` walked the class and its superclasses and read each

@@ -586,6 +586,34 @@ if ! grep -q "\`limit\` is assigned here, after the thread has started" build-re
   echo "the refusal did not name the variable:"; cat build-reassigned.log; exit 1
 fi
 printf '  refused: %s\n' "$(grep -m1 'is assigned here' build-reassigned.log | sed 's/^Error: //')"
+# The same line inside `{% if true %}` or `{% for %}`: the walk read the
+# macro's text rather than its expansion, so it compiled, and a thread
+# reading a captured `Int64 | Float64` its starter kept reassigning that
+# way counted 243585 torn reads in a debug build.
+for flow in if for; do
+  case "$flow" in
+    if) open='{% if true %}' ;;
+    for) open='{% for i in [1] %}' ;;
+  esac
+  cat > "reassigned_$flow.iyi" <<IYI
+limit = 1
+t = IyiThread.start do
+  puts limit
+  nil
+end
+$open
+  limit = 2
+{% end %}
+t.join
+IYI
+  if "$IYI" build "reassigned_$flow.iyi" -o "reassigned_$flow" > "build-reassigned-$flow.log" 2>&1; then
+    echo "a captured local assigned after the start inside {% $flow %} compiled:"; cat "build-reassigned-$flow.log"; exit 1
+  fi
+  if ! grep -q "\`limit\` is assigned here, after the thread has started" "build-reassigned-$flow.log"; then
+    echo "the {% $flow %} refusal did not name the variable:"; cat "build-reassigned-$flow.log"; exit 1
+  fi
+done
+echo "  and refused the same inside {% if %} and {% for %}"
 if ! "$IYI" build assigned_before.iyi -o assigned_before > build-assigned-before.log 2>&1; then
   echo "locals assigned before the start were refused:"; cat build-assigned-before.log; exit 1
 fi

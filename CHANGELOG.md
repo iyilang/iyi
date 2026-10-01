@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **The server reads `Connection` as a list of options: `close` anywhere
+  in it closes the connection, and an HTTP/1.0 `keep-alive` among others
+  keeps it.** The whole value was compared with "close": `Connection:
+  close, TE`, `TE, close` and two `Connection: close` lines (joined to
+  `close, close`) kept the connection open and were answered `Connection:
+  keep-alive`, against RFC 9110 §7.6.1 and RFC 9112 §9.6, and an HTTP/1.0
+  `Connection: TE, keep-alive` was closed. Each option is now compared
+  trimmed and without regard to case. `bench/std_http_exercise.iyi` checks
+  five lists; the old module read `close, TE` as keep-alive.
+
 - **`Server.format_response` writes a caller's `Content-Length` only when
   it is the body's, or on a HEAD or a 304, which send no body, and refuses
   a caller's `Transfer-Encoding`.** A caller's length was written whatever

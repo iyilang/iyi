@@ -269,6 +269,16 @@ assert_str "POST / ?- Content-Length=5;Transfer-Encoding=chunked; \"\" close", s
 assert_str "POST / ?- Connection=keep-alive;Transfer-Encoding=chunked; \"\" close", server_reads("POST / HTTP/1.0\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"), "chunks in HTTP/1.0 close the connection"
 puts "  chunks beside a length, or in HTTP/1.0, close the connection"
 
+# `Connection` is a list of options (RFC 9110 §7.6.1), read by `has_token?`:
+# `close, TE` and two `close` lines kept the connection open, answered
+# `keep-alive`.
+assert_str "GET / ?- Connection=close, TE; \"\" close", server_reads("GET / HTTP/1.1\r\nConnection: close, TE\r\n\r\n"), "close first in the list closes"
+assert_str "GET / ?- Connection=TE, Close; \"\" close", server_reads("GET / HTTP/1.1\r\nConnection: TE, Close\r\n\r\n"), "close last in the list closes"
+assert_str "GET / ?- Connection=close, close; \"\" close", server_reads("GET / HTTP/1.1\r\nConnection: close\r\nConnection: close\r\n\r\n"), "close said twice closes"
+assert_str "GET / ?- Connection=TE, keep-alive; \"\" keep", server_reads("GET / HTTP/1.0\r\nConnection: TE, keep-alive\r\n\r\n"), "an HTTP/1.0 keep-alive in a list keeps"
+assert_str "GET / ?- Connection=TE; \"\" keep", server_reads("GET / HTTP/1.1\r\nConnection: TE\r\n\r\n"), "a list without close keeps"
+puts "  Connection is read as a list of options: close anywhere closes"
+
 # A status line is `HTTP/` DIGIT "." DIGIT and three digits from 100.
 assert_str "refused: HTTP: not a status line: HTTP/1.1 +20 OK", client_reads("HTTP/1.1 +20 OK\r\n\r\n"), "a signed status is refused"
 assert_str "refused: HTTP: not a status line: HTTP/1.1 099 OK", client_reads("HTTP/1.1 099 OK\r\n\r\n"), "a status under 100 is refused"

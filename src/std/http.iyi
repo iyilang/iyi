@@ -305,9 +305,13 @@ pub struct Server
       query = origin[q + 1, origin.bytesize - q - 1]
     end
     stub = Request.new(method, path, query, headers, "")
+    # `Connection` is a list of options (RFC 9110 §7.6.1), and `close`
+    # among them closes (RFC 9112 §9.6): read as one value, `close, TE` and
+    # two `Connection: close` lines, joined to `close, close`, kept the
+    # connection open and were answered `keep-alive`.
     close = version == "HTTP/1.0"
     if conn = stub.header("Connection")
-      close = HTTP.same_name?(HTTP.trim(conn), "close") || (version == "HTTP/1.0" && !HTTP.same_name?(HTTP.trim(conn), "keep-alive"))
+      close = HTTP.has_token?(conn, "close") || (version == "HTTP/1.0" && !HTTP.has_token?(conn, "keep-alive"))
     end
     body_start = split_at + 4
     after = text[body_start, text.bytesize - body_start]
@@ -674,6 +678,15 @@ pub struct HTTP
       i = i + 1
     end
     true
+  end
+
+  # Whether a list of tokens (RFC 9110 §5.6.1), its repeated lines joined
+  # with ", ", holds *token*, in any case.
+  def self.has_token?(list : String, token : String) : Bool
+    list.split(',').each do |part|
+      return true if same_name?(trim(part), token)
+    end
+    false
   end
 
   # A token (RFC 9110 §5.6.2): what a method or a field name is made of.

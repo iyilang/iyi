@@ -309,7 +309,10 @@ for shape in panicked finished value crossed; do
   timeout 30 ./taskdeadlock "$shape" > "taskdeadlock-$shape.txt" 2>&1
   code=$?
   want=2; [ "$shape" = crossed ] && want=3
-  reports=$(grep -c 'deadlock' "taskdeadlock-$shape.txt")
+  # The panic lines alone: darwin's backtrace names frames such as
+  # `IyiScheduler::deadlock`, and counting every line that says the word
+  # read seven reports where the program made one.
+  reports=$(grep -c 'panic: .*deadlock' "taskdeadlock-$shape.txt")
   cleanups=$(grep -c '^cleanup: ' "taskdeadlock-$shape.txt")
   if [ "$code" -ne 1 ] || [ "$reports" -ne 1 ] || [ "$cleanups" -ne "$want" ] ||
      grep -q 'stack overflow' "taskdeadlock-$shape.txt"; then

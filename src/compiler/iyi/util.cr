@@ -87,9 +87,10 @@ module Iyi
   # pattern's own characters escaped, since a directory's name is a name.
   # `proj [v2]` and `x{a,b}` were read as a character class and a brace,
   # matched nothing, and `iyi test` found no tests there while `iyi fmt
-  # --check` passed having checked nothing.
+  # --check` passed having checked nothing. And without a verbatim prefix,
+  # whose `?` is a pattern character too (see `unverbatim`).
   def self.glob_root(dir : String | ::Path) : ::Path
-    posix = ::Path[dir].to_posix.to_s
+    posix = ::Path[unverbatim(dir.to_s)].to_posix.to_s
     escaped = String.build do |io|
       posix.each_char do |char|
         io << '\\' if char.in?('*', '?', '[', ']', '{', '}')
@@ -97,6 +98,32 @@ module Iyi
       end
     end
     ::Path.posix(escaped)
+  end
+
+  # iyi: *path* without the Win32 prefix that says "take this verbatim" or
+  # "this is a device": `\\?\C:\p` and `\\.\C:\p` are `C:\p`, and
+  # `\\?\UNC\server\share\p` is `\\server\share\p`. Rust's
+  # `fs::canonicalize`, which editors and agents written in it use, hands
+  # every path over in this form, and each verb that walks or compares
+  # paths treated the prefix as part of the name: `fmt --check` and `test`
+  # of a `\\?\` directory globbed `//\?/C:/...`, which matches nothing, and
+  # answered exit 0 and "no *_test.iyi found"; `check --affected` and `test
+  # --affected` of a `\\?\` file compared `\\?\c:\...` with `c:\...`, chose
+  # no consumer and called that a clean verdict; and `run` of a `\\?\` entry
+  # named its cache directory `\-C:-...`, which Windows refuses for the
+  # colon. Any other prefixed path - a pipe, a volume - is left as it is.
+  def self.unverbatim(path : String) : String
+    {% if flag?(:win32) %}
+      separator = {'\\', '/'}
+      return path unless path.size > 4 && path[0].in?(separator) && path[1].in?(separator) &&
+                         path[2].in?('?', '.') && path[3].in?(separator)
+      rest = path[4..]
+      if rest.size > 4 && rest[0, 3].compare("UNC", case_insensitive: true) == 0 && rest[3].in?(separator)
+        return "\\\\#{rest[4..]}"
+      end
+      return rest if rest.size > 2 && rest[0].ascii_letter? && rest[1] == ':' && rest[2].in?(separator)
+    {% end %}
+    path
   end
 
   def self.native_path(path : String) : String
@@ -128,13 +155,14 @@ module Iyi
 
   # iyi: *path* spelled the way the platform's file system compares names:
   # as it is on Linux, and on Windows with one separator and one case,
-  # because NTFS does not tell `C:\App\Util.iyi` from `c:/app/util.iyi`.
+  # because NTFS does not tell `C:\App\Util.iyi` from `c:/app/util.iyi`,
+  # and without a verbatim prefix, which names the same file (`unverbatim`).
   # For a path that may not exist yet, or a set of them, where
   # `same_file?` cannot ask. Every comparison that did not do this
   # answered differently for a drive letter an editor lowercased.
   def self.path_key(path : String) : String
     {% if flag?(:win32) %}
-      path.tr("/", "\\").downcase
+      unverbatim(path).tr("/", "\\").downcase
     {% else %}
       path
     {% end %}

@@ -125,6 +125,14 @@ case "$(uname -s)" in
     "$IYI" test --affected "$short" . > sel_short.txt 2>&1
     grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_short.txt ||
       { echo "the 8.3 short name selected otherwise ($short):"; cat sel_short.txt; exit 1; }
+    # And spelled verbatim, `\\?\C:\...` or `\\.\C:\...`, the form Rust's
+    # `fs::canonicalize` hands over: the prefix stayed in the key, no
+    # closure held `\\?\c:\...`, and it was "0 to run, 1 skipped".
+    for prefix in '\\?\' '\\.\'; do
+      "$IYI" test --affected "$prefix$(cygpath -w "$WORK/calc/add.iyi")" . > sel_verbatim.txt 2>&1
+      grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_verbatim.txt ||
+        { echo "the changed file spelled $prefix selected otherwise:"; cat sel_verbatim.txt; exit 1; }
+    done
     ;;
 esac
 "$IYI" test --affected nope.iyi . > off.txt 2>&1

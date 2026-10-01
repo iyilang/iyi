@@ -308,6 +308,27 @@ else
 fi
 "$IYI" fmt bom/app/util.iyi > /dev/null 2>&1
 cmp -s bom/app/util.iyi bom/util.keep || { echo "  fmt rewrote a formatted file with a byte order mark"; status=1; }
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # The entry spelled verbatim, `\\?\C:\...` or `\\.\C:\...`, or with the
+    # trailing space Win32 drops: the cache directory was named after the
+    # path's parts, `\-C:-...` - refused for its colon, "The directory name
+    # is invalid" - and `...-good.iyi `, made without its space and then
+    # written into with it, "The system cannot find the path specified".
+    for prefix in '\\?\' '\\.\'; do
+      if "$IYI" run "$prefix$(cygpath -w "$WORK/hdr/app/main.iyi")" > hdr_verbatim.out 2>&1 && grep -qx 42 hdr_verbatim.out; then
+        echo "  a module run by its path spelled $prefix: builds and runs"
+      else
+        echo "  a module run by its path spelled $prefix did not run:"; sed -n '1,3p' hdr_verbatim.out; status=1
+      fi
+    done
+    if "$IYI" run "good.iyi " > space_run.out 2>&1 && grep -qx ok space_run.out; then
+      echo "  a program run by its name with a trailing space: builds and runs"
+    else
+      echo "  a program run by its name with a trailing space did not run:"; sed -n '1,3p' space_run.out; status=1
+    fi
+    ;;
+esac
 # A CRLF file keeps its CRLF through `fmt`, and a literal keeps the line
 # breaks it holds, which are the program's data: every `\n` was turned, so
 # a string holding a bare line break gained a `\r` and printed eight bytes
@@ -366,6 +387,12 @@ case "$(uname -s)" in
     share="$(cygpath -w "$WORK/rooted/proj [v2]")"
     share="\\\\127.0.0.1\\${share:0:1}\$${share:2}"
     [ -d "$share" ] && roots+=("$share")
+    # And spelled verbatim, `\\?\C:\...` and `\\?\UNC\server\share\...`,
+    # the form Rust's `fs::canonicalize` hands over: the `?` went into the
+    # pattern as a pattern character, nothing matched, and `fmt --check`
+    # exited 0 while `test` said "no *_test.iyi found".
+    roots+=("\\\\?\\$(cygpath -w "$WORK/rooted/proj [v2]")")
+    [ -d "$share" ] && roots+=("\\\\?\\UNC\\${share:2}")
     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/rooted/x{a,b}/loop")" "$(cygpath -w "$WORK/rooted/x{a,b}")" > /dev/null
     ;;
 esac

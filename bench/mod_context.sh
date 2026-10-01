@@ -112,6 +112,24 @@ case "$answer" in
     ;;
 esac
 
+# The same change spelled verbatim, `\\?\C:\...`, the form Rust's
+# `fs::canonicalize` hands over. The prefix stayed in the key the closure
+# is compared by, so nothing matched and the answer was `{"checked":[]}`:
+# no consumer, all compile.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    answer="$(cd "$WORK/affected" && "$IYI" check --affected "\\\\?\\$(cygpath -w "$REPO/src/std/text.iyi")" --json 2>&1)"
+    case "$answer" in
+      *'"consumer.iyi"'*) echo "check --affected of a change spelled \\\\?\\ names its consumer" ;;
+      *)
+        echo "FAIL: check --affected of a change spelled \\\\?\\ named no consumer"
+        echo "  $answer"
+        status=1
+        ;;
+    esac
+    ;;
+esac
+
 # And the workspace R-1 exists for: the dependency is a `.iyimod` and its
 # source is gone (III.7). A build reads it because it was told to with a
 # flag; these verbs have no flag and read `mods` beside the root, for a

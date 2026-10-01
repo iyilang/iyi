@@ -142,6 +142,25 @@
 
 ### Fixed
 
+- **A path spelled `\\?\C:\...`, `\\.\C:\...` or `\\?\UNC\server\share\...`
+  names the file it names: `fmt --check` and `test` walk it, `--affected`
+  matches it, and `run`, `build` and `test` build it.** Rust's
+  `fs::canonicalize` hands paths over in this form, and every verb that
+  walks, compares or caches by path read the prefix as part of the name.
+  `fmt --check` of a `\\?\` directory exited 0 having checked nothing and
+  `test` of it said "no *_test.iyi found"; `test --affected` and `check
+  --affected` of a `\\?\` file answered "0 to run, 4 skipped: no test's
+  imports reach the change" and "0 consumer(s) checked, all compile"; and
+  `run` of a `\\?\` or `\\.\` entry stopped at
+  "...\cache\-C:-Users-...-main.iyi: The directory name is invalid." The
+  prefix is taken off (`Iyi.unverbatim`) wherever a glob pattern, a
+  comparison key or a cache directory's name is made, and the cache name is
+  made of characters Windows keeps, so `run "good.iyi "`, which answered
+  "...-good.iyi /bc_flags.o0: The system cannot find the path specified.",
+  runs too. `bench/verbs_exercise.sh`, `bench/test_verb.sh` and
+  `bench/mod_context.sh` check each spelling on Windows; the old compiler
+  gave the answers quoted.
+
 - **A regex refusal names backreferences, recursion and comments for
   what they are, and `[[:digit:]]` is RE2's digit class.** `(?P=n)` and
   `(?P>n)` were refused as "not a group name", `\k<n>` as an "unknown

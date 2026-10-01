@@ -182,7 +182,10 @@ pub class UdpSocket
     while true
       raise "socket is closed" if @fd < 0
       count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))
-      next if count < 0_i64 && UdpSocket.__is_eintr(count)
+      # The refusal an earlier send's ICMP left on a connected socket, which
+      # POSIX reports once and Windows is told not to (see `__sys_socket`'s
+      # win32 arm): read, it is gone, and the receive asks again.
+      next if count < 0_i64 && (UdpSocket.__is_eintr(count) || UdpSocket.__is_refused(count))
       return count.to_i32 if count >= 0_i64
       # A datagram larger than the buffer. POSIX fills the buffer, drops
       # the rest and answers the bytes it wrote; Winsock refuses the call
@@ -217,7 +220,7 @@ pub class UdpSocket
     len = 28_u32
     while true
       count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))
-      next if count < 0_i64 && UdpSocket.__is_eintr(count)
+      next if count < 0_i64 && (UdpSocket.__is_eintr(count) || UdpSocket.__is_refused(count))
       return count.to_i32 if count >= 0_i64
       return capacity if UdpSocket.__is_msgsize(count)
       return nil if UdpSocket.__is_eagain(count) || UdpSocket.__is_unbound(count)
@@ -301,6 +304,9 @@ pub class UdpSocket
   def send(bytes : Bytes) : Int32
     check_open
     res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64)
+    # An earlier datagram's refusal, reported here instead of this send,
+    # which did not go out: the report is gone once read, so it goes again.
+    res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64) if UdpSocket.__is_refused(res)
     raise "cannot send on UDP socket" if res < 0_i64
     res.to_i32
   end
@@ -576,6 +582,12 @@ pub class UdpSocket
     def self.__is_msgsize(res : Int64) : ::Bool
       false
     end
+
+    # ECONNREFUSED (61): the ICMP port-unreachable a connected socket's
+    # earlier send provoked, reported once by the next call.
+    def self.__is_refused(res : Int64) : ::Bool
+      res < 0_i64 && LibC.__error.value == 61
+    end
   {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
     AF_INET6        = 10
     SOL_SOCKET         = 1
@@ -752,6 +764,12 @@ pub class UdpSocket
       false
     end
 
+    # ECONNREFUSED (111): the ICMP port-unreachable a connected socket's
+    # earlier send provoked, reported once by the next call.
+    def self.__is_refused(res : Int64) : ::Bool
+      res == -111_i64
+    end
+
   {% elsif flag?(:win32) %}
     # AF_INET6 is 23 here, not Linux's 10 and not darwin's 30; the other
     # option numbers are Winsock's own too. `MSG_DONTWAIT` is 0 because
@@ -855,10 +873,10 @@ pub class UdpSocket
       # on it answers WSAECONNRESET instead of "nothing queued", and since
       # only WSAEWOULDBLOCK is read as that below, the receive panicked and
       # a server died of its first stale peer. Measured: a socket that sent
-      # to dead port 9 answered -10054 to the next `recvfrom`. POSIX never
-      # reports this, which is why the shared bodies have no case for it, so
-      # the report is turned off here rather than taught to them — the cure
-      # Windows itself offers.
+      # to dead port 9 answered -10054 to the next `recvfrom`. POSIX reports
+      # it only on a connected socket, and the shared bodies pass over it
+      # there (`__is_refused`); here the report is turned off instead — the
+      # cure Windows itself offers.
       off = 0_i32
       returned = 0_i32
       LibWs2_32.WSAIoctl(s, SIO_UDP_CONNRESET, pointerof(off).as(Void*), 4,
@@ -1054,6 +1072,11 @@ pub class UdpSocket
     def self.__is_msgsize(res : Int64) : ::Bool
       res == -10040_i64
     end
+
+    # Never: the report is turned off in `__sys_socket`.
+    def self.__is_refused(res : Int64) : ::Bool
+      false
+    end
   {% else %}
     AF_INET6          =     10
     SOL_SOCKET        =      1
@@ -1128,6 +1151,10 @@ pub class UdpSocket
     # No such refusal: a datagram larger than the buffer fills it, the
     # rest is dropped and the length answered is what fit.
     def self.__is_msgsize(res : Int64) : ::Bool
+      false
+    end
+
+    def self.__is_refused(res : Int64) : ::Bool
       false
     end
   {% end %}

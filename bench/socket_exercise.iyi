@@ -542,4 +542,28 @@ raise "closed_under_read: after the answer the peer read #{c_after.inspect}, not
 raise "closed_under_read: the parked read #{c_parked}" unless c_parked == "cancelled"
 puts "closed_under_read: ok"
 
+# A peer that resets after exactly one 4096-byte chunk: a read asking for
+# more takes the chunk, and the next read answers the reset. The read's
+# second receive met the reset and dropped it, and Linux reports a reset
+# once - the receive after it answers an end of file - so a transfer the
+# peer aborted read as one that ended cleanly. A close with bytes unread
+# in its queue is the reset; Linux's, since that is the platform measured.
+{% if flag?(:linux) %}
+  r_server = IyiSocket.listen("127.0.0.1", 0)
+  r_client = IyiSocket.connect("127.0.0.1", r_server.local_port).or_panic
+  r_conn = r_server.accept.or_panic
+  r_conn.write("r" * 4096).or_panic
+  r_client.write("unread").or_panic
+  sleep(50)
+  r_conn.close
+  sleep(50)
+  r_first = r_client.read(65536).or_panic
+  r_second = r_client.read(65536)
+  r_client.close
+  r_server.close
+  raise "reset_after_chunk: the first read got #{r_first.bytesize} bytes, not 4096" unless r_first.bytesize == 4096
+  raise "reset_after_chunk: after the chunk the read answered #{r_second.inspect}, not the reset" unless r_second.is_a?(SocketError) && r_second.disconnected?
+  puts "reset_after_chunk: ok"
+{% end %}
+
 puts "socket_exercise: all checks passed"

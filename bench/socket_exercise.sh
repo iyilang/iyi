@@ -83,6 +83,7 @@ echo "== every socket check reported"
 phrases="connect_accept message_exchange short_read closed_peer ipv6 unix timeout closed_under_read"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
+  Linux) phrases="$phrases reset_after_chunk" ;;
 esac
 for phrase in $phrases; do
   grep -q "$phrase: ok" "$WORK/socket-exercise.out" 2>/dev/null || {
@@ -323,6 +324,16 @@ prove_fails "local port returns 0" badport "local_port failed:" \
 # then parks every reader on its last 4 KB.
 prove_fails "a read whose buffer waits with it" inlined_read "retain: a reader parked" \
   '{ sub(/^  @\[NoInline\]$/, "  @[AlwaysInline]"); print }' --release
+
+# 12. A read whose second receive met the peer's reset and dropped it: the
+#     next read answered an end of file, and the aborted transfer read as
+#     a complete one. The exercise measures it on Linux.
+case "$(uname -s)" in
+  Linux)
+    prove_fails "a reset dropped after a full chunk" reset_dropped "reset_after_chunk:" \
+      '{ sub(/^    @pending_error = SocketError.new\("read from socket".*$/, ""); print }'
+    ;;
+esac
 
 echo
 echo "== what is not a port, and what is not an address"

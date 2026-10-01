@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A reset after a full read is a reset, and a connected UDP socket
+  outlives a peer that is not there.** A TCP read whose first receive
+  filled the 4 KB buffer asked again, and dropped that receive's error
+  for "the next read" - but Linux reports a reset once and answers 0
+  after, so a transfer the peer aborted read as a clean end of stream. The
+  error is kept and the next read answers it. On Linux a connected UDP
+  socket whose peer was not listening panicked at its next send or
+  receive ("cannot send on UDP socket"): the ICMP refusal comes back as
+  ECONNREFUSED there, which the module's Windows arm already turns off
+  so a server does not die of its first stale peer; Linux and darwin
+  pass over it too now. 200,000 address literals against `inet_pton` and
+  RFC 5952, 1.3 GB of TCP round trips and 42,000 datagrams found nothing
+  else; the socket and udp exercises check both and prove each fails.
+
 - **Every std module compiles beside every other.** `module std/bool`
   declares the namespace `Std::Bool`, and inside another std module a
   bare `Bool` then named it rather than the type: a program importing

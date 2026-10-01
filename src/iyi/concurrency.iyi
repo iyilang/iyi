@@ -1488,7 +1488,19 @@ class IyiScheduler
       return 0_i64
     end
 
-    park_overlapped_current(ms)
+    parked = park_overlapped_current(ms)
+    return parked unless parked.is_a?(Cancelled)
+    # Cancelled, and the read is the kernel's until its packet is off the
+    # port: the bytes and the OVERLAPPED's status are written when the
+    # poller takes it (`cancel` says what was measured), and a read whose
+    # bytes had come already is not ended by `CancelIoEx` at all. Answered
+    # `Cancelled` on the flag, those bytes were gone from the pipe and lost:
+    # a sibling that wrote three and then failed left the reader's buffer
+    # 0,0,0 at the answer and 97,98,99 after it, 8 runs in 8. So a status
+    # still STATUS_PENDING (0x103) parks once more for the packet, as
+    # `ProcessChild.settle` does, and bytes it carried are the answer.
+    park_overlapped_current if Pointer(UInt64).new(ov.address).value == 0x103_u64
+    fiber.io_bytes_read > 0_i64 ? fiber.io_bytes_read : parked
   end
 
   def self.wait_readable_current(fd : Int32 | Int64) : Nil | Cancelled

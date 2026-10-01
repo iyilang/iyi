@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **A cancelled read on Windows answers the bytes it had already taken, and
+  nothing is written into its buffer after it returns.** `iyi_read` on a
+  handle read through the completion port answered `Cancelled` as soon as
+  its group cancelled it, without waiting for the read's completion packet:
+  a sibling that wrote three bytes into the pipe and failed in the same turn
+  left the reader answered `Cancelled` with its buffer 0,0,0, the pipe
+  empty, and later the buffer holding 97,98,99, 8 runs in 8. The cancelled
+  read now waits for its packet while the operation is still pending, as
+  `std/process` and `std/socket` do, and answers the bytes it carried; one
+  that carried none answers `Cancelled`. `bench/concurrency_exercise.iyi`
+  requires the bytes answered or left in the pipe, and the buffer unchanged
+  after the answer; the old runtime answered "cancelled with its buffer
+  0,0,0, and the pipe held 0 bytes after".
+
 - **A `!` in a block kept as a proc - a task's body, most often - is
   refused as itself.** `!` expands to a `return`, and the captured-block
   check reported that: "can't return from captured block, use next",

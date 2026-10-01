@@ -318,6 +318,42 @@ end
 fail("poller: expected parked,wrote,read:7 — got #{io_order}") unless io_order == "parked,wrote,read:7"
 puts "a read parked in the poller and a sleeping writer woke it"
 
+# ── 5b. A read cancelled after its bytes came keeps them ────────────────
+# Windows posts the read, so the bytes leave the pipe for it when they are
+# written; a sibling that wrote three and failed in the same turn had the
+# cancelled read answer `Cancelled`, the pipe empty, and the bytes written
+# into the reader's buffer after the answer. POSIX waits for readability
+# and then reads, so there the cancelled wait leaves them in the pipe.
+# Either keeps them; neither writes into a buffer after its call is over.
+kept_fds = make_pipe
+kept_answer = "not asked"
+kept = Pointer(UInt8).malloc(4_u64)
+group do |g|
+  g.spawn do
+    got = iyi_read(kept_fds[0], kept.as(Void*), 3_u64)
+    kept_answer = got.is_a?(Cancelled) ? "cancelled" : "#{got} bytes"
+    0
+  end
+  g.spawn do
+    sleep(20)
+    __iyi_write(kept_fds[1], "abc".to_unsafe.as(Void*), 3_u64)
+    TaskFailed.new
+  end
+end
+kept_at_answer = "#{kept[0]},#{kept[1]},#{kept[2]}"
+kept_left = 0_i64
+if wait_readable(kept_fds[0].to_i32, 300) == true
+  rest = Pointer(UInt8).malloc(4_u64)
+  more = iyi_read(kept_fds[0], rest.as(Void*), 3_u64)
+  kept_left = more if more.is_a?(Int64)
+end
+kept_later = "#{kept[0]},#{kept[1]},#{kept[2]}"
+unless (kept_answer == "3 bytes" && kept_at_answer == "97,98,99" && kept_left == 0_i64) || (kept_answer == "cancelled" && kept_left == 3_i64)
+  fail("a read cancelled after its bytes came answered #{kept_answer} with its buffer #{kept_at_answer}, and the pipe held #{kept_left} bytes after: they were lost")
+end
+fail("a cancelled read's buffer was written after its answer: #{kept_at_answer}, then #{kept_later}") unless kept_later == kept_at_answer
+puts "a read cancelled after its bytes came kept them"
+
 # ── 6. A closed channel drains, then refuses, and wakes the parked ──────
 late = Channel(Int32).new(1)
 closed_saw = ""

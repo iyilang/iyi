@@ -169,8 +169,9 @@ end
 # `JSON.write_value` read and write its type: the built-in values, an
 # `Array` or `Hash(String, V)` of them, an `Any`, another serializable
 # type. A key the type has no field for is passed over; a field with no
-# key is refused by name unless its type admits `nil`, which it then
-# holds. It is what the other library's `include JSON::Serializable`
+# key keeps its default when it is written with one, and is otherwise
+# refused by name unless its type admits `nil`, which it then holds. It is
+# what the other library's `include JSON::Serializable`
 # writes, and the derive runs once, in the type's own module (SPEC.md
 # II.4), so a consumer calls the methods without the macro.
 pub macro serializable(declaration)
@@ -210,14 +211,18 @@ pub macro serializable(declaration)
     # which is the field's type with the nil taken out: `x || raise`.
     {% for field in declaration[:fields] %}
       json_value_{{ field[:name][1..].id }} = nil
+      json_found_{{ field[:name][1..].id }} = false
     {% end %}
     pull.read_object do |json_key|
       {% if declaration[:fields].empty? %}
         pull.skip
       {% else %}
+        # `json_found_` tells a key that was not there, where a field
+        # keeps its default, from a `null`.
         case json_key
         {% for field in declaration[:fields] %}
         when {{ field[:name][1..] }}
+          json_found_{{ field[:name][1..].id }} = true
           {% if field[:type].nilable? %}
             json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }} || raise("")))
           {% else %}
@@ -229,14 +234,27 @@ pub macro serializable(declaration)
         end
       {% end %}
     end
+    # A field written with a default (`@port : Int32 = 8080`) holds it
+    # already, so on a missing key it keeps its default; a key that is there
+    # wins, `null` included where the type admits nil. Whether there is a
+    # default is asked of the type when this method is compiled, not of the
+    # declaration, which carries names and types only: the port was refused
+    # by name, and `@host : String? = "localhost"` was overwritten with nil.
     {% for field in declaration[:fields] %}
-      {% if field[:type].nilable? %}
+      \{% if @type.instance_vars.any? { |ivar| ivar.name.stringify == {{ field[:name][1..] }} && ivar.has_default_value? } %}
+        {% if field[:type].nilable? %}
+          {{ field[:name].id }} = json_value_{{ field[:name][1..].id }} if json_found_{{ field[:name][1..].id }}
+        {% else %}
+          json_field_{{ field[:name][1..].id }} = json_value_{{ field[:name][1..].id }}
+          {{ field[:name].id }} = json_field_{{ field[:name][1..].id }} unless json_field_{{ field[:name][1..].id }}.nil?
+        {% end %}
+      \{% elsif {{ field[:type].nilable? }} %}
         {{ field[:name].id }} = json_value_{{ field[:name][1..].id }}
-      {% else %}
+      \{% else %}
         json_field_{{ field[:name][1..].id }} = json_value_{{ field[:name][1..].id }}
         raise "JSON for #{ {{ declaration[:name] }} } has no key #{ {{ field[:name][1..] }}.inspect }" if json_field_{{ field[:name][1..].id }}.nil?
         {{ field[:name].id }} = json_field_{{ field[:name][1..].id }}
-      {% end %}
+      \{% end %}
     {% end %}
   end
 end

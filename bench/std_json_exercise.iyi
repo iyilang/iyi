@@ -475,6 +475,20 @@ struct Places
   derive serializable
 end
 
+# Fields written with defaults, as `JSON::Serializable` reads them: on a
+# missing key a field keeps its default, and a key that is there wins,
+# `null` included. The port was refused by name and the host overwritten
+# with nil.
+struct Listener
+  @port : Int32 = 8080
+  @host : String? = "localhost"
+  getter port
+  getter host
+  getter name : String
+
+  derive serializable
+end
+
 place = Place.from_json("{\"x\": 1.5, \"extra\": [1, {\"deep\": null}], \"name\": \"a\", \"y\": -2}")
 assert_true place.x == 1.5 && place.y == -2.0 && place.name == "a" && place.note.nil?, "a derived type read, an unknown key passed over"
 assert_text "{\"x\":1.5,\"y\":-2.0,\"name\":\"a\",\"note\":null}", place.to_json, "a derived type written, a nil field as null"
@@ -496,7 +510,10 @@ group do |g|
   refusal = answer.message if answer.is_a?(Panicked)
 end
 assert_true refusal.includes?("JSON for Place has no key \"name\""), "a missing field refused by name: #{refusal}"
-puts "  read, written and round-tripped: nested, arrays, hashes, nil, unknown keys, a missing key refused"
+assert_text "{\"port\":1,\"host\":\"localhost\",\"name\":\"x\"}", Listener.from_json("{\"name\": \"x\", \"port\": 1}").to_json, "a nilable field keeps its default for a missing key"
+assert_text "{\"port\":8080,\"host\":\"localhost\",\"name\":\"x\"}", Listener.from_json("{\"name\": \"x\"}").to_json, "a field keeps its default for a missing key"
+assert_text "{\"port\":2,\"host\":null,\"name\":\"x\"}", Listener.from_json("{\"host\": null, \"name\": \"x\", \"port\": 2}").to_json, "a key that is there wins over the default, null included"
+puts "  read, written and round-tripped: nested, arrays, hashes, nil, unknown keys, defaults, a missing key refused"
 
 # ---------------------------------------------------------------------------
 # Refusals

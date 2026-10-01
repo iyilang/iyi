@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **A tab after a YAML block scalar's indentation is text.** The indentation
+  was detected over spaces and tabs, so a first line `  \techo hi` set three
+  columns, ended its own scalar and was refused:
+  `script: |\n  \techo hi\n  done\n` gave "tab used for indentation at line
+  2, column 3", and `foo: |-\n \tbar\n` the same at column 2. Indentation is
+  the leading spaces alone now, and the tab is text: "\techo hi\ndone\n" and
+  "\tbar", as PyYAML and ruamel read them (yaml-test-suite 96NN).
+  `bench/std_yaml_exercise.iyi` reads both; the old module refused the
+  first.
+
 - **A YAML block scalar at the document root may start at the first
   column.** Its indentation had a floor of 1 even at the root, where the
   text may begin at column 0, so `--- |\nfoo\nbar\n` and

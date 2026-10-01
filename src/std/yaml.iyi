@@ -1681,10 +1681,13 @@ pub class Parser
       # before it with more spaces: the text line is then less indented
       # and ends the scalar (a comment there is a trailing comment). Only
       # the text line counted, and the empty lines' extra spaces went
-      # missing (see below).
+      # missing (see below). Indentation is spaces alone, as `@heads`
+      # has it, and a tab after them is text: counted, it made a first
+      # line ` \tbar` two columns deep, so the line ended its own scalar
+      # and was refused as "tab used for indentation".
       look = @line + 1
       while look < @starts.size
-        content = skip_blank(@starts[look])
+        content = @heads[look]
         if content < @ends[look]
           indent = content - @starts[look] if content - @starts[look] > indent
           break

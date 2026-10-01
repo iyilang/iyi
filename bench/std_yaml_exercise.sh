@@ -198,6 +198,9 @@ prove_caught folded "a folded scalar drops its leading empty lines" \
 prove_caught spaced "spaces past the indentation make an empty line" \
   "spaces past the indentation on a blank line are text" \
   'if start + spaces >= finish && spaces <= indent' 'if start + spaces >= finish'
+prove_caught tabindent "a tab after a block scalar's indentation counts as indentation" \
+  "a tab after a block scalar's indentation is text" \
+  'content = @heads[look]' 'content = skip_blank(@starts[look])'
 prove_caught keep "the line after the stream's last line break is kept" \
   "keep chomping adds no line after the stream's last line break" \
   'break if finish >= @size' 'break if finish >= @size && false'

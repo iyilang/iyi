@@ -55,6 +55,12 @@ folded = YAML.parse(">\n  hello\n  world\n")
 assert_str("hello world\n", folded.as_s, "folded scalar")
 literal = YAML.parse("|\n  hello\n  world\n")
 assert_str("hello\nworld\n", literal.as_s, "literal scalar")
+# Block scalar indentation is spaces alone, and a tab after them is text:
+# counted, it ended the scalar at its own first line, which was refused as
+# "tab used for indentation".
+assert_str("\techo hi\ndone\n", reads("script: |\n  \techo hi\n  done\n", "a tab after a block scalar's indentation is text")["script"].as_s, "a tab after a block scalar's indentation is text")
+assert_str("\tbar", reads("foo: |-\n \tbar\n", "a tab after one space of indentation is text")["foo"].as_s, "a tab after one space of indentation is text")
+puts "  a tab after a block scalar's indentation is text"
 entries = YAML.parse("- |\n  x\n- >-\n  y\n  z\n- 2\n")
 assert_true(entries.size == 3, "block scalars as sequence entries do not eat the next entry")
 assert_str("x\n", entries[0].as_s, "literal entry")

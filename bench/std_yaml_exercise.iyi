@@ -141,6 +141,14 @@ assert_true(docs.size == 2 && docs[0].as_i == 1_i64 && docs[1].as_i == 2_i64, "t
 # second `...` was refused as "a document end marker with no document".
 marked = Parser.new("a: 1\n...\n...\n---\nb\n").parse_all
 assert_true(!marked.nil? && marked.size == 2 && marked[1].as_s == "b", "a document's end may be marked more than once")
+# A block scalar at the root may start at the first column, where a
+# document marker ends it: `--- |\nfoo` was refused as "unexpected
+# content" and `|-\n#x` read as "", the line taken for a comment.
+assert_str("foo\nbar\n", reads("--- |\nfoo\nbar\n", "a root block scalar may start at the first column").as_s, "a root block scalar may start at the first column")
+assert_str("#x", reads("|-\n#x\n", "a '#' at a root block scalar's first column is text").as_s, "a '#' at a root block scalar's first column is text")
+scalar_docs = Parser.new("--- |\nfoo\n--- >\nbar\nbaz\n...\n").parse_all
+assert_true(!scalar_docs.nil? && scalar_docs.size == 2 && scalar_docs[0].as_s == "foo\n" && scalar_docs[1].as_s == "bar baz\n", "a document marker ends a root block scalar at the first column")
+puts "  a root block scalar may start at the first column, and a document marker ends it"
 keys = YAML.parse("1: one\ntrue: x\n")
 assert_str("one", keys[Any.new(1_i64)].as_s, "integer key")
 # The core schema's integer is `[-+]?[0-9]+`: `0777` is 777, as the header

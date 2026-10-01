@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A YAML block scalar at the document root may start at the first
+  column.** Its indentation had a floor of 1 even at the root, where the
+  text may begin at column 0, so `--- |\nfoo\nbar\n` and
+  `--- >\nline1\nline2\n` were refused ("unexpected content at line 2,
+  column 1") and `--- |\n# not a comment\n`, `--- >\n#a\n#b\n` and
+  `|-\n#x\n` read as "", their lines taken for comments - ruamel.yaml writes
+  a top-level literal that way. The floor is 0 at the root and a document
+  marker ends such a scalar, so they read `"foo\nbar\n"`, `"line1 line2\n"`,
+  `"# not a comment\n"`, `"#a #b\n"` and `"#x"`, as ruamel reads them.
+  `bench/std_yaml_exercise.iyi` reads three such streams; the old module
+  refused the first.
+
 - **`YAML::Any` sequences and mappings hash so that keys spread.** A
   sequence hashed as `31 * h + item`, a mapping as a sum of
   `31 * key + value`, and an integer as its own low bits: a 150 by 150 grid

@@ -219,6 +219,9 @@ prove_caught flowfold "a plain scalar in a flow collection stops at its line end
 prove_caught docend "a document's end marked more than once is refused" \
   "a document's end may be marked more than once" \
   $'          skip_blank_lines\n        end\n        implicit_allowed = true' $'          break\n        end\n        implicit_allowed = true'
+prove_caught rootscalar "a root block scalar must be indented" \
+  "a root block scalar may start at the first column" \
+  $'      floor = parent + 1\n' $'      floor = parent + 1\n      floor = 1 if floor < 1\n'
 prove_caught tagbelow "a scalar tag alone on its line applies to the resolved node below" \
   "a tag over an empty node tags the empty scalar" \
   'if tag.nil? || tag == "!!seq" || tag == "!!map"' 'if true'

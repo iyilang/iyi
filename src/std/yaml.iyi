@@ -1696,14 +1696,18 @@ pub class Parser
         indent = spaces if spaces > indent
         look = look + 1
       end
+      # At the root (`parent` -1) the text may start at the first column,
+      # where a document marker ends it (below). A floor of 1 there
+      # refused `--- |\nfoo` as "unexpected content" and read `|\n#x` as
+      # "", the line taken for a comment after an empty scalar.
       floor = parent + 1
-      floor = 1 if floor < 1
       indent = floor if indent < floor
     end
     lines = [] of String
     look = @line + 1
     last_content = @line
     while look < @starts.size
+      break if document_marker?(look)
       start = @starts[look]
       finish = @ends[look]
       spaces = 0

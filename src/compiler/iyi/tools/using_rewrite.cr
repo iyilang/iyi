@@ -36,7 +36,10 @@ module Iyi
       collect_scopes(nodes, scopes, top: true)
       return nil unless scopes.any?(&.any?(UsingDecl))
 
-      starts = [0]
+      # Line 1 starts after a byte order mark: the lexer drops it before it
+      # counts columns, so a `using` on line 1 of a marked file was cut one
+      # character to the left.
+      starts = [text.starts_with?('\uFEFF') ? 1 : 0]
       text.each_char_with_index { |char, index| starts << index + 1 if char == '\n' }
       # {from, to, replacement}: character offsets, `to` exclusive.
       spans = [] of {Int32, Int32, String}

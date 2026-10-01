@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`iyi fix` edits line 1 of a file saved with a byte order mark where
+  the error is.** The lexer drops the mark before it counts columns, and
+  `fix` indexed the line with the mark still in it, so every edit on line
+  1 landed one character to the left: `x = -5.abss` was "fixed" to
+  `-5abss` ("fixed bom1.iyi:1:8: '.abs' -> 'abs'"), which then answered
+  `unexpected token: "abss"`, and a `using` on line 1 lost the mark and
+  became `import app/greeter::{polite}}`. Both edits step over the mark
+  now, and the mark stays. `bench/verbs_exercise.sh` fixes both files
+  behind a mark; the old compiler wrote `-5abss`.
+
 - **A busy run queue lets sleepers and the poller in.** The clock and
   the poller were asked only when no fiber was runnable, and `sleep(0)`
   puts its caller straight back: a task polling a flag with `sleep(0)`

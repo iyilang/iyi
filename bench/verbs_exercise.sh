@@ -623,6 +623,23 @@ else
   "$IYI" fix good.iyi --json | sed -n '1,2p'
   status=1
 fi
+# A byte order mark is not a column: the lexer drops it before it counts,
+# and on line 1 `fix` cut one character to the left - `x = -5.abss` became
+# `-5abss`, which does not parse, and a `using` there lost its mark and
+# became `import app/greeter::{polite}}`.
+mkdir -p "$WORK/marked/app"
+printf 'module app/greeter\n\npub def polite : String\n  "hi"\nend\n' > "$WORK/marked/app/greeter.iyi"
+printf '\357\273\277x = -5.abss\nputs x\n' > "$WORK/marked/typo.iyi"
+printf '\357\273\277using app/greeter::{polite}\n\nputs polite\n' > "$WORK/marked/using.iyi"
+printf '\357\273\277x = -5.abs\nputs x\n' > "$WORK/marked/typo.want"
+printf '\357\273\277import app/greeter::{polite}\n\nputs polite\n' > "$WORK/marked/using.want"
+(cd "$WORK/marked" && "$IYI" fix typo.iyi && "$IYI" fix using.iyi) > "$WORK/marked.txt" 2>&1; marked_code=$?
+if [ "$marked_code" -eq 0 ] && cmp -s "$WORK/marked/typo.iyi" "$WORK/marked/typo.want" &&
+   cmp -s "$WORK/marked/using.iyi" "$WORK/marked/using.want"; then
+  echo "  fix on line 1 behind a byte order mark: the edit and the using rewrite land where they are"
+else
+  echo "  fix behind a byte order mark (exit $marked_code):"; sed 's/^/    /' "$WORK/marked.txt" | head -3; status=1
+fi
 
 echo
 echo "== what a damaged artifact says"

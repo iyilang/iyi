@@ -194,8 +194,13 @@ class Iyi::Command
         remaining = diag
         break
       end
+      # The column is the lexer's, and the lexer drops a byte order mark
+      # before it counts: on line 1 of a marked file every edit landed one
+      # character to the left, and `-5.abss` became `-5abss`, which does not
+      # parse. The mark is a character of `line_text`, so it is stepped over.
       chars = line_text.chars
-      from = chars[diag.column - 1, diag.size].join
+      at = diag.column - 1 + (diag.line == 1 && line_text.starts_with?('\uFEFF') ? 1 : 0)
+      from = chars[at, diag.size].join
       if from == replacement
         # The suggestion equals what is already written: applying it
         # would change nothing and loop forever. Report and stop.
@@ -203,8 +208,9 @@ class Iyi::Command
         break
       end
 
-      lines[diag.line - 1] = chars[0, diag.column - 1].join + replacement +
-                             ((chars[diag.column - 1 + diag.size..]? || [] of Char).join)
+      # Spliced at the same `at`, past the mark the lexer drops.
+      lines[diag.line - 1] = chars[0, at].join + replacement +
+                             ((chars[at + diag.size..]? || [] of Char).join)
       File.write(path, lines.join('\n'))
       applied << {diag.line, diag.column, from, replacement}
     end

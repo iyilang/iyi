@@ -142,6 +142,23 @@
 
 ### Fixed
 
+- **A rendezvous send is delivered to the receive it woke.** A send that
+  found a receiver parked put its value in the channel and answered
+  `nil`, delivered, on the word of the wake. A `select` woken that way
+  took an arm that was ready by the time it ran, and a receiver
+  cancelled before it ran answered `Cancelled`; either way the value
+  stayed in a channel with no capacity after its sender was told it was
+  taken. A select parked on two channels took "first:1" and left the 2
+  its other sender had been told was taken, and a cancelled receiver
+  left a 5. The sender writes the value into the parked receiver's own
+  slot now and the wake is the delivery: the select takes the arm that
+  woke it, the cancelled receiver answers its 5, and a sender the select
+  did not take stays parked until a receive takes its value. A buffered
+  channel is as it was, and a round trip between two tasks costs what it
+  did: 77-82 ns before, 75-82 after (release, fastest and median of ten
+  runs). `bench/concurrency_exercise.iyi` runs both shapes; the old
+  runtime answered "select first:1;then second:2;".
+
 - **The server reads `Connection` as a list of options: `close` anywhere
   in it closes the connection, and an HTTP/1.0 `keep-alive` among others
   keeps it.** The whole value was compared with "close": `Connection:

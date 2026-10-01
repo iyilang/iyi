@@ -740,20 +740,34 @@ class IyiWaiter
   # `select`'s arms - is never parked again, or its link would join two
   # queues.
   property linked : Bool
+  # Where a rendezvous sender puts its value: the address of a `T` the
+  # parked receive owns, written only while the node is `current?`, so
+  # only while that receive is suspended in the park that made it. The
+  # flag is the receipt: a woken receive that was handed a value answers
+  # it, whatever else has happened since (`Channel#hand`).
+  @slot : UInt64
+  property handed : Bool
 
-  def initialize(@fiber : IyiFiber, @nonce : UInt64)
+  def initialize(@fiber : IyiFiber, @nonce : UInt64, @slot : UInt64)
     @next_node = nil
     @linked = false
+    @handed = false
   end
 
   # The same node for another park of the same fiber.
-  def renew(nonce : UInt64) : Nil
+  def renew(nonce : UInt64, slot : UInt64) : Nil
     @nonce = nonce
+    @slot = slot
     @next_node = nil
+    @handed = false
   end
 
   def fiber : IyiFiber
     @fiber
+  end
+
+  def slot : UInt64
+    @slot
   end
 
   # Still the park it was made for: the fiber is channel-parked and has
@@ -2797,10 +2811,11 @@ end
 #
 # `Channel(T).new` is a rendezvous, as Crystal's is: a send completes when
 # a receive takes it, and either side parks until the other arrives. A
-# parked sender carries its value in its node's box, so the handoff needs
-# no third party; `new(capacity)` buffers that many sends first. Closing
-# drains what was delivered, then refuses: a parked sender whose box is
-# still full failed, and its value dies with the node.
+# parked sender carries its value in its node's box, and a parked
+# receiver has a slot a sender fills, so the handoff needs no third
+# party; `new(capacity)` buffers that many sends first. Closing drains
+# what was delivered, then refuses: a parked sender whose box is still
+# full failed, and its value dies with the node.
 #
 # `T : Share` is not enforced yet for the reason the file header gives:
 # one thread cannot race, and a marker that gates nothing cannot be
@@ -2861,14 +2876,19 @@ class Channel(T)
     ChannelClosed.new
   end
 
-  # A closed channel drains what was delivered before it refuses.
+  # A closed channel drains what was delivered before it refuses. A
+  # rendezvous sender that finds this receive parked writes its value into
+  # `got` and marks the node handed, and that is the answer even when the
+  # task was cancelled before it ran: the sender was told it was taken.
   def receive : T | ChannelClosed | Cancelled
     fiber = IyiScheduler.current
     while true
       return Cancelled.new if fiber.cancelled
       return take_now if receive_ready?
-      park_receive_node(fiber, IyiScheduler.park(fiber))
+      got = uninitialized T
+      waiter = park_receive_node(fiber, IyiScheduler.park(fiber), pointerof(got).address)
       IyiScheduler.reschedule
+      return got if waiter.handed
     end
   end
 
@@ -2930,11 +2950,16 @@ class Channel(T)
     @closed || @count < @capacity || receiver_waiting?
   end
 
-  # Assumes `send_ready?`. A parked receiver is a completed rendezvous:
-  # the value goes through the buffer for the one instant the receiver
-  # needs to be scheduled, and the send is no longer contingent.
+  # Assumes `send_ready?`. A rendezvous puts the value in the parked
+  # receiver's own slot (`hand`). It went into the buffer, and the send
+  # answered delivered on the word of the wake: a select woken that way
+  # took another arm ready by then, a receiver cancelled before it ran
+  # answered `Cancelled`, and either way the value stayed in a channel of
+  # no capacity after its sender left. A buffered send completes when the
+  # buffer takes it, so there the woken receiver finds it in the buffer.
   def put_now(value : T) : Nil | ChannelClosed
     return ChannelClosed.new if @closed
+    return nil if @capacity == 0 && hand(value)
     if wake_receiver
       push_item(value)
       return nil
@@ -2954,9 +2979,9 @@ class Channel(T)
     IyiSendSelect(T).new(self, value)
   end
 
-  # Onto the ring's end. A rendezvous channel's one slot can be asked for
-  # more: two senders that each woke a receiver before either receiver ran
-  # have both values in hand, so a full ring doubles.
+  # Onto the ring's end. A buffered channel can be asked for more than
+  # its capacity: senders that each woke a parked receiver before any of
+  # them ran have all those values in hand, so a full ring doubles.
   private def push_item(value : T) : Nil
     if @count == @slots
       grown = Pointer(T).malloc((@slots * 2).to_u64)
@@ -2983,13 +3008,14 @@ class Channel(T)
   end
 
   # `select`'s arms park through these with one shared nonce; a plain
-  # call parks with a fresh nonce of its own.
-  def park_receive_node(fiber : IyiFiber, nonce : UInt64) : Nil
+  # call parks with a fresh nonce of its own. *slot* is where a rendezvous
+  # sender puts its value (`IyiWaiter#slot`).
+  def park_receive_node(fiber : IyiFiber, nonce : UInt64, slot : UInt64) : IyiWaiter
     waiter = fiber.spare_waiter
     if waiter.is_a?(IyiWaiter) && !waiter.linked
-      waiter.renew(nonce)
+      waiter.renew(nonce, slot)
     else
-      waiter = IyiWaiter.new(fiber, nonce)
+      waiter = IyiWaiter.new(fiber, nonce, slot)
       fiber.spare_waiter = waiter
     end
     waiter.linked = true
@@ -3000,6 +3026,7 @@ class Channel(T)
       @recv_head = waiter
     end
     @recv_tail = waiter
+    waiter
   end
 
   def park_send_node(fiber : IyiFiber, nonce : UInt64, value : T) : IyiSendNode(T)
@@ -3073,6 +3100,24 @@ class Channel(T)
     end
   end
 
+  # `wake_receiver` for a rendezvous, with the value written into the
+  # receiver's slot before its fiber runs: the wake is the delivery, so
+  # the select that parked the node takes this arm, and a cancellation
+  # that comes after the wake cannot strand the value. The node is
+  # current, so the slot's owner is suspended in the park that made it.
+  private def hand(value : T) : Bool
+    while true
+      head = @recv_head
+      return false unless head.is_a?(IyiWaiter)
+      unlink_receiver(head)
+      next unless head.current?
+      Pointer(T).new(head.slot).value = value
+      head.handed = true
+      IyiScheduler.enqueue(head.fiber)
+      return true
+    end
+  end
+
   # The oldest parked sender still standing, not yet woken: the caller
   # takes the value first and wakes the fiber after, so the box is the
   # delivery receipt by the time its owner runs.
@@ -3103,8 +3148,9 @@ class Channel(T)
         end
       {% end %}
       # Nothing ready: one park, every arm's node carrying its nonce.
-      # A send arm can win *while parked* — a receiver empties its box
-      # directly — and that is checked before the next round of parks.
+      # An arm can win *while parked* — a receiver empties a send arm's
+      # box, a rendezvous sender fills a receive arm's slot — and that is
+      # checked before the next round of parks.
       nonce = IyiScheduler.park(fiber)
       {% for i in 0...U.size %}
         actions[{{ i }}].park(fiber, nonce)
@@ -3112,7 +3158,7 @@ class Channel(T)
       IyiScheduler.reschedule
       {% for i in 0...U.size %}
         if actions[{{ i }}].won_while_parked?
-          return { {{ i }}, nil }
+          return { {{ i }}, actions[{{ i }}].won_value }
         end
       {% end %}
     end
@@ -3137,8 +3183,13 @@ end
 # it; a struct in a tuple is a copy nobody else can write to.
 class IyiReceiveSelect(T)
   @channel : Channel(T)
+  @node : IyiWaiter?
+  # The slot a rendezvous sender fills while this arm is parked.
+  @got : T
 
   def initialize(@channel : Channel(T))
+    @node = nil
+    @got = uninitialized T
   end
 
   def ready? : Bool
@@ -3150,13 +3201,19 @@ class IyiReceiveSelect(T)
   end
 
   def park(fiber : IyiFiber, nonce : UInt64) : Nil
-    @channel.park_receive_node(fiber, nonce)
+    @node = @channel.park_receive_node(fiber, nonce, pointerof(@got).address)
   end
 
-  # A parked receive wins by waking: the value is in the channel when
-  # the select looks again.
+  # A rendezvous receive wins by being handed its value. A buffered one
+  # wins by waking: the value is in the channel when the select looks
+  # again.
   def won_while_parked? : Bool
-    false
+    node = @node
+    node.is_a?(IyiWaiter) && node.handed
+  end
+
+  def won_value : T
+    @got
   end
 end
 
@@ -3184,6 +3241,10 @@ class IyiSendSelect(T)
   def won_while_parked? : Bool
     node = @node
     node.is_a?(IyiSendNode(T)) && node.delivered?
+  end
+
+  def won_value : Nil
+    nil
   end
 end
 

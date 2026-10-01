@@ -509,6 +509,71 @@ received_late = lonely.receive
 fail("a cancelled send's value was delivered anyway") if received_late.is_a?(Int32)
 puts "a cancelled rendezvous send died undelivered"
 
+# ── 12b. A rendezvous send completes only when a receive takes it ───────
+#
+# A send that found a receiver parked put its value in the channel and
+# answered delivered on the word of the wake. A select woken that way
+# took an arm that was ready by then - "first:1" - and left "second:2" in
+# a channel with no capacity after its sender was told it was taken; a
+# receiver cancelled before it ran answered `Cancelled` and left the 5.
+# The sender writes the value into the receiver's node now, so the wake
+# is the delivery, and the sender the select did not take stays parked.
+rv_first = Channel(Int32).new
+rv_second = Channel(Int32).new
+rv_log = ""
+group do |g|
+  g.spawn do
+    select
+    when rv_x = rv_first.receive
+      rv_log = rv_log + "select first:#{rv_x};"
+    when rv_y = rv_second.receive
+      rv_log = rv_log + "select second:#{rv_y};"
+    end
+    # What the channels hold now, taken without parking.
+    select
+    when rv_x = rv_first.receive
+      rv_log = rv_log + "then first:#{rv_x};"
+    else
+    end
+    select
+    when rv_y = rv_second.receive
+      rv_log = rv_log + "then second:#{rv_y};"
+    else
+    end
+    0
+  end
+  g.spawn do
+    rv_second.send(2)
+    0
+  end
+  g.spawn do
+    rv_first.send(1)
+    0
+  end
+end
+fail("rendezvous select: #{rv_log}") unless rv_log == "select second:2;then first:1;"
+rv_box = Channel(Int32).new
+rv_saw = ""
+group do |g|
+  g.spawn do
+    rv_got = rv_box.receive
+    rv_saw = rv_got.is_a?(Int32) ? "took #{rv_got}" : "refused"
+    0
+  end
+  g.spawn do
+    rv_box.send(5)
+    TaskFailed.new
+  end
+end
+rv_left = "nothing"
+select
+when rv_got = rv_box.receive
+  rv_left = rv_got.inspect
+else
+end
+fail("rendezvous: a receiver cancelled after a send was handed it answered #{rv_saw}, and the channel held #{rv_left}") unless rv_saw == "took 5" && rv_left == "nothing"
+puts "a rendezvous send was delivered to the receive it woke"
+
 # ── 13. Closing fails a parked sender, loudly ───────────────────────────
 doomed = Channel(Int32).new
 closed_send = ""

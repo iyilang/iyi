@@ -234,6 +234,9 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     (r"bin/crystal|\.build/crystal|make crystal|crystallang/crystal", "the bootstrap and compatibility binaries"),
     (r"crystal (spec|build|run|tool|env|deps|version)\b", "a command run against those binaries"),
     (r"CRYSTAL_(VERSION|PATH|HAS_WRAPPER|SPEC_|ONLY|BIN|ENV|FORMATTERS|WORKERS|BOOTSTRAP_)", "read by Crystal's runtime, bootstrap or wrapper"),
+    # `Config.env` reads `IYI_<name>` and then the compatibility binary's
+    # `CRYSTAL_<name>`; a child compiler run with neither set clears both.
+    (r'"CRYSTAL_OPTS" => nil', "the compatibility name Config.env falls back to, cleared for a child"),
     (r"__crystal_|crystal_type_id|crystal_instance_type_id|LibCrystalMain", "Crystal's runtime ABI symbols"),
     (r"Crystal::(LLVM_VERSION|VERSION|DESCRIPTION|ABI)", "constants the bootstrap injects"),
     (r"Crystal\.format|\bmodule Crystal\b", "Crystal's own API, called or reopened"),

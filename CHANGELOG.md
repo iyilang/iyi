@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`INI.build` refuses a key that opens with U+FEFF.** `INI.parse`
+  reads past a U+FEFF at the front of the text as a byte order mark, and
+  `build` writes the top-level keys first, so `{"" => {"\uFEFFkey" =>
+  "v"}}` was written `"\uFEFFkey=v\n"` and read back with a 3-byte `key`
+  for the 6-byte one, which `has_key?` no longer found. The module
+  promises that what `parse` would read back as something else is
+  refused; such a key is refused now, wherever it stands, since the
+  hash's order decides which is first: "it opens with U+FEFF, which is
+  read as a byte order mark". A U+FEFF after a key's first character
+  still round-trips. `bench/std_ini_exercise.iyi` builds the key; the
+  old module wrote it.
+
 - **`CSV.build` writes a last row of no fields so that it reads back.**
   Rows were joined by line breaks with none after the last, and a
   document's last line break ends a row rather than starting one, so a

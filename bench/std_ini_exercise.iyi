@@ -57,7 +57,14 @@ back = INI.parse(INI.build(plain))
 assert_true back.keys == ["s"] && back["s"].keys == ["hash", "eq"], "what can be written round-trips its names"
 assert_str "#not a comment", back["s"]["hash"], "a value opening with # round-trips"
 assert_str "a=b=c", back["s"]["eq"], "a value holding = round-trips"
-puts "  build refuses a line break, padding, a key with = and a section with ]"
+# A first top-level key opening with U+FEFF is written at the front of the
+# text, where `parse` reads past it as a byte order mark: `"\uFEFFkey"`
+# came back `key`.
+bom_key = build_refusal({"" => {"\uFEFFkey" => "v"}})
+assert_true bom_key.includes?("opens with U+FEFF"), "a key opening with U+FEFF is refused, not #{bom_key.inspect}"
+inner = INI.parse(INI.build({"s" => {"k\uFEFF" => "v"}}))
+assert_true inner["s"].has_key?("k\uFEFF"), "a U+FEFF past a key's first character round-trips"
+puts "  build refuses a line break, padding, a key with = or opening with U+FEFF and a section with ]"
 
 puts "\n== leading whitespace"
 # ASCII whitespace before a line, as the other library skips it: `\v` and

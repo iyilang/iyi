@@ -19,10 +19,10 @@
 # trip for text written the compact way. What `parse` would read back as
 # something else is refused rather than written: a line break in a name
 # or a value, a `]` in a section's name, a key that is empty, holds `=`
-# or opens with `#`, `;` or `[`, and blanks at either end of a key or a
-# value. INI has no escapes, so the one honest answer is the panic. The
-# IO form takes the IO first, the way `io.write` reads, and calls only
-# `write`.
+# or opens with `#`, `;`, `[` or U+FEFF (read as a byte order mark), and
+# blanks at either end of a key or a value. INI has no escapes, so the
+# one honest answer is the panic. The IO form takes the IO first, the
+# way `io.write` reads, and calls only `write`.
 
 module std/ini
 
@@ -177,11 +177,16 @@ pub struct INI
     nil
   end
 
+  # `parse` reads past a U+FEFF at the front of the text as a byte order
+  # mark, so a top-level key opening with one, written first, came back
+  # without it: `{"" => {"\uFEFFkey" => "v"}}` read back as `key`. Which
+  # key is first is the hash's order, so it is refused wherever it is.
   private def self.unwritable_key(key : String) : String?
     return "it is empty" if key.empty?
     return "it holds a line break" if line_break?(key)
     return "it holds `=`" if key.includes?("=")
     return "it opens with #{key[0].inspect}, which starts a comment or a section" if key.starts_with?("#") || key.starts_with?(";") || key.starts_with?("[")
+    return "it opens with U+FEFF, which is read as a byte order mark" if key.starts_with?('\uFEFF')
     return "blanks at either end are not read back" if key != key.strip
     nil
   end

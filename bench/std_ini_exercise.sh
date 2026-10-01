@@ -158,6 +158,7 @@ PY
   fi
 }
 broken "only space and tab skipped again" 'while offset < len && (raw[offset] == 32_u8 || (raw[offset] >= 9_u8 && raw[offset] <= 13_u8))' 'while offset < len && (raw[offset] == 32_u8 || raw[offset] == 9_u8)' "expected declaration at line 1, column 5"
+broken "a key opening with U+FEFF written again" "byte order mark\" if key.starts_with?('\\uFEFF')" 'byte order mark" if false' "ASSERTION FAILED: a key opening with U+FEFF is refused"
 
 echo
 if [ "$status" -eq 0 ]; then

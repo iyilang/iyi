@@ -2754,6 +2754,11 @@ module Iyi::Lsp
     private def module_mention_edits(text : String, old_mod : String, new_mod : String) : Array({Int32, Int32, Int32, String})
       edits = [] of {Int32, Int32, Int32, String}
       text.lines.each_with_index do |line, index|
+        # Past a byte order mark, and counted without it, as an editor's
+        # buffer is: `\uFEFFmodule calc/lexer` never started with `module `,
+        # so moving a file saved with the mark edited every importer and
+        # left the header naming the old path, and the program broke.
+        line = line.lchop('\uFEFF') if index == 0
         stripped = line.lstrip
         keyword =
           if stripped.starts_with?("module ")

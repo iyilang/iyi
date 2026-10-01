@@ -2391,6 +2391,32 @@ def main():
          "import calc/scanner" in parser_moved and clean,
          f"{sum(len(e) for e in changes.values())} edit(s) across {touched}")
 
+    # 70f. Moving a module saved with a byte order mark moves its header
+    #      too: `\uFEFFmodule calc/lexer` never started with `module `, so
+    #      the importer was edited and the header was not, and the moved
+    #      file named a path it no longer had.
+    bom_root = tempfile.mkdtemp(prefix="iyi-lsp-bom")
+    os.makedirs(os.path.join(bom_root, "calc"))
+    with open(os.path.join(bom_root, "calc", "lexer.iyi"), "w", encoding="utf-8-sig", newline="") as f:
+        f.write("module calc/lexer\n\npub def token(s : String) : String\n  s\nend\n")
+    with open(os.path.join(bom_root, "app.iyi"), "w", newline="") as f:
+        f.write("module app\n\nimport calc/lexer::{token}\n\nputs token(\"x\")\n")
+    bm = Client()
+    bm.send("initialize", {"rootUri": file_uri(bom_root), "capabilities": {}})
+    bm.send("initialized", {}, wait=False)
+    reply = bm.send("workspace/willRenameFiles", {"files": [
+        {"oldUri": file_uri(os.path.join(bom_root, "calc", "lexer.iyi")),
+         "newUri": file_uri(os.path.join(bom_root, "calc", "scanner.iyi"))}]})
+    bm.send("shutdown", {})
+    bm.send("exit", {}, wait=False)
+    bm.proc.wait(timeout=10)
+    bom_edits = sorted((u.rsplit("/", 1)[-1], e["range"]["start"]["line"], e["range"]["start"]["character"],
+                        e["range"]["end"]["character"], e["newText"])
+                       for u, edits in ((reply.get("result") or {}).get("changes") or {}).items() for e in edits)
+    step("70f", "a module saved with a byte order mark moves its header too",
+         bom_edits == [("app.iyi", 2, 7, 17, "calc/scanner"), ("lexer.iyi", 0, 7, 17, "calc/scanner")],
+         f"edits {bom_edits}")
+
     # 48b. A document link on an import, including a package's. The links
     #      were a filename guess — `<root>/<path>.iyi`, with the path taken
     #      as the run of `[A-Za-z0-9_/]` after the keyword — so a dotted

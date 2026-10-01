@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **Moving a module saved with a byte order mark moves its `module` header
+  too.** `\uFEFFmodule calc/lexer` never started with `module `, so
+  willRenameFiles edited every importer to `calc/scanner` and gave the
+  moved file no edit, and the program stopped compiling. The first line is
+  read past the mark now, with columns counted without it, and the header
+  gets its (0,7)-(0,17) edit. `bench/lsp_session.py` step 70f checks it;
+  the old server answered `lexer.iyi: []`.
+
 - **Rename refuses reserved words, `_`, magic constants and capitalised
   def names, and still takes a keyword that is a name where it lands.** A
   def was renamed to `end`, `nil`, `Hi` or `_`, and a variable to `do`,

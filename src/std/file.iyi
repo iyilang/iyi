@@ -1908,8 +1908,12 @@ class ::IyiIO
     seek(position, Seek::Set)
   end
 
-  # The kernel's move: the new offset, or a negative error.
+  # The kernel's move: the new offset, or a negative error. A stream with
+  # no descriptor - a `Memory` - is -1, which Windows' `to_u64` of it
+  # panicked "arithmetic overflow" on; it is EBADF everywhere, as Linux's
+  # kernel answers it.
   protected def self.lseek(fd : Int64, offset : Int64, whence : Int32) : Int64
+    return -9_i64 if fd < 0_i64
     {% if flag?(:win32) %}
       moved = 0_i64
       if Std::File::LibKernel32.SetFilePointerEx(Pointer(Void).new(fd.to_u64), offset, pointerof(moved), whence) == 0

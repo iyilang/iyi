@@ -118,7 +118,12 @@ class Iyi::Command
     found = [] of String
     Dir.each_child(dir) do |entry|
       full = File.join(dir, entry)
-      if File.directory?(full)
+      # Asked of the entry and not of what it names: `File.directory?`
+      # follows a link, so a junction back to the project was walked
+      # through, and `fix proj` died on `proj\loop\loop\...` 38 levels down,
+      # "The system cannot find the path specified". A link is not walked,
+      # as `test` and `fmt --check` do not walk one.
+      if File.info?(full, follow_symlinks: false).try(&.directory?)
         next if entry.starts_with?('.') || entry == "lib"
         found.concat(fix_sources(full))
       elsif entry.ends_with?(".iyi")

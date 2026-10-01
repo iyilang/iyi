@@ -170,7 +170,10 @@ class Iyi::Command
     found = [] of String
     Dir.each_child(dir) do |entry|
       full = File.join(dir, entry)
-      if File.directory?(full)
+      # Asked of the entry, as `fix`'s walk asks it: `File.directory?`
+      # follows a link, and a junction `src\loop` back to `src` was read
+      # until "src\loop\loop\...\x.iyi does not parse", exit 1.
+      if File.info?(full, follow_symlinks: false).try(&.directory?)
         next if entry.starts_with?('.') || entry == "lib"
         next if File.file?(File.join(full, Mod::Installer::MANIFEST))
         found.concat(mod_tidy_sources(full))

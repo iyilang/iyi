@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`iyi fix DIR` and `iyi mod tidy` do not walk through a link back into
+  the tree.** Both walk with a loop of their own and asked
+  `File.directory?`, which follows a link, so a junction `src\loop` to
+  its own directory was read until the path was too long: `fix` exited 1
+  on "...\src\loop\loop\...\x.iyi: The system cannot find the path
+  specified.", and `mod tidy` on "src\loop\loop\...\x.iyi does not
+  parse". The entry that made a junction a link named `fix` but changed
+  only the `**` walks. A link is an entry now and is not walked, as in
+  `test` and `fmt --check`. `bench/verbs_exercise.sh` runs both over a
+  tree with a link into itself (a junction on Windows, a symbolic link
+  elsewhere); the old compiler failed both.
+
 - **`iyi fix` edits line 1 of a file saved with a byte order mark where
   the error is.** The lexer drops the mark before it counts columns, and
   `fix` indexed the line with the mark still in it, so every edit on line

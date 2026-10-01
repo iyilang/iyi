@@ -471,6 +471,32 @@ for root in "${roots[@]}"; do
   fi
 done
 [ -e "rooted/x{a,b}/loop" ] && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c rmdir "$(cygpath -w "$WORK/rooted/x{a,b}/loop")"
+# `fix` and `mod tidy` walk a directory with a loop of their own rather
+# than a glob, asking `File.directory?`, which follows a link: they went
+# through one back into the tree, and `fix` died 38 levels down on "The
+# system cannot find the path specified", `mod tidy` on a file down there
+# that "does not parse".
+mkdir -p tidyloop/src
+printf 'module example.test/tidyloop\n' > tidyloop/iyi.mod
+printf 'module x\n\nputs 1\n' > tidyloop/src/x.iyi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/tidyloop/src/loop")" "$(cygpath -w "$WORK/tidyloop/src")" > /dev/null
+    ;;
+  *) ln -s "$WORK/tidyloop/src" tidyloop/src/loop ;;
+esac
+"$IYI" fix tidyloop/src > tidyloop.fix 2>&1; fix_code=$?
+(cd tidyloop && "$IYI" mod tidy --check) > tidyloop.tidy 2>&1; tidy_code=$?
+if [ "$fix_code" -eq 0 ] && grep -q "already clean" tidyloop.fix &&
+   [ "$tidy_code" -eq 0 ] && grep -q "say what the source imports" tidyloop.tidy; then
+  echo "  fix and mod tidy of a tree with a link back into it: the link is not walked"
+else
+  echo "  fix and mod tidy through a link: fix $fix_code, tidy $tidy_code"; sed -n '1,3p' tidyloop.fix tidyloop.tidy; status=1
+fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c rmdir "$(cygpath -w "$WORK/tidyloop/src/loop")" ;;
+  *) rm tidyloop/src/loop ;;
+esac
 # `lib` is left alone however the directory is named: the exclude was
 # compared as a string prefix, and `fmt --check .` walked to `./lib/x.iyi`,
 # which never starts with `lib`, and checked what a bare `fmt --check`

@@ -108,6 +108,29 @@ assert_int(sizeof(StaticArray(Int32, FOLDED_SIZE)), 8, "number: a StaticArray's 
 assert_int({{ -7 // 2 }}, -3, "number: a macro's // truncates")
 assert_int({{ -7 % 2 }}, -1, "number: a macro's % takes the dividend's sign")
 
+# A shift's width was read off the whole number union the folder holds a
+# value in, 256 bits, so a count from the type's own width up to 255
+# reached a shift the processor masks: `1 << 64` folded to 1, `1 << 33` to
+# 2, `1 << 255` to -2147483648, an enum's `1 << 40` to 256, `{{ 1 >> 32 }}`
+# to 1 and `{{ 1_i64 << 64 }}` to 1, where the line answers 0 for each, and
+# a StaticArray sized `(1 << 33) + 2` held 4 elements where the line says 2.
+FOLDED_SHL_WIDTH = 1 << 64
+FOLDED_SHL_33    = 1 << 33
+FOLDED_SHL_255   = 1 << 255
+FOLDED_SHL_SIZE  = (1 << 33) + 2
+
+enum FoldedWide
+  Shl = 1 << 40
+end
+
+assert_int(FOLDED_SHL_WIDTH, 0, "number: a constant shifted past the width is 0")
+assert_int(FOLDED_SHL_33, 0, "number: a constant shifted by 33 is 0")
+assert_int(FOLDED_SHL_255, 0, "number: a constant shifted by 255 is 0")
+assert_true(FoldedWide::Shl.value == 0, "number: an enum value shifted past the width is 0")
+assert_int({{ 1 >> 32 }}, 0, "number: a macro shifted right by the width is 0")
+assert_true({{ 1_i64 << 64 }} == 0_i64, "number: a macro's Int64 shifted by 64 is 0")
+assert_int(sizeof(StaticArray(Int32, FOLDED_SHL_SIZE)), 8, "number: a StaticArray's size folds a wide shift as the line does")
+
 # ---- 4. Base conversion, the other direction of printing
 assert_str(255.to_s(16), "ff", "number: hex")
 assert_str(5.to_s(2), "101", "number: binary")

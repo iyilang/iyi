@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A shift the compiler folds is 0 past its type's width for every
+  count, not only past 256.** The width was read off the number union the
+  folder holds a value in, 32 bytes, so a count from the type's own width
+  up to 255 reached a shift the processor masks: the constants `1 << 64`,
+  `1 << 33` and `1 << 255` were 1, 2 and -2147483648, an enum's `1 << 40`
+  was 256, `{{ 1 >> 32 }}` and `{{ 1_i64 << 64 }}` were 1, and a
+  StaticArray sized `(1 << 33) + 2` held 4 elements, where the same lines
+  at run time answer 0 and 2. Each folds to what the line answers now.
+  `bench/number_exercise.iyi` checks all six; the old compiler stopped at
+  "a constant shifted past the width is 0 (1 != 0)".
+
 - **A program under `iyi run` on Windows may start a child that breaks
   away from the runner's job.** The job `iyi run` holds its program in,
   so a stopped runner ends it, did not allow breakaway, and a program's

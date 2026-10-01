@@ -112,15 +112,31 @@ struct Iyi::MathInterpreter
 
   # A count below zero or past the width shifts every bit out.
   def self.iyi_shl(value : Int, count : Int)
-    count < 0 || count >= sizeof(typeof(value)) * 8 ? value.class.zero : value.unsafe_shl(count)
+    count < 0 || count >= iyi_width(value) ? value.class.zero : value.unsafe_shl(count)
   end
 
   # The same, and a negative value keeps its sign bit: -1.
   def self.iyi_shr(value : Int, count : Int)
-    if count < 0 || count >= sizeof(typeof(value)) * 8
+    if count < 0 || count >= iyi_width(value)
       value < 0 ? ~value.class.zero : value.class.zero
     else
       value.unsafe_shr(count)
+    end
+  end
+
+  # The width of the value's own type, in bits. It was `sizeof(typeof(value))
+  # * 8`, which reads the argument's static type, and both callers hand over
+  # the whole number union: 32 bytes, so every type was 256 bits wide and a
+  # count from the real width up to 255 reached `unsafe_shl`, which the
+  # processor masks. `1 << 64` and `1 << 200` folded to 1 and 256, `1 << 255`
+  # to -2147483648 and `{{ 1 >> 32 }}` to 1, where the line answers 0.
+  private def self.iyi_width(value : Int) : Int32
+    case value
+    when Int8, UInt8   then 8
+    when Int16, UInt16 then 16
+    when Int32, UInt32 then 32
+    when Int64, UInt64 then 64
+    else                    128
     end
   end
 

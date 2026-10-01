@@ -422,6 +422,16 @@ class ByteBuffer
     @size = @size + count
   end
 
+  # The byte at `index`, which is below `size`.
+  def [](index : Int32) : UInt8
+    @bytes[index]
+  end
+
+  # Keeps the first `count` bytes, in place.
+  def truncate(count : Int32) : Nil
+    @size = count if count < @size
+  end
+
   def spaces(count : Int32) : Nil
     while count > 0
       self << 32_u8
@@ -1473,17 +1483,16 @@ pub class Parser
     skip_blank(@starts[look])
   end
 
-  # Drops the blanks the buffer ends with, back to `floor` at most.
+  # Drops the blanks the buffer ends with, back to `floor` at most, and
+  # in place: it was rebuilt through `to_s` at every line end, a copy of
+  # the whole scalar so far, and a quoted scalar of 20,000 lines took 4.9
+  # seconds to read where the same bytes on one line took 5 ms.
   private def trim_trailing_blanks(floor : Int32) : Nil
-    # The buffer has no pop; rebuild without trailing blanks.
-    text = @buffer.to_s
-    count = text.bytesize
-    while count > floor && blank_byte?(text.to_unsafe[count - 1])
+    count = @buffer.size
+    while count > floor && blank_byte?(@buffer[count - 1])
       count = count - 1
     end
-    return if count == text.bytesize
-    @buffer.clear
-    @buffer.append(text.to_unsafe, count)
+    @buffer.truncate(count)
   end
 
   # `at` is the backslash; appends the escape and answers where it ends.

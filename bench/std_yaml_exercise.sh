@@ -201,6 +201,9 @@ prove_caught keep "the line after the stream's last line break is kept" \
 prove_caught esctab "folding trims escaped blanks" \
   "an escaped tab before a folded line break stays" \
   'trim_trailing_blanks(hard)' 'trim_trailing_blanks(0)'
+prove_caught foldcopy "folding copies a quoted scalar to trim it, not in place" \
+  "quoted scalars of 20,000 lines read in under a second" \
+  $'    count = @buffer.size\n    while count > floor' $'    text = @buffer.to_s\n    count = text.bytesize\n    @buffer.clear\n    @buffer.append(text.to_unsafe, count)\n    while count > floor'
 prove_caught escbreak "an escaped line break folds like a plain one" \
   "blanks before an escaped line break stay" \
   'next_quoted_line(opener, parent, flow, true)' 'next_quoted_line(opener, parent, flow, false)'

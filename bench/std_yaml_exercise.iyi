@@ -77,6 +77,17 @@ assert_str("", reads("a: !!str\n", "a tag over an empty node tags the empty scal
 assert_true(reads("- !!null\n", "!!null over an empty node is null")[0].null?, "!!null over an empty node is null")
 assert_str("1", reads("a: !!str\n  1\n", "a tag alone on its line applies to the text below as written")["a"].as_s, "a tag alone on its line applies to the text below as written")
 assert_str("", reads("[!!str ]", "properties over nothing in a flow collection are the empty scalar")[0].as_s, "properties over nothing in a flow collection are the empty scalar")
+# A quoted scalar's folding trims its blanks in place: it copied all it had
+# read at every line end, and 20,000 lines took 4.9 s where the same bytes
+# on one line took 5 ms.
+quoted_lines = "xxxxxxxxxx\n" * 20000
+quoted_started = __iyi_monotonic_ns
+double_lines = reads("\"" + quoted_lines + "\"", "a double-quoted scalar of 20,000 lines")
+single_lines = reads("'" + quoted_lines + "'", "a single-quoted scalar of 20,000 lines")
+quoted_ms = (__iyi_monotonic_ns - quoted_started) // 1000000
+assert_true(double_lines.as_s == "xxxxxxxxxx " * 20000 && single_lines == double_lines, "quoted scalars of 20,000 lines fold to one line each")
+assert_true(quoted_ms < 1000, "quoted scalars of 20,000 lines read in under a second, not #{quoted_ms} ms")
+puts "  a double- and a single-quoted scalar of 20,000 lines read in #{quoted_ms} ms"
 puts "  integers, floats, null, 1.2 strings, quotes, folded, literal and verbatim tags"
 puts "  '?' plain starts, block scalar blank lines and chomping, quoted folding, flow folding, tags over nothing"
 

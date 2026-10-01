@@ -142,6 +142,8 @@
 
 ### Fixed
 
+- **A YAML quoted scalar spread over many lines reads in linear time.** Before each line break, folding a double- or single-quoted scalar trimmed the trailing blanks by copying everything read so far (`@buffer.to_s`). Lines of 11 bytes took 304, 1,256 and 4,887 ms for 5,000, 10,000 and 20,000 lines, while the same 220,000 bytes on one line took 5 ms. The buffer is now trimmed in place, and 20,000 lines read in 12 ms. `bench/std_yaml_exercise.iyi` requires a double- and a single-quoted scalar of 20,000 lines to read in under a second. The old module took 10,041 ms there.
+
 - **An enum member past Int32 is a hash key and a value.** An enum's
   hash, `from_value` and `valid?` all went through `to_i32`, which
   panicked "arithmetic overflow" for a member such as `Huge = 1 << 40` of

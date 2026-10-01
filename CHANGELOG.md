@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **On Windows `File.exists?` is false for a DOS device that is not
+  there.** Windows answers the attributes of every DOS device name with
+  0x20, present or not, and the prelude took that for existence:
+  `File.exists?("COM9")` and `File.exists?("LPT7")` were true on a
+  machine with neither, where Python's `os.path.exists` says False. A
+  name Windows resolves to `\\.\NAME` is opened now, as a link already
+  was, and one that is not found does not exist; `NUL`, `CON`, `CONIN$`
+  and `CONOUT$` still do. bench/windows_exercise.sh asks of COM9, LPT7
+  and NUL; the old prelude answered true for COM9 and LPT7.
+
 - **On Windows a name that UTF-8 cannot spell is not answered as a name
   with U+FFFD in it.** NTFS keeps a name with an unpaired surrogate,
   which has no UTF-8 spelling, and the prelude's way back from UTF-16

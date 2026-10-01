@@ -446,6 +446,31 @@ EOF
         echo "  the runner was killed and port $held came back"
       fi
     fi
+
+    # 2f. A DOS device that is not there does not exist. Windows answers
+    # the attributes of every DOS device name with 0x20, whether the
+    # device is there or not, and `File.exists?` said true for `COM9` and
+    # `LPT7` on a machine with neither, where Python's `os.path.exists`
+    # says False. Such a name is opened now: an absent device is not
+    # found, and `NUL`, which opens, exists. No gate machine has a ninth
+    # serial port or a seventh printer port.
+    echo
+    echo "== A DOS device that is not there does not exist =="
+    printf 'module devices\n\nputs "COM9 " + File.exists?("COM9").to_s\nputs "LPT7 " + File.exists?("LPT7").to_s\nputs "NUL " + File.exists?("NUL").to_s\n' > "$WORK/devices.iyi"
+    if ! "$IYI" build -o "$WORK/devices.exe" "$WORK/devices.iyi" > "$WORK/devices.log" 2>&1; then
+      echo "  the device probe did not build"
+      tail -5 "$WORK/devices.log"
+      status=1
+    else
+      "$WORK/devices.exe" > "$WORK/devices.out" 2>&1 || true
+      if [ "$(tr -d '\r' < "$WORK/devices.out" | tr '\n' '|')" = "COM9 false|LPT7 false|NUL true|" ]; then
+        echo "  COM9 and LPT7 do not exist, NUL does"
+      else
+        echo "  the device names answered otherwise:"
+        sed -n '1,4p' "$WORK/devices.out"
+        status=1
+      fi
+    fi
     ;;
 esac
 

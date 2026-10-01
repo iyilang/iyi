@@ -83,9 +83,9 @@ struct Enum
   end
 
   # A key in a `Hash` is hashed and then compared, so a type used as one owes
-  # both (`src/iyi/hash.iyi`). The value is the whole of what a member is.
+  # both (`src/iyi/hash.iyi`). The value's own hash: `to_i32` panicked past it.
   def hash : Int32
-    value.to_i32
+    value.hash
   end
 
   # Whether every bit of *other* is in this one, which is what a `@[Flags]`
@@ -150,7 +150,7 @@ struct Enum
   # has it. `new` takes any value of the base type by design — that is how an
   # enum comes back from C or off a wire — and this is the question that asks
   # whether the one in hand is a member.
-  def self.from_value?(value : Int32) : self?
+  def self.from_value?(value : Int) : self?
     {% for member in @type.constants %}
       {% unless @type.annotation(Flags) && member.stringify == "All" %}
         return self.new({{ @type.constant(member) }}) if value == {{ @type.constant(member) }}

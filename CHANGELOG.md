@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **An enum member past Int32 is a hash key and a value.** An enum's
+  hash, `from_value` and `valid?` all went through `to_i32`, which
+  panicked "arithmetic overflow" for a member such as `Huge = 1 << 40` of
+  an `Int64` enum: it was no Hash key, and `from_value` of its own value
+  panicked. The hash is the value's own, and `from_value?` takes any
+  integer. `bench/std_enum_exercise.iyi` keys a hash by one and asks
+  `from_value` and `valid?`; the old modules panicked.
+
 - **A large socket write on Windows parks when the peer is not reading,
   and keeps its deadline.** Winsock takes a whole buffer of any size
   while what it holds is under the send buffer's size, so one `write` of

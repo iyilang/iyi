@@ -102,4 +102,19 @@ Level.new(9).inspect(STDOUT)
 print "\n"
 puts "  to_s(io) and inspect(io) write what to_s and inspect answer"
 
+# A member past Int32 is a member: its hash, `from_value` and `valid?` all
+# went through `to_i32`, which panicked "arithmetic overflow" for it, so an
+# Int64 enum with a large member was no Hash key and no value.
+enum Wide : Int64
+  Small =             1
+  Huge  = 1099511627776
+end
+
+wide_keys = {Wide::Small => 1, Wide::Huge => 2}
+check wide_keys[Wide::Huge]? == 2, "an Int64 member past Int32 is a hash key"
+check Wide.from_value(1099511627776_i64) == Wide::Huge, "from_value of a value past Int32"
+check Wide.valid?(Wide::Huge), "valid? of a member past Int32"
+check Wide.from_value?(5_i64).nil?, "and a value no member has is still nil"
+puts "  an Int64 member past Int32"
+
 puts "ALL CHECKS PASSED"

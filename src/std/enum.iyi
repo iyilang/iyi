@@ -82,14 +82,14 @@ struct ::Enum
 
   # The member numbered `val`; panics naming the value where no member is.
   def self.from_value(val : Int) : self
-    from_value?(val.to_i32) || raise "no #{self} member has the value #{val}"
+    from_value?(val) || raise "no #{self} member has the value #{val}"
   end
 
   # Whether `val` is a member: what `from_value?` answers, as a Bool. For a
   # flags enum that is a single member or `None`; a combination and `All`
   # are not members.
   def self.valid?(val : self) : Bool
-    !from_value?(val.value.to_i32).nil?
+    !from_value?(val.value).nil?
   end
 
   # The member named `string`, compared the lenient way `parse?` compares;

@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **The client unfolds a folded header line in an answer; the server still
+  refuses one.** `parse_fields`, shared by both halves, refused a line that
+  begins with a blank, so an answer with obs-fold - `X-A: a` and then ` b` -
+  panicked `HTTP.get` with "HTTP: header without a colon: \" b\"", where RFC
+  9112 §5.2 has a user agent replace each fold with a space. An answer's
+  folds are joined onto their field, one space each: `a`, ` b`, `\tc` read
+  as "a b c". A blank-led line right under the status line continues no
+  field and is still refused, and a request with a fold is still a 400, as a
+  server may answer. `bench/std_http_exercise.iyi` checks the three; the old
+  module refused the answer.
+
 - **`HTTP.format_request` refuses a caller's `Transfer-Encoding`, as it
   refuses a caller's `Content-Length`.** A request's body is always written
   with its length, so `{"Transfer-Encoding" => "chunked"}` went out beside

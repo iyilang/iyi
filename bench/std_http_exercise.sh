@@ -305,6 +305,8 @@ mutate "a chunk's end added past Int32's" 'return nil if size > n - i - 2' 'retu
 mutate "a decoded chunk's end added past Int32's" 'raise "HTTP: chunked body ends inside a chunk" if size > n - i' 'raise "HTTP: chunked body ends inside a chunk" if i + size > n'
 mutate "control characters let into a field value" 'return "header #{name} contains a control character" if control?(value)' ''
 mutate "control characters let into a request target" 'target.bytesize == 0 || HTTP.control?(target)' 'target.bytesize == 0'
+mutate "a folded answer read as fields of its own" 'lines = unfolded(lines) if unfold' ''
+mutate "a folded request unfolded too" 'lines = unfolded(lines) if unfold' 'lines = unfolded(lines)'
 mutate "a control character written into a request" 'raise "HTTP: header #{name} contains a control character" if control?(value)' ''
 mutate "a control character written into an answer" 'raise "HTTP: header #{name} contains a control character" if HTTP.control?(value)' ''
 mutate "a status written outside 100 to 999" 'unless response.status >= 100 && response.status <= 999' 'unless true'

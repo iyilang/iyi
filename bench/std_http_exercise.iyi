@@ -202,6 +202,14 @@ resp = HTTP.parse_response("HTTP/1.0 500\r\n\r\n")
 assert_true resp.status == 500 && resp.reason == "", "a status line with no reason"
 puts "  HEAD, 204 and a status with no reason"
 
+# A line that begins with a blank continues the field above it (obs-fold,
+# RFC 9112 §5.2), and the client unfolds it with one space; the server
+# refuses one, as it may. Read as a field of its own, `HTTP.get` panicked.
+assert_str "200 OK X-A=a b c;Content-Length=2; \"hi\"", client_reads("HTTP/1.1 200 OK\r\nX-A: a\r\n b\r\n\tc\r\nContent-Length: 2\r\n\r\nhi"), "a folded answer is unfolded"
+assert_str "refused: HTTP: header without a colon: \" b\"", client_reads("HTTP/1.1 200 OK\r\n b\r\nContent-Length: 2\r\n\r\nhi"), "a fold under the status line continues no field"
+assert_str "400 header without a colon: \" b\"", server_reads("GET / HTTP/1.1\r\nHost: x\r\nX-A: a\r\n b\r\n\r\n"), "and a folded request is refused"
+puts "  a folded field is unfolded in an answer and refused in a request"
+
 # A body short of its Content-Length is a connection that ended early, as
 # a chunked body cut inside a chunk is: it was a whole 200 with the part
 # that came, a cut-off download read as a good one.

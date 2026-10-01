@@ -445,7 +445,7 @@ pub struct HTTP
       lines = split_crlf(text[start, split_at - start])
       raise "HTTP: empty response" if lines.size == 0
       status, reason = parse_status(lines[0])
-      headers = case fields = parse_fields(lines)
+      headers = case fields = parse_fields(lines, unfold: true)
                 in String
                   raise "HTTP: " + fields
                 in Hash(String, String)
@@ -481,7 +481,14 @@ pub struct HTTP
   # as whichever came first or last. A value with a control character in
   # it - a CR or LF that ends no line, a NUL - is refused (§5.5) rather than
   # handed to whoever reads it or echoes it into a header.
-  def self.parse_fields(lines : Array(String)) : Hash(String, String) | String
+  #
+  # *unfold*, for an answer: a line that begins with a blank continues the
+  # field above it (obs-fold, RFC 9112 §5.2), and a user agent joins it on
+  # with one space; read as a field of its own, `HTTP.get` panicked with
+  # "header without a colon: \" b\"". A server may refuse one, and this
+  # one does.
+  def self.parse_fields(lines : Array(String), unfold : Bool = false) : Hash(String, String) | String
+    lines = unfolded(lines) if unfold
     headers = {} of String => String
     # The name as it was first spelled, by its lowercase, and the values
     # after the first, joined once at the end: joining line by line copied
@@ -515,6 +522,33 @@ pub struct HTTP
       headers[name] = values.join(", ")
     end
     headers
+  end
+
+  # *lines* with each field's folded lines joined onto it, one space for
+  # each fold. A blank-led line right under the status line continues no
+  # field, and is left for `parse_fields` to refuse.
+  private def self.unfolded(lines : Array(String)) : Array(String)
+    out = [] of String
+    i = 0
+    while i < lines.size
+      line = lines[i]
+      i = i + 1
+      if i > 1 && i < lines.size && folded?(lines[i])
+        joined = String::Builder.new
+        joined << trim(line)
+        while i < lines.size && folded?(lines[i])
+          joined << ' ' << trim(lines[i])
+          i = i + 1
+        end
+        line = joined.to_s
+      end
+      out << line
+    end
+    out
+  end
+
+  private def self.folded?(line : String) : Bool
+    line.bytesize > 0 && (line.to_unsafe[0] == 32_u8 || line.to_unsafe[0] == 9_u8)
   end
 
   # A `Content-Length` as a number, or nil when it is not one. Repeated

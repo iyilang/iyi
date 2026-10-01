@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`File.symlink` on Windows decides a file or directory link from the
+  target as the link will resolve it.** It read a relative target against
+  the working directory, so a link made in another directory took the kind
+  of whatever the working directory held under that name, and a file link to
+  a directory cannot be listed through [INFERENCE: found by reading; making
+  a symlink on the machine this was written on fails with error 1314, no
+  Developer Mode]. A relative target is joined onto the link's directory
+  first. Not gated, for the same reason.
+
 - **A Windows `Path` compares case-insensitively in every script when the
   program runs on Windows, as its file systems fold a name.** Only ASCII
   letters were folded: `Path.windows("C:\\Ä") == Path.windows("c:\\ä")` was

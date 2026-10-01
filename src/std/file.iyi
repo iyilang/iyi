@@ -1261,16 +1261,18 @@ class ::File
       # target is a directory, which Windows decides when the link is made
       # rather than reading it off the target the way posix does.
       # INVALID_FILE_ATTRIBUTES is 0xFFFFFFFF, which is what that DWORD
-      # spells as the Int32 it is declared as. The target's attributes are
-      # read off the wide path already in hand rather than through the
-      # prelude's `__iyi_path_attributes`, which would convert the same string
-      # a second time to arrive at the same pointer.
+      # spells as the Int32 it is declared as. A relative target is the
+      # link's directory's name for it, and it is read from there: read
+      # from the working directory, a link made in another directory took
+      # the kind of whatever this one held under that name, and a file
+      # link to a directory cannot be listed through. (Found by reading;
+      # no symlink could be made where this was written to measure it.)
       old_wide = __iyi_wide_path(sys_path(o))
       new_wide = __iyi_wide_path(sys_path(n))
       if old_wide.address == 0_u64 || new_wide.address == 0_u64
         raise "Cannot symlink #{o} to #{n}: the path is not valid UTF-8"
       end
-      target_attrs = Std::File::LibKernel32.GetFileAttributesW(old_wide)
+      target_attrs = __iyi_path_attributes(sys_path(join(dirname(n), o)))
       link_flags = 0x2_u32
       if target_attrs != -1 && (target_attrs & 0x10) != 0
         link_flags = link_flags | 0x1_u32

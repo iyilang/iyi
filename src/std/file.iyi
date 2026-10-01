@@ -1463,46 +1463,270 @@ class ::File
     raise "cannot read #{path}: it is a directory, or the read failed" if io.read_failed?
   end
 
+  # Whether *path* matches the shell-style *pattern*: `*` any run of
+  # characters within a segment, `**` any run of segments (a whole
+  # segment of the pattern), `?` one character but a separator, `[abc]`,
+  # `[a-z]` and `[^...]` one character of a set, `{a,b}` one of the
+  # branches (nested to ten), and `\` the next character literally. Only
+  # `/` in the pattern matches a separator. On Windows a name's `\` is a
+  # separator as well, and a pattern's `\` is one too rather than an
+  # escape: `Dir.glob` answers with either.
+  #
+  # The other library's algorithm (a port of the glob-match crate, after
+  # research.swtch.com/glob), linear in the name but for braces. This
+  # had `*` and `?` alone, byte by byte: `*` crossed separators, `?` took
+  # half of a two-byte character, `[a]` and `{a,b}` were literal text,
+  # and `*a*a*a*a*a*a*a*a*a*a*b` against forty `a`s did not finish.
   def self.match?(path : String | Path, pattern : String) : Bool
-    glob_match_at(path.to_s, 0, pattern, 0)
+    stack = Pointer(Int32).malloc(20_u64)
+    glob_from(pattern, path.to_s, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, stack, 0)
   end
 
-  private def self.glob_match_at(name : String, ni : Int32, pattern : String, pi : Int32) : Bool
-    nlen = name.bytesize
-    plen = pattern.bytesize
-    nptr = name.to_unsafe
-    pptr = pattern.to_unsafe
-    while pi < plen
-      pc = pptr[pi]
-      if pc == 42_u8
-        while pi < plen && pptr[pi] == 42_u8
-          pi = pi + 1
-        end
-        return true if pi == plen
-        while ni <= nlen
-          return true if glob_match_at(name, ni, pattern, pi)
-          ni = ni + 1
-        end
-        return false
-      elsif pc == 63_u8
-        return false if ni >= nlen
-        ni = ni + 1
-        pi = pi + 1
-      else
-        return false if ni >= nlen
-        # On Windows `/` and `\` are one separator, and `Dir.glob` answers
-        # with either: its own results did not match the pattern that
-        # found them.
-        {% if flag?(:win32) %}
-          return false if nptr[ni] != pc && !((pc == 47_u8 || pc == 92_u8) && (nptr[ni] == 47_u8 || nptr[ni] == 92_u8))
-        {% else %}
-          return false if nptr[ni] != pc
-        {% end %}
-        ni = ni + 1
-        pi = pi + 1
-      end
+  private def self.glob_sep?(b : UInt8) : Bool
+    {% if flag?(:win32) %}
+      b == 47_u8 || b == 92_u8
+    {% else %}
+      b == 47_u8
+    {% end %}
+  end
+
+  # The character at *at* and where the next begins; a byte that does not
+  # start one is U+FFFD and one byte wide.
+  private def self.glob_char(s : UInt8*, n : Int32, at : Int32) : {Int32, Int32}
+    b = s[at].to_i32
+    return {b, at + 1} if b < 0x80
+    width = b >= 0xF0 ? 4 : (b >= 0xE0 ? 3 : (b >= 0xC0 ? 2 : 0))
+    return {0xFFFD, at + 1} if width == 0 || at + width > n
+    value = width == 2 ? b & 0x1F : (width == 3 ? b & 0x0F : b & 0x07)
+    k = 1
+    while k < width
+      c = s[at + k].to_i32
+      return {0xFFFD, at + 1} if c & 0xC0 != 0x80
+      value = value * 64 + (c & 0x3F)
+      k = k + 1
     end
-    ni == nlen
+    {value, at + width}
+  end
+
+  # The pattern's byte at *at*, an escape read: the byte it stands for and
+  # the index of its last byte.
+  private def self.glob_unescape(g : UInt8*, n : Int32, at : Int32) : {UInt8, Int32}
+    c = g[at]
+    {% if !flag?(:win32) %}
+      if c == 92_u8
+        raise "File.match?: a pattern ends in an escape with nothing to escape" if at + 1 >= n
+        e = g[at + 1]
+        e = e == 97_u8 ? 97_u8 : (e == 98_u8 ? 8_u8 : (e == 110_u8 ? 10_u8 : (e == 114_u8 ? 13_u8 : (e == 116_u8 ? 9_u8 : e))))
+        return {e, at + 1}
+      end
+    {% end %}
+    {c, at}
+  end
+
+  # One character of a class: its code point and the index after it.
+  private def self.glob_class_char(g : UInt8*, n : Int32, at : Int32) : {Int32, Int32}
+    c, last = glob_unescape(g, n, at)
+    return {c.to_i32, last + 1} if c < 0x80_u8
+    glob_char(g, n, last)
+  end
+
+  # Skips the rest of the brace branch being matched, to past its `}`.
+  private def self.glob_skip_branch(g : UInt8*, n : Int32, gi : Int32, depth : Int32) : {Int32, Int32}
+    in_brackets = false
+    end_depth = depth - 1
+    while gi < n
+      c = g[gi]
+      if c == 123_u8 && !in_brackets
+        depth = depth + 1
+      elsif c == 125_u8 && !in_brackets
+        depth = depth - 1
+        return {gi + 1, depth} if depth == end_depth
+      elsif c == 91_u8 && !in_brackets
+        in_brackets = true
+      elsif c == 93_u8
+        in_brackets = false
+      elsif c == 92_u8
+        gi = gi + 1
+      end
+      gi = gi + 1
+    end
+    {gi, depth}
+  end
+
+  # The match from glob index *gi* and path index *pi*, the brace stack's
+  # first *size* entries (an opening brace's index, then its branch's) the
+  # braces being matched. A star's resumption point is `w_*`, the last
+  # globstar's `s_*`; a path index of zero there means none.
+  private def self.glob_from(pattern : String, path : String, match_start : Int32, gi : Int32, pi : Int32, depth : Int32, w_gi : Int32, w_pi : Int32, w_depth : Int32, s_gi : Int32, s_pi : Int32, s_depth : Int32, stack : Pointer(Int32), size : Int32) : Bool
+    g = pattern.to_unsafe
+    gn = pattern.bytesize
+    s = path.to_unsafe
+    sn = path.bytesize
+    while gi < gn || pi < sn
+      if gi < gn
+        c = g[gi]
+        if c == 42_u8
+          globstar = gi + 1 < gn && g[gi + 1] == 42_u8
+          if globstar
+            # `/**/**/` is one globstar.
+            k = gi + 2
+            while k + 4 <= gn && g[k] == 47_u8 && g[k + 1] == 42_u8 && g[k + 2] == 42_u8 && g[k + 3] == 47_u8
+              k = k + 3
+            end
+            k = k + 3 if k + 3 == gn && g[k] == 47_u8 && g[k + 1] == 42_u8 && g[k + 2] == 42_u8
+            gi = k - 2
+          end
+          w_gi = gi
+          w_pi = pi + 1
+          w_depth = depth
+          in_globstar = false
+          if globstar
+            gi = gi + 2
+            end_invalid = gi != gn
+            if (gi - match_start < 3 || g[gi - 3] == 47_u8) && (!end_invalid || g[gi] == 47_u8)
+              gi = gi + 1 if end_invalid
+              if pi == sn
+                w_pi = w_pi + 1
+              else
+                k = pi
+                while k < sn && !glob_sep?(s[k])
+                  k = k + 1
+                end
+                k = k + 1 if end_invalid || k != sn
+                w_pi = k
+                s_gi = w_gi
+                s_pi = w_pi
+                s_depth = w_depth
+              end
+              in_globstar = true
+            end
+          else
+            gi = gi + 1
+          end
+          if !in_globstar && pi < sn && glob_sep?(s[pi])
+            w_gi = s_gi
+            w_pi = s_pi
+            w_depth = s_depth
+          end
+          next
+        elsif c == 63_u8 && pi < sn
+          if !glob_sep?(s[pi])
+            gi = gi + 1
+            pi = glob_char(s, sn, pi)[1]
+            next
+          end
+        elsif c == 91_u8 && pi < sn
+          gi = gi + 1
+          negated = false
+          if gi < gn && g[gi] == 94_u8
+            negated = true
+            gi = gi + 1
+          end
+          first = true
+          hit = false
+          ch, next_pi = glob_char(s, sn, pi)
+          while gi < gn && (first || g[gi] != 93_u8)
+            low, gi = glob_class_char(g, gn, gi)
+            high = low
+            if gi + 1 < gn && g[gi] == 45_u8 && g[gi + 1] != 93_u8
+              high, gi = glob_class_char(g, gn, gi + 1)
+            end
+            hit = true if low <= ch && ch <= high
+            first = false
+          end
+          raise "File.match?: unterminated character set in #{pattern.inspect}" if gi >= gn
+          gi = gi + 1
+          if hit != negated
+            pi = next_pi
+            next
+          end
+        elsif c == 123_u8
+          # Back at a brace this match is inside: its branch continues.
+          at = 0
+          found = -1
+          while at < size
+            found = stack[at * 2 + 1] if stack[at * 2] == gi
+            at = at + 1
+          end
+          if found >= 0
+            gi = found
+            depth = depth + 1
+            next
+          end
+          return glob_brace(pattern, path, gi, pi, w_gi, w_pi, w_depth, s_gi, s_pi, s_depth, stack, size)
+        elsif (c == 125_u8 || c == 44_u8) && depth > 0
+          gi, depth = glob_skip_branch(g, gn, gi, depth)
+          next
+        elsif pi < sn
+          lit, last = glob_unescape(g, gn, gi)
+          hit = lit == 47_u8 ? glob_sep?(s[pi]) : s[pi] == lit
+          {% if flag?(:win32) %}
+            hit = glob_sep?(s[pi]) if lit == 92_u8
+          {% end %}
+          if hit
+            gi = last + 1
+            pi = pi + 1
+            if glob_sep?(lit)
+              w_gi = s_gi
+              w_pi = s_pi
+              w_depth = s_depth
+            end
+            next
+          end
+        end
+      end
+      # No match here: back to the last star, one character further on.
+      if w_pi > 0 && w_pi <= sn
+        gi = w_gi
+        pi = w_pi
+        depth = w_depth
+        next
+      end
+      return false
+    end
+    true
+  end
+
+  # Each branch of the brace at *open*, tried in turn with the state as it
+  # stands, the brace pushed so the branch's end finds its way back.
+  private def self.glob_brace(pattern : String, path : String, open : Int32, pi : Int32, w_gi : Int32, w_pi : Int32, w_depth : Int32, s_gi : Int32, s_pi : Int32, s_depth : Int32, stack : Pointer(Int32), size : Int32) : Bool
+    g = pattern.to_unsafe
+    gn = pattern.bytesize
+    depth = 0
+    in_brackets = false
+    branch = 0
+    gi = open
+    while gi < gn
+      c = g[gi]
+      if c == 123_u8 && !in_brackets
+        depth = depth + 1
+        branch = gi + 1 if depth == 1
+      elsif c == 125_u8 && !in_brackets
+        depth = depth - 1
+        if depth == 0
+          return true if glob_branch(pattern, path, open, branch, pi, w_gi, w_pi, w_depth, s_gi, s_pi, s_depth, stack, size)
+          break
+        end
+      elsif c == 44_u8 && depth == 1
+        return true if glob_branch(pattern, path, open, branch, pi, w_gi, w_pi, w_depth, s_gi, s_pi, s_depth, stack, size)
+        branch = gi + 1
+      elsif c == 91_u8 && !in_brackets
+        in_brackets = true
+      elsif c == 93_u8
+        in_brackets = false
+      elsif c == 92_u8
+        gi = gi + 1
+      end
+      gi = gi + 1
+    end
+    false
+  end
+
+  private def self.glob_branch(pattern : String, path : String, open : Int32, branch : Int32, pi : Int32, w_gi : Int32, w_pi : Int32, w_depth : Int32, s_gi : Int32, s_pi : Int32, s_depth : Int32, stack : Pointer(Int32), size : Int32) : Bool
+    raise "File.match?: braces nested past ten in #{pattern.inspect}" if size >= 10
+    stack[size * 2] = open
+    stack[size * 2 + 1] = branch
+    glob_from(pattern, path, branch, branch, pi, size + 1, w_gi, w_pi, w_depth, s_gi, s_pi, s_depth, stack, size + 1)
   end
 
   @@temp_counter = 0_u64

@@ -248,6 +248,18 @@ assert_str "a" + sep + "b", File.join("a", "b"), "join two strings"
 assert_true File.match?("foo.txt", "*.txt"), "match * suffix"
 assert_true !File.match?("foo.txt", "*.md"), "match rejects a different suffix"
 assert_true File.match?("a.txt", "?.txt"), "match ?"
+# The pattern language the other library documents: `*` inside a segment,
+# `**` across them, `?` one character, classes, braces and escapes - this
+# had `*` and `?` alone, byte by byte, and an exponential search.
+assert_true !File.match?("a/b.txt", "*.txt") && File.match?("a/b.txt", "*/*.txt"), "match: a star stays inside a segment"
+assert_true File.match?("x/y/z.cr", "**/*.cr") && File.match?("z.cr", "**/*.cr"), "match: a globstar crosses segments"
+assert_true File.match?("\u00e9a", "?a"), "match: ? is one character, not one byte"
+assert_true File.match?("b.txt", "{a,b}.txt") && File.match?("ab.txt", "a{x,{y,b}}.txt") && !File.match?("c.txt", "{a,b}.txt"), "match: braces choose a branch"
+assert_true File.match?("b", "[a-c]") && !File.match?("b", "[^a-c]") && File.match?("d", "[^a-c]"), "match: a class and its negation"
+assert_true !File.match?("a" * 40, "*a*a*a*a*a*a*a*a*a*a*b"), "match: many stars are linear"
+{% if !flag?(:win32) %}
+  assert_true File.match?("*", "\\*") && !File.match?("a", "\\*"), "match: a backslash escapes"
+{% end %}
 {% if flag?(:win32) %}
   # Either separator matches either: `Dir.glob` answers in both, and its
   # own results did not match the pattern that found them.

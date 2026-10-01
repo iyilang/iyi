@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **`File.match?` speaks the pattern language it is named for.** It knew
+  `*` and `?` and nothing else, byte by byte: `*` crossed separators, so
+  `a/b.txt` matched `*.txt`; `?` took one byte of a two-byte character;
+  `[a-c]`, `[^a]`, `{a,b}`, `**` and `\*` were literal text; and
+  `*a*a*a*a*a*a*a*a*a*a*b` against forty `a`s did not finish. It is the
+  other library's linear-time matcher now (after the glob-match crate
+  and research.swtch.com/glob), with Windows' rule kept - either
+  separator for either, so a pattern's `\` is a separator there - and the
+  argument order kept, `path` first, where the other library takes the
+  pattern first. 400,000 pattern and name pairs against Crystal's
+  `File.match?`, braces nested three deep, Unicode ranges and escapes
+  among them, agree on every answer; the file exercise checks each part
+  and proves five of them fail when broken.
+
 - **`std/io` keeps a final `\r`, knows a spent `Delimited`, and reads a
   large limit without allocating it.** `read_line(chomp)` stripped a `\r`
   that ended the stream with no `\n` after it - on a `Memory`, on a

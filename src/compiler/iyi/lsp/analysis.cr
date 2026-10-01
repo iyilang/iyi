@@ -241,11 +241,12 @@ module Iyi::Lsp
     # the cursor's file and position; the entry is whichever open
     # document's program we are searching — under R-1 a def's callers
     # live in the *consumers'* compiles, so the server asks this once per
-    # open document and merges.
-    def references_at(entry_path : String, entry_text : String, overrides : Hash(String, String), target : Location) : ReferencesVisitor?
+    # open document and merges. *seeds* are the defs the cursor's own
+    # compile adopted (`ReferencesVisitor#target_keys`).
+    def references_at(entry_path : String, entry_text : String, overrides : Hash(String, String), target : Location, seeds = Set({String, Int32, Int32}).new) : ReferencesVisitor?
       result = result_for(entry_path, entry_text, overrides)
       return nil unless result
-      visitor = ReferencesVisitor.new(target)
+      visitor = ReferencesVisitor.new(target, seeds)
       visitor.process(result) ? visitor : nil
     end
 

@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **References and rename asked at a call reach every importer, as they do
+  asked at the def.** Every other entry's compile was given the cursor's
+  own place, which only a compile holding the cursor's file can match: with
+  `greet.iyi` defining `shout` and `app.iyi` and `other.iyi` both calling
+  it, references from the call in `app.iyi` answered `app:2, app:4,
+  greet:2`, and a rename to `yell` edited two files and left `other.iyi`
+  failing with "Greet has no `shout`". The defs the first compile adopts
+  are now handed to the rest by their declaration, so the same five sites
+  and three files answer from either end. `bench/lsp_session.py` step 70a
+  checks both; the old server answered three sites and two files.
+
 - **A buffer holding a lone surrogate escape opens, with U+FFFD in its
   place.** `\ud83d` with no low half is valid JSON, an editor's buffer can
   hold one and `JSON.stringify` writes it as is, but no UTF-8 string can,

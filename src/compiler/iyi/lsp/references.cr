@@ -29,7 +29,9 @@ module Iyi::Lsp
     getter references = [] of {Location, Int32}
     getter declarations = [] of {Location, Int32}
 
-    @target_keys = Set({String, Int32, Int32}).new
+    # The adopted defs' keys, which are the seeds of every other entry's
+    # visitor (see `initialize`).
+    getter target_keys = Set({String, Int32, Int32}).new
     @target_names = Set(String).new
     # The files the adopted defs are declared in: under R-1 only a module
     # that imports one of them, directly or through another, can refer to
@@ -41,7 +43,13 @@ module Iyi::Lsp
     @program : Program? = nil
     @collecting = false
 
-    def initialize(@target_location : Location)
+    # *seeds* are the keys another compile adopted (`target_keys`): a def
+    # carrying one is adopted here too, wherever the cursor is. The cursor
+    # names a place in its own file, and an importer's compile holds that
+    # file only when it is the def's: asked from a call in `app.iyi`, a
+    # sibling `other.iyi` matched nothing, and rename edited `app.iyi` and
+    # the def and left `other.iyi` calling a name that was gone.
+    def initialize(@target_location : Location, @seeds = Set({String, Int32, Int32}).new)
     end
 
     def process(result : Compiler::Result) : Bool
@@ -116,8 +124,9 @@ module Iyi::Lsp
       true
     end
 
-    # Pass one: adopt a def whose name the cursor sits on. Pass two: a def
-    # carrying an adopted key is a declaration to report.
+    # Pass one: adopt a def whose name the cursor sits on, or one another
+    # compile adopted (`@seeds`). Pass two: a def carrying an adopted key
+    # is a declaration to report.
     private def consider(node : Def) : Nil
       location = node.location
       return unless location
@@ -126,6 +135,11 @@ module Iyi::Lsp
 
       if @collecting
         @declarations << {name_location, name_size} if key?(location)
+        return
+      end
+
+      if @seeds.includes?(key_of(location))
+        adopt node
         return
       end
 

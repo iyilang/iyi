@@ -1748,6 +1748,39 @@ def main():
          changed == ["lexer.iyi", "parser.iyi", "printer.iyi"],
          f"{sum(len(e) for e in changes.values())} edit(s) across {changed}")
 
+    # 70a. And asked at a call: references and rename reach every importer
+    #      from either end. The cursor's place went to every entry's
+    #      compile, and only a compile holding the cursor's file matched it,
+    #      so `other.iyi` - an importer like `app.iyi` - was missed and the
+    #      rename left it calling a name that was gone. The defs the first
+    #      compile adopts are the seeds of the rest.
+    seeds_root = tempfile.mkdtemp(prefix="iyi-lsp-seeds")
+    seeds_files = {"greet.iyi": "module greet\n\npub def shout(s : String) : String\n  s.upcase\nend\n",
+                   "app.iyi": "module app\n\nimport greet::{shout}\n\nputs shout(\"a\")\n",
+                   "other.iyi": "module other\n\nimport greet::{shout}\n\nputs shout(\"b\")\n"}
+    for name, body in seeds_files.items():
+        with open(os.path.join(seeds_root, name), "w", newline="") as f:
+            f.write(body)
+    sd = Client()
+    sd.send("initialize", {"rootUri": file_uri(seeds_root), "capabilities": {}})
+    sd.send("initialized", {}, wait=False)
+    seeds_app = file_uri(os.path.join(seeds_root, "app.iyi"))
+    sd.send("textDocument/didOpen", {"textDocument": {"uri": seeds_app, "languageId": "iyi", "version": 1,
+                                                       "text": seeds_files["app.iyi"]}}, wait=False)
+    sd.diagnostics(seeds_app)
+    seeds_at = {"textDocument": {"uri": seeds_app}, "position": {"line": 4, "character": 6}}
+    found = sd.send("textDocument/references", dict(seeds_at, context={"includeDeclaration": True})).get("result") or []
+    found_sites = sorted((u["uri"].rsplit("/", 1)[-1], u["range"]["start"]["line"]) for u in found)
+    renamed = (sd.send("textDocument/rename", dict(seeds_at, newName="yell")).get("result") or {}).get("changes", {})
+    renamed_sites = sorted((u.rsplit("/", 1)[-1], len(edits)) for u, edits in renamed.items())
+    sd.send("shutdown", {})
+    sd.send("exit", {}, wait=False)
+    sd.proc.wait(timeout=10)
+    step("70a", "references and rename from a call reach every importer",
+         found_sites == [("app.iyi", 2), ("app.iyi", 4), ("greet.iyi", 2), ("other.iyi", 2), ("other.iyi", 4)]
+         and renamed_sites == [("app.iyi", 2), ("greet.iyi", 1), ("other.iyi", 2)],
+         f"references {found_sites}, rename {renamed_sites}")
+
     # 34. incoming calls cross the same boundary: the def in lexer.iyi
     #     is called by defs in both consumers, one of them never opened.
     reply = c.send("textDocument/prepareCallHierarchy",

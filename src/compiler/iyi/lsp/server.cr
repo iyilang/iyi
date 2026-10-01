@@ -1682,7 +1682,10 @@ module Iyi::Lsp
       entries = workspace_entries
       entries_reaching(entries, first.target_files).each do |(entry_path, entry_text)|
         next if entry_path == path
-        visitor = @analysis.references_at(entry_path, entry_text, overrides_for(entry_path), target)
+        # Seeded with the defs the cursor's compile adopted, by key (the
+        # seeds of `ReferencesVisitor#initialize`): the cursor is a place in
+        # its own file, which this compile holds only when it is the def's.
+        visitor = @analysis.references_at(entry_path, entry_text, overrides_for(entry_path), target, first.target_keys)
         next unless visitor
         refuse_importer(visitor, renaming_to) if renaming_to
         references.concat visitor.references
@@ -1774,10 +1777,18 @@ module Iyi::Lsp
       imports
     end
 
+    # One site once, however its file is spelled. With seeds every compile
+    # that holds a site reports it, and each spells the file its own way -
+    # `c:\` from an editor's URI, `C:\` from the walk - so a rename keyed
+    # one file twice in `changes`.
     private def dedupe(sites : Array({Location, Int32})) : Array({Location, Int32})
       seen = Set({String, Int32, Int32}).new
       sites.select do |(location, _)|
-        seen.add?({fs_path(location.filename.to_s), location.line_number, location.column_number})
+        file = fs_path(location.filename.to_s)
+        {% if flag?(:win32) %}
+          file = file.downcase
+        {% end %}
+        seen.add?({file, location.line_number, location.column_number})
       end
     end
 

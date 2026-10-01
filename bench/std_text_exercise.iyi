@@ -375,4 +375,12 @@ raise "utf8: a built string counts its code points when asked" unless built.size
 raise "utf8: a built string's count stays what it was" unless built.size == 4 && built.bytesize == 10
 puts "    a built string counts its characters when asked, once"
 
+# An empty search matches before every character and at the end, as `sub`
+# matches it at the start: `"abc".gsub("", "-")` answered `"abc"`.
+raise "string: gsub empty at every character" unless "abc".gsub("", "-") == "-a-b-c-" && "".gsub("", "-") == "-" && "é".gsub("", "-") == "-é-"
+raise "string: gsub empty block" unless "ab".gsub("") { |m| "<#{m}>" } == "<>a<>b<>"
+unpaired = String.new(2) { |b| b[0] = 0xC3_u8; b[1] = 0x41_u8 }
+raise "string: gsub empty keeps a byte that begins no character" unless unpaired.gsub("", "-").bytes == [0x2D_u8, 0xC3_u8, 0x2D_u8, 0x41_u8, 0x2D_u8]
+puts "    gsub with an empty search writes the replacement before every character and at the end"
+
 puts "all std/text checks passed"

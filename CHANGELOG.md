@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`gsub("", replacement)` and `gsub("") { }` in std/text write the
+  replacement before every character and at the end.** Both answered the
+  string unchanged - `"abc".gsub("", "-")` was `"abc"` - while
+  `sub("", "-")` put one at the front. They answer `"-a-b-c-"` now,
+  as Crystal 1.21 and Python do, `""` gives `"-"`, and a byte that
+  begins no character is kept as it is, a unit of its own (C3 41 gives
+  2D C3 2D 41 2D, as Crystal's does). bench/std_text_exercise checks the
+  three forms; the old module failed at "string: gsub empty at every
+  character".
+
 - **A byte that begins no UTF-8 character is one U+FFFD to `size`,
   `each_char` and `chars`, and never takes the bytes after it.**
   `each_char` took the one to three bytes after a lead byte whatever they

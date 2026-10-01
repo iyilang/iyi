@@ -494,8 +494,12 @@ class ::String
     byte_slice(0, idx) + repl + byte_slice(idx + text.bytesize, bytesize - idx - text.bytesize)
   end
 
+  # An empty search matches before every character and at the end, as
+  # `sub` matches it at the start: `"abc".gsub("", "-")` is `"-a-b-c-"`, the
+  # other library's answer, where it was `"abc"`. A byte that begins no
+  # character is kept, a unit of its own.
   def gsub(search : String, replacement : String) : String
-    return self if search.empty?
+    return gsub(search) { replacement } if search.empty?
     pieces = split(search)
     pieces.join(replacement)
   end
@@ -509,7 +513,19 @@ class ::String
   end
 
   def gsub(search : String, & : String -> String) : String
-    return self if search.empty?
+    # The empty search of `gsub("", replacement)` above.
+    if search.empty?
+      return String.build(bytesize + 16) do |io|
+        start = 0
+        each_point do |_, at|
+          io.write(to_unsafe + start, at - start)
+          io << yield search
+          start = at
+        end
+        io.write(to_unsafe + start, bytesize - start)
+        io << yield search
+      end
+    end
     idx = index(search)
     return self unless idx
 

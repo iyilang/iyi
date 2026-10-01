@@ -220,6 +220,12 @@ def main : Nil
   puts "eq other type: #{eq1 == 123}"
   puts "same self: #{eq1.same?(eq1)}"
   puts "same copy: #{eq1.same?(eq2)}"
+  # Slices of two element types are unequal, as two such arrays are: they
+  # compared equal and hashed apart, so `Int32` -1, -2 and `Int64` -1, -2
+  # were `==` with hashes 204952928 and -1576659145.
+  wide_eq = Slice(Int64).new(3) { |i| i.to_i64 }
+  puts "eq other element type: #{eq1 == wide_eq} #{wide_eq == eq1}"
+  raise "eq other element type: an Int32 slice equalled an Int64 slice it hashes apart from" if eq1 == wide_eq || wide_eq == eq1
 
   # Equal contents hash alike, and a grid of two-element slices spreads:
   # the hash was `31 * h + x`, which gave this grid 4,769 distinct hashes

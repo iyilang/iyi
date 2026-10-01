@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **A `Slice` equals only a slice of its own element type, as an `Array`
+  does.** `==` took any `Slice(U)`, and numbers equal across types hash
+  apart, so `Slice[-1, -2]` of `Int32` and of `Int64` were `==` with
+  hashes 204952928 and -1576659145, and a table keyed by one missed the
+  other. It takes `Slice(T)` now, as `Array#==` takes `Array(T)`.
+  `bench/std_slice_exercise.iyi` compares an `Int32` slice with an `Int64`
+  one both ways; the old module answered true and true.
+
 - **`Slice(Bool).new(3, true)` is three trues.** `read_only` was
   positional in every `Slice.new`, so with `Bool` elements the value bound
   to it: the call built `Slice[false, false, false]`, read-only. It is

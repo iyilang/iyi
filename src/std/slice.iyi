@@ -431,7 +431,12 @@ pub struct Slice(T)
   end
 
   # Returns true if sizes match and all elements are equal.
-  def ==(other : Slice(U)) : Bool forall U
+  #
+  # A slice of its own element type, as `Array#==` takes an `Array(T)`. It
+  # took any `Slice(U)`, and numbers that compare equal across types hash
+  # apart: `Slice[-1, -2]` of `Int32` was `==` to the same of `Int64` with
+  # hashes 204952928 and -1576659145, so a table missed one by the other.
+  def ==(other : Slice(T)) : Bool
     return false if @size != other.size
     return true if @pointer.address == other.to_unsafe.address
     i = 0

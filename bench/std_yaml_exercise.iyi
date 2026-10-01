@@ -87,7 +87,7 @@ single_lines = reads("'" + quoted_lines + "'", "a single-quoted scalar of 20,000
 quoted_ms = (__iyi_monotonic_ns - quoted_started) // 1000000
 assert_true(double_lines.as_s == "xxxxxxxxxx " * 20000 && single_lines == double_lines, "quoted scalars of 20,000 lines fold to one line each")
 assert_true(quoted_ms < 1000, "quoted scalars of 20,000 lines read in under a second, not #{quoted_ms} ms")
-puts "  a double- and a single-quoted scalar of 20,000 lines read in #{quoted_ms} ms"
+puts "  a double- and a single-quoted scalar of 20,000 lines read in under a second"
 puts "  integers, floats, null, 1.2 strings, quotes, folded, literal and verbatim tags"
 puts "  '?' plain starts, block scalar blank lines and chomping, quoted folding, flow folding, tags over nothing"
 

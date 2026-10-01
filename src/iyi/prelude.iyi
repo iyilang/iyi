@@ -774,7 +774,7 @@ end
       end
       @@line_start = wide[read - 1] == 10_u16
       wide[read] = 0_u16
-      size = __iyi_utf8_size_from_wide(wide)
+      size = __iyi_utf8_size_from_wide(wide, 0)
       return 0_i64 if size <= 1
       bytes = size - 1
       return 0_i64 if bytes.to_u64 > count
@@ -953,9 +953,13 @@ end
   end
 
   # How many bytes the UTF-8 of *wide* needs, terminator included, or 0 when
-  # Windows refuses the conversion.
-  def __iyi_utf8_size_from_wide(wide : UInt16*) : Int32
-    needed = LibC.WideCharToMultiByte(65001, 0, wide, -1, Pointer(UInt8).new(0_u64), 0,
+  # Windows refuses the conversion. WC_ERR_INVALID_CHARS (128) by default
+  # refuses an unpaired surrogate: with 0 it became U+FFFD, and `Dir#read`
+  # named `x\uFFFDy.txt`, which does not exist, for a file named with one.
+  # Text a program is handed once - its arguments, a console's input -
+  # passes 0, where a refusal would lose the rest of it.
+  def __iyi_utf8_size_from_wide(wide : UInt16*, flags : Int32 = 128) : Int32
+    needed = LibC.WideCharToMultiByte(65001, flags, wide, -1, Pointer(UInt8).new(0_u64), 0,
       Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
     needed > 0 ? needed : 0
   end
@@ -9368,7 +9372,7 @@ class Program
           end
         end
         piece[taken] = 0_u16
-        size = __iyi_utf8_size_from_wide(piece)
+        size = __iyi_utf8_size_from_wide(piece, 0)
         if size > 0
           result << String.new(size - 1) { |target| __iyi_utf8_bytes_from_wide(piece, target, size) }
         end

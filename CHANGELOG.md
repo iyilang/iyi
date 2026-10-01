@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **On Windows a name that UTF-8 cannot spell is not answered as a name
+  with U+FFFD in it.** NTFS keeps a name with an unpaired surrogate,
+  which has no UTF-8 spelling, and the prelude's way back from UTF-16
+  converted with flags 0: `Dir.children` of a directory holding
+  `ok.txt` and `x<U+D800>y.txt` answered `["ok.txt", "x\uFFFDy.txt"]`,
+  a name `File.exists?` said false about, and `Dir.glob` answered the
+  same path, though `Dir#read` says such a name is stepped over. The
+  conversion passes WC_ERR_INVALID_CHARS now, so the listing steps over
+  it, and `Program.cwd` answers nil in such a directory where it
+  answered a path with U+FFFD in it. A program's arguments and a
+  console's input still convert as before, an unpaired surrogate as
+  U+FFFD, because refusing either loses the rest of it: `a<U+D800>b`
+  still arrives as the second of three arguments.
+  bench/std_dir_exercise.iyi makes such a name and lists its directory;
+  the old prelude answered `["ok.txt", "x\uFFFDy.txt"]`.
+
 - **On Windows a path that is not UTF-8 is refused, not spelled with
   U+FFFD.** The prelude converted a path with `MultiByteToWideChar`
   flags 0, which never fails: each byte that is not UTF-8 became U+FFFD,

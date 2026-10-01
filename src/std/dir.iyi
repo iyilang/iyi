@@ -390,7 +390,17 @@ pub class Dir
     {% elsif flag?(:win32) %}
       wide = __iyi_wide_path(c_str(target))
       if wide.address == 0_u64 || LibKernel32.SetCurrentDirectoryW(wide) == 0
-        raise "Cannot change directory to: #{target}"
+        code = LibKernel32.GetLastError
+        # ERROR_FILENAME_EXCED_RANGE (206): the working directory holds
+        # MAX_PATH less 2 unless long paths are enabled, and the `\\?\`
+        # prefix counts against it - measured, 254 characters went in and
+        # 255 did not, while every other call here took 396. The refusal
+        # named the directory and nothing else.
+        if code == 206 && exists?(target)
+          raise "Cannot change directory to: #{target}: the directory is there, and Windows refused it as " \
+                "the working directory: past 254 characters it does unless long paths are enabled"
+        end
+        raise "Cannot change directory to: #{target} (Windows error #{code})"
       end
     {% end %}
     # And `PWD` with it, as a shell's `cd` keeps it: `Path#expand` reads

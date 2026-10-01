@@ -202,6 +202,22 @@ refuses "open a path containing a NUL byte" open_nul "path contains a NUL byte" 
 refuses "cd to a missing directory" cd_missing "Cannot change directory to" \
   'Dir.cd("'"$WORK"'/missing_target_cwd")'
 
+# The working directory holds 254 characters unless long paths are
+# enabled, while every other call here takes a longer directory, and the
+# refusal named the directory and said nothing of why. Driven from here,
+# not the exercise: from an artifact a library's panic names a site its
+# source build does not, and the two runs' output is compared.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    long="$WORK"
+    for letter in d e f g; do
+      long="$long/$(printf "$letter%.0s" $(seq 60))"
+    done
+    refuses "cd past the working directory's limit" cd_long "past 254 characters" \
+      'Dir.mkdir_p("'"$long"'"); Dir.cd("'"$long"'")'
+    ;;
+esac
+
 refuses "read from a closed directory handle" read_closed "Cannot read from closed Dir" \
   'd = Dir.new("'"$WORK"'"); d.close; d.read'
 

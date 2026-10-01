@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **On Windows `Dir.cd` says why a long directory is refused.** The
+  working directory holds 258 characters unless long paths are enabled,
+  and the `\\?\` prefix a long path is given counts against them:
+  measured, 254 characters went in and 255 did not, while every other
+  file and directory call worked on a directory of 396. The refusal
+  named the directory and nothing else. It says "the directory is
+  there, and Windows refused it as the working directory: past 254
+  characters it does unless long paths are enabled" now, as
+  `Process.run`'s `chdir:` does, and any other refusal carries the
+  Windows error number. `bench/std_dir_exercise.sh` changes into a
+  directory past the limit; the old module refused with "Cannot change
+  directory to: <path>" alone.
+
 - **An open `Dir` keeps its entry buffer across a collection.** The
   buffer `FindNextFileW` writes each entry into was a block of its own,
   kept by its address as an integer inside the stream, which the

@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`UInt8` and `UInt64` divided by a double are doubles.** `std/int`
+  wrote `/(Float64)` only for the widths the prelude does not divide,
+  and the prelude divides only `Int32` and `Int64`, so `UInt8` and
+  `UInt64` had none: `1_u8 / 3.0` took the `Float32` overload and printed
+  0.33333334, and a `Float64` variable did not type. Found by 11,130
+  random arithmetic programs compared across iyi's debug and release
+  builds, a model of iyi's rules and Crystal - which otherwise agreed on
+  all 377,781 statements, overflow panics included; the int exercise
+  checks it and proves the check fails with the overload gone.
+
 - **Seven answers of tuples, symbols, enums and `ReferenceStorage`.**
   `Tuple#map`, `+` and `reverse` did not compile for the empty tuple -
   the macro wrote `{ }`, an empty hash literal. A tuple whose first member

@@ -23,6 +23,11 @@ puts "== add"
 assert_true 1_u16 + 2_u16 == 3_u16, "u16"
 assert_true 1_i8 + 2_i8 == 3_i8, "i8"
 assert_true 1_u32 + 1_u32 == 2_u32, "u32"
+# `UInt8` and `UInt64` divide by a double as the rest of the tower does. The
+# prelude writes `/` for `Int32` and `Int64` only, so `x / 3.0` did not type
+# for these two, and a literal divisor took the `Float32` overload instead:
+# `1_u8 / 3.0` was a single, 0.33333334.
+assert_true 1_u8 / 3.0 == 1.0 / 3.0 && 1_u64 / 3.0 == 1.0 / 3.0, "UInt8 and UInt64 divided by a double are doubles"
 puts "  UInt16, Int8, UInt32 add"
 
 puts "\n== bits"

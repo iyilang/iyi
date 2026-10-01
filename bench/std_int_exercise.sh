@@ -205,6 +205,32 @@ PY
   else
     printf '  a negative shift count answering zero: exits at "%s"\n' "$(grep -m1 'a negative shift count' "$WORK/shift.out" | sed 's/^iyi: panic: //')"
   fi
+
+  # `UInt8` and `UInt64` left without `/(Float64)` again, as the prelude
+  # leaves them: the exercise's literal divisor then takes the `Float32`
+  # overload and still compiles, and the division check has to say so.
+  mkdir -p "$WORK/udiv/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/int.iyi").read_text()
+old = '{% unless from[0] == "Int32" || from[0] == "Int64" %}\n        def /(other : Float64) : Float64'
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/udiv/std/int.iyi").write_text(src.replace(old, '{% unless prelude.includes?(from[0]) %}\n        def /(other : Float64) : Float64', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the division patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/udiv${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_int_exercise.iyi" >"$WORK/udiv.out" 2>&1; then
+    echo "  the exercise PASSED with UInt8 and UInt64 dividing by a single"
+    status=1
+  elif ! grep -q "UInt8 and UInt64 divided by a double are doubles" "$WORK/udiv.out"; then
+    echo "  UInt8 and UInt64 without /(Float64) failed, but not at its check:"
+    sed -n '1,3p' "$WORK/udiv.out"
+    status=1
+  else
+    printf '  UInt8 and UInt64 without /(Float64): exits at "%s"\n' "$(grep -m1 'divided by a double' "$WORK/udiv.out" | sed 's/^iyi: panic: //')"
+  fi
 fi
 
 echo

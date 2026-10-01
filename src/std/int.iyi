@@ -236,9 +236,14 @@ module std/int
           def {{ op.id }}(other : Float64) : Float64
           end
         {% end %}
+      {% end %}
 
-        # An integer divided by a float is a float, as the prelude has it
-        # for `Int32` and `Int64`.
+      # An integer divided by a float is a float, as the prelude has it for
+      # `Int32` and `Int64` - and for `UInt8` and `UInt64` too, which the
+      # prelude does not write: `x / 3.0` did not type for them, and with a
+      # literal divisor the `Float32` overload took it, so `1_u8 / 3.0` was a
+      # single, 0.33333334.
+      {% unless from[0] == "Int32" || from[0] == "Int64" %}
         def /(other : Float64) : Float64
           to_f64 / other
         end

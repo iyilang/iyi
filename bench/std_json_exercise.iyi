@@ -180,6 +180,13 @@ pull.skip
 assert_true(pull.kind.eof?, "skip over objects whose keys repeat only across objects")
 assert_text("{\"x\":[1],\"y\":{\"x\":2}}", JSON.from_json("{\"x\": [1], \"y\": {\"x\": 2}}", Any).to_json, "read_any with a key repeated in a nested object")
 assert_text("[1,{\"a\":[]}]", JSON.build { |b| PullParser.new("[1, {\"a\": []}]").read_raw(b) }, "read_raw into a builder")
+# A number goes through read_raw as the text it was read from. Rebuilt from
+# the Int64 or Float64 it parsed to, `1E+2` came back as `100.0` and a
+# UInt64 id past Int64 as `1.8446744073709552e+19`, which did not read
+# back as a UInt64.
+assert_text("[12345678901234567890,1E+2,0.1,-0,1.50]", PullParser.new("[12345678901234567890, 1E+2, 0.1, -0, 1.50]").read_raw, "read_raw writes a number as its own text")
+id_text = PullParser.new("{\"id\": 18446744073709551615}").read_raw
+assert_true(JSON.from_json(id_text, Hash(String, UInt64))["id"] == 18446744073709551615_u64, "a UInt64 id read back through read_raw: #{id_text}")
 puts "  read_object/read_array/read_x, skip, on_key, read_raw, read_any and locations"
 
 # An object with more keys than the pull parser scans (32) keeps its keys

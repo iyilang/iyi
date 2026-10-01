@@ -1911,17 +1911,21 @@ pub class PullParser
     end
   end
 
-  # The value the reader is on, written into `json` as it is read.
+  # The value the reader is on, written into `json` as it is read. A number
+  # is written as its own text, the text it was read from: rebuilt from the
+  # Int64 or Float64 it parsed to, `12345678901234567890` came back as
+  # `1.2345678901234567e+19` and `1E+2` as `100.0`, and a UInt64 id passed
+  # through here did not read back as itself.
   def read_raw(json : Builder) : Nil
     if @kind == Kind::Null
       read_next
       json.null
     elsif @kind == Kind::Bool
       json.bool(read_bool)
-    elsif @kind == Kind::Int
-      json.number(read_int)
-    elsif @kind == Kind::Float
-      json.number(read_float)
+    elsif @kind == Kind::Int || @kind == Kind::Float
+      number_text = raw_value
+      read_next
+      json.raw(number_text)
     elsif @kind == Kind::String
       json.string(read_string)
     elsif @kind == Kind::BeginArray

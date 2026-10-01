@@ -34,6 +34,15 @@ assert_str "a/b:c", URI.new(path: "a/b:c").to_s, "a colon past the first segment
 assert_str "file:C:/x", URI.new(scheme: "file", path: "C:/x").to_s, "nor a path behind a scheme"
 puts "  a colon in a relative path's first segment"
 
+# Userinfo may hold the sub-delims (RFC 3986 section 3.2.1), and a URI
+# that holds them is written back as it was: `user;type=a` came back
+# `user%3Btype%3Da`, which section 2.2 counts a different URI. A `:` and an
+# `@` inside a user or a password are still encoded.
+["http://user;type=a@h/", "ftp://u:p!$&'()*+,;=@h/x", "http://a%20b:p%3Aw@h/", "http://%40x@h/"].each do |text|
+  assert_str text, URI.parse(text).to_s, "#{text} round-trips"
+end
+puts "  userinfo keeps its sub-delims"
+
 puts "\n== refuse"
 assert_true URI.parse?("https://ex.com/a b").nil?, "space refused"
 puts "  a space in the reference is refused"

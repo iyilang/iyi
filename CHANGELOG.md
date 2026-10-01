@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`URI#to_s` writes userinfo's sub-delims as they were.** Userinfo may
+  hold `!$&'()*+,;=` (RFC 3986 §3.2.1), and the user and password were
+  re-encoded keeping only unreserved bytes: `http://user;type=a@h/` came
+  back `http://user%3Btype%3Da@h/`, which §2.2 counts a different URI.
+  They pass now; a `:` and an `@` inside either are still encoded.
+  `bench/std_uri_exercise.iyi` round-trips four such URIs; the old module
+  changed the first.
+
 - **A flags enum prints bits no member names, and a member that is
   several bits by its own name.** `Mode.new(9)` of `Read = 1` printed
   "Read", the 8 dropped; and with a `ReadWrite = 3` member, `3` printed

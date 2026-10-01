@@ -484,7 +484,6 @@ pub class UdpSocket
   {% if flag?(:darwin) %}
     AF_INET6          =     30
     SOL_SOCKET        = 0xffff
-    SO_REUSEADDR      = 0x0004
     SO_RCVBUF         = 0x1002
     SO_SNDBUF         = 0x1001
     MSG_DONTWAIT      =   0x80
@@ -549,11 +548,6 @@ pub class UdpSocket
       val
     end
 
-    def self.__sys_set_reuseaddr(fd : Int32) : Int32
-      val = 1_i32
-      LibC.setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, pointerof(val).as(Void*), 4_u32)
-    end
-
     def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
       kq = LibC.kqueue
       return false if kq < 0
@@ -613,10 +607,14 @@ pub class UdpSocket
     def self.__is_msgsize(res : Int64) : Bool
       false
     end
+
+    # ECONNREFUSED (61): see the Linux arm.
+    def self.__is_refused(res : Int64) : Bool
+      res < 0_i64 && LibC.__error.value == 61
+    end
   {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
     AF_INET6        = 10
     SOL_SOCKET         = 1
-    SO_REUSEADDR       = 2
     SO_RCVBUF          = 8
     SO_SNDBUF          = 7
     MSG_DONTWAIT       = 0x40
@@ -739,11 +737,6 @@ pub class UdpSocket
       res = __sys5(SYS_GETSOCKOPT, fd.to_i64, level.to_i64, optname.to_i64, pointerof(val).address.to_i64, pointerof(len).address.to_i64).to_i32
       raise "cannot get buffer size" if res < 0
       val
-    end
-
-    def self.__sys_set_reuseaddr(fd : Int32) : Int32
-      val = 1_i32
-      __sys5(SYS_SETSOCKOPT, fd.to_i64, SOL_SOCKET.to_i64, SO_REUSEADDR.to_i64, pointerof(val).address.to_i64, 4_i64).to_i32
     end
 
     def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
@@ -1048,15 +1041,6 @@ pub class UdpSocket
       val
     end
 
-    # Nothing, for the reason `std/socket`'s win32 arm gives: SO_REUSEADDR on
-    # Windows lets a different socket take a port this one is bound to, which
-    # is not what the POSIX arms ask for with it. A datagram socket needs the
-    # waiver even less than a listening one — there is no TIME_WAIT on a
-    # port that never had a connection.
-    def self.__sys_set_reuseaddr(fd : Int32) : Int32
-      0
-    end
-
     # One descriptor, one event, and a bound on the wait, which is what the
     # epoll and kqueue arms do with theirs.
     def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
@@ -1091,10 +1075,14 @@ pub class UdpSocket
     def self.__is_msgsize(res : Int64) : Bool
       res == -10040_i64
     end
+
+    # Never: `__sys_socket` turns the report off.
+    def self.__is_refused(res : Int64) : Bool
+      false
+    end
   {% else %}
     AF_INET6          =     10
     SOL_SOCKET        =      1
-    SO_REUSEADDR      =      2
     SO_RCVBUF         =      8
     SO_SNDBUF         =      7
     MSG_DONTWAIT      =   0x40
@@ -1135,10 +1123,6 @@ pub class UdpSocket
     end
 
     def self.__sys_get_buffer_size(fd : Int32, level : Int32, optname : Int32) : Int32
-      -1
-    end
-
-    def self.__sys_set_reuseaddr(fd : Int32) : Int32
       -1
     end
 

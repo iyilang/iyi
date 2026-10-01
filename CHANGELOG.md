@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A UDP port belongs to its first binder on Linux too.** `UdpSocket.bind`
+  set SO_REUSEADDR on Linux and darwin, which waives TIME_WAIT, a state
+  a datagram port never has; what it does to a datagram socket on Linux
+  is let a second socket bind the address and port the first holds,
+  and unicast then reaches one of them [INFERENCE: not run on Linux].
+  Windows set nothing and refused the second bind, measured. No arm
+  sets it now. `bench/std_udp_exercise.sh` binds a held port and
+  requires "the address is in use"; the old module with its win32
+  arm asking for SO_REUSEADDR, as the POSIX arms did, let the second
+  bind through.
+
 - **A UDP bind, send, connect or receive that fails says why.** Each
   failure was a fixed sentence that dropped the platform's number, the
   way a TCP bind once did: a port in use was "cannot bind UDP socket to

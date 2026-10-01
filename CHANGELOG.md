@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **Any number of fibers can read one task's `value` while it runs.**
+  The task kept one joiner, and a second fiber reading the value of a
+  task still running panicked "task already has a joiner", which the
+  group re-raised as "a task panicked: task already has a joiner",
+  exit 1; a read after the task had finished worked, so the outcome
+  hung on timing. Every reader waits now and is woken when the task
+  ends, in the order it asked, and a task that panics answers each of
+  them `Panicked`. `bench/concurrency_exercise.iyi` has the owner and
+  two tasks read one running task's value, and two tasks read a
+  panicking one's; the old runtime panicked "task already has a
+  joiner".
+
 - **`iyi foo` with only `iyi-foo.cmd` or `iyi-foo.bat` on PATH says the
   extension is a batch file.** The lookup is `CreateProcess`'s, which
   appends `.exe` and nothing else, so an npm-style shim was "iyi: unknown

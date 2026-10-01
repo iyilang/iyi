@@ -349,6 +349,50 @@ end
 fail("task.value answered #{doubled // 2}") unless doubled == 42
 puts "task.value joined and answered"
 
+# ── 7b. Any number of fibers read one task's value ─────────────────────
+# The task kept one joiner, and a second fiber reading a task still
+# running panicked "task already has a joiner". Every reader is woken,
+# in the order it came: the owner first, since it asked before either
+# task ran. A task that panics answers every reader `Panicked`, and the
+# join owes no re-raise for a panic somebody read.
+readers = ""
+group do |g|
+  slow_task = g.spawn do
+    sleep(10)
+    42
+  end
+  g.spawn do
+    v = slow_task.value
+    readers = readers + ",a:#{v.is_a?(Int32) ? v : -1}"
+    0
+  end
+  g.spawn do
+    v = slow_task.value
+    readers = readers + ",b:#{v.is_a?(Int32) ? v : -1}"
+    0
+  end
+  v = slow_task.value
+  readers = readers + "owner:#{v.is_a?(Int32) ? v : -1}"
+end
+fail("readers: expected owner:42,a:42,b:42 — got #{readers}") unless readers == "owner:42,a:42,b:42"
+broken_readers = ""
+group do |g|
+  failing_task = g.spawn do
+    sleep(10)
+    raise "the task several fibers read panicked, as it was meant to"
+    0
+  end
+  2.times do
+    g.spawn do
+      v = failing_task.value
+      broken_readers = broken_readers + (v.is_a?(Panicked) ? "P" : "?")
+      0
+    end
+  end
+end
+fail("readers of a panicked task saw #{broken_readers}") unless broken_readers == "PP"
+puts "three fibers read one task's value, and two read a panicked one's"
+
 # ── 8. The join is deferred: an early return cannot leak a task ─────────
 def leaves_early(finished : Pointer(Int32)) : Nil
   group do |g|

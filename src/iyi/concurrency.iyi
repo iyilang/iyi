@@ -432,7 +432,13 @@ class IyiFiber
   property sleep_prev : IyiFiber?
   property sleep_seq : UInt64
   property next_child : IyiFiber?
+  # Who waits for this fiber to finish: the first of them, and through
+  # `next_joiner` the rest, chained through the waiters themselves. One
+  # field held one joiner, and a second fiber reading the same running
+  # task's `value` panicked "task already has a joiner" - a rule written
+  # nowhere, and one a read after the task finished never met.
   property joiner : IyiFiber?
+  property next_joiner : IyiFiber?
 
   # The registry link and the stack's high end, for the collector's root
   # walk (GC_DESIGN.md Stage 3): a parked fiber's live values sit between
@@ -534,6 +540,7 @@ class IyiFiber
     @prev_io = nil
     @next_child = nil
     @joiner = nil
+    @next_joiner = nil
     @deadline = 0_i64
     @io_timed = false
     @timed_out = false
@@ -1250,11 +1257,7 @@ class IyiScheduler
     body = fiber.proc
     body.call unless body.is_a?(Nil)
     fiber.state = IyiFiberState::Done
-    joiner = fiber.joiner
-    if joiner.is_a?(IyiFiber)
-      fiber.joiner = nil
-      enqueue(joiner)
-    end
+    wake_joiners(fiber)
     # Never returns: a done fiber is never enqueued, so the switch away
     # is the last instruction of this stack's life — and the stack is
     # the next fiber's to take back, named here because after the
@@ -1600,13 +1603,38 @@ class IyiScheduler
     true
   end
 
+  # Any number of fibers wait on one task, each pushed on its chain.
   def self.join(fiber : IyiFiber) : Nil
     while fiber.state != IyiFiberState::Done
-      raise "task already has a joiner" if fiber.joiner.is_a?(IyiFiber)
       me = current
+      me.next_joiner = fiber.joiner
       fiber.joiner = me
       me.state = IyiFiberState::Joining
       reschedule
+    end
+  end
+
+  # Every fiber waiting on *fiber*, woken in the order they came: the
+  # chain is pushed at its head, so it is turned round first.
+  def self.wake_joiners(fiber : IyiFiber) : Nil
+    first = fiber.joiner
+    return unless first.is_a?(IyiFiber)
+    fiber.joiner = nil
+    waiter = first
+    rest = first.next_joiner
+    first.next_joiner = nil
+    while rest.is_a?(IyiFiber)
+      following = rest.next_joiner
+      rest.next_joiner = waiter
+      waiter = rest
+      rest = following
+    end
+    while true
+      following = waiter.next_joiner
+      waiter.next_joiner = nil
+      enqueue(waiter)
+      break unless following.is_a?(IyiFiber)
+      waiter = following
     end
   end
 
@@ -2106,7 +2134,7 @@ class IyiScheduler
 
   # The panic path: run the current fiber's pending defers innermost
   # first, then die at the task boundary. A spawned task marks itself,
-  # tells its group, wakes its joiner and is never scheduled again; the
+  # tells its group, wakes its joiners and is never scheduled again; the
   # main fiber has no boundary above it, so after its drain the process
   # exits 1. Every registered cleanup on the path has run either way,
   # which is the promise `defer` makes.
@@ -2134,11 +2162,7 @@ class IyiScheduler
     g.child_panicked(fiber.cancelled) if g.is_a?(IyiGroup)
 
     fiber.state = IyiFiberState::Done
-    joiner = fiber.joiner
-    if joiner.is_a?(IyiFiber)
-      fiber.joiner = nil
-      enqueue(joiner)
-    end
+    wake_joiners(fiber)
     state.dying = fiber
     reschedule
     __iyi_exit(1)
@@ -2442,6 +2466,7 @@ end
 # block returned — the whole union, error members included, so `case`
 # handles a task's failure exactly the way III.4.3 says (the group has
 # already applied its policy by then; reading the value is optional).
+# Any number of fibers may read it, before the task ends or after.
 class IyiTask(T)
   @fiber : IyiFiber
   @box : Array(T)

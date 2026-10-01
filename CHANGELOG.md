@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`File.tempfile` on Windows refuses a name that is not UTF-8 with the
+  module's sentence.** Its exclusive create handed the conversion's answer
+  to `CreateFileW` unchecked; with the conversion refusing such text, the
+  null path was refused "Windows error 3: The system cannot find the path
+  specified". It says "the path is not valid UTF-8" now, as the module's
+  other calls do. `bench/std_file_exercise.sh` asks for
+  `File.tempfile("bad\xFF")`; the old module answered Windows error 3.
+
 - **`File.info?` of a DOS device on Windows answers a character device.**
   `GetFileAttributesExW` refuses `NUL`, `CON` and a port that is there with
   ERROR_INVALID_PARAMETER, and `info?("NUL")` was nil while `exists?("NUL")`

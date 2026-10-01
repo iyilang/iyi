@@ -1970,7 +1970,12 @@ class ::File
     {% elsif flag?(:win32) %}
       # GENERIC_WRITE, CREATE_NEW (1), FILE_ATTRIBUTE_NORMAL.
       # ERROR_FILE_EXISTS is 80, ERROR_ALREADY_EXISTS 183.
-      handle = Std::File::LibKernel32.CreateFileW(__iyi_wide_path(sys_path(path)), 0x40000000, 0x7,
+      # A tempfile name that is not UTF-8 converts to null, and the create
+      # was refused "Windows error 3: The system cannot find the path
+      # specified".
+      wide = __iyi_wide_path(sys_path(path))
+      raise "Cannot create tempfile #{path}: the path is not valid UTF-8" if wide.address == 0_u64
+      handle = Std::File::LibKernel32.CreateFileW(wide, 0x40000000, 0x7,
         Pointer(Void).new(0_u64), 1, 0x80, Pointer(Void).new(0_u64))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
         code = Std::File::LibKernel32.GetLastError

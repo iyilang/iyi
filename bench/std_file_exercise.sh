@@ -666,6 +666,10 @@ PY
         fi
       fi
     fi
+    # A tempfile name that is not UTF-8 is refused as one: it was refused
+    # "Windows error 3: The system cannot find the path specified".
+    refuses "a tempfile name that is not UTF-8" tempfile_bad "the path is not valid UTF-8" \
+      'File.tempfile("bad\xFF")'
     ;;
 esac
 

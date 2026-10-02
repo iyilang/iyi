@@ -224,6 +224,13 @@ refuses "a file that is not there" "no such file" -- "$IYI" run "$WORK/nope.iyi"
 refuses "a directory as the entry" "is a directory, not a source file" -- "$IYI" run "$WORK"
 refuses "a directory where check wants a file" "is a directory" -- "$IYI" check "$WORK"
 refuses "two module headers in one file" "a file declares one module" -- "$IYI" run twoheaders.iyi
+# A file imported without a module header. The refusal was "`bare` is not
+# imported here: ... write `import bare::{name}`", under the very import
+# it described.
+printf 'pub def twice(x : Int32) : Int32\n  x * 2\nend\n' > bare.iyi
+printf 'import bare::{twice}\n\nputs twice(3)\n' > usesbare.iyi
+refuses "an import of a file with no module header" 'has no `module bare` header' -- \
+  "$IYI" run usesbare.iyi
 refuses "bytes that are not text" "not a valid iyi source file" -- "$IYI" run binary.iyi
 # A program that ran out of stack says so itself now - `iyi: panic: stack
 # overflow`, from a handler on an alternate stack (bench/panics.sh holds

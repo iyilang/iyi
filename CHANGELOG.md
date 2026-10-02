@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **Importing a file that has no module header says so.** `import
+  util::{twice}` of a `util.iyi` without `module util` was refused with
+  "`util` is not imported here: its names come with the import that loads
+  it, `import util::{name}`", under the very import it described. It says
+  "`util` is imported, but util.iyi has no `module util` header ... write
+  `module util` at its top" now, and the same of a file whose header names
+  another module. `bench/verbs_exercise.sh` checks it; the old compiler
+  gave the first sentence.
+
 - **`vet -f json`, `csv` and `codecov` (and `tool unreachable`) name a
   file the way a repository does, `app/helpers.iyi`, on every system.**
   On Windows all three wrote `app\helpers.iyi` - `"app\\helpers.iyi"` in

@@ -309,7 +309,16 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # different mistakes hide behind it, so they are told apart here.
     written = node.path.join('/')
     unless current_type.lookup_type?(path, allow_typeof: false)
-      if resolve_import(written)
+      if file = resolve_import(written)
+        # Loaded, and still no module: the file does not declare the one its
+        # path names. The sentence was "not imported here ... write `import
+        # util::{name}`" under the very `import util::{twice}` it was about.
+        if @program.iyi_imported_files.includes?(file)
+          node.raise "`#{written}` is imported, but #{Iyi.relative_filename(file)} " \
+                     "has no `module #{written}` header, and an import's names are " \
+                     "the `pub` ones under it: write `module #{written}` at its top " \
+                     "(SPEC.md R-1)"
+        end
         node.raise "`#{written}` is not imported here: its names come with the " \
                    "import that loads it, `import #{written}::{name}` (SPEC.md R-1, R-2b)"
       else

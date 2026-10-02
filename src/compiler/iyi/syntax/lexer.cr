@@ -243,6 +243,7 @@ module Iyi
 
       case current_char
       when '\0'
+        check_nul_byte
         @token.type = :EOF
       when ' ', '\t'
         consume_whitespace
@@ -1817,6 +1818,7 @@ module Iyi
       start = current_pos
 
       if current_char == '\0'
+        check_nul_byte
         @token.type = :EOF
         return @token
       end
@@ -2847,6 +2849,17 @@ module Iyi
       if error = @reader.error
         ::raise InvalidByteSequenceError.new("Unexpected byte 0x#{error.to_s(16)} at position #{@reader.pos}, malformed UTF-8")
       end
+    end
+
+    # iyi: the reader answers '\0' past the last byte, and every loop here
+    # takes a '\0' for the end, so a NUL byte inside a file ended it there
+    # without a word: `puts 1<NUL>` and the five lines after it compiled as
+    # `puts 1`, `iyi check` exited 0, and `fmt` wrote back the part before
+    # it - a UTF-16 file without its mark became `p`. A NUL short of the
+    # end is refused where it is.
+    private def check_nul_byte : Nil
+      return unless current_pos < @reader.string.bytesize
+      raise "unexpected NUL byte: source is UTF-8 text, which holds none (a UTF-16 file holds one in every ASCII character)"
     end
 
     def next_char

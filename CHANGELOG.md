@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **A NUL byte inside a source file is refused where it is.** The lexer took
+  every `\0` for the end of the file, so a file ended at its first NUL
+  without a word: `puts 1<NUL>` and the five lines after it compiled as
+  `puts 1` and `iyi check` exited 0, and `iyi fmt` wrote the file back as
+  `puts 1` - a UTF-16 file without its byte order mark, which has a NUL
+  beside every ASCII character, became `p`. A NUL short of the end is now
+  "unexpected NUL byte: source is UTF-8 text, which holds none (a UTF-16
+  file holds one in every ASCII character)" at its line and column, for
+  `check` and `fmt` alike. `bench/verbs_exercise.sh` formats and checks a
+  file with a NUL and formats a UTF-16 one, and requires the refusal and the
+  file unchanged; the old compiler exited 0 for the first two, writing the
+  file back cut at the NUL, and called the UTF-16 one only "produced
+  changes".
+
 - **`fmt` keeps the blanks and the `\r` at the end of a line inside a
   string.** Every line the formatter wrote was stripped of trailing
   whitespace except a heredoc's, and a string, a `%(...)`, a regex or a

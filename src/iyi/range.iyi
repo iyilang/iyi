@@ -7,9 +7,8 @@
 # for 'Range(B, E).new' (given 3, expected 0)" — a message about a constructor
 # nobody wrote, for the second loop anybody writes.
 #
-# What is here is what `samples/iyi/basics.iyi` and `grid.iyi` call and no
-# more. There is no `Enumerable` on it, no `step`, no reverse iteration: a
-# range in this prelude counts up by one and stops.
+# There is no `Enumerable` on it, no `step`, no reverse iteration: a range
+# in this prelude counts up by one and stops.
 struct Range(B, E)
   getter begin : B
   getter end : E
@@ -67,19 +66,19 @@ struct Range(B, E)
     total
   end
 
-  # A range is a value - three fields, one of them a flag - so two written
-  # the same way are the same range. `Object#==` answered before this, which
-  # is identity, so `(1..3) == (1..3)` was false and a range could not be
-  # found in a `Hash` or in an `Array#includes?`. The same defect `Tuple`
-  # had, in the prelude's other value type.
-  #
-  # `1..3` and `1...3` differ, and that is the flag's whole job.
+  # A range is a value, so two written the same way are the same range:
+  # `Object#==` is identity, and `(1..3) == (1..3)` was false. `1..3` and
+  # `1...3` differ, and that is the flag's whole job.
   def ==(other : self) : Bool
     @begin == other.begin && @end == other.end && @exclusive == other.exclusive?
   end
 
-  # And hashing follows equality: equal values have to land in one slot, or
-  # the comparison above is never reached for them.
+  # `when 1..5` is `(1..5) === x`: inclusion. `==` answered, and no arm matched.
+  def ===(value) : Bool
+    @begin <= value && (@exclusive ? value < @end : value <= @end)
+  end
+
+  # And hashing follows equality, or equal ranges would land in two slots.
   def hash : Int32
     value = (@begin.hash &* 31) &+ @end.hash
     @exclusive ? (value &* 31) &+ 1 : value &* 31

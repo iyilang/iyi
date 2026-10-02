@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`when 1..5`, `when {Nil, Bool}` and `when Int32 | String` match.** A
+  `when` asks `===`, and the prelude's `===` was `==` on every type: a
+  range never equals the integer it is asked about, nor a class an
+  instance, so those arms never matched and the `case` fell to `else`
+  without a word; `Int32 | String` did not compile, its hint naming an
+  import that did not help. `Range#===` is inclusion, `Class#===` is
+  membership, `Tuple#===` asks each member's own, and `Class.|` makes the
+  union. The prelude library stays under its ceiling. Found by 5,200
+  generated programs compared with Crystal, which otherwise agreed on
+  every one - inference, dispatch, `defer`, debug against `--release`.
+
 - **`a, *b, c = x, y, z` compiles without `import std/tuple`.** The
   splat's tuple was built with `Tuple.new`, which the prelude does not
   have, and the error named neither the line nor the import: "undefined
@@ -16860,7 +16871,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,829-line library and nothing else. Every other
+  written against iyi's own 19,832-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

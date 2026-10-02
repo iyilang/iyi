@@ -314,6 +314,16 @@ prove_fails_range "range == ignores exclusive" range_flag "range: inclusive is n
 prove_fails_range "range hash collapsed" range_hash "range: the flag changes the hash" \
   's/^    @exclusive ? (value &\* 31) &+ 1 : value &\* 31$/    0/'
 
+# 11. Case equality back to `==`: a range arm, a type in a tuple of types.
+prove_fails_range "range === is equality" range_case "range: === is inclusion" \
+  's/^    @begin <= value \&\& (@exclusive ? value < @end : value <= @end)$/    self == value/'
+
+prove_fails_primitives "class === is equality" class_case "class: === is membership" \
+  's/^    other.is_a?(self)$/    self == other/'
+
+prove_fails "tuple === is equality" tuple_case "tuple: a tuple of types matches member by member" \
+  's/^  def ===(other : Tuple(\*U)) : Bool forall U$/  def unused_case_equality(other : Tuple(*U)) : Bool forall U/'
+
 # A character that steps by two: the walk skips every other letter.
 prove_fails_primitives "a character plus one is two on" char_step "range: characters walk by one" \
   's/^    point = ord + other$/    point = ord + other * 2/'

@@ -42,9 +42,8 @@ class Object
     !(self == other)
   end
 
-  # Case equality: what a `case`'s `when` asks of each arm. Equality,
-  # unless a type answers with something stronger — `Symbol` below, and
-  # the whole of `select`, whose expansion is a `case` over an index.
+  # Case equality, what a `when` asks of each arm: equality, unless a type
+  # answers with something stronger - a range, a class, a tuple.
   def ===(other) : Bool
     self == other
   end
@@ -66,13 +65,6 @@ struct Nil
 end
 
 struct Symbol
-  # `case … when :before` compares with `===`, which on an ordinary value is
-  # `==`. Defined on `Object` in Crystal; here it is only ever reached on a
-  # symbol, so it is here.
-  def ===(other) : Bool
-    self == other
-  end
-
   def hash : Int32
     to_i
   end
@@ -108,22 +100,22 @@ struct Tuple
     raise "index out of range"
   end
 
-  # Two tuples are the same value when their members are, which is the whole
-  # of what a tuple is. Without this one `Object#==` answered — identity, on
-  # a value type — so `{1, 2} == {1, 2}` was **false**, and with it every
-  # collection that asks: a tuple key could never be found in a `Hash`, a
-  # `Set` of them was a list, `includes?`, `index` and `uniq` over `zip`'s
-  # own result answered no, and a `case` over a tuple matched nothing,
-  # because a `when` is `===` and `===` is `==`.
-  #
-  # Any tuple its size, member by member where one type holds the other:
-  # `self` took `{1, 2}` for `{1, y}` (y : Int32?) and not back, so `case
-  # {1, y} when {1, 2}` missed. `{-1}` and `{-1_i64}` hash apart: unequal.
+  # Two tuples are the same value when their members are. `Object#==` is
+  # identity, so `{1, 2} == {1, 2}` was false, a tuple key was never found
+  # in a `Hash`, and `uniq` over `zip`'s own result kept duplicates. Member
+  # by member where one type holds the other, so `case {1, y} when {1, 2}`
+  # (y : Int32?) matches; `{-1}` and `{-1_i64}` hash apart: unequal.
   def ==(other : Tuple(*U)) : Bool forall U
     {% for i in 0...(T.size == U.size ? T.size : 0) %}
       return false unless {{ T[i] <= U[i] || U[i] <= T[i] }} && self[{{i}}] == other[{{i}}]
     {% end %}
     {{ T.size == U.size }}
+  end
+
+  # Each member's own `===`: `when {Nil, Bool}` holds for `{nil, false}`,
+  # which `==` - a class against a value - never did.
+  def ===(other : Tuple(*U)) : Bool forall U
+    {{ (T.size == U.size ? (0...T.size).map { |i| "self[#{i}] === other[#{i}]" } + ["true"] : ["false"]).join(" && ").id }}
   end
 
   # And hashing follows equality, or the agreement above buys nothing: a key

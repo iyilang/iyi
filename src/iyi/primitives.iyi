@@ -78,6 +78,18 @@ class Class
   @[Primitive(:class_crystal_instance_type_id)]
   def crystal_instance_type_id : Int32
   end
+
+  # `Int32 === 1`, and `Int32 | String` as a value: a `when` asks these of
+  # the types in a tuple of types and of a union it is written with.
+  def ===(other) : Bool
+    other.is_a?(self)
+  end
+
+  def self.|(other : U.class) forall U
+    t = uninitialized self
+    u = uninitialized U
+    typeof(t, u)
+  end
 end
 
 # `true` and `false`.

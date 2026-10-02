@@ -123,6 +123,33 @@ assert_int((1..3).hash, (1..3).hash, "range: equal ranges hash the same")
 assert_true((1..3).hash != (1...3).hash, "range: the flag changes the hash")
 assert_true((1..3).hash != (1..4).hash, "range: a bound changes the hash")
 
+# A `when` is `===`, which was `==` everywhere: a range arm, a tuple of
+# types and a union of types matched nothing and fell to `else`.
+assert_true((1..3) === 3 && !((1...3) === 3) && !((1..3) === 0), "range: === is inclusion")
+range_arm = case 5
+            when 1..4 then "low"
+            when 5..9 then "high"
+            else           "none"
+            end
+assert_str(range_arm, "high", "range: a when arm matches by inclusion")
+either = 1 > 0 ? "s" : 1
+assert_true(String === either && !(Int32 === either), "class: === is membership")
+# A variable: a tuple literal after `case` is split member by member before
+# `===` is asked.
+typed_pair = {either, false}
+typed_arm = case typed_pair
+            when {Int32, Bool}  then "int"
+            when {String, Bool} then "str"
+            else                     "none"
+            end
+assert_str(typed_arm, "str", "tuple: a tuple of types matches member by member")
+union_arm = case either
+            when Int32 | Nil   then "int-or-nil"
+            when String | Char then "str-or-char"
+            else                    "none"
+            end
+assert_str(union_arm, "str-or-char", "class: a union of types matches")
+
 spans = {} of Range(Int32, Int32) => String
 spans[1..3] = "low"
 spans[5..9] = "high"

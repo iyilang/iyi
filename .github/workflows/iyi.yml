@@ -52,6 +52,13 @@ env:
   GIT_CONFIG_COUNT: "1"
   GIT_CONFIG_KEY_0: safe.directory
   GIT_CONFIG_VALUE_0: "*"
+# Python's UTF-8 mode, for every gate written in it: on Windows `open()`
+# without an encoding reads and writes cp1252, and a gate died the first
+# time a file it read or wrote held a character cp1252 has no byte for -
+# a compiler comment's arrow in `build_tool_scan.py`, an emoji in an
+# `lsp_session.py` step. A hundred-odd such opens in `bench/` read the
+# same on every runner this way.
+  PYTHONUTF8: "1"
 
 permissions: {}
 

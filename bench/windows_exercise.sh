@@ -337,6 +337,46 @@ EOF
       fi
     fi
 
+    # 2a'''. A small program fits a small job. An arena was committed whole,
+    # 16 MiB of charge from its first object, one per size class per
+    # thread: eight threads keeping thirty strings each, one per class,
+    # committed 995 MB with a few kilobytes live, and under a 200 MB job
+    # limit died "iyi: out of memory". An arena is committed as it is
+    # carved now, its tables and a slab at a time; the program finishes
+    # under the same limit.
+    echo
+    echo "== A small program fits a 200 MB job =="
+    cat > "$WORK/classes.iyi" <<'EOF'
+module classes
+
+threads = [] of IyiThread
+8.times do
+  threads << IyiThread.start do
+    keep = [] of String
+    30.times { |i| keep << "x" * (8 + i * 24) }
+    nil
+  end
+end
+threads.each(&.join)
+puts "eight threads, thirty classes each"
+EOF
+    if [ -z "$JOBPY" ]; then
+      echo "  no python to make a job with, so the limit is unmeasured"
+    elif ! "$IYI" build -o "$WORK/classes.exe" "$WORK/classes.iyi" > "$WORK/classes.log" 2>&1; then
+      echo "  the size-class probe did not build"
+      tail -5 "$WORK/classes.log"
+      status=1
+    else
+      "$JOBPY" "$WORK/job.py" 200 "$(cygpath -w "$WORK/classes.exe")" > "$WORK/classes.out" 2>&1 || true
+      if grep -qx "exit 0" "$WORK/classes.out" && grep -q "eight threads, thirty classes each" "$WORK/classes.out"; then
+        echo "  eight threads in thirty size classes each finish under a 200 MB job limit"
+      else
+        echo "  eight threads in thirty size classes each did not finish under a 200 MB job limit:"
+        sed -n '1,3p' "$WORK/classes.out"
+        status=1
+      fi
+    fi
+
     # 2b. What a short sleep costs. Windows rounds a millisecond timeout
     # up to the system timer tick, so the poller's own wait woke 15.6 ms
     # after a `sleep 1` and a hundred of them took 1,577 ms; with the

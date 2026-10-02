@@ -2814,6 +2814,7 @@ require "./file"
         stop = high + slab_for(chunk)
         stop = top if stop > top
         count = (stop - high).unsafe_div(chunk)
+        commit(high, high + count * chunk)
         Pointer(Atomic(UInt64)).new(arena + OFF_CURSOR).value.set(high)
         write64(arena + OFF_CURSOR_BYTE, meta(arena, high))
         write64(arena + OFF_BUMP_END, high + count * chunk)
@@ -3056,14 +3057,12 @@ require "./file"
       # middle, give the ends back.
       #
       # Windows cannot give back part of a reservation, so the aligned middle
-      # is taken again after the whole is freed, and another thread can take
-      # it first: ERROR_INVALID_ADDRESS (487), which a fresh reservation gets
-      # around. That was retried whatever the commit's error was, and the
-      # reservation still succeeds once the commit charge is spent - the
-      # system's (ERROR_COMMITMENT_LIMIT) or a job's (ERROR_NOT_ENOUGH_MEMORY)
-      # - so under a 300 MB job limit a program filling arenas spun at 100%
-      # CPU in this loop and never ended. Only the race goes round again, and
-      # not without end.
+      # is reserved again after the whole is freed, and another thread can
+      # take it first: ERROR_INVALID_ADDRESS (487), which a fresh reservation
+      # gets around. Only that race goes round again, and not without end:
+      # retried whatever the error was, a program filling arenas under a
+      # 300 MB job limit spun at 100% CPU here and never ended. The middle
+      # is reserved, not committed; `commit` charges it as it is carved.
       def self.map_aligned : UInt64
         {% if flag?(:win32) %}
           races = 0
@@ -3072,7 +3071,7 @@ require "./file"
             if raw != 0_u64
               base = (raw + MAP - 1_u64) & (0_u64 &- MAP)
               LibC.VirtualFree(Pointer(Void).new(raw), 0_u64, 0x8000_i32)
-              return base if LibC.VirtualAlloc(Pointer(Void).new(base), MAP, 0x3000_i32, 4_i32).address == base
+              return base if LibC.VirtualAlloc(Pointer(Void).new(base), MAP, 0x2000_i32, 4_i32).address == base
               races = races + 1
             end
             IyiRoots.fatal("iyi: out of memory\n") if raw == 0_u64 || LibC.GetLastError != 487 || races == 64
@@ -3084,6 +3083,22 @@ require "./file"
           tail = raw + MAP * 2_u64 - (base + MAP)
           __iyi_munmap(base + MAP, tail) if tail > 0
           base
+        {% end %}
+      end
+
+      # Windows charges a committed page to the commit limit whether it is
+      # touched or not, so an arena is committed as it is used: its head
+      # and tables and first slab when it is mapped, a slab at a time as
+      # the frontier moves (`next_slab`). The tables are committed whole,
+      # because the mark reads the entry of any word that lands in the
+      # arena. Committed whole, an arena was 16 MiB of charge from its
+      # first object: `puts 1` held 128 MiB, and eight threads of thirty
+      # short strings 995 MiB, out of memory under a 200 MB job limit with
+      # a few kilobytes live. Elsewhere an untouched page is charged
+      # nothing, and this is no call.
+      def self.commit(low : UInt64, high : UInt64) : Nil
+        {% if flag?(:win32) %}
+          IyiRoots.fatal("iyi: out of memory\n") if LibC.VirtualAlloc(Pointer(Void).new(low), high - low, 0x1000_i32, 4_i32).address == 0_u64
         {% end %}
       end
 
@@ -3120,20 +3135,21 @@ require "./file"
         {% end %}
         @@arenas_mapped = @@arenas_mapped &+ 1_u64
         chunk = chunk_of(index)
-        write64(base + OFF_MAP, MAP)
-        write64(base + OFF_CHUNK, chunk)
         # The tables: a byte and then sixteen bits for every chunk the
         # mapping could hold past the header page, and the grid on the
         # page after them.
         magic = (1_u64.unsafe_shl(MAGIC_SHIFT) + chunk.unsafe_shr(3_u64) - 1_u64).unsafe_div(chunk.unsafe_shr(3_u64))
         chunks = (MAP - HEAD).unsafe_div(chunk)
         first_offset = (META + chunks * (META_ENTRY + 1_u64) + PAGE - 1_u64) & (0_u64 &- PAGE)
-        write64(base + OFF_GRID, first_offset.unsafe_shl(GRID_SHIFT) | magic)
-        write64(base + OFF_MARKS, base + META + chunks * META_ENTRY)
         first = base + first_offset
         stop = first + slab_for(chunk)
         stop = base + MAP if stop > base + MAP
         count = (stop - first).unsafe_div(chunk)
+        commit(base, first + count * chunk)
+        write64(base + OFF_MAP, MAP)
+        write64(base + OFF_CHUNK, chunk)
+        write64(base + OFF_GRID, first_offset.unsafe_shl(GRID_SHIFT) | magic)
+        write64(base + OFF_MARKS, base + META + chunks * META_ENTRY)
         write64(base + OFF_CURSOR, first)
         write64(base + OFF_CURSOR_BYTE, base + META)
         write64(base + OFF_LEFT, count)

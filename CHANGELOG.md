@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **On Windows an arena is committed as it is carved, so a small program
+  fits a small job.** Every 16 MiB arena was committed whole by
+  `VirtualAlloc`, one per size class per thread, and Windows charges a
+  committed page to the commit limit whether or not it is touched: `puts 1`
+  committed 132 MiB, forty short strings 388 MiB, and eight threads each
+  keeping a string in thirty size classes 1,204 MiB, each with a working
+  set of 4 MiB - the last two "iyi: out of memory" under a 200 MB job
+  limit. The arena is reserved; its header, tables and first 64 KiB slab
+  are committed when it is mapped, and each later slab when the frontier
+  reaches it: 27, 39 and 118 MiB. The arena directory (16 MiB) and each
+  arena's tables (up to 4 MiB, for the 16-byte class) are still committed
+  whole, because the mark reads them for any word.
+  `bench/windows_exercise.sh` runs the eight threads under a 200 MB job;
+  the old prelude exited 1 with "iyi: out of memory" in 3 runs of 3.
+
 - **The mark answers a word that is in no arena without walking the list
   of large objects.** Every word the mark scanned that no arena held - an
   integer in a word-scanned buffer, a union, a tuple with a pointer in it

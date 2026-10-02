@@ -2516,37 +2516,43 @@ module Iyi::IyiMod
   # `declarations` above is the compile-against text and carries everything
   # a consumer's build needs, travelling bodies included (R-4); grounding a
   # reader needs less and pays per byte, so this renders only what a caller
-  # can name: exported functions and types, their methods, their docs, the
-  # impls — no bodies, no fields, no macros, no carried private types. The
+  # can name: exported functions, macros, constants and types, the members,
+  # associated types and nested types of those types, their methods, their
+  # docs, the impls — no bodies, no fields, no carried private types. The
   # measurement that forced the split is `bench/context_pack.py`: on the
   # kemal sample the compile-against text was within 4% of the sources it
   # replaces, because the bodies *are* most of a macro-heavy module.
+  #
+  # A type was its methods and nothing else, and every name a caller writes
+  # *through* a type went missing with that: `std/log`'s `Severity` showed
+  # `<` and `to_s` and none of `Trace` .. `None`, `Outer::Inner` was not
+  # there although `Outer::Inner.new.val` runs, and a trait's `type Elem`
+  # was absent under the `abstract def first_elem : Elem` that names it.
+  # `pub LIMIT` and `pub macro twice` were not listed at all, and an alias
+  # was followed by an `end` it does not have.
   def self.surface(artifact : Artifact, io : IO, docs : Bool = true) : Nil
     io << "module " << artifact.module_name << '\n'
 
     artifact.exports.functions.each do |signature|
       io << '\n'
-      if docs && !signature.doc.empty?
-        signature.doc.each_line { |line| io << "# " << line << '\n' }
-      end
+      write_doc io, signature.doc, "" if docs
       io << "pub " << render_signature(signature) << '\n'
     end
+
+    # The macro's line and not its body, as a function is its signature. The
+    # text carries no doc comment to show.
+    exported_macros(artifact).each { |line| io << '\n' << line << '\n' }
+
+    # A type's constants go under the type, where a caller reaches them;
+    # the module's own are listed here.
+    constants = Hash(String, Array(String)).new { |hash, key| hash[key] = [] of String }
+    exported_constants(artifact).each { |(container, line)| constants[container] << line }
+    constants[""]?.try &.each { |line| io << "\npub " << line << '\n' }
 
     artifact.exports.types.each do |declaration|
       next unless declaration.visibility == "pub"
       io << '\n'
-      if docs && !declaration.doc.empty?
-        declaration.doc.each_line { |line| io << "# " << line << '\n' }
-      end
-      io << "pub " << render_type_header(declaration) << '\n'
-      declaration.methods.each do |method|
-        next if method.visibility == "private"
-        if docs && !method.doc.empty?
-          method.doc.each_line { |line| io << "  # " << line << '\n' }
-        end
-        io << "  " << render_signature(method) << '\n'
-      end
-      io << "end\n"
+      surface_type io, declaration, "", declaration.name, constants, docs
     end
 
     # An impl is where a caller's methods come from, so it is rendered like
@@ -2581,9 +2587,7 @@ module Iyi::IyiMod
       io << header << '\n'
       record.methods.each do |method|
         next if method.visibility == "private"
-        if docs && !method.doc.empty?
-          method.doc.each_line { |line| io << "  # " << line << '\n' }
-        end
+        write_doc io, method.doc, "  " if docs
         io << "  " << render_signature(method) << '\n'
       end
       io << "end\n"
@@ -2596,12 +2600,107 @@ module Iyi::IyiMod
       io << '\n' << render_type_header(declaration) << '\n'
       declaration.methods.each do |method|
         next if method.visibility == "private"
-        if docs && !method.doc.empty?
-          method.doc.each_line { |line| io << "  # " << line << '\n' }
-        end
+        write_doc io, method.doc, "  " if docs
         io << "  " << render_signature(method) << '\n'
       end
       io << "end\n"
+    end
+  end
+
+  # One type of the surface and the types declared inside it, which a
+  # caller reaches as `Outer::Inner`. A nested type is carried with the
+  # visibility it was written with, and one written `private` is nobody's
+  # to name.
+  private def self.surface_type(io : IO, declaration : TypeDecl, indent : String, path : String,
+                                constants : Hash(String, Array(String)), docs : Bool) : Nil
+    write_doc io, declaration.doc, indent if docs
+    io << indent
+    io << "pub " if indent.empty?
+    io << render_type_header(declaration) << '\n'
+    # The whole declaration, as in `render_type_declaration`.
+    return if declaration.kind == "alias" || declaration.kind == "type"
+
+    inner = indent + "  "
+    declaration.assoc_types.each { |name| io << inner << "type " << name << '\n' }
+    declaration.members.each { |(name, value)| io << inner << name << " = " << value << '\n' }
+    constants[path]?.try &.each { |line| io << inner << line << '\n' }
+    declaration.types.each do |nested|
+      next if nested.visibility == "private"
+      surface_type io, nested, inner, "#{path}::#{nested.name}", constants, docs
+    end
+    declaration.methods.each do |method|
+      next if method.visibility == "private"
+      write_doc io, method.doc, inner if docs
+      io << inner << render_signature(method) << '\n'
+    end
+    io << indent << "end\n"
+  end
+
+  # A doc comment as comment lines. A blank line of it is `#`: written
+  # `# ` it ended every paragraph break of `iyi doc` and `mod context` in a
+  # trailing space.
+  def self.write_doc(io : IO, doc : String, indent : String) : Nil
+    doc.each_line do |line|
+      io << indent << (line.empty? ? "#" : "# ") << line << '\n'
+    end
+  end
+
+  # The names a caller writes in `import x::{...}`: the module's functions,
+  # macros, constants and types, each once, in the order the surface
+  # lists them.
+  def self.surface_names(artifact : Artifact) : Array(String)
+    names = artifact.exports.functions.map(&.name)
+    exported_macros(artifact).each do |line|
+      rest = line.lchop("pub macro ")
+      names << (rest.index('(').try { |stop| rest[0, stop] } || rest).strip
+    end
+    exported_constants(artifact).each do |(container, line)|
+      names << line.partition(" = ")[0] if container.empty?
+    end
+    artifact.exports.types.each do |declaration|
+      names << declaration.name if declaration.visibility == "pub"
+    end
+    names.uniq!
+  end
+
+  # The first line of each macro the module wrote `pub`. A shard's arrive
+  # unmarked (see `exported_macro`), and their text is no caller's surface.
+  private def self.exported_macros(artifact : Artifact) : Array(String)
+    artifact.macro_bodies.compact_map do |source|
+      first = source.lines.first?.try(&.strip)
+      first if first && first.starts_with?("pub macro ")
+    end
+  end
+
+  # The constants the module exports, as `{container, "NAME = value"}`, the
+  # container empty for the module's own. They travel in the initialiser,
+  # which is the module's source (see `Artifact#initialiser`), so they are
+  # read from it: `pub LIMIT = 5` and `pub VarInt::MAX = ...` are what it
+  # says. A shard's initialiser is the other language's, which has no `pub`.
+  private def self.exported_constants(artifact : Artifact) : Array({String, String})
+    constants = [] of {String, String}
+    return constants if artifact.initialiser.empty? || artifact.crystal_library
+    parser = Parser.new("module #{artifact.module_name}\n#{artifact.initialiser}")
+    parser.filename = "#{artifact.module_name}.iyi"
+    collect_exported_constants parser.parse, constants
+    constants
+  rescue CodeError
+    [] of {String, String}
+  end
+
+  private def self.collect_exported_constants(node : ASTNode, into : Array({String, String})) : Nil
+    case node
+    when Expressions
+      node.expressions.each { |child| collect_exported_constants child, into }
+    when ModuleDef
+      collect_exported_constants node.body, into
+    when Assign
+      target = node.target
+      if target.is_a?(Path) && target.exported?
+        into << {target.names[0...-1].join("::"), "#{target.names.last} = #{node.value}"}
+      end
+    else
+      # Nothing else at the top level declares a constant.
     end
   end
 

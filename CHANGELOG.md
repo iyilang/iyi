@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **`iyi doc` and `iyi mod context` list everything a caller names through a
+  module.** A type was rendered as its methods alone: `std/log`'s `Severity`
+  showed none of `Trace` .. `None`, `Outer::Inner` was missing although
+  `Outer::Inner.new.val` runs, a trait's `type Elem` was missing under the
+  `abstract def first_elem : Elem` naming it, an alias was followed by an
+  `end`, and `pub LIMIT` and `pub macro twice` were not listed, so the
+  import line said `import app/surf::{double, Container, Num, Outer, Size}`.
+  Members, associated types, nested types with their docs, a type's
+  constants, the module's constants and macros are listed now, the import
+  line names `twice` and `LIMIT`, and a blank doc line is `#` rather than `#
+  `. `bench/mod_context.sh` checks each line; the old compiler printed none
+  of them.
+
 - **`iyi bind` reads a shard's root as its own namespace, and past a byte
   order mark.** The root was the first top-level declaration, so a shard
   that reopens `class String` before `module Loud` bound as `loud (String) -

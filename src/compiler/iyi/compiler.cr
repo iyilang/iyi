@@ -1968,6 +1968,10 @@ module Iyi
             visibility: declared.private? ? "private" : "",
             types: [] of IyiMod::TypeDecl,
             value: iyi_alias_value(declared, name),
+            # The doc comment, as an exported type carries it: a nested
+            # type is reached through its container and documented there
+            # (`iyi doc` showed `Outer::Inner` without its `# Inner.`).
+            doc: declared.doc || "",
           )
           next
         end
@@ -2009,6 +2013,7 @@ module Iyi
             # makes `Helper.twice` and `Helper#twice` the same method.
             extends_self: declared.metaclass.ancestors.includes?(declared),
             includes: iyi_included_modules(declared),
+            doc: declared.doc || "",
           )
           next
         end
@@ -2044,6 +2049,7 @@ module Iyi
           macros: iyi_macros_on(declared),
           superclass: iyi_superclass_name(declared),
           includes: iyi_included_modules(declared),
+          doc: declared.doc || "",
         )
       end
       declarations.sort_by! &.name

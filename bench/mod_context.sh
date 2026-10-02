@@ -677,4 +677,80 @@ else
 fi
 cd "$WORK" || exit 1
 
+# The whole of what a caller names through a module, and nothing that is
+# not there. A type was rendered as its methods: an enum without its
+# members (`std/log`'s `Severity` had none of `Trace` .. `None`), a
+# struct without the type nested in it, a trait without the `type Elem`
+# its own `abstract def` names, and an alias followed by an `end` it does
+# not have. `pub LIMIT` and `pub macro twice` were not listed at all, and
+# the import line the pack hands a reader left both out, so the reader
+# never learnt the names `import app/surf::{LIMIT, twice}` checks with.
+# A blank doc line came out as `# `, with a trailing space.
+mkdir -p "$WORK/whole/app"
+cd "$WORK/whole" || exit 1
+cat > app/surf.iyi <<'EOF'
+module app/surf
+
+# The limit.
+pub LIMIT = 5
+
+pub macro twice(x)
+  {{x}} + {{x}}
+end
+
+# Doubles *x*.
+#
+# Second paragraph.
+pub def double(x : Int32) : Int32
+  x * 2
+end
+
+pub enum Size
+  Small = 1
+  Big   = 10
+end
+
+pub struct Outer
+  pub WIDTH = 3
+
+  # Inner.
+  pub struct Inner
+    def val : Int32
+      1
+    end
+  end
+end
+
+pub trait Container
+  type Elem
+
+  abstract def first_elem : Elem
+end
+
+pub alias Num = Int32 | Float64
+EOF
+printf 'import app/surf::{double}\n\nputs double(2)\n' > main.iyi
+export IYI_PATH="$REPO/src${PSEP}$WORK/whole"
+"$IYI" doc app/surf > whole_doc.txt 2>&1
+"$IYI" mod context main.iyi > whole_ctx.txt 2>&1
+hint='import app/surf::{double, twice, LIMIT, Container, Num, Outer, Size}'
+printf '%s\n\nputs twice(LIMIT) + Outer::WIDTH + Size::Big.value + Outer::Inner.new.val\n' "$hint" > hint.iyi
+absent=""
+for line in 'pub LIMIT = 5' 'pub macro twice(x)' '  Small = 1' '  Big = 10' '  WIDTH = 3' \
+  '  # Inner.' '  struct Inner' '    def val : Int32' '  type Elem' 'pub alias Num = Int32 | Float64'; do
+  grep -qxF -- "$line" whole_doc.txt || absent="$absent [$line]"
+done
+after_alias="$(grep -A1 -xF 'pub alias Num = Int32 | Float64' whole_doc.txt | sed -n '2p')"
+if [ -z "$absent" ] && [ "$after_alias" != "end" ] && ! grep -q ' $' whole_doc.txt &&
+   grep -qF "#   $hint" whole_ctx.txt && "$IYI" check hint.iyi > hint_check.txt 2>&1; then
+  echo "doc and mod context list members, nested types, associated types, constants and macros, and the import line names them"
+else
+  echo "FAIL: the surface of app/surf left something out"
+  echo "  missing:$absent; after the alias: '$after_alias'; lines ending in a space: $(grep -c ' $' whole_doc.txt)"
+  grep -m1 '^#   import' whole_ctx.txt | sed 's/^/  /'
+  sed -n '1,3p' hint_check.txt 2>/dev/null | sed 's/^/  /'
+  status=1
+fi
+cd "$WORK" || exit 1
+
 exit "$status"

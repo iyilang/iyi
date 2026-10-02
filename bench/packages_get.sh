@@ -330,6 +330,16 @@ cp use.iyi "$WORK/capp/use.iyi"
 grep -q "liba 1.1.0" replace4.log || fail "the program ran '$(cat replace4.log)', not liba's tag"
 [ "$status" -eq 0 ] && echo "  libc's replace of liba is libc's business: the build fetched liba v1.1.0"
 
+step "a relative IYI_MOD_MIRROR is the working directory's"
+# Handed to git as written, the path was read from the top of the git
+# repository the project sits in - `outer` here - and was no repository.
+mkdir -p "$WORK/outer/proj" && git init -q "$WORK/outer"
+printf 'module example.test/user/proj\n' > "$WORK/outer/proj/iyi.mod"
+(cd "$WORK/outer/proj" && IYI_MOD_MIRROR=../../mirror "$IYI" get example.test/user/liba@v1.1.0) > relmirror.log 2>&1 ||
+  fail "a relative mirror inside a repository was not found: $(cat relmirror.log)"
+grep -q "added example.test/user/liba v1.1.0" relmirror.log && echo "  ../../mirror from outer/proj: liba v1.1.0 added" ||
+  fail "the relative mirror's get said: $(cat relmirror.log)"
+
 step "a replacement that is not the module is refused by name"
 bad_replace() { # bad_replace <label> <target> <phrase>
   printf 'module example.test/user/rapp\n\nrequire example.test/user/liba v1.0.0\n\nreplace example.test/user/liba => %s\n' "$2" > "$WORK/rapp/iyi.mod"

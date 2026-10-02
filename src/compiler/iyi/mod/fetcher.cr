@@ -238,10 +238,14 @@ module Iyi::Mod
 
     # The repository *path* is fetched from: a `/vN` suffix is a major
     # version of the repository without it, not a repository of its own.
+    # A relative mirror is the working directory's, as every other path
+    # given to a verb is: handed to git as written, it was read from the
+    # top of whatever repository the project sat in, and `IYI_MOD_MIRROR=
+    # ../mirror` in a project inside one was "not a git repository".
     def self.remote_for(path : String) : String
       repository, _ = ModFile.split_major(path)
       if mirror = ENV["IYI_MOD_MIRROR"]?
-        File.join(mirror, repository)
+        File.join(File.expand_path(mirror), repository)
       else
         "https://#{repository}.git"
       end

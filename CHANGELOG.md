@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A relative `IYI_MOD_MIRROR` is the working directory's.** It was handed
+  to git as written, and git reads a relative local path from the top of the
+  repository it runs in, so a project inside any git repository could not
+  use one: `IYI_MOD_MIRROR=../../mirror iyi get ...` answered "cannot list
+  the versions of example.test/user/liba at
+  ../../mirror\example.test/user/liba", "does not appear to be a git
+  repository". It is expanded against the working directory first, as every
+  other path a verb takes. `bench/packages_get.sh` gets a module through
+  `../../mirror` from a project inside a repository; the old compiler
+  refused it so.
+
 - **A build inside a cached checkout never writes `iyi.sum` into the module
   cache, however the path is spelled.** Whether the directory was in the
   cache was a case-sensitive string prefix, so on Windows `iyi check` run

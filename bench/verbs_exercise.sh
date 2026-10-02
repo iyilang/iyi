@@ -424,12 +424,15 @@ esac
 # breaks it holds, which are the program's data: every `\n` was turned, so
 # a string holding a bare line break gained a `\r` and printed eight bytes
 # where it had printed seven. A heredoc's opener and the lines inside an
-# interpolated string are the other two places a line break can sit.
+# interpolated string are the other two places a line break can sit. And
+# macro text, a macro's body or a `{% if %}`'s, which the parser keeps as
+# text: its literals went unseen and `"a` / `b"` there gained the `\r`.
 mkdir -p crlf
 printf 'module m\r\n\r\ns = "one\ntwo"\r\nputs s.bytesize\r\n' > crlf/lit.iyi
 printf 'module h\r\n\r\ntext = <<-EOS\r\n  hello\r\n  world\r\n  EOS\r\nputs text.bytesize\r\n' > crlf/here.iyi
 printf 'module p\r\n\r\ndef f(x : Int32) : Int32\r\n  x + 1\r\nend\r\n\r\nputs "a#{f(1)}b\r\nc"\r\n' > crlf/interp.iyi
-for f in lit here interp; do
+printf 'module q\r\n\r\nmacro m\r\n  puts "a\nb".bytesize\r\nend\r\n\r\nm\r\n{%% if true %%}\r\n  puts "c\nd".bytesize\r\n{%% end %%}\r\n' > crlf/macro.iyi
+for f in lit here interp macro; do
   cp "crlf/$f.iyi" "crlf/$f.keep"
   "$IYI" fmt "crlf/$f.iyi" > /dev/null 2>&1
   if cmp -s "crlf/$f.iyi" "crlf/$f.keep"; then
@@ -631,6 +634,44 @@ if grep -q 'src.messy.iyi' excl.out && ! grep -q 'lib.messy.iyi' excl.out; then
   echo "  fmt --check . leaves lib alone, as fmt --check does"
 else
   echo "  fmt --check . and lib:"; sed -n '1,3p' excl.out; status=1
+fi
+# But a path named on the command line is formatted, whatever the excludes
+# say, which is Black's rule: `fmt --check lib/messy.iyi` and `fmt --check
+# lib` exited 0 having checked nothing - the default exclude took back
+# what was named.
+for named in lib/messy.iyi lib; do
+  (cd excl && "$IYI" fmt --check "$named" > ../excl_named.out 2>&1)
+  named_code=$?
+  if [ "$named_code" -eq 1 ] && grep -q 'lib.messy.iyi. produced changes' excl_named.out; then
+    echo "  fmt --check $named, named on the command line: checked"
+  else
+    echo "  fmt --check $named, named on the command line: exit $named_code"; sed -n '1,3p' excl_named.out; status=1
+  fi
+done
+# A file fmt may not read is reported, and the walk goes on. Asking what
+# the path is, and reading it, were outside every rescue: one such file
+# ended `fmt DIR` with "Error: ...: Access is denied." and the files after
+# it were never looked at.
+mkdir -p noread
+printf 'module a\n\nx=1\n' > noread/a_noread.iyi
+printf 'module z\n\nx=1\n' > noread/z_messy.iyi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w noread/a_noread.iyi)" /deny "$USERNAME:(R)" > /dev/null ;;
+  *) chmod a-r noread/a_noread.iyi ;;
+esac
+"$IYI" fmt --check noread > noread.out 2>&1
+noread_code=$?
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w noread/a_noread.iyi)" /remove:d "$USERNAME" > /dev/null ;;
+  *) chmod u+r noread/a_noread.iyi ;;
+esac
+if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ]; then
+  echo "  fmt --check of a directory holding a file it may not read: root reads anything, unmeasured"
+elif [ "$noread_code" -eq 1 ] && grep -q "cannot read '.*a_noread.iyi'" noread.out &&
+     grep -q "z_messy.iyi' produced changes" noread.out && ! has_trace noread.out; then
+  echo "  fmt --check of a directory holding a file it may not read: says so, and checks the rest"
+else
+  echo "  fmt --check of a directory holding a file it may not read: exit $noread_code"; sed -n '1,3p' noread.out; status=1
 fi
 # A program rebuilt while it runs, the everyday Windows loop: Windows will
 # not write over a running program, and the linker said so after the whole

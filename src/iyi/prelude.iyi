@@ -8955,10 +8955,17 @@ end
   end
 
   # `exit` where there are no tasks: the one registry's cleanups, then the
-  # process (the concurrency targets' is in concurrency.iyi).
+  # process (the concurrency targets' is in concurrency.iyi, and so is why
+  # `__iyi_flush_std` is).
   def exit(status : Int32 = 0) : NoReturn
     IyiDefers.drain
+    __iyi_flush_std
     __iyi_exit(status)
+  end
+
+  def __iyi_flush_std : Nil
+    STDOUT.flush
+    STDERR.flush
   end
 {% end %}
 
@@ -9056,6 +9063,7 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
     IyiScheduler.panic_current(message)
   {% else %}
     IyiDefers.drain
+    __iyi_flush_std
     __iyi_exit(1)
   {% end %}
 end
@@ -9646,6 +9654,7 @@ fun main(argc : Int32, argv : UInt8**) : Int32
     __iyi_win_install_fault_handler
   {% end %}
   LibIyiMain.__iyi_main(argc, argv)
+  __iyi_flush_std
   {% if flag?(:win32) %}
     # Not back into the C runtime, whose `exit` is `ExitProcess`, for the
     # reason `__iyi_exit` is not: a mark helper stopping this thread as it
@@ -9675,6 +9684,7 @@ end
   # it is for every other target.
   fun __main_argc_argv(argc : Int32, argv : UInt8**) : Int32
     LibIyiMain.__iyi_main(argc, argv)
+    __iyi_flush_std
     0
   end
 {% end %}

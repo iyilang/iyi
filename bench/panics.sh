@@ -150,6 +150,34 @@ run "$work/leave_task.iyi"
 [ "$out" = "task defer" ] || fail "exit from a task: wanted only its own defer, got: $out"
 step "exit from a task ends the process, after that task's defers"
 
+# ── 2d. what a stream set to `sync = false` still holds is written as the
+#      program ends: at its last line, at `exit` and at a panic's exit
+#      (`__iyi_flush_std`). Nothing wrote it, and standard output came
+#      back empty all three ways while standard error's line arrived ────
+cat > "$work/unsynced.iyi" <<'EOF'
+module unsynced
+
+STDOUT.sync = false
+print "buffered-a "
+puts "buffered-b"
+STDERR.puts "unbuffered"
+case Program.args[0]?
+when "exit"
+  exit 0
+when "raise"
+  raise "boom"
+end
+EOF
+"$IYI" build -o "$work/unsynced" "$work/unsynced.iyi" > "$work/unsynced.build" 2>&1 ||
+  fail "the unsynced program did not build: $(cat "$work/unsynced.build")"
+for ending in end exit raise; do
+  set +e
+  said=$("$work/unsynced" "$ending" 2>/dev/null)
+  set -e
+  [ "$said" = "buffered-a buffered-b" ] || fail "at its $ending, standard output held '$said', not the buffered line"
+done
+step "a stream set to sync = false is written at the end, at exit and at a panic"
+
 # ── 3. `.or_panic` is a real panic now: through the task boundary,
 #      carrying the error's message ────────────────────────────────────
 cat > "$work/orp.iyi" <<'EOF'

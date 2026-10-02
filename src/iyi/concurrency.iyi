@@ -2369,6 +2369,7 @@ class IyiScheduler
 
     body = fiber.proc
     if body.is_a?(Nil)
+      __iyi_flush_std
       __iyi_exit(1)
     end
 
@@ -2616,6 +2617,17 @@ def __iyi_defer_pop_run : Nil
   node.run
 end
 
+# What a standard stream set to `sync = false` still holds, written out as
+# the program ends: from `main`, from `exit` below and from a panic's exit.
+# Nothing wrote it, and it was lost - `STDOUT.sync = false`, two lines
+# printed, then the program's end, an `exit 0` or a `raise`, and standard
+# output was empty all three ways. A failed write here is a panic like any
+# other write's. The targets without tasks define it beside their `exit`.
+def __iyi_flush_std : Nil
+  STDOUT.flush
+  STDERR.flush
+end
+
 # The program ends here, with *status* as its exit code. What this task
 # deferred runs first, innermost first, as a panic's cleanups do; then the
 # process ends and every other task with it, their cleanups not run -
@@ -2633,6 +2645,7 @@ def exit(status : Int32 = 0) : NoReturn
     fiber.defers = node.next_node
     node.run
   end
+  __iyi_flush_std
   __iyi_exit(status)
 end
 

@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **Output buffered with `sync = false` reaches standard output when the
+  program ends, at `exit` and at a panic.** Nothing flushed the standard
+  streams' buffers: `STDOUT.sync = false`, two lines printed, then the
+  program's last line, an `exit 0` or a `raise`, and standard output came
+  back empty all three ways while standard error's line arrived. The
+  streams are flushed as `main` returns, in `exit` after the task's
+  cleanups and in a panic's exit after its defers; a write that fails there
+  is a panic like any other write's. `bench/panics.sh` checks all three; the
+  old runtime printed nothing (Linux and darwin share the change
+  [INFERENCE]).
+
 - **A file opened on the Windows console - `CON`, `CONIN$`, `CONOUT$` -
   writes and reads UTF-8.** Only the standard streams' consoles were written
   and read wide; a file on one went through `WriteFile` and `ReadFile` in the

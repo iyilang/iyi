@@ -3891,9 +3891,11 @@ module Iyi
         check_end
         write "; end"
       else
+        # iyi: a comment after the name already ended the line; another
+        # line break was a blank line, and every pass added one more.
         skip_space_or_newline
         check_end
-        write_line
+        write_line unless @wrote_newline
         write_indent
         write "end"
       end

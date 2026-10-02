@@ -2361,6 +2361,9 @@ describe Iyi::Formatter do
 
   assert_format "class X; annotation  FooAnnotation  ;  end ; end", "class X\n  annotation FooAnnotation; end\nend"
   assert_format "class X\n annotation  FooAnnotation  \n  end \n end", "class X\n  annotation FooAnnotation\n  end\nend"
+  # iyi: a comment after the name ends the line; a pass added a blank line.
+  assert_format "annotation Foo # c\nend"
+  assert_format "annotation Foo # c\n\nend"
 
   assert_format "macro foo\n{% verbatim do %}1 + 2{% end %}\nend"
   assert_format "{% verbatim do %}{{1}} + {{2}}{% end %}"

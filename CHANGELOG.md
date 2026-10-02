@@ -60,6 +60,9 @@
   check's hash; it has been since the exact integer equality above, and
   in the other compiler too.
 
+- **`fmt` settles on `annotation Foo # note`.** A comment after an
+  annotation's name already ended the line, and `fmt` added a blank line
+  under it on every pass.
 - **`fmt` keeps the end of a line inside a string.** It trimmed every
   line, so `"b   ⏎c"` lost its spaces and a `%(...)` written with CRLF
   lost the `\r`: the string changed. Lines that end inside a string are

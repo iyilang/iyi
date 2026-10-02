@@ -251,13 +251,21 @@ dir_broken "** into hidden directories" hidden_walk '      yield name unless nam
 # walked, strings written over - or the walk's own, or the walk never ends.
 case "$(uname -s)" in
   Linux)
-    dir_broken "a directory buffer the collector does not scan" stream_atomic '      words[2] = 0_i64
+    dir_broken "a directory buffer the collector does not scan" stream_atomic '      stream = Pointer(UInt8).malloc((HEAD + BUFFER).to_u64)
+      words = stream.as(Int64*)
+      words[0] = fd
+      words[1] = 0_i64
+      words[2] = 0_i64
       stream.as(Void*)
     end
 
     def self.readdir(dirp : Void*) : Void*
       words = dirp.as(Int64*)
-      records = dirp.as(UInt8*) + HEAD' '      words[2] = 0_i64
+      records = dirp.as(UInt8*) + HEAD' '      stream = Pointer(UInt8).malloc((HEAD + 8_i64).to_u64)
+      words = stream.as(Int64*)
+      words[0] = fd
+      words[1] = 0_i64
+      words[2] = 0_i64
       words[3] = Pointer(UInt8).malloc(BUFFER.to_u64).address.to_i64
       stream.as(Void*)
     end

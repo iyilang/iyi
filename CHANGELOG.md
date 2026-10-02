@@ -142,6 +142,12 @@
 
 ### Fixed
 
+- **`fmt` sets a trait and an impl apart from what is beside them by a blank
+  line, as it does a class.** They were left against the code above and
+  below: `trait A` / `end` / `impl A for B` / `end` stayed four lines.
+  `bench/verbs_exercise.sh` formats the four lines; the old compiler left
+  them as they were.
+
 - **`fmt` formats a `"a" \` followed by a comment line.** The parser
   continues a literal only when the next one starts right after the
   backslash's line break; after a comment line the literal has ended and the

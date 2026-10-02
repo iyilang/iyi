@@ -522,7 +522,9 @@ module Iyi
       # under it asks for its own.
       when ModuleDef
         !node.iyi_unit?
-      when Def, ClassDef, LibDef, CStructOrUnionDef, Macro
+      when Def, ClassDef, LibDef, CStructOrUnionDef, Macro, TraitDef, ImplDef
+        # iyi: a trait and an impl are definitions as a class is, and were
+        # left against the code above and below them.
         true
       when VisibilityModifier
         needs_two_lines? node.exp

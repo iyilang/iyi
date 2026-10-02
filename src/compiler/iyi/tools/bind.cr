@@ -2230,6 +2230,13 @@ module Iyi
     parts.reject(&.empty?)
   end
 
+  # *path* expanded, without a verbatim prefix, and with every 8.3 short
+  # name spelled out (`Iyi.long_path`, which also gives each name its case
+  # on disk).
+  private def self.keep_spelling(path : String) : ::Path
+    ::Path[Iyi.long_path(Iyi.unverbatim(File.expand_path(path)))]
+  end
+
   # A file that calls everything and is never called.
   #
   # Codegen is demand-driven, which is right for a program and wrong for a
@@ -2257,15 +2264,23 @@ module Iyi
     # another drive - the shard is named from the search path it is on,
     # the way `iyi bind`'s `lib/` is; `./` goes only in front of a path
     # that is relative to this file.
-    source = ::Path[Iyi.unverbatim(File.expand_path(program.filename || ""))]
-    base = ::Path[Iyi.unverbatim(File.expand_path(dir))]
+    #
+    # And both spelled the way the file system names them (`keep_spelling`):
+    # a CI runner's `mktemp` hands out `C:\Users\RUNNER~1\...` and its
+    # shell enters `C:\Users\runneradmin\...`, so an `--emit-bind` given the
+    # one beside a shard read through the other was seven directories away,
+    # and the keep file required `../../../../../../../runneradmin/AppData/
+    # .../greet.cr` - the home directory's name in a file that was one `../`
+    # from its shard.
+    source = keep_spelling(program.filename || "")
+    base = keep_spelling(dir)
     relative =
       if beside = source.relative_to?(base)
         beside = beside.to_posix.to_s
         beside.starts_with?(".") ? beside : "./#{beside}"
       else
         IyiPath.default_paths
-          .compact_map { |entry| Iyi.path_under?(source.to_s, Iyi.unverbatim(File.expand_path(entry))) }
+          .compact_map { |entry| Iyi.path_under?(source.to_s, keep_spelling(entry).to_s) }
           .first?.try { |under| ::Path[under].to_posix.to_s } || source.to_posix.to_s
       end
 

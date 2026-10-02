@@ -1105,6 +1105,12 @@ fi
 # `iyi bind --mods` spelled that way stopped before binding anything, on
 # `Dir.mkdir_p`'s "\\?\: The filename, directory name, or volume label
 # syntax is incorrect."
+#
+# The directory is also spelled in its 8.3 short form (`cygpath -d`), the
+# way a CI runner's `mktemp` spells its temporary directory, while the
+# shard is read through the long one the shell enters: the keep file
+# climbed out to the directory whose names differ and back down,
+# `require "../../../../../../../runneradmin/AppData/.../greet.cr"`.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     echo "== a \\\\?\\ directory for the boundary"
@@ -1112,13 +1118,13 @@ case "$(uname -s)" in
     mkdir -p "$VERBATIM/lib/greet/src" "$VERBATIM/emit"
     printf 'name: greet\n' > "$VERBATIM/lib/greet/shard.yml"
     printf 'module Greet\n  def self.hi : String\n    "hi"\n  end\nend\n' > "$VERBATIM/lib/greet/src/greet.cr"
-    emit="\\\\?\\$(cygpath -w "$VERBATIM/emit")"
+    emit="\\\\?\\$(cygpath -d "$VERBATIM/emit")"
     if (cd "$VERBATIM" && "$IYI" tool bind --crystal -e Greet --emit-bind "$emit" lib/greet/src/greet.cr > tool.log 2>&1) &&
        grep -qxF 'require "../lib/greet/src/greet.cr"' "$VERBATIM/emit/greet_keep.cr" &&
        (cd "$VERBATIM/emit" && "$IYI" build --crystal --iyi-keep Greet --emit-bind . -o keep greet_keep.cr > fill.log 2>&1); then
-      echo "  tool bind writes a keep file that fills"
+      echo "  tool bind writes a keep file that requires ../lib/greet/src/greet.cr and fills"
     else
-      echo "  tool bind wrote a keep file that does not fill:"
+      echo "  tool bind wrote a keep file that does not require ../lib/greet/src/greet.cr, or does not fill:"
       sed -n '3p' "$VERBATIM/emit/greet_keep.cr" 2>/dev/null | sed 's/^/    /'
       tail -3 "$VERBATIM/emit/fill.log" 2>/dev/null | sed 's/^/    /'
       status=1

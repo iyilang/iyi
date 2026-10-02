@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`GC.is_heap_ptr` answers beside threads whose large chunks come and
+  go.** It walked the list of large mappings without the runtime lock,
+  while another thread's `free` or sweep unlinked and unmapped nodes of it
+  under that lock: two seconds of it beside three threads that each
+  allocate 3 MB, grow it to 5 MB and drop it died of a memory fault in 10
+  runs of 10, plain and `--release`. It walks under the lock now, as
+  `stats` does. `bench/std_gc_exercise.iyi` checks two seconds of it
+  beside such threads, and `bench/std_gc_exercise.sh` proves the check
+  fires on a copy without the lock; the old module died of a memory fault
+  there in 3 runs of 3.
+
 - **A buffer of references grown by `realloc` keeps what it holds while a
   mark runs beside the program.** `realloc` frees the old buffer, and a
   mark helper that had it grayed and queued blackened it after the free;

@@ -110,9 +110,18 @@ pub struct GC
   # Whether `pointer` points into a live chunk on the collector's heap:
   # its start or any byte inside it. Null, a stack address and a freed
   # chunk answer false.
+  #
+  # Under the runtime lock, as `stats` is: a word in no arena walks the
+  # large-mapping list, and another thread's `free` or sweep unlinks and
+  # unmaps those nodes under that lock. Walked without it, beside three
+  # threads whose large chunks come and go, two seconds of `is_heap_ptr`
+  # died of a memory fault in 10 runs of 10 (`bench/std_gc_exercise.iyi`).
   def self.is_heap_ptr(pointer : Void*) : Bool
     return false if pointer.address == 0_u64
-    IyiRoots.base_of(pointer.address) != 0_u64
+    IyiHeap.lock
+    base = IyiRoots.base_of(pointer.address)
+    IyiHeap.unlock
+    base != 0_u64
   end
 
   # The numbers the collector keeps, read now.

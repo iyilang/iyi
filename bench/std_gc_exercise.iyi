@@ -14,6 +14,8 @@
 #     collected; `enable` lets it run again; `collect` works while disabled.
 #   * `stats` reads whole lists beside threads that allocate: two seconds
 #     of it while three threads allocate end without a fault.
+#   * `is_heap_ptr` answers beside threads whose large chunks come and go:
+#     two seconds of it end without a fault, every answer right.
 #
 # bench/std_gc_exercise.sh drives it, builds once with -Dgc_none to require
 # the compile-time refusal, and breaks copies of the module to prove the
@@ -177,5 +179,36 @@ end
 stop.set(1)
 allocators.each(&.join)
 puts "  two seconds of stats beside three allocating threads, every read whole"
+
+puts "== is_heap_ptr beside threads whose large chunks come and go"
+# A word in no arena walks the large-mapping list, which a `free` or a
+# sweep on another thread unlinks and unmaps under the runtime lock.
+# Walked without it, two seconds of `is_heap_ptr` beside three threads
+# that each malloc 3 MB, grow it to 5 MB and drop it died of a memory
+# fault in 10 runs of 10, plain and --release.
+quit = Atomic(Int32).new(0)
+mappers = [] of IyiThread
+3.times do
+  mappers << IyiThread.start do
+    while quit.get == 0
+      grown = Pointer(UInt8).malloc(3_000_000_u64).realloc(5_000_000_u64)
+      grown[4_999_999] = 2_u8
+      Array(Int32).new(50) { |k| k }
+    end
+    nil
+  end
+end
+mine = Pointer(UInt8).malloc(2_000_000_u64)
+on_stack = 12345_u64
+wrong = 0
+started = __iyi_monotonic_ns
+while __iyi_monotonic_ns - started < 2_000_000_000_i64
+  wrong += 1 if GC.is_heap_ptr(pointerof(on_stack).as(Void*))
+  wrong += 1 unless GC.is_heap_ptr((mine + 1_000_000_i64).as(Void*))
+end
+quit.set(1)
+mappers.each(&.join)
+check(wrong == 0, "is_heap_ptr beside large chunks coming and going answered #{wrong} wrong")
+puts "  two seconds of is_heap_ptr beside three threads mapping large chunks, every answer right"
 
 puts "ALL CHECKS PASSED"

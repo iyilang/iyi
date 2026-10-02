@@ -3513,7 +3513,11 @@ module Iyi
       write " "
       write node.op
       write "="
-      next_token_skip_space
+      # A comment after the operator keeps its line break, as after `=`: it
+      # took the break with it, and `x += # c` / `  2` came back with the
+      # value one column in.
+      next_token
+      skip_space(consume_newline: false)
       accept_assign_value_after_equals node.value
 
       false
@@ -3521,8 +3525,13 @@ module Iyi
 
     def accept_assign_value_after_equals(value, check_align = false)
       if @token.type.newline?
-        next_token_skip_space_or_newline
+        # The line is broken before the comments under `x =`, which stay on
+        # lines of their own above the value: they were written after the
+        # `=` with a blank line under them, and a second `fmt` moved the next
+        # comment up beside the first - `x = # c # d`.
+        next_token
         write_line
+        skip_space_or_newline(@indent + 2)
         write_indent(@indent + 2, value)
       else
         write " "
@@ -3655,15 +3664,26 @@ module Iyi
         write_token :OP_COLON_COLON
         skip_space_or_newline
         write_token :OP_LCURLY
-        skip_space_or_newline
+        # A comment in the list keeps its line, and a name after a comment
+        # starts a line of its own, indented: `{JSON,` / `# more` /
+        # `Builder}` came back as `{JSON, # more` / `Builder}` with the name
+        # at the line's start, and a second `fmt` put two spaces before the
+        # comment. Without a comment the list is one line, as before.
+        skip_space_or_newline(@indent + 2, last: true)
         names.each_with_index do |name, i|
+          write_indent(@indent + 2) if @wrote_newline
           write name
-          next_token_skip_space_or_newline
+          next_token
+          skip_space_or_newline(@indent + 2, last: true)
           if @token.type.op_comma?
-            write ", " unless last?(i, names)
-            next_token_skip_space_or_newline
+            last = last?(i, names)
+            write "," unless last
+            next_token
+            skip_space_or_newline(@indent + 2, last: true)
+            write " " unless last || @wrote_newline
           end
         end
+        write_indent if @wrote_newline
         write_token :OP_RCURLY
       end
 
@@ -3828,9 +3848,7 @@ module Iyi
       next_token_skip_space
 
       if value = node.value
-        write_token " ", :OP_EQ, " "
-        skip_space_or_newline
-        accept value
+        write_type_value_after_equals value
       end
 
       false
@@ -4576,12 +4594,25 @@ module Iyi
       end
 
       skip_space
-      write_token " ", :OP_EQ, " "
-      skip_space_or_newline
-
-      accept value
+      write_type_value_after_equals value
 
       false
+    end
+
+    # The value of `type X =` on the `=` line, as it always was, unless a
+    # comment comes between: then the comments keep their lines and the
+    # value goes under them, indented. `type X =` / `# c` / `Int32` came
+    # back as `type X = # c`, a blank line and the value, and a second
+    # `fmt` took the blank line out.
+    private def write_type_value_after_equals(value)
+      write_token " ", :OP_EQ
+      if skip_space_or_newline(@indent + 2, last: true)
+        write_indent(@indent + 2)
+        indent(@indent + 2, value)
+      else
+        write " "
+        accept value
+      end
     end
 
     def visit(node : ProcPointer)
@@ -4664,9 +4695,11 @@ module Iyi
         write_token :OP_LCURLY
         write " " if a_def.body.is_a?(Nop)
       end
-      skip_space
+      skip_space(@indent + 2)
 
-      if @token.type.newline?
+      # A comment after `{` or `do` has taken the line break: `-> do # c` /
+      # `x + 1 # d` / `end` came back with `# d end`, as a block did.
+      if @token.type.newline? || @wrote_newline
         format_nested a_def.body
       else
         skip_space_or_newline

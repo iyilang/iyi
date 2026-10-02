@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A comment in an import's name list, or between `x =`, `x +=` or
+  `type X =` and the value, stays where it is through `fmt`.** Each was
+  moved, and moved again by the next `fmt`: `{JSON,` / `# more` / `Builder}`
+  became `{JSON, # more` with `Builder}` at the line's start, and then two
+  spaces before the comment; `escape =` / `# note` / `if ...` gained a blank
+  line under `escape = # note`, and two comment lines ended up as
+  `x = # c # d`; `type X =` / `# c` / `Int32` lost its blank line only on
+  the second run; `x += # c` put the value one column in. A comment there
+  keeps a line of its own, indented, with the value or the next name under
+  it. `bench/verbs_exercise.sh` formats each and requires it unchanged; the
+  old compiler rewrote all of them.
+
 - **`fmt` takes `x /= y` and `x //= y` as the first line under a comment on
   an `if`, `while`, `when`, `def` or `do` line.** The formatter tells the
   lexer that a `/` starting a body is a regex, and a comment ending the line

@@ -396,8 +396,9 @@ echo
 echo "== negative proof: a count allocated whole is caught"
 patched_fails "a reader allocates the count" patched_most_reader "a large count allocates what is read, not the count" \
   '    capacity = count < 256 ? count : 256=>    capacity = count'
-patched_fails "a Sized asks for its whole limit" patched_most_sized "a large count allocates what is read, not the count" \
-  '    return read_piece(take) if take <= 65536=>    return read_piece(take)'
+# A Sized that asks its reader for its whole limit at once is no longer a
+# way to break this: the prelude's `read_bytes` grows with what arrives
+# too, so that copy allocated what was read and the check held.
 
 echo
 echo "== negative proof: a Sized that ignores its limit is caught"

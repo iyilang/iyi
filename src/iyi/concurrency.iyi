@@ -2741,21 +2741,21 @@ end
 
 class IyiGroup
   @live : Int32
-  @failed : Bool
+  getter first_failure : UInt64
   @first_child : IyiFiber?
   @joiner : IyiFiber?
 
   def initialize
     @live = 0
-    @failed = false
+    @first_failure = 0_u64
     @first_child = nil
     @joiner = nil
   end
 
   # Start a task. The block is compiled once and carried as a proc; its
-  # return value is the task's, and a return value that is an error
-  # member is a failure the group acts on (III.4.3): first failure
-  # cancels the siblings, `errgroup`'s policy with the library deleted.
+  # return value is the task's, and an error member is a failure the
+  # group acts on (III.4.3): the first cancels the siblings, and the task
+  # it is told on is `first_failure`, which the typed group answers.
   def spawn(&block : -> T) : IyiTask(T) forall T
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
@@ -2808,8 +2808,8 @@ class IyiGroup
 
   def child_finished(failed : Bool) : Nil
     @live = @live - 1
-    if failed && !@failed
-      @failed = true
+    if failed && @first_failure == 0_u64
+      @first_failure = IyiScheduler.current.object_id
       cancel_children
     end
     if @live == 0

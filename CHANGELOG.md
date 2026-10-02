@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **A typed group answers the error that stopped it, not the
+  `Cancelled` it caused.** The extraction asked the slots in text order,
+  and a task cancelled by a later sibling's failure answers `Cancelled`:
+  a first task asleep for 300 ms while the second answered `TaskFailed`
+  made the group answer `Cancelled`. The group keeps the task whose
+  failure cancelled the others (`IyiGroup#first_failure`), and the
+  extraction asks that slot first. `bench/concurrency_exercise.iyi`
+  checks it; the old compiler answered `Cancelled`.
+
 - **A group whose block ends in its own expression answers it.** The
   typed expansion applied to any block whose spawns were direct,
   appended the tuple after the author's last expression and threw that

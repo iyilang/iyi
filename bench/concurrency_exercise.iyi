@@ -929,6 +929,27 @@ end
 fail("typed group, one name reused: the first task's failure was lost") unless fetch_reused(true).is_a?(TaskFailed)
 puts "a typed group reusing one name for two spawns kept both slots and the first failure"
 
+# The error that stopped the group leaves it, not a sibling's
+# `Cancelled`: the first task, asleep when the second failed, is cancelled
+# by that failure and answers `Cancelled`, and the slots asked in text
+# order answered that in the failure's place.
+def fetch_stopped(fail_second : Bool) : Tuple(Int32, Int32) | TaskFailed | Cancelled | Panicked
+  group do |g|
+    x = g.spawn do
+      slept = sleep(5000)
+      slept.is_a?(Cancelled) ? slept : 21
+    end
+    y = g.spawn do
+      slept = sleep(10)
+      slept.is_a?(Cancelled) ? slept : (fail_second ? TaskFailed.new : 2)
+    end
+  end!
+end
+
+stopped = fetch_stopped(true)
+fail("typed group: a sibling's Cancelled left in place of the failure that cancelled it") unless stopped.is_a?(TaskFailed)
+puts "a typed group answered the failure that stopped it, not the Cancelled it caused"
+
 # A block whose last expression is its own answers that: the expansion
 # appended the tuple after it, and the block's answer was thrown away.
 summary = group do |g|

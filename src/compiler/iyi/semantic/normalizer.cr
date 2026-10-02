@@ -290,7 +290,8 @@ module Iyi
         end
       end
 
-      rewritten << Call.new(Var.new(group_param.name).at(node), "join").at(node)
+      group_var = Var.new(group_param.name).at(node)
+      rewritten << Call.new(group_var.clone, "join").at(node)
 
       values = [] of ASTNode
       handles.each do |handle|
@@ -303,6 +304,17 @@ module Iyi
       values.reverse_each do |value|
         is_error = IsA.new(value.clone, Path.global("Error").at(node)).at(node)
         extraction = If.new(is_error, value.clone, extraction).at(node)
+      end
+
+      if handles.size > 1
+        first = Var.new(program.new_temp_var_name).at(node)
+        rewritten << Assign.new(first.clone, Call.new(group_var.clone, "first_failure").at(node)).at(node)
+        handles.zip(values).reverse_each do |handle, value|
+          is_error = IsA.new(value.clone, Path.global("Error").at(node)).at(node)
+          fiber_id = Call.new(Call.new(handle.clone, "fiber").at(node), "object_id").at(node)
+          stopped_the_group = Call.new(fiber_id, "==", first.clone).at(node)
+          extraction = If.new(And.new(is_error, stopped_the_group).at(node), value.clone, extraction).at(node)
+        end
       end
       rewritten << extraction
 

@@ -680,6 +680,15 @@ refuses "vet with no file" "Usage: $(basename "$IYI" .exe) vet" -- "$IYI" vet
 refuses "a variable env does not have" "no such variable" -- "$IYI" env NOPE
 refuses "an argument to clear_cache" "takes no arguments" -- "$IYI" clear_cache extra
 refuses "an argument to the mcp server" "takes no arguments" -- "$IYI" mcp --nonesuch
+# `iyi env -- IYI_PATH` read the names before `--` only, and printed every
+# variable as a shell script, exit 0, for one value.
+env_dashed=$("$IYI" env -- IYI_PATH 2>&1)
+if [ "$env_dashed" = "$("$IYI" env IYI_PATH 2>&1)" ] && [ "$(printf '%s\n' "$env_dashed" | wc -l)" -eq 1 ]; then
+  echo "  env reads the names after --, too"
+else
+  echo "  env -- IYI_PATH printed: $(printf '%s' "$env_dashed" | head -2)"
+  status=1
+fi
 # A directory is one run: every `using` in every file is rewritten before
 # any file compiles, because `a` compiles the module it imports - and the
 # second run changes nothing.

@@ -142,6 +142,11 @@
 
 ### Fixed
 
+- **`iyi env -- IYI_PATH` prints that one value.** Only the names before
+  `--` were read, so it printed all six variables as a shell script, exit
+  0. `bench/verbs_exercise.sh` compares it with `iyi env IYI_PATH`; the old
+  compiler printed six lines.
+
 - **Importing a file that has no module header says so.** `import
   util::{twice}` of a `util.iyi` without `module util` was refused with
   "`util` is not imported here: its names come with the import that loads

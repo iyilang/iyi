@@ -12,8 +12,11 @@ class Iyi::Command
         exit
       end
 
+      # iyi: and the names after `--` too, which `iyi env -- IYI_PATH` puts
+      # there: only `before` was read, so it printed every variable as a
+      # shell script, exit 0, for a caller who had asked for one value.
       opts.unknown_args do |before, after|
-        var_names = before
+        var_names = before + after
       end
     end
 

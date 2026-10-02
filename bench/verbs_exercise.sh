@@ -802,6 +802,25 @@ refuses "a directory named as a socket, starting" "is a directory, not a socket"
 : > "$WORK/stale.sock"
 refuses "a stale socket file left by a dead daemon" "is a file, not a socket" -- \
   "$IYI" daemon build --socket "$WORK/stale.sock" -o d5 good.iyi
+# The remedies are ones that can work. The long-path refusal said to set
+# TMPDIR, which moves the default socket on no system - it is
+# `daemon.sock` in the cache directory - and on Windows, where there is no
+# daemon, `daemon build` said "start one with `iyi daemon start`" and the
+# stale file was to be removed so that one could listen there.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "no daemon on a socket, on Windows" "there is no daemon on Windows" -- \
+      "$IYI" daemon build --socket "$WORK/absent.sock" -o d6 good.iyi
+    refuses "a stale socket file, on Windows" "there is no daemon on Windows" -- \
+      "$IYI" daemon build --socket "$WORK/stale.sock" -o d7 good.iyi
+    refuses "a socket path past the kernel's limit, on Windows" "there is no daemon on Windows" -- \
+      "$IYI" daemon build --socket "$long" -o d8 good.iyi
+    ;;
+  *)
+    refuses "a default socket past the kernel's limit" "CACHE_DIR to a shorter directory" -- \
+      env IYI_CACHE_DIR="$WORK/$(printf 'c%.0s' $(seq 1 120))" "$IYI" daemon build -o d6 good.iyi
+    ;;
+esac
 
 echo
 echo "== where a program is written, and where its library is looked for"

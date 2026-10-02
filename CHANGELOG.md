@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **What the daemon refuses ends with a remedy that can work.** A default
+  socket path past the kernel's limit was told to "set TMPDIR to a
+  shorter directory", and the default is `daemon.sock` in the cache
+  directory, which TMPDIR moves on no system: with TMPDIR set to `C:\t`
+  the refusal named the same 164-byte path. It names `IYI_CACHE_DIR` now.
+  On Windows, which has no daemon, `daemon build` said "no daemon
+  listening on X (start one with `iyi daemon start`)" - the verb that
+  answers "there is no daemon on Windows" - and a stale file was to be
+  removed so that one could listen; each says there is no daemon on
+  Windows and that `iyi build` builds without one. `bench/verbs_exercise.sh`
+  checks the three Windows refusals and, elsewhere, the cache directory;
+  the old compiler gave neither.
+
 - **`run --sandbox` finds wasi-sdk's `clang.exe` under `WASI_SDK` on
   Windows, and names an `IYI_WASI_CC` or `IYI_WASMTIME` that points at
   nothing.** It looked for a bare `clang`, so an installed wasi-sdk was

@@ -548,6 +548,35 @@ EOF
         status=1
       fi
     fi
+
+    # 2g. Where the runtime's fatal sentences go: standard error, as a
+    # panic's do. They were `__iyi_write(1, ...)`, and are
+    # `__iyi_write(2, ...)` now: `prog > out` past a memory limit left "iyi:
+    # out of memory" in `out` among the program's own lines, and standard
+    # error empty. Both ways a program runs out under the 300 MB job of
+    # 2a'': a mapping larger than the limit, and arenas filled to it.
+    echo
+    echo "== The runtime's fatal sentences go to standard error =="
+    printf 'module bigmap\n\nputs "mapping"\nbig = Array(UInt8).new(400_000_000, 1_u8)\nputs big.size\n' > "$WORK/bigmap.iyi"
+    if [ -z "$JOBPY" ]; then
+      echo "  no python to make a job with, so the streams are unmeasured"
+    elif ! "$IYI" build -o "$WORK/bigmap.exe" "$WORK/bigmap.iyi" > "$WORK/bigmap.log" 2>&1; then
+      echo "  the mapping probe did not build"
+      tail -5 "$WORK/bigmap.log"
+      status=1
+    else
+      for probe in bigmap filler; do
+        "$JOBPY" "$WORK/job.py" 300 "$(cygpath -w "$WORK/$probe.exe")" > "$WORK/$probe.streams" 2>&1 || true
+        if grep -qx "exit 1" "$WORK/$probe.streams" && grep -qx "stderr: iyi: out of memory|" "$WORK/$probe.streams" &&
+           ! grep -q "^stdout: .*out of memory" "$WORK/$probe.streams"; then
+          echo "  $probe: 'iyi: out of memory' on standard error, and none of it on standard output"
+        else
+          echo "  $probe: the sentence is not on standard error alone:"
+          sed -n '1,3p' "$WORK/$probe.streams"
+          status=1
+        fi
+      done
+    fi
     ;;
 esac
 

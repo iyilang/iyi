@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **The runtime's fatal messages go to standard error, and on a Windows
+  console one written inside the allocator no longer hangs.** "iyi: out of
+  memory", "iyi: munmap failed" and the root-range sentences were written to
+  standard output: a 400 MB array under a 300 MB job limit exited 1 with
+  `mapping|iyi: out of memory|` on standard output and nothing on standard
+  error. They go to descriptor 2 now, as a panic does. With standard error a
+  console the sentence went through the console's UTF-16 conversion, which
+  took its buffers from the heap and waited on the heap lock the failing
+  allocator held: `GC.free` of a stack address never ended (killed at 20 s,
+  the screen showing only its first line). The conversion runs in 1 KB
+  pieces on the stack and allocates nothing. `bench/windows_exercise.sh` and
+  `bench/io_exercise.sh` check both; the old runtime answered as quoted.
+
 - **`GC.stats` is safe while other threads allocate.** It walked the arena
   and large-mapping lists without the runtime lock, and a collection another
   thread's allocation started could stop the walk on a mapping, unlink and

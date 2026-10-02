@@ -219,6 +219,59 @@ PY
       fi
     fi
 
+    # 6b. A fatal sentence the runtime writes holding its heap lock, with
+    #    standard error a console. The console's conversion took its
+    #    buffers from the heap, which waited on that same lock for good:
+    #    `GC.free` of a stack address fails in `free_large`, under the
+    #    lock, and the program never ended. The sentence -
+    #    `__iyi_write(2, ...)` - is converted on the stack now, and the
+    #    program says "iyi: munmap failed" and exits 1. Python runs it in
+    #    a console of its own and ends it after 20 seconds.
+    echo
+    echo "== a fatal sentence on a console, the heap lock held"
+    printf 'module badfree\n\nimport std/gc::{GC}\n\nputs "freeing"\nx = 5\nGC.free(pointerof(x).as(Void*))\nputs "survived"\n' > "$WORK/badfree.iyi"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the console is unmeasured"
+    elif ! "$IYI" build -o "$WORK/badfree" "$WORK/badfree.iyi" > "$WORK/badfree.build" 2>&1; then
+      echo "  the fatal-sentence program did not build"; sed -n '1,10p' "$WORK/badfree.build"; status=1
+    else
+      cat > "$WORK/fatal.py" <<'PY'
+import ctypes, os, subprocess, sys
+from ctypes import wintypes
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.CreateFileW.restype = wintypes.HANDLE
+program, result = sys.argv[1], sys.argv[2]
+if os.environ.get("FATAL_INNER") != "1":
+    info = subprocess.STARTUPINFO(); info.dwFlags = 1; info.wShowWindow = 0
+    inner = subprocess.Popen([sys.executable, __file__] + sys.argv[1:],
+                             env=dict(os.environ, FATAL_INNER="1"), creationflags=0x10, startupinfo=info)
+    inner.wait(timeout=60)
+    print(open(result, encoding="utf-8").read() if os.path.exists(result) else "UNMEASURED: the inner copy wrote nothing")
+    sys.exit(0)
+child = subprocess.Popen([program])
+try:
+    code = str(child.wait(timeout=20))
+except subprocess.TimeoutExpired:
+    child.kill(); code = "TIMEOUT"
+conout = k32.CreateFileW("CONOUT$", 0xC0000000, 3, None, 3, 0, None)
+lines, row = [f"exit {code}"], ctypes.create_unicode_buffer(120)
+for y in range(20):
+    n = wintypes.DWORD()
+    k32.ReadConsoleOutputCharacterW(conout, row, 120, wintypes.DWORD(y << 16), ctypes.byref(n))
+    if row.value[:n.value].strip():
+        lines.append(row.value[:n.value].rstrip())
+open(result, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+      "$PY" "$WORK/fatal.py" "$WORK/badfree.exe" "$WORK/fatal.result" > "$WORK/fatal.out" 2>&1
+      if grep -q '^UNMEASURED' "$WORK/fatal.out"; then
+        echo "  no console here, so the fatal sentence is unmeasured: $(cat "$WORK/fatal.out")"
+      elif grep -qx 'exit 1' "$WORK/fatal.out" && grep -qx 'iyi: munmap failed' "$WORK/fatal.out"; then
+        echo "  the program said 'iyi: munmap failed' on its console and exited 1"
+      else
+        echo "  the program did not end with its sentence:"; sed 's/^/    /' "$WORK/fatal.out"; status=1
+      fi
+    fi
+
     # 7. The console's mode after the program: writing to a console turns
     #    VT processing on, and the console outlives the program - it was
     #    left on for whatever ran there next, where the C runtime's own

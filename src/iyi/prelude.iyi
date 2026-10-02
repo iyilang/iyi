@@ -588,13 +588,14 @@ end
     # here put a tail held back from one of them in front of the next write
     # to the *other* — measured, a character whose lead byte went to stdout
     # and whose continuation byte went to stderr came out whole, on stderr.
-    # Two pairs rather than an array indexed by the descriptor, because the
+    # Two words rather than an array indexed by the descriptor, because the
     # prelude's `StaticArray` has no `[]=` and a heap slot for two words
-    # would be a mapping to keep alive for nothing.
+    # would be a mapping to keep alive for nothing. A word holds up to
+    # three bytes held back and, in its top byte, how many: `write_handle`,
+    # which `__iyi_write(2, ...)` reaches with the heap's lock held, joins
+    # them on the stack.
     @@carry_out : UInt64 = 0_u64
-    @@carry_out_length : Int32 = 0
     @@carry_err : UInt64 = 0_u64
-    @@carry_err_length : Int32 = 0
     # The console mode a stream had before VT processing was turned on
     # here, and its handle, for `restore_vt`.
     @@restore_out : UInt64 = 0_u64
@@ -663,56 +664,65 @@ end
       # Anything that is not the error stream carries as the output one:
       # `console?` has already refused every descriptor outside 0..2, and 0
       # is read from rather than written to.
-      on_error = fd == 2_i64
-      staged = buffer.as(UInt8*)
-      total = count.to_i32
-      held = on_error ? @@carry_err_length : @@carry_out_length
-      if held > 0
-        packed = on_error ? @@carry_err : @@carry_out
-        joined = Pointer(UInt8).malloc((held + total).to_u64)
-        index = 0
-        while index < held
-          joined[index] = (packed.unsafe_shr(index.to_u64 * 8_u64) & 0xFF_u64).to_u8
-          index = index + 1
-        end
-        (joined + held).copy_from(staged, total)
-        staged = joined
-        total = total + held
-        if on_error
-          @@carry_err = 0_u64
-          @@carry_err_length = 0
-        else
-          @@carry_out = 0_u64
-          @@carry_out_length = 0
-        end
+      write_handle(handle, buffer, count, fd == 2_i64 ? pointerof(@@carry_err) : pointerof(@@carry_out))
+    end
+
+    # The conversion and the write, for a console handle whose carry the
+    # caller keeps. Nothing here allocates: a runtime fatal message -
+    # `__iyi_write(2, ...)` from inside the allocator, its lock held, as a
+    # failed `VirtualFree` in `free_large` is - comes through here when
+    # standard error is a console, and the buffers this took from the heap
+    # waited on that lock for good. The text is converted in pieces on the
+    # stack instead; a piece of PIECE bytes is at most PIECE UTF-16 units.
+    PIECE = 1024
+
+    def self.write_handle(handle : Void*, buffer : Void*, count : UInt64, carry : UInt64*) : Int64
+      staged = uninitialized UInt8[PIECE]
+      wide = uninitialized UInt16[PIECE]
+      bytes = pointerof(staged).as(UInt8*)
+      units = pointerof(wide).as(UInt16*)
+      fill = carry.value.unsafe_shr(56_u64).to_i32
+      index = 0
+      while index < fill
+        bytes[index] = (carry.value.unsafe_shr(index.to_u64 * 8_u64) & 0xFF_u64).to_u8
+        index = index + 1
       end
-      whole = complete_length(staged, total)
-      tail = total - whole
-      if tail > 0
+      carry.value = 0_u64
+      source = buffer.as(UInt8*)
+      left = count
+      while true
+        take = left < (PIECE - fill).to_u64 ? left.to_i32 : PIECE - fill
+        (bytes + fill).copy_from(source, take)
+        source = source + take
+        left = left - take.to_u64
+        fill = fill + take
+        whole = complete_length(bytes, fill)
+        if whole > 0
+          wide_count = LibC.MultiByteToWideChar(65001, 0, bytes, whole, units, PIECE)
+          written = uninitialized Int32
+          if wide_count <= 0
+            # Not UTF-8 after all: the bytes are the program's and go out as
+            # they are, which is what every other platform does with them.
+            return -1_i64 if __iyi_win_write_file(handle, bytes.as(Void*), whole.to_u64) < 0_i64
+          elsif LibC.WriteConsoleW(handle, units.as(Void*), wide_count, pointerof(written), Pointer(Void).new(0_u64)) == 0
+            return -1_i64
+          end
+        end
+        # What is left of the piece is an unfinished sequence, three bytes
+        # at most: in front of the next piece, or of the next write.
         packed = 0_u64
-        index = 0
-        while index < tail
-          packed = packed | staged[whole + index].to_u64.unsafe_shl(index.to_u64 * 8_u64)
+        index = whole
+        while index < fill
+          bytes[index - whole] = bytes[index]
+          packed = packed | bytes[index].to_u64.unsafe_shl((index - whole).to_u64 * 8_u64)
           index = index + 1
         end
-        if on_error
-          @@carry_err = packed
-          @@carry_err_length = tail
-        else
-          @@carry_out = packed
-          @@carry_out_length = tail
+        fill = fill - whole
+        if left == 0_u64
+          carry.value = packed | fill.to_u64.unsafe_shl(56_u64) if fill > 0
+          return count.to_i64
         end
       end
-      return count.to_i64 if whole == 0
-      wide_count = LibC.MultiByteToWideChar(65001, 0, staged, whole, Pointer(UInt16).new(0_u64), 0)
-      # Not UTF-8 after all: the bytes are the program's and go out as they
-      # are, which is what every other platform does with them.
-      return __iyi_win_write_file(handle, staged.as(Void*), whole.to_u64) if wide_count <= 0
-      wide = Pointer(UInt16).malloc(wide_count.to_u64)
-      return __iyi_win_write_file(handle, staged.as(Void*), whole.to_u64) if LibC.MultiByteToWideChar(65001, 0, staged, whole, wide, wide_count) <= 0
-      written = uninitialized Int32
-      return -1_i64 if LibC.WriteConsoleW(handle, wide.as(Void*), wide_count, pointerof(written), Pointer(Void).new(0_u64)) == 0
-      count.to_i64
     end
 
     # The other direction, and the last leg of it. `ReadFile` on a console
@@ -1471,7 +1481,7 @@ require "./file"
       fun __iyi_mmap(length : UInt64) : Pointer(Void)
         result = LibC.mmap(Pointer(Void).new(0_u64), length, 3, 0x1002, -1, 0_i64)
         if result.address == 0xFFFFFFFFFFFFFFFF_u64
-          __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
         result
@@ -1479,7 +1489,7 @@ require "./file"
 
       fun __iyi_munmap(address : UInt64, length : UInt64) : Nil
         if LibC.munmap(Pointer(Void).new(address), length) != 0
-          __iyi_write(1, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
       end
@@ -1497,14 +1507,14 @@ require "./file"
       # fields read what the page's last owner left.
       fun __iyi_release_pages(address : UInt64, length : UInt64) : Nil
         return if LibC.mmap(Pointer(Void).new(address), length, 3, 0x1012, -1, 0_i64).address == address
-        __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+        __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
         __iyi_exit(1)
       end
     {% elsif flag?(:win32) %}
       fun __iyi_mmap(length : UInt64) : Pointer(Void)
         result = LibC.VirtualAlloc(nil, length, 0x3000_i32, 4_i32)
         if result.address == 0_u64
-          __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
         Pointer(Void).new(result.address)
@@ -1512,7 +1522,7 @@ require "./file"
 
       fun __iyi_munmap(address : UInt64, length : UInt64) : Nil
         if LibC.VirtualFree(Pointer(Void).new(address), 0_u64, 0x8000_i32) == 0
-          __iyi_write(1, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
       end
@@ -1568,7 +1578,7 @@ require "./file"
         # A failed raw syscall answers with -errno in the result register
         # rather than a flag: -4095..-1 is errno's whole range.
         if result < 0 && result >= -4095
-          __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
         Pointer(Void).new(result.to_u64)
@@ -1623,7 +1633,7 @@ require "./file"
                        : "volatile")
         {% end %}
         if result < 0 && result >= -4095
-          __iyi_write(1, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
       end
@@ -3666,8 +3676,12 @@ require "./file"
       # A root range that cannot be obtained ends the program. The whole
       # point of the range is that missing it frees live objects, so a
       # diagnosis now is cheaper than a corrupted heap later.
+      # On standard error, as a panic is, and as every other fatal sentence
+      # of the runtime's is: on standard output it landed in the program's
+      # data - `prog > out` past a job's memory limit left "iyi: out of
+      # memory" in `out` and standard error empty.
       def self.fatal(message : String) : NoReturn
-        __iyi_write(1, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
         __iyi_exit(1)
       end
 
@@ -7359,7 +7373,7 @@ require "./file"
       # A failed raw syscall answers with -errno in the result register rather
       # than a flag: -4095..-1 is errno's whole range.
       if result < 0 && result >= -4095
-        __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+        __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
         __iyi_exit(1)
       end
       Pointer(Void).new(result.to_u64)
@@ -7677,7 +7691,7 @@ require "./file"
           return if @@heap_start != 0_u64
           prev = LibWasmMem.memory_grow(0, 1)
           if prev < 0
-            __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+            __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
             __iyi_exit(1)
           end
           page = prev.to_u64.unsafe_shl(16_u64)
@@ -7745,7 +7759,7 @@ require "./file"
           if arena == 0_u64 || read64(arena + 24_u64) + chunk_size > PAGE
             prev = LibWasmMem.memory_grow(0, 1)
             if prev < 0
-              __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+              __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
               __iyi_exit(1)
             end
             arena = prev.to_u64.unsafe_shl(16_u64)
@@ -7782,7 +7796,7 @@ require "./file"
           pages = (total + PAGE - 1_u64).unsafe_div(PAGE)
           prev = LibWasmMem.memory_grow(0, pages.to_i32)
           if prev < 0
-            __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+            __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
             __iyi_exit(1)
           end
           arena = prev.to_u64.unsafe_shl(16_u64)
@@ -8230,7 +8244,7 @@ require "./file"
             pages = pages + 1 if bytes % 65536 > 0
             previous = LibWasmMem.memory_grow(0, pages.to_i32)
             if previous < 0
-              __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+              __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
               __iyi_exit(1)
             end
             @@cursor = previous.to_u64.unsafe_shl(16)
@@ -9508,8 +9522,8 @@ end
   # safe at all.
   #
   # The write is `WriteFile` on the standard error handle rather than
-  # `print`: a fault may have landed inside the allocator, and the console
-  # path above allocates.
+  # `print` or `__iyi_write(2, ...)`: a fault may have landed in a stream's
+  # write or in the console's conversion, and this touches only the handle.
   IYI_WIN_STACK_OVERFLOW = -1073741571 # 0xC00000FD, as the Int32 this file spells a DWORD with
   IYI_WIN_ACCESS_VIOLATION = -1073741819 # 0xC0000005
   IYI_WIN_GUARD_PAGE = -2147483647 # 0x80000001, STATUS_GUARD_PAGE_VIOLATION

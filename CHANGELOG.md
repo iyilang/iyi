@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`iyi doc app/Nest` is refused on every system.** On Windows, which
+  ignores case, it printed `module app/nest` and that module's surface at
+  exit 0, where Linux has no such file and refuses the path. Each segment of
+  a module path is now found under its root by its exact name, and the
+  answer is the usage error Linux gives. A prelude type's blank doc line is
+  `#` too: `iyi doc String` ended six lines in `# `. `bench/mod_context.sh`
+  checks both; the old compiler documented app/nest.
+
 - **`iyi doc` and `iyi mod context` list everything a caller names through a
   module.** A type was rendered as its methods alone: `std/log`'s `Severity`
   showed none of `Trace` .. `None`, `Outer::Inner` was missing although

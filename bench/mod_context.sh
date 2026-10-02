@@ -654,6 +654,29 @@ else
 fi
 cd "$WORK" || exit 1
 
+# A module path spelled in another case is not that module, on any file
+# system: `iyi doc app/Nest` printed `module app/nest` on Windows, which
+# ignores case, where Linux has no such file. And a prelude type's blank
+# doc line is `#`: `iyi doc String` ended six lines in `# `.
+mkdir -p "$WORK/spelled/app"
+cd "$WORK/spelled" || exit 1
+printf 'module app/nest\n\npub def value : Int32\n  7\nend\n' > app/nest.iyi
+"$IYI" doc app/nest > spelled_doc.txt 2>&1
+"$IYI" doc String > string_doc.txt 2>&1
+if "$IYI" doc app/Nest > other_case.txt 2>&1 || grep -q '^module app/nest' other_case.txt; then
+  echo "FAIL: \`iyi doc app/Nest\` answered for app/nest"
+  sed -n '1,2p' other_case.txt | sed 's/^/  /'
+  status=1
+elif ! grep -q '^pub def value : Int32' spelled_doc.txt || grep -q ' $' string_doc.txt; then
+  echo "FAIL: app/nest or String was documented wrongly"
+  sed -n '1,3p' spelled_doc.txt | sed 's/^/  /'
+  grep -n ' $' string_doc.txt | head -3 | sed 's/^/  /'
+  status=1
+else
+  echo "\`iyi doc app/Nest\` is refused as app/nest's, and String's doc has no line ending in a space"
+fi
+cd "$WORK" || exit 1
+
 # A doc comment is the same text whatever the file's line endings. Each
 # doc line of a CRLF file kept its `\r`: `iyi doc` printed `# Second
 # paragraph.\r` among LF lines, and `mod context --json` shipped

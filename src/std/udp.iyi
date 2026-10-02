@@ -456,7 +456,9 @@ pub class UdpSocket
     other_family = {% if flag?(:win32) %} 10047 {% elsif flag?(:darwin) %} 47 {% else %} 97 {% end %}
     # And Winsock's WSAEFAULT, its answer to an address too short for the
     # socket's family: an IPv4 one given to an IPv6 socket, measured.
-    too_short = {% if flag?(:win32) %} 10014 {% else %} -1 {% end %}
+    # darwin answers EINVAL for the same send - an IPv6 address from an
+    # IPv4 socket - measured on its CI runner; only a send is read so.
+    too_short = {% if flag?(:win32) %} 10014 {% elsif flag?(:darwin) %} (sending ? 22 : -1) {% else %} -1 {% end %}
     # A send that fails for its destination is one to a broadcast
     # address from a socket without SO_BROADCAST: Winsock's answer,
     # measured, and the one sendto(2) names for POSIX.

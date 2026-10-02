@@ -171,6 +171,24 @@ grep -q "example.test/user/liba builds at v1.1.0: iyi.mod names v1.0.0" get3.log
 "$IYI" run use.iyi > run1.log 2>&1 || { fail "the program did not build"; cat run1.log; }
 grep -q "liba 1.1.0" run1.log || fail "the program ran liba '$(cat run1.log)', not what MVS selected"
 
+# A build inside a cached checkout verifies and never writes there. The
+# test was a string prefix, so on Windows a cache spelled in another case
+# - a drive letter an editor lowercased - was not "inside", iyi.sum was
+# written into the package, and every project using it was refused. Now
+# `Sum.in_cache?` compares the two the way the file system does.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    checkout="$IYI_CACHE_DIR/mod/example.test/user/libb@v1.0.0"
+    (cd "$checkout" && IYI_CACHE_DIR="$(echo "$IYI_CACHE_DIR" | tr '[:lower:]' '[:upper:]')" "$IYI" check libb.iyi) > cachecase.log 2>&1 ||
+      fail "check in the cached libb failed: $(cat cachecase.log)"
+    if [ -e "$checkout/iyi.sum" ]; then
+      fail "a check with the cache spelled in upper case wrote iyi.sum into the cached libb"
+    else
+      echo "  a check in the cached libb, IYI_CACHE_DIR in upper case: no iyi.sum written there"
+    fi
+    ;;
+esac
+
 step "-u finds a tag published since, and the program builds against it"
 # First asked with --check: the new tag is found from the tags alone, said,
 # and nothing is written until the same `get` runs without it.

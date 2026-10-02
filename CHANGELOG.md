@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A build inside a cached checkout never writes `iyi.sum` into the module
+  cache, however the path is spelled.** Whether the directory was in the
+  cache was a case-sensitive string prefix, so on Windows `iyi check` run
+  from a checkout entered as `c:\...` - as editors and language clients
+  spell the drive - or with `IYI_CACHE_DIR` in another case was not
+  "inside": it wrote an `iyi.sum` into the cached package, and every project
+  using that version was then refused with "is not what it was" until the
+  cache was cleared. Both paths are compared as the file system compares
+  them now. `bench/packages_get.sh` checks a cached package with
+  `IYI_CACHE_DIR` in upper case on Windows; the old compiler wrote the file,
+  and the gate's next `get -u` was refused for it.
+
 - **A package whose `.gitattributes` says `* text=auto` has the same
   `iyi.sum` hash on Windows as on Linux.** The fetcher turned
   `core.autocrlf` off so a checkout holds the committed bytes, but a file

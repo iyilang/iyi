@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A Windows program that fills its arenas past the commit limit says "iyi:
+  out of memory" and exits 1.** `IyiHeap.map_aligned` frees its doubled
+  reservation and commits the aligned middle, and retried a failed commit
+  whatever its error; the reservation still succeeds once the commit charge
+  is spent, so under a 300 MB job limit a program filling arenas spun at
+  100% CPU and never ended (killed at 60 s, standard output holding only its
+  first line). Only ERROR_INVALID_ADDRESS, another thread taking the freed
+  range first, is retried now, 64 times at most; any other failure is out
+  of memory. `bench/windows_exercise.sh` runs the filler in a 300 MB job; the
+  old runtime answered TIMEOUT.
+
 - **A typed `group do ... end!` answers `Panicked` when a task
   panics.** The expansion joined the group before reading the tasks'
   values, and the join re-raised the panic nobody had read yet: a task

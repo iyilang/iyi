@@ -3026,18 +3026,28 @@ require "./file"
 
       # A MAP-aligned mapping of MAP bytes: ask for twice, keep the aligned
       # middle, give the ends back.
+      #
+      # Windows cannot give back part of a reservation, so the aligned middle
+      # is taken again after the whole is freed, and another thread can take
+      # it first: ERROR_INVALID_ADDRESS (487), which a fresh reservation gets
+      # around. That was retried whatever the commit's error was, and the
+      # reservation still succeeds once the commit charge is spent - the
+      # system's (ERROR_COMMITMENT_LIMIT) or a job's (ERROR_NOT_ENOUGH_MEMORY)
+      # - so under a 300 MB job limit a program filling arenas spun at 100%
+      # CPU in this loop and never ended. Only the race goes round again, and
+      # not without end.
       def self.map_aligned : UInt64
         {% if flag?(:win32) %}
+          races = 0
           loop do
             raw = LibC.VirtualAlloc(nil, MAP * 2_u64, 0x2000_i32, 4_i32).address
-            if raw == 0_u64
-              __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
-              __iyi_exit(1)
+            if raw != 0_u64
+              base = (raw + MAP - 1_u64) & (0_u64 &- MAP)
+              LibC.VirtualFree(Pointer(Void).new(raw), 0_u64, 0x8000_i32)
+              return base if LibC.VirtualAlloc(Pointer(Void).new(base), MAP, 0x3000_i32, 4_i32).address == base
+              races = races + 1
             end
-            base = (raw + MAP - 1_u64) & (0_u64 &- MAP)
-            LibC.VirtualFree(Pointer(Void).new(raw), 0_u64, 0x8000_i32)
-            committed = LibC.VirtualAlloc(Pointer(Void).new(base), MAP, 0x3000_i32, 4_i32).address
-            return base if committed == base
+            IyiRoots.fatal("iyi: out of memory\n") if raw == 0_u64 || LibC.GetLastError != 487 || races == 64
           end
         {% else %}
           raw = __iyi_mmap(MAP * 2_u64).address

@@ -89,15 +89,32 @@ class Iyi::Command
 
     # Two lines, not one joined with `&&`: Windows PowerShell 5.1 refuses
     # `&&` ("not a valid statement separator"), and no one separator means
-    # the same in cmd, PowerShell and a POSIX shell. The directory quoted
-    # when it holds a space, which all three read alike; and none when it
-    # is this one, however it was spelled.
+    # the same in cmd, PowerShell and a POSIX shell. None when it is this
+    # directory, however it was spelled.
     puts
     unless Iyi.same_file?(directory, Dir.current)
-      shown = Iyi.relative_filename(directory)
-      puts "cd #{shown.includes?(' ') ? %("#{shown}") : shown}"
+      puts "cd #{iyi_init_shell_word(Iyi.relative_filename(directory))}"
     end
     puts "#{Command.program_name} run #{name}.iyi    # builds and runs it"
+  end
+
+  # *path* as one word to `cd`: as it is when every character means itself
+  # to every shell, else in double quotes, which cmd, PowerShell and a
+  # POSIX shell all read alike - unless it holds what double quotes still
+  # expand in PowerShell and a POSIX shell (`$`, a backquote, `!`), where
+  # single quotes are the ones that hold it. It was quoted only for a
+  # space, and `cd ./x;y` ran `cd ./x` and then `y`; `cd ./d$x` went to
+  # `./d`; `cd ./a&b` ran `b` in cmd.
+  private def iyi_init_shell_word(path : String) : String
+    return path if path.each_char.all? { |c| c.alphanumeric? || c.in?('.', '_', '/', '\\', ':', '-') }
+    return %("#{path}") unless path.each_char.any?(&.in?('$', '`', '!', '"'))
+    # A quote inside single quotes: PowerShell doubles it, a POSIX shell
+    # closes, escapes and reopens.
+    {% if flag?(:win32) %}
+      "'#{path.gsub('\'', "''")}'"
+    {% else %}
+      "'#{path.gsub('\'', %q('\''))}'"
+    {% end %}
   end
 
   # The two files, in the order they are written.

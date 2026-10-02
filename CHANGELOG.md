@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`iyi init`'s `cd` line is one word to the shell for any directory
+  name.** It was quoted only for a space: `iyi init example.com/me/semi
+  'x;y'` printed `cd x;y`, which runs `cd x` and then `y`, and `'d$x'`
+  printed `cd d$x`, which PowerShell and a POSIX shell read as `cd d`. A
+  name with anything a shell reads specially is double-quoted now, which
+  cmd, PowerShell and a POSIX shell read alike, and single-quoted when it
+  holds `$`, a backquote or `!`, which double quotes still expand.
+  `bench/init_project.sh` checks `cd "x;y"` and `cd 'd$x'`; the old compiler
+  printed both bare.
+
 - **`iyi init` refuses a module path with a newline in it.** The path was
   checked by parsing a whole manifest, `module <path>`, so a newline made
   more directives: `iyi init "x<LF>require a.b/c v1.0.0<LF>#/hello"` exited

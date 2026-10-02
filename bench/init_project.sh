@@ -80,6 +80,13 @@ say "the next step is a cd of its own, quoted, and a run" \
   "$(grep -qx 'cd "my app"' spaced.txt && grep -q '^iyi run spaced.iyi' spaced.txt && ! grep -q '&&' spaced.txt; echo $?)"
 mkdir -p inplace && (cd inplace && "$IYI" init example.com/me/inplace .) > inplace.txt 2>&1
 say "and no cd into the directory it is in" "$([ -f inplace/inplace.iyi ] && ! grep -q "^cd " inplace.txt; echo $?)"
+# Quoted for whatever a shell would read as more than a name: `cd x;y` was
+# printed bare and ran `cd x`, then `y`; `cd d$x` went to `d`. Double quotes
+# where all three shells read them alike, single where `$` is inside.
+"$IYI" init example.com/me/semi 'x;y' > semi.txt 2>&1
+"$IYI" init example.com/me/dollar 'd$x' > dollar.txt 2>&1
+say "a directory with ; or \$ in its name is one word to cd" \
+  "$(grep -qx 'cd "x;y"' semi.txt && grep -qx "cd 'd\$x'" dollar.txt; echo $?)"
 
 # ── the name, the current directory, and the refusals ────────────────────
 mkdir -p here && (cd here && "$IYI" init kemal) > here.txt 2>&1

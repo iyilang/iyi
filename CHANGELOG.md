@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **The mark answers a word that is in no arena without walking the list
+  of large objects.** Every word the mark scanned that no arena held - an
+  integer in a word-scanned buffer, a union, a tuple with a pointer in it
+  - was looked for on the list of large mappings, one node at a time: a
+  collection over an `Array(Tuple(Int64, String))` of two million took
+  5,001 ms beside 200 live 1.1 MB buffers and 853 beside 50, against 21
+  beside none. The arena directory's byte for each 16 MiB slot counts the
+  large mappings that touch it, and a word in a slot that counts none is
+  answered at once: 19 ms and 14 ms. `bench/root_exercise.iyi` times a
+  million small integers beside 200 large mappings against the same beside
+  one, within five times and 20 ms; the old prelude took 790 ms against 2
+  (`--release`), 826 against 9 plain.
+
 - **Short-lived threads trigger collections: what a thread allocated
   counts when it ends.** A cache reports its allocation to the trigger a
   64 KiB slice at a time, and the slice a thread had not filled when it

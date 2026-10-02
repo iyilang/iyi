@@ -2784,7 +2784,7 @@ require "./file"
       # Whether the arena is still an arena, under the lock: the directory
       # byte is cleared before the unmap, under the same lock.
       def self.mapped?(arena : UInt64) : Bool
-        Pointer(UInt8).new(arena_dir + arena.unsafe_shr(24_u64)).value != 0_u8
+        Pointer(UInt8).new(arena_dir + arena.unsafe_shr(24_u64)).value == DIR_ARENA
       end
 
       # Under the lock: whether `owner` may set a region in `arena`, which
@@ -3016,7 +3016,17 @@ require "./file"
       # directory is a mapping of 2^24 bytes for a 48-bit space, reserved
       # once and committed a page at a time as arenas land in it; the
       # kernel charges nothing for the untouched rest.
+      #
+      # A slot is one arena's whole or none of it, and an arena's byte is
+      # `DIR_ARENA`. Any other byte counts the large mappings that touch
+      # the slot - over a megabyte each, so seventeen at most - and a word
+      # in a slot that counts none is no large object's without the walk
+      # of their list (`containing_large`). Every word the mark met in no
+      # arena walked it: an `Array(Tuple(Int64, String))` of two million
+      # beside 200 live 1.1 MB buffers took 11.5 s a collection, 66 ms
+      # beside none.
       DIR_SLOTS = 16777216_u64
+      DIR_ARENA = 128_u8
 
       @@arena_dir : UInt64 = 0_u64
 
@@ -3038,7 +3048,7 @@ require "./file"
       def self.arena_of(address : UInt64) : UInt64
         slot = address.unsafe_shr(24_u64)
         return 0_u64 if slot >= DIR_SLOTS
-        return 0_u64 if Pointer(UInt8).new(arena_dir + slot).value == 0_u8
+        return 0_u64 if Pointer(UInt8).new(arena_dir + slot).value != DIR_ARENA
         address & (0_u64 &- MAP)
       end
 
@@ -3147,7 +3157,7 @@ require "./file"
         @@arenas = base
         # The directory byte last, after the header and the link: a reader
         # that finds the byte finds an arena that is whole.
-        Pointer(UInt8).new(arena_dir + base.unsafe_shr(24_u64)).value = 1_u8
+        Pointer(UInt8).new(arena_dir + base.unsafe_shr(24_u64)).value = DIR_ARENA
         unlock
         base
       end
@@ -3158,6 +3168,7 @@ require "./file"
         write64(base + OFF_MAP, mapped)
         write64(base + 16 + OFF_MARK, (clear ? 0_u64 : ATOMIC_FLAG) | IyiMark.epoch_flag)
         lock
+        count_large(base, mapped, true)
         write64(base + OFF_NEXT, @@large)
         @@large = base
         unlock
@@ -3278,7 +3289,21 @@ require "./file"
           previous = node
           node = read64(node)
         end
+        count_large(base, read64(base + 8), false)
         __iyi_munmap(base, read64(base + 8))
+      end
+
+      # The directory's count (`DIR_ARENA`) for every slot a large mapping
+      # touches, up or down, under the lock: up before the node is listed,
+      # down after it is not.
+      def self.count_large(base : UInt64, mapped : UInt64, on : Bool) : Nil
+        slot = base.unsafe_shr(24_u64)
+        last = (base + mapped - 1_u64).unsafe_shr(24_u64)
+        while slot <= last && slot < DIR_SLOTS
+          byte = Pointer(UInt8).new(arena_dir + slot)
+          byte.value = on ? byte.value &+ 1_u8 : byte.value &- 1_u8
+          slot = slot + 1_u64
+        end
       end
 
       # Hand one empty arena's mapping back to the kernel — the sweep's
@@ -3410,6 +3435,10 @@ require "./file"
 
       def self.containing_large(pointer : Void*) : UInt64
         address = pointer.address
+        # A slot no large mapping touches answers without the walk
+        # (`DIR_ARENA` says why).
+        slot = address.unsafe_shr(24_u64)
+        return 0_u64 if slot < DIR_SLOTS && Pointer(UInt8).new(arena_dir + slot).value == 0_u8
         node = @@large
         while node != 0
           if address >= node + LARGE_USER && address < node + read64(node + OFF_MAP)

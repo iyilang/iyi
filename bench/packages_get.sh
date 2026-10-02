@@ -694,13 +694,20 @@ step "a package's sum is the same on every platform"
 # the tag's and not the machine's: on Windows the path of a file in a
 # directory went in with `\`, and the bytes were the checkout's, which
 # Git for Windows' default `core.autocrlf=true` writes with CRLF - an
-# `iyi.sum` made on Linux was refused there as tampering. Recomputed here
-# from the tag itself, with a global git config that asks for CRLF.
+# `iyi.sum` made on Linux was refused there as tampering. The package also
+# says `* text=auto` in its `.gitattributes`, which has git write its text
+# files with `core.eol` - CRLF on Windows by default - whatever autocrlf
+# says. Recomputed here from the tag itself, with a global git config that
+# asks for CRLF both ways, which the fetcher's KEEP_BYTES both undo.
 mkrepo "$WORK/work/libn"
+# Its own commit keeps the LF it was written with, quietly: the machine's
+# git may ask for CRLF, and warns of it under `text=auto`.
+git -C "$WORK/work/libn" config core.autocrlf false
 mkdir -p "$WORK/work/libn/sub"
 printf 'module example.test/user/libn\n' > "$WORK/work/libn/iyi.mod"
 printf 'module libn\n\npub def two : Int32\n  2\nend\n' > "$WORK/work/libn/libn.iyi"
 printf 'module libn/sub/extra\n\npub def three : Int32\n  3\nend\n' > "$WORK/work/libn/sub/extra.iyi"
+printf '* text=auto\n' > "$WORK/work/libn/.gitattributes"
 git -C "$WORK/work/libn" add -A && git -C "$WORK/work/libn" commit -qm one
 git init -q --bare "$WORK/mirror/example.test/user/libn"
 (cd "$WORK" && publish libn v1.0.0)
@@ -710,7 +717,8 @@ expected="$(
     printf '%s\0' "$f"; git show "v1.0.0:$f"; printf '\0'
   done | sha1sum | cut -c1-40
 )"
-printf '[core]\n\tautocrlf = true\n' > "$WORK/crlf.gitconfig"
+# Both: autocrlf for every file, eol for a `text` one (KEEP_BYTES).
+printf '[core]\n\tautocrlf = true\n\teol = crlf\n' > "$WORK/crlf.gitconfig"
 mkdir -p "$WORK/napp" && cd "$WORK/napp" || exit 1
 printf 'module example.test/user/napp\n' > iyi.mod
 GIT_CONFIG_GLOBAL="$WORK/crlf.gitconfig" "$IYI" get example.test/user/libn > sum.log 2>&1 || fail "get libn failed: $(cat sum.log)"

@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A package whose `.gitattributes` says `* text=auto` has the same
+  `iyi.sum` hash on Windows as on Linux.** The fetcher turned
+  `core.autocrlf` off so a checkout holds the committed bytes, but a file
+  the attributes mark as text is written with `core.eol`, whose default is
+  the platform's: CRLF on Windows. Such a package hashed `s1:6072c5fc...`
+  there and `s1:51c6f1a1...` - its tag's bytes - on Linux, and a sum made on
+  one was refused on the other as tampering. Fetched clones set
+  `core.eol=lf` too now. `bench/packages_get.sh` fetches a `text=auto`
+  package under a git config that asks for CRLF both ways and compares the
+  sum with one made from the tag's blobs; the old compiler wrote
+  `s1:5d54b1d6...` where the tag makes `s1:12371ab3...`.
+
 - **A module required on two lines of `iyi.mod` is refused, by line.** Both
   were accepted, and every reader took a different one: with `require ...
   lib v1.0.0` and `v1.1.0`, `iyi get example.test/user/lib@v1.0.0` said

@@ -266,6 +266,8 @@ module Iyi
 
       body = block.body
       statements = body.is_a?(Expressions) ? body.expressions.dup : [body] of ASTNode
+      last = statements.last?
+      return nil unless last && iyi_direct_spawn(last, group_param.name)
 
       handles = [] of ASTNode
       rewritten = [] of ASTNode
@@ -287,7 +289,6 @@ module Iyi
           rewritten << statement
         end
       end
-      return nil if handles.empty?
 
       rewritten << Call.new(Var.new(group_param.name).at(node), "join").at(node)
 
@@ -515,7 +516,10 @@ module Iyi
 
       assign = Assign.new(temp_var.clone, exp).at(node)
       check = IsA.new(temp_var.clone, Path.global(["Error"]).at(node)).at(node)
-      check.error_construct = "!"
+      # A `group do ... end!` that kept the general form answers its block's
+      # last expression, and the refusal of a `!` with nothing to propagate
+      # says so (`MainVisitor#check_error_union_operand`).
+      check.error_construct = exp.is_a?(Call) && exp.iyi_group? ? "end!" : "!"
       returned = Return.new(temp_var.clone).at(node)
       returned.from_propagate = true
       propagate = If.new(check, returned).at(node)

@@ -2114,6 +2114,16 @@ module Iyi
       members = type.is_a?(UnionType) ? type.union_types : [type] of Type
       errors, values = members.partition &.error?
 
+      # `end!` is the `!` of a group that kept the general form
+      # (normalizer.cr's `expand_iyi_group`).
+      if construct == "end!"
+        if errors.empty?
+          node.raise "`end!` has no error to propagate: this group answers its block's last expression, #{type}, and no member of it implements `Error`. " \
+                     "Only a block that ends in a `spawn` answers its tasks' tuple and their errors — see SPEC.md III.4.9"
+        end
+        construct = "!"
+      end
+
       if errors.empty?
         verb = construct == "!" ? "propagate" : "recover"
         section = construct == "!" ? "III.1" : "III.1.3"

@@ -440,6 +440,36 @@ if ! grep -q "can't propagate out of a block that runs as a proc" build-bang.log
   exit 1
 fi
 
+# ── 3e. An `end!` on a block that answers its own expression says so ──────
+# A group answers its block's last expression unless the block ends in a
+# spawn. The typed expansion used to append the tuple after any such
+# expression and throw it away (`puts "spawned"` after two spawns answered
+# {1, 2}); the general form answers Nil there, and the `!` with nothing to
+# propagate names the group's rule instead of only the type.
+step "an \`end!\` on a group that answers its own expression is refused as itself"
+cat > bang_tail.iyi <<'IYI'
+module bang_tail
+
+def pair : Tuple(Int32, Int32) | Cancelled | Panicked
+  group do |g|
+    x = g.spawn { 1 }
+    y = g.spawn { 2 }
+    puts "spawned"
+  end!
+end
+
+puts pair
+IYI
+if "$IYI" build bang_tail.iyi -o bang_tail > build-bang-tail.log 2>&1; then
+  echo "an \`end!\` on a group whose block ends in its own expression compiled"
+  exit 1
+fi
+if ! grep -q "this group answers its block's last expression" build-bang-tail.log; then
+  echo "an \`end!\` on a group whose block ends in its own expression was refused, but not as itself:"
+  tail -8 build-bang-tail.log
+  exit 1
+fi
+
 # ── 4. Failure proof: the interleaving assert is reachable ────────────────
 step "failure proof: a wrong order is refused"
 sed 's/== "bababa"/== "aaabbb"/' "$REPO/bench/concurrency_exercise.iyi" > misordered.iyi

@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **A group whose block ends in its own expression answers it.** The
+  typed expansion applied to any block whose spawns were direct,
+  appended the tuple after the author's last expression and threw that
+  away: a block ending in `"sum is #{a.value} and #{b.value}"` answered
+  `{1, 2}`. The expansion applies only to a block that ends in a spawn
+  now; any other block is the general form and answers its last
+  expression, and an `end!` on one whose answer has no error member is
+  refused with "this group answers its block's last expression" rather
+  than turned into a tuple. Of the groups in bench/ and samples/ the
+  expansion took, 33 ended in an expression of their own, none under
+  `end!`, and all of them still compile. `bench/concurrency_exercise.iyi`
+  and `.sh` step 3e check both; the old compiler answered `{20, 1}` and
+  built the `end!`, which printed "spawned" and `{1, 2}`.
+
 - **A group with macro code in its block keeps the general form.** A
   `{% for %}` that writes `y{{i}} = g.spawn {..}` is text when the typed
   expansion is decided, so its spawns were not slots: three tasks came

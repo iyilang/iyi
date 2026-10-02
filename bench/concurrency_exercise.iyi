@@ -929,6 +929,16 @@ end
 fail("typed group, one name reused: the first task's failure was lost") unless fetch_reused(true).is_a?(TaskFailed)
 puts "a typed group reusing one name for two spawns kept both slots and the first failure"
 
+# A block whose last expression is its own answers that: the expansion
+# appended the tuple after it, and the block's answer was thrown away.
+summary = group do |g|
+  a = g.spawn { 20 }
+  b = g.spawn { 1 }
+  "#{a.value.to_s} and #{b.value.to_s}"
+end
+fail("a group answered #{summary} for its block's last expression") unless summary.is_a?(String) && summary == "20 and 1"
+puts "a group whose block ends in its own expression answers it"
+
 # Macro code in the block keeps the general form: what a `{% for %}`
 # writes is text when the expansion is decided, so its spawns were no
 # slots - the tuple came out one short, and their errors were dropped.

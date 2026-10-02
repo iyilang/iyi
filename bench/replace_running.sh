@@ -79,7 +79,9 @@ wait_unheld() {
     tries=$((tries + 1))
   done
   tries=0
-  until powershell -NoProfile -Command "try { [IO.File]::Open('$path', 'Open', 'ReadWrite', 'None').Close(); exit 0 } catch { exit 1 }" >/dev/null 2>&1; do
+  # Opened for reading, alone: an open for writing asks a scanner in on its
+  # close, and the scanner's own handle is then what the delete meets.
+  until powershell -NoProfile -Command "try { [IO.File]::Open('$path', 'Open', 'Read', 'None').Close(); exit 0 } catch { exit 1 }" >/dev/null 2>&1; do
     if [ "$tries" -ge 60 ]; then
       echo "  after 30 s the file still opens only shared: a handle is held on it"
       break
@@ -127,10 +129,9 @@ stop_session
 [ -n "$aside" ] && wait_unheld "$WORK/$aside"
 cp "$IYI" "$WORK/next.exe"
 # Deleted is not gone at once: a file deleted while another handle has it
-# open - one opened to allow deletion, as a scanner's is, and the probe's
-# own open for writing is what asks the scanner in - stays under its name,
-# delete-pending, until that handle closes. Found in CI, twice in a row
-# with nothing holding the file when the wait above ended.
+# open - one opened to allow deletion, as a scanner's is - stays under its
+# name, delete-pending, until that handle closes. Found in CI, twice in a
+# row with nothing holding the file when the wait above ended.
 gone_soon() {
   local tries=0
   while [ -e "$1" ]; do
@@ -139,7 +140,20 @@ gone_soon() {
     tries=$((tries + 1))
   done
 }
-if replace "" "$next_w" && [ -n "$aside" ] && gone_soon "$WORK/$aside"; then
+# Something that opens a file without sharing its deletion - a scanner, a
+# moment after the session's exit - makes the delete fail, and `REPLACE`
+# sends that to NUL: the aside stays, nothing holding it a moment later,
+# once in CI. The contract is the next replacement once nothing holds it,
+# so a second one is asked for before the aside counts as left behind.
+replaced=1
+replace "" "$next_w" || replaced=0
+if [ "$replaced" -eq 1 ] && [ -n "$aside" ] && ! gone_soon "$WORK/$aside"; then
+  echo "  $aside outlived one replacement; it goes at the next:"
+  sed 's/^/    /' "$WORK/make.out"
+  cp "$IYI" "$WORK/next.exe"
+  replace "" "$next_w" || replaced=0
+fi
+if [ "$replaced" -eq 1 ] && [ -n "$aside" ] && gone_soon "$WORK/$aside"; then
   echo "  $aside deleted"
 else
   echo "  $aside is still there, or the replacement failed:"; sed 's/^/    /' "$WORK/make.out"

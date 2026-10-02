@@ -2029,6 +2029,11 @@ require "./file"
         page = @@cache
         return if page == 0
         table = Pointer(UInt64).new(page)
+        # The slice not yet reported is counted now, or a thread that
+        # allocated less than a slice was never counted at all: ten
+        # thousand threads of a thousand strings each ran no collection
+        # and mapped a gigabyte. The next slice anyone fills sees it.
+        allocated_word.value.add(read64(page + CACHE_SLICE))
         lock
         index = 0
         while index < FILL

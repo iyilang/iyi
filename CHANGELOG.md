@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **Short-lived threads trigger collections: what a thread allocated
+  counts when it ends.** A cache reports its allocation to the trigger a
+  64 KiB slice at a time, and the slice a thread had not filled when it
+  ended went with its cache, uncounted: ten thousand threads of a
+  thousand short strings each ran no collection and mapped 1,008 MiB,
+  still rising, at 715 MiB of working set. The remainder is counted as
+  the cache retires, and the next slice anyone fills runs the collection:
+  the same ten thousand threads ran 5 collections and held 384 MiB
+  mapped at 166 MiB of working set. `bench/collect_trigger.iyi` ends five
+  hundred such threads and fills one slice; the old prelude ran no
+  collection under an 8,424,400-byte budget.
+
 - **`GC.is_heap_ptr` answers beside threads whose large chunks come and
   go.** It walked the list of large mappings without the runtime lock,
   while another thread's `free` or sweep unlinked and unmapped nodes of it

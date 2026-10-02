@@ -391,7 +391,9 @@ for y in range(20):
         lines.append(row.value[:n.value].rstrip())
 open(result, "w", encoding="utf-8").write("\n".join(lines) + "\n")
 PY
-      "$PY" "$WORK/confile.py" "$WORK/confile.exe" "$WORK/confile.result" > "$WORK/confile.out" 2>&1
+      # The result holds `ç` and `ğ`: a runner whose Python writes code page
+      # 1252 could not print it, and the step read the traceback.
+      PYTHONIOENCODING=utf-8 "$PY" "$WORK/confile.py" "$WORK/confile.exe" "$WORK/confile.result" > "$WORK/confile.out" 2>&1
       if grep -q '^UNMEASURED' "$WORK/confile.out"; then
         echo "  no console here, so the console file is unmeasured: $(cat "$WORK/confile.out")"
       elif grep -qx 'conout: çay ğ 日本' "$WORK/confile.out" && grep -qx 'con: çay ğ' "$WORK/confile.out" &&

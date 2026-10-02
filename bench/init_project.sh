@@ -93,6 +93,11 @@ say "a /v2 suffix is a version, and the file is the name before it" "$([ -f majo
 "$IYI" init "Example.com/Me/App" bad > bad.txt 2>&1
 say "a path the manifest would refuse is refused before anything is written" \
   "$([ $? -ne 0 ] && grep -q 'is not a module path' bad.txt && [ ! -e bad ]; echo $?)"
+# A newline in the path made two directives of `module <path>`: `module x`
+# and a `require` nobody asked for were written, exit 0.
+"$IYI" init "$(printf 'x\nrequire a.b/c v1.0.0\n#/hello')" inj > inj.txt 2>&1
+say "a path with a newline in it is refused, and nothing written" \
+  "$([ $? -ne 0 ] && grep -q 'is not a module path' inj.txt && [ ! -e inj ]; echo $?)"
 "$IYI" init > none.txt 2>&1
 say "no module path is a usage error that shows the form" \
   "$([ $? -ne 0 ] && grep -q 'example.com/me/hello' none.txt; echo $?)"

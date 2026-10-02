@@ -50,23 +50,14 @@ class Iyi::Command
 
     # The manifest's own grammar decides what a module path is (III.7), and
     # its sentences say why one is not — the same ones a hand-written
-    # `iyi.mod` would draw on the first build.
+    # `iyi.mod` would draw on the first build. Asked of the path alone: it
+    # was asked of a whole manifest, `module <path>`, and a path holding a
+    # newline was two directives - `x<LF>require a.b/c v1.0.0<LF>#/hello`
+    # wrote `module x` and a `require` nobody asked for, beside `hello.iyi`.
     begin
-      Mod::ModFile.parse("module #{module_path}\n", "init")
+      Mod::ModFile.check_module_path(module_path)
     rescue ex : Mod::ModError
-      # Without the `file:line:` a manifest error carries, because there is
-      # no file yet; the sentence after it is the one that matters. Chopped
-      # by hand rather than by a regex: a regex literal here puts PCRE on
-      # the compiler's floor (SPEC.md III.9), and `bench/dependency_floor.sh`
-      # on Windows said so — `pcre2-8.dll` gained — the first time this
-      # line was written with one.
-      sentence = ex.message.to_s.lchop("init:")
-      digits = 0
-      while (char = sentence[digits]?) && char.ascii_number?
-        digits += 1
-      end
-      sentence = sentence[digits..].lchop(':').lchop(' ')
-      abort! "init: #{sentence}", :USAGE_ERROR
+      abort! "init: #{ex.message}", :USAGE_ERROR
     end
 
     directory ||= Dir.current

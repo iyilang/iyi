@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`iyi init` refuses a module path with a newline in it.** The path was
+  checked by parsing a whole manifest, `module <path>`, so a newline made
+  more directives: `iyi init "x<LF>require a.b/c v1.0.0<LF>#/hello"` exited
+  0 and wrote an `iyi.mod` of `module x` and a `require` nobody asked for,
+  beside a `hello.iyi`. The path alone is checked now, with the sentence a
+  bad path draws. `bench/init_project.sh` checks it is refused and nothing
+  written; the old compiler wrote both files.
+
 - **`iyi mod release` finds a module saved with a byte order mark, with a
   comment after its header, or with a tab after `pub`.** The modules that
   export something were picked by text - a line exactly `module <name>` and

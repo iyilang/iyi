@@ -142,6 +142,27 @@
 
 ### Fixed
 
+- **`iyi fmt --check lib/x.iyi` checks `lib/x.iyi`.** The default exclude,
+  `lib`, applied to the paths named on the command line as well as to the
+  ones a walk finds, so `fmt --check lib/x.iyi` and `fmt --check lib`
+  printed nothing and exited 0 having checked nothing - a CI step written
+  for one vendored module passed without reading it. An exclude prunes what
+  a walk finds now and does not take back a named path, which is Black's
+  rule for `--exclude`: a named file is formatted, and a named directory is
+  walked without the excludes that hold it. `bench/verbs_exercise.sh` checks
+  a messy `lib/messy.iyi` and `lib` by name; the old compiler exited 0 for
+  both.
+
+- **`iyi fmt` reports a file it may not read and goes on to the next.**
+  Asking what a path is and reading it were outside every rescue: a file
+  this user may not read ended `fmt DIR` with "Error: .\.\a_noread.iyi:
+  Access is denied.", exit 1, and the files after it were never checked. It
+  is "cannot read '...': Access is denied." now, with exit 1 at the end, and
+  the walk carries on. `bench/verbs_exercise.sh` checks a directory with an
+  unreadable file before a messy one (an ACL deny on Windows, `chmod`
+  elsewhere, unmeasured as root); the old compiler never reached the messy
+  one.
+
 - **A ```` ```crystal ```` fence in a `.iyi` file's doc comment keeps its
   tag.** `crystal` and `cr` were dropped from a fence's tag in every file -
   right for a `.cr` file, where they name its own language - and in a `.iyi`

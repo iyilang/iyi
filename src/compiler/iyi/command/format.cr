@@ -128,7 +128,7 @@ class Iyi::Command
       if @format_stdin
         format_stdin
       else
-        format_many @files
+        format_many @files, (walk_excludes(".") if @walk_all)
       end
     end
 

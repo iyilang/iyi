@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`fmt` formats `.or(...)` and `.or_panic` written on the line under their
+  value.** The formatter expected the `.` right after the value: `g(-1)` /
+  `  .or(2)` was "expecting ., not `NEWLINE`" and "there's a bug
+  formatting". It is indented on its own line as a call's `.bar` is, and a
+  comment inside `.or(` keeps its line with the default indented under it,
+  where the default went to the line's start. `bench/verbs_exercise.sh`
+  formats both on the next line and a commented `.or(`; the old compiler
+  gave up on the first.
+
 - **`fmt` keeps a bare line break inside a literal in macro text bare in a
   CRLF file.** A CRLF file is written back in CRLF with the breaks inside
   its literals as they were, and the literals were found by a parse - which

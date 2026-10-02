@@ -3764,6 +3764,15 @@ module Iyi
     def visit(node : Recover)
       accept node.exp
       skip_space
+
+      # On the next line, as a call's `.bar` may be: `g(-1)` / `  .or(2)`
+      # was "expecting ., not `NEWLINE`" and "there's a bug formatting".
+      base_indent = @indent
+      if @token.type.newline? || @wrote_newline
+        base_indent = @indent + 2
+        indent(base_indent) { consume_newlines }
+        write_indent(base_indent)
+      end
       write_token :OP_PERIOD
       skip_space_or_newline
 
@@ -3771,9 +3780,18 @@ module Iyi
         write "or"
         next_token_skip_space
         write_token :OP_LPAREN
-        skip_space_or_newline
-        accept default
-        skip_space_or_newline
+        # A comment in the parentheses keeps its line, and the lines under
+        # it are indented: `.or( # c` / `2)` came back with the `2` at the
+        # line's start.
+        if skip_space_or_newline(base_indent + 2, last: true)
+          write_indent(base_indent + 2)
+          indent(base_indent + 2, default)
+        else
+          accept default
+        end
+        if skip_space_or_newline(base_indent + 2, last: true)
+          write_indent(base_indent)
+        end
         write_token :OP_RPAREN
       else
         write "or_panic"

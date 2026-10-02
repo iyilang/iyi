@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`fmt` keeps the blanks and the `\r` at the end of a line inside a
+  string.** Every line the formatter wrote was stripped of trailing
+  whitespace except a heredoc's, and a string, a `%(...)`, a regex or a
+  command literal spanning lines is data too: `"a  ` / `b"` printed 5 for
+  its `bytesize` before `fmt` and 3 after, a tab went the same way, and a
+  `\r\n` inside a string in an LF file lost its `\r` (4, then 3) - in a
+  macro's body as well. The lines that end inside a literal are written as
+  they are now. `bench/verbs_exercise.sh` formats strings, a `%(...)`, a
+  regex and a macro's string with trailing blanks, a tab and a `\r` before
+  the break and requires them unchanged; the old compiler stripped every
+  one.
+
 - **A comment after a block's `{` or a proc literal's `{` or `do` keeps the
   `}` or `end` on a line of its own.** The formatter asked only whether a
   line break came after the opener, and a comment there had already taken

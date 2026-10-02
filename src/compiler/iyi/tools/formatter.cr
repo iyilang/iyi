@@ -641,10 +641,17 @@ module Iyi
       end
     end
 
+    # A line that ends inside a literal ends in the program's data, which
+    # `finish` must not strip: the trailing blanks and the `\r` of
+    # `"a  ` / `b"` went, so `x.bytesize` printed 5 before `fmt` and 3
+    # after, and a CRLF break inside a string in an LF file printed 4 and
+    # then 3. Only heredocs were spared.
     private def write_sanitized_string_body(escape, no_rstrip = false)
       body = @token.invalid_escape ? @token.value.as(String) : @token.raw
       body = Lexer.escape_forbidden_characters(body) if escape
+      first_line = @line
       write body, no_rstrip: no_rstrip
+      first_line.upto(@line - 1) { |line| @no_rstrip_lines << line }
     end
 
     def visit(node : StringInterpolation)

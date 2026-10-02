@@ -1,9 +1,9 @@
 # Exercises `std/gc`: the program's window onto iyi's own collector.
 #
 # Proves:
-#   * `malloc`, `malloc_atomic` and `realloc` hand out zeroed heap words;
-#     `realloc` keeps the bytes; `free` hands a chunk back so `is_heap_ptr`
-#     stops answering true for it.
+#   * `malloc` and `realloc` hand out zeroed heap words, `malloc_atomic`
+#     words it does not promise to clear; `realloc` keeps the bytes; `free`
+#     hands a chunk back so `is_heap_ptr` stops answering true for it.
 #   * `is_heap_ptr` answers true for a chunk's start and its interior, and
 #     false for null, a stack address and a freed chunk.
 #   * `stats` moves the way the collector does: `bytes_since_collection`
@@ -72,9 +72,9 @@ end
 check(kept, "realloc keeps the first 64 bytes")
 check(qb[4095] == 0_u8, "realloc zeroes the new tail")
 a = GC.malloc_atomic(32)
-check(a.address != 0_u64 && a.as(Pointer(UInt8))[31] == 0_u8, "malloc_atomic answers a zeroed word")
+check(a.address != 0_u64, "malloc_atomic answers a word")
 check(GC.malloc(0).address != 0_u64, "malloc(0) still answers a word")
-puts "  malloc, malloc_atomic and realloc answer zeroed words; realloc keeps the bytes"
+puts "  malloc and realloc answer zeroed words, malloc_atomic a word; realloc keeps the bytes"
 
 # ---------------------------------------------------------------------------
 puts "== heap pointers"

@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`GC.malloc_atomic` is documented as handing out bytes it does not
+  clear.** It said "`size` zeroed bytes", and the allocator hands an
+  atomic chunk back with its last owner's bytes on purpose, as Boehm's
+  `GC_malloc_atomic` does: 2,000 chunks taken after a collection freed
+  2,000 filled ones came back dirty, every one, in 20 rounds of 16, 64
+  and 200 bytes, and 39,981 of 40,000 at 5,000. The documentation says
+  the caller writes every byte it reads now, and
+  `bench/std_gc_exercise.iyi` no longer asserts a fresh chunk zeroed. No
+  behaviour changed.
+
 - **On Windows an arena is committed as it is carved, so a small program
   fits a small job.** Every 16 MiB arena was committed whole by
   `VirtualAlloc`, one per size class per thread, and Windows charges a

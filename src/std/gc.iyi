@@ -70,8 +70,12 @@ pub struct GC
     __iyi_malloc64(size.to_u64)
   end
 
-  # `size` zeroed bytes the collector does not scan: for bytes that hold no
-  # pointers, so the marker skips them.
+  # `size` bytes the collector does not scan: for bytes that hold no
+  # pointers, so the marker skips them. They are not cleared - a chunk the
+  # sweep handed back comes out with its last owner's bytes, as Boehm's
+  # `GC_malloc_atomic` hands them out - so the caller writes every byte
+  # it reads. This said "zeroed" while 2000 chunks taken after a
+  # collection freed 2000 filled ones came back dirty, every one.
   def self.malloc_atomic(size : Int) : Void*
     raise "negative size: #{size}" if size < 0
     __iyi_malloc_atomic64(size.to_u64)

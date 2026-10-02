@@ -53,10 +53,12 @@ module Iyi
       return unless @level.all?
       return if ignore_warning_due_to_location?(location)
 
+      # A SyntaxException either way: the front end built without semantic/
+      # (std specs, a shard's build) has no TypeException. Line 0 is no place.
       report = if location
                  SyntaxException.new message, location.line_number, location.column_number, location.filename
                else
-                 TypeException.new message
+                 SyntaxException.new message, 0, 0, nil
                end
       report.warning = true
       @reports << report

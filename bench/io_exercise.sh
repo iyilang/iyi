@@ -318,6 +318,90 @@ PY
       fi
     fi
 
+    # 7b. A file opened on the console: `CONOUT$` and `CON` written to,
+    #    `CONIN$` read. Only the standard streams' consoles were read and
+    #    written wide, and a file on one had the console's code page:
+    #    `conout: çay ğ 日本` showed as `conout: ├ºay ─ƒ µùÑµ£¼`, and
+    #    `Türkçe ğ` typed at `CONIN$` read as 8 bytes, `ğ` folded to `g`.
+    #    An `IyiIO` on a console (`@console`) goes through `IyiConsole` now.
+    #    Python runs the program in a console of its own, types the line
+    #    and reads the screen.
+    echo
+    echo "== a file opened on the console"
+    cat > "$WORK/confile.iyi" <<'EOF'
+module confile
+
+import std/file::{File}
+
+File.open("CONOUT$", "w") { |f| f.print "conout: çay ğ 日本\n" }
+File.open("CON", "w") { |f| f.print "con: çay ğ\n" }
+File.open("CONIN$") do |f|
+  line = f.gets(true)
+  puts "conin: #{line} #{line.bytesize}" if line
+end
+EOF
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the console is unmeasured"
+    elif ! "$IYI" build -o "$WORK/confile" "$WORK/confile.iyi" > "$WORK/confile.build" 2>&1; then
+      echo "  the console-file program did not build"; sed -n '1,10p' "$WORK/confile.build"; status=1
+    else
+      cat > "$WORK/confile.py" <<'PY'
+import ctypes, os, subprocess, sys, time
+from ctypes import wintypes
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.CreateFileW.restype = wintypes.HANDLE
+class KEY(ctypes.Structure):
+    _fields_ = [("down", wintypes.BOOL), ("repeat", wintypes.WORD), ("vk", wintypes.WORD),
+                ("scan", wintypes.WORD), ("char", wintypes.WCHAR), ("state", wintypes.DWORD)]
+class RECORD(ctypes.Structure):
+    class U(ctypes.Union):
+        _fields_ = [("key", KEY), ("pad", ctypes.c_byte * 16)]
+    _fields_ = [("kind", wintypes.WORD), ("event", U)]
+program, result = sys.argv[1], sys.argv[2]
+if os.environ.get("CONFILE_INNER") != "1":
+    info = subprocess.STARTUPINFO(); info.dwFlags = 1; info.wShowWindow = 0
+    inner = subprocess.Popen([sys.executable, __file__] + sys.argv[1:],
+                             env=dict(os.environ, CONFILE_INNER="1"), creationflags=0x10, startupinfo=info)
+    inner.wait(timeout=60)
+    print(open(result, encoding="utf-8").read() if os.path.exists(result) else "UNMEASURED: the inner copy wrote nothing")
+    sys.exit(0)
+conin = k32.CreateFileW("CONIN$", 0xC0000000, 3, None, 3, 0, None)
+conout = k32.CreateFileW("CONOUT$", 0xC0000000, 3, None, 3, 0, None)
+child = subprocess.Popen([program])
+time.sleep(1.5)
+records = []
+for unit in "Türkçe ğ\r":
+    for down in (1, 0):
+        r = RECORD(); r.kind = 1
+        r.event.key.down = down; r.event.key.repeat = 1
+        r.event.key.vk = 0x0D if unit == "\r" else 0
+        r.event.key.char = unit
+        records.append(r)
+written = wintypes.DWORD()
+k32.WriteConsoleInputW(conin, (RECORD * len(records))(*records), len(records), ctypes.byref(written))
+try:
+    code = str(child.wait(timeout=20))
+except subprocess.TimeoutExpired:
+    child.kill(); code = "TIMEOUT"
+lines, row = [f"exit {code}"], ctypes.create_unicode_buffer(120)
+for y in range(20):
+    n = wintypes.DWORD()
+    k32.ReadConsoleOutputCharacterW(conout, row, 120, wintypes.DWORD(y << 16), ctypes.byref(n))
+    if row.value[:n.value].strip():
+        lines.append(row.value[:n.value].rstrip())
+open(result, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+      "$PY" "$WORK/confile.py" "$WORK/confile.exe" "$WORK/confile.result" > "$WORK/confile.out" 2>&1
+      if grep -q '^UNMEASURED' "$WORK/confile.out"; then
+        echo "  no console here, so the console file is unmeasured: $(cat "$WORK/confile.out")"
+      elif grep -qx 'conout: çay ğ 日本' "$WORK/confile.out" && grep -qx 'con: çay ğ' "$WORK/confile.out" &&
+           grep -qx 'conin: Türkçe ğ 11' "$WORK/confile.out"; then
+        echo "  CONOUT\$ and CON show what was written, and CONIN\$ reads the 11 bytes typed"
+      else
+        echo "  the console file wrote or read otherwise:"; sed 's/^/    /' "$WORK/confile.out"; status=1
+      fi
+    fi
+
     # 8. A stream past a gibibyte. `read_all` and `read_line` doubled an
     #    Int32 capacity, and doubling 1 GiB panicked "arithmetic overflow":
     #    `File.read` of a 1,288,490,188-byte file did, after a 1.8 GB peak.

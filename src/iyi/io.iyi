@@ -16,6 +16,16 @@ class IyiIO
   @write_buffer : Pointer(UInt8)
   @write_capacity : Int32
   @write_pos : Int32
+  {% if flag?(:win32) %}
+    # A console a file was opened on - `CON`, `CONIN$`, `CONOUT$` - is
+    # written and read wide, as the standard streams' consoles are, with a
+    # carry of its own (`IyiConsole.write_handle`). Through `WriteFile` and
+    # `ReadFile` it was the console's code page: `çay ğ` written to
+    # `CONOUT$` showed as `├ºay ─ƒ`, and `Türkçe ğ` typed at `CONIN$` read
+    # as eight bytes of code page 437, `ğ` folded to `g`.
+    @console : Bool = false
+    @console_carry : UInt64 = 0_u64
+  {% end %}
 
   def initialize(@fd : Int64, buffer_size : Int32 = 4096, @sync : Bool = false)
     @closed = false
@@ -29,6 +39,18 @@ class IyiIO
     @write_capacity = buffer_size
     @write_buffer = Pointer(UInt8).malloc(buffer_size.to_u64)
     @write_pos = 0
+    {% if flag?(:win32) %}
+      # A character device answers the console's own question if it was
+      # opened to be read; opened only to be written, `GetConsoleMode`
+      # refuses it (ERROR_ACCESS_DENIED), and a wide write of nothing,
+      # which `NUL` refuses, is the test.
+      mode = 0
+      handle = Pointer(Void).new(@fd > 2_i64 ? @fd.to_u64 : 0_u64)
+      if @fd > 2_i64 && LibC.GetFileType(handle) == 2
+        readable = LibC.GetConsoleMode(handle, pointerof(mode)) != 0
+        @console = readable || LibC.WriteConsoleW(handle, pointerof(mode).as(Void*), 0, pointerof(mode), Pointer(Void).new(0_u64)) != 0
+      end
+    {% end %}
   end
 
   def self.new(fd : Int32, buffer_size : Int32 = 4096, sync : Bool = false) : IyiIO
@@ -377,6 +399,8 @@ class IyiIO
         outcome = iyi_read(0, buffer, count)
         return -2_i64 if outcome.is_a?(Cancelled)
         outcome
+      elsif @console
+        IyiConsole.read(Pointer(Void).new(target_fd.to_u64), buffer, count)
       else
         __iyi_file_read(target_fd, buffer, count)
       end
@@ -389,6 +413,8 @@ class IyiIO
     {% if flag?(:win32) %}
       if target_fd == 1_i64 || target_fd == 2_i64
         __iyi_write(target_fd.to_i32, buffer, count)
+      elsif @console
+        IyiConsole.write_handle(Pointer(Void).new(target_fd.to_u64), buffer, count, pointerof(@console_carry))
       else
         __iyi_file_write(target_fd, buffer, count)
       end

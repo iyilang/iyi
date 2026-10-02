@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A file opened on the Windows console - `CON`, `CONIN$`, `CONOUT$` -
+  writes and reads UTF-8.** Only the standard streams' consoles were written
+  and read wide; a file on one went through `WriteFile` and `ReadFile` in the
+  console's code page: `conout: çay ğ 日本` showed as
+  `conout: ├ºay ─ƒ µùÑµ£¼`, and `Türkçe ğ` typed at `CONIN$` read as 8
+  bytes with `ğ` folded to `g`. An `IyiIO` whose handle is a console now
+  writes through `WriteConsoleW` with a carry of its own and reads through
+  `ReadConsoleW`; a console opened only to be written, which refuses
+  `GetConsoleMode`, is recognised by a wide write of nothing.
+  `bench/io_exercise.sh` writes both names and types the line; the old
+  library answered as quoted.
+
 - **The runtime's fatal messages go to standard error, and on a Windows
   console one written inside the allocator no longer hangs.** "iyi: out of
   memory", "iyi: munmap failed" and the root-range sentences were written to

@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`run --sandbox` finds wasi-sdk's `clang.exe` under `WASI_SDK` on
+  Windows, and names an `IYI_WASI_CC` or `IYI_WASMTIME` that points at
+  nothing.** It looked for a bare `clang`, so an installed wasi-sdk was
+  "run --sandbox needs a wasi-sdk clang: set IYI_WASI_CC, or install
+  wasi-sdk ... at /opt/wasi-sdk or ~/.local/opt/wasi-sdk", and that same
+  sentence answered an `IYI_WASI_CC` the author had set to a missing file.
+  It says "IYI_WASI_CC is X, and there is no file there" now, lists the
+  paths it tried, and moves on to the next tool once clang is found.
+  `bench/verbs_exercise.sh` checks both; the old compiler answered the
+  install sentence to each.
+
 - **A file stored as `UP.IYI` is refused by name on every system, and a
   path typed in another case is read as the file it names.** The entry
   check folded case and the lexer did not, so on Windows `iyi run UP.IYI`

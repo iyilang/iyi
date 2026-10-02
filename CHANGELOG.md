@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.16.2 — 2026-10-02
+
+**About two hundred and sixty fixes, most of them found by comparing iyi
+with Crystal, Python, libxml2, expat, PyYAML and the RFCs at scale** -
+random programs, documents, macro expressions, formatter mutants and
+language-server sessions by the hundred thousand - each with a check
+proven to fail without it. A `when 1..5`, a `when` of a tuple of types
+and a `when Int32 | String` never matched and fell to `else`; a float
+literal passed to a `Float32` parameter rounded twice; `fmt` could change
+a program's meaning (a heredoc's last blank line, `- 1.abs`, the end of a
+line inside a string); a `--release` build wrote artifacts with no object
+code; iterator adaptors copied their counts; `std/json` wrote bytes its
+reader refused; `std/xml` took any byte past 0x7F for a name and wrote
+whatever it was handed. **Some answers change:** `Char#whitespace?`
+includes `\v` and `\f`, a negative shift count shifts the other way,
+`Int#chr` takes all of Unicode, a flags enum with every member set prints
+`All`, and `std/yaml` reads flow merges, tabs after indentation and `- `
+continuations as the spec does.
+
+**Windows** gains the `windows-0.17.0-2` branch's fixes, and a program
+there ends while another thread collects. The language server answers at
+the cursor's line while a buffer does not compile, renames one method at
+a time, and counts signature-help arguments correctly. `.iyimod` is
+still v54, so 0.16.1's artifacts are rebuilt only because the compiler's
+version is in their identity.
+
 ### Fixed
 
 - **`when 1..5`, `when {Nil, Bool}` and `when Int32 | String` match.** A

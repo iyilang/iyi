@@ -606,16 +606,20 @@ module Iyi
         @indent = column
 
         @passed_backslash_newline = true
-        next_token_skip_space
+        found_comment = next_token_skip_space
+
+        # The parser takes the next literal into this one only when it starts
+        # right after the backslash's line break. After a comment or a blank
+        # line this literal has ended and the next is a statement of its own;
+        # taking it in here left the formatter a literal ahead of the tree:
+        # `"a" \` / `# note` / `"b"` was "expecting DELIMITER_START, not
+        # `IDENT, puts`" and "there's a bug formatting".
+        continued = !found_comment && @token.type.delimiter_start? && @token.delimiter_state.kind.string?
 
         write_line if @token.type.newline?
         skip_space_or_newline
 
-        if @token.type.delimiter_start?
-          visit(node)
-        else
-          # empty continuation
-        end
+        visit(node) if continued
 
         @string_continuation -= 1
       else

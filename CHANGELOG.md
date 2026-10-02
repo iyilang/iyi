@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **`fmt` formats a `"a" \` followed by a comment line.** The parser
+  continues a literal only when the next one starts right after the
+  backslash's line break; after a comment line the literal has ended and the
+  next is a statement of its own, and the formatter took it in anyway:
+  `x = "a" \` / `# note` / `"b"` was "expecting DELIMITER_START, not
+  `IDENT, puts`" and "there's a bug formatting". The literal ends where the
+  parser ends it now. `bench/verbs_exercise.sh` formats the three lines; the
+  old compiler gave up.
+
 - **`iyi fmt --check lib/x.iyi` checks `lib/x.iyi`.** The default exclude,
   `lib`, applied to the paths named on the command line as well as to the
   ones a walk finds, so `fmt --check lib/x.iyi` and `fmt --check lib`

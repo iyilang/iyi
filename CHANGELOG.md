@@ -142,6 +142,31 @@
 
 ### Fixed
 
+- **`iyi bind` reads a shard's root as its own namespace, and past a byte
+  order mark.** The root was the first top-level declaration, so a shard
+  that reopens `class String` before `module Loud` bound as `loud (String) -
+  filling the object code failed`, its bind log describing Crystal's String,
+  and a `module Bom` behind a BOM was refused as "no top-level module, class
+  or struct". The declaration named for the shard's file wins now, then the
+  first the standard library does not declare, and both read past a BOM:
+  `loud (Loud)`, `bom (Bom)`. `bench/bind_roundtrip.sh` binds both; the old
+  compiler answered as quoted.
+
+- **`iyi bind` binds from a project path holding `;`, into a `\\?\`
+  directory, and every dependency shard.yml lists.** The search path went to
+  each step as absolute entries joined by `;`, so in `semi;x y` `top`'s
+  `require "base"` was "can't find file 'base'"; `--mods \\?\C:\...` stopped
+  on "\\?\: The filename, directory name, or volume label syntax is
+  incorrect."; `tool bind --emit-bind \\?\C:\...` wrote `require
+  "./C:/..."`, which the fill build could not find; and a manifest entry
+  with a `-` or indented four was skipped, so `my-lib:` with `tiny:` bound
+  only tiny and alone was "shard.yml lists no dependency that is under
+  lib/". An entry holding the delimiter goes relative to each step, the
+  prefix is dropped, a keep file names the shard from the search path where
+  no relative path exists, and a name is `[A-Za-z0-9_.-]` at the first
+  entry's indentation. `bench/bind_roundtrip.sh` binds each; the old
+  compiler failed each as quoted.
+
 - **The fill command `tool bind` prints is one this binary takes.** It said
   `crystal build --iyi-keep Greet --emit-bind DIR -o keepbin KEEP`, and the
   `crystal` on a PATH is Crystal's, which answers `Error: Invalid option:

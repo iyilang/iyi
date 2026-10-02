@@ -2249,10 +2249,25 @@ module Iyi
     # `relative_to?` answers `..\entry.cr`, and `\a` and `\e` are escapes
     # there, so the fill build went looking for a file called `..try.cr`.
     # `require` resolves `/` on every platform Crystal builds on.
-    source = ::Path[File.expand_path(program.filename || "")]
-    base = ::Path[File.expand_path(dir)]
-    relative = source.relative_to?(base).try(&.to_posix.to_s) || source.to_posix.to_s
-    relative = "./#{relative}" unless relative.starts_with?(".")
+    #
+    # Without a `\\?\` prefix on either side: `relative_to?` answers nil for
+    # two anchors that differ, `\\?\C:\` and `C:\` among them, and the
+    # fallback wrote `require "./C:/Users/.../greet.cr"`, which resolves
+    # nowhere. Where there is still no relative path - `--emit-bind` on
+    # another drive - the shard is named from the search path it is on,
+    # the way `iyi bind`'s `lib/` is; `./` goes only in front of a path
+    # that is relative to this file.
+    source = ::Path[Iyi.unverbatim(File.expand_path(program.filename || ""))]
+    base = ::Path[Iyi.unverbatim(File.expand_path(dir))]
+    relative =
+      if beside = source.relative_to?(base)
+        beside = beside.to_posix.to_s
+        beside.starts_with?(".") ? beside : "./#{beside}"
+      else
+        IyiPath.default_paths
+          .compact_map { |entry| Iyi.path_under?(source.to_s, Iyi.unverbatim(File.expand_path(entry))) }
+          .first?.try { |under| ::Path[under].to_posix.to_s } || source.to_posix.to_s
+      end
 
     String.build do |io|
       io << "# Written by `crystal tool bind`. Never called, and never edited:\n"

@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`fmt` takes `x /= y` and `x //= y` as the first line under a comment on
+  an `if`, `while`, `when`, `def` or `do` line.** The formatter tells the
+  lexer that a `/` starting a body is a regex, and a comment ending the line
+  above had already read the body's first token, so the word fell on the
+  token after it: `if b > 1 # c` / `a /= b` was "expecting keyword end, not
+  `IDENT, b`" and "there's a bug formatting". It is said only while the
+  body's first token is unread. `bench/verbs_exercise.sh` formats `/=` and
+  `//=` under commented `if` and `while` lines; the old compiler gave up on
+  both.
+
 - **`fmt` formats `.or(...)` and `.or_panic` written on the line under their
   value.** The formatter expected the `.` right after the value: `g(-1)` /
   `  .or(2)` was "expecting ., not `NEWLINE`" and "there's a bug

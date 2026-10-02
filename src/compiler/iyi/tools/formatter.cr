@@ -1464,7 +1464,12 @@ module Iyi
     end
 
     def format_nested(node, indent = @indent, write_end_line = true, write_indent = true)
-      slash_is_regex!
+      # The body's first token is read with a `/` taken as a regex - unless
+      # a comment ending the line above has had it read already, and the
+      # flag would fall on the token after it: under `if b > 1 # c`, `a /=
+      # b` lexed `/= b` as a regex and the formatter failed on "expecting
+      # keyword end, not `IDENT, b`".
+      slash_is_regex! unless @wrote_newline && !@token.type.newline? && !@token.type.space? && !@token.type.op_semicolon?
       if node.is_a?(Nop)
         skip_space_write_line
       else

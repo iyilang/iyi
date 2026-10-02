@@ -253,6 +253,26 @@ else
   echo "  every line ends CRLF, the new one too"
 fi
 
+step "a manifest with mixed line endings: each line is found, and keeps its own"
+# `init` writes LF and cmd's `echo require ... >> iyi.mod` appends CRLF. The
+# file was split on CRLF alone, so the LF lines were one piece and the
+# `require` in it was never found: get appended a second line, and tidy
+# said "removed" and removed nothing. (`grep -U`: a Windows grep reads a
+# line's CR away otherwise.)
+mkdir -p "$WORK/mixed" && cd "$WORK/mixed" || exit 1
+printf '# made by init\nmodule example.test/user/mixed\nrequire example.test/user/liba v1.1.0\r\n' > iyi.mod
+"$IYI" get example.test/user/liba@v1.0.0 > mixed.log 2>&1 || { fail "get on a mixed manifest failed"; cat mixed.log; }
+[ "$(grep -c 'example.test/user/liba' iyi.mod | tr -d ' ')" = "1" ] || fail "a mixed manifest gained a second liba line: $(cat iyi.mod)"
+grep -qU $'^require example.test/user/liba v1.0.0\r$' iyi.mod && ! grep -qU $'module example.test/user/mixed\r' iyi.mod ||
+  fail "the liba line did not move, or a line lost or gained its CR: $(od -c iyi.mod | tail -4)"
+printf 'module example.test/user/mixt\nrequire example.test/user/libb v1.0.0\r\n' > iyi.mod
+printf 'puts 1\n' > main.iyi
+"$IYI" mod tidy > mixed-tidy.log 2>&1 || { fail "tidy on a mixed manifest failed"; cat mixed-tidy.log; }
+[ -z "$(requires example.test/user/libb)" ] || fail "tidy said '$(cat mixed-tidy.log)' and left libb's line"
+"$IYI" mod tidy --check > mixed-tidy2.log 2>&1 || fail "a tidied mixed manifest was not clean: $(cat mixed-tidy2.log)"
+cd "$WORK/app" || exit 1
+[ "$status" -eq 0 ] && echo "  get moved the one CRLF line among LF ones, and tidy removed one for good"
+
 step "replace builds a required module from a directory"
 mkdir -p "$WORK/liba-local" "$WORK/rapp"
 printf 'module example.test/user/liba\n' > "$WORK/liba-local/iyi.mod"

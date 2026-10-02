@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **`iyi get` and `iyi mod tidy` find a `require` line in an `iyi.mod` that
+  mixes LF and CRLF.** `init` writes LF and cmd's `echo require ... >>
+  iyi.mod` appends CRLF; the file was split on CRLF alone, so the LF lines
+  were one piece and the `require` among them was never found. `get
+  example.test/user/liba@v1.0.0` appended a second liba line beside the
+  v1.1.0 one and said it had downgraded, and `mod tidy` said "removed
+  example.test/user/libb v1.0.0: nothing imports it" on every run while the
+  line stayed and `tidy --check` kept exiting 1. Each line keeps its own
+  ending now, and a new one takes the ending of the line before it.
+  `bench/packages_get.sh` moves a CRLF line among LF ones and tidies one
+  away; the old compiler added the second line and removed nothing.
+
 - **An `iyi.mod` saved with a byte order mark is read.** PowerShell 5.1's
   `Out-File -Encoding utf8` and older Notepad write one, and the manifest
   was refused as "`\uFEFFmodule` is not a directive" - which reads as

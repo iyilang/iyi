@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **The spacing warnings name `iyi fmt`, and `iyi fmt` does not print
+  them while it fixes them.** `def f(x : Int32): Int32` drew "Warning:
+  space required before colon in return type restriction (run `crystal
+  tool format` to fix this)" from `check`, and the same warning from
+  `iyi fmt` as it rewrote that very colon. The seven warnings say `run
+  `iyi fmt` to fix this` now, and the formatter does not report the
+  parser's warnings. `bench/verbs_exercise.sh` checks both; the old
+  compiler named `crystal tool format` and `fmt` printed the warning.
+
 - **A `module` header written after an `import` or code is told the
   header comes first.** Any header that was not the first expression was
   reported as a second one: `import app/lib` then `module app/main`, in

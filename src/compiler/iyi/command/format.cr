@@ -281,7 +281,7 @@ class Iyi::Command
 
     # This method is for mocking `Iyi.format` in test.
     private def format(filename, source)
-      Iyi.format(source, filename: filename, report_warnings: STDERR)
+      Iyi.format(source, filename: filename)
     end
 
     private def print_error(msg)

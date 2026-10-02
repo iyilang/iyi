@@ -544,6 +544,22 @@ fmt_gives "ends a literal where the parser does, at a comment after its \\" \
   $'x = "a" \\\n    # note\n    "b"\n' $'x = "a" \\\n    # note\n"b"\n'
 fmt_gives "sets traits and impls apart by a blank line, as classes are" \
   $'trait A\nend\nimpl A for B\nend\n' $'trait A\nend\n\nimpl A for B\nend\n'
+# The parser's spacing warning named `crystal tool format`, and `iyi fmt`
+# printed it while rewriting exactly that spacing.
+printf 'module colon\n\ndef f(x : Int32): Int32\n  x\nend\n\nputs f(1)\n' > colon.iyi
+cp colon.iyi colonfmt.iyi
+"$IYI" check colon.iyi > colon.out 2>&1
+"$IYI" fmt colonfmt.iyi > colonfmt.out 2>&1
+if ! grep -qF 'space required before colon in return type restriction (run `iyi fmt` to fix this)' colon.out ||
+  grep -qi crystal colon.out; then
+  echo "  a spacing warning from check does not name iyi fmt:"; sed -n '1,6p' colon.out
+  status=1
+elif grep -q 'Warning' colonfmt.out || ! grep -qF 'def f(x : Int32) : Int32' colonfmt.iyi; then
+  echo "  fmt on a spacing warning warned about it, or did not fix it:"; sed -n '1,6p' colonfmt.out
+  status=1
+else
+  echo "  a spacing warning from check says \`iyi fmt\`, and fmt fixes it without the warning"
+fi
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     # A module reached through an 8.3 short name, which only the file

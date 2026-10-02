@@ -1,8 +1,8 @@
 require "../syntax"
 
 module Iyi
-  def self.format(source, filename = nil, report_warnings : IO? = nil, flags : Array(String)? = nil)
-    Iyi::Formatter.format(source, filename: filename, report_warnings: report_warnings, flags: flags)
+  def self.format(source, filename = nil, flags : Array(String)? = nil)
+    Iyi::Formatter.format(source, filename: filename, flags: flags)
   end
 
   # iyi: *result*, the formatter's text for *source*, in the line endings
@@ -112,17 +112,15 @@ module Iyi
   end
 
   class Formatter < Visitor
-    def self.format(source, filename = nil, report_warnings : IO? = nil, flags : Array(String)? = nil)
+    # The parser's warnings are not reported: each one is a spacing the
+    # formatter is about to rewrite, and `iyi fmt` printed "space required
+    # before colon ... (run `crystal tool format` to fix this)" while fixing
+    # exactly that.
+    def self.format(source, filename = nil, flags : Array(String)? = nil)
       parser = Parser.new(source)
       parser.filename = filename
       parser.iyi_source_only = true
       nodes = parser.parse
-
-      # the formatter merely parses the same source again, it shouldn't
-      # introduce any new syntax warnings the parser cannot find
-      if report_warnings
-        parser.warnings.report(report_warnings)
-      end
 
       formatter = new(source, flags: flags)
       # iyi: the formatter re-lexes the source, and `!` is one token in a

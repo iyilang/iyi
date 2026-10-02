@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`vet -f json`, `csv` and `codecov` (and `tool unreachable`) name a
+  file the way a repository does, `app/helpers.iyi`, on every system.**
+  On Windows all three wrote `app\helpers.iyi` - `"app\\helpers.iyi"` in
+  JSON - which codecov's repository paths and a csv joined across machines
+  never match. The text format keeps the platform's separator.
+  `bench/verbs_exercise.sh` checks the three; the old compiler wrote a
+  backslash in each.
+
 - **What the daemon refuses ends with a remedy that can work.** A default
   socket path past the kernel's limit was told to "set TMPDIR to a
   shorter directory", and the default is `daemon.sock` in the cache

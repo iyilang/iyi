@@ -731,6 +731,22 @@ if [ "$marked_code" -eq 0 ] && cmp -s "$WORK/marked/typo.iyi" "$WORK/marked/typo
 else
   echo "  fix behind a byte order mark (exit $marked_code):"; sed 's/^/    /' "$WORK/marked.txt" | head -3; status=1
 fi
+# The formats a program reads name a file the way a repository does, on
+# every system. On Windows `vet -f json`, `csv` and `codecov` wrote
+# `app\helpers.iyi` (`app\\helpers.iyi` in JSON), which codecov's
+# repository paths and a csv joined across machines never match.
+mkdir -p "$WORK/vetdir/app"
+printf 'module app/helpers\n\npub def used : Int32\n  1\nend\n\npub def unused_h : Int32\n  2\nend\n' > "$WORK/vetdir/app/helpers.iyi"
+printf 'import app/helpers::{used}\n\nputs used\n' > "$WORK/vetdir/main.iyi"
+for vet_format in json csv codecov; do
+  (cd "$WORK/vetdir" && "$IYI" vet -f "$vet_format" main.iyi) > "$WORK/vet.$vet_format" 2>&1
+  if grep -qF 'app/helpers.iyi' "$WORK/vet.$vet_format" && ! grep -qF '\' "$WORK/vet.$vet_format"; then
+    echo "  vet -f $vet_format names app/helpers.iyi with /"
+  else
+    echo "  vet -f $vet_format: $(head -c 160 "$WORK/vet.$vet_format")"
+    status=1
+  fi
+done
 
 echo
 echo "== what a damaged artifact says"

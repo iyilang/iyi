@@ -59,7 +59,14 @@ module Iyi
         next unless print_tallies || count.zero?
 
         location = a_def.location.not_nil!
-        filename = ::Path[location.filename.as(String)].relative_to(current_dir).to_s
+        relative = ::Path[location.filename.as(String)].relative_to(current_dir)
+        # iyi: the formats a program reads name a file the way a repository
+        # does, `app/helpers.iyi`, on every system: codecov keys coverage by
+        # the repository's path, and json and csv are compared and joined
+        # across machines. On Windows all three said `app\helpers.iyi`
+        # (`app\\helpers.iyi` in JSON), which no such path matches. The text
+        # a person reads keeps the platform's spelling, as a diagnostic does.
+        filename = format.in?("json", "csv", "codecov") ? relative.to_posix.to_s : relative.to_s
         location = Location.new(filename, location.line_number, location.column_number)
         yield a_def, location, count
       end

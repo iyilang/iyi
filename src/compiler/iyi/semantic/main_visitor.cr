@@ -715,29 +715,52 @@ module Iyi
       ivar
     end
 
+    # iyi: the statement being typed, as {list, index, node}, for a macro
+    # there whose expansion writes a `defer` (`iyi_splice_macro_defers`).
+    @iyi_statement : {Expressions, Int32, ASTNode}? = nil
+    # The statement-macro expansions being typed, as {list, index,
+    # expansion}: the expansion stands at list[index].
+    @iyi_expansions : Array({Expressions, Int32, Expressions})? = nil
+
     def visit(node : Expressions)
-      exp_count = node.expressions.size
+      # iyi: a `defer` a macro wrote, in an expansion that does not stand
+      # for a statement of a list (`iyi_splice_macro_defers`): an argument,
+      # say. What it covers is the rest of the expansion, which is a scope
+      # of its own there, as a `begin` is.
+      if node.expressions.any?(Defer)
+        node.expressions = Normalizer.new(@program).apply_defers(node.expressions)
+      end
       # The probes stand at the front of the program's own list, and only
       # there is what they found raised: a probe's own body is an
       # `Expressions` too, and raising there put the first probe's error
       # in the second probe's place.
       probed = false
-      node.expressions.each_with_index do |exp, i|
+      # The list can end early: a macro statement whose `defer` takes the
+      # rest of it into its expansion.
+      i = 0
+      while i < node.expressions.size
+        exp = node.expressions[i]
         if exp.is_a?(If) && exp.iyi_definition_probe?
           visit_definition_probe(exp)
           probed = true
+          i += 1
           next
         end
         if probed
           forget_definition_probe_vars
           raise_definition_errors
         end
-        if i == exp_count - 1
+        exp = iyi_expanded_with_defers(node, i, exp) || exp
+        statement, @iyi_statement = @iyi_statement, {node, i, exp}
+        if i == node.expressions.size - 1
           exp.accept self
           node.bind_to exp
         else
           ignoring_type_filters { exp.accept self }
+          node.bind_to node.expressions[i] if i == node.expressions.size - 1
         end
+        @iyi_statement = statement
+        i += 1
       end
       if probed
         forget_definition_probe_vars
@@ -749,6 +772,76 @@ module Iyi
       end
 
       false
+    end
+
+    # iyi: a macro's expansion, typed where it stands. A macro that is a
+    # statement of a list stands for that statement: its expansion takes
+    # the statement's place when a `defer` in it needs the rest of the list
+    # (`iyi_splice_macro_defers`), and a macro it expands to in turn is
+    # that statement too.
+    def expand_macro(the_macro, node, mode = nil, *, visibility : Visibility, accept = true, &)
+      generated = super(the_macro, node, mode, visibility: visibility, accept: false) { yield }
+      return generated unless accept
+      statement = @iyi_statement
+      if statement && statement[2].same?(node)
+        list, index, _ = statement
+        if generated.is_a?(Expressions)
+          iyi_splice_macro_defers(list, index, generated)
+          expansions = @iyi_expansions ||= [] of {Expressions, Int32, Expressions}
+          expansions.push({list, index, generated})
+          generated.accept self
+          expansions.pop
+        else
+          @iyi_statement = {list, index, generated}
+          generated.accept self
+        end
+      else
+        generated.accept self
+      end
+      generated
+    end
+
+    # A `defer` a macro writes covers the rest of the scope the macro
+    # stands in, as the same line written there does (SPEC.md III.1.4).
+    # The normalizer leaves it standing in the expansion
+    # (`Normalizer#macro_expansion`); here the rest of the list moves into
+    # the expansion, the expansion takes the macro's place, and the defers
+    # are lowered over both. Lowered with the expansion alone, it covered
+    # nothing after the macro: `{% if true %} defer puts "a" {% end %}`
+    # printed "a" before the body that followed it.
+    private def iyi_splice_macro_defers(list : Expressions, index : Int32, expansion : Expressions) : Nil
+      return unless expansion.expressions.any?(Defer)
+      iyi_pull_rest(list)
+      rest = list.expressions[(index + 1)..]
+      list.expressions.pop(rest.size)
+      list.expressions[index] = expansion
+      expansion.expressions = Normalizer.new(@program).apply_defers(expansion.expressions + rest)
+    end
+
+    # When *list* is itself a macro statement's expansion, the rest of the
+    # list that statement stands in is *list*'s rest too.
+    private def iyi_pull_rest(list : Expressions) : Nil
+      frame = @iyi_expansions.try &.find { |entry| entry[2].same?(list) }
+      return unless frame
+      parent, index, _ = frame
+      iyi_pull_rest(parent)
+      rest = parent.expressions[(index + 1)..]
+      parent.expressions.pop(rest.size)
+      parent.expressions[index] = list
+      list.expressions.concat(rest)
+    end
+
+    # A macro statement the top-level pass already expanded, whose
+    # expansion writes a `defer`: the expansion takes the statement's
+    # place, and the rest of the list.
+    private def iyi_expanded_with_defers(list : Expressions, index : Int32, exp : ASTNode) : ASTNode?
+      expanded =
+        case exp
+        when Call, MacroIf, MacroFor, MacroExpression then exp.expanded
+        end
+      return nil unless expanded.is_a?(Expressions) && expanded.expressions.any?(Defer)
+      iyi_splice_macro_defers(list, index, expanded)
+      expanded
     end
 
     # iyi: one definition-site probe, typed on its own (R-2c). An error is

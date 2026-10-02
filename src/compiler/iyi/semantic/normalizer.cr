@@ -6,6 +6,7 @@ module Iyi
     def normalize(node, inside_exp = false, current_def = nil)
       normalizer = Normalizer.new(self)
       normalizer.current_def = current_def
+      normalizer.macro_expansion = node if Normalizer.macro_expansion?(node)
       node.transform(normalizer)
     end
   end
@@ -18,7 +19,24 @@ module Iyi
     # to their version with arguments copied from the current method.
     property current_def : Def?
 
+    # iyi: the top of a macro's expansion, when that is what is being
+    # normalized. Its statements are the enclosing scope's, not a scope of
+    # their own, so a `defer` among them is left standing for the main
+    # visitor to lower over the rest of that scope
+    # (`MainVisitor#iyi_splice_macro_defers`). Lowered here, it covered
+    # nothing: `{% if true %} defer puts "a" {% end %}` printed "a" before
+    # the body after it.
+    property macro_expansion : ASTNode?
+
     @dead_code = false
+
+    # A macro's expansion is parsed from a `VirtualFile`, and it is the
+    # only source that is.
+    def self.macro_expansion?(node : ASTNode) : Bool
+      location = node.location
+      location ||= node.expressions.first?.try(&.location) if node.is_a?(Expressions)
+      location.try(&.filename).is_a?(VirtualFile)
+    end
 
     def initialize(@program)
     end
@@ -60,7 +78,7 @@ module Iyi
         end
         break if @dead_code
       end
-      exps = apply_defers(exps)
+      exps = apply_defers(exps) unless node.same?(@macro_expansion)
       case exps.size
       when 0
         Nop.new
@@ -179,6 +197,11 @@ module Iyi
     # say — has nothing after it to defer past, so all that is left of it is
     # the cleanup itself, still guarded so that it runs on an unwind.
     def transform(node : Defer)
+      if node.same?(@macro_expansion)
+        # A macro's whole expansion: left standing, as in a list of them.
+        node.exp = node.exp.transform(self)
+        return Expressions.new([node] of ASTNode).at(node)
+      end
       ExceptionHandler.new(Nop.new, ensure: node.exp.transform(self)).at(node).tap(&.iyi_defer=(true))
     end
 

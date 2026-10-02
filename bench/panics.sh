@@ -354,6 +354,64 @@ run "$work/leave_defer.iyi"
 echo "$out" | grep -q "\`return\` can't leave a \`defer\`" || fail "\`defer return\` was refused, but not as leaving the defer: $out"
 step "a return out of a defer is refused as leaving it"
 
+# ── 6d. a `defer` a macro writes covers the rest of the scope the macro
+#      stands in, as the same line written there does. Lowered with the
+#      expansion alone, it had nothing after it and ran at once, before
+#      the code it guards ("if cleanup" before "if body") ─────────────────
+cat > "$work/macro_defer.iyi" <<'EOF'
+module macro_defer
+
+macro cleanup(msg)
+  defer puts {{msg}}
+end
+
+def written_by_if : Nil
+  {% if true %}
+    defer puts "if cleanup"
+  {% end %}
+  puts "if body"
+end
+
+def written_by_for : Nil
+  {% for n in [1, 2] %}
+    defer puts "for cleanup {{n}}"
+  {% end %}
+  puts "for body"
+end
+
+def written_by_call(early : Bool) : Int32
+  defer puts "written cleanup"
+  cleanup "call cleanup"
+  return 3 if early
+  puts "call body"
+  4
+end
+
+def dies : Int32
+  cleanup "panic-path cleanup"
+  raise "after the macro's defer" if true
+  0
+end
+
+written_by_if
+written_by_for
+puts written_by_call(true)
+puts written_by_call(false)
+group do |g|
+  t = g.spawn { dies }
+  puts(t.value.is_a?(Panicked) ? "panicked" : "did not panic")
+end
+EOF
+set +e
+out=$("$IYI" run "$work/macro_defer.iyi" 2>"$work/macro_defer.err")
+code=$?
+set -e
+[ "$code" = 0 ] || fail "macro-defer exit was $code, wanted 0: $out $(cat "$work/macro_defer.err")"
+expected=$(printf 'if body\nif cleanup\nfor body\nfor cleanup 2\nfor cleanup 1\ncall cleanup\nwritten cleanup\n3\ncall body\ncall cleanup\nwritten cleanup\n4\npanic-path cleanup\npanicked')
+[ "$out" = "$expected" ] || fail "a macro's defer did not cover the rest of its scope:
+$out"
+step "a defer a macro writes covers the rest of the scope it stands in"
+
 # ── 7. an arithmetic overflow is a panic like any other: the trap
 #      routes through the registry, so a task's overflow dies at the
 #      task boundary instead of taking the process bare-handed ────────

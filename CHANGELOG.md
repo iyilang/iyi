@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **A `defer` a macro writes covers the rest of the scope the macro
+  stands in.** The expansion was normalized as a list of its own, so its
+  `defer` had nothing after it and ran at once: `{% if true %} defer
+  puts "a cleanup" {% end %}` printed the cleanup before the body, a
+  `{% for %}` printed its two cleanups before it, and a macro `cleanup`
+  expanding to a `defer` did the same. The expansion's `defer` is left
+  standing now, and when the macro is a statement of a list the rest of
+  that list moves into the expansion before the `defer`s are lowered,
+  through macros that expand to macros too; a macro used as a value keeps
+  its expansion as a scope of its own, as a `begin` is.
+  `bench/panics.sh` step 6d checks `{% if %}`, `{% for %}`, a macro call
+  beside a written `defer` and a `return`, and the panic path; the old
+  compiler printed every cleanup before its body.
+
 - **Checking N `defer`s in one scope takes time near-linear in N.** One
   scope's `defer`s nest N handlers, and each assignment a cleanup made
   was bound into every handler around it, a merge over a list that grew

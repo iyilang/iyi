@@ -1434,6 +1434,14 @@ class Iyi::CodeGenVisitor
   # LLVM's verifier refuse a Windows build of any program whose imported
   # module raises — "Referencing global in another module!", on the default
   # multi-module path, where `--single-module` was fine.
+  #
+  # And defined in the main module's *context*, which is not the one being
+  # emitted into when a module's unit asks first. That happens when `raise`
+  # is copied into a unit before `_main` has raised anything: `--iyi-keep
+  # String` copies it into String's, and the main module's `_TI1PEAX` was
+  # then typed in String's context, so every `_CxxThrowException` call in
+  # `_main` failed the verifier ("Call parameter type does not match
+  # function signature!") and the build ended on "you've found a bug".
   def void_ptr_type_descriptor(mod = @llvm_mod)
     void_ptr_type_descriptor_name = "\u{1}??_R0PEAX@8"
 
@@ -1448,7 +1456,7 @@ class Iyi::CodeGenVisitor
     ])
 
     unless mod == @main_mod
-      void_ptr_type_descriptor(@main_mod)
+      in_main { void_ptr_type_descriptor(@main_mod) }
       return external_constant(type_descriptor, void_ptr_type_descriptor_name, mod)
     end
 
@@ -1476,7 +1484,7 @@ class Iyi::CodeGenVisitor
     eh_throwinfo = llvm_context.struct([llvm_context.int32, llvm_context.int32, llvm_context.int32, llvm_context.int32])
 
     unless mod == @main_mod
-      void_ptr_throwinfo(@main_mod)
+      in_main { void_ptr_throwinfo(@main_mod) }
       return external_constant(eh_throwinfo, void_ptr_throwinfo_name, mod)
     end
 
@@ -1520,13 +1528,21 @@ class Iyi::CodeGenVisitor
     end
   end
 
+  # A builder of its own, because nothing here is emitted: every operand is
+  # a constant and the builder only folds them. The main module's builder
+  # can have ended its block when a unit asks for these globals, and
+  # `IyiLLVMBuilder` answers anything asked after that with a nil value -
+  # an initializer field of the wrong type, which the verifier refused
+  # ("Global variable initializer type does not match global variable
+  # type!") for `_CT??_R0PEAX@88` and `_TI1PEAX` under `--iyi-keep String`.
   def sub_image_base(value, mod = @llvm_mod)
     image_base = external_constant(llvm_context.int8, "__ImageBase", mod)
 
-    @builder.trunc(
-      @builder.sub(
-        @builder.ptr2int(value, llvm_context.int64),
-        @builder.ptr2int(image_base, llvm_context.int64)),
+    folder = llvm_context.new_builder
+    folder.trunc(
+      folder.sub(
+        folder.ptr2int(value, llvm_context.int64),
+        folder.ptr2int(image_base, llvm_context.int64)),
       llvm_context.int32)
   end
 end

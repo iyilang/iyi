@@ -830,6 +830,21 @@ if [ -f out-source.txt ] && [ -f out-artifact.txt ]; then
   fi
 fi
 
+echo "== a fill build that keeps String"
+# Keeping String copies `raise` into String's unit before `_main` raises
+# anything, and on MSVC the main module's exception globals were then
+# made in that unit's LLVM context: the verifier refused every
+# `_CxxThrowException` call and the build ended on "you've found a bug".
+printf 'puts "x"\n' > "$WORK/keepstr.cr"
+if (cd "$WORK" && "$IYI" build --crystal --iyi-keep String -o keepstr keepstr.cr > keepstr.log 2>&1) &&
+   [ "$(cd "$WORK" && ./keepstr | tr -d '\r')" = "x" ]; then
+  echo "  it builds, and the program prints x"
+else
+  echo "  it did not build:"
+  grep -v '^ *from ' "$WORK/keepstr.log" | head -4 | sed 's/^/    /'
+  status=1
+fi
+
 # The boundary goes stale when the checkout it was written from changes.
 #
 # It did not, and that is what this section is for. A module compiled from

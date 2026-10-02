@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **A fill build that keeps `String` builds on Windows.** `iyi build
+  --crystal --iyi-keep String` of `puts "x"` failed LLVM's module verifier
+  with `Call parameter type does not match function signature!` about every
+  `call void @_CxxThrowException(ptr %exception1, ptr @_TI1PEAX)` and ended
+  on "you've found a bug in the iyi compiler". Keeping String copies `raise`
+  into String's unit before `_main` has raised anything, and the main
+  module's MSVC exception globals were then built in that unit's LLVM
+  context, their image-base offsets by a builder whose block had ended. They
+  are built in the main module's context now, the offsets folded by a
+  builder of their own, and the program prints `x`.
+  `bench/bind_roundtrip.sh` builds and runs it; the old compiler failed the
+  verifier.
+
 - **`iyi init`'s `cd` line is one word to the shell for any directory
   name.** It was quoted only for a space: `iyi init example.com/me/semi
   'x;y'` printed `cd x;y`, which runs `cd x` and then `y`, and `'d$x'`

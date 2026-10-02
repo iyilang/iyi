@@ -1163,6 +1163,7 @@ end
   # With `TerminateProcess`, 0 in 1,150.
   def __iyi_exit(status : Int32) : NoReturn
     IyiConsole.restore_vt
+    __iyi_hold_runtime_for_exit
     LibC.TerminateProcess(LibC.GetCurrentProcess, status)
     # Not reached; the `NoReturn` this def promises is `ExitProcess`'s.
     LibC.ExitProcess(status)
@@ -8865,6 +8866,28 @@ require "./file"
     bits = __iyi_win_signed_float_bits(a, 23, 127, 255, 0x80000000_u64)
     # Little-endian: the low half of the word is the single.
     pointerof(bits).as(Pointer(Float32)).value
+  end
+
+  # The end of the program takes the runtime lock and keeps it, so no
+  # collection is stopping this thread while it is inside
+  # `TerminateProcess`: a stop takes the lock before it suspends anyone.
+  # A collecting thread that suspended the main thread in there and asked
+  # for its registers waited on a thread the kernel was ending, which
+  # waited on it: the program printed its last line and never ended, once
+  # in 200 runs of `thread_exercise`'s end-under-collections step on a
+  # runner, until its threads were resumed from outside. Bounded, so a
+  # panic raised by the lock's own holder still ends the program.
+  def __iyi_hold_runtime_for_exit : Nil
+    tries = 0
+    while tries < 10_000_000 && !IyiRuntimeLock.try_lock
+      {% if flag?(:x86_64) && !flag?(:gc_none) && !flag?(:gc_boehm) %}
+        IyiThread.park_if_requested
+      {% end %}
+      {% if flag?(:x86_64) %}
+        asm("pause" :::: "volatile")
+      {% end %}
+      tries = tries + 1
+    end
   end
 {% end %}
 # ── end of the memory layer ─────────────────────────────────────────────

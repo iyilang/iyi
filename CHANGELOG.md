@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **A Windows program ends while another thread collects.** A thread
+  running collections could suspend the main thread inside
+  `TerminateProcess` and ask for its registers, and each then waited on
+  the other: the program printed its last line and never ended, once in
+  200 runs of `thread_exercise`'s end-under-collections step on a CI
+  runner. The end of the program now takes the runtime lock first, which
+  every stop holds while it suspends anyone.
+
 - **Three macro answers.** `"99999999999".to_i == x` stopped the
   compile with "Invalid Int32" since integer literals compare exactly
   (above), and so did `uniq`, `includes?` and a hash lookup on such a
@@ -16846,7 +16854,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,806-line library and nothing else. Every other
+  written against iyi's own 19,829-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -185,9 +185,19 @@ prove_fails "is_heap_ptr answers false for every pointer" never_heap "a chunk's 
 prove_fails "free does nothing" free_noop "a freed chunk is not" \
   's/    IyiHeap.free(pointer)/    pointer/'
 # Three threads allocate beside two seconds of `stats`: walked without the
-# lock, the walk died of a memory fault in 20 runs of 20 here.
-prove_fails "stats walks without the lock" stats_unlocked "memory fault" \
-  '/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d'
+# lock, the walk died of a memory fault in 20 runs of 20 on Windows, where a
+# released arena is unmapped as the scavenge ends. A Linux runner's walk
+# without the lock passed: the race is the platform's to arrange, so the
+# proof runs where it was measured.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails "stats walks without the lock" stats_unlocked "memory fault" \
+      '/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d'
+    ;;
+  *)
+    echo "  stats walks without the lock: not proven here, the race was measured on Windows"
+    ;;
+esac
 
 echo
 if [ "$status" -eq 0 ]; then

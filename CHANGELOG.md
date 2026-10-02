@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A column in a macro's expanded text is right after a `{{x}}` that starts
+  a line.** The parser's look for a `.` after the line before reads into
+  that line's interpolation, and a lookahead that failed put back the
+  position but not the location pragmas it had fired, so the text was lexed
+  again with the pushed location still counting: with `a = 1` and then
+  `{{x}}.nope` on two indented lines of a macro, `nope` was at column 8 of
+  the expanded text, not 5, and the caret stood under its `e` (with tab
+  indents, two columns right). The lexer reads the pragmas through a cursor
+  now, and a failed lookahead rewinds it with the location they had set.
+  `bench/verbs_exercise.sh` checks the caret; the old compiler put it three
+  columns right.
+
 - **An error inside a macro's expansion is placed at the call, carries no
   edit, and `iyi fix` leaves the file alone.** A frame in an expansion kept
   the line and column it had in the expanded text under the calling file's

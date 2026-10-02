@@ -1420,6 +1420,21 @@ else
   "$IYI" mod context user.iyi --json | sed -n '1,2p'
   status=1
 fi
+# The caret in a macro's expanded text, under a `{{x}}` that starts a
+# line. The parser's look for a `.` after `a = 1` reads into the next
+# line's interpolation, and a lookahead that failed put back the position
+# and not the location pragmas it had fired (the lexer's location_pragma
+# cursor is rewound now): `nope` in `  {{x}}.nope` was at column 8, and
+# the caret stood under its `e`.
+printf 'module interp\n\nmacro m(x)\n  a = 1\n  {{x}}.nope\nend\nm(1)\n' > interp.iyi
+"$IYI" check interp.iyi > interp.out 2>&1
+if [ "$(grep -A1 '^ > 2 | 1.nope$' interp.out | sed -n '2p')" = "$(printf '%9s^---' '')" ]; then
+  echo "  the caret after an interpolation that starts a line of macro text is under the column"
+else
+  echo "  the caret after an interpolation that starts a line of macro text:"
+  sed -n '1,20p' interp.out | cat -A
+  status=1
+fi
 # The caret under a line with tabs inside it: every character before the
 # column was counted as one space, so two tabs that pushed `nope` to
 # column 34 left the caret at 17. The caret line carries the shown line's

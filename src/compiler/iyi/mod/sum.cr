@@ -89,15 +89,20 @@ module Iyi::Mod
     end
 
     # Whether *dir* is inside the module cache, asked the way the file
-    # system compares names (`Iyi.path_key`). A string prefix was case- and
+    # system names files (`Iyi.file_key`). A string prefix was case- and
     # separator-sensitive: a check run from the checkout entered as `c:\`,
     # as editors and language clients spell the drive, was not "inside"
     # `C:\...\cache\mod`, so it wrote an `iyi.sum` into the cached package,
     # and every project using that version was refused as tampered with
-    # until the cache was cleared.
+    # until the cache was cleared. Folding the case was not the whole
+    # answer: on a CI runner `IYI_CACHE_DIR` is spelled `C:\Users\RUNNER~1\`
+    # the way `mktemp` hands it out, and the checkout's directory is
+    # `C:\Users\runneradmin\` the way the shell enters it, so the same write
+    # happened with every letter folded. Only the file system knows an 8.3
+    # name's long one.
     private def self.in_cache?(dir : String) : Bool
-      cache = Iyi.path_key(File.expand_path(Iyi::CacheDir.instance.join("mod")))
-      !Iyi.path_under?(Iyi.path_key(File.expand_path(dir)), cache).nil?
+      cache = Iyi.file_key(File.expand_path(Iyi::CacheDir.instance.join("mod")))
+      !Iyi.path_under?(Iyi.file_key(File.expand_path(dir)), cache).nil?
     end
 
     # The checkout's content, as one line-friendly token: files only,

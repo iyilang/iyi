@@ -174,17 +174,32 @@ grep -q "liba 1.1.0" run1.log || fail "the program ran liba '$(cat run1.log)', n
 # A build inside a cached checkout verifies and never writes there. The
 # test was a string prefix, so on Windows a cache spelled in another case
 # - a drive letter an editor lowercased - was not "inside", iyi.sum was
-# written into the package, and every project using it was refused. Now
-# `Sum.in_cache?` compares the two the way the file system does.
+# written into the package, and every project using it was refused. Then
+# it folded the case and still told an 8.3 short name from its long one:
+# a CI runner's mktemp spells the cache `C:/Users/RUNNER~1/...`, the shell
+# enters the checkout as `C:\Users\runneradmin\...`, and the file was
+# written. Now `Sum.in_cache?` compares the two the way the file system
+# names them. A file written anyway is taken back out, or libb is "not
+# what it was" in every step after this one.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     checkout="$IYI_CACHE_DIR/mod/example.test/user/libb@v1.0.0"
-    (cd "$checkout" && IYI_CACHE_DIR="$(echo "$IYI_CACHE_DIR" | tr '[:lower:]' '[:upper:]')" "$IYI" check libb.iyi) > cachecase.log 2>&1 ||
-      fail "check in the cached libb failed: $(cat cachecase.log)"
-    if [ -e "$checkout/iyi.sum" ]; then
-      fail "a check with the cache spelled in upper case wrote iyi.sum into the cached libb"
+    cache_spelled() { # cache_spelled <how> <IYI_CACHE_DIR>
+      (cd "$checkout" && IYI_CACHE_DIR="$2" "$IYI" check libb.iyi) > cachecase.log 2>&1 ||
+        fail "check in the cached libb, IYI_CACHE_DIR in $1, failed: $(cat cachecase.log)"
+      if [ -e "$checkout/iyi.sum" ]; then
+        fail "a check with the cache spelled in $1 wrote iyi.sum into the cached libb"
+        rm -f "$checkout/iyi.sum"
+      else
+        echo "  a check in the cached libb, IYI_CACHE_DIR in $1: no iyi.sum written there"
+      fi
+    }
+    cache_spelled "upper case" "$(echo "$IYI_CACHE_DIR" | tr '[:lower:]' '[:upper:]')"
+    short="$(cygpath -m "$(cygpath -d "$IYI_CACHE_DIR" 2>/dev/null)" 2>/dev/null)"
+    if [ -n "$short" ] && [ "$short" != "$IYI_CACHE_DIR" ]; then
+      cache_spelled "its 8.3 short form" "$short"
     else
-      echo "  a check in the cached libb, IYI_CACHE_DIR in upper case: no iyi.sum written there"
+      echo "  (this volume gives $IYI_CACHE_DIR no 8.3 short form; that spelling is not asked)"
     fi
     ;;
 esac

@@ -404,19 +404,25 @@ echo "  $caught of five runs lost a list or died"
 # allocator's word in between, so a thread that ran on into `take` was
 # stopped inside it, which the deferral exists to prevent: the program
 # above died of a memory fault once in the 54 runs CI made of it. A copy
-# of the runtime makes the run-on certain - every suspend taken back for
-# 20 us and asked again just before the context is read - and every list
-# holds; with the word read before the context, the same run-on kills it.
+# of the runtime makes the run-on certain - every suspend taken back and
+# asked again, for up to 2 ms, until the context is read with the thread
+# inside the allocator - and every list holds; with the word read before
+# the context, the same run-on loses a list or dies: 18 runs in 20 on
+# twelve cores, 3 in 20 held to four, so the proof runs up to sixty.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     runon='function runon(pad) {
-      print pad "LibC.ResumeThread(handle)"
-      print pad "until_ns = __iyi_monotonic_ns + 20000_i64"
+      print pad "until_ns = __iyi_monotonic_ns + 2000000_i64"
       print pad "while __iyi_monotonic_ns < until_ns"
+      print pad "  LibC.ResumeThread(handle)"
+      print pad "  while __iyi_monotonic_ns < until_ns && !IyiHeap.cache_inside?(IyiHeap.read64(cursor + IYI_TL_CACHE))"
+      print pad "  end"
+      print pad "  LibC.SuspendThread(handle)"
+      print pad "  IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)"
+      print pad "  break if IyiHeap.cache_inside?(IyiHeap.read64(cursor + IYI_TL_CACHE))"
       print pad "end"
-      print pad "LibC.SuspendThread(handle)"
     }'
-    step "a stop whose suspend lands 20 us late keeps every list"
+    step "a stop whose suspend lands inside the allocator keeps every list"
     mkdir -p late/iyi
     cp "$REPO"/src/iyi/*.iyi late/iyi/
     awk "$runon"' /^            sp = IyiRoots\.capture_thread_registers\(handle, cursor \+ IYI_TL_SPILL\)$/ { runon("            "); found = 1 } { print } END { if (!found) exit 3 }' \
@@ -434,7 +440,7 @@ case "$(uname -s)" in
       run=$((run + 1))
     done
     echo "  five runs, no list lost"
-    step "failure proof: the allocator's word read before the context, under the same late suspends"
+    step "failure proof: the allocator's word read before the context, under the same suspends"
     mkdir -p early/iyi
     cp "$REPO"/src/iyi/*.iyi early/iyi/
     awk "$runon"' /^            sp = IyiRoots\.capture_thread_registers\(handle, cursor \+ IYI_TL_SPILL\)$/ { held = $0; found = 1; next }
@@ -446,15 +452,15 @@ case "$(uname -s)" in
     fi
     caught=0
     run=1
-    while [ "$run" -le 5 ]; do
+    while [ "$caught" -eq 0 ] && [ "$run" -le 60 ]; do
       timeout -k 5 120 ./early-run > early.txt 2>&1
-      grep -q '^wrong=0$' early.txt || caught=$((caught + 1))
+      grep -q '^wrong=0$' early.txt || caught=$run
       run=$((run + 1))
     done
     if [ "$caught" -eq 0 ]; then
-      echo "five runs reading the allocator's word before the context all kept their lists"; exit 1
+      echo "sixty runs reading the allocator's word before the context all kept their lists"; exit 1
     fi
-    echo "  $caught of five runs lost a list or died"
+    printf '  run %s of up to sixty: "%s"\n' "$caught" "$(grep -m1 -E '^wrong=|memory fault' early.txt | cut -d. -f1)"
     ;;
 esac
 

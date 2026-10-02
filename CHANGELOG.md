@@ -142,6 +142,21 @@
 
 ### Fixed
 
+- **A collection on Windows never stops a thread inside the allocator.**
+  A stop read the thread's allocator word right after `SuspendThread`,
+  which only asks for the suspend: the thread runs on until
+  `GetThreadContext` waits for it, and one that ran on into `take` was
+  stopped inside it - the one place the stop exists to keep out of, a
+  list's head held in a register while the pause drops the list
+  [INFERENCE]. `bench/thread_exercise.sh`'s switching program died of a
+  memory fault in 1 of the 54 runs CI made of it, and in 15 of 20 here
+  with that run-on held at 20 us. The word is read after the context now,
+  so a thread found inside is let go and parks at the allocator's exit,
+  as it does on Linux and darwin. `bench/thread_exercise.sh` lands every
+  suspend inside the allocator and keeps every list in five runs; the old
+  order under the same suspends lost a list or died within sixty runs (18
+  of 20 on twelve cores, 3 of 20 held to four).
+
 - **"Did you mean" names only what the call can reach, and the refusal of
   a module's own unexported name says why it is refused there.** The
   suggestions ignored visibility: `App::Lib.helpr` was told "Did you mean

@@ -1205,7 +1205,10 @@ module Iyi
     io.puts "library nobody calls compiles to nothing. The keep file above is what"
     io.puts "calls it. Two commands finish the boundary:"
     io.puts
-    io.puts "  crystal build --iyi-keep #{root} --emit-bind #{dir} -o keepbin #{keep_path}"
+    # This binary and the flag `iyi bind` runs it with: the line said
+    # `crystal build --iyi-keep`, and the `crystal` on a PATH is Crystal's,
+    # which answers `Error: Invalid option: --iyi-keep`.
+    io.puts "  #{Command.program_name} build --crystal --iyi-keep #{root} --emit-bind #{dir} -o keepbin #{keep_path}"
     io.puts "  iyi build --crystal --use-iyimod #{dir} -o app app.iyi"
     io.puts
     io.puts "An *ordinary* build on the first line, not `--emit obj`. Codegen"

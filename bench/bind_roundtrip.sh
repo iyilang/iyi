@@ -944,6 +944,19 @@ else
   status=1
 fi
 
+echo "== the fill command the bind log names"
+# `tool bind` told a person to run `crystal build --iyi-keep`, which
+# Crystal answers with `Invalid option: --iyi-keep`; it names this binary
+# and the flags `iyi bind` runs it with.
+if grep -q "^  iyi build --crystal --iyi-keep Radix " "$NEAR/mods/radix.bind.log" &&
+   ! grep -q "crystal build --iyi-keep" "$NEAR/mods/radix.bind.log"; then
+  echo "  it is a command this binary takes"
+else
+  echo "  it is not this binary's:"
+  grep -- '--iyi-keep' "$NEAR/mods/radix.bind.log" | sed 's/^/    /'
+  status=1
+fi
+
 echo "== a method whose name iyi cannot write"
 # `!` is not part of a name here (SPEC.md III.1.7), so a shard's `sort!` is
 # carried by the boundary — a travelling body that calls it has to typecheck

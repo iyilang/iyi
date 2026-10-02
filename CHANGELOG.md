@@ -142,6 +142,13 @@
 
 ### Fixed
 
+- **The fill command `tool bind` prints is one this binary takes.** It said
+  `crystal build --iyi-keep Greet --emit-bind DIR -o keepbin KEEP`, and the
+  `crystal` on a PATH is Crystal's, which answers `Error: Invalid option:
+  --iyi-keep`. It says `iyi build --crystal --iyi-keep ...` now, the command
+  `iyi bind` itself runs. `bench/bind_roundtrip.sh` reads it from a bind
+  log; the old compiler wrote `crystal build`.
+
 - **A shard's module function whose block is typed crosses `iyi bind` with
   its body.** `def self.each_up(n : Int32, & : Int32 -> Nil)` crossed as a
   declaration alone: a typed block is ready, so nothing asked for the body,

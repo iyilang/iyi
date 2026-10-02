@@ -309,14 +309,15 @@ module Iyi
       name_location = node.name_location
       name_size = node.name_size
 
+      shown = replace_leading_tabs_with_spaces(line.chomp)
       io << "    "
-      io << replace_leading_tabs_with_spaces(line.chomp)
+      io << shown
       io.puts
 
       return unless name_location
 
       io << "    "
-      io << (" " * (name_location.column_number - 1))
+      caret_padding(io, shown[0, (name_location.column_number - 1).clamp(0, shown.size)])
       with_color.green.bold.surround(io) do
         io << '^'
         if name_size > 0

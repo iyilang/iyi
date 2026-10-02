@@ -2864,7 +2864,18 @@ module Iyi
           else
             # If the type is not virtual then we know for sure that the type
             # can't be instantiated, and we can produce a compile-time error.
-            node.raise "can't instantiate abstract #{instance_type.type_desc} #{instance_type}"
+            #
+            # iyi: at the call that asked for the instance. The primitive has
+            # no location, and the `allocate` a generated `new` makes stands
+            # where that `new` was made - `class Reference` in the prelude for
+            # a class with no `initialize` - so `A.new` was reported at
+            # primitives.iyi:58 and `-f json`'s deepest frame had no file and
+            # no line. Past a generated `new`, the call is the one to it.
+            blame = call
+            if blame && (outer = blame.parent_visitor?) && outer.typed_def?.try(&.new?) && (asked = outer.call)
+              blame = asked
+            end
+            (blame || node).raise "can't instantiate abstract #{instance_type.type_desc} #{instance_type}"
           end
         end
 

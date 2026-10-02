@@ -1464,6 +1464,34 @@ else
   sed -n '1,8p' tabbed.out | cat -A
   status=1
 fi
+# And a wide character, which a terminal draws in two cells: the caret
+# counted each as one, so seven CJK characters in front of `nope` left it
+# seven cells short. It is padded by the cells each character takes now
+# (`caret_padding`).
+printf 'module wide\n\ns = "\346\227\245\346\234\254\350\252\236\343\203\206\343\202\255\343\202\271\343\203\210"; puts s.nope\n' > wide.iyi
+"$IYI" check wide.iyi > wide.out 2>&1
+caret_line="$(grep -A1 '^ 3 | ' wide.out | sed -n '2p')"
+if [ "$caret_line" = "$(printf '%34s^---' '')" ]; then
+  echo "  the caret after wide characters is under the column a terminal draws"
+else
+  echo "  the caret after wide characters is not under the column:"
+  sed -n '1,8p' wide.out | cat -A
+  status=1
+fi
+# And an abstract class instantiated, which was reported at the prelude's
+# `class Reference`, where a generated `new` and its `allocate` are made;
+# `-f json`'s deepest frame had file "" and line null.
+printf 'module absnew\n\nabstract class A\nend\nA.new\n' > absnew.iyi
+"$IYI" check absnew.iyi > absnew.out 2>&1
+"$IYI" check -f json absnew.iyi > absnew.json 2>&1
+if grep -q '^In absnew.iyi:5:3' absnew.out && grep -q "can't instantiate abstract class" absnew.out &&
+   grep -q "\"line\":5,\"column\":3,\"size\":3,\"message\":\"can't instantiate abstract class" absnew.json; then
+  echo "  an abstract class instantiated is refused at the call"
+else
+  echo "  an abstract class instantiated is not refused at the call:"
+  sed -n '1,6p' absnew.out; cat absnew.json; echo
+  status=1
+fi
 refuses "doc on bytes that are not text" "not a valid iyi source file" -- \
   "$IYI" doc binary.iyi
 refuses "doc on a file that declares no module" "declares no module" -- \

@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **The caret stands under its column after wide characters, and
+  instantiating an abstract class is refused at the call.** The caret was
+  padded one space per character, and a terminal draws a CJK character or an
+  emoji in two cells: after `s = "日本語テキスト"; puts s.` the caret stood under
+  `puts`, seven cells short of `nope`. It is padded by the cells each
+  character takes now, as tabs were already written as tabs. And `A.new` of
+  an abstract class was reported at the prelude's `class Reference`
+  (primitives.iyi:58), where a generated `new` and its `allocate` are made,
+  with `-f json`'s deepest frame at file `""` and line `null`; it is
+  reported at `A.new` now. `bench/verbs_exercise.sh` checks both; the old
+  compiler put the caret seven cells short and the error in the prelude.
+
 - **Line 1 of a file saved with a byte order mark is shown without it.** The
   lexer drops the mark before it counts a column, and the line shown under
   an error kept it: ` 1 | \uFEFFputs 1.nope`, with the caret, placed by the

@@ -984,7 +984,7 @@ module Iyi
         # To:
         #
         #     temp1 = d
-        #     temp2 = ::Tuple.new(e, f)
+        #     temp2 = {e, f}
         #     temp3 = g
         #     a = temp1
         #     b = temp2
@@ -1013,7 +1013,11 @@ module Iyi
               end
               next
             end
-            value = Call.new(Path.global("Tuple").at(node), "new", node.values[i..i - node.targets.size])
+            # iyi: a tuple literal rather than `::Tuple.new(...)`. The
+            # prelude has no `Tuple.new` - it is std/tuple's - so the
+            # splat failed without that import, with "undefined method
+            # 'new' for Tuple(*T).class" and no place in the source.
+            value = TupleLiteral.new(node.values[i..i - node.targets.size]).at(node)
           else
             value = node.values[splat_index && i > splat_index ? i - node.targets.size : i]
           end

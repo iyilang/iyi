@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- **`a, *b, c = x, y, z` compiles without `import std/tuple`.** The
+  splat's tuple was built with `Tuple.new`, which the prelude does not
+  have, and the error named neither the line nor the import: "undefined
+  method 'new' for Tuple(*T).class". It is a tuple literal now. Found by
+  the semantic fuzz; the codegen spec checks it and failed before.
+
 - **A Windows program ends while another thread collects.** A thread
   running collections could suspend the main thread inside
   `TerminateProcess` and ask for its registers, and each then waited on

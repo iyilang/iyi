@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **A module required on two lines of `iyi.mod` is refused, by line.** Both
+  were accepted, and every reader took a different one: with `require ...
+  lib v1.0.0` and `v1.1.0`, `iyi get example.test/user/lib@v1.0.0` said
+  "downgraded example.test/user/lib v1.1.0 -> v1.0.0", exit 0, and left both
+  lines, and `mod reach` still built v1.1.0. The second line is refused now
+  - "iyi.mod:3: example.test/user/lib is already required, at v1.0.0; a
+  module is required once" - as a second `replace` of one path already was.
+  `bench/packages_get.sh` checks the refusal leaves `iyi.mod` as it was; the
+  old compiler answered 0.
+
 - **`iyi get` and `iyi mod tidy` find a `require` line in an `iyi.mod` that
   mixes LF and CRLF.** `init` writes LF and cmd's `echo require ... >>
   iyi.mod` appends CRLF; the file was split on CRLF alone, so the LF lines

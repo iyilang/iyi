@@ -236,6 +236,12 @@ refused "a version without its v" "does not start with \`v\`" example.test/user/
 refused "the module itself" "is this module" example.test/user/app
 refused "a path that is not a module path" "is not a module path" Example.test/User/liba
 refused "-u beside a path" "takes no path" -u example.test/user/liba
+# Two lines for one path: get moved the first, said the second was what it
+# moved from - "downgraded v1.3.0 -> v1.1.0" - and built at v1.3.0.
+mkdir -p "$WORK/dup" && cd "$WORK/dup" || exit 1
+printf 'module example.test/user/dup\nrequire example.test/user/liba v1.0.0\nrequire example.test/user/liba v1.3.0\n' > iyi.mod
+refused "a path required twice" "example.test/user/liba is already required, at v1.0.0" example.test/user/liba@v1.1.0
+cd "$WORK/app" || exit 1
 (cd "$WORK" && "$IYI" get example.test/user/liba) > nomanifest.log 2>&1
 if [ $? -eq 0 ] || ! grep -q "there is no iyi.mod" nomanifest.log; then
   fail "a directory without iyi.mod was not named"

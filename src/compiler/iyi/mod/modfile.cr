@@ -105,6 +105,15 @@ module Iyi::Mod
           raise ModError.new("#{source}:#{line_number}: #{usage}") unless rest.empty?
           path = check_path(fields[1], source, line_number)
           version = check_version(fields[2], source, line_number)
+          # Two lines for one module asked for two minimums, and every reader
+          # took a different one: `get` moved the first and reported the
+          # last as what it moved from, so `get @v1.1.0` beside v1.0.0 and
+          # v1.2.0 lines said "downgraded v1.2.0 -> v1.1.0" and the build
+          # stayed at v1.2.0. One line per module, as a `replace` is one.
+          if earlier = requirements.find { |other| other.path == path }
+            raise ModError.new("#{source}:#{line_number}: #{path} is already required, at v#{earlier.version}; " \
+                               "a module is required once, at the one minimum this manifest asks for")
+          end
           short_name = nil
           if short_word
             short_name = check_short_name(short_word, source, line_number)

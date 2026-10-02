@@ -412,6 +412,47 @@ expected=$(printf 'if body\nif cleanup\nfor body\nfor cleanup 2\nfor cleanup 1\n
 $out"
 step "a defer a macro writes covers the rest of the scope it stands in"
 
+# ── 6e. inside a cleanup `is_a?` narrows as it does in an `ensure`, for a
+#      variable assigned after the `defer` too, and the panic walk's run
+#      of the cleanup reads what was assigned last. It was refused
+#      ("expected argument #1 to 'String#+' to be String, not Int32"), and
+#      the scope's own read between the two assignments lost its
+#      narrowing to the cleanup's ──────────────────────────────────────────
+cat > "$work/narrow_defer.iyi" <<'EOF'
+module narrow_defer
+
+def later(flag : Bool, fail : Bool) : Int32
+  y = flag ? "s" : 1
+  defer puts(y.is_a?(Int32) ? y + 1 : y.bytesize)
+  y = 5
+  raise "later" if fail
+  0
+end
+
+def kept : Nil
+  y = 1
+  defer puts y
+  puts y + 1
+  y = "s"
+end
+
+puts later(true, false)
+kept
+group do |g|
+  t = g.spawn { later(true, true) }
+  puts(t.value.is_a?(Panicked) ? "panicked" : "did not panic")
+end
+EOF
+set +e
+out=$("$IYI" run "$work/narrow_defer.iyi" 2>"$work/narrow_defer.err")
+code=$?
+set -e
+[ "$code" = 0 ] || fail "narrowing-defer exit was $code, wanted 0: $out $(cat "$work/narrow_defer.err")"
+expected=$(printf '6\n0\n2\ns\n6\npanicked')
+[ "$out" = "$expected" ] || fail "a cleanup did not narrow as an ensure does:
+$out"
+step "is_a? narrows inside a cleanup, on the ordinary exit and on the panic walk"
+
 # ── 7. an arithmetic overflow is a panic like any other: the trap
 #      routes through the registry, so a task's overflow dies at the
 #      task boundary instead of taking the process bare-handed ────────

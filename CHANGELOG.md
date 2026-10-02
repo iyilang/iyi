@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **Inside a `defer` cleanup, `is_a?` narrows as it does in `ensure`.**
+  The panic walk's copy of the cleanup is a proc, and every read in it of
+  a variable assigned after the `defer` was bound to all the variable's
+  types, narrowed or not: `defer puts(y.is_a?(Int32) ? y + 1 :
+  y.bytesize)` before a later `y = 5` was refused with "expected argument
+  #1 to 'String#+' to be String, not Int32". What the cleanup narrows or
+  assigns itself reads as the scope's own variable does now, narrowed
+  from every type the scope assigns; the rest still reads every type.
+  And the read is bound, not the variable entry it read, which the scope
+  shared: `y = 1; defer puts y; puts y + 1; y = "s"` was refused at
+  `puts y + 1` with the same sentence, and compiles now.
+  `bench/panics.sh` step 6e checks both, on the ordinary exit and on the
+  panic walk; the old compiler refused both.
+
 - **A `defer` a macro writes covers the rest of the scope the macro
   stands in.** The expansion was normalized as a list of its own, so its
   `defer` had nothing after it and ran at once: `{% if true %} defer

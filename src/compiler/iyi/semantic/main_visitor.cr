@@ -96,6 +96,11 @@ module Iyi
     # iyi: inside the `ensure` a `defer` lowers to, where the cleanup runs
     # inline on an ordinary exit (normalizer.cr's `apply_defers`).
     property? inside_iyi_defer : Bool = false
+    # iyi: in `defer`'s panic-walk proc (`Def#iyi_defer?`) and the blocks
+    # inside it, the variables the cleanup narrowed or assigned itself;
+    # every other variable it reads is the scope's, as it stood at the
+    # `defer` (`check_mutably_closured`).
+    property iyi_defer_entries : Set(MetaVar)? = nil
     property? inside_constant = false
     property file_module : FileModule?
 
@@ -392,7 +397,7 @@ module Iyi
           node.bind_to(@program.nil_var)
         end
 
-        check_mutably_closured meta_var, var
+        check_mutably_closured meta_var, var, node
 
         node.bind_to(var)
 
@@ -968,6 +973,7 @@ module Iyi
       else
         simple_var.bind_to(target)
 
+        @iyi_defer_entries.try &.add(simple_var)
         check_mutably_closured(meta_var, simple_var)
       end
 
@@ -1275,6 +1281,7 @@ module Iyi
       block_visitor.last_block_kind = :block
       block_visitor.inside_ensure = inside_ensure?
       block_visitor.inside_iyi_defer = inside_iyi_defer?
+      block_visitor.iyi_defer_entries = @iyi_defer_entries
 
       node.body.accept block_visitor
 
@@ -1394,6 +1401,7 @@ module Iyi
       block_visitor.block_nest = @block_nest + 1
       block_visitor.parent = self
       block_visitor.is_initialize = @is_initialize
+      block_visitor.iyi_defer_entries = Set(MetaVar).new.compare_by_identity if node.def.iyi_defer?
 
       node.def.body.accept block_visitor
 
@@ -2627,7 +2635,17 @@ module Iyi
     def filter_vars(filters, &)
       filters.try &.each do |name, filter|
         existing_var = @vars[name]
+        # iyi: in `defer`'s proc, a variable the cleanup has not narrowed or
+        # assigned itself is narrowed from every type the scope assigns it,
+        # since the proc may run at any point of the scope; the scope's
+        # variable as it stood at the `defer` left out what was assigned
+        # after it.
+        if (entries = @iyi_defer_entries) && !entries.includes?(existing_var) &&
+           (meta_var = @meta_vars[name]?) && iyi_defer_read?(meta_var)
+          existing_var = meta_var
+        end
         filtered_var = MetaVar.new(name)
+        entries.try &.add(filtered_var)
         filtered_var.bind_to(existing_var.filtered_by(yield filter))
         @vars[name] = filtered_var
       end
@@ -3976,8 +3994,20 @@ module Iyi
     # to it (it gets all types assigned to meta_var).
     # Otherwise, add it to the local vars so that they could be
     # bond later on, if the meta_var stops being readonly.
-    def check_mutably_closured(meta_var, var)
-      defer_read = iyi_defer_read?(meta_var)
+    #
+    # iyi: a read inside `defer`'s proc of what the cleanup has not
+    # narrowed or assigned itself (`iyi_defer_entries`) gets every type the
+    # variable is assigned; what the cleanup narrowed reads as the scope's
+    # own variable does, so `defer puts(y.is_a?(Int32) ? y + 1 : y.size)`
+    # narrows as it does in an `ensure`. It was refused, "expected argument
+    # #1 to 'String#+' to be String, not Int32", once `y` was assigned
+    # after the `defer`. And it is the *read* that is bound, not the
+    # variable entry it read: that entry is the scope's own as it stood at
+    # the `defer`, shared with the scope's reads after it, and bound to
+    # every type it unbound their narrowing.
+    def check_mutably_closured(meta_var, var, read : ASTNode? = nil)
+      defer_read = iyi_defer_read?(meta_var) && !@iyi_defer_entries.try(&.includes?(var))
+      var = read if defer_read && read
       if meta_var.closured? && meta_var.mutably_closured? && (defer_read || !meta_var.iyi_defer_only?)
         var.bind_to(meta_var)
       elsif defer_read

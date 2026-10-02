@@ -191,6 +191,17 @@ grep -q "example.test/user/libb is already at v1.0.0" get4.log || fail "libb's s
 "$IYI" run use.iyi > run2.log 2>&1 || { fail "the program did not build after -u"; cat run2.log; }
 grep -q "liba 1.3.0" run2.log || fail "after -u the program ran '$(cat run2.log)'"
 
+step "a manifest saved with a byte order mark is read, and keeps it"
+# As PowerShell 5.1's `Out-File -Encoding utf8` writes one. It was refused
+# as "`\uFEFFmodule` is not a directive", and every verb with it.
+mkdir -p "$WORK/bom" && cd "$WORK/bom" || exit 1
+printf '\xef\xbb\xbfmodule example.test/user/bom\n' > iyi.mod
+"$IYI" get example.test/user/liba@v1.1.0 > bom.log 2>&1 || { fail "get on a manifest with a BOM failed"; cat bom.log; }
+[ "$(head -c 3 iyi.mod | od -An -tx1 | tr -d ' \n')" = "efbbbf" ] || fail "the BOM was not kept: $(od -c iyi.mod | head -2)"
+grep -q '^require example.test/user/liba v1.1.0$' iyi.mod || fail "the BOM manifest did not get liba: $(cat iyi.mod)"
+cd "$WORK/app" || exit 1
+[ "$status" -eq 0 ] && echo "  read past, kept, and liba v1.1.0 required"
+
 step "a major version past 1 is the same repository under a /vN path"
 # liba's repository publishes v2.0.0, whose manifest names the module
 # `example.test/user/liba/v2`. The plain path must not cross into it, the

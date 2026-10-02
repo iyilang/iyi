@@ -142,6 +142,15 @@
 
 ### Fixed
 
+- **An `iyi.mod` saved with a byte order mark is read.** PowerShell 5.1's
+  `Out-File -Encoding utf8` and older Notepad write one, and the manifest
+  was refused as "`\uFEFFmodule` is not a directive" - which reads as
+  `module` itself refused - so every verb in the project, `iyi check` of an
+  unrelated file included, exited 1. The mark is read past, as source files'
+  already were, and kept when `get` or `mod tidy` rewrites the file.
+  `bench/packages_get.sh` gets a requirement into such a manifest and checks
+  the mark is still there; the old compiler refused it.
+
 - **Ctrl-C and Ctrl-Break put the Windows console's mode back.** Either
   ends a program through Windows' own handler, past every exit of iyi's, so
   a console the program had written to was left with VT processing on: mode

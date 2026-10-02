@@ -67,7 +67,12 @@ module Iyi::Mod
       requirements = [] of Requirement
       replacements = {} of String => String
 
-      text.each_line.with_index(1) do |raw, line_number|
+      # A byte order mark is not part of the first directive: Windows
+      # editors and PowerShell 5.1's `Out-File -Encoding utf8` write one,
+      # and the manifest was refused as "`\uFEFFmodule` is not a
+      # directive", which reads as `module` itself refused - and every verb
+      # in the project failed on it. Source files with one were already read.
+      text.lchop('\uFEFF').each_line.with_index(1) do |raw, line_number|
         line = raw.strip
         next if line.empty? || line.starts_with?('#')
         fields = line.split

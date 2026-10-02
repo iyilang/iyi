@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`def or` and `def or_panic` are refused, naming the reserved word.**
+  `.or` and `.or_panic` are recognised by name at the call site, so a
+  method of either name compiled and every call to it was taken for the
+  recovery: `class A; def or(x : Int32) : Int32` built, and `A.new.or(5)`
+  answered "`.or` has no error to recover: no member of App::Main::A
+  implements `Error`". The def is refused now: "`or` is a reserved name
+  in iyi: `.or` is the error recovery the compiler knows by name, so a
+  method called `or` could never be called (SPEC.md III.1.3)".
+  `bench/verbs_exercise.sh` and `spec/compiler/parser/parser_spec.cr`
+  check it; the old compiler accepted the def.
+
 - **`nomacro!(1)` is told `!` takes no arguments.** The refusal of a
   `!` followed by a block or an argument list used one sentence for both:
   "`nomacro!` is not a method here: `!` propagates an error, and takes no

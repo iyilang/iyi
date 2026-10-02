@@ -4748,6 +4748,7 @@ module Iyi
         last_was_space = false
       elsif @token.type.ident?
         check_valid_def_name
+        check_iyi_reserved_def_name
         name = @token.value.to_s
 
         equals_sign, _ = consume_def_equals_sign
@@ -4780,6 +4781,7 @@ module Iyi
 
         if @token.type.ident?
           check_valid_def_name
+          check_iyi_reserved_def_name
           name = @token.value.to_s
 
           name_location = @token.location
@@ -5038,6 +5040,18 @@ module Iyi
         after the participle — `sort_in_place` mutates, `sorted` returns a new
         value. Postfix `!` propagates an error, and a name has none.
         MSG
+    end
+
+    # iyi: `def or` (SPEC.md III.1.3). `.or` and `.or_panic` are recognised
+    # at the call site by name, so a method of either name can never be
+    # called: `def or` compiled, and `A.new.or(5)` was then refused as a
+    # recovery with "no member of App::Main::A implements `Error`".
+    private def check_iyi_reserved_def_name
+      return unless iyi? && @token.value.in?("or", "or_panic")
+
+      raise "`#{@token.value}` is a reserved name in iyi: `.#{@token.value}` is the " \
+            "error recovery the compiler knows by name, so a method called " \
+            "`#{@token.value}` could never be called (SPEC.md III.1.3)", @token
     end
 
     # iyi: `items.sort_by! { |x| ... }` — the same mistake at a call site.

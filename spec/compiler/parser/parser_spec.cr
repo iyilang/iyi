@@ -4558,6 +4558,18 @@ end").as(ClassDef)
         end
       end
 
+      # `.or` and `.or_panic` are the recovery the compiler knows by name at
+      # the call site, so a method of either name could never be called:
+      # `def or` compiled and every call to it was refused as a recovery.
+      it "rejects a def named or or or_panic" do
+        {"def or(x)\nend", "def self.or_panic\nend"}.each do |source|
+          expect_raises(SyntaxException, "is a reserved name in iyi") do
+            parse(source, filename: "x.iyi")
+          end
+        end
+        parse("def or(x)\nend", filename: "x.cr")
+      end
+
       # A bodiless `def` in a trait, with another `def` under it: the
       # requirement wanted `abstract`, and the nested-def report says so.
       it "explains a bodiless def in a trait" do

@@ -530,6 +530,14 @@ refuses "a UTF-16 file without its mark, formatted" "unexpected NUL byte" -- "$I
 # not `NEWLINE`", and "there's a bug formatting".
 fmt_gives "takes .or and .or_panic on the line under their value" \
   $'x = g(-1)\n  .or(2)\ny = g(5)\n  .or_panic\nz = g(1).or( # c\n  2)\n'
+# `.or` is recognised by name at the call site, so `def or` compiled and
+# every call to it was refused as a recovery with "no member of
+# App::Main::A implements `Error`". The def is refused now.
+printf 'module ordef\n\nclass A\n  def or(x : Int32) : Int32\n    x\n  end\nend\n\nputs A.new.or(5)\n' > ordef.iyi
+refuses "a method named or" '`or` is a reserved name in iyi' -- "$IYI" check ordef.iyi
+printf 'module orpanicdef\n\nclass A\n  def self.or_panic : Int32\n    1\n  end\nend\n' > orpanicdef.iyi
+refuses "a class method named or_panic" '`or_panic` is a reserved name in iyi' -- \
+  "$IYI" check orpanicdef.iyi
 # Under a comment on an `if` or `while` line, `/=` was read as a regex.
 fmt_gives "takes x /= y and x //= y under a comment on an if or while line" \
   $'a = 8\nif a > 1 # c\n  a /= 2\nend\nwhile a > 1 # c\n  a //= 2\nend\n'

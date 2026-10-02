@@ -1038,10 +1038,15 @@ class Iyi::Command
     # compiler knows before it reads anything. `--prelude` still wins, and a
     # `.cr` file is untouched — the two languages share this compiler and do
     # not share a standard library.
-    # In the file system's case: on Windows `hello.IYI` is `hello.iyi`, and
-    # it was built against Crystal's library and told of a `--crystal` it
-    # was never given.
-    if !specified_prelude && sources.first?.try { |source| Iyi.path_key(source.filename).ends_with?(".iyi") }
+    # The extension is the stored name's (`gather_sources`), compared as it
+    # is stored. The case was folded here instead, so on Windows a file
+    # stored as `UP.IYI` got iyi's prelude and the other language's lexer
+    # (`Lexer.iyi_source?`), and valid iyi answered `unexpected token:
+    # "!"`; such a name is refused now (`Lexer.iyi_miscased?`).
+    if (entry = sources.first?) && Lexer.iyi_miscased?(entry.filename)
+      abort! Lexer.iyi_miscased_sentence(entry.filename), :USAGE_ERROR
+    end
+    if !specified_prelude && sources.first?.try(&.filename.ends_with?(".iyi"))
       compiler.prelude = "iyi/prelude"
     end
 
@@ -1194,6 +1199,9 @@ class Iyi::Command
         abort! "#{filename} is a directory, not a source file", :USAGE_ERROR if Dir.exists?(expanded)
         abort! "no such file: #{filename}", :USAGE_ERROR
       end
+      # The name as stored, which the language and `Lexer.iyi_miscased?`
+      # are read off.
+      expanded = Lexer.stored_name(expanded)
       Compiler::Source.new(expanded, File.read(expanded))
     end
   rescue exc : IO::Error

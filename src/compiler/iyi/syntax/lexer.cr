@@ -143,6 +143,54 @@ module Iyi
       end
     end
 
+    # iyi: `UP.IYI`, `x.Iyi`: the extension `iyi_source?` answers for, in
+    # another case. The language is read off the name with `ends_with?`, so
+    # on every system such a file is not an iyi file - and Windows opens it
+    # under either spelling, so it was half of one there: `iyi run UP.IYI`
+    # got iyi's prelude (the entry check folded case) and the other
+    # language's lexer, and answered `unexpected token: "!"` about valid
+    # iyi, while `fmt DIR` and `test DIR` walked past it and exited 0. One
+    # rule on every system, so a project that builds on one builds on all:
+    # the verbs that are handed or walk to a file *stored* under such a name
+    # refuse it, by name (a name typed in another case is read as the one
+    # stored, `stored_name`).
+    def self.iyi_miscased?(filename : String) : Bool
+      return false if filename.ends_with?(".iyi")
+      tail = filename[-4..]?
+      !tail.nil? && tail.compare(".iyi", case_insensitive: true) == 0
+    end
+
+    # The sentence for a name `iyi_miscased?` answers yes for, shared by
+    # every verb that is handed one or walks to one, so they refuse it alike.
+    def self.iyi_miscased_sentence(filename : String) : String
+      "#{Iyi.relative_filename(filename)} ends in `#{filename[-4..]}`, and an iyi source file ends in " \
+      "`.iyi`: the language is read off the extension, in lower case, on " \
+      "every system. Rename it #{File.basename(filename).rchop(filename[-4..])}.iyi"
+    end
+
+    # iyi: a file's name as its directory stores it, for `iyi_miscased?`
+    # and `iyi_source?` to read. On Windows a name typed in another case
+    # opens the same file, so `iyi run HDR/APP/MAIN.IYI` of a stored
+    # `main.iyi` got iyi's prelude and the other language's lexer. The
+    # stored name is the file's on every system: typed in any case it is
+    # read as what it is, and a file stored as `UP.IYI` is refused as one.
+    def self.stored_name(path : String) : String
+      {% if flag?(:win32) %}
+        base = File.basename(path)
+        children =
+          begin
+            Dir.children(File.dirname(path))
+          rescue File::Error
+            return path
+          end
+        return path if children.includes?(base)
+        if stored = children.find { |child| child.compare(base, case_insensitive: true) == 0 }
+          return path.rchop(base) + stored
+        end
+      {% end %}
+      path
+    end
+
     def next_token
       # Check previous token:
       if @token.type.newline? || @token.type.eof?

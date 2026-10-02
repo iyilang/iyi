@@ -112,7 +112,10 @@ class Iyi::Command
     end
 
     consumers = [] of String
-    Dir.glob("**/*.iyi") do |candidate|
+    # The extension in any case, so that `UP.IYI` is refused by name rather
+    # than left out of the ripple in silence (`Lexer.iyi_miscased?`).
+    Dir.glob("**/*.[iI][yY][iI]") do |candidate|
+      abort! Lexer.iyi_miscased_sentence(candidate), :USAGE_ERROR if Lexer.iyi_miscased?(candidate)
       closure = test_import_closure(candidate)
       consumers << candidate if closure.nil? || !manifest_changed.empty? ||
                                 closure.any? { |path| changed.includes?(Iyi.file_key(path)) }

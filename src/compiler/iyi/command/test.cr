@@ -93,9 +93,13 @@ class Iyi::Command
         # The pattern is built in posix form because a backslash is an escape
         # character in a glob, not a separator: `C:\dir\**\*_test.iyi` matched
         # nothing, so `iyi test` in a directory of tests found no tests.
-        Dir.glob(Iyi.glob_root(path).join("**", "*_test.iyi")) { |file| files << file }
+        # The extension in any case, so that `x_test.IYI` is refused below
+        # rather than walked past: "no *_test.iyi found" in a directory of
+        # one test (`Lexer.iyi_miscased?`).
+        Dir.glob(Iyi.glob_root(path).join("**", "*_test.[iI][yY][iI]")) { |file| files << file }
       elsif File.file?(path)
-        files << path
+        # As stored: `X_TEST.IYI` typed on Windows for `x_test.iyi` is it.
+        files << Lexer.stored_name(path)
       else
         abort! "no such file or directory: #{path}", :USAGE_ERROR
       end
@@ -104,6 +108,9 @@ class Iyi::Command
     # unique as strings, so `iyi test . app\x_test.iyi app/x_test.iyi`
     # built and ran one test three times and reported "passed":3.
     files.uniq! { |file| Iyi.file_key(File.expand_path(file)) }.sort!
+    if miscased = files.find { |file| Lexer.iyi_miscased?(file) }
+      abort! Lexer.iyi_miscased_sentence(miscased), :USAGE_ERROR
+    end
 
     if files.empty?
       abort! "no *_test.iyi found. A test is a plain iyi program that exits non-zero to fail", :USAGE_ERROR

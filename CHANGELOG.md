@@ -142,6 +142,19 @@
 
 ### Fixed
 
+- **A file stored as `UP.IYI` is refused by name on every system, and a
+  path typed in another case is read as the file it names.** The entry
+  check folded case and the lexer did not, so on Windows `iyi run UP.IYI`
+  got iyi's prelude and the other language's lexer and answered
+  `unexpected token: "!"` about valid iyi; `run HDR/APP/BANG.IYI` of a
+  stored `bang.iyi` answered the same; and `fmt --check DIR` exited 0
+  having walked past it, `test DIR` said "no *_test.iyi found". The
+  language is read off the stored name, `.iyi` in lower case: `run`,
+  `build`, `check`, `fmt` (a file or a walk), `test` and `check
+  --affected` say "UP.IYI ends in `.IYI`, and an iyi source file ends in
+  `.iyi` ... Rename it UP.iyi", and a name typed in another case runs.
+  `bench/verbs_exercise.sh` holds both; the old compiler failed all six.
+
 - **`iyi doc app/Nest` is refused on every system.** On Windows, which
   ignores case, it printed `module app/nest` and that module's surface at
   exit 0, where Linux has no such file and refuses the path. Each segment of

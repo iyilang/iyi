@@ -109,10 +109,13 @@ class Iyi::Command
       includes.map! { |p| Iyi.normalize_path p }
       excludes.map! { |p| Iyi.normalize_path p }
       excludes = excludes - includes
+      @walk_all = files.empty?
       if files.empty?
         # iyi: both extensions, because this fork formats both languages and
-        # a directory of `.iyi` files is the ordinary case here.
-        files = Dir["./**/*.cr"] + Dir["./**/*.iyi"]
+        # a directory of `.iyi` files is the ordinary case here. The `.iyi`
+        # one in any case, so that `UP.IYI` is refused by name
+        # (`Lexer.iyi_miscased?`) rather than walked past at exit 0.
+        files = Dir["./**/*.cr"] + Dir["./**/*.[iI][yY][iI]"]
       else
         files.map! { |p| Iyi.normalize_path p }
       end
@@ -146,27 +149,46 @@ class Iyi::Command
       format_source(@stdin_filename || "STDIN.iyi", source)
     end
 
-    private def format_many(files)
+    private def format_many(files, excludes : Array(String)?)
       files.each do |filename|
-        format_file_or_directory filename
+        format_file_or_directory filename, excludes
       end
     end
 
-    # Under an exclude as a path is, not as a string starts: `fmt --check .`
-    # and `fmt --check <absolute dir>` walked to `.\.\lib\x.iyi` and
+    # The excludes a walk from *root* prunes with, spelled as `path_key`s:
+    # under an exclude as a path is, not as a string starts - `fmt --check
+    # .` and `fmt --check <absolute dir>` walked to `.\.\lib\x.iyi` and
     # `C:\...\lib\x.iyi`, which never start with `.\lib`, and checked the
     # `lib` the bare `fmt --check` leaves alone.
-    private def excluded?(filename) : Bool
-      full = Iyi.path_key(File.expand_path(filename))
-      @excludes.any? do |exclude|
+    #
+    # An exclude prunes what a walk finds; it does not take back a path the
+    # caller named, which is Black's rule for `--exclude`. `fmt --check
+    # lib/x.iyi` and `fmt --check lib` checked nothing and exited 0, because
+    # the default exclude, `lib`, held them: a CI step written for one
+    # vendored module passed without reading it. So a named file is never
+    # excluded, and a named directory drops the excludes that hold it.
+    private def walk_excludes(root) : Array(String)
+      root = Iyi.path_key(File.expand_path(root))
+      @excludes.compact_map do |exclude|
         base = Iyi.path_key(File.expand_path(exclude))
-        full == base || !Iyi.path_under?(full, base).nil?
+        base unless root == base || Iyi.path_under?(root, base)
       end
     end
 
-    private def format_file_or_directory(filename)
+    private def excluded?(filename, excludes : Array(String)) : Bool
+      full = Iyi.path_key(File.expand_path(filename))
+      excludes.any? { |base| full == base || !Iyi.path_under?(full, base).nil? }
+    end
+
+    # *excludes* is nil for a path the caller named, and the walk's for one
+    # a walk found.
+    private def format_file_or_directory(filename, excludes : Array(String)?)
       if File.file?(filename)
-        format_file filename unless excluded?(filename)
+        # A name the caller typed is read as the one stored: a walk's names
+        # already are, and on Windows `MAIN.IYI` typed for a stored
+        # `main.iyi` is that iyi file (`Lexer.stored_name`), not a
+        # `Lexer.iyi_miscased?` one.
+        format_file(excludes ? filename : Lexer.stored_name(filename)) unless excludes && excluded?(filename, excludes)
       elsif Dir.exists?(filename)
         # Composed by `Path` rather than by interpolation, because a trailing
         # separator is its business: `chomp('/')` knew only the posix one, so
@@ -174,8 +196,9 @@ class Iyi::Command
         # nothing. Nothing arrives spelled that way while `normalize_path`
         # chops it first, and now nothing depends on that.
         directory = Iyi.glob_root(filename)
-        filenames = Dir[directory.join("**", "*.cr")] + Dir[directory.join("**", "*.iyi")]
-        format_many filenames
+        # And `.iyi` in any case, as above (`Lexer.iyi_miscased?`).
+        filenames = Dir[directory.join("**", "*.cr")] + Dir[directory.join("**", "*.[iI][yY][iI]")]
+        format_many filenames, walk_excludes(filename)
       else
         # iyi: and a failure, which it was not. `--check` printed this and
         # exited 0, so `iyi tool format --check "$FILE" || exit 1` passed
@@ -184,14 +207,29 @@ class Iyi::Command
         print_error "file or directory does not exist: #{filename}"
         @status_code = 1
       end
+    rescue ex : File::Error
+      # A file that cannot be read is reported, and the walk goes on to the
+      # next. Asking what the path is, and reading it, were outside every
+      # rescue: on Windows a file this user may not read cannot be asked
+      # either, and one such file ended `fmt DIR` with "Error:
+      # .\.\a_noread.iyi: Access is denied." before the files after it were
+      # looked at.
+      print_error "cannot read '#{filename}': #{ex.os_error.try(&.message) || ex.message}"
+      @status_code = 1
     end
 
     private def format_file(filename)
-      source = File.read(filename)
-      format_source filename, source
+      format_source filename, File.read(filename)
     end
 
     private def format_source(filename, source)
+      # Read as the other language, `UP.IYI` answered `unexpected token:
+      # "!"` about valid iyi (`Lexer.iyi_miscased?`).
+      if Lexer.iyi_miscased?(filename)
+        print_error Lexer.iyi_miscased_sentence(filename)
+        @status_code = 1
+        return
+      end
       result = format(filename, source)
 
       # Written back with the line endings and the byte order mark the file

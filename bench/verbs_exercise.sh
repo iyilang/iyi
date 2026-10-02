@@ -339,6 +339,32 @@ else
   grep -h -m1 "^Error" hdr_deps.out hdr_hier.out
   status=1
 fi
+# And the lexer, of `run HDR/APP/MAIN.IYI` above: a path typed in another
+# case is the file its directory stores, and a module that writes `!` - a
+# token in iyi and part of a name in the other language - ran on iyi's
+# prelude and was lexed as the other language: `unexpected token: "!"`.
+printf 'module app/bang\n\nstruct Neg\nend\n\nimpl Error for Neg\n  def message : String\n    "neg"\n  end\nend\n\ndef g(x : Int32) : Int32 | Neg\n  return Neg.new if x < 0\n  x\nend\n\ndef h : Int32 | Neg\n  v = g(1)!\n  v + 1\nend\n\nputs h.or(0)\n' > hdr/app/bang.iyi
+if [ HDR/APP/BANG.IYI -ef hdr/app/bang.iyi ]; then
+  if "$IYI" run HDR/APP/BANG.IYI > hdr_bang.out 2>&1 && grep -qx 2 hdr_bang.out; then
+    echo "  a module with \`!\` run by its path in another case: lexed as iyi"
+  else
+    echo "  a module with \`!\` run by its path in another case did not run:"
+    sed -n '1,3p' hdr_bang.out
+    status=1
+  fi
+fi
+# A file *stored* as `.IYI` is not an iyi file on any system, and every
+# verb says so by name (`Lexer.iyi_miscased?`). On Windows it was half of
+# one: `run` folded the case for the prelude and the lexer did not, and
+# `fmt DIR` and `test DIR` walked past it at exit 0.
+mkdir -p upcase/tests
+cp hdr/app/bang.iyi upcase/UP.IYI
+cp hdr/app/bang.iyi upcase/tests/up_test.IYI
+refuses "a file stored as .IYI, run" 'ends in `.IYI`' -- "$IYI" run upcase/UP.IYI
+refuses "a file stored as .IYI, checked" 'ends in `.IYI`' -- "$IYI" check upcase/UP.IYI
+refuses "a file stored as .IYI, formatted" 'ends in `.IYI`' -- "$IYI" fmt --check upcase/UP.IYI
+refuses "a directory holding a .IYI, formatted" 'ends in `.IYI`' -- "$IYI" fmt --check upcase
+refuses "a directory holding a _test.IYI, tested" 'ends in `.IYI`' -- "$IYI" test upcase/tests
 # A byte order mark, which a Windows editor may put at the front of a
 # file. The lexer skips it; the three readings of a header did not, so a
 # module saved with one ran as a script and its import beside the header

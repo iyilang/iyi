@@ -109,7 +109,15 @@ module Iyi::Share
       # form above enumerates; a bare module here is a type with no fields.
       nil
     when NonGenericClassType
-      if type.iyi_share_trusted?
+      # `String` by name: its one write after construction is `size`
+      # caching the character count in `@length`, and every thread that
+      # writes it writes the same count of the same immutable bytes. Read
+      # structurally, that write refused `s = "x"; IyiThread.start { puts s }`
+      # with "String's field @length is assigned in `size`", and with it
+      # `List(String)` and every struct holding a string. Said here rather
+      # than as `@[Share]` on the prelude's `class String`, whose line count
+      # is held to a ceiling.
+      if type.iyi_share_trusted? || type == type.program.string
         nil
       elsif type.iyi_from_artifact?
         "#{type} came from an artifact whose producer did not find it shareable"

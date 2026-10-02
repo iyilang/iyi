@@ -36,7 +36,8 @@
 #      `Share` (SPEC.md III.4.4) does not compile, and the error names the
 #      variable, its type and the field that made it mutable. Nor does a
 #      captured local the thread's block assigns, or its starter assigns
-#      after the start: one cell two threads write (6b).
+#      after the start: one cell two threads write (6b). A String, and a
+#      struct or `List` holding one, is captured and runs (6c).
 #   7. On Windows, a program whose main thread ends while another thread's
 #      collections stop it ends, two hundred runs of two hundred; and with
 #      the end put back into the C runtime's `exit` a run never ends, and
@@ -398,6 +399,65 @@ if [ "$caught" -eq 0 ]; then
 fi
 echo "  $caught of five runs lost a list or died"
 
+# Windows' `SuspendThread` asks for the suspend and returns, and the thread
+# runs on until `GetThreadContext` waits for it. The stop read the
+# allocator's word in between, so a thread that ran on into `take` was
+# stopped inside it, which the deferral exists to prevent: the program
+# above died of a memory fault once in the 54 runs CI made of it. A copy
+# of the runtime makes the run-on certain - every suspend taken back for
+# 20 us and asked again just before the context is read - and every list
+# holds; with the word read before the context, the same run-on kills it.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    runon='function runon(pad) {
+      print pad "LibC.ResumeThread(handle)"
+      print pad "until_ns = __iyi_monotonic_ns + 20000_i64"
+      print pad "while __iyi_monotonic_ns < until_ns"
+      print pad "end"
+      print pad "LibC.SuspendThread(handle)"
+    }'
+    step "a stop whose suspend lands 20 us late keeps every list"
+    mkdir -p late/iyi
+    cp "$REPO"/src/iyi/*.iyi late/iyi/
+    awk "$runon"' /^            sp = IyiRoots\.capture_thread_registers\(handle, cursor \+ IYI_TL_SPILL\)$/ { runon("            "); found = 1 } { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > late/iyi/thread.iyi || { echo "the stop's context read is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/late${PSEP}$REPO/src" "$IYI" build switching.iyi -o late-run > build-late.log 2>&1; then
+      cat build-late.log; exit 1
+    fi
+    run=1
+    while [ "$run" -le 5 ]; do
+      timeout -k 5 120 ./late-run > late.txt 2>&1
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q '^wrong=0$' late.txt; then
+        echo "run $run with late suspends exited $code:"; tail -3 late.txt; exit 1
+      fi
+      run=$((run + 1))
+    done
+    echo "  five runs, no list lost"
+    step "failure proof: the allocator's word read before the context, under the same late suspends"
+    mkdir -p early/iyi
+    cp "$REPO"/src/iyi/*.iyi early/iyi/
+    awk "$runon"' /^            sp = IyiRoots\.capture_thread_registers\(handle, cursor \+ IYI_TL_SPILL\)$/ { held = $0; found = 1; next }
+      /^              IyiHeap\.write64\(cursor \+ IYI_TL_SP, sp\)$/ { runon("              "); print "  " held; moved = 1 }
+      { print } END { if (!found || !moved) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > early/iyi/thread.iyi || { echo "the stop's context read or its sp store is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/early${PSEP}$REPO/src" "$IYI" build switching.iyi -o early-run > build-early.log 2>&1; then
+      cat build-early.log; exit 1
+    fi
+    caught=0
+    run=1
+    while [ "$run" -le 5 ]; do
+      timeout -k 5 120 ./early-run > early.txt 2>&1
+      grep -q '^wrong=0$' early.txt || caught=$((caught + 1))
+      run=$((run + 1))
+    done
+    if [ "$caught" -eq 0 ]; then
+      echo "five runs reading the allocator's word before the context all kept their lists"; exit 1
+    fi
+    echo "  $caught of five runs lost a list or died"
+    ;;
+esac
+
 # ── 5d. The first collection's helpers ────────────────────────────────────
 # How many helpers a mark may use is decided at the first collection, and
 # the word saying it was decided was written before the count: a thread
@@ -621,6 +681,70 @@ if [ "$(./assigned_before | tr -d '\r' | tr '\n' ' ')" != "60 61 62 " ]; then
   echo "locals assigned before the start built, but read:"; ./assigned_before; exit 1
 fi
 echo "  a local assigned before the start, and a block's own local, still build and read 60 61 62"
+
+# ── 6c. A String is Share, and so is what holds one immutably ──────────────
+# `String#size` caches the character count in `@length`, the one write a
+# string has after it is built, and the structural scan read it as a
+# mutable field: `s = "x"` captured by a thread's block was refused with
+# "String's field @length is assigned in `size`", and with it a struct
+# holding a string and `List(String)`. The cache is idempotent - every
+# thread writes the same count of the same bytes - so String is trusted.
+# A type that assigns its own String field after construction still is not.
+step "a String, a struct holding one and a List(String) are captured; a field assigned later is not"
+cat > strings.iyi <<'IYI'
+module strings
+
+import std/list::{List}
+
+struct User
+  getter name : String
+
+  def initialize(@name : String)
+  end
+end
+
+s = "x"
+u = User.new("ada")
+l = List.new(["a", "b"])
+t = IyiThread.start do
+  puts "#{s} #{s.size} #{u.name} #{l.size}"
+  nil
+end
+t.join
+IYI
+if ! "$IYI" build strings.iyi -o strings > build-strings.log 2>&1; then
+  echo "a block capturing a String, a User and a List(String) was refused:"; cat build-strings.log; exit 1
+fi
+if [ "$(./strings | tr -d '\r')" != "x 1 ada 2" ]; then
+  echo "the block capturing strings built, but printed:"; ./strings; exit 1
+fi
+echo "  a String, a struct holding one and a List(String) captured, and read x 1 ada 2"
+cat > renamed.iyi <<'IYI'
+module renamed
+
+class Tag
+  def initialize(@name : String)
+  end
+
+  def rename(to : String) : Nil
+    @name = to
+  end
+end
+
+tag = Tag.new("a")
+t = IyiThread.start do
+  tag.rename("b")
+  nil
+end
+t.join
+IYI
+if "$IYI" build renamed.iyi -o renamed > build-renamed.log 2>&1; then
+  echo "a block capturing a Tag whose String field is reassigned compiled:"; cat build-renamed.log; exit 1
+fi
+if ! grep -q "Tag's field @name is assigned in \`rename\`" build-renamed.log; then
+  echo "the refusal did not name the field:"; cat build-renamed.log; exit 1
+fi
+printf '  refused: %s\n' "$(grep -m1 'is not Share' build-renamed.log | sed 's/^Error: //')"
 
 # ── 7. Windows: a program ends while a collection stops it ────────────────
 # A thread runs collections back to back - each one stops the main thread -

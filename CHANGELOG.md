@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A thread's block captures a `String`, a struct holding one, and a
+  `List(String)`.** `String#size` caches the character count in
+  `@length`, and the `Share` check read that write as a mutable field:
+  `s = "x"; t = IyiThread.start { puts s }` was refused with "captures
+  `s : String`, which is not Share: String's field @length is assigned in
+  `size`", and `struct User; getter name : String` and `List(String)`
+  were refused through it. The cache is idempotent - every thread writes
+  the same count of the same bytes - so `String` is trusted now; a type
+  that assigns its own `String` field after construction is still
+  refused by that field. `bench/thread_exercise.sh` step 6c checks it;
+  the old compiler refused the three captures.
+
 - **The caret stands under its column after wide characters, and
   instantiating an abstract class is refused at the call.** The caret was
   padded one space per character, and a terminal draws a CJK character or an

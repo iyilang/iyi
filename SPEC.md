@@ -2633,7 +2633,9 @@ superclasses and included modules give it, and macro code as it expands on
 the type), or a setter `field=` is defined for it — III.4.7's mechanical
 rule, on the compiler's own AST rather than the count's — and every
 field's type must be shareable in turn: integers, floats, `Bool`, `Char`,
-`Nil`, `Symbol` and enums are; `Pointer` is raw memory and is not;
+`Nil`, `Symbol` and enums are; `String` is by name, its one write after
+construction being the character count `size` caches, the same from every
+thread; `Pointer` is raw memory and is not;
 `StaticArray` and a `Proc` are not; a tuple, named tuple or union is when
 every member is; a class typed as its base is when every subclass is. The
 trust half is `@[Share]` on a declaration, meaning shareable whenever the

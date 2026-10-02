@@ -122,8 +122,8 @@ end
 fail("a line read cancelled before its line came answered #{withdrawn.inspect}") unless withdrawn == "nil"
 # The next line is read by another `IyiThread` while this one's scheduler
 # keeps polling, sleeping in steps until it is done.
-# A String is not Share (III.4.4), so the thread answers 1 for the line
-# sent and 2 for anything else, through a cell both threads may touch.
+# The thread may not assign a local of this code (III.4.11), so it answers 1
+# for the line sent and 2 for anything else, through a cell both may touch.
 third_read = Atomic(Int32).new(0)
 reader = IyiThread.start do
   third_read.set(stdin.gets == "third\n" ? 1 : 2)

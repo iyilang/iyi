@@ -142,6 +142,22 @@
 
 ### Fixed
 
+- **A buffer of references grown by `realloc` keeps what it holds while a
+  mark runs beside the program.** `realloc` frees the old buffer, and a
+  mark helper that had it grayed and queued blackened it after the free;
+  the sweep relinked the freed chunk black, and its next object was born
+  black outside any mark - never scanned by the next one, which swept
+  everything only it held. A `Deque` of objects grown by `push`, in a
+  program with no `Pointer` in it, read swept leaves or died of a memory
+  fault in 19 debug runs of 20 and in 12 and 7 release runs of 20; a
+  `Pointer(Leaf)` buffer grown by `realloc` in about 10 of 20. The sweep
+  whitens every dead chunk it relinks, and the mark neither opens, counts
+  nor blackens a chunk freed after it was queued: 0 of 20 each. The
+  whitening is the fix - without it, the mark's refusal alone still lost
+  leaves in 1 run of 20. `bench/concurrent_mark.sh` runs three hundred
+  `realloc`-grown buffers ten times and requires every leaf intact; the
+  old prelude lost leaves (6,636 to 17,730) or faulted in 13 runs of 20.
+
 - **A collection on Windows never stops a thread inside the allocator.**
   A stop read the thread's allocator word right after `SuspendThread`,
   which only asks for the suspend: the thread runs on until

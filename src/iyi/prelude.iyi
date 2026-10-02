@@ -5178,6 +5178,11 @@ require "./file"
         slot = arena == 0 ? 0_u64 : IyiHeap.chunk_index(arena, base)
         byte = arena == 0 ? 0_u64 : arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY
         bits = byte == 0 ? IyiHeap.read64(base - 8_u64) : IyiHeap.read8(byte)
+        # Handed back after it was grayed (`IyiHeap.free`, `realloc`'s
+        # old chunk): no object, its words a dead buffer's and a list
+        # link. Not opened, not counted live, and not blackened - the
+        # sweep whitens it with the dead (`sweep_slice`).
+        return if byte != 0 && bits & IyiHeap::FREE_FLAG != 0
         # Atomic first, before any id is trusted: an atomic chunk's word is
         # whatever its last owner left, and the id in it is nobody's layout.
         if bits & IyiHeap::ATOMIC_FLAG != 0
@@ -6202,6 +6207,14 @@ require "./file"
               swept = swept &+ 1_u64
               IyiHeap.write8(byte, word | IyiHeap::FREE_FLAG)
             end
+            # White, whatever a mark left it: `IyiHeap.free` whitens a
+            # chunk, but a helper that had it grayed and queued before the
+            # free blackened it after, and relinked black it was born black
+            # outside any mark - the next mark never scanned it and swept
+            # what only it held. A `Deque` grown by `push` (its buffer
+            # realloc'd, the old one freed under the mark) read swept
+            # leaves in 19 debug runs of 20.
+            IyiHeap.write8(mark, WHITE) if colour != WHITE
             if run_low == 0
               run_low = cursor
               run_batch = batch_head

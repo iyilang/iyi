@@ -24,9 +24,10 @@
 # value at the document root, a container closed that was never opened, and
 # `to_s` of a document with a container still open or no value written.
 # Every control byte under 0x20 and the byte 0x7f are written as `\u00XX`;
-# `to_ascii_json` also writes every non-ASCII code point as `\uXXXX`, with a
-# surrogate pair past the basic plane, and bytes that are not a code point
-# as `\ufffd`.
+# bytes in a string that are not a code point are written as U+FFFD, one
+# per ill-formed subpart, so what is written is UTF-8 the reader takes
+# back; `to_ascii_json` also writes every non-ASCII code point as `\uXXXX`,
+# with a surrogate pair past the basic plane, and U+FFFD as `\ufffd`.
 #
 # `ToJSON` is the trait a type implements to be written by `JSON.to_json`;
 # `Any` implements it, and so do the prelude's scalars, arrays and hashes
@@ -169,11 +170,12 @@ end
 # `JSON.write_value` read and write its type: the built-in values, an
 # `Array` or `Hash(String, V)` of them, an `Any`, another serializable
 # type. A key the type has no field for is passed over; a field with no
-# key keeps its default when it is written with one, and is otherwise
-# refused by name unless its type admits `nil`, which it then holds. It is
-# what the other library's `include JSON::Serializable`
-# writes, and the derive runs once, in the type's own module (SPEC.md
-# II.4), so a consumer calls the methods without the macro.
+# key keeps its default when it is written with one, as does a field with
+# a default whose key holds `null` where its type does not admit nil; a
+# field with neither is refused by name unless its type admits `nil`,
+# which it then holds. It is what the other library's `include
+# JSON::Serializable` writes, and the derive runs once, in the type's own
+# module (SPEC.md II.4), so a consumer calls the methods without the macro.
 pub macro serializable(declaration)
   impl ::Std::Json::ToJSON for {{ declaration[:name].id }}
     def to_json(json : ::Std::Json::Builder) : Nil
@@ -226,7 +228,14 @@ pub macro serializable(declaration)
           {% if field[:type].nilable? %}
             json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }} || raise("")))
           {% else %}
-            json_value_{{ field[:name][1..].id }} = ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))
+            # A `null` for a field with a default whose type does not admit
+            # nil is no value, and the field keeps its default, as the other
+            # library's derive reads it; it was refused as not the type.
+            \{% if @type.instance_vars.any? { |ivar| ivar.name.stringify == {{ field[:name][1..] }} && ivar.has_default_value? } %}
+              json_value_{{ field[:name][1..].id }} = pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))
+            \{% else %}
+              json_value_{{ field[:name][1..].id }} = ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))
+            \{% end %}
           {% end %}
         {% end %}
         else
@@ -235,11 +244,12 @@ pub macro serializable(declaration)
       {% end %}
     end
     # A field written with a default (`@port : Int32 = 8080`) holds it
-    # already, so on a missing key it keeps its default; a key that is there
-    # wins, `null` included where the type admits nil. Whether there is a
-    # default is asked of the type when this method is compiled, not of the
-    # declaration, which carries names and types only: the port was refused
-    # by name, and `@host : String? = "localhost"` was overwritten with nil.
+    # already, so on a missing key, or a `null` its type does not admit, it
+    # keeps its default; a key that is there wins, `null` included where the
+    # type admits nil. Whether there is a default is asked of the type when
+    # this method is compiled, not of the declaration, which carries names
+    # and types only: the port was refused by name, and
+    # `@host : String? = "localhost"` was overwritten with nil.
     {% for field in declaration[:fields] %}
       \{% if @type.instance_vars.any? { |ivar| ivar.name.stringify == {{ field[:name][1..] }} && ivar.has_default_value? } %}
         {% if field[:type].nilable? %}
@@ -2133,15 +2143,29 @@ pub class Builder
       elsif b < 32_u8 || b == 127_u8
         write_hex_u4(b.to_i)
         i = i + 1
-      elsif @ascii_only && b >= 128_u8
-        # Decode the UTF-8 sequence and write the code point as \uXXXX, or as
-        # a surrogate pair past the basic plane. Bytes that are not a code
-        # point are written as U+FFFD, one per ill-formed subpart, so the
-        # output stays ASCII.
+      elsif b >= 128_u8
+        # Bytes that are not a code point are written as U+FFFD, one per
+        # ill-formed subpart, in either mode: written through as they
+        # were, `"a\xffb"` made a document that is not UTF-8 (RFC 8259
+        # §8.1), and this reader refused what this writer wrote. A
+        # well-formed sequence is copied, or under `ascii_only` decoded
+        # and written as \uXXXX, a surrogate pair past the basic plane.
         length = utf8_sequence_at(bytes, len, i)
         if length < 0
-          write_hex_u4(0xFFFD)
+          if @ascii_only
+            write_hex_u4(0xFFFD)
+          else
+            @buffer.append(0xEF_u8)
+            @buffer.append(0xBF_u8)
+            @buffer.append(0xBD_u8)
+          end
           i = i - length
+        elsif !@ascii_only
+          while length > 0
+            @buffer.append(bytes[i])
+            i = i + 1
+            length = length - 1
+          end
         elsif length == 2
           write_hex_u4(((b.to_i & 0x1F) << 6) | (bytes[i + 1].to_i & 0x3F))
           i = i + 2

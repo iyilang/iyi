@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`std/json` writes UTF-8, and a derive keeps a default for `null`.**
+  `to_json` and the builder copied bytes that are not UTF-8 straight
+  through, so the module's own reader refused what its writer wrote; an
+  ill-formed sequence is written as U+FFFD now, as `to_ascii_json`
+  already did. And a derived field with a default refused `null`, where
+  the other library keeps the default. Found by 228,134 documents
+  against Python's json and Crystal, which otherwise agreed throughout.
+
 - **The language server answers about the line the cursor is on while a
   buffer does not compile.** It answered from the last program that did,
   at the buffer's current line numbers, so after Enter and half a

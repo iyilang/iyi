@@ -4286,6 +4286,10 @@ end").as(ClassDef)
       # the first, and the second had no artifact at all.
       assert_syntax_error "module app/one\nmodule app/two", "a file declares one module"
       assert_syntax_error "module app/one\n\nputs 1\n\nmodule app/two", "a file declares one module"
+      # A header after code is the file's only header in the wrong place; it
+      # was told the file "already declares `no module`".
+      assert_syntax_error "import app/lib\nmodule app/two", "the `module` header comes first in a file: `module app/two` goes above every `import`"
+      assert_syntax_error "puts 1\nmodule app/two", "the `module` header comes first in a file"
 
       # A segment that *starts* with a keyword leaves the lexer through an
       # early return which skips the reset of `@slash_is_regex`, so the `/`

@@ -183,8 +183,19 @@ module Iyi
       expressions.each_with_index do |node, index|
         next if index == 0 || !node.is_a?(ModuleHeader)
         location = node.location
+        first = expressions.first
+        # A header after an `import` or a declaration is the file's only
+        # header in the wrong place, and was told the file "already declares
+        # `no module`" and that `app/main` belongs in `app/main.iyi` — said
+        # to `app/main.iyi`.
+        unless first.is_a?(ModuleHeader)
+          raise "the `module` header comes first in a file: `module #{node.path.join('/')}` " \
+                "goes above every `import` and declaration, with only comments " \
+                "before it (SPEC.md R-1, IV.6)",
+            location.try(&.line_number) || 1, location.try(&.column_number) || 1
+        end
         raise "a file declares one module, and this one already declares " \
-              "`#{expressions.first?.as?(ModuleHeader).try(&.path.join('/')) || "no module"}`. " \
+              "`#{first.path.join('/')}`. " \
               "A module is a compilation unit and its path is its file's path " \
               "(SPEC.md R-1, IV.6), so `#{node.path.join('/')}` belongs in " \
               "`#{node.path.join('/')}.iyi`",

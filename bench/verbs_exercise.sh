@@ -224,6 +224,12 @@ refuses "a file that is not there" "no such file" -- "$IYI" run "$WORK/nope.iyi"
 refuses "a directory as the entry" "is a directory, not a source file" -- "$IYI" run "$WORK"
 refuses "a directory where check wants a file" "is a directory" -- "$IYI" check "$WORK"
 refuses "two module headers in one file" "a file declares one module" -- "$IYI" run twoheaders.iyi
+# A header after an `import` is the file's only header in the wrong place.
+# It was told the file "already declares `no module`" and that
+# `latehead` belongs in `latehead.iyi` - said to `latehead.iyi`.
+printf 'import app/lib\nmodule latehead\n\nputs 1\n' > latehead.iyi
+refuses "a module header after an import" 'the `module` header comes first in a file' -- \
+  "$IYI" check latehead.iyi
 # A file imported without a module header. The refusal was "`bare` is not
 # imported here: ... write `import bare::{name}`", under the very import
 # it described.

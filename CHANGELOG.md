@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A `module` header written after an `import` or code is told the
+  header comes first.** Any header that was not the first expression was
+  reported as a second one: `import app/lib` then `module app/main`, in
+  `app/main.iyi`, answered "a file declares one module, and this one
+  already declares `no module`. ... so `app/main` belongs in
+  `app/main.iyi`". It answers "the `module` header comes first in a
+  file: `module app/main` goes above every `import` and declaration,
+  with only comments before it" now. `bench/verbs_exercise.sh` and
+  `spec/compiler/parser/parser_spec.cr` check it; the old compiler gave
+  the second-header answer.
+
 - **Importing a macro the module did not mark `pub` says it is not
   exported.** The refusal sorted unexported names by looking in the
   module's defs and types only, and a macro lives on the module's

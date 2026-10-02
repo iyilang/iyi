@@ -1158,6 +1158,17 @@ module Iyi
         node.raise "can't use `yield` outside a method"
       end
 
+      # iyi: the `yield` in a `defer`'s cleanup. The panic walk runs the
+      # cleanup as a proc (normalizer.cr's `apply_defers`), and the
+      # sentence below was about a proc literal nobody wrote.
+      if @typed_def.try(&.iyi_defer?)
+        node.raise <<-MSG
+          `yield` can't run in a `defer`
+
+          A panic runs what was deferred from a proc the cleanup is registered as (SPEC.md III.1.4), and a proc has no block to yield to. Capture the block (`&block`) and write `defer block.call`.
+          MSG
+      end
+
       if @fun_literal_context
         node.raise <<-MSG
           can't use `yield` inside a proc literal or captured block

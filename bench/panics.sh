@@ -453,6 +453,24 @@ expected=$(printf '6\n0\n2\ns\n6\npanicked')
 $out"
 step "is_a? narrows inside a cleanup, on the ordinary exit and on the panic walk"
 
+# ── 6f. a `yield` in a cleanup is refused as itself: the panic walk runs
+#      the cleanup as a proc, and the refusal was about a proc literal
+#      nobody wrote ──────────────────────────────────────────────────────
+cat > "$work/yield_defer.iyi" <<'EOF'
+module yield_defer
+
+def around(&) : Nil
+  defer yield
+  puts "body"
+end
+
+around { puts "cleanup" }
+EOF
+run "$work/yield_defer.iyi"
+[ "$code" != 0 ] || fail "\`defer yield\` compiled: $out"
+echo "$out" | grep -q "\`yield\` can't run in a \`defer\`" || fail "\`defer yield\` was refused, but not as a defer: $out"
+step "a yield in a defer is refused as a defer"
+
 # ── 7. an arithmetic overflow is a panic like any other: the trap
 #      routes through the registry, so a task's overflow dies at the
 #      task boundary instead of taking the process bare-handed ────────

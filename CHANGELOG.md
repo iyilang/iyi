@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`defer yield` is refused with a sentence about `defer`.** The panic
+  walk runs a cleanup as a proc, and the refusal was the other library's
+  "can't use `yield` inside a proc literal or captured block" with a
+  link to its docs, about a proc nobody wrote. It says "`yield` can't
+  run in a `defer`" now, why, and the way out: capture the block and
+  write `defer block.call`, which runs. `bench/panics.sh` step 6f checks
+  the sentence; the old compiler gave the proc-literal one.
+
 - **Inside a `defer` cleanup, `is_a?` narrows as it does in `ensure`.**
   The panic walk's copy of the cleanup is a proc, and every read in it of
   a variable assigned after the `defer` was bound to all the variable's

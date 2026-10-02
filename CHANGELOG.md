@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A ```` ```crystal ```` fence in a `.iyi` file's doc comment keeps its
+  tag.** `crystal` and `cr` were dropped from a fence's tag in every file -
+  right for a `.cr` file, where they name its own language - and in a `.iyi`
+  file that made the other language's example an iyi one, to be read and
+  formatted by iyi's rules from then on; a fence tagged `iyi`, the file's
+  own language, was never formatted. The tags are dropped in `.cr` files
+  only, and an `iyi` fence in a `.iyi` file is formatted as an untagged one
+  is. `bench/verbs_exercise.sh` formats a `.iyi` doc comment with a
+  ```` ```crystal ```` fence and requires it unchanged; the old compiler
+  wrote ```` ``` ````.
+
 - **A comment in an import's name list, or between `x =`, `x +=` or
   `type X =` and the value, stays where it is through `fmt`.** Each was
   moved, and moved again by the next `fmt`: `{JSON,` / `# more` / `Builder}`

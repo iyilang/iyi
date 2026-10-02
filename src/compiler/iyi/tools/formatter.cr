@@ -5188,14 +5188,20 @@ module Iyi
               @doc_comments << current_doc_comment if current_doc_comment.needs_format
               @current_doc_comment = nil
             else
-              # Normalize crystal language tag
-              if language.in?("cr", "crystal")
+              # iyi: an untagged fence is in the file's own language, and so
+              # is one tagged with that language's name. `crystal` and `cr`
+              # say so of a `.cr` file and are dropped there, as they always
+              # were; in a `.iyi` file they name the other language, and
+              # dropping them relabelled the other language's example as
+              # iyi, to be read - and formatted - by iyi's rules from then
+              # on; while an `iyi` fence, the file's own code, never was.
+              iyi = Lexer.iyi_source?(@filename)
+              if !iyi && language.in?("cr", "crystal")
                 value = value.rchop(language)
                 language = ""
               end
 
-              # We only format crystal code (empty by default means crystal)
-              needs_format = language.empty?
+              needs_format = language.empty? || (iyi && language == "iyi")
               @current_doc_comment = CommentInfo.new(@line + 1, needs_format)
             end
           end

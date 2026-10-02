@@ -109,6 +109,8 @@ class Iyi::Command
   def initialize(@options : Array(String))
     @color = Colorize.default_enabled?(STDOUT, STDERR)
     @error_trace = false
+    # iyi: `-f json` was asked for, so every refusal is data (`json_report`).
+    @json_output = false
     @progress_tracker = ProgressTracker.new
   end
 
@@ -274,17 +276,30 @@ class Iyi::Command
       end
     end
   rescue ex : Iyi::CodeError
-    report_warnings
-
     ex.color = @color
     ex.error_trace = @error_trace
-    if @config.try(&.output_format) == "json"
-      STDERR.puts ex.to_json
+    if @json_output
+      json_report { |json| ex.to_json_single(json) }
     else
+      report_warnings
       STDERR.puts ex
     end
     exit 1
   rescue ex : Iyi::Error
+    # Under `-f json` the chain is one array, outermost first. Printed a line
+    # at a time, `check -f json` on a module with a byte that is not UTF-8
+    # answered `Error: while importing "app/lib"` as text.
+    if @json_output
+      json_report do |json|
+        link = ex.as(Exception?)
+        while link
+          json_message_frame(json, link.message.to_s)
+          link = link.cause
+        end
+      end
+      exit Exit::CODE_ERROR.to_i
+    end
+
     report_warnings
 
     # This unwraps nested errors which could be caused by `require` which wraps
@@ -794,6 +809,9 @@ class Iyi::Command
 
       opts.on("-f #{allowed_formats.join("|")}", "--format #{allowed_formats.join("|")}", "Output format: #{allowed_formats[0]} (default), #{allowed_formats[1..].join(", ")}") do |f|
         output_format = f
+        # iyi: as soon as it is known, so a refusal before the compile (`no
+        # such file`) is data too (`json_report`).
+        @json_output = true if f == "json" && allowed_formats.includes?(f)
       end
 
       if unreachable_command
@@ -1088,6 +1106,10 @@ class Iyi::Command
     unless output_format.in?(allowed_formats)
       abort! "You have input an invalid format: #{output_format}. Supported formats: #{allowed_formats.join(", ")}", :USAGE_ERROR
     end
+    # iyi: data has no colour. The program's colour reaches the text of its
+    # messages, and `check -f json` on a terminal carried `\u001b[33;1m
+    # (compile-time type is (String | Nil))\u001b[39;22m` in "message".
+    compiler.color = false if output_format == "json"
 
     abort! "maximum number of threads cannot be lower than 1", :USAGE_ERROR if compiler.n_threads < 1
     validate_mcpu(compiler)
@@ -1375,9 +1397,26 @@ class Iyi::Command
   end
 
   private def print_error(msg)
+    if @json_output
+      json_report { |json| json_message_frame(json, msg.to_s) }
+      return
+    end
     # This is for the case where the main command is wrong
     @color = false if ARGV.includes?("--no-color") || !Colorize.default_enabled?(STDOUT, STDERR)
     Iyi.print_error(msg, @color)
+  end
+
+  # iyi: a refusal with no place in a source file, as a `-f json` frame: the
+  # shape every frame has, with the place left empty as an error from a
+  # macro's virtual file leaves it. `no such file: x.iyi` was text there.
+  private def json_message_frame(json : JSON::Builder, message : String) : Nil
+    json.object do
+      json.field "file", ""
+      json.field "line", nil
+      json.field "column", nil
+      json.field "size", 0
+      json.field "message", message
+    end
   end
 
   private def self.iyi_opts
@@ -1428,7 +1467,10 @@ class Iyi::Command
     Command.parse_with_iyi_opts(@options) { |opts| yield opts }
   end
 
+  # iyi: with the colour this command has, which is none unless the output
+  # is a terminal. `Compiler#color?` defaulted to true and nothing here set
+  # it, so a message's colour reached a file `iyi check` was redirected to.
   private def new_compiler
-    @compiler = Compiler.new
+    @compiler = Compiler.new.tap(&.color = @color)
   end
 end

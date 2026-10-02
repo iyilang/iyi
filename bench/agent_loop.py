@@ -132,6 +132,20 @@ def main():
          f"files {files}")
     os.remove(os.path.join(work, "deep_user.iyi"))
     os.remove(os.path.join(work, "calc", "deep", "wrong.iyi"))
+    # And no colour in a message. The program's colour reached the text of
+    # its messages, so a nil receiver's error carried `\x1b[33;1m` into
+    # "message" down a pipe, and into fix's "remaining".
+    cx = tempfile.mkdtemp(prefix="iyi-agent-colour")
+    os.makedirs(os.path.join(cx, "app"))
+    with open(os.path.join(cx, "app", "nilsize.iyi"), "w", newline="\n") as f:
+        f.write('module app/nilsize\n\nx = Program.args.size > 0 ? "a" : nil\nputs x.size\n')
+    proc = run("check", "-f", "json", "app/nilsize.iyi", cwd=cx)
+    frames = json.loads(proc.stderr)
+    fixed = json.loads(run("fix", "--json", "app/nilsize.iyi", cwd=cx).stdout)
+    step("an error's message carries no colour, in check -f json or in fix --json",
+         "\x1b" not in proc.stderr and "\x1b" not in fixed.get("remaining", "\x1b")
+         and any("for Nil (compile-time type is (String | Nil))" in f["message"] for f in frames),
+         f"{[f['message'][:70] for f in frames]}, remaining {fixed.get('remaining', '')[:70]!r}")
 
     # 4. fix: applies exactly that edit and converges
     proc = run("fix", "--json", "app.iyi", cwd=work)
@@ -502,6 +516,57 @@ def main():
          fixed["clean"] and [(a["from"], a["to"]) for a in fixed["applied"]] == [("addd", "add")],
          f"applied {fixed['applied']}")
 
+    # 4c'. a suggestion names only what the call can reach. `App::Lib.helpr`
+    # was told "Did you mean 'helper'?" about a def app/lib never marked
+    # `pub`, `fix` wrote it, and the next check answered "App::Lib does not
+    # export 'helper'"; so were a private method and a type a module left
+    # unmarked, reached by a qualified name.
+    rx = tempfile.mkdtemp(prefix="iyi-agent-reach")
+    os.makedirs(os.path.join(rx, "app"))
+
+    def rx_write(rel, text):
+        with open(os.path.join(rx, rel), "w", newline="\n") as f:
+            f.write(text)
+
+    def rx_read(rel):
+        with open(os.path.join(rx, rel), newline="") as f:
+            return f.read()
+
+    rx_write("app/lib.iyi", 'module app/lib\n\ndef helper : String\n  "a"\nend\n\npub def hi : String\n  helper\nend\n')
+    unreachable = {
+        "nonpub.iyi": "module nonpub\n\nimport app/lib\n\nputs App::Lib.helpr\n",
+        "privy.iyi": "module privy\n\nclass A\n  private def helper : Int32\n    1\n  end\nend\n\nputs A.new.helpr\n",
+        "app/qualified.iyi": "module app/qualified\n\nstruct Point\nend\n\nputs App::Qualified::Pont.new\n",
+    }
+    offered = {}
+    for rel, text in unreachable.items():
+        rx_write(rel, text)
+        frames = json.loads(run("check", "-f", "json", rel, cwd=rx).stderr)
+        proc = run("fix", "--json", rel, cwd=rx)
+        offered[rel] = ([f["suggested_edit"]["replacement"] for f in frames if "suggested_edit" in f],
+                        json.loads(proc.stdout)["applied"], rx_read(rel) == text)
+    step("nothing out of the call's reach is suggested, and fix leaves the file",
+         all(edits == [] and applied == [] and kept for edits, applied, kept in offered.values()),
+         f"{offered}")
+    # And the refusal says where the code is: `App::Main::Point` written in
+    # app/main itself was told "Only what a module marks `pub` is reachable
+    # from outside it", about code that is inside it.
+    rx_write("app/inside.iyi", 'module app/inside\n\nstruct Point\nend\n\ndef hi : String\n  "x"\nend\n\nputs App::Inside::Point.new\nputs App::Inside.hi\n')
+    inside = [f["message"] for f in json.loads(run("check", "-f", "json", "app/inside.iyi", cwd=rx).stderr)]
+    rx_write("outside.iyi", "module outside\n\nimport app/lib\n\nputs App::Lib.helper\n")
+    outside = [f["message"] for f in json.loads(run("check", "-f", "json", "outside.iyi", cwd=rx).stderr)]
+    step("a qualified name to the module's own unexported name is refused for what it is",
+         any("from inside it too: write `Point` here" in m for m in inside)
+         and not any("reachable from outside it" in m for m in inside)
+         and any("App::Lib does not export 'helper'. Only what a module marks `pub` is reachable from outside it" in m
+                 for m in outside),
+         f"inside {[m[:90] for m in inside]}, outside {[m[:60] for m in outside]}")
+    rx_write("app/inside.iyi", 'module app/inside\n\ndef hi : String\n  "x"\nend\n\nputs App::Inside.hi\n')
+    inside = [f["message"] for f in json.loads(run("check", "-f", "json", "app/inside.iyi", cwd=rx).stderr)]
+    step("and so is a call",
+         any("App::Inside does not export 'hi'" in m and "write `hi` here" in m for m in inside),
+         f"{[m[:120] for m in inside]}")
+
     # 5. test --affected: the exact selection, both directions
     proc = run("test", "--json", "--affected", "calc/add.iyi", cwd=work)
     report = json.loads(proc.stdout)
@@ -587,6 +652,56 @@ def main():
          and any(f["file"] == "consumer.iyi" for f in report["failed"]),
          f"affected_not_found {report.get('affected_not_found')}")
     os.rename(os.path.join(work, "calc/add.gone"), os.path.join(work, "calc/add.iyi"))
+
+    # 5b'. -f json is data whatever ends the run (`Command#json_report`).
+    # Four refusals were text: a module with a byte that is not UTF-8 past
+    # its first ("Error: while importing", no file or line), an entry file
+    # of such bytes, a file that is not there, and a warning, which a
+    # caller parsing standard error as JSON could not read.
+    jx = tempfile.mkdtemp(prefix="iyi-agent-json")
+    os.makedirs(os.path.join(jx, "app"))
+
+    def jx_write(rel, data):
+        with open(os.path.join(jx, rel), "wb") as f:
+            f.write(data)
+
+    jx_write("app/lib.iyi", b'module app/lib\n\npub def hi : String\n  "\xff"\nend\n')
+    jx_write("app/main.iyi", b"module app/main\n\nimport app/lib::*\nputs hi\n")
+    jx_write("bytes.iyi", b"module bytes\n\nputs \"\xff\"\n")
+    refusals = {}
+    for name in ("app/main.iyi", "bytes.iyi", "missing.iyi"):
+        proc = run("check", "-f", "json", name, cwd=jx)
+        try:
+            frames = json.loads(proc.stderr)
+        except json.JSONDecodeError:
+            frames = proc.stderr[:60]
+        refusals[name] = (proc.returncode, frames)
+    imported = refusals["app/main.iyi"][1]
+    step("a byte that is not UTF-8 anywhere in a module is refused at its import, as JSON",
+         refusals["app/main.iyi"][0] == 1 and isinstance(imported, list) and len(imported) == 1
+         and (imported[0]["line"], imported[0]["column"]) == (3, 1)
+         and imported[0]["file"].endswith("main.iyi")
+         and f"file '{os.path.join('app', 'lib.iyi')}' is not a valid iyi source file" in imported[0]["message"],
+         f"{imported}")
+    step("and an entry file of such bytes, and a file that is not there, are JSON too",
+         all(code == 1 and isinstance(frames, list) for code, frames in refusals.values())
+         and "is not a valid iyi source file" in refusals["bytes.iyi"][1][0]["message"]
+         and refusals["missing.iyi"][1][0]["message"] == "no such file: missing.iyi",
+         f"{ {k: v[1] if isinstance(v[1], str) else [f['message'][:50] for f in v[1]] for k, v in refusals.items()} }")
+    jx_write("colon.iyi", b"module colon\n\ndef f(x : Int32): Int32\n  x\nend\n\nputs f(1)\n")
+    proc = run("check", "-f", "json", "colon.iyi", cwd=jx)
+    warned = json.loads(proc.stderr) if proc.stderr.startswith("[") else proc.stderr[:60]
+    jx_write("colonbad.iyi", b"module colonbad\n\ndef f(x : Int32): Int32\n  x\nend\n\nputs f(1).nope\n")
+    proc_bad = run("check", "-f", "json", "colonbad.iyi", cwd=jx)
+    both = json.loads(proc_bad.stderr) if proc_bad.stderr.startswith("[") else proc_bad.stderr[:60]
+    step("a warning is a frame marked as one, beside an error in the same array",
+         proc.returncode == 0 and isinstance(warned, list)
+         and [(w["line"], w["column"], w.get("severity")) for w in warned] == [(3, 17, "warning")]
+         and "space required before colon" in warned[0]["message"]
+         and proc_bad.returncode == 1 and isinstance(both, list)
+         and [f.get("severity") for f in both] == [None, "warning"]
+         and "undefined method 'nope'" in both[0]["message"],
+         f"warned {warned}, both {both}")
 
     # 5c. the loop is around a language that can do work now: a pure-iyi
     # tool reads its args, its environment, and the disk — no --crystal

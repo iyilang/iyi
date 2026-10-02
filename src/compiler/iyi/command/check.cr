@@ -38,6 +38,12 @@ class Iyi::Command
         one file: every .iyi under the current directory whose imports
         reach a changed file is compiled alone, and every failure is
         named.
+
+        Under `-f json` standard error holds one JSON array whatever
+        ends the run: a warning is a frame marked `"severity":
+        "warning"`, after the error's frames when there is one, and a
+        refusal with no place in a file - no such file, bytes that are
+        not text - is a frame whose `line` is null.
         USAGE
       exit
     end
@@ -92,6 +98,10 @@ class Iyi::Command
         as_json = options.shift? == "json"
       when "--json"
         as_json = true
+      when "--no-color"
+        # Nothing to turn off: the compilers below are made without colour
+        # (`Compiler#color?`). Refused as "takes only changed files", it
+        # broke a script that passes `--no-color` to every verb it runs.
       else
         abort! "check --affected takes only changed files; unexpected '#{option}'", :USAGE_ERROR
       end

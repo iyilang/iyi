@@ -89,7 +89,13 @@ module Iyi
     property mattr : String?
 
     # If `false`, color won't be used in output messages.
-    property? color = true
+    #
+    # iyi: the colour is off unless a command turns it on, which `Command`
+    # does when its output is a terminal. On by default, it reached every
+    # compiler made without a command - the language server's, `fix`'s,
+    # `check --affected`'s - and the messages they hand on as data carried
+    # `\u001b[33;1m (compile-time type is (String | Nil))\u001b[39;22m`.
+    property? color = false
 
     # If `true`, skip cleanup process on semantic analysis.
     property? no_cleanup = false
@@ -169,11 +175,6 @@ module Iyi
     # the language server's order, and nobody else's. See
     # `Program#iyi_prefers_source`.
     property iyi_prefers_source = false
-
-    # iyi: this compile runs inside a process that outlives it — the
-    # language server's worker — so a source that is not UTF-8 is raised as
-    # an `Error` rather than printed and exited on. See `parse`.
-    property? iyi_in_process = false
 
     # Sets the Optimization mode.
     property optimization_mode = OptimizationMode::O0
@@ -506,11 +507,10 @@ module Iyi
     # reaches codegen, not analysis — a prelude analysed for one `-mcpu` is the
     # same analysis as for another. `progress_tracker` and `stderr` are where
     # output goes; `new_program` sets the first and the adopt path sets neither,
-    # which is visible now rather than merely true. `iyi_in_process` is what
-    # this compiler's own `parse` does with a source that is not UTF-8.
+    # which is visible now rather than merely true.
     OUTSIDE_PRELUDE_ANALYSIS = %w(
       cleanup cross_compile dependency_printer dump_ll emit_base_filename
-      emit_bind emit_targets frame_pointers iyi_direct_link iyi_in_process iyi_keep
+      emit_bind emit_targets frame_pointers iyi_direct_link iyi_keep
       iyi_link_driver_only link_flags mattr mcmodel mcpu n_threads no_cleanup
       program progress_tracker single_module stderr target_machine verbose
     )
@@ -3067,19 +3067,13 @@ module Iyi
       # file", which names the other language for a file this one was asked
       # to read - the identity `bench/identity_floor.py` exists to keep.
       language = source.filename.ends_with?(".iyi") ? "iyi" : "Crystal"
-      # iyi: raised in process. `Lsp::Analysis` compiles in the language
-      # server's own worker, and one `.iyi` file saved as Windows-1254, whose
-      # bytes are not UTF-8, ended that worker with exit 1 and its sentence
-      # written to a buffer nobody read: hover and every diagnostic pull on
-      # the file answered -32603, and an editor that pulls every two seconds
-      # had the worker respawned as often.
-      if iyi_in_process?
-        raise Error.new("file '#{Iyi.relative_filename(source.filename)}' is not a valid #{language} source file: #{ex.message}")
-      end
-      stderr.print colorize("Error: ").red.bold
-      stderr.print colorize("file '#{Iyi.relative_filename(source.filename)}' is not a valid #{language} source file: ").bold
-      stderr.puts ex.message
-      exit 1
+      # iyi: raised, never printed and exited on here. `Lsp::Analysis`
+      # compiles in the language server's own worker, and one `.iyi` file
+      # saved as Windows-1254 ended that worker with exit 1 and its sentence
+      # written to a buffer nobody read; and `check -f json`, which writes
+      # data (`Command#json_report`), got the sentence as text. Whoever
+      # compiles says it their way.
+      raise Error.new("file '#{Iyi.relative_filename(source.filename)}' is not a valid #{language} source file: #{ex.message}")
     end
 
     private def bc_flags_changed?(output_dir)

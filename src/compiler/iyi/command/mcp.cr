@@ -264,14 +264,19 @@ class Iyi::Command
     # produced the shape it promises. The four JSON tools have answered
     # when their output parses as JSON — diagnostics, a fix record, a
     # context pack, a test report — and have refused when it is a sentence.
+    # `check -f json` refuses in JSON too, so that a caller of the verb
+    # always parses what it gets: a file that is not there, or bytes that
+    # are not text, is a frame with no line (`Command#json_message_frame`),
+    # and a verdict about the code places at least one of its frames.
     # `doc` promises text, so for it the exit code is the answer.
     answered =
       if name == "doc"
         status.success?
       else
         begin
-          JSON.parse(text)
-          true
+          parsed = JSON.parse(text)
+          frames = parsed.as_a? if name == "check"
+          !frames || frames.empty? || frames.any? { |frame| frame["line"]?.try(&.as_i?) }
         rescue JSON::ParseException
           false
         end

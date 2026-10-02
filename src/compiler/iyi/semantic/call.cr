@@ -1488,8 +1488,10 @@ class Iyi::Call
     type.is_a?(Type) && (type.void? || type.nil_type?)
   end
 
+  # iyi: the cast itself, not a link to the other language's reference,
+  # which is what an iyi user was sent to read.
   private def cant_infer_block_return_type
-    raise "can't infer block return type, try to cast the block body with `as`. See: https://crystal-lang.org/reference/syntax_and_semantics/as.html#usage-for-when-the-compiler-cant-infer-the-type-of-a-block"
+    raise "can't infer block return type, try to cast the block body with `as`: `{ value.as(Int32) }` writes down the type the block returns, which nothing else here says"
   end
 
   # iyi: `def add_route(&block : Ctx -> B) forall B : IntoBody` (SPEC.md II.7

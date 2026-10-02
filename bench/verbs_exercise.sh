@@ -292,6 +292,12 @@ case "$(uname -s)" in
 esac
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
+# A block whose return type nothing says was sent to the other language's
+# reference: "See: https://crystal-lang.org/reference/...".
+printf 'module recblock\n\ndef rec(n : Int32)\n  capture { rec(n - 1) }\nend\n\ndef capture(&block : -> T) forall T\n  block.call\nend\n\nputs rec(3)\n' > recblock.iyi
+refuses "a block whose return type nothing says" \
+  'cast the block body with `as`: `{ value.as(Int32) }` writes down the type' -- \
+  "$IYI" check recblock.iyi
 # The refusal of an `--x86-asm-syntax` wrote over the value it refused
 # before printing it: "Invalid value `` for x86-asm-syntax".
 refuses "an --x86-asm-syntax that is neither" "Invalid value \`x\` for x86-asm-syntax" -- \
@@ -319,6 +325,17 @@ fi
 touch twin_b.done
 wait "$twin_a"
 grep -qx a twin_a.out || { echo "  the first of two same-named runs did not finish: $(head -c 200 twin_a.out)"; status=1; }
+# A byte that is not UTF-8 past a module's first character. Only the first
+# was guarded, and the rest answered `Error: while importing "app/lib"` and
+# `Unexpected byte 0xff at position 39`, naming no file and no line.
+mkdir -p badbyte/app
+printf 'module app/lib\n\npub def hi : String\n  "\377"\nend\n' > badbyte/app/lib.iyi
+printf 'module app/main\n\nimport app/lib::*\nputs hi\n' > badbyte/app/main.iyi
+refuses "a module with a byte that is not text on line 4" \
+  "main.iyi:3:1" -- "$IYI" check badbyte/app/main.iyi
+refuses "and the sentence names the module" \
+  "lib.iyi' is not a valid iyi source file: Unexpected byte 0xff at position 39" -- \
+  "$IYI" check badbyte/app/main.iyi
 # What a runner ended from outside leaves - `taskkill /F` runs no code
 # in it, so its program stays in the cache under the runner's own name -
 # the next run takes away once it is an hour old, and not before: a
@@ -1050,6 +1067,28 @@ refuses "an empty --affected, checking" "--affected takes a changed file" -- \
   "$IYI" check --affected ""
 refuses "an empty --affected, testing" "--affected takes a changed file" -- \
   "$IYI" test --affected "" .
+# Colour only where somebody sees it. The compiler's colour was on unless
+# `--no-color` said otherwise, and the messages carry it in their text, so
+# `iyi check` written into a file had `\033[33;1m (compile-time type is
+# (String | Nil))\033[39;22m` in it.
+printf 'module nilsize\n\nx = Program.args.size > 0 ? "a" : nil\nputs x.size\n' > nilsize.iyi
+"$IYI" check nilsize.iyi > nilsize.out 2>&1
+if grep -qF '(compile-time type is (String | Nil))' nilsize.out && ! grep -q $'\033' nilsize.out; then
+  echo "  an error written into a file carries no colour"
+else
+  echo "  an error written into a file:"; od -c nilsize.out | sed -n '1,4p'; status=1
+fi
+# `check --affected` refused the switch every other verb takes, as "takes
+# only changed files; unexpected '--no-color'".
+mkdir -p affcolor/app
+printf 'module app/lib\n\npub def value : Int32\n  7\nend\n' > affcolor/app/lib.iyi
+printf 'module app/user\n\nimport app/lib::{value}\n\nputs value\n' > affcolor/app/user.iyi
+(cd affcolor && "$IYI" check --affected app/lib.iyi --no-color) > affcolor.out 2>&1
+if [ $? -eq 0 ] && grep -qF "2 consumer(s) checked, all compile" affcolor.out; then
+  echo "  check --affected takes --no-color"
+else
+  echo "  check --affected --no-color:"; sed -n '1,3p' affcolor.out; status=1
+fi
 refuses "an empty test path" "'' is not one" -- "$IYI" test ""
 refuses "an empty file for fix" "which file" -- "$IYI" fix ""
 refuses "an empty .iyimod path" "expected a .iyimod path" -- "$IYI" mod dump ""

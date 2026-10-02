@@ -3120,8 +3120,11 @@ describe "Semantic: iyi" do
     # what another module reaches. `samples/iyi/modules.iyi` is a separate
     # file and is where that half is exercised.
 
+    # `Consumer` is inside app/greeter (see above), so the reason given is
+    # the one for the module's own code; `bench/agent_loop.py` holds the
+    # one another module is given.
     it "refuses a qualified call to a name the module does not export" do
-      assert_error <<-CODE, "App::Greeter does not export 'helper'. Only what a module marks `pub` is reachable from outside it"
+      assert_error <<-CODE, "App::Greeter does not export 'helper', and a qualified name reaches only what a module exports, from inside it too: write `helper` here"
         module app/greeter
 
         pub def polite : Int32

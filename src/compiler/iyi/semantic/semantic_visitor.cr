@@ -912,13 +912,15 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # and nothing to miss — `spec/compiler/bind_spec.cr` reads declarations back
     # on purpose and never gets as far as a symbol.
     if !artifact.filled && @program.iyi_wants_object_code
-      node.raise "\"#{artifact.module_name}\" was never filled: `crystal tool bind` " \
+      # iyi: by the verbs' names. It said `crystal tool bind`, the other
+      # language's verb, and "the fill step", which no verb is.
+      node.raise "\"#{artifact.module_name}\" was never filled: `iyi tool bind` " \
                  "wrote its declarations and the build that puts object code in " \
                  "it did not finish. Every method it declares would be an " \
                  "undefined symbol (SPEC.md IV.1g).\n\n" \
-                 "Run the fill step again and read what it says — a shard can " \
-                 "hold code its own compilation never types, and a boundary asks " \
-                 "for all of it."
+                 "Run `iyi bind` again (or, for a boundary bound by hand, its fill " \
+                 "build) and read what it says — a shard can hold code its own " \
+                 "compilation never types, and a boundary asks for all of it."
     end
 
     unless artifact.object_code.empty?
@@ -1294,24 +1296,27 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       rescue ex : File::Error
         node.raise "cannot read #{filename}: #{ex.os_error.try(&.message) || ex.message}"
       end
-    parser =
-      begin
-        @program.new_parser(source)
-      rescue ex : InvalidByteSequenceError
-        node.raise "file '#{Iyi.relative_filename(filename)}' is not a valid iyi source file: #{ex.message}"
-      end
-    parser.filename = filename
-    parser.wants_doc = @program.wants_doc?
-    # Only the package's own files: a std module a package imports is
-    # loaded while the package is still on the stack, and is std's.
-    if (current = @iyi_package_stack.last?) && iyi_inside_checkout?(filename, current[1])
-      parser.iyi_package_name = Mod::ModFile.package_name(current[0])
-    end
     @iyi_importing << filename
     begin
+      parser = @program.new_parser(source)
+      parser.filename = filename
+      parser.wants_doc = @program.wants_doc?
+      # Only the package's own files: a std module a package imports is
+      # loaded while the package is still on the stack, and is std's.
+      if (current = @iyi_package_stack.last?) && iyi_inside_checkout?(filename, current[1])
+        parser.iyi_package_name = Mod::ModFile.package_name(current[0])
+      end
       parsed_nodes = parser.parse
       parsed_nodes = @program.normalize(parsed_nodes, inside_exp: false)
       iyi_at_top_level { parsed_nodes.accept self }
+    rescue ex : InvalidByteSequenceError
+      # Wherever the byte is. `new_parser` decodes the first character and
+      # the lexer the rest as it goes, and only the first was guarded: a
+      # 0xFF on line 4 answered `Error: while importing "app/lib"` and
+      # `Unexpected byte 0xff at position 39`, with no file or line, and as
+      # text under `-f json` (`Command#json_report`). A module imported from
+      # here answers at its own `import` line, so the byte is in this file.
+      node.raise "file '#{Iyi.relative_filename(filename)}' is not a valid iyi source file: #{ex.message}"
     rescue ex : CodeError
       node.raise "while importing \"#{node.path.join('/')}\"", ex
     rescue ex
@@ -1906,9 +1911,11 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         # iyi: the same answer an unexported `def` gets, because it is the same
         # rule. A module's macros travel so that a travelling body can call
         # one, and `pub` is what makes one the consumer's to call (R-2).
+        # Worded for where the call is written: from inside it too, the
+        # qualified name is refused and the bare one is not.
         owner = the_macro.owner
         if owner.is_a?(ModuleType) && owner.instance_type.as?(ModuleType).try(&.iyi_unit?)
-          node.raise "#{owner.instance_type} does not export '#{node.name}'. Only what a module marks `pub` is reachable from outside it — see SPEC.md R-2"
+          node.raise Iyi.iyi_not_exported(owner.instance_type, "'#{node.name}'", node.name, base_type)
         end
 
         node.raise "private macro '#{node.name}' called for #{obj}"

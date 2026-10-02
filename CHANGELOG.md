@@ -142,6 +142,67 @@
 
 ### Fixed
 
+- **"Did you mean" names only what the call can reach, and the refusal of
+  a module's own unexported name says why it is refused there.** The
+  suggestions ignored visibility: `App::Lib.helpr` was told "Did you mean
+  'helper'?" about a def app/lib never marked `pub`, `iyi fix` wrote it,
+  and the next check answered "App::Lib does not export 'helper'"; a
+  private method behind a receiver and `App::Main::Pont` (to the unmarked
+  `App::Main::Point`) went the same way. And a qualified name to the
+  module's own unexported name, written in the module itself, was told
+  "Only what a module marks `pub` is reachable from outside it". A
+  private def is not offered to a call with a receiver, nor a protected
+  one where the caller has no access, nor a private type after a path's
+  first segment; inside the module the refusal says "a qualified name
+  reaches only what a module exports, from inside it too: write `Point`
+  here, or mark it `pub`". `bench/agent_loop.py` checks both; the old
+  compiler applied `helper`, `helper` and `App::Qualified::Point`.
+
+- **Two compiler messages name iyi's verbs and spell the cast, rather than
+  sending the reader to the other language.** A block whose return type
+  nothing says was told "try to cast the block body with `as`. See:
+  https://crystal-lang.org/reference/syntax_and_semantics/as.html#...",
+  and a boundary whose fill build never finished "`crystal tool bind`
+  wrote its declarations ... Run the fill step again". The first shows
+  the cast (`{ value.as(Int32) }`); the second names `iyi tool bind` and
+  says to run `iyi bind` again. `bench/verbs_exercise.sh` checks the
+  first and `spec/compiler/iyimod_spec.cr` the second; the old compiler
+  printed the crystal-lang.org link.
+
+- **`check -f json` answers in JSON whatever ends the run, and a module
+  with a byte that is not UTF-8 anywhere in it is refused at its
+  `import`.** Only a module's first character was decoded under the
+  guard, so a 0xFF on line 4 of `app/lib.iyi` answered `Error: while
+  importing "app/lib"` and `Error: Unexpected byte 0xff at position 39,
+  malformed UTF-8`, naming no file and no line. Under `-f json` that, an
+  entry file that is not UTF-8, `Error: no such file: missing.iyi` and a
+  warning (`In colon.iyi:3:17 ... Warning: ...`, exit 0) all came out as
+  text. The module is refused at the `import` line with "file
+  'app\lib.iyi' is not a valid iyi source file: ...", and under `-f json`
+  standard error is one JSON array: a refusal with no place in a file is
+  a frame whose `line` is null, and a warning is a frame marked
+  `"severity": "warning"`, after the error's frames. `iyi mcp` still says
+  `isError` for a check it could not make. `bench/agent_loop.py` and
+  `bench/verbs_exercise.sh` check it; the old compiler printed the text
+  above.
+
+- **A diagnostic carries no colour unless it is going to a terminal, and
+  never in `-f json`, `fix --json` or the language server.** The
+  compiler's colour was on unless `--no-color` turned it off, the command
+  never handed it the terminal check it made, and messages build their
+  colour into their own text: `check -f json` on a nil receiver, down a
+  pipe, answered `"undefined method 'size' for Nil\u001b[33;1m
+  (compile-time type is (String | Nil))\u001b[39;22m"`, and `fix --json`'s
+  `remaining`, the language server's published and pulled diagnostics and
+  `iyi check` written into a file carried the same codes. `check
+  --affected app/lib.iyi --no-color` was refused: "check --affected takes
+  only changed files; unexpected '--no-color'". The colour is the
+  command's now, on only for a terminal and off under `-f json`; a
+  compiler made without a command (the language server's, `fix`'s) has
+  none; and `check --affected` takes the switch. `bench/agent_loop.py`,
+  `bench/lsp_session.py` (71a) and `bench/verbs_exercise.sh` check it;
+  the old compiler put `\x1b[33;1m` in every one.
+
 - **`def or` and `def or_panic` are refused, naming the reserved word.**
   `.or` and `.or_panic` are recognised by name at the call site, so a
   method of either name compiled and every call to it was taken for the

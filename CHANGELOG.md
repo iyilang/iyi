@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`iyi mod release` finds a module saved with a byte order mark, with a
+  comment after its header, or with a tab after `pub`.** The modules that
+  export something were picked by text - a line exactly `module <name>` and
+  a line starting `pub ` - and each of those, which the lexer reads alike,
+  hid the module: "compared with v1.0.0: 0 modules, 1 thing gone", `gone
+  rel: module`, and "the next release is v2.0.0" for a release that changed
+  nothing. They are read as the lexer reads them now, and the same surface
+  is a patch. `bench/packages_get.sh` releases a module respelled all three
+  ways; the old compiler called it gone.
+
 - **`iyi mod release` compares with the last release, not the last
   pre-release.** The base was the highest tag HEAD contains, pre-releases
   included, so a def v1.1.0 exported and `v1.2.0-rc.1` removed was never

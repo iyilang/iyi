@@ -616,6 +616,21 @@ printf 'module example.test/user/rel/v2\n' > iyi.mod && git commit -qam v2
 grep -q "examples/demo" rel6.log && fail "an example program was counted as surface: $(cat rel6.log)"
 if "$IYI" mod release v1.0.0 > rel7.log 2>&1; then fail "a version already tagged was accepted: $(cat rel7.log)"; fi
 [ "$status" -eq 0 ] && echo "  respelled: patch; new def: minor, patch refused; gone def: v2 at /v2, refused until iyi.mod says it"
+# A module saved with a byte order mark, its header carrying a comment,
+# its `pub` followed by a tab: the same surface, so a patch. Each was a
+# module not found, its whole surface "gone", and a new major.
+RELHDR="$WORK/relhdr"
+mkrepo "$RELHDR"
+cd "$RELHDR" || exit 1
+printf 'module example.test/user/relhdr\n' > iyi.mod
+printf 'module relhdr\n\npub def greeting : String\n  "one"\nend\n' > relhdr.iyi
+git add -A && git commit -qm one && git tag v1.0.0
+printf '\xef\xbb\xbfmodule relhdr # the library\n\npub\tdef greeting : String\n  "one"\nend\n' > relhdr.iyi
+git commit -qam respelled
+"$IYI" mod release > relhdr.log 2>&1 || fail "mod release failed on a respelled header: $(cat relhdr.log)"
+grep -q "the next release is v1.0.1: the surface is as it was" relhdr.log ||
+  fail "a BOM, a header comment and pub<TAB> changed the surface: $(cat relhdr.log)"
+[ "$status" -eq 0 ] && echo "  a BOM, a comment on the header, pub<TAB>: the same surface, v1.0.1"
 
 step "mod release before v1: a break is a minor"
 REL0="$WORK/rel0"

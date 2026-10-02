@@ -258,12 +258,17 @@ class Iyi::Command
   # The package's modules that export something: a file whose header is its
   # own path and which writes `pub` at its top level. A program beside the
   # library - an example, a tool - exports nothing and is no one's surface.
+  # Read the way the lexer reads them: past a byte order mark, with a
+  # comment after the header, and any space after `pub`. A module saved
+  # with a BOM, headed `module rel # the library`, or written `pub<TAB>def`
+  # was not found, and its whole surface was reported gone - "the next
+  # release is v2.0.0" for a release that changed nothing.
   private def mod_release_modules(package : String) : Array(String)
     Mod::Reach.sources(package).compact_map do |file|
       name = ::Path[file].relative_to(package).to_posix.to_s.rchop(".iyi")
-      text = File.read(file)
-      next unless text.each_line.any? { |line| line.strip == "module #{name}" }
-      next unless text.each_line.any?(&.starts_with?("pub "))
+      lines = File.read(file).lchop('\uFEFF').lines
+      next unless lines.any? { |line| line.partition('#')[0].split == ["module", name] }
+      next unless lines.any? { |line| line.starts_with?("pub") && (after = line[3]?) && after.whitespace? }
       name
     end
   end

@@ -452,7 +452,11 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
   if [ "$source_status" -ne "$artifact_status" ]; then
     unconsumable="$unconsumable $name"
     echo "  $name: exits $artifact_status from its artifacts and $source_status from source"
-    sed -n '1,6p' "$work/artifact.out" | sed 's/^/    /'
+    # The end of the run that failed, which is where its check is named:
+    # the head of the one that passed said nothing about why.
+    failed_out="$work/source.out"
+    [ "$artifact_status" -ne 0 ] && failed_out="$work/artifact.out"
+    tail -n 6 "$failed_out" | sed 's/^/    /'
     continue
   fi
   # Two exercises print something no two builds can agree on, and for them

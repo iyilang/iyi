@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **A comment after a block's `{` or a proc literal's `{` or `do` keeps the
+  `}` or `end` on a line of its own.** The formatter asked only whether a
+  line break came after the opener, and a comment there had already taken
+  it: the body was written one column in and the closer went onto the last
+  line, after that line's comment, where it closed nothing - `run { # c` /
+  `puts y # d` / `}` came back as `puts y # d }`, and `iyi check` of the
+  result said "expecting token '}', not 'EOF'"; `-> do # c` ended
+  `x + 1 # d end`. The comment's break counts as the break now, and the
+  comment lines under `do |x| # c` stay inside the block, where they went
+  out to the call's column. `bench/verbs_exercise.sh` formats a block, a `{`
+  proc literal and a `do` one each with a comment after the opener and on
+  the last line, and requires each unchanged; the old compiler moved the
+  closer into the comment.
+
 - **`iyi env -- IYI_PATH` prints that one value.** Only the names before
   `--` were read, so it printed all six variables as a shell script, exit
   0. `bench/verbs_exercise.sh` compares it with `iyi env IYI_PATH`; the old

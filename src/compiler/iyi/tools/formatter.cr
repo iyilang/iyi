@@ -3182,10 +3182,16 @@ module Iyi
       elsif @token.type.op_lcurly?
         write "," if needs_comma
         write " {"
-        next_token_skip_space
+        next_token
+        skip_space(@indent + 2)
         body = format_block_args node.args, node
         next_token_skip_space_or_newline if @token.type.op_semicolon?
-        if @token.type.newline?
+        # A comment after `{` or `|x|` has taken the line break with it, and
+        # the block is a nested one all the same: this asked only for the
+        # break, wrote the body after the comment, and the `}` after the
+        # last line's comment, where it closed nothing - `run { # c` /
+        # `puts y # d` / `}` came back with `# d }`, which does not compile.
+        if @token.type.newline? || @wrote_newline
           format_nested body
           skip_space_or_newline
           write_indent
@@ -3331,7 +3337,9 @@ module Iyi
       end
       skip_space_or_newline
       write_token :OP_BAR
-      skip_space
+      # Inside the block, where the comment lines under `do |x| # c` are:
+      # they went out to the call's column.
+      skip_space(@indent + 2)
 
       node.body
     end

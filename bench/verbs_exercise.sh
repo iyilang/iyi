@@ -438,6 +438,81 @@ for f in lit here interp; do
     echo "  fmt changed a formatted CRLF file ($f):"; od -c "crlf/$f.iyi" | sed -n '1,6p'; status=1
   fi
 done
+# What `fmt` writes is what was written - the same program - and is its
+# own format: `fmt -` of the input is the wanted text, and the wanted
+# text formats to itself.
+fmt_gives() { # fmt_gives <label> <input> [<want>]; <want> defaults to <input>
+  local label="$1" input="$2" want="${3-$2}" code
+  printf '%s' "$input" > fmt_in.iyi
+  printf '%s' "$want" > fmt_want.iyi
+  "$IYI" fmt - < fmt_in.iyi > fmt_got.iyi 2> fmt_err.out
+  code=$?
+  "$IYI" fmt - < fmt_want.iyi > fmt_again.iyi 2>> fmt_err.out
+  if [ "$code" -eq 0 ] && cmp -s fmt_got.iyi fmt_want.iyi && cmp -s fmt_again.iyi fmt_want.iyi; then
+    echo "  fmt $label"
+  else
+    echo "  fmt $label: exit $code, and wrote:"; sed -n '1,8p' fmt_got.iyi fmt_err.out; status=1
+  fi
+}
+# A comment after a block's `{` or `do`, or a proc literal's: the `}` or
+# `end` went onto the last line, after that line's comment, where it
+# closed nothing and the file no longer compiled.
+fmt_gives "keeps a block's } off the last line, after a comment on its {" \
+  $'def run(&)\n  yield\nend\n\nrun { # c\n  y = 1\n  puts y # d\n}\n'
+fmt_gives "keeps a proc literal's } off the last line, after a comment on its {" \
+  $'f = ->(b : Int32) { # c\n  x = b\n  x + 1 # d\n}\n'
+fmt_gives "keeps a proc literal's end off the last line, after a comment on its do" \
+  $'f = -> do # c\n  x = 1\n  x + 1 # d\nend\n'
+fmt_gives "keeps the comment lines under do |x| # c inside the block" \
+  $'[1].each do |x| # c\n  # d\n  puts x\nend\n'
+# The blanks and the `\r` a line inside a literal ends with are the
+# program's: they were stripped - only heredocs were spared - so `"a  ` /
+# `b"` printed 5 before `fmt` and 3 after.
+fmt_gives "keeps the blanks and the \\r a line inside a literal ends with" \
+  $'x = 1\ns = "a  \nb"\nt = %(c\t\nd)\nu = /e  \nf/\nv = "g\r\nh"\n'
+fmt_gives "keeps the blanks a line inside a literal in a macro ends with" \
+  $'macro m\n  puts "a  \nb".bytesize\nend\n'
+# A NUL byte inside a file is not its end. The lexer took every '\0' for
+# one, so `puts 1<NUL>` and the lines after it compiled as `puts 1` -
+# `check` exited 0 - and `fmt` wrote back the part before the NUL: a
+# UTF-16 file without its byte order mark became `p`. (`check` quotes the
+# line, NUL and all, so its answer is read as text: `grep -a`.)
+printf 'module main\n\nputs 1\000\nputs 2\n' > nul.iyi
+cp nul.iyi nul.keep
+refuses "a NUL byte in a file, formatted" "unexpected NUL byte" -- "$IYI" fmt nul.iyi
+cmp -s nul.iyi nul.keep || { echo "  fmt wrote back a file with a NUL byte in it"; status=1; }
+"$IYI" check nul.iyi > nul_check.out 2>&1
+nul_code=$?
+if [ "$nul_code" -ne 0 ] && grep -aq "unexpected NUL byte" nul_check.out && ! has_trace nul_check.out; then
+  echo "  a NUL byte in a file, checked: exits $nul_code, \"unexpected NUL byte\""
+else
+  echo "  a NUL byte in a file, checked: exit $nul_code"; sed -n '1,3p' nul_check.out | tr -d '\000'; status=1
+fi
+printf 'p\000u\000t\000s\000 \0001\000\n\000' > utf16.iyi
+refuses "a UTF-16 file without its mark, formatted" "unexpected NUL byte" -- "$IYI" fmt --check utf16.iyi
+# `.or(...)` and `.or_panic` on the line under their value: "expecting .,
+# not `NEWLINE`", and "there's a bug formatting".
+fmt_gives "takes .or and .or_panic on the line under their value" \
+  $'x = g(-1)\n  .or(2)\ny = g(5)\n  .or_panic\nz = g(1).or( # c\n  2)\n'
+# Under a comment on an `if` or `while` line, `/=` was read as a regex.
+fmt_gives "takes x /= y and x //= y under a comment on an if or while line" \
+  $'a = 8\nif a > 1 # c\n  a /= 2\nend\nwhile a > 1 # c\n  a //= 2\nend\n'
+# A comment in an import's name list, or between `x =` or `type X =` and
+# the value, moved at every `fmt`.
+fmt_gives "keeps a comment in an import's name list on its own line" \
+  $'import std/json::{JSON,\n  # more\n  Builder}\n'
+fmt_gives "keeps a comment between x = or type X = and the value on its own line" \
+  $'escape =\n  # note\n  if b\n    "one"\n  else\n    "other"\n  end\ntype X =\n  # c\n  Int32\nx = 1\nx += # c\n  2\n'
+# A ```crystal fence in a `.iyi` doc comment lost its tag, which made the
+# other language's example iyi.
+fmt_gives "keeps a doc comment's \`\`\`crystal fence tagged in an iyi file" \
+  $'# The original:\n#\n# ```crystal\n# def save!\n#   @x  =  1\n# end\n# ```\ndef add(a, b)\n  a + b\nend\n'
+# A `"a" \` continued by a comment line, where the parser ends the literal:
+# the formatter took the next line's literal into it, and gave up.
+fmt_gives "ends a literal where the parser does, at a comment after its \\" \
+  $'x = "a" \\\n    # note\n    "b"\n' $'x = "a" \\\n    # note\n"b"\n'
+fmt_gives "sets traits and impls apart by a blank line, as classes are" \
+  $'trait A\nend\nimpl A for B\nend\n' $'trait A\nend\n\nimpl A for B\nend\n'
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     # A module reached through an 8.3 short name, which only the file

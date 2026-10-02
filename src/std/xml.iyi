@@ -23,7 +23,11 @@
 # values written as a decimal reference. A comment or a processing
 # instruction has no such escape, so `--` in a comment, a comment ending in
 # `-`, and `?>` in a processing instruction are refused when the node is made
-# or its text set.
+# or its text set. `to_xml` refuses a name that is not an XML name (and a
+# processing instruction target `xml`, or one holding a colon) and a
+# character XML cannot hold at all (a C0 control but tab, newline and
+# carriage return; U+FFFE; U+FFFF): written as they were, they made a
+# document no parser reads. A parsed document holds none of them.
 #
 # What it refuses, each with the line and column:
 #   * an undeclared entity (`&bogus;`), an unterminated one (`&amp` without
@@ -461,18 +465,30 @@ pub class Node
   # With *ascii* (a document declared US-ASCII), a character past U+007F in
   # text or an attribute value is written as a character reference: written
   # as its UTF-8 bytes, it made a document no other parser reads.
+  #
+  # A name that is not an XML name, and a character XML cannot hold at all
+  # (a C0 control but tab, newline and carriage return; U+FFFE, U+FFFF; a
+  # byte that is not UTF-8), are refused here: both were written as they
+  # were, so `set_attribute("k=\"1\" j", "2")` wrote two attributes and a
+  # "\u0001" in text a document no parser reads. A parsed tree holds
+  # neither.
   protected def serialize_node(buf : Array(String), ascii : Bool = false) : Nil
     if @node_type.element?
+      Node.check_writable_name(@name, "element")
       buf << "<"
       buf << @name
       ns_i = 0
       while ns_i < @namespaces.size
+        Node.check_writable_text(@namespaces[ns_i].uri)
+        Node.check_writable_name(@namespaces[ns_i].prefix, "namespace prefix") unless @namespaces[ns_i].default?
         buf << " "
         buf << @namespaces[ns_i].to_s(ascii)
         ns_i = ns_i + 1
       end
       attr_i = 0
       while attr_i < @attributes.size
+        Node.check_writable_name(@attributes[attr_i].name, "attribute")
+        Node.check_writable_text(@attributes[attr_i].value)
         buf << " "
         buf << @attributes[attr_i].to_s(ascii)
         attr_i = attr_i + 1
@@ -491,16 +507,24 @@ pub class Node
         buf << ">"
       end
     elsif @node_type.text?
+      Node.check_writable_text(@content)
       buf << Std::Xml.escape(@content, ascii)
     elsif @node_type.cdata?
+      Node.check_writable_text(@content)
       buf << "<![CDATA["
       serialize_cdata_body(buf)
       buf << "]]>"
     elsif @node_type.comment?
+      Node.check_writable_text(@content)
       buf << "<!--"
       buf << @content
       buf << "-->"
     elsif @node_type.pi?
+      Node.check_writable_name(@name, "processing instruction target")
+      if @name.downcase == "xml" || @name.includes?(":")
+        raise "'#{@name}' is reserved or holds a colon, so the processing instruction target cannot be written"
+      end
+      Node.check_writable_text(@content)
       buf << "<?"
       buf << @name
       if !@content.empty?
@@ -547,6 +571,26 @@ pub class Node
       end
     end
     buf << @content[run_start, len - run_start]
+  end
+
+  # What `to_xml` refuses to write (see `serialize_node`): a name that is
+  # not an XML name, and a character XML cannot hold raw or as a reference.
+  protected def self.check_writable_name(name : String, what : String) : Nil
+    raise "'#{name}' is not an XML name, so the #{what} cannot be written" unless Parser.name_shaped?(name)
+  end
+
+  protected def self.check_writable_text(text : String) : Nil
+    ptr = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      b = ptr[i]
+      if b < 32_u8 && b != 9_u8 && b != 10_u8 && b != 13_u8
+        raise "control character U+#{Parser.hex4(b.to_i32)} cannot be written: XML has no way to hold it"
+      end
+      i = i + 1
+    end
+    bad = Parser.first_bad_character(text, 0, false)
+    raise "#{bad[1]}, so it cannot be written" if bad[0] >= 0
   end
 end
 
@@ -1637,8 +1681,9 @@ pub class Parser
     if @pos >= @len
       fail("expected a name, found the end of the input")
     else
+      point = Parser.point_at(@input.to_unsafe, @pos, @len)[0]
       b = byte_at(@pos)
-      found = b >= 32_u8 && b < 127_u8 ? "'#{b.unsafe_chr}'" : "U+#{Parser.hex4(b.to_i32)}"
+      found = b >= 32_u8 && b < 127_u8 ? "'#{b.unsafe_chr}'" : "U+#{Parser.hex4(point < 0 ? b.to_i32 : point)}"
       fail("expected a name, found #{found}")
     end
     ""
@@ -1663,41 +1708,86 @@ pub class Parser
       i = i + 1
     end
     return true if colons == 0
-    if colons == 1 && ptr[0] != 58_u8 && ptr[len - 1] != 58_u8 && Parser.name_start_byte?(ptr[colon_at + 1])
+    if colons == 1 && ptr[0] != 58_u8 && ptr[len - 1] != 58_u8 && Parser.name_char_width(ptr, colon_at + 1, len, true) > 0
       return true
     end
     fail_at(line, col, "'#{name}' is not a qualified name: a name is 'local' or 'prefix:local'")
     false
   end
 
-  # ASCII letters, `_` and `:` start a name; digits, `-` and `.` continue
-  # one; any byte of a non-ASCII character does both.
-  protected def self.name_start_byte?(b : UInt8) : Bool
-    (b >= 97_u8 && b <= 122_u8) || (b >= 65_u8 && b <= 90_u8) || b == 95_u8 || b == 58_u8 || b >= 128_u8
+  # The name characters of XML 1.0 (fifth edition, productions [4] and
+  # [4a]): ASCII letters, `_` and `:` and the letters past U+00BF start a
+  # name; digits, `-`, `.`, U+00B7 and the combining marks continue one.
+  # Every byte past 0x7F did both, so `<a×b/>` and a no-break space or an
+  # ideographic space inside a name were read, and written back, as names.
+  protected def self.name_start_point?(cp : Int32) : Bool
+    return (cp >= 97 && cp <= 122) || (cp >= 65 && cp <= 90) || cp == 95 || cp == 58 if cp < 0xC0
+    (cp <= 0x2FF && cp != 0xD7 && cp != 0xF7) || (cp >= 0x370 && cp <= 0x1FFF && cp != 0x37E) ||
+      cp == 0x200C || cp == 0x200D || (cp >= 0x2070 && cp <= 0x218F) || (cp >= 0x2C00 && cp <= 0x2FEF) ||
+      (cp >= 0x3001 && cp <= 0xD7FF) || (cp >= 0xF900 && cp <= 0xFDCF) || (cp >= 0xFDF0 && cp <= 0xFFFD) ||
+      (cp >= 0x10000 && cp <= 0xEFFFF)
   end
 
-  protected def self.name_byte?(b : UInt8) : Bool
-    name_start_byte?(b) || (b >= 48_u8 && b <= 57_u8) || b == 45_u8 || b == 46_u8
+  protected def self.name_point?(cp : Int32) : Bool
+    name_start_point?(cp) || (cp >= 48 && cp <= 57) || cp == 45 || cp == 46 || cp == 0xB7 ||
+      (cp >= 0x300 && cp <= 0x36F) || cp == 0x203F || cp == 0x2040
+  end
+
+  # The code point of the UTF-8 character at *i* and its width; -1 and 1
+  # for a byte that begins no well-formed character (overlong included).
+  protected def self.point_at(ptr : Pointer(UInt8), i : Int32, len : Int32) : Tuple(Int32, Int32)
+    b = ptr[i]
+    return {b.to_i32, 1} if b < 128_u8
+    n = b >= 0xF5_u8 ? 0 : (b >= 0xF0_u8 ? 4 : (b >= 0xE0_u8 ? 3 : (b >= 0xC2_u8 ? 2 : 0)))
+    return {-1, 1} if n == 0 || i + n > len
+    cp = (b & (n == 2 ? 0x1F_u8 : (n == 3 ? 0x0F_u8 : 0x07_u8))).to_i32
+    k = 1
+    while k < n
+      c = ptr[i + k]
+      return {-1, 1} if (c & 0xC0_u8) != 0x80_u8
+      cp = (cp << 6) | (c & 0x3F_u8).to_i32
+      k = k + 1
+    end
+    return {-1, 1} if (n == 3 && cp < 0x800) || (n == 4 && (cp < 0x10000 || cp > 0x10FFFF))
+    {cp, n}
+  end
+
+  # The width of the name character at *i* (one that may start a name
+  # when *first*), or 0 where there is none. A byte past 0x7F that begins
+  # no XML character counts as one, so `step` refuses it with the
+  # encoding's sentence where it stands; an ASCII control ends the name.
+  protected def self.name_char_width(ptr : Pointer(UInt8), i : Int32, len : Int32, first : Bool) : Int32
+    return 0 if i >= len
+    point = point_at(ptr, i, len)
+    cp = point[0]
+    return 1 if cp < 0 || (cp >= 0x80 && !xml_char?(cp))
+    ok = first ? name_start_point?(cp) : name_point?(cp)
+    ok ? point[1] : 0
+  end
+
+  # Where the name starting at *i* ends: *i* itself when none starts there.
+  protected def self.name_end(ptr : Pointer(UInt8), i : Int32, len : Int32) : Int32
+    at = i
+    while at < len
+      width = name_char_width(ptr, at, len, at == i)
+      break if width == 0
+      at = at + width
+    end
+    at
   end
 
   # Whether all of *text* is one name.
   protected def self.name_shaped?(text : String) : Bool
-    ptr = text.to_unsafe
     len = text.bytesize
-    return false if len == 0 || !name_start_byte?(ptr[0])
-    i = 1
-    while i < len
-      return false unless name_byte?(ptr[i])
-      i = i + 1
-    end
-    true
+    len > 0 && name_end(text.to_unsafe, 0, len) == len
   end
 
   private def parse_name? : String?
     return nil if @pos >= @len
-    return nil unless Parser.name_start_byte?(byte_at(@pos))
+    finish = Parser.name_end(@input.to_unsafe, @pos, @len)
+    return nil if finish == @pos
     start = @pos
-    while @pos < @len && Parser.name_byte?(byte_at(@pos))
+    while @pos < finish
       step
     end
     slice_from(start)

@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- **`std/xml` reads and writes only XML names, and writes nothing a
+  reader cannot read back.** Every byte past 0x7F was a name character,
+  so `<a\u00A0k="1"/>` and `<a\u00D7b/>` were accepted and written back
+  with invisible spaces inside names; names are checked by code point
+  against XML 1.0's ranges now. And `to_xml` wrote any name and text it
+  was handed: `set_attribute("x=\"1\" y", "2")` wrote a second attribute,
+  and control characters went out raw. It refuses those now, as it
+  already refused `--` in a comment. Found by 170,000 documents read by
+  iyi, expat and libxml2.
+- **`std/yaml` reads six things as the spec does.** `{<< : {a: 1}}` and
+  `[<<: {a: 1}]` merge, as a block mapping does; a tab after a block
+  scalar's or a continuation line's indentation is text, not refused
+  indentation; a plain scalar's continuation line may start with `- `;
+  `[[a]: b]` is refused like `{[a]: b}`, where it was read and then
+  could not be dumped; and a second tag or anchor on one node is
+  refused, where the later tag silently won. Found by 200,000 documents
+  against PyYAML and libyaml.
+
 - **`std/json` writes UTF-8, and a derive keeps a default for `null`.**
   `to_json` and the builder copied bytes that are not UTF-8 straight
   through, so the module's own reader refused what its writer wrote; an

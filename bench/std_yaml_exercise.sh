@@ -253,6 +253,33 @@ prove_caught utf16 "a UTF-16 stream is refused for its first zero byte" \
 prove_caught eofbreak "a block scalar ending the stream gets a line feed it lacks" \
   "a literal entry ending the stream without a line break keeps no line feed it lacks" \
   'final = lines.size > 0 && @ends[last_content] < @size' 'final = lines.size > 0'
+prove_caught mergespaced "a flow '<<' merges only with its ':' adjacent" \
+  "a merge key spaced from its ':' merges" \
+  'key.kind == Any::KIND_STRING && key.as_s == "<<"' 'key.kind == Any::KIND_STRING && key.as_s == "<<" && @bytes[pos + 2] == 58_u8'
+prove_caught mergepair "a one-pair flow mapping keeps '<<' as a key" \
+  "a merge in a one-pair flow mapping merges" \
+  'if merge_key?(item_pos, item)' 'if false && merge_key?(item_pos, item)'
+prove_caught blocktab "a tab after a block scalar's spaces counts as indentation" \
+  "a tab after a block scalar's indentation is text" \
+  $'if skip_blank(@starts[look]) < @ends[look]\n          indent = spaces if spaces > indent' \
+  $'if skip_blank(@starts[look]) < @ends[look]\n          indent = skip_blank(@starts[look]) - @starts[look] if skip_blank(@starts[look]) - @starts[look] > indent'
+prove_caught dashline "a continuation line starting with '- ' is refused" \
+  "a continuation line starting with '- ' is text" \
+  $'      # and as a tab in the indentation.\n' \
+  $'      # and as a tab in the indentation.\n      if sequence_entry?(look)\n        fail("bad indentation of a sequence entry", @heads[look])\n        break\n      end\n'
+prove_caught tabline "a tab after a continuation line's spaces is refused" \
+  "a tab after a continuation line's indentation separates" \
+  $'      # and as a tab in the indentation.\n' \
+  $'      # and as a tab in the indentation.\n      if @tabbed[look]\n        fail("tab used for indentation", @heads[look])\n        break\n      end\n'
+prove_caught pairkey "a one-pair flow mapping takes a collection key" \
+  'accepted "[[a]: b]' \
+  'if item.kind == Any::KIND_ARRAY || item.kind == Any::KIND_HASH' 'if false'
+prove_caught secondtag "a second tag replaces the first" \
+  'accepted "a: !!str !!int 1' \
+  'fail("a second tag", pos) unless tag.nil?' 'nil'
+prove_caught secondanchor "a second anchor in a flow collection replaces the first" \
+  'refusal of "[&a &b 1, *a]' \
+  $'the `!!int`.\n        fail("a second anchor", pos) unless anchor.nil?' $'the `!!int`.\n        nil'
 
 echo
 if [ "$status" -eq 0 ]; then

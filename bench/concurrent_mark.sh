@@ -291,16 +291,18 @@ fi
 # The wake is one scheduling race per collection, and the check counts
 # the races lost over two hundred and fifty: on a four-core runner the
 # boosted build lost 5 to 88 in each of 40 runs, where the check allows 3.
-# Five runs still, and the first that is caught is the proof.
+# Ten runs, and the first that is caught is the proof: on an idle twelve-core
+# machine the boost showed in 1 wake of 256 across five runs once, and the
+# next run of the gate caught it on its second.
 caught=""
-for try in 1 2 3 4 5; do
+for try in 1 2 3 4 5 6 7 8 9 10; do
   timeout -k 5 300 ./boosted-run > boosted.txt 2>&1
   code=$?
   if [ "$code" -eq 1 ] && grep -q "waking the helpers held the program's thread" boosted.txt; then
     caught="$try"; break
   fi
 done
-[ -n "$caught" ] || { echo "the wake check did not fire in 5 runs:"; tail -3 boosted.txt; exit 1; }
+[ -n "$caught" ] || { echo "the wake check did not fire in 10 runs:"; tail -3 boosted.txt; exit 1; }
 printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 'waking the helpers' boosted.txt)"
 
 step "failure proof: a mark beside a busy program that asks for every helper is caught"

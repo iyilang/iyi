@@ -179,6 +179,12 @@ prove_fails "an append that copies twice" no_owning "list.iyi" "list: an append 
 prove_fails "a list that keeps the caller's array" no_copy "list.iyi" "list: the caller's array is not the list's" \
   's/@items = items.dup/@items = items/'
 
+# 12b. A list's iterator copied into the adaptor built on it (a struct again).
+prove_fails "a list iterator copied into its adaptor" copied_list_iter "list.iyi" "list: an adaptor shares its iterator" \
+  's/^pub class ListIterator(T)/pub struct ListIterator(T)/'
+prove_fails "a slice iterator copied into its adaptor" copied_slice_iter "slice.iyi" "slice: an adaptor shares its iterator" \
+  's/^pub class SliceIterator(T)/pub struct SliceIterator(T)/'
+
 # 13-15. A nil element read back as "no previous element": the nil test
 #     each of the three used before the flag, put back.
 prove_fails "each_cons_pair skips the pair after a nil" nil_cons_pair "enumerable.iyi" "enum: each_cons_pair after a nil element" \
@@ -513,6 +519,40 @@ if [ -n "$unportable" ]; then
   status=1
 else
   echo "  every exercise reads its own artifacts on darwin, windows, aarch64 and musl"
+fi
+
+echo
+echo "== every std module together, beside std/bool, on every platform"
+# `module std/bool` declares the namespace `Std::Bool`, and inside every
+# other std module a bare `Bool` then names it rather than the type: a
+# program importing std/bool with std/socket, std/udp, std/http, std/debug
+# or std/process did not compile, each on some target. One program that
+# imports every module, typechecked for each target, is the check.
+together="$WORK/together"
+mkdir -p "$together"
+{
+  for module in "$REPO"/src/std/*.iyi; do
+    echo "import std/$(basename "$module" .iyi)"
+  done
+  echo 'puts 1'
+} > "$together/all.iyi"
+apart=""
+for target in "" x86_64-windows-msvc aarch64-darwin aarch64-linux-gnu x86_64-linux-musl; do
+  if [ -n "$target" ]; then
+    flags=(--no-codegen --target "$target")
+  else
+    flags=(--no-codegen)
+  fi
+  if ! (cd "$together" && "$IYI" build "${flags[@]}" -o all all.iyi) > "$together/${target:-host}.log" 2>&1; then
+    apart="$apart ${target:-host}"
+    echo "  ${target:-host}: $(grep -m1 -E 'Error|BUG' "$together/${target:-host}.log" | cut -c1-160)"
+  fi
+done
+if [ -n "$apart" ]; then
+  echo "  FAIL: every std module does not compile together on:$apart"
+  status=1
+else
+  echo "  every std module compiles beside every other, std/bool among them, on five targets"
 fi
 
 echo

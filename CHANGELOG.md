@@ -2,145 +2,265 @@
 
 ## Unreleased
 
-### Added
-
-- **`Math.bessely0`, `bessely1`, `besselj` and `bessely`, and `besselj0`
-  and `besselj1` as glibc computes them.** The four were the rest of the
-  ten names Crystal's `Math` has and iyi's did not; the two iyi had were a
-  series and an asymptotic form, and differed from glibc 2.43 for 157,547
-  and 156,810 of 200,000 arguments. All six are fdlibm's `e_j0.c`,
-  `e_j1.c` and `e_jn.c` now, as glibc carries them, with what its
-  wrappers answer - NaN below zero and -inf at it for the second kind, an
-  infinity of the order's parity for `bessely(n, 0)` - and single and
-  generic overloads as Crystal has. Past 2 they take sin and cos, which
-  are CORE-MATH's in iyi and IBM's in glibc, so they differ from glibc's
-  where glibc's sin or cos is not correctly rounded: 204 and 195 of the
-  same 200,000. The oracle carries the three files on CORE-MATH's sin and
-  cos, and the math gate requires 127,000 arguments of each of the four
-  and 62,000 order-argument pairs of `besselj` and `bessely` to the last
-  bit, and proves the check fails with j0's numerator a term short and
-  yn's recurrence adding where it subtracts.
-
-- **`Math.isqrt`, `pw2ceil`, `ilogb`, `logb`, `scalbn` and `scalbln`.** Six
-  of the ten names Crystal's `Math` has and iyi's did not. `isqrt` and
-  `pw2ceil` answer in the argument's own integer type, the root by the
-  other library's bit-at-a-time method; a negative `isqrt` and a power of
-  two the type cannot hold panic, where that library raises. `ilogb` and
-  `logb` answer as C does at the edges - the least `Int32` for zero and
-  NaN, the greatest for an infinity, -inf from `logb(0)`, a subnormal's
-  own exponent - and `scalbn` is `ldexp`, `scalbln` its Int64 form. The
-  math exercise checks each at its edges and proves the checks fail with
-  the root not halved and the exponent one too high.
-
-### Changed
-
-- **`Math.atan2` is correctly rounded.** It was `atan(y / x)` corrected
-  by pi, which rounds twice: against CORE-MATH's correctly rounded atan2
-  it was wrong for 211,999 of 1,748,883 pairs, and against glibc 2.43's
-  (IBM's) for 211,906. It is CORE-MATH's now (MIT, revision
-  b1a4badf6765), its 192-bit slow path in 64-bit words over the shared
-  multiply, the exception flags it sets and clears dropped - none feeds
-  an answer - and differs from none of those pairs; glibc's differs from
-  it for 12,077, each an ulp. A typical call costs 32 ns where it cost
-  28; the rare pair that needs the slow path costs microseconds. The
-  oracle carries `atan2.c` and `tint.h`, and the math gate requires
-  209,000 pairs - every quadrant, quotients from 2^-1100 to 2^1100, the
-  table's 64ths, subnormals, the specials crossed - to the last bit and
-  proves the check fails with the quotient losing its divisor's low
-  part and the slow product its middle carries.
-
-- **`Math.hypot` and `cbrt` are correctly rounded.** Against the true
-  value rounded to the nearest double they were wrong for 5,323 and 6,413
-  of 20,000 arguments; they are CORE-MATH's (MIT, revision b1a4badf6765)
-  now, the one 128-bit product in hypot taken by the shared 64-bit
-  multiply, and wrong for none. glibc 2.43's hypot is right on the same
-  20,000, so iyi's now answers as Crystal's does - but for pairs of
-  subnormals, where glibc's is not correctly rounded; its cbrt is wrong
-  for 10,817 of them, and there the two differ. The oracle carries the two
-  files and the math gate requires 145,000 cbrt arguments and 120,000
-  hypot pairs to the last bit and proves the check fails with cbrt's
-  residual losing its cube's low part and hypot's square losing its own.
-
-- **`Math.fma` without FMA hardware is three to four times as fast.**
-  musl's arm took 10 ns a call on x86_64 without FMA3 (and on wasm32,
-  which has no such instruction); the correctly rounded functions make a
-  dozen calls apiece there, and cos took 300 ns against glibc's 7. The
-  common case is Boldo and Melquiond's proved emulation now - the product
-  exact by Dekker's split, z added exactly, the low parts' sum rounded to
-  odd, one rounding to nearest - taken while every exponent is well
-  inside the range and the result is not tiny or zero, with musl's for
-  the rest: 3 ns a call, faster than glibc's software fma at 6; sin 18 ns,
-  cos 110 and tan 140 over [-10, 10], from 50, 300 and 280. The fma cases
-  gain 20,000 where rounding the low parts to nearest instead of to odd
-  rounds twice, and the math gate proves the check fails without that
-  step. On processors with FMA nothing changes: the instruction answers.
-
-- **`Math.lgamma`, `tgamma` and `gamma` are correctly rounded, and
-  glibc's.** They were Lanczos and Stirling sums, and answered
-  differently from glibc 2.43 for 60,071 and 90,098 of 100,000 arguments.
-  They are CORE-MATH's (MIT), which glibc 2.43 carries, with their
-  tables; what glibc's `lgamma` and `tgamma` symbols add around them is
-  kept too, so **`gamma(+-0.0)` is an infinity of zero's sign**, where it
-  was NaN, and a negative integer or -inf is NaN. On a machine without
-  FMA they cost 283 and 204 ns against glibc's 149 and 109, and 28 and
-  25 before. The oracle carries glibc's two files behind its wrappers'
-  answers and the math gate requires 201,000 arguments of each to the
-  last bit - the whole range, every integer and half-integer from -200 to
-  200 and each side of them, lgamma's zeros at 1 and 2 - and proves the
-  check fails with their shared two-sum losing its low part.
-
-- **`Math.atan`, `asin` and `acos` are correctly rounded.** Against the
-  true value rounded to the nearest double they were wrong for 1,913,
-  5,338 and 6,821 of 15,000 arguments each; they are CORE-MATH's (MIT,
-  revision b1a4badf6765) now, with their tables, and wrong for none.
-  glibc 2.43's are IBM's, wrong for 1, 11 and 5 of the same 15,000, so a
-  program printing them agrees with Crystal's everywhere but there -
-  where it disagreed for 18% to 29% of arguments before. `atan2`, built
-  on `atan`, follows. The oracle carries CORE-MATH's three files and the
-  math gate requires 180,000 arguments of each to the last bit - the
-  whole range, the small-argument band, both ends of [-1, 1] - and
-  proves the check fails with their shared two-sum losing its low part.
-
-- **`Math.asinh`, `acosh` and `atanh` are correctly rounded, and
-  glibc's.** They were series near zero and `log1p` forms elsewhere, and
-  answered differently from glibc 2.43 for 43,123, 25,295 and 1,765 of
-  250,000 arguments. They are CORE-MATH's (MIT), which glibc 2.43 carries,
-  with their tables and the double-double helpers they share; the answer
-  out of the domain is glibc's own, NaN for `acosh(x < 1)` and
-  `atanh(|x| > 1)` and an infinity at `atanh(+-1)`. On a machine without
-  FMA they cost what the old ones did, twice glibc's. The oracle carries
-  glibc's five files and the math gate requires 205,000 arguments of each
-  to the last bit - the whole range, 1 from above for acosh and from
-  below for atanh, the subnormals - and proves the check fails with the
-  shared two-sum losing its low part, acosh near 1 without its square
-  root's correction, and atanh's 1 - |x| rounded.
-
-- **`Math.erf` and `erfc` are correctly rounded, and glibc's.** They were
-  a series and a continued fraction to about 1e-15, and `erf` of a
-  subnormal panicked "arithmetic overflow" - its series never stopped.
-  They are CORE-MATH's (MIT), which glibc 2.43 carries, with their
-  tables: every answer is the double nearest the true value, so the same
-  as glibc's for every argument, FMA or not. On this change's machine,
-  which has no FMA and takes `Math.fma`'s software arm, erf costs 97 ns
-  and erfc 348 against glibc's 60 and 173. `bench/libm_oracle/core_math`
-  carries glibc's five files and the math gate requires 212,000
-  arguments of each to the last bit - 2^-70 to 32, the subnormals,
-  erfc's subnormal results and its negatives - and proves the check
-  fails with the fast path's two-sum losing its low part, erfc's 1/x
-  losing its, and 1 + erf rounded for a negative erfc.
-
-- **`Math.sinh`, `cosh` and `tanh` are glibc's.** They were a series near
-  zero, `exp(x - ln 2)` past 709 and the textbook forms between, and
-  answered differently from glibc 2.43 in the last bit for 952 arguments
-  of sinh in 100,000, 217 of cosh and 4,863 of tanh. They are fdlibm's
-  `e_sinh.c`, `e_cosh.c` and `s_tanh.c` now, glibc 2.43's, branch for
-  branch at its thresholds, on the `exp` and `expm1` that are glibc's to
-  the last bit already. `bench/libm_oracle` carries the three files and
-  `bench/std_math_exercise.sh` requires 264,000 arguments of each to the
-  last bit - both sides of every threshold, both signs, the specials - and
-  proves the check fails with each function's small-argument branch moved.
-
 ### Fixed
+
+- **Three macro answers.** `"99999999999".to_i == x` stopped the
+  compile with "Invalid Int32" since integer literals compare exactly
+  (above), and so did `uniq`, `includes?` and a hash lookup on such a
+  number; the integer is read from its text now. `gsub` with `\k<name>`
+  wrote the reference as text. And a range whose end is written in
+  another integer kind lost its last element: `(0_i8..0).to_a` was `[]`.
+  Found by 38,456 macro expressions compared with Crystal's.
+
+- **`std/xml` reads and writes only XML names, and writes nothing a
+  reader cannot read back.** Every byte past 0x7F was a name character,
+  so `<a\u00A0k="1"/>` and `<a\u00D7b/>` were accepted and written back
+  with invisible spaces inside names; names are checked by code point
+  against XML 1.0's ranges now. And `to_xml` wrote any name and text it
+  was handed: `set_attribute("x=\"1\" y", "2")` wrote a second attribute,
+  and control characters went out raw. It refuses those now, as it
+  already refused `--` in a comment. Found by 170,000 documents read by
+  iyi, expat and libxml2.
+- **`std/yaml` reads six things as the spec does.** `{<< : {a: 1}}` and
+  `[<<: {a: 1}]` merge, as a block mapping does; a tab after a block
+  scalar's or a continuation line's indentation is text, not refused
+  indentation; a plain scalar's continuation line may start with `- `;
+  `[[a]: b]` is refused like `{[a]: b}`, where it was read and then
+  could not be dumped; and a second tag or anchor on one node is
+  refused, where the later tag silently won. Found by 200,000 documents
+  against PyYAML and libyaml.
+
+- **`std/json` writes UTF-8, and a derive keeps a default for `null`.**
+  `to_json` and the builder copied bytes that are not UTF-8 straight
+  through, so the module's own reader refused what its writer wrote; an
+  ill-formed sequence is written as U+FFFD now, as `to_ascii_json`
+  already did. And a derived field with a default refused `null`, where
+  the other library keeps the default. Found by 228,134 documents
+  against Python's json and Crystal, which otherwise agreed throughout.
+
+- **The language server answers about the line the cursor is on while a
+  buffer does not compile.** It answered from the last program that did,
+  at the buffer's current line numbers, so after Enter and half a
+  statement, definition and highlight below it named what was a line
+  away; the last good text is now laid over the buffer's lines first.
+- **Rename and references keep to one method.** Every `getter` in the
+  program was one method to them, because a macro-written def was keyed
+  by its macro's position: renaming `p.x` rewrote `p.y`. And `new` made
+  from `initialize` shared its key, so renaming `Point.new` turned
+  `def initialize(` into `make make(`. Both renames are refused now,
+  and renaming `initialize` touches its name alone.
+- **Signature help counts the arguments that are there and names the
+  right type.** Commas in a string, an array or a comment counted as
+  arguments, and `Nums.new(` in a module file offered every type's
+  constructor, compiler-written ones included.
+- **An outline selects the name.** `def self.make`, an `enum` and an
+  `impl` selected text beside their names, and a range's end was counted
+  in code points rather than UTF-16. The server also forgets a closed
+  buffer's text. Found by 441,870 requests and 9,891 edits over 197 files.
+
+- **A module header inside a body is an error.** `module bar` inside a
+  `class`, an `if` or a `begin` parsed as a header and was dropped
+  without a word - its `def`s went to the class - and inside a `begin`
+  it was taken for the file's own header and the `begin` left the tree.
+  It is refused now, pointing at `module Bar`.
+- **`when 1e400` is parsed.** A float literal past a double's range
+  raised `ArgumentError` out of the parser, through the duplicate-when
+  check's hash; it has been since the exact integer equality above, and
+  in the other compiler too.
+
+- **`fmt` settles on `annotation Foo # note`.** A comment after an
+  annotation's name already ended the line, and `fmt` added a blank line
+  under it on every pass.
+- **`fmt` keeps the end of a line inside a string.** It trimmed every
+  line, so `"b   ⏎c"` lost its spaces and a `%(...)` written with CRLF
+  lost the `\r`: the string changed. Lines that end inside a string are
+  kept as written now. The other compiler's formatter does the same.
+- **`fmt` keeps a heredoc's last blank line and a sign written apart.**
+  A line of spaces just above a heredoc's terminator is an empty line of
+  the string, and `fmt` trimmed it, so `<<-EOS\n  a\n  \n  EOS` went
+  from "a\n\n" to "a\n". And `- 1.abs`, which is `-(1.abs)`, became
+  `-1.abs`, which is `(-1).abs`; `- -1` became `--1` and `- 1_u8` became
+  `-1_u8`, neither of which parses. Both came from the other compiler's
+  formatter, whose specs pinned the heredoc trim; those specs now pin
+  the meaning.
+- **`fmt` no longer raises on three spellings the parser accepts:**
+  `.or(0)` or `.or_panic` on the line under its call, `&.succ!` and
+  `&.size!.succ` as a block, and a space or `\` line break before an
+  import's `::`. Found by 160,000 mutants of every `.iyi` file in the
+  tree and of 94 snippets, formatted twice and parsed back.
+
+- **A tuple with an element that cannot exist is stored without a
+  compiler crash.** After `return nil if x.nil?` with `x` always nil,
+  `{x, 1}` is a `Tuple(NoReturn, Int32)`, and storing it - `pairs << pr`
+  - stopped the compiler with "BUG: trying to assign Int32 <- NoReturn".
+  The store skips an element no run reaches, as an assignment of such a
+  value already did. The codegen spec checks it and crashed before; the
+  other compiler crashes the same way.
+
+- **An iterator adaptor that counts shares its count.** `take`, `skip`,
+  the two whiles, `chain`, `flat_map`, `each_cons`, `with_index`,
+  `cycle(n)` and `step` were structs, and `first(n)` takes its receiver
+  by value, so the copy kept its own count over the shared source:
+  `s = it.skip(2)`, `s.first(1)`, `s.to_a` skipped twice. They are
+  classes, as `ListIterator` and `SliceIterator` are now for the same
+  reason (`it.first(2)` then `it.to_a` gave the whole list again).
+  `zip` pulls its second source only once the first answers, as the
+  other library does: it took an element from a shared source for a
+  pair that never came. And `take` counts an empty pull, so a finished
+  pipeline is not pulled, and its blocks run, once more. Found by
+  4,700 random lazy chains counting block runs against Crystal.
+- **A float `step` with an infinite step ends.** `0.0.step(to: inf,
+  by: inf)` yielded infinity forever and `inf.step(to: 0.0, by: -inf)`
+  yielded a NaN, because the room left was NaN and the prelude's `<=>`
+  sorts NaN above every number.
+- **`abort("bye\n")` writes one newline,** as `puts` does; it wrote two.
+- **`std/debug` reads a version 2 or 3 DWARF line table.** It looked for
+  the directories one byte late, past version 4's extra field, and named
+  the frames of such a unit `??`; reachable on darwin when a dSYM holds
+  one.
+
+- **A float literal passed to a `Float32` parameter is rounded once.**
+  The call converted the double the literal was typed as, so a decimal a
+  hair past halfway between two singles landed on the tie and rounded
+  the wrong way: `take(1.00000005960464477539062500001)` was 1.0, where
+  the `_f32` suffix and `x : Float32 = ...` both read 1.0000001. The
+  codegen spec checks it and failed before.
+
+- **Integer literals the compiler compares are compared exactly.** It
+  compared them as doubles, which hold 53 bits, so a `case` refused
+  `when 36028797018963967_u64` beside `when 36028797018963968_u64` as a
+  duplicate, and the macro `9007199254740993 == 9007199254740992`
+  answered true, as `includes?` did. The parser and macro specs check
+  both and failed before.
+
+- **A `--release` build that writes artifacts writes their object code,
+  and a `--release` build reads them.** `--release` forced one LLVM
+  module, so with `--emit-iyimod` no type had a unit of its own and every
+  artifact said "object code (none)": a consumer failed to link. And a
+  single-module consumer internalised the declarations it read from an
+  artifact, which LLVM refuses - "Global is external, but doesn't have
+  external or weak linkage!", reported as a bug in the compiler, from
+  `--release --use-iyimod` and from a cross-compile against artifacts.
+  A release build that writes artifacts keeps a unit per type now, and a
+  declaration is external in every build. Found by the arithmetic fuzz;
+  the iyimod spec builds a module `--release` into an artifact, requires
+  its object code, and runs a `--release` program against it, and failed
+  before.
+
+- **`UInt8` and `UInt64` divided by a double are doubles.** `std/int`
+  wrote `/(Float64)` only for the widths the prelude does not divide,
+  and the prelude divides only `Int32` and `Int64`, so `UInt8` and
+  `UInt64` had none: `1_u8 / 3.0` took the `Float32` overload and printed
+  0.33333334, and a `Float64` variable did not type. Found by 11,130
+  random arithmetic programs compared across iyi's debug and release
+  builds, a model of iyi's rules and Crystal - which otherwise agreed on
+  all 377,781 statements, overflow panics included; the int exercise
+  checks it and proves the check fails with the overload gone.
+
+- **Seven answers of tuples, symbols, enums and `ReferenceStorage`.**
+  `Tuple#map`, `+` and `reverse` did not compile for the empty tuple -
+  the macro wrote `{ }`, an empty hash literal. A tuple whose first member
+  prints in braces printed `{{1, 2}, 3}`, which reads back as a macro;
+  it is `{ {1, 2}, 3 }`, as Crystal prints it. `NamedTuple#to_s` left a
+  key with letters past ASCII bare; `Symbol#inspect` wrote control bytes
+  raw and left `#{` to interpolate. `Mode::All.to_s` of a flags enum
+  spelled out every bit, where Crystal answers `All`. `std/enum` did not
+  import `std/int`, so an enum over `Int8`, `Int16`, `UInt16` or `UInt32`
+  compared, printed and converted wrongly or did not compile. And
+  `ReferenceStorage#hash` mixed the raw bytes where `==` compares fields,
+  so two equal storages - `0.0` and `-0.0`, or two equal strings - hashed
+  apart and a `Hash` missed one. 100,000 operation sequences against
+  Crystal and Python found these and none after, `Set`, `Heap`, `Box`,
+  `Atomic` under eight threads and `Bool` agreeing; each exercise checks
+  its fix and proves it fails.
+
+- **A reset after a full read is a reset, and a connected UDP socket
+  outlives a peer that is not there.** A TCP read whose first receive
+  filled the 4 KB buffer asked again, and dropped that receive's error
+  for "the next read" - but Linux reports a reset once and answers 0
+  after, so a transfer the peer aborted read as a clean end of stream. The
+  error is kept and the next read answers it. On Linux a connected UDP
+  socket whose peer was not listening panicked at its next send or
+  receive ("cannot send on UDP socket"): the ICMP refusal comes back as
+  ECONNREFUSED there, which the module's Windows arm already turns off
+  so a server does not die of its first stale peer; Linux and darwin
+  pass over it too now. 200,000 address literals against `inet_pton` and
+  RFC 5952, 1.3 GB of TCP round trips and 42,000 datagrams found nothing
+  else; the socket and udp exercises check both and prove each fails.
+
+- **Every std module compiles beside every other.** `module std/bool`
+  declares the namespace `Std::Bool`, and inside another std module a
+  bare `Bool` then named it rather than the type: a program importing
+  `std/bool` with `std/socket`, `std/udp`, `std/http` or (on Windows)
+  `std/debug` did not compile - "must return Std::Bool but it is
+  returning Bool". On Windows `std/atomic` did the same to `std/process`
+  and `std/signal`'s `Atomic(UInt64)`. Each writes `::Bool` and
+  `::Atomic` now, as `std/json` and `std/steppable` already did, and the
+  std gate typechecks one program importing every module for the host,
+  Windows, darwin, aarch64 Linux and musl.
+
+- **Six answers of the prelude's `String`, `Char` and integers are the
+  other library's.** On text that is not UTF-8, `String#size` counted a
+  lone continuation byte as nothing and a cut-short sequence as one
+  character, `each_char` decoded what it should have refused, and a
+  built string and a literal of the same bytes had different sizes - so
+  `rjust` padded to the wrong width; both count one character per byte
+  that does not begin a well-formed sequence now. `Char#whitespace?` left
+  out `\v` and `\f`, so `strip` kept them; `chomp('\n')` left the `\r`
+  of `\r\n`; `lines` dropped a final lone `\r`. `8 >> -2` was 0 where a
+  negative count shifts the other way (32), in the prelude's Int32 and
+  Int64 and in `std/int`'s other widths; and `233.chr` panicked, though
+  `'é'.ord` is 233 - `chr` takes every code point but the surrogates. 600,000
+  cases of `String`, `Char`, the integers, `Array`, `Hash`, `Set` and
+  `Range` against Crystal found these, and the collections and ranges
+  nothing; the library stays under its 3,734-line ceiling (3,732). The
+  number, int and text exercises check each and prove each check fails
+  with its fix undone.
+
+- **A child process gets three descriptors, and none of the parent's
+  signal handlers.** On Linux `Process.run` exec'd with every descriptor
+  the program had open and not marked close-on-exec - the poller's
+  epoll, a `File`, a listening socket - so a child held a port its parent
+  had closed and could not bind again; the child closes all but 0, 1 and
+  2 now, as Crystal's does and as the module's Windows arm already did.
+  A TERM sent to a child between its clone and its exec ran the parent's
+  handler in the child, which wrote into the parent's signal pipe: the
+  parent's `Signal.wait(TERM)` answered a signal nobody sent it. Signals
+  are blocked across the clone, and the child resets every handler
+  before it unblocks. A pipe that could not be made for lack of
+  descriptors was refused as "permission denied"; it is EMFILE. And the
+  module did not compile beside `std/bool` on any target - it wrote bare
+  `Bool` - nor on darwin beside `std/file` or `std/dir`, which bind
+  `stat64` with another signature; both bind it with `Void*` now, so
+  darwin's floor gains no symbol. 130,000 argument
+  lists, 30,000 environments, every exit code and signal, and pipes to 6
+  MiB against Python's `subprocess` found nothing else; the process
+  exercise checks each and proves the three runtime fixes fail undone.
+
+- **A directory walk keeps its buffer across a collection.** On Linux a
+  directory stream's 32 KB buffer was referenced only by an address kept
+  in an `Int64` block, which the collector does not scan, and on Windows
+  the find data the same way: a collection in the middle of a walk freed
+  it, the next directory opened took the same memory, and the first walk
+  read that one's records - in the end a record length of zero, and
+  `Dir#read` never moved past it. A program that walked a tree while
+  allocating hung, one run in two in the glob fuzz below. The stream is
+  allocated as pointers now, so the collector scans it; the dir exercise
+  walks 300 names across collections and another directory's reads, and
+  proves the walk does not end with the stream back in an `Int64` block.
+- **`Dir.glob` speaks the pattern language `File.match?` does.** It
+  matched each path whole with `*` and `?` alone: `*.{cr,iyi}`, `[xy].*`
+  and `\*` were literal text, `t/*/` and `t/**/` found nothing, and
+  `**/*.cr` found hidden files. It is the other library's walk now, a
+  segment at a time: braces expanded first, a literal segment joined
+  without a listing, `**` any number of directories, every other segment
+  matched by `File.match?`, a name starting with `.` hidden from every
+  wildcard, a symlink not walked into, a trailing separator answering
+  directories. 15,000 patterns over random trees with links agree with
+  Crystal's `Dir.glob` but one, `./**/.a`, which Crystal answers empty
+  and this answers with every `.a` named. A path is still joined with the
+  separator the pattern writes. The exercise checks each part, and three
+  proofs break braces, the trailing separator and the hidden rule.
 
 - **`GC.malloc_atomic` is documented as handing out bytes it does not
   clear.** It said "`size` zeroed bytes", and the allocator hands an
@@ -2852,6 +2972,178 @@
   dynamic table size: -1" for a negative size).
   `bench/std_hpack_exercise.sh` builds all three and expects the
   sentence; the old module ran each to exit 0.
+
+## 0.16.1 — 2026-10-01
+
+**`Math` answers the correctly rounded double.** `sin`, `cos`, `tan`,
+`atan`, `asin`, `acos`, `atan2`, `hypot` and `cbrt` are CORE-MATH's;
+`erf`, `erfc`, `asinh`, `acosh`, `atanh`, `lgamma` and `tgamma` are the
+CORE-MATH routines glibc 2.43 ships, and `sinh`, `cosh`, `tanh` and the
+Bessel functions glibc's fdlibm - each held by the math gate to its
+reference bit for bit, on Linux, Windows and darwin arm64. `sin(1e300)`
+was 0.0. `fma` rounds once, and without FMA hardware is three to four
+times as fast; `bessely0`, `bessely1`, `besselj`, `bessely`, `isqrt`,
+`pw2ceil`, `ilogb`, `logb`, `scalbn` and `scalbln` arrive. A result can
+differ from 0.16.0's in its last bit, and `gamma(±0)` is ±infinity.
+
+**About a hundred and ninety fixes, most of them found by comparing the
+library with Python, Crystal and the RFCs on millions of inputs**, each
+with a check in its module's exercise that is proven to fail without it.
+An HTTP server could be killed by a malformed chunked body and took two
+conflicting `Content-Length`s; one XML entity expanded to a gigabyte;
+`SemanticVersion` comparisons recursed forever; and a program outgrowing
+a large buffer beside a running mark could fault. **Some answers
+change:** `File.match?` speaks the full pattern language - `*` stays
+inside a segment, and `[`, `{`, `**` and `\` are syntax; `OptionParser`
+runs a short bundle (`-vq`) and sends `-q=1` to `invalid_option`;
+`CSV.parse` reads a blank line as an empty row; `UUID.parse` refuses a
+hyphen out of place; `Gzip.decompress` reads every member; HTTP refuses
+control bytes in a field and an interim `100` is no longer the response.
+
+**Windows** gains the process, path, link, console, signal and language
+server fixes of its branch. `.iyimod` is still v54, so 0.16.0's
+artifacts are rebuilt only because the compiler's version is in their
+identity.
+
+### Added
+
+- **`Math.bessely0`, `bessely1`, `besselj` and `bessely`, and `besselj0`
+  and `besselj1` as glibc computes them.** The four were the rest of the
+  ten names Crystal's `Math` has and iyi's did not; the two iyi had were a
+  series and an asymptotic form, and differed from glibc 2.43 for 157,547
+  and 156,810 of 200,000 arguments. All six are fdlibm's `e_j0.c`,
+  `e_j1.c` and `e_jn.c` now, as glibc carries them, with what its
+  wrappers answer - NaN below zero and -inf at it for the second kind, an
+  infinity of the order's parity for `bessely(n, 0)` - and single and
+  generic overloads as Crystal has. Past 2 they take sin and cos, which
+  are CORE-MATH's in iyi and IBM's in glibc, so they differ from glibc's
+  where glibc's sin or cos is not correctly rounded: 204 and 195 of the
+  same 200,000. The oracle carries the three files on CORE-MATH's sin and
+  cos, and the math gate requires 127,000 arguments of each of the four
+  and 62,000 order-argument pairs of `besselj` and `bessely` to the last
+  bit, and proves the check fails with j0's numerator a term short and
+  yn's recurrence adding where it subtracts.
+
+- **`Math.isqrt`, `pw2ceil`, `ilogb`, `logb`, `scalbn` and `scalbln`.** Six
+  of the ten names Crystal's `Math` has and iyi's did not. `isqrt` and
+  `pw2ceil` answer in the argument's own integer type, the root by the
+  other library's bit-at-a-time method; a negative `isqrt` and a power of
+  two the type cannot hold panic, where that library raises. `ilogb` and
+  `logb` answer as C does at the edges - the least `Int32` for zero and
+  NaN, the greatest for an infinity, -inf from `logb(0)`, a subnormal's
+  own exponent - and `scalbn` is `ldexp`, `scalbln` its Int64 form. The
+  math exercise checks each at its edges and proves the checks fail with
+  the root not halved and the exponent one too high.
+
+### Changed
+
+- **`Math.atan2` is correctly rounded.** It was `atan(y / x)` corrected
+  by pi, which rounds twice: against CORE-MATH's correctly rounded atan2
+  it was wrong for 211,999 of 1,748,883 pairs, and against glibc 2.43's
+  (IBM's) for 211,906. It is CORE-MATH's now (MIT, revision
+  b1a4badf6765), its 192-bit slow path in 64-bit words over the shared
+  multiply, the exception flags it sets and clears dropped - none feeds
+  an answer - and differs from none of those pairs; glibc's differs from
+  it for 12,077, each an ulp. A typical call costs 32 ns where it cost
+  28; the rare pair that needs the slow path costs microseconds. The
+  oracle carries `atan2.c` and `tint.h`, and the math gate requires
+  209,000 pairs - every quadrant, quotients from 2^-1100 to 2^1100, the
+  table's 64ths, subnormals, the specials crossed - to the last bit and
+  proves the check fails with the quotient losing its divisor's low
+  part and the slow product its middle carries.
+
+- **`Math.hypot` and `cbrt` are correctly rounded.** Against the true
+  value rounded to the nearest double they were wrong for 5,323 and 6,413
+  of 20,000 arguments; they are CORE-MATH's (MIT, revision b1a4badf6765)
+  now, the one 128-bit product in hypot taken by the shared 64-bit
+  multiply, and wrong for none. glibc 2.43's hypot is right on the same
+  20,000, so iyi's now answers as Crystal's does - but for pairs of
+  subnormals, where glibc's is not correctly rounded; its cbrt is wrong
+  for 10,817 of them, and there the two differ. The oracle carries the two
+  files and the math gate requires 145,000 cbrt arguments and 120,000
+  hypot pairs to the last bit and proves the check fails with cbrt's
+  residual losing its cube's low part and hypot's square losing its own.
+
+- **`Math.fma` without FMA hardware is three to four times as fast.**
+  musl's arm took 10 ns a call on x86_64 without FMA3 (and on wasm32,
+  which has no such instruction); the correctly rounded functions make a
+  dozen calls apiece there, and cos took 300 ns against glibc's 7. The
+  common case is Boldo and Melquiond's proved emulation now - the product
+  exact by Dekker's split, z added exactly, the low parts' sum rounded to
+  odd, one rounding to nearest - taken while every exponent is well
+  inside the range and the result is not tiny or zero, with musl's for
+  the rest: 3 ns a call, faster than glibc's software fma at 6; sin 18 ns,
+  cos 110 and tan 140 over [-10, 10], from 50, 300 and 280. The fma cases
+  gain 20,000 where rounding the low parts to nearest instead of to odd
+  rounds twice, and the math gate proves the check fails without that
+  step. On processors with FMA nothing changes: the instruction answers.
+
+- **`Math.lgamma`, `tgamma` and `gamma` are correctly rounded, and
+  glibc's.** They were Lanczos and Stirling sums, and answered
+  differently from glibc 2.43 for 60,071 and 90,098 of 100,000 arguments.
+  They are CORE-MATH's (MIT), which glibc 2.43 carries, with their
+  tables; what glibc's `lgamma` and `tgamma` symbols add around them is
+  kept too, so **`gamma(+-0.0)` is an infinity of zero's sign**, where it
+  was NaN, and a negative integer or -inf is NaN. On a machine without
+  FMA they cost 283 and 204 ns against glibc's 149 and 109, and 28 and
+  25 before. The oracle carries glibc's two files behind its wrappers'
+  answers and the math gate requires 201,000 arguments of each to the
+  last bit - the whole range, every integer and half-integer from -200 to
+  200 and each side of them, lgamma's zeros at 1 and 2 - and proves the
+  check fails with their shared two-sum losing its low part.
+
+- **`Math.atan`, `asin` and `acos` are correctly rounded.** Against the
+  true value rounded to the nearest double they were wrong for 1,913,
+  5,338 and 6,821 of 15,000 arguments each; they are CORE-MATH's (MIT,
+  revision b1a4badf6765) now, with their tables, and wrong for none.
+  glibc 2.43's are IBM's, wrong for 1, 11 and 5 of the same 15,000, so a
+  program printing them agrees with Crystal's everywhere but there -
+  where it disagreed for 18% to 29% of arguments before. `atan2`, built
+  on `atan`, follows. The oracle carries CORE-MATH's three files and the
+  math gate requires 180,000 arguments of each to the last bit - the
+  whole range, the small-argument band, both ends of [-1, 1] - and
+  proves the check fails with their shared two-sum losing its low part.
+
+- **`Math.asinh`, `acosh` and `atanh` are correctly rounded, and
+  glibc's.** They were series near zero and `log1p` forms elsewhere, and
+  answered differently from glibc 2.43 for 43,123, 25,295 and 1,765 of
+  250,000 arguments. They are CORE-MATH's (MIT), which glibc 2.43 carries,
+  with their tables and the double-double helpers they share; the answer
+  out of the domain is glibc's own, NaN for `acosh(x < 1)` and
+  `atanh(|x| > 1)` and an infinity at `atanh(+-1)`. On a machine without
+  FMA they cost what the old ones did, twice glibc's. The oracle carries
+  glibc's five files and the math gate requires 205,000 arguments of each
+  to the last bit - the whole range, 1 from above for acosh and from
+  below for atanh, the subnormals - and proves the check fails with the
+  shared two-sum losing its low part, acosh near 1 without its square
+  root's correction, and atanh's 1 - |x| rounded.
+
+- **`Math.erf` and `erfc` are correctly rounded, and glibc's.** They were
+  a series and a continued fraction to about 1e-15, and `erf` of a
+  subnormal panicked "arithmetic overflow" - its series never stopped.
+  They are CORE-MATH's (MIT), which glibc 2.43 carries, with their
+  tables: every answer is the double nearest the true value, so the same
+  as glibc's for every argument, FMA or not. On this change's machine,
+  which has no FMA and takes `Math.fma`'s software arm, erf costs 97 ns
+  and erfc 348 against glibc's 60 and 173. `bench/libm_oracle/core_math`
+  carries glibc's five files and the math gate requires 212,000
+  arguments of each to the last bit - 2^-70 to 32, the subnormals,
+  erfc's subnormal results and its negatives - and proves the check
+  fails with the fast path's two-sum losing its low part, erfc's 1/x
+  losing its, and 1 + erf rounded for a negative erfc.
+
+- **`Math.sinh`, `cosh` and `tanh` are glibc's.** They were a series near
+  zero, `exp(x - ln 2)` past 709 and the textbook forms between, and
+  answered differently from glibc 2.43 in the last bit for 952 arguments
+  of sinh in 100,000, 217 of cosh and 4,863 of tanh. They are fdlibm's
+  `e_sinh.c`, `e_cosh.c` and `s_tanh.c` now, glibc 2.43's, branch for
+  branch at its thresholds, on the `exp` and `expm1` that are glibc's to
+  the last bit already. `bench/libm_oracle` carries the three files and
+  `bench/std_math_exercise.sh` requires 264,000 arguments of each to the
+  last bit - both sides of every threshold, both signs, the specials - and
+  proves the check fails with each function's small-argument branch moved.
+
+### Fixed
 
 - **`Server.serve` returns when its listener closes beside an idle
   keep-alive client.** Its doc says the close ends `serve`, and a
@@ -16554,7 +16846,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,809-line library and nothing else. Every other
+  written against iyi's own 19,806-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

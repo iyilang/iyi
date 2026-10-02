@@ -82,6 +82,11 @@ describe Iyi::Formatter do
   assert_format %(%{hello})
   assert_format %("hel\\nlo")
   assert_format %("hel\nlo")
+  # iyi: a line that ends inside a string ends in the string's bytes.
+  assert_format %("hel   \nlo")
+  assert_format %("a \#{"b   \nc"} d")
+  assert_format "%(a\r\nb)"
+  assert_format %(x = "a\n  b"   ), %(x = "a\n  b")
 
   assert_format "[] of Foo"
   assert_format "[\n]   of   \n   Foo  ", "[] of Foo"
@@ -1070,6 +1075,13 @@ describe Iyi::Formatter do
   assert_format "+ 1", "+1"
   assert_format "&- 1", "&-1"
   assert_format "&+ 1", "&+1"
+  # iyi: a sign apart from a number is not the number's sign.
+  assert_format "- 1.abs"
+  assert_format "+ 1.abs"
+  assert_format "- -1"
+  assert_format "- - 1", "- -1"
+  assert_format "- 1_u8"
+  assert_format "- 1_u8.succ"
   assert_format "a-1", "a - 1"
   assert_format "a+1", "a + 1"
   assert_format "a&-1", "a &- 1"
@@ -2013,10 +2025,15 @@ describe Iyi::Formatter do
   assert_format "<<-HTML\n  hello \n  HTML"
   assert_format "<<-HTML\n  hello \n  world   \n  HTML"
   assert_format "  <<-HTML   \n    hello \n    world   \n    HTML", "<<-HTML\n  hello \n  world   \n  HTML"
-  assert_format "<<-HTML\n  hello\n  \n  HTML", "<<-HTML\n  hello\n\n  HTML"
+  # iyi: a line of spaces just above the terminator is an empty line of the
+  # string ("hello\n\n"), where an empty line there is none ("hello\n"), so
+  # the spaces stay.
+  assert_format "<<-HTML\n  hello\n  \n  HTML"
   assert_format "<<-HTML\n  hello\n   \n  HTML"
-  assert_format "<<-HTML\n   hello\n  \n   HTML", "<<-HTML\n   hello\n\n   HTML"
-  assert_format "<<-HTML\n   hello\n   \n   HTML", "<<-HTML\n   hello\n\n   HTML"
+  assert_format "<<-HTML\n   hello\n  \n   HTML"
+  assert_format "<<-HTML\n   hello\n   \n   HTML"
+  assert_format "<<-HTML\n  hello\n\n  HTML"
+  assert_format "  <<-HTML\n    hello\n    \n    HTML", "<<-HTML\n  hello\n  \n  HTML"
   assert_format "<<-HTML\n   hello\n    \n   HTML"
   assert_format "  <<-HTML\n    hello \n    world   \n    HTML", "<<-HTML\n  hello \n  world   \n  HTML"
 
@@ -2344,6 +2361,9 @@ describe Iyi::Formatter do
 
   assert_format "class X; annotation  FooAnnotation  ;  end ; end", "class X\n  annotation FooAnnotation; end\nend"
   assert_format "class X\n annotation  FooAnnotation  \n  end \n end", "class X\n  annotation FooAnnotation\n  end\nend"
+  # iyi: a comment after the name ends the line; a pass added a blank line.
+  assert_format "annotation Foo # c\nend"
+  assert_format "annotation Foo # c\n\nend"
 
   assert_format "macro foo\n{% verbatim do %}1 + 2{% end %}\nend"
   assert_format "{% verbatim do %}{{1}} + {{2}}{% end %}"

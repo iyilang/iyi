@@ -7,7 +7,9 @@
 #
 # A check that cannot fail is not a check. This script proves failure across
 # each capability: infinite sequence consumption, pipeline laziness, map,
-# select, skip, zip, chain, flat_map, and a source shared with its adaptor.
+# select, skip, zip, chain, flat_map, a source shared with its adaptor, a
+# zip that pulls past its first source, a counting adaptor copied into the
+# adaptor built on it, and a take that leaves an empty pull uncounted.
 #
 # Exits non-zero if any check fails.
 
@@ -239,10 +241,26 @@ prove_fails "range end broken" broken_range "assertion failed for range exclusiv
 prove_fails "array source copied" copied_source "assertion failed for adaptor shares its array source" \
   's/^pub class ArrayIterator(T)/pub struct ArrayIterator(T)/'
 
-# 10. An adaptor that keeps a count copied into the adaptor built on it (a
-#     struct again, as every stateful adaptor was)
-prove_fails "take copied into its adaptor" copied_take "assertion failed for take keeps its count" \
+# 10. Zip pulls its second source after the first ran out
+prove_fails "zip over-pulls" zip_overpull "assertion failed for zip pulls the longer source once per pair" \
+  's/^    return nil if item1\.nil?$/    item2 = @iter2.next if item1.nil?\n    return nil if item1.nil?/'
+
+# 11-15. A counting adaptor copied into the adaptor built on it (a struct
+#        again, as every stateful adaptor was)
+prove_fails "skip copied" copied_skip "assertion failed for skip keeps its count" \
+  's/^pub class SkipIterator(I, T)/pub struct SkipIterator(I, T)/'
+prove_fails "take copied" copied_take "assertion failed for take keeps its count" \
   's/^pub class TakeIterator(I, T)/pub struct TakeIterator(I, T)/'
+prove_fails "with_index copied" copied_with_index "assertion failed for with_index keeps its count" \
+  's/^pub class WithIndexIterator(I, T)/pub struct WithIndexIterator(I, T)/'
+prove_fails "step copied" copied_step "assertion failed for step keeps its stride" \
+  's/^pub class StepIterator(I, T)/pub struct StepIterator(I, T)/'
+prove_fails "each_cons copied" copied_cons "assertion failed for each_cons keeps its window" \
+  's/^pub class ConsIterator(I, T)/pub struct ConsIterator(I, T)/'
+
+# 16. Take counts only the pulls that answered
+prove_fails "take leaves an empty pull uncounted" take_uncounted "assertion failed for a take counts an empty pull" \
+  '/^pub class TakeIterator/,/^pub class TakeWhileIterator/s/^      @iter\.next$/      took = @iter.next; @count = @count - 1 if took.nil?; took/'
 echo
 if [ "$status" -eq 0 ]; then
   echo "Iterator: all 27 sections pass plain and release, and each check is"

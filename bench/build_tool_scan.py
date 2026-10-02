@@ -27,7 +27,7 @@ def scan_build(repo):
     found_build = {}
 
     # 1. Parse Makefile
-    with open(f"{repo}/Makefile") as f:
+    with open(f"{repo}/Makefile", encoding="utf-8") as f:
         raw_lines = f.readlines()
 
     # Join continuation lines ending with backslash
@@ -166,18 +166,18 @@ def scan_build(repo):
                     break
 
     # 2. Check src/llvm/
-    with open(f"{repo}/src/llvm/ext/find-llvm-config.sh") as f:
+    with open(f"{repo}/src/llvm/ext/find-llvm-config.sh", encoding="utf-8") as f:
         for idx, line in enumerate(f, 1):
             if "llvm-config" in line and not line.strip().startswith("#"):
                 found_build.setdefault("llvm-config", []).append(f"src/llvm/ext/find-llvm-config.sh:{idx}")
 
-    with open(f"{repo}/src/llvm/lib_llvm.cr") as f:
+    with open(f"{repo}/src/llvm/lib_llvm.cr", encoding="utf-8") as f:
         for idx, line in enumerate(f, 1):
             if any(w in line for w in ["llvm-config", "find-llvm-config.sh"]):
                 found_build.setdefault("llvm-config", []).append(f"src/llvm/lib_llvm.cr:{idx}")
 
     # 3. Check bin/crystal
-    with open(f"{repo}/bin/crystal") as f:
+    with open(f"{repo}/bin/crystal", encoding="utf-8") as f:
         for idx, line in enumerate(f, 1):
             if "$PARENT_CRYSTAL" in line and "exec" in line:
                 found_build.setdefault("crystal", []).append(f"bin/crystal:{idx}")
@@ -202,7 +202,7 @@ def scan_runtime(repo):
 
     for cf in sorted(compiler_files):
         rel = os.path.relpath(cf, repo)
-        with open(cf) as fh:
+        with open(cf, encoding="utf-8") as fh:
             for idx, line in enumerate(fh, 1):
                 for m in re.finditer(r'Process\.find_executable\(\s*"([^"]+)"\s*\)', line):
                     t = m.group(1)

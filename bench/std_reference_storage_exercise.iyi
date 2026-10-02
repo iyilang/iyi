@@ -145,6 +145,43 @@ assert_true ns1 == ns2, "equal nodes compare equal"
 assert_i32 ns1.hash, ns2.hash, "equal nodes have equal hash"
 puts "  structural equality and content hash"
 
+puts "\n== hash follows == field by field"
+
+# `==` compares field by field and `hash` mixed the raw bytes, so storages
+# that compared equal hashed apart: a `Float64` field holding 0.0 against
+# one holding -0.0 differs in its sign bit, and a `String?` field compares
+# by content while its bytes are the pointer.
+class Measure
+  property a : Float64
+  property b : Float64
+
+  def initialize(@a : Float64, @b : Float64)
+  end
+end
+
+class Tagged
+  property name : String?
+
+  def initialize(@name : String?)
+  end
+end
+
+mz1 = uninitialized ReferenceStorage(Measure)
+Measure.unsafe_construct(pointerof(mz1), 1.5, 0.0)
+mz2 = uninitialized ReferenceStorage(Measure)
+Measure.unsafe_construct(pointerof(mz2), 1.5, 0.0 * -1.0)
+assert_true mz1 == mz2, "0.0 and -0.0 fields compare equal"
+assert_i32 mz1.hash, mz2.hash, "0.0 and -0.0 fields hash alike"
+tg1 = uninitialized ReferenceStorage(Tagged)
+Tagged.unsafe_construct(pointerof(tg1), String.new(2) { |buf| buf[0] = 104_u8; buf[1] = 105_u8 })
+tg2 = uninitialized ReferenceStorage(Tagged)
+Tagged.unsafe_construct(pointerof(tg2), String.new(2) { |buf| buf[0] = 104_u8; buf[1] = 105_u8 })
+assert_true tg1 == tg2, "String? fields with equal contents compare equal"
+assert_i32 tg1.hash, tg2.hash, "String? fields with equal contents hash alike"
+keyed = {mz1 => 1}
+assert_true keyed[mz2]? == 1, "a storage equal to a key finds it"
+puts "  equal storages hash alike"
+
 puts "\n== uninitialized storage with a reference field"
 u1 = uninitialized ReferenceStorage(Box)
 u2 = uninitialized ReferenceStorage(Box)

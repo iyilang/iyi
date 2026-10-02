@@ -277,6 +277,25 @@ prove_caught eofbreak "a block scalar ending the stream gets a line feed it lack
 prove_caught maphash "a mapping's hash sums its pairs unmixed" \
   "a 150 by 150 grid of mappings has at least 22,000 hashes" \
   'value = value &+ {key, item}.hash' 'value = value &+ ((key.hash &* 31) &+ item.hash)'
+prove_caught mergespaced "a flow '<<' merges only with its ':' adjacent" \
+  "a merge key spaced from its ':' merges" \
+  'key.kind == Any::KIND_STRING && key.as_s == "<<"' 'key.kind == Any::KIND_STRING && key.as_s == "<<" && @bytes[pos + 2] == 58_u8'
+prove_caught mergepair "a one-pair flow mapping keeps '<<' as a key" \
+  "a merge in a one-pair flow mapping merges" \
+  'if merge_key?(item_pos, item)' 'if false && merge_key?(item_pos, item)'
+prove_caught tabline "a tab after a continuation line's spaces is refused" \
+  "a tab after a continuation line's indentation separates" \
+  $'      # and as a tab in the indentation.\n' \
+  $'      # and as a tab in the indentation.\n      if @tabbed[look]\n        fail("tab used for indentation", @heads[look])\n        break\n      end\n'
+prove_caught pairkey "a one-pair flow mapping takes a collection key" \
+  'accepted "[[a]: b]' \
+  'if item.kind == Any::KIND_ARRAY || item.kind == Any::KIND_HASH' 'if false'
+prove_caught secondtag "a second tag replaces the first" \
+  'accepted "a: !!str !!int 1' \
+  'fail("a second tag", pos) unless tag.nil?' 'nil'
+prove_caught secondanchor "a second anchor in a flow collection replaces the first" \
+  'refusal of "[&a &b 1, *a]' \
+  $'the `!!int`.\n        fail("a second anchor", pos) unless anchor.nil?' $'the `!!int`.\n        nil'
 
 echo
 if [ "$status" -eq 0 ]; then

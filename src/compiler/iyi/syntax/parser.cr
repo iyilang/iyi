@@ -114,6 +114,9 @@ module Iyi
     # Where the import being read ends; see `parse_import_path_segment`.
     @iyi_import_end : Location? = nil
 
+    # Every module header read, wherever it stood; see `apply_module_header`.
+    @iyi_module_headers : Array(ModuleHeader)? = nil
+
     def parse
       next_token_skip_statement_end
 
@@ -171,8 +174,11 @@ module Iyi
     private def apply_module_header(nodes : ASTNode) : ASTNode
       expressions =
         case nodes
-        when Expressions then nodes.expressions
-        else                  [nodes]
+        # iyi: a `begin ... end` around the whole file is one expression of
+        # it, not its list: a header inside one was taken for the file's, and
+        # the `begin` went missing from the tree.
+        when Expressions then nodes.keyword.none? ? nodes.expressions : [nodes] of ASTNode
+        else                  [nodes] of ASTNode
         end
 
       # iyi: one file, one module (R-1, IV.6). A second header was accepted and
@@ -199,6 +205,20 @@ module Iyi
               "A module is a compilation unit and its path is its file's path " \
               "(SPEC.md R-1, IV.6), so `#{node.path.join('/')}` belongs in " \
               "`#{node.path.join('/')}.iyi`",
+          location.try(&.line_number) || 1, location.try(&.column_number) || 1
+      end
+
+      # iyi: and the header is the file's first statement, not something a body
+      # holds. `module bar` inside a `class`, an `if` or a `begin` parsed as a
+      # header and was then dropped without a word - the `def`s under it went
+      # to the class, and `fmt` raised on the one inside a `begin`.
+      @iyi_module_headers.try &.each do |nested|
+        next if expressions.any?(&.same?(nested))
+        location = nested.location
+        written = nested.path.join('/')
+        raise "`module #{written}` is a module header, and a header is the first statement " \
+              "of its file, outside every `begin`, `if`, `class` and `def` (SPEC.md R-1). " \
+              "A module inside a type is named by a constant: `module #{nested.path.map(&.camelcase).join("::")}`",
           location.try(&.line_number) || 1, location.try(&.column_number) || 1
       end
 
@@ -2836,6 +2856,7 @@ module Iyi
         header = ModuleHeader.new(path)
         header.at(location)
         header.end_location = token_end_location
+        (@iyi_module_headers ||= [] of ModuleHeader) << header
         return header
       end
 

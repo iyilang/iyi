@@ -152,8 +152,10 @@ prove_fails "strip chars takes any wide character" strip_wide "string: rstrip ch
   's/^    !chars.index(byte_slice(at, width)).nil?$/    true/'
 prove_fails "chomp of a newline only a newline" chomp_nl "string: chomp newline" \
   '/^    return chomp if suffix == "\\n"$/d'
+# (Blind as the prelude's `whitespace?` was before it took \v and \f, which
+# it now does, so that set is written out rather than named.)
 prove_fails "split blind to vertical tab" split_vt "string: split vertical tab and form feed" \
-  's/^      if b.ascii_whitespace?$/      if b.whitespace?/'
+  's/^      if b.ascii_whitespace?$/      if b.in?(32.unsafe_chr, 9.unsafe_chr, 10.unsafe_chr, 13.unsafe_chr)/'
 prove_fails "empty separator ignores the limit" split_limit "string: split empty separator limit" \
   '/^        return pieces << byte_slice(at, bytesize - at) if limit > 1 \&\& pieces.size == limit - 1$/d'
 prove_fails "squeeze writes a byte of each character" squeeze_byte "string: squeeze" \
@@ -185,9 +187,9 @@ prove_fails "gsub char block narrowed" no_gsub_block "utf8: gsub char block" \
 prove_fails "tr range not expanded" no_tr_range "string: tr range" \
   's/^      if chars\[i\] == .-. \&\& i > 0 \&\& i + 1 < chars.size$/      if false/'
 
-# 14. Whitespace as the prelude counts it, without \v and \f
+# 14. Whitespace without \v and \f, as the prelude's `whitespace?` counted it
 prove_fails "control whitespace kept" no_vt "string: blank? vertical tab and form feed" \
-  's/unsafe_chr.ascii_whitespace?/unsafe_chr.whitespace?/'
+  's/unsafe_chr.ascii_whitespace?/unsafe_chr.in?(32.unsafe_chr, 9.unsafe_chr, 10.unsafe_chr, 13.unsafe_chr)/'
 
 # The two the prelude owns: `Char#to_s` encodes and `String#each_char`
 # decodes, and they are its own because the prelude counts code points in
@@ -240,10 +242,25 @@ prove_fails_prelude "char utf8 encoding broken" no_encode "utf8: char to_s" \
 # of `é` is the first check to read
 prove_fails_prelude "utf8 decoding broken" no_decode "string: squeeze multi-byte run" \
   's/^      index = index + (point < 0 ? 1 : width)$/      index = index + 1/'
-# A lead byte takes only the `10xxxxxx` bytes after it, or is one U+FFFD:
-# it took the next bytes whatever they were, and C3 41 was one character.
-prove_fails_prelude "a lead byte takes any byte after it" no_continuation "utf8: a lead byte without its continuation" \
+
+# 9b. A byte that starts no well-formed sequence counted as the start of
+#     one again: a lead byte taking the next bytes whatever they were (C3
+#     41 was one character), or an overlong form, a surrogate or a value
+#     past U+10FFFF decoded whole. Either makes a built string disagree
+#     with its literal.
+prove_fails_prelude "a lead byte takes any byte after it" no_continuation "utf8: an invalid byte is one character" \
   's/^        point = (byte \& 0xC0) == 0x80 ? (point << 6) | (byte \& 0x3F) : -1$/        point = (point << 6) | (byte \& 0x3F)/'
+prove_fails_prelude "a lead byte read as a sequence" lenient_lead "utf8: an invalid byte is one character" \
+  '/^      point = -1 if width > 1 \&\& (point < /d'
+
+# 9c. `whitespace?` without \v and \f, `chomp('\n')` blind to the `\r`
+#     before it, and `lines` cutting a `\r` that ends no line.
+prove_fails_prelude "strip blind to vertical tab" strip_vt "prelude: strip vertical tab and form feed" \
+  's/ || (self >= .\\t. \&\& self <= .\\r.)$/ || self == 9.unsafe_chr || self == 10.unsafe_chr || self == 13.unsafe_chr/'
+prove_fails_prelude "chomp of a newline only a newline" chomp_char_nl "prelude: chomp newline takes the cr" \
+  's/^    text = char == .\\n. ? .*$/    text = char.to_s/'
+prove_fails_prelude "lines cuts every cr" lines_cr "prelude: lines keeps a last cr" \
+  's/^    pieces.map { |line| line.chomp(.\\r.) }.concat(tail.empty? ? \[\] of String : \[tail\])$/    pieces.concat(tail.empty? ? [] of String : [tail]).map { |line| line.chomp(13.unsafe_chr) }/'
 
 # 10. Padding measured in bytes again, which is what it did
 prove_fails_prelude "padding width in bytes" no_width "utf8: ljust width" \

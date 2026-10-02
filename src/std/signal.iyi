@@ -80,12 +80,12 @@ class SignalWaiter
     # arrivals as bits, and where to post the wakeup - the port of the
     # scheduler the fiber parked on and its overlapped slot, zero when
     # nobody is parked.
-    @@arrived = Atomic(UInt64).new(0_u64)
-    @@port = Atomic(UInt64).new(0_u64)
-    @@slot = Atomic(UInt64).new(0_u64)
+    @@arrived = ::Atomic(UInt64).new(0_u64)
+    @@port = ::Atomic(UInt64).new(0_u64)
+    @@slot = ::Atomic(UInt64).new(0_u64)
     # The signals some `wait` has named, one bit each: the handler answers
     # for these alone.
-    @@named = Atomic(UInt64).new(0_u64)
+    @@named = ::Atomic(UInt64).new(0_u64)
   {% else %}
     @@read_fd = -1
     @@write_fd = -1

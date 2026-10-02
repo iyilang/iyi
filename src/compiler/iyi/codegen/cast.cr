@@ -75,6 +75,15 @@ class Iyi::CodeGenVisitor
     target_type = target_type.remove_indirection
     value_type = value_type.remove_indirection
 
+    # iyi: a NoReturn value has no bits and is never produced at run time, so
+    # there is nothing to store; `codegen_assign` skips one the same way. It
+    # still arrives here as a tuple *element*: after `return nil if x.nil?`
+    # with `x : Nil`, `{x, 1}` is typed `Tuple(NoReturn, Int32)`, which
+    # `Pointer(Tuple(Int32, Int32))#value=` accepts, and the element-wise
+    # `assign_distinct` then asked for `Int32 <- NoReturn`, which no overload
+    # takes.
+    return if value_type.no_return?
+
     # iyi: every typed store funnels through here — an instance variable,
     # a class variable, a `Pointer#value=`, a closure slot, an ivar
     # initialiser, a tuple element — so this is where the collector's

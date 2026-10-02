@@ -8,7 +8,8 @@
 # a broken step calculation, an ignored exclusive boundary, an unchecked
 # step direction, a broken block-iterator trait default, an add-first
 # overflow at Int32 MAX, a double that adds first below zero, a NaN
-# compared as a number, and a zero step let through.
+# compared as a number, a zero step let through, and the NaN room an
+# infinite step leaves read as a number.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -167,6 +168,7 @@ prove_fails "overflow-safe gap compare" mut5 "gap = ((limit - @step) <=> @curren
 prove_fails "doubles subtract below zero" mut7 "use_sub = @current.is_a?(::Float) || " "use_sub = "
 prove_fails "NaN orders against nothing" mut8 "if unordered?(limit) || unordered?(@current) || unordered?(@step)" "if false"
 prove_fails "zero step refused" mut9 "if !at_limit && !(@step > 0)" "if false && !(@step > 0)"
+prove_fails "NaN room read as a number" mut10 "if @current.is_a?(::Float) && (unordered?(limit - @step)" "if false && (unordered?(limit - @step)"
 
 echo
 if [ "$status" -ne 0 ]; then

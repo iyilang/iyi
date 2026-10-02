@@ -338,5 +338,12 @@ chained_head = chained.first(3).to_a
 growing << 3
 assert_equal("chain stays on its second source", "#{chained_head} #{chained.to_a}", "[1, 2, 9] []")
 puts "  every adaptor that keeps state resumes where the adaptor built on it stopped"
+# A take counts the pull that came back empty: uncounted, asking again
+# pulled the zip again, and the zip its counter a third time.
+take_counter = InfiniteCounter.new
+take_twice = take_counter.zip(Iterator.of([9])).take(2)
+take_once = take_twice.to_a
+take_again = take_twice.to_a
+assert_equal("a take counts an empty pull", "#{take_once} #{take_again} #{take_counter.pull_count}", "[{0, 9}] [] 2")
 
 puts "all iterator checks passed"

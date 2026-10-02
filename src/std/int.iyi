@@ -235,9 +235,14 @@ module std/int
           def {{ op.id }}(other : Float64) : Float64
           end
         {% end %}
+      {% end %}
 
-        # An integer divided by a float is a float, as the prelude has it
-        # for `Int32` and `Int64`.
+      # An integer divided by a float is a float, as the prelude has it for
+      # `Int32` and `Int64` - and for `UInt8` and `UInt64` too, which the
+      # prelude does not write: `x / 3.0` did not type for them, and with a
+      # literal divisor the `Float32` overload took it, so `1_u8 / 3.0` was a
+      # single, 0.33333334.
+      {% unless from[0] == "Int32" || from[0] == "Int64" %}
         def /(other : Float64) : Float64
           to_f64 / other
         end
@@ -370,16 +375,17 @@ module std/int
 
       {% unless name == "Int32" || name == "Int64" %}
         # A shift by the width or more answers zero (or the sign, shifting a
-        # negative value right), which the processor does not promise.
+        # negative value right), which the processor does not promise, and a
+        # negative count shifts the other way, as the prelude's `Int32` does.
         def <<(count : Int32) : {{ name.id }}
-          count >= {{ bits }} || count < 0 ? 0_{{ suffix.id }} : unsafe_shl(count)
+          count < 0 ? self >> (0 - count) : (count >= {{ bits }} ? 0_{{ suffix.id }} : unsafe_shl(count))
         end
 
         def >>(count : Int32) : {{ name.id }}
           {% if signed %}
-            count >= {{ bits }} || count < 0 ? (self < 0 ? -1_{{ suffix.id }} : 0_{{ suffix.id }}) : unsafe_shr(count)
+            count < 0 ? self << (0 - count) : (count >= {{ bits }} ? (self < 0 ? -1_{{ suffix.id }} : 0_{{ suffix.id }}) : unsafe_shr(count))
           {% else %}
-            count >= {{ bits }} || count < 0 ? 0_{{ suffix.id }} : unsafe_shr(count)
+            count < 0 ? self << (0 - count) : (count >= {{ bits }} ? 0_{{ suffix.id }} : unsafe_shr(count))
           {% end %}
         end
 

@@ -458,8 +458,53 @@ module Iyi
       NumberLiteral.new(@value, @kind)
     end
 
-    def_equals value.to_f64, kind
-    def_hash value, kind
+    # Integers are equal by value: `value.to_f64` has 53 bits, so 2^55 - 1
+    # and 2^55 were one literal - a `case` refused the pair as a duplicate
+    # `when`, and the macro `==` answered true. `<=>` is already exact. The
+    # hash follows the same key, so equal literals hash alike.
+    def ==(other : self)
+      return false unless kind == other.kind
+      if (mine = exact_integer?) && (theirs = other.exact_integer?)
+        mine == theirs
+      elsif (mine = float_value?) && (theirs = other.float_value?)
+        mine == theirs
+      else
+        value == other.value
+      end
+    end
+
+    def hash(hasher)
+      hasher = kind.hash(hasher)
+      if integer = exact_integer?
+        integer.hash(hasher)
+      elsif float = float_value?
+        float.hash(hasher)
+      else
+        value.hash(hasher)
+      end
+    end
+
+    # iyi: an integer literal's value read off its text, not cast to its kind.
+    # The kind does not always hold the text: `StringLiteral#to_i` answers an
+    # Int32-kind literal for any Int64, and `integer_value` raised on it, so
+    # `"99999999999".to_i == "99999999999".to_i` failed the compile where the
+    # other compiler answers true. Every integer text fits Int128 or UInt128,
+    # and reading the same number always takes the same branch, so equal
+    # literals still hash alike. Nil for a float kind.
+    protected def exact_integer? : Int128 | UInt128 | Nil
+      return nil unless kind.signed_int? || kind.unsigned_int?
+      value.to_i128? || value.to_u128?
+    end
+
+    # iyi: a float literal's value, or nil when it is out of Float64's range.
+    # `1e400` parses, and `==` and `hash` raised `ArgumentError` on it: the
+    # parser's check for a duplicate `when` puts the literals in a set, so
+    # `case x when 1e400 ... end` was an unhandled exception in the parser,
+    # in `fmt` and in the compiler alike. Out of range, the text is the
+    # value; `<=>` still raises, for the macro interpreter to report.
+    protected def float_value? : Float64?
+      value.to_f64?
+    end
 
     def pretty_print(pp) : Nil
       pp_type(pp, "NumberLiteral[", "]") do

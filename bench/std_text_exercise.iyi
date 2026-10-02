@@ -121,6 +121,13 @@ raise "string: lstrip chars shares a byte" unless "éx".lstrip("Ã") == "éx"
 raise "string: strip chars of other characters' bytes" unless "è".strip("é¨") == "è"
 # `"\n"` is every line ending, as `chomp` reads it.
 raise "string: chomp newline" unless "a\r\n".chomp("\n") == "a"
+# The prelude's own three beside these: `strip` takes `\v` and `\f`, as
+# `lstrip` and `rstrip` do; `chomp('\n')` takes the `\r` of a `\r\n`, or a
+# lone `\r`, as `chomp("\n")` does; and `lines` keeps a last `\r` that no
+# `\n` follows, as `each_line` does. Each answered otherwise.
+raise "prelude: strip vertical tab and form feed" unless "\v\fa\v\f".strip == "a"
+raise "prelude: chomp newline takes the cr" unless "a\r\n".chomp('\n') == "a" && "a\r".chomp('\n') == "a" && "a\n\r".chomp('\n') == "a\n"
+raise "prelude: lines keeps a last cr" unless "x\ny\r".lines == ["x", "y\r"] && "x\r\n".lines == ["x"] && "\r".lines == ["\r"]
 puts "    strip and chomp: blank, presence, lstrip, rstrip, strip, chomp, and chop verified"
 
 # 5. Split, join, partition, and rpartition
@@ -286,6 +293,22 @@ s_utf8.each_char do |c|
   char_count = char_count + 1
 end
 raise "utf8: each_char count" unless char_count == 5
+# A byte that starts no well-formed sequence is one character to `size` and
+# to `each_char`, as the other library reads it and as the compiler counts
+# a literal: built from a literal's bytes, `"\x80"` answered `size` 0, and
+# `"\xC3a"` was two to `size` and one to `each_char`.
+invalid_counts = ["\x80", "\xC3a", "\xE2\x82", "\xE2\x82a", "\xED\xA0\x80", "\xF0\x9F\x98", "\xF0\x9F\x98a", "\xC0\x80", "a\xF4\x90\x80\x80"].map do |text|
+  built = text * 1
+  yielded = [] of Int32
+  built.each_char { |c| yielded << c.ord }
+  "#{text.size}/#{built.size}/#{yielded.size}"
+end
+raise "utf8: an invalid byte is one character (#{invalid_counts.join(" ")})" unless invalid_counts.join(" ") == "1/1/1 2/2/2 2/2/2 3/3/3 3/3/3 3/3/3 4/4/4 2/2/2 5/5/5"
+# And what it yields for that byte is U+FFFD, as the other library's reader
+# does, not the byte read as a code point.
+invalid_points = [] of Int32
+("\xC3a" * 1).each_char { |c| invalid_points << c.ord }
+raise "utf8: an invalid byte is yielded as U+FFFD" unless invalid_points == [0xFFFD, 97]
 
 # Byte iteration:
 b_list = s_utf8.bytes

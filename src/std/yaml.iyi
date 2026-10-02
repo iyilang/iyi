@@ -49,7 +49,8 @@
 #   expand to more than ALIAS_NODE_LIMIT nodes (the "billion laughs"
 #   stream), a merge whose value is not a mapping or a sequence of
 #   mappings, an explicit `?` key, an anchor or an alias on a block
-#   mapping's key (a flow mapping's key may carry either), a tag it
+#   mapping's key (a flow mapping's key may carry either), a collection
+#   as a key, a second tag or a second anchor on one node, a tag it
 #   does not know (the verbatim `!<tag:yaml.org,2002:str>` spellings of
 #   the core tags are known), a directive not followed by `---`, and
 #   nesting past DEPTH_LIMIT levels.
@@ -1055,6 +1056,10 @@ pub class Parser
         return Any.new(nil) if @error
         pos = skip_blank(finish)
       elsif b == 33_u8 # !
+        # A node has one tag, as it has one anchor: `!!str !!int 1` read
+        # as the integer, the first tag dropped.
+        fail("a second tag", pos) unless tag.nil?
+        return Any.new(nil) if @error
         finish = tag_end(pos, @ends[@line])
         tag = tag_text(pos, finish)
         fail("unknown tag #{tag}", pos) unless tag.nil? || known_tag?(tag)
@@ -1258,6 +1263,9 @@ pub class Parser
       tag = nil.as(String?)
       text_pos = key_pos
       while @error.nil? && @bytes[text_pos] == 33_u8
+        # One tag, as on any node: `!!str !!int a: b` kept the later.
+        fail("a second tag", text_pos) unless tag.nil?
+        break if @error
         finish = tag_end(text_pos, @ends[@line])
         tag = tag_text(text_pos, finish)
         fail("unknown tag #{tag}", text_pos) unless known_tag?(tag)
@@ -1339,6 +1347,13 @@ pub class Parser
     else
       fail("a merge value must be a mapping or a sequence of mappings", pos)
     end
+  end
+
+  # A flow key at `pos` that read to `key` is a merge when it is the plain
+  # scalar `<<`: not quoted, no properties in front (`!!str <<` starts
+  # with `!`).
+  private def merge_key?(pos : Int32, key : Any) : Bool
+    @bytes[pos] == 60_u8 && key.kind == Any::KIND_STRING && key.as_s == "<<"
   end
 
   # ------------------------------------------------------------------
@@ -1450,19 +1465,16 @@ pub class Parser
         next
       end
       break if indent_of(look) <= parent
-      if @tabbed[look]
-        fail("tab used for indentation", @heads[look])
-        break
-      end
-      # A plain scalar's next line may start `- `, as text: the value of
-      # `key: a\n  - b` is "a - b", where it was refused as "bad
-      # indentation of a sequence entry".
+      # Past the indentation, a continuation line is text even when it
+      # opens with a tab or with `- `: `a: b\n  - c` is "b - c" and
+      # `a: b\n  \tc` is "b c". Both were refused, as a sequence entry
+      # and as a tab in the indentation.
       if key_colon(look) >= 0
         fail("bad indentation of a mapping entry", @heads[look])
         break
       end
       @line = look
-      start = @heads[look]
+      start = skip_blank(@heads[look])
       stop = plain_piece_end(start, false)
       if stop < @ends[look] && @bytes[stop] == 58_u8
         fail("a mapping value is not allowed here", stop)
@@ -1888,18 +1900,31 @@ pub class Parser
       quoted_key = @bytes[item_pos] == 34_u8 || @bytes[item_pos] == 39_u8
       if pos >= 0 && @bytes[pos] == 58_u8 && (quoted_key || value_indicator?(pos, true, @ends[@line]))
         # `[key: value]`: a one-pair mapping.
+        # As in a flow mapping: `[[a]: b]` read to a mapping with a
+        # sequence key, which `dump` then panicked on.
+        if item.kind == Any::KIND_ARRAY || item.kind == Any::KIND_HASH
+          fail("a collection cannot be a mapping key", item_pos)
+          break
+        end
         pair = Hash(Any, Any).new
         pos = skip_flow_space(pos + 1)
         if pos < 0
           fail("unterminated flow sequence", opener)
           break
         end
-        if @bytes[pos] == 44_u8 || @bytes[pos] == 93_u8
-          pair[item] = Any.new(nil)
-        else
-          pair[item] = parse_flow_node(pos)
+        value = Any.new(nil)
+        unless @bytes[pos] == 44_u8 || @bytes[pos] == 93_u8
+          value = parse_flow_node(pos)
           break if @error
           pos = skip_flow_space(@flow_end)
+        end
+        # `[<<: {a: 1}]` merges like any mapping's `<<`; it was the
+        # string key "<<".
+        if merge_key?(item_pos, item)
+          merge_into(pair, value, item_pos)
+          break if @error
+        else
+          pair[item] = value
         end
         item = Any.new(pair)
       end
@@ -1951,7 +1976,6 @@ pub class Parser
         fail("an explicit '?' key is not supported", pos)
         break
       end
-      merge = b == 60_u8 && pos + 2 < @ends[@line] && @bytes[pos + 1] == 60_u8 && value_indicator?(pos + 2, true, @ends[@line])
       key = parse_flow_node(pos)
       break if @error
       kk = key.kind
@@ -1959,6 +1983,9 @@ pub class Parser
         fail("a collection cannot be a mapping key", key_pos)
         break
       end
+      # The key is the plain scalar `<<` however it is followed: `{<< : x}`
+      # and `{<<}` were the string key "<<", where `{<<: x}` merged.
+      merge = merge_key?(key_pos, key)
       # `<<` is spelled once here too, as in a block mapping.
       if merge && merged
         fail("duplicate key #{key.inspect}", key_pos)
@@ -2021,6 +2048,10 @@ pub class Parser
     while true
       b = @bytes[pos]
       if b == 38_u8
+        # One anchor and one tag, as in block context: `[&a &b 1]`
+        # dropped `&a` and `[!!int !!str 1]` the `!!int`.
+        fail("a second anchor", pos) unless anchor.nil?
+        return Any.new(nil) if @error
         anchor_pos = pos
         finish = name_end(pos + 1, @ends[@line])
         anchor = String.new(finish - pos - 1) { |t| t.copy_from(@bytes + pos + 1, finish - pos - 1) }
@@ -2028,6 +2059,8 @@ pub class Parser
         return Any.new(nil) if @error
         pos = skip_flow_space(finish)
       elsif b == 33_u8
+        fail("a second tag", pos) unless tag.nil?
+        return Any.new(nil) if @error
         finish = tag_end(pos, @ends[@line])
         tag = tag_text(pos, finish)
         fail("unknown tag #{tag}", pos) unless tag.nil? || known_tag?(tag)

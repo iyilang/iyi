@@ -267,6 +267,10 @@ prove_fails "index by value" bad_index "tuple: index by value" \
 prove_fails "to_s without members" bad_to_s "tuple: to_s" \
   's/^      result = result + self\[{{i}}\].inspect$/      result = result + "?"/'
 
+# 7b. A tuple first, printed flush against the brace again: `{{1, 2}, 3}`.
+prove_fails "to_s without the padding" bad_to_s_pad "tuple: a tuple first is padded" \
+  's/ ? " " : "" {% else %}/ ? "" : "" {% else %}/'
+
 # 8. And the range's own pair, in the file it lives in.
 # The macro file, for `record`: a block it drops is a method the program
 # names and the compiler cannot find, so this one is refused at compile time.

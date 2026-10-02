@@ -244,6 +244,15 @@ mutate "a US-ASCII document written as UTF-8" \
   '    serialize_node(buf, lowered == "us-ascii" || lowered == "ascii")' '    serialize_node(buf)' 'every other character as a reference'
 mutate "a carriage return kept raw in CDATA" \
   '      elsif ptr[i] == 13_u8' '      elsif false' 'carriage return in CDATA'
+mutate "a name that is not an XML name written" \
+  '    raise "'"'"'#{name}'"'"' is not an XML name, so the #{what} cannot be written" unless Parser.name_shaped?(name)' '    nil' \
+  'to_xml refuses what does not read back: is not an XML name'
+mutate "a control character written raw" \
+  '        raise "control character U+#{Parser.hex4(b.to_i32)} cannot be written: XML has no way to hold it"' '        nil' \
+  'to_xml refuses what does not read back: control character U+0001'
+mutate "a reserved processing instruction target written" \
+  '      if @name.downcase == "xml" || @name.includes?(":")' '      if false' \
+  'to_xml refuses what does not read back: so the processing instruction target'
 
 echo
 if [ "$status" -eq 0 ]; then

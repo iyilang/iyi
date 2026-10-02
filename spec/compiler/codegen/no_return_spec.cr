@@ -89,4 +89,21 @@ describe "Code gen: no return" do
       typeof(raise("").foo)
       CODE
   end
+
+  it "codegens storing a tuple with a NoReturn element through a pointer" do
+    run(<<-CODE).to_i.should eq(2)
+      def foo
+        x = nil
+        return nil if x.nil?
+        {x, 1}
+      end
+
+      ptr = Pointer(Tuple(Int32, Int32)).malloc(1_u64)
+      ptr.value = {1, 2}
+      if v = foo
+        ptr.value = v
+      end
+      ptr.value[1]
+      CODE
+  end
 end

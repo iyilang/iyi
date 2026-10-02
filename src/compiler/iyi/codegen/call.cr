@@ -133,6 +133,13 @@ class Iyi::CodeGenVisitor
           else
             downcast(call_arg, def_arg.type, arg.type, true)
           end
+        # A float literal autocast to `Float32` at a call is the decimal read
+        # as a single, as `x : Float32 = 0.1` and the `_f32` suffix read it.
+        # Converted from the double it was typed as, it rounded twice:
+        # `take(1.00000005960464477539062500001)` was 1.0, not 1.0000001.
+        if arg.is_a?(NumberLiteral) && arg.kind.f64? && def_arg.type == @program.float32
+          call_arg = float32(arg.value)
+        end
       end
 
       # - C calling convention passing needs a separate handling of pass-by-value

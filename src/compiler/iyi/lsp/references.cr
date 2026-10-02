@@ -31,7 +31,7 @@ module Iyi::Lsp
 
     # The adopted defs' keys, which are the seeds of every other entry's
     # visitor (see `initialize`).
-    getter target_keys = Set({String, Int32, Int32}).new
+    getter target_keys = Set({String, Int32, Int32, String}).new
     @target_names = Set(String).new
     # The files the adopted defs are declared in: under R-1 only a module
     # that imports one of them, directly or through another, can refer to
@@ -40,6 +40,12 @@ module Iyi::Lsp
     # The types the adopted defs belong to, for rename's question: is the
     # new name one of theirs already.
     @target_owners = [] of Type
+    # iyi: why a rename of the adopted defs cannot be written, or nil. A
+    # def a macro wrote (`getter x`) has no name of its own in the source,
+    # and a `new` the compiler made from `initialize` has none at all: a
+    # rename rewrote the call sites and left the declaration, or wrote the
+    # new name over the `def` keyword.
+    getter unrenameable : String? = nil
     @program : Program? = nil
     @collecting = false
 
@@ -49,7 +55,7 @@ module Iyi::Lsp
     # file only when it is the def's: asked from a call in `app.iyi`, a
     # sibling `other.iyi` matched nothing, and rename edited `app.iyi` and
     # the def and left `other.iyi` calling a name that was gone.
-    def initialize(@target_location : Location, @seeds = Set({String, Int32, Int32}).new)
+    def initialize(@target_location : Location, @seeds = Set({String, Int32, Int32, String}).new)
     end
 
     def process(result : Compiler::Result) : Bool
@@ -78,7 +84,7 @@ module Iyi::Lsp
       # this" is not asking about the compiler's own probe.
       return true if node.iyi_synthetic?
       if @collecting
-        if (name_location = node.name_location) && node.target_defs.try &.any? { |d| key?(d.location) }
+        if (name_location = node.name_location) && node.target_defs.try &.any? { |d| key?(d) }
           @references << {name_location, node.name.size}
         end
       elsif node.location && @target_location.between?(node.name_location, node.name_end_location)
@@ -134,11 +140,11 @@ module Iyi::Lsp
       name_size = node.name.size
 
       if @collecting
-        @declarations << {name_location, name_size} if key?(location)
+        @declarations << {name_location, name_size} if key?(node) && !node.new?
         return
       end
 
-      if @seeds.includes?(key_of(location))
+      if @seeds.includes?(key_of(node))
         adopt node
         return
       end
@@ -152,9 +158,17 @@ module Iyi::Lsp
     private def adopt(node : Def) : Nil
       location = node.location
       return unless location
-      @target_keys << key_of(location)
+      @target_keys << key_of(node)
       @target_names << node.name
-      @target_files << location.filename.to_s
+      # The file the def is written in: for a macro's def, the file the
+      # macro was expanded in, not the expansion's name, which is no file
+      # and sent the server compiling every entry of the workspace.
+      @target_files << (location.original_filename || location.filename.to_s)
+      if node.new?
+        @unrenameable ||= "#{node.name} is made from initialize and has no declaration of its own to rename"
+      elsif location.filename.is_a?(VirtualFile)
+        @unrenameable ||= "#{node.name} is written by a macro, and the rename would leave the macro's argument behind"
+      end
       if owner = node.owner?
         @target_owners << owner unless @target_owners.any?(&.same?(owner))
       end
@@ -208,8 +222,27 @@ module Iyi::Lsp
     # never matched the def it calls (step 32 of `bench/lsp_session.py`,
     # the first time it ran there). Compared case-blind on Windows too,
     # which is what its filesystem does.
-    private def key_of(location : Location) : {String, Int32, Int32}
-      {canonical(location.filename.to_s), location.line_number, location.column_number}
+    # iyi: the def's name is part of the key: a `new` made from an
+    # `initialize` carries the initialize's location, and keyed by place
+    # alone the two were one def - a rename of `Point.new` wrote the new
+    # name over `def initialize`, keyword and name both.
+    private def key_of(node : Def) : {String, Int32, Int32, String}
+      location = node.location.not_nil!
+      {canonical(file_key(location.filename)), location.line_number, location.column_number, node.name}
+    end
+
+    # iyi: a macro's expansion is a VirtualFile whose name is the macro's
+    # alone ("expanded macro: getter"), so every `getter x : T` in the
+    # program put its def at one line and column of one "file", and
+    # references to `p.x` listed every getter call in the program. The
+    # site the macro was expanded at tells two expansions apart, and reads
+    # the same in every compile of the same source.
+    private def file_key(filename : String | VirtualFile | Nil) : String
+      if filename.is_a?(VirtualFile) && (site = filename.expanded_location)
+        "#{file_key(site.filename)}:#{site.line_number}:#{site.column_number}:#{filename.macro.name}"
+      else
+        filename.to_s
+      end
     end
 
     private def canonical(filename : String) : String
@@ -220,8 +253,8 @@ module Iyi::Lsp
       {% end %}
     end
 
-    private def key?(location : Location?) : Bool
-      location ? @target_keys.includes?(key_of(location)) : false
+    private def key?(node : Def) : Bool
+      node.location ? @target_keys.includes?(key_of(node)) : false
     end
   end
 end

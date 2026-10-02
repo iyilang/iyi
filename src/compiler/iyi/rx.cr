@@ -354,6 +354,12 @@ module Iyi::Rx
   # `\0` to `\9` name groups and an absent group contributes nothing. `\\` is a
   # literal backslash; any other escaped pair passes through as written, so a
   # replacement carrying Windows paths survives.
+  #
+  # iyi: `\k<name>` names a group too, now that the engine has named groups:
+  # it passed through as written, so `gsub(/(?<w>b)/, "[\\k<w>]")` wrote the
+  # reference instead of the capture. A name the pattern does not declare, or
+  # a `\k<` with no `>`, fails with the other compiler's messages; a named
+  # group that did not participate contributes nothing, as its number does.
   private def self.expand_replacement(m : Match, replacement : String) : String
     return replacement unless replacement.includes?('\\')
     buf = String::Builder.new
@@ -375,6 +381,16 @@ module Iyi::Rx
         elsif n == 0x5C
           buf.write_byte 0x5C_u8
           i += 2
+          next
+        elsif n == 0x6B && i + 2 < size && bytes[i + 2] == 0x3C
+          close = replacement.byte_index('>', i + 3)
+          raise ArgumentError.new("Missing ending '>' for '\\\\k<...'") unless close
+          name = replacement.byte_slice(i + 3, close - i - 3)
+          group = m.names[name]?
+          raise IndexError.new("Undefined group name reference: #{name.inspect}") unless group
+          text = m[group]
+          buf << text if text
+          i = close + 1
           next
         end
       end

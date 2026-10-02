@@ -588,14 +588,12 @@ pub class TakeIterator(I, T)
   end
 
   def next : T?
+    # Every pull counts, an empty one too, as in the other library: a pull
+    # that came back empty was not counted, so the next call pulled the
+    # exhausted source again and ran its blocks once more.
     if @count < @n
-      item = @iter.next
-      if item.nil?
-        nil
-      else
-        @count = @count + 1
-        item
-      end
+      @count = @count + 1
+      @iter.next
     else
       nil
     end
@@ -606,14 +604,12 @@ impl Iterator for TakeIterator(I, T) forall I, T
   type Elem = T
 
   def next : T?
+    # Every pull counts, an empty one too, as in the other library: a pull
+    # that came back empty was not counted, so the next call pulled the
+    # exhausted source again and ran its blocks once more.
     if @count < @n
-      item = @iter.next
-      if item.nil?
-        nil
-      else
-        @count = @count + 1
-        item
-      end
+      @count = @count + 1
+      @iter.next
     else
       nil
     end
@@ -744,11 +740,8 @@ pub struct ZipIterator(I1, T1, I2, T2)
     item1 = @iter1.next
     return nil if item1.nil?
     item2 = @iter2.next
-    if item2.nil?
-      nil
-    else
-      {item1, item2}
-    end
+    return nil if item2.nil?
+    {item1, item2}
   end
 end
 
@@ -760,11 +753,8 @@ impl Iterator for ZipIterator(I1, T1, I2, T2) forall I1, T1, I2, T2
     item1 = @iter1.next
     return nil if item1.nil?
     item2 = @iter2.next
-    if item2.nil?
-      nil
-    else
-      {item1, item2}
-    end
+    return nil if item2.nil?
+    {item1, item2}
   end
 end
 

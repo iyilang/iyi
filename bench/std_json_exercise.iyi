@@ -113,20 +113,24 @@ assert_text("{\n  \"a\": [\n    1,\n    {\n      \"b\": null\n    },\n    []\n  
 assert_text("[\n\t1,\n\t[\n\t\t2\n\t]\n]", JSON.parse("[1,[2]]").to_pretty_json("\t"), "pretty with a tab")
 assert_text("[\"\\u00e9\\ud83d\\ude00\\u20ac\"]", JSON.parse("[\"\u00e9\u{1F600}\u20ac\"]").to_ascii_json, "ascii-only escapes")
 assert_text("[\"\\ufffd\\ufffd\",\"a\\ufffd\",\"\\ufffd\\u00e9\\ufffd\\ufffd\\ud83d\\ude00\"]", Any.new([Any.new("\xff\xfe"), Any.new("a\xf0\x9f"), Any.new("\x80\u00e9\xc0\x80\u{1F600}")] of Any).to_ascii_json, "ascii-only writes bytes that are not a code point as \\ufffd, one per ill-formed subpart")
-# And the plain writer the same: it copied those bytes, so
-# `JSON.to_json("a\xffb")` was text `JSON.parse` refused ("invalid UTF-8
-# byte 255 in string at line 1, column 3"). Both writers write one value.
+# And `to_json` writes them as U+FFFD too: written through, `"a\xffb"`
+# was a document that is not UTF-8, which this reader refused ("invalid
+# UTF-8 byte 255 in string at line 1, column 3"). Both writers write one
+# value.
+not_utf8 = Any.new([Any.new("a\xffb"), Any.new("\xf0\x9f\x80\xe9")] of Any)
+assert_text("[\"a\u{FFFD}b\",\"\u{FFFD}\u{FFFD}\"]", not_utf8.to_json, "to_json writes bytes that are not a code point as U+FFFD, one per ill-formed subpart")
+assert_true(JSON.parse(not_utf8.to_pretty_json) == JSON.parse(not_utf8.to_json), "and what it writes is read back")
 ill_formed = Any.new([Any.new("\xff\xfe"), Any.new("a\xf0\x9f"), Any.new("\x80\u00e9\xc0\x80\u{1F600}")] of Any)
-assert_text("[\"\\ufffd\\ufffd\",\"a\\ufffd\",\"\\ufffd\u00e9\\ufffd\\ufffd\u{1F600}\"]", ill_formed.to_json, "the plain writer writes bytes that are not a code point as \\ufffd and copies the rest")
+assert_text("[\"\u{FFFD}\u{FFFD}\",\"a\u{FFFD}\",\"\u{FFFD}\u00e9\u{FFFD}\u{FFFD}\u{1F600}\"]", ill_formed.to_json, "the plain writer writes bytes that are not a code point as U+FFFD and copies the rest")
 assert_true(JSON.parse(ill_formed.to_json) == JSON.parse(ill_formed.to_ascii_json), "both writers' text reads back as one value")
 assert_text("a\uFFFDb", JSON.parse(JSON.to_json("a\xffb")).as_s, "JSON.to_json of a byte 0xff reads back as U+FFFD")
-assert_text("{\"a\\ufffdb\":1}", JSON.to_json({"a\xffb" => 1}), "and in a key")
-assert_text("\"\\ufffd\\ufffd\\ufffd\"", JSON.to_json("\xed\xa0\x80"), "an encoded surrogate is three ill-formed subparts")
+assert_text("{\"a\u{FFFD}b\":1}", JSON.to_json({"a\xffb" => 1}), "and in a key")
+assert_text("\"\u{FFFD}\u{FFFD}\u{FFFD}\"", JSON.to_json("\xed\xa0\x80"), "an encoded surrogate is three ill-formed subparts")
 assert_text("\"\\u0000\\u001f\\u007f\\b\\f\\n\\r\\t\\\"\\\\\"", Any.new("\u0000\u001f\u007f\b\f\n\r\t\"\\").to_json, "control bytes and DEL escaped")
 assert_text("-0.0", Any.new(-0.0).to_json, "negative zero float keeps its sign")
 assert_text("[0.1,1.0e-7,100.0,5.0e-324]", JSON.parse("[0.1, 1e-7, 100.0, 5e-324]").to_json, "float text is the shortest round trip")
 puts "  compact, pretty (two spaces and a tab), ascii-only and every escape written back"
-puts "  bytes that are not a code point written as \\ufffd by both writers, so the text reads back"
+puts "  bytes that are not a code point written as U+FFFD by both writers (\\ufffd in ascii-only), so the text reads back"
 
 # ---------------------------------------------------------------------------
 # Pull parser
@@ -552,8 +556,9 @@ end
 
 # Fields written with defaults, as `JSON::Serializable` reads them: on a
 # missing key a field keeps its default, and a key that is there wins,
-# `null` included. The port was refused by name and the host overwritten
-# with nil.
+# `null` included where the type admits nil; a `null` the type does not
+# admit leaves the default. The port was refused by name, the host
+# overwritten with nil, and a `null` port refused as not an Int32.
 struct Listener
   @port : Int32 = 8080
   @host : String? = "localhost"
@@ -588,6 +593,15 @@ assert_true refusal.includes?("JSON for Place has no key \"name\""), "a missing 
 assert_text "{\"port\":1,\"host\":\"localhost\",\"name\":\"x\"}", Listener.from_json("{\"name\": \"x\", \"port\": 1}").to_json, "a nilable field keeps its default for a missing key"
 assert_text "{\"port\":8080,\"host\":\"localhost\",\"name\":\"x\"}", Listener.from_json("{\"name\": \"x\"}").to_json, "a field keeps its default for a missing key"
 assert_text "{\"port\":2,\"host\":null,\"name\":\"x\"}", Listener.from_json("{\"host\": null, \"name\": \"x\", \"port\": 2}").to_json, "a key that is there wins over the default, null included"
+null_port = "unread"
+group do |g|
+  reader = g.spawn do
+    Listener.from_json("{\"port\": null, \"name\": \"x\"}").to_json
+  end
+  answer = reader.value
+  null_port = answer.is_a?(Panicked) ? "refused: #{answer.message}" : answer.to_s
+end
+assert_text "{\"port\":8080,\"host\":\"localhost\",\"name\":\"x\"}", null_port, "a null for a field with a default its type does not admit keeps the default"
 puts "  read, written and round-tripped: nested, arrays, hashes, nil, unknown keys, defaults, a missing key refused"
 
 # ---------------------------------------------------------------------------

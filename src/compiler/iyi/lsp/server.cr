@@ -1712,6 +1712,9 @@ module Iyi::Lsp
 
       first = @analysis.references_at(path, text, overrides_for(path), target)
       return {references, declarations} unless first
+      if renaming_to && (why = first.unrenameable)
+        raise Refused.new(why)
+      end
       refuse_importer(first, renaming_to) if renaming_to
       references.concat first.references
       declarations.concat first.declarations
@@ -1941,16 +1944,27 @@ module Iyi::Lsp
     private def selection_of(lines : Array(String), sym : Outline::Sym) : {Int32, Int32}
       name_line = lines[sym.name_line - 1]? || ""
       name_line = name_line.lchop('\uFEFF') if sym.name_line == 1
-      column = (name_line.index(sym.name, sym.name_column - 1) || sym.name_column - 1) + 1
-      {Lsp.character_of(name_line, column), Lsp.character_of(name_line, column + sym.name.size)}
+      # Where the outline's column and size already are the written name
+      # (`make` of `self.make`, `std/http` of `Std::Http`) the name is not on
+      # the line as listed, and they are the selection.
+      column = sym.name_column
+      size = sym.name_size
+      if found = name_line.index(sym.name, sym.name_column - 1)
+        column = found + 1
+        size = sym.name.size
+      end
+      {Lsp.character_of(name_line, column), Lsp.character_of(name_line, column + size)}
     end
 
     private def document_symbol(json : JSON::Builder, sym : Outline::Sym, lines : Array(String)) : Nil
       sel_start, sel_end = selection_of(lines, sym)
+      # iyi: the end in UTF-16 units, as every other range here is: `.size`
+      # counts characters, and an `end # 🎉` line's range stopped short.
+      end_text = lines[sym.end_line - 1]? || ""
       json.object do
         json.field "name", sym.name
         json.field "kind", sym.kind
-        json.field "range" { range(json, sym.line - 1, 0, sym.end_line - 1, (lines[sym.end_line - 1]? || "").size) }
+        json.field "range" { range(json, sym.line - 1, 0, sym.end_line - 1, Lsp.character_of(end_text, end_text.size + 1)) }
         json.field "selectionRange" { range(json, sym.name_line - 1, sel_start, sym.name_line - 1, sel_end) }
         unless sym.children.empty?
           json.field "children" do
@@ -1981,7 +1995,11 @@ module Iyi::Lsp
       if local = local_sites(text, path, target, text.lines)
         return respond_null(id) if local.instance_var?
       else
-        return respond_null(id) unless @analysis.references_at(path, text, overrides_for(path), target)
+        visitor = @analysis.references_at(path, text, overrides_for(path), target)
+        return respond_null(id) unless visitor
+        if why = visitor.unrenameable
+          raise Refused.new(why)
+        end
       end
 
       from, to = span
@@ -2175,11 +2193,16 @@ module Iyi::Lsp
       end
     end
 
-    # Walk backwards from the cursor to the unclosed `(`, counting the
-    # commas at its depth; what precedes it is the callee, maybe with a
-    # `receiver.` in front. Text, not syntax — the buffer mid-call has
-    # no syntax yet — and bounded, so a pathological file cannot stall
-    # a keystroke. Returns {receiver, name, commas-before-cursor}.
+    # Find the unclosed `(` before the cursor and the commas at its depth;
+    # what precedes it is the callee, maybe with a `receiver.` in front.
+    # Text, not syntax — the buffer mid-call has no syntax yet — and
+    # bounded, so a pathological file cannot stall a keystroke. Returns
+    # {receiver, name, commas-before-cursor}.
+    #
+    # iyi: read forwards, the way the text was written. Walking backwards
+    # could not tell a `,` inside `"a, b"`, a comment or an unclosed
+    # `[1, 2` from one between arguments: `zip(["a", "b"` answered the
+    # third parameter of a one-parameter method.
     private def enclosing_call(lines : Array(String), line0 : Int32, cursor : Int32) : {String?, String, Int32}?
       chars = [] of Char
       ({line0 - 40, 0}.max...line0).each do |index|
@@ -2189,27 +2212,45 @@ module Iyi::Lsp
       line_chars = (lines[line0]? || "").chars
       chars.concat line_chars[0, {cursor, line_chars.size}.min]
 
-      depth = 0
-      commas = 0
-      found = -1
-      index = chars.size - 1
-      while index >= 0
-        case chars[index]
-        when ')', ']', '}'
-          depth += 1
-        when '[', '{'
-          depth -= 1 if depth > 0
-        when '('
-          if depth.zero?
-            found = index
-            break
+      # Each open bracket: {bracket, index, commas at its depth}. `#` is
+      # an interpolation's `#{`, whose `}` goes back into its string.
+      opens = [] of {Char, Int32, Int32}
+      quote : Char? = nil
+      index = 0
+      while index < chars.size
+        ch = chars[index]
+        if q = quote
+          if ch == '\\'
+            index += 1
+          elsif ch == q || (ch == '\n' && q == '\'')
+            quote = nil
+          elsif q == '"' && ch == '#' && chars[index + 1]? == '{'
+            opens << {'#', index, 0}
+            quote = nil
+            index += 1
           end
-          depth -= 1
-        when ','
-          commas += 1 if depth.zero?
+        else
+          case ch
+          when '"', '\''
+            quote = ch
+          when '#'
+            while index + 1 < chars.size && chars[index + 1] != '\n'
+              index += 1
+            end
+          when '(', '[', '{'
+            opens << {ch, index, 0}
+          when ')', ']', '}'
+            quote = '"' if opens.pop?.try(&.[0]) == '#'
+          when ','
+            if top = opens.last?
+              opens[-1] = {top[0], top[1], top[2] + 1}
+            end
+          end
         end
-        index -= 1
+        index += 1
       end
+      return nil unless innermost = opens.reverse_each.find { |(bracket, _, _)| bracket == '(' }
+      _, found, commas = innermost
       return nil if found <= 0
 
       name_end = found - 1

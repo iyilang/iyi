@@ -36,7 +36,10 @@ import std/path::{Path}
       st_qspare1 : Int64
     end
 
-    fun stat = stat64(path : UInt8*, buf : Stat*) : Int32
+    # `Void*`, as std/process binds the same symbol: one C symbol bound
+    # with two signatures is refused, and a program importing both did not
+    # compile on darwin.
+    fun stat = stat64(path : UInt8*, buf : Void*) : Int32
     fun lstat = lstat64(path : UInt8*, buf : Stat*) : Int32
     fun fstat = fstat64(fd : Int32, buf : Stat*) : Int32
     fun rename(oldpath : UInt8*, newpath : UInt8*) : Int32

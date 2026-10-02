@@ -5,7 +5,8 @@
 #
 # Proves the exercise holds plain and --release, that a broken module is
 # caught, that output helpers emit expected content, and that abort
-# terminates execution with status codes and stderr messages.
+# terminates execution with status codes and stderr messages, a message
+# that ends in a newline written as one line.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -207,6 +208,54 @@ check_abort() { # check_abort <label> <name> <expected_code> <expected_stderr> <
 check_abort "default abort" abort_default 1 "" 'abort()'
 check_abort "abort with message and custom status" abort_msg 3 "kernel abort: fatal condition" 'abort("kernel abort: fatal condition", 3)'
 check_abort "abort with nil message and custom status" abort_nil 42 "" 'abort(nil, 42)'
+
+# A message that already ends in a newline is one line, as `puts` writes
+# it: the newline after it was written regardless, so the message came out
+# followed by an empty line. The whole error stream is compared, byte for
+# byte, because a `grep` for the message finds it either way.
+abort_stream_is() { # abort_stream_is <label> <name> <expected stream> <code>
+  local label="$1" name="$2" expected="$3" code="$4"
+  printf 'module main\n\nimport std/kernel::{abort}\n\n%s\n' "$code" > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    return 1
+  fi
+  "$WORK/$name" > /dev/null 2> "$WORK/$name.err"
+  printf '%s' "$expected" > "$WORK/$name.want"
+  if ! cmp -s "$WORK/$name.err" "$WORK/$name.want"; then
+    echo "  $label: the error stream was $(od -An -c "$WORK/$name.err" | tr -s ' ')"
+    return 1
+  fi
+  echo "  $label: the error stream is exactly the message"
+}
+abort_stream_is "a message ending in a newline is one line" abort_nl "line one
+" 'abort("line one\n", 2)' || status=1
+abort_stream_is "a message without one gets one" abort_no_nl "line two
+" 'abort("line two", 2)' || status=1
+
+if [ -n "$PY" ]; then
+  mkdir -p "$WORK/doubled/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/kernel.iyi").read_text()
+old = r'unless message.ends_with?("\\n")'
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/doubled/std/kernel.iyi").write_text(src.replace(old, 'unless false', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the doubled-newline patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/doubled${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" \
+       abort_stream_is "doubled newline (broken copy)" abort_doubled "line one
+" 'abort("line one\n", 2)' >/dev/null; then
+    echo "  a newline written after one already there PASSED"
+    status=1
+  else
+    echo "  a newline written after one already there is caught"
+  fi
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

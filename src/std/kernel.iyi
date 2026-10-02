@@ -66,8 +66,12 @@ end
 pub def abort(message : String? = nil, status : Int32 = 1) : NoReturn
   if message
     __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-    nl = "\n"
-    __iyi_write(2, nl.to_unsafe.as(Void*), 1_u64)
+    # A line, as `puts` writes one: a message that already ends in a
+    # newline gets no second one, as in the other library.
+    unless message.ends_with?("\n")
+      nl = "\n"
+      __iyi_write(2, nl.to_unsafe.as(Void*), 1_u64)
+    end
   end
   __iyi_exit(status)
 end

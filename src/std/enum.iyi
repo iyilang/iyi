@@ -21,6 +21,15 @@
 
 module std/enum
 
+# An enum may be numbered in any integer, and the prelude gives arithmetic
+# and text to four of them. Over `Int8`, `Int16`, `UInt16`, `UInt32`,
+# `Int128` or `UInt128` the conversions and `+`/`-`/`<=>` below did not
+# compile, and what the prelude's own `==`, `to_s` and `from_value?` call
+# fell to `Object`'s: over `Int8`, `Neg::M == Neg::M` was false and
+# `Neg::M.to_s` was `"Int8"`. `std/int` holds the rest of the tower, and
+# std/traits imports it for the same reason.
+import std/int
+
 struct ::Enum
   def to_i : Int32
     value.to_i32

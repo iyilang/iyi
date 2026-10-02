@@ -170,7 +170,7 @@ pub struct SocketError
 
   # The peer is gone: it reset the connection, or closed it and the write
   # found the pipe broken, or the connection was aborted.
-  def disconnected? : Bool
+  def disconnected? : ::Bool
     {% if flag?(:win32) %}
       @code == 10054 || @code == 10053 || @code == 10058
     {% elsif flag?(:darwin) %}
@@ -204,49 +204,49 @@ pub struct SocketError
   end
 
   # EACCES: a port the system keeps from this user.
-  private def denied? : Bool
+  private def denied? : ::Bool
     {% if flag?(:win32) %} @code == 10013 {% else %} @code == 13 {% end %}
   end
 
   # EADDRNOTAVAIL: an address that is not this host's, or the wildcard a
   # server prints, which Windows will not connect to.
-  private def unusable? : Bool
+  private def unusable? : ::Bool
     {% if flag?(:win32) %} @code == 10049 {% elsif flag?(:darwin) %} @code == 49 {% else %} @code == 99 {% end %}
   end
 
-  private def reset? : Bool
+  private def reset? : ::Bool
     {% if flag?(:win32) %} @code == 10054 {% elsif flag?(:darwin) %} @code == 54 {% else %} @code == 104 {% end %}
   end
 
-  private def broken_pipe? : Bool
+  private def broken_pipe? : ::Bool
     {% if flag?(:win32) %} @code == 10058 {% else %} @code == 32 {% end %}
   end
 
-  private def aborted? : Bool
+  private def aborted? : ::Bool
     {% if flag?(:win32) %} @code == 10053 {% elsif flag?(:darwin) %} @code == 53 {% else %} @code == 103 {% end %}
   end
 
-  private def refused? : Bool
+  private def refused? : ::Bool
     {% if flag?(:win32) %} @code == 10061 {% elsif flag?(:darwin) %} @code == 61 {% else %} @code == 111 {% end %}
   end
 
   # ENOENT: a unix socket's path that is not there. Winsock answers a
   # missing path with a refusal, which says the same.
-  private def missing? : Bool
+  private def missing? : ::Bool
     {% if flag?(:win32) %} false {% else %} @code == 2 {% end %}
   end
 
-  private def in_use? : Bool
+  private def in_use? : ::Bool
     {% if flag?(:win32) %} @code == 10048 {% elsif flag?(:darwin) %} @code == 48 {% else %} @code == 98 {% end %}
   end
 
   # The peer did not answer in time: a connect the network timed out, or a
   # read or write past its socket's timeout.
-  def timed_out? : Bool
+  def timed_out? : ::Bool
     {% if flag?(:win32) %} @code == 10060 {% elsif flag?(:darwin) %} @code == 60 {% else %} @code == 110 {% end %}
   end
 
-  private def unreachable? : Bool
+  private def unreachable? : ::Bool
     {% if flag?(:win32) %}
       @code == 10065 || @code == 10051
     {% elsif flag?(:darwin) %}
@@ -280,6 +280,11 @@ pub class IyiSocket
   # as long as it takes.
   getter read_timeout_ms : Int32? = nil
   getter write_timeout_ms : Int32? = nil
+
+  # An error a read met after it already had bytes to answer, which the
+  # next read answers: the kernel reports a reset once and an end of file
+  # after it, so one that was dropped read as a clean end.
+  @pending_error : SocketError? = nil
 
   def read_timeout_ms=(ms : Int32?) : Int32?
     raise "negative timeout: #{ms}" if ms.is_a?(Int32) && ms < 0
@@ -394,6 +399,10 @@ pub class IyiSocket
     # neither the count nor the call; the enumerable's sentence for it.
     raise "negative count: #{max_bytes}" if max_bytes < 0
     raise "socket is closed" if @fd < 0
+    if (kept = @pending_error).is_a?(SocketError)
+      @pending_error = nil
+      return kept
+    end
     while true
       got = read_ready(max_bytes)
       return got unless got.nil?
@@ -432,8 +441,9 @@ pub class IyiSocket
     buffer = Pointer(UInt8).malloc(max_bytes.to_u64)
     buffer.copy_from(pointerof(small).as(UInt8*), count)
     more = IyiSocket.__sys_recv(@fd, buffer + count, (max_bytes - count).to_u64)
-    # Nothing more yet, or an error the next read reports: this read ends
-    # with what came.
+    # Nothing more yet: this read ends with what came. An error is the
+    # next read's to answer, and is kept for it.
+    @pending_error = SocketError.new("read from socket", IyiSocket.__sys_code(more)) if more < 0_i64 && !IyiSocket.__sys_would_block?(more)
     total = more > 0_i64 ? count + more.to_i32 : count
     String.new(total) do |target|
       target.copy_from(buffer, total)
@@ -443,6 +453,10 @@ pub class IyiSocket
   def read(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
     raise "negative count: #{count}" if count < 0
     raise "socket is closed" if @fd < 0
+    if (kept = @pending_error).is_a?(SocketError)
+      @pending_error = nil
+      return kept
+    end
     while true
       n = IyiSocket.__sys_recv(@fd, buffer, count.to_u64)
       return n.to_i32 if n >= 0_i64
@@ -504,23 +518,23 @@ pub class IyiSocket
   # on the one descriptor where there is not. True when the descriptor is
   # ready, false when *ms* ran out first.
   {% if @top_level.has_constant?("IyiScheduler") %}
-    def self.await_readable(fd : Int32, ms : Int32 = -1) : Bool | Cancelled
+    def self.await_readable(fd : Int32, ms : Int32 = -1) : ::Bool | Cancelled
       wait_readable(fd, ms)
     end
 
-    def self.await_writable(fd : Int32, ms : Int32 = -1) : Bool | Cancelled
+    def self.await_writable(fd : Int32, ms : Int32 = -1) : ::Bool | Cancelled
       wait_writable(fd, ms)
     end
   {% else %}
     # A wait the kernel cut short (a signal, EINTR) answers `Cancelled`:
     # the one way a wait ends here without the descriptor being ready.
-    def self.await_readable(fd : Int32, ms : Int32 = -1) : Bool | Cancelled
+    def self.await_readable(fd : Int32, ms : Int32 = -1) : ::Bool | Cancelled
       ready = __sys_poll(fd, 1, ms)
       return Cancelled.new if ready < 0
       ready > 0
     end
 
-    def self.await_writable(fd : Int32, ms : Int32 = -1) : Bool | Cancelled
+    def self.await_writable(fd : Int32, ms : Int32 = -1) : ::Bool | Cancelled
       ready = __sys_poll(fd, 4, ms)
       return Cancelled.new if ready < 0
       ready > 0
@@ -604,7 +618,7 @@ pub class IyiSocket
     end
   end
 
-  def closed? : Bool
+  def closed? : ::Bool
     @fd < 0
   end
 
@@ -705,7 +719,7 @@ pub class IyiSocket
   # `LOCALHOST` and `localhost.`. Matched exactly, these were "cannot
   # resolve address: \"LOCALHOST\"", and so were `Localhost` and
   # `localhost.`.
-  private def self.localhost?(host : String) : Bool
+  private def self.localhost?(host : String) : ::Bool
     size = host.bytesize
     size = size - 1 if size == 10 && host.to_unsafe[9] == 46_u8
     return false unless size == 9
@@ -1009,7 +1023,7 @@ pub class IyiSocket
     end
 
     # Every connect here parks; see the Windows arm for the one that does not.
-    def self.__sys_connects_blocking?(family : Int32) : Bool
+    def self.__sys_connects_blocking?(family : Int32) : ::Bool
       false
     end
 
@@ -1065,11 +1079,11 @@ pub class IyiSocket
 
     # libSystem answers -1 and leaves the reason in errno: EAGAIN is 35,
     # EINPROGRESS 36.
-    def self.__sys_would_block?(result : Int64) : Bool
+    def self.__sys_would_block?(result : Int64) : ::Bool
       result < 0_i64 && LibC.error_location.value == 35
     end
 
-    def self.__sys_in_progress?(result : Int32) : Bool
+    def self.__sys_in_progress?(result : Int32) : ::Bool
       result < 0 && LibC.error_location.value == 36
     end
 
@@ -1203,7 +1217,7 @@ pub class IyiSocket
     def self.__sys_no_sigpipe(fd : Int32) : Nil
     end
 
-    def self.__sys_connects_blocking?(family : Int32) : Bool
+    def self.__sys_connects_blocking?(family : Int32) : ::Bool
       false
     end
 
@@ -1257,11 +1271,11 @@ pub class IyiSocket
     end
 
     # A raw syscall answers the negative errno: EAGAIN is 11, EINPROGRESS 115.
-    def self.__sys_would_block?(result : Int64) : Bool
+    def self.__sys_would_block?(result : Int64) : ::Bool
       result == -11_i64
     end
 
-    def self.__sys_in_progress?(result : Int32) : Bool
+    def self.__sys_in_progress?(result : Int32) : ::Bool
       result == -115
     end
 
@@ -1411,7 +1425,7 @@ pub class IyiSocket
     # close, a library that guessed wrong would answer WSANOTINITIALISED to
     # the next socket the program opened, and process exit releases it
     # anyway — the same answer Go and Rust give.
-    @@winsock : Bool = false
+    @@winsock : ::Bool = false
 
     def self.__sys_winsock : Nil
       return if @@winsock
@@ -1699,7 +1713,7 @@ pub class IyiSocket
     # WSAEWOULDBLOCK answers both questions here: it is what a non-blocking
     # call with nothing to do says, and it is what a connect that is under
     # way says, where POSIX has EAGAIN and EINPROGRESS for the two.
-    def self.__sys_would_block?(result : Int64) : Bool
+    def self.__sys_would_block?(result : Int64) : ::Bool
       result == -WSAEWOULDBLOCK
     end
 
@@ -1716,7 +1730,7 @@ pub class IyiSocket
     # socket still blocking it is Go's `connect` on this platform, and
     # its answer is the outcome: the listener is on this machine, and its
     # kernel queues the connection or refuses it at once.
-    def self.__sys_connects_blocking?(family : Int32) : Bool
+    def self.__sys_connects_blocking?(family : Int32) : ::Bool
       family == AF_UNIX
     end
 
@@ -1725,7 +1739,7 @@ pub class IyiSocket
       (0_i64 - result).to_i32
     end
 
-    def self.__sys_in_progress?(result : Int32) : Bool
+    def self.__sys_in_progress?(result : Int32) : ::Bool
       result == -WSAEWOULDBLOCK
     end
 
@@ -1854,11 +1868,11 @@ pub class IyiSocket
       -1
     end
 
-    def self.__sys_would_block?(result : Int64) : Bool
+    def self.__sys_would_block?(result : Int64) : ::Bool
       false
     end
 
-    def self.__sys_in_progress?(result : Int32) : Bool
+    def self.__sys_in_progress?(result : Int32) : ::Bool
       false
     end
 
@@ -1869,7 +1883,7 @@ pub class IyiSocket
     def self.__sys_no_sigpipe(fd : Int32) : Nil
     end
 
-    def self.__sys_connects_blocking?(family : Int32) : Bool
+    def self.__sys_connects_blocking?(family : Int32) : ::Bool
       false
     end
 

@@ -54,9 +54,9 @@ class String
   end
 
   # Each character's code point and the byte it starts at, by the other
-  # library's rule: a lead byte without the `10xxxxxx` bytes it calls for,
-  # one of those alone, an overlong form, a surrogate or a value past
-  # U+10FFFF is -1, one byte long, and `each_char` yields it as U+FFFD.
+  # library's rule and the compiler's for a literal: a lead byte without the
+  # `10xxxxxx` bytes it calls for, one of those alone, an overlong form, a
+  # surrogate or past U+10FFFF is -1, one byte, and `each_char` yields U+FFFD.
   private def each_point(& : Int32, Int32 -> Nil) : Nil
     index = 0
     while index < @bytesize
@@ -79,15 +79,12 @@ class String
     @bytesize
   end
 
-  # Crystal reads `@length == 0` on a non-empty string as "not counted yet" and
-  # scans; a string it builds without knowing the count leaves the field at
-  # zero. This prelude used to return the field, which was right for every
-  # string it makes itself and wrong for one that arrived from Crystal's own
-  # code — `to_json`'s result printed correctly here and answered `size` 0.
-  #
-  # No error, a wrong number, and the layout is shared on purpose (SPEC.md
-  # Part V item 12), so the invariant has to be shared too. The count is
-  # of what `each_char` yields, a byte that begins no character one U+FFFD.
+  # A zero `@length` on a non-empty string is "not counted yet", which is
+  # how the other library's own code leaves a string it builds: `to_json`'s
+  # result answered `size` 0 here while the field was returned as it stood.
+  # The layout is shared on purpose (SPEC.md Part V item 12), so the
+  # invariant is too. The count is of what `each_char` yields, a byte that
+  # begins no character one U+FFFD.
   def size : Int32
     return @length if @length > 0 || @bytesize == 0
 
@@ -309,8 +306,10 @@ class String
     starts_with?(char.to_s)
   end
 
+  # `'\n'` is a line's end, so it takes the `\r` before it, or a lone `\r`
+  # in its place, as the other library's does: `"a\r\n".chomp('\n')` is "a".
   def chomp(char : Char) : String
-    text = char.to_s
+    text = char == '\n' ? (ends_with?("\r\n") ? "\r\n" : (ends_with?("\r") ? "\r" : "\n")) : char.to_s
     return self unless ends_with?(text)
     byte_slice(0, bytesize - text.bytesize)
   end
@@ -390,16 +389,13 @@ class String
   end
 
   # The lines of a text, blank ones included, a final newline ending the last
-  # line; `\r\n` ends one too, as in Crystal - a Windows file's lines kept the
-  # `\r`, and `"1\r\n".lines[0].to_i` panicked where `File.read_lines` read 1.
-  # A last `\r` with no `\n` after it stays, as `each_line` keeps it:
-  # `"a\nb\r".lines` was `["a", "b"]`.
+  # line; `\r\n` ends one too, and a last `\r` with no `\n` after it is kept:
+  # `"1\r\n".lines[0].to_i` panicked where `File.read_lines` read 1.
   def lines : Array(String)
     return [] of String if bytesize == 0
     pieces = split('\n')
     tail = pieces.pop
-    pieces = pieces.map { |line| line.chomp('\r') }
-    tail.empty? ? pieces : pieces << tail
+    pieces.map { |line| line.chomp('\r') }.concat(tail.empty? ? [] of String : [tail])
   end
 
   private def byte_slice(start : Int32, count : Int32) : String
@@ -602,8 +598,8 @@ struct Char
   end
 
   # The classes a word counter asks about, ASCII's: a letter is one of the
-  # fifty-two, a digit one of the ten, whitespace the space, tab and the
-  # line breaks.
+  # fifty-two, a digit one of the ten, whitespace the space and `\t`, `\n`,
+  # `\v`, `\f`, `\r`, as the other library's ASCII test has it.
   def letter? : Bool
     (self >= 'a' && self <= 'z') || (self >= 'A' && self <= 'Z')
   end
@@ -617,7 +613,7 @@ struct Char
   end
 
   def whitespace? : Bool
-    self == ' ' || self == '\t' || self == '\n' || self == '\r'
+    self == ' ' || (self >= '\t' && self <= '\r')
   end
 end
 

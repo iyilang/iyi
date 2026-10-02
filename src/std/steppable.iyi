@@ -79,6 +79,16 @@ pub class NumericStepIterator(T)
     step_sign = @step > 0 ? 1 : (@step < 0 ? -1 : 0)
     use_sub = @current.is_a?(::Float) || (step_sign > 0 && @current > 0) || (step_sign < 0 && @current < 0)
     if use_sub
+      # An infinite step against an infinite limit or start makes the room
+      # left or the next value NaN, which the prelude's `<=>` sorts above
+      # every number: `0.0.step(to: inf, by: inf)` yielded inf forever,
+      # where the other library's `<=>` answers nil and the walk ends, and
+      # `inf.step(to: 0.0, by: -inf)` yielded a NaN, no value between the
+      # two. Both walks end here.
+      if @current.is_a?(::Float) && (unordered?(limit - @step) || unordered?(@current + @step))
+        @reached_end = true
+        return nil
+      end
       gap = ((limit - @step) <=> @current)
       if gap == step_sign
         @current = @current + @step

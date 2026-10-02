@@ -156,6 +156,11 @@ panics_with "not a number as an int" nan_int "arithmetic overflow" "(0.0/0.0).to
 panics_with "infinity as an int" inf_int "arithmetic overflow" "(1.0/0.0).to_i"
 panics_with "the boundary float" edge_float "arithmetic overflow" "2147483647.9.to_i"
 
+# A code point `chr` reads now that it reads past ASCII, and the ones that
+# are not characters at all: a surrogate half, and past U+10FFFF.
+panics_with "a surrogate is no character" surrogate_chr "out of char range" "0xD800.chr"
+panics_with "past the last code point" past_chr "out of char range" "0x110000.chr"
+
 # And the same value through the unchecked form, which is the pair of every
 # panic above: the instruction without the check. It is spelled
 # `unsafe_to_i32` because `!` is not part of a name in iyi (III.1.7), and
@@ -347,6 +352,23 @@ prove_fails "the unchecked conversion checked" checked_unsafe primitives.iyi \
 prove_fails "int64 against a double rounded first" i64_rounded primitives.iyi \
   "number: int64 against a double is exact" \
   's/^              (self - unsafe_mod(2048)).to_f64 - other + unsafe_mod(2048).to_f64 {{ op.id }} 0.0$/              to_f64 {{ op.id }} other/'
+
+# 11. A negative shift count answering zero again, in `>>` and in `<<`,
+#     and the Int64 pair the same way.
+prove_fails "a negative count shifts nowhere" neg_shr number.iyi \
+  "number: a negative count shifts the other way" \
+  's/^    count < 0 ? self << (0 - count) : (count >= 32 ? /    count < 0 ? 0 : (count >= 32 ? /'
+prove_fails "a negative count shifts nowhere, left" neg_shl number.iyi \
+  "number: a negative count shifts back" \
+  's/^    count < 0 ? self >> (0 - count) : (count >= 32 ? 0 : unsafe_shl(count))$/    count >= 32 || count < 0 ? 0 : unsafe_shl(count)/'
+prove_fails "an int64 negative count shifts nowhere" neg_shr64 number.iyi \
+  "number: an int64 negative count shifts the other way" \
+  's/^    count < 0 ? self << (0 - count) : (count >= 64 ? /    count < 0 ? 0_i64 : (count >= 64 ? /'
+
+# 12. `chr` held to ASCII again, so `'é'.ord.chr` panics.
+prove_fails "chr only ASCII" ascii_chr number.iyi \
+  "233 is out of char range" \
+  's/^    raise "#{self} is out of char range" if self < 0 || self > 0x10FFFF || (self >= 0xD800 \&\& self <= 0xDFFF)$/    raise "#{self} is out of char range" if self < 0 || self > 127/'
 
 echo
 echo "== and the check that keeps the processor out of it"

@@ -99,6 +99,48 @@ c1.close
 c2.close
 puts "  connect, send, and receive"
 
+# A connected socket whose peer is not there yet. The ICMP refusal of a
+# datagram is reported once, by whichever call on the socket comes next,
+# and that call panicked on Linux and darwin - "cannot send on UDP
+# socket", "cannot receive from UDP socket" - where Windows is told not to
+# report it and went on. The send it is reported to did not go out, so it
+# goes again, and a peer that binds afterwards hears it.
+gone = UdpSocket.bind("127.0.0.1", 0)
+gone_port = gone.local_port
+gone.close
+asker = UdpSocket.bind("127.0.0.1", 0)
+asker.connect("127.0.0.1", gone_port)
+asker.send("nobody")
+sleep(50)
+assert_int 6, asker.send("nobody"), "a send after a refusal sends"
+sleep(50)
+assert_true asker.receive?.nil?, "a refusal reported to a receive is nothing queued"
+asker.send("nobody")
+sleep(50)
+late = UdpSocket.bind("127.0.0.1", gone_port)
+asker.send("somebody")
+assert_str "somebody", late.receive_datagram.or_panic.text, "the send the refusal was reported to goes out"
+late.close
+asker.send("nobody")
+sleep(50)
+parked_heard = ""
+group do |g|
+  g.spawn do
+    parked_heard = asker.receive_datagram.or_panic.text
+    0
+  end
+  g.spawn do
+    sleep(20)
+    again = UdpSocket.bind("127.0.0.1", gone_port)
+    again.send_to("reply", "127.0.0.1", asker.local_port)
+    again.close
+    0
+  end
+end
+assert_str "reply", parked_heard, "a parked receive passes over a refusal and hears the reply"
+asker.close
+puts "  a refusal from a peer not there yet is not a panic"
+
 puts "\n== maximum datagram size"
 server.send_buffer_size = 131072
 server.receive_buffer_size = 131072

@@ -563,6 +563,7 @@ describe Iyi::IyiMod do
         pub enum Mode
           Read
           Write
+          Append
         end
 
         pub def loudest : Level
@@ -596,7 +597,7 @@ describe Iyi::IyiMod do
       level.not_nil!.members.should eq [{"Debug", "0"}, {"Warn", "2"}]
       mode = artifact.exports.types.find { |declaration| declaration.name == "Mode" }
       mode.not_nil!.annotations.should eq ["@[Flags]"]
-      mode.not_nil!.members.map(&.[0]).should eq ["Read", "Write"]
+      mode.not_nil!.members.map(&.[0]).should eq ["Read", "Write", "Append"]
 
       File.delete "app/levels.iyi"
 
@@ -2103,6 +2104,54 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A `--release` build that writes artifacts writes their object code.
+  # It forced one LLVM module, so no type had a unit of its own: the
+  # artifact said "object code (none)", and a `--release` consumer of it
+  # internalised the declarations it read and the IR was refused -
+  # "Global is external, but doesn't have external or weak linkage!".
+  it "carries object code from a release build to a release consumer" do
+    with_tempdir("iyimod_release_object_code") do
+      Dir.mkdir_p "boot"
+      File.write "boot/half.iyi", <<-IYI
+        module boot/half
+
+        pub struct Half
+          pub def self.of(x : Int32) : Int32
+            x // 2
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/half
+
+        puts Boot::Half::Half.of(84)
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.release!
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq "42"
+
+      artifact = Iyi::IyiMod.read(File.join("mods", "boot", "half.iyimod"), want_object_code: true)
+      artifact.object_code.empty?.should be_false
+
+      File.delete "boot/half.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.release!
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq "42"
+    end
+  end
+
   # A class variable's value travels, so a module with one is consumable.
   #
   # This was the case the type-body rule was written for, on the reading that
@@ -2198,6 +2247,7 @@ describe Iyi::IyiMod do
         enum Mode
           Read
           Write
+          Append
         end
 
         pub struct Holder
@@ -2227,7 +2277,7 @@ describe Iyi::IyiMod do
         Iyi::IyiMod.declarations(Iyi::IyiMod.read(File.join("mods", "boot", "kinds.iyimod")), io)
       end
       declarations.should contain "private enum Kind : Int32\n  Small = 3\n  Large = 9\nend"
-      declarations.should contain "@[Flags]\nprivate enum Mode : Int32\n  Read = 1\n  Write = 2\nend"
+      declarations.should contain "@[Flags]\nprivate enum Mode : Int32\n  Read = 1\n  Write = 2\n  Append = 4\nend"
 
       File.delete "boot/kinds.iyi"
 

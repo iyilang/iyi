@@ -62,6 +62,9 @@
 
 module std/process
 
+# `::Bool` throughout: beside `import std/bool` a bare `Bool` here named
+# that module, `Std::Bool`, and a program importing both did not compile.
+
 {% unless (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
   {% raise "std/process parks a fiber until a child ends, and this target has no runtime to park it in " \
            "(SPEC.md III.4): Linux, darwin arm64 and Windows x86_64 have one." %}
@@ -84,11 +87,9 @@ module std/process
     fun waitpid(pid : Int32, status : Int32*, options : Int32) : Int32
     fun kill(pid : Int32, signal : Int32) : Int32
     fun access(path : UInt8*, mode : Int32) : Int32
-    # `stat`, not `stat64` - one symbol on arm64, with the 64-bit inode -
-    # because std/file binds `stat64` with its own struct, and a program
-    # importing both (std/dir imports std/file) was refused on darwin as
-    # "fun redefinition with different signature".
-    fun process_stat = stat(path : UInt8*, buf : Void*) : Int32
+    # stat64 with `Void*`, std/file's own spelling: one C symbol bound with
+    # two signatures is refused, and beside std/file this did not compile.
+    fun stat = stat64(path : UInt8*, buf : Void*) : Int32
     fun _NSGetExecutablePath(buf : UInt8*, bufsize : UInt32*) : Int32
   end
 {% elsif flag?(:win32) %}
@@ -135,7 +136,7 @@ pub struct ProcessResult
   def initialize(@exit_code : Int32, @signal : Int32, @stdout : String, @stderr : String)
   end
 
-  def success? : Bool
+  def success? : ::Bool
     @signal == 0 && @exit_code == 0
   end
 end
@@ -151,7 +152,7 @@ pub struct ProcessError
   end
 
   # Nothing by that name: not on PATH, no such file, no such directory.
-  def not_found? : Bool
+  def not_found? : ::Bool
     {% if flag?(:win32) %}
       @code == 2 || @code == 3 || @code == 267
     {% else %}
@@ -159,7 +160,7 @@ pub struct ProcessError
     {% end %}
   end
 
-  def denied? : Bool
+  def denied? : ::Bool
     {% if flag?(:win32) %} @code == 5 {% else %} @code == 13 {% end %}
   end
 
@@ -212,7 +213,7 @@ pub struct Process
   # the child is ended, when the task running this is cancelled. Nothing
   # blocks the thread: the other tasks run while the child does.
   def self.run(command : String, args : Array(String) = [] of String, input : String? = nil,
-               chdir : String? = nil, capture : Bool = true,
+               chdir : String? = nil, capture : ::Bool = true,
                env : Hash(String, String) | Hash(String, String?) | Hash(String, Nil) | Nil = nil) : ProcessResult | ProcessError | Cancelled
     raise "Process.run: the command is empty" if command.empty?
     ProcessChild.check_text(command, "the command")
@@ -261,7 +262,7 @@ class ProcessChild
   # code an artifact does not carry (SPEC.md IV.1g), a declaration is not.
   @exit_code : Int32 = 0
   @signal : Int32 = 0
-  @ended : Bool = false
+  @ended : ::Bool = false
 
   {% if flag?(:win32) %}
     @process : Pointer(Void) = Pointer(Void).new(0_u64)
@@ -270,7 +271,7 @@ class ProcessChild
     @errors : Pointer(Void) = Pointer(Void).new(0_u64)
     # The job the child runs in, so ending it ends what it started too.
     @job : Pointer(Void) = Pointer(Void).new(0_u64)
-    @@serial = Atomic(UInt64).new(0_u64)
+    @@serial = ::Atomic(UInt64).new(0_u64)
   {% else %}
     @pid : Int32 = 0
     @input : Int32 = -1
@@ -309,7 +310,7 @@ class ProcessChild
     return nil unless changes
     names = [] of String
     values = [] of String
-    removed = [] of Bool
+    removed = [] of ::Bool
     each_variable do |name, value|
       names << name
       values << value
@@ -365,7 +366,7 @@ class ProcessChild
   # `ÇAY` and `çay` are one variable there, and folding ASCII alone left
   # `env: {"çay" => ...}` beside the variable it meant to replace or
   # remove.
-  def self.same_name?(one : String, other : String) : Bool
+  def self.same_name?(one : String, other : String) : ::Bool
     {% if flag?(:win32) %}
       return true if one.upcase == other.upcase
       wide_one = __iyi_win_env_wide(one.to_unsafe, one.bytesize)
@@ -429,7 +430,7 @@ class ProcessChild
     copy
   end
 
-  def self.separator?(text : String) : Bool
+  def self.separator?(text : String) : ::Bool
     bytes = text.to_unsafe
     index = 0
     while index < text.bytesize
@@ -448,7 +449,7 @@ class ProcessChild
   # awaited here once the output has closed. A cancellation met anywhere
   # ends the child first, so the group's join has nothing left to wait
   # for, and is answered once the child has been waited for.
-  def finish(input : String?, capture : Bool) : ProcessResult | Cancelled
+  def finish(input : String?, capture : ::Bool) : ProcessResult | Cancelled
     stdout = ""
     stderr = ""
     cancelled = false
@@ -536,11 +537,11 @@ class ProcessChild
     # `CreateProcessW`'s own search has it. npm, yarn and code are `.cmd`
     # shims, and a name whose only match was one was "no such program"
     # where the answer is the batch-file sentence.
-    def self.batch_beside?(name : String) : Bool
+    def self.batch_beside?(name : String) : ::Bool
       !extension?(name) && (file?("#{name}.cmd") || file?("#{name}.bat"))
     end
 
-    def self.extension?(name : String) : Bool
+    def self.extension?(name : String) : ::Bool
       bytes = name.to_unsafe
       index = name.bytesize - 1
       while index >= 0
@@ -552,17 +553,17 @@ class ProcessChild
       false
     end
 
-    def self.batch?(path : String) : Bool
+    def self.batch?(path : String) : ::Bool
       lower = path.downcase
       lower.ends_with?(".bat") || lower.ends_with?(".cmd")
     end
 
-    def self.file?(path : String) : Bool
+    def self.file?(path : String) : ::Bool
       attributes = __iyi_path_attributes(path.to_unsafe)
       attributes != -1 && attributes & 0x10 == 0
     end
 
-    def self.directory?(path : String) : Bool
+    def self.directory?(path : String) : ::Bool
       attributes = __iyi_path_attributes(path.to_unsafe)
       attributes != -1 && attributes & 0x10 != 0
     end
@@ -630,7 +631,7 @@ class ProcessChild
     # synchronous, which is what a program's standard stream expects.
     # Anonymous pipes cannot be opened for overlapped I/O, so it is a named
     # one, unique to this process and this call.
-    def self.pipe(inbound : Bool) : {Pointer(Void), Pointer(Void)}?
+    def self.pipe(inbound : ::Bool) : {Pointer(Void), Pointer(Void)}?
       serial = @@serial.add(1_u64)
       name = "\\\\.\\pipe\\iyi-process-#{LibKernel32.GetCurrentProcessId}-#{serial}"
       wide = __iyi_win_env_wide(name.to_unsafe, name.bytesize)
@@ -664,7 +665,7 @@ class ProcessChild
     end
 
     def start(command : String, path : String, args : Array(String), chdir : String?,
-              has_input : Bool, capture : Bool, environment : Array(String)?) : Nil | ProcessError
+              has_input : ::Bool, capture : ::Bool, environment : Array(String)?) : Nil | ProcessError
       line = String::Builder.new(256)
       ProcessChild.quote(command, line)
       args.each do |arg|
@@ -863,7 +864,7 @@ class ProcessChild
       end
     end
 
-    def read_all(output : Bool) : String | Cancelled
+    def read_all(output : ::Bool) : String | Cancelled
       handle = output ? @output : @errors
       text = String::Builder.new(1024)
       buffer = Pointer(UInt8).malloc(65536_u64)
@@ -1046,15 +1047,15 @@ class ProcessChild
         c = c_text(path)
         return errno if LibC.access(c, 1) != 0 # X_OK
         buffer = Pointer(UInt64).malloc(32_u64)
-        return errno if LibC.process_stat(c, buffer.as(Void*)) != 0
+        return errno if LibC.stat(c, buffer.as(Void*)) != 0
         # st_mode is the low half of the word at byte 4.
         mode = Pointer(Int32).new(buffer.address + 4_u64).value & 0xF000
         mode == 0x8000 ? 0 : EACCES
       end
 
-      def self.directory?(path : String) : Bool
+      def self.directory?(path : String) : ::Bool
         buffer = Pointer(UInt64).malloc(32_u64)
-        return false if LibC.process_stat(c_text(path), buffer.as(Void*)) != 0
+        return false if LibC.stat(c_text(path), buffer.as(Void*)) != 0
         Pointer(Int32).new(buffer.address + 4_u64).value & 0xF000 == 0x4000
       end
 
@@ -1099,6 +1100,7 @@ class ProcessChild
         SYS_GETCWD          =  79_i64
         SYS_READLINKAT      = 267_i64
         SYS_RT_SIGPROCMASK  =  14_i64
+        SYS_RT_SIGACTION    =  13_i64
         SYS_RT_SIGTIMEDWAIT = 128_i64
         # st_mode's byte in x86_64's `struct stat`.
         MODE_OFFSET = 24_u64
@@ -1121,11 +1123,13 @@ class ProcessChild
         SYS_GETCWD          =  17_i64
         SYS_READLINKAT      =  78_i64
         SYS_RT_SIGPROCMASK  = 135_i64
+        SYS_RT_SIGACTION    = 134_i64
         SYS_RT_SIGTIMEDWAIT = 137_i64
         MODE_OFFSET         =  16_u64
       {% end %}
-      # One number on every architecture since 5.3.
-      SYS_PIDFD_OPEN = 434_i64
+      # One number on every architecture: since 5.3, and close_range since 5.9.
+      SYS_PIDFD_OPEN  = 434_i64
+      SYS_CLOSE_RANGE = 436_i64
       WNOHANG        =   1_i64
       AT_FDCWD       = -100_i64
       EPIPE          = 32
@@ -1173,7 +1177,7 @@ class ProcessChild
         mode_of(c) == 0x8000 ? 0 : EACCES
       end
 
-      def self.directory?(path : String) : Bool
+      def self.directory?(path : String) : ::Bool
         mode_of(c_text(path)) == 0x4000
       end
 
@@ -1253,7 +1257,7 @@ class ProcessChild
       end
     end
 
-    def read_all(output : Bool) : String | Cancelled
+    def read_all(output : ::Bool) : String | Cancelled
       fd = output ? @output : @errors
       text = String::Builder.new(1024)
       buffer = Pointer(UInt8).malloc(65536_u64)
@@ -1305,7 +1309,7 @@ class ProcessChild
       # A pipe whose ends are closed on exec, the way `pipe2(O_CLOEXEC)`
       # makes one; this side's end also O_NONBLOCK, so it parks, and a write
       # on it answers EPIPE rather than raising SIGPIPE (F_SETNOSIGPIPE).
-      def self.pipe(ours_reads : Bool) : {Int32, Int32}?
+      def self.pipe(ours_reads : ::Bool) : {Int32, Int32}?
         fds = Pointer(Int32).malloc(2_u64)
         return nil if LibC.pipe(fds) != 0
         2.times { |index| LibC.fcntl(fds[index], 2, 1) } # F_SETFD FD_CLOEXEC
@@ -1316,7 +1320,7 @@ class ProcessChild
       end
 
       def start(command : String, path : String, args : Array(String), chdir : String?,
-                has_input : Bool, capture : Bool, environment : Array(String)?) : Nil | ProcessError
+                has_input : ::Bool, capture : ::Bool, environment : Array(String)?) : Nil | ProcessError
         theirs = Pointer(Int32).malloc(3_u64)
         3.times { |index| theirs[index] = -1 }
         if has_input
@@ -1419,10 +1423,13 @@ class ProcessChild
       # pipe2 with O_CLOEXEC; this side's end then O_NONBLOCK, so it parks.
       # An end that landed on 0, 1 or 2 - this program had closed that
       # stream - is moved above them first, or putting another end in its
-      # place in the child would close it.
-      def self.pipe(ours_reads : Bool) : {Int32, Int32}?
+      # place in the child would close it. A pipe that could not be made
+      # is its errno: answered as EACCES, a program out of descriptors
+      # (EMFILE) was told "permission denied".
+      def self.pipe(ours_reads : ::Bool) : {Int32, Int32} | Int32
         fds = Pointer(Int32).malloc(2_u64)
-        return nil if __iyi_conc_syscall3(SYS_PIPE2, fds.address.to_i64, 0x80000_i64, 0_i64) < 0_i64
+        made = __iyi_conc_syscall3(SYS_PIPE2, fds.address.to_i64, 0x80000_i64, 0_i64)
+        return (-made).to_i32 if made < 0_i64
         2.times do |index|
           if fds[index] < 3
             # F_DUPFD_CLOEXEC, from 3 up.
@@ -1438,7 +1445,7 @@ class ProcessChild
       end
 
       def start(command : String, path : String, args : Array(String), chdir : String?,
-                has_input : Bool, capture : Bool, environment : Array(String)?) : Nil | ProcessError
+                has_input : ::Bool, capture : ::Bool, environment : Array(String)?) : Nil | ProcessError
         # Everything the child will touch is made here, before the clone:
         # between the clone and the `execve` the child is a copy of one
         # thread of this program, and it makes system calls and nothing
@@ -1447,7 +1454,7 @@ class ProcessChild
         3.times { |index| theirs[index] = -1 }
         if has_input
           made = ProcessChild.pipe(false)
-          return ProcessError.new(command, EACCES) unless made
+          return ProcessError.new(command, made) if made.is_a?(Int32)
           @input = made[0]
           theirs[0] = made[1]
         elsif capture
@@ -1464,10 +1471,10 @@ class ProcessChild
         if capture
           2.times do |index|
             made = ProcessChild.pipe(true)
-            unless made
+            if made.is_a?(Int32)
               3.times { |slot| ProcessChild.sys_close(theirs[slot]) if theirs[slot] >= 0 }
               close_all
-              return ProcessError.new(command, EACCES)
+              return ProcessError.new(command, made)
             end
             if index == 0
               @output = made[0]
@@ -1481,10 +1488,10 @@ class ProcessChild
         # eight bytes, over a pipe closed on exec - so an `execve` that
         # worked says nothing and the parent reads the end.
         report = ProcessChild.pipe(true)
-        unless report
+        if report.is_a?(Int32)
           3.times { |slot| ProcessChild.sys_close(theirs[slot]) if theirs[slot] >= 0 }
           close_all
-          return ProcessError.new(command, EACCES)
+          return ProcessError.new(command, report)
         end
         target = ProcessChild.c_text(path)
         argv = ProcessChild.argv(command, args)
@@ -1496,12 +1503,25 @@ class ProcessChild
         empty_mask = Pointer(UInt64).malloc(1_u64)
         empty_mask[0] = 0_u64
         said = Pointer(Int32).malloc(2_u64)
+        # Two `struct sigaction`s for the child: one it reads a handler
+        # into, and SIG_DFL.
+        actions = Pointer(UInt64).malloc(8_u64)
+        8.times { |slot| actions[slot] = 0_u64 }
+        # Every signal held on this thread across the clone, the old mask
+        # kept beside: the child is born with them held and lets them in
+        # only once it has put this program's handlers back to the
+        # defaults (see `become`).
+        held = Pointer(UInt64).malloc(2_u64)
+        held[0] = 0xFFFFFFFFFFFFFFFF_u64
+        held[1] = 0_u64
+        __iyi_conc_syscall6(SYS_RT_SIGPROCMASK, 0_i64, held.address.to_i64, (held + 1).address.to_i64, 8_i64, 0_i64, 0_i64)
 
         # clone(SIGCHLD): a fork, in the one form both architectures have.
         pid = __iyi_conc_syscall6(SYS_CLONE, 17_i64, 0_i64, 0_i64, 0_i64, 0_i64, 0_i64)
         if pid == 0_i64
-          ProcessChild.become(theirs, directory, target, argv, envp, empty_mask, report[1], said)
+          ProcessChild.become(theirs, directory, target, argv, envp, empty_mask, report[1], said, actions)
         end
+        __iyi_conc_syscall6(SYS_RT_SIGPROCMASK, 2_i64, (held + 1).address.to_i64, 0_i64, 8_i64, 0_i64, 0_i64)
         3.times { |index| ProcessChild.sys_close(theirs[index]) if theirs[index] >= 0 }
         ProcessChild.sys_close(report[1])
         if pid < 0_i64
@@ -1534,7 +1554,23 @@ class ProcessChild
       # program or `exit_group`.
       def self.become(theirs : Pointer(Int32), directory : Pointer(UInt8), target : Pointer(UInt8),
                       argv : Pointer(Pointer(UInt8)), envp : Pointer(Pointer(UInt8)), empty_mask : Pointer(UInt64),
-                      report : Int32, said : Pointer(Int32)) : Nil
+                      report : Int32, said : Pointer(Int32), actions : Pointer(UInt64)) : Nil
+        # This program's handlers back to SIG_DFL while every signal is
+        # still held: a TERM sent to the child before its `execve` ran
+        # this program's handler here instead, which wrote into this
+        # program's own signal pipe - `Signal.wait` answered a TERM nobody
+        # sent it, and the child lived on. Held, the TERM ends the child
+        # once the mask below lets it in.
+        number = 1
+        while number < 65
+          if number != 9 && number != 19
+            __iyi_conc_syscall6(SYS_RT_SIGACTION, number.to_i64, 0_i64, actions.address.to_i64, 8_i64, 0_i64, 0_i64)
+            if actions[0] > 1_u64 # neither SIG_DFL (0) nor SIG_IGN (1)
+              __iyi_conc_syscall6(SYS_RT_SIGACTION, number.to_i64, (actions + 4).address.to_i64, 0_i64, 8_i64, 0_i64, 0_i64)
+            end
+          end
+          number = number + 1
+        end
         # SIG_SETMASK, nothing held: a program is not born with this
         # thread's blocked signals.
         __iyi_conc_syscall6(SYS_RT_SIGPROCMASK, 2_i64, empty_mask.address.to_i64, 0_i64, 8_i64, 0_i64, 0_i64)
@@ -1544,6 +1580,16 @@ class ProcessChild
             __iyi_conc_syscall3(SYS_DUP3, theirs[index].to_i64, index.to_i64, 0_i64)
           end
           index = index + 1
+        end
+        # The child's three streams and no others, as on Windows: a
+        # descriptor this program opened without O_CLOEXEC - its poller's
+        # epoll, a `File.open`, a socket - was the child's too, and a
+        # listening socket stayed bound for as long as the child ran.
+        # Marked close-on-exec (5.11), so the report below still works;
+        # before that, closed around the report (5.9).
+        if __iyi_conc_syscall3(SYS_CLOSE_RANGE, 3_i64, 0xFFFFFFFF_i64, 4_i64) < 0_i64 # CLOSE_RANGE_CLOEXEC
+          __iyi_conc_syscall3(SYS_CLOSE_RANGE, 3_i64, report.to_i64 - 1_i64, 0_i64)
+          __iyi_conc_syscall3(SYS_CLOSE_RANGE, report.to_i64 + 1_i64, 0xFFFFFFFF_i64, 0_i64)
         end
         if directory.address != 0_u64
           entered = __iyi_conc_syscall3(SYS_CHDIR, directory.address.to_i64, 0_i64, 0_i64)

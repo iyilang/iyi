@@ -117,4 +117,21 @@ check Wide.valid?(Wide::Huge), "valid? of a member past Int32"
 check Wide.from_value?(5_i64).nil?, "and a value no member has is still nil"
 puts "  an Int64 member past Int32"
 
+# An enum numbered in an integer the prelude gives no arithmetic or text to.
+# With nothing loading std/int, `==` on its values fell to `Object`'s and
+# answered false, `to_s` printed the type's name, and `to_i`/`+`/`<=>` here
+# did not compile.
+enum Tiny : Int8
+  Low  = -128
+  Mid  =    0
+  High =  127
+end
+
+check Tiny::Low == Tiny::Low && Tiny::Low != Tiny::High, "an Int8 enum compares by value"
+check Tiny::Low.to_s == "Low" && Tiny.new(-3_i8).to_s == "-3", "an Int8 enum prints its names (#{Tiny::Low.to_s})"
+check Tiny.from_value(-128) == Tiny::Low && Tiny.parse("high") == Tiny::High, "an Int8 enum's from_value and parse"
+tiny_keys = {Tiny::Low => 1, Tiny::High => 2}
+check tiny_keys[Tiny::High]? == 2, "an Int8 member is a hash key"
+puts "  an Int8 enum"
+
 puts "ALL CHECKS PASSED"

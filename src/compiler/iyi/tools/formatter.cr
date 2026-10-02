@@ -2647,6 +2647,23 @@ module Iyi
         if @token.type.unary_operator? && node.name == @token.type.to_s && !node.has_any_args?
           write @token.type
           next_token_skip_space_or_newline
+          # iyi: a sign written apart from a number is not that number's sign.
+          # `- 1.abs` is `-(1.abs)` and `-1.abs` is `(-1).abs`; `- -1`
+          # joined is `--1`, which does not parse, and `- 1_u8` joined is a
+          # negative unsigned literal, which does not either. The space goes
+          # only when the operand is the bare signed literal, so `- 1` is
+          # still `-1`.
+          if node.name.in?("-", "+")
+            if @token.type.op_minus? || @token.type.op_plus?
+              write " "
+            elsif @token.type.number?
+              literal = obj.as?(NumberLiteral)
+              value = @token.value.to_s
+              unless literal && !literal.kind.unsigned_int? && !value.starts_with?('-') && !value.starts_with?('+')
+                write " "
+              end
+            end
+          end
           accept obj
           return false
         end
@@ -3294,6 +3311,12 @@ module Iyi
             clear_object(body)
             accept body
           end
+        when Propagate
+          # iyi: `&.close!`, the call and then `!` on what it returns. The
+          # receiver is the block's parameter, which the source does not
+          # spell, as in every other arm.
+          clear_object(body)
+          accept body
         else
           raise "BUG: unexpected node for &. argument, at #{node.location}, not #{body.class}"
         end
@@ -3340,6 +3363,10 @@ module Iyi
         else
           clear_object(node.exp)
         end
+      when Propagate
+        # iyi: `&.size!.succ`, where the `!` sits between the block's
+        # parameter and the outer call.
+        clear_object(node.exp)
       end
     end
 
@@ -3660,11 +3687,15 @@ module Iyi
       write_keyword :import, " "
       format_iyi_module_path node.path
 
+      # iyi: the parser takes `app/x ::*` and a `\` line break before the
+      # `::`; `write_token` found the space where it wanted `::` and raised.
       if node.glob?
+        skip_space
         write_token :OP_COLON_COLON
         skip_space
         write_token :OP_STAR
       elsif names = node.names
+        skip_space
         write_token :OP_COLON_COLON
         skip_space_or_newline
         write_token :OP_LCURLY
@@ -3907,9 +3938,11 @@ module Iyi
         check_end
         write "; end"
       else
+        # iyi: a comment after the name already ended the line; another
+        # line break was a blank line, and every pass added one more.
         skip_space_or_newline
         check_end
-        write_line
+        write_line unless @wrote_newline
         write_indent
         write "end"
       end
@@ -5388,7 +5421,17 @@ module Iyi
           if line.size <= heredoc_indent
             # If the line is shorter than the heredoc indent it contains only
             # whitespace and can be trimmed entirely.
-            lines[line_number] = ""
+            #
+            # iyi: except the line just above the terminator. There an empty
+            # line is no line at all and a line of spaces is an empty one:
+            # `<<-EOS\n  a\n  \n  EOS` is "a\n\n", and with the spaces trimmed
+            # it was "a\n", so `fmt` took a line break out of the string. That
+            # line keeps at least one space, inside the indentation.
+            kept = 0
+            if line_number == fix.end_line - 1 && !line.empty?
+              kept = Math.min(Math.max(line.size - min_difference, 1), heredoc_indent - min_difference)
+            end
+            lines[line_number] = " " * kept
           else
             lines[line_number] = line[min_difference..]
           end

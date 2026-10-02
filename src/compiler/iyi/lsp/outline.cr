@@ -17,12 +17,16 @@ module Iyi::Lsp
     KIND_CONSTANT = 14
     KIND_STRUCT   = 23
 
+    # `name_size` is how many characters the name takes where it is
+    # written, from `name_column`: not `name.size`, which for `self.encode`
+    # and `Std::Http` (from `module std/http`) is not what the source says.
     record Sym,
       name : String,
       kind : Int32,
       line : Int32,
       name_line : Int32,
       name_column : Int32,
+      name_size : Int32,
       end_line : Int32,
       children : Array(Sym)
 
@@ -68,18 +72,21 @@ module Iyi::Lsp
       when ClassDef
         add(into, node.name.to_s, node.struct? ? KIND_STRUCT : KIND_CLASS, node, node.body)
       when ModuleDef
-        add(into, node.name.to_s, KIND_MODULE, node, node.body)
+        # A `module app/user` header carries no name location; its path
+        # node spans the header as written.
+        add(into, node.name.to_s, KIND_MODULE, node, node.body, written: node.name_location ? nil : node.name)
       when TraitDef
         add(into, node.name.to_s, KIND_TRAIT, node, node.body)
       when EnumDef
-        add(into, node.name.to_s, KIND_ENUM, node, nil)
+        add(into, node.name.to_s, KIND_ENUM, node, nil, written: node.name)
       when LibDef
         add(into, node.name.to_s, KIND_MODULE, node, node.body)
       when ImplDef
-        add(into, "impl #{node.trait} for #{node.target}", KIND_TRAIT, node, node.body)
+        # The name is the whole `impl T for U`, so it starts at `impl`.
+        add(into, "impl #{node.trait} for #{node.target}", KIND_TRAIT, node, node.body, at: node.location)
       when Def
         name = node.receiver ? "self.#{node.name}" : node.name
-        add(into, name, node.receiver ? KIND_FUNCTION : KIND_METHOD, node, nil)
+        add(into, name, node.receiver ? KIND_FUNCTION : KIND_METHOD, node, nil, size: node.name.size)
       when Macro
         add(into, node.name, KIND_FUNCTION, node, nil)
       when Assign
@@ -91,12 +98,18 @@ module Iyi::Lsp
       end
     end
 
-    private def self.add(into : Array(Sym), name : String, kind : Int32, node : ASTNode, body : ASTNode?) : Nil
+    # *written* is a node whose own span is the name as the source spells
+    # it, for a declaration with no name location; *at* and *size* place
+    # a name the node's own location and the listed name do not.
+    private def self.add(into : Array(Sym), name : String, kind : Int32, node : ASTNode, body : ASTNode?,
+                         size : Int32 = name.size, written : ASTNode? = nil, at : Location? = nil) : Nil
       location = node.location
       return unless location
 
       name_location =
-        if node.responds_to?(:name_location)
+        if at
+          at
+        elsif node.responds_to?(:name_location)
           node.name_location || location
         elsif node.is_a?(EnumDef)
           # An enum keeps no name location of its own, and its symbol's
@@ -105,6 +118,10 @@ module Iyi::Lsp
         else
           location
         end
+      if written && (from = written.location) && (to = written.end_location) && from.line_number == to.line_number
+        name_location = from
+        size = to.column_number - from.column_number + 1
+      end
       end_line = node.end_location.try(&.line_number) || location.line_number
 
       children = [] of Sym
@@ -116,6 +133,7 @@ module Iyi::Lsp
         line: location.line_number,
         name_line: name_location.line_number,
         name_column: name_location.column_number,
+        name_size: size,
         end_line: end_line,
         children: children)
     end

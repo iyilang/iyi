@@ -178,6 +178,10 @@ prove_fails "valid? accepts everything" valid_all "plain: a member is valid, 9 i
   's/    !from_value?(val.value).nil?/    true/'
 prove_fails "+ steps backwards" plus_back "Info + 1 is Warn" \
   's/    self.class.new(value + other)/    self.class.new(value - other)/'
+# Without std/int an Int8 enum's values have no `==` but `Object`'s, which
+# answers false: the module as it was.
+prove_fails "std/int not loaded" no_int "an Int8 enum compares by value" \
+  's/^import std\/int$//'
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -192,6 +192,32 @@ assert_equal("<?xml version=\"1.0\" encoding=\"US-ASCII\"?>\n<r><![CDATA[caf]]>&
 assert_equal("caf\u{E9} \u{1F600}\u{E9}", Std::Xml.parse(ascii_cdata.to_xml).root.text, "and reads back as the one run")
 puts "  a US-ASCII document writes a character past U+007F in CDATA as a reference between two sections"
 assert_true(Std::Xml.parse("<a xmlns:xml=\"http://www.w3.org/XML/1998/namespace\" xmlns:x=\"u\" xmlns:y=\"v\" x:k=\"1\" y:k=\"2\"/>").root.attributes.size == 2, "the xml prefix may be declared to its own uri; one local name in two namespaces is two attributes")
+# A name that is not an XML name, and a character XML cannot hold, were
+# written as they were: `set_attribute("k=\"1\" j", "2")` wrote two
+# attributes, `<?xml x?>` a declaration where none may be, and "\u{1}" in
+# text a document no parser reads. `to_xml` refuses them.
+unwritable = [] of Node
+injected = Node.new_element("a")
+injected.set_attribute("k=\"1\" j", "2")
+unwritable << injected
+controlled = Node.new_element("a")
+controlled.text = "a\u{1}b"
+unwritable << controlled
+reserved = Node.new_element("a")
+reserved.add_child(Node.new_pi("xml", "x"))
+unwritable << reserved
+wanted = ["is not an XML name, so the attribute cannot be written", "control character U+0001 cannot be written",
+          "so the processing instruction target cannot be written"]
+unwritable.each_with_index do |node, i|
+  said = "wrote it"
+  group do |g|
+    attempt = g.spawn { node.to_xml }
+    outcome = attempt.value
+    said = outcome.message.to_s if outcome.is_a?(Panicked)
+    0
+  end
+  assert_true(said.includes?(wanted[i]), "to_xml refuses what does not read back: #{wanted[i]}, not #{said.inspect}")
+end
 puts "  the document reads, navigates and writes back as itself: #{written.bytesize} bytes, #{menu.children.size} child nodes"
 
 # ---------------------------------------------------------------------------
@@ -316,6 +342,12 @@ refused("<!DOCTYPE a [<!ENTITY %p \"x\">]><a/>", "expected whitespace after '%' 
 refused("<a><?x:y?></a>", "processing instruction target 'x:y' cannot hold a colon at line 1, column 4")
 refused("<!DOCTYPE a [<!ENTITY a:b \"x\">]><a/>", "entity name 'a:b' cannot hold a colon at line 1, column 23")
 refused("<p:-a xmlns:p=\"u\"/>", "'p:-a' is not a qualified name: a name is 'local' or 'prefix:local' at line 1, column 1")
+# Name characters are XML's, not every byte past 0x7F: `×`, a no-break
+# space and U+00B7 first were read, and written back, as names.
+refused("<a\u{D7}b/>", "expected whitespace before the next attribute of <a> at line 1, column 3")
+refused("<a \u{A0}k=\"1\"/>", "expected a name, found U+00A0 at line 1, column 4")
+refused("<p:\u{B7}a xmlns:p=\"u\"/>", "'p:\u{B7}a' is not a qualified name: a name is 'local' or 'prefix:local' at line 1, column 1")
+assert_equal("\u{E9}\u{B7}\u{300}", Std::Xml.parse("<\u{E9}\u{B7}\u{300}/>").root.name, "U+00B7 and a combining mark continue a name")
 refused("<!DOCTYPEa><a/>", "expected whitespace after <!DOCTYPE at line 1, column 10")
 refused("<!DOCTYPE a [<!ENTITY e \"&a]b;\">]><a/>", "'&a]b;' is not a reference: 'a]b' is not a name at line 1, column 26")
 refused("<!DOCTYPE a [<!ELEMENT a ANY\n<!ENTITY e \"x\">]><a/>", "expected '>' to end the <!ELEMENT a> declaration at line 2, column 1")

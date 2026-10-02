@@ -23,12 +23,23 @@ puts "== add"
 assert_true 1_u16 + 2_u16 == 3_u16, "u16"
 assert_true 1_i8 + 2_i8 == 3_i8, "i8"
 assert_true 1_u32 + 1_u32 == 2_u32, "u32"
+# `UInt8` and `UInt64` divide by a double as the rest of the tower does. The
+# prelude writes `/` for `Int32` and `Int64` only, so `x / 3.0` did not type
+# for these two, and a literal divisor took the `Float32` overload instead:
+# `1_u8 / 3.0` was a single, 0.33333334.
+assert_true 1_u8 / 3.0 == 1.0 / 3.0 && 1_u64 / 3.0 == 1.0 / 3.0, "UInt8 and UInt64 divided by a double are doubles"
 puts "  UInt16, Int8, UInt32 add"
 
 puts "\n== bits"
 assert_true 3_u16.popcount == 2, "popcount 0b11"
 assert_true 1_u16.bit_length == 1, "bit_length"
-puts "  popcount and bit_length"
+# A negative count shifts the other way, as the prelude's `Int32` does and
+# the other library's tower does: it answered 0 (or -1, shifting a negative
+# right), so `8_i16 >> -2` was 0. Past the width it is still 0, or the sign.
+assert_true (8_i16 >> -2) == 32_i16 && (8_i16 << -2) == 2_i16, "a negative shift count shifts the other way"
+assert_true (8_u32 >> -2) == 32_u32 && (8_u32 << -2) == 2_u32 && (-8_i8 >> -1) == -16_i8, "a negative count, unsigned and narrow"
+assert_true (-8_i16 >> 16) == -1_i16 && (8_u16 << 16) == 0_u16, "past the width"
+puts "  popcount, bit_length and shifts"
 
 # A wide integer compared with a double is compared exactly, not rounded
 # to a double first: `9007199254740993_i128 == 9007199254740992.0` was

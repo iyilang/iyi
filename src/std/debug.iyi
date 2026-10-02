@@ -128,8 +128,11 @@ struct DwarfResolver
       line_range = (version >= 4 ? (cu_cursor + 14).value : (cu_cursor + 13).value).to_i32
       opcode_base = (version >= 4 ? (cu_cursor + 15).value : (cu_cursor + 14).value).to_i32
 
-      # Directories
-      cursor = cu_cursor + 16_i64 + (opcode_base - 1).to_i64
+      # Directories, after the opcode lengths. Version 4 added a byte
+      # (maximum_operations_per_instruction) ahead of them; a version 2 or
+      # 3 table starts one byte earlier, and reading it from 16 took its
+      # first file name for a directory and named every frame `??`.
+      cursor = cu_cursor + (version >= 4 ? 16_i64 : 15_i64) + (opcode_base - 1).to_i64
       dirs = [] of String
       dirs << ""
       while cursor.value != 0_u8
@@ -384,7 +387,7 @@ struct DwarfResolver
     #
     # The extension is the last dot after the last separator: a program in
     # a directory named `my.tools` keeps its own name.
-    def self.exe_pdb_wide(buffer : Pointer(UInt16), limit : Int32) : Bool
+    def self.exe_pdb_wide(buffer : Pointer(UInt16), limit : Int32) : ::Bool
       n = LibC.GetModuleFileNameW(Pointer(Void).new(0_u64), buffer, limit)
       return false if n <= 0 || n >= limit
       text = buffer.as(Pointer(UInt8))
@@ -454,7 +457,7 @@ struct DwarfResolver
     # 0x2C, four unused bytes, and the block index of the *block map* at
     # 0x34. The block map is an array of block numbers holding the
     # directory, which is the one structure read eagerly here.
-    def self.msf_open : Bool
+    def self.msf_open : ::Bool
       buf = @@pdb
       size = @@pdb_size
       magic = "Microsoft C/C++ MSF 7.00\r\n"
@@ -551,7 +554,7 @@ struct DwarfResolver
     # file, while the GUID is the link's identity. Without this a stale
     # `bt.pdb` in the current directory is read as this program's and every
     # line it answers is wrong.
-    def self.pdb_matches?(base : Pointer(UInt8), image_size : Int64, cv : Int64) : Bool
+    def self.pdb_matches?(base : Pointer(UInt8), image_size : Int64, cv : Int64) : ::Bool
       info_size = 0_i64
       info = read_stream(1, pointerof(info_size))
       return false if info.address == 0_u64
@@ -571,7 +574,7 @@ struct DwarfResolver
     # directory it was linked in, so the exe's own path with `.pdb` is tried
     # after it. Neither being there is not an error — a released zip ships
     # no PDB — and a panic then prints the addresses it captured.
-    def self.pdb_open(base : Pointer(UInt8), image_size : Int64, cv : Int64) : Bool
+    def self.pdb_open(base : Pointer(UInt8), image_size : Int64, cv : Int64) : ::Bool
       path = pdb_path_at(base, image_size, cv)
       unless path.empty?
         wide = __iyi_wide_path(path.to_unsafe)
@@ -584,7 +587,7 @@ struct DwarfResolver
     end
 
     def self.pdb_load(wide : Pointer(UInt16), base : Pointer(UInt8), image_size : Int64,
-                      cv : Int64) : Bool
+                      cv : Int64) : ::Bool
       # GENERIC_READ, every share right, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL:
       # the same four the prelude opens a file for reading with.
       handle = LibC.CreateFileW(wide, -2147483648, 7, Pointer(Void).new(0_u64), 3, 128,
@@ -680,7 +683,7 @@ struct DwarfResolver
     # server map, EC, optional debug header, so those two sizes alone place
     # both of the substreams this reader wants and the rest are never
     # walked.
-    def self.dbi_open : Bool
+    def self.dbi_open : ::Bool
       size = 0_i64
       dbi = read_stream(3, pointerof(size))
       return false if dbi.address == 0_u64
@@ -751,7 +754,7 @@ struct DwarfResolver
     # A name in a buffer compared without building a string out of it:
     # this runs after a panic, and the one question asked of the PDB's
     # named-stream map is whether an entry is `/names`.
-    def self.name_is?(buf : Pointer(UInt8), size : Int64, off : Int64, want : String) : Bool
+    def self.name_is?(buf : Pointer(UInt8), size : Int64, off : Int64, want : String) : ::Bool
       i = 0
       while i < want.bytesize
         return false if u8_at(buf, size, off + i.to_i64) != want.to_unsafe[i].to_i32
@@ -795,7 +798,7 @@ struct DwarfResolver
     # That stream's own header: 0xEFFEEFFE, a version, the byte size of the
     # string data, and then the strings at 12. Every file a line record
     # names is an offset into those bytes.
-    def self.names_open : Bool
+    def self.names_open : ::Bool
       index = names_stream
       return false if index <= 0
       size = 0_i64
@@ -817,7 +820,7 @@ struct DwarfResolver
     # come from a handful of modules and most of them from the same one.
     # The stream is a 4-byte signature, the symbol records up to
     # `SymByteSize`, the C11 line area, and then the C13 line area.
-    def self.module_open(index : Int32) : Bool
+    def self.module_open(index : Int32) : ::Bool
       return true if index >= 0 && index == @@mod_index && @@mod.address != 0_u64
       release(@@mod)
       @@mod = Pointer(UInt8).new(0_u64)

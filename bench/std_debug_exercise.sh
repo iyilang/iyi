@@ -6,6 +6,11 @@
 #
 # What it proves, in order:
 #
+#   Every platform with python3:
+#   0. The line-table reader names the file of an address in a hand-written
+#      version 3 table, whose directories start a byte before version 4's;
+#      a copy that reads every table at version 4's offset is refused.
+#
 #   Darwin:
 #   1. A panic several calls deep resolves every frame to the right line. The
 #      probe's call sites sit at known lines and each is checked by number,
@@ -111,6 +116,77 @@ platform_libc_only() {
 forbidden_undef() {
   nm -u "$1" 2>/dev/null | grep -E ' (write|dladdr|_NSGetExecutablePath|_dyld_get_image_vmaddr_slide)(@.*)?$'
 }
+
+# ── The line-table reader, on every platform: a version 3 table
+#
+# The Darwin arm reads `__debug_line` with `DwarfResolver.resolve_line`, and
+# the walk itself is the same bytes on any machine, so it is run here on a
+# table written out by hand rather than only where a dSYM exists. Version 3
+# puts its directories one byte before version 4 does (no
+# maximum_operations_per_instruction); read from version 4's offset, the
+# first directory lost its first byte, and with no directories at all the
+# first file name was taken for one and every frame was named `??`. The
+# reader is private to the module, so its four defs are lifted out of the
+# source into a harness that hands it the table.
+line_reader_names() { # line_reader_names <debug.iyi> <name> -> prints what it resolved
+  local src="$1" name="$2"
+  "$PY" - "$src" "$WORK/$name.iyi" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().split("\n")
+start = next(i for i, l in enumerate(lines) if l.startswith("  def self.read_uleb128"))
+stop = next(i for i, l in enumerate(lines) if i > start and l.startswith("  {% if flag?(:win32) %}"))
+body = "\n".join(lines[start:stop])
+# unit_length, version 3, header_length; min_inst 1, default_is_stmt 1,
+# line_base -5, line_range 14, opcode_base 13 and its 12 lengths; one
+# directory, one file in it; then the program: set_address 0x1000,
+# advance_line +41, set_column 7, copy, advance_pc 16, advance_line +1,
+# copy, advance_pc 16, end_sequence.
+header = [1, 1, 0xFB, 14, 13, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1]
+header += list(b"/src\0") + [0] + list(b"a.c\0") + [1, 0, 0] + [0]
+program = [0, 9, 2] + list((0x1000).to_bytes(8, "little")) + [3, 41, 5, 7, 1, 2, 16, 3, 1, 1, 2, 16, 0, 1, 1]
+after_length = [3, 0] + list(len(header).to_bytes(4, "little")) + header + program
+table = list(len(after_length).to_bytes(4, "little")) + after_length
+open(sys.argv[2], "w").write(
+    "struct LineReader\n" + body + "\nend\n\n" +
+    "table = [" + ", ".join("%d_u8" % b for b in table) + "]\n" +
+    "puts LineReader.resolve_line(0x1004_u64, table.to_unsafe, table.size.to_i64).inspect\n")
+PY
+  "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1 || {
+    sed -n '1,8p' "$WORK/$name.build"
+    return 1
+  }
+  "$WORK/$name"
+}
+
+echo "== the line-table reader names a version 3 table's file"
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so the version 3 table is unmeasured"
+else
+  v3=$(line_reader_names "$REPO/src/std/debug.iyi" v3_reader)
+  if [ "$v3" = '"/src/a.c:42:7"' ]; then
+    echo "  0x1004 in a version 3 table: /src/a.c:42:7"
+  else
+    fail "a version 3 table resolved 0x1004 to $v3, not /src/a.c:42:7"
+  fi
+  mkdir -p "$WORK/v4only"
+  if ! "$PY" - "$REPO/src/std/debug.iyi" "$WORK/v4only/debug.iyi" <<'PY'
+import sys
+t = open(sys.argv[1]).read()
+old = "(version >= 4 ? 16_i64 : 15_i64)"
+if old not in t:
+    raise SystemExit("the directory offset no longer reads the version")
+open(sys.argv[2], "w").write(t.replace(old, "16_i64", 1))
+PY
+  then
+    fail "the version-4-only copy could not be made"
+  elif ! v4only=$(line_reader_names "$WORK/v4only/debug.iyi" v4only_reader); then
+    fail "the version-4-only copy did not build: $v4only"
+  elif [ "$v4only" = '"/src/a.c:42:7"' ]; then
+    fail "a reader that takes every table for version 4 resolved the version 3 one anyway"
+  else
+    echo "  a reader that takes every table for version 4 answers $v4only, so the check has teeth"
+  fi
+fi
 
 # ── Linux: compile, refuse a fake DWARF resolution, keep the syscall write
 if [ "$PLATFORM" = linux ]; then

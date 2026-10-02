@@ -3,9 +3,11 @@
 #
 #     bash bench/std_dir_exercise.sh
 #
-# Proves the exercise holds plain and --release, that broken dot-entry filtering
-# and a dead glob matcher are caught, that `**` does not walk through a link
-# back up the tree, and what directory operations refuse:
+# Proves the exercise holds plain and --release, that broken dot-entry
+# filtering, a dead glob matcher, braces left unexpanded, a trailing
+# separator ignored, hidden names walked and - on Linux - a directory buffer
+# the collector does not scan are caught, that `**` does not walk through a
+# link back up the tree, and what directory operations refuse:
 # opening non-existent paths or files, deleting non-empty or non-existent
 # directories, creating existing directories, mkdir_p through a file, and
 # operating on closed directory handles.
@@ -88,7 +90,8 @@ for phrase in "== create, exists and file paths" \
               "== entries read across a collection" \
               "== glob star, recursive, hidden, and no-match" \
               "== current working directory and cd" \
-              "== delete empty and non-empty directories"; do
+              "== delete empty and non-empty directories" \
+              "== a directory read across a collection"; do
   if ! grep -q "$phrase" "$WORK/dir-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -143,10 +146,10 @@ if [ -z "$PY" ]; then
 elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/dir.iyi").read_text()
-old = "yield full if File.match?(full, matcher)"
+old = "next unless File.match?(name, seg)"
 if old not in src:
     raise SystemExit("glob patch site missing")
-Path("$WORK/patched_glob/std/dir.iyi").write_text(src.replace(old, "yield full if false", 1))
+Path("$WORK/patched_glob/std/dir.iyi").write_text(src.replace(old, "next", 1))
 PY
 then
   echo "  the glob patch did not apply"
@@ -191,6 +194,77 @@ case "$(uname -s)" in
     [ -d "$WORK/looped/d/loop" ] && MSYS_NO_PATHCONV=1 cmd /c rmdir "$(cygpath -w "$WORK/looped/d/loop")"
     ;;
   *) rm -f "$WORK/looped/d/loop" ;;
+esac
+
+echo
+echo "== proving the other glob and walk checks can fail"
+# dir_broken <label> <name> <old> <new> <phrase>: the exercise built against
+# a copy with one change, under a clock - a freed directory buffer is a
+# walk that never ends - and it must fail at the check that names it, or,
+# for the walk, not finish.
+dir_broken() {
+  if [ -z "$PY" ]; then
+    echo "  $1: no python3 on this machine, so the proof is unmeasured"
+    return
+  fi
+  mkdir -p "$WORK/$2/std"
+  if ! OLD="$3" NEW="$4" "$PY" - "$REPO/src/std/dir.iyi" "$WORK/$2/std/dir.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1]).read()
+assert src.count(os.environ["OLD"]) == 1
+open(sys.argv[2], "w").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+  then
+    echo "  $1: the patch did not apply"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$2${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$2/program" "$REPO/bench/std_dir_exercise.iyi" >"$WORK/$2/build.log" 2>&1; then
+    echo "  $1: the broken copy did not compile"
+    sed -n '1,6p' "$WORK/$2/build.log" | sed 's/^/    /'
+    status=1
+    return
+  fi
+  timeout 120 "$WORK/$2/program" >"$WORK/$2/out" 2>&1
+  local code=$?
+  if [ "$code" -eq 0 ]; then
+    echo "  $1: the exercise PASSED on a broken module"
+    status=1
+  elif [ "$code" -eq 124 ] || grep -q "$5" "$WORK/$2/out"; then
+    echo "  $1: caught"
+  else
+    echo "  $1: failed, but not at its check"
+    tail -3 "$WORK/$2/out" | sed 's/^/    /'
+    status=1
+  fi
+}
+dir_broken "braces left unexpanded" no_braces '      elsif c == 123_u8' '      elsif c == 0_u8' "glob: braces choose among names"
+dir_broken "a trailing separator ignored" no_tail '      tail = glob_sep?(bytes[n - 1]) ? sep : nil' '      tail = nil' "glob: a trailing separator answers directories"
+dir_broken "** into hidden directories" hidden_walk '      yield name unless name.starts_with?('"'"'.'"'"')' '      yield name' "glob \* skips hidden names"
+# Linux only. On Windows a freed find buffer is rewritten by FindNextFileW
+# right before every name is read out of it, so the names stay right and
+# the damage lands on whatever the block was handed to next: the walk check
+# passed on a broken copy there. The broken copy is the old stream: the
+# records in a block of their own, its address kept as an integer in the
+# stream's block, which the collector does not scan. The first check a
+# freed buffer trips is the earlier section's - entries read, a glob
+# walked, strings written over - or the walk's own, or the walk never ends.
+case "$(uname -s)" in
+  Linux)
+    dir_broken "a directory buffer the collector does not scan" stream_atomic '      words[2] = 0_i64
+      stream.as(Void*)
+    end
+
+    def self.readdir(dirp : Void*) : Void*
+      words = dirp.as(Int64*)
+      records = dirp.as(UInt8*) + HEAD' '      words[2] = 0_i64
+      words[3] = Pointer(UInt8).malloc(BUFFER.to_u64).address.to_i64
+      stream.as(Void*)
+    end
+
+    def self.readdir(dirp : Void*) : Void*
+      words = dirp.as(Int64*)
+      records = Pointer(UInt8).new(words[3].to_u64)' 'across\|written over' ;;
 esac
 
 echo

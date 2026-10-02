@@ -88,6 +88,15 @@ assert_str("", reads("a: !!str\n", "a tag over an empty node tags the empty scal
 assert_true(reads("- !!null\n", "!!null over an empty node is null")[0].null?, "!!null over an empty node is null")
 assert_str("1", reads("a: !!str\n  1\n", "a tag alone on its line applies to the text below as written")["a"].as_s, "a tag alone on its line applies to the text below as written")
 assert_str("", reads("[!!str ]", "properties over nothing in a flow collection are the empty scalar")[0].as_s, "properties over nothing in a flow collection are the empty scalar")
+# Only spaces indent a block scalar: a tab after them is its first text
+# character. `|` over `  \tx` counted the tab into the indentation, so the
+# line was less indented than itself and was refused as a tab in it.
+assert_str("\tx\ny\n", reads("a: |\n  \tx\n  y\n", "a tab after a block scalar's indentation is text")["a"].as_s, "a tab after a block scalar's indentation is text")
+# A plain scalar's continuation line is text past the indentation, `- `
+# and a tab first included: both were refused, where YAML reads "b - c"
+# and "b c".
+assert_str("b - c", reads("a: b\n  - c\n", "a continuation line starting with '- ' is text")["a"].as_s, "a continuation line starting with '- ' is text")
+assert_str("b c", reads("a: b\n  \tc\n", "a tab after a continuation line's indentation separates")["a"].as_s, "a tab after a continuation line's indentation separates")
 # A quoted scalar's folding trims its blanks in place: it copied all it had
 # read at every line end, and 20,000 lines took 4.9 s where the same bytes
 # on one line took 5 ms.
@@ -143,7 +152,15 @@ assert_true(won["x"].as_i == 1_i64, "merge fills the rest")
 rooted = YAML.parse("&a {b: 1}\n")
 assert_true(rooted.size == 1 && rooted["b"].as_i == 1_i64, "an anchor before a flow mapping at the root")
 assert_true(YAML.parse("!!map {a: 1}\n")["a"].as_i == 1_i64, "a tag before a flow mapping at the root")
+# `<<` merges however its `:` is spaced and in a one-pair flow mapping:
+# `{<< : m}` and `[<<: m]` read a key "<<", and `{<<}` (a merge of null)
+# was the key "<<" with a null value.
+spaced = reads("{<< : {a: 1}, b: 2}\n", "a merge key spaced from its ':' merges")["a"]?
+assert_true(!spaced.nil? && spaced.as_i == 1_i64, "a merge key spaced from its ':' merges")
+paired = reads("[<<: {a: 1}]\n", "a merge in a one-pair flow mapping merges")[0]["a"]?
+assert_true(!paired.nil? && paired.as_i == 1_i64, "a merge in a one-pair flow mapping merges")
 puts "  alias, merge, explicit key wins either side of <<, properties on a root flow mapping"
+puts "  << merges spaced from its ':' and in a one-pair flow mapping"
 
 puts "\n== streams and typed keys"
 docs = YAML.parse_all("1\n---\n2\n")
@@ -267,6 +284,15 @@ refused("a: b # c\n  d\n", "unexpected content at line 2, column 3")
 refused("[1,#c\n]\n", "a value was expected at line 1, column 4")
 refused("[? a]\n", "an explicit '?' key is not supported at line 1, column 2")
 refused("[- a]\n", "a sequence entry is not allowed here at line 1, column 2")
+refused("{<<}\n", "a merge value must be a mapping or a sequence of mappings at line 1, column 2")
+# A one-pair flow mapping refuses a collection key as a flow mapping does:
+# `[[a]: b]` was read, and `dump` then panicked on the sequence key.
+refused("[[a]: b]\n", "a collection cannot be a mapping key at line 1, column 2")
+# A node has one tag and one anchor: the later one silently replaced the
+# earlier (`!!str !!int 1` was the integer 1).
+refused("a: !!str !!int 1\n", "a second tag at line 1, column 10")
+refused("[!!int !!str 1]\n", "a second tag at line 1, column 8")
+refused("[&a &b 1, *a]\n", "a second anchor at line 1, column 5")
 laughs = "a: &a [x,x,x,x,x,x,x,x,x,x]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c,*c]\ne: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d,*d]\nf: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e,*e]\ng: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f,*f]\nh: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g,*g]\ni: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h,*h]\n"
 refused(laughs, "alias expansion past 1,000,000 nodes at line 6, column 29")
 refused("[" * 101 + "]" * 101, "nesting deeper than 100 levels at line 1, column 101")

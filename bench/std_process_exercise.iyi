@@ -14,6 +14,9 @@ module bench/std_process_exercise
 import std/process::{Process, ProcessResult, ProcessError}
 import std/env::{ENV}
 import std/dir::{Dir}
+{% if flag?(:linux) %}
+  import std/signal::{Signal}
+{% end %}
 
 pub struct TaskFailed
   def initialize
@@ -124,6 +127,15 @@ if mode = args[0]?
     stdout.write("woke\n")
   when "deaf"
     stdout.write("not reading\n")
+  when "fds"
+    # What this child holds besides its three streams and the listing's
+    # own descriptor (Linux).
+    stdout.write("#{Dir.new("/proc/self/fd").children.size - 4}\n")
+  when "emfile"
+    # Started with room for its three streams and one more: the run's
+    # pipe finds no descriptor left.
+    refused = Process.run("/bin/true")
+    stdout.write(refused.is_a?(ProcessError) ? "#{refused.code}\n" : "ran\n")
   when "parent"
     # Starts itself to write *args[1]* in 1.5 seconds, and waits for it.
     Process.run(Process.executable || "", ["late", args[1]], capture: false)
@@ -451,6 +463,53 @@ group do |g|
     killed = ran(Process.run("/bin/sh", ["-c", "kill -9 $$"]), "sh")
     fail("signal #{killed.signal}, exit #{killed.exit_code}") unless killed.signal == 9 && killed.exit_code == 137 && !killed.success?
     puts "  signal 9, exit code 137"
+    {% if flag?(:linux) %}
+      puts "== the child holds its three streams and nothing else of this program's"
+      # An open file, and the poller's epoll, are this program's alone.
+      held_path = "#{directory_of(me)}/iyi-process-held.txt"
+      held = File.open(held_path, "w")
+      holds = ran(Process.run(me, ["fds"]), "fds")
+      held.close
+      File.delete(held_path)
+      fail("the child held #{holds.stdout.chomp('\n')} of this program's descriptors") unless holds.stdout == "0\n"
+      puts "  none of this program's descriptors, an open file and the poller's included"
+
+      puts "== a program out of descriptors is told so"
+      starved = ran(Process.run("/bin/sh", ["-c", "ulimit -n 4 && exec \"$0\" emfile", me]), "emfile")
+      unless starved.stdout == "24\n"
+        fail("a run out of descriptors was not refused with EMFILE (24): #{starved.stdout.inspect}, #{starved.stderr.inspect}")
+      end
+      puts "  refused with EMFILE, not permission denied"
+
+      puts "== a TERM sent to a child as it starts is the child's"
+      # A sibling shell TERMs every child of this program, over and over,
+      # while this program waits for a TERM of its own and starts children
+      # one after another. One caught between its clone and its execve ran
+      # this program's handler, which told this program's Signal.wait.
+      killer = "while :; do for t in /proc/$PPID/task/*/children; do kids=; read -r kids < \"$t\"; " \
+               "for k in $kids; do [ \"$k\" = $$ ] || kill -TERM \"$k\" 2>/dev/null; done; done; done"
+      heard_term = false
+      spawned = 0
+      group do |h|
+        h.spawn do
+          got = Signal.wait(Signal::TERM)
+          heard_term = true unless got.is_a?(Cancelled)
+          0
+        end
+        h.spawn do
+          Process.run("/bin/sh", ["-c", killer])
+          0
+        end
+        sleep(100)
+        while spawned < 1000 && !heard_term
+          Process.run("/bin/true")
+          spawned = spawned + 1
+        end
+        h.cancel_children
+      end
+      fail("this program's Signal.wait heard a TERM sent to a child, after #{spawned} children") if heard_term
+      puts "  #{spawned} children started under a stream of TERMs, and none reached this program"
+    {% end %}
   {% end %}
 
   done = true

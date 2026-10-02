@@ -75,7 +75,7 @@ end
 pub class UdpSocket
   getter fd : Int32
   getter family : Int32
-  @closed : Bool
+  @closed : ::Bool
 
   def initialize(fd : Int32 = -1, @family : Int32 = 2)
     if fd < 0
@@ -192,6 +192,9 @@ pub class UdpSocket
     while true
       raise "socket is closed" if @fd < 0
       count = UdpSocket.__sys_recvfrom(@fd, buffer, capacity.to_u64, MSG_DONTWAIT, addr, pointerof(len))
+      # The refusal an earlier send's ICMP left on a connected socket, which
+      # POSIX reports once and Windows is told not to (see `__sys_socket`'s
+      # win32 arm): read, it is gone, and the receive asks again.
       next if count < 0_i64 && (UdpSocket.__is_eintr(count) || UdpSocket.__is_refused(count))
       return count.to_i32 if count >= 0_i64
       # A datagram larger than the buffer. POSIX fills the buffer, drops
@@ -310,12 +313,12 @@ pub class UdpSocket
   # Sends bytes to the connected peer.
   def send(bytes : Bytes) : Int32
     check_open
-    while true
-      res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64)
-      return res.to_i32 if res >= 0_i64
-      next if UdpSocket.__is_refused(res)
-      raise "cannot send on UDP socket: #{UdpSocket.refusal(res, true)}"
-    end
+    res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64)
+    # An earlier datagram's refusal, reported here instead of this send,
+    # which did not go out: the report is gone once read, so it goes again.
+    res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64) if UdpSocket.__is_refused(res)
+    raise "cannot send on UDP socket: #{UdpSocket.refusal(res, true)}" if res < 0_i64
+    res.to_i32
   end
 
   # Sends string to the connected peer.
@@ -382,7 +385,7 @@ pub class UdpSocket
     end
   end
 
-  def closed? : Bool
+  def closed? : ::Bool
     @fd < 0 || @closed
   end
 
@@ -420,7 +423,7 @@ pub class UdpSocket
 
   # Polls whether the socket is readable within timeout_ms milliseconds.
   # Returns true if a datagram is ready to be read, false on timeout.
-  def poll_read(timeout_ms : Int32 = 0) : Bool
+  def poll_read(timeout_ms : Int32 = 0) : ::Bool
     check_open
     raise "negative timeout: #{timeout_ms}" if timeout_ms < 0
     UdpSocket.__sys_poll_read(@fd, timeout_ms)
@@ -448,7 +451,7 @@ pub class UdpSocket
   # number, so a broadcast, a datagram past 65,507 bytes, a port in use
   # and an IPv6 address from an IPv4 socket all said only "cannot send to
   # H:P" or "cannot bind UDP socket to H:P" - measured on Windows.
-  def self.refusal(res : Int64, sending : Bool) : String
+  def self.refusal(res : Int64, sending : ::Bool) : String
     code = IyiSocket.__sys_code(res)
     # EACCES, EMSGSIZE and EAFNOSUPPORT, in the platform's numbers.
     denied = {% if flag?(:win32) %} 10013 {% else %} 13 {% end %}
@@ -550,7 +553,7 @@ pub class UdpSocket
       val
     end
 
-    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
+    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : ::Bool
       kq = LibC.kqueue
       return false if kq < 0
 
@@ -588,30 +591,30 @@ pub class UdpSocket
       nev > 0
     end
 
-    def self.__is_eagain(res : Int64) : Bool
+    def self.__is_eagain(res : Int64) : ::Bool
       res < 0_i64 && LibC.__error.value == 35
     end
 
-    def self.__is_eintr(res : Int64) : Bool
+    def self.__is_eintr(res : Int64) : ::Bool
       res < 0_i64 && LibC.__error.value == 4
     end
 
-    def self.__is_unbound(res : Int64) : Bool
+    def self.__is_unbound(res : Int64) : ::Bool
       false
     end
 
-    def self.__unbound_now? : Bool
+    def self.__unbound_now? : ::Bool
       false
     end
 
     # No such refusal: a datagram larger than the buffer fills it, the
     # rest is dropped and the length answered is what fit.
-    def self.__is_msgsize(res : Int64) : Bool
+    def self.__is_msgsize(res : Int64) : ::Bool
       false
     end
 
     # ECONNREFUSED (61): see the Linux arm.
-    def self.__is_refused(res : Int64) : Bool
+    def self.__is_refused(res : Int64) : ::Bool
       res < 0_i64 && LibC.__error.value == 61
     end
   {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
@@ -741,7 +744,7 @@ pub class UdpSocket
       val
     end
 
-    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
+    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : ::Bool
       epfd = __sys3(SYS_EPOLL_CREATE1, 0_i64, 0_i64, 0_i64)
       return false if epfd < 0_i64
 
@@ -763,38 +766,37 @@ pub class UdpSocket
       count > 0_i64
     end
 
-    def self.__is_eagain(res : Int64) : Bool
+    def self.__is_eagain(res : Int64) : ::Bool
       res == -11_i64 # -EAGAIN / -EWOULDBLOCK on Linux
     end
 
-    def self.__is_eintr(res : Int64) : Bool
+    def self.__is_eintr(res : Int64) : ::Bool
       res == -4_i64 # -EINTR on Linux
     end
 
-    def self.__is_unbound(res : Int64) : Bool
+    def self.__is_unbound(res : Int64) : ::Bool
       false
     end
 
-    def self.__unbound_now? : Bool
+    def self.__unbound_now? : ::Bool
       false
     end
     # No such refusal: a datagram larger than the buffer fills it, the
     # rest is dropped and the length answered is what fit.
-    def self.__is_msgsize(res : Int64) : Bool
+    def self.__is_msgsize(res : Int64) : ::Bool
       false
     end
 
-    # ECONNREFUSED: the ICMP port-unreachable a *connected* datagram
-    # socket's earlier send provoked, which Linux and BSD report to the
-    # next send or receive on it (udp(7)) and then forget; an unconnected
-    # one is never told. It is something the peer did, not a failure of
-    # this socket, so the shared bodies read it as nothing queued and send
-    # again. Read as a failure, the next `send` or `receive?` panicked
-    # here, where Windows, which has the report turned off, answered the
-    # byte count and nil - measured there; not run here [INFERENCE]. A
-    # `poll_read` the report wakes still answers true [INFERENCE], and
-    # the `receive?` after it nil.
-    def self.__is_refused(res : Int64) : Bool
+    # ECONNREFUSED (111): the ICMP port-unreachable a *connected* datagram
+    # socket's earlier send provoked, which Linux and BSD report once, to
+    # the next send or receive on it (udp(7)), and then forget; an
+    # unconnected one is never told. It is something the peer did, not a
+    # failure of this socket, so the shared bodies read it as nothing
+    # queued and send again. Read as a failure, the next `send` or
+    # `receive?` panicked here, where Windows, which has the report turned
+    # off, answered the byte count and nil. A `poll_read` the report wakes
+    # still answers true [INFERENCE], and the `receive?` after it nil.
+    def self.__is_refused(res : Int64) : ::Bool
       res == -111_i64
     end
   {% elsif flag?(:win32) %}
@@ -1059,41 +1061,41 @@ pub class UdpSocket
 
     # One descriptor, one event, and a bound on the wait, which is what the
     # epoll and kqueue arms do with theirs.
-    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
+    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : ::Bool
       entry = LibWs2_32::PollFd.new(fd: __sys_handle(fd), events: POLLRDNORM, revents: 0_i16)
       LibWs2_32.WSAPoll(pointerof(entry), 1, timeout_ms) > 0
     end
 
-    def self.__is_eagain(res : Int64) : Bool
+    def self.__is_eagain(res : Int64) : ::Bool
       res == -10035_i64 # -WSAEWOULDBLOCK, Winsock's own number
     end
 
     # Never: Winsock has no EINTR. A call either answers, or answers
     # WSAEWOULDBLOCK, or is posted and completed.
-    def self.__is_eintr(res : Int64) : Bool
+    def self.__is_eintr(res : Int64) : ::Bool
       false
     end
 
     # WSAEINVAL (10022): Winsock's answer to a receive, or an address asked,
     # on a socket that has none yet - one `client` made and nothing sent
     # from. POSIX has nothing queued there and port 0; Windows panicked.
-    def self.__is_unbound(res : Int64) : Bool
+    def self.__is_unbound(res : Int64) : ::Bool
       res == -10022_i64
     end
 
-    def self.__unbound_now? : Bool
+    def self.__unbound_now? : ::Bool
       LibWs2_32.WSAGetLastError == 10022
     end
 
     # A datagram that did not fit is an error here where it is a silent
     # truncation everywhere else: WSAEMSGSIZE (10040), with the buffer
     # already filled, which is why the caller answers its capacity.
-    def self.__is_msgsize(res : Int64) : Bool
+    def self.__is_msgsize(res : Int64) : ::Bool
       res == -10040_i64
     end
 
-    # Never: `__sys_socket` turns the report off.
-    def self.__is_refused(res : Int64) : Bool
+    # Never: the report is turned off in `__sys_socket`.
+    def self.__is_refused(res : Int64) : ::Bool
       false
     end
   {% else %}
@@ -1142,33 +1144,33 @@ pub class UdpSocket
       -1
     end
 
-    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : Bool
+    def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : ::Bool
       false
     end
 
-    def self.__is_eagain(res : Int64) : Bool
+    def self.__is_eagain(res : Int64) : ::Bool
       false
     end
 
-    def self.__is_eintr(res : Int64) : Bool
+    def self.__is_eintr(res : Int64) : ::Bool
       false
     end
 
-    def self.__is_unbound(res : Int64) : Bool
+    def self.__is_unbound(res : Int64) : ::Bool
       false
     end
 
-    def self.__unbound_now? : Bool
+    def self.__unbound_now? : ::Bool
       false
     end
 
     # No such refusal: a datagram larger than the buffer fills it, the
     # rest is dropped and the length answered is what fit.
-    def self.__is_msgsize(res : Int64) : Bool
+    def self.__is_msgsize(res : Int64) : ::Bool
       false
     end
 
-    def self.__is_refused(res : Int64) : Bool
+    def self.__is_refused(res : Int64) : ::Bool
       false
     end
   {% end %}

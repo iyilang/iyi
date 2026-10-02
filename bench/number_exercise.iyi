@@ -278,4 +278,19 @@ unchecked = [big.unsafe_to_i32.to_s, (0.0 - big).unsafe_to_i32.to_s, nan.unsafe_
 assert_str(unchecked.join(" "), "2147483647 -2147483648 0 255 0 0 10000000000",
   "number: an unchecked float saturates, NaN is 0, and one that fits is itself")
 
+# ---- 7. Shifts, and the character a code point names
+#
+# A negative count shifts the other way, as in the other library: it
+# answered 0 here (or -1, for `>>` of a negative), so `8 >> -2` was 0
+# where it is 32. Past the width it is still zero, or the sign.
+assert_int(8 >> -2, 32, "number: a negative count shifts the other way")
+assert_int(8 << -2, 2, "number: a negative count shifts back")
+assert_true((8_i64 >> -2) == 32_i64 && (8_i64 << -2) == 2_i64, "number: an int64 negative count shifts the other way")
+assert_true((-8 >> -1) == -16 && (-8 >> 40) == -1 && (8 << 32) == 0, "number: a negative count keeps the sign, and past the width")
+# `chr` is the other half of `Char#ord`, which answers every code point:
+# it refused everything past ASCII, so `'é'.ord.chr` panicked.
+assert_int(233.chr.ord, 233, "number: chr reads a code point past ASCII")
+assert_str('é'.ord.chr.to_s, "é", "number: ord and chr round trip")
+assert_int(0x10FFFF.chr.ord, 0x10FFFF, "number: chr reads the last code point")
+
 puts "all number checks passed"

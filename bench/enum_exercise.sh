@@ -240,6 +240,10 @@ prove_fails "> reversed" no_gt "enum: >" \
 prove_fails "to_s without names" no_to_s "enum: to_s first member" \
   's/^        return {{ member.stringify }} if value == {{ @type.constant(member) }}$//'
 
+# 3b. A flags `to_s` that skips `All` again, so every bit is spelled out.
+prove_fails "to_s skips All" no_all "flags: to_s of every bit is All" \
+  's/^      {% for member in @type.constants %}return {{ member.stringify }} if value == {{ @type.constant(member) }}; {% end %}$/      {% for member in @type.constants %}{% unless member.stringify == "All" %}return {{ member.stringify }} if value == {{ @type.constant(member) }}; {% end %}{% end %}/'
+
 # 4. `hash` collapsed to one number. A `Hash` of members still answers
 #    correctly — it compares the keys it finds — so what this breaks is the
 #    distribution, and the check that sees it is the one asking two members to

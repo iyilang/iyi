@@ -485,6 +485,63 @@ IYI
 fi
 
 echo
+echo "== proving the refusal checks can fail when the module is broken"
+# A connected socket's ICMP refusal is reported by the next call on Linux
+# (and darwin); Windows is told not to report it, so a copy that forgets
+# it there changes nothing. Measured on Linux.
+breaks_udp() { # breaks_udp <label> <dir> <phrase> <old> <new>
+  local label="$1" dir="$2" phrase="$3"
+  mkdir -p "$WORK/$dir/std"
+  OLD="$4" NEW="$5" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/udp.iyi").read_text()
+old, new = os.environ["OLD"], os.environ["NEW"]
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/$dir/std/udp.iyi").write_text(src.replace(old, new, 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  $label: the patch did not apply"
+    status=1
+  elif ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_udp_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,8p' "$WORK/$dir/build.log"
+    status=1
+  elif timeout -k 5 60 "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1; then
+    echo "  $label: the exercise PASSED on a broken module"
+    status=1
+  elif ! grep -qF -- "$phrase" "$WORK/$dir/out"; then
+    echo "  $label: failed, but not at '$phrase'"
+    sed -n '$p' "$WORK/$dir/out"
+    status=1
+  else
+    echo "  $label: caught at \"$(grep -m1 -F -- "$phrase" "$WORK/$dir/out" | sed 's/^iyi: panic: //')\""
+  fi
+}
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+elif [ "$(uname -s)" = Linux ]; then
+  breaks_udp "a send the refusal is reported to, not sent again" refused_send "cannot send on UDP socket" \
+    "    res = UdpSocket.__sys_send(@fd, bytes.to_unsafe, bytes.size.to_u64) if UdpSocket.__is_refused(res)
+" ""
+  breaks_udp "a receive? the refusal is reported to" refused_now "cannot receive from UDP socket" \
+    "next if count < 0_i64 && (UdpSocket.__is_eintr(count) || UdpSocket.__is_refused(count))
+      return count.to_i32 if count >= 0_i64
+      return capacity" \
+    "next if count < 0_i64 && UdpSocket.__is_eintr(count)
+      return count.to_i32 if count >= 0_i64
+      return capacity"
+  breaks_udp "a parked receive the refusal is reported to" refused_parked "cannot receive from UDP socket" \
+    "next if count < 0_i64 && (UdpSocket.__is_eintr(count) || UdpSocket.__is_refused(count))
+      return count.to_i32 if count >= 0_i64
+      # A datagram" \
+    "next if count < 0_i64 && UdpSocket.__is_eintr(count)
+      return count.to_i32 if count >= 0_i64
+      # A datagram"
+fi
+
+echo
 if [ "$status" -eq 0 ]; then
   echo "the std/udp exercise holds"
 else

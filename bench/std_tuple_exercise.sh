@@ -161,6 +161,21 @@ prove_fails "a named tuple hashing to its type's id again" broken_named_hash "AS
   '  def hash : Int32' '  def hash_unused : Int32'
 prove_fails "a named tuple hashed in the order its type lists the keys" broken_named_order "ASSERTION FAILED: hash: one hash whichever order" \
   '{% for key in T.keys.sort_by { |k| k.stringify } %}' '{% for key in T.keys %}'
+# The empty tuple's `reverse` and `map` gaining a member: what the brace
+# literal they used to write did not compile into at all. Built, so the check
+# that fires is the one asking for `{}`.
+prove_fails "the empty tuple's reverse is not empty" broken_empty_reverse "ASSERTION FAILED: reverse of the empty tuple" \
+  '        {% for i in 1..T.size %}' '        {% if T.size == 0 %}nil,{% end %}
+        {% for i in 1..T.size %}'
+prove_fails "the empty tuple's map is not empty" broken_empty_map "ASSERTION FAILED: map of the empty tuple" \
+  '          (yield self[{{i}}]),
+        {% end %}' '          (yield self[{{i}}]),
+        {% end %}
+        {% if T.size == 0 %}nil,{% end %}'
+# A key past ASCII left bare again: the rule that only asked about ASCII
+# bytes.
+prove_fails "a key past ASCII printed bare" broken_key_ascii "ASSERTION FAILED: to_s quotes a key with a letter past ASCII" \
+  '      return key.inspect unless word' '      return key.inspect if b < 128_u8 && !word'
 
 echo
 if [ "$status" -eq 0 ]; then

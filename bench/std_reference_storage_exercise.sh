@@ -131,10 +131,10 @@ else
   "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/reference_storage.iyi").read_text()
-old = "h = (h &* 31) ^ ptr[i].to_i32"
+old = "h = (h &* 31) ^ to_reference.@{{ivar.id}}.hash"
 if old not in src:
     raise SystemExit("hash patch site missing")
-Path("$WORK/patched_hash/std/reference_storage.iyi").write_text(src.replace(old, "h = (h * 31) ^ ptr[i].to_i32", 1))
+Path("$WORK/patched_hash/std/reference_storage.iyi").write_text(src.replace(old, "h = (h * 31) ^ to_reference.@{{ivar.id}}.hash", 1))
 PY
   if [ $? -ne 0 ]; then
     echo "  the hash patch did not apply"
@@ -144,6 +144,43 @@ PY
     status=1
   else
     echo "  overflow-checked hash is caught"
+  fi
+fi
+
+echo
+echo "== proving hash follows == field by field"
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  # The hash as it was: every byte of the instance, which is the sign bit of
+  # a -0.0 and the address a String? holds, where == reads neither.
+  mkdir -p "$WORK/patched_bytes/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/reference_storage.iyi").read_text()
+start = src.find("  def hash : Int32\n")
+stop = src.find("  def to_s : String")
+if start < 0 or stop < start:
+    raise SystemExit("hash patch site missing")
+old_hash = "  def hash : Int32\n    h = 0\n    ptr = pointerof(@type_id).as(Pointer(UInt8))\n    i = 0\n    sz = instance_sizeof(T)\n    while i < sz\n      h = (h &* 31) ^ ptr[i].to_i32\n      i = i + 1\n    end\n    h\n  end\n\n"
+Path("$WORK/patched_bytes/std/reference_storage.iyi").write_text(src[:start] + old_hash + src[stop:])
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the hash patch did not apply"
+    status=1
+  elif ! IYI_PATH="$WORK/patched_bytes${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched_bytes/program" "$REPO/bench/std_reference_storage_exercise.iyi" >"$WORK/patched_bytes/build.log" 2>&1; then
+    echo "  the byte-hash copy did not compile"
+    sed -n '1,6p' "$WORK/patched_bytes/build.log"
+    status=1
+  elif "$WORK/patched_bytes/program" >"$WORK/mut_bytes.out" 2>&1; then
+    echo "  the exercise PASSED on a hash of the raw bytes"
+    status=1
+  elif ! grep -q "ASSERTION FAILED: 0.0 and -0.0 fields hash alike" "$WORK/mut_bytes.out"; then
+    echo "  the byte hash failed, but not at '0.0 and -0.0 fields hash alike'"
+    sed -n '$p' "$WORK/mut_bytes.out"
+    status=1
+  else
+    echo "  a hash of the raw bytes is caught: 0.0 and -0.0 fields hash apart"
   fi
 fi
 

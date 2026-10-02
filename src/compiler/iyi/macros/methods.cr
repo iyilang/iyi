@@ -638,6 +638,26 @@ module Iyi
       in .f64?  then @value.to_f64
       end
     end
+
+    # iyi: this integer literal as one of *kind*, or nil when either kind is
+    # not an integer one or the value does not fit *kind*.
+    def integer_in?(kind : NumberKind) : NumberLiteral?
+      return nil unless self.kind.signed_int? || self.kind.unsigned_int?
+      value = case kind
+              in .i8?         then @value.to_i8?
+              in .i16?        then @value.to_i16?
+              in .i32?        then @value.to_i32?
+              in .i64?        then @value.to_i64?
+              in .i128?       then @value.to_i128?
+              in .u8?         then @value.to_u8?
+              in .u16?        then @value.to_u16?
+              in .u32?        then @value.to_u32?
+              in .u64?        then @value.to_u64?
+              in .u128?       then @value.to_u128?
+              in .f32?, .f64? then nil
+              end
+      value && NumberLiteral.new(value)
+    end
   end
 
   class CharLiteral
@@ -1451,6 +1471,13 @@ module Iyi
     end
 
     def interpret_to_range(from : NumberLiteral, to : NumberLiteral)
+      # iyi: the elements take the begin's kind, and the stdlib's Range reaches
+      # an inclusive end by `==`, which compares kinds, so `(0_i8..0).to_a` was
+      # `[]` and `(-1..4_u8).to_a` stopped at 3. An integer end that fits the
+      # begin's kind is read in that kind.
+      if to.kind != from.kind && (in_kind = to.integer_in?(from.kind))
+        to = in_kind
+      end
       Range.new(from, to, self.exclusive?)
     end
 

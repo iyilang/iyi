@@ -25,7 +25,12 @@
 # processing instruction has no such escape, so `--` in a comment, a comment
 # ending in `-`, and `?>` in a processing instruction are refused when the
 # node is made or its text set; in a document declared US-ASCII, `to_xml`
-# refuses a character past U+007F in one of them or in a name.
+# refuses a character past U+007F in one of them or in a name. `to_xml`
+# refuses a name that is not an XML name (and a processing instruction
+# target `xml`, or one holding a colon) and a character XML cannot hold at
+# all (a C0 control but tab, newline and carriage return; U+FFFE; U+FFFF):
+# written as they were, they made a document no parser reads. A parsed
+# document holds none of them.
 #
 # What it refuses, each with the line and column:
 #   * an undeclared entity (`&bogus;`), an unterminated one (`&amp` without
@@ -475,13 +480,23 @@ pub class Node
   # such a character is refused; it was written as UTF-8, and this module's
   # own parser refused the result ("byte 0xC3 is not US-ASCII, the declared
   # encoding").
+  #
+  # A name that is not an XML name, and a character XML cannot hold at all
+  # (a C0 control but tab, newline and carriage return; U+FFFE, U+FFFF; a
+  # byte that is not UTF-8), are refused here: both were written as they
+  # were, so `set_attribute("k=\"1\" j", "2")` wrote two attributes and a
+  # "\u0001" in text a document no parser reads. A parsed tree holds
+  # neither.
   protected def serialize_node(buf : Array(String), ascii : Bool = false) : Nil
     if @node_type.element?
+      Node.check_writable_name(@name, "element")
       refuse_non_ascii_name(@name) if ascii
       buf << "<"
       buf << @name
       ns_i = 0
       while ns_i < @namespaces.size
+        Node.check_writable_text(@namespaces[ns_i].uri)
+        Node.check_writable_name(@namespaces[ns_i].prefix, "namespace prefix") unless @namespaces[ns_i].default?
         refuse_non_ascii_name("xmlns:#{@namespaces[ns_i].prefix}") if ascii
         buf << " "
         buf << @namespaces[ns_i].to_s(ascii)
@@ -489,6 +504,8 @@ pub class Node
       end
       attr_i = 0
       while attr_i < @attributes.size
+        Node.check_writable_name(@attributes[attr_i].name, "attribute")
+        Node.check_writable_text(@attributes[attr_i].value)
         refuse_non_ascii_name(@attributes[attr_i].name) if ascii
         buf << " "
         buf << @attributes[attr_i].to_s(ascii)
@@ -508,17 +525,25 @@ pub class Node
         buf << ">"
       end
     elsif @node_type.text?
+      Node.check_writable_text(@content)
       buf << Std::Xml.escape(@content, ascii)
     elsif @node_type.cdata?
+      Node.check_writable_text(@content)
       buf << "<![CDATA["
       serialize_cdata_body(buf, ascii)
       buf << "]]>"
     elsif @node_type.comment?
+      Node.check_writable_text(@content)
       refuse_non_ascii_content("a comment") if ascii
       buf << "<!--"
       buf << @content
       buf << "-->"
     elsif @node_type.pi?
+      Node.check_writable_name(@name, "processing instruction target")
+      if @name.downcase == "xml" || @name.includes?(":")
+        raise "'#{@name}' is reserved or holds a colon, so the processing instruction target cannot be written"
+      end
+      Node.check_writable_text(@content)
       if ascii
         refuse_non_ascii_name(@name)
         refuse_non_ascii_content("a processing instruction")
@@ -611,6 +636,26 @@ pub class Node
       end
     end
     buf << @content[run_start, len - run_start]
+  end
+
+  # What `to_xml` refuses to write (see `serialize_node`): a name that is
+  # not an XML name, and a character XML cannot hold raw or as a reference.
+  protected def self.check_writable_name(name : String, what : String) : Nil
+    raise "'#{name}' is not an XML name, so the #{what} cannot be written" unless Parser.name_shaped?(name)
+  end
+
+  protected def self.check_writable_text(text : String) : Nil
+    ptr = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      b = ptr[i]
+      if b < 32_u8 && b != 9_u8 && b != 10_u8 && b != 13_u8
+        raise "control character U+#{Parser.hex4(b.to_i32)} cannot be written: XML has no way to hold it"
+      end
+      i = i + 1
+    end
+    bad = Parser.first_bad_character(text, 0, false)
+    raise "#{bad[1]}, so it cannot be written" if bad[0] >= 0
   end
 end
 
@@ -2117,6 +2162,7 @@ pub class Parser
   # (`U+00B7`) where it does not print as itself.
   private def found_here : String
     cp = code_point_at(@input.to_unsafe, @len, @pos)
+    cp = byte_at(@pos).to_i32 if cp < 0
     cp >= 32 && cp < 127 ? "'#{cp.unsafe_chr}'" : "U+#{Parser.hex4(cp)}"
   end
 
@@ -2225,13 +2271,14 @@ pub def xml_char?(cp : Int32) : Bool
 end
 
 # The code point the UTF-8 character at byte *i* of *ptr* (*len* bytes)
-# encodes, or -1 where the bytes there are not one; the parser refuses
-# those where its cursor reaches them.
+# encodes, or -1 where the bytes there are not one (an overlong form and
+# one past U+10FFFF included); the parser refuses those where its cursor
+# reaches them, and `name_shaped?` does not take them for a name.
 def code_point_at(ptr : Pointer(UInt8), len : Int32, i : Int32) : Int32
   b = ptr[i]
   return b.to_i32 if b < 0x80_u8
   n = utf8_width(b)
-  return -1 if b < 0xC2_u8 || i + n > len
+  return -1 if b < 0xC2_u8 || b >= 0xF5_u8 || i + n > len
   cp = (b & (n == 2 ? 0x1F_u8 : (n == 3 ? 0x0F_u8 : 0x07_u8))).to_i32
   k = 1
   while k < n
@@ -2240,6 +2287,7 @@ def code_point_at(ptr : Pointer(UInt8), len : Int32, i : Int32) : Int32
     cp = (cp << 6) | (c & 0x3F_u8).to_i32
     k = k + 1
   end
+  return -1 if (n == 3 && cp < 0x800) || (n == 4 && (cp < 0x10000 || cp > 0x10FFFF))
   cp
 end
 

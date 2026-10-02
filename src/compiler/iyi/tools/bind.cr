@@ -807,7 +807,15 @@ module Iyi
       # distinction the keep file takes: a module that does answers to these
       # itself, so the producer emits `*Gen@Gen#next_pair` and the keep file
       # keeps it alive.
-      travels = method.body_answers ||
+      #
+      # And whatever its side, a function that takes a block, for the reason
+      # a type's block-taking method carries its body below (`carries_body`):
+      # the producer inlines it at every call, the keep file's included. One
+      # whose block was written `& : Int32 -> Nil` is ready rather than
+      # answered by its body, so `body_answers` was false, the declaration
+      # crossed alone, and a program calling `Blk.each_up(3) { ... }` ended on
+      # `LNK2019: unresolved external symbol .2A.Blk.3A..3A.each_up...`.
+      travels = method.body_answers || !method.written_block.empty? ||
                 (signature.receiver.empty? && !extends_self?(program, root))
       if travels && (body = method.body) && !body.empty?
         @@mono_bodies[IyiMod.mono_body_key(iyi_module_name(root), signature)] = travelling_body(body)

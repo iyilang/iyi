@@ -882,6 +882,40 @@ else
 fi
 mv shard.cr.away shard.cr
 
+echo "== a module function whose block is written with its type"
+# A typed block is ready rather than answered by its body, so the function
+# crossed as a declaration alone; the producer inlines a block-taking
+# method at every call, the keep file's included, so nothing emitted the
+# symbol, and the program ended on `LNK2019: unresolved external symbol
+# .2A.Blk.3A..3A.each_up...` (`undefined symbol` elsewhere). The body
+# travels now, as a type's block-taking method's does.
+TYPED="$WORK/typed"
+mkdir -p "$TYPED/lib/blk/src"
+printf 'name: blk\n' > "$TYPED/lib/blk/shard.yml"
+cat > "$TYPED/lib/blk/src/blk.cr" <<'CR'
+module Blk
+  def self.each_up(n : Int32, & : Int32 -> Nil) : Nil
+    n.times { |i| yield i }
+  end
+end
+CR
+printf 'import blk\n\nBlk.each_up(3) { |i| puts i }\n' > "$TYPED/app.iyi"
+if ! (cd "$TYPED" && "$IYI" bind --lib lib --mods mods > bind.log 2>&1); then
+  echo "  the shard did not bind:"
+  sed 's/^/    /' "$TYPED/bind.log" | head -8
+  status=1
+elif ! (cd "$TYPED" && "$IYI" build --crystal --use-iyimod mods -o app app.iyi > build.log 2>&1); then
+  echo "  a program calling it did not build:"
+  grep -m2 -iE 'error|undefined' "$TYPED/build.log" | sed 's/^/    /'
+  status=1
+elif [ "$(cd "$TYPED" && ./app | tr -d '\r' | tr '\n' ' ')" = "0 1 2 " ]; then
+  echo "  its body crossed, and the program prints 0 1 2"
+else
+  echo "  the program printed something else:"
+  (cd "$TYPED" && ./app 2>&1 | head -4 | sed 's/^/    /')
+  status=1
+fi
+
 # And the inputs are the shard's own files, not a neighbour's whose directory
 # merely begins the same way: `lib/radix/src` is a prefix of
 # `lib/radix/src-extra/extra.cr`, and a bare dirname under `starts_with?`

@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **A shard's module function whose block is typed crosses `iyi bind` with
+  its body.** `def self.each_up(n : Int32, & : Int32 -> Nil)` crossed as a
+  declaration alone: a typed block is ready, so nothing asked for the body,
+  and the producer inlines a block-taking method at every call, so no symbol
+  was emitted either. `iyi bind` exited 0 and a program calling
+  `Blk.each_up(3) { |i| puts i }` failed to link on `LNK2019: unresolved
+  external symbol .2A.Blk.3A..3A.each_up...` (exit 96). The body travels
+  now, as a type's block-taking method's always did, and the program prints
+  0 1 2. `bench/bind_roundtrip.sh` binds, builds and runs it; the old
+  compiler failed at the link.
+
 - **A fill build that keeps `String` builds on Windows.** `iyi build
   --crystal --iyi-keep String` of `puts "x"` failed LLVM's module verifier
   with `Call parameter type does not match function signature!` about every

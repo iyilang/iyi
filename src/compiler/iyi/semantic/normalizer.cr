@@ -212,26 +212,28 @@ module Iyi
     #     group do |g|
     #       x = g.spawn { read(a) }
     #       y = g.spawn { read(b) }
-    #     end
+    #     end!
     #
-    # To:
+    # To (inside the `!`'s own expansion):
     #
     #     group do |g|
     #       %h1 = g.spawn { read(a) }
     #       x = %h1
     #       %h2 = g.spawn { read(b) }
     #       y = %h2
-    #       g.join
     #       %v1 = %h1.value
-    #       if %v1.is_a?(::Error)
+    #       %v2 = %h2.value
+    #       %first = g.first_failure
+    #       if %v1.is_a?(::Error) && %h1.fiber.object_id == %first
     #         %v1
+    #       elsif %v2.is_a?(::Error) && %h2.fiber.object_id == %first
+    #         %v2
+    #       elsif %v1.is_a?(::Error)
+    #         %v1
+    #       elsif %v2.is_a?(::Error)
+    #         %v2
     #       else
-    #         %v2 = %h2.value
-    #         if %v2.is_a?(::Error)
-    #           %v2
-    #         else
-    #           {%v1, %v2}
-    #         end
+    #         {%v1, %v2}
     #       end
     #     end
     #
@@ -243,8 +245,22 @@ module Iyi
     # ordinary machinery: the tuple's elements are non-error by the same
     # `is_a?(::Error)` narrowing `!` expands to, and the error side is the
     # union of what the branches answer. The method's deferred join stays
-    # — a `return` between two spawns still joins — and finds nothing live
-    # after the appended one, which costs a comparison.
+    # — a `return` between two spawns still joins.
+    #
+    # Under `end!` the values are read before any join: a read waits for
+    # its task, and reading a panicked task's value is what catches the
+    # panic as `Panicked` (III.1.4), so the deferred join finds nothing
+    # owed. With a `g.join` first, the join re-raised the panic nobody had
+    # read yet and the program died where the group was to answer
+    # `Panicked`. A group without `!` joins first, as before: nothing
+    # reads its answer for it, and a panic it swallowed into a discarded
+    # tuple would be a bug nobody heard of.
+    #
+    # The error that leaves is the one that stopped the group: the first
+    # failure cancels its siblings, and a sibling cancelled earlier in the
+    # text answers `Cancelled`, which the slots in text order answered in
+    # its place. The runtime keeps the failing task's object_id
+    # (`IyiGroup#first_failure`), and its slot is asked first.
     #
     # Each slot reads a handle of its own (`%h1`, `%h2`), never the author's
     # variable: one name reused for two spawns (`t = g.spawn {..}` twice)
@@ -252,13 +268,17 @@ module Iyi
     # first task's error.
     #
     # What qualifies is what the section says: the block's parameter is used
-    # as the receiver of direct `spawn` statements and *nowhere else*. A
-    # spawn in a loop, an `if`, or a `g` that escapes falls back quietly to
-    # the general form, whose group is its block's last expression and whose
-    # handles answer through `task.value`; a `!` demanding the typed form of
-    # a group that cannot have one is refused by `!`'s own degenerate-union
-    # check, which names the type it found.
-    private def expand_iyi_group(node : Call) : ASTNode?
+    # as the receiver of direct `spawn` statements and *nowhere else*, and
+    # the block ends in one. A spawn in a loop, an `if`, a `g` that escapes,
+    # or macro code anywhere in the block (whose expansion may spawn) falls
+    # back quietly to the general form, whose group is its block's last
+    # expression and whose handles answer through `task.value`; a `!`
+    # demanding the typed form of a group that cannot have one is refused
+    # by `!`'s own degenerate-union check, which names the type it found.
+    # A block whose last expression is its own — `"sum is #{a.value}"`
+    # after two spawns — answers that: the expansion threw it away and
+    # answered the tuple.
+    private def expand_iyi_group(node : Call, propagated : Bool) : ASTNode?
       block = node.block
       return nil unless block
       group_param = block.args.first?
@@ -291,7 +311,7 @@ module Iyi
       end
 
       group_var = Var.new(group_param.name).at(node)
-      rewritten << Call.new(group_var.clone, "join").at(node)
+      rewritten << Call.new(group_var.clone, "join").at(node) unless propagated
 
       values = [] of ASTNode
       handles.each do |handle|
@@ -376,7 +396,7 @@ module Iyi
       # the *typed* form applies is this file's question, and a `nil` answer
       # is the method call standing as written.
       if node.iyi_group?
-        expanded = expand_iyi_group(node)
+        expanded = expand_iyi_group(node, node.same?(@propagated_group))
         return expanded.transform(self) if expanded
       end
 
@@ -523,6 +543,9 @@ module Iyi
     # `::Error` rather than `Error`, so that a module of its own with that name
     # cannot change what the operator means.
     def transform(node : Propagate)
+      if (group = node.exp).is_a?(Call) && group.iyi_group?
+        @propagated_group = group
+      end
       exp = node.exp.transform(self)
       temp_var = program.new_temp_var
 
@@ -538,6 +561,10 @@ module Iyi
 
       Expressions.new([assign, propagate, temp_var.clone] of ASTNode).at(node)
     end
+
+    # iyi: the `group do ... end!` whose `!` is being expanded: the typed
+    # group reads its values before the join when its answer is propagated.
+    @propagated_group : Call?
 
     # iyi: `read_port().or(8080)` and `read_port().or_panic` (SPEC.md III.1.3).
     #

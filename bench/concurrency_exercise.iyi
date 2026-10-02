@@ -950,6 +950,25 @@ stopped = fetch_stopped(true)
 fail("typed group: a sibling's Cancelled left in place of the failure that cancelled it") unless stopped.is_a?(TaskFailed)
 puts "a typed group answered the failure that stopped it, not the Cancelled it caused"
 
+# A task that panics is the typed group's `Panicked` (III.1.4): reading a
+# value catches its task's panic, and the values are read before the join.
+# The join came first and re-raised the panic nobody had read yet, so the
+# program died where the group was to answer.
+def explode(n : Int32) : Int32
+  raise "a typed group's task panicked, as it was meant to" if n > 0
+  n
+end
+
+def fetch_panicking : Tuple(Int32, Int32) | Cancelled | Panicked
+  group do |g|
+    x = g.spawn { explode(1) }
+    y = g.spawn { 2 }
+  end!
+end
+
+fail("typed group: a panicking task did not answer Panicked") unless fetch_panicking.is_a?(Panicked)
+puts "a typed group answered a panicking task's Panicked"
+
 # A block whose last expression is its own answers that: the expansion
 # appended the tuple after it, and the block's answer was thrown away.
 summary = group do |g|

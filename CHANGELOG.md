@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A typed `group do ... end!` answers `Panicked` when a task
+  panics.** The expansion joined the group before reading the tasks'
+  values, and the join re-raised the panic nobody had read yet: a task
+  raising "task one bug" ended the program with "iyi: panic: a task
+  panicked: task one bug", exit 1, where SPEC.md III.1.4 says the typed
+  group propagates it like any other member of its error union. Under
+  `end!` the values are read first now, and reading one catches its
+  task's panic; a group without `!` still joins first, so a panic it
+  would swallow into a discarded tuple is still re-raised.
+  `bench/concurrency_exercise.iyi` checks it; the old compiler died with
+  that re-raise.
+
 - **A typed group answers the error that stopped it, not the
   `Cancelled` it caused.** The extraction asked the slots in text order,
   and a task cancelled by a later sibling's failure answers `Cancelled`:

@@ -565,10 +565,27 @@ module Iyi
     def check_exception_handler_vars(var_name, node)
       # If inside a begin part of an exception handler, bind this type to
       # the variable that will be used in the rescue/else blocks.
-      @all_exception_handler_vars.try &.each do |exception_handler_vars|
-        var = (exception_handler_vars[var_name] ||= MetaVar.new(var_name))
-        var.bind_to(node)
+      #
+      # iyi: the innermost handler's variable only. Each handler's variable
+      # is bound to the one of the handler inside it (`visit(ExceptionHandler)`),
+      # so an outer handler still has every type assigned anywhere in its
+      # body. The value bound into every handler on the stack made N nested
+      # handlers cost N^3 - N `defer`s in one scope nest N - and 2,000
+      # `defer x += 1` spent 14.5 s of a 20.7 s check here.
+      stack = @all_exception_handler_vars
+      iyi_exception_handler_var(stack, stack.size - 1, var_name).bind_to(node) if stack && !stack.empty?
+    end
+
+    # The variable *name* of the handler at *depth* in *stack*, made if it
+    # is missing and bound into the same variable of the handler outside.
+    private def iyi_exception_handler_var(stack : Array(MetaVars), depth : Int32, name : String) : MetaVar
+      vars = stack[depth]
+      if var = vars[name]?
+        return var
       end
+      var = vars[name] = MetaVar.new(name)
+      iyi_exception_handler_var(stack, depth - 1, name).bind_to(var) if depth > 0
+      var
     end
 
     def visit(node : Out)
@@ -3145,12 +3162,16 @@ module Iyi
       exception_handler_vars = @vars.dup
 
       all_exception_handler_vars.push exception_handler_vars
+      # iyi: and each is bound into the handler outside this one, which
+      # sees what this body assigns through it (`check_exception_handler_vars`).
+      outer_depth = all_exception_handler_vars.size - 2
 
       exception_handler_vars.each do |name, var|
         new_var = new_meta_var(name)
         new_var.nil_if_read = var.nil_if_read?
         new_var.bind_to(var)
         exception_handler_vars[name] = new_var
+        iyi_exception_handler_var(all_exception_handler_vars, outer_depth, name).bind_to(new_var) if outer_depth >= 0
       end
 
       node.body.accept self
@@ -3609,6 +3630,14 @@ module Iyi
         visitor = visitor.parent
       end
       var.mark_as_closured(by_defer)
+      # iyi: what that bound stays bound, and every read of a closured
+      # variable comes back here: bound again each time, a variable read
+      # 2,000 times bound one read 2,000 times over (`defer x += 1` written
+      # 2,000 times).
+      if var.mutably_closured?
+        var.iyi_defer_local_vars.clear
+        var.local_vars.clear unless var.iyi_defer_only?
+      end
     end
 
     def check_self_closured

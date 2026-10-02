@@ -142,6 +142,20 @@
 
 ### Fixed
 
+- **Checking N `defer`s in one scope takes time near-linear in N.** One
+  scope's `defer`s nest N handlers, and each assignment a cleanup made
+  was bound into every handler around it, a merge over a list that grew
+  with N, while each `defer` added a flag variable that every handler
+  nested inside it copied: `iyi check` of one def with 500, 1,000 and
+  2,000 `defer x += 1` took 0.98 s, 3.9 s and 21.1 s, 14.5 s of the last
+  in those binds. An assignment is bound into the innermost handler now,
+  each handler into the one outside it, and one flag serves every
+  `defer` of a list; a closured variable's pending reads are bound once
+  rather than again on every read. The same checks take 0.46 s, 0.55 s
+  and 0.88 s, and 4,000 take 1.52 s. `bench/defer_cost.sh` holds 2,000
+  to four times the time of 500; the old compiler took 28 times
+  (936 ms against 26,418 ms).
+
 - **SPEC.md III.5 rule 2 says the order of independent modules is
   unspecified, not unobservable.** It said no program could tell which of
   two independent modules initialised first, and two modules that each

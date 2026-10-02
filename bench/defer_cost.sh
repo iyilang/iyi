@@ -104,3 +104,43 @@ if [ "$per_op" -gt "$BUDGET_NS" ]; then
   exit 1
 fi
 echo "defer cost: inside the budget"
+
+# What a `defer` costs the compiler. N of them in one scope nest N
+# handlers, and the check of 2,000 took 20 s against 1.2 s for 500: each
+# assignment in a cleanup was bound into every handler around it (N^3),
+# and each `defer` added a flag variable that every handler nested inside
+# it copied (N^2). The claim is near-linear: 2,000 in one scope may take
+# at most four times what 500 take, which leaves room for the fixed cost
+# both share.
+defers() { # defers <n> <file>: one def, n `defer x += 1` in its scope
+  {
+    echo 'def f : Int32'
+    echo '  x = 0'
+    i=0
+    while [ "$i" -lt "$1" ]; do
+      echo '  defer x += 1'
+      i=$((i + 1))
+    done
+    echo '  x'
+    echo 'end'
+    echo 'puts f'
+  } > "$2"
+}
+check_ns() {
+  local start end
+  start=$(date +%s%N)
+  "$IYI" check "$1" > /dev/null
+  end=$(date +%s%N)
+  echo $((end - start))
+}
+defers 500 "$work/defers500.iyi"
+defers 2000 "$work/defers2000.iyi"
+check_ns "$work/defers500.iyi" > /dev/null
+small=$(check_ns "$work/defers500.iyi")
+large=$(check_ns "$work/defers2000.iyi")
+echo "defer compile cost: 500 defers in one scope checked in $((small / 1000000)) ms, 2000 in $((large / 1000000)) ms (budget 4x)"
+if [ "$large" -gt $((small * 4)) ]; then
+  echo "OVER BUDGET: 2000 defers in one scope took more than four times what 500 took to check"
+  exit 1
+fi
+echo "defer compile cost: inside the budget"

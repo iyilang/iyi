@@ -78,6 +78,8 @@ module Iyi
     #     a
     #     defer x
     #     b
+    #     defer y
+    #     c
     #
     # To:
     #
@@ -86,6 +88,15 @@ module Iyi
     #     __iyi_defer_push(-> { x if %live; nil })
     #     begin
     #       b
+    #       __iyi_defer_push(-> { y if %live; nil })
+    #       begin
+    #         c
+    #       ensure
+    #         %live = false
+    #         __iyi_defer_pop_run
+    #         %live = true
+    #         y
+    #       end
     #     ensure
     #       %live = false
     #       __iyi_defer_pop_run
@@ -100,6 +111,13 @@ module Iyi
     # holds, and the panic path walks the registry and runs what was never
     # popped. The ordinary exit disarms its proc before popping it, so the
     # registry stays balanced and the cleanup runs once.
+    #
+    # One `%live` serves every `defer` of the list: the pop runs only the
+    # proc on top, which is the one being disarmed, and the flag is armed
+    # again after it for the procs of the same list still registered. A
+    # flag for each `defer` was a variable for each, and every handler
+    # nested inside copies every variable in scope: N `defer`s in one
+    # scope were N^2 copies.
     #
     # The proc used to be the only copy, run by the pop too, and a proc is
     # a closure: in a struct method it read a copy of `self` made at entry
@@ -119,16 +137,19 @@ module Iyi
     # extra rule: a `defer` in a loop body runs at the end of each iteration
     # instead of piling up until the function returns, which is Go's
     # best-known wart with the feature.
-    private def apply_defers(exps : Array(ASTNode)) : Array(ASTNode)
+    def apply_defers(exps : Array(ASTNode), live : Var? = nil) : Array(ASTNode)
       index = exps.index { |exp| exp.is_a?(Defer) }
       return exps unless index
 
       deferred = exps[index].as(Defer)
-      rest = apply_defers(exps[(index + 1)..])
       head = exps[0...index]
 
       if program.iyi_prelude?
-        live = Var.new(program.new_temp_var_name).at(deferred)
+        # An earlier `defer` of this list made the flag, and its proc is
+        # still registered when this one is popped.
+        outer = live
+        live ||= Var.new(program.new_temp_var_name).at(deferred)
+        rest = apply_defers(exps[(index + 1)..], live)
         # The trailing `nil` pins the proc to `-> Nil`: a proc literal
         # does not coerce its return the way a block restriction does,
         # and a cleanup's value is nobody's.
@@ -139,13 +160,16 @@ module Iyi
         push = Call.global("__iyi_defer_push", ProcLiteral.new(cleanup).at(deferred)).at(deferred)
         pop = Call.new(nil, "__iyi_defer_pop_run", global: true).at(deferred)
         disarm = Assign.new(live.clone, BoolLiteral.new(false).at(deferred)).at(deferred)
-        ordinary_exit = Expressions.new([disarm, pop, deferred.exp] of ASTNode).at(deferred)
-        head << Assign.new(live.clone, BoolLiteral.new(true).at(deferred)).at(deferred)
+        ordinary_exit = [disarm, pop] of ASTNode
+        ordinary_exit << Assign.new(live.clone, BoolLiteral.new(true).at(deferred)).at(deferred) if outer
+        ordinary_exit << deferred.exp
+        head << Assign.new(live.clone, BoolLiteral.new(true).at(deferred)).at(deferred) unless outer
         head << push
-        head << ExceptionHandler.new(rest, ensure: ordinary_exit).at(deferred).tap(&.iyi_defer=(true))
+        head << ExceptionHandler.new(rest, ensure: Expressions.new(ordinary_exit).at(deferred)).at(deferred).tap(&.iyi_defer=(true))
       else
         # Crystal's prelude has a real unwinder, so the classic shape —
         # the cleanup inline in the `ensure` — already runs on a panic.
+        rest = apply_defers(exps[(index + 1)..])
         head << ExceptionHandler.new(rest, ensure: deferred.exp).at(deferred).tap(&.iyi_defer=(true))
       end
       head

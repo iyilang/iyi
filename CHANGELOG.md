@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **Importing a macro the module did not mark `pub` says it is not
+  exported.** The refusal sorted unexported names by looking in the
+  module's defs and types only, and a macro lives on the module's
+  metaclass: `import app/lib::{hidden_m}` of a plain `macro hidden_m`
+  answered "App::Lib has no `hidden_m`: nothing by that name is declared
+  in `app/lib`, `pub` or not." It answers "App::Lib does not export
+  `hidden_m` ... add `pub` to the declaration" now, as a def does.
+  `bench/verbs_exercise.sh` checks it; the old compiler gave the typo
+  answer.
+
 - **A thread's block captures a `String`, a struct holding one, and a
   `List(String)`.** `String#size` caches the character count in
   `@length`, and the `Share` check read that write as a mutable field:

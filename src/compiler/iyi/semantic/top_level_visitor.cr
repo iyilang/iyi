@@ -376,7 +376,10 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     if names = node.names
       unexported = names.reject { |name| used_type.exported_name?(name) }
       unless unexported.empty?
-        declared, absent = unexported.partition { |name| used_type.defs.try(&.has_key?(name)) || used_type.types?.try(&.has_key?(name)) }
+        # A macro lives on the module's metaclass, not in `defs`: a plain
+        # `macro hidden_m` imported by name was told "nothing by that name
+        # is declared".
+        declared, absent = unexported.partition { |name| used_type.defs.try(&.has_key?(name)) || used_type.metaclass.macros.try(&.has_key?(name)) || used_type.types?.try(&.has_key?(name)) }
         if absent.empty?
           node.raise "#{used_type} does not export #{declared.map { |name| "`#{name}`" }.join(", ")}. an import brings in only what a module marks `pub` — add `pub` to the declaration if it is meant to be part of the module's surface (SPEC.md R-2b)"
         else

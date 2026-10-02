@@ -231,6 +231,13 @@ printf 'pub def twice(x : Int32) : Int32\n  x * 2\nend\n' > bare.iyi
 printf 'import bare::{twice}\n\nputs twice(3)\n' > usesbare.iyi
 refuses "an import of a file with no module header" 'has no `module bare` header' -- \
   "$IYI" run usesbare.iyi
+# A macro the module declares and did not mark `pub`, imported by name, was
+# told "nothing by that name is declared in `app/macros`, `pub` or not" -
+# the answer for a typo, because only defs and types were looked in.
+printf 'module app/macros\n\nmacro hidden_m\n  1\nend\n' > app/macros.iyi
+printf 'module usesmacro\n\nimport app/macros::{hidden_m}\n\nhidden_m\n' > usesmacro.iyi
+refuses "a macro not marked pub, imported by name" 'does not export `hidden_m`' -- \
+  "$IYI" check usesmacro.iyi
 refuses "bytes that are not text" "not a valid iyi source file" -- "$IYI" run binary.iyi
 # A program that ran out of stack says so itself now - `iyi: panic: stack
 # overflow`, from a handler on an alternate stack (bench/panics.sh holds

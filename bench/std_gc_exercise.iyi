@@ -12,6 +12,8 @@
 #     `mapped_bytes` is at least one arena and only grows.
 #   * `disable` holds the trigger through allocation that would have
 #     collected; `enable` lets it run again; `collect` works while disabled.
+#   * `stats` reads whole lists beside threads that allocate: two seconds
+#     of it while three threads allocate end without a fault.
 #
 # bench/std_gc_exercise.sh drives it, builds once with -Dgc_none to require
 # the compile-time refusal, and breaks copies of the module to prove the
@@ -147,5 +149,33 @@ while round < 20
 end
 check(unterminated == 0, "#{unterminated} of 400 strings built in reused chunks had no terminator")
 puts "  400 strings built where longer ones were freed, each a C string"
+
+# ---------------------------------------------------------------------------
+puts "== stats beside threads that allocate"
+# `stats` walks the arena and large-mapping lists under the runtime lock.
+# Walked without it, a collection another thread's allocation started
+# stopped the walk on a mapping, unlinked and unmapped it, and the walk's
+# next read faulted: three threads allocating - a 3 MB chunk and a small
+# array a turn, so collections are frequent and mappings come and go -
+# beside two seconds of `stats` died of a memory fault in 10 runs of 10,
+# plain and --release.
+stop = Atomic(Int32).new(0)
+allocators = [] of IyiThread
+3.times do
+  allocators << IyiThread.start do
+    while stop.get == 0
+      Pointer(UInt8).malloc(3_000_000_u64)[0] = 1_u8
+      Array(Int32).new(50) { |k| k }
+    end
+    nil
+  end
+end
+started = __iyi_monotonic_ns
+while __iyi_monotonic_ns - started < 2_000_000_000_i64
+  check(GC.stats.mapped_bytes >= 16_777_216_u64, "stats beside allocating threads counts the arenas")
+end
+stop.set(1)
+allocators.each(&.join)
+puts "  two seconds of stats beside three allocating threads, every read whole"
 
 puts "ALL CHECKS PASSED"

@@ -11,7 +11,8 @@
 #   * A negative size is refused by name at every allocating verb.
 #   * Negative proofs: copies of the module that report a constant
 #     collection count, that leave the trigger on under `disable`, and that
-#     answer false for every heap pointer each fail at the named check.
+#     answer false for every heap pointer each fail at the named check; one
+#     whose `stats` walks without the runtime lock dies of a memory fault.
 #
 # Exits non-zero if any check fails.
 set -u
@@ -69,7 +70,7 @@ build_and_run "std_gc" exercise-gc "$REPO/bench/std_gc_exercise.iyi"
 
 echo
 echo "== every gc check reported"
-for check in "raw words" "heap pointers" "stats move with the collector" "disable holds the trigger" "a string built in a reused chunk ends in a NUL" "ALL CHECKS PASSED"; do
+for check in "raw words" "heap pointers" "stats move with the collector" "disable holds the trigger" "a string built in a reused chunk ends in a NUL" "stats beside threads that allocate" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-gc.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
@@ -183,6 +184,10 @@ prove_fails "is_heap_ptr answers false for every pointer" never_heap "a chunk's 
   's/IyiRoots.base_of(pointer.address) != 0_u64/IyiRoots.base_of(pointer.address) == 18446744073709551615_u64/'
 prove_fails "free does nothing" free_noop "a freed chunk is not" \
   's/    IyiHeap.free(pointer)/    pointer/'
+# Three threads allocate beside two seconds of `stats`: walked without the
+# lock, the walk died of a memory fault in 20 runs of 20 here.
+prove_fails "stats walks without the lock" stats_unlocked "memory fault" \
+  '/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d'
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **`GC.stats` is safe while other threads allocate.** It walked the arena
+  and large-mapping lists without the runtime lock, and a collection another
+  thread's allocation started could stop the walk on a mapping, unlink and
+  unmap it: three threads allocating beside two seconds of `stats` died with
+  "iyi: the program died of a memory fault" in 10 runs of 10, plain and
+  `--release`. The walk holds the runtime lock now, which a collection takes
+  before it stops anything. `bench/std_gc_exercise.iyi` runs that race and
+  `bench/std_gc_exercise.sh` proves a lock-less copy faults; the old module
+  died of a memory fault at the new check.
+
 - **A Windows program that fills its arenas past the commit limit says "iyi:
   out of memory" and exits 1.** `IyiHeap.map_aligned` frees its doubled
   reservation and commits the aligned middle, and retried a failed commit

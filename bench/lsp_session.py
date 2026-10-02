@@ -529,6 +529,19 @@ def fuzz_steps(c, work):
     step("52q", "below a line being typed, definition still names the callee written there",
          lines == [[2], [6]], str(lines))
 
+    # 52r. The same, after the wire has been quiet past the worker's idle
+    # retirement: its successor adopts the buffer with the clean text as a
+    # seed, and the seed's program was answered as it was, a line off -
+    # Linux's runner was slow enough to retire between 52q's questions.
+    time.sleep(3)
+    lines = []
+    for line in (11, 12):
+        reply = c.send("textDocument/definition", {
+            "textDocument": {"uri": uri}, "position": {"line": line, "character": 4}})
+        lines.append([loc["range"]["start"]["line"] for loc in reply.get("result") or []])
+    step("52r", "after a quiet spell retires the worker, definition still names the callee written there",
+         lines == [[2], [6]], str(lines))
+
 
 def main():
     watchdog(180)

@@ -202,7 +202,10 @@ module Iyi::Lsp
         seeded, _ = check(path, adopted, overrides)
         if seeded
           @seed.delete(path)
-          return seeded
+          # The seed is the clean text, not the buffer's: laid over the
+          # buffer's lines as the last good program is, or a successor
+          # answered every line below the edit from the line above it.
+          return aligned(path, text, overrides) || seeded
         end
       end
       nil

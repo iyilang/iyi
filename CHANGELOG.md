@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **Line 1 of a file saved with a byte order mark is shown without it.** The
+  lexer drops the mark before it counts a column, and the line shown under
+  an error kept it: ` 1 | \uFEFFputs 1.nope`, with the caret, placed by the
+  mark-free column, under `.nop` on any terminal that gives the mark a cell,
+  and under a space rather than `(` for a parse error on that line. The
+  lines an error shows are read as the lexer counted them now.
+  `bench/verbs_exercise.sh` checks it; the old compiler echoed the mark.
+
 - **A column in a macro's expanded text is right after a `{{x}}` that starts
   a line.** The parser's look for a `.` after the line before reads into
   that line's interpolation, and a lookahead that failed put back the

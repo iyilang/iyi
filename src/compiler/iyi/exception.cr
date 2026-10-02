@@ -86,6 +86,22 @@ module Iyi
       Iyi.relative_filename(filename)
     end
 
+    # iyi: the lines of a source file as the lexer counted them. The lexer
+    # drops a byte order mark before it counts a column, and the line shown
+    # under an error kept it: ` 1 | \uFEFFputs 1.nope`, the mark drawn as
+    # whatever a terminal makes of U+FEFF, and the caret, placed by the
+    # mark-free column, under `.nop` on every terminal that gives it a cell.
+    def source_file_lines(filename : String) : Array(String)
+      if lines = Iyi.iyi_declaration_lines?(filename)
+        return lines
+      end
+      lines = File.read_lines(filename)
+      if first = lines.first?
+        lines[0] = first.lchop('\uFEFF')
+      end
+      lines
+    end
+
     def colorize(obj)
       obj.colorize.toggle(@color)
     end
@@ -279,7 +295,7 @@ module Iyi
     end
 
     def format_error_from_file(filename : String)
-      lines = Iyi.iyi_declaration_lines?(filename) || File.read_lines(filename)
+      lines = source_file_lines(filename)
       formatted_error = format_error(
         filename: @filename,
         lines: lines,
@@ -321,12 +337,8 @@ module Iyi
       in Nil
         nil
       in String
-        if lines = Iyi.iyi_declaration_lines?(filename)
-          lines
-        elsif File.file? filename
-          File.read_lines(filename)
-        else
-          nil
+        if Iyi.iyi_declaration_lines?(filename) || File.file?(filename)
+          source_file_lines(filename)
         end
       in VirtualFile
         filename.source.lines

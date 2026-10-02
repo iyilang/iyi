@@ -399,6 +399,21 @@ else
 fi
 "$IYI" fmt bom/app/util.iyi > /dev/null 2>&1
 cmp -s bom/app/util.iyi bom/util.keep || { echo "  fmt rewrote a formatted file with a byte order mark"; status=1; }
+# And a byte order mark on line 1, which the lexer drops before it counts
+# a column: the line was shown with the mark, ` 1 | \uFEFFputs 1.nope`, and
+# the caret, placed by the mark-free column, stood under `.nop` wherever
+# a terminal gave the mark a cell. The line is read as the lexer counted
+# it now (`source_file_lines`).
+printf '\357\273\277puts 1.nope\n' > marked1.iyi
+"$IYI" check marked1.iyi > marked1.out 2>&1
+if grep -qx ' 1 | puts 1.nope' marked1.out &&
+   [ "$(grep -A1 '^ 1 | ' marked1.out | sed -n '2p')" = "$(printf '%12s^---' '')" ]; then
+  echo "  line 1 behind a byte order mark is shown without it, the caret under the column"
+else
+  echo "  line 1 behind a byte order mark:"
+  sed -n '1,8p' marked1.out | cat -A
+  status=1
+fi
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     # The entry spelled verbatim, `\\?\C:\...` or `\\.\C:\...`, or with the

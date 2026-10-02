@@ -292,7 +292,7 @@ module Iyi
         lines = filename.source.lines.to_a
         filename = "macro #{filename.macro.name} (in #{filename.macro.location.try &.filename}:#{filename.macro.location.try &.line_number})"
       when String
-        lines = File.read_lines(filename) if File.file?(filename)
+        lines = source_file_lines(filename) if File.file?(filename)
       else
         return
       end

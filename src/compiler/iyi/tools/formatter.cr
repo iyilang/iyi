@@ -79,11 +79,16 @@ module Iyi
   end
 
   # The numbers of the lines whose line break a literal holds, or nil when
-  # *text* does not parse.
+  # *text* does not parse. A literal in macro text - a macro's body, a `{%
+  # if %}`'s - is text to the parser, so the lexer names those lines as it
+  # passes them: unseen, a bare `\n` inside `"a` / `b"` in a CRLF file's
+  # macro came back `\r\n`, and `puts "a` / `b".bytesize` printed 3
+  # before `fmt` and 4 after.
   private def self.literal_lines(filename : String, text : String) : Set(Int32)?
     lines = Set(Int32).new
     parser = Parser.new(text)
     parser.filename = filename
+    parser.macro_literal_breaks = lines
     parser.parse.accept(LiteralLines.new(lines))
     lines
   rescue

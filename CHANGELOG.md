@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`fmt` keeps a bare line break inside a literal in macro text bare in a
+  CRLF file.** A CRLF file is written back in CRLF with the breaks inside
+  its literals as they were, and the literals were found by a parse - which
+  keeps a macro's body and a `{% if %}`'s as text, so the strings in them
+  were not seen: `puts "a` / `b".bytesize` there printed 3 before `fmt` and
+  4 after, in both places. The lexer names the lines whose break falls
+  inside a literal while it reads macro text, and those keep their ending
+  too. `bench/verbs_exercise.sh` formats a CRLF file with such a string in a
+  macro and in a `{% if %}` and requires it unchanged; the old compiler
+  turned both breaks into CRLF.
+
 - **A NUL byte inside a source file is refused where it is.** The lexer took
   every `\0` for the end of the file, so a file ended at its first NUL
   without a word: `puts 1<NUL>` and the five lines after it compiled as

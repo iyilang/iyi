@@ -37,6 +37,12 @@ module Iyi
 
     property macro_expansion_pragmas : Hash(Int32, Array(LocPragma))? = nil
 
+    # iyi: when set, the numbers of the lines whose line break lies inside a
+    # literal in macro text, a stretch the parser keeps as text. Only
+    # `Iyi.with_crlf` asks: a parse shows it the literals in code, and these
+    # are the ones it cannot see.
+    property macro_literal_breaks : Set(Int32)? = nil
+
     alias LocPragma = LocSetPragma | LocPushPragma | LocPopPragma | LocOriginPragma
 
     record LocSetPragma,
@@ -1979,6 +1985,7 @@ module Iyi
             (whitespace && !delimiter_state && char == 'e')
         case char
         when '\n'
+          macro_literal_breaks.try &.add(@line_number) if delimiter_state
           incr_line_number 0
           whitespace = true
           beginning_of_line = true

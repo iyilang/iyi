@@ -674,7 +674,20 @@ module Iyi::Lsp
           suggestion = cur.suggestion
         end
         if line && (msg = cur.message)
-          frames << {cur.true_filename, line, col, size, msg, suggestion}
+          # A frame inside a macro's expansion lands at the call it came
+          # from, with no span and no edit there: its line and column were
+          # the expansion's, and read as the calling file's they put the
+          # diagnostic on that file's `module` header, and `iyi fix`
+          # spliced the did-you-mean into it. The span and the edit are the
+          # expansion's text, which is no file an edit can open - which is
+          # what keeps `fix` and the quick fix off it, since this is where
+          # both get their edit.
+          file, line, col, expansion = cur.true_location(line, col)
+          if expansion
+            size = 0
+            suggestion = nil
+          end
+          frames << {file, line, col, size, msg, suggestion} if line
         end
         cur = cur.is_a?(TypeException) ? cur.inner : nil
       end
@@ -709,7 +722,14 @@ module Iyi::Lsp
         {file, line, col, msg}
       end
 
-      Diag.new(anchor[1], anchor[2], anchor[3], message, Iyi.iyi_spec_references(message), related, anchor[5])
+      # An anchor with no span of its own - a frame in a macro's expansion,
+      # placed at the call - is underlined as the call's frame is.
+      size = anchor[3]
+      if size == 0 && (spanned = frames.find { |(file, line, col, span, _, _)| file == anchor[0] && line == anchor[1] && col == anchor[2] && span > 0 })
+        size = spanned[3]
+      end
+
+      Diag.new(anchor[1], anchor[2], size, message, Iyi.iyi_spec_references(message), related, anchor[5])
     end
   end
 

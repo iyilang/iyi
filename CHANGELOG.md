@@ -142,6 +142,24 @@
 
 ### Fixed
 
+- **An error inside a macro's expansion is placed at the call, carries no
+  edit, and `iyi fix` leaves the file alone.** A frame in an expansion kept
+  the line and column it had in the expanded text under the calling file's
+  name: `puts m("abc")` on line 6, with `m` expanding to `"abc".upcse`, was
+  reported by `check -f json` at line 1, column 9 - the `module` header -
+  with a `suggested_edit` there; the language server underlined the header
+  (line 0, characters 8 to 10) and offered "Change to 'upcase'" on it; and
+  `iyi fix` applied the edit 32 times, to its cap, leaving `module
+  aupcaseeee...cal`. With the macro in an imported module, `module app/main`
+  became `moduleupcasemain`, and a parse error in an expansion was line 2 of
+  the calling file. Such a frame is at the call now, with `size` 0 and no
+  edit, and an `expansion` object names the macro and the line, column and
+  size in its text; the language server puts the diagnostic on the call and
+  offers no fix there, and `fix` reports the error and edits nothing.
+  `bench/agent_loop.py` and step 70n of `bench/lsp_session.py` check it; the
+  old compiler answered line 1, column 9 with the edit, and rewrote the
+  header.
+
 - **`fmt` sets a trait and an impl apart from what is beside them by a blank
   line, as it does a class.** They were left against the code above and
   below: `trait A` / `end` / `impl A for B` / `end` stayed four lines.

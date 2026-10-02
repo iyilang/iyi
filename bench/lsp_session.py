@@ -520,6 +520,50 @@ def main():
     c.send("textDocument/didClose", {"textDocument": {"uri": related_uri}}, wait=False)
     step("70i", "relatedInformation is in UTF-16 units", (6, 12) in notes, f"notes at {notes}")
 
+    # 70n. An error inside a macro's expansion is placed at the call. Its
+    #      line and column were the expansion's, read as the file's, so the
+    #      typo in `{{x}}.upcse`, expanded from line 6, was underlined on
+    #      the `module` header - line 0, characters 8 to 10 on the wire -
+    #      with a quick fix that wrote `upcase` into the header.
+    macro_uri = file_uri(os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-macro"), "mac.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": macro_uri, "languageId": "iyi", "version": 1,
+                             "text": 'module mac\n\nmacro m(x)\n  {{x}}.upcse\nend\nputs m("abc")\n'}},
+           wait=False)
+    macro_diags = c.diagnostics(macro_uri)["diagnostics"]
+    placed = [(d["range"]["start"]["line"], d["range"]["start"]["character"], d["range"]["end"]["character"])
+              for d in macro_diags]
+    reply = c.send("textDocument/codeAction",
+                   {"textDocument": {"uri": macro_uri},
+                    "range": macro_diags[0]["range"] if macro_diags else
+                    {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+                    "context": {"diagnostics": macro_diags}})
+    macro_fixes = [a["title"] for a in reply.get("result") or []]
+    c.send("textDocument/didClose", {"textDocument": {"uri": macro_uri}}, wait=False)
+    step("70n", "an error in a macro's expansion is at the call, with no edit",
+         placed == [(5, 5, 6)] and "upcse" in macro_diags[0]["message"] and macro_fixes == [],
+         f"at {placed}, fixes {macro_fixes}")
+
+    # 71a. A diagnostic's message is text, not a terminal's. The server's
+    #      compiler kept the colour every compiler had unless `--no-color`
+    #      said otherwise, and messages carry it in their text: a nil
+    #      receiver's diagnostic, published and pulled, read
+    #      "for Nil\u001b[33;1m (compile-time type is (String | Nil))".
+    nil_uri = file_uri(os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-colour"), "nilsize.iyi"))
+    c.send("textDocument/didOpen",
+           {"textDocument": {"uri": nil_uri, "languageId": "iyi", "version": 1,
+                             "text": 'module nilsize\n\nx = Program.args.size > 0 ? "a" : nil\nputs x.size\n'}},
+           wait=False)
+    published = [d["message"] for d in c.diagnostics(nil_uri)["diagnostics"]]
+    reply = c.send("textDocument/diagnostic", {"textDocument": {"uri": nil_uri}})
+    pulled = [d["message"] for d in (reply.get("result") or {}).get("items", [])]
+    c.send("textDocument/didClose", {"textDocument": {"uri": nil_uri}}, wait=False)
+    said = published + pulled
+    step("71a", "a diagnostic's message carries no colour, published or pulled",
+         len(published) == 1 and len(pulled) == 1
+         and all("for Nil (compile-time type is (String | Nil))" in m and "\x1b" not in m for m in said),
+         f"{[m[:60] for m in said]}")
+
     # 6. definition on the call jumps into the sibling module's def.
     reply = c.send("textDocument/definition",
                    {"textDocument": {"uri": app_uri},

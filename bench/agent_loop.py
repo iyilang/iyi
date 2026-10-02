@@ -259,6 +259,61 @@ def main():
          and first.get("spec") == ["III.1.7"],
          f"edit {first.get('suggested_edit')}, spec {first.get('spec')}")
 
+    # 4a'''. An error inside a macro's expansion is placed at the call, the
+    # expansion is named, and nothing offers an edit there. The frame kept
+    # the line and column it had in the expansion under the calling file's
+    # name, so `{{x}}.upcse` expanded from `puts m("abc")` on line 6 was
+    # main.iyi:1:9 with a `suggested_edit`, and `fix` applied it: 32 edits,
+    # each one into the `module` header, until the cap. With the macro in
+    # an imported module, `module app/main` became `moduleupcasemain`.
+    mx = tempfile.mkdtemp(prefix="iyi-agent-macro")
+    os.makedirs(os.path.join(mx, "app"))
+
+    def mx_write(rel, text):
+        with open(os.path.join(mx, rel), "w", newline="\n") as f:
+            f.write(text)
+
+    def mx_read(rel):
+        with open(os.path.join(mx, rel), newline="") as f:
+            return f.read()
+
+    local_macro = 'module app/local\n\nmacro m(x)\n  {{x}}.upcse\nend\nputs m("abc")\n'
+    mx_write("app/local.iyi", local_macro)
+    proc = run("check", "-f", "json", "app/local.iyi", cwd=mx)
+    frames = json.loads(proc.stderr)
+    cause = frames[-1] if frames else {}
+    step("an error in a macro's expansion is at the call, and names the expansion",
+         proc.returncode == 1 and (cause.get("line"), cause.get("column")) == (6, 6)
+         and cause.get("expansion") == {"macro": "m", "line": 1, "column": 9, "size": 5}
+         and "upcse" in cause.get("message", "")
+         and not any("suggested_edit" in frame for frame in frames),
+         f"at {cause.get('line')}:{cause.get('column')}, expansion {cause.get('expansion')}, "
+         f"edits {[frame['suggested_edit'] for frame in frames if 'suggested_edit' in frame]}")
+    proc = run("fix", "--json", "app/local.iyi", cwd=mx)
+    fixed = json.loads(proc.stdout)
+    step("and fix leaves the file alone",
+         proc.returncode == 1 and fixed["applied"] == [] and not fixed["clean"]
+         and mx_read("app/local.iyi") == local_macro,
+         f"applied {len(fixed['applied'])}, line 1 now {mx_read('app/local.iyi').splitlines()[0]!r}")
+    mx_write("app/lib.iyi", "module app/lib\n\npub macro bad(x)\n  {{x}}.upcse\nend\n")
+    lib_user = 'module app/main\n\nimport app/lib::*\nputs bad("a")\n'
+    mx_write("app/main.iyi", lib_user)
+    proc = run("fix", "--json", "app/main.iyi", cwd=mx)
+    fixed = json.loads(proc.stdout)
+    step("an imported macro's typo leaves the calling file alone too",
+         proc.returncode == 1 and fixed["applied"] == [] and mx_read("app/main.iyi") == lib_user,
+         f"applied {fixed['applied']}, line 1 now {mx_read('app/main.iyi').splitlines()[0]!r}")
+    # A parse error in an expansion: line 2 of the calling file, the line
+    # the error had in the expansion, with no frame saying so.
+    mx_write("app/cut.iyi", "module app/cut\n\nmacro m\n  1 +\nend\nm\n")
+    proc = run("check", "-f", "json", "app/cut.iyi", cwd=mx)
+    frames = json.loads(proc.stderr)
+    cause = frames[-1] if frames else {}
+    step("a parse error in an expansion is at the call too",
+         proc.returncode == 1 and (cause.get("line"), cause.get("column")) == (6, 1)
+         and (cause.get("expansion") or {}).get("macro") == "m",
+         f"at {cause.get('line')}:{cause.get('column')}, expansion {cause.get('expansion')}")
+
     # 4a''. the cap, and the verdict after it. `fix` applies at most
     # thirty-two edits in a run, and the verdict used to be read from a
     # variable only the `break` paths set - so a run whose every round

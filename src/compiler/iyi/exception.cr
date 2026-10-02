@@ -23,21 +23,57 @@ module Iyi
       end
     end
 
-    def true_filename(filename = @filename) : String
-      if filename.is_a? VirtualFile
-        loc = filename.expanded_location
-        if loc
-          true_filename loc.filename
+    # iyi: where a frame is in a file someone can open, as `{file, line,
+    # column, expansion}`. A frame in a real file is where it says; a frame
+    # inside a macro's expansion is placed at the call the expansion came
+    # from (walked out through nested expansions), and `expansion` names the
+    # text it was really in.
+    #
+    # This was `true_filename`, which swapped the expansion for the calling
+    # file and kept the line and column the frame had inside the expansion:
+    # a place that is nowhere. `puts bad("a")` on line 4 of main.iyi, where
+    # `bad` expands to `"a".upcse`, was reported at main.iyi:1:7, the
+    # `module` header; the language server underlined the header, and `iyi
+    # fix` spliced the did-you-mean in there, `module app/main` becoming
+    # `moduleupcasemain`.
+    def true_location(line_number : Int32?, column_number : Int32) : {String, Int32?, Int32, VirtualFile?}
+      case filename = @filename
+      in VirtualFile
+        if (call = filename.expanded_location.try(&.expanded_location)) && (file = call.filename.as?(String))
+          {file, call.line_number, call.column_number, filename}
         else
-          ""
+          {"", nil, 0, filename}
         end
-      else
-        if filename
-          filename
-        else
-          ""
+      in String
+        {filename, line_number, column_number, nil}
+      in Nil
+        {"", line_number, column_number, nil}
+      end
+    end
+
+    # The location fields of a `-f json` frame, at `true_location`. A frame
+    # in an expansion has no span in the file - the text it spans is the
+    # expansion's - so its `size` is 0 and an `expansion` object carries the
+    # macro's name and the frame's own line, column and size in its text.
+    # Answers whether the frame is in a real file, the one place an edit can
+    # be offered.
+    def json_location(json : JSON::Builder, line_number : Int32?, column_number : Int32, size : Int32) : Bool
+      file, line, column, expansion = true_location(line_number, column_number)
+      json.field "file", file
+      json.field "line", line
+      json.field "column", column
+      json.field "size", expansion ? 0 : size
+      if expansion
+        json.field "expansion" do
+          json.object do
+            json.field "macro", expansion.macro.name
+            json.field "line", line_number
+            json.field "column", column_number
+            json.field "size", size
+          end
         end
       end
+      expansion.nil?
     end
 
     def to_s_with_source(source)

@@ -26,6 +26,9 @@ class Iyi::Command
         and `-f json` makes each one data — file, line, column, size,
         message, the SPEC sections it cites, and, when the compiler
         knows the fix, a `suggested_edit` with the exact replacement.
+        An error inside a macro's expansion is placed at the call, with
+        no edit, and its `expansion` names the macro and the place in
+        the text the macro wrote.
 
         Every def with a fully written signature is typed even if
         nothing calls it — definition-site typing is the language's

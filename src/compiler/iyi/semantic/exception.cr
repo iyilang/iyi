@@ -74,11 +74,10 @@ module Iyi
 
     def to_json_single(json)
       json.object do
-        json.field "file", true_filename
-        json.field "line", @line_number
-        json.field "column", @column_number
-        json.field "size", @size
+        # A frame in a macro's expansion is placed at the call it came from.
+        in_file = json_location(json, @line_number, @column_number, @size)
         json.field "message", @message
+        json.field "severity", "warning" if warning?
         # iyi: the SPEC sections the message cites, as data (AI_FIRST.md §2
         # item 3). The house style writes "see SPEC.md III.1" into the
         # prose; a machine acting on the error gets the reference without
@@ -94,10 +93,12 @@ module Iyi
         # `line`:`column` (1-indexed) of `file` with `replacement`. Only
         # when the span really delimits the offending token — a
         # locationless error has no edit, and saying so beats guessing.
-        if (replacement = @suggestion) && @size > 0 && (line = @line_number)
+        # Nor has a frame in a macro's expansion: the token is in text the
+        # macro wrote, not in any file an edit can open.
+        if in_file && (replacement = @suggestion) && @size > 0 && (line = @line_number)
           json.field "suggested_edit" do
             json.object do
-              json.field "file", true_filename
+              json.field "file", @filename.as?(String) || ""
               json.field "line", line
               json.field "column", @column_number
               json.field "size", @size

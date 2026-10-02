@@ -72,17 +72,19 @@ module Iyi
 
     def to_json_single(json)
       json.object do
-        json.field "file", true_filename
-        json.field "line", @line_number
-        json.field "column", @column_number
         # iyi: `0`, not `null`, where the span is unknown. `-f json`
         # promises "file, line, column, size, message" as data, and a
         # type error's size is always an integer; a syntax error's was
         # `null`, so `e["size"]` arithmetic in an agent's loop broke on
         # exactly the error class it meets first. Zero is what the LSP
         # already makes of it.
-        json.field "size", @size || 0
+        #
+        # A parse error in a macro's expansion is placed at the call, and
+        # `expansion` says where in the macro's text: it said line 2 of the
+        # calling file, the line the error had inside the expansion.
+        in_file = json_location(json, @line_number, @column_number, @size || 0)
         json.field "message", @message
+        json.field "severity", "warning" if warning?
         if (message = @message) && (refs = Iyi.iyi_spec_references(message))
           json.field "spec" do
             json.array do
@@ -90,10 +92,11 @@ module Iyi
             end
           end
         end
-        if (replacement = @suggestion) && (size = @size) && size > 0
+        # No edit for a frame in a macro's expansion: no file holds its text.
+        if in_file && (replacement = @suggestion) && (size = @size) && size > 0
           json.field "suggested_edit" do
             json.object do
-              json.field "file", true_filename
+              json.field "file", @filename.as?(String) || ""
               json.field "line", @line_number
               json.field "column", @column_number
               json.field "size", size

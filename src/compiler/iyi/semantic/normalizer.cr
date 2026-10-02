@@ -326,6 +326,10 @@ module Iyi
       target
     end
 
+    # Whether *node* uses the variable *name*, or holds macro code: what a
+    # `{% for %}` writes is text until the main visitor expands it, so
+    # `y{{i}} = g.spawn {..}` in one was invisible here, and the tuple came
+    # out one slot short with those tasks' errors dropped.
     private def iyi_uses_var?(node : ASTNode, name : String) : Bool
       scan = IyiVarScan.new(name)
       node.accept(scan)
@@ -342,6 +346,11 @@ module Iyi
       def visit(node : Var)
         @found = true if node.name == @name
         true
+      end
+
+      def visit(node : MacroIf | MacroFor | MacroExpression | MacroVerbatim | MacroLiteral)
+        @found = true
+        false
       end
 
       def visit(node : ASTNode)

@@ -142,6 +142,18 @@
 
 ### Fixed
 
+- **A group with macro code in its block keeps the general form.** A
+  `{% for %}` that writes `y{{i}} = g.spawn {..}` is text when the typed
+  expansion is decided, so its spawns were not slots: three tasks came
+  out as the one-slot tuple `{1}`, and the second task's `TaskFailed` was
+  dropped. Any macro node in the block disqualifies the expansion now,
+  and the group answers its last expression, the last task's handle. A
+  macro *call* that spawns on the group by its name is still not seen:
+  it printed `{1, 2}` with its own task in no slot, since whether a call
+  is a macro is not known when the expansion is decided.
+  `bench/concurrency_exercise.iyi` checks it; the old compiler typed the
+  group.
+
 - **`defer yield` is refused with a sentence about `defer`.** The panic
   walk runs a cleanup as a proc, and the refusal was the other library's
   "can't use `yield` inside a proc literal or captured block" with a

@@ -929,6 +929,18 @@ end
 fail("typed group, one name reused: the first task's failure was lost") unless fetch_reused(true).is_a?(TaskFailed)
 puts "a typed group reusing one name for two spawns kept both slots and the first failure"
 
+# Macro code in the block keeps the general form: what a `{% for %}`
+# writes is text when the expansion is decided, so its spawns were no
+# slots - the tuple came out one short, and their errors were dropped.
+macro_shape = group do |g|
+  g.spawn { 1 }
+  {% for n in [2, 3] %}
+    g.spawn { {{n}} }
+  {% end %}
+end
+fail("a group with macro-written spawns was typed") unless macro_shape.is_a?(IyiTask(Int32))
+puts "a group with macro-written spawns kept the general form"
+
 # ── 18. A dynamic group keeps the general form ───────────────────────────
 #
 # A spawn in a loop has no arity, so the group stays `Nil` and handles

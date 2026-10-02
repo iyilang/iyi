@@ -387,17 +387,19 @@ awk '/^    state.current = fiber$/ { print "    fiber.state = IyiFiberState::Run
 if ! IYI_PATH="$WORK/skipping${PSEP}$REPO/src" "$IYI" build switching.iyi -o skipping-run > build-skipping.log 2>&1; then
   cat build-skipping.log; exit 1
 fi
-caught=0
+# A race, so it is run until it is caught: most runs lose a list, and one
+# runner once ran five that all kept theirs.
+caught=""
 run=1
-while [ "$run" -le 5 ]; do
+while [ "$run" -le 20 ]; do
   timeout -k 5 120 ./skipping-run > skipping.txt 2>&1
-  grep -q '^wrong=0$' skipping.txt || caught=$((caught + 1))
+  grep -q '^wrong=0$' skipping.txt || { caught="$run"; break; }
   run=$((run + 1))
 done
-if [ "$caught" -eq 0 ]; then
-  echo "five runs with the fiber marked early all kept their lists"; exit 1
+if [ -z "$caught" ]; then
+  echo "twenty runs with the fiber marked early all kept their lists"; exit 1
 fi
-echo "  $caught of five runs lost a list or died"
+echo "  run $caught lost a list or died"
 
 # Windows' `SuspendThread` asks for the suspend and returns, and the thread
 # runs on until `GetThreadContext` waits for it. The stop read the

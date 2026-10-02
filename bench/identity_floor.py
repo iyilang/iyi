@@ -237,6 +237,9 @@ ALLOWED_LINES: list[tuple[str, str]] = [
     # `Config.env` reads `IYI_<name>` and then the compatibility binary's
     # `CRYSTAL_<name>`; a child compiler run with neither set clears both.
     (r'"CRYSTAL_OPTS" => nil', "the compatibility name Config.env falls back to, cleared for a child"),
+    # The old warning text, quoted where its fix is told and checked: the
+    # entry says what `check` printed, the gate that it prints it no more.
+    (r"\(run `crystal$|grep -qi crystal colon\.out", "the replaced warning, quoted by its fix and its gate"),
     (r"__crystal_|crystal_type_id|crystal_instance_type_id|LibCrystalMain", "Crystal's runtime ABI symbols"),
     (r"Crystal::(LLVM_VERSION|VERSION|DESCRIPTION|ABI)", "constants the bootstrap injects"),
     (r"Crystal\.format|\bmodule Crystal\b", "Crystal's own API, called or reopened"),

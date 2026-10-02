@@ -631,6 +631,27 @@ fi
 "$IYI" mod release v0.4.0 > zero2.log 2>&1 || fail "v0.4.0 was refused for a v0 break: $(cat zero2.log)"
 [ "$status" -eq 0 ] && echo "  v0.3.0 -> a def gone: v0.3.1 refused, v0.4.0 holds it"
 
+step "mod release measures from the last release, not a pre-release"
+# v1.2.0-rc.1 removed what v1.1.0 exported: measured from the rc, the
+# removal was never compared and v1.2.0 "held what changed". A release
+# after an rc that only adds is a minor of v1.1.0's.
+RELRC="$WORK/relrc"
+mkrepo "$RELRC"
+cd "$RELRC" || exit 1
+printf 'module example.test/user/relrc\n' > iyi.mod
+printf 'module relrc\n\npub def greeting : String\n  "one"\nend\n' > relrc.iyi
+git add -A && git commit -qm one && git tag v1.1.0
+printf 'module relrc\n\npub def other : String\n  "x"\nend\n' > relrc.iyi && git commit -qam rc && git tag v1.2.0-rc.1
+printf '# the release\n' >> relrc.iyi && git commit -qam release
+if "$IYI" mod release v1.2.0 > relrc.log 2>&1 || ! grep -q "compared with v1.1.0" relrc.log ||
+  ! grep -q "so the next release is v2.0.0" relrc.log; then
+  fail "a break made in an rc was released as a minor: $(cat relrc.log)"
+fi
+printf 'module relrc\n\npub def greeting : String\n  "one"\nend\n\npub def a : Int32\n  1\nend\n' > relrc.iyi
+git commit -qam additive
+"$IYI" mod release v1.2.0 > relrc2.log 2>&1 || fail "v1.2.0 after v1.1.0 and an rc, adding a def, was refused: $(cat relrc2.log)"
+[ "$status" -eq 0 ] && echo "  an rc that removed: v2.0.0 from v1.1.0; a release that adds after it: v1.2.0"
+
 step "get says what a move changes in what the project uses"
 mkrepo "$WORK/work/libi"
 printf 'module example.test/user/libi\n' > "$WORK/work/libi/iyi.mod"

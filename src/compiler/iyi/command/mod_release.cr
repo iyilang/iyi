@@ -78,7 +78,13 @@ class Iyi::Command
       next unless version = SemanticVersion.parse?(line.strip.lchop('v'))
       released << version if major ? version.major == major : version.major <= 1
     end
-    base = released.max?
+    # Measured from the last release, not the last tag: a pre-release
+    # promises consumers nothing, so a break made in `v1.2.0-rc.1` is still
+    # a break against v1.1.0. Measured from the rc, a def v1.1.0 exported
+    # and the rc removed was never compared, and `v1.2.0` was approved as
+    # "holds what changed". The highest pre-release only when there is no
+    # release at all.
+    base = released.select(&.prerelease.identifiers.empty?).max? || released.max?
 
     if (wanted = proposed) && released.includes?(wanted)
       abort! "mod release: v#{wanted} is already a tag, and a version is released once", :USAGE_ERROR
@@ -160,8 +166,11 @@ class Iyi::Command
     puts "v#{wanted} holds what changed: `git tag v#{wanted}` and push it"
   end
 
-  # The smallest version after *base* that says what changed.
+  # The smallest version after *base* that says what changed. After a
+  # pre-release - which is the base only when nothing was released - that
+  # is its own release, whatever moved: a pre-release promises nothing.
   private def mod_release_next(base : SemanticVersion, breaking : Bool, additive : Bool) : SemanticVersion
+    return SemanticVersion.new(base.major, base.minor, base.patch) unless base.prerelease.identifiers.empty?
     if base.major == 0
       return SemanticVersion.new(0, base.minor + 1, 0) if breaking
       return SemanticVersion.new(0, base.minor, base.patch + 1)
@@ -171,8 +180,10 @@ class Iyi::Command
     SemanticVersion.new(base.major, base.minor, base.patch + 1)
   end
 
-  # Whether *wanted* moves far enough from *base* for the change.
+  # Whether *wanted* moves far enough from *base* for the change: anything
+  # after a pre-release does.
   private def mod_release_enough?(base : SemanticVersion, wanted : SemanticVersion, breaking : Bool, additive : Bool) : Bool
+    return true unless base.prerelease.identifiers.empty?
     return true if wanted.major > base.major
     if base.major == 0
       return wanted.minor > base.minor if breaking
@@ -269,11 +280,12 @@ class Iyi::Command
     Usage: #{Command.program_name} mod release [VERSION]
 
     Compare this package's exported surface at HEAD with the release before
-    it - the highest `vX.Y.Z` tag HEAD contains - and say what the next
-    release has to be: a thing gone is a new major (a new minor before v1),
-    a thing new is a new minor (a new patch before v1), nothing moved is a
-    patch. With VERSION, exit 1 when it is smaller than that, or when its
-    major is not the one iyi.mod's path names. Tags nothing.
+    it - the highest `vX.Y.Z` tag HEAD contains, a pre-release only when
+    there is no release - and say what the next release has to be: a thing
+    gone is a new major (a new minor before v1), a thing new is a new minor
+    (a new patch before v1), nothing moved is a patch; after a pre-release,
+    its own release. With VERSION, exit 1 when it is smaller than that, or
+    when its major is not the one iyi.mod's path names. Tags nothing.
     USAGE
   end
 end

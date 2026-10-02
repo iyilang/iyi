@@ -142,6 +142,17 @@
 
 ### Fixed
 
+- **`iyi mod release` compares with the last release, not the last
+  pre-release.** The base was the highest tag HEAD contains, pre-releases
+  included, so a def v1.1.0 exported and `v1.2.0-rc.1` removed was never
+  compared: `mod release v1.2.0` said "compared with v1.2.0-rc.1: 1 module,
+  0 things gone, 0 new" and "v1.2.0 holds what changed", exit 0, and without
+  a version suggested v1.2.1; an rc that only added made it demand v1.3.0. A
+  pre-release promises nothing, so the base is the highest release now - the
+  removal asks for v2.0.0, the addition is v1.2.0 - and a pre-release is the
+  base only when there is no release, when its own release is enough.
+  `bench/packages_get.sh` checks both; the old compiler approved the break.
+
 - **A relative `IYI_MOD_MIRROR` is the working directory's.** It was handed
   to git as written, and git reads a relative local path from the top of the
   repository it runs in, so a project inside any git repository could not

@@ -144,6 +144,11 @@ module Iyi
         assert_macro "{{9007199254740993 == 9007199254740992}} {{[9007199254740993].includes?(9007199254740992)}} {{9007199254740993 == 9007199254740993}}", "false false true"
       end
 
+      # iyi: `to_i` answers an Int32-kind literal for any Int64.
+      it "executes == and uniq on an integer wider than its kind" do
+        assert_macro %({{"99999999999".to_i == "99999999999".to_i}} {{"99999999999".to_i == "99999999998".to_i}} {{["99999999999".to_i, "99999999999".to_i].uniq.size}}), "true false 1"
+      end
+
       it "executes == on floats spelled two ways" do
         assert_macro "{{1.0 == 1.00}}", "true"
       end
@@ -601,6 +606,12 @@ module Iyi
 
       it "executes gsub" do
         assert_macro %({{"hello".gsub(/e|o/, "a")}}), %("halla")
+      end
+
+      it "executes gsub with a named backreference" do
+        assert_macro %q({{ "abc".gsub(/(?<w>b)/, "[\\k<w>]") }}), %("a[b]c")
+        assert_macro %q({{ "abc".gsub(/(?<w>x)?b/, "[\\k<w>]") }}), %("a[]c")
+        assert_macro_error %q({{ "abc".gsub(/(?<w>b)/, "\\k<v>") }}), %(Undefined group name reference: "v")
       end
 
       it "executes gsub with a block" do
@@ -3531,6 +3542,12 @@ module Iyi
       it "executes to_a" do
         assert_macro %({{x.to_a}}), %([1, 2, 3]), {x: RangeLiteral.new(1.int32, 3.int32, false)}
         assert_macro %({{x.to_a}}), %([1, 2]), {x: RangeLiteral.new(1.int32, 3.int32, true)}
+      end
+
+      # iyi: the inclusive end is reached by `==`, which compares kinds.
+      it "executes to_a when the end is written in another integer kind" do
+        assert_macro %({{(0_i8..0).to_a}} {{(-1..2_u8).to_a}} {{(1_u8...3).to_a}}), %([0_i8] [-1, 0, 1, 2] [1_u8, 2_u8])
+        assert_macro %({% for i in 0_i8..1 %}{{i}} {% end %}), %(0_i8 1_i8 )
       end
 
       it "#each" do

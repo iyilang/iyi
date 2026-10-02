@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Three macro answers.** `"99999999999".to_i == x` stopped the
+  compile with "Invalid Int32" since integer literals compare exactly
+  (above), and so did `uniq`, `includes?` and a hash lookup on such a
+  number; the integer is read from its text now. `gsub` with `\k<name>`
+  wrote the reference as text. And a range whose end is written in
+  another integer kind lost its last element: `(0_i8..0).to_a` was `[]`.
+  Found by 38,456 macro expressions compared with Crystal's.
+
 - **`std/xml` reads and writes only XML names, and writes nothing a
   reader cannot read back.** Every byte past 0x7F was a name character,
   so `<a\u00A0k="1"/>` and `<a\u00D7b/>` were accepted and written back

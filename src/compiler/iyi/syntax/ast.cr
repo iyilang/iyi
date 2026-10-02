@@ -464,8 +464,8 @@ module Iyi
     # hash follows the same key, so equal literals hash alike.
     def ==(other : self)
       return false unless kind == other.kind
-      if kind.signed_int? || kind.unsigned_int?
-        integer_value == other.integer_value
+      if (mine = exact_integer?) && (theirs = other.exact_integer?)
+        mine == theirs
       elsif (mine = float_value?) && (theirs = other.float_value?)
         mine == theirs
       else
@@ -475,13 +475,25 @@ module Iyi
 
     def hash(hasher)
       hasher = kind.hash(hasher)
-      if kind.signed_int? || kind.unsigned_int?
-        integer_value.hash(hasher)
+      if integer = exact_integer?
+        integer.hash(hasher)
       elsif float = float_value?
         float.hash(hasher)
       else
         value.hash(hasher)
       end
+    end
+
+    # iyi: an integer literal's value read off its text, not cast to its kind.
+    # The kind does not always hold the text: `StringLiteral#to_i` answers an
+    # Int32-kind literal for any Int64, and `integer_value` raised on it, so
+    # `"99999999999".to_i == "99999999999".to_i` failed the compile where the
+    # other compiler answers true. Every integer text fits Int128 or UInt128,
+    # and reading the same number always takes the same branch, so equal
+    # literals still hash alike. Nil for a float kind.
+    protected def exact_integer? : Int128 | UInt128 | Nil
+      return nil unless kind.signed_int? || kind.unsigned_int?
+      value.to_i128? || value.to_u128?
     end
 
     # iyi: a float literal's value, or nil when it is out of Float64's range.

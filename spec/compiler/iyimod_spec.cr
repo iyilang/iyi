@@ -4208,7 +4208,7 @@ describe Iyi::IyiMod do
       consumer = create_spec_compiler
       consumer.prelude = "iyi/prelude"
       consumer.use_iyimod = "mods"
-      expect_raises(Iyi::TypeException, /was never filled/) do
+      expect_raises(Iyi::TypeException, /was never filled: `iyi tool bind` wrote its declarations/) do
         consumer.compile source, File.expand_path("from-artifact")
       end
     end

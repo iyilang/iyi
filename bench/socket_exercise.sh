@@ -80,7 +80,7 @@ fi
 
 echo
 echo "== every socket check reported"
-phrases="connect_accept message_exchange short_read closed_peer ipv6 unix timeout closed_under_read"
+phrases="connect_accept message_exchange short_read closed_peer ipv6 localhost unix timeout closed_under_read"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
   Linux) phrases="$phrases reset_after_chunk" ;;
@@ -91,7 +91,7 @@ for phrase in $phrases; do
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, ipv6, unix and timeout all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, ipv6, localhost, unix and timeout all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -390,6 +390,10 @@ refuses "a host with a trailing space, shown inspected" addr_tspace "cannot reso
   "IyiSocket.parse_ip(\"1.2.3.4 \").b0"
 refuses "an IPv6 address given to the IPv4 parser, named as such" addr_v6 "cannot resolve address: \"::1\": an IPv6 address, which \`parse_ipv6\` reads" \
   "IyiSocket.parse_ip(\"::1\").b0"
+# `localhost` is matched without regard to case and with one trailing
+# dot, the way a name written fully qualified has it; two are not a name.
+refuses "localhost with two trailing dots" addr_two_dots "cannot resolve address: \"localhost..\"" \
+  "IyiSocket.parse_ip(\"localhost..\").b0"
 refuses "an IPv6 zone" addr_zone "cannot resolve address: \"fe80::1%eth0\": a zone" \
   "IyiSocket.parse_ipv6(\"fe80::1%eth0\")"
 refuses "seven IPv6 groups and no gap" addr_seven "7 groups, not eight" \

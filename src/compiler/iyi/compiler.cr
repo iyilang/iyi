@@ -89,7 +89,13 @@ module Iyi
     property mattr : String?
 
     # If `false`, color won't be used in output messages.
-    property? color = true
+    #
+    # iyi: the colour is off unless a command turns it on, which `Command`
+    # does when its output is a terminal. On by default, it reached every
+    # compiler made without a command - the language server's, `fix`'s,
+    # `check --affected`'s - and the messages they hand on as data carried
+    # `\u001b[33;1m (compile-time type is (String | Nil))\u001b[39;22m`.
+    property? color = false
 
     # If `true`, skip cleanup process on semantic analysis.
     property? no_cleanup = false
@@ -249,16 +255,25 @@ module Iyi
     # Raises `InvalidByteSequenceError` if the source code is not
     # valid UTF-8.
     def compile(source : Source | Array(Source), output_filename : String) : Result
-      # iyi: IV.6 read backwards, for every build and not only the server's.
-      # A module's path is its file's path, so an entry whose header ends
-      # its own path names the project root above both, and `import a/b`
-      # from `<root>/x/y.iyi` resolves the way a build from the root would.
-      # A tool that knows better has set the root already; an entry whose
-      # header and path disagree, or that has none, keeps the entry-dir rule.
+      adopt_header_root(source)
+      compile_configure_program(source, output_filename) { }
+    end
+
+    # iyi: IV.6 read backwards, for every build and not only the server's.
+    # A module's path is its file's path, so an entry whose header ends
+    # its own path names the project root above both, and `import a/b`
+    # from `<root>/x/y.iyi` resolves the way a build from the root would.
+    # A tool that knows better has set the root already; an entry whose
+    # header and path disagree, or that has none, keeps the entry-dir rule.
+    #
+    # Asked by the front end alone as well (`top_level_semantic`): it was
+    # asked in `compile` only, so `iyi tool dependencies app/main.iyi` and
+    # `tool hierarchy` of it answered "can't find module 'app/util'" about
+    # the import `run` and `check` of the same file resolve.
+    private def adopt_header_root(source : Source | Array(Source)) : Nil
       if @iyi_header_root.nil? && (entry = source.is_a?(Source) ? source : source.first?)
         @iyi_header_root = Compiler.header_root_of(entry.filename, entry.code)
       end
-      compile_configure_program(source, output_filename) { }
     end
 
     # iyi: the directory a workspace keeps its artifacts in.
@@ -309,7 +324,17 @@ module Iyi
       # And asked the way the file system compares: on Windows `APP\main.iyi`
       # is `app/main.iyi`, and a path typed in another case found no root
       # and then no module its header's imports named.
-      return nil unless Iyi.path_key(::Path[path].to_posix.to_s).ends_with?(Iyi.path_key(suffix))
+      unless Iyi.path_key(::Path[path].to_posix.to_s).ends_with?(Iyi.path_key(suffix))
+        # And asked of the long spelling, which only the file system knows:
+        # `APPLIC~1\main.iyi` is `applications_dir\main.iyi`, and an entry
+        # reached through the 8.3 name - a CI runner's `RUNNER~1`, a working
+        # directory a `cmd` window spelled short - found no root, and `run`,
+        # `check` and `test` of it said "can't find module
+        # 'applications_dir/util'" where the long spelling printed 42.
+        long = Iyi.long_path(File.expand_path(path))
+        return nil unless Iyi.path_key(::Path[long].to_posix.to_s).ends_with?(Iyi.path_key(suffix))
+        path = long
+      end
       root = path[0, path.size - suffix.size]
       root.empty? ? "/" : root
     end
@@ -1943,6 +1968,10 @@ module Iyi
             visibility: declared.private? ? "private" : "",
             types: [] of IyiMod::TypeDecl,
             value: iyi_alias_value(declared, name),
+            # The doc comment, as an exported type carries it: a nested
+            # type is reached through its container and documented there
+            # (`iyi doc` showed `Outer::Inner` without its `# Inner.`).
+            doc: declared.doc || "",
           )
           next
         end
@@ -1984,6 +2013,7 @@ module Iyi
             # makes `Helper.twice` and `Helper#twice` the same method.
             extends_self: declared.metaclass.ancestors.includes?(declared),
             includes: iyi_included_modules(declared),
+            doc: declared.doc || "",
           )
           next
         end
@@ -2019,6 +2049,7 @@ module Iyi
           macros: iyi_macros_on(declared),
           superclass: iyi_superclass_name(declared),
           includes: iyi_included_modules(declared),
+          doc: declared.doc || "",
         )
       end
       declarations.sort_by! &.name
@@ -2941,6 +2972,7 @@ module Iyi
     # valid UTF-8.
     def top_level_semantic(source : Source | Array(Source)) : Result
       source = [source] unless source.is_a?(Array)
+      adopt_header_root(source)
       program = new_program(source)
       node = parse program, source
       node, _ = program.top_level_semantic(node)
@@ -3035,10 +3067,13 @@ module Iyi
       # file", which names the other language for a file this one was asked
       # to read - the identity `bench/identity_floor.py` exists to keep.
       language = source.filename.ends_with?(".iyi") ? "iyi" : "Crystal"
-      stderr.print colorize("Error: ").red.bold
-      stderr.print colorize("file '#{Iyi.relative_filename(source.filename)}' is not a valid #{language} source file: ").bold
-      stderr.puts ex.message
-      exit 1
+      # iyi: raised, never printed and exited on here. `Lsp::Analysis`
+      # compiles in the language server's own worker, and one `.iyi` file
+      # saved as Windows-1254 ended that worker with exit 1 and its sentence
+      # written to a buffer nobody read; and `check -f json`, which writes
+      # data (`Command#json_report`), got the sentence as text. Whoever
+      # compiles says it their way.
+      raise Error.new("file '#{Iyi.relative_filename(source.filename)}' is not a valid #{language} source file: #{ex.message}")
     end
 
     private def bc_flags_changed?(output_dir)

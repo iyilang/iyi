@@ -765,7 +765,12 @@
       end
 
       # Answers how many threads were left running with a request to park,
-      # which is how many the stop then waits to hear from.
+      # which is how many the stop then waits to hear from. The allocator's
+      # word is read after `GetThreadContext`, which waits for the suspend
+      # `SuspendThread` only asks for. Read between the two, it let a thread
+      # run on into `take` and be stopped there: thread_exercise's switching
+      # program died of a memory fault once in the 54 runs CI made of it, and
+      # 15 times in 20 here with 20 us of that run-on made certain.
       private def self.suspend_others(line : UInt64) : Int64
         deferred = 0_i64
         cursor = @@lines
@@ -773,13 +778,13 @@
           if cursor != line
             handle = Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))
             LibC.SuspendThread(handle)
+            sp = IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)
             cache = IyiHeap.read64(cursor + IYI_TL_CACHE)
             if IyiHeap.cache_inside?(cache)
               IyiHeap.request_stop_at(cache)
               LibC.ResumeThread(handle)
               deferred = deferred + 1_i64
             else
-              sp = IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)
               IyiHeap.write64(cursor + IYI_TL_SP, sp)
             end
           end

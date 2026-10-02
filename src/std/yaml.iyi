@@ -19,7 +19,7 @@
 #     A key the mapping spells itself wins over a merged one, wherever it is
 #     spelled; among merged mappings the first wins.
 #   * The core-schema tags `!!str`, `!!int`, `!!float`, `!!bool`, `!!null`,
-#     `!!seq` and `!!map`; any other tag is refused.
+#     `!!seq` and `!!map`, on a value or a key; any other tag is refused.
 #   * Streams: `%YAML` and `%TAG` directives are skipped, `---` opens a
 #     document and `...` ends one. `parse_all` answers every document;
 #     `parse` answers the first (nil for an empty stream) after checking the
@@ -42,14 +42,16 @@
 #   not close, a flow collection that does not close, an unknown escape or
 #   an escape that names a surrogate, a mapping entry or sequence entry at
 #   an indentation that belongs to nothing, text after a value on its
-#   line, a value whose text is not a node, a duplicate key (the second
-#   spelling of a key is a mistake, not an override), an alias to an
-#   anchor that is not defined or is still being built (a cycle), aliases
-#   that together expand to more than ALIAS_NODE_LIMIT nodes (the
-#   "billion laughs" stream), a merge whose value is not a mapping or a
-#   sequence of mappings, an explicit `?` key, an anchor on a key, a
-#   collection as a key, a second tag or a second anchor on one node, a tag
-#   it does not know (the verbatim `!<tag:yaml.org,2002:str>` spellings of
+#   line, a value whose text is not a node, a duplicate key, a second `<<`
+#   among them (the second spelling of a key is a mistake, not an
+#   override; `<<: [*a, *b]` merges two), an alias to an anchor that is
+#   not defined or is still being built (a cycle), aliases that together
+#   expand to more than ALIAS_NODE_LIMIT nodes (the "billion laughs"
+#   stream), a merge whose value is not a mapping or a sequence of
+#   mappings, an explicit `?` key, an anchor or an alias on a block
+#   mapping's key (a flow mapping's key may carry either), a collection
+#   as a key, a second tag or a second anchor on one node, a tag it
+#   does not know (the verbatim `!<tag:yaml.org,2002:str>` spellings of
 #   the core tags are known), a directive not followed by `---`, and
 #   nesting past DEPTH_LIMIT levels.
 #
@@ -323,22 +325,26 @@ pub struct Any
   end
 
   # Agrees with `==`: the same kind and value hash the same, a mapping's
-  # hash does not depend on its order, and `0.0`/`-0.0` share one.
+  # hash does not depend on its order, and `0.0`/`-0.0` share one. A
+  # sequence mixes its items as an `Array` does, a mapping sums one mixed
+  # tuple hash per pair, and an integer hashes as an `Int64`. `31 * h +
+  # item`, a sum of `31 * key + value` and the integer's own low bits
+  # gave a 150 by 150 grid of `[i, j]` 4,769 hashes and of `{x: i, y: j}`
+  # 299, `{a: 1, b: 2}` the hash of `{a: 2, b: 1}` and -1 that of 0, and
+  # 40,000 such mappings took 987 ms to insert as keys; they take 19 ms.
   def hash : Int32
     k = kind
     if k == KIND_ARRAY
-      value = 7
-      @raw.as(Array(Any)).each { |item| value = (value &* 31) &+ item.hash }
-      value
+      @raw.as(Array(Any)).hash
     elsif k == KIND_HASH
-      value = 11
-      @raw.as(Hash(Any, Any)).each { |key, item| value = value &+ ((key.hash &* 31) &+ item.hash) }
-      value
+      pairs = @raw.as(Hash(Any, Any))
+      value = 0
+      pairs.each { |key, item| value = value &+ {key, item}.hash }
+      {value, pairs.size}.hash
     elsif k == KIND_STRING
       @raw.as(String).hash
     elsif k == KIND_INT
-      v = @raw.as(Int64)
-      ((v ^ (v >> 32)) & 0x7FFFFFFF_i64).to_i32
+      @raw.as(Int64).hash
     elsif k == KIND_FLOAT
       f = @raw.as(Float64)
       return 3 if f == 0.0
@@ -626,7 +632,18 @@ pub class Parser
   @expanded : Int64
   @anchor_sizes : Hash(String, Int64)
   @open_sizes : Array(Int64)
+  # Collections open now, and per anchor how deep its value nests: the
+  # deepest `@peak` reached while it was open, past the depth it opened
+  # at. An alias counts as its anchor's value written out in its place,
+  # as a merge written out is counted, so `@depth` plus that is what
+  # DEPTH_LIMIT bounds. Counting only the text, `aN: &aN [*aN-1]` was
+  # two levels a line and N as built: 110 such lines parsed in a task,
+  # and `==` on the last value then took the process down with a stack
+  # overflow.
   @depth : Int32
+  @peak : Int32
+  @anchor_depths : Hash(String, Int32)
+  @open_peaks : Array(Int32)
   @buffer : ByteBuffer
 
   def initialize(text : String)
@@ -645,6 +662,9 @@ pub class Parser
     @anchor_sizes = Hash(String, Int64).new
     @open_sizes = [] of Int64
     @depth = 0
+    @peak = 0
+    @anchor_depths = Hash(String, Int32).new
+    @open_peaks = [] of Int32
     @buffer = ByteBuffer.new
     split_lines
   end
@@ -688,6 +708,7 @@ pub class Parser
       # document starts here or on a later blank-free line.
       @anchors = Hash(String, Any).new
       @anchor_sizes = Hash(String, Int64).new
+      @anchor_depths = Hash(String, Int32).new
       docs << node
       implicit_allowed = false
       skip_blank_lines
@@ -1077,15 +1098,17 @@ pub class Parser
         end
       end
     else
-      if pos != anchor_pos
-        # Properties in front of what would otherwise be a key: `&a k: v`.
+      unless anchor.nil?
+        # An anchor in front of what would otherwise be a key: `&a k: v`.
         # key_colon looks from the line's head; look from the properties.
+        # A tag alone goes on, as tags on keys are read: `k: !!str x: y`
+        # is a mapping value where none may be, below.
         saved = @heads[@line]
         @heads[@line] = anchor_pos
         is_key = key_colon(@line) >= 0
         @heads[@line] = saved
         if is_key
-          fail("an anchor or tag on a mapping key is not supported", anchor_pos)
+          fail("an anchor on a mapping key is not supported", anchor_pos)
           return Any.new(nil)
         end
       end
@@ -1140,8 +1163,14 @@ pub class Parser
     # `- b` after a key is a sequence entry where none may start (it was
     # read as the text "- b").
     lone = pos + 1 >= @ends[@line] || blank_byte?(@bytes[pos + 1])
-    if plain_first_refused?(b) || (b == 63_u8 && lone)
+    if plain_first_refused?(b)
       fail("a scalar cannot start with '#{b.unsafe_chr}'", pos)
+      return Any.new(nil)
+    end
+    # `? a` is an explicit key, as on a mapping's later lines; on the
+    # first it was refused as "a scalar cannot start with '?'".
+    if b == 63_u8 && lone
+      fail("an explicit '?' key is not supported", pos)
       return Any.new(nil)
     end
     if b == 45_u8 && lone
@@ -1197,6 +1226,7 @@ pub class Parser
     @nodes = @nodes + 1
     pairs = Hash(Any, Any).new
     spelled = Hash(Any, Bool).new
+    merged = false
     result = Any.new(pairs)
     enter(@heads[@line])
     return result if @error
@@ -1218,8 +1248,8 @@ pub class Parser
       end
       colon = key_colon(@line)
       if colon < 0
-        if @bytes[key_pos] == 38_u8 || @bytes[key_pos] == 33_u8
-          fail("an anchor or tag on a mapping key is not supported", key_pos)
+        if @bytes[key_pos] == 38_u8
+          fail("an anchor on a mapping key is not supported", key_pos)
         else
           fail("expected a mapping key", key_pos)
         end
@@ -1227,24 +1257,49 @@ pub class Parser
       end
       merge = false
       key = Any.new(nil)
-      b = @bytes[key_pos]
-      if b == 34_u8 || b == 39_u8
-        key = Any.new(parse_quoted(key_pos, indent, false))
-      elsif b == 42_u8 || b == 38_u8 || b == 33_u8
-        fail("an alias, anchor or tag as a mapping key is not supported", key_pos)
-      elsif plain_first_refused?(b)
-        # `]: 1`, `}: 1` and `,: 1` were read as the keys "]", "}" and ",".
-        fail("a scalar cannot start with '#{b.unsafe_chr}'", key_pos)
-      else
-        finish = colon
-        while finish > key_pos && blank_byte?(@bytes[finish - 1])
-          finish = finish - 1
-        end
-        text = String.new(finish - key_pos) { |t| t.copy_from(@bytes + key_pos, finish - key_pos) }
-        merge = text == "<<"
-        key = Scalar.resolve(text)
+      # A core tag on a key is read as on a value: `!!str a: b` was
+      # refused as "an alias, anchor or tag as a mapping key", where the
+      # header refused only an anchor; PyYAML and ruamel read {a: b}.
+      tag = nil.as(String?)
+      text_pos = key_pos
+      while @error.nil? && @bytes[text_pos] == 33_u8
+        # One tag, as on any node: `!!str !!int a: b` kept the later.
+        fail("a second tag", text_pos) unless tag.nil?
+        break if @error
+        finish = tag_end(text_pos, @ends[@line])
+        tag = tag_text(text_pos, finish)
+        fail("unknown tag #{tag}", text_pos) unless known_tag?(tag)
+        text_pos = skip_blank(finish)
       end
       break if @error
+      b = @bytes[text_pos]
+      if b == 34_u8 || b == 39_u8
+        key = Any.new(parse_quoted(text_pos, indent, false))
+      elsif b == 42_u8
+        fail("an alias as a mapping key is not supported", text_pos)
+      elsif b == 38_u8
+        fail("an anchor on a mapping key is not supported", text_pos)
+      elsif plain_first_refused?(b)
+        # `]: 1`, `}: 1` and `,: 1` were read as the keys "]", "}" and ",".
+        fail("a scalar cannot start with '#{b.unsafe_chr}'", text_pos)
+      else
+        finish = colon
+        while finish > text_pos && blank_byte?(@bytes[finish - 1])
+          finish = finish - 1
+        end
+        text = String.new(finish - text_pos) { |t| t.copy_from(@bytes + text_pos, finish - text_pos) }
+        merge = tag.nil? && text == "<<"
+        key = tag.nil? ? Scalar.resolve(text) : Any.new(text)
+      end
+      key = apply_tag(tag, key, key_pos)
+      break if @error
+      # `<<` is spelled once, as any key is: a second merged as well,
+      # where ruamel refuses it, and `<<: [*a, *b]` merges two.
+      if merge && merged
+        fail("duplicate key #{key.inspect}", key_pos)
+        break
+      end
+      merged = merged || merge
       if !merge && spelled.has_key?(key)
         fail("duplicate key #{key.inspect}", key_pos)
         break
@@ -1670,31 +1725,36 @@ pub class Parser
       # before it with more spaces: the text line is then less indented
       # and ends the scalar (a comment there is a trailing comment). Only
       # the text line counted, and the empty lines' extra spaces went
-      # missing (see below).
+      # missing (see below). Indentation is spaces alone, as `@heads`
+      # has it, and a tab after them is text: counted, it made a first
+      # line ` \tbar` two columns deep, so the line ended its own scalar
+      # and was refused as "tab used for indentation".
       look = @line + 1
       while look < @starts.size
+        content = @heads[look]
+        if content < @ends[look]
+          indent = content - @starts[look] if content - @starts[look] > indent
+          break
+        end
         spaces = 0
         while @starts[look] + spaces < @ends[look] && @bytes[@starts[look] + spaces] == 32_u8
           spaces = spaces + 1
         end
-        # Only spaces indent: a tab after them is the line's first text
-        # character. `|\n  \tx` counted the tab, so the line was less
-        # indented than itself and the scalar ended before it.
-        if skip_blank(@starts[look]) < @ends[look]
-          indent = spaces if spaces > indent
-          break
-        end
         indent = spaces if spaces > indent
         look = look + 1
       end
+      # At the root (`parent` -1) the text may start at the first column,
+      # where a document marker ends it (below). A floor of 1 there
+      # refused `--- |\nfoo` as "unexpected content" and read `|\n#x` as
+      # "", the line taken for a comment after an empty scalar.
       floor = parent + 1
-      floor = 1 if floor < 1
       indent = floor if indent < floor
     end
     lines = [] of String
     look = @line + 1
     last_content = @line
     while look < @starts.size
+      break if document_marker?(look)
       start = @starts[look]
       finish = @ends[look]
       spaces = 0
@@ -1891,6 +1951,7 @@ pub class Parser
   private def parse_flow_mapping(opener : Int32) : Any
     pairs = Hash(Any, Any).new
     spelled = Hash(Any, Bool).new
+    merged = false
     result = Any.new(pairs)
     enter(opener)
     return result if @error
@@ -1925,6 +1986,12 @@ pub class Parser
       # The key is the plain scalar `<<` however it is followed: `{<< : x}`
       # and `{<<}` were the string key "<<", where `{<<: x}` merged.
       merge = merge_key?(key_pos, key)
+      # `<<` is spelled once here too, as in a block mapping.
+      if merge && merged
+        fail("duplicate key #{key.inspect}", key_pos)
+        break
+      end
+      merged = merged || merge
       if !merge && spelled.has_key?(key)
         fail("duplicate key #{key.inspect}", key_pos)
         break
@@ -2099,23 +2166,29 @@ pub class Parser
     return if name.nil?
     @open_anchors << name
     @open_sizes << @nodes
+    @open_peaks << @peak
+    @peak = @depth
   end
 
   private def close_anchor(name : String?, value : Any) : Nil
     return if name.nil?
     started = @nodes
+    peak = @peak
     if @open_anchors.size > 0
       @open_anchors.pop
       started = @open_sizes.pop
+      outer = @open_peaks.pop
+      @peak = outer if outer > @peak
     end
     return if @error
     @anchors[name] = value
     @anchor_sizes[name] = @nodes - started
+    @anchor_depths[name] = peak - @depth
   end
 
   # The anchored value, shared; the nodes it holds count as read again,
   # and once aliases have added ALIAS_NODE_LIMIT nodes the stream is
-  # refused rather than built.
+  # refused rather than built. Its levels count from where it is read.
   private def resolve_alias(name : String, pos : Int32) : Any
     if name.empty?
       fail("an alias with no name", pos)
@@ -2130,6 +2203,12 @@ pub class Parser
       fail("unknown anchor *#{name}", pos)
       return Any.new(nil)
     end
+    deepest = @depth + @anchor_depths[name]
+    if deepest > DEPTH_LIMIT
+      fail("nesting deeper than #{DEPTH_LIMIT} levels", pos)
+      return Any.new(nil)
+    end
+    @peak = deepest if deepest > @peak
     size = @anchor_sizes[name]
     @nodes = @nodes + size
     @expanded = @expanded + size
@@ -2142,6 +2221,7 @@ pub class Parser
 
   private def enter(pos : Int32) : Nil
     @depth = @depth + 1
+    @peak = @depth if @depth > @peak
     fail("nesting deeper than #{DEPTH_LIMIT} levels", pos) if @depth > DEPTH_LIMIT
   end
 

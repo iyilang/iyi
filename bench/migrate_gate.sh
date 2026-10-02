@@ -111,6 +111,43 @@ else
   tail -8 "$WORK/check.log"
 fi
 
+# A checkout that gives `.cr` files CRLF - this repository pins `eol=lf`,
+# which is what hid it - or an editor's byte order mark. Every rule reads a
+# line with `$` and splits on `\n`, so `module Shop\r` was never peeled as
+# a wrapper: "8 files → 4 modules", "2 of 4 modules compile". And a mark in
+# front of line 1's `require` gave "0 of 8", copied into the middle of a
+# module. Both migrate as the LF tree does now, the CRLF one written CRLF.
+echo "== CRLF and a byte order mark migrate as LF does"
+for ending in crlf bom; do
+  cp -r "$FIXTURE" "$WORK/$ending"
+  find "$WORK/$ending/src" -name '*.cr' | while read -r file; do
+    if [ "$ending" = crlf ]; then
+      awk '{ printf "%s\r\n", $0 }' "$file" > "$file.turned"
+    else
+      { printf '\357\273\277'; cat "$file"; } > "$file.turned"
+    fi
+    mv "$file.turned" "$file"
+  done
+  (cd "$WORK/$ending" && "$IYI" migrate src --out "$WORK/${ending}_out" --check > "$WORK/$ending.log" 2>&1)
+  differs=""
+  # The LF tree's module, with its lines ended as the source's were, byte
+  # for byte: Git for Windows' `grep` drops a `\r` before it matches, so
+  # asking it whether lines end CRLF is no check.
+  for module in $(cd "$WORK/checked" && find . -name '*.iyi' -o -name '*_crystal.cr'); do
+    if [ "$ending" = crlf ]; then
+      awk '{ printf "%s\r\n", $0 }' "$WORK/checked/$module" > "$WORK/want"
+    else
+      cp "$WORK/checked/$module" "$WORK/want"
+    fi
+    cmp -s "$WORK/want" "$WORK/${ending}_out/$module" || differs="$differs $module"
+  done
+  if [ -z "$differs" ] && [ "$(grep 'modules compile' "$WORK/$ending.log")" = "$(grep 'modules compile' "$WORK/check.log")" ]; then
+    step ok "$ending: $(grep 'modules compile' "$WORK/$ending.log" | cut -d';' -f1), the LF tree's modules$([ "$ending" = crlf ] && echo ', each line CRLF')"
+  else
+    step fail "$ending: $(grep -m1 'modules compile' "$WORK/$ending.log"); not as the LF tree:${differs:- (none)}"
+  fi
+done
+
 echo "== the migrated program answers what the Crystal one answered"
 if (cd "$WORK/out" && "$IYI" build --crystal -o "$WORK/iyi_shop" shop.iyi > "$WORK/iyi.err" 2>&1 &&
     cd "$WORK/out" && "$WORK/iyi_shop" > "$WORK/iyi.out" 2>> "$WORK/iyi.err"); then

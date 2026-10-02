@@ -3,10 +3,15 @@ module Iyi
     getter last : ASTNode
 
     # iyi: reached by `TypeNode.refuse_in_derive`, which has to know whether the
-    # expansion it is inside is a derive (SPEC.md II.4).
+    # expansion it is inside is a derive (SPEC.md II.4): one running now, or a
+    # macro inside a def a derive generated (`iyi_derive_def?`).
     getter program : Program
     property free_vars : Hash(String, TypeVar)?
     property macro_expansion_pragmas : Hash(Int32, Array(Lexer::LocPragma))? = nil
+
+    def iyi_derive_def? : Bool
+      !!@def.try(&.iyi_from_derive?)
+    end
 
     def self.new(program, scope : Type, path_lookup : Type, a_macro : Macro, call, a_def : Def? = nil, in_macro = false)
       vars = {} of String => ASTNode

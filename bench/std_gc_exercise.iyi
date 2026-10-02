@@ -1,9 +1,9 @@
 # Exercises `std/gc`: the program's window onto iyi's own collector.
 #
 # Proves:
-#   * `malloc`, `malloc_atomic` and `realloc` hand out zeroed heap words;
-#     `realloc` keeps the bytes; `free` hands a chunk back so `is_heap_ptr`
-#     stops answering true for it.
+#   * `malloc` and `realloc` hand out zeroed heap words, `malloc_atomic`
+#     words it does not promise to clear; `realloc` keeps the bytes; `free`
+#     hands a chunk back so `is_heap_ptr` stops answering true for it.
 #   * `is_heap_ptr` answers true for a chunk's start and its interior, and
 #     false for null, a stack address and a freed chunk.
 #   * `stats` moves the way the collector does: `bytes_since_collection`
@@ -12,6 +12,10 @@
 #     `mapped_bytes` is at least one arena and only grows.
 #   * `disable` holds the trigger through allocation that would have
 #     collected; `enable` lets it run again; `collect` works while disabled.
+#   * `stats` reads whole lists beside threads that allocate: two seconds
+#     of it while three threads allocate end without a fault.
+#   * `is_heap_ptr` answers beside threads whose large chunks come and go:
+#     two seconds of it end without a fault, every answer right.
 #
 # bench/std_gc_exercise.sh drives it, builds once with -Dgc_none to require
 # the compile-time refusal, and breaks copies of the module to prove the
@@ -68,9 +72,9 @@ end
 check(kept, "realloc keeps the first 64 bytes")
 check(qb[4095] == 0_u8, "realloc zeroes the new tail")
 a = GC.malloc_atomic(32)
-check(a.address != 0_u64 && a.as(Pointer(UInt8))[31] == 0_u8, "malloc_atomic answers a zeroed word")
+check(a.address != 0_u64, "malloc_atomic answers a word")
 check(GC.malloc(0).address != 0_u64, "malloc(0) still answers a word")
-puts "  malloc, malloc_atomic and realloc answer zeroed words; realloc keeps the bytes"
+puts "  malloc and realloc answer zeroed words, malloc_atomic a word; realloc keeps the bytes"
 
 # ---------------------------------------------------------------------------
 puts "== heap pointers"
@@ -147,5 +151,64 @@ while round < 20
 end
 check(unterminated == 0, "#{unterminated} of 400 strings built in reused chunks had no terminator")
 puts "  400 strings built where longer ones were freed, each a C string"
+
+# ---------------------------------------------------------------------------
+puts "== stats beside threads that allocate"
+# `stats` walks the arena and large-mapping lists under the runtime lock.
+# Walked without it, a collection another thread's allocation started
+# stopped the walk on a mapping, unlinked and unmapped it, and the walk's
+# next read faulted: three threads allocating - a 3 MB chunk and a small
+# array a turn, so collections are frequent and mappings come and go -
+# beside two seconds of `stats` died of a memory fault in 10 runs of 10,
+# plain and --release.
+stop = Atomic(Int32).new(0)
+allocators = [] of IyiThread
+3.times do
+  allocators << IyiThread.start do
+    while stop.get == 0
+      Pointer(UInt8).malloc(3_000_000_u64)[0] = 1_u8
+      Array(Int32).new(50) { |k| k }
+    end
+    nil
+  end
+end
+started = __iyi_monotonic_ns
+while __iyi_monotonic_ns - started < 2_000_000_000_i64
+  check(GC.stats.mapped_bytes >= 16_777_216_u64, "stats beside allocating threads counts the arenas")
+end
+stop.set(1)
+allocators.each(&.join)
+puts "  two seconds of stats beside three allocating threads, every read whole"
+
+puts "== is_heap_ptr beside threads whose large chunks come and go"
+# A word in no arena walks the large-mapping list, which a `free` or a
+# sweep on another thread unlinks and unmaps under the runtime lock.
+# Walked without it, two seconds of `is_heap_ptr` beside three threads
+# that each malloc 3 MB, grow it to 5 MB and drop it died of a memory
+# fault in 10 runs of 10, plain and --release.
+quit = Atomic(Int32).new(0)
+mappers = [] of IyiThread
+3.times do
+  mappers << IyiThread.start do
+    while quit.get == 0
+      grown = Pointer(UInt8).malloc(3_000_000_u64).realloc(5_000_000_u64)
+      grown[4_999_999] = 2_u8
+      Array(Int32).new(50) { |k| k }
+    end
+    nil
+  end
+end
+mine = Pointer(UInt8).malloc(2_000_000_u64)
+on_stack = 12345_u64
+wrong = 0
+started = __iyi_monotonic_ns
+while __iyi_monotonic_ns - started < 2_000_000_000_i64
+  wrong += 1 if GC.is_heap_ptr(pointerof(on_stack).as(Void*))
+  wrong += 1 unless GC.is_heap_ptr((mine + 1_000_000_i64).as(Void*))
+end
+quit.set(1)
+mappers.each(&.join)
+check(wrong == 0, "is_heap_ptr beside large chunks coming and going answered #{wrong} wrong")
+puts "  two seconds of is_heap_ptr beside three threads mapping large chunks, every answer right"
 
 puts "ALL CHECKS PASSED"

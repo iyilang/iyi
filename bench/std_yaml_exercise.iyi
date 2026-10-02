@@ -55,6 +55,12 @@ folded = YAML.parse(">\n  hello\n  world\n")
 assert_str("hello world\n", folded.as_s, "folded scalar")
 literal = YAML.parse("|\n  hello\n  world\n")
 assert_str("hello\nworld\n", literal.as_s, "literal scalar")
+# Block scalar indentation is spaces alone, and a tab after them is text:
+# counted, it ended the scalar at its own first line, which was refused as
+# "tab used for indentation".
+assert_str("\techo hi\ndone\n", reads("script: |\n  \techo hi\n  done\n", "a tab after a block scalar's indentation is text")["script"].as_s, "a tab after a block scalar's indentation is text")
+assert_str("\tbar", reads("foo: |-\n \tbar\n", "a tab after one space of indentation is text")["foo"].as_s, "a tab after one space of indentation is text")
+puts "  a tab after a block scalar's indentation is text"
 entries = YAML.parse("- |\n  x\n- >-\n  y\n  z\n- 2\n")
 assert_true(entries.size == 3, "block scalars as sequence entries do not eat the next entry")
 assert_str("x\n", entries[0].as_s, "literal entry")
@@ -73,6 +79,11 @@ assert_str("a b", reads("\"a \\\n  b\"", "blanks before an escaped line break st
 assert_str("a\nb", reads("\"a\\\n\n  b\"", "an empty line after an escaped line break is a line feed").as_s, "an empty line after an escaped line break is a line feed")
 assert_str("b", reads("[\"a\":b]", "a quoted key in a flow sequence takes an adjacent ':'")[0]["a"].as_s, "a quoted key in a flow sequence takes an adjacent ':'")
 assert_str("a b", reads("[a\n b]", "a plain scalar folds across lines in a flow collection")[0].as_s, "a plain scalar folds across lines in a flow collection")
+# A plain scalar's next line may start with `- `, as text: it was refused
+# as "bad indentation of a sequence entry".
+assert_str("a - b", reads("key: a\n  - b\n", "a plain scalar's next line may start with '- '")["key"].as_s, "a plain scalar's next line may start with '- '")
+assert_str("single multiline - sequence entry", reads("- single multiline\n - sequence entry\n", "a plain entry's next line may start with '- '")[0].as_s, "a plain entry's next line may start with '- '")
+puts "  a plain scalar's next line may start with '- ', as text"
 assert_str("", reads("a: !!str\n", "a tag over an empty node tags the empty scalar")["a"].as_s, "a tag over an empty node tags the empty scalar")
 assert_true(reads("- !!null\n", "!!null over an empty node is null")[0].null?, "!!null over an empty node is null")
 assert_str("1", reads("a: !!str\n  1\n", "a tag alone on its line applies to the text below as written")["a"].as_s, "a tag alone on its line applies to the text below as written")
@@ -158,6 +169,14 @@ assert_true(docs.size == 2 && docs[0].as_i == 1_i64 && docs[1].as_i == 2_i64, "t
 # second `...` was refused as "a document end marker with no document".
 marked = Parser.new("a: 1\n...\n...\n---\nb\n").parse_all
 assert_true(!marked.nil? && marked.size == 2 && marked[1].as_s == "b", "a document's end may be marked more than once")
+# A block scalar at the root may start at the first column, where a
+# document marker ends it: `--- |\nfoo` was refused as "unexpected
+# content" and `|-\n#x` read as "", the line taken for a comment.
+assert_str("foo\nbar\n", reads("--- |\nfoo\nbar\n", "a root block scalar may start at the first column").as_s, "a root block scalar may start at the first column")
+assert_str("#x", reads("|-\n#x\n", "a '#' at a root block scalar's first column is text").as_s, "a '#' at a root block scalar's first column is text")
+scalar_docs = Parser.new("--- |\nfoo\n--- >\nbar\nbaz\n...\n").parse_all
+assert_true(!scalar_docs.nil? && scalar_docs.size == 2 && scalar_docs[0].as_s == "foo\n" && scalar_docs[1].as_s == "bar baz\n", "a document marker ends a root block scalar at the first column")
+puts "  a root block scalar may start at the first column, and a document marker ends it"
 keys = YAML.parse("1: one\ntrue: x\n")
 assert_str("one", keys[Any.new(1_i64)].as_s, "integer key")
 # The core schema's integer is `[-+]?[0-9]+`: `0777` is 777, as the header
@@ -170,6 +189,11 @@ kept.each do |text, value|
 end
 assert_true(YAML.parse("0777\n") == Any.new(777_i64) && YAML.parse("0o17\n") == Any.new(15_i64), "0777 is 777, 0o17 is 15")
 assert_str("x", keys[Any.new(true)].as_s, "boolean key")
+# A core tag on a key is read as on a value: `!!str a: b` was refused as
+# "an alias, anchor or tag as a mapping key is not supported", where the
+# header refused only an anchor on a key.
+assert_str("{\"a\" => \"b\", \"1\" => 2}", reads("!!str a: b\n!!str 1: 2\n", "a core tag on a key is read").inspect, "a core tag on a key is read")
+puts "  a core tag on a key: !!str 1 is the string key \"1\""
 # An Int32 reaches an integer key as `Any.new(1)` does: `keys[1]` panicked
 # "expected a sequence, not a mapping", and `[]?` and `dig?` answered nil.
 by_index = keys[1]?
@@ -180,6 +204,27 @@ assert_str("x", YAML.parse("a:\n  1: x\n").dig("a", 1).as_s, "dig walks to an in
 h = Hash(Any, Int32).new
 h[YAML.parse("a: 1")] = 7
 assert_true(h[YAML.parse("a: 1")]? == 7, "Any hashes with ==")
+# A sequence hashes as an Array does and a mapping by its pairs mixed:
+# `31 * h + item` and a sum of `31 * key + value` gave a 150 by 150 grid
+# of [i, j] 4,769 hashes and of {x: i, y: j} 299, and {a: 1, b: 2} the
+# hash of {a: 2, b: 1}.
+seq_hashes = Hash(Int32, Bool).new
+map_hashes = Hash(Int32, Bool).new
+gi = 0
+while gi < 150
+  gj = 0
+  while gj < 150
+    seq_hashes[Any.new([Any.new(gi), Any.new(gj)] of Any).hash] = true
+    map_hashes[Any.new({Any.new("x") => Any.new(gi), Any.new("y") => Any.new(gj)} of Any => Any).hash] = true
+    gj = gj + 1
+  end
+  gi = gi + 1
+end
+assert_true(seq_hashes.size >= 22000, "a 150 by 150 grid of sequences has at least 22,000 hashes, not #{seq_hashes.size}")
+assert_true(map_hashes.size >= 22000, "a 150 by 150 grid of mappings has at least 22,000 hashes, not #{map_hashes.size}")
+swapped = YAML.parse("{a: 1, b: 2}").hash != YAML.parse("{a: 2, b: 1}").hash
+assert_true(swapped && YAML.parse("{a: 1, b: 2}").hash == YAML.parse("{b: 2, a: 1}").hash, "a mapping's hash follows its pairs, not their order")
+puts "  a 150 by 150 grid of sequences and of mappings has at least 22,000 hashes each"
 puts "  parse_all, integer and boolean keys, Any as a Hash key"
 
 puts "\n== what the reader refuses"
@@ -194,6 +239,13 @@ refused("\"\\q\"\n", "unknown escape '\\q' at line 1, column 2")
 # digits, and was reported as unknown.
 refused("path: \"C:\\Users\\bob\"\n", "escape '\\U' wants 8 hexadecimal digits: a backslash in double quotes is '\\\\', or single-quote the scalar at line 1, column 10")
 refused("? a: 1\n", "an explicit '?' key is not supported at line 1, column 1")
+# The sentences say what the header lists: `? a` on a first line was "a
+# scalar cannot start with '?'", an anchor on a key "an alias, anchor or
+# tag as a mapping key", and a second `<<` merged as well where a second
+# spelling of any other key is refused.
+refused("? lone\n: b\n", "an explicit '?' key is not supported at line 1, column 1")
+refused("&a k: v\n", "an anchor on a mapping key is not supported at line 1, column 1")
+refused("merged:\n  <<: {a: 1}\n  <<: {b: 2}\n", "duplicate key \"<<\" at line 3, column 3")
 refused("&a [*a]\n", "cyclic alias *a at line 1, column 5")
 refused("&a {b: *a}\n", "cyclic alias *a at line 1, column 8")
 refused("a: b\u0001c\n", "control character U+0001 is not allowed at line 1, column 5")
@@ -244,6 +296,17 @@ refused("[&a &b 1, *a]\n", "a second anchor at line 1, column 5")
 laughs = "a: &a [x,x,x,x,x,x,x,x,x,x]\nb: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\nc: &c [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]\nd: &d [*c,*c,*c,*c,*c,*c,*c,*c,*c,*c]\ne: &e [*d,*d,*d,*d,*d,*d,*d,*d,*d,*d]\nf: &f [*e,*e,*e,*e,*e,*e,*e,*e,*e,*e]\ng: &g [*f,*f,*f,*f,*f,*f,*f,*f,*f,*f]\nh: &h [*g,*g,*g,*g,*g,*g,*g,*g,*g,*g]\ni: &i [*h,*h,*h,*h,*h,*h,*h,*h,*h,*h]\n"
 refused(laughs, "alias expansion past 1,000,000 nodes at line 6, column 29")
 refused("[" * 101 + "]" * 101, "nesting deeper than 100 levels at line 1, column 101")
+# An alias counts its anchor's levels where it is read: `aN: &aN [*aN-1]`
+# is two levels a line as written and N as built, and 110 such lines
+# parsed in a task whose `==` then took the process down with a stack
+# overflow. The chain to `a99` is as deep as the limit allows.
+chained = "a0: &a0 x\n"
+link = 1
+while link < 100
+  chained = chained + "a#{link}: &a#{link} [*a#{link - 1}]\n"
+  link = link + 1
+end
+refused(chained + "a100: &a100 [*a99]\n", "nesting deeper than 100 levels at line 101, column 14")
 # The deepest document read is one a task can use: parse, compare, print,
 # hash and dump. At a limit of 256 a task died of a stack overflow parsing
 # 256 nested sequences and comparing 128, and the process with it.
@@ -252,7 +315,7 @@ deepest_map = "{a: " * 100 + "1" + "}" * 100
 in_task = false
 group do |g|
   g.spawn do
-    [deepest_seq, deepest_map].each do |deepest|
+    [deepest_seq, deepest_map, chained].each do |deepest|
       one = YAML.parse(deepest)
       raise "ASSERTION FAILED: the deepest document does not equal itself in a task" unless one == YAML.parse(deepest)
       one.inspect

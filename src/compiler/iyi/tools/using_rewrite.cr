@@ -36,7 +36,10 @@ module Iyi
       collect_scopes(nodes, scopes, top: true)
       return nil unless scopes.any?(&.any?(UsingDecl))
 
-      starts = [0]
+      # Line 1 starts after a byte order mark: the lexer drops it before it
+      # counts columns, so a `using` on line 1 of a marked file was cut one
+      # character to the left.
+      starts = [text.starts_with?('\uFEFF') ? 1 : 0]
       text.each_char_with_index { |char, index| starts << index + 1 if char == '\n' }
       # {from, to, replacement}: character offsets, `to` exclusive.
       spans = [] of {Int32, Int32, String}
@@ -138,9 +141,15 @@ module Iyi
       end
       merged.map do |(from, to, replacement)|
         whole_lines = replacement.empty? && (from == 0 || text[from - 1] == '\n') && to > 0 && text[to - 1] == '\n'
-        blank_before = from == 0 || (from >= 2 && text[from - 2] == '\n')
-        if whole_lines && blank_before && text[to]? == '\n'
-          {from, to + 1, replacement}
+        # A blank line is `\n` or `\r\n`. Only `\n` was asked, so in a CRLF
+        # file the line above read `\r` and was not blank, and the rewrite
+        # left two blank lines, `{polite}\r\n\r\n\r\nputs polite`, which
+        # `fmt --check` then rejected.
+        blank_before = from == 0 || (from >= 2 && text[from - 2] == '\n') ||
+                       (from >= 3 && text[from - 3] == '\n' && text[from - 2] == '\r')
+        blank_after = text[to]? == '\n' ? 1 : (text[to]? == '\r' && text[to + 1]? == '\n' ? 2 : 0)
+        if whole_lines && blank_before && blank_after > 0
+          {from, to + blank_after, replacement}
         else
           {from, to, replacement}
         end

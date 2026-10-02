@@ -205,7 +205,8 @@ class Iyi::Command
         file == single || shards_install?(file, project_root)
       end.select do |file|
         here = File.dirname(file)
-        File.read_lines(file).any? do |line|
+        # Without the mark, which hid a `require` on line 1 from `^`.
+        File.read(file).lchop('\uFEFF').lines.any? do |line|
           next false unless (match = MigrateUnit::REQUIRE.match(line))
           target = match[1] || ""
           next false unless target.starts_with?('.')
@@ -560,11 +561,14 @@ class Iyi::Command
     end
 
     written = {} of String => String
+    # The modules whose first source file's lines end CRLF, written so.
+    crlf_modules = Set(String).new
     written_paths = {} of String => String
     modules = {} of String => Array(MigrateUnit)
     units.each { |unit| (modules[remap[unit.path]? || unit.path] ||= [] of MigrateUnit) << unit }
     modules.each do |module_path, members|
       members = required_first(members, by_source) if members.size > 1
+      crlf_modules << module_path if migrate_crlf?(members.first.source)
       imports = Set(String).new
       usings = {} of String => Set(String)
       members.each do |member|
@@ -586,10 +590,10 @@ class Iyi::Command
         # `""` for the module path, because a sidecar is outside every
         # module: no name collapses to the bare spelling, all of them are
         # written in full.
-        File.write(sidecar_path,
-          "# Reopenings of types this tree does not own, kept as Crystal: R-3 closes\n" \
-          "# a type where it is written, and these are somebody else's (SPEC.md III.6).\n" +
-          MigrateUnit.resolve_marks(member.sidecar_text, remap, "").strip + "\n")
+        sidecar = "# Reopenings of types this tree does not own, kept as Crystal: R-3 closes\n" \
+                  "# a type where it is written, and these are somebody else's (SPEC.md III.6).\n" +
+                  MigrateUnit.resolve_marks(member.sidecar_text, remap, "").strip + "\n"
+        File.write(sidecar_path, migrate_crlf?(member.source) ? sidecar.gsub('\n', "\r\n") : sidecar)
       end
 
       written[module_path] = String.build do |io|
@@ -648,6 +652,8 @@ class Iyi::Command
         io << "module " << SHARDS_MODULE << "\n\n"
         shard_requires.each { |name| io << "require \"" << name << "\"\n" }
       end
+      # Nobody's file: it follows the tree's first.
+      crlf_modules << SHARDS_MODULE if migrate_crlf?(units.first.source)
     end
 
     written.each do |module_path, text|
@@ -663,7 +669,7 @@ class Iyi::Command
           File.join(out_dir, "#{module_path}.iyi")
         end
       Dir.mkdir_p(File.dirname(target))
-      File.write(target, text)
+      File.write(target, crlf_modules.includes?(module_path) ? text.gsub('\n', "\r\n") : text)
       written_paths[module_path] = target
     end
 
@@ -870,7 +876,21 @@ class Iyi::Command
       abort! "migrate: file '#{Iyi.relative_filename(file)}' is not a valid Crystal source file: " \
              "it holds bytes that are not UTF-8 text, and a migration copies the bytes it reads", :USAGE_ERROR
     end
-    text
+    # Read as the same lines a Linux checkout has: every rule below matches
+    # a line with `$`, and splits on `\n`, so a CRLF tree's `module Shop\r`
+    # was never peeled as a wrapper - the bench fixture went from "8 of 8
+    # modules compile" to "2 of 4" - and a byte order mark hid line 1's
+    # `require` and was copied into the middle of a module, "0 of 8". The
+    # modules are written back with the line ending read here
+    # (`migrate_crlf?`); the mark, an editor's, is not.
+    text = text.lchop('\uFEFF')
+    Iyi.crlf?(text) ? text.gsub("\r\n", "\n") : text
+  end
+
+  # Whether *file*'s lines end CRLF, which is how the module made from it is
+  # written: the first line ending decides, as it does for `iyi fmt`.
+  private def migrate_crlf?(file : String) : Bool
+    Iyi.crlf?(File.read(file))
   end
 
   # One name a module exports, and the module.

@@ -807,7 +807,15 @@ module Iyi
       # distinction the keep file takes: a module that does answers to these
       # itself, so the producer emits `*Gen@Gen#next_pair` and the keep file
       # keeps it alive.
-      travels = method.body_answers ||
+      #
+      # And whatever its side, a function that takes a block, for the reason
+      # a type's block-taking method carries its body below (`carries_body`):
+      # the producer inlines it at every call, the keep file's included. One
+      # whose block was written `& : Int32 -> Nil` is ready rather than
+      # answered by its body, so `body_answers` was false, the declaration
+      # crossed alone, and a program calling `Blk.each_up(3) { ... }` ended on
+      # `LNK2019: unresolved external symbol .2A.Blk.3A..3A.each_up...`.
+      travels = method.body_answers || !method.written_block.empty? ||
                 (signature.receiver.empty? && !extends_self?(program, root))
       if travels && (body = method.body) && !body.empty?
         @@mono_bodies[IyiMod.mono_body_key(iyi_module_name(root), signature)] = travelling_body(body)
@@ -1197,7 +1205,10 @@ module Iyi
     io.puts "library nobody calls compiles to nothing. The keep file above is what"
     io.puts "calls it. Two commands finish the boundary:"
     io.puts
-    io.puts "  crystal build --iyi-keep #{root} --emit-bind #{dir} -o keepbin #{keep_path}"
+    # This binary and the flag `iyi bind` runs it with: the line said
+    # `crystal build --iyi-keep`, and the `crystal` on a PATH is Crystal's,
+    # which answers `Error: Invalid option: --iyi-keep`.
+    io.puts "  #{Command.program_name} build --crystal --iyi-keep #{root} --emit-bind #{dir} -o keepbin #{keep_path}"
     io.puts "  iyi build --crystal --use-iyimod #{dir} -o app app.iyi"
     io.puts
     io.puts "An *ordinary* build on the first line, not `--emit obj`. Codegen"
@@ -2219,6 +2230,13 @@ module Iyi
     parts.reject(&.empty?)
   end
 
+  # *path* expanded, without a verbatim prefix, and with every 8.3 short
+  # name spelled out (`Iyi.long_path`, which also gives each name its case
+  # on disk).
+  private def self.keep_spelling(path : String) : ::Path
+    ::Path[Iyi.long_path(Iyi.unverbatim(File.expand_path(path)))]
+  end
+
   # A file that calls everything and is never called.
   #
   # Codegen is demand-driven, which is right for a program and wrong for a
@@ -2238,10 +2256,33 @@ module Iyi
     # `relative_to?` answers `..\entry.cr`, and `\a` and `\e` are escapes
     # there, so the fill build went looking for a file called `..try.cr`.
     # `require` resolves `/` on every platform Crystal builds on.
-    source = ::Path[File.expand_path(program.filename || "")]
-    base = ::Path[File.expand_path(dir)]
-    relative = source.relative_to?(base).try(&.to_posix.to_s) || source.to_posix.to_s
-    relative = "./#{relative}" unless relative.starts_with?(".")
+    #
+    # Without a `\\?\` prefix on either side: `relative_to?` answers nil for
+    # two anchors that differ, `\\?\C:\` and `C:\` among them, and the
+    # fallback wrote `require "./C:/Users/.../greet.cr"`, which resolves
+    # nowhere. Where there is still no relative path - `--emit-bind` on
+    # another drive - the shard is named from the search path it is on,
+    # the way `iyi bind`'s `lib/` is; `./` goes only in front of a path
+    # that is relative to this file.
+    #
+    # And both spelled the way the file system names them (`keep_spelling`):
+    # a CI runner's `mktemp` hands out `C:\Users\RUNNER~1\...` and its
+    # shell enters `C:\Users\runneradmin\...`, so an `--emit-bind` given the
+    # one beside a shard read through the other was seven directories away,
+    # and the keep file required `../../../../../../../runneradmin/AppData/
+    # .../greet.cr` - the home directory's name in a file that was one `../`
+    # from its shard.
+    source = keep_spelling(program.filename || "")
+    base = keep_spelling(dir)
+    relative =
+      if beside = source.relative_to?(base)
+        beside = beside.to_posix.to_s
+        beside.starts_with?(".") ? beside : "./#{beside}"
+      else
+        IyiPath.default_paths
+          .compact_map { |entry| Iyi.path_under?(source.to_s, keep_spelling(entry).to_s) }
+          .first?.try { |under| ::Path[under].to_posix.to_s } || source.to_posix.to_s
+      end
 
     String.build do |io|
       io << "# Written by `crystal tool bind`. Never called, and never edited:\n"

@@ -6,7 +6,8 @@
 # Proves the exercise holds plain and --release, that a broken address
 # resolution is caught, and what address parsing refuses: an invalid IPv4
 # host, an out of range octet, an incomplete IPv4 address, and an invalid
-# hex character in an IPv6 address.
+# hex character in an IPv6 address; and that a bind or send that fails
+# says why.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -79,7 +80,7 @@ fi
 
 echo
 echo "== every udp section reported"
-for phrase in "== address parsing" "== bind to port 0 and loopback exchange" "== connected sockets" "== maximum datagram size" "== nothing queued: the ? variants answer nil, and a bounded wait ends" "== socket lifecycle and close"; do
+for phrase in "== address parsing" "== bind to port 0 and loopback exchange" "== connected sockets" "== maximum datagram size" "== nothing queued: the ? variants answer nil, and a bounded wait ends" "== a connected peer that refused" "== socket lifecycle and close"; do
   if ! grep -q "$phrase" "$WORK/udp-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -105,10 +106,10 @@ else
 from pathlib import Path
 # The parser is std/socket's now, so the module broken is that one.
 src = Path("$REPO/src/std/socket.iyi").read_text()
-old = 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if host == "localhost"'
+old = 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if localhost?(host)'
 if old not in src:
     raise SystemExit("patch site missing")
-Path("$WORK/patched/std/socket.iyi").write_text(src.replace(old, 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8) if host == "localhost"', 1))
+Path("$WORK/patched/std/socket.iyi").write_text(src.replace(old, 'return IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8) if localhost?(host)', 1))
 PY
   if [ $? -ne 0 ]; then
     echo "  the patch did not apply"
@@ -236,6 +237,53 @@ module main
 import std/udp::{UdpSocket}
 s = UdpSocket.bind("127.0.0.1", 0)
 puts s.poll_read(-1)
+IYI
+
+echo
+echo "== a refusal says why"
+# Each refusal was a fixed sentence that dropped the platform's number:
+# a port in use was "cannot bind UDP socket to 127.0.0.1:P" and nothing
+# more, a datagram past 65,507 bytes and an IPv6 address from an IPv4
+# socket were both "cannot send to H:P". A sentence that names a port the
+# system chose prints it as P, so this output is the same on every run.
+refuses_port() { # refuses_port <label> <name> <phrase>, the program on stdin
+  refuses_body "$@" > "$WORK/$2.said"
+  sed 's/:[0-9][0-9]*\([:"]\)/:P\1/g' "$WORK/$2.said"
+}
+
+# And a port is its first binder's: no SO_REUSEADDR, which on Linux let
+# this second bind through.
+refuses_port "a second bind of a held port" rebind ": the address is in use" <<'IYI'
+module main
+import std/udp::{UdpSocket}
+held = UdpSocket.bind("127.0.0.1", 0)
+again = UdpSocket.bind("127.0.0.1", held.local_port)
+puts again.local_port
+IYI
+
+refuses_body "a datagram past 65,507 bytes" too_big "cannot send to 127.0.0.1:9: the datagram is too large to send" <<'IYI'
+module main
+import std/udp::{UdpSocket}
+puts UdpSocket.client.send_to("x" * 65508, "127.0.0.1", 9)
+IYI
+
+refuses_body "an IPv6 address from an IPv4 socket" other_family "cannot send to [::1]:9: the address is not of the socket's family" <<'IYI'
+module main
+import std/udp::{UdpSocket}
+puts UdpSocket.client.send_to("x", "::1", 9)
+IYI
+
+# A broadcast needs SO_BROADCAST. Linux answers that only where it has a
+# route for the address, and ENETUNREACH on a machine with none, so the
+# sentence is asked for where it was measured and a reason elsewhere.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) broadcast_said="cannot send to 255.255.255.255:9: the destination is a broadcast address" ;;
+  *) broadcast_said="cannot send to 255.255.255.255:9: " ;;
+esac
+refuses_body "a broadcast without SO_BROADCAST" broadcast "$broadcast_said" <<'IYI'
+module main
+import std/udp::{UdpSocket}
+puts UdpSocket.client.send_to("x", "255.255.255.255", 9)
 IYI
 
 echo

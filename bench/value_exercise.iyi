@@ -196,6 +196,26 @@ assert_str(served.host, "localhost", "property: a field's default is its value")
 served.host = "example"
 assert_str(served.host, "example", "property: and is written over")
 
+# The untyped spelling, a default the field's type is read from: `getter
+# retries = 3` expanded to `def retries = 3` and failed to parse inside the
+# prelude's macro ("unexpected token: \"=\""). It is the field's
+# initialiser now, and `property` writes the setter beside it.
+class Retried
+  getter retries = 3
+  getter names = [] of String
+  property label = "first"
+
+  def initialize
+  end
+end
+
+retried = Retried.new
+retried.names << "a"
+retried.label = "second"
+assert_int(retried.retries, 3, "getter: an untyped default is the field's value")
+assert_int(retried.names.size, 1, "getter: an untyped default is the field's own object")
+assert_str(retried.label, "second", "property: an untyped default is written over")
+
 puts "all value checks passed"
 
 LATER_WORDS = ["a", "b", "c"]

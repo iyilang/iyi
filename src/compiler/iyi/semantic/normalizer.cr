@@ -6,6 +6,7 @@ module Iyi
     def normalize(node, inside_exp = false, current_def = nil)
       normalizer = Normalizer.new(self)
       normalizer.current_def = current_def
+      normalizer.macro_expansion = node if Normalizer.macro_expansion?(node)
       node.transform(normalizer)
     end
   end
@@ -18,7 +19,24 @@ module Iyi
     # to their version with arguments copied from the current method.
     property current_def : Def?
 
+    # iyi: the top of a macro's expansion, when that is what is being
+    # normalized. Its statements are the enclosing scope's, not a scope of
+    # their own, so a `defer` among them is left standing for the main
+    # visitor to lower over the rest of that scope
+    # (`MainVisitor#iyi_splice_macro_defers`). Lowered here, it covered
+    # nothing: `{% if true %} defer puts "a" {% end %}` printed "a" before
+    # the body after it.
+    property macro_expansion : ASTNode?
+
     @dead_code = false
+
+    # A macro's expansion is parsed from a `VirtualFile`, and it is the
+    # only source that is.
+    def self.macro_expansion?(node : ASTNode) : Bool
+      location = node.location
+      location ||= node.expressions.first?.try(&.location) if node.is_a?(Expressions)
+      location.try(&.filename).is_a?(VirtualFile)
+    end
 
     def initialize(@program)
     end
@@ -60,7 +78,7 @@ module Iyi
         end
         break if @dead_code
       end
-      exps = apply_defers(exps)
+      exps = apply_defers(exps) unless node.same?(@macro_expansion)
       case exps.size
       when 0
         Nop.new
@@ -78,25 +96,54 @@ module Iyi
     #     a
     #     defer x
     #     b
+    #     defer y
+    #     c
     #
     # To:
     #
     #     a
-    #     __iyi_defer_push(-> { x })
+    #     %live = true
+    #     __iyi_defer_push(-> { x if %live; nil })
     #     begin
     #       b
+    #       __iyi_defer_push(-> { y if %live; nil })
+    #       begin
+    #         c
+    #       ensure
+    #         %live = false
+    #         __iyi_defer_pop_run
+    #         %live = true
+    #         y
+    #       end
     #     ensure
+    #       %live = false
     #       __iyi_defer_pop_run
+    #       x
     #     end
     #
-    # The cleanup is written once, as a proc the runtime holds. Every
-    # ordinary exit — falling off the end, a `return`, `!` expanding to
-    # a `return` (III.1.2) — reaches the `ensure`, which pops the proc
-    # and runs it. A panic reaches none of them: `raise` never unwinds
-    # (there is no unwinder to link, by design), so the panic path in
-    # the prelude walks the same registry and runs what was never
-    # popped. One list, two readers, and `defer`'s promise holds on
-    # every exit including the one that is a bug.
+    # Every ordinary exit — falling off the end, a `return`, `!` expanding
+    # to a `return` (III.1.2) — reaches the `ensure`, which runs the
+    # cleanup there, inline, as the scope's own code. A panic reaches none
+    # of them: `raise` never unwinds (there is no unwinder to link, by
+    # design), so the cleanup is also registered, as a proc the runtime
+    # holds, and the panic path walks the registry and runs what was never
+    # popped. The ordinary exit disarms its proc before popping it, so the
+    # registry stays balanced and the cleanup runs once.
+    #
+    # One `%live` serves every `defer` of the list: the pop runs only the
+    # proc on top, which is the one being disarmed, and the flag is armed
+    # again after it for the procs of the same list still registered. A
+    # flag for each `defer` was a variable for each, and every handler
+    # nested inside copies every variable in scope: N `defer`s in one
+    # scope were N^2 copies.
+    #
+    # The proc used to be the only copy, run by the pop too, and a proc is
+    # a closure: in a struct method it read a copy of `self` made at entry
+    # (`defer puts @n` printed 0 after `@n = 2`) and wrote into that copy,
+    # and every variable it named stopped narrowing. Inline, the cleanup is
+    # typed and run as an `ensure` is; the proc runs only when the frame
+    # never resumes, which is what lets the semantic pass keep a captured
+    # variable's narrowing (`Def#iyi_defer?`).
     #
     # **LIFO falls out of the nesting** twice over: a second `defer`
     # expands inside the first one's body, so its push is later and its
@@ -108,27 +155,39 @@ module Iyi
     # extra rule: a `defer` in a loop body runs at the end of each iteration
     # instead of piling up until the function returns, which is Go's
     # best-known wart with the feature.
-    private def apply_defers(exps : Array(ASTNode)) : Array(ASTNode)
+    def apply_defers(exps : Array(ASTNode), live : Var? = nil) : Array(ASTNode)
       index = exps.index { |exp| exp.is_a?(Defer) }
       return exps unless index
 
       deferred = exps[index].as(Defer)
-      rest = apply_defers(exps[(index + 1)..])
       head = exps[0...index]
 
       if program.iyi_prelude?
+        # An earlier `defer` of this list made the flag, and its proc is
+        # still registered when this one is popped.
+        outer = live
+        live ||= Var.new(program.new_temp_var_name).at(deferred)
+        rest = apply_defers(exps[(index + 1)..], live)
         # The trailing `nil` pins the proc to `-> Nil`: a proc literal
         # does not coerce its return the way a block restriction does,
         # and a cleanup's value is nobody's.
-        cleanup_body = Expressions.new([deferred.exp, NilLiteral.new.at(deferred)] of ASTNode).at(deferred)
-        proc_literal = ProcLiteral.new(Def.new("->", [] of Arg, cleanup_body)).at(deferred)
-        push = Call.global("__iyi_defer_push", proc_literal).at(deferred)
+        armed = If.new(live.clone, deferred.exp.clone).at(deferred)
+        cleanup_body = Expressions.new([armed, NilLiteral.new.at(deferred)] of ASTNode).at(deferred)
+        cleanup = Def.new("->", [] of Arg, cleanup_body).at(deferred)
+        cleanup.iyi_defer = true
+        push = Call.global("__iyi_defer_push", ProcLiteral.new(cleanup).at(deferred)).at(deferred)
         pop = Call.new(nil, "__iyi_defer_pop_run", global: true).at(deferred)
+        disarm = Assign.new(live.clone, BoolLiteral.new(false).at(deferred)).at(deferred)
+        ordinary_exit = [disarm, pop] of ASTNode
+        ordinary_exit << Assign.new(live.clone, BoolLiteral.new(true).at(deferred)).at(deferred) if outer
+        ordinary_exit << deferred.exp
+        head << Assign.new(live.clone, BoolLiteral.new(true).at(deferred)).at(deferred) unless outer
         head << push
-        head << ExceptionHandler.new(rest, ensure: pop).at(deferred).tap(&.iyi_defer=(true))
+        head << ExceptionHandler.new(rest, ensure: Expressions.new(ordinary_exit).at(deferred)).at(deferred).tap(&.iyi_defer=(true))
       else
         # Crystal's prelude has a real unwinder, so the classic shape —
         # the cleanup inline in the `ensure` — already runs on a panic.
+        rest = apply_defers(exps[(index + 1)..])
         head << ExceptionHandler.new(rest, ensure: deferred.exp).at(deferred).tap(&.iyi_defer=(true))
       end
       head
@@ -138,6 +197,11 @@ module Iyi
     # say — has nothing after it to defer past, so all that is left of it is
     # the cleanup itself, still guarded so that it runs on an unwind.
     def transform(node : Defer)
+      if node.same?(@macro_expansion)
+        # A macro's whole expansion: left standing, as in a list of them.
+        node.exp = node.exp.transform(self)
+        return Expressions.new([node] of ASTNode).at(node)
+      end
       ExceptionHandler.new(Nop.new, ensure: node.exp.transform(self)).at(node).tap(&.iyi_defer=(true))
     end
 
@@ -148,24 +212,28 @@ module Iyi
     #     group do |g|
     #       x = g.spawn { read(a) }
     #       y = g.spawn { read(b) }
-    #     end
+    #     end!
     #
-    # To:
+    # To (inside the `!`'s own expansion):
     #
     #     group do |g|
-    #       x = g.spawn { read(a) }
-    #       y = g.spawn { read(b) }
-    #       g.join
-    #       %v1 = x.value
-    #       if %v1.is_a?(::Error)
+    #       %h1 = g.spawn { read(a) }
+    #       x = %h1
+    #       %h2 = g.spawn { read(b) }
+    #       y = %h2
+    #       %v1 = %h1.value
+    #       %v2 = %h2.value
+    #       %first = g.first_failure
+    #       if %v1.is_a?(::Error) && %h1.fiber.object_id == %first
     #         %v1
+    #       elsif %v2.is_a?(::Error) && %h2.fiber.object_id == %first
+    #         %v2
+    #       elsif %v1.is_a?(::Error)
+    #         %v1
+    #       elsif %v2.is_a?(::Error)
+    #         %v2
     #       else
-    #         %v2 = y.value
-    #         if %v2.is_a?(::Error)
-    #           %v2
-    #         else
-    #           {%v1, %v2}
-    #         end
+    #         {%v1, %v2}
     #       end
     #     end
     #
@@ -177,17 +245,40 @@ module Iyi
     # ordinary machinery: the tuple's elements are non-error by the same
     # `is_a?(::Error)` narrowing `!` expands to, and the error side is the
     # union of what the branches answer. The method's deferred join stays
-    # — a `return` between two spawns still joins — and finds nothing live
-    # after the appended one, which costs a comparison.
+    # — a `return` between two spawns still joins.
+    #
+    # Under `end!` the values are read before any join: a read waits for
+    # its task, and reading a panicked task's value is what catches the
+    # panic as `Panicked` (III.1.4), so the deferred join finds nothing
+    # owed. With a `g.join` first, the join re-raised the panic nobody had
+    # read yet and the program died where the group was to answer
+    # `Panicked`. A group without `!` joins first, as before: nothing
+    # reads its answer for it, and a panic it swallowed into a discarded
+    # tuple would be a bug nobody heard of.
+    #
+    # The error that leaves is the one that stopped the group: the first
+    # failure cancels its siblings, and a sibling cancelled earlier in the
+    # text answers `Cancelled`, which the slots in text order answered in
+    # its place. The runtime keeps the failing task's object_id
+    # (`IyiGroup#first_failure`), and its slot is asked first.
+    #
+    # Each slot reads a handle of its own (`%h1`, `%h2`), never the author's
+    # variable: one name reused for two spawns (`t = g.spawn {..}` twice)
+    # read the last task twice, answering {2, 2} for {1, 2} and losing the
+    # first task's error.
     #
     # What qualifies is what the section says: the block's parameter is used
-    # as the receiver of direct `spawn` statements and *nowhere else*. A
-    # spawn in a loop, an `if`, or a `g` that escapes falls back quietly to
-    # the general form, whose group is its block's last expression and whose
-    # handles answer through `task.value`; a `!` demanding the typed form of
-    # a group that cannot have one is refused by `!`'s own degenerate-union
-    # check, which names the type it found.
-    private def expand_iyi_group(node : Call) : ASTNode?
+    # as the receiver of direct `spawn` statements and *nowhere else*, and
+    # the block ends in one. A spawn in a loop, an `if`, a `g` that escapes,
+    # or macro code anywhere in the block (whose expansion may spawn) falls
+    # back quietly to the general form, whose group is its block's last
+    # expression and whose handles answer through `task.value`; a `!`
+    # demanding the typed form of a group that cannot have one is refused
+    # by `!`'s own degenerate-union check, which names the type it found.
+    # A block whose last expression is its own — `"sum is #{a.value}"`
+    # after two spawns — answers that: the expansion threw it away and
+    # answered the tuple.
+    private def expand_iyi_group(node : Call, propagated : Bool) : ASTNode?
       block = node.block
       return nil unless block
       group_param = block.args.first?
@@ -195,6 +286,8 @@ module Iyi
 
       body = block.body
       statements = body.is_a?(Expressions) ? body.expressions.dup : [body] of ASTNode
+      last = statements.last?
+      return nil unless last && iyi_direct_spawn(last, group_param.name)
 
       handles = [] of ASTNode
       rewritten = [] of ASTNode
@@ -202,13 +295,12 @@ module Iyi
       statements.each do |statement|
         spawn_call = iyi_direct_spawn(statement, group_param.name)
         if spawn_call.is_a?(Call)
+          # `%h1 = g.spawn {..}`, and the author's `x = %h1` after it.
+          handle = Var.new(program.new_temp_var_name).at(statement)
+          handles << handle
+          rewritten << Assign.new(handle.clone, spawn_call).at(statement)
           if statement.is_a?(Assign) && !statement.target.is_a?(Underscore)
-            handles << statement.target
-            rewritten << statement
-          else
-            handle = Var.new(program.new_temp_var_name).at(statement)
-            handles << handle
-            rewritten << Assign.new(handle.clone, spawn_call).at(statement)
+            rewritten << Assign.new(statement.target, handle.clone).at(statement)
           end
         else
           # Any other use of the group parameter anywhere in the statement
@@ -217,9 +309,9 @@ module Iyi
           rewritten << statement
         end
       end
-      return nil if handles.empty?
 
-      rewritten << Call.new(Var.new(group_param.name).at(node), "join").at(node)
+      group_var = Var.new(group_param.name).at(node)
+      rewritten << Call.new(group_var.clone, "join").at(node) unless propagated
 
       values = [] of ASTNode
       handles.each do |handle|
@@ -232,6 +324,17 @@ module Iyi
       values.reverse_each do |value|
         is_error = IsA.new(value.clone, Path.global("Error").at(node)).at(node)
         extraction = If.new(is_error, value.clone, extraction).at(node)
+      end
+
+      if handles.size > 1
+        first = Var.new(program.new_temp_var_name).at(node)
+        rewritten << Assign.new(first.clone, Call.new(group_var.clone, "first_failure").at(node)).at(node)
+        handles.zip(values).reverse_each do |handle, value|
+          is_error = IsA.new(value.clone, Path.global("Error").at(node)).at(node)
+          fiber_id = Call.new(Call.new(handle.clone, "fiber").at(node), "object_id").at(node)
+          stopped_the_group = Call.new(fiber_id, "==", first.clone).at(node)
+          extraction = If.new(And.new(is_error, stopped_the_group).at(node), value.clone, extraction).at(node)
+        end
       end
       rewritten << extraction
 
@@ -256,6 +359,10 @@ module Iyi
       target
     end
 
+    # Whether *node* uses the variable *name*, or holds macro code: what a
+    # `{% for %}` writes is text until the main visitor expands it, so
+    # `y{{i}} = g.spawn {..}` in one was invisible here, and the tuple came
+    # out one slot short with those tasks' errors dropped.
     private def iyi_uses_var?(node : ASTNode, name : String) : Bool
       scan = IyiVarScan.new(name)
       node.accept(scan)
@@ -274,6 +381,11 @@ module Iyi
         true
       end
 
+      def visit(node : MacroIf | MacroFor | MacroExpression | MacroVerbatim | MacroLiteral)
+        @found = true
+        false
+      end
+
       def visit(node : ASTNode)
         true
       end
@@ -284,7 +396,7 @@ module Iyi
       # the *typed* form applies is this file's question, and a `nil` answer
       # is the method call standing as written.
       if node.iyi_group?
-        expanded = expand_iyi_group(node)
+        expanded = expand_iyi_group(node, node.same?(@propagated_group))
         return expanded.transform(self) if expanded
       end
 
@@ -431,18 +543,28 @@ module Iyi
     # `::Error` rather than `Error`, so that a module of its own with that name
     # cannot change what the operator means.
     def transform(node : Propagate)
+      if (group = node.exp).is_a?(Call) && group.iyi_group?
+        @propagated_group = group
+      end
       exp = node.exp.transform(self)
       temp_var = program.new_temp_var
 
       assign = Assign.new(temp_var.clone, exp).at(node)
       check = IsA.new(temp_var.clone, Path.global(["Error"]).at(node)).at(node)
-      check.error_construct = "!"
+      # A `group do ... end!` that kept the general form answers its block's
+      # last expression, and the refusal of a `!` with nothing to propagate
+      # says so (`MainVisitor#check_error_union_operand`).
+      check.error_construct = exp.is_a?(Call) && exp.iyi_group? ? "end!" : "!"
       returned = Return.new(temp_var.clone).at(node)
       returned.from_propagate = true
       propagate = If.new(check, returned).at(node)
 
       Expressions.new([assign, propagate, temp_var.clone] of ASTNode).at(node)
     end
+
+    # iyi: the `group do ... end!` whose `!` is being expanded: the typed
+    # group reads its values before the join when its answer is propagated.
+    @propagated_group : Call?
 
     # iyi: `read_port().or(8080)` and `read_port().or_panic` (SPEC.md III.1.3).
     #

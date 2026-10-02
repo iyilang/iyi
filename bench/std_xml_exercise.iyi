@@ -14,6 +14,9 @@
 #     astral characters, and the refusals `unescape` shares with the parser.
 #   * Every refusal in the module header, each with its sentence, its line and
 #     its column, through `parse?` and `Parser#error`.
+#   * The internal subset's element, attribute-list and notation
+#     declarations are read by their productions: defaults are given,
+#     values of a type other than CDATA normalised, malformed ones refused.
 #   * A billion-laughs document and a too-deep one are refused, and an
 #     external entity is never read.
 #   * A differential block of documents, serialized here for
@@ -90,6 +93,7 @@ assert_equal("urn:price", menu.attributes[0].namespace_uri, "attribute namespace
 assert_equal("", menu.attributes[1].namespace_uri, "unprefixed attribute has no namespace")
 assert_equal("http://www.w3.org/XML/1998/namespace", menu.attributes[2].namespace_uri, "xml: prefix is bound")
 assert_equal("fr", menu["xml:lang"], "xml:lang")
+assert_equal("a > b", menu["note"]? || "", "the DTD's attribute default is given to the element")
 
 items = menu.find_all("item")
 assert_true(items.size == 2, "two items")
@@ -178,6 +182,15 @@ assert_equal("<a><![CDATA[x]]>&#13;<![CDATA[y]]></a>", carriage.to_xml, "a carri
 assert_equal("x\ry", Std::Xml.parse(carriage.to_xml).root.text, "and reads back as a carriage return")
 ascii = Std::Xml.parse("<?xml version=\"1.0\" encoding=\"US-ASCII\"?><a xmlns:p=\"urn:&#xE9;\" b=\"&#233;\">&#x1F600;</a>")
 assert_equal("<?xml version=\"1.0\" encoding=\"US-ASCII\"?>\n<a xmlns:p=\"urn:&#233;\" b=\"&#233;\">&#128512;</a>\n", ascii.to_xml, "a US-ASCII document writes every other character as a reference")
+# CDATA has no escape either, so in a US-ASCII document a character past
+# U+007F in it is written as a reference between two sections, as a
+# carriage return is; it was written raw, as UTF-8, and the parser refused
+# the document it had written ("byte 0xC3 is not US-ASCII").
+ascii_cdata = Std::Xml.parse("<r><![CDATA[caf\u{E9} \u{1F600}\u{E9}]]></r>")
+ascii_cdata.encoding = "US-ASCII"
+assert_equal("<?xml version=\"1.0\" encoding=\"US-ASCII\"?>\n<r><![CDATA[caf]]>&#233;<![CDATA[ ]]>&#128512;&#233;<![CDATA[]]></r>\n", ascii_cdata.to_xml, "a non-ASCII character in the CDATA of a US-ASCII document is written as a reference between two sections")
+assert_equal("caf\u{E9} \u{1F600}\u{E9}", Std::Xml.parse(ascii_cdata.to_xml).root.text, "and reads back as the one run")
+puts "  a US-ASCII document writes a character past U+007F in CDATA as a reference between two sections"
 assert_true(Std::Xml.parse("<a xmlns:xml=\"http://www.w3.org/XML/1998/namespace\" xmlns:x=\"u\" xmlns:y=\"v\" x:k=\"1\" y:k=\"2\"/>").root.attributes.size == 2, "the xml prefix may be declared to its own uri; one local name in two namespaces is two attributes")
 # A name that is not an XML name, and a character XML cannot hold, were
 # written as they were: `set_attribute("k=\"1\" j", "2")` wrote two
@@ -337,8 +350,40 @@ refused("<p:\u{B7}a xmlns:p=\"u\"/>", "'p:\u{B7}a' is not a qualified name: a na
 assert_equal("\u{E9}\u{B7}\u{300}", Std::Xml.parse("<\u{E9}\u{B7}\u{300}/>").root.name, "U+00B7 and a combining mark continue a name")
 refused("<!DOCTYPEa><a/>", "expected whitespace after <!DOCTYPE at line 1, column 10")
 refused("<!DOCTYPE a [<!ENTITY e \"&a]b;\">]><a/>", "'&a]b;' is not a reference: 'a]b' is not a name at line 1, column 26")
-refused("<!DOCTYPE a [<!ELEMENT a ANY\n<!ENTITY e \"x\">]><a/>", "unclosed declaration in the DOCTYPE internal subset at line 1, column 14")
+refused("<!DOCTYPE a [<!ELEMENT a ANY\n<!ENTITY e \"x\">]><a/>", "expected '>' to end the <!ELEMENT a> declaration at line 2, column 1")
 refused("<!DOCTYPE a [<!ATTLIST a k CDATA \"\u{1}\">]><a/>", "control character U+0001 is not allowed at line 1, column 35")
+# <!ELEMENT>, <!ATTLIST> and <!NOTATION> are read by their productions
+# (XML 1.0, [45]-[60] and [82]); they were skipped to their `>` unread, and
+# the first seven here were taken.
+refused("<!DOCTYPE r [<!ELEMENT>]><r/>", "expected whitespace after <!ELEMENT at line 1, column 23")
+refused("<!DOCTYPE r [<!ATTLIST r a CDATA>]><r/>", "expected #REQUIRED, #IMPLIED, #FIXED or a quoted default for attribute 'a' in the <!ATTLIST r> declaration at line 1, column 33")
+refused("<!DOCTYPE r [<!ELEMENT r (a,|b)>]><r/>", "expected a name or '(' in the content model of element 'r' at line 1, column 29")
+refused("<!DOCTYPE r [<!NOTATION n>]><r/>", "expected whitespace after the notation name 'n' at line 1, column 26")
+refused("<!DOCTYPE r [<!ATTLIST garbage !!! ??? >]><r/>", "expected a name, found '!' at line 1, column 32")
+refused("<!DOCTYPE r [<!ATTLIST r a CDATA \"&undef;\">]><r/>", "undefined entity reference &undef; at line 1, column 35")
+refused("<!DOCTYPE r [<!ATTLIST r a CDATA \"<\">]><r/>", "raw '<' is not allowed in an attribute value at line 1, column 35")
+refused("<!DOCTYPE r [<!ELEMENT r (a,b|c)>]><r/>", "',' and '|' cannot join one group in the content model of element 'r' at line 1, column 30")
+refused("<!DOCTYPE r [<!ELEMENT r (#PCDATA|a)>]><r/>", "expected ')*' to end the content model of element 'r', which mixes #PCDATA and elements at line 1, column 36")
+refused("<!DOCTYPE r [<!ATTLIST r a FOO \"x\">]><r/>", "expected the type of attribute 'a' in the <!ATTLIST r> declaration: CDATA, ID, IDREF, IDREFS, ENTITY, ENTITIES, NMTOKEN, NMTOKENS, NOTATION or a list in parentheses at line 1, column 28")
+refused("<!DOCTYPE r [<!NOTATION n PUBLIC \"a{b\">]><r/>", "'{' is not allowed in a public identifier at line 1, column 36")
+refused("<!DOCTYPE r [<!ELEMENT r %p;>]><r/>", "parameter entity references are not supported at line 1, column 26")
+refused("<!DOCTYPE r [<!ATTLIST r xmlns:p CDATA \"\">]><r/>", "namespace prefix 'p' cannot be bound to an empty uri at line 1, column 45")
+refused("<!DOCTYPE a [<!ELEMENT a ANY", "unclosed <!ELEMENT a> declaration at line 1, column 14")
+declared = Std::Xml.parse("<!DOCTYPE a [<!ELEMENT a ((b|c)+,d?)><!ELEMENT b (#PCDATA|c)*><!NOTATION n PUBLIC \"-//A//B\" \"n.txt\">" +
+                          "<!ATTLIST a x CDATA \"1\" y CDATA #FIXED \"fixed\" z CDATA #IMPLIED t NMTOKENS \" p  q \" e (on|off) 'on'>" +
+                          "<!ATTLIST a x CDATA \"2\" w CDATA \"w\"><!ATTLIST b k NMTOKENS #IMPLIED>]><a x=\"mine\"><b k=\"  u   v&#9;w \"/><a/></a>").root
+assert_equal("mine", declared["x"], "a written attribute keeps its value over the default")
+assert_equal("fixed", declared["y"], "a #FIXED default is given to an element without the attribute")
+assert_true(declared["z"]?.nil?, "an #IMPLIED attribute is not given")
+assert_equal("p q", declared["t"], "a default of a type other than CDATA is trimmed and its spaces collapsed")
+assert_equal("on", declared["e"], "an enumerated attribute's default is given")
+assert_equal("w", declared["w"], "a second declaration of the attributes of one element adds to the first")
+assert_equal("1", declared.element_children[1]["x"], "every element of the name gets the defaults, and the first declaration of an attribute wins")
+assert_equal("u v\tw", declared.element_children[0]["k"], "a written NMTOKENS value is trimmed and its spaces collapsed, but not a tab a reference wrote")
+assert_equal("x,y,t,e,w", declared.element_children[1].attributes.map { |a| a.name }.join(","), "the defaults come in the order they were declared")
+bound = Std::Xml.parse("<!DOCTYPE r [<!ATTLIST r xmlns:p CDATA \"urn:p\" xmlns CDATA \"urn:d\">]><r><p:x/></r>").root
+assert_true(bound.namespace_uri == "urn:d" && bound.children[0].namespace_uri == "urn:p", "a defaulted xmlns and xmlns:p bind before the names are resolved")
+puts "  the internal subset's declarations are read: defaults given, non-CDATA values normalised, malformed ones refused"
 entity_spaces = Std::Xml.parse("<!DOCTYPE a [<!ENTITY e \"x&#9;y&#10;z\"><!ENTITY t \"&#38;#9;\">]><a b=\"&e;\" c=\"&t;\"/>").root
 assert_equal("x y z", entity_spaces["b"], "an entity's tabs and newlines are spaces in an attribute value")
 assert_equal("\t", entity_spaces["c"], "but not a tab a character reference in its replacement text names")
@@ -348,6 +393,16 @@ assert_true(Std::Xml.parse("\u{FEFF}<a/>").root.name == "a", "a byte order mark 
 assert_true(Std::Xml.parse("<a b=\"x\ty\nz\"/>").root["b"] == "x y z", "attribute value normalisation")
 assert_true(Std::Xml.parse("<a b='say \"hi\"'/>").root["b"] == "say \"hi\"", "single-quoted attribute")
 assert_true(Std::Xml.parse("<a>\r\nx\ry</a>").root.text == "\nx\ny", "line ends normalised in text")
+# Names are read by code point (XML 1.0 fifth edition, [4] and [4a]): any
+# byte past 0x7F used to start and continue one, so `<a×b/>` was an element
+# named "a×b" and `<·a/>` one named "·a".
+refused("<a\u{D7}b/>", "expected whitespace before the next attribute of <a> at line 1, column 3")
+refused("<a\u{A0}/>", "expected whitespace before the next attribute of <a> at line 1, column 3")
+refused("<\u{B7}a/>", "expected a name, found U+00B7 at line 1, column 2")
+refused("<a \u{300}b=\"1\"/>", "expected a name, found U+0300 at line 1, column 4")
+refused("<p:\u{B7}a xmlns:p=\"u\"/>", "'p:\u{B7}a' is not a qualified name: a name is 'local' or 'prefix:local' at line 1, column 1")
+refused("<!DOCTYPE a [<!ENTITY e \"&a\u{3000};\">]><a/>", "'&a\u{3000};' is not a reference: 'a\u{3000}' is not a name at line 1, column 26")
+assert_equal("a\u{B7}\u{300}\u{203F}-.1\u{10000}", Std::Xml.parse("<a\u{B7}\u{300}\u{203F}-.1\u{10000}/>").root.name, "U+00B7, a combining mark and U+203F continue a name")
 puts "  every refusal names what was refused, and where"
 
 # ---------------------------------------------------------------------------

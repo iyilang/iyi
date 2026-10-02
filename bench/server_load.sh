@@ -140,14 +140,25 @@ case "$(uname -s)" in
     if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src" "$IYI" build "$WORK/load/server_load.iyi" -o hidden > build-hidden.log 2>&1; then
       cat build-hidden.log; exit 1
     fi
-    timeout 300 ./hidden > hidden.txt 2>&1
-    code=$?
-    if [ "$code" -eq 0 ] || grep -q 'every property held' hidden.txt; then
-      echo "a buffer the collector cannot see survived the run, so the run proves nothing:"
+    # Still timing: a loaded CI runner let the hidden buffer survive two
+    # thousand rounds once (a Linux run of 2026-10-01), where the machines
+    # here never did. Three runs, and the first that dies is the proof; a
+    # buffer the collector cannot see survives all three only if the
+    # check cannot see it either.
+    caught=""
+    for try in 1 2 3; do
+      timeout 300 ./hidden > hidden.txt 2>&1
+      code=$?
+      if [ "$code" -ne 0 ] && ! grep -q 'every property held' hidden.txt; then
+        caught="$try"; break
+      fi
+    done
+    if [ -z "$caught" ]; then
+      echo "a buffer the collector cannot see survived three runs, so the run proves nothing:"
       grep -E '^(collections|answers|stacks|canary) ' hidden.txt | sed 's/^/  /'
       tail -2 hidden.txt; exit 1
     fi
-    printf '  exits %s\n' "$code"
+    printf '  exits %s on run %s\n' "$code" "$caught"
     ;;
 esac
 

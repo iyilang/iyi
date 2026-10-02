@@ -75,7 +75,7 @@ fi
 
 echo
 echo "== every number section reported"
-for phrase in "== abs" "== sign" "== round" "== divmod"; do
+for phrase in "== abs" "== sign" "== round" "== divmod" "== identities"; do
   if ! grep -q "$phrase" "$WORK/number-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1

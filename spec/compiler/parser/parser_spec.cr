@@ -1860,8 +1860,8 @@ module Iyi
     it_parses "Foo::BAR : Int64 = 1", TypeDeclaration.new(Path.new(["Foo", "BAR"]), "Int64".path, 1.int32)
     it_parses "::FOO : Int64 = 1", TypeDeclaration.new("FOO".path(global: true), "Int64".path, 1.int32)
     it_parses "::Foo::BAR : Int64 = 1", TypeDeclaration.new(Path.new(["Foo", "BAR"], global: true), "Int64".path, 1.int32)
-    assert_syntax_warning "FOO: Int64 = 1", "space required before colon in type declaration (run `crystal tool format` to fix this)"
-    assert_syntax_warning "::FOO: Int64 = 1", "space required before colon in type declaration (run `crystal tool format` to fix this)"
+    assert_syntax_warning "FOO: Int64 = 1", "space required before colon in type declaration (run `iyi fmt` to fix this)"
+    assert_syntax_warning "::FOO: Int64 = 1", "space required before colon in type declaration (run `iyi fmt` to fix this)"
     assert_syntax_error "FOO : Int64", "expected '=' for constant type declaration"
     assert_syntax_error "::FOO : Int64", "expected '=' for constant type declaration"
 
@@ -4298,6 +4298,10 @@ end").as(ClassDef)
       # the first, and the second had no artifact at all.
       assert_syntax_error "module app/one\nmodule app/two", "a file declares one module"
       assert_syntax_error "module app/one\n\nputs 1\n\nmodule app/two", "a file declares one module"
+      # A header after code is the file's only header in the wrong place; it
+      # was told the file "already declares `no module`".
+      assert_syntax_error "import app/lib\nmodule app/two", "the `module` header comes first in a file: `module app/two` goes above every `import`"
+      assert_syntax_error "puts 1\nmodule app/two", "the `module` header comes first in a file"
       # iyi: and the header is the file's first line. Inside a body it was
       # read as a header and dropped; inside a `begin` around the file it was
       # taken for the file's and the `begin` went missing.
@@ -4572,6 +4576,18 @@ end").as(ClassDef)
         end
       end
 
+      # `.or` and `.or_panic` are the recovery the compiler knows by name at
+      # the call site, so a method of either name could never be called:
+      # `def or` compiled and every call to it was refused as a recovery.
+      it "rejects a def named or or or_panic" do
+        {"def or(x)\nend", "def self.or_panic\nend"}.each do |source|
+          expect_raises(SyntaxException, "is a reserved name in iyi") do
+            parse(source, filename: "x.iyi")
+          end
+        end
+        parse("def or(x)\nend", filename: "x.cr")
+      end
+
       # A bodiless `def` in a trait, with another `def` under it: the
       # requirement wanted `abstract`, and the nested-def report says so.
       it "explains a bodiless def in a trait" do
@@ -4588,6 +4604,10 @@ end").as(ClassDef)
           expect_raises(SyntaxException, "`sort_by!` is not a method here") do
             parse(source, filename: "x.iyi")
           end
+        end
+        # An argument list after the `!` was told it "takes no block".
+        expect_raises(SyntaxException, "`nomacro!` is not a method here: `!` propagates an error, and takes no arguments") do
+          parse("nomacro!(1)", filename: "x.iyi")
         end
       end
 

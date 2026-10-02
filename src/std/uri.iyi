@@ -215,8 +215,6 @@ pub class URI
   @query : String?
   @fragment : String?
   property scheme : String?
-  property user : String?
-  property password : String?
   property port : Int32?
   property path : String
   property query : String?
@@ -236,8 +234,8 @@ pub class URI
     @port = port
     @path = path
     @query = query
-    @user = user
-    @password = password
+    self.user = user
+    self.password = password
     @fragment = fragment
     self.host = host
   end
@@ -266,10 +264,40 @@ pub class URI
     end
   end
 
-  def userinfo : String?
+  # The user and the password are kept as the reference wrote them, escapes
+  # and all, and written back so: decoded by `parse` and re-encoded by
+  # `authority`, `u%3Btype%3Da@h` came back `u;type=a@h`, which RFC 3986
+  # section 2.2 counts a different URI, and `é` came back `%C3%A9`. The
+  # getters decode; the setters and the constructor encode what they are
+  # given with `encode_userinfo`.
+  def user : String?
     u = @user
-    return nil unless u
+    u ? URI.decode(u) : nil
+  end
+
+  def user=(user : String?) : Nil
+    @user = user ? URI.encode_userinfo(user) : nil
+  end
+
+  def password : String?
     p = @password
+    p ? URI.decode(p) : nil
+  end
+
+  def password=(password : String?) : Nil
+    @password = password ? URI.encode_userinfo(password) : nil
+  end
+
+  # The user and the password as written, taken as they are.
+  protected def written_userinfo(user : String?, password : String?) : Nil
+    @user = user
+    @password = password
+  end
+
+  def userinfo : String?
+    u = user
+    return nil unless u
+    p = password
     p ? (u + ":" + p) : u
   end
 
@@ -277,15 +305,14 @@ pub class URI
     if info
       colon = info.index(':')
       if colon
-        @user = info[0, colon]
-        @password = info[colon + 1, info.bytesize - colon - 1]
+        self.user = info[0, colon]
+        self.password = info[colon + 1, info.bytesize - colon - 1]
       else
-        @user = info
-        @password = nil
+        self.user = info
+        self.password = nil
       end
     else
-      @user = nil
-      @password = nil
+      written_userinfo(nil, nil)
     end
   end
 
@@ -309,21 +336,16 @@ pub class URI
     @query = params.empty? ? nil : params.to_s
   end
 
-  # `userinfo@host:port`, the userinfo percent-encoded (a space is `%20`)
-  # and the host written as stored. The sub-delims userinfo may hold stay
-  # as written: encoded, `user;type=a` came back `user%3Btype%3Da`, and
-  # RFC 3986 section 2.2 counts that a different URI.
+  # `userinfo@host:port`, the userinfo and the host written as stored.
   def authority : String?
     return nil unless @host || @user || @port
 
     parts = [] of String
     if u = @user
-      u_enc = URI.encode_userinfo(u)
       if p = @password
-        p_enc = URI.encode_userinfo(p)
-        parts << (u_enc + ":" + p_enc + "@")
+        parts << (u + ":" + p + "@")
       else
-        parts << (u_enc + "@")
+        parts << (u + "@")
       end
     end
 
@@ -377,6 +399,14 @@ pub class URI
     parts.join("")
   end
 
+  # Hashing follows `==` (below), the eight parts mixed as a tuple's members
+  # are. Without it every URI hashed to its type, so `http://a/` and
+  # `https://b:8/x?y#z` hashed alike and a table of 16,000 URI keys took
+  # 11.3 s to fill where the same texts as strings took 4 ms.
+  def hash : Int32
+    {@scheme, @host, @port, @path, @query, @user, @password, @fragment}.hash
+  end
+
   private def colon_in_first_segment? : Bool
     at = 0
     while at < @path.bytesize
@@ -389,26 +419,28 @@ pub class URI
   end
 
   def dup : URI
-    URI.new(
+    copy = URI.new(
       scheme: @scheme,
       host: @host,
       port: @port,
       path: @path,
       query: @query,
-      user: @user,
-      password: @password,
       fragment: @fragment
     )
+    copy.written_userinfo(@user, @password)
+    copy
   end
 
+  # The userinfo is compared as written, as the path is: `u%3Btype%3Da` and
+  # `u;type=a` are two URIs (RFC 3986 section 2.2).
   def ==(other : URI) : Bool
     @scheme == other.scheme &&
       @host == other.host &&
       @port == other.port &&
       @path == other.path &&
       @query == other.query &&
-      @user == other.user &&
-      @password == other.password &&
+      @user == other.@user &&
+      @password == other.@password &&
       @fragment == other.fragment
   end
 
@@ -701,16 +733,11 @@ pub class URI
           user = uinfo[0, colon_ui]
           password = uinfo[colon_ui + 1, uinfo.bytesize - colon_ui - 1]
         end
-        # Userinfo is percent-decoded here and re-encoded by `authority`;
-        # a '+' in it is a '+', not a space.
-        decoded_user = URI.decode?(user)
-        return "malformed percent escape in userinfo #{uinfo.inspect} in #{s.inspect}" unless decoded_user
-        uri.user = decoded_user
-        if password
-          decoded_password = URI.decode?(password)
-          return "malformed percent escape in userinfo #{uinfo.inspect} in #{s.inspect}" unless decoded_password
-          uri.password = decoded_password
-        end
+        # Kept as written, escapes and all; the getters decode. A '+' in
+        # it is a '+', not a space.
+        return "malformed percent escape in userinfo #{uinfo.inspect} in #{s.inspect}" unless URI.decode?(user)
+        return "malformed percent escape in userinfo #{uinfo.inspect} in #{s.inspect}" if password && URI.decode?(password).nil?
+        uri.written_userinfo(user, password)
         host_port = auth_str[at_idx + 1, auth_str.bytesize - at_idx - 1]
       end
 
@@ -785,62 +812,65 @@ pub class URI
   # RFC 3986 Section 5.2.4: Remove Dot Segments
   # =========================================================================
 
+  # Linear in the path: the input buffer of section 5.2.4 is a cursor into
+  # *path*, and each step moves it past what it took. Each step sliced the
+  # rest of the path into a new string, so removing the dot segments took
+  # time in the square of the path's length: 132 KB of `/a/./b/../c` took
+  # 12.8 s in a release build, where splitting it at its slashes took 3 ms.
   def self.remove_dot_segments(path : String) : String
-    return "" if path.empty?
-
-    input = path
+    raw = path.to_unsafe
+    len = path.bytesize
     output_segments = [] of String
-
-    while !input.empty?
+    i = 0
+    while i < len
+      rest = len - i
+      c0 = raw[i]
+      c1 = rest > 1 ? raw[i + 1] : 0_u8
+      c2 = rest > 2 ? raw[i + 2] : 0_u8
+      c3 = rest > 3 ? raw[i + 3] : 0_u8
       # A. If the input buffer begins with a prefix of "../" or "./",
       #    then remove that prefix from the input buffer; otherwise,
-      if input.starts_with?("../")
-        input = input[3, input.bytesize - 3]
-      elsif input.starts_with?("./")
-        input = input[2, input.bytesize - 2]
+      if c0 == 46_u8 && c1 == 46_u8 && c2 == 47_u8
+        i = i + 3
+      elsif c0 == 46_u8 && c1 == 47_u8
+        i = i + 2
         # B. if the input buffer begins with a prefix of "/./" or "/.",
         #    where "." is a complete path segment, then replace that
         #    prefix with "/" in the input buffer; otherwise,
-      elsif input.starts_with?("/./")
-        input = "/" + input[3, input.bytesize - 3]
-      elsif input == "/."
-        input = "/"
+      elsif c0 == 47_u8 && c1 == 46_u8 && c2 == 47_u8
+        i = i + 2
+      elsif c0 == 47_u8 && c1 == 46_u8 && rest == 2
+        output_segments << "/"
+        i = len
         # C. if the input buffer begins with a prefix of "/../" or "/..",
         #    where ".." is a complete path segment, then replace that
         #    prefix with "/" in the input buffer and remove the last
         #    segment and its preceding "/" (if any) from the output buffer;
-      elsif input.starts_with?("/../")
-        input = "/" + input[4, input.bytesize - 4]
+      elsif c0 == 47_u8 && c1 == 46_u8 && c2 == 46_u8 && c3 == 47_u8
         output_segments.pop unless output_segments.empty?
-      elsif input == "/.."
-        input = "/"
+        i = i + 3
+      elsif c0 == 47_u8 && c1 == 46_u8 && c2 == 46_u8 && rest == 3
         output_segments.pop unless output_segments.empty?
+        output_segments << "/"
+        i = len
         # D. if the input buffer consists only of "." or "..", then remove
         #    that from the input buffer; otherwise,
-      elsif input == "." || input == ".."
-        input = ""
+      elsif c0 == 46_u8 && (rest == 1 || (rest == 2 && c1 == 46_u8))
+        i = len
         # E. move the first path segment in the input buffer to the end of
         #    the output buffer, including the initial "/" character (if any)
         #    and any subsequent characters up to, but not including, the next
         #    "/" character or the end of the input buffer.
       else
-        slash_idx = -1
-        if input.starts_with?('/')
-          # search for next '/' after index 0
-          next_slash = input.index('/', 1)
-          slash_idx = next_slash ? next_slash : input.bytesize
-        else
-          next_slash = input.index('/')
-          slash_idx = next_slash ? next_slash : input.bytesize
+        j = c0 == 47_u8 ? i + 1 : i
+        while j < len && raw[j] != 47_u8
+          j = j + 1
         end
-        segment = input[0, slash_idx]
-        output_segments << segment
-        input = input[slash_idx, input.bytesize - slash_idx]
+        output_segments << path[i, j - i]
+        i = j
       end
     end
-
-    res = output_segments.join("")
-    res
+    output_segments.join("")
   end
 
   # =========================================================================
@@ -858,17 +888,15 @@ pub class URI
       t.scheme = r.scheme
       t.host = r.host
       t.port = r.port
-      t.user = r.user
-      t.password = r.password
+      t.written_userinfo(r.@user, r.@password)
       t.path = URI.remove_dot_segments(r.path)
       t.query = r.query
     else
       # R.scheme is undefined
-      if r.host || r.user || r.port
+      if r.host || r.@user || r.port
         t.host = r.host
         t.port = r.port
-        t.user = r.user
-        t.password = r.password
+        t.written_userinfo(r.@user, r.@password)
         t.path = URI.remove_dot_segments(r.path)
         t.query = r.query
       else
@@ -891,8 +919,7 @@ pub class URI
         end
         t.host = @host
         t.port = @port
-        t.user = @user
-        t.password = @password
+        t.written_userinfo(@user, @password)
       end
       t.scheme = @scheme
     end

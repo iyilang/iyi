@@ -30,8 +30,7 @@
 # `false` is the correct answer, and it was measured doing exactly that to
 # eleven exercises. The fix belongs in overload resolution, where the
 # compiler knows both types; until then `UInt16` being in the cross is what
-# the library's own callers needed, and this paragraph is the rest of the
-# truth.
+# the library's own callers needed, and this paragraph is the rest of the truth.
 class Object
   @[Primitive(:class)]
   def class
@@ -83,13 +82,11 @@ end
 
 # `true` and `false`.
 struct Bool
-  @[Primitive(:binary)]
-  def ==(other : Bool) : Bool
-  end
-
-  @[Primitive(:binary)]
-  def !=(other : Bool) : Bool
-  end
+  {% for op in %w(== !=) %}
+    @[Primitive(:binary)]
+    def {{ op.id }}(other : Bool) : Bool
+    end
+  {% end %}
 end
 
 # One character - a byte, in this prelude, which reads its strings as ASCII.
@@ -118,13 +115,11 @@ end
 
 # A name that compares by identity: `:ok`, `:err`.
 struct Symbol
-  @[Primitive(:binary)]
-  def ==(other : Symbol) : Bool
-  end
-
-  @[Primitive(:binary)]
-  def !=(other : Symbol) : Bool
-  end
+  {% for op in %w(== !=) %}
+    @[Primitive(:binary)]
+    def {{ op.id }}(other : Symbol) : Bool
+    end
+  {% end %}
 
   @[Primitive(:convert)]
   def to_i : Int32
@@ -181,8 +176,7 @@ end
 # code generator has: a call on a generic instance's class passes that
 # class as a first argument (`Pointer(T).malloc` reads its size from
 # `call_args[1]`), and the atomic instructions take their operands from
-# the front. Crystal's `Atomic::Ops` is the same shape for the same
-# reason.
+# the front. Crystal's `Atomic::Ops` is the same shape for the same reason.
 struct IyiAtomic
   @[Primitive(:load_atomic)]
   def self.load(pointer : Pointer(T), ordering : Symbol, volatile : Bool) : T forall T
@@ -213,7 +207,6 @@ end
 
 {% begin %}
   {% ints = %w(Int32 Int64 UInt8 UInt64) %}
-  {% floats = %w(Float64) %}
   {% nums = %w(Int32 Int64 UInt8 UInt64 Float64) %}
   # `UInt16` compares and converts, and does not add. A wide character is
   # the one value of that width this prelude holds — Windows' every path,
@@ -234,15 +227,15 @@ end
       # The checked form raises on overflow — which in this prelude is a panic,
       # since `__crystal_raise_overflow` prints and exits (SPEC.md III.1.4).
       #
-      # The unchecked form is the same instruction without the check, and it
-      # is spelled the way `unsafe_chr` below is: `unsafe_to_u8`. Crystal
-      # spells it `to_u8!`, which is not a name in iyi (SPEC.md III.1.7) —
-      # those declarations were accepted only because a macro expansion was
+      # The unchecked form is the conversion without the check, and a float
+      # past the range saturates (NaN is 0), alike in every build. It is
+      # spelled the way `unsafe_chr` below is: `unsafe_to_u8`. Crystal spells
+      # it `to_u8!`, which is not a name in iyi (SPEC.md III.1.7) — those
+      # declarations were accepted only because a macro expansion was
       # reparsed by the other language's rules, and no iyi source could call
-      # one, because `x.to_u8!` is `x.to_u8` with its error propagated. The
-      # callers wanted the instruction: `memset`'s `value.to_u8!` is C's
-      # "converted to unsigned char", and the checked form panics on 0x1ff
-      # where C writes 0xff.
+      # one: `x.to_u8!` is `x.to_u8` with its error propagated. The callers
+      # wanted the instruction: `memset`'s `value.to_u8!` is C's "converted to
+      # unsigned char", and the checked form panics on 0x1ff where C writes 0xff.
       {% for name, type in {
                              to_i:   Int32,
                              to_f:   Float64,
@@ -274,12 +267,23 @@ end
   # A wide character against a double is left out for the same reason and
   # a better one: `std/int` defines that comparison by converting, because
   # every value narrower than a double *is* a double exactly, and an
-  # instruction that compares the two directly is not what it means.
+  # instruction that compares the two directly is not what it means. A 64-bit
+  # one is not, and the instruction rounded it first: `9007199254740993_i64 ==
+  # 9007199254740992.0` was true. Split at 2048, its high part is a double
+  # exactly, and the difference below keeps the values' sign.
   {% for num in comparables %}
     struct {{ num.id }}
       {% for num2 in comparables %}
-        {% unless (num == "UInt16" && num2 == "Float64") || (num == "Float64" && num2 == "UInt16") %}
-          {% for op in %w(== != < <= > >=) %}
+        {% for op in %w(== != < <= > >=) %}
+          {% if num2 == "Float64" && %w(Int64 UInt64).includes?(num) %}
+            def {{ op.id }}(other : Float64) : Bool
+              (self - unsafe_mod(2048)).to_f64 - other + unsafe_mod(2048).to_f64 {{ op.id }} 0.0
+            end
+          {% elsif num == "Float64" && %w(Int64 UInt64).includes?(num2) %}
+            def {{ op.id }}(other : {{ num2.id }}) : Bool
+              other {{ op.tr("<>", "><").id }} self
+            end
+          {% elsif !((num == "UInt16" && num2 == "Float64") || (num == "Float64" && num2 == "UInt16")) %}
             @[::Primitive(:binary)]
             def {{ op.id }}(other : {{ num2.id }}) : Bool
             end
@@ -314,33 +318,29 @@ end
         {% end %}
       {% end %}
 
-      {% for float in floats %}
-        {% for op in binaries %}
-          @[::Primitive(:binary)]
-          def {{ op.id }}(other : {{ float.id }}) : {{ float.id }}
-          end
-        {% end %}
+      {% for op in binaries %}
+        @[::Primitive(:binary)]
+        def {{ op.id }}(other : Float64) : Float64
+        end
       {% end %}
     end
   {% end %}
 
-  {% for float in floats %}
-    struct {{ float.id }}
-      {% for num in nums %}
-        {% for op in binaries %}
-          @[::Primitive(:binary)]
-          def {{ op.id }}(other : {{ num.id }}) : self
-          end
-        {% end %}
-
+  struct Float64
+    {% for num in nums %}
+      {% for op in binaries %}
         @[::Primitive(:binary)]
-        def fdiv(other : {{ num.id }}) : self
+        def {{ op.id }}(other : {{ num.id }}) : self
         end
       {% end %}
 
       @[::Primitive(:binary)]
-      def /(other : {{ float.id }}) : {{ float.id }}
+      def fdiv(other : {{ num.id }}) : self
       end
+    {% end %}
+
+    @[::Primitive(:binary)]
+    def /(other : Float64) : Float64
     end
-  {% end %}
+  end
 {% end %}

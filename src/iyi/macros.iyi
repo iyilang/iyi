@@ -4,7 +4,8 @@
 # `getter` is here because every sample declares a field with it, and a field
 # reader written by hand five times in a row is what a macro is for. The
 # variants Crystal's `object.cr` carries — lazy, nilable, `?`, raise-on-nil —
-# are not here, because no sample writes one.
+# are not here, because no sample writes one. An untyped default, `getter n =
+# 3`, is the field's initialiser `@n = 3`; it expanded to `def n = 3`.
 class Object
   macro getter(*names)
     {% for name in names %}
@@ -15,6 +16,7 @@ class Object
           @{{ name.var.id }}
         end
       {% else %}
+        {% if name.is_a?(Assign) %} @{{ name }} {% name = name.target %} {% end %}
         def {{ name.id }}
           @{{ name.id }}
         end
@@ -55,10 +57,8 @@ class Object
           @{{ name.var.id }} = value
         end
       {% else %}
-        def {{ name.id }}
-          @{{ name.id }}
-        end
-
+        getter {{ name }}
+        {% name = name.target if name.is_a?(Assign) %}
         def {{ name.id }}=(value)
           @{{ name.id }} = value
         end

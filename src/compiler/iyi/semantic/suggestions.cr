@@ -12,15 +12,21 @@ module Iyi
       (node.global? ? program : self).lookup_similar_path(node.names)
     end
 
+    # iyi: a private type is never reachable by a qualified name (R-2 makes
+    # every type a module leaves unmarked one), so after the first segment
+    # it is no answer. `App::Main::Pont` was told "Did you mean
+    # 'App::Main::Point'?", `iyi fix` wrote it, and the next check said
+    # `App::Main does not export App::Main::Point`.
     def lookup_similar_path(names : Array(String), lookup_in_namespace = true)
       type = self
       names.each_with_index do |name, idx|
         previous_type = type
         type = previous_type.lookup_name(name)
+        break if type && idx > 0 && type.private?
         unless type
           best_match = Levenshtein.find(name.downcase) do |finder|
-            previous_type.remove_alias.types?.try &.each_key do |type_name|
-              finder.test(type_name.downcase, type_name)
+            previous_type.remove_alias.types?.try &.each do |type_name, candidate|
+              finder.test(type_name.downcase, type_name) unless idx > 0 && candidate.private?
             end
           end
 
@@ -40,7 +46,13 @@ module Iyi
       lookup_in_namespace && self != program ? namespace.lookup_similar_path(names) : nil
     end
 
-    def lookup_similar_def(name, args_size, block)
+    # iyi: *outside* is the scope of a call written with a receiver other
+    # than `self`, which reaches no private def and a protected one only from
+    # a scope with access to it (`Call#check_visibility`). Nil, the default,
+    # is a call that can reach them all. `App::Lib.helpr` was told "Did you
+    # mean 'helper'?" about a def the module never marked `pub`, and `iyi
+    # fix` wrote the name the next check refused.
+    def lookup_similar_def(name, args_size, block, outside : Type? = nil)
       return nil unless SuggestableDefName.matches?(name)
 
       if (defs = self.defs)
@@ -56,7 +68,8 @@ module Iyi
                 # answer was never tested - so the sentence became "the prelude
                 # is small by rule" and `iyi fix` had nothing to apply.
                 fits = def_with_metadata.min_size <= args_size && args_size <= def_with_metadata.max_size
-                if fits && def_with_metadata.yields == !!block && def_with_metadata.def.name != name
+                if fits && def_with_metadata.yields == !!block && def_with_metadata.def.name != name &&
+                   iyi_reachable_from?(def_with_metadata.def, outside)
                   finder.test(def_name)
                   if finder.best_match != best_match
                     best_match = finder.best_match
@@ -71,15 +84,24 @@ module Iyi
       end
 
       parents.try &.each do |parent|
-        similar_def = parent.lookup_similar_def(name, args_size, block)
+        similar_def = parent.lookup_similar_def(name, args_size, block, outside)
         return similar_def if similar_def
       end
 
       nil
     end
 
-    def lookup_similar_def_name(name, args_size, block)
-      lookup_similar_def(name, args_size, block).try &.name
+    private def iyi_reachable_from?(a_def : Def, outside : Type?) : Bool
+      return true unless outside
+      case a_def.visibility
+      when .private?   then false
+      when .protected? then outside.instance_type.has_protected_access_to?(a_def.owner.instance_type)
+      else                  true
+      end
+    end
+
+    def lookup_similar_def_name(name, args_size, block, outside : Type? = nil)
+      lookup_similar_def(name, args_size, block, outside).try &.name
     end
 
     def lookup_similar_instance_var_name(name)

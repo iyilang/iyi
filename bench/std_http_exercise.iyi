@@ -163,6 +163,13 @@ req = HTTP.format_request("DELETE", "/items/1", "127.0.0.1")
 assert_true !req.includes?("Content-Length"), "a DELETE with no body has no length"
 puts "  Content-Length follows the method and the body"
 
+# A request's body goes with its length, so a caller's Transfer-Encoding
+# is not sent: written beside `Content-Length: 3` over "abc", unchunked,
+# it hung against the module's own server, which read "abc" as a chunk
+# size and waited for the rest of it.
+assert_str "refused: HTTP: Transfer-Encoding is not sent; a request's body goes with its length", answer { HTTP.format_request("POST", "/", "127.0.0.1", "abc", {"Transfer-Encoding" => "chunked"}) }, "a caller's Transfer-Encoding is not sent"
+puts "  a caller's Transfer-Encoding is refused, the body going with its length"
+
 puts "\n== response"
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nhi!\n")
 assert_true resp.status == 200, "status"
@@ -183,6 +190,14 @@ resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\
 assert_str "abcdefg", resp.body, "a chunked body arrives joined"
 puts "  a chunked body is joined, extensions and trailers dropped"
 
+# Chunked, once and last, is the coding this client decodes (RFC 9112
+# §6.3), and any other is refused: `gzip, chunked` and two `chunked`
+# lines were taken for no coding, and the chunks came back as the body.
+assert_str "refused: HTTP: transfer coding \"gzip\" is not one this client decodes", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n"), "a coding the client cannot undo is refused"
+assert_str "refused: HTTP: Transfer-Encoding \"chunked, chunked\" is chunked twice", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n"), "and so is a body chunked twice"
+assert_str "200 OK Transfer-Encoding=Chunked,; \"hi\"", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked,\r\n\r\n2\r\nhi\r\n0\r\n\r\n"), "chunked in any case, beside an empty element, is chunked"
+puts "  chunked alone is decoded, and a coding this client cannot undo is refused"
+
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n", true)
 assert_str "", resp.body, "a HEAD answer has the headers of a body it does not carry"
 assert_str "99", resp.header("Content-Length") || "", "and the length is still readable"
@@ -194,6 +209,14 @@ assert_str "Not Found", resp.reason, "reason with a space"
 resp = HTTP.parse_response("HTTP/1.0 500\r\n\r\n")
 assert_true resp.status == 500 && resp.reason == "", "a status line with no reason"
 puts "  HEAD, 204 and a status with no reason"
+
+# A line that begins with a blank continues the field above it (obs-fold,
+# RFC 9112 §5.2), and the client unfolds it with one space; the server
+# refuses one, as it may. Read as a field of its own, `HTTP.get` panicked.
+assert_str "200 OK X-A=a b c;Content-Length=2; \"hi\"", client_reads("HTTP/1.1 200 OK\r\nX-A: a\r\n b\r\n\tc\r\nContent-Length: 2\r\n\r\nhi"), "a folded answer is unfolded"
+assert_str "refused: HTTP: header without a colon: \" b\"", client_reads("HTTP/1.1 200 OK\r\n b\r\nContent-Length: 2\r\n\r\nhi"), "a fold under the status line continues no field"
+assert_str "400 header without a colon: \" b\"", server_reads("GET / HTTP/1.1\r\nHost: x\r\nX-A: a\r\n b\r\n\r\n"), "and a folded request is refused"
+puts "  a folded field is unfolded in an answer and refused in a request"
 
 # A body short of its Content-Length is a connection that ended early, as
 # a chunked body cut inside a chunk is: it was a whole 200 with the part
@@ -207,16 +230,23 @@ group do |g|
 end
 assert_str "HTTP: the body ended after 7 of its 100 bytes", short, "a short body is refused"
 puts "  a body short of its Content-Length is refused"
+
+# A length past Int32's is a length too large, not "not a number".
+assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3000000000\r\n\r\n"), "a 3 GB request is too large"
+assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 99999999999999999999999\r\n\r\n"), "and so is one past Int64's"
+assert_str "refused: HTTP: Content-Length \"3000000000\" is past the 2147483647 bytes a string holds", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\nabc"), "a 3 GB answer is too large"
+assert_str "refused: HTTP: the body ended after 3 of its 2147483647 bytes", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 2147483647\r\n\r\nabc"), "Int32's last is a length"
+puts "  a Content-Length past Int32's is refused as too large on both sides"
 puts "\n== messages at the edges"
 # Each refusal below is a raise, caught as its task's value: the panic
 # lines it prints are those refusals.
 # A chunked body that is not one is a request that is not HTTP: a 400.
 # `chunked_end` raised, the connection's task panicked with no answer
 # written, and `serve` panicked with it when its listener closed.
-assert_str "400 chunked body: not a chunk size: \"zz\"", server_reads("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"), "a chunk size that is not hexadecimal is a 400"
-assert_str "400 chunked body: a chunk is not followed by CRLF", server_reads("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcXY"), "a chunk without its CRLF is a 400"
+assert_str "400 chunked body: not a chunk size: \"zz\"", server_reads("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n"), "a chunk size that is not hexadecimal is a 400"
+assert_str "400 chunked body: a chunk is not followed by CRLF", server_reads("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabcXY"), "a chunk without its CRLF is a 400"
 # A chunk size near 2^31: where it ends passed Int32's, and the sum panicked.
-assert_str "more", server_reads("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n7fffffff\r\nab"), "a 2 GB chunk not here yet is waited for"
+assert_str "more", server_reads("POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n7fffffff\r\nab"), "a 2 GB chunk not here yet is waited for"
 assert_str "refused: HTTP: chunked body ends inside a chunk", client_reads("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7fffffff\r\nab"), "a 2 GB chunk cut short is refused as cut"
 puts "  a chunked body that is not one is a 400, and a 2 GB chunk size is a size"
 
@@ -231,24 +261,46 @@ assert_str "refused: HTTP: header X-A contains a control character", answer { Se
 assert_str "refused: HTTP: not a status line: HTTP/1.1 200 O\rK", client_reads("HTTP/1.1 200 O\rK\r\n\r\n"), "a reason with a bare CR is refused"
 puts "  control characters in values, targets and reasons are refused"
 
+# A caller's length is the body's, or a HEAD's or a 304's own: "2" on
+# "hello" was read as "he", and "llo" began the next answer on the
+# connection. The body goes with its length, so a caller's chunked framing
+# went out beside `Content-Length: 5` and was refused by the client.
+assert_str "refused: HTTP: Content-Length \"2\" is not the body's 5 bytes", answer { Server.format_response(Response.new(200, "hello", {"Content-Length" => "2"}), false, false) }, "a length short of the body is not written"
+assert_str "refused: HTTP: content-length \"100\" is not the body's 5 bytes", answer { Server.format_response(Response.new(200, "hello", {"content-length" => "100"}), false, false) }, "a length past the body is not written"
+assert_str "refused: HTTP: Transfer-Encoding is not written; the body goes with its length", answer { Server.format_response(Response.new(200, "hello", {"Transfer-Encoding" => "chunked"}), false, false) }, "a caller's chunked framing is not written"
+assert_str "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: keep-alive\r\n\r\nhello", Server.format_response(Response.new(200, "hello", {"Content-Length" => "5"}), false, false), "the body's own length is written once"
+assert_str "HTTP/1.1 200 OK\r\nContent-Length: 99\r\nConnection: keep-alive\r\n\r\n", Server.format_response(Response.new(200, "", {"Content-Length" => "99"}), true, false), "a HEAD's length is the caller's"
+assert_str "HTTP/1.1 304 Not Modified\r\nContent-Length: 99\r\nConnection: keep-alive\r\n\r\n", Server.format_response(Response.new(304, "", {"Content-Length" => "99"}), false, false), "and a 304's"
+puts "  a caller's Content-Length is the body's except on a HEAD or a 304, and its Transfer-Encoding is refused"
+
 # A field on several lines is one field, its values in order (RFC 9110
 # §5.3). The Hash kept the last line of a name spelled the same and the
 # first of one spelled otherwise: two different lengths were read as
 # whichever came first, and `Accept: a`, `accept: b`, `Accept: c` as "c".
-assert_str "400 Content-Length is not a number: \"3, 10\"", server_reads("POST / HTTP/1.1\r\nContent-Length: 3\r\ncontent-length: 10\r\n\r\nabcdefghij"), "two different lengths are a 400"
-assert_str "POST / ?- Content-Length=3, 3; \"abc\" keep", server_reads("POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc"), "one length said twice is that length"
-assert_str "GET / ?- Accept=a, b, c; \"\" keep", server_reads("GET / HTTP/1.1\r\nAccept: a\r\naccept: b\r\nAccept: c\r\n\r\n"), "a repeated field is its values joined"
+assert_str "400 Content-Length is not a number: \"3, 10\"", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\ncontent-length: 10\r\n\r\nabcdefghij"), "two different lengths are a 400"
+assert_str "POST / ?- Host=a;Content-Length=3, 3; \"abc\" keep", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabc"), "one length said twice is that length"
+assert_str "GET / ?- Host=a;Accept=a, b, c; \"\" keep", server_reads("GET / HTTP/1.1\r\nHost: a\r\nAccept: a\r\naccept: b\r\nAccept: c\r\n\r\n"), "a repeated field is its values joined"
 assert_str "200 OK X-A=1, 2;Content-Length=2; \"hi\"", client_reads("HTTP/1.1 200 OK\r\nX-A: 1\r\nx-a: 2\r\nContent-Length: 2\r\n\r\nhi"), "and so in an answer"
 # A length is digits and nothing else (RFC 9110 §8.6): `+3` was 3.
-assert_str "400 Content-Length is not a number: \"+3\"", server_reads("POST / HTTP/1.1\r\nContent-Length: +3\r\n\r\nabc"), "a signed length is a 400"
+assert_str "400 Content-Length is not a number: \"+3\"", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: +3\r\n\r\nabc"), "a signed length is a 400"
 puts "  a repeated field is one field, and two lengths that differ, or a signed one, are refused"
 
 # Chunks with a length beside them, or in HTTP/1.0, are read by the chunks
 # and the connection closed after (RFC 9112 §6.1, §6.3): a reader ahead of
 # this one may have taken the length.
-assert_str "POST / ?- Content-Length=5;Transfer-Encoding=chunked; \"\" close", server_reads("POST / HTTP/1.1\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"), "chunks and a length close the connection"
+assert_str "POST / ?- Host=a;Content-Length=5;Transfer-Encoding=chunked; \"\" close", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"), "chunks and a length close the connection"
 assert_str "POST / ?- Connection=keep-alive;Transfer-Encoding=chunked; \"\" close", server_reads("POST / HTTP/1.0\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"), "chunks in HTTP/1.0 close the connection"
 puts "  chunks beside a length, or in HTTP/1.0, close the connection"
+
+# `Connection` is a list of options (RFC 9110 §7.6.1), read by `has_token?`:
+# `close, TE` and two `close` lines kept the connection open, answered
+# `keep-alive`.
+assert_str "GET / ?- Host=a;Connection=close, TE; \"\" close", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: close, TE\r\n\r\n"), "close first in the list closes"
+assert_str "GET / ?- Host=a;Connection=TE, Close; \"\" close", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: TE, Close\r\n\r\n"), "close last in the list closes"
+assert_str "GET / ?- Host=a;Connection=close, close; \"\" close", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\nConnection: close\r\n\r\n"), "close said twice closes"
+assert_str "GET / ?- Connection=TE, keep-alive; \"\" keep", server_reads("GET / HTTP/1.0\r\nConnection: TE, keep-alive\r\n\r\n"), "an HTTP/1.0 keep-alive in a list keeps"
+assert_str "GET / ?- Host=a;Connection=TE; \"\" keep", server_reads("GET / HTTP/1.1\r\nHost: a\r\nConnection: TE\r\n\r\n"), "a list without close keeps"
+puts "  Connection is read as a list of options: close anywhere closes"
 
 # A status line is `HTTP/` DIGIT "." DIGIT and three digits from 100.
 assert_str "refused: HTTP: not a status line: HTTP/1.1 +20 OK", client_reads("HTTP/1.1 +20 OK\r\n\r\n"), "a signed status is refused"
@@ -265,8 +317,32 @@ assert_str "HTTP/1.1 304 Not Modified\r\nConnection: close\r\n\r\n", Server.form
 # The absolute form a server must accept (RFC 9112 §3.2.2) is read for
 # its path, as the other library reads it.
 assert_str "GET /a/b ?x=1 Host=example.com; \"\" keep", server_reads("GET http://example.com/a/b?x=1 HTTP/1.1\r\nHost: example.com\r\n\r\n"), "an absolute-form target's path"
-assert_str "OPTIONS / ?-  \"\" keep", server_reads("OPTIONS HTTP://example.com HTTP/1.1\r\n\r\n"), "an absolute-form target with no path is /"
+assert_str "OPTIONS / ?- Host=example.com; \"\" keep", server_reads("OPTIONS HTTP://example.com HTTP/1.1\r\nHost: a\r\n\r\n"), "an absolute-form target with no path is /"
 puts "  a 204 and a 304 carry nothing, and an absolute-form target is read for its path"
+
+# Host (RFC 9112 §3.2): an HTTP/1.1 request names one, no request names
+# two, and what it names is a host, or the answer is 400. The server
+# served a request with none, and handed the block `Host: a` and `Host:
+# b` as "a, b". An absolute-form target's authority is the host (§3.2.2):
+# the block was handed the Host line's.
+assert_str "400 an HTTP/1.1 request without Host", server_reads("GET / HTTP/1.1\r\n\r\n"), "an HTTP/1.1 request names its host"
+assert_str "GET / ?-  \"\" close", server_reads("GET / HTTP/1.0\r\n\r\n"), "an HTTP/1.0 one need not"
+assert_str "400 Host on 2 lines", server_reads("GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"), "a request names one host"
+assert_str "400 not a host: \"a/b\"", server_reads("GET / HTTP/1.1\r\nHost: a/b\r\n\r\n"), "and what it names is a host"
+assert_str "GET / ?- Host=; \"\" keep", server_reads("GET / HTTP/1.1\r\nHost:\r\n\r\n"), "an empty Host is one, for a target with no authority"
+assert_str "GET /echo ?q Host=other:8080; \"\" keep", server_reads("GET http://other:8080/echo?q HTTP/1.1\r\nHost: a\r\n\r\n"), "an absolute-form target's authority is the host"
+assert_str "400 not a host: \"u@h\"", server_reads("GET http://u@h/ HTTP/1.1\r\nHost: a\r\n\r\n"), "and an authority with a user in it is none"
+puts "  a request names one host, an HTTP/1.1 one must, and an absolute-form target's authority is it"
+
+# A status line is written only as the client half reads it: a reason
+# with a CRLF went out as a header of its own, `Set-Cookie: admin=1`, and
+# 2000 as `HTTP/1.1 2000 Server Error`, which `parse_response` refuses.
+assert_str "refused: HTTP: the reason contains a line break", answer { Server.format_response(Response.new(200, "OK\r\nSet-Cookie: admin=1", {} of String => String, "hi"), false, false) }, "a reason with a CRLF is not written"
+assert_str "refused: HTTP: the reason contains a control character", answer { Server.format_response(Response.new(200, "O\u0000K", {} of String => String, ""), false, false) }, "a reason with a NUL is not written"
+assert_str "refused: HTTP: not a status: 2000", answer { Server.format_response(Response.new(2000, "x"), false, false) }, "a four-digit status is not written"
+assert_str "refused: HTTP: not a status: 99", answer { Server.format_response(Response.new(99, "x"), false, false) }, "a status under 100 is not written"
+assert_str "999 Server Error Content-Length=1;Connection=close; \"x\"", client_reads(Server.format_response(Response.new(999, "x"), false, true)), "999 is a status, and read back as written"
+puts "  a status outside 100 to 999, or a reason with a line break, is not written"
 
 puts "\n== over a socket"
 # The server runs on a thread, and a thread's block may capture only what
@@ -333,6 +409,35 @@ server.join
 listener.close
 puts "  get, post, head, put, delete: five verbs, five connections, and what the server read is what each wrote"
 
+# An answer is read as far as its framing says, and no further: read to
+# the server's close, one from a server that held the connection open was
+# waited on until it closed - here the three seconds it waits, each. (A
+# whole answer the server resets after is `bench/std_http_exercise.sh`'s.)
+whole = IyiSocket.listen("127.0.0.1", 0)
+whole_port = whole.local_port
+whole_fd = whole.to_unsafe
+whole_server = IyiThread.start do
+  l = IyiSocket.new(whole_fd)
+  2.times do |i|
+    conn = l.accept.or_panic
+    read_request(conn).or_panic
+    conn.write(i == 0 ? "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi" : "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n").or_panic
+    conn.read_timeout_ms = 3000
+    conn.read(16)
+    conn.close
+  end
+  nil
+end
+whole_started = __iyi_monotonic_ns
+r = HTTP.get("http://127.0.0.1:#{whole_port}/held").or_panic
+held_chunks = HTTP.get("http://127.0.0.1:#{whole_port}/held-chunks").or_panic
+whole_ms = (__iyi_monotonic_ns - whole_started) // 1000000_i64
+assert_true r.body == "hi" && held_chunks.body == "hi", "the answers on held connections: #{r.body.inspect}, #{held_chunks.body.inspect}"
+assert_true whole_ms < 1500, "an answer is read to its length or its last chunk, not to a close three seconds later: #{whole_ms} ms"
+whole_server.join
+whole.close
+puts "  an answer is read to its length or its last chunk, under 1.5 s from a server that holds the connection 3 s"
+
 # An IPv6 literal's Host line keeps the URL's brackets: without them it
 # was `Host: ::1:<port>`, which no server can split into host and port.
 v6 = IyiSocket.listen("::1", 0)
@@ -353,9 +458,23 @@ v6_server.join
 v6.close
 puts "  an IPv6 literal's Host line keeps its brackets, under a scheme in capitals"
 
-# The listener's close ends `serve`, a connection idle between requests
-# with it: a keep-alive client that sat idle kept `serve` from returning
-# for as long as it stayed - here the three seconds it sleeps.
+# A client partway through a request: it sends *part*, and leaves three
+# seconds later.
+def partway(port : Int32, part : String) : Int32
+  c = IyiSocket.connect("127.0.0.1", port).or_panic
+  c.write(part).or_panic
+  sleep(3000)
+  c.close
+  0
+end
+
+# The listener's close ends `serve`, and every connection waiting on its
+# client with it: one idle between requests, and one partway through a
+# request - one byte of it, part of its head, part of a body of a stated
+# length, part of a chunked one. A keep-alive client that sat idle kept
+# `serve` from returning for as long as it stayed, and so did one that
+# had sent what has arrived of a request so far: here the three seconds
+# each sleeps.
 idle_listener = IyiSocket.listen("127.0.0.1", 0)
 idle_port = idle_listener.local_port
 idle_closed = 0_i64
@@ -369,10 +488,16 @@ group do |g|
     idle_returned = __iyi_monotonic_ns
     0
   end
+  g.spawn { partway(idle_port, "G") }
+  g.spawn { partway(idle_port, "GET /a HTTP/1.1\r\nHost: x\r\n") }
+  g.spawn { partway(idle_port, "POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc") }
+  g.spawn { partway(idle_port, "POST /a HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n") }
   g.spawn do
     keeper = IyiSocket.connect("127.0.0.1", idle_port).or_panic
     keeper.write("GET /a HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
     keeper.read(256)
+    # The four are in, and what has arrived of each is read.
+    sleep(200)
     idle_closed = __iyi_monotonic_ns
     HTTP.get("http://127.0.0.1:#{idle_port}/stop").or_panic
     sleep(3000)
@@ -381,8 +506,10 @@ group do |g|
   end
 end
 idle_ms = (idle_returned - idle_closed) // 1000000_i64
-assert_true idle_ms < 2000, "serve returns when its listener closes beside an idle keep-alive client, not #{idle_ms} ms later"
-puts "  the listener's close ends serve beside an idle keep-alive client"
+# The idle one and the four closed with the listener, what has arrived of
+# their requests unanswered.
+assert_true idle_ms < 2000, "serve returns when its listener closes beside an idle client and four partway through a request, not #{idle_ms} ms later"
+puts "  the listener's close ends serve beside an idle keep-alive client, and beside clients partway through a request"
 
 puts "\n== the server, from a raw socket"
 # What the server does with the wire: keep-alive across requests, a
@@ -492,6 +619,56 @@ group do |g|
     GC.enable
     lean.close
     assert_true lean_bytes < 8192_u64, "a kept-alive request allocates #{lean_bytes} bytes, under 8 KB"
+    # Requests written together are parsed where they lie in what has
+    # arrived: each was cut off the front of the read, the rest of the read
+    # copied twice per request - 34 KB a request, on average, here.
+    piped = IyiSocket.connect("127.0.0.1", sport).or_panic
+    batch = ask * 1000
+    GC.disable
+    piped_before = GC.stats.bytes_since_collection
+    piped.write(batch).or_panic
+    piped_got = 0
+    while piped_got < answer_size * 1000
+      piped_got = piped_got + piped.read(scratch, 4096).or_panic.as(Int32)
+    end
+    piped_bytes = (GC.stats.bytes_since_collection - piped_before) // 1000_u64
+    GC.enable
+    piped.close
+    assert_true piped_bytes < 8192_u64, "a request among a thousand written at once allocates #{piped_bytes} bytes, under 8 KB"
+    # A head that comes a piece at a time is searched as it arrives and
+    # kept in one builder: each read was added to the head so far, and all
+    # of what has arrived searched again from its start, per read.
+    slow = IyiSocket.connect("127.0.0.1", sport).or_panic
+    pad = "X-Pad: " + "p" * 1017 + "\r\n"
+    slow.write("GET /nothing HTTP/1.1\r\nHost: x\r\n").or_panic
+    sleep(5)
+    GC.disable
+    slow_before = GC.stats.bytes_since_collection
+    256.times do
+      slow.write(pad).or_panic
+      sleep(1)
+    end
+    slow.write("\r\n").or_panic
+    slow_answer = read_response(slow)
+    slow_bytes = GC.stats.bytes_since_collection - slow_before
+    GC.enable
+    slow.close
+    assert_true slow_answer.starts_with?("HTTP/1.1 204 "), "a head in 256 pieces is answered: #{slow_answer.inspect}"
+    assert_true slow_bytes < 8388608_u64, "a 256 KB head in 1 KB pieces costs the server #{slow_bytes} bytes, under 8 MB"
+    # A body is held at what has arrived of it, not at the length its head
+    # declares: a builder of that length was made at the second read, and a
+    # head that declared 64 MB and two bytes after it cost the server 64 MB.
+    big = IyiSocket.connect("127.0.0.1", sport).or_panic
+    big.write("POST /size HTTP/1.1\r\nHost: x\r\nContent-Length: 67108864\r\n\r\nx").or_panic
+    sleep(20)
+    GC.disable
+    big_before = GC.stats.bytes_since_collection
+    big.write("y").or_panic
+    sleep(20)
+    big_bytes = GC.stats.bytes_since_collection - big_before
+    GC.enable
+    big.close
+    assert_true big_bytes < 1048576_u64, "a head that declares 64 MB and sends two bytes costs the server #{big_bytes} bytes, under 1 MB"
     # A client that asks to be told before it sends its body is told:
     # without the `100 Continue`, curl waits a second before every upload
     # past a megabyte.
@@ -538,10 +715,13 @@ group do |g|
     0
   end
 end
-assert_true seen_paths.size == 213, "the block ran 213 times (the 400s never reached it), not #{seen_paths.size}"
+# The thousand written together and the head in pieces reached the block;
+# the 400s did not, nor the body that was declared and never came: only
+# what has arrived whole is answered.
+assert_true seen_paths.size == 1214, "the block ran 1214 times, not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, 201 lean requests, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MB body declared and not sent, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
 
 puts "\n== a burst of connections"
 # Twenty connections waiting, each with its request written, when the

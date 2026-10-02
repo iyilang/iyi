@@ -830,6 +830,21 @@ if [ -f out-source.txt ] && [ -f out-artifact.txt ]; then
   fi
 fi
 
+echo "== a fill build that keeps String"
+# Keeping String copies `raise` into String's unit before `_main` raises
+# anything, and on MSVC the main module's exception globals were then
+# made in that unit's LLVM context: the verifier refused every
+# `_CxxThrowException` call and the build ended on "you've found a bug".
+printf 'puts "x"\n' > "$WORK/keepstr.cr"
+if (cd "$WORK" && "$IYI" build --crystal --iyi-keep String -o keepstr keepstr.cr > keepstr.log 2>&1) &&
+   [ "$(cd "$WORK" && ./keepstr | tr -d '\r')" = "x" ]; then
+  echo "  it builds, and the program prints x"
+else
+  echo "  it did not build:"
+  grep -v '^ *from ' "$WORK/keepstr.log" | head -4 | sed 's/^/    /'
+  status=1
+fi
+
 # The boundary goes stale when the checkout it was written from changes.
 #
 # It did not, and that is what this section is for. A module compiled from
@@ -867,6 +882,40 @@ else
 fi
 mv shard.cr.away shard.cr
 
+echo "== a module function whose block is written with its type"
+# A typed block is ready rather than answered by its body, so the function
+# crossed as a declaration alone; the producer inlines a block-taking
+# method at every call, the keep file's included, so nothing emitted the
+# symbol, and the program ended on `LNK2019: unresolved external symbol
+# .2A.Blk.3A..3A.each_up...` (`undefined symbol` elsewhere). The body
+# travels now, as a type's block-taking method's does.
+TYPED="$WORK/typed"
+mkdir -p "$TYPED/lib/blk/src"
+printf 'name: blk\n' > "$TYPED/lib/blk/shard.yml"
+cat > "$TYPED/lib/blk/src/blk.cr" <<'CR'
+module Blk
+  def self.each_up(n : Int32, & : Int32 -> Nil) : Nil
+    n.times { |i| yield i }
+  end
+end
+CR
+printf 'import blk\n\nBlk.each_up(3) { |i| puts i }\n' > "$TYPED/app.iyi"
+if ! (cd "$TYPED" && "$IYI" bind --lib lib --mods mods > bind.log 2>&1); then
+  echo "  the shard did not bind:"
+  sed 's/^/    /' "$TYPED/bind.log" | head -8
+  status=1
+elif ! (cd "$TYPED" && "$IYI" build --crystal --use-iyimod mods -o app app.iyi > build.log 2>&1); then
+  echo "  a program calling it did not build:"
+  grep -m2 -iE 'error|undefined' "$TYPED/build.log" | sed 's/^/    /'
+  status=1
+elif [ "$(cd "$TYPED" && ./app | tr -d '\r' | tr '\n' ' ')" = "0 1 2 " ]; then
+  echo "  its body crossed, and the program prints 0 1 2"
+else
+  echo "  the program printed something else:"
+  (cd "$TYPED" && ./app 2>&1 | head -4 | sed 's/^/    /')
+  status=1
+fi
+
 # And the inputs are the shard's own files, not a neighbour's whose directory
 # merely begins the same way: `lib/radix/src` is a prefix of
 # `lib/radix/src-extra/extra.cr`, and a bare dirname under `starts_with?`
@@ -892,6 +941,19 @@ elif "$IYI" mod dump "$NEAR/mods/radix.iyimod" > "$NEAR/dump.txt" 2>&1 &&
 else
   echo "  the neighbour's file was taken as the shard's:"
   grep -n 'inputs\|\.cr$' "$NEAR/dump.txt" | sed 's/^/    /' | head -8
+  status=1
+fi
+
+echo "== the fill command the bind log names"
+# `tool bind` told a person to run `crystal build --iyi-keep`, which
+# Crystal answers with `Invalid option: --iyi-keep`; it names this binary
+# and the flags `iyi bind` runs it with.
+if grep -q "^  iyi build --crystal --iyi-keep Radix " "$NEAR/mods/radix.bind.log" &&
+   ! grep -q "crystal build --iyi-keep" "$NEAR/mods/radix.bind.log"; then
+  echo "  it is a command this binary takes"
+else
+  echo "  it is not this binary's:"
+  grep -- '--iyi-keep' "$NEAR/mods/radix.bind.log" | sed 's/^/    /'
   status=1
 fi
 
@@ -957,6 +1019,126 @@ else
   sed 's/^/    /' "$CLASH/bind.log"
   status=1
 fi
+
+echo "== the root is the shard's own namespace"
+# The first top-level declaration was the root, and a shard that reopens
+# `class String` before `module Loud` was bound as `loud (String)`: the
+# bind log described Crystal's String and `Loud` never crossed. A BOM in
+# front of `module Bom` hid the shard's only declaration, and the shard
+# was refused as declaring none.
+ROOTS="$WORK/roots"
+mkdir -p "$ROOTS/lib/loud/src" "$ROOTS/lib/bom/src"
+printf 'name: loud\n' > "$ROOTS/lib/loud/shard.yml"
+cat > "$ROOTS/lib/loud/src/loud.cr" <<'CR'
+class String
+  def shout : String
+    upcase + "!"
+  end
+end
+
+module Loud
+  def self.say(s : String) : String
+    s.shout
+  end
+end
+CR
+printf 'name: bom\n' > "$ROOTS/lib/bom/shard.yml"
+printf '\357\273\277module Bom\n  def self.v : Int32\n    7\n  end\nend\n' > "$ROOTS/lib/bom/src/bom.cr"
+if (cd "$ROOTS" && "$IYI" bind --lib lib --mods mods > bind.log 2>&1) &&
+   grep -q '^  loud (Loud) ' "$ROOTS/bind.log" && grep -q '^  bom (Bom) ' "$ROOTS/bind.log" &&
+   [ -f "$ROOTS/mods/loud.iyimod" ] && [ -f "$ROOTS/mods/bom.iyimod" ]; then
+  echo "  loud binds as Loud past its reopened String, and bom past its BOM"
+else
+  echo "  a root was misread:"
+  sed 's/^/    /' "$ROOTS/bind.log" | head -8
+  status=1
+fi
+
+echo "== shard.yml names with a dash, indented four"
+# A name was two spaces and `[A-Za-z0-9_]`: `my-lib:` was dropped, and with
+# every entry indented four the run was refused as "shard.yml lists no
+# dependency that is under lib/".
+MANIFEST="$WORK/manifest"
+mkdir -p "$MANIFEST/lib/my-lib/src" "$MANIFEST/lib/tiny/src" "$MANIFEST/lib/unlisted/src"
+printf 'name: app\nversion: 0.1.0\ndependencies:\n    my-lib:\n        path: ../my-lib\n    tiny:\n        path: ../tiny\n' > "$MANIFEST/shard.yml"
+for name in my-lib tiny unlisted; do
+  printf 'name: %s\n' "$name" > "$MANIFEST/lib/$name/shard.yml"
+done
+printf 'module MyLib\n  def self.v : Int32\n    1\n  end\nend\n' > "$MANIFEST/lib/my-lib/src/my-lib.cr"
+printf 'module Tiny\n  def self.v : Int32\n    2\n  end\nend\n' > "$MANIFEST/lib/tiny/src/tiny.cr"
+printf 'module Unlisted\n  def self.v : Int32\n    3\n  end\nend\n' > "$MANIFEST/lib/unlisted/src/unlisted.cr"
+if (cd "$MANIFEST" && "$IYI" bind > bind.log 2>&1) &&
+   grep -q '^binding 2 shards ' "$MANIFEST/bind.log" &&
+   grep -q '^  my-lib (MyLib) ' "$MANIFEST/bind.log" && grep -q '^  tiny (Tiny) ' "$MANIFEST/bind.log"; then
+  echo "  both listed shards bind, and the unlisted one does not"
+else
+  echo "  the manifest was misread:"
+  sed 's/^/    /' "$MANIFEST/bind.log" | head -8
+  status=1
+fi
+
+echo "== a project whose path holds the search path's separator"
+# The subprocesses were handed lib/ as an absolute path in IYI_PATH, which
+# is split on `;` on Windows (`:` elsewhere), so `top`'s `require "base"`
+# was "can't find file 'base'" in a project a plain build compiles.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) LISTED="$WORK/semi;x y" ;;
+  *) LISTED="$WORK/colon:x y" ;;
+esac
+mkdir -p "$LISTED/lib/base/src" "$LISTED/lib/top/src"
+printf 'name: base\n' > "$LISTED/lib/base/shard.yml"
+printf 'module Base\n  def self.v : Int32\n    41\n  end\nend\n' > "$LISTED/lib/base/src/base.cr"
+printf 'name: top\ndependencies:\n  base:\n    path: ../base\n' > "$LISTED/lib/top/shard.yml"
+printf 'require "base"\n\nmodule Top\n  def self.m : Int32\n    Base.v + 1\n  end\nend\n' > "$LISTED/lib/top/src/top.cr"
+if (cd "$LISTED" && "$IYI" bind --lib lib --mods mods > bind.log 2>&1) &&
+   grep -q '^  top (Top) .*mods/top.iyimod' "$LISTED/bind.log"; then
+  echo "  a shard requiring another binds in $(basename "$LISTED")"
+else
+  echo "  binding in $(basename "$LISTED") failed:"
+  sed 's/^/    /' "$LISTED/bind.log" | head -6
+  status=1
+fi
+
+# Windows only: a `--emit-bind` spelled `\\?\C:\...` had no path relative
+# to the shard - `relative_to?` answers nil for two anchors that differ -
+# and the keep file required `./C:/...`, which resolves nowhere. And
+# `iyi bind --mods` spelled that way stopped before binding anything, on
+# `Dir.mkdir_p`'s "\\?\: The filename, directory name, or volume label
+# syntax is incorrect."
+#
+# The directory is also spelled in its 8.3 short form (`cygpath -d`), the
+# way a CI runner's `mktemp` spells its temporary directory, while the
+# shard is read through the long one the shell enters: the keep file
+# climbed out to the directory whose names differ and back down,
+# `require "../../../../../../../runneradmin/AppData/.../greet.cr"`.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    echo "== a \\\\?\\ directory for the boundary"
+    VERBATIM="$WORK/verbatim"
+    mkdir -p "$VERBATIM/lib/greet/src" "$VERBATIM/emit"
+    printf 'name: greet\n' > "$VERBATIM/lib/greet/shard.yml"
+    printf 'module Greet\n  def self.hi : String\n    "hi"\n  end\nend\n' > "$VERBATIM/lib/greet/src/greet.cr"
+    emit="\\\\?\\$(cygpath -d "$VERBATIM/emit")"
+    if (cd "$VERBATIM" && "$IYI" tool bind --crystal -e Greet --emit-bind "$emit" lib/greet/src/greet.cr > tool.log 2>&1) &&
+       grep -qxF 'require "../lib/greet/src/greet.cr"' "$VERBATIM/emit/greet_keep.cr" &&
+       (cd "$VERBATIM/emit" && "$IYI" build --crystal --iyi-keep Greet --emit-bind . -o keep greet_keep.cr > fill.log 2>&1); then
+      echo "  tool bind writes a keep file that requires ../lib/greet/src/greet.cr and fills"
+    else
+      echo "  tool bind wrote a keep file that does not require ../lib/greet/src/greet.cr, or does not fill:"
+      sed -n '3p' "$VERBATIM/emit/greet_keep.cr" 2>/dev/null | sed 's/^/    /'
+      tail -3 "$VERBATIM/emit/fill.log" 2>/dev/null | sed 's/^/    /'
+      status=1
+    fi
+    if (cd "$VERBATIM" && "$IYI" bind --lib lib --mods "\\\\?\\$(cygpath -w "$VERBATIM/mods")" > bind.log 2>&1) &&
+       [ -f "$VERBATIM/mods/greet.iyimod" ]; then
+      echo "  and iyi bind binds into one"
+    else
+      echo "  iyi bind did not bind into one:"
+      sed 's/^/    /' "$VERBATIM/bind.log" | head -4
+      status=1
+    fi
+    ;;
+esac
 
 echo "workdir $WORK"
 exit $status

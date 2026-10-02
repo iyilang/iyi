@@ -1,15 +1,20 @@
 # A fiber reading standard input parks: SPEC.md III.4.8 named that call as
 # the one that had to stop being a blocking syscall. bench/concurrency_exercise.sh
 # feeds this a pipe - a line a second after the program has started, and
-# one two seconds later, twice - and asks three things of it:
+# one two seconds later, twice - and asks four things of it:
 #
+#   0. A wait for readiness keeps its deadline. With nothing in the pipe,
+#      `wait_readable(0, 200)` answers false when the 200 ms are up; on
+#      Windows it answered true at once.
 #   1. The reader parks. A sibling ticking every 100 ms ticks while the
 #      first line is on its way; a read that held the thread let it tick
 #      none.
 #   2. Cancellation reaches it (III.4.2). A sibling's failure ends the group
 #      at once, and the line sent after is read whole by the next read.
 #   3. The stream survives it: a line read withdrawn the same way leaves
-#      the next line to the next read.
+#      the next line to the next read, and that read is another thread's:
+#      on Windows the line was posted to the first reader's port, and the
+#      read had not answered 10 s on.
 module stdin_park
 
 import std/file::{File}
@@ -42,6 +47,13 @@ end
 if ready = Program.env("STDIN_PARK_READY")
   File.write(ready, "")
 end
+
+# ── 0. A readiness wait keeps its deadline ──────────────────────────────
+waited_from = __iyi_monotonic_ns
+early = wait_readable(0, 200)
+waited = elapsed_ms(waited_from)
+fail("a wait on standard input with nothing in it answered #{early} after #{waited} ms, against a 200 ms deadline") unless early == false && waited >= 190
+puts "a wait on stdin with nothing in it kept its 200 ms deadline"
 
 # ── 1. The reader parks ──────────────────────────────────────────────────
 ticks = 0
@@ -108,7 +120,22 @@ group do |g|
   end
 end
 fail("a line read cancelled before its line came answered #{withdrawn.inspect}") unless withdrawn == "nil"
-third = stdin.gets
-fail("after a withdrawn line read the next read #{third.inspect}, not the line sent") unless third == "third\n"
-puts "a withdrawn line read left the stream open, and the next line came whole"
+# The next line is read by another `IyiThread` while this one's scheduler
+# keeps polling, sleeping in steps until it is done.
+# The thread may not assign a local of this code (III.4.11), so it answers 1
+# for the line sent and 2 for anything else, through a cell both may touch.
+third_read = Atomic(Int32).new(0)
+reader = IyiThread.start do
+  third_read.set(stdin.gets == "third\n" ? 1 : 2)
+  nil
+end
+polls = 0
+while third_read.get == 0 && polls < 100
+  sleep(100)
+  polls = polls + 1
+end
+fail("another thread's read of standard input had not answered in 10 s") if third_read.get == 0
+reader.join
+fail("after a withdrawn line read another thread's read did not answer the line sent") unless third_read.get == 1
+puts "a withdrawn line read left the stream open, and another thread read the next line whole"
 puts "every property held"

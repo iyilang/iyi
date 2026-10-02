@@ -125,6 +125,14 @@ case "$(uname -s)" in
     "$IYI" test --affected "$short" . > sel_short.txt 2>&1
     grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_short.txt ||
       { echo "the 8.3 short name selected otherwise ($short):"; cat sel_short.txt; exit 1; }
+    # And spelled verbatim, `\\?\C:\...` or `\\.\C:\...`, the form Rust's
+    # `fs::canonicalize` hands over: the prefix stayed in the key, no
+    # closure held `\\?\c:\...`, and it was "0 to run, 1 skipped".
+    for prefix in '\\?\' '\\.\'; do
+      "$IYI" test --affected "$prefix$(cygpath -w "$WORK/calc/add.iyi")" . > sel_verbatim.txt 2>&1
+      grep -qE '1 passed, 0 failed, [0-9]+ skipped' sel_verbatim.txt ||
+        { echo "the changed file spelled $prefix selected otherwise:"; cat sel_verbatim.txt; exit 1; }
+    done
     ;;
 esac
 "$IYI" test --affected nope.iyi . > off.txt 2>&1
@@ -136,6 +144,16 @@ grep -qE '[0-9]+ passed, 0 failed$' off.txt ||
 grep -q '"affected_not_found":\["nope.iyi"\]' off.json ||
   { echo "the data says nothing about it:"; cat off.json; exit 1; }
 
+step "a test named more than once runs once"
+# The list was made unique as strings, so a test the directory walk found
+# and the caller named again in two more spellings was built and run three
+# times and counted as three passes.
+"$IYI" test --json . add_test.iyi "$WORK/add_test.iyi" > once.json 2>&1
+"$IYI" test --json . > all.json 2>&1
+passed() { grep -oE '"passed": ?[0-9]+' "$1" | grep -oE '[0-9]+$'; }
+[ -n "$(passed all.json)" ] && [ "$(passed once.json)" = "$(passed all.json)" ] ||
+  { echo "a test named again was counted again: $(passed once.json) passes where the directory has $(passed all.json)"; cat once.json; exit 1; }
+
 step "a flag is a flag, and a directory is not a changed file"
 "$IYI" test --nonesuch . > flag.txt 2>&1
 [ $? -eq 1 ] && grep -q 'unknown flag --nonesuch' flag.txt ||
@@ -144,12 +162,17 @@ step "a flag is a flag, and a directory is not a changed file"
 [ $? -eq 1 ] && grep -q 'is a directory, not a changed file' dir.txt ||
   { echo "a directory was accepted as a changed file:"; cat dir.txt; exit 1; }
 
-step "a timeout is a wait, so zero and less are refused"
+step "a timeout is a wait, so zero, less and more than a clock holds are refused"
 # `--timeout 0` and `--timeout -1` were taken, and every test came back
 # "hung: killed at -1.0s" - a verdict about the flag, printed as one about
-# the tests, and a run an agent computing its budget could produce.
-for wait in 0 -1 inf nan; do
-  "$IYI" test --timeout "$wait" . > wait.txt 2>&1
+# the tests, and a run an agent computing its budget could produce. And
+# one past what the clock counts went wrong after the test was built:
+# `1e300` overflowed the span the wait becomes, "Arithmetic overflow
+# (OverflowError)" and "you've found a bug", and `9.3e14` hung a run of
+# tests that end at once past a minute on Windows, though not every time
+# (hence the `timeout`).
+for wait in 0 -1 inf nan 1e300 9.3e14; do
+  timeout 120 "$IYI" test --timeout "$wait" . > wait.txt 2>&1
   [ $? -eq 1 ] && grep -q -- "$wait is not a wait" wait.txt ||
     { echo "--timeout $wait was taken as a deadline:"; cat wait.txt; exit 1; }
 done

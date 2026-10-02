@@ -236,10 +236,10 @@ fix_proof "a Huffman size counted in Int32" fix_size_i32 \
   '((total_bits + 7_i64) // 8_i64).to_i32' '(total_bits + 7) // 8'
 
 echo
-echo "== what integer encoding refuses"
+echo "== what integer encoding and the codec constructors refuse"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expr="$4"
-  printf 'module main\n\nimport std/hpack::{Integer}\n\n%s\n' "$expr" > "$WORK/$name.iyi"
+  printf 'module main\n\nimport std/hpack::{Integer, Encoder, Decoder, DynamicTable}\n\n%s\n' "$expr" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
     sed -n '1,10p' "$WORK/$name.build"
@@ -263,6 +263,14 @@ refuses() { # refuses <label> <name> <phrase> <expression>
 }
 refuses "prefix_bits zero" prefix_zero "prefix_bits must be between 1 and 8" 'Integer.encode(10_u64, 0)'
 refuses "prefix_bits nine" prefix_nine "prefix_bits must be between 1 and 8" 'Integer.encode(10_u64, 9)'
+# Made above the protocol's limit, an encoder's table outgrew the peer's:
+# the constructor took the size that `set_max_table_size` refused.
+refuses "an encoder made above the protocol limit" enc_over "Dynamic table size 8192 exceeds protocol limit 4096" \
+  'Encoder.new(max_table_size: 8192)'
+refuses "a decoder made above the protocol limit" dec_over "Dynamic table size 8192 exceeds protocol limit 4096" \
+  'Decoder.new(max_table_size: 8192)'
+refuses "a table made with a negative size" table_neg "Negative dynamic table size: -1" \
+  'DynamicTable.new(-1, 4096)'
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -66,6 +66,10 @@ raise "string: to_f? leading dot" unless ".5".to_f? == 0.5
 raise "string: to_f? trailing dot" unless "7.".to_f? == 7.0
 nan_val = "NaN".to_f?
 raise "string: to_f? nan" unless nan_val && nan_val != nan_val
+# A sign before NaN, as `to_f` reads it: "-NaN" and "+NaN" were nil here.
+minus_nan = "-NaN".to_f?
+plus_nan = "+NaN".to_f?
+raise "string: to_f? signed nan" unless minus_nan && minus_nan != minus_nan && plus_nan && plus_nan != plus_nan
 raise "string: to_f? invalid text" unless "bad".to_f?.nil?
 raise "string: to_f? double dot" unless "1.2.3".to_f?.nil?
 raise "string: to_f? double sign" unless "--5".to_f?.nil?
@@ -300,9 +304,11 @@ invalid_counts = ["\x80", "\xC3a", "\xE2\x82", "\xE2\x82a", "\xED\xA0\x80", "\xF
   "#{text.size}/#{built.size}/#{yielded.size}"
 end
 raise "utf8: an invalid byte is one character (#{invalid_counts.join(" ")})" unless invalid_counts.join(" ") == "1/1/1 2/2/2 2/2/2 3/3/3 3/3/3 3/3/3 4/4/4 2/2/2 5/5/5"
+# And what it yields for that byte is U+FFFD, as the other library's reader
+# does, not the byte read as a code point.
 invalid_points = [] of Int32
 ("\xC3a" * 1).each_char { |c| invalid_points << c.ord }
-raise "utf8: an invalid byte is yielded as itself" unless invalid_points == [195, 97]
+raise "utf8: an invalid byte is yielded as U+FFFD" unless invalid_points == [0xFFFD, 97]
 
 # Byte iteration:
 b_list = s_utf8.bytes
@@ -363,6 +369,25 @@ raise "utf8: ascii tr" unless "abc".tr("ab", "x") == "xxc"
 raise "utf8: ascii center" unless "hello".center(12, "-=") == "-=-hello-=-="
 puts "    the char family: strip, search, delete, squeeze, count, tr and center verified"
 
+# A byte that begins no character is one U+FFFD and never takes the bytes
+# after it: C3 41 was the one character U+00C1, a quote after a C3 was
+# swallowed, E2 82 was `size` 1 and two characters, and 80 61 62 split in
+# two lost its `a`.
+lead_a = String.new(2) { |b| b[0] = 0xC3_u8; b[1] = 0x41_u8 }
+quoted = String.new(5) { |b| b[0] = 0x61_u8; b[1] = 0xC3_u8; b[2] = 0x22_u8; b[3] = 0x62_u8; b[4] = 0x22_u8 }
+cut = String.new(2) { |b| b[0] = 0xE2_u8; b[1] = 0x82_u8 }
+stray = String.new(3) { |b| b[0] = 0x80_u8; b[1] = 0x61_u8; b[2] = 0x62_u8 }
+past = String.new(4) { |b| b[0] = 0xF4_u8; b[1] = 0x90_u8; b[2] = 0x80_u8; b[3] = 0x80_u8 }
+overlong = String.new(5) { |b| b[0] = 0xC0_u8; b[1] = 0x80_u8; b[2] = 0xED_u8; b[3] = 0xA0_u8; b[4] = 0x80_u8 }
+raise "utf8: a lead byte without its continuation is one U+FFFD" unless lead_a.chars == ['\uFFFD', 'A'] && lead_a.size == 2
+raise "utf8: a quote after a lead byte is a quote" unless quoted.chars == ['a', '\uFFFD', '"', 'b', '"'] && quoted.size == 5
+raise "utf8: size counts what each_char yields" unless cut.size == 2 && cut.chars == ['\uFFFD', '\uFFFD'] && stray.size == 3 && stray.chars == ['\uFFFD', 'a', 'b']
+raise "utf8: past U+10FFFF, overlong and surrogate bytes are U+FFFD each" unless past.chars == ['\uFFFD', '\uFFFD', '\uFFFD', '\uFFFD'] && overlong.size == 5 && overlong.chars.all? { |c| c == '\uFFFD' }
+raise "utf8: delete writes U+FFFD for a byte that begins no character" unless lead_a.delete("z") == "\uFFFDA" && quoted.delete("b") == "a\uFFFD\"\""
+raise "utf8: tr and squeeze write U+FFFD for it too" unless lead_a.tr("é", "e") == "\uFFFDA" && lead_a.squeeze("z") == "\uFFFDA" && lead_a.squeeze == "\uFFFDA" && past.squeeze == "\uFFFD"
+raise "utf8: split empty after a byte that begins no character" unless stray.split("", 2) == ["\uFFFD", "ab"] && lead_a.split("") == ["\uFFFD", "A"]
+puts "    a byte that begins no character is one U+FFFD in size, chars, delete, tr, squeeze and split"
+
 raise "string: to_u64 max" unless "18446744073709551615".to_u64 == 18446744073709551615_u64
 raise "string: to_u64 past max" unless "18446744073709551616".to_u64?.nil?
 raise "string: to_u64 base 16" unless "ff".to_u64(16) == 255_u64
@@ -376,5 +401,13 @@ built = String.build { |io| io << "aé€" << '🎉' }
 raise "utf8: a built string counts its code points when asked" unless built.size == 4
 raise "utf8: a built string's count stays what it was" unless built.size == 4 && built.bytesize == 10
 puts "    a built string counts its characters when asked, once"
+
+# An empty search matches before every character and at the end, as `sub`
+# matches it at the start: `"abc".gsub("", "-")` answered `"abc"`.
+raise "string: gsub empty at every character" unless "abc".gsub("", "-") == "-a-b-c-" && "".gsub("", "-") == "-" && "é".gsub("", "-") == "-é-"
+raise "string: gsub empty block" unless "ab".gsub("") { |m| "<#{m}>" } == "<>a<>b<>"
+unpaired = String.new(2) { |b| b[0] = 0xC3_u8; b[1] = 0x41_u8 }
+raise "string: gsub empty keeps a byte that begins no character" unless unpaired.gsub("", "-").bytes == [0x2D_u8, 0xC3_u8, 0x2D_u8, 0x41_u8, 0x2D_u8]
+puts "    gsub with an empty search writes the replacement before every character and at the end"
 
 puts "all std/text checks passed"

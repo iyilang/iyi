@@ -134,6 +134,39 @@ assert_str long, Regex.compile("\\w+").find(long) || "", "a million-byte word"
 assert_true Regex.compile("(a*)*b").scan(long + "b").size == 1, "nested stars over a million bytes"
 puts "  a million bytes, four patterns, one pass each"
 
+# The closure of a state was walked by recursion, a frame per split, and
+# an alternation chains a split per word: searched in a task, whose stack
+# is 256 KiB, 890 words overflowed it in a plain build (1,700 with
+# --release) and the panic ended the process; on the main stack, 35,000
+# did (66,000).
+puts "\n== a long alternation, in a task and on the main stack"
+
+def words(n : Int32) : String
+  String.build do |io|
+    i = 0
+    while i < n
+      io << "|" if i > 0
+      io << "w" << i
+      i = i + 1
+    end
+  end
+end
+
+in_task = ""
+group do |g|
+  attempt = g.spawn do
+    first = Regex.compile("(?:#{words(5000)})").find("x w71 y") || "nil"
+    bounded = Regex.compile("\\b(?:#{words(5000)})\\b").find("x w71 y") || "nil"
+    "#{first} #{bounded}"
+  end
+  outcome = attempt.value
+  in_task = outcome.is_a?(Panicked) ? outcome.message.to_s : outcome
+  0
+end
+assert_str "w7 w71", in_task, "5,000 words in a task: the first written wins, and \\b holds it to a word"
+assert_str "w69999", Regex.compile("\\b(?:#{words(70000)})\\b").find("x w69999 y") || "", "70,000 words on the main stack"
+puts "  5,000 words in a task, leftmost-first, and 70,000 on the main stack"
+
 args = Program.args
 if args.size > 0
   puts "\n== against Python's re"
@@ -169,6 +202,35 @@ if args.size > 0
   puts "  #{cases} pattern/subject pairs: find, scan, split and replace agree"
 end
 
+# What compiling *pattern* in a task is refused with, or "compiled".
+def refusal(pattern : String) : String
+  said = "compiled"
+  group do |g|
+    attempt = g.spawn { Regex.compile(pattern).find("") || "" }
+    outcome = attempt.value
+    said = outcome.message.to_s if outcome.is_a?(Panicked)
+    0
+  end
+  said
+end
+
+# A group is five frames of the parser, and a task's stack is 256 KiB:
+# under a cap of 1000, a task compiling 213 nested groups in a plain build
+# overflowed it and the panic ended the process. The deepest nesting the
+# cap allows, alternatives and counts among it, compiles in a task.
+puts "\n== the deepest nesting, compiled in a task"
+deepest = ""
+group do |g|
+  attempt = g.spawn { Regex.compile("(?:b|" * 100 + "a" + "){1}" * 10 + ")" * 90).find("xay") || "nil" }
+  outcome = attempt.value
+  deepest = outcome.is_a?(Panicked) ? outcome.message.to_s : outcome
+  0
+end
+assert_str "a", deepest, "100 nested groups compile in a task"
+too_deep = refusal("(" * 101 + "a" + ")" * 101)
+assert_true too_deep.includes?("regex: groups nested past 100"), "101 are refused, not #{too_deep.inspect}"
+puts "  100 nested groups compile in a task, and 101 are refused"
+
 puts "\n== the text side"
 bd = Regex.compile("B|D")
 assert_str("a(x)c(x)e", "aBcDe".gsub(bd, "(x)"), "String#gsub with a pattern")
@@ -197,5 +259,58 @@ assert_str "ccd", /#{pat}d/.find("xccd") || "", "an interpolated literal"
 assert_str "[cgt]gggtaaa|tttaccc[acg]", /[cgt]gggtaaa|tttaccc[acg]/.source, "a literal answers its source"
 assert_str "c+d", /#{pat}d/.source, "and an interpolated one the text it was compiled from"
 puts "  match, scan, escapes, a loop, an interpolation and the source"
+
+# Refused for what they are: `(?P=n)` was "not a group name", `\k<n>` an
+# "unknown escape", and `(?1)` and `(?#..)` "inline flags".
+puts "\n== a refusal names its reason"
+["(?P=n)", "(?<n>a)\\k<n>", "(?<n>a)\\k{n}", "(?<n>a)\\k'n'", "(a)\\g<1>", "(a)\\g{1}", "(a)\\g1"].each do |pattern|
+  said = refusal(pattern)
+  assert_true said.includes?("regex: backreferences are refused"), "/#{pattern}/ is a backreference, not #{said.inspect}"
+end
+["(?1)", "(?+1)", "(?-1)", "(?&n)", "(?P>n)", "(?R)"].each do |pattern|
+  said = refusal(pattern)
+  assert_true said.includes?("regex: recursion is refused"), "/#{pattern}/ is recursion, not #{said.inspect}"
+end
+comment = refusal("a(?#note)")
+assert_true comment.includes?("regex: comments are refused"), "(?#note) is a comment, not #{comment.inspect}"
+assert_true refusal("(?-i)a").includes?("regex: inline flags are refused"), "(?-i) is still a flag"
+assert_true refusal("\\kx").includes?("regex: unknown escape '\\k'"), "and \\k alone an unknown escape"
+puts "  backreferences, recursion and comments, each by name"
+
+# RE2's ASCII classes, by name inside a class. Read as bytes,
+# `[[:digit:]]+` found ":]]" in "[[:digit:]]x 5".
+puts "\n== POSIX classes"
+
+def bytes(lo : Int32, hi : Int32) : String
+  String.new(hi - lo + 1) do |dst|
+    c = lo
+    while c <= hi
+      dst[c - lo] = c.to_u8
+      c = c + 1
+    end
+  end
+end
+
+ascii = bytes(0, 127)
+upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+lower = "abcdefghijklmnopqrstuvwxyz"
+{
+  "alnum" => "0123456789" + upper + lower, "alpha" => upper + lower, "ascii" => ascii,
+  "blank" => "\t ", "cntrl" => bytes(0, 31) + bytes(127, 127), "digit" => "0123456789",
+  "graph" => bytes(33, 126), "lower" => lower, "print" => bytes(32, 126),
+  "punct" => "!\"\#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", "space" => bytes(9, 13) + " ",
+  "upper" => upper, "word" => "0123456789" + upper + "_" + lower,
+  "xdigit" => "0123456789ABCDEFabcdef",
+}.each do |name, members|
+  assert_str members, Regex.compile("[[:#{name}:]]").scan(ascii).join, "[:#{name}:] over ASCII"
+  assert_true Regex.compile("[[:^#{name}:]]").scan(ascii).join.bytesize == 128 - members.bytesize, "[:^#{name}:] is the rest"
+end
+assert_str "5", Regex.compile("[[:digit:]]+").find("[[:digit:]]x 5") || "", "[[:digit:]] is a digit"
+assert_str "12-3", Regex.compile("[[:digit:]-]+").find("ab12-3c") || "", "a class beside a byte"
+assert_str "é", Regex.compile("[[:^ascii:]]+").find("café") || "", "a negation takes the bytes past ASCII, as \\D does"
+assert_str "[:a", Regex.compile("[[:a]+").find("x[:a") || "", "a [: with no :] is the byte ["
+unknown = refusal("[[:foo:]]")
+assert_true unknown.includes?("regex: unknown class '[:foo:]'"), "a name RE2 does not have is refused, not #{unknown.inspect}"
+puts "  the 14 classes RE2 names and their negations"
 
 puts "\nALL CHECKS PASSED"

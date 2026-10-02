@@ -267,6 +267,8 @@ panics_with "min_by of an empty list" min_by_empty "min_by of an empty collectio
   'List(Int32).new([] of Int32).min_by { |x| x }'
 panics_with "minmax_by of an empty list" minmax_by_empty "minmax_by of an empty collection" \
   'List(Int32).new([] of Int32).minmax_by { |x| x }[0]'
+panics_with "groups of nothing" in_groups_zero "group size must be positive" \
+  'List(Int32).new([1, 2, 3]).in_groups_of(0, 0)'
 
 echo
 echo "== the library is iyi all the way down"
@@ -326,7 +328,10 @@ foreign=""
 for source in "$REPO"/src/std/*.iyi; do
   name="$(basename "$source" .iyi)"
   case "$name" in
-    socket|time|debug|file|dir|udp|random|signal|process)
+    # `std/path` folds a Windows name's case the way NTFS does, which is
+    # the platform's own table (LCMapStringEx); ASCII alone called `C:\Ä`
+    # and `c:\ä` two names.
+    socket|time|debug|file|dir|udp|random|signal|process|path)
       # Named libraries only: a `lib` block of platform bindings is the
       # exemption, an `@[Link]` to something the platform does not supply is
       # not covered by it.

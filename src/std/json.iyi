@@ -18,6 +18,8 @@
 # nesting past 256 levels, a number too large for a Float64) and an object
 # that names the same key twice, in `JSON.parse` and in the `PullParser`
 # alike. `JSON.parse` panics with that sentence; `JSON.parse?` answers `nil`.
+# Nor does `JSON.to_json` write such an object: two keys of a Hash written
+# as one text (`nil` and `"null"`, `1` and `"1"`) are refused, naming both.
 #
 # What the writer refuses: `NaN` and `Infinity`, which are not JSON numbers;
 # a value where an object key is due, a field outside an object, a second
@@ -548,39 +550,36 @@ pub struct Any
     elsif s = as_s?
       s.hash
     elsif i = as_i64?
-      integer_hash(i)
+      i.hash
     elsif f = float_value?
       if f >= -9223372036854775808.0 && f < 9223372036854775808.0
         t = f.to_i64
-        return integer_hash(t) if t.to_f64 == f
+        return t.hash if t.to_f64 == f
       end
       bits = IyiFloatText.bits_of(f)
       ((bits ^ bits.unsafe_shr(32_u64)) & 0x7FFFFFFF_u64).to_i32
     elsif a = as_a?
-      value = 17
-      idx = 0
-      while idx < a.size
-        value = (value &* 31) &+ a[idx].hash
-        idx = idx + 1
-      end
-      value
+      # As an `Array` hashes. It was `31 * h + e`, an integer hashing as
+      # itself: `[1,0]` and `[0,31]` hashed alike, and a 150 by 150 grid of
+      # `[i, j]` had 4,769 hashes for its 22,500 values.
+      a.hash
     elsif h = as_h?
-      value = 0
-      keys = h.keys
-      idx = 0
-      while idx < keys.size
-        k = keys[idx]
-        value = value &+ ((k.hash &* 31) &+ h[k].hash)
-        idx = idx + 1
+      # A sum over the pairs, each pair's two hashes packed into one word and
+      # put through splitmix64's finaliser, so the terms share no structure
+      # the sum could cancel. It was the sum of `31 * k.hash + v.hash`:
+      # `{"a":1,"b":2}` and `{"a":2,"b":1}` hashed alike, and 160,000 objects
+      # `{"x":i,"y":j}` took 26 s to go into a `Hash(Any, Bool)`.
+      value = 0x9E3779B97F4A7C15_u64 ^ h.size.to_i64.unsafe_to_u64
+      h.each do |k, v|
+        pair = k.hash.to_i64.unsafe_to_u64.unsafe_shl(32_u64) | (v.hash.to_i64.unsafe_to_u64 & 0xFFFFFFFF_u64)
+        pair = (pair ^ pair.unsafe_shr(30_u64)) &* 0xBF58476D1CE4E5B9_u64
+        pair = (pair ^ pair.unsafe_shr(27_u64)) &* 0x94D049BB133111EB_u64
+        value = value &+ (pair ^ pair.unsafe_shr(31_u64))
       end
-      value
+      value.hash
     else
       0
     end
-  end
-
-  private def integer_hash(i : Int64) : Int32
-    ((i ^ (i >> 32)) & 0x7FFFFFFF_i64).to_i32
   end
 
   def to_json : String
@@ -2147,9 +2146,12 @@ pub class Builder
         # Bytes that are not a code point are written as U+FFFD, one per
         # ill-formed subpart, in either mode: written through as they
         # were, `"a\xffb"` made a document that is not UTF-8 (RFC 8259
-        # §8.1), and this reader refused what this writer wrote. A
-        # well-formed sequence is copied, or under `ascii_only` decoded
-        # and written as \uXXXX, a surrogate pair past the basic plane.
+        # §8.1), and this reader refused what this writer wrote ("invalid
+        # UTF-8 byte 255 in string at line 1, column 3"). Replaced rather
+        # than refused, as `to_ascii_json` already did: a String holds any
+        # bytes, a file name or a log line. A well-formed sequence is
+        # copied, or under `ascii_only` decoded and written as \uXXXX, a
+        # surrogate pair past the basic plane.
         length = utf8_sequence_at(bytes, len, i)
         if length < 0
           if @ascii_only
@@ -2409,12 +2411,29 @@ pub struct JSON
     end
   end
 
-  # A key that is not a string is written by its `to_s`; `nil` as `"null"`,
-  # the word a JSON null is.
-  def self.write_value(val : Hash(K, V), b : Builder) : Nil forall K, V
+  # A String key is written as it is, and two of them are never one text.
+  def self.write_value(val : Hash(String, V), b : Builder) : Nil forall V
     b.object do
       val.each do |k, v|
-        b.field(key_text(k))
+        b.field(k)
+        write_or_null(v, b)
+      end
+    end
+  end
+
+  # Any other key is written by its `to_s`, `nil` as `"null"`, the word a
+  # JSON null is, so two keys can be one text: `{nil => 1, "null" => 2}`
+  # was written `{"null":1,"null":2}`, which `JSON.parse` refuses
+  # ("duplicate key 'null' at line 1, column 11"). The texts written are
+  # kept, and a repeat is refused, naming both keys.
+  def self.write_value(val : Hash(K, V), b : Builder) : Nil forall K, V
+    written = Hash(String, K).new
+    b.object do
+      val.each do |k, v|
+        text = key_text(k)
+        raise "the keys #{written[text].inspect} and #{k.inspect} are both written as #{text.inspect}" if written.has_key?(text)
+        written[text] = k
+        b.field(text)
         write_or_null(v, b)
       end
     end

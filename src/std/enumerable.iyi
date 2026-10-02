@@ -559,10 +559,14 @@ pub trait Enumerable
     result
   end
 
+  # The first truthy answer, as the other library's: this took the first
+  # non-nil one, `false` included, so `[1, 2, 3, 4].find_value { |i| i > 2 }`
+  # answered false where the other library documents true for that very
+  # call, and `{ |i| i > 8 }` answered false where it answers nil.
   def find_value(& : Elem -> U?) : U? forall U
     each do |e|
       value = yield e
-      return value unless value.nil?
+      return value if value
     end
     nil
   end
@@ -589,7 +593,11 @@ pub trait Enumerable
     acc
   end
 
+  # Refused under its own name, as `minmax` below is: delegated, a size of
+  # zero was refused with `each_slice`'s sentence, "slice size must be
+  # positive", from a call the reader never wrote.
   def in_groups_of(n : Int32, filler : Elem) : Array(Array(Elem))
+    raise "group size must be positive" if n <= 0
     groups = each_slice(n)
     last = groups.last?
     if last
@@ -671,9 +679,19 @@ pub trait Enumerable
     raise "min_of of an empty collection"
   end
 
+  # One walk, as `minmax_of?` below takes: `min?` and then `max?` walked the
+  # collection twice, so a source that can be read once (a pipe, a
+  # generator) answered {1, nil} for [3, 1, 4, 1, 5] and `minmax` refused
+  # it as empty.
   def minmax? : Tuple(Elem?, Elem?) where Elem : Comparable
-    low = min?
-    high = max?
+    low = nil
+    high = nil
+    each do |e|
+      cur_low = low
+      low = e if cur_low.nil? || (e <=> cur_low) < 0
+      cur_high = high
+      high = e if cur_high.nil? || (e <=> cur_high) > 0
+    end
     {low, high}
   end
 

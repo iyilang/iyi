@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 19,246 lines, of which 3,732 are the library held to the 3,734 ceiling (5,484 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 120,134 lines, none of it written in iyi |
+| iyi's own prelude | 19,806 lines, of which 3,731 are the library held to the 3,734 ceiling (5,567 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 122,438 lines, none of it written in iyi |
 | artifact format | `.iyimod` v54, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 19,246 lines
+> "No standard library worth the name" is still true of iyi's own 19,806 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,8 +270,8 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 19,246 lines,
-primitives included, of which the library is 3,732.** Not a standard library:
+**3. A deliberately tiny prelude, written in iyi. Done: 19,806 lines,
+primitives included, of which the library is 3,731.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
 bits of a `@[Flags]` one. **Its scope is set by what the
@@ -299,11 +299,11 @@ collector (GC_DESIGN.md, the block between two marks in `prelude.iyi`),
 the scheduler and the kernel thread (III.4, `concurrency.iyi` and
 `thread.iyi`), the shortest-round-trip float text (`float.iyi`) - and they
 are most of its lines. So the figure held to the ceiling is the library:
-**3,732 lines** of the 19,246, measured by `bench/doc_numbers.py` as
+**3,731 lines** of the 19,806, measured by `bench/doc_numbers.py` as
 everything under `src/iyi/` except those three and except every platform's
-floor of 1,752 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
+floor of 1,836 lines — the arms behind `flag?(:win32)`, `flag?(:linux)`,
 `flag?(:darwin)` and `flag?(:wasm32)`, which the paragraph on the breach
-below settles and explains. Opening `src/iyi/` counts 5,484 with the floor
+below settles and explains. Opening `src/iyi/` counts 5,567 with the floor
 still in it, and the whole-prelude figure is stated beside both because a
 reader sees the whole file, and a "tiny prelude" claim that hid 9,000 lines
 of runtime would be a claim about the wrong number.
@@ -421,7 +421,7 @@ where most of the 1,040 lines are.
 by hand.** Counting the lines inside a macro conditional whose condition
 names an OS, architecture or ABI flag — every arm of it, `else` included,
 since an `else` under `flag?(:linux)` is what the other platforms take and
-exists for the same reason — the platform floor measures **1,752 lines**
+exists for the same reason — the platform floor measures **1,836 lines**
 of the 4,803, and Windows is the largest arm of it by a wide margin, which
 is what a platform whose every path, console byte and integer division
 needs its own answer costs.
@@ -1008,9 +1008,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 120,134 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 19,246-line own prelude + 56,839 in std |
-| Specs | 21,146 lines | 12,225 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 122,438 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 19,806-line own prelude + 58,679 in std |
+| Specs | 21,146 lines | 12,346 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -1349,12 +1349,16 @@ is the narrow one: a derive reads upwards, and says so when something it cannot
 read is below it. The example at the top of this section was written the other
 way round before this was built, and is now written the way the language works.
 
-**The program-wide questions are refused for the length of the expansion.**
-Handing over a type hands over everything a macro may ask a type, and
-`all_subclasses`, `subclasses` and `includers` answer with the whole program
-rather than with a declaration. A derive that read one would generate different
-code depending on what else was compiled, which is the caching promise this
-section rests on, so inside a derive they raise. Outside one they are untouched.
+**The program-wide questions are refused for the length of the expansion, and
+in the methods it generates.** Handing over a type hands over everything a
+macro may ask a type, and `all_subclasses`, `subclasses` and `includers` answer
+with the whole program rather than with a declaration. A derive that read one
+would generate different code depending on what else was compiled, which is the
+caching promise this section rests on, so inside a derive they raise. A macro
+in a method the derive generated expands when that method is typed, after the
+derive has returned, so it raises there too: `\{{ Base.all_subclasses }}`
+escaped into a generated method had answered `A,B`, `B` declared below the
+derived type. Outside a derive they are untouched.
 
 **Several names on one line.** `derive named, counted` runs each macro in turn,
 left to right, each reading the same declaration. A name that is not an
@@ -1553,7 +1557,9 @@ rule, which is the whole reason the distinction exists: **a trait that declares
 associated types can be implemented only once for a given type.** A second impl
 answering `Elem` differently would make a call on that type ambiguous, which is
 the cost that ruled out making the element type a parameter. A trait with
-parameters has no such rule, because several impls are the point of it.
+parameters has no such rule, because several impls are the point of it. A trait
+with neither is implemented once as well: a second `impl T for S` had replaced
+the first one's methods without a word, and is refused the same way.
 
 One gap the implementation found, and it is on the parameter side: two impls of
 the same parameterised trait for one type **collide when their methods take the
@@ -2229,23 +2235,37 @@ registered cleanup around the rest of its scope:
 
 ```
 a                       a
-defer x        ⟶        __iyi_defer_push(-> { x })
-b                       begin
+defer x        ⟶        %live = true
+b                       __iyi_defer_push(-> { x if %live; nil })
+                        begin
                           b
                         ensure
+                          %live = false
                           __iyi_defer_pop_run
+                          x
                         end
 ```
 
-The cleanup is written once, as a proc the runtime holds on the current
-task. Every ordinary exit reaches the `ensure` — falling off the end, a
-`return`, `!` expanding to a `return` (III.1.2) — which pops the proc
-and runs it. A panic reaches none of them, and does not need to: the
-panic path walks the same registry and runs whatever was never popped.
-One list, two readers, and the promise holds on every exit including
-the one that is a bug. What changed against `begin`/`ensure` is still
-where the cleanup is *written*: at the acquisition, which is the entire
-ergonomic point.
+Every ordinary exit reaches the `ensure` — falling off the end, a
+`return`, `!` expanding to a `return` (III.1.2) — and runs the cleanup
+there, inline, as the scope's own code; it disarms and pops the
+registered copy first, so the cleanup runs once. A panic reaches none of
+them, and does not need to: the cleanup is also a proc the runtime holds
+on the current task, and the panic path walks that registry and runs
+whatever was never popped. One list, and the promise holds on every exit
+including the one that is a bug. The proc used to be the only copy, and a
+proc is a closure: in a struct method it read a copy of `self` made at
+entry and wrote into that copy, and every variable it named stopped
+narrowing. Inline, the cleanup reads the scope as it is, and since its
+proc runs only when the frame never resumes (the compiler marks its def
+`iyi_defer`), a variable it names keeps its narrowing. The panic walk's
+copy still reads a struct method's `self` as it was at entry. Nor may a
+cleanup leave its `defer`: a `return`, `next` or `break` that would is
+refused (`` `return` can't leave a `defer` ``), because the scope is
+already being left and the cleanup has no answer of its own; inside the
+proc a `return` used to end the cleanup and nothing said so. What
+changed against `begin`/`ensure` is still where the cleanup is
+*written*: at the acquisition, which is the entire ergonomic point.
 
 Two questions Part V.8 left open, both answered by Go's answers:
 
@@ -2608,10 +2628,14 @@ shareable cannot be captured by a spawned block or sent over a channel.
 **Built, as written, with the obligations below met.** `Iyi::Share`
 (`src/compiler/iyi/semantic/share.cr`) decides a type structurally: a
 field is mutable if any method other than `initialize` assigns it, by any
-spelling, or a setter `field=` is defined for it — III.4.7's mechanical
+spelling (the structural scan reads the type's own methods, those its
+superclasses and included modules give it, and macro code as it expands on
+the type), or a setter `field=` is defined for it — III.4.7's mechanical
 rule, on the compiler's own AST rather than the count's — and every
 field's type must be shareable in turn: integers, floats, `Bool`, `Char`,
-`Nil`, `Symbol` and enums are; `Pointer` is raw memory and is not;
+`Nil`, `Symbol` and enums are; `String` is by name, its one write after
+construction being the character count `size` caches, the same from every
+thread; `Pointer` is raw memory and is not;
 `StaticArray` and a `Proc` are not; a tuple, named tuple or union is when
 every member is; a class typed as its base is when every subclass is. The
 trust half is `@[Share]` on a declaration, meaning shareable whenever the
@@ -2634,7 +2658,16 @@ channel that crosses threads. Held by `spec/compiler/semantic/iyi_spec.cr`
 trusted generic refused by its argument, `self`), by
 `spec/compiler/iyimod_spec.cr` (the marker written, read and refused
 across an artifact) and by `bench/thread_exercise.sh`'s last step, a
-program that must not compile.
+program that must not compile. A `Share` type makes a value safe to read
+from two threads, not a variable safe to write, and a captured local is
+one cell both threads reach: a local the block assigns, or that its
+starter assigns after the start, or in a loop or block that starts the
+thread again, is refused by name (`` `count` is assigned here, after the
+thread has started ``). A local assigned before the start, or a block's
+own local, which is a new cell on every call, is captured as before.
+`count` added to by a thread and by its starter two million times each
+had compiled and counted 2684265 one run and 4000000 the next.
+`bench/thread_exercise.sh` step 6b holds it.
 
 This is Rust's `Send`/`Sync` **without** ownership or borrowing, and it is worth
 being exact about what that buys and what it does not. It rules out data races,
@@ -2941,14 +2974,16 @@ to the same block with the extraction appended (hygienic names throughout):
 
 ```
 group do |g|
-  x = g.spawn { read(a) }
-  y = g.spawn { read(b) }
+  %h1 = g.spawn { read(a) }
+  x = %h1
+  %h2 = g.spawn { read(b) }
+  y = %h2
   g.join
-  %v1 = x.value
+  %v1 = %h1.value
   if %v1.is_a?(::Error)
     %v1
   else
-    %v2 = y.value
+    %v2 = %h2.value
     if %v2.is_a?(::Error)
       %v2
     else
@@ -2957,6 +2992,11 @@ group do |g|
   end
 end
 ```
+
+Each slot reads a handle of its own, `%h1` and `%h2`. Reading the
+author's `x` and `y` instead let one name reused for both spawns read the
+last task twice: `{2, 2}` for `{1, 2}`, and a failing first task's error
+was lost.
 
 **The correction: the block stays a block.** The first build inlined the
 block's statements into the caller, and the gate's own `task.value`
@@ -3329,19 +3369,28 @@ initialiser is last by construction and so cannot precede a module that imports
 it. A cycle is now an error naming the cycle, which is the same accident rule 1
 stopped relying on above, and the one IV.4's coherence proof rests on.
 
-**2. Between independent modules the order is *unobservable*, not merely
-unspecified.** This is the rule worth having, and the compilation model already
-pays for it: a module can only name what it imports (R-1), can only reach what
-that module exports (R-2), and cannot reopen anything (R-3). So a module's
-initialiser has nothing of an unrelated module to look at, and no program can
-tell which of two independent modules went first. The tiebreak therefore does
-not need specifying. There is no experiment that could detect it.
+**2. Between independent modules the order is *unspecified*, and a program
+that depends on it is wrong.** The compilation model narrows what could depend
+on it: a module can only name what it imports (R-1), can only reach what that
+module exports (R-2), and cannot reopen anything (R-3). So a module's
+initialiser has nothing of an unrelated module to look at. It does have what
+both modules import. This rule used to say the order was *unobservable*, that
+no program could tell which of two independent modules went first and no
+experiment could detect it, and four small modules do. `io/a` and
+`io/b` each import `io/c`, and each initialiser is one call, `Log.add("a")`
+and `Log.add("b")`, appending to a class variable `io/c` declares; the entry
+module's `puts Log.items.join(",")` printed `b,a` in debug builds under
+`IYI_INIT_SEED=1` and `4`, and `a,b` under 2, 3 and 6 and in a release build.
+Nothing refuses such an initialiser. Refusing it would mean knowing which
+calls write another module's state, which is rule 5's direction and is not
+built. The tiebreak is still left unspecified, on purpose: an output that
+changes with it is the bug.
 
-A rule nobody can observe is a rule that rots, so **debug builds shuffle the
-order of independent modules. Built.** This is Go's own trick: map iteration was
-randomised precisely to stop programs depending on an order the specification
-never promised, and Go went further there than in its own `init`, which is
-ordered by file name and therefore depends on one.
+A rule a program can break without a word is a rule that rots, so **debug
+builds shuffle the order of independent modules. Built.** This is Go's own
+trick: map iteration was randomised precisely to stop programs depending on an
+order the specification never promised, and Go went further there than in its
+own `init`, which is ordered by file name and therefore depends on one.
 
 The compiler walks the DAG the way Kahn's algorithm does and picks at random
 among the modules whose imports have all been placed, so no two debug builds of
@@ -3356,10 +3405,11 @@ other, and their initialisers are declarations with nothing to observe. What it
 does establish is that the reordering is safe. The tree the compiler hands the
 rest of the pipeline is still one it types and generates code for, and that no
 sample was quietly relying on load order. Evidence for what the rule *catches*
-needs a program whose modules do work at initialisation, and there is not one
-yet; III.4.5 is the reason to expect there never will be many, since
-module-level mutable state is not shareable and an initialiser mostly computes
-constants.
+is the program under rule 2, whose unspecified order printed both ways across
+five seeds: its modules do work at initialisation, into a class variable they
+share.
+III.4.5 is the reason to expect few such programs, since module-level mutable
+state is not shareable and an initialiser mostly computes constants.
 
 **Rule 1 was accidental, and now is not. Built.** `import` used to expand the
 imported file *in place*, splicing its nodes where the directive stood, so a
@@ -7974,10 +8024,11 @@ Named honestly, so nobody mistakes this draft for complete.
 3. ~~Trait default methods.~~ **Settled by II.6**: traits supply bodies, with
    their own type parameters and conditional `where` bounds.
 4. ~~**Module initialisation order.**~~ **Specified in III.5**: DAG order, a
-   relative order between independent modules that is unobservable rather than
-   merely unspecified, no `init()`, no import for side effects, and
-   initialisation that may not fail. All but "no import for side effects" are
-   built, the shuffle that keeps the unobservable order unobservable included.
+   relative order between independent modules that is unspecified (two
+   initialisers writing a module both import can show it), no `init()`, no
+   import for side effects, and initialisation that may not fail. All but "no
+   import for side effects" are built, the shuffle that shows a program
+   depending on the unspecified order included.
    That last one is the only rule here with a cost and no measurement.
 5. ~~**Concurrency semantics.**~~ **Specified in III.4**: structured
    concurrency so a leak is unrepresentable, cancellation owned by the scope
@@ -9621,7 +9672,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 19,246-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 19,806-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

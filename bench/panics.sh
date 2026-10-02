@@ -8,7 +8,9 @@
 # with no boundary above it exits 1 after its defers ran, `exit` ends
 # with the status it is given after the calling task's defers, and
 # `.or_panic` is a real panic. The no-panic path rides the same registry and is
-# asserted unchanged.
+# asserted unchanged, and on it a cleanup is the scope's own code: it reads
+# a struct method's `self` live, keeps a variable's narrowing (the panic
+# walk's `iyi_defer` proc reads it live too), and cannot leave its `defer`.
 set -euo pipefail
 
 IYI=${IYI:-./bin/iyi}
@@ -148,6 +150,34 @@ run "$work/leave_task.iyi"
 [ "$out" = "task defer" ] || fail "exit from a task: wanted only its own defer, got: $out"
 step "exit from a task ends the process, after that task's defers"
 
+# ── 2d. what a stream set to `sync = false` still holds is written as the
+#      program ends: at its last line, at `exit` and at a panic's exit
+#      (`__iyi_flush_std`). Nothing wrote it, and standard output came
+#      back empty all three ways while standard error's line arrived ────
+cat > "$work/unsynced.iyi" <<'EOF'
+module unsynced
+
+STDOUT.sync = false
+print "buffered-a "
+puts "buffered-b"
+STDERR.puts "unbuffered"
+case Program.args[0]?
+when "exit"
+  exit 0
+when "raise"
+  raise "boom"
+end
+EOF
+"$IYI" build -o "$work/unsynced" "$work/unsynced.iyi" > "$work/unsynced.build" 2>&1 ||
+  fail "the unsynced program did not build: $(cat "$work/unsynced.build")"
+for ending in end exit raise; do
+  set +e
+  said=$("$work/unsynced" "$ending" 2>/dev/null)
+  set -e
+  [ "$said" = "buffered-a buffered-b" ] || fail "at its $ending, standard output held '$said', not the buffered line"
+done
+step "a stream set to sync = false is written at the end, at exit and at a panic"
+
 # ── 3. `.or_panic` is a real panic now: through the task boundary,
 #      carrying the error's message ────────────────────────────────────
 cat > "$work/orp.iyi" <<'EOF'
@@ -262,6 +292,212 @@ expected=$(printf 'body ran\nclose b\nclose a\n2\nclose b\nclose a\n1')
 [ "$out" = "$expected" ] || fail "normal-path output was:
 $out"
 step "the no-panic path is unchanged: LIFO on fall-through and on return"
+
+# ── 6b. on an ordinary exit the cleanup is the scope's own code: in a
+#      struct method it reads and writes the live struct, and a variable
+#      it names still narrows. Run only as a proc, it read a copy of
+#      `self` made at entry (`defer saw 0`), its write was lost (3, not
+#      100), and a later `x = x.size` stopped compiling. The panic walk's
+#      copy, the proc the compiler marks `iyi_defer`, still reads the
+#      variable as it is when the task dies ──────────────────────────────
+cat > "$work/live.iyi" <<'EOF'
+module live
+
+struct Counter
+  getter n : Int32
+
+  def initialize
+    @n = 0
+  end
+
+  def run : Int32
+    @n = 1
+    defer puts "defer saw #{@n}"
+    @n = 2
+    @n
+  end
+
+  def close : Nil
+    defer @n = 100
+    @n = 3
+  end
+end
+
+def grow(v : Int32 | String, fail : Bool) : Int32
+  x = v
+  defer puts "x was #{x}"
+  if x.is_a?(String)
+    x = x.size
+  end
+  raise "grew" if fail
+  x + 1
+end
+
+# One cleanup per iteration, run as each iteration ends, so it reads the
+# counter after that iteration's increment.
+def rounds : Nil
+  k = 0
+  while k < 2
+    defer puts "round #{k}"
+    k += 1
+  end
+end
+
+c = Counter.new
+puts c.run
+c.close
+puts c.n
+puts grow("hello", false)
+puts grow(4, false)
+rounds
+group do |g|
+  t = g.spawn { grow("hello", true) }
+  puts(t.value.is_a?(Panicked) ? "panicked" : "did not panic")
+end
+EOF
+set +e
+out=$("$IYI" run "$work/live.iyi" 2>"$work/live.err")
+code=$?
+set -e
+[ "$code" = 0 ] || fail "live-struct exit was $code, wanted 0: $out $(cat "$work/live.err")"
+expected=$(printf 'defer saw 2\n2\n100\nx was 5\n6\nx was 4\n5\nround 1\nround 2\nx was 5\npanicked')
+[ "$out" = "$expected" ] || fail "a defer did not see the live scope:
+$out"
+step "a defer sees the live struct and keeps its narrowing; the panic walk reads it live"
+
+# ── 6c. a cleanup cannot leave its `defer`: inside the proc a `return`
+#      ended the cleanup and nothing said so (`defer return 7` answered 1)
+cat > "$work/leave_defer.iyi" <<'EOF'
+module leave_defer
+
+def answer : Int32
+  defer return 7
+  1
+end
+
+puts answer
+EOF
+run "$work/leave_defer.iyi"
+[ "$code" != 0 ] || fail "\`defer return 7\` compiled and answered: $out"
+echo "$out" | grep -q "\`return\` can't leave a \`defer\`" || fail "\`defer return\` was refused, but not as leaving the defer: $out"
+step "a return out of a defer is refused as leaving it"
+
+# ── 6d. a `defer` a macro writes covers the rest of the scope the macro
+#      stands in, as the same line written there does. Lowered with the
+#      expansion alone, it had nothing after it and ran at once, before
+#      the code it guards ("if cleanup" before "if body") ─────────────────
+cat > "$work/macro_defer.iyi" <<'EOF'
+module macro_defer
+
+macro cleanup(msg)
+  defer puts {{msg}}
+end
+
+def written_by_if : Nil
+  {% if true %}
+    defer puts "if cleanup"
+  {% end %}
+  puts "if body"
+end
+
+def written_by_for : Nil
+  {% for n in [1, 2] %}
+    defer puts "for cleanup {{n}}"
+  {% end %}
+  puts "for body"
+end
+
+def written_by_call(early : Bool) : Int32
+  defer puts "written cleanup"
+  cleanup "call cleanup"
+  return 3 if early
+  puts "call body"
+  4
+end
+
+def dies : Int32
+  cleanup "panic-path cleanup"
+  raise "after the macro's defer" if true
+  0
+end
+
+written_by_if
+written_by_for
+puts written_by_call(true)
+puts written_by_call(false)
+group do |g|
+  t = g.spawn { dies }
+  puts(t.value.is_a?(Panicked) ? "panicked" : "did not panic")
+end
+EOF
+set +e
+out=$("$IYI" run "$work/macro_defer.iyi" 2>"$work/macro_defer.err")
+code=$?
+set -e
+[ "$code" = 0 ] || fail "macro-defer exit was $code, wanted 0: $out $(cat "$work/macro_defer.err")"
+expected=$(printf 'if body\nif cleanup\nfor body\nfor cleanup 2\nfor cleanup 1\ncall cleanup\nwritten cleanup\n3\ncall body\ncall cleanup\nwritten cleanup\n4\npanic-path cleanup\npanicked')
+[ "$out" = "$expected" ] || fail "a macro's defer did not cover the rest of its scope:
+$out"
+step "a defer a macro writes covers the rest of the scope it stands in"
+
+# ── 6e. inside a cleanup `is_a?` narrows as it does in an `ensure`, for a
+#      variable assigned after the `defer` too, and the panic walk's run
+#      of the cleanup reads what was assigned last. It was refused
+#      ("expected argument #1 to 'String#+' to be String, not Int32"), and
+#      the scope's own read between the two assignments lost its
+#      narrowing to the cleanup's ──────────────────────────────────────────
+cat > "$work/narrow_defer.iyi" <<'EOF'
+module narrow_defer
+
+def later(flag : Bool, fail : Bool) : Int32
+  y = flag ? "s" : 1
+  defer puts(y.is_a?(Int32) ? y + 1 : y.bytesize)
+  y = 5
+  raise "later" if fail
+  0
+end
+
+def kept : Nil
+  y = 1
+  defer puts y
+  puts y + 1
+  y = "s"
+end
+
+puts later(true, false)
+kept
+group do |g|
+  t = g.spawn { later(true, true) }
+  puts(t.value.is_a?(Panicked) ? "panicked" : "did not panic")
+end
+EOF
+set +e
+out=$("$IYI" run "$work/narrow_defer.iyi" 2>"$work/narrow_defer.err")
+code=$?
+set -e
+[ "$code" = 0 ] || fail "narrowing-defer exit was $code, wanted 0: $out $(cat "$work/narrow_defer.err")"
+expected=$(printf '6\n0\n2\ns\n6\npanicked')
+[ "$out" = "$expected" ] || fail "a cleanup did not narrow as an ensure does:
+$out"
+step "is_a? narrows inside a cleanup, on the ordinary exit and on the panic walk"
+
+# ── 6f. a `yield` in a cleanup is refused as itself: the panic walk runs
+#      the cleanup as a proc, and the refusal was about a proc literal
+#      nobody wrote ──────────────────────────────────────────────────────
+cat > "$work/yield_defer.iyi" <<'EOF'
+module yield_defer
+
+def around(&) : Nil
+  defer yield
+  puts "body"
+end
+
+around { puts "cleanup" }
+EOF
+run "$work/yield_defer.iyi"
+[ "$code" != 0 ] || fail "\`defer yield\` compiled: $out"
+echo "$out" | grep -q "\`yield\` can't run in a \`defer\`" || fail "\`defer yield\` was refused, but not as a defer: $out"
+step "a yield in a defer is refused as a defer"
 
 # ── 7. an arithmetic overflow is a panic like any other: the trap
 #      routes through the registry, so a task's overflow dies at the
@@ -435,6 +671,16 @@ $out"
     frames="$(echo "$out" | grep -cE "inner[^ ]* at .*named\.iyi:")"
     [ "$frames" -ge 2 ] || fail "the trace named $frames frames of the recursion, wanted at least 2:
 $out"
+    # And the first frame is the function that raised, at the raise's own
+    # line. Windows skipped two frames where only `raise` is above it, and
+    # dropped this one: the trace began at the caller, line 7.
+    case "$(uname -s)" in
+      MINGW* | MSYS* | CYGWIN* | Windows_NT)
+        echo "$out" | grep -qE "^0 +inner at .*named\.iyi:6$" ||
+          fail "the trace does not start at the function that raised, named.iyi:6:
+$out"
+        ;;
+    esac
     step "a panic names its callers where the program imported a resolver"
     ;;
   *)

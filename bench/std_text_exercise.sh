@@ -157,9 +157,11 @@ prove_fails "chomp of a newline only a newline" chomp_nl "string: chomp newline"
 prove_fails "split blind to vertical tab" split_vt "string: split vertical tab and form feed" \
   's/^      if b.ascii_whitespace?$/      if b.in?(32.unsafe_chr, 9.unsafe_chr, 10.unsafe_chr, 13.unsafe_chr)/'
 prove_fails "empty separator ignores the limit" split_limit "string: split empty separator limit" \
-  '/^        break if limit > 1 \&\& pieces.size == limit - 1$/d'
+  '/^        return pieces << byte_slice(at, bytesize - at) if limit > 1 \&\& pieces.size == limit - 1$/d'
 prove_fails "squeeze writes a byte of each character" squeeze_byte "string: squeeze" \
-  's/^        io.write(source + at, width) unless same$/        io.write(source + at, 1) unless same/'
+  's/^        io << point.unsafe_chr unless point == previous$/        io.write_byte(point.to_u8) unless point == previous/'
+prove_fails "squeeze writes no U+FFFD for a byte that begins no character" squeeze_lone "utf8: tr and squeeze write U+FFFD" \
+  's/^        point = 0xFFFD if point < 0$/        point = 0x3F if point < 0/'
 prove_fails "each_line drops a final cr" line_cr "utf8: each_line final cr" \
   's/^      yield byte_slice(start, bytesize - start)$/      yield byte_slice(start, source[bytesize - 1] == 13_u8 ? bytesize - start - 1 : bytesize - start)/'
 
@@ -236,17 +238,20 @@ prove_fails_prelude "an uncounted string answered as it is" no_count "utf8: char
 prove_fails_prelude "char utf8 encoding broken" no_encode "utf8: char to_s" \
   's/buffer\[1\] = (0x80 | (point \& 0x3F)).to_u8/buffer[1] = 0_u8/'
 
-# 9. And the decoder the same string's `size` already agrees with
-prove_fails_prelude "utf8 each_char decoding broken" no_decode "utf8: chars size" \
-  's/^      index = index + width$/      index = index + 1/'
+# 9. And the decoder `size`, `each_char` and `squeeze` share, which a run
+# of `é` is the first check to read
+prove_fails_prelude "utf8 decoding broken" no_decode "string: squeeze multi-byte run" \
+  's/^      index = index + (point < 0 ? 1 : width)$/      index = index + 1/'
 
 # 9b. A byte that starts no well-formed sequence counted as the start of
-#     one again: by its lead alone, or with the bytes after the second
-#     taken unread. Either makes a built string disagree with its literal.
+#     one again: a lead byte taking the next bytes whatever they were (C3
+#     41 was one character), or an overlong form, a surrogate or a value
+#     past U+10FFFF decoded whole. Either makes a built string disagree
+#     with its literal.
+prove_fails_prelude "a lead byte takes any byte after it" no_continuation "utf8: an invalid byte is one character" \
+  's/^        point = (byte \& 0xC0) == 0x80 ? (point << 6) | (byte \& 0x3F) : -1$/        point = (point << 6) | (byte \& 0x3F)/'
 prove_fails_prelude "a lead byte read as a sequence" lenient_lead "utf8: an invalid byte is one character" \
-  '/^    return 1 if second [<>] (lead == /d'
-prove_fails_prelude "a sequence not continued read whole" lenient_tail "utf8: an invalid byte is one character" \
-  '/^    return 1 if width > [23] \&\& /d'
+  '/^      point = -1 if width > 1 \&\& (point < /d'
 
 # 9c. `whitespace?` without \v and \f, `chomp('\n')` blind to the `\r`
 #     before it, and `lines` cutting a `\r` that ends no line.
@@ -310,6 +315,26 @@ panics_with "a repeat that does not fit" mul_overflow \
 panics_with "a negative slice count" slice_negative "negative count: -1" '"abc"[0, -1]'
 panics_with "an index past the end" index_past \
   "out of range for a string of 3 bytes" '"abc"[9]'
+# A build doubled its capacity in Int32, so growing past 1 GiB and a write
+# past 2147483647 bytes both panicked with "arithmetic overflow". It grows
+# to that limit and refuses past it with the sentence `*` has.
+panics_with "a build that does not fit" build_overflow \
+  "past the 2147483647 bytes a string holds" \
+  'String.build { |io| io << "ab"; io.write("x".to_unsafe, 2147483647) }'
+printf 'module main\n\nbig = ("a" * 1025) * 1047553\nio = String::Builder.new\nio << big << "b"\nputs io.bytesize\n' > "$WORK/build_gib.iyi"
+if "$IYI" build -o "$WORK/build_gib" "$WORK/build_gib.iyi" > "$WORK/build_gib.build" 2>&1; then
+  gib="$("$WORK/build_gib" 2>&1 | sed -n '1p')"
+  if [ "$gib" = "1073741826" ]; then
+    echo "  a build past 1 GiB: 1073741826 bytes"
+  else
+    echo "  a build past 1 GiB: answered '$gib', not 1073741826"
+    status=1
+  fi
+else
+  echo "  a build past 1 GiB: the program did not build"
+  sed -n '1,10p' "$WORK/build_gib.build"
+  status=1
+fi
 
 echo
 echo "== what std/text refuses, which is a panic with its own sentence"

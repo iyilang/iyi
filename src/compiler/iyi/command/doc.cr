@@ -97,16 +97,37 @@ class Iyi::Command
       end
     end
 
-    candidates = [File.join(Dir.current, "#{path}.iyi"), File.join(Dir.current, "#{path}.cr")]
-    IyiPath.new(iyi_path_entries).entries.each do |entry|
-      candidates << File.join(entry, "#{path}.iyi")
-      candidates << File.join(entry, "#{path}.cr")
+    roots = [Dir.current] + IyiPath.new(iyi_path_entries).entries
+    roots.each do |root|
+      {".iyi", ".cr"}.each do |extension|
+        relative = "#{path}#{extension}"
+        candidate = File.join(root, relative)
+        next unless File.file?(candidate) && doc_spelled_as?(root, relative)
+        # Expanded, as the file branch expands what it is handed: `File.join`
+        # leaves the module path's own `/` inside a root spelled with `\` on
+        # Windows, and the header check that follows read the mixed spelling
+        # as a module in the wrong place.
+        return File.expand_path(candidate)
+      end
     end
-    # Expanded, as the file branch expands what it is handed: `File.join`
-    # leaves the module path's own `/` inside a root spelled with `\` on
-    # Windows, and the header check that follows read the mixed spelling
-    # as a module in the wrong place.
-    candidates.find { |candidate| File.file?(candidate) }.try { |found| File.expand_path(found) }
+    nil
+  end
+
+  # Whether every `/` segment of *relative* is a name under *root* as it
+  # is written, case included. A module path is a name before it is a
+  # file, and a file system that ignores case answered for one the
+  # grammar refuses: `iyi doc app/Nest` printed `module app/nest` on
+  # Windows, where Linux has no such file and says so.
+  private def doc_spelled_as?(root : String, relative : String) : Bool
+    directory = root
+    relative.split('/').each do |segment|
+      next if segment.empty? || segment == "."
+      return false unless segment == ".." || Dir.children(directory).includes?(segment)
+      directory = File.join(directory, segment)
+    end
+    true
+  rescue File::Error
+    false
   end
 
   # The search path this process was given, or the default list when it
@@ -213,7 +234,7 @@ class Iyi::Command
 
     io = STDOUT
     if doc = type.doc
-      doc.each_line { |line| io << "# " << line << '\n' }
+      IyiMod.write_doc io, doc, ""
     end
     io << type.type_desc.lchop("generic ") << ' ' << type
     if type.is_a?(GenericType) && !type.type_vars.empty?
@@ -242,7 +263,7 @@ class Iyi::Command
     signatures.sort_by! { |signature| {signature.receiver, signature.name} }
     signatures.each do |signature|
       io << '\n'
-      signature.doc.each_line { |line| io << "  # " << line << '\n' } unless signature.doc.empty?
+      IyiMod.write_doc io, signature.doc, "  "
       io << "  " << IyiMod.render_signature(signature) << '\n'
     end
     io << "end\n"

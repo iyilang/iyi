@@ -670,7 +670,7 @@ pub class IyiSocket
   # CVE-2021-29921, so it must not quietly be 10 here), plus `localhost`.
   # The refusal inspects the host so a stray space shows.
   def self.parse_ip(host : String) : IPv4Address
-    return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if host == "localhost"
+    return IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8) if localhost?(host)
     return IPv4Address.new(0_u8, 0_u8, 0_u8, 0_u8) if host == "0.0.0.0" || host == ""
 
     parts = 0
@@ -711,6 +711,28 @@ pub class IyiSocket
     bytes[3] = curr.to_u8
 
     IPv4Address.new(bytes[0], bytes[1], bytes[2], bytes[3])
+  end
+
+  # `localhost` in any case, and with the one trailing dot of a name
+  # written fully qualified: a host name's case is not part of it (RFC
+  # 4343), and getaddrinfo, Python and curl all answer 127.0.0.1 for
+  # `LOCALHOST` and `localhost.`. Matched exactly, these were "cannot
+  # resolve address: \"LOCALHOST\"", and so were `Localhost` and
+  # `localhost.`.
+  private def self.localhost?(host : String) : ::Bool
+    size = host.bytesize
+    size = size - 1 if size == 10 && host.to_unsafe[9] == 46_u8
+    return false unless size == 9
+    name = "localhost".to_unsafe
+    raw = host.to_unsafe
+    index = 0
+    while index < 9
+      # ASCII only: setting bit 5 lowers an upper-case letter and leaves
+      # a lower-case one, and no other byte lands on a lower-case letter.
+      return false unless (raw[index] | 32_u8) == name[index]
+      index = index + 1
+    end
+    true
   end
 
   # Eight groups of up to four hex digits, `::` once for a run of zero

@@ -158,6 +158,7 @@ broken "a lone CR dropped again" 'elsif b == 10_u8 || b == 13_u8' 'elsif b == 10
 broken "a blank line read as one empty field" 'row << take(field, flen) if row.size > 0 || flen > 0 || opened' 'row << take(field, flen)' "ASSERTION FAILED: a blank line is a row of no fields"
 broken "a last quoted empty field dropped" 'if flen > 0 || row.size > 0 || opened' 'if flen > 0 || row.size > 0' "ASSERTION FAILED: a last line of one quoted empty field"
 broken "a lone empty field written bare" 'io << "\"\"" if fields.size == 1 && fields[0].empty?' '' "ASSERTION FAILED: a row of one empty field is written quoted"
+broken "a last row of no fields left unended" "io << '\\n' if rows.size > 0 && rows[rows.size - 1].empty?" '' "ASSERTION FAILED: a last row of no fields round trips"
 
 echo
 if [ "$status" -eq 0 ]; then

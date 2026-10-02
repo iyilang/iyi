@@ -257,11 +257,11 @@ class Iyi::Command
   # run). The language server's completion attaches the same pair to
   # every export it offers.
   private def mod_context_consumer_lines(written : String, artifact : IyiMod::Artifact, via : String? = nil) : String
-    names = artifact.exports.functions.map(&.name)
-    artifact.exports.types.each do |declaration|
-      names << declaration.name if declaration.visibility == "pub"
-    end
-    names.uniq!
+    # Every name the surface below lists, constants and macros included:
+    # `import app/misc::{f, Marked}` was the line for a module that exports
+    # `LIMIT` and `twice` too, and `import app/misc::{LIMIT, twice, f}`
+    # checks.
+    names = IyiMod.surface_names(artifact)
     String.build do |io|
       io << "# A file that uses this writes, after its own `module` line:\n"
       if names.empty?

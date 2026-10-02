@@ -259,6 +259,14 @@ assert_equal(9223372036854775807_i64, (-Span.seconds(-9223372036854775807_i64)).
 assert_equal(Time::MAX_SECONDS - Time::MIN_SECONDS, (Time.unix(Time::MAX_SECONDS) - Time.unix(Time::MIN_SECONDS)).to_i, "Time - Time across the whole range")
 puts "  Span accessors, operators (+, -, -@, cmp) and Time arithmetic verified"
 
+# Both ends of the milliseconds an Int64 holds come back: the lowest 808
+# were refused, so `Time.unix_ms(Int64::MIN).to_unix_ms` panicked where
+# `Time.unix_ms(Int64::MAX).to_unix_ms` answered.
+[-9223372036854775808_i64, -9223372036854775001_i64, -9223372036854775000_i64, -1001_i64, -1_i64, 0_i64, 9223372036854775807_i64].each do |ms|
+  assert_equal(ms, Time.unix_ms(ms).to_unix_ms, "Time.unix_ms(#{ms}).to_unix_ms round-trips")
+end
+puts "  Time.unix_ms round-trips at both ends of an Int64"
+
 # ---------------------------------------------------------------------------
 # RFC 3339 formatting and parsing
 # ---------------------------------------------------------------------------
@@ -327,5 +335,37 @@ assert_equal(-1_i64, (t_early <=> t_late).to_i64, "Time <=>")
 assert_equal(1_i64, (t_late <=> t_early).to_i64, "Time <=>")
 assert_equal(0_i64, (t_early <=> t_early).to_i64, "Time <=>")
 puts "  Time comparison (<=>, <, >, <=, >=, ==, !=, cmp) verified"
+
+# ---------------------------------------------------------------------------
+# Hash keys
+# ---------------------------------------------------------------------------
+
+puts "\n== hash keys"
+# Times, spans and days hash as they compare. Without a `hash` of their own
+# each hashed to its type: these pairs hashed alike, and every key of a table
+# of times went to one slot. A bound, not a benchmark: twenty times the same
+# pairs as tuples and 200 ms over.
+assert_true(Time.unix(1_i64).hash != Time.unix(1000000_i64, 5).hash, "two times hash apart")
+assert_true(Time.unix(7_i64, 9).hash == (Time.unix(6_i64, 999999999) + Span.nanoseconds(10_i64)).hash, "equal times hash alike")
+assert_true(Span.seconds(1_i64).hash != Span.days(9_i64).hash, "two spans hash apart")
+assert_true(Span.milliseconds(1500_i64).hash == Span.new(1_i64, 500000000).hash, "equal spans hash alike")
+assert_true(DayOfWeek::Monday.hash != DayOfWeek::Sunday.hash, "two days hash apart")
+started = __iyi_monotonic_ns
+times = {} of Time => Int32
+16000.times { |i| times[Time.unix(1700000000_i64 + i.to_i64 * 37_i64, i * 7919)] = i }
+times_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+spans = {} of Span => Int32
+16000.times { |i| spans[Span.new(i.to_i64 * 37_i64, i * 7919)] = i }
+spans_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+pairs = {} of {Int64, Int32} => Int32
+16000.times { |i| pairs[{1700000000_i64 + i.to_i64 * 37_i64, i * 7919}] = i }
+pairs_ns = __iyi_monotonic_ns - started
+assert_true(times.size == 16000 && times[Time.unix(1700000000_i64 + 4321_i64 * 37_i64, 4321 * 7919)]? == 4321, "a table of times fills and answers")
+assert_true(spans.size == 16000 && spans[Span.new(4321_i64 * 37_i64, 4321 * 7919)]? == 4321, "a table of spans fills and answers")
+assert_true(times_ns <= pairs_ns * 20 + 200_000_000_i64, "hash table: 16000 Time keys took #{times_ns // 1000000} ms where tuples took #{pairs_ns // 1000000} ms")
+assert_true(spans_ns <= pairs_ns * 20 + 200_000_000_i64, "hash table: 16000 Span keys took #{spans_ns // 1000000} ms where tuples took #{pairs_ns // 1000000} ms")
+puts "  times, spans and days hash as they compare; 16,000 time keys and 16,000 span keys each within twenty times their tuples' time and 200 ms"
 
 puts "\nALL CHECKS PASSED"

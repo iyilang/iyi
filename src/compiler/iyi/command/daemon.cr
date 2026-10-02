@@ -236,6 +236,11 @@ class Iyi::Command
     nil
   end
 
+  # iyi: the remedy says what moves the default socket, and on Windows that
+  # there is nothing to move it for. It said "set TMPDIR to a shorter
+  # directory", and the default is `daemon.sock` in the cache directory
+  # (`daemon_socket_path`), which TMPDIR moves on no system: with TMPDIR
+  # set to `C:\t` the refusal named the same 164-byte path again.
   private def daemon_refuse_long_socket(path : String) : Nil
     limit = Socket::UNIXAddress::MAX_PATH_SIZE
     return if path.bytesize <= limit
@@ -243,9 +248,27 @@ class Iyi::Command
     abort! "the socket path is #{path.bytesize} bytes and the kernel takes " \
            "#{limit}: #{path}. A unix socket's path is a fixed field in " \
            "`sockaddr_un`, so this is the machine's limit rather than " \
-           "this compiler's. Pass a shorter `--socket`, or set TMPDIR to " \
-           "a shorter directory and let the default sit under it",
+           "this compiler's. #{daemon_long_socket_remedy}",
       :FAILURE
+  end
+
+  private def daemon_long_socket_remedy : String
+    {% if flag?(:win32) %}
+      daemon_none_on_windows
+    {% else %}
+      "Pass a shorter `--socket`, or set #{Command.program_name.upcase}_CACHE_DIR " \
+      "to a shorter directory and let the default sit under it"
+    {% end %}
+  end
+
+  # iyi: what a Windows author is told instead of how to reach a daemon:
+  # "start one with `iyi daemon start`" sent them to the verb that answers
+  # "there is no daemon on Windows", and "remove it" or "pass a shorter
+  # `--socket`" to a path no daemon will ever listen on either.
+  private def daemon_none_on_windows : String
+    "The build daemon forks a child per build and Windows has no fork, so " \
+    "there is no daemon on Windows: `#{Command.program_name} build` with the " \
+    "same arguments builds without one"
   end
 
   private def daemon_start
@@ -760,10 +783,18 @@ class Iyi::Command
       # one on the same path answers "Address already in use" until the
       # stale file goes.
       if (info = File.info?(path)) && !info.type.socket?
-        abort! "#{path} is a file, not a socket: nothing can listen there. " \
-               "Remove it, or pass a `--socket` that is one", :FAILURE
+        {% if flag?(:win32) %}
+          abort! "#{path} is a file, not a socket: nothing can listen there. #{daemon_none_on_windows}", :FAILURE
+        {% else %}
+          abort! "#{path} is a file, not a socket: nothing can listen there. " \
+                 "Remove it, or pass a `--socket` that is one", :FAILURE
+        {% end %}
       end
-      abort! "no daemon listening on #{path} (start one with `#{Command.program_name} daemon start`)", :FAILURE
+      {% if flag?(:win32) %}
+        abort! "no daemon listening on #{path}. #{daemon_none_on_windows}", :FAILURE
+      {% else %}
+        abort! "no daemon listening on #{path} (start one with `#{Command.program_name} daemon start`)", :FAILURE
+      {% end %}
     end
 
     # The child runs a full command line, so put back the subcommand this one

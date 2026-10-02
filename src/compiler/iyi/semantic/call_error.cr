@@ -20,6 +20,33 @@ class Iyi::ASTNode
   end
 end
 
+module Iyi
+  # iyi: R-2's refusal of *name*, which *unit* did not mark `pub`, reached
+  # by a qualified name written in *scope*. The reason given was always the
+  # wall between modules, "Only what a module marks `pub` is reachable from
+  # outside it", and `App::Main::Point` written in app/main itself is not
+  # outside anything: a qualified name reaches a name the way another module
+  # would, from inside too, and there the bare name (*bare*) reaches it.
+  def self.iyi_not_exported(unit : Type, name : String, bare : String, scope : Type?) : String
+    if scope && iyi_inside?(scope, unit)
+      "#{unit} does not export #{name}, and a qualified name reaches only what a module exports, from inside it too: write `#{bare}` here, or mark it `pub` — see SPEC.md R-2"
+    else
+      "#{unit} does not export #{name}. Only what a module marks `pub` is reachable from outside it — see SPEC.md R-2"
+    end
+  end
+
+  # Whether *scope* is *unit* or is declared somewhere inside it.
+  def self.iyi_inside?(scope : Type, unit : Type) : Bool
+    unit = unit.instance_type
+    type = scope.instance_type
+    until type == unit
+      return false if type.is_a?(Program)
+      type = type.namespace.instance_type
+    end
+    true
+  end
+end
+
 class Iyi::Path
   def raise_undefined_constant(type)
     private_const = type.lookup_path(self, include_private: true)
@@ -28,7 +55,7 @@ class Iyi::Path
       # by Crystal's `private`, so say which word is missing (SPEC.md R-2).
       namespace = private_const.is_a?(Type) ? private_const.namespace : nil
       if namespace && namespace.iyi_unit?
-        self.raise("#{namespace} does not export #{private_const}. Only what a module marks `pub` is reachable from outside it — see SPEC.md R-2")
+        self.raise(Iyi.iyi_not_exported(namespace, private_const.to_s, names.last, type))
       end
 
       self.raise("private constant #{private_const} referenced")
@@ -1171,7 +1198,10 @@ class Iyi::Call
     check_macro_wrong_number_of_arguments(owner, def_name)
 
     owner_trace = obj.try &.find_owner_trace(owner.program, owner)
-    similar_name = owner.lookup_similar_def_name(def_name, self.args.size, block)
+    # A receiver other than `self` reaches no private def, so it is offered
+    # none (`Type#lookup_similar_def`).
+    outside = scope? if obj && !(obj.is_a?(Var) && obj.name == "self")
+    similar_name = owner.lookup_similar_def_name(def_name, self.args.size, block, outside)
     # iyi: the name may have arrived through an import's names, and those names live
     # on the scope's import list rather than on the owner — the exact miss
     # that made `addd` go unsuggested while `add` sat one edit away in
@@ -1640,7 +1670,7 @@ class Iyi::Call
 
         owner = match.def.owner
         if owner.is_a?(ModuleType) && owner.iyi_unit?
-          raise "#{owner} does not export '#{match.def.name}'. Only what a module marks `pub` is reachable from outside it — see SPEC.md R-2"
+          raise Iyi.iyi_not_exported(owner, "'#{match.def.name}'", match.def.name, scope?)
         end
 
         raise "private method '#{match.def.name}' called for #{owner}"

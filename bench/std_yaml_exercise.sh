@@ -185,7 +185,16 @@ PY
 
 prove_caught qplain "a plain scalar may not start with '?'" \
   "a plain scalar may start with '?'" \
-  '(b == 63_u8 && lone)' 'b == 63_u8'
+  'if b == 63_u8 && lone' 'if b == 63_u8'
+prove_caught keytag "a core tag on a key is refused" \
+  "a core tag on a key is read" \
+  '      while @error.nil? && @bytes[text_pos] == 33_u8' $'      fail("an alias, anchor or tag as a mapping key is not supported", key_pos) if @bytes[key_pos] == 33_u8\n      while @error.nil? && @bytes[text_pos] == 33_u8'
+prove_caught loneq "a lone '?' line is refused as a scalar" \
+  'refusal of "? lone' \
+  $'if b == 63_u8 && lone\n      fail("an explicit \'?\' key is not supported", pos)' $'if b == 63_u8 && lone\n      fail("a scalar cannot start with \'?\'", pos)'
+prove_caught mergedup "a second '<<' merges as well" \
+  'accepted "merged:' \
+  'if merge && merged' 'if merge && merged && false'
 prove_caught entry "'- b' after a key reads as text" \
   'accepted "a: - b' \
   'if b == 45_u8 && lone' 'if b == 45_u8 && lone && false'
@@ -198,6 +207,9 @@ prove_caught folded "a folded scalar drops its leading empty lines" \
 prove_caught spaced "spaces past the indentation make an empty line" \
   "spaces past the indentation on a blank line are text" \
   'if start + spaces >= finish && spaces <= indent' 'if start + spaces >= finish'
+prove_caught tabindent "a tab after a block scalar's indentation counts as indentation" \
+  "a tab after a block scalar's indentation is text" \
+  'content = @heads[look]' 'content = skip_blank(@starts[look])'
 prove_caught keep "the line after the stream's last line break is kept" \
   "keep chomping adds no line after the stream's last line break" \
   'break if finish >= @size' 'break if finish >= @size && false'
@@ -219,6 +231,9 @@ prove_caught flowfold "a plain scalar in a flow collection stops at its line end
 prove_caught docend "a document's end marked more than once is refused" \
   "a document's end may be marked more than once" \
   $'          skip_blank_lines\n        end\n        implicit_allowed = true' $'          break\n        end\n        implicit_allowed = true'
+prove_caught rootscalar "a root block scalar must be indented" \
+  "a root block scalar may start at the first column" \
+  $'      floor = parent + 1\n' $'      floor = parent + 1\n      floor = 1 if floor < 1\n'
 prove_caught tagbelow "a scalar tag alone on its line applies to the resolved node below" \
   "a tag over an empty node tags the empty scalar" \
   'if tag.nil? || tag == "!!seq" || tag == "!!map"' 'if true'
@@ -228,6 +243,9 @@ prove_caught flowempty "properties over nothing in a flow collection are refused
 prove_caught comment "a plain scalar folds on past a comment" \
   'accepted "a: b # c' \
   'break if skip_blank(@flow_end) < @ends[@line]' 'break if skip_blank(@flow_end) < @ends[@line] && false'
+prove_caught dashtext "a plain scalar's next line may not start with '- '" \
+  "a plain scalar's next line may start with '- '" \
+  $'      if key_colon(look) >= 0\n' $'      if sequence_entry?(look)\n        fail("bad indentation of a sequence entry", @heads[look])\n        break\n      end\n      if key_colon(look) >= 0\n'
 prove_caught intkey "an Int32 never reaches an integer key" \
   "an Int32 reaches an integer key through []? and dig?" \
   $'    return self[Any.new(index)] if kind == KIND_HASH\n    as_a[index]\n  end\n\n  def []?(index : Int32) : Any?\n    return self[Any.new(index)]? if kind == KIND_HASH\n' \
@@ -238,6 +256,9 @@ prove_caught hash "a '#' starts a flow scalar" \
 prove_caught flowentry "'? a' and '- a' read as text in a flow collection" \
   'accepted "[? a]' \
   'elsif (b == 63_u8 || b == 45_u8) && (pos + 1' 'elsif false && (b == 63_u8 || b == 45_u8) && (pos + 1'
+prove_caught aliasdepth "an alias's levels are not counted against the limit" \
+  'accepted "a0: &a0 x' \
+  'if deepest > DEPTH_LIMIT' 'if deepest > DEPTH_LIMIT && false'
 prove_caught escapes "the dump writes a byte order mark and C1 controls raw" \
   "a byte order mark is escaped when dumped" \
   $'size : Int32) : Int32\n    b = bytes[i]' $'size : Int32) : Int32\n    return -1\n    b = bytes[i]'
@@ -253,20 +274,15 @@ prove_caught utf16 "a UTF-16 stream is refused for its first zero byte" \
 prove_caught eofbreak "a block scalar ending the stream gets a line feed it lacks" \
   "a literal entry ending the stream without a line break keeps no line feed it lacks" \
   'final = lines.size > 0 && @ends[last_content] < @size' 'final = lines.size > 0'
+prove_caught maphash "a mapping's hash sums its pairs unmixed" \
+  "a 150 by 150 grid of mappings has at least 22,000 hashes" \
+  'value = value &+ {key, item}.hash' 'value = value &+ ((key.hash &* 31) &+ item.hash)'
 prove_caught mergespaced "a flow '<<' merges only with its ':' adjacent" \
   "a merge key spaced from its ':' merges" \
   'key.kind == Any::KIND_STRING && key.as_s == "<<"' 'key.kind == Any::KIND_STRING && key.as_s == "<<" && @bytes[pos + 2] == 58_u8'
 prove_caught mergepair "a one-pair flow mapping keeps '<<' as a key" \
   "a merge in a one-pair flow mapping merges" \
   'if merge_key?(item_pos, item)' 'if false && merge_key?(item_pos, item)'
-prove_caught blocktab "a tab after a block scalar's spaces counts as indentation" \
-  "a tab after a block scalar's indentation is text" \
-  $'if skip_blank(@starts[look]) < @ends[look]\n          indent = spaces if spaces > indent' \
-  $'if skip_blank(@starts[look]) < @ends[look]\n          indent = skip_blank(@starts[look]) - @starts[look] if skip_blank(@starts[look]) - @starts[look] > indent'
-prove_caught dashline "a continuation line starting with '- ' is refused" \
-  "a continuation line starting with '- ' is text" \
-  $'      # and as a tab in the indentation.\n' \
-  $'      # and as a tab in the indentation.\n      if sequence_entry?(look)\n        fail("bad indentation of a sequence entry", @heads[look])\n        break\n      end\n'
 prove_caught tabline "a tab after a continuation line's spaces is refused" \
   "a tab after a continuation line's indentation separates" \
   $'      # and as a tab in the indentation.\n' \

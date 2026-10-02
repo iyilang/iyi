@@ -171,6 +171,39 @@ grep -q "example.test/user/liba builds at v1.1.0: iyi.mod names v1.0.0" get3.log
 "$IYI" run use.iyi > run1.log 2>&1 || { fail "the program did not build"; cat run1.log; }
 grep -q "liba 1.1.0" run1.log || fail "the program ran liba '$(cat run1.log)', not what MVS selected"
 
+# A build inside a cached checkout verifies and never writes there. The
+# test was a string prefix, so on Windows a cache spelled in another case
+# - a drive letter an editor lowercased - was not "inside", iyi.sum was
+# written into the package, and every project using it was refused. Then
+# it folded the case and still told an 8.3 short name from its long one:
+# a CI runner's mktemp spells the cache `C:/Users/RUNNER~1/...`, the shell
+# enters the checkout as `C:\Users\runneradmin\...`, and the file was
+# written. Now `Sum.in_cache?` compares the two the way the file system
+# names them. A file written anyway is taken back out, or libb is "not
+# what it was" in every step after this one.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    checkout="$IYI_CACHE_DIR/mod/example.test/user/libb@v1.0.0"
+    cache_spelled() { # cache_spelled <how> <IYI_CACHE_DIR>
+      (cd "$checkout" && IYI_CACHE_DIR="$2" "$IYI" check libb.iyi) > cachecase.log 2>&1 ||
+        fail "check in the cached libb, IYI_CACHE_DIR in $1, failed: $(cat cachecase.log)"
+      if [ -e "$checkout/iyi.sum" ]; then
+        fail "a check with the cache spelled in $1 wrote iyi.sum into the cached libb"
+        rm -f "$checkout/iyi.sum"
+      else
+        echo "  a check in the cached libb, IYI_CACHE_DIR in $1: no iyi.sum written there"
+      fi
+    }
+    cache_spelled "upper case" "$(echo "$IYI_CACHE_DIR" | tr '[:lower:]' '[:upper:]')"
+    short="$(cygpath -m "$(cygpath -d "$IYI_CACHE_DIR" 2>/dev/null)" 2>/dev/null)"
+    if [ -n "$short" ] && [ "$short" != "$IYI_CACHE_DIR" ]; then
+      cache_spelled "its 8.3 short form" "$short"
+    else
+      echo "  (this volume gives $IYI_CACHE_DIR no 8.3 short form; that spelling is not asked)"
+    fi
+    ;;
+esac
+
 step "-u finds a tag published since, and the program builds against it"
 # First asked with --check: the new tag is found from the tags alone, said,
 # and nothing is written until the same `get` runs without it.
@@ -190,6 +223,17 @@ grep -q "upgraded example.test/user/liba v1.0.0 -> v1.3.0" get4.log || fail "the
 grep -q "example.test/user/libb is already at v1.0.0" get4.log || fail "libb's standing was not said: $(cat get4.log)"
 "$IYI" run use.iyi > run2.log 2>&1 || { fail "the program did not build after -u"; cat run2.log; }
 grep -q "liba 1.3.0" run2.log || fail "after -u the program ran '$(cat run2.log)'"
+
+step "a manifest saved with a byte order mark is read, and keeps it"
+# As PowerShell 5.1's `Out-File -Encoding utf8` writes one. It was refused
+# as "`\uFEFFmodule` is not a directive", and every verb with it.
+mkdir -p "$WORK/bom" && cd "$WORK/bom" || exit 1
+printf '\xef\xbb\xbfmodule example.test/user/bom\n' > iyi.mod
+"$IYI" get example.test/user/liba@v1.1.0 > bom.log 2>&1 || { fail "get on a manifest with a BOM failed"; cat bom.log; }
+[ "$(head -c 3 iyi.mod | od -An -tx1 | tr -d ' \n')" = "efbbbf" ] || fail "the BOM was not kept: $(od -c iyi.mod | head -2)"
+grep -q '^require example.test/user/liba v1.1.0$' iyi.mod || fail "the BOM manifest did not get liba: $(cat iyi.mod)"
+cd "$WORK/app" || exit 1
+[ "$status" -eq 0 ] && echo "  read past, kept, and liba v1.1.0 required"
 
 step "a major version past 1 is the same repository under a /vN path"
 # liba's repository publishes v2.0.0, whose manifest names the module
@@ -225,6 +269,12 @@ refused "a version without its v" "does not start with \`v\`" example.test/user/
 refused "the module itself" "is this module" example.test/user/app
 refused "a path that is not a module path" "is not a module path" Example.test/User/liba
 refused "-u beside a path" "takes no path" -u example.test/user/liba
+# Two lines for one path: get moved the first, said the second was what it
+# moved from - "downgraded v1.3.0 -> v1.1.0" - and built at v1.3.0.
+mkdir -p "$WORK/dup" && cd "$WORK/dup" || exit 1
+printf 'module example.test/user/dup\nrequire example.test/user/liba v1.0.0\nrequire example.test/user/liba v1.3.0\n' > iyi.mod
+refused "a path required twice" "example.test/user/liba is already required, at v1.0.0" example.test/user/liba@v1.1.0
+cd "$WORK/app" || exit 1
 (cd "$WORK" && "$IYI" get example.test/user/liba) > nomanifest.log 2>&1
 if [ $? -eq 0 ] || ! grep -q "there is no iyi.mod" nomanifest.log; then
   fail "a directory without iyi.mod was not named"
@@ -241,6 +291,26 @@ if [ "$(grep -c $'\r$' "$WORK/crlf/iyi.mod")" != "$(wc -l < "$WORK/crlf/iyi.mod"
 else
   echo "  every line ends CRLF, the new one too"
 fi
+
+step "a manifest with mixed line endings: each line is found, and keeps its own"
+# `init` writes LF and cmd's `echo require ... >> iyi.mod` appends CRLF. The
+# file was split on CRLF alone, so the LF lines were one piece and the
+# `require` in it was never found: get appended a second line, and tidy
+# said "removed" and removed nothing. (`grep -U`: a Windows grep reads a
+# line's CR away otherwise.)
+mkdir -p "$WORK/mixed" && cd "$WORK/mixed" || exit 1
+printf '# made by init\nmodule example.test/user/mixed\nrequire example.test/user/liba v1.1.0\r\n' > iyi.mod
+"$IYI" get example.test/user/liba@v1.0.0 > mixed.log 2>&1 || { fail "get on a mixed manifest failed"; cat mixed.log; }
+[ "$(grep -c 'example.test/user/liba' iyi.mod | tr -d ' ')" = "1" ] || fail "a mixed manifest gained a second liba line: $(cat iyi.mod)"
+grep -qU $'^require example.test/user/liba v1.0.0\r$' iyi.mod && ! grep -qU $'module example.test/user/mixed\r' iyi.mod ||
+  fail "the liba line did not move, or a line lost or gained its CR: $(od -c iyi.mod | tail -4)"
+printf 'module example.test/user/mixt\nrequire example.test/user/libb v1.0.0\r\n' > iyi.mod
+printf 'puts 1\n' > main.iyi
+"$IYI" mod tidy > mixed-tidy.log 2>&1 || { fail "tidy on a mixed manifest failed"; cat mixed-tidy.log; }
+[ -z "$(requires example.test/user/libb)" ] || fail "tidy said '$(cat mixed-tidy.log)' and left libb's line"
+"$IYI" mod tidy --check > mixed-tidy2.log 2>&1 || fail "a tidied mixed manifest was not clean: $(cat mixed-tidy2.log)"
+cd "$WORK/app" || exit 1
+[ "$status" -eq 0 ] && echo "  get moved the one CRLF line among LF ones, and tidy removed one for good"
 
 step "replace builds a required module from a directory"
 mkdir -p "$WORK/liba-local" "$WORK/rapp"
@@ -274,6 +344,16 @@ cp use.iyi "$WORK/capp/use.iyi"
 (cd "$WORK/capp" && "$IYI" run use.iyi) > replace4.log 2>&1 || { fail "a dependency's replace redirected the build"; cat replace4.log; }
 grep -q "liba 1.1.0" replace4.log || fail "the program ran '$(cat replace4.log)', not liba's tag"
 [ "$status" -eq 0 ] && echo "  libc's replace of liba is libc's business: the build fetched liba v1.1.0"
+
+step "a relative IYI_MOD_MIRROR is the working directory's"
+# Handed to git as written, the path was read from the top of the git
+# repository the project sits in - `outer` here - and was no repository.
+mkdir -p "$WORK/outer/proj" && git init -q "$WORK/outer"
+printf 'module example.test/user/proj\n' > "$WORK/outer/proj/iyi.mod"
+(cd "$WORK/outer/proj" && IYI_MOD_MIRROR=../../mirror "$IYI" get example.test/user/liba@v1.1.0) > relmirror.log 2>&1 ||
+  fail "a relative mirror inside a repository was not found: $(cat relmirror.log)"
+grep -q "added example.test/user/liba v1.1.0" relmirror.log && echo "  ../../mirror from outer/proj: liba v1.1.0 added" ||
+  fail "the relative mirror's get said: $(cat relmirror.log)"
 
 step "a replacement that is not the module is refused by name"
 bad_replace() { # bad_replace <label> <target> <phrase>
@@ -551,6 +631,21 @@ printf 'module example.test/user/rel/v2\n' > iyi.mod && git commit -qam v2
 grep -q "examples/demo" rel6.log && fail "an example program was counted as surface: $(cat rel6.log)"
 if "$IYI" mod release v1.0.0 > rel7.log 2>&1; then fail "a version already tagged was accepted: $(cat rel7.log)"; fi
 [ "$status" -eq 0 ] && echo "  respelled: patch; new def: minor, patch refused; gone def: v2 at /v2, refused until iyi.mod says it"
+# A module saved with a byte order mark, its header carrying a comment,
+# its `pub` followed by a tab: the same surface, so a patch. Each was a
+# module not found, its whole surface "gone", and a new major.
+RELHDR="$WORK/relhdr"
+mkrepo "$RELHDR"
+cd "$RELHDR" || exit 1
+printf 'module example.test/user/relhdr\n' > iyi.mod
+printf 'module relhdr\n\npub def greeting : String\n  "one"\nend\n' > relhdr.iyi
+git add -A && git commit -qm one && git tag v1.0.0
+printf '\xef\xbb\xbfmodule relhdr # the library\n\npub\tdef greeting : String\n  "one"\nend\n' > relhdr.iyi
+git commit -qam respelled
+"$IYI" mod release > relhdr.log 2>&1 || fail "mod release failed on a respelled header: $(cat relhdr.log)"
+grep -q "the next release is v1.0.1: the surface is as it was" relhdr.log ||
+  fail "a BOM, a header comment and pub<TAB> changed the surface: $(cat relhdr.log)"
+[ "$status" -eq 0 ] && echo "  a BOM, a comment on the header, pub<TAB>: the same surface, v1.0.1"
 
 step "mod release before v1: a break is a minor"
 REL0="$WORK/rel0"
@@ -565,6 +660,27 @@ if "$IYI" mod release v0.3.1 > zero.log 2>&1 || ! grep -q "so the next release i
 fi
 "$IYI" mod release v0.4.0 > zero2.log 2>&1 || fail "v0.4.0 was refused for a v0 break: $(cat zero2.log)"
 [ "$status" -eq 0 ] && echo "  v0.3.0 -> a def gone: v0.3.1 refused, v0.4.0 holds it"
+
+step "mod release measures from the last release, not a pre-release"
+# v1.2.0-rc.1 removed what v1.1.0 exported: measured from the rc, the
+# removal was never compared and v1.2.0 "held what changed". A release
+# after an rc that only adds is a minor of v1.1.0's.
+RELRC="$WORK/relrc"
+mkrepo "$RELRC"
+cd "$RELRC" || exit 1
+printf 'module example.test/user/relrc\n' > iyi.mod
+printf 'module relrc\n\npub def greeting : String\n  "one"\nend\n' > relrc.iyi
+git add -A && git commit -qm one && git tag v1.1.0
+printf 'module relrc\n\npub def other : String\n  "x"\nend\n' > relrc.iyi && git commit -qam rc && git tag v1.2.0-rc.1
+printf '# the release\n' >> relrc.iyi && git commit -qam release
+if "$IYI" mod release v1.2.0 > relrc.log 2>&1 || ! grep -q "compared with v1.1.0" relrc.log ||
+  ! grep -q "so the next release is v2.0.0" relrc.log; then
+  fail "a break made in an rc was released as a minor: $(cat relrc.log)"
+fi
+printf 'module relrc\n\npub def greeting : String\n  "one"\nend\n\npub def a : Int32\n  1\nend\n' > relrc.iyi
+git commit -qam additive
+"$IYI" mod release v1.2.0 > relrc2.log 2>&1 || fail "v1.2.0 after v1.1.0 and an rc, adding a def, was refused: $(cat relrc2.log)"
+[ "$status" -eq 0 ] && echo "  an rc that removed: v2.0.0 from v1.1.0; a release that adds after it: v1.2.0"
 
 step "get says what a move changes in what the project uses"
 mkrepo "$WORK/work/libi"
@@ -657,13 +773,20 @@ step "a package's sum is the same on every platform"
 # the tag's and not the machine's: on Windows the path of a file in a
 # directory went in with `\`, and the bytes were the checkout's, which
 # Git for Windows' default `core.autocrlf=true` writes with CRLF - an
-# `iyi.sum` made on Linux was refused there as tampering. Recomputed here
-# from the tag itself, with a global git config that asks for CRLF.
+# `iyi.sum` made on Linux was refused there as tampering. The package also
+# says `* text=auto` in its `.gitattributes`, which has git write its text
+# files with `core.eol` - CRLF on Windows by default - whatever autocrlf
+# says. Recomputed here from the tag itself, with a global git config that
+# asks for CRLF both ways, which the fetcher's KEEP_BYTES both undo.
 mkrepo "$WORK/work/libn"
+# Its own commit keeps the LF it was written with, quietly: the machine's
+# git may ask for CRLF, and warns of it under `text=auto`.
+git -C "$WORK/work/libn" config core.autocrlf false
 mkdir -p "$WORK/work/libn/sub"
 printf 'module example.test/user/libn\n' > "$WORK/work/libn/iyi.mod"
 printf 'module libn\n\npub def two : Int32\n  2\nend\n' > "$WORK/work/libn/libn.iyi"
 printf 'module libn/sub/extra\n\npub def three : Int32\n  3\nend\n' > "$WORK/work/libn/sub/extra.iyi"
+printf '* text=auto\n' > "$WORK/work/libn/.gitattributes"
 git -C "$WORK/work/libn" add -A && git -C "$WORK/work/libn" commit -qm one
 git init -q --bare "$WORK/mirror/example.test/user/libn"
 (cd "$WORK" && publish libn v1.0.0)
@@ -673,7 +796,8 @@ expected="$(
     printf '%s\0' "$f"; git show "v1.0.0:$f"; printf '\0'
   done | sha1sum | cut -c1-40
 )"
-printf '[core]\n\tautocrlf = true\n' > "$WORK/crlf.gitconfig"
+# Both: autocrlf for every file, eol for a `text` one (KEEP_BYTES).
+printf '[core]\n\tautocrlf = true\n\teol = crlf\n' > "$WORK/crlf.gitconfig"
 mkdir -p "$WORK/napp" && cd "$WORK/napp" || exit 1
 printf 'module example.test/user/napp\n' > iyi.mod
 GIT_CONFIG_GLOBAL="$WORK/crlf.gitconfig" "$IYI" get example.test/user/libn > sum.log 2>&1 || fail "get libn failed: $(cat sum.log)"

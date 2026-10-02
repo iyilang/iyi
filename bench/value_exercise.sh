@@ -238,11 +238,11 @@ else
 fi
 
 prove_fails "== by identity" no_eq "tuple: == same members" \
-  's/^      return false unless self\[{{i}}\] == other\[{{i}}\]$/      return false/'
+  's/^      return false unless {{ T\[i\] <= U\[i\] || U\[i\] <= T\[i\] }} \&\& self\[{{i}}\] == other\[{{i}}\]$/      return false/'
 
 # 2. Equality that ignores the members, the other direction: everything equal.
 prove_fails "== always true" all_eq "tuple: == different members" \
-  's/^      return false unless self\[{{i}}\] == other\[{{i}}\]$/      # broken/'
+  's/^      return false unless {{ T\[i\] <= U\[i\] || U\[i\] <= T\[i\] }} \&\& self\[{{i}}\] == other\[{{i}}\]$/      # broken/'
 
 # 3. One slot for every tuple, which is `Object#hash`. Equality still holds,
 #    so this is the check that a key is found rather than merely compared.

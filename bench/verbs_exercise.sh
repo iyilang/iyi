@@ -141,6 +141,18 @@ cp mods/app/lib.iyimod lib.good
 echo
 echo "== what the command line refuses"
 refuses "an unknown verb" "unknown command" -- "$IYI" frobnicate
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # An extension written as a batch file, the shape npm's shims take on
+    # Windows: the lookup is `CreateProcess`'s and appends `.exe` only, so
+    # `iyi batonly` with `iyi-batonly.cmd` on PATH said "unknown command or
+    # missing file" about a file that was there.
+    mkdir -p extbin
+    printf '@echo batonly %%*\r\n' > extbin/iyi-batonly.cmd
+    refuses "an extension that is a batch file" "iyi-batonly.cmd is a batch file" -- \
+      env PATH="$(cygpath -u "$WORK/extbin"):$PATH" "$IYI" batonly x
+    ;;
+esac
 # `help nonesuch` printed the whole usage and exited 0 - "yes, that is a
 # command" - and `help build` did the same, as if the verb had no help of
 # its own. `version extra` dropped the word.
@@ -188,6 +200,22 @@ refuses "the session that was removed" "unknown command" -- "$IYI" repl
 refuses "spec, which is iyi test here" "\`iyi test\` runs them" -- "$IYI" spec
 refuses "eval, which has no evaluator here" "\`iyi run\` it" -- "$IYI" eval "puts 1"
 refuses "an unknown flag" "Invalid option" -- "$IYI" build --nonesuch good.iyi
+# `--mcpu` was handed to LLVM unchecked: an unknown name was warned about
+# once per codegen thread, the lines running into each other, and the
+# build died in LLVM's `abort()` - "64-bit code requested on a subtarget
+# that doesn't support it!", exit 0xC0000409 on Windows. A name it knows
+# is still taken.
+refuses "an --mcpu LLVM does not know" "is not a CPU LLVM knows" -- \
+  "$IYI" build --mcpu nonesuch -o "$WORK/mcpu_bad" good.iyi
+case "$(uname -m)" in
+  x86_64 | amd64)
+    if "$IYI" build --mcpu x86-64 -o mcpu_ok good.iyi > mcpu.log 2>&1 && [ "$(./mcpu_ok | tr -d '\r')" = "ok" ]; then
+      echo "  an --mcpu LLVM knows: builds and runs"
+    else
+      echo "  an --mcpu LLVM knows did not build:"; sed -n '1,3p' mcpu.log; status=1
+    fi
+    ;;
+esac
 refuses "a file that is not there" "no such file" -- "$IYI" run "$WORK/nope.iyi"
 # One sentence for one mistake, from every verb that takes a file: this was
 # "no such file" about a path that is right there, so the reader ran `ls`,
@@ -196,6 +224,26 @@ refuses "a file that is not there" "no such file" -- "$IYI" run "$WORK/nope.iyi"
 refuses "a directory as the entry" "is a directory, not a source file" -- "$IYI" run "$WORK"
 refuses "a directory where check wants a file" "is a directory" -- "$IYI" check "$WORK"
 refuses "two module headers in one file" "a file declares one module" -- "$IYI" run twoheaders.iyi
+# A header after an `import` is the file's only header in the wrong place.
+# It was told the file "already declares `no module`" and that
+# `latehead` belongs in `latehead.iyi` - said to `latehead.iyi`.
+printf 'import app/lib\nmodule latehead\n\nputs 1\n' > latehead.iyi
+refuses "a module header after an import" 'the `module` header comes first in a file' -- \
+  "$IYI" check latehead.iyi
+# A file imported without a module header. The refusal was "`bare` is not
+# imported here: ... write `import bare::{name}`", under the very import
+# it described.
+printf 'pub def twice(x : Int32) : Int32\n  x * 2\nend\n' > bare.iyi
+printf 'import bare::{twice}\n\nputs twice(3)\n' > usesbare.iyi
+refuses "an import of a file with no module header" 'has no `module bare` header' -- \
+  "$IYI" run usesbare.iyi
+# A macro the module declares and did not mark `pub`, imported by name, was
+# told "nothing by that name is declared in `app/macros`, `pub` or not" -
+# the answer for a typo, because only defs and types were looked in.
+printf 'module app/macros\n\nmacro hidden_m\n  1\nend\n' > app/macros.iyi
+printf 'module usesmacro\n\nimport app/macros::{hidden_m}\n\nhidden_m\n' > usesmacro.iyi
+refuses "a macro not marked pub, imported by name" 'does not export `hidden_m`' -- \
+  "$IYI" check usesmacro.iyi
 refuses "bytes that are not text" "not a valid iyi source file" -- "$IYI" run binary.iyi
 # A program that ran out of stack says so itself now - `iyi: panic: stack
 # overflow`, from a handler on an alternate stack (bench/panics.sh holds
@@ -206,6 +254,11 @@ printf 'module deep\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\npu
 refuses "a program that ran out of stack" "stack overflow" -- "$IYI" run deep.iyi
 printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
+# `name!(1)`: the `!` is a propagation, and an argument list was told it
+# "takes no block".
+printf 'module bangargs\n\nnomacro!(1)\n' > bangargs.iyi
+refuses "a call spelled with ! and arguments" 'propagates an error, and takes no arguments' -- \
+  "$IYI" check bangargs.iyi
 # A program's own exit status is `iyi run`'s, a negative one too. On
 # Windows `exit(-1)` is 0xFFFFFFFF, which the runner took for an abnormal
 # end: "terminated abnormally, the cause is unknown", and exit 1.
@@ -223,8 +276,32 @@ else
   echo "  a program's exit(-1): the program exits $own_code, the runner $neg_code, saying: $(head -c 200 neg.out)"
   status=1
 fi
+# The job `iyi run` holds its program in lets a child break away from it,
+# as a shell does: the program's own CREATE_BREAKAWAY_FROM_JOB start was
+# refused with "Access is denied" (error 5) under `iyi run` alone.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    away=$("$IYI" run "$REPO/bench/std_process_exercise.iyi" -- breakaway 2>&1 | tail -1)
+    if [ "$away" = "started" ]; then
+      echo "  a program under iyi run starts a child that breaks away from the runner's job"
+    else
+      echo "  a program under iyi run could not start a child away from the runner's job: $away"
+      status=1
+    fi
+    ;;
+esac
 refuses "an output directory that is not there" "there is no" -- \
   "$IYI" build -o "$WORK/nodir/prog" good.iyi
+# A block whose return type nothing says was sent to the other language's
+# reference: "See: https://crystal-lang.org/reference/...".
+printf 'module recblock\n\ndef rec(n : Int32)\n  capture { rec(n - 1) }\nend\n\ndef capture(&block : -> T) forall T\n  block.call\nend\n\nputs rec(3)\n' > recblock.iyi
+refuses "a block whose return type nothing says" \
+  'cast the block body with `as`: `{ value.as(Int32) }` writes down the type' -- \
+  "$IYI" check recblock.iyi
+# The refusal of an `--x86-asm-syntax` wrote over the value it refused
+# before printing it: "Invalid value `` for x86-asm-syntax".
+refuses "an --x86-asm-syntax that is neither" "Invalid value \`x\` for x86-asm-syntax" -- \
+  "$IYI" build --x86-asm-syntax x -o "$WORK/asm" good.iyi
 # Two `iyi run`s at once of programs with one basename. The runner linked
 # into one executable per basename, and Windows will not write over one
 # that is running: the second failed with `LNK1104: cannot open file
@@ -248,6 +325,17 @@ fi
 touch twin_b.done
 wait "$twin_a"
 grep -qx a twin_a.out || { echo "  the first of two same-named runs did not finish: $(head -c 200 twin_a.out)"; status=1; }
+# A byte that is not UTF-8 past a module's first character. Only the first
+# was guarded, and the rest answered `Error: while importing "app/lib"` and
+# `Unexpected byte 0xff at position 39`, naming no file and no line.
+mkdir -p badbyte/app
+printf 'module app/lib\n\npub def hi : String\n  "\377"\nend\n' > badbyte/app/lib.iyi
+printf 'module app/main\n\nimport app/lib::*\nputs hi\n' > badbyte/app/main.iyi
+refuses "a module with a byte that is not text on line 4" \
+  "main.iyi:3:1" -- "$IYI" check badbyte/app/main.iyi
+refuses "and the sentence names the module" \
+  "lib.iyi' is not a valid iyi source file: Unexpected byte 0xff at position 39" -- \
+  "$IYI" check badbyte/app/main.iyi
 # What a runner ended from outside leaves - `taskkill /F` runs no code
 # in it, so its program stays in the cache under the runner's own name -
 # the next run takes away once it is an hour old, and not before: a
@@ -281,6 +369,44 @@ if [ HDR/APP/MAIN.IYI -ef hdr/app/main.iyi ]; then
     status=1
   fi
 fi
+# The front end alone reads the same root (`Compiler#adopt_header_root`).
+# `tool dependencies` and `tool hierarchy` never asked the header, and of
+# the file `run` builds just above both said "can't find module 'app/util'".
+"$IYI" tool dependencies hdr/app/main.iyi > hdr_deps.out 2>&1; deps_code=$?
+"$IYI" tool hierarchy hdr/app/main.iyi > hdr_hier.out 2>&1; hier_code=$?
+if [ "$deps_code" -eq 0 ] && grep -q 'util\.iyi' hdr_deps.out && [ "$hier_code" -eq 0 ]; then
+  echo "  tool dependencies and tool hierarchy of a module: resolve its imports"
+else
+  echo "  tool dependencies and tool hierarchy of a module: exit $deps_code and $hier_code"
+  grep -h -m1 "^Error" hdr_deps.out hdr_hier.out
+  status=1
+fi
+# And the lexer, of `run HDR/APP/MAIN.IYI` above: a path typed in another
+# case is the file its directory stores, and a module that writes `!` - a
+# token in iyi and part of a name in the other language - ran on iyi's
+# prelude and was lexed as the other language: `unexpected token: "!"`.
+printf 'module app/bang\n\nstruct Neg\nend\n\nimpl Error for Neg\n  def message : String\n    "neg"\n  end\nend\n\ndef g(x : Int32) : Int32 | Neg\n  return Neg.new if x < 0\n  x\nend\n\ndef h : Int32 | Neg\n  v = g(1)!\n  v + 1\nend\n\nputs h.or(0)\n' > hdr/app/bang.iyi
+if [ HDR/APP/BANG.IYI -ef hdr/app/bang.iyi ]; then
+  if "$IYI" run HDR/APP/BANG.IYI > hdr_bang.out 2>&1 && grep -qx 2 hdr_bang.out; then
+    echo "  a module with \`!\` run by its path in another case: lexed as iyi"
+  else
+    echo "  a module with \`!\` run by its path in another case did not run:"
+    sed -n '1,3p' hdr_bang.out
+    status=1
+  fi
+fi
+# A file *stored* as `.IYI` is not an iyi file on any system, and every
+# verb says so by name (`Lexer.iyi_miscased?`). On Windows it was half of
+# one: `run` folded the case for the prelude and the lexer did not, and
+# `fmt DIR` and `test DIR` walked past it at exit 0.
+mkdir -p upcase/tests
+cp hdr/app/bang.iyi upcase/UP.IYI
+cp hdr/app/bang.iyi upcase/tests/up_test.IYI
+refuses "a file stored as .IYI, run" 'ends in `.IYI`' -- "$IYI" run upcase/UP.IYI
+refuses "a file stored as .IYI, checked" 'ends in `.IYI`' -- "$IYI" check upcase/UP.IYI
+refuses "a file stored as .IYI, formatted" 'ends in `.IYI`' -- "$IYI" fmt --check upcase/UP.IYI
+refuses "a directory holding a .IYI, formatted" 'ends in `.IYI`' -- "$IYI" fmt --check upcase
+refuses "a directory holding a _test.IYI, tested" 'ends in `.IYI`' -- "$IYI" test upcase/tests
 # A byte order mark, which a Windows editor may put at the front of a
 # file. The lexer skips it; the three readings of a header did not, so a
 # module saved with one ran as a script and its import beside the header
@@ -308,16 +434,55 @@ else
 fi
 "$IYI" fmt bom/app/util.iyi > /dev/null 2>&1
 cmp -s bom/app/util.iyi bom/util.keep || { echo "  fmt rewrote a formatted file with a byte order mark"; status=1; }
+# And a byte order mark on line 1, which the lexer drops before it counts
+# a column: the line was shown with the mark, ` 1 | \uFEFFputs 1.nope`, and
+# the caret, placed by the mark-free column, stood under `.nop` wherever
+# a terminal gave the mark a cell. The line is read as the lexer counted
+# it now (`source_file_lines`).
+printf '\357\273\277puts 1.nope\n' > marked1.iyi
+"$IYI" check marked1.iyi > marked1.out 2>&1
+if grep -qx ' 1 | puts 1.nope' marked1.out &&
+   [ "$(grep -A1 '^ 1 | ' marked1.out | sed -n '2p')" = "$(printf '%12s^---' '')" ]; then
+  echo "  line 1 behind a byte order mark is shown without it, the caret under the column"
+else
+  echo "  line 1 behind a byte order mark:"
+  sed -n '1,8p' marked1.out | cat -A
+  status=1
+fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # The entry spelled verbatim, `\\?\C:\...` or `\\.\C:\...`, or with the
+    # trailing space Win32 drops: the cache directory was named after the
+    # path's parts, `\-C:-...` - refused for its colon, "The directory name
+    # is invalid" - and `...-good.iyi `, made without its space and then
+    # written into with it, "The system cannot find the path specified".
+    for prefix in '\\?\' '\\.\'; do
+      if "$IYI" run "$prefix$(cygpath -w "$WORK/hdr/app/main.iyi")" > hdr_verbatim.out 2>&1 && grep -qx 42 hdr_verbatim.out; then
+        echo "  a module run by its path spelled $prefix: builds and runs"
+      else
+        echo "  a module run by its path spelled $prefix did not run:"; sed -n '1,3p' hdr_verbatim.out; status=1
+      fi
+    done
+    if "$IYI" run "good.iyi " > space_run.out 2>&1 && grep -qx ok space_run.out; then
+      echo "  a program run by its name with a trailing space: builds and runs"
+    else
+      echo "  a program run by its name with a trailing space did not run:"; sed -n '1,3p' space_run.out; status=1
+    fi
+    ;;
+esac
 # A CRLF file keeps its CRLF through `fmt`, and a literal keeps the line
 # breaks it holds, which are the program's data: every `\n` was turned, so
 # a string holding a bare line break gained a `\r` and printed eight bytes
 # where it had printed seven. A heredoc's opener and the lines inside an
-# interpolated string are the other two places a line break can sit.
+# interpolated string are the other two places a line break can sit. And
+# macro text, a macro's body or a `{% if %}`'s, which the parser keeps as
+# text: its literals went unseen and `"a` / `b"` there gained the `\r`.
 mkdir -p crlf
 printf 'module m\r\n\r\ns = "one\ntwo"\r\nputs s.bytesize\r\n' > crlf/lit.iyi
 printf 'module h\r\n\r\ntext = <<-EOS\r\n  hello\r\n  world\r\n  EOS\r\nputs text.bytesize\r\n' > crlf/here.iyi
 printf 'module p\r\n\r\ndef f(x : Int32) : Int32\r\n  x + 1\r\nend\r\n\r\nputs "a#{f(1)}b\r\nc"\r\n' > crlf/interp.iyi
-for f in lit here interp; do
+printf 'module q\r\n\r\nmacro m\r\n  puts "a\nb".bytesize\r\nend\r\n\r\nm\r\n{%% if true %%}\r\n  puts "c\nd".bytesize\r\n{%% end %%}\r\n' > crlf/macro.iyi
+for f in lit here interp macro; do
   cp "crlf/$f.iyi" "crlf/$f.keep"
   "$IYI" fmt "crlf/$f.iyi" > /dev/null 2>&1
   if cmp -s "crlf/$f.iyi" "crlf/$f.keep"; then
@@ -326,6 +491,125 @@ for f in lit here interp; do
     echo "  fmt changed a formatted CRLF file ($f):"; od -c "crlf/$f.iyi" | sed -n '1,6p'; status=1
   fi
 done
+# What `fmt` writes is what was written - the same program - and is its
+# own format: `fmt -` of the input is the wanted text, and the wanted
+# text formats to itself.
+fmt_gives() { # fmt_gives <label> <input> [<want>]; <want> defaults to <input>
+  local label="$1" input="$2" want="${3-$2}" code
+  printf '%s' "$input" > fmt_in.iyi
+  printf '%s' "$want" > fmt_want.iyi
+  "$IYI" fmt - < fmt_in.iyi > fmt_got.iyi 2> fmt_err.out
+  code=$?
+  "$IYI" fmt - < fmt_want.iyi > fmt_again.iyi 2>> fmt_err.out
+  if [ "$code" -eq 0 ] && cmp -s fmt_got.iyi fmt_want.iyi && cmp -s fmt_again.iyi fmt_want.iyi; then
+    echo "  fmt $label"
+  else
+    echo "  fmt $label: exit $code, and wrote:"; sed -n '1,8p' fmt_got.iyi fmt_err.out; status=1
+  fi
+}
+# A comment after a block's `{` or `do`, or a proc literal's: the `}` or
+# `end` went onto the last line, after that line's comment, where it
+# closed nothing and the file no longer compiled.
+fmt_gives "keeps a block's } off the last line, after a comment on its {" \
+  $'def run(&)\n  yield\nend\n\nrun { # c\n  y = 1\n  puts y # d\n}\n'
+fmt_gives "keeps a proc literal's } off the last line, after a comment on its {" \
+  $'f = ->(b : Int32) { # c\n  x = b\n  x + 1 # d\n}\n'
+fmt_gives "keeps a proc literal's end off the last line, after a comment on its do" \
+  $'f = -> do # c\n  x = 1\n  x + 1 # d\nend\n'
+fmt_gives "keeps the comment lines under do |x| # c inside the block" \
+  $'[1].each do |x| # c\n  # d\n  puts x\nend\n'
+# The blanks and the `\r` a line inside a literal ends with are the
+# program's: they were stripped - only heredocs were spared - so `"a  ` /
+# `b"` printed 5 before `fmt` and 3 after.
+fmt_gives "keeps the blanks and the \\r a line inside a literal ends with" \
+  $'x = 1\ns = "a  \nb"\nt = %(c\t\nd)\nu = /e  \nf/\nv = "g\r\nh"\n'
+fmt_gives "keeps the blanks a line inside a literal in a macro ends with" \
+  $'macro m\n  puts "a  \nb".bytesize\nend\n'
+# A NUL byte inside a file is not its end. The lexer took every '\0' for
+# one, so `puts 1<NUL>` and the lines after it compiled as `puts 1` -
+# `check` exited 0 - and `fmt` wrote back the part before the NUL: a
+# UTF-16 file without its byte order mark became `p`. (`check` quotes the
+# line, NUL and all, so its answer is read as text: `grep -a`.)
+printf 'module main\n\nputs 1\000\nputs 2\n' > nul.iyi
+cp nul.iyi nul.keep
+refuses "a NUL byte in a file, formatted" "unexpected NUL byte" -- "$IYI" fmt nul.iyi
+cmp -s nul.iyi nul.keep || { echo "  fmt wrote back a file with a NUL byte in it"; status=1; }
+"$IYI" check nul.iyi > nul_check.out 2>&1
+nul_code=$?
+if [ "$nul_code" -ne 0 ] && grep -aq "unexpected NUL byte" nul_check.out && ! has_trace nul_check.out; then
+  echo "  a NUL byte in a file, checked: exits $nul_code, \"unexpected NUL byte\""
+else
+  echo "  a NUL byte in a file, checked: exit $nul_code"; sed -n '1,3p' nul_check.out | tr -d '\000'; status=1
+fi
+printf 'p\000u\000t\000s\000 \0001\000\n\000' > utf16.iyi
+refuses "a UTF-16 file without its mark, formatted" "unexpected NUL byte" -- "$IYI" fmt --check utf16.iyi
+# `.or(...)` and `.or_panic` on the line under their value: "expecting .,
+# not `NEWLINE`", and "there's a bug formatting".
+fmt_gives "takes .or and .or_panic on the line under their value" \
+  $'x = g(-1)\n  .or(2)\ny = g(5)\n  .or_panic\nz = g(1).or( # c\n  2)\n'
+# `.or` is recognised by name at the call site, so `def or` compiled and
+# every call to it was refused as a recovery with "no member of
+# App::Main::A implements `Error`". The def is refused now.
+printf 'module ordef\n\nclass A\n  def or(x : Int32) : Int32\n    x\n  end\nend\n\nputs A.new.or(5)\n' > ordef.iyi
+refuses "a method named or" '`or` is a reserved name in iyi' -- "$IYI" check ordef.iyi
+printf 'module orpanicdef\n\nclass A\n  def self.or_panic : Int32\n    1\n  end\nend\n' > orpanicdef.iyi
+refuses "a class method named or_panic" '`or_panic` is a reserved name in iyi' -- \
+  "$IYI" check orpanicdef.iyi
+# Under a comment on an `if` or `while` line, `/=` was read as a regex.
+fmt_gives "takes x /= y and x //= y under a comment on an if or while line" \
+  $'a = 8\nif a > 1 # c\n  a /= 2\nend\nwhile a > 1 # c\n  a //= 2\nend\n'
+# A comment in an import's name list, or between `x =` or `type X =` and
+# the value, moved at every `fmt`.
+fmt_gives "keeps a comment in an import's name list on its own line" \
+  $'import std/json::{JSON,\n  # more\n  Builder}\n'
+fmt_gives "keeps a comment between x = or type X = and the value on its own line" \
+  $'escape =\n  # note\n  if b\n    "one"\n  else\n    "other"\n  end\ntype X =\n  # c\n  Int32\nx = 1\nx += # c\n  2\n'
+# A ```crystal fence in a `.iyi` doc comment lost its tag, which made the
+# other language's example iyi.
+fmt_gives "keeps a doc comment's \`\`\`crystal fence tagged in an iyi file" \
+  $'# The original:\n#\n# ```crystal\n# def save!\n#   @x  =  1\n# end\n# ```\ndef add(a, b)\n  a + b\nend\n'
+# A `"a" \` continued by a comment line, where the parser ends the literal:
+# the formatter took the next line's literal into it, and gave up.
+fmt_gives "ends a literal where the parser does, at a comment after its \\" \
+  $'x = "a" \\\n    # note\n    "b"\n' $'x = "a" \\\n    # note\n"b"\n'
+fmt_gives "sets traits and impls apart by a blank line, as classes are" \
+  $'trait A\nend\nimpl A for B\nend\n' $'trait A\nend\n\nimpl A for B\nend\n'
+# The parser's spacing warning named `crystal tool format`, and `iyi fmt`
+# printed it while rewriting exactly that spacing.
+printf 'module colon\n\ndef f(x : Int32): Int32\n  x\nend\n\nputs f(1)\n' > colon.iyi
+cp colon.iyi colonfmt.iyi
+"$IYI" check colon.iyi > colon.out 2>&1
+"$IYI" fmt colonfmt.iyi > colonfmt.out 2>&1
+if ! grep -qF 'space required before colon in return type restriction (run `iyi fmt` to fix this)' colon.out ||
+  grep -qi crystal colon.out; then
+  echo "  a spacing warning from check does not name iyi fmt:"; sed -n '1,6p' colon.out
+  status=1
+elif grep -q 'Warning' colonfmt.out || ! grep -qF 'def f(x : Int32) : Int32' colonfmt.iyi; then
+  echo "  fmt on a spacing warning warned about it, or did not fix it:"; sed -n '1,6p' colonfmt.out
+  status=1
+else
+  echo "  a spacing warning from check says \`iyi fmt\`, and fmt fixes it without the warning"
+fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # A module reached through an 8.3 short name, which only the file
+    # system can spell out: `APPLIC~1\main.iyi` never ended with its
+    # header's `applications_dir/main.iyi`, so it found no root, and `run`,
+    # `check` and `test` of it said "can't find module
+    # 'applications_dir/util'".
+    mkdir -p short/applications_dir
+    printf 'module applications_dir/util\n\npub def answer : Int32\n  42\nend\n' > short/applications_dir/util.iyi
+    printf 'module applications_dir/main\n\nimport applications_dir/util::{answer}\n\nputs answer\n' > short/applications_dir/main.iyi
+    spelled="$(cygpath -d "$WORK/short/applications_dir/main.iyi")"
+    if [ "$spelled" = "$(cygpath -w "$WORK/short/applications_dir/main.iyi")" ]; then
+      echo "  a module reached through an 8.3 name: this volume makes none, unmeasured"
+    elif "$IYI" run "$spelled" > short.out 2>&1 && grep -qx 42 short.out; then
+      echo "  a module reached through an 8.3 name: resolves its imports"
+    else
+      echo "  a module reached through an 8.3 name did not run:"; grep -m1 "^Error" short.out || sed -n '1,3p' short.out; status=1
+    fi
+    ;;
+esac
 # A file fmt may not write is the file system's refusal, not a formatter
 # bug: a read-only file - common on Windows, a locked checkout or an
 # extracted archive - was reported as "there's a bug formatting", with a
@@ -366,6 +650,12 @@ case "$(uname -s)" in
     share="$(cygpath -w "$WORK/rooted/proj [v2]")"
     share="\\\\127.0.0.1\\${share:0:1}\$${share:2}"
     [ -d "$share" ] && roots+=("$share")
+    # And spelled verbatim, `\\?\C:\...` and `\\?\UNC\server\share\...`,
+    # the form Rust's `fs::canonicalize` hands over: the `?` went into the
+    # pattern as a pattern character, nothing matched, and `fmt --check`
+    # exited 0 while `test` said "no *_test.iyi found".
+    roots+=("\\\\?\\$(cygpath -w "$WORK/rooted/proj [v2]")")
+    [ -d "$share" ] && roots+=("\\\\?\\UNC\\${share:2}")
     MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/rooted/x{a,b}/loop")" "$(cygpath -w "$WORK/rooted/x{a,b}")" > /dev/null
     ;;
 esac
@@ -380,6 +670,32 @@ for root in "${roots[@]}"; do
   fi
 done
 [ -e "rooted/x{a,b}/loop" ] && MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c rmdir "$(cygpath -w "$WORK/rooted/x{a,b}/loop")"
+# `fix` and `mod tidy` walk a directory with a loop of their own rather
+# than a glob, asking `File.directory?`, which follows a link: they went
+# through one back into the tree, and `fix` died 38 levels down on "The
+# system cannot find the path specified", `mod tidy` on a file down there
+# that "does not parse".
+mkdir -p tidyloop/src
+printf 'module example.test/tidyloop\n' > tidyloop/iyi.mod
+printf 'module x\n\nputs 1\n' > tidyloop/src/x.iyi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c mklink /J "$(cygpath -w "$WORK/tidyloop/src/loop")" "$(cygpath -w "$WORK/tidyloop/src")" > /dev/null
+    ;;
+  *) ln -s "$WORK/tidyloop/src" tidyloop/src/loop ;;
+esac
+"$IYI" fix tidyloop/src > tidyloop.fix 2>&1; fix_code=$?
+(cd tidyloop && "$IYI" mod tidy --check) > tidyloop.tidy 2>&1; tidy_code=$?
+if [ "$fix_code" -eq 0 ] && grep -q "already clean" tidyloop.fix &&
+   [ "$tidy_code" -eq 0 ] && grep -q "say what the source imports" tidyloop.tidy; then
+  echo "  fix and mod tidy of a tree with a link back into it: the link is not walked"
+else
+  echo "  fix and mod tidy through a link: fix $fix_code, tidy $tidy_code"; sed -n '1,3p' tidyloop.fix tidyloop.tidy; status=1
+fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" cmd /c rmdir "$(cygpath -w "$WORK/tidyloop/src/loop")" ;;
+  *) rm tidyloop/src/loop ;;
+esac
 # `lib` is left alone however the directory is named: the exclude was
 # compared as a string prefix, and `fmt --check .` walked to `./lib/x.iyi`,
 # which never starts with `lib`, and checked what a bare `fmt --check`
@@ -392,6 +708,44 @@ if grep -q 'src.messy.iyi' excl.out && ! grep -q 'lib.messy.iyi' excl.out; then
   echo "  fmt --check . leaves lib alone, as fmt --check does"
 else
   echo "  fmt --check . and lib:"; sed -n '1,3p' excl.out; status=1
+fi
+# But a path named on the command line is formatted, whatever the excludes
+# say, which is Black's rule: `fmt --check lib/messy.iyi` and `fmt --check
+# lib` exited 0 having checked nothing - the default exclude took back
+# what was named.
+for named in lib/messy.iyi lib; do
+  (cd excl && "$IYI" fmt --check "$named" > ../excl_named.out 2>&1)
+  named_code=$?
+  if [ "$named_code" -eq 1 ] && grep -q 'lib.messy.iyi. produced changes' excl_named.out; then
+    echo "  fmt --check $named, named on the command line: checked"
+  else
+    echo "  fmt --check $named, named on the command line: exit $named_code"; sed -n '1,3p' excl_named.out; status=1
+  fi
+done
+# A file fmt may not read is reported, and the walk goes on. Asking what
+# the path is, and reading it, were outside every rescue: one such file
+# ended `fmt DIR` with "Error: ...: Access is denied." and the files after
+# it were never looked at.
+mkdir -p noread
+printf 'module a\n\nx=1\n' > noread/a_noread.iyi
+printf 'module z\n\nx=1\n' > noread/z_messy.iyi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w noread/a_noread.iyi)" /deny "$USERNAME:(R)" > /dev/null ;;
+  *) chmod a-r noread/a_noread.iyi ;;
+esac
+"$IYI" fmt --check noread > noread.out 2>&1
+noread_code=$?
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" icacls "$(cygpath -w noread/a_noread.iyi)" /remove:d "$USERNAME" > /dev/null ;;
+  *) chmod u+r noread/a_noread.iyi ;;
+esac
+if [ "$(uname -s)" = "Linux" ] && [ "$(id -u)" = "0" ]; then
+  echo "  fmt --check of a directory holding a file it may not read: root reads anything, unmeasured"
+elif [ "$noread_code" -eq 1 ] && grep -q "cannot read '.*a_noread.iyi'" noread.out &&
+     grep -q "z_messy.iyi' produced changes" noread.out && ! has_trace noread.out; then
+  echo "  fmt --check of a directory holding a file it may not read: says so, and checks the rest"
+else
+  echo "  fmt --check of a directory holding a file it may not read: exit $noread_code"; sed -n '1,3p' noread.out; status=1
 fi
 # A program rebuilt while it runs, the everyday Windows loop: Windows will
 # not write over a running program, and the linker said so after the whole
@@ -416,6 +770,39 @@ case "$(uname -s)" in
       kill "$running" 2>/dev/null; wait "$running" 2>/dev/null
     else
       echo "  the busy program did not build:"; sed -n '1,3p' busy.log; status=1
+    fi
+    # And the program database the linker writes beside it, which was
+    # never asked about: a read-only `.pdb`, as an extracted tree leaves
+    # one, failed the link after the whole compile - "LNK1201: error
+    # writing to program database", exit status 1201 - and the linker
+    # deleted the program on its way out. It is moved aside like the
+    # program; one held open, which cannot be moved, is refused before
+    # anything is compiled, and the program is left as it was.
+    printf 'module busy\n\nputs "third"\n' > busy/third.iyi
+    if "$IYI" build -o busy/db.exe busy/quick.iyi > pdb.log 2>&1 && [ -f busy/db.pdb ]; then
+      MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib +R "$(cygpath -w busy/db.pdb)"
+      "$IYI" build -o busy/db.exe busy/third.iyi > pdb.log 2>&1; rebuilt=$?
+      said="$(busy/db.exe 2>&1 | tr -d '\r')"
+      if [ "$rebuilt" -eq 0 ] && [ "$said" = "third" ]; then
+        echo "  a program whose .pdb is read-only: the .pdb moved aside, the new program runs"
+      else
+        echo "  a program whose .pdb is read-only: build $rebuilt, it said '$said'"; sed -n '1,3p' pdb.log; status=1
+      fi
+      for f in busy/db.pdb*; do MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL="*" attrib -R "$(cygpath -w "$f")"; done
+      powershell -NoProfile -Command "\$f = [IO.File]::Open('$(cygpath -w "$WORK/busy/db.pdb")', 'Open', 'Read', 'None'); \
+        New-Item -ItemType File '$(cygpath -w "$WORK/busy/held")' | Out-Null; \$i = 0; \
+        while (-not (Test-Path '$(cygpath -w "$WORK/busy/release")') -and \$i -lt 600) { Start-Sleep -Milliseconds 100; \$i++ }; \
+        \$f.Close()" > /dev/null 2>&1 &
+      holder=$!
+      i=0
+      while [ ! -f busy/held ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
+      refuses "a program whose .pdb is held open" "db.pdb is in use and cannot be replaced or moved aside" -- \
+        "$IYI" build -o busy/db.exe busy/quick.iyi
+      said="$(busy/db.exe 2>&1 | tr -d '\r')"
+      [ "$said" = "third" ] || { echo "  the refused build lost the program: it said '$said'"; status=1; }
+      touch busy/release; wait "$holder" 2>/dev/null
+    else
+      echo "  the program with a .pdb did not build:"; sed -n '1,3p' pdb.log; status=1
     fi
     # A directory the program fits in and the write probe does not: the
     # probe's name, `.iyi-write-probe-<pid>`, is longer than `m.exe`, and
@@ -446,6 +833,18 @@ case "$(uname -s)" in
       "$IYI" build --cross-compile --target wasm32-wasi -o "$WORK/towasm" good.iyi
     ;;
 esac
+# `run --sandbox` names the variable it was given. IYI_WASI_CC pointed at
+# nothing was skipped in silence and the refusal said to set it; and under
+# `$WASI_SDK` clang is `clang.exe` on Windows, where a bare `clang` was
+# looked for, so an installed wasi-sdk was "install wasi-sdk". Found, the
+# next tool is the one named.
+refuses "an IYI_WASI_CC that points at nothing" "IYI_WASI_CC is" -- \
+  env IYI_WASI_CC="$WORK/no-clang" "$IYI" run --sandbox good.iyi
+mkdir -p "$WORK/wasisdk/bin"
+: > "$WORK/wasisdk/bin/clang"
+: > "$WORK/wasisdk/bin/clang.exe"
+refuses "a wasi-sdk clang under WASI_SDK" "IYI_WASMTIME is" -- \
+  env -u IYI_WASI_CC WASI_SDK="$WORK/wasisdk" IYI_WASMTIME="$WORK/no-wasmtime" "$IYI" run --sandbox good.iyi
 
 echo
 echo "== what the verbs that were never here refuse"
@@ -471,6 +870,15 @@ refuses "vet with no file" "Usage: $(basename "$IYI" .exe) vet" -- "$IYI" vet
 refuses "a variable env does not have" "no such variable" -- "$IYI" env NOPE
 refuses "an argument to clear_cache" "takes no arguments" -- "$IYI" clear_cache extra
 refuses "an argument to the mcp server" "takes no arguments" -- "$IYI" mcp --nonesuch
+# `iyi env -- IYI_PATH` read the names before `--` only, and printed every
+# variable as a shell script, exit 0, for one value.
+env_dashed=$("$IYI" env -- IYI_PATH 2>&1)
+if [ "$env_dashed" = "$("$IYI" env IYI_PATH 2>&1)" ] && [ "$(printf '%s\n' "$env_dashed" | wc -l)" -eq 1 ]; then
+  echo "  env reads the names after --, too"
+else
+  echo "  env -- IYI_PATH printed: $(printf '%s' "$env_dashed" | head -2)"
+  status=1
+fi
 # A directory is one run: every `using` in every file is rewritten before
 # any file compiles, because `a` compiles the module it imports - and the
 # second run changes nothing.
@@ -491,6 +899,19 @@ elif ! (cd "$WORK/mig" && "$IYI" fix .) 2>&1 | grep -q "3 files: 0 rewritten, ev
 else
   echo "  fix over a directory: every using rewritten in one run, and the second run changes nothing"
 fi
+# A `using` folded into its import in a CRLF file left two blank lines
+# where the LF file is left one - only `\n` was a blank line's ending - and
+# `fmt --check` then refused the file the rewrite had written.
+mkdir -p "$WORK/crlfusing/app"
+printf 'module app/greeter\n\npub def polite : String\n  "hi"\nend\n' > "$WORK/crlfusing/app/greeter.iyi"
+printf 'module app/main\r\n\r\nimport app/greeter\r\n\r\nusing app/greeter::{polite}\r\n\r\nputs polite\r\n' > "$WORK/crlfusing/app/main.iyi"
+printf 'module app/main\r\n\r\nimport app/greeter::{polite}\r\n\r\nputs polite\r\n' > "$WORK/crlfusing/main.want"
+(cd "$WORK/crlfusing" && "$IYI" fix app/main.iyi && "$IYI" fmt --check app/main.iyi) > "$WORK/crlfusing.txt" 2>&1; crlf_code=$?
+if [ "$crlf_code" -eq 0 ] && cmp -s "$WORK/crlfusing/app/main.iyi" "$WORK/crlfusing/main.want"; then
+  echo "  fix folds a using in a CRLF file as in an LF one, and fmt --check agrees"
+else
+  echo "  fix of a using in a CRLF file (exit $crlf_code):"; sed 's/^/    /' "$WORK/crlfusing.txt" | head -3; status=1
+fi
 # And the flag that was being dropped is read now, from either side.
 if "$IYI" fix good.iyi --json | head -1 | grep -q '^{'; then
   echo "  fix reads --json after the file, too"
@@ -499,6 +920,39 @@ else
   "$IYI" fix good.iyi --json | sed -n '1,2p'
   status=1
 fi
+# A byte order mark is not a column: the lexer drops it before it counts,
+# and on line 1 `fix` cut one character to the left - `x = -5.abss` became
+# `-5abss`, which does not parse, and a `using` there lost its mark and
+# became `import app/greeter::{polite}}`.
+mkdir -p "$WORK/marked/app"
+printf 'module app/greeter\n\npub def polite : String\n  "hi"\nend\n' > "$WORK/marked/app/greeter.iyi"
+printf '\357\273\277x = -5.abss\nputs x\n' > "$WORK/marked/typo.iyi"
+printf '\357\273\277using app/greeter::{polite}\n\nputs polite\n' > "$WORK/marked/using.iyi"
+printf '\357\273\277x = -5.abs\nputs x\n' > "$WORK/marked/typo.want"
+printf '\357\273\277import app/greeter::{polite}\n\nputs polite\n' > "$WORK/marked/using.want"
+(cd "$WORK/marked" && "$IYI" fix typo.iyi && "$IYI" fix using.iyi) > "$WORK/marked.txt" 2>&1; marked_code=$?
+if [ "$marked_code" -eq 0 ] && cmp -s "$WORK/marked/typo.iyi" "$WORK/marked/typo.want" &&
+   cmp -s "$WORK/marked/using.iyi" "$WORK/marked/using.want"; then
+  echo "  fix on line 1 behind a byte order mark: the edit and the using rewrite land where they are"
+else
+  echo "  fix behind a byte order mark (exit $marked_code):"; sed 's/^/    /' "$WORK/marked.txt" | head -3; status=1
+fi
+# The formats a program reads name a file the way a repository does, on
+# every system. On Windows `vet -f json`, `csv` and `codecov` wrote
+# `app\helpers.iyi` (`app\\helpers.iyi` in JSON), which codecov's
+# repository paths and a csv joined across machines never match.
+mkdir -p "$WORK/vetdir/app"
+printf 'module app/helpers\n\npub def used : Int32\n  1\nend\n\npub def unused_h : Int32\n  2\nend\n' > "$WORK/vetdir/app/helpers.iyi"
+printf 'import app/helpers::{used}\n\nputs used\n' > "$WORK/vetdir/main.iyi"
+for vet_format in json csv codecov; do
+  (cd "$WORK/vetdir" && "$IYI" vet -f "$vet_format" main.iyi) > "$WORK/vet.$vet_format" 2>&1
+  if grep -qF 'app/helpers.iyi' "$WORK/vet.$vet_format" && ! grep -qF '\' "$WORK/vet.$vet_format"; then
+    echo "  vet -f $vet_format names app/helpers.iyi with /"
+  else
+    echo "  vet -f $vet_format: $(head -c 160 "$WORK/vet.$vet_format")"
+    status=1
+  fi
+done
 
 echo
 echo "== what a damaged artifact says"
@@ -570,6 +1024,25 @@ refuses "a directory named as a socket, starting" "is a directory, not a socket"
 : > "$WORK/stale.sock"
 refuses "a stale socket file left by a dead daemon" "is a file, not a socket" -- \
   "$IYI" daemon build --socket "$WORK/stale.sock" -o d5 good.iyi
+# The remedies are ones that can work. The long-path refusal said to set
+# TMPDIR, which moves the default socket on no system - it is
+# `daemon.sock` in the cache directory - and on Windows, where there is no
+# daemon, `daemon build` said "start one with `iyi daemon start`" and the
+# stale file was to be removed so that one could listen there.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "no daemon on a socket, on Windows" "there is no daemon on Windows" -- \
+      "$IYI" daemon build --socket "$WORK/absent.sock" -o d6 good.iyi
+    refuses "a stale socket file, on Windows" "there is no daemon on Windows" -- \
+      "$IYI" daemon build --socket "$WORK/stale.sock" -o d7 good.iyi
+    refuses "a socket path past the kernel's limit, on Windows" "there is no daemon on Windows" -- \
+      "$IYI" daemon build --socket "$long" -o d8 good.iyi
+    ;;
+  *)
+    refuses "a default socket past the kernel's limit" "CACHE_DIR to a shorter directory" -- \
+      env IYI_CACHE_DIR="$WORK/$(printf 'c%.0s' $(seq 1 120))" "$IYI" daemon build -o d6 good.iyi
+    ;;
+esac
 
 echo
 echo "== where a program is written, and where its library is looked for"
@@ -594,6 +1067,28 @@ refuses "an empty --affected, checking" "--affected takes a changed file" -- \
   "$IYI" check --affected ""
 refuses "an empty --affected, testing" "--affected takes a changed file" -- \
   "$IYI" test --affected "" .
+# Colour only where somebody sees it. The compiler's colour was on unless
+# `--no-color` said otherwise, and the messages carry it in their text, so
+# `iyi check` written into a file had `\033[33;1m (compile-time type is
+# (String | Nil))\033[39;22m` in it.
+printf 'module nilsize\n\nx = Program.args.size > 0 ? "a" : nil\nputs x.size\n' > nilsize.iyi
+"$IYI" check nilsize.iyi > nilsize.out 2>&1
+if grep -qF '(compile-time type is (String | Nil))' nilsize.out && ! grep -q $'\033' nilsize.out; then
+  echo "  an error written into a file carries no colour"
+else
+  echo "  an error written into a file:"; od -c nilsize.out | sed -n '1,4p'; status=1
+fi
+# `check --affected` refused the switch every other verb takes, as "takes
+# only changed files; unexpected '--no-color'".
+mkdir -p affcolor/app
+printf 'module app/lib\n\npub def value : Int32\n  7\nend\n' > affcolor/app/lib.iyi
+printf 'module app/user\n\nimport app/lib::{value}\n\nputs value\n' > affcolor/app/user.iyi
+(cd affcolor && "$IYI" check --affected app/lib.iyi --no-color) > affcolor.out 2>&1
+if [ $? -eq 0 ] && grep -qF "2 consumer(s) checked, all compile" affcolor.out; then
+  echo "  check --affected takes --no-color"
+else
+  echo "  check --affected --no-color:"; sed -n '1,3p' affcolor.out; status=1
+fi
 refuses "an empty test path" "'' is not one" -- "$IYI" test ""
 refuses "an empty file for fix" "which file" -- "$IYI" fix ""
 refuses "an empty .iyimod path" "expected a .iyimod path" -- "$IYI" mod dump ""
@@ -616,6 +1111,20 @@ else
   echo "  an empty search path: a list of nothing, printed as nothing"
   sed -n '1,8p' "$WORK/emptypath.txt"
   status=1
+fi
+# `$ORIGIN` on its own, the compiler's directory: the expansion read the
+# character after the name without asking whether there was one, and an
+# `IYI_PATH` holding it died of "Index out of bounds (IndexError)" and
+# "you've found a bug in the iyi compiler".
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) sep=';' ;;
+  *) sep=':' ;;
+esac
+env IYI_PATH="$REPO/src$sep\$ORIGIN" "$IYI" build -o origin good.iyi > "$WORK/origin.txt" 2>&1
+if [ "$(./origin 2>&1 | tr -d '\r')" = "ok" ] && ! has_trace "$WORK/origin.txt"; then
+  echo "  a search path holding \$ORIGIN alone: builds"
+else
+  echo "  a search path holding \$ORIGIN alone:"; sed -n '1,3p' "$WORK/origin.txt"; status=1
 fi
 # And `-o` naming the source itself - one word, typed twice. It read the
 # source, built it, and linked the executable over it: the program's only
@@ -1007,6 +1516,21 @@ else
   "$IYI" mod context user.iyi --json | sed -n '1,2p'
   status=1
 fi
+# The caret in a macro's expanded text, under a `{{x}}` that starts a
+# line. The parser's look for a `.` after `a = 1` reads into the next
+# line's interpolation, and a lookahead that failed put back the position
+# and not the location pragmas it had fired (the lexer's location_pragma
+# cursor is rewound now): `nope` in `  {{x}}.nope` was at column 8, and
+# the caret stood under its `e`.
+printf 'module interp\n\nmacro m(x)\n  a = 1\n  {{x}}.nope\nend\nm(1)\n' > interp.iyi
+"$IYI" check interp.iyi > interp.out 2>&1
+if [ "$(grep -A1 '^ > 2 | 1.nope$' interp.out | sed -n '2p')" = "$(printf '%9s^---' '')" ]; then
+  echo "  the caret after an interpolation that starts a line of macro text is under the column"
+else
+  echo "  the caret after an interpolation that starts a line of macro text:"
+  sed -n '1,20p' interp.out | cat -A
+  status=1
+fi
 # The caret under a line with tabs inside it: every character before the
 # column was counted as one space, so two tabs that pushed `nope` to
 # column 34 left the caret at 17. The caret line carries the shown line's
@@ -1019,6 +1543,34 @@ if [ "$caret_line" = "$(printf '          \t  \t\t  ^---')" ]; then
 else
   echo "  the caret under a line with tabs is not under the column:"
   sed -n '1,8p' tabbed.out | cat -A
+  status=1
+fi
+# And a wide character, which a terminal draws in two cells: the caret
+# counted each as one, so seven CJK characters in front of `nope` left it
+# seven cells short. It is padded by the cells each character takes now
+# (`caret_padding`).
+printf 'module wide\n\ns = "\346\227\245\346\234\254\350\252\236\343\203\206\343\202\255\343\202\271\343\203\210"; puts s.nope\n' > wide.iyi
+"$IYI" check wide.iyi > wide.out 2>&1
+caret_line="$(grep -A1 '^ 3 | ' wide.out | sed -n '2p')"
+if [ "$caret_line" = "$(printf '%34s^---' '')" ]; then
+  echo "  the caret after wide characters is under the column a terminal draws"
+else
+  echo "  the caret after wide characters is not under the column:"
+  sed -n '1,8p' wide.out | cat -A
+  status=1
+fi
+# And an abstract class instantiated, which was reported at the prelude's
+# `class Reference`, where a generated `new` and its `allocate` are made;
+# `-f json`'s deepest frame had file "" and line null.
+printf 'module absnew\n\nabstract class A\nend\nA.new\n' > absnew.iyi
+"$IYI" check absnew.iyi > absnew.out 2>&1
+"$IYI" check -f json absnew.iyi > absnew.json 2>&1
+if grep -q '^In absnew.iyi:5:3' absnew.out && grep -q "can't instantiate abstract class" absnew.out &&
+   grep -q "\"line\":5,\"column\":3,\"size\":3,\"message\":\"can't instantiate abstract class" absnew.json; then
+  echo "  an abstract class instantiated is refused at the call"
+else
+  echo "  an abstract class instantiated is not refused at the call:"
+  sed -n '1,6p' absnew.out; cat absnew.json; echo
   status=1
 fi
 refuses "doc on bytes that are not text" "not a valid iyi source file" -- \

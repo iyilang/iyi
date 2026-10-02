@@ -54,6 +54,31 @@ def directory_of(path : String) : String
   path[0, path.bytesize - name.bytesize - 1]
 end
 
+# Starts this program again with CREATE_BREAKAWAY_FROM_JOB, as a launcher
+# that means to outlive its parent does, says whether Windows let it - a
+# process in a job that does not allow it is refused "Access is denied" -
+# and waits for that one to end.
+def breakaway_start : String
+  {% if flag?(:win32) %}
+    line = "\"#{Process.executable || ""}\" exit 0"
+    wide_line = __iyi_win_env_wide(line.to_unsafe, line.bytesize)
+    startup = Pointer(UInt64).malloc(13_u64)
+    13.times { |index| startup[index] = 0_u64 }
+    startup[0] = 104_u64
+    made = Pointer(UInt64).malloc(3_u64)
+    nothing = Pointer(Void).new(0_u64)
+    # CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW.
+    if Std::Process::LibKernel32.CreateProcessW(Pointer(UInt16).new(0_u64), wide_line, nothing, nothing, 0,
+         0x01000000 | 0x08000000, nothing, Pointer(UInt16).new(0_u64), startup.as(Void*), made.as(Void*)) == 0
+      return "refused: error #{::LibC.GetLastError}"
+    end
+    ::LibC.WaitForSingleObject(Pointer(Void).new(made[0]), 10000)
+    ::LibC.CloseHandle(Pointer(Void).new(made[0]))
+    ::LibC.CloseHandle(Pointer(Void).new(made[1]))
+  {% end %}
+  "started"
+end
+
 # ── The child ────────────────────────────────────────────────────────────
 args = Program.args
 if mode = args[0]?
@@ -93,6 +118,10 @@ if mode = args[0]?
       stdout.write("#{Program.env(args[index]) || "<unset>"}\n")
       index = index + 1
     end
+  when "envorder"
+    # The names that begin with *args[1]*, in the order the block holds:
+    # sorted by name, as `env:` lays it out.
+    stdout.write(ENV.keys.select { |name| name.upcase.starts_with?(args[1]) }.join(" ") + "\n")
   when "sleep"
     sleep(args[1].to_i)
     stdout.write("woke\n")
@@ -113,6 +142,8 @@ if mode = args[0]?
   when "late"
     sleep(1500)
     File.write(args[1], "the grandchild outlived the cancel\n")
+  when "breakaway"
+    stdout.write("#{breakaway_start}\n")
   else
     fail("no child mode #{mode}")
   end
@@ -238,6 +269,13 @@ group do |g|
     cased = ran(Process.run(me, ["env", "IYI_PROCESS_PROBE"], env: {"iyi_process_probe" => "lower"}), "env: cased")
     fail("a name in another case: the child read #{cased.stdout.inspect}") unless cased.stdout == "lower\n"
     puts "  a name in another case is the same variable"
+    # Sorted by name, as Windows keeps its own block. The whole
+    # `NAME=VALUE` text was sorted, and the `=` with it: the child read
+    # IYI_ORDER(X) IYI_ORDER1 IYI_ORDER iyi_order_.
+    ordered = ran(Process.run(me, ["envorder", "IYI_ORDER"],
+      env: {"IYI_ORDER1" => "b", "iyi_order_" => "d", "IYI_ORDER" => "a", "IYI_ORDER(X)" => "c"}), "env: order")
+    fail("the child's block held #{ordered.stdout.inspect}") unless ordered.stdout == "IYI_ORDER IYI_ORDER(X) IYI_ORDER1 iyi_order_\n"
+    puts "  the block is sorted by name: #{ordered.stdout.chomp('\n')}"
   {% end %}
 
   puts "== a child that stops reading"
@@ -309,6 +347,14 @@ group do |g|
     sleep(2500)
     fail("a cancelled run's grandchild went on: #{File.read(marker)}") if File.exists?(marker)
     puts "  and what the child had started"
+    # A program the child starts may leave the child's job, as it may
+    # under a shell: the job allowed no breakaway, and the child's start
+    # with CREATE_BREAKAWAY_FROM_JOB was refused "Access is denied" (error
+    # 5). Measured, that start leaves this job alone, so it is allowed
+    # under `iyi run` too, whose own job forbids this program the same.
+    away = ran(Process.run(me, ["breakaway"]), "breakaway")
+    fail("the child's breakaway start was #{away.stdout.chomp('\n')}") unless away.stdout == "started\n"
+    puts "  and a program it starts may break away from the job"
   {% end %}
 
   {% if flag?(:win32) %}

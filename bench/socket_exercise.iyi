@@ -241,6 +241,25 @@ raise "ipv6: a refused connect answered #{refused6.inspect}" unless refused6.is_
 end
 puts "ipv6: ok"
 
+# 8b. `localhost` in any case, and with one trailing dot: a host name's
+#     case is not part of it (RFC 4343), and getaddrinfo, Python and curl
+#     all answer 127.0.0.1. Matched exactly, `LOCALHOST`, `Localhost` and
+#     `localhost.` were "cannot resolve address".
+["LOCALHOST", "Localhost", "localhost.", "LocalHost."].each do |name|
+  resolved = IyiSocket.parse_ip(name).to_s
+  raise "localhost: #{name} resolved to #{resolved}" unless resolved == "127.0.0.1"
+end
+named = IyiSocket.listen("LOCALHOST", 0)
+named_client = IyiSocket.connect("localhost.", named.local_port).or_panic
+named_conn = named.accept.or_panic
+named_client.write("by name")
+heard_named = named_conn.read(64).or_panic
+raise "localhost: the server read #{heard_named.inspect}" unless heard_named == "by name"
+named_client.close
+named_conn.close
+named.close
+puts "localhost: ok"
+
 # 9. A unix socket: a listener at a path, a connection to it, bytes each
 #    way, the path as the listener's address and no port. Closing the
 #    listener takes the path away - a connect to it is then a value, and

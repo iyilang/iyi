@@ -253,10 +253,15 @@ module Iyi::Lsp
     # The set is bounded: a cancel that arrived too late names an id
     # that was already answered, and its key would otherwise live
     # forever.
+    #
+    # Params that are not an object name nothing, and the cancel is
+    # dropped: `["x"]["id"]?` raised here, outside `handle`'s rescue, and
+    # `$/cancelRequest` with params `["x"]`, `"x"` or `5` ended the worker
+    # with the compiler-bug banner.
     private def sweep_cancels : Nil
       @inbox.reject! do |queued|
         next false unless queued["method"]?.try(&.as_s?) == "$/cancelRequest"
-        if cancel_id = queued["params"]?.try(&.["id"]?)
+        if cancel_id = queued["params"]?.try(&.as_h?).try(&.["id"]?)
           @cancelled << cancel_id.to_json
         end
         true
@@ -307,6 +312,17 @@ module Iyi::Lsp
           rescue
             nil
           end
+        # A lone surrogate escape (`\ud83d`) is JSON no UTF-8 string can
+        # hold, and the library refused the frame it was in; `Text.mend`
+        # writes it as U+FFFD and the frame is read again.
+        if parsed.nil? && (mended = Text.mend(body))
+          parsed =
+            begin
+              JSON.parse(String.new(mended))
+            rescue
+              nil
+            end
+        end
         # JSON, but not a message: `[]` parsed, and `message["method"]?`
         # on an array raised outside every rescue - one frame took the
         # server down with a backtrace. The loop reads a message as an
@@ -582,6 +598,20 @@ module Iyi::Lsp
           respond_error(id, -32602, "#{ex.file}: #{reason}")
         when IO::Error
           respond_error(id, -32602, ex.os_error.try(&.message) || ex.message.to_s)
+        when TypeCastError
+          # `as_s` on a uri that is 7 or a newName that is 5: a value of the
+          # request in the wrong JSON type (a position's numbers are read by
+          # `position_of`, which says so itself). Answered -32603 with the
+          # cast's own site, "Cast from Int64 to String failed, at
+          # C:\Users\...\src\json\any.cr:248:5" - the server's fault, and the
+          # build machine's paths. A cast from no JSON type is the server's
+          # own, and stays -32603.
+          reason = ex.message.to_s.partition(", at ")[0]
+          if JSON_TYPES.any? { |json_type| reason.starts_with?("Cast from #{json_type} to ") }
+            respond_error(id, -32602, "the request's params are not the shape #{method} takes: #{reason}")
+          else
+            respond_error(id, -32603, ex.message.to_s)
+          end
         when KeyError
           # `params["textDocument"]` on a request that carried none. The
           # JSON library's wording is `Missing hash key: "textDocument"`.
@@ -803,11 +833,15 @@ module Iyi::Lsp
           json.field "relatedInformation" do
             json.array do
               diag.related.each do |(file, line, col, msg)|
+                # In wire units, as every other range is: the codepoint
+                # column went out as it was, and an `f(1)` behind two emoji
+                # was placed at character 10, where the editor has it at 12.
+                character = col > 0 ? Lsp.character_of(read_line(file, line), col) : 0
                 json.object do
                   json.field "location" do
                     json.object do
                       json.field "uri", uri_of(file)
-                      json.field "range" { range(json, line - 1, col > 0 ? col - 1 : 0, line - 1, col > 0 ? col - 1 : 0) }
+                      json.field "range" { range(json, line - 1, character, line - 1, character) }
                     end
                   end
                   json.field "message", msg
@@ -947,7 +981,15 @@ module Iyi::Lsp
         return respond_cancelled(id) if @cancelled.delete(id.to_json)
         return respond_retrigger(id) if waiting_request?(id)
 
-        answers << {uri, result_id, compile_rows(uri, result_id)}
+        # A file the server may not read has no verdict, and is left out as
+        # the walk leaves out a directory it may not list.
+        rows =
+          begin
+            compile_rows(uri, result_id)
+          rescue IO::Error
+            next
+          end
+        answers << {uri, result_id, rows}
       end
 
       respond(id) do |json|
@@ -1159,7 +1201,9 @@ module Iyi::Lsp
       if (cached = @header_cache[file]?) && cached[0] == info.size && cached[1] == info.modification_time
         return {cached[2], cached[3]}
       end
-      text = File.read(file)
+      # A file the server may not read has no header here, and is not kept:
+      # taking the read permission away leaves the size and time as they were.
+      return {nil, [] of String} unless text = workspace_text(file)
       header = Exports.header_of(text)
       imports = imports_of(text)
       @header_cache[file] = {info.size, info.modification_time, header, imports}
@@ -1172,8 +1216,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -1289,8 +1332,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       lines = text.lines
       line_text = lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
@@ -1352,8 +1394,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
 
       # Everything below is in codepoints; the wire's UTF-16 enters and
@@ -1519,7 +1560,11 @@ module Iyi::Lsp
       end
 
       anchor = (last_import || header_index || -1) + 1
-      [{anchor, 0, 0, "import #{module_path}::{#{name}}\n"}]
+      # In the buffer's own line ending, as organize-imports and formatting
+      # answer: a CRLF buffer was handed `import greet::{shout}\n`, and a
+      # client that applies edits as written made the file mixed.
+      ending = Iyi.crlf?(text) ? "\r\n" : "\n"
+      [{anchor, 0, 0, "import #{module_path}::{#{name}}#{ending}"}]
     end
 
     private def name_char?(ch : Char?) : Bool
@@ -1565,11 +1610,12 @@ module Iyi::Lsp
     # its own scope, and refused when the new name is already one there.
     private def on_rename(id : JSON::Any, params : JSON::Any) : Nil
       new_name = params["newName"].as_s
+      path = path_of(params["textDocument"]["uri"].as_s)
       if local = local_at(params)
         if local.instance_var?
           raise Refused.new("#{local.name} is not renamed on its own: its accessors carry the name as methods")
         end
-        unless valid_local?(new_name)
+        unless valid_local?(new_name) && lexed_name(new_name, path)
           raise Refused.new("'#{new_name}' is not an iyi variable name")
         end
         if local.taken?(new_name, text_of(params["textDocument"]["uri"].as_s).lines)
@@ -1577,7 +1623,7 @@ module Iyi::Lsp
         end
         references, declarations = local.split
       else
-        unless valid_name?(new_name)
+        unless valid_name?(new_name) && lexed_name(new_name, path)
           raise Refused.new("'#{new_name}' is not an iyi method name")
         end
         if def_name_taken?(params, new_name)
@@ -1603,6 +1649,9 @@ module Iyi::Lsp
         (by_file[filename] ||= [] of {Int32, Int32, Int32}) << {location.line_number - 1, start_ch, end_ch}
       end
       by_file.each_value(&.uniq!)
+      if lexed_name(new_name, path).is_a?(Keyword)
+        by_file.each { |filename, edits| refuse_unparsable(filename, edits, new_name) }
+      end
 
       respond(id) do |json|
         json.object do
@@ -1654,8 +1703,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       target = Location.new(path, line0 + 1, Lsp.column_of(line_text, char))
 
@@ -1674,7 +1722,10 @@ module Iyi::Lsp
       entries = workspace_entries
       entries_reaching(entries, first.target_files).each do |(entry_path, entry_text)|
         next if entry_path == path
-        visitor = @analysis.references_at(entry_path, entry_text, overrides_for(entry_path), target)
+        # Seeded with the defs the cursor's compile adopted, by key (the
+        # seeds of `ReferencesVisitor#initialize`): the cursor is a place in
+        # its own file, which this compile holds only when it is the def's.
+        visitor = @analysis.references_at(entry_path, entry_text, overrides_for(entry_path), target, first.target_keys)
         next unless visitor
         refuse_importer(visitor, renaming_to) if renaming_to
         references.concat visitor.references
@@ -1704,10 +1755,35 @@ module Iyi::Lsp
         # this file is spelled its way (`%3A`, `%20`), and open buffers
         # are already in the list above, with their unsaved text.
         next if document_text(file)
-        entries << {file, File.read(file)}
+        next unless text = workspace_text(file)
+        entries << {file, text}
         break if entries.size >= 200
       end
       entries
+    end
+
+    # A workspace file's text, or nil where it cannot be read: the walk
+    # skips a directory it may not list, and a file it may not read is
+    # skipped the same way. One such file - access denied, or held open
+    # by a process that shares nothing - failed workspace symbols,
+    # completion, references, rename and workspace diagnostics alike,
+    # -32602 "locked.iyi: Access is denied.", blaming the client.
+    private def workspace_text(file : String) : String?
+      File.read(file)
+    rescue IO::Error
+      nil
+    end
+
+    # The key `same_path?` compares by, for a set. Asking `same_path?` of
+    # every path already listed made the workspace-symbol walk quadratic: a
+    # query that matched nothing took 344 ms over 500 files and 3,031 ms
+    # over 2,000. (A file that cannot be read is skipped there too.)
+    private def path_key(path : String) : String
+      {% if flag?(:win32) %}
+        fs_path(path).downcase
+      {% else %}
+        path
+      {% end %}
     end
 
     # The entries whose import graph reaches any of `files`: those files'
@@ -1766,10 +1842,18 @@ module Iyi::Lsp
       imports
     end
 
+    # One site once, however its file is spelled. With seeds every compile
+    # that holds a site reports it, and each spells the file its own way -
+    # `c:\` from an editor's URI, `C:\` from the walk - so a rename keyed
+    # one file twice in `changes`.
     private def dedupe(sites : Array({Location, Int32})) : Array({Location, Int32})
       seen = Set({String, Int32, Int32}).new
       sites.select do |(location, _)|
-        seen.add?({fs_path(location.filename.to_s), location.line_number, location.column_number})
+        file = fs_path(location.filename.to_s)
+        {% if flag?(:win32) %}
+          file = file.downcase
+        {% end %}
+        seen.add?({file, location.line_number, location.column_number})
       end
     end
 
@@ -1781,6 +1865,60 @@ module Iyi::Lsp
       body = name.ends_with?('?') || name.ends_with?('!') ? name.rchop : name
       return false if body.empty?
       body.each_char.all? { |ch| Iyi::Lexer.ident_part?(ch) }
+    end
+
+    # What the lexer of the file *name* goes into reads it as, when that is
+    # one identifier and nothing after it: the name itself, or the keyword
+    # it is. Nil for a constant, `_`, `__FILE__`, two words, an operator.
+    #
+    # A new name has to be one, because the lexer is what reads it back.
+    # Judged by its characters, `Hi` (a constant) and `_` were taken for a
+    # def, and `_` and `__LINE__` for a variable, and each was applied and
+    # left an error: 'unexpected token: "("', "expecting a name after
+    # 'def', not '_'", "can't read from _". A keyword is one identifier
+    # too, and the parser judges it (`refuse_unparsable`).
+    private def lexed_name(name : String, path : String) : String | Keyword | Nil
+      lexer = Lexer.new(name)
+      lexer.filename = path
+      token = lexer.next_token
+      return unless token.type.ident? && token.value.to_s == name
+      value = token.value
+      return unless lexer.next_token.type.eof?
+      case value
+      when String, Keyword then value
+      end
+    rescue CodeError | InvalidByteSequenceError
+      nil
+    end
+
+    # A keyword is a name in some places and not in others: `type`, `for`
+    # and `of` make variables that compile, and `do`, `typeof` and
+    # `abstract` make a file that does not parse. A list can only be wrong
+    # one way or the other - the variables' list missed those three and
+    # twenty more, and a def had none, so `end` and `nil` were taken for
+    # one - so the parser is asked: each edited file is read again with
+    # the rename in it, and a rename that leaves a file that parsed
+    # unparsable is refused.
+    private def refuse_unparsable(filename : String, edits : Array({Int32, Int32, Int32}), new_name : String) : Nil
+      text = document_text(filename) || (File.read(filename) if File.file?(filename))
+      return unless text && parses?(text, filename)
+      edited = text
+      edits.sort.reverse_each do |(line0, start_ch, end_ch)|
+        from = Text.offset_at(edited, line0, start_ch)
+        to = Text.offset_at(edited, line0, end_ch)
+        edited = edited.byte_slice(0, from) + new_name + edited.byte_slice(to, edited.bytesize - to)
+      end
+      return if parses?(edited, filename)
+      raise Refused.new("'#{new_name}' is a word iyi keeps for itself where the name is used: #{Exports.header_of(text) || filename} would not parse after the rename")
+    end
+
+    private def parses?(text : String, filename : String) : Bool
+      parser = Parser.new(text)
+      parser.filename = filename
+      parser.parse
+      true
+    rescue CodeError | InvalidByteSequenceError
+      false
     end
 
     # ── Document symbols ─────────────────────────────────────────────────
@@ -1797,10 +1935,29 @@ module Iyi::Lsp
       end
     end
 
-    private def document_symbol(json : JSON::Builder, sym : Outline::Sym, lines : Array(String)) : Nil
+    # A symbol's selectionRange: its name where the line has it, from the
+    # column the outline gives on. That column is the file's module's
+    # `module` keyword - its name is the written `calc/lexer`, which the
+    # parser has no location for - and a name not on the line as such
+    # (`impl Paint for Dot`) keeps the column. The lexer reads line 1 past
+    # U+FEFF, and so does an editor's buffer.
+    private def selection_of(lines : Array(String), sym : Outline::Sym) : {Int32, Int32}
       name_line = lines[sym.name_line - 1]? || ""
-      sel_start = Lsp.character_of(name_line, sym.name_column)
-      sel_end = Lsp.character_of(name_line, sym.name_column + sym.name_size)
+      name_line = name_line.lchop('\uFEFF') if sym.name_line == 1
+      # Where the outline's column and size already are the written name
+      # (`make` of `self.make`, `std/http` of `Std::Http`) the name is not on
+      # the line as listed, and they are the selection.
+      column = sym.name_column
+      size = sym.name_size
+      if found = name_line.index(sym.name, sym.name_column - 1)
+        column = found + 1
+        size = sym.name.size
+      end
+      {Lsp.character_of(name_line, column), Lsp.character_of(name_line, column + size)}
+    end
+
+    private def document_symbol(json : JSON::Builder, sym : Outline::Sym, lines : Array(String)) : Nil
+      sel_start, sel_end = selection_of(lines, sym)
       # iyi: the end in UTF-16 units, as every other range here is: `.size`
       # counts characters, and an `end # 🎉` line's range stopped short.
       end_text = lines[sym.end_line - 1]? || ""
@@ -1828,8 +1985,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -1863,8 +2019,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -1898,8 +2053,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       lines = text.lines
       line_text = lines[line0]? || ""
       target = Location.new(path, line0 + 1, Lsp.column_of(line_text, char))
@@ -1948,9 +2102,9 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
-      target = Location.new(path, line0 + 1, Lsp.column_of(line_text, params["position"]["character"].as_i))
+      target = Location.new(path, line0 + 1, Lsp.column_of(line_text, char))
       visitor = @analysis.references_at(path, text, overrides_for(path), target)
       !!visitor && visitor.taken?(name)
     end
@@ -1960,9 +2114,9 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       text = text_of(uri)
       lines = text.lines
-      line0 = params["position"]["line"].as_i
+      line0, char = position_of(params["position"])
       line_text = lines[line0]? || ""
-      target = Location.new(path_of(uri), line0 + 1, Lsp.column_of(line_text, params["position"]["character"].as_i))
+      target = Location.new(path_of(uri), line0 + 1, Lsp.column_of(line_text, char))
       local_sites(text, path_of(uri), target, lines)
     end
 
@@ -1981,7 +2135,9 @@ module Iyi::Lsp
       parser = Parser.new(text)
       parser.filename = path
       LocalSites.at(parser.parse, target, lines)
-    rescue CodeError
+    rescue CodeError | InvalidByteSequenceError
+      # A buffer that does not parse has no locals to find, and nor does
+      # one whose bytes are not UTF-8.
       nil
     end
 
@@ -1995,8 +2151,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       lines = text.lines
       line_text = lines[line0]? || ""
       cursor = Lsp.column_of(line_text, char) - 1
@@ -2137,7 +2292,9 @@ module Iyi::Lsp
       formatted =
         begin
           Iyi.as_written(path_of(uri), text, Iyi.format(text, filename: path_of(uri)))
-        rescue CodeError
+        rescue CodeError | InvalidByteSequenceError
+          # Nor does one that is not UTF-8, which was -32603 for the
+          # lexer's "Unexpected byte 0xfe at position 17".
           return respond_null(id)
         end
       return respond(id) { |json| json.array { } } if formatted == text
@@ -2219,14 +2376,16 @@ module Iyi::Lsp
       query = params["query"]?.try(&.as_s?) || ""
 
       paths = @documents.keys.map { |doc_uri| path_of(doc_uri) }
+      listed = paths.map { |known| path_key(known) }.to_set
       each_workspace_file(with_lib: false) do |file, _|
-        paths << file unless paths.any? { |known| same_path?(known, file) }
+        paths << file if listed.add?(path_key(file))
         break if paths.size >= 2000
       end
 
       results = [] of {String, Int32, String, Int32, Int32, Int32, String?}
       paths.each do |file|
-        text = document_text(file) || (File.file?(file) ? File.read(file) : nil)
+        # A file the server may not read has no symbols to offer.
+        text = document_text(file) || workspace_text(file)
         next unless text
         collect_workspace_symbols(Outline.build(text, file), file, text.lines, query, nil, results)
         break if results.size >= 400
@@ -2254,9 +2413,8 @@ module Iyi::Lsp
     private def collect_workspace_symbols(symbols : Array(Outline::Sym), file : String, lines : Array(String), query : String, container : String?, into : Array({String, Int32, String, Int32, Int32, Int32, String?})) : Nil
       symbols.each do |sym|
         if fuzzy_match?(query, sym.name)
-          name_line = lines[sym.name_line - 1]? || ""
-          start_ch = Lsp.character_of(name_line, sym.name_column)
-          end_ch = Lsp.character_of(name_line, sym.name_column + sym.name_size)
+          # The outline's selectionRange, so the two land on one name.
+          start_ch, end_ch = selection_of(lines, sym)
           into << {sym.name, sym.kind, file, sym.name_line - 1, start_ch, end_ch, container}
         end
         collect_workspace_symbols(sym.children, file, lines, query, sym.name, into)
@@ -2393,8 +2551,8 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      from_line = params["range"]["start"]["line"].as_i + 1
-      to_line = params["range"]["end"]["line"].as_i + 1
+      from_line = position_of(params["range"]["start"])[0] + 1
+      to_line = position_of(params["range"]["end"])[0] + 1
 
       hints = @analysis.inlay_hints_at(path, text, overrides_for(path), from_line, to_line)
       return respond_null(id) if hints.empty?
@@ -2437,6 +2595,13 @@ module Iyi::Lsp
       to = params["range"]["end"]["line"].as_i
       only = params["context"]?.try(&.["only"]?).try(&.as_a?.try(&.compact_map(&.as_s?)))
 
+      # A buffer this worker was handed (`iyi/adopt`) has a verdict on the
+      # client's screen and none stored here: the successor compiles only
+      # the focused file, and every other open file's quick fix was gone
+      # after an idle replacement - `a.iyi` offered "Change to 'upcase'"
+      # before a 3 s pause and nothing after it. Compiled here instead,
+      # which is the verdict that is on screen.
+      diagnostic_rows(uri) if action_wanted?(only, "quickfix") && !@published.has_key?(uri)
       actions = (@published[uri]? || [] of {Int32, Int32, Int32, String, String?}).compact_map do |(line0, start_ch, end_ch, message, suggestion)|
         next unless action_wanted?(only, "quickfix")
         next unless line0 >= from && line0 <= to && end_ch > start_ch
@@ -2666,6 +2831,11 @@ module Iyi::Lsp
     private def module_mention_edits(text : String, old_mod : String, new_mod : String) : Array({Int32, Int32, Int32, String})
       edits = [] of {Int32, Int32, Int32, String}
       text.lines.each_with_index do |line, index|
+        # Past a byte order mark, and counted without it, as an editor's
+        # buffer is: `\uFEFFmodule calc/lexer` never started with `module `,
+        # so moving a file saved with the mark edited every importer and
+        # left the header naming the old path, and the program broke.
+        line = line.lchop('\uFEFF') if index == 0
         stripped = line.lstrip
         keyword =
           if stripped.starts_with?("module ")
@@ -2695,8 +2865,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -2730,8 +2899,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -2874,6 +3042,9 @@ module Iyi::Lsp
       path = path_of(uri)
       text = text_of(uri)
       lines = text.lines
+      # No tree to expand in a buffer whose bytes are not UTF-8: the parse
+      # below raised for one, and the request failed with -32603.
+      return respond_null(id) unless text.valid_encoding?
 
       parsed =
         begin
@@ -2887,8 +3058,7 @@ module Iyi::Lsp
       respond(id) do |json|
         json.array do
           params["positions"].as_a.each do |position|
-            line0 = position["line"].as_i
-            char = position["character"].as_i
+            line0, char = position_of(position)
             line_text = lines[line0]? || ""
             column = Lsp.column_of(line_text, char)
 
@@ -3029,8 +3199,7 @@ module Iyi::Lsp
       uri = params["textDocument"]["uri"].as_s
       path = path_of(uri)
       text = text_of(uri)
-      line0 = params["position"]["line"].as_i
-      char = params["position"]["character"].as_i
+      line0, char = position_of(params["position"])
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
@@ -3151,7 +3320,9 @@ module Iyi::Lsp
       parser = Parser.new(text)
       parser.filename = path
       first_statement(parser.parse)
-    rescue CodeError
+    rescue CodeError | InvalidByteSequenceError
+      # Nothing to run in a buffer that does not parse, or whose bytes are
+      # not UTF-8.
       nil
     end
 
@@ -3428,10 +3599,20 @@ module Iyi::Lsp
         if workspace_directory?(path)
           next if name == "lib" && !with_lib
           walk_workspace(path, in_lib || name == "lib", with_lib, manifests, limit, found)
-        elsif (manifests ? name.in?(Mod::Installer::MANIFEST, Mod::Sum::FILE) : name.ends_with?(".iyi")) && File.file?(path)
+        elsif (manifests ? name.in?(Mod::Installer::MANIFEST, Mod::Sum::FILE) : name.ends_with?(".iyi")) && listed_file?(path)
           found << {path, in_lib}
         end
       end
+    end
+
+    # A file to list, skipped like a directory that will not list when the
+    # server may not read it: `File.file?` opens it for its attributes, and a file
+    # whose ACL denies reading raised from the walk, failing every
+    # workspace question with -32602 "locked.iyi: Access is denied.".
+    private def listed_file?(path : String) : Bool
+      File.file?(path)
+    rescue File::Error
+      false
     end
 
     # A directory to walk into: a real one, not a link to one.
@@ -3511,8 +3692,17 @@ module Iyi::Lsp
       {% end %}
     end
 
+    # A directory is said to be one, in one sentence on every platform:
+    # reading it answered with the OS's reason, which on Windows is
+    # "Access is denied." - a fact about permissions, and not the one
+    # that holds.
     private def text_of(uri : String) : String
-      @documents[uri]? || File.read(path_of(uri))
+      if text = @documents[uri]?
+        return text
+      end
+      path = path_of(uri)
+      raise BadParams.new("#{path}: Is a directory") if Dir.exists?(path)
+      File.read(path)
     end
 
     private def range(json : JSON::Builder, l0 : Int32, c0 : Int32, l1 : Int32, c1 : Int32) : Nil
@@ -3531,6 +3721,36 @@ module Iyi::Lsp
         end
       end
     end
+
+    # Past every line and every character a text the server reads can
+    # have: a frame is at most 64 MiB, and a file of 2^30 lines is a
+    # gigabyte of newlines.
+    WIRE_INDEX_LIMIT = 1 << 30
+
+    # A position off the wire as {line, character}, 0-based.
+    private def position_of(position : JSON::Any) : {Int32, Int32}
+      {wire_index(position["line"]), wire_index(position["character"])}
+    end
+
+    # One of a position's numbers. LSP's uinteger runs to 2^31 - 1, and
+    # `line0 + 1` on that overflowed: hover, rename and nine more at line
+    # 2147483647 answered -32603 "Arithmetic overflow" where line 999 of
+    # a seven-line file answers null. Held at a bound past any text, the
+    # number is still past the end and answered as such. A number that is
+    # not a non-negative integer (`"6"`, `6.0`, `-1`) is the client's
+    # mistake: the two were -32603 "Cast from String to Int+ failed" and
+    # "Cast from Float64", with the cast's source path.
+    private def wire_index(value : JSON::Any) : Int32
+      number = value.raw
+      unless number.is_a?(Int64) && number >= 0
+        raise BadParams.new("a position's line and character are integers from 0, not #{value.to_json}")
+      end
+      {number, WIRE_INDEX_LIMIT.to_i64}.min.to_i32
+    end
+
+    # What a JSON value can be, spelled as a failed cast names its type
+    # (see `handle`; a position goes through `position_of`).
+    JSON_TYPES = ["Nil", "Bool", "Int64", "Float64", "String", "Array(JSON::Any)", "Hash(String, JSON::Any)"]
 
     # Every open buffer except the one being compiled, keyed by the path
     # its file would have — the compiler reads these before the disk, so

@@ -50,7 +50,7 @@ module Iyi::Mod
       # cache — a tool compiling a dependency in place — verifies but never
       # writes, or the write would change the very tree a *user's* sum pins,
       # which is the mutation this file exists to notice, self-inflicted.
-      return if dir.starts_with?(Iyi::CacheDir.instance.join("mod"))
+      return if in_cache?(dir)
 
       return unless added
       File.write(sum_path, String.build do |io|
@@ -70,7 +70,7 @@ module Iyi::Mod
       wanted = keep.map { |selection| "#{selection.path} v#{selection.version}" }.to_set
       kept = known.select { |key, _| wanted.includes?(key) }
       dropped = known.size - kept.size
-      return 0 if dropped == 0 || dir.starts_with?(Iyi::CacheDir.instance.join("mod"))
+      return 0 if dropped == 0 || in_cache?(dir)
       File.write(sum_path, String.build do |io|
         kept.to_a.sort_by!(&.first).each do |(key, hash)|
           io << key << ' ' << hash << '\n'
@@ -86,6 +86,23 @@ module Iyi::Mod
       return [] of String unless File.file?(sum_path)
       wanted = keep.map { |selection| "#{selection.path} v#{selection.version}" }.to_set
       parse(File.read(sum_path), sum_path).keys.reject { |key| wanted.includes?(key) }.sort!
+    end
+
+    # Whether *dir* is inside the module cache, asked the way the file
+    # system names files (`Iyi.file_key`). A string prefix was case- and
+    # separator-sensitive: a check run from the checkout entered as `c:\`,
+    # as editors and language clients spell the drive, was not "inside"
+    # `C:\...\cache\mod`, so it wrote an `iyi.sum` into the cached package,
+    # and every project using that version was refused as tampered with
+    # until the cache was cleared. Folding the case was not the whole
+    # answer: on a CI runner `IYI_CACHE_DIR` is spelled `C:\Users\RUNNER~1\`
+    # the way `mktemp` hands it out, and the checkout's directory is
+    # `C:\Users\runneradmin\` the way the shell enters it, so the same write
+    # happened with every letter folded. Only the file system knows an 8.3
+    # name's long one.
+    private def self.in_cache?(dir : String) : Bool
+      cache = Iyi.file_key(File.expand_path(Iyi::CacheDir.instance.join("mod")))
+      !Iyi.path_under?(Iyi.file_key(File.expand_path(dir)), cache).nil?
     end
 
     # The checkout's content, as one line-friendly token: files only,

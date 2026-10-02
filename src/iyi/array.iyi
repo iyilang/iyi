@@ -545,9 +545,10 @@ class Array(T)
   end
 
   # `[1, 2, 3]`, the way it is written: an array printed is its elements
-  # inspected, so a string inside keeps its quotes and a nil says so.
+  # inspected, so a string inside keeps its quotes and a nil says so. Cast,
+  # or `Tuple.new.to_a`'s `Array(NoReturn)` "can't infer block return type".
   def to_s : String
-    "[" + map { |value| value.inspect }.join(", ") + "]"
+    "[" + map { |value| value.inspect.as(String) }.join(", ") + "]"
   end
 
   def inspect : String

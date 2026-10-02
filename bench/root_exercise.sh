@@ -168,7 +168,7 @@ if [ "$EXERCISED" = no ]; then
   unmeasured=$((unmeasured + 1))
 else
   for check in "stack bounds:" "global range:" "stack root:" "register root:" \
-               "global root:" "interior pointer:" "not a pointer:" "arena tail:" \
+               "global root:" "interior pointer:" "not a pointer:" "large walk:" "arena tail:" \
                "freed chunk:" "freed large:" "many roots:" "maps parser:" \
                "all root checks passed"; do
     if ! grep -q "$check" "$WORK/roots-gc.out" 2>/dev/null; then
@@ -176,7 +176,7 @@ else
       status=1
     fi
   done
-  [ "$status" -eq 0 ] && echo "  bounds, stack, register, global, interior, rejection, tail, freed, many and the maps parser all reported"
+  [ "$status" -eq 0 ] && echo "  bounds, stack, register, global, interior, rejection, large walk, tail, freed, many and the maps parser all reported"
 fi
 
 echo

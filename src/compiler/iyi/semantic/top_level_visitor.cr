@@ -309,7 +309,16 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # different mistakes hide behind it, so they are told apart here.
     written = node.path.join('/')
     unless current_type.lookup_type?(path, allow_typeof: false)
-      if resolve_import(written)
+      if file = resolve_import(written)
+        # Loaded, and still no module: the file does not declare the one its
+        # path names. The sentence was "not imported here ... write `import
+        # util::{name}`" under the very `import util::{twice}` it was about.
+        if @program.iyi_imported_files.includes?(file)
+          node.raise "`#{written}` is imported, but #{Iyi.relative_filename(file)} " \
+                     "has no `module #{written}` header, and an import's names are " \
+                     "the `pub` ones under it: write `module #{written}` at its top " \
+                     "(SPEC.md R-1)"
+        end
         node.raise "`#{written}` is not imported here: its names come with the " \
                    "import that loads it, `import #{written}::{name}` (SPEC.md R-1, R-2b)"
       else
@@ -367,7 +376,10 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     if names = node.names
       unexported = names.reject { |name| used_type.exported_name?(name) }
       unless unexported.empty?
-        declared, absent = unexported.partition { |name| used_type.defs.try(&.has_key?(name)) || used_type.types?.try(&.has_key?(name)) }
+        # A macro lives on the module's metaclass, not in `defs`: a plain
+        # `macro hidden_m` imported by name was told "nothing by that name
+        # is declared".
+        declared, absent = unexported.partition { |name| used_type.defs.try(&.has_key?(name)) || used_type.metaclass.macros.try(&.has_key?(name)) || used_type.types?.try(&.has_key?(name)) }
         if absent.empty?
           node.raise "#{used_type} does not export #{declared.map { |name| "`#{name}`" }.join(", ")}. an import brings in only what a module marks `pub` — add `pub` to the declaration if it is meant to be part of the module's surface (SPEC.md R-2b)"
         else
@@ -900,7 +912,19 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # about which impl it meant — which is exactly what making the element type a
   # parameter would have cost. Where the trait does have parameters, several
   # impls are the point, so they are left alone.
+  #
+  # A trait with neither is implemented once too. A second `impl T for S`
+  # was accepted and its methods replaced the first's without a word: two
+  # impls answering `f` with 1 and 2 printed 2. The orphan rule keeps a
+  # second impl out of every other module (IV.4), so this is the module's
+  # own second impl, and the first shows in the type's own `include` list.
   private def check_single_impl(node : ImplDef, trait_type, target_type)
+    if trait_type.is_a?(TraitType)
+      if target_type.parents.try &.any?(&.same?(trait_type))
+        node.raise "#{target_type} already implements #{trait_type}: a trait is implemented once for a type, and a second impl would replace the first one's methods — see SPEC.md II.6"
+      end
+      return
+    end
     return unless trait_type.is_a?(GenericTraitType)
     return if trait_type.assoc_types.empty?
     return unless trait_type.trait_params.empty?
@@ -2273,6 +2297,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       end
 
       if call_expanded = call.expanded
+        call_expanded.accept IyiDeriveMarker.new
         generated << call_expanded
       end
       first_macro ||= call.expanded_macro
@@ -2283,6 +2308,25 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # first and the expansions carry the rest.
     node.expanded = generated.size == 1 ? generated.first : Expressions.new(generated)
     node.expanded_macro = first_macro
+  end
+
+  # iyi: every def a derive generated, through the macros its expansion
+  # called, marked as the derive's code (`Def#iyi_from_derive?`). The flag
+  # above is off by the time a macro in one of their bodies expands.
+  private class IyiDeriveMarker < Visitor
+    def visit(node : Def) : Bool
+      node.iyi_from_derive = true
+      true
+    end
+
+    def visit(node : Call | ExpandableNode) : Bool
+      node.expanded.try &.accept self
+      true
+    end
+
+    def visit(node : ASTNode) : Bool
+      true
+    end
   end
 
   # The bounded facts R-5 lets a derive read: the declaration's own name, and

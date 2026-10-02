@@ -34,9 +34,12 @@ module Iyi::Lsp
       parser = Parser.new(text)
       parser.filename = path
       walk(parser.parse)
-    rescue CodeError
+    rescue CodeError | InvalidByteSequenceError
       # Mid-edit the file may not even parse; an empty outline is the
-      # honest answer and the diagnostics channel already says why.
+      # honest answer and the diagnostics channel already says why. A
+      # file whose bytes are not UTF-8 (one saved as Windows-1254) has no
+      # outline either: it raised past this, and workspace symbols failed
+      # for every file in the workspace with -32603 "Unexpected byte 0xfe".
       [] of Sym
     end
 
@@ -49,7 +52,21 @@ module Iyi::Lsp
     private def self.collect(node : ASTNode, into : Array(Sym)) : Nil
       case node
       when Expressions
-        node.expressions.each { |child| collect(child, into) }
+        header = nil
+        node.expressions.each do |child|
+          header = child if child.is_a?(ModuleHeader)
+          if header && child.is_a?(ModuleDef) && child.iyi_unit?
+            # The file's own module, as its header writes it: `module
+            # calc/lexer` is desugared to a `module Calc::Lexer` placed at
+            # the keyword, and the outline named it that, a spelling the
+            # file does not have, with a selectionRange of the keyword's
+            # column for that name's length - `module calc`, and `mod` for
+            # `module app`. The server finds the written name on the line.
+            add(into, header.path.join('/'), KIND_MODULE, child, child.body)
+          else
+            collect(child, into)
+          end
+        end
       when VisibilityModifier
         collect(node.exp, into)
       when ClassDef
@@ -94,6 +111,10 @@ module Iyi::Lsp
           at
         elsif node.responds_to?(:name_location)
           node.name_location || location
+        elsif node.is_a?(EnumDef)
+          # An enum keeps no name location of its own, and its symbol's
+          # selectionRange was `enum` for `enum Renk`; its name's path has one.
+          node.name.location || location
         else
           location
         end

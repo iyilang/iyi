@@ -51,11 +51,15 @@ module Iyi
     # relative to the compiler location, independent of the absolute path.
     def self.expand_paths(paths, origin)
       paths.map! do |path|
-        if (chopped = path.lchop?("$ORIGIN")) && chopped[0].in?(::Path::SEPARATORS)
+        # `$ORIGIN` alone is the directory itself. It read the character
+        # after the name without asking whether there was one, and
+        # `IYI_PATH=$ORIGIN` died of "Index out of bounds (IndexError)" and
+        # "you've found a bug in the iyi compiler".
+        if (chopped = path.lchop?("$ORIGIN")) && (chopped.empty? || chopped[0].in?(::Path::SEPARATORS))
           if origin.nil?
             raise "Missing executable path to expand $ORIGIN path"
           end
-          File.join(origin, chopped)
+          chopped.empty? ? origin : File.join(origin, chopped)
         else
           path
         end

@@ -25,8 +25,15 @@ module Iyi
       @lib_path = exclude ? File.expand_path(Iyi.normalize_path("lib")) : nil
     end
 
-    # Detected warnings.
-    property infos = [] of String
+    # Detected warnings, each kept as the exception that renders it: text for
+    # a person (`infos`, `report`) and frames for `-f json`, which used to
+    # get them as text in front of the JSON (`Command#json_report`).
+    getter reports = [] of CodeError
+
+    # The detected warnings as text, one each.
+    def infos : Array(String)
+      @reports.map(&.to_s_with_source(nil))
+    end
 
     # Whether the compiler will error if any warnings are detected.
     property? error_on_warnings = false
@@ -39,31 +46,31 @@ module Iyi
       return unless @level.all?
       return if ignore_warning_due_to_location?(node.location)
 
-      @infos << node.warning(message)
+      @reports << node.warning(message)
     end
 
     def add_warning_at(location : Location?, message : String)
       return unless @level.all?
       return if ignore_warning_due_to_location?(location)
 
-      if location
-        message = String.build do |io|
-          exception = SyntaxException.new message, location.line_number, location.column_number, location.filename
-          exception.warning = true
-          exception.append_to_s(io, nil)
-        end
-      end
-
-      @infos << message
+      # A SyntaxException either way: the front end built without semantic/
+      # (std specs, a shard's build) has no TypeException. Line 0 is no place.
+      report = if location
+                 SyntaxException.new message, location.line_number, location.column_number, location.filename
+               else
+                 SyntaxException.new message, 0, 0, nil
+               end
+      report.warning = true
+      @reports << report
     end
 
     def report(io : IO)
-      unless @infos.empty?
-        @infos.each do |message|
-          io.puts message
+      unless @reports.empty?
+        @reports.each do |report|
+          io.puts report.to_s_with_source(nil)
           io.puts "\n"
         end
-        io.puts "A total of #{@infos.size} warnings were found."
+        io.puts "A total of #{@reports.size} warnings were found."
       end
     end
 
@@ -85,18 +92,34 @@ module Iyi
 
   class ASTNode
     def warning(message, inner = nil, exception_type = Iyi::TypeException)
-      # TODO extract message formatting from exceptions
-      String.build do |io|
-        exception = exception_type.for_node(self, message, inner)
-        exception.warning = true
-        exception.append_to_s(io, nil)
-      end
+      exception = exception_type.for_node(self, message, inner)
+      exception.warning = true
+      exception
     end
   end
 
   class Command
     def report_warnings
-      @compiler.try &.warnings.report(STDERR)
+      return unless compiler = @compiler
+      if @json_output
+        json_report { } unless compiler.warnings.reports.empty?
+      else
+        compiler.warnings.report(STDERR)
+      end
+    end
+
+    # iyi: what `-f json` writes to standard error, whatever ends the run: one
+    # JSON array, the frames the block writes and then every warning, marked
+    # `"severity": "warning"`. Warnings were printed there as text, so
+    # `check -f json` on a file with one answered `In colon2.iyi:3:17 ...
+    # Warning: ...` and exit 0, and a caller parsing it as JSON got nothing.
+    def json_report(& : JSON::Builder ->) : Nil
+      STDERR.puts(JSON.build do |json|
+        json.array do
+          yield json
+          @compiler.try &.warnings.reports.each(&.to_json_single(json))
+        end
+      end)
     end
 
     def warnings_fail_on_exit?
@@ -104,7 +127,7 @@ module Iyi
       return false unless compiler
 
       warnings = compiler.warnings
-      warnings.error_on_warnings? && !warnings.infos.empty?
+      warnings.error_on_warnings? && !warnings.reports.empty?
     end
   end
 end

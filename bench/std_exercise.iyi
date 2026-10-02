@@ -58,6 +58,27 @@ impl Enumerable for SimpleSeq
   end
 end
 
+# A source that can be walked once, as a pipe or a generator can: each
+# `each` drains what is left, and counts the walk.
+class OnceSeq
+  getter walks : Int32
+
+  def initialize(@items : Array(Int32))
+    @walks = 0
+  end
+end
+
+impl Enumerable for OnceSeq
+  type Elem = Int32
+
+  def each(& : Int32 -> Nil) : Nil
+    @walks = @walks + 1
+    while !@items.empty?
+      yield @items.shift
+    end
+  end
+end
+
 # ---- Helpers ----------------------------------------------------------------
 
 def assert_true(cond : Bool, msg : String) : Nil
@@ -298,6 +319,12 @@ assert_true(!mm_q[0].nil? && mm_q[0] == 1, "enum: minmax? min")
 assert_true(!mm_q[1].nil? && mm_q[1] == 9, "enum: minmax? max")
 empty_mm_q = empty_seq.minmax?
 assert_true(empty_mm_q[0].nil? && empty_mm_q[1].nil?, "enum: minmax? empty")
+# One walk: `min?` and then `max?` walked twice, so a source that can be
+# read once answered {1, nil} and `minmax` refused it as empty.
+once = OnceSeq.new([3, 1, 4, 1, 5])
+once_mm = once.minmax?
+assert_str("#{once_mm} #{once.walks}", "{1, 5} 1", "enum: minmax? walks once")
+assert_str(OnceSeq.new([3, 1, 4, 1, 5]).minmax.to_s, "{1, 5}", "enum: minmax of a source read once")
 
 # 51. minmax
 mm = seq.minmax
@@ -384,6 +411,10 @@ assert_eq(comp.size, 3, "enum: compact_map")
 # 67. find_value
 fv = seq.find_value { |x| x > 5 ? "big-#{x}" : nil }
 assert_true(!fv.nil? && fv == "big-9", "enum: find_value")
+# The first truthy answer, as the other library's: `false` was an answer,
+# so a predicate block found false where the other library finds true.
+assert_str(seq.find_value { |x| x > 5 }.inspect, "true", "enum: find_value takes the first truthy answer")
+assert_str(seq.find_value { |x| x > 100 }.inspect, "nil", "enum: find_value of all falses is nil")
 
 # 68. accumulate
 acc = small_seq.accumulate(0) { |a, b| a + b }

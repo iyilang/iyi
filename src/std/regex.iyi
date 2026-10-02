@@ -3,23 +3,23 @@
 # Linear time: a Thompson NFA run as a Pike VM, one pass over the text
 # with a thread list in priority order, so a search costs the text's
 # length times the pattern's and never more. Lookaround, backreferences,
-# recursion, possessive quantifiers, inline flags and `\p{..}` classes
-# are refused with a sentence — the first four are not regular, and the
-# last two this engine does not have.
+# recursion, possessive quantifiers, inline flags, `(?#..)` comments and
+# `\p{..}` classes are refused with a sentence — the first four are not
+# regular, and the last three this engine does not have.
 #
 # Matches are leftmost-first, as RE2's and Python's are: `a|ab` on `ab`
 # answers `a`, a greedy `*` takes what it can and a lazy `*?` what it
 # must. The surface: `.` (any byte but newline), `^` `$` `\A` `\z`, `\b`
 # `\B`, `\d` `\w` `\s` and their negations (ASCII), classes `[a-z]`
-# `[^0-9\s]`, `\xHH`, `?` `*` `+` `{n}` `{n,}` `{n,m}` and their lazy
-# forms, groups `( )` `(?: )` `(?<name> )` (none capture: a match is the
-# whole of it). Bytes, not code points: a class holding a byte past
-# ASCII is refused, while a literal `é` outside one matches its own
-# bytes. `match?` is the whole string; `find` is the first match; `scan`
-# every non-overlapping one; `split` and `replace` read those, and an
-# empty match costs no text. A literal, `/a+b/`, is `Regex.compile("a+b")`
-# compiled once for the program; it takes no flags, which this engine
-# does not have.
+# `[^0-9\s]` and RE2's ASCII `[[:alpha:]]` `[[:^digit:]]`, `\xHH`, `?`
+# `*` `+` `{n}` `{n,}` `{n,m}` and their lazy forms, groups `( )` `(?: )`
+# `(?<name> )` (none capture: a match is the whole of it). Bytes, not
+# code points: a class holding a byte past ASCII is refused, while a
+# literal `é` outside one matches its own bytes. `match?` is the whole
+# string; `find` is the first match; `scan` every non-overlapping one;
+# `split` and `replace` read those, and an empty match costs no text. A
+# literal, `/a+b/`, is `Regex.compile("a+b")` compiled once for the
+# program; it takes no flags, which this engine does not have.
 
 module std/regex
 
@@ -486,6 +486,8 @@ class RxRun
   @nxt_size : Int32
   @seen : Pointer(Int32)
   @gen : Int32
+  # The closure's own stack of the states it has still to visit.
+  @todo : Pointer(Int32)
 
   def initialize(@nfa : RxNfa, text : String)
     @src = text.to_unsafe
@@ -504,6 +506,9 @@ class RxRun
       i = i + 1
     end
     @gen = 0
+    # A closure takes each state once and pushes at most its two outs, so
+    # twice the states bound its stack.
+    @todo = Pointer(Int32).malloc(count * 2_u64)
   end
 
   # `whole`: anchored at `from`, and only a match reaching the text's end
@@ -562,30 +567,49 @@ class RxRun
   end
 
   # The epsilon closure of `s`, in priority order: out1 before out2. Into
-  # the next list when `nxt`, else the current one.
+  # the next list when `nxt`, else the current one. Walked on a stack of
+  # its own, out2 pushed under out1 so all of out1's closure comes first,
+  # as the recursion visited it: recursing one frame per split, an
+  # alternation of 890 words overflowed a task's 256 KiB stack in a plain
+  # build (1,700 with --release) and 35,000 the main one's 8 MiB (66,000),
+  # and the panic killed the process.
   private def add(nxt : Bool, s : Int32, start : Int32, pos : Int32) : Nil
-    return if s < 0 || @seen[s] == @gen
-    @seen[s] = @gen
-    k = @nfa.kind[s]
-    if k == 3
-      add(nxt, @nfa.out1[s], start, pos)
-      add(nxt, @nfa.out2[s], start, pos)
-    elsif k == 5
-      add(nxt, @nfa.out1[s], start, pos) if pos == 0
-    elsif k == 6
-      add(nxt, @nfa.out1[s], start, pos) if pos == @n
-    elsif k == 7
-      add(nxt, @nfa.out1[s], start, pos) if boundary?(pos)
-    elsif k == 8
-      add(nxt, @nfa.out1[s], start, pos) unless boundary?(pos)
-    elsif nxt
-      @nxt_state[@nxt_size] = s
-      @nxt_start[@nxt_size] = start
-      @nxt_size = @nxt_size + 1
-    else
-      @cur_state[@cur_size] = s
-      @cur_start[@cur_size] = start
-      @cur_size = @cur_size + 1
+    todo = @todo
+    todo[0] = s
+    top = 1
+    while top > 0
+      top = top - 1
+      t = todo[top]
+      next if t < 0 || @seen[t] == @gen
+      @seen[t] = @gen
+      k = @nfa.kind[t]
+      if k == 3
+        todo[top] = @nfa.out2[t]
+        todo[top + 1] = @nfa.out1[t]
+        top = top + 2
+      elsif k >= 5 && k <= 8
+        holds = if k == 5
+                  pos == 0
+                elsif k == 6
+                  pos == @n
+                elsif k == 7
+                  boundary?(pos)
+                else
+                  !boundary?(pos)
+                end
+        if holds
+          todo[top] = @nfa.out1[t]
+          top = top + 1
+        end
+      elsif nxt
+        @nxt_state[@nxt_size] = t
+        @nxt_start[@nxt_size] = start
+        @nxt_size = @nxt_size + 1
+      else
+        @cur_state[@cur_size] = t
+        @cur_start[@cur_size] = start
+        @cur_size = @cur_size + 1
+      end
     end
   end
 
@@ -888,10 +912,16 @@ class RxCompiler
         @i = @i + 1
       elsif m == 61_u8 || m == 33_u8 # (?= (?!
         raise "regex: lookaround is refused in /#{@pat}/"
+      elsif m == 35_u8 # (?#
+        raise "regex: comments are refused in /#{@pat}/"
       elsif m == 60_u8 || m == 80_u8 # (?< (?P
         @i = @i + 1
         if m == 80_u8
           raise "regex: unmatched '(' in /#{@pat}/" if @i >= @n
+          # `(?P=n)` is Python's backreference and `(?P>n)` its call of a
+          # group; both were "not a group name".
+          raise "regex: backreferences are refused in /#{@pat}/" if peek == 61_u8
+          raise "regex: recursion is refused in /#{@pat}/" if peek == 62_u8
           raise "regex: not a group name in /#{@pat}/" unless peek == 60_u8
           @i = @i + 1
         end
@@ -906,7 +936,9 @@ class RxCompiler
         end
         raise "regex: unterminated group name in /#{@pat}/" if @i >= @n
         @i = @i + 1
-      elsif m == 82_u8 || m == 40_u8 # (?R (?(
+      elsif m == 82_u8 || m == 40_u8 || m == 38_u8 || RxCompiler.digit?(m) ||
+            ((m == 43_u8 || m == 45_u8) && @i + 1 < @n && RxCompiler.digit?(@src[@i + 1]))
+        # (?R (?( (?&n (?1 (?+1 (?-1: the last four were "inline flags".
         raise "regex: recursion is refused in /#{@pat}/"
       elsif m == 62_u8 # (?>
         raise "regex: atomic groups are refused in /#{@pat}/"
@@ -915,7 +947,11 @@ class RxCompiler
       end
     end
     @depth = @depth + 1
-    raise "regex: groups nested past 1000 in /#{@pat}/" if @depth > 1000
+    # A level of nesting is five frames of this parser, and a task's stack
+    # is 256 KiB: at a cap of 1000, sized for the main stack, a task
+    # compiling `(` * 213 in a plain build overflowed it and the panic
+    # killed the process. 100 leaves that task half its stack.
+    raise "regex: groups nested past 100 in /#{@pat}/" if @depth > 100
     inner = parse_alt
     @depth = @depth - 1
     raise "regex: unmatched '(' in /#{@pat}/" unless @i < @n && peek == 41_u8
@@ -929,6 +965,10 @@ class RxCompiler
     b = peek
     @i = @i + 1
     if b >= 49_u8 && b <= 57_u8
+      raise "regex: backreferences are refused in /#{@pat}/"
+    elsif (b == 107_u8 || b == 103_u8) && @i < @n &&
+          (peek == 60_u8 || peek == 123_u8 || peek == 39_u8 || (b == 103_u8 && (peek == 45_u8 || RxCompiler.digit?(peek))))
+      # \k<n> \k{n} \k'n' \g<1> \g{1} \g1 \g-1, which were "unknown escape".
       raise "regex: backreferences are refused in /#{@pat}/"
     elsif b == 100_u8 # \d
       class_from(false) { |c| RxCompiler.digit?(c) }
@@ -1044,10 +1084,11 @@ class RxCompiler
     single(s)
   end
 
-  # One member of a class: a byte, answered; or `\d` `\w` `\s` and their
-  # negations, merged into `bits` and answered as -1, so a range cannot
-  # be made of them.
+  # One member of a class: a byte, answered; or `\d` `\w` `\s`, their
+  # negations and the `[:alpha:]` kind, merged into `bits` and answered as
+  # -1, so a range cannot be made of them.
   private def class_atom(bits : Array(UInt8)) : Int32
+    return -1 if posix_class(bits)
     if peek == 92_u8
       @i = @i + 1
       raise "regex: trailing '\\' in /#{@pat}/" if @i >= @n
@@ -1085,6 +1126,33 @@ class RxCompiler
     b.to_i32
   end
 
+  # `[:alpha:]` and the other ASCII classes RE2 names, `[:^alpha:]` the
+  # bytes outside one. Read as bytes, `[[:digit:]]+` found ":]]" in
+  # "[[:digit:]]x 5", where RE2 finds "5". As in RE2, a `[:` with no `:]`
+  # after it is the byte `[`, and a name RE2 does not have is refused.
+  private def posix_class(bits : Array(UInt8)) : Bool
+    return false unless @i + 1 < @n && peek == 91_u8 && @src[@i + 1] == 58_u8
+    close = @i + 2
+    while close + 1 < @n && !(@src[close] == 58_u8 && @src[close + 1] == 93_u8)
+      close = close + 1
+    end
+    return false if close + 1 >= @n
+    neg = @src[@i + 2] == 94_u8
+    from = neg ? @i + 3 : @i + 2
+    name = @pat[from, close - from]
+    if RxCompiler.posix?(name, 0_u8).nil?
+      raise "regex: unknown class '#{@pat[@i, close + 2 - @i]}' in /#{@pat}/"
+    end
+    c = 0
+    while c < 256
+      u = c.to_u8
+      set_bit(bits, u) if (RxCompiler.posix?(name, u) == true) != neg
+      c = c + 1
+    end
+    @i = close + 2
+    true
+  end
+
   private def class_from(neg : Bool, & : UInt8 -> Bool) : {Int32, Array(Int32)}
     bits = Array(UInt8).new(32) { 0_u8 }
     c = 0
@@ -1119,6 +1187,32 @@ class RxCompiler
 
   def self.space?(c : UInt8) : Bool
     c == 32_u8 || c == 9_u8 || c == 10_u8 || c == 13_u8 || c == 12_u8 || c == 11_u8
+  end
+
+  # Whether *c* is in the ASCII class RE2 calls *name*; nil for a name it
+  # does not have.
+  def self.posix?(name : String, c : UInt8) : Bool?
+    case name
+    when "alnum"  then digit?(c) || alpha?(c)
+    when "alpha"  then alpha?(c)
+    when "ascii"  then c < 128_u8
+    when "blank"  then c == 32_u8 || c == 9_u8
+    when "cntrl"  then c < 32_u8 || c == 127_u8
+    when "digit"  then digit?(c)
+    when "graph"  then c > 32_u8 && c < 127_u8
+    when "lower"  then c >= 97_u8 && c <= 122_u8
+    when "print"  then c >= 32_u8 && c < 127_u8
+    when "punct"  then c > 32_u8 && c < 127_u8 && !digit?(c) && !alpha?(c)
+    when "space"  then space?(c)
+    when "upper"  then c >= 65_u8 && c <= 90_u8
+    when "word"   then word?(c)
+    when "xdigit" then digit?(c) || (c >= 65_u8 && c <= 70_u8) || (c >= 97_u8 && c <= 102_u8)
+    else               nil
+    end
+  end
+
+  def self.alpha?(c : UInt8) : Bool
+    (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8)
   end
 
   private def peek : UInt8

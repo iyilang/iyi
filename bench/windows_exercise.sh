@@ -260,6 +260,123 @@ EOF
       fi
     fi
 
+    # 2a''. A program past its job's memory limit ends. A failed arena
+    # commit was retried whatever its error, and the reservation before it
+    # still succeeds once the commit charge is spent: under a 300 MB job
+    # limit, a program filling arenas spun at 100% CPU and never ended. It
+    # says "iyi: out of memory" and exits 1 now; only ERROR_INVALID_ADDRESS,
+    # another thread taking the freed range first, is retried. Python makes
+    # the job and starts the program suspended in it, so nothing is
+    # allocated before the limit holds, and kills it after 60 seconds.
+    echo
+    echo "== A program past its job's memory limit ends =="
+    JOBPY=""
+    for candidate in python3 python; do
+      if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys' >/dev/null 2>&1; then
+        JOBPY="$candidate"
+        break
+      fi
+    done
+    cat > "$WORK/job.py" <<'PY'
+import ctypes, subprocess, sys
+from ctypes import wintypes
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+ntdll = ctypes.WinDLL("ntdll")
+k32.CreateJobObjectW.restype = wintypes.HANDLE
+k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+class BASIC(ctypes.Structure):
+    _fields_ = [("user", ctypes.c_int64), ("job_user", ctypes.c_int64), ("flags", wintypes.DWORD),
+                ("ws_min", ctypes.c_size_t), ("ws_max", ctypes.c_size_t), ("processes", wintypes.DWORD),
+                ("affinity", ctypes.c_size_t), ("priority", wintypes.DWORD), ("scheduling", wintypes.DWORD)]
+class EXTENDED(ctypes.Structure):
+    _fields_ = [("basic", BASIC), ("io", ctypes.c_uint64 * 6), ("process_memory", ctypes.c_size_t),
+                ("job_memory", ctypes.c_size_t), ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
+job = k32.CreateJobObjectW(None, None)
+info = EXTENDED()
+# JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+info.basic.flags = 0x100 | 0x2000
+info.process_memory = int(sys.argv[1]) << 20
+k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))
+child = subprocess.Popen(sys.argv[2:], stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=0x4)
+k32.AssignProcessToJobObject(job, int(child._handle))
+ntdll.NtResumeProcess(int(child._handle))
+try:
+    out, err = child.communicate(timeout=60)
+    print(f"exit {child.returncode}")
+except subprocess.TimeoutExpired:
+    child.kill()
+    out, err = child.communicate()
+    print("TIMEOUT")
+print("stdout: " + out.decode("utf-8", "replace").replace("\r", "").replace("\n", "|"))
+print("stderr: " + err.decode("utf-8", "replace").replace("\r", "").replace("\n", "|"))
+PY
+    cat > "$WORK/filler.iyi" <<'EOF'
+module filler
+
+puts "filling"
+keep = [] of Array(Int32)
+while true
+  keep << Array(Int32).new(64) { |k| k }
+end
+EOF
+    if [ -z "$JOBPY" ]; then
+      echo "  no python to make a job with, so the limit is unmeasured"
+    elif ! "$IYI" build -o "$WORK/filler.exe" "$WORK/filler.iyi" > "$WORK/filler.log" 2>&1; then
+      echo "  the filling probe did not build"
+      tail -5 "$WORK/filler.log"
+      status=1
+    else
+      "$JOBPY" "$WORK/job.py" 300 "$(cygpath -w "$WORK/filler.exe")" > "$WORK/filler.out" 2>&1 || true
+      if grep -qx "exit 1" "$WORK/filler.out" && grep -q "iyi: out of memory" "$WORK/filler.out"; then
+        echo "  filling arenas past a 300 MB job limit exits 1 with 'iyi: out of memory'"
+      else
+        echo "  filling arenas past a 300 MB job limit did not end with 'iyi: out of memory':"
+        sed -n '1,3p' "$WORK/filler.out"
+        status=1
+      fi
+    fi
+
+    # 2a'''. A small program fits a small job. An arena was committed whole,
+    # 16 MiB of charge from its first object, one per size class per
+    # thread: eight threads keeping thirty strings each, one per class,
+    # committed 995 MB with a few kilobytes live, and under a 200 MB job
+    # limit died "iyi: out of memory". An arena is committed as it is
+    # carved now, its tables and a slab at a time; the program finishes
+    # under the same limit.
+    echo
+    echo "== A small program fits a 200 MB job =="
+    cat > "$WORK/classes.iyi" <<'EOF'
+module classes
+
+threads = [] of IyiThread
+8.times do
+  threads << IyiThread.start do
+    keep = [] of String
+    30.times { |i| keep << "x" * (8 + i * 24) }
+    nil
+  end
+end
+threads.each(&.join)
+puts "eight threads, thirty classes each"
+EOF
+    if [ -z "$JOBPY" ]; then
+      echo "  no python to make a job with, so the limit is unmeasured"
+    elif ! "$IYI" build -o "$WORK/classes.exe" "$WORK/classes.iyi" > "$WORK/classes.log" 2>&1; then
+      echo "  the size-class probe did not build"
+      tail -5 "$WORK/classes.log"
+      status=1
+    else
+      "$JOBPY" "$WORK/job.py" 200 "$(cygpath -w "$WORK/classes.exe")" > "$WORK/classes.out" 2>&1 || true
+      if grep -qx "exit 0" "$WORK/classes.out" && grep -q "eight threads, thirty classes each" "$WORK/classes.out"; then
+        echo "  eight threads in thirty size classes each finish under a 200 MB job limit"
+      else
+        echo "  eight threads in thirty size classes each did not finish under a 200 MB job limit:"
+        sed -n '1,3p' "$WORK/classes.out"
+        status=1
+      fi
+    fi
+
     # 2b. What a short sleep costs. Windows rounds a millisecond timeout
     # up to the system timer tick, so the poller's own wait woke 15.6 ms
     # after a `sleep 1` and a hundred of them took 1,577 ms; with the
@@ -445,6 +562,60 @@ EOF
       else
         echo "  the runner was killed and port $held came back"
       fi
+    fi
+
+    # 2f. A DOS device that is not there does not exist. Windows answers
+    # the attributes of every DOS device name with 0x20, whether the
+    # device is there or not, and `File.exists?` said true for `COM9` and
+    # `LPT7` on a machine with neither, where Python's `os.path.exists`
+    # says False. Such a name is opened now: an absent device is not
+    # found, and `NUL`, which opens, exists. No gate machine has a ninth
+    # serial port or a seventh printer port.
+    echo
+    echo "== A DOS device that is not there does not exist =="
+    printf 'module devices\n\nputs "COM9 " + File.exists?("COM9").to_s\nputs "LPT7 " + File.exists?("LPT7").to_s\nputs "NUL " + File.exists?("NUL").to_s\n' > "$WORK/devices.iyi"
+    if ! "$IYI" build -o "$WORK/devices.exe" "$WORK/devices.iyi" > "$WORK/devices.log" 2>&1; then
+      echo "  the device probe did not build"
+      tail -5 "$WORK/devices.log"
+      status=1
+    else
+      "$WORK/devices.exe" > "$WORK/devices.out" 2>&1 || true
+      if [ "$(tr -d '\r' < "$WORK/devices.out" | tr '\n' '|')" = "COM9 false|LPT7 false|NUL true|" ]; then
+        echo "  COM9 and LPT7 do not exist, NUL does"
+      else
+        echo "  the device names answered otherwise:"
+        sed -n '1,4p' "$WORK/devices.out"
+        status=1
+      fi
+    fi
+
+    # 2g. Where the runtime's fatal sentences go: standard error, as a
+    # panic's do. They were `__iyi_write(1, ...)`, and are
+    # `__iyi_write(2, ...)` now: `prog > out` past a memory limit left "iyi:
+    # out of memory" in `out` among the program's own lines, and standard
+    # error empty. Both ways a program runs out under the 300 MB job of
+    # 2a'': a mapping larger than the limit, and arenas filled to it.
+    echo
+    echo "== The runtime's fatal sentences go to standard error =="
+    printf 'module bigmap\n\nputs "mapping"\nbig = Array(UInt8).new(400_000_000, 1_u8)\nputs big.size\n' > "$WORK/bigmap.iyi"
+    if [ -z "$JOBPY" ]; then
+      echo "  no python to make a job with, so the streams are unmeasured"
+    elif ! "$IYI" build -o "$WORK/bigmap.exe" "$WORK/bigmap.iyi" > "$WORK/bigmap.log" 2>&1; then
+      echo "  the mapping probe did not build"
+      tail -5 "$WORK/bigmap.log"
+      status=1
+    else
+      for probe in bigmap filler; do
+        "$JOBPY" "$WORK/job.py" 300 "$(cygpath -w "$WORK/$probe.exe")" > "$WORK/$probe.streams" 2>&1 || true
+        if grep -qx "exit 1" "$WORK/$probe.streams" && grep -qx "stderr: iyi: out of memory|" "$WORK/$probe.streams" &&
+           ! grep -q "^stdout: .*out of memory" "$WORK/$probe.streams"; then
+          echo "  $probe: 'iyi: out of memory' on standard error, and none of it on standard output"
+        else
+          echo "  $probe: the sentence is not on standard error alone:"
+          sed -n '1,3p' "$WORK/$probe.streams"
+          status=1
+        fi
+      done
     fi
     ;;
 esac

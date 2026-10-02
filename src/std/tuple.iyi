@@ -93,10 +93,10 @@ struct ::Tuple
 
   # Returns a new Tuple with each element mapped through the block.
   #
-  # This one, `+` and `reverse` build with `Tuple.new(...)` rather than a
-  # brace literal, as the other library does: for the empty tuple the
-  # literal expanded to `{ }`, which is an empty hash, and
-  # `Tuple.new.reverse` did not compile.
+  # This, `+`, `reverse`, and `NamedTuple#keys` and `#values` build with
+  # `Tuple.new(...)`, not braces: with no members `{ }` is an empty hash
+  # literal, so on the empty tuple each failed to compile with "for empty
+  # hashes use '{} of KeyType => ValueType'".
   def map(&)
     {% begin %}
       Tuple.new(
@@ -174,12 +174,37 @@ struct ::NamedTuple
     false
   end
 
-  # Compares corresponding values for equality.
-  def ==(other : self) : Bool
-    {% for key in T.keys %}
-      return false unless self[{{key.symbolize}}] == other[{{key.symbolize}}]
+  # Compares the values by name.
+  #
+  # Any named tuple: the keys are sorted and compared, then the values in
+  # that order as tuples compare (src/iyi/object.iyi), member by member
+  # where one type holds the other. `self` took `{a: 1, b: 2}` for `{a: 1,
+  # b: y}` (y : Int32?) and not back, so the pair answered true one way and
+  # false the other, and `case` over them did not match.
+  def ==(other : NamedTuple) : Bool
+    sorted_keys == other.sorted_keys && sorted_values == other.sorted_values
+  end
+
+  # The keys, and the values, in sorted key order: the order a type lists
+  # its keys in is not part of the value.
+  protected def sorted_keys
+    {% begin %}
+      Tuple.new(
+        {% for key in T.keys.sort_by { |k| k.stringify } %}
+          {{key.symbolize}},
+        {% end %}
+      )
     {% end %}
-    true
+  end
+
+  protected def sorted_values
+    {% begin %}
+      Tuple.new(
+        {% for key in T.keys.sort_by { |k| k.stringify } %}
+          self[{{key.symbolize}}],
+        {% end %}
+      )
+    {% end %}
   end
 
   # Value identity.
@@ -201,25 +226,27 @@ struct ::NamedTuple
     {% end %}
   end
 
-  # Returns a Tuple containing the key symbols in order.
+  # Returns a Tuple containing the key symbols in order. Built with
+  # `Tuple.new`, as `Tuple#map` is: for the named tuple with no keys,
+  # braces are an empty hash literal.
   def keys
     {% begin %}
-      {
+      Tuple.new(
         {% for key in T.keys %}
           {{key.symbolize}},
         {% end %}
-      }
+      )
     {% end %}
   end
 
   # Returns a Tuple containing the values in order.
   def values
     {% begin %}
-      {
+      Tuple.new(
         {% for key in T.keys %}
           self[{{key.symbolize}}],
         {% end %}
-      }
+      )
     {% end %}
   end
 

@@ -33,7 +33,12 @@ module Iyi
     def directory_for(filename : String)
       dir = compute_dir
 
-      filename = ::Path[filename]
+      # iyi: without a verbatim prefix (`Iyi.unverbatim`): `::Path` reads
+      # `\\?\C:\p\main.iyi` as the anchor `\\?\` and the parts `C:`, `p`,
+      # ..., and the name came out `\-C:-p-main.iyi`, which Windows refuses
+      # for its colon - `iyi run`, `build` and `test` of such an entry
+      # stopped at "The directory name is invalid".
+      filename = ::Path[Iyi.unverbatim(filename)]
       name = String.build do |io|
         filename.each_part do |part|
           if io.empty?
@@ -46,6 +51,16 @@ module Iyi
           io << part
         end
       end
+      {% if flag?(:win32) %}
+        # And a name Windows keeps as written, which one holding a colon -
+        # the verbatim prefix's leftover above - is not, nor one ending in a
+        # space: Win32 drops a trailing space from the last part of a path
+        # and keeps it everywhere else, so for `iyi run "hello.iyi "` the
+        # directory was made as `...-hello.iyi` and then written into as
+        # `...-hello.iyi \`: "The system cannot find the path specified".
+        name = name.gsub { |char| char.in?('<', '>', ':', '"', '/', '\\', '|', '?', '*') || char.ord < 32 ? '-' : char }
+        name += "-" if name.ends_with?(' ') || name.ends_with?('.')
+      {% end %}
       output_dir = File.join(dir, bounded_name(name))
       Dir.mkdir_p(output_dir)
       output_dir

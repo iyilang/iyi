@@ -50,23 +50,14 @@ class Iyi::Command
 
     # The manifest's own grammar decides what a module path is (III.7), and
     # its sentences say why one is not — the same ones a hand-written
-    # `iyi.mod` would draw on the first build.
+    # `iyi.mod` would draw on the first build. Asked of the path alone: it
+    # was asked of a whole manifest, `module <path>`, and a path holding a
+    # newline was two directives - `x<LF>require a.b/c v1.0.0<LF>#/hello`
+    # wrote `module x` and a `require` nobody asked for, beside `hello.iyi`.
     begin
-      Mod::ModFile.parse("module #{module_path}\n", "init")
+      Mod::ModFile.check_module_path(module_path)
     rescue ex : Mod::ModError
-      # Without the `file:line:` a manifest error carries, because there is
-      # no file yet; the sentence after it is the one that matters. Chopped
-      # by hand rather than by a regex: a regex literal here puts PCRE on
-      # the compiler's floor (SPEC.md III.9), and `bench/dependency_floor.sh`
-      # on Windows said so — `pcre2-8.dll` gained — the first time this
-      # line was written with one.
-      sentence = ex.message.to_s.lchop("init:")
-      digits = 0
-      while (char = sentence[digits]?) && char.ascii_number?
-        digits += 1
-      end
-      sentence = sentence[digits..].lchop(':').lchop(' ')
-      abort! "init: #{sentence}", :USAGE_ERROR
+      abort! "init: #{ex.message}", :USAGE_ERROR
     end
 
     directory ||= Dir.current
@@ -98,15 +89,32 @@ class Iyi::Command
 
     # Two lines, not one joined with `&&`: Windows PowerShell 5.1 refuses
     # `&&` ("not a valid statement separator"), and no one separator means
-    # the same in cmd, PowerShell and a POSIX shell. The directory quoted
-    # when it holds a space, which all three read alike; and none when it
-    # is this one, however it was spelled.
+    # the same in cmd, PowerShell and a POSIX shell. None when it is this
+    # directory, however it was spelled.
     puts
     unless Iyi.same_file?(directory, Dir.current)
-      shown = Iyi.relative_filename(directory)
-      puts "cd #{shown.includes?(' ') ? %("#{shown}") : shown}"
+      puts "cd #{iyi_init_shell_word(Iyi.relative_filename(directory))}"
     end
     puts "#{Command.program_name} run #{name}.iyi    # builds and runs it"
+  end
+
+  # *path* as one word to `cd`: as it is when every character means itself
+  # to every shell, else in double quotes, which cmd, PowerShell and a
+  # POSIX shell all read alike - unless it holds what double quotes still
+  # expand in PowerShell and a POSIX shell (`$`, a backquote, `!`), where
+  # single quotes are the ones that hold it. It was quoted only for a
+  # space, and `cd ./x;y` ran `cd ./x` and then `y`; `cd ./d$x` went to
+  # `./d`; `cd ./a&b` ran `b` in cmd.
+  private def iyi_init_shell_word(path : String) : String
+    return path if path.each_char.all? { |c| c.alphanumeric? || c.in?('.', '_', '/', '\\', ':', '-') }
+    return %("#{path}") unless path.each_char.any?(&.in?('$', '`', '!', '"'))
+    # A quote inside single quotes: PowerShell doubles it, a POSIX shell
+    # closes, escapes and reopens.
+    {% if flag?(:win32) %}
+      "'#{path.gsub('\'', "''")}'"
+    {% else %}
+      "'#{path.gsub('\'', %q('\''))}'"
+    {% end %}
   end
 
   # The two files, in the order they are written.

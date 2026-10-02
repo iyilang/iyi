@@ -225,6 +225,14 @@ struct Float64
   # fraction to round (`1e308.round(1)` was Infinity), a scale past the
   # range keeps every digit a double has (`1.5.round(400)` was NaN), and
   # one past the range the other way is a zero (`1.5.round(-400)`).
+  #
+  # A scaled value at 2^53 or past is at hand the same way: the place
+  # `digits` names is finer than the double's last bit, so the nearest
+  # double to the rounded decimal is the double itself. Scaled back, it
+  # moved: `0.8173247445520655.round(17)` was 0.8173247445520654, and
+  # `(-0.05).round(300)`, whose scale `10.0 ** 300` is not 10^300 exactly,
+  # was -0.049999999999999996. Between 2^52 and 2^53 the place can still
+  # be the coarser one, so that band is scaled back as before.
   def round(digits : Int32) : Float64
     return round if digits == 0
     if digits < 0
@@ -235,7 +243,7 @@ struct Float64
       return self if self != self || abs >= 4503599627370496.0
       scale = 10.0 ** digits
       scaled = self * scale
-      return self if scaled * 0.0 != 0.0
+      return self unless scaled.abs < 9007199254740992.0
       scaled.round / scale
     end
   end

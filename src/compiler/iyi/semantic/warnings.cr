@@ -83,7 +83,7 @@ module Iyi
           end
         end
 
-        @warnings.infos << use_site.warning(full_message)
+        @warnings.reports << use_site.warning(full_message)
         true
       else
         false

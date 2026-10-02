@@ -3,7 +3,8 @@
 
 module bench/std_slice_exercise
 
-import std/slice::{Slice}
+import std/iterator::{Iterator}
+import std/slice::{Slice, SliceIterator}
 
 alias Bytes = Std::Slice::Bytes
 
@@ -58,6 +59,13 @@ def main : Nil
   unless inferred.to_s == "Slice[1, 2, 3]" && inferred_value.to_s == "Slice[7, 7]" && inferred_ro.to_s == "Slice[0, 2]" && inferred_ro.read_only?
     raise "inferred new: expected Slice[1, 2, 3] Slice[7, 7] Slice[0, 2] read-only"
   end
+
+  # `read_only` is named, as in the other library: positional, it took the
+  # value's place when the elements are `Bool`, and this was three falses,
+  # read-only.
+  bools = Slice(Bool).new(3, true)
+  puts "Bool value new: #{bools} read_only?=#{bools.read_only?}"
+  raise "Bool value new: expected Slice[true, true, true], writable" unless bools.to_s == "Slice[true, true, true]" && !bools.read_only?
 
   puts "bytesize: #{s_block.bytesize} (expected #{5 * sizeof(Int32)})"
   puts "to_unsafe: #{s_block.to_unsafe.address > 0_u64}"
@@ -212,6 +220,12 @@ def main : Nil
   puts "eq other type: #{eq1 == 123}"
   puts "same self: #{eq1.same?(eq1)}"
   puts "same copy: #{eq1.same?(eq2)}"
+  # Slices of two element types are unequal, as two such arrays are: they
+  # compared equal and hashed apart, so `Int32` -1, -2 and `Int64` -1, -2
+  # were `==` with hashes 204952928 and -1576659145.
+  wide_eq = Slice(Int64).new(3) { |i| i.to_i64 }
+  puts "eq other element type: #{eq1 == wide_eq} #{wide_eq == eq1}"
+  raise "eq other element type: an Int32 slice equalled an Int64 slice it hashes apart from" if eq1 == wide_eq || wide_eq == eq1
 
   # Equal contents hash alike, and a grid of two-element slices spreads:
   # the hash was `31 * h + x`, which gave this grid 4,769 distinct hashes
@@ -258,6 +272,14 @@ def main : Nil
     ewi_indices << idx
   end
   puts "each_with_index: #{ewi_indices.to_s}"
+
+  # The iterator is a class, so an adaptor shares it: a struct was copied
+  # into `first(2)`, and the source then started again at 3, 6.
+  shared = SliceIterator.new(enum_s)
+  taken = shared.first(2).to_a
+  rest = shared.to_a
+  puts "iterator after first(2): #{taken} then #{rest}"
+  raise "iterator after first(2): expected [3, 6] then [9, 12, 15]" unless taken == [3, 6] && rest == [9, 12, 15]
 
   puts "== gc liveness verification"
   sub = make_interior_slice

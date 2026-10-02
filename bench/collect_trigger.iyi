@@ -352,6 +352,30 @@
   Held.keep = 0_u64
   puts "    spare: under a #{count(IyiMark.budget)}-byte budget the second epoch's 48 MiB of garbage mapped #{count(spare_mapped)} arenas afresh"
 
+  # 7. A thread's allocation counts when the thread ends. A cache reports
+  # its allocation a slice (64 KiB) at a time, and the slice a thread had
+  # not filled when it ended went with its cache, uncounted: ten thousand
+  # threads of a thousand short strings each ran no collection and mapped
+  # a gigabyte. Five hundred such threads end here - 40 KB each, 20 MB in
+  # all against a budget of twice the few MB live - this thread fills one
+  # slice, and that slice finds the budget crossed.
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    IyiMark.collect
+    before = IyiMark.collections
+    500.times do
+      IyiThread.start do
+        kept = [] of String
+        1000.times { |i| kept << "t#{i}" }
+        nil
+      end.join
+    end
+    churn(65536_u64)
+    if IyiMark.collections == before && !IyiMark.marking?
+      raise "threads: five hundred threads of a thousand strings each, then a slice here, ran no collection under a #{count(IyiMark.budget)}-byte budget"
+    end
+    puts "    threads: five hundred short-lived threads' allocation counted, and the next slice ran a collection"
+  {% end %}
+
   puts "    all trigger checks passed"
 {% else %}
   puts "    the trigger needs the collector's allocator (the default on linux-x86_64, linux-aarch64 and darwin); this build deselected it, nothing to exercise here"

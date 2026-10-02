@@ -525,6 +525,9 @@ end
                       written : Int32*, reserved : Void*) : Int32
     fun ReadConsoleW(handle : Void*, buffer : Void*, count : Int32,
                      read : Int32*, control : Void*) : Int32
+    # The console's mode put back on Ctrl-C and Ctrl-Break
+    # (`__iyi_win_console_ctrl`).
+    fun SetConsoleCtrlHandler(handler : Void*, add : Int32) : Int32
     # The stack, walked by the kernel's own unwinder. x86-64 Windows has no
     # frame pointer to chase — a frame is described by the unwind data in
     # `.pdata`, which is what `RtlCaptureStackBackTrace` reads — so a panic
@@ -588,13 +591,14 @@ end
     # here put a tail held back from one of them in front of the next write
     # to the *other* — measured, a character whose lead byte went to stdout
     # and whose continuation byte went to stderr came out whole, on stderr.
-    # Two pairs rather than an array indexed by the descriptor, because the
+    # Two words rather than an array indexed by the descriptor, because the
     # prelude's `StaticArray` has no `[]=` and a heap slot for two words
-    # would be a mapping to keep alive for nothing.
+    # would be a mapping to keep alive for nothing. A word holds up to
+    # three bytes held back and, in its top byte, how many: `write_handle`,
+    # which `__iyi_write(2, ...)` reaches with the heap's lock held, joins
+    # them on the stack.
     @@carry_out : UInt64 = 0_u64
-    @@carry_out_length : Int32 = 0
     @@carry_err : UInt64 = 0_u64
-    @@carry_err_length : Int32 = 0
     # The console mode a stream had before VT processing was turned on
     # here, and its handle, for `restore_vt`.
     @@restore_out : UInt64 = 0_u64
@@ -663,56 +667,65 @@ end
       # Anything that is not the error stream carries as the output one:
       # `console?` has already refused every descriptor outside 0..2, and 0
       # is read from rather than written to.
-      on_error = fd == 2_i64
-      staged = buffer.as(UInt8*)
-      total = count.to_i32
-      held = on_error ? @@carry_err_length : @@carry_out_length
-      if held > 0
-        packed = on_error ? @@carry_err : @@carry_out
-        joined = Pointer(UInt8).malloc((held + total).to_u64)
-        index = 0
-        while index < held
-          joined[index] = (packed.unsafe_shr(index.to_u64 * 8_u64) & 0xFF_u64).to_u8
-          index = index + 1
-        end
-        (joined + held).copy_from(staged, total)
-        staged = joined
-        total = total + held
-        if on_error
-          @@carry_err = 0_u64
-          @@carry_err_length = 0
-        else
-          @@carry_out = 0_u64
-          @@carry_out_length = 0
-        end
+      write_handle(handle, buffer, count, fd == 2_i64 ? pointerof(@@carry_err) : pointerof(@@carry_out))
+    end
+
+    # The conversion and the write, for a console handle whose carry the
+    # caller keeps. Nothing here allocates: a runtime fatal message -
+    # `__iyi_write(2, ...)` from inside the allocator, its lock held, as a
+    # failed `VirtualFree` in `free_large` is - comes through here when
+    # standard error is a console, and the buffers this took from the heap
+    # waited on that lock for good. The text is converted in pieces on the
+    # stack instead; a piece of PIECE bytes is at most PIECE UTF-16 units.
+    PIECE = 1024
+
+    def self.write_handle(handle : Void*, buffer : Void*, count : UInt64, carry : UInt64*) : Int64
+      staged = uninitialized UInt8[PIECE]
+      wide = uninitialized UInt16[PIECE]
+      bytes = pointerof(staged).as(UInt8*)
+      units = pointerof(wide).as(UInt16*)
+      fill = carry.value.unsafe_shr(56_u64).to_i32
+      index = 0
+      while index < fill
+        bytes[index] = (carry.value.unsafe_shr(index.to_u64 * 8_u64) & 0xFF_u64).to_u8
+        index = index + 1
       end
-      whole = complete_length(staged, total)
-      tail = total - whole
-      if tail > 0
+      carry.value = 0_u64
+      source = buffer.as(UInt8*)
+      left = count
+      while true
+        take = left < (PIECE - fill).to_u64 ? left.to_i32 : PIECE - fill
+        (bytes + fill).copy_from(source, take)
+        source = source + take
+        left = left - take.to_u64
+        fill = fill + take
+        whole = complete_length(bytes, fill)
+        if whole > 0
+          wide_count = LibC.MultiByteToWideChar(65001, 0, bytes, whole, units, PIECE)
+          written = uninitialized Int32
+          if wide_count <= 0
+            # Not UTF-8 after all: the bytes are the program's and go out as
+            # they are, which is what every other platform does with them.
+            return -1_i64 if __iyi_win_write_file(handle, bytes.as(Void*), whole.to_u64) < 0_i64
+          elsif LibC.WriteConsoleW(handle, units.as(Void*), wide_count, pointerof(written), Pointer(Void).new(0_u64)) == 0
+            return -1_i64
+          end
+        end
+        # What is left of the piece is an unfinished sequence, three bytes
+        # at most: in front of the next piece, or of the next write.
         packed = 0_u64
-        index = 0
-        while index < tail
-          packed = packed | staged[whole + index].to_u64.unsafe_shl(index.to_u64 * 8_u64)
+        index = whole
+        while index < fill
+          bytes[index - whole] = bytes[index]
+          packed = packed | bytes[index].to_u64.unsafe_shl((index - whole).to_u64 * 8_u64)
           index = index + 1
         end
-        if on_error
-          @@carry_err = packed
-          @@carry_err_length = tail
-        else
-          @@carry_out = packed
-          @@carry_out_length = tail
+        fill = fill - whole
+        if left == 0_u64
+          carry.value = packed | fill.to_u64.unsafe_shl(56_u64) if fill > 0
+          return count.to_i64
         end
       end
-      return count.to_i64 if whole == 0
-      wide_count = LibC.MultiByteToWideChar(65001, 0, staged, whole, Pointer(UInt16).new(0_u64), 0)
-      # Not UTF-8 after all: the bytes are the program's and go out as they
-      # are, which is what every other platform does with them.
-      return __iyi_win_write_file(handle, staged.as(Void*), whole.to_u64) if wide_count <= 0
-      wide = Pointer(UInt16).malloc(wide_count.to_u64)
-      return __iyi_win_write_file(handle, staged.as(Void*), whole.to_u64) if LibC.MultiByteToWideChar(65001, 0, staged, whole, wide, wide_count) <= 0
-      written = uninitialized Int32
-      return -1_i64 if LibC.WriteConsoleW(handle, wide.as(Void*), wide_count, pointerof(written), Pointer(Void).new(0_u64)) == 0
-      count.to_i64
     end
 
     # The other direction, and the last leg of it. `ReadFile` on a console
@@ -774,7 +787,7 @@ end
       end
       @@line_start = wide[read - 1] == 10_u16
       wide[read] = 0_u16
-      size = __iyi_utf8_size_from_wide(wide)
+      size = __iyi_utf8_size_from_wide(wide, 0)
       return 0_i64 if size <= 1
       bytes = size - 1
       return 0_i64 if bytes.to_u64 > count
@@ -864,10 +877,13 @@ end
   IYI_WIN_PATH_LIMIT = 248
 
   def __iyi_wide_path(path : UInt8*) : UInt16*
-    needed = LibC.MultiByteToWideChar(65001, 0, path, -1, Pointer(UInt16).new(0_u64), 0)
+    # MB_ERR_INVALID_CHARS (8) refuses text that is not UTF-8 (null): with
+    # 0, each bad byte became U+FFFD, `x\xFF.txt` and `x\xFE.txt` were one
+    # file, and the second write replaced the first.
+    needed = LibC.MultiByteToWideChar(65001, 8, path, -1, Pointer(UInt16).new(0_u64), 0)
     return Pointer(UInt16).new(0_u64) if needed <= 0
     wide = Pointer(UInt16).malloc(needed.to_u64)
-    return Pointer(UInt16).new(0_u64) if LibC.MultiByteToWideChar(65001, 0, path, -1, wide, needed) <= 0
+    return Pointer(UInt16).new(0_u64) if LibC.MultiByteToWideChar(65001, 8, path, -1, wide, needed) <= 0
     # `needed` counts the terminator; the length does not.
     # The limit is on the path Windows resolves, not on the text handed in:
     # `needed` measures a relative name without the current directory in
@@ -950,9 +966,13 @@ end
   end
 
   # How many bytes the UTF-8 of *wide* needs, terminator included, or 0 when
-  # Windows refuses the conversion.
-  def __iyi_utf8_size_from_wide(wide : UInt16*) : Int32
-    needed = LibC.WideCharToMultiByte(65001, 0, wide, -1, Pointer(UInt8).new(0_u64), 0,
+  # Windows refuses the conversion. WC_ERR_INVALID_CHARS (128) by default
+  # refuses an unpaired surrogate: with 0 it became U+FFFD, and `Dir#read`
+  # named `x\uFFFDy.txt`, which does not exist, for a file named with one.
+  # Text a program is handed once - its arguments, a console's input -
+  # passes 0, where a refusal would lose the rest of it.
+  def __iyi_utf8_size_from_wide(wide : UInt16*, flags : Int32 = 128) : Int32
+    needed = LibC.WideCharToMultiByte(65001, flags, wide, -1, Pointer(UInt8).new(0_u64), 0,
       Pointer(UInt8).new(0_u64), Pointer(Int32).new(0_u64))
     needed > 0 ? needed : 0
   end
@@ -973,8 +993,10 @@ end
     # `File.exists?` and `Dir.exists?` true, while `File.directory?`, which
     # follows, said false and `Dir.children` panicked. Opened through, a
     # link to nothing is not found; anything else it answers stands (an app
-    # execution alias does not open through, and exists).
-    if attributes != -1 && (attributes & 0x400) != 0
+    # execution alias does not open through, and exists). A DOS device name
+    # is opened too: `COM9` answers 0x20 whether the port is there or not,
+    # and `File.exists?` said true for an absent one, where Python says False.
+    if attributes != -1 && ((attributes & 0x400) != 0 || (attributes == 0x20 && __iyi_dos_device?(wide)))
       # FILE_READ_ATTRIBUTES, every share right, OPEN_EXISTING,
       # FILE_FLAG_BACKUP_SEMANTICS so a directory opens.
       through = LibC.CreateFileW(wide, 0x80, 7, nil, 3, 0x2000000, Pointer(Void).new(0_u64))
@@ -991,6 +1013,16 @@ end
     return -1 if found.address &+ 1_u64 == 0_u64
     LibC.FindClose(found)
     entry.as(Pointer(Int32)).value
+  end
+
+  # Whether Windows reads *wide* as a DOS device: it resolves `NUL` or
+  # `COM9` to `\\.\NUL` or `\\.\COM9`, and nothing else spelled without
+  # that prefix resolves there. The longest such name is `\\.\CONOUT$`.
+  private def __iyi_dos_device?(wide : UInt16*) : Bool
+    return false if wide[0] == 92_u16 && wide[1] == 92_u16
+    full = Pointer(UInt16).malloc(16_u64)
+    written = LibC.GetFullPathNameW(wide, 16, full, Pointer(Pointer(UInt16)).new(0_u64))
+    written > 0 && written < 16 && full[0] == 92_u16 && full[1] == 92_u16 && full[2] == 46_u16 && full[3] == 92_u16
   end
 
   # HANDLE is pointer-sized; File carries it as Int64. INVALID_HANDLE_VALUE
@@ -1452,7 +1484,7 @@ require "./file"
       fun __iyi_mmap(length : UInt64) : Pointer(Void)
         result = LibC.mmap(Pointer(Void).new(0_u64), length, 3, 0x1002, -1, 0_i64)
         if result.address == 0xFFFFFFFFFFFFFFFF_u64
-          __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
         result
@@ -1460,7 +1492,7 @@ require "./file"
 
       fun __iyi_munmap(address : UInt64, length : UInt64) : Nil
         if LibC.munmap(Pointer(Void).new(address), length) != 0
-          __iyi_write(1, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
       end
@@ -1478,14 +1510,14 @@ require "./file"
       # fields read what the page's last owner left.
       fun __iyi_release_pages(address : UInt64, length : UInt64) : Nil
         return if LibC.mmap(Pointer(Void).new(address), length, 3, 0x1012, -1, 0_i64).address == address
-        __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+        __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
         __iyi_exit(1)
       end
     {% elsif flag?(:win32) %}
       fun __iyi_mmap(length : UInt64) : Pointer(Void)
         result = LibC.VirtualAlloc(nil, length, 0x3000_i32, 4_i32)
         if result.address == 0_u64
-          __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
         Pointer(Void).new(result.address)
@@ -1493,7 +1525,7 @@ require "./file"
 
       fun __iyi_munmap(address : UInt64, length : UInt64) : Nil
         if LibC.VirtualFree(Pointer(Void).new(address), 0_u64, 0x8000_i32) == 0
-          __iyi_write(1, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
       end
@@ -1549,7 +1581,7 @@ require "./file"
         # A failed raw syscall answers with -errno in the result register
         # rather than a flag: -4095..-1 is errno's whole range.
         if result < 0 && result >= -4095
-          __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
         Pointer(Void).new(result.to_u64)
@@ -1604,7 +1636,7 @@ require "./file"
                        : "volatile")
         {% end %}
         if result < 0 && result >= -4095
-          __iyi_write(1, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
+          __iyi_write(2, "iyi: munmap failed\n".to_unsafe.as(Void*), 19_u64)
           __iyi_exit(1)
         end
       end
@@ -1997,6 +2029,11 @@ require "./file"
         page = @@cache
         return if page == 0
         table = Pointer(UInt64).new(page)
+        # The slice not yet reported is counted now, or a thread that
+        # allocated less than a slice was never counted at all: ten
+        # thousand threads of a thousand strings each ran no collection
+        # and mapped a gigabyte. The next slice anyone fills sees it.
+        allocated_word.value.add(read64(page + CACHE_SLICE))
         lock
         index = 0
         while index < FILL
@@ -2747,7 +2784,7 @@ require "./file"
       # Whether the arena is still an arena, under the lock: the directory
       # byte is cleared before the unmap, under the same lock.
       def self.mapped?(arena : UInt64) : Bool
-        Pointer(UInt8).new(arena_dir + arena.unsafe_shr(24_u64)).value != 0_u8
+        Pointer(UInt8).new(arena_dir + arena.unsafe_shr(24_u64)).value == DIR_ARENA
       end
 
       # Under the lock: whether `owner` may set a region in `arena`, which
@@ -2777,6 +2814,7 @@ require "./file"
         stop = high + slab_for(chunk)
         stop = top if stop > top
         count = (stop - high).unsafe_div(chunk)
+        commit(high, high + count * chunk)
         Pointer(Atomic(UInt64)).new(arena + OFF_CURSOR).value.set(high)
         write64(arena + OFF_CURSOR_BYTE, meta(arena, high))
         write64(arena + OFF_BUMP_END, high + count * chunk)
@@ -2979,7 +3017,17 @@ require "./file"
       # directory is a mapping of 2^24 bytes for a 48-bit space, reserved
       # once and committed a page at a time as arenas land in it; the
       # kernel charges nothing for the untouched rest.
+      #
+      # A slot is one arena's whole or none of it, and an arena's byte is
+      # `DIR_ARENA`. Any other byte counts the large mappings that touch
+      # the slot - over a megabyte each, so seventeen at most - and a word
+      # in a slot that counts none is no large object's without the walk
+      # of their list (`containing_large`). Every word the mark met in no
+      # arena walked it: an `Array(Tuple(Int64, String))` of two million
+      # beside 200 live 1.1 MB buffers took 11.5 s a collection, 66 ms
+      # beside none.
       DIR_SLOTS = 16777216_u64
+      DIR_ARENA = 128_u8
 
       @@arena_dir : UInt64 = 0_u64
 
@@ -3001,24 +3049,32 @@ require "./file"
       def self.arena_of(address : UInt64) : UInt64
         slot = address.unsafe_shr(24_u64)
         return 0_u64 if slot >= DIR_SLOTS
-        return 0_u64 if Pointer(UInt8).new(arena_dir + slot).value == 0_u8
+        return 0_u64 if Pointer(UInt8).new(arena_dir + slot).value != DIR_ARENA
         address & (0_u64 &- MAP)
       end
 
       # A MAP-aligned mapping of MAP bytes: ask for twice, keep the aligned
       # middle, give the ends back.
+      #
+      # Windows cannot give back part of a reservation, so the aligned middle
+      # is reserved again after the whole is freed, and another thread can
+      # take it first: ERROR_INVALID_ADDRESS (487), which a fresh reservation
+      # gets around. Only that race goes round again, and not without end:
+      # retried whatever the error was, a program filling arenas under a
+      # 300 MB job limit spun at 100% CPU here and never ended. The middle
+      # is reserved, not committed; `commit` charges it as it is carved.
       def self.map_aligned : UInt64
         {% if flag?(:win32) %}
+          races = 0
           loop do
             raw = LibC.VirtualAlloc(nil, MAP * 2_u64, 0x2000_i32, 4_i32).address
-            if raw == 0_u64
-              __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
-              __iyi_exit(1)
+            if raw != 0_u64
+              base = (raw + MAP - 1_u64) & (0_u64 &- MAP)
+              LibC.VirtualFree(Pointer(Void).new(raw), 0_u64, 0x8000_i32)
+              return base if LibC.VirtualAlloc(Pointer(Void).new(base), MAP, 0x2000_i32, 4_i32).address == base
+              races = races + 1
             end
-            base = (raw + MAP - 1_u64) & (0_u64 &- MAP)
-            LibC.VirtualFree(Pointer(Void).new(raw), 0_u64, 0x8000_i32)
-            committed = LibC.VirtualAlloc(Pointer(Void).new(base), MAP, 0x3000_i32, 4_i32).address
-            return base if committed == base
+            IyiRoots.fatal("iyi: out of memory\n") if raw == 0_u64 || LibC.GetLastError != 487 || races == 64
           end
         {% else %}
           raw = __iyi_mmap(MAP * 2_u64).address
@@ -3027,6 +3083,22 @@ require "./file"
           tail = raw + MAP * 2_u64 - (base + MAP)
           __iyi_munmap(base + MAP, tail) if tail > 0
           base
+        {% end %}
+      end
+
+      # Windows charges a committed page to the commit limit whether it is
+      # touched or not, so an arena is committed as it is used: its head
+      # and tables and first slab when it is mapped, a slab at a time as
+      # the frontier moves (`next_slab`). The tables are committed whole,
+      # because the mark reads the entry of any word that lands in the
+      # arena. Committed whole, an arena was 16 MiB of charge from its
+      # first object: `puts 1` held 128 MiB, and eight threads of thirty
+      # short strings 995 MiB, out of memory under a 200 MB job limit with
+      # a few kilobytes live. Elsewhere an untouched page is charged
+      # nothing, and this is no call.
+      def self.commit(low : UInt64, high : UInt64) : Nil
+        {% if flag?(:win32) %}
+          IyiRoots.fatal("iyi: out of memory\n") if LibC.VirtualAlloc(Pointer(Void).new(low), high - low, 0x1000_i32, 4_i32).address == 0_u64
         {% end %}
       end
 
@@ -3063,20 +3135,21 @@ require "./file"
         {% end %}
         @@arenas_mapped = @@arenas_mapped &+ 1_u64
         chunk = chunk_of(index)
-        write64(base + OFF_MAP, MAP)
-        write64(base + OFF_CHUNK, chunk)
         # The tables: a byte and then sixteen bits for every chunk the
         # mapping could hold past the header page, and the grid on the
         # page after them.
         magic = (1_u64.unsafe_shl(MAGIC_SHIFT) + chunk.unsafe_shr(3_u64) - 1_u64).unsafe_div(chunk.unsafe_shr(3_u64))
         chunks = (MAP - HEAD).unsafe_div(chunk)
         first_offset = (META + chunks * (META_ENTRY + 1_u64) + PAGE - 1_u64) & (0_u64 &- PAGE)
-        write64(base + OFF_GRID, first_offset.unsafe_shl(GRID_SHIFT) | magic)
-        write64(base + OFF_MARKS, base + META + chunks * META_ENTRY)
         first = base + first_offset
         stop = first + slab_for(chunk)
         stop = base + MAP if stop > base + MAP
         count = (stop - first).unsafe_div(chunk)
+        commit(base, first + count * chunk)
+        write64(base + OFF_MAP, MAP)
+        write64(base + OFF_CHUNK, chunk)
+        write64(base + OFF_GRID, first_offset.unsafe_shl(GRID_SHIFT) | magic)
+        write64(base + OFF_MARKS, base + META + chunks * META_ENTRY)
         write64(base + OFF_CURSOR, first)
         write64(base + OFF_CURSOR_BYTE, base + META)
         write64(base + OFF_LEFT, count)
@@ -3100,7 +3173,7 @@ require "./file"
         @@arenas = base
         # The directory byte last, after the header and the link: a reader
         # that finds the byte finds an arena that is whole.
-        Pointer(UInt8).new(arena_dir + base.unsafe_shr(24_u64)).value = 1_u8
+        Pointer(UInt8).new(arena_dir + base.unsafe_shr(24_u64)).value = DIR_ARENA
         unlock
         base
       end
@@ -3111,6 +3184,7 @@ require "./file"
         write64(base + OFF_MAP, mapped)
         write64(base + 16 + OFF_MARK, (clear ? 0_u64 : ATOMIC_FLAG) | IyiMark.epoch_flag)
         lock
+        count_large(base, mapped, true)
         write64(base + OFF_NEXT, @@large)
         @@large = base
         unlock
@@ -3231,7 +3305,21 @@ require "./file"
           previous = node
           node = read64(node)
         end
+        count_large(base, read64(base + 8), false)
         __iyi_munmap(base, read64(base + 8))
+      end
+
+      # The directory's count (`DIR_ARENA`) for every slot a large mapping
+      # touches, up or down, under the lock: up before the node is listed,
+      # down after it is not.
+      def self.count_large(base : UInt64, mapped : UInt64, on : Bool) : Nil
+        slot = base.unsafe_shr(24_u64)
+        last = (base + mapped - 1_u64).unsafe_shr(24_u64)
+        while slot <= last && slot < DIR_SLOTS
+          byte = Pointer(UInt8).new(arena_dir + slot)
+          byte.value = on ? byte.value &+ 1_u8 : byte.value &- 1_u8
+          slot = slot + 1_u64
+        end
       end
 
       # Hand one empty arena's mapping back to the kernel — the sweep's
@@ -3363,6 +3451,10 @@ require "./file"
 
       def self.containing_large(pointer : Void*) : UInt64
         address = pointer.address
+        # A slot no large mapping touches answers without the walk
+        # (`DIR_ARENA` says why).
+        slot = address.unsafe_shr(24_u64)
+        return 0_u64 if slot < DIR_SLOTS && Pointer(UInt8).new(arena_dir + slot).value == 0_u8
         node = @@large
         while node != 0
           if address >= node + LARGE_USER && address < node + read64(node + OFF_MAP)
@@ -3637,8 +3729,12 @@ require "./file"
       # A root range that cannot be obtained ends the program. The whole
       # point of the range is that missing it frees live objects, so a
       # diagnosis now is cheaper than a corrupted heap later.
+      # On standard error, as a panic is, and as every other fatal sentence
+      # of the runtime's is: on standard output it landed in the program's
+      # data - `prog > out` past a job's memory limit left "iyi: out of
+      # memory" in `out` and standard error empty.
       def self.fatal(message : String) : NoReturn
-        __iyi_write(1, message.to_unsafe.as(Void*), message.bytesize.to_u64)
+        __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
         __iyi_exit(1)
       end
 
@@ -5132,6 +5228,11 @@ require "./file"
         slot = arena == 0 ? 0_u64 : IyiHeap.chunk_index(arena, base)
         byte = arena == 0 ? 0_u64 : arena &+ IyiHeap::META &+ slot &* IyiHeap::META_ENTRY
         bits = byte == 0 ? IyiHeap.read64(base - 8_u64) : IyiHeap.read8(byte)
+        # Handed back after it was grayed (`IyiHeap.free`, `realloc`'s
+        # old chunk): no object, its words a dead buffer's and a list
+        # link. Not opened, not counted live, and not blackened - the
+        # sweep whitens it with the dead (`sweep_slice`).
+        return if byte != 0 && bits & IyiHeap::FREE_FLAG != 0
         # Atomic first, before any id is trusted: an atomic chunk's word is
         # whatever its last owner left, and the id in it is nobody's layout.
         if bits & IyiHeap::ATOMIC_FLAG != 0
@@ -6156,6 +6257,14 @@ require "./file"
               swept = swept &+ 1_u64
               IyiHeap.write8(byte, word | IyiHeap::FREE_FLAG)
             end
+            # White, whatever a mark left it: `IyiHeap.free` whitens a
+            # chunk, but a helper that had it grayed and queued before the
+            # free blackened it after, and relinked black it was born black
+            # outside any mark - the next mark never scanned it and swept
+            # what only it held. A `Deque` grown by `push` (its buffer
+            # realloc'd, the old one freed under the mark) read swept
+            # leaves in 19 debug runs of 20.
+            IyiHeap.write8(mark, WHITE) if colour != WHITE
             if run_low == 0
               run_low = cursor
               run_batch = batch_head
@@ -7330,7 +7439,7 @@ require "./file"
       # A failed raw syscall answers with -errno in the result register rather
       # than a flag: -4095..-1 is errno's whole range.
       if result < 0 && result >= -4095
-        __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+        __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
         __iyi_exit(1)
       end
       Pointer(Void).new(result.to_u64)
@@ -7648,7 +7757,7 @@ require "./file"
           return if @@heap_start != 0_u64
           prev = LibWasmMem.memory_grow(0, 1)
           if prev < 0
-            __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+            __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
             __iyi_exit(1)
           end
           page = prev.to_u64.unsafe_shl(16_u64)
@@ -7716,7 +7825,7 @@ require "./file"
           if arena == 0_u64 || read64(arena + 24_u64) + chunk_size > PAGE
             prev = LibWasmMem.memory_grow(0, 1)
             if prev < 0
-              __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+              __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
               __iyi_exit(1)
             end
             arena = prev.to_u64.unsafe_shl(16_u64)
@@ -7753,7 +7862,7 @@ require "./file"
           pages = (total + PAGE - 1_u64).unsafe_div(PAGE)
           prev = LibWasmMem.memory_grow(0, pages.to_i32)
           if prev < 0
-            __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+            __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
             __iyi_exit(1)
           end
           arena = prev.to_u64.unsafe_shl(16_u64)
@@ -8201,7 +8310,7 @@ require "./file"
             pages = pages + 1 if bytes % 65536 > 0
             previous = LibWasmMem.memory_grow(0, pages.to_i32)
             if previous < 0
-              __iyi_write(1, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
+              __iyi_write(2, "iyi: out of memory\n".to_unsafe.as(Void*), 19_u64)
               __iyi_exit(1)
             end
             @@cursor = previous.to_u64.unsafe_shl(16)
@@ -8912,10 +9021,17 @@ end
   end
 
   # `exit` where there are no tasks: the one registry's cleanups, then the
-  # process (the concurrency targets' is in concurrency.iyi).
+  # process (the concurrency targets' is in concurrency.iyi, and so is why
+  # `__iyi_flush_std` is).
   def exit(status : Int32 = 0) : NoReturn
     IyiDefers.drain
+    __iyi_flush_std
     __iyi_exit(status)
+  end
+
+  def __iyi_flush_std : Nil
+    STDOUT.flush
+    STDERR.flush
   end
 {% end %}
 
@@ -8969,12 +9085,12 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
     callstack = uninitialized Void*[64]
     count = LibC.backtrace(pointerof(callstack).as(Void**), 64)
   {% elsif flag?(:win32) && flag?(:x86_64) %}
-    # Captured before anything is printed, and two frames skipped: this
-    # function and the kernel's own collector. Sixty-four is what the
-    # darwin arm asks for, so a resolver written against one works on the
-    # other.
+    # Captured before anything is printed, skipping this function alone,
+    # as darwin does: the collector is not a frame of its own, and two
+    # skipped dropped the function that raised. Sixty-four is what the
+    # darwin arm asks for, so a resolver written against one works on both.
     callstack = uninitialized Void*[64]
-    count = LibC.RtlCaptureStackBackTrace(2, 64, pointerof(callstack).as(Void**), Pointer(Int32).new(0_u64)) & 0xFFFF
+    count = LibC.RtlCaptureStackBackTrace(1, 64, pointerof(callstack).as(Void**), Pointer(Int32).new(0_u64)) & 0xFFFF
   {% end %}
   __iyi_say("iyi: panic: ")
   __iyi_say(message)
@@ -9013,6 +9129,7 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
     IyiScheduler.panic_current(message)
   {% else %}
     IyiDefers.drain
+    __iyi_flush_std
     __iyi_exit(1)
   {% end %}
 end
@@ -9119,15 +9236,15 @@ end
   # `WideCharToMultiByte` at CP_UTF8 (65001), the same pair
   # `__iyi_wide_path` and `__iyi_utf8_size_from_wide` put a path through.
   #
-  # Two differences from those, both of them the environment's. The flags
-  # are strict — MB_ERR_INVALID_CHARS (8) and WC_ERR_INVALID_CHARS (128) —
-  # where a path passes 0: with 0, bytes that are not UTF-8 become U+FFFD
-  # and a lone surrogate in a value becomes U+FFFD too, so what comes back
-  # is a half-converted string that no longer matches the name it was asked
-  # for, and nil is the honest answer for both. And the count is explicit
-  # rather than `-1`: a name in `GetEnvironmentStringsW`'s block is the
-  # slice in front of the first `=` and carries no terminator of its own,
-  # which a NUL-terminated-only conversion cannot express.
+  # The flags are as strict as a path's - MB_ERR_INVALID_CHARS (8) and
+  # WC_ERR_INVALID_CHARS (128) - for the same reason: with 0, bytes that
+  # are not UTF-8 and a lone surrogate in a value both become U+FFFD, a
+  # string that no longer matches the name it was asked for, and nil is
+  # the honest answer. The one difference is the environment's: the count
+  # is explicit rather than `-1`, because a name in
+  # `GetEnvironmentStringsW`'s block is the slice in front of the first `=`
+  # and carries no terminator of its own, which a NUL-terminated-only
+  # conversion cannot express.
   #
   # Windows documents a zero count as a failed call, so the empty string is
   # answered here rather than asked about — a variable whose value is `""`
@@ -9365,7 +9482,7 @@ class Program
           end
         end
         piece[taken] = 0_u16
-        size = __iyi_utf8_size_from_wide(piece)
+        size = __iyi_utf8_size_from_wide(piece, 0)
         if size > 0
           result << String.new(size - 1) { |target| __iyi_utf8_bytes_from_wide(piece, target, size) }
         end
@@ -9479,8 +9596,8 @@ end
   # safe at all.
   #
   # The write is `WriteFile` on the standard error handle rather than
-  # `print`: a fault may have landed inside the allocator, and the console
-  # path above allocates.
+  # `print` or `__iyi_write(2, ...)`: a fault may have landed in a stream's
+  # write or in the console's conversion, and this touches only the handle.
   IYI_WIN_STACK_OVERFLOW = -1073741571 # 0xC00000FD, as the Int32 this file spells a DWORD with
   IYI_WIN_ACCESS_VIOLATION = -1073741819 # 0xC0000005
   IYI_WIN_GUARD_PAGE = -2147483647 # 0x80000001, STATUS_GUARD_PAGE_VIOLATION
@@ -9501,6 +9618,20 @@ end
     # Unreachable: the process is gone. Spelled out because the type says
     # nothing returns from here and the binding above returns an Int32.
     LibC.ExitProcess(1)
+  end
+
+  # Ctrl-C and Ctrl-Break end a program through Windows' own handler,
+  # `ExitProcess`, past every exit of iyi's, and the console was left with
+  # VT processing on: mode 7 after the program where it had been 3, the
+  # mode `restore_vt` puts back at every other ending. This handler puts it
+  # back and answers FALSE, so the event goes on to the next handler and in
+  # the end to Windows' default, which ends the process as before. It is
+  # registered before the program runs, so it is asked last: a
+  # `Signal.wait` that takes the event answers it first, and the program
+  # goes on with VT processing as it had it.
+  fun __iyi_win_console_ctrl(event : Int32) : Int32
+    IyiConsole.restore_vt
+    0
   end
 
   fun __iyi_win_fault(info : Void*) : Int32
@@ -9577,6 +9708,9 @@ end
     # word and it is callable from outside iyi.
     filter = ->__iyi_win_fault(Void*)
     address = Pointer(Void).new(Pointer(UInt64).new(pointerof(filter).address).value)
+    # The console's control handler, registered first so it is asked last.
+    ctrl = ->__iyi_win_console_ctrl(Int32)
+    LibC.SetConsoleCtrlHandler(Pointer(Void).new(Pointer(UInt64).new(pointerof(ctrl).address).value), 1)
     # Both, and the vectored one is the one that works: a program whose
     # entry point is the CRT's `mainCRTStartup` runs inside
     # `__scrt_common_main_seh`, whose own `__except` takes a stack overflow
@@ -9603,6 +9737,7 @@ fun main(argc : Int32, argv : UInt8**) : Int32
     __iyi_win_install_fault_handler
   {% end %}
   LibIyiMain.__iyi_main(argc, argv)
+  __iyi_flush_std
   {% if flag?(:win32) %}
     # Not back into the C runtime, whose `exit` is `ExitProcess`, for the
     # reason `__iyi_exit` is not: a mark helper stopping this thread as it
@@ -9632,6 +9767,7 @@ end
   # it is for every other target.
   fun __main_argc_argv(argc : Int32, argv : UInt8**) : Int32
     LibIyiMain.__iyi_main(argc, argv)
+    __iyi_flush_std
     0
   end
 {% end %}

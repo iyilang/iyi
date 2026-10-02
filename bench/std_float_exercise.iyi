@@ -124,6 +124,14 @@ q, r = 7.5.divmod(-2.0)
 assert_true q == -4.0 && r == -0.5, "divmod(7.5, -2.0) is (-4.0, -0.5)"
 q32, r32 = 7.5_f32.divmod(2.0_f32)
 assert_true q32 == 3.0_f32 && r32 == 1.5_f32, "the single's divmod"
+# Past a quotient of 2^23 a single's `//` is the double's, narrowed: run in
+# 24 bits the remainder's multiple rounded, and the quotient came out one
+# over the floor, 12799595.0 and 16106953.0 for the two below, so `divmod`
+# did not give the dividend back.
+assert_true (-170277296.0_f32) // -13.303335_f32 == 12799594.0_f32, "a single's quotient past 2^23 is its floor"
+assert_true (-4.1095315e20_f32) // -25514022535168.0_f32 == 16106952.0_f32, "and a second one"
+q32, r32 = (-170277296.0_f32).divmod(-13.303335_f32)
+assert_true q32.to_f64 * (-13.303335_f32).to_f64 + r32.to_f64 == -170277296.0, "that divmod gives the dividend back"
 puts "  the zero of % is the divisor's, // floors, divmod is Python's"
 
 puts "\n== traits"

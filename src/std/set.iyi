@@ -111,12 +111,23 @@ class ::Set(T)
     size == other.size && subset_of?(other)
   end
 
-  # Equal sets hash alike: the members' hashes are combined with a
-  # wrapping sum, which does not care about order the way the sets do
-  # not. A hash is a number modulo the word, so the arithmetic wraps.
+  # Equal sets hash alike, and unequal ones apart. Each member's hash goes
+  # through splitmix64's finaliser before a wrapping sum, which does not
+  # care about order the way the sets do not, and the size is folded in
+  # after, as `Array#hash` folds it. The members' hashes summed as they
+  # were put a set of small integers at their total, `Int32#hash` being the
+  # value: {1, 4} and {2, 3} were one key, the 11,175 sets {i, j} with
+  # i < j < 150 had 297 hashes between them, and a table of such keys grew
+  # quadratically.
   def hash : Int32
-    h = 0
-    each { |v| h = h &+ v.hash }
-    h
+    sum = 0_u64
+    each do |v|
+      x = v.hash.to_i64.unsafe_to_u64
+      x = (x ^ x.unsafe_shr(30_u64)) &* 0xBF58476D1CE4E5B9_u64
+      x = (x ^ x.unsafe_shr(27_u64)) &* 0x94D049BB133111EB_u64
+      sum = sum &+ (x ^ x.unsafe_shr(31_u64))
+    end
+    value = (sum ^ size.to_i64.unsafe_to_u64) &* 0x100000001B3_u64
+    (value ^ value.unsafe_shr(29_u64)).hash
   end
 end

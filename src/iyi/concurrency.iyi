@@ -432,7 +432,19 @@ class IyiFiber
   property sleep_prev : IyiFiber?
   property sleep_seq : UInt64
   property next_child : IyiFiber?
+  # Who waits for this fiber to finish: the first of them, and through
+  # `next_joiner` the rest, chained through the waiters themselves. One
+  # field held one joiner, and a second fiber reading the same running
+  # task's `value` panicked "task already has a joiner" - a rule written
+  # nowhere, and one a read after the task finished never met. `awaited`
+  # is the task a fiber waits on in that chain, and `joining` the group
+  # whose join it waits in, so a deadlock can take it off either one.
   property joiner : IyiFiber?
+  property next_joiner : IyiFiber?
+  property awaited : IyiFiber?
+  property joining : IyiGroup?
+  # Woken to report a deadlock on its own stack (`IyiScheduler.deadlock`).
+  property deadlocked : Bool
 
   # The registry link and the stack's high end, for the collector's root
   # walk (GC_DESIGN.md Stage 3): a parked fiber's live values sit between
@@ -534,6 +546,10 @@ class IyiFiber
     @prev_io = nil
     @next_child = nil
     @joiner = nil
+    @next_joiner = nil
+    @awaited = nil
+    @joining = nil
+    @deadlocked = false
     @deadline = 0_i64
     @io_timed = false
     @timed_out = false
@@ -718,26 +734,42 @@ class IyiWaiter
   @fiber : IyiFiber
   @nonce : UInt64
   property next_node : IyiWaiter?
-  # In a channel's queue: set when parked there, cleared by the one walk
-  # that takes a node off a queue's head (`Channel#unlink_receiver`). A
-  # node still linked - left behind by a cancelled park, or one of a
-  # `select`'s arms - is never parked again, or its link would join two
-  # queues.
+  property prev_node : IyiWaiter?
+  # In a channel's queue: set when parked there, cleared when the node
+  # leaves it (`Channel#unlink_receiver`), from the head or from wherever
+  # it stands. A node still linked - one a cancelled park has not taken
+  # out yet - is never parked again, or its link would join two queues.
   property linked : Bool
+  # Where a rendezvous sender puts its value: the address of a `T` the
+  # parked receive owns, written only while the node is `current?`, so
+  # only while that receive is suspended in the park that made it. The
+  # flag is the receipt: a woken receive that was handed a value answers
+  # it, whatever else has happened since (`Channel#hand`).
+  @slot : UInt64
+  property handed : Bool
 
-  def initialize(@fiber : IyiFiber, @nonce : UInt64)
+  def initialize(@fiber : IyiFiber, @nonce : UInt64, @slot : UInt64)
     @next_node = nil
+    @prev_node = nil
     @linked = false
+    @handed = false
   end
 
   # The same node for another park of the same fiber.
-  def renew(nonce : UInt64) : Nil
+  def renew(nonce : UInt64, slot : UInt64) : Nil
     @nonce = nonce
+    @slot = slot
     @next_node = nil
+    @prev_node = nil
+    @handed = false
   end
 
   def fiber : IyiFiber
     @fiber
+  end
+
+  def slot : UInt64
+    @slot
   end
 
   # Still the park it was made for: the fiber is channel-parked and has
@@ -758,6 +790,7 @@ class IyiSendNode(T)
   @fiber : IyiFiber
   @nonce : UInt64
   property next_node : IyiSendNode(T)?
+  property prev_node : IyiSendNode(T)?
   @value : T
   @taken : Bool
   # In a channel's queue, as `IyiWaiter#linked` is; and read by the
@@ -765,12 +798,13 @@ class IyiSendNode(T)
   # needed. The channel keeps one node to park its next sender with
   # (`Channel#park_send_node`), and hands it out again only when both
   # hold: a node taken off the queue has a sender yet to wake and read
-  # `delivered?`, and a node read and still queued is a cancelled park's.
+  # `delivered?`, and a node still queued is a park nobody has left.
   property linked : Bool
   property read : Bool
 
   def initialize(@fiber : IyiFiber, @nonce : UInt64, @value : T)
     @next_node = nil
+    @prev_node = nil
     @taken = false
     @linked = false
     @read = false
@@ -782,6 +816,7 @@ class IyiSendNode(T)
     @nonce = nonce
     @value = value
     @next_node = nil
+    @prev_node = nil
     @taken = false
   end
 
@@ -857,6 +892,15 @@ class IyiSchedulerState
   property dying : IyiFiber?
   property stack_pool : UInt64
 
+  # The thread's own fiber, the one with no task above it: a deadlock is
+  # reported on its stack, whichever fiber's park found it.
+  property root : IyiFiber?
+  # Parks counted, and when the poller was last asked without waiting, so
+  # it is asked even while the run queue never empties
+  # (`IyiScheduler.reschedule`).
+  property parks : UInt64
+  property polled_at : Int64
+
   {% if flag?(:win32) %}
     # Windows' deadline: the timer this thread arms for the nearest
     # sleeper, and the two handles it waits on — the completion port and
@@ -873,6 +917,9 @@ class IyiSchedulerState
     # an assignment inside a macro conditional is not counted either.
     @deadline_timer : Int64 = 0_i64
     @wait_handles : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
+    # The fiber on this thread waiting for standard input's reader, which
+    # posts to this thread's port (`IyiStdinReader.read`).
+    property stdin_waiter : IyiFiber?
 
     def deadline_timer : Int64
       @deadline_timer
@@ -896,6 +943,8 @@ class IyiSchedulerState
     @events = Pointer(UInt8).new(0_u64)
     @stack_pool = 0_u64
     @sleep_seq = 0_u64
+    @parks = 0_u64
+    @polled_at = 0_i64
     @io_slots = nil
   end
 end
@@ -976,6 +1025,7 @@ class IyiScheduler
       main.stack_top = top
     {% end %}
     state.current = main
+    state.root = main
     register(main)
     main
   end
@@ -1074,14 +1124,52 @@ class IyiScheduler
   # it with nothing printed (`thread_exercise`, once in sixty runs there).
   # Only a fiber the registry holds is unlinked - `unregister` of one it
   # does not would rewrite the head.
+  #
+  # And what the scheduler made for the thread goes with it: the poller,
+  # Windows' deadline timer, the stacks in the pool, and the state on the
+  # roots' list. None of it was ever given back, and a thread that slept
+  # once left two handles: a thousand of them, run and joined one after
+  # another, took the process from 60 handles to 2,061, and a thousand
+  # that each ran four tasks kept 259 MiB of stacks committed after they
+  # had all ended.
   def self.retire_thread : Nil
     state = @@state
     return if state.is_a?(Nil)
     main = state.current
-    return unless main.is_a?(IyiFiber)
-    head = @@all_head
-    linked = main.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == main.object_id)
-    unregister(main) if linked
+    if main.is_a?(IyiFiber)
+      head = @@all_head
+      linked = main.prev_fiber.is_a?(IyiFiber) || (head.is_a?(IyiFiber) && head.object_id == main.object_id)
+      unregister(main) if linked
+    end
+    reap_dying
+    __iyi_close(state.pollfd) if state.pollfd > 0_i64
+    {% if flag?(:win32) %}
+      __iyi_close(state.deadline_timer) if state.deadline_timer > 0_i64
+    {% end %}
+    base = state.stack_pool
+    while base != 0_u64
+      following = Pointer(UInt64).new(base + IyiFiber::STACK_BYTES - 8_u64).value
+      __iyi_munmap(base, IyiFiber::STACK_BYTES)
+      base = following
+    end
+    state.stack_pool = 0_u64
+    IyiRuntimeLock.lock
+    previous : IyiSchedulerState? = nil
+    cursor = @@states_head
+    while cursor.is_a?(IyiSchedulerState)
+      if cursor.object_id == state.object_id
+        if previous.is_a?(IyiSchedulerState)
+          previous.next_state = state.next_state
+        else
+          @@states_head = state.next_state
+        end
+        break
+      end
+      previous = cursor
+      cursor = cursor.next_state
+    end
+    IyiRuntimeLock.unlock
+    @@state = nil
   end
 
   # The top of the fiber stack holding `address`, 0 when no fiber's
@@ -1166,8 +1254,7 @@ class IyiScheduler
     state.run_tail = fiber
   end
 
-  def self.dequeue : IyiFiber?
-    state = self.state
+  def self.dequeue(state : IyiSchedulerState) : IyiFiber?
     head = state.run_head
     return nil unless head.is_a?(IyiFiber)
     state.run_head = head.next_run
@@ -1180,15 +1267,50 @@ class IyiScheduler
   # set) and run something else. Returns when this fiber is switched back
   # in — possibly without a switch at all, when the wait ended before
   # anything else got to run.
+  #
+  # Every `POLL_EVERY`th park looks at the clock as well, and at the poller
+  # once `POLL_IO_NS` have passed since it last looked, without waiting.
+  # Both were looked at only once the run queue was empty, and a yield
+  # keeps it full: a task polling a flag with `sleep(0)` spun 20,000,000
+  # times in 666-813 ms while the task sleeping 10 ms to set it never woke,
+  # and a `sleep(50)` beside a channel ping-pong woke after 545-669 ms, when
+  # the ping-pong had stopped by itself. The poller is a system call, and
+  # asked every 256 parks it put 15 ns on a 90 ns round trip beside a parked
+  # `accept`; the clock alone is not measurable there.
+  POLL_EVERY =     256_u64
+  POLL_IO_NS = 1000000_i64
+
   def self.reschedule : Nil
+    st = state
+    parks = st.parks &+ 1_u64
+    st.parks = parks
+    poll_now(st) if parks % POLL_EVERY == 0_u64
     while true
-      fiber = dequeue
+      fiber = dequeue(st)
       if fiber.is_a?(IyiFiber)
         switch_to(fiber)
         return
       end
-      wait_for_events
+      wait_for_events(true)
     end
+  end
+
+  # The expired sleepers and, when its time has come, the poller's news,
+  # without waiting; nothing at all when nobody waits on either.
+  def self.poll_now(st : IyiSchedulerState) : Nil
+    io = !st.io_head.is_a?(Nil)
+    {% if flag?(:win32) %}
+      io = io || IyiStdinReader.waiting?
+    {% end %}
+    if io
+      now = __iyi_monotonic_ns
+      if now - st.polled_at >= POLL_IO_NS
+        st.polled_at = now
+        wait_for_events(false)
+        return
+      end
+    end
+    wake_expired_sleepers
   end
 
   # How a spawned fiber's stack is made, installed by the first spawn
@@ -1238,6 +1360,7 @@ class IyiScheduler
     # Back on this fiber's own stack, which is the first moment a stack
     # somebody else finished with can be taken back.
     reap_dying
+    deadlock if previous.deadlocked
   end
 
   # The trampoline lands here on a fresh fiber's first resume.
@@ -1250,11 +1373,7 @@ class IyiScheduler
     body = fiber.proc
     body.call unless body.is_a?(Nil)
     fiber.state = IyiFiberState::Done
-    joiner = fiber.joiner
-    if joiner.is_a?(IyiFiber)
-      fiber.joiner = nil
-      enqueue(joiner)
-    end
+    wake_joiners(fiber)
     # Never returns: a done fiber is never enqueued, so the switch away
     # is the last instruction of this stack's life — and the stack is
     # the next fiber's to take back, named here because after the
@@ -1364,14 +1483,17 @@ class IyiScheduler
     if fd == 0_i32 || fd == 0_i64
       handle = LibC.GetStdHandle(-10)
       # A pipe or a console waits, and is read by a thread of its own; a
-      # zero-byte read is a question about readiness, which a console
-      # would answer by taking a character, so it is answered here. A disk
+      # zero-byte read is a question about readiness, which the thread asks
+      # a pipe the way it reads one, and a console would answer by taking
+      # a character: a console is ready at once, which is this platform's
+      # limit, since what its line reads waits for Enter either way. A disk
       # file answers at once and is read where it is asked, without an
       # OVERLAPPED: on a handle not opened for one, its offset is where the
       # read starts, and every read would start at 0.
       return __iyi_read(0_i64, buffer, count) unless IyiStdinReader.waits?(handle)
-      return 0_i64 if count == 0_u64
-      return IyiStdinReader.read(handle, IyiConsole.console?(0_i64, handle), buffer, count, ms)
+      console = IyiConsole.console?(0_i64, handle)
+      return 0_i64 if count == 0_u64 && console
+      return IyiStdinReader.read(handle, console, buffer, count, ms)
     elsif fd == 1_i32 || fd == 1_i64
       handle = LibC.GetStdHandle(-11)
     elsif fd == 2_i32 || fd == 2_i64
@@ -1410,7 +1532,19 @@ class IyiScheduler
       return 0_i64
     end
 
-    park_overlapped_current(ms)
+    parked = park_overlapped_current(ms)
+    return parked unless parked.is_a?(Cancelled)
+    # Cancelled, and the read is the kernel's until its packet is off the
+    # port: the bytes and the OVERLAPPED's status are written when the
+    # poller takes it (`cancel` says what was measured), and a read whose
+    # bytes had come already is not ended by `CancelIoEx` at all. Answered
+    # `Cancelled` on the flag, those bytes were gone from the pipe and lost:
+    # a sibling that wrote three and then failed left the reader's buffer
+    # 0,0,0 at the answer and 97,98,99 after it, 8 runs in 8. So a status
+    # still STATUS_PENDING (0x103) parks once more for the packet, as
+    # `ProcessChild.settle` does, and bytes it carried are the answer.
+    park_overlapped_current if Pointer(UInt64).new(ov.address).value == 0x103_u64
+    fiber.io_bytes_read > 0_i64 ? fiber.io_bytes_read : parked
   end
 
   def self.wait_readable_current(fd : Int32 | Int64) : Nil | Cancelled
@@ -1420,9 +1554,13 @@ class IyiScheduler
   end
 
   # The same wait with a deadline *ms* milliseconds away, -1 for none:
-  # true when *fd* is readable, false when the deadline came first.
+  # true when *fd* is readable, false when the deadline came first. The
+  # flag starts false here, not at the arm: a wait answered before arming
+  # read the last one's, and after one timed-out wait a pipe holding three
+  # bytes, or stdin with a line in it, was "timed out" after 0 ms.
   def self.wait_readable_current(fd : Int32 | Int64, ms : Int32) : Bool | Cancelled
     fiber = current
+    fiber.timed_out = false
     return Cancelled.new if fiber.cancelled
     {% if flag?(:win32) %}
       res = read_current(fd, Pointer(Void).new(0_u64), 0_u64, ms)
@@ -1453,6 +1591,7 @@ class IyiScheduler
   # its own deadline - so it answers true at once.
   def self.wait_writable_current(fd : Int32 | Int64, ms : Int32) : Bool | Cancelled
     fiber = current
+    fiber.timed_out = false
     return Cancelled.new if fiber.cancelled
     {% if flag?(:win32) %}
       true
@@ -1600,14 +1739,63 @@ class IyiScheduler
     true
   end
 
+  # Any number of fibers wait on one task, each pushed on its chain.
   def self.join(fiber : IyiFiber) : Nil
     while fiber.state != IyiFiberState::Done
-      raise "task already has a joiner" if fiber.joiner.is_a?(IyiFiber)
       me = current
+      me.awaited = fiber
+      me.next_joiner = fiber.joiner
       fiber.joiner = me
       me.state = IyiFiberState::Joining
       reschedule
     end
+  end
+
+  # Every fiber waiting on *fiber*, woken in the order they came: the
+  # chain is pushed at its head, so it is turned round first.
+  def self.wake_joiners(fiber : IyiFiber) : Nil
+    first = fiber.joiner
+    return unless first.is_a?(IyiFiber)
+    fiber.joiner = nil
+    waiter = first
+    rest = first.next_joiner
+    first.next_joiner = nil
+    while rest.is_a?(IyiFiber)
+      following = rest.next_joiner
+      rest.next_joiner = waiter
+      waiter = rest
+      rest = following
+    end
+    while true
+      following = waiter.next_joiner
+      waiter.next_joiner = nil
+      waiter.awaited = nil
+      enqueue(waiter)
+      break unless following.is_a?(IyiFiber)
+      waiter = following
+    end
+  end
+
+  # *fiber* off the chain of the task it waits on.
+  def self.leave_joiners(task : IyiFiber, fiber : IyiFiber) : Nil
+    fiber.awaited = nil
+    head = task.joiner
+    return unless head.is_a?(IyiFiber)
+    if head.object_id == fiber.object_id
+      task.joiner = fiber.next_joiner
+    else
+      walk = head
+      while true
+        following = walk.next_joiner
+        break unless following.is_a?(IyiFiber)
+        if following.object_id == fiber.object_id
+          walk.next_joiner = fiber.next_joiner
+          break
+        end
+        walk = following
+      end
+    end
+    fiber.next_joiner = nil
   end
 
   # III.4.2: cancellation reaches a *blocked* fiber. Whatever the fiber is
@@ -1662,19 +1850,57 @@ class IyiScheduler
 
   # ── The poller ───────────────────────────────────────────────────────
 
-  def self.wait_for_events : Nil
-    sleep_head = state.sleep_head
-    quiet = state.io_head.is_a?(Nil) && sleep_head.is_a?(Nil)
-    {% if flag?(:win32) %}
-      quiet = quiet && !IyiStdinReader.waiting?
-    {% end %}
-    raise "deadlock: every fiber is blocked and nothing can wake one" if quiet
+  DEADLOCK = "deadlock: every fiber is blocked and nothing can wake one"
 
-    timeout = -1_i64
+  # A deadlock is the root fiber's panic, raised on the root's own stack.
+  # It was raised on the stack of whichever fiber's park found it, mostly
+  # a task's, parked or already done, and that task went through its
+  # boundary a second time: its group counted it twice, and the next park
+  # found the deadlock again - 182 reports, then "stack overflow" - or the
+  # group cancelling it enqueued the dying task, which switched to itself
+  # and exited 1 without the owner's cleanups. The root is taken off what
+  # it waits on, so nothing wakes it there again, and woken to report it.
+  def self.deadlock_found : Nil
+    root = state.root
+    deadlock unless root.is_a?(IyiFiber)
+    task = root.awaited
+    leave_joiners(task, root) if task.is_a?(IyiFiber)
+    group = root.joining
+    group.forget_joiner if group.is_a?(IyiGroup)
+    deadlock if root.object_id == current.object_id
+    root.deadlocked = true
+    enqueue(root)
+  end
+
+  # On the root's stack. A second deadlock in the drain of the first, a
+  # cleanup waiting on tasks cancellation does not reach, is the same news
+  # and goes on through the drain without being printed again.
+  def self.deadlock : NoReturn
+    fiber = current
+    fiber.deadlocked = false
+    panic_current(DEADLOCK) if fiber.panicked && fiber.panic_message == DEADLOCK
+    raise DEADLOCK
+  end
+
+  # Waits for the next event when *blocking*, and otherwise takes what has
+  # arrived already (`poll_now`).
+  def self.wait_for_events(blocking : Bool) : Nil
+    sleep_head = state.sleep_head
+    timeout = blocking ? -1_i64 : 0_i64
     {% if flag?(:win32) %}
       gap_ns = -1_i64
     {% end %}
-    if sleep_head.is_a?(IyiFiber)
+    if blocking
+      quiet = state.io_head.is_a?(Nil) && sleep_head.is_a?(Nil)
+      {% if flag?(:win32) %}
+        quiet = quiet && !IyiStdinReader.waiting?
+      {% end %}
+      if quiet
+        deadlock_found
+        return
+      end
+    end
+    if blocking && sleep_head.is_a?(IyiFiber)
       now = __iyi_monotonic_ns
       gap = sleep_head.deadline - now
       gap = 0_i64 if gap < 0
@@ -1693,9 +1919,10 @@ class IyiScheduler
       port = Pointer(Void).new(pollfd.to_u64)
 
       # No deadline to keep, or a Windows that refused the timer: the
-      # port's own wait, blocking or rounded up to the tick as before.
+      # port's own wait, blocking or rounded up to the tick as before. Not
+      # waiting, the drain below is the whole of it.
       timer = gap_ns < 0 ? -1_i64 : deadline_timer
-      if timer <= 0
+      if timer <= 0 && blocking
         LibC.GetQueuedCompletionStatus(port, pointerof(bytes_transferred), pointerof(completion_key), pointerof(overlapped_ptr), timeout_ms)
         if overlapped_ptr.address != 0_u64 && overlapped_ptr.address == IyiStdinReader.overlapped_address
           IyiStdinReader.delivered
@@ -1706,7 +1933,7 @@ class IyiScheduler
             enqueue(fiber)
           end
         end
-      else
+      elsif timer > 0
         # A due time in hundred-nanosecond units, negative for "from
         # now"; a gap of zero is an absolute time already past, which
         # signals at once. The drain below takes whatever the port has,
@@ -1807,6 +2034,7 @@ class IyiScheduler
   end
 
   def self.wake_expired_sleepers : Nil
+    return if state.sleep_head.is_a?(Nil)
     now = __iyi_monotonic_ns
     while true
       head = state.sleep_head
@@ -2106,17 +2334,31 @@ class IyiScheduler
 
   # The panic path: run the current fiber's pending defers innermost
   # first, then die at the task boundary. A spawned task marks itself,
-  # tells its group, wakes its joiner and is never scheduled again; the
+  # tells its group, wakes its joiners and is never scheduled again; the
   # main fiber has no boundary above it, so after its drain the process
   # exits 1. Every registered cleanup on the path has run either way,
   # which is the promise `defer` makes.
   def self.panic_current(message : String) : NoReturn
     fiber = current
+    # A fiber past its boundary has nothing left to run, and a second pass
+    # through it counts the task twice in its group: the runtime's own
+    # raise is the only one that can come from there, and it ends the run.
+    __iyi_exit(1) if fiber.state == IyiFiberState::Done
+    # The running fiber, whichever park the runtime raised in: a group
+    # cancelling its children must not enqueue the one that is dying.
+    fiber.state = IyiFiberState::Running
+    again = fiber.panicked
     # Marked before the drain: a boundary the drain itself reaches — a
     # deferred `g.join`, above all — must see that its owner is already
     # dying and keep quiet rather than re-raise into the unwind.
     fiber.panicked = true
     fiber.panic_message = message
+    # A deadlock found while this fiber waited in a group's join: that join
+    # is a cleanup already off the list, and it is finished here as a
+    # panicking owner's, its tasks cancelled and their cleanups run.
+    group = fiber.joining
+    fiber.joining = nil
+    group.join if group.is_a?(IyiGroup) && !again
 
     while true
       node = fiber.defers
@@ -2127,6 +2369,7 @@ class IyiScheduler
 
     body = fiber.proc
     if body.is_a?(Nil)
+      __iyi_flush_std
       __iyi_exit(1)
     end
 
@@ -2134,11 +2377,7 @@ class IyiScheduler
     g.child_panicked(fiber.cancelled) if g.is_a?(IyiGroup)
 
     fiber.state = IyiFiberState::Done
-    joiner = fiber.joiner
-    if joiner.is_a?(IyiFiber)
-      fiber.joiner = nil
-      enqueue(joiner)
-    end
+    wake_joiners(fiber)
     state.dying = fiber
     reschedule
     __iyi_exit(1)
@@ -2191,8 +2430,6 @@ end
     PAGE       = 65536_u64
 
     @@page : UInt64 = 0_u64
-    @@waiter : IyiFiber? = nil
-    @@answer : Int64 = 0_i64
 
     def self.word(offset : UInt64) : Pointer(Atomic(UInt64))
       Pointer(Atomic(UInt64)).new(@@page + offset)
@@ -2204,12 +2441,13 @@ end
       @@page == 0_u64 ? 0_u64 : @@page + OVERLAPPED
     end
 
+    # This scheduler's: the fiber asking, on the thread that asked.
     def self.waiting? : Bool
-      @@waiter.is_a?(IyiFiber)
+      IyiScheduler.state.stdin_waiter.is_a?(IyiFiber)
     end
 
     def self.waiter?(fiber : IyiFiber) : Bool
-      waiter = @@waiter
+      waiter = IyiScheduler.state.stdin_waiter
       waiter.is_a?(IyiFiber) && waiter.sp_slot.address == fiber.sp_slot.address
     end
 
@@ -2221,34 +2459,56 @@ end
       kind == 2 || kind == 3
     end
 
+    # Under the runtime lock, and the page published only once its words
+    # are written, the thread made suspended (4) until then: two threads'
+    # first reads would otherwise each make a reader, and one that saw the
+    # page early would ring a doorbell not made yet.
     def self.start(handle : Void*) : Nil
-      @@page = __iyi_mmap(PAGE).address
-      word(W_HANDLE).value.set(handle.address)
-      word(W_PORT).value.set(IyiScheduler.pollfd.to_u64)
-      word(W_DOORBELL).value.set(LibC.CreateSemaphoreW(nil, 0_i32, 1_i32, nil).address)
-      entry = ->(argument : UInt64) { IyiStdinReader.run(argument) }
-      thread = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(Pointer(UInt64).new(pointerof(entry).address).value),
-        Pointer(Void).new(0_u64), 0_i32, nil)
-      raise "CreateThread failed for standard input's reader" if thread.address == 0_u64
-      word(W_THREAD).value.set(thread.address)
+      IyiRuntimeLock.lock
+      if @@page == 0_u64
+        page = __iyi_mmap(PAGE).address
+        Pointer(UInt64).new(page + W_HANDLE).value = handle.address
+        Pointer(UInt64).new(page + W_DOORBELL).value = LibC.CreateSemaphoreW(nil, 0_i32, 1_i32, nil).address
+        entry = ->(argument : UInt64) { IyiStdinReader.run(argument) }
+        thread = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(Pointer(UInt64).new(pointerof(entry).address).value),
+          Pointer(Void).new(0_u64), 4_i32, nil)
+        if thread.address != 0_u64
+          Pointer(UInt64).new(page + W_THREAD).value = thread.address
+          @@page = page
+          LibC.ResumeThread(thread)
+        end
+      end
+      IyiRuntimeLock.unlock
+      raise "CreateThread failed for standard input's reader" if @@page == 0_u64
     end
 
+    # Any thread's fiber may ask, one read at a time in the process: the
+    # claim is the state's own IDLE to ASKED, and the port to post to and
+    # the fiber to wake are the asking scheduler's. They were the first
+    # reader's: the port was set once, at the start, and the waiter was
+    # one for the process, so a second `IyiThread` reading stdin had its
+    # line posted to the main thread's port. A main thread joining it
+    # never took the post and the program hung; one polling took it and
+    # switched onto the other thread's fiber, an access violation, 3 runs
+    # in 3 each.
     def self.read(handle : Void*, console : Bool, buffer : Void*, count : UInt64, ms : Int32) : Int64 | Cancelled
       fiber = IyiScheduler.current
       return Cancelled.new if fiber.cancelled
-      raise "two fibers reading standard input" if waiting?
       start(handle) if @@page == 0_u64
-      @@waiter = fiber
+      raise "two fibers reading standard input" unless word(W_STATE).value.compare_and_set(IDLE, ASKED)[1]
+      st = IyiScheduler.state
+      st.stdin_waiter = fiber
+      fiber.io_bytes_read = 0_i64
       word(W_BUFFER).value.set(buffer.address)
       word(W_COUNT).value.set(count)
       word(W_CONSOLE).value.set(console ? 1_u64 : 0_u64)
-      word(W_STATE).value.set(ASKED)
+      word(W_PORT).value.set(IyiScheduler.pollfd.to_u64)
       LibC.ReleaseSemaphore(Pointer(Void).new(word(W_DOORBELL).value.get), 1_i32, nil)
       deadline = ms
       withdrawn = false
-      while word(W_STATE).value.get != IDLE
+      while st.stdin_waiter.is_a?(IyiFiber)
         IyiScheduler.park_stdin_current(deadline)
-        next if word(W_STATE).value.get == IDLE
+        next unless st.stdin_waiter.is_a?(IyiFiber)
         # Woken with the read still the thread's: a cancellation. A
         # deadline withdraws the read from the poller and wakes nobody
         # until the post (`IyiScheduler.wake_expired_sleepers`).
@@ -2256,8 +2516,7 @@ end
         withdrawn = true
         deadline = -1
       end
-      @@waiter = nil
-      answer = @@answer
+      answer = fiber.io_bytes_read
       return answer if answer > 0_i64
       return Cancelled.new if fiber.cancelled
       answer
@@ -2287,13 +2546,17 @@ end
       end
     end
 
-    # The post taken off the port: the answer to the fiber, and the next
-    # read free to be asked.
+    # The post taken off the asking scheduler's port: the answer to its
+    # fiber, and the next read free to be asked - by any thread, so the
+    # bytes are read off the page first.
     def self.delivered : Nil
-      @@answer = word(W_BYTES).value.get.to_i64
+      st = IyiScheduler.state
+      waiter = st.stdin_waiter
+      bytes = word(W_BYTES).value.get.to_i64
+      st.stdin_waiter = nil
       word(W_STATE).value.set(IDLE)
-      waiter = @@waiter
       return unless waiter.is_a?(IyiFiber)
+      waiter.io_bytes_read = bytes
       IyiScheduler.untime(waiter)
       IyiScheduler.enqueue(waiter) if waiter.state == IyiFiberState::WaitingIo
     end
@@ -2354,6 +2617,17 @@ def __iyi_defer_pop_run : Nil
   node.run
 end
 
+# What a standard stream set to `sync = false` still holds, written out as
+# the program ends: from `main`, from `exit` below and from a panic's exit.
+# Nothing wrote it, and it was lost - `STDOUT.sync = false`, two lines
+# printed, then the program's end, an `exit 0` or a `raise`, and standard
+# output was empty all three ways. A failed write here is a panic like any
+# other write's. The targets without tasks define it beside their `exit`.
+def __iyi_flush_std : Nil
+  STDOUT.flush
+  STDERR.flush
+end
+
 # The program ends here, with *status* as its exit code. What this task
 # deferred runs first, innermost first, as a panic's cleanups do; then the
 # process ends and every other task with it, their cleanups not run -
@@ -2371,6 +2645,7 @@ def exit(status : Int32 = 0) : NoReturn
     fiber.defers = node.next_node
     node.run
   end
+  __iyi_flush_std
   __iyi_exit(status)
 end
 
@@ -2442,6 +2717,7 @@ end
 # block returned — the whole union, error members included, so `case`
 # handles a task's failure exactly the way III.4.3 says (the group has
 # already applied its policy by then; reading the value is optional).
+# Any number of fibers may read it, before the task ends or after.
 class IyiTask(T)
   @fiber : IyiFiber
   @box : Array(T)
@@ -2478,21 +2754,21 @@ end
 
 class IyiGroup
   @live : Int32
-  @failed : Bool
+  getter first_failure : UInt64
   @first_child : IyiFiber?
   @joiner : IyiFiber?
 
   def initialize
     @live = 0
-    @failed = false
+    @first_failure = 0_u64
     @first_child = nil
     @joiner = nil
   end
 
   # Start a task. The block is compiled once and carried as a proc; its
-  # return value is the task's, and a return value that is an error
-  # member is a failure the group acts on (III.4.3): first failure
-  # cancels the siblings, `errgroup`'s policy with the library deleted.
+  # return value is the task's, and an error member is a failure the
+  # group acts on (III.4.3): the first cancels the siblings, and the task
+  # it is told on is `first_failure`, which the typed group answers.
   def spawn(&block : -> T) : IyiTask(T) forall T
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
@@ -2545,8 +2821,8 @@ class IyiGroup
 
   def child_finished(failed : Bool) : Nil
     @live = @live - 1
-    if failed && !@failed
-      @failed = true
+    if failed && @first_failure == 0_u64
+      @first_failure = IyiScheduler.current.object_id
       cancel_children
     end
     if @live == 0
@@ -2582,8 +2858,10 @@ class IyiGroup
     while @live > 0
       me = IyiScheduler.current
       @joiner = me
+      me.joining = self
       me.state = IyiFiberState::Joining
       IyiScheduler.reschedule
+      me.joining = nil
     end
     # The boundary owes a re-raise for any panic *nobody read*: a bug
     # observed through its handle already became a `Panicked` value
@@ -2600,6 +2878,13 @@ class IyiGroup
       end
       child = child.next_child
     end
+  end
+
+  # :nodoc: — the owner taken out of this join by a deadlock
+  # (`IyiScheduler.deadlock_found`), so no task finishing later wakes it
+  # in whatever it waits on next.
+  def forget_joiner : Nil
+    @joiner = nil
   end
 
   # Cancel every task still live. The group's own tool; a failing child
@@ -2629,15 +2914,17 @@ end
 #
 # `Channel(T).new` is a rendezvous, as Crystal's is: a send completes when
 # a receive takes it, and either side parks until the other arrives. A
-# parked sender carries its value in its node's box, so the handoff needs
-# no third party; `new(capacity)` buffers that many sends first. Closing
-# drains what was delivered, then refuses: a parked sender whose box is
-# still full failed, and its value dies with the node.
+# parked sender carries its value in its node's box, and a parked
+# receiver has a slot a sender fills, so the handoff needs no third
+# party; `new(capacity)` buffers that many sends first. Closing drains
+# what was delivered, then refuses: a parked sender whose box is still
+# full failed, and its value dies with the node.
 #
 # `T : Share` is not enforced yet for the reason the file header gives:
 # one thread cannot race, and a marker that gates nothing cannot be
 # tested for gating. `select` is answered by this protocol — a node per
-# arm, one nonce, losers stale by arithmetic — at the bottom of the class.
+# arm, one nonce, losers stale by arithmetic until the woken select takes
+# them out — at the bottom of the class.
 class Channel(T)
   # The values in hand, a ring: `@count` of them from `@first`. An array
   # shifted from the front steps its buffer past the slot and gives up a
@@ -2683,24 +2970,35 @@ class Channel(T)
 
     # Park carrying the value. The wake tells one of three stories, and
     # the box is the witness for the one that matters: emptied means
-    # delivered, whatever else has happened since.
+    # delivered, whatever else has happened since. A box still full is a
+    # cancelled park's or a closed channel's, and its node leaves the
+    # queue here, so a cancelled one leaves nothing behind.
     node = park_send_node(fiber, IyiScheduler.park(fiber), value)
     IyiScheduler.reschedule
     delivered = node.delivered?
     node.read = true
     return nil if delivered
+    unlink_sender(node)
     return Cancelled.new if fiber.cancelled
     ChannelClosed.new
   end
 
-  # A closed channel drains what was delivered before it refuses.
+  # A closed channel drains what was delivered before it refuses. A
+  # rendezvous sender that finds this receive parked writes its value into
+  # `got` and marks the node handed, and that is the answer even when the
+  # task was cancelled before it ran: the sender was told it was taken.
+  # A woken park that was handed nothing takes its node out of the queue,
+  # so a cancelled one leaves nothing behind.
   def receive : T | ChannelClosed | Cancelled
     fiber = IyiScheduler.current
     while true
       return Cancelled.new if fiber.cancelled
       return take_now if receive_ready?
-      park_receive_node(fiber, IyiScheduler.park(fiber))
+      got = uninitialized T
+      waiter = park_receive_node(fiber, IyiScheduler.park(fiber), pointerof(got).address)
       IyiScheduler.reschedule
+      return got if waiter.handed
+      unlink_receiver(waiter)
     end
   end
 
@@ -2762,11 +3060,16 @@ class Channel(T)
     @closed || @count < @capacity || receiver_waiting?
   end
 
-  # Assumes `send_ready?`. A parked receiver is a completed rendezvous:
-  # the value goes through the buffer for the one instant the receiver
-  # needs to be scheduled, and the send is no longer contingent.
+  # Assumes `send_ready?`. A rendezvous puts the value in the parked
+  # receiver's own slot (`hand`). It went into the buffer, and the send
+  # answered delivered on the word of the wake: a select woken that way
+  # took another arm ready by then, a receiver cancelled before it ran
+  # answered `Cancelled`, and either way the value stayed in a channel of
+  # no capacity after its sender left. A buffered send completes when the
+  # buffer takes it, so there the woken receiver finds it in the buffer.
   def put_now(value : T) : Nil | ChannelClosed
     return ChannelClosed.new if @closed
+    return nil if @capacity == 0 && hand(value)
     if wake_receiver
       push_item(value)
       return nil
@@ -2786,9 +3089,9 @@ class Channel(T)
     IyiSendSelect(T).new(self, value)
   end
 
-  # Onto the ring's end. A rendezvous channel's one slot can be asked for
-  # more: two senders that each woke a receiver before either receiver ran
-  # have both values in hand, so a full ring doubles.
+  # Onto the ring's end. A buffered channel can be asked for more than
+  # its capacity: senders that each woke a parked receiver before any of
+  # them ran have all those values in hand, so a full ring doubles.
   private def push_item(value : T) : Nil
     if @count == @slots
       grown = Pointer(T).malloc((@slots * 2).to_u64)
@@ -2815,23 +3118,26 @@ class Channel(T)
   end
 
   # `select`'s arms park through these with one shared nonce; a plain
-  # call parks with a fresh nonce of its own.
-  def park_receive_node(fiber : IyiFiber, nonce : UInt64) : Nil
+  # call parks with a fresh nonce of its own. *slot* is where a rendezvous
+  # sender puts its value (`IyiWaiter#slot`).
+  def park_receive_node(fiber : IyiFiber, nonce : UInt64, slot : UInt64) : IyiWaiter
     waiter = fiber.spare_waiter
     if waiter.is_a?(IyiWaiter) && !waiter.linked
-      waiter.renew(nonce)
+      waiter.renew(nonce, slot)
     else
-      waiter = IyiWaiter.new(fiber, nonce)
+      waiter = IyiWaiter.new(fiber, nonce, slot)
       fiber.spare_waiter = waiter
     end
     waiter.linked = true
     tail = @recv_tail
+    waiter.prev_node = tail
     if tail.is_a?(IyiWaiter)
       tail.next_node = waiter
     else
       @recv_head = waiter
     end
     @recv_tail = waiter
+    waiter
   end
 
   def park_send_node(fiber : IyiFiber, nonce : UInt64, value : T) : IyiSendNode(T)
@@ -2848,6 +3154,7 @@ class Channel(T)
     node.read = false
     node.linked = true
     tail = @send_tail
+    node.prev_node = tail
     if tail.is_a?(IyiSendNode(T))
       tail.next_node = node
     else
@@ -2867,12 +3174,30 @@ class Channel(T)
     end
   end
 
-  # The head off the receive queue, and no longer linked anywhere.
-  private def unlink_receiver(head : IyiWaiter) : Nil
-    @recv_head = head.next_node
-    @recv_tail = nil if @recv_head.is_a?(Nil)
-    head.next_node = nil
-    head.linked = false
+  # Out of the receive queue from wherever it stands, in constant time,
+  # and no longer linked anywhere; a node no queue holds is left as it
+  # is. The queue is linked both ways because a select's losing arms
+  # leave from the middle: they stayed until something walked them off
+  # the head, so a loop selecting over a busy channel and an idle one
+  # left a node in the idle one's queue for every park - 30 MiB kept
+  # after two million rounds, freed only when the idle channel was used.
+  def unlink_receiver(node : IyiWaiter) : Nil
+    return unless node.linked
+    before = node.prev_node
+    after = node.next_node
+    if before.is_a?(IyiWaiter)
+      before.next_node = after
+    else
+      @recv_head = after
+    end
+    if after.is_a?(IyiWaiter)
+      after.prev_node = before
+    else
+      @recv_tail = before
+    end
+    node.next_node = nil
+    node.prev_node = nil
+    node.linked = false
   end
 
   private def sender_waiting? : Bool
@@ -2884,11 +3209,24 @@ class Channel(T)
     end
   end
 
-  private def unlink_sender(head : IyiSendNode(T)) : Nil
-    @send_head = head.next_node
-    @send_tail = nil if @send_head.is_a?(Nil)
-    head.next_node = nil
-    head.linked = false
+  # The send queue's `unlink_receiver`.
+  def unlink_sender(node : IyiSendNode(T)) : Nil
+    return unless node.linked
+    before = node.prev_node
+    after = node.next_node
+    if before.is_a?(IyiSendNode(T))
+      before.next_node = after
+    else
+      @send_head = after
+    end
+    if after.is_a?(IyiSendNode(T))
+      after.prev_node = before
+    else
+      @send_tail = before
+    end
+    node.next_node = nil
+    node.prev_node = nil
+    node.linked = false
   end
 
   # True when a parked receiver was woken; stale nodes — parks their
@@ -2900,6 +3238,24 @@ class Channel(T)
       return false unless head.is_a?(IyiWaiter)
       unlink_receiver(head)
       next unless head.current?
+      IyiScheduler.enqueue(head.fiber)
+      return true
+    end
+  end
+
+  # `wake_receiver` for a rendezvous, with the value written into the
+  # receiver's slot before its fiber runs: the wake is the delivery, so
+  # the select that parked the node takes this arm, and a cancellation
+  # that comes after the wake cannot strand the value. The node is
+  # current, so the slot's owner is suspended in the park that made it.
+  private def hand(value : T) : Bool
+    while true
+      head = @recv_head
+      return false unless head.is_a?(IyiWaiter)
+      unlink_receiver(head)
+      next unless head.current?
+      Pointer(T).new(head.slot).value = value
+      head.handed = true
       IyiScheduler.enqueue(head.fiber)
       return true
     end
@@ -2935,16 +3291,22 @@ class Channel(T)
         end
       {% end %}
       # Nothing ready: one park, every arm's node carrying its nonce.
-      # A send arm can win *while parked* — a receiver empties its box
-      # directly — and that is checked before the next round of parks.
+      # An arm can win *while parked* — a receiver empties a send arm's
+      # box, a rendezvous sender fills a receive arm's slot — and that is
+      # checked before the next round of parks, once every arm's node has
+      # left its queue: the losers' nodes are stale, and left there they
+      # stayed until their channel was used again.
       nonce = IyiScheduler.park(fiber)
       {% for i in 0...U.size %}
         actions[{{ i }}].park(fiber, nonce)
       {% end %}
       IyiScheduler.reschedule
       {% for i in 0...U.size %}
+        actions[{{ i }}].unpark
+      {% end %}
+      {% for i in 0...U.size %}
         if actions[{{ i }}].won_while_parked?
-          return { {{ i }}, nil }
+          return { {{ i }}, actions[{{ i }}].won_value }
         end
       {% end %}
     end
@@ -2969,8 +3331,13 @@ end
 # it; a struct in a tuple is a copy nobody else can write to.
 class IyiReceiveSelect(T)
   @channel : Channel(T)
+  @node : IyiWaiter?
+  # The slot a rendezvous sender fills while this arm is parked.
+  @got : T
 
   def initialize(@channel : Channel(T))
+    @node = nil
+    @got = uninitialized T
   end
 
   def ready? : Bool
@@ -2982,13 +3349,24 @@ class IyiReceiveSelect(T)
   end
 
   def park(fiber : IyiFiber, nonce : UInt64) : Nil
-    @channel.park_receive_node(fiber, nonce)
+    @node = @channel.park_receive_node(fiber, nonce, pointerof(@got).address)
   end
 
-  # A parked receive wins by waking: the value is in the channel when
-  # the select looks again.
+  def unpark : Nil
+    node = @node
+    @channel.unlink_receiver(node) if node.is_a?(IyiWaiter)
+  end
+
+  # A rendezvous receive wins by being handed its value. A buffered one
+  # wins by waking: the value is in the channel when the select looks
+  # again.
   def won_while_parked? : Bool
-    false
+    node = @node
+    node.is_a?(IyiWaiter) && node.handed
+  end
+
+  def won_value : T
+    @got
   end
 end
 
@@ -3013,9 +3391,18 @@ class IyiSendSelect(T)
     @node = @channel.park_send_node(fiber, nonce, @value)
   end
 
+  def unpark : Nil
+    node = @node
+    @channel.unlink_sender(node) if node.is_a?(IyiSendNode(T))
+  end
+
   def won_while_parked? : Bool
     node = @node
     node.is_a?(IyiSendNode(T)) && node.delivered?
+  end
+
+  def won_value : Nil
+    nil
   end
 end
 

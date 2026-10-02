@@ -26,6 +26,9 @@ class Iyi::Command
         and `-f json` makes each one data — file, line, column, size,
         message, the SPEC sections it cites, and, when the compiler
         knows the fix, a `suggested_edit` with the exact replacement.
+        An error inside a macro's expansion is placed at the call, with
+        no edit, and its `expansion` names the macro and the place in
+        the text the macro wrote.
 
         Every def with a fully written signature is typed even if
         nothing calls it — definition-site typing is the language's
@@ -35,6 +38,12 @@ class Iyi::Command
         one file: every .iyi under the current directory whose imports
         reach a changed file is compiled alone, and every failure is
         named.
+
+        Under `-f json` standard error holds one JSON array whatever
+        ends the run: a warning is a frame marked `"severity":
+        "warning"`, after the error's frames when there is one, and a
+        refusal with no place in a file - no such file, bytes that are
+        not text - is a frame whose `line` is null.
         USAGE
       exit
     end
@@ -89,6 +98,10 @@ class Iyi::Command
         as_json = options.shift? == "json"
       when "--json"
         as_json = true
+      when "--no-color"
+        # Nothing to turn off: the compilers below are made without colour
+        # (`Compiler#color?`). Refused as "takes only changed files", it
+        # broke a script that passes `--no-color` to every verb it runs.
       else
         abort! "check --affected takes only changed files; unexpected '#{option}'", :USAGE_ERROR
       end
@@ -112,7 +125,10 @@ class Iyi::Command
     end
 
     consumers = [] of String
-    Dir.glob("**/*.iyi") do |candidate|
+    # The extension in any case, so that `UP.IYI` is refused by name rather
+    # than left out of the ripple in silence (`Lexer.iyi_miscased?`).
+    Dir.glob("**/*.[iI][yY][iI]") do |candidate|
+      abort! Lexer.iyi_miscased_sentence(candidate), :USAGE_ERROR if Lexer.iyi_miscased?(candidate)
       closure = test_import_closure(candidate)
       consumers << candidate if closure.nil? || !manifest_changed.empty? ||
                                 closure.any? { |path| changed.includes?(Iyi.file_key(path)) }

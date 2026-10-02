@@ -233,6 +233,9 @@ refuses "a gzip length that does not match" gzip_len "gzip: the length does not 
   'Gzip.decompress(bytes([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 3, 0, 0, 0, 0, 0, 5, 0, 0, 0]))'
 refuses "a gzip name that never ends" gzip_name "gzip: the stream ends inside its header" \
   'Gzip.decompress(bytes([0x1f, 0x8b, 8, 8, 0, 0, 0, 0, 0, 0xff, 0x61, 0x62, 0x63]))'
+# RFC 1952 2.3.1.2 makes a reserved flag an error, as zlib does.
+refuses "a gzip header with a reserved flag" gzip_reserved "gzip: a reserved header flag is set (FLG 32)" \
+  'Gzip.decompress(bytes([0x1f, 0x8b, 8, 0x20, 0, 0, 0, 0, 0, 0xff, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0]))'
 # A dynamic block's codes may leave bit patterns unused only when the code
 # is one code of one bit; zlib and puff refuse every other incomplete set.
 refuses "an incomplete literal/length code" lit_incomplete "DEFLATE: the literal/length code is incomplete" \

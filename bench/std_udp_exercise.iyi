@@ -187,6 +187,26 @@ late = server.receive_datagram?
 assert_true !late.nil? && late.text == "late", "receive_datagram? answers the queued one"
 puts "  the ? variants never park, and poll_read bounds a wait"
 
+puts "\n== a connected peer that refused: nothing queued, and the next send goes"
+# The peer's ICMP port-unreachable is reported to a connected datagram
+# socket on Linux and BSD as ECONNREFUSED, on its next send or receive,
+# and the module read that as its own failure: "cannot send on UDP
+# socket" [INFERENCE: not run on Linux]. Windows has the report turned
+# off and answers the byte count and nil, so that is the answer on every
+# platform.
+gone = UdpSocket.bind("127.0.0.1", 0)
+gone_port = gone.local_port
+gone.close
+talker = UdpSocket.client
+talker.connect("127.0.0.1", gone_port)
+assert_int 1, talker.send("x"), "the first send to a port nobody holds"
+sleep(100)
+assert_int 1, talker.send("y"), "the send after the peer's port-unreachable"
+sleep(100)
+assert_true talker.receive?.nil?, "nothing is queued after the peer's port-unreachable"
+talker.close
+puts "  the peer's port-unreachable is neither a failed send nor a failed receive"
+
 puts "\n== socket lifecycle and close"
 assert_true !client.closed?, "client initially not closed"
 client.close

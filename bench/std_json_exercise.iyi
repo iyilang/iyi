@@ -114,14 +114,23 @@ assert_text("[\n\t1,\n\t[\n\t\t2\n\t]\n]", JSON.parse("[1,[2]]").to_pretty_json(
 assert_text("[\"\\u00e9\\ud83d\\ude00\\u20ac\"]", JSON.parse("[\"\u00e9\u{1F600}\u20ac\"]").to_ascii_json, "ascii-only escapes")
 assert_text("[\"\\ufffd\\ufffd\",\"a\\ufffd\",\"\\ufffd\\u00e9\\ufffd\\ufffd\\ud83d\\ude00\"]", Any.new([Any.new("\xff\xfe"), Any.new("a\xf0\x9f"), Any.new("\x80\u00e9\xc0\x80\u{1F600}")] of Any).to_ascii_json, "ascii-only writes bytes that are not a code point as \\ufffd, one per ill-formed subpart")
 # And `to_json` writes them as U+FFFD too: written through, `"a\xffb"`
-# was a document that is not UTF-8, which this reader refused.
+# was a document that is not UTF-8, which this reader refused ("invalid
+# UTF-8 byte 255 in string at line 1, column 3"). Both writers write one
+# value.
 not_utf8 = Any.new([Any.new("a\xffb"), Any.new("\xf0\x9f\x80\xe9")] of Any)
 assert_text("[\"a\u{FFFD}b\",\"\u{FFFD}\u{FFFD}\"]", not_utf8.to_json, "to_json writes bytes that are not a code point as U+FFFD, one per ill-formed subpart")
 assert_true(JSON.parse(not_utf8.to_pretty_json) == JSON.parse(not_utf8.to_json), "and what it writes is read back")
+ill_formed = Any.new([Any.new("\xff\xfe"), Any.new("a\xf0\x9f"), Any.new("\x80\u00e9\xc0\x80\u{1F600}")] of Any)
+assert_text("[\"\u{FFFD}\u{FFFD}\",\"a\u{FFFD}\",\"\u{FFFD}\u00e9\u{FFFD}\u{FFFD}\u{1F600}\"]", ill_formed.to_json, "the plain writer writes bytes that are not a code point as U+FFFD and copies the rest")
+assert_true(JSON.parse(ill_formed.to_json) == JSON.parse(ill_formed.to_ascii_json), "both writers' text reads back as one value")
+assert_text("a\uFFFDb", JSON.parse(JSON.to_json("a\xffb")).as_s, "JSON.to_json of a byte 0xff reads back as U+FFFD")
+assert_text("{\"a\u{FFFD}b\":1}", JSON.to_json({"a\xffb" => 1}), "and in a key")
+assert_text("\"\u{FFFD}\u{FFFD}\u{FFFD}\"", JSON.to_json("\xed\xa0\x80"), "an encoded surrogate is three ill-formed subparts")
 assert_text("\"\\u0000\\u001f\\u007f\\b\\f\\n\\r\\t\\\"\\\\\"", Any.new("\u0000\u001f\u007f\b\f\n\r\t\"\\").to_json, "control bytes and DEL escaped")
 assert_text("-0.0", Any.new(-0.0).to_json, "negative zero float keeps its sign")
 assert_text("[0.1,1.0e-7,100.0,5.0e-324]", JSON.parse("[0.1, 1e-7, 100.0, 5e-324]").to_json, "float text is the shortest round trip")
 puts "  compact, pretty (two spaces and a tab), ascii-only and every escape written back"
+puts "  bytes that are not a code point written as U+FFFD by both writers (\\ufffd in ascii-only), so the text reads back"
 
 # ---------------------------------------------------------------------------
 # Pull parser
@@ -371,6 +380,38 @@ assert_true(counts.size == 4, "Any as a hash key: four distinct values")
 assert_true(counts[JSON.parse("1")] == 2 && counts[JSON.parse("[1]")] == 2 && counts[JSON.parse("{\"a\":[1]}")] == 2, "each equal pair counted twice")
 puts "  #{same.size} equal pairs hash alike, #{different.size} unequal pairs differ, Any keys a Hash"
 
+# And a key that spreads. An array hashed as `31 * h + e` and an object as
+# the sum of `31 * k.hash + v.hash`, an integer hashing as itself: `[1,0]`
+# and `[0,31]` were one hash, `{"a":1,"b":2}` and `{"a":2,"b":1}` another,
+# a 150 by 150 grid had 4,769 hashes as arrays and 299 as objects for its
+# 22,500 values, and 160,000 objects took 26 s to go into a Hash.
+assert_true(JSON.parse("[1,0]").hash != JSON.parse("[0,31]").hash, "[1,0] and [0,31] hash apart")
+assert_true(JSON.parse("{\"a\":1,\"b\":2}").hash != JSON.parse("{\"a\":2,\"b\":1}").hash, "values swapped between keys hash apart")
+grid_arrays = {} of Int32 => Bool
+grid_objects = {} of Int32 => Bool
+objects = Array(Any).new(160000)
+400.times do |i|
+  400.times do |j|
+    fields = {} of String => Any
+    fields["x"] = Any.new(i)
+    fields["y"] = Any.new(j)
+    object = Any.new(fields)
+    objects << object
+    if i < 150 && j < 150
+      grid_arrays[Any.new([Any.new(i), Any.new(j)] of Any).hash] = true
+      grid_objects[object.hash] = true
+    end
+  end
+end
+assert_true(grid_arrays.size >= 22400 && grid_objects.size >= 22400, "a 150 by 150 grid has #{grid_arrays.size} array and #{grid_objects.size} object hashes for 22,500 values")
+keyed_started = __iyi_monotonic_ns
+keyed = {} of Any => Bool
+objects.each { |o| keyed[o] = true }
+keyed_ms = (__iyi_monotonic_ns - keyed_started) // 1000000
+assert_true(keyed.size == 160000, "160,000 distinct objects are 160,000 keys")
+assert_true(keyed_ms < 2000, "160,000 objects took #{keyed_ms} ms to go into a Hash, not under 2,000")
+puts "  arrays and objects hash apart: 22,400 hashes of a 150 by 150 grid at least, 160,000 objects keyed under 2,000 ms"
+
 # ---------------------------------------------------------------------------
 # to_json and from_json over prelude values and a ToJSON type
 # ---------------------------------------------------------------------------
@@ -406,6 +447,38 @@ assert_text("[[1],[]]", JSON.to_json([[1_i64], [] of Int64]), "Array(Array(Int64
 assert_text("{\"k\":[1.5],\"m\":[]}", JSON.to_json({"k" => [1.5], "m" => [] of Float64}), "Hash(String, Array(Float64))")
 assert_text("{\"1\":true}", JSON.to_json({1 => true}), "Hash with an integer key is written by to_s")
 assert_text("{\"null\":1}", JSON.to_json({nil => 1}), "Hash with a nil key is written as \"null\"")
+# Two keys that are one text were written twice, `{"null":1,"null":2}`,
+# which `JSON.parse` refused ("duplicate key 'null' at line 1, column
+# 11"). The writer refuses them, naming both; keys whose text differs are
+# written as before.
+nil_beside_text = {} of String? => Int32
+nil_beside_text[nil] = 1
+nil_beside_text["nil"] = 2
+assert_text("{\"null\":1,\"nil\":2}", JSON.to_json(nil_beside_text), "a nil key beside a String key")
+nil_and_null = "accepted"
+group do |g|
+  writer = g.spawn do
+    keys = {} of String? => Int32
+    keys[nil] = 1
+    keys["null"] = 2
+    JSON.to_json(keys).bytesize
+  end
+  answer = writer.value
+  nil_and_null = answer.message if answer.is_a?(Panicked)
+end
+assert_text("the keys nil and \"null\" are both written as \"null\"", nil_and_null, "nil and \"null\" as keys of one Hash refused")
+one_and_text = "accepted"
+group do |g|
+  writer = g.spawn do
+    keys = {} of Int32 | String => Bool
+    keys[1] = true
+    keys["1"] = false
+    JSON.to_json(keys).bytesize
+  end
+  answer = writer.value
+  one_and_text = answer.message if answer.is_a?(Panicked)
+end
+assert_text("the keys 1 and \"1\" are both written as \"1\"", one_and_text, "1 and \"1\" as keys of one Hash refused")
 assert_text("{\"x\":3,\"y\":0.5}", JSON.to_json(Point.new(3, 0.5)), "a ToJSON type")
 assert_text("[{\"x\":1,\"y\":1.0},{\"x\":2,\"y\":2.0}]", JSON.to_json([Point.new(1, 1.0), Point.new(2, 2.0)]), "an array of ToJSON values")
 assert_text("[1,\"s\",null]", JSON.to_json(JSON.parse("[1, \"s\", null]")), "an Any")
@@ -452,6 +525,7 @@ assert_text("1", JSON.to_json(1.as(Int32?)), "an Int32? holding 1")
 assert_text("null", JSON.to_json(nil.as(Int32?)), "an Int32? holding nil")
 assert_text("{\"tags\":[\"a\",null]}", Tagged.from_json("{\"tags\": [\"a\", null]}").to_json, "a derived Array(String?) field")
 puts "  nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String, Any, arrays, hashes, a ToJSON struct and each of them or nil"
+puts "  two keys of a Hash written as one text (nil and \"null\", 1 and \"1\") refused, naming both"
 
 puts "\n== derive serializable"
 

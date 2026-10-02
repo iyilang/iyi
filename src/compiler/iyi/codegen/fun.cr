@@ -762,6 +762,15 @@ class Iyi::CodeGenVisitor
         def_var = def_vars.try &.[var.name]?
         next if def_var && !def_var.closured?
 
+        # iyi: the contexts are walked from the nearest out, and a name the
+        # nearer one already gave is a different variable further out. A
+        # block's own `doomed`, captured inside the block, and a `doomed`
+        # the enclosing def assigns after the block are two variables with
+        # two slots; the def's overwrote the block's here, so the proc read
+        # the block's Int32 out of the def's String slot and the compiler
+        # died with "BUG: trying to downcast Int32 <- String".
+        next if self.context.vars.has_key?(var.name)
+
         if context.fun.naked?
           debug_variable_created = false
         else

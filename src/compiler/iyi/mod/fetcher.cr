@@ -59,7 +59,7 @@ module Iyi::Mod
           raise ex
         end
       else
-        args = ["clone", "--quiet", "--config", KEEP_BYTES, "--depth", "1", "--branch", tag, "--", remote, staging]
+        args = ["clone", "--quiet"] + KEEP_BYTES + ["--depth", "1", "--branch", tag, "--", remote, staging]
         output = IO::Memory.new
         status = Process.run("git", args, output: output, error: output)
         unless status.success?
@@ -204,9 +204,13 @@ module Iyi::Mod
     # what `iyi.sum` hashes: Git for Windows' own default,
     # `core.autocrlf=true`, wrote every text file with CRLF, and a package's
     # sum on Windows was not its sum anywhere else - an `iyi.sum` made on
-    # Linux was refused as tampering. Written into the clone's own config,
-    # so the checkout a whole clone makes later keeps it too.
-    KEEP_BYTES = "core.autocrlf=false"
+    # Linux was refused as tampering. `core.eol` too: a package whose
+    # `.gitattributes` says `* text=auto` has its text files written with
+    # `core.eol`, whose default is the platform's, whatever autocrlf says -
+    # CRLF on Windows, so that sum differed (`s1:6072c5fc...` against the
+    # tag's `s1:51c6f1a1...`) until this was set. Written into the clone's
+    # own config, so the checkout a whole clone makes later keeps it too.
+    KEEP_BYTES = ["--config", "core.autocrlf=false", "--config", "core.eol=lf"]
 
     # A whole clone of *path*'s repository at *into*: a pseudo-version's
     # commit is on no tag a shallow clone could ask for, and its version
@@ -214,7 +218,7 @@ module Iyi::Mod
     private def self.clone_history(path : String, into : String) : Nil
       remote = remote_for(path)
       output = IO::Memory.new
-      status = Process.run("git", ["clone", "--quiet", "--config", KEEP_BYTES, "--no-checkout", "--", remote, into], output: output, error: output)
+      status = Process.run("git", ["clone", "--quiet"] + KEEP_BYTES + ["--no-checkout", "--", remote, into], output: output, error: output)
       unless status.success?
         raise ModError.new("cannot fetch #{path} from #{remote}:\n#{output.to_s.strip}")
       end
@@ -234,10 +238,14 @@ module Iyi::Mod
 
     # The repository *path* is fetched from: a `/vN` suffix is a major
     # version of the repository without it, not a repository of its own.
+    # A relative mirror is the working directory's, as every other path
+    # given to a verb is: handed to git as written, it was read from the
+    # top of whatever repository the project sat in, and `IYI_MOD_MIRROR=
+    # ../mirror` in a project inside one was "not a git repository".
     def self.remote_for(path : String) : String
       repository, _ = ModFile.split_major(path)
       if mirror = ENV["IYI_MOD_MIRROR"]?
-        File.join(mirror, repository)
+        File.join(File.expand_path(mirror), repository)
       else
         "https://#{repository}.git"
       end

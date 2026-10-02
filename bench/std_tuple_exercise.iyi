@@ -59,7 +59,21 @@ empty_a = Tuple.new.to_a
 assert_true empty_a.size == 0 && empty_a.empty?, "to_a of the empty tuple is empty"
 assert_str "Array(NoReturn)", typeof(empty_a).to_s, "to_a of the empty tuple"
 assert_str "[1, \"a\"]", {1, "a"}.to_a.to_s, "to_a of a pair"
+# And printed: `Array(NoReturn)#to_s` failed to compile with "can't infer
+# block return type", the union of no types being no type for the block.
+assert_str "[]", empty_a.to_s, "to_a of the empty tuple, printed"
 puts "  the empty tuple and a pair"
+
+puts "\n== the empty tuple"
+# Built with braces, which with no members are `{ }`, an empty hash
+# literal: each of these failed to compile with "for empty hashes use '{}
+# of KeyType => ValueType'".
+assert_str "{}", Tuple.new.reverse.to_s, "reverse of the empty tuple"
+assert_str "{}", Tuple.new.map { |x| x }.to_s, "map of the empty tuple"
+assert_str "{}", (Tuple.new + Tuple.new).to_s, "the empty tuple plus the empty tuple"
+assert_str "{\"a\", 1}", {1, "a"}.reverse.to_s, "reverse of a pair"
+assert_str "{1, \"b\", 2.5}", ({1} + {"b", 2.5}).to_s, "a single plus a pair"
+puts "  reverse, map and + of nothing"
 
 puts "\n== first"
 assert_true ({7, 8}).first == 7, "first"
@@ -89,14 +103,31 @@ assert_str "{\"é\": 1, \"aé\": 2, a1: 3}", {"é": 1, "aé": 2, a1: 3}.to_s, "t
 puts "  a key past ASCII is quoted"
 
 puts "\n== builders on the empty tuple"
-# `map`, `+` and `reverse` wrote their result as a brace literal, and for
-# the empty tuple that is `{ }`, an empty hash: none of these compiled.
-assert_str "{}", Tuple.new.reverse.to_s, "reverse of the empty tuple"
-assert_str "{}", Tuple.new.map { |x| x }.to_s, "map of the empty tuple"
-assert_str "{}", (Tuple.new + Tuple.new).to_s, "+ of two empty tuples"
+# `map`, `+` and `reverse` on tuples with members; the empty tuple's are
+# checked under "the empty tuple" above.
 assert_str "{'c', \"a\", 1}", {1, "a", 'c'}.reverse.to_s, "reverse of a triple"
 assert_str "{2, 4}", {1, 2}.map { |x| x * 2 }.to_s, "map of a pair"
 assert_str "{1, \"a\"}", ({1} + {"a"}).to_s, "+ of two singles"
 puts "  map, + and reverse of the empty tuple, and of tuples with members"
+
+puts "\n== equality across union members"
+# Any tuple of the size, member by member where one type holds the other:
+# `==` took `self`, which `{1, 2}` matched for `{1, y}` (y : Int32?) and
+# `{1, y}` did not for `{1, 2}`, so the pair was equal one way only and a
+# `case` over them did not match. Named tuples the same, by name.
+y = Program.args.size > 100 ? nil : 2
+assert_true ({1, y}) == ({1, 2}) && ({1, 2}) == ({1, y}), "{1, y} and {1, 2} are equal both ways"
+matched = false
+case {1, y}
+when {1, 2}
+  matched = true
+end
+assert_true matched, "case {1, y} when {1, 2} matches"
+assert_true ({a: 1, b: y}) == ({a: 1, b: 2}) && ({a: 1, b: 2}) == ({a: 1, b: y}), "{a: 1, b: y} and {a: 1, b: 2} are equal both ways"
+assert_true ({b: 2, a: 1}) == ({a: 1, b: y}), "a named tuple equal whichever order the keys were written in"
+# Unrelated member types stay unequal, as they hash apart.
+assert_true ({-1}) != ({-1_i64}) && ({a: -1}) != ({a: -1_i64}), "Int32 and Int64 members are unequal"
+assert_true ({1, 2}) != ({1, 2, 3}) && ({a: 1}) != ({a: 1, b: 2}) && ({a: 1}) != ({b: 1}), "another size or other keys are unequal"
+puts "  {1, y} == {1, 2} both ways, a case over them matches, named alike"
 
 puts "\nALL CHECKS PASSED"

@@ -96,6 +96,9 @@ module std/process
   lib LibKernel32
     fun CreateJobObjectW(attributes : Void*, name : UInt16*) : Void*
     fun AssignProcessToJobObject(job : Void*, process : Void*) : Int32
+    # Sets the child's job to allow breakaway: a program the child starts
+    # may leave the job, as it may under a shell.
+    fun SetInformationJobObject(job : Void*, info_class : Int32, info : Void*, size : Int32) : Int32
     fun TerminateJobObject(job : Void*, exit_code : UInt32) : Int32
     fun CompareStringOrdinal(one : UInt16*, one_length : Int32, other : UInt16*, other_length : Int32, ignore_case : Int32) : Int32
     fun CreateProcessW(application : UInt16*, command_line : UInt16*, process_attributes : Void*,
@@ -339,15 +342,24 @@ class ProcessChild
         removed << false
       end
     end
-    entries = [] of String
-    names.each_with_index { |name, index| entries << "#{name}=#{values[index]}" unless removed[index] }
+    kept = [] of Int32
+    names.size.times { |index| kept << index unless removed[index] }
     {% if flag?(:win32) %}
       # The block `CreateProcessW` takes is sorted by name, without regard
-      # to case, and a program reading it may rely on that.
-      entries.sorted_by { |entry| entry.upcase }
-    {% else %}
-      entries
+      # to case, and a program reading it may rely on that. The whole
+      # `NAME=VALUE` text was sorted, and the `=` sorted with it: `1`, `(`
+      # and `-` are below it, so a child read `IYIZ1` before `IYIZ` and
+      # `ProgramFiles(x86)` before `ProgramFiles`. The names alone now, in
+      # the order Windows keeps its own block: ordinal, case folded.
+      wides = names.map do |name|
+        wide = __iyi_win_env_wide(name.to_unsafe, name.bytesize)
+        raise "Process.run: an environment name or value is not valid UTF-8" if wide.address == 0_u64
+        wide
+      end
+      # CSTR_LESS_THAN, CSTR_EQUAL and CSTR_GREATER_THAN are 1, 2 and 3.
+      kept = kept.sorted { |one, other| LibKernel32.CompareStringOrdinal(wides[one], -1, wides[other], -1, 1) - 2 }
     {% end %}
+    kept.map { |index| "#{names[index]}=#{values[index]}" }
   end
 
   # On Windows as Windows compares two names, case folded in every script:
@@ -752,10 +764,11 @@ class ProcessChild
       info[12] = theirs[2].address
       info[13] = attributes.address
       answer = Pointer(UInt64).malloc(3_u64)
-      # bInheritHandles, and EXTENDED_STARTUPINFO_PRESENT. The environment
-      # is this process's own block, which `ENV[]=` writes, unless `env:`
-      # gave one, which is UTF-16 (CREATE_UNICODE_ENVIRONMENT).
-      flags = 0x00080000
+      # bInheritHandles, EXTENDED_STARTUPINFO_PRESENT, and CREATE_SUSPENDED
+      # until the child is in its job, breakaway and all (below). The
+      # environment is this process's own block, which `ENV[]=` writes,
+      # unless `env:` gave one, which is UTF-16 (CREATE_UNICODE_ENVIRONMENT).
+      flags = 0x00080000 | 0x4
       flags = flags | 0x400 if environment
       made_it = LibKernel32.CreateProcessW(wide_path, wide_line, Pointer(Void).new(0_u64), Pointer(Void).new(0_u64),
         count > 0 ? 1 : 0, flags, block.as(Void*), wide_directory, info.as(Void*), answer.as(Void*))
@@ -775,19 +788,40 @@ class ProcessChild
         return ProcessError.new(command, failed, failed == ERROR_DIRECTORY ? chdir : nil)
       end
       @process = Pointer(Void).new(answer[0])
+      thread = Pointer(Void).new(answer[1])
       # In a job of its own: a cancelled run ended the child alone, and a
       # program it had started - a shell's command, a server's worker -
       # went on running, where the top of this file promises a task that
       # stops leaves no program running. Without a job, the child alone.
+      # It runs once it is in the job: started running, a program it
+      # started before the assignment was outside what a cancel ends.
+      #
+      # JOB_OBJECT_LIMIT_BREAKAWAY_OK (0x800), the LimitFlags DWORD at byte
+      # 16 of the 144-byte JOBOBJECT_EXTENDED_LIMIT_INFORMATION (class 9),
+      # allows breakaway: a program the child starts with
+      # CREATE_BREAKAWAY_FROM_JOB leaves the job, as it does under a shell.
+      # Without it that start was refused "Access is denied" under
+      # `Process.run` alone.
       job = LibKernel32.CreateJobObjectW(Pointer(Void).new(0_u64), Pointer(UInt16).new(0_u64))
       if job.address != 0_u64
+        limits = Pointer(UInt64).malloc(18_u64)
+        18.times { |index| limits[index] = 0_u64 }
+        limits[2] = 0x800_u64
+        LibKernel32.SetInformationJobObject(job, 9, limits.as(Void*), 144)
         if LibKernel32.AssignProcessToJobObject(job, @process) != 0
           @job = job
         else
           ::LibC.CloseHandle(job)
         end
       end
-      ::LibC.CloseHandle(Pointer(Void).new(answer[1]))
+      resumed = ::LibC.ResumeThread(thread) != -1
+      failed = resumed ? 0 : ::LibC.GetLastError
+      ::LibC.CloseHandle(thread)
+      unless resumed
+        ::LibC.TerminateProcess(@process, 1)
+        close_all
+        return ProcessError.new(command, failed)
+      end
       nil
     end
 

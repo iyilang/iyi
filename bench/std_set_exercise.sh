@@ -12,7 +12,8 @@
 #   * The prelude's `Set` is the one the algebra lands on: `[..].to_set | s`.
 #   * Enumerable on a set, through the impl in std/enumerable.
 #   * Negative proofs: an intersection that unions, a subset test that ignores
-#     size, and an equality that ignores membership are each caught.
+#     size, an equality that ignores membership and a hash that sums the
+#     members unmixed are each caught.
 #
 # Exits non-zero if any check fails.
 set -u
@@ -213,6 +214,8 @@ prove_fails "equality that ignores membership" broken_eq "assertion failed for =
   "src.replace('size == other.size && subset_of?(other)', 'size == other.size')"
 prove_fails "symmetric difference missing one side" broken_xor "assertion failed for symmetric difference" \
   "src.replace('other.each { |v| result.add(v) unless includes?(v) }', '')"
+prove_fails "hash that sums the members unmixed" broken_hash "assertion failed for {1, 4} and {2, 3} hash apart" \
+  "src.replace('sum = sum &+ (x ^ x.unsafe_shr(31_u64))', 'sum = sum &+ v.hash.to_i64.unsafe_to_u64')"
 
 echo
 if [ "$status" -ne 0 ]; then

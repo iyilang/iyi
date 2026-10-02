@@ -5,9 +5,10 @@
 # a comma. Lines end at LF, CRLF or a lone CR, and a blank line is a row
 # of no fields, as in the other library. `CSV.build` writes the same
 # contract: a field is quoted when it holds a comma, a quote or a
-# line break, and a row of one empty field is written `""`. A quote
-# without its pair is `unterminated quoted field`. A byte order mark is
-# read past, and a UTF-16 document is refused by its.
+# line break, a row of one empty field is written `""`, and a last row
+# of no fields is ended with a line break. A quote without its pair is
+# `unterminated quoted field`. A byte order mark is read past, and a
+# UTF-16 document is refused by its.
 
 module std/csv
 
@@ -98,6 +99,14 @@ pub struct CSV
         # no fields, or as nothing at the end: quoted, it is the field.
         io << "\"\"" if fields.size == 1 && fields[0].empty?
         c = 0
+        # A U+FEFF at the front of the text is read past as a byte order
+        # mark, so a first field opening with one came back without it:
+        # `[["\uFEFFid"]]` read back as `[["id"]]`. Quoted, the text opens
+        # with `"` and the mark is the field's.
+        if r == 0 && fields.size > 0 && fields[0].starts_with?('\uFEFF')
+          io << quote(fields[0])
+          c = 1
+        end
         while c < fields.size
           io << ',' if c > 0
           io << escape(fields[c])
@@ -105,6 +114,11 @@ pub struct CSV
         end
         r = r + 1
       end
+      # A document's last line break ends a row rather than starting one,
+      # so a last row of no fields - the empty text after the last `\n` -
+      # was read back as nothing: `[["a"], []]` came back `[["a"]]`, and
+      # `[[]]` came back `[]`. Its line is ended.
+      io << '\n' if rows.size > 0 && rows[rows.size - 1].empty?
     end
   end
 
@@ -126,6 +140,14 @@ pub struct CSV
       i = i + 1
     end
     return field unless need
+    quote(field)
+  end
+
+  # Always quoted: a field that holds a separator, or a first field that
+  # opens with U+FEFF.
+  private def self.quote(field : String) : String
+    p = field.to_unsafe
+    n = field.bytesize
     extra = 2
     i = 0
     while i < n

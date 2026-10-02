@@ -23,21 +23,57 @@ module Iyi
       end
     end
 
-    def true_filename(filename = @filename) : String
-      if filename.is_a? VirtualFile
-        loc = filename.expanded_location
-        if loc
-          true_filename loc.filename
+    # iyi: where a frame is in a file someone can open, as `{file, line,
+    # column, expansion}`. A frame in a real file is where it says; a frame
+    # inside a macro's expansion is placed at the call the expansion came
+    # from (walked out through nested expansions), and `expansion` names the
+    # text it was really in.
+    #
+    # This was `true_filename`, which swapped the expansion for the calling
+    # file and kept the line and column the frame had inside the expansion:
+    # a place that is nowhere. `puts bad("a")` on line 4 of main.iyi, where
+    # `bad` expands to `"a".upcse`, was reported at main.iyi:1:7, the
+    # `module` header; the language server underlined the header, and `iyi
+    # fix` spliced the did-you-mean in there, `module app/main` becoming
+    # `moduleupcasemain`.
+    def true_location(line_number : Int32?, column_number : Int32) : {String, Int32?, Int32, VirtualFile?}
+      case filename = @filename
+      in VirtualFile
+        if (call = filename.expanded_location.try(&.expanded_location)) && (file = call.filename.as?(String))
+          {file, call.line_number, call.column_number, filename}
         else
-          ""
+          {"", nil, 0, filename}
         end
-      else
-        if filename
-          filename
-        else
-          ""
+      in String
+        {filename, line_number, column_number, nil}
+      in Nil
+        {"", line_number, column_number, nil}
+      end
+    end
+
+    # The location fields of a `-f json` frame, at `true_location`. A frame
+    # in an expansion has no span in the file - the text it spans is the
+    # expansion's - so its `size` is 0 and an `expansion` object carries the
+    # macro's name and the frame's own line, column and size in its text.
+    # Answers whether the frame is in a real file, the one place an edit can
+    # be offered.
+    def json_location(json : JSON::Builder, line_number : Int32?, column_number : Int32, size : Int32) : Bool
+      file, line, column, expansion = true_location(line_number, column_number)
+      json.field "file", file
+      json.field "line", line
+      json.field "column", column
+      json.field "size", expansion ? 0 : size
+      if expansion
+        json.field "expansion" do
+          json.object do
+            json.field "macro", expansion.macro.name
+            json.field "line", line_number
+            json.field "column", column_number
+            json.field "size", size
+          end
         end
       end
+      expansion.nil?
     end
 
     def to_s_with_source(source)
@@ -48,6 +84,22 @@ module Iyi
 
     def relative_filename(filename)
       Iyi.relative_filename(filename)
+    end
+
+    # iyi: the lines of a source file as the lexer counted them. The lexer
+    # drops a byte order mark before it counts a column, and the line shown
+    # under an error kept it: ` 1 | \uFEFFputs 1.nope`, the mark drawn as
+    # whatever a terminal makes of U+FEFF, and the caret, placed by the
+    # mark-free column, under `.nop` on every terminal that gives it a cell.
+    def source_file_lines(filename : String) : Array(String)
+      if lines = Iyi.iyi_declaration_lines?(filename)
+        return lines
+      end
+      lines = File.read_lines(filename)
+      if first = lines.first?
+        lines[0] = first.lchop('\uFEFF')
+      end
+      lines
     end
 
     def colorize(obj)
@@ -72,6 +124,45 @@ module Iyi
           char
         end
       end
+    end
+
+    # The blanks that put a caret under the character after *before*, the
+    # shown text in front of it, where a terminal draws that character: a
+    # tab as a tab, a wide character as two cells, a combining mark as
+    # none. Counted one cell each, seven CJK characters in front of `nope`
+    # left the caret seven cells short of it.
+    def caret_padding(io : IO, before : String) : Nil
+      before.each_char do |char|
+        if char == '\t'
+          io << '\t'
+        else
+          display_width(char).times { io << ' ' }
+        end
+      end
+    end
+
+    # East Asian Wide and Fullwidth (UAX #11), emoji presentation included.
+    private WIDE_CHARACTERS = {
+      0x1100..0x115F, 0x231A..0x231B, 0x2329..0x232A, 0x23E9..0x23EC, 0x23F0..0x23F0,
+      0x23F3..0x23F3, 0x25FD..0x25FE, 0x2614..0x2615, 0x2648..0x2653, 0x267F..0x267F,
+      0x2693..0x2693, 0x26A1..0x26A1, 0x26AA..0x26AB, 0x26BD..0x26BE, 0x26C4..0x26C5,
+      0x26CE..0x26CE, 0x26D4..0x26D4, 0x26EA..0x26EA, 0x26F2..0x26F3, 0x26F5..0x26F5,
+      0x26FA..0x26FA, 0x26FD..0x26FD, 0x2705..0x2705, 0x270A..0x270B, 0x2728..0x2728,
+      0x274C..0x274C, 0x274E..0x274E, 0x2753..0x2755, 0x2757..0x2757, 0x2795..0x2797,
+      0x27B0..0x27B0, 0x27BF..0x27BF, 0x2B1B..0x2B1C, 0x2B50..0x2B50, 0x2B55..0x2B55,
+      0x2E80..0x303E, 0x3041..0x33FF, 0x3400..0x4DBF, 0x4E00..0x9FFF, 0xA000..0xA4CF,
+      0xA960..0xA97F, 0xAC00..0xD7A3, 0xF900..0xFAFF, 0xFE10..0xFE19, 0xFE30..0xFE6F,
+      0xFF00..0xFF60, 0xFFE0..0xFFE6, 0x16FE0..0x16FE4, 0x17000..0x18CFF, 0x1B000..0x1B2FF,
+      0x1F004..0x1F004, 0x1F0CF..0x1F0CF, 0x1F18E..0x1F18E, 0x1F191..0x1F19A, 0x1F200..0x1F251,
+      0x1F300..0x1F64F, 0x1F680..0x1F6FF, 0x1F7E0..0x1F7EB, 0x1F90C..0x1F9FF, 0x1FA70..0x1FAFF,
+      0x20000..0x3FFFD,
+    }
+
+    private def display_width(char : Char) : Int32
+      ord = char.ord
+      return 1 if ord < 0x300
+      return 0 if char.mark? || (0x200B..0x200F).includes?(ord) || (0xFE00..0xFE0F).includes?(ord) || ord == 0xFEFF
+      WIDE_CHARACTERS.any?(&.includes?(ord)) ? 2 : 1
     end
   end
 
@@ -184,16 +275,17 @@ module Iyi
     end
 
     # *before* is the text of the shown line in front of the column, when
-    # there is one: its tabs are written as tabs, so the caret lands under
-    # the column a terminal put the character in. Counted as one column
-    # each, a tab inside the line left the caret 17 columns short of the
-    # `nope` two tabs had pushed to 34.
+    # there is one, padded as a terminal draws it (`caret_padding`): its
+    # tabs are written as tabs, so the caret lands under the column a
+    # terminal put the character in. Counted as one column each, a tab
+    # inside the line left the caret 17 columns short of the `nope` two
+    # tabs had pushed to 34.
     def append_error_indicator(io, offset, column_number, size = 0, before : String? = nil)
       size ||= 0
       io << '\n'
       if before
         io << (" " * offset)
-        before.each_char { |char| io << (char == '\t' ? '\t' : ' ') }
+        caret_padding(io, before)
       else
         io << (" " * (offset + column_number - 1))
       end
@@ -243,7 +335,7 @@ module Iyi
     end
 
     def format_error_from_file(filename : String)
-      lines = Iyi.iyi_declaration_lines?(filename) || File.read_lines(filename)
+      lines = source_file_lines(filename)
       formatted_error = format_error(
         filename: @filename,
         lines: lines,
@@ -285,12 +377,8 @@ module Iyi
       in Nil
         nil
       in String
-        if lines = Iyi.iyi_declaration_lines?(filename)
-          lines
-        elsif File.file? filename
-          File.read_lines(filename)
-        else
-          nil
+        if Iyi.iyi_declaration_lines?(filename) || File.file?(filename)
+          source_file_lines(filename)
         end
       in VirtualFile
         filename.source.lines

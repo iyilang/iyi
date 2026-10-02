@@ -42,6 +42,13 @@ assert_str "ı", Unicode.downcase("I", turkic), "turkic downcase of an ascii str
 # taken in; one character at a time it was `ı` with the dot over it.
 assert_str "i", Unicode.downcase("I\u0307", turkic), "turkic downcase of I with a combining dot"
 assert_str "ix", Unicode.downcase("I\u0307X", turkic), "and what follows it is lowered as before"
+# Marks of a class other than 0 and 230 may sit between the `I` and the dot
+# (After_I and Before_Dot): the NFD of `İ` with a dot below lowers like its
+# NFC form. Looking only at the next code point it was `ı`, U+0323, U+0307.
+assert_str "i\u0323", Unicode.downcase("I\u0323\u0307", turkic), "turkic downcase of I, a dot below, then a dot above"
+assert_str "i\u0323", Unicode.downcase("\u0130\u0323", turkic), "turkic downcase of the NFC form, İ and a dot below"
+assert_str "ı\u0301\u0307", Unicode.downcase("I\u0301\u0307", turkic), "a mark of class 230 between keeps the I dotless"
+puts "  turkic I takes in a dot above past marks of other classes"
 assert_str "İÜ", Unicode.upcase("iü", turkic), "turkic upcase beside a non-ascii letter"
 assert_str "I", Unicode.upcase("i"), "plain upcase of i"
 # The titlecase digraphs have no row in the upcase table; their uppercase
@@ -62,5 +69,17 @@ assert_str "Ας", Unicode.capitalize("ΑΣ"), "final sigma after the capitalize
 assert_str "\u02BCN", Unicode.capitalize("\u0149"), "capitalize of n preceded by apostrophe is its uppercase"
 assert_str "\u0399\u0308\u0301", Unicode.capitalize("\u0390"), "capitalize of iota with dialytika and tonos is its uppercase"
 puts "  one-code-point titlecase and the final sigma after the first letter"
+# Cased and Case_Ignorable are the Unicode properties, not general
+# categories: a format character (Cf), a modifier symbol (Sk) and a
+# modifier letter (Lm) are looked through, a spacing mark (Mc) is not, and
+# the Roman numeral `Ⅻ` (Nl, Other_Uppercase) is cased. The answers are
+# Python's str.lower; the approximation gave ς, ς, σ, σ and σ.
+assert_str "ασ\u200Bα", Unicode.downcase("ΑΣ\u200BΑ"), "a zero width space inside a word is case-ignorable"
+assert_str "ασ\u0384α", Unicode.downcase("ΑΣ\u0384Α"), "the Greek tonos inside a word is case-ignorable"
+assert_str "α\u02BCς", Unicode.downcase("Α\u02BCΣ"), "a modifier apostrophe before the final sigma is looked through"
+assert_str "\u217Bς", Unicode.downcase("\u216BΣ"), "a sigma after the cased Roman numeral twelve is final"
+assert_str "ας\u0903α", Unicode.downcase("ΑΣ\u0903Α"), "a spacing mark ends the word before it"
+assert_str "\u216Bς", Unicode.capitalize("\u216BΣ"), "capitalize judges the final sigma by the same properties"
+puts "  the final sigma by the Cased and Case_Ignorable properties"
 
 puts "\nALL CHECKS PASSED"

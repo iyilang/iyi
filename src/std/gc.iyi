@@ -70,8 +70,12 @@ pub struct GC
     __iyi_malloc64(size.to_u64)
   end
 
-  # `size` zeroed bytes the collector does not scan: for bytes that hold no
-  # pointers, so the marker skips them.
+  # `size` bytes the collector does not scan: for bytes that hold no
+  # pointers, so the marker skips them. They are not cleared - a chunk the
+  # sweep handed back comes out with its last owner's bytes, as Boehm's
+  # `GC_malloc_atomic` hands them out - so the caller writes every byte
+  # it reads. This said "zeroed" while 2000 chunks taken after a
+  # collection freed 2000 filled ones came back dirty, every one.
   def self.malloc_atomic(size : Int) : Void*
     raise "negative size: #{size}" if size < 0
     __iyi_malloc_atomic64(size.to_u64)
@@ -110,14 +114,32 @@ pub struct GC
   # Whether `pointer` points into a live chunk on the collector's heap:
   # its start or any byte inside it. Null, a stack address and a freed
   # chunk answer false.
+  #
+  # Under the runtime lock, as `stats` is: a word in no arena walks the
+  # large-mapping list, and another thread's `free` or sweep unlinks and
+  # unmaps those nodes under that lock. Walked without it, beside three
+  # threads whose large chunks come and go, two seconds of `is_heap_ptr`
+  # died of a memory fault in 10 runs of 10 (`bench/std_gc_exercise.iyi`).
   def self.is_heap_ptr(pointer : Void*) : Bool
     return false if pointer.address == 0_u64
-    IyiRoots.base_of(pointer.address) != 0_u64
+    IyiHeap.lock
+    base = IyiRoots.base_of(pointer.address)
+    IyiHeap.unlock
+    base != 0_u64
   end
 
   # The numbers the collector keeps, read now.
+  #
+  # The walk holds the runtime lock, which a collection takes before it
+  # stops anything and holds while the scavenge unlinks an arena or a
+  # large mapping. Walked without it, a collection another thread's
+  # allocation started could stop this walk on a mapping, unlink and unmap
+  # it, and the walk's next read was of memory gone: beside three threads
+  # allocating, two seconds of `stats` died of a memory fault in 10 runs
+  # of 10 (`bench/std_gc_exercise.iyi`).
   def self.stats : Stats
     mapped = 0_u64
+    IyiHeap.lock
     arena = IyiHeap.first_arena
     while arena != 0_u64
       mapped += IyiHeap::MAP
@@ -128,6 +150,7 @@ pub struct GC
       mapped += IyiHeap.large_mapped(large)
       large = IyiHeap.large_next(large)
     end
+    IyiHeap.unlock
     Stats.new(mapped, IyiMark.allocated_since, IyiMark.bytes_freed, IyiMark.bytes_kept, IyiMark.collections)
   end
 end

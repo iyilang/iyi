@@ -132,6 +132,12 @@ module Iyi::Lsp
     @versions = {} of String => Int64
     @clean = {} of String => String
     @shut_down = false
+    # The client's `shutdown`, kept verbatim like the handshake and for
+    # the same reason: the refusal of every request after it but `exit`
+    # lives in the worker, and a successor never told of it answered as
+    # if none had come. Kept after the frame is forwarded, as the
+    # handshake is, so a worker this frame spawned is not also handed it.
+    @shutdown_frame : Bytes?
     @running = true
     @private_id = 0
     getter exit_code = 0
@@ -204,8 +210,10 @@ module Iyi::Lsp
           # reading. Spend it on a fresh worker rather than on their
           # next keystroke - or, when the last one was replaced on the
           # memory bound mid-traffic, on the warm-up that retirement
-          # left for the quiet.
-          if (worker = @worker) && worker.idle?
+          # left for the quiet. Past `shutdown` there is no next
+          # keystroke, and nothing is warmed or replaced (`retire`,
+          # `@shutdown_frame`).
+          if !@shut_down && (worker = @worker) && worker.idle?
             if @warm_pending
               @warm_pending = false
               # A successor that has worked since the memory bound made
@@ -233,6 +241,13 @@ module Iyi::Lsp
 
     private def dispatch(body : Bytes) : Nil
       message = parse(body)
+      # A lone surrogate escape is valid JSON the JSON library refuses
+      # (`Text.mend`). The mended frame is the one kept and the one the
+      # worker is handed, so the buffer it opens is the buffer here.
+      if message.nil? && (mended = Text.mend(body))
+        body = mended
+        message = parse(body)
+      end
       table = message.try(&.as_h?)
       method = table.try(&.["method"]?).try(&.as_s?)
       params = table.try(&.["params"]?)
@@ -240,24 +255,32 @@ module Iyi::Lsp
 
       # The proxy reads what it has to keep and nothing else. Every
       # frame still reaches the worker below, so a method this case
-      # does not name is not a method this proxy has to know.
+      # does not name is not a method this proxy has to know — and a
+      # frame of the wrong shape is kept by nobody here and refused by
+      # the worker. These were read as the protocol spells them, and any
+      # other shape raised outside every rescue: a didOpen with no text
+      # ("Missing hash key"), a didSave whose params were a string
+      # ("Expected Hash"), a didChange with no contentChanges each ended
+      # the session with exit 1, where the worker alone had survived
+      # them all.
       case method
       when "initialize", "initialized"
         # Kept for a successor to be handed, and kept *after* the frame
         # is forwarded (below): a worker spawned by this very frame must
         # not also be handed a replay of it.
       when "textDocument/didOpen"
-        if params && (document = params["textDocument"]?)
-          uri = document["uri"].as_s
-          @documents[uri] = document["text"].as_s
+        document = params.try(&.as_h?).try(&.["textDocument"]?).try(&.as_h?)
+        if document && (uri = document["uri"]?.try(&.as_s?)) &&
+           (text = document["text"]?.try(&.as_s?))
+          @documents[uri] = text
           @versions[uri] = document["version"]?.try(&.as_i64?) || 0_i64
           @focus = uri
         end
       when "textDocument/didChange"
-        if params && (uri = params.dig?("textDocument", "uri").try(&.as_s?))
+        if params && (uri = uri_of(params)) && (first = changes_of(params))
           text = @documents[uri]? || ""
           changes = [] of JSON::Any
-          params["contentChanges"].as_a.each do |change|
+          first.each do |change|
             text = Text.apply(text, change)
             changes << change
           end
@@ -274,11 +297,13 @@ module Iyi::Lsp
             break unless queued = @pending.first?
             other = parse(queued).try(&.as_h?)
             break unless other && other["method"]?.try(&.as_s?) == "textDocument/didChange"
-            other_params = other["params"]
-            break unless other_params.dig?("textDocument", "uri").try(&.as_s?) == uri
+            # One of the wrong shape ends the burst, and reaches the
+            # worker on its own, as it came.
+            break unless (other_params = other["params"]?) && uri_of(other_params) == uri &&
+                         (more = changes_of(other_params))
             @pending.shift
             newest = other_params
-            other_params["contentChanges"].as_a.each do |change|
+            more.each do |change|
               text = Text.apply(text, change)
               changes << change
             end
@@ -291,9 +316,10 @@ module Iyi::Lsp
           return
         end
       when "textDocument/didSave"
-        @focus = params.try(&.dig?("textDocument", "uri")).try(&.as_s?) || @focus
+        # Params of the wrong shape name no file, and the focus stays.
+        @focus = uri_of(params) || @focus
       when "textDocument/didClose"
-        if uri = params.try(&.dig?("textDocument", "uri")).try(&.as_s?)
+        if uri = uri_of(params)
           @documents.delete(uri)
           # iyi: the version and the last clean text go with the buffer.
           # Kept, a session that opened and closed files held the clean
@@ -328,6 +354,7 @@ module Iyi::Lsp
       case method
       when "initialize"  then @initialize_frame = body
       when "initialized" then @initialized_frame = body
+      when "shutdown"    then @shutdown_frame = body
       end
     end
 
@@ -361,6 +388,17 @@ module Iyi::Lsp
           break
         end
       end
+    end
+
+    # The `textDocument.uri` a notification names, or nil where its
+    # params are the wrong shape to have one.
+    private def uri_of(params : JSON::Any?) : String?
+      params.try(&.as_h?).try(&.["textDocument"]?).try(&.as_h?).try(&.["uri"]?).try(&.as_s?)
+    end
+
+    # A didChange's `contentChanges`, or nil where they are not a list.
+    private def changes_of(params : JSON::Any?) : Array(JSON::Any)?
+      params.try(&.as_h?).try(&.["contentChanges"]?).try(&.as_a?)
     end
 
     # One `didChange` carrying a burst's changes in order, addressed to
@@ -509,7 +547,14 @@ module Iyi::Lsp
     # buffers now and warmed at the next quiet (`@warm_pending`), because
     # a warm-up sent first is a compile the next request waits behind -
     # 0.8 s for an unchanged workspace pull that compiles nothing.
+    #
+    # Past `shutdown` nothing is retired: there is no keystroke left to
+    # save a compile for. The refusal of every request but `exit` lives in
+    # the worker, and the successor was not told (`@shutdown_frame`): a
+    # hover right after `shutdown` was -32600, the same hover after a 3.5 s
+    # pause was answered in full by a fresh worker.
     private def retire(warm_now : Bool = true) : Nil
+      return if @shut_down
       return unless old = @worker
       return unless successor = spawn_worker
       @worker = successor
@@ -551,6 +596,14 @@ module Iyi::Lsp
       end
       if frame = @initialized_frame
         write_frame(worker, frame)
+      end
+      # A successor started past `shutdown` - its predecessor died, and
+      # the next request needs someone to refuse it - is told the session
+      # is over, and that is all it is told. Without it a request after a
+      # dead worker's `shutdown` was answered as if none had come.
+      if frame = @shutdown_frame
+        write_frame(worker, frame)
+        return
       end
       adopt(worker)
       if warm_now

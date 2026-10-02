@@ -273,8 +273,11 @@ pub struct Complex
          else
            y.abs / Math.sqrt(2.0 * (r + x))
          end
-    # Negated: `0.0 - im` lost the sign of an imaginary part that underflowed.
-    Complex.new(scale * re, scale * (y >= 0.0 ? im : -im))
+    # The imaginary part takes `y`'s sign bit: `y >= 0.0` is true for -0.0,
+    # and put -4 - 0i above the cut, 0 + 2i where `log` and C99's `csqrt`
+    # answer 0 - 2i. A copied sign, as the negation before it, keeps an
+    # imaginary part that underflowed signed, which `0.0 - im` did not.
+    Complex.new(scale * re, scale * Math.copysign(im, y))
   end
 end
 

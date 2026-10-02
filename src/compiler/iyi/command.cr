@@ -109,6 +109,8 @@ class Iyi::Command
   def initialize(@options : Array(String))
     @color = Colorize.default_enabled?(STDOUT, STDERR)
     @error_trace = false
+    # iyi: `-f json` was asked for, so every refusal is data (`json_report`).
+    @json_output = false
     @progress_tracker = ProgressTracker.new
   end
 
@@ -274,17 +276,30 @@ class Iyi::Command
       end
     end
   rescue ex : Iyi::CodeError
-    report_warnings
-
     ex.color = @color
     ex.error_trace = @error_trace
-    if @config.try(&.output_format) == "json"
-      STDERR.puts ex.to_json
+    if @json_output
+      json_report { |json| ex.to_json_single(json) }
     else
+      report_warnings
       STDERR.puts ex
     end
     exit 1
   rescue ex : Iyi::Error
+    # Under `-f json` the chain is one array, outermost first. Printed a line
+    # at a time, `check -f json` on a module with a byte that is not UTF-8
+    # answered `Error: while importing "app/lib"` as text.
+    if @json_output
+      json_report do |json|
+        link = ex.as(Exception?)
+        while link
+          json_message_frame(json, link.message.to_s)
+          link = link.cause
+        end
+      end
+      exit Exit::CODE_ERROR.to_i
+    end
+
     report_warnings
 
     # This unwraps nested errors which could be caused by `require` which wraps
@@ -625,11 +640,17 @@ class Iyi::Command
     # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, which winnt.cr does not spell.
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000_u32
 
+    # JOB_OBJECT_LIMIT_BREAKAWAY_OK: a child the program starts with
+    # CREATE_BREAKAWAY_FROM_JOB leaves the job, as it does when the program
+    # is run from a shell. Without it that start was refused with "Access is
+    # denied" under `iyi run` alone.
+    JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x0800_u32
+
     private def kill_child_with_runner(process)
       job = LibC.CreateJobObjectW(Pointer(LibC::SECURITY_ATTRIBUTES).null, Pointer(UInt16).null)
       return if job.null?
       limits = LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION.new
-      limits.basicLimitInformation.limitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+      limits.basicLimitInformation.limitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
       if LibC.SetInformationJobObject(job, LibC::JOBOBJECTINFOCLASS::ExtendedLimitInformation,
            pointerof(limits).as(Void*),
            sizeof(LibC::JOBOBJECT_EXTENDED_LIMIT_INFORMATION).to_u32) == 0
@@ -747,7 +768,9 @@ class Iyi::Command
         end
 
         opts.on("--x86-asm-syntax att|intel", "X86 dialect for --emit=asm: AT&T (default), Intel") do |value|
-          case value = LLVM::InlineAsmDialect.parse?(value)
+          # `dialect`, not `value`: the parse wrote over the word it read,
+          # and the refusal said "Invalid value `` for x86-asm-syntax".
+          case dialect = LLVM::InlineAsmDialect.parse?(value)
           in Nil
             abort! "Invalid value `#{value}` for x86-asm-syntax", :USAGE_ERROR
           in .att?
@@ -786,6 +809,9 @@ class Iyi::Command
 
       opts.on("-f #{allowed_formats.join("|")}", "--format #{allowed_formats.join("|")}", "Output format: #{allowed_formats[0]} (default), #{allowed_formats[1..].join(", ")}") do |f|
         output_format = f
+        # iyi: as soon as it is known, so a refusal before the compile (`no
+        # such file`) is data too (`json_report`).
+        @json_output = true if f == "json" && allowed_formats.includes?(f)
       end
 
       if unreachable_command
@@ -1030,10 +1056,15 @@ class Iyi::Command
     # compiler knows before it reads anything. `--prelude` still wins, and a
     # `.cr` file is untouched — the two languages share this compiler and do
     # not share a standard library.
-    # In the file system's case: on Windows `hello.IYI` is `hello.iyi`, and
-    # it was built against Crystal's library and told of a `--crystal` it
-    # was never given.
-    if !specified_prelude && sources.first?.try { |source| Iyi.path_key(source.filename).ends_with?(".iyi") }
+    # The extension is the stored name's (`gather_sources`), compared as it
+    # is stored. The case was folded here instead, so on Windows a file
+    # stored as `UP.IYI` got iyi's prelude and the other language's lexer
+    # (`Lexer.iyi_source?`), and valid iyi answered `unexpected token:
+    # "!"`; such a name is refused now (`Lexer.iyi_miscased?`).
+    if (entry = sources.first?) && Lexer.iyi_miscased?(entry.filename)
+      abort! Lexer.iyi_miscased_sentence(entry.filename), :USAGE_ERROR
+    end
+    if !specified_prelude && sources.first?.try(&.filename.ends_with?(".iyi"))
       compiler.prelude = "iyi/prelude"
     end
 
@@ -1075,8 +1106,13 @@ class Iyi::Command
     unless output_format.in?(allowed_formats)
       abort! "You have input an invalid format: #{output_format}. Supported formats: #{allowed_formats.join(", ")}", :USAGE_ERROR
     end
+    # iyi: data has no colour. The program's colour reaches the text of its
+    # messages, and `check -f json` on a terminal carried `\u001b[33;1m
+    # (compile-time type is (String | Nil))\u001b[39;22m` in "message".
+    compiler.color = false if output_format == "json"
 
     abort! "maximum number of threads cannot be lower than 1", :USAGE_ERROR if compiler.n_threads < 1
+    validate_mcpu(compiler)
 
     if !compiler.no_codegen? && !run && Dir.exists?(output_filename)
       abort! "can't use `#{output_filename}` as output filename because it's a directory", :USAGE_ERROR
@@ -1109,8 +1145,24 @@ class Iyi::Command
       # so the old program is moved aside - it goes on running - and the
       # new one written where it was.
       {% if flag?(:win32) %}
-        unless compiler.cross_compile? || Iyi.move_aside_if_busy(output_filename)
-          abort! "#{output_filename} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+        unless compiler.cross_compile?
+          # And the program database the MSVC linker writes beside it,
+          # first, so a refusal leaves the program as it was. A `.pdb` a
+          # debugger holds open, or a read-only one from an extracted tree,
+          # failed the link after the whole compile - "LNK1201: error writing
+          # to program database", exit status 1201, the linker's command line
+          # - and the linker deleted the program on its way out.
+          {% if flag?(:msvc) %}
+            unless compiler.debug.none?
+              pdb = "#{output_filename.rchop(::Path[output_filename].extension)}.pdb"
+              unless Iyi.move_aside_if_busy(pdb)
+                abort! "#{pdb} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+              end
+            end
+          {% end %}
+          unless Iyi.move_aside_if_busy(output_filename)
+            abort! "#{output_filename} is in use and cannot be replaced or moved aside", :USAGE_ERROR
+          end
         end
       {% end %}
     end
@@ -1169,6 +1221,9 @@ class Iyi::Command
         abort! "#{filename} is a directory, not a source file", :USAGE_ERROR if Dir.exists?(expanded)
         abort! "no such file: #{filename}", :USAGE_ERROR
       end
+      # The name as stored, which the language and `Lexer.iyi_miscased?`
+      # are read off.
+      expanded = Lexer.stored_name(expanded)
       Compiler::Source.new(expanded, File.read(expanded))
     end
   rescue exc : IO::Error
@@ -1225,6 +1280,40 @@ class Iyi::Command
     target_specific_opts(opts, compiler)
     setup_compiler_warning_options(opts, compiler)
     opts.invalid_option { }
+  end
+
+  # iyi: whether LLVM knows the `--mcpu` it was given, asked before anything
+  # is compiled. It was handed over unchecked, and an unknown name reached
+  # each codegen thread: `iyi build --mcpu nonesuch` printed "'nonesuch' is
+  # not a recognized processor for this target" once per thread, the lines
+  # running into each other, then "LLVM ERROR: 64-bit code requested on a
+  # subtarget that doesn't support it!", and died in `abort()`, exit
+  # 0xC0000409 on Windows. LLVM's C interface has no question for this, and
+  # its one list of the names is what `--mcpu help` prints to stderr as a
+  # target machine is made; so a child of this binary is asked for that list,
+  # for this target. When it cannot answer, LLVM is left to answer as before.
+  private def validate_mcpu(compiler) : Nil
+    cpu = compiler.mcpu
+    return if cpu.nil? || cpu.empty? || cpu == LLVM.host_cpu_name
+    return unless exe = Process.executable_path
+    listing = IO::Memory.new
+    Process.run(exe, ["build", "--target", compiler.codegen_target.to_s, "--mcpu", "help"],
+      env: {"IYI_OPTS" => nil, "CRYSTAL_OPTS" => nil}, error: listing)
+    # "Available CPUs for this target:", a blank line, one `  name - what`
+    # a line, and "Available features for this target:" after them.
+    known = [] of String
+    listed = false
+    listing.to_s.each_line do |line|
+      if line.starts_with?("Available")
+        break if listed
+        listed = true
+      elsif listed && !line.blank?
+        known << line.strip.split(' ', 2).first
+      end
+    end
+    return if known.empty? || known.includes?(cpu)
+    abort! "--mcpu #{cpu} is not a CPU LLVM knows for #{compiler.codegen_target}; `--mcpu help` lists the ones it does", :USAGE_ERROR
+  rescue IO::Error
   end
 
   private def target_specific_opts(opts, compiler)
@@ -1308,9 +1397,26 @@ class Iyi::Command
   end
 
   private def print_error(msg)
+    if @json_output
+      json_report { |json| json_message_frame(json, msg.to_s) }
+      return
+    end
     # This is for the case where the main command is wrong
     @color = false if ARGV.includes?("--no-color") || !Colorize.default_enabled?(STDOUT, STDERR)
     Iyi.print_error(msg, @color)
+  end
+
+  # iyi: a refusal with no place in a source file, as a `-f json` frame: the
+  # shape every frame has, with the place left empty as an error from a
+  # macro's virtual file leaves it. `no such file: x.iyi` was text there.
+  private def json_message_frame(json : JSON::Builder, message : String) : Nil
+    json.object do
+      json.field "file", ""
+      json.field "line", nil
+      json.field "column", nil
+      json.field "size", 0
+      json.field "message", message
+    end
   end
 
   private def self.iyi_opts
@@ -1361,7 +1467,10 @@ class Iyi::Command
     Command.parse_with_iyi_opts(@options) { |opts| yield opts }
   end
 
+  # iyi: with the colour this command has, which is none unless the output
+  # is a terminal. `Compiler#color?` defaulted to true and nothing here set
+  # it, so a message's colour reached a file `iyi check` was redirected to.
   private def new_compiler
-    @compiler = Compiler.new
+    @compiler = Compiler.new.tap(&.color = @color)
   end
 end

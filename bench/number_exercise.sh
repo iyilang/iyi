@@ -325,6 +325,18 @@ prove_fails "negative places ignored" places_round float.iyi \
   "number: round to tens and hundreds" \
   's/^    return round if digits == 0$/    return round if digits <= 0/'
 
+# 8f. A scaled value past 2^53 scaled back again, which moved a double
+#     that had nothing left to round.
+prove_fails "round scales back what has nothing to round" round_drift float.iyi \
+  "number: round keeps a double with nothing left to round" \
+  's/^      return self unless scaled.abs < 9007199254740992.0$/      return self if scaled * 0.0 != 0.0/'
+
+# 8g. The double kept from 2^52 instead, where the place can still be
+#     coarser than its last bit.
+prove_fails "round keeps from 2^52" round_band float.iyi \
+  "number: round still rounds under 2^53" \
+  's/^      return self unless scaled.abs < 9007199254740992.0$/      return self unless scaled.abs < 4503599627370496.0/'
+
 # 9. And the unchecked conversions made checked, which is what the prelude
 #    had before `unsafe_to_u8` was a name: the instruction is the point, so
 #    a checked one panics where the exercise asserted a value. Anchored on
@@ -334,7 +346,14 @@ prove_fails "the unchecked conversion checked" checked_unsafe primitives.iyi \
   "arithmetic overflow" \
   's/^        @\[::Primitive(:unchecked_convert)\]$/        @[::Primitive(:convert)]/'
 
-# 10. A negative shift count answering zero again, in `>>` and in `<<`,
+# 10. A 64-bit integer against a double by the instruction's rounding
+#     again: the integer made a double first, in both operand orders, and
+#     the operators and `std/int`'s `<=>` no longer agree.
+prove_fails "int64 against a double rounded first" i64_rounded primitives.iyi \
+  "number: int64 against a double is exact" \
+  's/^              (self - unsafe_mod(2048)).to_f64 - other + unsafe_mod(2048).to_f64 {{ op.id }} 0.0$/              to_f64 {{ op.id }} other/'
+
+# 11. A negative shift count answering zero again, in `>>` and in `<<`,
 #     and the Int64 pair the same way.
 prove_fails "a negative count shifts nowhere" neg_shr number.iyi \
   "number: a negative count shifts the other way" \
@@ -346,7 +365,7 @@ prove_fails "an int64 negative count shifts nowhere" neg_shr64 number.iyi \
   "number: an int64 negative count shifts the other way" \
   's/^    count < 0 ? self << (0 - count) : (count >= 64 ? /    count < 0 ? 0_i64 : (count >= 64 ? /'
 
-# 11. `chr` held to ASCII again, so `'é'.ord.chr` panics.
+# 12. `chr` held to ASCII again, so `'é'.ord.chr` panics.
 prove_fails "chr only ASCII" ascii_chr number.iyi \
   "233 is out of char range" \
   's/^    raise "#{self} is out of char range" if self < 0 || self > 0x10FFFF || (self >= 0xD800 \&\& self <= 0xDFFF)$/    raise "#{self} is out of char range" if self < 0 || self > 127/'

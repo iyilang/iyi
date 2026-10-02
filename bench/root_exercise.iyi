@@ -185,6 +185,19 @@
     Pointer(UInt8).malloc(size).address ^ MASK
   end
 
+  # The integers 1 to `words` asked of `base_of`, one after another: what
+  # the mark asks of every word it scans that no arena holds.
+  @[NoInline]
+  def reject_words(words : UInt64) : UInt64
+    found = 0_u64
+    word = 1_u64
+    while word <= words
+      found = found + IyiRoots.base_of(word)
+      word = word + 1_u64
+    end
+    found
+  end
+
   # Overwrites the frames below this one, which is where the copies the
   # allocation left behind are. Each level keeps a word in a slot the frame
   # holds across the call, so the level cannot be optimised into nothing, and
@@ -312,6 +325,26 @@
   raise "not a pointer: an address in a mapping that is not an arena resolved to 0x#{hex(IyiRoots.base_of(outside))}" if IyiRoots.base_of(outside) != 0
   raise "not a pointer: a code address resolved to 0x#{hex(IyiRoots.base_of(IyiRoots.data_low - 4096_u64))}" if IyiRoots.base_of(IyiRoots.data_low - 4096_u64) != 0
   print "  not a pointer: a small integer, zero, a stack address, a global address, a foreign mapping and a code address are all rejected\n"
+
+  # --- A word in no arena answers without the large list ---
+  # A word no arena holds was looked for on the list of large mappings a
+  # node at a time, and the mark asks that of every such word it scans:
+  # an `Array(Tuple(Int64, String))` of two million beside 200 live 1.1 MB
+  # buffers took 11.5 s a collection where it took 66 ms beside none. A
+  # word in a stretch of the address space no large mapping touches is
+  # answered by the directory. A million small integers beside 200 large
+  # mappings take at most five times what they take beside one, and 20 ms.
+  alone_started = IyiMark.now_ns
+  raise "large walk: a small integer resolved beside one large mapping" if reject_words(1000000_u64) != 0
+  alone = IyiMark.now_ns - alone_started
+  larges = [] of Pointer(UInt8)
+  200.times { larges << Pointer(UInt8).malloc(1100000_u64) }
+  crowd_started = IyiMark.now_ns
+  raise "large walk: a small integer resolved beside 200 large mappings" if reject_words(1000000_u64) != 0
+  crowd = IyiMark.now_ns - crowd_started
+  larges.each { |l| IyiHeap.free(l.as(Void*)) }
+  raise "large walk: a million integers took #{count(crowd // 1000000_u64)} ms beside 200 large mappings and #{count(alone // 1000000_u64)} ms beside one" if crowd > alone * 5_u64 + 20000000_u64
+  print "  large walk: a million integers beside 200 large mappings rejected within five times the time beside one\n"
 
   # --- The untouched tail of an arena is not an object ---
   # A word can land inside an arena and still be no chunk anybody was handed,

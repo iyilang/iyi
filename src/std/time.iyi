@@ -55,6 +55,13 @@ pub struct DayOfWeek
     @value == other.value
   end
 
+  # Hashing follows `==`. Without it a day hashed to its type, `Object#hash`'s
+  # default: `Monday.hash == Sunday.hash`, and every day a table held went to
+  # one slot.
+  def hash : Int32
+    @value
+  end
+
   def monday? : Bool
     @value == 1
   end
@@ -299,6 +306,14 @@ pub struct Span
     @seconds == other.@seconds && @nanoseconds == other.@nanoseconds
   end
 
+  # Hashing follows `==`, the two parts mixed as a tuple's members are. Without
+  # it every span hashed to its type: `Span.seconds(1).hash ==
+  # Span.days(9).hash`, and a table of 16,000 spans took 0.95 s to fill where
+  # the same pairs as tuples took 1 ms.
+  def hash : Int32
+    {@seconds, @nanoseconds}.hash
+  end
+
   def to_s : String
     # The parts are taken signed, as the accessors take them, and each is
     # made positive: negating the seconds first overflowed for the
@@ -355,14 +370,21 @@ pub struct Time
   MAX_SECONDS =  67767976233532799_i64
 
   def initialize(@seconds : Int64, nanoseconds : Int32 = 0)
-    sec = @seconds &+ (nanoseconds.to_i64 // 1000000000_i64)
+    carry = nanoseconds.to_i64 // 1000000000_i64
     nsec = (nanoseconds.to_i64 % 1000000000_i64).to_i32
     if nsec < 0
-      sec = sec &- 1_i64
+      carry = carry - 1_i64
       nsec = nsec + 1000000000
     end
+    sec = @seconds &+ carry
     if sec < MIN_SECONDS || sec > MAX_SECONDS
-      raise "year out of range: #{@seconds} seconds from the epoch is past the years an Int32 holds"
+      # The count after the carry is the one refused, so it is the one named.
+      # The message named the count before it, and `Time.unix(MAX_SECONDS,
+      # 999999999) + 1ns` was refused naming 67767976233532799, a second the
+      # module had just accepted. A sum that wrapped is named as the sum.
+      wrapped = (carry > 0_i64 && sec < @seconds) || (carry < 0_i64 && sec > @seconds)
+      count = wrapped ? "#{@seconds} #{carry > 0_i64 ? "+" : "-"} #{carry.abs}" : sec.to_s
+      raise "year out of range: #{count} seconds from the epoch is past the years an Int32 holds"
     end
     @seconds = sec
     @nanoseconds = nsec
@@ -524,14 +546,18 @@ pub struct Time
     if nanosecond < 0 || nanosecond > 999999999
       raise "invalid nanosecond: #{nanosecond}"
     end
-
+    # The two are one fraction of the second written: past it they carried
+    # into the next second in silence, and `Time.utc(2024, 12, 31, 23, 59, 59,
+    # 999, 999999999)` answered 2025-01-01T00:00:00.998999999Z, a date nobody
+    # wrote, where the same constructor refuses a 60th second.
     total_ns = millisecond.to_i64 * 1000000_i64 + nanosecond.to_i64
-    extra_sec = total_ns // 1000000000_i64
-    nano_rem = (total_ns % 1000000000_i64).to_i32
+    if total_ns > 999999999_i64
+      raise "invalid millisecond + nanosecond: #{millisecond} ms and #{nanosecond} ns are past one second"
+    end
 
     days = days_from_civil(year.to_i64, month, day)
-    sec = days * 86400_i64 + hour.to_i64 * 3600_i64 + minute.to_i64 * 60_i64 + second.to_i64 + extra_sec
-    new(sec, nano_rem)
+    sec = days * 86400_i64 + hour.to_i64 * 3600_i64 + minute.to_i64 * 60_i64 + second.to_i64
+    new(sec, total_ns.to_i32)
   end
 
   def self.new(year : Int32, month : Int32, day : Int32, hour : Int32 = 0, minute : Int32 = 0, second : Int32 = 0, millisecond : Int32 = 0, nanosecond : Int32 = 0) : Time
@@ -704,13 +730,17 @@ pub struct Time
   # Refused with the module's sentence past the milliseconds an Int64
   # holds, some 292 million years either side of 1970, where the multiply
   # was the prelude's bare "arithmetic overflow" for a year `Time.utc`
-  # accepts, 300,000,000.
+  # accepts, 300,000,000. Both edges answer to the last millisecond that
+  # fits: the lowest 808 an Int64 holds were refused, so
+  # `Time.unix_ms(Int64::MIN).to_unix_ms` panicked. A negative second is
+  # taken one up and its milliseconds from 1000 down, so the product fits
+  # too.
   def to_unix_ms : Int64
     ms = (@nanoseconds // 1000000).to_i64
-    if @seconds > 9223372036854775_i64 || @seconds < -9223372036854775_i64 || (@seconds == 9223372036854775_i64 && ms > 807_i64)
+    if @seconds > 9223372036854775_i64 || @seconds < -9223372036854776_i64 || (@seconds == 9223372036854775_i64 && ms > 807_i64) || (@seconds == -9223372036854776_i64 && ms < 192_i64)
       raise "time out of range: #{@seconds} seconds from the epoch is past the milliseconds an Int64 holds"
     end
-    @seconds * 1000_i64 + ms
+    @seconds < 0_i64 ? (@seconds + 1_i64) * 1000_i64 + (ms - 1000_i64) : @seconds * 1000_i64 + ms
   end
 
   def to_unix_f : Float64
@@ -768,6 +798,13 @@ pub struct Time
 
   def ==(other : Time) : Bool
     @seconds == other.seconds && @nanoseconds == other.nanoseconds
+  end
+
+  # Hashing follows `==`, as `Span`'s does. Without it every time hashed to its
+  # type: `Time.unix(1).hash == Time.unix(1000000, 5).hash`, and a table of
+  # 16,000 times took 1.2 s to fill where the same pairs as tuples took 1 ms.
+  def hash : Int32
+    {@seconds, @nanoseconds}.hash
   end
 
   # ---------------------------------------------------------------------------

@@ -53,23 +53,26 @@ class String
     {% end %}
   end
 
-  # The bytes of the character at *at*: 2 to 4 for a well-formed sequence,
-  # 1 for ASCII and for each byte of one that is overlong, a surrogate, past
-  # U+10FFFF, cut short or not continued - the other library's reading, and
-  # the compiler's for a literal's `size`. `size` and `each_char` both step
-  # by it: counting lead bytes made `"\xC3a"` two to `size` and one to
-  # `each_char`, and `"\x80"` built here 0 where its literal is 1.
-  private def char_width(at : Int32) : Int32
-    lead = to_unsafe[at]
-    return 1 if lead < 0xC2_u8 || lead > 0xF4_u8
-    width = lead < 0xE0_u8 ? 2 : (lead < 0xF0_u8 ? 3 : 4)
-    return 1 if at + width > @bytesize
-    second = to_unsafe[at + 1]
-    return 1 if second < (lead == 0xE0_u8 ? 0xA0_u8 : (lead == 0xF0_u8 ? 0x90_u8 : 0x80_u8))
-    return 1 if second > (lead == 0xED_u8 ? 0x9F_u8 : (lead == 0xF4_u8 ? 0x8F_u8 : 0xBF_u8))
-    return 1 if width > 2 && (to_unsafe[at + 2] & 0xC0_u8) != 0x80_u8
-    return 1 if width > 3 && (to_unsafe[at + 3] & 0xC0_u8) != 0x80_u8
-    width
+  # Each character's code point and the byte it starts at, by the other
+  # library's rule and the compiler's for a literal: a lead byte without the
+  # `10xxxxxx` bytes it calls for, one of those alone, an overlong form, a
+  # surrogate or past U+10FFFF is -1, one byte, and `each_char` yields U+FFFD.
+  private def each_point(& : Int32, Int32 -> Nil) : Nil
+    index = 0
+    while index < @bytesize
+      lead = to_unsafe[index].to_i32
+      width = lead < 0xC2 || lead > 0xF4 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4
+      point = width > 1 ? lead & (0x7F >> width) : lead < 0x80 ? lead : -1
+      k = 1
+      while k < width && point >= 0
+        byte = index + k < @bytesize ? to_unsafe[index + k].to_i32 : 0
+        point = (byte & 0xC0) == 0x80 ? (point << 6) | (byte & 0x3F) : -1
+        k = k + 1
+      end
+      point = -1 if width > 1 && (point < (1 << (5 * width - 4)) || point > 0x10FFFF || (point >= 0xD800 && point < 0xE000))
+      yield point, index
+      index = index + (point < 0 ? 1 : width)
+    end
   end
 
   def bytesize : Int32
@@ -80,15 +83,13 @@ class String
   # how the other library's own code leaves a string it builds: `to_json`'s
   # result answered `size` 0 here while the field was returned as it stood.
   # The layout is shared on purpose (SPEC.md Part V item 12), so the
-  # invariant is too.
+  # invariant is too. The count is of what `each_char` yields, a byte that
+  # begins no character one U+FFFD.
   def size : Int32
     return @length if @length > 0 || @bytesize == 0
+
     count = 0
-    index = 0
-    while index < @bytesize
-      index = index + char_width(index)
-      count = count + 1
-    end
+    each_point { count = count + 1 }
     @length = count
   end
 
@@ -124,22 +125,11 @@ class String
   # convention `samples/iyi/calc` scans with; a character is a unit only
   # where a character is what was asked for.
   #
-  # A byte that starts no well-formed sequence (`char_width` says 1) is
-  # yielded as itself: this decodes, it does not validate.
+  # A byte that begins no character is one U+FFFD, as in the other library.
+  # A lead byte took the bytes after it whatever they were: C3 41 was the one
+  # character U+00C1 at `size` 2, and `"a" C3 '"'` swallowed the quote.
   def each_char(& : Char -> Nil) : Nil
-    index = 0
-    while index < @bytesize
-      width = char_width(index)
-      point = to_unsafe[index].to_i32
-      point = point & (0xFF >> (width + 1)) if width > 1
-      k = 1
-      while k < width
-        point = (point << 6) | (to_unsafe[index + k].to_i32 & 0x3F)
-        k = k + 1
-      end
-      yield point.unsafe_chr
-      index = index + width
-    end
+    each_point { |point| yield point < 0 ? '\uFFFD' : point.unsafe_chr }
   end
 
   def []?(index : Int32) : Char?
@@ -707,15 +697,21 @@ class String::Builder
     String.new(@bytesize) { |buffer| buffer.copy_from(@buffer, @bytesize) }
   end
 
+  # In Int64, so a build doubles past 1 GiB up to the 2147483647 bytes a
+  # string holds and is refused past them as `*` is: in Int32, doubling
+  # 1 GiB panicked a 1.2 GB build with "arithmetic overflow".
   private def reserve(extra : Int32) : Nil
-    needed = @bytesize + extra
-    return if needed <= @capacity
-    capacity = @capacity
+    needed = @bytesize.to_i64 + extra.to_i64
+    return if needed <= @capacity.to_i64
+    raise "a string of #{@bytesize} bytes and #{extra} more is past the " \
+          "2147483647 bytes a string holds" if needed > 2147483647_i64
+    capacity = @capacity.to_i64
     while capacity < needed
       capacity = capacity * 2
     end
+    capacity = 2147483647_i64 if capacity > 2147483647_i64
     @buffer = @buffer.realloc(capacity.to_u64)
-    @capacity = capacity
+    @capacity = capacity.to_i32
   end
 end
 

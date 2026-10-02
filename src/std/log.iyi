@@ -16,9 +16,9 @@
 #
 # Backends: `IOBackend` writes each entry to an IO through a `Formatter`
 # (`DefaultFormatter`: `2024-02-29T15:30:45.123456Z INFO - source: message`,
-# the source and its ` - ` omitted at the root); `MemoryBackend` keeps
-# the entries for a test to read back. A `Backend` of your own is a
-# class with `write(entry)` and `close`.
+# and `... INFO - message` at the root, the source and its `: ` left
+# off); `MemoryBackend` keeps the entries for a test to read back. A
+# `Backend` of your own is a class with `write(entry)` and `close`.
 #
 # Logging is synchronous: the entry is written before the call returns,
 # in the calling thread, with no queue between.

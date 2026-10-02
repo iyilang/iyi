@@ -75,7 +75,7 @@ fi
 
 echo
 echo "== every int section reported"
-for phrase in "== add" "== bits" "== comparison with doubles" "== conversion from doubles" "== unchecked conversions" "== traits"; do
+for phrase in "== add" "== bits" "== comparison with doubles" "== conversion from doubles" "== unchecked conversions" "== traits" "== gcd"; do
   if ! grep -q "$phrase" "$WORK/int-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1

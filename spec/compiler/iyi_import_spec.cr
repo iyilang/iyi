@@ -293,6 +293,31 @@ describe "Semantic: iyi import" do
     end
   end
 
+  # `protected` is the same case as `private` (SPEC.md IV): a name a module's
+  # own code may call and a consumer may not write. Two modules under one root
+  # share the root and nothing else, and the namespace climb that decides
+  # `protected` went past the unit to the root, so `app/main` called
+  # `app/dep`'s protected method.
+  it "refuses a protected method from another module under the same root" do
+    with_iyi_modules({
+      "main.iyi"    => "module app/main\n\nimport app/dep::*\n\nDog.new.prot\n",
+      "app/dep.iyi" => "module app/dep\n\npub struct Dog\n  def initialize\n  end\n\n  protected def prot : Int32\n    1\n  end\nend\n",
+    }) do
+      expect_raises(Iyi::TypeException, /protected method 'prot' called for App::Dep::Dog/) do
+        semantic_iyi("main.iyi")
+      end
+    end
+  end
+
+  it "lets a module call its own type's protected method" do
+    with_iyi_modules({
+      "main.iyi"    => "module app/main\n\nimport app/dep::*\n\nasked\n",
+      "app/dep.iyi" => "module app/dep\n\npub struct Dog\n  def initialize\n  end\n\n  protected def prot : Int32\n    1\n  end\nend\n\npub def asked : Int32\n  Dog.new.prot\nend\n",
+    }) do
+      semantic_iyi("main.iyi")
+    end
+  end
+
   # An `import` written below other code used to declare the module inside the
   # importing one — `Samples::InitOrder::Boot::Registry` — which compiled,
   # because the importing file reaches it under the same name either way. The

@@ -74,11 +74,10 @@ module Iyi
 
     def to_json_single(json)
       json.object do
-        json.field "file", true_filename
-        json.field "line", @line_number
-        json.field "column", @column_number
-        json.field "size", @size
+        # A frame in a macro's expansion is placed at the call it came from.
+        in_file = json_location(json, @line_number, @column_number, @size)
         json.field "message", @message
+        json.field "severity", "warning" if warning?
         # iyi: the SPEC sections the message cites, as data (AI_FIRST.md §2
         # item 3). The house style writes "see SPEC.md III.1" into the
         # prose; a machine acting on the error gets the reference without
@@ -94,10 +93,12 @@ module Iyi
         # `line`:`column` (1-indexed) of `file` with `replacement`. Only
         # when the span really delimits the offending token — a
         # locationless error has no edit, and saying so beats guessing.
-        if (replacement = @suggestion) && @size > 0 && (line = @line_number)
+        # Nor has a frame in a macro's expansion: the token is in text the
+        # macro wrote, not in any file an edit can open.
+        if in_file && (replacement = @suggestion) && @size > 0 && (line = @line_number)
           json.field "suggested_edit" do
             json.object do
-              json.field "file", true_filename
+              json.field "file", @filename.as?(String) || ""
               json.field "line", line
               json.field "column", @column_number
               json.field "size", @size
@@ -193,9 +194,14 @@ module Iyi
       end
     end
 
+    # iyi: the innermost message there is. A chain can end in a
+    # MethodTraceException - the `Int32 trace:` frame under `undefined
+    # method 'abss' for Int32` - which has no message, and returning its nil
+    # made `iyi fix` report the remaining error as "" with only `(in
+    # util.iyi:4)` after it. The frame above it says what went wrong.
     def deepest_error_message
       if inner = @inner
-        inner.deepest_error_message
+        inner.deepest_error_message || @message
       else
         @message
       end
@@ -286,7 +292,7 @@ module Iyi
         lines = filename.source.lines.to_a
         filename = "macro #{filename.macro.name} (in #{filename.macro.location.try &.filename}:#{filename.macro.location.try &.line_number})"
       when String
-        lines = File.read_lines(filename) if File.file?(filename)
+        lines = source_file_lines(filename) if File.file?(filename)
       else
         return
       end
@@ -303,14 +309,15 @@ module Iyi
       name_location = node.name_location
       name_size = node.name_size
 
+      shown = replace_leading_tabs_with_spaces(line.chomp)
       io << "    "
-      io << replace_leading_tabs_with_spaces(line.chomp)
+      io << shown
       io.puts
 
       return unless name_location
 
       io << "    "
-      io << (" " * (name_location.column_number - 1))
+      caret_padding(io, shown[0, (name_location.column_number - 1).clamp(0, shown.size)])
       with_color.green.bold.surround(io) do
         io << '^'
         if name_size > 0

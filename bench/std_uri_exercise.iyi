@@ -15,7 +15,28 @@ end
 
 import std/uri::{URI, Params}
 
-puts "== parse"
+puts "== hash"
+# URIs hash as they compare. Without a `hash` of its own a URI hashed to its
+# type: these two hashed alike, and a table of 16,000 URI keys took 11.3 s
+# to fill where the same texts as String keys took 4 ms. A bound, not a
+# benchmark: twenty times the texts' time and 200 ms over.
+assert_true URI.parse("http://a/").hash != URI.parse("https://b:8/x?y#z").hash, "two URIs hash apart"
+assert_true URI.parse("http://u:p@h:8/x?y#z").hash == URI.parse("http://u:p@h:8/x?y#z").hash, "equal URIs hash alike"
+texts = (0...16000).map { |i| "http://h/p#{i}" }
+uris = texts.map { |text| URI.parse(text) }
+started = __iyi_monotonic_ns
+by_uri = {} of URI => Int32
+uris.each_with_index { |uri, i| by_uri[uri] = i }
+keyed_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+by_text = {} of String => Int32
+texts.each_with_index { |text, i| by_text[text] = i }
+texted_ns = __iyi_monotonic_ns - started
+assert_true by_uri.size == 16000 && by_uri[URI.parse("http://h/p4321")]? == 4321, "a table of URIs fills and answers"
+assert_true keyed_ns <= texted_ns * 20 + 200_000_000_i64, "hash table: 16000 URI keys took #{keyed_ns // 1000000} ms where String keys took #{texted_ns // 1000000} ms"
+puts "  URIs hash as they compare; 16,000 keys within twenty times their texts' time and 200 ms"
+
+puts "\n== parse"
 u = URI.parse("https://ex.com/a")
 assert_str "https", u.scheme.to_s, "scheme"
 assert_true u.host == "ex.com", "host"
@@ -43,6 +64,24 @@ puts "  a colon in a relative path's first segment"
 end
 puts "  userinfo keeps its sub-delims"
 
+# And so are its escapes: the user and the password were decoded by
+# `parse` and re-encoded by `to_s`, so `u%3Btype%3Da@h` came back
+# `u;type=a@h` - two URIs to section 2.2 - and `é` came back `%C3%A9`. The
+# getters decode, and what a setter is given is encoded.
+["http://u%3Btype%3Da@h/", "http://a%2Cb:c%3Dd@h/", "http://é:ü@h/"].each do |text|
+  assert_str text, URI.parse(text).to_s, "#{text} round-trips"
+  assert_str text, URI.parse(text).dup.to_s, "#{text} round-trips through dup"
+end
+escaped = URI.parse("http://u%3Btype%3Da@h/a")
+assert_str "u;type=a", escaped.user.to_s, "the user getter decodes"
+assert_true escaped != URI.parse("http://u;type=a@h/a"), "an escaped and a bare sub-delim are two URIs"
+assert_str "http://u%3Btype%3Da@h/c", escaped.resolve("c").to_s, "resolve keeps the userinfo as written"
+given = URI.parse("http://h/")
+given.user = "a@b"
+assert_str "http://a%40b@h/", given.to_s, "a user given to the setter is encoded"
+assert_str "a@b", given.user.to_s, "and read back decoded"
+puts "  userinfo keeps its escapes"
+
 puts "\n== refuse"
 assert_true URI.parse?("https://ex.com/a b").nil?, "space refused"
 puts "  a space in the reference is refused"
@@ -56,6 +95,33 @@ assert_str "A b", form["d"], "an escape and a plus are decoded"
 assert_str "", form["%"], "a lone % is a key"
 assert_str "", form["e"], "a key with no value"
 puts "  a malformed escape in a query is read, not refused"
+
+puts "\n== dot segments"
+# RFC 3986 section 5.4's examples, normal and abnormal.
+base = URI.parse("http://a/b/c/d;p?q")
+[{"g", "http://a/b/c/g"}, {"./g", "http://a/b/c/g"}, {"g/", "http://a/b/c/g/"}, {"/g", "http://a/g"},
+ {".", "http://a/b/c/"}, {"./", "http://a/b/c/"}, {"..", "http://a/b/"}, {"../", "http://a/b/"},
+ {"../g", "http://a/b/g"}, {"../..", "http://a/"}, {"../../g", "http://a/g"}, {"../../../g", "http://a/g"},
+ {"/./g", "http://a/g"}, {"/../g", "http://a/g"}, {"g.", "http://a/b/c/g."}, {".g", "http://a/b/c/.g"},
+ {"g..", "http://a/b/c/g.."}, {"..g", "http://a/b/c/..g"}, {"./../g", "http://a/b/g"}, {"./g/.", "http://a/b/c/g/"},
+ {"g/./h", "http://a/b/c/g/h"}, {"g/../h", "http://a/b/c/h"}, {"g;x=1/./y", "http://a/b/c/g;x=1/y"},
+ {"g;x=1/../y", "http://a/b/c/y"}].each do |pair|
+  assert_str pair[1], base.resolve(pair[0]).to_s, "#{pair[0]} resolves"
+end
+# Linear in the path: each step sliced the rest of the path into a new
+# string, and 132 KB of `/a/./b/../c` took 21 s to normalize under `iyi run`
+# where splitting it took 4 ms. A bound, not a benchmark: twenty times the
+# split and 200 ms over.
+long = "/a/./b/../c" * 12000
+started = __iyi_monotonic_ns
+pieces = long.split('/')
+split_ns = __iyi_monotonic_ns - started
+started = __iyi_monotonic_ns
+removed = URI.remove_dot_segments(long)
+removed_ns = __iyi_monotonic_ns - started
+assert_true pieces.size == 60001 && removed == "/a/c" * 12000, "132 KB of dot segments come out right"
+assert_true removed_ns <= split_ns * 20 + 200_000_000_i64, "dot segments: 132 KB took #{removed_ns // 1000000} ms where splitting it took #{split_ns // 1000000} ms"
+puts "  section 5.4's examples, and 132 KB within twenty times its split and 200 ms"
 
 puts "\n== encode"
 assert_str "peter+%2B+paul", URI.encode("peter + paul", space_to_plus: true), "a '+' is %2B once a space is '+'"

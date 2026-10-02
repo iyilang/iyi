@@ -28,6 +28,14 @@
 # test that neither exits nor fails is killed at the deadline (`--timeout`,
 # 60 s default), because a harness that can hang is not a harness.
 class Iyi::Command
+  # The longest `--timeout`: what Windows' waitable timer can count, in
+  # 100 ns ticks held in an `Int64` - 922,337,203,684 s, some 29,000 years.
+  # Past what the event loops' arithmetic holds a wait went wrong: 1e300
+  # overflowed the span the wait becomes, and 9.3e14, 9.2e15 and 4.6e18
+  # each hung a test that ends at once past a minute in one run on
+  # Windows, and did not in the next.
+  private MAX_TEST_WAIT = (Int64::MAX // 10_000_000 - 1).to_f
+
   private def test
     as_json = false
     timeout = 60.0
@@ -44,9 +52,12 @@ class Iyi::Command
         timeout = value.to_f? || abort! "--timeout takes seconds, not '#{value}'", :USAGE_ERROR
         # `0` and `-1` were taken and every test came back "hung: killed
         # at -1.0s" - a verdict about the flag, printed as one about the
-        # tests. A wait is a positive number of seconds; `inf` overflows
-        # the span it becomes, and `nan` is not a number of anything.
-        unless timeout.finite? && timeout > 0
+        # tests. A wait is a positive number of seconds, and one the clock
+        # can count (`MAX_TEST_WAIT`): `1e300` overflowed the span it
+        # becomes after the test was built, "Arithmetic overflow
+        # (OverflowError)" and "you've found a bug in the iyi compiler", as
+        # `inf` once did; `nan` is not a number of anything.
+        unless timeout.finite? && timeout > 0 && timeout <= MAX_TEST_WAIT
           abort! "--timeout takes seconds to wait, and #{value} is not a wait", :USAGE_ERROR
         end
       when "--affected"
@@ -82,14 +93,24 @@ class Iyi::Command
         # The pattern is built in posix form because a backslash is an escape
         # character in a glob, not a separator: `C:\dir\**\*_test.iyi` matched
         # nothing, so `iyi test` in a directory of tests found no tests.
-        Dir.glob(Iyi.glob_root(path).join("**", "*_test.iyi")) { |file| files << file }
+        # The extension in any case, so that `x_test.IYI` is refused below
+        # rather than walked past: "no *_test.iyi found" in a directory of
+        # one test (`Lexer.iyi_miscased?`).
+        Dir.glob(Iyi.glob_root(path).join("**", "*_test.[iI][yY][iI]")) { |file| files << file }
       elsif File.file?(path)
-        files << path
+        # As stored: `X_TEST.IYI` typed on Windows for `x_test.iyi` is it.
+        files << Lexer.stored_name(path)
       else
         abort! "no such file or directory: #{path}", :USAGE_ERROR
       end
     end
-    files.uniq!.sort!
+    # One run per file, however many ways it was spelled: the list was made
+    # unique as strings, so `iyi test . app\x_test.iyi app/x_test.iyi`
+    # built and ran one test three times and reported "passed":3.
+    files.uniq! { |file| Iyi.file_key(File.expand_path(file)) }.sort!
+    if miscased = files.find { |file| Lexer.iyi_miscased?(file) }
+      abort! Lexer.iyi_miscased_sentence(miscased), :USAGE_ERROR
+    end
 
     if files.empty?
       abort! "no *_test.iyi found. A test is a plain iyi program that exits non-zero to fail", :USAGE_ERROR

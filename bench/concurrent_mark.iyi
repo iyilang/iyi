@@ -145,6 +145,18 @@
     end
   end
 
+  # Two hundred collections beside the program, each woken by its thread,
+  # and the kept chain whole after them.
+  def wake_rounds(kept : Cell) : Nil
+    round = 0
+    while round < 200
+      churn(IyiMark.budget)
+      IyiMark.settle
+      round = round + 1
+    end
+    fail("the kept chain lost its payload under the wake rounds") unless tail(kept).payload.is_a?(Payload)
+  end
+
   # Allocate until a mark is running beside this thread, or the budget has
   # gone by twice, which means no mark will be concurrent here.
   def allocate_until_marking : Bool
@@ -452,23 +464,27 @@
   # On a four-core Windows runner, 40 runs each: the shipped helpers made
   # no wake past a millisecond in 10,000, and helpers with the boost made
   # 5 to 88 in every run of 250. Asserted where it was measured; printed
-  # everywhere.
+  # everywhere. A CI runner still took the thread for 4 wakes of 256 once,
+  # with the shipped helpers: so a round past the bound is run again, and
+  # the check is the second round. The boost is slow in every round, the
+  # machine's stalls are not.
   IyiMark.auto = true
   kept = build_chain(1_u64)
-  wake_round = 0
-  while wake_round < 200
-    churn(IyiMark.budget)
-    IyiMark.settle
-    wake_round = wake_round + 1
-  end
-  IyiMark.auto = false
-  fail("the kept chain lost its payload under the wake rounds") unless tail(kept).payload.is_a?(Payload)
+  wake_rounds(kept)
   wake = IyiMark.wake_longest_ns
   wakes = IyiMark.wakes
   slow = IyiMark.wakes_slow
   {% if flag?(:win32) %}
+    if slow > 3_u64
+      puts "wake: #{slow.to_i64} of #{wakes.to_i64} wakes past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us in the first round, the longest #{(wake // 1000_u64).to_i64} us; a second round decides"
+      wakes_before = wakes
+      wake_rounds(kept)
+      wakes = IyiMark.wakes - wakes_before
+      slow = IyiMark.wakes_slow - slow
+    end
     fail("wake: waking the helpers held the program's thread past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us in #{slow.to_i64} wakes of #{wakes.to_i64}, the longest #{(wake // 1000_u64).to_i64} us") if slow > 3_u64
   {% end %}
+  IyiMark.auto = false
   puts "wake: the program's thread woke the helpers #{wakes.to_i64} times, #{slow.to_i64} of them past #{(IyiMark::WAKE_SLOW_NS // 1000_u64).to_i64} us, the longest #{(wake // 1000_u64).to_i64} us"
 
   # ── The helpers' share beside a busy program ──────────────────────────

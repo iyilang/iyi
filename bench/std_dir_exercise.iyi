@@ -5,6 +5,9 @@
 
 module bench/std_dir_exercise
 
+# `Dir.glob`, matching with `File.match?`, is timed against a bound.
+import std/time::{Time}
+
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
 end
@@ -60,6 +63,21 @@ def clean_tree(dir_path : String) : Nil
       File.delete(full)
     end
   end
+end
+
+# How many of *fill* are still *byte* and nothing else.
+def filled(fill : Array(String), byte : UInt8) : Int32
+  intact = 0
+  fill.each do |text|
+    same = true
+    i = 0
+    while i < text.bytesize
+      same = false if text.to_unsafe[i] != byte
+      i = i + 1
+    end
+    intact = intact + 1 if same
+  end
+  intact
 end
 
 saved_orig = Dir.current
@@ -178,6 +196,57 @@ d_manual.close
 assert_true d_manual.closed?, "d_manual remains closed after idempotent close"
 puts "  entries, children, and dot entry filtering policies"
 
+puts "\n== entries read across a collection"
+# The buffer an open directory reads entries into is the stream's own
+# memory. It was a block the stream kept by its address as an integer,
+# which the collector does not read as a reference: a collection with the
+# directory open freed it, and the next entries were written into what had
+# the memory then - measured on Windows, a live String came to hold an
+# entry's name, and `Dir.glob` over 4,000 files died of a memory fault.
+# Strings the size of each platform's buffer, 592 bytes on Windows and 32
+# KiB on Linux, are made after each collection to take that memory.
+many_dir = sandbox + "/many"
+Dir.mkdir(many_dir)
+200.times { |i| File.write(many_dir + "/entry_#{i}.txt", "") }
+small_fill = [] of String
+large_fill = [] of String
+seen = [] of String
+reader = Dir.new(many_dir)
+if first_seen = reader.read
+  seen << first_seen
+end
+GC.collect
+2000.times { small_fill << "A" * 600 }
+8.times { large_fill << "B" * 32800 }
+while name_seen = reader.read
+  seen << name_seen
+end
+reader.close
+entry_names = 0
+seen.each { |name| entry_names = entry_names + 1 if name.starts_with?("entry_") && name.ends_with?(".txt") }
+assert_true seen.size == 202 && entry_names == 200, "every entry is read across a collection: #{seen.size} names, #{entry_names} entries"
+
+tree = sandbox + "/tree"
+8.times do |i|
+  Dir.mkdir_p(tree + "/d#{i}/e")
+  6.times { |j| File.write(tree + "/d#{i}/e/f#{j}.txt", "") }
+end
+walked = 0
+3.times do
+  Dir.glob(tree + "/**/*.txt") do |_|
+    walked = walked + 1
+    if walked % 7 == 0
+      GC.collect
+      8.times { small_fill << "A" * 600 }
+      large_fill << "B" * 32800
+    end
+  end
+end
+assert_true walked == 144, "three globs across collections find 48 files each: #{walked}"
+assert_true filled(small_fill, 65_u8) == small_fill.size && filled(large_fill, 66_u8) == large_fill.size,
+  "no string made with a directory open was written over: #{small_fill.size - filled(small_fill, 65_u8)} and #{large_fill.size - filled(large_fill, 66_u8)}"
+puts "  a directory read and a glob walked across collections, nothing written over"
+
 puts "\n== glob star, recursive, hidden, and no-match"
 File.write(listing_dir + "/.hidden_glob", "h")
 glob_txt = Dir.glob(listing_dir + "/*.txt")
@@ -192,6 +261,16 @@ assert_true !glob_star.any? { |p| p.includes?(".hidden_glob") }, "glob * skips h
 
 glob_deep = Dir.glob(listing_dir + "/**/*.txt")
 assert_true glob_deep.size == 2, "recursive glob finds both txt files"
+# `**` goes as deep as the tree does. A cap of 64 levels, all that ended a
+# walk through a link back up the tree, stopped it without a word, and a
+# file 70 down was not found; bench/std_dir_exercise.sh walks the link.
+bottom = sandbox + "/deep"
+70.times { bottom = bottom + "/d" }
+Dir.mkdir_p(bottom)
+File.write(bottom + "/bottom.txt", "b")
+deepest = Dir.glob(sandbox + "/deep/**/bottom.txt")
+assert_true deepest == [bottom + "/bottom.txt"], "** finds a file 70 levels down: #{deepest.size}"
+puts "  ** to any depth"
 assert_true Dir.glob(listing_dir + "/no_such_pattern_*").empty?, "no-match glob is empty"
 assert_true Dir[listing_dir + "/*.txt"].size == 2, "Dir[] is glob"
 # A wildcard before the last segment, and a pattern that starts `./`:
@@ -223,9 +302,45 @@ File.write(listing_dir + "/nested_dir/inner/.secret.txt", "s")
 deep_txt = Dir.glob(listing_dir + "/**/*.txt").sorted
 assert_true deep_txt.size == 4 && !deep_txt.any? { |p| p.includes?(".secret") }, "glob: ** passes over hidden names: #{deep_txt.inspect}"
 File.delete(listing_dir + "/nested_dir/inner/.secret.txt")
+# A class or a brace in a middle segment, which `File.match?` reads, and
+# a brace whose branches have different depths.
+braced_middle = Dir.glob(listing_dir + "/{nested_dir,none}/*.txt")
+assert_true braced_middle == [listing_dir + "/nested_dir/one.txt"], "a brace in a middle segment: #{braced_middle.inspect}"
+classed_middle = Dir.glob(listing_dir + "/nested_[d]ir/inner/*.txt")
+assert_true classed_middle == [listing_dir + "/nested_dir/inner/deep.txt"], "a class in a middle segment: #{classed_middle.inspect}"
+uneven = Dir.glob(listing_dir + "/{nested_dir/inner,none}/*.txt")
+assert_true uneven == [listing_dir + "/nested_dir/inner/deep.txt"], "a brace holding a separator: #{uneven.inspect}"
 File.delete(listing_dir + "/nested_dir/inner/deep.txt")
 File.delete(listing_dir + "/nested_dir/one.txt")
 Dir.delete(listing_dir + "/nested_dir/inner")
+# The pattern language is `File.match?`'s, and so is the algorithm. `?`
+# took one byte, so `?.txt` missed `ü.txt`; a class and a brace were
+# literal text, so `file_[ab].*` and `*.{txt,md}` answered `[]`; a `**`
+# matched from inside a name, so `**/*.txt` answered `.dotted.txt` by its
+# `dotted.txt`; and a `*` backtracked at every position, four times slower
+# for each star - nine against one forty-character name took 30 seconds.
+File.write(listing_dir + "/ü.txt", "u")
+File.write(listing_dir + "/notes.md", "m")
+one_char = Dir.glob(listing_dir + "/?.txt")
+assert_true one_char == [listing_dir + "/ü.txt"], "? is one character, both bytes of ü: #{one_char.inspect}"
+classed = Dir.glob(listing_dir + "/file_[ab].*").sorted
+assert_true classed == [listing_dir + "/file_a.txt", listing_dir + "/file_b.txt"], "a class matches: #{classed.inspect}"
+braced = Dir.glob(listing_dir + "/*.{txt,md}").sorted
+assert_true braced == [listing_dir + "/file_a.txt", listing_dir + "/file_b.txt", listing_dir + "/notes.md", listing_dir + "/ü.txt"], "a brace matches: #{braced.inspect}"
+File.write(listing_dir + "/.dotted.txt", "d")
+starred_deep = Dir.glob(listing_dir + "/**/*.txt").sorted
+assert_true starred_deep == [listing_dir + "/file_a.txt", listing_dir + "/file_b.txt", listing_dir + "/ü.txt"], "** and * answer no hidden name, nor the rest of one: #{starred_deep.inspect}"
+dot_named = Dir.glob(listing_dir + "/.*").sorted
+assert_true dot_named == [listing_dir + "/.dotted.txt", listing_dir + "/.hidden_glob"], "a segment written with a leading . answers hidden names: #{dot_named.inspect}"
+File.delete(listing_dir + "/.dotted.txt")
+File.write(listing_dir + "/" + "a" * 40, "")
+started = Time.monotonic
+starred = Dir.glob(listing_dir + "/" + "*a" * 9 + "*b")
+assert_true starred.empty? && (Time.monotonic - started).total_milliseconds < 2000, "nine stars against a forty-character name answer in under 2 seconds"
+File.delete(listing_dir + "/" + "a" * 40)
+File.delete(listing_dir + "/ü.txt")
+File.delete(listing_dir + "/notes.md")
+puts "  File.match?'s language and linear time"
 puts "  glob matching, hidden names, recursion, and empty results"
 
 puts "\n== a directory read across a collection"
@@ -234,33 +349,33 @@ puts "\n== a directory read across a collection"
 # walk freed it, the next directory opened took the same memory, and the
 # first walk read its records - a record length of zero, and `read` never
 # moved past it. Every name must be the directory's own, and the walk end.
-walked = sandbox + "/walked"
-Dir.mkdir(walked)
-Dir.mkdir(walked + "_other")
-File.write(walked + "_other/a_name_from_elsewhere", "")
+walk_dir = sandbox + "/walked"
+Dir.mkdir(walk_dir)
+Dir.mkdir(walk_dir + "_other")
+File.write(walk_dir + "_other/a_name_from_elsewhere", "")
 own = {} of String => Bool
 index = 0
 while index < 300
   name = "entry_#{index}_" + "n" * 40
-  File.write(walked + "/" + name, "")
+  File.write(walk_dir + "/" + name, "")
   own[name] = true
   index = index + 1
 end
 walk_seen = 0
 foreign = 0
-Dir.each_child(walked) do |name|
+Dir.each_child(walk_dir) do |name|
   walk_seen = walk_seen + 1
   foreign = foreign + 1 unless own.has_key?(name)
   if walk_seen % 20 == 0
     GC.collect
-    Dir.children(walked + "_other")
+    Dir.children(walk_dir + "_other")
   end
 end
 assert_true walk_seen == 300 && foreign == 0, "a walk across collections reads its own 300 names (#{walk_seen}, #{foreign} foreign)"
-own.keys.each { |name| File.delete(walked + "/" + name) }
-File.delete(walked + "_other/a_name_from_elsewhere")
-Dir.delete(walked)
-Dir.delete(walked + "_other")
+own.keys.each { |name| File.delete(walk_dir + "/" + name) }
+File.delete(walk_dir + "_other/a_name_from_elsewhere")
+Dir.delete(walk_dir)
+Dir.delete(walk_dir + "_other")
 puts "  every name the directory's own, across collections and another directory's reads"
 
 puts "\n== current working directory and cd"
@@ -344,6 +459,12 @@ puts "  deletion outcomes for empty and non-empty paths"
   Dir.mkdir_p(prefixed)
   assert_true Dir.exists?(sandbox + "/prefixed/two/three"), "mkdir_p makes every segment of a \\\\?\\ path"
 
+  # A `\\?\` pattern globs the directory it names: the scan for a wildcard
+  # stopped at that `?`, and the walk began at `\\` and answered `[]`.
+  verbatim = Dir.glob("\\\\?\\" + backslashed(sandbox) + "\\regular_*.txt")
+  assert_true verbatim == ["\\\\?\\" + backslashed(sandbox) + "\\regular_file.txt"], "a \\\\?\\ pattern globs: #{verbatim.inspect}"
+  puts "  a \\\\?\\ pattern globs the directory it names"
+
   # The device namespace's `\\.\` names what `\\?\` names, and past 248
   # characters it was taken for a share, `\\?\UNC\.\C:\...`, which names
   # nothing: a long directory spelled with it did not exist.
@@ -353,6 +474,38 @@ puts "  deletion outcomes for empty and non-empty paths"
   assert_true long_dir.bytesize > 248, "the long directory is past the limit: #{long_dir.bytesize}"
   assert_true Dir.exists?("\\\\.\\" + long_dir), "a long directory spelled with \\\\.\\ exists"
   assert_str "deep", File.read("\\\\.\\" + long_dir + "\\long.txt"), "a long file spelled with \\\\.\\ reads"
+
+  # A name with an unpaired surrogate has no UTF-8 spelling, and a listing
+  # steps over it: it was answered as U+FFFD, a name that is not there.
+  # It is made and removed through the wide calls, there being no iyi
+  # String that spells it.
+  lib LibWideName
+    fun CreateFileW(name : UInt16*, access : Int32, share : Int32, security : Void*,
+                    disposition : Int32, flags : Int32, template : Void*) : Void*
+    fun CloseHandle(handle : Void*) : Int32
+    fun DeleteFileW(name : UInt16*) : Int32
+  end
+
+  lone_dir = sandbox + "/lone"
+  Dir.mkdir(lone_dir)
+  File.write(lone_dir + "/ok.txt", "k")
+  lone_wide = __iyi_wide_path(backslashed(lone_dir).to_unsafe)
+  lone_length = 0
+  while lone_wide[lone_length] != 0_u16
+    lone_length = lone_length + 1
+  end
+  lone_name = Pointer(UInt16).malloc((lone_length + 9).to_u64)
+  lone_name.copy_from(lone_wide, lone_length)
+  tail = [92_u16, 120_u16, 0xD800_u16, 121_u16, 46_u16, 116_u16, 120_u16, 116_u16, 0_u16] # \x?y.txt
+  tail.each_with_index { |unit, index| lone_name[lone_length + index] = unit }
+  lone_handle = LibWideName.CreateFileW(lone_name, 0x40000000, 0, Pointer(Void).new(0_u64), 1, 0x80, Pointer(Void).new(0_u64))
+  assert_true lone_handle.address != 0xFFFFFFFFFFFFFFFF_u64, "a name with an unpaired surrogate was made"
+  LibWideName.CloseHandle(lone_handle)
+  lone_children = Dir.children(lone_dir)
+  lone_glob = Dir.glob(lone_dir + "/*")
+  LibWideName.DeleteFileW(lone_name)
+  assert_true lone_children == ["ok.txt"] && lone_glob == [lone_dir + "/ok.txt"], "a name UTF-8 cannot spell is stepped over: #{lone_children.inspect}"
+  puts "  a name UTF-8 cannot spell is stepped over"
 
   # A drive's root keeps the separator that makes it the root.
   assert_str "C:\\", Dir.without_trailing_separator("C:\\"), "a drive's root keeps its separator"

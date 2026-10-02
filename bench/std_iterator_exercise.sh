@@ -129,6 +129,48 @@ if ! grep -q "all iterator checks passed" "$WORK/iterator-release.out" 2>/dev/nu
 fi
 
 echo
+echo "== zip and chain take an iterator, and say so at the call"
+# `zip` and `chain` are bounded `forall O : Iterator`, as `Enumerable#zip`
+# is (SPEC.md II.6 finding 6). Unbounded, a zip with an array was refused
+# from inside std/iterator.iyi, "undefined constant O::Elem" and "Did you
+# mean 'IO'?", and a chain with one, or with another element type, from
+# `ChainIterator#next`. The refusal names the caller's line, `O` and the
+# method now, and a chain of two element types yields either, as the other
+# library's does.
+refused_at_call() { # refused_at_call <label> <name> <method> <expression>
+  local label="$1" name="$2" method="$3" expression="$4"
+  printf 'module main\n\nimport std/iterator::{Iterator, ArrayIterator}\n\nputs (%s).to_a\n' \
+    "$expression" > "$WORK/$name.iyi"
+  if IYI_PATH="$BASE_IYI_PATH" "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" \
+       > "$WORK/$name.build" 2>&1; then
+    echo "  $label: it built"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "required by \`O\` in \`$method\`" "$WORK/$name.build" ||
+     ! grep -qF -- "$name.iyi:5" "$WORK/$name.build"; then
+    echo "  $label: refused, but not at the call"
+    sed -n '1,8p' "$WORK/$name.build"
+    status=1
+    return
+  fi
+  echo "  $label: refused at the call, naming \`O\` in \`$method\`"
+}
+refused_at_call "a zip with an array" zip_array zip 'Iterator.of([1, 2]).zip([10, 20])'
+refused_at_call "a chain with an array" chain_array chain 'Iterator.of([1, 2]).chain([10, 20])'
+printf 'module main\n\nimport std/iterator::{Iterator, ArrayIterator}\n\nputs Iterator.of([1, 2]).chain(Iterator.of(["a"])).to_a\n' \
+  > "$WORK/chain_mixed.iyi"
+if IYI_PATH="$BASE_IYI_PATH" "$IYI" build -o "$WORK/chain_mixed" "$WORK/chain_mixed.iyi" \
+     > "$WORK/chain_mixed.build" 2>&1 &&
+   [ "$("$WORK/chain_mixed" | tr -d '\r')" = '[1, 2, "a"]' ]; then
+  echo '  a chain of Int32 and String yields both: [1, 2, "a"]'
+else
+  echo "  a chain of two element types did not yield both"
+  sed -n '1,8p' "$WORK/chain_mixed.build"
+  status=1
+fi
+
+echo
 echo "== proving the checks can fail when an iterator mechanism is broken"
 
 prove_fails() {
@@ -178,9 +220,10 @@ prove_fails "select predicate broken" broken_select "assertion failed for pipeli
 prove_fails "skip count broken" broken_skip "assertion failed for skip" \
   's/while @skipped < @n/while @skipped < 0/'
 
-# 5. Zip broken (prematurely halts pairing)
+# 5. Zip broken (prematurely halts pairing: every pull answers as though a
+#    source had run out)
 prove_fails "zip pairing broken" broken_zip "assertion failed for zip" \
-  's/return nil if item2\.nil?/return nil/'
+  's/{item1, item2}/nil/'
 
 # 6. Chain broken (skips first iterator directly to second)
 prove_fails "chain sequence broken" broken_chain "assertion failed for chain" \
@@ -199,19 +242,20 @@ prove_fails "array source copied" copied_source "assertion failed for adaptor sh
   's/^pub class ArrayIterator(T)/pub struct ArrayIterator(T)/'
 
 # 10. Zip pulls its second source after the first ran out
-prove_fails "zip over-pulls" zip_overpull "assertion failed for zip leaves the second source's rest" \
+prove_fails "zip over-pulls" zip_overpull "assertion failed for zip pulls the longer source once per pair" \
   's/^    return nil if item1\.nil?$/    item2 = @iter2.next if item1.nil?\n    return nil if item1.nil?/'
 
-# 11-15. A counting adaptor copied into its own adaptor (a struct again)
-prove_fails "skip copied" copied_skip "assertion failed for a skip shares its count" \
+# 11-15. A counting adaptor copied into the adaptor built on it (a struct
+#        again, as every stateful adaptor was)
+prove_fails "skip copied" copied_skip "assertion failed for skip keeps its count" \
   's/^pub class SkipIterator(I, T)/pub struct SkipIterator(I, T)/'
-prove_fails "take copied" copied_take "assertion failed for a take shares its count" \
+prove_fails "take copied" copied_take "assertion failed for take keeps its count" \
   's/^pub class TakeIterator(I, T)/pub struct TakeIterator(I, T)/'
-prove_fails "with_index copied" copied_with_index "assertion failed for a with_index shares its index" \
+prove_fails "with_index copied" copied_with_index "assertion failed for with_index keeps its count" \
   's/^pub class WithIndexIterator(I, T)/pub struct WithIndexIterator(I, T)/'
-prove_fails "step copied" copied_step "assertion failed for a step shares its stride" \
+prove_fails "step copied" copied_step "assertion failed for step keeps its stride" \
   's/^pub class StepIterator(I, T)/pub struct StepIterator(I, T)/'
-prove_fails "each_cons copied" copied_cons "assertion failed for an each_cons shares its window" \
+prove_fails "each_cons copied" copied_cons "assertion failed for each_cons keeps its window" \
   's/^pub class ConsIterator(I, T)/pub struct ConsIterator(I, T)/'
 
 # 16. Take counts only the pulls that answered

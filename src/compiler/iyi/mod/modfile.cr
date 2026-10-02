@@ -67,7 +67,12 @@ module Iyi::Mod
       requirements = [] of Requirement
       replacements = {} of String => String
 
-      text.each_line.with_index(1) do |raw, line_number|
+      # A byte order mark is not part of the first directive: Windows
+      # editors and PowerShell 5.1's `Out-File -Encoding utf8` write one,
+      # and the manifest was refused as "`\uFEFFmodule` is not a
+      # directive", which reads as `module` itself refused - and every verb
+      # in the project failed on it. Source files with one were already read.
+      text.lchop('\uFEFF').each_line.with_index(1) do |raw, line_number|
         line = raw.strip
         next if line.empty? || line.starts_with?('#')
         fields = line.split
@@ -100,6 +105,15 @@ module Iyi::Mod
           raise ModError.new("#{source}:#{line_number}: #{usage}") unless rest.empty?
           path = check_path(fields[1], source, line_number)
           version = check_version(fields[2], source, line_number)
+          # Two lines for one module asked for two minimums, and every reader
+          # took a different one: `get` moved the first and reported the
+          # last as what it moved from, so `get @v1.1.0` beside v1.0.0 and
+          # v1.2.0 lines said "downgraded v1.2.0 -> v1.1.0" and the build
+          # stayed at v1.2.0. One line per module, as a `replace` is one.
+          if earlier = requirements.find { |other| other.path == path }
+            raise ModError.new("#{source}:#{line_number}: #{path} is already required, at v#{earlier.version}; " \
+                               "a module is required once, at the one minimum this manifest asks for")
+          end
           short_name = nil
           if short_word
             short_name = check_short_name(short_word, source, line_number)
@@ -205,48 +219,74 @@ module Iyi::Mod
     # person wrote, comments and order and blank lines, stays as it was:
     # the manifest is theirs, and a tool that rewrote it whole would turn
     # every `get` into a diff of the file.
+    #
+    # Each line keeps its own ending, and a byte order mark stays where it
+    # was. The file was split on one ending - CRLF when any line had it -
+    # so in a manifest `init` wrote with LF and `echo require ... >>`
+    # extended from cmd with CRLF, the LF lines were one glued element whose
+    # first word was `#`: the `require` was never found, `get` appended a
+    # second line for the path, and `mod tidy` said "removed" every run and
+    # removed nothing.
     def self.with_requirement(text : String, path : String, version : SemanticVersion, short_name : String? = nil) : String
-      newline = text.includes?("\r\n") ? "\r\n" : "\n"
+      bom, lines = manifest_lines(text)
       line = "require #{path} v#{version}"
       line += " as #{short_name}" if short_name
-      lines = text.split(newline)
-      # A trailing newline leaves an empty last element; it is put back.
-      ended = !lines.empty? && lines.last.empty?
-      lines.pop if ended
       last_require = nil
       lines.each_with_index do |raw, index|
-        fields = raw.strip.split
+        content = raw.chomp
+        fields = content.strip.split
         next unless fields.first? == "require"
         last_require = index
         next unless fields[1]? == path
-        indent = raw[0, raw.size - raw.lstrip.size]
+        indent = content[0, content.size - content.lstrip.size]
         # A short name already on the line stays, unless another was given,
         # and so does a `reaches` limit: a `get` moves the version only.
         kept = !short_name && fields[3]? == "as" && (name = fields[4]?) ? " as #{name}" : ""
         if at = fields.index("reaches")
           kept += " " + fields[at..].join(' ')
         end
-        lines[index] = indent + line + kept
-        return lines.join(newline) + (ended ? newline : "")
+        lines[index] = indent + line + kept + raw[content.size..]
+        return bom + lines.join
       end
-      if at = last_require
-        lines.insert(at + 1, line)
-      else
-        lines << "" unless lines.empty? || lines.last.strip.empty?
-        lines << line
+      # A new line ends the way the line before it does, or the way the
+      # file's first ended line does when that one has no ending.
+      at = last_require ? last_require + 1 : lines.size
+      ended = lines.find(&.ends_with?('\n')) || "\n"
+      if at > 0
+        before = lines[at - 1]
+        ended = before if before.ends_with?('\n')
+        lines[at - 1] = before + ended_with(ended) unless before.ends_with?('\n')
       end
-      lines.join(newline) + newline
+      newline = ended_with(ended)
+      if last_require.nil? && !lines.empty? && !lines.last.strip.empty?
+        lines << newline
+        at += 1
+      end
+      lines.insert(at, line + newline)
+      bom + lines.join
     end
 
-    # *text* without *path*'s `require` line; every other line as it was.
+    # *text* without *path*'s `require` line; every other line as it was,
+    # with its own ending.
     def self.without_requirement(text : String, path : String) : String
-      newline = text.includes?("\r\n") ? "\r\n" : "\n"
-      lines = text.split(newline)
+      bom, lines = manifest_lines(text)
       lines.reject! do |raw|
         fields = raw.strip.split
         fields.first? == "require" && fields[1]? == path
       end
-      lines.join(newline)
+      bom + lines.join
+    end
+
+    # The byte order mark *text* starts with, if any, and its lines after
+    # it, each with the ending it was written with.
+    private def self.manifest_lines(text : String) : {String, Array(String)}
+      bom = text.starts_with?('\uFEFF') ? "\uFEFF" : ""
+      {bom, text.lchop('\uFEFF').lines(chomp: false)}
+    end
+
+    # The line ending *line* closes with: CRLF or LF.
+    private def self.ended_with(line : String) : String
+      line.ends_with?("\r\n") ? "\r\n" : "\n"
     end
 
     # A module path is a URL's path half (III.7): host-shaped segments may

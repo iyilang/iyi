@@ -118,7 +118,7 @@ prove_fails "short reads fail" noshort "short_reads:" \
 
 # 3. Buffer boundary broken: take count in multi-buffer read_line corrupted
 prove_fails "read across buffer boundary fails" noboundary "buffer_boundary:" \
-  '{ if ($0 ~ /take = found_idx - @read_pos \+ 1/) { print "take = 1"; next } print }'
+  '{ if ($0 ~ /take = found_idx >= 0 \? found_idx - @read_pos \+ 1 : avail/) { print "        take = 1"; next } print }'
 
 # 4. EOF check broken: eof? always returns false
 prove_fails "eof check fails" noeof "eof:" \
@@ -219,6 +219,59 @@ PY
       fi
     fi
 
+    # 6b. A fatal sentence the runtime writes holding its heap lock, with
+    #    standard error a console. The console's conversion took its
+    #    buffers from the heap, which waited on that same lock for good:
+    #    `GC.free` of a stack address fails in `free_large`, under the
+    #    lock, and the program never ended. The sentence -
+    #    `__iyi_write(2, ...)` - is converted on the stack now, and the
+    #    program says "iyi: munmap failed" and exits 1. Python runs it in
+    #    a console of its own and ends it after 20 seconds.
+    echo
+    echo "== a fatal sentence on a console, the heap lock held"
+    printf 'module badfree\n\nimport std/gc::{GC}\n\nputs "freeing"\nx = 5\nGC.free(pointerof(x).as(Void*))\nputs "survived"\n' > "$WORK/badfree.iyi"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the console is unmeasured"
+    elif ! "$IYI" build -o "$WORK/badfree" "$WORK/badfree.iyi" > "$WORK/badfree.build" 2>&1; then
+      echo "  the fatal-sentence program did not build"; sed -n '1,10p' "$WORK/badfree.build"; status=1
+    else
+      cat > "$WORK/fatal.py" <<'PY'
+import ctypes, os, subprocess, sys
+from ctypes import wintypes
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.CreateFileW.restype = wintypes.HANDLE
+program, result = sys.argv[1], sys.argv[2]
+if os.environ.get("FATAL_INNER") != "1":
+    info = subprocess.STARTUPINFO(); info.dwFlags = 1; info.wShowWindow = 0
+    inner = subprocess.Popen([sys.executable, __file__] + sys.argv[1:],
+                             env=dict(os.environ, FATAL_INNER="1"), creationflags=0x10, startupinfo=info)
+    inner.wait(timeout=60)
+    print(open(result, encoding="utf-8").read() if os.path.exists(result) else "UNMEASURED: the inner copy wrote nothing")
+    sys.exit(0)
+child = subprocess.Popen([program])
+try:
+    code = str(child.wait(timeout=20))
+except subprocess.TimeoutExpired:
+    child.kill(); code = "TIMEOUT"
+conout = k32.CreateFileW("CONOUT$", 0xC0000000, 3, None, 3, 0, None)
+lines, row = [f"exit {code}"], ctypes.create_unicode_buffer(120)
+for y in range(20):
+    n = wintypes.DWORD()
+    k32.ReadConsoleOutputCharacterW(conout, row, 120, wintypes.DWORD(y << 16), ctypes.byref(n))
+    if row.value[:n.value].strip():
+        lines.append(row.value[:n.value].rstrip())
+open(result, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+      "$PY" "$WORK/fatal.py" "$WORK/badfree.exe" "$WORK/fatal.result" > "$WORK/fatal.out" 2>&1
+      if grep -q '^UNMEASURED' "$WORK/fatal.out"; then
+        echo "  no console here, so the fatal sentence is unmeasured: $(cat "$WORK/fatal.out")"
+      elif grep -qx 'exit 1' "$WORK/fatal.out" && grep -qx 'iyi: munmap failed' "$WORK/fatal.out"; then
+        echo "  the program said 'iyi: munmap failed' on its console and exited 1"
+      else
+        echo "  the program did not end with its sentence:"; sed 's/^/    /' "$WORK/fatal.out"; status=1
+      fi
+    fi
+
     # 7. The console's mode after the program: writing to a console turns
     #    VT processing on, and the console outlives the program - it was
     #    left on for whatever ran there next, where the C runtime's own
@@ -262,6 +315,188 @@ PY
         echo "  the console's mode is what it was before the program: 3"
       else
         echo "  the program left the console's mode changed:"; sed 's/^/    /' "$WORK/vtmode.out"; status=1
+      fi
+    fi
+
+    # 7b. A file opened on the console: `CONOUT$` and `CON` written to,
+    #    `CONIN$` read. Only the standard streams' consoles were read and
+    #    written wide, and a file on one had the console's code page:
+    #    `conout: çay ğ 日本` showed as `conout: ├ºay ─ƒ µùÑµ£¼`, and
+    #    `Türkçe ğ` typed at `CONIN$` read as 8 bytes, `ğ` folded to `g`.
+    #    An `IyiIO` on a console (`@console`) goes through `IyiConsole` now.
+    #    Python runs the program in a console of its own, types the line
+    #    and reads the screen.
+    echo
+    echo "== a file opened on the console"
+    cat > "$WORK/confile.iyi" <<'EOF'
+module confile
+
+import std/file::{File}
+
+File.open("CONOUT$", "w") { |f| f.print "conout: çay ğ 日本\n" }
+File.open("CON", "w") { |f| f.print "con: çay ğ\n" }
+File.open("CONIN$") do |f|
+  line = f.gets(true)
+  puts "conin: #{line} #{line.bytesize}" if line
+end
+EOF
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the console is unmeasured"
+    elif ! "$IYI" build -o "$WORK/confile" "$WORK/confile.iyi" > "$WORK/confile.build" 2>&1; then
+      echo "  the console-file program did not build"; sed -n '1,10p' "$WORK/confile.build"; status=1
+    else
+      cat > "$WORK/confile.py" <<'PY'
+import ctypes, os, subprocess, sys, time
+from ctypes import wintypes
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.CreateFileW.restype = wintypes.HANDLE
+class KEY(ctypes.Structure):
+    _fields_ = [("down", wintypes.BOOL), ("repeat", wintypes.WORD), ("vk", wintypes.WORD),
+                ("scan", wintypes.WORD), ("char", wintypes.WCHAR), ("state", wintypes.DWORD)]
+class RECORD(ctypes.Structure):
+    class U(ctypes.Union):
+        _fields_ = [("key", KEY), ("pad", ctypes.c_byte * 16)]
+    _fields_ = [("kind", wintypes.WORD), ("event", U)]
+program, result = sys.argv[1], sys.argv[2]
+if os.environ.get("CONFILE_INNER") != "1":
+    info = subprocess.STARTUPINFO(); info.dwFlags = 1; info.wShowWindow = 0
+    inner = subprocess.Popen([sys.executable, __file__] + sys.argv[1:],
+                             env=dict(os.environ, CONFILE_INNER="1"), creationflags=0x10, startupinfo=info)
+    inner.wait(timeout=60)
+    print(open(result, encoding="utf-8").read() if os.path.exists(result) else "UNMEASURED: the inner copy wrote nothing")
+    sys.exit(0)
+conin = k32.CreateFileW("CONIN$", 0xC0000000, 3, None, 3, 0, None)
+conout = k32.CreateFileW("CONOUT$", 0xC0000000, 3, None, 3, 0, None)
+child = subprocess.Popen([program])
+time.sleep(1.5)
+records = []
+for unit in "Türkçe ğ\r":
+    for down in (1, 0):
+        r = RECORD(); r.kind = 1
+        r.event.key.down = down; r.event.key.repeat = 1
+        r.event.key.vk = 0x0D if unit == "\r" else 0
+        r.event.key.char = unit
+        records.append(r)
+written = wintypes.DWORD()
+k32.WriteConsoleInputW(conin, (RECORD * len(records))(*records), len(records), ctypes.byref(written))
+try:
+    code = str(child.wait(timeout=20))
+except subprocess.TimeoutExpired:
+    child.kill(); code = "TIMEOUT"
+lines, row = [f"exit {code}"], ctypes.create_unicode_buffer(120)
+for y in range(20):
+    n = wintypes.DWORD()
+    k32.ReadConsoleOutputCharacterW(conout, row, 120, wintypes.DWORD(y << 16), ctypes.byref(n))
+    if row.value[:n.value].strip():
+        lines.append(row.value[:n.value].rstrip())
+open(result, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+PY
+      # The result holds `ç` and `ğ`: a runner whose Python writes code page
+      # 1252 could not print it, and the step read the traceback.
+      PYTHONIOENCODING=utf-8 "$PY" "$WORK/confile.py" "$WORK/confile.exe" "$WORK/confile.result" > "$WORK/confile.out" 2>&1
+      if grep -q '^UNMEASURED' "$WORK/confile.out"; then
+        echo "  no console here, so the console file is unmeasured: $(cat "$WORK/confile.out")"
+      elif grep -qx 'conout: çay ğ 日本' "$WORK/confile.out" && grep -qx 'con: çay ğ' "$WORK/confile.out" &&
+           grep -qx 'conin: Türkçe ğ 11' "$WORK/confile.out"; then
+        echo "  CONOUT\$ and CON show what was written, and CONIN\$ reads the 11 bytes typed"
+      else
+        echo "  the console file wrote or read otherwise:"; sed 's/^/    /' "$WORK/confile.out"; status=1
+      fi
+    fi
+
+    # 8. A stream past a gibibyte. `read_all` and `read_line` doubled an
+    #    Int32 capacity, and doubling 1 GiB panicked "arithmetic overflow":
+    #    `File.read` of a 1,288,490,188-byte file did, after a 1.8 GB peak.
+    #    That file reads whole, and as one line, and one of 2 GiB - a byte
+    #    past what a string holds - is refused by name both ways. Sparse
+    #    files, so nothing is written to the disk; built with --release,
+    #    where one read of the first took 2.0 s and 3.6 GB at its peak
+    #    (11.6 s in a plain build).
+    echo
+    echo "== a stream past a gibibyte"
+    printf 'module main\n\npath = Program.args[1]\nif Program.args[0] == "all"\n  puts "read_all #{File.read(path).bytesize}"\nelse\n  line = File.open(path).read_line\n  puts "read_line #{line ? line.bytesize : -1}"\nend\n' > "$WORK/big.iyi"
+    if ! "$IYI" build --release -o "$WORK/big" "$WORK/big.iyi" > "$WORK/big.build" 2>&1; then
+      echo "  the big-stream program did not build"; sed -n '1,10p' "$WORK/big.build"; status=1
+    else
+      for size in 1288490188 2147483648; do
+        : > "$WORK/big$size.bin"
+        fsutil sparse setflag "$(cygpath -w "$WORK/big$size.bin")" > /dev/null 2>&1
+        dd if=/dev/zero of="$WORK/big$size.bin" bs=1 count=0 seek="$size" 2>/dev/null
+      done
+      big_case() { # big_case <all|line> <size> <the line it answers>
+        "$WORK/big" "$1" "$WORK/big$2.bin" > "$WORK/big.out" 2>&1
+        if grep -qxF -- "$3" "$WORK/big.out"; then
+          echo "  $1 of $2 bytes: $3"
+        else
+          echo "  $1 of $2 bytes did not answer '$3':"; sed -n '1,3p' "$WORK/big.out" | sed 's/^/    /'; status=1
+        fi
+      }
+      big_case all 1288490188 "read_all 1288490188"
+      big_case line 1288490188 "read_line 1288490188"
+      big_case all 2147483648 "iyi: panic: the stream is past the 2147483647 bytes a string holds"
+      big_case line 2147483648 "iyi: panic: a line is past the 2147483647 bytes a string holds"
+      rm -f "$WORK"/big*.bin
+    fi
+
+    # 9. The console's mode after Ctrl-C and Ctrl-Break. Either ends the
+    #    program through Windows' own handler, past every exit of iyi's,
+    #    and the console was left with VT processing on: mode 7 where it
+    #    had been 3. A handler of iyi's (`__iyi_win_console_ctrl`) puts the
+    #    mode back and passes the event on, so the program still ends the
+    #    way Windows ends it, with STATUS_CONTROL_C_EXIT. Python runs the
+    #    program in a console of its own, sets the mode without VT, sends
+    #    each event and reads the mode after.
+    echo
+    echo "== the console's mode after Ctrl-C and Ctrl-Break"
+    printf 'module interrupted\n\nputs "hello"\nsleep(10000)\nputs "slept"\n' > "$WORK/interrupted.iyi"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the mode is unmeasured"
+    elif ! "$IYI" build -o "$WORK/interrupted" "$WORK/interrupted.iyi" > "$WORK/interrupted.build" 2>&1; then
+      echo "  the interrupted program did not build"; sed -n '1,10p' "$WORK/interrupted.build"; status=1
+    else
+      cat > "$WORK/interrupted.py" <<'PY'
+import ctypes, os, subprocess, sys, time
+from ctypes import wintypes
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.CreateFileW.restype = wintypes.HANDLE
+program, result = sys.argv[1], sys.argv[2]
+if os.environ.get("INTERRUPTED_INNER") != "1":
+    info = subprocess.STARTUPINFO(); info.dwFlags = 1; info.wShowWindow = 0
+    inner = subprocess.Popen([sys.executable, __file__] + sys.argv[1:],
+                             env=dict(os.environ, INTERRUPTED_INNER="1"), creationflags=0x10, startupinfo=info)
+    inner.wait(timeout=90)
+    print(open(result).read() if os.path.exists(result) else "UNMEASURED: the inner copy wrote nothing")
+    sys.exit(0)
+keep = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)(lambda event: True)
+conout = k32.CreateFileW("CONOUT$", 0xC0000000, 3, None, 3, 0, None)
+mode, lines = wintypes.DWORD(), []
+for name, event in (("c", 0), ("break", 1)):
+    k32.SetConsoleMode(conout, 3)
+    k32.GetConsoleMode(conout, ctypes.byref(mode))
+    before = mode.value
+    # Ctrl-C reaches a child only if this process does not ignore it.
+    k32.SetConsoleCtrlHandler(None, False)
+    child = subprocess.Popen([program])
+    time.sleep(1.5)
+    k32.SetConsoleCtrlHandler(keep, True)
+    k32.GenerateConsoleCtrlEvent(event, 0)
+    try:
+        code = str(child.wait(timeout=20) & 0xFFFFFFFF)
+    except subprocess.TimeoutExpired:
+        child.kill(); code = "TIMEOUT"
+    k32.SetConsoleCtrlHandler(keep, False)
+    k32.GetConsoleMode(conout, ctypes.byref(mode))
+    lines.append(f"{name}: exit {code} before {before} after {mode.value}")
+open(result, "w").write("\n".join(lines) + "\n")
+PY
+      "$PY" "$WORK/interrupted.py" "$WORK/interrupted.exe" "$WORK/interrupted.result" > "$WORK/interrupted.out" 2>&1
+      if grep -q '^UNMEASURED' "$WORK/interrupted.out"; then
+        echo "  no console here, so the mode is unmeasured: $(cat "$WORK/interrupted.out")"
+      elif grep -qx 'c: exit 3221225786 before 3 after 3' "$WORK/interrupted.out" &&
+           grep -qx 'break: exit 3221225786 before 3 after 3' "$WORK/interrupted.out"; then
+        echo "  Ctrl-C and Ctrl-Break end the program and leave the console's mode at 3"
+      else
+        echo "  an interrupted program left the console otherwise:"; sed 's/^/    /' "$WORK/interrupted.out"; status=1
       fi
     fi
     ;;

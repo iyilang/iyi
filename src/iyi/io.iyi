@@ -16,6 +16,16 @@ class IyiIO
   @write_buffer : Pointer(UInt8)
   @write_capacity : Int32
   @write_pos : Int32
+  {% if flag?(:win32) %}
+    # A console a file was opened on - `CON`, `CONIN$`, `CONOUT$` - is
+    # written and read wide, as the standard streams' consoles are, with a
+    # carry of its own (`IyiConsole.write_handle`). Through `WriteFile` and
+    # `ReadFile` it was the console's code page: `çay ğ` written to
+    # `CONOUT$` showed as `├ºay ─ƒ`, and `Türkçe ğ` typed at `CONIN$` read
+    # as eight bytes of code page 437, `ğ` folded to `g`.
+    @console : Bool = false
+    @console_carry : UInt64 = 0_u64
+  {% end %}
 
   def initialize(@fd : Int64, buffer_size : Int32 = 4096, @sync : Bool = false)
     @closed = false
@@ -29,6 +39,18 @@ class IyiIO
     @write_capacity = buffer_size
     @write_buffer = Pointer(UInt8).malloc(buffer_size.to_u64)
     @write_pos = 0
+    {% if flag?(:win32) %}
+      # A character device answers the console's own question if it was
+      # opened to be read; opened only to be written, `GetConsoleMode`
+      # refuses it (ERROR_ACCESS_DENIED), and a wide write of nothing,
+      # which `NUL` refuses, is the test.
+      mode = 0
+      handle = Pointer(Void).new(@fd > 2_i64 ? @fd.to_u64 : 0_u64)
+      if @fd > 2_i64 && LibC.GetFileType(handle) == 2
+        readable = LibC.GetConsoleMode(handle, pointerof(mode)) != 0
+        @console = readable || LibC.WriteConsoleW(handle, pointerof(mode).as(Void*), 0, pointerof(mode), Pointer(Void).new(0_u64)) != 0
+      end
+    {% end %}
   end
 
   def self.new(fd : Int32, buffer_size : Int32 = 4096, sync : Bool = false) : IyiIO
@@ -87,18 +109,27 @@ class IyiIO
     @read_limit
   end
 
+  # The buffer grows with what arrives, up to `count`, as std/io's
+  # `Reader#read_bytes` does: allocated whole first, 10 bytes read with a
+  # count of 1,500,000,000 took 1.6 GB. It starts at the stream's buffer,
+  # the most one piece is, so one doubling holds the next piece.
   def read_bytes(count : Int32) : String
     raise "cannot read from closed IO" if @closed
     return "" if count <= 0
 
-    result_buf = Pointer(UInt8).malloc(count.to_u64)
     total_read = 0
+    result_cap = count < @read_capacity ? count : @read_capacity
+    result_buf = Pointer(UInt8).malloc(result_cap.to_u64)
 
     while total_read < count
       avail = @read_limit - @read_pos
       if avail > 0
         needed = count - total_read
         to_copy = avail < needed ? avail : needed
+        if total_read + to_copy > result_cap
+          result_cap = count - result_cap < result_cap ? count : result_cap * 2
+          result_buf = result_buf.realloc(result_cap.to_u64)
+        end
         (result_buf + total_read).copy_from(@read_buffer + @read_pos, to_copy)
         total_read = total_read + to_copy
         @read_pos = @read_pos + to_copy
@@ -119,13 +150,15 @@ class IyiIO
   # it was a read and a copy per 4 KB, and an 86 MB file took 150 ms to
   # read where one read per doubling of the result takes a fraction. A
   # failed read leaves the limit at -1 as `fill_buffer` does, which is
-  # what `read_failed?` reports.
+  # what `read_failed?` reports. In Int64, up to one byte past what a
+  # string holds: in Int32, doubling 1 GiB panicked "arithmetic overflow",
+  # and `File.read` of any file over 1 GiB - 64 KiB with it.
   def read_all : String
     raise "cannot read from closed IO" if @closed
 
-    capacity = 8192
+    capacity = 8192_i64
     buffer = Pointer(UInt8).malloc(capacity.to_u64)
-    filled = 0
+    filled = 0_i64
 
     avail = @read_limit - @read_pos
     if avail > 0
@@ -134,15 +167,13 @@ class IyiIO
       end
       buffer = buffer.realloc(capacity.to_u64) if capacity > 8192
       buffer.copy_from(@read_buffer + @read_pos, avail)
-      filled = avail
+      filled = avail.to_i64
       @read_pos = @read_limit
     end
 
     until @eof
-      if capacity - filled < 65536
-        while capacity - filled < 65536
-          capacity = capacity * 2
-        end
+      if capacity - filled < 65536 && capacity < 2147483648_i64
+        capacity = capacity * 2
         buffer = buffer.realloc(capacity.to_u64)
       end
       got = low_level_read(@fd, (buffer + filled).as(Void*), (capacity - filled).to_u64)
@@ -151,12 +182,13 @@ class IyiIO
         @read_limit = got < 0_i64 ? -1 : 0
         @eof = true
       else
-        filled = filled + got.to_i
+        filled = filled + got
+        raise "the stream is past the 2147483647 bytes a string holds" if filled > 2147483647
       end
     end
 
-    String.new(filled) do |target|
-      target.copy_from(buffer, filled)
+    String.new(filled.to_i32) do |target|
+      target.copy_from(buffer, filled.to_i32)
     end
   end
 
@@ -199,8 +231,9 @@ class IyiIO
       end
     end
 
-    # Multi-buffer path: accumulate until newline or EOF
-    line_cap = 256
+    # Multi-buffer path: accumulate until newline or EOF. The capacity is
+    # Int64: in Int32, a line over 1 GiB panicked "arithmetic overflow".
+    line_cap = 256_i64
     line_buf = Pointer(UInt8).malloc(line_cap.to_u64)
     line_len = 0
 
@@ -216,30 +249,19 @@ class IyiIO
           end
           j = j + 1
         end
-
-        if found_idx >= 0
-          take = found_idx - @read_pos + 1
-          if (line_len + take) > line_cap
-            while (line_len + take) > line_cap
-              line_cap = line_cap * 2
-            end
-            line_buf = line_buf.realloc(line_cap.to_u64)
+        take = found_idx >= 0 ? found_idx - @read_pos + 1 : avail
+        wanted = line_len.to_i64 + take
+        raise "a line is past the 2147483647 bytes a string holds" if wanted > 2147483647
+        if wanted > line_cap
+          while wanted > line_cap
+            line_cap = line_cap * 2
           end
-          (line_buf + line_len).copy_from(@read_buffer + @read_pos, take)
-          line_len = line_len + take
-          @read_pos = found_idx + 1
-          break
-        else
-          if (line_len + avail) > line_cap
-            while (line_len + avail) > line_cap
-              line_cap = line_cap * 2
-            end
-            line_buf = line_buf.realloc(line_cap.to_u64)
-          end
-          (line_buf + line_len).copy_from(@read_buffer + @read_pos, avail)
-          line_len = line_len + avail
-          @read_pos = @read_limit
+          line_buf = line_buf.realloc(line_cap.to_u64)
         end
+        (line_buf + line_len).copy_from(@read_buffer + @read_pos, take)
+        line_len = wanted.to_i32
+        @read_pos = @read_pos + take
+        break if found_idx >= 0
       end
 
       break if @eof
@@ -377,6 +399,8 @@ class IyiIO
         outcome = iyi_read(0, buffer, count)
         return -2_i64 if outcome.is_a?(Cancelled)
         outcome
+      elsif @console
+        IyiConsole.read(Pointer(Void).new(target_fd.to_u64), buffer, count)
       else
         __iyi_file_read(target_fd, buffer, count)
       end
@@ -389,6 +413,8 @@ class IyiIO
     {% if flag?(:win32) %}
       if target_fd == 1_i64 || target_fd == 2_i64
         __iyi_write(target_fd.to_i32, buffer, count)
+      elsif @console
+        IyiConsole.write_handle(Pointer(Void).new(target_fd.to_u64), buffer, count, pointerof(@console_carry))
       else
         __iyi_file_write(target_fd, buffer, count)
       end

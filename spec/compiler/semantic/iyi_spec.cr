@@ -1133,6 +1133,60 @@ describe "Semantic: iyi" do
         Foo.new
         CODE
     end
+
+    # The orphan rule keeps a second impl out of every other module, so the
+    # one left is the module's own. It was accepted, and its methods replaced
+    # the first one's: `S.new.f` answered 2.
+    it "refuses a second impl of a trait for the same type" do
+      assert_error <<-CODE, "S already implements T: a trait is implemented once for a type"
+        trait T
+          abstract def f : Int32
+        end
+
+        struct S
+        end
+
+        impl T for S
+          def f : Int32
+            1
+          end
+        end
+
+        impl T for S
+          def f : Int32
+            2
+          end
+        end
+        CODE
+    end
+
+    it "lets a subclass implement a trait its superclass implements" do
+      assert_type(<<-CODE) { int32 }
+        trait T
+          abstract def f : Int32
+        end
+
+        class Base
+        end
+
+        class Derived < Base
+        end
+
+        impl T for Base
+          def f : Int32
+            1
+          end
+        end
+
+        impl T for Derived
+          def f : Int32
+            2
+          end
+        end
+
+        Derived.new.f
+        CODE
+    end
   end
 
   describe "generic impls (SPEC.md II.7)" do
@@ -3066,8 +3120,11 @@ describe "Semantic: iyi" do
     # what another module reaches. `samples/iyi/modules.iyi` is a separate
     # file and is where that half is exercised.
 
+    # `Consumer` is inside app/greeter (see above), so the reason given is
+    # the one for the module's own code; `bench/agent_loop.py` holds the
+    # one another module is given.
     it "refuses a qualified call to a name the module does not export" do
-      assert_error <<-CODE, "App::Greeter does not export 'helper'. Only what a module marks `pub` is reachable from outside it"
+      assert_error <<-CODE, "App::Greeter does not export 'helper', and a qualified name reaches only what a module exports, from inside it too: write `helper` here"
         module app/greeter
 
         pub def polite : Int32

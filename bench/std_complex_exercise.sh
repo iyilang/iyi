@@ -131,7 +131,7 @@ else
   # `abs` breaks the first check; every other label puts back one thing
   # this module got wrong, and the check written for it has to be the one
   # that fails - a copy caught somewhere else proves nothing about it.
-  for label in abs to_s conj negate minus root divide over inv exp bigroot sign hash equal cis zero; do
+  for label in abs to_s conj negate minus root rootsign divide over inv exp bigroot sign hash equal cis zero; do
     rm -rf "$WORK/patched" && mkdir -p "$WORK/patched/std"
     if ! PROOF="$label" "$PY" - <<PY
 import os
@@ -147,7 +147,8 @@ proofs = {
     "conj": ("Complex.new(@real, -@imag)", "Complex.new(@real, 0.0 - @imag)"),
     "negate": ("Complex.new(-@real, -@imag)", "Complex.new(0.0 - @real, 0.0 - @imag)"),
     "minus": ("to_f64 - other.real, -other.imag", "to_f64 - other.real, 0.0 - other.imag"),
-    "root": ("y >= 0.0 ? im : -im", "y >= 0.0 ? im : 0.0 - im"),
+    "root": ("Math.copysign(im, y)", "(y >= 0.0 ? im : 0.0 - im)"),
+    "rootsign": ("Math.copysign(im, y)", "(y >= 0.0 ? im : -im)"),
     "divide": ("  def /(other : Complex) : Complex\n",
                "  def /(other : Complex) : Complex\n"
                "    d = other.abs2\n"
@@ -184,6 +185,7 @@ PY
       negate) want="negation flips a zero" ;;
       minus) want="a number minus a complex negates its imaginary zero" ;;
       root) want="a root's underflowed imaginary part keeps its sign" ;;
+      rootsign) want="the root of -4 - 0i is below the cut" ;;
       divide) want="a divisor whose abs2 overflows" ;;
       over) want="a number over a complex is times its inverse" ;;
       inv) want="the inverse of a value whose abs2 underflows" ;;

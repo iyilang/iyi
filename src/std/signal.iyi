@@ -182,6 +182,10 @@ class SignalWaiter
       # No handle: a cancellation's `CancelIoEx` has no operation to stop.
       fiber.wait_handle = Pointer(Void).new(0_u64)
       fiber.io_bytes_read = 0_i64
+      # One waiter at a time, as the poller holds a descriptor to one
+      # reader: a second park wrote its slot over the first's, and the
+      # first was never woken, not even by the next Ctrl-Break.
+      raise "two fibers reading one fd" if @@slot.get != 0_u64
       @@port.set(IyiScheduler.pollfd.to_u64)
       @@slot.set(ov.address)
       # An arrival between the check above and the slot being set posted

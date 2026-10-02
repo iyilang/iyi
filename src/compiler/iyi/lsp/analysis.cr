@@ -202,7 +202,10 @@ module Iyi::Lsp
         seeded, _ = check(path, adopted, overrides)
         if seeded
           @seed.delete(path)
-          return seeded
+          # The seed is the clean text, not the buffer's: laid over the
+          # buffer's lines as the last good program is, or a successor
+          # answered every line below the edit from the line above it.
+          return aligned(path, text, overrides) || seeded
         end
       end
       nil
@@ -272,11 +275,12 @@ module Iyi::Lsp
     # the cursor's file and position; the entry is whichever open
     # document's program we are searching — under R-1 a def's callers
     # live in the *consumers'* compiles, so the server asks this once per
-    # open document and merges.
-    def references_at(entry_path : String, entry_text : String, overrides : Hash(String, String), target : Location) : ReferencesVisitor?
+    # open document and merges. *seeds* are the defs the cursor's own
+    # compile adopted (`ReferencesVisitor#target_keys`).
+    def references_at(entry_path : String, entry_text : String, overrides : Hash(String, String), target : Location, seeds = Set({String, Int32, Int32, String}).new) : ReferencesVisitor?
       result = result_for(entry_path, entry_text, overrides)
       return nil unless result
-      visitor = ReferencesVisitor.new(target)
+      visitor = ReferencesVisitor.new(target, seeds)
       visitor.process(result) ? visitor : nil
     end
 
@@ -717,7 +721,20 @@ module Iyi::Lsp
           suggestion = cur.suggestion
         end
         if line && (msg = cur.message)
-          frames << {cur.true_filename, line, col, size, msg, suggestion}
+          # A frame inside a macro's expansion lands at the call it came
+          # from, with no span and no edit there: its line and column were
+          # the expansion's, and read as the calling file's they put the
+          # diagnostic on that file's `module` header, and `iyi fix`
+          # spliced the did-you-mean into it. The span and the edit are the
+          # expansion's text, which is no file an edit can open - which is
+          # what keeps `fix` and the quick fix off it, since this is where
+          # both get their edit.
+          file, line, col, expansion = cur.true_location(line, col)
+          if expansion
+            size = 0
+            suggestion = nil
+          end
+          frames << {file, line, col, size, msg, suggestion} if line
         end
         cur = cur.is_a?(TypeException) ? cur.inner : nil
       end
@@ -752,7 +769,14 @@ module Iyi::Lsp
         {file, line, col, msg}
       end
 
-      Diag.new(anchor[1], anchor[2], anchor[3], message, Iyi.iyi_spec_references(message), related, anchor[5])
+      # An anchor with no span of its own - a frame in a macro's expansion,
+      # placed at the call - is underlined as the call's frame is.
+      size = anchor[3]
+      if size == 0 && (spanned = frames.find { |(file, line, col, span, _, _)| file == anchor[0] && line == anchor[1] && col == anchor[2] && span > 0 })
+        size = spanned[3]
+      end
+
+      Diag.new(anchor[1], anchor[2], size, message, Iyi.iyi_spec_references(message), related, anchor[5])
     end
   end
 

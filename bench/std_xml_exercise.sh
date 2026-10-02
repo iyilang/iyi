@@ -130,6 +130,18 @@ refuses "a processing instruction given ?> by text=" pi_set "'?>' is not allowed
   '(n = Node.new_pi("p", "a"); n.text = "?>"; n).to_xml'
 refuses "text= on a document" document_text "a document has no text of its own" \
   '(d = Document.new; d.text = "x"; d).to_xml'
+# A name, a comment and a processing instruction have no character
+# references, so in a document declared US-ASCII one holding a character
+# past U+007F is refused at to_xml; it was written as UTF-8, which the
+# module's own parser then refused as "not US-ASCII".
+refuses "a comment past ASCII in a US-ASCII document" ascii_comment "U+00E9 cannot be written in a comment of a document declared US-ASCII" \
+  '(d = Document.new(encoding: "US-ASCII"); d.add_child(Node.new_comment("caf\u{E9}")); d).to_xml'
+refuses "a processing instruction past ASCII in a US-ASCII document" ascii_pi "U+00E9 cannot be written in a processing instruction of a document declared US-ASCII" \
+  '(d = Document.new(encoding: "US-ASCII"); d.add_child(Node.new_pi("p", "caf\u{E9}")); d).to_xml'
+refuses "an element name past ASCII in a US-ASCII document" ascii_element "cannot be written in a document declared US-ASCII" \
+  '(d = Document.new(encoding: "US-ASCII"); d.add_child(Node.new_element("caf\u{E9}")); d).to_xml'
+refuses "an attribute name past ASCII in a US-ASCII document" ascii_attribute "cannot be written in a document declared US-ASCII" \
+  '(d = Document.new(encoding: "US-ASCII"); e = Node.new_element("r"); e.set_attribute("\u{E9}", "1"); d.add_child(e); d).to_xml'
 
 echo
 echo "== proving the checks can fail when the module is broken"
@@ -174,7 +186,9 @@ mutate "a name with two colons accepted" \
 mutate "the xmlns prefix declared" \
   '        elsif ns_prefix == "xmlns"' '        elsif false' 'accepted .*xmlns:xmlns'
 mutate "CDATA written whole" \
-  '      serialize_cdata_body(buf)' '      buf << @content' 'splits the section'
+  '      serialize_cdata_body(buf, ascii)' '      buf << @content' 'splits the section'
+mutate "a character past U+007F written raw in the CDATA of a US-ASCII document" \
+  '      elsif ascii && ptr[i] >= 0x80_u8' '      elsif false' 'in the CDATA of a US-ASCII document'
 mutate "text= dropped on an element" \
   '      add_child(Node.new_text(value))' '      nil' 'text= replaces'
 mutate "an entity's '<' read as text in an attribute value" \
@@ -198,6 +212,14 @@ mutate "XML declaration attributes in any order" \
   '      if !in_place && (attr_name == "version"' '      if false && (attr_name == "version"' 'accepted .*standalone=.*version='
 mutate "any text as a version" \
   '        if !Parser.version_number?(attr_val)' '        if false' 'accepted .*1<0'
+mutate "a declaration running into the next" \
+  '      fail("expected '"'"'>'"'"' to end the #{what}")' '      nil' 'accepted .*ELEMENT a ANY'
+mutate "a content model group joined by both , and |" \
+  '          if groups.last != 0_u8 && groups.last != b' '          if false' 'accepted .*(a,b|c)'
+mutate "an attribute-list default not given" \
+  '    defaults = @attribute_defaults[name]?' '    defaults = @attribute_defaults["\n"]?' 'attribute default is given to the element'
+mutate "a value of a type other than CDATA kept as written" \
+  '      attr_val = Parser.collapse_spaces(attr_val) if tokenized?(name, attr_name)' '      nil' 'written NMTOKENS value'
 mutate "a parameter entity reference kept as text in an entity value" \
   '      elsif b == 37_u8' '      elsif false' 'accepted .*%p;'
 mutate "no space after the % of a parameter entity" \
@@ -207,27 +229,21 @@ mutate "a colon in a processing instruction target" \
 mutate "a colon in an entity name" \
   '    if name.includes?(":")' '    if false' 'accepted .*ENTITY a:b'
 mutate "a local part that cannot start a name" \
-  ' && Parser.name_char_width(ptr, colon_at + 1, len, true) > 0' '' 'accepted .*p:-a'
+  ' && Parser.name_start?(code_point_at(ptr, len, colon_at + 1))' '' 'accepted .*p:-a'
+mutate "a code point past 0x7F taken to start and continue a name" \
+  '    return cp != 0xD7 && cp != 0xF7 if cp <= 0x2FF' '    return true if cp <= 0x2FF' 'accepted "<a.*b/>"'
 mutate "no space after <!DOCTYPE" \
   '    if !skip_whitespace
       fail("expected whitespace after <!DOCTYPE")' '    if !skip_whitespace && false
       fail("expected whitespace after <!DOCTYPE")' 'accepted .*DOCTYPEa'
 mutate "a reference in an entity value that is not a name" \
   '    if !Parser.name_shaped?(ref)' '    if false' 'accepted .*a]b'
-mutate "a skipped declaration running into the next" \
-  '      elsif b == 60_u8
-        break' '      elsif false
-        break' 'accepted .*ELEMENT a ANY'
-mutate "a control character in a skipped declaration" \
-  '          if control?(byte_at(@pos))' '          if false' 'accepted .*ATTLIST a k CDATA'
 mutate "no byte budget on entity expansion" \
   '    if @expanded_bytes > @max_expanded_bytes' '    if false' 'thousand times is refused'
 mutate "a US-ASCII document written as UTF-8" \
   '    serialize_node(buf, lowered == "us-ascii" || lowered == "ascii")' '    serialize_node(buf)' 'every other character as a reference'
 mutate "a carriage return kept raw in CDATA" \
   '      elsif ptr[i] == 13_u8' '      elsif false' 'carriage return in CDATA'
-mutate "any character past 0x7F read as a name character" \
-  '    ok = first ? name_start_point?(cp) : name_point?(cp)' '    ok = cp >= 0x80 || (first ? name_start_point?(cp) : name_point?(cp))' 'accepted "<a.*b/>'
 mutate "a name that is not an XML name written" \
   '    raise "'"'"'#{name}'"'"' is not an XML name, so the #{what} cannot be written" unless Parser.name_shaped?(name)' '    nil' \
   'to_xml refuses what does not read back: is not an XML name'

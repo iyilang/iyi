@@ -121,13 +121,13 @@ build_and_run "std_time" exercise-time "$REPO/bench/std_time_exercise.iyi"
 
 echo
 echo "== every time check reported"
-for check in "known-value table" "leap-year rules" "scattered roundtrip" "platform clocks" "span construction" "RFC 3339" "time comparison" "ALL CHECKS PASSED"; do
+for check in "known-value table" "leap-year rules" "scattered roundtrip" "platform clocks" "span construction" "RFC 3339" "time comparison" "hash keys" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-time.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339 and Comparable all reported"
+[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339, Comparable and hash keys all reported"
 
 # ---------------------------------------------------------------------------
 # Negative failure proofs
@@ -246,6 +246,10 @@ time_panics_with "fraction digits the format cannot print" frac12 "fraction_digi
   'Time.utc(2024, 1, 1).to_rfc3339(12)'
 time_panics_with "an eighth day of the week" dow8 "invalid day of week: 8" \
   'DayOfWeek.new(8).to_s'
+# A millisecond and a nanosecond past one second between them carried into
+# the next second, day and year in silence.
+time_panics_with "a fraction past one second" utc_frac "invalid millisecond + nanosecond: 999 ms and 999999999 ns are past one second" \
+  'Time.utc(2024, 12, 31, 23, 59, 59, 999, 999999999).to_rfc3339(9)'
 # Text after the offset was never looked at: `...Zjunk` and `...+05:30:00`
 # parsed. An offset is 00..23 hours and 00..59 minutes: `+99:99` moved the
 # instant four days in silence. A year no Int32 holds is refused with the
@@ -266,6 +270,10 @@ time_panics_with "milliseconds past an Int64" unix_ms_far "is past the milliseco
   'Time.utc(300000000, 1, 1).to_unix_ms'
 time_panics_with "a designator of two bytes" parse_tz_utf8 "invalid timezone designator in RFC 3339: ²" \
   'Time.parse_rfc3339("2024-02-29T12:30:45²Z").to_rfc3339'
+# The 808 milliseconds above Int64::MIN answer now; the one below it is
+# still refused.
+time_panics_with "the millisecond below Int64::MIN" unix_ms_min "-9223372036854776 seconds from the epoch is past the milliseconds an Int64 holds" \
+  'Time.unix(-9223372036854776_i64, 191999999).to_unix_ms'
 time_panics_with "a year past Int32, parsed" parse_y2g "year out of range in RFC 3339 string" \
   'Time.parse_rfc3339("2147483648-01-01T00:00:00Z").to_rfc3339'
 time_panics_with "a year past Int32, from the epoch" unix_1e17 "year out of range" \
@@ -274,6 +282,10 @@ time_panics_with "the last Int64 second" unix_max "year out of range" \
   'Time.unix(9223372036854775807_i64).year'
 time_panics_with "the first Int64 second" unix_min "year out of range" \
   'Time.unix(-9223372036854775808_i64).to_rfc3339'
+# A refusal after the carry names the count after it: it named the count
+# before, a second the module had just accepted.
+time_panics_with "the last second's last nanosecond and one more" max_carry "year out of range: 67767976233532800 seconds from the epoch" \
+  '(Time.unix(67767976233532799_i64, 999999999) + Span.nanoseconds(1_i64)).to_rfc3339'
 time_panics_with "a span sum past Int64" span_add "Span overflows" \
   'Span.seconds(9223372036854775807_i64) + Span.seconds(1_i64)'
 time_panics_with "a day count past Int64 seconds" span_days "Span overflows" \

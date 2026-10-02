@@ -423,6 +423,23 @@ refuses "info on a path that does not exist" info_nonexistent "File not found: "
 refuses "real_path of an empty path" realpath_empty "Cannot resolve realpath for " \
   'File.real_path("")'
 
+# What Windows cannot hold, refused by name. A second past what a FILETIME
+# holds overflowed its tick count - "arithmetic overflow", after the file
+# was made - and the second before 1601 is the count 0, which Windows reads
+# as "leave the time alone": that touch answered and changed nothing.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    refuses "touch at a second past a Windows file time" touch_late "is not a second a Windows file time holds" \
+      'File.touch("'"$WORK"'/touch_late.txt", 910692730086_i64)'
+    refuses "touch at the second before one" touch_early "is not a second a Windows file time holds" \
+      'File.touch("'"$WORK"'/touch_early.txt", -11644473600_i64)'
+    if [ -e "$WORK/touch_late.txt" ] || [ -e "$WORK/touch_early.txt" ]; then
+      echo "  a refused touch made its file"
+      status=1
+    fi
+    ;;
+esac
+
 # A byte range another process has locked. Windows fails the read with
 # ERROR_LOCK_VIOLATION, and `File.read` answered "" with no word - the
 # failure spelled as an empty file. And a write that fails raised from
@@ -649,6 +666,10 @@ PY
         fi
       fi
     fi
+    # A tempfile name that is not UTF-8 is refused as one: it was refused
+    # "Windows error 3: The system cannot find the path specified".
+    refuses "a tempfile name that is not UTF-8" tempfile_bad "the path is not valid UTF-8" \
+      'File.tempfile("bad\xFF")'
     ;;
 esac
 

@@ -112,6 +112,24 @@ case "$answer" in
     ;;
 esac
 
+# The same change spelled verbatim, `\\?\C:\...`, the form Rust's
+# `fs::canonicalize` hands over. The prefix stayed in the key the closure
+# is compared by, so nothing matched and the answer was `{"checked":[]}`:
+# no consumer, all compile.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    answer="$(cd "$WORK/affected" && "$IYI" check --affected "\\\\?\\$(cygpath -w "$REPO/src/std/text.iyi")" --json 2>&1)"
+    case "$answer" in
+      *'"consumer.iyi"'*) echo "check --affected of a change spelled \\\\?\\ names its consumer" ;;
+      *)
+        echo "FAIL: check --affected of a change spelled \\\\?\\ named no consumer"
+        echo "  $answer"
+        status=1
+        ;;
+    esac
+    ;;
+esac
+
 # And the workspace R-1 exists for: the dependency is a `.iyimod` and its
 # source is gone (III.7). A build reads it because it was told to with a
 # flag; these verbs have no flag and read `mods` beside the root, for a
@@ -632,6 +650,128 @@ if grep -q "pub def value : Int32" listed_doc.txt && grep -q "pub def value : In
 else
   echo "FAIL: a project in $(basename "$listed"): doc and mod context answered"
   sed -n '1,2p' listed_doc.txt listed_ctx.txt | sed 's/^/  /'
+  status=1
+fi
+cd "$WORK" || exit 1
+
+# A module path spelled in another case is not that module, on any file
+# system: `iyi doc app/Nest` printed `module app/nest` on Windows, which
+# ignores case, where Linux has no such file. And a prelude type's blank
+# doc line is `#`: `iyi doc String` ended six lines in `# `.
+mkdir -p "$WORK/spelled/app"
+cd "$WORK/spelled" || exit 1
+printf 'module app/nest\n\npub def value : Int32\n  7\nend\n' > app/nest.iyi
+"$IYI" doc app/nest > spelled_doc.txt 2>&1
+"$IYI" doc String > string_doc.txt 2>&1
+if "$IYI" doc app/Nest > other_case.txt 2>&1 || grep -q '^module app/nest' other_case.txt; then
+  echo "FAIL: \`iyi doc app/Nest\` answered for app/nest"
+  sed -n '1,2p' other_case.txt | sed 's/^/  /'
+  status=1
+elif ! grep -q '^pub def value : Int32' spelled_doc.txt || grep -q ' $' string_doc.txt; then
+  echo "FAIL: app/nest or String was documented wrongly"
+  sed -n '1,3p' spelled_doc.txt | sed 's/^/  /'
+  grep -n ' $' string_doc.txt | head -3 | sed 's/^/  /'
+  status=1
+else
+  echo "\`iyi doc app/Nest\` is refused as app/nest's, and String's doc has no line ending in a space"
+fi
+cd "$WORK" || exit 1
+
+# A doc comment is the same text whatever the file's line endings. Each
+# doc line of a CRLF file kept its `\r`: `iyi doc` printed `# Second
+# paragraph.\r` among LF lines, and `mod context --json` shipped
+# "Doubles *x*.\r\n\r\nSecond paragraph.\r" - the grounding an agent reads
+# differed on a Windows checkout.
+mkdir -p "$WORK/endings/lf" "$WORK/endings/crlf"
+cd "$WORK/endings" || exit 1
+printf 'module lib\n\n# Doubles *x*.\n#\n# Second paragraph.\npub def twice(x : Int32) : Int32\n  x * 2\nend\n' > lf/lib.iyi
+awk '{ printf "%s\r\n", $0 }' lf/lib.iyi > crlf/lib.iyi
+for ending in lf crlf; do
+  printf 'module use\n\nimport lib::{twice}\n\nputs twice(1)\n' > "$ending/use.iyi"
+  (cd "$ending" && "$IYI" doc lib.iyi > "../$ending.doc" 2>&1 && "$IYI" mod context --json use.iyi > "../$ending.json" 2>&1)
+done
+if cmp -s lf.doc crlf.doc && grep -qF '"doc":"Doubles *x*.\n\nSecond paragraph."' crlf.json; then
+  echo "a CRLF file's doc comments read as the LF file's, in doc and in the context pack"
+else
+  echo "FAIL: a CRLF file's doc comments differ from the LF file's"
+  od -c crlf.doc | sed -n '1,4p' | sed 's/^/  /'
+  grep -o '"doc":"[^"]*"' crlf.json | head -2 | sed 's/^/  /'
+  status=1
+fi
+cd "$WORK" || exit 1
+
+# The whole of what a caller names through a module, and nothing that is
+# not there. A type was rendered as its methods: an enum without its
+# members (`std/log`'s `Severity` had none of `Trace` .. `None`), a
+# struct without the type nested in it, a trait without the `type Elem`
+# its own `abstract def` names, and an alias followed by an `end` it does
+# not have. `pub LIMIT` and `pub macro twice` were not listed at all, and
+# the import line the pack hands a reader left both out, so the reader
+# never learnt the names `import app/surf::{LIMIT, twice}` checks with.
+# A blank doc line came out as `# `, with a trailing space.
+mkdir -p "$WORK/whole/app"
+cd "$WORK/whole" || exit 1
+cat > app/surf.iyi <<'EOF'
+module app/surf
+
+# The limit.
+pub LIMIT = 5
+
+pub macro twice(x)
+  {{x}} + {{x}}
+end
+
+# Doubles *x*.
+#
+# Second paragraph.
+pub def double(x : Int32) : Int32
+  x * 2
+end
+
+pub enum Size
+  Small = 1
+  Big   = 10
+end
+
+pub struct Outer
+  pub WIDTH = 3
+
+  # Inner.
+  pub struct Inner
+    def val : Int32
+      1
+    end
+  end
+end
+
+pub trait Container
+  type Elem
+
+  abstract def first_elem : Elem
+end
+
+pub alias Num = Int32 | Float64
+EOF
+printf 'import app/surf::{double}\n\nputs double(2)\n' > main.iyi
+export IYI_PATH="$REPO/src${PSEP}$WORK/whole"
+"$IYI" doc app/surf > whole_doc.txt 2>&1
+"$IYI" mod context main.iyi > whole_ctx.txt 2>&1
+hint='import app/surf::{double, twice, LIMIT, Container, Num, Outer, Size}'
+printf '%s\n\nputs twice(LIMIT) + Outer::WIDTH + Size::Big.value + Outer::Inner.new.val\n' "$hint" > hint.iyi
+absent=""
+for line in 'pub LIMIT = 5' 'pub macro twice(x)' '  Small = 1' '  Big = 10' '  WIDTH = 3' \
+  '  # Inner.' '  struct Inner' '    def val : Int32' '  type Elem' 'pub alias Num = Int32 | Float64'; do
+  grep -qxF -- "$line" whole_doc.txt || absent="$absent [$line]"
+done
+after_alias="$(grep -A1 -xF 'pub alias Num = Int32 | Float64' whole_doc.txt | sed -n '2p')"
+if [ -z "$absent" ] && [ "$after_alias" != "end" ] && ! grep -q ' $' whole_doc.txt &&
+   grep -qF "#   $hint" whole_ctx.txt && "$IYI" check hint.iyi > hint_check.txt 2>&1; then
+  echo "doc and mod context list members, nested types, associated types, constants and macros, and the import line names them"
+else
+  echo "FAIL: the surface of app/surf left something out"
+  echo "  missing:$absent; after the alias: '$after_alias'; lines ending in a space: $(grep -c ' $' whole_doc.txt)"
+  grep -m1 '^#   import' whole_ctx.txt | sed 's/^/  /'
+  sed -n '1,3p' hint_check.txt 2>/dev/null | sed 's/^/  /'
   status=1
 fi
 cd "$WORK" || exit 1

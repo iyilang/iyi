@@ -124,10 +124,14 @@ refuses "a header value with a line break" header_break "HTTP: header X-A contai
   'HTTP.format_request("GET", "/", "127.0.0.1", "", {"X-A" => "1\r\nX-B: 2"})'
 refuses "a header the request writes itself" header_own "is the request.s own header" \
   'HTTP.format_request("GET", "/", "127.0.0.1", "", {"content-length" => "5"})'
+refuses "a caller's Transfer-Encoding" header_te "a request's body goes with its length" \
+  'HTTP.format_request("POST", "/", "127.0.0.1", "abc", {"Transfer-Encoding" => "chunked"})'
 refuses "https" scheme_tls "HTTP: TLS is not in 0.x" \
   'HTTP.get("https://127.0.0.1/").or_panic.status'
 refuses "a Content-Length that is not a number" length_text "HTTP: Content-Length is not a number" \
   'HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: many\r\n\r\nabc").body'
+refuses "a Content-Length past Int32's" length_large "HTTP: Content-Length \"3000000000\" is past the 2147483647 bytes a string holds" \
+  'HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\nabc").body'
 refuses "a chunked body cut inside a chunk" chunk_cut "HTTP: chunked body ends inside a chunk" \
   'HTTP.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n9\r\nabc").body'
 refuses "a status that is not a number" status_text "HTTP: not a status line" \
@@ -213,6 +217,65 @@ else
 fi
 
 echo
+echo "== the client against a server that resets the connection after a whole answer"
+# Read to the close, `HTTP.get` answered `SocketError` ("the connection was
+# reset by the peer") for a whole 200 that the server reset 300 ms after
+# it, where Python's http.client answers the 200: an answer is read as far
+# as its framing says, and what the connection does after it is not read.
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3 to reset the connection with"
+else
+  cat > "$WORK/reset_client.iyi" <<'IYI'
+module main
+
+import std/http::{HTTP, Response}
+import std/socket::{SocketError}
+
+case got = HTTP.get("http://127.0.0.1:#{Program.args[0]}/x")
+in Response
+  puts "#{got.status} #{got.body}"
+in SocketError
+  puts "SocketError: #{got.message}"
+in Cancelled
+  puts "Cancelled"
+end
+IYI
+  if ! "$IYI" build -o "$WORK/reset_client" "$WORK/reset_client.iyi" > "$WORK/reset_client.build" 2>&1; then
+    echo "  the client did not build"
+    sed -n '1,8p' "$WORK/reset_client.build"
+    status=1
+  else
+    "$PY" - > "$WORK/reset.server.out" 2>&1 <<'PY' &
+import socket, struct, sys, time
+ls = socket.socket()
+ls.bind(("127.0.0.1", 0))
+ls.listen(1)
+print(ls.getsockname()[1], flush=True)
+c, _ = ls.accept()
+data = b""
+while b"\r\n\r\n" not in data:
+    data += c.recv(65536)
+c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi")
+time.sleep(0.3)
+# A close with no lingering is a reset, on every platform.
+linger = struct.pack("HH", 1, 0) if sys.platform == "win32" else struct.pack("ii", 1, 0)
+c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+c.close()
+PY
+    reset_pid=$!
+    rport=$(await_port "$WORK/reset.server.out" "$reset_pid")
+    said=$(timeout 30 "$WORK/reset_client" "$rport" 2>&1)
+    wait "$reset_pid" 2>/dev/null
+    if [ "$said" = "200 hi" ]; then
+      echo "  a whole 200 that the server resets after is the 200"
+    else
+      echo "  the client answered: $said"
+      status=1
+    fi
+  fi
+fi
+
+echo
 echo "== the server under load"
 if command -v wrk >/dev/null 2>&1; then
   "$IYI" build --release -o "$WORK/server-release" "$REPO/bench/std_http_server.iyi" >"$WORK/server-release.build.log" 2>&1
@@ -281,11 +344,24 @@ PY
 }
 mutate "a status parsed as zero" '{code, reason}' '{0, reason}'
 mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca + 0_u8 if ca >= 65_u8 && ca <= 90_u8'
-mutate "a chunked body left as it came" 'body = decode_chunked(body) if' 'body = body + "" if'
+mutate "a chunked body left as it came" 'body = decode_chunked(body)' 'body = body + ""'
 mutate "a server that forgets keep-alive" 'wrote.is_a?(Int32) && !close' 'wrote.is_a?(Int32) && false'
+mutate "Connection read as one value" 'HTTP.has_token?(conn, "close")' 'HTTP.same_name?(HTTP.trim(conn), "close")'
 mutate "a server that answers every request 200" 'Response.new(400, reason' 'Response.new(200, reason'
-mutate "a server that parses the body so far after every read" 'wanted = parsed.wanted' 'wanted = 0'
-mutate "a server that parses a chunked body again after every read" 'if head = parsed.chunked' 'if head = nil.as(Request?)'
+mutate "a server that parses the body so far after every read" 'while have < wanted' 'while have < rest.bytesize + 1'
+mutate "a server that parses a chunked body again after every read" '        read = HTTP.read_chunked(buffer, parsed.consumed, MAX_BODY) { wait_read(client, listener, idle) }' '        more = wait_read(client, listener, idle)
+        return unless more
+        buffer = buffer + more
+        next if more.bytesize > 0
+        read = HTTP.read_chunked(buffer, parsed.consumed, MAX_BODY) { wait_read(client, listener, idle) }'
+mutate "a server that holds a body at its declared length, not at what has arrived" 'have = have + more.bytesize' 'have = have + more.bytesize
+      String::Builder.new(wanted) if pieces.size == 2'
+mutate "a server that adds each read to the head so far and searches all of it" '        text, ends = HTTP.read_head(rest, 0, MAX_HEAD) { wait_read(client, listener, idle) }' '        more = wait_read(client, listener, idle)
+        return unless more
+        text = rest + more
+        ends = HTTP.find_headers_end(text)'
+mutate "a server that waits on a client partway through a body" 'got = read_body(client, rest, wanted, listener, idle)' 'got = read_body(client, rest, wanted, listener, nil)'
+mutate "a server that cuts each request off the front of the read" 'start = parsed.consumed' 'buffer = buffer[parsed.consumed, buffer.bytesize - parsed.consumed]'
 mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
 mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
 mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle)' '          accepted = client
@@ -293,15 +369,28 @@ mutate "a server whose tasks share the accept loop's variable" '          spawn_
             handle(accepted, handler)
             0
           end'
+mutate "a coding this client cannot undo read as chunked" 'return "transfer coding #{coding.inspect} is not one this client decodes" unless same_name?(coding, "chunked")' 'next unless same_name?(coding, "chunked")'
+mutate "a body chunked twice decoded as if once" 'return "Transfer-Encoding #{te.inspect} is chunked twice" if chunked > 1' ''
+mutate "a length past Int32's read as no number" 'return 2147483648_i64 if n > 2147483647_i64' 'return nil if n > 2147483647_i64'
 mutate "a socket read that takes all it may read from the heap" 'if count < first || max_bytes == first' 'if false' socket.iyi
 mutate "a malformed chunked body that raises in the server" 'return "not a chunk size: #{size_text.inspect}" unless size' 'raise "HTTP: not a chunk size: #{size_text.inspect}" unless size'
 mutate "a chunk's end added past Int32's" 'return nil if size > n - i - 2' 'return nil if i + size + 2 > n'
 mutate "a decoded chunk's end added past Int32's" 'raise "HTTP: chunked body ends inside a chunk" if size > n - i' 'raise "HTTP: chunked body ends inside a chunk" if i + size > n'
 mutate "control characters let into a field value" 'return "header #{name} contains a control character" if control?(value)' ''
 mutate "control characters let into a request target" 'target.bytesize == 0 || HTTP.control?(target)' 'target.bytesize == 0'
+mutate "a folded answer read as fields of its own" 'lines = unfolded(lines) if unfold' ''
+mutate "a folded request unfolded too" 'lines = unfolded(lines) if unfold' 'lines = unfolded(lines)'
 mutate "a control character written into a request" 'raise "HTTP: header #{name} contains a control character" if control?(value)' ''
 mutate "a control character written into an answer" 'raise "HTTP: header #{name} contains a control character" if HTTP.control?(value)' ''
+mutate "a status written outside 100 to 999" 'unless response.status >= 100 && response.status <= 999' 'unless true'
+mutate "a reason written with a line break in it" '    raise "HTTP: the reason contains a line break" if HTTP.has_break?(response.reason)
+    raise "HTTP: the reason contains a control character" if HTTP.control?(response.reason)
+' ''
 mutate "control characters let into a reason" 'raise "HTTP: not a status line: #{line}" if control?(reason)' ''
+mutate "Host: a and Host: b on one request served as one" 'return ParsedRequest.new(nil, "Host on #{hosts} lines", true, 0) if hosts > 1' ''
+mutate "an HTTP/1.1 request with no Host served" 'hosts == 0 && version == "HTTP/1.1"' 'false'
+mutate "a Host that is not a host served" 'unless HTTP.host?(value)' 'if false'
+mutate "an absolute-form target's authority left for the Host line's" 'headers[host_name] = named' ''
 mutate "repeated fields told apart by case" 'key = name.downcase' 'key = name'
 mutate "two lengths that differ read as the first" 'return nil unless trim(part) == first' 'return nil if false'
 mutate "chunks beside a length that keep the connection" 'close = true if stub.header("Content-Length") || version == "HTTP/1.0"' 'close = true if false'
@@ -309,7 +398,11 @@ mutate "a signed or low status read as one" 'code_text.bytesize == 3 && digits?(
 mutate "any version under HTTP/" 'sp1 && sp1 == 8 && digits?(line[5, 1]) && line.to_unsafe[6] == 46_u8 && digits?(line[7, 1])' 'sp1'
 mutate "an interim answer taken for the answer" 'break unless status >= 100 && status < 200 && status != 101 && start < text.bytesize' 'break'
 mutate "a 204 written with a body and a length" 'bodiless = (response.status >= 100 && response.status < 200) || response.status == 204 || response.status == 304' 'bodiless = false'
+mutate "a client that reads an answer with a length to the close" 'while answer.bytesize.to_i64 < need' 'while true'
+mutate "a client that reads a chunked answer to the close" 'if te = final.header("Transfer-Encoding")' 'if te = nil.as(String?)'
 mutate "an absolute-form target handed on whole" 'if authority = HTTP.absolute_form(target)' 'if authority = nil.as(Int32?)'
+mutate "a caller's length written beside a body it does not measure" 'unless head || response.status == 304' 'unless true'
+mutate "a caller's chunked framing written beside a length" 'raise "HTTP: #{name} is not written; the body goes with its length" if HTTP.same_name?(name, "Transfer-Encoding")' ''
 
 echo
 if [ "$status" -eq 0 ]; then

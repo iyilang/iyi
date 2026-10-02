@@ -88,6 +88,24 @@ raise "eof: expected eof? to remain true" unless io_eof.eof?
 io_eof.close
 puts "eof: ok"
 
+# 4a. `read_bytes` grows with what arrives, up to the count: the count is a
+# most, and it was allocated whole before the read - 10 bytes read with a
+# count of 1,500,000,000 took 1.6 GB. Here 100 MB are asked of 36 bytes,
+# counted by the collector, which the other allocators do not count.
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+  File.write(path, sample_text)
+  io_most = File.open(path, "r", 4096)
+  IyiMark.auto = false
+  most_before = IyiMark.allocated_since
+  most = io_most.read_bytes(100_000_000)
+  most_bytes = IyiMark.allocated_since - most_before
+  IyiMark.auto = true
+  io_most.close
+  raise "read_bytes: a count of 100000000 read #{most.bytesize} bytes, not the 36 there are" unless most == sample_text
+  raise "read_bytes: a count of 100000000 allocated #{most_bytes} bytes to read 36" if most_bytes > 1_000_000_u64
+  puts "read_bytes: a large count allocates what is read"
+{% end %}
+
 # 4b. `read_all` reads the rest of a file in large pieces, not through the
 # stream's own buffer a buffer at a time: 4 MB through a 4 KB buffer was
 # 1,024 reads and as many copies. Linux counts a process's reads in
@@ -126,11 +144,25 @@ puts "puts: ok"
 
 # 6. `lines` ends a line at `\r\n` as at `\n`, as Crystal's does: a Windows
 # text's lines kept the `\r`, and summing a file of numbers panicked on
-# "1\r" where `File.read_lines` read 1. A `\r` inside a line stays.
+# "1\r" where `File.read_lines` read 1. A `\r` inside a line stays, and so
+# does a last one with no `\n` after it: `"a\nb\r".lines` was `["a", "b"]`.
 crlf_lines = "1\r\n2\r\n\r\na\rb\n3".lines
 raise "lines: CRLF text read as #{crlf_lines.size} lines, not 5, or kept a \\r" unless crlf_lines == ["1", "2", "", "a\rb", "3"]
 raise "lines: CRLF numbers did not read as numbers" unless crlf_lines[0].to_i + crlf_lines[1].to_i == 3
+raise "lines: a last \\r with no \\n after it was dropped" unless "a\nb\r".lines == ["a", "b\r"] && "\r".lines == ["\r"] && "a\r\n\r".lines == ["a", "\r"]
 puts "lines: ok"
+
+# 7. On Windows a path that is not UTF-8 names nothing. Converted without
+# MB_ERR_INVALID_CHARS, each bad byte became U+FFFD, so `\xFF` named the
+# file spelled with U+FFFD, and two such names were one file.
+{% if flag?(:win32) %}
+  replaced = "bench-io-exercise-\uFFFD.txt"
+  File.write(replaced, "replacement")
+  spelled = File.exists?("bench-io-exercise-\xFF.txt")
+  File.delete(replaced)
+  raise "names: a path that is not UTF-8 named #{replaced}" if spelled
+  puts "names: ok"
+{% end %}
 
 # Cleanup
 File.delete(path) if File.exists?(path)

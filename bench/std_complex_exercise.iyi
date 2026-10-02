@@ -43,6 +43,11 @@ assert_true Complex.new(-1.0, 0.0).conj.log.imag < 0.0, "the conjugate of -1 is 
 assert_str "-0.0 - 0.0i", (-Complex.new(0.0, 0.0)).to_s, "negation flips a zero"
 assert_str "1.0 - 0.0i", (2 - Complex.new(1.0, 0.0)).to_s, "a number minus a complex negates its imaginary zero"
 assert_str "1.0e+150 - 0.0i", Complex.new(1.0e300, -1.0e-300).sqrt.to_s, "a root's underflowed imaginary part keeps its sign"
+# Not the other library's answer, which tests `y >= 0.0` and so puts
+# -4 - 0i above the branch cut, `0.0 + 2.0i`: C99's `csqrt`, Python's
+# cmath and this module's own `log` put it below.
+assert_str "0.0 - 2.0i", Complex.new(-4.0, -0.0).sqrt.to_s, "the root of -4 - 0i is below the cut"
+assert_str "0.0 - 0.0i", Complex.new(0.0, -0.0).sqrt.to_s, "the root of 0 - 0i keeps the zero's sign"
 puts "  a zero keeps its sign through negation, the conjugate and the root, and prints it"
 
 puts "\n== division"

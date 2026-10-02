@@ -184,8 +184,8 @@ prove_fails "hash ignores bit values" broken_hash \
   'h = (31 &* h)'
 
 prove_fails "fill start+count overflows Int32" broken_fill_overflow \
-  'limit = (c > @size - s) ? @size : (s + c)' \
-  'limit = (s + c > @size) ? @size : (s + c)'
+  'limit = c > @size - i ? @size : i + c.to_i' \
+  'limit = i + c.to_i > @size ? @size : i + c.to_i'
 
 prove_fails "rotate goes through Int32" broken_rotate_i32 \
   'k64 = n.to_i64 % @size.to_i64' \

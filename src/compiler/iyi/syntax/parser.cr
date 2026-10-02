@@ -189,8 +189,19 @@ module Iyi
       expressions.each_with_index do |node, index|
         next if index == 0 || !node.is_a?(ModuleHeader)
         location = node.location
+        first = expressions.first
+        # A header after an `import` or a declaration is the file's only
+        # header in the wrong place, and was told the file "already declares
+        # `no module`" and that `app/main` belongs in `app/main.iyi` — said
+        # to `app/main.iyi`.
+        unless first.is_a?(ModuleHeader)
+          raise "the `module` header comes first in a file: `module #{node.path.join('/')}` " \
+                "goes above every `import` and declaration, with only comments " \
+                "before it (SPEC.md R-1, IV.6)",
+            location.try(&.line_number) || 1, location.try(&.column_number) || 1
+        end
         raise "a file declares one module, and this one already declares " \
-              "`#{expressions.first?.as?(ModuleHeader).try(&.path.join('/')) || "no module"}`. " \
+              "`#{first.path.join('/')}`. " \
               "A module is a compilation unit and its path is its file's path " \
               "(SPEC.md R-1, IV.6), so `#{node.path.join('/')}` belongs in " \
               "`#{node.path.join('/')}.iyi`",
@@ -1657,7 +1668,7 @@ module Iyi
         var = Var.new(name).at(@token.location).at_end(token_end_location)
         next_token
         unless @token.type.space?
-          warnings.add_warning_at(@token.location, "space required before colon in type declaration (run `crystal tool format` to fix this)")
+          warnings.add_warning_at(@token.location, "space required before colon in type declaration (run `iyi fmt` to fix this)")
         end
         skip_space
         check :OP_COLON
@@ -1708,7 +1719,7 @@ module Iyi
 
       if @no_type_declaration == 0 && @token.type.op_colon?
         unless space_after_name
-          warnings.add_warning_at(@token.location, "space required before colon in type declaration (run `crystal tool format` to fix this)")
+          warnings.add_warning_at(@token.location, "space required before colon in type declaration (run `iyi fmt` to fix this)")
         end
         parse_type_declaration(var)
       else
@@ -1723,7 +1734,7 @@ module Iyi
 
       if @no_type_declaration == 0 && @token.type.op_colon? && type.is_a?(Path)
         unless space_after_name
-          warnings.add_warning_at(@token.location, "space required before colon in type declaration (run `crystal tool format` to fix this)")
+          warnings.add_warning_at(@token.location, "space required before colon in type declaration (run `iyi fmt` to fix this)")
         end
         parse_type_declaration(type, is_const: true)
       else
@@ -4758,6 +4769,7 @@ module Iyi
         last_was_space = false
       elsif @token.type.ident?
         check_valid_def_name
+        check_iyi_reserved_def_name
         name = @token.value.to_s
 
         equals_sign, _ = consume_def_equals_sign
@@ -4790,6 +4802,7 @@ module Iyi
 
         if @token.type.ident?
           check_valid_def_name
+          check_iyi_reserved_def_name
           name = @token.value.to_s
 
           name_location = @token.location
@@ -4912,7 +4925,7 @@ module Iyi
 
       if @token.type.op_colon?
         unless last_was_space
-          warnings.add_warning_at @token.location, "space required before colon in return type restriction (run `crystal tool format` to fix this)"
+          warnings.add_warning_at @token.location, "space required before colon in return type restriction (run `iyi fmt` to fix this)"
         end
         next_token_skip_space
         return_type = parse_bare_proc_type
@@ -5050,6 +5063,18 @@ module Iyi
         MSG
     end
 
+    # iyi: `def or` (SPEC.md III.1.3). `.or` and `.or_panic` are recognised
+    # at the call site by name, so a method of either name can never be
+    # called: `def or` compiled, and `A.new.or(5)` was then refused as a
+    # recovery with "no member of App::Main::A implements `Error`".
+    private def check_iyi_reserved_def_name
+      return unless iyi? && @token.value.in?("or", "or_panic")
+
+      raise "`#{@token.value}` is a reserved name in iyi: `.#{@token.value}` is the " \
+            "error recovery the compiler knows by name, so a method called " \
+            "`#{@token.value}` could never be called (SPEC.md III.1.3)", @token
+    end
+
     # iyi: `items.sort_by! { |x| ... }` — the same mistake at a call site.
     #
     # By here the `!` has been read as a propagation, and what follows it is
@@ -5061,8 +5086,10 @@ module Iyi
       return unless atomic.is_a?(Propagate) && (call = atomic.exp).is_a?(Call)
       return unless @token.type.op_lcurly? || @token.type.op_lparen? || @token.keyword?(:do)
 
+      # An argument list was told `!` "takes no block" too: `nomacro!(1)`.
+      taken = @token.type.op_lparen? ? "arguments" : "block"
       raise <<-MSG, @token
-        `#{call.name}!` is not a method here: `!` propagates an error, and takes no block
+        `#{call.name}!` is not a method here: `!` propagates an error, and takes no #{taken}
 
         `!` can't be part of a name in iyi (SPEC.md III.1.7a), so the pair
         Crystal spells `#{call.name}` and `#{call.name}!` is spelled after the
@@ -5176,7 +5203,7 @@ module Iyi
         skip_space_or_newline
 
         if @token.type.op_colon? && !space_after_amp # anonymous block arg without space
-          warnings.add_warning_at @token.location, "space required before colon in type restriction (run `crystal tool format` to fix this)"
+          warnings.add_warning_at @token.location, "space required before colon in type restriction (run `iyi fmt` to fix this)"
         end
 
         block_param = parse_def_block_param(extra_assigns, annotations)
@@ -5328,7 +5355,7 @@ module Iyi
 
       if @token.type.op_colon?
         unless param_name.empty? || found_space
-          warnings.add_warning_at @token.location, "space required before colon in type restriction (run `crystal tool format` to fix this)"
+          warnings.add_warning_at @token.location, "space required before colon in type restriction (run `iyi fmt` to fix this)"
         end
         next_token_skip_space_or_newline
 
@@ -5788,7 +5815,7 @@ module Iyi
           else
             if @no_type_declaration == 0 && @token.type.op_colon?
               unless name_followed_by_space
-                warnings.add_warning_at(@token.location, "space required before colon in type declaration (run `crystal tool format` to fix this)")
+                warnings.add_warning_at(@token.location, "space required before colon in type declaration (run `iyi fmt` to fix this)")
               end
               declare_var = parse_type_declaration(Var.new(name).at(location).at_end(end_location))
               end_location = declare_var.end_location

@@ -15,8 +15,9 @@
 # multiplication, negation, the modulo sign rule, bitwise and, exponentiation,
 # abs, the constant one, BigInt hashing, BigDecimal hash normalisation,
 # division rounding, exact-division detection, zero printing, rational
-# reduction, the unbalanced Karatsuba split and the split that prints and
-# parses long values, and requires each break to be caught at a named check.
+# reduction, the unbalanced Karatsuba split, the split that prints and
+# parses long values and the recursive division a long print splits by,
+# and requires each break to be caught at a named check.
 #
 # Exits non-zero if any check fails.
 
@@ -90,13 +91,13 @@ fi
 
 echo
 echo "== every big number section reported"
-for phrase in "construction and conversions:" "predicates and comparisons:" "basic arithmetic:" "division corner cases:" "bitwise operations:" "known large values:" "round trips:" "modular exponentiation:" "algebraic identities:" "karatsuba:" "hashing:" "decimal arithmetic:" "rational arithmetic:" "base round trips:"; do
+for phrase in "construction and conversions:" "predicates and comparisons:" "basic arithmetic:" "division corner cases:" "bitwise operations:" "known large values:" "round trips:" "modular exponentiation:" "algebraic identities:" "karatsuba:" "hashing:" "decimal arithmetic:" "rational arithmetic:" "base round trips:" "long print:"; do
   if ! grep -q "$phrase" "$WORK/big-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  construction, predicates, arithmetic, division, bitwise, known values, roundtrips, pow_mod, identities, karatsuba, hashing, decimals, rationals and bases all reported"
+[ "$status" -eq 0 ] && echo "  construction, predicates, arithmetic, division, bitwise, known values, roundtrips, pow_mod, identities, karatsuba, hashing, decimals, rationals, bases and long prints all reported"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -367,9 +368,10 @@ prove_fails "bigint hash ignores limbs" no_hash_limbs "hash: neighbour differs" 
 prove_fails "bigint hash ignores sign" no_hash_sign "hash: negative differs" \
   's/h = (h ^ (@sign + 1)\.to_u64) &\* 1099511628211_u64/h = h ^ 0_u64/'
 
-# 11. BigDecimal hash forgets to normalise the scale (1.10 != 1.1 as keys)
+# 11. BigDecimal hash keeps the trailing zeros, so 1.10 and 1.1 (or 1e1000000
+# and 1 followed by a million zeros) differ as keys
 prove_fails "decimal hash skips normalisation" no_dec_norm "hash: decimal scale agreement" \
-  's/n = normalized/n = self/'
+  's/stripped = strip_zeros(2147483647)/stripped = {@value, 0}/'
 
 # 12. Division truncates instead of rounding
 prove_fails "decimal division truncates" no_dec_round "decimal: div rounds half away" \
@@ -412,6 +414,10 @@ prove_fails "printing copies per chunk" no_print_split "base: printing 7 costs i
 #     per digit did
 prove_fails "parsing copies per chunk" no_parse_split "base: parsing 7 costs its digits" \
   's/if count > per \* DIGITS_SPLIT_LIMBS$/if false/;s/^      carry = value$/      carry = value + limbs.dup.size.to_u64 * 0_u64/'
+
+# 22. Printing that splits by long division, quadratic in the length
+prove_fails "printing splits by long division" no_print_recursive "base: printing a long value costs what parsing it does" \
+  's/halves = divmod_recursive(powers\[level\])$/halves = divmod(powers[level])/'
 
 # A rational's float through twenty decimal places again, and its
 # halfway rounded up rather than to even.

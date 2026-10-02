@@ -8,7 +8,9 @@
 # or a bare root (`\`). A Windows path is absolute only with both a drive
 # and a root, so `C:foo` (drive-relative) and `\foo` (rooted) are not.
 # DOS device paths (`\\.\`, `\\?\`) are not recognised: they read as UNC
-# shares named `.` and `?`. Windows names compare case-insensitively.
+# shares named `.` and `?`. Windows names compare case-insensitively: in
+# every script on Windows, as its file systems fold them, and in ASCII
+# letters alone where the program was built for another platform.
 #
 # Lexical operations: `basename`, `dirname`, `extension`, `stem`,
 # `parent`, `parents`, `parts`, `join` and `/`, `normalize` (`.` and `..`
@@ -31,6 +33,14 @@
 module std/path
 
 import std/traits::{Comparable}
+
+{% if flag?(:win32) %}
+  lib LibKernel32
+    fun LCMapStringEx(locale : UInt16*, flags : Int32, source : UInt16*, source_length : Int32,
+                      destination : UInt16*, destination_length : Int32, version : Void*,
+                      reserved : Void*, sort_handle : Int64) : Int32
+  end
+{% end %}
 
 pub struct Path
   pub enum Kind : UInt8
@@ -597,7 +607,7 @@ pub struct Path
     parent.join(name)
   end
 
-  # Byte order; Windows names fold ASCII case, and `/` is `\` there.
+  # Byte order; a Windows name folded as `windows_fold` folds it.
   private def compare_names(a : String, b : String) : Int32
     windows? ? Path.compare_strings_ci(a, b) : Path.compare_strings(a, b)
   end
@@ -617,7 +627,7 @@ pub struct Path
   end
 
   def hash : Int32
-    (windows? ? backslashed(@name.downcase) : @name).hash &* 31 &+ @kind.value.to_i32
+    (windows? ? Path.windows_fold(@name) : @name).hash &* 31 &+ @kind.value.to_i32
   end
 
   # *s* with each `/` written `\`.
@@ -650,6 +660,8 @@ pub struct Path
     len1 == len2 ? 0 : (len1 < len2 ? -1 : 1)
   end
 
+  # As the two names' `windows_fold`s compare, read here without folding
+  # either while both are ASCII.
   def self.compare_strings_ci(s1 : String, s2 : String) : Int32
     len1 = s1.bytesize
     len2 = s2.bytesize
@@ -660,6 +672,7 @@ pub struct Path
     while i < min_len
       b1 = p1[i]
       b2 = p2[i]
+      return compare_strings(windows_fold(s1), windows_fold(s2)) if b1 >= 128_u8 || b2 >= 128_u8
       b1 = b1 + 32_u8 if b1 >= 65_u8 && b1 <= 90_u8
       b2 = b2 + 32_u8 if b2 >= 65_u8 && b2 <= 90_u8
       b1 = 92_u8 if b1 == 47_u8
@@ -669,6 +682,63 @@ pub struct Path
     end
     len1 == len2 ? 0 : (len1 < len2 ? -1 : 1)
   end
+
+  # *s* as a Windows name compares: `/` written `\`, ASCII letters lower
+  # case, and on Windows every other letter in the case its file systems
+  # fold it to - LCMAP_UPPERCASE without linguistic casing, measured to
+  # make the same classes as CompareStringOrdinal's on every BMP unit. A
+  # surrogate pair stays as written, as both leave it. ASCII alone folded,
+  # `C:\Ä` and `c:\ä` were two paths where NTFS has one file; built for
+  # another platform there is no table to ask, and ASCII alone is folded.
+  def self.windows_fold(s : String) : String
+    {% if flag?(:win32) %}
+      index = 0
+      while index < s.bytesize && s.to_unsafe[index] < 128_u8
+        index = index + 1
+      end
+      if index < s.bytesize
+        folded = native_fold(s)
+        return folded if folded
+      end
+    {% end %}
+    String.new(s.bytesize) do |buffer|
+      at = 0
+      while at < s.bytesize
+        byte = s.to_unsafe[at]
+        byte = byte + 32_u8 if byte >= 65_u8 && byte <= 90_u8
+        buffer[at] = byte == 47_u8 ? 92_u8 : byte
+        at = at + 1
+      end
+    end
+  end
+
+  {% if flag?(:win32) %}
+    # Text that is not UTF-8 has no UTF-16 to fold, and is folded as ASCII.
+    private def self.native_fold(s : String) : String?
+      wide = __iyi_win_env_wide(s.to_unsafe, s.bytesize)
+      return nil if wide.address == 0_u64
+      length = 0
+      while wide[length] != 0_u16
+        length = length + 1
+      end
+      upper = Pointer(UInt16).malloc((length + 1).to_u64)
+      invariant = Pointer(UInt16).malloc(1_u64)
+      invariant[0] = 0_u16
+      nothing = Pointer(Void).new(0_u64)
+      return nil if LibKernel32.LCMapStringEx(invariant, 0x200, wide, length, upper, length, nothing, nothing, 0_i64) != length
+      at = 0
+      while at < length
+        unit = wide[at] >= 0xD800_u16 && wide[at] <= 0xDFFF_u16 ? wide[at] : upper[at]
+        unit = unit + 32_u16 if unit >= 65_u16 && unit <= 90_u16
+        upper[at] = unit == 47_u16 ? 92_u16 : unit
+        at = at + 1
+      end
+      upper[length] = 0_u16
+      size = __iyi_utf8_size_from_wide(upper)
+      return nil if size <= 1
+      String.new(size - 1) { |t| __iyi_utf8_bytes_from_wide(upper, t, size) }
+    end
+  {% end %}
 end
 
 impl Comparable for Path

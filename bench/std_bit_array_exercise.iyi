@@ -112,6 +112,14 @@ assert_true("ba[1]? is not nil", !q_false.nil?)
 assert_true("ba[1]? value", q_false == false)
 assert_true("ba[10]? is nil (past end)", ba[10]?.nil?)
 assert_true("ba[-11]? is nil (before start)", ba[-11]?.nil?)
+# Counted in Int64 by `index_within` and narrowed after: an index past
+# Int32 was narrowed first and panicked "arithmetic overflow", in `[]?`
+# too, which answers nil.
+assert_true("ba[2^32]? is nil", ba[4294967296_i64]?.nil?)
+assert_true("ba[-2^32]? is nil", ba[-4294967296_i64]?.nil?)
+assert_true("index from 2^32 is nil", ba.index(true, 4294967296_i64).nil?)
+assert_true("rindex from -2^32 is nil", ba.rindex(true, -4294967296_i64).nil?)
+puts "  an index past Int32 is outside, not an overflow"
 
 # Toggle operation
 tba = BitArray.new(10)
@@ -276,6 +284,13 @@ assert_true("huge fill last", huge_fill[7])
 start_at_end = BitArray.new(4)
 start_at_end.fill(true, 4, 2147483647)
 assert_true("fill start==size huge count is no-op", start_at_end.none?)
+# And a count past Int32 runs to the end too, counted as `index_within`
+# counts: narrowed before it was cut to the room left, 2^32 panicked
+# "arithmetic overflow".
+wide_fill = BitArray.new(8)
+wide_fill.fill(true, -6, 4294967296_i64)
+assert_equal_str("fill with a count of 2^32", wide_fill.to_s, "BitArray[00111111]")
+puts "  a fill count past Int32 runs to the end"
 # Predicates: any?, none?, all?, one?
 
 pred = BitArray.new(8)

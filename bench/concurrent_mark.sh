@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Eight steps, the last five failure proofs:
+# Nine steps, the last five failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -20,20 +20,23 @@
 #      only the runtime's where the machine gives its threads their cores:
 #      on a twelve-core Windows VM this read 23 to 64 ms, the length of
 #      the longest second stops measured there.
-#   4. Failure proof: the barrier's shade removed from a copy of the
+#   4. Buffers of references grown by `realloc`, ten runs of three hundred
+#      rounds, plain: every referent intact in every run. The old buffer
+#      is freed while a mark may have it queued.
+#   5. Failure proof: the barrier's shade removed from a copy of the
 #      prelude; the first payload moved under a mark is freed, and the
 #      program exits 1 saying so.
-#   5. Failure proof: the barrier's own look at the marking flag removed;
+#   6. Failure proof: the barrier's own look at the marking flag removed;
 #      a barrier run after its mark ended grays a holder, the next mark
 #      sweeps the payload it held, and the program exits 1 saying so.
-#   6. Failure proof: `free`'s look at the mark removed; a large block
+#   7. Failure proof: `free`'s look at the mark removed; a large block
 #      outgrown under a mark is unmapped beside the helpers at once, which
 #      is how a helper walking the large list faulted, and the program
 #      exits 1 saying so.
-#   7. Failure proof, on Windows: the helpers given back the boost a
+#   8. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check - more than three of the
 #      program's wakes past a millisecond - exits 1.
-#   8. Failure proof, on Windows: the cap on the helpers beside a busy
+#   9. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
 set -u
 
@@ -113,14 +116,14 @@ Gaps.setup
 count = IyiThread.core_count.to_i32
 deadline = IyiMark.now_ns + 1000000000_u64
 threads = [] of IyiThread
-i = 1
-while i < count
-  k = i
+# Each thread's index is its block call's own: a captured local `k = i`
+# reassigned by a `while` was one cell every thread read, and a late reader
+# could see the next index (SPEC.md III.4.4 refuses it now).
+(count - 1).times do |j|
   threads << IyiThread.start do
-    watch(k, deadline)
+    watch(j + 1, deadline)
     nil
   end
-  i = i + 1
 end
 watch(0, deadline)
 threads.each { |t| t.join }
@@ -137,6 +140,74 @@ if ! "$IYI" build --release machine.iyi -o machine > build-machine.log 2>&1; the
 fi
 timeout -k 5 60 ./machine > machine.txt 2>&1 || { cat machine.txt; exit 1; }
 grep '^machine:' machine.txt | sed 's/^/  /'
+
+# A buffer of references grown by `realloc` frees its old copy, and a mark
+# beside the program may have that copy grayed and queued: it blackened the
+# freed chunk, the sweep relinked it black, and the chunk's next object was
+# born black outside any mark - never scanned by the next, which swept what
+# only it held. Without the sweep's whitening, 13 runs of this in 20 lost
+# leaves or died of a memory fault. Ten runs, each its own chance.
+step "buffers grown by realloc beside the mark keep what they hold, ten runs"
+cat > realloced.iyi <<'IYI'
+module realloced
+
+class Leaf
+  getter v : Int64
+  getter s : String
+
+  def initialize(@v : Int64)
+    @s = "L#{@v}"
+  end
+end
+
+class Held
+  getter buf : Pointer(Leaf)
+  getter n : Int32
+  getter base : Int64
+
+  def initialize(@buf : Pointer(Leaf), @n : Int32, @base : Int64)
+  end
+end
+
+seed = 12345_i64
+keep = [] of Held
+lost = 0
+300.times do |round|
+  seed = (seed * 1103515245 + 12345) % 2147483647
+  n = 1 + (seed % 3000).to_i32
+  cap = 1
+  buf = Pointer(Leaf).malloc(1_u64)
+  base = round.to_i64 * 10000
+  i = 0
+  while i < n
+    if i >= cap
+      cap = cap * 2
+      buf = buf.realloc(cap.to_u64)
+    end
+    buf[i] = Leaf.new(base + i)
+    i += 1
+  end
+  keep << Held.new(buf, n, base)
+  keep.shift if keep.size > 12
+  keep.each do |h|
+    h.n.times do |j|
+      leaf = h.buf[j]
+      lost += 1 if leaf.v != h.base + j || leaf.s != "L#{h.base + j}"
+    end
+  end
+end
+puts "lost #{lost}"
+exit(lost == 0 ? 0 : 1)
+IYI
+if ! "$IYI" build realloced.iyi -o realloced > build-realloced.log 2>&1; then
+  cat build-realloced.log; exit 1
+fi
+for run in 1 2 3 4 5 6 7 8 9 10; do
+  if ! timeout -k 5 120 ./realloced > realloced.txt 2>&1 || ! grep -qx "lost 0" realloced.txt; then
+    echo "  run $run of 10 lost what a realloc'd buffer held:"; tail -3 realloced.txt; exit 1
+  fi
+done
+echo "  ten runs of three hundred realloc'd buffers, every leaf intact"
 
 step "failure proof: a barrier that shades nothing loses the moved payload"
 mkdir -p patched/iyi
@@ -220,16 +291,18 @@ fi
 # The wake is one scheduling race per collection, and the check counts
 # the races lost over two hundred and fifty: on a four-core runner the
 # boosted build lost 5 to 88 in each of 40 runs, where the check allows 3.
-# Five runs still, and the first that is caught is the proof.
+# Ten runs, and the first that is caught is the proof: on an idle twelve-core
+# machine the boost showed in 1 wake of 256 across five runs once, and the
+# next run of the gate caught it on its second.
 caught=""
-for try in 1 2 3 4 5; do
+for try in 1 2 3 4 5 6 7 8 9 10; do
   timeout -k 5 300 ./boosted-run > boosted.txt 2>&1
   code=$?
   if [ "$code" -eq 1 ] && grep -q "waking the helpers held the program's thread" boosted.txt; then
     caught="$try"; break
   fi
 done
-[ -n "$caught" ] || { echo "the wake check did not fire in 5 runs:"; tail -3 boosted.txt; exit 1; }
+[ -n "$caught" ] || { echo "the wake check did not fire in 10 runs:"; tail -3 boosted.txt; exit 1; }
 printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 'waking the helpers' boosted.txt)"
 
 step "failure proof: a mark beside a busy program that asks for every helper is caught"

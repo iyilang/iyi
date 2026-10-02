@@ -34,7 +34,10 @@
 #      node on a free list.
 #   6. Failure proof: a block that captures a value whose type is not
 #      `Share` (SPEC.md III.4.4) does not compile, and the error names the
-#      variable, its type and the field that made it mutable.
+#      variable, its type and the field that made it mutable. Nor does a
+#      captured local the thread's block assigns, or its starter assigns
+#      after the start: one cell two threads write (6b). A String, and a
+#      struct or `List` holding one, is captured and runs (6c).
 #   7. On Windows, a program whose main thread ends while another thread's
 #      collections stop it ends, two hundred runs of two hundred; and with
 #      the end put back into the C runtime's `exit` a run never ends, and
@@ -139,10 +142,11 @@ case "$(uname -s)" in
     # exercise's `mprotect` (a fiber stack's guard page), and the thread
     # floor's thread list: pthread_create, pthread_join, pthread_kill and
     # sigaction for the thread and the stop, pipe/read/write for the park,
-    # __tlv_bootstrap for the thread-locals. Nothing else.
+    # __tlv_bootstrap for the thread-locals, and close for a finished
+    # thread's kqueue (`IyiScheduler.retire_thread`). Nothing else.
     step "dependency floor: what threads cost darwin, by name"
     runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
-    thread='_pipe _pthread_create _pthread_join _pthread_kill _read'
+    thread='_close _pipe _pthread_create _pthread_join _pthread_kill _read'
     for bin in threads threads-release; do
       allowed="$(printf '%s\n' $runtime $thread | sort -u)"
       found="$(nm -u "$bin" | sed -e 's/^ *//' | awk '{ print $NF }' | sort -u)"
@@ -395,6 +399,71 @@ if [ "$caught" -eq 0 ]; then
 fi
 echo "  $caught of five runs lost a list or died"
 
+# Windows' `SuspendThread` asks for the suspend and returns, and the thread
+# runs on until `GetThreadContext` waits for it. The stop read the
+# allocator's word in between, so a thread that ran on into `take` was
+# stopped inside it, which the deferral exists to prevent: the program
+# above died of a memory fault once in the 54 runs CI made of it. A copy
+# of the runtime makes the run-on certain - every suspend taken back and
+# asked again, for up to 2 ms, until the context is read with the thread
+# inside the allocator - and every list holds; with the word read before
+# the context, the same run-on loses a list or dies: 18 runs in 20 on
+# twelve cores, 3 in 20 held to four, so the proof runs up to sixty.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    runon='function runon(pad) {
+      print pad "until_ns = __iyi_monotonic_ns + 2000000_i64"
+      print pad "while __iyi_monotonic_ns < until_ns"
+      print pad "  LibC.ResumeThread(handle)"
+      print pad "  while __iyi_monotonic_ns < until_ns && !IyiHeap.cache_inside?(IyiHeap.read64(cursor + IYI_TL_CACHE))"
+      print pad "  end"
+      print pad "  LibC.SuspendThread(handle)"
+      print pad "  IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)"
+      print pad "  break if IyiHeap.cache_inside?(IyiHeap.read64(cursor + IYI_TL_CACHE))"
+      print pad "end"
+    }'
+    step "a stop whose suspend lands inside the allocator keeps every list"
+    mkdir -p late/iyi
+    cp "$REPO"/src/iyi/*.iyi late/iyi/
+    awk "$runon"' /^            sp = IyiRoots\.capture_thread_registers\(handle, cursor \+ IYI_TL_SPILL\)$/ { runon("            "); found = 1 } { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > late/iyi/thread.iyi || { echo "the stop's context read is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/late${PSEP}$REPO/src" "$IYI" build switching.iyi -o late-run > build-late.log 2>&1; then
+      cat build-late.log; exit 1
+    fi
+    run=1
+    while [ "$run" -le 5 ]; do
+      timeout -k 5 120 ./late-run > late.txt 2>&1
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q '^wrong=0$' late.txt; then
+        echo "run $run with late suspends exited $code:"; tail -3 late.txt; exit 1
+      fi
+      run=$((run + 1))
+    done
+    echo "  five runs, no list lost"
+    step "failure proof: the allocator's word read before the context, under the same suspends"
+    mkdir -p early/iyi
+    cp "$REPO"/src/iyi/*.iyi early/iyi/
+    awk "$runon"' /^            sp = IyiRoots\.capture_thread_registers\(handle, cursor \+ IYI_TL_SPILL\)$/ { held = $0; found = 1; next }
+      /^              IyiHeap\.write64\(cursor \+ IYI_TL_SP, sp\)$/ { runon("              "); print "  " held; moved = 1 }
+      { print } END { if (!found || !moved) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > early/iyi/thread.iyi || { echo "the stop's context read or its sp store is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/early${PSEP}$REPO/src" "$IYI" build switching.iyi -o early-run > build-early.log 2>&1; then
+      cat build-early.log; exit 1
+    fi
+    caught=0
+    run=1
+    while [ "$caught" -eq 0 ] && [ "$run" -le 60 ]; do
+      timeout -k 5 120 ./early-run > early.txt 2>&1
+      grep -q '^wrong=0$' early.txt || caught=$run
+      run=$((run + 1))
+    done
+    if [ "$caught" -eq 0 ]; then
+      echo "sixty runs reading the allocator's word before the context all kept their lists"; exit 1
+    fi
+    printf '  run %s of up to sixty: "%s"\n' "$caught" "$(grep -m1 -E '^wrong=|memory fault' early.txt | cut -d. -f1)"
+    ;;
+esac
+
 # ── 5d. The first collection's helpers ────────────────────────────────────
 # How many helpers a mark may use is decided at the first collection, and
 # the word saying it was decided was written before the count: a thread
@@ -474,6 +543,214 @@ if ! grep -q "captures \`items : Array(Int32)\`, which is not Share" build-unsha
   echo "the refusal did not name the capture:"; cat build-unshared.log; exit 1
 fi
 printf '  refused: %s\n' "$(grep -m1 'is not Share' build-unshared.log | sed 's/^Error: //')"
+
+# The structural scan for an assigned field reads every method the type
+# has, not only the ones its class and superclasses declare, and reads
+# macro code as what it expands to. A `bump` from an included `module`, and
+# one whose `@n += 1` sat inside `{% if true %}` or in a macro it called,
+# each compiled, and two threads bumping the counter two million times each
+# counted 2336841 and 2343960 of 4000000; each is refused by its field now.
+step "failure proof: a field assigned by a mixin's method or by macro code is not Share"
+for shape in mixin macro_if macro_call; do
+  case "$shape" in
+    mixin) bump='include Bump' ;;
+    macro_if) bump='def bump : Nil
+    {% if true %}
+      @n += 1
+    {% end %}
+  end' ;;
+    macro_call) bump='macro incr
+    @n += 1
+  end
+
+  def bump : Nil
+    incr
+  end' ;;
+  esac
+  cat > "assigned_$shape.iyi" <<IYI
+module Bump
+  def bump : Nil
+    @n += 1
+  end
+end
+
+class Counter
+  $bump
+
+  def initialize
+    @n = 0_i64
+  end
+end
+
+c = Counter.new
+t = IyiThread.start do
+  c.bump
+  nil
+end
+t.join
+IYI
+  if "$IYI" build "assigned_$shape.iyi" -o "assigned_$shape" > "build-assigned-$shape.log" 2>&1; then
+    echo "a counter bumped by $shape code compiled:"; cat "build-assigned-$shape.log"; exit 1
+  fi
+  if ! grep -q "Counter's field @n is assigned in \`bump\`" "build-assigned-$shape.log"; then
+    echo "the $shape refusal did not name the field:"; cat "build-assigned-$shape.log"; exit 1
+  fi
+done
+echo "  refused by its field three ways: a mixin's method, {% if %} and a macro call"
+
+# ── 6b. A captured local is one cell, and nothing assigns it after the start
+# A Share type makes a value safe to read from two threads, not a variable
+# safe to write: a captured local is one cell both threads reach. `count`
+# added to two million times by a thread and two million by its starter
+# compiled, and counted 2684265, 2355445 and 4000000 on three runs. The
+# block assigning it, and the starter assigning it after the start, are
+# refused by name now; a local assigned before the start, and a block's
+# own local captured on each call, still build and run.
+step "failure proof: a captured local the thread or its starter assigns does not compile"
+cat > raced.iyi <<'IYI'
+count = 0
+t = IyiThread.start do
+  2000000.times { count += 1 }
+  nil
+end
+2000000.times { count += 1 }
+t.join
+puts count
+IYI
+cat > reassigned.iyi <<'IYI'
+limit = 1
+t = IyiThread.start do
+  puts limit
+  nil
+end
+limit = 2
+t.join
+IYI
+cat > assigned_before.iyi <<'IYI'
+total = 0
+[1, 2, 3].each { |v| total += v }
+3.times do |i|
+  part = total * 10 + i
+  t = IyiThread.start do
+    puts part
+    nil
+  end
+  t.join
+end
+IYI
+if "$IYI" build raced.iyi -o raced > build-raced.log 2>&1; then
+  echo "a thread assigning a captured local compiled:"; cat build-raced.log; exit 1
+fi
+if ! grep -q "assigns \`count\`, a local of the code that started the thread" build-raced.log; then
+  echo "the refusal did not name the variable:"; cat build-raced.log; exit 1
+fi
+printf '  refused: %s\n' "$(grep -m1 'assigns `count`' build-raced.log | sed 's/^Error: //')"
+if "$IYI" build reassigned.iyi -o reassigned > build-reassigned.log 2>&1; then
+  echo "a captured local assigned after the thread started compiled:"; cat build-reassigned.log; exit 1
+fi
+if ! grep -q "\`limit\` is assigned here, after the thread has started" build-reassigned.log; then
+  echo "the refusal did not name the variable:"; cat build-reassigned.log; exit 1
+fi
+printf '  refused: %s\n' "$(grep -m1 'is assigned here' build-reassigned.log | sed 's/^Error: //')"
+# The same line inside `{% if true %}` or `{% for %}`: the walk read the
+# macro's text rather than its expansion, so it compiled, and a thread
+# reading a captured `Int64 | Float64` its starter kept reassigning that
+# way counted 243585 torn reads in a debug build.
+for flow in if for; do
+  case "$flow" in
+    if) open='{% if true %}' ;;
+    for) open='{% for i in [1] %}' ;;
+  esac
+  cat > "reassigned_$flow.iyi" <<IYI
+limit = 1
+t = IyiThread.start do
+  puts limit
+  nil
+end
+$open
+  limit = 2
+{% end %}
+t.join
+IYI
+  if "$IYI" build "reassigned_$flow.iyi" -o "reassigned_$flow" > "build-reassigned-$flow.log" 2>&1; then
+    echo "a captured local assigned after the start inside {% $flow %} compiled:"; cat "build-reassigned-$flow.log"; exit 1
+  fi
+  if ! grep -q "\`limit\` is assigned here, after the thread has started" "build-reassigned-$flow.log"; then
+    echo "the {% $flow %} refusal did not name the variable:"; cat "build-reassigned-$flow.log"; exit 1
+  fi
+done
+echo "  and refused the same inside {% if %} and {% for %}"
+if ! "$IYI" build assigned_before.iyi -o assigned_before > build-assigned-before.log 2>&1; then
+  echo "locals assigned before the start were refused:"; cat build-assigned-before.log; exit 1
+fi
+if [ "$(./assigned_before | tr -d '\r' | tr '\n' ' ')" != "60 61 62 " ]; then
+  echo "locals assigned before the start built, but read:"; ./assigned_before; exit 1
+fi
+echo "  a local assigned before the start, and a block's own local, still build and read 60 61 62"
+
+# ── 6c. A String is Share, and so is what holds one immutably ──────────────
+# `String#size` caches the character count in `@length`, the one write a
+# string has after it is built, and the structural scan read it as a
+# mutable field: `s = "x"` captured by a thread's block was refused with
+# "String's field @length is assigned in `size`", and with it a struct
+# holding a string and `List(String)`. The cache is idempotent - every
+# thread writes the same count of the same bytes - so String is trusted.
+# A type that assigns its own String field after construction still is not.
+step "a String, a struct holding one and a List(String) are captured; a field assigned later is not"
+cat > strings.iyi <<'IYI'
+module strings
+
+import std/list::{List}
+
+struct User
+  getter name : String
+
+  def initialize(@name : String)
+  end
+end
+
+s = "x"
+u = User.new("ada")
+l = List.new(["a", "b"])
+t = IyiThread.start do
+  puts "#{s} #{s.size} #{u.name} #{l.size}"
+  nil
+end
+t.join
+IYI
+if ! "$IYI" build strings.iyi -o strings > build-strings.log 2>&1; then
+  echo "a block capturing a String, a User and a List(String) was refused:"; cat build-strings.log; exit 1
+fi
+if [ "$(./strings | tr -d '\r')" != "x 1 ada 2" ]; then
+  echo "the block capturing strings built, but printed:"; ./strings; exit 1
+fi
+echo "  a String, a struct holding one and a List(String) captured, and read x 1 ada 2"
+cat > renamed.iyi <<'IYI'
+module renamed
+
+class Tag
+  def initialize(@name : String)
+  end
+
+  def rename(to : String) : Nil
+    @name = to
+  end
+end
+
+tag = Tag.new("a")
+t = IyiThread.start do
+  tag.rename("b")
+  nil
+end
+t.join
+IYI
+if "$IYI" build renamed.iyi -o renamed > build-renamed.log 2>&1; then
+  echo "a block capturing a Tag whose String field is reassigned compiled:"; cat build-renamed.log; exit 1
+fi
+if ! grep -q "Tag's field @name is assigned in \`rename\`" build-renamed.log; then
+  echo "the refusal did not name the field:"; cat build-renamed.log; exit 1
+fi
+printf '  refused: %s\n' "$(grep -m1 'is not Share' build-renamed.log | sed 's/^Error: //')"
 
 # ── 7. Windows: a program ends while a collection stops it ────────────────
 # A thread runs collections back to back - each one stops the main thread -

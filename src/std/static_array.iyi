@@ -51,27 +51,31 @@ struct ::StaticArray(T, N)
 
   # Returns the element at the given *index*. Negative indices count backward.
   def [](index : Int) : T
-    idx = index.to_i
-    idx += N if idx < 0
-    raise "Index out of bounds: #{index} (size: #{N})" if idx < 0 || idx >= N
+    idx = index_within(index) || raise "Index out of bounds: #{index} (size: #{N})"
     to_unsafe[idx]
   end
 
   # Returns the element at *index*, or nil if out of bounds.
   def []?(index : Int) : T?
-    idx = index.to_i
-    idx += N if idx < 0
-    return nil if idx < 0 || idx >= N
-    to_unsafe[idx]
+    idx = index_within(index)
+    idx ? to_unsafe[idx] : nil
   end
 
   # Sets the element at *index* to *value*.
   def []=(index : Int, value : T) : T
-    idx = index.to_i
-    idx += N if idx < 0
-    raise "Index out of bounds: #{index} (size: #{N})" if idx < 0 || idx >= N
+    idx = index_within(index) || raise "Index out of bounds: #{index} (size: #{N})"
     to_unsafe[idx] = value
     value
+  end
+
+  # *index*, counted from the end when negative, or nil when it is outside.
+  # Counted in `Int64` and narrowed after: narrowed first, an index past
+  # `Int32` panicked "arithmetic overflow", in `[]?` too, where the other
+  # library and this method's own doc answer nil.
+  private def index_within(index : Int) : Int32?
+    idx = index.to_i64
+    idx += N if idx < 0
+    idx < 0 || idx >= N ? nil : idx.to_i
   end
 
   # Returns the first element. Raises if empty.
@@ -127,7 +131,7 @@ struct ::StaticArray(T, N)
 
   # Returns a Slice backed by this static array.
   def to_slice : Std::Slice::Slice(T)
-    Std::Slice::Slice(T).new(to_unsafe, N, false)
+    Std::Slice::Slice(T).new(to_unsafe, N, read_only: false)
   end
 
   # Converts this static array into a heap Array.
@@ -153,17 +157,21 @@ struct ::StaticArray(T, N)
 
   # Fills *count* elements starting at *start* with *value*.
   def fill(value : T, start : Int, count : Int) : self
-    s = start.to_i
+    s = start.to_i64
     s += N if s < 0
-    c = count.to_i
+    c = count.to_i64
     return self if c <= 0
     raise "Start out of bounds" if s < 0 || s > N
-    # Room left, not `s + c`: that overflowed for a count near the top of
-    # `Int32`, where the other library clamps the count to the end.
-    limit = (c > N - s) ? N : (s + c)
-    while s < limit
-      to_unsafe[s] = value
-      s += 1
+    # In `Int64`, as `index_within` counts, until the start is inside and the
+    # count is cut to the room left: narrowed first, a count of 2^32
+    # panicked "arithmetic overflow" where the other library fills to the
+    # end. Room left, not `s + c`: that overflowed for a count near the top
+    # of `Int32`.
+    i = s.to_i
+    limit = c > N - i ? N : i + c.to_i
+    while i < limit
+      to_unsafe[i] = value
+      i += 1
     end
     self
   end
@@ -207,20 +215,12 @@ struct ::StaticArray(T, N)
     StaticArray(U, N).new { |i| yield to_unsafe[i], off + i }
   end
 
-  # In-place stable sort using insertion sort (efficient for small stack arrays).
+  # Sorted by `Array#sort_in_place`, the stable merge sort, and copied
+  # back. It was an insertion sort of its own, quadratic: 8,000 elements in
+  # reverse order took 31,996,000 comparisons where the array's sort takes
+  # under 100,000. Equal elements keep their order, as they did.
   def sort_in_place : self
-    i = 1
-    while i < N
-      val = to_unsafe[i]
-      j = i - 1
-      while j >= 0 && to_unsafe[j] > val
-        to_unsafe[j + 1] = to_unsafe[j]
-        j -= 1
-      end
-      to_unsafe[j + 1] = val
-      i += 1
-    end
-    self
+    sort_in_place { |a, b| a > b ? 1 : 0 }
   end
 
   # Returns a new sorted static array.
@@ -230,17 +230,16 @@ struct ::StaticArray(T, N)
     ary
   end
 
-  # In-place sort with custom block comparator.
+  # In-place sort with custom block comparator, by the same merge sort.
   def sort_in_place(&block : (T, T) -> Int32) : self
-    i = 1
-    while i < N
-      val = to_unsafe[i]
-      j = i - 1
-      while j >= 0 && yield(to_unsafe[j], val) > 0
-        to_unsafe[j + 1] = to_unsafe[j]
-        j -= 1
-      end
-      to_unsafe[j + 1] = val
+    write_back(to_a.sort_in_place { |a, b| yield a, b })
+  end
+
+  # Puts *sorted*, this array's elements in their new order, back in place.
+  private def write_back(sorted : Array(T)) : self
+    i = 0
+    sorted.each do |value|
+      to_unsafe[i] = value
       i += 1
     end
     self
@@ -274,8 +273,11 @@ struct ::StaticArray(T, N)
     ary
   end
 
+  # Each key computed once, by `Array#sort_in_place_by`, the merge sort of
+  # key and element pairs: a comparison of `yield(a) <=> yield(b)` computed
+  # it twice per comparison, 63,992,000 times for 8,000 elements.
   def sort_by_in_place(&block : T -> _) : self
-    sort_in_place { |a, b| yield(a) <=> yield(b) }
+    write_back(to_a.sort_in_place_by { |e| yield e })
   end
 
   def unstable_sort_by(&block : T -> _) : StaticArray(T, N)
@@ -286,10 +288,13 @@ struct ::StaticArray(T, N)
     sort_by_in_place { |e| yield e }
   end
 
-  # Rotates elements in place by *n* positions.
+  # Rotates elements in place by *n* positions. Reduced in `Int64` before it
+  # is narrowed, as `index_within` and `BitArray`'s rotation count: `n.to_i`
+  # panicked "arithmetic overflow" for 3000000001_i64, which rotates four
+  # elements by one.
   def rotate_in_place(n : Int = 1) : self
     return self if N <= 1
-    k = n.to_i % N
+    k = (n.to_i64 % N.to_i64).to_i
     k += N if k < 0
     return self if k == 0
 
@@ -334,10 +339,8 @@ struct ::StaticArray(T, N)
 
   # Returns the index of *object*, or nil if not found.
   def index(object, offset : Int = 0) : Int32?
-    start = offset.to_i
-    start += N if start < 0
-    return nil if start < 0 || start >= N
-    i = start
+    i = index_within(offset)
+    return nil unless i
     while i < N
       return i if to_unsafe[i] == object
       i += 1
@@ -347,10 +350,8 @@ struct ::StaticArray(T, N)
 
   # Returns the last index of *object*, or nil if not found.
   def rindex(object, offset : Int = N - 1) : Int32?
-    start = offset.to_i
-    start += N if start < 0
-    return nil if start < 0 || start >= N
-    i = start
+    i = index_within(offset)
+    return nil unless i
     while i >= 0
       return i if to_unsafe[i] == object
       i -= 1

@@ -16,6 +16,8 @@ end
 import std/file::{File}
 import std/dir::{Dir}
 import std/gc::{GC}
+# For TMPDIR, TEMP and TMP unset around `File.tempfile`'s GetTempPathW.
+import std/env::{ENV}
 
 # The sandbox is the argument, then IYI_FILE_SANDBOX, then the platform's
 # own temporary directory. It was `/tmp` last, which is not a directory on
@@ -56,6 +58,12 @@ f_nonexistent = sandbox + "/std_file_ex_nonexistent_xyz.txt"
 assert_true !File.exists?(f_nonexistent), "nonexistent file does not exist"
 assert_true File.info?(f_nonexistent).nil?, "info? on nonexistent returns nil"
 assert_true !File.empty?(f_nonexistent), "empty? on a missing path is false"
+{% if flag?(:win32) %}
+  # A DOS device is a character device, there to `info?` as it is to
+  # `exists?`: `info?("NUL")` was nil.
+  device = File.info?("NUL")
+  assert_true device ? device.type.character_device? && device.size == 0_i64 : false, "info? of NUL is a character device"
+{% end %}
 puts "  exists, size, and empty verified"
 
 puts "\n== line-wise reading"
@@ -106,6 +114,14 @@ File.touch(f1)
 assert_str "overwritten content", File.read(f1), "touch does not truncate"
 File.touch(f1, 1_i64)
 assert_true File.info(f1).modification_time == 1_i64, "touch sets the given unix time"
+{% if flag?(:win32) %}
+  # The first and last seconds a Windows file time holds are set and read
+  # back; one past either is refused (bench/std_file_exercise.sh).
+  File.touch(f1, 910692730085_i64)
+  assert_true File.info(f1).modification_time == 910692730085_i64, "touch sets the last second a FILETIME holds"
+  File.touch(f1, -11644473599_i64)
+  assert_true File.info(f1).modification_time == -11644473599_i64, "touch sets the first second a FILETIME holds"
+{% end %}
 File.touch(f1)
 puts "  truncation and overwrite verified"
 
@@ -178,6 +194,22 @@ assert_true !File.exists?(fresh_name), "the renamed file's old name is gone"
 File.delete(held_name)
 puts "  a destination somebody has open is replaced by a rename"
 
+# And a destination that is both: read-only, and open. Windows refused it
+# "Access is denied" where either alone was replaced - the attribute's
+# retry cannot replace a file that is open, and the replacement that can
+# did not ignore the attribute.
+both_name = sandbox + "/rename_both.txt"
+File.write(both_name, "old contents")
+File.write(fresh_name, "new contents")
+File.chmod(both_name, 0o444)
+holder = File.open(both_name, "r")
+File.rename(fresh_name, both_name)
+holder.close
+assert_str "new contents", File.read(both_name), "a read-only destination somebody has open is replaced"
+File.chmod(both_name, 0o644)
+File.delete(both_name)
+puts "  and one that is read-only and open at once"
+
 puts "\n== directory and file queries"
 assert_true File.exists?(sandbox), "sandbox directory exists"
 assert_true File.directory?(sandbox), "sandbox is a directory"
@@ -200,6 +232,19 @@ File.link(f1, flink)
 assert_true File.exists?(flink), "link exists"
 assert_true File.same?(f1, flink), "hard link same? is true"
 assert_str "overwritten content", File.read(flink), "link content"
+# A name renamed onto another link of its own file: POSIX `rename` does
+# nothing, and Windows replaced the second link with the first, so the
+# first name was gone.
+File.rename(f1, flink)
+assert_true File.exists?(f1) && File.exists?(flink), "a rename onto its own hard link leaves both names"
+{% if flag?(:win32) %}
+  # A name in another case is the same directory entry, and is renamed -
+  # a file with a second link too.
+  File.rename(f1, sandbox + "/STD_FILE_EX_1.txt")
+  assert_true Dir.children(sandbox).includes?("STD_FILE_EX_1.txt"), "a rename into another case renames a linked file"
+  File.rename(sandbox + "/STD_FILE_EX_1.txt", f1)
+  assert_true Dir.children(sandbox).includes?("std_file_ex_1.txt"), "and back"
+{% end %}
 
 fsym = sandbox + "/std_file_ex_sym.txt"
 # Making a symbolic link on Windows takes a privilege
@@ -285,6 +330,18 @@ File.delete(kept_at)
   # share named `?`.
   drive_root = (Program.cwd || "C:\\")[0, 3]
   assert_true File.real_path(drive_root) == drive_root, "the real path of #{drive_root} is #{File.real_path(drive_root)}"
+  # With TMPDIR, TEMP and TMP all unset, both ask Windows (GetTempPathW):
+  # `tempfile` alone kept the literal `C:\Windows\Temp`, beside a
+  # `Dir.tempdir` in the user's profile.
+  unset = ["TMPDIR", "TEMP", "TMP"]
+  kept_values = unset.map { |name| ENV[name]? }
+  unset.each { |name| ENV[name] = nil }
+  bare = File.tempfile("std_file_ex")
+  bare_dir = Dir.tempdir
+  unset.each_with_index { |name, index| ENV[name] = kept_values[index] }
+  File.delete(bare)
+  assert_str bare_dir, File.dirname(bare), "with no TMPDIR, TEMP or TMP, tempfile makes its file in Dir.tempdir"
+  puts "  tempfile asks Windows where Dir.tempdir does"
 {% end %}
 File.delete(ta)
 File.delete(tb)

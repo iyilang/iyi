@@ -1,8 +1,8 @@
 require "../syntax"
 
 module Iyi
-  def self.format(source, filename = nil, report_warnings : IO? = nil, flags : Array(String)? = nil)
-    Iyi::Formatter.format(source, filename: filename, report_warnings: report_warnings, flags: flags)
+  def self.format(source, filename = nil, flags : Array(String)? = nil)
+    Iyi::Formatter.format(source, filename: filename, flags: flags)
   end
 
   # iyi: *result*, the formatter's text for *source*, in the line endings
@@ -79,11 +79,16 @@ module Iyi
   end
 
   # The numbers of the lines whose line break a literal holds, or nil when
-  # *text* does not parse.
+  # *text* does not parse. A literal in macro text - a macro's body, a `{%
+  # if %}`'s - is text to the parser, so the lexer names those lines as it
+  # passes them: unseen, a bare `\n` inside `"a` / `b"` in a CRLF file's
+  # macro came back `\r\n`, and `puts "a` / `b".bytesize` printed 3
+  # before `fmt` and 4 after.
   private def self.literal_lines(filename : String, text : String) : Set(Int32)?
     lines = Set(Int32).new
     parser = Parser.new(text)
     parser.filename = filename
+    parser.macro_literal_breaks = lines
     parser.parse.accept(LiteralLines.new(lines))
     lines
   rescue
@@ -107,17 +112,15 @@ module Iyi
   end
 
   class Formatter < Visitor
-    def self.format(source, filename = nil, report_warnings : IO? = nil, flags : Array(String)? = nil)
+    # The parser's warnings are not reported: each one is a spacing the
+    # formatter is about to rewrite, and `iyi fmt` printed "space required
+    # before colon ... (run `crystal tool format` to fix this)" while fixing
+    # exactly that.
+    def self.format(source, filename = nil, flags : Array(String)? = nil)
       parser = Parser.new(source)
       parser.filename = filename
       parser.iyi_source_only = true
       nodes = parser.parse
-
-      # the formatter merely parses the same source again, it shouldn't
-      # introduce any new syntax warnings the parser cannot find
-      if report_warnings
-        parser.warnings.report(report_warnings)
-      end
 
       formatter = new(source, flags: flags)
       # iyi: the formatter re-lexes the source, and `!` is one token in a
@@ -517,7 +520,9 @@ module Iyi
       # under it asks for its own.
       when ModuleDef
         !node.iyi_unit?
-      when Def, ClassDef, LibDef, CStructOrUnionDef, Macro
+      when Def, ClassDef, LibDef, CStructOrUnionDef, Macro, TraitDef, ImplDef
+        # iyi: a trait and an impl are definitions as a class is, and were
+        # left against the code above and below them.
         true
       when VisibilityModifier
         needs_two_lines? node.exp
@@ -601,16 +606,20 @@ module Iyi
         @indent = column
 
         @passed_backslash_newline = true
-        next_token_skip_space
+        found_comment = next_token_skip_space
+
+        # The parser takes the next literal into this one only when it starts
+        # right after the backslash's line break. After a comment or a blank
+        # line this literal has ended and the next is a statement of its own;
+        # taking it in here left the formatter a literal ahead of the tree:
+        # `"a" \` / `# note` / `"b"` was "expecting DELIMITER_START, not
+        # `IDENT, puts`" and "there's a bug formatting".
+        continued = !found_comment && @token.type.delimiter_start? && @token.delimiter_state.kind.string?
 
         write_line if @token.type.newline?
         skip_space_or_newline
 
-        if @token.type.delimiter_start?
-          visit(node)
-        else
-          # empty continuation
-        end
+        visit(node) if continued
 
         @string_continuation -= 1
       else
@@ -641,20 +650,17 @@ module Iyi
       end
     end
 
+    # A line that ends inside a literal ends in the program's data, which
+    # `finish` must not strip: the trailing blanks and the `\r` of
+    # `"a  ` / `b"` went, so `x.bytesize` printed 5 before `fmt` and 3
+    # after, and a CRLF break inside a string in an LF file printed 4 and
+    # then 3. Only heredocs were spared.
     private def write_sanitized_string_body(escape, no_rstrip = false)
       body = @token.invalid_escape ? @token.value.as(String) : @token.raw
       body = Lexer.escape_forbidden_characters(body) if escape
-      # iyi: a line that ends inside a string ends in the string's own bytes:
-      # `"b   ⏎c"` is "b   \nc", and trimming the line took the spaces (or
-      # a `\r` before the line feed) out of the string. Only those lines are
-      # kept as written; the line the string closes on is still trimmed.
-      if !no_rstrip && body.includes?('\n')
-        first_line = @line
-        write body
-        (first_line...@line).each { |line| @no_rstrip_lines.add line }
-        return
-      end
+      first_line = @line
       write body, no_rstrip: no_rstrip
+      first_line.upto(@line - 1) { |line| @no_rstrip_lines << line }
     end
 
     def visit(node : StringInterpolation)
@@ -1462,7 +1468,12 @@ module Iyi
     end
 
     def format_nested(node, indent = @indent, write_end_line = true, write_indent = true)
-      slash_is_regex!
+      # The body's first token is read with a `/` taken as a regex - unless
+      # a comment ending the line above has had it read already, and the
+      # flag would fall on the token after it: under `if b > 1 # c`, `a /=
+      # b` lexed `/= b` as a regex and the formatter failed on "expecting
+      # keyword end, not `IDENT, b`".
+      slash_is_regex! unless @wrote_newline && !@token.type.newline? && !@token.type.space? && !@token.type.op_semicolon?
       if node.is_a?(Nop)
         skip_space_write_line
       else
@@ -3209,10 +3220,16 @@ module Iyi
       elsif @token.type.op_lcurly?
         write "," if needs_comma
         write " {"
-        next_token_skip_space
+        next_token
+        skip_space(@indent + 2)
         body = format_block_args node.args, node
         next_token_skip_space_or_newline if @token.type.op_semicolon?
-        if @token.type.newline?
+        # A comment after `{` or `|x|` has taken the line break with it, and
+        # the block is a nested one all the same: this asked only for the
+        # break, wrote the body after the comment, and the `}` after the
+        # last line's comment, where it closed nothing - `run { # c` /
+        # `puts y # d` / `}` came back with `# d }`, which does not compile.
+        if @token.type.newline? || @wrote_newline
           format_nested body
           skip_space_or_newline
           write_indent
@@ -3368,7 +3385,9 @@ module Iyi
       end
       skip_space_or_newline
       write_token :OP_BAR
-      skip_space
+      # Inside the block, where the comment lines under `do |x| # c` are:
+      # they went out to the call's column.
+      skip_space(@indent + 2)
 
       node.body
     end
@@ -3525,7 +3544,11 @@ module Iyi
       write " "
       write node.op
       write "="
-      next_token_skip_space
+      # A comment after the operator keeps its line break, as after `=`: it
+      # took the break with it, and `x += # c` / `  2` came back with the
+      # value one column in.
+      next_token
+      skip_space(consume_newline: false)
       accept_assign_value_after_equals node.value
 
       false
@@ -3533,8 +3556,13 @@ module Iyi
 
     def accept_assign_value_after_equals(value, check_align = false)
       if @token.type.newline?
-        next_token_skip_space_or_newline
+        # The line is broken before the comments under `x =`, which stay on
+        # lines of their own above the value: they were written after the
+        # `=` with a blank line under them, and a second `fmt` moved the next
+        # comment up beside the first - `x = # c # d`.
+        next_token
         write_line
+        skip_space_or_newline(@indent + 2)
         write_indent(@indent + 2, value)
       else
         write " "
@@ -3671,15 +3699,26 @@ module Iyi
         write_token :OP_COLON_COLON
         skip_space_or_newline
         write_token :OP_LCURLY
-        skip_space_or_newline
+        # A comment in the list keeps its line, and a name after a comment
+        # starts a line of its own, indented: `{JSON,` / `# more` /
+        # `Builder}` came back as `{JSON, # more` / `Builder}` with the name
+        # at the line's start, and a second `fmt` put two spaces before the
+        # comment. Without a comment the list is one line, as before.
+        skip_space_or_newline(@indent + 2, last: true)
         names.each_with_index do |name, i|
+          write_indent(@indent + 2) if @wrote_newline
           write name
-          next_token_skip_space_or_newline
+          next_token
+          skip_space_or_newline(@indent + 2, last: true)
           if @token.type.op_comma?
-            write ", " unless last?(i, names)
-            next_token_skip_space_or_newline
+            last = last?(i, names)
+            write "," unless last
+            next_token
+            skip_space_or_newline(@indent + 2, last: true)
+            write " " unless last || @wrote_newline
           end
         end
+        write_indent if @wrote_newline
         write_token :OP_RCURLY
       end
 
@@ -3785,9 +3824,10 @@ module Iyi
     def visit(node : Recover)
       accept node.exp
       skip_space
-      # iyi: `read(path)` and `.or(0)` on the line under it, the way a call
-      # chain is broken. The `.` is not the next token there, and `write_token`
-      # raised on the newline; this is what `visit(Call)` does at its dot.
+
+      # On the next line, as a call's `.bar` may be: `g(-1)` / `  .or(2)`
+      # was "expecting ., not `NEWLINE`" and "there's a bug formatting".
+      base_indent = @indent
       if @token.type.newline? || @wrote_newline
         base_indent = @indent + 2
         indent(base_indent) { consume_newlines }
@@ -3800,9 +3840,18 @@ module Iyi
         write "or"
         next_token_skip_space
         write_token :OP_LPAREN
-        skip_space_or_newline
-        accept default
-        skip_space_or_newline
+        # A comment in the parentheses keeps its line, and the lines under
+        # it are indented: `.or( # c` / `2)` came back with the `2` at the
+        # line's start.
+        if skip_space_or_newline(base_indent + 2, last: true)
+          write_indent(base_indent + 2)
+          indent(base_indent + 2, default)
+        else
+          accept default
+        end
+        if skip_space_or_newline(base_indent + 2, last: true)
+          write_indent(base_indent)
+        end
         write_token :OP_RPAREN
       else
         write "or_panic"
@@ -3834,9 +3883,7 @@ module Iyi
       next_token_skip_space
 
       if value = node.value
-        write_token " ", :OP_EQ, " "
-        skip_space_or_newline
-        accept value
+        write_type_value_after_equals value
       end
 
       false
@@ -4584,12 +4631,25 @@ module Iyi
       end
 
       skip_space
-      write_token " ", :OP_EQ, " "
-      skip_space_or_newline
-
-      accept value
+      write_type_value_after_equals value
 
       false
+    end
+
+    # The value of `type X =` on the `=` line, as it always was, unless a
+    # comment comes between: then the comments keep their lines and the
+    # value goes under them, indented. `type X =` / `# c` / `Int32` came
+    # back as `type X = # c`, a blank line and the value, and a second
+    # `fmt` took the blank line out.
+    private def write_type_value_after_equals(value)
+      write_token " ", :OP_EQ
+      if skip_space_or_newline(@indent + 2, last: true)
+        write_indent(@indent + 2)
+        indent(@indent + 2, value)
+      else
+        write " "
+        accept value
+      end
     end
 
     def visit(node : ProcPointer)
@@ -4672,9 +4732,11 @@ module Iyi
         write_token :OP_LCURLY
         write " " if a_def.body.is_a?(Nop)
       end
-      skip_space
+      skip_space(@indent + 2)
 
-      if @token.type.newline?
+      # A comment after `{` or `do` has taken the line break: `-> do # c` /
+      # `x + 1 # d` / `end` came back with `# d end`, as a block did.
+      if @token.type.newline? || @wrote_newline
         format_nested a_def.body
       else
         skip_space_or_newline
@@ -5163,14 +5225,20 @@ module Iyi
               @doc_comments << current_doc_comment if current_doc_comment.needs_format
               @current_doc_comment = nil
             else
-              # Normalize crystal language tag
-              if language.in?("cr", "crystal")
+              # iyi: an untagged fence is in the file's own language, and so
+              # is one tagged with that language's name. `crystal` and `cr`
+              # say so of a `.cr` file and are dropped there, as they always
+              # were; in a `.iyi` file they name the other language, and
+              # dropping them relabelled the other language's example as
+              # iyi, to be read - and formatted - by iyi's rules from then
+              # on; while an `iyi` fence, the file's own code, never was.
+              iyi = Lexer.iyi_source?(@filename)
+              if !iyi && language.in?("cr", "crystal")
                 value = value.rchop(language)
                 language = ""
               end
 
-              # We only format crystal code (empty by default means crystal)
-              needs_format = language.empty?
+              needs_format = language.empty? || (iyi && language == "iyi")
               @current_doc_comment = CommentInfo.new(@line + 1, needs_format)
             end
           end

@@ -134,12 +134,19 @@ pub trait Iterator
     SkipWhileIterator(self, Elem).new(self, func)
   end
 
-  def zip(other : O) : ZipIterator(self, Elem, O, O::Elem) forall O
+  # Bounded, as `Enumerable#zip` is (SPEC.md II.6 finding 6). Unbounded, a
+  # zip with an array was refused from inside this file, "undefined
+  # constant O::Elem" at the line below, and a chain with one from
+  # `ChainIterator#next`; with `forall O : Iterator` the refusal names the
+  # caller's line, the argument's type and `O`. A chain of two element
+  # types yields either, as the other library's does: it was a return-type
+  # error inside `ChainIterator`.
+  def zip(other : O) : ZipIterator(self, Elem, O, O::Elem) forall O : Iterator
     ZipIterator(self, Elem, O, O::Elem).new(self, other)
   end
 
-  def chain(other : O) : ChainIterator(self, O, Elem) forall O
-    ChainIterator(self, O, Elem).new(self, other)
+  def chain(other : O) : ChainIterator(self, O, Elem | O::Elem) forall O : Iterator
+    ChainIterator(self, O, Elem | O::Elem).new(self, other)
   end
 
   def flat_map(&func : Elem -> Array(U)) : FlatMapIterator(self, Elem, U) forall U
@@ -237,13 +244,18 @@ pub trait Iterator
     count
   end
 
-  # Pulls one element to answer, and that element is gone: an iterator is a
-  # pull, so a predicate over one cannot be free. The block form below reads
-  # as much as it has to and no more. Said here because a method spelled
-  # like a question that quietly takes an element is the kind of thing a
-  # caller finds out from the answer to the *next* question.
+  # Whether an element is truthy, which is what the other library's `any?`
+  # answers: this said whether there was an element at all, so
+  # `Iterator.of([false, false]).any?` was true. It pulls until it meets a
+  # truthy element, and what it pulled is gone: an iterator is a pull, so a
+  # predicate over one cannot be free. For a source with no `false` in it
+  # that is one element. The block form below reads as much as it has to
+  # and no more. Said here because a method spelled like a question that
+  # quietly takes elements is the kind of thing a caller finds out from the
+  # answer to the *next* question.
   def any? : Bool
-    !self.next.nil?
+    each { |e| return true if e }
+    false
   end
 
   def any?(& : Elem -> Bool) : Bool
@@ -347,11 +359,14 @@ end
 # its source by value, and a struct source was copied into it, so
 # `it.first(2).to_a` and then `it.to_a` gave [1, 2] and [1, 2, 3, 4] where
 # the other library gives [1, 2] and [3, 4]. Shared, the adaptor's pulls
-# are the source's. An adaptor that counts or remembers - take, skip, the
-# two whiles, chain, flat_map, each_cons, with_index, cycle(n), step - is a
-# class for the same reason: a struct copy kept its own count over the
-# shared source, so `s = it.skip(2)`, `s.first(1)`, `s.to_a` skipped twice.
-# The adaptors that remember nothing stay structs.
+# are the source's. An adaptor that keeps a count, a flag or a buffer is
+# the source of whatever is built on it, so it is a class for the same
+# reason: as a struct it was copied too, and `t = it.take(3)`,
+# `t.first(2).to_a` and then `t.to_a` gave [3, 4, 5] where the other
+# library gives [3], `each_cons` handed its first window out again and
+# `step` and `with_index` restarted their strides and counts. An adaptor
+# that keeps only its sources, a block or a size stays a struct: a copy of
+# it pulls from the same place.
 pub class ArrayIterator(T)
   def initialize(@array : Array(T))
     @index = 0
@@ -717,10 +732,11 @@ pub struct ZipIterator(I1, T1, I2, T2)
   def initialize(@iter1 : I1, @iter2 : I2)
   end
 
+  # Asks the second source only when the first has an element. Asking both
+  # took one from the second each time the first had run out: after
+  # `a.zip(b).to_a` with `a` = [1] and `b` = [10, 20, 30], `b.next`
+  # answered 30 where the other library and Python's `zip` answer 20.
   def next : Tuple(T1, T2)?
-    # The second source is pulled only once the first has answered, as in
-    # the other library: pulling both ran the second's blocks for a pair
-    # that never came and took that element from a shared source.
     item1 = @iter1.next
     return nil if item1.nil?
     item2 = @iter2.next
@@ -732,10 +748,8 @@ end
 impl Iterator for ZipIterator(I1, T1, I2, T2) forall I1, T1, I2, T2
   type Elem = Tuple(T1, T2)
 
+  # Not asking the second source once the first has run out, as above.
   def next : Tuple(T1, T2)?
-    # The second source is pulled only once the first has answered, as in
-    # the other library: pulling both ran the second's blocks for a pair
-    # that never came and took that element from a shared source.
     item1 = @iter1.next
     return nil if item1.nil?
     item2 = @iter2.next
@@ -947,7 +961,7 @@ impl Iterator for WithIndexIterator(I, T) forall I, T
   end
 end
 
-pub struct CycleIterator(I, T)
+pub class CycleIterator(I, T)
   def initialize(@iter : I)
     @cache = [] of T
     @cached = false

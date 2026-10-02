@@ -401,7 +401,7 @@ def package_fixture(home):
 def opened(c, work, name, text):
     """Write *name* under *work*, open it, and wait for its verdict."""
     path = os.path.join(work, name)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     uri = file_uri(path)
     c.send("textDocument/didOpen", {"textDocument": {

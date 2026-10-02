@@ -435,6 +435,68 @@ PY
       big_case line 2147483648 "iyi: panic: a line is past the 2147483647 bytes a string holds"
       rm -f "$WORK"/big*.bin
     fi
+
+    # 9. The console's mode after Ctrl-C and Ctrl-Break. Either ends the
+    #    program through Windows' own handler, past every exit of iyi's,
+    #    and the console was left with VT processing on: mode 7 where it
+    #    had been 3. A handler of iyi's (`__iyi_win_console_ctrl`) puts the
+    #    mode back and passes the event on, so the program still ends the
+    #    way Windows ends it, with STATUS_CONTROL_C_EXIT. Python runs the
+    #    program in a console of its own, sets the mode without VT, sends
+    #    each event and reads the mode after.
+    echo
+    echo "== the console's mode after Ctrl-C and Ctrl-Break"
+    printf 'module interrupted\n\nputs "hello"\nsleep(10000)\nputs "slept"\n' > "$WORK/interrupted.iyi"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the mode is unmeasured"
+    elif ! "$IYI" build -o "$WORK/interrupted" "$WORK/interrupted.iyi" > "$WORK/interrupted.build" 2>&1; then
+      echo "  the interrupted program did not build"; sed -n '1,10p' "$WORK/interrupted.build"; status=1
+    else
+      cat > "$WORK/interrupted.py" <<'PY'
+import ctypes, os, subprocess, sys, time
+from ctypes import wintypes
+k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+k32.CreateFileW.restype = wintypes.HANDLE
+program, result = sys.argv[1], sys.argv[2]
+if os.environ.get("INTERRUPTED_INNER") != "1":
+    info = subprocess.STARTUPINFO(); info.dwFlags = 1; info.wShowWindow = 0
+    inner = subprocess.Popen([sys.executable, __file__] + sys.argv[1:],
+                             env=dict(os.environ, INTERRUPTED_INNER="1"), creationflags=0x10, startupinfo=info)
+    inner.wait(timeout=90)
+    print(open(result).read() if os.path.exists(result) else "UNMEASURED: the inner copy wrote nothing")
+    sys.exit(0)
+keep = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)(lambda event: True)
+conout = k32.CreateFileW("CONOUT$", 0xC0000000, 3, None, 3, 0, None)
+mode, lines = wintypes.DWORD(), []
+for name, event in (("c", 0), ("break", 1)):
+    k32.SetConsoleMode(conout, 3)
+    k32.GetConsoleMode(conout, ctypes.byref(mode))
+    before = mode.value
+    # Ctrl-C reaches a child only if this process does not ignore it.
+    k32.SetConsoleCtrlHandler(None, False)
+    child = subprocess.Popen([program])
+    time.sleep(1.5)
+    k32.SetConsoleCtrlHandler(keep, True)
+    k32.GenerateConsoleCtrlEvent(event, 0)
+    try:
+        code = str(child.wait(timeout=20) & 0xFFFFFFFF)
+    except subprocess.TimeoutExpired:
+        child.kill(); code = "TIMEOUT"
+    k32.SetConsoleCtrlHandler(keep, False)
+    k32.GetConsoleMode(conout, ctypes.byref(mode))
+    lines.append(f"{name}: exit {code} before {before} after {mode.value}")
+open(result, "w").write("\n".join(lines) + "\n")
+PY
+      "$PY" "$WORK/interrupted.py" "$WORK/interrupted.exe" "$WORK/interrupted.result" > "$WORK/interrupted.out" 2>&1
+      if grep -q '^UNMEASURED' "$WORK/interrupted.out"; then
+        echo "  no console here, so the mode is unmeasured: $(cat "$WORK/interrupted.out")"
+      elif grep -qx 'c: exit 3221225786 before 3 after 3' "$WORK/interrupted.out" &&
+           grep -qx 'break: exit 3221225786 before 3 after 3' "$WORK/interrupted.out"; then
+        echo "  Ctrl-C and Ctrl-Break end the program and leave the console's mode at 3"
+      else
+        echo "  an interrupted program left the console otherwise:"; sed 's/^/    /' "$WORK/interrupted.out"; status=1
+      fi
+    fi
     ;;
 esac
 

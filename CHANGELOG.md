@@ -142,6 +142,16 @@
 
 ### Fixed
 
+- **Ctrl-C and Ctrl-Break put the Windows console's mode back.** Either
+  ends a program through Windows' own handler, past every exit of iyi's, so
+  a console the program had written to was left with VT processing on: mode
+  7 after the program where it had been 3. A console control handler,
+  registered before the program runs and so asked last, restores the mode
+  and passes the event on; the process still ends with
+  STATUS_CONTROL_C_EXIT, and a `Signal.wait` that takes the event answers it
+  first. `bench/io_exercise.sh` sends both events; the old runtime left the
+  mode at 7.
+
 - **Output buffered with `sync = false` reaches standard output when the
   program ends, at `exit` and at a panic.** Nothing flushed the standard
   streams' buffers: `STDOUT.sync = false`, two lines printed, then the

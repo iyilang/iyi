@@ -525,6 +525,9 @@ end
                       written : Int32*, reserved : Void*) : Int32
     fun ReadConsoleW(handle : Void*, buffer : Void*, count : Int32,
                      read : Int32*, control : Void*) : Int32
+    # The console's mode put back on Ctrl-C and Ctrl-Break
+    # (`__iyi_win_console_ctrl`).
+    fun SetConsoleCtrlHandler(handler : Void*, add : Int32) : Int32
     # The stack, walked by the kernel's own unwinder. x86-64 Windows has no
     # frame pointer to chase — a frame is described by the unwind data in
     # `.pdata`, which is what `RtlCaptureStackBackTrace` reads — so a panic
@@ -9554,6 +9557,20 @@ end
     LibC.ExitProcess(1)
   end
 
+  # Ctrl-C and Ctrl-Break end a program through Windows' own handler,
+  # `ExitProcess`, past every exit of iyi's, and the console was left with
+  # VT processing on: mode 7 after the program where it had been 3, the
+  # mode `restore_vt` puts back at every other ending. This handler puts it
+  # back and answers FALSE, so the event goes on to the next handler and in
+  # the end to Windows' default, which ends the process as before. It is
+  # registered before the program runs, so it is asked last: a
+  # `Signal.wait` that takes the event answers it first, and the program
+  # goes on with VT processing as it had it.
+  fun __iyi_win_console_ctrl(event : Int32) : Int32
+    IyiConsole.restore_vt
+    0
+  end
+
   fun __iyi_win_fault(info : Void*) : Int32
     record = Pointer(UInt64).new(info.address).value
     code = Pointer(Int32).new(record).value
@@ -9628,6 +9645,9 @@ end
     # word and it is callable from outside iyi.
     filter = ->__iyi_win_fault(Void*)
     address = Pointer(Void).new(Pointer(UInt64).new(pointerof(filter).address).value)
+    # The console's control handler, registered first so it is asked last.
+    ctrl = ->__iyi_win_console_ctrl(Int32)
+    LibC.SetConsoleCtrlHandler(Pointer(Void).new(Pointer(UInt64).new(pointerof(ctrl).address).value), 1)
     # Both, and the vectored one is the one that works: a program whose
     # entry point is the CRT's `mainCRTStartup` runs inside
     # `__scrt_common_main_seh`, whose own `__except` takes a stack overflow

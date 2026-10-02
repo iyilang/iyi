@@ -5051,8 +5051,10 @@ module Iyi
       return unless atomic.is_a?(Propagate) && (call = atomic.exp).is_a?(Call)
       return unless @token.type.op_lcurly? || @token.type.op_lparen? || @token.keyword?(:do)
 
+      # An argument list was told `!` "takes no block" too: `nomacro!(1)`.
+      taken = @token.type.op_lparen? ? "arguments" : "block"
       raise <<-MSG, @token
-        `#{call.name}!` is not a method here: `!` propagates an error, and takes no block
+        `#{call.name}!` is not a method here: `!` propagates an error, and takes no #{taken}
 
         `!` can't be part of a name in iyi (SPEC.md III.1.7a), so the pair
         Crystal spells `#{call.name}` and `#{call.name}!` is spelled after the

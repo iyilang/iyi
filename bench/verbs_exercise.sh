@@ -254,6 +254,11 @@ printf 'module deep\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\npu
 refuses "a program that ran out of stack" "stack overflow" -- "$IYI" run deep.iyi
 printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
+# `name!(1)`: the `!` is a propagation, and an argument list was told it
+# "takes no block".
+printf 'module bangargs\n\nnomacro!(1)\n' > bangargs.iyi
+refuses "a call spelled with ! and arguments" 'propagates an error, and takes no arguments' -- \
+  "$IYI" check bangargs.iyi
 # A program's own exit status is `iyi run`'s, a negative one too. On
 # Windows `exit(-1)` is 0xFFFFFFFF, which the runner took for an abnormal
 # end: "terminated abnormally, the cause is unknown", and exit 1.

@@ -4575,6 +4575,10 @@ end").as(ClassDef)
             parse(source, filename: "x.iyi")
           end
         end
+        # An argument list after the `!` was told it "takes no block".
+        expect_raises(SyntaxException, "`nomacro!` is not a method here: `!` propagates an error, and takes no arguments") do
+          parse("nomacro!(1)", filename: "x.iyi")
+        end
       end
 
       # Three more arrivals, each a sentence rather than the token the

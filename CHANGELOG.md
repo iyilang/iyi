@@ -142,6 +142,14 @@
 
 ### Fixed
 
+- **`nomacro!(1)` is told `!` takes no arguments.** The refusal of a
+  `!` followed by a block or an argument list used one sentence for both:
+  "`nomacro!` is not a method here: `!` propagates an error, and takes no
+  block", under an argument list. It says "takes no arguments" before
+  `(` now. `bench/verbs_exercise.sh` and
+  `spec/compiler/parser/parser_spec.cr` check it; the old compiler said
+  "takes no block".
+
 - **The spacing warnings name `iyi fmt`, and `iyi fmt` does not print
   them while it fixes them.** `def f(x : Int32): Int32` drew "Warning:
   space required before colon in return type restriction (run `crystal

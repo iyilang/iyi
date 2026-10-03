@@ -111,11 +111,10 @@ struct Char
     ord
   end
 
-  # The character *other* code points on: what `'a'..'z'` steps by.
+  # The character *other* code points on: what `'a'..'z'` steps by. `chr`
+  # refuses a surrogate too, where `'\u{D7FF}' + 1` was U+D800.
   def +(other : Int32) : Char
-    point = ord + other
-    raise "#{point} is out of char range" if point < 0 || point > 0x10FFFF
-    point.unsafe_chr
+    (ord + other).chr
   end
 
   {% for op in %w(== != < <= > >=) %}

@@ -168,6 +168,9 @@ panics_with "2^63 as an int64" edge_i64 "arithmetic overflow" "92233720368547758
 # are not characters at all: a surrogate half, and past U+10FFFF.
 panics_with "a surrogate is no character" surrogate_chr "out of char range" "0xD800.chr"
 panics_with "past the last code point" past_chr "out of char range" "0x110000.chr"
+# `Char#+` steps by code point and lands on no surrogate either: it checked
+# the two ends alone, and `'\u{D7FF}' + 1` was U+D800, invalid UTF-8.
+panics_with "a step onto a surrogate" surrogate_step "out of char range" "'\\u{D7FF}' + 1"
 
 # And the same value through the unchecked form, which is the pair of every
 # panic above: the instruction without the check. It is spelled

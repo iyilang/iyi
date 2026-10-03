@@ -333,7 +333,7 @@ prove_fails "tuple === is equality" tuple_case "tuple: a tuple of types matches 
 
 # A character that steps by two: the walk skips every other letter.
 prove_fails_primitives "a character plus one is two on" char_step "range: characters walk by one" \
-  's/^    point = ord + other$/    point = ord + other * 2/'
+  's/^    (ord + other).chr$/    (ord + other * 2).chr/'
 
 echo
 if [ "$status" -eq 0 ]; then

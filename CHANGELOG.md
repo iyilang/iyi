@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`Char#+` refuses to land on a surrogate, as `chr` and the other
+  library's `Char#+` refuse it.** It checked the two ends of the code
+  points alone, so `('\u{D7FF}' + 1).ord` was 55296, U+D800, and its `to_s`
+  the three bytes ED A0 80, which every other method reads back as three
+  U+FFFD. It goes through `Int32#chr` now and panics "55296 is out of char
+  range" as `0xD800.chr` does; the other library raises "0xd800 out of
+  char range". `bench/number_exercise.sh` drives the panic; the old
+  prelude answered 55296.
+
 - **`samples/iyi/calc` reads what Windows pipes, and an error exits 1.** Its
   lexer had no case for `\r`: `x = 2 + 3 * 4` and `x * 10` with CRLF line
   ends answered "error: unexpected character at 13", and `echo 2 + 3 * 4|`

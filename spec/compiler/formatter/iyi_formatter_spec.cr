@@ -82,6 +82,13 @@ describe "Formatter on iyi" do
   assert_iyi_format "while x.nil? # c\n  # body\n  x = 1\nend"
   assert_iyi_format "raise \"x\" if pwd.nil? # c\n# next\nputs 1"
 
+  # A suffix `if`/`unless` on an `if`/`unless` block. The keyword in front
+  # was taken for the prefix form: fmt wrote the inner block, asked for
+  # `if` at the line break after its condition, and died.
+  assert_iyi_format "if true\n  puts 1\nend if false"
+  assert_iyi_format "unless false\n  puts 1\nend unless true"
+  assert_iyi_format "if a\n  1\nelse\n  2\nend if b"
+
   # Traits, their supertraits, and the associated types they declare.
   assert_iyi_format "module m\n\npub trait Show\n  abstract def show : String\nend"
   assert_iyi_format "module m\n\npub trait Ord : Cmp\n  abstract def cmp(other : self) : Int32\nend"

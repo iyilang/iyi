@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`fmt` formats a suffix `if` or `unless` on an `if` or `unless`
+  block.** `if true` / `puts 1` / `end if false` compiled, and `fmt`
+  answered "there's a bug formatting", exit 1: it told the suffix form
+  from the block form by the keyword in front, which was the inner
+  block's `if`, wrote that block, and asked for `if` at the line break
+  after `true`. `end unless` and an `if`/`else` block under `if` failed
+  the same way. The suffix form is now the one whose body starts where
+  the node does. `spec/compiler/formatter/iyi_formatter_spec.cr` formats
+  all three; the old formatter raised "expecting keyword if, not
+  `NEWLINE`".
+
 - **A `{` block or proc whose body starts on the opener's line keeps its
   `}` or `end` out of a comment ending the body's last line.** `fmt`
   wrote `[1].each { |i| puts i` / `puts 2 # c` / `}` as `puts 2 # c }`,

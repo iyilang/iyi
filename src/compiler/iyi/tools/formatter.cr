@@ -1402,7 +1402,13 @@ module Iyi
     end
 
     def visit_if_or_unless(node, keyword : Keyword)
-      if !@token.keyword?(keyword) && node.else.is_a?(Nop)
+      # The suffix form is the one whose body starts where the node does: the
+      # keyword in front is no test when that body is itself an `if` block -
+      # `if a` / `puts 1` / `end if b` took the prefix path at the inner `if`,
+      # wrote its body and asked for `if` where the source had a line break,
+      # and fmt answered "there's a bug formatting" on code that compiled.
+      suffix = !@token.keyword?(keyword) || (!node.location.nil? && node.then.location == node.location)
+      if suffix && node.else.is_a?(Nop)
         # Suffix if/unless
         accept node.then
         write_keyword " ", keyword, " "

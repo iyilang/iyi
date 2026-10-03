@@ -243,6 +243,20 @@ assert_int(retried.retries, 3, "getter: an untyped default is the field's value"
 assert_int(retried.names.size, 1, "getter: an untyped default is the field's own object")
 assert_str(retried.label, "second", "property: an untyped default is written over")
 
+# ---- 7. A struct of the program's own, which is its fields as the other
+# library's is. `Object#==` answered false, so a struct was not equal to
+# itself, `includes?` missed it and a struct key was never found again.
+struct Point
+  def initialize(@x : Int32, @label : String)
+  end
+end
+
+point = Point.new(1, "a")
+assert_true(point == point && point == Point.new(1, "a"), "struct: equal to itself and to its copy")
+assert_true(point != Point.new(2, "a") && point != Point.new(1, "b"), "struct: a field changes it")
+assert_true([point].includes?(Point.new(1, "a")), "struct: includes? finds its copy")
+assert_str({point => "found"}[Point.new(1, "a")]? || "missing", "found", "struct: a hash key found")
+
 puts "all value checks passed"
 
 LATER_WORDS = ["a", "b", "c"]

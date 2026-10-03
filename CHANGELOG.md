@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A struct with no `==` of its own equals another of its type whose
+  fields are equal, as the other library's `Struct#==` has it.** `Object#==`
+  answers false, so a struct was not even equal to itself: for `b =
+  Bar.new(1)`, `b == b` and `[b].includes?(b)` were false and `{b =>
+  "found"}[b]?` was nil. `Struct#==` now compares each instance variable
+  with its own `==`; a struct of another type is still unequal. Hashing
+  stays `Object#hash`, every value of the type in one slot, correct and
+  slow. `bench/value_exercise.sh` checks it; the old prelude failed at
+  "struct: equal to itself and to its copy".
+
 - **`arr.sort_in_place` with no block sorts the array in place by `<`.**
   SPEC.md III.1.7a pairs it with `sorted` and the compiler's hint for
   `sort!` names both, but only `sorted` had the blockless form: the call was

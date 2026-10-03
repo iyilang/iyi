@@ -1,7 +1,5 @@
-# What every value can do — SPEC.md, "0.1.0", item 3.
-#
-# Small on purpose. `to_s` returns a `String` rather than taking an `IO`, which
-# is the single biggest saving against Crystal's core: an `IO` here would bring
+# What every value can do — SPEC.md, "0.1.0", item 3. Small on purpose:
+# `to_s` returns a `String` rather than taking an `IO`, which would bring
 # buffering, encodings and a class hierarchy for the sake of `puts`.
 class Object
   # The type's own name, which is what a value that has said nothing about
@@ -10,17 +8,15 @@ class Object
     {{ @type.name.stringify }}
   end
 
-  # What a value looks like written down rather than printed. The two differ
-  # for `nil` and for strings, which is the whole reason a sample reaches for
-  # it: `#{value.inspect}` is how it shows that a value is absent.
+  # What a value looks like written down rather than printed: the two differ
+  # for `nil` and strings, and `#{value.inspect}` shows a value is absent.
   def inspect : String
     to_s
   end
 
   # Every type is usable as a `Hash` key, and one that has not said how it
-  # hashes hashes to its type. That is correct and useless — every value of
-  # such a type lands in one slot — which is the honest default: a type that
-  # is used as a key defines `hash`.
+  # hashes hashes to its type: correct and useless, every value of the type
+  # in one slot, the honest default. A type used as a key defines `hash`.
   def hash : Int32
     crystal_type_id
   end
@@ -46,6 +42,19 @@ class Object
   # answers with something stronger - a range, a class, a tuple.
   def ===(other) : Bool
     self == other
+  end
+end
+
+# A struct is its fields, as the other library's `Struct#==` has it: two are
+# equal when each field is. `Object#==` answers false, so a struct was not
+# equal to itself - `b == b` was false and `{b => 1}[b]?` nil. `Object#hash`
+# stays correct for it, one slot a type; a struct that is a key writes one.
+struct Struct
+  def ==(other : self) : Bool
+    {% for ivar in @type.instance_vars %}
+      return false unless @{{ ivar.id }} == other.@{{ ivar.id }}
+    {% end %}
+    true
   end
 end
 
@@ -80,19 +89,14 @@ end
 # tuple out and answers `[]`; what it looks like printed is the prelude's,
 # one element per position, each inspected.
 struct Tuple
-  # How many, which is the type's own arithmetic rather than anything a
-  # caller counts. It arrived inside `format.iyi` because `sprintf` walks
-  # its arguments, so `std/indexable` - which asks a tuple of indexes how
-  # long it is - only compiled while a formatter was in every program.
+  # How many: the type's own arithmetic, here rather than in `format.iyi`,
+  # where `std/indexable` could only reach it with a formatter compiled in.
   def size : Int32
     {{ T.size }}
   end
 
   # Indexed by a *value* rather than by a literal, which is what walking a
-  # tuple at runtime needs: `std/indexable`'s `values_at(*indexes)` asks a
-  # tuple of indexes for its members one by one, and `sprintf` walks its
-  # arguments the same way. Both were reading it out of `format.iyi`, so
-  # either one only compiled while a formatter was in the program.
+  # tuple at runtime needs: `std/indexable`'s `values_at` and `sprintf` do.
   def [](index : Int32)
     {% for i in 0...T.size %}
       return self[{{i}}] if index == {{i}}
@@ -101,10 +105,9 @@ struct Tuple
   end
 
   # Two tuples are the same value when their members are. `Object#==` is
-  # identity, so `{1, 2} == {1, 2}` was false, a tuple key was never found
-  # in a `Hash`, and `uniq` over `zip`'s own result kept duplicates. Member
-  # by member where one type holds the other, so `case {1, y} when {1, 2}`
-  # (y : Int32?) matches; `{-1}` and `{-1_i64}` hash apart: unequal.
+  # false, so `{1, 2} == {1, 2}` was, and a tuple key was never found in a
+  # `Hash`. Member by member where one type holds the other, so `case {1,
+  # y} when {1, 2}` (y : Int32?) matches; `{-1}` and `{-1_i64}` are unequal.
   def ==(other : Tuple(*U)) : Bool forall U
     {% for i in 0...(T.size == U.size ? T.size : 0) %}
       return false unless {{ T[i] <= U[i] || U[i] <= T[i] }} && self[{{i}}] == other[{{i}}]
@@ -118,14 +121,11 @@ struct Tuple
     {{ (T.size == U.size ? (0...T.size).map { |i| "self[#{i}] === other[#{i}]" } + ["true"] : ["false"]).join(" && ").id }}
   end
 
-  # And hashing follows equality, or the agreement above buys nothing: a key
-  # is found by its slot first and compared second. `Object#hash` put every
-  # tuple in one slot, correct and useless in the way that comment says.
-  #
-  # Each member multiplied through and its high bits folded back down: `a *
-  # 31 + b` gave a 1,000 by 1,000 grid of points 32,000 hashes between a
-  # million keys, and a table probing a slot at a time turned those runs
-  # into one - it had not filled in ten minutes.
+  # And hashing follows equality: a key is found by its slot first and
+  # compared second, and `Object#hash` put every tuple in one slot. Each
+  # member multiplied through and its high bits folded back down: `a * 31 +
+  # b` gave the million points of a 1,000 by 1,000 grid 32,000 hashes, and
+  # a table probing a slot at a time had not filled in ten minutes.
   def hash : Int32
     value = 0x9E3779B97F4A7C15_u64
     {% for i in 0...T.size %}

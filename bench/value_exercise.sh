@@ -244,6 +244,13 @@ prove_fails "== by identity" no_eq "tuple: == same members" \
 prove_fails "== always true" all_eq "tuple: == different members" \
   's/^      return false unless {{ T\[i\] <= U\[i\] || U\[i\] <= T\[i\] }} \&\& self\[{{i}}\] == other\[{{i}}\]$/      # broken/'
 
+# 2b. A struct's `==` taken away, so `Object#==` answers false again, and
+#     one that reads no field, so every struct of a type is equal.
+prove_fails "struct == gone" no_struct_eq "struct: equal to itself" \
+  '/^struct Struct$/,/^end$/d'
+prove_fails "struct == reads no field" struct_eq_blind "struct: a field changes it" \
+  's/^      return false unless @{{ ivar.id }} == other.@{{ ivar.id }}$/      # broken/'
+
 # 3. One slot for every tuple, which is `Object#hash`. Equality still holds,
 #    so this is the check that a key is found rather than merely compared.
 prove_fails "hash collapsed" no_hash "tuple: order changes the hash" \

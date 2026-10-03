@@ -187,6 +187,11 @@ pub struct Server
     start = 0
     continued = false
     while true
+      # Past the empty lines a client may send before a request: RFC 9112
+      # §2.2 has a server ignore them. Some clients end a body with an extra
+      # CRLF, and the request after it on the connection was answered 400
+      # "not a request line" and closed.
+      start = HTTP.past_empty_lines(buffer, start)
       parsed = parse_request(buffer, start)
       if req = parsed.request
         continued = false
@@ -309,6 +314,7 @@ pub struct Server
   # of `text`: a server parses each request where it lies in
   # what has arrived, and copies none of what follows it.
   def self.parse_request(text : String, from : Int32 = 0) : ParsedRequest
+    from = HTTP.past_empty_lines(text, from)
     split_at = HTTP.find_headers_end(text, from)
     unless split_at
       return ParsedRequest.new(nil, "request headers past #{MAX_HEAD} bytes", true, 0) if text.bytesize - from > MAX_HEAD
@@ -710,6 +716,17 @@ pub struct HTTP
       i = i + 2
     end
     out.to_s
+  end
+
+  # Where *text* goes on at *from* past the empty lines there: what a
+  # server skips before a request line (RFC 9112 §2.2).
+  def self.past_empty_lines(text : String, from : Int32) : Int32
+    p = text.to_unsafe
+    at = from
+    while at + 1 < text.bytesize && p[at] == 13_u8 && p[at + 1] == 10_u8
+      at = at + 2
+    end
+    at
   end
 
   def self.find_headers_end(text : String, from : Int32 = 0) : Int32?

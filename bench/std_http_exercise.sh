@@ -400,6 +400,7 @@ mutate "a signed or low status read as one" 'code_text.bytesize == 3 && digits?(
 mutate "any version under HTTP/" 'sp1 && sp1 == 8 && digits?(line[5, 1]) && line.to_unsafe[6] == 46_u8 && digits?(line[7, 1])' 'sp1'
 mutate "an interim answer taken for the answer" 'break unless status >= 100 && status < 200 && status != 101 && start < text.bytesize' 'break'
 mutate "a 204 written with a body and a length" 'bodiless = (response.status >= 100 && response.status < 200) || response.status == 204 || response.status == 304' 'bodiless = false'
+mutate "an empty line before a request read as one" 'while at + 1 < text.bytesize && p[at] == 13_u8' 'while false && p[at] == 13_u8'
 mutate "a client that reads an answer with a length to the close" 'while answer.bytesize.to_i64 < need' 'while true'
 mutate "a client that reads a chunked answer to the close" 'if te = final.header("Transfer-Encoding")' 'if te = nil.as(String?)'
 mutate "an absolute-form target handed on whole" 'if authority = HTTP.absolute_form(target)' 'if authority = nil.as(Int32?)'

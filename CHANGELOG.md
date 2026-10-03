@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`Server.serve` skips the empty lines before a request line, as RFC
+  9112 §2.2 asks of a server.** A client that ended a body with one more
+  CRLF had its next request on the connection answered 400 and closed:
+  "not a request line: \"\"" after one empty line, "empty request" after
+  two. They are passed over, by `Server.parse_request` too.
+  `bench/std_http_exercise.iyi` sends a body with a CRLF after it and a
+  request after that; the old module answered 400 "empty request".
+
 - **`Server.serve` closes the connection after an answer whose
   `Connection` says `close`.** The block's line was dropped,
   `Connection: keep-alive` written in its place, and the next request on

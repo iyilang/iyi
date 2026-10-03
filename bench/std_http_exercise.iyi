@@ -833,4 +833,32 @@ group do |g|
 end
 puts "  twenty connections that arrived together, each answered its own request"
 
+puts "\n== empty lines before a request"
+# An empty line before a request is skipped (RFC 9112 §2.2): a client that
+# ended its body with one more CRLF had its next request answered 400.
+blank = IyiSocket.listen(0)
+blank_port = blank.local_port
+group do |g|
+  g.spawn do
+    Server.serve(blank) do |req|
+      blank.close if req.path == "/stop"
+      Response.new(200, "#{req.method} #{req.path} #{req.body}")
+    end
+    0
+  end
+  g.spawn do
+    lines = IyiSocket.connect("127.0.0.1", blank_port).or_panic
+    lines.write("POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi\r\n").or_panic
+    assert_str "POST /a hi", HTTP.parse_response(read_response(lines)).body, "a body with a CRLF after it"
+    lines.write("\r\nGET /b HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    after = HTTP.parse_response(read_response(lines))
+    assert_true after.status == 200 && after.body == "GET /b ", "the request after empty lines is served: #{after.status} #{after.body.inspect}"
+    lines.close
+    assert_true !Server.parse_request("\r\nGET /c HTTP/1.1\r\nHost: x\r\n\r\n").request.nil?, "parse_request reads past an empty line"
+    HTTP.get("http://127.0.0.1:#{blank_port}/stop").or_panic
+    0
+  end
+end
+puts "  empty lines before a request are skipped"
+
 puts "\nALL CHECKS PASSED"

@@ -3013,7 +3013,12 @@ module Iyi
         skip_space_or_newline
       end
 
-      with_lexical_var_scope do
+      # iyi: a proc literal's body is not the `defer`'s: `!` in it returns
+      # from the proc, as `return` does, and leaves no cleanup. The count was
+      # read through the literal, so `defer puts((->(s : String) { parse(s)! })
+      # .call("x"))` was refused as leaving the `defer`.
+      inside_defer, @inside_defer = @inside_defer, 0
+      literal = with_lexical_var_scope do
         push_vars params
 
         end_location = nil
@@ -3037,6 +3042,8 @@ module Iyi
         a_def = Def.new("->", params, body, return_type: return_type).at(location).at_end(end_location)
         ProcLiteral.new(a_def).at(location).at_end(end_location)
       end
+      @inside_defer = inside_defer
+      literal
     end
 
     def check_not_pipe_before_proc_literal_body

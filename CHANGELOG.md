@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`!` in a proc literal written inside a `defer` is accepted.** The
+  parser counted the `defer` through the literal's body, so `defer
+  puts((->(s : String) { parse(s)! }).call("x").class)` was refused with
+  "`!` can't propagate out of a `defer`", while `return` in the same
+  place compiled. The `!` returns from the proc and leaves no cleanup;
+  the program now prints `ParseErr`. A `!` in a block inside a `defer` is
+  still refused, since a block's `!` returns from the enclosing function.
+  `spec/compiler/parser/parser_spec.cr` checks both; the old parser
+  refused the proc.
+
 - **`!` works inside the blocks of `Array#sorted` and `#sorted_by`.**
   Both captured their block only to hand it to `sort_in_place` and
   `sort_in_place_by`, so `xs.sorted_by { |x| key_of(x)! }` in a def

@@ -4815,6 +4815,17 @@ end").as(ClassDef)
         end
       end
 
+      # `!` in a proc literal returns from the proc, as `return` there does,
+      # and leaves no cleanup; it was refused as leaving the `defer`. A block
+      # is the enclosing function's, so `!` in one still is.
+      it "propagates out of a proc literal inside a `defer`" do
+        node = parse(%(defer (->(s : String) { parse(s)! }).call("x")), filename: "x.iyi").as(Defer)
+        node.to_s.should contain("parse(s)!")
+        expect_raises(SyntaxException, "`!` can't propagate out of a `defer`") do
+          parse("defer items.each { |x| close(x)! }", filename: "x.iyi")
+        end
+      end
+
       it "still propagates after the `defer` body has been parsed" do
         node = parse("defer f.close\nread(p)!", filename: "x.iyi").as(Expressions)
         node.expressions[0].should be_a(Defer)

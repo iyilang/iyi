@@ -511,12 +511,14 @@ pub struct HTTP
   # `Content-Length` are the request's own lines; a caller's header of
   # that name is refused rather than sent twice. A body's length is
   # always written for the methods a body belongs to, so `POST` with
-  # nothing to say still says `Content-Length: 0`.
+  # nothing to say still says `Content-Length: 0`. A byte of the path past
+  # 127 goes as `%` and two hex digits: a request target is ASCII (RFC
+  # 9112 §3.2, RFC 3986 §2.1), and `/ü` went out as its UTF-8 bytes, raw.
   def self.format_request(method : String, path : String, host : String, body : String = "", headers : Hash(String, String) = {} of String => String) : String
     raise "HTTP: not a method: #{method.inspect}" unless token?(method)
     raise "HTTP: not a request path: #{path.inspect}" if path.bytesize == 0 || has_space_or_control?(path)
     raise "HTTP: not a host: #{host.inspect}" if host.bytesize == 0 || has_space_or_control?(host)
-    req = "#{method} #{path} HTTP/1.1\r\nHost: #{host}\r\nConnection: close\r\n"
+    req = "#{method} #{ascii_target(path)} HTTP/1.1\r\nHost: #{host}\r\nConnection: close\r\n"
     headers.each do |name, value|
       raise "HTTP: not a header name: #{name.inspect}" unless token?(name)
       raise "HTTP: header #{name} contains a line break" if has_break?(value)
@@ -979,6 +981,38 @@ pub struct HTTP
       i = i + 1
     end
     false
+  end
+
+  # *target* with each byte past 127 written `%XX`, as a browser and Go's
+  # client send it; the target itself when it has none.
+  private def self.ascii_target(target : String) : String
+    p = target.to_unsafe
+    n = target.bytesize
+    high = 0
+    i = 0
+    while i < n
+      high = high + 1 if p[i] > 127_u8
+      i = i + 1
+    end
+    return target if high == 0
+    digits = "0123456789ABCDEF".to_unsafe
+    String.new(n + high * 2) do |buf|
+      at = 0
+      i = 0
+      while i < n
+        b = p[i]
+        if b > 127_u8
+          buf[at] = 37_u8
+          buf[at + 1] = digits[b.to_i32 // 16]
+          buf[at + 2] = digits[b.to_i32 % 16]
+          at = at + 3
+        else
+          buf[at] = b
+          at = at + 1
+        end
+        i = i + 1
+      end
+    end
   end
 
   # A control character other than a tab, or DEL: what a field value may

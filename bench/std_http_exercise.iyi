@@ -170,6 +170,11 @@ puts "  Content-Length follows the method and the body"
 assert_str "refused: HTTP: Transfer-Encoding is not sent; a request's body goes with its length", answer { HTTP.format_request("POST", "/", "127.0.0.1", "abc", {"Transfer-Encoding" => "chunked"}) }, "a caller's Transfer-Encoding is not sent"
 puts "  a caller's Transfer-Encoding is refused, the body going with its length"
 
+# A request target is ASCII (RFC 9112 §3.2): a byte past 127 goes as `%`
+# and two hex digits, as Go's client sends it. `/ü/ç?ş=1` went out raw.
+assert_true HTTP.format_request("GET", "/\u00fc/\u00e7?\u015f=1", "127.0.0.1").starts_with?("GET /%C3%BC/%C3%A7?%C5%9F=1 HTTP/1.1\r\n"), "a byte past 127 in the target is percent-encoded"
+puts "  a byte past 127 in the path or the query goes percent-encoded"
+
 puts "\n== response"
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nhi!\n")
 assert_true resp.status == 200, "status"

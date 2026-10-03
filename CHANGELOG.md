@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`HTTP.request` percent-encodes the bytes of a URL's path and query
+  past 127.** `HTTP.get("http://127.0.0.1:P/ü/ç?ş=1")` sent the request
+  line `GET /ü/ç?ş=1 HTTP/1.1`, raw UTF-8 where RFC 9112 §3.2 wants an
+  ASCII target. `format_request` writes each such byte as `%` and two
+  hex digits now, `GET /%C3%BC/%C3%A7?%C5%9F=1 HTTP/1.1`, as Go's client
+  does. `bench/std_http_exercise.iyi` formats that request; without the
+  encoding the line went out raw.
+
 - **`Response#header_values` keeps a field's lines apart, so two
   `Set-Cookie` lines can be read as two.** A repeated field was there
   only joined with ", ", as `header` documents, and a cookie's `Expires`

@@ -1570,9 +1570,15 @@ the first one's methods without a word, and is refused the same way.
 One gap the implementation found, and it is on the parameter side: two impls of
 the same parameterised trait for one type **collide when their methods take the
 same arguments**. `impl Into(String) for U` and `impl Into(Int32) for U` both
-define `into`, and the second silently wins. That is the shape parameters exist
+define `into`, and the second silently won. That is the shape parameters exist
 for, so it needs an answer; Rust's is to select the impl from the type the call
-site expects, which this design does not yet have anywhere else.
+site expects, which this design does not yet have anywhere else. Until it does,
+the collision is refused, naming both impls. Two *different* traits that
+require one method are the same collision without the parameter, and the one
+two independent libraries reach by choosing the same name: `impl Named for
+User` and `impl Column for User` each wrote `label`, and a call through `Named`
+ran Column's. A type has one method of a name and parameters, so the second
+impl is refused, naming both traits, in one module or across two.
 
 **2. Default methods need their own type parameters.**
 

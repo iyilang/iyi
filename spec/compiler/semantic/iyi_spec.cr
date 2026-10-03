@@ -1364,6 +1364,65 @@ describe "Semantic: iyi" do
         Derived.new.f
         CODE
     end
+
+    # Two traits can require one method, and a type implement both. The
+    # second impl's method replaced the first one's, so a call through the
+    # first trait ran the second's.
+    it "refuses an impl writing a method another trait's impl answers" do
+      assert_error <<-CODE, "and impl B for Y writes it again. A type has one method of a name and parameters"
+        trait A
+          abstract def name : Int32
+        end
+
+        trait B
+          abstract def name : Int32
+        end
+
+        struct Y
+        end
+
+        impl A for Y
+          def name : Int32
+            1
+          end
+        end
+
+        impl B for Y
+          def name : Int32
+            2
+          end
+        end
+        CODE
+    end
+
+    # And two impls of one parameterised trait, whose methods take the same
+    # arguments: the second silently won (SPEC.md II.6).
+    it "refuses two impls of a parameterised trait answering one method" do
+      assert_error <<-CODE, "App::Conv::User#into is what impl App::Conv::Into(String) for App::Conv::User answers"
+        module App
+          module Conv
+            trait Into(T)
+              abstract def into : T
+            end
+
+            struct User
+            end
+
+            impl Into(String) for User
+              def into : String
+                "u"
+              end
+            end
+
+            impl Into(Int32) for User
+              def into : Int32
+                1
+              end
+            end
+          end
+        end
+        CODE
+    end
   end
 
   describe "generic impls (SPEC.md II.7)" do

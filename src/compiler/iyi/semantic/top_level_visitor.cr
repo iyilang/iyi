@@ -43,6 +43,11 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # `current_type` is the semantic type; a derive macro is handed syntax.
   @derive_owners = [] of ClassDef
 
+  # iyi: the impl each impl-written def came from, and how to name it, so a
+  # def that replaces one can say whose it was (`iyi_refuse_impl_collision`).
+  # By identity: two impls' defs can be equal as syntax.
+  @iyi_impl_defs = Hash(Def, {ImplDef, String}).new.compare_by_identity
+
   @last_doc : String?
 
   # special types recognized for `@[Primitive]`
@@ -739,8 +744,11 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     container = IyiMod.mono_body_container(trait_type.to_s, target_type.to_s)
 
     impl_methods = [] of IyiMod::Signature
+    trait_label = (trait_args = node.trait_args) ? "#{trait_type.to_s(generic_args: false)}(#{trait_args.join(", ")})" : trait_type.to_s
+    impl_label = "impl #{trait_label} for #{target_type}"
     iyi_impl_body_defs(node) do |a_def|
       a_def.iyi_from_impl = true
+      @iyi_impl_defs[a_def] = {node, impl_label}
       signature = IyiMod.signature(a_def)
       impl_methods << signature
 
@@ -781,6 +789,11 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       target_type.add_annotation(annotation_type, ann)
     end
 
+    # Before the body: a second impl of the trait has to be refused as one,
+    # and its methods would otherwise meet the first one's on the way in
+    # (`iyi_refuse_impl_collision`).
+    check_single_impl node, trait_type, target_type
+
     # Define the methods on the target type.
     pushing_type(target_type) do
       node.body.accept self
@@ -790,7 +803,6 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # why `TraitType` is a module type — and `from_impl` is what keeps this
     # path open now that a written `include` of a trait is refused.
     assoc_args = check_impl_assoc_types node, trait_type, target_type
-    check_single_impl node, trait_type, target_type
     check_impl_supertraits node, trait_type, target_type
 
     args = (node.trait_args || [] of ASTNode) + (assoc_args || [] of ASTNode)
@@ -1584,6 +1596,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     node.visibility = :private if is_instance_method && unexported_in_unit?(current_type, node.exported?)
 
     replaced = target_type.add_def node
+    iyi_refuse_impl_collision node, replaced
     iyi_refuse_override node, replaced
 
     record_export current_type, node.name, node.exported?
@@ -1619,6 +1632,44 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     end
 
     false
+  end
+
+  # iyi: an impl's method that takes the place of one another impl wrote
+  # (SPEC.md II.6). A type has one method of a name and parameters, so the
+  # impl written second answers for both traits, and nothing at either
+  # site says so.
+  #
+  # Two traits from two libraries can require the same method, and both be
+  # implemented for one type: `impl Named for User` and `impl Column for
+  # User` each wrote `label`, and `greet(user)` — a call through `Named` —
+  # printed Column's "user_name". The same held across modules, each impl
+  # legal under R-3 on its own: two libraries implementing their own traits
+  # for `String` with a `tag` each had the first library's `show` print the
+  # second's answer. A second impl of one trait is refused before its body
+  # is read (`check_single_impl`), and one impl writing a method twice is
+  # the impl's own business. An impl repeating a method its own type wrote
+  # is left alone: the requirement is the type's method either way, and
+  # `std/iterator` writes every adaptor's `next` in both places.
+  private def iyi_refuse_impl_collision(node : Def, replaced : Def?) : Nil
+    return unless replaced
+    return unless node.iyi_from_impl? && replaced.iyi_from_impl?
+
+    mine = @iyi_impl_defs[node]?
+    theirs = @iyi_impl_defs[replaced]?
+    return if mine && theirs && mine[0].same?(theirs[0])
+
+    at = replaced.location.try(&.expanded_location)
+    where = at ? " (#{at.filename}:#{at.line_number})" : ""
+    first = theirs.try(&.[1]) || "an impl"
+    second = mine.try(&.[1]) || "this impl"
+    node.raise "#{replaced.owner}##{node.name} is what #{first} answers#{where}, " \
+               "and #{second} writes it again. A type has one method of a " \
+               "name and parameters, so the second would answer for both " \
+               "traits, and a call through the first would run it. Two " \
+               "traits that require the same method can't both be " \
+               "implemented for one type: rename one trait's method, or " \
+               "implement one of them for a type that wraps " \
+               "#{replaced.owner} (SPEC.md II.6)"
   end
 
   # iyi: a `.iyi` file may *add* to a type of the other language and may not

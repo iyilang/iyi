@@ -394,6 +394,19 @@ refuses "a module with a byte that is not text on line 4" \
 refuses "and the sentence names the module" \
   "lib.iyi' is not a valid iyi source file: Unexpected byte 0xff at position 39" -- \
   "$IYI" check badbyte/app/main.iyi
+# Two traits that require the same method, both implemented for one type:
+# the second impl's method replaced the first one's, so a call through the
+# first trait ran it - in one file, and across two libraries whose impls
+# R-3 allows one at a time.
+printf 'trait A\n  abstract def name : String\nend\n\ntrait B\n  abstract def name : String\nend\n\nstruct Y\nend\n\nimpl A for Y\n  def name : String\n    "from A"\n  end\nend\n\nimpl B for Y\n  def name : String\n    "from B"\n  end\nend\n\ndef via_a(x : A) : String\n  x.name\nend\n\nputs via_a(Y.new)\n' > implclash.iyi
+refuses "two traits' impls answering one method" 'Y#name is what impl A for Y answers' -- \
+  "$IYI" check implclash.iyi
+mkdir -p clash/lib
+printf 'module lib/tx\n\npub trait Tagged\n  abstract def tag : String\nend\n\nimpl Tagged for String\n  def tag : String\n    "tx"\n  end\nend\n\npub def show(x : Tagged) : String\n  "tx sees " + x.tag\nend\n' > clash/lib/tx.iyi
+printf 'module lib/ty\n\npub trait Marked\n  abstract def tag : String\nend\n\nimpl Marked for String\n  def tag : String\n    "ty"\n  end\nend\n\npub def mark(x : Marked) : String\n  "ty sees " + x.tag\nend\n' > clash/lib/ty.iyi
+printf 'module main\n\nimport lib/tx::{show}\nimport lib/ty::{mark}\n\nputs show("s")\nputs mark("s")\n' > clash/main.iyi
+refuses "two libraries' impls answering one method" 'String#tag is what impl Lib::Tx::Tagged for String answers' -- \
+  "$IYI" check clash/main.iyi
 # What a runner ended from outside leaves - `taskkill /F` runs no code
 # in it, so its program stays in the cache under the runner's own name -
 # the next run takes away once it is an hour old, and not before: a

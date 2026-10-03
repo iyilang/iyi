@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **Two impls answering one method on one type are refused, naming
+  both.** Two traits that require a method of the same name could both be
+  implemented for a type, and the second impl's method replaced the
+  first one's: `impl Named for User` and `impl Column for User` each
+  wrote `label`, and `greet(user)`, a call through `Named`, printed
+  `Hello, user_name`, Column's answer. Across modules too: two libraries
+  each implementing its own trait for `String` with a `tag`, each impl
+  legal under R-3, made the first library's `show` print `tx sees ty`;
+  and two impls of one parameterised trait, `Into(String)` and
+  `Into(Int32)` (the gap SPEC.md II.6 recorded), printed the second's 1.
+  Each is refused at the second impl's method now: "Y#name is what impl A
+  for Y answers (...), and impl B for Y writes it again ... rename one
+  trait's method, or implement one of them for a type that wraps Y".
+  `bench/verbs_exercise.sh` and `spec/compiler/semantic/iyi_spec.cr`
+  check them; the old compiler printed `from B` for a call through `A`.
+
 - **A reopen may not replace a method another module wrote.** Only the
   prelude's methods were held to R-3's no-replacing rule, so two modules
   each reopening `::String` with a `tag` of its own had the first one's

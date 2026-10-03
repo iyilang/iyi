@@ -59,6 +59,12 @@ raise "string: to_i64 plain" unless "9000000000".to_i64 == 9000000000_i64
 raise "string: to_i64 base 16" unless "100000000".to_i64(16) == 4294967296_i64
 raise "string: to_i64? invalid" unless "not_a_num".to_i64?.nil?
 raise "string: to_i64? base invalid" unless "zz".to_i64?(10).nil?
+# Whitespace around a number is not part of it, as the other library reads
+# one, and inside it is still refused: `" 42".to_i64?`, `"ff ".to_i?(16)`
+# and a line read with its `\n` were nil.
+raise "string: numbers inside whitespace" unless " 42\n".to_i64? == 42_i64 && "\u00a0ff ".to_i?(16) == 255 && "\t7 ".to_u64? == 7_u64 && "\u3000-3".to_i64?(10) == -3_i64
+raise "string: whitespace inside a number" unless "4 2".to_i64?.nil? && "- 5".to_i?(10).nil? && " ".to_u64?.nil? && "42\u0085".to_i64?.nil?
+puts "    to_i?, to_i64? and to_u64? read a number inside whitespace"
 
 raise "string: to_f? standard" unless "12.34".to_f? == 12.34
 raise "string: to_f? exponent" unless "-0.5e2".to_f? == -50.0

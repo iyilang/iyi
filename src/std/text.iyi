@@ -931,19 +931,20 @@ class ::String
     to_i?(base) || raise "not a number in base #{base}: #{inspect}"
   end
 
+  # Whitespace before and after the number is not part of it, as the other
+  # library reads one (`Char#whitespace?`, so a no-break space too); inside
+  # it is still refused. `" 42".to_i64?`, `"ff ".to_i?(16)` and a line
+  # read with its `\n` were nil here, and 42 and 255 there.
   def to_i?(base : Int32) : Int32?
     raise "base #{base} out of range (2..36)" if base < 2 || base > 36
-    return nil if empty?
+    index = space_end
+    stop = space_start(index)
+    return nil if index == stop
 
-    index = 0
-    negative = false
-    if self[0] == '-'
-      return nil if bytesize == 1
-      negative = true
-      index = 1
-    elsif self[0] == '+'
-      return nil if bytesize == 1
-      index = 1
+    negative = to_unsafe[index] == 45_u8
+    if negative || to_unsafe[index] == 43_u8
+      return nil if index + 1 == stop
+      index = index + 1
     end
 
     # Accumulated as a negative magnitude, because that is the range that
@@ -957,7 +958,7 @@ class ::String
     cutoff = 0 - (limit - bound * base)
 
     value = 0
-    while index < bytesize
+    while index < stop
       b = to_unsafe[index]
       digit = -1
       if b >= 48_u8 && b <= 57_u8
@@ -997,12 +998,13 @@ class ::String
 
   def to_u64?(base : Int32) : UInt64?
     raise "base #{base} out of range (2..36)" if base < 2 || base > 36
-    return nil if empty?
-    index = to_unsafe[0] == 43_u8 ? 1 : 0
-    return nil if index == bytesize
+    index = space_end
+    stop = space_start(index)
+    index = index + 1 if index < stop && to_unsafe[index] == 43_u8
+    return nil if index == stop
     radix = base.to_u64
     value = 0_u64
-    while index < bytesize
+    while index < stop
       b = to_unsafe[index]
       digit = if b >= 48_u8 && b <= 57_u8
                 (b - 48_u8).to_u64
@@ -1045,17 +1047,14 @@ class ::String
 
   def to_i64?(base : Int32) : Int64?
     raise "base #{base} out of range (2..36)" if base < 2 || base > 36
-    return nil if empty?
+    index = space_end
+    stop = space_start(index)
+    return nil if index == stop
 
-    index = 0
-    negative = false
-    if self[0] == '-'
-      return nil if bytesize == 1
-      negative = true
-      index = 1
-    elsif self[0] == '+'
-      return nil if bytesize == 1
-      index = 1
+    negative = to_unsafe[index] == 45_u8
+    if negative || to_unsafe[index] == 43_u8
+      return nil if index + 1 == stop
+      index = index + 1
     end
 
     # The same negative accumulation, for the type whose own `MIN` a program
@@ -1066,7 +1065,7 @@ class ::String
     cutoff = 0_i64 - (limit - bound * radix)
 
     value = 0_i64
-    while index < bytesize
+    while index < stop
       b = to_unsafe[index]
       digit = -1_i64
       if b >= 48_u8 && b <= 57_u8

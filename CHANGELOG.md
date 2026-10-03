@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`String#to_i?(base)`, `#to_i64?` and `#to_u64?` read a number with
+  whitespace around it, as the other library's readers do.** They refused
+  any whitespace, so `" 42".to_i64?`, `"ff ".to_i?(16)` and a line read with
+  its `\n` still on were nil, and `to_i64` panicked "not a number", where
+  the other library answers 42 and 255. Leading and trailing
+  `Char#whitespace?` characters are skipped now (a no-break space and U+3000
+  among them, U+0085 not), and whitespace inside the number or after its
+  sign is still refused. Eighteen spellings under `to_i64?`, `to_u64?`,
+  `to_i?(16)` and `to_i64?(36)` answer as the other library's.
+  `bench/std_text_exercise.iyi` checks it; the old module answered nil for
+  `" 42\n".to_i64?`.
+
 - **`7 / 2` and `1 <=> 1_i64` compile whatever is imported, and answer what
   the other library answers.** `std/float` gave every integer a `/(Float32)`
   beside its `/(Float64)`, so the literal in `7 / 2` cast to both and

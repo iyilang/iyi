@@ -439,6 +439,38 @@ refused("<!DOCTYPE a [<!ENTITY e \"&a\u{3000};\">]><a/>", "'&a\u{3000};' is not 
 assert_equal("a\u{B7}\u{300}\u{203F}-.1\u{10000}", Std::Xml.parse("<a\u{B7}\u{300}\u{203F}-.1\u{10000}/>").root.name, "U+00B7, a combining mark and U+203F continue a name")
 puts "  every refusal names what was refused, and where"
 
+# A node is in one place: one moved by `add_child` stayed among its old
+# parent's children too, and was written in both places; one added under
+# its own descendant made a loop `to_xml` followed until the stack ran out.
+moved = Std::Xml.parse("<r><a><x/></a><b/></r>")
+moved_x = moved.root.find("x").as(Node)
+moved.root.find("b").as(Node).add_child(moved_x)
+moved_x.set_attribute("k", "1")
+assert_equal("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<r><a/><b><x k=\"1\"/></b></r>\n", moved.to_xml, "a node add_child moved is under its new parent alone")
+looped = "added"
+group do |g|
+  attempt = g.spawn { moved.root.find("b").as(Node).children[0].add_child(moved.root); "added" }
+  outcome = attempt.value
+  looped = outcome.message.to_s if outcome.is_a?(Panicked)
+  0
+end
+assert_equal("a node cannot be added under itself or one of its own descendants", looped, "add_child refuses a loop")
+# A document and a node that happen to carry one `id` are two nodes: `==`
+# compared ids, which a `Document` counts apart from a `Node`, and a
+# document handed a node of its own id refused it as itself.
+moved_doc = Document.new
+moved_el = Node.new_element("e")
+while moved_doc.id < moved_el.id
+  moved_doc = Document.new
+end
+while moved_el.id < moved_doc.id
+  moved_el = Node.new_element("e")
+end
+assert_true(moved_doc != moved_el, "a document and an element with one id are two nodes")
+moved_doc.add_child(moved_el)
+assert_equal("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<e/>\n", moved_doc.to_xml, "a document takes an element that shares its id")
+puts "  add_child moves a node rather than copying it, and refuses to put a node under itself"
+
 # ---------------------------------------------------------------------------
 # Limits
 # ---------------------------------------------------------------------------

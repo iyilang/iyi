@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- **`std/xml`'s `add_child` moves a node, and refuses to put one under
+  itself.** The child stayed among its old parent's children as well,
+  so `b.add_child(x)` for an `x` under `a` wrote `<r><a><x/></a><b><x/>
+  </b></r>`, and an attribute set on `x` afterwards showed in both
+  places; and a node added under itself or one of its descendants made
+  a loop that `to_xml` followed until "stack overflow: the stack ran
+  out". The child is taken out of its old parent first now, as a DOM's
+  `appendChild` does, a loop is refused ("a node cannot be added under
+  itself or one of its own descendants"), and so is a document as a
+  child. The parser appends the nodes it has just made through a
+  method of its own, so reading a document asks nothing more of it.
+  `Node#==` is identity now: it compared ids, which a `Document` counts
+  apart from a `Node`, so the first `Document.new` was `==` the first
+  `Node.new_element`. `bench/std_xml_exercise.iyi` moves a node, edits
+  it and checks the written document, checks the loop's sentence, and
+  adds an element to a document that shares its id; the old module
+  wrote the moved node twice, and with ids compared the document and
+  the element were one node.
+
 - **`std/xml`'s `to_xml` refuses what its parser would refuse, and an
   encoding cannot write markup into the declaration.** The serializer
   checked a name only against XML 1.0's `Name`, which takes any colon,

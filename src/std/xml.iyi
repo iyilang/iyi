@@ -163,8 +163,12 @@ pub class Node
   property namespaces : Array(Namespace)
   @content : String
 
+  # The same node, by identity. It compared `id`s, and a `Document` counts
+  # its own: the first `Document.new` and the first `Node.new_element`
+  # were both 1, so the two were `==`, and `add_child`'s question "is this
+  # node one of my ancestors" would answer yes for a stranger.
   def ==(other : Node) : Bool
-    @id == other.id
+    object_id == other.object_id
   end
 
   def initialize(@node_type : NodeType, @name : String = "", @content : String = "")
@@ -314,7 +318,29 @@ pub class Node
     curr
   end
 
+  # Moves *child* here, as the last child: a node is in one place in a
+  # tree. It stayed among its old parent's children as well, so a node
+  # moved from `<a>` to `<b>` was written under both and an attribute set
+  # on it showed in both places; and a node added under itself or under one
+  # of its own descendants made a loop that `to_xml` followed until the
+  # stack ran out. That is refused, and so is a document as a child.
   def add_child(child : Node) : Node
+    raise "a document cannot be the child of a node" if child.node_type.document?
+    n = self
+    while true
+      raise "a node cannot be added under itself or one of its own descendants" if n == child
+      up = n.parent
+      break if up.nil?
+      n = up
+    end
+    old = child.parent
+    old.children = old.children.reject { |c| c == child } unless old.nil?
+    append_parsed(child)
+  end
+
+  # The parser's own append: the child was just made, under this node, and
+  # is in no list yet.
+  protected def append_parsed(child : Node) : Node
     child.parent = self
     @children << child
     child
@@ -1036,9 +1062,9 @@ pub class Parser
       skip_whitespace
       break if @pos >= @len
       if match?("<!--")
-        doc.add_child(parse_comment)
+        doc.append_parsed(parse_comment)
       elsif match?("<?")
-        doc.add_child(parse_pi)
+        doc.append_parsed(parse_pi)
       elsif match?("<!DOCTYPE")
         if has_root
           fail("DOCTYPE must come before the root element")
@@ -1056,7 +1082,7 @@ pub class Parser
         if has_root
           fail("a second root element")
         else
-          doc.add_child(parse_element(doc))
+          doc.append_parsed(parse_element(doc))
           has_root = true
         end
       else
@@ -1926,13 +1952,13 @@ pub class Parser
           @depth = @depth - 1
           return elem
         elsif match?("<!--")
-          elem.add_child(parse_comment)
+          elem.append_parsed(parse_comment)
         elsif match?("<![CDATA[")
-          elem.add_child(parse_cdata)
+          elem.append_parsed(parse_cdata)
         elsif match?("<?")
-          elem.add_child(parse_pi)
+          elem.append_parsed(parse_pi)
         else
-          elem.add_child(parse_element(elem))
+          elem.append_parsed(parse_element(elem))
         end
         return elem if failed?
         run_start = @pos
@@ -2000,7 +2026,7 @@ pub class Parser
   private def flush_text(elem : Node, parts : Array(String)) : Nil
     return if parts.empty?
     text = parts.join("")
-    elem.add_child(Node.new_text(text)) unless text.empty?
+    elem.append_parsed(Node.new_text(text)) unless text.empty?
   end
 
   # A quoted value with references decoded and a literal tab or newline

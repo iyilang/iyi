@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A live `Channel` keeps no value it was offered and never
+  delivered.** Only a delivery emptied a send node, and the channel keeps
+  its last node: a 48 MB select send arm that timed out kept 45 MiB, a
+  48 MB send whose task was cancelled 46 MiB more, and one a close refused
+  46 MiB more, for as long as each channel lived. A failed send and a
+  losing select arm let go of the value now: the cancelled and refused
+  sends keep 0 MiB, and the timed-out arm, run in a task, 0 MiB against
+  45 MiB (on the main stack a slot the select's frames left still holds
+  it). `bench/concurrency_exercise.iyi` checks each at 64 MB against
+  16 MiB; the old runtime kept 61 MiB for the timed-out arm and 61 MiB
+  for the cancelled send.
+
 - **A task spawned on a group after a failure cancelled it starts
   cancelled.** The group kept no cancelled state, and a task started
   only copied its spawner's flag: one spawned 10 ms after a sibling

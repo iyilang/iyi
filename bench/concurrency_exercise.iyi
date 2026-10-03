@@ -1255,15 +1255,24 @@ puts "a parked sender's receipt survived the next sender's park"
 # its slot, and a rendezvous channel's spare send node kept the last value
 # parked through it: 50 messages of 4 MB through a channel of 50, all
 # received, kept 190 MiB, and 48 MB through a rendezvous 238 MiB, for as
-# long as the channels lived. 64 MB each way here, against 16 MiB.
+# long as the channels lived. Nor does it keep a value it never
+# delivered: a select's 48 MB send arm that timed out kept 45 MiB, a
+# cancelled send 46 MiB and a send a close refused 46 MiB more. 64 MB
+# each here, against 16 MiB.
 {% unless flag?(:gc_none) || flag?(:gc_boehm) %}
   class KeptChannels
     getter buffered : Channel(String)
     getter rendezvous : Channel(String)
+    getter timed_out : Channel(String)
+    getter cancelled_send : Channel(String)
+    getter refused : Channel(String)
 
     def initialize
       @buffered = Channel(String).new(16)
       @rendezvous = Channel(String).new
+      @timed_out = Channel(String).new
+      @cancelled_send = Channel(String).new
+      @refused = Channel(String).new
     end
   end
 
@@ -1293,6 +1302,49 @@ puts "a parked sender's receipt survived the next sender's park"
     end
   end
 
+  # In a task, whose stack goes when it ends: on the main stack a slot the
+  # select's frames left kept the value whatever the channel did.
+  def offer_timing_out(ch : Channel(String)) : Nil
+    group do |g|
+      g.spawn do
+        select
+        when ch.send("t" * 64000000)
+          fail("channel: a send nobody received was delivered")
+        when timeout(5)
+          nil
+        end
+        0
+      end
+    end
+  end
+
+  def offer_cancelled(ch : Channel(String)) : Nil
+    group do |g|
+      g.spawn do
+        ch.send("c" * 64000000)
+        0
+      end
+      g.spawn do
+        sleep(5)
+        TaskFailed.new
+      end
+    end
+  end
+
+  def offer_refused(ch : Channel(String)) : Nil
+    group do |g|
+      g.spawn do
+        ch.send("x" * 64000000)
+        0
+      end
+      g.spawn do
+        sleep(5)
+        ch.close
+        0
+      end
+    end
+  end
+
   # Writes over the stack a finished call left, so what stays kept is the
   # channels' and not a stale frame's.
   def scrub_stack(depth : Int32) : Int32
@@ -1314,7 +1366,22 @@ puts "a parked sender's receipt survived the next sender's park"
   fail("channel: 64 MB received through a buffered channel left #{grew // mib} MiB kept") if grew > 16_u64 * mib
   grew = kept_rendezvous > kept_before ? kept_rendezvous - kept_before : 0_u64
   fail("channel: 64 MB received through a rendezvous left #{grew // mib} MiB kept") if grew > 16_u64 * mib
-  puts "a live channel kept under 16 MiB of the 64 MB it handed out, buffered or rendezvous"
+  offer_timing_out(holding.timed_out)
+  scrub_stack(50)
+  kept_offered = kept_now
+  grew = kept_offered > kept_rendezvous ? kept_offered - kept_rendezvous : 0_u64
+  fail("channel: a 64 MB select send arm that timed out left #{grew // mib} MiB kept") if grew > 16_u64 * mib
+  offer_cancelled(holding.cancelled_send)
+  scrub_stack(50)
+  kept_cancelled = kept_now
+  grew = kept_cancelled > kept_offered ? kept_cancelled - kept_offered : 0_u64
+  fail("channel: a cancelled 64 MB send left #{grew // mib} MiB kept") if grew > 16_u64 * mib
+  offer_refused(holding.refused)
+  scrub_stack(50)
+  kept_refused = kept_now
+  grew = kept_refused > kept_cancelled ? kept_refused - kept_cancelled : 0_u64
+  fail("channel: a 64 MB send a close refused left #{grew // mib} MiB kept") if grew > 16_u64 * mib
+  puts "a live channel kept under 16 MiB of the 64 MB it handed out, buffered or rendezvous, and of each 64 MB it never delivered"
   holding.buffered.close
 {% end %}
 

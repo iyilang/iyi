@@ -846,6 +846,14 @@ class IyiSendNode(T)
     value
   end
 
+  # The box emptied with nothing delivered, once its send failed or its
+  # select took another arm. It was left full: a select's 48 MB send arm
+  # that timed out kept 45 MiB, a cancelled send 46 MiB, and a send
+  # refused by a close 46 MiB more, for as long as each channel lived.
+  def forget : Nil
+    IyiScheduler.forget(pointerof(@value))
+  end
+
   def delivered? : Bool
     @taken
   end
@@ -3115,13 +3123,15 @@ class Channel(T)
     # the box is the witness for the one that matters: emptied means
     # delivered, whatever else has happened since. A box still full is a
     # cancelled park's or a closed channel's, and its node leaves the
-    # queue here, so a cancelled one leaves nothing behind.
+    # queue here and lets go of the value, so a cancelled one leaves
+    # nothing behind.
     node = park_send_node(fiber, IyiScheduler.park(fiber), value)
     IyiScheduler.reschedule
     delivered = node.delivered?
     node.read = true
     return nil if delivered
     unlink_sender(node)
+    node.forget
     return Cancelled.new if fiber.cancelled
     ChannelClosed.new
   end
@@ -3568,9 +3578,13 @@ class IyiSendSelect(T)
     @node = @channel.park_send_node(fiber, nonce, @value)
   end
 
+  # A losing arm's node lets go of the value as it leaves: the channel
+  # may keep the node as its spare (`Channel#park_send_node`).
   def unpark : Nil
     node = @node
-    @channel.unlink_sender(node) if node.is_a?(IyiSendNode(T))
+    return unless node.is_a?(IyiSendNode(T))
+    @channel.unlink_sender(node)
+    node.forget unless node.delivered?
   end
 
   def won_while_parked? : Bool

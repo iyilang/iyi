@@ -1151,7 +1151,12 @@ module Iyi
         # = 1000_u64` written on a reopened `::File` is this module's to
         # carry however little of `::File` is.
         class_vars = iyi_class_vars_written_in(type, filename)
-        next if methods.empty? && included.empty? && fields.empty? && class_vars.empty?
+        # And the macros written here on it, which are its surface as its
+        # methods are: `std/static_array` writes `macro [](*args)` on
+        # `::StaticArray`, and neither a consumer of the artifact nor `iyi
+        # doc` had it.
+        macros = iyi_macros_on(type, filename)
+        next if methods.empty? && included.empty? && fields.empty? && class_vars.empty? && macros.empty?
         methods.sort_by! &.name
 
         # `Tuple` and `NamedTuple` describe themselves as "tuple" and "named
@@ -1171,6 +1176,7 @@ module Iyi
           includes: included,
           usings: iyi_type_usings(program, type, filename),
           types: [] of IyiMod::TypeDecl,
+          macros: macros,
         )
       end
       declarations.sort_by! &.name
@@ -2617,13 +2623,18 @@ module Iyi
 
     # The macros declared on one type, which is the same question one level in:
     # a class may declare a macro and a method of that class may call it, and
-    # the method's body is what travels.
-    private def iyi_macros_on(type : Type?) : Array(String)
-      sources = [] of String
+    # the method's body is what travels. Each with its doc comment
+    # (`IyiMod.macro_source`), in the order of the macros themselves. With
+    # *filename*, only those written there: a type this module reopens has
+    # the macros of whoever declared it too.
+    private def iyi_macros_on(type : Type?, filename : String? = nil) : Array(String)
+      macros = [] of Macro
       type.try &.metaclass.as?(ModuleType).try &.macros.try &.each_value do |overloads|
-        overloads.each { |a_macro| sources << a_macro.to_s }
+        overloads.each do |a_macro|
+          macros << a_macro if filename.nil? || a_macro.location.try(&.original_filename) == filename
+        end
       end
-      sources.sort!
+      macros.sort_by!(&.to_s).map { |a_macro| IyiMod.macro_source(a_macro) }
     end
 
     private def iyi_record_mono_body(program : Program, filename : String,

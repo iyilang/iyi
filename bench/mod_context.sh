@@ -321,6 +321,38 @@ EOF
 fi
 cd "$WORK" || exit 1
 
+# And what the surface holds of a macro. A type's macros are called through
+# it as its methods are, and `iyi doc std/eiy` listed `Eiy`'s methods and
+# none of `embed`, `render` and `def_to_s`, which are how the module is
+# used; `std/static_array`'s `macro []` on `::StaticArray` was not in the
+# artifact at all; `mod context --json` had no macro anywhere; and a
+# module's own `pub macro` was its line without the doc comment above it.
+export IYI_PATH="$REPO/src"
+mkdir -p "$WORK/macros"
+cd "$WORK/macros" || exit 1
+"$IYI" doc std/eiy > eiy.txt 2>&1
+"$IYI" doc std/static_array > static_array.txt 2>&1
+"$IYI" doc std/derives > derives.txt 2>&1
+printf 'import std/eiy::{Eiy}\n\nputs Eiy::Buffer.new.to_s\n' > uses_eiy.iyi
+"$IYI" mod context uses_eiy.iyi > eiy_context.txt 2>&1
+"$IYI" mod context --json uses_eiy.iyi > eiy_context.json 2>&1
+missing=""
+for line in "  macro embed(filename, io_name)" "  macro render(filename)" "  macro def_to_s(filename)"; do
+  grep -qxF -- "$line" eiy.txt || missing="$missing doc:'$line'"
+  grep -qxF -- "$line" eiy_context.txt || missing="$missing context:'$line'"
+done
+grep -B1 -xF "  macro embed(filename, io_name)" eiy.txt | head -1 | grep -q '^  # ' || missing="$missing doc:embed's-doc"
+grep -qxF "  macro [](*args)" static_array.txt || missing="$missing doc:StaticArray.[]"
+grep -B1 -xF "pub macro described(declaration)" derives.txt | head -1 | grep -q '^# ' || missing="$missing doc:described's-doc"
+grep -qF '"name":"embed"' eiy_context.json || missing="$missing json:embed"
+if [ -n "$missing" ]; then
+  echo "FAIL: the surface left out a macro or its doc:$missing"
+  status=1
+else
+  echo "doc and mod context list a type's macros and a macro's doc: Eiy.embed/render/def_to_s, StaticArray.[], std/derives"
+fi
+cd "$WORK" || exit 1
+
 # And the third command that reads imports without building: `iyi tool
 # dependencies`, which draws the tree an editor, a build cache or a person
 # asks "what does this file depend on".

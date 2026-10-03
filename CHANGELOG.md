@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **`iyi doc` and `iyi mod context` list a type's macros, and a macro's
+  doc comment.** `iyi doc std/eiy` printed `pub struct Eiy` with its
+  methods and none of `macro embed(filename, io_name)`, `macro
+  render(filename)` and `macro def_to_s(filename)`, which are how the
+  module is used; `iyi doc std/static_array` had no `macro [](*args)`,
+  which was not in the artifact at all (it is written on a reopened
+  `::StaticArray`); `mod context --json` carried no macro; and `iyi doc
+  std/derives` printed `pub macro described(declaration)` without the two
+  lines above it saying what it does. A macro now travels with its doc
+  comment, the hashes taken without it so a doc edit moves neither, and
+  the surface writes each macro's line under its doc: a type's after its
+  methods, a reopened type's too. `bench/mod_context.sh` checks it; the
+  old compiler answered `the surface left out a macro or its doc` for
+  all ten lines and docs it asks for.
+
 - **A float converts to an integer by truncating first, under every
   name.** The prelude's five (`to_i`, `to_i32`, `to_i64`, `to_u8`,
   `to_u64`) checked the untruncated value while std/int's and std/float's

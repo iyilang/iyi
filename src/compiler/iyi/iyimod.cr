@@ -241,10 +241,7 @@ module Iyi::IyiMod
   MACRO_HOOKS = {"included", "extended", "inherited", "method_added", "finished"}
 
   def self.exported_macro(source : String) : String
-    first = source.lines.first?
-    return source unless first
-
-    written = first.lstrip
+    written = macro_line(source)
     # An iyi module's macros are written `pub macro` and travel as their own
     # text, so this is only about the other language's: `pub pub macro
     # described(declaration)` is `can't apply \`pub\` to pub`, and
@@ -252,15 +249,57 @@ module Iyi::IyiMod
     return source if written.starts_with?("pub ")
     return source unless written.starts_with?("macro ")
 
-    rest = written.lchop("macro ").lstrip
-    name = String.build do |io|
+    name = macro_name(source)
+    return source if name.empty? || MACRO_HOOKS.includes?(name)
+    doc = source.size - undocumented_macro(source).size
+    "#{source[0, doc]}pub #{source[doc..]}"
+  end
+
+  # A macro as the artifact carries it: its source, with the doc comment
+  # written above it as comment lines, which is where a reader of the
+  # declarations finds it and how `mod context` shows it. `Macro#to_s` is
+  # the macro alone, so `iyi doc std/derives` showed `pub macro
+  # described(declaration)` without the two lines that say what it does.
+  # The hashes are taken without them (`undocumented_macro`): a doc edit
+  # moves neither, as it moves neither for a def.
+  def self.macro_source(a_macro : Macro) : String
+    source = a_macro.to_s
+    doc = a_macro.doc
+    return source if doc.nil? || doc.empty?
+    String.build do |io|
+      write_doc io, doc, ""
+      io << source
+    end
+  end
+
+  # A carried macro's first line, `pub macro twice(x)`, past its doc.
+  def self.macro_line(source : String) : String
+    source.each_line do |line|
+      text = line.strip
+      return text unless text.starts_with?('#')
+    end
+    ""
+  end
+
+  # The name a call writes: `twice` for `pub macro twice(x)`.
+  def self.macro_name(source : String) : String
+    rest = macro_line(source).lchop("pub ").lchop("macro ").lstrip
+    String.build do |io|
       rest.each_char do |char|
         break if char.whitespace? || char == '('
         io << char
       end
     end
-    return source if name.empty? || MACRO_HOOKS.includes?(name)
-    "pub #{source}"
+  end
+
+  # A carried macro's doc comment, as `Signature#doc` holds a def's.
+  def self.macro_doc(source : String) : String
+    source.lines.take_while(&.starts_with?('#')).map(&.lchop('#').lchop(' ')).join('\n')
+  end
+
+  # A carried macro without its doc comment.
+  def self.undocumented_macro(source : String) : String
+    source.lines(chomp: false).skip_while(&.starts_with?('#')).join
   end
 
   # Imports' names that resolve their annotations, and which modules this
@@ -367,7 +406,8 @@ module Iyi::IyiMod
     implementation.write encode_mono_bodies(artifact)
     # With the bodies rather than with the exports: a macro is not reachable
     # from another module, and editing one changes what a consumer compiles.
-    implementation.write encode_macro_bodies(artifact)
+    # Without their doc comments, as the exports are hashed without theirs.
+    implementation.write encode_macro_bodies(artifact, docs: false)
     write_string implementation, artifact.initialiser
     implementation.write_byte(artifact.has_initialiser ? 1_u8 : 0_u8)
 
@@ -1738,7 +1778,7 @@ module Iyi::IyiMod
       io.puts "macros        (none)"
     else
       io.puts "macros"
-      macros.each { |source| io.puts "  #{source.lines.first? || ""}" }
+      macros.each { |source| io.puts "  #{macro_line(source)}" }
     end
 
     bodies = artifact.mono_bodies
@@ -2396,7 +2436,7 @@ module Iyi::IyiMod
     return if declaration.kind == "alias"
 
     inner = indent + "  "
-    declaration.macros.each { |source| io.puts "#{inner}#{source.lines.first? || ""}" }
+    declaration.macros.each { |source| io.puts "#{inner}#{macro_line(source)}" }
     declaration.assoc_types.each { |name| io.puts "#{inner}type #{name}" }
     declaration.fields.each { |(name, type, _)| io.puts "#{inner}#{name} : #{type}" }
     declaration.class_vars.each { |class_var| io.puts "#{inner}#{dump_class_var(class_var)}" }
@@ -2557,9 +2597,13 @@ module Iyi::IyiMod
       io << "pub " << render_signature(signature) << '\n'
     end
 
-    # The macro's line and not its body, as a function is its signature. The
-    # text carries no doc comment to show.
-    exported_macros(artifact).each { |line| io << '\n' << line << '\n' }
+    # The macro's line and not its body, as a function is its signature,
+    # and its doc comment above it as a function's is.
+    exported_macros(artifact).each do |source|
+      io << '\n'
+      write_doc io, macro_doc(source), "" if docs
+      io << macro_line(source) << '\n'
+    end
 
     # A type's constants go under the type, where a caller reaches them;
     # the module's own are listed here.
@@ -2621,6 +2665,7 @@ module Iyi::IyiMod
         write_doc io, method.doc, "  " if docs
         io << "  " << render_signature(method) << '\n'
       end
+      surface_macros io, declaration, "  ", docs
       io << "end\n"
     end
   end
@@ -2651,7 +2696,19 @@ module Iyi::IyiMod
       write_doc io, method.doc, inner if docs
       io << inner << render_signature(method) << '\n'
     end
+    surface_macros io, declaration, inner, docs
     io << indent << "end\n"
+  end
+
+  # A type's macros, each its line under its doc. They are called through
+  # the type as its methods are, and were not in the surface: `iyi doc
+  # std/eiy` listed `Eiy`'s methods and none of `embed`, `render` and
+  # `def_to_s`, which are how the module is used.
+  private def self.surface_macros(io : IO, declaration : TypeDecl, indent : String, docs : Bool) : Nil
+    declaration.macros.each do |source|
+      write_doc io, macro_doc(source), indent if docs
+      io << indent << macro_line(source) << '\n'
+    end
   end
 
   # A doc comment as comment lines. A blank line of it is `#`: written
@@ -2668,10 +2725,7 @@ module Iyi::IyiMod
   # lists them.
   def self.surface_names(artifact : Artifact) : Array(String)
     names = artifact.exports.functions.map(&.name)
-    exported_macros(artifact).each do |line|
-      rest = line.lchop("pub macro ")
-      names << (rest.index('(').try { |stop| rest[0, stop] } || rest).strip
-    end
+    exported_macros(artifact).each { |source| names << macro_name(source) }
     exported_constants(artifact).each do |(container, line)|
       names << line.partition(" = ")[0] if container.empty?
     end
@@ -2681,13 +2735,10 @@ module Iyi::IyiMod
     names.uniq!
   end
 
-  # The first line of each macro the module wrote `pub`. A shard's arrive
+  # Each macro the module wrote `pub`, as it is carried. A shard's arrive
   # unmarked (see `exported_macro`), and their text is no caller's surface.
-  private def self.exported_macros(artifact : Artifact) : Array(String)
-    artifact.macro_bodies.compact_map do |source|
-      first = source.lines.first?.try(&.strip)
-      first if first && first.starts_with?("pub macro ")
-    end
+  def self.exported_macros(artifact : Artifact) : Array(String)
+    artifact.macro_bodies.select { |source| macro_line(source).starts_with?("pub macro ") }
   end
 
   # The constants the module exports, as `{container, "NAME = value"}`, the
@@ -2923,9 +2974,9 @@ module Iyi::IyiMod
     io.to_slice
   end
 
-  private def self.encode_macro_bodies(artifact : Artifact) : Bytes
+  private def self.encode_macro_bodies(artifact : Artifact, docs : Bool = true) : Bytes
     io = IO::Memory.new
-    write_strings io, artifact.macro_bodies
+    write_strings io, docs ? artifact.macro_bodies : artifact.macro_bodies.map { |source| undocumented_macro(source) }
     io.to_slice
   end
 
@@ -3175,7 +3226,7 @@ module Iyi::IyiMod
       write_class_vars io, declaration.class_vars
       write_string io, declaration.superclass
       write_strings io, declaration.includes
-      write_strings io, declaration.macros
+      write_strings io, (docs ? declaration.macros : declaration.macros.map { |source| undocumented_macro(source) })
       write_strings io, declaration.funs
       write_strings io, declaration.annotations
       write_string io, (docs ? declaration.doc : "")

@@ -29,6 +29,11 @@ module Iyi::IyiMod
           artifact.exports.types.each { |declaration| api_type(declaration, json) }
         end
       end
+      # The `pub` ones, each as its line and its doc: a macro takes syntax
+      # and has no types to list. Absent, as a type's were, `mod context
+      # --json` grounded an edit with no `Eiy.embed` in it.
+      macros = IyiMod.exported_macros(artifact)
+      json.field "macros" { api_macros(macros, json) } unless macros.empty?
       json.field "impls" do
         json.array do
           artifact.exports.impls.each do |entry|
@@ -59,6 +64,19 @@ module Iyi::IyiMod
       json.field "visibility", signature.visibility unless signature.visibility.empty?
       json.field "doc", signature.doc unless signature.doc.empty?
       json.field "rendered", IyiMod.render_signature(signature)
+    end
+  end
+
+  private def self.api_macros(sources : Array(String), json : JSON::Builder) : Nil
+    json.array do
+      sources.each do |source|
+        json.object do
+          json.field "name", IyiMod.macro_name(source)
+          doc = IyiMod.macro_doc(source)
+          json.field "doc", doc unless doc.empty?
+          json.field "rendered", IyiMod.macro_line(source)
+        end
+      end
     end
   end
 
@@ -106,6 +124,7 @@ module Iyi::IyiMod
       unless declaration.methods.empty?
         json.field "methods" { json.array { declaration.methods.each { |m| api_signature(m, json) } } }
       end
+      json.field "macros" { api_macros(declaration.macros, json) } unless declaration.macros.empty?
       unless declaration.types.empty?
         json.field "types" { json.array { declaration.types.each { |t| api_type(t, json) } } }
       end

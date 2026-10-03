@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **`URI#normalize` leaves a relative reference pointing where it
+  did.** Section 5.2.4's dot-segment algorithm is for a path already
+  merged with a base, and `normalize` ran it on a relative reference's
+  own path: `a/..` became `/`, the root, `../x` became `x`, `.` and
+  `..` became the empty reference, and `a/../../x` became `/x`. Against
+  `http://h/a/b/c`, `a/..` resolves to `http://h/a/b/` and what
+  `normalize` made of it to `http://h/`; a probe of 29,484 random
+  references against five bases failed 20,893 checks of resolving the
+  same before and after, or of a second `normalize` changing nothing.
+  A relative reference with a rootless path has its dot segments taken
+  out as any base would take them now, keeping a `..` that climbs past
+  its own segments: `./`, `../x`, `./`, `../`, `../x`, and the probe
+  fails none. `bench/std_uri_exercise.iyi` normalizes seven references
+  and resolves each both ways; the old module answered `/` for `a/..`.
+
 - **`URI#normalize` writes a host's escapes with upper-case hex
   digits.** RFC 3986 section 6.2.2.1 normalizes a host to lower case
   and the hex digits of a percent escape to upper case; `normalize`

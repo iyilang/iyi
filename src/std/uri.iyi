@@ -873,6 +873,44 @@ pub class URI
     output_segments.join("")
   end
 
+  # The dot segments of a relative reference's path taken out as resolving
+  # it against any base would take them: a `..` that climbs past the
+  # reference's own segments stays, since only the base knows what it
+  # climbs out of, and a path that ends in a dot segment names a
+  # directory, so `a/..` is `./`.
+  protected def self.remove_relative_dot_segments(path : String) : String
+    return path if path.empty?
+    segments = path.split('/')
+    kept = [] of String
+    directory = false
+    i = 0
+    while i < segments.size
+      segment = segments[i]
+      if segment == "."
+        directory = true
+      elsif segment == ".."
+        if !kept.empty? && kept[kept.size - 1] != ".."
+          kept.pop
+        else
+          kept << ".."
+        end
+        directory = true
+      else
+        kept << segment
+        directory = false
+      end
+      i = i + 1
+    end
+    return "./" if kept.empty?
+    joined = kept.join("/")
+    joined = joined + "/" if directory
+    # One empty segment left is the directory itself; an empty first
+    # segment before more, as `a/..//x` leaves, is behind `./`: bare, the
+    # path would open with `/` and be rooted.
+    return "./" if joined.empty?
+    joined.starts_with?('/') ? "./" + joined : joined
+  end
+
   # =========================================================================
   # RFC 3986 Section 5.2: Relative Reference Resolution
   # =========================================================================
@@ -1010,7 +1048,12 @@ pub class URI
       end
     end
 
-    @path = URI.remove_dot_segments(@path)
+    # A relative reference's path waits for a base, and section 5.2.4's
+    # algorithm is for a path already merged with one: run on `a/..` it
+    # answered `/`, the root, and on `../x` it answered `x`, so the
+    # normalized reference resolved somewhere else.
+    relative = @scheme.nil? && @host.nil? && @user.nil? && @port.nil? && !@path.starts_with?('/')
+    @path = relative ? URI.remove_relative_dot_segments(@path) : URI.remove_dot_segments(@path)
     self
   end
 end

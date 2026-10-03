@@ -1248,9 +1248,14 @@ module Iyi
 
       if panic
         # `.or_panic()` is allowed but pointless; there is nothing to pass.
+        # An argument was "expecting token ')', not 'DELIMITER_START'", a
+        # sentence about the lexer's tokens where `.or` gets one about itself.
         if @token.type.op_lparen?
           next_token_skip_space_or_newline
-          check :OP_RPAREN
+          unless @token.type.op_rparen?
+            raise "`.or_panic` takes no argument: it panics with the error's own `message`; " \
+                  "for a default use `.or(value)` (SPEC.md III.1.3)", @token
+          end
           end_location = token_end_location
           next_token
         end

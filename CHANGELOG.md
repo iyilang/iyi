@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`.or_panic("msg")` is refused with a sentence about `.or_panic`.**
+  It was "expecting token ')', not 'DELIMITER_START'", a sentence about
+  the lexer's tokens, where a misused `.or` already gets one about itself.
+  It now says "`.or_panic` takes no argument: it panics with the error's
+  own `message`; for a default use `.or(value)`". Checked in
+  `spec/compiler/parser/parser_spec.cr`; the old parser gave the token
+  message.
+
 - **`!` in a proc literal written inside a `defer` is accepted.** The
   parser counted the `defer` through the literal's body, so `defer
   puts((->(s : String) { parse(s)! }).call("x").class)` was refused with

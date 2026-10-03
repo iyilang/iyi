@@ -4752,6 +4752,13 @@ end").as(ClassDef)
         parse("read(path).or_panic()", filename: "x.iyi").as(Recover).panic?.should be_true
       end
 
+      # It was "expecting token ')', not 'DELIMITER_START'".
+      it "says `.or_panic` takes no argument" do
+        expect_raises(SyntaxException, "`.or_panic` takes no argument: it panics with the error's own `message`") do
+          parse(%(read(path).or_panic("msg")), filename: "x.iyi")
+        end
+      end
+
       it "requires a default in parentheses after `.or`" do
         expect_raises(SyntaxException, "`.or` takes the default to use when the value is an error") do
           parse("read(path).or 8080", filename: "x.iyi")

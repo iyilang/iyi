@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`strip`, `lstrip`, `rstrip` and `blank?` take the whitespace the other
+  library's `Char#whitespace?` names, above ASCII too.** All four read bytes
+  and knew ASCII alone: `"b\u00A0".strip` kept its 3 bytes, `"\u3000".blank?`
+  was false and `'\u00A0'.whitespace?` false, so an INI value or key read
+  with a no-break or ideographic space kept it. `Char#whitespace?` now
+  answers the space and `\t` to `\r`, and above ASCII Unicode's Zs, Zl and
+  Zp (not U+0085, a control, as there), and the four decode characters at
+  either end, so a stray byte or the A0 that ends `à` is never taken for a
+  space. `Char#to_s` and `String::Builder#<<` share one encoder,
+  `Char#each_byte`, with `Char#bytesize` moved into the prelude from
+  `std/text`. `bench/std_text_exercise.sh` checks it; the old prelude
+  answered `"b\u00A0".strip.bytesize` 3 and failed at "prelude: strip
+  unicode whitespace".
+
 - **A `.iyimod` written by a `--no-codegen` build is refused by name
   where a build links against it.** It carries declarations and no
   object code, and nothing in the file said so: `iyi run --use-iyimod

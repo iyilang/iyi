@@ -88,21 +88,6 @@ struct ::Char
     (self >= 'A' && self <= 'Z') ? (ord + 32).unsafe_chr : self
   end
 
-  def bytesize : Int32
-    cp = ord
-    if cp < 0x80
-      1
-    elsif cp < 0x800
-      2
-    elsif cp < 0x10000
-      3
-    elsif cp <= 0x10FFFF
-      4
-    else
-      1
-    end
-  end
-
   def to_i : Int32
     to_i(10)
   end
@@ -134,16 +119,11 @@ struct ::Char
 end
 
 class ::String
-  # The whitespace `blank?`, `lstrip` and `rstrip` look through is the one
-  # `Char#ascii_whitespace?` names, `\v` and `\f` included - the prelude's
-  # `whitespace?`, so `strip` with no argument agrees with these.
+  # The whitespace `blank?`, `lstrip` and `rstrip` look through is the
+  # prelude's `Char#whitespace?`, decoded, so `strip` with no argument agrees
+  # with these and with the other library: `"\u3000".blank?` was false.
   def blank? : Bool
-    i = 0
-    while i < bytesize
-      return false unless to_unsafe[i].unsafe_chr.ascii_whitespace?
-      i = i + 1
-    end
-    true
+    space_end == bytesize
   end
 
   def presence : String?
@@ -151,11 +131,8 @@ class ::String
   end
 
   def lstrip : String
-    i = 0
-    while i < bytesize && to_unsafe[i].unsafe_chr.ascii_whitespace?
-      i = i + 1
-    end
-    byte_slice(i, bytesize - i)
+    first = space_end
+    byte_slice(first, bytesize - first)
   end
 
   # A `Char` above ASCII is more than one byte, and this family narrowed it
@@ -214,11 +191,7 @@ class ::String
   end
 
   def rstrip : String
-    last = bytesize
-    while last > 0 && to_unsafe[last - 1].unsafe_chr.ascii_whitespace?
-      last = last - 1
-    end
-    byte_slice(0, last)
+    byte_slice(0, space_start(0))
   end
 
   def rstrip(char : Char) : String

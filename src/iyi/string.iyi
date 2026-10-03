@@ -60,19 +60,22 @@ class String
   private def each_point(& : Int32, Int32 -> Nil) : Nil
     index = 0
     while index < @bytesize
-      lead = to_unsafe[index].to_i32
-      width = lead < 0xC2 || lead > 0xF4 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4
-      point = width > 1 ? lead & (0x7F >> width) : lead < 0x80 ? lead : -1
-      k = 1
-      while k < width && point >= 0
-        byte = index + k < @bytesize ? to_unsafe[index + k].to_i32 : 0
-        point = (byte & 0xC0) == 0x80 ? (point << 6) | (byte & 0x3F) : -1
-        k = k + 1
-      end
-      point = -1 if width > 1 && (point < (1 << (5 * width - 4)) || point > 0x10FFFF || (point >= 0xD800 && point < 0xE000))
-      yield point, index
-      index = index + (point < 0 ? 1 : width)
+      yield point = point_at(index), index
+      index = index + (point < 0 ? 1 : point.unsafe_chr.bytesize)
     end
+  end
+
+  private def point_at(index : Int32) : Int32
+    lead = to_unsafe[index].to_i32
+    width = lead < 0xC2 || lead > 0xF4 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4
+    point = width > 1 ? lead & (0x7F >> width) : lead < 0x80 ? lead : -1
+    k = 1
+    while k < width && point >= 0
+      byte = index + k < @bytesize ? to_unsafe[index + k].to_i32 : 0
+      point = (byte & 0xC0) == 0x80 ? (point << 6) | (byte & 0x3F) : -1
+      k = k + 1
+    end
+    width > 1 && (point < (1 << (5 * width - 4)) || point > 0x10FFFF || (point >= 0xD800 && point < 0xE000)) ? -1 : point
   end
 
   def bytesize : Int32
@@ -97,19 +100,10 @@ class String
     @bytesize == 0
   end
 
-  # The character at *index*, and the substring that starts there, asked for by
-  # `samples/iyi/calc`, which scans its input a character at a time and cannot
-  # do it with `to_unsafe` without becoming a program about pointers.
-  #
-  # ASCII, like the rest of this file: a byte is a character here, which is true
-  # of every string this prelude is asked to handle and false in general. The
-  # place it stops being true is the place to make `Char` real, and `size`
-  # already counts UTF-8 properly, so the two would disagree, noted rather than
-  # hidden.
-  #
-  # A negative index counts from the end, so `s[-1]` is the last character.
-  # Out of range after that wrap still raises rather than returning nil: the
-  # caller knows the length. `[]?` is the question that allows absence.
+  # The character at *index*, asked for by `samples/iyi/calc`, which scans
+  # its input a character at a time. Byte-indexed: a byte is the character
+  # for ASCII, and `each_char` is the decoded walk. A negative index counts
+  # from the end; out of range after that wrap raises, `[]?` answers nil.
   def [](index : Int32) : Char
     asked = index
     index = @bytesize + index if index < 0
@@ -352,17 +346,32 @@ class String
     matched == wanted.bytesize
   end
 
-  # Without the whitespace at either end.
+  # Without `Char#whitespace?`'s characters at either end, decoded: it read
+  # bytes, and `"b\u00A0".strip` kept the space the other library takes.
   def strip : String
-    first = 0
-    while first < bytesize && to_unsafe[first].unsafe_chr.whitespace?
-      first = first + 1
+    first = space_end
+    byte_slice(first, space_start(first) - first)
+  end
+
+  # Where the whitespace in front ends, and where the run behind starts no
+  # nearer the front than *floor*; `std/text`'s `lstrip`, `rstrip` and
+  # `blank?` ask them too. A whitespace character is three bytes at most.
+  private def space_end : Int32
+    each_point { |point, at| return at unless point.unsafe_chr.whitespace? }
+    @bytesize
+  end
+
+  private def space_start(floor : Int32) : Int32
+    last = @bytesize
+    while last > floor
+      start = last - 1
+      while start > floor && last - start < 3 && (to_unsafe[start] & 0xC0) == 0x80
+        start = start - 1
+      end
+      break unless (char = point_at(start).unsafe_chr).whitespace? && start + char.bytesize == last
+      last = start
     end
-    last = bytesize
-    while last > first && to_unsafe[last - 1].unsafe_chr.whitespace?
-      last = last - 1
-    end
-    byte_slice(first, last - first)
+    last
   end
 
   # The pieces between separators, empty ones included: `"a,,b".split(',')`
@@ -559,38 +568,43 @@ end
 #
 # UTF-8, in one to four bytes. It wrote the low byte and nothing else, which
 # is right for the ASCII a byte-indexed `[]` hands back and wrong for every
-# other character a program can write: `puts 'é'` printed one invalid byte,
-# and `each_char` above now yields code points that would print the same way.
-# `0x10FFFF` is the last one there is; past it a `'?'` goes out rather than a
-# sequence no reader can decode.
+# other character a program can write: `puts 'é'` printed one invalid byte.
 struct Char
   def to_s : String
-    point = ord
-    if point < 0x80
-      String.new(1) do |buffer|
-        buffer[0] = point.to_u8
+    at = 0
+    String.new(bytesize) do |buffer|
+      each_byte do |byte|
+        buffer[at] = byte
+        at = at + 1
       end
-    elsif point < 0x800
-      String.new(2) do |buffer|
-        buffer[0] = (0xC0 | (point >> 6)).to_u8
-        buffer[1] = (0x80 | (point & 0x3F)).to_u8
-      end
-    elsif point < 0x10000
-      String.new(3) do |buffer|
-        buffer[0] = (0xE0 | (point >> 12)).to_u8
-        buffer[1] = (0x80 | ((point >> 6) & 0x3F)).to_u8
-        buffer[2] = (0x80 | (point & 0x3F)).to_u8
-      end
-    elsif point <= 0x10FFFF
-      String.new(4) do |buffer|
-        buffer[0] = (0xF0 | (point >> 18)).to_u8
-        buffer[1] = (0x80 | ((point >> 12) & 0x3F)).to_u8
-        buffer[2] = (0x80 | ((point >> 6) & 0x3F)).to_u8
-        buffer[3] = (0x80 | (point & 0x3F)).to_u8
-      end
-    else
-      String.new(1) { |buffer| buffer[0] = '?'.ord.to_u8 }
     end
+  end
+
+  # `0x10FFFF` is the last code point there is; past it a `'?'` goes out
+  # rather than a sequence no reader can decode. `String::Builder` writes
+  # these too, which had its own copy of the four arms.
+  def each_byte(& : UInt8 -> Nil) : Nil
+    point = ord
+    if point < 0x80 || point > 0x10FFFF
+      yield point < 0x80 ? point.to_u8 : 63_u8
+    elsif point < 0x800
+      yield (0xC0 | (point >> 6)).to_u8
+      yield (0x80 | (point & 0x3F)).to_u8
+    elsif point < 0x10000
+      yield (0xE0 | (point >> 12)).to_u8
+      yield (0x80 | ((point >> 6) & 0x3F)).to_u8
+      yield (0x80 | (point & 0x3F)).to_u8
+    else
+      yield (0xF0 | (point >> 18)).to_u8
+      yield (0x80 | ((point >> 12) & 0x3F)).to_u8
+      yield (0x80 | ((point >> 6) & 0x3F)).to_u8
+      yield (0x80 | (point & 0x3F)).to_u8
+    end
+  end
+
+  def bytesize : Int32
+    point = ord
+    point < 0x80 || point > 0x10FFFF ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4
   end
 
   def inspect : String
@@ -598,8 +612,9 @@ struct Char
   end
 
   # The classes a word counter asks about, ASCII's: a letter is one of the
-  # fifty-two, a digit one of the ten, whitespace the space and `\t`, `\n`,
-  # `\v`, `\f`, `\r`, as the other library's ASCII test has it.
+  # fifty-two, a digit one of the ten. Whitespace is the other library's:
+  # the space and `\t` to `\r`, and above ASCII Unicode's Zs, Zl and Zp, so
+  # U+00A0 and U+3000 are and U+0085, a control, is not. It was ASCII's.
   def letter? : Bool
     (self >= 'a' && self <= 'z') || (self >= 'A' && self <= 'Z')
   end
@@ -613,6 +628,7 @@ struct Char
   end
 
   def whitespace? : Bool
+    return ord.in?(0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000) || (ord >= 0x2000 && ord <= 0x200A) if ord > 0x7F
     self == ' ' || (self >= '\t' && self <= '\r')
   end
 end
@@ -651,27 +667,7 @@ class String::Builder
   # A character's UTF-8 bytes, written in place rather than through a
   # string of its own.
   def <<(char : Char) : self
-    point = char.ord
-    if point < 0x80
-      write_byte(point.to_u8)
-    elsif point < 0x800
-      reserve(2)
-      write_byte((0xC0 | (point >> 6)).to_u8)
-      write_byte((0x80 | (point & 0x3F)).to_u8)
-    elsif point < 0x10000
-      reserve(3)
-      write_byte((0xE0 | (point >> 12)).to_u8)
-      write_byte((0x80 | ((point >> 6) & 0x3F)).to_u8)
-      write_byte((0x80 | (point & 0x3F)).to_u8)
-    elsif point <= 0x10FFFF
-      reserve(4)
-      write_byte((0xF0 | (point >> 18)).to_u8)
-      write_byte((0x80 | ((point >> 12) & 0x3F)).to_u8)
-      write_byte((0x80 | ((point >> 6) & 0x3F)).to_u8)
-      write_byte((0x80 | (point & 0x3F)).to_u8)
-    else
-      write_byte(63_u8)
-    end
+    char.each_byte { |byte| write_byte(byte) }
     self
   end
 

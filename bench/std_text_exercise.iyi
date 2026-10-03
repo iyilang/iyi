@@ -410,4 +410,11 @@ unpaired = String.new(2) { |b| b[0] = 0xC3_u8; b[1] = 0x41_u8 }
 raise "string: gsub empty keeps a byte that begins no character" unless unpaired.gsub("", "-").bytes == [0x2D_u8, 0xC3_u8, 0x2D_u8, 0x41_u8, 0x2D_u8]
 puts "    gsub with an empty search writes the replacement before every character and at the end"
 
+# Whitespace is the other library's `Char#whitespace?`: above ASCII the
+# Zs, Zl and Zp characters, decoded, and not U+0085 or a stray byte. The
+# prelude's `strip` and these three read bytes as ASCII and kept them all.
+raise "prelude: strip unicode whitespace" unless "\u3000\u00A0b\u2028\u00A0\u3000".strip == "b" && " \u0085x\u0085".strip.bytesize == 5 && "a \x80".strip.bytesize == 3 && "xà\u00A0".strip == "xà"
+raise "string: unicode whitespace" unless "\u2000\u3000".blank? && "\u3000a\u202F".lstrip == "a\u202F" && "\u3000a\u202F".rstrip == "\u3000a" && !"\u0085".blank?
+puts "    whitespace above ASCII: strip, lstrip, rstrip and blank? take Zs, Zl and Zp"
+
 puts "all std/text checks passed"

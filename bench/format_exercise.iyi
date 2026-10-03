@@ -437,6 +437,10 @@ raise "format: Float32 text failed: #{t5}" if t5 != "[0.1|0.1|1.5 ]"
 # -5_i16 printed 18446744073709551611, an `Int64`'s, and of -5_i128 -5.
 t6 = sprintf("[%u|%u|%u|%d]", -5_i8, -5_i16, -5_i128, -5_i16)
 raise "format: unsigned of a narrow or wide word failed: #{t6}" if t6 != "[251|65531|340282366920938463463374607431768211451|-5]"
+# `%p` and `%s` of an `Int128` are its own text, and `%c` its code point:
+# `%p` of 65_i128 was "65" in quotes, and `%c` of 65_u128 was refused.
+t8 = sprintf("[%p|%-4s|%c|%3c]", 65_i128, -7_i128, 65_u128, 233_i128)
+raise "format: Int128 text and code point failed: #{t8}" if t8 != "[65|-7  |A|  é]"
 puts "    tower: Int8 to UInt128 and Float32, and %c of any code point"
 
 # A float past an `Int64` under an integer verb is its own integer, every

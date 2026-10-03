@@ -955,8 +955,12 @@ module ::IyiFormat
            end
     if base == 0
       return format_arg(val.to_f64, verb, minus, plus, space, zero, hash, width, precision) if verb == 'f' || verb == 'e' || verb == 'E' || verb == 'g' || verb == 'G'
-      return format_arg(val.to_s, verb, minus, plus, space, zero, hash, width, precision) if verb == 's' || verb == 'p'
-      raise "%#{verb} wants a character, and #{val} is a #{val.class}" if verb == 'c'
+      # The value's own text, as every other integer's: written as its
+      # digits and then asked again as a string, `%p` of 65_i128 was "65" in
+      # quotes, the string's inspection; and `%c` is a code point here too,
+      # where it was refused as "wants a character".
+      return format_string_arg(verb == 'p' ? val.inspect : val.to_s, minus, width, precision) if verb == 's' || verb == 'p'
+      return format_char_arg(code_point(val), minus, width) if verb == 'c'
       raise "unknown format specifier '%#{verb}'"
     end
     # `%u` is the word's bits, as an `Int64`'s are: `%u` of -5_i128

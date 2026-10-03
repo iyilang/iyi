@@ -195,6 +195,10 @@ prove_fails "NaN drops the sign flags" no_nan_sign "general: NaN takes the sign 
 prove_fails "%g fixed from %f's places" no_g_digits "precision must be at most 400, not 403" \
   's/^        fixed = "0\." + ("0" \* (0 - exp - 1)) + sig$/        fixed = IyiFloatText.format_fixed(val.abs, prec - 1 - exp)/'
 
+# 10. An Int128's `%p` asked of its digits as a string again: 65_i128 in quotes.
+prove_fails "an Int128's %p asked of its digits again" no_wide_text "format: Int128 text and code point" \
+  "s/verb == 'p' ? val\.inspect : val\.to_s/verb == 'p' ? val.to_s.inspect : val.to_s/"
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "Format strings: width, alignment, zero pad, precision, bases, negatives,"

@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`%p` and `%s` of an `Int128` or `UInt128` are its own text, and `%c`
+  its code point.** The value was written as digits and formatted again
+  as a string, so `%p` of 65_i128 printed `"65"` in quotes where `%p` of
+  65 prints 65, and `%c` of 65_u128 panicked "%c wants a character, and
+  65 is a UInt128" where `%c` of every other integer is its code point.
+  They answer 65 and A now. `bench/format_exercise.iyi` checks both, and
+  its `.sh` proves the check fails with the digits formatted again as a
+  string; the old module panicked "%c wants a character, and 65 is a
+  UInt128".
+
 - **`sprintf`, `printf` and `String#%` take one array or tuple as the
   argument list, as the other library does.** An array was one argument:
   `"%s, %s, %s, D" % ['A', 'B', 'C']`, the other library's own example

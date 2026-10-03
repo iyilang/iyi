@@ -1,22 +1,25 @@
 # Comparable, Num and Hashable over the prelude's scalars, and Hashable over
-# the other keys a table takes: arrays, nil and symbols.
+# the other keys a table takes: tuples, named tuples, arrays, nil and
+# symbols.
 #
-# The two imports are what makes `Hashable` true rather than declared.
+# The imports are what makes `Hashable` true rather than declared.
 # `hash_key` forwards to the value's own `hash`, and the prelude defines
 # `hash` for `Int32`, `String` and a handful more; every other integer's
-# lives in `std/int` and both floats' in `std/float`. Importing neither,
-# `impl Hashable for Int16` forwarded to `Object#hash` — the type's id, one
-# slot for every value of the type — so `1_i16.hash == 31337_i16.hash` was
-# true, and `1.5.hash == 31337.5.hash` with it. A trait may not promise what
-# the module implementing it has not loaded (SPEC.md II.8).
+# lives in `std/int`, both floats' in `std/float`, and a named tuple's in
+# `std/tuple`. Importing neither number module, `impl Hashable for Int16`
+# forwarded to `Object#hash` — the type's id, one slot for every value of
+# the type — so `1_i16.hash == 31337_i16.hash` was true, and
+# `1.5.hash == 31337.5.hash` with it. A trait may not promise what the
+# module implementing it has not loaded (SPEC.md II.8).
 #
-# Both named, though `std/float` imports `std/int` itself: an integer's hash
+# Each named, though `std/float` imports `std/int` itself: an integer's hash
 # is not a thing to reach through a float, and a rule that holds only while
 # somebody else's import survives is not held.
 module std/traits
 
 import std/int
 import std/float
+import std/tuple
 
 pub trait Comparable
   abstract def <=>(other : self) : Int32
@@ -252,11 +255,27 @@ impl Hashable for Float32
 end
 
 # The keys a `Hash` takes that are not scalars. Each has the `==` and the
-# `hash` a table asks of a key - an array's and a symbol's in the prelude,
-# nil's the one value's - and `group_by`, `tally`, `tally_by`, `index_by`
-# and `to_h` ask `Hashable` of theirs, which none of these was:
+# `hash` a table asks of a key - a tuple's, an array's and a symbol's in
+# the prelude, nil's the one value's - and `group_by`, `tally`, `tally_by`,
+# `index_by` and `to_h` ask `Hashable` of theirs, which none of these was:
 # `tally` of a list of arrays was refused with "Array(Int32) does not
-# implement Std::Traits::Hashable", where the table it builds takes them.
+# implement Std::Traits::Hashable", where the table it builds takes them,
+# and `group_by { |x| {x % 2, x % 3} }`, the usual way to group by two
+# things, with "Tuple(Int32, Int32) does not implement" the same. A named
+# tuple's `==` and `hash` are `std/tuple`'s, which is the third import above:
+# without it a named tuple hashed as its type's id, every value alike.
+impl Hashable for ::Tuple(*T) forall T
+  def hash_key : Int32
+    hash
+  end
+end
+
+impl Hashable for ::NamedTuple(T) forall T
+  def hash_key : Int32
+    hash
+  end
+end
+
 impl Hashable for Array(T) forall T
   def hash_key : Int32
     hash

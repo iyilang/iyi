@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A tuple and a named tuple are `Hashable`, so `group_by`, `tally`,
+  `tally_by`, `index_by` and `to_h` take one as the key.** Each has the
+  `==` and the `hash` a `Hash` asks of a key, and neither implemented the
+  trait those methods ask for: `group_by { |x| {x % 2, x % 3} }`, the usual
+  way to group by two things, was refused with "Tuple(Int32, Int32) does
+  not implement Std::Traits::Hashable", and `tally_by { |x| {parity: x %
+  2} }` with "NamedTuple(parity: Int32) does not implement" the same.
+  `std/traits` implements it for both, and imports `std/tuple`, where a
+  named tuple's `==` and `hash` are. `bench/std_exercise.iyi` checks both,
+  and its source and artifact runs print the same; the old module answered
+  "Tuple(Int32, Int32) does not implement Std::Traits::Hashable".
+
 - **A module's artifact names the types the compiler resolved from the
   top level, so a module beside an `app/tuple`, an `app/std` or an
   `app/exception` reads back as it compiled.** The declarations a

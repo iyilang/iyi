@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`iyi doc` prints a generic prelude type's parameters once.** The
+  type's own name already carries them, and a second list followed:
+  `class Array(T)(T)`, `class Hash(K, V)(K, V)`, `tuple Tuple(*T)(T) <
+  Value`, `function Proc(*T, R)(T, R) < Value`. The header reads as the
+  declaration does now, `class Array(T)` and `tuple Tuple(*T) < Value`.
+  `bench/packages_resolve.sh` checks Array's and Tuple's headers; the old
+  verb printed `class Array(T)(T)`.
+
 - **`init` refuses a name whose root module would be a type of the
   prelude, and names the type.** The root module is the name's camelcase,
   a top-level type like every type of the prelude, and only the grammar

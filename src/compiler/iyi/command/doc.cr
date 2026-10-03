@@ -236,10 +236,10 @@ class Iyi::Command
     if doc = type.doc
       IyiMod.write_doc io, doc, ""
     end
+    # A generic type prints its own parameters, the splat's `*` included;
+    # a second list after it printed them twice: `class Array(T)(T)`,
+    # `tuple Tuple(*T)(T)`.
     io << type.type_desc.lchop("generic ") << ' ' << type
-    if type.is_a?(GenericType) && !type.type_vars.empty?
-      io << '(' << type.type_vars.join(", ") << ')'
-    end
     if type.is_a?(ClassType) && (superclass = type.superclass) && superclass.to_s != "Reference" && superclass.to_s != "Struct" && superclass.to_s != "Object"
       io << " < " << superclass
     end

@@ -417,6 +417,13 @@ step "iyi doc prints a prelude type's surface"
 grep -q '^class String' prelude-doc.txt || { echo "the type header is missing:"; head -5 prelude-doc.txt; exit 1; }
 grep -q '  def to_i : Int32' prelude-doc.txt || { echo "a method is missing:"; cat prelude-doc.txt; exit 1; }
 grep -q '  def size : Int32' prelude-doc.txt || { echo "size is missing"; exit 1; }
+# A generic type's header carries its parameters once, as it is declared:
+# the list was printed after a name that already held it, `class
+# Array(T)(T)` and `tuple Tuple(*T)(T) < Value`.
+"$IYI" doc Array > array-doc.txt 2>&1 || { cat array-doc.txt; exit 1; }
+grep -qx 'class Array(T)' array-doc.txt || { echo "Array's header is not \`class Array(T)\`:"; grep -m1 '^class' array-doc.txt; exit 1; }
+"$IYI" doc Tuple > tuple-doc.txt 2>&1 || { cat tuple-doc.txt; exit 1; }
+grep -qx 'tuple Tuple(\*T) < Value' tuple-doc.txt || { echo "Tuple's header is not \`tuple Tuple(*T) < Value\`:"; grep -m1 '^tuple' tuple-doc.txt; exit 1; }
 # A method, as the Int32 check below reads it: the doc carries the type's
 # comments too, and the word in `String.new`'s ("the byte was allocated
 # for that") failed the old `grep allocate` with no method in sight.

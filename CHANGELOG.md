@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **A generic that holds itself one level deeper is refused instead of
+  overflowing the stack.** `struct S(T)` with `@x : S(Array(T))?` - used or
+  not - `@x : S(S(T))?`, and `impl C for Box(T) forall T` with
+  `type Elem = Box(Array(T))` each made a deeper instance of the generic
+  for every instance made, until "Stack overflow" in `types.cr` after 6 to
+  19 seconds. Instantiation stops at the nest a written type is already
+  held to, and refuses at the generic's declaration: "generic type too
+  nested: S(Array(Array(...". `bench/verbs_exercise.sh` checks the
+  instance-variable and associated-type shapes; the old compiler answered
+  the stack overflow.
+
 - **A macro whose expansion runs it again is refused 64 levels deep.**
   `macro m(x)` holding `m({{ x }})`, two macros calling each other, and an
   `inherited` hook that declares a subclass of `{{ @type }}` expanded until

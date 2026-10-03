@@ -1895,6 +1895,17 @@ else
   sed -n '1,6p' absnew.out; cat absnew.json; echo
   status=1
 fi
+# A generic whose instance variable holds the same generic one level
+# deeper made instances until the stack ran out, used or not, and so did
+# an associated type wrapping its receiver: "Stack overflow" after 6 to 19
+# seconds. Refused as a call that builds such a type already was.
+printf 'struct S(T)\n  @x : S(Array(T))?\nend\n' > genivar.iyi
+refuses "a generic holding itself one level deeper" "generic type too nested: S(Array(Array(" -- \
+  "$IYI" check genivar.iyi
+refuses "and the refusal is at the generic" "genivar.iyi:1:1" -- "$IYI" check genivar.iyi
+printf 'pub trait C\n  type Elem\n  abstract def first : Elem\nend\n\npub struct Box(T)\n  def initialize(@v : T)\n  end\nend\n\nimpl C for Box(T) forall T\n  type Elem = Box(Array(T))\n\n  def first : Box(Array(T))\n    Box.new([@v])\n  end\nend\n\nputs Box.new(1).first\n' > genassoc.iyi
+refuses "an associated type wrapping its receiver" "generic type too nested: Box(Array(Array(" -- \
+  "$IYI" check genassoc.iyi
 refuses "doc on bytes that are not text" "not a valid iyi source file" -- \
   "$IYI" doc binary.iyi
 refuses "doc on a file that declares no module" "declares no module" -- \

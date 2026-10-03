@@ -4657,8 +4657,9 @@ as a row `@web` no import can begin with.
 function - read that module from the directory instead of its tag: the
 library written beside the app that uses it, or a fork checked out to
 try. The directory has to hold the module, its own `iyi.mod` naming the
-same path, and is spelled `./`, `../` or absolute so it is never read as
-a module path. It is the program's decision alone: a `replace` in a
+same path, and is spelled `./`, `../`, `.\`, `..\` or absolute so it is
+never read as a module path, in double quotes when it holds a space -
+`=> "../my lib"`. It is the program's decision alone: a `replace` in a
 dependency's manifest is read and ignored, as Go does, or a library could
 redirect its consumers' builds. And it is not a fact `iyi.sum` records:
 a directory somebody is editing would be refused at the next keystroke.

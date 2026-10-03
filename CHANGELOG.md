@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **A `replace` directory may hold a space, in double quotes, and may be
+  spelled `..\lib`.** The line was split on spaces, so `replace
+  example.test/user/liba => "../liba local"` and the same unquoted were both
+  refused as "`replace` takes a path and a directory, as `replace <path> =>
+  ../dir`", which blames the line's shape: on Windows `C:\Users\First Last\`
+  is an ordinary place for a project. And `..\liba-local` and
+  `.\..\liba-local`, the native relative spelling every other verb takes,
+  were refused as "'..\liba-local' is not a directory" about a directory
+  that was there. The directory is the rest of the line after `=>` now;
+  quoted, it builds; unquoted with a space it is refused as "holds a space;
+  a directory with one is written in double quotes"; `.\` and `..\` are
+  directory spellings on every system, as in Go's go.mod; and a target
+  spelled like a module path is "not spelled as a directory".
+  `bench/packages_get.sh` builds from all three spellings and asks for both
+  refusals; the old compiler refused the three and gave the old sentences.
+
 - **`iyi vet` reports the program, not the packages it builds from.** std's
   unused methods were left out of what it reports and a package's were not:
   in a project requiring libb, with liba replaced by a directory beside it,

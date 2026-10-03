@@ -399,7 +399,31 @@ mkdir -p "$WORK/nomod"
 bad_replace "a directory with no iyi.mod" ../nomod "has no iyi.mod"
 mkdir -p "$WORK/othermod" && printf 'module example.test/user/other\n' > "$WORK/othermod/iyi.mod"
 bad_replace "a directory holding another module" ../othermod "says it is 'example.test/user/other'"
-bad_replace "a target spelled like a module path" liba-local "is not a directory"
+bad_replace "a target spelled like a module path" liba-local "is not spelled as a directory"
+bad_replace "a directory with a space, unquoted" "../liba local" "holds a space; a directory with one is written in double quotes"
+
+step "a replacement in quotes may hold a space, and Windows' own spelling is one"
+# On Windows `C:\Users\First Last\` is an ordinary place for a project, and
+# the line was split on spaces: `=> "../greet lib"` was refused as "takes a
+# path and a directory". `..\lib`, the native relative spelling every other
+# verb takes, was refused as "'..\lib' is not a directory".
+good_replace() { # good_replace <label> <target>
+  printf 'module example.test/user/rapp\n\nrequire example.test/user/liba v1.0.0\n\nreplace example.test/user/liba => %s\n' "$2" > "$WORK/rapp/iyi.mod"
+  (cd "$WORK/rapp" && "$IYI" run use.iyi) > good.log 2>&1
+  if [ $? -ne 0 ] || ! grep -q "liba from beside the app" good.log; then
+    fail "$1: not built from the replacement:"; sed 's/^/    /' good.log
+  else
+    echo "  $1: built from the replacement"
+  fi
+}
+cp -r "$WORK/liba-local" "$WORK/liba local"
+good_replace "\"../liba local\"" '"../liba local"'
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    good_replace "..\\liba-local" '..\liba-local'
+    good_replace ".\\..\\liba-local" '.\..\liba-local'
+    ;;
+esac
 
 step "mod tidy says what the source imports"
 mkdir -p "$WORK/tapp"

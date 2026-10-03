@@ -4598,7 +4598,7 @@ end").as(ClassDef)
           end
         end
         parse("def group(&)\nend", filename: "x.cr")
-        parse("def group(&)\nend", filename: "/install/src/iyi/concurrency.iyi")
+        parse("def group(&)\nend", filename: File.expand_path("../../../src/iyi/concurrency.iyi", __DIR__))
       end
 
       # A bodiless `def` in a trait, with another `def` under it: the

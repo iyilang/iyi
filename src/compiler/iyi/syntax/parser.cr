@@ -5091,14 +5091,16 @@ module Iyi
             "`#{@token.value}` could never be called (SPEC.md III.1.3)", @token
     end
 
-    # iyi: a file of the prelude, by where it is, as `iyi doc` and the
-    # call-error hints tell it (`src/iyi/`). An expansion is the file it
+    # iyi: a file of the prelude: one beside the `prelude.iyi` of an `iyi/`
+    # directory, which is where IYI_PATH finds the prelude, so a copy of it
+    # a gate patches in a scratch directory is the prelude too (it was
+    # refused by a `src/iyi/` path test). An expansion is the file it
     # expands in: the prelude's `property group : IyiGroup?` writes a `def
     # group` into a virtual file.
     private def iyi_prelude_file? : Bool
       return false unless filename = @token.location.original_filename
-      posix = ::Path[filename].to_posix.to_s
-      posix.includes?("/src/iyi/") || posix.starts_with?("src/iyi/")
+      dir = ::File.dirname(filename)
+      ::File.basename(dir) == "iyi" && ::File.exists?(::File.join(dir, "prelude.iyi"))
     end
 
     # iyi: `items.sort_by! { |x| ... }` — the same mistake at a call site.

@@ -1475,8 +1475,20 @@ module Iyi
       # an inclusive end by `==`, which compares kinds, so `(0_i8..0).to_a` was
       # `[]` and `(-1..4_u8).to_a` stopped at 3. An integer end that fits the
       # begin's kind is read in that kind.
-      if to.kind != from.kind && (in_kind = to.integer_in?(from.kind))
-        to = in_kind
+      # A begin too small for the end is read in the end's kind instead:
+      # `(0_i8..300)` stepped an `Int8` and stopped on "Arithmetic overflow".
+      if to.kind != from.kind
+        if in_kind = to.integer_in?(from.kind)
+          to = in_kind
+        elsif in_kind = from.integer_in?(to.kind)
+          from = in_kind
+        end
+      end
+      # iyi: the walk steps from the begin, and a float has no next value:
+      # `(0.0..2).to_a` said "BUG: called 'succ' for non-integer literal". A
+      # float end only bounds the walk, `(1..3.5)` being `[1, 2, 3]`.
+      unless from.kind.signed_int? || from.kind.unsigned_int?
+        raise "a macro range steps from an integer, and #{from} is a float"
       end
       Range.new(from, to, self.exclusive?)
     end

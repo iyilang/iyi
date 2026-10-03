@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A macro range walks to an end wider than its begin, and says why a
+  float begin cannot step.** `(0_i8..300).to_a` stopped on "Arithmetic
+  overflow"; the begin is read in the end's kind now, and the walk gives
+  301 elements. `(0.0..2).to_a` said "BUG: called 'succ' for non-integer
+  literal"; it is refused naming the float, and a float end still bounds
+  an integer walk. The macro specs check both and failed before.
+
 ## 0.16.2 — 2026-10-02
 
 **About two hundred and sixty fixes, most of them found by comparing iyi

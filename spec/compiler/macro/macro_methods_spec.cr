@@ -3550,6 +3550,15 @@ module Iyi
         assert_macro %({% for i in 0_i8..1 %}{{i}} {% end %}), %(0_i8 1_i8 )
       end
 
+      it "executes to_a when the begin's kind is too small for the end" do
+        assert_macro %({{(0_i8..300).to_a.size}} {{(250_u8...258).to_a.last}}), %(301 257)
+      end
+
+      it "steps from an integer to a float end, and refuses a float begin by name" do
+        assert_macro %({{(1..3.5).to_a}}), %([1, 2, 3])
+        assert_macro_error %({{(0.0..2).to_a}}), "a macro range steps from an integer, and 0.0 is a float"
+      end
+
       it "#each" do
         assert_macro(
           %({% begin %}{% values = [] of Nil %}{% (1..3).each { |v| values << v } %}{{values}}{% end %}),

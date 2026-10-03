@@ -2184,7 +2184,12 @@ module Iyi::Lsp
       {Lsp.character_of(name_line, column), Lsp.character_of(name_line, column + size)}
     end
 
-    private def document_symbol(json : JSON::Builder, sym : Outline::Sym, lines : Array(String)) : Nil
+    # Levels of `children` in one outline: a level is two JSON levels (the
+    # array and the symbol in it) against the builder's 99, and fifty
+    # nested classes answered -32603 "Nesting of 100 is too deep".
+    OUTLINE_DEPTH = 32
+
+    private def document_symbol(json : JSON::Builder, sym : Outline::Sym, lines : Array(String), depth : Int32 = 1) : Nil
       sel_start, sel_end = selection_of(lines, sym)
       # iyi: the end in UTF-16 units, as every other range here is: `.size`
       # counts characters, and an `end # 🎉` line's range stopped short.
@@ -2194,13 +2199,19 @@ module Iyi::Lsp
         json.field "kind", sym.kind
         json.field "range" { range(json, sym.line - 1, 0, sym.end_line - 1, Lsp.character_of(end_text, end_text.size + 1)) }
         json.field "selectionRange" { range(json, sym.name_line - 1, sel_start, sym.name_line - 1, sel_end) }
-        unless sym.children.empty?
+        unless sym.children.empty? || depth == OUTLINE_DEPTH
           json.field "children" do
             json.array do
-              sym.children.each { |child| document_symbol(json, child, lines) }
+              sym.children.each { |child| document_symbol(json, child, lines, depth + 1) }
             end
           end
         end
+      end
+      # At the deepest level written, a symbol's own are listed beside it
+      # rather than in it: still inside its parent's range, and every
+      # symbol is still in the outline.
+      if depth == OUTLINE_DEPTH
+        sym.children.each { |child| document_symbol(json, child, lines, depth) }
       end
     end
 
@@ -2837,8 +2848,11 @@ module Iyi::Lsp
 
     private def on_code_action(id : JSON::Any, params : JSON::Any) : Nil
       uri = params["textDocument"]["uri"].as_s
-      from = params["range"]["start"]["line"].as_i
-      to = params["range"]["end"]["line"].as_i
+      # Read as every other position is (`position_of`): `.as_i` on a
+      # line past 2^31 - 1 answered -32603 "Arithmetic overflow", where
+      # the same line in a hover is held at the bound.
+      from = position_of(params["range"]["start"])[0]
+      to = position_of(params["range"]["end"])[0]
       only = params["context"]?.try(&.["only"]?).try(&.as_a?.try(&.compact_map(&.as_s?)))
 
       # A buffer this worker was handed (`iyi/adopt`) has a verdict on the
@@ -3369,6 +3383,8 @@ module Iyi::Lsp
           return respond_null(id)
         end
 
+      # The document's last line, for a position past it.
+      last_line = text.count('\n')
       respond(id) do |json|
         json.array do
           params["positions"].as_a.each do |position|
@@ -3379,10 +3395,26 @@ module Iyi::Lsp
             collector = SpanCollector.new(Location.new(path, line0 + 1, column))
             parsed.accept collector
             chain = nest_spans(collector.spans)
+            # Each span is written inside the next (`write_selection`), and
+            # a JSON builder stops at 99 levels: a cursor inside a
+            # 100-deep expression answered -32603 "Nesting of 100 is too
+            # deep". The middle of a longer chain goes; the innermost
+            # spans and the outermost stay, each still inside the next.
+            if chain.size > SELECTION_DEPTH
+              half = SELECTION_DEPTH // 2
+              chain = chain[0, half] + chain[chain.size - half, half]
+            end
 
             if chain.empty?
+              # Held to the document, as an edit's position is (LSP 3.17:
+              # past a line's end is its end): the client's numbers came
+              # back as they were sent, line 9 of a one-line buffer and
+              # 2^30 for the protocol's largest position.
+              at_line = {line0, last_line}.min
+              at_text = lines[at_line]? || ""
+              at_char = {char, Lsp.character_of(at_text, at_text.size + 1)}.min
               json.object do
-                json.field "range" { range(json, line0, char, line0, char) }
+                json.field "range" { range(json, at_line, at_char, at_line, at_char) }
               end
             else
               write_selection(json, chain, chain.size - 1, lines)
@@ -3410,6 +3442,12 @@ module Iyi::Lsp
       end
       chain
     end
+
+    # Spans in one selection chain. The answer's object, its array and a
+    # range's `start` are four JSON levels, and each span is one more,
+    # against the builder's 99; sixty-four expand-selections is past
+    # what a person presses.
+    SELECTION_DEPTH = 64
 
     # chain[index] innermost-out via recursion: the object is the
     # innermost range, its `parent` the next span outward.

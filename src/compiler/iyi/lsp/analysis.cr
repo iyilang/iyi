@@ -243,9 +243,12 @@ module Iyi::Lsp
     def result_for(path : String, text : String, overrides : Hash(String, String)) : Compiler::Result?
       result, _ = check(path, text, overrides)
       return result if result
-      if cached = @last_good[path]?
-        return aligned(path, text, overrides) || cached
-      end
+      # Only as laid over the buffer's lines (`aligned`): the last good
+      # program as it was names lines the buffer no longer has where
+      # they are. Nil where the two cannot be laid together, and the
+      # question is answered with nothing rather than with the old text's
+      # line numbers.
+      return aligned(path, text, overrides) if @last_good[path]?
       # Kept until one of the two compiles works: dropping it on a try
       # that failed — a sibling buffer mid-edit is enough — would spend
       # the fallback on the one question that could not use it and
@@ -258,7 +261,7 @@ module Iyi::Lsp
           # The seed is the clean text, not the buffer's: laid over the
           # buffer's lines as the last good program is, or a successor
           # answered every line below the edit from the line above it.
-          return aligned(path, text, overrides) || seeded
+          return aligned(path, text, overrides)
         end
       end
       nil
@@ -270,8 +273,8 @@ module Iyi::Lsp
     # read against the wrong line: press Enter, type half a statement,
     # and hover, definition and highlight below it answered about the
     # line above, their ranges a line off. One compile per buffer text,
-    # and only once a question needs the fallback; nil where the two
-    # cannot be aligned, and the caller answers as it did.
+    # and only once a question needs the fallback; nil where the text
+    # laid over the buffer's lines does not compile.
     @aligned_key : {String, UInt64, UInt64}?
     @aligned : Compiler::Result?
 
@@ -281,7 +284,7 @@ module Iyi::Lsp
       return @aligned if @aligned_key == key
       @aligned_key = key
       @aligned = nil
-      return nil unless candidate = Lsp.rebase(good, text)
+      candidate = Lsp.rebase(good, text)
       return @aligned = @last_good[path]? if candidate == good
       @aligned = compile(path, candidate, overrides)[0]
     end
@@ -1036,10 +1039,15 @@ module Iyi::Lsp
   # iyi: *good* laid over *now*'s lines. The lines the two share at the
   # start and at the end stay where *now* has them, and the lines between
   # are *good*'s, padded with blank lines to *now*'s count, so every
-  # position outside the edit names the same line in both. Nil where
-  # *good* has more lines there than *now*: removed lines cannot be put
-  # back without moving the ones after them.
-  def self.rebase(good : String, now : String) : String?
+  # position outside the edit names the same line in both. Where *good*
+  # has more lines there than *now*, the lines between are all blank:
+  # removed lines cannot be put back without moving the ones after them,
+  # and a question inside the edit has no line of *good*'s to be about.
+  # This answered nil there, and the caller answered from *good* as it
+  # was - a highlight below two edits that removed eleven lines named
+  # line 312 of a 306-line buffer, and every other line it named was the
+  # old text's.
+  def self.rebase(good : String, now : String) : String
     good_lines = good.split('\n')
     now_lines = now.split('\n')
     limit = {good_lines.size, now_lines.size}.min
@@ -1053,7 +1061,7 @@ module Iyi::Lsp
     end
     inner = good_lines.size - prefix - suffix
     room = now_lines.size - prefix - suffix
-    return nil if inner > room
+    inner = 0 if inner > room
     lines = good_lines[0, prefix + inner]
     (room - inner).times { lines << "" }
     lines.concat good_lines[good_lines.size - suffix, suffix]

@@ -4,6 +4,40 @@
 
 ### Fixed
 
+- **selectionRange and documentSymbol answer deep nesting.** A cursor
+  inside 100 nested parentheses and the outline of 50 nested classes
+  answered -32603 "Nesting of 100 is too deep", the JSON builder's limit.
+  A selection keeps its 32 innermost and 32 outermost spans, and an
+  outline nests 32 levels and lists anything deeper beside its parent,
+  so every symbol is still listed. Step 73e of `bench/lsp_session.py`
+  checks both; the old server answered neither.
+
+- **A cursor question in a broken buffer below removed lines names the
+  buffer's own lines.** The last good program is laid over the buffer's
+  lines for such an answer, and where lines had been removed it could
+  not be, so the answer came from the old text as it was: a highlight
+  after two edits that removed eleven lines of
+  `bench/std_regex_exercise.iyi` named line 312 of a 306-line buffer.
+  The removed span is laid down as blank lines now, and an answer is
+  never taken from the unaligned program. Step 73f of
+  `bench/lsp_session.py` checks it; the old server highlighted lines
+  [2, 9, 10, 11] of 12, the last of them a blank line, where the name is
+  on [2, 8, 9, 10].
+
+- **A codeAction range past line 2^31 - 1 is answered.** Its lines were
+  read with `.as_i`, and line 2^31 or 2^40 answered -32603 "Arithmetic
+  overflow" where hover and inlayHint hold such a line at the bound.
+  They go through `position_of` now. Step 73g of `bench/lsp_session.py`
+  checks it; the old server answered the overflow.
+
+- **selectionRange at a position outside the document is held to the
+  document.** Where no span held the position, the answer was the
+  position as sent: line 9 of a one-line buffer, and 2^30 for the
+  protocol's largest position. It is held to the last line and that
+  line's end now, as an edit's position is. Step 73h of
+  `bench/lsp_session.py` checks it; the old server answered (9, 2) and
+  (1073741824, 1073741824) for a three-line buffer.
+
 - **One `workspace/diagnostic` stays near the worker's memory bound.** A
   pull compiled every file of the workspace in one worker, which has no
   collector, and freed nothing until it answered; the proxy retires a

@@ -644,6 +644,80 @@ def traits_disk_and_completion():
     k.proc.wait(timeout=10)
 
 
+def document_bound_steps(c):
+    """Answers outside the document, and answers past the JSON builder's
+    nesting: -32603 where the client was owed a range."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-bounds")
+    # 73e. Deep nesting against the JSON builder's 99 levels: a selection
+    #      inside 100 nested parentheses and the outline of 50 nested
+    #      classes answered -32603 "Nesting of 100 is too deep".
+    deep = opened(c, own, "deep.iyi", "x = " + "(" * 100 + "1" + ")" * 100 + "\nputs x\n")
+    chosen = c.send("textDocument/selectionRange", {"textDocument": {"uri": deep},
+                                                    "positions": [{"line": 0, "character": 104}]})
+    depth, node = 0, (chosen.get("result") or [None])[0]
+    while node:
+        depth, node = depth + 1, node.get("parent")
+    classes = "".join(f"class C{n}\n" for n in range(50)) + "end\n" * 50
+    nested = opened(c, own, "nested.iyi", classes)
+    outline = c.send("textDocument/documentSymbol", {"textDocument": {"uri": nested}})
+    listed = []
+    pending = list(outline.get("result") or [])
+    while pending:
+        symbol = pending.pop()
+        listed.append(symbol["name"])
+        pending.extend(symbol.get("children", []))
+    step("73e", "a deep selection and a deep outline are answered, every class listed",
+         "error" not in chosen and depth > 1 and "error" not in outline and
+         sorted(listed) == sorted(f"C{n}" for n in range(50)),
+         f"{depth} nested range(s), {len(listed)} of 50 classes")
+
+    # 73f. A question in a buffer that does not compile, below two lines
+    #      removed: the last good program could not be laid over the
+    #      buffer's lines, and was answered from as it was - a highlight
+    #      named the old text's lines, one past the end among them. The
+    #      edited lines are left out of it now, and every line it names
+    #      holds the name.
+    stale_text = ("module stale\n\ndef twice(n : Int32) : Int32\n  n * 2\nend\n\n"
+                  "a = 1\nb = 2\nc = 3\nputs twice(a)\nputs twice(a + 1)\nputs twice(a + 2)\n")
+    stale = opened(c, own, "stale.iyi", stale_text)
+    removed = {"start": {"line": 7, "character": 0}, "end": {"line": 8, "character": 5}}
+    c.send("textDocument/didChange", {"textDocument": {"uri": stale, "version": 2},
+                                      "contentChanges": [{"range": removed, "text": "b = ("}]}, wait=False)
+    c.diagnostics(stale)
+    now = "\n".join(stale_text.split("\n")[:7] + ["b = ("] + stale_text.split("\n")[9:])
+    marks = c.send("textDocument/documentHighlight", {"textDocument": {"uri": stale},
+                                                      "position": {"line": 10, "character": 6}})
+    rows = now.split("\n")
+    lines = [h["range"]["start"]["line"] for h in marks.get("result") or []]
+    named = [span_text(now, h["range"]) if h["range"]["start"]["line"] < len(rows) else None
+             for h in marks.get("result") or []]
+    step("73f", "below removed lines, a broken buffer's answers name its own lines",
+         bool(named) and all(t == "twice" for t in named),
+         f"highlights on lines {lines} of {len(rows)}: {named}")
+
+    # 73g. A codeAction range read its lines as `.as_i`: line 2^31 answered
+    #      -32603 "Arithmetic overflow", where every other position past
+    #      the protocol's uinteger is held at the bound.
+    far = {"line": 2 ** 31, "character": 0}
+    acted = c.send("textDocument/codeAction", {"textDocument": {"uri": stale}, "range": {"start": far, "end": far},
+                                               "context": {"diagnostics": []}})
+    step("73g", "a codeAction range past 2^31 - 1 is answered",
+         "error" not in acted, json.dumps(acted.get("error") or acted.get("result"))[:70])
+
+    # 73h. A selection asked past the document came back as asked: line 9
+    #      of a two-line buffer, and 2^30 for the protocol's largest
+    #      position. Held to the document now, as an edit is.
+    short = opened(c, own, "short.iyi", "module short\n\nputs 1\n")
+    edge = c.send("textDocument/selectionRange", {"textDocument": {"uri": short}, "positions": [
+        {"line": 9, "character": 2}, {"line": 2 ** 31 - 1, "character": 2 ** 31 - 1}]})
+    ends = [(r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in edge.get("result") or []]
+    step("73h", "a selection asked past the document is held to its end",
+         ends == [(3, 0), (3, 0)], f"ranges at {ends}")
+    for uri in (deep, nested, stale, short):
+        c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
+    shutil.rmtree(own, ignore_errors=True)
+
+
 def fuzz_steps(c, work):
     """What a fuzz over the library and the samples found: 441,870
     requests from positions nobody chose. Each step failed before its fix."""
@@ -3265,6 +3339,7 @@ def main():
     step("70j", "a position past the end is answered, a misshapen one is invalid params",
          not overflowed and codes == [-32602] * 3 and not leaked,
          f"overflowed {overflowed[:1]}, codes {codes}, leaked {len(leaked)}")
+    document_bound_steps(c)
 
     # 52i. A hover inside `x.or(0)`: the `or` tests a variable of the
     # compiler's own, and the cursor context looked it up among the names

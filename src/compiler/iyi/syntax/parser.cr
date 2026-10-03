@@ -2728,7 +2728,13 @@ module Iyi
       found_space = @token.type.space?
       skip_space
 
-      type_vars, _ = parse_type_vars
+      # A trait's type parameters are names, one each: a `*` in front of one
+      # was read and dropped, so `trait Num(*T)` was `trait Num(T)`, checked
+      # as that, and `fmt` died on the `*` the tree did not have.
+      type_vars, splat_index = parse_type_vars
+      if type_vars && splat_index
+        raise "a trait's type parameter cannot be a splat: write `#{type_vars[splat_index]}`, not `*#{type_vars[splat_index]}`", name_location
+      end
       skip_space
 
       # iyi: `trait Ord : Eq, Show` — the traits an implementer must already
@@ -2792,7 +2798,12 @@ module Iyi
           {trait_node, nil}
         when Generic
           name = trait_node.name
-          unless name.is_a?(Path)
+          # `Greet[0]` and `Greet*` are types, the static array and pointer
+          # of `Greet`, and no trait: `impl Greet[0] for User` was refused as
+          # an impl of `StaticArray(T, N)`, a name the line does not have, and
+          # named arguments, `Greet(x: Int32)`, were dropped. `fmt` died on
+          # both.
+          unless name.is_a?(Path) && trait_node.suffix.none? && trait_node.named_args.nil?
             raise "expected a trait name after `impl`", name_location
           end
           {name, trait_node.type_vars}
@@ -3931,7 +3942,10 @@ module Iyi
         next_token_skip_space
       end
 
-      unless @token.value.in?(Keyword::WHEN, Keyword::ELSE, Keyword::END)
+      # `in` starts a branch as `when` does: `case` / `in` / `end` read the
+      # `in` as the value to match, and check answered "undefined local
+      # variable or method 'in'" where the `case ... in` has no value.
+      unless @token.value.in?(Keyword::WHEN, Keyword::IN, Keyword::ELSE, Keyword::END)
         cond = parse_op_assign_no_control
         skip_statement_end
       end
@@ -4771,8 +4785,10 @@ module Iyi
       # not to calls that might have this def as a macro argument.
       @stop_on_do = false
 
-      next_token
-
+      # The name is read from `def` on, in the mode that reads `` ` `` and
+      # `/` as names, as `macro` reads its own: a first token taken before it
+      # was skipped unread when no space came between, so `def{ f(x)`,
+      # `def[ f(x)` and ``def` f`` were each `def f`.
       consume_def_or_macro_name
 
       receiver = nil

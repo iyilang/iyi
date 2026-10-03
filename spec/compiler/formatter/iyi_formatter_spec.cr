@@ -106,6 +106,27 @@ describe "Formatter on iyi" do
   assert_iyi_format "module m\n\nimpl Show for Box(T) forall T : Show\n  def show : String\n    \"b\"\n  end\nend"
   assert_iyi_format "module m\n\nimpl Each for Nums\n  type Elem = Int32\n\n  def each(& : Int32 -> Nil) : Nil\n  end\nend"
 
+  # Headers the parser read as something they do not say, and fmt then
+  # died on: a splat trait parameter it dropped, a trait spelled as a
+  # static array or a pointer, a `case` whose `in` it took for the
+  # value, and a `def` followed at once by a bracket or a backtick, which
+  # it skipped. Each is a syntax error now, where fmt answered "there's a
+  # bug formatting" and check passed or blamed a name the line lacks.
+  it "refuses headers the parser used to misread" do
+    {
+      "pub trait Num(*T)\nend"              => "a trait's type parameter cannot be a splat",
+      "impl Greet[0] for User\nend"         => "expected a trait name after `impl`",
+      "impl Greet* for User\nend"           => "expected a trait name after `impl`",
+      "impl Greet(x: Int32) for User\nend"  => "expected a trait name after `impl`",
+      "case\nin\nend"                       => "requires a case expression",
+      "def{ f(x : Int32) : Int32\n  x\nend" => "expecting a name after 'def', not '{'",
+      "def[ f(x : Int32) : Int32\n  x\nend" => "expecting a name after 'def', not '['",
+      "def` f : Int32\n  1\nend"            => "parentheses are mandatory",
+    }.each do |source, message|
+      expect_raises(Iyi::SyntaxException, message) { Iyi.format(source, filename: "spec.iyi") }
+    end
+  end
+
   # A bound on a name the signature mentions rather than introduces (II.6),
   # and one on a name it introduces (II.7).
   assert_iyi_format "module m\n\ndef includes?(value : Elem) : Bool where Elem : Cmp\n  true\nend"

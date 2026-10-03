@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- **A splat trait parameter, a static array or pointer as an `impl`'s
+  trait, a `case` / `in` with no value, and a `def` followed at once by
+  `{`, `[` or a backtick are syntax errors.** The parser read each as
+  something else, and `fmt` answered "there's a bug formatting", exit 1,
+  on all eight forms below. `pub trait Num(*T)` lost the `*` and was
+  checked as `Num(T)`: `impl Num(Int32, String) for Int32` answered
+  "wrong number of type arguments for Num(T) (given 2, expected 1)".
+  `impl Greet[0] for User` answered "can't implement StaticArray(T, N),
+  it's a generic struct", and named arguments, `impl Greet(x: Int32)`,
+  were dropped. `case` / `in` / `end` answered "undefined local variable
+  or method 'in'". `def{ f(x : Int32)`, `def[ f(...)` and ``def` f`` were
+  each checked as `def f`, exit 0. Each stops at its line now: "a
+  trait's type parameter cannot be a splat", "expected a trait name after
+  `impl`", "exhaustive case (case ... in) requires a case expression",
+  "expecting a name after 'def', not '{'".
+  `spec/compiler/formatter/iyi_formatter_spec.cr` requires a syntax error
+  from each of the eight; the old compiler raised the formatter's
+  internal error on all of them.
+
 - **`fmt` formats a `::` call whose name is on the next line.** The
   parser reads `::` / `puts 2` as `::puts 2`, as it reads a path, and
   `fmt` asked for the name at the line break: "there's a bug

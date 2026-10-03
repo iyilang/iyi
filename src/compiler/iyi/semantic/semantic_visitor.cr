@@ -117,6 +117,15 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
           note << "IYI_PATH sets that list, and unsetting it uses the one "
           note << "this compiler was built with"
         end
+      elsif node.iyi_prelude?
+        # iyi: the other half, the prelude `--crystal` injects, which is
+        # Crystal's library and not iyi's. The Windows zip does not carry
+        # it (Makefile.win says why), and `iyi run --crystal x.iyi` from an
+        # install answered with the `shards install` advice below.
+        notes << "This is the prelude `--crystal` gives a program: Crystal's standard library, " \
+                 "a directory on the search path that iyi's own library does not need. " \
+                 "The Windows zip does not include it; a checkout of iyi's source has it in `src`, " \
+                 "and IYI_PATH can name that directory"
       else
         notes << <<-NOTE
           If you're trying to require a shard:

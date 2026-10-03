@@ -1530,6 +1530,16 @@ else
   sed -n '1,8p' "$WORK/lost.txt"
   status=1
 fi
+# And `--crystal`'s prelude, which is the other library's: the Windows zip
+# does not carry it, and the answer was the `shards install` advice.
+env IYI_PATH="$WORK/nowhere" "$IYI" build --crystal -o lost good.iyi > "$WORK/lostcr.txt" 2>&1
+if grep -q 'shards install' "$WORK/lostcr.txt" || ! grep -q "The Windows zip does not include it" "$WORK/lostcr.txt"; then
+  echo "  a missing --crystal prelude: did not say whose library is missing"
+  sed -n '1,8p' "$WORK/lostcr.txt"
+  status=1
+else
+  echo "  a missing --crystal prelude: says it is the other library, which the Windows zip does not carry"
+fi
 # And the formatter, asked about a file that is not there. It printed
 # "file or directory does not exist" and exited 0, so a CI line that
 # reads `iyi tool format --check "$FILE"` passed on a path with a typo -

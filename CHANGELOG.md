@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`--crystal` without the other library on the search path says which
+  library is missing.** The Windows zip carries iyi's prelude and `std` and
+  not the other library, which README said it did, and `iyi run --crystal`
+  from it answered "can't find file 'prelude'" and then "If you're trying to
+  require a shard: - Did you remember to run `shards install`?". The
+  injected `--crystal` prelude now has a note of its own: what it is, that
+  the Windows zip does not include it, and that a source checkout's `src`
+  named in IYI_PATH has it; README's zip paragraph says the zip carries two
+  of the three libraries and why. `bench/verbs_exercise.sh` builds
+  `--crystal` with IYI_PATH pointed at nothing; the old compiler gave the
+  shards advice.
+
 - **`iyi fix` prints its edit so a Char reads as one.** The text replaced
   and its replacement were wrapped in single quotes, and the Char an edit
   writes was quoted twice: `fixed split.iyi:4:14: '" "' -> '' ''`, which

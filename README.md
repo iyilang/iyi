@@ -472,10 +472,18 @@ Expand-Archive iyi-0.16.2-windows-x86_64.zip -DestinationPath "$env:LOCALAPPDATA
 ```
 
 What the zip carries is `bin\iyi.exe`, the `LLVM-C.dll` the compiler
-loads, and the same three libraries the tarball has, so there is nothing
-to configure and no `IYI_PATH` to set; what it does not carry is the
-daemon, because `iyi daemon`'s server loop is `poll(2)` and its worker is
-`fork` (`src/compiler/iyi/command/daemon.cr`), neither of which Windows
+loads, and two of the tarball's three libraries — iyi's prelude and
+`src/std` — so there is nothing to configure and no `IYI_PATH` to set.
+Crystal's standard library, the third, is not in it: `--crystal` gives a
+program that library's prelude, which links pcre2, gc, iconv and the rest,
+and on Windows the only `.lib` files for those are in Crystal's own
+package (`Makefile.win` says so where the zip is written). `--crystal`
+there wants a checkout of this repository — its `src` on `IYI_PATH`, and
+the package's `lib` on `CRYSTAL_LIBRARY_PATH` — and a build without the
+library says that rather than suggesting `shards install`. What the zip
+does not carry either is the daemon, because `iyi daemon`'s server loop
+is `poll(2)` and its worker is `fork`
+(`src/compiler/iyi/command/daemon.cr`), neither of which Windows
 has. `init`, `check`, `vet`, `build`, `test`, `mod context`, `mod diff`,
 `migrate`, a package through `iyi.mod` and `iyi.sum`, `iyi lsp` — the
 whole scripted editor session, over source and over artifacts, and a

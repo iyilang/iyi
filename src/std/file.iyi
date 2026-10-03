@@ -1291,7 +1291,18 @@ class ::File
       # the kind of whatever this one held under that name, and a file
       # link to a directory cannot be listed through. (Found by reading;
       # no symlink could be made where this was written to measure it.)
-      old_wide = __iyi_wide_path(sys_path(o))
+      # A `/` in the target is written `\`: the link keeps the target as
+      # given, and Go's `os.Symlink` converts it the same way because "'/'
+      # does not work in link's content". Passed as written, a link to
+      # `sub/t.txt` would point at nothing. (Not measured either, for the
+      # same reason.)
+      target = sys_path(o)
+      i = 0
+      while i < o.bytesize
+        target[i] = 92_u8 if target[i] == 47_u8
+        i = i + 1
+      end
+      old_wide = __iyi_wide_path(target)
       new_wide = __iyi_wide_path(sys_path(n))
       if old_wide.address == 0_u64 || new_wide.address == 0_u64
         raise "Cannot symlink #{o} to #{n}: the path is not valid UTF-8"

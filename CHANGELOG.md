@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **On Windows `File.symlink` writes a `/` in the target as `\`.** The
+  target went to `CreateSymbolicLinkW` as written, and Go's `os.Symlink`
+  converts it because "'/' does not work in link's content", so a link
+  to `sub/t.txt` probably pointed at nothing [INFERENCE: not measured;
+  this machine refuses the call with error 1314, no Developer Mode]. The
+  target's separators are backslashed before the call now. No bench
+  checks it, for the same reason.
+
 - **On Windows a refused `Dir.mkdir`, `mkdir_p`, `delete` or `open` says
   why.** Each said the path and nothing else: "Cannot create directory:
   db" for a directory that was there and for one under a missing

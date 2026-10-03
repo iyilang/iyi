@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **Taking a `Hash`'s oldest key and deleting it until none is left is
+  linear: 40,000 keys take under a millisecond, where they took 197 ms.**
+  `delete` marks an entry gone where it stands, and `each` started at entry
+  0, so every key taken stepped over every key taken before it; that is
+  quadratic, 1,391 ms in a plain build. The table now keeps the other
+  library's `@first`: every entry before it is gone, `delete` moves it past
+  the gone ones at the front, and `each` starts there.
+  `bench/collections_exercise.sh` checks a 50 ms bound at 40,000; the old
+  prelude failed it at 197 ms.
+
 - **`String#==` is ten times faster on long strings: 1,000 compares of two
   equal megabytes take 22 ms optimised, as Python's take 20.** It compared
   a byte at a time, and the early exit kept LLVM from vectorising the loop:

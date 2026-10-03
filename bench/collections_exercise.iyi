@@ -410,6 +410,25 @@ shared_ms = (__iyi_monotonic_ns - shared_started) // 1000000
 assert_true(shared.size == 20000 && shared[19999 &* 65536]? == 19999, "hash: multiples of 65536 all kept")
 assert_true(shared_ms < 250, "hash: 20,000 keys that share their low bits insert in #{shared_ms} ms, not a second")
 
+# The oldest key taken and deleted until none is left, the queue a table in
+# insertion order makes: `each` started at entry 0 and stepped over every
+# key deleted before it, 40,000 of them 197 ms optimised and quadratic.
+def oldest(table : Hash(Int32, Int32)) : Int32
+  table.each { |key, value| return key }
+  -1
+end
+
+queue = {} of Int32 => Int32
+40000.times { |k| queue[k] = k }
+queue_started = __iyi_monotonic_ns
+popped = 0
+while queue.size > 0
+  popped = popped + 1 if queue.delete(oldest(queue)) == popped
+end
+queue_ms = (__iyi_monotonic_ns - queue_started) // 1000000
+assert_int(popped, 40000, "hash: the oldest key is taken in order")
+assert_true(queue_ms < 50, "hash: 40,000 oldest keys taken in #{queue_ms} ms, past 50")
+
 # A class instance is itself, and a set of them finds each one: `Object#==`
 # answered false, so an instance did not equal itself and a `Set` never
 # found what was added to it. A class that says what equal means keeps

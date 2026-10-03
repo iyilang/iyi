@@ -231,6 +231,11 @@ prove_fails "each walks the gone entries" each_gone hash.iyi \
   "hash: each counts what size says" \
   's/^      yield @keys\[entry\], @values\[entry\] unless @gone.address != 0_u64 \&\& @gone\[entry\]$/      yield @keys[entry], @values[entry]/'
 
+# 4b. `each` from entry 0 again, over every key deleted at the front.
+prove_fails "each starts before the gone at the front" each_from_zero hash.iyi \
+  "hash: 40,000 oldest keys taken in" \
+  's/^    entry = @first$/    entry = 0/'
+
 # 5. A set that keeps duplicates, which is the one thing a set is.
 prove_fails "a set forgets its members" dup_set set.iyi \
   "set: the other one is still in" \

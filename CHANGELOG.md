@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A connect to `localhost` that 127.0.0.1 refuses is tried at ::1.**
+  `IyiSocket.connect`, and so `HTTP.get`, took `localhost` for 127.0.0.1
+  alone, while Windows names ::1 first and dev servers often listen
+  there: against a listener on ::1 only, `HTTP.get` answered "cannot
+  connect to localhost:P: connection refused" after 2016 ms. A refused
+  or unreachable 127.0.0.1 is tried again at ::1 now, and the module's
+  header says so. Windows takes 2 s to refuse the first connect, so the
+  ::1 listener is reached in 2017 ms, and a port nobody holds is refused
+  in 4059 ms where it was about 2 s. `bench/socket_exercise.iyi` connects
+  to `localhost` against a listener on ::1 only; the old module answered
+  a `SocketError`.
+
 - **A module's overloads called unqualified with a union argument run
   the overload the value picks.** With `pub def fr_show(x : Int32)` and
   `pub def fr_show(x : String)` in `kit/lib2`, `fr_show(v)` for a

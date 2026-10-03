@@ -260,6 +260,21 @@ named_conn.close
 named.close
 puts "localhost: ok"
 
+# 8c. A connect to `localhost` reaches a listener on ::1 alone: Windows
+#     names both addresses and dev servers often bind ::1, where the
+#     connect went to 127.0.0.1 only and was "connection refused".
+v6_only = IyiSocket.listen("::1", 0)
+v6_client = IyiSocket.connect("localhost", v6_only.local_port)
+raise "localhost_v6: the connect answered #{v6_client.inspect}" unless v6_client.is_a?(IyiSocket)
+v6_conn = v6_only.accept.or_panic
+v6_client.write("over ::1")
+heard_v6 = v6_conn.read(64).or_panic
+raise "localhost_v6: the server read #{heard_v6.inspect}" unless heard_v6 == "over ::1"
+v6_client.close
+v6_conn.close
+v6_only.close
+puts "localhost_v6: ok"
+
 # 9. A unix socket: a listener at a path, a connection to it, bytes each
 #    way, the path as the listener's address and no port. Closing the
 #    listener takes the path away - a connect to it is then a value, and

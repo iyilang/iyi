@@ -10,7 +10,8 @@
 # getaddrinfo is the standard route in libc, but on Linux it pulls in libc.so,
 # dynamic NSS modules (libnss_dns, libnss_files), and resolver state, which destroys
 # the zero-undefined-symbol dependency floor (SPEC.md III.9).
-# By parsing numeric addresses (and mapping "localhost" to 127.0.0.1)
+# By parsing numeric addresses (and mapping "localhost" to 127.0.0.1, and
+# a connect refused there to ::1)
 # in pure iyi arithmetic without libc, Linux programs retain raw syscall purity
 # (zero undefined symbols) and Darwin programs only link standard socket symbols
 # provided by libSystem. A socket listening on `::` takes IPv6 alone on
@@ -227,7 +228,7 @@ pub struct SocketError
     {% if flag?(:win32) %} @code == 10053 {% elsif flag?(:darwin) %} @code == 53 {% else %} @code == 103 {% end %}
   end
 
-  private def refused? : ::Bool
+  def refused? : ::Bool
     {% if flag?(:win32) %} @code == 10061 {% elsif flag?(:darwin) %} @code == 61 {% else %} @code == 111 {% end %}
   end
 
@@ -247,7 +248,7 @@ pub struct SocketError
     {% if flag?(:win32) %} @code == 10060 {% elsif flag?(:darwin) %} @code == 60 {% else %} @code == 110 {% end %}
   end
 
-  private def unreachable? : ::Bool
+  def unreachable? : ::Bool
     {% if flag?(:win32) %}
       @code == 10065 || @code == 10051
     {% elsif flag?(:darwin) %}
@@ -314,9 +315,21 @@ pub class IyiSocket
   # blocking `poll` on the descriptor and never do, but the type is the
   # same, so a program reads the same everywhere.
 
+  # `localhost` is 127.0.0.1 and then ::1: a refused or unreachable
+  # 127.0.0.1 is tried again at ::1. Windows names both, ::1 first, and a
+  # dev server that binds `localhost` there is often on ::1 alone, where
+  # a connect to 127.0.0.1 only was "connection refused". 127.0.0.1 goes
+  # first because a listener here binds `localhost` there. Windows takes
+  # 2 s to refuse a connect, so a ::1-only listener is reached in 2 s
+  # (2017 ms measured) and a port nobody holds is refused in 4 s, not 2.
   def self.connect(host : String, port : Int32) : IyiSocket | Cancelled | SocketError
     addr, family = sockaddr(host, port)
-    connect_to(addr, family, endpoint(host, port))
+    got = connect_to(addr, family, endpoint(host, port))
+    if localhost?(host) && got.is_a?(SocketError) && (got.refused? || got.unreachable?)
+      six = connect_to(make_sockaddr_in6(parse_ipv6("::1"), port), AF_INET6, endpoint(host, port))
+      return six unless six.is_a?(SocketError)
+    end
+    got
   end
 
   # *host* and *port* as a message names them: an IPv6 literal in its

@@ -1171,6 +1171,17 @@ class ::File
       if old_wide.address == 0_u64 || new_wide.address == 0_u64
         raise "Cannot rename #{o} to #{n}: a path is not valid UTF-8"
       end
+      # A directory onto a name that is no directory is refused, as POSIX
+      # `rename` refuses it (ENOTDIR): MoveFileExW replaced the file with
+      # the directory - measured, `File.rename("d", "f.txt")` left `f.txt`
+      # a directory and the file's contents gone, where Linux said "Cannot
+      # rename". Only a directory itself is asked about; a link to one, a
+      # reparse point, is left to the rename.
+      moving = Std::File::LibKernel32.GetFileAttributesW(old_wide)
+      if moving != -1 && (moving & 0x10) != 0 && (moving & 0x400) == 0
+        onto = Std::File::LibKernel32.GetFileAttributesW(new_wide)
+        raise "Cannot rename #{o} to #{n}: #{n} is not a directory" if onto != -1 && (onto & 0x10) == 0
+      end
       # MoveFileExW replaced the second link with the first, and the first
       # name was gone: measured, renaming `a` onto its own hard link `b`
       # left `b` alone, where POSIX leaves both.

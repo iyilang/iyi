@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **On Windows `File.rename` refuses to put a directory where a file is,
+  as POSIX `rename` refuses it.** `MoveFileExW` replaced the file with
+  the directory: `File.rename("d", "f.txt")` left `f.txt` a directory and
+  the file's contents gone, where POSIX `rename` answers ENOTDIR and the
+  Linux arm says "Cannot rename" [INFERENCE: from the code and POSIX,
+  not run on Linux here]. It panics "... is not a directory" now, and
+  the file stays. `bench/std_file_exercise.iyi` renames a directory onto
+  a file; the old module renamed it.
+
 - **`Server.serve` skips the empty lines before a request line, as RFC
   9112 §2.2 asks of a server.** A client that ended a body with one more
   CRLF had its next request on the connection answered 400 and closed:

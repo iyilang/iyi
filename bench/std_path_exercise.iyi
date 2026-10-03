@@ -274,9 +274,16 @@ assert_true(Path.posix("a") < Path.posix("b"), "Path <")
 assert_true(Path.posix("b") > Path.posix("a"), "Path >")
 assert_str("a,b,c", [Path.posix("c"), Path.posix("a"), Path.posix("b")].sorted.map { |p| p.to_s }.join(","), "sorted")
 assert_true((Path.posix("a") <=> Path.posix("a")) == 0, "<=> equal")
-assert_str("Path[\"a\"]", Path.posix("a").inspect, "inspect")
+assert_str("Path[\"a\"]", Path["a"].inspect, "inspect of a native path")
+# A path of the kind this platform does not use names its constructor, as
+# the other library writes it: `Path.posix("/usr/bin")` on Windows was
+# `Path["/usr/bin"]`, which names a Windows path.
+posix_said = Path.posix("/usr/bin").native? ? "Path[\"/usr/bin\"]" : "Path.posix(\"/usr/bin\")"
+windows_said = Path.windows("C:\\x").native? ? "Path[\"C:\\\\x\"]" : "Path.windows(\"C:\\\\x\")"
+assert_str(posix_said, Path.posix("/usr/bin").inspect, "inspect of a POSIX path")
+assert_str(windows_said, Path.windows("C:\\x").inspect, "inspect of a Windows path")
 assert_true(Path.posix("").empty?, "empty?")
 assert_true(Path.new("x").native?, "Path.new is native")
-puts "  <, >, <=>, sorted, inspect verified"
+puts "  <, >, <=>, sorted, inspect verified, a path of the other kind naming its constructor"
 
 puts "\nALL CHECKS PASSED"

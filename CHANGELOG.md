@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`Path#inspect` writes `Path.posix(...)` or `Path.windows(...)` for a
+  path of the kind the platform does not use, as the other library
+  does.** `Path.posix("/usr/bin").inspect` on Windows was
+  `Path["/usr/bin"]`, which spells a Windows path and is not `==` to it.
+  A native path still inspects as `Path[...]`. **The answer changes** for
+  a non-native path; nothing in src/std, bench or samples read it.
+  `bench/std_path_exercise.iyi` checks both kinds on either platform; the
+  old module answered `Path["/usr/bin"]`.
+
 - **`Path#parents` and `#each_parent` keep the spelling the path was
   written with, as `parent` does and the other library's do.** Each
   ancestor was rebuilt from `parts` and joined with the kind's separator,

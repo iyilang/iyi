@@ -124,8 +124,13 @@ pub struct Path
     io.write(@name)
   end
 
+  # A path of the kind this platform does not use names its constructor,
+  # as the other library writes it: `Path.posix("/usr/bin")` on Windows
+  # inspected as `Path["/usr/bin"]`, a Windows path, which `==` tells
+  # apart from it.
   def inspect : String
-    "Path[" + @name.inspect + "]"
+    return "Path[" + @name.inspect + "]" if native?
+    (posix? ? "Path.posix(" : "Path.windows(") + @name.inspect + ")"
   end
 
   def inspect(io : IO) : Nil

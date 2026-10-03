@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`Gzip.decompress` reads a file of many members in the time its
+  members take.** Every member was sized by the file's last trailer, or
+  by three times the bytes after it, so each allocated what the rest of
+  the file could hold. In release builds, a hundred two-byte members
+  ahead of one of 64 MB took 2,489 ms and 1,600 of them 36,028 ms, where
+  Python's gzip took 152 and 317; 500 members of 64 KB, the shape bgzip
+  writes, took 2,942 ms where 125 took 218. Only the first member is
+  sized by the trailer now, the one a file of one member has, and a
+  member after it grows from nothing: the same files read in 309,
+  219, 234 and 60 ms. `bench/std_compress_exercise.iyi` holds a
+  thousand members ahead of one of 8 MB to six times that member alone
+  and 100 ms; the old module took 2,751 ms where the one took 60.
+
 - **`HttpDatagram.from_stream_id` refuses a stream ID that is no
   client-initiated bidirectional stream.** RFC 9297 Section 2.1
   associates an HTTP Datagram with a request stream and nothing else,

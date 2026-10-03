@@ -169,6 +169,28 @@ joined = Gzip.compress("first\n") + Gzip.compress("second\n") + Gzip.compress(""
 assert_true Gzip.decompress(joined) == "first\nsecond\n", "every member of a concatenated gzip file"
 assert_true Gzip.decompress(Gzip.compress("first\n") + "\0\0\0\0") == "first\n", "zero padding after the last member"
 puts "  a gzip file of three members, and one padded with zeros"
+# And in the time its members take. Every member was sized by the file's
+# last trailer, or by three times the bytes after it, so each allocated
+# what the rest of the file could hold: a thousand two-byte members ahead
+# of one of 8 MB took 2.6 s where that member alone took 64 ms. A bound,
+# not a benchmark: six times the one member and 100 ms over.
+zeros = run_of(0, 8_000_000)
+one = Gzip.compress(zeros)
+many = Gzip.compress("x\n") * 1000 + one
+best_one = 0_i64
+best_many = 0_i64
+3.times do |k|
+  t0 = IyiMark.now_ns
+  inflated_one = Gzip.decompress(one)
+  t1 = IyiMark.now_ns
+  joined_many = Gzip.decompress(many)
+  t2 = IyiMark.now_ns
+  assert_true inflated_one == zeros && joined_many == "x\n" * 1000 + zeros, "8 MB of zeros, alone and behind a thousand members"
+  best_one = (t1 - t0).to_i64 if k == 0 || (t1 - t0).to_i64 < best_one
+  best_many = (t2 - t1).to_i64 if k == 0 || (t2 - t1).to_i64 < best_many
+end
+assert_true best_many <= best_one * 6 + 100_000_000_i64, "a thousand members and one of 8 MB took #{best_many // 1000000} ms where that one took #{best_one // 1000000} ms"
+puts "  a thousand members ahead of one of 8 MB within six times that one and 100 ms"
 
 args = Program.args
 if args.size > 0

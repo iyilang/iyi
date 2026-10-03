@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A package import with no requirement suggests the repository's
+  `require` line.** `import example.test/user/liba` without an `iyi.mod`
+  said to write `require example.test/user v1.2.3`: the last segment was
+  always dropped, so a package's root module was sent to the
+  organisation. The message names the whole path first, `require
+  example.test/user/liba v1.2.3`, then the packages it could be inside
+  (`example.test/user`), longest first as `iyi mod tidy` tries them.
+  `bench/packages_resolve.sh` checks the line; the old compiler named
+  `example.test/user`.
+
 - **`impl Enumerable for Nums` without the import names the import.** The
   compiler itself declares `Enumerable` and `Indexable`, so in an `.iyi`
   file without `import std/enumerable` the name found that module and the

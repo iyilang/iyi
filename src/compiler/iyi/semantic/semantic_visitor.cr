@@ -209,9 +209,22 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # find `github.com/user/lib.iyi`" would be technically true and useless.
     package = resolve_package(path)
     if package.nil? && path.includes?('.')
+      # The repository is a prefix of the path, and which one only the
+      # repositories know: `iyi mod tidy` asks them, longest first, down to
+      # two segments, since a host alone is never a module. The line used
+      # to drop the last segment, so the root module of a package,
+      # `example.test/user/liba`, was told `require example.test/user`.
+      segments = path.split('/')
+      repositories = segments.size < 2 ? [path] : segments.size.downto(2).map { |count| segments[0, count].join('/') }.to_a
+      inside = ""
+      if repositories.size > 1
+        above = repositories[1..].map { |prefix| "`#{prefix}`" }.join(" or ")
+        inside = ", or the package the module is inside (#{above}) - `iyi mod tidy` finds which"
+      end
       node.raise "no requirement covers '#{path}'. A dotted path is a " \
-                 "package (SPEC.md III.7); the file beside the entry file " \
-                 "that declares one is `iyi.mod`, as `require #{path[0, path.rindex('/') || path.size]} v1.2.3`"
+                 "package (SPEC.md III.7); the file that declares one is " \
+                 "`iyi.mod`, at the root the entry's `module` header names or beside " \
+                 "the entry, as `require #{repositories.first} v1.2.3`#{inside}"
     end
 
     # iyi: the artifact, if there is one (SPEC.md IV.1). This is R-1's contract

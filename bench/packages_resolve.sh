@@ -102,12 +102,20 @@ fi
 ./app/app | grep -q 'v1.1.0' || { echo "cache-built program answered differently"; exit 1; }
 
 # ── 3. Failure proof: a package import needs a manifest ──────────────────
+# The require line it names is the repository's: the whole path first, for
+# the package's root module. It used to drop the last segment and answer
+# `require example.test/user v1.2.3`, the organisation.
 step "failure proof: a dotted import without iyi.mod names the manifest"
 mkdir -p bare
 printf 'import example.test/user/liba\nputs 1\n' > bare/main.iyi
 (cd bare && "$IYI" build main.iyi -o bare) > bare.log 2>&1
 if [ $? -eq 0 ] || ! grep -q 'iyi.mod' bare.log; then
   echo "the refusal did not name the manifest:"
+  tail -6 bare.log
+  exit 1
+fi
+if ! grep -qF 'as `require example.test/user/liba v1.2.3`' bare.log; then
+  echo "the refusal did not name the repository's require line:"
   tail -6 bare.log
   exit 1
 fi

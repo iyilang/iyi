@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **A `--release` build returns what a helper the top level called once
+  built and dropped.** LLVM inlined the helper into `__iyi_main`, whose
+  frame lives as long as the program, and spilled its array to a slot of
+  that frame nothing wrote again, so the conservative stack scan kept it:
+  `make` filling an array with 4,000 arrays of 80 KB, called once, left
+  `live after 3 collections: 312 MB` under --release where a debug build
+  printed `0 MB`. A call the top level makes once now stays a call, at no
+  measured cost (three --release programs within run-to-run noise). One
+  inside a top-level loop or block is still inlined and can leave its last
+  pass's structure behind (156 MB after a two-pass loop of the same
+  helper), because keeping those out of line cost a loop of a small
+  function 2.6 times its time. `bench/root_exercise.sh` checks the once
+  case in a --release build; the old compiler answered `dropped: under 8 MB
+  marked after three collections (false)`.
+
 - **`GC.collect` no longer keeps a returned helper's data alive through a
   stale word in the collector's own frames.** The collector's frames are
   built over what earlier, deeper calls left on the stack, and a slot one

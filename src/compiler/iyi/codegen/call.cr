@@ -316,6 +316,7 @@ class Iyi::CodeGenVisitor
     with_cloned_context do |old_block_context|
       context.vars = old_block_context.vars.dup
       context.closure_parent_context = old_block_context
+      context.repeats = true
 
       # Allocate block vars, but first undefine variables outside
       # the block with the same name. This can only happen in this case:
@@ -654,8 +655,28 @@ class Iyi::CodeGenVisitor
     if external = target_def.c_calling_convention?
       set_call_attributes_external(node, external)
     else
-      # Non-external methods/functions have no arguments attributes
+      keep_call_out_of_main(target_def)
     end
+  end
+
+  # iyi: a call the top level makes once stays a call in an optimised build.
+  # The top level is `__iyi_main`, whose frame lives as long as the program,
+  # and the collector reads every frame conservatively. LLVM inlines an
+  # internal function with one call site whatever its size, and the register
+  # allocator then spills the helper's locals to slots of that frame which
+  # nothing writes again. `def make` filling an array with 4,000 arrays of
+  # 80 KB and returning its size, called once from the top level, left the
+  # array at 72(%rsp) of `__iyi_main`, and after three `GC.collect` 312 MB
+  # were still marked live under --release: 0 MB in a debug build and 0 MB
+  # with the helper `@[NoInline]`. Out of line, the helper's frame is popped
+  # when it returns and its slots are below where the next scan starts. A
+  # call that runs once costs one call either way. One inside a `while` or
+  # a block may be a loop's, so the inliner keeps it (GC_DESIGN.md says what
+  # that leaves).
+  def keep_call_out_of_main(target_def)
+    return if context.repeats? || target_def.always_inline? || context.fun != @main
+
+    @last.add_instruction_attribute(LLVM::AttributeIndex::FunctionIndex.value, LLVM::Attribute::NoInline, llvm_context)
   end
 
   def set_call_attributes_external(node, target_def)

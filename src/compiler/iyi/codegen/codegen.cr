@@ -1269,6 +1269,7 @@ module Iyi
       set_ensure_exception_handler(node)
 
       with_cloned_context do
+        context.repeats = true
         cond = node.cond.single_expression
         endless_while = cond.true_literal?
 

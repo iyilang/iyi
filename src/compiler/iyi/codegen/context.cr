@@ -12,6 +12,10 @@ class Iyi::CodeGenVisitor
     property break_phi : Phi?
     property next_phi : Phi?
     property while_block : LLVM::BasicBlock?
+    # iyi: whether code emitted here may run more than once per entry to
+    # the function — inside a `while` or a block — which is what
+    # `keep_call_out_of_main` asks before it keeps a call out of line.
+    property? repeats = false
     property! block : Block
     property! block_context : Context
     property closure_vars : Array(MetaVar)?
@@ -44,6 +48,7 @@ class Iyi::CodeGenVisitor
       context.break_phi = @break_phi
       context.next_phi = @next_phi
       context.while_block = @while_block
+      context.repeats = @repeats
       if block = @block
         context.block = block
       end

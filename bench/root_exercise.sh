@@ -210,6 +210,41 @@ elif ! grep -q "all root checks passed" "$WORK/roots-release.out" 2>/dev/null; t
 fi
 
 echo
+echo "== a helper the top level called once leaves nothing in its frame"
+# An optimised build inlined `make` - one call site, which LLVM inlines
+# whatever its size - into `__iyi_main`, whose frame lives as long as the
+# program, and spilled the array to a slot of it nothing wrote again: the
+# 4,000-array form of this kept 312 MB marked through three collections,
+# where a debug build freed all of it. The compiler keeps a call the top
+# level makes once out of line (codegen/call.cr, `keep_call_out_of_main`).
+# Built with --release only, because only that build inlines.
+cat > "$WORK/dropped.iyi" <<'IYI'
+def make(count : Int32) : Int32
+  a = [] of Array(Int64)
+  count.times { a << Array(Int64).new(10000, 7_i64) }
+  a.size
+end
+
+puts "made #{make(1000)} arrays of 80 KB"
+3.times { IyiMark.collect }
+puts "dropped: under 8 MB marked after three collections (#{IyiMark.bytes_marked < 8_388_608_u64})"
+IYI
+if [ "$EXERCISED" = no ]; then
+  echo "  nothing was exercised here, so the inlined helper is unmeasured too"
+  unmeasured=$((unmeasured + 1))
+elif ! "$IYI" build --release -o "$WORK/dropped" "$WORK/dropped.iyi" >"$WORK/dropped.log" 2>&1; then
+  echo "  build failed"
+  sed -n '1,12p' "$WORK/dropped.log"
+  status=1
+elif "$WORK/dropped" >"$WORK/dropped.out" 2>&1 && grep -q "after three collections (true)" "$WORK/dropped.out"; then
+  sed 's/^/  /' "$WORK/dropped.out"
+else
+  echo "  FAIL: the helper's arrays stayed marked"
+  sed 's/^/    /' "$WORK/dropped.out" | tail -3
+  status=1
+fi
+
+echo
 echo "== what root discovery asks the machine for"
 # Linux adds two undefined symbols and no library: `__data_start` and `_end`
 # bound the static data, and both come from the link that is already happening,

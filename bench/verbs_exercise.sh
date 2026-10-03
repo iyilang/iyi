@@ -257,6 +257,19 @@ printf 'pub def twice(x : Int32) : Int32\n  x * 2\nend\n' > bare.iyi
 printf 'import bare::{twice}\n\nputs twice(3)\n' > usesbare.iyi
 refuses "an import of a file with no module header" 'has no `module bare` header' -- \
   "$IYI" run usesbare.iyi
+# A splat generic is bound the way it was declared. `impl Show for
+# Proc(Int32)` was told to write `Proc(T) forall T`, which was refused for
+# its arity, and `Tuple(*T) forall T` as if T were not a `forall` name.
+printf 'trait Show\n  abstract def show : String\nend\n\nimpl Show for Proc(Int32)\n  def show : String\n    "proc"\n  end\nend\n' > implproc.iyi
+refuses "a specialised impl of a splat generic" 'Write `impl Show for Proc(*T, R) forall T, R`' -- \
+  "$IYI" check implproc.iyi
+printf 'trait Show\n  abstract def show : String\nend\n\nimpl Show for Proc(*T, R) forall T, R\n  def show : String\n    "proc"\n  end\nend\n\nimpl Show for Tuple(*T) forall T\n  def show : String\n    "tuple of #{size}"\n  end\nend\n\nputs(->{ 1 }.show)\nputs({1, "a"}.show)\n' > implsplat.iyi
+splat_out=$("$IYI" run implsplat.iyi 2>&1 | tr -d '\r')
+if [ "$splat_out" = "$(printf 'proc\ntuple of 2')" ]; then
+  echo "  the spelling it suggests, and Tuple(*T) forall T: both bind and run"
+else
+  echo "  impls for Proc(*T, R) and Tuple(*T): $(printf '%s' "$splat_out" | head -c 300)"; status=1
+fi
 # A macro the module declares and did not mark `pub`, imported by name, was
 # told "nothing by that name is declared in `app/macros`, `pub` or not" -
 # the answer for a typo, because only defs and types were looked in.

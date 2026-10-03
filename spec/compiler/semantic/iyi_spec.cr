@@ -1420,6 +1420,41 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # A splat parameter is bound the way it was declared. `Tuple(*T) forall
+    # T` was told T was not one of the `forall` names.
+    it "binds a splat parameter written with its splat" do
+      assert_type(<<-CODE) { int32 }
+        trait Sized
+          abstract def count : Int32
+        end
+
+        impl Sized for Tuple(*X) forall X
+          def count : Int32
+            1
+          end
+        end
+
+        {1, 2}.count
+        CODE
+    end
+
+    # The refusal names one parameter for each the generic declares, splat
+    # included. Built from the written arguments, `Proc(Int32)` was told to
+    # write `Proc(T) forall T`, which is refused for its arity.
+    it "suggests the splat generic's own parameters" do
+      assert_error <<-CODE, "Write `impl Sized for Proc(*T, R) forall T, R`"
+        trait Sized
+          abstract def count : Int32
+        end
+
+        impl Sized for Proc(Int32)
+          def count : Int32
+            1
+          end
+        end
+        CODE
+    end
+
     it "refuses a blanket impl" do
       assert_error <<-CODE, "can't implement Showable for every type"
         trait Showable

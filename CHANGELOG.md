@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **An impl binds a splat generic with its splat, and the refusal of a
+  specialised impl names a spelling that compiles.** `impl Show for
+  Tuple(*T) forall T` answered "expected one of the type parameters
+  introduced by `forall` (T)", and `impl Show for Proc(Int32)` was told
+  "Write `impl Show for Proc(T) forall T`", which answered "wrong number
+  of type vars for Proc(*T, R) (given 1, expected 2)"; `Hash(String,
+  Int32)` was told `Hash(T) forall T` the same way. The refusal names
+  one parameter for each the generic declares now, the splat with its
+  `*` - `impl Show for Proc(*T, R) forall T, R`, `Hash(K, V) forall K,
+  V` - and that spelling binds: `{1, 2, 3}.show` prints `tup3`.
+  `bench/verbs_exercise.sh` and `spec/compiler/semantic/iyi_spec.cr`
+  check it; the old compiler refused `Tuple(*T)` and suggested
+  `Proc(T)`.
+
 - **An impl for a module that is not a trait is refused.** `impl Show
   for M`, with `M` a plain module, was accepted, and every type that
   wrote `include M` acquired the trait with no impl of its own for R-3 to

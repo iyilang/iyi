@@ -1678,6 +1678,10 @@ Crystal requires a reopened generic to repeat the declared names, which leaks a
 type's private naming into every impl of it. An impl states arity, not
 vocabulary.
 
+A splat parameter is bound the way it was declared: `impl Show for Tuple(*T)
+forall T`, `impl Show for Proc(*T, R) forall T, R`. A refused specialised impl
+names that spelling, one parameter for each the type declares.
+
 **3. A bound is a trait, and nothing else (Go).** `forall T : Show`. There is no
 separate constraint language: what you can bound by is what you can implement.
 This matters more here than in Go, because under R-4 a bound is not only a

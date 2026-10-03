@@ -969,6 +969,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # describes the mechanism, not the mistake. Requiring the binder is a
     # deliberate decision, so it should be possible to learn it from the error.
     unbound = target.type_vars.compact_map do |arg|
+      arg = arg.exp if arg.is_a?(Splat)
       next unless arg.is_a?(Path) && !arg.global? && arg.names.size == 1
       name = arg.names.first
       name unless current_type.lookup_path(arg)
@@ -980,7 +981,22 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
 
     # Everything resolved, so this asks to implement the trait for one
     # instantiation only. See SPEC.md II.7 for why iyi has no specialisation.
-    node.target.raise "can't implement #{node.trait} for #{target} alone: iyi has no specialised impls, so a trait is implemented for #{target.name} once, for every instantiation. Write `impl #{node.trait} for #{target.name}(T) forall T`"
+    node.target.raise "can't implement #{node.trait} for #{target} alone: iyi has no specialised impls, so a trait is implemented for #{target.name} once, for every instantiation. Write `#{iyi_generic_impl_spelling(node, target)}`"
+  end
+
+  # iyi: the impl a refusal tells the author to write instead: one `forall`
+  # name for each parameter the generic declares, the splat one written with
+  # its `*`, as the type itself was declared. Built from the written
+  # arguments it named a spelling that is refused as well:
+  # `impl Show for Proc(Int32)` was told to write `Proc(T) forall T`, which
+  # answered "wrong number of type vars for Proc(*T, R) (given 1, expected
+  # 2)", and `Hash(String, Int32)` was told the same one-parameter `Hash(T)`.
+  private def iyi_generic_impl_spelling(node : ImplDef, target : Generic) : String
+    base = current_type.lookup_type?(target.name)
+    return "impl #{node.trait} for #{target.name}(T) forall T" unless base.is_a?(GenericType)
+
+    params = base.type_vars.map_with_index { |name, index| index == base.splat_index ? "*#{name}" : name }
+    "impl #{node.trait} for #{target.name}(#{params.join(", ")}) forall #{base.type_vars.join(", ")}"
   end
 
   # iyi: resolves the target of `impl Greet for Box(T) forall T` (SPEC.md II.7).
@@ -1024,14 +1040,26 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     args = target.type_vars
 
     if args.size != declared.size
-      node.target.raise "wrong number of type vars for #{base} (given #{args.size}, expected #{declared.size})"
+      node.target.raise "wrong number of type vars for #{base} (given #{args.size}, expected #{declared.size}). Write `#{iyi_generic_impl_spelling(node, target)}`"
     end
 
     # Every argument must be one of the `forall` names, each used once. A
     # concrete argument — `impl Show for Box(Int32)` — is refused rather than
     # treated as specialisation: see SPEC.md II.7.
+    #
+    # A splat parameter is bound the way it was declared, `Tuple(*T)` for
+    # `struct Tuple(*T)`; `Tuple(T)` binds it too, as it always did. Only the
+    # bare form was looked for, so `impl Show for Tuple(*T) forall T` was
+    # told T was not one of the `forall` names it had just been given.
     renames = {} of String => String
     args.each_with_index do |arg, index|
+      if arg.is_a?(Splat)
+        unless index == base.splat_index
+          arg.raise "#{declared[index]} is not a splat parameter of #{base}, so it is bound without `*`: `#{iyi_generic_impl_spelling(node, target)}`"
+        end
+        arg = arg.exp
+      end
+
       unless arg.is_a?(Path) && !arg.global? && arg.names.size == 1 && type_vars.includes?(arg.names.first)
         arg.raise "expected one of the type parameters introduced by `forall` (#{type_vars.join(", ")}); iyi has no specialised impls, so a concrete type here is not a narrower impl but an error"
       end

@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **On Windows a module that uses `defer` or `group` links from its
+  artifact into any program.** Its catch pad names the `void*` type
+  descriptor, which the main module defined only when the program's own
+  code first raised, rescued or deferred, so a consumer with none of its
+  own ended on `LNK2001: unresolved external symbol "void * `RTTI Type
+  Descriptor'" (??_R0PEAX@8)` for a module whose one def was `defer log
+  << "lib-defer"`. The descriptor and the throw info are defined whenever
+  an artifact's object code links in. `bench/samples_roundtrip.sh` and
+  `spec/compiler/iyimod_spec.cr` consume a `defer` and a `group` from an
+  artifact; the old compiler failed the link.
+
 - **A `--release` program links the object code of the artifacts it
   reads.** A single-module build made private everything its main module
   defines - runtime `fun`s, type ids, `:headed` bytes, constants, class

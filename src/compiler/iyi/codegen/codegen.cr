@@ -705,6 +705,7 @@ module Iyi
         iyi_define_all_symbol_values
         iyi_define_all_match_funs
         iyi_define_all_artifact_const_reads
+        iyi_define_msvc_catch_globals if @program.has_flag?("msvc")
       end
 
       # iyi: the mark loop runs inside the built program, so the pointer

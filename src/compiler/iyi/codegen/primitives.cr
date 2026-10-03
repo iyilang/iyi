@@ -1520,6 +1520,21 @@ class Iyi::CodeGenVisitor
     void_ptr_throwinfo
   end
 
+  # iyi: both of the above, defined whether this build's own code asked or
+  # not, for an artifact's object code (SPEC.md IV.1g). They are made when
+  # first asked for, and an artifact's unit asked in the build that wrote it:
+  # a `defer` or a `group` is a catch pad over `void*`, which names
+  # `??_R0PEAX@8` in the main module. A consumer with no `defer`, `rescue`
+  # or `raise` of its own never asked, and `--use-iyimod` of a module whose
+  # one def was `defer log << "lib-defer"` ended on `LNK2001: unresolved
+  # external symbol "void * `RTTI Type Descriptor'" (??_R0PEAX@8)`.
+  def iyi_define_msvc_catch_globals : Nil
+    in_main do
+      void_ptr_type_descriptor
+      void_ptr_throwinfo
+    end
+  end
+
   def external_constant(type, name, mod = @llvm_mod)
     mod.globals[name]? || begin
       c = mod.globals.add(type, name)

@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **Moving a module's file rewrites the qualified names that spell
+  it.** `workspace/willRenameFiles` for `geo/b.iyi` to `geo/c.iyi`
+  rewrote the header and `import geo/b` and left `puts
+  Geo::B::Dog.new.name`, a name the moved module no longer has. Every
+  path that begins with the module's camelcase name (`Geo::B`,
+  `::Geo::B`) is rewritten to the new one as well, read off the parse,
+  so a string or a comment that says `Geo::B` is left alone.
+  `bench/lsp_session.py` step 72j moves a module and reads the importer
+  back; the old server answered `puts Geo::B.name`.
+
 - **Rename, references and implementation treat a trait's requirement
   and every method that answers it as one method.** A rename on
   `sq.area` rewrote the def in `impl Shape for Square` and every call and

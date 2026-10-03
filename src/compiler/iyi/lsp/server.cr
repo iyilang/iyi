@@ -2805,6 +2805,11 @@ module Iyi::Lsp
     # the client applies before the rename lands on disk. A file whose
     # header and path disagree has no module identity to move, and is
     # left alone by name.
+    #
+    # And every name a module is spelled by in code: `geo/b` is `Geo::B`
+    # (IV.6 #6), so `Geo::B::Dog` moves with the file to `Geo::C::Dog`. It
+    # was left behind, and the import the edit moved named a module the
+    # code still called by its old name.
     private def on_will_rename_files(id : JSON::Any, params : JSON::Any) : Nil
       edits = {} of String => Array({Int32, Int32, Int32, String})
 
@@ -2835,10 +2840,12 @@ module Iyi::Lsp
         next if new_mod.empty? || new_mod == old_mod || !clean_module?(new_mod)
 
         (edits[uri_of(old_path)] ||= [] of {Int32, Int32, Int32, String})
-          .concat module_mention_edits(text, old_mod, new_mod)
+          .concat(module_mention_edits(text, old_mod, new_mod))
+          .concat(qualified_name_edits(text, old_path, old_mod, new_mod))
         workspace_entries.each do |(entry_path, entry_text)|
           next if same_path?(entry_path, old_path)
           mentions = module_mention_edits(entry_text, old_mod, new_mod)
+          mentions.concat qualified_name_edits(entry_text, entry_path, old_mod, new_mod)
           next if mentions.empty?
           (edits[uri_of(entry_path)] ||= [] of {Int32, Int32, Int32, String})
             .concat mentions
@@ -2898,6 +2905,63 @@ module Iyi::Lsp
         edits << {index, start_ch, end_ch, new_mod}
       end
       edits
+    end
+
+    # Every place *text* spells the moved module's name in code - a path
+    # that begins `Geo::B`, or `::Geo::B` - with the span of those
+    # segments. Off the parse, so a string or a comment that says `Geo::B`
+    # is left as it is, and only where the source spells the segments as
+    # written; a buffer that does not parse offers none.
+    private def qualified_name_edits(text : String, path : String, old_mod : String, new_mod : String) : Array({Int32, Int32, Int32, String})
+      edits = [] of {Int32, Int32, Int32, String}
+      old_names = old_mod.split('/').map(&.camelcase)
+      old_written = old_names.join("::")
+      return edits unless text.includes?(old_written)
+      new_written = new_mod.split('/').map(&.camelcase).join("::")
+
+      parser = Parser.new(text)
+      parser.filename = path
+      finder = ModulePathFinder.new(old_names)
+      parser.parse.accept finder
+
+      lines = text.lines
+      finder.locations.each do |location|
+        line = lines[location.line_number - 1]?
+        next unless line
+        line = line.lchop('\uFEFF') if location.line_number == 1
+        column = location.column_number
+        rest = line.chars[(column - 1)..]?.try(&.join) || ""
+        if rest.starts_with?("::#{old_written}")
+          column += 2
+        elsif !rest.starts_with?(old_written)
+          next
+        end
+        start_ch = Lsp.character_of(line, column)
+        end_ch = Lsp.character_of(line, column + old_written.size)
+        edits << {location.line_number - 1, start_ch, end_ch, new_written}
+      end
+      edits.uniq!
+    rescue CodeError | InvalidByteSequenceError
+      [] of {Int32, Int32, Int32, String}
+    end
+
+    # The paths that begin with the segments *names*, where they start.
+    private class ModulePathFinder < Visitor
+      getter locations = [] of Location
+
+      def initialize(@names : Array(String))
+      end
+
+      def visit(node : Path)
+        if (location = node.location) && node.names.size >= @names.size && node.names[0, @names.size] == @names
+          @locations << location
+        end
+        true
+      end
+
+      def visit(node)
+        true
+      end
     end
 
     # ── Implementation ───────────────────────────────────────────────────

@@ -233,8 +233,10 @@ breaks "the prelude's round without its zero" round iyi/float.iyi \
 breaks "round(mode) without its zero" round_mode std/number.iyi \
   'return self if self == 0.0' '# return self if self == 0.0' \
   '(-0.0).round(TiesAway) is -0.0'
-breaks "** Int32::MIN without the square" pow_min iyi/float.iyi \
-  'return 1.0 / (half * half)' 'return 1.0 / half' \
+# `**` squares its base in double-double and rounds once; with the base
+# squared in plain doubles, `1.0000001 ** Int32::MIN` is 5.444710059167897e-94.
+breaks "** Int32::MIN squared in plain doubles" pow_min iyi/float.iyi \
+  'base, low = IyiFloatText.product(base, low, base, low) if count > 0' 'base, low = base * base, 0.0 if count > 0' \
   '1.0000001 ** Int32::MIN'
 
 echo

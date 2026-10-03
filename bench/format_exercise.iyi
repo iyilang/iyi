@@ -456,4 +456,14 @@ r4 = refusal { sprintf("%.402g", 0.1) }
 raise "format: %.402g was #{r4.inspect}" if r4 != "precision must be at most 401, not 402"
 puts "    integer verbs: a float past Int64 is its own integer; NaN, a field past Int32 and %g past 401 digits are refused by name"
 
+# The arguments may come as one array or tuple, as the other library takes
+# them: its own example, `"%s, %s, %s, D" % ['A', 'B', 'C']`, panicked "too
+# few arguments", and `"[%s]" % ["A"]` printed [["A"]].
+l1 = "%s, %s, %s, D" % ['A', 'B', 'C']
+l2 = "[%s]" % ["A"]
+l3 = sprintf("%d+%d=%s", [1, 2, 3])
+l4 = sprintf("%s=%.1f", {"pi", 3.14159})
+raise "format: list arguments failed: #{l1}|#{l2}|#{l3}|#{l4}" if "#{l1}|#{l2}|#{l3}|#{l4}" != "A, B, C, D|[A]|1+2=3|pi=3.1"
+puts "    list arguments: an array or a tuple is the argument list"
+
 puts "    all format checks passed"

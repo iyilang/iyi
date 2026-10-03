@@ -1047,6 +1047,14 @@ module ::IyiFormat
 end
 
 pub def sprintf(format_string : String, *args : *T) : String forall T
+  sprintf(format_string, args)
+end
+
+# The argument list may be one array or tuple, as the other library takes
+# it: `"%s, %s, %s, D" % ['A', 'B', 'C']`, its own example, panicked "too
+# few arguments for format string" here, and `"[%s]" % ["A"]` printed
+# `[["A"]]` where it prints `[A]`.
+pub def sprintf(format_string : String, args : Array | Tuple) : String
   index = 0
   format_bytesize = format_string.bytesize
   format_ptr = format_string.to_unsafe
@@ -1159,7 +1167,12 @@ pub def sprintf(format_string : String, *args : *T) : String forall T
 end
 
 pub def printf(format_string : String, *args : *T) : Nil forall T
-  print sprintf(format_string, *args)
+  print sprintf(format_string, args)
+end
+
+# The argument list as one array or tuple, as `sprintf` takes it.
+pub def printf(format_string : String, args : Array | Tuple) : Nil
+  print sprintf(format_string, args)
 end
 
 # Qualified, because a reopening is not inside the module that writes it:

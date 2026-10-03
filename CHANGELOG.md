@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`sprintf`, `printf` and `String#%` take one array or tuple as the
+  argument list, as the other library does.** An array was one argument:
+  `"%s, %s, %s, D" % ['A', 'B', 'C']`, the other library's own example
+  for `String#%`, panicked "too few arguments for format string", and
+  `"[%s]" % ["A"]` printed `[["A"]]` where that library prints `[A]`.
+  A lone array or tuple is now the list for `sprintf(format, list)` and
+  `printf(format, list)` too; arguments written out are read as before.
+  **The answer changes** for a lone tuple: `sprintf("%s", {1, 2})`
+  printed `{1, 2}` and now panics "too many arguments for format string:
+  2 given, 1 used", as two arguments for one specifier do.
+  `bench/format_exercise.iyi` formats an array and a tuple each way, and
+  its `.sh` proves the check fails with an array taken as one argument;
+  the old module panicked "too few arguments for format string".
+
 - **`Benchmark.ips` lines up a rate under 1,000 per second with one
   that has a unit.** `human_mean` answered `" 594.70"` beside
   `" 597.80M"`, a character narrower, so that row's `(` and every

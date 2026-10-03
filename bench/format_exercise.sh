@@ -71,13 +71,13 @@ fi
 
 echo
 echo "== every format section reported"
-for phrase in "width:" "alignment:" "zero pad:" "precision:" "base:" "negative:" "boundary:" "general:" "tower:"; do
+for phrase in "width:" "alignment:" "zero pad:" "precision:" "base:" "negative:" "boundary:" "general:" "tower:" "list arguments:"; do
   grep -q "$phrase" "$WORK/format-plain.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  width, alignment, zero pad, precision, base, negative, boundary, and general all reported"
+[ "$status" -eq 0 ] && echo "  width, alignment, zero pad, precision, base, negative, boundary, general, tower and the argument list all reported"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -133,6 +133,10 @@ prove_fails "alignment ignored" no_align "format: alignment" \
 # 3. Zero padding replaced with spaces
 prove_fails "zero pad broken" no_zero "format: zero pad" \
   's/sign + prefix + ("0" \* pad_count) + digits/sign + prefix + (" " * pad_count) + digits/'
+
+# 3b. An array one argument again rather than the argument list.
+prove_fails "an array is one argument again" no_list "too few arguments for format string" \
+  's/^pub def sprintf(format_string : String, args : Array | Tuple) : String$/pub def sprintf(format_string : String, args : Tuple) : String/'
 
 # 4. Float rounding dropped (always rounds down): the half-to-even test in
 #    `scaled_digits` is the one place every float digit is decided.

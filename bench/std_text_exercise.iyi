@@ -59,12 +59,6 @@ raise "string: to_i64 plain" unless "9000000000".to_i64 == 9000000000_i64
 raise "string: to_i64 base 16" unless "100000000".to_i64(16) == 4294967296_i64
 raise "string: to_i64? invalid" unless "not_a_num".to_i64?.nil?
 raise "string: to_i64? base invalid" unless "zz".to_i64?(10).nil?
-# Whitespace around a number is not part of it, as the other library reads
-# one, and inside it is still refused: `" 42".to_i64?`, `"ff ".to_i?(16)`
-# and a line read with its `\n` were nil.
-raise "string: numbers inside whitespace" unless " 42\n".to_i64? == 42_i64 && "\u00a0ff ".to_i?(16) == 255 && "\t7 ".to_u64? == 7_u64 && "\u3000-3".to_i64?(10) == -3_i64
-raise "string: whitespace inside a number" unless "4 2".to_i64?.nil? && "- 5".to_i?(10).nil? && " ".to_u64?.nil? && "42\u0085".to_i64?.nil?
-puts "    to_i?, to_i64? and to_u64? read a number inside whitespace"
 
 raise "string: to_f? standard" unless "12.34".to_f? == 12.34
 raise "string: to_f? exponent" unless "-0.5e2".to_f? == -50.0
@@ -251,6 +245,10 @@ raise "string: squeeze all" unless "yellow  moon".squeeze == "yelow mon"
 raise "string: squeeze char" unless "yellow  moon".squeeze('o') == "yellow  mon"
 raise "string: squeeze chars" unless "yellow  moon".squeeze(" l") == "yelow moon"
 raise "string: count char" unless "banana".count('a') == 3
+# A run of a character, not of a byte: `耀` is E8 80 80. Ahead of the sets
+# below, whose wide run `à-ê` a broken decoder reads as running backwards.
+raise "string: squeeze multi-byte run" unless "ééé".squeeze == "é"
+raise "string: squeeze inside a character" unless "耀".squeeze == "耀"
 # A set as the other library's `Char#in_set?` reads one: runs, a leading
 # `^` negating, a `\` making the next `^` or `-` itself, and several sets
 # intersected. `count(String)` counted a substring (`"banana".count("an")`
@@ -264,9 +262,6 @@ raise "string: a char is itself, not a set" unless "a^b".delete('^') == "ab" && 
 puts "    count, delete and squeeze read a character set: runs, ^, \\ and several sets"
 raise "string: center char pad" unless "hello".center(11, '-') == "---hello---"
 raise "string: center str pad" unless "hello".center(12, "-=") == "-=-hello-=-="
-# A run of a character, not of a byte: `耀` is E8 80 80.
-raise "string: squeeze multi-byte run" unless "ééé".squeeze == "é"
-raise "string: squeeze inside a character" unless "耀".squeeze == "耀"
 puts "    transformations: tr, delete, squeeze, count, and center verified"
 
 # 9. UTF-8 awareness and byte/character boundaries
@@ -461,6 +456,15 @@ puts "    gsub with an empty search writes the replacement before every characte
 raise "prelude: strip unicode whitespace" unless "\u3000\u00A0b\u2028\u00A0\u3000".strip == "b" && " \u0085x\u0085".strip.bytesize == 5 && "a \x80".strip.bytesize == 3 && "xà\u00A0".strip == "xà"
 raise "string: unicode whitespace" unless "\u2000\u3000".blank? && "\u3000a\u202F".lstrip == "a\u202F" && "\u3000a\u202F".rstrip == "\u3000a" && !"\u0085".blank?
 puts "    whitespace above ASCII: strip, lstrip, rstrip and blank? take Zs, Zl and Zp"
+
+# Whitespace around a number is not part of it, as the other library reads
+# one, and inside it is still refused: `" 42".to_i64?`, `"ff ".to_i?(16)`
+# and a line read with its `\n` were nil. They read the whitespace and
+# the decoder above, and come after their checks: ahead of them, a
+# `whitespace?` blind to U+00A0 or a broken decoder stopped here first.
+raise "string: numbers inside whitespace" unless " 42\n".to_i64? == 42_i64 && "\u00a0ff ".to_i?(16) == 255 && "\t7 ".to_u64? == 7_u64 && "\u3000-3".to_i64?(10) == -3_i64
+raise "string: whitespace inside a number" unless "4 2".to_i64?.nil? && "- 5".to_i?(10).nil? && " ".to_u64?.nil? && "42\u0085".to_i64?.nil?
+puts "    to_i?, to_i64? and to_u64? read a number inside whitespace"
 
 # `==` compares thirty-two bytes a step and then the rest one at a time:
 # every length to 70 - two whole steps and a tail - against itself, its

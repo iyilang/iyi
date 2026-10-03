@@ -112,7 +112,7 @@ prove_fails() {
   fi
   if ! grep -q "$phrase" "$WORK/$dir/out"; then
     echo "  $label: failed, but not at expected check (expected '$phrase')"
-    sed -n '$p' "$WORK/$dir/out"
+    tail -n 2 "$WORK/$dir/out"
     status=1
     return
   fi
@@ -217,7 +217,7 @@ prove_fails_prelude() {
   fi
   if ! grep -q "$phrase" "$WORK/$dir/out"; then
     echo "  $label: failed, but not at expected check (expected '$phrase')"
-    sed -n '$p' "$WORK/$dir/out"
+    tail -n 2 "$WORK/$dir/out"
     status=1
     return
   fi

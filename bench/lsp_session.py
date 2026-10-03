@@ -436,6 +436,24 @@ def applied(text, edits):
     return "\n".join(rows)
 
 
+def library_rename_step(c):
+    """73d. `puts` renamed from a buffer: the edit rewrote the compiler's
+    own `src/iyi/io.iyi`, after a walk of the workspace that took two
+    minutes over 145 files. Refused, before the walk."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-library")
+    sayer = opened(c, own, "sayer.iyi", "module sayer\n\nputs 1\n")
+    at_puts = {"textDocument": {"uri": sayer}, "position": {"line": 2, "character": 1}}
+    renamed = c.send("textDocument/rename", dict(at_puts, newName="say"))
+    prepared = c.send("textDocument/prepareRename", at_puts)
+    c.send("textDocument/didClose", {"textDocument": {"uri": sayer}}, wait=False)
+    shutil.rmtree(own, ignore_errors=True)
+    codes = [(r.get("error") or {}).get("code") for r in (renamed, prepared)]
+    message = (renamed.get("error") or {}).get("message", "")
+    step("73d", "a def in the compiler's library is refused a rename",
+         codes == [-32803, -32803] and "library" in message,
+         f"codes {codes}: {message[:70] or json.dumps(renamed.get('result'))[:70]}")
+
+
 def traits_disk_and_completion():
     """A trait method renamed, a module changed on disk under an open
     buffer, a module file moved, and the cursor questions that answered
@@ -3216,6 +3234,7 @@ def main():
          reply.get("error", {}).get("code") == -32803
          and "nothing renameable" in reply["error"]["message"],
          json.dumps(reply.get("error"))[:80])
+    library_rename_step(c)
     reply = c.send("workspace/executeCommand", {"command": "iyi.nonesuch", "arguments": []})
     step("52h", "an unknown command is invalid params",
          reply.get("error", {}).get("code") == -32602

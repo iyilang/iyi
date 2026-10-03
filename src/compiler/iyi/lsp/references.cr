@@ -32,7 +32,7 @@ module Iyi::Lsp
     # The adopted defs' keys, which are the seeds of every other entry's
     # visitor (see `initialize`).
     getter target_keys = Set({String, Int32, Int32, String}).new
-    @target_names = Set(String).new
+    getter target_names = Set(String).new
     # The files the adopted defs are declared in: under R-1 only a module
     # that imports one of them, directly or through another, can refer to
     # them, which is how the server picks which entries to compile.

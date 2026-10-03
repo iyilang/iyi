@@ -1882,6 +1882,7 @@ module Iyi::Lsp
       if renaming_to && (why = first.unrenameable)
         raise Refused.new(why)
       end
+      refuse_foreign_declaration(first) if renaming_to
       refuse_importer(first, renaming_to) if renaming_to
       references.concat first.references
       declarations.concat first.declarations
@@ -1900,6 +1901,46 @@ module Iyi::Lsp
       end
 
       {dedupe(references), dedupe(declarations)}
+    end
+
+    # A def declared in the compiler's library, or outside every
+    # workspace folder in a file the editor does not hold, is not the
+    # person's to rename: its callers are every program that reads that
+    # file, and the workspace holds a few of them. `puts` renamed from a
+    # buffer answered an edit to the toolchain's own `src/iyi/io.iyi`,
+    # line 447 - and in a workspace of 145 files the walk to build that
+    # answer took two minutes, answering nothing else meanwhile. Refused
+    # here, from the cursor's own compile, before the walk.
+    private def refuse_foreign_declaration(visitor : ReferencesVisitor) : Nil
+      visitor.target_files.each do |file|
+        where =
+          if library_dirs.any? { |dir| inside?(file, dir) }
+            "the compiler's library"
+          elsif !@roots.empty? && @roots.none? { |root| inside?(file, root) } && !document_text(file)
+            "outside the workspace"
+          end
+        next unless where
+        name = visitor.target_names.first? || "this method"
+        raise Refused.new("'#{name}' is declared in #{fs_path(file)}, #{where}: a rename would rewrite a file " \
+                          "that programs outside this workspace read, and leave their calls behind")
+      end
+    end
+
+    # Where the compiler reads its own library from: the absolute entries
+    # of its path. `lib`, the one relative entry, is a project's
+    # dependencies, and a workspace's folders already judge those.
+    @library_dirs : Array(String)?
+
+    private def library_dirs : Array(String)
+      @library_dirs ||= IyiPath.default_paths.select { |dir| ::Path[dir].absolute? }
+    end
+
+    # Whether *file* is *dir* or below it, compared a part at a time the
+    # way `same_path?` compares a path.
+    private def inside?(file : String, dir : String) : Bool
+      parts = ::Path[File.expand_path(fs_path(file))].parts
+      under = ::Path[File.expand_path(fs_path(dir))].parts
+      under.size <= parts.size && (0...under.size).all? { |index| same_path?(under[index], parts[index]) }
     end
 
     private def refuse_importer(visitor : ReferencesVisitor, name : String) : Nil
@@ -2168,6 +2209,7 @@ module Iyi::Lsp
         if why = visitor.unrenameable
           raise Refused.new(why)
         end
+        refuse_foreign_declaration(visitor)
       end
 
       from, to = span

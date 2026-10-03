@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **Renaming a call to a prelude def is refused, before any workspace
+  walk.** `puts` renamed to `say` from a buffer answered a WorkspaceEdit
+  for the toolchain's own `src/iyi/io.iyi`, line 447 (`def puts(text :
+  String) : Nil`), with no error, and in a 145-file workspace the walk to
+  build it took two minutes, answering nothing else meanwhile. Rename and
+  prepareRename read where the def is declared from the cursor's own
+  compile and refuse with -32803 when that is under the compiler's
+  library path, or outside every workspace folder in a file the editor
+  does not hold: "'puts' is declared in ...\\src\\iyi\\io.iyi, the
+  compiler's library: a rename would rewrite a file that programs
+  outside this workspace read, and leave their calls behind". Step 73d of
+  `bench/lsp_session.py` checks both requests; the old server answered
+  the rename with the edit and prepareRename with a range.
+
 - **After a language-server worker dies, the next edit is applied once.**
   The proxy took a didChange into its own buffer first, then found no
   worker, started one, handed it that buffer (`iyi/adopt`) and forwarded

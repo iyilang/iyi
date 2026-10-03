@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **`7 / 2` and `1 <=> 1_i64` compile whatever is imported, and answer what
+  the other library answers.** `std/float` gave every integer a `/(Float32)`
+  beside its `/(Float64)`, so the literal in `7 / 2` cast to both and
+  importing `std/float` turned a line that printed 3.5 into "ambiguous call,
+  implicit cast of 2 matches all of Float64, Float32". `Int#<=>` took only
+  `self`, so once `std/traits` added `Int32#<=>(Int32)` (imported through
+  `std/enumerable`, `std/indexable` or `std/steppable`) the `1_i64` in
+  `1 <=> 1_i64` cast to `Int32` and to `Float64`: "ambiguous call", where
+  the other library answers 0. An integer over any integer is a `Float64`
+  now (`Int#/(Int)`, in `std/float`), and `Int#<=>` takes any integer, the
+  widths compared exactly by the cross-width primitives; `a <=> b` of an
+  `Int32` and an `Int64` variable, which did not type, answers 0 as there.
+  `bench/std_float_exercise.iyi` and `bench/std_int_exercise.iyi` check
+  both; the old modules answered "ambiguous call" at each.
+
 - **`%f`, `%e`, `%E`, `%g` and `%G` format a `UInt8`, as they do every other
   integer width.** `"%f" % 200_u8` panicked "%f wants a number, and 200 is a
   UInt8" where `%d` printed 200 and the other library prints 200.000000:

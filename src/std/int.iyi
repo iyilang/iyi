@@ -524,7 +524,12 @@ module std/int
 {% end %}
 
 struct ::Int
-  def <=>(other : self) : Int32
+  # Against any integer, as the other library's `Int#<=>` is, the widths
+  # compared exactly by the primitives above. Against `self` only, an
+  # `Int64` beside an `Int32` did not type, and once `std/traits` added
+  # `Int32#<=>(Int32)` the literal in `1 <=> 1_i64` cast to that and to
+  # `Float64` both: "ambiguous call" where the other library answers 0.
+  def <=>(other : ::Int) : Int32
     self < other ? -1 : (self > other ? 1 : 0)
   end
 

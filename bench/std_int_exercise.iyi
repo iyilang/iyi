@@ -169,6 +169,11 @@ assert_true (1_i8 <=> 2_i8) == -1, "i8 cmp"
 assert_true List(Int8).new([1_i8, 2_i8, 3_i8]).sum == 6_i8, "i8 sum"
 assert_true List(UInt16).new([] of UInt16).sum == 0_u16, "u16 empty sum"
 puts "  Comparable and Num for the rest of the tower"
+# Against any integer, as the other library's `Int#<=>` is. Against `self`
+# only, the `1_i64` in `1 <=> 1_i64` cast to `Int32` and to `Float64` once
+# `std/traits` was imported, and the line was "ambiguous call".
+assert_true (1 <=> 1_i64) == 0 && (1 <=> 2_u8) == -1 && (-1 <=> 18446744073709551615_u64) == -1 && (300_i16 <=> 255_u8) == 1, "<=> across widths"
+puts "  <=> between any two widths"
 
 # A type's minimum has a gcd whenever the answer fits, as `Math.gcd`
 # answers: `abs` came first and refused it, so `(-2147483648).gcd(6)`

@@ -197,6 +197,15 @@ import std/number
         def /(other : Float32) : Float32
           to_f32 / other
         end
+
+        # An integer over an integer is a double, as the other library
+        # divides one, and written out so that an integer divisor matches
+        # without a cast: beside `/(Float64)` and the `/(Float32)` above,
+        # the literal in `7 / 2` cast to both, and importing this module
+        # made that line "ambiguous call" where it had printed 3.5.
+        def /(other : ::Int) : Float64
+          to_f64 / other.to_f64
+        end
       {% end %}
     end
   {% end %}

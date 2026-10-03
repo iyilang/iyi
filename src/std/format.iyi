@@ -826,15 +826,20 @@ module ::IyiFormat
         not_a_number(val, verb)
       end
     when 'x'
+      # The sign flags hold in every base, as `%d`'s: a negative value is
+      # written with its `-` (`%x` of -255 is -ff), so `+` and space are
+      # the other bases' too, as the other library and Python have them.
+      # `%+x` of 255 printed ff, and a column of signed deltas lost its signs
+      # on one side. Only `%u` is the word's bits, and never signed.
       case val
       when Int32
-        format_int64(val.to_i64, 16, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 16, false, true, minus, plus, space, zero, hash, width, precision)
       when Int64
-        format_int64(val, 16, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val, 16, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
-        format_uint64(val, 16, false, false, minus, plus, space, zero, hash, width, precision)
+        format_uint64(val, 16, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt8
-        format_int64(val.to_i64, 16, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 16, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -843,13 +848,13 @@ module ::IyiFormat
     when 'X'
       case val
       when Int32
-        format_int64(val.to_i64, 16, true, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 16, true, true, minus, plus, space, zero, hash, width, precision)
       when Int64
-        format_int64(val, 16, true, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val, 16, true, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
-        format_uint64(val, 16, true, false, minus, plus, space, zero, hash, width, precision)
+        format_uint64(val, 16, true, true, minus, plus, space, zero, hash, width, precision)
       when UInt8
-        format_int64(val.to_i64, 16, true, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 16, true, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -858,13 +863,13 @@ module ::IyiFormat
     when 'o'
       case val
       when Int32
-        format_int64(val.to_i64, 8, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 8, false, true, minus, plus, space, zero, hash, width, precision)
       when Int64
-        format_int64(val, 8, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val, 8, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
-        format_uint64(val, 8, false, false, minus, plus, space, zero, hash, width, precision)
+        format_uint64(val, 8, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt8
-        format_int64(val.to_i64, 8, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 8, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -873,13 +878,13 @@ module ::IyiFormat
     when 'b'
       case val
       when Int32
-        format_int64(val.to_i64, 2, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 2, false, true, minus, plus, space, zero, hash, width, precision)
       when Int64
-        format_int64(val, 2, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val, 2, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
-        format_uint64(val, 2, false, false, minus, plus, space, zero, hash, width, precision)
+        format_uint64(val, 2, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt8
-        format_int64(val.to_i64, 2, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 2, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -976,7 +981,7 @@ module ::IyiFormat
     digits = negative ? text[1, text.bytesize - 1] : text
     digits = digits.upcase if verb == 'X'
     digits = "" if digits == "0" && precision == 0
-    sign = negative ? "-" : ((verb == 'd' || verb == 'i') ? (plus ? "+" : (space ? " " : "")) : "")
+    sign = negative ? "-" : (verb != 'u' ? (plus ? "+" : (space ? " " : "")) : "")
     prefix = ""
     if hash && text != "0"
       prefix = base == 16 ? (verb == 'X' ? "0X" : "0x") : (base == 8 ? "0o" : (base == 2 ? "0b" : ""))

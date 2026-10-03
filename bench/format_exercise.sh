@@ -167,11 +167,15 @@ prove_fails "the digits are the value's, all of them" no_exact "format: exact la
 
 # 5. Base conversion broken (binary emits decimal)
 prove_fails "base conversion broken" no_base "format: base" \
-  's/format_int64(val\.to_i64, 2, false, false/format_int64(val.to_i64, 10, false, false/'
+  's/format_int64(val\.to_i64, 2, false, true/format_int64(val.to_i64, 10, false, true/'
 
 # 6. Negative number sign flag broken (space flag dropped)
 prove_fails "sign flag broken" no_neg "format: sign space positive" \
   's/sign = " "/sign = ""/'
+
+# 6b. Hex unsigned again for a sign flag, while its `-` stays.
+prove_fails "hex sign flags dropped" no_hex_sign "format: sign flags in other bases" \
+  's/format_int64(val\.to_i64, 16, false, true/format_int64(val.to_i64, 16, false, false/'
 
 # 7. Boundary case broken (precision 0 on value 0 produces "0" instead of "")
 prove_fails "boundary zero precision broken" no_bound "format: boundary" \

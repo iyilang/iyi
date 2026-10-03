@@ -240,7 +240,12 @@ raise "format: negative float plus sign failed" if n10 != "   -3.14"
 n11 = sprintf("%+8.2f", 3.14)
 raise "format: positive float plus sign failed" if n11 != "   +3.14"
 
-puts "    negative: signed values, explicit + and space signs, and negative non-decimal bases"
+# The sign flags hold in every base that writes a `-`: `%+x` of 255 printed
+# ff where -255 printed -ff, as did an Int128's. `%u` alone stays unsigned.
+n12 = sprintf("%+x|% o|%+#b|%+X|% x|%+u", 255, 8, 5, 255_i128, 0, 5)
+raise "format: sign flags in other bases failed" if n12 != "+ff| 10|+0b101|+FF| 0|5"
+
+puts "    negative: signed values, explicit + and space signs in every base, and negative non-decimal bases"
 
 # 7. Boundary cases: wider than field, precision 0, minimum and maximum integers.
 bd1 = sprintf("%3s", "abcdef")

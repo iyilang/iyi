@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`+` and space sign `%x`, `%X`, `%o` and `%b` as they sign `%d`.**
+  Those verbs write a negative value with its `-` (`%x` of -255 is -ff)
+  but dropped both flags for the rest: `sprintf("%+x|% o|%+#b|%+X|% x",
+  255, 8, 5, 255_i128, 0)` printed `ff|10|0b101|FF|0`, so a column of
+  signed deltas lost its signs on one side, against the module's own
+  "always show sign" and against the other library and Python, which
+  print `+ff| 10|+0b101|+FF| 0`. It prints that now; `%u`, the word's
+  bits, stays unsigned. `bench/format_exercise.iyi` checks every base,
+  and its `.sh` proves the check fails with hex unsigned again; the old
+  module answered `ff|10|0b101|FF|0|5`.
+
 - **`%p` and `%s` of an `Int128` or `UInt128` are its own text, and `%c`
   its code point.** The value was written as digits and formatted again
   as a string, so `%p` of 65_i128 printed `"65"` in quotes where `%p` of

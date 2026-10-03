@@ -97,6 +97,11 @@ assert_true(absent.delete("y") == nil, "hash: deleting a missing key is nil")
 assert_int(absent.size, 1, "hash: a missing delete removes nothing")
 assert_true(absent.has_key?("x"), "hash: the survivor is still there")
 
+# A first key in braces of its own is spaced off, as a tuple's first member
+# is and the other library's hash is: `{{1, 2} => 3}` reads as a macro.
+assert_str({ {1, 2} => { {3, 4} => 5 } }.inspect, "{ {1, 2} => { {3, 4} => 5 } }", "hash: a first key in braces is spaced off")
+assert_str({1 => { {2 => 3} => 5 }}.inspect, "{1 => { {2 => 3} => 5 }}", "hash: and only the hash whose first key it is")
+
 # Keys that share one slot by construction: equal by their number, hashed
 # to one constant, so every key lands in the same slot and the comparison
 # is what finds it. (Arrays did this by accident, hashing to their type's

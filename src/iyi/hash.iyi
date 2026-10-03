@@ -162,11 +162,13 @@ class Hash(K, V)
     result
   end
 
-  # `{"a" => 1, "b" => 2}`, in insertion order, both sides inspected.
+  # `{"a" => 1}`, in insertion order, both sides inspected; a first key in
+  # braces is spaced off, `{ {1, 2} => 3 }`, as a tuple's: `{{` is a macro.
   def to_s : String
     parts = [] of String
     each { |key, value| parts << key.inspect + " => " + value.inspect }
-    "{" + parts.join(", ") + "}"
+    pad = @size > 0 && (@keys[@first].is_a?(Tuple) || @keys[@first].is_a?(NamedTuple) || @keys[@first].is_a?(Hash)) ? " " : ""
+    "{" + pad + parts.join(", ") + pad + "}"
   end
 
   def inspect : String

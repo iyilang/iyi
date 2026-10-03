@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A hash whose first key is a tuple, named tuple or hash prints with a
+  space inside its braces, `{ {1, 2} => 3 }`, as the other library's does
+  and as a tuple's first member already did.** `Hash#to_s` wrote
+  `{{1, 2} => 3}`, and nested, `{{1, 2} => {{3, 4} => 5}}`: `{{` reads
+  back as a macro. The first key decides, by its type as `Tuple#to_s`
+  decides, so `{1 => { {3, 4} => 5 }}` pads the inner hash alone.
+  `bench/collections_exercise.iyi` checks it; the old prelude printed
+  `{{1, 2} => {{3, 4} => 5}}`.
+
 - **`Array#delete` removes every element equal to its argument and
   answers the last one removed, or nil, as the other library's does.** It
   removed the first alone and answered whether there was one, so

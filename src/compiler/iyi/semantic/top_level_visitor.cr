@@ -762,10 +762,15 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       # `calc` sample's link ended on the union. The same question
       # `Iyi::Compiler#iyi_widened_parameters?` asks of an ordinary def,
       # asked here of what was written, because nothing is inferred yet.
-      if iyi_impl_signature_widened?(a_def) && file
-        bodies = @program.iyi_mono_bodies[file] ||= {} of String => String
-        bodies[IyiMod.mono_body_key(container, signature)] = a_def.body.to_s
-      elsif bodies_travel && file
+      #
+      # And a block-taking method, whatever its target: it is instantiated
+      # with the caller's block inside it, so there is no machine code of
+      # its own to ship — the reason `Iyi::Compiler#iyi_takes_block?` makes
+      # an ordinary def's body travel. Left to the rule above, `impl Walk
+      # for B` with a yielding `walk` on a struct this module declares
+      # carried a header alone, and the consumer's link ended on
+      # `Kit::Lib::B#walk<&Proc(Int32, Nil)>:Nil`.
+      if file && (bodies_travel || a_def.block_arg || a_def.block_arity || iyi_impl_signature_widened?(a_def))
         bodies = @program.iyi_mono_bodies[file] ||= {} of String => String
         bodies[IyiMod.mono_body_key(container, signature)] = a_def.body.to_s
       end

@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A yielding method an `impl` gives a type of the module's own travels
+  in the artifact, so a consumer can call it.** `impl Walk for B` with a
+  block-taking `walk` on a struct `kit/lib` declares carried a header and
+  no body, because an impl for a non-generic type of the module's own
+  ships as machine code, and a block-taking method has none: the
+  consumer's link ended on `Kit::Lib::B#walk<&Proc(Int32, Nil)>:Nil`.
+  `impl Enumerable for R` did the same to `each`, and `R.new(3).map {}`
+  stopped on "can't use `yield` inside a proc literal or captured block"
+  inside Enumerable's travelling `map`. The body travels now, as an
+  ordinary block-taking def's does, and both print what the source build
+  prints, debug and release. The `impl_block` case of
+  `bench/samples_roundtrip.sh` checks it; the old compiler stopped on the
+  `yield` refusal.
+
 - **On Windows `File.symlink` writes a `/` in the target as `\`.** The
   target went to `CreateSymbolicLinkW` as written, and Go's `os.Symlink`
   converts it because "'/' does not work in link's content", so a link

@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`Atomic(Int64).fence`, and every fence asked of an instance's
+  class, compiles.** `std/atomic` declared the fence instruction on
+  `Atomic(T)` itself, and a call on a generic instance's class passes
+  that class as a first argument, where the code generator reads the
+  ordering: `Atomic.fence` built, and `Atomic(Int64).fence` or
+  `Atomic(UInt8).fence_acquire` stopped the compiler with "Multiple
+  assignment count mismatch (IndexError)" and "you've found a bug in
+  the iyi compiler". The instruction is declared on the prelude's
+  `IyiAtomic` beside the other four now, which is where the prelude's
+  own comment says an atomic instruction must go for this reason.
+  `bench/std_atomic_exercise.iyi` asks each fence of an instance's
+  class; the old module did not compile it.
+
 - **On Windows two Ctrl-Breaks that arrive before a `Signal.wait` are
   one INT, and the wait answers it.** The console handler added each
   arrival's bit to the arrivals rather than setting it, so two INTs

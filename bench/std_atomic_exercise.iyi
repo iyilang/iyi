@@ -158,6 +158,13 @@ Atomic.fence_acquire
 Atomic.fence_release
 Atomic.fence_acq_rel
 puts "  fence, fence_acquire, fence_release and fence_acq_rel each emitted (the driver reads them off the IR)"
+# Asked of an instance's class as well: the primitive declared on
+# `Atomic(T)` took that class for its ordering, and the compiler stopped.
+Atomic(Int64).fence
+Atomic(UInt8).fence_acquire
+Atomic(Int32).fence_release
+Atomic(UInt64).fence_acq_rel
+puts "  Atomic(Int64).fence and the weaker fences on Atomic(UInt8), Atomic(Int32) and Atomic(UInt64) compile and run"
 
 # ---------------------------------------------------------------------------
 puts "== four threads counting"

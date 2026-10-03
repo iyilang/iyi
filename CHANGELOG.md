@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`Set`, `Deque` and `StaticArray` compare and combine across element
+  types both ways.** `Set(Int32) == Set(Int32?)` was false where the
+  other order was true, and `&`, `^`, `-`, `subset_of?` and
+  `superset_of?` with the wider set on the left did not compile - inside
+  the library, the prelude's `Set#-` included. `Deque#==` and
+  `StaticArray#==` had the same one-way rule. And `StaticArray#to_s(io)`
+  compiled only for symbols. Found by building every method against 14
+  element types; 34,000 random sequences over these, `NamedTuple` and
+  `Log` otherwise agreed with Crystal.
+
 - **An abstract generic class survives its artifact.** Its header was
   written `pub abstract generic class Src(T)`, which a consumer could not
   read back. And a stale artifact whose source is gone is no longer told

@@ -14,6 +14,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/static_array
+import std/io::{Memory}
 
 puts "== new"
 a = StaticArray(Int32, 3).new(9)
@@ -38,6 +39,14 @@ array_text = big.to_a.to_s
 array_ns = __iyi_monotonic_ns - started
 assert_true big_text == "StaticArray" + array_text, "to_s of 10,000 elements matches the array's"
 assert_true text_ns <= array_ns * 20 + 200_000_000_i64, "to_s: 10,000 elements took #{text_ns // 1000000} ms where to_a.to_s took #{array_ns // 1000000} ms"
+# Into an IO: it asked each element for `inspect(io)`, which the
+# prelude's types do not have, so it failed to compile for all of them.
+into = Memory.new
+words = StaticArray(String, 2).new { |i| i == 0 ? "a" : "b" }
+words.to_s(into)
+into << " "
+StaticArray(Int32, 2).new { |i| i + 1 }.inspect(into)
+assert_str "StaticArray[\"a\", \"b\"] StaticArray[1, 2]", into.to_s, "to_s and inspect into an IO"
 puts "  10,000 elements as to_a.to_s writes them, within the bound"
 
 puts "\n== compare"
@@ -46,7 +55,15 @@ puts "\n== compare"
 low = StaticArray(Int32, 3).new { |i| i }
 high = StaticArray(Int32, 3).new { |i| i * 2 }
 assert_str "-1 1 0", "#{low <=> high} #{high <=> low} #{low <=> low.dup}", "<=> is lexicographic"
-puts "  lexicographic"
+# Of another element type, either way round. Restricted to
+# `StaticArray(T, N)`, a `StaticArray(Int32, 3)` was taken for a
+# `StaticArray(Int32?, 3)` and not back, so the one equality answered
+# true one way and false the other.
+nilable = StaticArray(Int32?, 3).new { |i| i }
+assert_true low == nilable, "== of a wider element type"
+assert_true nilable == low, "== of a narrower element type"
+assert_true !(high == nilable) && !(low == StaticArray(Int32?, 2).new { |i| i }), "== of another type sees a difference"
+puts "  lexicographic, and equal across element types"
 
 puts "\n== fill"
 # A count past the end runs to the end, as the other library clamps it:
@@ -96,6 +113,7 @@ assert_true keyed.size == 22500 && keyed[pair(149, 17)]? == 2533, "a grid table 
 # A bound, not a benchmark: twenty times the tuples' time and 200 ms over.
 # The type's id took 3.7 s for this grid.
 assert_true keyed_ns <= tupled_ns * 20 + 200_000_000_i64, "hash table: 22500 keys took #{keyed_ns // 1000000} ms where tuples took #{tupled_ns // 1000000} ms"
+assert_true low.hash == nilable.hash, "hash follows == across element types"
 puts "  22500 distinct hashes, and a table of them within the bound"
 
 puts "\n== sort"

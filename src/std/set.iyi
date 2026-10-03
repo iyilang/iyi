@@ -47,68 +47,83 @@ class ::Set(T)
     copy
   end
 
-  # Union: everything in either, this set's elements first.
-  def |(other : Set(T)) : Set(T)
-    result = dup
+  # Union: everything in either, this set's elements first. The other set
+  # may be of another element type, as everything below may: the union of
+  # a `Set(Int32)` and a `Set(Int32?)` is a `Set(Int32?)`, either way round.
+  # Restricted to `Set(T)`, a set of the narrower type was taken for the
+  # wider one and not back, and where the body then asked the narrower set
+  # about a member of the wider type it failed to compile inside this file:
+  # `Set(Int32?) == Set(Int32)`, `&`, `^`, `subset_of?` and the rest, while
+  # `Set(Int32) == Set(Int32?)` answered false for the same members.
+  def |(other : Set(U)) : Set(T | U) forall U
+    result = Set(T | U).new
+    each { |v| result.add(v) }
     other.each { |v| result.add(v) }
     result
   end
 
   # `+` is union: two sets added are one set.
-  def +(other : Set(T)) : Set(T)
+  def +(other : Set(U)) : Set(T | U) forall U
     self | other
   end
 
   # Intersection: what is in both, in this set's order.
-  def &(other : Set(T)) : Set(T)
+  def &(other : Set(U)) : Set(T) forall U
     result = Set(T).new
-    each { |v| result.add(v) if other.includes?(v) }
+    each { |v| result.add(v) if other.has_member?(v) }
     result
   end
 
   # Symmetric difference: what is in exactly one of the two.
-  def ^(other : Set(T)) : Set(T)
-    result = Set(T).new
-    each { |v| result.add(v) unless other.includes?(v) }
-    other.each { |v| result.add(v) unless includes?(v) }
+  def ^(other : Set(U)) : Set(T | U) forall U
+    result = Set(T | U).new
+    each { |v| result.add(v) unless other.has_member?(v) }
+    other.each { |v| result.add(v) unless has_member?(v) }
     result
   end
 
   # Every element of this set is in other. The empty set is a subset of
   # every set, itself included.
-  def subset_of?(other : Set(T)) : Bool
+  def subset_of?(other : Set(U)) : Bool forall U
     return false if size > other.size
-    each { |v| return false unless other.includes?(v) }
+    each { |v| return false unless other.has_member?(v) }
     true
   end
 
   # A subset that is not the same set.
-  def proper_subset_of?(other : Set(T)) : Bool
+  def proper_subset_of?(other : Set(U)) : Bool forall U
     size < other.size && subset_of?(other)
   end
 
-  def superset_of?(other : Set(T)) : Bool
+  def superset_of?(other : Set(U)) : Bool forall U
     other.subset_of?(self)
   end
 
-  def proper_superset_of?(other : Set(T)) : Bool
+  def proper_superset_of?(other : Set(U)) : Bool forall U
     other.proper_subset_of?(self)
   end
 
   # No element in common; two empty sets are disjoint.
-  def disjoint?(other : Set(T)) : Bool
-    each { |v| return false if other.includes?(v) }
+  def disjoint?(other : Set(U)) : Bool forall U
+    each { |v| return false if other.has_member?(v) }
     true
   end
 
   # At least one element in common.
-  def intersects?(other : Set(T)) : Bool
+  def intersects?(other : Set(U)) : Bool forall U
     !disjoint?(other)
   end
 
-  # The same members, in any order.
-  def ==(other : Set(T)) : Bool
-    size == other.size && subset_of?(other)
+  # The same members, in any order, where one element type holds the
+  # other, as tuples compare (src/iyi/object.iyi).
+  def ==(other : Set(U)) : Bool forall U
+    {{ T <= U || U <= T }} && size == other.size && subset_of?(other)
+  end
+
+  # Whether value, of any type, is a member: one this set's type cannot
+  # hold is not.
+  protected def has_member?(value) : Bool
+    value.is_a?(T) && includes?(value)
   end
 
   # Equal sets hash alike, and unequal ones apart. Each member's hash goes

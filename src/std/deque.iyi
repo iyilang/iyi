@@ -351,9 +351,12 @@ pub class Deque(T)
     copy
   end
 
-  # The same elements in the same order.
-  def ==(other : Deque(T)) : Bool
-    return false unless @size == other.size
+  # The same elements in the same order, where one element type holds the
+  # other, as tuples compare (src/iyi/object.iyi). Restricted to
+  # `Deque(T)`, a `Deque(Int32)` was taken for a `Deque(Int32?)` and not
+  # back: the one equality answered true one way and false the other.
+  def ==(other : Deque(U)) : Bool forall U
+    return false unless {{ T <= U || U <= T }} && @size == other.size
     i = 0
     while i < @size
       return false unless unsafe_fetch(i) == other.unsafe_fetch(i)

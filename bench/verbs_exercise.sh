@@ -537,6 +537,13 @@ refuses "a module with a byte that is not text on line 4" \
 refuses "and the sentence names the module" \
   "lib.iyi' is not a valid iyi source file: Unexpected byte 0xff at position 39" -- \
   "$IYI" check badbyte/app/main.iyi
+# And a byte that is not UTF-8 in a macro's expansion, which is read back
+# as source: `check` ended in "Unexpected byte 0xff at position 0, malformed
+# UTF-8 (InvalidByteSequenceError)" and a stack trace.
+printf 'puts {{ "\\xff".id }}\n' > macrobyte.iyi
+refuses "a macro that writes out a byte that is not text" "macro expansion is not UTF-8 text" -- \
+  "$IYI" check macrobyte.iyi
+refuses "and the refusal is at the macro" "macrobyte.iyi:1:6" -- "$IYI" check macrobyte.iyi
 # Two traits that require the same method, both implemented for one type:
 # the second impl's method replaced the first one's, so a call through the
 # first trait ran it - in one file, and across two libraries whose impls

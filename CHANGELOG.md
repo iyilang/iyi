@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A macro whose expansion is not UTF-8 text is refused at the call.**
+  `puts {{ "\xff".id }}`, `m("\xff")` through a macro writing `{{ x.id }}`,
+  and a `# {{ "\xff".id }}` comment in a macro body ended `check` in
+  "Unexpected byte 0xff at position 0, malformed UTF-8
+  (InvalidByteSequenceError)" and a stack trace from `lexer.cr`: an
+  expansion is read back as source, and nothing checked it first. It is
+  refused now at the call, `macrobyte.iyi:1:6`: "macro expansion is not
+  UTF-8 text". `bench/verbs_exercise.sh` checks the sentence and the
+  place; the old compiler answered the exception.
+
 - **A `def initialize` in a trait, or in an impl for a lib struct or a
   metaclass, compiles.** `pub trait Wt` holding a `def initialize` ended
   `check`, `build` and `vet` in "Missing hash key: Wt (KeyError)" and a

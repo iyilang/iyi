@@ -53,6 +53,14 @@ class Iyi::Program
   end
 
   def parse_macro_source(generated_source, macro_expansion_pragmas, the_macro, node, vars, current_def = nil, inside_type = false, inside_exp = false, visibility : Visibility = :public, &)
+    # iyi: an expansion is read back as source, and the lexer raises for a
+    # byte that is not UTF-8 - which every parse of a file turns into a
+    # sentence, and nothing here did: `puts {{ "\xff".id }}` ended `check` in
+    # "Unexpected byte 0xff at position 0, malformed UTF-8
+    # (InvalidByteSequenceError)" and a stack trace. Refused at the call.
+    unless generated_source.valid_encoding?
+      node.raise "macro expansion is not UTF-8 text: it holds a byte that is no character (a \"\\xff\" in a string it writes out, say), and an expansion is read back as source"
+    end
     parser = @program.new_parser(generated_source, var_scopes: [vars.dup])
     virtual = VirtualFile.new(the_macro, generated_source, node.location)
     virtual.line_origins = line_origins_of(generated_source, macro_expansion_pragmas)

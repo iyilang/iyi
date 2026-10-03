@@ -522,9 +522,18 @@ class Iyi::CodeGenVisitor
     # Asked of the instance type, because a module-level `def` is owned by the
     # module's *metaclass* — `App::Greeter::title` with a `::` in its symbol,
     # not a `#` — and that is most of what a module exports.
+    #
+    # Except a body that answers with the receiver's own storage, which is
+    # inlined here all the same and *also* emitted. Called, `@counter` comes
+    # back as a copy and `self` as a copy of the receiver, so `h.counter.bump`
+    # bumped a temporary: `h.counter.bump -> 1` in the build writing the
+    # artifact, 2 from source. The symbol is for a caller that only has the
+    # header (`iyi bind`'s); the consumer of an `--emit-iyimod` artifact has
+    # the body, which travels for this reason (`IyiMod.answer_travels?`).
     unless @program.iyi_exported_owners.empty?
-      if owner = target_def.owner
-        return false if @program.iyi_exported_owners.includes?(owner.instance_type)
+      if (owner = target_def.owner) && @program.iyi_exported_owners.includes?(owner.instance_type)
+        return false unless body.is_a?(InstanceVar) || (body.is_a?(Var) && body.name == "self")
+        target_def_fun(target_def, self_type)
       end
     end
 

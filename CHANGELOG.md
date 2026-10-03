@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A struct changed through a getter or a `self`-returning method of a
+  module's type changes the original in every build mode.** From source
+  the call is inlined and answers the field itself; the build writing the
+  artifact called it so the module had a symbol, and the consumer had
+  only a header to call, so each answered a copy: `h.counter.bump` then
+  `h.counter.n` printed 1 under `--emit-iyimod`, `--release
+  --emit-iyimod` and `--use-iyimod`, 2 from source, and `c.me.bump` the
+  same. The writing build inlines such a body and still emits the symbol,
+  and the body travels in the artifact (`IyiMod.answer_travels?`), so the
+  consumer inlines it too. `bench/samples_roundtrip.sh` checks both
+  through each mode, `--release` included; the old compiler answered 1.
+
 - **`protected` travels in a module's artifact, and `mod dump` writes a
   method's visibility.** From source `Box.new(4).secret` is `protected
   method 'secret' called for App::Vis::Box`; through the artifact the

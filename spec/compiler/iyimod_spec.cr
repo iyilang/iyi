@@ -2109,6 +2109,15 @@ describe Iyi::IyiMod do
   # artifact said "object code (none)", and a `--release` consumer of it
   # internalised the declarations it read and the IR was refused -
   # "Global is external, but doesn't have external or weak linkage!".
+  #
+  # And a `--release` consumer made private what that object code reaches
+  # by name in the program that links it. `x // 2` reaches nothing, so this
+  # passed while a module with a checked `+` did not link
+  # (`__iyi_raise_overflow`), nor one with a class (`:type_id`, `:headed`);
+  # on Windows a `defer` names the `void*` type descriptor, which a consumer
+  # with no `defer` of its own never defined. A struct changed through a
+  # getter is the last line: called rather than inlined, the getter answered
+  # a copy and the bump was lost, in the build writing the artifact too.
   it "carries object code from a release build to a release consumer" do
     with_tempdir("iyimod_release_object_code") do
       Dir.mkdir_p "boot"
@@ -2120,6 +2129,34 @@ describe Iyi::IyiMod do
             x // 2
           end
         end
+
+        pub struct Counter
+          property n : Int32
+
+          def initialize(@n : Int32)
+          end
+
+          def bump : Nil
+            @n += 1
+          end
+        end
+
+        pub class Holder
+          property counter : Counter
+
+          def initialize(@counter : Counter)
+          end
+        end
+
+        pub def add1(x : Int32) : Int32
+          x + 1
+        end
+
+        pub def with_defer(log : Array(String)) : Int32
+          defer log << "defer"
+          log << "body"
+          7
+        end
         IYI
       File.write "main.iyi", <<-IYI
         module main
@@ -2127,16 +2164,24 @@ describe Iyi::IyiMod do
         import boot/half
 
         puts Boot::Half::Half.of(84)
+        puts Boot::Half.add1(41)
+        h = Boot::Half::Holder.new(Boot::Half::Counter.new(1))
+        h.counter.bump
+        puts h.counter.n
+        log = [] of String
+        puts Boot::Half.with_defer(log)
+        puts log.join(",")
         IYI
 
       source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "42\n42\n2\n7\nbody,defer"
 
       producer = create_spec_compiler
       producer.prelude = "iyi/prelude"
       producer.release!
       producer.emit_iyimod = "mods"
       producer.compile source, File.expand_path("from-source")
-      `./from-source`.chomp.should eq "42"
+      `./from-source`.chomp.should eq expected
 
       artifact = Iyi::IyiMod.read(File.join("mods", "boot", "half.iyimod"), want_object_code: true)
       artifact.object_code.empty?.should be_false
@@ -2148,7 +2193,84 @@ describe Iyi::IyiMod do
       consumer.release!
       consumer.use_iyimod = "mods"
       consumer.compile source, File.expand_path("from-artifact")
-      `./from-artifact`.chomp.should eq "42"
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # The same reach without `--release`, where each type is a unit of its own
+  # and only two things were missing. A getter's caller has only a header,
+  # and a call answers a copy where the inlined body answered the field
+  # itself: `h.counter.bump` left 1 in the build writing the artifact and in
+  # the one reading it. And on Windows a module's `defer` is a catch pad over
+  # `void*`, whose type descriptor the main module defines when its own code
+  # first asks - which a consumer with no `defer`, `rescue` or `raise` of its
+  # own never did: `unresolved external symbol ... (??_R0PEAX@8)`.
+  it "changes a struct through an artifact's getter, and links its defer" do
+    with_tempdir("iyimod_getter_and_defer") do
+      Dir.mkdir_p "boot"
+      File.write "boot/shelf.iyi", <<-IYI
+        module boot/shelf
+
+        pub struct Counter
+          property n : Int32
+
+          def initialize(@n : Int32)
+          end
+
+          def me : self
+            self
+          end
+
+          def bump : Nil
+            @n += 1
+          end
+        end
+
+        pub class Holder
+          property counter : Counter
+
+          def initialize(@counter : Counter)
+          end
+        end
+
+        pub def with_defer(log : Array(String)) : Int32
+          defer log << "defer"
+          log << "body"
+          7
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/shelf
+
+        h = Boot::Shelf::Holder.new(Boot::Shelf::Counter.new(1))
+        h.counter.bump
+        puts h.counter.n
+        c = Boot::Shelf::Counter.new(1)
+        c.me.bump
+        puts c.n
+        log = [] of String
+        puts Boot::Shelf.with_defer(log)
+        puts log.join(",")
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "2\n2\n7\nbody,defer"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      File.delete "boot/shelf.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
     end
   end
 

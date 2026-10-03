@@ -169,5 +169,103 @@ else
   fi
 fi
 
+# What a module's object code reaches in the program that links it, built
+# both ways and with `--release` both ways - the samples above never write
+# a release artifact. A struct changed through a getter and through `self`
+# changes the original: inlined from source, the call answers the field
+# itself, and an artifact's body-less header was a call that answered a
+# copy, so `h.counter.bump` left the counter at 1 in the build writing the
+# artifact and in the one reading it. Checked `+`, a class, a `defer` and a
+# `group`, whose code refers by name to what the consumer defines: its
+# runtime `fun`s, type ids, `:headed` bytes and class variables, which a
+# `--release` consumer made private and the linker could not find
+# (`__iyi_raise_overflow`), and on Windows the `void*` type descriptor a
+# catch pad names, which a consumer with no `defer` or `raise` of its own
+# never defined (`??_R0PEAX@8`).
+REACH="$WORK/reach"
+mkdir -p "$REACH/shelf"
+cat > "$REACH/shelf/box.iyi" <<'IYI'
+module shelf/box
+
+pub struct Counter
+  property n : Int32
+
+  def initialize(@n : Int32)
+  end
+
+  def me : self
+    self
+  end
+
+  def bump : Nil
+    @n += 1
+  end
+end
+
+pub class Holder
+  property counter : Counter
+
+  def initialize(@counter : Counter)
+  end
+end
+
+pub def add1(x : Int32) : Int32
+  x + 1
+end
+
+pub def with_defer(log : Array(String)) : Int32
+  defer log << "defer"
+  log << "body"
+  7
+end
+
+pub def twice_in_task(n : Int32) : Int32
+  out = 0
+  group do |g|
+    t = g.spawn { n * 2 }
+    v = t.value
+    out = v.is_a?(Int32) ? v : -1
+  end
+  out
+end
+IYI
+cat > "$REACH/main.iyi" <<'IYI'
+module main
+
+import shelf/box::*
+
+h = Holder.new(Counter.new(1))
+h.counter.bump
+puts "through a getter: #{h.counter.n}"
+c = Counter.new(1)
+c.me.bump
+puts "through self: #{c.n}"
+puts add1(41)
+log = [] of String
+puts "#{with_defer(log)} #{log.join(",")}"
+puts twice_in_task(21)
+IYI
+printf 'through a getter: 2\nthrough self: 2\n42\n7 body,defer\n42\n' > "$REACH/expected.txt"
+reach() { # reach <label> <name> [build flags...]
+  local label="$1" name="$2"
+  shift 2
+  if ! (cd "$REACH" && "$IYI" build "$@" -o "$name" main.iyi) > "$REACH/$name.log" 2>&1; then
+    echo "reach: $label failed to build"
+    grep -m3 -E "error|Error" "$REACH/$name.log"
+    status=1
+  elif ! "$REACH/$name" > "$REACH/$name.txt" 2>&1 || ! cmp -s "$REACH/expected.txt" "$REACH/$name.txt"; then
+    echo "reach: $label answered differently from the source"
+    diff "$REACH/expected.txt" "$REACH/$name.txt" | head -8
+    status=1
+  else
+    echo "reach: $label answers as the source does"
+  fi
+}
+reach "writing the artifact" emit --emit-iyimod mods
+reach "writing it --release" emit-release --release --emit-iyimod modsr
+rm -rf "$REACH/shelf"
+reach "reading the artifact" use --use-iyimod mods
+reach "reading it --release" use-release --release --use-iyimod modsr
+
 echo "workdir $WORK"
 exit $status

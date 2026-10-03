@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A refused `rescue` or `ensure` is reported at the keyword.** On a
+  def or a block the handler starts where the body does, so `def foo :
+  Int32` / `raise "x"` / `rescue` was reported at line 3, `raise "x"`,
+  and a def's `ensure` at `puts "a"`. The refusal now points at the
+  `rescue` or `ensure` it refuses, and a def's body, which is cloned when
+  it is typed, keeps the `ensure` keyword's location. Checked in
+  `spec/compiler/semantic/iyi_spec.cr`; the old compiler reported line
+  2, column 3 for a keyword on line 3.
+
 - **`a.sort!` suggests `sort_in_place`.** In the other library `sort!`
   sorts in place, and the hint answered "undefined method 'sort' for
   Array(Int32) / 'sorted' is what this library calls it": following it

@@ -2908,6 +2908,10 @@ module Iyi
       ex.implicit = implicit
       ex.suffix = suffix
       ex.iyi_defer = iyi_defer?
+      # iyi: a def's body is cloned when it is typed, and the `ensure` it
+      # carries is refused at its keyword (MainVisitor, ExceptionHandler).
+      ex.else_location = else_location
+      ex.ensure_location = ensure_location
       ex
     end
 

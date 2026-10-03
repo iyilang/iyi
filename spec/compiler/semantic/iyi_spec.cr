@@ -526,6 +526,21 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # A def's or a block's handler starts where its body does, and the
+    # refusal pointed at the body's first statement, not at the keyword.
+    it "points at the `rescue` and the `ensure` of a def" do
+      {"rescue" => "iyi has no exceptions to rescue", "ensure" => "iyi has no `ensure`"}.each do |keyword, message|
+        ex = expect_raises(TypeException) do
+          semantic "def foo\n  1\n#{keyword}\n  2\nend\nfoo", filename: "prog.iyi"
+        end
+        while (inner = ex.inner).is_a?(TypeException)
+          ex = inner
+        end
+        ex.message.to_s.should contain(message)
+        {ex.line_number, ex.column_number}.should eq({3, 1})
+      end
+    end
+
     it "keeps a Crystal file's rescue" do
       assert_type("begin; 1; rescue; 2; end", filename: "prog.cr") { int32 }
     end

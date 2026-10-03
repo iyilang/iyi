@@ -3285,14 +3285,18 @@ module Iyi
       # sentence rather than a silent nothing. `.cr` sources keep theirs,
       # and so does the handler `defer` itself lowers to, which is the
       # registry's pop and carries the flag that says so.
+      #
+      # Said at the keyword: a def's or a block's handler starts where its
+      # body does, and `def foo ... rescue` was reported at `raise "x"`.
       if @program.iyi_prelude? && !node.iyi_defer? && node.location.try(&.original_filename.try(&.ends_with?(".iyi")))
         if node.rescues || node.else
-          node.raise "iyi has no exceptions to rescue: an error is a value the caller handles (SPEC.md III.1), " \
-                     "and a panic is caught at a task boundary (III.1.4), never here - this `rescue` would not run. " \
-                     "Return the error, or read the task's `value`"
-        elsif node.ensure
-          node.raise "iyi has no `ensure`: a panic unwinds by registry and skips it (SPEC.md III.1.4). " \
-                     "Write `defer`, which runs on return, on `!` and on a panic"
+          (node.rescues.try(&.first) || node).raise "iyi has no exceptions to rescue: an error is a value the caller handles (SPEC.md III.1), " \
+                                                    "and a panic is caught at a task boundary (III.1.4), never here - this `rescue` would not run. " \
+                                                    "Return the error, or read the task's `value`"
+        elsif node.ensure && (at = node.ensure_location || node.location)
+          ::raise TypeException.new("iyi has no `ensure`: a panic unwinds by registry and skips it (SPEC.md III.1.4). " \
+                                    "Write `defer`, which runs on return, on `!` and on a panic",
+            at.line_number, at.column_number, at.filename, "ensure".size)
         end
       end
 

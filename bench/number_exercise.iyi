@@ -80,33 +80,40 @@ assert_true((-9223372036854775808_i64 % -1_i64) == 0_i64, "number: int64 min rem
 # constant, an enum value, a StaticArray's size and a macro. The compiler
 # folded them with the other library's floored operators, so `-7 // 2` as
 # a constant was -4 beside the -3 of the line above, `-7 % 2` was 1, `7 %
-# -2` was -1, `8 << -1` was 4 and `-8 >> 40` was 0, and a StaticArray sized
-# `-7 % 3 + 3` held 5 elements where the same expression at run time is 2.
-# The compiler folds by the rules of the file the operator is written in
-# (`MathInterpreter.iyi_rules?`): iyi's here, the other library's in its own.
+# -2` was -1 and `-8 >> 40` was 0, and a StaticArray sized `-7 % 3 + 3`
+# held 5 elements where the same expression at run time is 2. The
+# compiler folds by the rules of the file the operator is written in
+# (`MathInterpreter.iyi_rules?`): iyi's here, the other library's in its
+# own. A negative count shifts the other way folded, as it does at run
+# time (section 7): it folded to 0, so `8 << -1` was 0 and `8 >> -1` and
+# `{{ 8 >> -1 }}` were 0 where the line answers 4 and 16.
 FOLDED_DIV     = -7 // 2
 FOLDED_REM     = -7 % 2
 FOLDED_REM_NEG = 7 % -2
 FOLDED_SHL     = 8 << -1
 FOLDED_SHR     = -8 >> 40
+FOLDED_SHR_NEG = 8 >> -1
 FOLDED_SIZE    = -7 % 3 + 3
 
 enum Folded
-  Div = -7 // 2
-  Rem = -7 % 2
-  Shl = 8 << -1
+  Div    = -7 // 2
+  Rem    = -7 % 2
+  Shl    = 8 << -1
+  ShrNeg = 64 >> -2
 end
 
 assert_int(FOLDED_DIV, -3, "number: a constant's // truncates as the line's does")
 assert_int(FOLDED_REM, -1, "number: a constant's % takes the dividend's sign")
 assert_int(FOLDED_REM_NEG, 1, "number: a constant's % ignores the divisor's sign")
-assert_int(FOLDED_SHL, 0, "number: a constant shifted by a negative count is 0")
+assert_int(FOLDED_SHL, 4, "number: a constant shifted left by a negative count shifts right")
+assert_int(FOLDED_SHR_NEG, 16, "number: a constant shifted right by a negative count shifts left")
 assert_int(FOLDED_SHR, -1, "number: a constant shifted right past the width keeps its sign")
-assert_true(Folded::Div.value == -3 && Folded::Rem.value == -1 && Folded::Shl.value == 0,
+assert_true(Folded::Div.value == -3 && Folded::Rem.value == -1 && Folded::Shl.value == 4 && Folded::ShrNeg.value == 256,
   "number: an enum value folds as the line does")
 assert_int(sizeof(StaticArray(Int32, FOLDED_SIZE)), 8, "number: a StaticArray's size folds % as the line does")
 assert_int({{ -7 // 2 }}, -3, "number: a macro's // truncates")
 assert_int({{ -7 % 2 }}, -1, "number: a macro's % takes the dividend's sign")
+assert_int({{ 8 >> -1 }}, 16, "number: a macro shifted by a negative count shifts the other way")
 
 # A shift's width was read off the whole number union the folder holds a
 # value in, 256 bits, so a count from the type's own width up to 255

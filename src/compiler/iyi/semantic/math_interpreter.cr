@@ -99,25 +99,30 @@ struct Iyi::MathInterpreter
   # iyi: an operator folded at compile time answers what it answers at run
   # time, so a constant, an enum value, a StaticArray size and a macro say
   # the same as the line that computes it. The folding used the host's
-  # operators, which are the other library's: `X = -7 // 2` was -4,
-  # `-7 % 2` was 1 and `8 << -1` was 4, where iyi's integers (number.iyi,
-  # std/int.iyi) truncate, take the dividend's sign and answer 0 for a
-  # negative count: -3, -1 and 0. That held for every constant, because
-  # codegen folds any integer constant it can. A source of the other
+  # operators, which are the other library's: `X = -7 // 2` was -4 and
+  # `-7 % 2` was 1, where iyi's integers (number.iyi, std/int.iyi) truncate
+  # and take the dividend's sign: -3 and -1. That held for every constant,
+  # because codegen folds any integer constant it can. A source of the other
   # language, or one built against the other library (`--crystal`), runs
   # that library's operators and keeps its rules.
   def self.iyi_rules?(program : Program, location : Location?) : Bool
     program.iyi_prelude? && Lexer.iyi_source?(location.try(&.filename))
   end
 
-  # A count below zero or past the width shifts every bit out.
+  # A count past the width shifts every bit out, and a negative count shifts
+  # the other way, as number.iyi's `<<` does. It answered 0 for a negative
+  # count (or -1, for `>>` of a negative value), so `C = 8 >> -1`, an enum's
+  # `64 >> -2` and `{{ 8 >> -1 }}` were 0 where the line answers 16 and 256.
+  # `0 - count` rather than `-count`, which an unsigned count does not have.
   def self.iyi_shl(value : Int, count : Int)
-    count < 0 || count >= iyi_width(value) ? value.class.zero : value.unsafe_shl(count)
+    return iyi_shr(value, 0 - count) if count < 0
+    count >= iyi_width(value) ? value.class.zero : value.unsafe_shl(count)
   end
 
-  # The same, and a negative value keeps its sign bit: -1.
+  # The same, and a negative value shifted past the width keeps its sign: -1.
   def self.iyi_shr(value : Int, count : Int)
-    if count < 0 || count >= iyi_width(value)
+    return iyi_shl(value, 0 - count) if count < 0
+    if count >= iyi_width(value)
       value < 0 ? ~value.class.zero : value.class.zero
     else
       value.unsafe_shr(count)

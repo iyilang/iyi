@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A constant, an enum value and a macro shift by a negative count the
+  other way, as the line that computes the same expression does.** The
+  folder still answered 0 for a negative count (-1 for a negative value
+  shifted right) after the prelude's `<<` and `>>` learned to shift the
+  other way, so `C = 8 >> -1` and `{{ 8 >> -1 }}` were 0 where run time
+  answers 16, an enum's `64 >> -2` was 0 against 256, `C = 8 << -1` was 0
+  against 4, `-8 >> -1` was -1 against -16 and `{{ 255_u8 >> -1 }}` was 0
+  against 254. A negative count folds as a shift the other way now, past
+  the width included. `bench/number_exercise.iyi` checks a constant and an
+  enum value each way and a macro, and the row that pinned `8 << -1` at 0
+  says 4; the old compiler answered 0 there.
+
 - **`BigInt#divmod`, `//` and `%` divide long values in less than
   quadratic time.** Every division was Knuth's long division, whose cost
   is the product of the quotient's length and the divisor's, and the

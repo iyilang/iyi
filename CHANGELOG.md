@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **A class whose fields have defaults written in its body (`@id = 0`,
+  `@items = [] of T`) can be imported from its artifact.** Such a default
+  counted as a statement in a type body, so the artifact refused every
+  consumer: "\"kit/lib\" has code inside a type body that has to run",
+  where the source build printed the default. The artifact already carries
+  it beside the field and the consumer's `new` runs it, so a class's field
+  default is exempt now; a module's is still refused, because it is handed
+  to an includer only as the include is read. The `field_default` case of
+  `bench/samples_roundtrip.sh` checks it; the old compiler refused the
+  import.
+
 - **A method with an empty body travels in the artifact as one, so the
   consumer compiles it rather than asking the linker for it.** The
   reader tells a header from a travelled body by whether there is a body,

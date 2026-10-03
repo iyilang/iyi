@@ -1603,20 +1603,31 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # What is left is what the rule is for: a statement in a type body. `puts
   # "x"` there has no declaration to ride on and nothing carries it, so a
   # program built against the artifact would run without it.
-  private def iyi_type_body_initialiser?(node : ASTNode) : Bool
+  #
+  # And a class's field default is the third thing that rides on one:
+  # `TypeDecl#fields` carries `@id = 0` beside the field it initialises, from
+  # `instance_vars_initializers`, and the consumer's `new` runs it. Counted as
+  # a statement, `pub class A; @id = 0; end` made the artifact refuse every
+  # consumer of the module, where the source build printed 0. A *module's*
+  # field default stays a statement: it is handed to whatever includes the
+  # module at the moment of the include, so a consumer's includer is never
+  # given it, and *fields* is false there.
+  private def iyi_type_body_initialiser?(node : ASTNode, fields = false) : Bool
     case node
     when Expressions
-      node.expressions.any? { |child| iyi_type_body_initialiser?(child) }
-    when ClassDef, ModuleDef
+      node.expressions.any? { |child| iyi_type_body_initialiser?(child, fields) }
+    when ClassDef
+      iyi_type_body_initialiser?(node.body, true)
+    when ModuleDef
       iyi_type_body_initialiser?(node.body)
     when VisibilityModifier
-      iyi_type_body_initialiser?(node.exp)
+      iyi_type_body_initialiser?(node.exp, fields)
     when Assign
       target = node.target
-      !(target.is_a?(Path) || target.is_a?(ClassVar))
+      !(target.is_a?(Path) || target.is_a?(ClassVar) || (fields && target.is_a?(InstanceVar)))
     else
       if expansion = iyi_expansion(node)
-        iyi_type_body_initialiser?(expansion)
+        iyi_type_body_initialiser?(expansion, fields)
       else
         iyi_initialiser?(node)
       end
@@ -1642,7 +1653,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     when VisibilityModifier
       iyi_uncarried_initialiser?(node.exp)
     when ClassDef
-      iyi_type_body_initialiser?(node.body)
+      iyi_type_body_initialiser?(node)
     when TraitDef, ImplDef
       iyi_initialiser?(node.body)
     when LibDef

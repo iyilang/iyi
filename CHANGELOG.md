@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`init` refuses a name whose root module would be a type of the
+  prelude, and names the type.** The root module is the name's camelcase,
+  a top-level type like every type of the prelude, and only the grammar
+  was asked: `iyi init class` wrote `class.iyi`, exit 0, whose first run
+  was `Error: Class is not a module, it's a metaclass`, and `string`,
+  `set`, `file`, `int`, `nil` and twenty more wrote projects that did not
+  build either. `init` asks the prelude now and refuses before writing
+  anything: `init: class names its root module `class`, which is the type
+  Class, and Class is already the prelude's metaclass`. `io`, `time`,
+  `json` and `kemal` are written as before. `bench/init_project.sh` inits
+  `example.com/me/string` and `class`; the old verb wrote both.
+
 - **R-2c types a script's top-level defs, class methods, and defs whose
   parameters have a default, an external name, a splat, a named-only
   place or an abstract class's type.** Each was left to its callers, so

@@ -74,6 +74,18 @@ class Iyi::Command
       abort! "init: '#{last}', the last segment of #{module_path}, cannot name a module: a module name is " \
              "lower-case letters and digits with single `_` between them. Name the project so its last segment is one", :USAGE_ERROR
     end
+    # The root module is a top-level type, its name's camelcase (`module
+    # hello` is `Hello`), and so is every type of the prelude: `iyi init
+    # class` wrote `module class`, whose first run was `Class is not a
+    # module, it's a metaclass`, and `string`, `set`, `file`, `int` and
+    # twenty more wrote a project that did not build either. The prelude is
+    # asked rather than listed, so the answer is whatever it declares.
+    camel = name.camelcase
+    if prelude_type = doc_prelude_program.types[camel]?
+      abort! "init: #{module_path} names its root module `#{name}`, which is the type #{camel}, and #{camel} is " \
+             "already the prelude's #{prelude_type.type_desc.lchop("generic ")}. Name the project so its last segment " \
+             "is a name the prelude does not take", :USAGE_ERROR
+    end
     files = iyi_init_files(module_path, name)
     taken = files.keys.select { |name| File.exists?(File.join(directory, name)) }
     unless taken.empty?

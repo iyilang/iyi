@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **An unmarked macro is the module's own through its artifact too.**
+  From source `App::Lib.inner` is refused with `App::Lib does not export
+  'inner'`; built with `--use-iyimod` and the source gone it compiled and
+  printed 1, and `mod dump --declarations` wrote the macro `pub macro
+  inner`: the declarations marked every carried macro exported, a rule
+  meant for a shard's, which arrive unmarked. An iyi module's macros are
+  now written as the module wrote them, and the artifact build gives the
+  source build's refusal. `bench/verbs_exercise.sh` checks it; the old
+  compiler built the program.
+
 - **A setter that writes no return type works through its module's
   artifact.** R-2 lets `def n=(v : Int32)` go without one, and the
   artifact carried it as a header with none, so a consumer built with

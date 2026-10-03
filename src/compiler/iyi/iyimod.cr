@@ -2000,8 +2000,13 @@ module Iyi::IyiMod
 
     # First, because a macro has to be defined before the code that calls it is
     # read, and the bodies below are full of code that calls them.
+    # Marked `pub` here only when they are a shard's, which arrive unmarked
+    # and are its surface (see `exported_macro`). An iyi module marked the
+    # ones it exports, and the rest are its own: marked here, `macro inner`
+    # was callable as `App::Lib.inner` through the artifact while the source
+    # said `App::Lib does not export 'inner'`.
     artifact.macro_bodies.each do |source|
-      io << '\n' << exported_macro(source) << '\n'
+      io << '\n' << (artifact.crystal_library ? exported_macro(source) : source) << '\n'
     end
 
     # Before the functions, because one of them reads it: `Backtracer.configure`

@@ -1504,6 +1504,18 @@ else
   echo "  --crystal refused a module that is not std:"; head -3 own_crystal.log; status=1
 fi
 
+# An unmarked macro is the module's own through its artifact as from its
+# source: the declarations wrote it `pub macro`, so `App::Mac.inner` ran
+# and printed 1 where the source says "does not export 'inner'".
+mkdir -p "$WORK/mac/app"
+printf 'module app/mac\n\nmacro inner\n  1\nend\n\npub macro outer\n  2\nend\n' > "$WORK/mac/app/mac.iyi"
+printf 'import app/mac\n\nputs App::Mac.outer\n' > "$WORK/mac/ok.iyi"
+printf 'import app/mac\n\nputs App::Mac.inner\n' > "$WORK/mac/inner.iyi"
+(cd "$WORK/mac" && "$IYI" build --emit-iyimod mods -o ok ok.iyi && mv app/mac.iyi mac.source) > "$WORK/mac.log" 2>&1 ||
+  { echo "  the macro module does not build:"; sed -n '1,3p' "$WORK/mac.log"; status=1; }
+refuses "an unmarked macro, through its artifact" "does not export 'inner'" -- \
+  "$IYI" build --use-iyimod "$WORK/mac/mods" -o "$WORK/mac/u" "$WORK/mac/inner.iyi"
+
 echo "== what the other verbs refuse, and what one of them prints"
 # `doc`, `migrate`, `bind` and the rest of `mod` were never in this file,
 # and every one of them failed the standard the verbs above hold to: `doc`

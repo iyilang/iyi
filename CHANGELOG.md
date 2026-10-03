@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`iyi mod release` in a package inside another repository compares only
+  the package's own releases.** Every `v*` tag in the enclosing repository
+  was taken for one: an uncommitted package in a repository tagged `v0.16.2`
+  had that tag checked out, the whole repository with it, and the answer was
+  "Error: mod release: v0.16.2 has no iyi.mod at pkg", and committed it
+  answered the same. HEAD has to hold the package now, or the answer says to
+  commit it first, and the release compared is the highest tag whose tree
+  holds the package's iyi.mod: committed under that `v0.16.2`, the package
+  has "no release before this one". `bench/packages_get.sh` asks both; the
+  old compiler failed both.
+
 - **`iyi doc String`, `iyi doc prelude` and `iyi init` work in a project
   whose packages cannot be fetched.** Each compiles the prelude alone, as an
   empty file in the working directory, and that file's root resolved the

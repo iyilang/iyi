@@ -76,6 +76,15 @@ class Iyi::Command
     # both "versions" compiled were the tree as it stood and nothing moved.
     inside = (mod_release_git(dir, "rev-parse", "--show-prefix") || "").strip.rchop('/')
 
+    # The package has to be in HEAD, which is what a tag names: a package
+    # not yet committed - or not yet its own repository, sitting untracked
+    # in someone else's - has nothing a release could compare.
+    manifest_at = ->(rev : String) { "#{rev}:#{inside.empty? ? "" : "#{inside}/"}#{Mod::Installer::MANIFEST}" }
+    unless mod_release_git(dir, "cat-file", "-e", manifest_at.call("HEAD"))
+      abort! "mod release: HEAD of the repository at #{Iyi.relative_filename(top)} has no #{Mod::Installer::MANIFEST} at " \
+             "#{inside.empty? ? "its root" : inside}; a release is of what a commit holds, so commit the package first", :USAGE_ERROR
+    end
+
     _, major = Mod::ModFile.split_major(root.path)
     released = [] of SemanticVersion
     (mod_release_git(dir, "tag", "--list", "v*", "--merged", "HEAD") || "").each_line do |line|
@@ -88,7 +97,12 @@ class Iyi::Command
     # and the rc removed was never compared, and `v1.2.0` was approved as
     # "holds what changed". The highest pre-release only when there is no
     # release at all.
-    base = released.select(&.prerelease.identifiers.empty?).max? || released.max?
+    # And only a tag that holds this package: in a repository that holds
+    # other things the tags are theirs too. A new package inside another
+    # repository took its `v0.16.2` for its last release, checked the whole
+    # repository out to compare, and answered "v0.16.2 has no iyi.mod".
+    ordered = released.sort_by { |version| {version.prerelease.identifiers.empty? ? 1 : 0, version} }.reverse!
+    base = ordered.find { |version| mod_release_git(dir, "cat-file", "-e", manifest_at.call("v#{version}")) }
 
     if (wanted = proposed) && released.includes?(wanted)
       abort! "mod release: v#{wanted} is already a tag, and a version is released once", :USAGE_ERROR

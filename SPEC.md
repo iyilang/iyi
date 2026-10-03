@@ -4728,7 +4728,9 @@ version selection builds every consumer at the highest minimum anyone
 asked for, and that is only safe while a minor or patch release keeps what
 the one before it exported - which Go leaves to the author's memory.
 `iyi mod release [VERSION]` checks out HEAD and the highest `vX.Y.Z` tag
-it contains beside the tree, compiles every module of the package that
+it contains that holds the package's `iyi.mod` - a package inside a larger
+repository is not released by the repository's tags - beside the tree,
+compiles every module of the package that
 writes `pub` once, and compares the two surfaces line by line: functions,
 `pub` types with their parameters and methods, the types inside them that
 are not `private`, their macros, an enum's members and what an alias

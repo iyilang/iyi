@@ -749,6 +749,26 @@ git commit -qam additive
 "$IYI" mod release v1.2.0 > relrc2.log 2>&1 || fail "v1.2.0 after v1.1.0 and an rc, adding a def, was refused: $(cat relrc2.log)"
 [ "$status" -eq 0 ] && echo "  an rc that removed: v2.0.0 from v1.1.0; a release that adds after it: v1.2.0"
 
+step "mod release of a package inside another repository"
+# The enclosing repository's tags are not the package's: a new package in
+# one took its `v0.16.2` for its last release, checked the whole repository
+# out to compare, and answered "v0.16.2 has no iyi.mod at ...". Uncommitted,
+# it is told so; committed, with no tag that holds it, it has no release.
+RELN="$WORK/reln"
+mkrepo "$RELN"
+cd "$RELN" || exit 1
+printf 'outside\n' > README && git add -A && git commit -qm outer && git tag v0.16.2
+mkdir -p pkg && cd pkg || exit 1
+printf 'module example.test/user/pkg\n' > iyi.mod
+printf 'module pkg\n\npub def f : Int32\n  1\nend\n' > pkg.iyi
+if "$IYI" mod release > reln.log 2>&1 || ! grep -q "commit the package first" reln.log; then
+  fail "an uncommitted package inside a repository was not told so: $(cat reln.log)"
+fi
+git add -A && git commit -qm pkg
+"$IYI" mod release > reln2.log 2>&1 && grep -q "no release before this one" reln2.log ||
+  fail "a package no tag holds was compared with one: $(cat reln2.log)"
+[ "$status" -eq 0 ] && echo "  uncommitted: told so; committed under the repository's v0.16.2: no release before this one"
+
 step "mod release: every name a consumer writes is surface"
 # Each edit below is made to v1.0.0 alone and removes a name a consumer of
 # v1.0.0 writes: a constant, a type nested in an exported one (gone, or

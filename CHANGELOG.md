@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **Calling a method that the build writing an artifact never reached is
+  refused, naming the module, instead of failing at link.** An artifact
+  carries the machine code its producing build compiled, and a program
+  that wrote kit/lib's artifact without calling `fb_public` left it
+  declared and defined nowhere: a consumer calling it ended on `LNK2019
+  unresolved external symbol
+  .2A.Kit.3A..3A.Lib.40.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E..3A.Int32`.
+  It stops now on "kit/lib's artifact declares `Kit::Lib.fb_public(x :
+  Int32)`, and its object code has no symbol for it: the build that wrote
+  the artifact never reached it", debug and release. The same symbol
+  missing from an artifact that another artifact's object code calls is
+  still a link error. The `unreached` case of `bench/samples_roundtrip.sh`
+  checks it; the old compiler answered the LNK2019.
+
 - **A method whose body uses `{{@type}}` works on a consumer's subclass,
   and a producer's subclass no longer leaks into the library's
   artifact.** Such a method is expanded again for every receiver, and its

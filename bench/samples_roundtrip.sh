@@ -267,5 +267,249 @@ rm -rf "$REACH/shelf"
 reach "reading the artifact" use --use-iyimod mods
 reach "reading it --release" use-release --release --use-iyimod modsr
 
+# Shapes of module whose artifact read back as something other than its
+# source, each built from source while writing the artifact and then from the
+# artifact alone. Each was measured failing on the build that read it:
+# `impl_block` linked no further than `Kit::Lib::B#walk<&Proc(Int32, Nil)>`
+# and Enumerable's `map` said "can't use yield inside a proc literal";
+# `abstract_generic` came back as `pub abstract generic class GA(T)`;
+# `empty_body` ended on `G(Int32)@G(T)#noop:Nil`; `field_default` was refused
+# for "code inside a type body that has to run"; `hooks` said `undefined
+# method 'kind' for Main::Mine`; and `macro_def` put `class ::Main::User` in
+# the library's artifact - `superclass mismatch for class Main::User`.
+TRAVEL="$WORK/travel"
+travel() { # travel <case> <expected output>, with $TRAVEL/<case>/{kit/lib.iyi,main.iyi}
+  local name="$1" dir="$TRAVEL/$1"
+  printf '%s\n' "$2" > "$dir/expected.txt"
+  if ! (cd "$dir" && "$IYI" build --emit-iyimod mods -o emit main.iyi) > "$dir/emit.log" 2>&1; then
+    echo "travel: $name failed to build from source"
+    grep -m3 -E "error|Error" "$dir/emit.log"
+    status=1
+    return
+  fi
+  rm -rf "$dir/kit"
+  if ! (cd "$dir" && "$IYI" build --use-iyimod mods -o use main.iyi) > "$dir/use.log" 2>&1; then
+    echo "travel: $name failed to build from its artifact"
+    grep -m3 -E "error|Error" "$dir/use.log"
+    status=1
+  elif ! "$dir/emit" > "$dir/emit.txt" 2>&1 || ! cmp -s "$dir/expected.txt" "$dir/emit.txt" ||
+    ! "$dir/use" > "$dir/use.txt" 2>&1 || ! cmp -s "$dir/expected.txt" "$dir/use.txt"; then
+    echo "travel: $name answered differently from the source"
+    diff "$dir/expected.txt" "$dir/use.txt" | head -8
+    status=1
+  else
+    echo "travel: $name answers from its artifact as from source"
+  fi
+}
+mkdir -p "$TRAVEL"/{impl_block,abstract_generic,empty_body,field_default,hooks,macro_def,unreached}/kit
+cat > "$TRAVEL/impl_block/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+import std/enumerable::{Enumerable}
+
+pub trait Walk
+  abstract def walk(& : Int32 -> Nil) : Nil
+end
+
+pub struct B
+  def initialize(@n : Int32)
+  end
+end
+
+impl Walk for B
+  def walk(& : Int32 -> Nil) : Nil
+    yield 3
+    yield 4
+  end
+end
+
+impl Enumerable for B
+  type Elem = Int32
+
+  def each(& : Int32 -> Nil) : Nil
+    i = 0
+    while i < @n
+      yield i
+      i += 1
+    end
+  end
+end
+IYI
+cat > "$TRAVEL/impl_block/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+import std/enumerable
+
+B.new(0).walk { |x| puts x }
+puts B.new(3).map { |x| x * 2 }
+IYI
+travel impl_block "$(printf '3\n4\n[0, 2, 4]')"
+cat > "$TRAVEL/abstract_generic/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub abstract class GA(T)
+  abstract def get : T
+end
+
+pub class GC(T) < GA(T)
+  def initialize(@v : T)
+  end
+
+  def get : T
+    @v
+  end
+end
+IYI
+cat > "$TRAVEL/abstract_generic/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+puts GC.new(3).get
+IYI
+travel abstract_generic 3
+cat > "$TRAVEL/empty_body/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub class G(T)
+  def initialize(@v : T)
+  end
+
+  def noop : Nil
+  end
+
+  def get : T
+    @v
+  end
+end
+
+pub struct S(T)
+  def one : Int32
+    1
+  end
+end
+
+pub def each_none(& : Int32 -> Nil) : Nil
+end
+IYI
+cat > "$TRAVEL/empty_body/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+g = G.new(5)
+g.noop
+each_none { |x| puts x }
+puts "#{g.get} #{S(String).new.one}"
+IYI
+travel empty_body "5 1"
+cat > "$TRAVEL/field_default/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub class A
+  @id = 7
+  @items = [] of String
+
+  def describe : String
+    "#{@id} #{@items.size}"
+  end
+end
+IYI
+cat > "$TRAVEL/field_default/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+puts A.new.describe
+IYI
+travel field_default "7 0"
+cat > "$TRAVEL/hooks/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub abstract class P
+  @@names = [] of String
+
+  macro inherited
+    P.add({{@type.name.stringify}})
+
+    def kind : String
+      {{@type.name.stringify}}
+    end
+  end
+
+  def self.add(name : String) : Nil
+    @@names << name
+  end
+
+  def self.names : Array(String)
+    @@names
+  end
+end
+
+pub class One < P
+end
+IYI
+cat > "$TRAVEL/hooks/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+class Mine < P
+end
+
+puts "#{One.new.kind} #{Mine.new.kind} #{P.names}"
+IYI
+travel hooks 'Kit::Lib::One Main::Mine ["Kit::Lib::One", "Main::Mine"]'
+cat > "$TRAVEL/macro_def/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub class Model
+  def type_name : String
+    {{ @type.name.stringify }}
+  end
+end
+IYI
+cat > "$TRAVEL/macro_def/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+class User < Model
+end
+
+puts "#{User.new.type_name} #{Model.new.type_name}"
+IYI
+travel macro_def "Main::User Kit::Lib::Model"
+
+# And a method the build writing the artifact never called, which the
+# artifact declares and has no machine code for (SPEC.md IV.1g). It is
+# refused naming the module; it was a link error naming a mangled symbol,
+# `.2A.Kit.3A..3A.Lib.40.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E.`.
+cat > "$TRAVEL/unreached/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub def fb_public(x : Int32) : Int32
+  x * 7
+end
+IYI
+printf 'module producer\n\nimport kit/lib\n' > "$TRAVEL/unreached/producer.iyi"
+printf 'module main\n\nimport kit/lib::*\n\nputs fb_public(3)\n' > "$TRAVEL/unreached/main.iyi"
+if ! (cd "$TRAVEL/unreached" && "$IYI" build --emit-iyimod mods -o producer producer.iyi) > "$TRAVEL/unreached/emit.log" 2>&1; then
+  echo "travel: unreached failed to write its artifact"
+  status=1
+else
+  rm -rf "$TRAVEL/unreached/kit"
+  (cd "$TRAVEL/unreached" && "$IYI" build --use-iyimod mods -o use main.iyi) > "$TRAVEL/unreached/use.log" 2>&1
+  if grep -q "kit/lib's artifact declares .Kit::Lib.fb_public" "$TRAVEL/unreached/use.log" &&
+    grep -q "never reached it" "$TRAVEL/unreached/use.log"; then
+    echo "travel: a method the artifact's build never reached is refused naming the module"
+  else
+    echo "travel: a method the artifact's build never reached was not refused by name"
+    grep -m3 -E "error|Error" "$TRAVEL/unreached/use.log"
+    status=1
+  fi
+fi
+
 echo "workdir $WORK"
 exit $status

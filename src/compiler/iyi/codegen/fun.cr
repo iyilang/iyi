@@ -158,6 +158,20 @@ class Iyi::CodeGenVisitor
     @program.iyi_exported_owners.includes?(self_type.instance_type)
   end
 
+  # iyi: the refusal for a call to a method an artifact declares and none
+  # defines, naming the module the declaration came from — the parser read
+  # it under the artifact's path, and `iyi_artifact_modules` is keyed on that.
+  private def iyi_refuse_unreached(target_def : Def, self_type) : NoReturn
+    file = target_def.location.try(&.original_filename)
+    module_name = file.try { |path| @program.iyi_artifact_modules[path]? } || file || "an imported module"
+    owner = target_def.owner? || self_type
+    target_def.raise "#{module_name}'s artifact declares `#{Call.def_full_name(owner, target_def)}`, " \
+                     "and its object code has no symbol for it: the build that wrote the artifact " \
+                     "never reached it. An artifact carries the machine code its producing build " \
+                     "compiled (SPEC.md IV.1g). Write #{module_name}'s artifact again from a build " \
+                     "that calls it, or build against #{module_name}'s source"
+  end
+
   # The unit a callee should be copied into, or nil to route it normally.
   #
   # Nil unless this build is writing artifacts and is currently emitting code
@@ -281,6 +295,18 @@ class Iyi::CodeGenVisitor
       # guesses at.
       compiled_elsewhere = !is_fun_literal &&
                            @program.iyi_artifact_symbols.includes?(mangled_name)
+
+      # iyi: and a header no artifact defines a symbol for is a call the link
+      # cannot answer. An artifact carries the machine code its producing
+      # build reached (SPEC.md IV.1g), so a method that build never called is
+      # declared in it and compiled nowhere — and left to the linker the
+      # program ended on `LNK2019 unresolved external symbol` and a mangled
+      # `.2A.Kit.3A..3A.Lib.40.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E.`,
+      # naming no module. Refused here, where the module is still known.
+      if target_def.iyi_from_artifact? && !compiled_elsewhere && !is_fun_literal &&
+         !target_def.is_a?(External)
+        iyi_refuse_unreached target_def, self_type
+      end
 
       needs_body = (!target_def.is_a?(External) || is_exported_fun) &&
                    !target_def.iyi_from_artifact? &&

@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`String#to_i?`, `to_i` and `to_f` read a number with whitespace on
+  either side, as the other library's `whitespace: true` does.** They
+  read the whole string or nothing: `" 42".to_i?` and `"42\n".to_i?` were
+  nil, so a line read with its `\n` still on was no number, and
+  `" 42 ".to_i` and `" 1.5 ".to_f` panicked "not a number". They skip
+  `Char#whitespace?` at both ends now, Unicode's as the other library's:
+  `"\u00A0-7\u3000".to_i?` is -7, and `"42\u0085".to_i?` is still nil
+  (U+0085 is a control), as are `"4 2"`, `"+ 1"` and `" "`. `to_f` takes
+  a slice only when there is whitespace to drop. `bench/number_exercise.iyi`
+  checks it; the old prelude failed "whitespace around an integer".
+
 - **A range prints as it is written, `1..5`, `1...3`, `"a".."b"`, as
   the other library's does.** `Range` had no `to_s`, so `Object#to_s`
   answered the type: `puts 1..5` printed `Range(Int32, Int32)`, and

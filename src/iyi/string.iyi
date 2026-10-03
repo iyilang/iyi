@@ -226,24 +226,24 @@ class String
     to_i? || raise "not a number: #{inspect}"
   end
 
-  # Read as a *negative* magnitude, the range that holds every value the
-  # type has: `Int32::MIN` has no positive twin, so accumulating
-  # `2147483648` and negating it could not read what `to_s` wrote - it
-  # overflowed on the last digit, and with checked arithmetic that was a
-  # panic rather than the `nil` a `?` promises.
+  # Around the digits, `Char#whitespace?` is skipped as the other
+  # library's `whitespace: true` skips it (`"42\n".to_i?` was nil). Read
+  # as a *negative* magnitude, which holds every value the type has:
+  # `2147483648` accumulated and negated, `Int32::MIN` overflowed on its
+  # last digit, a panic rather than the `nil` a `?` promises.
   def to_i? : Int32?
-    return nil if empty?
-
-    index = 0
-    negative = self[0] == '-'
-    if negative || self[0] == '+'
+    index = space_end
+    last = space_start(index)
+    return nil if index == last
+    negative = to_unsafe[index] == 45_u8
+    if negative || to_unsafe[index] == 43_u8
       # A sign alone is not a number; `+5` is one, as it is for `to_f`.
-      return nil if @bytesize == 1
-      index = 1
+      return nil if last - index == 1
+      index = index + 1
     end
 
     value = 0
-    while index < @bytesize
+    while index < last
       digit = to_unsafe[index].to_i - 48
       return nil if digit < 0 || digit > 9
       # The next step would leave the type: -214748364 * 10 is the last

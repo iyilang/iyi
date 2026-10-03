@@ -57,6 +57,14 @@ assert_true("99999999999999999999".to_i? == nil, "number: far too large is nil")
 assert_true("12abc".to_i? == nil, "number: trailing letters are nil")
 assert_true("".to_i? == nil, "number: empty is nil")
 assert_true("-".to_i? == nil, "number: a lone sign is nil")
+# Whitespace on either side is not in the way: `to_i?`, `to_i` and `to_f`
+# take `Char#whitespace?` there, as the other library's `whitespace: true`
+# does. A line read with its `\n` still on was nil, and `" 42 ".to_i`
+# panicked. Inside the number, alone, or U+0085 (a control), it is no
+# number still.
+assert_true(" 42".to_i? == 42 && "42\n".to_i? == 42 && "\u00A0-7\u3000".to_i? == -7 && " 42 ".to_i == 42, "number: whitespace around an integer")
+assert_true("4 2".to_i?.nil? && "+ 1".to_i?.nil? && " ".to_i?.nil? && "42\u0085".to_i?.nil?, "number: whitespace inside, alone, or U+0085 is no integer")
+assert_true(" 1.5 ".to_f == 1.5 && "\t2.5e3\n".to_f == 2500.0 && "\u20281e-3".to_f == 0.001, "number: whitespace around a float")
 
 # ---- 3. Division and remainder, which have to agree with each other
 assert_int(7 // 2, 3, "number: division truncates")

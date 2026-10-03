@@ -518,6 +518,38 @@ if [ "$code" -ne 1 ] || ! grep -q 'panic: a task spawned on a group whose block 
   exit 1
 fi
 
+# ── 3g. The join names the first failure, not the last spawned ───────────
+# Two tasks that panic: both are printed where they happen, first then
+# second, and the join owes one re-raise for the pair. It walked its
+# children newest first and named "a task panicked: second", where III.4.3
+# says the first failing task is the one that leaves the group.
+step "a group's join re-raises the first task that panicked"
+cat > two_panics.iyi <<'IYI'
+module two_panics
+
+def bomb(m : String) : Int32
+  raise m
+end
+
+group do |g|
+  g.spawn { bomb("first") }
+  g.spawn { bomb("second") }
+end
+IYI
+if ! "$IYI" build two_panics.iyi -o two_panics > build-two-panics.log 2>&1; then
+  echo "two panics probe failed to build:"
+  tail -5 build-two-panics.log
+  exit 1
+fi
+timeout 30 ./two_panics > two_panics.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q 'panic: a task panicked: first' two_panics.txt ||
+   grep -q 'a task panicked: second' two_panics.txt; then
+  echo "two panicking tasks joined with exit $code and not the first named:"
+  cat two_panics.txt
+  exit 1
+fi
+
 # ── 4. Failure proof: the interleaving assert is reachable ────────────────
 step "failure proof: a wrong order is refused"
 sed 's/== "bababa"/== "aaabbb"/' "$REPO/bench/concurrency_exercise.iyi" > misordered.iyi

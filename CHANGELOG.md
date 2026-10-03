@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **A group's join re-raises the first task that panicked, not the last
+  one spawned.** The join owes one re-raise for the panics nobody read,
+  and it walked its children newest first: two tasks that both panicked,
+  `bomb("first")` then `bomb("second")`, were printed at their sites in
+  that order and the join ended the program on `iyi: panic: a task
+  panicked: second`. III.4.3 says the first failing task is the one that
+  leaves the group, and the group already records it. The join names that
+  one now - `a task panicked: first` - and marks every unread panic
+  delivered. `bench/concurrency_exercise.sh` step 3g checks it; the old
+  runtime named `second`.
+
 - **A tuple and a named tuple are `Hashable`, so `group_by`, `tally`,
   `tally_by`, `index_by` and `to_h` take one as the key.** Each has the
   `==` and the `hash` a `Hash` asks of a key, and neither implemented the

@@ -2954,15 +2954,18 @@ class IyiGroup
     # child is marked delivered before the raise, so the deferred
     # second join (concurrency's own `defer g.join`) finds nothing —
     # and an owner already on its own panic path gets the mark without
-    # the noise.
+    # the noise. The one named is the failure that stopped the group: the
+    # list is newest first, and two panics were reported as the second.
+    owed = nil
     child = @first_child
     while child.is_a?(IyiFiber)
       if child.panicked && !child.panic_delivered
         child.panic_delivered = true
-        raise "a task panicked: " + child.panic_message unless IyiScheduler.current.panicked
+        owed = child unless owed.is_a?(IyiFiber) && child.object_id != @first_failure
       end
       child = child.next_child
     end
+    raise "a task panicked: " + owed.panic_message if owed.is_a?(IyiFiber) && !IyiScheduler.current.panicked
   end
 
   # :nodoc: — the owner taken out of this join by a deadlock

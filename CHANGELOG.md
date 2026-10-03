@@ -33,6 +33,15 @@
   panicked with "arithmetic overflow". Found by 330,000 cases against
   Crystal; `enumerable` and `indexable` agreed on 108,000.
 
+- **A value returned past a `defer` is the value it was.** A union, tuple
+  or struct a `return`, `break` or `next` carried was a pointer to its
+  variable, read only after the cleanup ran: `defer u = -2` then
+  `return u` with `u : Char | String` returned an `Int32` read as a
+  `Char` - "out of memory" in a debug build, a crash in a release one -
+  and a cleanup assigning the same type silently changed the answer. It
+  is copied out before the first cleanup runs. Found by the semantic
+  fuzz; the other compiler does the same, and six codegen specs check
+  return, break, next and a block's own value and failed before.
 - **A selection range asked outside the text stays inside it.** Past a
   line's end or the last line, the language server echoed the position
   as given.

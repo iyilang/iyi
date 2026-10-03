@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A generic struct holding a trait it implements is refused as a
+  recursive struct.** `Box(Show).new(1)` beside `impl Show for Box(T)
+  forall T` ended in "Stack overflow" inside the compiler, ~12k frames
+  of gc_field_offsets, while the non-generic `W` with `@value : Show`
+  was "recursive struct W detected": the check walked the generic
+  `Box(T)` and never met `Box(Show)`. It answers "recursive struct
+  Box(Show) detected" now (also `Pair(Show, Int32)`, `Wrap(Show)`).
+  `bench/verbs_exercise.sh` and `spec/compiler/semantic/iyi_spec.cr`
+  check it; the old compiler overflowed its stack.
+
 - **A nilable trait in a field, an array or a generic argument compiles
   when a generic type implements the trait.** With `impl Show for Gen(T)
   forall T` anywhere in the program, `@s : Show?`, `[nil, 1] of Show?`

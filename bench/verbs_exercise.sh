@@ -416,6 +416,11 @@ printf 'module deep\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\npu
 refuses "a program that ran out of stack" "stack overflow" -- "$IYI" run deep.iyi
 printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
+# A generic struct holding a trait it implements, `Box(Show)` beside `impl
+# Show for Box(T) forall T`: the recursive-struct check never met
+# `Box(Show)`, and the compiler overflowed its stack laying it out.
+printf 'trait Show\n  abstract def show : String\nend\n\nimpl Show for Int32\n  def show : String\n    "i"\n  end\nend\n\nstruct Box(T)\n  def initialize(@value : T)\n  end\nend\n\nimpl Show for Box(T) forall T\n  def show : String\n    "B"\n  end\nend\n\nputs Box(Show).new(1).show\n' > recbox.iyi
+refuses "a generic struct holding a trait it implements" "recursive struct Box(Show) detected" -- "$IYI" run recbox.iyi
 # `name!(1)`: the `!` is a propagation, and an argument list was told it
 # "takes no block".
 printf 'module bangargs\n\nnomacro!(1)\n' > bangargs.iyi

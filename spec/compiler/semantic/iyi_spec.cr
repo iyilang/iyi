@@ -1802,6 +1802,36 @@ describe "Semantic: iyi" do
         end
         CODE
     end
+
+    # `impl Show for Box(T) forall T` lists the generic `Box(T)` among Show's
+    # includers. The recursive-struct check walked that list, never met
+    # `Box(Show)`, and the compiler overflowed its stack laying it out.
+    it "refuses a generic struct holding a trait it implements" do
+      assert_error <<-CODE, "recursive struct Box(Show) detected"
+        trait Show
+          abstract def show : Int32
+        end
+
+        struct Box(T)
+          def initialize(@value : T)
+          end
+        end
+
+        impl Show for Box(T) forall T
+          def show : Int32
+            1
+          end
+        end
+
+        impl Show for Int32
+          def show : Int32
+            2
+          end
+        end
+
+        Box(Show).new(1)
+        CODE
+    end
   end
 
   # A bound on a *method*'s free variable, which is a different mechanism from

@@ -734,11 +734,10 @@ module ::IyiFormat
            code_point(val.to_i64)
          when Int64
            code_point(val)
-         when UInt8
-           code_point(val.to_i64)
          when UInt64
-           # `UInt16` and `UInt32` arrive here widened, and all three were
-           # the first character of their digits: `%c` of 65_u32 was "6".
+           # `UInt8`, `UInt16` and `UInt32` arrive widened, and the last two
+           # and this were the first character of their digits: `%c` of
+           # 65_u32 was "6".
            code_point(val)
          else
            first = ' '
@@ -777,6 +776,11 @@ module ::IyiFormat
       return format_arg(verb == 'u' ? val.to_i64 & 255_i64 : val.to_i64, verb, minus, plus, space, zero, hash, width, precision)
     when Int16
       return format_arg(verb == 'u' ? val.to_i64 & 65535_i64 : val.to_i64, verb, minus, plus, space, zero, hash, width, precision)
+    when UInt8
+      # Widened as `Int8` is: it had every integer verb's branch of its own
+      # and none of the float verbs', so `%f` of 200_u8 panicked "wants a
+      # number" where `%d` printed 200.
+      return format_arg(val.to_i64, verb, minus, plus, space, zero, hash, width, precision)
     when UInt16, UInt32
       return format_arg(val.to_u64, verb, minus, plus, space, zero, hash, width, precision)
     when Float32
@@ -801,8 +805,6 @@ module ::IyiFormat
         format_int64(val, 10, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
         format_uint64(val, 10, false, true, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 10, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -818,8 +820,6 @@ module ::IyiFormat
         format_uint64(val.unsafe_to_u64, 10, false, false, minus, plus, space, zero, hash, width, precision)
       when UInt64
         format_uint64(val, 10, false, false, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 10, false, false, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -838,8 +838,6 @@ module ::IyiFormat
         format_int64(val, 16, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
         format_uint64(val, 16, false, true, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 16, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -853,8 +851,6 @@ module ::IyiFormat
         format_int64(val, 16, true, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
         format_uint64(val, 16, true, true, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 16, true, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -868,8 +864,6 @@ module ::IyiFormat
         format_int64(val, 8, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
         format_uint64(val, 8, false, true, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 8, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -883,8 +877,6 @@ module ::IyiFormat
         format_int64(val, 2, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
         format_uint64(val, 2, false, true, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 2, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else

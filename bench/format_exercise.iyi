@@ -446,7 +446,12 @@ raise "format: unsigned of a narrow or wide word failed: #{t6}" if t6 != "[251|6
 # `%p` of 65_i128 was "65" in quotes, and `%c` of 65_u128 was refused.
 t8 = sprintf("[%p|%-4s|%c|%3c]", 65_i128, -7_i128, 65_u128, 233_i128)
 raise "format: Int128 text and code point failed: #{t8}" if t8 != "[65|-7  |A|  é]"
-puts "    tower: Int8 to UInt128 and Float32, and %c of any code point"
+# The float verbs of a `UInt8` are its double's, as of every other width:
+# it had a branch of its own under each integer verb and none under these,
+# so `%f` of 200_u8 panicked "wants a number" where `%d` printed 200.
+t9 = sprintf("[%f|%e|%E|%g|%G|%.1f|%d|%x|%c]", 200_u8, 200_u8, 0_u8, 255_u8, 7_u8, 7_u8, 200_u8, 200_u8, 65_u8)
+raise "format: the float verbs of a UInt8 failed: #{t9}" if t9 != "[200.000000|2.000000e+02|0.000000E+00|255|7|7.0|200|c8|A]"
+puts "    tower: Int8 to UInt128 and Float32 under every verb, and %c of any code point"
 
 # A float past an `Int64` under an integer verb is its own integer, every
 # digit, as Python writes it; NaN, a width or precision past an `Int32`

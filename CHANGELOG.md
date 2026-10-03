@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`%f`, `%e`, `%E`, `%g` and `%G` format a `UInt8`, as they do every other
+  integer width.** `"%f" % 200_u8` panicked "%f wants a number, and 200 is a
+  UInt8" where `%d` printed 200 and the other library prints 200.000000:
+  `UInt8` had a branch of its own under each integer verb and none under the
+  float verbs, and unlike `Int8`, `Int16`, `UInt16` and `UInt32` it was not
+  widened first. It is widened to `Int64` as `Int8` is, and its seven
+  integer branches are gone. Thirteen values from `Int8` to `UInt128` under
+  seventeen verbs print what the other library prints, 239 lines alike.
+  `bench/format_exercise.iyi` checks the float verbs of a `UInt8`; the old
+  module panicked "%f wants a number, and 200 is a UInt8".
+
 - **`String#count`, `#delete` and `#squeeze` read a character set as the
   other library's do.** `count(String)` counted a substring, so
   `"banana".count("an")` was 2 where the other library answers 5, and all

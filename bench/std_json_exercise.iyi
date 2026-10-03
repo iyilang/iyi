@@ -479,6 +479,24 @@ group do |g|
   one_and_text = answer.message if answer.is_a?(Panicked)
 end
 assert_text("the keys 1 and \"1\" are both written as \"1\"", one_and_text, "1 and \"1\" as keys of one Hash refused")
+# A key the object already holds is refused where it is written: the
+# builder wrote `{"x":1,"x":2}`, and two String keys whose bytes are not
+# UTF-8 were both written as U+FFFD - documents `JSON.parse` refuses.
+written_twice = "accepted"
+group do |g|
+  writer = g.spawn { JSON.build { |b| b.object { b.field("x", 1); b.field("x", 2) } } }
+  answer = writer.value
+  written_twice = answer.message if answer.is_a?(Panicked)
+end
+assert_text("the key \"x\" is written twice in one object", written_twice, "a key written twice by the builder refused")
+replaced_twice = "accepted"
+group do |g|
+  writer = g.spawn { JSON.to_json({"a\xFF" => 1, "a\xFE" => 2}) }
+  answer = writer.value
+  replaced_twice = answer.message if answer.is_a?(Panicked)
+end
+assert_true(replaced_twice.includes?("are both written as \"a\u{FFFD}\""), "two keys written as one U+FFFD text refused, not #{replaced_twice.inspect}")
+assert_text("{\"x\":{\"x\":1},\"y\":[{\"x\":2}]}", JSON.build { |b| b.object { b.field("x") { b.object { b.field("x", 1) } }; b.field("y") { b.array { b.object { b.field("x", 2) } } } } }, "one key in nested objects is no repeat")
 assert_text("{\"x\":3,\"y\":0.5}", JSON.to_json(Point.new(3, 0.5)), "a ToJSON type")
 assert_text("[{\"x\":1,\"y\":1.0},{\"x\":2,\"y\":2.0}]", JSON.to_json([Point.new(1, 1.0), Point.new(2, 2.0)]), "an array of ToJSON values")
 assert_text("[1,\"s\",null]", JSON.to_json(JSON.parse("[1, \"s\", null]")), "an Any")

@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`std/json` writes no object with a key twice.** The reader refuses
+  a duplicate key, and the builder wrote one: `JSON.build` with
+  `field("x", 1)` and `field("x", 2)` wrote `{"x":1,"x":2}`, and
+  `JSON.to_json({"a\xFF" => 1, "a\xFE" => 2})` wrote both keys as
+  `"a\uFFFD"`, since bytes that are not UTF-8 are written as U+FFFD -
+  `JSON.parse` refused both documents it had written. The builder keeps
+  the text of every key of each open object and refuses a repeat:
+  "the key \"x\" is written twice in one object", or for two keys
+  written as one text, "the keys ... and ... are both written as ...",
+  the sentence `to_json` already gave `nil` and `"null"`.
+  `bench/std_json_exercise.iyi` checks both and that one key in two
+  nested objects is no repeat; the old module answered "accepted".
+
 - **`std/xml`'s `add_child` moves a node, and refuses to put one under
   itself.** The child stayed among its old parent's children as well,
   so `b.add_child(x)` for an `x` under `a` wrote `<r><a><x/></a><b><x/>

@@ -272,7 +272,7 @@ puts "  a chunked body that is not one is a 400, and a 2 GB chunk size is a size
 # A control character in a field value or the target (RFC 9110 §5.5, RFC
 # 9112 §2.2) is refused on the way in and on the way out: a server block
 # that echoed a header with a bare LF in it panicked writing its answer.
-assert_str "400 not a request target: \"/?a\nb\"", server_reads("GET /?a\nb HTTP/1.1\r\n\r\n"), "a target with a line feed is a 400"
+assert_str "400 not a request target: \"/?a\\nb\"", server_reads("GET /?a\nb HTTP/1.1\r\n\r\n"), "a target with a line feed is a 400"
 assert_str "400 header User-Agent contains a control character", server_reads("GET / HTTP/1.1\r\nUser-Agent: a\rb\r\n\r\n"), "a value with a bare CR is a 400"
 assert_str "refused: HTTP: header X-A contains a control character", client_reads("HTTP/1.1 200 OK\r\nX-A: a\u0000b\r\n\r\n"), "an answer's value with a NUL is refused"
 assert_str "refused: HTTP: header X-A contains a control character", answer { HTTP.format_request("GET", "/", "127.0.0.1", "", {"X-A" => "a\u0000b"}) }, "a value with a NUL is not written"

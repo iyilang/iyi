@@ -392,6 +392,13 @@ if [ "$code" -ne 1 ] || ! grep -q "^FAIL: share:" greedy.txt; then
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: share:' greedy.txt)"
 
+# Measured on twelve cores, where eleven new helpers waited for a core;
+# on a CI runner's four the wait cost 35 ms against a 164 ms bound and the
+# proof did not fire. Below eight cores it is said to be unmeasured.
+cores="${NUMBER_OF_PROCESSORS:-$(nproc 2>/dev/null || echo 0)}"
+if [ "$cores" -lt 8 ]; then
+  echo "  the first-collection wait proof needs 8 cores to show; this machine has $cores: unmeasured here"
+else
 step "failure proof: a first collection that waits for every helper to reach its park is caught"
 mkdir -p ready/iyi
 cp "$REPO"/src/iyi/*.iyi ready/iyi/
@@ -416,6 +423,7 @@ for round in 1 2 3 4 5; do
 done
 [ -n "$caught" ] || { echo "the crowded check did not fire in five rounds: $best ms with the wait, within $bound"; exit 1; }
 echo "  caught on round $caught: beside $beside threads computing, past four times the time with no helpers and 100 ms"
+fi
 
 echo "workdir $WORK"
 echo "concurrent mark: every step held"

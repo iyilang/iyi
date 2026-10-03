@@ -94,9 +94,9 @@ prove_fails() {
   fi
   # The phrase is the good case: the exercise survived the break, noticed it,
   # and said which check caught it.
-  if grep -q "$phrase" "$WORK/$dir/out"; then
+  if grep -qE "$phrase" "$WORK/$dir/out"; then
     printf '  %s: exits %s at "%s"\n' "$label" "$exit_code" \
-      "$(grep -m1 "$phrase" "$WORK/$dir/out" | sed 's/^iyi: panic: //')"
+      "$(grep -m1 -E "$phrase" "$WORK/$dir/out" | sed 's/^iyi: panic: //')"
     return
   fi
   # A break can also be too severe to narrate. Since the prelude allocates its
@@ -161,8 +161,10 @@ prove_fails "warm pages counted at the full chunk" roundwarm "rounding:" \
 prove_fails "a batch left unstamped" batchstamp "batch:" \
   '{ if ($0 ~ /^            write8\(entry, CARVED_FLAG \| FREE_FLAG \| epoch\)$/) { print "            # removed"; next } print }'
 
-# And not listed at all: every allocation carves again.
-prove_fails "a batch not listed" batchlist "batch:" \
+# And not listed at all: every allocation carves again. darwin arm64's
+# sixteen-kilobyte pages make the carving show first in the warm check's
+# high water, which catches it there.
+prove_fails "a batch not listed" batchlist "batch:|warm:" \
   '{ if ($0 ~ /^          table\[index\] = listed$/) { print "          # removed"; next } print }'
 
 # The idle bit read for the first page of a slice and trusted to its end:

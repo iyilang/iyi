@@ -3282,7 +3282,16 @@ module Iyi
             accept body
           end
           skip_space_or_newline
-          write " "
+          # A comment ending the body's last line has not taken the line
+          # break with it (that is the `}`'s to decide), and a `}` written
+          # after it closed nothing: `each { |i| puts i` / `puts 2 # c` / `}`
+          # came back with `# c }`, and the file no longer parsed.
+          if @wrote_comment
+            write_line
+            write_indent
+          else
+            write " "
+          end
         end
         write_token :OP_RCURLY
       else
@@ -4800,6 +4809,12 @@ module Iyi
       indent do
         skip_space_or_newline
       end
+
+      # A body on the opener's line can end its last line in a comment, which
+      # has not taken the line break with it: `-> { puts 1` / `puts 2 # c` /
+      # `}` came back with `# c }`, and the `}` closed nothing, or closed the
+      # lines after it - `x.call` went into `x`'s own body. `do` had `# c end`.
+      write_line if @wrote_comment
 
       if is_do
         check_end

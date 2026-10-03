@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A `{` block or proc whose body starts on the opener's line keeps its
+  `}` or `end` out of a comment ending the body's last line.** `fmt`
+  wrote `[1].each { |i| puts i` / `puts 2 # c` / `}` as `puts 2 # c }`,
+  exit 0, and the result did not parse: "expecting token '}', not
+  'EOF'". In `x = -> { puts 1` / `puts 2 # c` / `}` / `x.call` the `}`
+  went into the comment and the proc took in `x.call`: "can't use
+  variable name 'x' inside assignment to variable 'x'". A `-> do` body
+  ended `# c end`. The closer goes on the next line now, at the block's
+  indentation. `spec/compiler/formatter/iyi_formatter_spec.cr` formats a
+  block, a block in a def, a `{` proc and a `do` proc of this shape and
+  requires each unchanged; the old formatter wrote `puts 2 # c }` and
+  `puts 2 # c end`.
+
 - **Calling a method that the build writing an artifact never reached is
   refused, naming the module, instead of failing at link.** An artifact
   carries the machine code its producing build compiled, and a program

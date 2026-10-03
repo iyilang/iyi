@@ -114,6 +114,14 @@ describe "Formatter on iyi" do
   assert_iyi_format "x = [ # c\n  # first\n  1,\n]"
   assert_iyi_format "h = { # c\n  # first\n  1 => 2,\n}"
 
+  # A `{` block's or a proc's body that starts on the opener's line and
+  # runs over several: a comment ending its last line took the `}` into it,
+  # so the block closed nothing, or closed the lines after it.
+  assert_iyi_format "[1].each { |i| puts i\nputs 2 # c\n}"
+  assert_iyi_format "def f\n  [1].each { |i| puts i\n  puts 2 # c\n  }\nend"
+  assert_iyi_format "x = -> { puts 1\nputs 2 # c\n}\nx.call"
+  assert_iyi_format "x = -> do puts 1\nputs 2 # c\nend\nx.call"
+
   # Errors: propagation, recovery, and the panic that takes no default.
   assert_iyi_format "module m\n\nvalue = read(path)!"
   # A short block's call can propagate: `&.close!`, `&.size!.succ`.

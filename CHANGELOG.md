@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A float converts to an integer by truncating first, under every
+  name.** The prelude's five (`to_i`, `to_i32`, `to_i64`, `to_u8`,
+  `to_u64`) checked the untruncated value while std/int's and std/float's
+  truncate first, so one rule had two answers: `255.5.to_u8` and
+  `(-0.5).to_u8` panicked "arithmetic overflow" where `255.5.to_u16` was
+  255 and `(-0.5).to_u16` 0, and `2147483647.9.to_i` panicked. What is
+  refused now is a truncation the type does not hold, NaN and the
+  infinities: those three answer 255, 0 and 2147483647, and `256.0.to_u8`,
+  `(-1.0).to_u8` and `2147483648.0.to_i` panic. This reverses the pin on
+  `2147483647.9.to_i`, which matched the other library; under `--crystal`
+  its own rule still holds. `bench/number_exercise.iyi` and `.sh` check
+  the edges both sides; the old compiler panicked at `255.5.to_u8`.
+
 - **On Windows a module that uses `defer` or `group` links from its
   artifact into any program.** Its catch pad names the `void*` type
   descriptor, which the main module defined only when the program's own

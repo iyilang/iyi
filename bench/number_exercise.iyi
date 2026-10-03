@@ -189,6 +189,18 @@ assert_int([1.0, nan, 0.5].sorted.size, 3, "number: sorting with nan keeps the c
 # Toward zero, the same direction `//` takes.
 assert_int(2.9.to_i, 2, "number: to_i truncates")
 assert_int((-2.9).to_i, -2, "number: to_i truncates toward zero")
+# A float truncates first, and what is refused is a truncation the type
+# does not hold - the rule std/int and std/float already kept. The
+# prelude's own five checked the untruncated value, so `255.5.to_u8` and
+# `(-0.5).to_u8` panicked while std/int's `255.5.to_u16` was 255. The last
+# doubles under 2^63 and 2^64 are here too; past each is a panic, driven by
+# `bench/number_exercise.sh`.
+truncated = [255.5.to_u8.to_s, 255.99.to_u8.to_s, (-0.5).to_u8.to_s, (-0.99).to_u64.to_s,
+             2147483647.9.to_i.to_s, (-2147483648.9).to_i32.to_s,
+             9223372036854774784.0.to_i64.to_s, (-9223372036854775808.0).to_i64.to_s,
+             18446744073709549568.0.to_u64.to_s]
+assert_str(truncated.join(" "), "255 255 0 0 2147483647 -2147483648 9223372036854774784 -9223372036854775808 18446744073709549568",
+  "number: a float truncates first and is refused only past the type")
 assert_true((-0.0).abs.to_s == "0.0" && (-2.5).abs == 2.5, "number: abs clears the sign of a zero too")
 assert_true((-1.5).floor == -2.0, "number: floor goes down")
 assert_true((-1.5).ceil == -1.0, "number: ceil goes up")

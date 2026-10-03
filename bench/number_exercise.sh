@@ -148,13 +148,21 @@ panics_with "modulo by zero" zero_mod "modulo by zero" "7 % 0"
 
 # And the float that does not fit an integer, which the compiler checks
 # rather than this file: unchecked it would hand back whatever the hardware's
-# conversion left behind. The last one is the boundary - 2147483647.9
-# truncates to a value that fits, and this compiler and the other language
-# both refuse it - measured against both rather than assumed.
+# conversion left behind. A float truncates first and what is refused is a
+# truncation the type does not hold, so each boundary is the first double
+# whose truncation does not fit: 2147483648.0 rather than 2147483647.9,
+# which truncates to one that does and is answered in
+# `bench/number_exercise.iyi`. That was a panic too, the range checked on
+# the untruncated value, while std/int's `255.5.to_u16` answered 255.
 panics_with "a float too large for an int" big_float "arithmetic overflow" "1e20.to_i"
 panics_with "not a number as an int" nan_int "arithmetic overflow" "(0.0/0.0).to_i"
 panics_with "infinity as an int" inf_int "arithmetic overflow" "(1.0/0.0).to_i"
-panics_with "the boundary float" edge_float "arithmetic overflow" "2147483647.9.to_i"
+panics_with "the boundary float" edge_float "arithmetic overflow" "2147483648.0.to_i"
+panics_with "the boundary float below" edge_float_low "arithmetic overflow" "(-2147483649.0).to_i32"
+panics_with "a byte's boundary" edge_byte "arithmetic overflow" "256.0.to_u8"
+panics_with "minus one as a byte" neg_byte "arithmetic overflow" "(-1.0).to_u8"
+panics_with "minus one as a uint64" neg_u64 "arithmetic overflow" "(-1.0).to_u64"
+panics_with "2^63 as an int64" edge_i64 "arithmetic overflow" "9223372036854775808.0.to_i64"
 
 # A code point `chr` reads now that it reads past ASCII, and the ones that
 # are not characters at all: a surrogate half, and past U+10FFFF.

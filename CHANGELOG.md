@@ -4,6 +4,44 @@
 
 ### Fixed
 
+- **An iterator yields a nil element instead of stopping at it: the end
+  of a pull is `Stop`, which is no element.** `next` answered `Elem?`,
+  nil for the end, so `Iterator.of([1, nil, 3]).to_a` was `[1]`,
+  `Iterator.of([nil, nil]).count` 0, `Iterator.of_values({"a" => nil,
+  "b" => 1}).to_a` `[]`, and a `map` whose block answered nil ended the
+  stream there, all without a word; the other library answers
+  `[1, nil, 3]`, 3 and `[nil, 1]`, its `next` answering `Iterator::Stop`
+  in the same place. `next` answers `Elem | Stop` now, `Stop` a struct
+  with nothing in it (`import std/iterator::{Iterator, Stop}`). **The
+  protocol changes:** an iterator written outside std answers `Stop.new`
+  at its end and tests a pull with `is_a?(Stop)`. There were 28
+  implementors - 23 adaptors and sources in std/iterator, `ListIterator`,
+  `Slice`'s `SliceIterator`, `NumericStepIterator`, the counter in
+  `bench/std_iterator_exercise.iyi` and the one in
+  `samples/iyi/std_iterator.iyi` - and all of them, with
+  `bench/std_steppable_exercise.iyi`'s pulls, are moved. A compile-time
+  refusal of a nilable `Elem` was the other way, and would have left
+  `Iterator.of([1, nil, 3])` and a `map` to nil unusable where the other
+  library answers them. Each adaptor writes `next` once now, as
+  `NumericStepIterator` did; the `impl` repeated it. The `map`, `select`,
+  `zip` and `take` mutations of `bench/std_iterator_exercise.sh` patch
+  the new text. `bench/std_iterator_exercise.iyi` checks five nil-element
+  cases and its `.sh` proves them load-bearing with `each` stopping at a
+  nil again; the old module answered `[1]`, 0, `[]`, `[1]` and
+  `[{"x", 0}]` for them, and the new exercise does not build against it
+  ("Std::Iterator has no `Stop`").
+- **`Iterator.of` takes an endless range and counts up from its
+  beginning, as the other library does; a beginless one is refused at the
+  call.** `Iterator.of((1..)).first(3).to_a` was accepted and then refused
+  from inside `src/std/iterator.iyi:421`, "expected argument #1 to
+  'Int32#<' to be ... not Nil", a line of the library. It answers
+  `[1, 2, 3]` now, and `Iterator.of((1..)).step(3).first(4).to_a`
+  `[1, 4, 7, 10]` as there. `Iterator.of(..5)` is refused at the
+  caller's line: "Iterator.of takes a range with a beginning: a beginless
+  range has no first element to count up from".
+  `bench/std_iterator_exercise.iyi` checks the endless range; the old
+  module did not build it, with the refusal above.
+
 - **`Float64#**` with an `Int32` exponent answers the nearest double: all
   2,052 powers of 1.1, 0.7 and 10.0 checked against Python's `Fraction`
   are correctly rounded, where 1,879 were not.** It squared and multiplied

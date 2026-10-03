@@ -12,7 +12,7 @@ module std/slice
 
 import std/enumerable::{Enumerable}
 import std/indexable::{Indexable}
-import std/iterator::{Iterator}
+import std/iterator::{Iterator, Stop}
 
 # `pub`, because an alias is part of a module's surface like anything else: an
 # unexported one is unreachable from a consumer, which R-2 now says out loud.
@@ -503,8 +503,8 @@ pub class SliceIterator(T)
     @index = 0
   end
 
-  def next : T?
-    return nil if @index >= @slice.size
+  def next : T | Stop
+    return Stop.new if @index >= @slice.size
     item = @slice[@index]
     @index = @index + 1
     item
@@ -513,11 +513,4 @@ end
 
 impl Iterator for SliceIterator(T) forall T
   type Elem = T
-
-  def next : T?
-    return nil if @index >= @slice.size
-    item = @slice[@index]
-    @index = @index + 1
-    item
-  end
 end

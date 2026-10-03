@@ -9,7 +9,8 @@
 # each capability: infinite sequence consumption, pipeline laziness, map,
 # select, skip, zip, chain, flat_map, a source shared with its adaptor, a
 # zip that pulls past its first source, a counting adaptor copied into the
-# adaptor built on it, and a take that leaves an empty pull uncounted.
+# adaptor built on it, a take that leaves an empty pull uncounted, and a
+# nil element read as the end.
 #
 # Exits non-zero if any check fails.
 
@@ -209,13 +210,13 @@ prove_fails() {
 prove_fails "take limit broken" broken_take "assertion failed for infinite take" \
   's/@count < @n/@count < (@n + 1)/'
 
-# 2. Pipeline mapping broken (map iterator returns nil prematurely)
+# 2. Pipeline mapping broken (map iterator answers the end prematurely)
 prove_fails "map transform broken" broken_map "assertion failed for pipeline result" \
-  's/def next : U?/def next : U?; return nil/g'
+  's/def next : U | Stop/def next : U | Stop; return Stop.new/g'
 
 # 3. Select filtering broken (fails to loop over elements)
 prove_fails "select predicate broken" broken_select "assertion failed for pipeline result" \
-  's/while !(item = @iter\.next)\.nil?/item = @iter.next; if !item.nil?/'
+  's/until (item = @iter\.next)\.is_a?(Stop)/item = @iter.next; unless item.is_a?(Stop)/'
 # 4. Skip broken (fails to advance past requested count)
 prove_fails "skip count broken" broken_skip "assertion failed for skip" \
   's/while @skipped < @n/while @skipped < 0/'
@@ -223,7 +224,7 @@ prove_fails "skip count broken" broken_skip "assertion failed for skip" \
 # 5. Zip broken (prematurely halts pairing: every pull answers as though a
 #    source had run out)
 prove_fails "zip pairing broken" broken_zip "assertion failed for zip" \
-  's/{item1, item2}/nil/'
+  's/{item1, item2}/Stop.new/'
 
 # 6. Chain broken (skips first iterator directly to second)
 prove_fails "chain sequence broken" broken_chain "assertion failed for chain" \
@@ -243,7 +244,7 @@ prove_fails "array source copied" copied_source "assertion failed for adaptor sh
 
 # 10. Zip pulls its second source after the first ran out
 prove_fails "zip over-pulls" zip_overpull "assertion failed for zip pulls the longer source once per pair" \
-  's/^    return nil if item1\.nil?$/    item2 = @iter2.next if item1.nil?\n    return nil if item1.nil?/'
+  's/^    return Stop.new if item1\.is_a?(Stop)$/    item2 = @iter2.next if item1.is_a?(Stop)\n    return Stop.new if item1.is_a?(Stop)/'
 
 # 11-15. A counting adaptor copied into the adaptor built on it (a struct
 #        again, as every stateful adaptor was)
@@ -260,7 +261,11 @@ prove_fails "each_cons copied" copied_cons "assertion failed for each_cons keeps
 
 # 16. Take counts only the pulls that answered
 prove_fails "take leaves an empty pull uncounted" take_uncounted "assertion failed for a take counts an empty pull" \
-  '/^pub class TakeIterator/,/^pub class TakeWhileIterator/s/^      @iter\.next$/      took = @iter.next; @count = @count - 1 if took.nil?; took/'
+  '/^pub class TakeIterator/,/^pub class TakeWhileIterator/s/^      @iter\.next$/      took = @iter.next; @count = @count - 1 if took.is_a?(Stop); took/'
+
+# 17. A nil element read as the end, as it was when the end was nil
+prove_fails "a nil element read as the end" nil_as_end "assertion failed for a nil element is an element" \
+  's/^    until (item = self\.next)\.is_a?(Stop)$/    until (item = self.next).is_a?(Stop) || item.nil?/'
 echo
 if [ "$status" -eq 0 ]; then
   echo "Iterator: all 27 sections pass plain and release, and each check is"

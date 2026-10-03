@@ -7,7 +7,7 @@ module bench/std_steppable_exercise
 
 import std/steppable::{Steppable, NumericStepIterator}
 
-import std/iterator::{Iterator}
+import std/iterator::{Iterator, Stop}
 
 # User-defined type implementing Steppable trait.
 # Requires +, -, <=>, >, < for NumericStepIterator's contract.
@@ -63,7 +63,7 @@ end
 
 def collect_vals(iter : NumericStepIterator(StepInt)) : Array(Int32)
   res = [] of Int32
-  while !(x = iter.next).nil?
+  until (x = iter.next).is_a?(Stop)
     res << x.val
   end
   res
@@ -160,7 +160,7 @@ puts "\n== open-ended stepping without limit"
 s21 = StepInt.new(10).step(by: StepInt.new(5))
 inf1 = [] of Int32
 cnt = 0
-while cnt < 4 && !(x = s21.next).nil?
+while cnt < 4 && !(x = s21.next).is_a?(Stop)
   inf1 << x.val
   cnt = cnt + 1
 end
@@ -193,7 +193,7 @@ assert_int("sum of 10, 7, 4", 21, sum2.val)
 inf_iter = StepInt.new(100).step(by: StepInt.new(25))
 taken = inf_iter.take(3)
 taken_vals = [] of Int32
-while !(x = taken.next).nil?
+until (x = taken.next).is_a?(Stop)
   taken_vals << x.val
 end
 assert_equal("take on NumericStepIterator", "[100, 125, 150]", taken_vals.to_s)
@@ -203,7 +203,7 @@ puts "\n== Int32 overflow near the type's edges"
 MAX = 2147483647
 s_max = StepInt.new(MAX - 2).step(to: StepInt.new(MAX), by: StepInt.new(1))
 assert_equal("inclusive step to Int32 MAX", "[2147483645, 2147483646, 2147483647]", collect_vals(s_max).to_s)
-assert_true("next after MAX is nil", s_max.next.nil?)
+assert_true("next after MAX is the end", s_max.next.is_a?(Stop))
 
 s_max2 = StepInt.new(MAX - 1).step(to: StepInt.new(MAX), by: StepInt.new(2))
 assert_equal("step 2 near Int32 MAX", "[2147483646]", collect_vals(s_max2).to_s)
@@ -214,7 +214,7 @@ assert_equal("exclusive step near Int32 MAX", "[2147483645, 2147483646]", collec
 MIN = -2147483648
 s_min = StepInt.new(MIN + 2).step(to: StepInt.new(MIN), by: StepInt.new(-1))
 assert_equal("inclusive step to Int32 MIN", "[-2147483646, -2147483647, -2147483648]", collect_vals(s_min).to_s)
-assert_true("next after MIN is nil", s_min.next.nil?)
+assert_true("next after MIN is the end", s_min.next.is_a?(Stop))
 
 s_min2 = StepInt.new(MIN + 1).step(to: StepInt.new(MIN), by: StepInt.new(-2))
 assert_equal("step -2 near Int32 MIN", "[-2147483647]", collect_vals(s_min2).to_s)

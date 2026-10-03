@@ -587,8 +587,10 @@ class ::String
   # Mapped per character. The 256-entry byte table this used could not hold
   # a character above ASCII: `"a☃".tr("☃", "x")` answered `"axxx"`, one `x`
   # per byte of the character it was asked to replace once. Both sets name
-  # runs the way the other library does: `a-z` is the twenty-six letters,
-  # and a `-` at either end is itself.
+  # runs: `a-z` is the twenty-six letters, and a `-` at either end is
+  # itself, as the other library's `delete` sets read them. Its `tr` pairs
+  # the characters positionally, a `-` among them, so
+  # `"bab".tr("a-c", "A-C")` is `"bAb"` there and `"BAB"` here.
   #
   # Both sets in ASCII - the common case, and a DNA complement's - are one
   # 256-entry byte table built once and one pass over the bytes, which a

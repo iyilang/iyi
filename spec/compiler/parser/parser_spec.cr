@@ -4690,6 +4690,15 @@ end").as(ClassDef)
         end
       end
 
+      # A constant compared with `<` is a comparison, spaced or not before a
+      # lowercase or a literal; only `Array<Int32>`'s touching shape is the
+      # other languages' type arguments.
+      it "reads a constant compared with < as a comparison" do
+        parse("Level::Info < Level::Error", filename: "x.iyi")
+        parse("Float32::MIN < 0.0_f32", filename: "x.iyi")
+        parse("A<b", filename: "x.iyi")
+      end
+
       # Habits of other languages that were bare token errors, or errors
       # far from what was written (HuntDiag3).
       it "names the spelling of another language's syntax" do

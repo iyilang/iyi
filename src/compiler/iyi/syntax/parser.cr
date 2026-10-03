@@ -927,7 +927,13 @@ module Iyi
 
             method = @token.type.to_s
             name_location = @token.location
-            if iyi? && method == "<" && left.is_a?(Path) && !iyi_space_before_bang?
+            # Only `Array<Int32>`'s shape: the `<` touching the path and a
+            # type name touching the `<`. `Level::Info < Level::Error` is a
+            # comparison, and was refused as one.
+            if iyi? && method == "<" && left.is_a?(Path) && (left_end = left.end_location) &&
+               left_end.line_number == name_location.line_number &&
+               left_end.column_number + 1 == name_location.column_number &&
+               current_char.ascii_uppercase?
               iyi_check_angle_generic("type")
             end
 

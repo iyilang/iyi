@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **A `!` whose error the enclosing signature does not list is reported
+  at the `!`.** It was the other library's "method Wrongerr.g must
+  return (Int32 | Wrongerr::ParseErr) but it is returning
+  Wrongerr::IOErr", at the signature's return type, with nothing
+  pointing at the operator. It now names the error, the def and its
+  return type, and the two ways out (widen the signature, or handle it
+  with `case`), at the `!`. The check reads the annotation the call
+  resolved: looked up again from the `!`, the one on a def inside a
+  module never reached it. `bench/verbs_exercise.sh` checks the line
+  and the sentence; the old compiler answered at the signature, 30:9.
+
 - **`!` in `initialize` is refused, and so is a `return` there that
   leaves a field unassigned.** `new` answers the object whatever
   `initialize` returns, so `@v = parse(s)!` dropped the error and built a

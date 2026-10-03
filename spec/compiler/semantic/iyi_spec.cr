@@ -2679,6 +2679,49 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "reports an error member the enclosing signature does not list at the `!`" do
+      # It was the other library's "must return (Int32 | ParseError) but it
+      # is returning IOError", reported at the signature.
+      assert_error <<-CODE, "`!` propagates App::Fails::IOError out of `go`, and `go` returns (App::Fails::ParseError | Int32), which does not include it", filename: "x.iyi"
+        module App
+          module Fails
+            struct IOError
+              def initialize
+              end
+            end
+
+            impl Error for IOError
+              def message : String
+                "boom"
+              end
+            end
+
+            struct ParseError
+              def initialize
+              end
+            end
+
+            impl Error for ParseError
+              def message : String
+                "bad"
+              end
+            end
+
+            def self.read(missing : Bool) : Int32 | IOError
+              return IOError.new if missing
+              1
+            end
+
+            def self.go : Int32 | ParseError
+              read(false)!
+            end
+          end
+        end
+
+        App::Fails.go
+        CODE
+    end
+
     it "does not make Nil an error" do
       # III.1.5: absence and failure stay distinct, so `T?` is not an error
       # union and nothing here touches it.

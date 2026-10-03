@@ -2177,7 +2177,11 @@ module Iyi
       # which is true and says nothing about the operator that put it there or
       # about the two ways out.
       if construct == "!" && (enclosing = @typed_def) && (restriction = enclosing.return_type)
-        declared = begin
+        # The annotation as the call resolved it (`Call#check_return_type`).
+        # Looked up again from here, the one on a def inside `module
+        # wrongerr` never reached the check below, and the mistake still got
+        # the sentence this replaces.
+        declared = enclosing.freeze_type || begin
           current_type.lookup_type?(restriction, allow_typeof: false)
         rescue
           nil
@@ -2191,6 +2195,21 @@ module Iyi
                        "#{declared}, which has no error member. Give it one " \
                        "(`#{declared} | #{errors.first}`), or handle the error here " \
                        "with `case` — see SPEC.md III.1"
+          end
+
+          # iyi: and somewhere for *this* error. One the signature does not
+          # list was reported by the other library at the signature, "method
+          # ::g must return (Int32 | ParseErr) but it is returning IOErr", with
+          # nothing pointing at the `!`. The test is the one that sentence
+          # comes from, member by member.
+          missing = errors.reject(&.implements?(declared))
+          unless missing.empty?
+            node.raise "`!` propagates #{missing.map(&.to_s).join(" or ")} out of " \
+                       "`#{enclosing.name}`, and `#{enclosing.name}` returns " \
+                       "#{declared}, which does not include #{missing.size == 1 ? "it" : "them"}. " \
+                       "There is no implicit conversion: add #{missing.size == 1 ? "it" : "them"} " \
+                       "to the signature (an alias keeps a long one short), or handle " \
+                       "the error here with `case` — see SPEC.md III.1.2 and III.1.6"
           end
         end
       end

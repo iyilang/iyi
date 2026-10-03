@@ -419,6 +419,13 @@ refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wil
 printf 'module bangargs\n\nnomacro!(1)\n' > bangargs.iyi
 refuses "a call spelled with ! and arguments" 'propagates an error, and takes no arguments' -- \
   "$IYI" check bangargs.iyi
+# A `!` whose error the enclosing signature does not list is refused at the
+# `!`, naming it. It was the other library's "method Wrongerr.g must return
+# (Int32 | Wrongerr::ParseErr) but it is returning Wrongerr::IOErr", at the
+# signature.
+printf 'module wrongerr\n\nclass IOErr\n  def initialize\n  end\nend\n\nimpl Error for IOErr\n  def message : String\n    "io"\n  end\nend\n\nclass ParseErr\n  def initialize\n  end\nend\n\nimpl Error for ParseErr\n  def message : String\n    "parse"\n  end\nend\n\ndef read(s : String) : String | IOErr\n  return IOErr.new if s == "x"\n  s\nend\n\ndef g : Int32 | ParseErr\n  read("x")!.size\nend\n\nputs g\n' > wrongerr.iyi
+refuses "a ! whose error the signature does not list" 'wrongerr.iyi:31:3' -- "$IYI" check wrongerr.iyi
+refuses "a ! whose error the signature does not list" 'which does not include it' -- "$IYI" check wrongerr.iyi
 # A detached `!` after a call: `v = g(-1) !` propagated, because the
 # argument list swallows the space after its `)`. Only `g(-1)!` does
 # (SPEC.md III.1.2); `f !x` is still `f(!x)`.

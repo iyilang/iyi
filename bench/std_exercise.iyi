@@ -458,6 +458,10 @@ assert_str(nilable.minmax_by { |x| x || -5 }[0].inspect, "nil", "enum: minmax_by
 nan_list = List(Float64).new([0.0 / 0.0])
 assert_true(!nan_list.includes?(0.0 / 0.0), "enum: includes? asks == (no NaN is equal)")
 assert_true(List(Float64).new([1.5, 2.5]).includes?(2.5), "enum: includes? finds an equal float")
+# Of any element type, since `==` is all it asks: bounded `where Elem :
+# Comparable`, a list of arrays or of nilable numbers did not compile.
+assert_true(List(Array(Int32)).new([[1], [2]]).includes?([2]), "enum: includes? in a list of arrays")
+assert_true(List(Int32?).new([1, nil] of Int32?).includes?(nil), "enum: includes? of nil in a list of nilable numbers")
 
 # And the plain `max_by`, `min_by` and `minmax_by`, which took the nil their
 # `?` forms answer for "nothing" as nothing: a nil element that won raised

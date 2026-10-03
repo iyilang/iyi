@@ -22,8 +22,8 @@
 #     `reduce`, `accumulate` and eight more. `U` belongs to the method, not to
 #     the trait.
 #   * `where Elem : Comparable` — about a quarter of `Enumerable` is valid
-#     only for some element types. `max`, `min`, `sum`, `product`, `tally`, `sorted`,
-#     `includes?` and `minmax` say so instead of duck-typing. `sum` and
+#     only for some element types. `max`, `min`, `sum`, `product`, `tally`, `sorted`
+#     and `minmax` say so instead of duck-typing. `sum` and
 #     `product` also need `Num` to require `self.zero` and `self.one`: an
 #     identity belongs to the type, since an empty collection has no element
 #     to ask.
@@ -306,8 +306,10 @@ pub trait Enumerable
 
   # Equality, as `Array#includes?` asks it: `<=>` answering 0 is ordering,
   # and for a float it said a NaN was present in a list of NaNs, which no
-  # `==` says and `[nan].includes?(nan)` does not.
-  def includes?(value : Elem) : Bool where Elem : Comparable
+  # `==` says and `[nan].includes?(nan)` does not. And so no bound: every
+  # type has `==`, and the `Comparable` one left from the `<=>` days
+  # refused a list of arrays, of nilable numbers or of any class.
+  def includes?(value : Elem) : Bool
     each { |e| return true if e == value }
     false
   end

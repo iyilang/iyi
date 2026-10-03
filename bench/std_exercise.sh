@@ -205,9 +205,11 @@ prove_fails "min_by refuses a nil answer" nil_min_by "enumerable.iyi" "panic: mi
 prove_fails "minmax_by refuses a nil answer" nil_minmax_by "enumerable.iyi" "panic: minmax_by of an empty collection" \
   's/raise "minmax_by of an empty collection" if entry\[2\]\.nil?/raise "minmax_by of an empty collection" if entry[0].nil?/'
 
-# 19. `includes?` asking `<=>` again.
-prove_fails "includes? by ordering" cmp_includes "enumerable.iyi" "enum: includes? asks ==" \
-  's/return true if e == value/return true if (e <=> value) == 0/'
+# 19. `includes?` asking anything but `==` again: a hash, which agrees for
+#     two NaNs. (`<=>`, which it asked once, no longer compiles here: the
+#     exercise asks it of a list of arrays now, and an array has no `<=>`.)
+prove_fails "includes? by hash" hash_includes "enumerable.iyi" "enum: includes? asks ==" \
+  's/return true if e == value/return true if e.hash == value.hash/'
 
 echo
 echo "== one mistake, one sentence, whichever tower answers"

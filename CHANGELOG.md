@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`includes?` on a `List`, `Deque`, `Slice` or any other `Enumerable`
+  takes every element type.** It asks `==`, which every type has, and
+  was still bounded `where Elem : Comparable` from when it asked `<=>`:
+  `Deque(Array(Int32))#includes?([2])` was refused with "Array(Int32)
+  does not implement Std::Traits::Comparable, required by `where Elem :
+  Comparable` in `includes?`" while `index([2])` answered 1, and
+  `List(Int32?)#includes?(nil)` was refused the same way. The bound is
+  gone. `bench/std_exercise.iyi` asks both; the old module did not
+  compile them.
+
 - **`URI#normalize` leaves a relative reference pointing where it
   did.** Section 5.2.4's dot-segment algorithm is for a path already
   merged with a base, and `normalize` ran it on a relative reference's

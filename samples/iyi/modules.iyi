@@ -109,7 +109,7 @@ puts App::Formal.title
 #     ./bin/crystal build --no-codegen --emit-iyimod /tmp/mods samples/iyi/modules.iyi
 #     ./bin/crystal mod dump --declarations /tmp/mods/app/greeter.iyimod
 #     mv samples/iyi/app /tmp/app-elsewhere
-#     ./bin/crystal build --use-iyimod /tmp/mods samples/iyi/modules.iyi   # compiles
+#     ./bin/crystal build --no-codegen --use-iyimod /tmp/mods samples/iyi/modules.iyi   # compiles
 #     mv /tmp/app-elsewhere samples/iyi/app
 #
 # The second command prints what the third one compiles against: `app/greeter`
@@ -118,6 +118,7 @@ puts App::Formal.title
 # `pub`, and R-2b's "unreachable rather than absent from an import's names"
 # is the same statement as "not in the artifact".
 #
-# * Not yet: object code. `--use-iyimod` implies `--no-codegen`, because the
-#   artifact carries what another module may call and not how it is done, so
-#   there is nothing in it to generate a program from (SPEC.md IV.1f).
+# * No object code here: the first build was `--no-codegen`, so its artifacts
+#   carry what another module may call and not how it is done, and the third
+#   build typechecks against them; one that links is refused by name (SPEC.md
+#   IV.1f). `--emit-iyimod` without `--no-codegen` carries the code too.

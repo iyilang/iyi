@@ -950,6 +950,10 @@ module Iyi
           end
         end
         artifact.filled = true
+        # Said in the file, because the file is what a consumer has: one from
+        # a build that generated nothing is refused where a build links
+        # (`Artifact#declarations_only`).
+        artifact.declarations_only = units.nil?
         IyiMod.write artifact, path
       end
     end

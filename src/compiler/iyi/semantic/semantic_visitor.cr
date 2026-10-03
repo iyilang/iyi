@@ -923,6 +923,18 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
                  "compilation never types, and a boundary asks for all of it."
     end
 
+    # iyi: an artifact from a build that generated no code (SPEC.md IV.1g),
+    # where this build links. `build --no-codegen --emit-iyimod` writes the
+    # declarations and nothing to link, and `iyi run --use-iyimod mods` on
+    # one ended in 19 `LNK2019: unresolved external symbol` lines and
+    # `LNK1120`, exit 1120, naming the artifact nowhere.
+    if artifact.declarations_only && @program.iyi_wants_object_code
+      node.raise "#{Iyi.relative_filename(artifact_path)} holds declarations only: the build " \
+                 "that wrote it was given --no-codegen, so every method \"#{artifact.module_name}\" " \
+                 "declares would be an undefined symbol at the link. Rebuild it without " \
+                 "--no-codegen, or pass --no-codegen here to typecheck against it"
+    end
+
     unless artifact.object_code.empty?
       @program.iyi_artifact_objects[artifact.module_name] = artifact.object_code
     end

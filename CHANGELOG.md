@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A `.iyimod` written by a `--no-codegen` build is refused by name
+  where a build links against it.** It carries declarations and no
+  object code, and nothing in the file said so: `iyi run --use-iyimod
+  mods main.iyi` against one ended in 19 `LNK2019: unresolved external
+  symbol` lines and `LNK1120`, exit 1120, naming the artifact nowhere.
+  The header records it now - `.iyimod` is v55, so a v54 artifact is
+  refused and rebuilt - `mod dump` says "written by a --no-codegen
+  build", and a build that links answers "mods\kit\api.iyimod holds
+  declarations only: the build that wrote it was given --no-codegen
+  ... Rebuild it without --no-codegen, or pass --no-codegen here to
+  typecheck against it"; a front-end build still reads it.
+  `bench/verbs_exercise.sh` links against one and typechecks against
+  it; the old compiler went to the linker.
+
 - **`test --affected` and `check --affected` run everything when a
   changed file is one no import can name.** The selection knows parsed
   imports alone, so a template a test renders, a fixture it reads, and

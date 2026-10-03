@@ -56,7 +56,10 @@ module Iyi::IyiMod
   # v52: a signature carries the annotations written above it, because
   # `@[Primitive]` is a declaration a module makes and not one the compiler
   # made — see `Signature#annotations`.
-  FORMAT_VERSION = 54_u32
+  # v55: the header says whether the build that wrote the artifact generated
+  # code, because one from `--no-codegen` carries no object code and a build
+  # that links against it is refused by name (`Artifact#declarations_only`).
+  FORMAT_VERSION = 55_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -1193,6 +1196,18 @@ module Iyi::IyiMod
     # is as finished as it was ever going to be.
     property filled : Bool
 
+    # Whether the build that wrote this artifact generated no code at all -
+    # `--emit-iyimod` on a `--no-codegen` build.
+    #
+    # Not `filled`: that says a step of `iyi tool bind` died, and this says
+    # nothing was ever going to put machine code here. Without it the two
+    # artifacts a consumer could not link looked like a complete one, and
+    # `iyi run --use-iyimod mods main.iyi` against a module written with
+    # `--no-codegen` ended in 19 `LNK2019: unresolved external symbol`
+    # lines about `Kit::Api`, naming the file nowhere. A front-end build
+    # reads it as it reads any other: its declarations are all it wants.
+    property declarations_only : Bool
+
     # Whether this artifact's root is a *class* rather than a module.
     #
     # It decides one thing and it is structural: a module's declarations are
@@ -1275,7 +1290,8 @@ module Iyi::IyiMod
                    @top_level = [] of Signature, @top_level_funs = [] of String,
                    @reopened = [] of TypeDecl, @libs = [] of String,
                    @layouts = [] of {String, TypeLayout},
-                   @inputs = [] of String, @symbol_literals = [] of String)
+                   @inputs = [] of String, @symbol_literals = [] of String,
+                   @declarations_only = false)
     end
   end
 
@@ -1615,7 +1631,8 @@ module Iyi::IyiMod
         hashes, constants, macro_bodies, requires, header[:crystal_library],
         header[:class_root], header[:filled], header[:module_extends_self],
         regexes, class_vars, match_types, symbols,
-        top_level, top_level_funs, reopened, libs, layouts, inputs, symbol_literals)
+        top_level, top_level_funs, reopened, libs, layouts, inputs, symbol_literals,
+        declarations_only: header[:declarations_only])
     end
   rescue ex : Error
     raise ex
@@ -1758,6 +1775,7 @@ module Iyi::IyiMod
     # With the pattern, because the name is a digest: a reader looking at
     # `$Regex:5f2b…` in the list above has no way to tell which literal it is.
     io.puts "object code   never filled: the fill step did not finish" unless artifact.filled
+    io.puts "object code   none: written by a --no-codegen build" if artifact.declarations_only
 
     symbols = artifact.symbols
     unless symbols.empty?
@@ -2829,6 +2847,7 @@ module Iyi::IyiMod
     io.write_byte(artifact.class_root ? 1_u8 : 0_u8)
     io.write_byte(artifact.filled ? 1_u8 : 0_u8)
     io.write_byte(artifact.module_extends_self ? 1_u8 : 0_u8)
+    io.write_byte(artifact.declarations_only ? 1_u8 : 0_u8)
     io.to_slice
   end
 
@@ -2844,11 +2863,12 @@ module Iyi::IyiMod
     class_root = io.read_byte == 1_u8
     filled = io.read_byte == 1_u8
     module_extends_self = io.read_byte == 1_u8
+    declarations_only = io.read_byte == 1_u8
     {module_name: module_name, source_path: source_path,
      compiler_version: compiler_version, target_triple: target_triple, flags: flags,
      has_initialiser: has_initialiser, crystal_library: crystal_library,
      class_root: class_root, filled: filled,
-     module_extends_self: module_extends_self}
+     module_extends_self: module_extends_self, declarations_only: declarations_only}
   end
 
   private def self.encode_requires(artifact : Artifact) : Bytes

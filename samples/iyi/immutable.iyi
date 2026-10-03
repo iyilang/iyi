@@ -95,7 +95,7 @@ puts "two elem types  #{nums.map { |x| x + 1 }.join(",")} / #{words.map { |s| s.
 #
 #     ./bin/crystal build --no-codegen --emit-iyimod /tmp/mods samples/iyi/immutable.iyi
 #     mv src/std /tmp/std-elsewhere
-#     ./bin/crystal build --use-iyimod /tmp/mods samples/iyi/immutable.iyi   # compiles
+#     ./bin/crystal build --no-codegen --use-iyimod /tmp/mods samples/iyi/immutable.iyi   # compiles
 #     mv /tmp/std-elsewhere src/std
 #
 # This file is the hard case for R-1's contract, not `modules.iyi`: what has to
@@ -106,6 +106,7 @@ puts "two elem types  #{nums.map { |x| x + 1 }.join(",")} / #{words.map { |s| s.
 # `type Elem = T`. Every call above is checked against those and against
 # nothing else (SPEC.md IV.1f).
 #
-# Not codegen: `--use-iyimod` implies `--no-codegen`, so this compiles the file
-# without producing a program. `./bin/crystal run` above is still an ordinary
-# build that reads the sources.
+# Not codegen: artifacts from a `--no-codegen` build carry no object code, so
+# the second build passes `--no-codegen` too and produces no program - one that
+# links against them is refused by name. `./bin/crystal run` above is still an
+# ordinary build that reads the sources.

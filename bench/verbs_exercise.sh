@@ -971,6 +971,19 @@ refuses "an artifact directory that is not there" "needs a directory of .iyimod 
 # mods/app/lib.iyimod", about the file the author had just been looking at.
 refuses "an artifact where --use-iyimod's directory goes" "is a file" -- \
   "$IYI" build --use-iyimod mods/app/lib.iyimod -o u4 user.iyi
+# An artifact a `--no-codegen` build wrote carries declarations and nothing
+# to link. A build against one went to the linker, which said `LNK2019:
+# unresolved external symbol` 19 times and named the artifact nowhere. A
+# front-end build against it is what it is for, and still takes it.
+"$IYI" build --no-codegen --emit-iyimod nocg user.iyi > nocg.log 2>&1 ||
+  { echo "  a --no-codegen build wrote no artifact:"; sed -n '1,3p' nocg.log; status=1; }
+refuses "a --no-codegen artifact, linked against" "holds declarations only" -- \
+  "$IYI" build --use-iyimod nocg -o u5 user.iyi
+if "$IYI" build --no-codegen --use-iyimod nocg user.iyi > nocg2.log 2>&1; then
+  echo "  a --no-codegen artifact, typechecked against: taken"
+else
+  echo "  a --no-codegen artifact, typechecked against:"; sed -n '1,3p' nocg2.log; status=1
+fi
 
 echo
 echo "== what the daemon refuses"

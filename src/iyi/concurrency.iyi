@@ -831,9 +831,14 @@ class IyiSendNode(T)
     @fiber.state == IyiFiberState::WaitingCh && @fiber.park_nonce == @nonce
   end
 
+  # The box is emptied as it is read: the channel keeps this node to park
+  # its next sender with, and a node kept full held the last value parked
+  # through it - 48 MB after the receiver had it and let it go.
   def take : T
     @taken = true
-    @value
+    value = @value
+    IyiScheduler.forget(pointerof(@value))
+    value
   end
 
   def delivered? : Bool
@@ -1242,6 +1247,18 @@ class IyiScheduler
     fiber.park_nonce = nonce
     fiber.state = IyiFiberState::WaitingCh
     nonce
+  end
+
+  # Zero the value *slot* holds, once a channel has handed it out, so the
+  # channel does not keep it reachable (`Channel#shift_item`,
+  # `IyiSendNode#take`). Read again only after a store writes it anew.
+  def self.forget(slot : Pointer(T)) : Nil forall T
+    bytes = slot.as(Pointer(UInt8))
+    index = 0
+    while index < sizeof(T)
+      bytes[index] = 0_u8
+      index = index + 1
+    end
   end
 
   def self.enqueue(fiber : IyiFiber) : Nil
@@ -3136,8 +3153,13 @@ class Channel(T)
     @count = @count + 1
   end
 
+  # The slot is emptied as it is read, as a send node's box is: a ring
+  # kept every value it had held until a later send wrote over it, and 50
+  # messages of 4 MB through a channel of 50, every one received, kept
+  # 190 MiB.
   private def shift_item : T
     value = @ring[@first]
+    IyiScheduler.forget(@ring + @first.to_i64)
     @first = @first + 1 == @slots ? 0 : @first + 1
     @count = @count - 1
     value

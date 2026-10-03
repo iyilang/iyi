@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A live `Channel` keeps no value it has handed out.** A buffered
+  channel's ring kept each value until a later send wrote over its
+  slot, and a rendezvous channel kept the last value parked through it
+  in the send node it saves for its next sender: 50 messages of 4 MB
+  through `Channel(String).new(50)`, every one received, kept 190 MiB,
+  and a 48 MB message through a rendezvous kept 238 MiB, for as long as
+  the channel lived. The slot and the node's box are cleared as the
+  value is read, and the same program keeps 3 MiB and 0 MiB.
+  `bench/concurrency_exercise.iyi` step 16e passes 64 MB each way
+  against a 16 MiB bound; the runtime without the clearing failed it
+  with "64 MB received through a buffered channel left 61 MiB kept",
+  and with only the ring cleared "64 MB received through a rendezvous
+  left 61 MiB kept".
+
 - **On Windows the collector sizes its mark helpers by the cores the
   process may run on.** `IyiThread.core_count` answered the machine's
   count whatever the process's affinity mask, which the Linux arm

@@ -976,6 +976,75 @@ puts "a parked sender's receipt survived the next sender's park"
   puts "200000 selects beside an idle channel kept under 256 KiB more"
 {% end %}
 
+# ── 16e. A channel keeps no value it has handed out ─────────────────────
+#
+# A buffered channel's ring kept every value until a later send wrote over
+# its slot, and a rendezvous channel's spare send node kept the last value
+# parked through it: 50 messages of 4 MB through a channel of 50, all
+# received, kept 190 MiB, and 48 MB through a rendezvous 238 MiB, for as
+# long as the channels lived. 64 MB each way here, against 16 MiB.
+{% unless flag?(:gc_none) || flag?(:gc_boehm) %}
+  class KeptChannels
+    getter buffered : Channel(String)
+    getter rendezvous : Channel(String)
+
+    def initialize
+      @buffered = Channel(String).new(16)
+      @rendezvous = Channel(String).new
+    end
+  end
+
+  def kept_now : UInt64
+    GC.collect
+    GC.stats.bytes_kept_by_last_sweep
+  end
+
+  def through_buffered(ch : Channel(String)) : Nil
+    16.times do |i|
+      ch.send("#{i}" + ("v" * 4000000))
+      ch.receive
+    end
+  end
+
+  def through_rendezvous(ch : Channel(String)) : Nil
+    group do |g|
+      g.spawn do
+        ch.send("r" * 64000000)
+        0
+      end
+      g.spawn do
+        sleep(5)
+        ch.receive
+        0
+      end
+    end
+  end
+
+  # Writes over the stack a finished call left, so what stays kept is the
+  # channels' and not a stale frame's.
+  def scrub_stack(depth : Int32) : Int32
+    a = 0_u64
+    b = 0_u64
+    depth > 0 ? scrub_stack(depth - 1) + (a + b).to_i32 : 0
+  end
+
+  holding = KeptChannels.new
+  kept_before = kept_now
+  through_buffered(holding.buffered)
+  scrub_stack(50)
+  kept_buffered = kept_now
+  through_rendezvous(holding.rendezvous)
+  scrub_stack(50)
+  kept_rendezvous = kept_now
+  mib = 1048576_u64
+  grew = kept_buffered > kept_before ? kept_buffered - kept_before : 0_u64
+  fail("channel: 64 MB received through a buffered channel left #{grew // mib} MiB kept") if grew > 16_u64 * mib
+  grew = kept_rendezvous > kept_before ? kept_rendezvous - kept_before : 0_u64
+  fail("channel: 64 MB received through a rendezvous left #{grew // mib} MiB kept") if grew > 16_u64 * mib
+  puts "a live channel kept under 16 MiB of the 64 MB it handed out, buffered or rendezvous"
+  holding.buffered.close
+{% end %}
+
 # ── 17. The typed group — III.4.9 ────────────────────────────────────────
 #
 # Two direct spawns make the group a value: the tuple of what they

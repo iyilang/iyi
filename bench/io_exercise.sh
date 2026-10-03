@@ -118,7 +118,7 @@ prove_fails "short reads fail" noshort "short_reads:" \
 
 # 3. Buffer boundary broken: take count in multi-buffer read_line corrupted
 prove_fails "read across buffer boundary fails" noboundary "buffer_boundary:" \
-  '{ if ($0 ~ /take = found_idx >= 0 \? found_idx - @read_pos \+ 1 : avail/) { print "        take = 1"; next } print }'
+  '{ if ($0 ~ /take = newline \? j - @read_pos \+ 1 : avail/) { print "        take = 1"; next } print }'
 
 # 4. EOF check broken: eof? always returns false
 prove_fails "eof check fails" noeof "eof:" \
@@ -418,7 +418,7 @@ PY
     if ! "$IYI" build --release -o "$WORK/big" "$WORK/big.iyi" > "$WORK/big.build" 2>&1; then
       echo "  the big-stream program did not build"; sed -n '1,10p' "$WORK/big.build"; status=1
     else
-      for size in 1288490188 2147483648; do
+      for size in 268435456 1288490188 2147483648; do
         : > "$WORK/big$size.bin"
         fsutil sparse setflag "$(cygpath -w "$WORK/big$size.bin")" > /dev/null 2>&1
         dd if=/dev/zero of="$WORK/big$size.bin" bs=1 count=0 seek="$size" 2>/dev/null
@@ -435,6 +435,35 @@ PY
       big_case line 1288490188 "read_line 1288490188"
       big_case all 2147483648 "iyi: panic: the stream is past the 2147483647 bytes a string holds"
       big_case line 2147483648 "iyi: panic: a line is past the 2147483647 bytes a string holds"
+      # And how much of the machine a read of the file takes: grown by
+      # doubling and then copied into the string, 256 MB peaked at 774 MB
+      # of working set; read into a string the file's size, it is the file.
+      if [ -z "$PY" ]; then
+        echo "  no python3 on this machine, so the peak of a read is unmeasured"
+      else
+        cat > "$WORK/peak.py" <<'PY'
+import ctypes, subprocess, sys
+from ctypes import wintypes
+class Counters(ctypes.Structure):
+    _fields_ = [("cb", wintypes.DWORD), ("faults", wintypes.DWORD)] + \
+        [(name, ctypes.c_size_t) for name in ("peak", "now", "a", "b", "c", "d", "page", "peak_page")]
+psapi = ctypes.WinDLL("psapi")
+psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+process = subprocess.Popen(sys.argv[1:], stdout=subprocess.PIPE)
+out, _ = process.communicate()
+counters = Counters()
+counters.cb = ctypes.sizeof(Counters)
+psapi.GetProcessMemoryInfo(int(process._handle), ctypes.byref(counters), counters.cb)
+print(out.decode().strip(), counters.peak >> 20)
+PY
+        "$PY" "$WORK/peak.py" "$WORK/big" all "$WORK/big268435456.bin" > "$WORK/peak.out" 2>&1
+        read -r _ read_bytes peak_mb < "$WORK/peak.out"
+        if [ "$read_bytes" = 268435456 ] && [ "$peak_mb" -lt 384 ] 2>/dev/null; then
+          echo "  all of 268435456 bytes: under 384 MB of working set at the peak"
+        else
+          echo "  all of 268435456 bytes: not under 384 MB at the peak: $(cat "$WORK/peak.out")"; status=1
+        fi
+      fi
       rm -f "$WORK"/big*.bin
     fi
 

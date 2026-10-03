@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`File.read` holds the file once: a 256 MB read peaks at 260 MB of
+  working set, where it peaked at 774.** `read_all` grew a buffer by
+  doubling, with the old and new blocks both live during each `realloc`,
+  and then copied it into the string while the buffer was still alive,
+  three times the file at the peak (1 GB took 3,078 MB). `File.read` now
+  asks the file its size (`fstat` on Linux, `GetFileSizeEx` on Windows)
+  and reads straight into a string of that size. A file that comes up short
+  is cut to what came, and one that grew is read on. A pipe, a console or a
+  `/proc` file, which have no size, still grow the buffer, and so does
+  darwin, where either call would be a libSystem symbol the floor lists do
+  not name. The same read went from 293 to 88 ms, optimised.
+  `bench/io_exercise.sh` checks it; the old prelude answered `read_all
+  268435456 774`, past its 384 MB bound.
+
 - **`chop`, `reverse` and the strips that take a set read an ill-formed
   byte as one character, as `each_char` and `size` do.** Each took a
   character to be a lead byte and every `10xxxxxx` byte after it, so a

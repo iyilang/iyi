@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A trait with a parameterised supertrait reads back from its
+  artifact.** The artifact qualified every name in the supertrait,
+  the trait's own parameter included, so `pub trait Ord(T) : Cmp(T)`
+  was written `pub trait Ord(T) : ::Lib::Ord::Cmp(::T)` and a consumer
+  stopped on "undefined constant ::T" (measured by FixGenSem before
+  the fix). The trait's parameters stay bare, and the consumer's
+  `N.new(2).gt(N.new(1))` prints `true` as the source build does.
+  `bench/samples_roundtrip.sh`'s `supertrait` case builds it from
+  source and from the artifact.
+
 - **A `forall` def read from a module's artifact compiles at the
   consumer's types, and the producer's own types stay out of the
   library's artifact.** A `forall` def's body stayed behind and its

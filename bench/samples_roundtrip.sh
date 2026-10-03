@@ -542,6 +542,48 @@ puts "#{Basket.new.price} #{Bag.new.price} #{Box.new.price} #{Basket.new.zoned?}
 IYI
 travel annotated "3 0 5 true false"
 
+# And a parameterised supertrait, written into the artifact with the trait's
+# own parameter qualified: `pub trait Ord(T) : ::Kit::Lib::Cmp(::T)`, and
+# the consumer stopped on "undefined constant ::T".
+mkdir -p "$TRAVEL/supertrait/kit"
+cat > "$TRAVEL/supertrait/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub trait Cmp(T)
+  abstract def cmp(other : T) : Int32
+end
+
+pub trait Ord(T) : Cmp(T)
+  def gt(other : T) : Bool
+    cmp(other) > 0
+  end
+end
+IYI
+cat > "$TRAVEL/supertrait/main.iyi" <<'IYI'
+module main
+
+import kit/lib::{Cmp, Ord}
+
+struct N
+  getter n : Int32
+
+  def initialize(@n : Int32)
+  end
+end
+
+impl Cmp(N) for N
+  def cmp(other : N) : Int32
+    @n - other.n
+  end
+end
+
+impl Ord(N) for N
+end
+
+puts N.new(2).gt(N.new(1))
+IYI
+travel supertrait true
+
 # And a method the build writing the artifact never called, which the
 # artifact declares and has no machine code for (SPEC.md IV.1g). It is
 # refused naming the module; it was a link error naming a mangled symbol,

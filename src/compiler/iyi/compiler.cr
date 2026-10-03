@@ -1815,7 +1815,10 @@ module Iyi
         kind: iyi_type_kind(type),
         type_parameters: type_parameters,
         assoc_types: assoc_types,
-        supertraits: type.responds_to?(:supertraits) ? type.supertraits.map { |supertrait| IyiMod.absolute_type(supertrait.to_s) } : [] of String,
+        # The trait's own parameters stay bare: `trait Ord(T) : Cmp(T)` was
+        # written `::Lib::Ord::Cmp(::T)`, and the consumer stopped on
+        # "undefined constant ::T".
+        supertraits: type.responds_to?(:supertraits) ? type.supertraits.map { |supertrait| IyiMod.absolute_type(supertrait.to_s, type.is_a?(GenericType) ? type.type_vars : [] of String) } : [] of String,
         # None for the type the annotation above makes: its `@type_id` is
         # the compiler's, and a compiler handed one back refuses it —
         # "can't declare instance variables in ReferenceStorage(T)". What

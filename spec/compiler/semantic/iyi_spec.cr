@@ -2796,6 +2796,57 @@ describe "Semantic: iyi" do
         end
         CODE
     end
+
+    # A subtrait's default naming its supertrait's associated type was
+    # "undefined constant Elem", though its body could call `items`.
+    it "lets a default name the required trait's associated type" do
+      assert_type(<<-CODE) { tuple_of([int32, string]) }
+        module App
+          module Coll
+            trait Bag
+              type Elem
+              abstract def item : Elem
+            end
+
+            trait Sorted : Bag
+              def smallest : Elem
+                item.as(Elem)
+              end
+            end
+
+            struct S
+            end
+
+            impl Bag for S
+              type Elem = Int32
+
+              def item : Int32
+                3
+              end
+            end
+
+            impl Sorted for S
+            end
+
+            struct W
+            end
+
+            impl Bag for W
+              type Elem = String
+
+              def item : String
+                "b"
+              end
+            end
+
+            impl Sorted for W
+            end
+          end
+        end
+
+        {App::Coll::S.new.smallest, App::Coll::W.new.smallest}
+        CODE
+    end
   end
 
   # iyi: errors are ordinary union members (SPEC.md III.1). `Error` is the

@@ -738,6 +738,16 @@ else
   sed -n '1,8p' marked1.out | cat -A
   status=1
 fi
+# A subtrait's default naming its supertrait's associated type, `def
+# smallest : Elem` in `trait Sorted : Bag`, was "undefined constant Elem",
+# though its body could call `Bag`'s `items`.
+printf 'trait Bag\n  type Elem\n  abstract def items : Array(Elem)\nend\n\ntrait Sorted : Bag\n  def smallest : Elem\n    items.first.as(Elem)\n  end\nend\n\nstruct S\nend\n\nimpl Bag for S\n  type Elem = Int32\n\n  def items : Array(Int32)\n    [3, 1]\n  end\nend\n\nimpl Sorted for S\nend\n\nputs S.new.smallest\n' > subassoc.iyi
+sub_out=$("$IYI" run subassoc.iyi 2>&1 | tr -d '\r')
+if [ "$sub_out" = "3" ]; then
+  echo "  a subtrait's default naming its supertrait's associated type: runs"
+else
+  echo "  a subtrait's default naming its supertrait's associated type: $(printf '%s' "$sub_out" | head -c 300)"; status=1
+fi
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     # The entry spelled verbatim, `\\?\C:\...` or `\\.\C:\...`, or with the

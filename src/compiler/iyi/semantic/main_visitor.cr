@@ -193,7 +193,8 @@ module Iyi
       type = lookup_scope.lookup_type_var(node,
         free_vars: free_vars,
         find_root_generic_type_parameters: find_root_generic_type_parameters,
-        remove_alias: false)
+        remove_alias: false,
+        self_type: (@scope || lookup_scope).instance_type)
 
       case type
       when Const

@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A subtrait's default may name its supertrait's associated type.**
+  `def smallest : Elem` in `trait Sorted : Bag` was "undefined constant
+  Elem", though its body could call `Bag`'s `items`. The name is read
+  through the implementing type, as the body's calls are, so `S` (Elem =
+  Int32) prints 3 and `W` (Elem = String) prints `b`, in a signature and
+  in a body (`Array(Elem).new`). `bench/verbs_exercise.sh` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  answered "undefined constant Elem".
+
 - **A trait may require a parameterised trait.** `trait Ord(T) :
   Cmp(T)` was "expecting any of these tokens: ;, NEWLINE, SPACE (not
   '(')". It compiles now, and the requirement is read at each impl's

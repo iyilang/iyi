@@ -931,25 +931,33 @@ def buffer_steps(c):
     #      as it stayed focused. Here the death is a kill during a compile
     #      that waits 30 s, and the outline of another file has to be
     #      answered well inside that.
-    pause = "ping -n 31 127.0.0.1" if os.name == "nt" else "sleep 30"
-    slow_text = f'module slow\n\n{{% system("{pause}") %}}\nputs 1\n'
-    slow_uri = file_uri(os.path.join(own, "slow.iyi"))
-    c.send("textDocument/didOpen", {"textDocument": {"uri": slow_uri, "languageId": "iyi", "version": 1,
-                                                     "text": slow_text}}, wait=False)
-    # Killed well inside the two quiet seconds the proxy retires a worker
-    # in: a retirement first would start a worker this kill did not list.
-    time.sleep(0.5)
-    killed = kill_workers(c)
-    started = time.monotonic()
-    reply = c.send("textDocument/documentSymbol", {"textDocument": {"uri": twice_uri}})
-    elapsed = time.monotonic() - started
-    for uri in (slow_uri, twice_uri):
-        c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
-    shutil.rmtree(own, ignore_errors=True)
-    step("73c", "a successor is not warmed on the buffer its predecessor died in",
-         not killed or ("result" in reply and elapsed < 10),
-         f"{killed or 'unmeasured'} worker(s) killed, another file's outline answered "
-         f"{'within' if elapsed < 10 else 'past'} 10 s")
+    # Windows only: the workers are listed and killed there, and elsewhere
+    # the 30 s compile ran to its end on every recompile of the buffer and
+    # held the session past the watchdog (Linux CI, step 53 never answered).
+    if os.name == "nt":
+        pause = "ping -n 31 127.0.0.1" if os.name == "nt" else "sleep 30"
+        slow_text = f'module slow\n\n{{% system("{pause}") %}}\nputs 1\n'
+        slow_uri = file_uri(os.path.join(own, "slow.iyi"))
+        c.send("textDocument/didOpen", {"textDocument": {"uri": slow_uri, "languageId": "iyi", "version": 1,
+                                                         "text": slow_text}}, wait=False)
+        # Killed well inside the two quiet seconds the proxy retires a worker
+        # in: a retirement first would start a worker this kill did not list.
+        time.sleep(0.5)
+        killed = kill_workers(c)
+        started = time.monotonic()
+        reply = c.send("textDocument/documentSymbol", {"textDocument": {"uri": twice_uri}})
+        elapsed = time.monotonic() - started
+        for uri in (slow_uri, twice_uri):
+            c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
+        shutil.rmtree(own, ignore_errors=True)
+        step("73c", "a successor is not warmed on the buffer its predecessor died in",
+             not killed or ("result" in reply and elapsed < 10),
+             f"{killed or 'unmeasured'} worker(s) killed, another file's outline answered "
+             f"{'within' if elapsed < 10 else 'past'} 10 s")
+    else:
+        shutil.rmtree(own, ignore_errors=True)
+        print("step 73c a successor is not warmed on the buffer its predecessor died in: "
+              "unmeasured here, the workers are killed on Windows only", flush=True)
 
 
 def main():

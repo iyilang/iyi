@@ -317,6 +317,9 @@ module Iyi
     end
 
     def interpret_run(node)
+      # iyi: what another program prints is not a fact of the declaration, and
+      # II.10 measured `run` at +7.4 s per distinct script on a cold build.
+      TypeNode.refuse_in_derive(self, "run", "runs another program")
       if node.args.size == 0
         node.wrong_number_of_arguments "macro '::run'", 0, "1+"
       end
@@ -2474,12 +2477,12 @@ module Iyi
     # A def the derive generated is its code as well. Its macros expand when
     # it is typed, after the derive has returned: `\{{ Base.all_subclasses }}`
     # in one answered `A,B` beside a `B` declared after the derived struct.
-    def self.refuse_in_derive(interpreter : MacroInterpreter, method : String) : Nil
+    def self.refuse_in_derive(interpreter : MacroInterpreter, method : String, what : String = "answers with the whole program") : Nil
       return unless interpreter.program.expanding_derive? || interpreter.iyi_derive_def?
 
       raise Iyi::TypeException.new(
-        "`#{method}` is not available to a derive: it answers with the whole " \
-        "program, and a derive may only read the declaration it is attached to " \
+        "`#{method}` is not available to a derive: it #{what}, " \
+        "and a derive may only read the declaration it is attached to " \
         "and what that declaration's types implement — see SPEC.md II.4")
     end
 

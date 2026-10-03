@@ -1360,6 +1360,17 @@ puts value
 IYI
 refuses "a macro that declares a name ending in !" "part of a name in iyi" -- \
   "$IYI" build -o "$WORK/macro_name" "$WORK/macro_name.iyi"
+# A derive may read its declaration only (SPEC.md II.4). Its `macro
+# finished` ran after it, and an escaped `all_subclasses` in one answered
+# `A,B` beside a `B` declared below the derived struct; its `run` ran the
+# script and the method answered what the script printed.
+printf 'class Base\nend\n\nclass A < Base\nend\n\nmacro fin_in(declaration)\n  macro finished\n    def all_subs : String\n      \\{{ Base.all_subclasses.map(&.name.stringify).join(",") }}\n    end\n  end\nend\n\nstruct X\n  def initialize\n  end\n\n  derive fin_in\nend\n\nclass B < Base\nend\n\nputs X.new.all_subs\n' > "$WORK/derivehook.iyi"
+refuses "a macro finished inside a derive" '`macro finished` is not available to a derive' -- \
+  "$IYI" run "$WORK/derivehook.iyi"
+printf 'puts "\\"generated\\""\n' > "$WORK/gen.cr"
+printf 'macro r(declaration)\n  def got : String\n    {{ run("./gen.cr").stringify }}\n  end\nend\n\nstruct X\n  def initialize\n  end\n\n  derive r\nend\n\nputs X.new.got\n' > "$WORK/deriverun.iyi"
+refuses "a run inside a derive" '`run` is not available to a derive' -- \
+  "$IYI" run "$WORK/deriverun.iyi"
 
 # And the other direction, which is the one that cost something: `!` is the
 # operator a caller's signature is written for, and no macro could produce

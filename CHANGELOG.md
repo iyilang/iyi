@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **A derive may no longer write a macro hook or call `run`.** II.4
+  forbids a derive the whole-program questions, and only
+  `subclasses`, `all_subclasses` and `includers` were refused: a
+  derive whose body was `macro finished` holding an escaped `{{
+  Base.all_subclasses ... }}` printed `A,B` beside a `B` declared
+  below the derived struct, a derive's `macro finished` defined a
+  method that ran (`late`), and `{{ run("./gen.cr") }}` in a derive
+  ran the script and the method answered `"generated"`. A hook
+  (`finished`, `inherited`, `included`, `extended`, `method_added`)
+  written while a derive expands is refused with "`macro finished` is
+  not available to a derive: a hook runs after the derive, against the
+  whole program", and `run` with "it runs another program".
+  `spec/compiler/iyi_derive_spec.cr` and `bench/verbs_exercise.sh`
+  hold both; the old compiler printed `A,B` and `"generated"`, exit 0.
+
 - **A struct changed through a getter or a `self`-returning method of a
   module's type changes the original in every build mode.** From source
   the call is inlined and answers the field itself; the build writing the

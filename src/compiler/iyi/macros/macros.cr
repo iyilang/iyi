@@ -67,6 +67,22 @@ class Iyi::Program
     Prof.span("  macro: normalize") { normalize(generated_node, inside_exp: inside_exp, current_def: current_def) }
   end
 
+  # iyi: a hook a derive defines (`macro finished`, `inherited`, `included`,
+  # `extended`, `method_added`) runs after the derive has returned, against
+  # whatever the rest of the program declares, which is the whole-program
+  # answer R-5 keeps from a derive (SPEC.md II.4). Refused while the derive
+  # expands. A derive's `macro finished` holding an escaped
+  # `{{ Base.all_subclasses }}` answered `A,B` beside a `B` declared after
+  # the derived struct, past the refusal `all_subclasses` has in a derive.
+  def iyi_refuse_hook_in_derive(node : Macro) : Nil
+    return unless expanding_derive? && node.name.in?(Iyi::IyiMod::MACRO_HOOKS)
+
+    node.raise "`macro #{node.name}` is not available to a derive: a hook runs " \
+               "after the derive, against the whole program, and a derive may only " \
+               "read the declaration it is attached to and what that declaration's " \
+               "types implement — see SPEC.md II.4"
+  end
+
   # iyi: an inline macro's `LocOriginPragma`s as lines: the expansion's
   # line at each pragma is the origin's, and each line after it the next
   # one, until the next pragma. Read before the parse, which consumes the

@@ -1364,6 +1364,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     node.block_arg.try &.accept self
 
     node.set_type @program.nil
+    @program.iyi_refuse_hook_in_derive node
 
     if node.name == "finished"
       unless node.args.empty?

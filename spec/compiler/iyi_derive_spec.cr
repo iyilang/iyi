@@ -339,6 +339,78 @@ describe "Semantic: iyi derive" do
     end
   end
 
+  # A hook a derive writes runs after the derive has returned, against the
+  # rest of the program. A `macro finished` holding an escaped
+  # `{{ Base.all_subclasses }}` answered `A,B` beside a `B` declared below
+  # the derived type, past both refusals above.
+  it "refuses a hook inside a derive" do
+    {"finished", "inherited"}.each do |hook|
+      with_iyi_modules({
+        "app/derives.iyi" => <<-IYI,
+          module app/derives
+
+          pub macro late(declaration)
+            macro #{hook}
+              def late : Int32
+                1
+              end
+            end
+          end
+          IYI
+        "main.iyi" => <<-IYI,
+          module app/main
+
+          import app/derives::*
+
+          pub class Holder
+            def initialize
+            end
+
+            derive late
+          end
+          IYI
+      }) do
+        expect_raises(Iyi::TypeException, /`macro #{hook}` is not available to a derive/) do
+          semantic_iyi("main.iyi")
+        end
+      end
+    end
+  end
+
+  # `run` compiles and runs another program, whose output is no fact of the
+  # declaration; inside a derive it ran, and the method answered its output.
+  it "refuses `run` inside a derive" do
+    with_iyi_modules({
+      "app/derives.iyi" => <<-IYI,
+        module app/derives
+
+        pub macro generated(declaration)
+          def generated : String
+            {{ run("./gen.cr").stringify }}
+          end
+        end
+        IYI
+      "main.iyi" => <<-IYI,
+        module app/main
+
+        import app/derives::*
+
+        pub struct Holder
+          def initialize
+          end
+
+          derive generated
+        end
+
+        Holder.new.generated
+        IYI
+    }) do
+      expect_raises(Iyi::TypeException, /`run` is not available to a derive: it runs another program/) do
+        semantic_iyi("main.iyi")
+      end
+    end
+  end
+
   it "leaves the program-wide type questions to an ordinary macro" do
     with_iyi_modules({
       "main.iyi" => <<-IYI,

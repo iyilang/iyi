@@ -4,6 +4,30 @@
 
 ### Fixed
 
+- **`Float64#**` with an `Int32` exponent answers the nearest double: all
+  2,052 powers of 1.1, 0.7 and 10.0 checked against Python's `Fraction`
+  are correctly rounded, where 1,879 were not.** It squared and multiplied
+  in plain doubles, rounding at every step: `1.1 ** 100` was
+  13780.612339822364 (the nearest double is 13780.61233982238),
+  `10.0 ** 100` was 1.0000000000000002e+100, `0.9999999 ** 10000000`
+  0.36787942292366493 (0.367879422971105), and the worst of
+  `1.1 ** -400..400` was 48.2 ulp out. It squares in double-double now,
+  the power and the base each a pair of doubles good to some 106 bits
+  (Dekker's product, the factors split by mask so none overflows), and
+  rounds once at the end; a product below 2^-969 is taken 2^108 up so its
+  error terms do not underflow, which kept `10.0 ** -312` and
+  `10.0 ** -317` off by a subnormal step. A negative exponent powers the
+  reciprocal, itself a pair, and `Int32::MIN` is counted in an Int64.
+  `Float32#**` (`std/float`) goes through it. The other library's `**`
+  on Windows misses 5 of the 2,052 by an ulp (`10.0 ** 23`, `1.1 ** 317`,
+  `0.7 ** 10` among them), so there the two answer differently and iyi's
+  is the nearest. `bench/number_exercise.iyi` checks the three sweeps by
+  a digest of their bits folded the same way in Python, and spot values;
+  `bench/std_float_exercise.iyi`'s `1.0000001 ** Int32::MIN` is
+  5.444710317852295e-94 (Python's `decimal` at 80 digits), where it
+  pinned the old 5.444710383108578e-94. The old prelude failed the first
+  sweep.
+
 - **`String#inspect` and `Char#inspect` escape what they hold, as the
   other library's do, so an inspected value reads back as the one
   inspected.** Neither escaped anything: `["a\", \"b"].inspect` printed

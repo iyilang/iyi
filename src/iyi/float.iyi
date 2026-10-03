@@ -113,31 +113,25 @@ struct Float64
     (mix & 2147483647_u64).to_i32 ^ (mix.unsafe_shr(31_u64) & 1_u64).to_i32
   end
 
-  # A whole power, by squaring: `2.0 ** 10`. A negative exponent is one
-  # over the positive one - or, where the positive one is past a double's
-  # range, the reciprocal's power: `2.0 ** -1074` is 5.0e-324, the
-  # smallest double, where one over `2.0 ** 1074`, which is infinite, was
-  # 0.0. The smallest exponent has no positive twin - negating it panicked
-  # "arithmetic overflow" - so its power is the square of the half, which
-  # is the same product the squaring loop would take.
+  # A whole power by squaring in double-double - the power and the base each
+  # a sum of two doubles good to some 106 bits - rounded once, at the end.
+  # In plain doubles every step rounded: `1.1 ** 100` was 13780.612339822364
+  # and `0.9999999 ** 10000000` 854,604 ulp off. A negative exponent powers
+  # the reciprocal, itself a pair, so `2.0 ** -1074` is 5.0e-324 although
+  # `2.0 ** 1074` is infinite, and `Int32::MIN` is counted in an Int64.
   def **(exponent : Int32) : Float64
-    if exponent == -2147483648
-      half = self ** 1073741824
-      return 1.0 / (half * half)
-    end
+    base, low = self, 0.0
     if exponent < 0
-      positive = self ** -exponent
-      return 1.0 / positive if positive * 0.0 == 0.0 || positive != positive
-      return (1.0 / self) ** -exponent
+      base = 1.0 / self
+      one, error = IyiFloatText.product(base, 0.0, self, 0.0)
+      low = one - one == 0.0 ? ((1.0 - one) - error) / self : 0.0
     end
-    result = 1.0
-    base = self
-    while exponent > 0
-      result = result * base if exponent % 2 == 1
-      exponent = exponent // 2
-      # Not squared past the last use: `2 ** 30` fits and its base's
-      # next square does not.
-      base = base * base if exponent > 0
+    count = exponent.to_i64.abs
+    result, rest = 1.0, 0.0
+    while count > 0
+      result, rest = IyiFloatText.product(result, rest, base, low) if count % 2 == 1
+      count = count // 2
+      base, low = IyiFloatText.product(base, low, base, low) if count > 0
     end
     result
   end
@@ -1308,6 +1302,25 @@ module IyiFloatText
   def self.from_bits(bits : UInt64) : Float64
     holder = bits
     pointerof(holder).as(Pointer(Float64)).value
+  end
+
+  # `(ah + al) * (bh + bl)` as a renormalised pair: Dekker's product of the
+  # highs, each cut at bit 26 by mask, where his split's scaling overflows
+  # past 2^996. Past the range the low part is dropped, not made a NaN; a
+  # product below 2^-969, whose error terms underflow, is taken 2^108 up
+  # and rounded down once: `10.0 ** -312` was 1.000000000003e-312.
+  def self.product(ah : Float64, al : Float64, bh : Float64, bl : Float64) : {Float64, Float64}
+    p = ah * bh
+    return {p, 0.0} unless p - p == 0.0
+    if p != 0.0 && p.abs < 2.004168360008973e-292
+      high, low = product(ah * 3.2451855365842673e32, al * 3.2451855365842673e32, bh, bl)
+      return {high * 3.0814879110195774e-33, low * 3.0814879110195774e-33}
+    end
+    a1 = from_bits(bits_of(ah) & 0xFFFFFFFFF8000000_u64)
+    b1 = from_bits(bits_of(bh) & 0xFFFFFFFFF8000000_u64)
+    e = ((a1 * b1 - p) + a1 * (bh - b1) + (ah - a1) * b1) + (ah - a1) * (bh - b1) + (ah * bl + al * bh)
+    high = p + e
+    {high, e - (high - p)}
   end
 
   def self.tail_is?(bytes : Pointer(UInt8), word : String) : Bool

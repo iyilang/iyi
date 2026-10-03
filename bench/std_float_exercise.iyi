@@ -165,12 +165,13 @@ assert_str "-0.0", (-0.0).remainder(2.0).to_s, "(-0.0).remainder(2.0) is -0.0"
 assert_str "-0.0", (-0.0_f32).remainder(2.0_f32).to_s, "(-0.0_f32).remainder(2.0_f32) is -0.0"
 assert_str "-0.0", (-4.0).remainder(2.0).to_s, "(-4.0).remainder(2.0) is -0.0"
 # `x ** Int32::MIN` negated the exponent and panicked "arithmetic
-# overflow"; it is one over the 2^31st power, squared the way every other
-# exponent is.
+# overflow"; the exponent is counted in an Int64 now. 5.444710317852295e-94
+# is the power rounded once (Python's `decimal` at 80 digits); squaring in
+# plain doubles answered 5.444710383108578e-94.
 assert_true 2.0 ** -2147483648 == 0.0, "2.0 ** Int32::MIN is 0.0"
 assert_true (0.5 ** -2147483648).infinite? == 1, "0.5 ** Int32::MIN is Infinity"
 assert_true (-1.0) ** -2147483648 == 1.0, "-1.0 ** Int32::MIN is 1.0"
-assert_str "5.444710383108578e-94", (1.0000001 ** -2147483648).to_s, "1.0000001 ** Int32::MIN"
+assert_str "5.444710317852295e-94", (1.0000001 ** -2147483648).to_s, "1.0000001 ** Int32::MIN"
 assert_true 2.0_f32 ** -2147483648 == 0.0_f32, "2.0_f32 ** Int32::MIN is 0.0"
 puts "  a zero keeps its sign; ** takes the smallest Int32"
 

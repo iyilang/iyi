@@ -268,16 +268,14 @@ else
 fi ;;
 esac
 
-# 11. An io wait that ends before its deadline and stays in the sleep list:
-#     the deadline wakes the fiber a second time, after it has finished,
-#     which the runtime reports with a panic the program outlives. On
-#     Windows an expired io deadline cancels the operation and lets its
-#     completion wake the fiber, so a stale one wakes nothing and the
-#     exercise cannot see it; the readiness pollers are where it shows.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    echo "  a deadline left behind: epoll's and kqueue's failure, proved there" ;;
-  *)
+# 11. An io wait that ends before its deadline and stays in the sleep heap:
+#     the deadline comes later and ends whatever the fiber waits on then.
+#     A read with no deadline of its own is where that shows, on every
+#     poller: epoll and kqueue wake it, Windows cancels its operation, and
+#     it answers "timed out". The sleep after the early read stopped
+#     showing it - a sleep writes its own deadline over the old one, and a
+#     fiber already woken is not queued twice - and on Linux this proof
+#     reported the exercise passing with the deadline left behind.
 mkdir -p "$WORK/stale/iyi"
 cp -R "$REPO/src/iyi/." "$WORK/stale/iyi/"
 awk '{ sub(/return unless fiber\.io_timed$/, "return"); print }' \
@@ -295,11 +293,14 @@ else
   if [ "$code" -eq 0 ] && ! grep -q "iyi: panic" "$WORK/stale/out"; then
     echo "  a deadline left behind: the exercise still passed, so it does not test this"
     status=1
+  elif ! grep -q -E "timeout: (a read with no deadline|the read's old deadline)" "$WORK/stale/out"; then
+    echo "  a deadline left behind: failed (exit $code), but not at a deadline's check"
+    tail -2 "$WORK/stale/out" | sed 's/^/    /'
+    status=1
   else
-    echo "  a deadline left behind: caught (exit $code: $(grep -m1 -E "iyi: panic|timeout:" "$WORK/stale/out" | sed 's/^iyi: panic: //'))"
+    echo "  a deadline left behind: caught (exit $code: $(grep -m1 -E "timeout: (a read with no deadline|the read's old deadline)" "$WORK/stale/out" | sed 's/^iyi: panic: //'))"
   fi
-fi ;;
-esac
+fi
 
 # 8. An IPv6 address written without its `::`, or a family forgotten.
 prove_fails "ipv6 written uncompressed" badsix "ipv6:" \

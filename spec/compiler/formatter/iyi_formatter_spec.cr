@@ -39,6 +39,11 @@ describe "Formatter on iyi" do
   assert_iyi_format "module m\n\nimport web/dsl::{get, run}\n\nget \"/\" do |env|\n  \"hi\"\nend"
   assert_iyi_format "import app/greeter::*\n\nputs 1"
 
+  # A line break after `::` is space to the parser, as in front of a path:
+  # `::` / `puts 2` is `::puts 2`, and fmt asked for the name at the line
+  # break and answered "there's a bug formatting".
+  assert_iyi_format "puts 1\n::\nputs 2", "puts 1\n::puts 2"
+
   # A keyword-prefixed segment: `end` and `def` start these names, and the
   # slash after one is what the parser had to take out of the lexer's hands.
   assert_iyi_format "module endpoint/handler"

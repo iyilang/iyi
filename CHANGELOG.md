@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`fmt` formats a `::` call whose name is on the next line.** The
+  parser reads `::` / `puts 2` as `::puts 2`, as it reads a path, and
+  `fmt` asked for the name at the line break: "there's a bug
+  formatting", exit 1, on a file `iyi check` passed. It writes `::puts
+  2` now. `spec/compiler/formatter/iyi_formatter_spec.cr` formats `puts
+  1` / `::` / `puts 2`; the old formatter raised "expecting NUMBER, not
+  `IDENT, puts`".
+
 - **`fmt` formats a suffix `if` or `unless` on an `if` or `unless`
   block.** `if true` / `puts 1` / `end if false` compiled, and `fmt`
   answered "there's a bug formatting", exit 1: it told the suffix form

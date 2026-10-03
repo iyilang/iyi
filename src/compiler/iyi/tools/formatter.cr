@@ -2674,7 +2674,13 @@ module Iyi
         return false
       end
 
-      write_token :OP_COLON_COLON if node.global?
+      if node.global?
+        # The parser reads a line break after `::` as space, as it does in
+        # front of a path: `::` / `puts 2` is `::puts 2`, and the name was
+        # asked for at the line break, "there's a bug formatting".
+        write_token :OP_COLON_COLON
+        skip_space_or_newline
+      end
 
       if obj
         # This handles unary operators written in prefix notation.

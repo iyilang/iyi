@@ -59,6 +59,7 @@ ENTRIES = ["immutable.iyi", "collections.iyi", "derive.iyi", "calc.iyi",
 # R-4 as built, pinned on two modules at the ends of the spectrum.
 ALL_GENERIC = "std/list"    # every def is on List(T): bodies travel, no object code
 NO_GENERIC = "calc/lexer"   # no type parameter, no macro: object code, no body
+GETTER_BODIES = 512         # bytes of getter bodies that travel beside its object code
 
 # Of what a consumer's front end reads from an artifact - exports, mono
 # bodies, macro bodies; object code is the linker's - the share that is
@@ -156,8 +157,12 @@ def main():
         plain = by_module.get(NO_GENERIC)
         if not plain:
             failures.append(f"{NO_GENERIC} was not emitted")
-        elif plain.get("object code", 0) == 0 or plain.get("mono bodies", 0) != 0:
-            failures.append(f"{NO_GENERIC} has no generic and should ship object code and no body: {plain}")
+        # A getter's body - one instance variable, or `self` - travels, so a
+        # struct changed through it changes the original from an artifact as
+        # from source; calc/lexer's are 137 bytes. More than a few hundred is
+        # a body that should have been object code.
+        elif plain.get("object code", 0) == 0 or plain.get("mono bodies", 0) > GETTER_BODIES:
+            failures.append(f"{NO_GENERIC} has no generic and should ship object code and no body past its getters': {plain}")
         if bodies_share > BODIES_CEILING:
             failures.append(f"bodies are {bodies_share:.0%} of what a consumer reads, over the {BODIES_CEILING:.0%} line")
 

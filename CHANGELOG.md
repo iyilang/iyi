@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`each_with_object` yields the element first and the memo second, as the
+  other library does.** It yielded `(memo, element)`, so
+  `[[1], [2]].each_with_object([] of Int32) { |x, acc| acc.concat(x) }`
+  compiled under both libraries and answered `[]` here, the elements mutated
+  and the memo not, where the other library answers `[1, 2]`; with a `Hash`
+  memo the same call did not compile (undefined method '[]=' for String).
+  The block is `& : Elem, U -> Nil` now, and its callers changed with it:
+  `samples/iyi/collections.iyi`, `samples/iyi/immutable.iyi` and
+  `bench/std_exercise.iyi` wrote `|o, e|`. `bench/std_exercise.iyi` checks
+  that `[[3], [1, 4]]` collects `[3, 1, 4]`; the old module did not compile
+  its element-first block (undefined method '*' for Array(Int32)).
+
 - **Source nested deeper than the compiler reads is refused with a
   sentence.** The parser and every pass after it recurse on the
   compiler's stack, and `iyi check` died with "Stack overflow (e.g.,

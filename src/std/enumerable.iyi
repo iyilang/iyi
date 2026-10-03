@@ -279,8 +279,12 @@ pub trait Enumerable
     end
   end
 
-  def each_with_object(obj : U, & : U, Elem -> Nil) : U forall U
-    each { |e| yield obj, e }
+  # The element first and the memo second, as the other library yields them.
+  # It was the reverse, so `[[1], [2]].each_with_object([] of Int32) { |x,
+  # acc| acc.concat(x) }` compiled under both and answered `[]` here: the
+  # element was the one mutated (SPEC.md III.1.7a's worst shape).
+  def each_with_object(obj : U, & : Elem, U -> Nil) : U forall U
+    each { |e| yield e, obj }
     obj
   end
 

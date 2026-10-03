@@ -238,9 +238,14 @@ ewi_sum = 0
 seq.each_with_index { |x, i| ewi_sum = ewi_sum + i }
 assert_eq(ewi_sum, 28, "enum: each_with_index")
 
-# 30. each_with_object
-ewo = seq.each_with_object([] of Int32) { |arr, x| arr << (x * 10) }
+# 30. each_with_object, element first and memo second, as the other library
+#     yields them. Where the two types coincide, the reversed order compiled
+#     and mutated the elements instead of the memo.
+ewo = seq.each_with_object([] of Int32) { |x, arr| arr << (x * 10) }
 assert_eq(ewo.size, 8, "enum: each_with_object")
+ewo_same = [[3], [1, 4]].each_with_object([] of Int32) { |x, acc| acc.concat(x) }
+assert_str(ewo_same.to_s, "[3, 1, 4]", "enum: each_with_object yields the element, then the memo")
+puts "  each_with_object yields (element, memo): [[3], [1, 4]] collects [3, 1, 4]"
 
 # 31. join
 small_seq = SimpleSeq.new([3, 1, 4])

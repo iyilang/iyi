@@ -336,7 +336,11 @@
     IYI_MC_PC    = 272_u64
 
   {% elsif flag?(:win32) %}
-    # Windows: uses kernel32 APIs already declared in prelude.iyi
+    # The rest of kernel32 is declared in prelude.iyi; this one is asked
+    # by `core_count` alone.
+    lib LibC
+      fun GetProcessAffinityMask(process : Void*, process_mask : UInt64*, system_mask : UInt64*) : Int32
+    end
   {% end %}
 
   class IyiThread
@@ -925,8 +929,22 @@
     # allocation here would refill against that lock and never return.
     def self.core_count : UInt64
       {% if flag?(:win32) %}
-        count = LibC.GetActiveProcessorCount(0xFFFF_u16)
-        count <= 0 ? 1_u64 : count.to_u64
+        # The process's affinity mask, counted, as Linux counts its own:
+        # the machine's count started eleven helpers for a process held to
+        # one core (`start /affinity 1`), and eight allocating threads ran
+        # 3,077 ms against 178 with none. A process across processor
+        # groups has no single mask (both read 0), and gets the machine's.
+        mask = 0_u64
+        system = 0_u64
+        count = 0_u64
+        if LibC.GetProcessAffinityMask(LibC.GetCurrentProcess, pointerof(mask), pointerof(system)) != 0
+          while mask != 0_u64
+            count = count + (mask & 1_u64)
+            mask = mask.unsafe_shr(1_u64)
+          end
+        end
+        count = LibC.GetActiveProcessorCount(0xFFFF_u16).to_u64 if count == 0_u64
+        count == 0_u64 ? 1_u64 : count
       {% elsif flag?(:linux) %}
         mask = Pointer(UInt64).new(__iyi_mmap(4096_u64).address)
         got = __iyi_conc_syscall3(IYI_SYS_GETAFFINITY, 0_i64, 128_i64, mask.address.to_i64)

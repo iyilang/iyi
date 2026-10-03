@@ -190,6 +190,33 @@ cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null 
 step "the numbers, release build ($cores cores here)"
 grep -E '^(threads|speed):' answers-release.txt | sed 's/^/  /'
 
+# ── 3b. Windows: the cores are the process's ──────────────────────────────
+# The cores the marker sizes its helpers by were the machine's, whatever
+# the affinity mask: a process held to one core (`start /affinity 1`) on
+# twelve started eleven mark helpers, and eight allocating threads ran
+# 3,077 ms against 178 with none. The mask's bits are counted now.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "the cores a process may run on are its affinity mask's"
+    cat > cores.iyi <<'IYI'
+puts "core_count=#{IyiThread.core_count} default_helpers=#{IyiMark.default_helpers}"
+IYI
+    if ! "$IYI" build cores.iyi -o cores > build-cores.log 2>&1; then
+      cat build-cores.log; exit 1
+    fi
+    held() { MSYS2_ARG_CONV_EXCL='*' cmd /c "start /affinity $1 /b /wait cores.exe" | tr -d '\r'; }
+    got="$(held 1)"
+    [ "$got" = "core_count=1 default_helpers=0" ] || { echo "held to one core: $got"; exit 1; }
+    if [ "${NUMBER_OF_PROCESSORS:-1}" -ge 2 ]; then
+      got="$(held 3)"
+      [ "$got" = "core_count=2 default_helpers=1" ] || { echo "held to two cores: $got"; exit 1; }
+      echo "  held to one core it counts 1 and starts no helper; held to two, 2 and one"
+    else
+      echo "  held to one core it counts 1 and starts no helper; one core here, so two were not tried"
+    fi
+    ;;
+esac
+
 # ── 4. Past the core count ────────────────────────────────────────────────
 # Twice the cores, at least nine and at most 32: past the core count on
 # any runner, and within a runner's patience - 32 threads on the darwin

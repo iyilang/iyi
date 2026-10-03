@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **On Windows the collector sizes its mark helpers by the cores the
+  process may run on.** `IyiThread.core_count` answered the machine's
+  count whatever the process's affinity mask, which the Linux arm
+  counts: under `start /affinity 1` or `/affinity 3` on twelve cores it
+  answered 12, so a mark started 11 helpers, and eight threads
+  allocating on one core took 3,077 ms where they took 178 with no
+  helper. It counts the mask's bits now, and takes the machine's count
+  only for a process across processor groups, which has no one mask:
+  1, 2 and 4 under `/affinity 1`, `3` and `F00`.
+  `bench/thread_exercise.sh` step 3b runs under masks 1 and 3; the old
+  runtime answered `core_count=12 default_helpers=11` for both.
+
 - **On Windows a thread is named on its line before any collection can
   stop it.** `IyiThread.start` linked the new thread's line for the
   stops under the runtime lock and the thread ran at once, while its

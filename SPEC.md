@@ -2781,7 +2781,14 @@ module-level `Array` compiles and runs.
 #### III.4.6 What carries over from Crystal, and what does not
 
 - **`Channel(T)` carries over**, with `T : Share`.
-- **`select` carries over** unchanged.
+- **`select` carries over**, with two differences. `when timeout(ms)` takes
+  `Int32` milliseconds, as `sleep` does, rather than the other library's
+  `Time::Span`, and it is written unbound only: `when t = timeout(50)` is
+  "undefined method 'timeout'". And an unbound arm (`when out.send(1)`,
+  `when ch.receive`) runs its body only when its operation happened: on a
+  closed channel or in a cancelled task it runs nothing, where it once ran
+  its body for a send that never went. A bound arm still receives the
+  `ChannelClosed` or `Cancelled` and decides.
 - **`Fiber` does not carry over as a user-facing primitive.** It is how a task
   is implemented. Exposing a raw spawn puts III.4.1's leak straight back.
 - **Parallelism is not free of the rest of the design.** IV.1d already measured

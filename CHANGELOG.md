@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`fmt` formats a macro whose body starts with a blank line and then a
+  line at column 0.** `macro m` / (blank) / `{{ 1 }}` / `end` compiled,
+  and `fmt` answered "there's a bug formatting", exit 1: the parser's
+  line break after the header takes the blank lines, the formatter's
+  lexer hands them back as a piece of macro text, and the parser has no
+  node for it. A `{% %}` line or a comment at column 0 failed the same
+  way, so `fmt` could write a file it then refused. The blank lines are
+  written as they are now. `spec/compiler/formatter/iyi_formatter_spec.cr`
+  formats the three shapes; the old formatter raised "expecting
+  MACRO_EXPRESSION_START, not `MACRO_LITERAL`" on the first.
+
 - **`fmt` keeps an `asm` section under the first colon after a comment,
   and settles on it in one pass.** A comment ending an operand section's
   line was written with its line break, and the next `: ...` went to

@@ -1928,6 +1928,19 @@ module Iyi
         return format_macro_end
       end
 
+      # The parser's newline token after the header takes every blank line
+      # below it, and this lexer, which counts whitespace, hands those back as
+      # a literal of their own. When the body's first line starts at column 0
+      # with `{{`, `{%` or a comment, the parser has no node for that literal
+      # and the node after it met it instead: `macro m`, a blank line,
+      # `{{ 1 }}` was "there's a bug formatting". The blank lines are kept.
+      first = body.is_a?(Expressions) ? body.expressions.first : body
+      if @token.type.macro_literal? && newlines_only?(@token.raw) &&
+         !(first.is_a?(MacroLiteral) && newlines_only?(first.value[0, 1]))
+        write @token.raw, no_rstrip: true
+        next_macro_token
+      end
+
       inside_macro do
         no_indent do
           format_nested body, write_end_line: false, write_indent: false
@@ -1946,6 +1959,10 @@ module Iyi
       write "end"
       next_token
       false
+    end
+
+    private def newlines_only?(text)
+      !text.empty? && text.each_char.all?(&.in?('\n', '\r'))
     end
 
     def visit(node : MacroLiteral)

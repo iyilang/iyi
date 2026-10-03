@@ -167,4 +167,12 @@ describe "Formatter on iyi" do
     "module m\n\nmacro twice\n  v = read()!\n  puts v\nend"
   assert_iyi_format "module m\n\nmacro plain\n v = 1\n   puts v\n  end",
     "module m\n\nmacro plain\n  v = 1\n  puts v\nend"
+
+  # A macro body that starts with a blank line and then a line at column 0
+  # was "there's a bug formatting": the parser's line break took the blank
+  # line, and the formatter's handed it back as text the parser has no node
+  # for.
+  assert_iyi_format "macro m\n\n{{ 1 }}\nend"
+  assert_iyi_format "macro m\n\n{% if true %}puts \"yes\"{% end %}\nend"
+  assert_iyi_format "macro twice(x)\n\n# c\n  {{x}}\nend"
 end

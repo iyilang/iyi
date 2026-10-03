@@ -90,4 +90,20 @@ accent.parse(["-é", "-ö"])
 assert_str "é=,invalid -ö", added(ran, mark), "a short flag is one character"
 puts "  -vqp8080 is -v -q -p 8080, and --out=FILE, -oFILE and -é are flags"
 
+puts "\n== an optional value"
+# `--color [WHEN]` may be given its value or not, as the other library
+# reads the brackets: it was a required value, so `--color -v` gave `-v`
+# to `--color` and `-l --color` gave it `--color`, never run.
+chosen = [] of String
+optional = OptionParser.new
+optional.on("--color [WHEN]", "colour") { |v| chosen << "color=" + v }
+optional.on("-l [LEVEL]", "level") { |v| chosen << "l=" + v }
+optional.on("-z[N]", "size") { |v| chosen << "z=" + v }
+optional.on("-v", "verbose") { |v| chosen << "v" }
+optional.missing_option { |flag| chosen << "missing " + flag }
+left_over = optional.parse(["--color", "-v", "--color=never", "--color", "always", "-l3", "-l", "--color", "x", "-z9", "-z", "--color"])
+assert_str "color=,v,color=never,color=always,l=3,l=,color=x,z=9,z=,color=", chosen.join(","), "a bracketed value may be left out"
+assert_true left_over.empty?, "an optional value took x, #{left_over.inspect}"
+puts "  --color [WHEN], -l [LEVEL] and -z[N] run with or without a value"
+
 puts "\nALL CHECKS PASSED"

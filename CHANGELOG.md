@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`OptionParser` reads `--color [WHEN]` as a value that may be left
+  out.** The brackets were not read, so a bracketed value was a required
+  one: `--color` last panicked "flag --color needs a value", `--color -v`
+  handed `-v` to `--color` as its value instead of running it, and `-l
+  --color` did the same with `--color`. `--name [VALUE]`, `-n [VALUE]`
+  and `-n[VALUE]` now take the next argument unless there is none or it
+  is a flag the parser knows, and are called with "" otherwise, as the
+  other library reads optional values. `bench/std_option_parser_exercise.iyi`
+  parses each spelling with and without its value, and the `.sh` proves
+  the check fails with the brackets read as a required value; the old
+  module answered
+  `color=-v,color=never,color=always,l=3,l=--color,z=9,z=--color`.
+
 - **A `UUID` keeps its own sixteen bytes.** `UUID.new(bytes)` held the
   caller's array and `bytes` handed it back, so a buffer reused for the
   next record changed the UUID already made from it: `UUID.new(b)` read

@@ -156,10 +156,10 @@ class ::String
     mask = ascii_mask(chars)
     at = 0
     while at < bytesize
-      width = 1
-      while at + width < bytesize && (to_unsafe[at + width] & 0xC0_u8) == 0x80_u8
-        width = width + 1
-      end
+      # One character as `each_char` reads it (`well_formed_at`): its lead
+      # byte with every `10xxxxxx` byte after it kept `"a\x80"` whole, and
+      # `"a\x80".lstrip("a")` stripped nothing.
+      width = well_formed_at(at)
       break unless named_at?(at, width, mask, chars)
       at = at + width
     end
@@ -218,10 +218,10 @@ class ::String
     mask = ascii_mask(chars)
     last = bytesize
     while last > 0
-      start = last - 1
-      while start > 0 && (to_unsafe[start] & 0xC0_u8) == 0x80_u8
-        start = start - 1
-      end
+      # The character `each_char` reads last (`well_formed_at`), not the
+      # bytes back to a lead byte: a cut `€` (E2 82) was found inside the
+      # `€` of *chars*, and `"x\xE2\x82".rstrip("€")` was `"x"`.
+      start = char_start_before(last)
       break unless named_at?(start, last - start, mask, chars)
       last = start
     end
@@ -259,13 +259,53 @@ class ::String
       return byte_slice(0, bytesize - 2)
     end
     # The last character, not the last byte: `"hé".chop` cut `é` in half
-    # and answered two bytes that are not a string. A character's trailing
-    # bytes are the ones of the form 10xxxxxx; the cut goes before them.
-    cut = bytesize - 1
-    while cut > 0 && (to_unsafe[cut] & 0xC0_u8) == 0x80_u8
-      cut = cut - 1
+    # and answered two bytes that are not a string. The character is the one
+    # `each_char` reads last, an ill-formed byte being one of its own: the
+    # cut had gone back over every `10xxxxxx` byte, so `"\t\xE2\x82".chop`
+    # (two characters after the tab) was `"\t"`.
+    byte_slice(0, char_start_before(bytesize))
+  end
+
+  # Where the character that ends at byte *stop* begins, as `each_char`
+  # reads characters: a well-formed sequence is one character and any other
+  # byte is one by itself. Three bytes back at most, as far as a character's
+  # first byte can be, so a run of stray `10xxxxxx` bytes stays linear.
+  private def char_start_before(stop : Int32) : Int32
+    source = to_unsafe
+    start = stop - 1
+    while start > 0 && start > stop - 4 && (source[start] & 0xC0_u8) == 0x80_u8
+      start = start - 1
     end
-    byte_slice(0, cut)
+    well_formed_at(start) == stop - start ? start : stop - 1
+  end
+
+  # The bytes of the character that starts at *at*, as `each_char` reads
+  # it: a well-formed UTF-8 sequence - no overlong form, no surrogate,
+  # nothing past U+10FFFF - or one byte for anything else.
+  private def well_formed_at(at : Int32) : Int32
+    source = to_unsafe
+    lead = source[at]
+    return 1 if lead < 0x80_u8
+    width = if lead >= 0xC2_u8 && lead <= 0xDF_u8
+              2
+            elsif lead >= 0xE0_u8 && lead <= 0xEF_u8
+              3
+            elsif lead >= 0xF0_u8 && lead <= 0xF4_u8
+              4
+            else
+              return 1
+            end
+    return 1 if at + width > bytesize
+    second = source[at + 1]
+    low = lead == 0xE0_u8 ? 0xA0_u8 : (lead == 0xF0_u8 ? 0x90_u8 : 0x80_u8)
+    high = lead == 0xED_u8 ? 0x9F_u8 : (lead == 0xF4_u8 ? 0x8F_u8 : 0xBF_u8)
+    return 1 if second < low || second > high
+    k = 2
+    while k < width
+      return 1 if (source[at + k] & 0xC0_u8) != 0x80_u8
+      k = k + 1
+    end
+    width
   end
 
   def ends_with?(char : Char) : Bool
@@ -1008,20 +1048,19 @@ class ::String
     to_f
   end
 
-  # The characters in reverse, found from the back: a lead byte is any byte
-  # that is not `10xxxxxx`, so each character's bytes are copied as they
-  # stand. It decoded the whole string into an array of `Char`s first - four
-  # bytes each, 520 MB to reverse 130 MB of ASCII.
+  # The characters in reverse, found from the back, each character's bytes
+  # copied as they stand. It decoded the whole string into an array of
+  # `Char`s first - four bytes each, 520 MB to reverse 130 MB of ASCII. A
+  # character is the one `each_char` reads (`well_formed_at`): taking every
+  # `10xxxxxx` byte with the byte before it, `" \x80é".reverse` was
+  # `"é \x80"`, the stray byte still after the space it followed.
   def reverse : String
     source = to_unsafe
     String.new(bytesize) do |buffer|
       at = 0
       stop = bytesize
       while stop > 0
-        start = stop - 1
-        while start > 0 && (source[start] & 0xC0_u8) == 0x80_u8
-          start = start - 1
-        end
+        start = source[stop - 1] < 0x80_u8 ? stop - 1 : char_start_before(stop)
         k = start
         while k < stop
           buffer[at] = source[k]

@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`chop`, `reverse` and the strips that take a set read an ill-formed
+  byte as one character, as `each_char` and `size` do.** Each took a
+  character to be a lead byte and every `10xxxxxx` byte after it, so a
+  stray byte joined the character before it: `"\t\xE2\x82".chop` (two
+  characters after the tab) was `"\t"`, `" \x80é".reverse` was `"é \x80"`,
+  `"a\x80".lstrip("a")` and `"é\x80".lstrip("é")` stripped nothing, and
+  a cut `€`, E2 82, was found inside the `€` of a set, so
+  `"x\xE2\x82".rstrip("€")` was `"x"`. A character is one well-formed
+  sequence or one byte now, looked for at most three bytes back, so a
+  run of stray bytes stays linear. Well-formed text answers as before.
+  `bench/std_text_exercise.iyi` chops, reverses and strips ill-formed
+  text; the old module answered `"\t"` for the chop.
+
 - **`fmt` lines up end-of-line comments by the cells a terminal draws, a
   wide character taking two.** `x = "日本" # c` over `yy = "ab" # d` was
   written `x = "日本"  # c` / `yy = "ab" # d`: counted one each, the two

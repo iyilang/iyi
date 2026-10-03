@@ -226,8 +226,20 @@ module Iyi
       true
     end
 
+    # iyi: what the cache root holds besides build directories, which the
+    # rotation leaves alone. `mod` is every package checkout `iyi get` made
+    # (`Mod::Fetcher`), and a checkout is what iyi.sum pins, not a build's
+    # leftovers: its modification time moves only when a new host's
+    # directory is made under it, so eleven builds after a `get` it was the
+    # oldest entry and was deleted, and a project that had built a minute
+    # earlier answered "cannot fetch example.com/me/greet v0.1.0" offline.
+    # `clear_cache` still removes it. The root's files - `msvc-probe`,
+    # `linker-probe`, the link templates - are not directories and the
+    # rotation passes over them already.
+    NOT_BUILDS = {"mod"}
+
     private def gather_cache_entries(dir)
-      Dir.children(dir).map! { |name| File.join(dir, name) }
+      Dir.children(dir).reject!(&.in?(NOT_BUILDS)).map! { |name| File.join(dir, name) }
     end
   end
 end

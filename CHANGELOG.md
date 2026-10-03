@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A project whose packages are in the cache still builds offline after
+  other builds.** The cache keeps its ten newest build directories, and
+  `mod`, where `iyi get` puts every package checkout, was one more entry to
+  it: its modification time moves only when a new host's directory is made
+  under it, so eleven builds after a `get` it was the oldest and was
+  deleted, and the program that had built from the cache a minute before
+  answered "Error: cannot fetch example.test/user/liba v1.3.0 from ..." with
+  the mirror gone. The rotation passes over `mod` now; `clear_cache` still
+  removes it. `bench/packages_get.sh` makes eleven newer directories, builds
+  once, and builds again with no mirror; the old compiler deleted `mod` and
+  failed that build.
+
 - **`String#split` with a limit of 1 or less answers the string whole, and
   an empty string one empty piece, as the other library's does.** A negative
   limit split everything and 0 meant no limit, so `"a,b".split(",", -1)` and

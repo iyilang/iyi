@@ -226,6 +226,19 @@ grep -q "example.test/user/libb is already at v1.0.0" get4.log || fail "libb's s
 "$IYI" run use.iyi > run2.log 2>&1 || { fail "the program did not build after -u"; cat run2.log; }
 grep -q "liba 1.3.0" run2.log || fail "after -u the program ran '$(cat run2.log)'"
 
+step "the build cache's rotation keeps package checkouts"
+# The cache keeps its ten newest build directories, and `mod` was one more
+# entry to it: eleven builds after a `get` the checkouts were gone, and a
+# project that had just built answered "cannot fetch" with no network.
+# Eleven newer directories stand in for the builds; one build rotates.
+for i in 0 1 2 3 4 5 6 7 8 9 10; do mkdir -p "$IYI_CACHE_DIR/rotate-$i"; done
+"$IYI" build -o rotate use.iyi > rotate.log 2>&1 || { fail "the build that rotates the cache failed"; cat rotate.log; }
+[ -d "$IYI_CACHE_DIR/mod" ] || fail "the rotation deleted the package checkouts in $IYI_CACHE_DIR/mod"
+IYI_MOD_MIRROR="$WORK/no-mirror" "$IYI" run use.iyi > rotate-run.log 2>&1 ||
+  fail "with no mirror, the program did not build from the cache: $(cat rotate-run.log)"
+rm -rf "$IYI_CACHE_DIR"/rotate-*
+[ "$status" -eq 0 ] && echo "  eleven newer build directories and a build: mod kept, the program builds with no mirror"
+
 step "a manifest saved with a byte order mark is read, and keeps it"
 # As PowerShell 5.1's `Out-File -Encoding utf8` writes one. It was refused
 # as "`\uFEFFmodule` is not a directive", and every verb with it.

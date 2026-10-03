@@ -5578,41 +5578,48 @@ module Iyi
 
     # Align series of successive comments
     def align_comments(lines)
-      max_column = nil
+      max_cells = nil
 
       lines.each_with_index do |line, i|
         comment_column = @comment_columns[i]?
         if comment_column
-          if max_column
-            lines[i] = align_comment line, i, comment_column, max_column
-          else
-            max_column = find_max_column(lines, i + 1, comment_column)
-            lines[i] = align_comment line, i, comment_column, max_column
-          end
+          max_cells ||= find_max_cells(lines, i)
+          lines[i] = align_comment line, comment_column, max_cells
         else
-          max_column = nil
+          max_cells = nil
         end
       end
     end
 
-    def find_max_column(lines, base, max)
-      while base < @comment_columns.size
-        comment_column = @comment_columns[base]?
-        break unless comment_column
-
-        max = comment_column if comment_column > max
+    def find_max_cells(lines, base)
+      max = 0
+      while (comment_column = @comment_columns[base]?) && (line = lines[base]?)
+        max = Math.max(max, cells_before(line, comment_column))
         base += 1
       end
-
       max
     end
 
-    def align_comment(line, i, comment_column, max_column)
-      return line if comment_column == max_column
+    # The cells a terminal draws the text in front of *column* in, a wide
+    # character taking two. Counted in characters, `x = "日本" # c` over
+    # `yy = "ab" # d` put the first `#` two cells right of the second.
+    private def cells_before(line, column)
+      return column if line.ascii_only?
+
+      cells = 0
+      line.each_char_with_index do |char, index|
+        break if index == column
+        cells += CodeError.display_width(char)
+      end
+      cells
+    end
+
+    def align_comment(line, comment_column, max_cells)
+      gap = max_cells - cells_before(line, comment_column)
+      return line if gap <= 0
 
       source_line = line[0...comment_column]
       comment_line = line[comment_column..-1]
-      gap = max_column - comment_column
 
       result = String.build do |str|
         str << source_line

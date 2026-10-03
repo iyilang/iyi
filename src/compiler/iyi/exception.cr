@@ -136,7 +136,7 @@ module Iyi
         if char == '\t'
           io << '\t'
         else
-          display_width(char).times { io << ' ' }
+          CodeError.display_width(char).times { io << ' ' }
         end
       end
     end
@@ -158,7 +158,8 @@ module Iyi
       0x20000..0x3FFFD,
     }
 
-    private def display_width(char : Char) : Int32
+    # Also how `fmt` lines up the comments ending successive lines.
+    def self.display_width(char : Char) : Int32
       ord = char.ord
       return 1 if ord < 0x300
       return 0 if char.mark? || (0x200B..0x200F).includes?(ord) || (0xFE00..0xFE0F).includes?(ord) || ord == 0xFEFF

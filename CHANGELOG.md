@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`fmt` lines up end-of-line comments by the cells a terminal draws, a
+  wide character taking two.** `x = "日本" # c` over `yy = "ab" # d` was
+  written `x = "日本"  # c` / `yy = "ab" # d`: counted one each, the two
+  CJK characters left the first `#` two cells right of the second. The
+  padding counts cells now, as the error caret does.
+  `spec/compiler/formatter/iyi_formatter_spec.cr` formats the pair; the
+  old formatter wrote `x = "日本"  # c`.
+
 - **`fmt` no longer puts spaces in front of a call's `)` after a comment
   on an earlier argument's line.** Inside a `begin`, `f(a, # c` /
   `bbbbbbbb)` was written `bbbbbbbb  )`, with or without comments on the

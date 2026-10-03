@@ -189,6 +189,10 @@ describe "Formatter on iyi" do
     end
   end
 
+  # Comments line up where a terminal draws them, a wide character taking
+  # two cells: counted one each, the first `#` here sat two cells right.
+  assert_iyi_format "x = \"日本\" # c\nyy = \"ab\"  # d"
+
   # Running at all: these two are wrong on the way in and right on the way out.
   assert_iyi_format "module m\n\npub    def   polite(name : String) : String\n  name\nend",
     "module m\n\npub def polite(name : String) : String\n  name\nend"

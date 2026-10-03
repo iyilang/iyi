@@ -229,7 +229,17 @@ raise "string: squeeze all" unless "yellow  moon".squeeze == "yelow mon"
 raise "string: squeeze char" unless "yellow  moon".squeeze('o') == "yellow  mon"
 raise "string: squeeze chars" unless "yellow  moon".squeeze(" l") == "yelow moon"
 raise "string: count char" unless "banana".count('a') == 3
-raise "string: count str" unless "banana".count("an") == 2
+# A set as the other library's `Char#in_set?` reads one: runs, a leading
+# `^` negating, a `\` making the next `^` or `-` itself, and several sets
+# intersected. `count(String)` counted a substring (`"banana".count("an")`
+# was 2), and a range or a `^` was text to all three: `count("a-z")` was 0
+# and `"aaabbbccc".squeeze("a-c")` was "abbbc".
+raise "string: count a set" unless "banana".count("an") == 5 && "hello world".count("a-z") == 10 && "hello".count("^l") == 3 && "hello world".count("lo", "o") == 2
+raise "string: delete and squeeze a set" unless "hello world".delete("a-k") == "llo worl" && "aaabbbccc".squeeze("a-c") == "abc" && "aaabbbccc".squeeze("a-c", "^b") == "abbbc" && "hello".delete("l", "lo") == "heo"
+raise "string: a set's own characters" unless "a^b-".count("^-") == 1 && "a^b".count("\\^") == 1 && "a-b".count("a\\-b") == 3 && "a-b".count("a-") == 2 && "a^b".count("^") == 3 && "abc".count("") == 0
+raise "string: a set of wide characters" unless "héllo".count("^é") == 4 && "héllo".delete("à-ê") == "hllo"
+raise "string: a char is itself, not a set" unless "a^b".delete('^') == "ab" && "a--b".squeeze('-') == "a-b" && "a^b".count('^') == 1
+puts "    count, delete and squeeze read a character set: runs, ^, \\ and several sets"
 raise "string: center char pad" unless "hello".center(11, '-') == "---hello---"
 raise "string: center str pad" unless "hello".center(12, "-=") == "-=-hello-=-="
 # A run of a character, not of a byte: `耀` is E8 80 80.

@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- **`String#count`, `#delete` and `#squeeze` read a character set as the
+  other library's do.** `count(String)` counted a substring, so
+  `"banana".count("an")` was 2 where the other library answers 5, and all
+  three read their argument as the characters written:
+  `"hello world".count("a-z")` was 0, `"hello world".delete("a-k")` came
+  back unchanged, `"aaabbbccc".squeeze("a-c")` was "abbbc" and
+  `"hello".count("^l")` was 0. A set is read by `Char#in_set?`'s rules now,
+  compiled once per call: `a-z` is a run and one that runs backwards panics,
+  a leading `^` negates, a `\` makes the `^` or `-` after it itself, and a
+  `-` first or last is itself. Several sets intersect (`count("lo", "o")`),
+  and `count`, `delete` and `squeeze` of a `Char` compare that character, so
+  `delete('^')` deletes a caret. In 569 random sets over `abc^-\z_é☃`, and
+  in the other library's own spec cases for the three, they answer as there.
+  No caller in src/std, src/iyi, bench or samples counted a substring of
+  more than one character but the exercise's own check, which now expects 5.
+  `bench/std_text_exercise.iyi` checks the sets; the old module did not
+  compile `count("lo", "o")` (wrong number of arguments) and counted `"an"`
+  in banana as 2.
+
 - **`each_with_object` yields the element first and the memo second, as the
   other library does.** It yielded `(memo, element)`, so
   `[[1], [2]].each_with_object([] of Int32) { |x, acc| acc.concat(x) }`

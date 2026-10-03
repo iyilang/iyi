@@ -8,7 +8,7 @@
 #    while `bytesize` counts raw bytes.
 #    Following the prelude's established convention, all string indexing
 #    (`[]`, `[start, count]`), slice operations, and search offsets
-#    (`index`, `rindex`, `sub`, `gsub`, `split`, `count`) are strictly
+#    (`index`, `rindex`, `sub`, `gsub`, `split`) are strictly
 #    BYTE-INDEXED.
 #    For example, with `s = "héllo"`, `s.size` is 5, `s.bytesize` is 6,
 #    `s[1]` is byte 195 (0xC3), `s[2]` is byte 169 (0xA9), and `s.index('l')`
@@ -691,16 +691,20 @@ class ::String
   end
 
   def delete(char : Char) : String
-    delete(char.to_s)
+    deleted { |c| c == char }
   end
 
-  # Characters, not bytes: a 256-entry byte mask cannot hold a character
-  # above ASCII, and deleting one byte of one leaves the rest behind.
-  def delete(chars : String) : String
-    return self if chars.empty?
-    named = chars.chars
+  # The characters in every one of *sets*, as `count` reads them. Characters,
+  # not bytes: a 256-entry byte mask cannot hold a character above ASCII,
+  # and deleting one byte of one leaves the rest behind.
+  def delete(*sets : String) : String
+    compiled = compiled_sets(sets)
+    deleted { |c| in_sets?(c.ord, compiled) }
+  end
+
+  private def deleted(& : Char -> Bool) : String
     String.build(bytesize) do |io|
-      each_char { |c| io << c unless named.includes?(c) }
+      each_char { |c| io << c unless yield c }
     end
   end
 
@@ -722,19 +726,23 @@ class ::String
   end
 
   def squeeze(char : Char) : String
-    squeeze(char.to_s)
+    squeezed { |c| c == char }
   end
 
-  # A run of the same character becomes one of it. Compared per character,
-  # so a multi-byte one is a run rather than three bytes that never match.
-  def squeeze(chars : String) : String
-    return self if chars.empty?
-    named = chars.chars
+  # A run of the same character in every one of *sets* becomes one of it.
+  # Compared per character, so a multi-byte one is a run rather than three
+  # bytes that never match.
+  def squeeze(*sets : String) : String
+    compiled = compiled_sets(sets)
+    squeezed { |c| in_sets?(c.ord, compiled) }
+  end
+
+  private def squeezed(& : Char -> Bool) : String
     String.build(bytesize) do |io|
       started = false
       previous = ' '
       each_char do |c|
-        next if started && c == previous && named.includes?(c)
+        next if started && c == previous && (yield c)
         io << c
         previous = c
         started = true
@@ -743,19 +751,96 @@ class ::String
   end
 
   def count(char : Char) : Int32
-    count(char.to_s)
+    total = 0
+    each_char { |c| total = total + 1 if c == char }
+    total
   end
 
-  def count(search : String) : Int32
-    return 0 if search.empty? || search.bytesize > bytesize
-    c = 0
-    start = 0
-    s_len = search.bytesize
-    while (idx = index(search, start))
-      c = c + 1
-      start = idx + s_len
+  # The characters in every one of *sets*, a set read as the other
+  # library's `Char#in_set?` reads one: `"hello world".count("a-z")` is 10
+  # and `"hello".count("^l")` is 3. This counted *sets* as a substring, so
+  # `"banana".count("an")` was 2 here and 5 there, and a range or a `^`
+  # was text: `count("a-z")` was 0, and `delete` and `squeeze` took the
+  # set as a list of the characters written.
+  def count(*sets : String) : Int32
+    compiled = compiled_sets(sets)
+    total = 0
+    each_char { |c| total = total + 1 if in_sets?(c.ord, compiled) }
+    total
+  end
+
+  private def compiled_sets(sets : Tuple) : Array(Array(Int32))
+    compiled = Array(Array(Int32)).new(sets.size)
+    i = 0
+    while i < sets.size
+      compiled << set_runs(sets[i])
+      i = i + 1
     end
-    c
+    compiled
+  end
+
+  # A set compiled once, as runs of code points `low, high, answer` in the
+  # order the set names them, and last the answer for a character in none.
+  # The reading is the other library's: a `^` first negates the set, `a-z`
+  # is a run and one that runs backwards a mistake, a `-` first or last is
+  # itself, and a `\` makes the `^` or `-` after it itself. That reader
+  # answers at the first spelling a character matches, which is why the
+  # order is kept: `"^-a"` is the run `^-a`, not a negation.
+  private def set_runs(set : String) : Array(Int32)
+    runs = [] of Int32
+    kept = 1
+    ranging = false
+    previous = -1
+    set.each_char do |char|
+      point = char.ord
+      if point == 94 && previous < 0
+        kept = 0
+        previous = point
+        next
+      end
+      if point == 45
+        if previous >= 0 && previous != 92
+          ranging = true
+          kept = 1 if previous == 94
+          next
+        end
+        runs << point << point << kept
+      end
+      if ranging
+        raise "text: set range #{previous.unsafe_chr}-#{char} runs backwards" if previous > point
+        runs << previous << point << kept
+        ranging = false
+      elsif point != 92
+        runs << point << point << kept
+      end
+      previous = point
+    end
+    runs << 45 << 45 << kept if ranging
+    runs << 92 << 92 << kept if previous == 92
+    runs << 1 - kept
+    runs
+  end
+
+  # Whether *point* is in every compiled set: the first run holding it
+  # answers for its set, and the set's last entry answers otherwise.
+  private def in_sets?(point : Int32, compiled : Array(Array(Int32))) : Bool
+    s = 0
+    while s < compiled.size
+      runs = compiled[s]
+      last = runs.size - 1
+      answer = runs[last]
+      i = 0
+      while i < last
+        if runs[i] <= point && point <= runs[i + 1]
+          answer = runs[i + 2]
+          break
+        end
+        i = i + 3
+      end
+      return false if answer == 0
+      s = s + 1
+    end
+    true
   end
 
   # The width is in characters, because `size` is and because a centred

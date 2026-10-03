@@ -475,6 +475,30 @@ def main():
     step("and the honest shapes are clean", proc.returncode == 0,
          " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
 
+    # And a def a macro wrote, typed where its module's other defs are.
+    # `module kit/bool` is the namespace `Kit::Bool`, and `kit/flag` does
+    # not import it, so its bare `Bool` means the type - except that code
+    # expanded from `{% if %}` was asked about as if no file had written
+    # it, and met `Kit::Bool` on the climb. Imported beside `kit/bool`,
+    # `Flag.on` was "expected argument #1 to 'Kit::Flag::Flag.on' to be
+    # Kit::Bool, not Bool"; R-2c typing every def put the same refusal on
+    # std/dir's `remove_directory`, so a program importing every std
+    # module did not compile.
+    os.makedirs(os.path.join(work, "kit"), exist_ok=True)
+    write("kit/bool.iyi", "module kit/bool\n\npub def yes : ::Bool\n  true\nend\n")
+    write("kit/flag.iyi", (
+        "module kit/flag\n\n"
+        "pub class Flag\n"
+        "  {% if true %}\n    def self.on(given : Bool) : Bool\n      given\n    end\n  {% end %}\n\n"
+        "  {% if true %}\n    def self.off : Bool\n      false\n    end\n  {% end %}\n"
+        "end\n"
+    ))
+    write("flags.iyi", "import kit/bool\nimport kit/flag::{Flag}\n\nputs Flag.on(true)\n")
+    proc = run("run", "flags.iyi", cwd=work)
+    step("a def a macro expanded names the types its own file sees, beside a module named for one",
+         proc.returncode == 0 and proc.stdout.strip() == "true",
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
+
     # And a type nobody exports, and a method an `impl` block gives it:
     # both were caller-typed, so with nothing constructing the type a
     # String returned as an Int32 and a call to a method that exists

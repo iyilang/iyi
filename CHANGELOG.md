@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- **A def a macro expands names the types its own file sees, so every
+  std module compiles beside `std/bool` again.** Code a macro expands is
+  located in a virtual file, and the import wall (SPEC.md R-1) read that
+  as no writer at all, so the climb out of a unit's namespace kept a
+  sibling unit the file never imported. `std/dir` writes `private def
+  self.remove_directory(...) : Bool` inside `{% if flag?(:win32) %}`, and
+  beside `std/bool` that `Bool` was `Std::Bool`. Once R-2c typed
+  `Dir.delete` and `Dir.delete?`, which call it, at their definitions, the
+  program `bench/std_exercise.sh` builds from every std module failed with
+  "method Std::Dir::Dir.remove_directory must return Std::Bool but it is
+  returning Bool" (2 errors); before R-2c a call to `Dir.delete?` beside
+  `std/bool` was refused the same way. The file that expanded the macro is
+  the writer now, as it already was for file-private types.
+  `bench/agent_loop.py` runs a `{% if %}` class method of a module
+  imported beside one named `kit/bool`; the old compiler answered
+  "expected argument #1 to 'Kit::Flag::Flag.on' to be Kit::Bool, not
+  Bool".
+
 - **A `--release` build returns what a helper the top level called once
   built and dropped.** LLVM inlined the helper into `__iyi_main`, whose
   frame lives as long as the program, and spilled its array to a slot of

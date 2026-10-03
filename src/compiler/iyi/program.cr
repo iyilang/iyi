@@ -174,7 +174,14 @@ module Iyi
       unit_file = unit.as?(ModuleType).try(&.iyi_unit_file) || unit.locations.try(&.first?).try(&.filename).as?(String)
       return unless unit_file && iyi_imported_files.includes?(unit_file)
 
-      writer = location.try(&.filename).as?(String)
+      # Code a macro expanded was written in the file that expanded it, the
+      # file a file-private type is looked up in too. Its location is a
+      # virtual file, which this read as no writer at all, so the climb out
+      # of `std/dir`'s `{% if flag?(:win32) %}` met `Std::Bool` and kept it:
+      # beside `std/bool`, `def self.remove_directory : Bool` there was
+      # "must return Std::Bool but it is returning Bool", while the same
+      # line outside the `{% if %}` meant the type.
+      writer = location.try(&.original_filename)
       return unless writer
       return if writer == unit_file
       # Only writers this build read as files: the entry and everything

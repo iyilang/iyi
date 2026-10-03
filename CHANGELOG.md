@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`arr.sort_in_place` with no block sorts the array in place by `<`.**
+  SPEC.md III.1.7a pairs it with `sorted` and the compiler's hint for
+  `sort!` names both, but only `sorted` had the blockless form: the call was
+  refused with "'Array(Int32)#sort_in_place' is expected to be invoked with
+  a block". It now sorts the receiver, stable, and answers it.
+  `bench/collections_exercise.sh` checks it; the old prelude refused the
+  check at compile time.
+
 - **`strip`, `lstrip`, `rstrip` and `blank?` take the whitespace the other
   library's `Char#whitespace?` names, above ASCII too.** All four read bytes
   and knew ASCII alone: `"b\u00A0".strip` kept its 3 bytes, `"\u3000".blank?`

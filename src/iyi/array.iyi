@@ -298,13 +298,9 @@ class Array(T)
 
   # Sorts this array, and `sorted` is the one that leaves it alone.
   #
-  # The name is spelled out because of the library beside this one (SPEC.md
-  # III.1.7a). III.1.7(A) says the plain verb mutates and the participle
-  # copies, which is Swift's convention and was chosen because `!` had to leave
-  # identifiers so that postfix `!` could propagate an error. Crystal spells
-  # the same pair `sort!` and `sort`, so a plain `sort` here would mean the
-  # opposite of a plain `sort` under `--crystal` — the same call, two meanings,
-  # no error. A longer name costs a few characters and cannot be misread.
+  # Spelled out for the library beside this one (SPEC.md III.1.7a): its pair
+  # is `sort!` and `sort`, so a plain `sort` that mutated here would be one
+  # call with two meanings under `--crystal`, and no error.
   #
   # A merge sort, stable, over runs of SORT_RUN that an insertion sort puts
   # in order first. It was an insertion sort alone, written for the samples'
@@ -537,9 +533,13 @@ class Array(T)
     accumulator
   end
 
-  # `sort` takes the comparison, `sorted` is the one for elements that already
-  # compare — SPEC.md III.1.7(A)'s pair, with the name that says a copy comes
-  # back.
+  # The pair for elements that already compare, by `<`. SPEC.md III.1.7a
+  # pairs `sort_in_place` with `sorted` and the hint for `sort!` names both,
+  # but only `sorted` had this form: "expected to be invoked with a block".
+  def sort_in_place : self
+    sort_in_place { |a, b| b < a ? 1 : 0 }
+  end
+
   def sorted : Array(T)
     sorted { |a, b| b < a ? 1 : 0 }
   end

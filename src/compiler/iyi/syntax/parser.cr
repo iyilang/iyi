@@ -5331,7 +5331,7 @@ module Iyi
         where_location = @token.location
         next_token_skip_space
         where_bounds = parse_where_bounds
-        iyi_check_method_where(where_location, where_bounds) unless free_vars
+        iyi_check_method_where(where_location, where_bounds, free_vars, is_abstract)
       end
 
       if is_abstract
@@ -5389,15 +5389,29 @@ module Iyi
     # associated type for `where` to bound, and the name was bound by
     # nothing: with no caller the def passed `check`, and with one it was
     # "undefined constant T" with "Did you mean 'U'?" carried as the edit.
-    # `forall` takes the same bounds, so the edit is the keyword.
-    private def iyi_check_method_where(location : Location, bounds : Hash(String, ASTNode)) : Nil
-      return unless iyi? && @type_nest == 0
+    # `forall` takes the same bounds, so the edit is the keyword. Beside a
+    # `forall` the same `where` was let through, and bounded the `forall`'s
+    # own name; there the edit is to move the bound, not to retype a keyword.
+    #
+    # And on an `abstract def`: a requirement is answered by every impl,
+    # whatever its associated types are, so there is nothing for the bound to
+    # withhold. `abstract def first : Elem where Elem : Show` with `Elem =
+    # Float64` compiled, and a call through the trait printed 1.5.
+    private def iyi_check_method_where(location : Location, bounds : Hash(String, ASTNode), free_vars : Array(String)?, is_abstract : Bool) : Nil
+      return unless iyi?
       name, bound = bounds.first
+      if is_abstract
+        ::raise SyntaxException.new("`where` can't bound a requirement: every impl answers an `abstract def`, whatever its " \
+                                    "associated types are, so `where #{name} : #{bound}` would withhold nothing. `where` goes " \
+                                    "on a default method, which the types that don't meet it go without (SPEC.md II.6)",
+          location.line_number, location.column_number, @filename, 5)
+      end
+      return unless @type_nest == 0
       refusal = SyntaxException.new("`where` bounds an associated type of the trait a method is written in; " \
                                     "a method's own type parameter is introduced by `forall`, which takes the " \
                                     "same bounds: `forall #{name} : #{bound}` (SPEC.md II.6, II.7)",
         location.line_number, location.column_number, @filename, 5)
-      refusal.suggestion = "forall"
+      refusal.suggestion = "forall" unless free_vars
       ::raise refusal
     end
 

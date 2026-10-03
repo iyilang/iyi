@@ -4775,6 +4775,19 @@ end").as(ClassDef)
         {ex.size, ex.suggestion}.should eq({17, "import app/util"})
       end
 
+      # `where` that bounds nothing: beside a function's own `forall` it was
+      # let through, and on an `abstract def` it was dropped, so `Elem =
+      # Float64` met `where Elem : Show` and the call printed 1.5.
+      it "refuses `where` beside a function's forall and on a requirement" do
+        ex = expect_raises(SyntaxException, "introduced by `forall`, which takes the same bounds: `forall T : Greet`") do
+          parse("def hello(x : T) : String forall T where T : Greet\n  \"\"\nend\n", filename: "x.iyi")
+        end
+        ex.suggestion.should be_nil
+        expect_raises(SyntaxException, "`where` can't bound a requirement: every impl answers an `abstract def`") do
+          parse("trait Bag\n  type Elem\n  abstract def first : Elem where Elem : Show\nend\n", filename: "x.iyi")
+        end
+      end
+
       # A unary operator reaches across a newline for its operand, so a stray
       # `!` before the header read it as `!(module x)`: past the one-module
       # rule, never typed, and codegen died on "has no type".

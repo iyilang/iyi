@@ -677,6 +677,10 @@ refuses "a file stored as .IYI, checked" 'ends in `.IYI`' -- "$IYI" check upcase
 refuses "a file stored as .IYI, formatted" 'ends in `.IYI`' -- "$IYI" fmt --check upcase/UP.IYI
 refuses "a directory holding a .IYI, formatted" 'ends in `.IYI`' -- "$IYI" fmt --check upcase
 refuses "a directory holding a _test.IYI, tested" 'ends in `.IYI`' -- "$IYI" test upcase/tests
+# `where` on an `abstract def` bounds nothing - every impl answers a
+# requirement - and was dropped: `Elem = Float64` met `where Elem : Show`.
+printf 'trait Show\n  abstract def show : String\nend\n\ntrait Bag\n  type Elem\n  abstract def first : Elem where Elem : Show\nend\n' > wherereq.iyi
+refuses "a where bound on a requirement" "\`where\` can't bound a requirement" -- "$IYI" check wherereq.iyi
 # A reopen replacing a method another module wrote: two modules each
 # reopening `::String` with a `tag` had the first one's code run the
 # second's.

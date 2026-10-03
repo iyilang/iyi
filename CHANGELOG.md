@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`where` is refused where it bounds nothing.** On an `abstract def`
+  it was dropped: `abstract def first : Elem where Elem : Show` with
+  `Elem = Float64` compiled and printed 1.5. Beside a top-level
+  `forall`, `def f(x : T) forall T where T : Show` passed the refusal
+  `where` alone gets. Both are refused at the parse now: "`where` can't
+  bound a requirement: every impl answers an `abstract def`" and the
+  `forall T : Show` sentence. `bench/verbs_exercise.sh` and
+  `spec/compiler/parser/parser_spec.cr` check it; the old compiler
+  printed 1.5.
+
 - **A requirement whose return type names its own `forall` variable is
   checked against the impl's.** `abstract def ident(x : U) : U forall U`
   (and `: Array(U)`, and the same in an abstract class) was "can't

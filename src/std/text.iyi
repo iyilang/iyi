@@ -1088,37 +1088,50 @@ class ::String
     0_i64 - value
   end
 
+  # The other library's reading, whitespace around it aside: a sign, then
+  # `inf`, `infinity` or `nan` in any case (a `nan` may close with a `(...)`
+  # of letters, digits and `_`), or decimal digits. Text whose value leaves
+  # the range is nil, as that reader's ERANGE makes it: nonzero digits that
+  # round to zero, or digits that round past the largest double. Here
+  # `"1e400".to_f?` was Infinity, `"1e-400".to_f?` 0.0, and only `Infinity`
+  # and `NaN` spelled so were words: `"inf".to_f?` was nil.
   def to_f? : Float64?
-    return nil if empty?
-    # `to_f` reads a sign before either word, NaN's too: "-NaN" and "+NaN"
-    # were NaN there and nil here.
-    return to_f if self == "NaN" || self == "-NaN" || self == "+NaN" || self == "Infinity" || self == "-Infinity" || self == "+Infinity"
-
     bytes = to_unsafe
-    size = bytesize
-    at = 0
-    if bytes[0] == 45_u8 || bytes[0] == 43_u8
-      at = 1
+    first = space_end
+    stop = space_start(first)
+    at = first
+    negative = at < stop && bytes[at] == 45_u8
+    at = at + 1 if negative || (at < stop && bytes[at] == 43_u8)
+    return nil if at >= stop
+
+    if word_at?(at, stop, "nan")
+      return nil unless at + 3 == stop || nan_payload?(at + 3, stop)
+      return 0.0 / 0.0
     end
-    return nil if at >= size
+    if word_at?(at, stop, "inf")
+      return nil unless at + 3 == stop || (at + 8 == stop && word_at?(at + 3, stop, "inity"))
+      return negative ? -1.0 / 0.0 : 1.0 / 0.0
+    end
 
     seen_point = false
     any_digit = false
+    nonzero = false
 
-    while at < size
+    while at < stop
       b = bytes[at]
       if b >= 48_u8 && b <= 57_u8
         any_digit = true
+        nonzero = true if b != 48_u8
       elsif b == 46_u8 && !seen_point
         seen_point = true
       elsif (b == 101_u8 || b == 69_u8) && any_digit
         at = at + 1
-        return nil if at >= size
+        return nil if at >= stop
         if bytes[at] == 45_u8 || bytes[at] == 43_u8
           at = at + 1
         end
-        return nil if at >= size
-        while at < size
+        return nil if at >= stop
+        while at < stop
           eb = bytes[at]
           return nil if eb < 48_u8 || eb > 57_u8
           at = at + 1
@@ -1131,7 +1144,34 @@ class ::String
     end
 
     return nil unless any_digit
-    to_f
+    value = IyiFloatText.parse(first == 0 && stop == bytesize ? self : byte_slice(first, stop - first))
+    return nil if nonzero && value == 0.0
+    return nil if value * 0.0 != 0.0
+    value
+  end
+
+  # Whether the bytes at *at* spell *word*, which is lower-case, in any case.
+  private def word_at?(at : Int32, stop : Int32, word : String) : Bool
+    return false if at + word.bytesize > stop
+    i = 0
+    while i < word.bytesize
+      return false unless (to_unsafe[at + i] | 0x20_u8) == word.to_unsafe[i]
+      i = i + 1
+    end
+    true
+  end
+
+  # A `(...)` of letters, digits and `_` running to *stop*.
+  private def nan_payload?(at : Int32, stop : Int32) : Bool
+    return false unless stop - at >= 2 && to_unsafe[at] == 40_u8 && to_unsafe[stop - 1] == 41_u8
+    i = at + 1
+    while i < stop - 1
+      b = to_unsafe[i]
+      letter = (b | 0x20_u8) >= 97_u8 && (b | 0x20_u8) <= 122_u8
+      return false unless letter || (b >= 48_u8 && b <= 57_u8) || b == 95_u8
+      i = i + 1
+    end
+    true
   end
 
   # The characters in reverse, found from the back, each character's bytes

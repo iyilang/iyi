@@ -80,6 +80,15 @@ raise "string: to_f? invalid text" unless "bad".to_f?.nil?
 raise "string: to_f? double dot" unless "1.2.3".to_f?.nil?
 raise "string: to_f? double sign" unless "--5".to_f?.nil?
 raise "string: to_f? empty" unless "".to_f?.nil?
+# Out of the range is nil, as the other library's ERANGE makes it, and
+# `inf`, `infinity` and `nan` are words in any case: `"1e400".to_f?` was
+# Infinity, `"1e-400".to_f?` 0.0, and `"inf".to_f?` nil.
+raise "string: to_f? out of range is nil" unless "1e400".to_f?.nil? && "-1e400".to_f?.nil? && "1e-400".to_f?.nil? && "1.7976931348623159e308".to_f?.nil?
+raise "string: to_f? at the edges of the range" unless "4.9e-324".to_f? == 5.0e-324 && "1.7976931348623157e308".to_f? == 1.7976931348623157e308 && "0e500".to_f? == 0.0
+nan_word = "nan".to_f?
+raise "string: to_f? words in any case" unless "INF".to_f? == 1.0 / 0.0 && "-Infinity".to_f? == -1.0 / 0.0 && "infinity".to_f? == 1.0 / 0.0 && nan_word && nan_word != nan_word && "infin".to_f?.nil?
+raise "string: to_f? inside whitespace" unless " 1.5 ".to_f? == 1.5 && "\n2\r\n".to_f? == 2.0 && " - ".to_f?.nil? && "1 .5".to_f?.nil?
+puts "    to_f? out of range is nil, its words in any case, and whitespace around it is not part of it"
 puts "    base conversion: to_i, to_i64 with bases 2..36, and nilable to_f? verified"
 
 # 4. Whitespace, strip, chomp, chop, and blank/presence

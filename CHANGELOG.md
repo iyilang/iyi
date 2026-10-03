@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`String#to_f?` answers nil for text out of a double's range and reads
+  `inf`, `infinity` and `nan` in any case, as the other library's does.** It
+  checked the spelling and answered whatever the digits came to:
+  `"1e400".to_f?` was Infinity, `"-1e400".to_f?` -Infinity and
+  `"1e-400".to_f?` 0.0, where the other library answers nil for all three;
+  and only `Infinity` and `NaN` spelled so were words, so `"inf"`, `"INF"`,
+  `"infinity"` and `"nan"` were nil. Text with a nonzero digit that rounds
+  to zero, or digits that round past the largest double, is nil now, and the
+  subnormals stay (`"4.9e-324"` is 5.0e-324); the words take a sign and any
+  case, and `nan` a closing `(...)` of letters, digits and `_`. Whitespace
+  around the number is skipped, as the integer readers skip it. Sixty-seven
+  spellings answer as the other library's. `bench/std_text_exercise.iyi`
+  checks them; the old module answered Infinity for `"1e400".to_f?`.
+
 - **`String#to_i?(base)`, `#to_i64?` and `#to_u64?` read a number with
   whitespace around it, as the other library's readers do.** They refused
   any whitespace, so `" 42".to_i64?`, `"ff ".to_i?(16)` and a line read with

@@ -2724,6 +2724,17 @@ def main():
     cr.diagnostics(crlf_app)
     reply = cr.send("textDocument/completion", {"textDocument": {"uri": crlf_app},
                                                 "position": {"line": 2, "character": 8}})
+    # 73i. and an import that is the last line, with no line ending after
+    #      it: the insert went to the line after it, which the document
+    #      does not have - `ch\nimport std/json` was handed an edit at 2:0.
+    #      It goes at the end of the last line, behind a line ending.
+    tail_text = "puts sho\nimport std/json"
+    tail = file_uri(os.path.join(crlf_root, "tail.iyi"))
+    cr.send("textDocument/didOpen", {"textDocument": {"uri": tail, "languageId": "iyi", "version": 1,
+                                                       "text": tail_text}}, wait=False)
+    cr.diagnostics(tail)
+    tailed = cr.send("textDocument/completion", {"textDocument": {"uri": tail},
+                                                 "position": {"line": 0, "character": 8}})
     cr.send("shutdown", {})
     cr.send("exit", {}, wait=False)
     cr.proc.wait(timeout=10)
@@ -2731,6 +2742,11 @@ def main():
              for e in i.get("additionalTextEdits", [])]
     step("70k", "an auto-import into a CRLF buffer ends its line in CRLF",
          texts == ["import greet::{shout}\r\n"], f"edits {texts!r}")
+    at_end = [(e["range"]["start"]["line"], e["range"]["start"]["character"], e["newText"])
+              for i in (tailed.get("result") or {}).get("items", []) if i["label"] == "shout"
+              for e in i.get("additionalTextEdits", [])]
+    step("73i", "an auto-import after a last line with no line ending stays in the document",
+         at_end == [(1, 15, "\nimport greet::{shout}")], f"edits {at_end!r}")
 
     # 37. fuzzy ranks below prefix but still answers: `ucs` finds
     #     upcase on the receiver, tiered after any prefix match.

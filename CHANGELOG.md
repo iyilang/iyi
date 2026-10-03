@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **An auto-import after a last import with no line ending stays in the
+  document.** The new `import` was inserted at the start of the line after
+  the last import, and when that import was the file's last line with no
+  line ending the line did not exist: `ch\nimport std/json` was handed an
+  edit at 2:0, and a client that holds an edit to the last line glued the
+  import onto `import std/json`. It goes at the end of that line now,
+  behind the buffer's own line ending (1:15, `\nimport ...`). Step 73i of
+  `bench/lsp_session.py` checks it; the old server answered 2:0.
+
 - **selectionRange and documentSymbol answer deep nesting.** A cursor
   inside 100 nested parentheses and the outline of 50 nested classes
   answered -32603 "Nesting of 100 is too deep", the JSON builder's limit.

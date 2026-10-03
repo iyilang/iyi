@@ -1679,6 +1679,17 @@ module Iyi::Lsp
       # answer: a CRLF buffer was handed `import greet::{shout}\n`, and a
       # client that applies edits as written made the file mixed.
       ending = Iyi.crlf?(text) ? "\r\n" : "\n"
+      # The last import on the last line, with no line ending after it:
+      # the line after it is not in the document. The insert was at that
+      # line all the same, past the end - `ch\nimport std/json` was handed
+      # an edit at 2:0, and a client that holds an edit to the last line
+      # glued the import onto `import std/json`. It goes at the end of
+      # that line instead, behind a line ending of its own.
+      if anchor > 0 && anchor == lines.size && !text.ends_with?('\n')
+        last = lines[anchor - 1]
+        end_ch = Lsp.character_of(last, last.size + 1)
+        return [{anchor - 1, end_ch, end_ch, "#{ending}import #{module_path}::{#{name}}"}]
+      end
       [{anchor, 0, 0, "import #{module_path}::{#{name}}#{ending}"}]
     end
 

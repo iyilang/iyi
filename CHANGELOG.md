@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`fmt` puts a call's or a def's arguments on their own lines after a
+  comment or a trailing space following its `(`.** `x = Planet.new( # c`
+  / `  1.5,` / `  2.5)` was written with `1.5,` at column 0;
+  `def initialize( # c` put its first parameter at column 0 and lined the
+  rest up under the `(`; `foo( # c` / `  a: 1,` put `a: 1,` at column 0;
+  and `f( ` with a trailing space, then `  1,` / `  2)`, became `f(1,` /
+  `  2)`. The formatter looked for the line break right after the `(` and
+  found the comment or the space instead. It looks past them now, and
+  each gets the layout the same call has without them.
+  `spec/compiler/formatter/iyi_formatter_spec.cr` formats six such calls
+  and defs; the old formatter wrote `1.5,` at column 0.
+
 - **`fmt` indents the comment lines under a header that ends in a comment
   with the body.** After `class Box(T) # c`, `module Foo(T) # c`,
   `def g : Int32 | Nil # c`, `def f(x : T) : Nil where T : Foo # c`,

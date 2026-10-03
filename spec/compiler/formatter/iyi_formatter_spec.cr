@@ -44,6 +44,17 @@ describe "Formatter on iyi" do
   assert_iyi_format "module endpoint/handler"
   assert_iyi_format "module m\n\nimport defs/shared"
 
+  # A comment or a trailing space after a call's or a def's `(` sits before
+  # the line break that puts the arguments on their own lines. A comment
+  # there put the first argument at column 0 (a def also lined its later
+  # parameters up under the `(`), and `f( ` became `f(1,`.
+  assert_iyi_format "x = Planet.new( # c\n  1.5,\n  2.5)"
+  assert_iyi_format "def f\n  x = foo( # c\n    1,\n    2)\nend"
+  assert_iyi_format "x = foo( # c\n  # first\n  1,\n)"
+  assert_iyi_format "foo( # c\n  a: 1,\n  b: 2)"
+  assert_iyi_format "def initialize( # c\n  scheme : String? = nil,\n  host : String? = nil,\n)\nend"
+  assert_iyi_format "f( \n  1,\n  2)", "f(\n  1,\n  2)"
+
   # R-2: what a module exports says so.
   assert_iyi_format "module m\n\npub def polite(name : String) : String\n  name\nend"
   assert_iyi_format "module m\n\npub struct Box(T)\n  getter value : T\nend"

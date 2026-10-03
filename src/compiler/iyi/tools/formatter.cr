@@ -1665,7 +1665,10 @@ module Iyi
       @indent = @column + 1
 
       write_token :OP_LPAREN
-      skip_space
+      # A comment after "(" leaves the newline after it to the check below:
+      # written with it, `def initialize( # c` lost the indentation mode, put
+      # its first parameter at column 0 and lined the rest up under the "(".
+      skip_space(consume_newline: false)
 
       # When "(" follows newline, it turns on two spaces indentation mode.
       if @token.type.newline?
@@ -3040,6 +3043,11 @@ module Iyi
       has_newlines = false
       found_comment = false
 
+      # A space or a comment after `(` comes before the newline that puts the
+      # arguments on their own lines. Looking at it first, `f( ` with a
+      # trailing space was written `f(1,`, and `Planet.new( # c` put its
+      # first argument at column 0.
+      skip_space(consume_newline: false)
       if @token.type.newline?
         if do_consume_newlines
           indent(needed_indent) { consume_newlines }
@@ -3096,12 +3104,13 @@ module Iyi
     end
 
     def format_named_args(args, named_args, needed_indent)
-      skip_space(needed_indent)
-
       named_args_column = needed_indent
 
-      if args.empty?
-      else
+      # With no positional argument, what follows `(` is the first named
+      # argument's, and `format_args_simple` reads a comment there with the
+      # newline after it. Written here, `foo( # c` put `a: 1` at column 0.
+      unless args.empty?
+        skip_space(needed_indent)
         write_token :OP_COMMA
         found_comment = skip_space(needed_indent)
         if found_comment || @token.type.newline?

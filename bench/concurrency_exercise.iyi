@@ -803,6 +803,96 @@ end
 fail("select else: got #{took_else}") unless took_else == "else"
 puts "select with nothing ready took its else"
 
+# ── 16a. `when timeout(ms)`, and an arm nobody binds ────────────────────
+#
+# The timeout arm the other library's `select` has was "undefined method
+# 'timeout_select_action'". An unbound send arm ran its body when nothing
+# was sent: on a closed channel, and in a cancelled task.
+idle_arm = Channel(Int32).new
+timeout_seen = ""
+started = __iyi_monotonic_ns
+select
+when idle_got = idle_arm.receive
+  timeout_seen = "received"
+when timeout(50)
+  timeout_seen = "timed out"
+end
+waited_ms = elapsed_ms(started)
+fail("select timeout: #{timeout_seen} after #{waited_ms} ms") unless timeout_seen == "timed out" && waited_ms >= 45 && waited_ms < 5000
+early_arm = Channel(Int32).new
+timeout_seen = ""
+group do |g|
+  g.spawn do
+    sleep(10)
+    early_arm.send(4)
+    0
+  end
+  g.spawn do
+    select
+    when early_got = early_arm.receive
+      timeout_seen = "received #{early_got}"
+    when timeout(5000)
+      timeout_seen = "timed out"
+    end
+    0
+  end
+end
+fail("select timeout: a value sent first answered #{timeout_seen}") unless timeout_seen == "received 4"
+
+# A select whose deadline passes while a sender wakes it, before it runs,
+# is woken by both: the clock is read before the run queue every 256th
+# park, and it queued the fiber a second time - "a done fiber was
+# scheduled", which the .sh looks for in this program's output.
+racing = Channel(Int32).new(1)
+raced = 0
+600.times do |round|
+  (round % 5).times { sleep(0) }
+  group do |g|
+    g.spawn do
+      select
+      when race_got = racing.receive
+        raced = raced + 1
+      when timeout(1)
+        racing.receive
+      end
+      0
+    end
+    g.spawn do
+      until_ns = __iyi_monotonic_ns + 1500000_i64
+      while __iyi_monotonic_ns < until_ns
+      end
+      racing.send(1)
+      0
+    end
+  end
+end
+fail("select timeout: #{raced} of 600 values sent after the deadline were taken") unless raced == 600
+
+unbound_ran = [] of String
+shut = Channel(Int32).new(1)
+shut.close
+select
+when shut.send(1)
+  unbound_ran << "closed"
+end
+unheard = Channel(Int32).new
+group do |g|
+  g.spawn do
+    sleep(50)
+    select
+    when unheard.send(1)
+      unbound_ran << "cancelled"
+    end
+    0
+  end
+  g.spawn do
+    sleep(10)
+    TaskFailed.new
+  end
+end
+fail("an unbound send arm ran its body with nothing sent: #{unbound_ran}") unless unbound_ran.empty?
+puts "a select timed out, lost no value to its deadline, and ran no unbound arm whose send did not happen"
+
 # ── 16b. A ring of tasks passing a value allocates nothing per message ──
 #
 # Every park took a node from the heap - a receiver's and, where the

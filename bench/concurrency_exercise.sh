@@ -74,6 +74,13 @@ if ! timeout 60 ./exercise > answers.txt 2>&1; then
   exit 1
 fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
+# A panic on a task's stack is printed and the program goes on, so the
+# scheduler's own complaint is looked for here (step 16a's select race).
+if grep -q 'a done fiber was scheduled' answers.txt; then
+  echo "the exercise scheduled a finished fiber:"
+  grep -m3 'a done fiber' answers.txt
+  exit 1
+fi
 
 step "exercise, release build"
 if ! "$IYI" build --release "$REPO/bench/concurrency_exercise.iyi" -o exercise-release > build-release.log 2>&1; then
@@ -87,6 +94,11 @@ if ! timeout 60 ./exercise-release > answers-release.txt 2>&1; then
   exit 1
 fi
 grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
+if grep -q 'a done fiber was scheduled' answers-release.txt; then
+  echo "the release exercise scheduled a finished fiber:"
+  grep -m3 'a done fiber' answers-release.txt
+  exit 1
+fi
 
 # ── 1b. A fiber reading stdin parks, and is cancelled there ───────────────
 # bench/stdin_park.iyi, fed by a pipe that answers a second after the

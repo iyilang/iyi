@@ -834,7 +834,17 @@ module Iyi
           cloned_call.name = select_action_name(cloned_call.name)
           tuple_values << cloned_call
 
-          case_whens << When.new([NumberLiteral.new(index).at(node)] of ASTNode, a_when.body.clone)
+          body = a_when.body.clone
+          # iyi: an arm nobody binds runs its body only when its operation
+          # happened. `when out.send(1)` ran its body on a closed channel
+          # and in a cancelled task, where the send answered `ChannelClosed`
+          # or `Cancelled` and nothing was sent; bound, the arm sees that
+          # answer itself.
+          if @program.iyi_prelude?
+            failed = IsA.new(Var.new(value_name).at(node), Path.global("Error").at(node)).at(node)
+            body = If.new(failed, NilLiteral.new.at(node), body).at(node)
+          end
+          case_whens << When.new([NumberLiteral.new(index).at(node)] of ASTNode, body)
         when Assign
           cloned_call = condition.value.as(Call).clone
           cloned_call.name = select_action_name(cloned_call.name)

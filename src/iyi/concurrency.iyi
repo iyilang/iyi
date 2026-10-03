@@ -2086,7 +2086,10 @@ class IyiScheduler
           io_remove(head)
         {% end %}
       end
-      enqueue(head)
+      # A select with a timeout arm is in this heap and a channel's queues
+      # at once, and either can wake it: one already woken is not queued
+      # twice. Its `unpark` takes it out of here when it runs.
+      enqueue(head) unless head.state == IyiFiberState::Runnable
     end
   end
 
@@ -2109,6 +2112,13 @@ class IyiScheduler
     fiber.sleep_prev = nil
     root = st.sleep_head
     st.sleep_head = root.is_a?(IyiFiber) ? sleep_meld(root, fiber) : fiber
+  end
+
+  # Whether *fiber* is in the heap: its root, or linked under a node.
+  def self.sleeping?(fiber : IyiFiber) : Bool
+    root = state.sleep_head
+    return true if root.is_a?(IyiFiber) && root.object_id == fiber.object_id
+    fiber.sleep_prev.is_a?(IyiFiber)
   end
 
   # Out of the heap from wherever it is; nothing when it is not in it.
@@ -3452,6 +3462,61 @@ class IyiSendSelect(T)
   def won_value : Nil
     nil
   end
+end
+
+# `when timeout(ms)`: the arm that wins once *ms* milliseconds have passed
+# since the select began. The expansion asked for `timeout_select_action`
+# and nothing answered, so the other library's arm was "undefined method"
+# here. Parked, the select waits in the sleep heap at the deadline as well
+# as in its channels' queues. It never wins while parked: a channel arm
+# that won in the same turn holds a value, and the deadline is read on
+# the next round, after the channels have had their say.
+class IyiTimeoutSelect
+  @deadline : Int64
+  @fiber : IyiFiber?
+
+  def initialize(ms : Int32)
+    @deadline = __iyi_monotonic_ns + ms.to_i64 * 1000000_i64
+    @fiber = nil
+  end
+
+  def ready? : Bool
+    __iyi_monotonic_ns >= @deadline
+  end
+
+  def execute : Nil
+    nil
+  end
+
+  # Two timeout arms share the fiber's one place in the heap, at the
+  # earlier deadline.
+  def park(fiber : IyiFiber, nonce : UInt64) : Nil
+    @fiber = fiber
+    if IyiScheduler.sleeping?(fiber)
+      return if fiber.deadline <= @deadline
+      IyiScheduler.sleep_remove(fiber)
+    end
+    fiber.deadline = @deadline
+    IyiScheduler.sleep_insert(fiber)
+  end
+
+  def unpark : Nil
+    fiber = @fiber
+    IyiScheduler.sleep_remove(fiber) if fiber.is_a?(IyiFiber)
+    @fiber = nil
+  end
+
+  def won_while_parked? : Bool
+    false
+  end
+
+  def won_value : Nil
+    nil
+  end
+end
+
+def timeout_select_action(ms : Int32) : IyiTimeoutSelect
+  IyiTimeoutSelect.new(ms)
 end
 
 # ── Stack overflow: a guard-page fault is a sentence, not a signal ──────

@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **`select` has `when timeout(ms)`, and an arm nobody binds runs its
+  body only when its operation happened.** SPEC III.4.6 carries `select`
+  over from the other library, and its timeout arm was "undefined method
+  'timeout_select_action'" here. It is an arm now, in milliseconds as
+  `sleep` is: the select waits in the sleep heap at the deadline as well
+  as in its channels' queues. A value handed over in the turn the
+  deadline passed still wins; the first build of it queued such a select
+  twice, "a done fiber was scheduled", and the clock now skips a fiber
+  already woken. An unbound arm - `when out.send(1)` - ran its body when
+  the send answered `ChannelClosed` or `Cancelled` and nothing was sent;
+  a bound arm still sees that answer. `bench/concurrency_exercise.iyi`
+  step 16a checks the timeout, 600 sends racing a 1 ms deadline, and
+  both unbound cases, and `bench/concurrency_exercise.sh` fails on "a
+  done fiber was scheduled". The old compiler answered
+  `["closed", "cancelled"]` for the two unbound arms, and the old
+  runtime did not compile `timeout(50)`.
+
 - **A live `Channel` keeps no value it has handed out.** A buffered
   channel's ring kept each value until a later send wrote over its
   slot, and a rendezvous channel kept the last value parked through it

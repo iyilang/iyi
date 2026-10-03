@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`Box(T).unbox` of a null pointer is nil when `T` admits nil.** It
+  panicked "Unboxing null pointer" for every `T`, so
+  `Box(String?).unbox` of the null a C callback is handed when there is
+  no data refused, where the other library answers nil for `String?`.
+  A nilable `T` answers nil now, and any other `T` still panics.
+  `bench/std_box_exercise.iyi` unboxes a null as `String?` and as
+  `Int32?`; the old module panicked "Unboxing null pointer".
+
 - **`take(n)` and `first(n)` on an `Enumerable` stop at the nth
   element.** The count was checked before each append, so every call
   pulled one element more than it kept, and a source read once (a pipe,

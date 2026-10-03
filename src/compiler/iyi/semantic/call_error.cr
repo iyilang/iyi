@@ -967,31 +967,64 @@ class Iyi::Call
   # small by rule and concluded `UInt32` had no methods at all. The names
   # are read off the module's text: a `def`, a `%w(...)` operator list, or
   # a quoted conversion name.
-  private def iyi_std_int_hint(program, name : String, owner) : String?
-    return nil unless owner.instance_type.is_a?(IntegerType)
+  #
+  # The floats are `std/float`'s the same way: `Float32`'s methods and what
+  # `Float64` still lacked, unary `-` among it. Without it `1.5_f32.to_f64`
+  # was sent to `--crystal` and `-x` on a `Float64` was "wrong number of
+  # arguments", neither naming the import. *size* is the arguments the call
+  # gave, for that second shape: the module must declare the name with
+  # none, or with some, to be the answer. A module the program already
+  # loaded is not: its methods are there, so the call is wrong otherwise.
+  IYI_STD_NUMBER_MODULES = {
+    "int"   => "the module that makes the whole integer tower usable",
+    "float" => "the module that makes `Float32` a number and gives `Float64` what the prelude leaves out",
+  }
+
+  private def iyi_std_number_hint(program, name : String, owner, size : Int32? = nil) : String?
+    module_name =
+      case owner.instance_type
+      when IntegerType then "int"
+      when FloatType   then "float"
+      else                  return nil
+      end
+    loaded = "std/#{module_name}"
+    return nil if program.iyi_module_paths.has_value?(loaded) || program.iyi_artifact_modules.has_value?(loaded)
     program.iyi_path.entries.each do |entry|
-      path = File.join(entry, "std", "int.iyi")
+      path = File.join(entry, "std", "#{module_name}.iyi")
       next unless File.file?(path)
       text = File.read(path)
-      return nil unless iyi_std_int_names?(text, name)
-      return "`#{name}` on #{owner.instance_type} is in `std/int`, the module that makes " \
-             "the whole integer tower usable: `import std/int`."
+      return nil unless iyi_std_number_names?(text, name)
+      return nil unless size.nil? || iyi_std_number_takes?(text, name, size)
+      taking = size.nil? ? "" : " with #{size == 0 ? "no" : size} argument#{size == 1 ? "" : "s"}"
+      return "`#{name}`#{taking} on #{owner.instance_type} is in `std/#{module_name}`, " \
+             "#{IYI_STD_NUMBER_MODULES[module_name]}: `import std/#{module_name}`."
     end
     nil
   end
 
-  # Whether std/int's *text* declares *name*: a `def`, an operator in a
+  # Whether *text* declares *name* taking no argument (`def - : Float32`, a
+  # quoted conversion name) or, for a *size* above zero, taking some (`def
+  # name(`, an operator in a `%w(...)` list the template writes binary).
+  private def iyi_std_number_takes?(text : String, name : String, size : Int32) : Bool
+    if size == 0
+      text.includes?("def #{name} :") || text.includes?("\"#{name}\"")
+    else
+      text.includes?("def #{name}(") || iyi_std_number_listed?(text, name)
+    end
+  end
+
+  # Whether a number module's *text* declares *name*: a `def`, an operator in a
   # `%w(...)` list, or a quoted conversion name - and the two families
   # written from those by a prefix in the template, `def &{{ op.id }}` for
   # the wrapping `&+ &- &*` and `def unsafe_{{ conv[0].id }}` for the
   # unchecked conversions. Without the prefixes, `x &* 33_u32` on a
   # `UInt32` - a checksum's first line - was told the prelude is small by
   # rule, and a port concluded `UInt32` had no methods at all.
-  private def iyi_std_int_names?(text : String, name : String) : Bool
+  private def iyi_std_number_names?(text : String, name : String) : Bool
     return true if text.includes?("def #{name}(") || text.includes?("def #{name} ") || text.includes?("\"#{name}\"")
-    return true if iyi_std_int_listed?(text, name)
+    return true if iyi_std_number_listed?(text, name)
     if name.size > 1 && name.starts_with?('&') && text.includes?("def &{{")
-      return true if iyi_std_int_listed?(text, name[1..])
+      return true if iyi_std_number_listed?(text, name[1..])
     end
     if name.starts_with?("unsafe_") && text.includes?("def unsafe_{{")
       return true if text.includes?("\"#{name.lchop("unsafe_")}\"")
@@ -999,7 +1032,7 @@ class Iyi::Call
     false
   end
 
-  private def iyi_std_int_listed?(text : String, name : String) : Bool
+  private def iyi_std_number_listed?(text : String, name : String) : Bool
     text.each_line.any? do |line|
       line.includes?("%w(") && line.split("%w(", 2)[1].split(')', 2)[0].split(' ').includes?(name)
     end
@@ -1346,11 +1379,11 @@ class Iyi::Call
       if !obj && !similar_name && (arrival = Iyi::IYI_ARRIVAL_CALL_HINTS[def_name]?)
         msg << '\n' << arrival
       end
-      # iyi: the method itself, on this integer, one import away: said
+      # iyi: the method itself, on this number, one import away: said
       # before a spelling that is merely near it (`to_u32` is not a typo of
       # `to_i32`) and before an arrival note meant for another receiver.
-      if obj && (integers = iyi_std_int_hint(program, def_name, owner))
-        msg << '\n' << integers
+      if obj && (numbers = iyi_std_number_hint(program, def_name, owner))
+        msg << '\n' << numbers
       elsif obj && !similar_name && (arrival = Iyi::IYI_ARRIVAL_METHOD_HINTS[def_name]?)
         fits = case def_name
                when "/" then owner.is_a?(IntegerType)
@@ -1433,6 +1466,12 @@ class Iyi::Call
 
         str << '+' if min_splat != Int32::MAX
         str << ")\n"
+      end
+      # iyi: the overload the call wanted may be a std module's: `-x` on a
+      # `Float64` is `std/float`'s unary `-`, and the binary ones listed
+      # below are all the prelude has.
+      if obj && !named_args_types && (numbers = iyi_std_number_hint(program, def_name, owner, arg_types.size))
+        str << numbers << '\n'
       end
       str << "Overloads are:"
       append_matches(defs, arg_types, str)

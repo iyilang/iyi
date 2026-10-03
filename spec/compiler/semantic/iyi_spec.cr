@@ -365,6 +365,10 @@ describe "Semantic: iyi" do
       assert_error "x = 5_u64\nx.unsafe_to_u32", "`unsafe_to_u32` on UInt64 is in `std/int`"
     end
 
+    it "names std/float for a method the floats have there" do
+      assert_error "x = 1.5_f32\nx.to_f64", "`to_f64` on Float32 is in `std/float`"
+    end
+
     it "names puts value.inspect for p" do
       assert_error "p 1", "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel::{p}`"
     end

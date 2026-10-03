@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A float method `std/float` has names `import std/float`.** `-x` on a
+  `Float64` said "wrong number of arguments for 'Float64#-' (given 0,
+  expected 1)" and listed the binary overloads, and `1.5_f32.to_f64`
+  said the prelude is small by rule and pointed at `iyi build --crystal`;
+  `std/float` declares both. The hint `std/int` gives the integers now
+  covers the floats: "`-` with no arguments on Float64 is in
+  `std/float`, ...: `import std/float`." and "`to_f64` on Float32 is in
+  `std/float`", which is also what `sprintf("%f", 1.5_f32)` without the
+  import is told now, from inside `std/format`. A program that already
+  loads the module is not told to import it. `bench/std_float_exercise.sh`
+  checks both; the old compiler named no import.
+
 - **A method missing on a nilable receiver no longer ends with the
   prelude's size rule.** `x + 1` with `x : Int32 | Nil` said, under "x
   can be nil here: narrow it first", "iyi's prelude has no `+` on Nil: it

@@ -133,6 +133,30 @@ refuses "a double // zero" f64_div0 "division by zero" '1.0 // 0.0'
 refuses "a single // zero" f32_div0 "division by zero" '1.0_f32 // 0.0_f32'
 
 echo
+echo "== what a program without the import is told"
+# The error names the import: `-x` on a Float64 was "wrong number of
+# arguments for 'Float64#-' (given 0, expected 1)" and nothing more, and
+# `1.5_f32.to_f64` was sent to `iyi build --crystal`.
+told() { # told <label> <name> <phrase> <program>
+  local label="$1" name="$2" phrase="$3" program="$4"
+  printf '%s\n' "$program" > "$WORK/$name.iyi"
+  if "$IYI" check "$WORK/$name.iyi" > "$WORK/$name.check" 2>&1; then
+    echo "  $label: it type-checked without the import"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "$phrase" "$WORK/$name.check"; then
+    echo "  $label: refused, but not naming the import:"
+    sed -n '1,12p' "$WORK/$name.check"
+    status=1
+    return
+  fi
+  printf '  %s: "%s"\n' "$label" "$phrase"
+}
+told "-x on a Float64" told_neg '`-` with no arguments on Float64 is in `std/float`' $'x = 1.5\nputs -x'
+told "to_f64 on a Float32" told_to_f64 '`to_f64` on Float32 is in `std/float`' $'x = 1.5_f32\nputs x.to_f64'
+
+echo
 echo "== proving the checks can fail when the module is broken"
 mkdir -p "$WORK/patched/std"
 if [ -z "$PY" ]; then

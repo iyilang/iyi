@@ -133,16 +133,6 @@ module Iyi
     path
   end
 
-  # iyi: whether *filename* is the prelude's or a module of the standard
-  # library beside it: a file under an `iyi/` or `std/` directory whose
-  # parent holds `iyi/prelude.iyi`. A project's own `std/` is its own.
-  def self.library_source?(filename : String) : Bool
-    posix = ::Path[filename].to_posix.to_s
-    {"/iyi/", "/std/"}.any? do |marker|
-      (index = posix.rindex(marker)) && File.file?(File.join(posix[0, index], "iyi", "prelude.iyi"))
-    end
-  end
-
   # iyi: *path* as it reads from under *base*, or nil when it is not under it.
   #
   # Both sides are filesystem paths, so the question is `Path`'s and not a

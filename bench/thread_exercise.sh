@@ -354,8 +354,16 @@ if ! timeout -k 5 300 ./crowd > crowd.txt 2>&1; then
   cat crowd.txt; exit 1
 fi
 sed 's/^/  /' crowd.txt
+# The two proofs need cores for the spin and the serial stop to show: on a
+# CI runner's four, sixteen threads spinning without the yield stayed under
+# five times one thread's turns, and the proof did not fire. Measured on
+# twelve; below eight they are said to be unmeasured.
+cores="${NUMBER_OF_PROCESSORS:-0}"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    if [ "$cores" -lt 8 ]; then
+      echo "  the lock and stop failure proofs need 8 cores to show; this machine has $cores: unmeasured here"
+    else
     step "failure proof: a lock that only spins is caught"
     mkdir -p spinning/iyi
     cp "$REPO"/src/iyi/*.iyi spinning/iyi/
@@ -394,6 +402,7 @@ case "$(uname -s)" in
     done
     [ -n "$caught" ] || { echo "the stop check did not fire in five runs:"; tail -3 serial.txt; exit 1; }
     printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 '^FAIL: stop:' serial.txt)"
+    fi
     ;;
 esac
 

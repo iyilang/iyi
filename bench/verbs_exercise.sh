@@ -1835,6 +1835,24 @@ else
   sed -n '1,20p' interp.out | cat -A
   status=1
 fi
+# A macro whose expansion runs it again expanded until the stack ran out:
+# "Stack overflow (e.g., infinite or very deep recursion)" after 5 to 17
+# seconds, for a macro calling itself, two calling each other, and an
+# `inherited` hook whose subclass sets it off again. Refused 64 levels
+# deep, and a recursion that ends short of that still runs.
+printf 'macro m(x)\n  m({{ x }})\nend\n\nm(1)\n' > macroself.iyi
+refuses "a macro that calls itself" "macro expansion nested more than 64 deep" -- "$IYI" check macroself.iyi
+printf 'macro a\n  b\nend\n\nmacro b\n  a\nend\n\na\n' > macropair.iyi
+refuses "two macros that call each other" "macro expansion nested more than 64 deep" -- "$IYI" check macropair.iyi
+printf 'class Base\n  macro inherited\n    class Sub < {{ @type }}\n    end\n  end\nend\n\nclass A < Base\nend\n' > macrohook.iyi
+refuses "an inherited hook its subclass sets off" "macro expansion nested more than 64 deep" -- \
+  "$IYI" check macrohook.iyi
+printf 'macro down(n)\n  {%% if n > 0 %%}\n    down({{ n - 1 }})\n  {%% else %%}\n    puts "bottom"\n  {%% end %%}\nend\n\ndown(60)\n' > macrodown.iyi
+if [ "$("$IYI" run macrodown.iyi 2>&1 | tr -d '\r')" = "bottom" ]; then
+  echo "  a macro recursion 61 levels deep that ends still runs"
+else
+  echo "  a macro recursion 61 levels deep that ends:"; "$IYI" run macrodown.iyi 2>&1 | sed -n '1,3p'; status=1
+fi
 # The caret under a line with tabs inside it: every character before the
 # column was counted as one space, so two tabs that pushed `nope` to
 # column 34 left the caret at 17. The caret line carries the shown line's

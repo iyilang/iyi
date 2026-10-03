@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A macro whose expansion runs it again is refused 64 levels deep.**
+  `macro m(x)` holding `m({{ x }})`, two macros calling each other, and an
+  `inherited` hook that declares a subclass of `{{ @type }}` expanded until
+  the stack ran out: "Stack overflow (e.g., infinite or very deep
+  recursion)" after 5 to 17 seconds, in `Lexer.iyi_source?`. Each
+  expansion counts the expansions it sits inside, and one more than 64
+  deep is refused at the call: "macro expansion nested more than 64 deep".
+  The bound is short of the stack for both shapes (a self-call ran out
+  near 4,900 levels, the `inherited` hook near 125) and a recursion that
+  ends inside it still runs. `bench/verbs_exercise.sh` checks the three
+  shapes and a 61-level recursion that prints `bottom`; the old compiler
+  answered the stack overflow.
+
 - **A macro whose expansion is not UTF-8 text is refused at the call.**
   `puts {{ "\xff".id }}`, `m("\xff")` through a macro writing `{{ x.id }}`,
   and a `# {{ "\xff".id }}` comment in a macro body ended `check` in

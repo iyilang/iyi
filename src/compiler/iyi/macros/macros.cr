@@ -71,6 +71,10 @@ class Iyi::Program
     parser.fun_nest = 1 if current_def && current_def.is_a?(External)
     parser.type_nest = 1 if inside_type
     parser.wants_doc = @program.wants_doc?
+    # iyi: see `VirtualFile#depth`.
+    if virtual.depth > VirtualFile::DEPTH_LIMIT
+      node.raise "macro expansion nested more than #{VirtualFile::DEPTH_LIMIT} deep: a macro whose expansion runs it again (a call of itself, of a macro that calls it back, or a class that sets off the `inherited` hook that wrote it) has to stop before that"
+    end
     generated_node = Prof.span("  macro: reparse") { yield parser }
     Prof.span("  macro: normalize") { normalize(generated_node, inside_exp: inside_exp, current_def: current_def) }
   end

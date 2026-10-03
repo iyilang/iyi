@@ -538,4 +538,14 @@ assert_int(first_left, 1, "set: in the order they went in")
 50000.times { |i| large.add(i) if i % 2 == 0 }
 assert_int(large.size, 50000, "set: and a deleted key comes back")
 
+# ---- Printed as the literal that spells it
+#
+# A string or character inspects with the other library's escapes, so an
+# element's quotes are not the collection's: `["a\", \"b"]` printed as two
+# strings, a tab inside a value as a tab, and `'\''` as `'''`.
+assert_str(["a\", \"b"].inspect, "[\"a\\\", \\\"b\"]", "inspect: a quote inside a string is escaped")
+assert_str({"k" => "a\tb\\\#{x}"}.inspect, "{\"k\" => \"a\\tb\\\\\\\#{x}\"}", "inspect: a tab, a backslash and an interpolation are escaped")
+assert_str(['\'', '\0', '"', 'é'].inspect, "['\\'', '\\0', '\"', 'é']", "inspect: a character's quote and NUL are escaped")
+assert_str(["\u0000\e\u007F\u00A0\u200B\u{E0001}\xFF"].inspect, "[\"\\u0000\\e\\u007F\\u00A0\\u200B\\u{E0001}\\xFF\"]", "inspect: what is not printable is hex")
+
 puts "all collection checks passed"

@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **`String#inspect` and `Char#inspect` escape what they hold, as the
+  other library's do, so an inspected value reads back as the one
+  inspected.** Neither escaped anything: `["a\", \"b"].inspect` printed
+  `["a", "b"]`, two strings for one, `{"k" => "a\tb"}` printed a raw tab,
+  `"say \"hi\"\n"` a raw quote and line break, and `'\''.inspect` was
+  `'''`. A string now escapes `"`, `\` and `#{`, a character `'` and `\`;
+  `\a \b \t \n \v \f \r \e` by letter, NUL as `'\0'` in a character and
+  `\u0000` in a string; whatever the new `Char#printable?` refuses as
+  `\uXXXX` or `\u{XXXXX}`; and a byte that is no UTF-8 as `\xFF`.
+  `printable?` is the other library's: not a control (Cc), format (Cf) or
+  private-use (Co) character of Unicode 15, nor whitespace but the space.
+  All 90 lines of a probe over C0, C1, the format characters, private use,
+  noncharacters and astral planes print as the other library prints them.
+  Array, Hash, Tuple and Range inspect their members, so they escape too.
+  `bench/collections_exercise.iyi` checks it; the old prelude printed
+  `["a", "b"]`.
+
 - **`String#to_i?`, `to_i` and `to_f` read a number with whitespace on
   either side, as the other library's `whitespace: true` does.** They
   read the whole string or nothing: `" 42".to_i?` and `"42\n".to_i?` were

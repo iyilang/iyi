@@ -111,17 +111,12 @@ class String
     to_unsafe[index].unsafe_chr
   end
 
-  # Every character in order, decoded: `size` counts code points, so this
-  # yields exactly that many. It used to yield one per byte, which made the
-  # prelude disagree with itself — `"héllo".size` was 5 and `each_char` ran
-  # six times — and `samples/iyi/basics` counted the bytes of a word it
-  # printed. Indexing stays byte-indexed (`[]` above), which is the
-  # convention `samples/iyi/calc` scans with; a character is a unit only
-  # where a character is what was asked for.
-  #
-  # A byte that begins no character is one U+FFFD, as in the other library.
-  # A lead byte took the bytes after it whatever they were: C3 41 was the one
-  # character U+00C1 at `size` 2, and `"a" C3 '"'` swallowed the quote.
+  # Every character in order, decoded, as many as `size` counts: it yielded
+  # one per byte, so `"héllo".size` was 5 and `each_char` ran six times.
+  # Indexing stays byte-indexed (`[]` above), as `samples/iyi/calc` scans.
+  # A byte that begins no character is one U+FFFD, as in the other library:
+  # a lead byte took the bytes after it whatever they were, C3 41 was the
+  # one character U+00C1, and `"a" C3 '"'` swallowed the quote.
   def each_char(& : Char -> Nil) : Nil
     each_point { |point| yield point < 0 ? '\uFFFD' : point.unsafe_chr }
   end
@@ -211,11 +206,16 @@ class String
     self
   end
 
-  # In double quotes, the way the literal is spelled: `no such key "b"`
-  # reads as a string and not a name. Nothing inside is escaped: the
-  # strings this prelude holds are the program's own.
+  # The literal that spells it, escaped as the other library's, a byte that
+  # is no UTF-8 as `\x`: unescaped, `["a\", \"b"]` printed as two strings.
   def inspect : String
-    "\"" + self + "\""
+    io = String::Builder.new(@bytesize + 2) << '"'
+    each_point do |point, at|
+      next io << "\\x" << to_unsafe[at].to_i32.to_s(16).upcase if point < 0
+      io << '\\' if point == 35 && at + 1 < @bytesize && to_unsafe[at + 1] == 123_u8
+      point.unsafe_chr.inspect_into(io, '"')
+    end
+    (io << '"').to_s
   end
 
   # The number this string spells - an optional sign and decimal digits,
@@ -557,18 +557,10 @@ class String
   end
 end
 
-# `Char`'s own, and it lives here rather than in `primitives.iyi` because the
-# one-byte string it builds needs `String.new`.
-#
-# Without it `puts s[0]` printed the text `Char`: `Object#to_s` answers with the
-# type's name, so a type that never defined `to_s` prints its own name instead
-# of its value and nothing says a method is missing. `samples/iyi/calc` scans
-# with `String#[]` and compares the result, which is why nothing caught it —
-# comparison was defined and printing was not.
-#
-# UTF-8, in one to four bytes. It wrote the low byte and nothing else, which
-# is right for the ASCII a byte-indexed `[]` hands back and wrong for every
-# other character a program can write: `puts 'é'` printed one invalid byte.
+# `Char`'s own, here rather than in `primitives.iyi` because the string it
+# builds needs `String.new`. Without `to_s`, `puts s[0]` printed `Char`, the
+# type's name; UTF-8 in one to four bytes, where it wrote the low byte
+# alone and `puts 'é'` printed one invalid byte.
 struct Char
   def to_s : String
     at = 0
@@ -608,7 +600,31 @@ struct Char
   end
 
   def inspect : String
-    "'" + to_s + "'"
+    String.build(12) { |io| inspect_into(io << '\'', '\'') << '\'' }
+  end
+
+  # Itself as `inspect` writes it between *quote*s, the other library's
+  # escapes; not `printable?`, as `\u` and hex. `'\''` was `'''`.
+  def inspect_into(io : String::Builder, quote : Char) : String::Builder
+    o = ord
+    return io << '\\' << self if self == quote || self == '\\'
+    return io << '\\' << "abtnvfr"[o - 7] if o >= 7 && o <= 13
+    return io << (o == 27 ? "\\e" : "\\0") if o == 27 || (o == 0 && quote == '\'')
+    return io << self if printable?
+    hex = o.to_s(16).upcase
+    io << (o > 0xFFFF ? "\\u{" + hex + "}" : "\\u" + hex.rjust(4, '0'))
+  end
+
+  # Not a control (Cc), format (Cf) or private-use (Co) character of
+  # Unicode 15, nor whitespace but the space: the other library's.
+  def printable? : Bool
+    o = ord
+    return o >= 0x20 && o != 0x7F if o < 0x80
+    !(o <= 0xA0 || whitespace? || o.in?(0xAD, 0x61C, 0x6DD, 0x70F, 0x8E2, 0x180E, 0xFEFF, 0x110BD, 0x110CD, 0xE0001) ||
+      (o >= 0x600 && o <= 0x605) || (o >= 0x890 && o <= 0x891) || (o >= 0x200B && o <= 0x200F) || (o >= 0x202A && o <= 0x202E) ||
+      (o >= 0x2060 && o <= 0x2064) || (o >= 0x2066 && o <= 0x206F) || (o >= 0xFFF9 && o <= 0xFFFB) || (o >= 0x13430 && o <= 0x1343F) ||
+      (o >= 0x1BCA0 && o <= 0x1BCA3) || (o >= 0x1D173 && o <= 0x1D17A) || (o >= 0xE0020 && o <= 0xE007F) ||
+      (o >= 0xE000 && o <= 0xF8FF) || (o >= 0xF0000 && (o & 0xFFFF) < 0xFFFE))
   end
 
   # The classes a word counter asks about, ASCII's: a letter is one of the
@@ -633,13 +649,10 @@ struct Char
   end
 end
 
-# Text built a piece at a time, the way `String.build` spells it in the
-# other library: `String.build { |io| io << "a" << 1 << 'b' }` is `"a1b"`.
-# The bytes go into one buffer that doubles when it fills and are copied
-# once, into the string, at the end — so building is linear in what is
-# written. `result = result + piece` in a loop copies everything written so
-# far on every piece: `Array#join` and `String#tr` were built that way and
-# did not finish on a 130 MB sequence.
+# Text built a piece at a time, as the other library's `String.build`: one
+# buffer that doubles when it fills, copied into the string once, at the
+# end. `result = result + piece` copies all written so far on every piece:
+# `Array#join` and `String#tr` built that way did not finish on 130 MB.
 class String::Builder
   @buffer : Pointer(UInt8)
   @bytesize : Int32

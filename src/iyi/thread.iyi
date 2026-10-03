@@ -336,10 +336,11 @@
     IYI_MC_PC    = 272_u64
 
   {% elsif flag?(:win32) %}
-    # The rest of kernel32 is declared in prelude.iyi; this one is asked
-    # by `core_count` alone.
+    # The rest of kernel32 is declared in prelude.iyi; these are asked by
+    # `core_count` and `first_written` alone.
     lib LibC
       fun GetProcessAffinityMask(process : Void*, process_mask : UInt64*, system_mask : UInt64*) : Int32
+      fun VirtualQuery(address : Void*, buffer : Void*, length : UInt64) : UInt64
     end
   {% end %}
 
@@ -1136,10 +1137,41 @@
           sp = IyiHeap.read64(cursor + IYI_TL_SP)
           top = IyiScheduler.fiber_top_holding(sp)
           top = IyiHeap.read64(cursor + IYI_TL_TOP) if top == 0
+          {% if flag?(:win32) %}
+            sp = first_written(sp, top)
+          {% end %}
           IyiRoots.scan_range(sp, top, visit)
         end
         cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
       end
     end
+
+    {% if flag?(:win32) %}
+      # Where a stopped thread's stack starts holding anything: *sp*, or the
+      # first committed page above it that is not a guard page. A thread, or
+      # a task on a fiber stack, stopped after its `sub rsp` or push moved
+      # sp below StackLimit and before its first touch of the new page has
+      # sp in that stack's PAGE_GUARD page. Only the owner's touch grows a
+      # stack; the collector's raised STATUS_GUARD_PAGE_VIOLATION in the
+      # collector and cleared the guard. On a thread's stack nothing claims
+      # that, and the process died with 0x80000001 and nothing printed: ten
+      # runs in ten of one thread collecting while new threads recursed
+      # 2,000 frames, inside 0.65 s. On a fiber's the overflow handler named
+      # it, and a task 1,500 frames into its 256 KiB was reported a "stack
+      # overflow" (6 runs in 20). Nothing below a guard page was ever
+      # written, so the scan begins above it.
+      def self.first_written(sp : UInt64, top : UInt64) : UInt64
+        buffer = uninitialized UInt64[6]
+        info = pointerof(buffer).as(Pointer(UInt64))
+        while sp < top && LibC.VirtualQuery(Pointer(Void).new(sp), info.as(Void*), 48_u64) != 0_u64
+          # MEMORY_BASIC_INFORMATION: the base, the size at 24, the state
+          # at 32 (MEM_COMMIT 0x1000) and the protection at 36 (PAGE_GUARD
+          # 0x100).
+          return sp if (info[4] & 0xFFFFFFFF_u64) == 0x1000_u64 && (info[4].unsafe_shr(32_u64) & 0x100_u64) == 0_u64
+          sp = info[0] + info[3]
+        end
+        sp
+      end
+    {% end %}
   end
 {% end %}

@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- **On Windows a collection no longer reads a stopped thread's guard
+  page.** A stop scanned each stopped thread's stack from its saved sp,
+  and a thread, or a task on its fiber stack, stopped after a frame moved
+  sp below the committed stack and before it first touched the new page
+  has sp in that stack's `PAGE_GUARD` page. Read from the collecting
+  thread, the page raised `STATUS_GUARD_PAGE_VIOLATION` there and lost
+  its guard: on a thread's stack nothing claims that, and the process
+  died with 0x80000001 and nothing printed; on a fiber's, the overflow
+  handler reported a "stack overflow" nobody had. Four threads each
+  starting threads that recurse 2,000 frames and run two tasks of 400,
+  beside a thread collecting in a loop: ten runs in ten died within a
+  second. The scan asks `VirtualQuery` and starts at the first committed
+  page above sp that is not a guard page, where everything the thread
+  wrote is: ten runs of two seconds in ten end.
+  `bench/thread_exercise.sh` step 7c runs it three times, and puts the
+  scan from sp back as its failure proof; the old runtime died in ten
+  runs of ten, five with exit 0x80000001 and nothing printed and five
+  with `iyi: panic: stack overflow`.
+
 - **A live `Channel` keeps no value it was offered and never
   delivered.** Only a delivery emptied a send node, and the channel keeps
   its last node: a 48 MB select send arm that timed out kept 45 MiB, a

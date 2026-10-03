@@ -49,6 +49,9 @@
 #      collections stop it ends, two hundred runs of two hundred; and with
 #      the end put back into the C runtime's `exit` a run never ends, and
 #      is released by resuming its threads.
+#  7c. On Windows, threads and their tasks grow fresh stacks while a thread
+#      collects in a loop, and every run ends; with the stop's scan started
+#      at sp again, inside the guard page, a run dies.
 #
 # Linux x86_64 and aarch64, darwin aarch64.
 set -u
@@ -1471,6 +1474,108 @@ IYI
       echo "ten runs with the handle written after the unlock all ended well"; exit 1
     fi
     printf '  run %s of up to ten: "%s"\n' "$caught" "$(head -1 unnamed.txt | tr -d '\r' | cut -d. -f1)"
+    ;;
+esac
+
+# ── 7c. Windows: a stop scans no stack's guard page ──────────────────────
+# A thread, or a task on its fiber stack, stopped after a frame moved sp
+# below the committed stack and before its first touch of the new page
+# has sp in that stack's guard page, and the scan from sp read it from the
+# collecting thread: STATUS_GUARD_PAGE_VIOLATION there, and the process
+# died with 0x80000001 and nothing printed, or a fiber's overflow handler
+# named a "stack overflow" nobody had. The scan starts at the first
+# committed page that is not a guard page now. Ten runs of the old scan
+# in ten died, each inside a second; the proof puts it back.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "threads and tasks grow fresh stacks beside a thread collecting in a loop: three runs, and every one ends"
+    cat > guard.iyi <<'IYI'
+class Shared
+  getter stop : Atomic(Int64)
+  getter grown : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+    @grown = Atomic(Int64).new(0_i64)
+  end
+end
+
+# Sixteen words a frame, each read back after the call below returns:
+# every level steps sp into a page this stack has not touched yet.
+def deep(n : Int32) : Int32
+  return 0 if n == 0
+  pad = uninitialized UInt64[16]
+  slot = pointerof(pad).as(Pointer(UInt64))
+  slot.value = n.to_u64
+  below = deep(n - 1)
+  below + (slot.value == n.to_u64 ? 0 : 1)
+end
+
+shared = Shared.new
+collector = IyiThread.start do
+  while shared.stop.get == 0_i64
+    IyiMark.collect
+  end
+  nil
+end
+deadline = IyiMark.now_ns + Program.args[0].to_i.to_u64 * 1000000_u64
+workers = [] of IyiThread
+4.times do
+  workers << IyiThread.start do
+    while IyiMark.now_ns < deadline
+      # A new thread each time: its stack and its tasks' stacks are
+      # committed only as they grow.
+      IyiThread.start do
+        raise "a thread's frames read back wrong" if deep(2000) != 0
+        group do |g|
+          2.times { g.spawn { deep(400) } }
+          0
+        end
+        nil
+      end.join
+      shared.grown.add(1_i64)
+    end
+    nil
+  end
+end
+workers.each(&.join)
+shared.stop.set(1_i64)
+collector.join
+puts "stacks grown beside a collecting thread: #{shared.grown.get > 0}"
+IYI
+    if ! "$IYI" build guard.iyi -o guard > build-guard.log 2>&1; then
+      cat build-guard.log; exit 1
+    fi
+    run=1
+    while [ "$run" -le 3 ]; do
+      timeout -k 5 60 ./guard 2000 > guard.txt 2>&1
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q '^stacks grown beside a collecting thread: true' guard.txt; then
+        echo "run $run exited $code:"; tail -3 guard.txt; exit 1
+      fi
+      run=$((run + 1))
+    done
+    echo "  three runs of two seconds, and every one ended"
+
+    step "failure proof: the scan from sp again, guard page and all, and a run dies"
+    mkdir -p guarded/iyi
+    cp "$REPO"/src/iyi/*.iyi guarded/iyi/
+    awk '/^            sp = first_written\(sp, top\)$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > guarded/iyi/thread.iyi || { echo "the scan's start is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/guarded${PSEP}$REPO/src" "$IYI" build guard.iyi -o guard-from-sp > build-guarded.log 2>&1; then
+      cat build-guarded.log; exit 1
+    fi
+    caught=0
+    run=1
+    while [ "$caught" -eq 0 ] && [ "$run" -le 5 ]; do
+      timeout -k 5 60 ./guard-from-sp 2000 > guarded.txt 2>&1
+      grep -q '^stacks grown beside a collecting thread: true' guarded.txt || caught=$run
+      run=$((run + 1))
+    done
+    if [ "$caught" -eq 0 ]; then
+      echo "five runs scanning from sp all ended well"; exit 1
+    fi
+    echo "  run $caught of up to five died"
     ;;
 esac
 

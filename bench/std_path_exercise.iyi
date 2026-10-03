@@ -4,7 +4,8 @@
 #   * normalize, dirname, basename, extension, stem, parts, parents on a
 #     corpus, printed as `oracle` lines the shell script replays through
 #     python3's posixpath.
-#   * join and `/`, with an anchored right-hand side winning.
+#   * join and `/`, with an anchored right-hand side winning, and on
+#     Windows a root or a drive-relative name read on the left's drive.
 #   * relative_to on a corpus (replayed through posixpath.relpath), and
 #     the two refusals: different anchors, a base that climbs through `..`.
 #   * expand under an explicit base and under `PWD`, `home:` under `HOME`.
@@ -228,6 +229,14 @@ assert_str("C:\\base\\\u00e9", Path.windows("C:\u00e9").expand(base).to_s, "a dr
 assert_str("D:\\\u00e9x", Path.windows("D:\u00e9x").expand(base).to_s, "a non-ASCII name on another drive expands whole")
 # Only a bare drive joins without a separator; `foo:` is a name.
 assert_str("foo:\\bar", Path.windows("foo:").join("bar").to_s, "only a bare drive joins without a separator")
+# A Windows anchor can be half of one, and the other half is the left
+# side's, as ntpath joins: `C:\a` joined with `\b` was `\b`, a root on
+# whatever drive is current, and with `C:b` it was `C:b`.
+assert_str("C:\\b", Path.windows("C:\\a").join("\\b").to_s, "a root joined onto a drive path stays on the drive")
+assert_str("\\\\srv\\sh\\y", Path.windows("\\\\srv\\sh\\x").join("/y").normalize.to_s, "a root joined onto a share stays on the share")
+assert_str("C:\\a\\b", Path.windows("C:\\a").join("c:b").to_s, "a drive-relative name on the same drive goes under the left side")
+assert_str("D:b", Path.windows("C:\\a").join("D:b").to_s, "a drive-relative name on another drive is the answer by itself")
+assert_str("\\b", Path.windows("a").join("\\b").to_s, "a root joined onto a name with no drive is the answer by itself")
 # `/` and `\` are one separator to `==` and to a hash as well.
 assert_true(Path.windows("C:/a") == Path.windows("C:\\a"), "/ and \\ are one separator in ==")
 assert_true(h[Path.windows("c:/a")]? == 1, "and in the hash")

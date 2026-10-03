@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **On Windows `Path#join` keeps the left side's drive for a root or a
+  drive-relative name, as ntpath joins.** A right-hand side with any
+  anchor was the answer by itself, so `Path.windows("C:\\a").join("\\b")`
+  was `\b`, a root on whatever drive is current, and `join("c:b")` was
+  `c:b`, where `expand` already read both on `C:\a`; `File.join`
+  answered the same. A root with no drive lands on the left side's drive
+  now (`C:\b`), and a drive-relative name on the same drive goes under
+  the left side (`C:\a\b`); a name on another drive is still the answer
+  by itself, and POSIX paths are unchanged. `expand` reads rooted and
+  same-drive names through `join`. Of 6,000 random pairs, normalized,
+  three differ from Python's `ntpath.join`: two where ntpath compares
+  `//srv/sh` and `\\srv\sh` as strings, one a share whose name ends in
+  a colon. `bench/std_path_exercise.iyi` checks each case and the `.sh`
+  proves the check fails with the drive dropped; the old module answered
+  `\b`.
+
 - **`Box(T).unbox` of a null pointer is nil when `T` admits nil.** It
   panicked "Unboxing null pointer" for every `T`, so
   `Box(String?).unbox` of the null a C callback is handed when there is

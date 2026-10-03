@@ -406,12 +406,25 @@ pub struct Path
   end
 
   # `self` with *part* under it; a *part* with an anchor of its own is
-  # the answer by itself, and an empty one changes nothing.
+  # the answer by itself, and an empty one changes nothing. A Windows
+  # anchor can be half of one, and then the other half is `self`'s, as
+  # ntpath joins and Windows reads the name: a root with no drive is on
+  # `self`'s drive, and a drive-relative *part* on `self`'s drive goes
+  # under `self`. Answered by itself, `C:\a` joined with `\b` was `\b`,
+  # a root on whatever drive is current, and with `C:b` it was `C:b`,
+  # where `expand` read both on `C:\a`.
   def join(part : String) : Path
     return self if part.empty?
     p = Path.new(part, @kind)
-    return p if p.anchor
     return p if @name.empty?
+    if p.anchor
+      own = drive
+      their = p.drive
+      return Path.new(own + part, @kind) if own && their.nil?
+      return p unless own && their && p.root.nil? && compare_names(own, their) == 0
+      part = part[their.bytesize, part.bytesize - their.bytesize]
+      return self if part.empty?
+    end
 
     # Nor after a bare drive: `C:` is the current directory on C:, and
     # `C:` joined with `foo` is `C:foo`, the way `normalize` spells it;
@@ -565,25 +578,18 @@ pub struct Path
                  Path.new(pwd || raise("cannot expand #{@name.inspect}: no base given, and neither PWD nor the process's own directory answers"), @kind)
                end
     raise "cannot expand #{@name.inspect}: base #{base_dir.name.inspect} is not absolute" unless base_dir.absolute?
-    # A Windows path can be anchored and still not absolute, and `join`
-    # hands back an anchored part as it is: `\foo` and `C:foo` came out
-    # as themselves, where the answer promised is absolute. `\foo` is
-    # rooted on the base's drive. `C:foo` is under the base when the base
-    # is on C:, and under C:'s root otherwise, which is what Windows makes
-    # of a drive this process has not been to.
+    # A Windows path can be anchored and still not absolute. `join` puts
+    # `\foo` on the base's drive and `C:foo` under the base when the base
+    # is on C:; on another drive `C:foo` is under C:'s root, which is what
+    # Windows makes of a drive this process has not been to.
     unless posix?
       drive = p.drive
-      if drive && p.root.nil?
+      base_drive = base_dir.drive
+      if drive && p.root.nil? && !(base_drive && compare_names(base_drive, drive) == 0)
         # Bytes, as the slice counts: `size` counts characters, and
         # `C:é` expanded to a cut-off `C:\b\` plus half of the `é`.
         rest = p.name[drive.bytesize, p.name.bytesize - drive.bytesize]
-        base_drive = base_dir.drive
-        if base_drive && base_drive.downcase == drive.downcase
-          return base_dir.join(rest).normalize
-        end
         return Path.new(drive + separator + rest, @kind).normalize
-      elsif drive.nil? && p.root
-        return Path.new((base_dir.drive || "") + p.name, @kind).normalize
       end
     end
     base_dir.join(p).normalize

@@ -199,10 +199,15 @@ if [ -n "$PY" ]; then
     'a UNC share has no extension'
   caught_at "a drive-relative rest cut by characters" \
     'rest = p.name[drive.bytesize, p.name.bytesize - drive.bytesize]' 'rest = p.name[drive.size, p.name.size - drive.size]' \
-    'a drive-relative non-ASCII name expands whole'
+    'a non-ASCII name on another drive expands whole'
   caught_at "any name ending in : joined like a drive" \
     '(drive_end == 2 && anchor_end == 2 && @name.bytesize == 2)' '(!posix? && @name.ends_with?(":"))' \
     'only a bare drive joins without a separator'
+  # `expand` reads a rooted name through `join` now, so its check is the
+  # first one a join that drops the drive reaches.
+  caught_at "a root joined onto a drive path answered by itself" \
+    'return Path.new(own + part, @kind) if own && their.nil?' '# a half anchor taken whole' \
+    'expands onto the base'
 fi
 
 echo

@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`HttpDatagram.from_stream_id` refuses a stream ID that is no
+  client-initiated bidirectional stream.** RFC 9297 Section 2.1
+  associates an HTTP Datagram with a request stream and nothing else,
+  which is why its Quarter Stream ID is the stream ID divided by four
+  with nothing left over. The module divided any stream ID down, so
+  `from_stream_id(19_u64, payload)` built a datagram for stream 16,
+  another request's, and its `stream_id` answered 16; the exercise had
+  pinned that. A stream ID that is not a multiple of four is refused
+  with a sentence naming the section now, and one past 2^62 - 1 is still
+  refused by the quarter it would be. `bench/std_capsule_exercise.iyi`
+  round-trips request streams up to 2^62 - 4 and
+  `bench/std_capsule_exercise.sh` checks that streams 19 and 1 are
+  refused; the old module answered quarter 4 and stream 16 for 19.
+
 - **`abort` ends the program as `exit` does: what the task deferred
   runs, and buffered output is written.** It wrote its message with the
   runtime's own `__iyi_write` and ended with `__iyi_exit`, which skip

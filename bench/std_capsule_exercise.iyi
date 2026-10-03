@@ -224,13 +224,13 @@ dg16 = HttpDatagram.from_stream_id(16_u64, Bytes.new(0))
 assert_u64 4_u64, dg16.quarter_stream_id, "qid from stream 16"
 assert_u64 16_u64, dg16.stream_id, "stream_id from qid 4"
 
-dg19 = HttpDatagram.from_stream_id(19_u64, Bytes.new(0))
-assert_u64 4_u64, dg19.quarter_stream_id, "qid from stream 19 (19 // 4 = 4)"
-assert_u64 16_u64, dg19.stream_id, "stream_id from qid 4"
-
-dg1 = HttpDatagram.from_stream_id(1_u64, Bytes.new(0))
-assert_u64 0_u64, dg1.quarter_stream_id, "qid from stream 1"
-assert_u64 0_u64, dg1.stream_id, "stream_id from qid 0 (1 // 4 * 4)"
+# Every request stream round trips; one that is no request stream is
+# refused (the .sh beside this file): RFC 9297 Section 2.1 carries a
+# datagram on client-initiated bidirectional streams alone, whose IDs are
+# multiples of four, and stream 19 was divided down to stream 16's.
+[4_u64, 8_u64, 1024_u64, VarInt::MAX - 3_u64].each do |sid|
+  assert_u64 sid, HttpDatagram.from_stream_id(sid, Bytes.new(0)).stream_id, "stream #{sid} round trips through its quarter"
+end
 # RFC 9297 Section 2.1: a stream ID is at most 2^62 - 1, so a Quarter Stream
 # ID is at most 2^60 - 1 and a larger one on the wire is an error.
 qid_max = 1152921504606846975_u64

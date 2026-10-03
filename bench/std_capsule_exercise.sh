@@ -10,7 +10,8 @@
 # Capsule-Protocol value whose parameters are not parsed are each caught,
 # and what `capsule` refuses: 62-bit integer overflow, explicit length
 # mismatch, overlong varints in strict mode, Quarter Stream IDs past
-# 2^60 - 1, and truncated buffers or length overruns in datagram and capsule
+# 2^60 - 1, a stream ID that is no client-initiated bidirectional stream,
+# and truncated buffers or length overruns in datagram and capsule
 # framing.
 set -u
 
@@ -182,6 +183,8 @@ refuses "overlong datagram qid in strict mode" datagram_overlong "overlong varin
 refuses "datagram quarter stream id past 2^60 - 1" datagram_qid_overflow "http datagram quarter stream id exceeds maximum 2^60 - 1" 'HttpDatagram.new(1152921504606846976_u64, Bytes.new(0))'
 refuses "decoded quarter stream id past 2^60 - 1" datagram_qid_decoded "http datagram quarter stream id exceeds maximum 2^60 - 1" 'HttpDatagram.decode(VarInt.encode(1152921504606846976_u64))'
 refuses "stream id past 2^62 - 1" datagram_sid_overflow "http datagram quarter stream id exceeds maximum 2^60 - 1" 'HttpDatagram.from_stream_id(18446744073709551615_u64, Bytes.new(0))'
+refuses "stream id that is no request stream" datagram_sid_unaligned "http datagram stream id 19 is not a client-initiated bidirectional stream" 'HttpDatagram.from_stream_id(19_u64, Bytes.new(0))'
+refuses "server-initiated stream id" datagram_sid_server "http datagram stream id 1 is not a client-initiated bidirectional stream" 'HttpDatagram.from_stream_id(1_u64, Bytes.new(0))'
 refuses "truncated capsule on empty buffer" capsule_trunc "truncated capsule: buffer empty or offset beyond end" 'Capsule.decode(Bytes.new(0))'
 refuses "capsule truncated before length" capsule_len_trunc "truncated capsule: buffer ends before capsule length" 'b = Bytes.new(1); b[0] = 0x00_u8; Capsule.decode(b)'
 refuses "capsule length overrunning buffer" capsule_overrun "capsule length overruns buffer" 'b = Bytes.new(3); b[0] = 0x00_u8; b[1] = 0x10_u8; b[2] = 0xAA_u8; Capsule.decode(b)'

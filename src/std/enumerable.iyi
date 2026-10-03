@@ -628,8 +628,11 @@ pub trait Enumerable
     theirs = other.to_a
     result = [] of Tuple(Elem, O::Elem)
     i = 0
+    # As many pairs as this collection has elements, and a shorter *other*
+    # refused at its first missing index, as the other library refuses it:
+    # the pairs stopped at the shorter, and an element went without a word.
     each do |e|
-      result << {e, theirs[i]} if i < theirs.size
+      result << {e, theirs[i]}
       i = i + 1
     end
     result

@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- **`zip` refuses a shorter other collection at its first missing
+  index, as the other library does.** `Array#zip`, its block form and
+  `Enumerable#zip` stopped at the shorter, so `[1, 2, 3].zip([4, 5])`
+  answered `[{1, 4}, {2, 5}]` and dropped 3 without a word; the other
+  library raises IndexError, the block form after yielding the two pairs
+  it has. The entry that added the block form said it stopped at the
+  shorter "as Crystal 1.21 yields them", which was not so, and SPEC.md
+  records no decision for it. All three panic now with `index 2 out of
+  range for 2 elements`, the block form after its two pairs; a longer
+  other still gives as many pairs as the receiver holds, and the lazy
+  `Iterator#zip` still stops at the shorter, as the other library's does.
+  **The answer changes:** `samples/iyi/collections.iyi` zipped five
+  numbers with four words and zips four now, printing the same line, and
+  `bench/std_indexable_exercise.iyi`'s block-zip check, which pinned the
+  stop, takes a longer other. `bench/collections_exercise.sh` and
+  `bench/std_exercise.sh` check the refusals; the old prelude answered 2
+  and the old std/enumerable 3.
+
 - **`Array#max_by` and `min_by` place a NaN key where `<=>` does, above
   every number.** They read the keys with `<`, which is false both ways
   against NaN, so `[1.0, NaN, 0.5].max_by(&.itself)` was 1.0 and

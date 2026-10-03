@@ -95,8 +95,10 @@ puts "tally_by        #{w.tally_by { |s| s.size }[4]}"
 puts "sum_by          #{w.sum_by { |s| s.size }}"
 
 # SPEC II.6 finding 6: one bound replaces `Indexable | Iterable | Iterator`,
-# and `O::Elem` names what the other collection yields.
-puts "zip             #{n.zip(w).map { |pair| "#{pair[0]}#{pair[1]}" }.join(" ")}"
+# and `O::Elem` names what the other collection yields. Four numbers for
+# four words: a shorter other collection is refused, as the other library
+# refuses it.
+puts "zip             #{Nums.new([3, 1, 4, 1]).zip(w).map { |pair| "#{pair[0]}#{pair[1]}" }.join(" ")}"
 
 cycled = [] of Int32
 Nums.new([1, 2]).cycle(2) { |x| cycled << x }

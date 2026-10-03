@@ -500,12 +500,12 @@ class Array(T)
     set
   end
 
-  # Pairs, element by element, as long as the shorter.
+  # Pairs, element by element, as many as this array holds: a shorter
+  # *other* is refused at its first missing index, as the other library does.
   def zip(other : Array(U)) : Array(Tuple(T, U)) forall U
-    count = @size < other.size ? @size : other.size
-    result = Array(Tuple(T, U)).new(count)
+    result = Array(Tuple(T, U)).new(@size)
     index = 0
-    while index < count
+    while index < @size
       result << {@buffer[index], other[index]}
       index = index + 1
     end
@@ -514,11 +514,10 @@ class Array(T)
 
   # The same pairs handed to a block, with no array of them made: the
   # other library's `a.zip(b) { |x, y| ... }`, which a training loop calls
-  # a few million times.
+  # a few million times, and which refuses a shorter *other* the same way.
   def zip(other : Array(U), & : T, U -> _) : Nil forall U
-    count = @size < other.size ? @size : other.size
     index = 0
-    while index < count
+    while index < @size
       yield @buffer[index], other[index]
       index = index + 1
     end

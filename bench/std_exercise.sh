@@ -276,6 +276,10 @@ panics_with "minmax_by of an empty list" minmax_by_empty "minmax_by of an empty 
   'List(Int32).new([] of Int32).minmax_by { |x| x }[0]'
 panics_with "groups of nothing" in_groups_zero "group size must be positive" \
   'List(Int32).new([1, 2, 3]).in_groups_of(0, 0)'
+# A zip with a shorter collection is refused, as the other library refuses
+# it: the pairs stopped at the shorter, and an element went unsaid.
+panics_with "a zip with a shorter collection" zip_shorter "index 3 out of range for 3 elements" \
+  'List(Int32).new([1, 2, 3, 4]).zip(List(Int32).new([5, 6, 7])).size'
 
 echo
 echo "== the library is iyi all the way down"

@@ -121,6 +121,10 @@ panics_with "an index past the end" index_past "out of range for 2 elements" "[1
 panics_with "an index before the start" index_before "out of range for 2 elements" "[1, 2][-5]"
 panics_with "a key nobody put in" missing_key "no such key" "({} of Int32 => Int32)[5]"
 panics_with "a negative count" negative_count "negative count" "[1, 2].first(-1).size"
+# A zip with a shorter array is refused, as the other library refuses it:
+# the pairs stopped at the shorter, and the third element went unsaid.
+panics_with "a zip with a shorter array" zip_shorter "index 2 out of range for 2 elements" "[1, 2, 3].zip([4, 5]).size"
+panics_with "a block zip with a shorter array" zip_block_shorter "index 2 out of range for 2 elements" "[1, 2, 3].zip([4, 5]) { |a, b| a + b }"
 
 echo
 echo "== proving the checks can fail, one broken method at a time"

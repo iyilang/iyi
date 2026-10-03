@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- **An abstract generic class survives its artifact.** Its header was
+  written `pub abstract generic class Src(T)`, which a consumer could not
+  read back. And a stale artifact whose source is gone is no longer told
+  to pass `--emit-iyimod`, which cannot rebuild it without the source;
+  the refusal says so. Found by 907 more generated multi-module programs
+  - 1,500 in all, every other one agreeing from source and artifacts.
 - **Six programs a module's artifacts could not build now build from
   them.** A `--release` program linking artifacts was one LLVM module,
   which hid the symbols an artifact's object code calls by name -

@@ -654,7 +654,8 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # The artifact is no longer the module. A build that also writes artifacts
     # is the incremental loop, and recompiling this module from its source —
     # and rewriting the artifact on the way out — is what it asked for.
-    return nil if @program.iyi_rewrites_artifacts && resolve_import(path)
+    source = resolve_import(path)
+    return nil if @program.iyi_rewrites_artifacts && source
 
     # iyi: the reason gets its own sentence. It used to be spliced into "is not
     # X any more", which reads as staleness — and a truncated file is not
@@ -672,9 +673,18 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         false
       end
 
+    # iyi: both halves of the usual remedy compile the module from its source,
+    # and with the source gone neither can. Told to pass --emit-iyimod, a
+    # build that had passed it was being handed the sentence it had already
+    # acted on.
     remedy =
       if bound
         "Rebuild the boundary with `iyi bind`."
+      elsif source.nil?
+        "\"#{path}\" has no source here to compile in its place, so " \
+        "--emit-iyimod cannot rewrite it: put its source back, or rebuild " \
+        "the artifact where its source is, with the artifacts it imports " \
+        "beside it."
       else
         "Rebuild it with --emit-iyimod, or pass --emit-iyimod to this build " \
         "and let it rewrite what has moved."

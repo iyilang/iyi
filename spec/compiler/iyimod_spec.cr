@@ -3725,6 +3725,53 @@ describe Iyi::IyiMod do
     end
   end
 
+  # The remedy for a stale artifact compiles the module from its source. With
+  # the source gone that is not a remedy, and a build that had passed
+  # --emit-iyimod was still told to pass it.
+  it "does not offer --emit-iyimod for an artifact with no source to rebuild from" do
+    with_tempdir("iyimod_stale_no_source") do
+      Dir.mkdir_p "app"
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import app/half
+
+        puts App::Half.half(3.0)
+        IYI
+      File.write "app/half.iyi", <<-IYI
+        module app/half
+
+        import std/float
+
+        pub def half(x : Float64) : Float64
+          x / 2
+        end
+        IYI
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+
+      # Only the module's own artifact, without the `std/float` one it was
+      # compiled against, and without its source.
+      Dir.mkdir_p "only/app"
+      File.copy "mods/app/half.iyimod", "only/app/half.iyimod"
+      File.delete "app/half.iyi"
+
+      rewriter = create_spec_compiler
+      rewriter.prelude = "iyi/prelude"
+      rewriter.use_iyimod = "only"
+      rewriter.emit_iyimod = "only"
+      error = expect_raises(Iyi::TypeException, /"std\/float", which it imports, has: there is no artifact for it/) do
+        rewriter.compile source, File.expand_path("rewritten")
+      end
+      error.message.to_s.should contain %("app/half" has no source here to compile in its place)
+      error.message.to_s.should_not contain "pass --emit-iyimod to this build"
+    end
+  end
+
   # A module path is a file path (R-1), so the same name can come to mean a
   # different file: `src/std/` ships a `std/text`, and a program with one of
   # its own that deletes it finds the library's at that path. The artifact is
@@ -5255,6 +5302,52 @@ describe Iyi::IyiMod do
         IYI
       from_source, from_artifact = iyimod_round_trip(modules, main)
       from_source.should eq "own\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # An abstract generic class. Its kind is `abstract generic class`, and the
+  # header took `generic ` off the front only, so the consumer read
+  # `pub abstract generic class Src(T)` and stopped on "`pub abstract` takes a
+  # class, a struct or a def".
+  it "renders an abstract generic class it can read back" do
+    with_tempdir("iyimod_abstract_generic") do
+      modules = {"app/src.iyi" => <<-IYI}
+        module app/src
+
+        pub abstract class Src(T)
+          abstract def value : T
+
+          def pair : Array(T)
+            [value, value]
+          end
+        end
+
+        pub class IntSrc < Src(Int32)
+          def initialize(@n : Int32)
+          end
+
+          def value : Int32
+            @n * 2
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import app/src::*
+
+        class StrSrc < Src(String)
+          def value : String
+            "s"
+          end
+        end
+
+        puts IntSrc.new(4).pair
+        puts StrSrc.new.pair
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "[8, 8]\n[\"s\", \"s\"]\n"
       from_artifact.should eq from_source
     end
   end

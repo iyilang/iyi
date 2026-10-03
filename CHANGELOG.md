@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`iyi migrate` of one file below the source root writes its sidecar
+  beside the module.** The sidecar of a reopening (`struct Int32`) was
+  put under the file's directory and the module path's own directory
+  again: `iyi migrate src/shop/counter.cr` wrote `src/shop/counter.iyi`
+  and `src/shop/shop/counter_crystal.cr`, and the next command it
+  printed, `iyi check --crystal src/shop/counter.iyi`, answered `can't
+  find file './counter_crystal.cr'`. Module and sidecar are placed by
+  one rule now, and the check is clean. `bench/migrate_gate.sh` migrates
+  such a file and checks it; the old verb wrote
+  `src/sub/sub/counter_crystal.cr`.
+
 - **`iyi lsp`, `iyi bind` and `iyi migrate` refuse a flag they do not
   have, by name.** `iyi lsp --bogus extra` served a session as if it
   were `iyi lsp`, `iyi bind --bogus` was a shard named `--bogus` and

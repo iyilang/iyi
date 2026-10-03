@@ -590,7 +590,11 @@ class Iyi::Command
 
       sidecars = members.reject(&.sidecar.empty?)
       sidecars.each do |member|
-        sidecar_path = File.join(out_dir, File.dirname(module_path), "#{File.basename(member.path)}_crystal.cr")
+        # Beside the module, wherever that is written: one file at a time
+        # put `src/shop/counter.cr`'s module beside it and the sidecar under
+        # a second `shop/`, at `src/shop/shop/counter_crystal.cr`, so the
+        # module's `require "./counter_crystal.cr"` found nothing.
+        sidecar_path = File.join(File.dirname(migrate_target(module_path, single, out_named, out_dir)), "#{File.basename(member.path)}_crystal.cr")
         Dir.mkdir_p(File.dirname(sidecar_path))
         # `""` for the module path, because a sidecar is outside every
         # module: no name collapses to the bare spelling, all of them are
@@ -662,17 +666,7 @@ class Iyi::Command
     end
 
     written.each do |module_path, text|
-      # One file at a time goes *beside* its source, under its own name.
-      # The header still says `module kemal/base_log_handler`, which is
-      # what an importer writes and where the file already sits under the
-      # tree's source root - `out_dir/kemal/base_log_handler.iyi` from a
-      # run inside that directory made a second `kemal/` under it.
-      target =
-        if single && out_named.nil?
-          File.join(File.dirname(single), "#{File.basename(module_path)}.iyi")
-        else
-          File.join(out_dir, "#{module_path}.iyi")
-        end
+      target = migrate_target(module_path, single, out_named, out_dir)
       Dir.mkdir_p(File.dirname(target))
       File.write(target, crlf_modules.includes?(module_path) ? text.gsub('\n', "\r\n") : text)
       written_paths[module_path] = target
@@ -853,6 +847,21 @@ class Iyi::Command
       true
     end
   {% end %}
+
+  # Where a module is written. One file at a time goes *beside* its source,
+  # under its own name, unless `--out` said otherwise. The header still
+  # says `module kemal/base_log_handler`, which is what an importer writes
+  # and where the file already sits under the tree's source root -
+  # `out_dir/kemal/base_log_handler.iyi` from a run inside that directory
+  # made a second `kemal/` under it. A tree goes under `--out` at the
+  # module's path.
+  private def migrate_target(module_path : String, single : String?, out_named : String?, out_dir : String) : String
+    if single && out_named.nil?
+      File.join(File.dirname(single), "#{File.basename(module_path)}.iyi")
+    else
+      File.join(out_dir, "#{module_path}.iyi")
+    end
+  end
 
   # A flag's value, which is not the flag written after it. `--out` only
   # tested for the end of argv, so `migrate tree --out --check` took

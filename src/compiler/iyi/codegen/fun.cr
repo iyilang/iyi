@@ -23,15 +23,20 @@ class Iyi::CodeGenVisitor
     iyi_record_unit_lib(target_def)
 
     # iyi: a method that takes a block is instantiated with the caller's block
-    # inlined into it, so its machine code belongs to whoever wrote the block
-    # and not to the module that declared the method (SPEC.md IV.1g).
+    # inlined into it, and a `forall` method at the caller's types, so its
+    # machine code belongs to whoever wrote the call and not to the module
+    # that declared the method (SPEC.md IV.1g).
     #
     # Emitted here, private to this unit, and so absent from the artifact —
     # which is what the consumer needs, because it makes its own from the body
     # that travels in `MonoBodies`. Left in the module's own unit it was a
     # duplicate symbol for a block the producer happened to write, and a
-    # missing one for every block it did not.
-    if iyi_block_instantiated?(target_def, self_type)
+    # missing one for every block it did not. A `forall` def left there also
+    # took the producer's own types into the library's artifact:
+    # `wrap(Meters.new)` in a program put `Lib::Box2::Box(Q4::Meters)` in
+    # `lib/box2`'s type ids, and every other program importing it was refused
+    # because it "cannot name it".
+    if iyi_caller_instantiated?(target_def, self_type)
       here = ModuleInfo.new(@llvm_mod, @llvm_typer, self.builder)
       func = typed_fun?(@llvm_mod, mangled_name) ||
              codegen_fun(mangled_name, target_def, self_type, fun_module_info: here, iyi_internal: true)
@@ -150,11 +155,11 @@ class Iyi::CodeGenVisitor
   end
 
   # iyi: whether this def's machine code is the caller's rather than the
-  # module's — a block-taking method of a module whose artifact is being
-  # written (SPEC.md IV.1g).
-  private def iyi_block_instantiated?(target_def, self_type) : Bool
+  # module's — a block-taking or `forall` method of a module whose artifact
+  # is being written (SPEC.md IV.1g, `IyiMod.caller_instantiated?`).
+  private def iyi_caller_instantiated?(target_def, self_type) : Bool
     return false if @program.iyi_exported_owners.empty?
-    return false unless target_def.block_arg || target_def.block_arity
+    return false unless IyiMod.caller_instantiated?(target_def)
     @program.iyi_exported_owners.includes?(self_type.instance_type)
   end
 

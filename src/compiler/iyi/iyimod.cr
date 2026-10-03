@@ -2400,6 +2400,19 @@ module Iyi::IyiMod
     end
   end
 
+  # iyi: whether a def is instantiated per call site, so its machine code is
+  # the caller's and its body has to travel (SPEC.md IV.1g): it takes a block
+  # (`&block : …` or a bare `yield`), which is inlined into it, or it has
+  # `forall` parameters, which the caller binds. A forall def was neither, so
+  # its body stayed behind: `count(x : T) : Int32 forall T` called as
+  # `count(1)` by the producing build carried `count<Int32>` alone, and a
+  # consumer's `count("s")` was refused because the artifact's object code
+  # "has no symbol for it".
+  def self.caller_instantiated?(a_def : Def) : Bool
+    return true if a_def.block_arg || a_def.block_arity
+    !!a_def.free_vars.try { |vars| !vars.empty? }
+  end
+
   # Marks a parsed reconstruction as what it is.
   #
   # A `def` from an artifact is a header: a call to it is typed from its return

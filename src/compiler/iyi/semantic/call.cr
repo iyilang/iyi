@@ -790,6 +790,11 @@ class Iyi::Call
     return nil unless type.is_a?(Type)
     # A free variable is bound per call and has no one symbol behind it.
     return nil if type.is_a?(TypeParameter)
+    # Nor has a generic written bare, `args : Tuple`: it matches each
+    # instantiation and the producer keyed the symbol on that one. Widened to
+    # the uninstantiated generic, a consumer's `fmt("a", {1})` ended codegen
+    # on "BUG: called create_llvm_type for K".
+    return nil if type.is_a?(GenericType)
 
     # `virtual_type` is what a value of a class with subclasses is held as,
     # and what the producing build's keep file gave the method. A leaf class

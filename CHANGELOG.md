@@ -4,6 +4,27 @@
 
 ### Fixed
 
+- **A `forall` def read from a module's artifact compiles at the
+  consumer's types, and the producer's own types stay out of the
+  library's artifact.** A `forall` def's body stayed behind and its
+  instantiations went into the module's object code, so the artifact
+  served only the calls its producing build happened to make:
+  `lib/box2`'s `count(x : T) : Int32 forall T`, written from a build
+  that called `count(1)`, refused a consumer's `count("s")` because its
+  object code "has no symbol for it", and `Conv#pair` and `Conv.one`
+  the same. A producer calling `wrap(Meters.new)` put
+  `Lib::Box2::Box(Q4::Meters)` in `lib/box2`'s type ids, and every other
+  program importing it was refused at the import ("numbers ..., and this
+  build cannot name it"). A `forall` def's body now travels the way a
+  block-taking def's does, its instantiations are compiled in the
+  caller's unit, and both consumers print what the source build prints.
+  A call to an artifact def whose parameter is a bare generic (`args :
+  Tuple`), which `std/format`'s travelling `sprintf` makes, ended codegen
+  on "BUG: called create_llvm_type for K"; it is keyed on the argument's
+  own type. `bench/samples_roundtrip.sh`'s `forall` case writes the
+  artifact from one program and reads it from another; the old compiler
+  was refused at the import.
+
 - **A module's `forall T : Trait` and `where Elem : Trait` bounds hold
   when it is read from its artifact.** A signature in the `.iyimod`
   carried a def's free variables and no bounds, so `mod dump` showed

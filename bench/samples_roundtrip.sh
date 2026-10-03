@@ -571,5 +571,138 @@ else
   fi
 fi
 
+# And a `forall` def, which is the caller's to compile like a block-taking
+# one (SPEC.md IV.1g), with its bounds the caller's to check (II.6 §3,
+# II.7 rule 3). The artifact is written by a program that calls `wrap` at
+# its own `Meters`, and read by one that calls everything at types the
+# producer never used. The forall bodies stayed behind and their
+# instantiations went into the library's object code: the consumer was
+# refused at the import because `kit/lib` "numbers
+# `Kit::Lib::Box(Producer::Meters)`, and this build cannot name it", and
+# without that call `wrap("s")` was "has no symbol for it". The signatures
+# carried `forall T` and no `where` at all, so `render(2.5)` and a `shown`
+# over `Float64`, both refused from source, built from the artifact.
+mkdir -p "$TRAVEL/forall/kit"
+cat > "$TRAVEL/forall/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub trait Show
+  abstract def show : String
+end
+
+impl Show for Int32
+  def show : String
+    "i#{self}"
+  end
+end
+
+pub trait Bag
+  type Elem
+  abstract def items : Array(Elem)
+
+  def shown : String where Elem : Show
+    items.map { |x| x.show }.join(",")
+  end
+end
+
+pub struct Box(T)
+  getter value : T
+
+  def initialize(@value : T)
+  end
+end
+
+pub struct Two(T)
+  def initialize(@a : T, @b : T)
+  end
+end
+
+impl Bag for Two(T) forall T
+  type Elem = T
+
+  def items : Array(T)
+    [@a, @b]
+  end
+end
+
+pub def wrap(x : T) : Box(T) forall T
+  Box.new(x)
+end
+
+pub def render(x : T) : String forall T : Show
+  x.show
+end
+
+pub struct Conv
+  def initialize
+  end
+
+  def pair(x : T) : Array(T) forall T
+    [x, x]
+  end
+
+  def self.one(x : T) : Array(T) forall T
+    [x]
+  end
+end
+IYI
+cat > "$TRAVEL/forall/producer.iyi" <<'IYI'
+module producer
+
+import kit/lib::*
+
+pub struct Meters
+  def initialize
+  end
+end
+
+puts wrap(Meters.new).value.class
+puts render(1)
+puts Conv.new.pair(1).size
+puts Two.new(1, 2).shown
+IYI
+cat > "$TRAVEL/forall/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+puts wrap("s").value
+puts Conv.new.pair("s").size
+puts Conv.one('c').size
+puts render(7)
+puts Two.new(3, 4).shown
+IYI
+printf 'module main\n\nimport kit/lib::*\n\nputs render(2.5)\n' > "$TRAVEL/forall/free.iyi"
+printf 'module main\n\nimport kit/lib::*\n\nputs Two.new(1.5, 2.5).shown\n' > "$TRAVEL/forall/where.iyi"
+printf 's\n2\n1\ni7\ni3,i4\n' > "$TRAVEL/forall/expected.txt"
+if ! (cd "$TRAVEL/forall" && "$IYI" build --emit-iyimod mods -o producer producer.iyi) > "$TRAVEL/forall/emit.log" 2>&1; then
+  echo "travel: forall failed to write its artifact"
+  grep -m3 -E "error|Error" "$TRAVEL/forall/emit.log"
+  status=1
+else
+  rm -rf "$TRAVEL/forall/kit"
+  if ! (cd "$TRAVEL/forall" && "$IYI" build --use-iyimod mods -o use main.iyi) > "$TRAVEL/forall/use.log" 2>&1; then
+    echo "travel: forall defs at the consumer's types failed to build from another program's artifact"
+    grep -m3 -E "error|Error" "$TRAVEL/forall/use.log"
+    status=1
+  elif ! "$TRAVEL/forall/use" > "$TRAVEL/forall/use.txt" 2>&1 || ! cmp -s "$TRAVEL/forall/expected.txt" "$TRAVEL/forall/use.txt"; then
+    echo "travel: forall defs answered differently from the source"
+    diff "$TRAVEL/forall/expected.txt" "$TRAVEL/forall/use.txt" | head -8
+    status=1
+  else
+    echo "travel: forall defs compile at the consumer's types from another program's artifact"
+  fi
+  for bound in free where; do
+    (cd "$TRAVEL/forall" && "$IYI" build --use-iyimod mods -o "$bound" "$bound.iyi") > "$TRAVEL/forall/$bound.log" 2>&1
+    if grep -q "Float64 does not implement Kit::Lib::Show, required by" "$TRAVEL/forall/$bound.log"; then
+      echo "travel: a $bound bound read from the artifact is checked as from source"
+    else
+      echo "travel: a $bound bound read from the artifact was not checked"
+      grep -m3 -E "error|Error" "$TRAVEL/forall/$bound.log"
+      status=1
+    fi
+  done
+fi
+
 echo "workdir $WORK"
 exit $status

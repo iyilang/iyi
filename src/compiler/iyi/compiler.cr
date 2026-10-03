@@ -985,11 +985,12 @@ module Iyi
             signatures.each do |item|
               signature = IyiMod.signature(item.def)
               functions << signature
-              # A module's own `pub def` that takes a block is the consumer's
-              # to compile for the same reason, and the module name is the
-              # container the far side looks it up under.
+              # A module's own `pub def` that takes a block, or has `forall`
+              # parameters, is the consumer's to compile for the same reason,
+              # and the module name is the container the far side looks it up
+              # under.
               if !item.def.abstract? &&
-                 (iyi_takes_block?(item.def) || iyi_widened_parameters?(type, item.def) ||
+                 (IyiMod.caller_instantiated?(item.def) || iyi_widened_parameters?(type, item.def) ||
                  IyiMod.answer_travels?(item.def))
                 iyi_record_mono_body program, filename, module_name, signature, item.def
               end
@@ -1017,7 +1018,7 @@ module Iyi
 
             signature = IyiMod.signature(item.def, check_block: false)
             carried_functions << signature
-            if iyi_takes_block?(item.def) || IyiMod.answer_travels?(item.def)
+            if IyiMod.caller_instantiated?(item.def) || IyiMod.answer_travels?(item.def)
               iyi_record_mono_body program, filename, module_name, signature, item.def
             end
           end
@@ -2429,10 +2430,11 @@ module Iyi
 
           signature = IyiMod.signature(item.def)
           methods << signature
-          # A block-taking def travels whatever type it is on: it is
-          # instantiated with the caller's block inside it, so the consumer is
-          # what compiles it — the same reason a generic's method and a trait's
-          # default travel (SPEC.md IV.1g).
+          # A block-taking or `forall` def travels whatever type it is on: it
+          # is instantiated with the caller's block inside it, or at the
+          # caller's types, so the consumer is what compiles it — the same
+          # reason a generic's method and a trait's default travel (SPEC.md
+          # IV.1g).
           #
           # And a def whose machine code enumerates an open type's members, or
           # which calls one that does, for the reason III.6 gives: the set is
@@ -2445,7 +2447,7 @@ module Iyi
           # its own expansion can answer. Kept behind, `type_name` was a header
           # and the consumer's link ended on `Model+@Model#type_name:String`,
           # where the source build printed `Main::User`.
-          if (travels || iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
+          if (travels || IyiMod.caller_instantiated?(item.def) || item.def.iyi_open_travel? ||
              item.def.macro_def? || iyi_widened_parameters?(type, item.def) ||
              IyiMod.answer_travels?(item.def)) && !item.def.abstract?
             iyi_record_mono_body program, filename, container, signature, item.def
@@ -2551,8 +2553,8 @@ module Iyi
 
             signature = IyiMod.signature(item.def, check_block: false)
             signatures << signature
-            # The same three reasons the exported side travels for: a
-            # block-taking body is the caller's, one whose code answers for
+            # The same reasons the exported side travels for: a block-taking
+            # or `forall` body is the caller's, one whose code answers for
             # an open set is the program's (SPEC.md III.6), and one whose
             # parameter is written wider than its callers has no symbol the
             # consumer can ask for. A header for any of them would promise a
@@ -2561,7 +2563,7 @@ module Iyi
             # module it keeps to itself, and the link ended on
             # `decode_int32<IyiIO+>`.
             if travels || (stencilled && side.same?(type)) ||
-               iyi_takes_block?(item.def) || item.def.iyi_open_travel? || item.def.macro_def? ||
+               IyiMod.caller_instantiated?(item.def) || item.def.iyi_open_travel? || item.def.macro_def? ||
                iyi_widened_parameters?(type, item.def) || IyiMod.answer_travels?(item.def)
               iyi_record_mono_body program, filename, container, signature, item.def
             end
@@ -2580,12 +2582,6 @@ module Iyi
     # `src/std` spells it — so the last name is what is compared.
     private def iyi_primitive_written?(a_def : Def) : Bool
       !!a_def.all_annotations.try &.any? { |ann| ann.path.names.last? == "Primitive" }
-    end
-
-    # iyi: whether a def is instantiated per call site because it takes a
-    # block — `&block : …` or a bare `yield` (SPEC.md IV.1g).
-    private def iyi_takes_block?(a_def : Def) : Bool
-      !!(a_def.block_arg || a_def.block_arity)
     end
 
     # iyi: whether a consumer would ask for a symbol this build had no reason

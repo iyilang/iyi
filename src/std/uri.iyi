@@ -149,9 +149,13 @@ pub struct Params
     end
   end
 
-  # Parses a query string into Params, the way the WHATWG URL standard
-  # reads `application/x-www-form-urlencoded`: `+` is a space, `%XX` is
-  # the byte, and a `%` that does not start two hex digits is itself.
+  # Parses a query string into Params, decoding each name and value the
+  # way the WHATWG URL standard reads `application/x-www-form-urlencoded`:
+  # `+` is a space, `%XX` is the byte, and a `%` that does not start two
+  # hex digits is itself. Pairs are separated by `&` and also by `;`, as
+  # the other library separates them, where the standard and Python
+  # 3.12's `parse_qsl` split at `&` alone: `a=1;b=2` is two pairs here and
+  # one there.
   # Never a panic - the query is whatever a client sent, and `?q=100%`
   # is what browsers send for "100%". `URI.decode` stays strict: it is
   # asked of text a program made.

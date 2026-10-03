@@ -4,6 +4,32 @@
 
 ### Fixed
 
+- **A cancelled task's `select` gives `Cancelled` to its first bound arm,
+  and with no bound arm the task stops.** The select answered `Cancelled`
+  to its first arm, and an unbound first arm runs nothing, so a heartbeat
+  loop of `when timeout(10)` and a bound receive, or of `when quit.receive`
+  and `when timeout(10)`, never saw its cancel: it spun at a full core
+  (5,000,000 select rounds in 860 ms) and its group's join never ended,
+  killed by a 10 s timeout both ways. The first arm that binds receives
+  it now; with none, the task stops where it is, its defers run, its group
+  counts it cancelled rather than failed, and its handle's `value` answers
+  `Panicked` ("a task stopped by its cancellation has no value"). Both
+  loops end with their group, 50 ms after the sibling's failure (SPEC.md
+  III.4.6). `bench/concurrency_exercise.iyi` checks both under 4 s; the
+  old runtime answered "no arm saw its cancel, the unbound loop ran on"
+  at its 5 s give-up.
+
+- **An unbound `select` arm runs its body whenever its operation
+  happened, whatever the value.** The arm asked whether its answer was an
+  `Error`, so a receive from a `Channel(Boom)` took the `Boom` and skipped
+  its body ("unbound receive took a value: true; body ran: false"), and of
+  two values from a `Channel(Int32 | Boom)` one body ran. The select
+  answers whether the operation happened beside the value now, so a
+  `Channel(ChannelClosed)`'s delivered value runs it too, and a closed
+  channel still runs nothing. `bench/concurrency_exercise.iyi` checks a
+  `TaskFailed` and a `ChannelClosed` taken by unbound receives; the old
+  expansion ran neither body.
+
 - **`zip` refuses a shorter other collection at its first missing
   index, as the other library does.** `Array#zip`, its block form and
   `Enumerable#zip` stopped at the shorter, so `[1, 2, 3].zip([4, 5])`

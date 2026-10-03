@@ -2817,10 +2817,21 @@ module-level `Array` compiles and runs.
   `Int32` milliseconds, as `sleep` does, rather than the other library's
   `Time::Span`, and it is written unbound only: `when t = timeout(50)` is
   "undefined method 'timeout'". And an unbound arm (`when out.send(1)`,
-  `when ch.receive`) runs its body only when its operation happened: on a
-  closed channel or in a cancelled task it runs nothing, where it once ran
-  its body for a send that never went. A bound arm still receives the
-  `ChannelClosed` or `Cancelled` and decides.
+  `when ch.receive`) runs its body only when its operation happened, which
+  the select answers beside the value: a receive that took a `Boom` from a
+  `Channel(Boom)` runs it, and on a closed channel or in a cancelled task
+  it runs nothing, where it once ran its body for a send that never went.
+  A bound arm still receives the `ChannelClosed` or `Cancelled` and
+  decides, and a cancelled task's `Cancelled` goes to the first arm that
+  binds. A select with no bound arm has nowhere to put it, so its task
+  stops there: its defers run, its group counts it cancelled, not failed,
+  and its handle's `value` answers `Panicked` ("a task stopped by its
+  cancellation has no value"), the member `T | Panicked` has for a task
+  that did not finish. A `!` cannot leave a task's block, which runs as a
+  proc; a panic would fail the owner over a one-shot select that did
+  nothing wrong; and returning without parking was the bug: a heartbeat
+  loop around `when timeout(10)` spun at a full core, and its group's join
+  never ended.
 - **`Fiber` does not carry over as a user-facing primitive.** It is how a task
   is implemented. Exposing a raw spawn puts III.4.1's leak straight back.
 - **Parallelism is not free of the rest of the design.** IV.1d already measured

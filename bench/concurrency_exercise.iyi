@@ -944,6 +944,77 @@ end
 fail("an unbound send arm ran its body with nothing sent: #{unbound_ran}") unless unbound_ran.empty?
 puts "a select timed out, lost no value to its deadline, and ran no unbound arm whose send did not happen"
 
+# An unbound receive that took a value runs its body, whatever the value:
+# the arm asked whether its answer was an `Error`, so a `Channel(TaskFailed)`
+# gave up its value and the body was skipped. A `Channel(ChannelClosed)` is
+# the exact case: the value is the very type a closed channel answers.
+errors_in = Channel(TaskFailed).new(1)
+errors_in.send(TaskFailed.new)
+closes_in = Channel(ChannelClosed).new(1)
+closes_in.send(ChannelClosed.new)
+delivered_ran = [] of String
+select
+when errors_in.receive
+  delivered_ran << "error"
+end
+select
+when closes_in.receive
+  delivered_ran << "closed value"
+end
+fail("an unbound receive took a value and ran its body for #{delivered_ran}") unless delivered_ran == ["error", "closed value"]
+puts "an unbound receive ran its body for a TaskFailed and a ChannelClosed it took"
+
+# A cancelled task's select gives `Cancelled` to its first bound arm, and
+# with no arm bound the task stops, its defers run. It went to the first
+# arm, bound or not, and an unbound one runs nothing: a heartbeat loop
+# around `when timeout(10)` spun at a full core and its group's join
+# waited forever. Each loop here gives up at 5 s.
+def beat_until_bound(data : Channel(Int32), log : Array(String), give_up : Int64) : Int32
+  while __iyi_monotonic_ns < give_up
+    select
+    when timeout(10)
+      nil
+    when beat = data.receive
+      if beat.is_a?(Cancelled)
+        log << "its bound arm saw Cancelled"
+        return 0
+      end
+    end
+  end
+  log << "no arm saw its cancel"
+  0
+end
+
+def beat_until_quit(quit : Channel(Int32), log : Array(String), give_up : Int64) : Int32
+  defer log << "the unbound loop's defer ran"
+  while __iyi_monotonic_ns < give_up
+    select
+    when quit.receive
+      break
+    when timeout(10)
+      nil
+    end
+  end
+  log << "the unbound loop ran on"
+  0
+end
+
+beats = Channel(Int32).new
+quits = Channel(Int32).new
+beat_log = [] of String
+started = __iyi_monotonic_ns
+group do |g|
+  g.spawn { beat_until_bound(beats, beat_log, started + 5000000000_i64) }
+  g.spawn { beat_until_quit(quits, beat_log, started + 5000000000_i64) }
+  g.spawn do
+    sleep(30)
+    TaskFailed.new
+  end
+end
+heard_beats = beat_log.sorted.join(", ")
+fail("a cancelled select: #{heard_beats}, after #{elapsed_ms(started)} ms") unless heard_beats == "its bound arm saw Cancelled, the unbound loop's defer ran" && elapsed_ms(started) < 4000
+puts "a cancelled select gave Cancelled to its bound arm, and stopped a task with none, under 4 s"
+
 # ── 16b. A ring of tasks passing a value allocates nothing per message ──
 #
 # Every park took a node from the heap - a receiver's and, where the

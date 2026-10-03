@@ -865,15 +865,36 @@ module Iyi
     #       qux
     #     end
     #
+    # iyi: under iyi's prelude the select answers a third value, whether
+    # the arm's operation happened, and takes the first bound arm's index
+    # (-1 for none), the arm a cancelled task's `Cancelled` goes to:
+    #
+    #     %index, %value, %happened = ::Channel.select({foo_select_action, bar_select_action}, 1)
+    #     case %index
+    #     when 0
+    #       if %happened
+    #         body
+    #       end
+    #     when 1
+    #       ...
+    #
     def expand(node : Select)
       index_name = @program.new_temp_var_name
       value_name = @program.new_temp_var_name
+      # iyi: the select's third answer, whether the arm's operation
+      # happened.
+      happened_name = @program.new_temp_var_name if @program.iyi_prelude?
 
       targets = [Var.new(index_name).at(node), Var.new(value_name).at(node)] of ASTNode
+      targets << Var.new(happened_name).at(node) if happened_name
       channel = Path.global("Channel").at(node)
 
       tuple_values = [] of ASTNode
       case_whens = [] of When
+      # iyi: the arm a cancelled task's `Cancelled` goes to, -1 for none
+      # (`Channel.select`). It went to the first arm, and an unbound first
+      # arm dropped it: a loop around the select never saw its cancel.
+      first_bound = -1
 
       node.whens.each_with_index do |a_when, index|
         condition = a_when.conds.first
@@ -886,15 +907,16 @@ module Iyi
           body = a_when.body.clone
           # iyi: an arm nobody binds runs its body only when its operation
           # happened. `when out.send(1)` ran its body on a closed channel
-          # and in a cancelled task, where the send answered `ChannelClosed`
-          # or `Cancelled` and nothing was sent; bound, the arm sees that
-          # answer itself.
-          if @program.iyi_prelude?
-            failed = IsA.new(Var.new(value_name).at(node), Path.global("Error").at(node)).at(node)
-            body = If.new(failed, NilLiteral.new.at(node), body).at(node)
+          # and in a cancelled task, where nothing was sent; bound, the
+          # arm sees that answer itself. It asked whether the answer was
+          # an `Error`, and a `Channel(Boom)`'s receive took its `Boom`
+          # and skipped the body.
+          if happened_name
+            body = If.new(Var.new(happened_name).at(node), body).at(node)
           end
           case_whens << When.new([NumberLiteral.new(index).at(node)] of ASTNode, body)
         when Assign
+          first_bound = index if first_bound < 0
           cloned_call = condition.value.as(Call).clone
           cloned_call.name = select_action_name(cloned_call.name)
           tuple_values << cloned_call
@@ -915,11 +937,9 @@ module Iyi
         case_else = Call.new("raise", StringLiteral.new("BUG: invalid select index"), global: true).at(node)
       end
 
-      call = Call.new(
-        channel,
-        node.else ? "non_blocking_select" : "select",
-        TupleLiteral.new(tuple_values).at(node),
-      ).at(node)
+      args = [TupleLiteral.new(tuple_values).at(node)] of ASTNode
+      args << NumberLiteral.new(first_bound).at(node) if happened_name
+      call = Call.new(channel, node.else ? "non_blocking_select" : "select", args).at(node)
       multi = MultiAssign.new(targets, [call] of ASTNode)
       case_cond = Var.new(index_name).at(node)
       a_case = Case.new(case_cond, case_whens, case_else, exhaustive: false).at(node)

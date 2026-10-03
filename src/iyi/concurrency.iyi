@@ -22,10 +22,11 @@
 # Cancellation (III.4.2) belongs to the group: a task whose value is an
 # error member, a block left early, or a cancel of the task holding the
 # group open cancels the tasks still running. A cancelled fiber is not
-# torn down — nothing here unwinds — it is *woken*, and every blocking
-# primitive answers `Cancelled` from then on. A task written with `!`
-# therefore drains out of its own accord, which is III.1.2 doing
-# cancellation's plumbing for free.
+# torn down — it is *woken*, and every blocking primitive answers
+# `Cancelled` from then on. A task written with `!` therefore drains out
+# of its own accord, which is III.1.2 doing cancellation's plumbing for
+# free. Where no answer can carry `Cancelled`, the task stops instead and
+# its defers run (`IyiScheduler.stop_current`).
 #
 # What is deliberately absent, so nobody reads silence as an accident:
 # `Share` (III.4.4) gates nothing until a second thread exists, because one
@@ -2453,6 +2454,35 @@ class IyiScheduler
     reschedule
     __iyi_exit(1)
   end
+
+  # III.4.2's other ending: a cancelled task stopped where no answer can
+  # carry its `Cancelled`, `Channel.select` with no bound arm for one. Its
+  # pending defers run innermost first, as a panic's do, and its group
+  # counts it as a cancelled task, not a failure; nothing is printed. Its
+  # handle has no value to give, and `IyiTask#value` says so as
+  # `Panicked`, the union's one member for a task that did not finish.
+  # Such a select answered `Cancelled` to its first arm, which runs
+  # nothing unbound, so a loop around it spun at a full core and its
+  # group's join waited forever.
+  def self.stop_current : NoReturn
+    fiber = current
+    while true
+      node = fiber.defers
+      break unless node.is_a?(IyiDeferNode)
+      fiber.defers = node.next_node
+      node.run
+    end
+    g = fiber.group
+    if g.is_a?(IyiGroup)
+      g.child_finished(false)
+      g.drop_child(fiber)
+    end
+    fiber.state = IyiFiberState::Done
+    wake_joiners(fiber)
+    state.dying = fiber
+    reschedule
+    raise "a done fiber was scheduled"
+  end
 end
 
 {% if flag?(:win32) %}
@@ -2819,6 +2849,7 @@ class IyiTask(T)
       @fiber.panic_delivered = true
       return Panicked.new(@fiber.panic_message)
     end
+    return Panicked.new("a task stopped by its cancellation has no value") if @box.empty?
     @box.first
   end
 end
@@ -3373,18 +3404,23 @@ class Channel(T)
 
   # ── select — III.4.6, the library half of the expansion ────────────
   #
-  # A `select` compiles to `%i, %v = ::Channel.select({arm, arm})` and a
-  # case over the index; `non_blocking_select` when an `else` arm
+  # A `select` compiles to `%i, %v, %h = ::Channel.select({arm, arm}, b)`
+  # and a case over the index; `non_blocking_select` when an `else` arm
   # exists. One def serves every arity, because a tuple's size is a
-  # compile-time fact a macro walks. On a cancelled task the first arm
-  # answers `Cancelled`, exactly as that arm's own primitive would have.
-  def self.select(actions : U) forall U
+  # compile-time fact a macro walks. `%h` says the arm's operation
+  # happened, and an arm nobody binds runs its body only then: it ran
+  # unless its answer was an `Error`, so a `Channel(Boom)`'s receive took
+  # the `Boom` and skipped the body. *bound* is the first arm that binds,
+  # -1 for none, and a cancelled task's `Cancelled` goes to it, as that
+  # arm's own primitive would have answered it.
+  def self.select(actions : U, bound : Int32) forall U
     fiber = IyiScheduler.current
     while true
-      return {0, Cancelled.new} if fiber.cancelled
+      return cancelled_answer(bound) if fiber.cancelled
       {% for i in 0...U.size %}
         if actions[{{ i }}].ready?
-          return { {{ i }}, actions[{{ i }}].execute }
+          happened = !actions[{{ i }}].refused?
+          return { {{ i }}, actions[{{ i }}].execute, happened }
         end
       {% end %}
       # Nothing ready: one park, every arm's node carrying its nonce.
@@ -3403,7 +3439,7 @@ class Channel(T)
       {% end %}
       {% for i in 0...U.size %}
         if actions[{{ i }}].won_while_parked?
-          return { {{ i }}, actions[{{ i }}].won_value }
+          return { {{ i }}, actions[{{ i }}].won_value, true }
         end
       {% end %}
     end
@@ -3411,15 +3447,31 @@ class Channel(T)
 
   # No arm ready answers -1, which the expansion's case meets with the
   # program's own `else`.
-  def self.non_blocking_select(actions : U) forall U
+  def self.non_blocking_select(actions : U, bound : Int32) forall U
     fiber = IyiScheduler.current
-    return {0, Cancelled.new} if fiber.cancelled
+    return cancelled_answer(bound) if fiber.cancelled
     {% for i in 0...U.size %}
       if actions[{{ i }}].ready?
-        return { {{ i }}, actions[{{ i }}].execute }
+        happened = !actions[{{ i }}].refused?
+        return { {{ i }}, actions[{{ i }}].execute, happened }
       end
     {% end %}
-    {-1, nil}
+    {-1, nil, false}
+  end
+
+  # With no bound arm a cancelled task stops (`IyiScheduler.stop_current`):
+  # the `Cancelled` went to the first arm, which runs nothing unbound, so
+  # a loop around `when timeout(10)` and a bound receive spun at a full
+  # core, never cancelled, and its group's join waited for it forever.
+  private def self.cancelled_answer(bound : Int32) : Tuple(Int32, Cancelled, Bool)
+    IyiScheduler.stop_current if bound < 0
+    {bound, Cancelled.new, false}
+  end
+
+  # Nothing happens on the arm `take_now` answers: `ChannelClosed` is
+  # the refusal here, where a closed channel's buffer is spent.
+  def receive_refused? : Bool
+    @closed && @count == 0
   end
 end
 
@@ -3439,6 +3491,10 @@ class IyiReceiveSelect(T)
 
   def ready? : Bool
     @channel.receive_ready?
+  end
+
+  def refused? : Bool
+    @channel.receive_refused?
   end
 
   def execute : T | ChannelClosed
@@ -3478,6 +3534,10 @@ class IyiSendSelect(T)
 
   def ready? : Bool
     @channel.send_ready?
+  end
+
+  def refused? : Bool
+    @channel.closed?
   end
 
   def execute : Nil | ChannelClosed
@@ -3521,6 +3581,10 @@ class IyiTimeoutSelect
 
   def ready? : Bool
     __iyi_monotonic_ns >= @deadline
+  end
+
+  def refused? : Bool
+    false
   end
 
   def execute : Nil

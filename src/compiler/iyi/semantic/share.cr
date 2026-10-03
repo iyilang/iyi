@@ -213,6 +213,9 @@ module Iyi::Share
           scanner.fields.each do |field|
             found[field] ||= "assigned in `#{name}`"
           end
+          scanner.addressed.each do |field|
+            found[field] ||= "given out by `pointerof` in `#{name}`"
+          end
         end
       end
     end
@@ -237,6 +240,11 @@ module Iyi::Share
   # 4000000.
   class MutationScanner < Visitor
     getter fields = Set(String).new
+    # Fields whose address a body takes. Whatever holds the pointer writes
+    # the field without an assignment the scan could see: `pointerof(@n).
+    # value += 1` in `poke` read as no write at all, and two threads poking
+    # a counter 100 million times each counted 122761325 of 200000000.
+    getter addressed = Set(String).new
     # Some macro code here did not expand on the type alone.
     getter? unexpanded = false
 
@@ -260,6 +268,12 @@ module Iyi::Share
 
     def visit(node : MultiAssign) : Bool
       node.targets.each { |target| note(target) }
+      true
+    end
+
+    def visit(node : PointerOf) : Bool
+      exp = node.exp
+      @addressed << exp.name if exp.is_a?(InstanceVar)
       true
     end
 

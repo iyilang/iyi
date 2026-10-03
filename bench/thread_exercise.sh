@@ -626,6 +626,36 @@ IYI
 done
 echo "  refused by its field three ways: a mixin's method, {% if %} and a macro call"
 
+# An address is a write the scan cannot see: `pointerof(@n).value += 1` in
+# `poke` read as no assignment, so the Counter was Share, and two threads
+# poking it 100 million times each counted 122761325 of 200000000. A field
+# whose address a method other than `initialize` takes is mutable now.
+step "failure proof: a field given out by pointerof is not Share"
+cat > addressed.iyi <<'IYI'
+class Counter
+  def initialize(@n : Int32)
+  end
+
+  def poke : Nil
+    pointerof(@n).value += 1
+  end
+end
+
+c = Counter.new(0)
+t = IyiThread.start do
+  c.poke
+  nil
+end
+t.join
+IYI
+if "$IYI" build addressed.iyi -o addressed > build-addressed.log 2>&1; then
+  echo "a counter written through pointerof compiled:"; cat build-addressed.log; exit 1
+fi
+if ! grep -q "Counter's field @n is given out by \`pointerof\` in \`poke\`" build-addressed.log; then
+  echo "the pointerof refusal did not name the field:"; cat build-addressed.log; exit 1
+fi
+printf '  refused: %s\n' "$(grep -m1 'is not Share' build-addressed.log | sed 's/^Error: //')"
+
 # ── 6b. A captured local is one cell, and nothing assigns it after the start
 # A Share type makes a value safe to read from two threads, not a variable
 # safe to write: a captured local is one cell both threads reach. `count`

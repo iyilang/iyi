@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A field a method takes the address of with `pointerof` makes its
+  type not Share.** The scan for a field assigned outside `initialize`
+  saw assignments and setters only, so `def poke; pointerof(@n).value +=
+  1` read as no write: a Counter captured by an `IyiThread` block
+  compiled, and two threads poking it 100 million times each counted
+  122761325 of 200000000. A field whose address a method other than
+  `initialize` takes is mutable now, and the capture is refused with
+  "Counter's field @n is given out by `pointerof` in `poke`".
+  `bench/thread_exercise.sh` step 6 builds it and
+  `spec/compiler/semantic/iyi_spec.cr` holds the shape; the old compiler
+  built it.
+
 - **A line `puts` writes to `STDOUT` or `STDERR` comes out whole when
   several threads print at once.** Both are sync, and `write_line` wrote
   the text and then its newline as two writes, so another thread's line

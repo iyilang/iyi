@@ -3596,6 +3596,25 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "refuses a captured value whose field a method takes the address of" do
+      assert_error(stub + <<-CODE, "captures `counter : Counter`, which is not Share: Counter's field @n is given out by `pointerof` in `slot` (SPEC.md III.4.4)", filename: "x.iyi")
+        class Counter
+          def initialize(@n : Int32)
+          end
+
+          def slot : Pointer(Int32)
+            pointerof(@n)
+          end
+        end
+
+        counter = Counter.new(0)
+        IyiThread.start do
+          counter.slot
+          nil
+        end
+        CODE
+    end
+
     it "refuses a captured value through a field that is not shareable" do
       assert_error(stub + <<-CODE, "captures `bag : Bag`, which is not Share: Bag's field @items : Pointer(Int32) is not shareable: Pointer(Int32) is raw memory", filename: "x.iyi")
         class Bag

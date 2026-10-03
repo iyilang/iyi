@@ -20,11 +20,11 @@
 #                          makes
 #
 # A worker is retired when the wire goes quiet (`RETIRE_IDLE`) or after
-# `RETIRE_AFTER` requests, never while a request of its own is in flight
-# — so the code lens that runs the person's program is not killed
-# half-way, and the replacement is warmed while nobody is typing. Its
-# successor is handed the buffers with `iyi/adopt` and asked for the
-# focused file's verdict, which is the state the dead one had.
+# `RETIRE_AFTER` requests, never while a request of its own or a change's
+# verdict is in flight — so the code lens that runs the person's program
+# is not killed half-way, and the replacement is warmed while nobody is
+# typing. Its successor is handed the buffers with `iyi/adopt` and asked
+# for the focused file's verdict, which is the state the dead one had.
 #
 # This is the shape `iyi daemon` already uses for builds — analyse once,
 # fork per build, let the child's exit do the freeing (IV.1d) — and the
@@ -89,12 +89,22 @@ module Iyi::Lsp
       # Requests and buffer changes it has seen. A worker that has done
       # nothing is not worth replacing.
       property worked = 0
+      # The buffers it was handed a change to and has not published the
+      # verdict on, by the version that verdict will carry. A change is
+      # a notification and has no id, but it is owed an answer all the
+      # same: a worker killed between taking a change and publishing on
+      # it took the verdict with it, its successor adopted the buffer
+      # and said nothing, and a client waiting on the verdict waited for
+      # ever. Held to two cores beside a busy loop, a compile ran past
+      # `RETIRE_IDLE`, the quiet replaced the worker 2.06 s into it, and
+      # `bench/lsp_memory.py`'s paced session stopped at its 36th edit.
+      getter verdicts = {} of String => Int64
 
       def initialize(@process : Process)
       end
 
       def idle? : Bool
-        @outstanding.empty?
+        @outstanding.empty? && @verdicts.empty?
       end
 
       # Has it cost enough to be worth the fifth of a second its
@@ -281,6 +291,7 @@ module Iyi::Lsp
           @documents[uri] = text
           @versions[uri] = document["version"]?.try(&.as_i64?) || 0_i64
           @focus = uri
+          opened = uri
         end
       when "textDocument/didChange"
         if params && (uri = uri_of(params)) && (first = changes_of(params))
@@ -328,6 +339,7 @@ module Iyi::Lsp
           @documents[uri] = text
           @versions[uri] = newest.dig?("textDocument", "version").try(&.as_i64?) ||
                            (@versions[uri]? || 0_i64) + 1
+          owe(uri, newest.dig?("textDocument", "version").try(&.as_i64?))
           return
         end
       when "textDocument/didSave"
@@ -344,6 +356,7 @@ module Iyi::Lsp
           @versions.delete(uri)
           @clean.delete(uri)
           @focus = nil if @focus == uri
+          @worker.try &.verdicts.delete(uri)
         end
       when "workspace/diagnostic"
         # Kept to be carried on in a successor where this worker stops at
@@ -372,6 +385,9 @@ module Iyi::Lsp
       # worker asked nothing, and is not told.
       return if answering && id.try(&.as_s?).try(&.starts_with?(PRIVATE_ID))
       post(body, id, request: !answering)
+      # The worker publishes a didOpen's verdict at the version the frame
+      # said, or 0 where it said none, which is the number kept here.
+      owe(opened, @versions[opened]?) if opened
 
       case method
       when "initialize" then @initialize_frame = body
@@ -379,6 +395,21 @@ module Iyi::Lsp
         @initialized_frame = body
         watch_files
       when "shutdown" then @shutdown_frame = body
+      end
+    end
+
+    # The verdict a buffer's change is owed, on the worker that took it
+    # (`Worker#verdicts`). Only where the frame said its version: a
+    # successor was handed the buffers and not their versions, so a
+    # change that said none is published under a number this proxy
+    # cannot predict, and waiting on it would keep the worker for ever.
+    # Nor before `initialize`, when the worker drops the notification.
+    private def owe(uri : String, version : Int64?) : Nil
+      return unless @initialize_frame && (worker = @worker)
+      if version
+        worker.verdicts[uri] = version
+      else
+        worker.verdicts.delete(uri)
       end
     end
 
@@ -555,6 +586,17 @@ module Iyi::Lsp
            params["version"]?.try(&.as_i64?) == @versions[uri]? &&
            (held = @documents[uri]?)
           @clean[uri] = held
+        end
+        # The verdict a change was owed (`Worker#verdicts`). The memory
+        # bound passes over a worker that owes one, and retires it once
+        # it has said it.
+        if table && table["method"]?.try(&.as_s?) == "textDocument/publishDiagnostics" &&
+           (uri = table["params"]?.try(&.["uri"]?).try(&.as_s?)) &&
+           (owed = worker.verdicts[uri]?) && table["params"]["version"]?.try(&.as_i64?) == owed
+          worker.verdicts.delete(uri)
+          @outbox.send body
+          retire(warm_now: false) if worker.idle? && worker.spent?
+          return
         end
         @outbox.send body
         return

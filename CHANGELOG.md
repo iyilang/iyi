@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **A change's verdict is published even when its compile outlasts the
+  quiet the language server replaces a worker in.** A didChange is a
+  notification, so the proxy counted a worker compiling one as idle, and
+  two seconds with nothing on the wire replaced it mid-compile: the
+  successor adopted the buffer and published nothing, and a client
+  waiting on the verdict waited for ever. Held to two cores beside a busy
+  loop, `bench/lsp_memory.py`'s paced session stopped at its 36th edit,
+  the worker replaced 2.06 s after the change; Windows CI stopped in the
+  same step with "step 4 never finished" [INFERENCE: the same way]. A
+  worker owes each change's verdict, by its version, until it publishes
+  it, and neither the quiet nor the memory bound retires it before then.
+  Step 74a of `bench/lsp_session.py` holds a change's compile for four
+  seconds on a pipe its macro reads; the old proxy answered the hover
+  asked after it and never sent the verdict.
+
 - **A trait with a parameterised supertrait reads back from its
   artifact.** The artifact qualified every name in the supertrait,
   the trait's own parameter included, so `pub trait Ord(T) : Cmp(T)`

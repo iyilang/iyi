@@ -960,6 +960,83 @@ def buffer_steps(c):
               "unmeasured here, the workers are killed on Windows only", flush=True)
 
 
+def held_open(work, seconds):
+    """A path a macro's `read_file` waits on for *seconds*, then reads
+    as empty: a FIFO on POSIX, a named pipe on Windows. A compile that
+    reads it lasts as long as the gate says, on any machine. Once let
+    go of, the path is gone, and a later compile of the same text
+    fails at once rather than waiting again."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateNamedPipeW.restype = wintypes.HANDLE
+        kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR] + [wintypes.DWORD] * 6 + [ctypes.c_void_p]
+        kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        path = r"\\.\pipe\iyi-lsp-held-%d" % os.getpid()
+        # Outbound, bytes, one instance. A reader connects to it before
+        # this side has asked for one, and reads until it is closed.
+        handle = kernel.CreateNamedPipeW(path, 2, 0, 1, 0, 0, 0, None)
+
+        def release():
+            time.sleep(seconds)
+            kernel.ConnectNamedPipe(handle, None)
+            kernel.CloseHandle(handle)
+    else:
+        path = os.path.join(work, "held")
+        os.mkfifo(path)
+
+        def release():
+            time.sleep(seconds)
+            # Blocks until the reader has opened it, so the reader sees
+            # the end of the file rather than no file.
+            writer = os.open(path, os.O_WRONLY)
+            os.unlink(path)
+            os.close(writer)
+    threading.Thread(target=release, daemon=True).start()
+    return path
+
+
+def held_verdict_step():
+    """74a. A change whose compile outlasts the quiet the proxy replaces
+    a worker in (`Proxy::RETIRE_IDLE`, two seconds). A change is a
+    notification and has no id, so the proxy counted the worker idle,
+    replaced it two seconds into the compile, and the successor adopted
+    the buffer and published nothing: a client waiting on the verdict
+    waited for ever. `lsp_memory.py`'s paced session stopped that way
+    held to two cores beside a busy loop, where a compile ran past two
+    seconds. The compile here reads a pipe the gate holds for four, so
+    the timing is the gate's and not the machine's."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-held")
+    h = Client()
+    h.send("initialize", {"rootUri": file_uri(own), "capabilities": {}})
+    h.send("initialized", {}, wait=False)
+    held_uri = opened(h, own, "held.iyi", "module held\n\nputs 1\n")
+    spelled = held_open(own, 4).replace("\\", "\\\\")
+    h.send("textDocument/didChange", {"textDocument": {"uri": held_uri, "version": 2}, "contentChanges": [
+        {"text": f'module held\n\n{{{{ read_file("{spelled}") }}}}\nputs 1\n'}]}, wait=False)
+    # Past the hold, and past the quiet after it: a verdict still owed by
+    # then is one nobody is going to send. The hover asked now is the
+    # bound on the wait - whichever comes first says which happened.
+    time.sleep(7)
+    asked = h.request_nowait("textDocument/hover", {"textDocument": {"uri": held_uri},
+                                                    "position": {"line": 3, "character": 0}})
+    first = h.wait_for(lambda m: m.get("id") == asked or (
+        m.get("method") == "textDocument/publishDiagnostics" and m["params"]["uri"] == held_uri
+        and m["params"].get("version") == 2))
+    if first.get("id") != asked:
+        h.wait_for(lambda m: m.get("id") == asked)
+    h.send("shutdown", {})
+    h.send("exit", {}, wait=False)
+    h.proc.wait(timeout=10)
+    shutil.rmtree(own, ignore_errors=True)
+    step("74a", "a change whose compile outlasts the idle replacement still gets its verdict",
+         first.get("id") != asked,
+         "the verdict came before a hover asked after it" if first.get("id") != asked
+         else "the hover was answered and the verdict never came")
+
+
 def main():
     watchdog(180)
     # Set before the server starts, because a child inherits the environment
@@ -3453,6 +3530,7 @@ def main():
          f"{len(items)} item(s): {items and items[0]['message'][:50]}")
     buffer_steps(c)
     traits_disk_and_completion()
+    held_verdict_step()
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has
     # for it rather than an empty result.

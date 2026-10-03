@@ -106,4 +106,18 @@ check(Regex.compile(near).find(run).nil?, "a literal pattern's near miss")
 check(run.rindex(near).nil?, "rindex of a near miss")
 check((near + run).rindex(near) == 0, "rindex finds it at the start")
 
-puts "text scale: #{seq.bytesize // (1024 * 1024)} MB through join, reverse, tr, gsub, delete, squeeze, replace, each_line, String.build, Enumerable#join, String.join, CSV.build, HTTP.decode_chunked, center and a near-miss search and pattern, each checked"
+# Two equal megabytes compared a thousand times. A byte a step that took
+# 230 ms optimised, eleven times Python's `==`; thirty-two bytes a step it
+# is 22. The bound is the optimised build's, five times that.
+mega = "acgt" * 262144
+twin = "acgt" * 262144
+same = 0
+started = __iyi_monotonic_ns
+1000.times { same = same + 1 if mega == twin }
+check(same == 1000, "== of equal megabytes")
+{% if flag?(:release) %}
+  ms = (__iyi_monotonic_ns - started) // 1000000
+  check(ms < 120, "1,000 == of equal megabytes took #{ms} ms, past 120")
+{% end %}
+
+puts "text scale: #{seq.bytesize // (1024 * 1024)} MB through join, reverse, tr, gsub, delete, squeeze, replace, each_line, String.build, Enumerable#join, String.join, CSV.build, HTTP.decode_chunked, center, a near-miss search and pattern and ==, each checked"

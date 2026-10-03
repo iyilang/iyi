@@ -430,4 +430,16 @@ raise "prelude: strip unicode whitespace" unless "\u3000\u00A0b\u2028\u00A0\u300
 raise "string: unicode whitespace" unless "\u2000\u3000".blank? && "\u3000a\u202F".lstrip == "a\u202F" && "\u3000a\u202F".rstrip == "\u3000a" && !"\u0085".blank?
 puts "    whitespace above ASCII: strip, lstrip, rstrip and blank? take Zs, Zl and Zp"
 
+# `==` compares thirty-two bytes a step and then the rest one at a time:
+# every length to 70 - two whole steps and a tail - against itself, its
+# copy, one byte longer, and one byte changed at each position in turn.
+wrong = 0
+(0..70).each do |n|
+  base = "q" * n
+  wrong += 1 unless base == base && base == "q" * n && base != "q" * (n + 1)
+  n.times { |at| wrong += 1 if base == base[0, at] + "r" + base[at + 1, n] }
+end
+raise "prelude: == at every length and position (#{wrong} wrong)" unless wrong == 0
+puts "    == at every length to 70, a byte changed at each position"
+
 puts "all std/text checks passed"

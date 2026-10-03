@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`String#==` is ten times faster on long strings: 1,000 compares of two
+  equal megabytes take 22 ms optimised, as Python's take 20.** It compared
+  a byte at a time, and the early exit kept LLVM from vectorising the loop:
+  230 ms for the same compares, eleven times Python. It compares four
+  8-byte words a step and the tail a byte at a time, and the same string is
+  equal to itself without the walk. `bench/std_text_exercise.iyi` checks
+  every length to 70 with one byte changed at each position, and
+  `bench/std_text_scale_exercise.sh` checks a 120 ms bound; the old prelude
+  took 624 ms there.
+
 - **`File.read` holds the file once: a 256 MB read peaks at 260 MB of
   working set, where it peaked at 774.** `read_all` grew a buffer by
   doubling, with the old and new blocks both live during each `realloc`,

@@ -149,15 +149,10 @@ class String
     end
   end
 
-  # Pad on the left (rjust) or the right (ljust) to *width*. A width that
-  # already fits returns the string unchanged.
-  # *width* is in characters, because `size` is: padding is asked for to line
-  # a column up, and a string measured one way and padded another lines up
-  # for ASCII and nothing else. `"héllo".rjust(7, '.')` used to answer a
-  # string whose own `size` was 6. The pad travels as its own bytes for the
-  # same reason — written as one byte, a `'·'` left a lone continuation byte
-  # in the middle of the result. It defaults rather than living in a second
-  # overload of each, which is two methods for one question.
+  # Pad on the left (rjust) or the right (ljust) to *width*, in characters
+  # as `size` counts them, the pad as its own bytes: in bytes,
+  # `"héllo".rjust(7, '.')` answered a string of `size` 6, and a `'·'`
+  # written as one byte left a lone continuation byte in the result.
   def rjust(width : Int32, pad : Char = ' ') : String
     count = size
     return self if width <= count
@@ -190,10 +185,9 @@ class String
     end
   end
 
-  # `"ab" * -3` answered `""` where Crystal raises, and III.1.7a says one
-  # name means one thing in both. The size is a division rather than the
-  # multiply below, so the refusal names the string: `"abcd" * 600_000_000`
-  # panicked with "arithmetic overflow", which is the machine's adder.
+  # `"ab" * -3` answered `""` where the other library raises (III.1.7a).
+  # The size is a division, so the refusal names the string: `"abcd" *
+  # 600_000_000` panicked "arithmetic overflow", the machine's adder.
   def *(count : Int32) : String
     raise "negative count: #{count}" if count < 0
     return "" if count == 0 || @bytesize == 0
@@ -217,21 +211,17 @@ class String
     self
   end
 
-  # Written down rather than printed: in double quotes, the way the
-  # literal is spelled, which is what `Object#inspect`'s comment promises
-  # and what makes `no such key "b"` read as a string and not a name.
-  # Nothing inside is escaped: the strings this prelude holds are the
-  # program's own, and a quote inside one is rare and reads as itself.
+  # In double quotes, the way the literal is spelled: `no such key "b"`
+  # reads as a string and not a name. Nothing inside is escaped: the
+  # strings this prelude holds are the program's own.
   def inspect : String
     "\"" + self + "\""
   end
 
   # The number this string spells - an optional sign and decimal digits,
-  # the whole string - asked for by `samples/iyi/calc`, which reads a
-  # token's text and needs the integer behind it. Raises on anything else,
-  # as Crystal's `to_i` does: one name means one thing in both libraries
-  # (SPEC.md III.1.7a), and a silent 0 for `"oops"` is wrong twice over.
-  # `to_i?` answers nil for the same text, the pair `[]` and `[]?` are.
+  # the whole string - as `samples/iyi/calc` reads a token. Raises on
+  # anything else, as the other library's does (SPEC.md III.1.7a): a
+  # silent 0 for `"oops"` is wrong twice; `to_i?` answers nil for it.
   def to_i : Int32
     to_i? || raise "not a number: #{inspect}"
   end
@@ -279,9 +269,8 @@ class String
     end
   end
 
-  # The three the Kemal port's path joining needs. ASCII again — a `Char`
-  # argument here is always `\'/\'` — and byte-indexed, which is the same
-  # thing while the strings are ASCII.
+  # The three the Kemal port's path joining needs, byte-indexed: the same
+  # as by character while the strings are ASCII.
   def starts_with?(prefix : String) : Bool
     return false if prefix.bytesize > bytesize
 
@@ -512,12 +501,23 @@ class String
     end
   end
 
+  # Thirty-two bytes a step while they last, then one at a time, and the
+  # same string is itself: a byte a step was eleven times Python's `==`,
+  # 230 ms for 1,000 compares of equal megabytes. No load needs alignment.
   def ==(other : String) : Bool
     return false unless bytesize == other.bytesize
-
+    a = to_unsafe
+    b = other.to_unsafe
+    return true if a.address == b.address
     index = 0
+    while index + 32 <= bytesize
+      x = (a + index).as(Pointer(UInt64))
+      y = (b + index).as(Pointer(UInt64))
+      return false unless (x[0] ^ y[0]) | (x[1] ^ y[1]) | (x[2] ^ y[2]) | (x[3] ^ y[3]) == 0_u64
+      index = index + 32
+    end
     while index < bytesize
-      return false unless to_unsafe[index] == other.to_unsafe[index]
+      return false unless a[index] == b[index]
       index = index + 1
     end
     true

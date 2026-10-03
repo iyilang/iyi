@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **A module's overloads called unqualified with a union argument run
+  the overload the value picks.** With `pub def fr_show(x : Int32)` and
+  `pub def fr_show(x : String)` in `kit/lib2`, `fr_show(v)` for a
+  `v : Int32 | String` matched each overload against the caller's self,
+  which is never the module, so no arm was taken and the call ran into
+  `unreachable`: `import kit/lib2::*` and `import kit/lib2::{fr_show}` at
+  the top level printed `iyi: out of memory`, the same call inside a def
+  or from a class nested in the module declaring the overloads stopped on
+  `Process hit a breakpoint`, and from inside another module the program
+  died of a memory fault. `Kit::Lib2.fr_show(v)` worked. A module's
+  function takes no receiver, so the dispatch now matches it on its
+  arguments alone, and all of these print `int`/`str` in debug and
+  release builds. bench/verbs_exercise.sh checks it; the old compiler
+  answered a memory fault in the plain build and printed nothing in the
+  release build.
+
 - **On Windows `File.rename` refuses to put a directory where a file is,
   as POSIX `rename` refuses it.** `MoveFileExW` replaced the file with
   the directory: `File.rename("d", "f.txt")` left `f.txt` a directory and

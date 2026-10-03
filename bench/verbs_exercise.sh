@@ -151,6 +151,24 @@ if [ "$(cd "$WORK/setter" && ./from-artifact 2>&1)" = "5" ]; then
 else
   echo "  a setter with no written return, through its artifact:"; sed -n '1,3p' "$WORK/setter.log"; status=1
 fi
+# A module's overloads called unqualified with a union argument: through
+# `import ::*`, through `import ::{name}`, from inside another module, and
+# from a type nested in the module that declares them. Every one fell into
+# `unreachable`: from source it was "iyi: out of memory", a memory fault or
+# a breakpoint, by build, while `App::Ov.show(v)` answered.
+mkdir -p "$WORK/ovl/app"
+printf 'module app/ov\n\npub def show(x : Int32) : String\n  "int"\nend\n\npub def show(x : String) : String\n  "str"\nend\n' > "$WORK/ovl/app/ov.iyi"
+printf 'module app/relay\n\nimport app/ov::*\n\npub def relay(v : Int32 | String) : String\n  show(v)\nend\n\npub class C\n  def go(v : Int32 | String) : String\n    show(v)\n  end\nend\n' > "$WORK/ovl/app/relay.iyi"
+printf 'module main\n\nimport app/ov::{show}\nimport app/relay::*\n\ndef own(x : Int32) : String\n  "own int"\nend\n\ndef own(x : String) : String\n  "own str"\nend\n\nclass D\n  def go(v : Int32 | String) : String\n    own(v)\n  end\nend\n\nv : Int32 | String = "abc".size > 0 ? "s" : 1\nw : Int32 | String = "abc".size > 0 ? 1 : "s"\nputs show(v), show(w), relay(v), C.new.go(w), D.new.go(v)\n' > "$WORK/ovl/m.iyi"
+for mode in plain release; do
+  flag=""; [ "$mode" = release ] && flag="--release"
+  (cd "$WORK/ovl" && "$IYI" build $flag -o "ovl-$mode" m.iyi && "./ovl-$mode") > "$WORK/ovl-$mode.out" 2>&1
+  if [ "$(tr -d '\r' < "$WORK/ovl-$mode.out" | tr '\n' ' ')" = "str int str int own str " ]; then
+    echo "  a module's overloads called unqualified with a union, $mode: each arm answers"
+  else
+    echo "  a module's overloads called unqualified with a union, $mode:"; sed -n '1,3p' "$WORK/ovl-$mode.out"; status=1
+  fi
+done
 # Names the compiler resolved, written into an artifact that is read
 # inside the module. Beside an `app/tuple`, an `app/std` and an
 # `app/exception`, a `Tuple`, a `Std::Traits::Hashable` and an `Exception`

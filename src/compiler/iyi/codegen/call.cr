@@ -426,6 +426,15 @@ class Iyi::CodeGenVisitor
           if is_super
             # A super call always matches the obj type
             result = int1(1)
+          elsif !node_obj && (def_owner = a_def.owner).is_a?(MetaclassType) && def_owner.instance_type.iyi_unit?
+            # iyi: a module's function reached unqualified, through an import
+            # or from a type nested in the module, takes no receiver, so there
+            # is no self to match: the scope's self is some other type and its
+            # type id never equalled the module's. Every arm was then skipped
+            # and the call fell into `unreachable`, which ran on as "out of
+            # memory", a memory fault or a hang for `fr_show(v)` with
+            # `v : Int32 | String`, while `Kit::Lib2.fr_show(v)` worked.
+            result = int1(1)
           else
             result = match_type_id(owner, a_def.owner, obj_type_id)
           end

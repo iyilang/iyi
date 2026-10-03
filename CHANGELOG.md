@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`std/hpack` counts 32 octets a field in the header list size, as
+  RFC 7540 6.5.2 defines the size SETTINGS_MAX_HEADER_LIST_SIZE limits.**
+  `Decoder#max_header_list_size` summed names and values alone, so two
+  `:method: GET` were 20 octets and passed a limit of 70, and 120 fields
+  `x-a: 1` passed a limit of 4096; Python's `hpack` refuses both. A field
+  adds its name, its value and 32 now. 1,764 header blocks from Python's
+  `hpack` encoder, a quarter of them corrupted, decode to the same
+  headers or the same refusal, and 9,000 Huffman encodes and decodes
+  agree with its nghttp2 table. `bench/std_hpack_exercise.iyi` checks one
+  field within 70 and two past it, and the `.sh` proves the check fails
+  without the 32; the old module decoded both.
+
 - **On Windows `Path#join` keeps the left side's drive for a root or a
   drive-relative name, as ntpath joins.** A right-hand side with any
   anchor was the answer by itself, so `Path.windows("C:\\a").join("\\b")`

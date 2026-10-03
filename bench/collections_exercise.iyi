@@ -548,4 +548,14 @@ assert_str({"k" => "a\tb\\\#{x}"}.inspect, "{\"k\" => \"a\\tb\\\\\\\#{x}\"}", "i
 assert_str(['\'', '\0', '"', 'é'].inspect, "['\\'', '\\0', '\"', 'é']", "inspect: a character's quote and NUL are escaped")
 assert_str(["\u0000\e\u007F\u00A0\u200B\u{E0001}\xFF"].inspect, "[\"\\u0000\\e\\u007F\\u00A0\\u200B\\u{E0001}\\xFF\"]", "inspect: what is not printable is hex")
 
+# ---- A NaN key, placed where `<=>` places it
+#
+# `max_by` and `min_by` read the keys with `<`, which is false both ways
+# against NaN, so `[1.0, NaN, 0.5].max_by` was 1.0 and `[NaN, 1.0].min_by`
+# NaN, where `max` and std/enumerable's `max_by` put NaN above every number.
+nan = 0.0 / 0.0
+assert_str([1.0, nan, 0.5].max_by { |v| v }.to_s, "NaN", "array: max_by of a NaN key is the NaN")
+assert_str([nan, 1.0].min_by { |v| v }.to_s, "1.0", "array: min_by passes over a NaN key")
+assert_str([nan, 1.0].max_by { |v| v }.to_s, "NaN", "array: a NaN key first stays the largest")
+
 puts "all collection checks passed"

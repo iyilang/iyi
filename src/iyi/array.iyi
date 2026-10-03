@@ -228,8 +228,8 @@ class Array(T)
     nil
   end
 
-  # The element whose key is largest, or smallest, by `<` on the keys; the
-  # first of equals. Empty is a mistake, as with `first`.
+  # The element whose key is largest, or smallest, the first of equals; a
+  # NaN key is above every other, as `<=>` places it. Empty is a mistake.
   def max_by(& : T -> U) : T forall U
     raise "max_by of an empty array" if empty?
     best = @buffer[0]
@@ -237,7 +237,7 @@ class Array(T)
     index = 1
     while index < @size
       key = yield @buffer[index]
-      if best_key < key
+      if best_key < key || (key.is_a?(Float) && key != key && best_key == best_key)
         best = @buffer[index]
         best_key = key
       end
@@ -253,7 +253,7 @@ class Array(T)
     index = 1
     while index < @size
       key = yield @buffer[index]
-      if key < best_key
+      if key < best_key || (key.is_a?(Float) && best_key != best_key && key == key)
         best = @buffer[index]
         best_key = key
       end

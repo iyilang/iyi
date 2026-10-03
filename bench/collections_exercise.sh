@@ -278,6 +278,11 @@ prove_fails "an array hashed by its type" type_hashed_array array.iyi \
   "hash: a 300 by 300 grid of arrays spreads" \
   's/^    value.hash$/    crystal_type_id/'
 
+# 12. `max_by` reading its keys with `<` alone, so a NaN key never wins.
+prove_fails "max_by passes over a NaN key" nan_max_by array.iyi \
+  "array: max_by of a NaN key is the NaN" \
+  's/^      if best_key < key || (key.is_a?(Float) \&\& key != key \&\& best_key == best_key)$/      if best_key < key/'
+
 echo
 echo "== and what an empty receiver says when it is asked for a size"
 panics_with "a negative capacity" neg_cap "negative capacity" "Array(Int32).new(-1).size"

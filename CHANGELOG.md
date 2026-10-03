@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`Array#max_by` and `min_by` place a NaN key where `<=>` does, above
+  every number.** They read the keys with `<`, which is false both ways
+  against NaN, so `[1.0, NaN, 0.5].max_by(&.itself)` was 1.0 and
+  `[NaN, 1.0].min_by(&.itself)` NaN, where `max`, `max_of`, `minmax_by`
+  and std/enumerable's `max_by`, all `<=>` with NaN last, answer NaN and
+  1.0. A NaN float key now wins `max_by` and loses `min_by`, the first of
+  equal NaNs kept; other keys are compared as before. The other library
+  refuses all of these ("Comparison of NaN and 1.0 failed"); here `<=>`
+  is the total order the entry for `Float64#<=>` describes, and the two
+  methods agree with it. `bench/collections_exercise.iyi` checks three
+  cases and its `.sh` proves the `max_by` one fails with `<` alone; the
+  old prelude answered 1.0. The prelude keeps its line count.
+
 - **`Time#inspect` writes the nanoseconds when there are any, in the
   other library's form.** `Time` had no `inspect`, so it was `to_s`, and
   `Time.utc(2024, 1, 1, 0, 0, 0, nanosecond: 5).inspect` was

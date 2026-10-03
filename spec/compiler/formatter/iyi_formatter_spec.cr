@@ -75,6 +75,13 @@ describe "Formatter on iyi" do
   assert_iyi_format "module m\n\npub abstract struct Shape\n  abstract def area : Int32\nend"
   assert_iyi_format "module m\n\npub abstract def title : String"
 
+  # A comment after `nil?` is the line's, as after `is_a?(T)`: the comment
+  # line under `if x.nil? # c` went to column 3, and the one under `raise
+  # "x" if pwd.nil? # c` to the column of `pwd`.
+  assert_iyi_format "if x.nil? # c\n  # body\n  x = 1\nend"
+  assert_iyi_format "while x.nil? # c\n  # body\n  x = 1\nend"
+  assert_iyi_format "raise \"x\" if pwd.nil? # c\n# next\nputs 1"
+
   # Traits, their supertraits, and the associated types they declare.
   assert_iyi_format "module m\n\npub trait Show\n  abstract def show : String\nend"
   assert_iyi_format "module m\n\npub trait Ord : Cmp\n  abstract def cmp(other : self) : Int32\nend"

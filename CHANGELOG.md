@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`fmt` keeps the comment line under `if x.nil? # c` at the body's
+  indentation.** It went to column 3 (column 6 under `while`), and under
+  `raise "x" if pwd.nil? # c` the next comment line went to column 13,
+  the column of `pwd`. `nil?` skipped the space after it as `.as (T)`
+  skips the one before its `(`, and so wrote the comment, and the lines
+  after it, inside the condition's indentation. A space before a comment
+  is left to the line now, as after `is_a?(T)`.
+  `spec/compiler/formatter/iyi_formatter_spec.cr` formats `if`, `while`
+  and a suffix `if`; the old formatter wrote `   # body`.
+
 - **`fmt` puts a call's or a def's arguments on their own lines after a
   comment or a trailing space following its `(`.** `x = Planet.new( # c`
   / `  1.5,` / `  2.5)` was written with `1.5,` at column 0;

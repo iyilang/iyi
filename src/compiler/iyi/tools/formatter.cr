@@ -2914,8 +2914,11 @@ module Iyi
       found_comment = false
 
       # For special calls we want to format `.as (Int32)` into `.as(Int32)`
-      # so we remove the space between "as" and "(".
-      skip_space if special_call
+      # so we remove the space between "as" and "(". A space before a comment
+      # is left to the caller, as after any other call: skipped here, the
+      # comment after `if x.nil?` was written inside the condition's
+      # indentation, and the comment line under it went to column 3.
+      skip_space if special_call && @token.type.space? && @lexer.current_char != '#'
 
       # If the call has a single argument which is a parenthesized `Expressions`,
       # we skip whitespace between the method name and the arg. The parenthesized

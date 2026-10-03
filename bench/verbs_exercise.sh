@@ -454,6 +454,11 @@ refuses "a ! in initialize" "can't propagate out of \`initialize\`" -- "$IYI" ch
 printf 'module initreturn\n\nclass C\n  getter v : Int32\n  getter name : String\n\n  def initialize(early : Bool)\n    @v = 1\n    return if early\n    @name = "named"\n  end\nend\n\nputs C.new(true).name.size\n' > initreturn.iyi
 refuses "a return in initialize before a field is assigned" "can't leave \`initialize\` before @name is assigned" -- \
   "$IYI" check initreturn.iyi
+# A parameterised trait as a bound, `forall T : Into(String)`, lost its
+# arguments: a type with only `impl Into(Int32)` met it and printed 2.
+printf 'trait Into(T)\n  abstract def into : T\nend\n\nstruct B\nend\n\nimpl Into(Int32) for B\n  def into : Int32\n    2\n  end\nend\n\ndef as_s(x : T) : String forall T : Into(String)\n  x.into.to_s\nend\n\nputs as_s(B.new)\n' > intobound.iyi
+refuses "a parameterised bound its argument does not meet" 'B does not implement Into(String), required by `T` in `as_s`' -- \
+  "$IYI" check intobound.iyi
 # A program's own exit status is `iyi run`'s, a negative one too. On
 # Windows `exit(-1)` is 0xFFFFFFFF, which the runner took for an abnormal
 # end: "terminated abnormally, the cause is unknown", and exit 1.

@@ -4560,6 +4560,18 @@ end").as(ClassDef)
         node.free_var_bounds.should be_nil
       end
 
+      # A bound read as a path stopped at `Into`, so any `Into` met it, and
+      # `(String)` was left to be the body's first statement.
+      it "parses a parameterised bound" do
+        into_string = Generic.new(Path.new(["Into"]), [Path.new(["String"])] of ASTNode)
+        node = parse("def f(x : T) forall T : Into(String)\nend").as(Def)
+        node.free_var_bounds.should eq({"T" => into_string} of String => ASTNode)
+        node.body.should eq(Nop.new)
+        node = parse("def go : Nil where Elem : Into(String)\nend").as(Def)
+        node.where_bounds.should eq({"Elem" => into_string} of String => ASTNode)
+        node.body.should eq(Nop.new)
+      end
+
       assert_syntax_error "def f(x : T) forall T :\nend", "expecting token 'CONST'"
 
       # iyi: `where Elem : Comparable` — a bound on a name the method did not

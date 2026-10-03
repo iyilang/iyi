@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A parameterised trait as a bound is checked at its arguments.**
+  `forall T : Into(String)` and `where Elem : Into(String)` were read as
+  `Into`, so a type with only `impl Into(Int32)` met them and printed 2,
+  and on the def's line `(Float64)` became the body's first statement.
+  It answers "B does not implement Into(String), required by `T` in
+  `as_s`" (and "required by `where Elem : Into(String)` in `conv`") now.
+  `bench/verbs_exercise.sh`, `spec/compiler/parser/parser_spec.cr` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  printed 2.
+
 - **A generic struct holding a trait it implements is refused as a
   recursive struct.** `Box(Show).new(1)` beside `impl Show for Box(T)
   forall T` ended in "Stack overflow" inside the compiler, ~12k frames

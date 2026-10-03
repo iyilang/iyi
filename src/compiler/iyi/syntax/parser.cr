@@ -3004,7 +3004,7 @@ module Iyi
         next_token_skip_space_or_newline
         supertraits = [] of ASTNode
         loop do
-          supertraits << parse_path
+          supertraits << parse_iyi_bound
           skip_space
           break unless @token.type.op_comma?
           next_token_skip_space_or_newline
@@ -3124,7 +3124,7 @@ module Iyi
           if @token.type.op_colon?
             next_token_skip_space_or_newline
             type_var_bounds ||= {} of String => ASTNode
-            type_var_bounds[name] = parse_path
+            type_var_bounds[name] = parse_iyi_bound
             skip_space
           end
 
@@ -5420,7 +5420,7 @@ module Iyi
         check :OP_COLON
         next_token_skip_space_or_newline
 
-        bounds[name] = parse_path
+        bounds[name] = parse_iyi_bound
         skip_space
 
         break unless @token.type.op_comma?
@@ -5630,7 +5630,7 @@ module Iyi
         if @token.type.op_colon?
           next_token_skip_space_or_newline
           bounds ||= {} of String => ASTNode
-          bounds[free_var] = parse_path
+          bounds[free_var] = parse_iyi_bound
           skip_space
         end
 
@@ -5642,6 +5642,18 @@ module Iyi
         end
       end
       {free_vars, bounds}
+    end
+
+    # A bound, and a supertrait, is a trait as a type position names it, so a
+    # parameterised one carries its arguments: `forall T : Into(String)`,
+    # `where Elem : Into(String)`, `trait Ord(T) : Cmp(T)`. Read as a path,
+    # the arguments were left behind — any `Into` met the bound, a `B` with
+    # only `impl Into(Int32)` passed `forall T : Into(String)` and printed 2,
+    # `(Float64)` on a def's line became its body's first statement, and the
+    # supertrait was "expecting any of these tokens: ;, NEWLINE, SPACE (not
+    # '(')".
+    private def parse_iyi_bound : ASTNode
+      parse_generic
     end
 
     def compute_block_arg_yields(block_arg)

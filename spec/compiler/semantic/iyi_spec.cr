@@ -1970,6 +1970,54 @@ describe "Semantic: iyi" do
         App.f(1)
         CODE
     end
+
+    # Read as a path, `Into(String)` was any `Into`: a type with only `impl
+    # Into(Int32)` met it, under `forall` and under `where` alike.
+    it "checks a parameterised bound at its arguments" do
+      code = <<-CODE
+        trait Into(T)
+          abstract def into : T
+        end
+
+        struct B
+        end
+
+        impl Into(%s) for B
+          def into : %s
+            %s
+          end
+        end
+
+        trait Bag
+          type Elem
+          abstract def items : Array(Elem)
+
+          def conv : Int32 where Elem : Into(String)
+            1
+          end
+        end
+
+        struct S
+        end
+
+        impl Bag for S
+          type Elem = B
+
+          def items : Array(B)
+            [B.new]
+          end
+        end
+
+        def as_s(x : T) : Int32 forall T : Into(String)
+          1
+        end
+
+        %s
+        CODE
+      assert_type(code % {"String", "String", "\"b\"", "{as_s(B.new), S.new.conv}"}) { tuple_of([int32, int32]) }
+      assert_error code % {"Int32", "Int32", "2", "as_s(B.new)"}, "B does not implement Into(String), required by `T` in `as_s`"
+      assert_error code % {"Int32", "Int32", "2", "S.new.conv"}, "B does not implement Into(String), required by `where Elem : Into(String)` in `conv`"
+    end
   end
 
   # iyi: `trait Ord : Eq` — a trait requiring another trait (SPEC.md II.6).

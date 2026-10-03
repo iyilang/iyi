@@ -183,6 +183,9 @@ raise "string: index char offset not found" unless "banana".index('b', 1).nil?
 raise "string: index str" unless "banana".index("na") == 2
 raise "string: index str with offset" unless "banana".index("na", 3) == 4
 raise "string: index str not found" unless "banana".index("xyz").nil?
+# An offset near the top of `Int32` is past the end like any other, and
+# adding the needle's size to it panicked with "arithmetic overflow".
+raise "string: index far past the end" unless "abc".index("bc", 2147483646).nil? && "abc".index('b', 2147483647).nil?
 
 raise "string: rindex char" unless "banana".rindex('a') == 5
 raise "string: rindex char offset" unless "banana".rindex('a', 4) == 3
@@ -388,6 +391,23 @@ raise "utf8: tr and squeeze write U+FFFD for it too" unless lead_a.tr("é", "e")
 raise "utf8: split empty after a byte that begins no character" unless stray.split("", 2) == ["\uFFFD", "ab"] && lead_a.split("") == ["\uFFFD", "A"]
 puts "    a byte that begins no character is one U+FFFD in size, chars, delete, tr, squeeze and split"
 
+# The same characters found from the back or one at a time: `reverse`,
+# `chop` and `strip` with a set took every `10xxxxxx` byte with the lead
+# before it, so an overlong C0 80 stayed one piece and a stray byte after
+# `é` joined it; a set never named a byte that begins no character, even
+# one holding that very byte; `tr` with two ASCII sets kept such a byte
+# where any other set writes U+FFFD; and a `tr` run across the surrogates
+# wrote one as three bytes that read back as three U+FFFD.
+trail = String.new(3) { |b| b[0] = 0xC3_u8; b[1] = 0xA9_u8; b[2] = 0xA9_u8 }
+raise "utf8: reverse by each_char's characters" unless overlong.reverse.bytes == [0x80_u8, 0xA0_u8, 0xED_u8, 0x80_u8, 0xC0_u8] && trail.reverse.bytes == [0xA9_u8, 0xC3_u8, 0xA9_u8]
+raise "utf8: chop by each_char's characters" unless trail.chop == "é" && cut.chop.bytes == [0xE2_u8]
+raise "utf8: a set names a byte that begins no character" unless lead_a.lstrip(lead_a) == "" && stray.lstrip(stray) == "" && "\uFFFDa".lstrip(lead_a) == "a"
+raise "utf8: lstrip a set by each_char's characters" unless (trail + "b").lstrip("é").bytes == [0xA9_u8, 0x62_u8]
+raise "utf8: rstrip a set by each_char's characters" unless (trail + "b").rstrip(stray) == "é" && lead_a.rstrip(lead_a) == ""
+raise "utf8: an ascii tr writes U+FFFD too" unless lead_a.tr("AB", "bc") == "\uFFFDb"
+raise "utf8: a tr run has no surrogates" unless "ab".tr("ab", "\uD7FF-\uE000") == "\uD7FF\uE000"
+puts "    reverse, chop, strip with a set and tr read it the way each_char does"
+
 raise "string: to_u64 max" unless "18446744073709551615".to_u64 == 18446744073709551615_u64
 raise "string: to_u64 past max" unless "18446744073709551616".to_u64?.nil?
 raise "string: to_u64 base 16" unless "ff".to_u64(16) == 255_u64
@@ -395,6 +415,9 @@ raise "string: to_u64 refuses a sign" unless "-1".to_u64?.nil?
 raise "string: range" unless "hello"[1..3] == "ell" && "hello"[1...3] == "el"
 raise "string: range from the back" unless "hello"[-3..-1] == "llo" && "hello"[0..-2] == "hell"
 raise "string: backwards range is empty" unless "hello"[3..1] == ""
+# An end at either limit of `Int32` is past the string like any other:
+# counting the bytes between overflowed and panicked.
+raise "string: range to the end of Int32" unless "hello"[1..2147483647] == "ello" && "b"[1...-2147483648] == ""
 puts "    to_u64 and a range of a string verified"
 
 built = String.build { |io| io << "aé€" << '🎉' }

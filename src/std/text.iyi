@@ -179,10 +179,7 @@ class ::String
     mask = ascii_mask(chars)
     at = 0
     while at < bytesize
-      width = 1
-      while at + width < bytesize && (to_unsafe[at + width] & 0xC0_u8) == 0x80_u8
-        width = width + 1
-      end
+      width = point_width(at)
       break unless named_at?(at, width, mask, chars)
       at = at + width
     end
@@ -207,10 +204,51 @@ class ::String
 
   # Whether the *width* bytes at *at*, one character, are one of *chars*. A
   # whole character's bytes are found in well-formed UTF-8 only where that
-  # character starts, so the byte search is a character search.
+  # character starts, so the byte search is a character search. A byte that
+  # begins no character is U+FFFD, as `each_char` reads it and as `delete`
+  # looks it up, and so is one in *chars*: neither was ever named, even by a
+  # set holding that very byte.
   private def named_at?(at : Int32, width : Int32, mask : Pointer(Bool), chars : String) : Bool
-    return mask[to_unsafe[at].to_i] if width == 1
+    return mask[to_unsafe[at].to_i] if to_unsafe[at] < 0x80_u8
+    return chars.chars.includes?('\uFFFD') if width == 1 || (width == 3 && byte_run?(at, "\uFFFD"))
     !chars.index(byte_slice(at, width)).nil?
+  end
+
+  # The bytes of the character at *at*, by `each_char`'s rule: one for a
+  # byte that begins no character. Counting the `10xxxxxx` bytes after a
+  # lead instead read an overlong form, a surrogate or a stray continuation
+  # byte as part of the character before it.
+  private def point_width(at : Int32) : Int32
+    lead = to_unsafe[at].to_i32
+    width = lead < 0xC2 || lead > 0xF4 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4
+    return 1 if width == 1 || at + width > bytesize
+    point = lead & (0x7F >> width)
+    k = 1
+    while k < width
+      byte = to_unsafe[at + k].to_i32
+      return 1 unless (byte & 0xC0) == 0x80
+      point = (point << 6) | (byte & 0x3F)
+      k = k + 1
+    end
+    return 1 if point < (1 << (5 * width - 4)) || point > 0x10FFFF || (point >= 0xD800 && point < 0xE000)
+    width
+  end
+
+  # Where the character that ends at *stop* starts, by the same rule: a
+  # lead whose own width reaches exactly to *stop*, or else the last byte
+  # alone.
+  private def char_start(stop : Int32) : Int32
+    start = stop - 1
+    while start > 0 && stop - start < 4 && (to_unsafe[start] & 0xC0_u8) == 0x80_u8
+      start = start - 1
+    end
+    point_width(start) == stop - start ? start : stop - 1
+  end
+
+  # Whether every byte is part of a character.
+  private def well_formed? : Bool
+    each_point { |point| return false if point < 0 }
+    true
   end
 
   def rstrip : String
@@ -245,10 +283,7 @@ class ::String
     mask = ascii_mask(chars)
     last = bytesize
     while last > 0
-      start = last - 1
-      while start > 0 && (to_unsafe[start] & 0xC0_u8) == 0x80_u8
-        start = start - 1
-      end
+      start = char_start(last)
       break unless named_at?(start, last - start, mask, chars)
       last = start
     end
@@ -286,12 +321,9 @@ class ::String
       return byte_slice(0, bytesize - 2)
     end
     # The last character, not the last byte: `"hé".chop` cut `é` in half
-    # and answered two bytes that are not a string. A character's trailing
-    # bytes are the ones of the form 10xxxxxx; the cut goes before them.
-    cut = bytesize - 1
-    while cut > 0 && (to_unsafe[cut] & 0xC0_u8) == 0x80_u8
-      cut = cut - 1
-    end
+    # and answered two bytes that are not a string. The character is the
+    # one `each_char` ends with.
+    cut = char_start(bytesize)
     byte_slice(0, cut)
   end
 
@@ -386,7 +418,9 @@ class ::String
     offset = bytesize + offset if offset < 0
     return nil if offset < 0
     return offset if search.bytesize == 0 && offset <= bytesize
-    return nil if offset + search.bytesize > bytesize
+    # Room left, not an end: `offset + search.bytesize` overflowed for an
+    # offset near the top of `Int32` and panicked where the answer is nil.
+    return nil if offset > bytesize - search.bytesize
     byte_index(search, offset)
   end
 
@@ -580,17 +614,19 @@ class ::String
   # Both sets in ASCII - the common case, and a DNA complement's - are one
   # 256-entry byte table built once and one pass over the bytes, which a
   # character above ASCII passes through untouched because none of its
-  # bytes is under 0x80. Otherwise the map is per character. A `to`
-  # shorter than `from` repeats its last character, which is the rule the
-  # other library follows; an empty one deletes the character. Each
-  # character was looked up in an array of one-character strings and the
-  # answer appended to a string rebuilt every time, and a 130 MB `tr` did
-  # not finish.
+  # bytes is under 0x80. A byte that begins no character is not one of
+  # those: the table kept it as it stood where the per-character map
+  # writes U+FFFD, so text holding one takes that map too. Otherwise the
+  # map is per character. A `to` shorter than `from` repeats its last
+  # character, which is the rule the other library follows; an empty one
+  # deletes the character. Each character was looked up in an array of
+  # one-character strings and the answer appended to a string rebuilt every
+  # time, and a 130 MB `tr` did not finish.
   def tr(from : String, to : String) : String
     return self if from.empty?
     sources = tr_set(from)
     targets = tr_set(to)
-    return tr_bytes(sources, targets) if sources.all? { |c| c.ord < 0x80 } && targets.all? { |c| c.ord < 0x80 }
+    return tr_bytes(sources, targets) if sources.all? { |c| c.ord < 0x80 } && targets.all? { |c| c.ord < 0x80 } && well_formed?
 
     String.build(bytesize) do |io|
       each_char do |c|
@@ -662,8 +698,10 @@ class ::String
           raise "text: tr range #{chars[i - 1]}-#{chars[i + 1]} runs backwards"
         end
         cp = low + 1
+        # A surrogate is not a character, and written it is three bytes
+        # that read back as three U+FFFD.
         while cp <= high
-          named << cp.unsafe_chr
+          named << cp.unsafe_chr unless cp >= 0xD800 && cp < 0xE000
           cp = cp + 1
         end
         i = i + 2
@@ -924,11 +962,13 @@ class ::String
   # `s[1..3]`, `s[-3..-1]`: the bytes a range names, its ends counted from
   # the back when negative, as `[](start, count)` counts them.
   def [](range : Range(Int32, Int32)) : String
-    first = range.begin < 0 ? bytesize + range.begin : range.begin
-    last = range.end < 0 ? bytesize + range.end : range.end
+    # In 64 bits: `0..Int32::MAX` overflowed counting its bytes, and so did
+    # an exclusive end of `Int32::MIN`.
+    first = (range.begin < 0 ? bytesize + range.begin : range.begin).to_i64
+    last = (range.end < 0 ? bytesize + range.end : range.end).to_i64
     last = last - 1 if range.exclusive?
     count = last - first + 1
-    self[range.begin, count < 0 ? 0 : count]
+    self[range.begin, count < 0 ? 0 : (count > bytesize ? bytesize : count.to_i32)]
   end
 
   def to_i64 : Int64
@@ -1035,9 +1075,11 @@ class ::String
     to_f
   end
 
-  # The characters in reverse, found from the back: a lead byte is any byte
-  # that is not `10xxxxxx`, so each character's bytes are copied as they
-  # stand. It decoded the whole string into an array of `Char`s first - four
+  # The characters in reverse, found from the back by `each_char`'s rule,
+  # so each character's bytes are copied as they stand and a byte that
+  # begins no character is one of its own: taking every `10xxxxxx` byte
+  # with the lead before it kept `C0 80` and a stray byte after `é` whole.
+  # It decoded the whole string into an array of `Char`s first - four
   # bytes each, 520 MB to reverse 130 MB of ASCII.
   def reverse : String
     source = to_unsafe
@@ -1045,10 +1087,7 @@ class ::String
       at = 0
       stop = bytesize
       while stop > 0
-        start = stop - 1
-        while start > 0 && (source[start] & 0xC0_u8) == 0x80_u8
-          start = start - 1
-        end
+        start = char_start(stop)
         k = start
         while k < stop
           buffer[at] = source[k]

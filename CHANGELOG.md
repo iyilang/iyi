@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`std/text` reads malformed UTF-8 one way everywhere, and two edges
+  do not overflow.** `reverse`, `chop`, `lstrip` and `rstrip` joined every
+  continuation byte to the lead before it, where `each_char` reads a lead
+  that begins no character as a character of its own: `chop` of
+  `"\xC3\xA9\xA9"` gave `""`, not `"é"`. A strip set never named such a
+  byte, an ASCII-only `tr` copied it where every other `tr` writes
+  U+FFFD, and a `tr` range across the surrogates wrote them as invalid
+  bytes. `index` with an offset near `Int32::MAX` and `s[1..Int32::MAX]`
+  panicked with "arithmetic overflow". Found by 330,000 cases against
+  Crystal; `enumerable` and `indexable` agreed on 108,000.
+
 - **A value returned past a `defer` is the value it was.** A union, tuple
   or struct a `return`, `break` or `next` carried was a pointer to its
   variable, read only after the cleanup ran: `defer u = -2` then

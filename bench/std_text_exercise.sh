@@ -164,6 +164,29 @@ prove_fails "squeeze writes no U+FFFD for a byte that begins no character" squee
   's/^        point = 0xFFFD if point < 0$/        point = 0x3F if point < 0/'
 prove_fails "each_line drops a final cr" line_cr "utf8: each_line final cr" \
   's/^      yield byte_slice(start, bytesize - start)$/      yield byte_slice(start, source[bytesize - 1] == 13_u8 ? bytesize - start - 1 : bytesize - start)/'
+# An offset or a range end near a limit of `Int32` added to again, which
+# panicked with "arithmetic overflow" where the answer is nil or the rest.
+prove_fails "index offset added to its needle" index_far "arithmetic overflow" \
+  's/^    return nil if offset > bytesize - search.bytesize$/    return nil if offset + search.bytesize > bytesize/'
+prove_fails "range counted in Int32" range_far "arithmetic overflow" \
+  's/^    first = (range.begin < 0 ? bytesize + range.begin : range.begin).to_i64$/    first = range.begin < 0 ? bytesize + range.begin : range.begin/; s/^    last = (range.end < 0 ? bytesize + range.end : range.end).to_i64$/    last = range.end < 0 ? bytesize + range.end : range.end/'
+# Characters found by their `10xxxxxx` bytes again rather than by the rule
+# `each_char` decodes with, a set blind to a byte that begins no
+# character, the byte table keeping one, and a run through the surrogates.
+prove_fails "reverse groups continuation bytes" reverse_cont "utf8: reverse by each_char's characters" \
+  's/^        start = char_start(stop)$/        start = stop - 1\n        while start > 0 \&\& (source[start] \& 0xC0_u8) == 0x80_u8\n          start = start - 1\n        end/'
+prove_fails "chop groups continuation bytes" chop_cont "utf8: chop by each_char's characters" \
+  's/^    cut = char_start(bytesize)$/    cut = bytesize - 1\n    while cut > 0 \&\& (to_unsafe[cut] \& 0xC0_u8) == 0x80_u8\n      cut = cut - 1\n    end/'
+prove_fails "a set blind to a byte that begins no character" strip_lone "utf8: a set names a byte that begins no character" \
+  '/^    return chars.chars.includes?(.\\uFFFD.) if width == 1/d'
+prove_fails "lstrip groups continuation bytes" lstrip_cont "utf8: lstrip a set by each_char's characters" \
+  's/^      width = point_width(at)$/      width = 1\n      while at + width < bytesize \&\& (to_unsafe[at + width] \& 0xC0_u8) == 0x80_u8\n        width = width + 1\n      end/'
+prove_fails "rstrip groups continuation bytes" rstrip_cont "utf8: rstrip a set by each_char's characters" \
+  's/^      start = char_start(last)$/      start = last - 1\n      while start > 0 \&\& (to_unsafe[start] \& 0xC0_u8) == 0x80_u8\n        start = start - 1\n      end/'
+prove_fails "the byte table keeps a byte that begins no character" tr_lone "utf8: an ascii tr writes U+FFFD too" \
+  's/ \&\& well_formed?$//'
+prove_fails "a tr run through the surrogates" tr_surrogate "utf8: a tr run has no surrogates" \
+  's/^          named << cp.unsafe_chr unless cp >= 0xD800 \&\& cp < 0xE000$/          named << cp.unsafe_chr/'
 
 # 5. String split broken
 prove_fails "string split broken" no_split "string: split str" \

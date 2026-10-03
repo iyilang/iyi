@@ -1,6 +1,6 @@
 # The first iyi program.
 #
-#   ./bin/crystal run samples/iyi/hello.iyi
+#   ./bin/iyi run samples/iyi/hello.iyi
 #
 # Everything below compiles and runs today. What is still missing is listed at
 # the bottom — this file is meant to stay honest about how far the

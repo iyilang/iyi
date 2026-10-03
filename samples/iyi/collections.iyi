@@ -1,6 +1,6 @@
 # The `Enumerable` port, exercised — SPEC.md II.6.
 #
-#   ./bin/crystal run samples/iyi/collections.iyi
+#   ./bin/iyi run samples/iyi/collections.iyi
 #
 # `std/enumerable.iyi` holds the trait. This file implements it twice and calls
 # every method it defines. Both matter: a default method is only typed when it

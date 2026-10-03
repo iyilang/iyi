@@ -1,6 +1,6 @@
 # Module initialisation order: SPEC.md III.5.
 #
-#   ./bin/crystal run samples/iyi/init_order.iyi
+#   ./bin/iyi run samples/iyi/init_order.iyi
 #
 # Prints its five lines in the order they are numbered, and the numbering is
 # the whole point — none of it comes from where the `import` directives are

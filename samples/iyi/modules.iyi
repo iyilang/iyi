@@ -1,6 +1,6 @@
 # Modules across files: `import`, and the names it brings into scope.
 #
-#   ./bin/crystal run samples/iyi/modules.iyi
+#   ./bin/iyi run samples/iyi/modules.iyi
 #
 # Everything below compiles and runs today. `hello.iyi` covers traits and
 # `impl` in a single file; this one covers the part a single file cannot show.

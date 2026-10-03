@@ -1,6 +1,6 @@
 # The shareable immutable sequence, exercised — SPEC.md III.4.7.
 #
-#   ./bin/crystal run samples/iyi/immutable.iyi
+#   ./bin/iyi run samples/iyi/immutable.iyi
 #
 # `std/list.iyi` holds the type. This file is the evidence for the two claims
 # made about it, because a type that merely compiles has proved neither:

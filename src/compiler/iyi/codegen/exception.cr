@@ -277,7 +277,10 @@ class Iyi::CodeGenVisitor
     # However, ensure blocks do not affect the return type of an exception handler, so we need to
     # save and restore @last to preserve the correct return value.
     old_last = @last
-    accept node_ensure if node_ensure
+    if node_ensure
+      old_last = preserve_across_ensure(old_last, node.type?) if @needs_value
+      accept node_ensure
+    end
     @last = old_last
 
     false
@@ -296,8 +299,12 @@ class Iyi::CodeGenVisitor
     end
   end
 
-  def execute_ensures_until(node)
+  # iyi: *value_type* is the type of `@last`, the value a `return`, `break` or
+  # `next` carries past the ensures; `@last` is that value again afterwards.
+  def execute_ensures_until(node, value_type : Type? = nil)
     stop_exception_handler = @node_ensure_exception_handlers[node]?.try &.node
+    value = @last
+    preserved = false
 
     @ensure_exception_handlers.try &.reverse_each do |exception_handler|
       break if exception_handler.node.same?(stop_exception_handler)
@@ -305,10 +312,36 @@ class Iyi::CodeGenVisitor
       target_ensure = exception_handler.node.ensure
       next unless target_ensure
 
+      unless preserved
+        value = preserve_across_ensure(value, value_type)
+        preserved = true
+      end
+
       with_context(exception_handler.context) do
         accept target_ensure
       end
     end
+
+    @last = value
+  end
+
+  # iyi: a value passed by value is a pointer, and reading a variable yields a
+  # pointer to the variable's own storage. An ensure that reassigns the
+  # variable then rewrites a value that was already taken, and with another
+  # type it leaves bytes the value's type does not describe: `return u` with
+  # `u : Char | String` and `ensure u = -2` returned an `Int32` read as a
+  # `Char`. The value is evaluated before the ensure runs, so copy it out
+  # before the first ensure body.
+  private def preserve_across_ensure(value, type)
+    return value unless type && type.passed_by_value? && !builder.end
+    # Only an address can change under the ensure; a value already loaded
+    # is itself, and loading through it would be wrong.
+    return value unless value.type.kind.pointer?
+
+    llvm_value_type = llvm_type(type)
+    copy = alloca llvm_value_type
+    store load(llvm_value_type, value), copy
+    copy
   end
 
   def set_ensure_exception_handler(node)

@@ -396,6 +396,49 @@ def main():
     step("and the honest unexported def is clean",
          run("check", "unexported.iyi", cwd=work).returncode == 0, "")
 
+    # And a script, which has no module header: its top-level defs are
+    # the program's, and the program is a module to the compiler, so the
+    # rule took it for a mixin and typed none of them. `def g(x : Int32) :
+    # String` with `x` for a body passed `check` while nothing called it,
+    # and the same def below a `module` header was refused.
+    write("script.iyi", "def g(x : Int32) : String\n  x\nend\n")
+    proc = run("check", "script.iyi", cwd=work)
+    step("a script's uncalled top-level def is typed at its definition",
+         proc.returncode == 1 and "must return String but it is returning Int32" in (proc.stdout + proc.stderr),
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
+    write("script.iyi", "def g(x : Int32) : String\n  x.to_s\nend\n")
+    step("and the honest script is clean",
+         run("check", "script.iyi", cwd=work).returncode == 0, "")
+
+    # And the shapes the probe used to leave to callers: a class method, a
+    # parameter with a default, one with an external name, a splat, a
+    # named-only parameter and an abstract class's. Each def below answers
+    # a String for an Int32, and each compiled and ran; every one is
+    # reported now, each at its own line.
+    shapes = (
+        "module app7\n\n"
+        "abstract class Animal\n  abstract def name : String\nend\n\n"
+        "class Dog < Animal\n  def name : String\n    \"d\"\n  end\nend\n\n"
+        "class C\n  def self.make : Int32\n    \"not an int\"\n  end\nend\n\n"
+        "def a(x : Animal) : Int32\n  x.name\nend\n\n"
+        "def b(x : Int32 = 1) : Int32\n  \"default\"\nend\n\n"
+        "def c(to x : Int32) : Int32\n  \"external\"\nend\n\n"
+        "def d(*xs : Int32) : Int32\n  \"splat\"\nend\n\n"
+        "def e(x : Int32, *, y : Int32) : Int32\n  \"named only\"\nend\n"
+    )
+    write("shapes.iyi", shapes)
+    proc = run("check", "-f", "json", "shapes.iyi", cwd=work)
+    lines = sorted({frame["line"] for frame in json.loads(proc.stderr or proc.stdout or "[]")
+                    if "instantiating" not in frame["message"]})
+    step("a class method, a default, an external name, a splat, a named-only and an abstract parameter are typed",
+         proc.returncode == 1 and lines == [14, 19, 23, 27, 31, 35], f"lines {lines}")
+    write("shapes.iyi", shapes.replace("\"not an int\"", "1").replace("x.name", "x.name.size")
+          .replace("\"default\"", "x").replace("\"external\"", "x").replace("\"splat\"", "xs.size")
+          .replace("\"named only\"", "x + y"))
+    proc = run("check", "shapes.iyi", cwd=work)
+    step("and the honest shapes are clean", proc.returncode == 0,
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
+
     # And a type nobody exports, and a method an `impl` block gives it:
     # both were caller-typed, so with nothing constructing the type a
     # String returned as an Int32 and a call to a method that exists

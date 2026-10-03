@@ -4,6 +4,30 @@
 
 ### Fixed
 
+- **R-2c types a script's top-level defs, class methods, and defs whose
+  parameters have a default, an external name, a splat, a named-only
+  place or an abstract class's type.** Each was left to its callers, so
+  a wrong body nothing called compiled. A header-less script holding
+  `def g(x : Int32) : String` with `x` for a body passed `check` with no
+  output, exit 0, where the same def below a `module` header was refused:
+  the program is a module to the compiler, and was taken for a mixin.
+  `def self.make : Int32` answering `"not an int"` compiled and the
+  program printed `1`; `def b(x : Int32 = 1)`, `def c(to x : Int32)`,
+  `def d(*xs : Int32)`, `def e(x : Int32, *, y : Int32)` and `def a(x :
+  Animal)` with `Animal` abstract, each answering a String for an Int32,
+  printed `compiled`. Each is typed at its definition now: a class method
+  on its class, an abstract class's methods and parameters through its
+  virtual type, as a caller's value arrives, a default's place and a
+  named-only parameter with a value, a splat with one element. SPEC.md's
+  R-2c row lists what stays out of reach (generic types, `forall` and
+  double-splat defs, defs a macro writes). `bench/agent_loop.py` checks a
+  script and the six shapes, each reported at its own line; the old
+  compiler's `check` exited 0 on both. The wider rule found one body in
+  the library that did not type for its own signature: `Process.run`
+  copied an `env` declared as three hash types with one `each` block,
+  which answers "type must be Nil, not (String | Nil)" for an `env` of
+  that union; it copies by key now.
+
 - **The refusal of a local an `IyiThread` block shares with its starter
   advises `Atomic` alone.** Both forms ended "keep the value in an
   `Atomic` or behind a `Mutex`", and iyi has no `Mutex`: `m = Mutex.new`

@@ -225,7 +225,11 @@ pub struct Process
     if chdir && Program.env("PWD") && !(env && env.has_key?("PWD"))
       moved = {"PWD" => nil} of String => String?
       if given = env
-        given.each { |name, value| moved[name] = value }
+        # By key: `each` over the three hash types *env* may be shares one
+        # block, whose value cannot be both `Nil` and `String | Nil`, so an
+        # *env* of that union did not compile ("type must be Nil, not
+        # (String | Nil)"), which definition-site typing reports here.
+        given.keys.each { |name| moved[name] = given[name]? }
       end
       env = moved
     end

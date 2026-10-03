@@ -2168,7 +2168,17 @@ module Iyi
       if errors.empty?
         verb = construct == "!" ? "propagate" : "recover"
         section = construct == "!" ? "III.1" : "III.1.3"
-        node.raise "`#{construct}` has no error to #{verb}: no member of #{type} implements `Error`. `#{construct}` is for a union with an error member — see SPEC.md #{section}"
+        message = "`#{construct}` has no error to #{verb}: no member of #{type} implements `Error`. `#{construct}` is for a union with an error member — see SPEC.md #{section}"
+        # `xs.uniq!`, `s.upcase!`: the other library's in-place spelling of
+        # a method whose plain name is here, so the `!` reached this rule
+        # and the naming rule `sort!` and `map!` are told was never said.
+        if construct == "!" && (bang = node.iyi_bang_call)
+          name, receiver = bang
+          in_place = "#{name}_in_place"
+          instead = type.has_def?(in_place) ? "call `#{receiver}.#{in_place}`, which changes it" : "reassign the copy, `#{receiver} = #{receiver}.#{name}`"
+          message += "\n`#{name}!` is the other library's in-place spelling, and `!` cannot end a name here (SPEC.md III.1.7a): #{instead}"
+        end
+        node.raise message
       end
 
       # iyi: `!` hands the error to the caller, so the enclosing signature has

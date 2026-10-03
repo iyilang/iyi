@@ -1591,6 +1591,18 @@ class Iyi::Call
     # This will insert this node into the trace as the new first frame.
     self.raise ex.message, ex, exception_type: Iyi::MacroRaiseException
   rescue ex : Iyi::CodeError
+    # iyi: `Channel.new` with no type argument: the type parameter is
+    # inferred from `new`'s arguments, and a channel's has none that holds
+    # a `T`. The error was raised at the `T` inside the prelude
+    # (src/iyi/concurrency.iyi:3098), the one frame shown, in a file the
+    # reader did not write; it is said at the call that left it out.
+    if name == "new" && ex.message.try(&.starts_with?("can't infer the type parameter")) &&
+       (meta = @obj.try(&.type?)).is_a?(MetaclassType) && (generic = meta.instance_type).is_a?(GenericClassType) &&
+       Lexer.iyi_source?(location.try(&.filename))
+      written = "#{generic.name}(#{generic.type_vars.map { "Int32" }.join(", ")})"
+      self.raise "`#{generic.name}.new` can't infer #{generic.type_vars.map { |var| "`#{var}`" }.join(" and ")} from its arguments: " \
+                 "write #{generic.type_vars.size == 1 ? "it" : "them"}, `#{written}.new`"
+    end
     if @obj && name == "initialize"
       # Avoid putting 'initialize' in the error trace
       # because it's most likely that this is happening

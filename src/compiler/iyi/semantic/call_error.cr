@@ -219,6 +219,17 @@ module Iyi
     "Dict"  => "`Hash(K, V)` is the name here: `{\"a\" => 1}` is a `Hash(String, Int32)`.",
     "Map"   => "`Hash(K, V)` is the name here: `{\"a\" => 1}` is a `Hash(String, Int32)`.",
     "Set"   => "`Set(T)` comes with `import std/set`; it is declared at the root, so the import alone is enough to write `Set(Int32).new`.",
+    # Rust's, Java's and TypeScript's names for what a type here is
+    # called, or is not called at all.
+    "HashMap"   => "`Hash(K, V)` is the name here: `{\"a\" => 1}` is a `Hash(String, Int32)`.",
+    "BTreeMap"  => "`Hash(K, V)` is the name here: `{\"a\" => 1}` is a `Hash(String, Int32)`.",
+    "Boolean"   => "`Bool` is the name here.",
+    "Str"       => "`String` is the name here.",
+    "Result"    => "There is no `Result`: an error is a member of the return type's union, `Int32 | ParseError`, with `impl Error for ParseError` (SPEC.md III.1).",
+    "Option"    => "There is no `Option`: a value that may be nil is `T?`, `Int32?`.",
+    "Mutex"     => "There is no `Mutex`: an `Atomic(Int32)` keeps a shared count (SPEC.md III.4.10), and a `Channel` hands values between tasks.",
+    "Thread"    => "A kernel thread is `IyiThread.start { ... }` (SPEC.md III.4.11); a task is `g.spawn { ... }` inside `group do |g| ... end`.",
+    "WaitGroup" => "A `group do |g| ... end` waits for every task it started (SPEC.md III.4.9).",
   }
 
   IYI_ARRIVAL_CALL_HINTS = {
@@ -247,6 +258,13 @@ module Iyi
     "catch" => "iyi has no exceptions to catch: an error is a value the caller handles, and `!` propagates it (SPEC.md III.1, III.1.7a).",
     "range" => "A range is written `(0...3)` — `...` excludes the end, `..` includes it — and `(0...3).each do |i| ... end` iterates it.",
     "echo"  => "`puts` is the spelling here; it ends the line.",
+    # A call in this table is one with no receiver, so the method table's
+    # `parseInt` never met `parseInt("3")`.
+    "parseInt" => "`.to_i` is the spelling here: `\"3\".to_i`, and it panics on what is not a number.",
+    # JavaScript's, Python's and Rust's concurrency words. Each was
+    # "undefined method" with nothing after it.
+    "await" => "There is no `await`: a task started with `t = g.spawn { fetch }` inside `group do |g|` ... `end` answers with `t.value`, which waits for it (SPEC.md III.4).",
+    "async" => "There is no `async`: concurrency is a group, `group do |g|` ... `end`, and each `g.spawn { ... }` in it is a task (SPEC.md III.4).",
   }
 
   # A method called on a receiver in Crystal's spelling, and
@@ -272,6 +290,26 @@ module Iyi
     "decode_string" => "`Base64.decode` answers a String here - the other library's `decode_string` (`import std/base64`).",
     "toString"      => "`to_s` is the spelling here: `1.to_s`.",
     "parseInt"      => "`to_i` is the spelling here: `\"1\".to_i`, and it panics on what is not a number.",
+    # More of them, each of which drew the size rule and `iyi build
+    # --crystal`: the method is here under another name, and no other
+    # library is what the reader needs. `get`, `join` and `await` are
+    # read only where the receiver is a Hash or a task (`raise_undefined_method`).
+    "len"         => "`size` is the spelling here: `xs.size`, `s.size`.",
+    "to_string"   => "`to_s` is the spelling here: `1.to_s`.",
+    "unwrap"      => "There is no `unwrap`: `.or_panic` takes the value out of a union with an error member, `.or(default)` gives the error an answer, and a nil is narrowed (`if x`) or given an answer (`x || default`).",
+    "unwrap_or"   => "There is no `unwrap_or`: `.or(default)` gives an error member an answer, and `x || default` gives a nil one.",
+    "contains"    => "`includes?` is the spelling here: `xs.includes?(2)`, `s.includes?(\"a\")`.",
+    "contains?"   => "`includes?` is the spelling here: `xs.includes?(2)`, `s.includes?(\"a\")`.",
+    "trim"        => "`strip` is the spelling here: `s.strip`.",
+    "upper"       => "`upcase` is the spelling here: `s.upcase`.",
+    "lower"       => "`downcase` is the spelling here: `s.downcase`.",
+    "toUpperCase" => "`upcase` is the spelling here: `s.upcase`.",
+    "toLowerCase" => "`downcase` is the spelling here: `s.downcase`.",
+    "clone"       => "`dup` is the copy here: `ys = xs.dup`.",
+    "iter"        => "There is no `iter`: a collection takes the block itself, `xs.map { |x| x * 2 }`.",
+    "get"         => "`h[key]?` is the lookup here: it answers nil for a missing key, and `h[key]` panics on one.",
+    "join"        => "`t.value` waits for a task and answers what its block did (SPEC.md III.4).",
+    "await"       => "`t.value` waits for a task and answers what its block did (SPEC.md III.4); there is no `await`.",
     # `Array#sum` asks the element type for its zero, because an empty
     # array has no element to ask. A type that is not a number has none,
     # and the sentence a person is missing is what to use instead.
@@ -1300,6 +1338,80 @@ class Iyi::Call
     Levenshtein.find(def_name, candidates)
   end
 
+  # iyi: the `IYI_ARRIVAL_METHOD_HINTS` entry a method name is met with.
+  # `xs.lenght` misspells another language's name, and is as far from
+  # `size` as `length` is, so a long name near a long key is read as that
+  # key. The names other types have for something else are kept to the
+  # receiver that has the answer: `get` to a type with `[]?`, `clone` to
+  # one with `dup`, `join` and `await` to a task.
+  private def iyi_arrival_method_key(def_name : String, owner : Type) : String?
+    hints = Iyi::IYI_ARRIVAL_METHOD_HINTS
+    key = def_name if hints.has_key?(def_name)
+    if !key && def_name.size >= 5
+      key = Levenshtein.find(def_name, hints.keys.select { |name| name.size >= 5 && name[0].ascii_letter? })
+    end
+    case key
+    when "get"           then key if owner.has_def?("[]?")
+    when "clone"         then key if owner.has_def?("dup")
+    when "join", "await" then key if owner.to_s.starts_with?("IyiTask(")
+    else                      key
+    end
+  end
+
+  # iyi: the receiver as a hint can write it in code: its own source when
+  # that is one short line. The nil hint said `the receiver` for anything
+  # but a variable, inside code spans: "(`if value = the receiver`)".
+  private def iyi_receiver_code(obj : ASTNode) : String?
+    text = obj.to_s
+    text unless text.includes?('\n') || text.size > 60
+  end
+
+  private def iyi_nil_receiver_hint(obj : ASTNode, def_name : String) : String
+    String.build do |str|
+      case def_name
+      when "try"     then str << "There is no `try`. "
+      when "not_nil" then str << "There is no `not_nil!`: `!` propagates an error here (SPEC.md III.1.7a). "
+      end
+      receiver = iyi_receiver_code(obj)
+      if obj.is_a?(Var)
+        str << receiver << " can be nil here: narrow it first (`if " << receiver << "`) or give the nil an answer (`" << receiver << " || default`)"
+      elsif obj.is_a?(InstanceVar)
+        str << receiver << " can be nil here: narrow it first (`if value = " << receiver << "`) or give the nil an answer (`" << receiver << " || default`)"
+      elsif receiver.nil?
+        str << "The receiver can be nil here: bind it to a variable and narrow that (`if value = ...`), or give the nil an answer with `||`"
+      elsif obj.is_a?(Call)
+        # `if name(1)` and then `name(1).upcase` narrows nothing: the
+        # second `name(1)` is another call, with another answer.
+        str << '`' << receiver << "` can be nil here, and a call is made again each time it is written, so `if " << receiver << "` narrows nothing: "
+        str << "bind it and narrow the variable (`if value = " << receiver << "`, then use `value`) or give the nil an answer (`" << receiver << " || default`)"
+      else
+        str << '`' << receiver << "` can be nil here: narrow it first (`if value = " << receiver << "`) or give the nil an answer (`" << receiver << " || default`)"
+      end
+    end
+  end
+
+  # iyi: a method missing on an error member of the receiver's union: the
+  # value was used as though it could not fail. `ch.receive + 1` was sent
+  # to the prelude's size rule and `iyi build --crystal`, and a `T | E` of
+  # the program's own had no hint at all.
+  private def iyi_error_receiver_hint(obj : ASTNode, union : UnionType) : String
+    errors, values = union.union_types.partition(&.error?)
+    receiver = iyi_receiver_code(obj)
+    String.build do |str|
+      str << (receiver ? "`#{receiver}`" : "The receiver") << " can be "
+      to_sentence(str, errors.map { |type| "`#{type}`" }, " or ")
+      str << " here, " << (errors.size == 1 ? "an error" : "errors") << " (SPEC.md III.1): "
+      if receiver && !values.empty?
+        bound = obj.is_a?(Var) || obj.is_a?(InstanceVar) ? receiver : "value = #{receiver}"
+        str << "give " << (errors.size == 1 ? "it" : "them") << " an answer (`" << receiver << ".or(default)`), tell them apart (`case " << bound << "` with `in "
+        str << values.join(" | ") << "` and `in " << errors.join(", ") << "`), or propagate "
+        str << (errors.size == 1 ? "it" : "them") << " from a def that returns " << (errors.size == 1 ? "it" : "them") << " (`" << receiver << "!`)"
+      else
+        str << "give them an answer with `.or(default)`, tell them apart with `case`, or propagate them from a def that returns them with `!`"
+      end
+    end
+  end
+
   private def raise_undefined_method(owner, def_name, obj)
     check_macro_wrong_number_of_arguments(owner, def_name)
 
@@ -1366,12 +1478,24 @@ class Iyi::Call
         msg << colorize(" (compile-time type is #{obj.type})").yellow.bold
         # iyi: a nilable receiver is the commonest shape this error takes,
         # and the sentence above names the type without saying what to
-        # do; the two idioms are one line each.
+        # do; the two idioms are one line each. An error member is the
+        # same shape with three (SPEC.md III.1).
         if owner.is_a?(NilType)
-          receiver = obj.is_a?(Var) || obj.is_a?(InstanceVar) ? obj.to_s : "the receiver"
-          narrowed = obj.is_a?(Var) ? "if #{receiver}" : "if value = #{receiver}"
-          msg << '\n' << "#{receiver} can be nil here: narrow it first (`#{narrowed}`) or give the nil an answer (`#{receiver} || default`)"
+          msg << '\n' << iyi_nil_receiver_hint(obj, def_name)
+          receiver_hinted = true
+        elsif owner.error? && (union = obj.type).is_a?(UnionType)
+          msg << '\n' << iyi_error_receiver_hint(obj, union)
+          receiver_hinted = true
         end
+      end
+
+      # iyi: the name is a word of a C-family comment (`x = 1 // the
+      # answer`), which is integer division by `the(answer)` here. A
+      # near name is still said, but not carried as the edit: `iyi fix`
+      # would rewrite a word of the comment.
+      floor_div = iyi_after_floor_div unless obj
+      if floor_div
+        msg << '\n' << "`//` at #{floor_div.line_number}:#{floor_div.column_number} is integer division, so the words after it are read as code: a comment starts with `#` (`x = 1 # the answer`)."
       end
 
       if similar_name
@@ -1390,7 +1514,7 @@ class Iyi::Call
           msg << "'#{similar_name}' is what that library calls it, and `!` cannot end a name in iyi (SPEC.md III.1.7): no call written here can spell it. Reach it through a Crystal-side method whose name this language can write."
         else
           msg << "Did you mean '#{similar_name}'?"
-          suggested_edit = similar_name
+          suggested_edit = similar_name unless floor_div
         end
       end
 
@@ -1424,13 +1548,14 @@ class Iyi::Call
       # `to_i32`) and before an arrival note meant for another receiver.
       if obj && (numbers = iyi_std_number_hint(program, def_name, owner))
         msg << '\n' << numbers
-      elsif obj && !similar_name && (arrival = Iyi::IYI_ARRIVAL_METHOD_HINTS[def_name]?)
-        fits = case def_name
-               when "/" then owner.is_a?(IntegerType)
-               when "%" then owner.to_s == "String"
-               else          true
+      elsif obj && !similar_name && (key = iyi_arrival_method_key(def_name, owner))
+        fits = case key
+               when "/"              then owner.is_a?(IntegerType)
+               when "%"              then owner.to_s == "String"
+               when "try", "not_nil" then !receiver_hinted # the nil hint opens with it
+               else                       true
                end
-        msg << '\n' << arrival if fits
+        msg << '\n' << Iyi::IYI_ARRIVAL_METHOD_HINTS[key] if fits
       elsif obj && (shadowed = iyi_shadowed_type_hint(def_name, owner, obj))
         msg << '\n' << shadowed
       elsif obj && !similar_name && !participle && iyi_prelude_type?(owner)
@@ -1442,11 +1567,12 @@ class Iyi::Call
         bare = owner.instance_type.to_s.split('(').first
         if reachable = iyi_std_method_hint(program, def_name, owner)
           msg << '\n' << reachable
-        elsif !owner.is_a?(NilType)
-          # Not for a nil: the other library's `Nil` has no `+` either, and
-          # the receiver's other members are what the call was written
-          # for, so the note sent a nilable `x + 1` to `--crystal` under
-          # the narrowing hint that is the answer.
+        elsif !receiver_hinted
+          # Not for a nil or an error member: the other library's `Nil`
+          # has no `+` either, nor has any library `Cancelled#+`, and the
+          # receiver's other members are what the call was written for, so
+          # the note sent a nilable `x + 1` to `--crystal` under the hint
+          # that is the answer.
           msg << '\n' << "iyi's prelude has no `#{def_name}` on #{owner}: it is small by rule - a method enters when a program in the repository needs it (SPEC.md III.1). `iyi doc #{bare}` lists what it has; `iyi build --crystal` gives a program Crystal's library instead (README.md, \"The library a program has\")."
         end
       end

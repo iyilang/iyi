@@ -564,6 +564,9 @@ module Iyi
       # last expression, and the refusal of a `!` with nothing to propagate
       # says so (`MainVisitor#check_error_union_operand`).
       check.error_construct = exp.is_a?(Call) && exp.iyi_group? ? "end!" : "!"
+      if exp.is_a?(Call) && exp.iyi_banged? && (receiver = exp.obj) && exp.args.empty? && !exp.block
+        check.iyi_bang_call = {exp.name, receiver.to_s}
+      end
       returned = Return.new(temp_var.clone).at(node)
       returned.from_propagate = true
       propagate = If.new(check, returned).at(node)

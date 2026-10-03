@@ -54,6 +54,14 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # is file inclusion inside one unit, which is how the prelude is written.
     if !node.iyi_prelude? && @program.iyi_prelude? &&
        relative_to.try(&.ends_with?(".iyi")) && !filename.starts_with?('.')
+      # `require "json"` was told to write `import json`, which reaches
+      # Crystal's `src/json.cr` and fails inside it; iyi's own is std's.
+      if iyi_std_module?("std/#{filename}")
+        node.raise "iyi has no `require`: iyi's own `#{filename}` is a module of its " \
+                   "standard library, reached with `import std/#{filename}` (SPEC.md R-1). " \
+                   "`--crystal` gives a program Crystal's library instead, and there " \
+                   "`require` means what it means in Crystal"
+      end
       node.raise "iyi has no `require`. A module is reached with " \
                  "`import #{filename}`, and it is a path to a file rather than " \
                  "a library name (SPEC.md R-1). There is no standard library " \
@@ -271,12 +279,28 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       # file that is there: `import calc/ad` beside `calc/add.iyi` is a typo,
       # and the sentence about the rule read as if the rule were the problem.
       hint = ""
-      if similar = Levenshtein.find(path, import_siblings(path))
+      if iyi_std_module?("std/#{path}")
+        # `import math`: the module is std's, and the siblings of a bare
+        # name are the project root's files.
+        hint = "\nDid you mean `std/#{path}`?"
+      elsif similar = Levenshtein.find(path, import_siblings(path))
         hint = "\nDid you mean `#{similar}`?"
       end
       node.raise "can't find module '#{path}'. A module's path is its file's " \
                  "path, so this one is `#{path}.iyi`, resolved from the " \
                  "directory of the file being built and then from `IYI_PATH`#{hint}"
+    end
+
+    # iyi: `import json` under iyi's own prelude found Crystal's
+    # `src/json.cr` on `IYI_PATH`, beside the prelude, and the build died
+    # inside it - "undefined constant Deque" at src/json/from_json.cr:61,
+    # then a hint to import `std/deque`, which mended nothing. That library
+    # is written against the other prelude (the converse is refused below),
+    # so it is refused at the line that reached it.
+    if artifact_path.nil? && package.nil? && @program.iyi_prelude? && iyi_crystal_library_source?(path, filename)
+      own = iyi_std_module?("std/#{path}") ? "; iyi's own is `import std/#{path}`" : ""
+      node.raise "`#{path}` here is Crystal's library (#{filename}), which builds " \
+                 "only under `--crystal`, against Crystal's prelude#{own}"
     end
 
     # iyi: iyi's own standard library, reached by a program built against
@@ -525,6 +549,17 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     posix = ::Path[filename].to_posix.to_s
     return false unless index = posix.rindex("/std/")
     File.file?(File.join(posix[0, index], "iyi", "prelude.iyi"))
+  end
+
+  # iyi: whether *filename*, which *path* resolved to, is a `.cr` file of
+  # Crystal's library: one on an `IYI_PATH` entry that also holds iyi's
+  # prelude, which is where the two libraries ship side by side.
+  private def iyi_crystal_library_source?(path : String, filename : String) : Bool
+    return false unless filename.ends_with?(".cr")
+    @program.iyi_path.entries.any? do |entry|
+      Iyi.native_path(File.join(entry, "#{path}.cr")) == filename &&
+        File.file?(File.join(entry, "iyi", "prelude.iyi"))
+    end
   end
 
   # iyi: whether *path* names a module of iyi's own standard library on

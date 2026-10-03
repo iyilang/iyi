@@ -327,6 +327,79 @@ describe "Semantic: iyi" do
       exception.to_s.should contain("x can be nil here")
       exception.to_s.should_not contain("small by rule")
     end
+
+    # HuntDiag3: the receiver's own text, not the words `the receiver` in
+    # a code span, and why `if make(true)` narrows nothing.
+    it "says the narrowing for a call receiver in its own text" do
+      assert_error <<-CODE, "`make(true)` can be nil here, and a call is made again each time it is written, so `if make(true)` narrows nothing: bind it and narrow the variable (`if value = make(true)`", filename: "x.iyi"
+        class B
+          def size
+            1
+          end
+        end
+
+        def make(b : Bool) : B?
+          if b
+            B.new
+          end
+        end
+
+        make(true).size
+        CODE
+    end
+
+    it "names the error members and their three idioms" do
+      exception = expect_raises(Iyi::TypeException) do
+        semantic <<-CODE, filename: "x.iyi"
+          class A
+            def size
+              1
+            end
+          end
+
+          struct E
+          end
+
+          impl Error for E
+            def message : String
+              "e"
+            end
+          end
+
+          def g(b : Bool) : A | E
+            return E.new if b
+            A.new
+          end
+
+          v = g(false)
+          v.size
+          CODE
+      end
+      exception.to_s.should contain("`v` can be `E` here, an error (SPEC.md III.1): give it an answer (`v.or(default)`), tell them apart (`case v` with `in A` and `in E`), or propagate it from a def that returns it (`v!`)")
+      exception.to_s.should_not contain("small by rule")
+    end
+
+    it "says what a C-family comment after code is" do
+      assert_error "x = 1 // the answer", "`//` at 1:7 is integer division, so the words after it are read as code: a comment starts with `#`", filename: "x.iyi"
+    end
+
+    it "names the spelling of another language's method" do
+      assert_error "class A\nend\nA.new.trim", "`strip` is the spelling here", filename: "x.iyi"
+      assert_error "class A\nend\nA.new.lenght", "`size` is the spelling here", filename: "x.iyi"
+      assert_error "class A\nend\nA.new.to_string", "`to_s` is the spelling here", filename: "x.iyi"
+    end
+
+    it "names the in-place spelling of a method whose plain name is here" do
+      assert_error "class A\n  def uniq\n    self\n  end\nend\na = A.new\na.uniq!", "`uniq!` is the other library's in-place spelling, and `!` cannot end a name here (SPEC.md III.1.7a): reassign the copy, `a = a.uniq`", filename: "x.iyi"
+    end
+
+    it "says a setter in initialize is not the field" do
+      assert_error "class P\n  @x : Int32\n\n  def initialize(x : Int32)\n    self.x = x\n  end\nend\nP.new(1)", "`self.x = x` calls a setter, and does not assign the field", filename: "x.iyi"
+    end
+
+    it "suggests an ancestor's method one case away over the type's own" do
+      assert_error "class P\n  def to_s\n    \"\"\n  end\nend\nclass C < P\n  def to_i\n    1\n  end\nend\nC.new.to_S", "Did you mean 'to_s'?", filename: "x.iyi"
+    end
   end
 
   describe "Crystal's spelling" do

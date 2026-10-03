@@ -4,6 +4,39 @@
 
 ### Fixed
 
+- **A type error names what to write instead of the prelude's size
+  rule.** Measured with the previous compiler: `name(1).upcase` on a
+  `String?` said "the receiver can be nil here: narrow it first (`if
+  value = the receiver`)", code that does not parse; `ch.receive + 1`
+  and `t.value + 1` said the prelude is small by rule and pointed at
+  `iyi build --crystal`, and a program's own `Int32 | E` had no hint;
+  `xs.len()`, `.trim`, `.to_string`, `.unwrap`, `.clone`, `h.get(k)`,
+  `t.await` and `xs.lenght` got the size rule or nothing; `import json`
+  died in src/json/from_json.cr:61 on "undefined constant Deque", and
+  `require "json"` advised `import json`; `xs.uniq!` said only that `!`
+  had no error to propagate; `self.x = x` in `initialize` claimed `@x` was
+  set in other initializers and advised making it nilable; `Channel.new`
+  was reported at src/iyi/concurrency.iyi:3098; `"007".to_S` was told
+  "Did you mean 'to_f'?" and `iyi fix` wrote it; `x = 1 // the answer`
+  was "undefined local variable or method 'answer'" alone. Now: "`name(1)`
+  can be nil here, and a call is made again each time it is written, so
+  `if name(1)` narrows nothing: bind it"; "`v` can be `Cancelled` or
+  `ChannelClosed` here, errors (SPEC.md III.1): give them an answer
+  (`v.or(default)`), tell them apart (`case v` ...), or propagate them
+  ... (`v!`)"; "`size` is the spelling here", "`strip`", "`to_s`",
+  "`.or_panic`", "`dup`", "`h[key]?`", "`t.value`"; "`json` here is
+  Crystal's library ..., which builds only under `--crystal`; iyi's own
+  is `import std/json`" and `import math` adds "Did you mean
+  `std/math`?"; "`uniq!` is the other library's in-place spelling ...:
+  reassign the copy, `xs = xs.uniq`"; "`self.x = x` calls a setter, and
+  does not assign the field"; "`Channel.new` can't infer `T` ...:
+  `Channel(Int32).new`" at the user's line; "Did you mean 'to_s'?"
+  (a case-only difference wins, and a parent's nearer name is seen); and
+  "`//` at 1:7 is integer division". `Result`, `Option`, `HashMap`,
+  `Boolean`, `Mutex`, `Thread`, `await` and `async` get arrival hints.
+  `spec/compiler/semantic/iyi_spec.cr` checks them; the old compiler gave
+  the answers quoted above.
+
 - **The parser names the iyi spelling for the syntax other languages
   write first.** Each of these was a token error or a report far from the
   mistake, measured with the previous compiler: `// say hi` was

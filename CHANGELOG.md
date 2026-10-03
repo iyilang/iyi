@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`take(n)` and `first(n)` on an `Enumerable` stop at the nth
+  element.** The count was checked before each append, so every call
+  pulled one element more than it kept, and a source read once (a pipe,
+  a generator) lost it. Over a source of 1 to 6, `take(0)`, `take(2)`
+  and `first(2)` answered `[] [2, 3] [5, 6]`. They answer
+  `[] [1, 2] [3, 4]` now, as the other library's `first(n)` does.
+  `bench/std_exercise.iyi` checks it on a source read once; the old
+  module answered `[] [2, 3] [5, 6]`.
+
 - **`includes?` on a `List`, `Deque`, `Slice` or any other `Enumerable`
   takes every element type.** It asks `==`, which every type has, and
   was still bounded `where Elem : Comparable` from when it asked `<=>`:

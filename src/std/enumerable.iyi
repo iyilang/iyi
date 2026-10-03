@@ -217,10 +217,16 @@ pub trait Enumerable
     # here, so this is the one place that has to say so. Zero still answers
     # `[]`: an empty prefix is a real answer to a real question.
     raise "negative count: #{n}" if n < 0
+    # And it stops at the nth element rather than at the one after it, as
+    # the other library's `first(n)` does: the check came before the
+    # append, so every call pulled one element more than it kept, and a
+    # source read once (a pipe, a generator) lost it - `take(2)` twice
+    # over 1..6 answered [1, 2] and then [4, 5], and `take(0)` pulled one.
     result = [] of Elem
+    return result if n == 0
     each do |e|
-      return result if result.size >= n
       result << e
+      return result if result.size >= n
     end
     result
   end

@@ -325,6 +325,11 @@ once = OnceSeq.new([3, 1, 4, 1, 5])
 once_mm = once.minmax?
 assert_str("#{once_mm} #{once.walks}", "{1, 5} 1", "enum: minmax? walks once")
 assert_str(OnceSeq.new([3, 1, 4, 1, 5]).minmax.to_s, "{1, 5}", "enum: minmax of a source read once")
+# And `take` stops at the nth element: it pulled one more than it kept,
+# so a second `take(2)` of a source read once began at 4 rather than 3,
+# and `take(0)` lost an element.
+drained = OnceSeq.new([1, 2, 3, 4, 5, 6])
+assert_str("#{drained.take(0)} #{drained.take(2)} #{drained.first(2)}", "[] [1, 2] [3, 4]", "enum: take pulls no element past the nth")
 
 # 51. minmax
 mm = seq.minmax

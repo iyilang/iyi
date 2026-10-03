@@ -144,6 +144,11 @@ prove_fails "Enumerable each_cons_pair broken" no_cons_pair "enumerable.iyi" "en
 prove_fails "Enumerable to_h corrupted" no_to_h "enumerable.iyi" "enum: to_h" \
   's/result\[pair\[0\]\] = pair\[1\]/result[pair[0]] = 0/'
 
+# 6b. `take` pulling past the nth element again: with the guard for a
+#     zero count gone, `take(0)` pulls an element and keeps it.
+prove_fails "take(0) pulls an element" take_zero_pulls "enumerable.iyi" "enum: take pulls no element past the nth" \
+  's/^    return result if n == 0$/    result/'
+
 # 7. String hash_key is the length
 prove_fails "Hashable String hash_key is length" no_strhash "traits.iyi" "Hashable: String hash_key is the string" \
   's/hash # FNV, not the length/size/'

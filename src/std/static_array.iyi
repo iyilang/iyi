@@ -156,11 +156,16 @@ struct ::StaticArray(T, N)
   end
 
   # Fills *count* elements starting at *start* with *value*.
+  #
+  # A negative count and a start outside are refused before anything is
+  # filled, as the other library and `Slice#fill` refuse them: an early
+  # return for `c <= 0` came first, so `fill(7, 0, -1)` and `fill(7, 9, 0)`
+  # of four elements answered the array untouched and said nothing.
   def fill(value : T, start : Int, count : Int) : self
     s = start.to_i64
     s += N if s < 0
     c = count.to_i64
-    return self if c <= 0
+    raise "negative count: #{count}" if c < 0
     raise "Start out of bounds" if s < 0 || s > N
     # In `Int64`, as `index_within` counts, until the start is inside and the
     # count is cut to the room left: narrowed first, a count of 2^32

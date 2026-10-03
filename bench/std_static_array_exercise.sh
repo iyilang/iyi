@@ -83,6 +83,25 @@ done
 [ "$status" -eq 0 ] && echo "  sections reported"
 
 echo
+echo "== a negative fill count and a start past the end are refused"
+# Each in a process of its own, since a refusal is a panic. A return for
+# any count of zero or less came first, so both answered the array
+# untouched and said nothing, where the other library refuses both.
+refused() { # refused <probe> <phrase> [program]: 0 when the probe panics so
+  "${3:-$WORK/static_array-plain}" "$1" >"$WORK/$1.out" 2>&1 && return 1
+  grep -qF -- "$2" "$WORK/$1.out"
+}
+for probe in "probe_fill_negative_count:negative count: -1" "probe_fill_start_past_end:Start out of bounds"; do
+  if refused "${probe%%:*}" "${probe#*:}"; then
+    echo "  ${probe%%:*}: refused with \"${probe#*:}\""
+  else
+    echo "  ${probe%%:*}: not refused with \"${probe#*:}\""
+    tail -n 2 "$WORK/${probe%%:*}.out" | sed 's/^/    /'
+    status=1
+  fi
+done
+
+echo
 echo "== the same program with optimisation on (--release)"
 build_and_run "release" static_array-release --release >/dev/null
 if ! grep -q "ALL CHECKS PASSED" "$WORK/static_array-release.out" 2>/dev/null; then
@@ -184,6 +203,34 @@ prove_fails "fill ending at s + c again" broken_fill_end "arithmetic overflow" \
 # its own, so `Object#hash`, the type's id, for every value.
 prove_fails "hash answering the type's id again" broken_hash "ASSERTION FAILED: hash spread" \
   '  def hash : Int32' '  def hash_unused : Int32'
+
+# The early return put back ahead of the refusals: the negative count's
+# probe then runs to the end, the array untouched, and is not refused.
+if [ -z "$PY" ]; then
+  echo "  fill's early return again: skipped, no working python3"
+else
+  mkdir -p "$WORK/broken_fill_count/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/static_array.iyi").read_text()
+old = '    raise "negative count: #{count}" if c < 0\n'
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/broken_fill_count/std/static_array.iyi").write_text(src.replace(old, '    return self if c <= 0\n', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  fill's early return again: the patch did not apply"
+    status=1
+  elif ! IYI_PATH="$WORK/broken_fill_count${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/broken_fill_count/program" "$REPO/bench/std_static_array_exercise.iyi" >"$WORK/broken_fill_count/build.log" 2>&1; then
+    echo "  fill's early return again: the broken copy did not compile"
+    status=1
+  elif refused probe_fill_negative_count "negative count: -1" "$WORK/broken_fill_count/program"; then
+    echo "  fill's early return again: the probe was still refused"
+    status=1
+  else
+    echo "  fill's early return again: caught, the probe said \"$(grep -m1 'not refused' "$WORK/probe_fill_negative_count.out" | sed 's/^ *//')\""
+  fi
+fi
 
 echo
 if [ "$status" -eq 0 ]; then

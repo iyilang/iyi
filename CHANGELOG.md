@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`StaticArray#fill(value, start, count)` refuses a negative count
+  and a start past the end.** A return for any count of zero or less
+  came before the start was checked, so `fill(7, 0, -1)` and
+  `fill(7, 9, 0)` of four elements answered the array untouched and
+  said nothing, where the other library and `Slice#fill` refuse both.
+  They panic with "negative count: -1" and "Start out of bounds" now.
+  `bench/std_static_array_exercise.sh` runs each in a process of its
+  own; the old module ran `fill(7, 0, -1)` to the end unrefused.
+
 - **`StaticArray#to_s(io)` and `inspect(io)` compile and write what
   `to_s` answers.** Each element was asked for `inspect(io)`, which no
   prelude type has, and the `IyiIO` for `<<`, which only `import

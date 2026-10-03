@@ -376,6 +376,61 @@ module Iyi::Lsp
       end
     end
 
+    # Completion after `expr.`, where `expr` is more than a name -
+    # `b.value`, `"x"`, `[1]`: its methods, from the type the compile gave
+    # the expression spanning *start_column* to *end_column* on *line*.
+    # *text* is the buffer without the `.` and what follows it, so the
+    # expression stands as written.
+    def expression_methods_at(path : String, text : String, overrides : Hash(String, String), line : Int32, start_column : Int32, end_column : Int32) : Array({String, String, Int32})
+      result = result_for(path, text, overrides)
+      return [] of {String, String, Int32} unless result
+      type = ExpressionTypeVisitor.new(path, line, start_column, end_column).find(result)
+      return [] of {String, String, Int32} unless type
+      methods_of(type, kind: 2) # Method
+    end
+
+    # Completion after `Name::`: what can follow the `::` - the types and
+    # constants *written* names. A function cannot (`App::Shapes::total`
+    # is a parse error), and a private type is the module's own.
+    def members_at(path : String, text : String, overrides : Hash(String, String), line : Int32, column : Int32, written : String) : Array({String, String, Int32})
+      result = result_for(path, text, overrides)
+      return [] of {String, String, Int32} unless result
+      scope = {} of String => Type
+      ContextVisitor.new(Location.new(path, line, column)).process(result).contexts.try &.each do |ctx|
+        ctx.each { |name, type| scope[name] ||= type }
+      end
+      owner = receiver_type(result, path, scope, written)
+      return [] of {String, String, Int32} unless owner
+      items = [] of {String, String, Int32}
+      owner.instance_type.types?.try &.each do |name, member|
+        next if member.private? || member.metaclass?
+        if member.is_a?(Const)
+          items << {name, "#{written}::#{name}", 21} # Constant
+        else
+          items << {name, "#{member.type_desc} #{written}::#{name}", completion_kind_of(member)}
+        end
+      end
+      items
+    end
+
+    # LSP CompletionItemKind, from what the type is.
+    private def completion_kind_of(type : Type) : Int32
+      case kind_of(type)
+      when 11 then 8  # Interface
+      when 10 then 13 # Enum
+      when 23 then 22 # Struct
+      when  2 then 9  # Module
+      else         7  # Class
+      end
+    end
+
+    # Definition of a macro call: where the macro it expanded is written.
+    def macro_definition_at(path : String, text : String, overrides : Hash(String, String), line : Int32, column : Int32) : Location?
+      result = result_for(path, text, overrides)
+      return nil unless result
+      MacroCallVisitor.new(Location.new(path, line, column)).find(result)
+    end
+
     # One overload a signature-help answer offers: the label as the
     # author wrote it, each parameter's own spelling (a substring of the
     # label, which is how LSP highlights the active one), and the doc
@@ -704,7 +759,9 @@ module Iyi::Lsp
         return found
       end
       within = scope["self"]? || unit_self_of(result, path)
-      within.try(&.instance_type.lookup_path(receiver.split("::"))).as?(Type)
+      # A script's top level has neither, and `App::Shapes` is found from
+      # the program's own namespace.
+      (within.try(&.instance_type) || result.program).lookup_path(receiver.split("::")).as?(Type)
     end
 
     # One entry per name, nearest ancestor wins — the same order a call
@@ -899,6 +956,79 @@ module Iyi::Lsp
     end
 
     def visit(node)
+      true
+    end
+  end
+
+  # iyi: the macro a call under the cursor expanded, by where it is
+  # written - in top-level code or a typed instance of a def.
+  class MacroCallVisitor < Visitor
+    include TypedDefProcessor
+
+    @found : Location? = nil
+
+    def initialize(@target_location : Location)
+    end
+
+    def find(result : Compiler::Result) : Location?
+      result.node.accept self
+      process_result result unless @found
+      @found
+    end
+
+    def process_typed_def(typed_def : Def) : Nil
+      typed_def.accept self unless @found
+    end
+
+    def visit(node : Call)
+      return false if @found
+      if node.location && @target_location.between?(node.name_location, node.name_end_location) &&
+         (expanded = node.expanded_macro)
+        @found = expanded.location
+        return false
+      end
+      true
+    end
+
+    def visit(node)
+      !@found
+    end
+  end
+
+  # iyi: the type the compile gave the expression written from
+  # *start_column* to *end_column* on *line* of *file* - in top-level code
+  # or inside any typed instance of a def, which is where a def body's
+  # nodes carry types. The receiver of `b.value.` is such a span.
+  class ExpressionTypeVisitor < Visitor
+    include TypedDefProcessor
+
+    @found : Type? = nil
+    @target_location : Location
+
+    def initialize(@file : String, @line : Int32, @start_column : Int32, @end_column : Int32)
+      @target_location = Location.new(@file, @line, @start_column)
+    end
+
+    def find(result : Compiler::Result) : Type?
+      result.node.accept self
+      process_result result unless @found
+      @found
+    end
+
+    def process_typed_def(typed_def : Def) : Nil
+      typed_def.accept self unless @found
+    end
+
+    def visit(node)
+      return false if @found
+      if (start = node.location) && (stop = node.end_location) &&
+         start.line_number == @line && start.column_number == @start_column &&
+         stop.line_number == @line && stop.column_number == @end_column &&
+         (filename = start.filename).is_a?(String) && Location.same_file?(filename, @file) &&
+         (type = node.type?)
+        @found = type
+        return false
+      end
       true
     end
   end

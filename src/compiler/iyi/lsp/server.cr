@@ -1405,6 +1405,21 @@ module Iyi::Lsp
       result = @analysis.implementations_at(path, text, overrides_for(path), line0 + 1, column)
       traces = result.try(&.implementations)
       unless traces && !traces.empty?
+        # A macro call has no def to resolve to, and answered null: the
+        # macro it expanded is where it is defined.
+        if (location = @analysis.macro_definition_at(path, text, overrides_for(path), line0 + 1, column)) &&
+           (filename = location.filename).is_a?(String)
+          target_line = read_line(filename, location.line_number)
+          ch = Lsp.character_of(target_line, location.column_number)
+          return respond(id) do |json|
+            json.array do
+              json.object do
+                json.field "uri", uri_of(filename)
+                json.field "range" { range(json, location.line_number - 1, ch, location.line_number - 1, ch) }
+              end
+            end
+          end
+        end
         return respond_null(id)
       end
 
@@ -1454,18 +1469,42 @@ module Iyi::Lsp
 
       receiver = nil
       anchor = prefix_start
-      if prefix_start > 0 && chars[prefix_start - 1]? == '.'
-        receiver_start = prefix_start - 1
-        while receiver_start > 0 && (name_char?(chars[receiver_start - 1]?) || chars[receiver_start - 1]? == '@')
-          receiver_start -= 1
+      # `import app/shapes::{Square, |` selects from a module, and `X::|`
+      # names something inside a type or module: both were answered with
+      # the scope's locals and the keywords, none of which can go there.
+      selecting = import_selection(chars, prefix_start)
+      member_of = nil
+      if selecting
+        scope_items = selection_items(path, text, selecting, chars[0...prefix_start].join)
+      elsif prefix_start > 1 && chars[prefix_start - 1]? == ':' && chars[prefix_start - 2]? == ':'
+        path_start = prefix_start - 2
+        while path_start > 0 && (name_char?(chars[path_start - 1]?) || chars[path_start - 1]? == ':')
+          path_start -= 1
         end
+        member_of = chars[path_start...(prefix_start - 2)].join.lchop("::")
+        return respond_null(id) if member_of.empty?
+        scope_items = @analysis.members_at(path, text, overrides_for(path), line0 + 1, path_start + 1, member_of)
+      elsif prefix_start > 0 && chars[prefix_start - 1]? == '.'
+        receiver_start = expression_start(chars, prefix_start - 1)
         receiver = chars[receiver_start...(prefix_start - 1)].join
         anchor = receiver_start
         return respond_null(id) if receiver.empty?
+        if receiver.each_char.all? { |ch| name_char?(ch) || ch == '@' }
+          scope_items = @analysis.completion_at(path, text, overrides_for(path), line0 + 1, anchor + 1, receiver)
+        else
+          # An expression - `b.value.`, `"x".`, `[1].` - typed where it is
+          # written, in the buffer without the `.` and what follows it: the
+          # receiver was the run of name characters before the dot, so
+          # anything else had none and the answer was null.
+          lines = text.lines
+          lines[line0] = chars[0...(prefix_start - 1)].join + chars[cursor..]?.try(&.join).to_s
+          probe = lines.join('\n')
+          scope_items = @analysis.expression_methods_at(
+            path, probe, overrides_for(path), line0 + 1, receiver_start + 1, prefix_start - 1)
+        end
+      else
+        scope_items = @analysis.completion_at(path, text, overrides_for(path), line0 + 1, anchor + 1, nil)
       end
-
-      scope_items = @analysis.completion_at(
-        path, text, overrides_for(path), line0 + 1, anchor + 1, receiver)
 
       # {label, detail, kind, tier, from module, additional edits}.
       # The tier leads sortText: prefix matches before fuzzy ones,
@@ -1479,7 +1518,7 @@ module Iyi::Lsp
         end
       end
 
-      if receiver.nil?
+      if receiver.nil? && member_of.nil? && selecting.nil?
         KEYWORDS.each do |keyword|
           rows << {keyword, "keyword", 14, '2', nil, nil} if prefix.empty? || keyword.starts_with?(prefix)
         end
@@ -1497,6 +1536,7 @@ module Iyi::Lsp
             break if count >= 100
             next if entry_path == path
             Exports.of(entry_text, entry_path).each do |item|
+              next unless item.kind == Exports::FUNCTION
               next if item.module_path == own
               next if seen.includes?(item.name)
               tier =
@@ -1609,6 +1649,76 @@ module Iyi::Lsp
       # client that applies edits as written made the file mixed.
       ending = Iyi.crlf?(text) ? "\r\n" : "\n"
       [{anchor, 0, 0, "import #{module_path}::{#{name}}#{ending}"}]
+    end
+
+    # Where the expression before the `.` at *dot* starts: names and their
+    # `.`/`::` joints, `@`, a trailing `?` or `!`, and a bracketed or quoted
+    # stretch skipped whole - `b.value`, `foo(1).bar`, `"x"`, `[1, 2]`.
+    private def expression_start(chars : Array(Char), dot : Int32) : Int32
+      index = dot
+      while index > 0
+        ch = chars[index - 1]
+        if ch.in?('?', '!') && !(index > 1 && name_char?(chars[index - 2]))
+          # `!foo.` negates `foo.bar`, and a `?` after a space is the
+          # ternary: neither belongs to the receiver.
+          break
+        elsif name_char?(ch) || ch.in?('@', '.', ':', '?', '!')
+          index -= 1
+        elsif ch.in?(')', ']', '}')
+          opener = ch == ')' ? '(' : ch == ']' ? '[' : '{'
+          depth = 0
+          index -= 1
+          loop do
+            return dot if index < 0
+            current = chars[index]
+            depth += 1 if current == ch
+            depth -= 1 if current == opener
+            break if depth.zero?
+            index -= 1
+          end
+        elsif ch.in?('"', '\'')
+          index -= 1
+          loop do
+            index -= 1
+            return dot if index < 0
+            break if chars[index] == ch && (index.zero? || chars[index - 1] != '\\')
+          end
+        else
+          break
+        end
+      end
+      index
+    end
+
+    # The module an `import path::{...` line selects from, when the cursor
+    # is inside its braces; nil anywhere else.
+    private def import_selection(chars : Array(Char), prefix_start : Int32) : String?
+      before = chars[0...prefix_start].join
+      stripped = before.lstrip
+      rest = stripped.lchop?("pub import ") || stripped.lchop?("import ")
+      return nil unless rest
+      brace = rest.index("::{")
+      return nil unless brace && !rest[brace..].includes?('}')
+      module_path = rest[0, brace].strip
+      module_path.empty? ? nil : module_path
+    end
+
+    # What `import path::{...}` can select: the module's exports, read off
+    # its source the way auto-import reads them, less the names the line
+    # already selects.
+    private def selection_items(path : String, text : String, module_path : String, written : String) : Array({String, String, Int32})
+      chosen = written.partition("::{")[2].split(',').map(&.strip).to_set
+      file = @analysis.module_files(path, text, overrides_for(path))[module_path]?
+      source = file.try { |found| document_text(found) || workspace_text(found) }
+      unless source
+        if entry = workspace_entries.find { |(_, entry_text)| Exports.header_of(entry_text) == module_path }
+          file, source = entry
+        end
+      end
+      return [] of {String, String, Int32} unless file && source
+      Exports.of(source, file).compact_map do |item|
+        {item.name, item.detail, item.kind} unless chosen.includes?(item.name)
+      end
     end
 
     private def name_char?(ch : Char?) : Bool

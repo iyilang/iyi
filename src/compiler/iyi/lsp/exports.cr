@@ -1,17 +1,22 @@
-# iyi: the workspace's exported defs, from the parser alone — what
-# auto-import completion offers. R-2 makes this a syntax question:
-# `pub` is written at the declaration, so one parse of a module names
-# its whole callable surface, no compile and no artifact needed. The
-# walk covers module-level `pub def` only: those are the names a
-# `import X::{...}` line can select and a bare call can reach.
+# iyi: the workspace's exports, from the parser alone — what completion
+# offers. R-2 makes this a syntax question: `pub` is written at the
+# declaration, so one parse of a module names its whole surface, no
+# compile and no artifact needed. The walk covers what a module exports
+# at its own level: `pub def` and `pub macro`, the names a bare call
+# reaches, and the `pub` types, which an `import X::{...}` line selects
+# as well.
 require "../syntax/ast"
 require "../syntax/parser"
 
 module Iyi::Lsp
   module Exports
-    # One offerable export: the def's name, the module path an `import`
-    # line selects it from, and the signature as written.
-    record Item, name : String, module_path : String, detail : String
+    # One offerable export: its name, the module path an `import` line
+    # selects it from, the signature as written, and its LSP
+    # CompletionItemKind (3 a function or macro, 7 a class, 8 a trait,
+    # 13 an enum, 22 a struct).
+    record Item, name : String, module_path : String, detail : String, kind : Int32 = 3
+
+    FUNCTION = 3
 
     def self.of(text : String, path : String) : Array(Item)
       module_path = header_of(text)
@@ -46,9 +51,31 @@ module Iyi::Lsp
         collect(node.exp, module_path, into)
       when Def
         into << Item.new(node.name, module_path, signature_of(node)) if node.exported?
+      when Macro
+        into << Item.new(node.name, module_path, "macro #{macro_signature_of(node)}") if node.exported?
+      when ClassDef
+        into << Item.new(node.name.to_s, module_path, "#{node.struct? ? "struct" : "class"} #{node.name}", node.struct? ? 22 : 7) if node.exported?
+      when TraitDef
+        into << Item.new(node.name.to_s, module_path, "trait #{node.name}", 8) if node.exported?
+      when EnumDef
+        into << Item.new(node.name.to_s, module_path, "enum #{node.name}", 13) if node.exported?
       else
-        # Types travel by name and are reachable qualified; a bare call
-        # reaches defs, and defs are what completion inserts.
+        # Constants and aliases are reached qualified.
+      end
+    end
+
+    # A macro's name and parameters, as `iyi doc` lists it.
+    private def self.macro_signature_of(a_macro : Macro) : String
+      String.build do |io|
+        io << a_macro.name
+        unless a_macro.args.empty?
+          io << '('
+          a_macro.args.each_with_index do |arg, index|
+            io << ", " unless index.zero?
+            arg.to_s(io)
+          end
+          io << ')'
+        end
       end
     end
 

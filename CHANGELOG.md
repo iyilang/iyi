@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **Completion works after any receiver, after `X::` and inside an
+  import's braces, and a macro is offered and found like a def.** The
+  receiver was the run of name characters before the dot, so `b.value.`,
+  `sq.side.`, `"x".` and `[1].` got nothing; `App::Shapes::` and
+  `import app/shapes::{Square, |` offered the scope's locals and the
+  keywords, none of which can go there; a `pub macro` was never offered,
+  and definition on a macro call answered null. The receiver is now the
+  expression before the dot, typed where it is written; `X::` lists the
+  types and constants inside `X`; an import's braces list what the
+  module exports and the line has not selected yet; a `pub macro` is
+  offered with its import edit as a `pub def` is; and definition on a
+  macro call goes to the macro. `bench/lsp_session.py` steps 72d, 72e
+  and 72f check each; the old server answered `[]`, the locals and the
+  keywords, and null.
+
 - **Moving a module's file rewrites the qualified names that spell
   it.** `workspace/willRenameFiles` for `geo/b.iyi` to `geo/c.iyi`
   rewrote the header and `import geo/b` and left `puts

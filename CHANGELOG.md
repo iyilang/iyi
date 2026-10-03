@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`abort` ends the program as `exit` does: what the task deferred
+  runs, and buffered output is written.** It wrote its message with the
+  runtime's own `__iyi_write` and ended with `__iyi_exit`, which skip
+  both: after `STDOUT.sync = false` and `puts "before"`, `abort "bye"`
+  left standard output empty, a `defer` around the call never ran, and a
+  line buffered on standard error before the message was lost. The
+  message goes through `STDERR` now and the program ends with `exit`, as
+  the other library's `abort` is `STDERR.puts` and `exit`.
+  `bench/std_kernel_exercise.sh` aborts with both streams buffered and a
+  cleanup deferred, compares both streams byte for byte, and proves the
+  check fails on a copy that ends with `__iyi_exit`; the old module
+  printed nothing on standard output and only "the message" on
+  standard error.
+
 - **`+` and space sign `%x`, `%X`, `%o` and `%b` as they sign `%d`.**
   Those verbs write a negative value with its `-` (`%x` of -255 is -ff)
   but dropped both flags for the rest: `sprintf("%+x|% o|%+#b|%+X|% x",

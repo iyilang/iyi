@@ -9,6 +9,8 @@
 #     an escaped tag, quotes, backslashes, `#{`, UTF-8 text, and
 #     bench/std_eiy_exercise_part.eiy rendered from inside it) print the
 #     expected text byte for byte, plain and with --release.
+#   * Two builds of it at once, the template helper the macros run made
+#     stale before each of four rounds, all build.
 #   * `Eiy::Lexer` token types, values, flags and positions; the generated
 #     source of `process_string`, exactly; `process_file`, `locate`, and the
 #     nil-answering pair.
@@ -141,6 +143,39 @@ if grep -qF "ALL CHECKS PASSED" "$WORK/exercise-eiy-release.out" 2>/dev/null; th
 else
   echo "  the release build did not report ALL CHECKS PASSED"
   sed -n '1,12p' "$WORK/release.log"
+  status=1
+fi
+
+echo
+echo "== two builds of it at once, the template helper stale before each"
+# Every compiler on the machine links the helper the macros `run`
+# (std/eiy/process) into one cache directory, and it was linked straight to
+# its final name: Windows will not write over a program that is running, so
+# two builds of this exercise at once, the helper stale, failed one of the
+# two in each of 4 rounds with "LNK1104: cannot open file ...\macro_run".
+# The module is copied so that its helper can be made stale here.
+mkdir -p "$WORK/twice/std/eiy"
+cp "$REPO/src/std/eiy.iyi" "$WORK/twice/std/eiy.iyi"
+cp "$REPO/src/std/eiy/process.iyi" "$WORK/twice/std/eiy/process.iyi"
+twice_failed=0
+for round in 1 2 3 4; do
+  # A modification time the helper was not built from.
+  touch -t "2020010100${round}0" "$WORK/twice/std/eiy/process.iyi"
+  pids=""
+  for side in a b; do
+    IYI_PATH="$WORK/twice${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/twice/$side" \
+      "$REPO/bench/std_eiy_exercise.iyi" >"$WORK/twice/$round$side.log" 2>&1 &
+    pids="$pids $!"
+  done
+  for pid in $pids; do
+    wait "$pid" || twice_failed=$((twice_failed + 1))
+  done
+done
+if [ "$twice_failed" -eq 0 ]; then
+  echo "  8 builds, two at a time, all built"
+else
+  echo "  $twice_failed of 8 builds, two at a time, failed:"
+  grep -h -m1 "rror" "$WORK"/twice/*.log | head -3 | sed 's/^/    /'
   status=1
 fi
 

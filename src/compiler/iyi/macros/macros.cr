@@ -180,7 +180,27 @@ class Iyi::Program
       return CompiledMacroRun.new(executable_path, time.elapsed, true)
     end
 
-    result = host_compiler.compile Compiler::Source.new(filename, source), executable_path
+    # iyi: linked under this process's own name and renamed into place. The
+    # directory is one per helper and shared by every compiler on the
+    # machine, and the link went straight to `macro_run`: two `iyi check` of
+    # the eiy exercise at once, its helper stale, failed one of the two in
+    # each of 4 rounds with "LNK1104: cannot open file ...\macro_run" -
+    # Windows will not write over a program that is running, and the other
+    # compiler was running it. A rename is whole, so whoever starts the
+    # program starts the old one or the new one, never half of one. Windows
+    # refuses that rename too while the old one runs; then this process
+    # keeps its own copy until it exits, and records nothing, since the
+    # requires below would vouch for a `macro_run` that is still the old
+    # program.
+    staging_path = "#{executable_path}.#{Process.pid}"
+    sweep_macro_run_leftovers(program_dir, executable_path)
+    result = host_compiler.compile Compiler::Source.new(filename, source), staging_path
+    begin
+      File.rename(staging_path, executable_path)
+    rescue File::Error
+      at_exit { File.delete?(staging_path) rescue nil }
+      return CompiledMacroRun.new(staging_path, time.elapsed, false)
+    end
 
     # Write the new files from which 'filename' depends into the cache dir
     # (here we store how to obtain these files, because a require might use
@@ -201,6 +221,21 @@ class Iyi::Program
     end
 
     CompiledMacroRun.new(executable_path, time.elapsed, false)
+  end
+
+  # The copies `macro_compile` kept and a killed compiler left, an hour
+  # after: a younger one may be one another compiler has just linked and not
+  # yet started, and a copy that is running refuses the delete anyway.
+  private def sweep_macro_run_leftovers(program_dir, executable_path) : Nil
+    prefix = "#{File.basename(executable_path)}."
+    cutoff = Time.utc - 1.hour
+    Dir.each_child(program_dir) do |name|
+      next unless name.starts_with?(prefix)
+      path = File.join(program_dir, name)
+      next unless (info = File.info?(path)) && info.modification_time < cutoff
+      File.delete?(path) rescue nil
+    end
+  rescue File::Error
   end
 
   @host_compiler : Compiler?

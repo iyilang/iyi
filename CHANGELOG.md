@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **Two compilers that run the same macro helper at once both build.**
+  Every compiler on the machine links the helper a macro `run`s (std/eiy's
+  template compiler) into one cache directory, and it linked it straight
+  to `macro_run`. Windows will not write over a program that is running,
+  so two `iyi build` of the eiy exercise at once, the helper stale,
+  failed one of the two in each of 4 rounds with "LNK1104: cannot open
+  file ...\macro_run", and the language server's `workspace/diagnostic`
+  answered -32603 for the same reason. The helper is linked under the
+  compiler's process id now and renamed into place; when Windows refuses
+  the rename because the old helper is running, that compiler runs its
+  own copy, records nothing for it, and deletes it when it exits.
+  `bench/std_eiy_exercise.sh` runs four rounds of two builds at once; the
+  old compiler failed 4 of the 8.
+
 - **An auto-import after a last import with no line ending stays in the
   document.** The new `import` was inserted at the start of the line after
   the last import, and when that import was the file's last line with no

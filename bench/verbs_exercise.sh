@@ -347,6 +347,19 @@ refuses "a block whose return type nothing says" \
 # before printing it: "Invalid value `` for x86-asm-syntax".
 refuses "an --x86-asm-syntax that is neither" "Invalid value \`x\` for x86-asm-syntax" -- \
   "$IYI" build --x86-asm-syntax x -o "$WORK/asm" good.iyi
+# A requirement answered with other parameters was reported by the other
+# library's abstract-def pass at the struct, naming no impl, and `self`
+# answered with the implementing type was refused the same way.
+printf 'trait Show\n  abstract def show(n : Int32) : String\nend\n\nstruct X\nend\n\nimpl Show for X\n  def show(n : String) : String\n    n\n  end\nend\n\nputs 1\n' > implparams.iyi
+refuses "an impl method of the required name with other parameters" 'impl Show for X does not answer Show#show(n : Int32)' -- \
+  "$IYI" check implparams.iyi
+printf 'import std/traits::{Comparable}\n\nstruct V\n  getter v : Int32\n\n  def initialize(@v : Int32)\n  end\nend\n\nimpl Comparable for V\n  def <=>(other : V) : Int32\n    v <=> other.v\n  end\nend\n\nputs V.new(2) > V.new(1)\n' > implself.iyi
+self_out=$("$IYI" run implself.iyi 2>&1 | tr -d '\r')
+if [ "$self_out" = "true" ]; then
+  echo "  an impl answering a requirement's self with its own type: runs"
+else
+  echo "  an impl answering self with its own type: $(printf '%s' "$self_out" | head -c 300)"; status=1
+fi
 # Two `iyi run`s at once of programs with one basename. The runner linked
 # into one executable per basename, and Windows will not write over one
 # that is running: the second failed with `LNK1104: cannot open file

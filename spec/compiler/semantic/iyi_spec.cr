@@ -1001,6 +1001,57 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # A method of the required name answered the requirement whatever it
+    # took, and the other library's abstract-def pass reported the mismatch
+    # at the struct, naming no impl.
+    it "reports a requirement answered with other parameters, at the impl" do
+      assert_error <<-CODE, "impl App::Show::Showable for App::Show::Foo does not answer App::Show::Showable#show(n : Int32): App::Show::Foo#show(n : String) takes other parameters"
+        module App
+          module Show
+            trait Showable
+              abstract def show(n : Int32) : String
+            end
+
+            struct Foo
+            end
+
+            impl Showable for Foo
+              def show(n : String) : String
+                n
+              end
+            end
+          end
+        end
+        CODE
+    end
+
+    # `self` in a requirement is the implementing type, so the impl may
+    # write the type. It was read as the trait, and refused.
+    it "accepts the implementing type where a requirement says self" do
+      assert_type(<<-CODE) { int32 }
+        trait Cmp
+          abstract def cmp(other : self) : Int32
+        end
+
+        struct Foo
+          def initialize(@v : Int32)
+          end
+
+          def v : Int32
+            @v
+          end
+        end
+
+        impl Cmp for Foo
+          def cmp(other : Foo) : Int32
+            other.v
+          end
+        end
+
+        Foo.new(2).cmp(Foo.new(1))
+        CODE
+    end
+
     it "does not report a requirement an unused type leaves unimplemented" do
       # The point of checking at the impl: today this compiles clean, because
       # Crystal only reports an unimplemented abstract where the type is used.

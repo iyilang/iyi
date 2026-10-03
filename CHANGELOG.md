@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **A trait requirement answered with other parameters is refused at
+  the impl, naming it, and `self` may be answered with the implementing
+  type.** Only the name was compared, so `def go(x : String)` for
+  `abstract def go(x : Int32)` was reported by the other library's
+  abstract-def pass as "abstract `def A#go(x : Int32)` must be
+  implemented by Y", at `struct Y` and naming no impl; and `impl
+  Comparable for X` with `def <=>(other : X)` was refused the same way,
+  "abstract `def Std::Traits::Comparable#<=>(other : self)` must be
+  implemented by X", because `self` was read as the trait. The impl
+  answers "impl A for Y does not answer A#go(x : Int32): Y#go(x : String)
+  takes other parameters, so a call through A has no method to run" now,
+  and `self` in a requirement is the implementing type, so the
+  Comparable impl compiles and `V.new(2) > V.new(1)` prints `true`.
+  `bench/verbs_exercise.sh` and `spec/compiler/semantic/iyi_spec.cr`
+  check both; the old compiler gave the two errors at the struct.
+
 - **An impl binds a splat generic with its splat, and the refusal of a
   specialised impl names a spelling that compiles.** `impl Show for
   Tuple(*T) forall T` answered "expected one of the type parameters

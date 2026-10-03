@@ -1,3 +1,5 @@
+require "../syntax/transformer"
+
 # Checks that abstract methods are implemented.
 #
 # We traverse all abstract types in the program (abstract classes/structs
@@ -153,6 +155,16 @@ class Iyi::AbstractDefChecker
       m2 = replace_method_arg_paths_with_type_vars(t2, m2, generic_base)
     end
 
+    # iyi: `self` in a trait's requirement is the type implementing it, so an
+    # impl may write that type where the trait wrote `self`. Read as the
+    # trait — the one type nothing implements — `impl Comparable for X` with
+    # `def <=>(other : X)` was refused as "abstract `def
+    # Comparable#<=>(other : self)` must be implemented by X", at X's
+    # declaration and not the impl.
+    if t2.trait? && !t2.is_a?(GenericType) && (implementer = iyi_implementer(target_type))
+      m2 = replace_trait_self(m2, implementer)
+    end
+
     # First check positional arguments
     # The following algorithm walk through the arguments in the abstract
     # method and the implementation at the same time, until a splat argument is found
@@ -240,6 +252,60 @@ class Iyi::AbstractDefChecker
     end
 
     true
+  end
+
+  # iyi: whether *type* answers the trait *base*'s requirement *method*: the
+  # question `implements_with_ancestors?` asks, without the return-type and
+  # parameter-name reports it makes on the way. Asked where the impl is
+  # written (`TopLevelVisitor#check_impl_requirements`), so that a method of
+  # the right name and the wrong parameters is refused there, naming the
+  # impl; this pass, which runs later, reports at the type.
+  def answers?(type : Type, method : Def, base : Type) : Bool
+    free_vars = free_var_nodes(method)
+    ([type] + type.ancestors).any? do |ancestor|
+      answered = ancestor.defs.try &.[method.name]?.try &.any? do |item|
+        implements?(type, ancestor, item.def, free_var_nodes(item.def), base, method, free_vars)
+      end
+      next false unless answered
+      next true if ancestor == type
+
+      ancestor = ancestor.generic_type.as(Type) if ancestor.is_a?(GenericInstanceType)
+      !base.implements?(ancestor)
+    end
+  end
+
+  # The type `self` stands for in a requirement *type* answers: the type
+  # itself, or a generic one instantiated at its own parameters, which is
+  # what `self` names inside it. Nil for a splat generic, whose parameter
+  # is not one type to instantiate at; `self` is read as written there.
+  private def iyi_implementer(type : Type) : Type?
+    return type unless type.is_a?(GenericType)
+    return nil if type.splat_index || type.double_variadic?
+
+    type.instantiate(type.type_vars.map { |name| type.type_parameter(name).as(TypeVar) })
+  end
+
+  private def replace_trait_self(method : Def, implementer : Type) : Def
+    replacer = ReplaceTraitSelf.new(implementer)
+    method = method.clone
+    method.args.each do |arg|
+      arg.restriction = arg.restriction.try &.transform(replacer)
+    end
+    method
+  end
+
+  # `self` as a path that already holds its type, which `TypeLookup` answers
+  # without looking the name up — the way `ReplacePathWithTypeVar` hands a
+  # generic base's parameters over.
+  class ReplaceTraitSelf < Transformer
+    def initialize(@implementer : Type)
+    end
+
+    def transform(node : Self) : ASTNode
+      path = Path.new(@implementer.to_s).at(node)
+      path.type = @implementer
+      path
+    end
   end
 
   private def def_arg_ranges(method : Def)

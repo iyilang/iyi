@@ -1228,10 +1228,41 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # here for the impl to have inherited: it has to have written them.
     missing.concat missing_requirements(trait_type.metaclass, target_type.metaclass).map { |name| "self.#{name}" }
 
-    return if missing.empty?
+    unless missing.empty?
+      missing.sort!
+      node.raise "impl #{trait_type} for #{target_type} is missing #{missing.size == 1 ? "a method" : "methods"} required by the trait: #{missing.join(", ")}"
+    end
 
-    missing.sort!
-    node.raise "impl #{trait_type} for #{target_type} is missing #{missing.size == 1 ? "a method" : "methods"} required by the trait: #{missing.join(", ")}"
+    check_impl_answers node, trait_type, target_type
+  end
+
+  # iyi: a method of the required name answers a requirement only if it
+  # takes what the requirement takes, and that is checked here too, for the
+  # reason the name is. Only the name was: `def go(x : String)` against
+  # `abstract def go(x : Int32)` passed this check and was reported by the
+  # other library's abstract-def pass, as "abstract `def A#go(x : Int32)`
+  # must be implemented by Y" at `struct Y`, naming no impl. The parameters
+  # are compared the way that pass compares them, `self` read as the
+  # implementing type; a type it cannot resolve yet is left to it.
+  private def check_impl_answers(node : ImplDef, trait_type, target_type)
+    # A trait with parameters or associated types is left to that pass: its
+    # requirements name them, and asked here, before the whole program has
+    # been declared, `impl IndexableMutable for Array(T)` was told its
+    # `unsafe_put(index : Int32, value : T)` did not answer `value : Elem`.
+    return if trait_type.is_a?(GenericType)
+
+    checker = AbstractDefChecker.new(@program)
+    trait_type.defs.try &.each_value do |list|
+      list.each do |item|
+        required = item.def
+        next unless required.abstract?
+        next if checker.answers?(target_type, required, trait_type)
+
+        written = target_type.lookup_defs(required.name).reject(&.abstract?)
+        names = written.map { |a_def| Call.def_full_name(a_def.owner, a_def) }.join(" and ")
+        node.raise "impl #{trait_type} for #{target_type} does not answer #{Call.def_full_name(trait_type, required)}: #{names} #{written.size == 1 ? "takes" : "take"} other parameters, so a call through #{trait_type} has no method to run. Write the method with the requirement's parameters; where it says `self`, #{target_type} will do"
+      end
+    end
   end
 
   private def missing_requirements(trait_type, target_type) : Array(String)

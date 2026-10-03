@@ -1790,6 +1790,15 @@ satisfy the trait is wrong when it is written, whether or not anything uses it.
 The check is local. It needs the trait's declaration and this impl, never a
 global pass, which is what R-1 requires of it.
 
+It asks for the parameters as well as the name. `def go(x : String)` against
+`abstract def go(x : Int32)` had passed it and been reported by the other
+library's pass, at the struct and naming no impl; it is refused at the impl
+now, naming the impl and both signatures. `self` in a requirement is the
+implementing type, so `impl Comparable for X` may answer `<=>(other : self)`
+with `def <=>(other : X)`, which was refused as unimplemented. A trait with
+parameters or associated types still has its parameters compared by the later
+pass, at the type: its requirements name what the impl's `include` binds.
+
 A requirement is satisfied by the method existing on the target, not strictly
 by the impl block defining it. A `def show` written on the struct itself lives
 in the type's own module, which is exactly where R-3 would let an impl live, so

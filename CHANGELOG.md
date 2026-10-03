@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A `UUID` keeps its own sixteen bytes.** `UUID.new(bytes)` held the
+  caller's array and `bytes` handed it back, so a buffer reused for the
+  next record changed the UUID already made from it: `UUID.new(b)` read
+  `00000000-0000-0000-0000-000000000000`, and after `b[0] = 255_u8` it
+  read `ff000000-0000-0000-0000-000000000000`. Writing to `u.bytes`
+  changed a UUID that was already a hash key, and its table then
+  answered nil for it. The bytes are copied in, and `bytes` answers a
+  copy, as the other library's UUID is a value. `v4` and `parse` hand
+  over the array they fill without a second copy.
+  `bench/std_uuid_exercise.iyi` reuses a buffer and writes to `bytes`,
+  and the `.sh` proves the check fails with the caller's array kept; the
+  old module answered `ff000000-0000-0000-0000-000000000000`.
+
 - **`Atomic(Int64).fence`, and every fence asked of an instance's
   class, compiles.** `std/atomic` declared the fence instruction on
   `Atomic(T)` itself, and a call on a generic instance's class passes

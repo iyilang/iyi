@@ -12,9 +12,20 @@ import std/random::{Random}
 pub struct UUID
   @bytes : Array(UInt8)
 
+  # The sixteen bytes are the UUID's own, copied in here and out of
+  # `bytes`, as the other library's are a value: held as the caller's
+  # array, a buffer reused for the next record changed every UUID made
+  # from it (`b[0] = 255_u8` after `UUID.new(b)` turned `00000000-...`
+  # into `ff000000-...`), and `u.bytes[1] = 255_u8` changed a UUID that
+  # was already a hash key, which its table then could not find.
   def initialize(bytes : Array(UInt8))
     raise "UUID: need 16 bytes, got #{bytes.size}" if bytes.size != 16
-    @bytes = bytes
+    @bytes = bytes.dup
+  end
+
+  # An array `v4` or `parse` has just filled, which nothing else holds.
+  private def initialize(*, owned : Array(UInt8))
+    @bytes = owned
   end
 
   def self.v4 : UUID
@@ -27,7 +38,7 @@ pub struct UUID
     end
     bytes[6] = (bytes[6] & 0x0f_u8) | 0x40_u8
     bytes[8] = (bytes[8] & 0x3f_u8) | 0x80_u8
-    new(bytes)
+    new(owned: bytes)
   end
 
   def self.parse(text : String) : UUID
@@ -39,7 +50,7 @@ pub struct UUID
       bytes[i] = ((nibble(hex[i * 2]) << 4) | nibble(hex[i * 2 + 1])).to_u8
       i = i + 1
     end
-    new(bytes)
+    new(owned: bytes)
   end
 
   def to_s : String
@@ -57,16 +68,21 @@ pub struct UUID
   end
 
   def bytes : Array(UInt8)
-    @bytes
+    @bytes.dup
   end
 
   def ==(other : UUID) : Bool
+    theirs = other.stored
     i = 0
     while i < 16
-      return false if @bytes[i] != other.bytes[i]
+      return false if @bytes[i] != theirs[i]
       i = i + 1
     end
     true
+  end
+
+  protected def stored : Array(UInt8)
+    @bytes
   end
 
   # Hashing follows `==`: the sixteen bytes, as an array of them hashes.

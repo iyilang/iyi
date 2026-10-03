@@ -71,10 +71,10 @@ require "./atomic"
 
 # The runtime's one lock: what the allocator's centre, the scheduler's
 # registries and the thread list are behind, and what a collection takes
-# before it stops anything, so no stopped thread can be holding it. A spin
-# on one `compare_and_set` — uncontended it is one instruction, and one
-# thread never contends. A spinner holds nothing, so where threads exist
-# the spin is also where a thread asked to stop for a collection parks.
+# before it stops anything, so no stopped thread can be holding it. A
+# spinner holds nothing: where threads exist the spin is where a thread
+# asked to stop parks, and every 128th turn yields the core, or a holder
+# preempted with it waits out spinners' timeslices (48 threads: 30x).
 class IyiRuntimeLock
   @@word : UInt64 = 0_u64
 
@@ -85,11 +85,12 @@ class IyiRuntimeLock
   def self.lock : Nil
     word = self.word
     # Read before the CAS: a failed CAS still takes the line for writing,
-    # and fifteen helpers spinning on one while a collection held it
-    # slowed the holder; a read spins on a shared line.
+    # and fifteen helpers spinning on one slowed the holder.
+    spins = 0
     while word.value.get != 0_u64 || !word.value.compare_and_set(0_u64, 1_u64)[1]
       {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
         IyiThread.park_if_requested
+        IyiThread.yield_cpu if (spins = spins &+ 1) & 127 == 0
       {% end %}
       {% if flag?(:x86_64) %}
         asm("pause" :::: "volatile")
@@ -99,8 +100,7 @@ class IyiRuntimeLock
     end
   end
 
-  # One try, no wait and no park: for a walk that must not park where it
-  # stands and has somewhere else to be.
+  # One try, no wait and no park: for a walk that must not park here.
   def self.try_lock : Bool
     word = self.word
     word.value.get == 0_u64 && word.value.compare_and_set(0_u64, 1_u64)[1]

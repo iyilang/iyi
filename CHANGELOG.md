@@ -4,6 +4,28 @@
 
 ### Fixed
 
+- **Threads past the core count share the runtime lock, and are
+  stopped, without waiting out each other's timeslices.** The lock only
+  spun, so a holder preempted with it held every spinner up for a whole
+  timeslice: 64 threads of 20,000 small arrays each
+  (`r2_alloc_threads`) ran 1.8 to 20 s on twelve cores against 0.23 to
+  0.40 for twelve threads, and 48 threads taking the lock in turn took
+  30 to 35 times what one thread took for all of their turns. Every
+  128th turn of the spin gives the core away now (`SwitchToThread` on
+  Windows, `sched_yield` on Linux): 1.3 to 1.5 times, and the 64
+  threads 0.3 to 0.8 s. Windows' stop also waited for each suspend
+  before it asked for the next, and a thread with no core takes its
+  suspend only when the scheduler runs it: beside 48 threads computing
+  a stop took 85 to 275 ms. Every suspend is asked first now: 0 to 13
+  ms. `bench/thread_exercise.sh` step 4b checks both on Windows; the
+  old runtime answered "FAIL: lock: 48 threads taking the runtime lock
+  took 8043 ms, past 5 times the 243 ms one thread took for all their
+  turns", and with the suspends asked one at a time "FAIL: stop: five
+  collections stopped 48 threads that only compute in 307 ms each, past
+  60". darwin's spin is unchanged: its `yield_cpu` is the CPU's hint,
+  and a scheduler yield there is a libSystem name the floor does not
+  carry. [INFERENCE] Linux gains as Windows did; not run there.
+
 - **A proc or a task that captures a `case` branch's `it` sees it at that
   branch's type, and the other `case`s in the scope keep theirs.** `it` was
   one variable for the whole scope, and a variable a closure captures is

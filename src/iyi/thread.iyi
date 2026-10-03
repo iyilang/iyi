@@ -810,13 +810,24 @@
       # run on into `take` and be stopped there: thread_exercise's switching
       # program died of a memory fault once in the 54 runs CI made of it, and
       # 15 times in 20 here with 20 us of that run-on made certain.
+      #
+      # Every suspend is asked for before any is waited for. A thread that
+      # is not running takes its suspend when the scheduler next runs it,
+      # and `GetThreadContext` waits for that: one suspend and one wait at a
+      # time made a stop the sum of those waits. Beside 48 threads computing
+      # on twelve cores a stop took 85 to 275 ms that way, and 0 to 13 asked
+      # all at once (bench/thread_exercise.sh).
       private def self.suspend_others(line : UInt64) : Int64
+        cursor = @@lines
+        while cursor != 0
+          LibC.SuspendThread(Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))) if cursor != line
+          cursor = IyiHeap.read64(cursor + IYI_TL_NEXT)
+        end
         deferred = 0_i64
         cursor = @@lines
         while cursor != 0
           if cursor != line
             handle = Pointer(Void).new(IyiHeap.read64(cursor + IYI_TL_HANDLE))
-            LibC.SuspendThread(handle)
             sp = IyiRoots.capture_thread_registers(handle, cursor + IYI_TL_SPILL)
             cache = IyiHeap.read64(cursor + IYI_TL_CACHE)
             if IyiHeap.cache_inside?(cache)

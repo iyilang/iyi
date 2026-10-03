@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`JSON::Any#to_s` is a string itself and null nothing, as
+  `YAML::Any#to_s` and the other library answer them.** It was the JSON
+  text for every kind, so `"hello #{doc["name"]}"` printed `hello "Ada"`
+  and `JSON.parse("null").to_s` was `null`, where the other library
+  prints `hello Ada` and an empty string. A number or a boolean is its
+  JSON text still, which is the other library's text for each (2.5,
+  1.0e+20, true, 7 measured); an array or an object is its JSON text
+  too, where the other library writes `{"a" => JSON::Any([1, "x"])}`,
+  and `inspect` stays the JSON text. **The answer changes** for a string
+  and for null; no caller in src/std, src/iyi, bench or samples read
+  `to_s` of an `Any`. `bench/std_json_exercise.iyi` checks a string, null,
+  a number and a boolean; the old module printed `hello "Ada"`.
+
 - **An iterator yields a nil element instead of stopping at it: the end
   of a pull is `Stop`, which is no element.** `next` answered `Elem?`,
   nil for the end, so `Iterator.of([1, nil, 3]).to_a` was `[1]`,

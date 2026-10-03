@@ -108,6 +108,13 @@ assert_true(again.hash == doc.hash, "and hashes the same")
 assert_text(compact, again.to_json, "and writes the same text")
 assert_text(compact, doc.to_s, "to_s is to_json")
 assert_text(compact, doc.inspect, "inspect is to_json")
+# A string is itself and null nothing, as `YAML::Any#to_s` and the other
+# library answer them: a string was its JSON text, quotes and all, so an
+# interpolated name printed `hello "Ada"`.
+assert_text("hello Ada", "hello #{JSON.parse("{\"name\": \"Ada\"}")["name"]}", "a string interpolates as itself")
+assert_text("", JSON.parse("null").to_s, "null is nothing as text")
+assert_text("2.5 true", "#{JSON.parse("2.5")} #{JSON.parse("true")}", "a number and a boolean as their text")
+puts "  to_s: a string as itself, null as nothing, anything else as its JSON text"
 pretty = JSON.parse("{\"a\":[1,{\"b\":null},[]],\"c\":{}}").to_pretty_json
 assert_text("{\n  \"a\": [\n    1,\n    {\n      \"b\": null\n    },\n    []\n  ],\n  \"c\": {}\n}", pretty, "pretty text")
 assert_text("[\n\t1,\n\t[\n\t\t2\n\t]\n]", JSON.parse("[1,[2]]").to_pretty_json("\t"), "pretty with a tab")

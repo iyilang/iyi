@@ -611,8 +611,18 @@ pub struct Any
     b.to_s
   end
 
+  # A string as itself and null as nothing, as `YAML::Any#to_s` and the
+  # other library answer them; a number, a boolean or a collection as its
+  # JSON text. A string was its JSON text too, so `"hello #{doc["name"]}"`
+  # printed `hello "Ada"`, and null printed `null`.
   def to_s : String
-    to_json
+    if s = as_s?
+      s
+    elsif @raw.nil?
+      ""
+    else
+      to_json
+    end
   end
 
   def inspect : String

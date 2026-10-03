@@ -326,19 +326,28 @@ pub struct Path
   end
 
   # Every ancestor, the outermost first: `"a/b/c"` has `"."`, `"a"`,
-  # `"a/b"`; `"/a/b"` has `"/"`, `"/a"`.
+  # `"a/b"`; `"/a/b"` has `"/"`, `"/a"`. Each is a `parent` of the one
+  # after it, so it keeps the spelling `parent` keeps: rebuilt from
+  # `parts` and joined with `separator`, `Path.windows("C:/a/b/c")` had
+  # `"C:/a\\b"` where its `parent` is `"C:/a/b"`.
   def parents : Array(Path)
     res = [] of Path
     return res if @name.empty?
-    all = parts
-    _, anchor_end = anchor_indices
-    if anchor_end == 0 && all.first != "."
-      res << Path.new(".", @kind)
+    child = self
+    up = parent
+    while up.to_s != child.to_s
+      res << up
+      child = up
+      up = up.parent
     end
-    i = 1
-    while i < all.size
-      res << Path.new(build_name(all, i), @kind)
+    i = 0
+    j = res.size - 1
+    while i < j
+      outer = res[j]
+      res[j] = res[i]
+      res[i] = outer
       i = i + 1
+      j = j - 1
     end
     res
   end

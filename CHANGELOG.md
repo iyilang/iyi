@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`Path#parents` and `#each_parent` keep the spelling the path was
+  written with, as `parent` does and the other library's do.** Each
+  ancestor was rebuilt from `parts` and joined with the kind's separator,
+  so `Path.windows("C:/a/b/c").parents` was `["C:/", "C:/a", "C:/a\\b"]`,
+  two separators in one list and a last parent other than `parent`
+  (`C:/a/b`), and `Path.windows("a/b/c")` gave `a\\b`. Each ancestor is
+  a `parent` of the next now, `["C:/", "C:/a", "C:/a/b"]`, and the
+  answers match the other library's for 15 spellings of both kinds
+  (drive, UNC, `C:a`, `..\x`, trailing and doubled separators).
+  `bench/std_path_exercise.iyi` checks it; the old module answered
+  `C:/,C:/a,C:/a\b`.
+
 - **`CSV.parse` refuses text after a closing quote and a quote inside an
   unquoted field, at their line and column, as the other library
   refuses them.** `CSV.parse(%("a"b,c))` answered `[["ab", "c"]]`,

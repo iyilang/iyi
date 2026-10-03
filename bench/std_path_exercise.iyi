@@ -101,6 +101,11 @@ assert_str("a|b", Path.posix("a/b").parts.join("|"), "parts of a relative path")
 assert_str("/,/a,/a/b", Path.posix("/a/b/c").parents.map { |p| p.to_s }.join(","), "parents of an absolute path, outermost first")
 assert_str(".,a,a/b", Path.posix("a/b/c").parents.map { |p| p.to_s }.join(","), "parents of a relative path start at .")
 assert_str("", Path.posix("/").parents.map { |p| p.to_s }.join(","), "the root has no parent")
+# Each ancestor keeps the spelling `parent` keeps: rebuilt and joined with
+# `\`, `Path.windows("C:/a/b/c")` had `C:/a\b` where its `parent` is `C:/a/b`.
+assert_str("C:/,C:/a,C:/a/b", Path.windows("C:/a/b/c").parents.map { |p| p.to_s }.join(","), "parents keep the separators they were written with")
+assert_str(".,a,a/.", Path.windows("a/./b").parents.map { |p| p.to_s }.join(","), "parents of a relative Windows path written with /")
+assert_str(Path.windows("C:/a/b/c").parent.to_s, Path.windows("C:/a/b/c").parents.last.to_s, "the last parent is parent")
 assert_str("/a", Path.posix("/a/b").parent.to_s, "parent")
 seen = 0
 Path.posix("/a/b").each_part { |part| seen += 1 }

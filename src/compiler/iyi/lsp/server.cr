@@ -478,12 +478,23 @@ module Iyi::Lsp
         # A typing burst is one verdict: every didChange for this
         # document already queued applies now, and the compile runs
         # once, on what the person actually sees.
+        #
+        # A queued frame is read by its shape before it is taken, as the
+        # proxy reads it: one whose params, `textDocument` or
+        # `contentChanges` were not there to read raised here, and the
+        # rescue dropped this whole notification - the readable change
+        # before it was lost, and the proxy, which kept it, held a buffer
+        # the worker no longer had. One of the wrong shape ends the burst
+        # and is refused on its own.
         while (queued = @inbox.first?) &&
               queued["method"]?.try(&.as_s?) == "textDocument/didChange" &&
-              queued["params"]["textDocument"]["uri"].as_s == uri
+              (queued_params = queued["params"]?.try(&.as_h?)) &&
+              (queued_document = queued_params["textDocument"]?.try(&.as_h?)) &&
+              queued_document["uri"]?.try(&.as_s?) == uri &&
+              (more = queued_params["contentChanges"]?.try(&.as_a?))
           @inbox.shift
-          version = queued.dig?("params", "textDocument", "version").try(&.as_i64?) || version
-          queued["params"]["contentChanges"].as_a.each do |change|
+          version = queued_document["version"]?.try(&.as_i64?) || version
+          more.each do |change|
             text = Text.apply(text, change)
           end
         end

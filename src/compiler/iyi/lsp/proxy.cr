@@ -131,6 +131,9 @@ module Iyi::Lsp
     # text that never compiled.
     @versions = {} of String => Int64
     @clean = {} of String => String
+    # The focused buffer and its text when the last worker died, which
+    # its successors are not warmed on (`warm`).
+    @fatal : {String, String}?
     @shut_down = false
     # The client's `shutdown`, kept verbatim like the handshake and for
     # the same reason: the refusal of every request after it but `exit`
@@ -308,11 +311,20 @@ module Iyi::Lsp
               changes << change
             end
           end
+          @focus = uri
+          # Posted before the buffer here takes the change. A frame that
+          # finds no worker spawns one and hands it `@documents` with
+          # `iyi/adopt`, and then the change itself: taken here first,
+          # the successor adopted a buffer that already held it and
+          # applied it again - after a worker's death, `ab` with one `c`
+          # typed after it was `abcc` to the worker and `abc` to the
+          # editor, and every later answer was about a text nobody had.
+          # A didOpen carries its whole text and can be applied twice; a
+          # didChange cannot.
+          post(one_change(newest, changes), nil)
           @documents[uri] = text
           @versions[uri] = newest.dig?("textDocument", "version").try(&.as_i64?) ||
                            (@versions[uri]? || 0_i64) + 1
-          @focus = uri
-          post(one_change(newest, changes), nil)
           return
         end
       when "textDocument/didSave"
@@ -569,6 +581,15 @@ module Iyi::Lsp
       return unless worker.same?(@worker)
       status = worker.process.wait rescue nil
       @worker = nil
+      # The text the person is in when a worker dies is the likeliest to
+      # have killed it, and `warm` would compile it again first thing in
+      # every successor: a buffer of 600 open parentheses (a stack
+      # overflow) took down the worker that answered each request after
+      # it, and every request in the session, about any file, answered
+      # -32603 "did not survive" for as long as it was focused.
+      if (focus = @focus) && (held = @documents[focus]?)
+        @fatal = {focus, held}
+      end
       worker.outstanding.each do |key|
         next if key.starts_with?(%("#{PRIVATE_ID}))
         next if retry && id && key == id.to_json
@@ -702,6 +723,10 @@ module Iyi::Lsp
     # rather than on the next keystroke. Its answer is dropped.
     private def warm(worker : Worker) : Nil
       return unless uri = @focus
+      # Not the text a worker died holding (`bury`): the warm-up is an
+      # answer nobody asked for, and the request behind it was the one
+      # refused. An edit makes it a text no worker has died on.
+      return if (fatal = @fatal) && fatal[0] == uri && @documents[uri]? == fatal[1]
       key = private_id
       worker.outstanding << key.to_json
       frame = JSON.build do |json|

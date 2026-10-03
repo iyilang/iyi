@@ -744,6 +744,122 @@ def fuzz_steps(c, work):
          lines == [[2], [6]], str(lines))
 
 
+def kill_workers(c):
+    """Kill the proxy's workers - its children started from its own
+    binary, not a console host Windows may have given it - and whatever
+    each of them started, and wait for them to be gone. A process a
+    compile started (a macro's `system`) holds the worker's pipes on
+    Windows, where handles are inherited, and the proxy reads no death
+    until it ends too. Returns how many workers there were; none where
+    children cannot be listed, and the step that asked reports itself
+    unmeasured."""
+    import signal
+    own = os.path.normcase(process_binary(c.proc.pid))
+    found = []
+    for pid in children(c.proc.pid):
+        try:
+            if os.path.normcase(process_binary(pid)) == own:
+                found.append(pid)
+        except OSError:
+            continue
+    doomed, pending = [], list(found)
+    while pending:
+        pid = pending.pop()
+        doomed.append(pid)
+        pending.extend(children(pid))
+    for pid in reversed(doomed):
+        try:
+            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        except OSError:
+            pass
+    deadline = time.monotonic() + 10
+    while any(pid in children(c.proc.pid) for pid in found) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    # The proxy reads the worker's pipe closing on its own fiber.
+    time.sleep(0.5)
+    return len(found)
+
+
+def buffer_steps(c):
+    """A worker's death and a malformed burst: the proxy's buffers and the
+    worker's stopped being the editor's."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-buffers")
+    # 73a. A worker dies, and the next thing the person does is type one
+    #      character. The proxy took the change into its own buffer, then
+    #      spawned a successor, handed it that buffer (`iyi/adopt`) and
+    #      forwarded the change as well: `def ab` with a `c` typed after
+    #      it was `abcc` to the worker and `abc` to the editor, and every
+    #      answer after it was about a text nobody had.
+    twice_uri = opened(c, own, "twice.iyi", "def ab\nend\n")
+    killed = kill_workers(c)
+    c.send("textDocument/didChange", {"textDocument": {"uri": twice_uri, "version": 2}, "contentChanges": [
+        {"range": {"start": {"line": 0, "character": 6}, "end": {"line": 0, "character": 6}}, "text": "c"}]},
+        wait=False)
+    reply = c.send("textDocument/documentSymbol", {"textDocument": {"uri": twice_uri}})
+    names = [s["name"] for s in reply.get("result") or []]
+    step("73a", "after a worker dies, the change that follows is applied once",
+         (not killed and names) or names == ["abc"],
+         f"{killed or 'unmeasured'} worker(s) killed, then the outline is {names}")
+
+    # 73b. A readable change and, queued behind it, a change whose params
+    #      are null: the worker read the second while gathering the burst,
+    #      raised on its shape, and dropped both - the outline stayed
+    #      empty, where the proxy kept the edit and the two buffers parted.
+    #      Driven against the worker alone, behind a compile, so both are
+    #      queued when it gets to them.
+    w = Client(("lsp", "--worker"))
+    w.send("initialize", {"rootUri": file_uri(own), "capabilities": {}})
+    w.send("initialized", {}, wait=False)
+    burst = file_uri(os.path.join(own, "burst.iyi"))
+    w.send("textDocument/didOpen", {"textDocument": {"uri": burst, "languageId": "iyi", "version": 1,
+                                                     "text": ""}}, wait=False)
+    w.diagnostics(burst)
+    with open(os.path.join(own, "busy.iyi"), "w") as f:
+        f.write("module busy\n\nputs 1\n")
+    busy = w.write_batch([
+        ("textDocument/diagnostic", {"textDocument": {"uri": file_uri(os.path.join(own, "busy.iyi"))}}, True),
+        ("textDocument/didChange", {"textDocument": {"uri": burst, "version": 2},
+                                    "contentChanges": [{"text": "def added_by_edit\nend\n"}]}, False),
+        ("textDocument/didChange", None, False),
+    ])
+    w.wait_for(lambda m: m.get("id") == busy[0])
+    reply = w.send("textDocument/documentSymbol", {"textDocument": {"uri": burst}})
+    names = [s["name"] for s in reply.get("result") or []]
+    w.send("shutdown", {})
+    w.send("exit", {}, wait=False)
+    w.proc.wait(timeout=10)
+    step("73b", "a change of the wrong shape queued behind a readable one takes only itself",
+         names == ["added_by_edit"], f"outline {names}")
+
+    # 73c. and a worker that dies while the person is in a buffer is not
+    #      followed by one that compiles that buffer before anything else.
+    #      A buffer whose compile overflowed the stack killed every worker
+    #      the proxy started, because each was warmed on the focused file
+    #      first: every request about any file answered -32603 for as long
+    #      as it stayed focused. Here the death is a kill during a compile
+    #      that waits 30 s, and the outline of another file has to be
+    #      answered well inside that.
+    pause = "ping -n 31 127.0.0.1" if os.name == "nt" else "sleep 30"
+    slow_text = f'module slow\n\n{{% system("{pause}") %}}\nputs 1\n'
+    slow_uri = file_uri(os.path.join(own, "slow.iyi"))
+    c.send("textDocument/didOpen", {"textDocument": {"uri": slow_uri, "languageId": "iyi", "version": 1,
+                                                     "text": slow_text}}, wait=False)
+    # Killed well inside the two quiet seconds the proxy retires a worker
+    # in: a retirement first would start a worker this kill did not list.
+    time.sleep(0.5)
+    killed = kill_workers(c)
+    started = time.monotonic()
+    reply = c.send("textDocument/documentSymbol", {"textDocument": {"uri": twice_uri}})
+    elapsed = time.monotonic() - started
+    for uri in (slow_uri, twice_uri):
+        c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
+    shutil.rmtree(own, ignore_errors=True)
+    step("73c", "a successor is not warmed on the buffer its predecessor died in",
+         not killed or ("result" in reply and elapsed < 10),
+         f"{killed or 'unmeasured'} worker(s) killed, another file's outline answered "
+         f"{'within' if elapsed < 10 else 'past'} 10 s")
+
+
 def main():
     watchdog(180)
     # Set before the server starts, because a child inherits the environment
@@ -3217,6 +3333,7 @@ def main():
     step("60c", "a change that cannot be read is skipped, and the next one applies",
          [d["range"]["start"]["line"] for d in items if "nope" in d["message"]] == [2],
          f"{len(items)} item(s): {items and items[0]['message'][:50]}")
+    buffer_steps(c)
     traits_disk_and_completion()
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has

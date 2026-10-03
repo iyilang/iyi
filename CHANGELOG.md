@@ -4,6 +4,38 @@
 
 ### Fixed
 
+- **After a language-server worker dies, the next edit is applied once.**
+  The proxy took a didChange into its own buffer first, then found no
+  worker, started one, handed it that buffer (`iyi/adopt`) and forwarded
+  the change as well: `def ab` with one `c` typed after a worker's death
+  was `abcc` to the worker and `abc` to the editor, and every later
+  answer for the file was about a text nobody had. The change is posted
+  before the proxy's buffer takes it now. Step 73a of
+  `bench/lsp_session.py` checks it; the old server's outline was
+  `['abcc']`.
+
+- **A didChange of the wrong shape queued behind a readable one is
+  refused alone.** While gathering a typing burst the worker read the
+  queued frame's `params.textDocument.uri` and `contentChanges` as the
+  protocol spells them, so params that were null, lacked `textDocument`
+  or named a uri of 5 raised, and the whole notification was dropped -
+  the readable change with it, while the proxy kept that change and the
+  two buffers parted. The queued frame is read by its shape before it is
+  taken now, and one of the wrong shape ends the burst. Step 73b of
+  `bench/lsp_session.py` checks it; the old worker's outline was `[]`
+  where it is `['added_by_edit']`.
+
+- **A successor is not warmed on the buffer its predecessor died in.**
+  The proxy warms each new worker by compiling the focused file, so a
+  buffer whose compile killed the worker (600 open parentheses overflowed
+  the parser's stack) killed every successor too, and every request in
+  the session, about any file, answered -32603 "did not survive" for as
+  long as it stayed focused. The focused text a worker died holding is
+  remembered and not warmed until it is edited. Step 73c of
+  `bench/lsp_session.py` kills a worker mid-compile of a buffer whose
+  macro waits 30 s and asks another file's outline; the old proxy
+  answered it only after recompiling that buffer, past 10 s.
+
 - **A program's error stream no longer carries "Unable to load debug
   information" for an exception nobody printed.** On Windows every `raise`
   loads the debug information (the stack cannot be walked without it), and

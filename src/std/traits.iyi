@@ -1,4 +1,5 @@
-# Comparable, Num and Hashable over the prelude's scalars.
+# Comparable, Num and Hashable over the prelude's scalars, and Hashable over
+# the other keys a table takes: arrays, nil and symbols.
 #
 # The two imports are what makes `Hashable` true rather than declared.
 # `hash_key` forwards to the value's own `hash`, and the prelude defines
@@ -245,6 +246,30 @@ impl Num for Float32
 end
 
 impl Hashable for Float32
+  def hash_key : Int32
+    hash
+  end
+end
+
+# The keys a `Hash` takes that are not scalars. Each has the `==` and the
+# `hash` a table asks of a key - an array's and a symbol's in the prelude,
+# nil's the one value's - and `group_by`, `tally`, `tally_by`, `index_by`
+# and `to_h` ask `Hashable` of theirs, which none of these was:
+# `tally` of a list of arrays was refused with "Array(Int32) does not
+# implement Std::Traits::Hashable", where the table it builds takes them.
+impl Hashable for Array(T) forall T
+  def hash_key : Int32
+    hash
+  end
+end
+
+impl Hashable for Nil
+  def hash_key : Int32
+    hash
+  end
+end
+
+impl Hashable for Symbol
   def hash_key : Int32
     hash
   end

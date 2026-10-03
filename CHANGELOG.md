@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`group_by`, `tally`, `tally_by`, `index_by` and `to_h` take an array,
+  nil or a symbol as a key.** Each asks `Hashable` of its key, and
+  `std/traits` implemented it for the scalars alone: `tally` of a list of
+  arrays was refused with "Array(Int32) does not implement
+  Std::Traits::Hashable, required by `where Elem : Std::Traits::Hashable`
+  in `tally`", and a list of nilable numbers and an `index_by` answering
+  symbols were refused the same way, where the table each builds takes
+  them. `Array`, `Nil` and `Symbol` implement it now, by the `hash` each
+  already had. A tuple key is still refused: its impl does not survive
+  the module's artifact yet. `bench/std_exercise.iyi` counts and groups by
+  all three; the old module did not compile them.
+
 - **`iyi migrate` of one file below the source root writes its sidecar
   beside the module.** The sidecar of a reopening (`struct Int32`) was
   put under the file's directory and the module path's own directory

@@ -364,6 +364,13 @@ assert_eq(mm_of[1], -1, "enum: minmax_of max")
 gb = seq.group_by { |x| x % 2 }
 assert_eq(gb[0].size, 3, "enum: group_by 0")
 assert_eq(gb[1].size, 5, "enum: group_by 1")
+# By an array, nil and a symbol, each a key a `Hash` takes: none was
+# `Hashable`, so each of these was refused with "Array(Int32) does not
+# implement Std::Traits::Hashable" and its like.
+assert_eq(List.new([[1], [2], [1]]).tally[[1]], 2, "traits: tally of arrays")
+assert_eq(List.new([1, 2, 3]).group_by { |x| [x % 2] }[[1]].size, 2, "traits: group_by an array")
+assert_eq(List.new([1, nil, nil] of Int32?).tally[nil], 2, "traits: tally of nil")
+assert_eq(List.new([1, 2, 3]).index_by { |x| x.even? ? :even : :odd }[:odd], 3, "traits: index_by a symbol")
 
 # 57. index_by
 ib = small_seq.index_by { |x| x.to_s }

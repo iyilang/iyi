@@ -3205,6 +3205,15 @@ require "./file"
           head = head_of(arena, pointer.address)
           index = class_index(read64(arena + OFF_CHUNK))
           table = cache
+          # Inside the allocator's bracket, as `take` is, so a stop waits
+          # for `leave`. Stopped between the entry and the list - a
+          # suspend lands anywhere - by the pause that drops every list,
+          # the thread linked the chunk back after it, onto the dropped
+          # list it had read, while the sweep relinked the same chunks as
+          # dead: handed out twice, and a batch head's tagged word stamped
+          # as an index. `bench/concurrent_mark.sh`'s bursts of frees faulted
+          # or lost a chunk in 25 runs of 30.
+          write64(table.address &+ CACHE_INSIDE, read64(table.address &+ CACHE_INSIDE) &+ 1_u64)
           # Free, white, and this epoch's: on the cache's list until the
           # next pause drops it, and the sweep of its arena leaves a free
           # chunk of the current parity alone (`sweep_slice`).
@@ -3218,6 +3227,7 @@ require "./file"
           write64(head + OFF_LINK, table[index])
           write64(head + OFF_INDEX, slot)
           table[index] = head
+          leave(table)
         else
           # A large chunk under a running mark stays mapped and listed, and
           # the sweep after the mark frees it: the helpers walk the large

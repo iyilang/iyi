@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A small chunk freed while a stop lands in the middle of the free is
+  not linked onto a list the pause dropped.** `IyiHeap.free` changed the
+  thread's own free list outside the allocator's bracket, so a stop
+  could catch it between writing the chunk's entry and storing the list
+  head; the pause dropped every list and turned the epoch, and on resume
+  the chunk went back onto the dropped list, whose chunks the sweep then
+  handed out a second time. `stamp` later wrote through a tagged list
+  word and the program died of a memory fault. Measured with a program
+  that frees bursts of small chunks across collections: the old runtime
+  failed 25 of 30 runs (master's 16 of 20), and 0 of 30 with the free
+  inside the bracket. `bench/concurrent_mark.sh` runs that program ten
+  times and proves the check with the bracket removed.
+
 - **A type error says which type was meant, and what to write.** Measured
   with the previous compiler: `class String` in `module app/main` gave
   "undefined local variable or method 'upcase' for App::Main::String"

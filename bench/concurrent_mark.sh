@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Ten steps, the last six failure proofs:
+# Twelve steps, the last seven failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -26,22 +26,28 @@
 #   4. Buffers of references grown by `realloc`, ten runs of three hundred
 #      rounds, plain: every referent intact in every run. The old buffer
 #      is freed while a mark may have it queued.
-#   5. Failure proof: the barrier's shade removed from a copy of the
+#   5. Small chunks handed back by `GC.free` in bursts, ten runs, plain:
+#      every chunk kept since is intact, the pauses landing among the
+#      frees included.
+#   6. Failure proof: the barrier's shade removed from a copy of the
 #      prelude; the first payload moved under a mark is freed, and the
 #      program exits 1 saying so.
-#   6. Failure proof: the barrier's own look at the marking flag removed;
+#   7. Failure proof: the barrier's own look at the marking flag removed;
 #      a barrier run after its mark ended grays a holder, the next mark
 #      sweeps the payload it held, and the program exits 1 saying so.
-#   7. Failure proof: `free`'s look at the mark removed; a large block
+#   8. Failure proof: `free`'s look at the mark removed; a large block
 #      outgrown under a mark is unmapped beside the helpers at once, which
 #      is how a helper walking the large list faulted, and the program
 #      exits 1 saying so.
-#   8. Failure proof, on Windows: the helpers given back the boost a
+#   9. Failure proof: `free` outside the allocator's bracket; a pause
+#      among the frees puts the lists it dropped back on the cache, and
+#      step 5's program exits 1 within ten runs.
+#  10. Failure proof, on Windows: the helpers given back the boost a
 #      satisfied wait brings, and the wake check - more than three of the
 #      program's wakes past a millisecond - exits 1.
-#   9. Failure proof, on Windows: the cap on the helpers beside a busy
+#  11. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
-#  10. Failure proof, on Windows: the first collection's wait for every
+#  12. Failure proof, on Windows: the first collection's wait for every
 #      helper to reach its park put back, and the crowded check fires.
 set -u
 
@@ -281,6 +287,89 @@ for run in 1 2 3 4 5 6 7 8 9 10; do
 done
 echo "  ten runs of three hundred realloc'd buffers, every leaf intact"
 
+# A chunk `free` hands back goes on this thread's own list, and a pause
+# drops every list: the sweep after it relinks the dropped chunks as dead.
+# A thread stopped inside `free`, between the chunk's entry and its list -
+# a suspend lands anywhere - put the chunk back after the pause, linked to
+# the list it had read, while the sweep linked the same chunks into its
+# batches. Handed out twice, one held a batch head's tagged word where its
+# index goes, and the stamp wrote through it: this program faulted or lost
+# a chunk in 25 runs of 30 here, and step 4's faulted in 3 of 1,600, each
+# fault looked at on that store. A pause among the frees waits 2 ms for
+# the helpers' sweep before the list is allocated from, which is what made
+# it near certain.
+step "small chunks freed in bursts across the pauses keep what was kept, ten runs"
+cat > freed.iyi <<'IYI'
+module freed
+
+import std/gc::{GC}
+
+class Node
+  getter link : Node?
+
+  def initialize(@link : Node?)
+  end
+end
+
+# Past the stop's bound, so every mark goes beside the program and a
+# helper's stop ends it, wherever this thread stands.
+chain = nil.as(Node?)
+i = 0
+while i < 20000
+  chain = Node.new(chain)
+  i += 1
+end
+ring = Pointer(Pointer(UInt64)).malloc(4096_u64)
+burst = Pointer(Pointer(UInt64)).malloc(64_u64)
+lost = 0
+round = 0
+while round < 200000
+  j = 0
+  while j < 64
+    burst[j] = Pointer(UInt64).malloc(2_u64)
+    j += 1
+  end
+  epoch = IyiMark.epoch
+  j = 0
+  while j < 64
+    GC.free(burst[j].as(Void*))
+    j += 1
+  end
+  if IyiMark.epoch != epoch
+    until_ns = IyiMark.now_ns + 2000000_u64
+    while IyiMark.now_ns < until_ns
+    end
+  end
+  slot = round % 4096
+  if round >= 4096
+    old = ring[slot]
+    lost += 1 if old[0] != (round - 4096).to_u64 || old[1] != (round - 4096).to_u64 &+ 7_u64
+  end
+  kept = Pointer(UInt64).malloc(2_u64)
+  kept[0] = round.to_u64
+  kept[1] = round.to_u64 &+ 7_u64
+  ring[slot] = kept
+  round += 1
+end
+count = 0
+node = chain
+while node
+  count += 1
+  node = node.link
+end
+puts "lost #{lost + 20000 - count}"
+exit(lost == 0 && count == 20000 ? 0 : 1)
+IYI
+if ! "$IYI" build freed.iyi -o freed > build-freed.log 2>&1; then
+  cat build-freed.log; exit 1
+fi
+for run in 1 2 3 4 5 6 7 8 9 10; do
+  if ! timeout -k 5 120 ./freed > freed.txt 2>&1 || ! grep -qx "lost 0" freed.txt; then
+    echo "  run $run of 10 lost a chunk kept beside chunks freed:"; tail -3 freed.txt; exit 1
+  fi
+done
+echo "  ten runs of 200,000 bursts of frees, every kept chunk intact"
+
 step "failure proof: a barrier that shades nothing loses the moved payload"
 mkdir -p patched/iyi
 cp "$REPO"/src/iyi/*.iyi patched/iyi/
@@ -345,6 +434,24 @@ if [ "$code" -ne 1 ] || ! grep -q "^FAIL: small:" thousand.txt; then
   echo "the small live set check did not fire (exit $code):"; tail -3 thousand.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: small:' thousand.txt)"
+
+step "failure proof: a free outside the allocator's bracket puts a dropped list back"
+mkdir -p unbracketed/iyi
+cp "$REPO"/src/iyi/*.iyi unbracketed/iyi/
+awk '/^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered = 1; next }
+  prev ~ /^          table\[index\] = head$/ && /^          leave\(table\)$/ { left = 1; prev = $0; next }
+  { prev = $0; print } END { if (!entered || !left) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > unbracketed/iyi/prelude.iyi || { echo "the bracket this proof removes from free is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/unbracketed${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-unbracketed > build-unbracketed.log 2>&1; then
+  cat build-unbracketed.log; exit 1
+fi
+caught=""
+for try in 1 2 3 4 5 6 7 8 9 10; do
+  timeout -k 5 120 ./freed-unbracketed > unbracketed.txt 2>&1
+  if [ "$?" -eq 1 ]; then caught="$try"; break; fi
+done
+[ -n "$caught" ] || { echo "ten runs of the free outside its bracket kept every chunk:"; tail -3 unbracketed.txt; exit 1; }
+echo "  exits 1 within ten runs: a kept chunk lost, or a memory fault"
 
 if [ "$PSEP" = ":" ]; then
   echo "workdir $WORK"

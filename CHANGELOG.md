@@ -4,6 +4,27 @@
 
 ### Fixed
 
+- **The parser names the iyi spelling for import paths, braced bodies and
+  impl headers.** Measured with the previous compiler: `import
+  app/util.iyi` was told to add `require app/util.iyi v1.2.3` to
+  `iyi.mod`; `import "app/util"`, `import ./app/util` and `import
+  App::Util` were "expecting token 'IDENT', not ..." and `import
+  app\util` "unknown token: 'u'"; each is now one sentence with `import
+  app/util` as the edit `iyi fix` applies. Go's `if err != nil {` was
+  "void value expression" at the `return` and a braced `while` a missing
+  `end` at the end of the file; `module app/dash-name` was told a header
+  is the first statement of its file and to write `module App::Dash`; a
+  `module App::Upper` header was a missing `end`; `struct U : Greet` was
+  "unexpected token: \":\""; `impl Greet, Loud for U` and Rust's `impl
+  Point` were "expecting identifier 'for'"; `def f : (Int32, String)` and
+  `impl Greet for U, V` were "expecting token '->'"; `def hello(x : T)
+  where T : Greet` passed `check` uncalled and, called, was "undefined
+  constant T / Did you mean 'U'?" (now `forall` is the edit);
+  `App::Util::helper(1)` was "expecting token 'CONST', not 'helper'"; and
+  `$counter` was told to "use @@class_variables instead". Each names what
+  to write. `spec/compiler/parser/parser_spec.cr` checks them; the old
+  compiler gave the answers quoted.
+
 - **A class variable a thread block reaches through a call is held to the
   rule one it names is.** Measured with the previous compiler:
   `IyiThread.start { Counter.incr }`, with `@@n += 1` in `def self.incr`

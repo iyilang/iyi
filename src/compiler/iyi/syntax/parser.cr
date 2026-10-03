@@ -1535,7 +1535,13 @@ module Iyi
       when .symbol?
         node_and_next_token SymbolLiteral.new(@token.value.to_s)
       when .global?
-        raise "$global_variables are not supported, use @@class_variables instead"
+        # iyi: the other library's advice, "use @@class_variables instead",
+        # sent a program's shared count to a class variable, which the
+        # thread gate refuses once a thread names it (SPEC.md III.4.5). It
+        # was said one column past the name.
+        raise "iyi has no global variables: pass the value to what needs it, make one that never changes " \
+              "a constant (`LIMIT = 10`), and keep a count threads share in an `Atomic(Int32)` or send values " \
+              "over a `Channel` (SPEC.md III.4.5)", @token
       when .op_dollar_tilde?, .op_dollar_question?
         location = @token.location
         var = Var.new(@token.to_s).at(location)
@@ -2129,6 +2135,7 @@ module Iyi
       next_token_skip_space_or_newline
 
       cond = parse_op_assign_no_control allow_suffix: false
+      iyi_check_braced_body(klass == While ? "while" : "until", cond)
 
       slash_is_regex!
       skip_statement_end
@@ -2304,6 +2311,24 @@ module Iyi
         skip_space
       end
 
+      # iyi: `struct U : Greet` (Swift, Kotlin, C#) was "unexpected token:
+      # \":\"" and `struct U implements Greet` (Java, TypeScript) "undefined
+      # method 'implements' for U.class".
+      if iyi? && (@token.type.op_colon? || (@token.type.ident? && @token.value == "implements"))
+        location = @token.location
+        next_token_skip_space
+        traits = [] of String
+        while @token.type.const?
+          traits << parse_path.to_s
+          skip_space
+          break unless @token.type.op_comma?
+          next_token_skip_space
+        end
+        impls = (traits.empty? ? ["Trait"] : traits).map { |each_trait| "`impl #{each_trait} for #{name}`" }
+        raise "a type implements a trait after its declaration, not in its header: #{impls.join(" and ")}, " \
+              "each holding that trait's methods (SPEC.md R-3)", location
+      end
+
       superclass = nil
 
       if @token.type.op_lt?
@@ -2384,8 +2409,7 @@ module Iyi
     # Distinguishable from Crystal's `module Foo` because that takes a CONST.
     def parse_module_path : Array(String)
       segments = [] of String
-      check Token::Kind::IDENT
-      segments << check_module_path_segment(@token.value.to_s)
+      segments << module_header_segment
 
       # After an identifier the lexer would treat `/` as the start of a regex
       # literal, so `app/user` lexes as `app` followed by DELIMITER_START.
@@ -2406,8 +2430,7 @@ module Iyi
       while @token.type.op_slash?
         suppress_regex
         next_token
-        check Token::Kind::IDENT
-        segments << check_module_path_segment(@token.value.to_s)
+        segments << module_header_segment
         suppress_regex
         next_token
       end
@@ -2415,6 +2438,27 @@ module Iyi
       @wants_regex = true
       skip_space
       segments
+    end
+
+    # iyi: `module app/dash-name`, a file named the way TypeScript and CSS
+    # projects name theirs. The `-` ended the path at `app/dash`, and the
+    # report was that a header is the first statement of its file - of a
+    # header on line 1 - with `module App::Dash` to write instead.
+    private def module_header_segment : String
+      check Token::Kind::IDENT
+      segment = @token.value.to_s
+      if current_char == '-' && peek_next_char.ascii_letter?
+        written = String.build do |io|
+          io << segment
+          while current_char == '-' || current_char == '_' || current_char.ascii_alphanumeric?
+            io << current_char
+            next_char
+          end
+        end
+        raise "module path segment '#{written}' has a `-`: a segment is lower-case snake_case, " \
+              "`#{written.tr("-", "_")}`, and the file is named the same (SPEC.md IV.6 #6)", @token
+      end
+      check_module_path_segment(segment)
     end
 
     # iyi: both flags, because the lexer reads one of them and the parser sets
@@ -2497,7 +2541,11 @@ module Iyi
     def parse_import
       location = @token.location
       next_token_skip_space
+      check_import_path_shape(location)
       path = parse_import_path
+      if path.last.ends_with?(".iyi")
+        refuse_import_path "a module path has no extension", location, @iyi_import_end, path.join('/').rchop(".iyi")
+      end
       names = nil
       name_locations = nil
       glob = false
@@ -2514,10 +2562,77 @@ module Iyi
                 "`import #{path.join('/')}::{name}`, or takes every one, `import #{path.join('/')}::*`", @token
         end
       end
+      if @token.value == Keyword::AS
+        raise "an import is not renamed: after `import #{path.join('/')}` its names are reached as " \
+              "`#{path.map(&.camelcase).join("::")}::name`, and `import #{path.join('/')}::{name}` " \
+              "brings one in unqualified (SPEC.md R-2b)", @token
+      end
       node = ImportDecl.new(path, names, name_locations, glob)
       node.at(location)
       node.end_location = @iyi_import_end
       node
+    end
+
+    # iyi: the shapes an import path is written in by other languages, each
+    # refused with the iyi spelling as an edit `iyi fix` applies. Measured
+    # before: `import "app/util"` was "expecting token 'IDENT', not
+    # 'DELIMITER_START'", `import ./app/util` the same with '.', `import
+    # App::Util` the same with 'App', `import app\util` was "unknown token:
+    # 'u'", and `import app/util.iyi` was told to add an `iyi.mod`
+    # requirement for a file beside the entry.
+    private def check_import_path_shape(location : Location) : Nil
+      case @token.type
+      when .delimiter_start?
+        literal = parse_delimiter(want_skip_space: false)
+        written = literal.is_a?(StringLiteral) ? literal.value : "app/util"
+        written = written.lchop("./").rchop(".iyi").gsub('\\', '/')
+        refuse_import_path "an import path is not quoted", location, literal.end_location, written
+      when .op_period?, .op_period_period?
+        while @token.type.op_period? || @token.type.op_period_period? || @token.type.op_slash?
+          suppress_regex
+          next_token
+        end
+        rest = parse_import_path.join('/') if @token.type.ident?
+        refuse_import_path "an import path is read from the entry's directory and IYI_PATH, " \
+                           "never from the importing file's, so it has no `./` or `../`",
+          location, @iyi_import_end, rest || "app/util"
+      when .const?
+        names = [] of String
+        while @token.type.const?
+          names << @token.value.to_s
+          @iyi_import_end = token_end_location
+          next_token
+          break unless @token.type.op_colon_colon?
+          next_token
+        end
+        refuse_import_path "an import names the module's path, and `#{names.join("::")}` is how " \
+                           "the module is named after it", location, @iyi_import_end,
+          names.join('/', &.underscore)
+      when .ident?
+        # The rest of the path as written, read without lexing it: the lexer
+        # takes `\u` for an escape and stops there.
+        source = @reader.string
+        stop = current_pos
+        while stop < source.bytesize && ((char = source.byte_at(stop).unsafe_chr).ascii_alphanumeric? ||
+              char.in?('_', '.', '-', '/', '\\'))
+          stop += 1
+        end
+        written = "#{@token.value}#{string_range(current_pos, stop)}"
+        if written.includes?('\\')
+          written_end = Location.new(@filename, location.line_number, @token.column_number + written.size - 1)
+          refuse_import_path "path segments are separated by `/`", location, written_end, written.gsub('\\', '/')
+        end
+      end
+    end
+
+    private def refuse_import_path(why : String, location : Location, written_end : Location?, path : String) : NoReturn
+      now = "import #{path}"
+      if written_end && written_end.line_number == location.line_number
+        size = written_end.column_number - location.column_number + 1
+      end
+      refusal = SyntaxException.new("#{why}: `#{now}`", location.line_number, location.column_number, @filename, size)
+      refusal.suggestion = now if size
+      ::raise refusal
     end
 
     # Like `parse_module_path`, with dotted and hyphened segments admitted.
@@ -2954,10 +3069,36 @@ module Iyi
         end
       skip_space
 
+      # iyi: `impl Greet, Loud for U` was "expecting identifier 'for', not
+      # ','", and Rust's inherent `impl Point` "expecting identifier 'for',
+      # not 'NEWLINE'".
+      if iyi? && @token.type.op_comma?
+        traits = [trait_node.to_s]
+        while @token.type.op_comma?
+          next_token_skip_space
+          traits << parse_path.to_s
+          skip_space
+        end
+        target_text = "Type"
+        if @token.keyword?(:for)
+          next_token_skip_space
+          target_text = parse_union_type.to_s
+        end
+        raise "an `impl` names one trait: #{traits.map { |each_trait| "`impl #{each_trait} for #{target_text}`" }.join(" and ")}, " \
+              "each holding that trait's methods", location
+      end
+      if iyi? && !@token.keyword?(:for) && (@token.type.newline? || @token.type.op_semicolon? || @token.type.eof?)
+        raise "`impl #{trait_node}` has no trait: a type's own methods are written inside its declaration, " \
+              "`struct #{trait_node}` ... `end`, and `impl` is only `impl Trait for #{trait_node}` (SPEC.md R-3)", location
+      end
+
       check_ident :for
       next_token_skip_space_or_newline
 
+      # A list here is two targets, which `parse_proc_type_output` names.
+      @iyi_impl_trait = trait_node.to_s
       target = parse_bare_proc_type
+      @iyi_impl_trait = nil
       skip_space
 
       type_vars = nil
@@ -3087,6 +3228,14 @@ module Iyi
       body = push_visibility { parse_expressions }
 
       end_location = token_end_location
+      # iyi: `module App::Upper` as a file's first line, the other library's
+      # habit, was "expecting 'end' to close the module that began at line
+      # 1, not the end of the file", and nothing said which line was meant.
+      if iyi? && @token.type.eof? && @iyi_open.size == 1 && @iyi_module_headers.nil?
+        raise "`module #{name}` opens a namespace that needs an `end`, and none is written; " \
+              "a file's module header is its lower-case path, `module #{name.names.join('/', &.underscore)}`, " \
+              "with no `end`, and `#{name}` is how importers name it (SPEC.md R-1)", name_location
+      end
       check_ident :end
       iyi_closed
       next_token_skip_space
@@ -5173,8 +5322,10 @@ module Iyi
       skip_space
       where_bounds = nil
       if @token.type.ident? && @token.value == "where"
+        where_location = @token.location
         next_token_skip_space
         where_bounds = parse_where_bounds
+        iyi_check_method_where(where_location, where_bounds) unless free_vars
       end
 
       if is_abstract
@@ -5225,6 +5376,23 @@ module Iyi
     private def iyi_return_arrow
       unexpected_token unless iyi?
       raise "unexpected token: \"->\": a return type is `: Type` here, not `-> Type` - `def name(args) : Type`", @token
+    end
+
+    # iyi: `def hello(x : T) : String where T : Greet`, Rust's bound on a
+    # function's own type parameter. Outside every type there is no
+    # associated type for `where` to bound, and the name was bound by
+    # nothing: with no caller the def passed `check`, and with one it was
+    # "undefined constant T" with "Did you mean 'U'?" carried as the edit.
+    # `forall` takes the same bounds, so the edit is the keyword.
+    private def iyi_check_method_where(location : Location, bounds : Hash(String, ASTNode)) : Nil
+      return unless iyi? && @type_nest == 0
+      name, bound = bounds.first
+      refusal = SyntaxException.new("`where` bounds an associated type of the trait a method is written in; " \
+                                    "a method's own type parameter is introduced by `forall`, which takes the " \
+                                    "same bounds: `forall #{name} : #{bound}` (SPEC.md II.6, II.7)",
+        location.line_number, location.column_number, @filename, 5)
+      refusal.suggestion = "forall"
+      ::raise refusal
     end
 
     # iyi: `def max : Elem where Elem : Comparable` (SPEC.md II.6).
@@ -5858,6 +6026,7 @@ module Iyi
     end
 
     def parse_if_after_condition(cond, location, check_end)
+      iyi_check_braced_body("if", cond)
       iyi_opened "if", location if check_end
       slash_is_regex!
       skip_statement_end
@@ -5906,6 +6075,7 @@ module Iyi
     end
 
     def parse_unless_after_condition(cond, location)
+      iyi_check_braced_body("unless", cond)
       iyi_opened "unless", location
       slash_is_regex!
       skip_statement_end
@@ -5928,6 +6098,21 @@ module Iyi
       node = Unless.new(cond, a_then, a_else).at(location).at_end(end_location)
       node.else_location = else_location
       node
+    end
+
+    # iyi: `if err != nil {` and `while i < 3 {`, the braced body of Go, Rust
+    # and the C family. The `{` opened a tuple literal as the body's first
+    # statement, so Go's error check was "void value expression" at the
+    # `return` inside it, and a braced `while` was "expecting 'end' to close
+    # the while that began at line 2, not the end of the file".
+    private def iyi_check_braced_body(keyword : String, cond : ASTNode) : Nil
+      return unless iyi? && @token.type.op_lcurly?
+      message = "a body is not braced: `#{keyword} #{cond}` ends its line, the body follows on the next, and `end` closes it"
+      if cond.is_a?(Call) && cond.name == "!=" && cond.args.first?.is_a?(NilLiteral) && cond.obj.to_s.starts_with?("err")
+        message += ". An error is a value of the union a call returns, not a second result to test: " \
+                   "`g(x)!` propagates it, and `case` handles it (SPEC.md III.1.2)"
+      end
+      raise message, @token
     end
 
     def set_visibility(node)
@@ -6962,7 +7147,16 @@ module Iyi
       @wants_regex = false
       next_token
       while @token.type.op_colon_colon?
+        colons = @token.location
         next_token_skip_space_or_newline
+        # iyi: `App::Util::helper(1)`, Rust's path to a function, was
+        # "expecting token 'CONST', not 'helper'".
+        if iyi? && @token.type.ident?
+          refusal = SyntaxException.new("a module's function is called with `.`: `#{names.join("::")}.#{@token.value}`; " \
+                                        "`::` reaches a type or a constant", colons.line_number, colons.column_number, @filename, 2)
+          refusal.suggestion = "."
+          ::raise refusal
+        end
         names << check_const
         end_location = token_end_location
 
@@ -7120,6 +7314,20 @@ module Iyi
 
     def parse_proc_type_output(input_types, location)
       has_output_type = type_start?(consume_newlines: false)
+
+      # iyi: a list of types with no `->` after it is no proc type: Go's
+      # `def f : (Int32, String)` and `impl Greet for U, V` were both
+      # "expecting token '->', not 'NEWLINE'", a proc type neither meant.
+      if iyi? && !@token.type.op_minus_gt? && (inputs = input_types) && inputs.size > 1
+        list = inputs.join(", ")
+        at = location || @token.location
+        if implemented = @iyi_impl_trait
+          raise "an `impl` names one type: #{inputs.map { |type| "`impl #{implemented} for #{type}`" }.join(" and ")}, " \
+                "each holding the trait's methods", at
+        end
+        raise "`#{list}` is a list of types, and a type is one: several values are a tuple, `Tuple(#{list})`, " \
+              "returned as `{a, b}`; a proc type ends in `->`, `#{list} -> Nil`", at
+      end
 
       check :OP_MINUS_GT
       end_location = token_end_location
@@ -8265,6 +8473,10 @@ module Iyi
     # iyi: where an `else` was followed by `if` on its own line, for the
     # missing-`end` sentence above.
     @iyi_else_if : Location?
+
+    # iyi: the trait of the `impl` whose target is being read, for the
+    # sentence `parse_proc_type_output` gives a list of targets.
+    @iyi_impl_trait : String?
 
     def iyi_opened(what : String, location : Location?) : Nil
       @iyi_open << {what, location}

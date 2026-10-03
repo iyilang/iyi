@@ -1445,7 +1445,7 @@ module Iyi
 
     it_parses "::A::B", Path.global(["A", "B"])
 
-    assert_syntax_error "$foo", "$global_variables are not supported, use @@class_variables instead"
+    assert_syntax_error "$foo", "iyi has no global variables", 1, 1
 
     it_parses "macro foo;end", Macro.new("foo", [] of Arg, Expressions.new)
     it_parses "macro [];end", Macro.new("[]", [] of Arg, Expressions.new)
@@ -4722,6 +4722,36 @@ end").as(ClassDef)
         end
         # A `.cr` file keeps the other library's reading.
         parse("x = 7 // 2\n", filename: "x.cr")
+      end
+
+      # The rest of HuntDiag3's: import paths, braced bodies, type headers,
+      # impl lists, `where` on a function and Rust's `::` call.
+      it "names the iyi spelling of an import path, a header and an impl" do
+        {
+          "import app/util.iyi\n"                                           => "a module path has no extension: `import app/util`",
+          "import \"app/util\"\n"                                           => "an import path is not quoted: `import app/util`",
+          "import ./app/util\n"                                             => "has no `./` or `../`: `import app/util`",
+          "import App::Util\n"                                              => "is how the module is named after it: `import app/util`",
+          "import app\\util\n"                                              => "path segments are separated by `/`: `import app/util`",
+          "import app/util as u\n"                                          => "an import is not renamed",
+          "def f : Int32\n  if err != nil {\n    return 0\n  }\n  1\nend\n" => "a body is not braced: `if err != nil` ends its line",
+          "i = 0\nwhile i < 3 {\n  i += 1\n}\n"                             => "a body is not braced: `while i < 3`",
+          "module app/dash-name\n"                                          => "module path segment 'dash-name' has a `-`",
+          "module App::Upper\n\npub def hi : String\n  \"\"\nend\n"         => "a file's module header is its lower-case path, `module app/upper`",
+          "struct U : Greet\nend\n"                                         => "not in its header: `impl Greet for U`",
+          "struct U implements Greet\nend\n"                                => "not in its header: `impl Greet for U`",
+          "impl Greet, Loud for U\nend\n"                                   => "`impl Greet for U` and `impl Loud for U`",
+          "impl Greet for U, V\nend\n"                                      => "`impl Greet for U` and `impl Greet for V`",
+          "impl Point\nend\n"                                               => "`impl Point` has no trait",
+          "def f : (Int32, String)\n  return 1, \"a\"\nend\n"               => "a tuple, `Tuple(Int32, String)`",
+          "def hello(x : T) : String where T : Greet\n  \"\"\nend\n"        => "introduced by `forall`, which takes the same bounds: `forall T : Greet`",
+          "puts App::Util::helper(1)\n"                                     => "a module's function is called with `.`: `App::Util.helper`",
+        }.each do |code, message|
+          expect_raises(SyntaxException, message) { parse(code, filename: "x.iyi") }
+        end
+        # Each carries its edit, which `iyi fix` applies.
+        ex = expect_raises(SyntaxException) { parse("import \"app/util\"::{helper}\n", filename: "x.iyi") }
+        {ex.size, ex.suggestion}.should eq({17, "import app/util"})
       end
 
       # A unary operator reaches across a newline for its operand, so a stray

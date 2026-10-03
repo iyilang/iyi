@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`iyi vet` reports the program, not the packages it builds from.** std's
+  unused methods were left out of what it reports and a package's were not:
+  in a project requiring libb, with liba replaced by a directory beside it,
+  `iyi vet vet.iyi` printed
+  `..\cache\mod\example.test\user\libb@v1.0.0\libb.iyi:3:1 Libb#number` and
+  `..\liba-local\liba.iyi:7:1 Liba#unused_here` beside the program's own
+  `own_unused` and exited 1, for exports only the packages' authors can act
+  on. Every directory the manifest builds a package from, a checkout or a
+  `replace` target, is left out now, as std is. `bench/packages_get.sh` vets
+  that program and wants `own_unused` alone; the old compiler named all
+  three.
+
 - **A project whose packages are in the cache still builds offline after
   other builds.** The cache keeps its ten newest build directories, and
   `mod`, where `iyi get` puts every package checkout, was one more entry to

@@ -346,6 +346,20 @@ grep -q "beside the app, edited" replace2.log || fail "the edit did not build: $
 grep -q "example.test/user/liba builds from ../liba-local, which replaces it" replace3.log || fail "get did not say the line moves nothing: $(cat replace3.log)"
 [ "$status" -eq 0 ] && echo "  built from ../liba-local, directly and through libb; edits build; iyi.sum never records it"
 
+step "vet reports the program, not the packages it builds from"
+# A package's unused export is its author's to act on, as std's is: `iyi
+# vet` printed the cached libb's and the replacement's beside the program's
+# own and exited 1, which no change to the program could fix.
+printf '\npub def unused_here : Int32\n  1\nend\n' >> "$WORK/liba-local/liba.iyi"
+printf 'import example.test/user/liba::{greeting}\nimport example.test/user/libb::*\n\ndef own_unused : Int32\n  1\nend\n\nputs greeting\n' > "$WORK/rapp/vet.iyi"
+(cd "$WORK/rapp" && "$IYI" vet vet.iyi) > vet.log 2>&1
+vet_code=$?
+if [ "$vet_code" -ne 1 ] || ! grep -q "own_unused" vet.log || grep -q "unused_here\|number" vet.log; then
+  fail "vet answered $vet_code, naming the packages' defs or not the program's:"; sed 's/^/    /' vet.log
+else
+  echo "  vet names the program's unused def, and neither the cached libb's nor the replacement's"
+fi
+
 step "a dependency's own replace is ignored"
 mkrepo "$WORK/work/libc"
 printf 'module example.test/user/libc\nrequire example.test/user/liba v1.1.0\nreplace example.test/user/liba => ../elsewhere\n' > "$WORK/work/libc/iyi.mod"

@@ -357,8 +357,9 @@
       # waits to see leave.
       @@deferred : Int64 = 0_i64
     {% end %}
-    # Every thread object ever started, so a body's closure is rooted from
-    # `start` until the thread that runs it holds it on its own stack.
+    # Every thread object started and not yet running, so a body's closure
+    # is rooted from `start` until the thread that runs it holds it on its
+    # own stack, and no longer (`run`).
     @@head : IyiThread?
 
     @line : UInt64
@@ -651,11 +652,27 @@
         # reads a cache and not a zero (see `suspend_others`).
         IyiHeap.write64(line + IYI_TL_CACHE, IyiHeap.cache_page)
       {% end %}
+      # Found and taken off the list under the lock, which every writer of
+      # the list holds; from here this frame roots the body. Left on it,
+      # every thread ever started kept its block's captures: 2,000 threads
+      # each capturing 64 KiB, every one joined, kept 156 MiB.
+      IyiRuntimeLock.lock
+      previous = nil.as(IyiThread?)
       thread = @@head
       while thread.is_a?(IyiThread)
         break if thread.line == line
+        previous = thread
         thread = thread.next_thread
       end
+      if thread.is_a?(IyiThread)
+        if previous.is_a?(IyiThread)
+          previous.next_thread = thread.next_thread
+        else
+          @@head = thread.next_thread
+        end
+        thread.next_thread = nil
+      end
+      IyiRuntimeLock.unlock
       raise "a thread started with no body" unless thread.is_a?(IyiThread)
       thread.proc.call
       # The fibers go first, while the stack they name is still this
@@ -670,20 +687,31 @@
       unlink(line)
     end
 
+    # Waits for the thread to end, then unmaps its line; a thread joined
+    # already answers at once. A second join on Windows waited on, and
+    # closed, whatever handle had the first one's value by then: with a
+    # thread started after the first join and sleeping 2 s, it took 2,000
+    # ms, and that thread's own join then returned on the closed handle.
     def join : Nil
+      line = @line
+      return if line == 0
       {% if flag?(:linux) %}
-        while (tid = IyiThread.word(@line + IYI_TL_HANDLE).value.get) != 0_u64
-          __iyi_conc_syscall6(IYI_SYS_FUTEX, (@line + IYI_TL_HANDLE).to_i64, IYI_FUTEX_WAIT, tid.to_i64, 0_i64, 0_i64, 0_i64)
+        while (tid = IyiThread.word(line + IYI_TL_HANDLE).value.get) != 0_u64
+          __iyi_conc_syscall6(IYI_SYS_FUTEX, (line + IYI_TL_HANDLE).to_i64, IYI_FUTEX_WAIT, tid.to_i64, 0_i64, 0_i64, 0_i64)
         end
       {% elsif flag?(:darwin) %}
-        handle = Pointer(Void).new(IyiHeap.read64(@line + IYI_TL_HANDLE))
+        handle = Pointer(Void).new(IyiHeap.read64(line + IYI_TL_HANDLE))
         result = LibC.pthread_join(handle, Pointer(Void).new(0_u64))
         raise "pthread_join failed: #{result}" if result != 0
       {% elsif flag?(:win32) %}
-        handle = Pointer(Void).new(IyiHeap.read64(@line + IYI_TL_HANDLE))
+        handle = Pointer(Void).new(IyiHeap.read64(line + IYI_TL_HANDLE))
         LibC.WaitForSingleObject(handle, -1_i32)
         LibC.CloseHandle(handle)
       {% end %}
+      # The thread has left the stop's list and ended, so nothing reads
+      # the line again: each thread's stayed mapped for good.
+      @line = 0_u64
+      __iyi_munmap(line, IYI_THREAD_LINE)
     end
 
     # The deferred stop, paid where a thread holds nothing: `take`'s exit,

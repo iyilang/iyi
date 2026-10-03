@@ -15,7 +15,8 @@
 #      fibers of its own, one parked holding an object's only reference;
 #      collections stopped threads; and the program finishes, which is the
 #      proof no stop deadlocked on the runtime lock or on a thread inside
-#      the allocator.
+#      the allocator. A joined thread keeps nothing its block captured, its
+#      line is unmapped, and a second join of it returns at once.
 #   2. The binary keeps the floor. On Linux the runtime's five C-template
 #      names and nothing else: a thread by raw `clone`, a stop by `tgkill`
 #      and `rt_sigaction`, a park by `futex`, all syscalls. On darwin the

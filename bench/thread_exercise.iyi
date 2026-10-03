@@ -268,6 +268,7 @@
   {% if flag?(:win32) %}
     lib LibC
       fun GetProcessHandleCount(process : Void*, count : Int32*) : Int32
+      fun VirtualQuery(address : Void*, buffer : Void*, length : UInt64) : UInt64
     end
   {% end %}
 
@@ -279,6 +280,57 @@
       LibC.GetProcessHandleCount(LibC.GetCurrentProcess, pointerof(handles))
     {% end %}
     handles
+  end
+
+  # A thread whose block holds 64 KiB only it names, started and joined.
+  def start_holding(index : Int32) : Nil
+    payload = "#{index}:" + ("x" * 65536)
+    IyiThread.start { fail("joined: a block lost what it captured") if payload.size < 65536; nil }.join
+  end
+
+  # Whether a line is still mapped: the kernel's answer on Windows, and
+  # no elsewhere, where the check that reads it has nothing to ask.
+  def line_mapped?(line : UInt64) : Bool
+    {% if flag?(:win32) %}
+      info = uninitialized UInt64[6]
+      LibC.VirtualQuery(Pointer(Void).new(line), pointerof(info).as(Void*), 48_u64)
+      # The region's state, at 32: MEM_FREE is 0x10000.
+      (Pointer(UInt64).new(pointerof(info).address + 32_u64).value & 0xFFFFFFFF_u64) != 0x10000_u64
+    {% else %}
+      false
+    {% end %}
+  end
+
+  class Rendezvous
+    getter go : Atomic(Int64)
+    getter done : Atomic(Int64)
+
+    def initialize
+      @go = Atomic(Int64).new(0_i64)
+      @done = Atomic(Int64).new(0_i64)
+    end
+  end
+
+  # A finished thread joined again, with another started between the two
+  # joins. That one waits for the main thread to get past the second join
+  # and gives up after 20 s, which only a second join that waited on it
+  # lets happen.
+  def join_twice : Nil
+    meet = Rendezvous.new
+    first = IyiThread.start { nil }
+    first.join
+    next_one = IyiThread.start do
+      limit = __iyi_monotonic_ns + 20_000_000_000_i64
+      while meet.go.get == 0_i64 && __iyi_monotonic_ns < limit
+        sleep(1)
+      end
+      meet.done.set(meet.go.get == 0_i64 ? 2_i64 : 1_i64)
+      nil
+    end
+    first.join
+    meet.go.set(1_i64)
+    next_one.join
+    fail("joined: a second join of a finished thread waited 20 s on the thread started after it") if meet.done.get != 1_i64
   end
 
   args = Program.args
@@ -351,6 +403,38 @@
   handles_left = process_handles - handles_before
   fail("teardown: 200 finished threads left #{handles_left} handles open") if handles_left > 20
   puts "teardown: 200 finished threads gave their schedulers back"
+
+  # ── 1c. A joined thread keeps nothing ──────────────────────────────────
+  # Every thread object started stayed on the list that roots a body until
+  # its thread runs it, and so did everything its block captured: these
+  # 256 threads, every one joined, kept 20 MiB more through a collection.
+  # A thread takes itself off that list before its body runs now, and its
+  # join unmaps its line, which nothing unmapped before. And a second join
+  # returns at once: on Windows it waited on, and closed, whatever handle
+  # had the first one's value by then - the next thread's, in each of six
+  # runs of twenty pairs - so that thread's own join returned on a closed
+  # handle.
+  IyiMark.collect
+  kept_before = IyiMark.bytes_kept
+  index = 0
+  while index < 256
+    start_holding(index)
+    index = index + 1
+  end
+  IyiMark.collect
+  kept_after = IyiMark.bytes_kept
+  grew = kept_after > kept_before ? kept_after - kept_before : 0_u64
+  fail("joined: 256 joined threads kept #{grew // 1048576_u64} MiB more through a collection, and the bound is 4") if grew >= 4194304_u64
+  index = 0
+  while index < 20
+    join_twice
+    index = index + 1
+  end
+  probe = IyiThread.start { nil }
+  probe_line = probe.line
+  probe.join
+  fail("joined: a joined thread's line is still mapped") if line_mapped?(probe_line)
+  puts "joined: 256 joined threads keep under 4 MiB of what their blocks held, and twenty second joins return at once"
 
   # ── 2. The price: allocations per second per thread ────────────────────
   # Each thread allocates a fixed count from its own cache with the

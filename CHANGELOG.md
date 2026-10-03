@@ -4,6 +4,27 @@
 
 ### Fixed
 
+- **A thread lets go of its block once it runs, and `join` unmaps its
+  line.** Every thread object ever started stayed on the list that
+  roots a body until its thread runs it, so nothing its block captured
+  was ever collected: 2,000 threads, each joined, each block capturing
+  64 KiB, kept 156 MiB through a collection, and each thread's line kept
+  a mapping of its own. A thread takes itself off that list under the
+  runtime lock before its body runs now, and its join unmaps the line:
+  the same 2,000 threads keep 0 MiB. `bench/thread_exercise.iyi` step 1c
+  holds 256 of them under 4 MiB and asks Windows whether a joined
+  thread's line is still mapped; the old runtime kept 20 MiB more.
+
+- **A second `join` of a thread returns at once.** On Windows it waited
+  on, and closed, the thread's handle again, whatever handle had that
+  value by then: with a thread started after the first join and
+  sleeping 2 s, the second join took 2,000 ms, waiting on the newer
+  thread, and then closed that thread's handle. A joined thread answers
+  at once now. `bench/thread_exercise.iyi` step 1c joins twenty
+  finished threads twice, each beside a newer thread that waits for the
+  second join to return; the old runtime's second join waited on the
+  newer thread until it gave up at 20 s.
+
 - **`GC.collect` after a bare `import std/gc` is told to import `GC` by
   name.** The bare import keeps the module's names qualified (SPEC.md
   R-2b), so `GC` was the prelude's own, and the error said "iyi's

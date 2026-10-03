@@ -1232,6 +1232,38 @@ describe "Semantic: iyi" do
         App::Show.render(App::Show::Foo.new)
         CODE
     end
+
+    # A requirement's own `forall` variable in its return type was looked up
+    # in the trait, which has no `U`: "can't resolve return type U", however
+    # the impl answered it, and the same in an abstract class. The impl's
+    # variable answers it where it stands in the requirement's place.
+    it "answers a requirement whose return names its own forall variable" do
+      code = <<-CODE
+        trait Ident
+          abstract def ident(x : U) : U forall U
+        end
+
+        abstract class Base
+          abstract def same(x : U) : U forall U
+        end
+
+        class A < Base
+          def same(x : V) : V forall V
+            x
+          end
+        end
+
+        impl Ident for A
+          def ident(x : V) : %s forall V
+            %s
+          end
+        end
+
+        {A.new.ident('a'), A.new.same(1)}
+        CODE
+      assert_type(code % {"V", "x"}) { tuple_of([char, int32]) }
+      assert_error code % {"Int32", "1"}, "this method must return U, which is the return type of the overridden method Ident#ident(x : U) forall U, or a subtype of it, not Int32"
+    end
   end
 
   describe "impl coherence (R-3)" do

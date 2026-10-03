@@ -388,7 +388,9 @@ class Iyi::AbstractDefChecker
     base_return_type_node = base_method.return_type
     return unless base_return_type_node
 
-    original_base_return_type = base_type.lookup_type?(base_return_type_node)
+    base_free_vars, free_vars = iyi_free_var_stand_ins(base_method, method)
+
+    original_base_return_type = base_type.lookup_type?(base_return_type_node, free_vars: base_free_vars.try(&.dup))
     unless original_base_return_type
       report_error(base_return_type_node, "can't resolve return type #{base_return_type_node}")
       return
@@ -406,7 +408,7 @@ class Iyi::AbstractDefChecker
       base_return_type_node.accept(replacer)
     end
 
-    base_return_type = base_type.lookup_type?(base_return_type_node)
+    base_return_type = base_type.lookup_type?(base_return_type_node, free_vars: base_free_vars.try(&.dup))
     unless base_return_type
       report_error(base_return_type_node, "can't resolve return type #{base_return_type_node}")
       return
@@ -418,7 +420,7 @@ class Iyi::AbstractDefChecker
       return
     end
 
-    return_type = type.lookup_type?(return_type_node)
+    return_type = type.lookup_type?(return_type_node, free_vars: free_vars)
     unless return_type
       report_error(return_type_node, "can't resolve return type #{return_type_node}")
       return
@@ -427,6 +429,64 @@ class Iyi::AbstractDefChecker
     unless return_type.implements?(base_return_type)
       report_error(return_type_node, "this method must return #{base_return_type}, which is the return type of the overridden method #{Call.def_full_name(base_type, base_method)}, or a subtype of it, not #{return_type}")
       return
+    end
+  end
+
+  # iyi: `abstract def ident(x : U) : U forall U` (SPEC.md II.6 §2).
+  #
+  # A requirement's own type parameter belongs to the method, not to the
+  # trait, so its return type looked up in the trait found no `U`: every such
+  # requirement, and the same in an abstract class, was "can't resolve return
+  # type U", however the impl answered it. Each free variable stands in as a
+  # type parameter of its own, and an impl's is the requirement's where the
+  # two sit at the same place in a parameter: `ident(x : V) : V forall V`
+  # answers it because its `V` is where the requirement's `U` is (II.7 rule
+  # 2, the names are the impl's own), and `: Int32` does not.
+  private def iyi_free_var_stand_ins(base_method : Def, method : Def) : {Hash(String, TypeVar)?, Hash(String, TypeVar)?}
+    base_names = base_method.free_vars || [] of String
+    names = method.free_vars || [] of String
+    return {nil, nil} if base_names.empty? && names.empty?
+
+    owner = GenericModuleType.new(@program, @program, "forall", base_names + names)
+    base_vars = base_names.to_h { |name| {name, TypeParameter.new(@program, owner, name).as(TypeVar)} }
+    vars = {} of String => TypeVar
+    restrictions = base_method.args.map_with_index { |arg, i| {arg.restriction, method.args[i]?.try(&.restriction)} }
+    restrictions << {base_method.block_arg.try(&.restriction), method.block_arg.try(&.restriction)}
+    restrictions.each do |base_restriction, restriction|
+      base_paths = iyi_single_names(base_restriction)
+      paths = iyi_single_names(restriction)
+      next unless base_paths.size == paths.size
+
+      base_paths.zip(paths) do |base_name, name|
+        next unless base_name && name && names.includes?(name)
+        if base_var = base_vars[base_name]?
+          vars[name] ||= base_var
+        end
+      end
+    end
+    names.each { |name| vars[name] ||= TypeParameter.new(@program, owner, name) }
+    {base_vars, vars}
+  end
+
+  # The paths of a restriction in the order they are written, each as its
+  # single name or nil.
+  private def iyi_single_names(node : ASTNode?) : Array(String?)
+    names = [] of String?
+    node.try &.accept(CollectSingleNames.new(names))
+    names
+  end
+
+  class CollectSingleNames < Visitor
+    def initialize(@names : Array(String?))
+    end
+
+    def visit(node : Path)
+      @names << node.single_name?
+      false
+    end
+
+    def visit(node : ASTNode)
+      true
     end
   end
 

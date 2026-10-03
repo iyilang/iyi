@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A requirement whose return type names its own `forall` variable is
+  checked against the impl's.** `abstract def ident(x : U) : U forall U`
+  (and `: Array(U)`, and the same in an abstract class) was "can't
+  resolve return type U" however the impl answered it. The impl's
+  variable answers it where it stands in the requirement's place, so
+  `def ident(x : V) : V forall V` runs and `: Int32` is refused as "this
+  method must return U ... not Int32". `bench/verbs_exercise.sh` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  answered "can't resolve return type Array(U)".
+
 - **Default methods of two traits that meet on one type are refused,
   naming both.** The refusal of two impls writing one method did not see
   defaults: `Named` and `Column` each defaulting `label` had a call

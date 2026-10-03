@@ -642,6 +642,15 @@ else
   grep -h -m1 "^Error" hdr_deps.out hdr_hier.out
   status=1
 fi
+# A requirement whose return names its own `forall` variable was "can't
+# resolve return type Array(U)", however the impl answered it.
+printf 'trait Ident\n  abstract def ident(x : U) : Array(U) forall U\nend\n\nstruct A\nend\n\nimpl Ident for A\n  def ident(x : V) : Array(V) forall V\n    [x]\n  end\nend\n\nputs A.new.ident(3)\n' > forallret.iyi
+ret_out=$("$IYI" run forallret.iyi 2>&1 | tr -d '\r')
+if [ "$ret_out" = "[3]" ]; then
+  echo "  a requirement returning its own forall variable, answered by the impl's: runs"
+else
+  echo "  a requirement returning its own forall variable: $(printf '%s' "$ret_out" | head -c 300)"; status=1
+fi
 # And the lexer, of `run HDR/APP/MAIN.IYI` above: a path typed in another
 # case is the file its directory stores, and a module that writes `!` - a
 # token in iyi and part of a name in the other language - ran on iyi's

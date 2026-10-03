@@ -1613,6 +1613,13 @@ refuses "a flag where --out's directory goes" "--check is a flag" -- \
   "$IYI" migrate tree --out --check
 refuses "a flag where --mods' directory goes" "--mods takes a directory" -- \
   "$IYI" bind --mods --lib
+# A flag a verb does not have is refused by name. `bind --bogus` was a
+# shard, and the answer was "no lib/ here"; `migrate --bogus` was a tree
+# that was "no such directory"; `lsp --bogus extra` served a session.
+refuses "a flag bind does not have" "bind: unknown flag --bogus" -- "$IYI" bind --bogus
+refuses "a flag migrate does not have" "migrate: unknown flag --bogus" -- "$IYI" migrate --bogus
+refuses "a flag lsp does not have" "lsp: unknown flag --bogus" -- "$IYI" lsp --bogus extra
+refuses "an argument lsp does not take" "lsp takes no arguments, and 'extra' is one" -- "$IYI" lsp extra
 # A file where a directory goes is not a directory that is missing:
 # `--lib shard.yml` said "no shard.yml/ here; run `shards install`" and
 # `--mods shard.yml` died of mkdir's "File exists"; an empty shard name

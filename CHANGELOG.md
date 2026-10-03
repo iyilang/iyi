@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`iyi lsp`, `iyi bind` and `iyi migrate` refuse a flag they do not
+  have, by name.** `iyi lsp --bogus extra` served a session as if it
+  were `iyi lsp`, `iyi bind --bogus` was a shard named `--bogus` and
+  answered `bind: no lib/ here; run shards install first`, and `iyi
+  migrate --bogus` was a tree, `migrate: no such directory: --bogus`.
+  Each says `<verb>: unknown flag --bogus` now, as `test`, `init` and
+  `get` do; `lsp` refuses an argument too, and still takes `--stdio`,
+  which LSP's own guidance has a client pass. A flag after `bind`'s shard
+  names is refused rather than bound. `bench/verbs_exercise.sh` checks
+  each; the old verbs answered as above, and `lsp` exited 0.
+
 - **`iyi doc` names a module it cannot find, and refuses what it was
   not asked to read.** A module path that resolved nowhere was told what
   it already was: `iyi doc std/sett` answered `expected a module path

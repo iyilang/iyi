@@ -95,6 +95,11 @@ class Iyi::Command
               cd iyi && #{Command.program_name} build --crystal -o app <entry>.iyi
           USAGE
         exit
+      when .starts_with?('-')
+        # A flag this verb does not have, not a tree: `iyi migrate --bogus`
+        # answered "no such directory: --bogus", which sends the reader
+        # looking for a directory they did not name.
+        abort! "migrate: unknown flag #{option}", :USAGE_ERROR
       else
         if src
           abort! "migrate: one tree at a time; unexpected '#{option}'", :USAGE_ERROR

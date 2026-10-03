@@ -17,12 +17,24 @@ require "../lsp/proxy"
 
 class Iyi::Command
   private def lsp
-    if options.first?.in?("--help", "-h")
+    # What the protocol's own guidance has a client pass: `--stdio`, which
+    # is the one transport this server speaks (LSP 3.17, "Implementation
+    # Considerations"). Anything else was served without a word: `iyi lsp
+    # --bogus extra` ran a session as if it had been `iyi lsp`, where `mcp`
+    # refuses the same line and `test` its flags.
+    options.each do |option|
+      next if option.in?("--help", "-h", "--worker", "--stdio")
+      abort! "lsp: unknown flag #{option}", :USAGE_ERROR if option.starts_with?('-')
+      abort! "lsp takes no arguments, and '#{option}' is one", :USAGE_ERROR
+    end
+    if options.any?(&.in?("--help", "-h"))
       puts <<-USAGE
-        Usage: #{Command.program_name} lsp
+        Usage: #{Command.program_name} lsp [--stdio]
 
         Speak the Language Server Protocol over stdin/stdout. Point an editor
-        at it; there is nothing to configure.
+        at it; there is nothing to configure. `--stdio`, which some clients
+        pass, names the transport it speaks anyway; any other argument is
+        refused.
 
         Beyond LSP 3.17's earning subset — diagnostics pushed on every
         change and pulled on request (one file or the whole workspace),

@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **A range prints as it is written, `1..5`, `1...3`, `"a".."b"`, as
+  the other library's does.** `Range` had no `to_s`, so `Object#to_s`
+  answered the type: `puts 1..5` printed `Range(Int32, Int32)`, and
+  `[1..2].inspect` `[Range(Int32, Int32)]`, with no import that mended it.
+  Each end is inspected and a nil end left out (`1..`); `inspect` is
+  `Object#inspect`, the same text. `bench/value_exercise.iyi` checks it;
+  the old prelude printed `Range(Int32, Int32)`.
+
 - **A hash whose first key is a tuple, named tuple or hash prints with a
   space inside its braces, `{ {1, 2} => 3 }`, as the other library's does
   and as a tuple's first member already did.** `Hash#to_s` wrote

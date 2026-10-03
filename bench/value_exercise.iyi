@@ -122,6 +122,10 @@ assert_true(((1..3) != (1...3)), "range: != follows ==")
 assert_int((1..3).hash, (1..3).hash, "range: equal ranges hash the same")
 assert_true((1..3).hash != (1...3).hash, "range: the flag changes the hash")
 assert_true((1..3).hash != (1..4).hash, "range: a bound changes the hash")
+# A range prints as it is written, each end inspected, as the other
+# library's does: `Object#to_s` printed the type, `Range(Int32, Int32)`.
+assert_str((1..5).to_s, "1..5", "range: to_s is the literal")
+assert_str("#{1...3} #{[-2..-1]} #{("a".."b").inspect} #{(1..nil).inspect}", "1...3 [-2..-1] \"a\"..\"b\" 1..", "range: exclusive, inside an array, ends inspected, an open end left out")
 
 # A `when` is `===`, which was `==` everywhere: a range arm, a tuple of
 # types and a union of types matched nothing and fell to `else`.

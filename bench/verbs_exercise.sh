@@ -273,6 +273,18 @@ refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wil
 printf 'module bangargs\n\nnomacro!(1)\n' > bangargs.iyi
 refuses "a call spelled with ! and arguments" 'propagates an error, and takes no arguments' -- \
   "$IYI" check bangargs.iyi
+# A detached `!` after a call: `v = g(-1) !` propagated, because the
+# argument list swallows the space after its `)`. Only `g(-1)!` does
+# (SPEC.md III.1.2); `f !x` is still `f(!x)`.
+printf 'module detached\n\ndef g(x : Int32) : Int32\n  x\nend\n\nv = g(-1) !\nputs v\n' > detached.iyi
+refuses "a detached ! after a call" 'write it attached, `g(-1)!`' -- \
+  "$IYI" check detached.iyi
+printf 'module unary\n\ndef f(b : Bool) : Bool\n  b\nend\n\nx = true\nputs f !x\n' > unary.iyi
+if [ "$("$IYI" run unary.iyi 2>&1 | tr -d '\r')" = "false" ]; then
+  echo "  f !x is still f(!x)"
+else
+  echo "  f !x no longer reads as f(!x):"; "$IYI" run unary.iyi 2>&1 | sed -n '1,3p'; status=1
+fi
 # A program's own exit status is `iyi run`'s, a negative one too. On
 # Windows `exit(-1)` is 0xFFFFFFFF, which the runner took for an abnormal
 # end: "terminated abnormally, the cause is unknown", and exit 1.

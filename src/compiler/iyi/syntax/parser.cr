@@ -885,6 +885,7 @@ module Iyi
       case token_type = @token.type
       when .unary_operator?
         location = @token.location
+        iyi_check_detached_bang(nil) if token_type.op_bang?
         next_token_skip_space_or_newline
         check_void_expression_keyword
         arg = parse_prefix
@@ -949,6 +950,10 @@ module Iyi
       while true
         case @token.type
         when .op_bang?
+          # A call's argument list swallows the space after its `)`, so
+          # `v = g(-1) !` came here as attached and propagated.
+          attached = false if iyi? && iyi_space_before_bang?
+          iyi_check_detached_bang(atomic) unless attached
           break unless attached && iyi?
           if @inside_defer > 0
             raise <<-MSG, @token
@@ -5095,6 +5100,36 @@ module Iyi
         Crystal spells `#{call.name}` and `#{call.name}!` is spelled after the
         participle for the copy and with `_in_place` for the one that changes
         its receiver — `sorted`, `sort_in_place`, `sorted_by`, `sort_in_place_by`.
+        MSG
+    end
+
+    # iyi: whether the current `!` token has a space or tab right before it.
+    private def iyi_space_before_bang? : Bool
+      start = @token.start
+      start > 0 && @reader.string.byte_at(start - 1).unsafe_chr.in?(' ', '\t')
+    end
+
+    # iyi: a detached `!` with nothing after it on its line: `v = g(x) !`.
+    # It read as propagation after a `)` and as the negation of the next
+    # line otherwise. Only an attached `!` propagates (SPEC.md III.1.2), and
+    # a detached one that negates nothing is the attached form misspelt.
+    private def iyi_check_detached_bang(subject : ASTNode?) : Nil
+      return unless iyi? && iyi_space_before_bang?
+      location = @token.location
+      nothing_follows = peek_ahead do
+        next_token_skip_space
+        type = @token.type
+        type.newline? || type.eof? || type.op_semicolon? || type.op_comma? ||
+          type.op_rparen? || type.op_rsquare? || type.op_rcurly? || @token.keyword?(:end)
+      end
+      return unless nothing_follows
+
+      attached = subject ? "`#{subject}!`" : "`f(x)!`"
+      raise <<-MSG, location
+        a `!` with a space before it doesn't propagate: write it attached, #{attached}
+
+        Only an attached `!` propagates an error, so that `f !x` keeps meaning
+        `f(!x)`, and this one has nothing after it to negate (SPEC.md III.1.2).
         MSG
     end
 

@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A `!` with a space before it no longer propagates.** III.1.2
+  makes the operator attached-only, and `v = g(-1) !` in a def
+  returning `Int32 | IOErr` compiled and returned `IOErr`: the call's
+  argument list swallows the space after its `)`, so the `!` looked
+  attached; after `(w) !` or `w.itself !` the same `!` negated the
+  next line instead. A detached `!` with nothing after it on its line
+  is refused now, naming the attached form: "a `!` with a space before
+  it doesn't propagate: write it attached, `g(-1)!`". `f !x` still
+  means `f(!x)`. `spec/compiler/parser/parser_spec.cr` and
+  `bench/verbs_exercise.sh` hold it; the old compiler accepted the
+  program.
+
 - **A derive may no longer write a macro hook or call `run`.** II.4
   forbids a derive the whole-program questions, and only
   `subclasses`, `all_subclasses` and `includers` were refused: a

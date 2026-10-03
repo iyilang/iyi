@@ -4689,6 +4689,21 @@ end").as(ClassDef)
         node.args[0].should be_a(Not)
       end
 
+      # `v = g(-1) !` propagated: the argument list swallows the space after
+      # its `)`, so the `!` arrived looking attached. A detached `!` that
+      # negates nothing is refused, naming the attached form.
+      it "refuses a detached `!` with nothing after it" do
+        {"v = g(-1) !", "v = g(-1) !\nv", "(w) !", "w.itself !\n1", "[g(x) !]"}.each do |source|
+          expect_raises(SyntaxException, "a `!` with a space before it doesn't propagate: write it attached") do
+            parse(source, filename: "x.iyi")
+          end
+        end
+        expect_raises(SyntaxException, "write it attached, `g(-1)!`") do
+          parse("v = g(-1) !", filename: "x.iyi")
+        end
+        parse("v = g(-1)!", filename: "x.iyi").as(Assign).value.should be_a(Propagate)
+      end
+
       it "leaves a Crystal file's `!` alone" do
         parse("a.sort!", filename: "x.cr").as(Call).name.should eq("sort!")
       end

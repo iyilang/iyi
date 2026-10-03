@@ -305,6 +305,9 @@ module Iyi
           @token.type = :OP_EQ
         end
       when '!'
+        # iyi: the parser reads the byte before a `!` to tell `g(x)!` from
+        # `g(x) !`, since the argument list swallows the space after `)`.
+        @token.start = start
         case next_char
         when '='
           next_char :OP_BANG_EQ

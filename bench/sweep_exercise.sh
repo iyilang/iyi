@@ -118,7 +118,7 @@ prove_fails() {
     return
   fi
   echo "  $label: failed, but not at the expected check"
-  sed -n '$p' "$WORK/$dir/out"
+  grep -v '^[0-9][0-9]* ' "$WORK/$dir/out" | tail -6 | sed 's/^/    /'
   status=1
 }
 

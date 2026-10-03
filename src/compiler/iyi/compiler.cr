@@ -1098,6 +1098,15 @@ module Iyi
             travels: true)
           next
         end
+        # Whether this file writes the type down at all. A def that uses
+        # `{{@type}}` is copied onto each subclass a call reaches, and the copy
+        # keeps the location of the def it was copied from, so the producing
+        # program's own `class User < Model` gave kit/lib a `User#type_name`
+        # located in kit/lib. Carried, `class ::Main::User` ended up in the
+        # library's artifact: the same program built from it was refused with
+        # `superclass mismatch for class Main::User`, and a consumer with a
+        # `struct User` of its own with `User is not a struct, it's a class`.
+        named_here = type.locations.try &.any? { |location| location.original_filename == filename }
         {type, type.metaclass}.each do |side|
           side.as?(ModuleType).try &.defs.try &.each_value do |items|
             items.each do |item|
@@ -1107,6 +1116,7 @@ module Iyi
               # macro wrote is located in its expansion, not in the file.
               next unless a_def.location.try(&.original_filename) == filename
               next if a_def.iyi_from_impl? || a_def.new? || a_def.abstract?
+              next if a_def.macro_def? && !named_here
               # The compiler's instructions are not this module's to describe;
               # the ones it wrote `@[Primitive]` above are. `std/float` writes
               # the whole matrix for `::Float32` this way.
@@ -2371,9 +2381,16 @@ module Iyi
           # which calls one that does, for the reason III.6 gives: the set is
           # the whole program's, so the answer is too. `Iyi::OpenTravel` marked
           # it before this ran.
+          #
+          # And a def whose body uses `{{@type}}` and the like, which is
+          # expanded again for each receiver a call reaches: a consumer's
+          # `class User < Model` is a receiver this build never saw, so only
+          # its own expansion can answer. Kept behind, `type_name` was a header
+          # and the consumer's link ended on `Model+@Model#type_name:String`,
+          # where the source build printed `Main::User`.
           if (travels || iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
-             iyi_widened_parameters?(type, item.def) || IyiMod.answer_travels?(item.def)) &&
-             !item.def.abstract?
+             item.def.macro_def? || iyi_widened_parameters?(type, item.def) ||
+             IyiMod.answer_travels?(item.def)) && !item.def.abstract?
             iyi_record_mono_body program, filename, container, signature, item.def
           end
         end
@@ -2487,7 +2504,7 @@ module Iyi
             # module it keeps to itself, and the link ended on
             # `decode_int32<IyiIO+>`.
             if travels || (stencilled && side.same?(type)) ||
-               iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
+               iyi_takes_block?(item.def) || item.def.iyi_open_travel? || item.def.macro_def? ||
                iyi_widened_parameters?(type, item.def) || IyiMod.answer_travels?(item.def)
               iyi_record_mono_body program, filename, container, signature, item.def
             end

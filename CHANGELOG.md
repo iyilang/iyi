@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **A method whose body uses `{{@type}}` works on a consumer's subclass,
+  and a producer's subclass no longer leaks into the library's
+  artifact.** Such a method is expanded again for every receiver, and its
+  body stayed behind as a header: a consumer's `class User < Model` ended
+  on LNK2019 `Model+@Model#type_name:String`, where the source build
+  printed `Main::User`. And the copy the compiler makes on a subclass kept
+  the library's location, so a program writing the artifact with its own
+  `class User < Model` gave kit/lib a `class ::Main::User`: the same
+  program built from it was "superclass mismatch for class Main::User",
+  and another consumer with a `struct User` was "User is not a struct,
+  it's a class". The body travels now, and a copy on a type the library
+  never names stays out. The `macro_def` case of
+  `bench/samples_roundtrip.sh` checks it; the old compiler stopped on the
+  superclass mismatch.
+
 - **A type's macro hooks (`macro inherited`, `included`, `extended`,
   `method_added`) travel in its artifact, and run as they do from
   source.** They are kept apart from a type's other macros and the

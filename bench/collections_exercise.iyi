@@ -181,6 +181,12 @@ assert_int([3, 1, 2].sorted[0], 1, "array: sorted")
 in_place = ["c", "a", "b"]
 assert_true(in_place.sort_in_place.object_id == in_place.object_id && in_place == ["a", "b", "c"], "array: sort_in_place without a block")
 assert_int([1, 2].concat([3]).size, 3, "array: concat")
+# `delete` takes every equal element and answers the last, or nil, as the
+# other library's: it took the first alone and answered true, so the same
+# call left `[2, 1, 3, 1]` here and `[2, 3]` there.
+repeated = [1, 2, 1, 3, 1]
+assert_true(repeated.delete(1) == 1 && repeated == [2, 3], "array: delete takes every equal element")
+assert_true(repeated.delete(9).nil? && repeated == [2, 3], "array: delete of a missing value is nil")
 
 # The defect: an array appended to itself is a doubling, not a loop.
 doubling = [1, 2]

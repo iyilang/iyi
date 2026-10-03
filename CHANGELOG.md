@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`Array#delete` removes every element equal to its argument and
+  answers the last one removed, or nil, as the other library's does.** It
+  removed the first alone and answered whether there was one, so
+  `x = [1, 2, 1, 3, 1]; x.delete(1)` answered true and left
+  `[2, 1, 3, 1]` where the other library answers 1 and leaves `[2, 3]`,
+  the same call compiling under both and leaving different arrays. It is
+  one compacting pass now, `delete(value : T) : T?`. The one caller that
+  read the answer, `samples/iyi/grid.iyi`, prints `a` where it printed
+  `true`; no caller in `src/std`, `src/iyi` or `bench` used it.
+  `bench/collections_exercise.iyi` checks it; the old prelude failed
+  "array: delete takes every equal element".
+
 - **`Char#+` refuses to land on a surrogate, as `chr` and the other
   library's `Char#+` refuse it.** It checked the two ends of the code
   points alone, so `('\u{D7FF}' + 1).ord` was 55296, U+D800, and its `to_s`

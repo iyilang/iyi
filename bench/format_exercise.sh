@@ -136,7 +136,7 @@ prove_fails "zero pad broken" no_zero "format: zero pad" \
 
 # 3b. An array one argument again rather than the argument list.
 prove_fails "an array is one argument again" no_list "too few arguments for format string" \
-  's/^pub def sprintf(format_string : String, args : Array | Tuple) : String$/pub def sprintf(format_string : String, args : Tuple) : String/'
+  's/^pub def sprintf(format_string : String, args : Array) : String$/private def sprintf_no_list(format_string : String, args : Array) : String/'
 
 # 4. Float rounding dropped (always rounds down): the half-to-even test in
 #    `scaled_digits` is the one place every float digit is decided.

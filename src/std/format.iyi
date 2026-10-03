@@ -1062,8 +1062,18 @@ end
 # The argument list may be one array or tuple, as the other library takes
 # it: `"%s, %s, %s, D" % ['A', 'B', 'C']`, its own example, panicked "too
 # few arguments for format string" here, and `"[%s]" % ["A"]` printed
-# `[["A"]]` where it prints `[A]`.
-pub def sprintf(format_string : String, args : Array | Tuple) : String
+# `[["A"]]` where it prints `[A]`. Two overloads rather than one taking
+# `Array | Tuple`: a union with Array in it cannot be written into an
+# artifact ("can't use Array(T) in unions yet").
+pub def sprintf(format_string : String, args : Array) : String
+  format_list(format_string, args)
+end
+
+pub def sprintf(format_string : String, args : Tuple) : String
+  format_list(format_string, args)
+end
+
+private def format_list(format_string : String, args) : String
   index = 0
   format_bytesize = format_string.bytesize
   format_ptr = format_string.to_unsafe
@@ -1180,7 +1190,11 @@ pub def printf(format_string : String, *args : *T) : Nil forall T
 end
 
 # The argument list as one array or tuple, as `sprintf` takes it.
-pub def printf(format_string : String, args : Array | Tuple) : Nil
+pub def printf(format_string : String, args : Array) : Nil
+  print sprintf(format_string, args)
+end
+
+pub def printf(format_string : String, args : Tuple) : Nil
   print sprintf(format_string, args)
 end
 

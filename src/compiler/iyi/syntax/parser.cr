@@ -5072,12 +5072,33 @@ module Iyi
     # at the call site by name, so a method of either name can never be
     # called: `def or` compiled, and `A.new.or(5)` was then refused as a
     # recovery with "no member of App::Main::A implements `Error`".
+    #
+    # `group` is reserved the same way (III.4.9): a bare `group do ... end`
+    # is the compiler's group wherever it is written, so a program's own
+    # `def group` compiled and its call was lowered as a group: "undefined
+    # method 'join' for Spawner". The prelude's is the group, and is left.
     private def check_iyi_reserved_def_name
-      return unless iyi? && @token.value.in?("or", "or_panic")
+      return unless iyi?
+      if @token.value == "group" && !iyi_prelude_file?
+        raise "`group` is a reserved name in iyi: `group do ... end` is the task " \
+              "group the compiler knows by name, so a method called `group` would " \
+              "be lowered as one (SPEC.md III.4.9)", @token
+      end
+      return unless @token.value.in?("or", "or_panic")
 
       raise "`#{@token.value}` is a reserved name in iyi: `.#{@token.value}` is the " \
             "error recovery the compiler knows by name, so a method called " \
             "`#{@token.value}` could never be called (SPEC.md III.1.3)", @token
+    end
+
+    # iyi: a file of the prelude, by where it is, as `iyi doc` and the
+    # call-error hints tell it (`src/iyi/`). An expansion is the file it
+    # expands in: the prelude's `property group : IyiGroup?` writes a `def
+    # group` into a virtual file.
+    private def iyi_prelude_file? : Bool
+      return false unless filename = @token.location.original_filename
+      posix = ::Path[filename].to_posix.to_s
+      posix.includes?("/src/iyi/") || posix.starts_with?("src/iyi/")
     end
 
     # iyi: `items.sort_by! { |x| ... }` — the same mistake at a call site.

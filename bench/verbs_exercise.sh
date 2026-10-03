@@ -581,6 +581,11 @@ refuses "a method named or" '`or` is a reserved name in iyi' -- "$IYI" check ord
 printf 'module orpanicdef\n\nclass A\n  def self.or_panic : Int32\n    1\n  end\nend\n' > orpanicdef.iyi
 refuses "a class method named or_panic" '`or_panic` is a reserved name in iyi' -- \
   "$IYI" check orpanicdef.iyi
+# `group do ... end` is the task group by name (SPEC.md III.4.9), so a
+# class's own `def group` compiled and its call was lowered as a group:
+# "undefined method 'join' for Spawner". The def is refused now.
+printf 'module groupdef\n\nclass Pool\n  def group(& : Int32 -> Int32) : Int32\n    yield 1\n  end\nend\n' > groupdef.iyi
+refuses "a method named group" '`group` is a reserved name in iyi' -- "$IYI" check groupdef.iyi
 # Under a comment on an `if` or `while` line, `/=` was read as a regex.
 fmt_gives "takes x /= y and x //= y under a comment on an if or while line" \
   $'a = 8\nif a > 1 # c\n  a /= 2\nend\nwhile a > 1 # c\n  a //= 2\nend\n'

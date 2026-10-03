@@ -105,8 +105,9 @@ pub struct IPv6Address
     word.unsafe_shr(((7 - (index & 7)) * 8).to_u64).unsafe_to_u8
   end
 
-  # Group *index*, 0 to 7.
-  def group(index : Int32) : Int32
+  # The 16-bit group *index*, 0 to 7. Not `group`: that name is the task
+  # group's in iyi (SPEC.md III.4.9).
+  def hextet(index : Int32) : Int32
     (self[index * 2].to_i32 << 8) | self[index * 2 + 1].to_i32
   end
 
@@ -119,7 +120,7 @@ pub struct IPv6Address
     start = -1
     index = 0
     while index < 8
-      if group(index) == 0
+      if hextet(index) == 0
         start = index if start < 0
         if index - start + 1 > best_size
           best = start
@@ -135,9 +136,9 @@ pub struct IPv6Address
     index = 0
     while index < 8
       if best < 0 || index < best
-        head << group(index).to_s(16)
+        head << hextet(index).to_s(16)
       elsif index >= best + best_size
-        tail << group(index).to_s(16)
+        tail << hextet(index).to_s(16)
       end
       index = index + 1
     end

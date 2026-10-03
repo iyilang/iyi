@@ -4588,6 +4588,19 @@ end").as(ClassDef)
         parse("def or(x)\nend", filename: "x.cr")
       end
 
+      # A bare `group do ... end` is the compiler's task group (III.4.9), so
+      # a class's own `def group` compiled and its call was lowered as one:
+      # "undefined method 'join' for Spawner". The prelude's is the group.
+      it "rejects a def named group outside the prelude" do
+        {"def group(&)\nend", "def self.group\nend"}.each do |source|
+          expect_raises(SyntaxException, "`group` is a reserved name in iyi") do
+            parse(source, filename: "x.iyi")
+          end
+        end
+        parse("def group(&)\nend", filename: "x.cr")
+        parse("def group(&)\nend", filename: "/install/src/iyi/concurrency.iyi")
+      end
+
       # A bodiless `def` in a trait, with another `def` under it: the
       # requirement wanted `abstract`, and the nested-def report says so.
       it "explains a bodiless def in a trait" do

@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`def group` is refused in an iyi file, as `def or` is.** III.4.9
+  makes `group` a reserved name: a bare `group do ... end` is the task
+  group wherever it is written. A class's own `def group(& : Spawner
+  -> Int32)` compiled, and a call to it in the class, `group do |p|
+  p.spawn { 41 } end`, was lowered as a group and refused with
+  "undefined method 'join' for Spawner". `def group` and `def
+  self.group` outside the prelude are refused now: "`group` is a
+  reserved name in iyi ... (SPEC.md III.4.9)". std/socket's
+  `IPv6Address#group(index)`, the one other, is `hextet(index)`.
+  `spec/compiler/parser/parser_spec.cr` and `bench/verbs_exercise.sh`
+  hold it; the old compiler accepted the def.
+
 - **A `!` with a space before it no longer propagates.** III.1.2
   makes the operator attached-only, and `v = g(-1) !` in a def
   returning `Int32 | IOErr` compiled and returned `IOErr`: the call's

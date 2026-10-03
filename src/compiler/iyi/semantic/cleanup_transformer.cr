@@ -811,11 +811,14 @@ module Iyi
       named = NamedClassVars.new
       a_def.body.accept named
       advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`"
-      named.vars.each do |class_var, var|
+      named.vars.each do |class_var, var, via|
         next if var.thread_local?
         if assign = named.assigns[var]?
           assign.raise "the block IyiThread.start runs on another thread assigns `#{class_var.name}`, a class variable, #{advice}"
         end
+        # One a called def names is said at the call, the block's own text.
+        at = via || class_var
+        names = via ? "calls `#{via.name}`, and that reaches" : "names"
         if written = var.iyi_written
           write, in_def = written
           where = if in_def && in_def.name != "->"
@@ -825,31 +828,41 @@ module Iyi
                   else
                     "outside it"
                   end
-          class_var.raise "the block IyiThread.start runs on another thread names the class variable `#{class_var.name}`, which is written after its initializer (#{where}), #{advice}"
+          at.raise "the block IyiThread.start runs on another thread #{names} the class variable `#{class_var.name}`, which is written after its initializer (#{where}), #{advice}"
         end
         type = var.type?
         next unless type
         if why = Iyi::Share.reason(type)
-          class_var.raise "the block IyiThread.start runs on another thread names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+          at.raise "the block IyiThread.start runs on another thread #{names} the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
         end
       end
     end
 
     # Every class variable a body names, once each, with the variable it
-    # is, and the first assignment to each.
+    # is and the call in the body that reaches it if one does, and the
+    # first assignment to each in the body's own text. A call is followed
+    # into the program's own defs: `IyiThread.start { Counter.incr }`, with
+    # `@@n += 1` in `incr` and the starter calling `incr` too, compiled and
+    # raced, where the same `+=` written in the block was refused. The
+    # prelude's and the standard library's defs are not followed: their
+    # state is the library's to keep, and no edit here could change it.
     class NamedClassVars < Visitor
-      getter vars = [] of {ClassVar, MetaTypeVar}
+      getter vars = [] of {ClassVar, MetaTypeVar, Call?}
       getter assigns = {} of MetaTypeVar => ASTNode
       @seen = Set(MetaTypeVar).new
+      @entered = Set(Def).new
+      @via : Call? = nil
+      @library = {} of String => Bool
 
       def initialize
         @assigns.compare_by_identity
         @seen.compare_by_identity
+        @entered.compare_by_identity
       end
 
       def visit(node : Assign) : Bool
         target = node.target
-        if target.is_a?(ClassVar) && (var = target.var?)
+        if !@via && target.is_a?(ClassVar) && (var = target.var?)
           @assigns[var] ||= node
         end
         true
@@ -857,12 +870,30 @@ module Iyi
 
       def visit(node : ClassVar) : Bool
         var = node.var?
-        @vars << {node, var} if var && @seen.add?(var)
+        @vars << {node, var, @via} if var && @seen.add?(var)
         false
+      end
+
+      def visit(node : Call) : Bool
+        via = @via
+        @via = via || node
+        node.target_defs.try &.each do |target_def|
+          target_def.body.accept self if own?(target_def) && @entered.add?(target_def)
+        end
+        @via = via
+        true
       end
 
       def visit(node : ASTNode) : Bool
         true
+      end
+
+      # Written in a `.iyi` file that is not the prelude's or a module of
+      # the standard library beside it.
+      private def own?(a_def : Def) : Bool
+        filename = a_def.location.try(&.original_filename)
+        return false unless filename.is_a?(String) && filename.ends_with?(".iyi")
+        !@library.put_if_absent(filename) { Iyi.library_source?(filename) }
       end
     end
 

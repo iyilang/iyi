@@ -4123,6 +4123,24 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "refuses a class variable a method the block calls writes after its initializer" do
+      assert_error(stub + <<-CODE, "the block IyiThread.start runs on another thread calls `incr`, and that reaches the class variable `@@n`, which is written after its initializer (in `incr`)", filename: "x.iyi")
+        class Counter
+          @@n = 0
+
+          def self.incr : Int32
+            @@n = 1
+          end
+        end
+
+        IyiThread.start do
+          Counter.incr
+          nil
+        end
+        Counter.incr
+        CODE
+    end
+
     it "refuses a captured value whose type has a setter" do
       assert_error(stub + <<-CODE, "the block IyiThread.start runs on another thread captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=` (SPEC.md III.4.4)", filename: "x.iyi")
         class Counter

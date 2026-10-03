@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A class variable a thread block reaches through a call is held to the
+  rule one it names is.** Measured with the previous compiler:
+  `IyiThread.start { Counter.incr }`, with `@@n += 1` in `def self.incr`
+  and the starter calling `Counter.incr` too, was accepted (rc=0), at the
+  top level and inside a class method alike, while `@@n += 1` written in
+  the block was refused. The gate now follows the block's calls into the
+  program's own defs (not the prelude's or the standard library's) and
+  refuses at the call: "the block IyiThread.start runs on another thread
+  calls `incr`, and that reaches the class variable `@@n`, which is
+  written after its initializer (in `incr`)". `spec/compiler/semantic/
+  iyi_spec.cr` checks it; the old compiler accepted the program.
+
 - **A type error names what to write instead of the prelude's size
   rule.** Measured with the previous compiler: `name(1).upcase` on a
   `String?` said "the receiver can be nil here: narrow it first (`if

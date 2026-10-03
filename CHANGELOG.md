@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Fixed
+
+- **On Windows two Ctrl-Breaks that arrive before a `Signal.wait` are
+  one INT, and the wait answers it.** The console handler added each
+  arrival's bit to the arrivals rather than setting it, so two INTs
+  nobody had taken yet were 4 + 4 = 8, the bit of no signal a wait
+  names, and the `Signal.wait(Signal::INT)` after them never answered:
+  measured, one and three Ctrl-Breaks were answered INT, two and four
+  parked the waiter until its watchdog cancelled it. The bit is set
+  with a compare-and-set loop now, so a pending signal is a bit on
+  Windows as it is on Linux and darwin. `bench/std_signal_exercise.iyi`
+  sends two Ctrl-Breaks and checks that the next wait answers INT and
+  the one after it waits for a third, on every platform now; the old
+  module answered "the first of two answered Cancelled" after the
+  five-second watchdog.
+
 ## 0.16.2 — 2026-10-02
 
 **About two hundred and sixty fixes, most of them found by comparing iyi

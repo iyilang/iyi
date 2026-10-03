@@ -142,30 +142,39 @@ fail("the kept signal was #{kept}") unless kept == "INT"
 waited_ms = (__iyi_monotonic_ns - started) // 1000000_i64
 fail("the kept signal took #{waited_ms} ms to be taken") if waited_ms > 1000
 puts "  the next wait answered at once"
-{% unless flag?(:win32) %}
-  # Twice in a row and taken once: a pending signal is a bit, not a count.
-  interrupt_self
-  interrupt_self
-  sleep(50)
-  once = Signal.wait(Signal::INT)
-  fail("the first of two answered #{once}") unless once == Signal::INT
-  second = ""
-  group do |g|
-    g.spawn do
-      signal = Signal.wait(Signal::INT)
-      second = "taken before the third was sent" if second == ""
-      signal.is_a?(Cancelled) ? signal : 0
-    end
-    g.spawn do
-      sleep(100)
-      second = "waited for the third" if second == ""
-      interrupt_self
-      0
-    end
+# Twice in a row and taken once: a pending signal is a bit, not a count.
+# Windows added each Ctrl-Break to the arrivals, and two INT bits added
+# are one bit higher: the wait after them never answered, so the first
+# has a watchdog beside it.
+interrupt_self
+interrupt_self
+sleep(50)
+once = ""
+group do |g|
+  g.spawn do
+    signal = Signal.wait(Signal::INT)
+    once = signal.to_s
+    signal.is_a?(Cancelled) ? signal : 0
   end
-  fail("two arrivals were #{second}") unless second == "waited for the third"
-  puts "  two arrivals nobody waited for are one"
-{% end %}
+  g.spawn { watchdog(-> { once != "" }) }
+end
+fail("the first of two answered #{once}") unless once == "INT"
+second = ""
+group do |g|
+  g.spawn do
+    signal = Signal.wait(Signal::INT)
+    second = "taken before the third was sent" if second == ""
+    signal.is_a?(Cancelled) ? signal : 0
+  end
+  g.spawn do
+    sleep(100)
+    second = "waited for the third" if second == ""
+    interrupt_self
+    0
+  end
+end
+fail("two arrivals were #{second}") unless second == "waited for the third"
+puts "  two arrivals nobody waited for are one"
 
 puts "== a graceful stop: the signal closes the listener and the group joins"
 server = IyiSocket.listen("127.0.0.1", 0)

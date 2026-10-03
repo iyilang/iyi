@@ -157,10 +157,18 @@ class SignalWaiter
     # one handler answered every event, so waiting for TERM alone swallowed
     # Ctrl-C and Ctrl-Break, and waiting for INT alone held a closing
     # console for Windows' five seconds.
+    #
+    # An arrival is a bit set, not a number added: two Ctrl-Breaks before a
+    # `wait` took the first added the INT bit to itself and carried it into
+    # the next one, 4 + 4 = 8, and the wait that followed never answered.
     def self.console_event(event : Int32) : Int32
       signal = event <= 1 ? 2 : 15
-      return 0 if @@named.get & 1_u64.unsafe_shl(signal.to_u64) == 0_u64
-      @@arrived.add(1_u64.unsafe_shl(signal.to_u64))
+      bit = 1_u64.unsafe_shl(signal.to_u64)
+      return 0 if @@named.get & bit == 0_u64
+      while true
+        seen = @@arrived.get
+        break if seen & bit != 0_u64 || @@arrived.compare_and_set(seen, seen | bit)[1]
+      end
       slot = @@slot.swap(0_u64)
       if slot != 0_u64
         ::LibC.PostQueuedCompletionStatus(Pointer(Void).new(@@port.get), 1, 0_u64, Pointer(Void).new(slot))

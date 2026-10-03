@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **References, prepareRename and rename on a type's name say it is a
+  type instead of answering null.** `textDocument/references` and
+  `prepareRename` on `Square` answered null, which an editor and an
+  agent read as "nothing uses it". The typed graph they read binds a
+  call to its def and has no record of a type's uses in annotations and
+  declarations, so a list from it would be partial and a rename would
+  leave the rest behind; the request is refused (RequestFailed) with
+  "Square is a type, and references and rename follow defs, their calls
+  and local variables". `bench/lsp_session.py` step 72g asks; the old
+  server answered null.
+
 - **Completion works after any receiver, after `X::` and inside an
   import's braces, and a macro is offered and found like a def.** The
   receiver was the run of name characters before the dot, so `b.value.`,

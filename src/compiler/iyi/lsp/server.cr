@@ -1731,6 +1731,7 @@ module Iyi::Lsp
     private def on_references(id : JSON::Any, params : JSON::Any) : Nil
       references, declarations = reference_sites(params)
       if references.empty? && declarations.empty?
+        refuse_type_name(params)
         return respond_null(id)
       end
 
@@ -1777,6 +1778,7 @@ module Iyi::Lsp
         end
         references, declarations = local.split
       else
+        refuse_type_name(params)
         unless valid_name?(new_name) && lexed_name(new_name, path)
           raise Refused.new("'#{new_name}' is not an iyi method name")
         end
@@ -2150,6 +2152,7 @@ module Iyi::Lsp
         return respond_null(id) if local.instance_var?
       else
         visitor = @analysis.references_at(path, text, overrides_for(path), target)
+        refuse_type_name(params) unless visitor
         return respond_null(id) unless visitor
         if why = visitor.unrenameable
           raise Refused.new(why)
@@ -2165,6 +2168,22 @@ module Iyi::Lsp
           json.field "placeholder", line_text[from..to]
         end
       end
+    end
+
+    # A type's name under the cursor, refused by name rather than with
+    # null: references, prepareRename and rename on `Square` answered
+    # null, which an editor and an agent read as "nothing uses it". The
+    # typed graph these read binds a call to its def, and a type's uses in
+    # annotations and declarations are not in it, so an answer from it
+    # would be a partial list and a rename that leaves the rest behind.
+    private def refuse_type_name(params : JSON::Any) : Nil
+      text = text_of(params["textDocument"]["uri"].as_s)
+      line0, char = position_of(params["position"])
+      line_text = text.lines[line0]? || ""
+      word = word_at(line_text, Lsp.column_of(line_text, char))
+      return unless word && word[0]?.try(&.ascii_uppercase?)
+      raise Refused.new("#{word} is a type, and references and rename follow defs, their calls and local variables: " \
+                        "a type's uses in annotations and declarations are not in the typed graph they read")
     end
 
     # ── Type definition ──────────────────────────────────────────────────

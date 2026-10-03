@@ -425,6 +425,207 @@ def span_text(text, rng):
     return units[2 * rng["start"]["character"]:2 * rng["end"]["character"]].decode("utf-16-le")
 
 
+def applied(text, edits):
+    """*text* with LSP TextEdits (UTF-16 positions, one line each) applied."""
+    rows = text.split("\n")
+    for e in sorted(edits, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True):
+        line = e["range"]["start"]["line"]
+        units = rows[line].encode("utf-16-le")
+        start, end = 2 * e["range"]["start"]["character"], 2 * e["range"]["end"]["character"]
+        rows[line] = (units[:start].decode("utf-16-le") + e["newText"] + units[end:].decode("utf-16-le"))
+    return "\n".join(rows)
+
+
+def traits_disk_and_completion():
+    """A trait method renamed, a module changed on disk under an open
+    buffer, a module file moved, and the cursor questions that answered
+    null: each step failed before its fix."""
+    root = tempfile.mkdtemp(prefix="iyi-lsp-traits")
+    shapes = ("module app/shapes\n\n# Anything with an area.\npub trait Shape\n  abstract def area : Int32\nend\n\n"
+              "pub class Square\n  getter side : Int32\n\n  def initialize(@side : Int32)\n  end\nend\n\n"
+              "impl Shape for Square\n  def area : Int32\n    @side * @side\n  end\nend\n\n"
+              "pub class Box(T)\n  getter value : T\n\n  def initialize(@value : T)\n  end\nend\n\n"
+              "pub macro double(x)\n  {{x}} * 2\nend\n\n"
+              "pub def total(s : Shape) : Int32\n  s.area\nend\n")
+    main = ("import app/shapes::{Square, Box, total, double}\n\n"
+            "sq = Square.new(3)\nb = Box.new(\"hi\")\nputs sq.area + total(sq)\nputs b.value\nputs double(4)\n")
+    os.makedirs(os.path.join(root, "app"))
+    with open(os.path.join(root, "app", "shapes.iyi"), "w") as f:
+        f.write(shapes)
+    k = Client()
+    k.send("initialize", {"rootUri": file_uri(root), "capabilities": {
+        "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": True}}}})
+    k.send("initialized", {}, wait=False)
+    # 72a. A client that can be asked is asked to watch the files a
+    #      verdict reads, once, by the proxy. Read off what arrives before
+    #      the answer to a request sent after `initialized`, so a server
+    #      that never asks fails the step rather than hanging it.
+    arrived = []
+    probe = k.request_nowait("workspace/symbol", {"query": "Shape"})
+    k.wait_for(lambda m: arrived.append(m) is None and m.get("id") == probe)
+    asked = next((m for m in arrived if m.get("method") == "client/registerCapability"), None)
+    watchers = [w["globPattern"] for r in (asked or {}).get("params", {}).get("registrations", [])
+                for w in r["registerOptions"]["watchers"]]
+    if asked:
+        answer = json.dumps({"jsonrpc": "2.0", "id": asked["id"], "result": None}).encode()
+        k.raw(b"Content-Length: %d\r\n\r\n%s" % (len(answer), answer))
+    step("72a", "the server asks a client that can be asked to watch iyi files",
+         "**/*.iyi" in watchers, f"watchers {watchers}")
+
+    shapes_uri = opened(k, root, os.path.join("app", "shapes.iyi"), shapes)
+    main_uri = opened(k, root, "main.iyi", main)
+
+    # 72b. A rename of a method an impl gives a type renames the trait's
+    #      requirement too: it left `abstract def area`, and the program
+    #      said `impl Shape for Square is missing a method required by the
+    #      trait: area`.
+    reply = k.send("textDocument/rename", {"textDocument": {"uri": main_uri},
+                                           "position": {"line": 4, "character": at(main, 4, "area")},
+                                           "newName": "surface"})
+    changes = (reply.get("result") or {}).get("changes") or {}
+    moved = os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-renamed"))
+    os.makedirs(os.path.join(moved, "app"))
+    for rel, text, uri in ((os.path.join("app", "shapes.iyi"), shapes, shapes_uri), ("main.iyi", main, main_uri)):
+        with open(os.path.join(moved, rel), "w") as f:
+            f.write(applied(text, changes.get(uri, [])))
+    checked = subprocess.run([os.path.abspath(IYI), "check", "main.iyi"], cwd=moved, capture_output=True, text=True)
+    step("72b", "renaming an impl's method renames the trait's requirement, and the program compiles",
+         checked.returncode == 0 and "abstract def surface" in open(os.path.join(moved, "app", "shapes.iyi")).read(),
+         (checked.stdout + checked.stderr).strip()[:80] or "check passes")
+
+    # 72c. Implementation from the requirement is the impl's def, and its
+    #      references reach the calls: both answered the requirement alone.
+    reply = k.send("textDocument/implementation", {"textDocument": {"uri": shapes_uri},
+                                                   "position": {"line": 4, "character": at(shapes, 4, "area")}})
+    lines = [l["range"]["start"]["line"] for l in reply.get("result") or []]
+    reply = k.send("textDocument/references", {"textDocument": {"uri": shapes_uri},
+                                               "position": {"line": 4, "character": at(shapes, 4, "area")},
+                                               "context": {"includeDeclaration": False}})
+    callers = sorted((r["uri"].rsplit("/", 1)[-1], r["range"]["start"]["line"]) for r in reply.get("result") or [])
+    step("72c", "from `abstract def area`: implementation is the impl's def, references reach every call",
+         lines == [15] and ("main.iyi", 4) in callers and ("shapes.iyi", 32) in callers, f"impl {lines}, refs {callers}")
+
+    def labels(text, line, character):
+        k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 2},
+                                          "contentChanges": [{"text": text}]}, wait=False)
+        k.diagnostics(main_uri)
+        reply = k.send("textDocument/completion", {"textDocument": {"uri": main_uri},
+                                                   "position": {"line": line, "character": character}})
+        result = reply.get("result") or {}
+        return [i["label"] for i in (result.get("items", []) if isinstance(result, dict) else result)]
+
+    # 72d. Completion after an expression that is not a bare name: the
+    #      receiver was the run of name characters before the dot.
+    after_call = labels(main + "b.value.\n", 7, 8)
+    after_literal = labels(main + "\"x\".\n", 7, 4)
+    step("72d", "completion after `b.value.` and `\"x\".` lists String's methods",
+         "size" in after_call and "size" in after_literal, f"{after_call[:4]} / {after_literal[:4]}")
+
+    # 72e. After `App::Shapes::` the module's types, and in an import's
+    #      braces what it exports and the line has not selected yet; both
+    #      offered the scope's locals and the keywords.
+    members = labels(main + "x = App::Shapes::\n", 7, 17)
+    selectable = labels(main.replace("::{Square, Box, total, double}", "::{Square, }"), 0, 28)
+    step("72e", "`App::Shapes::` lists its types; `import app/shapes::{Square, |` its other exports",
+         {"Square", "Box", "Shape"} <= set(members) and "def" not in members and
+         {"Box", "total", "double"} <= set(selectable) and "Square" not in selectable and "def" not in selectable,
+         f"{sorted(members)[:5]} / {sorted(selectable)}")
+    k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 3},
+                                      "contentChanges": [{"text": main}]}, wait=False)
+    k.diagnostics(main_uri)
+
+    # 72f. A macro is a definition and an export like a def: definition on
+    #      `double(4)` and completion of `doub` with its import answered
+    #      null and nothing.
+    reply = k.send("textDocument/definition", {"textDocument": {"uri": main_uri},
+                                               "position": {"line": 6, "character": at(main, 6, "double")}})
+    found = [(d["uri"].rsplit("/", 1)[-1], d["range"]["start"]["line"]) for d in reply.get("result") or []]
+    unimported = main.replace("::{Square, Box, total, double}", "::{Square, Box, total}").replace("puts double(4)", "puts doub")
+    k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 4},
+                                      "contentChanges": [{"text": unimported}]}, wait=False)
+    k.diagnostics(main_uri)
+    reply = k.send("textDocument/completion", {"textDocument": {"uri": main_uri},
+                                               "position": {"line": 6, "character": 9}})
+    offered = [(i["label"], [e["newText"] for e in i.get("additionalTextEdits", [])])
+               for i in (reply.get("result") or {}).get("items", []) if i["label"] == "double"]
+    step("72f", "definition on a macro call is the macro; `doub` offers it with its import",
+         found == [("shapes.iyi", 27)] and offered == [("double", ["import app/shapes::{Square, Box, total, double}"])],
+         f"{found} / {offered}")
+    k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 5},
+                                      "contentChanges": [{"text": main}]}, wait=False)
+    k.diagnostics(main_uri)
+
+    # 72g. A type's name: hover on the trait in `impl Shape for Square`
+    #      answers its declaration, and references on `Square` say why there
+    #      is no list instead of null, which reads as "unused".
+    reply = k.send("textDocument/hover", {"textDocument": {"uri": shapes_uri},
+                                          "position": {"line": 14, "character": at(shapes, 14, "Shape")}})
+    hover = ((reply.get("result") or {}).get("contents") or {}).get("value", "")
+    reply = k.send("textDocument/references", {"textDocument": {"uri": main_uri},
+                                               "position": {"line": 2, "character": at(main, 2, "Square")},
+                                               "context": {"includeDeclaration": True}})
+    refused = reply.get("error") or {}
+    step("72g", "hover on a trait in an impl is its declaration; references on a type say it is a type",
+         "pub trait Shape" in hover and refused.get("code") == -32803 and "Square is a type" in refused.get("message", ""),
+         f"{hover[:30]!r} / {refused.get('message', '')[:40]}")
+
+    # 72h. A module an open buffer imports, changed on disk: the verdict is
+    #      compiled again. It was memoised on the buffers alone, so every
+    #      pull answered what the buffer last had.
+    os.makedirs(os.path.join(root, "geo"))
+    dog = os.path.join(root, "geo", "b.iyi")
+    original = "module geo/b\n\npub def name : String\n  \"dog\"\nend\n"
+    with open(dog, "w") as f:
+        f.write(original)
+    user = "import geo/b\n\nputs Geo::B.name\n"
+    user_uri = opened(k, root, "user.iyi", user)
+
+    def pulled():
+        reply = k.send("textDocument/diagnostic", {"textDocument": {"uri": user_uri}})
+        return [d["message"].split("\n")[0][:40] for d in (reply.get("result") or {}).get("items", [])]
+
+    with open(dog, "w") as f:
+        f.write(original.replace("def name", "def title"))
+    renamed = pulled()
+    os.remove(dog)
+    deleted = pulled()
+    with open(dog, "w") as f:
+        f.write(original)
+    restored = pulled()
+    step("72h", "a pull after an imported module is renamed, deleted and written back answers each",
+         any("undefined method 'name'" in m for m in renamed) and any("can't find module 'geo/b'" in m for m in deleted)
+         and restored == [], f"{renamed} / {deleted} / {restored}")
+
+    # 72i. And the push verdict, on `workspace/didChangeWatchedFiles`: the
+    #      open buffer that imports the changed module is published again.
+    with open(dog, "w") as f:
+        f.write(original.replace("def name", "def title"))
+    k.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": file_uri(dog), "type": 2}]}, wait=False)
+    # What is published before the answer to a request sent after it: the
+    # server works in order, so a server that publishes nothing fails the
+    # step rather than hanging it.
+    arrived = []
+    probe = k.request_nowait("workspace/symbol", {"query": "zz"})
+    k.wait_for(lambda m: arrived.append(m) is None and m.get("id") == probe)
+    pushed = [d for m in arrived if m.get("method") == "textDocument/publishDiagnostics"
+              and m["params"]["uri"] == user_uri for d in m["params"]["diagnostics"]]
+    step("72i", "a watched-file change republishes the open buffer that imports it",
+         any("undefined method 'name'" in d["message"] for d in pushed), f"{[d['message'][:40] for d in pushed]}")
+    with open(dog, "w") as f:
+        f.write(original)
+
+    # 72j. Moving a module's file renames the names that spell it: the edit
+    #      moved the import to `geo/c` and left `Geo::B.name`.
+    reply = k.send("workspace/willRenameFiles", {"files": [
+        {"oldUri": file_uri(dog), "newUri": file_uri(os.path.join(root, "geo", "c.iyi"))}]})
+    edits = ((reply.get("result") or {}).get("changes") or {}).get(user_uri, [])
+    step("72j", "moving geo/b.iyi to geo/c.iyi rewrites `Geo::B` in the importer",
+         applied(user, edits) == "import geo/c\n\nputs Geo::C.name\n", repr(applied(user, edits)))
+    k.send("shutdown", {})
+    k.send("exit", {}, wait=False)
+    k.proc.wait(timeout=10)
+
+
 def fuzz_steps(c, work):
     """What a fuzz over the library and the samples found: 441,870
     requests from positions nobody chose. Each step failed before its fix."""
@@ -3016,6 +3217,7 @@ def main():
     step("60c", "a change that cannot be read is skipped, and the next one applies",
          [d["range"]["start"]["line"] for d in items if "nope" in d["message"]] == [2],
          f"{len(items)} item(s): {items and items[0]['message'][:50]}")
+    traits_disk_and_completion()
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has
     # for it rather than an empty result.

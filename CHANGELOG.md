@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **A `--release` program links the object code of the artifacts it
+  reads.** A single-module build made private everything its main module
+  defines - runtime `fun`s, type ids, `:headed` bytes, constants, class
+  variables - and an artifact's object code reaches them by name, so
+  `--release --use-iyimod` linked only a module that reached none of
+  them, as the spec's `x // 2` does: a module whose one def was `x + 1`
+  ended on `LNK2019: unresolved external symbol __iyi_raise_overflow`, a
+  class on `Holder:type_id` and `:headed`, a `group` on 126 symbols. They
+  keep the linkage a build of many modules gives them whenever an
+  artifact's object code links in, and the release consumer prints what
+  the source build prints. `bench/samples_roundtrip.sh` builds a module
+  with each of these `--release` both ways, and
+  `spec/compiler/iyimod_spec.cr`'s release case gained them; the old
+  compiler failed both links.
+
 - **A `Server.serve` block that panics ends its own connection, not the
   server.** The connection's task belonged to `serve`'s group and nobody
   read its answer, so the panic cancelled the other connections - a

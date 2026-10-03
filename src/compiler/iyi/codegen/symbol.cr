@@ -77,7 +77,7 @@ class Iyi::CodeGenVisitor
 
   private def iyi_define_symbol_global(global_name : String, index : Int32) : Nil
     global = @main_mod.globals.add(@main_llvm_context.int32, global_name)
-    global.linkage = LLVM::Linkage::Internal if @single_module
+    global.linkage = LLVM::Linkage::Internal if iyi_internalise?
     global.initializer = @main_llvm_context.int32.const_int(index)
     global.global_constant = true
   end

@@ -55,7 +55,7 @@ class File
       {% else %}
         asm("svc #0" : "={x0}"(result) : "{x8}"(80_i64), "{x0}"(fd), "{x1}"(pointerof(stat)) : "memory" : "volatile")
       {% end %}
-      result < 0_i64 ? -1_i64 : stat[6]
+      result < 0_i64 ? -1_i64 : pointerof(stat).as(Int64*)[6]
     end
   {% elsif flag?(:win32) %}
     lib LibFile

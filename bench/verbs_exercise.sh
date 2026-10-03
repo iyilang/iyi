@@ -1065,6 +1065,21 @@ case "$(uname -s)" in
     else
       echo "  a build in a ${#deep}-character directory: exit $deep_code"; sed -n '1,3p' "$WORK/deep.log"; status=1
     fi
+    # And under a cache root of the author's choosing. The program's cache
+    # name was bounded at a fixed 100 characters, which assumed a short
+    # root: under a 120-character IYI_CACHE_DIR this program's objects
+    # passed MAX_PATH, "a codegen thread failed: Error opening file with
+    # mode 'w': ...o0.bc: The system cannot find the path specified". A
+    # root no build fits under is refused by name.
+    longroot="$WORK/$(printf 'r%.0s' $(seq 1 $((120 - ${#WORK} - 1))))"
+    (cd "$deep" && IYI_CACHE_DIR="$longroot" "$IYI" run m.iyi > "$WORK/longroot.log" 2>&1); longroot_code=$?
+    if [ "$longroot_code" -eq 0 ] && grep -qx deep "$WORK/longroot.log"; then
+      echo "  a program in a ${#deep}-character directory runs under a ${#longroot}-character cache root"
+    else
+      echo "  a program under a ${#longroot}-character cache root: exit $longroot_code"; sed -n '1,3p' "$WORK/longroot.log"; status=1
+    fi
+    refuses "a cache root no build fits under" "would pass Windows' 260-character path limit" -- \
+      env IYI_CACHE_DIR="$WORK/$(printf 't%.0s' $(seq 1 $((170 - ${#WORK} - 1))))" "$IYI" build -o "$WORK/toolong" good.iyi
     ;;
 esac
 # A target whose back end the compiler's LLVM does not carry. Windows' is

@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A program builds under a long cache directory on Windows.** A program's
+  directory in the cache was bounded at 100 characters on the assumption
+  that the cache root is short, and IYI_CACHE_DIR is the author's: under a
+  120-character root, a program 245 characters deep failed with "a codegen
+  thread failed: Error opening file with mode 'w': '...o0.bc'" ("The system
+  cannot find the path specified"), its object past Windows' 260. The bound
+  is now what MAX_PATH leaves after the root and the longest object a build
+  writes, and a root that leaves no room, 163 characters or more, is refused
+  as "... would pass Windows' 260-character path limit. Point IYI_CACHE_DIR
+  at a directory of at most 162 characters", where a build under a
+  170-character root failed the same way as above. `bench/verbs_exercise.sh`
+  runs the deep program under a 120-character root and asks for the refusal
+  at 170; the old compiler failed both.
+
 - **`iyi mod release` in a package inside another repository compares only
   the package's own releases.** Every `v*` tag in the enclosing repository
   was taken for one: an uncommitted package in a repository tagged `v0.16.2`

@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`String#split` with a limit of 1 or less answers the string whole, and
+  an empty string one empty piece, as the other library's does.** A negative
+  limit split everything and 0 meant no limit, so `"a,b".split(",", -1)` and
+  `"a b".split(-1)` were `["a", "b"]` where the other library answers
+  `["a,b"]` and `["a b"]`; and `"".split(",", -1)` was `[]` though
+  `"".split(",")` was `[""]`. No limit is `nil` now (`limit : Int32? = nil`
+  in `split(String)`, and `Int32?` in `split(Char, limit)` and
+  `split(limit)`), and 0 is a limit like any other. Twenty-nine calls answer
+  as the other library's. The one caller that passed 0 for no limit,
+  `bench/std_text_exercise.iyi`'s `"a☃b".split('☃', 0)`, passes 2.
+  `bench/std_text_exercise.iyi` checks the limits; the old module answered
+  `["a", "b"]` for `"a,b".split(",", -1)` and did not compile
+  `split(",", nil)`.
+
 - **`String#to_f?` answers nil for text out of a double's range and reads
   `inf`, `infinity` and `nan` in any case, as the other library's does.** It
   checked the spelling and answered whatever the digits came to:

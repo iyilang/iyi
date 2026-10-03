@@ -312,18 +312,21 @@ class ::String
     ends_with?(char.to_s)
   end
 
-  def split(separator : String, limit : Int32 = 0) : Array(String)
-    return [self] if limit == 1
-    return [] of String if empty? && limit < 0
+  # No limit is `nil`, and one of 1 or less is the string whole, as the
+  # other library answers both. A negative limit split everything, and 0
+  # stood for none: `"a,b".split(",", -1)` was `["a", "b"]` here and
+  # `["a,b"]` there. An empty string is one empty piece whatever the
+  # limit, as it is without one: `"".split(",", -1)` was `[]`.
+  def split(separator : String, limit : Int32? = nil) : Array(String)
+    return [self] if empty? || (limit && limit <= 1)
+    limit = limit || 0
 
     # Characters, and the limit counts them as it counts any other piece:
-    # `"abc".split("", 2)` is `["a", "bc"]`. An empty string is one empty
-    # piece, as it is with any other separator. A byte that begins no
+    # `"abc".split("", 2)` is `["a", "bc"]`. A byte that begins no
     # character is a U+FFFD piece and the rest starts at the byte after it:
     # it moved on by the bytes of the character written, and 80 61 62 split
     # in two was C2 80 and `b`, the `a` lost.
     if separator.empty?
-      return [self] if empty?
       pieces = [] of String
       each_point do |point, at|
         return pieces << byte_slice(at, bytesize - at) if limit > 1 && pieces.size == limit - 1
@@ -346,16 +349,17 @@ class ::String
     pieces
   end
 
-  def split(separator : Char, limit : Int32) : Array(String)
+  def split(separator : Char, limit : Int32?) : Array(String)
     split(separator.to_s, limit)
   end
 
   def split : Array(String)
-    split(0)
+    split(nil)
   end
 
-  def split(limit : Int32) : Array(String)
-    return [self] if limit == 1
+  def split(limit : Int32?) : Array(String)
+    return [self] if limit && limit <= 1
+    limit = limit || 0
     pieces = [] of String
     in_token = false
     token_start = 0

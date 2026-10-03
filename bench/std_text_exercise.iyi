@@ -175,6 +175,13 @@ raise "string: split vertical tab and form feed" unless sp6.size == 4 && sp6[1] 
 sp7 = "abc".split("", 2)
 raise "string: split empty separator limit" unless sp7.size == 2 && sp7[0] == "a" && sp7[1] == "bc"
 raise "string: split empty string on empty separator" unless "".split("").size == 1
+# A limit of 1 or less is the string whole and no limit is `nil`, as the
+# other library splits: `"a,b".split(",", -1)` was `["a", "b"]`, and
+# `"".split(",", -1)` was `[]` where `"".split(",")` was `[""]`.
+raise "string: split limit 1 or less" unless "a,b".split(",", -1) == ["a,b"] && "a,b".split(",", 0) == ["a,b"] && "a b".split(-1) == ["a b"] && "abc".split("", -1) == ["abc"] && "a,b".split(',', 0) == ["a,b"]
+raise "string: split of an empty string" unless "".split(",", -1) == [""] && "".split(",", 3) == [""] && "".split(-1) == [""] && "".split == [] of String
+raise "string: split without a limit" unless "a,b,c".split(",", nil) == ["a", "b", "c"] && "a b c".split(nil) == ["a", "b", "c"]
+puts "    split: a limit of 1 or less is the string whole, and an empty string one empty piece"
 
 part1 = "host:port:8080".partition(":")
 raise "string: partition found" unless part1[0] == "host" && part1[1] == ":" && part1[2] == "port:8080"
@@ -384,7 +391,7 @@ puts "    utf8 awareness: multi-byte characters, byte indexing, chars decoding, 
 raise "utf8: lstrip char" unless "☃a☃".lstrip('☃') == "a☃"
 raise "utf8: rstrip char" unless "☃a☃".rstrip('☃') == "☃a"
 raise "utf8: ends_with char" unless "a☃".ends_with?('☃')
-raise "utf8: split char" unless "a☃b".split('☃', 0).size == 2
+raise "utf8: split char" unless "a☃b".split('☃', 2).size == 2
 raise "utf8: index char" unless "a☃b".index('☃', 0) == 1
 raise "utf8: rindex char" unless "a☃b".rindex('☃') == 1
 raise "utf8: delete char" unless "a☃b".delete('☃') == "ab"

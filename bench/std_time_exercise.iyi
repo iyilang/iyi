@@ -335,6 +335,12 @@ assert_equal(-1_i64, (t_early <=> t_late).to_i64, "Time <=>")
 assert_equal(1_i64, (t_late <=> t_early).to_i64, "Time <=>")
 assert_equal(0_i64, (t_early <=> t_early).to_i64, "Time <=>")
 puts "  Time comparison (<=>, <, >, <=, >=, ==, !=, cmp) verified"
+# Two unequal times inspect apart, as the other library writes them: with
+# no `inspect` of its own a time inspected as `to_s`, so 5 ns past
+# midnight read `2024-01-01 00:00:00 UTC`, the same as midnight.
+assert_true(Time.utc(2024, 1, 1, 0, 0, 0, nanosecond: 5).inspect == "2024-01-01 00:00:00.000000005Z", "inspect keeps the nanoseconds")
+assert_true(Time.utc(2024, 1, 1).inspect == "2024-01-01 00:00:00Z", "inspect of a whole second")
+puts "  inspect writes the nanoseconds when there are any, as the other library does"
 
 # ---------------------------------------------------------------------------
 # Hash keys

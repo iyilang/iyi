@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`Time#inspect` writes the nanoseconds when there are any, in the
+  other library's form.** `Time` had no `inspect`, so it was `to_s`, and
+  `Time.utc(2024, 1, 1, 0, 0, 0, nanosecond: 5).inspect` was
+  `2024-01-01 00:00:00 UTC`, the same as `Time.utc(2024, 1, 1)`, which
+  `==` tells apart from it. They are `2024-01-01 00:00:00.000000005Z`
+  and `2024-01-01 00:00:00Z` now, as the other library inspects them;
+  `to_s` is unchanged. **The answer changes** for every `inspect` of a
+  `Time`, an array of times included. `bench/std_time_exercise.iyi`
+  checks both; the old module answered `2024-01-01 00:00:00 UTC`.
+
 - **`Path#inspect` writes `Path.posix(...)` or `Path.windows(...)` for a
   path of the kind the platform does not use, as the other library
   does.** `Path.posix("/usr/bin").inspect` on Windows was

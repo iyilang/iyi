@@ -505,6 +505,17 @@ if [ "$self_out" = "true" ]; then
 else
   echo "  an impl answering self with its own type: $(printf '%s' "$self_out" | head -c 300)"; status=1
 fi
+# A nilable trait stored in a field or an array, where a generic type
+# implements the trait: the union was laid out with the generic `Gen(T)`
+# among its members, and the build ended in "BUG: called create_llvm_type
+# for T".
+printf 'trait Show\n  abstract def show : String\nend\n\nimpl Show for Int32\n  def show : String\n    "i"\n  end\nend\n\nstruct Gen(T)\n  def initialize(@v : T)\n  end\nend\n\nimpl Show for Gen(T) forall T\n  def show : String\n    "G"\n  end\nend\n\nclass Holder\n  def initialize(@s : Show?)\n  end\n\n  def s : Show?\n    @s\n  end\nend\n\nputs Holder.new(nil).s.nil?\na = [nil, 1, Gen.new(2)] of Show?\na.each { |e| puts e.show if e }\n' > traitunion.iyi
+union_out=$("$IYI" run traitunion.iyi 2>&1 | tr -d '\r')
+if [ "$union_out" = "$(printf 'true\ni\nG')" ]; then
+  echo "  a nilable trait in a field and an array, a generic type implementing it: runs"
+else
+  echo "  a nilable trait a generic type implements: $(printf '%s' "$union_out" | head -c 300)"; status=1
+fi
 # Two `iyi run`s at once of programs with one basename. The runner linked
 # into one executable per basename, and Windows will not write over one
 # that is running: the second failed with `LNK1104: cannot open file

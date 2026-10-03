@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A nilable trait in a field, an array or a generic argument compiles
+  when a generic type implements the trait.** With `impl Show for Gen(T)
+  forall T` anywhere in the program, `@s : Show?`, `[nil, 1] of Show?`
+  and `Box(Show?)` ended in "BUG: called create_llvm_type for T": the
+  union was laid out with the generic `Gen(T)` itself among its members.
+  It is laid out with Gen's instances now, and the four HuntGenerics
+  programs print `true`, `2`, `true` and `i1`/`G`.
+  `bench/verbs_exercise.sh` checks it; the old compiler stopped with the
+  BUG line.
+
 - **A small chunk freed while a stop lands in the middle of the free is
   not linked onto a list the pause dropped.** `IyiHeap.free` changed the
   thread's own free list outside the allocator's bracket, so a stop

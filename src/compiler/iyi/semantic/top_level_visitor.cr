@@ -47,6 +47,9 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   # def that replaces one can say whose it was (`iyi_refuse_impl_collision`).
   # By identity: two impls' defs can be equal as syntax.
   @iyi_impl_defs = Hash(Def, {ImplDef, String}).new.compare_by_identity
+  # And the trait each impl included, as the type has it, so a default that
+  # meets one of those defs can ask how the two traits stand.
+  @iyi_impl_traits = Hash(ImplDef, Type).new.compare_by_identity
 
   @last_doc : String?
 
@@ -867,6 +870,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         Generic.new(node.trait, args).at(node.trait)
       end
     include_node = Include.new(trait_name).at(node)
+    iyi_refuse_default_collision node, impl_label, target_type, trait_name
     # iyi: where II.6's associated types meet II.7's generic impls.
     #
     # `impl Enumerable for List(T) forall T` answers `type Elem = T`, and that
@@ -1712,18 +1716,175 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     theirs = @iyi_impl_defs[replaced]?
     return if mine && theirs && mine[0].same?(theirs[0])
 
-    at = replaced.location.try(&.expanded_location)
-    where = at ? " (#{at.filename}:#{at.line_number})" : ""
     first = theirs.try(&.[1]) || "an impl"
     second = mine.try(&.[1]) || "this impl"
-    node.raise "#{replaced.owner}##{node.name} is what #{first} answers#{where}, " \
-               "and #{second} writes it again. A type has one method of a " \
-               "name and parameters, so the second would answer for both " \
-               "traits, and a call through the first would run it. Two " \
-               "traits that require the same method can't both be " \
-               "implemented for one type: rename one trait's method, or " \
-               "implement one of them for a type that wraps " \
-               "#{replaced.owner} (SPEC.md II.6)"
+    iyi_raise_collision node, replaced.owner, node.name, "#{first} answers#{iyi_collision_where(replaced)}", "#{second} writes it again"
+  end
+
+  # iyi: the same collision met through a trait's default method, which
+  # `iyi_refuse_impl_collision` never sees: a default reaches the type by the
+  # impl's `include`, and the type's lookup finds the trait included last.
+  # `Named` and `Column` each defaulting `label` had a call through `Named`
+  # print "column"; Column's impl writing `label` over Named's default did
+  # the same; and `impl Conv(String)` beside `impl Conv(Int32)`, whose trait
+  # defaults `tname` as `T.to_s`, had a call through `Conv(String)` print
+  # "Int32". Asked before the include, of the defaults it is about to bring
+  # and of the methods this impl wrote, against the traits the type already
+  # has. A method the type itself writes answers every trait that defaults
+  # it, and is left alone as `iyi_refuse_impl_collision` leaves it.
+  #
+  # So are two traits layered one on the other (`iyi_layered?`): `Indexable`
+  # writes O(1) `first`, `index` and `to_a` over `Enumerable`'s, and is
+  # written for a type that has both — refusing that refused `std/indexable`
+  # at `impl Indexable for Array(T)`.
+  private def iyi_refuse_default_collision(node : ImplDef, label : String, target_type : Type, trait_name : ASTNode) : Nil
+    incoming = lookup_type(trait_name, free_vars: impl_target_free_vars(target_type))
+    return unless incoming.trait?
+
+    @iyi_impl_traits[node] = incoming
+    earlier = target_type.parents.try(&.select(&.trait?)) || [] of Type
+    incoming.defs.try &.each_value do |list|
+      list.each do |item|
+        default = item.def
+        next if default.abstract?
+
+        brought = "#{label} answers it again with #{iyi_trait_label(incoming)}'s default"
+        if own = iyi_same_method(target_type.defs.try(&.[default.name]?), target_type, default, incoming, target_type)
+          theirs = @iyi_impl_defs[own]?
+          next unless theirs && !theirs[0].same?(node)
+          next if (their_trait = @iyi_impl_traits[theirs[0]]?) && iyi_layered?(incoming, their_trait, default.name, target_type)
+          iyi_raise_collision node, target_type, default.name, "#{theirs[1]} answers#{iyi_collision_where(own)}", brought
+        end
+        earlier.each do |parent|
+          other = iyi_same_method(parent.defs.try(&.[default.name]?), parent, default, incoming, target_type)
+          next unless other && !iyi_layered?(incoming, parent, default.name, target_type)
+          iyi_raise_collision node, target_type, default.name, iyi_default_answer(parent, target_type, other), brought
+        end
+      end
+    end
+
+    iyi_impl_body_defs(node) do |written|
+      next if written.receiver
+      # It took the place of a method the type wrote, which answered for
+      # every trait already.
+      next if (previous = written.previous) && !@iyi_impl_defs.has_key?(previous.def)
+      earlier.each do |parent|
+        other = iyi_same_method(parent.defs.try(&.[written.name]?), parent, written, target_type, target_type)
+        next unless other && !iyi_layered?(incoming, parent, written.name, target_type)
+        iyi_raise_collision written, target_type, written.name, iyi_default_answer(parent, target_type, other), "#{label} writes it again"
+      end
+    end
+  end
+
+  # Whether two traits a type implements are layered, one written against
+  # the other, so that where their methods meet one is meant to stand for
+  # both: one requires the other (`trait Ord : Comparable`, SPEC.md II.6
+  # §3a), or a default of one is another method the other requires, which
+  # is how `Indexable`'s `each` answers `Enumerable`'s (II.6, "a trait cannot
+  # include a trait"). Not the method *name* they meet on: `Named`'s default
+  # `label` answering `Column`'s required `label` is the collision itself.
+  # Two parameterisations of one trait never are.
+  private def iyi_layered?(one : Type, other : Type, name : String, target_type : Type) : Bool
+    return false if iyi_generic_trait(one) == iyi_generic_trait(other)
+
+    iyi_requires?(one, other) || iyi_requires?(other, one) ||
+      iyi_answers_requirement?(one, other, name, target_type) || iyi_answers_requirement?(other, one, name, target_type)
+  end
+
+  private def iyi_generic_trait(trait_type : Type) : Type
+    trait_type.is_a?(GenericInstanceType) ? trait_type.generic_type.as(Type) : trait_type
+  end
+
+  private def iyi_requires?(subtrait : Type, base : Type) : Bool
+    subtrait = iyi_generic_trait(subtrait)
+    return false unless subtrait.is_a?(TraitSupertraits)
+
+    subtrait.supertraits.any? do |supertrait|
+      iyi_generic_trait(supertrait) == iyi_generic_trait(base) || iyi_requires?(supertrait, base)
+    end
+  end
+
+  private def iyi_answers_requirement?(provider : Type, consumer : Type, met_on : String, target_type : Type) : Bool
+    defs = consumer.defs
+    return false unless defs
+
+    defs.any? do |name, list|
+      name != met_on && list.any? { |item| item.def.abstract? && !!iyi_same_method(provider.defs.try(&.[name]?), provider, item.def, consumer, target_type) }
+    end
+  end
+
+  private def iyi_default_answer(parent : Type, target_type : Type, default : Def) : String
+    "impl #{iyi_trait_label(parent)} for #{target_type} answers with #{iyi_trait_label(parent)}'s default#{iyi_collision_where(default)}"
+  end
+
+  private def iyi_collision_where(a_def : Def) : String
+    at = a_def.location.try(&.expanded_location)
+    at ? " (#{at.filename}:#{at.line_number})" : ""
+  end
+
+  private def iyi_raise_collision(at : ASTNode, owner : Type, name : String, first : String, second : String) : NoReturn
+    at.raise "#{owner}##{name} is what #{first}, " \
+             "and #{second}. A type has one method of a " \
+             "name and parameters, so the second would answer for both " \
+             "traits, and a call through the first would run it. Two " \
+             "traits that require the same method can't both be " \
+             "implemented for one type: rename one trait's method, or " \
+             "implement one of them for a type that wraps " \
+             "#{owner} (SPEC.md II.6)"
+  end
+
+  # The non-abstract def among *candidates*, defined in *owner*, that takes
+  # what *a_def*, defined in *a_owner*, takes. Restrictions are compared as
+  # the types they name where the two owners resolve them, so a default of
+  # `Conv(T)` read in `Conv(String)` and in `Conv(Int32)` is one method with
+  # no parameter and two with `xs : Array(T)`; one either owner cannot
+  # resolve yet is compared as written.
+  private def iyi_same_method(candidates : Array(DefWithMetadata)?, owner : Type, a_def : Def, a_owner : Type, self_type : Type) : Def?
+    candidates.try &.each do |item|
+      other = item.def
+      next if other.abstract? || other.same?(a_def) && owner.same?(a_owner)
+      next unless other.min_max_args_sizes == a_def.min_max_args_sizes && other.splat_index == a_def.splat_index &&
+                  !!other.block_arity == !!a_def.block_arity && other.double_splat.nil? == a_def.double_splat.nil?
+
+      named_from = (other.splat_index || other.args.size - 1) + 1
+      same = other.args.each_with_index.all? do |arg, i|
+        mine = a_def.args[i]
+        next false if i >= named_from && arg.external_name != mine.external_name
+        iyi_same_restriction?(arg.restriction, owner, mine.restriction, a_owner, self_type)
+      end
+      return other if same
+    end
+    nil
+  end
+
+  private def iyi_same_restriction?(restriction : ASTNode?, owner : Type, other : ASTNode?, other_owner : Type, self_type : Type) : Bool
+    return restriction.nil? && other.nil? if restriction.nil? || other.nil?
+
+    type = iyi_restriction_type(restriction, owner, self_type)
+    other_type = iyi_restriction_type(other, other_owner, self_type)
+    type && other_type ? type == other_type : restriction == other
+  end
+
+  private def iyi_restriction_type(restriction : ASTNode, owner : Type, self_type : Type) : Type?
+    owner.lookup_type?(restriction, self_type: self_type)
+  rescue TypeException
+    nil
+  end
+
+  # A trait as an impl names it: its parameters, and none of the associated
+  # types an instance carries alongside them.
+  private def iyi_trait_label(trait_type : Type) : String
+    return trait_type.to_s unless trait_type.is_a?(GenericInstanceType) && (generic = trait_type.generic_type).is_a?(GenericTraitType)
+
+    name = generic.to_s(generic_args: false)
+    params = generic.trait_params
+    return name if params.empty?
+
+    args = params.map do |param|
+      arg = trait_type.type_vars[param]
+      arg.is_a?(Var) ? arg.type.devirtualize.to_s : arg.to_s
+    end
+    "#{name}(#{args.join(", ")})"
   end
 
   # iyi: a `.iyi` file may *add* to a type of the other language and may not

@@ -580,6 +580,12 @@ printf 'module lib/ty\n\npub trait Marked\n  abstract def tag : String\nend\n\ni
 printf 'module main\n\nimport lib/tx::{show}\nimport lib/ty::{mark}\n\nputs show("s")\nputs mark("s")\n' > clash/main.iyi
 refuses "two libraries' impls answering one method" 'String#tag is what impl Lib::Tx::Tagged for String answers' -- \
   "$IYI" check clash/main.iyi
+# And met through default methods, which reach the type by the impl's
+# include: `Named` and `Column` each defaulting `label` had a call through
+# `Named` print Column's.
+printf 'trait Named\n  def label : String\n    "named"\n  end\nend\n\ntrait Column\n  def label : String\n    "column"\n  end\nend\n\nstruct User\nend\n\nimpl Named for User\nend\n\nimpl Column for User\nend\n\ndef via_named(x : Named) : String\n  x.label\nend\n\nputs via_named(User.new)\n' > defaultclash.iyi
+refuses "two traits' defaults answering one method" "and impl Column for User answers it again with Column's default" -- \
+  "$IYI" check defaultclash.iyi
 # A `def initialize` in a trait, or in an impl for a lib struct, is in a
 # type no `class` or `struct` declared: `check`, `build` and `vet` ended in
 # "Missing hash key: Wt (KeyError)" and a stack trace. A trait's

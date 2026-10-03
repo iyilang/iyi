@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **Default methods of two traits that meet on one type are refused,
+  naming both.** The refusal of two impls writing one method did not see
+  defaults: `Named` and `Column` each defaulting `label` had a call
+  through `Named` print "column", Column's impl writing `label` over
+  Named's default did the same, and `impl Conv(String)` beside `impl
+  Conv(Int32)`, whose trait defaults `tname`, printed "Int32" through
+  `Conv(String)`. The second impl answers "User#label is what impl Named
+  for User answers with Named's default (...), and impl Column for User
+  answers it again with Column's default" now. A method the type writes
+  itself, and traits layered one on the other (`Indexable` over
+  `Enumerable`), are left alone. `bench/verbs_exercise.sh` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  printed `column`.
+
 - **A parameterised trait as a bound is checked at its arguments.**
   `forall T : Into(String)` and `where Elem : Into(String)` were read as
   `Into`, so a type with only `impl Into(Int32)` met them and printed 2,

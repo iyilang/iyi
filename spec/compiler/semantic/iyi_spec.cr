@@ -1524,6 +1524,121 @@ describe "Semantic: iyi" do
         end
         CODE
     end
+
+    # The same collisions met through a default method, which reaches the
+    # type by the impl's include: a call through the first trait ran the
+    # second's default, or the method the second impl wrote over it.
+    it "refuses a default method another trait's impl answers too" do
+      code = <<-CODE
+        trait A
+          def name : String
+            "a"
+          end
+        end
+
+        trait B
+          %s
+        end
+
+        struct Y
+        end
+
+        impl A for Y
+        end
+
+        impl B for Y
+          %s
+        end
+        CODE
+      assert_error code % {"def name : String\n    \"b\"\n  end", ""},
+        "Y#name is what impl A for Y answers with A's default"
+      assert_error code % {"def name : String\n    \"b\"\n  end", ""},
+        "and impl B for Y answers it again with B's default. A type has one method of a name and parameters"
+      assert_error code % {"abstract def name : String", "def name : String\n    \"b\"\n  end"},
+        "and impl B for Y writes it again. A type has one method of a name and parameters"
+    end
+
+    it "refuses two parameterisations of a trait whose default takes the same arguments" do
+      code = <<-CODE
+        trait Conv(T)
+          abstract def conv(x : T) : String
+
+          def twice(x : T) : Int32
+            1
+          end
+
+          %s
+        end
+
+        struct U
+        end
+
+        impl Conv(String) for U
+          def conv(x : String) : String
+            x
+          end
+        end
+
+        impl Conv(Int32) for U
+          def conv(x : Int32) : String
+            "i"
+          end
+        end
+
+        U.new.twice(1)
+        CODE
+      assert_type(code % "") { int32 }
+      assert_error code % "def tname : String\n    T.to_s\n  end",
+        "U#tname is what impl Conv(String) for U answers with Conv(String)'s default"
+    end
+
+    # What stands for both traits by design is left alone: a method the type
+    # writes itself, and a trait layered on another, whose default answers
+    # the other's requirement - `Indexable`'s `each` and `first` beside
+    # `Enumerable`'s.
+    it "leaves a default alone where the type writes the method or the traits are layered" do
+      assert_type(<<-CODE) { tuple_of([string, int32]) }
+        trait A
+          def name : String
+            "a"
+          end
+
+          abstract def each : Int32
+
+          def first : Int32
+            each
+          end
+        end
+
+        trait B
+          def name : String
+            "b"
+          end
+
+          def each : Int32
+            1
+          end
+
+          def first : Int32
+            2
+          end
+        end
+
+        struct Y
+          def name : String
+            "y"
+          end
+        end
+
+        impl B for Y
+        end
+
+        impl A for Y
+        end
+
+        {Y.new.name, Y.new.first}
+        CODE
+    end
   end
 
   describe "generic impls (SPEC.md II.7)" do

@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A type's macro hooks (`macro inherited`, `included`, `extended`,
+  `method_added`) travel in its artifact, and run as they do from
+  source.** They are kept apart from a type's other macros and the
+  artifact read only those, so none travelled: with a hook that defines
+  `def kind`, a consumer's `class Mine < P` was "undefined method 'kind'
+  for Main::Mine", and with one that registers the subclass, both the
+  library's `One < P` and the consumer's `Mine < P` built and printed
+  `[]` where the source build printed `["Kit::Lib::One"]` and
+  `["Main::Mine"]`. The hooks are written into the declaration now; the
+  consumer registers them as it reads it, and runs them for the library's
+  subclasses it reads as for its own, so all three print what the source
+  build prints. The `hooks` case of `bench/samples_roundtrip.sh` checks
+  it; the old compiler stopped on the undefined `kind`.
+
 - **An abstract generic type is written back as `abstract class` and
   `abstract struct`.** Its kind was recorded as `abstract generic class`,
   and only a leading `generic` is taken off when it is rendered, so `pub

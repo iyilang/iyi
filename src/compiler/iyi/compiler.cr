@@ -2638,12 +2638,25 @@ module Iyi
     # (`IyiMod.macro_source`), in the order of the macros themselves. With
     # *filename*, only those written there: a type this module reopens has
     # the macros of whoever declared it too.
+    #
+    # Its hooks as well — `macro inherited`, `included`, `extended`,
+    # `method_added` — which `add_macro` files under `hooks` and not under
+    # `macros`, so reading the one table carried none of them. Written back
+    # as the macros they were, the consumer's own reading registers them
+    # again, and a consumer's `class Mine < P` runs P's hook the way the
+    # source build does: without it `Mine.new.kind` was `undefined method
+    # 'kind' for Main::Mine`, and a registry hook added nothing and printed
+    # `[]` where the source build printed `["Main::Mine"]`.
     private def iyi_macros_on(type : Type?, filename : String? = nil) : Array(String)
       macros = [] of Macro
-      type.try &.metaclass.as?(ModuleType).try &.macros.try &.each_value do |overloads|
+      metaclass = type.try &.metaclass.as?(ModuleType)
+      metaclass.try &.macros.try &.each_value do |overloads|
         overloads.each do |a_macro|
           macros << a_macro if filename.nil? || a_macro.location.try(&.original_filename) == filename
         end
+      end
+      metaclass.try &.hooks.try &.each do |hook|
+        macros << hook.macro if filename.nil? || hook.macro.location.try(&.original_filename) == filename
       end
       macros.sort_by!(&.to_s).map { |a_macro| IyiMod.macro_source(a_macro) }
     end

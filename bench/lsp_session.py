@@ -55,6 +55,16 @@ def watchdog(seconds):
             if time.monotonic() - LAST["at"] > seconds:
                 print(f"step {LAST['step'] + 1} never finished: no answer in "
                       f"{seconds} s after step {LAST['step']}", flush=True)
+                # What was asked and who was left to answer it: a hang on a
+                # Windows runner said nothing more than the line above.
+                print(f"  the last request sent: {LAST.get('sent', '(none)')}", flush=True)
+                for proc in LIVE:
+                    if proc.poll() is None:
+                        try:
+                            kids = children(proc.pid)
+                        except Exception as error:  # noqa: BLE001 - a report, not a check
+                            kids = f"unlisted ({error})"
+                        print(f"  server {proc.pid} running, its children {kids}", flush=True)
                 for proc in LIVE:
                     proc.kill()
                 os._exit(1)
@@ -236,6 +246,7 @@ class Client:
         if wait:
             message["id"] = self.next_id
         body = json.dumps(message).encode()
+        LAST["sent"] = f"{method} #{self.next_id}" if wait else method
         self.proc.stdin.write(
             b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
         self.proc.stdin.flush()

@@ -194,11 +194,13 @@ done
 # artifact wrote the names without it, and the consumer stopped on
 # "App::Tuple is not a generic type" (an impl's target, a field, a class
 # variable's type), on "undefined constant Std::Traits::Hashable" (a
-# supertrait) and on "App::Exception is not a class" (a superclass). And an
+# supertrait) and on "App::Exception is not a class" (a superclass;
+# measured with Exception, which iyi now refuses to subclass, and kept
+# here with Reference). And an
 # impl of a parameterised trait came back `impl App::Lib::Into(T)(String)
 # for ...`, which does not parse.
 mkdir -p "$WORK/shadow/app"
-for sibling in tuple std exception; do
+for sibling in tuple std reference; do
   printf 'module app/%s\n\npub def %s_here : Int32\n  1\nend\n' "$sibling" "$sibling" > "$WORK/shadow/app/$sibling.iyi"
 done
 cat > "$WORK/shadow/app/lib.iyi" << 'IYI'
@@ -206,7 +208,7 @@ module app/lib
 
 import app/tuple
 import app/std
-import app/exception
+import app/reference
 import std/traits
 
 pub trait Show
@@ -227,7 +229,7 @@ pub trait Into(T)
   abstract def into : T
 end
 
-pub class Oops < ::Exception
+pub class Oops < ::Reference
   pub def note : String
     "oops"
   end

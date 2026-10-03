@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A line `puts` writes to `STDOUT` or `STDERR` comes out whole when
+  several threads print at once.** Both are sync, and `write_line` wrote
+  the text and then its newline as two writes, so another thread's line
+  could land between them: four `IyiThread`s of 20,000 `puts` each left 750
+  of 80,000 lines merged into a file and 717 into a pipe. A sync stream now
+  writes the text and its newline in one write; a buffered one is
+  unchanged. `bench/thread_exercise.sh` checks it; the old prelude left
+  3,510 of 80,000 lines broken there.
+
 - **A panic a `std` module raises prints no site when the module comes
   from its artifact, as it prints none built from source.** `raise` knew a
   library file by `src/std/` and `src/iyi/` alone, so `Deque(Int32).new.pop`

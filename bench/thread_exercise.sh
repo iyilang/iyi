@@ -522,6 +522,32 @@ while [ "$run" -le 100 ]; do
 done
 echo "  a hundred of a hundred ended"
 
+# ── 5e. A line `puts` writes is one write ─────────────────────────────────
+# `STDOUT` is sync, and `write_line` wrote the text and then the newline:
+# four threads of 20,000 `puts` each left 750 of 80,000 lines merged with
+# another thread's, on Windows into a file. Every line must come out whole.
+step "four threads printing at once: every line whole"
+cat > whole_lines.iyi <<'IYI'
+threads = [] of IyiThread
+4.times do |t|
+  threads << IyiThread.start do
+    20000.times { |i| puts "thread-#{t}-line-#{i}-of-twenty-thousand" }
+    nil
+  end
+end
+threads.each { |th| th.join }
+IYI
+if ! "$IYI" build whole_lines.iyi -o whole_lines > build-whole_lines.log 2>&1; then
+  cat build-whole_lines.log; exit 1
+fi
+./whole_lines > whole_lines.txt 2>&1
+total=$(wc -l < whole_lines.txt | tr -d ' ')
+broken=$(LC_ALL=C grep -cvE '^thread-[0-3]-line-[0-9]+-of-twenty-thousand$' whole_lines.txt)
+if [ "$total" -ne 80000 ] || [ "$broken" -ne 0 ]; then
+  echo "  $broken of $total lines are not one thread's whole line"; exit 1
+fi
+echo "  80000 lines from four threads, none merged"
+
 # ── 6. Share: what a thread's block may capture is decided at compile time ─
 # SPEC.md III.4.4's marker, gating III.4.11's block: a value whose type has
 # a mutable field — here an `Array`, whose size is assigned by its own

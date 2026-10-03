@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **A reopen may not replace a method another module wrote.** Only the
+  prelude's methods were held to R-3's no-replacing rule, so two modules
+  each reopening `::String` with a `tag` of its own had the first one's
+  `via_x` print the second's `y`. The second is refused at the reopen
+  now: "String#tag is lib/x's method, and this replaces it (...) ... Give
+  it a name lib/x does not use"; a module still adds methods, and
+  replaces the ones it wrote. `bench/verbs_exercise.sh` and
+  `spec/compiler/iyi_import_spec.cr` check it; the old compiler printed
+  `y`.
+
 - **A trait requirement answered with other parameters is refused at
   the impl, naming it, and `self` may be answered with the implementing
   type.** Only the name was compared, so `def go(x : String)` for

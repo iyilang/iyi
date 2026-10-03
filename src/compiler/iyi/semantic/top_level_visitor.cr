@@ -1666,14 +1666,29 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
 
     kind = node.is_a?(Macro) ? "macro" : "method"
     if @program.iyi_prelude?
-      # The prelude extends itself: `number.iyi` writing a method
-      # `primitives.iyi` declared is one library deciding its own surface.
-      return unless iyi_written_in_prelude?(replaced)
       return if iyi_written_in_prelude?(node)
-      whose = "the prelude's"
-      instead = "Give it a name the prelude does not use, or add the #{kind} " \
-                "to the prelude itself, where one definition answers for " \
-                "every program"
+      if iyi_written_in_prelude?(replaced)
+        # The prelude extends itself: `number.iyi` writing a method
+        # `primitives.iyi` declared is one library deciding its own surface.
+        whose = "the prelude's"
+        instead = "Give it a name the prelude does not use, or add the #{kind} " \
+                  "to the prelude itself, where one definition answers for " \
+                  "every program"
+      else
+        # And another module's are that module's, by the same reasoning: its
+        # own code calls the one it wrote. Only the prelude's were asked
+        # about, so two modules each reopening `::String` with a `tag` of
+        # its own had the first one's `via_x` run the second's. A module
+        # replacing a def it wrote itself is its own business, as it is the
+        # prelude's.
+        return unless iyi_written_in?(replaced, ".iyi")
+        file = replaced.location.try(&.expanded_location).try(&.filename.as?(String))
+        return if file.nil? || iyi_written_file(replaced) == iyi_written_file(node)
+        writer = @program.iyi_module_paths[file]? || @program.iyi_artifact_modules[file]? || Iyi.relative_filename(file)
+        whose = "#{writer}'s"
+        instead = "Give it a name #{writer} does not use: #{writer}'s own " \
+                  "code calls the one it wrote"
+      end
     else
       return unless iyi_written_in?(replaced, ".cr")
       whose = "the library's"
@@ -1727,6 +1742,12 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     !!node.location.try(&.expanded_location).try do |at|
       at.filename.as?(String).try &.ends_with?(extension)
     end
+  end
+
+  # The file a definition was written in, following a macro back to its
+  # source, as a posix path so that two spellings of one file are one.
+  private def iyi_written_file(node : Def | Macro) : String?
+    node.location.try(&.expanded_location).try(&.filename.as?(String)).try { |file| ::Path[file].to_posix.to_s }
   end
 
   private def process_def_primitive_annotation(node, ann)

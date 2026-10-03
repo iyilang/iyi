@@ -983,6 +983,41 @@ describe "Semantic: iyi import" do
       end
     end
 
+    # Another module's methods are that module's, by the same reasoning: its
+    # own code calls the one it wrote. Two modules each reopening a prelude
+    # type with a `tag` of its own had the first one's code run the second's.
+    it "refuses a module that replaces a method another module added" do
+      with_iyi_modules({
+        "prelude/shout.iyi" => "class ::Shouter\nend\n",
+        "app/x.iyi"         => <<-IYI,
+          module app/x
+
+          require "../prelude/shout.iyi"
+
+          class ::Shouter
+            def tag : Int32
+              1
+            end
+          end
+          IYI
+        "main.iyi" => <<-IYI,
+          module app/main
+
+          import app/x
+
+          class ::Shouter
+            def tag : Int32
+              2
+            end
+          end
+          IYI
+      }) do |dir|
+        expect_raises(Iyi::TypeException, /Shouter#tag is app\/x's method, and this replaces it/) do
+          semantic_iyi("main.iyi", prelude_dir: File.join(dir, "prelude"))
+        end
+      end
+    end
+
     # A macro is the same act and a wider one: `getter` is a declaration
     # macro, so a module that reopens `::Object` and writes its own decides
     # what every field declaration in the program means, including the ones

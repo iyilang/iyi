@@ -4084,6 +4084,17 @@ as the whole diagnosis. Refused in the same sentence now, and told apart the
 same way: a def written beside `prelude.iyi` may replace one, a def written
 anywhere else may not.
 
+**And another module's are that module's.** The same reasoning, one library
+over: a module's own code calls the methods it wrote, so a reopen in another
+module that writes one again hands that module's callers its answer. Two
+modules each reopening `::String` with a `tag` of its own had the first one's
+code run the second's; a def written in another `.iyi` module may not be
+replaced on its type now. A module still adds what it likes, and replaces what
+it wrote itself. Still open: a reopen of a *subtype* that overrides such a def,
+as `struct ::Int32; def gcd` beside `std/int`'s `Int#gcd` does (its
+`12.lcm(8)` answers 96), because `std` specialises that way itself:
+`UInt8#abs` over `std/number`'s `Number#abs`.
+
 **And a macro is the same act, one layer wider.** The question was asked of
 `def` and not of `macro`, and a `macro` is where it costs more: `getter` is a
 *declaration* macro, so a file that reopens `::Object` and writes its own

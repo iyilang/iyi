@@ -465,6 +465,15 @@ refuses "a file stored as .IYI, checked" 'ends in `.IYI`' -- "$IYI" check upcase
 refuses "a file stored as .IYI, formatted" 'ends in `.IYI`' -- "$IYI" fmt --check upcase/UP.IYI
 refuses "a directory holding a .IYI, formatted" 'ends in `.IYI`' -- "$IYI" fmt --check upcase
 refuses "a directory holding a _test.IYI, tested" 'ends in `.IYI`' -- "$IYI" test upcase/tests
+# A reopen replacing a method another module wrote: two modules each
+# reopening `::String` with a `tag` had the first one's code run the
+# second's.
+mkdir -p reopen/lib
+printf 'module lib/x\n\nclass ::String\n  def tag : String\n    "x"\n  end\nend\n\npub def via_x(s : String) : String\n  s.tag\nend\n' > reopen/lib/x.iyi
+printf 'module lib/y\n\nclass ::String\n  def tag : String\n    "y"\n  end\nend\n' > reopen/lib/y.iyi
+printf 'module main\n\nimport lib/x\nimport lib/y\n\nputs Lib::X.via_x("s")\n' > reopen/main.iyi
+refuses "a reopen replacing another module's method" "String#tag is lib/x's method, and this replaces it" -- \
+  "$IYI" check reopen/main.iyi
 # A byte order mark, which a Windows editor may put at the front of a
 # file. The lexer skips it; the three readings of a header did not, so a
 # module saved with one ran as a script and its import beside the header

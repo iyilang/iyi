@@ -662,6 +662,7 @@ module Iyi
       return unless fun_literal.is_a?(ProcLiteral)
       a_def = fun_literal.def
       check_thread_constants_share(a_def)
+      check_thread_class_vars_share(a_def)
       return unless a_def.closure?
 
       vars = a_def.vars
@@ -789,6 +790,74 @@ module Iyi
         const = node.target_const
         type = node.type?
         @paths << {node, type} if const && type && @seen.add?(const)
+        false
+      end
+
+      def visit(node : ASTNode) : Bool
+        true
+      end
+    end
+
+    # iyi: a class variable is module-level state as a constant is (SPEC.md
+    # III.4.5), named in the block's own text with nothing the closure
+    # lists: a class method whose thread block and starter each ran
+    # `@@count += 1` two million times compiled, and printed 2548908 and
+    # 2461914 of 4000000. One only its initializer writes is a value, asked
+    # what a constant is. One written again - by the block, or anywhere
+    # the typer reached - is one cell every thread that names it shares,
+    # refused as a captured local assigned after the start is. A
+    # thread-local one is every thread's own, and neither.
+    def check_thread_class_vars_share(a_def : Def) : Nil
+      named = NamedClassVars.new
+      a_def.body.accept named
+      advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`"
+      named.vars.each do |class_var, var|
+        next if var.thread_local?
+        if assign = named.assigns[var]?
+          assign.raise "the block IyiThread.start runs on another thread assigns `#{class_var.name}`, a class variable, #{advice}"
+        end
+        if written = var.iyi_written
+          write, in_def = written
+          where = if in_def && in_def.name != "->"
+                    "in `#{in_def.name}`"
+                  elsif location = write.location
+                    "at line #{location.line_number}"
+                  else
+                    "outside it"
+                  end
+          class_var.raise "the block IyiThread.start runs on another thread names the class variable `#{class_var.name}`, which is written after its initializer (#{where}), #{advice}"
+        end
+        type = var.type?
+        next unless type
+        if why = Iyi::Share.reason(type)
+          class_var.raise "the block IyiThread.start runs on another thread names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+        end
+      end
+    end
+
+    # Every class variable a body names, once each, with the variable it
+    # is, and the first assignment to each.
+    class NamedClassVars < Visitor
+      getter vars = [] of {ClassVar, MetaTypeVar}
+      getter assigns = {} of MetaTypeVar => ASTNode
+      @seen = Set(MetaTypeVar).new
+
+      def initialize
+        @assigns.compare_by_identity
+        @seen.compare_by_identity
+      end
+
+      def visit(node : Assign) : Bool
+        target = node.target
+        if target.is_a?(ClassVar) && (var = target.var?)
+          @assigns[var] ||= node
+        end
+        true
+      end
+
+      def visit(node : ClassVar) : Bool
+        var = node.var?
+        @vars << {node, var} if var && @seen.add?(var)
         false
       end
 

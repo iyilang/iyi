@@ -989,6 +989,107 @@ if [ "$(./constant_shared | tr -d '\r')" != "hi 3 2" ]; then
 fi
 echo "  an Int32, a String and a List(String) constant still build and read hi 3 2"
 
+# A class variable is module-level state too, and the block names it with
+# nothing the closure lists: a class method whose thread block and starter
+# each ran `@@count += 1` two million times compiled, and printed 2548908
+# and 2461914 of 4000000. One written after its initializer - by the block
+# or by a method - is one cell every thread shares, and one whose type is
+# not Share is refused as a constant is; one only its initializer writes,
+# of a Share type, is read from the thread as before.
+step "failure proof: a block naming a class variable written again, or not Share, does not compile"
+cat > classvar_assigned.iyi <<'IYI'
+class Tally
+  @@count = 0
+
+  def self.run : Nil
+    t = IyiThread.start do
+      @@count += 1
+      nil
+    end
+    t.join
+  end
+end
+
+Tally.run
+IYI
+cat > classvar_written.iyi <<'IYI'
+class Tally
+  @@count = 0
+
+  def self.bump : Nil
+    @@count += 1
+  end
+
+  def self.run : Nil
+    t = IyiThread.start do
+      puts @@count
+      nil
+    end
+    bump
+    t.join
+  end
+end
+
+Tally.run
+IYI
+cat > classvar_array.iyi <<'IYI'
+class Tally
+  @@items = [1, 2, 3]
+
+  def self.run : Nil
+    t = IyiThread.start do
+      puts @@items.size
+      nil
+    end
+    t.join
+  end
+end
+
+Tally.run
+IYI
+cat > classvar_shared.iyi <<'IYI'
+module classvar_shared
+
+import std/list::{List}
+
+class Tally
+  @@limit = 3
+  @@name = "x"
+  @@names : List(String) = List.new(["a", "b"])
+
+  def self.run : Nil
+    t = IyiThread.start do
+      puts "#{@@name} #{@@limit} #{@@names.size}"
+      nil
+    end
+    t.join
+  end
+end
+
+Tally.run
+IYI
+for shape in assigned written array; do
+  case "$shape" in
+    assigned) said="assigns \`@@count\`, a class variable, so every thread that reaches it shares one mutable cell" ;;
+    written) said="names the class variable \`@@count\`, which is written after its initializer (in \`bump\`)" ;;
+    array) said="names the class variable \`@@items : Array(Int32)\`, which is not Share" ;;
+  esac
+  if "$IYI" build "classvar_$shape.iyi" -o "classvar_$shape" > "build-classvar-$shape.log" 2>&1; then
+    echo "a block naming a class variable ($shape) compiled:"; cat "build-classvar-$shape.log"; exit 1
+  fi
+  if ! grep -qF "$said" "build-classvar-$shape.log"; then
+    echo "the class variable refusal ($shape) did not say what it should:"; cat "build-classvar-$shape.log"; exit 1
+  fi
+  printf '  refused: %s\n' "$(grep -m1 'class variable' "build-classvar-$shape.log" | sed 's/^Error: //')"
+done
+if ! "$IYI" build classvar_shared.iyi -o classvar_shared > build-classvar-shared.log 2>&1; then
+  echo "a block naming class variables only their initializers write was refused:"; cat build-classvar-shared.log; exit 1
+fi
+if [ "$(./classvar_shared | tr -d '\r')" != "x 3 2" ]; then
+  echo "a block naming class variables only their initializers write built, but printed:"; ./classvar_shared; exit 1
+fi
+echo "  an Int32, a String and a List(String) class variable only their initializers write still build and read x 3 2"
+
 # ── 7. Windows: a program ends while a collection stops it ────────────────
 # A thread runs collections back to back - each one stops the main thread -
 # while the main thread comes to the end of the program. Back into the C

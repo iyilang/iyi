@@ -1100,6 +1100,8 @@ module Iyi
       var = lookup_class_var(target)
       target.var = var
       var.thread_local = true if thread_local
+      # iyi: a write after the initializer, for the thread gate.
+      var.iyi_written ||= {node.as(ASTNode), @typed_def}
 
       if casted_value = check_automatic_cast(value, var.type, node)
         value = casted_value
@@ -3026,7 +3028,10 @@ module Iyi
       when InstanceVar
         lookup_instance_var exp
       when ClassVar
-        visit_class_var exp
+        # iyi: the pointer can write it, as an assignment does.
+        var = visit_class_var exp
+        var.iyi_written ||= {node.as(ASTNode), @typed_def}
+        var
       when Global
         node.raise "BUG: there should be no use of global variables other than $~ and $?"
       when Path

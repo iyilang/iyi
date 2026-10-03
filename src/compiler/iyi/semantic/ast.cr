@@ -577,6 +577,14 @@ module Iyi
     # compiler drops a nil initialiser because assigning nil assigns nothing.
     property iyi_initialiser_source : String = ""
 
+    # iyi: the first write to a class variable the typer met outside its
+    # initializer - an assignment, or a `pointerof` that can write it - and
+    # the def it is in, for the thread gate (SPEC.md III.4.5). A class
+    # variable only its initializer writes is a value; one written again is
+    # a cell every thread that names it shares. Code nothing calls is never
+    # typed, and never runs, so it writes nothing here.
+    property iyi_written : {ASTNode, Def?}? = nil
+
     property freeze_type : Type?
 
     # Flag used during codegen to indicate the initializer is simple

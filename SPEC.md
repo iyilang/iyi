@@ -2687,10 +2687,11 @@ level at a time — ``captures `items :
 Array(Int32)`, which is not Share: Array(Int32)'s field @size is assigned
 in `unsafe_set_size` ``. The channel's `T : Share` (III.4.6) waits for the
 channel that crosses threads. Held by `spec/compiler/semantic/iyi_spec.cr`
-(eleven shapes: immutable captures pass, a setter, an assignment outside
+(twelve shapes: immutable captures pass, a setter, an assignment outside
 `initialize`, a field one and two levels down, a field `pointerof` gives
 out, `@[Share]` trusted, a trusted generic refused by its argument, `self`,
-`self` reached by a call, a constant the block names), by
+`self` reached by a call, a constant the block names, a class variable
+written after its initializer), by
 `spec/compiler/iyimod_spec.cr` (the marker written, read and refused
 across an artifact) and by `bench/thread_exercise.sh`'s last step, a
 program that must not compile. A `Share` type makes a value safe to read
@@ -2709,7 +2710,15 @@ thread's block and a million by its starter, had compiled and printed
 1061337, and is refused now with ``names the constant `COUNTS :
 Array(Int32)`, which is not Share``. A constant that a method the block
 calls reads is reached through the call, and is not checked. Step 6d
-holds it.
+holds it. A class variable the block names is the same state with a cell
+of its own: one written after its initializer - by the block, by any
+method the program calls, or through `pointerof` - is refused by name, as
+a captured local assigned after the start is (``assigns `@@count`, a class
+variable, so every thread that reaches it shares one mutable cell``), and
+one only its initializer writes is asked what a constant is. A
+thread-local one is every thread's own. `@@count += 1` run two million
+times by a thread and two million by its starter had compiled and printed
+2548908 of 4000000.
 
 This is Rust's `Send`/`Sync` **without** ownership or borrowing, and it is worth
 being exact about what that buys and what it does not. It rules out data races,

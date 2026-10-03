@@ -3673,6 +3673,30 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "refuses a class variable the block names that a method writes after its initializer" do
+      assert_error(stub + <<-CODE, "names the class variable `@@total`, which is written after its initializer (in `bump`), so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5)", filename: "x.iyi")
+        class Tally
+          @@total = 0
+          @@limit = 3
+
+          def self.bump : Nil
+            @@total = 1
+          end
+
+          def self.run : Nil
+            IyiThread.start do
+              @@limit
+              @@total
+              nil
+            end
+          end
+        end
+
+        Tally.bump
+        Tally.run
+        CODE
+    end
+
     it "refuses a captured value whose type has a setter" do
       assert_error(stub + <<-CODE, "the block IyiThread.start runs on another thread captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=` (SPEC.md III.4.4)", filename: "x.iyi")
         class Counter

@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **A class variable an `IyiThread` block names must be written only by
+  its initializer, and be Share (SPEC.md III.4.5).** The thread gate asked
+  about captured locals, `self` and constants, and a class variable is
+  none of them: a class method whose thread block and starter each ran
+  `@@count += 1` two million times compiled and printed 2548908 and
+  2461914 of 4000000, and fifty million times each, 70122760, 63226363
+  and 59290015 of 100000000. A class variable written after its
+  initializer - by the block, by any method the program calls, or
+  through `pointerof` - is refused by name now ("assigns `@@count`, a
+  class variable, so every thread that reaches it shares one mutable
+  cell"; "names the class variable `@@count`, which is written after its
+  initializer (in `bump`)"), and one only its initializer writes must be
+  Share, as a constant must; a thread-local one is every thread's own,
+  and is not asked. `bench/thread_exercise.sh` builds the three
+  refusals and reads an Int32, a String and a `List(String)` class
+  variable from a thread; the old compiler built all three refusals.
+
 - **On Windows a handle read on one thread reads on another.** Each
   thread has its own completion port and a handle belongs to one, and
   every operation associated the handle and ignored the refusal (error

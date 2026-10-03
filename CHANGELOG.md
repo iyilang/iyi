@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`iyi doc String`, `iyi doc prelude` and `iyi init` work in a project
+  whose packages cannot be fetched.** Each compiles the prelude alone, as an
+  empty file in the working directory, and that file's root resolved the
+  project's iyi.mod: with a requirement not in the cache and no network, all
+  three answered "Error: the prelude does not compile: cannot fetch
+  example.test/user/nope v1.0.0 from ..." and exited 1, the reason cut after
+  its first line. The prelude imports no package, and is compiled with none
+  now. `bench/packages_get.sh` runs the three in a project requiring a
+  module the mirror does not have; the old compiler failed all three.
+
 - **A `replace` directory may hold a space, in double quotes, and may be
   spelled `..\lib`.** The line was split on spaces, so `replace
   example.test/user/liba => "../liba local"` and the same unquoted were both

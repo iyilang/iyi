@@ -275,6 +275,20 @@ if [ $? -eq 0 ] || ! grep -q "is major version 2, and v1.1.0 is not; v1.1.0 is e
 fi
 [ "$status" -eq 0 ] && echo "  the plain path stays on v1; /v2 fetched from liba's repository at v2.0.0; mismatched lines refused"
 
+step "the prelude's own verbs do not fetch the project's packages"
+# `doc String`, `doc prelude` and `init` compile the prelude alone, and did
+# it as an empty file in the working directory, whose iyi.mod was resolved:
+# a requirement not in the cache, with no network, answered "the prelude
+# does not compile: cannot fetch ...".
+mkdir -p "$WORK/offline" && cd "$WORK/offline" || exit 1
+printf 'module example.test/user/offline\nrequire example.test/user/nope v1.0.0\n' > iyi.mod
+for verb in "doc String" "doc prelude" "init tool tools/tool"; do
+  # shellcheck disable=SC2086 # the verb's words are its arguments
+  "$IYI" $verb > offline.log 2>&1 || fail "\`$verb\` in a project whose requirement cannot be fetched: $(head -2 offline.log)"
+done
+cd "$WORK/app" || exit 1
+[ "$status" -eq 0 ] && echo "  doc String, doc prelude and init answer with a requirement that cannot be fetched"
+
 step "what get refuses leaves iyi.mod as it was"
 refused "a version that is not a tag" "has no v1.9.9; its versions are v1.0.0, v1.1.0, v1.2.0-rc.1, v1.3.0" \
   example.test/user/liba@v1.9.9

@@ -255,6 +255,13 @@ class Iyi::Command
     compiler.no_codegen = true
     compiler.wants_doc = true
     compiler.stdout = IO::Memory.new
+    # No packages: the prelude imports none, and the empty entry sits in the
+    # working directory, whose iyi.mod would otherwise be resolved for it.
+    # In a project with a requirement not in the cache and no network, `iyi
+    # doc String`, `doc prelude` and `init` (which asks this for the
+    # prelude's names) each answered "the prelude does not compile: cannot
+    # fetch example.com/me/greet v0.1.0".
+    compiler.iyi_mod_table = [] of {String, String}
     compiler.stderr = IO::Memory.new
     begin
       compiler.top_level_semantic(Compiler::Source.new("doc.iyi", "")).program

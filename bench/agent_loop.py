@@ -343,6 +343,15 @@ def main():
          and (cause.get("expansion") or {}).get("macro") == "m",
          f"at {cause.get('line')}:{cause.get('column')}, expansion {cause.get('expansion')}")
 
+    # 4a'''-nil. Under a nilable `x + 1` the error went on to say the
+    # prelude is small by rule and `iyi build --crystal` gives the other
+    # library, whose `Nil` has no `+` either; the narrowing is the answer.
+    write("advice_nil.iyi", "x = Program.args.size > 10 ? 1 : nil\nputs x + 1\n")
+    said = run("check", "advice_nil.iyi", cwd=work).stderr
+    step("a nilable receiver is not sent to the other library",
+         "x can be nil here" in said and "small by rule" not in said, "")
+    os.remove(os.path.join(work, "advice_nil.iyi"))
+
     # 4a''. the cap, and the verdict after it. `fix` applies at most
     # thirty-two edits in a run, and the verdict used to be read from a
     # variable only the `break` paths set - so a run whose every round

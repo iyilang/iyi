@@ -302,6 +302,31 @@ describe "Semantic: iyi" do
         A.new.g
         CODE
     end
+
+    # The other library's `Nil` has no `size` either, so the size rule's
+    # `--crystal` note sent a nilable receiver nowhere useful.
+    it "keeps the size rule's note off a nil" do
+      exception = expect_raises(Iyi::TypeException) do
+        semantic <<-CODE
+          class B
+            def size
+              1
+            end
+          end
+
+          def make(b : Bool) : B?
+            if b
+              B.new
+            end
+          end
+
+          x = make(true)
+          x.size
+          CODE
+      end
+      exception.to_s.should contain("x can be nil here")
+      exception.to_s.should_not contain("small by rule")
+    end
   end
 
   describe "Crystal's spelling" do

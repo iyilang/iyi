@@ -1367,7 +1367,11 @@ class Iyi::Call
         bare = owner.instance_type.to_s.split('(').first
         if reachable = iyi_std_method_hint(program, def_name, owner)
           msg << '\n' << reachable
-        else
+        elsif !owner.is_a?(NilType)
+          # Not for a nil: the other library's `Nil` has no `+` either, and
+          # the receiver's other members are what the call was written
+          # for, so the note sent a nilable `x + 1` to `--crystal` under
+          # the narrowing hint that is the answer.
           msg << '\n' << "iyi's prelude has no `#{def_name}` on #{owner}: it is small by rule - a method enters when a program in the repository needs it (SPEC.md III.1). `iyi doc #{bare}` lists what it has; `iyi build --crystal` gives a program Crystal's library instead (README.md, \"The library a program has\")."
         end
       end

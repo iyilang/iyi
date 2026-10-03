@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A method missing on a nilable receiver no longer ends with the
+  prelude's size rule.** `x + 1` with `x : Int32 | Nil` said, under "x
+  can be nil here: narrow it first", "iyi's prelude has no `+` on Nil: it
+  is small by rule ... `iyi build --crystal` gives a program Crystal's
+  library instead", and the other library's `Nil` has no `+` either. The
+  note is left off for `Nil`; the narrowing is the answer.
+  `spec/compiler/semantic/iyi_spec.cr` and `bench/agent_loop.py` check
+  it; the old compiler printed the note.
+
 - **A nilable argument to a trait parameter is told to narrow the nil, not
   to write an impl for the union.** `f(v)` with `v : Int32 | Nil` and
   `f(x : Show)` said "Write `impl Show for (Int32 | Nil)` in the module

@@ -148,7 +148,8 @@ PY
   fi
 }
 prove "a measure without its label" 'BM::Tms.new(real, label)' 'BM::Tms.new(real, "")'
-prove "integer seconds asked of Time" 'new(Std::Time::Span.seconds(calculation.to_i64), Std::Time::Span.seconds(warmup.to_i64)' 'new(Time.seconds(calculation.to_i64), Time.seconds(warmup.to_i64)'
+prove "integer seconds asked of Time" 'return Std::Time::Span.seconds(seconds.to_i64)' 'return Time.seconds(seconds.to_i64)'
+prove "a fraction of a second dropped" 'return Std::Time::Span.seconds(seconds.to_i64) if seconds.is_a?(Int)' 'return Std::Time::Span.seconds(seconds.to_i64)'
 prove "zeros for the CPU time" 'Std::Format.sprintf("(  %.6f)", real)' 'Std::Format.sprintf("  0.000000   0.000000   0.000000 (  %.6f)", real)'
 prove "zeros for the bytes per call" '            item.human_compare)' '            "0B/op  " + item.human_compare)' output
 

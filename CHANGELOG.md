@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`Benchmark::IPS::Job.new(0.5, 0.25)` keeps the fractions of a
+  second.** The seconds were narrowed with `to_i64`, so a fractional
+  calculation or warm-up time was zero and the job warmed up and
+  measured for no time at all, where the other library's
+  `0.5.seconds` is half a second. A fraction is kept to the nanosecond
+  now, and whole seconds are taken as they were.
+  `bench/std_benchmark_exercise.iyi` holds `Job.new(0.2, 0.1)` to a
+  0.3 s floor; the old module ran it in 2.7e-6 s.
+
 - **`fill(value, offset, count)` past the end names an index outside
   the collection when the offset is negative.** The end was counted
   from the offset as written, so `[1, 2, 3, 4, 5].fill(0, -2, 5)`

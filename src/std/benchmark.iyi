@@ -186,13 +186,21 @@ pub class Benchmark
         @items = [] of Entry
       end
 
-      # Seconds as integers, as the other library takes them. It asked
+      # Seconds as numbers, as the other library takes them. It asked
       # `Time.seconds`, which `Time` (an instant) does not have, so
       # `Job.new(1, 1)` did not compile; a length of time is a `Span`. The
       # answer is named: a program built from this module's artifact read
       # a method with none as one that answers nil.
       def self.new(calculation = 5, warmup = 2, interactive = false) : Job
-        new(Std::Time::Span.seconds(calculation.to_i64), Std::Time::Span.seconds(warmup.to_i64), !!interactive)
+        new(span_of(calculation), span_of(warmup), !!interactive)
+      end
+
+      # A count of seconds as a span, its fraction kept: narrowed with
+      # `to_i64`, `Job.new(0.5, 0.25)` warmed up and measured for no time
+      # at all, where the other library's `0.5.seconds` is half a second.
+      private def self.span_of(seconds) : Std::Time::Span
+        return Std::Time::Span.seconds(seconds.to_i64) if seconds.is_a?(Int)
+        Std::Time::Span.nanoseconds((seconds.to_f * 1_000_000_000.0).round.to_i64)
       end
 
       def report(label : String = "", &action : ->) : Entry

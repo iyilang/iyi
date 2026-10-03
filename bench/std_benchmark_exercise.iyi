@@ -50,5 +50,14 @@ if Program.args[0]? == "print"
   end
 end
 puts "  integer seconds build a job"
+# A fraction of a second is kept, as the other library's `0.2.seconds`
+# keeps it: narrowed to whole seconds, `Job.new(0.2, 0.1)` warmed up and
+# measured for no time at all. A bound, not a measurement: at least the
+# 0.3 s asked for.
+fractional = Benchmark::IPS::Job.new(0.2, 0.1)
+fractional.report("nothing") { nil }
+took = Benchmark.realtime { fractional.execute }.total_seconds
+assert_true took >= 0.3, "Job.new(0.2, 0.1) ran for #{took} s"
+puts "  Job.new(0.2, 0.1) runs for at least 0.3 s"
 
 puts "\nALL CHECKS PASSED"

@@ -3145,6 +3145,26 @@ describe "Semantic: iyi" do
         CRYSTAL
     end
 
+    # `a.sort!` is the other library's in-place sort; offered the copy
+    # `sorted`, the call became `a.sorted` and left `a` unsorted.
+    it "names the in-place form when the verb was written with `!`" do
+      assert_error <<-CRYSTAL, "'sort_in_place' is what this library calls it", filename: "x.iyi"
+        module app/thing
+
+        struct Numbers
+          def sorted : Int32
+            1
+          end
+
+          def sort_in_place : Int32
+            1
+          end
+        end
+
+        Numbers.new.sort!
+        CRYSTAL
+    end
+
     # The participle is on the verb, which is the first word: `sort_by` is
     # `sorted_by`, `map_by` would be `mapped_by`. (`sort_by` itself is one
     # Levenshtein reaches; the doubled consonant here is what it does not.)

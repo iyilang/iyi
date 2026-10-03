@@ -1251,6 +1251,17 @@ class Iyi::Call
     nil
   end
 
+  # iyi: `sort_in_place` for `a.sort!`. The `!` was written attached, and in
+  # the other library that is the mutating `sort!`: offered the participle,
+  # the call became `a.sorted` and `a` stayed unsorted. Both spellings the
+  # library has are asked: `sort_in_place_by` and `sort_by_in_place`.
+  private def iyi_in_place_for(def_name : String, owner) : String?
+    verb, sep, rest = def_name.partition('_')
+    {"#{def_name}_in_place", "#{verb}_in_place#{sep}#{rest}"}.find do |candidate|
+      owner.lookup_defs(candidate).any?(&.visibility.public?)
+    end
+  end
+
   # Every name the scope's imports brought into unqualified reach,
   # Levenshtein'd. `import m::{add}` contributes its selection;
   # `import m::*` contributes the module's exported names. The walk is
@@ -1307,6 +1318,10 @@ class Iyi::Call
     # `x.i_a?(T)` was "undefined method" with nothing near it. They are
     # names a call can be a typo of like any other.
     similar_name ||= Levenshtein.find(def_name, IYI_PSEUDO_METHODS) if obj && def_name.size >= 3
+    # iyi: and for `a.sort!` the receiver's own in-place name, ahead of any
+    # near spelling: `a.reverse!` is no request for the copy `reversed`.
+    in_place = iyi_in_place_for(def_name, owner) if iyi_banged?
+    similar_name = nil if in_place
 
     # The name that the span under this error can be *replaced with* — set
     # only where that is literally true: the suggestion names a different
@@ -1387,7 +1402,7 @@ class Iyi::Call
       # Crystal writes the plain verb, and "undefined method 'sort'" is true
       # and teaches nothing. The suggestion machinery above will not reach it —
       # `sort` to `sorted` is two edits — so the rule says it instead.
-      if !similar_name && (participle = iyi_participle_for(def_name, owner))
+      if !similar_name && (participle = in_place || iyi_participle_for(def_name, owner))
         msg << '\n' << "'#{participle}' is what this library calls it: `!` cannot end a name here, so the copy takes the participle and the one that changes the receiver says so (SPEC.md III.1.7a)"
         # The participle *is* the name to type here — as much an edit as
         # a Levenshtein hit, and the reason the rule exists.

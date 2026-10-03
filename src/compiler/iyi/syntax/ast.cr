@@ -963,6 +963,11 @@ module Iyi
     # of a call a Crystal file is free to mean differently.
     property? iyi_group = false
 
+    # iyi: written with an attached `!`, which propagates here and is the
+    # other library's mutating spelling, so `a.sort!` is asked of `sort`
+    # and the undefined-method hint names `sort_in_place` (SPEC.md III.1.7a).
+    property? iyi_banged = false
+
     # iyi: this call's answer came out of an *open* set — a module's including
     # types, or a generic's instantiations (SPEC.md III.6).
     #
@@ -1025,6 +1030,7 @@ module Iyi
       clone.expansion = expansion?
       clone.iyi_group = iyi_group?
       clone.iyi_open_dispatch = iyi_open_dispatch?
+      clone.iyi_banged = iyi_banged?
       clone
     end
 

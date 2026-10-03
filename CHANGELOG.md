@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`a.sort!` suggests `sort_in_place`.** In the other library `sort!`
+  sorts in place, and the hint answered "undefined method 'sort' for
+  Array(Int32) / 'sorted' is what this library calls it": following it
+  wrote `a.sorted`, a copy, and left `a` unsorted. A call written with an
+  attached `!` is now offered the receiver's in-place name when it has
+  one - `sort_in_place`, `sort_in_place_by`, `sort_by_in_place` - and
+  other calls still get the participle. Checked in
+  `spec/compiler/semantic/iyi_spec.cr`; the old compiler named `sorted`.
+
 - **`.or_panic("msg")` is refused with a sentence about `.or_panic`.**
   It was "expecting token ')', not 'DELIMITER_START'", a sentence about
   the lexer's tokens, where a misused `.or` already gets one about itself.

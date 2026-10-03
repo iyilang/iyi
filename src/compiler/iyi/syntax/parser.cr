@@ -965,6 +965,7 @@ module Iyi
               MSG
           end
           check_void_value atomic, location
+          atomic.iyi_banged = true if atomic.is_a?(Call)
           atomic = Propagate.new(atomic).at(location)
           next_token
           if @token.type.space?

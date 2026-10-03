@@ -3168,7 +3168,11 @@ module Iyi
             end
           end
         elsif found_comment
-          write_indent(column)
+          # A comment after an earlier argument's comma says nothing about
+          # this line: `f(a, # c` over `bbbbbbbb)` inside a `begin` was
+          # written `bbbbbbbb  )`, the block's indentation put in front of
+          # the `)`. Only a `)` that starts its line takes it.
+          write_indent(column) if @wrote_newline
         end
         check :OP_RPAREN
 

@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`fmt` no longer puts spaces in front of a call's `)` after a comment
+  on an earlier argument's line.** Inside a `begin`, `f(a, # c` /
+  `bbbbbbbb)` was written `bbbbbbbb  )`, with or without comments on the
+  lines around it to align: the comment after the comma made the closing
+  `)` take the block's indentation, which only a `)` starting its own
+  line needs. `spec/compiler/formatter/iyi_formatter_spec.cr` formats the
+  case with aligned comments; the old formatter wrote
+  `    bbbbbbbb  ) # d`.
+
 - **`fmt` keeps the comment line under `if x.nil? # c` at the body's
   indentation.** It went to column 3 (column 6 under `while`), and under
   `raise "x" if pwd.nil? # c` the next comment line went to column 13,

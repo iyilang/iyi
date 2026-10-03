@@ -154,6 +154,10 @@ describe "Formatter on iyi" do
     (covered - taken).should be_empty
   end
 
+  # Aligned comments move the comments, not the code: the `)` after a
+  # comment on an earlier argument's line was written `bbbbbbbb  )`.
+  assert_iyi_format "begin\n  f(a,        # c\n    bbbbbbbb) # d\nend           # e"
+
   # The samples, twice: a formatter that is not a fixed point rewrites a
   # file on every save, and the samples are the tree's own code, so the
   # second pass has to be a no-op over every one. Then the same files with

@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`iyi fix` prints its edit so a Char reads as one.** The text replaced
+  and its replacement were wrapped in single quotes, and the Char an edit
+  writes was quoted twice: `fixed split.iyi:4:14: '" "' -> '' ''`, which
+  reads as two empty strings. They are printed in backticks now, as the
+  messages write code: ``fixed split.iyi:4:14: `" "` -> `' '` ``.
+  `bench/verbs_exercise.sh` checks the line; the old compiler printed the
+  quotes.
+
 - **A program builds under a long cache directory on Windows.** A program's
   directory in the cache was bounded at 100 characters on the assumption
   that the cache root is short, and IYI_CACHE_DIR is the author's: under a

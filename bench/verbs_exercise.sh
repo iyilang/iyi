@@ -1198,6 +1198,17 @@ if [ "$marked_code" -eq 0 ] && cmp -s "$WORK/marked/typo.iyi" "$WORK/marked/typo
 else
   echo "  fix behind a byte order mark (exit $marked_code):"; sed 's/^/    /' "$WORK/marked.txt" | head -3; status=1
 fi
+# The edit is printed in backticks, the way messages write code. In single
+# quotes the Char an edit writes was quoted a second time: `fixed
+# split.iyi:4:14: '" "' -> '' ''`, which reads as two empty strings.
+mkdir -p "$WORK/splitfix"
+printf 'module t\n\ns = "a b"\nputs s.split(" ").size\n' > "$WORK/splitfix/split.iyi"
+(cd "$WORK/splitfix" && "$IYI" fix split.iyi) > "$WORK/splitfix.txt" 2>&1
+if grep -qF "fixed split.iyi:4:14: \`\" \"\` -> \`' '\`" "$WORK/splitfix.txt"; then
+  echo "  fix prints a string-to-char edit as \`\" \"\` -> \`' '\`"
+else
+  echo "  fix printed its edit as:"; sed 's/^/    /' "$WORK/splitfix.txt" | head -3; status=1
+fi
 # The formats a program reads name a file the way a repository does, on
 # every system. On Windows `vet -f json`, `csv` and `codecov` wrote
 # `app\helpers.iyi` (`app\\helpers.iyi` in JSON), which codecov's

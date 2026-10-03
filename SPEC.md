@@ -2669,7 +2669,9 @@ Go needed `errgroup`, a library, because `error` carries no type information a
 signature could have stated.
 
 Default policy: the first failing task cancels its siblings and the error leaves
-the group. That is `errgroup`'s behaviour, typed and built in.
+the group. That is `errgroup`'s behaviour, typed and built in. The group stays
+cancelled: a task spawned on it after the failure starts cancelled, where one
+spawned 10 ms after it slept its full 2,000 ms, and the group's join with it.
 
 #### III.4.4 Data races are a compile error, and R-3 is why that is affordable: **BUILT, gating the block a thread runs**
 

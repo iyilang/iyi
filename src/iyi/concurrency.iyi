@@ -2877,6 +2877,10 @@ class IyiGroup
   # Joined, so its scope is over: a handle kept past it spawned a task
   # that never ran, and nothing said so (III.4.1).
   @ended : Bool
+  # Cancelled once (`cancel_children`), so a task spawned after starts
+  # cancelled: one spawned 10 ms after a sibling's failure had cancelled
+  # the group slept its full 2000 ms, and the group's join with it.
+  @cancelled : Bool
 
   def initialize
     @live = 0
@@ -2884,6 +2888,7 @@ class IyiGroup
     @first_child = nil
     @joiner = nil
     @ended = false
+    @cancelled = false
     @outer = IyiScheduler.current.open_group
     IyiScheduler.current.open_group = self
   end
@@ -2892,12 +2897,13 @@ class IyiGroup
   # return value is the task's, and an error member is a failure the
   # group acts on (III.4.3): the first cancels the siblings, and the task
   # it is told on is `first_failure`, which the typed group answers. A
-  # task a cancelled one starts is cancelled from its first wait on.
+  # task a cancelled one starts, or one a cancelled group starts, is
+  # cancelled from its first wait on.
   def spawn(&block : -> T) : IyiTask(T) forall T
     raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
-    fiber.cancelled = IyiScheduler.current.cancelled
+    fiber.cancelled = IyiScheduler.current.cancelled || @cancelled
     task = IyiTask(T).new(fiber)
     runner = self
     install(fiber) do
@@ -3022,6 +3028,7 @@ class IyiGroup
   # Cancel every task still live. The group's own tool; a failing child
   # reaches it through the policy above.
   def cancel_children : Nil
+    @cancelled = true
     child = @first_child
     while child.is_a?(IyiFiber)
       IyiScheduler.cancel(child)

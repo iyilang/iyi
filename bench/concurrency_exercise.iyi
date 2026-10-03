@@ -662,6 +662,21 @@ unless heard == "joined cancelled, owner cancelled, started late cancelled, type
 end
 puts "a failing group cancelled its tasks' own groups, joined, read or started late, under 5 s"
 
+# A group a failure has cancelled stays cancelled: a task spawned on it
+# after the failure slept its full 2000 ms, and the group's join with it.
+late_saw = ""
+started = __iyi_monotonic_ns
+group do |g|
+  g.spawn { TaskFailed.new }
+  sleep(10)
+  g.spawn do
+    late_saw = napped(10000)
+    0
+  end
+end
+fail("a task spawned on a failed group #{late_saw}, and the group took #{elapsed_ms(started)} ms") unless late_saw == "cancelled" && elapsed_ms(started) < 5000
+puts "a task spawned on a group after its failure started cancelled, under 5 s"
+
 # ── 9. A rendezvous send parks until its value is taken ─────────────────
 #
 # `Channel(T).new` with no capacity: the sender cannot leave `send` until

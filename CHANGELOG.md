@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A task spawned on a group after a failure cancelled it starts
+  cancelled.** The group kept no cancelled state, and a task started
+  only copied its spawner's flag: one spawned 10 ms after a sibling
+  returned an error "slept the full 2000 ms; group took 2034 ms". The
+  group stays cancelled now, and that task's sleep answers `Cancelled` at
+  once: the group takes 10 ms (SPEC.md III.4.3).
+  `bench/concurrency_exercise.iyi` checks it under 5 s; the old runtime's
+  task slept, and the group took 10010 ms.
+
 - **A cancel reaches a task reading the value of a task outside its
   groups.** The reader stayed on that task's joiner chain, which no
   cancel walks: an inner group whose reader awaited an outer group's

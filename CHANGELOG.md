@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **`BigInt#divmod`, `//` and `%` divide long values in less than
+  quadratic time.** Every division was Knuth's long division, whose cost
+  is the product of the quotient's length and the divisor's, and the
+  recursive division `to_s` had been given was reached by `to_s` alone:
+  a value twice a 2,097,152-bit divisor took 4.9 s in a release build,
+  four times as long per doubling. A divisor past 65,536 bits with a
+  quotient past 16,384 now goes to the recursion, on the magnitudes,
+  with the truncating signs given after; that division takes 2.0 s, and
+  76 divisions either side of both thresholds in every sign agree with
+  Python's. `bench/std_big_exercise.iyi` checks `a == q * b + r`, the
+  remainder's size and its sign for every pair of signs either side of
+  both thresholds, and holds a 524,288-by-262,144-bit division under
+  four times its product; the old module took seven.
+
 - **`std/json` writes no object with a key twice.** The reader refuses
   a duplicate key, and the builder wrote one: `JSON.build` with
   `field("x", 1)` and `field("x", 2)` wrote `{"x":1,"x":2}`, and

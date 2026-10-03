@@ -415,9 +415,18 @@ prove_fails "printing copies per chunk" no_print_split "base: printing 7 costs i
 prove_fails "parsing copies per chunk" no_parse_split "base: parsing 7 costs its digits" \
   's/if count > per \* DIGITS_SPLIT_LIMBS$/if false/;s/^      carry = value$/      carry = value + limbs.dup.size.to_u64 * 0_u64/'
 
-# 22. Printing that splits by long division, quadratic in the length
+# 22. Printing that splits by long division, quadratic in the length.
+#     `divmod_long`, not `divmod`: `divmod` itself takes the recursion
+#     for a divisor this long now.
 prove_fails "printing splits by long division" no_print_recursive "base: printing a long value costs what parsing it does" \
-  's/halves = divmod_recursive(powers\[level\])$/halves = divmod(powers[level])/'
+  's/halves = divmod_recursive(powers\[level\])$/halves = divmod_long(powers[level])/'
+
+# 23. A long division's remainder without the dividend's sign, and 24.
+#     long division for every divisor, as `//`, `%` and `divmod` had.
+prove_fails "a long division's remainder unsigned" no_div_sign "div: long" \
+  's/@sign < 0 ? r.negate : r}$/r}/'
+prove_fails "long division for a long divisor" no_div_recursive "div: a long division took" \
+  's/if divisor_bits > DIVIDE_RECURSIVE_BITS \&\& /if false \&\& /'
 
 # A rational's float through twenty decimal places again, and its
 # halfway rounded up rather than to even.

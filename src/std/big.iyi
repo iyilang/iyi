@@ -675,10 +675,28 @@ pub struct BigInt
     res
   end
 
-  # Division and Modulo: Knuth Algorithm D
-  # Returns {quotient, remainder}.
+  # Division and Modulo. Returns {quotient, remainder}.
   # Division truncates towards zero; remainder follows the sign of the dividend (self).
+  #
+  # A long divisor and a long quotient go to `divmod_recursive`, the
+  # recursive division `to_s` splits its digits with, on the magnitudes,
+  # and take their signs after. Long division costs the product of the
+  # quotient's length and the divisor's, and every division went to it: a
+  # value twice a divisor of 524,288 bits took 282 ms in a release build
+  # and one of 2,097,152 bits 4,929 ms, four times over per doubling,
+  # where these take 179 and 1,964.
   def divmod(other : BigInt) : Tuple(BigInt, BigInt)
+    raise "division by zero" if other.zero?
+    divisor_bits = BigInt.bit_length(other)
+    if divisor_bits > DIVIDE_RECURSIVE_BITS && BigInt.bit_length(self) - divisor_bits > DIVIDE_SPLIT_BITS
+      q, r = abs.divmod_recursive(other.abs)
+      return {@sign == other.sign ? q : q.negate, @sign < 0 ? r.negate : r}
+    end
+    divmod_long(other)
+  end
+
+  # Knuth's Algorithm D, with the signs `divmod` gives.
+  protected def divmod_long(other : BigInt) : Tuple(BigInt, BigInt)
     raise "division by zero" if other.zero?
     return {BigInt.zero, BigInt.zero} if zero?
 
@@ -1384,6 +1402,11 @@ pub struct BigInt
   # slower past it: 53 ms to 45 at 262,144 bits.
   DIVIDE_SPLIT_BITS = 16384
 
+  # And below this many bits of divisor `divmod` itself divides long:
+  # the recursion is the faster only past it, and it divides a value many
+  # times the divisor's length one divisor's length at a time.
+  DIVIDE_RECURSIVE_BITS = 65536
+
   # The quotient and remainder of this value, not negative, by `divisor`,
   # positive, for the time a few products of half the length take: long
   # division costs the product of the two lengths, and the split print
@@ -1419,7 +1442,7 @@ pub struct BigInt
   # Each is a division by the divisor's top half, a product by its bottom
   # half, and at most two corrections, the divisor's top bit being set.
   protected def div_two_by_one(divisor : BigInt, n : Int32) : Tuple(BigInt, BigInt)
-    return divmod(divisor) if BigInt.bit_length(self) - n <= DIVIDE_SPLIT_BITS
+    return divmod_long(divisor) if BigInt.bit_length(self) - n <= DIVIDE_SPLIT_BITS
     half = n >> 1
     top = divisor >> half
     bottom = divisor.bits(0, half)

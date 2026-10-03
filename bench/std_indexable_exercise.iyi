@@ -413,6 +413,9 @@ if Program.args.size > 0
   when "probe_fill_huge_count"
     puts "triggering fill past end with a huge count raise:"
     mut.fill(0, 1, 2147483647)
+  when "probe_fill_past_end_from_negative"
+    puts "triggering fill past end from a negative offset raise:"
+    mut.fill(0, -2, 5)
   when "probe_insert_out_of_range"
     puts "triggering insert out of range raise:"
     marr.insert(2, 0)

@@ -489,7 +489,10 @@ pub trait IndexableMutable : Indexable
     # Compared as room left rather than as an end, and the end named in
     # 64 bits: `offset + count` overflowed for a count near the top of
     # `Int32`, and the refusal read "arithmetic overflow" instead of this.
-    raise "index #{asked.to_i64 + count} out of range for #{size} elements" if count > size - offset
+    # The end is counted from the resolved offset: from the offset as
+    # written, `fill(0, -2, 5)` of five elements named index 3, which
+    # is inside them.
+    raise "index #{offset.to_i64 + count} out of range for #{size} elements" if count > size - offset
     i = 0
     while i < count
       unsafe_put(offset + i, value)

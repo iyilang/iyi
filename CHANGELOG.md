@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`fill(value, offset, count)` past the end names an index outside
+  the collection when the offset is negative.** The end was counted
+  from the offset as written, so `[1, 2, 3, 4, 5].fill(0, -2, 5)`
+  panicked "index 3 out of range for 5 elements", naming an index that
+  is one of the five. It is counted from where the offset lands now:
+  "index 8 out of range for 5 elements", as `fill(0, 3, 5)` says.
+  `Array` and `Deque` share it through `IndexableMutable`.
+  `bench/std_indexable_exercise.sh` probes it; the old module named
+  index 3.
+
 - **`StaticArray#fill(value, start, count)` refuses a negative count
   and a start past the end.** A return for any count of zero or less
   came before the start was checked, so `fill(7, 0, -1)` and

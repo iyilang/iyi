@@ -145,6 +145,10 @@ run_probe "fill past the end" probe_fill_past_end "index 6 out of range for 5 el
 # A count near the top of Int32 is refused in the same sentence, not as an
 # "arithmetic overflow" of `offset + count`.
 run_probe "fill past the end with a huge count" probe_fill_huge_count "index 2147483648 out of range for 5 elements"
+# From a negative offset the end is counted from where the offset lands:
+# counted from the offset as written, `fill(0, -2, 5)` named index 3,
+# which is one of the five.
+run_probe "fill past the end from a negative offset" probe_fill_past_end_from_negative "index 8 out of range for 5 elements"
 run_probe "insert out of range" probe_insert_out_of_range "index 2 out of range for 1 elements"
 run_probe "delete_at out of range" probe_delete_at_out_of_range "index -2 out of range for 1 elements"
 

@@ -151,6 +151,97 @@ if [ "$(cd "$WORK/setter" && ./from-artifact 2>&1)" = "5" ]; then
 else
   echo "  a setter with no written return, through its artifact:"; sed -n '1,3p' "$WORK/setter.log"; status=1
 fi
+# Names the compiler resolved, written into an artifact that is read
+# inside the module. Beside an `app/tuple`, an `app/std` and an
+# `app/exception`, a `Tuple`, a `Std::Traits::Hashable` and an `Exception`
+# there are those modules, and the source says `::` for that reason. The
+# artifact wrote the names without it, and the consumer stopped on
+# "App::Tuple is not a generic type" (an impl's target, a field, a class
+# variable's type), on "undefined constant Std::Traits::Hashable" (a
+# supertrait) and on "App::Exception is not a class" (a superclass). And an
+# impl of a parameterised trait came back `impl App::Lib::Into(T)(String)
+# for ...`, which does not parse.
+mkdir -p "$WORK/shadow/app"
+for sibling in tuple std exception; do
+  printf 'module app/%s\n\npub def %s_here : Int32\n  1\nend\n' "$sibling" "$sibling" > "$WORK/shadow/app/$sibling.iyi"
+done
+cat > "$WORK/shadow/app/lib.iyi" << 'IYI'
+module app/lib
+
+import app/tuple
+import app/std
+import app/exception
+import std/traits
+
+pub trait Show
+  abstract def show : String
+end
+
+impl Show for ::Tuple(*T) forall T
+  def show : String
+    "a tuple"
+  end
+end
+
+pub trait Keyed : ::Std::Traits::Hashable
+  abstract def key : Int32
+end
+
+pub trait Into(T)
+  abstract def into : T
+end
+
+pub class Oops < ::Exception
+  pub def note : String
+    "oops"
+  end
+end
+
+pub class Item
+  @pair : ::Tuple(Int32, Int32)
+  @@last : ::Tuple(Int32, Int32)?
+
+  pub def initialize(@pair : ::Tuple(Int32, Int32))
+    @@last = @pair
+  end
+
+  pub def self.last_sum : Int32
+    if last = @@last
+      last[0] + last[1]
+    else
+      0
+    end
+  end
+end
+
+impl ::Std::Traits::Hashable for Item
+  def hash_key : Int32
+    @pair[0] + @pair[1]
+  end
+end
+
+impl Keyed for Item
+  def key : Int32
+    hash_key * 10
+  end
+end
+
+impl Into(String) for Item
+  def into : String
+    "item"
+  end
+end
+IYI
+printf 'import app/lib::{Item, Oops}\n\nitem = Item.new({3, 4})\nputs({1, "x"}.show)\nputs Oops.new.note\nputs item.hash_key\nputs item.key\nputs item.into\nputs Item.last_sum\n' > "$WORK/shadow/m.iyi"
+(cd "$WORK/shadow" && "$IYI" build --emit-iyimod mods -o from-source m.iyi && mv app/lib.iyi lib.source &&
+  "$IYI" build --use-iyimod mods -o from-artifact m.iyi) > "$WORK/shadow.log" 2>&1
+shadow_expected="$(printf 'a tuple\noops\n7\n70\nitem\n7')"
+if [ "$(cd "$WORK/shadow" && ./from-source 2>&1)" = "$shadow_expected" ] &&
+  [ "$(cd "$WORK/shadow" && ./from-artifact 2>&1)" = "$shadow_expected" ]; then
+  echo "  names a sibling module shadows, through the artifact: as from source"
+else
+  echo "  names a sibling module shadows, through the artifact:"; sed -n '1,6p' "$WORK/shadow.log"; status=1
+fi
 
 echo
 echo "== what the command line refuses"

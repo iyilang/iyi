@@ -4,6 +4,29 @@
 
 ### Fixed
 
+- **A module's artifact names the types the compiler resolved from the
+  top level, so a module beside an `app/tuple`, an `app/std` or an
+  `app/exception` reads back as it compiled.** The declarations a
+  consumer compiles against are read inside the module, and the artifact
+  wrote a resolved name without its `::`: `impl Show for ::Tuple(*T)` came
+  back `for Tuple(*T)` and a field or class variable of type
+  `::Tuple(Int32, Int32)` came back `Tuple(Int32, Int32)`, each "App::Tuple
+  is not a generic type"; a supertrait `::Std::Traits::Hashable` beside an
+  `app/std` was "undefined constant Std::Traits::Hashable", and a
+  superclass `::Exception` beside an `app/exception` was "App::Exception
+  is not a class, it's a module". `std/traits` could not import
+  `std/tuple` for the same reason ("Std::Tuple is not a generic type"). An
+  impl of a parameterised trait did not read back at all: `impl
+  Into(String) for User` was written `impl App::Lib::Into(T)(String) for
+  App::Lib::User`, "expecting identifier 'for', not '('", and `iyi doc`
+  showed `impl Into(T)(String) for User`. Impl headers, supertraits,
+  superclasses, includes and field and class-variable types are written
+  global now (`::Tuple(::Int32, ::Int32)`), relative only where a
+  superclass or an include is a sibling, and an impl names its trait once.
+  `bench/verbs_exercise.sh` builds such a module and runs it from source
+  and through its artifact; the old compiler stopped on the
+  `Into(T)(String)` line.
+
 - **Taking a `Hash`'s oldest key and deleting it until none is left is
   linear: 40,000 keys take under a millisecond, where they took 197 ms.**
   `delete` marks an entry gone where it stands, and `each` started at entry

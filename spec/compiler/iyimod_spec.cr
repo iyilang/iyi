@@ -816,7 +816,7 @@ describe Iyi::IyiMod do
       artifact = Iyi::IyiMod.read(File.join("mods", "app", "box.iyimod"))
       secret = artifact.exports.types.find! { |declaration| declaration.name == "Secret" }
       secret.visibility.should eq "private"
-      secret.fields.should eq [{"@n", "Int32", ""}]
+      secret.fields.should eq [{"@n", "::Int32", ""}]
       # Headers, and only headers. The consumer cannot reach them and the
       # module's own object code already defines them — but a body that
       # travels calls them, and a call it cannot typecheck is refused before
@@ -1356,7 +1356,7 @@ describe Iyi::IyiMod do
 
       tally = artifact.exports.types.find { |type| type.name == "Tally" }.should_not be_nil
       tally.class_vars.map { |class_var| {class_var.name, class_var.type, class_var.value} }
-        .should eq [{"@@cache", "(String | Nil)", ""}, {"@@seen", "Int32", "0"}]
+        .should eq [{"@@cache", "(::String | ::Nil)", ""}, {"@@seen", "::Int32", "0"}]
       tally.class_vars.map(&.annotations).should eq [[] of String, [] of String]
 
       File.delete "app/counter.iyi"
@@ -2998,8 +2998,9 @@ describe Iyi::IyiMod do
       end
       declarations.should contain "pub abstract class Sink"
       declarations.should contain "pub class Doubler < Sink"
-      # The field, named and not printed: no `+`.
-      declarations.should contain "@sink : Boot::Sink::Sink\n"
+      # The field, named and not printed: no `+`, and global, because it is
+      # read inside the module.
+      declarations.should contain "@sink : ::Boot::Sink::Sink\n"
 
       File.delete "boot/sink.iyi"
 
@@ -4552,8 +4553,9 @@ describe Iyi::IyiMod do
       # In the order they were declared, because that order is the layout: a
       # field's offset is its position in this list, and a consumer compiling a
       # body of this module's has to reach the same field the module's own
-      # object code does.
-      declaration.fields.should eq [{"@item", "T", ""}, {"@count", "Int32", ""}]
+      # object code does. Global, the type parameter excepted: the declaration
+      # is read inside the module (`IyiMod.absolute_type`).
+      declaration.fields.should eq [{"@item", "T", ""}, {"@count", "::Int32", ""}]
     end
   end
 
@@ -4994,7 +4996,7 @@ describe Iyi::IyiMod do
     # reader of this file has to be able to tell from "carried and exported".
     text.should contain "  pub trait Greet"
     text.should contain "    def greet : String"
-    text.should contain "  impl Greet for User"
+    text.should contain "  impl ::Greet for ::User"
   end
 
   # II.6 keeps a trait's parameters and its associated types apart — the first
@@ -5036,7 +5038,7 @@ describe Iyi::IyiMod do
     # `generic` is how a type describes itself, not how anyone declares one.
     text.should contain "  pub trait Enumerable : Cmp"
     text.should contain "    type Elem"
-    text.should contain "  impl Std::Enumerable::Enumerable for Std::List::List(T) forall T : Cmp"
+    text.should contain "  impl ::Std::Enumerable::Enumerable for ::Std::List::List(T) forall T : Cmp"
     text.should contain "    type Elem = T"
   end
 
@@ -5060,10 +5062,10 @@ describe Iyi::IyiMod do
     text.should contain "pub trait Greet\n  abstract def greet : String\nend\n"
     # An `abstract def` ends at its signature and takes no `end` of its own.
     text.should_not contain "abstract def greet : String\n  end"
-    text.should contain "impl Greet for User\nend\n"
+    text.should contain "impl ::Greet for ::User\nend\n"
     # The impl comes after the type it targets, because the requirement check
     # reads the methods off the target rather than out of the impl's body.
-    text.index("pub trait Greet").not_nil!.should be < text.index("impl Greet for User").not_nil!
+    text.index("pub trait Greet").not_nil!.should be < text.index("impl ::Greet for ::User").not_nil!
   end
 
   it "renders a generic type and the impl that answers its associated type" do
@@ -5078,7 +5080,7 @@ describe Iyi::IyiMod do
 
     text.should contain "pub struct List(T)"
     text.should contain "  def each(& : (T -> Nil)) : Nil\n  end\n"
-    text.should contain "impl Std::Enumerable::Enumerable for Std::List::List(T) forall T\n  type Elem = T\nend\n"
+    text.should contain "impl ::Std::Enumerable::Enumerable for ::Std::List::List(T) forall T\n  type Elem = T\nend\n"
   end
 end
 

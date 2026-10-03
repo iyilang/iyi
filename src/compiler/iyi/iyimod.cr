@@ -2688,7 +2688,7 @@ module Iyi::IyiMod
       end
     artifact.exports.impls.each do |record|
       io << '\n'
-      header = render_impl_header(record)
+      header = render_impl_header(record, absolute: false)
       header = header.gsub("#{root}::", "") unless root.empty?
       io << header << '\n'
       record.methods.each do |method|
@@ -2868,19 +2868,83 @@ module Iyi::IyiMod
     end
   end
 
-  # An impl's declaration line — `impl Enumerable for List(T) forall T`.
-  def self.render_impl_header(record : ImplRecord) : String
-    String.build do |io|
-      io << "impl " << record.trait_name
+  # A resolved type's name, written so that it names that type wherever it
+  # is read.
+  #
+  # A type prints relative to the top level - `Tuple(Int32, Int32)`,
+  # `Std::Traits::Hashable` - and the declarations a consumer compiles
+  # against are read inside the module, where a name resolves from the
+  # module outwards. So a module beside it took the name for its own:
+  # `std/traits` writes `impl Hashable for ::Tuple(*T)` and imports
+  # `std/tuple`, its artifact said `impl ... for Tuple(*T)`, and the
+  # consumer answered "Std::Tuple is not a generic type" about a module the
+  # source had compiled. A field `@pair : ::Tuple(Int32, Int32)` beside an
+  # `app/tuple` came back the same way, and a supertrait
+  # `Std::Traits::Hashable` beside an `app/std` was "undefined constant".
+  #
+  # Every path in the name is made global, the arguments' as well.
+  # *parameters* are the type parameters in scope - the `T` of `List(T)`,
+  # an impl's `forall T` - which name no type and stay as they are.
+  #
+  # Text that does not parse as a type comes back as it went in. A virtual
+  # type inside an argument prints as `Array(IyiIO+)`, which no reader
+  # takes either way (`Iyi::Compiler#iyi_type_name`).
+  def self.absolute_type(text : String, parameters : Array(String) = [] of String) : String
+    return text if text.empty? || text == "?"
+    parser = Parser.new(text)
+    parser.filename = "type.iyi"
+    parser.next_token
+    type = parser.parse_bare_proc_type
+    parser.check :EOF
+    type.accept AbsolutePaths.new(parameters)
+    type.to_s
+  rescue SyntaxException
+    text
+  end
 
+  # The visitor half of `absolute_type`.
+  private class AbsolutePaths < Visitor
+    def initialize(@parameters : Array(String))
+    end
+
+    def visit(node : Path)
+      node.global = true unless node.names.size == 1 && @parameters.includes?(node.names.first)
+      false
+    end
+
+    def visit(node : ASTNode)
+      true
+    end
+  end
+
+  # An impl's declaration line — `impl Enumerable for List(T) forall T`.
+  #
+  # The trait and the target are the resolved pair (`ImplRecord`), and by
+  # default they are written `absolute_type`, which is how the consumer
+  # reads them back. Not in the record itself: the pair keys the impl's
+  # travelling bodies (`mono_body_container`) the same on both sides.
+  # *absolute* is false for the caller's view, which shortens names to the
+  # module's own root (`surface`).
+  def self.render_impl_header(record : ImplRecord, absolute : Bool = true) : String
+    String.build do |io|
+      parameters = record.free_variables.map(&.lchop('*'))
       arguments = record.trait_arguments
+
+      # A parameterised trait resolves to the generic, which prints with its
+      # own parameters, and the arguments this impl gives it follow. Written
+      # whole, `impl Into(String) for User` came back from its artifact as
+      # `impl App::Lib::Into(T)(String) for App::Lib::User`, and the consumer
+      # stopped on "expecting identifier 'for', not '('".
+      named = arguments.empty? ? record.trait_name : record.trait_name.partition('(')[0]
+      io << "impl " << (absolute ? absolute_type(named, parameters) : named)
+
       unless arguments.empty?
         io << '('
         arguments.join(io, ", ")
         io << ')'
       end
 
-      io << " for " << record.type_name
+      io << " for " << (absolute ? absolute_type(record.type_name, parameters) : record.type_name)
 
       free_variables = record.free_variables
       unless free_variables.empty?

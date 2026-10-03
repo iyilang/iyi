@@ -1132,8 +1132,7 @@ module Iyi
         # are the prelude's or another module's, and either way they arrive
         # with the type; an include under this module's namespace could not
         # have been written anywhere but here.
-        included = (own ? iyi_included_modules(type).select(&.starts_with?(own_prefix)) : [] of String)
-          .map { |name| iyi_absolute_name(name) }
+        included = own ? iyi_included_modules(type).select(&.lchop("::").starts_with?(own_prefix)) : [] of String
         # The fields of a type this file declares under a foreign name.
         # Nothing else on this side carries a field: a type the module does
         # not own arrives with its own, and one it owns is declared in the
@@ -1192,14 +1191,6 @@ module Iyi
       locations = type.locations
       return false if locations.nil? || locations.empty?
       locations.all? { |location| location.original_filename == filename }
-    end
-
-    # iyi: one name written so it resolves from anywhere, which is what the
-    # reopened section needs: its text is rendered inside the module, where
-    # `Float` is the module `Std::Float` before it is the prelude's type.
-    private def iyi_absolute_name(name : String) : String
-      return name if name.empty? || name.starts_with?("::")
-      "::#{name}"
     end
 
     # iyi: the imports' names written inside *type*'s own body, as the
@@ -1812,7 +1803,7 @@ module Iyi
         kind: iyi_type_kind(type),
         type_parameters: type_parameters,
         assoc_types: assoc_types,
-        supertraits: type.responds_to?(:supertraits) ? type.supertraits.map(&.to_s) : [] of String,
+        supertraits: type.responds_to?(:supertraits) ? type.supertraits.map { |supertrait| IyiMod.absolute_type(supertrait.to_s) } : [] of String,
         # None for the type the annotation above makes: its `@type_id` is
         # the compiler's, and a compiler handed one back refuses it —
         # "can't declare instance variables in ReferenceStorage(T)". What
@@ -1940,7 +1931,7 @@ module Iyi
       type.process_value
       written = type.@value.to_s
       return written unless written.empty? || written == name
-      type.aliased_type?.try(&.to_s) || written
+      type.aliased_type?.try { |aliased| IyiMod.absolute_type(aliased.to_s) } || written
     end
 
     # iyi: the types declared under *type* that a consumer needs to have rather
@@ -2235,13 +2226,13 @@ module Iyi
     # be writing what the keyword already says. Devirtualised, for the reason
     # `iyi_type_name` gives.
     #
-    # Written relative to the namespace the class is declared in, which is
-    # what makes `inheritance_order` able to place it: that walk matches the
-    # names in a declaration against its *siblings*, so a superclass spelled
-    # `Std::Io::Reader` beside a sibling called `Reader` matched nothing and
-    # `pub class Sized < Std::Io::Reader` was rendered above the class it
-    # names — `undefined constant Std::Io::Reader`, about a type eleven
-    # lines below.
+    # Written relative to the namespace the class is declared in when it is
+    # declared there too, which is what makes `inheritance_order` able to
+    # place it: that walk matches the names in a declaration against its
+    # *siblings*, so a superclass spelled `Std::Io::Reader` beside a sibling
+    # called `Reader` matched nothing and `pub class Sized < Std::Io::Reader`
+    # was rendered above the class it names — `undefined constant
+    # Std::Io::Reader`, about a type eleven lines below. See `iyi_edge_name`.
     private def iyi_superclass_name(type : Type) : String
       return "" unless type.responds_to?(:superclass)
       superclass = type.superclass
@@ -2254,11 +2245,26 @@ module Iyi
       # here, which is the one place the rule below is wrong.
       return name if type.is_a?(GenericReferenceStorageType)
       return "" if name == "Reference" || name == "Struct" || name == "Value"
-      if type.is_a?(NamedType)
-        prefix = "#{type.namespace}::"
-        return name.lchop(prefix) if prefix != "::" && name.starts_with?(prefix)
-      end
-      name
+      iyi_edge_name(type, name)
+    end
+
+    # iyi: a type a declaration of *type* is written in terms of - its
+    # superclass, an include - as the declaration's text names it.
+    #
+    # Relative to *type*'s namespace where it is a sibling, for
+    # `inheritance_order`, and global everywhere else, because the text is
+    # read inside the module: `pub class Oops < ::Exception` beside an
+    # `app/exception` came back `< Exception`, which there is
+    # `App::Exception`. See `IyiMod.absolute_type`.
+    private def iyi_edge_name(type : Type, name : String) : String
+      absolute = IyiMod.absolute_type(name, iyi_parameter_names(type))
+      type.is_a?(NamedType) ? absolute.lchop("::#{type.namespace}::") : absolute
+    end
+
+    # iyi: the type parameters *type* declares, which a name written inside
+    # it may use and which name no type.
+    private def iyi_parameter_names(type : Type) : Array(String)
+      type.as?(GenericType).try(&.type_vars) || [] of String
     end
 
     # iyi: the modules a type includes, written back as the renderer's
@@ -2278,9 +2284,9 @@ module Iyi
     # include as much as a plain module is and is not a `ModuleType`, which
     # is the distinction `Iyi::Bind` learned the same way.
     #
-    # Relative to the namespace, for the reason `iyi_superclass_name` is:
-    # `inheritance_order` places a declaration by matching these names
-    # against its siblings.
+    # Relative to the namespace where they are siblings, for the reason
+    # `iyi_superclass_name` is: `inheritance_order` places a declaration by
+    # matching these names against its siblings.
     private def iyi_included_modules(type : Type) : Array(String)
       names = [] of String
       return names unless type.responds_to?(:parents)
@@ -2288,7 +2294,6 @@ module Iyi
       return names unless parents
 
       superclass = type.responds_to?(:superclass) ? type.superclass : nil
-      prefix = type.is_a?(NamedType) ? "#{type.namespace}::" : "::"
       parents.each do |parent|
         next if superclass && parent.same?(superclass)
         next unless parent.is_a?(ModuleType) || parent.is_a?(GenericModuleInstanceType)
@@ -2300,8 +2305,7 @@ module Iyi
         # record; this is for what the author wrote `include` above.
         next if parent.trait?
 
-        name = parent.devirtualize.to_s
-        name = name.lchop(prefix) if prefix != "::" && name.starts_with?(prefix)
+        name = iyi_edge_name(type, parent.devirtualize.to_s)
         names << name unless names.includes?(name)
       end
       names
@@ -2690,7 +2694,7 @@ module Iyi
         # recorded as `?` rather than guessed at — the same convention an
         # unannotated signature takes, and equally visible in `mod dump`.
         resolved = variable.type?
-        fields << {name, resolved ? iyi_type_name(resolved) : "?", defaults[name]? || ""}
+        fields << {name, resolved ? iyi_type_name(resolved, type) : "?", defaults[name]? || ""}
       end
       fields
     end
@@ -2728,13 +2732,22 @@ module Iyi
     # measured are. A virtual type inside a generic argument —
     # `Array(IyiIO+)` — would still print as it prints; a rule that covers
     # what was measured is the one worth having.
-    private def iyi_type_name(type : Type) : String
-      if type.is_a?(UnionType) && type.union_types.any? { |member| member.devirtualize != member }
-        names = [] of String
-        type.union_types.each { |member| names << member.devirtualize.to_s }
-        return names.join(" | ")
-      end
-      type.devirtualize.to_s
+    #
+    # And global, every name in it, because the declaration is read inside
+    # the module: `@pair : ::Tuple(Int32, Int32)` beside an `app/tuple` came
+    # back `@pair : Tuple(Int32, Int32)` and the consumer said "App::Tuple is
+    # not a generic type". *owner* is the type the name is written in, whose
+    # parameters stay as they are. See `IyiMod.absolute_type`.
+    private def iyi_type_name(type : Type, owner : Type) : String
+      text =
+        if type.is_a?(UnionType) && type.union_types.any? { |member| member.devirtualize != member }
+          names = [] of String
+          type.union_types.each { |member| names << member.devirtualize.to_s }
+          names.join(" | ")
+        else
+          type.devirtualize.to_s
+        end
+      IyiMod.absolute_type(text, iyi_parameter_names(owner))
     end
 
     # iyi: a type's own class variables, for `TypeDecl#class_vars` (SPEC.md
@@ -2772,7 +2785,7 @@ module Iyi
         annotations = variable.thread_local? ? ["@[ThreadLocal]"] : [] of String
         # The same reading a field's type gets, and for the same reason.
         resolved = variable.type?
-        class_vars << IyiMod::ClassVarDecl.new(name, resolved ? iyi_type_name(resolved) : "?",
+        class_vars << IyiMod::ClassVarDecl.new(name, resolved ? iyi_type_name(resolved, type) : "?",
           initialiser, annotations)
       end
       class_vars

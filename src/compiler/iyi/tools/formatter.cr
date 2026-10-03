@@ -953,7 +953,9 @@ module Iyi
       found_comment = false
       found_first_newline = false
 
-      found_comment = skip_space
+      # A comment after the opener ends the line, and comment lines under it
+      # go with the elements: `x = [ # c` put the `# first` below at column 0.
+      found_comment = skip_space(@indent + 2)
       if found_comment || @token.type.newline?
         # add one level of indentation for contents if a newline is present
         offset = @indent + 2
@@ -1366,7 +1368,11 @@ module Iyi
 
         accept type
 
-        skip_space
+        # What follows the last type is the caller's, as after any other type:
+        # skipped here, the comment ending `def g : Int32 | Nil # c` was
+        # written with the comment lines under it at the `def`'s indentation
+        # rather than the body's.
+        skip_space unless last?(i, node.types) && !node.parens?
       end
 
       write_token :OP_RPAREN if node.parens?
@@ -1609,9 +1615,13 @@ module Iyi
           write_token " ", :OP_COLON, " "
           skip_space_or_newline
           accept bound
+          # What follows the last bound is the body's: skipped here, a comment
+          # ending the line was written with the comment lines under it at the
+          # `def`'s indentation rather than the body's.
+          break if i == last_where
           skip_space
           if @token.type.op_comma?
-            write ", " unless i == last_where
+            write ", "
             next_token_skip_space_or_newline
           end
         end
@@ -3758,8 +3768,9 @@ module Iyi
           accept supertrait
           # `skip_space` and not `skip_space_or_newline`: what follows the last
           # supertrait is the trait's body, and a comment on the next line
-          # belongs to it rather than to this line.
-          skip_space
+          # belongs to it rather than to this line - at the body's indentation,
+          # where `trait Num : Comparable # c` put it at the trait's own.
+          skip_space(@indent + 2)
           if @token.type.op_comma?
             write ", " unless last?(i, supertraits)
             next_token_skip_space_or_newline
@@ -3807,12 +3818,16 @@ module Iyi
         next_token_skip_space_or_newline
         type_vars.each_with_index do |type_var, i|
           write type_var
-          next_token_skip_space
+          # A comment ending the header is the body's, and so are the comment
+          # lines under it: `impl Show for Box(T) forall T # c` put them at
+          # the `impl`'s indentation.
+          next_token
+          skip_space(@indent + 2)
           if @token.type.op_colon?
             write " : "
             next_token_skip_space_or_newline
             accept node.type_var_bounds.not_nil![type_var]
-            skip_space
+            skip_space(@indent + 2)
           end
           if @token.type.op_comma?
             write ", " unless last?(i, type_vars)
@@ -4002,8 +4017,10 @@ module Iyi
             next_token_skip_space_or_newline
           end
         end
+        # What follows `)` is the caller's: skipped here, a comment ending
+        # `class Box(T) # c` was written with the comment lines under it at
+        # the class's indentation rather than its body's.
         write_token :OP_RPAREN
-        skip_space
       end
     end
 

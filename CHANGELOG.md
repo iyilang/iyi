@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **`fmt` indents the comment lines under a header that ends in a comment
+  with the body.** After `class Box(T) # c`, `module Foo(T) # c`,
+  `def g : Int32 | Nil # c`, `def f(x : T) : Nil where T : Foo # c`,
+  `impl Show for Box(T) forall T # c`, `trait Num : Comparable # c`,
+  `x = [ # c` or `h = { # c`, the comment line below went to the
+  header's own column - column 0 at the top level, 2 instead of 4 inside
+  a class - and stayed there on every pass. The header's last part wrote
+  the comment, its line break and the lines after it before the body's
+  indentation was set; it leaves them to the body now, as
+  `def f : Int32 # c` and `struct Foo # c` always did. (A union ending a
+  line before a comment line and a def is now set apart from them as any
+  other type is.) `spec/compiler/formatter/iyi_formatter_spec.cr` formats
+  eleven such headers; the old formatter wrote `# doc` at column 0 under
+  `class Box(T) # c`.
+
 - **`fmt` formats a macro whose body starts with a blank line and then a
   line at column 0.** `macro m` / (blank) / `{{ 1 }}` / `end` compiled,
   and `fmt` answered "there's a bug formatting", exit 1: the parser's

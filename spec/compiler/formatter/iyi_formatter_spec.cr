@@ -81,6 +81,21 @@ describe "Formatter on iyi" do
   assert_iyi_format "module m\n\ndef includes?(value : Elem) : Bool where Elem : Cmp\n  true\nend"
   assert_iyi_format "module m\n\npub def announce(item : T) : String forall T : Greet\n  item.greet\nend"
 
+  # A comment ending a header: the comment lines under it are the body's,
+  # where they went to the header's own column after type parameters, a
+  # union return type, `forall`, `where`, a supertrait or a `[`/`{`.
+  assert_iyi_format "class Box(T) # c\n  # doc\n  def f\n  end\nend"
+  assert_iyi_format "pub struct Box(T) # c\n  # doc\n  getter value : T\nend"
+  assert_iyi_format "module Foo(T) # c\n  # doc\n  def f\n  end\nend"
+  assert_iyi_format "def g : Int32 | Nil # c\n  # body\n  nil\nend"
+  assert_iyi_format "class A\n  def self.decode(x) : String | Err # c\n    # body\n    nil\n  end\nend"
+  assert_iyi_format "def f(x : T) : Nil where T : Foo # c\n  # body\n  nil\nend"
+  assert_iyi_format "impl Show for Box(T) forall T # c\n  # doc\n  def show : String\n    \"x\"\n  end\nend"
+  assert_iyi_format "impl Show for Box(T) forall T : Show # c\n  # doc\n  def show : String\n    \"x\"\n  end\nend"
+  assert_iyi_format "pub trait Num : Comparable # c\n  # doc\n  abstract def x : Int32\nend"
+  assert_iyi_format "x = [ # c\n  # first\n  1,\n]"
+  assert_iyi_format "h = { # c\n  # first\n  1 => 2,\n}"
+
   # Errors: propagation, recovery, and the panic that takes no default.
   assert_iyi_format "module m\n\nvalue = read(path)!"
   # A short block's call can propagate: `&.close!`, `&.size!.succ`.

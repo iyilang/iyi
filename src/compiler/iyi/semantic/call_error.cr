@@ -656,10 +656,14 @@ class Iyi::Call
           actual = actual_type.devirtualize
           str.puts
           str.puts
-          str << "`#{actual}` does not implement `#{wanted}`. Write "
-          str << "`impl #{wanted} for #{actual}` in the module that declares "
-          str << "`#{wanted}` or in the one that declares `#{actual}` — R-3 "
-          str << "allows those two and no others (SPEC.md IV.4)"
+          if actual.is_a?(UnionType)
+            iyi_union_lacks_trait(str, actual, wanted.as(Type), arg)
+          else
+            str << "`#{actual}` does not implement `#{wanted}`. Write "
+            str << "`impl #{wanted} for #{actual}` in the module that declares "
+            str << "`#{wanted}` or in the one that declares `#{actual}` — R-3 "
+            str << "allows those two and no others (SPEC.md IV.4)"
+          end
         end
 
         # iyi: a unit somebody arriving from Crystal has otherwise
@@ -681,6 +685,39 @@ class Iyi::Call
         str << ", "
       end
       str << element
+    end
+  end
+
+  # iyi: a union implements a trait when every member does, and an impl for
+  # the union itself is refused (SPEC.md II.1), so the advice names the
+  # members. It used to be "Write `impl Show for (Int32 | Nil)`", which the
+  # next build answered with "can't implement a trait for (Int32 | Nil),
+  # it's a union". A nil is the usual missing member, and there the answer
+  # is mostly the narrowing, not an impl.
+  private def iyi_union_lacks_trait(str : IO, actual : UnionType, wanted : Type, arg : ASTNode?) : Nil
+    lacking = actual.union_types.map(&.devirtualize).reject(&.implements?(wanted)).uniq!
+    str << "`#{actual}` does not implement `#{wanted}`: a union implements a trait when every member does"
+    if lacking.empty?
+      str << " (SPEC.md II.1)"
+      return
+    end
+    str << ", and "
+    to_sentence(str, lacking.map { |type| "`#{type}`" }, " and ")
+    str << (lacking.size == 1 ? " does not" : " do not")
+    str << " (SPEC.md II.1). "
+    if lacking.size == 1 && lacking.first.nil_type?
+      value = arg.is_a?(Var) ? arg.name : nil
+      if value
+        str << "#{value} can be nil here: narrow it first (`if #{value}`) or give the nil an answer (`#{value} || default`)"
+      else
+        str << "Narrow the nil first (`if value = ...`) or give it an answer (`... || default`)"
+      end
+      str << "; a nil with an answer of its own is `impl #{wanted} for Nil`, in the module that declares `#{wanted}`"
+    else
+      str << "A union's impl is not writable; write "
+      to_sentence(str, lacking.map { |type| "`impl #{wanted} for #{type}`" }, " and ")
+      str << ", each in the module that declares `#{wanted}` or in the one that declares the member — R-3 "
+      str << "allows those two and no others (SPEC.md IV.4)"
     end
   end
 

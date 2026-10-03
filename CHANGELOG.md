@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A nilable argument to a trait parameter is told to narrow the nil, not
+  to write an impl for the union.** `f(v)` with `v : Int32 | Nil` and
+  `f(x : Show)` said "Write `impl Show for (Int32 | Nil)` in the module
+  that declares `Show` or in the one that declares `(Int32 | Nil)`", and
+  writing that is refused: "can't implement a trait for (Int32 | Nil),
+  it's a union" (SPEC.md II.1). The advice names the members that lack
+  the impl now: "a union implements a trait when every member does, and
+  `Nil` does not (SPEC.md II.1). v can be nil here: narrow it first (`if
+  v`) or give the nil an answer (`v || default`)", and for other members
+  one `impl Show for Char` per member. `spec/compiler/semantic/iyi_spec.cr`
+  and `bench/agent_loop.py` check it; the old compiler advised the union
+  impl.
+
 - **`def group` is refused in an iyi file, as `def or` is.** III.4.9
   makes `group` a reserved name: a bare `group do ... end` is the task
   group wherever it is written. A class's own `def group(& : Spawner

@@ -224,6 +224,61 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # A union impl is refused (SPEC.md II.1), so the advice for a nilable
+    # argument was "Write `impl Show for (Int32 | Nil)`", which the next
+    # build refused.
+    it "names the narrowing, not a union impl, for a nilable argument to a trait" do
+      code = <<-CODE
+        trait Show
+          abstract def show : String
+        end
+
+        impl Show for Int32
+          def show : String
+            "i"
+          end
+        end
+
+        def f(x : Show) : String
+          x.show
+        end
+
+        def make(b : Bool) : Int32?
+          if b
+            1
+          end
+        end
+
+        v = make(true)
+        f(v)
+        CODE
+      assert_error code, "a union implements a trait when every member does, and `Nil` does not (SPEC.md II.1). v can be nil here: narrow it first (`if v`)"
+      exception = expect_raises(Iyi::TypeException) { semantic code }
+      exception.to_s.should_not contain("impl Show for (Int32 | Nil)")
+    end
+
+    it "names each member that lacks the trait" do
+      assert_error <<-CODE, "and `Char` and `String` do not (SPEC.md II.1). A union's impl is not writable; write `impl Show for Char` and `impl Show for String`"
+        trait Show
+          abstract def show : String
+        end
+
+        def f(x : Show) : String
+          x.show
+        end
+
+        def pick(b : Bool) : String | Char
+          if b
+            "s"
+          else
+            'c'
+          end
+        end
+
+        f(pick(true))
+        CODE
+    end
+
     it "says the narrowing form for an instance variable" do
       assert_error <<-CODE, "@v can be nil here: narrow it first (`if value = @v`)"
         class B

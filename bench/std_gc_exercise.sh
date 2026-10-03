@@ -106,6 +106,24 @@ else
   status=1
 fi
 
+echo
+echo "== a bare import is told how to reach the module's GC"
+# `import std/gc` keeps the module's names qualified (SPEC.md R-2b), so a
+# bare `GC` is the prelude's own. `GC.collect` was told "iyi's prelude has
+# no `collect` on GC:Module: it is small by rule" and pointed at
+# `iyi build --crystal`, with the module's `GC` one import away.
+printf 'import std/gc\nGC.collect\nputs 1\n' > "$WORK/bare-import.iyi"
+if "$IYI" check "$WORK/bare-import.iyi" >"$WORK/bare-import.log" 2>&1; then
+  echo "  the bare import type-checked (it should have been told to import GC)"
+  status=1
+elif grep -qF 'Import it by name, `import std/gc::{GC}`' "$WORK/bare-import.log"; then
+  echo '  told: "Import it by name, `import std/gc::{GC}`"'
+else
+  echo "  refused, but without the import:"
+  tail -5 "$WORK/bare-import.log" | sed 's/^/    /'
+  status=1
+fi
+
 # ---------------------------------------------------------------------------
 # What the allocating verbs refuse
 # ---------------------------------------------------------------------------

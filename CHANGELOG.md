@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`GC.collect` after a bare `import std/gc` is told to import `GC` by
+  name.** The bare import keeps the module's names qualified (SPEC.md
+  R-2b), so `GC` was the prelude's own, and the error said "iyi's
+  prelude has no `collect` on GC:Module: it is small by rule ... `iyi
+  build --crystal` gives a program Crystal's library instead", where
+  every other bare import gets the R-2b hint. When a loaded module
+  exports a type of the receiver's name that has the method, the error
+  says so now: "`GC` here is the prelude's, and `std/gc` exports a `GC`
+  that has `collect` ... Import it by name, `import std/gc::{GC}`".
+  `bench/std_gc_exercise.sh` checks it; the old compiler gave the
+  size-rule note.
+
 - **A package import with no requirement suggests the repository's
   `require` line.** `import example.test/user/liba` without an `iyi.mod`
   said to write `require example.test/user v1.2.3`: the last segment was

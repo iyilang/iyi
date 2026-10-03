@@ -1192,6 +1192,29 @@ class Iyi::Call
     nil
   end
 
+  # iyi: `GC.collect` after `import std/gc`: the bare import keeps the
+  # module's names qualified (SPEC.md R-2b), so `GC` is the prelude's own
+  # `GC` - which has no `collect` - and the error went on to the prelude's
+  # size rule and `--crystal`, while the module the file imported exports a
+  # `GC` that has it. The same R-2b answer `iyi_out_of_reach_hint` gives a
+  # function, for a type the prelude also declares.
+  private def iyi_shadowed_type_hint(def_name : String, owner, obj) : String?
+    return nil unless owner.is_a?(MetaclassType) && obj.is_a?(Path) && obj.names.size == 1
+    name = obj.names.first
+    exporting = [] of ModuleType
+    iyi_each_unit(program) do |mod|
+      next unless mod.exported_name?(name)
+      type = mod.types?.try &.[name]?
+      exporting << mod if type && !type.same?(owner.instance_type) && !type.metaclass.lookup_defs(def_name).empty?
+    end
+    return nil if exporting.empty?
+    written = exporting.map { |mod| iyi_written_path(mod) }
+    "`#{name}` here is the prelude's, and #{written.map { |path| "`#{path}`" }.join(" and ")} " \
+    "exports a `#{name}` that has `#{def_name}`, which this file has not brought into scope. " \
+    "Import it by name, `import #{written.first}::{#{name}}`, or write it as " \
+    "`#{exporting.first}::#{name}` (SPEC.md R-2b)"
+  end
+
   # The written form of a unit's path: `App::Greeter` is `app/greeter`, which
   # is what an import is spelled with and what the file is called.
   private def iyi_written_path(type : Type) : String
@@ -1393,6 +1416,8 @@ class Iyi::Call
                else          true
                end
         msg << '\n' << arrival if fits
+      elsif obj && (shadowed = iyi_shadowed_type_hint(def_name, owner, obj))
+        msg << '\n' << shadowed
       elsif obj && !similar_name && !participle && iyi_prelude_type?(owner)
         # iyi: a method Crystal's library has and this one does not, on a
         # type the prelude declares, with nothing near it in spelling:

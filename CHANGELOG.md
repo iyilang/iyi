@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **A program's error stream no longer carries "Unable to load debug
+  information" for an exception nobody printed.** On Windows every `raise`
+  loads the debug information (the stack cannot be walked without it), and
+  a failed load was printed there and then: under heavy parallel load
+  `iyi check -f json` put "Unable to load debug information:
+  SymInitializeW: (RuntimeError)" and a frame in front of its JSON, about
+  8 times in 50,000 runs. The failure is kept and printed the first time a
+  backtrace is decoded, which is what the load was for. Measured with DbgHelp
+  initialised beforehand, which makes the load fail every time: a rescued
+  `raise` printed the failure before the program's own first line, and
+  prints nothing now until the backtrace is asked for.
+  `spec/std/exception/call_stack_spec.cr` checks the order. [INFERENCE]
+  The intermittent failure under load is the same SymInitializeW error;
+  it was not reproduced in isolation (0 of 240).
+
 - **A generic that holds itself one level deeper is refused instead of
   overflowing the stack.** `struct S(T)` with `@x : S(Array(T))?` - used or
   not - `@x : S(S(T))?`, and `impl C for Box(T) forall T` with

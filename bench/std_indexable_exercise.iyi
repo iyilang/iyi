@@ -13,6 +13,7 @@ module bench/std_indexable_exercise
 
 import std/indexable::{Indexable, IndexableMutable}
 import std/enumerable::{Enumerable}
+import std/random::{Random}
 
 # Minimal custom sequence implementing ONLY the two requirements.
 # Does NOT implement `def each`. Indexable supplies `def each`, which then
@@ -162,18 +163,20 @@ assert_equal("10+20+30,20+30+40,30+40+50", cons_accum.join(","), "each_cons bloc
 s_default = arr.sample
 assert_true(arr.includes?(s_default), "sample default in range")
 
-s_seed1 = arr.sample(42)
-s_seed2 = arr.sample(42)
-assert_true(s_seed1 == s_seed2, "sample deterministic for same seed")
-
 s_block = arr.sample { |sz| 1 }
 assert_true(s_block == 20, "sample with custom block")
 
-# A negative seed is a seed: the checked `to_u64` panicked with "arithmetic
-# overflow" on every one. Its bits are the generator's input, so -1 is
-# 2^64 - 1 and lands on index 3 of 5, and the least Int32 on index 4.
-assert_true(arr.sample(-1) == 40, "sample with a negative seed")
-assert_true(arr.sample(-2147483648) == 50, "sample with the least seed")
+# `sample(Int32)` is a count, the only meaning it has: it was a seed on
+# `Indexable` and a count on an array with std/random imported, so
+# `xs.sample(3)` answered one element or three by the imports, and a
+# `Deque`'s answered 20 either way. A collection other than an array
+# chooses what an array chooses with the same generator.
+ten = MinimalSeq(Int32).new([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+ten_picked = ten.sample(3, Random.new(5))
+assert_equal("7,8,4", ten_picked.join(","), "a collection samples three as an array does")
+assert_true(ten.sample(Random.new(3)) == ten.to_a.sample(Random.new(3)), "a collection samples one as an array does")
+assert_true(ten.sample(3).uniq.size == 3, "sample(3) is three distinct elements")
+puts "  sample(n) is a count, and chooses what an array chooses"
 
 # Binary search
 bs_elem = arr.bsearch { |x| x >= 35 }
@@ -257,7 +260,7 @@ assert_true(seq_join_ns <= array_join_ns * 20 + 200_000_000_i64, "indexable join
 assert_equal("1,2,3,4,5", seq.to_a.join(","), "seq to_a")
 assert_true(seq.bsearch { |x| x >= 3 } == 3, "seq bsearch")
 assert_true(seq.bsearch_index { |x| x >= 3 } == 2, "seq bsearch_index")
-assert_true(seq.sample(10) >= 1 && seq.sample(10) <= 5, "seq sample seeded")
+assert_true(seq.sample(10).sorted.join(",") == "1,2,3,4,5", "seq sample of more than it holds is all of it")
 assert_true(seq.equals?(seq), "seq equals? self")
 
 # 12+ Enumerable methods on MinimalSeq:

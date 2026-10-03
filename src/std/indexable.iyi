@@ -38,6 +38,7 @@ module std/indexable
 
 import std/enumerable::{Enumerable}
 import std/traits::{Comparable, Hashable}
+import std/random::{Random}
 
 pub trait Indexable
   type Elem
@@ -290,21 +291,39 @@ pub trait Indexable
 
   # ---- sampling ------------------------------------------------------------
 
-  # Returns a sample element from the collection. Raises if empty.
-  def sample : Elem
+  # One element, or *n* distinct ones, chosen by `random`, a fresh generator
+  # when none is given, the way std/random's `Array#sample` chooses them:
+  # so a `Deque` makes the other library's choices in its order, as an
+  # array does. `sample(Int32)` was a seed here and a count there, so
+  # `[10, 20, 30, 40, 50].sample(3)` answered 20 without std/random and
+  # three elements with it, a `Deque`'s answered 20 either way, and
+  # `sample` answered the middle element on every run.
+  def sample(random : Random? = nil) : Elem
     raise "can't sample empty collection" if empty?
-    unsafe_fetch(size // 2)
+    rng = random || Random.new
+    unsafe_fetch(rng.rand(size))
   end
 
-  # Returns a pseudo-random element using a 64-bit linear congruential generator
-  # initialized with the given seed. Deterministic across runs for a given seed.
-  # The seed's bits are taken as they are: the checked `to_u64` panicked
-  # with "arithmetic overflow" for every negative seed.
-  def sample(seed : Int32) : Elem
-    raise "can't sample empty collection" if empty?
-    val = (seed.to_i64.unsafe_to_u64 &* 6364136223846793005_u64) &+ 1442695040888963407_u64
-    idx = (val % size.to_u64).to_i32
-    unsafe_fetch(idx)
+  def sample(n : Int32, random : Random? = nil) : Array(Elem)
+    raise "sample of a negative count: #{n}" if n < 0
+    picked = Array(Elem).new(n)
+    return picked if n == 0
+    rng = random || Random.new
+    if n == 1
+      picked << sample(rng) unless empty?
+      return picked
+    end
+    i = 0
+    while i < size
+      if i < n
+        picked << unsafe_fetch(i)
+      else
+        j = rng.rand(i + 1)
+        picked[j] = unsafe_fetch(i) if j < n
+      end
+      i = i + 1
+    end
+    picked.shuffle_in_place(rng)
   end
 
   # Returns a sample element using the index returned by the caller's block.

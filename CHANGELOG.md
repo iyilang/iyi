@@ -4,6 +4,26 @@
 
 ### Fixed
 
+- **`sample(n)` on any `Indexable` is *n* distinct elements, the count
+  std/random's `Array#sample` answers, and `sample` is a random
+  element.** `Indexable#sample(Int32)` took the number as the seed of a
+  generator of its own, so `[10, 20, 30, 40, 50].sample(3)` answered 20
+  without `import std/random` and three elements with it,
+  `Deque.new([10, 20, 30, 40, 50]).sample(3)` answered 20 either way, and
+  `sample` answered the middle element, 30, on every run; the other
+  library answers three random distinct elements and one random one.
+  `Indexable` has std/random's two now, `sample(random = nil)` and
+  `sample(n, random = nil)`, making the same draws in the same order: a
+  `Deque` of 1..10 sampled three with `Random.new(5)` picks `[7, 8, 4]`,
+  as an array here and the other library do. std/indexable imports
+  std/random for the generator. **The answer changes**, and
+  `sample(seed)` is gone; its one caller, `bench/std_indexable_exercise.iyi`,
+  takes a generator. That exercise checks a collection other than an
+  array choosing what an array chooses, and its `.sh` proves the check
+  fails with the reservoir broken, in place of the seed mutation; the old
+  module refused the check's `sample(3, Random.new(5))` ("given 2,
+  expected 0..1") and answered 20, 20 and 30 for the three calls above.
+
 - **`JSON::Any#to_s` is a string itself and null nothing, as
   `YAML::Any#to_s` and the other library answer them.** It was the JSON
   text for every kind, so `"hello #{doc["name"]}"` printed `hello "Ada"`

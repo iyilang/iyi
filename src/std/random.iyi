@@ -17,7 +17,9 @@
 # `Array#sample` and `sample(n)` take a generator, and use a fresh one
 # when handed none; they land here so a program that never asks for a
 # random number does not carry one. Each makes the other library's
-# choices in the other library's order.
+# choices in the other library's order, and `Indexable#sample` and
+# `sample(n)` in std/indexable make the same ones for a `Deque` or a
+# `Slice`.
 
 module std/random
 

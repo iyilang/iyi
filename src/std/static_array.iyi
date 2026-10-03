@@ -413,15 +413,12 @@ struct ::StaticArray(T, N)
     c
   end
 
+  # The text `to_s` builds, written as `BitArray#to_s(io)` writes it. It
+  # asked each element for `inspect(io)`, which no prelude type has, and
+  # `IyiIO` for `<<`, which only `import std/io` gives it: `to_s(STDOUT)`
+  # of a `StaticArray(Int32, 3)` did not compile, and `inspect(io)` with it.
   def to_s(io : IO) : Nil
-    io << "StaticArray["
-    i = 0
-    while i < N
-      io << ", " if i > 0
-      to_unsafe[i].inspect(io)
-      i += 1
-    end
-    io << ']'
+    io.write(to_s)
   end
 
   # Into one builder: adding each element to the text so far copied that

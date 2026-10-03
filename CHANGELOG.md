@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`StaticArray#to_s(io)` and `inspect(io)` compile and write what
+  `to_s` answers.** Each element was asked for `inspect(io)`, which no
+  prelude type has, and the `IyiIO` for `<<`, which only `import
+  std/io` gives it: `StaticArray[1, 2, 3].to_s(STDOUT)` was refused
+  with "wrong number of arguments for 'Int32#inspect' (given 1,
+  expected 0)", and without `std/io` with "undefined method '<<' for
+  IyiIO". Both write the text `to_s` builds now, as
+  `BitArray#to_s(io)` does. `bench/std_static_array_exercise.iyi`
+  writes both into an `IO::Memory`; the old module did not compile it.
+
 - **`OptionParser` reads `--color [WHEN]` as a value that may be left
   out.** The brackets were not read, so a bracketed value was a required
   one: `--color` last panicked "flag --color needs a value", `--color -v`

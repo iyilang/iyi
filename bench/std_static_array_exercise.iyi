@@ -39,6 +39,16 @@ array_ns = __iyi_monotonic_ns - started
 assert_true big_text == "StaticArray" + array_text, "to_s of 10,000 elements matches the array's"
 assert_true text_ns <= array_ns * 20 + 200_000_000_i64, "to_s: 10,000 elements took #{text_ns // 1000000} ms where to_a.to_s took #{array_ns // 1000000} ms"
 puts "  10,000 elements as to_a.to_s writes them, within the bound"
+# Into an IO, the same text: each element was asked for `inspect(io)`,
+# which no prelude type has, so neither of these compiled.
+import std/io::{Memory}
+
+written = Memory.new
+StaticArray(Int32, 3).new { |i| i + 1 }.to_s(written)
+written.write(" ")
+StaticArray(String, 2).new { |i| i == 0 ? "a" : "b" }.inspect(written)
+assert_str "StaticArray[1, 2, 3] StaticArray[\"a\", \"b\"]", written.to_s, "to_s(io) and inspect(io)"
+puts "  to_s(io) and inspect(io) write what to_s answers"
 
 puts "\n== compare"
 # `<=>` forwarded to a `Slice#<=>` that does not exist, so this section did

@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **An impl for a module that is not a trait is refused.** `impl Show
+  for M`, with `M` a plain module, was accepted, and every type that
+  wrote `include M` acquired the trait with no impl of its own for R-3 to
+  check: a `struct Y; include M` printed `via M` for `Y.new.show` and
+  `true` for `Y.new.is_a?(Show)`, and an `impl Show for Y` beside it
+  was accepted too, where a second impl of one trait is refused. It
+  answers "can't implement Show for M, it's a module. A trait is
+  implemented for a type, and a module is not one: every type that
+  includes M would get Show with no impl of its own for R-3 to check"
+  now, and SPEC.md II.8's table has the row. `bench/verbs_exercise.sh`
+  and `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  checked the program clean.
+
 - **A program whose own threads hold every core no longer pays
   seconds for its first collection.** The first collection starts the
   mark helpers, and it waited for each to reach its park, which a new

@@ -238,6 +238,12 @@ refuses "a file that is not there" "no such file" -- "$IYI" run "$WORK/nope.iyi"
 refuses "a directory as the entry" "is a directory, not a source file" -- "$IYI" run "$WORK"
 refuses "a directory where check wants a file" "is a directory" -- "$IYI" check "$WORK"
 refuses "two module headers in one file" "a file declares one module" -- "$IYI" run twoheaders.iyi
+# An impl for a module that is not a trait gave every type including the
+# module the trait, with no impl of its own for R-3 to check: `struct Y;
+# include M` answered `is_a?(Show)` true and ran M's `show`.
+printf 'trait Show\n  abstract def show : String\nend\n\nmodule M\nend\n\nimpl Show for M\n  def show : String\n    "via M"\n  end\nend\n\nstruct Y\n  include M\nend\n\nputs Y.new.show\n' > implmodule.iyi
+refuses "an impl for a module" "can't implement Show for M, it's a module" -- \
+  "$IYI" check implmodule.iyi
 # A header after an `import` is the file's only header in the wrong place.
 # It was told the file "already declares `no module`" and that
 # `latehead` belongs in `latehead.iyi` - said to `latehead.iyi`.

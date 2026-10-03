@@ -931,6 +931,33 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # A module that is not a trait is refused as a target for the reason a
+    # written `include Greet` is: an impl for it gave every includer the
+    # trait with no impl of its own, and `struct Y; include M` answered
+    # `is_a?(Showable)` true.
+    it "refuses to implement a trait for a module" do
+      assert_error <<-CODE, "can't implement Showable for M, it's a module. A trait is implemented for a type"
+        trait Showable
+          abstract def show : Int32
+        end
+
+        module M
+        end
+
+        impl Showable for M
+          def show : Int32
+            1
+          end
+        end
+
+        struct Y
+          include M
+        end
+
+        Y.new.show
+        CODE
+    end
+
     it "reports a requirement the impl does not satisfy, at the impl" do
       # Crystal's abstract-def check reports at the point the type is first
       # used and names the type. This names the impl and the method.

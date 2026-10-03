@@ -1764,7 +1764,7 @@ as a separate kind of type would mean reimplementing restriction matching,
 union dispatch and codegen to arrive back where it started.
 
 So `TraitType` is a *subclass* of the module type. What it adds is the ability
-to refuse four things:
+to refuse five things:
 
 | Written | Refused because |
 |---|---|
@@ -1772,6 +1772,7 @@ to refuse four things:
 | names imported from `Greet` (`::*` or `::{...}`) | A trait exports no names to bring into scope. By II.3 rule 1 a trait method is resolved from the receiver, never from an import's names, so the two never meet. |
 | `impl SomeModule for X` | A module has no requirements to satisfy and nothing for R-3 to check. Only a trait is implementable. |
 | `impl Greet for SomeTrait` | A blanket impl in disguise, refused for the reason II.7 gives. |
+| `impl Greet for SomeModule` | The `include` row by another road: every type that includes the module gets the trait with no impl of its own for R-3 to check. `impl Show for M` was accepted, and a `struct Y; include M` answered `is_a?(Show)` true. |
 
 An import's list may still *name* a trait:
 `import app/show::{Showable}` loads the module and selects a type from it, which

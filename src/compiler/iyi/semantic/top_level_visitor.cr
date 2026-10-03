@@ -685,6 +685,17 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       node.target.raise "can't implement #{trait_type} for #{target_type}, it's a trait. A trait is implemented for a type, and a trait is not one — to give every implementer of #{target_type} a default #{trait_type}, iyi has no blanket impls (SPEC.md II.7)"
     end
 
+    # And a module that is not a trait, for the same reason a written
+    # `include Greet` is refused: every type that includes the module gets
+    # the trait with no impl of its own for R-3 to check. `impl Show for M`
+    # was accepted, and a `struct Y` and a `class Z` that each wrote
+    # `include M` answered `is_a?(Show)` true and ran M's `show`; a second,
+    # `impl Show for Y` beside it was accepted too, where a second impl is
+    # refused everywhere else.
+    if target_type.module?
+      node.target.raise "can't implement #{trait_type} for #{target_type}, it's a module. A trait is implemented for a type, and a module is not one: every type that includes #{target_type} would get #{trait_type} with no impl of its own for R-3 to check, which is the `include` hole II.8 refuses — implement #{trait_type} for each type instead (SPEC.md II.8)"
+    end
+
     unless target_type.is_a?(ModuleType)
       node.target.raise "can't implement a trait for #{target_type}, it's a #{target_type.type_desc}"
     end

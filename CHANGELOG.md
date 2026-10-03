@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **A panic a `std` module raises prints no site when the module comes
+  from its artifact, as it prints none built from source.** `raise` knew a
+  library file by `src/std/` and `src/iyi/` alone, so `Deque(Int32).new.pop`
+  built with `--use-iyimod mods` printed `at mods\std\deque.iyimod:297`
+  under the panic, a line in the library that is not where the bug is, and
+  the two builds of one program disagreed. A `.iyimod` path under a `std`
+  directory is a library site now. `bench/std_exercise.sh` checks it; the
+  old prelude printed that line.
+
 - **A struct with no `==` of its own equals another of its type whose
   fields are equal, as the other library's `Struct#==` has it.** `Object#==`
   answers false, so a struct was not even equal to itself: for `b =

@@ -9093,13 +9093,15 @@ end
   # directory's separator the platform's and the module path's `/`, and
   # `raise` looked for `/src/std/` alone: every panic `std` raised there
   # named the library's own line - one a platform arm had moved, at
-  # that - where the rule is that it names none.
-  private def __iyi_backslashed_library_site?(file : String) : Bool
-    file.includes?("\\src\\iyi") || file.includes?("\\src\\std")
+  # that - where the rule is that it names none. Nor does a `std` module
+  # read from its artifact, `mods\std\deque.iyimod`: one did, so a build
+  # from artifacts printed a line its build from source did not.
+  private def __iyi_native_library_site?(file : String) : Bool
+    file.includes?("\\src\\iyi") || file.includes?("\\src\\std") || (file.ends_with?(".iyimod") && file.includes?("\\std\\"))
   end
 {% else %}
-  private def __iyi_backslashed_library_site?(file : String) : Bool
-    false
+  private def __iyi_native_library_site?(file : String) : Bool
+    file.ends_with?(".iyimod") && file.includes?("/std/")
   end
 {% end %}
 
@@ -9120,7 +9122,7 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
   __iyi_say("\n")
   # The site, when it is the program's; a panic the library raises names
   # the library's own line, which is not where the bug is, and prints none.
-  unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/") || __iyi_backslashed_library_site?(file)
+  unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/") || __iyi_native_library_site?(file)
     __iyi_say("  at ")
     __iyi_say(file)
     __iyi_say(":")

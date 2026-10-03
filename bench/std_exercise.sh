@@ -496,6 +496,32 @@ else
 fi
 
 echo
+echo "== a panic std raises names no site from its artifact either"
+# A panic the library raises prints no site, the library's own line not
+# being where the bug is - but that test knew `src/std/` and not an
+# artifact's path, and from artifacts `Deque#pop` of an empty deque printed
+# `at mods\std\deque.iyimod:297`, which its build from source did not.
+site="$WORK/r1/panic_site"
+mkdir -p "$site/mods"
+printf 'import std/deque::{Deque}\n\nDeque(Int32).new.pop\n' > "$site/pop.iyi"
+if (cd "$site" && "$IYI" build --emit-iyimod mods -o from-source pop.iyi \
+      && "$IYI" build --use-iyimod mods -o from-artifact pop.iyi) > "$site/build.log" 2>&1; then
+  "$site/from-source" > "$site/source.out" 2>&1
+  "$site/from-artifact" > "$site/artifact.out" 2>&1
+  # The first line and the absence of a site, not the whole stream: darwin
+  # prints a backtrace after it, and its addresses differ between builds.
+  if [ "$(head -1 "$site/source.out")" != "$(head -1 "$site/artifact.out")" ] || grep -q '^  at ' "$site/artifact.out"; then
+    echo "  FAIL: from artifacts the panic reads"; sed -n '1,4p' "$site/artifact.out" | sed 's/^/    /'
+    status=1
+  else
+    echo "  both print: $(head -1 "$site/artifact.out")"
+  fi
+else
+  echo "  FAIL: did not build: $(grep -m1 -E 'Error|BUG' "$site/build.log" | cut -c1-140)"
+  status=1
+fi
+
+echo
 echo "== and on the platforms this runner is not"
 # The front end only, which is where a platform differs: a module's
 # `{% if flag?(:darwin) %}` branch declares a different `lib` with

@@ -4931,6 +4931,9 @@ module Iyi
 
         write_line unless @wrote_newline
         write_indent
+      elsif @wrote_newline
+        # A comment after the last section ended the line.
+        write_indent
       end
 
       write_token :OP_RPAREN
@@ -4962,23 +4965,32 @@ module Iyi
 
       parts.each_with_index do |part, i|
         yield part
-        skip_space
+        # A comment ending the line leaves its newline to the checks below,
+        # which put the next section under the first colon. Written with the
+        # newline, it left the next `: ...` at column 1, and a comment line
+        # between two sections went up to the end of the line before it,
+        # with a blank line after it that a second pass turned into the
+        # column-1 layout.
+        found_comment = skip_space(consume_newline: false)
 
         if @token.type.op_comma?
           write "," unless last?(i, parts)
-          next_token_skip_space
+          next_token
+          found_comment = skip_space(consume_newline: false)
         end
 
         if @token.type.newline?
           if last?(i, parts)
-            next_token_skip_space_or_newline
+            skip_space_or_newline(colon_column, last: true)
             if @token.type.op_colon? || @token.type.op_colon_colon?
-              write_line
+              write_line unless @wrote_newline
               write_indent(colon_column)
+            elsif found_comment
+              write_line unless @wrote_newline
             end
           else
             consume_newlines
-            write_indent(last?(i, parts) ? colon_column : column)
+            write_indent(column)
             skip_space_or_newline
           end
         else

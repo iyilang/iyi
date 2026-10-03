@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`fmt` keeps an `asm` section under the first colon after a comment,
+  and settles on it in one pass.** A comment ending an operand section's
+  line was written with its line break, and the next `: ...` went to
+  column 1. A comment line between two sections went up to the end of the
+  line before it, with a blank line under it, and a second `fmt` moved the
+  next section to column 1: `fmt` and then `fmt --check` on such a file
+  answered "produced changes", exit 1. The comment stays after its
+  section, a comment line goes under the colons, and the sections stay
+  lined up. `spec/compiler/formatter/iyi_formatter_spec.cr` formats both
+  layouts, and now formats every case's output a second time; the old
+  formatter wrote the section after `"={rax}"(leaf) # c` as
+  ` : "{rax}"(1_u64))`, at column 1.
+
 - **A def a macro expands names the types its own file sees, so every
   std module compiles beside `std/bool` again.** Code a macro expands is
   located in a virtual file, and the import wall (SPEC.md R-1) read that

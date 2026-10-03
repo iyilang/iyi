@@ -9,12 +9,15 @@ require "../../../src/compiler/iyi/formatter"
 # a different language from the one it is about.
 #
 # Every case here is written the way this repository writes it, so what these
-# assert is that the formatter leaves correct code alone. The two that change
-# something are the ones that show it is running at all.
+# assert is that the formatter leaves correct code alone, and that a second
+# pass over what it wrote changes nothing. The cases that change something
+# show it is running at all, or that a comment or a trailing space no longer
+# decides the layout.
 private def assert_iyi_format(input, output = input, file = __FILE__, line = __LINE__)
   it "formats #{input.inspect}", file, line do
     result = Iyi.format("#{input}\n", filename: "spec.iyi")
     result.should eq("#{output}\n"), file: file, line: line
+    Iyi.format(result, filename: "spec.iyi").should eq(result), file: file, line: line
   end
 end
 
@@ -89,6 +92,14 @@ describe "Formatter on iyi" do
   # Recovery on the line under its call, as a call chain is broken.
   assert_iyi_format "module m\n\nvalue = read(path)\n  .or(0)"
   assert_iyi_format "module m\n\nvalue = read(path)\n  .or_panic"
+
+  # asm: a comment after an operand section keeps the next section under
+  # the first colon, where it went to column 1; a comment line between two
+  # sections stays on its line there, where it went up to the line before
+  # with a blank line after it, and a second pass moved the section again.
+  assert_iyi_format "def f\n  asm(\"cpuid\" : \"={rax}\"(leaf) # c\n              : \"{rax}\"(1_u64))\nend"
+  assert_iyi_format "def f\n  asm(\"cpuid\" : \"={rax}\"(leaf)\n              : \"{rax}\"(1_u64)\n# c\n              : \"rbx\")\nend",
+    "def f\n  asm(\"cpuid\" : \"={rax}\"(leaf)\n              : \"{rax}\"(1_u64)\n              # c\n              : \"rbx\")\nend"
 
   # And the list itself, held against the parser's, because a case per
   # declaration only helps while the cases are all of them. `parse_pub` is

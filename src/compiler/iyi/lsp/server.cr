@@ -3067,8 +3067,14 @@ module Iyi::Lsp
             chain = nest_spans(collector.spans)
 
             if chain.empty?
+              # iyi: the position the client asked about, kept inside the
+              # document: past a line's end or the last line it was echoed
+              # as given, `{line, 10000}`, a range in no document.
+              at_line = line0.clamp(0, Math.max(text.ends_with?('\n') ? lines.size : lines.size - 1, 0))
+              at_text = lines[at_line]? || ""
+              at_char = char.clamp(0, Lsp.character_of(at_text, at_text.size + 1))
               json.object do
-                json.field "range" { range(json, line0, char, line0, char) }
+                json.field "range" { range(json, at_line, at_char, at_line, at_char) }
               end
             else
               write_selection(json, chain, chain.size - 1, lines)

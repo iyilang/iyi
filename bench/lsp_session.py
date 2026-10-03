@@ -542,6 +542,18 @@ def fuzz_steps(c, work):
     step("52r", "after a quiet spell retires the worker, definition still names the callee written there",
          lines == [[2], [6]], str(lines))
 
+    # 52s. A selection range asked where no node is - past a line's end,
+    # past the last line - echoed the position as given, a range outside
+    # the document.
+    short = "module short\n\nputs 1\n"
+    uri = opened(c, work, "short.iyi", short)
+    reply = c.send("textDocument/selectionRange", {
+        "textDocument": {"uri": uri},
+        "positions": [{"line": 2, "character": 40}, {"line": 90, "character": 7}]})
+    got = [(r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in reply.get("result") or []]
+    step("52s", "a selection range asked outside the text stays inside it",
+         len(got) == 2 and got[0][0] == 2 and got[0][1] <= 6 and got[1] == (3, 0), str(got))
+
 
 def main():
     watchdog(180)

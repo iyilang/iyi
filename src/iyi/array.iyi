@@ -362,11 +362,11 @@ class Array(T)
   end
 
   # The copy, with the comparison written out. One body, because the difference
-  # between the pair is which array it runs on.
-  def sorted(&block : T, T -> Int32) : Array(T)
-    copy = dup
-    copy.sort_in_place(&block)
-    copy
+  # between the pair is which array it runs on. The block is handed on through
+  # `yield`, not captured: a captured block is kept to call later, and `!` in
+  # it was refused as "maybe by a task" although the sort runs it here.
+  def sorted(& : T, T -> Int32) : Array(T)
+    dup.sort_in_place { |a, b| yield a, b }
   end
 
   # Sorted on a key each element answers, ascending by `<`: the same pair
@@ -384,10 +384,8 @@ class Array(T)
     self
   end
 
-  def sorted_by(&block : T -> U) : Array(T) forall U
-    copy = dup
-    copy.sort_in_place_by(&block)
-    copy
+  def sorted_by(& : T -> U) : Array(T) forall U
+    dup.sort_in_place_by { |value| yield value }
   end
 
   # `first` on an empty array is a mistake rather than a nil: the array knows

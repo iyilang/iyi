@@ -360,6 +360,31 @@ asked_by = asked.sorted_by { |x| x }
 assert_int(AskedCount.less, element_questions, "array: sorted_by asks < as often as sorted")
 assert_true(asked_sorted[0].value == 0 && asked_by[4999].value == asked_sorted[4999].value, "array: the one-question sorts agree")
 
+# `!` in a sort's block returns from the def around it, as in `each`'s:
+# the sort runs the block before it answers. `sorted` and `sorted_by`
+# captured their block to hand it on, and `!` in a captured one was refused
+# as "kept and called later, maybe by a task".
+class BadKey
+end
+
+impl Error for BadKey
+  def message : String
+    "a negative key"
+  end
+end
+
+def key_of(x : Int32) : Int32 | BadKey
+  x < 0 ? BadKey.new : x
+end
+
+def by_checked_key(xs : Array(Int32)) : Array(Int32) | BadKey
+  xs.sorted_by { |x| key_of(x)! }.sorted { |a, b| key_of(b)! < key_of(a)! ? 1 : 0 }
+end
+
+checked = by_checked_key([3, 1, 2])
+assert_true(checked.is_a?(Array(Int32)) && checked == [1, 2, 3], "array: `!` in sorted_by's and sorted's blocks")
+assert_true(by_checked_key([3, -1, 2]).is_a?(BadKey), "array: `!` in a sort's block returns the error")
+
 # Every key type the prelude has spreads its keys: a type without a `hash`
 # of its own hashes to its type id, so all its keys share one slot and a
 # table of them is a list searched from the front - two million `Int64`

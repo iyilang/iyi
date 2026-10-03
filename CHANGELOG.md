@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`!` works inside the blocks of `Array#sorted` and `#sorted_by`.**
+  Both captured their block only to hand it to `sort_in_place` and
+  `sort_in_place_by`, so `xs.sorted_by { |x| key_of(x)! }` in a def
+  returning `Array(Int32) | BadKey` was refused with "`!` can't propagate
+  out of a block that runs as a proc ... it is kept and called later,
+  maybe by a task", while `each`, `select`, `sum` and `map` took the same
+  `!`. The block runs before the sort answers, and both now hand it on
+  through `yield`, so `!` returns the error from the def. Checked in
+  `bench/collections_exercise.iyi`; the old prelude refused that file.
+
 - **A group's join re-raises the first task that panicked, not the last
   one spawned.** The join owes one re-raise for the panics nobody read,
   and it walked its children newest first: two tasks that both panicked,

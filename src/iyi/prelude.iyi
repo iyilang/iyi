@@ -3817,15 +3817,23 @@ require "./file"
       # debug build). On Windows the committed limit bounds it, because a
       # touch below the guard page faults. A debug build's own `collect`
       # frame is above the cleared stretch and can still hold such a word.
+      # The loop calls nothing: a store through `IyiHeap.write64`, not
+      # inlined in a `--release --emit-iyimod` build, pushed its return
+      # address into the stretch it was clearing and returned to 0. Off
+      # Windows the 128 bytes under the stack pointer are the red zone a
+      # leaf like this one may keep its locals in, so they are left alone.
       @[NoInline]
       def self.clear_dead_stack : Nil
         high = stack_pointer
+        {% unless flag?(:win32) %}
+          high = high - 128_u64
+        {% end %}
         low = high - 2048_u64
         {% if flag?(:win32) %}
           low = stack_limit if low < stack_limit
         {% end %}
         while low < high
-          IyiHeap.write64(low, 0_u64)
+          Pointer(UInt64).new(low).value = 0_u64
           low = low + 8_u64
         end
       end

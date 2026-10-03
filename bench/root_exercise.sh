@@ -210,6 +210,20 @@ elif ! grep -q "all root checks passed" "$WORK/roots-release.out" 2>/dev/null; t
 fi
 
 echo
+echo "== a collection in a --release build that writes artifacts"
+# The dead-stack clearing stored through a call that such a build does not
+# inline, and the call's return address sat in the stretch it cleared:
+# std_slice_exercise, built so, died of a memory fault at its first
+# collection.
+if ! "$IYI" build --release --emit-iyimod "$WORK/mods-rel" -o "$WORK/slice-rel" "$REPO/bench/std_slice_exercise.iyi" >"$WORK/slice-rel.build.log" 2>&1; then
+  echo "  the --release --emit-iyimod build failed:"; sed -n '1,8p' "$WORK/slice-rel.build.log"; status=1
+elif ! "$WORK/slice-rel" >"$WORK/slice-rel.out" 2>&1; then
+  echo "  a --release --emit-iyimod build died: $(tail -1 "$WORK/slice-rel.out")"; status=1
+else
+  echo "  std_slice_exercise built --release --emit-iyimod collects and ends"
+fi
+
+echo
 echo "== a helper the top level called once leaves nothing in its frame"
 # An optimised build inlined `make` - one call site, which LLVM inlines
 # whatever its size - into `__iyi_main`, whose frame lives as long as the

@@ -680,7 +680,11 @@ module Iyi::IyiMod
     # of a `lib` the library declares, and false of one only the shard has,
     # where there is no other copy. `sqlite3` writes `@[Link("sqlite3")] lib
     # LibSQLite3`, the consumer's copy of that lib arrived bare, nothing asked
-    # for `-lsqlite3`, and the link ended on `sqlite3_value_text`.
+    # for `-lsqlite3`, and the link ended on `sqlite3_value_text`. And the
+    # ones only a macro reads, because a def using `{{@type}}` is expanded
+    # again on the far side: `@[Shop::Priced] class Report` arrived bare and
+    # its `{{ @type.annotation(Shop::Priced) }}` answered false there (see
+    # `Iyi::Compiler#iyi_read_annotations`).
     #
     # Text, like `macros` and `funs` beside it: an annotation is source a
     # reader parses back, and translating it through a record would be a second
@@ -2121,7 +2125,7 @@ module Iyi::IyiMod
   end
 
   private def self.inheritance_order(types : Array(TypeDecl)) : Array(TypeDecl)
-    return types if types.all? { |declaration| declaration.superclass.empty? && declaration.includes.empty? }
+    return types if types.all? { |declaration| declaration.superclass.empty? && declaration.includes.empty? && declaration.annotations.empty? }
 
     by_name = types.to_h { |declaration| {declaration.name, declaration} }
     ordered = [] of TypeDecl
@@ -2139,7 +2143,10 @@ module Iyi::IyiMod
       # whole text found nothing (`undefined constant SessionMethods`), and
       # matching only the head left the arguments behind it (`undefined
       # constant Statement`).
-      needed = [declaration.superclass].concat(declaration.includes)
+      # And the annotations above it, which are resolved where they stand
+      # too: an `@[Priced]` read back above `annotation Priced` names
+      # nothing yet (`TypeDecl#annotations`).
+      needed = [declaration.superclass].concat(declaration.includes).concat(declaration.annotations)
       needed.each do |written|
         # Split by hand rather than with a literal: a regex in the compiler's
         # own source is a link against PCRE2, and `bench/dependency_floor.sh`

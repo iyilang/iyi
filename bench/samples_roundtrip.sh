@@ -293,8 +293,12 @@ reach "reading it --release" use-release --release --use-iyimod modsr
 # `abstract_generic` came back as `pub abstract generic class GA(T)`;
 # `empty_body` ended on `G(Int32)@G(T)#noop:Nil`; `field_default` was refused
 # for "code inside a type body that has to run"; `hooks` said `undefined
-# method 'kind' for Main::Mine`; and `macro_def` put `class ::Main::User` in
-# the library's artifact - `superclass mismatch for class Main::User`.
+# method 'kind' for Main::Mine`; `macro_def` put `class ::Main::User` in
+# the library's artifact - `superclass mismatch for class Main::User`; and
+# `annotated`, whose bodies `macro_def` made travel, read `@type` on a
+# declaration that arrived without its annotations: `price` answered 0 for
+# the library's own `@[Priced(3)] class Basket`, and the module-private
+# `Zone` was `undefined constant Zone`.
 TRAVEL="$WORK/travel"
 travel() { # travel <case> <expected output>, with $TRAVEL/<case>/{kit/lib.iyi,main.iyi}
   local name="$1" dir="$TRAVEL/$1"
@@ -319,7 +323,7 @@ travel() { # travel <case> <expected output>, with $TRAVEL/<case>/{kit/lib.iyi,m
     echo "travel: $name answers from its artifact as from source"
   fi
 }
-mkdir -p "$TRAVEL"/{impl_block,abstract_generic,empty_body,field_default,hooks,macro_def,unreached}/kit
+mkdir -p "$TRAVEL"/{impl_block,abstract_generic,empty_body,field_default,hooks,macro_def,annotated,unreached}/kit
 cat > "$TRAVEL/impl_block/kit/lib.iyi" <<'IYI'
 module kit/lib
 
@@ -499,6 +503,44 @@ end
 puts "#{User.new.type_name} #{Model.new.type_name}"
 IYI
 travel macro_def "Main::User Kit::Lib::Model"
+# `Basket` sorts above `Priced`, so the annotation is only declared before
+# the type it is written over if the reader orders it there.
+cat > "$TRAVEL/annotated/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub annotation Priced
+end
+
+annotation Zone
+end
+
+@[Priced(3)]
+@[Zone]
+pub class Basket
+  def price : Int32
+    {{ (found = @type.annotation(Priced)) ? found[0] : 0 }}
+  end
+
+  def zoned? : Bool
+    {{ @type.annotation(Zone) ? true : false }}
+  end
+end
+IYI
+cat > "$TRAVEL/annotated/main.iyi" <<'IYI'
+module main
+
+import kit/lib::*
+
+class Bag < Basket
+end
+
+@[Priced(5)]
+class Box < Basket
+end
+
+puts "#{Basket.new.price} #{Bag.new.price} #{Box.new.price} #{Basket.new.zoned?} #{Bag.new.zoned?}"
+IYI
+travel annotated "3 0 5 true false"
 
 # And a method the build writing the artifact never called, which the
 # artifact declares and has no machine code for (SPEC.md IV.1g). It is

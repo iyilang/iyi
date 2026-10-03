@@ -1807,6 +1807,7 @@ module Iyi
       if type.is_a?(GenericReferenceStorageType)
         annotations << "@[Primitive(:ReferenceStorageType)]"
       end
+      annotations.concat iyi_read_annotations(type)
 
       IyiMod::TypeDecl.new(
         name: name,
@@ -2001,6 +2002,28 @@ module Iyi
           next
         end
 
+        # An annotation the module keeps to itself, because what travels is
+        # written under it: `iyi_read_annotations` puts `@[Zone]` above a type
+        # and a travelling body asks `{{ @type.annotation(Zone) }}`, and a
+        # consumer without it said `undefined constant Zone`. It has nothing
+        # but its name, as an exported one has, and no `private` in front:
+        # unmarked is what keeps it the module's own, and `private annotation`
+        # is refused with "can't apply visibility modifier".
+        if declared.is_a?(AnnotationType)
+          declarations << IyiMod::TypeDecl.new(
+            name: name,
+            kind: declared.type_desc,
+            type_parameters: [] of String,
+            assoc_types: [] of String,
+            supertraits: [] of String,
+            fields: [] of {String, String, String},
+            methods: [] of IyiMod::Signature,
+            visibility: "",
+            doc: declared.doc || "",
+          )
+          next
+        end
+
         # An enum, which travels as its members whichever side it is on. This
         # is the same declaration the exported path writes, and the carried
         # side used to fall through to the class branch below: it wrote the
@@ -2029,6 +2052,7 @@ module Iyi
             supertraits: [] of String,
             fields: [] of {String, String, String},
             class_vars: collect_iyi_class_vars(declared),
+            annotations: iyi_read_annotations(declared),
             methods: iyi_carried_methods(program, filename, container, declared),
             visibility: declared.private? ? "private" : "",
             types: iyi_carried_types(program, filename, declared, path: container),
@@ -2068,6 +2092,7 @@ module Iyi
           supertraits: [] of String,
           fields: collect_iyi_fields(declared),
           class_vars: collect_iyi_class_vars(declared),
+          annotations: iyi_read_annotations(declared),
           methods: iyi_carried_methods(program, filename, container, declared),
           visibility: declared.private? ? "private" : "",
           types: iyi_carried_types(program, filename, declared, path: container),
@@ -2325,6 +2350,38 @@ module Iyi
         names << name unless names.includes?(name)
       end
       names
+    end
+
+    # iyi: the annotations written above *type* that only a macro reads, as
+    # the lines `render_type_declaration` writes back above it.
+    #
+    # A def using `{{@type}}` travels and is expanded again on the far side,
+    # so what it asks of `@type` has to arrive with the type.
+    # `bench/migrate_fixture`'s `Report#priced?` is `{{
+    # @type.annotation(Shop::Priced) ? true : false }}` over an
+    # `@[Shop::Priced] class Report`; the declaration arrived bare, and the
+    # program built from the artifacts printed `priced? false` where the
+    # source build printed `priced? true`.
+    #
+    # Not the compiler's own, which `Program` declares at the top: each does
+    # something besides being read, and the ones a declaration needs are
+    # written by their own rules (`@[Share]` in `iyi_type_declaration`,
+    # `@[Flags]` on an enum, `@[Link]` on a lib). The path is an edge, for
+    # `inheritance_order`: an annotation has to be declared above the type it
+    # is written over.
+    private def iyi_read_annotations(type : Type) : Array(String)
+      written = [] of String
+      type.annotations.try &.each do |annotation_type, values|
+        next if annotation_type.namespace.is_a?(Program)
+        name = iyi_edge_name(type, annotation_type.to_s)
+        path = Path.new(name.lchop("::").split("::"), name.starts_with?("::"))
+        values.each do |value|
+          copy = value.clone
+          copy.path = path
+          written << copy.to_s
+        end
+      end
+      written
     end
 
     # One side of a type's methods — its own, or its metaclass's.

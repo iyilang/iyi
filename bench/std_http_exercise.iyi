@@ -186,6 +186,16 @@ assert_str "lower", resp.header("X-KIND") || "", "a header asked for in another 
 assert_true resp.header("X-Missing").nil?, "a header that is not there is nil"
 puts "  header names are read without regard to case, and trimmed"
 
+# `header` joins a repeated field with ", " (RFC 9110 §5.3), and a
+# `Set-Cookie` cannot be split back out of that join: the comma in an
+# `Expires` date is one too. `header_values` keeps the lines apart.
+cookies = HTTP.parse_response("HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT\r\nset-cookie: b=2; Path=/\r\nContent-Length: 2\r\n\r\nhi")
+assert_str "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT|b=2; Path=/", cookies.header_values("SET-COOKIE").join("|"), "each Set-Cookie line apart"
+assert_str "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT, b=2; Path=/", cookies.header("Set-Cookie") || "", "header still joins them"
+assert_str "2", cookies.header_values("content-length").join("|"), "a field on one line is one value"
+assert_true cookies.header_values("X-Missing").empty?, "a field that is not there has no values"
+puts "  header_values keeps a repeated field's lines apart"
+
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n4;ext=1\r\ndefg\r\n0\r\nX-Trailer: t\r\n\r\n")
 assert_str "abcdefg", resp.body, "a chunked body arrives joined"
 puts "  a chunked body is joined, extensions and trailers dropped"
@@ -457,6 +467,30 @@ assert_true r.body.includes?("Host: [::1]:#{v6_port}\r\n"), "an IPv6 Host keeps 
 v6_server.join
 v6.close
 puts "  an IPv6 literal's Host line keeps its brackets, under a scheme in capitals"
+
+# Two `Set-Cookie` lines over a socket stay two, under a chunked body and
+# under one with a length: the client keeps the head it parsed for both.
+cookie_listener = IyiSocket.listen("127.0.0.1", 0)
+cookie_port = cookie_listener.local_port
+cookie_fd = cookie_listener.to_unsafe
+cookie_server = IyiThread.start do
+  l = IyiSocket.new(cookie_fd)
+  2.times do |i|
+    conn = l.accept.or_panic
+    read_request(conn).or_panic
+    framed = i == 0 ? "Transfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n" : "Content-Length: 2\r\n\r\nhi"
+    conn.write("HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT\r\nSet-Cookie: b=2\r\n" + framed).or_panic
+    conn.close
+  end
+  nil
+end
+["chunked", "length"].each do |framing|
+  r = HTTP.get("http://localhost:#{cookie_port}/#{framing}").or_panic
+  assert_str "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT|b=2", r.header_values("Set-Cookie").join("|"), "two Set-Cookie lines over a socket, #{framing}"
+end
+cookie_server.join
+cookie_listener.close
+puts "  two Set-Cookie lines arrive apart under a chunked body and a length"
 
 # A head is read as far as the megabyte the server takes of a request's,
 # and refused past it: one that did not end was read for as long as it

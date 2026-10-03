@@ -6,8 +6,9 @@
 # `IyiSocket` will open. TLS is not in 0.x. A
 # request carries the caller's headers and body; the response's headers
 # are read by name without regard to case, a field on several lines is
-# one field with its values joined by ", ", interim 1xx answers are read
-# past, and a chunked body arrives joined. `format_request` /
+# one field with its values joined by ", " (`header_values` keeps the
+# lines apart, as a `Set-Cookie` must be read), interim 1xx answers are
+# read past, and a chunked body arrives joined. `format_request` /
 # `parse_response` are the text; `request` writes one and reads the
 # other. A status line that is not HTTP is refused with the first line,
 # a header with a control character in its value is refused either way,
@@ -38,8 +39,11 @@ pub struct Response
   getter reason : String
   getter headers : Hash(String, String)
   getter body : String
+  # The values of each field the server sent on more than one line, by
+  # its name in `headers`, one entry a line.
+  @apart : Hash(String, Array(String))? = nil
 
-  def initialize(@status : Int32, @reason : String, @headers : Hash(String, String), @body : String)
+  def initialize(@status : Int32, @reason : String, @headers : Hash(String, String), @body : String, @apart : Hash(String, Array(String))? = nil)
   end
 
   # A response to write: the reason is the status's own, the headers the
@@ -56,6 +60,27 @@ pub struct Response
       return value if HTTP.same_name?(key, name)
     end
     nil
+  end
+
+  # A field's lines apart, in the order they came: `header` joins them
+  # with ", ", and `Set-Cookie` is the field that join breaks (RFC 9110
+  # §5.3), since a cookie's `Expires` date has a comma in it - two cookies
+  # read as "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT, b=2", which no
+  # split takes back apart. Empty for a field that is not there.
+  def header_values(name : String) : Array(String)
+    if apart = @apart
+      apart.each do |key, values|
+        return values.dup if HTTP.same_name?(key, name)
+      end
+    end
+    found = header(name)
+    found ? [found] : [] of String
+  end
+
+  # The same answer with *body* for its body: the client reads a chunked
+  # body after the head it parsed.
+  protected def with_body(body : String) : Response
+    Response.new(@status, @reason, @headers, body, @apart)
   end
 
   def success? : Bool
@@ -524,23 +549,27 @@ pub struct HTTP
     status = 0
     reason = ""
     headers = {} of String => String
+    apart = nil.as(Hash(String, Array(String))?)
     while true
       split_at = find_headers_end(text, start)
       raise "HTTP: no header terminator" unless split_at
       lines = split_crlf(text[start, split_at - start])
       raise "HTTP: empty response" if lines.size == 0
       status, reason = parse_status(lines[0])
-      headers = case fields = parse_fields(lines, unfold: true)
+      # A repeated field's lines, kept for `header_values`, the last head's.
+      lines_of = {} of String => Array(String)
+      headers = case fields = parse_fields(lines, unfold: true, apart: lines_of)
                 in String
                   raise "HTTP: " + fields
                 in Hash(String, String)
                   fields
                 end
+      apart = lines_of.empty? ? nil : lines_of
       start = split_at + 4
       break unless status >= 100 && status < 200 && status != 101 && start < text.bytesize
     end
     body = text[start, text.bytesize - start]
-    response = Response.new(status, reason, headers, "")
+    response = Response.new(status, reason, headers, "", apart)
     return response if head || status == 204 || status == 304 || (status >= 100 && status < 200)
     if te = response.header("Transfer-Encoding")
       # Chunked, once and last, is the coding this client decodes (RFC 9112
@@ -562,7 +591,7 @@ pub struct HTTP
       raise "HTTP: the body ended after #{body.bytesize} of its #{length} bytes" if body.bytesize < length
       body = body[0, length] if length < body.bytesize
     end
-    Response.new(status, reason, headers, body)
+    Response.new(status, reason, headers, body, apart)
   end
 
   # Why an answer's `Transfer-Encoding` is not one this client decodes,
@@ -596,14 +625,17 @@ pub struct HTTP
   # with one space; read as a field of its own, `HTTP.get` panicked with
   # "header without a colon: \" b\"". A server may refuse one, and this
   # one does.
-  def self.parse_fields(lines : Array(String), unfold : Bool = false) : Hash(String, String) | String
+  #
+  # *apart*, when given, is handed each repeated field's values by the
+  # name in the answer, a line each, before they are joined.
+  def self.parse_fields(lines : Array(String), unfold : Bool = false, apart : Hash(String, Array(String))? = nil) : Hash(String, String) | String
     lines = unfolded(lines) if unfold
     headers = {} of String => String
     # The name as it was first spelled, by its lowercase, and the values
     # after the first, joined once at the end: joining line by line copied
     # the value so far per line.
     spelled = {} of String => String
-    more = {} of String => Array(String)
+    more = apart || {} of String => Array(String)
     i = 1
     while i < lines.size
       line = lines[i]
@@ -839,7 +871,7 @@ pub struct HTTP
         raise "HTTP: chunked body ends before its last chunk" if read.nil?
         raise "HTTP: " + read if read.is_a?(String)
         body, _ = read
-        return Response.new(status, final.reason, final.headers, body)
+        return final.with_body(body)
       end
       need = 9223372036854775807_i64
       if cl = final.header("Content-Length")

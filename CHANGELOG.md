@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`Response#header_values` keeps a field's lines apart, so two
+  `Set-Cookie` lines can be read as two.** A repeated field was there
+  only joined with ", ", as `header` documents, and a cookie's `Expires`
+  date has a comma of its own: two cookies read as "a=1; Expires=Wed, 21
+  Oct 2026 07:28:00 GMT, b=2; Path=/", which no split takes back apart
+  (RFC 9110 §5.3 makes `Set-Cookie` the exception to the join).
+  `header_values(name)` answers each line's value in order, one for a
+  field on one line and none for a field that is not there; `header`
+  and `headers` still join. `bench/std_http_exercise.iyi` parses two
+  `Set-Cookie` lines and reads them over a socket under a chunked body
+  and under a length; with the lines not kept it answered the joined
+  value.
+
 - **A connect to `localhost` that 127.0.0.1 refuses is tried at ::1.**
   `IyiSocket.connect`, and so `HTTP.get`, took `localhost` for 127.0.0.1
   alone, while Windows names ::1 first and dev servers often listen

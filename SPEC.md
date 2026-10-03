@@ -2681,14 +2681,16 @@ is assigned are not in the artifact, so an imported type without the
 marker is refused with the artifact as the reason. What it gates is the
 block `IyiThread.start` runs on another thread (III.4.11): every variable
 the block captures, and `self` when the block reaches an instance
-variable, must be `Share`, and the error names the variable, its type and
-the field that failed, one level at a time — ``captures `items :
+variable or calls one of its methods without a receiver, must be `Share`,
+and the error names the variable, its type and the field that failed, one
+level at a time — ``captures `items :
 Array(Int32)`, which is not Share: Array(Int32)'s field @size is assigned
 in `unsafe_set_size` ``. The channel's `T : Share` (III.4.6) waits for the
 channel that crosses threads. Held by `spec/compiler/semantic/iyi_spec.cr`
-(eight shapes: immutable captures pass, a setter, an assignment outside
-`initialize`, a field one and two levels down, `@[Share]` trusted, a
-trusted generic refused by its argument, `self`), by
+(eleven shapes: immutable captures pass, a setter, an assignment outside
+`initialize`, a field one and two levels down, a field `pointerof` gives
+out, `@[Share]` trusted, a trusted generic refused by its argument, `self`,
+`self` reached by a call, a constant the block names), by
 `spec/compiler/iyimod_spec.cr` (the marker written, read and refused
 across an artifact) and by `bench/thread_exercise.sh`'s last step, a
 program that must not compile. A `Share` type makes a value safe to read

@@ -573,6 +573,81 @@ if ! grep -q "captures \`items : Array(Int32)\`, which is not Share" build-unsha
 fi
 printf '  refused: %s\n' "$(grep -m1 'is not Share' build-unshared.log | sed 's/^Error: //')"
 
+# `self` is captured by a receiverless call as much as by an instance
+# variable: `bump` written for `self.bump` in the block of a method of a
+# Counter whose `bump` does `@n += 1`, twenty million times beside its
+# starter's twenty million, compiled and counted 28936626 of 40000000,
+# while `@n += 1` in the block itself was refused. A method of a Share
+# self, and a class method calling another receiverless, still build and
+# run.
+step "failure proof: a block calling a method of a self that is not Share does not compile"
+cat > selfcall.iyi <<'IYI'
+class Counter
+  @n = 0
+
+  def bump : Nil
+    @n += 1
+  end
+
+  def run : Nil
+    t = IyiThread.start do
+      bump
+      nil
+    end
+    t.join
+  end
+end
+
+Counter.new.run
+IYI
+cat > selfcall_shared.iyi <<'IYI'
+class Greeter
+  def initialize(@name : String)
+  end
+
+  def greeting : String
+    "hi #{@name}"
+  end
+
+  def run : Nil
+    t = IyiThread.start do
+      puts greeting
+      nil
+    end
+    t.join
+  end
+
+  def self.twice(n : Int32) : Int32
+    n * 2
+  end
+
+  def self.go : Nil
+    t = IyiThread.start do
+      puts twice(21)
+      nil
+    end
+    t.join
+  end
+end
+
+Greeter.new("ada").run
+Greeter.go
+IYI
+if "$IYI" build selfcall.iyi -o selfcall > build-selfcall.log 2>&1; then
+  echo "a block calling a receiverless method of a Counter compiled:"; cat build-selfcall.log; exit 1
+fi
+if ! grep -q "captures \`self : Counter\`, which is not Share: Counter's field @n is assigned in \`bump\`" build-selfcall.log; then
+  echo "the refusal did not name self:"; cat build-selfcall.log; exit 1
+fi
+printf '  refused: %s\n' "$(grep -m1 'is not Share' build-selfcall.log | sed 's/^Error: //')"
+if ! "$IYI" build selfcall_shared.iyi -o selfcall_shared > build-selfcall-shared.log 2>&1; then
+  echo "receiverless calls on a Share self and on a class were refused:"; cat build-selfcall-shared.log; exit 1
+fi
+if [ "$(./selfcall_shared | tr -d '\r' | tr '\n' ' ')" != "hi ada 42 " ]; then
+  echo "receiverless calls on a Share self and on a class built, but printed:"; ./selfcall_shared; exit 1
+fi
+echo "  a Share self's method and a class method, called receiverless, still build and print hi ada 42"
+
 # The structural scan for an assigned field reads every method the type
 # has, not only the ones its class and superclasses declare, and reads
 # macro code as what it expands to. A `bump` from an included `module`, and

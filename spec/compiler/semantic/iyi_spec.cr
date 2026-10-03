@@ -3750,5 +3750,28 @@ describe "Semantic: iyi" do
         Worker.new.go
         CODE
     end
+
+    it "refuses a self reached by a receiverless call whose type is not shareable" do
+      assert_error(stub + <<-CODE, "captures `self : Worker`, which is not Share: Worker's field @done is assigned in `finish` (SPEC.md III.4.4)", filename: "x.iyi")
+        class Worker
+          def initialize
+            @done = false
+          end
+
+          def finish : Nil
+            @done = true
+          end
+
+          def go : Nil
+            IyiThread.start do
+              finish
+              nil
+            end
+          end
+        end
+
+        Worker.new.go
+        CODE
+    end
   end
 end

@@ -650,7 +650,8 @@ module Iyi
     # value it captures must be `Share` (SPEC.md III.4.4, III.4.11). The
     # block became a proc when the call was typed, and the proc's def knows
     # which of the enclosing variables it closed over; each one's type is
-    # asked, and `self` too when the block reached an instance variable.
+    # asked, and `self` too when the block reached an instance variable or
+    # called one of self's methods receiverless.
     def check_thread_captures_share(node : Call, target_def : Def)
       return unless target_def.name == "start"
       owner = target_def.owner
@@ -689,7 +690,13 @@ module Iyi
         end
       end
 
-      if captures_self
+      # `bump` written for `self.bump` reaches self as `@n` does, and the
+      # closure's variables do not list it: a block calling `bump` twenty
+      # million times beside its starter's twenty million compiled and
+      # counted 28936626 of 40000000, where `@n += 1` in the block was
+      # refused. A receiverless call to a method that takes self is a
+      # capture of self.
+      if captures_self || ReceiverlessSelfCalls.any?(a_def.body)
         if self_type = @current_def.try(&.owner)
           unless self_type.is_a?(Program) || self_type.metaclass?
             if why = Iyi::Share.reason(self_type)
@@ -925,6 +932,35 @@ module Iyi
 
       def visit(node : ASTNode)
         true
+      end
+    end
+
+    # Whether a body, its inlined blocks and the procs inside it included,
+    # calls a method on self without writing a receiver. A call is one when
+    # its method takes a self argument, which is what codegen passes self
+    # for: not a top-level def, a class method of a plain type, or a
+    # function an import names (receiverless, but the module's).
+    class ReceiverlessSelfCalls < Visitor
+      getter? found = false
+
+      def self.any?(body : ASTNode) : Bool
+        visitor = new
+        body.accept visitor
+        visitor.found?
+      end
+
+      def visit(node : Call) : Bool
+        return false if @found
+        target_defs = node.target_defs
+        if !node.obj && !node.uses_with_scope? && target_defs && target_defs.any?(&.owner.passed_as_self?)
+          @found = true
+          return false
+        end
+        true
+      end
+
+      def visit(node : ASTNode) : Bool
+        !@found
       end
     end
 

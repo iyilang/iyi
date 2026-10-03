@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **An `IyiThread` block that calls a method of `self` without a
+  receiver captures `self`, which must be Share.** `self` was asked only
+  when the block read an instance variable: in a Counter method, a block
+  calling `bump` (which does `@n += 1`) twenty million times beside its
+  starter's twenty million compiled and counted 28936626 of 40000000,
+  while `@n += 1` written in the block was refused. A receiverless call
+  to a method that takes `self` is the capture now, inside an inner proc
+  too, and the program is refused with "captures `self : Counter`, which
+  is not Share: Counter's field @n is assigned in `bump`"; a Share
+  self's method and a class method called the same way still build and
+  run. `bench/thread_exercise.sh` step 6 builds both; the old compiler
+  built the racing one.
+
 - **A constant an `IyiThread` block names must be Share, as a captured
   variable must (SPEC.md III.4.5).** The thread gate asked only the
   variables the block closed over and `self`, and a constant is neither,

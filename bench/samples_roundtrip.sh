@@ -81,6 +81,24 @@ for sample in $SAMPLES; do
   fi
 done
 
+# `calc` on what Windows pipes, and on input with an error. cmd's `echo`
+# ends the line in CRLF and the lexer had no case for `\r`: `echo 2 + 3 *
+# 4| iyi run samples\iyi\calc.iyi` answered "error: unexpected character at
+# 9". And every error went to standard output at exit 0, so a script could
+# not tell. The from-source build of it is the one run.
+if [ -f from-source-calc ]; then
+  crlf="$(printf 'x = 2 + 3 * 4\r\nx * 10\r\n' | ./from-source-calc 2>&1 | tr -d '\r')"
+  printf '1 / 0\n' | ./from-source-calc > calc-err.out 2> calc-err.err
+  err_code=$?
+  if [ "$crlf" = "140" ] && [ "$err_code" -eq 1 ] && [ ! -s calc-err.out ] &&
+     [ "$(tr -d '\r' < calc-err.err)" = "error: divided by zero" ]; then
+    echo "calc: CRLF input answers 140; 1 / 0 is said on standard error, exit 1"
+  else
+    echo "calc: CRLF input answered '$crlf'; 1 / 0 exited $err_code with '$(cat calc-err.out)' on standard output"
+    status=1
+  fi
+fi
+
 # Symbols, numbered by the program that links. A symbol is its index in the
 # program's table, and each build numbers its symbols in the order it meets
 # them: the producer below meets `:apple` and `:carrot` first, the consumer

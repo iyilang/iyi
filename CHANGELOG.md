@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`samples/iyi/calc` reads what Windows pipes, and an error exits 1.** Its
+  lexer had no case for `\r`: `x = 2 + 3 * 4` and `x * 10` with CRLF line
+  ends answered "error: unexpected character at 13", and `echo 2 + 3 * 4|`
+  in cmd "at 9"; and every error went to standard output at exit 0, so `1 /
+  0` piped in said "error: divided by zero" and exited 0. `\r` is whitespace
+  now, the byte order mark PowerShell's pipe starts with is dropped, input
+  that is only line ends runs the demo, and an error is written to standard
+  error, exiting 1 for input that was typed; the demo, whose last two lines
+  are errors on purpose, exits 0. `bench/samples_roundtrip.sh` pipes both
+  into the sample; the old one answered `unexpected character at 13` and
+  exited 0.
+
 - **`--crystal` without the other library on the search path says which
   library is missing.** The Windows zip carries iyi's prelude and `std` and
   not the other library, which README said it did, and `iyi run --crystal`

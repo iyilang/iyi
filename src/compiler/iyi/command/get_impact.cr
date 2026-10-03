@@ -60,13 +60,13 @@ class Iyi::Command
       body = [] of String
       added_count = 0
       importers.keys.sort.each do |inner|
-        old_lines = before[inner]? || [] of String
-        new_lines = after[inner]? || [] of String
-        gone = old_lines - new_lines
-        added = new_lines - old_lines
+        old_lines = before[inner]? || {} of String => SurfaceLine
+        new_lines = after[inner]? || {} of String => SurfaceLine
+        gone = (old_lines.keys - new_lines.keys).sort!
+        added = (new_lines.keys - old_lines.keys).sort!
         gone.each do |line|
-          name = get_impact_name(line)
-          counterpart = name ? added.find { |candidate| get_impact_name(candidate) == name } : nil
+          name = get_impact_word(old_lines[line].name)
+          counterpart = name ? added.find { |candidate| get_impact_word(new_lines[candidate].name) == name } : nil
           sites = name ? get_impact_sites(importers[inner], name) : [] of String
           where = sites.empty? ? " - used nowhere here" : ""
           if counterpart
@@ -77,8 +77,8 @@ class Iyi::Command
           end
           sites.each { |site| body << "    #{site}" }
         end
-        gone_names = gone.compact_map { |line| get_impact_name(line) }.to_set
-        added_count += added.count { |line| !(name = get_impact_name(line)) || !gone_names.includes?(name) }
+        gone_names = gone.compact_map { |line| get_impact_word(old_lines[line].name) }.to_set
+        added_count += added.count { |line| !(name = get_impact_word(new_lines[line].name)) || !gone_names.includes?(name) }
       end
       next if body.empty?
       lines << header
@@ -100,7 +100,7 @@ class Iyi::Command
 
   # Both versions' surfaces, each from a copy of its checkout: the cache is
   # a cache and the compile writes an entry beside the package.
-  private def get_impact_surfaces(old_checkout : String, new_checkout : String, path : String, was : SemanticVersion, now : SemanticVersion) : {Hash(String, Array(String)), Hash(String, Array(String))}
+  private def get_impact_surfaces(old_checkout : String, new_checkout : String, path : String, was : SemanticVersion, now : SemanticVersion) : {Hash(String, Hash(String, SurfaceLine)), Hash(String, Hash(String, SurfaceLine))}
     scratch = File.tempname("iyi-impact", nil)
     Dir.mkdir_p(scratch)
     begin
@@ -115,28 +115,11 @@ class Iyi::Command
     end
   end
 
-  # The name a surface line gives a consumer to write, or nil for an impl.
-  # `def greeting(...)`, `Box.def size`, `struct Outer::Box(T)`,
-  # `macro get(...)`.
-  private def get_impact_name(line : String) : String?
-    return nil if line.starts_with?("impl ")
-    text = line
-    if (dot = text.index(".def ")) && !text.starts_with?("def ") && !text.starts_with?("abstract ")
-      text = text[(dot + 1)..]
-    end
-    text = text.lchop("abstract ").lchop("private ")
-    rest =
-      if tail = text.lchop?("def ")
-        tail.lchop("self.")
-      elsif tail = text.lchop?("macro ")
-        tail
-      else
-        _, space, tail = text.partition(' ')
-        return nil if space.empty?
-        tail.rpartition("::")[2]
-      end
-    name = rest.each_char.take_while { |char| char.alphanumeric? || char == '_' || char == '?' || char == '!' }.join
-    name.empty? ? nil : name
+  # The name a surface line gives a consumer to write (`SurfaceLine#name`)
+  # when it is a word a file can be searched for: an impl has none, and an
+  # operator's `+` is in every other line of a program.
+  private def get_impact_word(name : String?) : String?
+    name if name && (first = name[0]?) && (first.letter? || first == '_')
   end
 
   # `file:line` for each line of *files* that writes *name* as a word,

@@ -4,6 +4,26 @@
 
 ### Fixed
 
+- **`iyi mod release` sees every name a consumer writes, and rates a new
+  trait requirement and a defaulted parameter right.** Deleting `pub
+  LIMIT = 10`, a `pub class Inner` nested in an exported class (or making
+  it `private`), a type's `macro def_twice`, an enum member, or retargeting
+  `pub alias Pair` was `compared with v1.0.0: 1 module, 0 things gone, 0
+  new` and `the next release is v1.0.1: the surface is as it was`, and a
+  consumer of v1.0.0 stopped on `undefined constant Kit::LIMIT` and the
+  like. `abstract def perimeter : Int32` added to a `pub trait` was `v1.1.0
+  holds what changed`, though every `impl` of the trait broke; `by : Int32
+  = 2` appended to `pub def scale` was `gone  shapes: def scale(x : Int32)
+  : Int32` and a new major at a `/v2` path, though every call still built.
+  The surface now carries constants (by name: a value moved breaks no one
+  who names it, and the type is not in the artifact), enum members, what
+  an alias names, a type's macros and every nested type not `private`; a
+  requirement new on a type that was there is a break (`new ... - a
+  requirement, which every impl of it has to add`), and a def that only
+  gained defaulted parameters is `grown`, a minor. `bench/packages_get.sh`
+  checks all eight and a constant's value moved (a patch); the old
+  compiler answered v1.0.1 for the deleted constant.
+
 - **`iyi doc` and `iyi mod context` list a type's macros, and a macro's
   doc comment.** `iyi doc std/eiy` printed `pub struct Eiy` with its
   methods and none of `macro embed(filename, io_name)`, `macro

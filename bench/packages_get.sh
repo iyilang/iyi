@@ -54,7 +54,9 @@
 # gone is a major, at the path `/v2`, and the manifest has to say it first;
 # before v1 a break is a minor. An example program beside the library is
 # nobody's surface, a release written with `using` is still read, and a
-# version already tagged is refused.
+# version already tagged is refused. A constant, a nested type, a type's
+# macro, an enum member and an alias's target are surface; a requirement
+# new on a trait is a major and a defaulted parameter appended a minor.
 #
 # Then what a move changes in what the project uses: an export whose
 # signature moved is "changed" with the lines that write it - a comment
@@ -681,6 +683,88 @@ printf 'module relrc\n\npub def greeting : String\n  "one"\nend\n\npub def a : I
 git commit -qam additive
 "$IYI" mod release v1.2.0 > relrc2.log 2>&1 || fail "v1.2.0 after v1.1.0 and an rc, adding a def, was refused: $(cat relrc2.log)"
 [ "$status" -eq 0 ] && echo "  an rc that removed: v2.0.0 from v1.1.0; a release that adds after it: v1.2.0"
+
+step "mod release: every name a consumer writes is surface"
+# Each edit below is made to v1.0.0 alone and removes a name a consumer of
+# v1.0.0 writes: a constant, a type nested in an exported one (gone, or
+# made private), a type's macro, an enum member, what an alias names. Each
+# was "the surface is as it was", v1.0.1, and the consumer of v1.0.0 then
+# stopped on `undefined constant Kit::LIMIT` and the like. An `abstract
+# def` new on a trait that was there breaks every impl of it, and was a
+# minor; a defaulted parameter appended to a def breaks no call, and was a
+# def gone and a new major at /v2. A constant's value moved is a patch.
+RELK="$WORK/relk"
+mkrepo "$RELK"
+cd "$RELK" || exit 1
+printf 'module example.test/user/kit\n' > iyi.mod
+cat > kit.iyi <<'EOF'
+module kit
+
+pub trait Shape
+  abstract def area : Int32
+end
+
+pub class Box
+  getter v : Int32
+
+  def initialize(@v : Int32)
+  end
+
+  macro def_twice(name)
+    def {{name.id}} : Int32
+      @v * 2
+    end
+  end
+
+  pub class Inner
+    def id : Int32
+      1
+    end
+  end
+end
+
+pub LIMIT = 10
+
+pub def scale(x : Int32) : Int32
+  x * 2
+end
+
+pub enum Color
+  Red
+  Green
+  Blue
+end
+
+pub alias Pair = Tuple(Int32, String)
+EOF
+git add -A && git commit -qm one && git tag v1.0.0
+# relk <label> <answer> <sed script>: v1.0.0's kit.iyi edited by the script
+# and committed is released as <answer>.
+relk() {
+  git checkout -q v1.0.0 -- kit.iyi
+  sed -i.bak "$3" kit.iyi && rm -f kit.iyi.bak
+  git commit -qam "$1"
+  "$IYI" mod release > relk.log 2>&1 || fail "mod release failed on $1: $(cat relk.log)"
+  grep -q "the next release is $2" relk.log || fail "$1 was not $2: $(cat relk.log)"
+}
+relk "a constant gone" "v2.0.0" '/^pub LIMIT = 10$/d'
+grep -q "gone  kit: const LIMIT" relk.log || fail "the gone constant was not named: $(cat relk.log)"
+relk "a nested type gone" "v2.0.0" 's/  pub class Inner/  pub class Inside/'
+grep -q "gone  kit: class Box::Inner" relk.log || fail "the gone nested type was not named: $(cat relk.log)"
+relk "a nested type made private" "v2.0.0" 's/  pub class Inner/  private class Inner/'
+relk "a type's macro gone" "v2.0.0" 's/macro def_twice/macro def_double/'
+grep -q "gone  kit: Box.macro def_twice(name)" relk.log || fail "the gone macro was not named: $(cat relk.log)"
+relk "an enum member gone" "v2.0.0" '/^  Blue$/d'
+grep -q "gone  kit: member Color::Blue" relk.log || fail "the gone member was not named: $(cat relk.log)"
+relk "an alias retargeted" "v2.0.0" 's/Tuple(Int32, String)/Tuple(String, Int32)/'
+relk "a requirement new on a trait" "v2.0.0" 's/  abstract def area : Int32/&\n  abstract def perimeter : Int32/'
+grep -q "new   kit: Shape.abstract def perimeter : Int32 - a requirement" relk.log ||
+  fail "the new requirement was not named as one: $(cat relk.log)"
+relk "a defaulted parameter appended" "v1.1.0" 's/def scale(x : Int32)/def scale(x : Int32, by : Int32 = 2)/; s/  x \* 2/  x * by/'
+grep -q "grown kit: def scale(x : Int32) : Int32 -> def scale(x : Int32, by : Int32 = 2) : Int32" relk.log ||
+  fail "the grown def was not named: $(cat relk.log)"
+relk "a constant's value moved" "v1.0.1" 's/^pub LIMIT = 10$/pub LIMIT = 11/'
+[ "$status" -eq 0 ] && echo "  a constant, a nested type, a type's macro, a member, an alias's target gone, a trait's requirement new: v2.0.0; a defaulted parameter: v1.1.0; a value: v1.0.1"
 
 step "get says what a move changes in what the project uses"
 mkrepo "$WORK/work/libi"

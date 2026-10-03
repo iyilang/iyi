@@ -2746,7 +2746,7 @@ module Iyi::IyiMod
   # which is the module's source (see `Artifact#initialiser`), so they are
   # read from it: `pub LIMIT = 5` and `pub VarInt::MAX = ...` are what it
   # says. A shard's initialiser is the other language's, which has no `pub`.
-  private def self.exported_constants(artifact : Artifact) : Array({String, String})
+  def self.exported_constants(artifact : Artifact) : Array({String, String})
     constants = [] of {String, String}
     return constants if artifact.initialiser.empty? || artifact.crystal_library
     parser = Parser.new("module #{artifact.module_name}\n#{artifact.initialiser}")

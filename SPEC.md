@@ -4679,11 +4679,17 @@ the one before it exported - which Go leaves to the author's memory.
 `iyi mod release [VERSION]` checks out HEAD and the highest `vX.Y.Z` tag
 it contains beside the tree, compiles every module of the package that
 writes `pub` once, and compares the two surfaces line by line: functions,
-`pub` types with their parameters and methods and the types inside them,
-impls and macros, a `private` def that travels with a generic's body not
-among them. A line gone is a new major, a line or a module new a new minor,
-nothing moved a patch; before v1 a break moves the minor and an addition
-the patch, as Cargo reads `0.x`. It names each line, says the next
+`pub` types with their parameters and methods, the types inside them that
+are not `private`, their macros, an enum's members and what an alias
+names, the constants, impls and `pub macro`s, a `private` def that travels
+with a generic's body not among them. A line gone is a new major, a line
+or a module new a new minor, nothing moved a patch. Two pairs read
+otherwise: a def gone whose line came back with only defaulted parameters
+after its own is a minor, every call still building, and an `abstract
+def` or associated type new on a type that was there is a major, every
+impl of it lacking one. A constant is its name; its type is not in the
+artifact. Before v1 a break moves the minor and an addition the patch, as
+Cargo reads `0.x`. It names each line, says the next
 version, and with VERSION exits 1 when it understates the change - or
 when a new major past 1 is not yet the `/vN` path iyi.mod declares, which
 is where that major has to live. A release written with `using` is read

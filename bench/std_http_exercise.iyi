@@ -768,6 +768,37 @@ assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
 puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, a block that panicked, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MB body declared and not sent, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
 
+puts "\n== the block's own close"
+# An answer whose `Connection` says `close` closes the connection after
+# it, as Go's server and Python's do: the line was dropped, `keep-alive`
+# written in its place, and the next request on the connection served.
+closer = IyiSocket.listen(0)
+closer_port = closer.local_port
+group do |g|
+  g.spawn do
+    Server.serve(closer) do |req|
+      if req.path == "/bye"
+        Response.new(200, "bye", {"Connection" => "close"})
+      else
+        closer.close
+        Response.new(200, "stopped")
+      end
+    end
+    0
+  end
+  g.spawn do
+    bye = IyiSocket.connect("127.0.0.1", closer_port).or_panic
+    bye.write("GET /bye HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    bye_answer = HTTP.parse_response(read_response(bye))
+    assert_str "close", bye_answer.header("Connection") || "", "a block's Connection: close is the answer's"
+    assert_str "", bye.read(16).or_panic, "and the connection closes after it"
+    bye.close
+    assert_str "stopped", HTTP.get("http://127.0.0.1:#{closer_port}/stop").or_panic.body, "the listener closed"
+    0
+  end
+end
+puts "  a block's Connection: close closes the connection after its answer"
+
 puts "\n== a burst of connections"
 # Twenty connections waiting, each with its request written, when the
 # server starts: its accept loop takes them one after another without

@@ -16,8 +16,9 @@
 #
 # `Server.serve(listener) { |request| Response }` is the other side: a
 # fiber per connection under a group, each connection kept alive across
-# requests until the client says `Connection: close`, closes, or sends
-# something that is not HTTP (answered 400 and closed). The block gets a
+# requests until the client or the block's answer says `Connection:
+# close`, the client closes, or sends something that is not HTTP
+# (answered 400 and closed). The block gets a
 # `Request` — method, path (an absolute-form target's own), query,
 # headers, body, read to the length the client declared or de-chunked —
 # and answers a `Response`, which is written with its length; a 1xx, 204
@@ -289,11 +290,18 @@ pub struct Server
 
   # The handler's answer to *req*, written: whether the connection goes on.
   # A client that went away before its answer is gone; its connection ends
-  # here, and the server goes on.
+  # here, and the server goes on. An answer whose own `Connection` says
+  # `close` closes the connection after it, as Go's server and Python's
+  # do: the line was dropped, `keep-alive` written in its place, and the
+  # next request served on a connection the block had ended.
   private def self.answered?(client : IyiSocket, handler : Proc(Request, Response), req : Request, close : Bool) : Bool
     response = handler.call(req)
-    wrote = client.write(format_response(response, HTTP.same_name?(req.method, "HEAD"), close))
-    wrote.is_a?(Int32) && !close
+    closing = close
+    if said = response.header("Connection")
+      closing = true if HTTP.has_token?(said, "close")
+    end
+    wrote = client.write(format_response(response, HTTP.same_name?(req.method, "HEAD"), closing))
+    wrote.is_a?(Int32) && !closing
   end
 
   # A request at *from* in `text`, if a whole one is there. No request and

@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`Server.serve` closes the connection after an answer whose
+  `Connection` says `close`.** The block's line was dropped,
+  `Connection: keep-alive` written in its place, and the next request on
+  the connection read and served; Go's server and Python's close it
+  [INFERENCE: from their sources, not run here]. The answer says `close`
+  now and the connection ends after it. `bench/std_http_exercise.iyi`
+  answers `Connection: close` from the block; the old module wrote
+  "keep-alive" and served the request after it.
+
 - **`HTTP.request` refuses an answer whose head runs past a megabyte.**
   The head was read for as long as it came: 256 MB of one field cost the
   client 824 MB of memory before it panicked "no header terminator" at

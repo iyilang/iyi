@@ -12,8 +12,8 @@
   with `O_PATH` now, and `touch` asks `info?`.
 - **A path with a NUL in it is refused by the prelude's `File` too.** It
   was cut at the NUL, so `File.write("victim\0.txt", x)` wrote `victim`.
-- **`File.real_path` does not walk through a file:** `f/`, `f/.` and `f/..`
-  of a regular file are refused, as the system's `realpath` does.
+- **`File.real_path` does not walk through a file on Linux:** `f/`, `f/.`
+  and `f/..` of a regular file are refused, as glibc's `realpath` does.
 - **`File.read_lines` keeps a last line's lone `\r`,** as `each_line` does.
 - **`ENV.each` visits every variable while its block deletes some.** It
   yielded from the live table, which a delete compacts, so the entry

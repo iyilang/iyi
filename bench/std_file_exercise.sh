@@ -434,23 +434,37 @@ exercise_broken "a last line's lone \\r taken off" lone_cr std \
       rem_len = rem_len - 1 if rem_len > 0 && ptr[line_start + rem_len - 1] == 13_u8
       res << ' \
   "read_lines keeps a last line's lone"
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
-  *)
-    # Whether to make the file decided by whether it reads, as `exists?`
-    # decided it by opening it to read: a write-only file was emptied.
-    exercise_broken "a touch that makes what it cannot read" touch_unread std \
-      '    File.write(p, "") if info?(p).nil?' \
-      '    File.write(p, "") unless File.exists?(p) && File.readable?(p)' \
-      "touch keeps the content of a file it may not read" ;;
-esac
-if [ "$(uname -s)" = Linux ]; then
-  # `exists?` as an open to read, which a file its owner may not read
-  # refuses.
-  exercise_broken "an exists? that opens to read" exists_read prelude \
-    '      fd = {% if flag?(:linux) %} __iyi_openat(c_path(path), 0x280000, 0) {% else %} __iyi_open_read(c_path(path)) {% end %}' \
-    '      fd = __iyi_open_read(c_path(path))' \
-    "exists? of a file this user may not read"
+# A user mode 000 does not stop - root, which a CI container runs as -
+# reads every file, so the exercise skips these two checks there and a
+# broken copy has nothing to fail.
+printf 'x' > "$WORK/unreadable_probe"
+chmod 000 "$WORK/unreadable_probe"
+if [ -r "$WORK/unreadable_probe" ]; then
+  unreadable_measured=0
+  echo "  touch and exists? of a file its owner may not read: not measured, this user reads it all the same"
+else
+  unreadable_measured=1
+fi
+chmod 600 "$WORK/unreadable_probe"
+if [ "$unreadable_measured" -eq 1 ]; then
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+    *)
+      # Whether to make the file decided by whether it reads, as `exists?`
+      # decided it by opening it to read: a write-only file was emptied.
+      exercise_broken "a touch that makes what it cannot read" touch_unread std \
+        '    File.write(p, "") if info?(p).nil?' \
+        '    File.write(p, "") unless File.exists?(p) && File.readable?(p)' \
+        "touch keeps the content of a file it may not read" ;;
+  esac
+  if [ "$(uname -s)" = Linux ]; then
+    # `exists?` as an open to read, which a file its owner may not read
+    # refuses.
+    exercise_broken "an exists? that opens to read" exists_read prelude \
+      '      fd = {% if flag?(:linux) %} __iyi_openat(c_path(path), 0x280000, 0) {% else %} __iyi_open_read(c_path(path)) {% end %}' \
+      '      fd = __iyi_open_read(c_path(path))' \
+      "exists? of a file this user may not read"
+  fi
 fi
 
 echo
@@ -499,18 +513,17 @@ refuses "real_path of an empty path" realpath_empty "Cannot resolve realpath for
 # to `victim\0.txt` wrote `victim`.
 nul_write='File.write("'"$WORK"'/victim" + String.new(1) { |b| b[0] = 0_u8 } + ".txt", "x")'
 refuses "a write to a path with a NUL in it" path_nul "path contains a NUL byte" "$nul_write"
-# A file is no directory to go through: `f/`, `f/.` and `f/..` are
-# ENOTDIR, as libc's realpath answers, where Linux's own walk answered
-# `f` and, for `f/..`, its parent.
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
-  *)
-    printf 'x' > "$WORK/rp_file"
-    for tail in / /. /..; do
-      refuses "real_path of a file, then $tail" "realpath_file$(printf '%s' "$tail" | tr './' 'ds')" \
-        "Cannot resolve realpath for " 'File.real_path("'"$WORK/rp_file$tail"'")'
-    done ;;
-esac
+# A file is no directory to go through: on Linux `f/`, `f/.` and `f/..`
+# are ENOTDIR, as libc's realpath answers, where iyi's own walk answered
+# `f` and, for `f/..`, its parent. darwin's realpath takes a trailing
+# separator after a file, and iyi asks it.
+if [ "$(uname -s)" = Linux ]; then
+  printf 'x' > "$WORK/rp_file"
+  for tail in / /. /..; do
+    refuses "real_path of a file, then $tail" "realpath_file$(printf '%s' "$tail" | tr './' 'ds')" \
+      "Cannot resolve realpath for " 'File.real_path("'"$WORK/rp_file$tail"'")'
+  done
+fi
 
 # The refusals above on a copy without the line that makes each: the
 # program answers. refusal_broken <label> <dir> <std|prelude> <old> <new> <expression>

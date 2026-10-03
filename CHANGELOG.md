@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`chr` takes every code point in every integer width.** The
+  prelude's `Int32#chr` reads every code point but the surrogates, and
+  `std/int`'s `chr`, which says it keeps that contract for the rest of
+  the tower, still stopped at ASCII: `233.chr` was 'é' while
+  `233_i64.chr`, `233_u8.chr` and `0x263A_u32.chr` panicked "233 is out
+  of char range". Every width answers the character now, and refuses a
+  surrogate or a value past 0x10FFFF as `Int32#chr` does.
+  `bench/std_int_exercise.iyi` reads code points past ASCII in five
+  widths; the old module panicked "233 is out of char range".
+
 - **`_ = g.spawn { }` in a typed group takes no tuple slot.** III.4.9
   names `_ =` as the explicit discard, and the expansion gave it a slot
   like any spawn: `_ = g.spawn { read(a) }` beside

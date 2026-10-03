@@ -181,4 +181,12 @@ assert_true (-170141183460469231731687303715884105728_i128).gcd(-6_i128) == 2_i1
 assert_true 12.gcd(-18) == 6 && 0.gcd(-5) == 5 && 255_u8.gcd(85_u8) == 85_u8, "the ordinary answers stay"
 puts "  a minimum's gcd, where it fits"
 
+# `chr` takes every code point but the surrogates in every width, as the
+# prelude's `Int32#chr` does: past ASCII it panicked "233 is out of char
+# range" for every type but `Int32`, though `233.chr` was 'é'.
+puts "\n== chr"
+assert_true 233_i64.chr == 'é' && 233_u8.chr == 'é' && 0x263A_u32.chr == '☺', "chr past ASCII"
+assert_true 0x1F600_i128.chr.ord == 0x1F600 && 0x10FFFF_u64.chr.ord == 0x10FFFF && 65_i8.chr == 'A', "chr to the last code point"
+puts "  every code point, every width"
+
 puts "\nALL CHECKS PASSED"

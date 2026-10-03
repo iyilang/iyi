@@ -137,6 +137,20 @@ else
   status=1
 fi
 cp mods/app/lib.iyimod lib.good
+# A setter that writes no return (R-2 lets it: it answers what it was
+# handed) answers through its module's artifact what it answers from
+# source. It was carried as a header the consumer typed `Nil`, and the
+# link asked for `n=<Int32>:Nil` where the module had emitted `:Int32`.
+mkdir -p "$WORK/setter/app"
+printf 'module app/s\n\npub class Box\n  @n : Int32\n\n  def initialize(@n : Int32)\n  end\n\n  def n=(v : Int32)\n    @n = v\n  end\n\n  def n : Int32\n    @n\n  end\nend\n' > "$WORK/setter/app/s.iyi"
+printf 'import app/s::{Box}\n\nb = Box.new(1)\nb.n = 5\nputs b.n\n' > "$WORK/setter/m.iyi"
+(cd "$WORK/setter" && "$IYI" build --emit-iyimod mods -o from-source m.iyi && mv app/s.iyi s.source &&
+  "$IYI" build --use-iyimod mods -o from-artifact m.iyi) > "$WORK/setter.log" 2>&1
+if [ "$(cd "$WORK/setter" && ./from-artifact 2>&1)" = "5" ]; then
+  echo "  a setter with no written return, through its artifact: 5, as from source"
+else
+  echo "  a setter with no written return, through its artifact:"; sed -n '1,3p' "$WORK/setter.log"; status=1
+fi
 
 echo
 echo "== what the command line refuses"

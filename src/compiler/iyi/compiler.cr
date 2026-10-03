@@ -989,7 +989,8 @@ module Iyi
               # to compile for the same reason, and the module name is the
               # container the far side looks it up under.
               if !item.def.abstract? &&
-                 (iyi_takes_block?(item.def) || iyi_widened_parameters?(type, item.def))
+                 (iyi_takes_block?(item.def) || iyi_widened_parameters?(type, item.def) ||
+                 IyiMod.answer_travels?(item.def))
                 iyi_record_mono_body program, filename, module_name, signature, item.def
               end
             end
@@ -1016,7 +1017,7 @@ module Iyi
 
             signature = IyiMod.signature(item.def, check_block: false)
             carried_functions << signature
-            if iyi_takes_block?(item.def)
+            if iyi_takes_block?(item.def) || IyiMod.answer_travels?(item.def)
               iyi_record_mono_body program, filename, module_name, signature, item.def
             end
           end
@@ -2361,7 +2362,7 @@ module Iyi
           # the whole program's, so the answer is too. `Iyi::OpenTravel` marked
           # it before this ran.
           if (travels || iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
-             iyi_widened_parameters?(type, item.def)) &&
+             iyi_widened_parameters?(type, item.def) || IyiMod.answer_travels?(item.def)) &&
              !item.def.abstract?
             iyi_record_mono_body program, filename, container, signature, item.def
           end
@@ -2477,7 +2478,7 @@ module Iyi
             # `decode_int32<IyiIO+>`.
             if travels || (stencilled && side.same?(type)) ||
                iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
-               iyi_widened_parameters?(type, item.def)
+               iyi_widened_parameters?(type, item.def) || IyiMod.answer_travels?(item.def)
               iyi_record_mono_body program, filename, container, signature, item.def
             end
           end

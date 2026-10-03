@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **A setter that writes no return type works through its module's
+  artifact.** R-2 lets `def n=(v : Int32)` go without one, and the
+  artifact carried it as a header with none, so a consumer built with
+  `--use-iyimod` typed `b.n = 5` as `Nil` and the link ended on
+  `unresolved external symbol ...Box.23.n.3D..3C.Int32.3E..3A.Nil` where
+  the module had emitted `...:Int32`; from source the program printed 5.
+  A setter's answer is the argument's type at each call, which no header
+  can say, so its body now travels and the consumer compiles it, as it
+  does a block-taking def's. `bench/verbs_exercise.sh` checks it; the old
+  compiler failed that link.
+
 - **`iyi mod release` sees every name a consumer writes, and rates a new
   trait requirement and a defaulted parameter right.** Deleting `pub
   LIMIT = 10`, a `pub class Inner` nested in an exported class (or making

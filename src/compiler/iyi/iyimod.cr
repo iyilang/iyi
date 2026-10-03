@@ -2327,6 +2327,29 @@ module Iyi::IyiMod
       MSG
   end
 
+  # iyi: whether a def's answer is written nowhere a consumer reads, so its
+  # body has to travel for the consumer to have one: a setter, which R-2
+  # lets go without a return type (`check_types_written`) because it answers
+  # what it was handed. That is the argument's type at each call, not the
+  # parameter's restriction, so no header can say it. Carried as a header,
+  # `def n=(v : Int32)` was typed `Nil` on the far side, and the link asked
+  # for `n=<Int32>:Nil` where this module had emitted `n=<Int32>:Int32`.
+  #
+  # And a def whose answer is the receiver's own storage: a body that is one
+  # instance variable, or `self`. Codegen answers that call with the field's
+  # address rather than a copy (`try_inline_call`), so `h.counter.bump` bumps
+  # the counter `h` holds, and a return type says `Counter` and nothing about
+  # where it lives. Carried as a header, the consumer called the symbol and
+  # bumped a copy: `h.counter.bump -> 1`, where the source build says 2.
+  def self.answer_travels?(a_def : Def) : Bool
+    return true if a_def.return_type.nil? && a_def.name.ends_with?('=')
+    case body = a_def.body
+    when InstanceVar then true
+    when Var         then body.name == "self"
+    else                  false
+    end
+  end
+
   # Marks a parsed reconstruction as what it is.
   #
   # A `def` from an artifact is a header: a call to it is typed from its return

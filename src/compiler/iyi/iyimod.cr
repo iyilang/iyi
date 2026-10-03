@@ -2463,6 +2463,15 @@ module Iyi::IyiMod
     # A body only where one travelled (`MonoBodies`). Indented back under this
     # declaration, because what is stored is the body the author wrote and the
     # indentation it was written at is not a fact about it.
+    #
+    # An empty one is written `nil`, which is what an empty body answers.
+    # Whether a body travelled is the key's question, and the reader cannot
+    # ask it: `DeclarationMarker` tells a header from a body by whether there
+    # is one, so `def noop : Nil` with nothing in it came back as a header and
+    # the consumer's link ended on `G(Int32)@G(T)#noop:Nil` — and on every
+    # generic struct's `initialize`, every empty trait default and every
+    # empty block-taking def, each listed in `MonoBodies`.
+    body = "nil" if body && body.blank?
     body.try &.each_line do |line|
       io << indent << "  " << line << '\n'
     end

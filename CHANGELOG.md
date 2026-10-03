@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A method with an empty body travels in the artifact as one, so the
+  consumer compiles it rather than asking the linker for it.** The
+  reader tells a header from a travelled body by whether there is a body,
+  and an empty one listed in `MonoBodies` came back as a header: every
+  build reading the artifact ended on LNK2019, for `G(Int32)@G(T)#noop:Nil`
+  (an empty method of a generic class), `S(String)@S(T)#initialize:Nil`
+  (any generic struct with no `initialize` written), `each_none<&Proc…>`
+  (an empty block-taking def), an empty trait default, and the
+  `initialize` of a library's `abstract struct` under a consumer's
+  subclass. An empty travelled body is written `nil` now, which is what it
+  answers, and each of them prints what the source build prints. The
+  `empty_body` case of `bench/samples_roundtrip.sh` checks it; the old
+  compiler ended on those three LNK2019s.
+
 - **A yielding method an `impl` gives a type of the module's own travels
   in the artifact, so a consumer can call it.** `impl Walk for B` with a
   block-taking `walk` on a struct `kit/lib` declares carried a header and

@@ -694,9 +694,17 @@ pub struct HTML
     end
   end
 
+  # Whether the name for *codepoint* is one HTML5 also reads without its
+  # `;`: of this table's names, exactly those of `"`, `&`, `<`, `>` and of
+  # U+00A0 to U+00FF, each code point having one name here.
+  private def self.legacy_name?(codepoint : Int32) : Bool
+    codepoint == 34 || codepoint == 38 || codepoint == 60 || codepoint == 62 || (codepoint >= 160 && codepoint <= 255)
+  end
+
   # Unescapes HTML character references.
   # Handles:
-  # - 253 standard named entities (e.g. &amp;, &copy;, &euro;)
+  # - 253 standard named entities (e.g. &amp;, &copy;, &euro;); only the
+  #   legacy ones (&amp, &copy, the other Latin-1 names) without the `;`
   # - Decimal numeric entities (e.g. &#60;)
   # - Hexadecimal numeric entities (e.g. &#x3c;, &#X3C;)
   # - Bare & that is not an entity is preserved unchanged
@@ -796,11 +804,19 @@ pub struct HTML
             # The longest name the table has wins, as the HTML5 rule reads
             # it: `&ltb` is `<b` and `&copy2024` is `©2024`. Looking up
             # only the whole alphanumeric run left both as written.
+            # Only the legacy names - `amp`, `lt`, `gt`, `quot` and the
+            # Latin-1 ones, U+00A0 to U+00FF - match without their `;`
+            # (HTML5's table has every other name with it alone), so a
+            # query string keeps its parameters: `&lang=en` was `〈=en`,
+            # `&ge=5` was `≥=5`, and `&notin` was `∉` where it is `¬in`.
             n = ptr - name_start
             n = 8 if n > 8 # no name in the table is longer
             cp = -1
             while n >= 2 && cp < 0
               cp = named_entity_codepoint(string[name_start, n])
+              if cp >= 0 && !legacy_name?(cp) && !(name_start + n < len && raw[name_start + n] == 59_u8)
+                cp = -1
+              end
               n = n - 1 if cp < 0
             end
 

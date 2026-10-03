@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`HTML.unescape` reads a name without its `;` only where HTML5 does:
+  `amp`, `lt`, `gt`, `quot` and the Latin-1 names.** Any of the module's
+  253 names matched without a `;`, so `?q=x&lang=en` came out
+  `?q=x〈=en`, `a&ge=5` came out `a≥=5` and `&notin` came out `∉`, where
+  HTML5's table has those names with the `;` alone and Python's
+  `html.unescape` keeps the first two and answers `¬in`. 19,046 random
+  strings agree with Python's `html.unescape` over the module's names
+  (U+10FFFF left out: a noncharacter Python drops and HTML5 keeps).
+  `bench/std_html_exercise.iyi` checks each, and the `.sh` proves the
+  check fails with every name read without its `;`; the old module
+  answered `?q=x〈=en a≥=5 ∉ ∉ … … ©`.
+
 - **`std/hpack` counts 32 octets a field in the header list size, as
   RFC 7540 6.5.2 defines the size SETTINGS_MAX_HEADER_LIST_SIZE limits.**
   `Decoder#max_header_list_size` summed names and values alone, so two

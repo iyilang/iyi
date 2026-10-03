@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A cancel reaches a task reading the value of a task outside its
+  groups.** The reader stayed on that task's joiner chain, which no
+  cancel walks: an inner group whose reader awaited an outer group's
+  3-second task "ended after 3030 ms" though it failed at 20 ms, and with
+  an outer task waiting on the inner group's end the program died "iyi:
+  panic: deadlock: every fiber is blocked and nothing can wake one". The
+  cancelled reader stops now, as a `select` with no bound arm does, since
+  `value` has no `Cancelled` to answer: the inner group ends at 20 ms and
+  the second program prints "done". A reader of a task the cancel did
+  reach still waits for it. `bench/concurrency_exercise.iyi` checks the
+  group under 5 s and the reader's defer; the old runtime held it
+  6000 ms.
+
 - **A cancelled task's `select` gives `Cancelled` to its first bound arm,
   and with no bound arm the task stops.** The select answered `Cancelled`
   to its first arm, and an unbound first arm runs nothing, so a heartbeat

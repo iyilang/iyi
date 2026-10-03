@@ -492,6 +492,52 @@ end
 fail("readers of a panicked task saw #{broken_readers}") unless broken_readers == "PP"
 puts "three fibers read one task's value, and two read a panicked one's"
 
+# ── 7c. A cancel reaches a task reading a task outside its groups ────────
+# A cancelled reader waits for a task the cancel reached too, which ends,
+# and stops at any other: its defers run, and its own handle answers
+# `Panicked`, since `value` has no `Cancelled` (III.4.2). It waited: a
+# reader of an outer group's task held its failed group until that task
+# ended, 6 s here against a 5 s bound, and with an outer task waiting on
+# the inner group's end the program died "deadlock".
+def read_outer(outer_task : IyiTask(Int32), log : Array(String)) : Int32
+  defer log << "reader's defer ran"
+  got = outer_task.value
+  log << "reader read #{got.is_a?(Int32) ? got : -1}"
+  0
+end
+
+release = Channel(Int32).new(1)
+reader_log = [] of String
+reader_said = ""
+inner_ms = 0_i64
+started = __iyi_monotonic_ns
+group do |g|
+  outer_task = g.spawn do
+    select
+    when released = release.receive
+      nil
+    when timeout(6000)
+      nil
+    end
+    7
+  end
+  group do |h|
+    reader = h.spawn { read_outer(outer_task, reader_log) }
+    h.spawn do
+      sleep(20)
+      TaskFailed.new
+    end
+    said = reader.value
+    reader_said = said.is_a?(Panicked) ? said.message : "a value"
+  end
+  inner_ms = elapsed_ms(started)
+  release.send(1)
+end
+fail("a cancelled reader of an outer task held its group #{inner_ms} ms") if inner_ms >= 5000
+heard_reader = reader_log.join(", ")
+fail("a cancelled reader of an outer task: #{heard_reader}; its handle said #{reader_said}") unless heard_reader == "reader's defer ran" && reader_said == "a task stopped by its cancellation has no value"
+puts "a cancel stopped a task reading an outer group's task, under 5 s, and its defer ran"
+
 # ── 8. The join is deferred: an early return cannot leak a task ─────────
 def leaves_early(finished : Pointer(Int32)) : Nil
   group do |g|

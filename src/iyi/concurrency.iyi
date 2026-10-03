@@ -1796,10 +1796,16 @@ class IyiScheduler
     true
   end
 
-  # Any number of fibers wait on one task, each pushed on its chain.
+  # Any number of fibers wait on one task, each pushed on its chain. A
+  # cancelled reader waits only for a task the cancel reached too, which
+  # ends; for any other it stops (`stop_current`), because `value` has no
+  # `Cancelled` to answer. It waited for that task in full: a reader of
+  # an outer group's 3-second task held its failed group for 3030 ms, and
+  # one whose task waited on the group's end died "deadlock".
   def self.join(fiber : IyiFiber) : Nil
     while fiber.state != IyiFiberState::Done
       me = current
+      stop_current if me.cancelled && !fiber.cancelled
       me.awaited = fiber
       me.next_joiner = fiber.joiner
       fiber.joiner = me
@@ -1907,6 +1913,13 @@ class IyiScheduler
     while group.is_a?(IyiGroup)
       group.cancel_children
       group = group.outer
+    end
+    # A reader of a task the walk above did not reach is woken to stop
+    # (`join`); one whose task it reached waits for that task to end.
+    task = fiber.awaited
+    if fiber.state == IyiFiberState::Joining && task.is_a?(IyiFiber) && !task.cancelled
+      leave_joiners(task, fiber)
+      enqueue(fiber)
     end
   end
 

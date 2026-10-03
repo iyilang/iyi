@@ -3037,9 +3037,12 @@ paragraph under "The ceiling was not a guess" says how);
 `group do ... end!` types its own return now (III.4.9, the section says
 what the build corrected) — a *dynamic* group's union still
 comes out through `task.value`; a fiber waiting on the `value` of a task
-outside its own groups is the one wait cancellation does not reach — a
-cancel reaches the tasks of every group the cancelled task holds open,
-joined, reading values or asleep, and a block left early by `return`,
+outside its own groups was the one wait cancellation did not reach, and
+it stops now as III.4.6's select with no bound arm does, since `value`
+has no `Cancelled` to answer — it waited for that task in full, 3,030 ms
+for an outer group's 3-second task — while a reader of a task the cancel
+did reach waits for it to end; a cancel reaches the tasks of every group
+the cancelled task holds open, joined, reading values or asleep, and a block left early by `return`,
 `break` or `!` cancels the tasks still running in it; and the platforms that cannot carry the model get
 nothing rather than an imitation: wasm32 cannot switch stacks (measured in
 III.4.12). darwin arm64 and Windows x86_64 run the real runtime: darwin's kqueue

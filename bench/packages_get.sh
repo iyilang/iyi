@@ -805,6 +805,28 @@ got="$(awk '$1 == "example.test/user/libn" { print $3 }' iyi.sum)"
 [ "$got" = "s1:$expected" ] || fail "libn's sum is $got, where the tag's bytes and paths make s1:$expected"
 [ "$status" -eq 0 ] && echo "  s1:$expected, from the tag's paths and bytes, with a CRLF-asking git"
 
+step "a module in a subdirectory reads the manifest at the root its header names"
+# `greet/greeter.iyi` declares `module greet/greeter`, so its root is the
+# directory above `greet/`, and iyi.mod is there. `run main.iyi` built it,
+# and every verb asked of the module itself read the manifest beside it:
+# `check` said "no requirement covers 'example.test/user/liba'", the test
+# beside it "does not build", `check --affected` "3 consumer(s) checked, 2
+# broke", and `mod context` "does not resolve".
+mkdir -p "$WORK/sapp/greet" && cd "$WORK/sapp" || exit 1
+printf 'module example.test/user/sapp\nrequire example.test/user/liba v1.1.0\n' > iyi.mod
+printf 'module greet/greeter\n\nimport example.test/user/liba\n\npub def hello : String\n  "greeter says " + Liba.greeting\nend\n' > greet/greeter.iyi
+printf 'module greet/greeter_test\n\nimport greet/greeter\n\nassert Greet::Greeter.hello == "greeter says liba 1.1.0", "hello"\n' > greet/greeter_test.iyi
+printf 'import greet/greeter\n\nputs Greet::Greeter.hello\n' > main.iyi
+"$IYI" run main.iyi > sub-run.log 2>&1 && grep -q "greeter says liba 1.1.0" sub-run.log || fail "the entry did not build: $(cat sub-run.log)"
+"$IYI" check greet/greeter.iyi > sub-check.log 2>&1 || fail "check of the module alone: $(cat sub-check.log)"
+(cd greet && "$IYI" check greeter.iyi) > sub-check2.log 2>&1 || fail "check from inside greet/: $(cat sub-check2.log)"
+"$IYI" test > sub-test.log 2>&1 && grep -q "^1 passed, 0 failed" sub-test.log || fail "the test beside the module: $(cat sub-test.log)"
+"$IYI" check --affected greet/greeter.iyi > sub-aff.log 2>&1 && grep -q "^3 consumer(s) checked, all compile" sub-aff.log ||
+  fail "check --affected of the module: $(cat sub-aff.log)"
+"$IYI" mod context greet/greeter.iyi > sub-ctx.log 2>&1 && grep -q "def greeting : String" sub-ctx.log ||
+  fail "mod context of the module: $(head -5 sub-ctx.log)"
+[ "$status" -eq 0 ] && echo "  greet/greeter.iyi: check, its test, check --affected and mod context resolve liba through the root's iyi.mod"
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "iyi get: every step held"

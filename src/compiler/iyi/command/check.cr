@@ -209,20 +209,21 @@ class Iyi::Command
     compiler.no_codegen = true
     compiler.stdout = IO::Memory.new
     compiler.stderr = IO::Memory.new
-    root = closure_root_of(expanded)
+    code = File.read(expanded)
+    root = Compiler.entry_root_of(expanded, code)
     compiler.iyi_project_root = root
-    compiler.iyi_mod_table = Mod::Installer.table_for(File.dirname(expanded))
+    compiler.iyi_mod_table = Mod::Installer.table_for(root)
     # iyi: the artifacts a workspace keeps, for a module whose source is not
     # there — the same reading the language server does, and for the same
     # reason. A library arrives as `.iyimod` files (III.7), and `check` on a
     # file importing one answered `can't find module` about a module `build
     # --use-iyimod` compiles against. See `Compiler.workspace_artifacts`.
-    if artifacts = Compiler.workspace_artifacts(root || File.dirname(expanded))
+    if artifacts = Compiler.workspace_artifacts(root)
       compiler.use_iyimod = artifacts
       compiler.iyi_prefers_source = true
     end
     compiler.compile(
-      Compiler::Source.new(expanded, File.read(expanded)),
+      Compiler::Source.new(expanded, code),
       File.tempname("iyi-check", nil))
     nil
   rescue ex : CodeError

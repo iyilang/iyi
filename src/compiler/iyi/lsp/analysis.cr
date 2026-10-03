@@ -115,9 +115,13 @@ module Iyi::Lsp
     end
 
     private def compile(path : String, text : String, overrides : Hash(String, String)) : {Compiler::Result?, Array(Diag)}
+      # IV.6 read backwards, as a build reads it: `<root>/calc/parser.iyi`
+      # resolves its `import calc/lexer` from `<root>`, and its packages
+      # through `<root>/iyi.mod` (`Compiler.entry_root_of`).
+      root = Compiler.entry_root_of(path, text)
       table =
         begin
-          Mod::Installer.table_for(File.dirname(path))
+          Mod::Installer.table_for(root)
         rescue ex : Mod::ModError
           return {nil, [Diag.new(1, 1, 0, ex.message.to_s, nil, [] of {String, Int32, Int32, String})]}
         end
@@ -129,9 +133,6 @@ module Iyi::Lsp
       compiler.iyi_mod_table = table
       compiler.iyi_file_overrides = overrides
       compiler.stdout = IO::Memory.new
-      # IV.6 read backwards, as a build reads it: `<root>/calc/parser.iyi`
-      # resolves its `import calc/lexer` from `<root>`.
-      root = Compiler.header_root_of(path, text)
       compiler.iyi_project_root = root
       compiler.stderr = IO::Memory.new
 
@@ -151,7 +152,7 @@ module Iyi::Lsp
       # sources present is compiled exactly as it was before this, and a
       # directory under some other name leaves the server saying what it
       # said.
-      if artifacts = Compiler.workspace_artifacts(root || File.dirname(path))
+      if artifacts = Compiler.workspace_artifacts(root)
         compiler.use_iyimod = artifacts
         compiler.iyi_prefers_source = true
       end

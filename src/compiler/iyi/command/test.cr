@@ -234,11 +234,12 @@ class Iyi::Command
   # the closure dropped what it could not open.
   private def test_import_closure(file : String) : Set(String)?
     entry = File.expand_path(file)
-    # IV.6 read backwards, the same rule the LSP applies: a file whose
-    # path ends with its own `module` header's path names the project
-    # root above both, and imports resolve from there — the way a build
-    # would. A header-less script keeps the entry-dir rule.
-    entry_dir = closure_root_of(entry) || File.dirname(entry)
+    # IV.6 read backwards, the rule a build applies
+    # (`Compiler.entry_root_of`): a file whose path ends with its own
+    # `module` header's path names the project root above both, and its
+    # imports and its manifest resolve from there. A header-less script
+    # keeps the entry-dir rule.
+    entry_dir = closure_root_of(entry)
     table = Mod::Installer.table_for(entry_dir)
     closure = Set(String).new
     entry_imports = test_imports_of(entry)
@@ -272,10 +273,10 @@ class Iyi::Command
   # IV.6 read backwards, which is the build's own rule: one reading of it,
   # because a selection that placed a test differently from the build that
   # compiles it would discount the wrong tests.
-  private def closure_root_of(path : String) : String?
-    Compiler.header_root_of(path, File.read(path))
+  private def closure_root_of(path : String) : String
+    Compiler.entry_root_of(path, File.read(path))
   rescue IO::Error
-    nil
+    File.dirname(path)
   end
 
   private def run_one_test(file : String, deadline : Float64) : {file: String, status: String, seconds: Float64, output: String}

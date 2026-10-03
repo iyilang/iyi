@@ -4486,8 +4486,9 @@ Artifact distribution is deliberately last. It is the differentiator and it is
 worth nothing until there is something to install.
 
 **Step 1 is built, and three decisions came out of building it.** `iyi.mod`
-beside the entry file is the opt-in: `module <path>` and `require <path>
-v1.2.3`, nothing else. The resolver is MVS as written above, a worklist
+at the project root - the root the entry's `module` header names (IV.6),
+or beside the entry file - is the opt-in: `module <path>` and `require
+<path> v1.2.3`, nothing else. The resolver is MVS as written above, a worklist
 whose per-path answer only climbs (`src/compiler/iyi/mod/`); the fetcher is
 `git clone --depth 1 --branch v<version>` from `https://<path>.git`, into
 the compiler's cache, immutable once its manifest is readable —
@@ -4591,7 +4592,7 @@ counts what it imports. It travels to every verb in the same prefix table,
 as a row `@web` no import can begin with.
 
 **`replace` builds a module from a directory.** `replace <path> =>
-../dir` in the manifest beside the entry file makes every build - and
+../dir` in the program's own manifest makes every build - and
 `get`, `check`, the language server, which all resolve through one
 function - read that module from the directory instead of its tag: the
 library written beside the app that uses it, or a fork checked out to

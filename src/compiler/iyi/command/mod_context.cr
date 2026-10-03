@@ -124,11 +124,17 @@ class Iyi::Command
     end
     filename = File.expand_path(filename)
     entry_dir = File.dirname(filename)
+    # The workspace root rather than the entry's directory, for the
+    # manifest and the artifacts: IV.6 read backwards, the way a build, the
+    # server and `iyi test` read it. A file whose path ends with its own
+    # `module` header's path names the root above both, and that is where a
+    # workspace keeps `iyi.mod` and `mods`.
+    root = Compiler.entry_root_of(filename, File.read(filename))
 
     imports = mod_context_imports(filename)
     table =
       begin
-        @mod_context_table = Mod::Installer.table_for(entry_dir)
+        @mod_context_table = Mod::Installer.table_for(root)
       rescue ex : Mod::ModError
         abort! ex.message.to_s, :USAGE_ERROR
       end
@@ -136,17 +142,11 @@ class Iyi::Command
     emit_dir = File.tempname("iyi-context", nil)
     Dir.mkdir_p(emit_dir)
     begin
-      # The workspace root rather than the entry's directory, for the
-      # artifacts alone: IV.6 read backwards, the way the server and
-      # `iyi test` read it. A file whose path ends with its own `module`
-      # header's path names the root above both, and that is where a
-      # workspace keeps `mods`.
-      artifact_root = Compiler.header_root_of(filename, File.read(filename)) || entry_dir
       blocks = [] of ContextBlock
       imports.each do |written|
-        blocks << mod_context_block(written, entry_dir, table, emit_dir, artifact_root)
+        blocks << mod_context_block(written, entry_dir, table, emit_dir, root)
       end
-      mod_context_reexports(blocks, emit_dir, artifact_root)
+      mod_context_reexports(blocks, emit_dir, root)
 
       if as_json
         JSON.build(STDOUT) do |json|

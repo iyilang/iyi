@@ -1,6 +1,6 @@
 # iyi: the piece that turns a manifest into search roots. `iyi build` calls
-# this once, before semantic: if the entry file's directory has an
-# `iyi.mod`, its requirements are resolved (MVS, resolver.cr), every
+# this once, before semantic: if the project root (`Compiler.entry_root_of`)
+# has an `iyi.mod`, its requirements are resolved (MVS, resolver.cr), every
 # selection is checked out (fetcher.cr), and the program gets a prefix
 # table the import resolver consults — longest prefix first, so
 # `github.com/user/lib/v2` wins over `github.com/user/lib` when both are
@@ -16,8 +16,10 @@ module Iyi::Mod
   module Installer
     MANIFEST = "iyi.mod"
 
-    # The prefix table for the program whose entry file sits in
-    # *entry_dir*, or an empty one when there is no manifest to serve.
+    # The prefix table for the program answered from *entry_dir* - the root
+    # its entry's header names, or the entry's directory
+    # (`Compiler.entry_root_of`) - or an empty one when there is no manifest
+    # to serve.
     def self.table_for(entry_dir : String) : Array({String, String})
       manifest_path = File.join(entry_dir, MANIFEST)
       return [] of {String, String} unless File.file?(manifest_path)

@@ -339,6 +339,19 @@ module Iyi
       root.empty? ? "/" : root
     end
 
+    # The directory a build of *path* is answered from: the root its header
+    # names, or its own directory when the header names none. The manifest
+    # is read there, and a workspace keeps `mods` there, for every verb
+    # that compiles - a build, `check`, `test`, `mod context`, the language
+    # server. The manifest was read beside the entry, so in a project whose
+    # `iyi.mod` sits above `greet/`, `iyi run main.iyi` built
+    # `greet/greeter.iyi` and `iyi check greet/greeter.iyi` refused it with
+    # "no requirement covers 'example.test/user/liba'"; the test beside it
+    # "does not build", and `check --affected` said two consumers broke.
+    def self.entry_root_of(path : String, text : String) : String
+      header_root_of(path, text) || File.dirname(path)
+    end
+
     # Compiles against an already-analysed prelude. This is the same split the
     # fork probe measures (SPEC.md IV.1a): the top-level pass runs over the user
     # file only, and every pass after it runs over both trees, because they walk
@@ -390,9 +403,9 @@ module Iyi
       # never computed is not one it can be said to have decided against.
       if table = @iyi_mod_table
         program.iyi_mod_table = table
-      elsif filename = program.filename
+      elsif entry = sources.first?
         begin
-          program.iyi_mod_table = Mod::Installer.table_for(File.dirname(filename))
+          program.iyi_mod_table = Mod::Installer.table_for(Compiler.entry_root_of(entry.filename, entry.code))
         rescue ex : Mod::ModError
           raise Error.new(ex.message)
         end
@@ -3020,16 +3033,17 @@ module Iyi
       program.iyi_prefers_source = @iyi_prefers_source
       program.iyi_wants_object_code = !@no_codegen
       program.iyi_rewrites_artifacts = !@emit_iyimod.nil?
-      # iyi: the manifest, if the entry file's directory has one (III.7) —
-      # or the table a tool prepared, which wins because the tool resolved
-      # the *user's* manifest and the entry may be a dependency with none.
+      # iyi: the manifest, if the root the entry is answered from has one
+      # (III.7, `Compiler.entry_root_of`) — or the table a tool prepared,
+      # which wins because the tool resolved the *user's* manifest and the
+      # entry may be a dependency with none.
       # A manifest failure is a build error with the manifest's name in it,
       # not a compiler bug banner.
       if table = @iyi_mod_table
         program.iyi_mod_table = table
-      elsif filename = program.filename
+      elsif entry = sources.first?
         begin
-          program.iyi_mod_table = Mod::Installer.table_for(File.dirname(filename))
+          program.iyi_mod_table = Mod::Installer.table_for(Compiler.entry_root_of(entry.filename, entry.code))
         rescue ex : Mod::ModError
           raise Error.new(ex.message)
         end

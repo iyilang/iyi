@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **A module in a subdirectory resolves its packages through the
+  manifest at the root its header names, under every verb.** The
+  manifest was read beside the file each verb was given, so in a project
+  whose `iyi.mod` sits above `greet/`, `iyi run main.iyi` printed
+  `greeter says liba 1.0.0` while `iyi check greet/greeter.iyi` answered
+  "no requirement covers 'example.test/user/liba'", `iyi test` said the
+  test beside the module "does not build", `check --affected
+  greet/greeter.iyi` said "3 consumer(s) checked, 2 broke", `mod
+  context` said the import "does not resolve", and the language server
+  put the refusal on the import line. A build, `check`, `test`, `check
+  --affected`, `mod context` and the server read `iyi.mod` and `mods` at
+  the root the entry's `module` header names now, or beside the entry
+  when it names none (`Compiler.entry_root_of`). `bench/packages_get.sh`
+  checks such a module, runs its test, checks its ripple and asks `mod
+  context` about it, and `bench/lsp_session.py` opens it; the old
+  compiler refused each, as above.
+
 - **`chr` takes every code point in every integer width.** The
   prelude's `Int32#chr` reads every code point but the surrogates, and
   `std/int`'s `chr`, which says it keeps that contract for the rest of

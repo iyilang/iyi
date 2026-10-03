@@ -23,7 +23,7 @@
 # `replace` builds a required module from a directory on this machine
 # instead of its tag: the module being written beside the one that uses
 # it, or a fork checked out to try. It is the program's own decision, so
-# only the manifest beside the entry file is obeyed; one in a dependency's
+# only the program's own manifest is obeyed; one in a dependency's
 # manifest is read and ignored, as Go does, or a library could redirect
 # its consumers' builds. The target is spelled as a directory - `./`,
 # `../` or absolute - so it can never be mistaken for a module path.

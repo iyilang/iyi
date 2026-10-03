@@ -2747,6 +2747,30 @@ def main():
              f"{len(links)} link(s): {sorted(os.path.basename(t) for t in by_line.values())}")
         c.send("textDocument/didClose", {"textDocument": {"uri": pkg_uri}},
                wait=False)
+
+        # 48a. A module in a subdirectory reads the manifest at the root its
+        #      header names. `greet/greeter.iyi`, declaring `module
+        #      greet/greeter`, was compiled with the manifest beside it -
+        #      there is none in `greet/` - and the editor showed "no
+        #      requirement covers 'example.test/user/liba'" on a module a
+        #      build of the app compiles.
+        greet_dir = os.path.join(os.path.dirname(pkg_path), "greet")
+        os.makedirs(greet_dir, exist_ok=True)
+        greeter = os.path.join(greet_dir, "greeter.iyi")
+        greeter_text = ("module greet/greeter\n\nimport example.test/user/liba\n\n"
+                        "pub def hello : String\n  \"greeter says \" + Liba.greeting\nend\n")
+        with open(greeter, "w") as f:
+            f.write(greeter_text)
+        greeter_uri = file_uri(greeter)
+        c.send("textDocument/didOpen",
+               {"textDocument": {"uri": greeter_uri, "languageId": "iyi",
+                                 "version": 1, "text": greeter_text}}, wait=False)
+        greeter_diags = c.diagnostics(greeter_uri)["diagnostics"]
+        step("48a", "a module in a subdirectory resolves a package through the root's iyi.mod",
+             greeter_diags == [],
+             greeter_diags[0]["message"].splitlines()[0][:70] if greeter_diags else "no diagnostics")
+        c.send("textDocument/didClose", {"textDocument": {"uri": greeter_uri}},
+               wait=False)
     else:
         step(48, "a document link follows a package import into the cache",
              False, "the package fixture needs git, which this run has none of")

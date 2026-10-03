@@ -1890,7 +1890,7 @@ module Iyi::IyiMod
     io.puts
     io.puts "note          format v#{FORMAT_VERSION} carries declarations,"
     io.puts "              signatures, field lists in declaration order, the"
-    io.puts "              the constants and class variables this module's"
+    io.puts "              constants and class variables this module's"
     io.puts "              own code reads, the macros and"
     io.puts "              bodies a consumer has to compile for itself, the"
     io.puts "              object code of this module's own non-generic"
@@ -2199,10 +2199,27 @@ module Iyi::IyiMod
       free_variables: a_def.free_vars || [] of String,
       required: a_def.abstract?,
       doc: a_def.doc || "",
-      visibility: a_def.visibility.private? ? "private" : "",
+      visibility: signature_visibility(a_def),
       # As the module wrote them. See `Signature#annotations`.
       annotations: a_def.all_annotations.try(&.map(&.to_s)) || [] of String,
     )
+  end
+
+  # iyi: what a signature carries of a def's visibility - `private`,
+  # `protected`, or nothing.
+  #
+  # `protected` was dropped: from source `Box.new(4).secret` is `protected
+  # method 'secret' called for App::Vis::Box`, through the artifact it typed
+  # and the link failed on `Box#secret`, a symbol the module never meant
+  # anyone outside to ask for. Not an `initialize`'s: the compiler marks
+  # every one `protected` once it has made its `new`, and the consumer's
+  # compiler does the same with the one it reads.
+  private def self.signature_visibility(a_def : Def) : String
+    case
+    when a_def.visibility.private?                                 then "private"
+    when a_def.visibility.protected? && a_def.name != "initialize" then "protected"
+    else                                                                ""
+    end
   end
 
   # iyi: R-2 reaches the block parameter (SPEC.md IV.2).
@@ -2438,7 +2455,6 @@ module Iyi::IyiMod
     signature.annotations.each { |source| io << indent << source << '\n' }
     io << indent
     io << "pub " if exported
-    io << "private " if signature.visibility == "private"
     io << render_signature(signature) << '\n'
     # An `abstract def` ends at its signature. Anything else needs the `end`
     # its absent body would have carried.
@@ -2888,6 +2904,9 @@ module Iyi::IyiMod
   # tool that lies at exactly the moment it is needed.
   def self.render_signature(signature : Signature) : String
     String.build do |io|
+      # Written as the module wrote it: `mod dump` printed `def hidden` for
+      # a `private def hidden`, and `protected` was nowhere.
+      io << signature.visibility << ' ' unless signature.visibility.empty?
       io << "abstract " if signature.required
       io << "def "
       io << signature.receiver << '.' unless signature.receiver.empty?

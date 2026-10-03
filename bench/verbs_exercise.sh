@@ -1072,6 +1072,28 @@ case "$(uname -s)" in
 esac
 
 echo
+echo "== what an artifact keeps to a type"
+# `protected` travels as written: through the artifact `Box.new(4).secret`
+# typed, and the link failed on a symbol the module never meant anyone
+# outside to ask for, where the source says "protected method 'secret'
+# called". And `mod dump` writes a method's visibility, which it left off
+# `private def hidden` too.
+mkdir -p "$WORK/vis/app"
+printf 'module app/vis\n\npub class Box\n  @n : Int32\n\n  def initialize(@n : Int32)\n  end\n\n  def value : Int32\n    @n\n  end\n\n  protected def secret : Int32\n    @n * 2\n  end\n\n  private def hidden : Int32\n    @n * 3\n  end\nend\n' > "$WORK/vis/app/vis.iyi"
+printf 'import app/vis::{Box}\n\nputs Box.new(4).value\n' > "$WORK/vis/ok.iyi"
+printf 'import app/vis::{Box}\n\nputs Box.new(4).secret\n' > "$WORK/vis/secret.iyi"
+(cd "$WORK/vis" && "$IYI" build --emit-iyimod mods -o ok ok.iyi && mv app/vis.iyi vis.source) > "$WORK/vis.log" 2>&1 ||
+  { echo "  the protected module does not build:"; sed -n '1,3p' "$WORK/vis.log"; status=1; }
+refuses "a protected method, through its artifact" "protected method 'secret' called" -- \
+  "$IYI" build --use-iyimod "$WORK/vis/mods" -o "$WORK/vis/u" "$WORK/vis/secret.iyi"
+"$IYI" mod dump "$WORK/vis/mods/app/vis.iyimod" > "$WORK/visdump.log" 2>&1
+if grep -qF "protected def secret : Int32" "$WORK/visdump.log" && grep -qF "private def hidden : Int32" "$WORK/visdump.log"; then
+  echo "  mod dump writes protected and private as the module did"
+else
+  echo "  mod dump dropped a visibility:"; grep -E "def (secret|hidden)" "$WORK/visdump.log"; status=1
+fi
+
+echo
 echo "== where a program is written, and where its library is looked for"
 # `-o ""` is what `-o "$OUT"` produces with `OUT` unset. It used to mean
 # the current directory: the program landed beside its source under a

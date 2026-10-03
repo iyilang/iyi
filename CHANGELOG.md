@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`protected` travels in a module's artifact, and `mod dump` writes a
+  method's visibility.** From source `Box.new(4).secret` is `protected
+  method 'secret' called for App::Vis::Box`; through the artifact the
+  call typed and the link ended on an unresolved `Box#secret` symbol,
+  because a signature carried `private` and nothing else. `mod dump`
+  printed `def secret : Int32` and `def hidden : Int32` for a `protected
+  def` and a `private def`. Both visibilities are carried and written now
+  - in the dump, the declarations a consumer compiles and the surface -
+  and the artifact build refuses the call as the source build does.
+  `bench/verbs_exercise.sh` checks it; the old compiler went on to the
+  link.
+
 - **An unmarked macro is the module's own through its artifact too.**
   From source `App::Lib.inner` is refused with `App::Lib does not export
   'inner'`; built with `--use-iyimod` and the source gone it compiled and

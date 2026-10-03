@@ -4,6 +4,15 @@
 
 ### Fixed
 
+- **`URI#normalize` writes a host's escapes with upper-case hex
+  digits.** RFC 3986 section 6.2.2.1 normalizes a host to lower case
+  and the hex digits of a percent escape to upper case; `normalize`
+  lower-cased the whole host, escapes included, so
+  `HTTP://%c3%A9.EXAMPLE:80/` came out `http://%c3%a9.example/`. The
+  host is lowered and its escapes' digits raised now.
+  `bench/std_uri_exercise.iyi` normalizes that URI; the old module
+  answered `http://%c3%a9.example/`.
+
 - **`<%-` keeps the blanks before it when another tag stands before it
   on its line.** The module says `<%-` drops the indentation before a
   tag that is the first thing on its line, but text with no line break

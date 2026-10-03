@@ -82,6 +82,12 @@ assert_str "http://a%40b@h/", given.to_s, "a user given to the setter is encoded
 assert_str "a@b", given.user.to_s, "and read back decoded"
 puts "  userinfo keeps its escapes"
 
+# A normalized host is lower case and its escapes' hex digits upper-case,
+# both rules of RFC 3986 section 6.2.2.1: `downcase` alone normalized
+# `%C3%A9.EXAMPLE` to `%c3%a9.example`.
+assert_str "http://%C3%A9.example/", URI.parse("HTTP://%c3%A9.EXAMPLE:80/").normalize.to_s, "a host's escapes are normalized to upper case"
+puts "  a normalized host is lower case, its escapes upper case"
+
 puts "\n== refuse"
 assert_true URI.parse?("https://ex.com/a b").nil?, "space refused"
 puts "  a space in the reference is refused"

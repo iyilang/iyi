@@ -2,10 +2,10 @@
 # path, query and fragment, read by `URI.parse` (`URI.parse?` answers nil
 # where `parse` panics with the reason), written back by `to_s`, resolved
 # against a base by `resolve` (section 5.2, dot segments included),
-# normalized by `normalize` (lower-case scheme and host, default port
-# dropped, dot segments removed). `Params` holds an ordered multi-valued
-# query, read by `Params.parse` and written by `to_s` the
-# application/x-www-form-urlencoded way.
+# normalized by `normalize` (lower-case scheme and host, the host's escapes
+# with upper-case hex digits, default port dropped, dot segments removed).
+# `Params` holds an ordered multi-valued query, read by `Params.parse` and
+# written by `to_s` the application/x-www-form-urlencoded way.
 #
 # Percent-encoding: `encode`, `encode_path`, `encode_path_segment` and
 # `encode_www_form` each keep a documented set of bytes and encode every
@@ -964,6 +964,30 @@ pub class URI
     end
   end
 
+  # The host in lower case and its escapes' hex digits upper-case, the
+  # two rules RFC 3986 section 6.2.2.1 gives: `downcase` alone wrote
+  # `%C3%A9` as `%c3%a9`, the one spelling of the escape the section
+  # normalizes away from.
+  protected def self.normalized_host(host : String) : String
+    lower = host.downcase
+    return lower unless lower.index('%')
+    raw = lower.to_unsafe
+    n = lower.bytesize
+    String.new(n) do |buf|
+      buf.copy_from(raw, n)
+      i = 0
+      while i + 2 < n
+        if raw[i] == 37_u8 && hex_digit?(raw[i + 1]) && hex_digit?(raw[i + 2])
+          buf[i + 1] = raw[i + 1] >= 97_u8 ? raw[i + 1] - 32_u8 : raw[i + 1]
+          buf[i + 2] = raw[i + 2] >= 97_u8 ? raw[i + 2] - 32_u8 : raw[i + 2]
+          i = i + 3
+        else
+          i = i + 1
+        end
+      end
+    end
+  end
+
   def normalize : URI
     dup.normalize_in_place
   end
@@ -973,7 +997,8 @@ pub class URI
       @scheme = s.downcase
     end
     if h = @host
-      @host = h.downcase
+      # Lower case, its escapes' hex digits upper-case.
+      @host = URI.normalized_host(h)
     end
 
     if s = @scheme

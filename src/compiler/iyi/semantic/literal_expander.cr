@@ -617,19 +617,68 @@ module Iyi
     #
     # To, in each branch:
     #
-    #     it = %temp
-    #     serve(it)
+    #     %it = %temp
+    #     it = %it
+    #     serve(%it)
     #
     # An assignment rather than anything new, so `it` picks up the narrowing the
     # branch's `is_a?` already did — in the second branch it is an `IOError`,
     # not the whole union. It also means `it` outlives the `case` exactly the
     # way a variable assigned inside an `if` does, which is the rule iyi already
     # has for every other branch body.
+    #
+    # The branch reads a variable of its own rather than `it`, because `it` is
+    # one variable for the whole scope and a variable a proc or a task captures
+    # is not narrowed. Read as `it`, `in Int32 then ->{ it + 1 }` was refused
+    # with "expected argument #1 to 'String#+' to be String, not Int32", and so
+    # was every later `case` in the scope that did `it + 1`; `g.spawn { total
+    # += it }` was refused over `(Int32 | String)`.
     private def bind_it(node : Case, body : ASTNode, subject : ASTNode?)
       return body unless node.binds_it? && subject
 
-      assign = Assign.new(Var.new("it").at(body), subject.clone).at(body)
-      Expressions.new([assign, body] of ASTNode).at(body)
+      hidden = new_temp_var.at(body)
+      # A copy: the `case` keeps its branches as they were written, `it` and
+      # all, for whatever reads them after the expansion.
+      body = body.clone
+      body.accept ItRenamer.new(hidden.name)
+      bind = Assign.new(hidden, subject.clone).at(body)
+      keep = Assign.new(Var.new("it").at(body), hidden.clone).at(body)
+      Expressions.new([bind, keep, body] of ASTNode).at(body)
+    end
+
+    # Points the `it` of one branch at the variable `bind_it` gave it.
+    private class ItRenamer < Visitor
+      def initialize(@name : String)
+      end
+
+      def visit(node : Var)
+        node.name = @name if node.name == "it"
+        false
+      end
+
+      # A nested `case` binds its own `it` in its branches; its subject and its
+      # conditions are still read in this one.
+      def visit(node : Case)
+        return true unless node.binds_it?
+        node.cond.try &.accept self
+        node.whens.each { |wh| wh.conds.each &.accept self }
+        false
+      end
+
+      # So does a proc with a parameter of that name.
+      def visit(node : Def)
+        node.args.none? { |arg| arg.name == "it" }
+      end
+
+      # Macro code is text until the main visitor expands it, and the `it` it
+      # reads then is the one every branch still assigns.
+      def visit(node : MacroIf | MacroFor | MacroExpression | MacroVerbatim | MacroLiteral)
+        false
+      end
+
+      def visit(node : ASTNode)
+        true
+      end
     end
 
     def expand(node : Case)

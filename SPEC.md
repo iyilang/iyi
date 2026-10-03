@@ -1971,7 +1971,10 @@ Two things the build found, both since closed:
   section write `in IOError then log(it)`, and `case` has learned to bind the
   value it is matching. The binding is an ordinary assignment the expander
   writes into each branch, so `it` picks up the narrowing that branch already
-  did: in the `IOError` branch it *is* an `IOError`, not the whole union. Three
+  did: in the `IOError` branch it *is* an `IOError`, not the whole union. The
+  branch itself reads a variable of its own that holds the same value, so a
+  proc or a `g.spawn` block that captures `it` keeps that branch's type, and
+  no other `case` in the scope loses its narrowing to the capture. Three
   consequences follow from it being an assignment rather than new machinery:
   `it` outlives the `case` exactly the way a variable assigned inside an `if`
   does; a nested `case` shadows the outer one's `it`; and `it` is a name an iyi

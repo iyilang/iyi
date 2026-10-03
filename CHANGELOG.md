@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A proc or a task that captures a `case` branch's `it` sees it at that
+  branch's type, and the other `case`s in the scope keep theirs.** `it` was
+  one variable for the whole scope, and a variable a closure captures is
+  not narrowed: `in Int32 then ->{ it + 1 }` was refused with "expected
+  argument #1 to 'String#+' to be String, not Int32", `in Int32 then
+  g.spawn { total += it }` with "expected argument #1 to 'Int32#+' to be
+  Int32, not (Int32 | String)", and a later `case` that did `it + 1`
+  without capturing anything was refused the same way once an earlier one
+  had captured `it`. Each branch reads a variable of its own now, assigned
+  the narrowed value; `it` is still assigned too, so it outlives the
+  `case` as SPEC.md III.1.1 says. `bench/runtime_exercise.iyi` step 17
+  captures `it` in a task and in a proc and reads a later `case`'s; the
+  old compiler refused the step at its `g.spawn` line.
+
 - **A constant, an enum value and a macro shift by a negative count the
   other way, as the line that computes the same expression does.** The
   folder still answered 0 for a negative count (-1 for a negative value

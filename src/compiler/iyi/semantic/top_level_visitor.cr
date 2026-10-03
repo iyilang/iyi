@@ -650,21 +650,26 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     !!(mod && mod.iyi_unit?)
   end
 
-  # iyi: `trait Ord : Eq` (SPEC.md II.6).
+  # iyi: `trait Ord : Eq` (SPEC.md II.6), and `trait Ord(T) : Cmp(T)`, whose
+  # supertrait names the trait's own parameter: looked up where the trait is
+  # declared, that `T` is the parameter, and each impl reads it at its own
+  # arguments (`check_impl_supertraits`).
   private def resolve_supertraits(node : TraitDef, type)
     supertraits = node.supertraits
     return unless supertraits
     return unless type.is_a?(TraitSupertraits)
 
+    generic = type
+    free_vars = generic.type_vars.to_h { |name| {name, generic.type_parameter(name).as(TypeVar)} } if generic.is_a?(GenericType)
     resolved = [] of Type
     supertraits.each do |supertrait_node|
-      supertrait = lookup_type(supertrait_node)
+      supertrait = lookup_type(supertrait_node, free_vars: free_vars)
 
       unless supertrait.trait?
         supertrait_node.raise "can't require #{supertrait}, it's a #{supertrait.type_desc}. A trait can only require another trait"
       end
 
-      if supertrait == type
+      if supertrait == type || (supertrait.is_a?(GenericInstanceType) && supertrait.generic_type == type)
         supertrait_node.raise "#{type} can't require itself"
       end
 
@@ -860,7 +865,6 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # why `TraitType` is a module type — and `from_impl` is what keeps this
     # path open now that a written `include` of a trait is refused.
     assoc_args = check_impl_assoc_types node, trait_type, target_type
-    check_impl_supertraits node, trait_type, target_type
 
     args = (node.trait_args || [] of ASTNode) + (assoc_args || [] of ASTNode)
     trait_name =
@@ -882,6 +886,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # already does.
     include_in target_type, include_node, :included,
       from_impl: true, free_vars: impl_target_free_vars(target_type)
+    check_impl_supertraits node, trait_type, target_type
 
     check_impl_requirements node, trait_type, target_type
 
@@ -987,13 +992,25 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
   #
   # Transitivity comes for free. If `Eq` itself required `Show`, the
   # `impl Eq for N` this one insists on was checked the same way.
+  #
+  # A supertrait naming the trait's parameter, `trait Ord(T) : Cmp(T)`, is
+  # read at the arguments this impl gave: `impl Ord(N) for N` needs `Cmp(N)`,
+  # and `impl Cmp(String) for N` is not that. Which is why this runs after the
+  # include: the trait at those arguments is the one the target now has.
   private def check_impl_supertraits(node : ImplDef, trait_type, target_type)
     return unless trait_type.is_a?(TraitSupertraits)
 
-    missing = trait_type.supertraits.reject { |supertrait| target_type.implements?(supertrait) }
+    implemented = target_type.parents.try &.find { |parent| parent.is_a?(GenericInstanceType) && parent.generic_type == trait_type }
+    label = trait_type.to_s
+    required = trait_type.supertraits.map do |supertrait|
+      next supertrait unless implemented && supertrait.unbound?
+      label = iyi_trait_label(implemented)
+      supertrait.replace_type_parameters(implemented)
+    end
+    missing = required.reject { |supertrait| target_type.implements?(supertrait) }
     return if missing.empty?
 
-    node.raise "impl #{trait_type} for #{target_type} needs #{missing.size == 1 ? "an impl" : "impls"} of #{missing.join(", ")} for #{target_type} first: #{trait_type} requires its implementers to implement #{missing.size == 1 ? "it" : "them"} — see SPEC.md II.6"
+    node.raise "impl #{label} for #{target_type} needs #{missing.size == 1 ? "an impl" : "impls"} of #{missing.map { |supertrait| iyi_trait_label(supertrait) }.join(", ")} for #{target_type} first: #{label} requires its implementers to implement #{missing.size == 1 ? "it" : "them"} — see SPEC.md II.6"
   end
 
   # iyi: a trait whose only type vars are associated ones can be implemented at

@@ -4452,6 +4452,13 @@ end").as(ClassDef)
         node.supertraits.should eq([Path.new(["App", "Cmp", "Eq"])] of ASTNode)
       end
 
+      # Read as a path, the supertrait stopped at `Cmp` and the `(` was
+      # "expecting any of these tokens: ;, NEWLINE, SPACE (not '(')".
+      it "parses a parameterised supertrait" do
+        node = parse("trait Ord(T) : Cmp(T)\nend").as(TraitDef)
+        node.supertraits.should eq([Generic.new(Path.new(["Cmp"]), [Path.new(["T"])] of ASTNode)] of ASTNode)
+      end
+
       it "leaves a trait without supertraits alone" do
         parse("trait Greet\nend").as(TraitDef).supertraits.should be_nil
       end

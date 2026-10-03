@@ -690,6 +690,12 @@ printf 'module lib/y\n\nclass ::String\n  def tag : String\n    "y"\n  end\nend\
 printf 'module main\n\nimport lib/x\nimport lib/y\n\nputs Lib::X.via_x("s")\n' > reopen/main.iyi
 refuses "a reopen replacing another module's method" "String#tag is lib/x's method, and this replaces it" -- \
   "$IYI" check reopen/main.iyi
+# A parameterised supertrait, `trait Ord(T) : Cmp(T)`, was "expecting any
+# of these tokens: ;, NEWLINE, SPACE (not '(')"; it is read at each impl's
+# arguments, and `impl Cmp(String)` does not give `impl Ord(N)` its `Cmp(N)`.
+printf 'trait Cmp(T)\n  abstract def cmp(other : T) : Int32\nend\n\ntrait Ord(T) : Cmp(T)\n  def gt(other : T) : Bool\n    cmp(other) > 0\n  end\nend\n\nstruct N\nend\n\nimpl Cmp(String) for N\n  def cmp(other : String) : Int32\n    1\n  end\nend\n\nimpl Ord(N) for N\nend\n' > supargs.iyi
+refuses "a parameterised supertrait not implemented at the impl's arguments" 'needs an impl of Cmp(N) for N first' -- \
+  "$IYI" check supargs.iyi
 # A byte order mark, which a Windows editor may put at the front of a
 # file. The lexer skips it; the three readings of a header did not, so a
 # module saved with one ran as a script and its import beside the header

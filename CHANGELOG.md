@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **A trait may require a parameterised trait.** `trait Ord(T) :
+  Cmp(T)` was "expecting any of these tokens: ;, NEWLINE, SPACE (not
+  '(')". It compiles now, and the requirement is read at each impl's
+  arguments: `impl Ord(N) for N` needs `impl Cmp(N) for N`, and with only
+  `impl Cmp(String)` it answers "impl Ord(N) for N needs an impl of
+  Cmp(N) for N first". `bench/verbs_exercise.sh`,
+  `spec/compiler/parser/parser_spec.cr` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  stopped at the `(`. [INFERENCE] Through a `.iyimod` the supertrait is
+  still written with its parameter qualified (`::T`), see compiler.cr.
+
 - **`where` is refused where it bounds nothing.** On an `abstract def`
   it was dropped: `abstract def first : Elem where Elem : Show` with
   `Elem = Float64` compiled and printed 1.5. Beside a top-level

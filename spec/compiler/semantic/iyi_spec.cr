@@ -2353,6 +2353,45 @@ describe "Semantic: iyi" do
         end
         CODE
     end
+
+    # `trait Ord(T) : Cmp(T)` was a parse error at the `(`. The supertrait is
+    # read at each impl's arguments: `impl Ord(N)` needs `Cmp(N)`, and an
+    # `impl Cmp(String)` is not that.
+    it "reads a parameterised supertrait at the impl's arguments" do
+      code = <<-CODE
+        module App
+          module Cmp
+            trait Cmp(T)
+              abstract def cmp(other : T) : Int32
+            end
+
+            trait Ord(T) : Cmp(T)
+              def gt(other : T) : Int32
+                cmp(other)
+              end
+            end
+
+            struct N
+              def initialize
+              end
+            end
+
+            impl Cmp(%s) for N
+              def cmp(other : %s) : Int32
+                1
+              end
+            end
+
+            impl Ord(N) for N
+            end
+          end
+        end
+
+        App::Cmp::N.new.gt(App::Cmp::N.new)
+        CODE
+      assert_type(code % {"N", "N"}) { int32 }
+      assert_error code % {"String", "String"}, "impl App::Cmp::Ord(App::Cmp::N) for App::Cmp::N needs an impl of App::Cmp::Cmp(App::Cmp::N) for App::Cmp::N first"
+    end
   end
 
   # iyi: `type Elem` — an associated type (SPEC.md II.6). It is an output of the

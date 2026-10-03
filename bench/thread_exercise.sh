@@ -1049,6 +1049,129 @@ PS1
     ;;
 esac
 
+# ── 7b. Windows: a thread is named on its line before a stop can see it ───
+# A child was linked for the stops under the runtime lock and ran at once,
+# and its handle reached its line only after the lock was released: a stop
+# in between suspended NULL, read sp 0 and scanned from address 0. The
+# child is created suspended now, its handle written under the lock, and
+# resumed after. A copy of the runtime holds every start open 2 ms there
+# while two threads collect, and every run ends well; the failure proof
+# puts the old order back under the same 2 ms, and a run dies.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "threads started while two others collect, each start held open 2 ms: three runs, and every one ends well"
+    cat > starting.iyi <<'IYI'
+class Flag
+  getter stop : Atomic(Int64)
+  getter ran : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+    @ran = Atomic(Int64).new(0_i64)
+  end
+end
+
+class Node
+  property next_node : Node?
+  property value : Int64
+
+  def initialize(@value : Int64)
+    @next_node = nil
+  end
+end
+
+def churn(flag : Flag) : Nil
+  while flag.stop.get == 0_i64
+    head : Node? = nil
+    200.times do |i|
+      n = Node.new(i.to_i64)
+      n.next_node = head
+      head = n
+    end
+    sum = 0_i64
+    cur = head
+    while cur.is_a?(Node)
+      sum = sum + cur.value
+      cur = cur.next_node
+    end
+    raise "churn sum #{sum}" if sum != 19900_i64
+  end
+end
+
+def child(flag : Flag, i : Int32) : Nil
+  a = [] of String
+  20.times { |k| a << "child-#{i}-#{k}" }
+  raise "child list" if a.size != 20 || a[19] != "child-#{i}-19"
+  flag.ran.add(1_i64)
+end
+
+flag = Flag.new
+churners = [] of IyiThread
+2.times { churners << IyiThread.start { churn(flag) } }
+deadline = __iyi_monotonic_ns + Program.args[0].to_i.to_i64 * 1_000_000_000_i64
+started = 0
+while __iyi_monotonic_ns < deadline
+  batch = [] of IyiThread
+  4.times do |k|
+    n = started + k
+    batch << IyiThread.start { child(flag, n) }
+  end
+  started = started + 4
+  batch.each(&.join)
+end
+flag.stop.set(1_i64)
+churners.each(&.join)
+raise "ran #{flag.ran.get} of #{started}" if flag.ran.get != started
+puts "ok started=#{started}"
+IYI
+    widen='function widen(pad) {
+      print pad "widen = __iyi_monotonic_ns"
+      print pad "while __iyi_monotonic_ns - widen < 2000000_i64"
+      print pad "end"
+    }'
+    mkdir -p widened/iyi
+    cp "$REPO"/src/iyi/*.iyi widened/iyi/
+    awk "$widen"' /^        LibC\.ResumeThread\(h\)$/ { widen("        "); found = 1 } { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > widened/iyi/thread.iyi || { echo "the start's resume is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/widened${PSEP}$REPO/src" "$IYI" build starting.iyi -o widened-run > build-widened.log 2>&1; then
+      cat build-widened.log; exit 1
+    fi
+    run=1
+    while [ "$run" -le 3 ]; do
+      timeout -k 5 60 ./widened-run 3 > widened.txt 2>&1
+      code=$?
+      if [ "$code" -ne 0 ] || ! grep -q '^ok ' widened.txt; then
+        echo "run $run with every start held open exited $code:"; tail -3 widened.txt; exit 1
+      fi
+      run=$((run + 1))
+    done
+    echo "  three runs of three seconds, and every thread ran its body"
+
+    step "failure proof: the handle written after the unlock, the thread already running, under the same 2 ms"
+    mkdir -p unnamed/iyi
+    cp "$REPO"/src/iyi/*.iyi unnamed/iyi/
+    awk "$widen"' /^        IyiHeap\.write64\(line \+ IYI_TL_HANDLE, h\.address\)$/ { held = $0; found++; next }
+      /^        h = LibC\.CreateThread\(.*thread_entry.*, 4_i32, nil\)$/ { sub(/, 4_i32, nil\)$/, ", 0_i32, nil)"); found++ }
+      /^        LibC\.ResumeThread\(h\)$/ { widen("        "); print held; found++ }
+      { print } END { if (found != 3) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > unnamed/iyi/thread.iyi || { echo "the start's creation, handle write or resume is not in thread.iyi any more"; exit 1; }
+    if ! IYI_PATH="$WORK/unnamed${PSEP}$REPO/src" "$IYI" build starting.iyi -o unnamed-run > build-unnamed.log 2>&1; then
+      cat build-unnamed.log; exit 1
+    fi
+    caught=0
+    run=1
+    while [ "$caught" -eq 0 ] && [ "$run" -le 10 ]; do
+      timeout -k 5 60 ./unnamed-run 3 > unnamed.txt 2>&1
+      grep -q '^ok ' unnamed.txt || caught=$run
+      run=$((run + 1))
+    done
+    if [ "$caught" -eq 0 ]; then
+      echo "ten runs with the handle written after the unlock all ended well"; exit 1
+    fi
+    printf '  run %s of up to ten: "%s"\n' "$caught" "$(head -1 unnamed.txt | tr -d '\r' | cut -d. -f1)"
+    ;;
+esac
+
 echo "workdir $WORK"
 echo "thread exercise: every step held"
 exit 0

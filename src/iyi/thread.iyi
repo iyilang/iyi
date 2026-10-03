@@ -572,14 +572,21 @@
         IyiRuntimeLock.unlock
         raise "pthread_create failed: #{result}" if result != 0
       {% elsif flag?(:win32) %}
+        # Created suspended (CREATE_SUSPENDED, 4) and its handle written
+        # under the lock, so no stop can name the line before it can
+        # suspend the thread. The handle was written after the unlock while
+        # the thread already ran: a stop between the two suspended NULL,
+        # read sp 0, and scanned from address 0, and with 2 ms of busy-wait
+        # there five runs in five died of a memory fault inside a second.
         IyiRuntimeLock.lock
         IyiHeap.write64(line + IYI_TL_NEXT, @@lines)
         @@lines = line
         @@count = @@count + 1_i64
-        h = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(thread_entry), Pointer(Void).new(line), 0_i32, nil)
+        h = LibC.CreateThread(nil, 0_u64, Pointer(Void).new(thread_entry), Pointer(Void).new(line), 4_i32, nil)
+        IyiHeap.write64(line + IYI_TL_HANDLE, h.address)
         IyiRuntimeLock.unlock
         raise "CreateThread failed" if h.address == 0_u64
-        IyiHeap.write64(line + IYI_TL_HANDLE, h.address)
+        LibC.ResumeThread(h)
       {% end %}
       thread
     end

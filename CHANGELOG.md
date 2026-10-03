@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **On Windows a thread is named on its line before any collection can
+  stop it.** `IyiThread.start` linked the new thread's line for the
+  stops under the runtime lock and the thread ran at once, while its
+  handle reached the line only after the lock was released: a stop in
+  between suspended NULL, read sp 0 and scanned the running thread's
+  stack from address 0. 37 runs and about 700,000 starts never landed
+  there, but with that window held open 2 ms five runs in five died of
+  a memory fault within 0.8 s. The thread is created suspended now, its
+  handle written under the lock, and resumed after; with the same 2 ms
+  there every run ends well. `bench/thread_exercise.sh` step 7b holds
+  every start open 2 ms while two threads collect, and its failure
+  proof puts the old order back: "iyi: the program died of a memory
+  fault" in the first run.
+
 - **A thread lets go of its block once it runs, and `join` unmaps its
   line.** Every thread object ever started stayed on the list that
   roots a body until its thread runs it, so nothing its block captured

@@ -80,6 +80,19 @@ def filled(fill : Array(String), byte : UInt8) : Int32
   intact
 end
 
+# What *work* panicked with, or "done" when it did not: run as a task,
+# whose value catches the panic.
+def refusal_of(&work : -> Nil) : String
+  said = "done"
+  group do |g|
+    task = g.spawn { work.call; 0 }
+    outcome = task.value
+    said = outcome.message.to_s if outcome.is_a?(Panicked)
+    0
+  end
+  said
+end
+
 saved_orig = Dir.current
 sandbox_env = Program.env("TEST_SANDBOX")
 sandbox = if sandbox_env && !sandbox_env.empty?
@@ -506,6 +519,20 @@ puts "  deletion outcomes for empty and non-empty paths"
   LibWideName.DeleteFileW(lone_name)
   assert_true lone_children == ["ok.txt"] && lone_glob == [lone_dir + "/ok.txt"], "a name UTF-8 cannot spell is stepped over: #{lone_children.inspect}"
   puts "  a name UTF-8 cannot spell is stepped over"
+
+  # A refusal says why, in Windows' words after its number, as `File`'s
+  # do: "Cannot create directory: <path>" was all that was said for a
+  # directory that was there and for a parent that was not, and "Cannot
+  # remove directory: <path>" for one that was not empty.
+  [{"mkdir an existing directory", refusal_of { Dir.mkdir(listing_dir) }, "Windows error 183:"},
+   {"mkdir under a missing parent", refusal_of { Dir.mkdir(sandbox + "/zz/yy") }, "Windows error 3:"},
+   {"mkdir_p through a file", refusal_of { Dir.mkdir_p(sandbox + "/regular_file.txt/x") }, "Windows error 183:"},
+   {"delete a non-empty directory", refusal_of { Dir.delete(listing_dir) }, "Windows error 145:"},
+   {"open a missing directory", refusal_of { Dir.children(sandbox + "/zz"); nil }, "Windows error 3:"}].each do |row|
+    what, said, why = row
+    assert_true said.starts_with?("Cannot ") && said.includes?(why), "#{what} says why with #{why}, not #{said.inspect}"
+  end
+  puts "  a refused mkdir, mkdir_p, delete and open say why"
 
   # A drive's root keeps the separator that makes it the root.
   assert_str "C:\\", Dir.without_trailing_separator("C:\\"), "a drive's root keeps its separator"

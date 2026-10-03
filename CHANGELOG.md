@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **On Windows a refused `Dir.mkdir`, `mkdir_p`, `delete` or `open` says
+  why.** Each said the path and nothing else: "Cannot create directory:
+  db" for a directory that was there and for one under a missing
+  parent, "Cannot remove directory: db" for one that was not empty. They
+  end in Windows' number and its sentence for it now, as `File`'s
+  refusals do: "Windows error 183: Cannot create a file when that file
+  already exists", "Windows error 3: The system cannot find the path
+  specified", "Windows error 145: The directory is not empty". The POSIX
+  arms are unchanged. `bench/std_dir_exercise.iyi` checks five refusals;
+  the old module answered "Cannot create directory: <path>" with nothing
+  after it.
+
 - **`Path.windows` reads `\\?\UNC\server\share` with the share as its
   drive, as Python does.** The prefix was read as a share of its own,
   host `?` and share `UNC`: the drive of `\\?\UNC\srv\sh\x` was

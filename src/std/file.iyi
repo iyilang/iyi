@@ -494,8 +494,8 @@ class ::File
     # 0x200: without the second, a message with an insert in it fails rather
     # than printing the placeholder. Windows ends these sentences with CRLF
     # and sometimes a trailing space, which is a line break in the middle of
-    # a panic, so the tail comes off.
-    private def self.win_error : String
+    # a panic, so the tail comes off. `std/dir`'s refusals say it too.
+    def self.win_error : String
       code = Std::File::LibKernel32.GetLastError
       room = 1024
       wide = Pointer(UInt16).malloc(room.to_u64)

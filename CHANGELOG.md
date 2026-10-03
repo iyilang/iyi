@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A `Server.serve` block that panics ends its own connection, not the
+  server.** The connection's task belonged to `serve`'s group and nobody
+  read its answer, so the panic cancelled the other connections - a
+  kept-alive client's next request found its connection gone ("cannot
+  read from socket: the connection was aborted") - and `serve` panicked
+  "a task panicked: handler failed" when its listener closed. Each
+  connection runs in a group of its own whose answer is read, as Go's
+  server recovers a handler: the panic is printed where it happened, that
+  connection closes, and the others are served. `bench/std_http_exercise.iyi`
+  panics a block between two requests on another kept connection; the old
+  module closed that one too and panicked "a task panicked".
+
 - **`group_by`, `tally`, `tally_by`, `index_by` and `to_h` take an array,
   nil or a symbol as a key.** Each asks `Hashable` of its key, and
   `std/traits` implemented it for the scalars alone: `tally` of a list of

@@ -531,6 +531,8 @@ group do |g|
       elsif req.path == "/stop"
         listener.close
         Response.new(200, "bye")
+      elsif req.path == "/fail"
+        raise "the block failed on /fail"
       else
         Response.new(404, "no #{req.path}\n")
       end
@@ -593,6 +595,21 @@ group do |g|
     echo_answer = read_to_close(echo)
     assert_true echo_answer.starts_with?("HTTP/1.1 400 ") && echo_answer.ends_with?("header User-Agent contains a control character\n"), "a header with a bare LF is a 400: #{echo_answer.inspect}"
     echo.close
+    # A block that panics ends its own connection, which reads only the
+    # close, and nothing else: the panic reached `serve`'s group, which
+    # cancelled the other connections - this kept one's next request read
+    # "the connection was aborted" - and panicked "a task panicked" when
+    # `serve` returned.
+    steady = IyiSocket.connect("127.0.0.1", sport).or_panic
+    steady.write("GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(steady)).status == 204, "a kept connection, before a block panics"
+    failing = IyiSocket.connect("127.0.0.1", sport).or_panic
+    failing.write("GET /fail HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_str "", read_to_close(failing), "a panicking block's connection reads only its close"
+    failing.close
+    steady.write("GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(steady)).status == 204, "the kept connection is served after another's block panicked"
+    steady.close
     # The client half of this module against the server half.
     r8 = HTTP.post("http://127.0.0.1:#{sport}/echo?z=9", "via client", {"User-Agent" => "iyi"}).or_panic
     assert_true r8.status == 200 && r8.body == "via client" && r8.header("X-Query") == "z=9", "HTTP.post against Server.serve"
@@ -717,11 +734,11 @@ group do |g|
 end
 # The thousand written together and the head in pieces reached the block;
 # the 400s did not, nor the body that was declared and never came: only
-# what has arrived whole is answered.
-assert_true seen_paths.size == 1214, "the block ran 1214 times, not #{seen_paths.size}"
+# what has arrived whole is answered. The block that panicked ran.
+assert_true seen_paths.size == 1217, "the block ran 1217 times, not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MB body declared and not sent, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, a block that panicked, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MB body declared and not sent, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
 
 puts "\n== a burst of connections"
 # Twenty connections waiting, each with its request written, when the

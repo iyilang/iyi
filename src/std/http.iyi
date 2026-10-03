@@ -145,9 +145,23 @@ pub struct Server
   # ran: connections that arrived together were served by several tasks at
   # once - "two fibers reading one fd" - and the others by none, and their
   # clients waited forever.
+  #
+  # The connection runs in a group of its own whose answer is read, so a
+  # block that panics ends its own connection - its defers close it, and the
+  # panic is printed where it happened - and nothing else, which is what
+  # Go's server does. Unread, the panic reached `serve`'s group, which
+  # cancelled every other connection and the accept loop and panicked "a
+  # task panicked": one request whose block failed took the server down.
   private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, IyiSocket)) : Nil
     g.spawn do
-      handle(client, handler, listener, idle)
+      group do |own|
+        served = own.spawn do
+          handle(client, handler, listener, idle)
+          0
+        end
+        served.value
+        0
+      end
       0
     end
   end

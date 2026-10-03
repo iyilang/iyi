@@ -813,6 +813,24 @@ class Iyi::Call
     return_type = program.nil if return_type.void?
     typed_def.freeze_type = return_type
     typed_def.type = return_type if return_type.no_return? || return_type.nil_type?
+    # iyi: and a signature with an error member is the def's type, not just a
+    # bound on it (SPEC.md III.1.8, IV.2). The other library types a call from
+    # the body and only checks it against the annotation, so `def f : Int32 |
+    # IOErr` whose body answers `1` typed `f` as `Int32`: `f()!` was refused as
+    # having "no error to propagate", a `case` with no `IOErr` branch
+    # compiled, and a build reading the same def from its `.iyimod`, which
+    # types it from the annotation, refused `f() + 1` and failed to link
+    # against the symbol the source build had mangled with `Int32`.
+    # `Def#map_type` widens to it.
+    #
+    # Only there. Widened everywhere, `def stdout : IyiIO` answered `IyiIO+`,
+    # every `puts` dispatched over each subclass the program holds, and four
+    # std exercises read from their artifacts failed to link
+    # `Std::Io::Sized#write`, which `std/io`'s object code never needed.
+    members = return_type.is_a?(UnionType) ? return_type.union_types : [return_type]
+    if members.any?(&.error?) && Lexer.iyi_source?(match.def.location.try(&.filename))
+      typed_def.iyi_declared_return = true
+    end
   end
 
   def check_tuple_indexer(owner, def_name, args, arg_types)

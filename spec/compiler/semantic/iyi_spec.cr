@@ -2521,6 +2521,39 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "types a call from its declared error union, not from its body" do
+      # SPEC.md III.1.8, IV.2: the signature is the contract. Typed from the
+      # body, `never` was `Int32` and `never!` was refused as having "no error
+      # to propagate", while a build reading `never` from its `.iyimod` typed
+      # it `Int32 | IOError`.
+      assert_type(<<-CODE, filename: "x.iyi") { union_of(int32, types["App"].types["Fails"].types["IOError"]) }
+        module App
+          module Fails
+            struct IOError
+              def initialize
+              end
+            end
+
+            impl Error for IOError
+              def message : String
+                "boom"
+              end
+            end
+
+            def self.never : Int32 | IOError
+              1
+            end
+
+            def self.go : Int32 | IOError
+              never!
+            end
+          end
+        end
+
+        App::Fails.go
+        CODE
+    end
+
     it "propagates an error member out of the enclosing method" do
       # III.1.2. `read` can fail; `load` says so in its own return type, and
       # `!` is what carries the failure across without a `case`. The filename

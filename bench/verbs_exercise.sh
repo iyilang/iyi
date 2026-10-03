@@ -151,6 +151,24 @@ if [ "$(cd "$WORK/setter" && ./from-artifact 2>&1)" = "5" ]; then
 else
   echo "  a setter with no written return, through its artifact:"; sed -n '1,3p' "$WORK/setter.log"; status=1
 fi
+# A def whose return names an error member answers that declared error
+# union, from source as through its artifact (SPEC.md III.1.8, IV.2), even
+# when its body never fails. From source `never_fails` was typed from its
+# body, `Int32`: `never_fails()!` was refused with "`!` has no error to
+# propagate", and a program without the `!` built from source and failed
+# to link through the artifact, on `never_fails:(Int32 | ...LibErr)`.
+mkdir -p "$WORK/declared/app"
+printf 'module app/e\n\npub class LibErr\n  def initialize\n  end\nend\n\nimpl Error for LibErr\n  def message : String\n    "liberr"\n  end\nend\n\npub def never_fails : Int32 | LibErr\n  1\nend\n' > "$WORK/declared/app/e.iyi"
+printf 'import app/e::*\n\ndef g : Int32 | LibErr\n  never_fails()! + 1\nend\n\nputs typeof(never_fails)\ncase g\nin Int32 then puts it\nin LibErr then puts it.message\nend\n' > "$WORK/declared/m.iyi"
+(cd "$WORK/declared" && "$IYI" build --emit-iyimod mods -o from-source m.iyi && mv app/e.iyi e.source &&
+  "$IYI" build --use-iyimod mods -o from-artifact m.iyi) > "$WORK/declared.log" 2>&1
+declared_expected="$(printf '(App::E::LibErr | Int32)\n2')"
+if [ "$(cd "$WORK/declared" && ./from-source 2>&1 | tr -d '\r')" = "$declared_expected" ] &&
+   [ "$(cd "$WORK/declared" && ./from-artifact 2>&1 | tr -d '\r')" = "$declared_expected" ]; then
+  echo "  a def typed by its declared error union, from source and through its artifact alike"
+else
+  echo "  a def's declared error union, from source and through its artifact:"; sed -n '1,3p' "$WORK/declared.log"; status=1
+fi
 # A module's overloads called unqualified with a union argument: through
 # `import ::*`, through `import ::{name}`, from inside another module, and
 # from a type nested in the module that declares them. Every one fell into

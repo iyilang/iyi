@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- **A def whose return type names an error member answers that whole
+  union, from source as through its artifact, even when its body never
+  fails.** A call was typed from the def's body and only checked against
+  the annotation, so `pub def never_fails : Int32 | LibErr` with the body
+  `1` was `Int32`: `never_fails()!` was refused with "`!` has no error to
+  propagate: no member of Int32 implements `Error`", `.or` the same way,
+  and a `case` with no `LibErr` branch compiled. A build reading the
+  module from its `.iyimod` types the call from the annotation, so the
+  same program built from source and failed to link through the artifact
+  (LNK2019 on `never_fails:(Int32 | Lib::Errs::LibErr)`). Such a def's
+  type is its declared union now, virtual where the artifact path reads
+  it virtual, so both builds type, check and mangle the call alike. A
+  signature with no error member keeps its body's type: widened
+  everywhere, `def stdout : IyiIO` answered `IyiIO+`, and the html, io,
+  static_array and symbol exercises failed to link from their artifacts
+  on `Std::Io::Sized#write`. `bench/verbs_exercise.sh` builds such a
+  module and runs it from source and through its artifact; the old
+  compiler refused the `!`.
+
 - **A splat trait parameter, a static array or pointer as an `impl`'s
   trait, a `case` / `in` with no value, and a `def` followed at once by
   `{`, `[` or a backtick are syntax errors.** The parser read each as

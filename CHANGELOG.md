@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **`iyi doc` names a module it cannot find, and refuses what it was
+  not asked to read.** A module path that resolved nowhere was told what
+  it already was: `iyi doc std/sett` answered `expected a module path
+  (`iyi doc app/greeter`), a .iyi file, a .iyimod artifact, or a type of
+  the prelude`. It answers `can't find module 'std/sett'`, the file that
+  name means and every directory it was looked for under. `iyi doc
+  std/set extra junk` printed std/set's surface at exit 0 and dropped the
+  rest; a second argument is refused by name now (`doc reads one module,
+  file or type at a time, and 'extra' is a second`), and so is a flag
+  `doc` does not have. And a module path reaches the workspace's `mods`
+  after the sources, as the other verbs do: with only
+  `mods/docs/docd.iyimod` beside it, `iyi doc docs/docd` answered
+  `expected a module path`, and it prints the artifact's surface now, the
+  one the source gave. `bench/packages_resolve.sh` checks all three; the
+  old verb answered `expected a module path` twice and printed the
+  surface with the extra arguments dropped.
+
 - **`iyi doc IO` names what `IO` is an alias of, and prints what it
   can do.** An alias had no branch of its own: stdout was `alias IO` and
   `end`, exit 0, with neither `IyiIO` nor one method. It prints `alias IO

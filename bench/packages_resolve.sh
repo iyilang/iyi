@@ -468,9 +468,31 @@ diff -u doc.txt modpath-doc.txt > modpath-diff.txt 2>&1 || {
   head -10 modpath-diff.txt
   exit 1
 }
+# A subject spelled as a module path and found nowhere is a missing module,
+# named, with where it was looked for: it was told to give "a module path
+# (`iyi doc app/greeter`)", which is what it had given.
 "$IYI" doc docs/nosuch > missing-mod.txt 2>&1 && { echo "a module that is not there was documented"; exit 1; }
-grep -q 'expected a module path' missing-mod.txt || {
-  echo "the refusal does not name the module-path form:"; cat missing-mod.txt; exit 1; }
+grep -q "can't find module 'docs/nosuch'. .*docs/nosuch.iyi.* looked for under" missing-mod.txt || {
+  echo "the refusal does not name the missing module:"; cat missing-mod.txt; exit 1; }
+# And one subject a run: `iyi doc docs/docd extra junk` printed docd's
+# surface at exit 0 and dropped the rest without a word.
+"$IYI" doc docs/docd extra junk > extra-doc.txt 2>&1 && { echo "a second subject was dropped, exit 0"; exit 1; }
+grep -q "'extra' is a second" extra-doc.txt || {
+  echo "the second subject is not named:"; cat extra-doc.txt; exit 1; }
+# A module whose source is not there and whose artifact is, in the
+# workspace's `mods`, documents from the artifact, as every other verb
+# reads it: with only `mods/app/twice.iyimod`, `iyi doc app/twice` was told
+# to give "a module path".
+mkdir -p docmods/app
+printf 'module app/twice\n\n# Doubles it.\npub def twice(n : Int32) : Int32\n  n * 2\nend\n' > docmods/app/twice.iyi
+printf 'import app/twice\n' > docmods/main.iyi
+(cd docmods && "$IYI" doc app/twice) > twice-doc.txt 2>&1 || { cat twice-doc.txt; exit 1; }
+(cd docmods && "$IYI" build --no-codegen --emit-iyimod mods main.iyi) > emit-mods.txt 2>&1 || { cat emit-mods.txt; exit 1; }
+rm docmods/app/twice.iyi
+(cd docmods && "$IYI" doc app/twice) > mods-doc.txt 2>&1 || {
+  echo "the module in mods was not documented:"; cat mods-doc.txt; exit 1; }
+diff -u twice-doc.txt mods-doc.txt > mods-diff.txt 2>&1 || {
+  echo "the artifact in mods and the source answered differently:"; head -10 mods-diff.txt; exit 1; }
 
 echo "workdir $WORK"
 echo "packages gate: every step held"

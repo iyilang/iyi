@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`Server.serve` answers a body past its limit 413 and a head past
+  its limit 431.** Both were answered 400, as a request that is not
+  HTTP: `Content-Length: 99999999999` got "HTTP/1.1 400 Bad Request" and
+  "body past 67108864 bytes". A body declared past `Server::MAX_BODY`,
+  or a chunk size past it, is answered 413 Content Too Large (RFC 9110
+  §15.5.14) now, and a head past `Server::MAX_HEAD` 431 Request Header
+  Fields Too Large (RFC 6585 §5); anything else is still a 400, and
+  `ParsedRequest#status` says which. `bench/std_http_exercise.iyi` checks
+  both limits in `parse_request` and both 413s over a socket; the old
+  module answered "400 body past 67108864 bytes".
+
 - **`HTTP.request` percent-encodes the bytes of a URL's path and query
   past 127.** `HTTP.get("http://127.0.0.1:P/ü/ç?ş=1")` sent the request
   line `GET /ü/ç?ş=1 HTTP/1.1`, raw UTF-8 where RFC 9112 §3.2 wants an

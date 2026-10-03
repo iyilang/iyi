@@ -19,7 +19,8 @@
 # fiber per connection under a group, each connection kept alive across
 # requests until the client or the block's answer says `Connection:
 # close`, the client closes, or sends something that is not HTTP
-# (answered 400 and closed). The block gets a
+# (answered 400 and closed; a body past `Server::MAX_BODY` 413, a head
+# past `Server::MAX_HEAD` 431). The block gets a
 # `Request` — method, path (an absolute-form target's own), query,
 # headers, body, read to the length the client declared or de-chunked —
 # and answers a `Response`, which is written with its length; a 1xx, 204
@@ -125,8 +126,12 @@ struct ParsedRequest
   # with an empty body, `consumed` bytes of head behind it. The server
   # reads the body as it arrives (`HTTP.read_chunked`).
   getter chunked : Request?
+  # The status *error* is answered with: 413 for a body past `MAX_BODY`
+  # (RFC 9110 §15.5.14), 431 for a head past `MAX_HEAD` (RFC 6585 §5),
+  # and 400 for a request that is not HTTP. Both limits were a 400.
+  getter status : Int32
 
-  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32, @wanted : Int32 = 0, @expects : Bool = false, @chunked : Request? = nil)
+  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32, @wanted : Int32 = 0, @expects : Bool = false, @chunked : Request? = nil, @status : Int32 = 400)
   end
 end
 
@@ -225,7 +230,7 @@ pub struct Server
         next
       end
       if reason = parsed.error
-        client.write(format_response(Response.new(400, reason + "\n"), false, true))
+        client.write(format_response(Response.new(parsed.status, reason + "\n"), false, true))
         return
       end
       # A chunked body is decoded as it arrives. It was added to what came
@@ -242,7 +247,10 @@ pub struct Server
         read = HTTP.read_chunked(buffer, parsed.consumed, MAX_BODY) { wait_read(client, listener, idle) }
         return if read.nil?
         if read.is_a?(String)
-          client.write(format_response(Response.new(400, read + "\n"), false, true))
+          # Past the limit is a body too large, as `parse_request` answers
+          # one whose chunks are all in.
+          too_large = read == "chunked body past #{MAX_BODY} bytes"
+          client.write(format_response(Response.new(too_large ? 413 : 400, read + "\n"), false, true))
           return
         end
         body, buffer = read
@@ -342,7 +350,7 @@ pub struct Server
     from = HTTP.past_empty_lines(text, from)
     split_at = HTTP.find_headers_end(text, from)
     unless split_at
-      return ParsedRequest.new(nil, "request headers past #{MAX_HEAD} bytes", true, 0) if text.bytesize - from > MAX_HEAD
+      return ParsedRequest.new(nil, "request headers past #{MAX_HEAD} bytes", true, 0, status: 431) if text.bytesize - from > MAX_HEAD
       return ParsedRequest.new(nil, nil, false, 0)
     end
     lines = HTTP.split_crlf(text[from, split_at - from])
@@ -440,7 +448,7 @@ pub struct Server
       in String
         return ParsedRequest.new(nil, "chunked body: #{done}", true, 0)
       in Int32
-        return ParsedRequest.new(nil, "chunked body past #{MAX_BODY} bytes", true, 0) if done - body_start > MAX_BODY
+        return ParsedRequest.new(nil, "chunked body past #{MAX_BODY} bytes", true, 0, status: 413) if done - body_start > MAX_BODY
         body = HTTP.decode_chunked(text[body_start, done - body_start])
         return ParsedRequest.new(Request.new(method, path, query, headers, body), nil, close, done)
       end
@@ -451,7 +459,7 @@ pub struct Server
       return ParsedRequest.new(nil, "Content-Length is not a number: #{cl.inspect}", true, 0) unless n
       # A length past 2147483647 is one too, read as one past it: it was
       # answered "not a number", where it is a body too large.
-      return ParsedRequest.new(nil, "body past #{MAX_BODY} bytes", true, 0) if n > MAX_BODY.to_i64
+      return ParsedRequest.new(nil, "body past #{MAX_BODY} bytes", true, 0, status: 413) if n > MAX_BODY.to_i64
       length = n.to_i32
     end
     # Short of its length, the rest is waited for (`wanted`) - the bytes
@@ -1137,6 +1145,7 @@ pub struct HTTP
     when 405 then "Method Not Allowed"
     when 408 then "Request Timeout"
     when 413 then "Content Too Large"
+    when 431 then "Request Header Fields Too Large"
     when 500 then "Internal Server Error"
     when 501 then "Not Implemented"
     when 503 then "Service Unavailable"

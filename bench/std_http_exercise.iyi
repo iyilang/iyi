@@ -115,8 +115,9 @@ def answer(&work : -> String) : String
   said
 end
 
-# What the server makes of `text`: "400 <why>", "more" while a request is
-# still arriving, or the request its block would be handed.
+# What the server makes of `text`: "<status> <why>" for a refusal, "more"
+# while a request is still arriving, or the request its block would be
+# handed.
 def server_reads(text : String) : String
   answer do
     parsed = Server.parse_request(text)
@@ -124,7 +125,7 @@ def server_reads(text : String) : String
       heads = String.build { |io| req.headers.each { |k, v| io << k << "=" << v << ";" } }
       "#{req.method} #{req.path} ?#{req.query || "-"} #{heads} #{req.body.inspect} #{parsed.close ? "close" : "keep"}"
     elsif why = parsed.error
-      "400 #{why}"
+      "#{parsed.status} #{why}"
     else
       "more"
     end
@@ -247,8 +248,11 @@ assert_str "HTTP: the body ended after 7 of its 100 bytes", short, "a short body
 puts "  a body short of its Content-Length is refused"
 
 # A length past Int32's is a length too large, not "not a number".
-assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3000000000\r\n\r\n"), "a 3 GB request is too large"
-assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 99999999999999999999999\r\n\r\n"), "and so is one past Int64's"
+assert_str "413 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3000000000\r\n\r\n"), "a 3 GB request is too large"
+assert_str "413 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 99999999999999999999999\r\n\r\n"), "and so is one past Int64's"
+# A request too large is a 413 (RFC 9110 §15.5.14) and a head too large a
+# 431 (RFC 6585 §5): both were answered 400, as if they were not HTTP.
+assert_str "431 request headers past 1048576 bytes", server_reads("GET / HTTP/1.1\r\nHost: a\r\nX-Long: " + "a" * 1048576), "a head past a megabyte is a 431"
 assert_str "refused: HTTP: Content-Length \"3000000000\" is past the 2147483647 bytes a string holds", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\nabc"), "a 3 GB answer is too large"
 assert_str "refused: HTTP: the body ended after 3 of its 2147483647 bytes", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 2147483647\r\n\r\nabc"), "Int32's last is a length"
 puts "  a Content-Length past Int32's is refused as too large on both sides"
@@ -640,6 +644,15 @@ group do |g|
     assert_true r6.body.starts_with?("not an HTTP/1 request"), "and says why: #{r6.body.inspect}"
     assert_str "", bad.read(16).or_panic, "and the connection is closed"
     bad.close
+    # A body past the limit is a 413 (RFC 9110 §15.5.14), declared or in a
+    # chunk size not sent yet: both were a 400, as if they were not HTTP.
+    ["Content-Length: 99999999999\r\n\r\n", "Transfer-Encoding: chunked\r\n\r\n4000001\r\n"].each do |framing|
+      large = IyiSocket.connect("127.0.0.1", sport).or_panic
+      large.write("POST /size HTTP/1.1\r\nHost: x\r\n" + framing).or_panic
+      r_large = HTTP.parse_response(read_response(large))
+      assert_true r_large.status == 413 && r_large.reason == "Content Too Large", "a body past the limit is a 413: #{r_large.status} #{r_large.body.inspect}"
+      large.close
+    end
     # HTTP/1.0 closes by default.
     old = IyiSocket.connect("127.0.0.1", sport).or_panic
     old.write("GET /nothing HTTP/1.0\r\n\r\n").or_panic

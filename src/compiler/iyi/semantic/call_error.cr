@@ -152,10 +152,12 @@ class Iyi::Path
   # Read off the search path the way an import is resolved, and only on
   # the error path. A string walk rather than a `Regex`: the compiler
   # links no pcre2 (SPEC.md III.9), and one regex here was enough to make
-  # it.
+  # it. Public for the impl refusal too: `Enumerable` is a module the
+  # compiler declares, so `impl Enumerable for Nums` without the import
+  # finds that module instead of an undefined constant.
   IYI_STD_DECLARERS = {"pub class ", "pub struct ", "pub module ", "pub trait ", "pub enum ", "pub alias "}
 
-  private def iyi_std_declares_hint(program, name : String) : String?
+  def iyi_std_declares_hint(program, name : String) : String?
     program.iyi_path.entries.each do |entry|
       dir = File.join(entry, "std")
       next unless Dir.exists?(dir)

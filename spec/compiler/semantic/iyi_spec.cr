@@ -892,6 +892,21 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # `Enumerable` is a module the compiler declares, so without the import
+    # the name found it and the refusal said "it's a generic module", where
+    # `impl Comparable` is told the import.
+    it "names std/enumerable for `impl Enumerable` without the import" do
+      assert_error <<-CODE, "`Enumerable` comes with `import std/enumerable::{Enumerable}`", filename: "nums.iyi"
+        struct Nums
+        end
+
+        impl Enumerable for Nums
+          def each(& : Int32 -> Nil) : Nil
+          end
+        end
+        CODE
+    end
+
     it "refuses to implement a trait for a trait" do
       # A blanket impl in disguise: it would give every implementer of one
       # trait a second one, from a module that has heard of neither.

@@ -656,7 +656,18 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     # it has no requirements to satisfy, and R-3 has nothing to check for it.
     trait_type = lookup_type(node.trait)
     unless trait_type.trait?
-      node.trait.raise "can't implement #{trait_type}, it's a #{trait_type.type_desc}. Only a trait can be implemented"
+      message = "can't implement #{trait_type}, it's a #{trait_type.type_desc}. Only a trait can be implemented"
+      # iyi: `Enumerable` and `Indexable` are modules the compiler itself
+      # declares, so in an .iyi file without `import std/enumerable` the name
+      # found that module and the refusal said "it's a generic module",
+      # where `impl Comparable` gets the import line from the undefined
+      # constant. The same std scan answers here.
+      written = node.trait.is_a?(Generic) ? node.trait.as(Generic).name : node.trait
+      if written.is_a?(Path) && written.names.size == 1 && Lexer.iyi_source?(written.location.try(&.filename)) &&
+         (hint = written.iyi_std_declares_hint(program, written.names.first))
+        message = "#{message}\n#{hint}"
+      end
+      node.trait.raise message
     end
 
     check_impl_trait_args node, trait_type

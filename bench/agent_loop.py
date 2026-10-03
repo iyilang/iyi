@@ -382,6 +382,18 @@ def main():
          f"applied {len(fixed['applied'])}, clean {fixed['clean']}")
     os.remove(os.path.join(work, "capped.iyi"))
 
+    # 4a-enum. `impl Enumerable` without its import was "can't implement
+    # Enumerable(T), it's a generic module" - the compiler declares that
+    # module - where `impl Comparable` is told the import.
+    write("advice_enum.iyi", (
+        "struct Nums\nend\n\n"
+        "impl Enumerable for Nums\n  def each(& : Int32 -> Nil) : Nil\n  end\nend\n"
+    ))
+    said = run("check", "advice_enum.iyi", cwd=work).stderr
+    step("`impl Enumerable` without its import names the import",
+         "`Enumerable` comes with `import std/enumerable::{Enumerable}`" in said, "")
+    os.remove(os.path.join(work, "advice_enum.iyi"))
+
     # 4b. the blind spot, closed as a language rule: an uncalled body is
     # typed against its declared signature (definition-site typing,
     # R-2's dividend) — by check AND by a plain build; fix converges to

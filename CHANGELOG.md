@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`impl Enumerable for Nums` without the import names the import.** The
+  compiler itself declares `Enumerable` and `Indexable`, so in an `.iyi`
+  file without `import std/enumerable` the name found that module and the
+  refusal said "can't implement Enumerable(T), it's a generic module.
+  Only a trait can be implemented", where `impl Comparable` is told
+  "`Comparable` comes with `import std/traits::{Comparable}`". The
+  refusal adds "`Enumerable` comes with `import
+  std/enumerable::{Enumerable}`" now. `bench/agent_loop.py` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler gave
+  the generic-module sentence alone.
+
 - **A float method `std/float` has names `import std/float`.** `-x` on a
   `Float64` said "wrong number of arguments for 'Float64#-' (given 0,
   expected 1)" and listed the binary overloads, and `1.5_f32.to_f64`

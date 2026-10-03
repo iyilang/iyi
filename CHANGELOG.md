@@ -4,6 +4,26 @@
 
 ### Fixed
 
+- **`std/xml`'s `to_xml` refuses what its parser would refuse, and an
+  encoding cannot write markup into the declaration.** The serializer
+  checked a name only against XML 1.0's `Name`, which takes any colon,
+  and wrote `version` and `encoding` between quotes as they were. So
+  `Node.new_element("p:a")` with `p` declared nowhere was written
+  `<p:a/>`, `:x`, `a:` and `p:x:y` were written as names, `p:v` and
+  `q:v` with `p` and `q` bound to one uri were written side by side, a
+  `Document` with two root elements, none, or text beside the root was
+  written, and `Document.new(encoding: "x\" standalone=\"maybe")`
+  closed the declaration's quote and wrote an attribute of its own; a
+  version like `2` or an encoding like `ISO-8859-1` was written as well.
+  The module's own parser refused every one of those documents ("is
+  not declared", "is not a qualified name", "given twice", "a second
+  root element"). `to_xml` refuses each now with a sentence naming it,
+  as it already refused a name that is not an XML name; a prefix
+  declared by an `xmlns:` attribute set on the element or an ancestor
+  counts as declared. `bench/std_xml_exercise.iyi` asks `to_xml` of
+  eight such trees and checks each sentence; the old module wrote
+  `<p:a/>` ("wrote it").
+
 - **A class variable an `IyiThread` block names must be written only by
   its initializer, and be Share (SPEC.md III.4.5).** The thread gate asked
   about captured locals, `self` and constants, and a class variable is

@@ -206,8 +206,41 @@ unwritable << controlled
 reserved = Node.new_element("a")
 reserved.add_child(Node.new_pi("xml", "x"))
 unwritable << reserved
+# A name the reader does not take as a qualified name, a prefix nobody
+# declared, one attribute written through two prefixes of one uri, and a
+# document that is not one root element were written too, and this
+# module's parser refused each: `to_xml` refuses them now.
+undeclared = Node.new_element("p:a")
+unwritable << undeclared
+colon_first = Node.new_element("a")
+colon_first.set_attribute(":x", "1")
+unwritable << colon_first
+twice = Std::Xml.parse("<a xmlns:p='urn:x' xmlns:q='urn:x'/>")
+twice.root.set_attribute("p:v", "1")
+twice.root.set_attribute("q:v", "2")
+unwritable << twice
+two_roots = Document.new
+two_roots.add_child(Node.new_element("a"))
+two_roots.add_child(Node.new_element("b"))
+unwritable << two_roots
+loose_text = Document.new
+loose_text.add_child(Node.new_text("hi"))
+loose_text.add_child(Node.new_element("b"))
+unwritable << loose_text
+unwritable << Document.new
+declared_away = Document.new(encoding: "x\" standalone=\"maybe")
+declared_away.add_child(Node.new_element("a"))
+unwritable << declared_away
+latin = Document.new(version: "2", encoding: "ISO-8859-1")
+latin.add_child(Node.new_element("a"))
+unwritable << latin
 wanted = ["is not an XML name, so the attribute cannot be written", "control character U+0001 cannot be written",
-          "so the processing instruction target cannot be written"]
+          "so the processing instruction target cannot be written",
+          "namespace prefix 'p' of 'p:a' is not declared, so the element cannot be written",
+          "':x' is not a qualified name", "attribute 'v' in namespace 'urn:x' is given twice on <a>",
+          "a document with 2 root elements cannot be written", "text outside the root element cannot be written",
+          "a document with no root element cannot be written",
+          "encoding 'x\" standalone=\"maybe' is not one this module reads", "version '2' is not a version number"]
 unwritable.each_with_index do |node, i|
   said = "wrote it"
   group do |g|
@@ -219,6 +252,7 @@ unwritable.each_with_index do |node, i|
   assert_true(said.includes?(wanted[i]), "to_xml refuses what does not read back: #{wanted[i]}, not #{said.inspect}")
 end
 puts "  the document reads, navigates and writes back as itself: #{written.bytesize} bytes, #{menu.children.size} child nodes"
+puts "  to_xml refuses an undeclared prefix, a name that is no qualified name, one attribute twice, and a document that is not one root"
 
 # ---------------------------------------------------------------------------
 # Escaping

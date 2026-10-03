@@ -490,6 +490,7 @@ pub class Node
   protected def serialize_node(buf : Array(String), ascii : Bool = false) : Nil
     if @node_type.element?
       Node.check_writable_name(@name, "element")
+      check_namespaced_name(@name, "element")
       refuse_non_ascii_name(@name) if ascii
       buf << "<"
       buf << @name
@@ -502,13 +503,23 @@ pub class Node
         buf << @namespaces[ns_i].to_s(ascii)
         ns_i = ns_i + 1
       end
+      expanded = Hash(String, String).new
       attr_i = 0
       while attr_i < @attributes.size
-        Node.check_writable_name(@attributes[attr_i].name, "attribute")
-        Node.check_writable_text(@attributes[attr_i].value)
-        refuse_non_ascii_name(@attributes[attr_i].name) if ascii
+        attr = @attributes[attr_i]
+        Node.check_writable_name(attr.name, "attribute")
+        Node.check_writable_text(attr.value)
+        if attr.name != "xmlns" && attr.prefix != "xmlns"
+          uri = check_namespaced_name(attr.name, "attribute")
+          if !attr.prefix.empty?
+            first = expanded["#{uri}\n#{attr.local_name}"]?
+            raise "attribute '#{attr.local_name}' in namespace '#{uri}' is given twice on <#{@name}>, as '#{first}' and '#{attr.name}', so it cannot be written" unless first.nil?
+            expanded["#{uri}\n#{attr.local_name}"] = attr.name
+          end
+        end
+        refuse_non_ascii_name(attr.name) if ascii
         buf << " "
-        buf << @attributes[attr_i].to_s(ascii)
+        buf << attr.to_s(ascii)
         attr_i = attr_i + 1
       end
       if @children.empty?
@@ -563,6 +574,44 @@ pub class Node
         c_i = c_i + 1
       end
     end
+  end
+
+  # A name a namespace-aware reader takes: `local` or `prefix:local`, its
+  # prefix bound here, by a declaration this tree holds or by an `xmlns:`
+  # attribute set on this element or one around it. Answers the uri the
+  # prefix is bound to, "" for no prefix. A name was checked only against
+  # XML 1.0's `Name`, which takes any colon, so `:a`, `a:`, `p:x:y` and a
+  # `p:a` whose `p` nobody declared were written, and this module's parser
+  # refused each document ("is not a qualified name", "is not declared").
+  private def check_namespaced_name(name : String, what : String) : String
+    ptr = name.to_unsafe
+    len = name.bytesize
+    colon = -1
+    colons = 0
+    i = 0
+    while i < len
+      if ptr[i] == 58_u8
+        colon = i if colons == 0
+        colons = colons + 1
+      end
+      i = i + 1
+    end
+    return "" if colons == 0
+    if colons > 1 || colon == 0 || colon == len - 1 || !Parser.name_shaped?(name[colon + 1, len - colon - 1])
+      raise "'#{name}' is not a qualified name: a name is 'local' or 'prefix:local', so the #{what} cannot be written"
+    end
+    prefix = name[0, colon]
+    ns = resolve_namespace_prefix(prefix)
+    return ns.uri unless ns.nil?
+    node = self
+    while true
+      declared = node.attribute("xmlns:#{prefix}")
+      return declared unless declared.nil?
+      up = node.parent
+      break if up.nil?
+      node = up
+    end
+    raise "namespace prefix '#{prefix}' of '#{name}' is not declared, so the #{what} cannot be written"
   end
 
   private def refuse_non_ascii_name(name : String) : Nil
@@ -657,6 +706,18 @@ pub class Node
     bad = Parser.first_bad_character(text, 0, false)
     raise "#{bad[1]}, so it cannot be written" if bad[0] >= 0
   end
+
+  # Nothing but XML's white space: space, tab, newline, carriage return.
+  protected def self.xml_blank?(text : String) : Bool
+    ptr = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      b = ptr[i]
+      return false unless b == 32_u8 || b == 9_u8 || b == 10_u8 || b == 13_u8
+      i = i + 1
+    end
+    true
+  end
 end
 
 pub class Document < Node
@@ -678,7 +739,23 @@ pub class Document < Node
     first_element_child
   end
 
+  # The declaration and the document's own children are checked as the
+  # reader checks them: the declaration first, the shape after each node's
+  # own refusals. `version` and `encoding` were written between quotes as
+  # they were, so an encoding holding a `"` closed the declaration and wrote
+  # markup of its own (`Document.new(encoding: "x\" standalone=\"maybe")`),
+  # and a version that is not `1.` and digits or an encoding this module
+  # does not read (`ISO-8859-1`) made a document its parser refuses. So did
+  # a second root element, none, text that is not white space, or a CDATA
+  # section beside the root.
   def to_xml : String
+    if !Parser.version_number?(@version)
+      raise "version '#{@version}' is not a version number, so the document cannot be written"
+    end
+    lowered = @encoding.downcase
+    if !@encoding.empty? && lowered != "utf-8" && lowered != "utf8" && lowered != "us-ascii" && lowered != "ascii"
+      raise "encoding '#{@encoding}' is not one this module reads (UTF-8 or US-ASCII), so the document cannot be written"
+    end
     buf = [] of String
     buf << "<?xml version=\""
     buf << @version
@@ -694,8 +771,16 @@ pub class Document < Node
       buf << "\""
     end
     buf << "?>\n"
-    lowered = @encoding.downcase
     serialize_node(buf, lowered == "us-ascii" || lowered == "ascii")
+    roots = 0
+    @children.each do |child|
+      if child.node_type.element?
+        roots = roots + 1
+      elsif child.node_type.cdata? || (child.node_type.text? && !Node.xml_blank?(child.text))
+        raise "#{child.node_type.cdata? ? "a CDATA section" : "text"} outside the root element cannot be written"
+      end
+    end
+    raise "a document with #{roots == 0 ? "no root element" : "#{roots} root elements"} cannot be written" if roots != 1
     buf.join("")
   end
 end

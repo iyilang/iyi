@@ -1057,7 +1057,11 @@ module Iyi
     end
 
     def codegen_return_node(node, node_type)
-      execute_ensures_until(node.target.as(Def), node_type)
+      old_last = @last
+
+      execute_ensures_until(node.target.as(Def))
+
+      @last = old_last
 
       if return_phi = context.return_phi
         return_phi.add @last, node_type
@@ -1321,14 +1325,18 @@ module Iyi
       case target = node.target
       when Call
         if break_phi = context.break_phi
-          execute_ensures_until(target, node_type)
+          old_last = @last
+          execute_ensures_until(target)
+          @last = old_last
 
           break_phi.add @last, node_type
           return false
         end
       when While
         if break_phi = context.break_phi
-          execute_ensures_until(target, node_type)
+          old_last = @last
+          execute_ensures_until(target)
+          @last = old_last
 
           break_phi.add @last, node_type
           return false
@@ -1345,7 +1353,9 @@ module Iyi
       case target = node.target
       when Block
         if next_phi = context.next_phi
-          execute_ensures_until(target, node_type)
+          old_last = @last
+          execute_ensures_until(target)
+          @last = old_last
 
           next_phi.add @last, node_type
           return false

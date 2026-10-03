@@ -370,10 +370,11 @@ pub struct Eiy
     while true
       if token.string?
         str_val = token.value
+        opens_line = token.column_number == 1
         token = lexer.next_token?
         return nil unless token
 
-        str_val = suppress_leading_indentation(token, str_val)
+        str_val = suppress_leading_indentation(token, str_val, opens_line)
 
         unless str_val.empty?
           parts << io_name
@@ -512,7 +513,7 @@ pub struct Eiy
     size
   end
 
-  private def self.suppress_leading_indentation(token : Lexer::Token, string : String) : String
+  private def self.suppress_leading_indentation(token : Lexer::Token, string : String, opens_line : Bool) : String
     if (token.output? || token.control?) && token.suppress_leading?
       raw = string.to_unsafe
       len = string.bytesize
@@ -525,6 +526,11 @@ pub struct Eiy
         end
         i -= 1
       end
+      # Blanks with no line break before them are a line's indentation only
+      # when the text opens the line. After a tag on the same line the `<%-`
+      # is not the first thing there, and `<%= a %>  <%- b %>` lost the two
+      # spaces between its tags.
+      return string if start_idx == 0 && !opens_line
       all_ws = true
       i = start_idx
       while i < len
@@ -547,7 +553,12 @@ pub struct Eiy
       idx = token.value.index('\n')
       if idx
         token.value = token.value[idx + 1, token.value.bytesize - idx - 1]
+        token.line_number = token.line_number + 1
       end
+      # What `-%>` leaves stands where the rest of its line was taken, so it
+      # opens a line (`generate`'s opens_line) and a `<%-` after it takes
+      # its blanks.
+      token.column_number = 1
     end
   end
 

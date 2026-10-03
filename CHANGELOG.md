@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`<%-` keeps the blanks before it when another tag stands before it
+  on its line.** The module says `<%-` drops the indentation before a
+  tag that is the first thing on its line, but text with no line break
+  in it was taken as indentation wherever it stood: `<%= a %>  <%- b %>`
+  lost the two spaces between its tags, and so did blanks after an
+  escaped `<%% %>`. Blanks are dropped now only where the text opens its
+  line: at the template's start, after a line break, or in what a `-%>`
+  left. `bench/std_eiy_exercise.iyi` pins the generated source of
+  `<%= a %>  <%- b %><% c -%>  <%- d %>`; the old module wrote no
+  `out.print("  ")` between the first two tags.
+
 - **An error in a control tag's code is reported at the template's own
   column.** A space was put before control code that did not open with
   one, so everything on the code's first line stood a column right of

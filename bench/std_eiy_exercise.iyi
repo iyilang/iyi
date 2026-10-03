@@ -212,6 +212,16 @@ open_lexer = Eiy::Lexer.new("çay <%% never")
 assert_true(open_lexer.next_token.string?, "text before the open tag lexes")
 assert_true(open_lexer.next_token?.nil?, "next_token? answers nil at the open tag")
 assert_text("unterminated <%% tag at line 1, column 5", open_lexer.error || "(no error)", "the lexer's sentence")
+# `<%-` takes the blanks before it only where it is the first thing on its
+# line: after an output tag on the same line it is not, and the two spaces
+# between the tags were dropped. Blanks that `-%>` leaves are a line's start.
+opens_line_source = Eiy.process_string("<%= a %>  <%- b %><% c -%>  <%- d %>", "t.eiy", "out")
+opens_line_expected = "#<loc:push>out.print((#<loc:\"t.eiy\",1,4> a \n))#<loc:pop>\n" \
+                      "out.print(\"  \")\n" \
+                      "#<loc:push>#<loc:\"t.eiy\",1,14> b \n#<loc:pop>\n" \
+                      "#<loc:push>#<loc:\"t.eiy\",1,21> c \n#<loc:pop>\n" \
+                      "#<loc:push>#<loc:\"t.eiy\",1,32> d \n#<loc:pop>\n"
+assert_text(opens_line_expected, opens_line_source, "<%- after a tag on its line keeps the blanks")
 puts "  generated source exact; process_file, locate, process_string? and the lexer's error all answer"
 
 puts "ALL CHECKS PASSED"

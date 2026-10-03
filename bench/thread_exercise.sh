@@ -37,7 +37,8 @@
 #      variable, its type and the field that made it mutable. Nor does a
 #      captured local the thread's block assigns, or its starter assigns
 #      after the start: one cell two threads write (6b). A String, and a
-#      struct or `List` holding one, is captured and runs (6c).
+#      struct or `List` holding one, is captured and runs (6c). A constant
+#      the block names is asked what a captured value is (6d).
 #   7. On Windows, a program whose main thread ends while another thread's
 #      collections stop it ends, two hundred runs of two hundred; and with
 #      the end put back into the C runtime's `exit` a run never ends, and
@@ -809,6 +810,76 @@ if ! grep -q "Tag's field @name is assigned in \`rename\`" build-renamed.log; th
   echo "the refusal did not name the field:"; cat build-renamed.log; exit 1
 fi
 printf '  refused: %s\n' "$(grep -m1 'is not Share' build-renamed.log | sed 's/^Error: //')"
+
+# ── 6d. A constant the block names is module-level state ──────────────────
+# SPEC.md III.4.5: module-level mutable state is not reachable from another
+# thread. The block names a constant in its own text rather than capturing
+# it, so the closure's variables never listed it: `COUNTS = [0]` with
+# `COUNTS[0] += 1` run a million times in the block and a million by its
+# starter compiled and printed 1061337, and `C2 = Counter.new` bumped the
+# same way printed 1404865. Each is refused by the constant's name now; a
+# constant whose type is Share - an integer, a String, a List - is read
+# from the thread as before.
+step "failure proof: a block naming a constant that is not Share does not compile"
+cat > constant_array.iyi <<'IYI'
+COUNTS = [0]
+t = IyiThread.start do
+  COUNTS[0] += 1
+  nil
+end
+t.join
+IYI
+cat > constant_counter.iyi <<'IYI'
+class Counter
+  @n = 0
+
+  def bump : Nil
+    @n += 1
+  end
+end
+
+C2 = Counter.new
+t = IyiThread.start do
+  C2.bump
+  nil
+end
+t.join
+IYI
+cat > constant_shared.iyi <<'IYI'
+module constant_shared
+
+import std/list::{List}
+
+LIMIT = 3
+GREETING = "hi"
+NAMES = List.new(["a", "b"])
+t = IyiThread.start do
+  puts "#{GREETING} #{LIMIT} #{NAMES.size}"
+  nil
+end
+t.join
+IYI
+if "$IYI" build constant_array.iyi -o constant_array > build-constant-array.log 2>&1; then
+  echo "a block naming an Array constant compiled:"; cat build-constant-array.log; exit 1
+fi
+if ! grep -q "names the constant \`COUNTS : Array(Int32)\`, which is not Share" build-constant-array.log; then
+  echo "the refusal did not name the constant:"; cat build-constant-array.log; exit 1
+fi
+printf '  refused: %s\n' "$(grep -m1 'is not Share' build-constant-array.log | sed 's/^Error: //')"
+if "$IYI" build constant_counter.iyi -o constant_counter > build-constant-counter.log 2>&1; then
+  echo "a block naming a Counter constant compiled:"; cat build-constant-counter.log; exit 1
+fi
+if ! grep -q "names the constant \`C2 : Counter\`, which is not Share: Counter's field @n is assigned in \`bump\`" build-constant-counter.log; then
+  echo "the refusal did not name the constant:"; cat build-constant-counter.log; exit 1
+fi
+printf '  refused: %s\n' "$(grep -m1 'is not Share' build-constant-counter.log | sed 's/^Error: //')"
+if ! "$IYI" build constant_shared.iyi -o constant_shared > build-constant-shared.log 2>&1; then
+  echo "a block naming Share constants was refused:"; cat build-constant-shared.log; exit 1
+fi
+if [ "$(./constant_shared | tr -d '\r')" != "hi 3 2" ]; then
+  echo "a block naming Share constants built, but printed:"; ./constant_shared; exit 1
+fi
+echo "  an Int32, a String and a List(String) constant still build and read hi 3 2"
 
 # ── 7. Windows: a program ends while a collection stops it ────────────────
 # A thread runs collections back to back - each one stops the main thread -

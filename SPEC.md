@@ -2701,6 +2701,13 @@ own local, which is a new cell on every call, is captured as before.
 `count` added to by a thread and by its starter two million times each
 had compiled and counted 2684265 one run and 4000000 the next.
 `bench/thread_exercise.sh` step 6b holds it.
+A constant the block names is module-level state (III.4.5), and is asked
+what a captured variable is: `COUNTS = [0]`, bumped a million times by a
+thread's block and a million by its starter, had compiled and printed
+1061337, and is refused now with ``names the constant `COUNTS :
+Array(Int32)`, which is not Share``. A constant that a method the block
+calls reads is reached through the call, and is not checked. Step 6d
+holds it.
 
 This is Rust's `Send`/`Sync` **without** ownership or borrowing, and it is worth
 being exact about what that buys and what it does not. It rules out data races,

@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **A constant an `IyiThread` block names must be Share, as a captured
+  variable must (SPEC.md III.4.5).** The thread gate asked only the
+  variables the block closed over and `self`, and a constant is neither,
+  so a block reading only constants was not even a closure: `COUNTS =
+  [0]` with `COUNTS[0] += 1` run a million times by a thread and a
+  million by its starter compiled and printed 1061337, and `C2 =
+  Counter.new` bumped the same way printed 1404865. Each constant the
+  block, its inner blocks and its procs name is asked now, and the
+  program is refused with "names the constant `COUNTS : Array(Int32)`,
+  which is not Share"; an integer, a String or a `List` constant is read
+  as before. A constant that a method the block calls reads is reached
+  through the call and is still not checked. `bench/thread_exercise.sh`
+  step 6d builds both and the legal form; the old compiler built both.
+
 - **A field a method takes the address of with `pointerof` makes its
   type not Share.** The scan for a field assigned outside `initialize`
   saw assignments and setters only, so `def poke; pointerof(@n).value +=

@@ -660,6 +660,7 @@ module Iyi
       fun_literal = block.fun_literal
       return unless fun_literal.is_a?(ProcLiteral)
       a_def = fun_literal.def
+      check_thread_constants_share(a_def)
       return unless a_def.closure?
 
       vars = a_def.vars
@@ -748,6 +749,41 @@ module Iyi
           end
         next unless why
         assign.raise "`#{name}` is assigned here, #{why}, and the block IyiThread.start runs on another thread (line #{line}) captures it, #{advice}"
+      end
+    end
+
+    # iyi: a constant is module-level state the block names in its own text,
+    # so it is no variable the closure lists, and a block reading only
+    # constants is no closure at all: `COUNTS = [0]` with `COUNTS[0] += 1`
+    # run a million times in the block and a million by its starter
+    # compiled and printed 1061337 (SPEC.md III.4.5). Each constant the
+    # block, its inlined blocks and its procs name is asked what a captured
+    # variable is. One that a method the block calls reads is reached
+    # through the call, and is not seen here.
+    def check_thread_constants_share(a_def : Def) : Nil
+      named = NamedConstants.new
+      a_def.body.accept named
+      named.paths.each do |path, type|
+        if why = Iyi::Share.reason(type)
+          path.raise "the block IyiThread.start runs on another thread names the constant `#{path} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+        end
+      end
+    end
+
+    # Every constant a body names, once each, with its value's type.
+    class NamedConstants < Visitor
+      getter paths = [] of {Path, Type}
+      @seen = Set(Const).new
+
+      def visit(node : Path) : Bool
+        const = node.target_const
+        type = node.type?
+        @paths << {node, type} if const && type && @seen.add?(const)
+        false
+      end
+
+      def visit(node : ASTNode) : Bool
+        true
       end
     end
 

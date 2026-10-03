@@ -3552,6 +3552,28 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "refuses a constant the block names whose type is not shareable" do
+      assert_error(stub + <<-CODE, "names the constant `TALLY : Tally`, which is not Share: Tally's field @total is assigned in `bump` (SPEC.md III.4.5)", filename: "x.iyi")
+        class Tally
+          def initialize
+            @total = 0
+          end
+
+          def bump : Nil
+            @total = 1
+          end
+        end
+
+        LIMIT = 3
+        TALLY = Tally.new
+        IyiThread.start do
+          LIMIT
+          TALLY.bump
+          nil
+        end
+        CODE
+    end
+
     it "refuses a captured value whose type has a setter" do
       assert_error(stub + <<-CODE, "the block IyiThread.start runs on another thread captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=` (SPEC.md III.4.4)", filename: "x.iyi")
         class Counter

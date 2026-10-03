@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **Rename, references and implementation treat a trait's requirement
+  and every method that answers it as one method.** A rename on
+  `sq.area` rewrote the def in `impl Shape for Square` and every call and
+  left `abstract def area`, so the program it left said "impl Shape for
+  Square is missing a method required by the trait: area"; references
+  from the requirement answered the requirement alone, implementation
+  from it answered null, and hover on `Shape` in `impl Shape for Square`
+  answered null. The requirement, its default and the def of that name
+  and arity on every implementing type are adopted together now (not
+  the stub of the witness struct definition-site typing builds),
+  implementation from a trait's method answers each implementor's def,
+  and hover on a type's name answers its declaration and doc comment.
+  `bench/lsp_session.py` steps 72b, 72c and 72g rename through an impl
+  and compile the result, and ask implementation, references and hover;
+  the old server's rename left a program that does not compile.
+
 - **An open file's diagnostics follow the modules it imports when they
   change on disk.** The server memoised a verdict on the buffers alone,
   so a module an open buffer imports, renamed, deleted or written back by

@@ -543,6 +543,28 @@ module Iyi::Lsp
       locations
     end
 
+    # Implementation from a method of a trait - its requirement or its
+    # default - or from one that answers it: the def of that name and arity
+    # on every type that implements the trait, linked the way references
+    # link them (`ReferencesVisitor#link_trait_methods`). It answered null
+    # from `abstract def area`, which is the one place implementation is
+    # asked from. Empty for a method no trait names.
+    def method_implementations_at(path : String, text : String, overrides : Hash(String, String), line : Int32, column : Int32) : Array(Location)
+      result = result_for(path, text, overrides)
+      return [] of Location unless result
+      visitor = ReferencesVisitor.new(Location.new(path, line, column))
+      return [] of Location unless visitor.process(result)
+      adopted = visitor.adopted
+      return [] of Location unless adopted.any? { |a_def| a_def.owner?.try(&.instance_type.trait?) }
+      locations = [] of Location
+      adopted.each do |a_def|
+        next if a_def.abstract? || a_def.owner?.try(&.instance_type.trait?)
+        location = a_def.name_location || a_def.location
+        locations << location if location && location.filename.is_a?(String)
+      end
+      locations.uniq!
+    end
+
     # One type as a hierarchy node names it: the short name, where it
     # is declared, and its LSP SymbolKind.
     record TypeSite, name : String, location : Location, kind : Int32

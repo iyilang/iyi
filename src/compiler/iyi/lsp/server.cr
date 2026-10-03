@@ -1292,6 +1292,23 @@ module Iyi::Lsp
         end
       end
 
+      # A type's name - `Shape` in `impl Shape for Square` - is no variable
+      # and no call, and answered null: its declaration line and doc comment
+      # instead, from this file's type of that name or the one type there is.
+      if parts.empty? && word && word[0]?.try(&.ascii_uppercase?)
+        sites = @analysis.hierarchy_types_named(path, text, overrides_for(path), word)
+        site = sites.find { |candidate| same_path?(candidate.location.filename.to_s, path) } || (sites.first if sites.size == 1)
+        if site
+          filename = site.location.filename.to_s
+          declaration = read_line(filename, site.location.line_number).strip
+          unless declaration.empty?
+            parts << "```iyi\n#{declaration}\n```"
+            doc = doc_above(filename, site.location.line_number)
+            parts << doc unless doc.empty?
+          end
+        end
+      end
+
       return respond_null(id) if parts.empty?
 
       respond(id) do |json|
@@ -2896,8 +2913,12 @@ module Iyi::Lsp
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
-      locations = @analysis.implementors_at(
-        path, text, overrides_for(path), word_at(line_text, column))
+      word = word_at(line_text, column)
+      locations = @analysis.implementors_at(path, text, overrides_for(path), word)
+      if locations.empty? && word && !word[0]?.try(&.ascii_uppercase?)
+        # A trait's method: each implementor's def of it.
+        locations = @analysis.method_implementations_at(path, text, overrides_for(path), line0 + 1, column)
+      end
       return respond_null(id) if locations.empty?
 
       respond(id) do |json|

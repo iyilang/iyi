@@ -8,7 +8,9 @@
 # or a bare root (`\`). A Windows path is absolute only with both a drive
 # and a root, so `C:foo` (drive-relative) and `\foo` (rooted) are not.
 # DOS device paths (`\\.\`, `\\?\`) are not recognised: they read as UNC
-# shares named `.` and `?`. Windows names compare case-insensitively: in
+# shares named `.` and `?`, except `\\?\UNC\server\share`, the long form
+# of `\\server\share`, whose drive runs through the share as Python's
+# reads it. Windows names compare case-insensitively: in
 # every script on Windows, as its file systems fold them, and in ASCII
 # letters alone where the program was built for another platform.
 #
@@ -185,8 +187,12 @@ pub struct Path
 
     return {0, 0} unless sep?(b0)
     if len >= 5 && sep?(ptr[1]) && !sep?(ptr[2])
-      # "\\server\share": a host run, a separator, a share run
-      i = 2
+      # "\\server\share": a host run, a separator, a share run. After
+      # `\\?\UNC\` the host comes after the prefix: read as host `?` and
+      # share `UNC`, `\\?\UNC\srv\sh\x` had the drive `\\?\UNC`, and
+      # `\\?\UNC\srv\other\x` relative to `\\?\UNC\srv\sh` was `..\other\x`,
+      # across shares.
+      i = long_unc? ? 8 : 2
       while i < len && !sep?(ptr[i])
         i = i + 1
       end
@@ -203,6 +209,14 @@ pub struct Path
       end
     end
     {0, 1}
+  end
+
+  # `\\?\UNC\` at the start, `UNC` in any case and either separator, as
+  # Python's `splitroot` matches it.
+  private def long_unc? : Bool
+    ptr = @name.to_unsafe
+    return false unless @name.bytesize > 8 && ptr[2] == 63_u8 && sep?(ptr[3]) && sep?(ptr[7])
+    (ptr[4] | 32_u8) == 117_u8 && (ptr[5] | 32_u8) == 110_u8 && (ptr[6] | 32_u8) == 99_u8
   end
 
   def drive : String?

@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **`Path.windows` reads `\\?\UNC\server\share` with the share as its
+  drive, as Python does.** The prefix was read as a share of its own,
+  host `?` and share `UNC`: the drive of `\\?\UNC\srv\sh\x` was
+  `\\?\UNC`, and `\\?\UNC\srv\other\x` was relative to
+  `\\?\UNC\srv\sh` as `..\other\x`, across shares. After `\\?\UNC\`, in
+  any case and with either separator, the server and share come next,
+  so the drive is `\\?\UNC\srv\sh` and `relative_to?` across shares is
+  nil. `bench/std_path_exercise.iyi` checks the drive and both
+  `relative_to`s; the old module answered `\\?\UNC`.
+
 - **`Server.serve` answers a body past its limit 413 and a head past
   its limit 431.** Both were answered 400, as a request that is not
   HTTP: `Content-Length: 99999999999` got "HTTP/1.1 400 Bad Request" and

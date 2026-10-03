@@ -234,6 +234,15 @@ assert_str("foo:\\bar", Path.windows("foo:").join("bar").to_s, "only a bare driv
 # whatever drive is current, and with `C:b` it was `C:b`.
 assert_str("C:\\b", Path.windows("C:\\a").join("\\b").to_s, "a root joined onto a drive path stays on the drive")
 assert_str("\\\\srv\\sh\\y", Path.windows("\\\\srv\\sh\\x").join("/y").normalize.to_s, "a root joined onto a share stays on the share")
+# `\\?\UNC\server\share` is `\\server\share` written long, and the share
+# is its drive, as Python reads it: the drive was `\\?\UNC`, and a path on
+# one share was relative to another.
+long_unc = Path.windows("\\\\?\\UNC\\srv\\sh\\x")
+assert_str("\\\\?\\UNC\\srv\\sh", long_unc.drive.to_s, "a long UNC path's drive runs through the share")
+assert_str("//?/unc/srv/sh", Path.windows("//?/unc/srv/sh/x").drive.to_s, "in any case, with either separator")
+assert_str("x", long_unc.relative_to("\\\\?\\UNC\\srv\\sh").to_s, "a long UNC path relative to its own share")
+assert_true(Path.windows("\\\\?\\UNC\\srv\\other\\x").relative_to?("\\\\?\\UNC\\srv\\sh").nil?, "is not relative to another share")
+puts "  \\\\?\\UNC\\server\\share is a share's drive"
 assert_str("C:\\a\\b", Path.windows("C:\\a").join("c:b").to_s, "a drive-relative name on the same drive goes under the left side")
 assert_str("D:b", Path.windows("C:\\a").join("D:b").to_s, "a drive-relative name on another drive is the answer by itself")
 assert_str("\\b", Path.windows("a").join("\\b").to_s, "a root joined onto a name with no drive is the answer by itself")

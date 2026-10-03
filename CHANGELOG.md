@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **`!` in `initialize` is refused, and so is a `return` there that
+  leaves a field unassigned.** `new` answers the object whatever
+  `initialize` returns, so `@v = parse(s)!` dropped the error and built a
+  `C` whose `name.size` was "the program died of a memory fault", and an
+  early `return` before `@name = "named"` did the same. The `!` gets
+  "`!` can't propagate out of `initialize`", which points at a
+  `def self.build(...) : C | ParseErr` constructor, and the `return` gets
+  "`return` can't leave `initialize` before @name is assigned". A
+  `return` after every field is set, as `std/regex`'s `RxRuns` has, still
+  compiles. `bench/verbs_exercise.sh` checks both; the old compiler built
+  both programs, and both died of a memory fault.
+
 - **A def whose return type names an error member answers that whole
   union, from source as through its artifact, even when its body never
   fails.** A call was typed from the def's body and only checked against

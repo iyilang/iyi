@@ -2696,6 +2696,76 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "refuses `!` in initialize, where `new` would drop the error" do
+      assert_error <<-CODE, "`!` can't propagate out of `initialize`", filename: "x.iyi"
+        module App
+          module Fails
+            struct ParseError
+              def initialize
+              end
+            end
+
+            impl Error for ParseError
+              def message : String
+                "bad"
+              end
+            end
+
+            def self.parse(bad : Bool) : Int32 | ParseError
+              return ParseError.new if bad
+              1
+            end
+
+            class Box
+              @value : Int32
+
+              def initialize(bad : Bool)
+                @value = Fails.parse(bad)!
+              end
+            end
+          end
+        end
+
+        App::Fails::Box.new(true)
+        CODE
+    end
+
+    it "refuses a `return` in initialize that leaves a field unassigned" do
+      assert_error <<-CODE, "`return` can't leave `initialize` before @name is assigned", filename: "x.iyi"
+        class Box
+          @value : Int32
+          @name : String
+
+          def initialize(early : Bool)
+            @value = 1
+            return if early
+            @name = "named"
+          end
+        end
+
+        Box.new(true)
+        CODE
+    end
+
+    it "keeps a `return` in initialize once every field is assigned" do
+      # `std/regex`'s `RxRuns` stops there when the automaton does not apply.
+      assert_no_errors <<-CODE, filename: "x.iyi"
+        class Box
+          @value : Int32
+          @name : String
+
+          def initialize(early : Bool)
+            @value = 1
+            @name = "named"
+            return if early
+            @value = 2
+          end
+        end
+
+        Box.new(true)
+        CODE
+    end
+
     # iyi: a module's initialisation may not fail (SPEC.md III.5). Already
     # rejected before this, but through Crystal's rule about `return` — which
     # is what the expansion happens to be made of, and explains nothing.

@@ -431,6 +431,15 @@ if [ "$("$IYI" run unary.iyi 2>&1 | tr -d '\r')" = "false" ]; then
 else
   echo "  f !x no longer reads as f(!x):"; "$IYI" run unary.iyi 2>&1 | sed -n '1,3p'; status=1
 fi
+# `new` answers the object whatever `initialize` returns, so a `!` in
+# initialize dropped its error and left the fields after it unassigned:
+# `C.new("x").name.size` died of a memory fault. A `return` that leaves a
+# field unassigned did the same.
+printf 'module initbang\n\nclass ParseErr\n  def initialize\n  end\nend\n\nimpl Error for ParseErr\n  def message : String\n    "bad"\n  end\nend\n\ndef parse(s : String) : Int32 | ParseErr\n  return ParseErr.new if s == "x"\n  1\nend\n\nclass C\n  getter v : Int32\n  getter name : String\n\n  def initialize(s : String)\n    @v = parse(s)!\n    @name = "named"\n  end\nend\n\nputs C.new("x").name.size\n' > initbang.iyi
+refuses "a ! in initialize" "can't propagate out of \`initialize\`" -- "$IYI" check initbang.iyi
+printf 'module initreturn\n\nclass C\n  getter v : Int32\n  getter name : String\n\n  def initialize(early : Bool)\n    @v = 1\n    return if early\n    @name = "named"\n  end\nend\n\nputs C.new(true).name.size\n' > initreturn.iyi
+refuses "a return in initialize before a field is assigned" "can't leave \`initialize\` before @name is assigned" -- \
+  "$IYI" check initreturn.iyi
 # A program's own exit status is `iyi run`'s, a negative one too. On
 # Windows `exit(-1)` is 0xFFFFFFFF, which the runner took for an abnormal
 # end: "terminated abnormally, the cause is unknown", and exit 1.

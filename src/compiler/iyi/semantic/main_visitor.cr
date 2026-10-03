@@ -2077,6 +2077,10 @@ module Iyi
 
       node.exp.try &.accept self
 
+      if typed_def.name == "initialize" || typed_def.name.starts_with?("initialize:")
+        iyi_check_initialize_exit(node)
+      end
+
       node.target = typed_def
 
       typed_def.bind_to(node_exp_or_nil_literal(node))
@@ -2086,6 +2090,41 @@ module Iyi
       node.type = @program.no_return
 
       false
+    end
+
+    # iyi: `new` answers the object whatever its `initialize` returns, so a
+    # `!` there dropped the error, and either a `!` or a `return` left every
+    # field it had not reached yet unassigned: `C.new("x")` with `@v =
+    # parse(s)!` answered a `C` whose `v` read 0 and whose `name.size` was a
+    # memory fault (SPEC.md III.1.2 has the error go to the caller, and here
+    # there is none). A `return` after every field is set is still an early
+    # exit, and `std/regex`'s `RxRuns` keeps one.
+    private def iyi_check_initialize_exit(node : Return)
+      if node.from_propagate?
+        error = node.exp.try(&.type?) || "E"
+        node.raise <<-MSG
+          `!` can't propagate out of `initialize`
+
+          `new` answers the object whatever `initialize` returns, so the #{error} would be dropped and the object built with the fields not assigned yet left uninitialized. Decide before building: write a constructor `def self.build(...) : #{scope} | #{error}` that propagates with `!` and then calls `new` with values that cannot fail — see SPEC.md III.1.2.
+          MSG
+      end
+
+      return unless node.location.try(&.original_filename.try(&.ends_with?(".iyi")))
+
+      unassigned = scope.all_instance_vars.compact_map do |name, ivar|
+        next if scope.has_instance_var_initializer?(name)
+        next if (var = @vars[name]?) && !var.nil_if_read?
+        type = ivar.type?
+        next if !type || type.includes_type?(@program.nil)
+        name
+      end
+      return if unassigned.empty?
+
+      node.raise <<-MSG
+        `return` can't leave `initialize` before #{unassigned.join(", ")} #{unassigned.size == 1 ? "is" : "are"} assigned
+
+        `new` answers the object whatever `initialize` returns, so the object would be built with #{unassigned.size == 1 ? "that field" : "those fields"} uninitialized. Assign #{unassigned.size == 1 ? "it" : "them"} first, or decide before building with a constructor `def self.build(...) : #{scope} | E` that calls `new` only once it can — see SPEC.md III.1.2.
+        MSG
     end
 
     def end_visit(node : Splat)

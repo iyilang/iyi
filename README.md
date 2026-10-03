@@ -122,7 +122,7 @@ and no more: no TLS, no serialisation, and no sockets or format strings -
 outside the prelude every program carries. Its concurrency — a
 cooperative scheduler, `group`/`spawn`,
 `Channel`, cancellable `sleep` and reads (SPEC.md III.4) — runs on Linux
-(x86_64, aarch64) and macOS arm64 only;
+(x86_64, aarch64), macOS arm64 and Windows x86-64;
 `--crystal` supplies Crystal's standard library, IO, `require` and the
 ecosystem. Dependencies exist but are young: an `iyi.mod` beside the entry
 file names requirements, `iyi get` adds or moves one, resolution is
@@ -229,10 +229,10 @@ same session:
 
 | program | iyi | `go build` |
 |---|---|---|
-| `hello` (147 lines) | **0.07 s** | 0.08 s |
+| `hello` (149 lines) | **0.07 s** | 0.08 s |
 | generated pair, 6,912 lines | 0.24 s | **0.09 s** |
 
-<sup>Both counts are `wc -l`: 147 for `samples/iyi/hello.iyi`, of which 44 are
+<sup>Both counts are `wc -l`: 149 for `samples/iyi/hello.iyi`, of which 44 are
 code and the rest the commentary that makes it a sample, and 6,912 for what
 `python3 bench/build_speed/generate_pair.py 300 <dir>` writes. The Go side of
 each row is 11 lines and 6,016.</sup>
@@ -296,6 +296,7 @@ module          app/greeter
 interface       changed    what a consumer type-checks against
 implementation  unchanged  the bodies a consumer compiles: macros, generics, the initialiser
 source          changed    the file
+dependencies    unchanged  what this module was compiled against
 
   gone   def polite(name : String) : String
   gone   def title : String
@@ -361,8 +362,8 @@ Under 1.00 is iyi ahead. These seconds are a machine, not a language: run
 `python3 bench/runtime.py` on an idle one. Where the two libraries do the
 same work they are within noise. `Hash` is ahead by 10x on this workload -
 sequential integer keys, which flatter a compact table - and no longer
-does less: it keeps insertion order, as Crystal's does, and still cannot
-delete. `String` is 1.8x slower with the collector off and 1.2x as it
+does less: it keeps insertion order, as Crystal's does, and `delete`
+takes an entry out. `String` is 1.8x slower with the collector off and 1.2x as it
 runs: the collector is masking a slower builder, which is the same confound
 the first reading published upside down as a twenty-times win.
 
@@ -650,7 +651,10 @@ to be found: Apple ships no static libc, and the linker refuses, `ld: library
 part of the OS, so the file still copies to another Mac and runs. Windows is
 the same shape, importing `kernel32` and, for a program that asks for
 entropy or a socket, `advapi32` and `ws2_32` — all three ship with the
-machine — and `--static` links the static CRT there. A wasm32 build is one
+machine — and the C runtime it links is the *dynamic* one, so the file also
+imports `vcruntime140.dll`, the Visual C++ redistributable, and five UCRT
+façades. `--static` changes nothing there: it is accepted and the binary
+imports the same seven DLLs. A wasm32 build is one
 self-contained module already.
 
 Building it instead needs LLVM 19 and a Crystal compiler to bootstrap from:
@@ -855,6 +859,8 @@ requirement, answer the associated type, and the rest arrives. It is checked
 once at the `impl`, not at every call.
 
 ```crystal
+import std/enumerable::{Enumerable}
+
 pub struct Nums
   def initialize(@a : Array(Int32))
   end
@@ -945,12 +951,15 @@ a new way to be stuck.
 
 ## The samples
 
-Twenty programs in [`samples/iyi`](samples/iyi), each documenting a part
-of the design rather than showing off: `hello` (traits and `impl`), `modules`
+Twenty-seven programs in [`samples/iyi`](samples/iyi). Nineteen document a
+part of the design rather than showing off: `hello` (traits and `impl`), `modules`
 (`import` and the names it brings, across files), `generics`, `errors`, `collections`,
 `immutable` (a shareable collection and the copy that makes it safe),
 `init_order`, `webapp`, `workers` (a pool and a typed pair of tasks),
-`calc`, `derive`, `files` and `formatting`. And seven that document nothing:
+`derive`, `files`, `formatting`, `format` (format strings), `enums`, `io`
+(standard input a line at a time), `socket` (a TCP client and server on
+loopback) and `std_iterator`, `std_text` and `std_time` (a standard module
+each). `calc` is a language. And seven document nothing:
 `basics` is the seven programs a person writes in their first half hour,
 `inventory` the first one with a struct in it, `config` the first that reads
 text, `grid` the first with a table, `shapes` the first with a trait of its
@@ -959,7 +968,7 @@ remembers what it has seen, and they are there because the prelude grows
 only when a program in this repository needs something.
 
 R-1 is checked rather than asserted. `bash bench/samples_roundtrip.sh` builds
-the five samples that import anything, deletes every imported module's source,
+the twelve samples that import anything, deletes every imported module's source,
 builds again from the artifacts and compares what the two programs print. CI
 runs it on every push.
 
@@ -1106,7 +1115,7 @@ marked PROPOSED are the parts that will move under you.
   Crystal's does; out of range after that wrap still raises.
   `samples/iyi/formatting.iyi` is the rest of the small set: `to_s(base)`,
   `rjust` / `ljust`, and `*`.
-- **`Share` gates nothing yet, and one platform has no runtime.** SPEC.md
+- **`Share` gates a thread, not a task, and one platform has no runtime.** SPEC.md
   III.4's structured concurrency — `group`/`spawn`, `Channel`, `select`,
   cancellation delivered as values, panics dying at task boundaries — is
   built in iyi's own prelude and runs on Linux (x86_64, aarch64), macOS

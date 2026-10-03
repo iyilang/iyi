@@ -7,8 +7,10 @@
 # contract: a field is quoted when it holds a comma, a quote or a
 # line break, a row of one empty field is written `""`, and a last row
 # of no fields is ended with a line break. A quote without its pair is
-# `unterminated quoted field`. A byte order mark is read past, and a
-# UTF-16 document is refused by its.
+# `unterminated quoted field`; text after a closing quote, and a quote in
+# a field that did not open with one, are refused at their line and
+# column, as the other library refuses them. A byte order mark is read
+# past, and a UTF-16 document is refused by its.
 
 module std/csv
 
@@ -45,6 +47,11 @@ pub struct CSV
           else
             quoted = false
             i = i + 1
+            # Only a comma, a line break or the end may follow: `"a"b,c`
+            # was the field `ab`, where RFC 4180 has no such field.
+            if i < n && src[i] != 44_u8 && src[i] != 10_u8 && src[i] != 13_u8
+              refuse(text, i, "expecting comma, newline or end, not '#{char_at(text, i)}'")
+            end
           end
         else
           field[flen] = b
@@ -56,6 +63,10 @@ pub struct CSV
           quoted = true
           opened = true
           i = i + 1
+        elsif b == 34_u8
+          # A quote in a field that did not open with one: `a"b,c` was the
+          # field `a"b`, a guess at what an unpaired quote meant.
+          refuse(text, i, "unexpected quote")
         elsif b == 44_u8 # comma
           row << take(field, flen)
           flen = 0
@@ -124,6 +135,35 @@ pub struct CSV
 
   private def self.take(field : Pointer(UInt8), flen : Int32) : String
     String.new(flen) { |dst| dst.copy_from(field, flen) }
+  end
+
+  # The line and column of the byte at *at*, both counted from 1 and the
+  # column in characters, as the other library counts them: worked out
+  # here, on the way out, so a document that parses pays nothing for them.
+  private def self.refuse(text : String, at : Int32, what : String) : NoReturn
+    src = text.to_unsafe
+    line = 1
+    column = 1
+    i = 0
+    while i < at
+      b = src[i]
+      if b == 10_u8 || (b == 13_u8 && !(i + 1 < at && src[i + 1] == 10_u8))
+        line = line + 1
+        column = 1
+      elsif b != 13_u8 && (b & 0xC0_u8) != 0x80_u8
+        column = column + 1
+      end
+      i = i + 1
+    end
+    raise "#{what} at line #{line}, column #{column}"
+  end
+
+  # The character that starts at byte *at*, for a refusal to name.
+  private def self.char_at(text : String, at : Int32) : String
+    b = text.to_unsafe[at]
+    len = b < 0x80_u8 ? 1 : (b < 0xE0_u8 ? 2 : (b < 0xF0_u8 ? 3 : 4))
+    len = text.bytesize - at if len > text.bytesize - at
+    take(text.to_unsafe + at, len)
   end
 
   private def self.escape(field : String) : String

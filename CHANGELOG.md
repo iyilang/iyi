@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **`CSV.parse` refuses text after a closing quote and a quote inside an
+  unquoted field, at their line and column, as the other library
+  refuses them.** `CSV.parse(%("a"b,c))` answered `[["ab", "c"]]`,
+  `%(x,"b"""c")` `[["x", "b\"c\""]]` and `%(a"b,c)` `[["a\"b", "c"]]`,
+  fields RFC 4180 has no grammar for. They panic now with `expecting
+  comma, newline or end, not 'b' at line 1, column 4`, `... not 'c' at
+  line 1, column 8` and `unexpected quote at line 1, column 2`, the other
+  library's sentences in this module's lower case. The column counts
+  characters, and a line ends at LF, CRLF or a lone CR once each: the
+  other library counts a CRLF as two lines, so `h1,h2\r\nv1,v"2` is
+  line 2 here and line 3 there. The place is counted only on the way
+  out. `bench/std_csv_exercise.iyi` checks four refusals and a closing
+  quote before a comma and before a CRLF, and its `.sh` proves both
+  refusals load-bearing; the old module answered `parsed [["ab", "c"]]`.
+  The lone-CR check gained a twin with no quote in it, because a lone CR
+  dropped now meets the quote refusal before that check.
+
 - **`sample(n)` on any `Indexable` is *n* distinct elements, the count
   std/random's `Array#sample` answers, and `sample` is a random
   element.** `Indexable#sample(Int32)` took the number as the seed of a

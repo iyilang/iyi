@@ -159,6 +159,8 @@ broken "a blank line read as one empty field" 'row << take(field, flen) if row.s
 broken "a last quoted empty field dropped" 'if flen > 0 || row.size > 0 || opened' 'if flen > 0 || row.size > 0' "ASSERTION FAILED: a last line of one quoted empty field"
 broken "a lone empty field written bare" 'io << "\"\"" if fields.size == 1 && fields[0].empty?' '' "ASSERTION FAILED: a row of one empty field is written quoted"
 broken "a last row of no fields left unended" "io << '\\n' if rows.size > 0 && rows[rows.size - 1].empty?" '' "ASSERTION FAILED: a last row of no fields round trips"
+broken "text after a closing quote kept" 'if i < n && src[i] != 44_u8 && src[i] != 10_u8 && src[i] != 13_u8' 'if false' "ASSERTION FAILED: text after a closing quote"
+broken "a quote in an unquoted field kept" 'refuse(text, i, "unexpected quote")' 'field[flen] = b; flen = flen + 1; i = i + 1' "ASSERTION FAILED: a quote inside an unquoted field"
 
 echo
 if [ "$status" -eq 0 ]; then

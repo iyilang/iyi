@@ -4,6 +4,22 @@
 
 ### Fixed
 
+- **`test --affected` and `check --affected` run everything when a
+  changed file is one no import can name.** The selection knows parsed
+  imports alone, so a template a test renders, a fixture it reads, and
+  the prelude every test compiles were in no closure: after an edit to
+  `page.eiy`, `iyi test --affected page.eiy` answered "0 to run, 1
+  skipped: no test's imports reach the change" while the test rendering
+  it failed under a plain `iyi test`; `check --affected page.eiy` on a
+  template that no longer parsed said "0 consumer(s) checked, all
+  compile", exit 0; and `--affected src/iyi/prelude.iyi` skipped every
+  test. A changed file that is not a `.iyi`, or that sits under the
+  prelude's directory, turns the discount off now and says why, as
+  `iyi.mod` and a deleted file already did (`affected_not_imported`
+  under `--json`). `bench/test_verb.sh` changes a template and the
+  prelude, and breaks the template under `check --affected`; the old
+  compiler answered "0 to run, 4 skipped".
+
 - **A module in a subdirectory resolves its packages through the
   manifest at the root its header names, under every verb.** The
   manifest was read beside the file each verb was given, so in a project

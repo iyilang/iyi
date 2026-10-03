@@ -143,6 +143,25 @@ grep -qE '[0-9]+ passed, 0 failed$' off.txt ||
 "$IYI" test --json --affected nope.iyi . > off.json 2>&1
 grep -q '"affected_not_found":\["nope.iyi"\]' off.json ||
   { echo "the data says nothing about it:"; cat off.json; exit 1; }
+# A changed file no import can name is in no closure either: a template a
+# test renders through `Eiy.render`, and the prelude every test compiles.
+# Both were "0 to run, 1 skipped: no test's imports reach the change", and
+# `check --affected` on a template that no longer parses said "0
+# consumer(s) checked, all compile", exit 0.
+printf 'hello <%%= 1 + 1 %%>\n' > page.eiy
+printf 'import std/eiy::{Eiy}\n\nassert Eiy.render("page.eiy") == "hello 2\\n", "rendered"\n' > page_test.iyi
+"$IYI" test --affected page.eiy . > tmpl.txt 2>&1
+grep -q 'page.eiy is not a module an import can name, so every test ran' tmpl.txt &&
+  grep -qE '[0-9]+ passed, 0 failed$' tmpl.txt ||
+  { echo "a changed template discounted the run:"; cat tmpl.txt; exit 1; }
+"$IYI" test --json --affected "$REPO/src/iyi/prelude.iyi" . > prelude.json 2>&1
+grep -q '"affected_not_imported":\[' prelude.json && grep -Eq '"skipped": ?0' prelude.json ||
+  { echo "a changed prelude file discounted the run:"; cat prelude.json; exit 1; }
+printf 'hello <%%= 1 + %%>\n)\n' > page.eiy
+"$IYI" check --affected page.eiy > tmpl_check.txt 2>&1
+[ $? -eq 1 ] && grep -q '^page_test.iyi: ' tmpl_check.txt ||
+  { echo "a template that no longer parses broke no consumer:"; cat tmpl_check.txt; exit 1; }
+rm page.eiy page_test.iyi
 
 step "a test named more than once runs once"
 # The list was made unique as strings, so a test the directory walk found

@@ -124,13 +124,22 @@ class Iyi::Command
       File.basename(path).in?(Iyi::Mod::Installer::MANIFEST, Iyi::Mod::Sum::FILE)
     end
 
+    # A changed file no import can name: the prelude, which every module
+    # compiles, and a file that is not a module, which one reaches through
+    # a macro (`Eiy.embed`, `read_file`). No closure holds either, and a
+    # syntax error in `page.eiy` was answered "0 consumer(s) checked, all
+    # compile" while `iyi check page_test.iyi` failed in page.eiy.
+    unimported = typed.select do |path|
+      File.file?(path) && !manifest_changed.includes?(path) && outside_every_closure?(path)
+    end
+
     consumers = [] of String
     # The extension in any case, so that `UP.IYI` is refused by name rather
     # than left out of the ripple in silence (`Lexer.iyi_miscased?`).
     Dir.glob("**/*.[iI][yY][iI]") do |candidate|
       abort! Lexer.iyi_miscased_sentence(candidate), :USAGE_ERROR if Lexer.iyi_miscased?(candidate)
       closure = test_import_closure(candidate)
-      consumers << candidate if closure.nil? || !manifest_changed.empty? ||
+      consumers << candidate if closure.nil? || !manifest_changed.empty? || !unimported.empty? ||
                                 closure.any? { |path| changed.includes?(Iyi.file_key(path)) }
     end
     consumers.sort!
@@ -168,6 +177,11 @@ class Iyi::Command
               json.array { manifest_changed.each { |path| json.string path } }
             end
           end
+          unless unimported.empty?
+            json.field "affected_not_imported" do
+              json.array { unimported.each { |path| json.string path } }
+            end
+          end
         end
       end
       STDOUT.puts
@@ -192,6 +206,10 @@ class Iyi::Command
       unless manifest_changed.empty?
         puts "#{manifest_changed.join(", ")} changed, so every module is a consumer: " \
              "the requirements are what every package import resolves through"
+      end
+      unless unimported.empty?
+        puts "#{unimported.join(", ")} is not a module an import can name, so every module is a " \
+             "consumer: the prelude and a file a macro reads reach a module without an import"
       end
       verdict = failures.empty? ? "all compile" : "#{failures.size} broke"
       puts "#{consumers.size} consumer(s) checked, #{verdict}"

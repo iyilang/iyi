@@ -128,8 +128,9 @@ describe "Formatter on iyi" do
   end
 
   # A bound on a name the signature mentions rather than introduces (II.6),
-  # and one on a name it introduces (II.7).
-  assert_iyi_format "module m\n\ndef includes?(value : Elem) : Bool where Elem : Cmp\n  true\nend"
+  # inside the trait whose associated type it is - `where` outside every
+  # type is refused - and one on a name it introduces (II.7).
+  assert_iyi_format "trait Seq\n  def includes?(value : Elem) : Bool where Elem : Cmp\n    true\n  end\nend"
   assert_iyi_format "module m\n\npub def announce(item : T) : String forall T : Greet\n  item.greet\nend"
 
   # A comment ending a header: the comment lines under it are the body's,
@@ -140,7 +141,7 @@ describe "Formatter on iyi" do
   assert_iyi_format "module Foo(T) # c\n  # doc\n  def f\n  end\nend"
   assert_iyi_format "def g : Int32 | Nil # c\n  # body\n  nil\nend"
   assert_iyi_format "class A\n  def self.decode(x) : String | Err # c\n    # body\n    nil\n  end\nend"
-  assert_iyi_format "def f(x : T) : Nil where T : Foo # c\n  # body\n  nil\nend"
+  assert_iyi_format "trait Seq\n  def f(x : T) : Nil where T : Foo # c\n    # body\n    nil\n  end\nend"
   assert_iyi_format "impl Show for Box(T) forall T # c\n  # doc\n  def show : String\n    \"x\"\n  end\nend"
   assert_iyi_format "impl Show for Box(T) forall T : Show # c\n  # doc\n  def show : String\n    \"x\"\n  end\nend"
   assert_iyi_format "pub trait Num : Comparable # c\n  # doc\n  abstract def x : Int32\nend"

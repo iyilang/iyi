@@ -251,6 +251,10 @@ eiy_build_refuses "a template that is not there" no_such_template "cannot read $
 # line and column, not in the generated source.
 printf 'ok\n  x <%%= nonexistent_thing %%>\n' > "$WORK/bad_name.eiy"
 eiy_build_refuses "a name the template does not have" bad_name "bad_name.eiy:2:9"
+# A control tag's code that opens straight after `<%` too: it was reported
+# a column right, at 2:6.
+printf 'ok\n  <%%nonexistent_thing%%>\n' > "$WORK/bad_control.eiy"
+eiy_build_refuses "a name in a control tag with no space before it" bad_control "bad_control.eiy:2:5"
 
 echo
 echo "== what the runtime API refuses"

@@ -414,7 +414,10 @@ pub struct Eiy
         unless str_val.starts_with?('#')
           parts << "#<loc:push>"
           append_loc(parts, filename, line_number, column_number)
-          parts << " " unless str_val.starts_with?(' ')
+          # The code straight after its location, as an output tag's is: a
+          # space put before code that did not open with one moved its first
+          # line a column right, and `<%nonexistent%>` was refused at
+          # column 4, where the name starts at 3.
           parts << str_val
           parts << "\n#<loc:pop>\n"
         end

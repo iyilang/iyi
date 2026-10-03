@@ -181,6 +181,11 @@ generated_expected = "out.print(\"a \\\"q\\\" \\\\ \\\#{b\\t\\n\")\n" \
                      "out.print(\"d\")\n" \
                      "#<loc:push>#<loc:\"t.eiy\",2,23> end \n#<loc:pop>\n"
 assert_text(generated_expected, generated, "process_string output")
+# Code that opens straight after `<%` follows its location straight, as an
+# output tag's does: a space was put before it, and the compiler reported
+# everything on its first line a column right of where the template has it.
+tight = Eiy.process_string("<%x = 1%>", "t.eiy", "out")
+assert_text("#<loc:push>#<loc:\"t.eiy\",1,3>x = 1\n#<loc:pop>\n", tight, "a control tag's code follows its location")
 # Text that is not UTF-8 is written as `\x` escapes: the compiler reads a
 # literal as UTF-8, and a byte that is not stops it with an internal error.
 # UTF-8 stays itself; an overlong or surrogate spelling is not UTF-8.

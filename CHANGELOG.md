@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **An error in a control tag's code is reported at the template's own
+  column.** A space was put before control code that did not open with
+  one, so everything on the code's first line stood a column right of
+  where the template has it: `<%undefined_x%>` on line 2 was refused at
+  `2:4`, the caret under its `n`, where the name starts at column 3.
+  The code follows its location straight now, as an output tag's does.
+  `bench/std_eiy_exercise.iyi` pins the generated source of `<%x = 1%>`
+  and the `.sh` builds a template whose `<%nonexistent_thing%>` must
+  stop at `2:5`; the old module wrote `#<loc:"t.eiy",1,3> x = 1`.
+
 - **`Gzip.decompress` reads a file of many members in the time its
   members take.** Every member was sized by the file's last trailer, or
   by three times the bytes after it, so each allocated what the rest of

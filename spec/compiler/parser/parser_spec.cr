@@ -4201,6 +4201,48 @@ module Iyi
     end
 
     describe "iyi" do
+      describe "nesting" do
+        # The parser and every pass after it recurse, on the compiler's
+        # stack: `iyi check` died of a stack overflow on 288 unclosed
+        # `f(x: `, 500 unclosed `(` and a chain of 3,750 `+`.
+        it "reads `(` nested to the limit, the literal inside a level of its own" do
+          source = "#{"(" * (Parser::NESTING_LIMIT - 1)}1#{")" * (Parser::NESTING_LIMIT - 1)}"
+          parse(source).to_s.should eq(source)
+        end
+
+        it "refuses one level more at the innermost token, naming the limit" do
+          ex = expect_raises(SyntaxException, "nesting deeper than #{Parser::NESTING_LIMIT} levels") do
+            parse("#{"(" * Parser::NESTING_LIMIT}1#{")" * Parser::NESTING_LIMIT}")
+          end
+          {ex.line_number, ex.column_number}.should eq({1, Parser::NESTING_LIMIT + 1})
+        end
+
+        it "refuses calls left open with a sentence where an error unwinds through each" do
+          expect_raises(SyntaxException, "nesting deeper than #{Parser::NESTING_LIMIT} levels") do
+            parse("def f(x)\n  x\nend\nputs #{"f(x: " * 300}")
+          end
+        end
+
+        it "reads a chain as deep as the tree limit" do
+          parse("x#{" + x" * (Parser::DEPTH_LIMIT - 1)}").as(Call).name.should eq("+")
+        end
+
+        it "refuses a chain one link deeper at its start, naming the limit" do
+          ex = expect_raises(SyntaxException, "nested deeper than #{Parser::DEPTH_LIMIT} levels") do
+            parse("puts 1\nx#{" + x" * Parser::DEPTH_LIMIT}")
+          end
+          {ex.line_number, ex.column_number}.should eq({2, 1})
+        end
+
+        it "counts chains through the parentheses around them" do
+          # Twenty levels of 60 links each: no chain is long and no `(` is
+          # deep, and the tree is 1,200 deep.
+          expect_raises(SyntaxException, "nested deeper than #{Parser::DEPTH_LIMIT} levels") do
+            parse("#{"(" * 20}x#{"#{" + x" * 59})" * 20}")
+          end
+        end
+      end
+
       it "scopes a module header's contents into a namespace" do
         # `module app/greeter` is rewritten to `ModuleDef(App::Greeter)` at
         # parse time, so the whole semantic phase needs no changes. `import`

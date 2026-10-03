@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **Source nested deeper than the compiler reads is refused with a
+  sentence.** The parser and every pass after it recurse on the
+  compiler's stack, and `iyi check` died with "Stack overflow (e.g.,
+  infinite or very deep recursion)" and pages of frames on 300 calls left
+  open with a named argument each, on 1,200 nested `(` and on a chain of
+  4,000 `+`; the language server died with it, and a buffer like that
+  open in an editor answered every request -32603. The parser now stops
+  at 128 levels of its own descent, "nesting deeper than 128 levels", and
+  at a tree 1,000 deep, which a chain of operators or calls grows without
+  any nesting, "an expression nested deeper than 1000 levels", each a
+  syntax error at the place. The deepest file in src/, bench/, samples/,
+  spec/ and the other library's src/ is 23 levels and a tree 39 deep; the
+  limits sit under half of where the parser and under a third of where
+  the later passes overflowed. `spec/compiler/parser/parser_spec.cr` and
+  `bench/verbs_exercise.sh` check both; the old compiler overflowed on
+  the three verbs cases.
+
 - **Two compilers that run the same macro helper at once both build.**
   Every compiler on the machine links the helper a macro `run`s (std/eiy's
   template compiler) into one cache directory, and it linked it straight

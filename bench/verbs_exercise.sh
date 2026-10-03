@@ -2003,6 +2003,24 @@ if [ -n "$kernel_file" ] && [ -r "$kernel_file" ]; then
 else
   echo "  a module the kernel will not hand over: no /proc here, nothing to drive"
 fi
+# Source nested deeper than the compiler reads is refused with a sentence at
+# the place. `iyi check` died of "Stack overflow (e.g., infinite or very
+# deep recursion)" and pages of frames on 1,200 nested `(`, on 300 calls left
+# open with a named argument each, and on a chain of 4,000 `+`; the language
+# server died with it. A file deeper than any in the repository still reads.
+printf 'module deep\n\nputs %s1%s\n' "$(printf '(%.0s' $(seq 1200))" "$(printf ')%.0s' $(seq 1200))" > deep.iyi
+refuses "1,200 nested parentheses" "nesting deeper than 128 levels" -- "$IYI" check deep.iyi
+printf 'module deepopen\n\ndef f(x)\n  x\nend\n\nputs %s\n' "$(printf 'f(x: %.0s' $(seq 300))" > deepopen.iyi
+refuses "300 calls left open" "nesting deeper than 128 levels" -- "$IYI" check deepopen.iyi
+printf 'module chain\n\nx = 1\nputs x%s\n' "$(printf ' + x%.0s' $(seq 4000))" > chain.iyi
+refuses "a chain of 4,000 +" "nested deeper than 1000 levels" -- "$IYI" check chain.iyi
+printf 'module shallow\n\nx = 1\nputs %s1%s%s\n' "$(printf '(%.0s' $(seq 100))" "$(printf ')%.0s' $(seq 100))" \
+  "$(printf ' + x%.0s' $(seq 800))" > shallow.iyi
+if "$IYI" check shallow.iyi > shallow.log 2>&1; then
+  echo "  100 nested parentheses and a chain of 800 + read"
+else
+  echo "  100 nested parentheses and a chain of 800 +:"; sed -n '1,3p' shallow.log; status=1
+fi
 
 echo
 echo "== proving the trace detector can fail"

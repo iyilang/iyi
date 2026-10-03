@@ -88,6 +88,87 @@ module Iyi
       # then this flag is set to `true` when parsing `foo`'s arguments.
       @stop_on_do = false
       @assigned_vars = [] of String
+      @iyi_nesting = 0
+    end
+
+    # iyi: how deep the parser reads, so that a deep source is refused with a
+    # sentence rather than ending the process. The parser descends
+    # recursively, and every later pass walks the tree recursively, on the
+    # stack the compiler was given; `iyi check` died with "Stack overflow"
+    # on 288 unclosed `f(x: ` calls, 500 unclosed `(`, 687 closed calls,
+    # 1,000 closed `(`, 906 nested `if`s, and on a chain of 3,750 `+` or
+    # `.abs`, and the language server died with it.
+    #
+    # Two measures, each set by its own overflow. `NESTING_LIMIT` counts
+    # the parser's descent - a `(`, a call's argument, a block's statement,
+    # an `elsif`, a unary operator, an assigned value, the atom at the
+    # bottom: one level each. It sits at under half the unclosed calls,
+    # because an error raised that deep unwinds through every level's
+    # `ensure`, and on Windows each one raises again on top of the stack
+    # (500 unclosed `(` overflowed where 1,000 closed ones read).
+    # `DEPTH_LIMIT` is the depth of the tree that results, which a chain
+    # grows without the parser descending at all - `a + b + c` is
+    # `(a + b) + c` - and sits at under a third of the 3,750 links the
+    # passes after the parser overflowed on; `&&`, `elsif`, `case` and
+    # unary chains went further. The deepest real code measured, every file
+    # of src/, bench/, samples/, spec/ and the other library's src/, was 23
+    # levels of descent (src/std/yaml.iyi) and a tree 39 deep.
+    NESTING_LIMIT =  128
+    DEPTH_LIMIT   = 1000
+
+    # One level of the parser's descent, refused past `NESTING_LIMIT`. Not
+    # restored by an `ensure`: a parse that raises is not resumed, and an
+    # `ensure` here would be one more re-raise per level on the way out.
+    private def iyi_nest(&)
+      if (@iyi_nesting += 1) > NESTING_LIMIT
+        raise "nesting deeper than #{NESTING_LIMIT} levels: the compiler reads no deeper. Name an inner part with a local variable or a method of its own", @token
+      end
+      value = yield
+      @iyi_nesting -= 1
+      value
+    end
+
+    # The tree's depth, refused past `DEPTH_LIMIT` (see `NESTING_LIMIT`).
+    # One walk of what was read, since a chain's depth is in no single
+    # loop that built it: twenty `(` around chains of 60 is 1,200 deep.
+    private def iyi_check_depth(node : ASTNode) : ASTNode
+      check = DepthCheck.new(DEPTH_LIMIT)
+      node.accept check
+      if location = check.too_deep
+        raise "an expression nested deeper than #{DEPTH_LIMIT} levels: the compiler reads no deeper. A chain of operators or calls nests one level per link; name a part of it with a local variable",
+          location.line_number, location.column_number, location.filename || @filename
+      end
+      node
+    end
+
+    # Stops descending at the first node past the limit and keeps the
+    # location nearest it.
+    private class DepthCheck < Visitor
+      getter too_deep : Location? = nil
+      @depth = 0
+      @location : Location? = nil
+
+      def initialize(@limit : Int32)
+      end
+
+      def visit_any(node)
+        return false if @too_deep
+        @location = node.location || @location
+        if @depth == @limit
+          @too_deep = @location || Location.new(nil, 1, 1)
+          return false
+        end
+        @depth += 1
+        true
+      end
+
+      def visit(node : ASTNode)
+        true
+      end
+
+      def end_visit_any(node)
+        @depth -= 1
+      end
     end
 
     def wants_doc=(@wants_doc : Bool)
@@ -121,7 +202,7 @@ module Iyi
       next_token_skip_statement_end
 
       nodes = parse_expressions.tap { iyi_check_eof }
-      apply_module_header(nodes)
+      apply_module_header(iyi_check_depth(nodes))
     end
 
     # iyi: what is left once every top-level expression is read is a
@@ -332,11 +413,11 @@ module Iyi
       when .normal?
         parse
       when .lib?
-        parse_lib_body
+        iyi_check_depth parse_lib_body
       when .lib_struct_or_union?
-        parse_c_struct_or_union_body
+        iyi_check_depth parse_c_struct_or_union_body
       else
-        parse_enum_body
+        iyi_check_depth parse_enum_body
       end
     end
 
@@ -637,7 +718,7 @@ module Iyi
 
             atomic.name = "[]="
             atomic.name_size = 0
-            arg = parse_op_assign_no_control
+            arg = iyi_nest { parse_op_assign_no_control }
             atomic.args << arg
             atomic.end_location = arg.end_location
           else
@@ -687,11 +768,11 @@ module Iyi
               else
                 if atomic.is_a?(Var) && !var?(atomic.name)
                   @assigned_vars.push atomic.name
-                  value = parse_op_assign_no_control
+                  value = iyi_nest { parse_op_assign_no_control }
                   @assigned_vars.pop
                   value
                 else
-                  parse_op_assign_no_control
+                  iyi_nest { parse_op_assign_no_control }
                 end
               end
             end
@@ -725,7 +806,7 @@ module Iyi
           push_var atomic
           method = @token.type.to_s.byte_slice(0, @token.to_s.bytesize - 1)
           next_token_skip_space_or_newline
-          value = parse_op_assign_no_control
+          value = iyi_nest { parse_op_assign_no_control }
           atomic = OpAssign.new(atomic, method, value).at(location)
           atomic.name_location = name_location
         else
@@ -748,13 +829,13 @@ module Iyi
         next_token_skip_space_or_newline
 
         @no_type_declaration += 1
-        true_val = parse_question_colon
+        true_val = iyi_nest { parse_question_colon }
 
         skip_space_or_newline
         check :OP_COLON
         next_token_skip_space_or_newline
 
-        false_val = parse_question_colon
+        false_val = iyi_nest { parse_question_colon }
         @no_type_declaration -= 1
 
         cond = If.new(cond, true_val, false_val, ternary: true).at(cond).at_end(false_val)
@@ -820,7 +901,7 @@ module Iyi
 
             slash_is_regex!
             next_token_skip_space_or_newline
-            right = parse_{{(right_associative ? name : next_operator).id}}
+            right = {% if right_associative %} iyi_nest { parse_{{name.id}} } {% else %} parse_{{next_operator.id}} {% end %}
             left = ({{node.id}}).at(location).at_end(right)
             left.name_location = name_location if left.is_a?(Call)
           else
@@ -888,7 +969,7 @@ module Iyi
         iyi_check_detached_bang(nil) if token_type.op_bang?
         next_token_skip_space_or_newline
         check_void_expression_keyword
-        arg = parse_prefix
+        arg = iyi_nest { parse_prefix }
         # iyi: a unary operator reaches across a newline for its operand, so
         # a stray `!` on the line before `module x` read the header as
         # `!(module x ...)` - out of the top level, past the one-module rule,
@@ -1063,7 +1144,7 @@ module Iyi
                   end_location = token_end_location
                   next_token
                 else
-                  arg = parse_op_assign_no_control
+                  arg = iyi_nest { parse_op_assign_no_control }
                   end_location = arg.end_location
                 end
               else
@@ -1372,7 +1453,7 @@ module Iyi
 
     def parse_atomic
       location = @token.location
-      atomic = parse_atomic_without_location
+      atomic = iyi_nest { parse_atomic_without_location }
       atomic.location ||= location
       atomic
     end
@@ -4458,7 +4539,7 @@ module Iyi
           skip_whitespace = check_macro_skip_whitespace
           pieces << exp.at_end(token_end_location)
         when .macro_control_start?
-          macro_control = parse_macro_control(start_location, macro_state)
+          macro_control = iyi_nest { parse_macro_control(start_location, macro_state) }
           if macro_control
             skip_space_or_newline
             check :OP_PERCENT_RCURLY
@@ -5662,7 +5743,7 @@ module Iyi
           a_else = parse_expressions
         when Keyword::ELSIF
           else_location = @token.location
-          a_else = parse_if check_end: false
+          a_else = iyi_nest { parse_if check_end: false }
         end
       end
 
@@ -6526,7 +6607,7 @@ module Iyi
     end
 
     def parse_atomic_type_with_suffix
-      type = parse_atomic_type
+      type = iyi_nest { parse_atomic_type }
       parse_type_suffix type
     end
 

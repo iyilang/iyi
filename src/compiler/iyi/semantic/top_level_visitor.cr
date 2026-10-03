@@ -169,8 +169,24 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         if superclass == @program.enum
           node_superclass.raise "can't inherit Enum. Use the enum keyword to define enums"
         end
+        # iyi: `class MyError < Exception` compiled, and `MyError.new("bad")`
+        # then listed `Reference.new()` as its one overload; the prelude's
+        # `Exception` is the runtime's and has no hierarchy under it.
+        if superclass.same?(@program.types["Exception"]?) && @program.iyi_prelude? && Lexer.iyi_source?(node.location.try(&.filename))
+          node_superclass.raise "iyi has no exception hierarchy: an error is a type of its own, `struct #{node.name}` " \
+                                "with a `def message : String` and `impl Error for #{node.name}`, returned as a member " \
+                                "of the result's union, `Int32 | #{node.name}` (SPEC.md III.1)"
+        end
       else
-        node_superclass.raise "#{superclass} is not a class, it's a #{superclass.type_desc}"
+        message = "#{superclass} is not a class, it's a #{superclass.type_desc}"
+        # iyi: `struct U < Greet` is how the other languages' `class U :
+        # Greet` and `implements` read here, and the sentence stopped at
+        # what Greet is.
+        if superclass.trait?
+          message += ". A type implements a trait after its declaration: `impl #{superclass} for #{node.name}`, " \
+                     "holding the trait's methods (SPEC.md R-3)"
+        end
+        node_superclass.raise message
       end
     else
       superclass = node.struct? ? program.struct : program.reference
@@ -319,6 +335,17 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         # path names. The sentence was "not imported here ... write `import
         # util::{name}`" under the very `import util::{twice}` it was about.
         if @program.iyi_imported_files.includes?(file)
+          # iyi: a file with another header was told to "write `module
+          # app/wrong` at its top", above the header it had, which is a
+          # second header and the next error.
+          text = @program.iyi_file_override(file) || (File.read(file) if File.file?(file))
+          line = text.try { |source| source.each_line.map(&.strip).find(&.starts_with?("module ")) }
+          header = line.try { |found| found.split[1]? }
+          if header && header != written
+            node.raise "`#{written}` is imported, but #{Iyi.relative_filename(file)} declares `module #{header}`: " \
+                       "change that line to `module #{written}`, or move the file to `#{header}.iyi` and import " \
+                       "that path (SPEC.md R-1)"
+          end
           node.raise "`#{written}` is imported, but #{Iyi.relative_filename(file)} " \
                      "has no `module #{written}` header, and an import's names are " \
                      "the `pub` ones under it: write `module #{written}` at its top " \
@@ -648,6 +675,27 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     type.supertraits = resolved
   end
 
+  # iyi: `impl Greet for W` above `struct W` was "undefined constant W",
+  # which sent the reader looking for an import, with the type a few lines
+  # down. The file's text is asked, as written, for the declaration.
+  private def check_impl_target_declared_below(node : ImplDef) : Nil
+    target = node.target
+    return unless target.is_a?(Path) && target.names.size == 1 && !target.global? && !current_type.lookup_type?(target)
+    return unless (location = target.location) && (filename = location.filename).is_a?(String) && File.file?(filename)
+    name = target.names.first
+    File.read_lines(filename).each_with_index(1) do |line, number|
+      next if number <= location.line_number
+      declaration = line.lstrip.lchop("pub ").lchop("abstract ")
+      {"struct ", "class ", "enum "}.each do |keyword|
+        next unless declaration.starts_with?("#{keyword}#{name}")
+        after = declaration[keyword.size + name.size]?
+        next if after && (after.alphanumeric? || after == '_')
+        target.raise "undefined constant #{name}\n`#{name}` is declared below, at line #{number}, and a file's " \
+                     "declarations are read in order: an `impl` comes after the type it implements"
+      end
+    end
+  end
+
   # iyi: `impl Greet for User ... end`, `impl Greet for Box(T) forall T`
   #
   # Desugars to reopening the target type, defining the methods on it, and
@@ -682,6 +730,7 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
         resolve_generic_impl_target(node, type_vars)
       else
         check_generic_impl_without_forall(node)
+        check_impl_target_declared_below(node)
         lookup_type(node.target)
       end
 

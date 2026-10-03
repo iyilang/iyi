@@ -451,6 +451,19 @@ describe "Semantic: iyi" do
       assert_error "let x = 1", "There is no `let`: a variable is `x = 1`"
     end
 
+    it "names a variable for const and mut, double quotes for a Char, and forall for a lone T" do
+      assert_error "const x = 5", "There is no `const`: a variable is `x = 1`, and a constant is an upper-case name"
+      assert_error "let mut x = 5", "There is no `mut`: a variable is `x = 1`, and any variable can be assigned again"
+      assert_error %(class Strs\n  def join(sep : String) : String\n    sep\n  end\nend\nStrs.new.join(',')), %(Did you mean ","? `join` takes a `String`, written in double quotes)
+      assert_error "struct U\nend\ndef hello(x : T) : String\n  \"\"\nend\nhello(U.new)", "`T` names no type here: a method's own type parameter is introduced by `forall`"
+    end
+
+    it "names the shadowed type, a trait superclass and an Exception subclass" do
+      assert_error "struct Box\n  def size : Int32\n    1\n  end\nend\nmodule Inner\n  struct Box\n    def twice : Int32\n      size * 2\n    end\n  end\nend\nInner::Box.new.twice",
+        "`Inner::Box` is a new type, declared at x.iyi:7, that shadows `::Box`, and `size` is on `::Box`", filename: "x.iyi"
+      assert_error "trait Greet\n  abstract def greet : String\nend\nstruct U < Greet\nend", "it's a trait. A type implements a trait after its declaration: `impl Greet for U`"
+    end
+
     it "names size, to_s and nil for len, str and null" do
       assert_error "len(1)", "`.size` is the spelling here"
       assert_error "str(1)", "`.to_s` is the spelling here"

@@ -79,6 +79,13 @@ class Iyi::Path
       self.raise("undefined constant #{self}\n#{hint}")
     end
 
+    # iyi: `App::Util.helper(1)` with no `import app/util` was "undefined
+    # constant App::Util", with the module a file away under the very path
+    # the name maps to.
+    if names.size >= 2 && Iyi::Lexer.iyi_source?(location.try(&.filename)) && (hint = iyi_unimported_module_hint(type.program))
+      self.raise("undefined constant #{self}\n#{hint}")
+    end
+
     # iyi: Crystal's name for a thing the prelude spells otherwise, for
     # someone arriving with Crystal's spelling in their fingers. First,
     # because where the table has a sentence it says more than the scan
@@ -103,6 +110,16 @@ class Iyi::Path
     end
 
     self.raise("undefined constant #{self}")
+  end
+
+  # The module a qualified name maps to, `app/util` for `App::Util` (IV.6
+  # #6), when that file is where an import would find it: beside the
+  # entry, under the root its header names, or on `IYI_PATH`.
+  private def iyi_unimported_module_hint(program) : String?
+    written = names.map(&.underscore).join('/')
+    roots = [program.iyi_project_root || program.filename.try { |entry| File.dirname(entry) }, program.iyi_header_root]
+    return nil unless (roots.compact + program.iyi_path.entries).any? { |root| File.file?(File.join(root, "#{written}.iyi")) }
+    "`#{self}` is module `#{written}`, which this file has not imported: `import #{written}` (SPEC.md R-2b)"
   end
 
   # The qualified name of the one package module called *name*, when it
@@ -243,6 +260,12 @@ module Iyi
     "spawn"   => "`spawn` is a group's: `group do |g| g.spawn { ... } end` (SPEC.md III.4). A task has a boundary, and the group is it.",
     "let"     => "There is no `let`: a variable is `x = 1`, and its type is the value's.",
     "var"     => "There is no `var`: a variable is `x = 1`, and its type is the value's.",
+    # `const x = 5`, the line TypeScript writes most, was "undefined method
+    # 'const'" with nothing after it: the parser names `const MAX = 5` and
+    # leaves a lower-case name to the call. `let mut x` stopped at `mut`.
+    "const"   => "There is no `const`: a variable is `x = 1`, and a constant is an upper-case name, `MAX = 1`.",
+    "val"     => "There is no `val`: a variable is `x = 1`, and a constant is an upper-case name, `MAX = 1`.",
+    "mut"     => "There is no `mut`: a variable is `x = 1`, and any variable can be assigned again.",
     "elif"    => "`elsif` is the spelling here.",
     "elseif"  => "`elsif` is the spelling here.",
     "println" => "`puts` is the spelling here; it ends the line.",
@@ -644,14 +667,19 @@ class Iyi::Call
     # `index`, `chomp` — the prelude takes a `Char` and there is exactly
     # one right spelling. Say it, and hand it over as an edit spanning the
     # literal, so `iyi fix` and the editor's quickfix apply it without a
-    # round (AI_FIRST.md §5, the fourth run).
+    # round (AI_FIRST.md §5, the fourth run). The other direction is the
+    # same guess learned from it: `xs.join(',')` and `s.includes?('a')`
+    # were "expected argument #1 ... to be String, not Char" and no edit.
     char_fix = nil
     char_span = nil
-    if arg.is_a?(StringLiteral) && arg.value.size == 1 && expected_types.size == 1 && expected_types.first.is_a?(CharType)
+    sole = expected_types.first if expected_types.size == 1
+    if arg.is_a?(StringLiteral) && arg.value.size == 1 && sole.is_a?(CharType)
       char_fix = arg.value[0].inspect
-      if (from = arg.location) && (to = arg.end_location) && from.line_number == to.line_number
-        char_span = to.column_number - from.column_number + 1
-      end
+    elsif arg.is_a?(CharLiteral) && sole && sole == program.string
+      char_fix = arg.value.to_s.inspect
+    end
+    if char_fix && arg && (from = arg.location) && (to = arg.end_location) && from.line_number == to.line_number
+      char_span = to.column_number - from.column_number + 1
     end
 
     raise_no_overload_matches(arg || self, defs, arg_types, inner_exception, suggestion: char_span ? char_fix : nil, size: char_span) do |str|
@@ -681,7 +709,12 @@ class Iyi::Call
         to_sentence(str, expected_types, " or ")
         str << ", not #{actual_type.devirtualize}"
 
-        if char_fix
+        if char_fix && arg.is_a?(CharLiteral)
+          str.puts
+          str.puts
+          str << "Did you mean #{char_fix}? `#{def_name}` takes a `String`, written in double quotes; "
+          str << "single quotes make a `Char`"
+        elsif char_fix
           str.puts
           str.puts
           str << "Did you mean #{char_fix}? A one-character string is still a "
@@ -1253,6 +1286,51 @@ class Iyi::Call
     "`#{exporting.first}::#{name}` (SPEC.md R-2b)"
   end
 
+  # iyi: `class String` in `module app/main` declares `App::Main::String`, a
+  # type of the module's own, and `String` in that file means it from then
+  # on. Measured before: `upcase + "!"` in its `def shout` was "undefined
+  # local variable or method 'upcase' for App::Main::String", `self * 2`
+  # in a `struct Int32` was "undefined method '*' for App::Main::Int32",
+  # and a `struct Thing` beside `import app/util::*` was "undefined local
+  # variable or method 'n' for Thing": each named a type the program did
+  # not know it had declared. Said where one of two types with one name
+  # has the method and the other is the receiver, and only of a type that
+  # declares no instance variable - a reopen's shape, not a type's.
+  private def iyi_shadowing_type_hint(def_name : String, owner) : String?
+    meta = owner.is_a?(MetaclassType)
+    type = meta ? owner.instance_type : owner
+    return nil unless type.is_a?(NamedType)
+    has = ->(other : Type) { !other.same?(type) && !(meta ? other.metaclass : other).lookup_defs(def_name).empty? }
+    # Declared in a file of the program's: the compiler's own types and the
+    # macro-made integers have no such file, the library's are under it.
+    declared = ->(other : Type) do
+      file = other.locations.try(&.first?).try(&.filename)
+      file.is_a?(String) && !Iyi.library_source?(file)
+    end
+    others = [] of Type
+    program.types[type.name]?.try { |other| others << other }
+    iyi_each_unit(program) { |mod| mod.types?.try(&.[type.name]?).try { |other| others << other } }
+    if declared.call(type)
+      shadow = type
+      shadowed = others.find { |other| has.call(other) }
+    else
+      shadow = others.find { |other| has.call(other) && declared.call(other) }
+      shadowed = type
+    end
+    return nil unless shadow.is_a?(InstanceVarContainer) && shadowed && shadow.all_instance_vars.empty?
+    return nil unless (location = shadow.locations.try(&.first?)) && (file = location.filename).is_a?(String)
+    top = shadowed.namespace.is_a?(Program)
+    shown = top ? "::#{type.name}" : shadowed.to_s
+    add = if top
+            "A method is added to `#{shown}` with `#{shadow.type_desc} #{shown}`"
+          else
+            "Another module's type is closed (SPEC.md R-3): a method for it is a `def` taking one, " \
+            "or a trait of this module's with `impl Trait for #{type.name}`"
+          end
+    "`#{shadow}` is a new type, declared at #{::Path[file].basename}:#{location.line_number}, that shadows " \
+    "`#{shown}`, and `#{def_name}` is on `#{shadow.same?(type) ? shown : shadow}`. #{add}."
+  end
+
   # The written form of a unit's path: `App::Greeter` is `app/greeter`, which
   # is what an import is spelled with and what the file is called.
   private def iyi_written_path(type : Type) : String
@@ -1543,10 +1621,14 @@ class Iyi::Call
       if !obj && !similar_name && (arrival = Iyi::IYI_ARRIVAL_CALL_HINTS[def_name]?)
         msg << '\n' << arrival
       end
-      # iyi: the method itself, on this number, one import away: said
-      # before a spelling that is merely near it (`to_u32` is not a typo of
-      # `to_i32`) and before an arrival note meant for another receiver.
-      if obj && (numbers = iyi_std_number_hint(program, def_name, owner))
+      # A type that shadows another of its name comes first: every note
+      # below is about the receiver the call reached, which is the wrong one.
+      if shadowing = iyi_shadowing_type_hint(def_name, owner)
+        msg << '\n' << shadowing
+        # iyi: the method itself, on this number, one import away: said
+        # before a spelling that is merely near it (`to_u32` is not a typo of
+        # `to_i32`) and before an arrival note meant for another receiver.
+      elsif obj && (numbers = iyi_std_number_hint(program, def_name, owner))
         msg << '\n' << numbers
       elsif obj && !similar_name && (key = iyi_arrival_method_key(def_name, owner))
         fits = case key

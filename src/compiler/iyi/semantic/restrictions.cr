@@ -929,9 +929,17 @@ module Iyi
 
       if had_ident_type
         other.raise "undefined constant #{other}"
-      else
-        other.raise_undefined_constant(context.defining_type)
       end
+      # iyi: `def f(x : T)` with no `forall` was "undefined constant T" with
+      # "Did you mean 'U'?" carried as the edit: a type parameter replaced
+      # by whichever one-letter type the program had. A name shaped like a
+      # type parameter is told how one is introduced.
+      name = other.names.first
+      if other.names.size == 1 && !other.global? && name.size <= 2 && name[0].ascii_uppercase? && name[1..].each_char.all?(&.ascii_number?)
+        other.raise "undefined constant #{other}\n`#{name}` names no type here: a method's own type parameter is introduced " \
+                    "by `forall` after the return type, `def f(x : #{name}) : #{name} forall #{name}` (SPEC.md II.7)"
+      end
+      other.raise_undefined_constant(context.defining_type)
     end
 
     def restrict(other : Generic, context)

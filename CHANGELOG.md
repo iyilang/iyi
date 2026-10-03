@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- **A type error says which type was meant, and what to write.** Measured
+  with the previous compiler: `class String` in `module app/main` gave
+  "undefined local variable or method 'upcase' for App::Main::String"
+  with no word that a new type had been declared, and `struct Int32`
+  "undefined method '*' for App::Main::Int32"; the error now names the
+  declaration, the type it shadows and `struct ::Int32`. `xs.join(',')`
+  and `s.includes?('a')` had no did-you-mean, where `split(",")` did;
+  both now carry `","` as the edit. `const x = 5` and `let mut x = 5`
+  were "undefined method 'const'" and "undefined method 'mut'" alone; a
+  lone `x : T` was "Did you mean 'U'?"; `impl Greet for W` above `struct
+  W` was "undefined constant W" and now gives the line it is declared on;
+  `struct U < Greet` stopped at "it's a trait"; `App::Util` without its
+  import was "undefined constant App::Util"; a file whose header is
+  `module app/other` was told to write `module app/wrong` above it; and
+  `class MyError < Exception` compiled, then listed `Reference.new()` for
+  `MyError.new("bad")`. Each now names the iyi spelling.
+  `spec/compiler/semantic/iyi_spec.cr` checks them; the old compiler gave
+  the answers quoted.
+
 - **The parser names the iyi spelling for import paths, braced bodies and
   impl headers.** Measured with the previous compiler: `import
   app/util.iyi` was told to add `require app/util.iyi v1.2.3` to

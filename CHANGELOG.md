@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **`iyi doc IO` names what `IO` is an alias of, and prints what it
+  can do.** An alias had no branch of its own: stdout was `alias IO` and
+  `end`, exit 0, with neither `IyiIO` nor one method. It prints `alias IO
+  = IyiIO`, then IyiIO's surface (`close`, `flush`, `gets`, `puts` ...).
+  `bench/packages_resolve.sh` checks the line and `flush`; the old verb
+  printed `alias IO` and `end`.
+
 - **`iyi doc` prints a generic prelude type's parameters once.** The
   type's own name already carries them, and a second list followed:
   `class Array(T)(T)`, `class Hash(K, V)(K, V)`, `tuple Tuple(*T)(T) <

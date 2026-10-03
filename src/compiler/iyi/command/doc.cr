@@ -228,6 +228,18 @@ class Iyi::Command
   private def doc_prelude_type(name : String) : Nil
     program = doc_prelude_program
     type = program.lookup_path(name.split("::"))
+    # An alias is another name for its target, and what it can do is what
+    # the target can: `iyi doc IO` printed `alias IO` and `end`, naming
+    # neither `IyiIO` nor one thing an IO does. The alias line comes
+    # first, then the target's surface.
+    if type.is_a?(AliasType)
+      target = type.remove_alias
+      if doc = type.doc
+        IyiMod.write_doc STDOUT, doc, ""
+      end
+      STDOUT << "alias " << type << " = " << target << "\n\n"
+      type = target
+    end
     unless type.is_a?(Type)
       abort! "the prelude has no type #{name}", :USAGE_ERROR
     end

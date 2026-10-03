@@ -448,6 +448,12 @@ grep -q 'the prelude has no type Nope' nope.txt || { echo "the unknown type was 
 grep -q '^class String' index.txt || { echo "the index lacks String:"; cat index.txt; exit 1; }
 grep -q '^class Hash(K, V)' index.txt || { echo "the index lacks Hash(K, V):"; cat index.txt; exit 1; }
 grep -q 'Regex\|Int128\|IyiHeap' index.txt && { echo "the index lists what the prelude does not offer:"; cat index.txt; exit 1; }
+# An alias is its target's other name, and documents as the target does:
+# `iyi doc IO` printed `alias IO` and `end`, with neither `IyiIO` nor one
+# thing an IO can do.
+"$IYI" doc IO > io-doc.txt 2>&1 || { cat io-doc.txt; exit 1; }
+grep -qx 'alias IO = IyiIO' io-doc.txt || { echo "IO's target is not named:"; cat io-doc.txt; exit 1; }
+grep -q '^  def flush' io-doc.txt || { echo "IO's surface is missing:"; cat io-doc.txt; exit 1; }
 
 # ── 10b. `iyi doc app/greeter`: the spelling the language is built on ─────
 # A module's path *is* its file's path (R-1, IV.6), and it is what

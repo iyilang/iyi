@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A program whose own threads hold every core no longer pays
+  seconds for its first collection.** The first collection starts the
+  mark helpers, and it waited for each to reach its park, which a new
+  thread does only once the scheduler gives it a core: beside 24
+  threads computing on twelve cores, 300,000 small allocations on the
+  main thread took 1.4 to 4.3 s, against 26 to 387 ms with no helpers.
+  Each helper is handed the generation it waits past when it is made,
+  so one that runs late joins the next mark as a helper woken late
+  does, and nothing waits for it to run: 53 to 125 ms, beside 30 to
+  112 with no helpers. `bench/concurrent_mark.sh` checks it on Windows,
+  the run with helpers held to four times the run without and 100 ms;
+  the old runtime took 2,334 ms against a bound of 184.
+
 - **Threads past the core count share the runtime lock, and are
   stopped, without waiting out each other's timeslices.** The lock only
   spun, so a holder preempted with it held every spinner up for a whole

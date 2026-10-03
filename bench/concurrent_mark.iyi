@@ -242,6 +242,24 @@
     holder
   end
 
+  # The stack under the caller's frame zeroed, where `stray_holder` and the
+  # barrier ran: the next collection's frames reuse it, and a word of theirs
+  # not yet written is scanned as it stands. A payload pointer `stray_holder`
+  # left there kept the payload alive through that scan, and the stray
+  # check's failure proof stopped failing, three runs of three, when the
+  # runtime's lock and its helpers' start changed the collector's frames.
+  @[NoInline]
+  def scrub_stack : Nil
+    pad = uninitialized UInt64[2048]
+    base = pointerof(pad).as(UInt64*)
+    index = 0
+    while index < 2048
+      base[index] = 0_u64
+      index = index + 1
+    end
+    asm("" :: "r"(base) : "memory" : "volatile")
+  end
+
   def note_stops : Nil
     Stops.note
   end
@@ -314,6 +332,7 @@
   IyiHeap.enter_barrier
   IyiMark.barrier(cell.address, 1_u64)
   IyiHeap.leave_barrier
+  scrub_stack
   IyiMark.collect
   strayed = stray.payload
   fail("stray: the holder lost its payload") unless strayed.is_a?(Payload)

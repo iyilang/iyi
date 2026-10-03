@@ -4,7 +4,7 @@
 #
 #     bash bench/concurrent_mark.sh
 #
-# Nine steps, the last five failure proofs:
+# Ten steps, the last six failure proofs:
 #   1. The program holds, release: twenty-four rounds or more each move a
 #      payload out of an unmarked chain into an already-marked holder, at
 #      least one of them under a running mark, and every payload is intact
@@ -19,7 +19,10 @@
 #      and nothing else, and the longest gap any of them saw. A pause is
 #      only the runtime's where the machine gives its threads their cores:
 #      on a twelve-core Windows VM this read 23 to 64 ms, the length of
-#      the longest second stops measured there.
+#      the longest second stops measured there. And the first collections
+#      beside twice the cores' threads computing: on Windows, the main
+#      thread's allocations take no more than four times what they take
+#      with no helpers, and 100 ms.
 #   4. Buffers of references grown by `realloc`, ten runs of three hundred
 #      rounds, plain: every referent intact in every run. The old buffer
 #      is freed while a mark may have it queued.
@@ -38,6 +41,8 @@
 #      program's wakes past a millisecond - exits 1.
 #   9. Failure proof, on Windows: the cap on the helpers beside a busy
 #      program removed, and the share check exits 1.
+#  10. Failure proof, on Windows: the first collection's wait for every
+#      helper to reach its park put back, and the crowded check fires.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -140,6 +145,73 @@ if ! "$IYI" build --release machine.iyi -o machine > build-machine.log 2>&1; the
 fi
 timeout -k 5 60 ./machine > machine.txt 2>&1 || { cat machine.txt; exit 1; }
 grep '^machine:' machine.txt | sed 's/^/  /'
+
+# The first collection beside threads of the program's that hold every
+# core. It starts the helpers, and it waited for each to reach its park,
+# which a new thread does only once the scheduler gives it a core: beside
+# 24 threads computing on twelve cores, 300,000 small allocations on the
+# main thread took 1.8 to 4.0 s, against 8 to 212 ms with no helpers. A
+# helper is handed the generation it waits past now, and nothing waits for
+# it to run: 11 to 77 ms. Three runs of each, the best of each compared;
+# asserted on Windows, where it was measured, and printed everywhere.
+cat > crowded.iyi <<'IYI'
+module crowded
+
+class Flag
+  getter stop : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+  end
+end
+
+def spin(flag : Flag) : Nil
+  x = 0_i64
+  while flag.stop.get == 0_i64
+    x = x &+ 1
+  end
+end
+
+IyiMark.workers = 0_u64 if Program.args.size > 0 && Program.args[0] == "alone"
+flag = Flag.new
+spinners = [] of IyiThread
+(IyiThread.core_count.to_i * 2).times { spinners << IyiThread.start { spin(flag) } }
+started = IyiMark.now_ns
+sum = 0_i64
+300000.times do |i|
+  a = Array(Int32).new(4, i)
+  sum = sum + a[0]
+end
+took = IyiMark.now_ns - started
+flag.stop.set(1_i64)
+spinners.each { |thread| thread.join }
+puts "crowded: #{took // 1000000_u64} ms, #{IyiMark.collections} collections, beside #{spinners.size} threads, #{sum}"
+IYI
+if ! "$IYI" build --release crowded.iyi -o crowded > build-crowded.log 2>&1; then
+  cat build-crowded.log; exit 1
+fi
+# The best of three runs of `./$1 $2` in milliseconds, into `best`.
+crowded_best() {
+  best=""
+  for try in 1 2 3; do
+    timeout -k 5 120 "./$1" $2 > crowded.txt 2>&1 || { cat crowded.txt; exit 1; }
+    ms="$(tr -d '\r' < crowded.txt | sed -n 's/^crowded: \([0-9]*\) ms, [1-9][0-9]* collections, .*$/\1/p')"
+    beside="$(tr -d '\r' < crowded.txt | sed -n 's/^.* beside \([0-9]*\) threads.*$/\1/p')"
+    [ -n "$ms" ] || { echo "no collection, or no answer:"; cat crowded.txt; exit 1; }
+    if [ -z "$best" ] || [ "$ms" -lt "$best" ]; then best="$ms"; fi
+  done
+}
+step "the first collections beside threads computing on every core cost what they cost with no helpers"
+crowded_best crowded alone
+alone="$best"
+crowded_best crowded helped
+helped="$best"
+bound=$((alone * 4 + 100))
+if [ "$PSEP" != ":" ] && [ "$helped" -gt "$bound" ]; then
+  echo "beside $beside threads computing, 300,000 allocations took $helped ms with helpers, past $bound: four times the $alone ms with none, and 100"
+  exit 1
+fi
+echo "  beside $beside threads computing, held to four times the time with no helpers and 100 ms"
 
 # A buffer of references grown by `realloc` frees its old copy, and a mark
 # beside the program may have that copy grayed and queued: it blackened the
@@ -319,6 +391,31 @@ if [ "$code" -ne 1 ] || ! grep -q "^FAIL: share:" greedy.txt; then
   echo "the share check did not fire (exit $code):"; tail -3 greedy.txt; exit 1
 fi
 printf '  exits 1 at "%s"\n' "$(grep -m1 '^FAIL: share:' greedy.txt)"
+
+step "failure proof: a first collection that waits for every helper to reach its park is caught"
+mkdir -p ready/iyi
+cp "$REPO"/src/iyi/*.iyi ready/iyi/
+# The wait put back as it was: each helper counts itself in on a word of
+# the pool, and the helpers' start waits for the count.
+awk '/^      def self\.helper_main\(seen : UInt64\) : Nil$/ { print; main = 1; next }
+  main && /^        w = worker$/ { print; print "        pool_word(512_u64).value.add(1_u64)"; main = 0; counted = 1; next }
+  /^          @@helpers = @@helpers \+ 1_u64$/ { print; made = 1; next }
+  made && /^        end$/ { print; print "        while pool_word(512_u64).value.get < @@helpers"; print "          spin_pause"; print "        end"; made = 0; waited = 1; next }
+  { print } END { if (!counted || !waited) exit 3 }' \
+  "$REPO/src/iyi/prelude.iyi" > ready/iyi/prelude.iyi || { echo "the helpers' start this proof changes is not in the prelude any more"; exit 1; }
+if ! IYI_PATH="$WORK/ready${PSEP}$REPO/src" "$IYI" build --release crowded.iyi -o crowded-ready > build-ready.log 2>&1; then
+  cat build-ready.log; exit 1
+fi
+# Runs with the wait took 291 to 1,223 ms here, against bounds of 140 and
+# 184, and a machine busy elsewhere moves both: five rounds of three, and
+# the first caught is the proof.
+caught=""
+for round in 1 2 3 4 5; do
+  crowded_best crowded-ready helped
+  if [ "$best" -gt "$bound" ]; then caught="$round"; break; fi
+done
+[ -n "$caught" ] || { echo "the crowded check did not fire in five rounds: $best ms with the wait, within $bound"; exit 1; }
+echo "  caught on round $caught: beside $beside threads computing, past four times the time with no helpers and 100 ms"
 
 echo "workdir $WORK"
 echo "concurrent mark: every step held"

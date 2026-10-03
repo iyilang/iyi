@@ -4467,7 +4467,6 @@ require "./file"
       POOL_ACTIVE = 256_u64
       POOL_GENERATION = 320_u64
       POOL_HELPERS_DONE = 384_u64
-      POOL_READY = 512_u64
       # The sweep round (GC_DESIGN.md Stage 8): open after a collection
       # while helpers may claim arenas, closed by the next collection
       # before it stops anything; and how many helper walks are in flight.
@@ -5474,35 +5473,35 @@ require "./file"
         cores > 1_u64 ? cores - 1_u64 : 0_u64
       end
 
-      # Helpers up to `count`, and every one of them at its park before
-      # this returns: a helper that read the generation after it turned
-      # would sleep through the mark, and the collector waits for every
-      # helper to answer a generation it turned.
+      # Helpers up to `count`, each handed the generation as it stands now,
+      # which is the one it waits past: a helper that read it for itself
+      # after a turn would sleep through the mark it was made for, and only
+      # a helper finishes a mark beside the program. Nothing here waits for
+      # a helper to run. It waited for every one to reach its park, and a
+      # new thread waits for a core: beside 24 threads of the program's
+      # computing on twelve cores, the first collection held the allocating
+      # thread 1.6 to 2.0 s that way, where the same allocations took 8 to
+      # 212 ms with no helpers at all.
       def self.start_helpers(count : UInt64) : Nil
         pool
         {% if flag?(:win32) %}
           doorbell
         {% end %}
         while @@helpers < count
-          IyiThread.start_helper(helper_entry, @@helpers)
+          IyiThread.start_helper(helper_entry, pool_word(POOL_GENERATION).value.get)
           @@helpers = @@helpers + 1_u64
-        end
-        while pool_word(POOL_READY).value.get < @@helpers
-          spin_pause
         end
       end
 
       def self.helper_entry : UInt64
-        proc = ->(index : UInt64) { IyiMark.helper_main(index) }
+        proc = ->(seen : UInt64) { IyiMark.helper_main(seen) }
         Pointer(UInt64).new(pointerof(proc).address).value
       end
 
       # A helper's whole life: park on the generation, drain, fold its
       # accounts, count itself done, park again.
-      def self.helper_main(index : UInt64) : Nil
+      def self.helper_main(seen : UInt64) : Nil
         w = worker
-        seen = pool_word(POOL_GENERATION).value.get
-        pool_word(POOL_READY).value.add(1_u64)
         while true
           seen = wait_generation(seen)
           # A permit or nothing: a helper the mark did not ask for parks

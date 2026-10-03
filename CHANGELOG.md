@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **Six programs a module's artifacts could not build now build from
+  them.** A `--release` program linking artifacts was one LLVM module,
+  which hid the symbols an artifact's object code calls by name -
+  `__iyi_raise_overflow` for any `a + b`, type ids, class variables - so
+  50 of 75 such builds failed to link. A def whose body answers fewer
+  union members than its annotation, and a def whose parameter is written
+  as a trait, were emitted under one symbol and asked for under another.
+  An empty method of a generic type travelled as a header and was never
+  defined. `@items = [] of Int32` without a type was refused as code in a
+  type body. And a module whose dispatch over a trait was typed against
+  its definition-typing witness was refused by its consumer. Found by 593
+  generated multi-module programs built from source and from artifacts,
+  whose outputs otherwise all agreed; each has an iyimod spec that failed
+  before.
+
 - **`File.exists?` answers for a file it may not read and does not wait
   on a FIFO,** and `File.touch` no longer empties such a file. `exists?`
   opened the path to read: an unreadable file did not exist, a FIFO

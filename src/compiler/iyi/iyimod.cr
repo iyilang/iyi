@@ -2361,8 +2361,18 @@ module Iyi::IyiMod
     # A body only where one travelled (`MonoBodies`). Indented back under this
     # declaration, because what is stored is the body the author wrote and the
     # indentation it was written at is not a fact about it.
-    body.try &.each_line do |line|
-      io << indent << "  " << line << '\n'
+    #
+    # iyi: an empty one is written `nil`, which is what an empty body
+    # evaluates to. Rendered as nothing it read back as a header -
+    # `DeclarationMarker` tells the two apart by a `Nop` body - so `def
+    # initialize; end` on a generic type was declared and never defined, and
+    # `Stack(Int32).new` failed to link.
+    if body && body.blank?
+      io << indent << "  nil\n"
+    else
+      body.try &.each_line do |line|
+        io << indent << "  " << line << '\n'
+      end
     end
 
     io << indent << "end\n"

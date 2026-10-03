@@ -1587,8 +1587,14 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     when VisibilityModifier
       iyi_type_body_initialiser?(node.exp)
     when Assign
+      # iyi: an instance variable's initialiser is the third. `@items = [] of
+      # Item` runs in every `initialize`, not when the type body is read, and
+      # it travels the way a typed `@items : Array(Item) = [] of Item` does:
+      # in the type's own `initialize` for object code, and beside the field
+      # (`TypeDecl#fields`) where the consumer compiles it. Read as a
+      # statement it refused the module.
       target = node.target
-      !(target.is_a?(Path) || target.is_a?(ClassVar))
+      !(target.is_a?(Path) || target.is_a?(ClassVar) || target.is_a?(InstanceVar))
     else
       if expansion = iyi_expansion(node)
         iyi_type_body_initialiser?(expansion)

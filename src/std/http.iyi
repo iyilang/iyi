@@ -1,8 +1,9 @@
 # HTTP/1.1 over `IyiSocket`, written in iyi: a client, and a server.
 #
 # `HTTP.get`, `head`, `post`, `put`, `delete` and the `request` under
-# them speak `http://` only, to a numeric IPv4 host or `localhost` —
-# the same addresses `IyiSocket` will open. TLS is not in 0.x. A
+# them speak `http://` only, to a numeric IPv4 host, an IPv6 one in
+# brackets (`http://[::1]:8080/`) or `localhost` — the same addresses
+# `IyiSocket` will open. TLS is not in 0.x. A
 # request carries the caller's headers and body; the response's headers
 # are read by name without regard to case, a field on several lines is
 # one field with its values joined by ", ", interim 1xx answers are read

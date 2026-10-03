@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **A module's `forall T : Trait` and `where Elem : Trait` bounds hold
+  when it is read from its artifact.** A signature in the `.iyimod`
+  carried a def's free variables and no bounds, so `mod dump` showed
+  `def render(x : T) : String forall T` and `def shown : String`, and a
+  consumer accepted calls the source build refuses:
+  `Pair.new(Dog.new, Dog.new).shown`, for a `Dog` with a `show` method
+  and no `impl Show`, printed `dog,dog`, and `Pair.new(1.5, 2.5).shown`
+  stopped on `undefined method 'show' for Float64` inside the artifact's
+  own text. A signature carries both kinds of bound (format v56), `mod
+  dump` renders them, and the consumer refuses those calls with the
+  source build's message: `Float64 does not implement Gl::Core::Show,
+  required by `where Elem : Gl::Core::Show` in `shown``.
+  `spec/compiler/iyimod_spec.cr` round-trips and renders both, and
+  `bench/samples_roundtrip.sh`'s `forall` case checks both refusals
+  from an artifact; the old compiler built a `shown` over `Float64` to
+  `undefined method 'show' for Float64`.
+
 - **A subtrait's default may name its supertrait's associated type.**
   `def smallest : Elem` in `trait Sorted : Bag` was "undefined constant
   Elem", though its body could call `Bag`'s `items`. The name is read

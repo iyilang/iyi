@@ -41,9 +41,12 @@ private def signature(name : String,
                       block_parameter = "",
                       free_variables = [] of String,
                       receiver = "",
-                      required = false)
+                      required = false,
+                      free_variable_bounds = [] of {String, String},
+                      where_bounds = [] of {String, String})
   Iyi::IyiMod::Signature.new(name, receiver, parameters, block_parameter,
-    return_type, free_variables, required)
+    return_type, free_variables, required,
+    free_variable_bounds: free_variable_bounds, where_bounds: where_bounds)
 end
 
 private def type_declaration(name : String,
@@ -331,6 +334,26 @@ describe Iyi::IyiMod do
       read[1].required.should be_true
       read[2].receiver.should eq "self"
       read[3].parameters.should eq ["*values : T", "**options"]
+    end
+  end
+
+  # A bound is checked where a call matches (II.6 §3), so a consumer that
+  # has only the artifact needs it as much as the names. The format carried
+  # `forall T` for `forall T : Show` and nothing for `where Elem : Show`, and
+  # a consumer accepted calls the source build refused.
+  it "round-trips and renders a def's bounds" do
+    signatures = [
+      signature("render", ["x : T", "y : U"], "String", free_variables: ["T", "U"],
+        free_variable_bounds: [{"T", "Show"}]),
+      signature("shown", return_type: "String", where_bounds: [{"Elem", "Show"}, {"Key", "Cmp"}]),
+    ]
+
+    with_temporary_file do |path|
+      Iyi::IyiMod.write sample_artifact(exports: signatures), path
+      read = Iyi::IyiMod.read(path).exports.functions
+
+      Iyi::IyiMod.render_signature(read[0]).should eq "def render(x : T, y : U) : String forall T : Show, U"
+      Iyi::IyiMod.render_signature(read[1]).should eq "def shown : String where Elem : Show, Key : Cmp"
     end
   end
 

@@ -59,7 +59,10 @@ module Iyi::IyiMod
   # v55: the header says whether the build that wrote the artifact generated
   # code, because one from `--no-codegen` carries no object code and a build
   # that links against it is refused by name (`Artifact#declarations_only`).
-  FORMAT_VERSION = 55_u32
+  # v56: a signature carries its `forall` and `where` bounds, because a bound
+  # is checked where a call matches and a consumer reading the names alone
+  # accepted calls the source build refused (`Signature#where_bounds`).
+  FORMAT_VERSION = 56_u32
 
   FORMAT = IO::ByteFormat::LittleEndian
 
@@ -507,7 +510,16 @@ module Iyi::IyiMod
     # Text, like `TypeDecl#annotations` beside it and for the same reason: an
     # annotation is source a reader parses back, and translating it through a
     # record would be a second spelling of something that already has one.
-    annotations : Array(String) = [] of String
+    annotations : Array(String) = [] of String,
+    # iyi: `forall T : Show`'s bounds, as `{name, trait}` pairs, and `where
+    # Elem : Show`'s, both as written. A bound is part of the signature (II.7
+    # rule 3), checked where a call matches (II.6 §3), and the artifact
+    # carried the names alone: `def render(x : T) : String forall T` and
+    # `def shown : String`, so a consumer reading the artifact accepted
+    # `Pair.new(Dog.new, Dog.new).shown` for a `Dog` that never implemented
+    # `Show` and printed `dog,dog`, where the source build refused it.
+    free_variable_bounds : Array({String, String}) = [] of {String, String},
+    where_bounds : Array({String, String}) = [] of {String, String}
 
   # A type the module declares: `pub struct`, `pub class`, `pub trait` — and,
   # since the object code started travelling, the ones it does not export.
@@ -2209,7 +2221,16 @@ module Iyi::IyiMod
       visibility: signature_visibility(a_def),
       # As the module wrote them. See `Signature#annotations`.
       annotations: a_def.all_annotations.try(&.map(&.to_s)) || [] of String,
+      free_variable_bounds: bound_pairs(a_def.free_var_bounds),
+      where_bounds: bound_pairs(a_def.where_bounds),
     )
+  end
+
+  # A def's bounds as the `{name, trait}` pairs `Signature` carries, in the
+  # order they were written.
+  private def self.bound_pairs(bounds : Hash(String, ASTNode)?) : Array({String, String})
+    return [] of {String, String} unless bounds
+    bounds.map { |name, bound| {name, bound.to_s} }
   end
 
   # iyi: what a signature carries of a def's visibility - `private`,
@@ -3006,8 +3027,20 @@ module Iyi::IyiMod
 
       free_variables = signature.free_variables
       unless free_variables.empty?
+        bounds = signature.free_variable_bounds.to_h
         io << " forall "
-        free_variables.join(io, ", ")
+        free_variables.join(io, ", ") do |name, inner|
+          inner << name
+          if bound = bounds[name]?
+            inner << " : " << bound
+          end
+        end
+      end
+
+      where_bounds = signature.where_bounds
+      unless where_bounds.empty?
+        io << " where "
+        where_bounds.join(io, ", ") { |(name, bound), inner| inner << name << " : " << bound }
       end
     end
   end
@@ -3404,6 +3437,8 @@ module Iyi::IyiMod
       write_string io, (docs ? signature.doc : "")
       write_string io, signature.visibility
       write_strings io, signature.annotations
+      write_pairs io, signature.free_variable_bounds
+      write_pairs io, signature.where_bounds
     end
   end
 
@@ -3420,7 +3455,7 @@ module Iyi::IyiMod
       visibility = read_string(io)
       annotations = read_strings(io)
       Signature.new(name, receiver, parameters, block_parameter, return_type,
-        free_variables, required, visibility, doc, annotations)
+        free_variables, required, visibility, doc, annotations, read_pairs(io), read_pairs(io))
     end
   end
 

@@ -261,7 +261,8 @@ class Iyi::Command
     return false if old.required || wide.required
     return false unless old.name == wide.name && old.receiver == wide.receiver && old.visibility == wide.visibility &&
                         old.block_parameter == wide.block_parameter && old.return_type == wide.return_type &&
-                        old.free_variables == wide.free_variables
+                        old.free_variables == wide.free_variables &&
+                        old.free_variable_bounds == wide.free_variable_bounds && old.where_bounds == wide.where_bounds
     kept = old.parameters.size
     return false unless wide.parameters.size > kept && wide.parameters[0, kept] == old.parameters
     wide.parameters[kept..].all? { |parameter| parameter.starts_with?('*') || parameter.includes?(" = ") }

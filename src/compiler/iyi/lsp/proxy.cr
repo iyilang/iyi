@@ -349,13 +349,63 @@ module Iyi::Lsp
       # gets the protocol's refusal rather than silence. `result` or
       # `error` is what tells the two apart.
       answering = table ? (table.has_key?("result") || table.has_key?("error")) : false
+      # The client answering the proxy's own request (`watch_files`): the
+      # worker asked nothing, and is not told.
+      return if answering && id.try(&.as_s?).try(&.starts_with?(PRIVATE_ID))
       post(body, id, request: !answering)
 
       case method
-      when "initialize"  then @initialize_frame = body
-      when "initialized" then @initialized_frame = body
-      when "shutdown"    then @shutdown_frame = body
+      when "initialize" then @initialize_frame = body
+      when "initialized"
+        @initialized_frame = body
+        watch_files
+      when "shutdown" then @shutdown_frame = body
       end
+    end
+
+    # iyi: asks the client to say when a file a verdict reads changes on
+    # disk, where it can be asked (dynamic registration, LSP 3.17). A
+    # module an open buffer imports changes under it - `git checkout`, a
+    # rename, another process's write - and without the notification an
+    # editor that only listens kept the verdict the buffer last had.
+    # Asked here and once: a worker is replaced mid-session and handed the
+    # handshake again, and each successor registering would leave the
+    # client a watcher per worker.
+    private def watch_files : Nil
+      frame = @initialize_frame
+      return unless frame
+      dynamic = parse(frame).try(&.dig?("params", "capabilities", "workspace", "didChangeWatchedFiles", "dynamicRegistration")).try(&.as_bool?)
+      return unless dynamic
+      @outbox.send(JSON.build do |json|
+        json.object do
+          json.field "jsonrpc", "2.0"
+          json.field "id", private_id
+          json.field "method", "client/registerCapability"
+          json.field "params" do
+            json.object do
+              json.field "registrations" do
+                json.array do
+                  json.object do
+                    json.field "id", "iyi/watched-files"
+                    json.field "method", "workspace/didChangeWatchedFiles"
+                    json.field "registerOptions" do
+                      json.object do
+                        json.field "watchers" do
+                          json.array do
+                            {"**/*.iyi", "**/iyi.mod", "**/iyi.sum"}.each do |glob|
+                              json.object { json.field "globPattern", glob }
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end.to_slice)
     end
 
     # Take whatever the client has already sent, so a burst can be seen

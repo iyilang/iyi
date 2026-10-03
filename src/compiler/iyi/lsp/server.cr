@@ -14,6 +14,8 @@
 #   textDocument/didOpen · didChange · didSave · didClose — incremental
 #     sync; every change publishes diagnostics from a real compile of the
 #     buffer, unsaved and half-broken included
+#   workspace/didChangeWatchedFiles — a file changed on disk republishes
+#     the open verdicts that read it (`Proxy` registers the watcher)
 #   textDocument/hover          — the name's type, the def's signature
 #     and doc comment
 #   textDocument/definition     — where the call or type is defined
@@ -495,12 +497,15 @@ module Iyi::Lsp
         @documents.delete(uri)
         @versions.delete(uri)
         @published.delete(uri)
+        @watched_ids.delete(uri)
         # Not while the file is open under another spelling of it: the
         # analysis is kept by path, and closing one spelling dropped the
         # other's last good result - completion and hover went empty in the
         # buffer still open.
         closed = path_of(uri)
         @analysis.close(closed) unless @documents.each_key.any? { |open| same_path?(path_of(open), closed) }
+      when "workspace/didChangeWatchedFiles"
+        on_watched_files_changed
       when "textDocument/hover"
         on_hover(id.not_nil!, params.not_nil!)
       when "textDocument/definition"
@@ -875,6 +880,28 @@ module Iyi::Lsp
             end
           end
         end
+      end
+    end
+
+    # `workspace/didChangeWatchedFiles`: files changed on disk, which an
+    # open buffer's verdict may read - a module it imports, the manifest.
+    # Each open buffer whose `result_ids` fold moved since the last such
+    # notification is published again; an open buffer's verdict was
+    # published on its own edits only, so a module it imports deleted or
+    # renamed on disk left the editor showing the verdict it had. With no
+    # workspace root the fold sees no disk, and every open buffer is
+    # published.
+    @watched_ids = {} of String => String
+
+    private def on_watched_files_changed : Nil
+      ids = result_ids
+      @documents.each_key do |uri|
+        result_id = ids[path_of(uri)]?
+        unless @roots.empty? || result_id.nil?
+          next if @watched_ids[uri]? == result_id
+          @watched_ids[uri] = result_id
+        end
+        publish_diagnostics(uri)
       end
     end
 

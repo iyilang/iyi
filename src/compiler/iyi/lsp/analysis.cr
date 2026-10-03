@@ -59,25 +59,48 @@ module Iyi::Lsp
     KEEP = 8
 
     # The last compile, keyed by exactly what determines it: the path,
-    # the buffer, and the sibling buffers. One keystroke triggers
-    # diagnostics, then often hover, highlight, inlay hints — the same
-    # question compiled four times is the same answer computed once.
-    # This is not incremental state: the key *is* the whole input, so a
-    # hit can never differ from a recompile.
+    # the buffer, the sibling buffers, and the files on disk it read or
+    # looked for (`@memo_disk`). One keystroke triggers diagnostics, then
+    # often hover, highlight, inlay hints — the same question compiled
+    # four times is the same answer computed once. This is not
+    # incremental state: the key *is* the whole input, so a hit can never
+    # differ from a recompile.
+    #
+    # The disk half is checked, not hashed into the key: a stat per file
+    # the compile touched. It was the buffers alone, so an imported module
+    # renamed, deleted or written back on disk - `git checkout`, an
+    # agent's write - left the importer's verdict as it was, pull after
+    # pull, until its own buffer was edited: `name` renamed to `title` in
+    # `geo/b.iyi` answered `[]`, and with `geo/b.iyi` written back, "can't
+    # find module 'geo/b'".
     @memo_key : {String, UInt64, UInt64}?
     @memo : {Compiler::Result?, Array(Diag)}?
+    @memo_disk = [] of {String, UInt64}
+    # What the latest `compile` touched on disk, for `check` to keep.
+    @touched = [] of {String, UInt64}
 
     # Compile one buffer as its own entry, front end only. Returns the
     # typed result and no diagnostics, or nil and what went wrong.
     def check(path : String, text : String, overrides : Hash(String, String)) : {Compiler::Result?, Array(Diag)}
       key = {path, text.hash, overrides.hash}
-      if @memo_key == key && (hit = @memo)
+      if @memo_key == key && (hit = @memo) && @memo_disk.all? { |(file, stamp)| Analysis.disk_stamp(file) == stamp }
         return hit
       end
       answer = compile(path, text, overrides)
       @memo_key = key
       @memo = answer
+      @memo_disk = @touched
       answer
+    end
+
+    # A file on disk as it stands, folded to a number: its size and its
+    # modification time, or zero where it is not there.
+    def self.disk_stamp(file : String) : UInt64
+      info = File.info?(file)
+      return 0_u64 unless info
+      info.size.to_u64! &* 1099511628211_u64 &+ info.modification_time.to_unix_ns.to_u64!
+    rescue File::Error
+      0_u64
     end
 
     # The server's open set, which is what `@last_good` is allowed to
@@ -157,9 +180,18 @@ module Iyi::Lsp
         compiler.iyi_prefers_source = true
       end
 
-      result = compiler.compile(
+      # `compile_configure_program` rather than `compile`, to hand the
+      # program the set it records every module path it asks about in
+      # (`Program#iyi_probes`); the header root `compile` would adopt is
+      # the project root set above.
+      probes = Set(String).new
+      program = nil
+      result = compiler.compile_configure_program(
         Compiler::Source.new(path, text),
-        File.tempname("iyi-lsp", nil))
+        File.tempname("iyi-lsp", nil)) do |configured|
+        configured.iyi_probes = probes
+        program = configured
+      end
       if @open.includes?(path)
         @last_good.delete(path)
         @last_good[path] = result
@@ -181,6 +213,26 @@ module Iyi::Lsp
       {nil, [to_diag(ex, path)]}
     rescue ex : Iyi::Error
       {nil, [Diag.new(1, 1, 0, ex.message.to_s, nil, [] of {String, Int32, Int32, String})]}
+    ensure
+      @touched = touched_by(path, root, program, probes)
+    end
+
+    # Every file a compile of *path* read from disk or looked for there,
+    # each with its stamp now: the modules and library files it required,
+    # every candidate an import was looked for at (found or not, so a
+    # module written into place is seen), and the manifest and sum at the
+    # root. A failed compile counts what it got to. The buffer itself is
+    # the memo key's business.
+    private def touched_by(path : String, root : String?, program : Program?, probes : Set(String)?) : Array({String, UInt64})
+      files = Set(String).new
+      program.try &.requires.each { |file| files << file }
+      probes.try &.each { |file| files << file }
+      if root
+        files << File.join(root, Mod::Installer::MANIFEST)
+        files << File.join(root, Mod::Sum::FILE)
+      end
+      files.delete(path)
+      files.map { |file| {file, Analysis.disk_stamp(file)} }
     end
 
     # The typed result to answer a cursor question from: this buffer's

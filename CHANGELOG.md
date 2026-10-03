@@ -4,6 +4,23 @@
 
 ### Fixed
 
+- **An open file's diagnostics follow the modules it imports when they
+  change on disk.** The server memoised a verdict on the buffers alone,
+  so a module an open buffer imports, renamed, deleted or written back by
+  another process, left every pull answering what the buffer last had:
+  with `name` renamed to `title` in `geo/b.iyi` the pull answered `[]`,
+  with the file deleted still `[]`, and with it written back "can't
+  find module 'geo/b'" until the buffer itself was edited; and
+  `workspace/didChangeWatchedFiles` was not handled at all. A verdict is
+  compiled again now when a file its compile read, or looked for and did
+  not find, has changed size or time; the proxy asks a client that can
+  be asked to watch `**/*.iyi`, `iyi.mod` and `iyi.sum`; and a watched
+  change republishes the open buffers whose imports moved.
+  `bench/lsp_session.py` steps 72a, 72h and 72i check the registration,
+  a pull after a rename, a delete and a restore, and the push after a
+  watched change; the old server registered nothing and answered `[]`,
+  `[]` and `[]`.
+
 - **Two impls answering one method on one type are refused, naming
   both.** Two traits that require a method of the same name could both be
   implemented for a type, and the second impl's method replaced the

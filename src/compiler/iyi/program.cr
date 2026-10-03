@@ -291,6 +291,7 @@ module Iyi
     # edit - a rename in the buffer left the importer's verdict clean.
     # The buffers are the open documents, a handful, so the fold is a scan.
     def iyi_file_override(filename : String) : String?
+      @iyi_probes.try &.<< filename
       overrides = @iyi_file_overrides
       return nil if overrides.empty?
       if text = overrides[filename]?
@@ -302,6 +303,15 @@ module Iyi
       {% end %}
       nil
     end
+
+    # iyi: every path `iyi_file_override` was asked about - a module that
+    # was read, and a candidate the resolver looked for and did not find -
+    # when a tool wants them. `iyi lsp` stamps each and compiles again when
+    # one changes on disk: its verdicts were keyed by the buffers alone, so
+    # an imported module renamed, deleted or written back by another
+    # process left an open file's diagnostics as they were until the
+    # buffer itself was edited. Nil for a build, which records nothing.
+    property iyi_probes : Set(String)? = nil
 
     # iyi: the project root, when a tool knows better than "the entry
     # file's directory". `iyi lsp` derives it from the file's own module

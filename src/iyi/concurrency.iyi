@@ -211,6 +211,10 @@ end
 {% if flag?(:win32) %}
   IYI_POLL_DATA_OFFSET =  0_u64
   IYI_POLL_EVENT_BYTES = 32_i64
+
+  lib LibC
+    fun GetProcAddress(h_module : Void*, proc_name : UInt8*) : Void*
+  end
 {% elsif flag?(:darwin) %}
   # A kevent's fd is its first field (`ident`), so the data offset is 0.
   IYI_POLL_DATA_OFFSET =  0_u64
@@ -1457,10 +1461,20 @@ class IyiScheduler
       end
     end
     fiber.io_direction = direction
-    LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32)
+    port = Pointer(Void).new(pollfd.to_u64)
+    ov = fiber.wait_overlapped
+    # A handle belongs to one port, and each thread has its own. Every
+    # operation associated the handle and ignored the answer, which after
+    # the first is a refusal (87): a socket read on the main thread and
+    # handed to a worker kept its completions on the main thread's port,
+    # and the worker's read waited forever, its deadline with it. The
+    # handle is moved to this thread's port each time instead - a handle
+    # on none refuses the move and is associated - and the move clears the
+    # skip-on-success mode, so the mode follows it: without it, 50 reads
+    # that answered at once left 50 completions that woke the next read.
+    LibC.CreateIoCompletionPort(handle, port, 0_u64, 0_i32) if move_to_port(handle, port, ov) != 0
     LibC.SetFileCompletionNotificationModes(handle, 1_u8)
 
-    ov = fiber.wait_overlapped
     Pointer(UInt64).new(ov.address + 0_u64).value = 0_u64
     Pointer(UInt64).new(ov.address + 8_u64).value = 0_u64
     Pointer(UInt64).new(ov.address + 16_u64).value = 0_u64
@@ -1472,6 +1486,28 @@ class IyiScheduler
   end
 
   {% if flag?(:win32) %}
+    # `NtSetInformationFile`, asked of ntdll once and kept as a proc's two
+    # words: ntdll is in every process, and naming it on the import table
+    # adds a DLL to the floor `bench/concurrency_exercise.sh` reads.
+    @@set_information = Pointer(UInt64).new(0_u64)
+
+    # FileReplaceCompletionInformation (61, Windows 8.1): *handle*'s
+    # completions go to *port* from here on; nonzero for a handle on no
+    # port. *scratch* is the fiber's OVERLAPPED, which holds the
+    # information and the status block for the call and is zeroed after.
+    def self.move_to_port(handle : Void*, port : Void*, scratch : Pointer(UInt8)) : Int32
+      call = @@set_information
+      if call.address == 0_u64
+        call = Pointer(UInt64).malloc(2_u64)
+        call.value = LibC.GetProcAddress(LibC.GetModuleHandleA("ntdll.dll".to_unsafe), "NtSetInformationFile".to_unsafe).address
+        @@set_information = call
+      end
+      Pointer(UInt64).new(scratch.address).value = port.address
+      Pointer(UInt64).new(scratch.address + 8_u64).value = 0_u64
+      set = call.as(Pointer(Proc(Void*, Void*, Void*, UInt32, Int32, Int32))).value
+      set.call(handle, Pointer(Void).new(scratch.address + 16_u64), scratch.as(Void*), 16_u32, 61)
+    end
+
     # A park for standard input's reader thread: off the io list, which is
     # the port's operations, and woken by `IyiStdinReader.delivered`.
     def self.park_stdin_current(ms : Int32) : Nil

@@ -366,6 +366,57 @@ stale_holding = wait_readable(stale_fds[0].to_i32, 300)
 fail("a wait on an empty pipe answered #{stale_quiet}, and then on one holding three bytes #{stale_holding}") unless stale_quiet == false && stale_holding == true
 puts "a wait after a timed-out one found the bytes waiting"
 
+# ── 5d. A handle read on one thread reads on another ────────────────────
+# Windows only: each thread has its own completion port and a handle
+# belongs to one, so a pipe read on the main thread and then on a worker
+# had the worker's completions go to the main thread's port, and its read
+# - deadline and all - waited forever. Fifty bytes already in the pipe
+# answer the worker's first reads at once, which would leave fifty stray
+# completions on its port if moving the handle lost the "skip a completion
+# that answered at once" mode; the late read then woke on one of them.
+{% if flag?(:win32) %}
+  class Handoff
+    @@outcome = Pointer(Atomic(UInt64)).malloc(1_u64)
+
+    def self.outcome : Pointer(Atomic(UInt64))
+      @@outcome
+    end
+  end
+
+  # The worker's half, a def so nothing of the program's is captured:
+  # fifty one-byte reads the pipe already holds, then the late five.
+  def handoff_reads(fd : Int64) : Nil
+    buffer = Pointer(UInt8).malloc(8_u64)
+    ones = 0
+    while ones < 50 && IyiScheduler.read_current(fd, buffer.as(Void*), 1_u64, 3000) == 1_i64
+      ones = ones + 1
+    end
+    late = IyiScheduler.read_current(fd, buffer.as(Void*), 5_u64, 3000)
+    whole = ones == 50 && late == 5_i64 && buffer[0] == 102_u8 && buffer[4] == 108_u8
+    Handoff.outcome.value.set(whole ? 1_u64 : 2_u64)
+  end
+
+  handoff = make_pipe
+  handed = Pointer(UInt8).malloc(64_u64)
+  __iyi_write(handoff[1], "a".to_unsafe.as(Void*), 1_u64)
+  fail("the main thread's read of the pipe to hand over failed") unless iyi_read(handoff[0], handed.as(Void*), 1_u64) == 1_i64
+  __iyi_write(handoff[1], ("0123456789" * 5).to_unsafe.as(Void*), 50_u64)
+  handed_fd = handoff[0]
+  receiver = IyiThread.start { handoff_reads(handed_fd) }
+  sleep(200)
+  __iyi_write(handoff[1], "final".to_unsafe.as(Void*), 5_u64)
+  waited = 0
+  while Handoff.outcome.value.get == 0_u64 && waited < 500
+    sleep(10)
+    waited = waited + 1
+  end
+  handoff_outcome = Handoff.outcome.value.get
+  fail("a pipe read on the main thread and then on a worker hung there for 5 s") if handoff_outcome == 0_u64
+  fail("a pipe handed to a worker thread answered its reads wrongly") unless handoff_outcome == 1_u64
+  receiver.join
+  puts "a pipe read on the main thread was read on a worker, its late bytes too"
+{% end %}
+
 # ── 6. A closed channel drains, then refuses, and wakes the parked ──────
 late = Channel(Int32).new(1)
 closed_saw = ""

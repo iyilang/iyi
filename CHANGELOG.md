@@ -4,6 +4,26 @@
 
 ### Fixed
 
+- **On Windows a handle read on one thread reads on another.** Each
+  thread has its own completion port and a handle belongs to one, and
+  every operation associated the handle and ignored the refusal (error
+  87): a socket read on the main thread and handed to a worker kept its
+  completions on the main thread's port, and the worker's read, 3-second
+  deadline and all, waited until the process was killed. Each operation
+  now moves the handle to the running thread's port
+  (FileReplaceCompletionInformation, Windows 8.1); a handle on no port
+  refuses the move and is associated as before. The move clears the
+  skip-on-success mode, so the mode is set after it: without that, 50
+  reads that answered at once left 50 completions, and the next read
+  woke on one of them with a stale byte. The handoff reads `second`
+  after 154 ms now. `bench/concurrency_exercise.iyi` step 5d reads a
+  pipe on the main thread and then on a worker, fifty bytes that answer
+  at once and five that come 200 ms later; the old association failed it
+  with "a pipe read on the main thread and then on a worker hung there
+  for 5 s". A one-byte loopback ping-pong of 20,000 round trips took
+  648 ms, best of ten, against 610 ms before, on a machine busy enough
+  that the means were 703 and 798 ms.
+
 - **`select` has `when timeout(ms)`, and an arm nobody binds runs its
   body only when its operation happened.** SPEC III.4.6 carries `select`
   over from the other library, and its timeout arm was "undefined method

@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **A `def initialize` in a trait, or in an impl for a lib struct or a
+  metaclass, compiles.** `pub trait Wt` holding a `def initialize` ended
+  `check`, `build` and `vet` in "Missing hash key: Wt (KeyError)" and a
+  stack trace through `type_guess_visitor.cr`, and so did
+  `impl Tq for LibQ::CS` and `impl Tq for Int32.class` with one; the type
+  guesser opened its list of a type's `initialize` methods only for a
+  `class`, `struct` or `module` it visited. The list is opened where an
+  `initialize` is recorded, so a trait's `initialize` is a default method
+  like any other: `impl Wt for B` makes `B.new(1)` and the impl for the lib
+  struct makes `LibQ::CS.new`. `bench/verbs_exercise.sh` runs both ("an
+  initialize in a trait and in an impl for a lib struct makes the value");
+  the old compiler answered the KeyError.
+
 - **A `!` whose error the enclosing signature does not list is reported
   at the `!`.** It was the other library's "method Wrongerr.g must
   return (Int32 | Wrongerr::ParseErr) but it is returning

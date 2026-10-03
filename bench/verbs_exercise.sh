@@ -550,6 +550,17 @@ printf 'module lib/ty\n\npub trait Marked\n  abstract def tag : String\nend\n\ni
 printf 'module main\n\nimport lib/tx::{show}\nimport lib/ty::{mark}\n\nputs show("s")\nputs mark("s")\n' > clash/main.iyi
 refuses "two libraries' impls answering one method" 'String#tag is what impl Lib::Tx::Tagged for String answers' -- \
   "$IYI" check clash/main.iyi
+# A `def initialize` in a trait, or in an impl for a lib struct, is in a
+# type no `class` or `struct` declared: `check`, `build` and `vet` ended in
+# "Missing hash key: Wt (KeyError)" and a stack trace. A trait's
+# `initialize` is a default method like any other now, and an implementer
+# is made with it.
+printf 'pub trait Wt\n  def initialize(x : Int32)\n  end\nend\n\nstruct B\n  getter v : Int32 = 3\nend\n\nimpl Wt for B\nend\n\nlib LibQ\n  struct CS\n    a : Int32\n  end\nend\n\npub trait Tq\nend\n\nimpl Tq for LibQ::CS\n  def initialize\n  end\nend\n\nputs B.new(1).v\nputs LibQ::CS.new.a\n' > traitinit.iyi
+if "$IYI" run traitinit.iyi > traitinit.out 2>&1 && [ "$(tr -d '\r' < traitinit.out)" = "$(printf '3\n0')" ]; then
+  echo "  an initialize in a trait and in an impl for a lib struct makes the value"
+else
+  echo "  an initialize in a trait or in an impl for a lib struct:"; sed -n '1,3p' traitinit.out; status=1
+fi
 # What a runner ended from outside leaves - `taskkill /F` runs no code
 # in it, so its program stays in the cache under the runner's own name -
 # the next run takes away once it is an hour old, and not before: a

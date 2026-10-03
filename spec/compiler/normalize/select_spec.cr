@@ -1,14 +1,24 @@
 require "../../spec_helper"
 
 describe "Normalize: case" do
+  # iyi: an arm nobody binds runs its body only when its operation happened
+  # (the value is no Error), under iyi's prelude, which the specs build with.
   it "normalizes select with call" do
     assert_expand "select; when foo; body; when bar; baz; end", <<-CODE
       __temp_1, __temp_2 = ::Channel.select({foo_select_action, bar_select_action})
       case __temp_1
       when 0
-        body
+        if __temp_2.is_a?(::Error)
+          nil
+        else
+          body
+        end
       when 1
-        baz
+        if __temp_2.is_a?(::Error)
+          nil
+        else
+          baz
+        end
       else
         ::raise("BUG: invalid select index")
       end
@@ -33,7 +43,11 @@ describe "Normalize: case" do
       __temp_1, __temp_2 = ::Channel.non_blocking_select({foo_select_action})
       case __temp_1
       when 0
-        body
+        if __temp_2.is_a?(::Error)
+          nil
+        else
+          body
+        end
       else
         baz
       end

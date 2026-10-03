@@ -725,7 +725,7 @@ module Iyi
       inside = CaptureAssignments.new(@program, meta, nil, a_def.vars)
       a_def.body.accept inside
       if first = inside.assigns.first?
-        first[0].raise "the block IyiThread.start runs on another thread assigns `#{name}`, a local of the code that started the thread, so the two threads share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic` or behind a `Mutex`"
+        first[0].raise "the block IyiThread.start runs on another thread assigns `#{name}`, a local of the code that started the thread, so the two threads share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`"
       end
 
       scope = meta.context
@@ -736,9 +736,12 @@ module Iyi
       outside = CaptureAssignments.new(@program, meta, start, vars)
       body.try &.accept(outside)
       line = start.location.try(&.line_number)
+      # Only `Atomic`: the advice also said "or behind a `Mutex`", and iyi
+      # has none to keep a value behind (`Mutex.new` is an undefined
+      # constant).
       advice = "so the thread and the code that started it share one mutable cell: a data race (SPEC.md III.4.4). " \
                "Capture a local that is assigned once (a block's own locals are new on every call), " \
-               "or keep the value in an `Atomic` or behind a `Mutex`"
+               "or keep the value in an `Atomic`"
       # Not found, or found assigned nowhere: the walk does not know this
       # scope, and the typer's answer stands.
       unless outside.found_start? && !outside.assigns.empty?

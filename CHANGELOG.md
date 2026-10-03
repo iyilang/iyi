@@ -4,6 +4,13 @@
 
 ### Fixed
 
+- **The refusal of a local an `IyiThread` block shares with its starter
+  advises `Atomic` alone.** Both forms ended "keep the value in an
+  `Atomic` or behind a `Mutex`", and iyi has no `Mutex`: `m = Mutex.new`
+  is "undefined constant Mutex". The advice names `Atomic` only now.
+  `bench/thread_exercise.sh` step 6b checks both refusals for it; the old
+  compiler named a `Mutex`.
+
 - **An `IyiThread` block that calls a method of `self` without a
   receiver captures `self`, which must be Share.** `self` was asked only
   when the block read an instance variable: in a Counter method, a block

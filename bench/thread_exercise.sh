@@ -786,6 +786,11 @@ if ! grep -q "\`limit\` is assigned here, after the thread has started" build-re
   echo "the refusal did not name the variable:"; cat build-reassigned.log; exit 1
 fi
 printf '  refused: %s\n' "$(grep -m1 'is assigned here' build-reassigned.log | sed 's/^Error: //')"
+# The advice names what iyi has: it said "or behind a `Mutex`", and `Mutex`
+# is an undefined constant here. `Atomic` is the one it names now.
+if grep -q 'Mutex' build-raced.log build-reassigned.log || ! grep -q 'Keep the value in an `Atomic`' build-raced.log; then
+  echo "the advice does not name Atomic alone:"; cat build-raced.log build-reassigned.log; exit 1
+fi
 # The same line inside `{% if true %}` or `{% for %}`: the walk read the
 # macro's text rather than its expansion, so it compiled, and a thread
 # reading a captured `Int64 | Float64` its starter kept reassigning that

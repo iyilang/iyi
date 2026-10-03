@@ -363,6 +363,7 @@ mutate "a server that adds each read to the head so far and searches all of it" 
 mutate "a server that waits on a client partway through a body" 'got = read_body(client, rest, wanted, listener, idle)' 'got = read_body(client, rest, wanted, listener, nil)'
 mutate "a server that cuts each request off the front of the read" 'start = parsed.consumed' 'buffer = buffer[parsed.consumed, buffer.bytesize - parsed.consumed]'
 mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
+mutate "a client that reads a head for as long as it comes" 'got, ends = read_head(got, at, Server::MAX_HEAD)' 'got, ends = read_head(got, at, 2147483647)'
 mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
 mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle)' '          accepted = client
           g.spawn do

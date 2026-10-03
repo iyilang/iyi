@@ -458,6 +458,34 @@ v6_server.join
 v6.close
 puts "  an IPv6 literal's Host line keeps its brackets, under a scheme in capitals"
 
+# A head is read as far as the megabyte the server takes of a request's,
+# and refused past it: one that did not end was read for as long as it
+# came, and 256 MB of one field cost the client 824 MB. The server here
+# writes one field until the client stops taking it, 64 MB at most, and
+# counts the 64 KB pieces that went.
+endless = IyiSocket.listen("127.0.0.1", 0)
+endless_port = endless.local_port
+endless_fd = endless.to_unsafe
+endless_sent = Atomic(Int32).new(0)
+endless_server = IyiThread.start do
+  l = IyiSocket.new(endless_fd)
+  conn = l.accept.or_panic
+  read_request(conn).or_panic
+  conn.write("HTTP/1.1 200 OK\r\nX-Long: ")
+  field = "a" * 65536
+  while endless_sent.get < 1024 && conn.write(field).is_a?(Int32)
+    endless_sent.add(1)
+  end
+  conn.close
+  nil
+end
+endless_said = answer { HTTP.get("http://127.0.0.1:#{endless_port}/long").or_panic.status.to_s }
+endless_server.join
+endless.close
+assert_str "refused: HTTP: response headers past 1048576 bytes", endless_said, "a head past a megabyte is refused"
+assert_true endless_sent.get < 256, "the client stopped taking an endless head: #{endless_sent.get} pieces of 64 KB went"
+puts "  a head past a megabyte is refused, not read for as long as it comes"
+
 # A client partway through a request: it sends *part*, and leaves three
 # seconds later.
 def partway(port : Int32, part : String) : Int32

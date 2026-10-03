@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **`HTTP.request` refuses an answer whose head runs past a megabyte.**
+  The head was read for as long as it came: 256 MB of one field cost the
+  client 824 MB of memory before it panicked "no header terminator" at
+  the server's close, and a head that never ended took all there was. It
+  reads as far as `Server::MAX_HEAD`, the 1 MiB the server takes of a
+  request's head, and panics "HTTP: response headers past 1048576
+  bytes" past it, 21 ms into the same 256 MB. `bench/std_http_exercise.iyi`
+  writes one field until the client stops taking it: 26 to 28 pieces of
+  64 KB go now, and all 1,024 of a 64 MB cap with the limit taken out;
+  the old module answered "HTTP: no header terminator".
+
 - **A refused `rescue` or `ensure` is reported at the keyword.** On a
   def or a block the handler starts where the body does, so `def foo :
   Int32` / `raise "x"` / `rescue` was reported at line 3, `raise "x"`,

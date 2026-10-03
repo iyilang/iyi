@@ -740,10 +740,11 @@ pub struct HTTP
   # asks the server to close. The answer is read as far as its framing
   # says (RFC 9112 §6.3) - its length, its last chunk, or its head alone
   # for a `HEAD`, a 1xx, 204 or 304 - and to the server's close only when it
-  # has neither a length nor chunks. The socket parks under the runtime,
-  # so a request from a task answers `Cancelled` when the task is; a
-  # refused or reset connection answers `SocketError`; `!` passes either
-  # up, `.or_panic` refuses it.
+  # has neither a length nor chunks. A head past `Server::MAX_HEAD`, the
+  # megabyte the server takes of a request's, is refused. The socket parks
+  # under the runtime, so a request from a task answers `Cancelled` when
+  # the task is; a refused or reset connection answers `SocketError`; `!`
+  # passes either up, `.or_panic` refuses it.
   def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String = "") : Response | Cancelled | SocketError
     uri = URI.parse(url)
     scheme = uri.scheme
@@ -783,10 +784,14 @@ pub struct HTTP
     got = ""
     at = 0
     while true
-      got, ends = read_head(got, at, 2147483647) { reader.call }
+      # As far as the server's limit on a request's head, and no further: a
+      # head that did not end was read for as long as it came, 256 MB of one
+      # field cost the client 824 MB, and one that never ended took it all.
+      got, ends = read_head(got, at, Server::MAX_HEAD) { reader.call }
       if failure = failed
         return failure
       end
+      raise "HTTP: response headers past #{Server::MAX_HEAD} bytes" if ends.nil? && got.bytesize - at > Server::MAX_HEAD
       # The connection ended before a head did: refused as it was, or the
       # interim answer it ended after is the answer.
       return parse_response(got, head) unless ends

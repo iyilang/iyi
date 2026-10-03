@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **An abstract generic type is written back as `abstract class` and
+  `abstract struct`.** Its kind was recorded as `abstract generic class`,
+  and only a leading `generic` is taken off when it is rendered, so `pub
+  abstract class GA(T)` came back `pub abstract generic class GA(T)`:
+  every build reading the artifact stopped on "`pub abstract` takes a
+  class, a struct or a def" (a private one on "unexpected token:
+  \"generic\""), and `iyi doc` printed the same line from source. The
+  word is dropped behind `abstract` now, the artifact builds and runs, and
+  `iyi doc` prints `pub abstract class GA(T)`. The `abstract_generic` case
+  of `bench/samples_roundtrip.sh` checks it; the old compiler stopped on
+  the `pub abstract` refusal.
+
 - **A class whose fields have defaults written in its body (`@id = 0`,
   `@items = [] of T`) can be imported from its artifact.** Such a default
   counted as a statement in a type body, so the artifact refused every

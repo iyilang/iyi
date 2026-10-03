@@ -2204,9 +2204,15 @@ module Iyi
     # abstract def on non-abstract class`, which is where `std/log` stopped.
     # `Iyi::Bind` writes it into `kind` the same way, and
     # `render_type_header` prints the string as it is.
+    #
+    # Less the word `generic`, which is the description and not the keyword:
+    # `render_type_header` takes it off the front, and behind `abstract` it
+    # stayed, so `pub abstract class GA(T)` came back as `pub abstract generic
+    # class GA(T)` — "pub abstract takes a class, a struct or a def" from the
+    # artifact reader, and the same line in `iyi doc` and `mod context`.
     private def iyi_type_kind(type : Type) : String
       abstract_type = type.responds_to?(:abstract?) && type.abstract?
-      abstract_type ? "abstract #{type.type_desc}" : type.type_desc
+      abstract_type ? "abstract #{type.type_desc.lchop("generic ")}" : type.type_desc
     end
 
     # iyi: what a class inherits from, empty where it inherits from the root

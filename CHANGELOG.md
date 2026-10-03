@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`_ = g.spawn { }` in a typed group takes no tuple slot.** III.4.9
+  names `_ =` as the explicit discard, and the expansion gave it a slot
+  like any spawn: `_ = g.spawn { read(a) }` beside
+  `g.spawn { read(a + 1) }` answered `{30, 40}`, typed
+  `Tuple(Int32, Int32)`. It answers `{40}`, `Tuple(Int32)`, now, and a
+  group whose spawns are all discarded answers `{}`. The discarded
+  task's value is still read, so a failure that stopped the group still
+  leaves as its error and a panic still arrives as `Panicked`.
+  `bench/concurrency_exercise.iyi` step 17 checks both; the old
+  compiler refused it with "method ::fetch_discarding must return
+  (Cancelled | Panicked | TaskFailed | Tuple(Int32)) but it is returning
+  (Panicked | TaskFailed | Tuple(Int32, Int32))".
+
 - **A group cancels its tasks when its block is left early, and when
   the task holding it open is cancelled.** SPEC III.4.2 names three
   causes and only a failing child's was built. `return 5` out of a

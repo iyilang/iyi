@@ -1056,6 +1056,21 @@ stopped = fetch_stopped(true)
 fail("typed group: a sibling's Cancelled left in place of the failure that cancelled it") unless stopped.is_a?(TaskFailed)
 puts "a typed group answered the failure that stopped it, not the Cancelled it caused"
 
+# `_ =` is the explicit discard (III.4.9): no slot in the tuple. It took
+# one, and `{30, 40}` came back for `{40}`. Its failure still stopped the
+# group, and still leaves it.
+def fetch_discarding(fail_discarded : Bool) : Tuple(Int32) | TaskFailed | Cancelled | Panicked
+  group do |g|
+    _ = g.spawn { fail_discarded ? TaskFailed.new : 1 }
+    y = g.spawn { 2 }
+  end!
+end
+
+one_slot = fetch_discarding(false)
+fail("typed group, one spawn discarded: not the one-slot tuple {2}") unless one_slot.is_a?(Tuple(Int32)) && one_slot[0] == 2
+fail("typed group: a discarded task's failure did not leave") unless fetch_discarding(true).is_a?(TaskFailed)
+puts "a typed group gave a discarded spawn no slot, and its failure still left"
+
 # A task that panics is the typed group's `Panicked` (III.1.4): reading a
 # value catches its task's panic, and the values are read before the join.
 # The join came first and re-raised the panic nobody had read yet, so the

@@ -290,6 +290,11 @@ module Iyi
       return nil unless last && iyi_direct_spawn(last, group_param.name)
 
       handles = [] of ASTNode
+      # Which handles are tuple slots. `_ = g.spawn {..}` is III.4.9's
+      # explicit discard, and it took a slot all the same: `{30, 40}` for
+      # `{40}`. Its value is still read below, so a failure that stopped
+      # the group still leaves it and a panic still arrives as `Panicked`.
+      slots = [] of Bool
       rewritten = [] of ASTNode
 
       statements.each do |statement|
@@ -298,8 +303,10 @@ module Iyi
           # `%h1 = g.spawn {..}`, and the author's `x = %h1` after it.
           handle = Var.new(program.new_temp_var_name).at(statement)
           handles << handle
+          discarded = statement.is_a?(Assign) && statement.target.is_a?(Underscore)
+          slots << !discarded
           rewritten << Assign.new(handle.clone, spawn_call).at(statement)
-          if statement.is_a?(Assign) && !statement.target.is_a?(Underscore)
+          if statement.is_a?(Assign) && !discarded
             rewritten << Assign.new(statement.target, handle.clone).at(statement)
           end
         else
@@ -314,13 +321,15 @@ module Iyi
       rewritten << Call.new(group_var.clone, "join").at(node) unless propagated
 
       values = [] of ASTNode
-      handles.each do |handle|
+      tuple = [] of ASTNode
+      handles.each_with_index do |handle, index|
         value = Var.new(program.new_temp_var_name).at(node)
         values << value
+        tuple << value.clone if slots[index]
         rewritten << Assign.new(value.clone, Call.new(handle.clone, "value").at(node)).at(node)
       end
 
-      extraction = TupleLiteral.new(values.map(&.clone)).at(node).as(ASTNode)
+      extraction = TupleLiteral.new(tuple).at(node).as(ASTNode)
       values.reverse_each do |value|
         is_error = IsA.new(value.clone, Path.global("Error").at(node)).at(node)
         extraction = If.new(is_error, value.clone, extraction).at(node)

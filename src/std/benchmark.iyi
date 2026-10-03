@@ -145,7 +145,10 @@ pub class Benchmark
         elsif m >= 1_000.0
           Std::Format.sprintf("%7.2fk", m / 1_000.0)
         else
-          Std::Format.sprintf("%7.2f", m)
+          # A blank where the unit goes, as the other library pads it: with
+          # none, a rate under 1,000 was a column narrower than one with a
+          # unit, and its row's `(` stood one place left of the row above.
+          Std::Format.sprintf("%7.2f ", m)
         end
       end
 

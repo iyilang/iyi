@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **`Benchmark.ips` lines up a rate under 1,000 per second with one
+  that has a unit.** `human_mean` answered `" 594.70"` beside
+  `" 597.80M"`, a character narrower, so that row's `(` and every
+  column after it stood one place left of the row above. A blank stands
+  where the unit goes now, as the other library pads it.
+  `bench/std_benchmark_exercise.iyi` checks both widths; the old module
+  answered `[ 594.70] [ 597.80M]`.
+
 - **`Benchmark::IPS::Job.new(0.5, 0.25)` keeps the fractions of a
   second.** The seconds were narrowed with `to_i64`, so a fractional
   calculation or warm-up time was zero and the job warmed up and

@@ -4690,6 +4690,40 @@ end").as(ClassDef)
         end
       end
 
+      # Habits of other languages that were bare token errors, or errors
+      # far from what was written (HuntDiag3).
+      it "names the spelling of another language's syntax" do
+        {
+          "// say hi\nputs 1\n"                                    => "`//` opens no comment here: a comment starts with `#`",
+          "/* say hi */\nputs 1\n"                                 => "`/*` opens no comment here",
+          "trait G\n  def g : String\nend\nputs 1\n"               => "`def g : String` has no `end` of its own: it took the trait's `end`",
+          "impl G for U {\n  def g : String\n    \"\"\n  end\n}\n" => "`{` opens no body here",
+          "def f : Int32 | E\n  x = g()?\n  x\nend\n"              => "an error propagates with an attached `!`: `g()!`",
+          "fn main() {\n  puts 1\n}\n"                             => "there is no `fn`: a function is `def main(args) : Type`",
+          "package main\nputs 1\n"                                 => "there is no `package`",
+          "println!(\"{}\", 1)\n"                                  => "`println!` is Rust's macro",
+          "v = vec![1, 2]\n"                                       => "`vec!` is Rust's macro",
+          "def add(a, b):\n  a + b\nend\n"                         => "a block is not opened with `:` and indentation",
+          "x = 3\nif x > 1:\n  puts x\nend\n"                      => "a block is not opened with `:` and indentation",
+          "case 3\nin 1 then puts 1\nend\n"                        => "`in 1` matches a value, and `in` matches types: a value is matched with `when 1 then ...`",
+          "x = 3\nmatch x\nin 1 then puts 1\nend\n"                => "`match` at line 2 is a call here",
+          "x := 5\n"                                               => "there is no `:=`",
+          "interface Greet\n  abstract def g : String\nend\n"      => "there is no `interface`: a set of required methods is a `trait`",
+          "xs = Array<Int32>.new\n"                                => "type arguments are written in parentheses: `Array(Int32)`",
+          "def first<T>(xs : Array(T)) : T\n  xs[0]\nend\n"        => "`def first(xs : Array(T)) : T forall T`",
+          "x = Some(1)\n"                                          => "there is no `Some(...)`",
+          "x = 5\ny = x as Int64\n"                                => "`as` is a method call here, not an operator: `x.as(Int64)`",
+          "puts f\"hi {x}\"\n"                                     => "there is no `f\"...\"` prefix",
+          "Puts \"x\"\n"                                           => "`Puts` is a constant, and the name of a call is lower-case: `puts \"...\"`",
+          "export def f : Int32\n  1\nend\n"                       => "there is no `export`: `pub def f : Int32`",
+          "def f(a : i32) : Int32\n  a\nend\n"                     => "Rust's `i32` is `Int32` here",
+        }.each do |code, message|
+          expect_raises(SyntaxException, message) { parse(code, filename: "x.iyi") }
+        end
+        # A `.cr` file keeps the other library's reading.
+        parse("x = 7 // 2\n", filename: "x.cr")
+      end
+
       # A unary operator reaches across a newline for its operand, so a stray
       # `!` before the header read it as `!(module x)`: past the one-module
       # rule, never typed, and codegen died on "has no type".

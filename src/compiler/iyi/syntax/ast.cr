@@ -968,6 +968,13 @@ module Iyi
     # and the undefined-method hint names `sort_in_place` (SPEC.md III.1.7a).
     property? iyi_banged = false
 
+    # iyi: where the `//` this receiverless call stands to the right of
+    # begins. `x = 1 // the answer` is a comment in the languages people
+    # come from and integer division here, so the words after it are calls,
+    # and "undefined local variable or method 'answer'" pointed at the last
+    # word of the comment without a word about the `//`.
+    property iyi_after_floor_div : Location?
+
     # iyi: this call's answer came out of an *open* set — a module's including
     # types, or a generic's instantiations (SPEC.md III.6).
     #
@@ -1031,6 +1038,7 @@ module Iyi
       clone.iyi_group = iyi_group?
       clone.iyi_open_dispatch = iyi_open_dispatch?
       clone.iyi_banged = iyi_banged?
+      clone.iyi_after_floor_div = iyi_after_floor_div
       clone
     end
 
@@ -1921,6 +1929,10 @@ module Iyi
     # leaves this nil; one a compiler-known construct wrote has rules
     # (SPEC.md III.1.1).
     property error_construct : String? = nil
+    # iyi: for `xs.uniq!`, the method's name and its receiver's source -
+    # a `!` attached to a method call, which is the other library's in-place
+    # spelling when the call answers no error (SPEC.md III.1.7a).
+    property iyi_bang_call : {String, String}? = nil
 
     def initialize(@obj, @const, @nil_check = false)
     end
@@ -1933,6 +1945,7 @@ module Iyi
     def clone_without_location
       clone = IsA.new(@obj.clone, @const.clone, @nil_check)
       clone.error_construct = error_construct
+      clone.iyi_bang_call = iyi_bang_call
       clone
     end
 

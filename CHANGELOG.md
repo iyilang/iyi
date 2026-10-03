@@ -4,6 +4,39 @@
 
 ### Fixed
 
+- **The parser names the iyi spelling for the syntax other languages
+  write first.** Each of these was a token error or a report far from the
+  mistake, measured with the previous compiler: `// say hi` was
+  "unexpected token: \"say\"" and `/* say hi */` was told to `import
+  std/regex`; a bodiless `def greet : String` in a one-method trait was
+  "expecting identifier 'end', not 'EOF'" on a line past the file, as was
+  `impl Greet for U {`; `x = g()?` was "can't use variable name 'x'
+  inside assignment" on the next line; `fn main() {` was "'main' is not
+  expected to be invoked with a block" and `package main` listed the
+  runtime's `main(argc, argv)`; `println!(...)` got a paragraph about
+  `sort_in_place`; `def add(a, b):` drew a warning to run `iyi fmt`;
+  `case x` / `in 1` listed what `in` takes; `match x` was "unexpected
+  'in'"; `x := 5` was "unknown token: ' '"; `interface Greet` was
+  "unexpected 'end'"; `Array<Int32>.new` was "unexpected token: \".\"";
+  `Err("bad")` was "expecting token ':', not ')'"; `x as Int64` was
+  "there's no self in this scope"; `f"hi"`, `"""` and `Puts "x"` were
+  "unexpected token: \"DELIMITER_START\""; `export def` and `async def`
+  were "can't declare def dynamically"; `x : i32` was a bare token error.
+  Each is now refused at the token with the spelling here: "`//` opens
+  no comment here: a comment starts with `#`", "`def greet : String` has
+  no `end` of its own: it took the trait's `end` ... `abstract def greet
+  : String`", "`?` starts a ternary here ...: `g()!`" (carried as the
+  edit `iyi fix` applies), "there is no `fn`: a function is `def main(args)
+  : Type`", "`println!` is Rust's macro ...: `puts x`", "a block is not
+  opened with `:` and indentation here", "a value is matched with `when
+  1 then ...`", "there is no `:=`", "there is no `interface`: ... a
+  `trait`", "type arguments are written in parentheses: `Array(Int32)`",
+  "there is no `Some(...)`", "`as` is a method call here ...:
+  `x.as(Int64)`", "there is no `f\"...\"` prefix", "there is no `export`:
+  `pub def f : Int32`" and "Rust's `i32` is `Int32` here". A `.cr` file
+  parses as before. `spec/compiler/parser/parser_spec.cr` checks each;
+  the old compiler answered with the token errors above.
+
 - **On one core a thread waiting for the runtime lock gets it.** The
   lock was a test-and-set, and a holder runs its unlock and its next lock
   back to back, so on one core a waiter ran only while the holder was

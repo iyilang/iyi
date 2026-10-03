@@ -223,6 +223,9 @@ module Iyi
           # iyi: `in` with no `case` open is usually not a `case` at all.
           # `for i in 0..3` is the loop every other language writes, and
           # the answer it drew named a construct nobody had typed.
+          if match = @iyi_match_lookalike
+            raise "unexpected '#{@token}': #{iyi_no_match(match)}", @token
+          end
           if (lookalike = @iyi_for_lookalike) && @token.value == Keyword::IN
             raise "unexpected 'in': `for` at line #{lookalike[1].try(&.line_number)} is a call here, " \
                   "not a keyword - a range iterates with `(0..3).each do |i| ... end` and a " \
@@ -822,6 +825,7 @@ module Iyi
       cond = parse_range
 
       while @token.type.op_question?
+        iyi_check_rust_question(cond) if iyi?
         location = @token.location
 
         check_void_value cond, location
@@ -842,6 +846,31 @@ module Iyi
       end
 
       cond
+    end
+
+    # iyi: `x = g()?` - Rust's propagation, which is postfix `!` here
+    # (SPEC.md III.1.2). The `?` opened a ternary, and the report came where
+    # the ternary failed: "can't use variable name 'x' inside assignment" on
+    # the next line, or "expecting token ':', not 'puts'" two lines down. A
+    # ternary's `?` is followed by its true branch; an attached `?` with
+    # nothing after it on the line, or `.`, `)` or `end`, is the other
+    # language's operator. The edit is the one character.
+    private def iyi_check_rust_question(subject : ASTNode) : Nil
+      return if iyi_space_before_bang?
+      location = @token.location
+      nothing_follows = peek_ahead do
+        next_token_skip_space
+        type = @token.type
+        type.newline? || type.eof? || type.op_semicolon? || type.op_period? ||
+          type.op_rparen? || type.op_rsquare? || type.op_rcurly? || @token.keyword?(:end)
+      end
+      return unless nothing_follows
+      text = subject.to_s
+      attached = text.includes?('\n') || text.size > 60 ? "`f(x)!`" : "`#{text}!`"
+      refusal = SyntaxException.new("`?` starts a ternary here (`a ? b : c`); an error propagates with an attached `!`: #{attached} (SPEC.md III.1.2)",
+        location.line_number, location.column_number, @filename, 1)
+      refusal.suggestion = "!"
+      ::raise refusal
     end
 
     def parse_range
@@ -898,10 +927,14 @@ module Iyi
 
             method = @token.type.to_s
             name_location = @token.location
+            if iyi? && method == "<" && left.is_a?(Path) && !iyi_space_before_bang?
+              iyi_check_angle_generic("type")
+            end
 
             slash_is_regex!
             next_token_skip_space_or_newline
             right = {% if right_associative %} iyi_nest { parse_{{name.id}} } {% else %} parse_{{next_operator.id}} {% end %}
+            iyi_mark_after_floor_div(right, name_location) if iyi? && method == "//"
             left = ({{node.id}}).at(location).at_end(right)
             left.name_location = name_location if left.is_a?(Call)
           else
@@ -909,6 +942,16 @@ module Iyi
           end
         end
       end
+    end
+
+    # iyi: `x = 1 // the answer` is a C-family comment, and here it is
+    # integer division by the call `the(answer)`. The calls that make up the
+    # right side carry the `//`'s location, so an undefined name among them
+    # can say what the `//` is (`Call#iyi_after_floor_div`).
+    private def iyi_mark_after_floor_div(node, at : Location) : Nil
+      return unless node.is_a?(Call) && node.obj.nil?
+      node.iyi_after_floor_div = at
+      node.args.each { |arg| iyi_mark_after_floor_div(arg, at) }
     end
 
     parse_operator :or, :and, "Or.new left, right", :op_bar_bar?
@@ -1820,6 +1863,13 @@ module Iyi
     end
 
     def parse_const(global = false, location = @token.location)
+      # iyi: `Some(x)`, `Ok(x)`, `Err("bad")` - Rust's wrappers, read as a
+      # generic type whose arguments are not types: "unexpected token:
+      # \"xs\"", "expecting token ':', not ')'". A type argument starts with
+      # a capital, and those are left to the generic.
+      if iyi? && !global && current_char == '(' && !peek_next_char.ascii_uppercase? && (spelling = IYI_RUST_WRAPPERS[@token.value.to_s]?)
+        raise "there is no `#{@token.value}(...)`: #{spelling}", @token
+      end
       type = parse_generic global, location, expression: true
       space_after_name = @token.type.space?
       skip_space
@@ -1833,6 +1883,13 @@ module Iyi
         parse_custom_literal type
       end
     end
+
+    # iyi: the Rust wrappers, and what is written in their place.
+    IYI_RUST_WRAPPERS = {
+      "Some" => "a value that may be nil is `T?`, and is the value itself - `Some(x)` is `x`, and `None` is `nil`",
+      "Ok"   => "a value is returned as it is - `Ok(x)` is `x` - and the return type names the errors beside it, `Int32 | ParseError` (SPEC.md III.1)",
+      "Err"  => "an error is a value of a type that implements `Error`, returned as it is: `return ParseError.new(\"bad\")`, with `impl Error for ParseError` (SPEC.md III.1)",
+    }
 
     def parse_custom_literal(type)
       if @token.type.op_lcurly?
@@ -2833,10 +2890,13 @@ module Iyi
         end
       end
 
+      iyi_check_angle_generic("trait") if @token.type.op_lt?
       check(StatementEnd) if type_vars || supertraits || !found_space
+      check_iyi_braced_body("trait")
       skip_statement_end
 
       body = push_visibility { parse_trait_or_impl_body }
+      check_iyi_left_open(body, "trait")
 
       end_location = token_end_location
       check_ident :end
@@ -2872,6 +2932,7 @@ module Iyi
       # `impl Into(Array(String)) for User` needs no rule of its own. It stops
       # before `for` for the same reason the target below stops before
       # `forall`: neither is a type token.
+      iyi_check_angle_generic("impl") if @token.type.op_lt?
       trait_node = parse_bare_proc_type
       trait_path, trait_args =
         case trait_node
@@ -2925,9 +2986,11 @@ module Iyi
         end
       end
 
+      check_iyi_braced_body("impl")
       skip_statement_end
 
       body = push_visibility { parse_trait_or_impl_body }
+      check_iyi_left_open(body, "impl")
 
       end_location = token_end_location
       check_ident :end
@@ -2943,6 +3006,51 @@ module Iyi
       impl_def.end_location = end_location
       impl_def.at(location)
       impl_def
+    end
+
+    # iyi: `Array<Int32>`, `def first<T>`, `impl<T>`, `trait Into<T>` - the
+    # angle brackets of Rust, TypeScript, Java, Go and C#. Each was a bare
+    # token error ("unexpected token: \"<\""), and `Array<Int32>.new` was
+    # read as two comparisons and reported at the `.`.
+    private def iyi_check_angle_generic(where : String) : Nil
+      return unless iyi?
+      message =
+        case where
+        when "def"   then "a method's own type parameter is introduced with `forall` after its signature: `def first(xs : Array(T)) : T forall T`"
+        when "impl"  then "a generic impl names its type parameter with `forall` after the type: `impl Greet for Array(T) forall T`"
+        when "trait" then "a trait's type parameters are written in parentheses: `trait Into(T)`"
+        else              "type arguments are written in parentheses: `Array(Int32)`, `Hash(String, Int32)`"
+        end
+      raise "`<` opens no type arguments here: #{message}", @token
+    end
+
+    # iyi: `impl Greet for U {` and `trait Greet {` - the braces of the
+    # languages people come from. The `{` opened a hash literal and the
+    # report came at the end of the file: "expecting identifier 'end', not
+    # 'EOF'".
+    private def check_iyi_braced_body(what : String) : Nil
+      return unless iyi? && @token.type.op_lcurly?
+      raise "`{` opens no body here: the #{what} line ends before it, and the body under it runs to `end`, as every block's does", @token
+    end
+
+    # iyi: a trait or impl body that reached the end of the file, holding a
+    # `def` with no body. `def greet : String` in a trait is the bodiless
+    # requirement of Rust, Go and TypeScript; here it opened a body, took
+    # the trait's `end` as its own, and the trait stayed open to the end of
+    # the file: "expecting identifier 'end', not 'EOF'", on a line past the
+    # last. The two-`def` trait was already caught (`check_iyi_bodiless_trait_def`).
+    private def check_iyi_left_open(body : ASTNode, what : String) : Nil
+      return unless iyi? && @token.type.eof?
+      defs = body.is_a?(Expressions) ? body.expressions : [body]
+      bodiless = defs.find { |exp| exp.is_a?(Def) && exp.body.is_a?(Nop) && !exp.abstract? }
+      return unless bodiless.is_a?(Def)
+      signature = String.build do |str|
+        str << "def " << bodiless.name
+        str << '(' << bodiless.args.join(", ") << ')' unless bodiless.args.empty?
+        str << " : " << bodiless.return_type if bodiless.return_type
+      end
+      fix = what == "trait" ? "A method a trait requires has no body and says so: `abstract #{signature}` (SPEC.md II.6)." : "A method in an impl has a body, and its own `end`."
+      raise "`#{signature}` has no `end` of its own: it took the #{what}'s `end`, so the #{what} is still open at the end of the file. #{fix}", bodiless.location || @token.location
     end
 
     def parse_module_def
@@ -4174,6 +4282,12 @@ module Iyi
         end
       end
 
+      # iyi: `in 1` - a value under `in`, the Rust `match` arm and the
+      # samples' `case ... in Type` carried over to values. The sentence
+      # listed what `in` takes and not the construct that matches a value.
+      if iyi? && exp.is_a?(NumberLiteral | StringLiteral | CharLiteral | SymbolLiteral | RangeLiteral)
+        raise "`in #{exp}` matches a value, and `in` matches types: a value is matched with `when #{exp} then ...`, and `else` takes the rest (`_` is no pattern here)", exp.location.not_nil!
+      end
       raise "expression of exhaustive case (case ... in) must be a constant (like `IO::Memory`), a generic (like `Array(Int32)`), a bool literal (true or false), a nil literal (nil) or a question method (like `.red?`)", exp.location.not_nil!
     end
 
@@ -5028,6 +5142,7 @@ module Iyi
       when .op_minus_gt?
         iyi_return_arrow
       else
+        iyi_check_angle_generic("def") if @token.type.op_lt?
         if is_abstract && @token.type.eof?
           # OK
         else
@@ -5039,6 +5154,7 @@ module Iyi
       iyi_return_arrow if iyi? && @token.type.op_minus_gt?
 
       if @token.type.op_colon?
+        iyi_check_python_colon
         unless last_was_space
           warnings.add_warning_at @token.location, "space required before colon in return type restriction (run `iyi fmt` to fix this)"
         end
@@ -5222,6 +5338,13 @@ module Iyi
     # a call that reads correctly in the other language teaches nothing.
     private def check_iyi_bang_call(atomic)
       return unless atomic.is_a?(Propagate) && (call = atomic.exp).is_a?(Call)
+      # `println!("{}", x)`, `vec![1, 2]`: Rust's macros, which drew the
+      # sentence below about Crystal's bang pairs and `sort_in_place` - or,
+      # for `vec![`, "undefined local variable or method 'vec'".
+      if call.obj.nil? && call.args.empty? && (spelling = IYI_RUST_MACROS[call.name]?) &&
+         (@token.type.op_lparen? || (@token.type.op_lsquare? && call.name == "vec"))
+        raise "`#{call.name}!` is Rust's macro, and iyi has none of those: #{spelling}", call.name_location || @token.location
+      end
       return unless @token.type.op_lcurly? || @token.type.op_lparen? || @token.keyword?(:do)
 
       # An argument list was told `!` "takes no block" too: `nomacro!(1)`.
@@ -5235,6 +5358,19 @@ module Iyi
         its receiver — `sorted`, `sort_in_place`, `sorted_by`, `sort_in_place_by`.
         MSG
     end
+
+    # iyi: the Rust macros a program opens with, and their spelling here.
+    IYI_RUST_MACROS = {
+      "println"   => "`puts x` writes a line, and a string interpolates where `{}` did: `puts \"x is \#{x}\"`",
+      "print"     => "`print x` writes without the line break, and a string interpolates where `{}` did: `print \"x is \#{x}\"`",
+      "eprintln"  => "`stderr.puts x` writes a line to standard error, and a string interpolates where `{}` did: `\"x is \#{x}\"`",
+      "format"    => "a string interpolates where `{}` did: `\"x is \#{x}\"`",
+      "panic"     => "`raise \"why\"` panics (SPEC.md III.1.4)",
+      "todo"      => "`raise \"not yet\"` panics (SPEC.md III.1.4)",
+      "vec"       => "an array is its literal, `[1, 2, 3]`, and an empty one says its type, `[] of Int32`",
+      "assert"    => "`assert x == 1, \"why\"` panics when the condition is false",
+      "assert_eq" => "`assert a == b, \"why\"` panics when they differ",
+    }
 
     # iyi: whether the current `!` token has a space or tab right before it.
     private def iyi_space_before_bang? : Bool
@@ -5818,6 +5954,12 @@ module Iyi
         obj = Var.new("self").at(location)
         return parse_is_a(obj)
       when Keyword::AS
+        # iyi: `y = x as Int64`, the cast of Rust, Kotlin and TypeScript: a
+        # bare `as` with no `(` is an `as` on an implicit self, and the
+        # report was "there's no self in this scope".
+        if iyi? && current_char != '('
+          raise "`as` is a method call here, not an operator: `x.as(Int64)` narrows a union to a member, and a number converts with `x.to_i64`", location
+        end
         obj = Var.new("self").at(location)
         return parse_as(obj)
       when Keyword::AS_QUESTION
@@ -5885,6 +6027,13 @@ module Iyi
         # Not a special call
       end
 
+      # iyi: `match x {` and `match x` with `in` arms under it: a call to
+      # `match`, recorded before its arguments are read because the brace
+      # block is one of them, and its `1 => ...` is where the parse fails.
+      if iyi? && name == "match" && name_followed_by_space && !is_var && @iyi_match_lookalike.nil?
+        @iyi_match_lookalike = name_location
+      end
+
       call_args = preserve_stop_on_do(@stop_on_do) { parse_call_args stop_on_do_after_space: @stop_on_do }
 
       if call_args
@@ -5923,6 +6072,46 @@ module Iyi
           raise "there is no `#{name}`: a constant is `#{constant} = ...`, " \
                 "uppercase is what makes it one, and `pub #{constant} = ...` " \
                 "is how a module exports it (SPEC.md R-2)", name_location
+        end
+
+        # iyi: `fn main() {` and `func main() {`, the first line of a Rust
+        # or Go program: a call to `fn` whose argument is a call to `main`
+        # with a brace block. It parses, and the semantic said "'main' is
+        # not expected to be invoked with a block". `package main`, Go's
+        # line above it, is a call too, and drew "wrong number of arguments
+        # for 'main'" with the runtime's `main(argc, argv)` for an overload.
+        if iyi? && !is_var && !has_parentheses && args && args.size == 1 && (inner = args.first).is_a?(Call) && inner.obj.nil?
+          if name.in?("fn", "func", "function") && inner.block
+            main = inner.name == "main" ? ", and a program needs no `main`: its top-level code is what runs" : ""
+            raise "there is no `#{name}`: a function is `def #{inner.name}(args) : Type`, " \
+                  "and its body runs to `end`, not braces#{main}", name_location
+          end
+          if name == "package" && inner.args.empty? && !inner.has_parentheses? && !inner.block
+            raise "there is no `package`: a file's identity is its `module` header " \
+                  "(`module app/#{inner.name}`, SPEC.md R-1), and a program's entry file needs none", name_location
+          end
+        end
+
+        # iyi: `interface Greet` and `protocol Greet` (TypeScript, Go, Java,
+        # Swift): a call with a constant for its argument. The report was
+        # the `end` under it, "nothing is open for it to close", or a
+        # return-type mismatch on a top-level `def area`.
+        if iyi? && !is_var && !has_parentheses && name.in?("interface", "protocol") && args && args.size == 1 && (required = args.first).is_a?(Path)
+          raise "there is no `#{name}`: a set of required methods is a `trait` (`trait #{required}` with " \
+                "`abstract def name : Type` lines), implemented by `impl #{required} for T` (SPEC.md II.6)", name_location
+        end
+
+        # iyi: `export def f` and `async def f`: a call whose argument is a
+        # def, which the semantic refused as "can't declare def
+        # dynamically", a macro-expansion condition nobody wrote.
+        if iyi? && !is_var && !has_parentheses && args && args.size == 1 && args.first.is_a?(Def)
+          case name
+          when "export"
+            raise "there is no `export`: `pub def f : Int32` marks a def as part of the module's surface (SPEC.md R-2)", name_location
+          when "async"
+            raise "there is no `async`: concurrency is a group - `group do |g|`, a line `t = g.spawn { fetch }`, then `end` - " \
+                  "and `t.value` waits for a task's answer (SPEC.md III.4)", name_location
+          end
         end
       else
         has_parentheses = false
@@ -6630,6 +6819,11 @@ module Iyi
           # language's spelling of a name this one capitalises.
           if iyi? && (proper = IYI_TYPE_SPELLINGS[@token.value.to_s]?)
             raise "unexpected token: #{@token.to_s.inspect}: a type name is capitalised here - `#{proper}`", @token
+          end
+          # `x : i32`, `f64`, `usize`: Rust's names, which are not the
+          # capitalised spelling of these.
+          if iyi? && (proper = IYI_RUST_TYPE_SPELLINGS[@token.value.to_s]?)
+            raise "unexpected token: #{@token.to_s.inspect}: Rust's `#{@token}` is `#{proper}` here", @token
           end
           unexpected_token
         end
@@ -7996,11 +8190,14 @@ module Iyi
     end
 
     def check(token_types : Array(Token::Kind))
-      raise "expecting any of these tokens: #{token_types.join ", "} (not '#{@token}')", @token unless token_types.any? { |type| @token.type == type }
+      return if token_types.any? { |type| @token.type == type }
+      iyi_check_python_colon
+      raise "expecting any of these tokens: #{token_types.join ", "} (not '#{@token}')", @token
     end
 
     def check(token_type : Token::Kind)
       return if token_type == @token.type
+      iyi_check_python_colon
       # iyi: a closer that is missing names what it would close and where
       # that began, as a missing `end` does: "expecting token ']', not
       # 'puts'" pointed at the next line's first word and said nothing
@@ -8010,6 +8207,23 @@ module Iyi
         raise "expecting token '#{token_type}', not '#{@token}'; the #{unclosed.name} that began at line #{unclosed.location.line_number} is still open", @token
       end
       raise "expecting token '#{token_type}', not '#{@token}'", @token
+    end
+
+    # iyi: `if x > 1:`, `def add(a, b):`, `class Foo:` - Python opens a
+    # block with a `:` at the end of its line. Nothing here ends a line with
+    # one, so where a token was wrong and it is that `:`, the habit is
+    # named: `if x > 1:` was "unexpected token: \":\"", and `def add(a, b):`
+    # drew a warning to run `iyi fmt` about a return type's colon, which
+    # formatting cannot mend.
+    private def iyi_check_python_colon : Nil
+      return unless iyi? && @token.type.op_colon?
+      location = @token.location
+      at_line_end = peek_ahead do
+        next_token_skip_space
+        @token.type.newline? || @token.type.eof?
+      end
+      return unless at_line_end
+      raise "a block is not opened with `:` and indentation here: drop the `:`, and the block runs to `end` (`if x > 1`, its lines, then `end`)", location
     end
 
     private def iyi_closes?(token_type : Token::Kind, name : String) : Bool
@@ -8071,6 +8285,7 @@ module Iyi
     end
 
     def unexpected_token(msg : String? = nil, token : Token = @token)
+      iyi_check_python_colon
       token_str = token.type.eof? ? "EOF" : token.to_s.inspect
       if msg
         raise "unexpected token: #{token_str} (#{msg})", @token
@@ -8081,6 +8296,12 @@ module Iyi
       # as a call and then met its return type; both are answered.
       if token.type.ident? && (spelling = IYI_SPELLINGS[token.value.to_s]?)
         raise "unexpected token: #{token_str}: #{spelling}", @token
+      end
+      if iyi? && token.type.delimiter_start? && token.same?(@token) && (hint = iyi_string_start_hint)
+        raise "unexpected string: #{hint}", @token
+      end
+      if (match = @iyi_match_lookalike) && token.type.op_eq_gt?
+        raise "unexpected token: #{token_str}: #{iyi_no_match(match)}", @token
       end
       if (lookalike = @iyi_def_lookalike) && lookalike[1].try(&.line_number) == token.line_number
         raise "unexpected token: #{token_str}: `#{lookalike[0]}` is a call here, not a keyword - a function is `def name(args) : Type`", @token
@@ -8121,6 +8342,24 @@ module Iyi
       "void"    => "Nil",
     }
 
+    # iyi: Rust's primitive names, and the type each one is here. `usize`
+    # is an index or a size, and those are `Int32`.
+    IYI_RUST_TYPE_SPELLINGS = {
+      "i8"    => "Int8",
+      "i16"   => "Int16",
+      "i32"   => "Int32",
+      "i64"   => "Int64",
+      "i128"  => "Int128",
+      "u8"    => "UInt8",
+      "u16"   => "UInt16",
+      "u32"   => "UInt32",
+      "u64"   => "UInt64",
+      "f32"   => "Float32",
+      "f64"   => "Float64",
+      "usize" => "Int32",
+      "isize" => "Int32",
+    }
+
     # iyi: the first `fn`, `func` or `function` parsed as a command call
     # with a call for its argument - `fn f(x : Int32)` - and where. It
     # is what a stray `end` or a `: Type` after the parenthesis is about.
@@ -8131,6 +8370,47 @@ module Iyi
     # keyword with no construct open and it said so: "unexpected 'in': no
     # `case` is open for it", about a line with no `case` anywhere near it.
     @iyi_for_lookalike : {String, Location?}?
+
+    # iyi: where the first `match` parsed as a command call is - `match x`,
+    # Rust's and Scala's case - for the `in` or `=>` arm that fails under it.
+    @iyi_match_lookalike : Location?
+
+    private def iyi_no_match(match : Location?) : String
+      "`match` at line #{match.try(&.line_number)} is a call here, not a keyword - a value is matched " \
+      "with `case x`, `when 1 then ...` arms, `else` for the rest and `end` (`in` matches a type)"
+    end
+
+    # iyi: a string where none may start, and the word in front of it.
+    # `f"hello {name}"`, `"""` and `Puts "x"` were each "unexpected token:
+    # \"DELIMITER_START\"", the lexer's own name for a quote.
+    private def iyi_string_start_hint : String?
+      source = @reader.string
+      # A delimiter token's `start` is not where its quote is; its line and
+      # column are.
+      start = 0
+      (@token.line_number - 1).times { start = (source.byte_index('\n', start) || return) + 1 }
+      start += @token.column_number - 1
+      return unless start < source.bytesize && source.byte_at(start) == '"'.ord
+      if start >= 2 && source.byte_at(start - 1) == '"'.ord && source.byte_at(start - 2) == '"'.ord
+        return "there is no `\"\"\"`: a string literal may span lines (`\"a` on one line, `b\"` on the next), and a heredoc is `<<-TEXT`, its lines, then `TEXT`"
+      end
+      finish = start
+      while finish > 0 && source.byte_at(finish - 1).unsafe_chr.in?(' ', '\t')
+        finish -= 1
+      end
+      attached = finish == start
+      first = finish
+      while first > 0 && (source.byte_at(first - 1).unsafe_chr.ascii_alphanumeric? || source.byte_at(first - 1) == '_'.ord)
+        first -= 1
+      end
+      word = source.byte_slice(first, finish - first)
+      return if word.empty?
+      if attached && word.in?("f", "r", "b", "rb", "br", "fr", "rf", "u")
+        "there is no `#{word}\"...\"` prefix: every string interpolates, with `\#{...}` - `\"hello \#{name}\"`"
+      elsif word[0].ascii_uppercase?
+        "`#{word}` is a constant, and the name of a call is lower-case: `#{word.downcase} \"...\"`"
+      end
+    end
 
     def unexpected_token_in_atomic
       # iyi: the file ending inside a literal or a call is what

@@ -450,10 +450,17 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
     echo "  $name: cannot write its artifacts: $(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-140)"
     continue
   fi
-  if ! (cd "$work" && "$IYI" build --use-iyimod mods -o from-artifact "$source") \
-       > "$work/use.log" 2>&1; then
+  (cd "$work" && "$IYI" build --use-iyimod mods -o from-artifact "$source") \
+    > "$work/use.log" 2>&1
+  use_status=$?
+  if [ "$use_status" -ne 0 ]; then
     unconsumable="$unconsumable $name"
-    echo "  $name: $(grep -m1 -E 'Error|BUG|undefined' "$work/use.log" | cut -c1-140)"
+    # A failure with no such line printed the name and nothing after it:
+    # std_compress_exercise did, once, and the next runs consumed it
+    # cleanly. The status and the log's last line say what it was.
+    said="$(grep -m1 -E 'Error|BUG|undefined' "$work/use.log")"
+    [ -n "$said" ] || said="exits $use_status: $(tail -n 1 "$work/use.log")"
+    echo "  $name: $(printf '%s' "$said" | cut -c1-140)"
     continue
   fi
   "$work/from-source" > "$work/source.out" 2>&1

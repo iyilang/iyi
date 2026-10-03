@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **`GC.collect` no longer keeps a returned helper's data alive through a
+  stale word in the collector's own frames.** The collector's frames are
+  built over what earlier, deeper calls left on the stack, and a slot one
+  of them never wrote still held the helper's array: in
+  `bench/root_exercise.iyi` the collection after a helper built 32 MB and
+  returned still marked 33,566,736 bytes of it under --release, from a word
+  184 bytes under the caller's stack pointer. `collect` now zeroes 2 KiB of
+  dead stack under itself first, as Boehm's `GC_clear_a_few_frames` does. A
+  debug build's own `collect` frame is above that stretch and can still
+  hold such a word, so the check asserts in the --release build.
+  `bench/root_exercise.sh` runs it; the old prelude answered `dead helper:
+  33566736 bytes the helper built were still marked after it returned`.
+
 - **References, prepareRename and rename on a type's name say it is a
   type instead of answering null.** `textDocument/references` and
   `prepareRename` on `Square` answered null, which an editor and an

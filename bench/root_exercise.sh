@@ -169,14 +169,14 @@ if [ "$EXERCISED" = no ]; then
 else
   for check in "stack bounds:" "global range:" "stack root:" "register root:" \
                "global root:" "interior pointer:" "not a pointer:" "large walk:" "arena tail:" \
-               "freed chunk:" "freed large:" "many roots:" "maps parser:" \
+               "freed chunk:" "freed large:" "many roots:" "maps parser:" "dead helper:" \
                "all root checks passed"; do
     if ! grep -q "$check" "$WORK/roots-gc.out" 2>/dev/null; then
       echo "  MISSING: $check"
       status=1
     fi
   done
-  [ "$status" -eq 0 ] && echo "  bounds, stack, register, global, interior, rejection, large walk, tail, freed, many and the maps parser all reported"
+  [ "$status" -eq 0 ] && echo "  bounds, stack, register, global, interior, rejection, large walk, tail, freed, many, the maps parser and the dead helper all reported"
 fi
 
 echo
@@ -197,7 +197,9 @@ echo "== the same program with optimisation on"
 # build that changes register allocation is the one worth running twice. The
 # register check names its own premises and fails when one is gone, so this
 # run is not a formality: it is the one that would catch the ordering that
-# lets the optimiser reuse the register before the scan reaches it.
+# lets the optimiser reuse the register before the scan reaches it. The
+# dead-helper check is asserted only here, where `IyiMark.collect` is
+# inlined into the program's frame and zeroes everything under it.
 build_and_run "release" roots-release --release
 if [ "$EXERCISED" = no ]; then
   echo "  nothing was exercised here, so the optimised run is unmeasured too"

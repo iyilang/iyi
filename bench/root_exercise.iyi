@@ -506,6 +506,34 @@
     print "  fiber root: an address held only on a suspended fiber's stack was found by the walk\n"
   {% end %}
 
+  # --- What a returned helper built is freed by the next collection ---
+  # The collector's frames are built over the stack the helper's calls
+  # used, and a slot one of them never writes still held the helper's
+  # array: under --release the collection after `build_and_drop` marked
+  # all 32 MB of it, from a word 184 bytes under this frame's stack
+  # pointer. `IyiMark.collect` zeroes the dead stack under itself first
+  # (`IyiRoots.clear_dead_stack`). Asserted in the optimised build, where
+  # `collect` is inlined here: a debug build's own `collect` frame sits
+  # above the zeroed stretch, and a word in it kept the same 32 MB there.
+  def build_and_drop(arrays : Int32) : Int32
+    made = [] of Array(Int64)
+    arrays.times { made << Array(Int64).new(8192, 7_i64) }
+    made.size
+  end
+
+  IyiMark.collect
+  marked_before = IyiMark.bytes_marked
+  built = build_and_drop(512)
+  IyiMark.collect
+  {% if flag?(:release) %}
+    if IyiMark.bytes_marked > marked_before + 8_388_608_u64
+      raise "dead helper: #{count(IyiMark.bytes_marked - marked_before)} bytes the helper built were still marked after it returned"
+    end
+    print "  dead helper: #{built} arrays of 64 KB a returned helper built were freed by the next collection\n"
+  {% else %}
+    print "  dead helper: #{built} arrays of 64 KB built and dropped, asserted in the optimised build\n"
+  {% end %}
+
   print "  all root checks passed\n"
   __iyi_exit(status)
 {% else %}

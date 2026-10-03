@@ -3806,6 +3806,30 @@ require "./file"
         value
       end
 
+      # Zeroes the dead stack under a collection about to run, as Boehm's
+      # `GC_clear_a_few_frames` does. The collector's frames are built over
+      # what earlier, deeper calls left there, and a slot one of them never
+      # writes is scanned with that stale word in it: the dead helper in
+      # `bench/root_exercise.iyi` built 32 MB, returned, and the next
+      # `IyiMark.collect` under --release still marked all of it, reached
+      # from a word 184 bytes under the caller's stack pointer. Two KiB is
+      # several times the deepest collector stack measured (448 bytes, a
+      # debug build). On Windows the committed limit bounds it, because a
+      # touch below the guard page faults. A debug build's own `collect`
+      # frame is above the cleared stretch and can still hold such a word.
+      @[NoInline]
+      def self.clear_dead_stack : Nil
+        high = stack_pointer
+        low = high - 2048_u64
+        {% if flag?(:win32) %}
+          low = stack_limit if low < stack_limit
+        {% end %}
+        while low < high
+          IyiHeap.write64(low, 0_u64)
+          low = low + 8_u64
+        end
+      end
+
       # The high end, discovered once. The main thread's stack grows down
       # from a fixed top on both targets, so the number does not change over
       # a run and reading it lazily is the same answer as recording it at
@@ -6760,6 +6784,7 @@ require "./file"
       # the sweep is eager here — every arena, the large list — where the
       # trigger's collections leave the sweep to the allocator.
       def self.collect : Nil
+        IyiRoots.clear_dead_stack
         IyiRuntimeLock.lock
         # A collection already running beside the program is finished by
         # its helper; this one waits for it rather than racing it.

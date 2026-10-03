@@ -5602,9 +5602,12 @@ module Iyi
 
     # The cells a terminal draws the text in front of *column* in, a wide
     # character taking two. Counted in characters, `x = "日本" # c` over
-    # `yy = "ab" # d` put the first `#` two cells right of the second.
+    # `yy = "ab" # d` put the first `#` two cells right of the second. In an
+    # iyi file only: the other language's library is held to its own
+    # formatter, which counts characters, and its doc comments' wide
+    # examples were realigned by this.
     private def cells_before(line, column)
-      return column if line.ascii_only?
+      return column if line.ascii_only? || !Lexer.iyi_source?(@filename)
 
       cells = 0
       line.each_char_with_index do |char, index|

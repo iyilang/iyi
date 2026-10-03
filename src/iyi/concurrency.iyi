@@ -19,18 +19,18 @@
 #   select / when / else      # over any mix of arms; the expansion's
 #                             # library half is at the bottom of this file
 #
-# Cancellation (III.4.2) belongs to the group: the first task whose value is
-# an error member cancels its siblings. A cancelled fiber is not torn down —
-# nothing here unwinds — it is *woken*, and every blocking primitive answers
-# `Cancelled` from then on. A task written with `!` therefore drains out of
-# its own accord, which is III.1.2 doing cancellation's plumbing for free.
+# Cancellation (III.4.2) belongs to the group: a task whose value is an
+# error member, a block left early, or a cancel of the task holding the
+# group open cancels the tasks still running. A cancelled fiber is not
+# torn down — nothing here unwinds — it is *woken*, and every blocking
+# primitive answers `Cancelled` from then on. A task written with `!`
+# therefore drains out of its own accord, which is III.1.2 doing
+# cancellation's plumbing for free.
 #
 # What is deliberately absent, so nobody reads silence as an accident:
 # `Share` (III.4.4) gates nothing until a second thread exists, because one
-# thread interleaves at parks only and cannot race; and the typed
-# `group do ... end!` return (III.4.1's final shape) is compiler work this
-# runtime has to exist before anyone can build. Panics at task boundaries
-# (III.1.4) are built and live at the bottom of the scheduler: a panicking
+# thread interleaves at parks only and cannot race. Panics at task
+# boundaries (III.1.4) live at the bottom of the scheduler: a panicking
 # task drains its defers, tells its group, and dies alone.
 #
 # Linux and darwin arm64, through each platform's own doorway: raw
@@ -435,14 +435,16 @@ class IyiFiber
   # Who waits for this fiber to finish: the first of them, and through
   # `next_joiner` the rest, chained through the waiters themselves. One
   # field held one joiner, and a second fiber reading the same running
-  # task's `value` panicked "task already has a joiner" - a rule written
-  # nowhere, and one a read after the task finished never met. `awaited`
-  # is the task a fiber waits on in that chain, and `joining` the group
+  # task's `value` panicked "task already has a joiner". `awaited` is
+  # the task a fiber waits on in that chain, and `joining` the group
   # whose join it waits in, so a deadlock can take it off either one.
   property joiner : IyiFiber?
   property next_joiner : IyiFiber?
   property awaited : IyiFiber?
   property joining : IyiGroup?
+  # The innermost group this fiber has open, the rest through
+  # `IyiGroup#outer`: what a cancel of the fiber reaches (`cancel`).
+  property open_group : IyiGroup?
   # Woken to report a deadlock on its own stack (`IyiScheduler.deadlock`).
   property deadlocked : Bool
 
@@ -549,6 +551,7 @@ class IyiFiber
     @next_joiner = nil
     @awaited = nil
     @joining = nil
+    @open_group = nil
     @deadlocked = false
     @deadline = 0_i64
     @io_timed = false
@@ -1800,7 +1803,7 @@ class IyiScheduler
 
   # III.4.2: cancellation reaches a *blocked* fiber. Whatever the fiber is
   # parked on, it is unparked here and its next (or current) blocking
-  # primitive answers `Cancelled`.
+  # primitive answers `Cancelled`; running or runnable, the flag is enough.
   def self.cancel(fiber : IyiFiber) : Nil
     return if fiber.state == IyiFiberState::Done
     return if fiber.cancelled
@@ -1829,7 +1832,6 @@ class IyiScheduler
         # operation provably over at every wake. It changes cancellation
         # for every kind of handle on this platform — files, the console,
         # pipes — and each would need its own measurement first.
-        fiber.cancelled = true
         LibC.CancelIoEx(fiber.wait_handle, fiber.wait_overlapped.as(Void*))
         io_remove(fiber)
         enqueue(fiber)
@@ -1843,9 +1845,15 @@ class IyiScheduler
       # reads, and every wake skips a node that is no longer current.
       enqueue(fiber)
     end
-    # Running or runnable: the flag is enough. Joining (state 5) is left
-    # to wake when its target finishes, which a failing group guarantees
-    # by cancelling every child.
+    # And it reaches what the fiber started: the tasks of every group it
+    # holds open, so a join it waits in - a park no wake above ends - ends
+    # as they do. A task joining a group of its own was left to wait, and
+    # its grandchild's 2-second sleep ran in full after the group failed.
+    group = fiber.open_group
+    while group.is_a?(IyiGroup)
+      group.cancel_children
+      group = group.outer
+    end
   end
 
   # ── The poller ───────────────────────────────────────────────────────
@@ -2757,21 +2765,32 @@ class IyiGroup
   getter first_failure : UInt64
   @first_child : IyiFiber?
   @joiner : IyiFiber?
+  # The group its owner had open when this one opened (`open_group`).
+  getter outer : IyiGroup?
+  # Joined, so its scope is over: a handle kept past it spawned a task
+  # that never ran, and nothing said so (III.4.1).
+  @ended : Bool
 
   def initialize
     @live = 0
     @first_failure = 0_u64
     @first_child = nil
     @joiner = nil
+    @ended = false
+    @outer = IyiScheduler.current.open_group
+    IyiScheduler.current.open_group = self
   end
 
   # Start a task. The block is compiled once and carried as a proc; its
   # return value is the task's, and an error member is a failure the
   # group acts on (III.4.3): the first cancels the siblings, and the task
-  # it is told on is `first_failure`, which the typed group answers.
+  # it is told on is `first_failure`, which the typed group answers. A
+  # task a cancelled one starts is cancelled from its first wait on.
   def spawn(&block : -> T) : IyiTask(T) forall T
+    raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
+    fiber.cancelled = IyiScheduler.current.cancelled
     task = IyiTask(T).new(fiber)
     runner = self
     install(fiber) do
@@ -2841,20 +2860,21 @@ class IyiGroup
     child_finished(!cancelled)
   end
 
-  # :nodoc: — `group`'s deferred half. The scope cannot be left until
-  # every task has finished, and `defer` is what guarantees "cannot":
-  # a `return` out of the block still runs this.
-  def join : Nil
+  # :nodoc: — `group`'s deferred half, and the typed group's explicit
+  # one: the scope's end, after which the group takes no task. It cannot
+  # be left until every task has finished, and `defer` is what guarantees
+  # "cannot". *early* says the block did not reach its end - a `return`,
+  # a `break`, a `!` - and the owner stops what it started before it
+  # waits for it (III.4.2), as it does leaving on a panic: `return 5`
+  # beside a task's 2-second sleep took the 2 seconds, and a panic beside
+  # a parked accept loop never ended.
+  def join(early : Bool = false) : Nil
     # An `exit` runs this task's cleanups and ends the process, the other
     # tasks with it: a group's join is one of those cleanups, and it waited
     # for every task - `exit(4)` beside a sibling's minute-long sleep took
     # the minute.
     return if IyiScheduler.exiting?
-    # An owner leaving on a panic stops what it started before it waits for
-    # it, as a failing child stops its siblings: the panic was printed and
-    # the program went on running until a parked accept loop or a long
-    # sleep beside it ended by itself, which a server's never does.
-    cancel_children if IyiScheduler.current.panicked
+    cancel_children if early || IyiScheduler.current.panicked
     while @live > 0
       me = IyiScheduler.current
       @joiner = me
@@ -2863,6 +2883,8 @@ class IyiGroup
       IyiScheduler.reschedule
       me.joining = nil
     end
+    @ended = true
+    IyiScheduler.current.open_group = @outer
     # The boundary owes a re-raise for any panic *nobody read*: a bug
     # observed through its handle already became a `Panicked` value
     # there, and re-raising it too would report one bug twice. The
@@ -2900,14 +2922,18 @@ end
 
 # III.4.1: concurrency is introduced by a scope, never by a call. The
 # join is deferred, so no exit leaves a task running — not a `return`,
-# not an error leaving through `!`. The group answers what its block
-# answers, which is how the typed form (III.4.9) gets a value out: the
-# expansion appends the extraction to the block, and the block stays a
-# block, so nothing a task assigned leaks into the enclosing scope.
+# not an error leaving through `!` — and one before the block's end
+# cancels them first. The group answers what its block answers, which is
+# how the typed form (III.4.9) gets a value out: the expansion appends
+# the extraction to the block, and the block stays a block, so nothing a
+# task assigned leaks into the enclosing scope.
 def group(& : IyiGroup -> U) : U forall U
   g = IyiGroup.new
-  defer g.join
-  yield g
+  early = true
+  defer g.join(early)
+  answer = yield g
+  early = false
+  answer
 end
 
 # ── Channel — III.4.6 ──────────────────────────────────────────────────

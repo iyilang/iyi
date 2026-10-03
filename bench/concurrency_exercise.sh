@@ -470,6 +470,42 @@ if ! grep -q "this group answers its block's last expression" build-bang-tail.lo
   exit 1
 fi
 
+# ── 3f. A task spawned on a group whose block has ended is a panic ────────
+# A handle can be kept past its block (`saved = g`), and a task spawned on
+# it there had no scope left to join it: the program printed "leak
+# returning", exited 0, and the task never ran. III.4.1 says a task cannot
+# outlive the scope that started it, so the spawn is the bug, said there.
+step "a task spawned on a group whose block has ended is refused at run time"
+cat > late_spawn.iyi <<'IYI'
+module late_spawn
+
+saved = nil.as(IyiGroup?)
+group do |g|
+  saved = g
+  g.spawn { 0 }
+end
+if late = saved
+  late.spawn do
+    puts "the late task ran"
+    0
+  end
+end
+puts "the late spawn returned"
+IYI
+if ! "$IYI" build late_spawn.iyi -o late_spawn > build-late-spawn.log 2>&1; then
+  echo "late spawn probe failed to build:"
+  tail -5 build-late-spawn.log
+  exit 1
+fi
+timeout 30 ./late_spawn > late_spawn.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q 'panic: a task spawned on a group whose block has ended' late_spawn.txt ||
+   grep -q '^the late' late_spawn.txt; then
+  echo "a task spawned on an ended group exited $code:"
+  cat late_spawn.txt
+  exit 1
+fi
+
 # ── 4. Failure proof: the interleaving assert is reachable ────────────────
 step "failure proof: a wrong order is refused"
 sed 's/== "bababa"/== "aaabbb"/' "$REPO/bench/concurrency_exercise.iyi" > misordered.iyi

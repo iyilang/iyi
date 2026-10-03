@@ -4,6 +4,33 @@
 
 ### Fixed
 
+- **A group cancels its tasks when its block is left early, and when
+  the task holding it open is cancelled.** SPEC III.4.2 names three
+  causes and only a failing child's was built. `return 5` out of a
+  block beside a task's 2-second sleep answered after 2,000 ms with the
+  sleep run in full, and a task's own group was not stopped when the
+  group around that task failed: its grandchild slept the full 2
+  seconds, because a task parked in a join was the one park no cancel
+  reached. A `return`, `break` or `!` out of the block now cancels what
+  it started before the join waits (0 ms), and cancelling a task
+  cancels the tasks of every group it holds open, wherever it is
+  parked - in their join, reading a typed group's values, or asleep in
+  the block - and a task it starts afterwards starts cancelled.
+  `bench/concurrency_exercise.iyi` step 8b checks each; the old runtime
+  failed it with "leaving a group block early took 30013 ms beside 10 s
+  sleeps", and the runtime without the walk over held groups with "a
+  failing group took 10018 ms to stop its grandchildren".
+
+- **A task spawned on a group whose block has ended is a panic.** A
+  handle kept past its block (`saved = g`) still spawned, and the task
+  had no scope left to join it: it never ran, nothing reported it, and
+  the program printed "the late spawn returned" and exited 0 (reading
+  the task's `value` ran it outside any scope). III.4.1 says a task
+  cannot outlive the scope that started it, so the spawn panics now:
+  "a task spawned on a group whose block has ended: no scope is left to
+  join it", exit 1. `bench/concurrency_exercise.sh` step 3f checks it;
+  the old runtime exited 0 there.
+
 - **`HTML.unescape` reads a name without its `;` only where HTML5 does:
   `amp`, `lt`, `gt`, `quot` and the Latin-1 names.** Any of the module's
   253 names matched without a `;`, so `?q=x&lang=en` came out

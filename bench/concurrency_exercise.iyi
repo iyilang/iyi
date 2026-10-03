@@ -459,6 +459,112 @@ leaves_early(flag)
 fail("a `return` out of the group block left its task running") unless flag.value == 1
 puts "an early return still joined the group"
 
+# ── 8b. A group left early, or cancelled from outside, cancels its tasks ─
+#
+# III.4.2: "A group cancels its remaining children when the block leaves
+# early, when a child fails under the group's policy, or when an enclosing
+# group is cancelled." Only the policy held: `return 5` out of a block
+# beside a task's 2-second sleep took the 2 seconds and the sleep answered
+# in full, and so did a task's own group when the group around the task
+# failed - its owner waited in the inner join, or on a typed group's
+# values, and no cancel reached either park. Every sleep here is 10 s,
+# against a 5 s bound; a task started by a cancelled one is cancelled too.
+def napped(ms : Int32) : String
+  sleep(ms).is_a?(Cancelled) ? "cancelled" : "slept"
+end
+
+def refusal(fails : Bool) : Int32 | TaskFailed
+  return TaskFailed.new if fails
+  0
+end
+
+def leave_by_return(log : Array(String)) : Int32
+  group do |g|
+    g.spawn do
+      log << "return " + napped(10000)
+      0
+    end
+    return 5
+  end
+  0
+end
+
+def leave_by_bang(log : Array(String)) : Int32 | TaskFailed
+  group do |g|
+    g.spawn do
+      log << "! " + napped(10000)
+      0
+    end
+    refusal(true)!
+  end
+  0
+end
+
+def typed_inner(log : Array(String)) : Tuple(String, Int32) | Cancelled | Panicked
+  group do |h|
+    a = h.spawn do
+      saw = napped(10000)
+      log << "typed " + saw
+      saw
+    end
+    b = h.spawn { 2 }
+  end!
+end
+
+early = [] of String
+started = __iyi_monotonic_ns
+fail("a `return 5` out of a group block answered something else") unless leave_by_return(early) == 5
+fail("a `!` out of a group block did not leave as the error") unless leave_by_bang(early).is_a?(TaskFailed)
+group do |g|
+  g.spawn do
+    early << "break " + napped(10000)
+    0
+  end
+  break
+end
+fail("leaving a group block early took #{elapsed_ms(started)} ms beside 10 s sleeps") if elapsed_ms(started) >= 5000
+fail("leaving a group block early did not cancel its task: #{early}") unless early == ["return cancelled", "! cancelled", "break cancelled"]
+puts "a block left by `return`, `!` or `break` cancelled its sleeping task, under 5 s"
+
+outer = [] of String
+started = __iyi_monotonic_ns
+group do |g|
+  g.spawn do
+    group do |h|
+      h.spawn do
+        outer << "joined " + napped(10000)
+        0
+      end
+    end
+    0
+  end
+  g.spawn do
+    answered = typed_inner(outer)
+    outer << "typed answered " + (answered.is_a?(Tuple(String, Int32)) ? answered[0] : "an error")
+    0
+  end
+  g.spawn do
+    outer << "owner " + napped(10000)
+    group do |h|
+      h.spawn do
+        outer << "started late " + napped(10000)
+        0
+      end
+    end
+    0
+  end
+  g.spawn do
+    sleep(20)
+    TaskFailed.new
+  end
+end
+fail("a failing group took #{elapsed_ms(started)} ms to stop its grandchildren") if elapsed_ms(started) >= 5000
+heard = outer.sorted.join(", ")
+unless heard == "joined cancelled, owner cancelled, started late cancelled, typed answered cancelled, typed cancelled"
+  fail("a cancel did not reach a task's own group: #{heard}")
+end
+puts "a failing group cancelled its tasks' own groups, joined, read or started late, under 5 s"
+
 # ── 9. A rendezvous send parks until its value is taken ─────────────────
 #
 # `Channel(T).new` with no capacity: the sender cannot leave `send` until

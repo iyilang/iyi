@@ -170,6 +170,9 @@ module Iyi::Lsp
     # their turn, and whether the client's side has ended.
     @pending = Deque(Bytes).new
     @eof = false
+    # A client's `workspace/diagnostic` in flight, by id: its params, and
+    # the items answered so far by the workers that carried it (`pulled`).
+    @pulls = {} of String => {JSON::Any?, Hash(String, JSON::Any)}
 
     def run : Nil
       spawn do
@@ -342,6 +345,10 @@ module Iyi::Lsp
           @clean.delete(uri)
           @focus = nil if @focus == uri
         end
+      when "workspace/diagnostic"
+        # Kept to be carried on in a successor where this worker stops at
+        # its bound (`pulled`).
+        @pulls[id.to_json] = {params, {} of String => JSON::Any} if id && !id.raw.nil?
       when "shutdown"
         @shut_down = true
       when "exit"
@@ -498,7 +505,10 @@ module Iyi::Lsp
           # There is no compiler to run any more — the binary this
           # server started from is gone. Saying so is the honest answer;
           # dying is not, because the client is holding open buffers.
-          unstartable(id) if id && request
+          if id && request
+            @pulls.delete(id.to_json)
+            unstartable(id)
+          end
           return
         end
         @worker = worker
@@ -562,6 +572,10 @@ module Iyi::Lsp
 
       key = id.to_json
       waited = worker.outstanding.delete(key)
+      if waited && (pull = @pulls.delete(key))
+        return unless merged = pulled(worker, key, pull, table, body)
+        body = merged
+      end
       # An answer to a question the client did not ask: the proxy's own
       # warm-up, or a replayed `initialize` whose answer the client
       # already has. Dropping it is the whole trick that lets a worker be
@@ -572,6 +586,80 @@ module Iyi::Lsp
         @outbox.send body
       end
       retire(warm_now: false) if worker.idle? && worker.spent?
+    end
+
+    # The answer to a client's workspace pull, from every worker that
+    # carried it: the items this one judged added to the ones before it.
+    # Nil where the pull goes on in a successor - this worker stopped at
+    # its bound (`iyi/partial`) with nothing else in flight, and is
+    # retired here. Each successor is handed the ids judged so far, and
+    # answers those files `unchanged`, which the client has never had:
+    # the full item from the worker that judged them is the one kept.
+    private def pulled(worker : Worker, key : String, pull : {JSON::Any?, Hash(String, JSON::Any)},
+                       table : Hash(String, JSON::Any), body : Bytes) : Bytes?
+      params, judged = pull
+      result = table["result"]?.try(&.as_h?)
+      items = result.try(&.["items"]?).try(&.as_a?)
+      # A refusal, a cancel, a retrigger: as it came.
+      return body unless result && items
+      items.each do |item|
+        next unless (fields = item.as_h?) && (uri = fields["uri"]?.try(&.as_s?))
+        next if judged[uri]?.try(&.["kind"]?).try(&.as_s?) == "full"
+        judged[uri] = item
+      end
+      if result["iyi/partial"]?.try(&.as_bool?) && worker.idle?
+        retire(warm_now: false)
+        if (successor = @worker) && !successor.same?(worker)
+          @pulls[key] = pull
+          post(continued_pull(key, params, judged), JSON.parse(key))
+          return
+        end
+      end
+      JSON.build do |json|
+        json.object do
+          json.field "jsonrpc", "2.0"
+          json.field "id" { json.raw key }
+          json.field "result" do
+            json.object do
+              json.field "items" do
+                json.array { judged.each_value(&.to_json(json)) }
+              end
+            end
+          end
+        end
+      end.to_slice
+    end
+
+    # The client's pull again, as the client sent it, with the files
+    # judged so far among the ids it already holds.
+    private def continued_pull(key : String, params : JSON::Any?, judged : Hash(String, JSON::Any)) : Bytes
+      fields = params.try(&.as_h?)
+      JSON.build do |json|
+        json.object do
+          json.field "jsonrpc", "2.0"
+          json.field "id" { json.raw key }
+          json.field "method", "workspace/diagnostic"
+          json.field "params" do
+            json.object do
+              fields.try &.each do |name, value|
+                json.field(name) { value.to_json(json) } unless name == "previousResultIds"
+              end
+              json.field "previousResultIds" do
+                json.array do
+                  fields.try(&.["previousResultIds"]?).try(&.as_a?).try &.each(&.to_json(json))
+                  judged.each do |uri, item|
+                    next unless item["kind"]?.try(&.as_s?) == "full" && (value = item["resultId"]?)
+                    json.object do
+                      json.field "uri", uri
+                      json.field "value" { value.to_json(json) }
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end.to_slice
     end
 
     # A worker's stdout closed. Whoever was waiting is told by the code
@@ -795,6 +883,7 @@ module Iyi::Lsp
     # the message because "the server broke" without a signal number is
     # a bug report nobody can act on.
     private def refuse(key : String, status : Process::Status?) : Nil
+      @pulls.delete(key)
       how =
         if status.nil?
           "it is gone"

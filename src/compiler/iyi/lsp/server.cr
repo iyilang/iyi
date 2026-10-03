@@ -999,6 +999,8 @@ module Iyi::Lsp
       # protocol has for exactly this and which the editor answers by
       # asking again when the typing stops.
       answers = [] of {String, String, Array({Int32, Int32, Int32, Diag})?}
+      compiled = 0
+      partial = false
       uris.each do |uri|
         next unless @documents.has_key?(uri) || File.file?(path_of(uri))
         result_id = ids[path_of(uri)]? || "0"
@@ -1019,6 +1021,20 @@ module Iyi::Lsp
         return respond_cancelled(id) if @cancelled.delete(id.to_json)
         return respond_retrigger(id) if waiting_request?(id)
 
+        # The worker's bound, between two files. One pull compiled every
+        # file in one process with no collector, about 40 MB apiece, and
+        # gave nothing back until it answered: 1,443 MB for the 36 files
+        # of `samples/iyi`, 5.4 GB for 145, where the proxy retires a
+        # worker at `Proxy::RETIRE_FOOTPRINT` - but only between
+        # requests. So the pull answers the files it has judged and says
+        # it stopped short (`iyi/partial`), and the proxy hands the rest
+        # to a successor (`Proxy#pulled`). One file per answer at the
+        # least, so every answer gets further.
+        if compiled > 0 && Lsp.footprint >= Proxy::RETIRE_FOOTPRINT
+          partial = true
+          break
+        end
+
         # A file the server may not read has no verdict, and is left out as
         # the walk leaves out a directory it may not list.
         rows =
@@ -1028,6 +1044,7 @@ module Iyi::Lsp
             next
           end
         answers << {uri, result_id, rows}
+        compiled += 1
       end
 
       respond(id) do |json|
@@ -1055,6 +1072,9 @@ module Iyi::Lsp
               end
             end
           end
+          # Not LSP: read and taken off by the proxy, and a client that
+          # drives the worker alone reads a report of the files judged.
+          json.field "iyi/partial", true if partial
         end
       end
     end

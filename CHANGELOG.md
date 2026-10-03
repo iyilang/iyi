@@ -4,6 +4,20 @@
 
 ### Fixed
 
+- **One `workspace/diagnostic` stays near the worker's memory bound.** A
+  pull compiled every file of the workspace in one worker, which has no
+  collector, and freed nothing until it answered; the proxy retires a
+  worker at 512 MB, but only between requests. Measured with the old
+  server: 1,443 MB of working set for the 36 files of `samples/iyi`,
+  3.1 GB for the 92 of `bench` and 5.4 GB for 145. The worker stops
+  between two files once it has cost 512 MB and answers the files it
+  judged; the proxy retires it, asks a fresh worker for the rest with
+  those files' ids, and answers the client once with every file: 553 MB
+  for `samples/iyi` and 512 MB for `bench` now. `bench/lsp_memory.py`
+  ("a workspace pull is bounded too") pulls `samples/iyi` cold and again
+  with the ids it was given, which must be all `unchanged`, under 760 MB;
+  the old server peaked at 1,329 MB there.
+
 - **Renaming a call to a prelude def is refused, before any workspace
   walk.** `puts` renamed to `say` from a buffer answered a WorkspaceEdit
   for the toolchain's own `src/iyi/io.iyi`, line 447 (`def puts(text :

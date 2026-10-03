@@ -38,6 +38,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -457,6 +458,48 @@ def binary_gone():
          f"worker(s) now {workers(client.proc.pid, {os.path.normcase(binary)})}")
     client.proc.kill()
 
+
+def workspace_pull(argv):
+    """`workspace/diagnostic` over `samples/iyi`, cold, and the peak tree
+    megabytes while it runs; then the same pull with the ids it handed
+    out, which is every file `unchanged` only if the first answer judged
+    every file. Returns the peak, the files judged, and whether the
+    second answer said nothing new.
+
+    One pull compiled every file in one worker and gave nothing back until
+    it answered: 1,443 MB for these 36 files, 5.4 GB for 145, against the
+    512 MB a worker is retired at - and retirement waited for the pull to
+    end. A worker stops at that bound now, and the proxy carries the rest
+    of the pull in a fresh one; the client still gets one answer."""
+    root = REPO / "samples" / "iyi"
+    client = Client(argv)
+    client.send("initialize", {"processId": None, "rootUri": root.as_uri(),
+                               "capabilities": {}})
+    client.send("initialized", {}, wait=False)
+    # Sampled while the pull runs, not after it: what a pull cost is gone
+    # the moment its worker is retired.
+    peak, pulling = [0], [True]
+
+    def sample():
+        while pulling[0]:
+            peak[0] = max(peak[0], tree_mb(client.proc.pid))
+            time.sleep(0.25)
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
+    reply = client.send("workspace/diagnostic", {"previousResultIds": []})
+    pulling[0] = False
+    sampler.join()
+    items = (reply.get("result") or {}).get("items", [])
+    previous = [{"uri": item["uri"], "value": item["resultId"]} for item in items]
+    again = client.send("workspace/diagnostic", {"previousResultIds": previous})
+    kinds = [item["kind"] for item in (again.get("result") or {}).get("items", [])]
+    client.send("shutdown", {})
+    client.send("exit", {}, wait=False)
+    client.proc.wait(timeout=30)
+    whole = bool(items) and len(kinds) == len(items) and all(kind == "unchanged" for kind in kinds)
+    return peak[0], len(items), whole
+
+
 def main():
     # A step takes seconds; five minutes with none finished is a server
     # that stopped answering, named and killed rather than waited on.
@@ -504,6 +547,17 @@ def main():
          bool(first) and first == last,
          f"{len(first)} item(s) for `s.up`, identical" if first == last
          else f"{first} -> {last}")
+
+    peak, judged, whole = workspace_pull(argv)
+    detail = (f"{judged} files of samples/iyi in one answer"
+              f"{', every one' if whole else ', not every one'}, peak {peak} MB")
+    if not measured:
+        step("a workspace pull is bounded too", whole,
+             detail + " (no /proc here; unmeasured)")
+    else:
+        step("a workspace pull is bounded too",
+             whole and peak <= TYPING_CEILING_MB,
+             detail + f", bound {TYPING_CEILING_MB} MB")
 
     # A rebuild unlinks the binary under a running session, which
     # `lsp_session.py` step 46 holds for the process the editor talks to.

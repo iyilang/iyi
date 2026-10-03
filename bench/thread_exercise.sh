@@ -34,6 +34,10 @@
 #      and as many computing stopped by collections, held there to 60 ms a
 #      stop; with a failure proof each - the lock's yield removed, and the
 #      suspends asked one at a time.
+#  4c. On Windows held to one core, five threads start and are joined
+#      beside a thread that collects in a loop, and beside one that takes
+#      the runtime lock in a loop, each within 10 s; with the lock's count
+#      and the collection's yield taken out a run never ends.
 #   5. Failure proof: the thread-root walk removed from a copy of the
 #      prelude, and a thread's list — reachable from its stopped frames
 #      alone — is swept out from under it; the program exits 1 naming the
@@ -370,8 +374,8 @@ case "$(uname -s)" in
     step "failure proof: a lock that only spins is caught"
     mkdir -p spinning/iyi
     cp "$REPO"/src/iyi/*.iyi spinning/iyi/
-    awk '/^        IyiThread\.yield_cpu if \(spins = spins &\+ 1\) & 127 == 0$/ { found = 1; next } { print } END { if (!found) exit 3 }' \
-      "$REPO/src/iyi/prelude.iyi" > spinning/iyi/prelude.iyi || { echo "the lock's yield is not in the prelude any more"; exit 1; }
+    awk '/^        since = released$/ { after = 1 } after && /^        yield_cpu$/ { found = 1; after = 0; next } { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > spinning/iyi/thread.iyi || { echo "the lock's yield is not in thread.iyi any more"; exit 1; }
     if ! IYI_PATH="$WORK/spinning${PSEP}$REPO/src" "$IYI" build --release crowd.iyi -o crowd-spinning > build-spinning.log 2>&1; then
       cat build-spinning.log; exit 1
     fi
@@ -406,6 +410,102 @@ case "$(uname -s)" in
     [ -n "$caught" ] || { echo "the stop check did not fire in five runs:"; tail -3 serial.txt; exit 1; }
     printf '  exits 1 on run %s at "%s"\n' "$caught" "$(grep -m1 '^FAIL: stop:' serial.txt)"
     fi
+    ;;
+esac
+
+# ── 4c. Windows: on one core a waiter gets the runtime lock ──────────────
+# The lock was a plain test-and-set, and a holder on one core runs its
+# unlock and its next lock back to back: a spinner ran only while the
+# holder was preempted, so with the lock held. Under `start /affinity 1`
+# a thread starting beside one looping collections waited in its first
+# allocation for minutes, and ten beside one taking the lock in a loop
+# waited more than a minute.
+# A spinner that sees no release in 128 turns counts itself on the lock's
+# word now, and a free lock with one counted is its first; a collection
+# gives the core away once it has released the threads it stopped, which
+# was nearly all the time they had. The proof takes both out, and a run
+# held to one core does not end.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    step "held to one core, threads start beside a thread collecting in a loop and one taking the lock in a loop"
+    cat > starve.iyi <<'IYI'
+class Flag
+  getter stop : Atomic(Int64)
+  getter turns : Atomic(Int64)
+
+  def initialize
+    @stop = Atomic(Int64).new(0_i64)
+    @turns = Atomic(Int64).new(0_i64)
+  end
+end
+
+def fail(message : String) : Nil
+  print "FAIL: #{message}\n"
+  __iyi_exit(1)
+end
+
+# Five threads started and joined one after another beside a thread that
+# collects in a loop, or takes the runtime lock in one and holds it for
+# 2,000 increments a turn; answers the nanoseconds the five took.
+def beside(collect : Bool) : UInt64
+  flag = Flag.new
+  busy = IyiThread.start do
+    while flag.stop.get == 0_i64
+      if collect
+        IyiMark.collect
+      else
+        IyiRuntimeLock.lock
+        held = 0
+        while held < 2000
+          flag.turns.add(1_i64)
+          held = held + 1
+        end
+        IyiRuntimeLock.unlock
+      end
+    end
+    nil
+  end
+  started = IyiMark.now_ns
+  5.times { IyiThread.start { nil }.join }
+  took = IyiMark.now_ns - started
+  flag.stop.set(1_i64)
+  busy.join
+  took
+end
+
+took = beside(true)
+fail("five threads started beside a thread collecting in a loop took #{took // 1000000_u64} ms, past 10 s") if took > 10000000000_u64
+puts "five threads started and joined beside a thread collecting in a loop, held to 10 s"
+took = beside(false)
+fail("five threads started beside a thread taking the runtime lock in a loop took #{took // 1000000_u64} ms, past 10 s") if took > 10000000000_u64
+puts "five threads started and joined beside a thread taking the runtime lock in a loop, held to 10 s"
+IYI
+    one_core() { MSYS2_ARG_CONV_EXCL='*' timeout -k 5 "$1" cmd /c "start /affinity 1 /b /wait $2.exe" | tr -d '\r'; }
+    if ! "$IYI" build --release starve.iyi -o starve > build-starve.log 2>&1; then
+      cat build-starve.log; exit 1
+    fi
+    one_core 120 starve > starve.txt
+    if [ "$(grep -c ', held to 10 s$' starve.txt)" -ne 2 ] || grep -q '^FAIL' starve.txt; then
+      echo "held to one core:"; cat starve.txt; exit 1
+    fi
+    sed 's/^/  /' starve.txt
+
+    step "failure proof: without the lock's count and the collection's yield, a run held to one core never ends"
+    mkdir -p unfair/iyi
+    cp "$REPO"/src/iyi/*.iyi unfair/iyi/
+    awk '/^        if !counted && released == since$/ { print "        if false"; found = 1; next } { print } END { if (!found) exit 3 }' \
+      "$REPO/src/iyi/thread.iyi" > unfair/iyi/thread.iyi || { echo "the lock's count is not in thread.iyi any more"; exit 1; }
+    awk '/^          IyiThread\.yield_to_stopped$/ { found++; next } { print } END { if (found != 2) exit 3 }' \
+      "$REPO/src/iyi/prelude.iyi" > unfair/iyi/prelude.iyi || { echo "the collections' yields are not in the prelude any more"; exit 1; }
+    if ! IYI_PATH="$WORK/unfair${PSEP}$REPO/src" "$IYI" build --release starve.iyi -o starve-unfair > build-unfair.log 2>&1; then
+      cat build-unfair.log; exit 1
+    fi
+    one_core 30 starve-unfair > unfair.txt
+    taskkill //F //IM starve-unfair.exe > /dev/null 2>&1
+    if [ "$(grep -c ', held to 10 s$' unfair.txt)" -eq 2 ]; then
+      echo "the unfair lock let every thread start:"; cat unfair.txt; exit 1
+    fi
+    echo "  $(grep -c ', held to 10 s$' unfair.txt) of the two shapes ended within 30 s"
     ;;
 esac
 

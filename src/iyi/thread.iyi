@@ -1006,6 +1006,57 @@
       {% end %}
     end
 
+    # The core, given away once a collection has released the threads it
+    # stopped and the runtime lock: a collector looping `GC.collect` on one
+    # core stopped every other thread for nearly all its time, and one ran
+    # only when a timeslice ended in the instants between two stops. The
+    # lock's turn needs the waiter to run at all.
+    def self.yield_to_stopped : Nil
+      yield_cpu if @@count > 1_i64
+    end
+
+    # One turn of the runtime lock's spin past its first look
+    # (`IyiRuntimeLock.lock`): answers the turns so far, negative once this
+    # spinner is counted on the lock's word, and the generation - the
+    # word's count of releases - its last 128 turns began at. A spinner
+    # holds nothing, so this is also where a thread asked to stop parks.
+    #
+    # Every 128th turn gives the core away: a holder preempted with the
+    # lock held otherwise waited out the spinners' timeslices, and 48
+    # threads taking it on twelve cores took 30 times what one thread took
+    # for all their turns. That is not fairness. A holder on one core runs
+    # its unlock and its next lock back to back, and a spinner runs only
+    # while the holder is preempted, so with the lock held: under `start
+    # /affinity 1` a thread taking the lock in a loop kept ten threads
+    # started beside it waiting 22 s in all, and with 2,000 increments held
+    # per turn for more than a minute. So a spinner that saw no release in
+    # its 128 turns counts itself, and a free lock with one counted is not
+    # taken at a first look: the newcomer gives the core away once, and
+    # the counted spinner takes it, uncounting itself in the same CAS. The
+    # ten threads: 0.7 to 1 s. Counted on 128 turns of a held word alone,
+    # a spinner merely beaten to a moving lock counted too, and the 48
+    # threads took 2.5 to 5 times one; and a take by CAS of the whole word
+    # failed on every release between its read and it, past 5 times. An OR
+    # of bit 0 takes any free lock: 1.6 to 1.9 times, the plain lock 1.4 to
+    # 1.7 on the same machine, and alone a take and release cost the same.
+    def self.lock_turn(word : Pointer(Atomic(UInt64)), seen : UInt64, spins : Int64, since : UInt64) : Tuple(Int64, UInt64)
+      counted = spins < 0
+      turn = (counted ? 0_i64 &- spins : spins) &+ 1
+      released = seen.unsafe_shr(16_u64)
+      if turn == 1
+        since = released
+        yield_cpu if (seen & 0xFFFE_u64) != 0_u64
+      elsif turn & 127 == 0
+        if !counted && released == since
+          word.value.add(2_u64)
+          counted = true
+        end
+        since = released
+        yield_cpu
+      end
+      {counted ? 0_i64 &- turn : turn, since}
+    end
+
 
     # This thread's line, from the thread-local or, in the instant before
     # a child names its own, by its handle.

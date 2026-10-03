@@ -4,6 +4,27 @@
 
 ### Fixed
 
+- **On one core a thread waiting for the runtime lock gets it.** The
+  lock was a test-and-set, and a holder runs its unlock and its next lock
+  back to back, so on one core a waiter ran only while the holder was
+  preempted, and found the lock held. Under `start /affinity 1`, five
+  threads started and joined beside a thread looping `GC.collect` did
+  not end in 30 s, and ten beside one taking the lock in a loop for
+  2,000 increments a turn not in 60; at 50 a turn they took 22 s. A spinner
+  that sees no release in 128 turns counts itself on the lock's word,
+  and a free lock with one counted is not taken at a newcomer's first
+  look: the newcomer gives the core away once. A collection gives the
+  core away too once it has released the threads it stopped, which on
+  one core had only the instants between two stops to run in. Both
+  shapes take 0.4 to 1.2 s now, the ten 0.7 to 1 s, and twenty threads
+  beside allocation-driven collections 45 to 54 ms against 3.3 s.
+  Uncontended, a take and release cost what they did, 9.7 to 10.3 ns
+  against 9.9 to 10.5; 48 threads taking the lock on twelve cores take
+  1.6 to 1.9 times one thread's turns, against 1.4 to 1.7.
+  `bench/thread_exercise.sh` step 4c holds both shapes to 10 s on one
+  core, and takes the count and the yield out as its failure proof; the
+  old runtime printed nothing in 30 s.
+
 - **On Windows a collection no longer reads a stopped thread's guard
   page.** A stop scanned each stopped thread's stack from its saved sp,
   and a thread, or a task on its fiber stack, stopped after a frame moved

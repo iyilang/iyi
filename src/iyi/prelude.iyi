@@ -71,10 +71,9 @@ require "./atomic"
 
 # The runtime's one lock: what the allocator's centre, the scheduler's
 # registries and the thread list are behind, and what a collection takes
-# before it stops anything, so no stopped thread can be holding it. A
-# spinner holds nothing: where threads exist the spin is where a thread
-# asked to stop parks, and every 128th turn yields the core, or a holder
-# preempted with it waits out spinners' timeslices (48 threads: 30x).
+# before it stops anything, so no stopped thread can be holding it. Bit 0
+# holds it, bits 1-15 count the spinners `IyiThread.lock_turn` counts, by
+# 2, and each release adds 1 at bit 16.
 class IyiRuntimeLock
   @@word : UInt64 = 0_u64
 
@@ -84,13 +83,14 @@ class IyiRuntimeLock
 
   def self.lock : Nil
     word = self.word
-    # Read before the CAS: a failed CAS still takes the line for writing,
-    # and fifteen helpers spinning on one slowed the holder.
-    spins = 0
-    while word.value.get != 0_u64 || !word.value.compare_and_set(0_u64, 1_u64)[1]
+    # Read first: a failed take still takes the line for writing, and
+    # fifteen helpers spinning on one slowed the holder.
+    spins = 0_i64
+    since = 0_u64
+    until ((seen = word.value.get) & 1_u64) == 0_u64 && ((seen & 0xFFFE_u64) == 0_u64 || spins != 0) && (spins < 0 ? word.value.compare_and_set(seen, seen &- 1_u64)[1] : (IyiAtomic.rmw(:or, pointerof(@@word), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64)
       {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
         IyiThread.park_if_requested
-        IyiThread.yield_cpu if (spins = spins &+ 1) & 127 == 0
+        spins, since = IyiThread.lock_turn(word, seen, spins, since)
       {% end %}
       {% if flag?(:x86_64) %}
         asm("pause" :::: "volatile")
@@ -103,11 +103,11 @@ class IyiRuntimeLock
   # One try, no wait and no park: for a walk that must not park here.
   def self.try_lock : Bool
     word = self.word
-    word.value.get == 0_u64 && word.value.compare_and_set(0_u64, 1_u64)[1]
+    ((seen = word.value.get) & 1_u64) == 0_u64 && (IyiAtomic.rmw(:or, pointerof(@@word), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64
   end
 
   def self.unlock : Nil
-    word.value.set(0_u64)
+    word.value.add(0xFFFF_u64)
   end
 end
 
@@ -6780,6 +6780,7 @@ require "./file"
         IyiRuntimeLock.unlock
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           wake_sweep_round
+          IyiThread.yield_to_stopped
         {% end %}
       end
 
@@ -6808,6 +6809,9 @@ require "./file"
         collect_locked(true)
         @@collecting = false
         IyiRuntimeLock.unlock
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+          IyiThread.yield_to_stopped
+        {% end %}
       end
 
       # Wait out a collection running beside the program, if one is. The

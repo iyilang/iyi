@@ -4,6 +4,24 @@
 
 ### Fixed
 
+- **`File.exists?` answers for a file it may not read and does not wait
+  on a FIFO,** and `File.touch` no longer empties such a file. `exists?`
+  opened the path to read: an unreadable file did not exist, a FIFO
+  waited for a writer forever, and `touch` - which creates a file that
+  does not exist - truncated one it could not read. On Linux it opens
+  with `O_PATH` now, and `touch` asks `info?`.
+- **A path with a NUL in it is refused by the prelude's `File` too.** It
+  was cut at the NUL, so `File.write("victim\0.txt", x)` wrote `victim`.
+- **`File.real_path` does not walk through a file:** `f/`, `f/.` and `f/..`
+  of a regular file are refused, as the system's `realpath` does.
+- **`File.read_lines` keeps a last line's lone `\r`,** as `each_line` does.
+- **`ENV.each` visits every variable while its block deletes some.** It
+  yielded from the live table, which a delete compacts, so the entry
+  after each deleted one was skipped.
+- **`Process.run(env: {name => nil})` unsets every entry of a name the
+  environment holds twice;** the child read the second. Found by 24,000
+  file and 8,000 environment sequences against Crystal and Python.
+
 - **`std/text` reads malformed UTF-8 one way everywhere, and two edges
   do not overflow.** `reverse`, `chop`, `lstrip` and `rstrip` joined every
   continuation byte to the lead before it, where `each_char` reads a lead

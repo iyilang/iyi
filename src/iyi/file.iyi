@@ -62,10 +62,10 @@ class File
       # INVALID_FILE_ATTRIBUTES is the DWORD -1 this file's Int32 spells.
       __iyi_path_attributes(c_path(path)) != -1
     {% else %}
-      fd = __iyi_open_read(c_path(path))
-      return false if fd < 0
-      __iyi_close(fd)
-      true
+      # O_PATH on Linux: no read right asked, and a FIFO's open does not wait.
+      fd = {% if flag?(:linux) %} __iyi_openat(c_path(path), 0x280000, 0) {% else %} __iyi_open_read(c_path(path)) {% end %}
+      __iyi_close(fd) if fd >= 0
+      fd >= 0
     {% end %}
   end
 
@@ -74,7 +74,7 @@ class File
   end
 
   private def self.c_path(path : String) : UInt8*
-    n = path.bytesize
+    n = path.byte_index("\u0000") ? raise("path contains a NUL byte") : path.bytesize
     buffer = Pointer(UInt8).malloc((n + 1).to_u64)
     buffer.copy_from(path.to_unsafe, n)
     buffer[n] = 0_u8

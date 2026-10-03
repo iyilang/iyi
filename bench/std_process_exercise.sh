@@ -137,6 +137,7 @@ if [ "$PLATFORM" = windows ]; then
   grep -q "a working directory Windows will not take" "$WORK/process-plain.out" || { echo "  missing: the long working directory"; status=1; }
 else
   grep -q "signal 9, exit code 137" "$WORK/process-plain.out" || { echo "  missing: the signalled child"; status=1; }
+  grep -q "a name held twice is removed whole for the child" "$WORK/process-plain.out" || { echo "  missing: a name held twice, removed for the child"; status=1; }
   if [ "$PLATFORM" = linux ]; then
     for phrase in "none of this program's descriptors" \
                   "refused with EMFILE" \
@@ -275,6 +276,13 @@ else
 
   prove unenvironed "env: ignored" "with env: the child read" \
     "    environment = ProcessChild.environment(env)" "    environment = nil.as(Array(String)?)"
+  if [ "$PLATFORM" != windows ]; then
+    # A removal that takes the first entry of a name and leaves the second,
+    # which the child then reads.
+    prove firstonly "a removal that leaves a name's second entry" "a name held twice and removed" \
+      "          removed[at] = true if index != -1
+" ""
+  fi
 
   prove unkilled "the kill taken out" "the cancelled run took" \
     "        child.kill

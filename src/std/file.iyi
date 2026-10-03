@@ -425,6 +425,9 @@ import std/path::{Path}
         end
         st = uninitialized Stat
         return Pointer(UInt8).new(0_u64) if lstat(c_bytes(candidate), pointerof(st)) != 0
+        # Anything but a directory ends the path: `f/`, `f/.` and `f/..`
+        # of a file are ENOTDIR, as libc answers, not `f` and its parent.
+        return Pointer(UInt8).new(0_u64) if rest.bytesize > 0 && (st.st_mode & 0o170000) != 0o040000
         done = candidate
       end
       done = "/" if done.bytesize == 0
@@ -1058,7 +1061,10 @@ class ::File
               "which runs from -11644473599 (1601) to 910692730085 (30828)"
       end
     {% end %}
-    File.write(p, "") unless File.exists?(p)
+    # Made only when `info?` finds nothing there. `exists?` opened the
+    # file to read, so a file this user may write but not read was
+    # "missing", and the write that made it emptied it.
+    File.write(p, "") if info?(p).nil?
     {% if flag?(:linux) %}
       if Std::File::LibC.utimensat(sys_path(p), time) != 0
         raise "Cannot touch #{p}"
@@ -1566,9 +1572,9 @@ class ::File
       end
       i = i + 1
     end
+    # A last line keeps a `\r` no `\n` follows, as `each_line` keeps it.
     if line_start < len
       rem_len = len - line_start
-      rem_len = rem_len - 1 if rem_len > 0 && ptr[line_start + rem_len - 1] == 13_u8
       res << String.new(rem_len) { |t| t.copy_from(ptr + line_start, rem_len) }
     end
     res

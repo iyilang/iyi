@@ -252,6 +252,32 @@ group do |g|
   fail("env: changed this program's own IYI_PROCESS_GIVEN") unless Program.env("IYI_PROCESS_GIVEN").nil?
   fail("env: removed this program's own IYI_PROCESS_PROBE") unless Program.env("IYI_PROCESS_PROBE") == "değer-日本"
   puts "  one variable given and one removed, for the child alone"
+  {% if !flag?(:win32) %}
+    # A name the environment holds twice - `execve` hands a program
+    # whatever table it is given - is removed whole for the child: only
+    # its first entry went, and the child read the second.
+    was = __iyi_environ
+    entries = 0
+    if was.address != 0_u64
+      while was[entries].address != 0_u64
+        entries = entries + 1
+      end
+    end
+    doubled = Pointer(UInt8*).malloc((entries + 3).to_u64)
+    entries.times { |i| doubled[i] = was[i] }
+    ["IYI_PROCESS_TWICE=first", "IYI_PROCESS_TWICE=second"].each_with_index do |text, i|
+      entry = Pointer(UInt8).malloc((text.bytesize + 1).to_u64)
+      entry.copy_from(text.to_unsafe, text.bytesize)
+      entry[text.bytesize] = 0_u8
+      doubled[entries + i] = entry
+    end
+    doubled[entries + 2] = Pointer(UInt8).new(0_u64)
+    __iyi_set_environ(doubled)
+    gone = ran(Process.run(me, ["env", "IYI_PROCESS_TWICE"], env: {"IYI_PROCESS_TWICE" => nil}), "env: twice")
+    fail("a name held twice and removed: the child read #{gone.stdout.inspect}") unless gone.stdout == "<unset>\n"
+    ENV.delete("IYI_PROCESS_TWICE")
+    puts "  a name held twice is removed whole for the child"
+  {% end %}
   # A child started elsewhere does not inherit a `PWD` naming here, which
   # `Path#expand` reads first: the child expanded its relative paths in
   # the parent's directory. Unless `env:` says what `PWD` is.

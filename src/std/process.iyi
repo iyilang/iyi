@@ -326,7 +326,13 @@ class ProcessChild
       index = -1
       at = 0
       while at < names.size
-        index = at if index == -1 && same_name?(names[at], name)
+        if same_name?(names[at], name)
+          # A later entry of the name goes, as `ENV.delete` takes them
+          # all: removed or replaced, a name this environment held twice
+          # reached the child with its second value.
+          removed[at] = true if index != -1
+          index = at if index == -1
+        end
         at = at + 1
       end
       if index >= 0

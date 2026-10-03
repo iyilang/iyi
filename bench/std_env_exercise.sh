@@ -160,6 +160,45 @@ PY
     ;;
 esac
 
+# `each` yielded from the live table, so a block that deleted the name it
+# was handed moved the next entry into the slot just read. Put back, it
+# must be caught where the exercise deletes inside `each`.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    mkdir -p "$WORK/liveeach/std"
+    if [ -z "$PY" ]; then
+      echo "  no python3 on this machine, so the live-table each proof is unmeasured"
+    elif ! "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/env.iyi").read_text()
+old = '''          names << String.new(eq_pos) { |t| t.copy_from(entry, eq_pos) }
+          v_len = len - eq_pos - 1
+          values << String.new(v_len) { |t| t.copy_from(entry + (eq_pos + 1), v_len) }
+'''
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+new = '''          v_len = len - eq_pos - 1
+          yield String.new(eq_pos) { |t| t.copy_from(entry, eq_pos) }, String.new(v_len) { |t| t.copy_from(entry + (eq_pos + 1), v_len) }
+'''
+Path("$WORK/liveeach/std/env.iyi").write_text(src.replace(old, new, 1))
+PY
+    then
+      echo "  the live-table each patch did not apply"
+      status=1
+    elif IYI_PATH="$WORK/liveeach${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_env_exercise.iyi" >"$WORK/liveeach.out" 2>&1; then
+      echo "  the exercise PASSED with each yielding from the live table"
+      status=1
+    elif ! grep -q "ASSERTION FAILED: each visits every variable while its block deletes" "$WORK/liveeach.out"; then
+      echo "  an each over the live table failed somewhere else:"
+      sed 's/^/    /' "$WORK/liveeach.out"
+      status=1
+    else
+      echo "  an each that skips past what its block deleted is caught"
+    fi
+    ;;
+esac
+
 # On Linux and darwin a table `ENV[]=` builds is installed into the C
 # runtime's `environ`, which the collector does not scan, so the prelude
 # holds it in a class variable too. Taken out, the table is garbage at the

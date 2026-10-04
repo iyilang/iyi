@@ -11,7 +11,8 @@
 #     is caught and fails the exercise.
 #   * What the module refuses: reading a path that does not exist, reading a
 #     directory passed where a file is expected, unsupported open modes,
-#     and info on a nonexistent path.
+#     info on a nonexistent path, a path with a NUL in it, and real_path
+#     through a file; and, on Linux, that `exists?` of a FIFO answers.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -291,7 +292,7 @@ if [ -z "$PY" ]; then
 elif ! "$PY" - <<PY
 from pathlib import Path
 src = Path("$REPO/src/std/file.iyi").read_text()
-old = '    File.write(p, "") unless File.exists?(p)'
+old = '    File.write(p, "") if info?(p).nil?'
 if old not in src:
     raise SystemExit("touch patch site missing")
 Path("$WORK/patched_touch/std/file.iyi").write_text(src.replace(old, '    File.write(p, "")', 1))
@@ -382,6 +383,91 @@ else
   status=1
 fi
 
+# A copy of the library with one site replaced, in std/file or in the
+# prelude's File: broken_copy <dir> <std|prelude> <old> <new>.
+broken_copy() {
+  local dir="$1" which="$2" source target
+  if [ "$which" = prelude ]; then
+    mkdir -p "$WORK/$dir/iyi"
+    cp "$REPO"/src/iyi/*.iyi "$WORK/$dir/iyi/"
+    source="$REPO/src/iyi/file.iyi"
+    target="$WORK/$dir/iyi/file.iyi"
+  else
+    mkdir -p "$WORK/$dir/std"
+    source="$REPO/src/std/file.iyi"
+    target="$WORK/$dir/std/file.iyi"
+  fi
+  OLD="$3" NEW="$4" "$PY" - "$source" "$target" <<'PY'
+import os, sys
+src = open(sys.argv[1]).read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing: " + os.environ["OLD"])
+open(sys.argv[2], "w").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+}
+# The exercise run on such a copy must fail at the check that names it:
+# exercise_broken <label> <dir> <std|prelude> <old> <new> <phrase>.
+exercise_broken() {
+  if [ -z "$PY" ]; then
+    echo "  $1: no python3 on this machine, so the proof is unmeasured"
+    return
+  fi
+  if ! broken_copy "$2" "$3" "$4" "$5"; then
+    echo "  $1: the patch did not apply"
+    status=1
+  elif mkdir -p "$WORK/$2-sandbox" &&
+       TMPDIR="$WORK/$2-sandbox" IYI_PATH="$WORK/$2${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" \
+       "$IYI" run "$REPO/bench/std_file_exercise.iyi" -- "$WORK/$2-sandbox" >"$WORK/$2.out" 2>&1; then
+    echo "  $1: the exercise PASSED on a broken module"
+    status=1
+  elif grep -q "$6" "$WORK/$2.out"; then
+    echo "  $1: caught at \"$6\""
+  else
+    echo "  $1: failed, but not at \"$6\""
+    tail -3 "$WORK/$2.out" | sed 's/^/    /'
+    status=1
+  fi
+}
+exercise_broken "a last line's lone \\r taken off" lone_cr std \
+  '      rem_len = len - line_start
+      res << ' \
+  '      rem_len = len - line_start
+      rem_len = rem_len - 1 if rem_len > 0 && ptr[line_start + rem_len - 1] == 13_u8
+      res << ' \
+  "read_lines keeps a last line's lone"
+# A user mode 000 does not stop - root, which a CI container runs as -
+# reads every file, so the exercise skips these two checks there and a
+# broken copy has nothing to fail.
+printf 'x' > "$WORK/unreadable_probe"
+chmod 000 "$WORK/unreadable_probe"
+if [ -r "$WORK/unreadable_probe" ]; then
+  unreadable_measured=0
+  echo "  touch and exists? of a file its owner may not read: not measured, this user reads it all the same"
+else
+  unreadable_measured=1
+fi
+chmod 600 "$WORK/unreadable_probe"
+if [ "$unreadable_measured" -eq 1 ]; then
+  case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+    *)
+      # Whether to make the file decided by whether it reads, as `exists?`
+      # decided it by opening it to read: a write-only file was emptied.
+      exercise_broken "a touch that makes what it cannot read" touch_unread std \
+        '    File.write(p, "") if info?(p).nil?' \
+        '    File.write(p, "") unless File.exists?(p) && File.readable?(p)' \
+        "touch keeps the content of a file it may not read" ;;
+  esac
+  if [ "$(uname -s)" = Linux ]; then
+    # `exists?` as an open to read, which a file its owner may not read
+    # refuses.
+    exercise_broken "an exists? that opens to read" exists_read prelude \
+      '      fd = {% if flag?(:linux) %} __iyi_openat(c_path(path), 0x280000, 0) {% else %} __iyi_open_read(c_path(path)) {% end %}' \
+      '      fd = __iyi_open_read(c_path(path))' \
+      "exists? of a file this user may not read"
+  fi
+fi
+
 echo
 echo "== what file refuses"
 refuses() { # refuses <label> <name> <phrase> <expression>
@@ -423,6 +509,89 @@ refuses "info on a path that does not exist" info_nonexistent "File not found: "
   'File.info("'"$WORK"'/does_not_exist.txt")'
 refuses "real_path of an empty path" realpath_empty "Cannot resolve realpath for " \
   'File.real_path("")'
+# A path a NUL cuts short is refused, as std/file's own calls refuse it:
+# the prelude's handed the kernel the bytes before the NUL, and a write
+# to `victim\0.txt` wrote `victim`.
+nul_write='File.write("'"$WORK"'/victim" + String.new(1) { |b| b[0] = 0_u8 } + ".txt", "x")'
+refuses "a write to a path with a NUL in it" path_nul "path contains a NUL byte" "$nul_write"
+# A file is no directory to go through: on Linux `f/`, `f/.` and `f/..`
+# are ENOTDIR, as libc's realpath answers, where iyi's own walk answered
+# `f` and, for `f/..`, its parent. darwin's realpath takes a trailing
+# separator after a file, and iyi asks it.
+if [ "$(uname -s)" = Linux ]; then
+  printf 'x' > "$WORK/rp_file"
+  for tail in / /. /..; do
+    refuses "real_path of a file, then $tail" "realpath_file$(printf '%s' "$tail" | tr './' 'ds')" \
+      "Cannot resolve realpath for " 'File.real_path("'"$WORK/rp_file$tail"'")'
+  done
+fi
+
+# The refusals above on a copy without the line that makes each: the
+# program answers. refusal_broken <label> <dir> <std|prelude> <old> <new> <expression>
+refusal_broken() {
+  if [ -z "$PY" ]; then
+    echo "  $1: no python3 on this machine, so the proof is unmeasured"
+    return
+  fi
+  if ! broken_copy "$2" "$3" "$4" "$5"; then
+    echo "  $1: the patch did not apply"
+    status=1
+    return
+  fi
+  printf 'module main\n\nimport std/file::{File}\n\n%s\n' "$6" > "$WORK/$2-prog.iyi"
+  if ! IYI_PATH="$WORK/$2${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$2-prog" "$WORK/$2-prog.iyi" > "$WORK/$2-prog.build" 2>&1; then
+    echo "  $1: the broken copy did not build"
+    sed -n '1,10p' "$WORK/$2-prog.build"
+    status=1
+  elif "$WORK/$2-prog" > "$WORK/$2-prog.out" 2>&1; then
+    echo "  $1: caught, the refusal above answers on it"
+  else
+    echo "  $1: refused all the same: $(sed -n '1p' "$WORK/$2-prog.out")"
+    status=1
+  fi
+}
+refusal_broken "a path cut short at its NUL" nul_cut prelude \
+  '    n = path.byte_index("\u0000") ? raise("path contains a NUL byte") : path.bytesize' \
+  '    n = path.bytesize' "$nul_write"
+if [ "$(uname -s)" = Linux ]; then
+  refusal_broken "a real_path that walks through a file" realpath_through std \
+    '        return Pointer(UInt8).new(0_u64) if rest.bytesize > 0 && (st.st_mode & 0o170000) != 0o040000' \
+    '' 'File.real_path("'"$WORK/rp_file/.."'")'
+
+  # A FIFO nobody writes is there to `exists?` at once: opened to read,
+  # the open waited for a writer, and `exists?` never answered.
+  mkfifo "$WORK/fifo"
+  printf 'module main\n\nimport std/file::{File}\n\nputs File.exists?(Program.args[0])\n' > "$WORK/fifo_exists.iyi"
+  if ! "$IYI" build -o "$WORK/fifo_exists" "$WORK/fifo_exists.iyi" > "$WORK/fifo_exists.build" 2>&1; then
+    echo "  exists? of a FIFO: the program did not build"
+    sed -n '1,10p' "$WORK/fifo_exists.build"
+    status=1
+  elif [ "$(timeout 20 "$WORK/fifo_exists" "$WORK/fifo" 2>&1)" = "true" ]; then
+    echo "  exists? of a FIFO nobody writes: true, without waiting for a writer"
+  else
+    echo "  exists? of a FIFO nobody writes did not answer true within 20 seconds"
+    status=1
+  fi
+  if [ -z "$PY" ]; then
+    echo "  an exists? that opens a FIFO to read: no python3 on this machine, so the proof is unmeasured"
+  elif ! broken_copy fifo_wait prelude \
+         '      fd = {% if flag?(:linux) %} __iyi_openat(c_path(path), 0x280000, 0) {% else %} __iyi_open_read(c_path(path)) {% end %}' \
+         '      fd = __iyi_open_read(c_path(path))'; then
+    echo "  an exists? that opens a FIFO to read: the patch did not apply"
+    status=1
+  elif ! IYI_PATH="$WORK/fifo_wait${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/fifo_wait-prog" "$WORK/fifo_exists.iyi" > "$WORK/fifo_wait.build" 2>&1; then
+    echo "  an exists? that opens a FIFO to read: the broken copy did not build"
+    status=1
+  else
+    timeout 5 "$WORK/fifo_wait-prog" "$WORK/fifo" > /dev/null 2>&1
+    if [ $? -eq 124 ]; then
+      echo "  an exists? that opens a FIFO to read: caught, it was still waiting after 5 seconds"
+    else
+      echo "  an exists? that opens a FIFO to read answered: the check above cannot fail"
+      status=1
+    fi
+  fi
+fi
 
 # What Windows cannot hold, refused by name. A second past what a FILETIME
 # holds overflowed its tick count - "arithmetic overflow", after the file

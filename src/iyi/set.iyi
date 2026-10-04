@@ -48,10 +48,10 @@ class Set(T)
     @entries.keys
   end
 
-  # The elements of this set that are not in `other`, in this set's order.
-  def -(other : Set(T)) : Set(T)
+  # Not in `other`, in this order; `other` may be of another element type.
+  def -(other : Set(U)) : Set(T) forall U
     result = Set(T).new
-    each { |value| result.add(value) unless other.includes?(value) }
+    each { |value| result.add(value) unless value.is_a?(U) && other.includes?(value) }
     result
   end
 

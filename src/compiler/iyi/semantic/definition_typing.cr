@@ -59,6 +59,11 @@ module Iyi::DefinitionTyping
   # drops them from the program's variables once the probes are typed.
   VAR_PREFIX = "__iyi_dt_"
 
+  # Every witness type's name begins with this. An artifact's object code
+  # can number one, and a consumer reading it needs to tell (see
+  # `Program#iyi_artifact_phantom_types`).
+  WITNESS_PREFIX = "IyiDefTypeWitness_"
+
   def self.append_probes(program : Program, node : ASTNode) : Nil
     return unless node.is_a?(Expressions)
     runner = Runner.new(program)
@@ -278,7 +283,7 @@ module Iyi::DefinitionTyping
       # The name leaks into error messages ("undefined method 'length'
       # for ..."), so it carries the trait's own name: a reader meets
       # the witness *for Sized*, not an anonymous serial.
-      witness = "IyiDefTypeWitness_#{trait_type.to_s.gsub("::", "_")}"
+      witness = "#{WITNESS_PREFIX}#{trait_type.to_s.gsub("::", "_")}"
       stubs = [] of String
 
       if defs = trait_type.defs

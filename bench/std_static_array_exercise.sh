@@ -232,6 +232,21 @@ PY
   fi
 fi
 
+# Equality as it was, restricted to `StaticArray(T, N)`: an array of a wider
+# element type is not taken, and `==(other : Object)` answers false.
+prove_fails "equality restricted to its own element type again" broken_eq_type "ASSERTION FAILED: == of a wider element type" \
+  '  def ==(other : StaticArray(U, M)) : Bool forall U, M
+    return false unless {{ T <= U || U <= T }} && N == M' '  def ==(other : StaticArray(T, N)) : Bool'
+prove_fails "equality across element types one way only" broken_eq_one_way "ASSERTION FAILED: == of a narrower element type" \
+  '{{ T <= U || U <= T }}' '{{ T <= U }}'
+
+# Into an IO as the array's own text rather than this type's: the check of
+# `to_s(io)` and `inspect(io)` sees the name missing.
+prove_fails "to_s into an IO written as the array's" broken_to_s_io "ASSERTION FAILED: to_s and inspect into an IO" \
+  '  def to_s(io : IO) : Nil
+    io.write(to_s)' '  def to_s(io : IO) : Nil
+    io.write(to_a.to_s)'
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/static_array exercise holds"

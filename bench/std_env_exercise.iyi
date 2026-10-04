@@ -138,6 +138,23 @@ assert_str "val3", env_map[K3], "to_h K3"
 
 assert_true ENV.size >= 3, "size at least 3"
 assert_true !ENV.empty?, "empty? is false"
+
+# A block that deletes as it goes sees every variable all the same: the
+# table was walked while `delete` closed it up, so the entry after each
+# deleted one moved into the slot just read and was never yielded.
+each_names = ["_IYI_ENV_EXERCISE_EACH_A", "_IYI_ENV_EXERCISE_EACH_B", "_IYI_ENV_EXERCISE_EACH_C"]
+each_names.each { |name| ENV[name] = "x" }
+visited = 0
+ENV.each do |k, _|
+  if each_names.includes?(k)
+    visited = visited + 1
+    ENV.delete(k)
+  end
+end
+assert_true visited == 3, "each visits every variable while its block deletes: #{visited} of 3"
+left = 0
+each_names.each { |name| left = left + 1 if ENV.has_key?(name) }
+assert_true left == 0, "every variable each's block deleted is gone: #{left} left"
 puts "  each, each_key, each_value, keys, values, to_h, size, and cleanup"
 
 puts "\n== nil assignment, empty value, positions, and Program.env"

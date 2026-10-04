@@ -12,7 +12,9 @@
 #   * What is refused: pop/shift/first/last of an empty deque, an index past
 #     the end, a negative count, each with the prelude's sentence.
 #   * Negative proofs: a growth that drops the wrapped run, a rotation that
-#     goes the wrong way, and an insert that overwrites are each caught.
+#     goes the wrong way, an insert that overwrites, and an equality
+#     restricted to its own element type or taken one way only are each
+#     caught.
 #
 # Exits non-zero if any check fails.
 set -u
@@ -258,6 +260,12 @@ prove_fails "delete that closes the gap from the wrong side" broken_delete "asse
 # and only for a deque handed itself: `+` concatenates another one first.
 prove_fails "concat onto itself that stops short" broken_concat_self "assertion failed for concat onto itself" \
   "src.replace('    count = other.size\n', '    count = other.size\n    count = count - 1 if other.@buffer.address == @buffer.address\n', 1)"
+# Equality as it was, restricted to `Deque(T)`: a deque of a wider element
+# type is not taken, and `Object#==` answers false for the same elements.
+prove_fails "equality restricted to its own element type again" broken_eq_type "assertion failed for == of a wider element type" \
+  "src.replace('def ==(other : Deque(U)) : Bool forall U\n    return false unless {{ T <= U || U <= T }} && ', 'def ==(other : Deque(T)) : Bool\n    return false unless ', 1)"
+prove_fails "equality across element types one way only" broken_eq_one_way "assertion failed for == of a narrower element type" \
+  "src.replace('{{ T <= U || U <= T }}', '{{ T <= U }}', 1)"
 
 echo
 if [ "$status" -eq 0 ]; then

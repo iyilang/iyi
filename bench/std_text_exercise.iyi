@@ -120,14 +120,6 @@ raise "string: chop empty" unless "".chop == ""
 raise "string: chop multibyte" unless "hé".chop == "h"
 raise "string: chop multibyte, three bytes" unless "a✓".chop == "a"
 raise "string: chop keeps the rest intact" unless "✓✓".chop == "✓"
-# And the last character `each_char` reads, an ill-formed byte one of its
-# own (`well_formed_at` in the module): every `10xxxxxx` byte was cut with
-# the byte before it, so `"\t\xE2\x82".chop` was `"\t"`.
-raise "string: chop an ill-formed byte" unless "\t\xE2\x82".chop == "\t\xE2" && "é\x80".chop == "é" && "a\xF0\x9F\x98".chop == "a\xF0\x9F" && "\xC0\x80".chop == "\xC0"
-# And the strips that take a set read the same characters: a lead byte
-# kept the `10xxxxxx` bytes after it, so `"a\x80".lstrip("a")` stripped
-# nothing and a cut `€`, E2 82, was found inside the `€` of the set.
-raise "string: strip a set past an ill-formed byte" unless "a\x80".lstrip("a") == "\x80" && "\r\x80".strip("c\rß") == "\x80" && "x\xE2\x82".rstrip("€") == "x\xE2\x82" && "\xE2\x82x".lstrip("€") == "\xE2\x82x"
 
 raise "string: ends_with? char true" unless "hello".ends_with?('o')
 raise "string: ends_with? char false" if "hello".ends_with?('h')
@@ -207,6 +199,9 @@ raise "string: index char offset not found" unless "banana".index('b', 1).nil?
 raise "string: index str" unless "banana".index("na") == 2
 raise "string: index str with offset" unless "banana".index("na", 3) == 4
 raise "string: index str not found" unless "banana".index("xyz").nil?
+# An offset near the top of `Int32` is past the end like any other, and
+# adding the needle's size to it panicked with "arithmetic overflow".
+raise "string: index far past the end" unless "abc".index("bc", 2147483646).nil? && "abc".index('b', 2147483647).nil?
 
 raise "string: rindex char" unless "banana".rindex('a') == 5
 raise "string: rindex char offset" unless "banana".rindex('a', 4) == 3
@@ -368,11 +363,6 @@ reversed = s_utf8.reverse
 raise "utf8: reverse content" unless reversed == "olléh"
 raise "utf8: reverse size" unless reversed.size == 5
 raise "utf8: reverse bytesize" unless reversed.bytesize == 6
-# A byte that begins no character is one by itself, as `each_char` reads
-# it (`well_formed_at` in the module): reversed with the byte before it,
-# `" \x80é".reverse` was `"é \x80"`.
-ill_formed = [" \x80é", "abc\x80\x80\x80\x80", "\xE2\x82x", "é\x80\xBFa", "\xED\xA0\x80b", "\xF4\x90\x80\x80z", "\xC0\x80"]
-raise "utf8: reverse an ill-formed byte" unless " \x80é".reverse == "é\x80 " && ill_formed.all? { |text| text.reverse.chars == text.chars.reversed && text.reverse.reverse == text }
 # A `\r` with no newline after it is text.
 cr_lines = [] of String
 "a\r\nb\r".each_line { |l| cr_lines << l }
@@ -428,6 +418,23 @@ raise "utf8: tr and squeeze write U+FFFD for it too" unless lead_a.tr("é", "e")
 raise "utf8: split empty after a byte that begins no character" unless stray.split("", 2) == ["\uFFFD", "ab"] && lead_a.split("") == ["\uFFFD", "A"]
 puts "    a byte that begins no character is one U+FFFD in size, chars, delete, tr, squeeze and split"
 
+# The same characters found from the back or one at a time: `reverse`,
+# `chop` and `strip` with a set took every `10xxxxxx` byte with the lead
+# before it, so an overlong C0 80 stayed one piece and a stray byte after
+# `é` joined it; a set never named a byte that begins no character, even
+# one holding that very byte; `tr` with two ASCII sets kept such a byte
+# where any other set writes U+FFFD; and a `tr` run across the surrogates
+# wrote one as three bytes that read back as three U+FFFD.
+trail = String.new(3) { |b| b[0] = 0xC3_u8; b[1] = 0xA9_u8; b[2] = 0xA9_u8 }
+raise "utf8: reverse by each_char's characters" unless overlong.reverse.bytes == [0x80_u8, 0xA0_u8, 0xED_u8, 0x80_u8, 0xC0_u8] && trail.reverse.bytes == [0xA9_u8, 0xC3_u8, 0xA9_u8]
+raise "utf8: chop by each_char's characters" unless trail.chop == "é" && cut.chop.bytes == [0xE2_u8]
+raise "utf8: a set names a byte that begins no character" unless lead_a.lstrip(lead_a) == "" && stray.lstrip(stray) == "" && "\uFFFDa".lstrip(lead_a) == "a"
+raise "utf8: lstrip a set by each_char's characters" unless (trail + "b").lstrip("é").bytes == [0xA9_u8, 0x62_u8]
+raise "utf8: rstrip a set by each_char's characters" unless (trail + "b").rstrip(stray) == "é" && lead_a.rstrip(lead_a) == ""
+raise "utf8: an ascii tr writes U+FFFD too" unless lead_a.tr("AB", "bc") == "\uFFFDb"
+raise "utf8: a tr run has no surrogates" unless "ab".tr("ab", "\uD7FF-\uE000") == "\uD7FF\uE000"
+puts "    reverse, chop, strip with a set and tr read it the way each_char does"
+
 raise "string: to_u64 max" unless "18446744073709551615".to_u64 == 18446744073709551615_u64
 raise "string: to_u64 past max" unless "18446744073709551616".to_u64?.nil?
 raise "string: to_u64 base 16" unless "ff".to_u64(16) == 255_u64
@@ -435,6 +442,9 @@ raise "string: to_u64 refuses a sign" unless "-1".to_u64?.nil?
 raise "string: range" unless "hello"[1..3] == "ell" && "hello"[1...3] == "el"
 raise "string: range from the back" unless "hello"[-3..-1] == "llo" && "hello"[0..-2] == "hell"
 raise "string: backwards range is empty" unless "hello"[3..1] == ""
+# An end at either limit of `Int32` is past the string like any other:
+# counting the bytes between overflowed and panicked.
+raise "string: range to the end of Int32" unless "hello"[1..2147483647] == "ello" && "b"[1...-2147483648] == ""
 puts "    to_u64 and a range of a string verified"
 
 built = String.build { |io| io << "aé€" << '🎉' }
@@ -477,5 +487,23 @@ wrong = 0
 end
 raise "prelude: == at every length and position (#{wrong} wrong)" unless wrong == 0
 puts "    == at every length to 70, a byte changed at each position"
+
+# Ill-formed bytes through chop, the strips that take a set and reverse,
+# each one character by itself as `each_char` reads it (`point_width` in
+# the module). Last, so a broken decoder or set stops at its own check
+# above first.
+# The last character `each_char` reads, an ill-formed byte one of its
+# own (`point_width` in the module): every `10xxxxxx` byte was cut with
+# the byte before it, so `"\t\xE2\x82".chop` was `"\t"`.
+raise "string: chop an ill-formed byte" unless "\t\xE2\x82".chop == "\t\xE2" && "é\x80".chop == "é" && "a\xF0\x9F\x98".chop == "a\xF0\x9F" && "\xC0\x80".chop == "\xC0"
+# The strips that take a set read the same characters: a lead byte
+# kept the `10xxxxxx` bytes after it, so `"a\x80".lstrip("a")` stripped
+# nothing and a cut `€`, E2 82, was found inside the `€` of the set.
+raise "string: strip a set past an ill-formed byte" unless "a\x80".lstrip("a") == "\x80" && "\r\x80".strip("c\rß") == "\x80" && "x\xE2\x82".rstrip("€") == "x\xE2\x82" && "\xE2\x82x".lstrip("€") == "\xE2\x82x"
+# A byte that begins no character is one by itself, as `each_char` reads
+# it (`point_width` in the module): reversed with the byte before it,
+# `" \x80é".reverse` was `"é \x80"`.
+ill_formed = [" \x80é", "abc\x80\x80\x80\x80", "\xE2\x82x", "é\x80\xBFa", "\xED\xA0\x80b", "\xF4\x90\x80\x80z", "\xC0\x80"]
+raise "utf8: reverse an ill-formed byte" unless " \x80é".reverse == "é\x80 " && ill_formed.all? { |text| text.reverse.chars == text.chars.reversed && text.reverse.reverse == text }
 
 puts "all std/text checks passed"

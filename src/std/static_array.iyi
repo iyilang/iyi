@@ -102,8 +102,13 @@ struct ::StaticArray(T, N)
     to_unsafe[N - 1]
   end
 
-  # Equality. Returns true if corresponding elements are equal.
-  def ==(other : StaticArray(T, N)) : Bool
+  # Equality. Returns true if corresponding elements are equal, where one
+  # element type holds the other, as tuples compare (src/iyi/object.iyi).
+  # Restricted to `StaticArray(T, N)`, a `StaticArray(Int32, 2)` was taken
+  # for a `StaticArray(Int32?, 2)` and not back: the one equality answered
+  # true one way and false the other.
+  def ==(other : StaticArray(U, M)) : Bool forall U, M
+    return false unless {{ T <= U || U <= T }} && N == M
     i = 0
     while i < N
       return false unless to_unsafe[i] == other.to_unsafe[i]

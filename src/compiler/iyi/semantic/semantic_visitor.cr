@@ -711,7 +711,8 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # The artifact is no longer the module. A build that also writes artifacts
     # is the incremental loop, and recompiling this module from its source —
     # and rewriting the artifact on the way out — is what it asked for.
-    return nil if @program.iyi_rewrites_artifacts && resolve_import(path)
+    source = resolve_import(path)
+    return nil if @program.iyi_rewrites_artifacts && source
 
     # iyi: the reason gets its own sentence. It used to be spliced into "is not
     # X any more", which reads as staleness — and a truncated file is not
@@ -729,9 +730,18 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
         false
       end
 
+    # iyi: both halves of the usual remedy compile the module from its source,
+    # and with the source gone neither can. Told to pass --emit-iyimod, a
+    # build that had passed it was being handed the sentence it had already
+    # acted on.
     remedy =
       if bound
         "Rebuild the boundary with `iyi bind`."
+      elsif source.nil?
+        "\"#{path}\" has no source here to compile in its place, so " \
+        "--emit-iyimod cannot rewrite it: put its source back, or rebuild " \
+        "the artifact where its source is, with the artifacts it imports " \
+        "beside it."
       else
         "Rebuild it with --emit-iyimod, or pass --emit-iyimod to this build " \
         "and let it rewrite what has moved."
@@ -1667,6 +1677,12 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     when VisibilityModifier
       iyi_type_body_initialiser?(node.exp, fields)
     when Assign
+      # iyi: an instance variable's initialiser is the third. `@items = [] of
+      # Item` runs in every `initialize`, not when the type body is read, and
+      # it travels the way a typed `@items : Array(Item) = [] of Item` does:
+      # in the type's own `initialize` for object code, and beside the field
+      # (`TypeDecl#fields`) where the consumer compiles it. Read as a
+      # statement it refused the module.
       target = node.target
       !(target.is_a?(Path) || target.is_a?(ClassVar) || (fields && target.is_a?(InstanceVar)))
     else

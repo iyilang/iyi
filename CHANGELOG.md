@@ -2786,6 +2786,86 @@
   module answered "the first of two answered Cancelled" after the
   five-second watchdog.
 
+- **`Set`, `Deque` and `StaticArray` compare and combine across element
+  types both ways.** `Set(Int32) == Set(Int32?)` was false where the
+  other order was true, and `&`, `^`, `-`, `subset_of?` and
+  `superset_of?` with the wider set on the left did not compile - inside
+  the library, the prelude's `Set#-` included. `Deque#==` and
+  `StaticArray#==` had the same one-way rule. And `StaticArray#to_s(io)`
+  compiled only for symbols. Found by building every method against 14
+  element types; 34,000 random sequences over these, `NamedTuple` and
+  `Log` otherwise agreed with Crystal.
+
+- **An abstract generic class survives its artifact.** Its header was
+  written `pub abstract generic class Src(T)`, which a consumer could not
+  read back. And a stale artifact whose source is gone is no longer told
+  to pass `--emit-iyimod`, which cannot rebuild it without the source;
+  the refusal says so. Found by 907 more generated multi-module programs
+  - 1,500 in all, every other one agreeing from source and artifacts.
+- **Six programs a module's artifacts could not build now build from
+  them.** A `--release` program linking artifacts was one LLVM module,
+  which hid the symbols an artifact's object code calls by name -
+  `__iyi_raise_overflow` for any `a + b`, type ids, class variables - so
+  50 of 75 such builds failed to link. A def whose body answers fewer
+  union members than its annotation, and a def whose parameter is written
+  as a trait, were emitted under one symbol and asked for under another.
+  An empty method of a generic type travelled as a header and was never
+  defined. `@items = [] of Int32` without a type was refused as code in a
+  type body. And a module whose dispatch over a trait was typed against
+  its definition-typing witness was refused by its consumer. Found by 593
+  generated multi-module programs built from source and from artifacts,
+  whose outputs otherwise all agreed; each has an iyimod spec that failed
+  before.
+
+- **`File.exists?` answers for a file it may not read and does not wait
+  on a FIFO,** and `File.touch` no longer empties such a file. `exists?`
+  opened the path to read: an unreadable file did not exist, a FIFO
+  waited for a writer forever, and `touch` - which creates a file that
+  does not exist - truncated one it could not read. On Linux it opens
+  with `O_PATH` now, and `touch` asks `info?`.
+- **A path with a NUL in it is refused by the prelude's `File` too.** It
+  was cut at the NUL, so `File.write("victim\0.txt", x)` wrote `victim`.
+- **`File.real_path` does not walk through a file on Linux:** `f/`, `f/.`
+  and `f/..` of a regular file are refused, as glibc's `realpath` does.
+- **`File.read_lines` keeps a last line's lone `\r`,** as `each_line` does.
+- **`ENV.each` visits every variable while its block deletes some.** It
+  yielded from the live table, which a delete compacts, so the entry
+  after each deleted one was skipped.
+- **`Process.run(env: {name => nil})` unsets every entry of a name the
+  environment holds twice;** the child read the second. Found by 24,000
+  file and 8,000 environment sequences against Crystal and Python.
+
+- **`std/text` reads malformed UTF-8 one way everywhere, and two edges
+  do not overflow.** `reverse`, `chop`, `lstrip` and `rstrip` joined every
+  continuation byte to the lead before it, where `each_char` reads a lead
+  that begins no character as a character of its own: `chop` of
+  `"\xC3\xA9\xA9"` gave `""`, not `"é"`. A strip set never named such a
+  byte, an ASCII-only `tr` copied it where every other `tr` writes
+  U+FFFD, and a `tr` range across the surrogates wrote them as invalid
+  bytes. `index` with an offset near `Int32::MAX` and `s[1..Int32::MAX]`
+  panicked with "arithmetic overflow". Found by 330,000 cases against
+  Crystal; `enumerable` and `indexable` agreed on 108,000.
+
+- **A value returned past a `defer` is the value it was.** A union, tuple
+  or struct a `return`, `break` or `next` carried was a pointer to its
+  variable, read only after the cleanup ran: `defer u = -2` then
+  `return u` with `u : Char | String` returned an `Int32` read as a
+  `Char` - "out of memory" in a debug build, a crash in a release one -
+  and a cleanup assigning the same type silently changed the answer. It
+  is copied out before the first cleanup runs. Found by the semantic
+  fuzz; the other compiler does the same, and six codegen specs check
+  return, break, next and a block's own value and failed before.
+- **A selection range asked outside the text stays inside it.** Past a
+  line's end or the last line, the language server echoed the position
+  as given.
+
+- **A macro range walks to an end wider than its begin, and says why a
+  float begin cannot step.** `(0_i8..300).to_a` stopped on "Arithmetic
+  overflow"; the begin is read in the end's kind now, and the walk gives
+  301 elements. `(0.0..2).to_a` said "BUG: called 'succ' for non-integer
+  literal"; it is refused naming the float, and a float end still bounds
+  an integer walk. The macro specs check both and failed before.
+
 ## 0.16.2 — 2026-10-02
 
 **About two hundred and sixty fixes, most of them found by comparing iyi

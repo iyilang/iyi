@@ -543,6 +543,17 @@ module Iyi
     # the names the artifact carried.
     getter iyi_artifact_numbered_types = Set(Type).new
 
+    # iyi: the witness types an imported artifact's object code refers to a
+    # type id of and this build does not have, by name.
+    #
+    # Definition-site typing (R-2c) gives a trait a witness type in the build
+    # that typed a def restricted to it, and the witness implements the trait,
+    # so every dispatch over the trait that build compiled tests for it. No
+    # value ever has that type - its probe sits under `if false` - so the
+    # consumer defines the id as one no type has rather than refusing the
+    # module over a type that exists only to be typed against.
+    getter iyi_artifact_phantom_types = Set(String).new
+
     # iyi: one name an imported artifact's object code refers to, waiting for
     # every import to be in before it is resolved (SPEC.md IV.1g).
     #
@@ -880,7 +891,12 @@ module Iyi
         # a module this program did not import - reachable from neither.
         # Refused with both names rather than left to the linker, which would
         # report the mangled symbol and no module at all.
-        if ref.match
+        # A definition-typing witness is the one type a module's object code
+        # may number without the module declaring it. See
+        # `iyi_artifact_phantom_types`.
+        if !ref.match && ref.name.starts_with?(DefinitionTyping::WITNESS_PREFIX)
+          iyi_artifact_phantom_types << ref.name
+        elsif ref.match
           ref.node.raise <<-MESSAGE
             "#{ref.module_name}" matches against `#{ref.name}`, and this build cannot name it
 

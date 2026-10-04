@@ -6,14 +6,16 @@
 # Proves:
 #   * Union, intersection, difference, symmetric difference, the subset and
 #     superset relations, `disjoint?`, `intersects?`, `==` and `hash` on sets a
-#     person can read.
+#     person can read, and on a set of another element type either way round.
 #   * The same algebra on 200 generated pairs, diffed line by line against
 #     python3 computing the pairs with its own `set`.
 #   * The prelude's `Set` is the one the algebra lands on: `[..].to_set | s`.
 #   * Enumerable on a set, through the impl in std/enumerable.
 #   * Negative proofs: an intersection that unions, a subset test that ignores
-#     size, an equality that ignores membership and a hash that sums the
-#     members unmixed are each caught.
+#     size, an equality that ignores membership, an equality restricted to its
+#     own element type or taken one way only, a prelude `-` that drops members
+#     of a type the other set cannot hold, and a hash that sums the members
+#     unmixed are each caught.
 #
 # Exits non-zero if any check fails.
 set -u
@@ -164,21 +166,27 @@ fi
 
 echo
 echo "== proving the checks can fail when the algebra is broken"
-prove_fails() { # prove_fails <label> <name> <phrase> <python replace-expression>
-  local label="$1" name="$2" phrase="$3" replace="$4"
+# The broken copy is of std/set.iyi, or of the prelude's set.iyi when a fifth
+# argument names it: `-` is the prelude's, and the prelude is read from the
+# first entry of the search path that has one, so the whole of it is copied.
+prove_fails() { # prove_fails <label> <name> <phrase> <python replace-expression> [std/set.iyi|iyi/set.iyi]
+  local label="$1" name="$2" phrase="$3" replace="$4" file="${5:-std/set.iyi}"
   if [ -z "$PY" ]; then
     echo "  $label: skipped, no working python3 to make the broken copy with"
     unmeasured=$((unmeasured + 1))
     return 0
   fi
   mkdir -p "$WORK/$name/std"
+  case "$file" in
+    iyi/*) cp -R "$REPO/src/iyi" "$WORK/$name/iyi" ;;
+  esac
   "$PY" -c "
 import sys
-src = open('$REPO/src/std/set.iyi').read()
+src = open('$REPO/src/$file').read()
 broken = $replace
 if broken == src:
     sys.exit('patch did not apply')
-open('$WORK/$name/std/set.iyi', 'w').write(broken)
+open('$WORK/$name/$file', 'w').write(broken)
 " || { echo "  $label: the patch did not apply"; status=1; return; }
   if ! IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/$name/program" "$REPO/bench/std_set_exercise.iyi" >"$WORK/$name/build.log" 2>&1; then
     echo "  $label: the patched library did not build"
@@ -207,13 +215,21 @@ open('$WORK/$name/std/set.iyi', 'w').write(broken)
 }
 
 prove_fails "intersection that unions" broken_and "assertion failed for intersection" \
-  "src.replace('result.add(v) if other.includes?(v)', 'result.add(v)')"
+  "src.replace('result.add(v) if other.has_member?(v)', 'result.add(v)')"
 prove_fails "subset test that ignores membership" broken_subset "assertion failed for subset_of? same size" \
-  "src.replace('each { |v| return false unless other.includes?(v) }', '')"
+  "src.replace('each { |v| return false unless other.has_member?(v) }', '')"
 prove_fails "equality that ignores membership" broken_eq "assertion failed for == sees a different member" \
   "src.replace('size == other.size && subset_of?(other)', 'size == other.size')"
 prove_fails "symmetric difference missing one side" broken_xor "assertion failed for symmetric difference" \
-  "src.replace('other.each { |v| result.add(v) unless includes?(v) }', '')"
+  "src.replace('other.each { |v| result.add(v) unless has_member?(v) }', '')"
+# Equality as it was, restricted to `Set(T)`: a set of a wider element type
+# is not taken, and `Object#==` answers false for the same members.
+prove_fails "equality restricted to its own element type again" broken_eq_type "assertion failed for == of a wider element type" \
+  "src.replace('def ==(other : Set(U)) : Bool forall U\n    {{ T <= U || U <= T }} && ', 'def ==(other : Set(T)) : Bool\n    ')"
+prove_fails "equality across element types one way only" broken_eq_one_way "assertion failed for == of a narrower element type" \
+  "src.replace('{{ T <= U || U <= T }}', '{{ T <= U }}')"
+prove_fails "the prelude's - dropping members of a type the other set cannot hold" broken_minus "assertion failed for - of either element type" \
+  "src.replace('unless value.is_a?(U) && other.includes?(value)', 'unless !value.is_a?(U) || other.includes?(value)')" iyi/set.iyi
 prove_fails "hash that sums the members unmixed" broken_hash "assertion failed for {1, 4} and {2, 3} hash apart" \
   "src.replace('sum = sum &+ (x ^ x.unsafe_shr(31_u64))', 'sum = sum &+ v.hash.to_i64.unsafe_to_u64')"
 

@@ -2870,9 +2870,15 @@ module Iyi::IyiMod
   # How a type declaration's first line is written back. The kind already
   # describes itself and not how anybody declares one: what makes `List`
   # generic is the `(T)` this line already carries.
+  #
+  # iyi: wherever the word sits. An abstract generic class's kind is
+  # `abstract generic class`, so taking `generic ` off the front left it in
+  # the middle, and the consumer read `pub abstract generic class Src(T)` -
+  # "`pub abstract` takes a class, a struct or a def" - for a module that
+  # had compiled from its source.
   def self.render_type_header(declaration : TypeDecl) : String
     String.build do |io|
-      io << declaration.kind.lchop("generic ") << ' ' << declaration.name
+      io << declaration.kind.sub("generic ", "") << ' ' << declaration.name
 
       parameters = declaration.type_parameters
       unless parameters.empty?

@@ -2641,17 +2641,22 @@ module Iyi
       instance = owner.is_a?(MetaclassType) ? owner.instance_type : owner
       return true if instance.is_a?(ClassType) && instance.virtual_type != instance
 
-      # The return, where only the *virtual* half of the question applies. A
-      # union is written into the symbol on both sides — the producer's body
-      # types to the annotation it was written under — so a `def scan(source
-      # : String) : Array(Token) | BadCharacter` has nothing to disagree
-      # about, and reading it as a widening shipped the bodies of every
-      # module that returns one. What does disagree is a class with
-      # subclasses: the consumer holds the answer as its virtual type.
+      # The return. A class with subclasses disagrees by shape: the consumer
+      # holds the answer as its virtual type. A union disagrees only where the
+      # body answers fewer members than were written - codegen keys the
+      # producer's symbol on the type the body inferred and a consumer keys
+      # the call on the declaration, so `def mixed(flag : Bool) : Int32 |
+      # String | Nil` over `flag ? 4 : "four"` was emitted as
+      # `…mixed<Bool>:(Int32 | String)` and asked for with `| Nil` on the end.
+      # Asked of the instances this build typed, because reading every union
+      # as a widening shipped the bodies of every module that returns one,
+      # and a `def scan(source : String) : Array(Token) | BadCharacter` whose
+      # body answers both has nothing to disagree about.
       if return_type = a_def.return_type
         declared = owner.lookup_type?(return_type)
         if declared.is_a?(Type) && !declared.is_a?(TypeParameter)
           return true if declared.virtual_type != declared
+          return true if declared.is_a?(UnionType) && iyi_answers_narrower?(owner, a_def, declared)
         end
       end
 
@@ -2663,15 +2668,35 @@ module Iyi
       false
     end
 
+    # iyi: whether an instance of *a_def* this build typed answers a narrower
+    # type than the union its return annotation wrote. Instances live on the
+    # type a call was made through, which for a module's own function is the
+    # module's metaclass, so both sides are asked.
+    private def iyi_answers_narrower?(owner : Type, a_def : Def, declared : Type) : Bool
+      {owner, owner.metaclass}.any? do |container|
+        container.is_a?(DefInstanceContainer) &&
+          container.def_instances.each_value.any? do |instance|
+            next false unless instance.iyi_origin.same?(a_def)
+            answered = instance.type?
+            !answered.nil? && answered != declared
+          end
+      end
+    end
+
     # One written parameter type, asked whether the consumer would key a
     # symbol on something else. A free variable is bound per call and is not
     # a widening; a name this scope cannot resolve is not this check's to
     # guess at.
+    #
+    # A trait or module is one: no value has it as its type, so the producer
+    # instantiated `area_of(x : Shape)` at each type its callers passed -
+    # `area_of<Sq>`, and `area_of<Main::Tri>` for the consumer's own type -
+    # while a consumer reading the declaration asked for `area_of<Shape>`.
     private def iyi_widened_type?(owner : Type, written : ASTNode) : Bool
       declared = owner.lookup_type?(written)
       return false unless declared.is_a?(Type)
       return false if declared.is_a?(TypeParameter)
-      declared.is_a?(UnionType) || declared.virtual_type != declared
+      declared.is_a?(UnionType) || declared.module? || declared.virtual_type != declared
     end
 
     # Records one body against `IyiMod.mono_body_key`.
@@ -3247,9 +3272,17 @@ module Iyi
       # there is none - the `.iyimod` said "object code (none)" and a
       # consumer failed to link against it. A cross-compile and an `--emit`
       # still write one module, which is the one file they answer.
+      #
+      # iyi: a `--release` build that *links* artifacts keeps a unit per type
+      # too. One module gives every symbol the program defines internal
+      # linkage - the type ids, the class variables, `__iyi_raise_overflow`, the
+      # collector's globals - and an artifact's object code refers to them by
+      # name from outside that module, so `a + b` in an imported module's
+      # body was `undefined reference to '__iyi_raise_overflow'` at link.
       llvm_modules = @progress_tracker.stage("Codegen (crystal)") do
         program.codegen node, debug: debug, frame_pointers: frame_pointers,
-          single_module: @cross_compile || !@emit_targets.none? || (@single_module && @emit_iyimod.nil?)
+          single_module: @cross_compile || !@emit_targets.none? ||
+                         (@single_module && @emit_iyimod.nil? && program.iyi_artifact_objects.empty?)
       end
 
       output_dir = CacheDir.instance.directory_for(sources)

@@ -106,15 +106,17 @@ class Iyi::RecursiveStructChecker
       push(path, type) do
         # Check if the module is composed, recursively, of the target struct.
         #
-        # iyi: through the members codegen lays the module out with, not the
-        # raw includers. `impl Show for Box(T) forall T` lists the generic
-        # `Box(T)`, which is never the `Box(Show)` being checked and holds no
-        # field, so `Box(Show).new(1)` passed here and the compiler then
-        # overflowed its stack sizing `Box(Show)` inside itself, where the
-        # non-generic `impl Show for W` was "recursive struct W detected".
+        # iyi: through the raw includers and also the members codegen lays
+        # the module out with. `impl Show for Box(T) forall T` lists the
+        # generic `Box(T)`, which is never the `Box(Show)` being checked and
+        # holds no field, so `Box(Show).new(1)` passed here and the compiler
+        # then overflowed its stack sizing `Box(Show)` inside itself. The raw
+        # includers stay: a generic `Foo(T)` including the module is the
+        # target itself while it has no instance yet (#4720's specs).
         members = [] of Type
+        type.raw_including_types.try &.each { |included| members << included }
         type.add_to_including_types(members)
-        members.each do |member|
+        members.uniq.each do |member|
           push(path, member) do
             check_recursive(target, member, checked, path)
           end

@@ -5453,6 +5453,163 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A trait's default method runs on the implementing type, which may be
+  # another module's. Its unqualified names were looked up from that type,
+  # so `lib/core`'s `twice` called the consumer's own `helper` - 7 where its
+  # own module's says 106 - and, with no `helper` in the consumer, was
+  # refused. `run`'s definition-typing witness took the same wrong turn.
+  it "resolves a default method's functions in the trait's module" do
+    with_tempdir("iyimod_default_scope") do
+      modules = {"lib/core.iyi" => <<-IYI}
+        module lib/core
+
+        def helper(x : Int32) : Int32
+          x + 100
+        end
+
+        pub trait Op
+          abstract def apply(x : Int32) : Int32
+
+          def twice(x : Int32) : Int32
+            helper(apply(x))
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/core::*
+
+        def helper(x : Int32) : Int32
+          x + 1
+        end
+
+        struct A
+          def initialize
+          end
+        end
+
+        impl Op for A
+          def apply(x : Int32) : Int32
+            x * 2
+          end
+        end
+
+        def run(o : Op) : Int32
+          o.twice(3)
+        end
+
+        puts A.new.twice(3)
+        puts run(A.new)
+        puts helper(3)
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "106\n106\n4\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # `.or` lowers to a temporary and an `if`, and a body that travels is the
+  # normalized text: inside `#{}` that was two expressions where the parser
+  # reads one, and the consumer stopped on "Unterminated string
+  # interpolation" in a module that had compiled.
+  it "carries a recovery inside an interpolation in a body that travels" do
+    with_tempdir("iyimod_interpolated_or") do
+      modules = {"lib/core.iyi" => <<-IYI}
+        module lib/core
+
+        pub struct Bad
+          def initialize
+          end
+        end
+
+        impl Error for Bad
+          def message : String
+            "bad"
+          end
+        end
+
+        pub def half(x : Int32) : Int32 | Bad
+          return Bad.new if x.odd?
+          x // 2
+        end
+
+        pub def show(v : T, x : Int32) : String forall T
+          "\#{v}: \#{half(x).or(-1)}"
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/core::*
+
+        puts show("a", 8)
+        puts show(1, 3)
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "a: 4\n1: -1\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # A signature with an error member is the def's type (III.1.8), and a
+  # default method's body travels for its implementers. Read from the
+  # artifact, where its location is no `.iyi`, the body's own answer typed
+  # it: `Int32`, and `.or` on it was refused as having nothing to recover.
+  it "keeps a travelled body's declared error union" do
+    with_tempdir("iyimod_declared_union") do
+      modules = {"lib/core.iyi" => <<-IYI}
+        module lib/core
+
+        pub struct Bad
+          def initialize
+          end
+        end
+
+        impl Error for Bad
+          def message : String
+            "bad"
+          end
+        end
+
+        pub trait Op
+          abstract def apply(x : Int32) : Int32 | Bad
+
+          def twice(x : Int32) : Int32 | Bad
+            apply(x).or(0) + 1
+          end
+        end
+
+        pub struct Half
+          def initialize
+          end
+        end
+
+        impl Op for Half
+          def apply(x : Int32) : Int32 | Bad
+            return Bad.new if x.odd?
+            x // 2
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/core::*
+
+        def run(o : Op, x : Int32) : Int32
+          o.twice(x).or(-1)
+        end
+
+        puts run(Half.new, 8)
+        puts run(Half.new, 3)
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "5\n1\n"
+      from_artifact.should eq from_source
+    end
+  end
+
   # An abstract generic class. Its kind is `abstract generic class`, and the
   # header took `generic ` off the front only, so the consumer read
   # `pub abstract generic class Src(T)` and stopped on "`pub abstract` takes a

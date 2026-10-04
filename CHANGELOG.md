@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- **A trait's default method calls its own module's functions.** The
+  lookup of a receiverless call started at the receiver's type, so a
+  default method in `lib/core` calling `helper` ran the consumer's own
+  `helper` when it had one - wrong output, no error - and was refused when
+  it had none; inside one module, a def taking the trait as a parameter
+  was refused. It starts where the method was written now. A generic
+  type's methods could not call their module's functions at all.
+- **Two bodies that travel in an artifact read back as written.** A
+  `.or` inside a string interpolation was "Unterminated string
+  interpolation" in the consumer, and a default method declared
+  `Int32 | Bad` whose body answers only `Int32` lost its error member
+  there, so `.or` on it was refused. Found by 1,450 generated programs
+  using traits, error unions, `case in` and `defer`, each with its answer
+  computed from SPEC.md and built four ways; the rest all agreed.
+
 - **A change's verdict is published even when its compile outlasts the
   quiet the language server replaces a worker in.** A didChange is a
   notification, so the proxy counted a worker compiling one as idle, and

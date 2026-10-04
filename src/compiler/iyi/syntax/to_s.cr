@@ -139,7 +139,20 @@ module Iyi
         else
           exps.each do |exp|
             @str << "\#{"
-            exp.accept(self)
+            # iyi: a lowering can leave several expressions where one was
+            # written: `#{half(x).or(-1)}` is a temporary and an `if` once
+            # normalized, and that is the text a body travelling in a
+            # `.iyimod` is (IV.1g). An interpolation reads one expression, so
+            # unwrapped the consumer stopped on "Unterminated string
+            # interpolation" in a module that had compiled; parenthesized
+            # it is one again.
+            if exp.is_a?(Expressions) && !exp.keyword.paren? && exp.expressions.size > 1
+              @str << '('
+              exp.accept(self)
+              @str << ')'
+            else
+              exp.accept(self)
+            end
             @str << '}'
           end
         end

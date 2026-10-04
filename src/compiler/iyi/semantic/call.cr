@@ -350,7 +350,16 @@ class Iyi::Call
       # type's own body belongs to that type. `instance_type` turns
       # `Main.class` — the owner of code in a module body — back into `Main`,
       # which is where the directive was recorded.
-      scope_type = owner.instance_type
+      #
+      # iyi: the owner *as written*, which is not always the receiver's type.
+      # A trait's default method runs on the implementing type, and the
+      # implementer may be another module's: walking out from it found that
+      # module's functions, so `helper` in a default method of `lib/core`
+      # called the consumer's own `helper` when it had one and was refused
+      # when it had none. The body is the trait's, and so are its names —
+      # which is what `path_lookup` already says for its *types*. The same
+      # holds for a superclass's method run on a subclass.
+      scope_type = iyi_lexical_scope(owner)
       enclosing = false
 
       while scope_type
@@ -374,6 +383,11 @@ class Iyi::Call
         end
 
         break if scope_type == program
+        # iyi: a generic instance sits where its generic type was declared.
+        # `Box(Int32)` is not a `NamedType`, so the walk ended at it and a
+        # generic type's methods - alone among a module's types - could not
+        # call the module's own functions.
+        scope_type = scope_type.generic_type if scope_type.is_a?(GenericInstanceType)
         scope_type = scope_type.is_a?(NamedType) ? scope_type.namespace : nil
         enclosing = true
       end
@@ -446,15 +460,25 @@ class Iyi::Call
   # *def_name* in from, when that module declares it: the same walk as the
   # lookup's, asked only once the lookup has failed.
   private def iyi_imported_owner(owner, def_name) : Type?
-    scope_type = owner.instance_type
+    scope_type = iyi_lexical_scope(owner)
     while scope_type
       scope_type.using_modules?.try &.each do |using_module|
         return using_module.type if using_module.exports?(def_name) && using_module.type.defs.try(&.has_key?(def_name))
       end
       break if scope_type == program
+      scope_type = scope_type.generic_type if scope_type.is_a?(GenericInstanceType)
       scope_type = scope_type.is_a?(NamedType) ? scope_type.namespace : nil
     end
     nil
+  end
+
+  # iyi: the scope a receiverless call is written in, where the walk above
+  # starts. The visitor's `path_lookup` is the type that *declared* the def
+  # being typed — the trait for a default method, the superclass for an
+  # inherited one — and the owner is the receiver's type; types already
+  # resolve from the first, and names now do too.
+  private def iyi_lexical_scope(owner : Type) : Type
+    (@parent_visitor.try(&.path_lookup) || owner).instance_type
   end
 
   def lookup_matches_checking_expansion(owner, signature, search_in_parents = true, with_autocast = false)
@@ -832,10 +856,26 @@ class Iyi::Call
     # every `puts` dispatched over each subclass the program holds, and four
     # std exercises read from their artifacts failed to link
     # `Std::Io::Sized#write`, which `std/io`'s object code never needed.
+    #
+    # iyi: and a body that travelled in a `.iyimod` was written in iyi too. Its
+    # location is the artifact's path, which is no `.iyi`, so a default method
+    # declared `Int32 | Bad` whose body only answered `Int32` was typed
+    # `Int32` by the consumer that compiles it, and `o.twice(x).or(-1)` that
+    # built from source was refused there as having "no error to recover".
     members = return_type.is_a?(UnionType) ? return_type.union_types : [return_type]
-    if members.any?(&.error?) && Lexer.iyi_source?(match.def.location.try(&.filename))
+    if members.any?(&.error?) && iyi_written?(match.def.location.try(&.filename))
       typed_def.iyi_declared_return = true
     end
+  end
+
+  # iyi: whether a def was written in iyi: in an `.iyi` file, or in an
+  # artifact built from one, whose declarations are parsed under the
+  # artifact's own path (`SemanticVisitor`, `iyi_artifact_source_paths`).
+  private def iyi_written?(filename) : Bool
+    return true if Lexer.iyi_source?(filename)
+    return false unless filename.is_a?(String)
+    source = program.iyi_artifact_source_paths[filename]?
+    !source.nil? && Lexer.iyi_source?(source)
   end
 
   def check_tuple_indexer(owner, def_name, args, arg_types)

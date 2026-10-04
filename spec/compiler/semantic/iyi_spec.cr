@@ -814,6 +814,27 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "puts a module's own functions in scope for a generic type declared in it" do
+      # `Box(Int32)` is a generic instance, which is not a named type: the
+      # walk out to the module stopped at it, and only a generic type's
+      # methods could not call their own module's functions.
+      assert_no_errors <<-CODE
+        module app/thing
+
+        def helper
+          1
+        end
+
+        struct Box(T)
+          def go : Int32
+            helper
+          end
+        end
+
+        Box(Int32).new.go
+        CODE
+    end
+
     it "leaves a Crystal module scoping exactly as it was" do
       assert_error <<-CODE, "undefined local variable or method 'helper'"
         module Thing

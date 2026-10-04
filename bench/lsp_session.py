@@ -996,6 +996,24 @@ def buffer_steps(c):
               "unmeasured here, the workers are killed on Windows only", flush=True)
 
 
+def restore_binary(backup, binary):
+    """Put the binary step 46 moved aside back. A Windows runner refused
+    the rename back once with "being used by another process", the
+    request already answered and no server started from the file since:
+    a scanner's handle on a freshly renamed executable [INFERENCE]. Ten
+    seconds of retries; a server that kept the file open still fails
+    here, with the error it got."""
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.replace(backup, binary)
+            return
+        except PermissionError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.2)
+
+
 def held_open(work, seconds):
     """A path a macro's `read_file` waits on for *seconds*, then reads
     as empty: a FIFO on POSIX, a named pipe on Windows. A compile that
@@ -3142,7 +3160,7 @@ def main():
             reply = c.send("textDocument/diagnostic",
                            {"textDocument": {"uri": greet_uri}})
         finally:
-            shutil.move(backup, binary)
+            restore_binary(backup, binary)
         held = (reply.get("result") or {}).get("kind") == "full"
         step(46, "a rebuilt binary does not lobotomise the session",
              held and "error" not in reply,

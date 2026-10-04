@@ -4,6 +4,18 @@
 
 ### Fixed
 
+- **A captured local that a kept block assigns is refused, as one
+  assigned after the start is.** A block a method keeps - `def
+  keep(&block : -> Nil)` - was walked with the variable table the typer
+  made before the block was captured, so `v = 2` inside it read as some
+  other variable: `keep { v = 2 }` compiled on either side of
+  `IyiThread.start { v }`, and a thread reading the `Int64 | Float64` it
+  captured while its starter called the kept block 20,000,000 times
+  counted 28,415 torn reads. The walk reads a kept block's own table now.
+  Held by `spec/compiler/semantic/iyi_spec.cr`. Found by 2,680 generated
+  concurrency programs whose answers SPEC.md III.4 fixes, each built
+  plain and `--release` and run on one core and on all.
+
 - **A trait's default method calls its own module's functions.** The
   lookup of a receiverless call started at the receiver's type, so a
   default method in `lib/core` calling `helper` ran the consumer's own
@@ -19,6 +31,15 @@
   using traits, error unions, `case in` and `defer`, each with its answer
   computed from SPEC.md and built four ways; the rest all agreed.
 
+- **A cleanup's own group runs its tasks whole on a panic's path.** A
+  group's join cancelled its tasks whenever its owner was panicking, not
+  only when the panic left the group's block, so a `defer` whose cleanup
+  opened a group - its block finished, nothing in it failed - had a 5 ms
+  sleep answer `Cancelled` in a panicking task, where the same cleanup on
+  a normal return slept it. A block a panic leaves was `early` already;
+  the deadlock drain, which finishes the join its root waited in, says
+  so itself now. Held by `bench/concurrency_exercise.sh`.
+
 - **A change's verdict is published even when its compile outlasts the
   quiet the language server replaces a worker in.** A didChange is a
   notification, so the proxy counted a worker compiling one as idle, and
@@ -33,6 +54,15 @@
   Step 74a of `bench/lsp_session.py` holds a change's compile for four
   seconds on a pipe its macro reads; the old proxy answered the hover
   asked after it and never sent the verdict.
+
+- **A typed group whose task opens a group of the same name answers its
+  tuple.** III.4.9's check that the group's parameter is used only as the
+  receiver of direct spawns took a nested block's parameter of the same
+  name for a use: a task opening `group do |g|` inside `group do |g|`, or
+  iterating `each { |g| }`, made the outer group answer its last handle -
+  `IyiTask(Int32)` where `{1, 2}` was written - and `end!` on it was
+  refused. A block of the same parameter name is a scope of its own now.
+  Held by `spec/compiler/semantic/iyi_spec.cr`.
 
 - **A trait with a parameterised supertrait reads back from its
   artifact.** The artifact qualified every name in the supertrait,

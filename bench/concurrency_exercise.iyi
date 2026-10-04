@@ -677,6 +677,32 @@ end
 fail("a task spawned on a failed group #{late_saw}, and the group took #{elapsed_ms(started)} ms") unless late_saw == "cancelled" && elapsed_ms(started) < 5000
 puts "a task spawned on a group after its failure started cancelled, under 5 s"
 
+# A cleanup that opens a group runs it whole on a panic's path too. The
+# join cancelled the tasks of any group its owner joined while dying, so
+# a `defer`'s own group - its block finished, nothing failed in it - had
+# its 30 ms sleep answer `Cancelled`, where the same cleanup run on a
+# normal return slept it.
+def cleanup_naps(log : Array(String)) : Nil
+  group do |h|
+    h.spawn do
+      log << napped(30)
+      0
+    end
+  end
+end
+
+cleanup_log = [] of String
+group do |g|
+  t = g.spawn do
+    defer cleanup_naps(cleanup_log)
+    raise "a task whose cleanup opens a group panicked, as it was meant to"
+    0
+  end
+  t.value
+end
+fail("a group a panicking task's cleanup opened: #{cleanup_log}") unless cleanup_log == ["slept"]
+puts "a group a cleanup opens on a panic's path ran its task uncancelled"
+
 # ── 9. A rendezvous send parks until its value is taken ─────────────────
 #
 # `Channel(T).new` with no capacity: the sender cannot leave `send` until

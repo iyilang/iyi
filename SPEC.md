@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 20,323 lines, of which 3,732 are the library held to the 3,734 ceiling (5,603 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 126,814 lines, none of it written in iyi |
+| compiler | 126,828 lines, none of it written in iyi |
 | artifact format | `.iyimod` v56, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -1013,9 +1013,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 126,814 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 126,828 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 20,323-line own prelude + 59,403 in std |
-| Specs | 21,146 lines | 14,214 for iyi |
+| Specs | 21,146 lines | 14,274 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2712,11 +2712,11 @@ level at a time — ``captures `items :
 Array(Int32)`, which is not Share: Array(Int32)'s field @size is assigned
 in `unsafe_set_size` ``. The channel's `T : Share` (III.4.6) waits for the
 channel that crosses threads. Held by `spec/compiler/semantic/iyi_spec.cr`
-(twelve shapes: immutable captures pass, a setter, an assignment outside
+(thirteen shapes: immutable captures pass, a setter, an assignment outside
 `initialize`, a field one and two levels down, a field `pointerof` gives
 out, `@[Share]` trusted, a trusted generic refused by its argument, `self`,
 `self` reached by a call, a constant the block names, a class variable
-written after its initializer), by
+written after its initializer, a local a kept block assigns), by
 `spec/compiler/iyimod_spec.cr` (the marker written, read and refused
 across an artifact) and by `bench/thread_exercise.sh`'s last step, a
 program that must not compile. A `Share` type makes a value safe to read
@@ -2724,8 +2724,13 @@ from two threads, not a variable safe to write, and a captured local is
 one cell both threads reach: a local the block assigns, or that its
 starter assigns after the start, or in a loop or block that starts the
 thread again, is refused by name (`` `count` is assigned here, after the
-thread has started ``). A local assigned before the start, or a block's
-own local, which is a new cell on every call, is captured as before.
+thread has started ``). A block a method keeps may run after the start
+wherever it is written, so a local it assigns is refused the same way:
+`keep { v = 2 }` compiled on either side of the start, and a thread
+reading the `Int64 | Float64` it captured while its starter called the
+kept block counted 28415 torn reads. A local assigned before the start,
+or a block's own local, which is a new cell on every call, is captured
+as before.
 `count` added to by a thread and by its starter two million times each
 had compiled and counted 2684265 one run and 4000000 the next.
 `bench/thread_exercise.sh` step 6b holds it.
@@ -3137,7 +3142,11 @@ waits on a loser no longer than the failure takes.
 **What qualifies.** The expansion applies when the block's parameter is
 used as the receiver of direct `spawn` statements — assigned or bare, not
 inside an `if`, a `while` or a nested block — and nowhere else, and when the
-block ends in one, because a tuple has an arity and a loop does not. A block
+block ends in one, because a tuple has an arity and a loop does not. A
+block inside it with a parameter of the same name - a task's own `group
+do |g|`, an `each { |g| }` - is a scope of its own, and its `g` is not
+the group's: read as the group's, the outer group answered its last
+handle, `IyiTask(Int32)` where `{1, 2}` was written. A block
 that ends in an expression of its own answers that expression: the expansion
 once appended the tuple after it and threw it away, so a block ending in
 `"sum is #{a.value} and #{b.value}"` answered `{1, 2}`. An `end!` on such a

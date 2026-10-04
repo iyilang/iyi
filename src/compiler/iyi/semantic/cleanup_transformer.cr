@@ -905,7 +905,13 @@ module Iyi
 
       def visit(node : Block)
         @regions << node
-        @scopes << node.vars
+        # iyi: a captured block is typed as the proc it becomes, so its
+        # variables are that proc's table: the block's own held cells made
+        # before it was captured, `v = 2` in a stored `keep { v = 2 }` read
+        # as some other variable, and a thread reading the `v` it captured
+        # while its starter called the block counted 28415 torn reads.
+        fun_literal = node.fun_literal
+        @scopes << (fun_literal.is_a?(ProcLiteral) ? fun_literal.def.vars : node.vars)
         true
       end
 

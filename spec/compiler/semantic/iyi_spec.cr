@@ -4389,6 +4389,30 @@ describe "Semantic: iyi" do
     end
   end
 
+  # SPEC.md III.4.9: what qualifies for the typed group is a parameter used
+  # as the receiver of direct spawns and nowhere else, and a block of the
+  # same parameter name is a scope of its own. A task opening `group do
+  # |g|` inside `group do |g|` made the outer group answer its last
+  # handle, `IyiTask(Int32)` where `{1, 2}` was written, and `end!` on it
+  # was refused.
+  describe "typed group" do
+    it "types a group whose task opens a group of the same parameter name" do
+      typed = Program.new.normalize(parse(<<-CODE, filename: "x.iyi")).to_s
+        group do |g|
+          a = g.spawn { 1 }
+          b = g.spawn do
+            group do |g|
+              g.spawn { 5 }
+            end
+            [1].each { |g| g }
+            2
+          end
+        end
+        CODE
+      typed.should contain("g.first_failure")
+    end
+  end
+
   # SPEC.md III.4.4: `Share`, gating the block `IyiThread.start` runs on
   # another thread (III.4.11). The stub stands in for the prelude's thread:
   # the compiler knows the call by its owner's name and the block's shape.
@@ -4669,6 +4693,42 @@ describe "Semantic: iyi" do
         end
 
         Worker.new.go
+        CODE
+    end
+
+    # A block a method keeps runs whenever the method's caller calls it,
+    # so a captured local it assigns is assigned after the start wherever
+    # the block is written: `keep { v = 2 }` compiled on either side of
+    # the start, and a thread reading the `Int64 | Float64` it captured
+    # while its starter called the kept block counted 28415 torn reads.
+    it "refuses a captured local a stored block assigns, on either side of the start" do
+      kept = <<-KEPT
+        def keep(&block : -> Nil) : Proc(Nil)
+          block
+        end
+
+        v = 1
+
+        KEPT
+      assert_error(stub + kept + <<-CODE, "`v` is assigned here, in a block or a proc that may run after the thread has started", filename: "x.iyi")
+        flip = keep do
+          v = 2
+          nil
+        end
+        IyiThread.start do
+          v
+          nil
+        end
+        CODE
+      assert_error(stub + kept + <<-CODE, "`v` is assigned here, in a block or a proc that may run after the thread has started", filename: "x.iyi")
+        IyiThread.start do
+          v
+          nil
+        end
+        flip = keep do
+          v = 2
+          nil
+        end
         CODE
     end
   end

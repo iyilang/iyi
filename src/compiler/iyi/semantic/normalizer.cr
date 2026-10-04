@@ -390,6 +390,14 @@ module Iyi
         true
       end
 
+      # iyi: a block whose parameter has the name is a scope of its own:
+      # a task's `group do |g|` uses its `g`, not the group's, and taking
+      # it for the group's made the outer group answer its last handle -
+      # `IyiTask(Int32)` for `{1, 2}`, and `end!` refused.
+      def visit(node : Block)
+        node.args.none? { |arg| arg.name == @name }
+      end
+
       def visit(node : MacroIf | MacroFor | MacroExpression | MacroVerbatim | MacroLiteral)
         @found = true
         false

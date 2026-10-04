@@ -2451,7 +2451,7 @@ class IyiScheduler
     # panicking owner's, its tasks cancelled and their cleanups run.
     group = fiber.joining
     fiber.joining = nil
-    group.join if group.is_a?(IyiGroup) && !again
+    group.join(true) if group.is_a?(IyiGroup) && !again
 
     while true
       node = fiber.defers
@@ -2985,17 +2985,17 @@ class IyiGroup
   # one: the scope's end, after which the group takes no task. It cannot
   # be left until every task has finished, and `defer` is what guarantees
   # "cannot". *early* says the block did not reach its end - a `return`,
-  # a `break`, a `!` - and the owner stops what it started before it
-  # waits for it (III.4.2), as it does leaving on a panic: `return 5`
-  # beside a task's 2-second sleep took the 2 seconds, and a panic beside
-  # a parked accept loop never ended.
+  # a `break`, a `!`, a panic - and the owner stops what it started before
+  # it waits (III.4.2): `return 5` beside a 2-second sleep took the 2 s.
+  # A dying owner is not the sign: a cleanup's own group, opened and ended
+  # on a panic's path, had its tasks cancelled at its end.
   def join(early : Bool = false) : Nil
     # An `exit` runs this task's cleanups and ends the process, the other
     # tasks with it: a group's join is one of those cleanups, and it waited
     # for every task - `exit(4)` beside a sibling's minute-long sleep took
     # the minute.
     return if IyiScheduler.exiting?
-    cancel_children if early || IyiScheduler.current.panicked
+    cancel_children if early
     while @live > 0
       me = IyiScheduler.current
       @joiner = me

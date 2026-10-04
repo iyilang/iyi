@@ -447,7 +447,11 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
   if ! (cd "$work" && "$IYI" build --emit-iyimod mods -o from-source "$source") \
        > "$work/emit.log" 2>&1; then
     unconsumable="$unconsumable $name"
-    echo "  $name: cannot write its artifacts: $(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-140)"
+    why="$(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-140)"
+    # A failure with no Error line was seen twice, under a loaded machine,
+    # and its log was gone with the work directory: name its last lines.
+    [ -n "$why" ] || why="no Error line; it ended: $(tail -3 "$work/emit.log" | tr '\n' ' ' | cut -c1-200)"
+    echo "  $name: cannot write its artifacts: $why"
     continue
   fi
   (cd "$work" && "$IYI" build --use-iyimod mods -o from-artifact "$source") \

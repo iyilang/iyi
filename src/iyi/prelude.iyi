@@ -71,10 +71,9 @@ require "./atomic"
 
 # The runtime's one lock: what the allocator's centre, the scheduler's
 # registries and the thread list are behind, and what a collection takes
-# before it stops anything, so no stopped thread can be holding it. A spin
-# on one `compare_and_set` — uncontended it is one instruction, and one
-# thread never contends. A spinner holds nothing, so where threads exist
-# the spin is also where a thread asked to stop for a collection parks.
+# before it stops anything, so no stopped thread can be holding it. Bit 0
+# holds it, bits 1-15 count the spinners `IyiThread.lock_turn` counts, by
+# 2, and each release adds 1 at bit 16.
 class IyiRuntimeLock
   @@word : UInt64 = 0_u64
 
@@ -84,12 +83,14 @@ class IyiRuntimeLock
 
   def self.lock : Nil
     word = self.word
-    # Read before the CAS: a failed CAS still takes the line for writing,
-    # and fifteen helpers spinning on one while a collection held it
-    # slowed the holder; a read spins on a shared line.
-    while word.value.get != 0_u64 || !word.value.compare_and_set(0_u64, 1_u64)[1]
+    # Read first: a failed take still takes the line for writing, and
+    # fifteen helpers spinning on one slowed the holder.
+    spins = 0_i64
+    since = 0_u64
+    until ((seen = word.value.get) & 1_u64) == 0_u64 && ((seen & 0xFFFE_u64) == 0_u64 || spins != 0) && (spins < 0 ? word.value.compare_and_set(seen, seen &- 1_u64)[1] : (IyiAtomic.rmw(:or, pointerof(@@word), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64)
       {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
         IyiThread.park_if_requested
+        spins, since = IyiThread.lock_turn(word, seen, spins, since)
       {% end %}
       {% if flag?(:x86_64) %}
         asm("pause" :::: "volatile")
@@ -99,15 +100,14 @@ class IyiRuntimeLock
     end
   end
 
-  # One try, no wait and no park: for a walk that must not park where it
-  # stands and has somewhere else to be.
+  # One try, no wait and no park: for a walk that must not park here.
   def self.try_lock : Bool
     word = self.word
-    word.value.get == 0_u64 && word.value.compare_and_set(0_u64, 1_u64)[1]
+    ((seen = word.value.get) & 1_u64) == 0_u64 && (IyiAtomic.rmw(:or, pointerof(@@word), 1_u64, :sequentially_consistent, false) & 1_u64) == 0_u64
   end
 
   def self.unlock : Nil
-    word.value.set(0_u64)
+    word.value.add(0xFFFF_u64)
   end
 end
 
@@ -3205,6 +3205,15 @@ require "./file"
           head = head_of(arena, pointer.address)
           index = class_index(read64(arena + OFF_CHUNK))
           table = cache
+          # Inside the allocator's bracket, as `take` is, so a stop waits
+          # for `leave`. Stopped between the entry and the list - a
+          # suspend lands anywhere - by the pause that drops every list,
+          # the thread linked the chunk back after it, onto the dropped
+          # list it had read, while the sweep relinked the same chunks as
+          # dead: handed out twice, and a batch head's tagged word stamped
+          # as an index. `bench/concurrent_mark.sh`'s bursts of frees faulted
+          # or lost a chunk in 25 runs of 30.
+          write64(table.address &+ CACHE_INSIDE, read64(table.address &+ CACHE_INSIDE) &+ 1_u64)
           # Free, white, and this epoch's: on the cache's list until the
           # next pause drops it, and the sweep of its arena leaves a free
           # chunk of the current parity alone (`sweep_slice`).
@@ -3218,6 +3227,7 @@ require "./file"
           write64(head + OFF_LINK, table[index])
           write64(head + OFF_INDEX, slot)
           table[index] = head
+          leave(table)
         else
           # A large chunk under a running mark stays mapped and listed, and
           # the sweep after the mark frees it: the helpers walk the large
@@ -3804,6 +3814,38 @@ require "./file"
           asm("mov $0, sp" : "=r"(value) :: : "volatile")
         {% end %}
         value
+      end
+
+      # Zeroes the dead stack under a collection about to run, as Boehm's
+      # `GC_clear_a_few_frames` does. The collector's frames are built over
+      # what earlier, deeper calls left there, and a slot one of them never
+      # writes is scanned with that stale word in it: the dead helper in
+      # `bench/root_exercise.iyi` built 32 MB, returned, and the next
+      # `IyiMark.collect` under --release still marked all of it, reached
+      # from a word 184 bytes under the caller's stack pointer. Two KiB is
+      # several times the deepest collector stack measured (448 bytes, a
+      # debug build). On Windows the committed limit bounds it, because a
+      # touch below the guard page faults. A debug build's own `collect`
+      # frame is above the cleared stretch and can still hold such a word.
+      # The loop calls nothing: a store through `IyiHeap.write64`, not
+      # inlined in a `--release --emit-iyimod` build, pushed its return
+      # address into the stretch it was clearing and returned to 0. Off
+      # Windows the 128 bytes under the stack pointer are the red zone a
+      # leaf like this one may keep its locals in, so they are left alone.
+      @[NoInline]
+      def self.clear_dead_stack : Nil
+        high = stack_pointer
+        {% unless flag?(:win32) %}
+          high = high - 128_u64
+        {% end %}
+        low = high - 2048_u64
+        {% if flag?(:win32) %}
+          low = stack_limit if low < stack_limit
+        {% end %}
+        while low < high
+          Pointer(UInt64).new(low).value = 0_u64
+          low = low + 8_u64
+        end
       end
 
       # The high end, discovered once. The main thread's stack grows down
@@ -4467,7 +4509,6 @@ require "./file"
       POOL_ACTIVE = 256_u64
       POOL_GENERATION = 320_u64
       POOL_HELPERS_DONE = 384_u64
-      POOL_READY = 512_u64
       # The sweep round (GC_DESIGN.md Stage 8): open after a collection
       # while helpers may claim arenas, closed by the next collection
       # before it stops anything; and how many helper walks are in flight.
@@ -5474,35 +5515,35 @@ require "./file"
         cores > 1_u64 ? cores - 1_u64 : 0_u64
       end
 
-      # Helpers up to `count`, and every one of them at its park before
-      # this returns: a helper that read the generation after it turned
-      # would sleep through the mark, and the collector waits for every
-      # helper to answer a generation it turned.
+      # Helpers up to `count`, each handed the generation as it stands now,
+      # which is the one it waits past: a helper that read it for itself
+      # after a turn would sleep through the mark it was made for, and only
+      # a helper finishes a mark beside the program. Nothing here waits for
+      # a helper to run. It waited for every one to reach its park, and a
+      # new thread waits for a core: beside 24 threads of the program's
+      # computing on twelve cores, the first collection held the allocating
+      # thread 1.6 to 2.0 s that way, where the same allocations took 8 to
+      # 212 ms with no helpers at all.
       def self.start_helpers(count : UInt64) : Nil
         pool
         {% if flag?(:win32) %}
           doorbell
         {% end %}
         while @@helpers < count
-          IyiThread.start_helper(helper_entry, @@helpers)
+          IyiThread.start_helper(helper_entry, pool_word(POOL_GENERATION).value.get)
           @@helpers = @@helpers + 1_u64
-        end
-        while pool_word(POOL_READY).value.get < @@helpers
-          spin_pause
         end
       end
 
       def self.helper_entry : UInt64
-        proc = ->(index : UInt64) { IyiMark.helper_main(index) }
+        proc = ->(seen : UInt64) { IyiMark.helper_main(seen) }
         Pointer(UInt64).new(pointerof(proc).address).value
       end
 
       # A helper's whole life: park on the generation, drain, fold its
       # accounts, count itself done, park again.
-      def self.helper_main(index : UInt64) : Nil
+      def self.helper_main(seen : UInt64) : Nil
         w = worker
-        seen = pool_word(POOL_GENERATION).value.get
-        pool_word(POOL_READY).value.add(1_u64)
         while true
           seen = wait_generation(seen)
           # A permit or nothing: a helper the mark did not ask for parks
@@ -6749,6 +6790,7 @@ require "./file"
         IyiRuntimeLock.unlock
         {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
           wake_sweep_round
+          IyiThread.yield_to_stopped
         {% end %}
       end
 
@@ -6761,6 +6803,7 @@ require "./file"
       # the sweep is eager here — every arena, the large list — where the
       # trigger's collections leave the sweep to the allocator.
       def self.collect : Nil
+        IyiRoots.clear_dead_stack
         IyiRuntimeLock.lock
         # A collection already running beside the program is finished by
         # its helper; this one waits for it rather than racing it.
@@ -6776,6 +6819,9 @@ require "./file"
         collect_locked(true)
         @@collecting = false
         IyiRuntimeLock.unlock
+        {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+          IyiThread.yield_to_stopped
+        {% end %}
       end
 
       # Wait out a collection running beside the program, if one is. The
@@ -9093,13 +9139,15 @@ end
   # directory's separator the platform's and the module path's `/`, and
   # `raise` looked for `/src/std/` alone: every panic `std` raised there
   # named the library's own line - one a platform arm had moved, at
-  # that - where the rule is that it names none.
-  private def __iyi_backslashed_library_site?(file : String) : Bool
-    file.includes?("\\src\\iyi") || file.includes?("\\src\\std")
+  # that - where the rule is that it names none. Nor does a `std` module
+  # read from its artifact, `mods\std\deque.iyimod`: one did, so a build
+  # from artifacts printed a line its build from source did not.
+  private def __iyi_native_library_site?(file : String) : Bool
+    file.includes?("\\src\\iyi") || file.includes?("\\src\\std") || (file.ends_with?(".iyimod") && file.includes?("\\std\\"))
   end
 {% else %}
-  private def __iyi_backslashed_library_site?(file : String) : Bool
-    false
+  private def __iyi_native_library_site?(file : String) : Bool
+    file.ends_with?(".iyimod") && file.includes?("/std/")
   end
 {% end %}
 
@@ -9120,7 +9168,7 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
   __iyi_say("\n")
   # The site, when it is the program's; a panic the library raises names
   # the library's own line, which is not where the bug is, and prints none.
-  unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/") || __iyi_backslashed_library_site?(file)
+  unless file.includes?("/src/iyi/") || file.includes?("/src/std/") || file.starts_with?("src/iyi/") || file.starts_with?("src/std/") || __iyi_native_library_site?(file)
     __iyi_say("  at ")
     __iyi_say(file)
     __iyi_say(":")

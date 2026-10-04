@@ -238,9 +238,14 @@ ewi_sum = 0
 seq.each_with_index { |x, i| ewi_sum = ewi_sum + i }
 assert_eq(ewi_sum, 28, "enum: each_with_index")
 
-# 30. each_with_object
-ewo = seq.each_with_object([] of Int32) { |arr, x| arr << (x * 10) }
+# 30. each_with_object, element first and memo second, as the other library
+#     yields them. Where the two types coincide, the reversed order compiled
+#     and mutated the elements instead of the memo.
+ewo = seq.each_with_object([] of Int32) { |x, arr| arr << (x * 10) }
 assert_eq(ewo.size, 8, "enum: each_with_object")
+ewo_same = [[3], [1, 4]].each_with_object([] of Int32) { |x, acc| acc.concat(x) }
+assert_str(ewo_same.to_s, "[3, 1, 4]", "enum: each_with_object yields the element, then the memo")
+puts "  each_with_object yields (element, memo): [[3], [1, 4]] collects [3, 1, 4]"
 
 # 31. join
 small_seq = SimpleSeq.new([3, 1, 4])
@@ -325,6 +330,11 @@ once = OnceSeq.new([3, 1, 4, 1, 5])
 once_mm = once.minmax?
 assert_str("#{once_mm} #{once.walks}", "{1, 5} 1", "enum: minmax? walks once")
 assert_str(OnceSeq.new([3, 1, 4, 1, 5]).minmax.to_s, "{1, 5}", "enum: minmax of a source read once")
+# And `take` stops at the nth element: it pulled one more than it kept,
+# so a second `take(2)` of a source read once began at 4 rather than 3,
+# and `take(0)` lost an element.
+drained = OnceSeq.new([1, 2, 3, 4, 5, 6])
+assert_str("#{drained.take(0)} #{drained.take(2)} #{drained.first(2)}", "[] [1, 2] [3, 4]", "enum: take pulls no element past the nth")
 
 # 51. minmax
 mm = seq.minmax
@@ -359,6 +369,17 @@ assert_eq(mm_of[1], -1, "enum: minmax_of max")
 gb = seq.group_by { |x| x % 2 }
 assert_eq(gb[0].size, 3, "enum: group_by 0")
 assert_eq(gb[1].size, 5, "enum: group_by 1")
+# By an array, nil, a symbol, a pair and a named tuple, each a key a `Hash`
+# takes: none was `Hashable`, so each of these was refused with
+# "Array(Int32) does not implement Std::Traits::Hashable" and its like.
+assert_eq(List.new([[1], [2], [1]]).tally[[1]], 2, "traits: tally of arrays")
+assert_eq(List.new([1, 2, 3]).group_by { |x| [x % 2] }[[1]].size, 2, "traits: group_by an array")
+assert_eq(List.new([1, nil, nil] of Int32?).tally[nil], 2, "traits: tally of nil")
+assert_eq(List.new([1, 2, 3]).index_by { |x| x.even? ? :even : :odd }[:odd], 3, "traits: index_by a symbol")
+by_pair = List.new([1, 2, 3, 4, 5, 6]).group_by { |x| {x % 2, x % 3} }
+assert_str("#{by_pair.size} #{by_pair[{1, 1}]}", "6 [1]", "traits: group_by a pair")
+by_name = List.new([1, 2, 3, 4, 5]).tally_by { |x| {parity: x % 2} }
+assert_str("#{by_name.size} #{by_name[{parity: 1}]}", "2 3", "traits: tally_by a named tuple")
 
 # 57. index_by
 ib = small_seq.index_by { |x| x.to_s }
@@ -458,6 +479,10 @@ assert_str(nilable.minmax_by { |x| x || -5 }[0].inspect, "nil", "enum: minmax_by
 nan_list = List(Float64).new([0.0 / 0.0])
 assert_true(!nan_list.includes?(0.0 / 0.0), "enum: includes? asks == (no NaN is equal)")
 assert_true(List(Float64).new([1.5, 2.5]).includes?(2.5), "enum: includes? finds an equal float")
+# Of any element type, since `==` is all it asks: bounded `where Elem :
+# Comparable`, a list of arrays or of nilable numbers did not compile.
+assert_true(List(Array(Int32)).new([[1], [2]]).includes?([2]), "enum: includes? in a list of arrays")
+assert_true(List(Int32?).new([1, nil] of Int32?).includes?(nil), "enum: includes? of nil in a list of nilable numbers")
 
 # And the plain `max_by`, `min_by` and `minmax_by`, which took the nil their
 # `?` forms answer for "nothing" as nothing: a nil element that won raised

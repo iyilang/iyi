@@ -115,8 +115,9 @@ def answer(&work : -> String) : String
   said
 end
 
-# What the server makes of `text`: "400 <why>", "more" while a request is
-# still arriving, or the request its block would be handed.
+# What the server makes of `text`: "<status> <why>" for a refusal, "more"
+# while a request is still arriving, or the request its block would be
+# handed.
 def server_reads(text : String) : String
   answer do
     parsed = Server.parse_request(text)
@@ -124,7 +125,7 @@ def server_reads(text : String) : String
       heads = String.build { |io| req.headers.each { |k, v| io << k << "=" << v << ";" } }
       "#{req.method} #{req.path} ?#{req.query || "-"} #{heads} #{req.body.inspect} #{parsed.close ? "close" : "keep"}"
     elsif why = parsed.error
-      "400 #{why}"
+      "#{parsed.status} #{why}"
     else
       "more"
     end
@@ -170,6 +171,11 @@ puts "  Content-Length follows the method and the body"
 assert_str "refused: HTTP: Transfer-Encoding is not sent; a request's body goes with its length", answer { HTTP.format_request("POST", "/", "127.0.0.1", "abc", {"Transfer-Encoding" => "chunked"}) }, "a caller's Transfer-Encoding is not sent"
 puts "  a caller's Transfer-Encoding is refused, the body going with its length"
 
+# A request target is ASCII (RFC 9112 §3.2): a byte past 127 goes as `%`
+# and two hex digits, as Go's client sends it. `/ü/ç?ş=1` went out raw.
+assert_true HTTP.format_request("GET", "/\u00fc/\u00e7?\u015f=1", "127.0.0.1").starts_with?("GET /%C3%BC/%C3%A7?%C5%9F=1 HTTP/1.1\r\n"), "a byte past 127 in the target is percent-encoded"
+puts "  a byte past 127 in the path or the query goes percent-encoded"
+
 puts "\n== response"
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nhi!\n")
 assert_true resp.status == 200, "status"
@@ -185,6 +191,16 @@ assert_str "3", resp.header("Content-Length") || "", "a header by any case"
 assert_str "lower", resp.header("X-KIND") || "", "a header asked for in another case"
 assert_true resp.header("X-Missing").nil?, "a header that is not there is nil"
 puts "  header names are read without regard to case, and trimmed"
+
+# `header` joins a repeated field with ", " (RFC 9110 §5.3), and a
+# `Set-Cookie` cannot be split back out of that join: the comma in an
+# `Expires` date is one too. `header_values` keeps the lines apart.
+cookies = HTTP.parse_response("HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT\r\nset-cookie: b=2; Path=/\r\nContent-Length: 2\r\n\r\nhi")
+assert_str "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT|b=2; Path=/", cookies.header_values("SET-COOKIE").join("|"), "each Set-Cookie line apart"
+assert_str "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT, b=2; Path=/", cookies.header("Set-Cookie") || "", "header still joins them"
+assert_str "2", cookies.header_values("content-length").join("|"), "a field on one line is one value"
+assert_true cookies.header_values("X-Missing").empty?, "a field that is not there has no values"
+puts "  header_values keeps a repeated field's lines apart"
 
 resp = HTTP.parse_response("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n4;ext=1\r\ndefg\r\n0\r\nX-Trailer: t\r\n\r\n")
 assert_str "abcdefg", resp.body, "a chunked body arrives joined"
@@ -232,8 +248,11 @@ assert_str "HTTP: the body ended after 7 of its 100 bytes", short, "a short body
 puts "  a body short of its Content-Length is refused"
 
 # A length past Int32's is a length too large, not "not a number".
-assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3000000000\r\n\r\n"), "a 3 GB request is too large"
-assert_str "400 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 99999999999999999999999\r\n\r\n"), "and so is one past Int64's"
+assert_str "413 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 3000000000\r\n\r\n"), "a 3 GB request is too large"
+assert_str "413 body past 67108864 bytes", server_reads("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 99999999999999999999999\r\n\r\n"), "and so is one past Int64's"
+# A request too large is a 413 (RFC 9110 §15.5.14) and a head too large a
+# 431 (RFC 6585 §5): both were answered 400, as if they were not HTTP.
+assert_str "431 request headers past 1048576 bytes", server_reads("GET / HTTP/1.1\r\nHost: a\r\nX-Long: " + "a" * 1048576), "a head past a megabyte is a 431"
 assert_str "refused: HTTP: Content-Length \"3000000000\" is past the 2147483647 bytes a string holds", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\nabc"), "a 3 GB answer is too large"
 assert_str "refused: HTTP: the body ended after 3 of its 2147483647 bytes", client_reads("HTTP/1.1 200 OK\r\nContent-Length: 2147483647\r\n\r\nabc"), "Int32's last is a length"
 puts "  a Content-Length past Int32's is refused as too large on both sides"
@@ -253,7 +272,7 @@ puts "  a chunked body that is not one is a 400, and a 2 GB chunk size is a size
 # A control character in a field value or the target (RFC 9110 §5.5, RFC
 # 9112 §2.2) is refused on the way in and on the way out: a server block
 # that echoed a header with a bare LF in it panicked writing its answer.
-assert_str "400 not a request target: \"/?a\nb\"", server_reads("GET /?a\nb HTTP/1.1\r\n\r\n"), "a target with a line feed is a 400"
+assert_str "400 not a request target: \"/?a\\nb\"", server_reads("GET /?a\nb HTTP/1.1\r\n\r\n"), "a target with a line feed is a 400"
 assert_str "400 header User-Agent contains a control character", server_reads("GET / HTTP/1.1\r\nUser-Agent: a\rb\r\n\r\n"), "a value with a bare CR is a 400"
 assert_str "refused: HTTP: header X-A contains a control character", client_reads("HTTP/1.1 200 OK\r\nX-A: a\u0000b\r\n\r\n"), "an answer's value with a NUL is refused"
 assert_str "refused: HTTP: header X-A contains a control character", answer { HTTP.format_request("GET", "/", "127.0.0.1", "", {"X-A" => "a\u0000b"}) }, "a value with a NUL is not written"
@@ -458,6 +477,58 @@ v6_server.join
 v6.close
 puts "  an IPv6 literal's Host line keeps its brackets, under a scheme in capitals"
 
+# Two `Set-Cookie` lines over a socket stay two, under a chunked body and
+# under one with a length: the client keeps the head it parsed for both.
+cookie_listener = IyiSocket.listen("127.0.0.1", 0)
+cookie_port = cookie_listener.local_port
+cookie_fd = cookie_listener.to_unsafe
+cookie_server = IyiThread.start do
+  l = IyiSocket.new(cookie_fd)
+  2.times do |i|
+    conn = l.accept.or_panic
+    read_request(conn).or_panic
+    framed = i == 0 ? "Transfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n" : "Content-Length: 2\r\n\r\nhi"
+    conn.write("HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT\r\nSet-Cookie: b=2\r\n" + framed).or_panic
+    conn.close
+  end
+  nil
+end
+["chunked", "length"].each do |framing|
+  r = HTTP.get("http://localhost:#{cookie_port}/#{framing}").or_panic
+  assert_str "a=1; Expires=Wed, 21 Oct 2026 07:28:00 GMT|b=2", r.header_values("Set-Cookie").join("|"), "two Set-Cookie lines over a socket, #{framing}"
+end
+cookie_server.join
+cookie_listener.close
+puts "  two Set-Cookie lines arrive apart under a chunked body and a length"
+
+# A head is read as far as the megabyte the server takes of a request's,
+# and refused past it: one that did not end was read for as long as it
+# came, and 256 MB of one field cost the client 824 MB. The server here
+# writes one field until the client stops taking it, 64 MB at most, and
+# counts the 64 KB pieces that went.
+endless = IyiSocket.listen("127.0.0.1", 0)
+endless_port = endless.local_port
+endless_fd = endless.to_unsafe
+endless_sent = Atomic(Int32).new(0)
+endless_server = IyiThread.start do
+  l = IyiSocket.new(endless_fd)
+  conn = l.accept.or_panic
+  read_request(conn).or_panic
+  conn.write("HTTP/1.1 200 OK\r\nX-Long: ")
+  field = "a" * 65536
+  while endless_sent.get < 1024 && conn.write(field).is_a?(Int32)
+    endless_sent.add(1)
+  end
+  conn.close
+  nil
+end
+endless_said = answer { HTTP.get("http://127.0.0.1:#{endless_port}/long").or_panic.status.to_s }
+endless_server.join
+endless.close
+assert_str "refused: HTTP: response headers past 1048576 bytes", endless_said, "a head past a megabyte is refused"
+assert_true endless_sent.get < 256, "the client stopped taking an endless head: #{endless_sent.get} pieces of 64 KB went"
+puts "  a head past a megabyte is refused, not read for as long as it comes"
+
 # A client partway through a request: it sends *part*, and leaves three
 # seconds later.
 def partway(port : Int32, part : String) : Int32
@@ -531,6 +602,8 @@ group do |g|
       elsif req.path == "/stop"
         listener.close
         Response.new(200, "bye")
+      elsif req.path == "/fail"
+        raise "the block failed on /fail"
       else
         Response.new(404, "no #{req.path}\n")
       end
@@ -571,6 +644,15 @@ group do |g|
     assert_true r6.body.starts_with?("not an HTTP/1 request"), "and says why: #{r6.body.inspect}"
     assert_str "", bad.read(16).or_panic, "and the connection is closed"
     bad.close
+    # A body past the limit is a 413 (RFC 9110 §15.5.14), declared or in a
+    # chunk size not sent yet: both were a 400, as if they were not HTTP.
+    ["Content-Length: 99999999999\r\n\r\n", "Transfer-Encoding: chunked\r\n\r\n4000001\r\n"].each do |framing|
+      large = IyiSocket.connect("127.0.0.1", sport).or_panic
+      large.write("POST /size HTTP/1.1\r\nHost: x\r\n" + framing).or_panic
+      r_large = HTTP.parse_response(read_response(large))
+      assert_true r_large.status == 413 && r_large.reason == "Content Too Large", "a body past the limit is a 413: #{r_large.status} #{r_large.body.inspect}"
+      large.close
+    end
     # HTTP/1.0 closes by default.
     old = IyiSocket.connect("127.0.0.1", sport).or_panic
     old.write("GET /nothing HTTP/1.0\r\n\r\n").or_panic
@@ -593,6 +675,21 @@ group do |g|
     echo_answer = read_to_close(echo)
     assert_true echo_answer.starts_with?("HTTP/1.1 400 ") && echo_answer.ends_with?("header User-Agent contains a control character\n"), "a header with a bare LF is a 400: #{echo_answer.inspect}"
     echo.close
+    # A block that panics ends its own connection, which reads only the
+    # close, and nothing else: the panic reached `serve`'s group, which
+    # cancelled the other connections - this kept one's next request read
+    # "the connection was aborted" - and panicked "a task panicked" when
+    # `serve` returned.
+    steady = IyiSocket.connect("127.0.0.1", sport).or_panic
+    steady.write("GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(steady)).status == 204, "a kept connection, before a block panics"
+    failing = IyiSocket.connect("127.0.0.1", sport).or_panic
+    failing.write("GET /fail HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_str "", read_to_close(failing), "a panicking block's connection reads only its close"
+    failing.close
+    steady.write("GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(steady)).status == 204, "the kept connection is served after another's block panicked"
+    steady.close
     # The client half of this module against the server half.
     r8 = HTTP.post("http://127.0.0.1:#{sport}/echo?z=9", "via client", {"User-Agent" => "iyi"}).or_panic
     assert_true r8.status == 200 && r8.body == "via client" && r8.header("X-Query") == "z=9", "HTTP.post against Server.serve"
@@ -717,11 +814,42 @@ group do |g|
 end
 # The thousand written together and the head in pieces reached the block;
 # the 400s did not, nor the body that was declared and never came: only
-# what has arrived whole is answered.
-assert_true seen_paths.size == 1214, "the block ran 1214 times, not #{seen_paths.size}"
+# what has arrived whole is answered. The block that panicked ran.
+assert_true seen_paths.size == 1217, "the block ran 1217 times, not #{seen_paths.size}"
 assert_str "POST /echo", seen_paths[0], "the first request's line"
 assert_str "HEAD /echo", seen_paths[2], "the HEAD's"
-puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MB body declared and not sent, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
+puts "  keep-alive, chunked, HEAD, 204, 404, 400s, Connection: close, HTTP/1.0, a block that panicked, 201 lean requests, a thousand written at once, a 256 KB head in pieces, a 64 MB body declared and not sent, 100-continue both ways, a 24 MB upload, a 16 MB chunked one, and the client against it"
+
+puts "\n== the block's own close"
+# An answer whose `Connection` says `close` closes the connection after
+# it, as Go's server and Python's do: the line was dropped, `keep-alive`
+# written in its place, and the next request on the connection served.
+closer = IyiSocket.listen(0)
+closer_port = closer.local_port
+group do |g|
+  g.spawn do
+    Server.serve(closer) do |req|
+      if req.path == "/bye"
+        Response.new(200, "bye", {"Connection" => "close"})
+      else
+        closer.close
+        Response.new(200, "stopped")
+      end
+    end
+    0
+  end
+  g.spawn do
+    bye = IyiSocket.connect("127.0.0.1", closer_port).or_panic
+    bye.write("GET /bye HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    bye_answer = HTTP.parse_response(read_response(bye))
+    assert_str "close", bye_answer.header("Connection") || "", "a block's Connection: close is the answer's"
+    assert_str "", bye.read(16).or_panic, "and the connection closes after it"
+    bye.close
+    assert_str "stopped", HTTP.get("http://127.0.0.1:#{closer_port}/stop").or_panic.body, "the listener closed"
+    0
+  end
+end
+puts "  a block's Connection: close closes the connection after its answer"
 
 puts "\n== a burst of connections"
 # Twenty connections waiting, each with its request written, when the
@@ -756,5 +884,33 @@ group do |g|
   end
 end
 puts "  twenty connections that arrived together, each answered its own request"
+
+puts "\n== empty lines before a request"
+# An empty line before a request is skipped (RFC 9112 §2.2): a client that
+# ended its body with one more CRLF had its next request answered 400.
+blank = IyiSocket.listen(0)
+blank_port = blank.local_port
+group do |g|
+  g.spawn do
+    Server.serve(blank) do |req|
+      blank.close if req.path == "/stop"
+      Response.new(200, "#{req.method} #{req.path} #{req.body}")
+    end
+    0
+  end
+  g.spawn do
+    lines = IyiSocket.connect("127.0.0.1", blank_port).or_panic
+    lines.write("POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nhi\r\n").or_panic
+    assert_str "POST /a hi", HTTP.parse_response(read_response(lines)).body, "a body with a CRLF after it"
+    lines.write("\r\nGET /b HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    after = HTTP.parse_response(read_response(lines))
+    assert_true after.status == 200 && after.body == "GET /b ", "the request after empty lines is served: #{after.status} #{after.body.inspect}"
+    lines.close
+    assert_true !Server.parse_request("\r\nGET /c HTTP/1.1\r\nHost: x\r\n\r\n").request.nil?, "parse_request reads past an empty line"
+    HTTP.get("http://127.0.0.1:#{blank_port}/stop").or_panic
+    0
+  end
+end
+puts "  empty lines before a request are skipped"
 
 puts "\nALL CHECKS PASSED"

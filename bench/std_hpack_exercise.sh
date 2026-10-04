@@ -234,6 +234,9 @@ fix_proof "a Huffman size counted in Int32" fix_size_i32 \
   'total_bits = 0_i64' 'total_bits = 0_i32' \
   'HUFFMAN_LENS[byte_val].to_i64' 'HUFFMAN_LENS[byte_val]' \
   '((total_bits + 7_i64) // 8_i64).to_i32' '(total_bits + 7) // 8'
+fix_proof "a header list counted without 32 octets a field" fix_list_overhead \
+  "a header list counts 32 octets a field" "" \
+  'bytesize.to_i64 + 32' 'bytesize.to_i64'
 
 echo
 echo "== what integer encoding and the codec constructors refuse"

@@ -324,6 +324,8 @@ class Iyi::CodeGenVisitor
   end
 
   private def codegen_out_of_range(target_type : IntegerType, arg_type : FloatType, arg)
+    return iyi_truncation_out_of_range(target_type, arg_type, arg) if @program.iyi_prelude?
+
     min_value, max_value = target_type.range
     max_value = case arg_type.kind
                 when .f32?
@@ -368,6 +370,48 @@ class Iyi::CodeGenVisitor
     else
       int_max_value
     end
+  end
+
+  # iyi: under iyi's prelude a float converts to an integer by truncating
+  # first, and what is refused is a truncation the type does not hold
+  # (std/int.iyi's rule), so the bounds are exclusive and one past the
+  # type's: `min - 1 < arg < max + 1`. The range was checked on the
+  # untruncated value, as the other library checks it - and as it still is
+  # under `--crystal`, whose library is that one - which made one name
+  # answer two ways here: `255.5.to_u8` and `(-0.5).to_u8` panicked while
+  # std/int's `255.5.to_u16` was 255 and `(-0.5).to_u16` 0.
+  #
+  # Both bounds have to be floats, and the comparison against each is
+  # chosen so that it says the same thing when the integer bound is not one.
+  # `min - 1` is -1 for an unsigned type and a float for a signed one whose
+  # `2^(bits-1)` needs fewer bits than the float's precision; past that it
+  # is not a float, and the first float above it is `min` itself. `max + 1`
+  # is a power of two and a float, but for a single against `UInt128`:
+  # 2^128 is past the single's largest finite value, so only the infinity
+  # is at or above it. The lower comparison is unordered so that NaN is
+  # refused too.
+  private def iyi_truncation_out_of_range(target_type : IntegerType, arg_type : FloatType, arg)
+    bits = target_type.bytes * 8
+    precision = arg_type.kind.f32? ? 24 : 53
+
+    below =
+      if target_type.unsigned?
+        builder.fcmp(LLVM::RealPredicate::ULE, arg, float(-1.0, arg_type))
+      elsif bits - 1 < precision
+        builder.fcmp(LLVM::RealPredicate::ULE, arg, float(-(2.0 ** (bits - 1)) - 1.0, arg_type))
+      else
+        builder.fcmp(LLVM::RealPredicate::ULT, arg, float(-(2.0 ** (bits - 1)), arg_type))
+      end
+
+    past = target_type.unsigned? ? bits : bits - 1
+    above =
+      if arg_type.kind.f32? && past >= 128
+        builder.fcmp(LLVM::RealPredicate::OGT, arg, float(Float32::MAX, arg_type))
+      else
+        builder.fcmp(LLVM::RealPredicate::OGE, arg, float(2.0 ** past, arg_type))
+      end
+
+    or(below, above)
   end
 
   private def codegen_out_of_range(target_type : FloatType, arg_type : IntegerType, arg)
@@ -1518,6 +1562,21 @@ class Iyi::CodeGenVisitor
       sub_image_base(catchable_void_ptr, mod),
     ]
     void_ptr_throwinfo
+  end
+
+  # iyi: both of the above, defined whether this build's own code asked or
+  # not, for an artifact's object code (SPEC.md IV.1g). They are made when
+  # first asked for, and an artifact's unit asked in the build that wrote it:
+  # a `defer` or a `group` is a catch pad over `void*`, which names
+  # `??_R0PEAX@8` in the main module. A consumer with no `defer`, `rescue`
+  # or `raise` of its own never asked, and `--use-iyimod` of a module whose
+  # one def was `defer log << "lib-defer"` ended on `LNK2001: unresolved
+  # external symbol "void * `RTTI Type Descriptor'" (??_R0PEAX@8)`.
+  def iyi_define_msvc_catch_globals : Nil
+    in_main do
+      void_ptr_type_descriptor
+      void_ptr_throwinfo
+    end
   end
 
   def external_constant(type, name, mod = @llvm_mod)

@@ -335,35 +335,98 @@ class Iyi::Command
     end
   end
 
+  # One line of a module's surface and what it is. *name* is what a consumer
+  # writes for it, nil for an impl; *owner* the type it is under, empty for
+  # the module's own; *declares* the type a type's own line declares;
+  # *signature* the def a def's line renders. A *requirement* is an
+  # `abstract def` or an associated type: what an implementer supplies
+  # rather than what a caller uses, so one new on a type that was already
+  # there breaks every impl of it, where any other new line breaks nothing.
+  record SurfaceLine, name : String?, owner : String = "", declares : String = "",
+    signature : IyiMod::Signature? = nil, requirement : Bool = false
+
   # What a consumer can name, as text, so that two of them can be compared.
   # A module's surface, one line per thing a consumer can name - what
   # `mod diff` lists as gone and new, and what `mod release` weighs: functions, `pub`
   # types with their parameters, their methods and the types inside them,
   # impls and macros.
   private def iyi_export_lines(artifact : IyiMod::Artifact) : Array(String)
-    lines = [] of String
+    iyi_surface_lines(artifact).keys.sort!
+  end
+
+  # The same lines, each with what it is (`SurfaceLine`).
+  #
+  # Every name a consumer can write is a line, and it was not: the
+  # constants, an enum's members, what an alias names, a type's macros and
+  # every type nested in an exported one were left out, so `mod release`
+  # called deleting `pub LIMIT`, `Box::Inner`, `Color::Blue` or `macro
+  # def_twice` "the surface is as it was" - v1.0.1 - and a consumer of
+  # v1.0.0 stopped on `undefined constant Kit::LIMIT`. A constant is its
+  # name: its value travels as source and its type is not in the artifact.
+  # A value moved breaks no one who names it; one whose type moved is not
+  # seen here, which is the one gap left.
+  private def iyi_surface_lines(artifact : IyiMod::Artifact) : Hash(String, SurfaceLine)
+    lines = {} of String => SurfaceLine
     exports = artifact.exports
     # A private def travels with the generic bodies that call it, and is
     # nobody's to call: not surface.
-    exports.functions.each { |signature| lines << IyiMod.render_signature(signature) unless signature.visibility == "private" }
-    exports.types.each { |declaration| iyi_export_type_lines(declaration, "", lines) }
+    exports.functions.each do |signature|
+      next if signature.visibility == "private"
+      lines[IyiMod.render_signature(signature)] = SurfaceLine.new(signature.name, signature: signature)
+    end
+    exports.types.each { |declaration| iyi_surface_type(declaration, "", lines) }
     exports.impls.each do |entry|
       named = entry.trait_arguments.empty? ? entry.trait_name : "#{entry.trait_name}(#{entry.trait_arguments.join(", ")})"
-      lines << "impl #{named} for #{entry.type_name}"
+      lines["impl #{named} for #{entry.type_name}"] = SurfaceLine.new(nil)
     end
-    artifact.macro_bodies.each { |source| lines << source.lines.first.strip }
-    lines.uniq!.sort!
+    # The `pub` ones: an unmarked macro is the module's own, as an
+    # unmarked def is.
+    IyiMod.exported_macros(artifact).each do |source|
+      lines[IyiMod.macro_line(source)] = SurfaceLine.new(IyiMod.macro_name(source))
+    end
+    IyiMod.exported_constants(artifact).each do |(container, text)|
+      name = text.partition(" = ")[0]
+      lines["const #{container.empty? ? "" : "#{container}::"}#{name}"] = SurfaceLine.new(name, owner: container)
+    end
+    lines
   end
 
-  private def iyi_export_type_lines(declaration : IyiMod::TypeDecl, outer : String, lines : Array(String)) : Nil
-    return unless declaration.visibility == "pub"
-    name = "#{outer}#{declaration.name}"
-    parameters = declaration.type_parameters.empty? ? "" : "(#{declaration.type_parameters.join(", ")})"
-    lines << "#{declaration.kind} #{name}#{parameters}"
-    declaration.methods.each do |signature|
-      lines << "#{name}.#{IyiMod.render_signature(signature)}" unless signature.visibility == "private"
+  # A module's own type is surface when it says `pub`. One nested in it
+  # travels with the visibility it was written with, and is surface unless
+  # that is `private`: `Box::Inner` is named as `Box` is.
+  private def iyi_surface_type(declaration : IyiMod::TypeDecl, outer : String, lines : Hash(String, SurfaceLine)) : Nil
+    if outer.empty?
+      return unless declaration.visibility == "pub"
+    else
+      return if declaration.visibility == "private"
     end
-    declaration.types.each { |inner| iyi_export_type_lines(inner, "#{name}::", lines) }
+    name = "#{outer}#{declaration.name}"
+    owner = outer.rchop("::")
+    header =
+      if declaration.kind == "alias"
+        # What it names is the whole of an alias: a consumer writing
+        # `Pair` writes the type on the right.
+        "alias #{name} = #{declaration.value}"
+      else
+        parameters = declaration.type_parameters.empty? ? "" : "(#{declaration.type_parameters.join(", ")})"
+        "#{declaration.kind} #{name}#{parameters}"
+      end
+    lines[header] = SurfaceLine.new(declaration.name, owner: owner, declares: name)
+    declaration.assoc_types.each do |assoc|
+      lines["#{name}.type #{assoc}"] = SurfaceLine.new(assoc, owner: name, requirement: true)
+    end
+    declaration.members.each do |(member, _)|
+      lines["member #{name}::#{member}"] = SurfaceLine.new(member, owner: name)
+    end
+    declaration.macros.each do |source|
+      lines["#{name}.#{IyiMod.macro_line(source)}"] = SurfaceLine.new(IyiMod.macro_name(source), owner: name)
+    end
+    declaration.methods.each do |signature|
+      next if signature.visibility == "private"
+      lines["#{name}.#{IyiMod.render_signature(signature)}"] =
+        SurfaceLine.new(signature.name, owner: name, signature: signature, requirement: signature.required)
+    end
+    declaration.types.each { |inner| iyi_surface_type(inner, "#{name}::", lines) }
   end
 
   private def read_iyimod(path : String) : IyiMod::Artifact

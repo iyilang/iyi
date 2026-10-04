@@ -14,6 +14,8 @@
 #   textDocument/didOpen · didChange · didSave · didClose — incremental
 #     sync; every change publishes diagnostics from a real compile of the
 #     buffer, unsaved and half-broken included
+#   workspace/didChangeWatchedFiles — a file changed on disk republishes
+#     the open verdicts that read it (`Proxy` registers the watcher)
 #   textDocument/hover          — the name's type, the def's signature
 #     and doc comment
 #   textDocument/definition     — where the call or type is defined
@@ -476,12 +478,23 @@ module Iyi::Lsp
         # A typing burst is one verdict: every didChange for this
         # document already queued applies now, and the compile runs
         # once, on what the person actually sees.
+        #
+        # A queued frame is read by its shape before it is taken, as the
+        # proxy reads it: one whose params, `textDocument` or
+        # `contentChanges` were not there to read raised here, and the
+        # rescue dropped this whole notification - the readable change
+        # before it was lost, and the proxy, which kept it, held a buffer
+        # the worker no longer had. One of the wrong shape ends the burst
+        # and is refused on its own.
         while (queued = @inbox.first?) &&
               queued["method"]?.try(&.as_s?) == "textDocument/didChange" &&
-              queued["params"]["textDocument"]["uri"].as_s == uri
+              (queued_params = queued["params"]?.try(&.as_h?)) &&
+              (queued_document = queued_params["textDocument"]?.try(&.as_h?)) &&
+              queued_document["uri"]?.try(&.as_s?) == uri &&
+              (more = queued_params["contentChanges"]?.try(&.as_a?))
           @inbox.shift
-          version = queued.dig?("params", "textDocument", "version").try(&.as_i64?) || version
-          queued["params"]["contentChanges"].as_a.each do |change|
+          version = queued_document["version"]?.try(&.as_i64?) || version
+          more.each do |change|
             text = Text.apply(text, change)
           end
         end
@@ -495,12 +508,15 @@ module Iyi::Lsp
         @documents.delete(uri)
         @versions.delete(uri)
         @published.delete(uri)
+        @watched_ids.delete(uri)
         # Not while the file is open under another spelling of it: the
         # analysis is kept by path, and closing one spelling dropped the
         # other's last good result - completion and hover went empty in the
         # buffer still open.
         closed = path_of(uri)
         @analysis.close(closed) unless @documents.each_key.any? { |open| same_path?(path_of(open), closed) }
+      when "workspace/didChangeWatchedFiles"
+        on_watched_files_changed
       when "textDocument/hover"
         on_hover(id.not_nil!, params.not_nil!)
       when "textDocument/definition"
@@ -878,6 +894,28 @@ module Iyi::Lsp
       end
     end
 
+    # `workspace/didChangeWatchedFiles`: files changed on disk, which an
+    # open buffer's verdict may read - a module it imports, the manifest.
+    # Each open buffer whose `result_ids` fold moved since the last such
+    # notification is published again; an open buffer's verdict was
+    # published on its own edits only, so a module it imports deleted or
+    # renamed on disk left the editor showing the verdict it had. With no
+    # workspace root the fold sees no disk, and every open buffer is
+    # published.
+    @watched_ids = {} of String => String
+
+    private def on_watched_files_changed : Nil
+      ids = result_ids
+      @documents.each_key do |uri|
+        result_id = ids[path_of(uri)]?
+        unless @roots.empty? || result_id.nil?
+          next if @watched_ids[uri]? == result_id
+          @watched_ids[uri] = result_id
+        end
+        publish_diagnostics(uri)
+      end
+    end
+
     # ── Pull diagnostics: the agent's shape of the same verdict ─────────
     #
     # A pull carries a `resultId`, and the next pull hands it back: the
@@ -961,6 +999,8 @@ module Iyi::Lsp
       # protocol has for exactly this and which the editor answers by
       # asking again when the typing stops.
       answers = [] of {String, String, Array({Int32, Int32, Int32, Diag})?}
+      compiled = 0
+      partial = false
       uris.each do |uri|
         next unless @documents.has_key?(uri) || File.file?(path_of(uri))
         result_id = ids[path_of(uri)]? || "0"
@@ -981,6 +1021,20 @@ module Iyi::Lsp
         return respond_cancelled(id) if @cancelled.delete(id.to_json)
         return respond_retrigger(id) if waiting_request?(id)
 
+        # The worker's bound, between two files. One pull compiled every
+        # file in one process with no collector, about 40 MB apiece, and
+        # gave nothing back until it answered: 1,443 MB for the 36 files
+        # of `samples/iyi`, 5.4 GB for 145, where the proxy retires a
+        # worker at `Proxy::RETIRE_FOOTPRINT` - but only between
+        # requests. So the pull answers the files it has judged and says
+        # it stopped short (`iyi/partial`), and the proxy hands the rest
+        # to a successor (`Proxy#pulled`). One file per answer at the
+        # least, so every answer gets further.
+        if compiled > 0 && Lsp.footprint >= Proxy::RETIRE_FOOTPRINT
+          partial = true
+          break
+        end
+
         # A file the server may not read has no verdict, and is left out as
         # the walk leaves out a directory it may not list.
         rows =
@@ -990,6 +1044,7 @@ module Iyi::Lsp
             next
           end
         answers << {uri, result_id, rows}
+        compiled += 1
       end
 
       respond(id) do |json|
@@ -1017,6 +1072,9 @@ module Iyi::Lsp
               end
             end
           end
+          # Not LSP: read and taken off by the proxy, and a client that
+          # drives the worker alone reads a report of the files judged.
+          json.field "iyi/partial", true if partial
         end
       end
     end
@@ -1265,6 +1323,23 @@ module Iyi::Lsp
         end
       end
 
+      # A type's name - `Shape` in `impl Shape for Square` - is no variable
+      # and no call, and answered null: its declaration line and doc comment
+      # instead, from this file's type of that name or the one type there is.
+      if parts.empty? && word && word[0]?.try(&.ascii_uppercase?)
+        sites = @analysis.hierarchy_types_named(path, text, overrides_for(path), word)
+        site = sites.find { |candidate| same_path?(candidate.location.filename.to_s, path) } || (sites.first if sites.size == 1)
+        if site
+          filename = site.location.filename.to_s
+          declaration = read_line(filename, site.location.line_number).strip
+          unless declaration.empty?
+            parts << "```iyi\n#{declaration}\n```"
+            doc = doc_above(filename, site.location.line_number)
+            parts << doc unless doc.empty?
+          end
+        end
+      end
+
       return respond_null(id) if parts.empty?
 
       respond(id) do |json|
@@ -1361,6 +1436,21 @@ module Iyi::Lsp
       result = @analysis.implementations_at(path, text, overrides_for(path), line0 + 1, column)
       traces = result.try(&.implementations)
       unless traces && !traces.empty?
+        # A macro call has no def to resolve to, and answered null: the
+        # macro it expanded is where it is defined.
+        if (location = @analysis.macro_definition_at(path, text, overrides_for(path), line0 + 1, column)) &&
+           (filename = location.filename).is_a?(String)
+          target_line = read_line(filename, location.line_number)
+          ch = Lsp.character_of(target_line, location.column_number)
+          return respond(id) do |json|
+            json.array do
+              json.object do
+                json.field "uri", uri_of(filename)
+                json.field "range" { range(json, location.line_number - 1, ch, location.line_number - 1, ch) }
+              end
+            end
+          end
+        end
         return respond_null(id)
       end
 
@@ -1410,18 +1500,42 @@ module Iyi::Lsp
 
       receiver = nil
       anchor = prefix_start
-      if prefix_start > 0 && chars[prefix_start - 1]? == '.'
-        receiver_start = prefix_start - 1
-        while receiver_start > 0 && (name_char?(chars[receiver_start - 1]?) || chars[receiver_start - 1]? == '@')
-          receiver_start -= 1
+      # `import app/shapes::{Square, |` selects from a module, and `X::|`
+      # names something inside a type or module: both were answered with
+      # the scope's locals and the keywords, none of which can go there.
+      selecting = import_selection(chars, prefix_start)
+      member_of = nil
+      if selecting
+        scope_items = selection_items(path, text, selecting, chars[0...prefix_start].join)
+      elsif prefix_start > 1 && chars[prefix_start - 1]? == ':' && chars[prefix_start - 2]? == ':'
+        path_start = prefix_start - 2
+        while path_start > 0 && (name_char?(chars[path_start - 1]?) || chars[path_start - 1]? == ':')
+          path_start -= 1
         end
+        member_of = chars[path_start...(prefix_start - 2)].join.lchop("::")
+        return respond_null(id) if member_of.empty?
+        scope_items = @analysis.members_at(path, text, overrides_for(path), line0 + 1, path_start + 1, member_of)
+      elsif prefix_start > 0 && chars[prefix_start - 1]? == '.'
+        receiver_start = expression_start(chars, prefix_start - 1)
         receiver = chars[receiver_start...(prefix_start - 1)].join
         anchor = receiver_start
         return respond_null(id) if receiver.empty?
+        if receiver.each_char.all? { |ch| name_char?(ch) || ch == '@' }
+          scope_items = @analysis.completion_at(path, text, overrides_for(path), line0 + 1, anchor + 1, receiver)
+        else
+          # An expression - `b.value.`, `"x".`, `[1].` - typed where it is
+          # written, in the buffer without the `.` and what follows it: the
+          # receiver was the run of name characters before the dot, so
+          # anything else had none and the answer was null.
+          lines = text.lines
+          lines[line0] = chars[0...(prefix_start - 1)].join + chars[cursor..]?.try(&.join).to_s
+          probe = lines.join('\n')
+          scope_items = @analysis.expression_methods_at(
+            path, probe, overrides_for(path), line0 + 1, receiver_start + 1, prefix_start - 1)
+        end
+      else
+        scope_items = @analysis.completion_at(path, text, overrides_for(path), line0 + 1, anchor + 1, nil)
       end
-
-      scope_items = @analysis.completion_at(
-        path, text, overrides_for(path), line0 + 1, anchor + 1, receiver)
 
       # {label, detail, kind, tier, from module, additional edits}.
       # The tier leads sortText: prefix matches before fuzzy ones,
@@ -1435,7 +1549,7 @@ module Iyi::Lsp
         end
       end
 
-      if receiver.nil?
+      if receiver.nil? && member_of.nil? && selecting.nil?
         KEYWORDS.each do |keyword|
           rows << {keyword, "keyword", 14, '2', nil, nil} if prefix.empty? || keyword.starts_with?(prefix)
         end
@@ -1453,6 +1567,7 @@ module Iyi::Lsp
             break if count >= 100
             next if entry_path == path
             Exports.of(entry_text, entry_path).each do |item|
+              next unless item.kind == Exports::FUNCTION
               next if item.module_path == own
               next if seen.includes?(item.name)
               tier =
@@ -1564,7 +1679,88 @@ module Iyi::Lsp
       # answer: a CRLF buffer was handed `import greet::{shout}\n`, and a
       # client that applies edits as written made the file mixed.
       ending = Iyi.crlf?(text) ? "\r\n" : "\n"
+      # The last import on the last line, with no line ending after it:
+      # the line after it is not in the document. The insert was at that
+      # line all the same, past the end - `ch\nimport std/json` was handed
+      # an edit at 2:0, and a client that holds an edit to the last line
+      # glued the import onto `import std/json`. It goes at the end of
+      # that line instead, behind a line ending of its own.
+      if anchor > 0 && anchor == lines.size && !text.ends_with?('\n')
+        last = lines[anchor - 1]
+        end_ch = Lsp.character_of(last, last.size + 1)
+        return [{anchor - 1, end_ch, end_ch, "#{ending}import #{module_path}::{#{name}}"}]
+      end
       [{anchor, 0, 0, "import #{module_path}::{#{name}}#{ending}"}]
+    end
+
+    # Where the expression before the `.` at *dot* starts: names and their
+    # `.`/`::` joints, `@`, a trailing `?` or `!`, and a bracketed or quoted
+    # stretch skipped whole - `b.value`, `foo(1).bar`, `"x"`, `[1, 2]`.
+    private def expression_start(chars : Array(Char), dot : Int32) : Int32
+      index = dot
+      while index > 0
+        ch = chars[index - 1]
+        if ch.in?('?', '!') && !(index > 1 && name_char?(chars[index - 2]))
+          # `!foo.` negates `foo.bar`, and a `?` after a space is the
+          # ternary: neither belongs to the receiver.
+          break
+        elsif name_char?(ch) || ch.in?('@', '.', ':', '?', '!')
+          index -= 1
+        elsif ch.in?(')', ']', '}')
+          opener = ch == ')' ? '(' : ch == ']' ? '[' : '{'
+          depth = 0
+          index -= 1
+          loop do
+            return dot if index < 0
+            current = chars[index]
+            depth += 1 if current == ch
+            depth -= 1 if current == opener
+            break if depth.zero?
+            index -= 1
+          end
+        elsif ch.in?('"', '\'')
+          index -= 1
+          loop do
+            index -= 1
+            return dot if index < 0
+            break if chars[index] == ch && (index.zero? || chars[index - 1] != '\\')
+          end
+        else
+          break
+        end
+      end
+      index
+    end
+
+    # The module an `import path::{...` line selects from, when the cursor
+    # is inside its braces; nil anywhere else.
+    private def import_selection(chars : Array(Char), prefix_start : Int32) : String?
+      before = chars[0...prefix_start].join
+      stripped = before.lstrip
+      rest = stripped.lchop?("pub import ") || stripped.lchop?("import ")
+      return nil unless rest
+      brace = rest.index("::{")
+      return nil unless brace && !rest[brace..].includes?('}')
+      module_path = rest[0, brace].strip
+      module_path.empty? ? nil : module_path
+    end
+
+    # What `import path::{...}` can select: the module's exports, read off
+    # its source the way auto-import reads them, less the names the line
+    # already selects.
+    private def selection_items(path : String, text : String, module_path : String, written : String) : Array({String, String, Int32})
+      chosen = written.partition("::{")[2].split(',').map(&.strip).to_set
+      file = @analysis.module_files(path, text, overrides_for(path))[module_path]?
+      source = file.try { |found| document_text(found) || workspace_text(found) }
+      unless source
+        if entry = workspace_entries.find { |(_, entry_text)| Exports.header_of(entry_text) == module_path }
+          file, source = entry
+        end
+      end
+      return [] of {String, String, Int32} unless file && source
+      Exports.of(source, file).compact_map do |item|
+        {item.name, item.detail, item.kind} unless chosen.includes?(item.name)
+      end
     end
 
     private def name_char?(ch : Char?) : Bool
@@ -1577,6 +1773,7 @@ module Iyi::Lsp
     private def on_references(id : JSON::Any, params : JSON::Any) : Nil
       references, declarations = reference_sites(params)
       if references.empty? && declarations.empty?
+        refuse_type_name(params)
         return respond_null(id)
       end
 
@@ -1623,6 +1820,7 @@ module Iyi::Lsp
         end
         references, declarations = local.split
       else
+        refuse_type_name(params)
         unless valid_name?(new_name) && lexed_name(new_name, path)
           raise Refused.new("'#{new_name}' is not an iyi method name")
         end
@@ -1715,6 +1913,7 @@ module Iyi::Lsp
       if renaming_to && (why = first.unrenameable)
         raise Refused.new(why)
       end
+      refuse_foreign_declaration(first) if renaming_to
       refuse_importer(first, renaming_to) if renaming_to
       references.concat first.references
       declarations.concat first.declarations
@@ -1733,6 +1932,46 @@ module Iyi::Lsp
       end
 
       {dedupe(references), dedupe(declarations)}
+    end
+
+    # A def declared in the compiler's library, or outside every
+    # workspace folder in a file the editor does not hold, is not the
+    # person's to rename: its callers are every program that reads that
+    # file, and the workspace holds a few of them. `puts` renamed from a
+    # buffer answered an edit to the toolchain's own `src/iyi/io.iyi`,
+    # line 447 - and in a workspace of 145 files the walk to build that
+    # answer took two minutes, answering nothing else meanwhile. Refused
+    # here, from the cursor's own compile, before the walk.
+    private def refuse_foreign_declaration(visitor : ReferencesVisitor) : Nil
+      visitor.target_files.each do |file|
+        where =
+          if library_dirs.any? { |dir| inside?(file, dir) }
+            "the compiler's library"
+          elsif !@roots.empty? && @roots.none? { |root| inside?(file, root) } && !document_text(file)
+            "outside the workspace"
+          end
+        next unless where
+        name = visitor.target_names.first? || "this method"
+        raise Refused.new("'#{name}' is declared in #{fs_path(file)}, #{where}: a rename would rewrite a file " \
+                          "that programs outside this workspace read, and leave their calls behind")
+      end
+    end
+
+    # Where the compiler reads its own library from: the absolute entries
+    # of its path. `lib`, the one relative entry, is a project's
+    # dependencies, and a workspace's folders already judge those.
+    @library_dirs : Array(String)?
+
+    private def library_dirs : Array(String)
+      @library_dirs ||= IyiPath.default_paths.select { |dir| ::Path[dir].absolute? }
+    end
+
+    # Whether *file* is *dir* or below it, compared a part at a time the
+    # way `same_path?` compares a path.
+    private def inside?(file : String, dir : String) : Bool
+      parts = ::Path[File.expand_path(fs_path(file))].parts
+      under = ::Path[File.expand_path(fs_path(dir))].parts
+      under.size <= parts.size && (0...under.size).all? { |index| same_path?(under[index], parts[index]) }
     end
 
     private def refuse_importer(visitor : ReferencesVisitor, name : String) : Nil
@@ -1956,7 +2195,12 @@ module Iyi::Lsp
       {Lsp.character_of(name_line, column), Lsp.character_of(name_line, column + size)}
     end
 
-    private def document_symbol(json : JSON::Builder, sym : Outline::Sym, lines : Array(String)) : Nil
+    # Levels of `children` in one outline: a level is two JSON levels (the
+    # array and the symbol in it) against the builder's 99, and fifty
+    # nested classes answered -32603 "Nesting of 100 is too deep".
+    OUTLINE_DEPTH = 32
+
+    private def document_symbol(json : JSON::Builder, sym : Outline::Sym, lines : Array(String), depth : Int32 = 1) : Nil
       sel_start, sel_end = selection_of(lines, sym)
       # iyi: the end in UTF-16 units, as every other range here is: `.size`
       # counts characters, and an `end # 🎉` line's range stopped short.
@@ -1966,13 +2210,19 @@ module Iyi::Lsp
         json.field "kind", sym.kind
         json.field "range" { range(json, sym.line - 1, 0, sym.end_line - 1, Lsp.character_of(end_text, end_text.size + 1)) }
         json.field "selectionRange" { range(json, sym.name_line - 1, sel_start, sym.name_line - 1, sel_end) }
-        unless sym.children.empty?
+        unless sym.children.empty? || depth == OUTLINE_DEPTH
           json.field "children" do
             json.array do
-              sym.children.each { |child| document_symbol(json, child, lines) }
+              sym.children.each { |child| document_symbol(json, child, lines, depth + 1) }
             end
           end
         end
+      end
+      # At the deepest level written, a symbol's own are listed beside it
+      # rather than in it: still inside its parent's range, and every
+      # symbol is still in the outline.
+      if depth == OUTLINE_DEPTH
+        sym.children.each { |child| document_symbol(json, child, lines, depth) }
       end
     end
 
@@ -1996,10 +2246,12 @@ module Iyi::Lsp
         return respond_null(id) if local.instance_var?
       else
         visitor = @analysis.references_at(path, text, overrides_for(path), target)
+        refuse_type_name(params) unless visitor
         return respond_null(id) unless visitor
         if why = visitor.unrenameable
           raise Refused.new(why)
         end
+        refuse_foreign_declaration(visitor)
       end
 
       from, to = span
@@ -2011,6 +2263,22 @@ module Iyi::Lsp
           json.field "placeholder", line_text[from..to]
         end
       end
+    end
+
+    # A type's name under the cursor, refused by name rather than with
+    # null: references, prepareRename and rename on `Square` answered
+    # null, which an editor and an agent read as "nothing uses it". The
+    # typed graph these read binds a call to its def, and a type's uses in
+    # annotations and declarations are not in it, so an answer from it
+    # would be a partial list and a rename that leaves the rest behind.
+    private def refuse_type_name(params : JSON::Any) : Nil
+      text = text_of(params["textDocument"]["uri"].as_s)
+      line0, char = position_of(params["position"])
+      line_text = text.lines[line0]? || ""
+      word = word_at(line_text, Lsp.column_of(line_text, char))
+      return unless word && word[0]?.try(&.ascii_uppercase?)
+      raise Refused.new("#{word} is a type, and references and rename follow defs, their calls and local variables: " \
+                        "a type's uses in annotations and declarations are not in the typed graph they read")
     end
 
     # ── Type definition ──────────────────────────────────────────────────
@@ -2591,8 +2859,11 @@ module Iyi::Lsp
 
     private def on_code_action(id : JSON::Any, params : JSON::Any) : Nil
       uri = params["textDocument"]["uri"].as_s
-      from = params["range"]["start"]["line"].as_i
-      to = params["range"]["end"]["line"].as_i
+      # Read as every other position is (`position_of`): `.as_i` on a
+      # line past 2^31 - 1 answered -32603 "Arithmetic overflow", where
+      # the same line in a hover is held at the bound.
+      from = position_of(params["range"]["start"])[0]
+      to = position_of(params["range"]["end"])[0]
       only = params["context"]?.try(&.["only"]?).try(&.as_a?.try(&.compact_map(&.as_s?)))
 
       # A buffer this worker was handed (`iyi/adopt`) has a verdict on the
@@ -2761,6 +3032,11 @@ module Iyi::Lsp
     # the client applies before the rename lands on disk. A file whose
     # header and path disagree has no module identity to move, and is
     # left alone by name.
+    #
+    # And every name a module is spelled by in code: `geo/b` is `Geo::B`
+    # (IV.6 #6), so `Geo::B::Dog` moves with the file to `Geo::C::Dog`. It
+    # was left behind, and the import the edit moved named a module the
+    # code still called by its old name.
     private def on_will_rename_files(id : JSON::Any, params : JSON::Any) : Nil
       edits = {} of String => Array({Int32, Int32, Int32, String})
 
@@ -2791,10 +3067,12 @@ module Iyi::Lsp
         next if new_mod.empty? || new_mod == old_mod || !clean_module?(new_mod)
 
         (edits[uri_of(old_path)] ||= [] of {Int32, Int32, Int32, String})
-          .concat module_mention_edits(text, old_mod, new_mod)
+          .concat(module_mention_edits(text, old_mod, new_mod))
+          .concat(qualified_name_edits(text, old_path, old_mod, new_mod))
         workspace_entries.each do |(entry_path, entry_text)|
           next if same_path?(entry_path, old_path)
           mentions = module_mention_edits(entry_text, old_mod, new_mod)
+          mentions.concat qualified_name_edits(entry_text, entry_path, old_mod, new_mod)
           next if mentions.empty?
           (edits[uri_of(entry_path)] ||= [] of {Int32, Int32, Int32, String})
             .concat mentions
@@ -2856,6 +3134,63 @@ module Iyi::Lsp
       edits
     end
 
+    # Every place *text* spells the moved module's name in code - a path
+    # that begins `Geo::B`, or `::Geo::B` - with the span of those
+    # segments. Off the parse, so a string or a comment that says `Geo::B`
+    # is left as it is, and only where the source spells the segments as
+    # written; a buffer that does not parse offers none.
+    private def qualified_name_edits(text : String, path : String, old_mod : String, new_mod : String) : Array({Int32, Int32, Int32, String})
+      edits = [] of {Int32, Int32, Int32, String}
+      old_names = old_mod.split('/').map(&.camelcase)
+      old_written = old_names.join("::")
+      return edits unless text.includes?(old_written)
+      new_written = new_mod.split('/').map(&.camelcase).join("::")
+
+      parser = Parser.new(text)
+      parser.filename = path
+      finder = ModulePathFinder.new(old_names)
+      parser.parse.accept finder
+
+      lines = text.lines
+      finder.locations.each do |location|
+        line = lines[location.line_number - 1]?
+        next unless line
+        line = line.lchop('\uFEFF') if location.line_number == 1
+        column = location.column_number
+        rest = line.chars[(column - 1)..]?.try(&.join) || ""
+        if rest.starts_with?("::#{old_written}")
+          column += 2
+        elsif !rest.starts_with?(old_written)
+          next
+        end
+        start_ch = Lsp.character_of(line, column)
+        end_ch = Lsp.character_of(line, column + old_written.size)
+        edits << {location.line_number - 1, start_ch, end_ch, new_written}
+      end
+      edits.uniq!
+    rescue CodeError | InvalidByteSequenceError
+      [] of {Int32, Int32, Int32, String}
+    end
+
+    # The paths that begin with the segments *names*, where they start.
+    private class ModulePathFinder < Visitor
+      getter locations = [] of Location
+
+      def initialize(@names : Array(String))
+      end
+
+      def visit(node : Path)
+        if (location = node.location) && node.names.size >= @names.size && node.names[0, @names.size] == @names
+          @locations << location
+        end
+        true
+      end
+
+      def visit(node)
+        true
+      end
+    end
+
     # ── Implementation ───────────────────────────────────────────────────
 
     # The trait under the cursor answers with the types that implement
@@ -2869,8 +3204,12 @@ module Iyi::Lsp
       line_text = text.lines[line0]? || ""
       column = Lsp.column_of(line_text, char)
 
-      locations = @analysis.implementors_at(
-        path, text, overrides_for(path), word_at(line_text, column))
+      word = word_at(line_text, column)
+      locations = @analysis.implementors_at(path, text, overrides_for(path), word)
+      if locations.empty? && word && !word[0]?.try(&.ascii_uppercase?)
+        # A trait's method: each implementor's def of it.
+        locations = @analysis.method_implementations_at(path, text, overrides_for(path), line0 + 1, column)
+      end
       return respond_null(id) if locations.empty?
 
       respond(id) do |json|
@@ -3055,6 +3394,8 @@ module Iyi::Lsp
           return respond_null(id)
         end
 
+      # The document's last line, for a position past it.
+      last_line = text.count('\n')
       respond(id) do |json|
         json.array do
           params["positions"].as_a.each do |position|
@@ -3065,14 +3406,24 @@ module Iyi::Lsp
             collector = SpanCollector.new(Location.new(path, line0 + 1, column))
             parsed.accept collector
             chain = nest_spans(collector.spans)
+            # Each span is written inside the next (`write_selection`), and
+            # a JSON builder stops at 99 levels: a cursor inside a
+            # 100-deep expression answered -32603 "Nesting of 100 is too
+            # deep". The middle of a longer chain goes; the innermost
+            # spans and the outermost stay, each still inside the next.
+            if chain.size > SELECTION_DEPTH
+              half = SELECTION_DEPTH // 2
+              chain = chain[0, half] + chain[chain.size - half, half]
+            end
 
             if chain.empty?
-              # iyi: the position the client asked about, kept inside the
-              # document: past a line's end or the last line it was echoed
-              # as given, `{line, 10000}`, a range in no document.
-              at_line = line0.clamp(0, Math.max(text.ends_with?('\n') ? lines.size : lines.size - 1, 0))
+              # Held to the document, as an edit's position is (LSP 3.17:
+              # past a line's end is its end): the client's numbers came
+              # back as they were sent, line 9 of a one-line buffer and
+              # 2^30 for the protocol's largest position.
+              at_line = {line0, last_line}.min
               at_text = lines[at_line]? || ""
-              at_char = char.clamp(0, Lsp.character_of(at_text, at_text.size + 1))
+              at_char = {char, Lsp.character_of(at_text, at_text.size + 1)}.min
               json.object do
                 json.field "range" { range(json, at_line, at_char, at_line, at_char) }
               end
@@ -3102,6 +3453,12 @@ module Iyi::Lsp
       end
       chain
     end
+
+    # Spans in one selection chain. The answer's object, its array and a
+    # range's `start` are four JSON levels, and each span is one more,
+    # against the builder's 99; sixty-four expand-selections is past
+    # what a person presses.
+    SELECTION_DEPTH = 64
 
     # chain[index] innermost-out via recursion: the object is the
     # innermost range, its `parent` the next span outward.

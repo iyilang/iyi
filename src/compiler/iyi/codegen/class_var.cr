@@ -39,7 +39,7 @@ class Iyi::CodeGenVisitor
     unless global
       main_llvm_type = @main_llvm_typer.llvm_type(class_var.type)
       global = @main_mod.globals.add(main_llvm_type, global_name)
-      global.linkage = LLVM::Linkage::Internal if @single_module
+      global.linkage = LLVM::Linkage::Internal if iyi_internalise?
       declare_thread_local(global) if class_var.thread_local?
       if !global.initializer && type.includes_type?(@program.nil_type)
         global.initializer = main_llvm_type.null
@@ -56,7 +56,7 @@ class Iyi::CodeGenVisitor
     unless initialized_flag
       initialized_flag = @main_mod.globals.add(@main_llvm_context.int1, initialized_flag_name)
       initialized_flag.initializer = @main_llvm_context.int1.const_int(0)
-      initialized_flag.linkage = LLVM::Linkage::Internal if @single_module
+      initialized_flag.linkage = LLVM::Linkage::Internal if iyi_internalise?
       declare_thread_local(initialized_flag) if class_var.thread_local?
     end
     initialized_flag

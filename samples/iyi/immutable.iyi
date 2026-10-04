@@ -1,6 +1,6 @@
 # The shareable immutable sequence, exercised — SPEC.md III.4.7.
 #
-#   ./bin/crystal run samples/iyi/immutable.iyi
+#   ./bin/iyi run samples/iyi/immutable.iyi
 #
 # `std/list.iyi` holds the type. This file is the evidence for the two claims
 # made about it, because a type that merely compiles has proved neither:
@@ -73,7 +73,7 @@ puts "take/skip       #{nums.take(2).join(",")} #{nums.skip(3).join(",")}"
 puts "take_while      #{nums.take_while { |x| x < 4 }.join(",")}"
 puts "skip_while      #{nums.skip_while { |x| x < 4 }.join(",")}"
 puts "reduce          #{nums.reduce(0) { |a, x| a + x }}"
-puts "each_with_object #{nums.each_with_object([] of Int32) { |o, e| o << e * 10 }.join(",")}"
+puts "each_with_object #{nums.each_with_object([] of Int32) { |e, o| o << e * 10 }.join(",")}"
 puts "join            #{nums.join("-")}"
 puts "includes?       #{nums.includes?(4)} #{nums.includes?(9)}"
 puts "max/min         #{nums.max} #{nums.min}"
@@ -95,7 +95,7 @@ puts "two elem types  #{nums.map { |x| x + 1 }.join(",")} / #{words.map { |s| s.
 #
 #     ./bin/crystal build --no-codegen --emit-iyimod /tmp/mods samples/iyi/immutable.iyi
 #     mv src/std /tmp/std-elsewhere
-#     ./bin/crystal build --use-iyimod /tmp/mods samples/iyi/immutable.iyi   # compiles
+#     ./bin/crystal build --no-codegen --use-iyimod /tmp/mods samples/iyi/immutable.iyi   # compiles
 #     mv /tmp/std-elsewhere src/std
 #
 # This file is the hard case for R-1's contract, not `modules.iyi`: what has to
@@ -106,6 +106,7 @@ puts "two elem types  #{nums.map { |x| x + 1 }.join(",")} / #{words.map { |s| s.
 # `type Elem = T`. Every call above is checked against those and against
 # nothing else (SPEC.md IV.1f).
 #
-# Not codegen: `--use-iyimod` implies `--no-codegen`, so this compiles the file
-# without producing a program. `./bin/crystal run` above is still an ordinary
-# build that reads the sources.
+# Not codegen: artifacts from a `--no-codegen` build carry no object code, so
+# the second build passes `--no-codegen` too and produces no program - one that
+# links against them is refused by name. `./bin/crystal run` above is still an
+# ordinary build that reads the sources.

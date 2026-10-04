@@ -1,6 +1,6 @@
 # The `Enumerable` port, exercised — SPEC.md II.6.
 #
-#   ./bin/crystal run samples/iyi/collections.iyi
+#   ./bin/iyi run samples/iyi/collections.iyi
 #
 # `std/enumerable.iyi` holds the trait. This file implements it twice and calls
 # every method it defines. Both matter: a default method is only typed when it
@@ -66,7 +66,7 @@ puts "take_while      #{n.take_while { |x| x < 4 }.join(",")}"
 puts "skip_while      #{n.skip_while { |x| x < 4 }.join(",")}"
 puts "reduce          #{n.reduce(0) { |a, x| a + x }}"
 puts "each_with_index #{n.map_with_index { |x, i| i }.join(",")}"
-puts "each_with_object #{n.each_with_object([] of Int32) { |o, e| o << e * 10 }.join(",")}"
+puts "each_with_object #{n.each_with_object([] of Int32) { |e, o| o << e * 10 }.join(",")}"
 puts "join            #{n.join("-")}"
 puts "includes?       #{n.includes?(4)} #{n.includes?(9)}"
 puts "max?/max        #{n.max?} #{n.max}"
@@ -95,8 +95,10 @@ puts "tally_by        #{w.tally_by { |s| s.size }[4]}"
 puts "sum_by          #{w.sum_by { |s| s.size }}"
 
 # SPEC II.6 finding 6: one bound replaces `Indexable | Iterable | Iterator`,
-# and `O::Elem` names what the other collection yields.
-puts "zip             #{n.zip(w).map { |pair| "#{pair[0]}#{pair[1]}" }.join(" ")}"
+# and `O::Elem` names what the other collection yields. Four numbers for
+# four words: a shorter other collection is refused, as the other library
+# refuses it.
+puts "zip             #{Nums.new([3, 1, 4, 1]).zip(w).map { |pair| "#{pair[0]}#{pair[1]}" }.join(" ")}"
 
 cycled = [] of Int32
 Nums.new([1, 2]).cycle(2) { |x| cycled << x }

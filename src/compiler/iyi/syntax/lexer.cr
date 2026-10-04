@@ -305,6 +305,9 @@ module Iyi
           @token.type = :OP_EQ
         end
       when '!'
+        # iyi: the parser reads the byte before a `!` to tell `g(x)!` from
+        # `g(x) !`, since the argument list swallows the space after `)`.
+        @token.start = start
         case next_char
         when '='
           next_char :OP_BANG_EQ
@@ -402,10 +405,12 @@ module Iyi
         elsif @wants_def_or_macro_name
           @token.type = :OP_SLASH
         elsif @slash_is_regex
+          iyi_refuse_slash_comment(char)
           delimited_pair :regex, '/', '/', start
         elsif char.ascii_whitespace? || char == '\0'
           @token.type = :OP_SLASH
         elsif @wants_regex
+          iyi_refuse_slash_comment(char)
           delimited_pair :regex, '/', '/', start
         else
           @token.type = :OP_SLASH
@@ -470,6 +475,10 @@ module Iyi
       when ':'
         if next_char == ':'
           next_char :OP_COLON_COLON
+        elsif @iyi && current_char == '=' && !peek_next_char.in?('=', '~')
+          # iyi: Go's `x := 5`. `:=` is no symbol (`:==` and `:=~` are),
+          # and the report was "unknown token: ' '", one column past it.
+          raise "there is no `:=`: a variable is `x = 5`, and its type is the value's", @token.line_number, @token.column_number
         elsif @wants_symbol
           consume_symbol
         else
@@ -1793,6 +1802,20 @@ module Iyi
       @token.column_number = @column_number
 
       false
+    end
+
+    # iyi: a `/` where an operand starts, followed by `*` or by a second `/`
+    # and a space, is a C-family comment, not a regex: `/* say hi */` was
+    # told to `import std/regex`, and `// say hi` was "unexpected token:
+    # \"say\"". A regex cannot start with `*`, and an empty one followed by
+    # words is no expression.
+    private def iyi_refuse_slash_comment(char : Char) : Nil
+      return unless @iyi
+      if char == '*'
+        raise "`/*` opens no comment here: a comment starts with `#` and runs to the end of its line, one `#` per line (`# say hi`)", @token.line_number, @token.column_number
+      elsif char == '/' && ((after = peek_next_char).ascii_whitespace? || after == '\0')
+        raise "`//` opens no comment here: a comment starts with `#` and runs to the end of its line (`# say hi`)", @token.line_number, @token.column_number
+      end
     end
 
     def raise_unterminated_quoted(delimiter_state)

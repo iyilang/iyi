@@ -497,8 +497,8 @@ class ::File
     # 0x200: without the second, a message with an insert in it fails rather
     # than printing the placeholder. Windows ends these sentences with CRLF
     # and sometimes a trailing space, which is a line break in the middle of
-    # a panic, so the tail comes off.
-    private def self.win_error : String
+    # a panic, so the tail comes off. `std/dir`'s refusals say it too.
+    def self.win_error : String
       code = Std::File::LibKernel32.GetLastError
       room = 1024
       wide = Pointer(UInt16).malloc(room.to_u64)
@@ -1177,6 +1177,17 @@ class ::File
       if old_wide.address == 0_u64 || new_wide.address == 0_u64
         raise "Cannot rename #{o} to #{n}: a path is not valid UTF-8"
       end
+      # A directory onto a name that is no directory is refused, as POSIX
+      # `rename` refuses it (ENOTDIR): MoveFileExW replaced the file with
+      # the directory - measured, `File.rename("d", "f.txt")` left `f.txt`
+      # a directory and the file's contents gone, where Linux said "Cannot
+      # rename". Only a directory itself is asked about; a link to one, a
+      # reparse point, is left to the rename.
+      moving = Std::File::LibKernel32.GetFileAttributesW(old_wide)
+      if moving != -1 && (moving & 0x10) != 0 && (moving & 0x400) == 0
+        onto = Std::File::LibKernel32.GetFileAttributesW(new_wide)
+        raise "Cannot rename #{o} to #{n}: #{n} is not a directory" if onto != -1 && (onto & 0x10) == 0
+      end
       # MoveFileExW replaced the second link with the first, and the first
       # name was gone: measured, renaming `a` onto its own hard link `b`
       # left `b` alone, where POSIX leaves both.
@@ -1286,7 +1297,18 @@ class ::File
       # the kind of whatever this one held under that name, and a file
       # link to a directory cannot be listed through. (Found by reading;
       # no symlink could be made where this was written to measure it.)
-      old_wide = __iyi_wide_path(sys_path(o))
+      # A `/` in the target is written `\`: the link keeps the target as
+      # given, and Go's `os.Symlink` converts it the same way because "'/'
+      # does not work in link's content". Passed as written, a link to
+      # `sub/t.txt` would point at nothing. (Not measured either, for the
+      # same reason.)
+      target = sys_path(o)
+      i = 0
+      while i < o.bytesize
+        target[i] = 92_u8 if target[i] == 47_u8
+        i = i + 1
+      end
+      old_wide = __iyi_wide_path(target)
       new_wide = __iyi_wide_path(sys_path(n))
       if old_wide.address == 0_u64 || new_wide.address == 0_u64
         raise "Cannot symlink #{o} to #{n}: the path is not valid UTF-8"

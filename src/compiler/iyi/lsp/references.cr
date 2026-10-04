@@ -32,7 +32,7 @@ module Iyi::Lsp
     # The adopted defs' keys, which are the seeds of every other entry's
     # visitor (see `initialize`).
     getter target_keys = Set({String, Int32, Int32, String}).new
-    @target_names = Set(String).new
+    getter target_names = Set(String).new
     # The files the adopted defs are declared in: under R-1 only a module
     # that imports one of them, directly or through another, can refer to
     # them, which is how the server picks which entries to compile.
@@ -48,6 +48,9 @@ module Iyi::Lsp
     getter unrenameable : String? = nil
     @program : Program? = nil
     @collecting = false
+    # The adopted defs themselves, for `link_trait_methods` to read their
+    # owners and arity from, and for go-to-implementation to answer with.
+    getter adopted = [] of Def
 
     # *seeds* are the keys another compile adopted (`target_keys`): a def
     # carrying one is adopted here too, wherever the cursor is. The cursor
@@ -63,6 +66,7 @@ module Iyi::Lsp
       process_result result
       result.node.accept self
       return false if @target_keys.empty?
+      link_trait_methods(result.program)
 
       @collecting = true
       process_result result
@@ -158,7 +162,7 @@ module Iyi::Lsp
     private def adopt(node : Def) : Nil
       location = node.location
       return unless location
-      @target_keys << key_of(node)
+      @adopted << node if @target_keys.add?(key_of(node))
       @target_names << node.name
       # The file the def is written in: for a macro's def, the file the
       # macro was expanded in, not the expansion's name, which is no file
@@ -171,6 +175,58 @@ module Iyi::Lsp
       end
       if owner = node.owner?
         @target_owners << owner unless @target_owners.any?(&.same?(owner))
+      end
+    end
+
+    # iyi: a trait's requirement and every method that answers it are one
+    # method to a caller - a call on a value typed by the trait reaches
+    # whichever implementation the value has. So adopting any of them
+    # adopts the rest: the trait's own def (abstract or default) and the
+    # def of that name and arity on every type that implements the trait.
+    # A rename of `Square#area` rewrote its def and every call and left
+    # `abstract def area` in `Shape`, and the program it left said `impl
+    # Shape for Square is missing a method required by the trait: area`;
+    # references from the requirement answered the requirement alone.
+    private def link_trait_methods(program : Program) : Nil
+      linked = [] of {Type, String, Int32}
+      @adopted.each do |a_def|
+        owner = a_def.owner?
+        next unless owner
+        instance = owner.instance_type
+        ([instance] + instance.ancestors).each do |ancestor|
+          owner_trait = ancestor.is_a?(GenericInstanceType) ? ancestor.generic_type.as(Type) : ancestor
+          next unless owner_trait.trait? && owner_trait.defs.try(&.has_key?(a_def.name))
+          entry = {owner_trait, a_def.name, a_def.args.size}
+          linked << entry unless linked.any? { |(seen, name, arity)| seen.same?(owner_trait) && name == entry[1] && arity == entry[2] }
+        end
+      end
+      return if linked.empty?
+
+      each_type(program) do |type|
+        # Not the struct definition-site typing synthesizes to probe a
+        # trait-typed parameter: its stub `def area` is stamped with the
+        # trait's own location, and a rename wrote the new name over
+        # `trait` in `pub trait Shape`.
+        next if type.to_s.starts_with?(WITNESS_PREFIX)
+        linked.each do |(wanted, name, arity)|
+          answers = type.same?(wanted) || type.ancestors.any? do |ancestor|
+            ancestor.same?(wanted) || (ancestor.is_a?(GenericInstanceType) && ancestor.generic_type.same?(wanted))
+          end
+          next unless answers
+          type.defs.try &.[name]?.try &.each do |item|
+            adopt item.def if item.def.args.size == arity
+          end
+        end
+      end
+    end
+
+    # The name `DefinitionTyping` gives its witness structs.
+    WITNESS_PREFIX = "IyiDefTypeWitness_"
+
+    private def each_type(type : Type, &block : Type ->) : Nil
+      type.types?.try &.each_value do |inner|
+        block.call inner
+        each_type(inner, &block)
       end
     end
 

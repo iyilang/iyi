@@ -181,6 +181,11 @@ generated_expected = "out.print(\"a \\\"q\\\" \\\\ \\\#{b\\t\\n\")\n" \
                      "out.print(\"d\")\n" \
                      "#<loc:push>#<loc:\"t.eiy\",2,23> end \n#<loc:pop>\n"
 assert_text(generated_expected, generated, "process_string output")
+# Code that opens straight after `<%` follows its location straight, as an
+# output tag's does: a space was put before it, and the compiler reported
+# everything on its first line a column right of where the template has it.
+tight = Eiy.process_string("<%x = 1%>", "t.eiy", "out")
+assert_text("#<loc:push>#<loc:\"t.eiy\",1,3>x = 1\n#<loc:pop>\n", tight, "a control tag's code follows its location")
 # Text that is not UTF-8 is written as `\x` escapes: the compiler reads a
 # literal as UTF-8, and a byte that is not stops it with an internal error.
 # UTF-8 stays itself; an overlong or surrogate spelling is not UTF-8.
@@ -207,6 +212,16 @@ open_lexer = Eiy::Lexer.new("çay <%% never")
 assert_true(open_lexer.next_token.string?, "text before the open tag lexes")
 assert_true(open_lexer.next_token?.nil?, "next_token? answers nil at the open tag")
 assert_text("unterminated <%% tag at line 1, column 5", open_lexer.error || "(no error)", "the lexer's sentence")
+# `<%-` takes the blanks before it only where it is the first thing on its
+# line: after an output tag on the same line it is not, and the two spaces
+# between the tags were dropped. Blanks that `-%>` leaves are a line's start.
+opens_line_source = Eiy.process_string("<%= a %>  <%- b %><% c -%>  <%- d %>", "t.eiy", "out")
+opens_line_expected = "#<loc:push>out.print((#<loc:\"t.eiy\",1,4> a \n))#<loc:pop>\n" \
+                      "out.print(\"  \")\n" \
+                      "#<loc:push>#<loc:\"t.eiy\",1,14> b \n#<loc:pop>\n" \
+                      "#<loc:push>#<loc:\"t.eiy\",1,21> c \n#<loc:pop>\n" \
+                      "#<loc:push>#<loc:\"t.eiy\",1,32> d \n#<loc:pop>\n"
+assert_text(opens_line_expected, opens_line_source, "<%- after a tag on its line keeps the blanks")
 puts "  generated source exact; process_file, locate, process_string? and the lexer's error all answer"
 
 puts "ALL CHECKS PASSED"

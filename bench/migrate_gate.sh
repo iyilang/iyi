@@ -372,6 +372,31 @@ else
   holds "a file a module requires is refused, with why" "none of its names" "$WORK/step_refuse.log"
 fi
 
+# A file below the source root keeps its sidecar beside its module. The
+# module path is the namespace, `sub/counter`, and the sidecar was put
+# under the directory the file is in *and* that path's own directory:
+# `src/sub/sub/counter_crystal.cr`, so the module's `require
+# "./counter_crystal.cr"` found nothing and its first check refused.
+rm -rf "$WORK/sub"
+mkdir -p "$WORK/sub/src/sub"
+printf 'name: sub\nversion: 0.1.0\n' > "$WORK/sub/shard.yml"
+printf 'struct Int32\n  def liras : String\n    "#{self} TRY"\n  end\nend\n\nmodule Sub\n  module Counter\n    def self.report(count : Int32) : String\n      count.liras\n    end\n  end\nend\n' > "$WORK/sub/src/sub/counter.cr"
+if (cd "$WORK/sub" && "$IYI" migrate src/sub/counter.cr > "$WORK/sub.log" 2>&1); then
+  if [ -f "$WORK/sub/src/sub/counter_crystal.cr" ] && [ ! -e "$WORK/sub/src/sub/sub" ]; then
+    step ok "a file below the root keeps its sidecar beside its module"
+  else
+    step fail "the sidecar went somewhere else: $(cd "$WORK/sub" && find src -name '*_crystal.cr' | head -1)"
+  fi
+  if (cd "$WORK/sub" && "$IYI" check --crystal src/sub/counter.iyi > "$WORK/sub_check.log" 2>&1); then
+    step ok "and the module it requires it from compiles"
+  else
+    step fail "the module does not compile: $(grep -m1 'Error' "$WORK/sub_check.log")"
+  fi
+else
+  step fail "migrate of a file below the root failed"
+  tail -5 "$WORK/sub.log"
+fi
+
 # A template's path is written from the directory the *original* program
 # was built from - `ECR.embed("src/views/report.html.ecr")` resolves against
 # the build's working directory - so the copy has to sit at that same path

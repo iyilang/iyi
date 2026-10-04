@@ -56,9 +56,11 @@ class Iyi::Type
   end
 
   # Similar to `lookup_type`, but the result might also be an ASTNode, for example when
-  # looking `N` relative to a StaticArray.
-  def lookup_type_var(node : Path, free_vars : Hash(String, TypeVar)? = nil, find_root_generic_type_parameters = true, remove_alias = true) : Type | ASTNode
-    TypeLookup.new(self, self.instance_type, true, false, free_vars, find_root_generic_type_parameters, remove_alias).lookup_type_var(node).not_nil!
+  # looking `N` relative to a StaticArray. *self_type* is the type a method body
+  # runs for, which is what a subtrait's default reads its supertrait's
+  # associated types through (`iyi_supertrait_assoc_type`).
+  def lookup_type_var(node : Path, free_vars : Hash(String, TypeVar)? = nil, find_root_generic_type_parameters = true, remove_alias = true, self_type : Type = self.instance_type) : Type | ASTNode
+    TypeLookup.new(self, self_type, true, false, free_vars, find_root_generic_type_parameters, remove_alias).lookup_type_var(node).not_nil!
   end
 
   # Similar to `lookup_type_var`, but might return `nil`.
@@ -155,6 +157,7 @@ class Iyi::Type
         end
       else
         type = @root.lookup_path(node, include_private: @include_private || node.iyi_from_artifact? || node.iyi_synthetic?)
+        type ||= iyi_supertrait_assoc_type(node)
       end
 
       if type.is_a?(Type)
@@ -180,6 +183,35 @@ class Iyi::Type
       end
 
       type
+    end
+
+    # iyi: `trait Sorted : Bag` with a default `def smallest : Elem` (SPEC.md
+    # II.6 §3a). A supertrait is a requirement and not an inclusion, so
+    # `Bag`'s associated type is not among `Sorted`'s names, and the default
+    # was "undefined constant Elem" though its body could call `Bag`'s
+    # `items`. The name is read the way the body's calls are, through the
+    # implementing type: the answer its impl of the supertrait gave.
+    private def iyi_supertrait_assoc_type(node : Path) : Type?
+      return unless node.names.size == 1 && !node.global?
+      return unless (root = @root).is_a?(TraitSupertraits)
+
+      name = node.names.first
+      iyi_supertrait_assoc_type(root, name, @self_type.instance_type)
+    end
+
+    private def iyi_supertrait_assoc_type(subtrait : TraitSupertraits, name : String, self_type : Type) : Type?
+      subtrait.supertraits.each do |supertrait|
+        generic = supertrait.is_a?(GenericInstanceType) ? supertrait.generic_type : supertrait
+        if generic.is_a?(GenericTraitType) && generic.assoc_types.includes?(name)
+          answer = self_type.ancestors.find { |ancestor| ancestor.is_a?(GenericInstanceType) && ancestor.generic_type == generic }
+          var = answer.type_vars[name]? if answer.is_a?(GenericInstanceType)
+          return var.type if var.is_a?(Var)
+        end
+        if generic.is_a?(TraitSupertraits) && (type = iyi_supertrait_assoc_type(generic, name, self_type))
+          return type
+        end
+      end
+      nil
     end
 
     def lookup(node : Union)

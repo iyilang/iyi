@@ -169,14 +169,14 @@ if [ "$EXERCISED" = no ]; then
 else
   for check in "stack bounds:" "global range:" "stack root:" "register root:" \
                "global root:" "interior pointer:" "not a pointer:" "large walk:" "arena tail:" \
-               "freed chunk:" "freed large:" "many roots:" "maps parser:" \
+               "freed chunk:" "freed large:" "many roots:" "maps parser:" "dead helper:" \
                "all root checks passed"; do
     if ! grep -q "$check" "$WORK/roots-gc.out" 2>/dev/null; then
       echo "  MISSING: $check"
       status=1
     fi
   done
-  [ "$status" -eq 0 ] && echo "  bounds, stack, register, global, interior, rejection, large walk, tail, freed, many and the maps parser all reported"
+  [ "$status" -eq 0 ] && echo "  bounds, stack, register, global, interior, rejection, large walk, tail, freed, many, the maps parser and the dead helper all reported"
 fi
 
 echo
@@ -197,13 +197,64 @@ echo "== the same program with optimisation on"
 # build that changes register allocation is the one worth running twice. The
 # register check names its own premises and fails when one is gone, so this
 # run is not a formality: it is the one that would catch the ordering that
-# lets the optimiser reuse the register before the scan reaches it.
+# lets the optimiser reuse the register before the scan reaches it. The
+# dead-helper check is asserted only here, where `IyiMark.collect` is
+# inlined into the program's frame and zeroes everything under it.
 build_and_run "release" roots-release --release
 if [ "$EXERCISED" = no ]; then
   echo "  nothing was exercised here, so the optimised run is unmeasured too"
   unmeasured=$((unmeasured + 1))
 elif ! grep -q "all root checks passed" "$WORK/roots-release.out" 2>/dev/null; then
   echo "  MISSING: the optimised build did not reach the end"
+  status=1
+fi
+
+echo
+echo "== a collection in a --release build that writes artifacts"
+# The dead-stack clearing stored through a call that such a build does not
+# inline, and the call's return address sat in the stretch it cleared:
+# std_slice_exercise, built so, died of a memory fault at its first
+# collection.
+if ! "$IYI" build --release --emit-iyimod "$WORK/mods-rel" -o "$WORK/slice-rel" "$REPO/bench/std_slice_exercise.iyi" >"$WORK/slice-rel.build.log" 2>&1; then
+  echo "  the --release --emit-iyimod build failed:"; sed -n '1,8p' "$WORK/slice-rel.build.log"; status=1
+elif ! "$WORK/slice-rel" >"$WORK/slice-rel.out" 2>&1; then
+  echo "  a --release --emit-iyimod build died: $(tail -1 "$WORK/slice-rel.out")"; status=1
+else
+  echo "  std_slice_exercise built --release --emit-iyimod collects and ends"
+fi
+
+echo
+echo "== a helper the top level called once leaves nothing in its frame"
+# An optimised build inlined `make` - one call site, which LLVM inlines
+# whatever its size - into `__iyi_main`, whose frame lives as long as the
+# program, and spilled the array to a slot of it nothing wrote again: the
+# 4,000-array form of this kept 312 MB marked through three collections,
+# where a debug build freed all of it. The compiler keeps a call the top
+# level makes once out of line (codegen/call.cr, `keep_call_out_of_main`).
+# Built with --release only, because only that build inlines.
+cat > "$WORK/dropped.iyi" <<'IYI'
+def make(count : Int32) : Int32
+  a = [] of Array(Int64)
+  count.times { a << Array(Int64).new(10000, 7_i64) }
+  a.size
+end
+
+puts "made #{make(1000)} arrays of 80 KB"
+3.times { IyiMark.collect }
+puts "dropped: under 8 MB marked after three collections (#{IyiMark.bytes_marked < 8_388_608_u64})"
+IYI
+if [ "$EXERCISED" = no ]; then
+  echo "  nothing was exercised here, so the inlined helper is unmeasured too"
+  unmeasured=$((unmeasured + 1))
+elif ! "$IYI" build --release -o "$WORK/dropped" "$WORK/dropped.iyi" >"$WORK/dropped.log" 2>&1; then
+  echo "  build failed"
+  sed -n '1,12p' "$WORK/dropped.log"
+  status=1
+elif "$WORK/dropped" >"$WORK/dropped.out" 2>&1 && grep -q "after three collections (true)" "$WORK/dropped.out"; then
+  sed 's/^/  /' "$WORK/dropped.out"
+else
+  echo "  FAIL: the helper's arrays stayed marked"
+  sed 's/^/    /' "$WORK/dropped.out" | tail -3
   status=1
 fi
 

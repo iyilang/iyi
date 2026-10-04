@@ -19,7 +19,7 @@
 #     * encoder emits the interval minimum then the final size
 #     * decoder refuses a size update after a header field
 # - Security defenses:
-#     * Decompression bomb protection: bounds decoded uncompressed header size & count
+#     * Decompression bomb protection: bounds the decoded header list size (RFC 7540 6.5.2: name, value and 32 octets a field) & count
 #     * Respects peer SETTINGS_HEADER_TABLE_SIZE limit
 #     * Invalid index detection (index 0 or index > static + dynamic length)
 #     * Integer encodings that overflow UInt64 or Int32 indexes are HpackError
@@ -615,6 +615,10 @@ pub class Decoder
     offset = 0_i32
     # Int64: with no list limit (Int32's largest), one 4 KB entry indexed
     # 600,000 times passed Int32 and panicked where it should count.
+    # A field counts its name, its value and 32 octets, the header list
+    # size of RFC 7540 6.5.2 that SETTINGS_MAX_HEADER_LIST_SIZE limits:
+    # counted without the 32, two `:method: GET` were 20 octets and passed
+    # a limit of 70, and 120 fields `x-a: 1` passed 4096.
     total_uncompressed_size = 0_i64
     header_count = 0_i32
     seen_field = false
@@ -647,7 +651,7 @@ pub class Decoder
         if header_count > @max_header_count
           return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
         end
-        total_uncompressed_size = total_uncompressed_size + field.name.bytesize.to_i64 + field.value.bytesize.to_i64
+        total_uncompressed_size = total_uncompressed_size + field.name.bytesize.to_i64 + field.value.bytesize.to_i64 + 32
         if total_uncompressed_size > @max_header_list_size.to_i64
           return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
         end
@@ -694,7 +698,7 @@ pub class Decoder
         if header_count > @max_header_count
           return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
         end
-        total_uncompressed_size = total_uncompressed_size + name.bytesize.to_i64 + val.bytesize.to_i64
+        total_uncompressed_size = total_uncompressed_size + name.bytesize.to_i64 + val.bytesize.to_i64 + 32
         if total_uncompressed_size > @max_header_list_size.to_i64
           return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
         end
@@ -762,7 +766,7 @@ pub class Decoder
         if header_count > @max_header_count
           return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
         end
-        total_uncompressed_size = total_uncompressed_size + name.bytesize.to_i64 + val.bytesize.to_i64
+        total_uncompressed_size = total_uncompressed_size + name.bytesize.to_i64 + val.bytesize.to_i64 + 32
         if total_uncompressed_size > @max_header_list_size.to_i64
           return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
         end
@@ -809,7 +813,7 @@ pub class Decoder
         if header_count > @max_header_count
           return HpackError.new("Decompression bomb: header count limit #{@max_header_count} exceeded")
         end
-        total_uncompressed_size = total_uncompressed_size + name.bytesize.to_i64 + val.bytesize.to_i64
+        total_uncompressed_size = total_uncompressed_size + name.bytesize.to_i64 + val.bytesize.to_i64 + 32
         if total_uncompressed_size > @max_header_list_size.to_i64
           return HpackError.new("Decompression bomb: decoded header list exceeds #{@max_header_list_size} octets")
         end

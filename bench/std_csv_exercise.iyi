@@ -13,6 +13,18 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
+# What `CSV.parse` panicked with, or "parsed" and the rows.
+def csv_refusal(doc : String) : String
+  said = "parsed"
+  group do |g|
+    attempt = g.spawn { CSV.parse(doc).inspect }
+    outcome = attempt.value
+    said = outcome.is_a?(Panicked) ? outcome.message.to_s : "parsed #{outcome}"
+    0
+  end
+  said
+end
+
 import std/csv::{CSV}
 
 puts "== parse"
@@ -53,7 +65,8 @@ puts "  a UTF-16 document is refused"
 puts "\n== line ends and empty fields"
 # A lone CR ends a line, as in the other library: it was dropped, and the
 # text either side of it ran into one field (`a"b"`).
-assert_str "[[\"a\"], [\"b\"]]", CSV.parse("a\r\"b\"").inspect, "a lone CR ends the line"
+assert_str "[[\"a\"], [\"b\"]]", CSV.parse("a\rb").inspect, "a lone CR ends the line"
+assert_str "[[\"a\"], [\"b\"]]", CSV.parse("a\r\"b\"").inspect, "a lone CR ends the line before a quoted field"
 # A blank line is a row of no fields there, not a row of one empty field.
 assert_str "[[\"a\"], [], [\"b\"]]", CSV.parse("a\n\nb\n").inspect, "a blank line is a row of no fields"
 # `""` is a field with nothing in it, last line or not: it was dropped.
@@ -72,5 +85,16 @@ end
 assert_str "a\n\n", CSV.build([["a"], [] of String]), "a last row of no fields is ended"
 assert_str "", CSV.build([] of Array(String)), "no rows are no text"
 puts "  lone CR, blank line, quoted empty field, last row of no fields, both ways"
+
+# Text after a closing quote, and a quote in a field that did not open
+# with one, are refused at their line and column, as the other library
+# refuses them: `"a"b,c` read as the field `ab` and `a"b,c` as `a"b`. A
+# line ends at CRLF once (the other library counts it twice: line 3).
+assert_str "expecting comma, newline or end, not 'b' at line 1, column 4", csv_refusal("\"a\"b,c"), "text after a closing quote"
+assert_str "expecting comma, newline or end, not 'c' at line 1, column 8", csv_refusal("x,\"b\"\"\"c\""), "text after a doubled quote and the closing one"
+assert_str "unexpected quote at line 1, column 2", csv_refusal("a\"b,c"), "a quote inside an unquoted field"
+assert_str "unexpected quote at line 2, column 5", csv_refusal("h1,h2\r\nv1,v\"2"), "a quote on the second line"
+assert_str "parsed [[\"\", \"x\"], [\"a\"]]", csv_refusal("\"\",x\n\"a\"\r\n"), "a closing quote before a comma or a line end"
+puts "  text after a closing quote and a quote in an unquoted field are refused, with line and column"
 
 puts "\nALL CHECKS PASSED"

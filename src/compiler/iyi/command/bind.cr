@@ -53,9 +53,20 @@ class Iyi::Command
           `kemal`, `DB` is `d_b`), and the output says it.
           USAGE
         exit
+      when .starts_with?('-')
+        # A flag this verb does not have, not a shard: `iyi bind --bogus`
+        # was read as a shard named `--bogus` and answered "no lib/ here",
+        # about a directory the line never mentioned.
+        abort! "bind: unknown flag #{option}", :USAGE_ERROR
       else
         break
       end
+    end
+    # The shards come last, as the usage writes them, and a flag among them
+    # was bound as one more shard's name.
+    if flag = options.find(&.starts_with?('-'))
+      abort! "bind: #{flag} comes after the shard names, where no flag is read; the flags come first: " \
+             "#{Command.program_name} bind [--lib DIR] [--mods DIR] [SHARD ...]", :USAGE_ERROR
     end
     # Without a `\\?\` prefix, which names the same directory and which
     # `Dir.mkdir_p` takes apart one component at a time: `--mods

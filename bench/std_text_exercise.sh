@@ -112,7 +112,7 @@ prove_fails() {
   fi
   if ! grep -q "$phrase" "$WORK/$dir/out"; then
     echo "  $label: failed, but not at expected check (expected '$phrase')"
-    sed -n '$p' "$WORK/$dir/out"
+    tail -n 2 "$WORK/$dir/out"
     status=1
     return
   fi
@@ -210,10 +210,6 @@ prove_fails "gsub char block narrowed" no_gsub_block "utf8: gsub char block" \
 prove_fails "tr range not expanded" no_tr_range "string: tr range" \
   's/^      if chars\[i\] == .-. \&\& i > 0 \&\& i + 1 < chars.size$/      if false/'
 
-# 14. Whitespace without \v and \f, as the prelude's `whitespace?` counted it
-prove_fails "control whitespace kept" no_vt "string: blank? vertical tab and form feed" \
-  's/unsafe_chr.ascii_whitespace?/unsafe_chr.in?(32.unsafe_chr, 9.unsafe_chr, 10.unsafe_chr, 13.unsafe_chr)/'
-
 # The two the prelude owns: `Char#to_s` encodes and `String#each_char`
 # decodes, and they are its own because the prelude counts code points in
 # `size` and has to agree with itself. Patched where they live.
@@ -244,7 +240,7 @@ prove_fails_prelude() {
   fi
   if ! grep -q "$phrase" "$WORK/$dir/out"; then
     echo "  $label: failed, but not at expected check (expected '$phrase')"
-    sed -n '$p' "$WORK/$dir/out"
+    tail -n 2 "$WORK/$dir/out"
     status=1
     return
   fi
@@ -258,13 +254,15 @@ prove_fails_prelude() {
 prove_fails_prelude "an uncounted string answered as it is" no_count "utf8: char to_s size" \
   's/^    return @length if @length > 0 || @bytesize == 0$/    return @length/'
 
-prove_fails_prelude "char utf8 encoding broken" no_encode "utf8: char to_s" \
-  's/buffer\[1\] = (0x80 | (point \& 0x3F)).to_u8/buffer[1] = 0_u8/'
+# `Char#to_s` and `String::Builder#<<` share the encoder now, and the
+# `squeeze` check, which builds an `é`, comes before the `to_s` ones.
+prove_fails_prelude "char utf8 encoding broken" no_encode "string: squeeze multi-byte run" \
+  's/yield (0x80 | (point \& 0x3F)).to_u8/yield 0_u8/'
 
 # 9. And the decoder `size`, `each_char` and `squeeze` share, which a run
 # of `é` is the first check to read
 prove_fails_prelude "utf8 decoding broken" no_decode "string: squeeze multi-byte run" \
-  's/^      index = index + (point < 0 ? 1 : width)$/      index = index + 1/'
+  's/^      index = index + (point < 0 ? 1 : point.unsafe_chr.bytesize)$/      index = index + 1/'
 
 # 9b. A byte that starts no well-formed sequence counted as the start of
 #     one again: a lead byte taking the next bytes whatever they were (C3
@@ -272,14 +270,20 @@ prove_fails_prelude "utf8 decoding broken" no_decode "string: squeeze multi-byte
 #     past U+10FFFF decoded whole. Either makes a built string disagree
 #     with its literal.
 prove_fails_prelude "a lead byte takes any byte after it" no_continuation "utf8: an invalid byte is one character" \
-  's/^        point = (byte \& 0xC0) == 0x80 ? (point << 6) | (byte \& 0x3F) : -1$/        point = (point << 6) | (byte \& 0x3F)/'
+  's/^      point = (byte \& 0xC0) == 0x80 ? (point << 6) | (byte \& 0x3F) : -1$/      point = (point << 6) | (byte \& 0x3F)/'
 prove_fails_prelude "a lead byte read as a sequence" lenient_lead "utf8: an invalid byte is one character" \
-  '/^      point = -1 if width > 1 \&\& (point < /d'
+  's/^    width > 1 \&\& (point < .* ? -1 : point$/    point/'
 
-# 9c. `whitespace?` without \v and \f, `chomp('\n')` blind to the `\r`
+# 9c. `whitespace?` without \v and \f - which `blank?`, `lstrip` and
+#     `rstrip` ask too, `blank?` first - `chomp('\n')` blind to the `\r`
 #     before it, and `lines` cutting a `\r` that ends no line.
-prove_fails_prelude "strip blind to vertical tab" strip_vt "prelude: strip vertical tab and form feed" \
+prove_fails_prelude "whitespace blind to vertical tab" strip_vt "string: blank? vertical tab and form feed" \
   's/ || (self >= .\\t. \&\& self <= .\\r.)$/ || self == 9.unsafe_chr || self == 10.unsafe_chr || self == 13.unsafe_chr/'
+# And whitespace above ASCII, which `strip` and its byte loops never saw.
+prove_fails_prelude "strip blind to unicode spaces" strip_unicode "prelude: strip unicode whitespace" \
+  '/^    return ord.in?(0xA0, /d'
+prove_fails_prelude "trailing space read from its last byte" strip_tail "prelude: strip unicode whitespace" \
+  's/ \&\& start + char.bytesize == last$//'
 prove_fails_prelude "chomp of a newline only a newline" chomp_char_nl "prelude: chomp newline takes the cr" \
   's/^    text = char == .\\n. ? .*$/    text = char.to_s/'
 prove_fails_prelude "lines cuts every cr" lines_cr "prelude: lines keeps a last cr" \

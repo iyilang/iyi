@@ -19,18 +19,19 @@
 #   select / when / else      # over any mix of arms; the expansion's
 #                             # library half is at the bottom of this file
 #
-# Cancellation (III.4.2) belongs to the group: the first task whose value is
-# an error member cancels its siblings. A cancelled fiber is not torn down —
-# nothing here unwinds — it is *woken*, and every blocking primitive answers
-# `Cancelled` from then on. A task written with `!` therefore drains out of
-# its own accord, which is III.1.2 doing cancellation's plumbing for free.
+# Cancellation (III.4.2) belongs to the group: a task whose value is an
+# error member, a block left early, or a cancel of the task holding the
+# group open cancels the tasks still running. A cancelled fiber is not
+# torn down — it is *woken*, and every blocking primitive answers
+# `Cancelled` from then on. A task written with `!` therefore drains out
+# of its own accord, which is III.1.2 doing cancellation's plumbing for
+# free. Where no answer can carry `Cancelled`, the task stops instead and
+# its defers run (`IyiScheduler.stop_current`).
 #
 # What is deliberately absent, so nobody reads silence as an accident:
 # `Share` (III.4.4) gates nothing until a second thread exists, because one
-# thread interleaves at parks only and cannot race; and the typed
-# `group do ... end!` return (III.4.1's final shape) is compiler work this
-# runtime has to exist before anyone can build. Panics at task boundaries
-# (III.1.4) are built and live at the bottom of the scheduler: a panicking
+# thread interleaves at parks only and cannot race. Panics at task
+# boundaries (III.1.4) live at the bottom of the scheduler: a panicking
 # task drains its defers, tells its group, and dies alone.
 #
 # Linux and darwin arm64, through each platform's own doorway: raw
@@ -211,6 +212,10 @@ end
 {% if flag?(:win32) %}
   IYI_POLL_DATA_OFFSET =  0_u64
   IYI_POLL_EVENT_BYTES = 32_i64
+
+  lib LibC
+    fun GetProcAddress(h_module : Void*, proc_name : UInt8*) : Void*
+  end
 {% elsif flag?(:darwin) %}
   # A kevent's fd is its first field (`ident`), so the data offset is 0.
   IYI_POLL_DATA_OFFSET =  0_u64
@@ -435,14 +440,16 @@ class IyiFiber
   # Who waits for this fiber to finish: the first of them, and through
   # `next_joiner` the rest, chained through the waiters themselves. One
   # field held one joiner, and a second fiber reading the same running
-  # task's `value` panicked "task already has a joiner" - a rule written
-  # nowhere, and one a read after the task finished never met. `awaited`
-  # is the task a fiber waits on in that chain, and `joining` the group
+  # task's `value` panicked "task already has a joiner". `awaited` is
+  # the task a fiber waits on in that chain, and `joining` the group
   # whose join it waits in, so a deadlock can take it off either one.
   property joiner : IyiFiber?
   property next_joiner : IyiFiber?
   property awaited : IyiFiber?
   property joining : IyiGroup?
+  # The innermost group this fiber has open, the rest through
+  # `IyiGroup#outer`: what a cancel of the fiber reaches (`cancel`).
+  property open_group : IyiGroup?
   # Woken to report a deadlock on its own stack (`IyiScheduler.deadlock`).
   property deadlocked : Bool
 
@@ -549,6 +556,7 @@ class IyiFiber
     @next_joiner = nil
     @awaited = nil
     @joining = nil
+    @open_group = nil
     @deadlocked = false
     @deadline = 0_i64
     @io_timed = false
@@ -828,9 +836,22 @@ class IyiSendNode(T)
     @fiber.state == IyiFiberState::WaitingCh && @fiber.park_nonce == @nonce
   end
 
+  # The box is emptied as it is read: the channel keeps this node to park
+  # its next sender with, and a node kept full held the last value parked
+  # through it - 48 MB after the receiver had it and let it go.
   def take : T
     @taken = true
-    @value
+    value = @value
+    IyiScheduler.forget(pointerof(@value))
+    value
+  end
+
+  # The box emptied with nothing delivered, once its send failed or its
+  # select took another arm. It was left full: a select's 48 MB send arm
+  # that timed out kept 45 MiB, a cancelled send 46 MiB, and a send
+  # refused by a close 46 MiB more, for as long as each channel lived.
+  def forget : Nil
+    IyiScheduler.forget(pointerof(@value))
   end
 
   def delivered? : Bool
@@ -1241,6 +1262,18 @@ class IyiScheduler
     nonce
   end
 
+  # Zero the value *slot* holds, once a channel has handed it out, so the
+  # channel does not keep it reachable (`Channel#shift_item`,
+  # `IyiSendNode#take`). Read again only after a store writes it anew.
+  def self.forget(slot : Pointer(T)) : Nil forall T
+    bytes = slot.as(Pointer(UInt8))
+    index = 0
+    while index < sizeof(T)
+      bytes[index] = 0_u8
+      index = index + 1
+    end
+  end
+
   def self.enqueue(fiber : IyiFiber) : Nil
     fiber.state = IyiFiberState::Runnable
     fiber.next_run = nil
@@ -1437,10 +1470,20 @@ class IyiScheduler
       end
     end
     fiber.io_direction = direction
-    LibC.CreateIoCompletionPort(handle, Pointer(Void).new(pollfd.to_u64), 0_u64, 0_i32)
+    port = Pointer(Void).new(pollfd.to_u64)
+    ov = fiber.wait_overlapped
+    # A handle belongs to one port, and each thread has its own. Every
+    # operation associated the handle and ignored the answer, which after
+    # the first is a refusal (87): a socket read on the main thread and
+    # handed to a worker kept its completions on the main thread's port,
+    # and the worker's read waited forever, its deadline with it. The
+    # handle is moved to this thread's port each time instead - a handle
+    # on none refuses the move and is associated - and the move clears the
+    # skip-on-success mode, so the mode follows it: without it, 50 reads
+    # that answered at once left 50 completions that woke the next read.
+    LibC.CreateIoCompletionPort(handle, port, 0_u64, 0_i32) if move_to_port(handle, port, ov) != 0
     LibC.SetFileCompletionNotificationModes(handle, 1_u8)
 
-    ov = fiber.wait_overlapped
     Pointer(UInt64).new(ov.address + 0_u64).value = 0_u64
     Pointer(UInt64).new(ov.address + 8_u64).value = 0_u64
     Pointer(UInt64).new(ov.address + 16_u64).value = 0_u64
@@ -1452,6 +1495,28 @@ class IyiScheduler
   end
 
   {% if flag?(:win32) %}
+    # `NtSetInformationFile`, asked of ntdll once and kept as a proc's two
+    # words: ntdll is in every process, and naming it on the import table
+    # adds a DLL to the floor `bench/concurrency_exercise.sh` reads.
+    @@set_information = Pointer(UInt64).new(0_u64)
+
+    # FileReplaceCompletionInformation (61, Windows 8.1): *handle*'s
+    # completions go to *port* from here on; nonzero for a handle on no
+    # port. *scratch* is the fiber's OVERLAPPED, which holds the
+    # information and the status block for the call and is zeroed after.
+    def self.move_to_port(handle : Void*, port : Void*, scratch : Pointer(UInt8)) : Int32
+      call = @@set_information
+      if call.address == 0_u64
+        call = Pointer(UInt64).malloc(2_u64)
+        call.value = LibC.GetProcAddress(LibC.GetModuleHandleA("ntdll.dll".to_unsafe), "NtSetInformationFile".to_unsafe).address
+        @@set_information = call
+      end
+      Pointer(UInt64).new(scratch.address).value = port.address
+      Pointer(UInt64).new(scratch.address + 8_u64).value = 0_u64
+      set = call.as(Pointer(Proc(Void*, Void*, Void*, UInt32, Int32, Int32))).value
+      set.call(handle, Pointer(Void).new(scratch.address + 16_u64), scratch.as(Void*), 16_u32, 61)
+    end
+
     # A park for standard input's reader thread: off the io list, which is
     # the port's operations, and woken by `IyiStdinReader.delivered`.
     def self.park_stdin_current(ms : Int32) : Nil
@@ -1739,10 +1804,16 @@ class IyiScheduler
     true
   end
 
-  # Any number of fibers wait on one task, each pushed on its chain.
+  # Any number of fibers wait on one task, each pushed on its chain. A
+  # cancelled reader waits only for a task the cancel reached too, which
+  # ends; for any other it stops (`stop_current`), because `value` has no
+  # `Cancelled` to answer. It waited for that task in full: a reader of
+  # an outer group's 3-second task held its failed group for 3030 ms, and
+  # one whose task waited on the group's end died "deadlock".
   def self.join(fiber : IyiFiber) : Nil
     while fiber.state != IyiFiberState::Done
       me = current
+      stop_current if me.cancelled && !fiber.cancelled
       me.awaited = fiber
       me.next_joiner = fiber.joiner
       fiber.joiner = me
@@ -1800,7 +1871,7 @@ class IyiScheduler
 
   # III.4.2: cancellation reaches a *blocked* fiber. Whatever the fiber is
   # parked on, it is unparked here and its next (or current) blocking
-  # primitive answers `Cancelled`.
+  # primitive answers `Cancelled`; running or runnable, the flag is enough.
   def self.cancel(fiber : IyiFiber) : Nil
     return if fiber.state == IyiFiberState::Done
     return if fiber.cancelled
@@ -1829,7 +1900,6 @@ class IyiScheduler
         # operation provably over at every wake. It changes cancellation
         # for every kind of handle on this platform — files, the console,
         # pipes — and each would need its own measurement first.
-        fiber.cancelled = true
         LibC.CancelIoEx(fiber.wait_handle, fiber.wait_overlapped.as(Void*))
         io_remove(fiber)
         enqueue(fiber)
@@ -1843,9 +1913,22 @@ class IyiScheduler
       # reads, and every wake skips a node that is no longer current.
       enqueue(fiber)
     end
-    # Running or runnable: the flag is enough. Joining (state 5) is left
-    # to wake when its target finishes, which a failing group guarantees
-    # by cancelling every child.
+    # And it reaches what the fiber started: the tasks of every group it
+    # holds open, so a join it waits in - a park no wake above ends - ends
+    # as they do. A task joining a group of its own was left to wait, and
+    # its grandchild's 2-second sleep ran in full after the group failed.
+    group = fiber.open_group
+    while group.is_a?(IyiGroup)
+      group.cancel_children
+      group = group.outer
+    end
+    # A reader of a task the walk above did not reach is woken to stop
+    # (`join`); one whose task it reached waits for that task to end.
+    task = fiber.awaited
+    if fiber.state == IyiFiberState::Joining && task.is_a?(IyiFiber) && !task.cancelled
+      leave_joiners(task, fiber)
+      enqueue(fiber)
+    end
   end
 
   # ── The poller ───────────────────────────────────────────────────────
@@ -2061,7 +2144,10 @@ class IyiScheduler
           io_remove(head)
         {% end %}
       end
-      enqueue(head)
+      # A select with a timeout arm is in this heap and a channel's queues
+      # at once, and either can wake it: one already woken is not queued
+      # twice. Its `unpark` takes it out of here when it runs.
+      enqueue(head) unless head.state == IyiFiberState::Runnable
     end
   end
 
@@ -2084,6 +2170,13 @@ class IyiScheduler
     fiber.sleep_prev = nil
     root = st.sleep_head
     st.sleep_head = root.is_a?(IyiFiber) ? sleep_meld(root, fiber) : fiber
+  end
+
+  # Whether *fiber* is in the heap: its root, or linked under a node.
+  def self.sleeping?(fiber : IyiFiber) : Bool
+    root = state.sleep_head
+    return true if root.is_a?(IyiFiber) && root.object_id == fiber.object_id
+    fiber.sleep_prev.is_a?(IyiFiber)
   end
 
   # Out of the heap from wherever it is; nothing when it is not in it.
@@ -2381,6 +2474,35 @@ class IyiScheduler
     state.dying = fiber
     reschedule
     __iyi_exit(1)
+  end
+
+  # III.4.2's other ending: a cancelled task stopped where no answer can
+  # carry its `Cancelled`, `Channel.select` with no bound arm for one. Its
+  # pending defers run innermost first, as a panic's do, and its group
+  # counts it as a cancelled task, not a failure; nothing is printed. Its
+  # handle has no value to give, and `IyiTask#value` says so as
+  # `Panicked`, the union's one member for a task that did not finish.
+  # Such a select answered `Cancelled` to its first arm, which runs
+  # nothing unbound, so a loop around it spun at a full core and its
+  # group's join waited forever.
+  def self.stop_current : NoReturn
+    fiber = current
+    while true
+      node = fiber.defers
+      break unless node.is_a?(IyiDeferNode)
+      fiber.defers = node.next_node
+      node.run
+    end
+    g = fiber.group
+    if g.is_a?(IyiGroup)
+      g.child_finished(false)
+      g.drop_child(fiber)
+    end
+    fiber.state = IyiFiberState::Done
+    wake_joiners(fiber)
+    state.dying = fiber
+    reschedule
+    raise "a done fiber was scheduled"
   end
 end
 
@@ -2748,6 +2870,7 @@ class IyiTask(T)
       @fiber.panic_delivered = true
       return Panicked.new(@fiber.panic_message)
     end
+    return Panicked.new("a task stopped by its cancellation has no value") if @box.empty?
     @box.first
   end
 end
@@ -2757,21 +2880,38 @@ class IyiGroup
   getter first_failure : UInt64
   @first_child : IyiFiber?
   @joiner : IyiFiber?
+  # The group its owner had open when this one opened (`open_group`).
+  getter outer : IyiGroup?
+  # Joined, so its scope is over: a handle kept past it spawned a task
+  # that never ran, and nothing said so (III.4.1).
+  @ended : Bool
+  # Cancelled once (`cancel_children`), so a task spawned after starts
+  # cancelled: one spawned 10 ms after a sibling's failure had cancelled
+  # the group slept its full 2000 ms, and the group's join with it.
+  @cancelled : Bool
 
   def initialize
     @live = 0
     @first_failure = 0_u64
     @first_child = nil
     @joiner = nil
+    @ended = false
+    @cancelled = false
+    @outer = IyiScheduler.current.open_group
+    IyiScheduler.current.open_group = self
   end
 
   # Start a task. The block is compiled once and carried as a proc; its
   # return value is the task's, and an error member is a failure the
   # group acts on (III.4.3): the first cancels the siblings, and the task
-  # it is told on is `first_failure`, which the typed group answers.
+  # it is told on is `first_failure`, which the typed group answers. A
+  # task a cancelled one starts, or one a cancelled group starts, is
+  # cancelled from its first wait on.
   def spawn(&block : -> T) : IyiTask(T) forall T
+    raise "a task spawned on a group whose block has ended: no scope is left to join it" if @ended
     IyiScheduler.make_stacks_with { |fresh| fresh.prepare_stack } unless IyiScheduler.makes_stacks?
     fiber = IyiFiber.new
+    fiber.cancelled = IyiScheduler.current.cancelled || @cancelled
     task = IyiTask(T).new(fiber)
     runner = self
     install(fiber) do
@@ -2841,20 +2981,21 @@ class IyiGroup
     child_finished(!cancelled)
   end
 
-  # :nodoc: — `group`'s deferred half. The scope cannot be left until
-  # every task has finished, and `defer` is what guarantees "cannot":
-  # a `return` out of the block still runs this.
-  def join : Nil
+  # :nodoc: — `group`'s deferred half, and the typed group's explicit
+  # one: the scope's end, after which the group takes no task. It cannot
+  # be left until every task has finished, and `defer` is what guarantees
+  # "cannot". *early* says the block did not reach its end - a `return`,
+  # a `break`, a `!` - and the owner stops what it started before it
+  # waits for it (III.4.2), as it does leaving on a panic: `return 5`
+  # beside a task's 2-second sleep took the 2 seconds, and a panic beside
+  # a parked accept loop never ended.
+  def join(early : Bool = false) : Nil
     # An `exit` runs this task's cleanups and ends the process, the other
     # tasks with it: a group's join is one of those cleanups, and it waited
     # for every task - `exit(4)` beside a sibling's minute-long sleep took
     # the minute.
     return if IyiScheduler.exiting?
-    # An owner leaving on a panic stops what it started before it waits for
-    # it, as a failing child stops its siblings: the panic was printed and
-    # the program went on running until a parked accept loop or a long
-    # sleep beside it ended by itself, which a server's never does.
-    cancel_children if IyiScheduler.current.panicked
+    cancel_children if early || IyiScheduler.current.panicked
     while @live > 0
       me = IyiScheduler.current
       @joiner = me
@@ -2863,21 +3004,26 @@ class IyiGroup
       IyiScheduler.reschedule
       me.joining = nil
     end
+    @ended = true
+    IyiScheduler.current.open_group = @outer
     # The boundary owes a re-raise for any panic *nobody read*: a bug
     # observed through its handle already became a `Panicked` value
     # there, and re-raising it too would report one bug twice. The
     # child is marked delivered before the raise, so the deferred
     # second join (concurrency's own `defer g.join`) finds nothing —
     # and an owner already on its own panic path gets the mark without
-    # the noise.
+    # the noise. The one named is the failure that stopped the group: the
+    # list is newest first, and two panics were reported as the second.
+    owed = nil
     child = @first_child
     while child.is_a?(IyiFiber)
       if child.panicked && !child.panic_delivered
         child.panic_delivered = true
-        raise "a task panicked: " + child.panic_message unless IyiScheduler.current.panicked
+        owed = child unless owed.is_a?(IyiFiber) && child.object_id != @first_failure
       end
       child = child.next_child
     end
+    raise "a task panicked: " + owed.panic_message if owed.is_a?(IyiFiber) && !IyiScheduler.current.panicked
   end
 
   # :nodoc: — the owner taken out of this join by a deadlock
@@ -2890,6 +3036,7 @@ class IyiGroup
   # Cancel every task still live. The group's own tool; a failing child
   # reaches it through the policy above.
   def cancel_children : Nil
+    @cancelled = true
     child = @first_child
     while child.is_a?(IyiFiber)
       IyiScheduler.cancel(child)
@@ -2900,14 +3047,18 @@ end
 
 # III.4.1: concurrency is introduced by a scope, never by a call. The
 # join is deferred, so no exit leaves a task running — not a `return`,
-# not an error leaving through `!`. The group answers what its block
-# answers, which is how the typed form (III.4.9) gets a value out: the
-# expansion appends the extraction to the block, and the block stays a
-# block, so nothing a task assigned leaks into the enclosing scope.
+# not an error leaving through `!` — and one before the block's end
+# cancels them first. The group answers what its block answers, which is
+# how the typed form (III.4.9) gets a value out: the expansion appends
+# the extraction to the block, and the block stays a block, so nothing a
+# task assigned leaks into the enclosing scope.
 def group(& : IyiGroup -> U) : U forall U
   g = IyiGroup.new
-  defer g.join
-  yield g
+  early = true
+  defer g.join(early)
+  answer = yield g
+  early = false
+  answer
 end
 
 # ── Channel — III.4.6 ──────────────────────────────────────────────────
@@ -2972,13 +3123,15 @@ class Channel(T)
     # the box is the witness for the one that matters: emptied means
     # delivered, whatever else has happened since. A box still full is a
     # cancelled park's or a closed channel's, and its node leaves the
-    # queue here, so a cancelled one leaves nothing behind.
+    # queue here and lets go of the value, so a cancelled one leaves
+    # nothing behind.
     node = park_send_node(fiber, IyiScheduler.park(fiber), value)
     IyiScheduler.reschedule
     delivered = node.delivered?
     node.read = true
     return nil if delivered
     unlink_sender(node)
+    node.forget
     return Cancelled.new if fiber.cancelled
     ChannelClosed.new
   end
@@ -3110,8 +3263,13 @@ class Channel(T)
     @count = @count + 1
   end
 
+  # The slot is emptied as it is read, as a send node's box is: a ring
+  # kept every value it had held until a later send wrote over it, and 50
+  # messages of 4 MB through a channel of 50, every one received, kept
+  # 190 MiB.
   private def shift_item : T
     value = @ring[@first]
+    IyiScheduler.forget(@ring + @first.to_i64)
     @first = @first + 1 == @slots ? 0 : @first + 1
     @count = @count - 1
     value
@@ -3276,18 +3434,23 @@ class Channel(T)
 
   # ── select — III.4.6, the library half of the expansion ────────────
   #
-  # A `select` compiles to `%i, %v = ::Channel.select({arm, arm})` and a
-  # case over the index; `non_blocking_select` when an `else` arm
+  # A `select` compiles to `%i, %v, %h = ::Channel.select({arm, arm}, b)`
+  # and a case over the index; `non_blocking_select` when an `else` arm
   # exists. One def serves every arity, because a tuple's size is a
-  # compile-time fact a macro walks. On a cancelled task the first arm
-  # answers `Cancelled`, exactly as that arm's own primitive would have.
-  def self.select(actions : U) forall U
+  # compile-time fact a macro walks. `%h` says the arm's operation
+  # happened, and an arm nobody binds runs its body only then: it ran
+  # unless its answer was an `Error`, so a `Channel(Boom)`'s receive took
+  # the `Boom` and skipped the body. *bound* is the first arm that binds,
+  # -1 for none, and a cancelled task's `Cancelled` goes to it, as that
+  # arm's own primitive would have answered it.
+  def self.select(actions : U, bound : Int32) forall U
     fiber = IyiScheduler.current
     while true
-      return {0, Cancelled.new} if fiber.cancelled
+      return cancelled_answer(bound) if fiber.cancelled
       {% for i in 0...U.size %}
         if actions[{{ i }}].ready?
-          return { {{ i }}, actions[{{ i }}].execute }
+          happened = !actions[{{ i }}].refused?
+          return { {{ i }}, actions[{{ i }}].execute, happened }
         end
       {% end %}
       # Nothing ready: one park, every arm's node carrying its nonce.
@@ -3306,7 +3469,7 @@ class Channel(T)
       {% end %}
       {% for i in 0...U.size %}
         if actions[{{ i }}].won_while_parked?
-          return { {{ i }}, actions[{{ i }}].won_value }
+          return { {{ i }}, actions[{{ i }}].won_value, true }
         end
       {% end %}
     end
@@ -3314,15 +3477,31 @@ class Channel(T)
 
   # No arm ready answers -1, which the expansion's case meets with the
   # program's own `else`.
-  def self.non_blocking_select(actions : U) forall U
+  def self.non_blocking_select(actions : U, bound : Int32) forall U
     fiber = IyiScheduler.current
-    return {0, Cancelled.new} if fiber.cancelled
+    return cancelled_answer(bound) if fiber.cancelled
     {% for i in 0...U.size %}
       if actions[{{ i }}].ready?
-        return { {{ i }}, actions[{{ i }}].execute }
+        happened = !actions[{{ i }}].refused?
+        return { {{ i }}, actions[{{ i }}].execute, happened }
       end
     {% end %}
-    {-1, nil}
+    {-1, nil, false}
+  end
+
+  # With no bound arm a cancelled task stops (`IyiScheduler.stop_current`):
+  # the `Cancelled` went to the first arm, which runs nothing unbound, so
+  # a loop around `when timeout(10)` and a bound receive spun at a full
+  # core, never cancelled, and its group's join waited for it forever.
+  private def self.cancelled_answer(bound : Int32) : Tuple(Int32, Cancelled, Bool)
+    IyiScheduler.stop_current if bound < 0
+    {bound, Cancelled.new, false}
+  end
+
+  # Nothing happens on the arm `take_now` answers: `ChannelClosed` is
+  # the refusal here, where a closed channel's buffer is spent.
+  def receive_refused? : Bool
+    @closed && @count == 0
   end
 end
 
@@ -3342,6 +3521,10 @@ class IyiReceiveSelect(T)
 
   def ready? : Bool
     @channel.receive_ready?
+  end
+
+  def refused? : Bool
+    @channel.receive_refused?
   end
 
   def execute : T | ChannelClosed
@@ -3383,6 +3566,10 @@ class IyiSendSelect(T)
     @channel.send_ready?
   end
 
+  def refused? : Bool
+    @channel.closed?
+  end
+
   def execute : Nil | ChannelClosed
     @channel.put_now(@value)
   end
@@ -3391,9 +3578,13 @@ class IyiSendSelect(T)
     @node = @channel.park_send_node(fiber, nonce, @value)
   end
 
+  # A losing arm's node lets go of the value as it leaves: the channel
+  # may keep the node as its spare (`Channel#park_send_node`).
   def unpark : Nil
     node = @node
-    @channel.unlink_sender(node) if node.is_a?(IyiSendNode(T))
+    return unless node.is_a?(IyiSendNode(T))
+    @channel.unlink_sender(node)
+    node.forget unless node.delivered?
   end
 
   def won_while_parked? : Bool
@@ -3404,6 +3595,65 @@ class IyiSendSelect(T)
   def won_value : Nil
     nil
   end
+end
+
+# `when timeout(ms)`: the arm that wins once *ms* milliseconds have passed
+# since the select began. The expansion asked for `timeout_select_action`
+# and nothing answered, so the other library's arm was "undefined method"
+# here. Parked, the select waits in the sleep heap at the deadline as well
+# as in its channels' queues. It never wins while parked: a channel arm
+# that won in the same turn holds a value, and the deadline is read on
+# the next round, after the channels have had their say.
+class IyiTimeoutSelect
+  @deadline : Int64
+  @fiber : IyiFiber?
+
+  def initialize(ms : Int32)
+    @deadline = __iyi_monotonic_ns + ms.to_i64 * 1000000_i64
+    @fiber = nil
+  end
+
+  def ready? : Bool
+    __iyi_monotonic_ns >= @deadline
+  end
+
+  def refused? : Bool
+    false
+  end
+
+  def execute : Nil
+    nil
+  end
+
+  # Two timeout arms share the fiber's one place in the heap, at the
+  # earlier deadline.
+  def park(fiber : IyiFiber, nonce : UInt64) : Nil
+    @fiber = fiber
+    if IyiScheduler.sleeping?(fiber)
+      return if fiber.deadline <= @deadline
+      IyiScheduler.sleep_remove(fiber)
+    end
+    fiber.deadline = @deadline
+    IyiScheduler.sleep_insert(fiber)
+  end
+
+  def unpark : Nil
+    fiber = @fiber
+    IyiScheduler.sleep_remove(fiber) if fiber.is_a?(IyiFiber)
+    @fiber = nil
+  end
+
+  def won_while_parked? : Bool
+    false
+  end
+
+  def won_value : Nil
+    nil
+  end
+end
+
+def timeout_select_action(ms : Int32) : IyiTimeoutSelect
+  IyiTimeoutSelect.new(ms)
 end
 
 # ── Stack overflow: a guard-page fault is a sentence, not a signal ──────

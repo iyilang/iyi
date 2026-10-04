@@ -2,10 +2,10 @@
 # path, query and fragment, read by `URI.parse` (`URI.parse?` answers nil
 # where `parse` panics with the reason), written back by `to_s`, resolved
 # against a base by `resolve` (section 5.2, dot segments included),
-# normalized by `normalize` (lower-case scheme and host, default port
-# dropped, dot segments removed). `Params` holds an ordered multi-valued
-# query, read by `Params.parse` and written by `to_s` the
-# application/x-www-form-urlencoded way.
+# normalized by `normalize` (lower-case scheme and host, the host's escapes
+# with upper-case hex digits, default port dropped, dot segments removed).
+# `Params` holds an ordered multi-valued query, read by `Params.parse` and
+# written by `to_s` the application/x-www-form-urlencoded way.
 #
 # Percent-encoding: `encode`, `encode_path`, `encode_path_segment` and
 # `encode_www_form` each keep a documented set of bytes and encode every
@@ -149,9 +149,13 @@ pub struct Params
     end
   end
 
-  # Parses a query string into Params, the way the WHATWG URL standard
-  # reads `application/x-www-form-urlencoded`: `+` is a space, `%XX` is
-  # the byte, and a `%` that does not start two hex digits is itself.
+  # Parses a query string into Params, decoding each name and value the
+  # way the WHATWG URL standard reads `application/x-www-form-urlencoded`:
+  # `+` is a space, `%XX` is the byte, and a `%` that does not start two
+  # hex digits is itself. Pairs are separated by `&` and also by `;`, as
+  # the other library separates them, where the standard and Python
+  # 3.12's `parse_qsl` split at `&` alone: `a=1;b=2` is two pairs here and
+  # one there.
   # Never a panic - the query is whatever a client sent, and `?q=100%`
   # is what browsers send for "100%". `URI.decode` stays strict: it is
   # asked of text a program made.
@@ -873,6 +877,44 @@ pub class URI
     output_segments.join("")
   end
 
+  # The dot segments of a relative reference's path taken out as resolving
+  # it against any base would take them: a `..` that climbs past the
+  # reference's own segments stays, since only the base knows what it
+  # climbs out of, and a path that ends in a dot segment names a
+  # directory, so `a/..` is `./`.
+  protected def self.remove_relative_dot_segments(path : String) : String
+    return path if path.empty?
+    segments = path.split('/')
+    kept = [] of String
+    directory = false
+    i = 0
+    while i < segments.size
+      segment = segments[i]
+      if segment == "."
+        directory = true
+      elsif segment == ".."
+        if !kept.empty? && kept[kept.size - 1] != ".."
+          kept.pop
+        else
+          kept << ".."
+        end
+        directory = true
+      else
+        kept << segment
+        directory = false
+      end
+      i = i + 1
+    end
+    return "./" if kept.empty?
+    joined = kept.join("/")
+    joined = joined + "/" if directory
+    # One empty segment left is the directory itself; an empty first
+    # segment before more, as `a/..//x` leaves, is behind `./`: bare, the
+    # path would open with `/` and be rooted.
+    return "./" if joined.empty?
+    joined.starts_with?('/') ? "./" + joined : joined
+  end
+
   # =========================================================================
   # RFC 3986 Section 5.2: Relative Reference Resolution
   # =========================================================================
@@ -964,6 +1006,30 @@ pub class URI
     end
   end
 
+  # The host in lower case and its escapes' hex digits upper-case, the
+  # two rules RFC 3986 section 6.2.2.1 gives: `downcase` alone wrote
+  # `%C3%A9` as `%c3%a9`, the one spelling of the escape the section
+  # normalizes away from.
+  protected def self.normalized_host(host : String) : String
+    lower = host.downcase
+    return lower unless lower.index('%')
+    raw = lower.to_unsafe
+    n = lower.bytesize
+    String.new(n) do |buf|
+      buf.copy_from(raw, n)
+      i = 0
+      while i + 2 < n
+        if raw[i] == 37_u8 && hex_digit?(raw[i + 1]) && hex_digit?(raw[i + 2])
+          buf[i + 1] = raw[i + 1] >= 97_u8 ? raw[i + 1] - 32_u8 : raw[i + 1]
+          buf[i + 2] = raw[i + 2] >= 97_u8 ? raw[i + 2] - 32_u8 : raw[i + 2]
+          i = i + 3
+        else
+          i = i + 1
+        end
+      end
+    end
+  end
+
   def normalize : URI
     dup.normalize_in_place
   end
@@ -973,7 +1039,8 @@ pub class URI
       @scheme = s.downcase
     end
     if h = @host
-      @host = h.downcase
+      # Lower case, its escapes' hex digits upper-case.
+      @host = URI.normalized_host(h)
     end
 
     if s = @scheme
@@ -985,7 +1052,12 @@ pub class URI
       end
     end
 
-    @path = URI.remove_dot_segments(@path)
+    # A relative reference's path waits for a base, and section 5.2.4's
+    # algorithm is for a path already merged with one: run on `a/..` it
+    # answered `/`, the root, and on `../x` it answered `x`, so the
+    # normalized reference resolved somewhere else.
+    relative = @scheme.nil? && @host.nil? && @user.nil? && @port.nil? && !@path.starts_with?('/')
+    @path = relative ? URI.remove_relative_dot_segments(@path) : URI.remove_dot_segments(@path)
     self
   end
 end

@@ -17,9 +17,13 @@
 # the tree, every module of the package that exports anything is compiled
 # once, and the two artifacts' surfaces are compared line by line: a line
 # gone is a break, a line or a module new is an addition, nothing moved is
-# a patch. Before v1 a break moves the minor and an addition the patch, the
-# way Cargo reads a `0.x`. A break past v1 is a new major, which is a new
-# module path (`/v2`), and the manifest has to say so first.
+# a patch. Two pairs read otherwise. A def gone whose line came back with
+# only defaulted parameters after its own is an addition: every call still
+# builds. An `abstract def` or associated type new on a type that was
+# there is a break: every impl of it lacks it. Before v1 a break moves the
+# minor and an addition the patch, the way Cargo reads a `0.x`. A break
+# past v1 is a new major, which is a new module path (`/v2`), and the
+# manifest has to say so first.
 #
 # It tags nothing: a release is `git tag` and a push, and this is the check
 # that runs before them - exit 1 when VERSION understates the change.
@@ -72,6 +76,15 @@ class Iyi::Command
     # both "versions" compiled were the tree as it stood and nothing moved.
     inside = (mod_release_git(dir, "rev-parse", "--show-prefix") || "").strip.rchop('/')
 
+    # The package has to be in HEAD, which is what a tag names: a package
+    # not yet committed - or not yet its own repository, sitting untracked
+    # in someone else's - has nothing a release could compare.
+    manifest_at = ->(rev : String) { "#{rev}:#{inside.empty? ? "" : "#{inside}/"}#{Mod::Installer::MANIFEST}" }
+    unless mod_release_git(dir, "cat-file", "-e", manifest_at.call("HEAD"))
+      abort! "mod release: HEAD of the repository at #{Iyi.relative_filename(top)} has no #{Mod::Installer::MANIFEST} at " \
+             "#{inside.empty? ? "its root" : inside}; a release is of what a commit holds, so commit the package first", :USAGE_ERROR
+    end
+
     _, major = Mod::ModFile.split_major(root.path)
     released = [] of SemanticVersion
     (mod_release_git(dir, "tag", "--list", "v*", "--merged", "HEAD") || "").each_line do |line|
@@ -84,7 +97,12 @@ class Iyi::Command
     # and the rc removed was never compared, and `v1.2.0` was approved as
     # "holds what changed". The highest pre-release only when there is no
     # release at all.
-    base = released.select(&.prerelease.identifiers.empty?).max? || released.max?
+    # And only a tag that holds this package: in a repository that holds
+    # other things the tags are theirs too. A new package inside another
+    # repository took its `v0.16.2` for its last release, checked the whole
+    # repository out to compare, and answered "v0.16.2 has no iyi.mod".
+    ordered = released.sort_by { |version| {version.prerelease.identifiers.empty? ? 1 : 0, version} }.reverse!
+    base = ordered.find { |version| mod_release_git(dir, "cat-file", "-e", manifest_at.call("v#{version}")) }
 
     if (wanted = proposed) && released.includes?(wanted)
       abort! "mod release: v#{wanted} is already a tag, and a version is released once", :USAGE_ERROR
@@ -120,25 +138,62 @@ class Iyi::Command
 
     gone = [] of String
     added = [] of String
+    # New lines that break all the same: a requirement on a type that was
+    # already there, which every impl of it now lacks.
+    asked = [] of String
+    # A def gone whose line came back with defaulted parameters after its
+    # own: every call to it still compiles, so the pair is an addition.
+    grown = [] of String
     before.each do |name, lines|
       if now = after[name]?
-        (lines - now).each { |line| gone << "#{name}: #{line}" }
-        (now - lines).each { |line| added << "#{name}: #{line}" }
+        appeared = now.keys - lines.keys
+        (lines.keys - now.keys).each do |line|
+          was = lines[line]
+          wider = appeared.find do |candidate|
+            mod_release_extends?(was, now[candidate])
+          end
+          if wider
+            appeared.delete(wider)
+            grown << "#{name}: #{line} -> #{wider}"
+          else
+            gone << "#{name}: #{line}"
+          end
+        end
+        appeared.each do |line|
+          entry = now[line]
+          if entry.requirement && lines.each_value.any? { |other| other.declares == entry.owner }
+            asked << "#{name}: #{line}"
+          else
+            added << "#{name}: #{line}"
+          end
+        end
       else
         gone << "#{name}: module"
       end
     end
     (after.keys - before.keys).each { |name| added << "#{name}: module" }
 
+    news = added.size + asked.size + grown.size
     puts "compared with v#{base}: #{after.size} module#{after.size == 1 ? "" : "s"}, " \
-         "#{gone.size} thing#{gone.size == 1 ? "" : "s"} gone, #{added.size} new"
+         "#{gone.size} thing#{gone.size == 1 ? "" : "s"} gone, #{news} new"
     gone.sort.each { |line| puts "  gone  #{line}" }
+    asked.sort.each { |line| puts "  new   #{line} - a requirement, which every impl of it has to add" }
+    grown.sort.each { |line| puts "  grown #{line}" }
     added.sort.each { |line| puts "  new   #{line}" }
 
-    breaking = !gone.empty?
-    additive = !added.empty?
+    breaking = !gone.empty? || !asked.empty?
+    additive = news > 0
     next_version = mod_release_next(base, breaking, additive)
-    why = breaking ? "something a consumer uses is gone" : additive ? "something is new" : "the surface is as it was"
+    why =
+      if !gone.empty?
+        "something a consumer uses is gone"
+      elsif !asked.empty?
+        "a type a consumer implements requires something new"
+      elsif additive
+        "something is new"
+      else
+        "the surface is as it was"
+      end
     repository, _ = Mod::ModFile.split_major(root.path)
     next_path = next_version.major >= 2 ? "#{repository}/v#{next_version.major}" : repository
 
@@ -194,9 +249,28 @@ class Iyi::Command
     true
   end
 
+  # Whether the def line *now* takes every call the gone line *was* took:
+  # the same def, the same answer, its parameters the old ones and then
+  # only defaulted ones, splats or a bare `*`. A requirement is not one -
+  # an impl written to the old `abstract def` no longer matches the new
+  # one. Compared line by line, `by : Int32 = 2` appended to `pub def
+  # scale` was a def gone and one new, and the release a new major at a
+  # `/v2` path although every `scale(x)` still built.
+  private def mod_release_extends?(was : SurfaceLine, now : SurfaceLine) : Bool
+    return false unless (old = was.signature) && (wide = now.signature) && was.owner == now.owner
+    return false if old.required || wide.required
+    return false unless old.name == wide.name && old.receiver == wide.receiver && old.visibility == wide.visibility &&
+                        old.block_parameter == wide.block_parameter && old.return_type == wide.return_type &&
+                        old.free_variables == wide.free_variables &&
+                        old.free_variable_bounds == wide.free_variable_bounds && old.where_bounds == wide.where_bounds
+    kept = old.parameters.size
+    return false unless wide.parameters.size > kept && wide.parameters[0, kept] == old.parameters
+    wide.parameters[kept..].all? { |parameter| parameter.starts_with?('*') || parameter.includes?(" = ") }
+  end
+
   # The surface of the package at *rev* (`package_surface`), from the
   # commit checked out beside the tree - never into it.
-  private def mod_release_surface(top : String, rev : String, inside : String, into : String) : Hash(String, Array(String))
+  private def mod_release_surface(top : String, rev : String, inside : String, into : String) : Hash(String, Hash(String, SurfaceLine))
     unless mod_release_git(top, "worktree", "add", "--detach", "--quiet", into, rev)
       raise Mod::ModError.new("cannot check out #{rev}")
     end
@@ -213,13 +287,14 @@ class Iyi::Command
   end
 
   # Every module of the package at *package* that exports something, by
-  # name, with its surface as sorted lines: one entry importing them all is
-  # compiled there, so the package's own requirements resolve as they would
-  # for a consumer. *package* is a copy nobody builds again - the entry is
-  # written into it. With *respell*, a version written before `import
-  # X::{...}` replaced `using` is read the way `iyi fix` would write it: the
-  # surface is the same. *label* names the version in a refusal.
-  private def package_surface(package : String, scratch : String, label : String, respell : Bool) : Hash(String, Array(String))
+  # name, with its surface's lines (`iyi_surface_lines`): one entry
+  # importing them all is compiled there, so the package's own requirements
+  # resolve as they would for a consumer. *package* is a copy nobody builds
+  # again - the entry is written into it. With *respell*, a version written
+  # before `import X::{...}` replaced `using` is read the way `iyi fix`
+  # would write it: the surface is the same. *label* names the version in a
+  # refusal.
+  private def package_surface(package : String, scratch : String, label : String, respell : Bool) : Hash(String, Hash(String, SurfaceLine))
     if respell
       Mod::Reach.sources(package).each do |file|
         if rewritten = UsingRewrite.rewrite(File.read(file), file)
@@ -228,7 +303,7 @@ class Iyi::Command
       end
     end
     modules = mod_release_modules(package)
-    return {} of String => Array(String) if modules.empty?
+    return {} of String => Hash(String, SurfaceLine) if modules.empty?
 
     entry = File.join(package, "__iyi_release_entry.iyi")
     File.write(entry, modules.map { |name| "import #{name}\n" }.join)
@@ -246,11 +321,11 @@ class Iyi::Command
       raise Mod::ModError.new("#{label} does not compile, so there is no surface to compare: #{deepest.message.to_s.lines.first?}")
     end
 
-    surfaces = {} of String => Array(String)
+    surfaces = {} of String => Hash(String, SurfaceLine)
     Dir.glob(Iyi.glob_root(emit).join("**", "*.iyimod")) do |candidate|
       artifact = IyiMod.read(candidate) rescue next
       next unless modules.includes?(artifact.module_name)
-      surfaces[artifact.module_name] = iyi_export_lines(artifact)
+      surfaces[artifact.module_name] = iyi_surface_lines(artifact)
     end
     surfaces
   end
@@ -287,10 +362,12 @@ class Iyi::Command
     Compare this package's exported surface at HEAD with the release before
     it - the highest `vX.Y.Z` tag HEAD contains, a pre-release only when
     there is no release - and say what the next release has to be: a thing
-    gone is a new major (a new minor before v1), a thing new is a new minor
-    (a new patch before v1), nothing moved is a patch; after a pre-release,
-    its own release. With VERSION, exit 1 when it is smaller than that, or
-    when its major is not the one iyi.mod's path names. Tags nothing.
+    gone, or a requirement new on a type an impl implements, is a new major
+    (a new minor before v1), a thing new - a def that only gained defaulted
+    parameters among them - is a new minor (a new patch before v1), nothing
+    moved is a patch; after a pre-release, its own release. With VERSION,
+    exit 1 when it is smaller than that, or when its major is not the one
+    iyi.mod's path names. Tags nothing.
     USAGE
   end
 end

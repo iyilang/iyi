@@ -145,6 +145,10 @@ run_probe "fill past the end" probe_fill_past_end "index 6 out of range for 5 el
 # A count near the top of Int32 is refused in the same sentence, not as an
 # "arithmetic overflow" of `offset + count`.
 run_probe "fill past the end with a huge count" probe_fill_huge_count "index 2147483648 out of range for 5 elements"
+# From a negative offset the end is counted from where the offset lands:
+# counted from the offset as written, `fill(0, -2, 5)` named index 3,
+# which is one of the five.
+run_probe "fill past the end from a negative offset" probe_fill_past_end_from_negative "index 8 out of range for 5 elements"
 run_probe "insert out of range" probe_insert_out_of_range "index 2 out of range for 1 elements"
 run_probe "delete_at out of range" probe_delete_at_out_of_range "index -2 out of range for 1 elements"
 
@@ -202,10 +206,10 @@ prove_fails "rotate_in_place reversal" broken_rotate "expected .3,2,10,101,4., g
 prove_fails "delete_if compaction" broken_delete_if "expected .1,3,5,99., got" \
   's/unsafe_set_size(kept)/unsafe_set_size(size)/'
 
-# 7. Break the seeded sample: a seed's sign dropped instead of its bits kept
-#    lands -1 where 1 lands.
-prove_fails "sample with a negative seed" broken_seed "assertion failed: sample with a negative seed" \
-  's/seed\.to_i64\.unsafe_to_u64/seed.to_i64.abs.unsafe_to_u64/'
+# 7. Break the sample of a count: an element past the first n never takes
+#    a slot, so the three are always the first three, shuffled.
+prove_fails "sample of a count" broken_sample "a collection samples three as an array does" \
+  's/picked\[j\] = unsafe_fetch(i) if j < n/picked[j] = unsafe_fetch(i) if j < 0/'
 
 # 8. Put join back on `result = result + ...`, which copies the text so far
 #    once per element: the linear-time bound beside `Array#join` catches it.

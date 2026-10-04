@@ -20,5 +20,13 @@ b = Box(Int32).new(41)
 assert_true b.object == 41, "stored"
 assert_true Box(Int32).unbox(Box(Int32).box(41)) == 41, "box then unbox"
 puts "  new, object, box/unbox"
+# A null pointer is nil for a T that admits nil, as the other library
+# answers it for `String?`: it was refused for every T, so a C callback
+# handed no data panicked "Unboxing null pointer" where nil was the answer.
+none = Pointer(Void).new(0_u64)
+assert_true Box(String?).unbox(none).nil?, "a null pointer unboxed as a String? is nil"
+assert_true Box(Int32?).unbox(none).nil?, "a null pointer unboxed as an Int32? is nil"
+assert_str "kept", Box(String?).unbox(Box(String?).box("kept")).to_s, "a String? still unboxes to its value"
+puts "  a null pointer is nil for a nilable T"
 
 puts "\nALL CHECKS PASSED"

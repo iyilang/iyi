@@ -137,6 +137,149 @@ else
   status=1
 fi
 cp mods/app/lib.iyimod lib.good
+# A setter that writes no return (R-2 lets it: it answers what it was
+# handed) answers through its module's artifact what it answers from
+# source. It was carried as a header the consumer typed `Nil`, and the
+# link asked for `n=<Int32>:Nil` where the module had emitted `:Int32`.
+mkdir -p "$WORK/setter/app"
+printf 'module app/s\n\npub class Box\n  @n : Int32\n\n  def initialize(@n : Int32)\n  end\n\n  def n=(v : Int32)\n    @n = v\n  end\n\n  def n : Int32\n    @n\n  end\nend\n' > "$WORK/setter/app/s.iyi"
+printf 'import app/s::{Box}\n\nb = Box.new(1)\nb.n = 5\nputs b.n\n' > "$WORK/setter/m.iyi"
+(cd "$WORK/setter" && "$IYI" build --emit-iyimod mods -o from-source m.iyi && mv app/s.iyi s.source &&
+  "$IYI" build --use-iyimod mods -o from-artifact m.iyi) > "$WORK/setter.log" 2>&1
+if [ "$(cd "$WORK/setter" && ./from-artifact 2>&1)" = "5" ]; then
+  echo "  a setter with no written return, through its artifact: 5, as from source"
+else
+  echo "  a setter with no written return, through its artifact:"; sed -n '1,3p' "$WORK/setter.log"; status=1
+fi
+# A def whose return names an error member answers that declared error
+# union, from source as through its artifact (SPEC.md III.1.8, IV.2), even
+# when its body never fails. From source `never_fails` was typed from its
+# body, `Int32`: `never_fails()!` was refused with "`!` has no error to
+# propagate", and a program without the `!` built from source and failed
+# to link through the artifact, on `never_fails:(Int32 | ...LibErr)`.
+mkdir -p "$WORK/declared/app"
+printf 'module app/e\n\npub class LibErr\n  def initialize\n  end\nend\n\nimpl Error for LibErr\n  def message : String\n    "liberr"\n  end\nend\n\npub def never_fails : Int32 | LibErr\n  1\nend\n' > "$WORK/declared/app/e.iyi"
+printf 'import app/e::*\n\ndef g : Int32 | LibErr\n  never_fails()! + 1\nend\n\nputs typeof(never_fails)\ncase g\nin Int32 then puts it\nin LibErr then puts it.message\nend\n' > "$WORK/declared/m.iyi"
+(cd "$WORK/declared" && "$IYI" build --emit-iyimod mods -o from-source m.iyi && mv app/e.iyi e.source &&
+  "$IYI" build --use-iyimod mods -o from-artifact m.iyi) > "$WORK/declared.log" 2>&1
+declared_expected="$(printf '(App::E::LibErr | Int32)\n2')"
+if [ "$(cd "$WORK/declared" && ./from-source 2>&1 | tr -d '\r')" = "$declared_expected" ] &&
+   [ "$(cd "$WORK/declared" && ./from-artifact 2>&1 | tr -d '\r')" = "$declared_expected" ]; then
+  echo "  a def typed by its declared error union, from source and through its artifact alike"
+else
+  echo "  a def's declared error union, from source and through its artifact:"; sed -n '1,3p' "$WORK/declared.log"; status=1
+fi
+# A module's overloads called unqualified with a union argument: through
+# `import ::*`, through `import ::{name}`, from inside another module, and
+# from a type nested in the module that declares them. Every one fell into
+# `unreachable`: from source it was "iyi: out of memory", a memory fault or
+# a breakpoint, by build, while `App::Ov.show(v)` answered.
+mkdir -p "$WORK/ovl/app"
+printf 'module app/ov\n\npub def show(x : Int32) : String\n  "int"\nend\n\npub def show(x : String) : String\n  "str"\nend\n' > "$WORK/ovl/app/ov.iyi"
+printf 'module app/relay\n\nimport app/ov::*\n\npub def relay(v : Int32 | String) : String\n  show(v)\nend\n\npub class C\n  def go(v : Int32 | String) : String\n    show(v)\n  end\nend\n' > "$WORK/ovl/app/relay.iyi"
+printf 'module main\n\nimport app/ov::{show}\nimport app/relay::*\n\ndef own(x : Int32) : String\n  "own int"\nend\n\ndef own(x : String) : String\n  "own str"\nend\n\nclass D\n  def go(v : Int32 | String) : String\n    own(v)\n  end\nend\n\nv : Int32 | String = "abc".size > 0 ? "s" : 1\nw : Int32 | String = "abc".size > 0 ? 1 : "s"\nputs show(v), show(w), relay(v), C.new.go(w), D.new.go(v)\n' > "$WORK/ovl/m.iyi"
+for mode in plain release; do
+  flag=""; [ "$mode" = release ] && flag="--release"
+  (cd "$WORK/ovl" && "$IYI" build $flag -o "ovl-$mode" m.iyi && "./ovl-$mode") > "$WORK/ovl-$mode.out" 2>&1
+  if [ "$(tr -d '\r' < "$WORK/ovl-$mode.out" | tr '\n' ' ')" = "str int str int own str " ]; then
+    echo "  a module's overloads called unqualified with a union, $mode: each arm answers"
+  else
+    echo "  a module's overloads called unqualified with a union, $mode:"; sed -n '1,3p' "$WORK/ovl-$mode.out"; status=1
+  fi
+done
+# Names the compiler resolved, written into an artifact that is read
+# inside the module. Beside an `app/tuple`, an `app/std` and an
+# `app/exception`, a `Tuple`, a `Std::Traits::Hashable` and an `Exception`
+# there are those modules, and the source says `::` for that reason. The
+# artifact wrote the names without it, and the consumer stopped on
+# "App::Tuple is not a generic type" (an impl's target, a field, a class
+# variable's type), on "undefined constant Std::Traits::Hashable" (a
+# supertrait) and on "App::Exception is not a class" (a superclass;
+# measured with Exception, which iyi now refuses to subclass, and kept
+# here with Reference). And an
+# impl of a parameterised trait came back `impl App::Lib::Into(T)(String)
+# for ...`, which does not parse.
+mkdir -p "$WORK/shadow/app"
+for sibling in tuple std reference; do
+  printf 'module app/%s\n\npub def %s_here : Int32\n  1\nend\n' "$sibling" "$sibling" > "$WORK/shadow/app/$sibling.iyi"
+done
+cat > "$WORK/shadow/app/lib.iyi" << 'IYI'
+module app/lib
+
+import app/tuple
+import app/std
+import app/reference
+import std/traits
+
+pub trait Show
+  abstract def show : String
+end
+
+impl Show for ::Tuple(*T) forall T
+  def show : String
+    "a tuple"
+  end
+end
+
+pub trait Keyed : ::Std::Traits::Hashable
+  abstract def key : Int32
+end
+
+pub trait Into(T)
+  abstract def into : T
+end
+
+pub class Oops < ::Reference
+  pub def note : String
+    "oops"
+  end
+end
+
+pub class Item
+  @pair : ::Tuple(Int32, Int32)
+  @@last : ::Tuple(Int32, Int32)?
+
+  pub def initialize(@pair : ::Tuple(Int32, Int32))
+    @@last = @pair
+  end
+
+  pub def self.last_sum : Int32
+    if last = @@last
+      last[0] + last[1]
+    else
+      0
+    end
+  end
+end
+
+impl ::Std::Traits::Hashable for Item
+  def hash_key : Int32
+    @pair[0] + @pair[1]
+  end
+end
+
+impl Keyed for Item
+  def key : Int32
+    hash_key * 10
+  end
+end
+
+impl Into(String) for Item
+  def into : String
+    "item"
+  end
+end
+IYI
+printf 'import app/lib::{Item, Oops}\n\nitem = Item.new({3, 4})\nputs({1, "x"}.show)\nputs Oops.new.note\nputs item.hash_key\nputs item.key\nputs item.into\nputs Item.last_sum\n' > "$WORK/shadow/m.iyi"
+(cd "$WORK/shadow" && "$IYI" build --emit-iyimod mods -o from-source m.iyi && mv app/lib.iyi lib.source &&
+  "$IYI" build --use-iyimod mods -o from-artifact m.iyi) > "$WORK/shadow.log" 2>&1
+shadow_expected="$(printf 'a tuple\noops\n7\n70\nitem\n7')"
+if [ "$(cd "$WORK/shadow" && ./from-source 2>&1)" = "$shadow_expected" ] &&
+  [ "$(cd "$WORK/shadow" && ./from-artifact 2>&1)" = "$shadow_expected" ]; then
+  echo "  names a sibling module shadows, through the artifact: as from source"
+else
+  echo "  names a sibling module shadows, through the artifact:"; sed -n '1,6p' "$WORK/shadow.log"; status=1
+fi
 
 echo
 echo "== what the command line refuses"
@@ -224,6 +367,12 @@ refuses "a file that is not there" "no such file" -- "$IYI" run "$WORK/nope.iyi"
 refuses "a directory as the entry" "is a directory, not a source file" -- "$IYI" run "$WORK"
 refuses "a directory where check wants a file" "is a directory" -- "$IYI" check "$WORK"
 refuses "two module headers in one file" "a file declares one module" -- "$IYI" run twoheaders.iyi
+# An impl for a module that is not a trait gave every type including the
+# module the trait, with no impl of its own for R-3 to check: `struct Y;
+# include M` answered `is_a?(Show)` true and ran M's `show`.
+printf 'trait Show\n  abstract def show : String\nend\n\nmodule M\nend\n\nimpl Show for M\n  def show : String\n    "via M"\n  end\nend\n\nstruct Y\n  include M\nend\n\nputs Y.new.show\n' > implmodule.iyi
+refuses "an impl for a module" "can't implement Show for M, it's a module" -- \
+  "$IYI" check implmodule.iyi
 # A header after an `import` is the file's only header in the wrong place.
 # It was told the file "already declares `no module`" and that
 # `latehead` belongs in `latehead.iyi` - said to `latehead.iyi`.
@@ -237,6 +386,19 @@ printf 'pub def twice(x : Int32) : Int32\n  x * 2\nend\n' > bare.iyi
 printf 'import bare::{twice}\n\nputs twice(3)\n' > usesbare.iyi
 refuses "an import of a file with no module header" 'has no `module bare` header' -- \
   "$IYI" run usesbare.iyi
+# A splat generic is bound the way it was declared. `impl Show for
+# Proc(Int32)` was told to write `Proc(T) forall T`, which was refused for
+# its arity, and `Tuple(*T) forall T` as if T were not a `forall` name.
+printf 'trait Show\n  abstract def show : String\nend\n\nimpl Show for Proc(Int32)\n  def show : String\n    "proc"\n  end\nend\n' > implproc.iyi
+refuses "a specialised impl of a splat generic" 'Write `impl Show for Proc(*T, R) forall T, R`' -- \
+  "$IYI" check implproc.iyi
+printf 'trait Show\n  abstract def show : String\nend\n\nimpl Show for Proc(*T, R) forall T, R\n  def show : String\n    "proc"\n  end\nend\n\nimpl Show for Tuple(*T) forall T\n  def show : String\n    "tuple of #{size}"\n  end\nend\n\nputs(->{ 1 }.show)\nputs({1, "a"}.show)\n' > implsplat.iyi
+splat_out=$("$IYI" run implsplat.iyi 2>&1 | tr -d '\r')
+if [ "$splat_out" = "$(printf 'proc\ntuple of 2')" ]; then
+  echo "  the spelling it suggests, and Tuple(*T) forall T: both bind and run"
+else
+  echo "  impls for Proc(*T, R) and Tuple(*T): $(printf '%s' "$splat_out" | head -c 300)"; status=1
+fi
 # A macro the module declares and did not mark `pub`, imported by name, was
 # told "nothing by that name is declared in `app/macros`, `pub` or not" -
 # the answer for a typo, because only defs and types were looked in.
@@ -254,11 +416,49 @@ printf 'module deep\n\ndef down(n : Int32) : Int32\n  down(n + 1) + 1\nend\n\npu
 refuses "a program that ran out of stack" "stack overflow" -- "$IYI" run deep.iyi
 printf 'module wild\n\np = Pointer(Int32).new(16_u64)\nputs p.value\n' > wild.iyi
 refuses "a program the kernel killed" "died of a memory fault" -- "$IYI" run wild.iyi
+# A generic struct holding a trait it implements, `Box(Show)` beside `impl
+# Show for Box(T) forall T`: the recursive-struct check never met
+# `Box(Show)`, and the compiler overflowed its stack laying it out.
+printf 'trait Show\n  abstract def show : String\nend\n\nimpl Show for Int32\n  def show : String\n    "i"\n  end\nend\n\nstruct Box(T)\n  def initialize(@value : T)\n  end\nend\n\nimpl Show for Box(T) forall T\n  def show : String\n    "B"\n  end\nend\n\nputs Box(Show).new(1).show\n' > recbox.iyi
+refuses "a generic struct holding a trait it implements" "recursive struct Box(Show) detected" -- "$IYI" run recbox.iyi
 # `name!(1)`: the `!` is a propagation, and an argument list was told it
 # "takes no block".
 printf 'module bangargs\n\nnomacro!(1)\n' > bangargs.iyi
 refuses "a call spelled with ! and arguments" 'propagates an error, and takes no arguments' -- \
   "$IYI" check bangargs.iyi
+# A `!` whose error the enclosing signature does not list is refused at the
+# `!`, naming it. It was the other library's "method Wrongerr.g must return
+# (Int32 | Wrongerr::ParseErr) but it is returning Wrongerr::IOErr", at the
+# signature.
+printf 'module wrongerr\n\nclass IOErr\n  def initialize\n  end\nend\n\nimpl Error for IOErr\n  def message : String\n    "io"\n  end\nend\n\nclass ParseErr\n  def initialize\n  end\nend\n\nimpl Error for ParseErr\n  def message : String\n    "parse"\n  end\nend\n\ndef read(s : String) : String | IOErr\n  return IOErr.new if s == "x"\n  s\nend\n\ndef g : Int32 | ParseErr\n  read("x")!.size\nend\n\nputs g\n' > wrongerr.iyi
+refuses "a ! whose error the signature does not list" 'wrongerr.iyi:31:3' -- "$IYI" check wrongerr.iyi
+refuses "a ! whose error the signature does not list" 'which does not include it' -- "$IYI" check wrongerr.iyi
+# A detached `!` after a call: `v = g(-1) !` propagated, because the
+# argument list swallows the space after its `)`. Only `g(-1)!` does
+# (SPEC.md III.1.2); `f !x` is still `f(!x)`.
+printf 'module detached\n\ndef g(x : Int32) : Int32\n  x\nend\n\nv = g(-1) !\nputs v\n' > detached.iyi
+refuses "a detached ! after a call" 'write it attached, `g(-1)!`' -- \
+  "$IYI" check detached.iyi
+printf 'module unary\n\ndef f(b : Bool) : Bool\n  b\nend\n\nx = true\nputs f !x\n' > unary.iyi
+if [ "$("$IYI" run unary.iyi 2>&1 | tr -d '\r')" = "false" ]; then
+  echo "  f !x is still f(!x)"
+else
+  echo "  f !x no longer reads as f(!x):"; "$IYI" run unary.iyi 2>&1 | sed -n '1,3p'; status=1
+fi
+# `new` answers the object whatever `initialize` returns, so a `!` in
+# initialize dropped its error and left the fields after it unassigned:
+# `C.new("x").name.size` died of a memory fault. A `return` that leaves a
+# field unassigned did the same.
+printf 'module initbang\n\nclass ParseErr\n  def initialize\n  end\nend\n\nimpl Error for ParseErr\n  def message : String\n    "bad"\n  end\nend\n\ndef parse(s : String) : Int32 | ParseErr\n  return ParseErr.new if s == "x"\n  1\nend\n\nclass C\n  getter v : Int32\n  getter name : String\n\n  def initialize(s : String)\n    @v = parse(s)!\n    @name = "named"\n  end\nend\n\nputs C.new("x").name.size\n' > initbang.iyi
+refuses "a ! in initialize" "can't propagate out of \`initialize\`" -- "$IYI" check initbang.iyi
+printf 'module initreturn\n\nclass C\n  getter v : Int32\n  getter name : String\n\n  def initialize(early : Bool)\n    @v = 1\n    return if early\n    @name = "named"\n  end\nend\n\nputs C.new(true).name.size\n' > initreturn.iyi
+refuses "a return in initialize before a field is assigned" "can't leave \`initialize\` before @name is assigned" -- \
+  "$IYI" check initreturn.iyi
+# A parameterised trait as a bound, `forall T : Into(String)`, lost its
+# arguments: a type with only `impl Into(Int32)` met it and printed 2.
+printf 'trait Into(T)\n  abstract def into : T\nend\n\nstruct B\nend\n\nimpl Into(Int32) for B\n  def into : Int32\n    2\n  end\nend\n\ndef as_s(x : T) : String forall T : Into(String)\n  x.into.to_s\nend\n\nputs as_s(B.new)\n' > intobound.iyi
+refuses "a parameterised bound its argument does not meet" 'B does not implement Into(String), required by `T` in `as_s`' -- \
+  "$IYI" check intobound.iyi
 # A program's own exit status is `iyi run`'s, a negative one too. On
 # Windows `exit(-1)` is 0xFFFFFFFF, which the runner took for an abnormal
 # end: "terminated abnormally, the cause is unknown", and exit 1.
@@ -302,6 +502,30 @@ refuses "a block whose return type nothing says" \
 # before printing it: "Invalid value `` for x86-asm-syntax".
 refuses "an --x86-asm-syntax that is neither" "Invalid value \`x\` for x86-asm-syntax" -- \
   "$IYI" build --x86-asm-syntax x -o "$WORK/asm" good.iyi
+# A requirement answered with other parameters was reported by the other
+# library's abstract-def pass at the struct, naming no impl, and `self`
+# answered with the implementing type was refused the same way.
+printf 'trait Show\n  abstract def show(n : Int32) : String\nend\n\nstruct X\nend\n\nimpl Show for X\n  def show(n : String) : String\n    n\n  end\nend\n\nputs 1\n' > implparams.iyi
+refuses "an impl method of the required name with other parameters" 'impl Show for X does not answer Show#show(n : Int32)' -- \
+  "$IYI" check implparams.iyi
+printf 'import std/traits::{Comparable}\n\nstruct V\n  getter v : Int32\n\n  def initialize(@v : Int32)\n  end\nend\n\nimpl Comparable for V\n  def <=>(other : V) : Int32\n    v <=> other.v\n  end\nend\n\nputs V.new(2) > V.new(1)\n' > implself.iyi
+self_out=$("$IYI" run implself.iyi 2>&1 | tr -d '\r')
+if [ "$self_out" = "true" ]; then
+  echo "  an impl answering a requirement's self with its own type: runs"
+else
+  echo "  an impl answering self with its own type: $(printf '%s' "$self_out" | head -c 300)"; status=1
+fi
+# A nilable trait stored in a field or an array, where a generic type
+# implements the trait: the union was laid out with the generic `Gen(T)`
+# among its members, and the build ended in "BUG: called create_llvm_type
+# for T".
+printf 'trait Show\n  abstract def show : String\nend\n\nimpl Show for Int32\n  def show : String\n    "i"\n  end\nend\n\nstruct Gen(T)\n  def initialize(@v : T)\n  end\nend\n\nimpl Show for Gen(T) forall T\n  def show : String\n    "G"\n  end\nend\n\nclass Holder\n  def initialize(@s : Show?)\n  end\n\n  def s : Show?\n    @s\n  end\nend\n\nputs Holder.new(nil).s.nil?\na = [nil, 1, Gen.new(2)] of Show?\na.each { |e| puts e.show if e }\n' > traitunion.iyi
+union_out=$("$IYI" run traitunion.iyi 2>&1 | tr -d '\r')
+if [ "$union_out" = "$(printf 'true\ni\nG')" ]; then
+  echo "  a nilable trait in a field and an array, a generic type implementing it: runs"
+else
+  echo "  a nilable trait a generic type implements: $(printf '%s' "$union_out" | head -c 300)"; status=1
+fi
 # Two `iyi run`s at once of programs with one basename. The runner linked
 # into one executable per basename, and Windows will not write over one
 # that is running: the second failed with `LNK1104: cannot open file
@@ -336,6 +560,43 @@ refuses "a module with a byte that is not text on line 4" \
 refuses "and the sentence names the module" \
   "lib.iyi' is not a valid iyi source file: Unexpected byte 0xff at position 39" -- \
   "$IYI" check badbyte/app/main.iyi
+# And a byte that is not UTF-8 in a macro's expansion, which is read back
+# as source: `check` ended in "Unexpected byte 0xff at position 0, malformed
+# UTF-8 (InvalidByteSequenceError)" and a stack trace.
+printf 'puts {{ "\\xff".id }}\n' > macrobyte.iyi
+refuses "a macro that writes out a byte that is not text" "macro expansion is not UTF-8 text" -- \
+  "$IYI" check macrobyte.iyi
+refuses "and the refusal is at the macro" "macrobyte.iyi:1:6" -- "$IYI" check macrobyte.iyi
+# Two traits that require the same method, both implemented for one type:
+# the second impl's method replaced the first one's, so a call through the
+# first trait ran it - in one file, and across two libraries whose impls
+# R-3 allows one at a time.
+printf 'trait A\n  abstract def name : String\nend\n\ntrait B\n  abstract def name : String\nend\n\nstruct Y\nend\n\nimpl A for Y\n  def name : String\n    "from A"\n  end\nend\n\nimpl B for Y\n  def name : String\n    "from B"\n  end\nend\n\ndef via_a(x : A) : String\n  x.name\nend\n\nputs via_a(Y.new)\n' > implclash.iyi
+refuses "two traits' impls answering one method" 'Y#name is what impl A for Y answers' -- \
+  "$IYI" check implclash.iyi
+mkdir -p clash/lib
+printf 'module lib/tx\n\npub trait Tagged\n  abstract def tag : String\nend\n\nimpl Tagged for String\n  def tag : String\n    "tx"\n  end\nend\n\npub def show(x : Tagged) : String\n  "tx sees " + x.tag\nend\n' > clash/lib/tx.iyi
+printf 'module lib/ty\n\npub trait Marked\n  abstract def tag : String\nend\n\nimpl Marked for String\n  def tag : String\n    "ty"\n  end\nend\n\npub def mark(x : Marked) : String\n  "ty sees " + x.tag\nend\n' > clash/lib/ty.iyi
+printf 'module main\n\nimport lib/tx::{show}\nimport lib/ty::{mark}\n\nputs show("s")\nputs mark("s")\n' > clash/main.iyi
+refuses "two libraries' impls answering one method" 'String#tag is what impl Lib::Tx::Tagged for String answers' -- \
+  "$IYI" check clash/main.iyi
+# And met through default methods, which reach the type by the impl's
+# include: `Named` and `Column` each defaulting `label` had a call through
+# `Named` print Column's.
+printf 'trait Named\n  def label : String\n    "named"\n  end\nend\n\ntrait Column\n  def label : String\n    "column"\n  end\nend\n\nstruct User\nend\n\nimpl Named for User\nend\n\nimpl Column for User\nend\n\ndef via_named(x : Named) : String\n  x.label\nend\n\nputs via_named(User.new)\n' > defaultclash.iyi
+refuses "two traits' defaults answering one method" "and impl Column for User answers it again with Column's default" -- \
+  "$IYI" check defaultclash.iyi
+# A `def initialize` in a trait, or in an impl for a lib struct, is in a
+# type no `class` or `struct` declared: `check`, `build` and `vet` ended in
+# "Missing hash key: Wt (KeyError)" and a stack trace. A trait's
+# `initialize` is a default method like any other now, and an implementer
+# is made with it.
+printf 'pub trait Wt\n  def initialize(x : Int32)\n  end\nend\n\nstruct B\n  getter v : Int32 = 3\nend\n\nimpl Wt for B\nend\n\nlib LibQ\n  struct CS\n    a : Int32\n  end\nend\n\npub trait Tq\nend\n\nimpl Tq for LibQ::CS\n  def initialize\n  end\nend\n\nputs B.new(1).v\nputs LibQ::CS.new.a\n' > traitinit.iyi
+if "$IYI" run traitinit.iyi > traitinit.out 2>&1 && [ "$(tr -d '\r' < traitinit.out)" = "$(printf '3\n0')" ]; then
+  echo "  an initialize in a trait and in an impl for a lib struct makes the value"
+else
+  echo "  an initialize in a trait or in an impl for a lib struct:"; sed -n '1,3p' traitinit.out; status=1
+fi
 # What a runner ended from outside leaves - `taskkill /F` runs no code
 # in it, so its program stays in the cache under the runner's own name -
 # the next run takes away once it is an hour old, and not before: a
@@ -381,6 +642,15 @@ else
   grep -h -m1 "^Error" hdr_deps.out hdr_hier.out
   status=1
 fi
+# A requirement whose return names its own `forall` variable was "can't
+# resolve return type Array(U)", however the impl answered it.
+printf 'trait Ident\n  abstract def ident(x : U) : Array(U) forall U\nend\n\nstruct A\nend\n\nimpl Ident for A\n  def ident(x : V) : Array(V) forall V\n    [x]\n  end\nend\n\nputs A.new.ident(3)\n' > forallret.iyi
+ret_out=$("$IYI" run forallret.iyi 2>&1 | tr -d '\r')
+if [ "$ret_out" = "[3]" ]; then
+  echo "  a requirement returning its own forall variable, answered by the impl's: runs"
+else
+  echo "  a requirement returning its own forall variable: $(printf '%s' "$ret_out" | head -c 300)"; status=1
+fi
 # And the lexer, of `run HDR/APP/MAIN.IYI` above: a path typed in another
 # case is the file its directory stores, and a module that writes `!` - a
 # token in iyi and part of a name in the other language - ran on iyi's
@@ -407,6 +677,25 @@ refuses "a file stored as .IYI, checked" 'ends in `.IYI`' -- "$IYI" check upcase
 refuses "a file stored as .IYI, formatted" 'ends in `.IYI`' -- "$IYI" fmt --check upcase/UP.IYI
 refuses "a directory holding a .IYI, formatted" 'ends in `.IYI`' -- "$IYI" fmt --check upcase
 refuses "a directory holding a _test.IYI, tested" 'ends in `.IYI`' -- "$IYI" test upcase/tests
+# `where` on an `abstract def` bounds nothing - every impl answers a
+# requirement - and was dropped: `Elem = Float64` met `where Elem : Show`.
+printf 'trait Show\n  abstract def show : String\nend\n\ntrait Bag\n  type Elem\n  abstract def first : Elem where Elem : Show\nend\n' > wherereq.iyi
+refuses "a where bound on a requirement" "\`where\` can't bound a requirement" -- "$IYI" check wherereq.iyi
+# A reopen replacing a method another module wrote: two modules each
+# reopening `::String` with a `tag` had the first one's code run the
+# second's.
+mkdir -p reopen/lib
+printf 'module lib/x\n\nclass ::String\n  def tag : String\n    "x"\n  end\nend\n\npub def via_x(s : String) : String\n  s.tag\nend\n' > reopen/lib/x.iyi
+printf 'module lib/y\n\nclass ::String\n  def tag : String\n    "y"\n  end\nend\n' > reopen/lib/y.iyi
+printf 'module main\n\nimport lib/x\nimport lib/y\n\nputs Lib::X.via_x("s")\n' > reopen/main.iyi
+refuses "a reopen replacing another module's method" "String#tag is lib/x's method, and this replaces it" -- \
+  "$IYI" check reopen/main.iyi
+# A parameterised supertrait, `trait Ord(T) : Cmp(T)`, was "expecting any
+# of these tokens: ;, NEWLINE, SPACE (not '(')"; it is read at each impl's
+# arguments, and `impl Cmp(String)` does not give `impl Ord(N)` its `Cmp(N)`.
+printf 'trait Cmp(T)\n  abstract def cmp(other : T) : Int32\nend\n\ntrait Ord(T) : Cmp(T)\n  def gt(other : T) : Bool\n    cmp(other) > 0\n  end\nend\n\nstruct N\nend\n\nimpl Cmp(String) for N\n  def cmp(other : String) : Int32\n    1\n  end\nend\n\nimpl Ord(N) for N\nend\n' > supargs.iyi
+refuses "a parameterised supertrait not implemented at the impl's arguments" 'needs an impl of Cmp(N) for N first' -- \
+  "$IYI" check supargs.iyi
 # A byte order mark, which a Windows editor may put at the front of a
 # file. The lexer skips it; the three readings of a header did not, so a
 # module saved with one ran as a script and its import beside the header
@@ -448,6 +737,16 @@ else
   echo "  line 1 behind a byte order mark:"
   sed -n '1,8p' marked1.out | cat -A
   status=1
+fi
+# A subtrait's default naming its supertrait's associated type, `def
+# smallest : Elem` in `trait Sorted : Bag`, was "undefined constant Elem",
+# though its body could call `Bag`'s `items`.
+printf 'trait Bag\n  type Elem\n  abstract def items : Array(Elem)\nend\n\ntrait Sorted : Bag\n  def smallest : Elem\n    items.first.as(Elem)\n  end\nend\n\nstruct S\nend\n\nimpl Bag for S\n  type Elem = Int32\n\n  def items : Array(Int32)\n    [3, 1]\n  end\nend\n\nimpl Sorted for S\nend\n\nputs S.new.smallest\n' > subassoc.iyi
+sub_out=$("$IYI" run subassoc.iyi 2>&1 | tr -d '\r')
+if [ "$sub_out" = "3" ]; then
+  echo "  a subtrait's default naming its supertrait's associated type: runs"
+else
+  echo "  a subtrait's default naming its supertrait's associated type: $(printf '%s' "$sub_out" | head -c 300)"; status=1
 fi
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
@@ -555,6 +854,11 @@ refuses "a method named or" '`or` is a reserved name in iyi' -- "$IYI" check ord
 printf 'module orpanicdef\n\nclass A\n  def self.or_panic : Int32\n    1\n  end\nend\n' > orpanicdef.iyi
 refuses "a class method named or_panic" '`or_panic` is a reserved name in iyi' -- \
   "$IYI" check orpanicdef.iyi
+# `group do ... end` is the task group by name (SPEC.md III.4.9), so a
+# class's own `def group` compiled and its call was lowered as a group:
+# "undefined method 'join' for Spawner". The def is refused now.
+printf 'module groupdef\n\nclass Pool\n  def group(& : Int32 -> Int32) : Int32\n    yield 1\n  end\nend\n' > groupdef.iyi
+refuses "a method named group" '`group` is a reserved name in iyi' -- "$IYI" check groupdef.iyi
 # Under a comment on an `if` or `while` line, `/=` was read as a regex.
 fmt_gives "takes x /= y and x //= y under a comment on an if or while line" \
   $'a = 8\nif a > 1 # c\n  a /= 2\nend\nwhile a > 1 # c\n  a //= 2\nend\n'
@@ -819,6 +1123,21 @@ case "$(uname -s)" in
     else
       echo "  a build in a ${#deep}-character directory: exit $deep_code"; sed -n '1,3p' "$WORK/deep.log"; status=1
     fi
+    # And under a cache root of the author's choosing. The program's cache
+    # name was bounded at a fixed 100 characters, which assumed a short
+    # root: under a 120-character IYI_CACHE_DIR this program's objects
+    # passed MAX_PATH, "a codegen thread failed: Error opening file with
+    # mode 'w': ...o0.bc: The system cannot find the path specified". A
+    # root no build fits under is refused by name.
+    longroot="$WORK/$(printf 'r%.0s' $(seq 1 $((120 - ${#WORK} - 1))))"
+    (cd "$deep" && IYI_CACHE_DIR="$longroot" "$IYI" run m.iyi > "$WORK/longroot.log" 2>&1); longroot_code=$?
+    if [ "$longroot_code" -eq 0 ] && grep -qx deep "$WORK/longroot.log"; then
+      echo "  a program in a ${#deep}-character directory runs under a ${#longroot}-character cache root"
+    else
+      echo "  a program under a ${#longroot}-character cache root: exit $longroot_code"; sed -n '1,3p' "$WORK/longroot.log"; status=1
+    fi
+    refuses "a cache root no build fits under" "would pass Windows' 260-character path limit" -- \
+      env IYI_CACHE_DIR="$WORK/$(printf 't%.0s' $(seq 1 $((170 - ${#WORK} - 1))))" "$IYI" build -o "$WORK/toolong" good.iyi
     ;;
 esac
 # A target whose back end the compiler's LLVM does not carry. Windows' is
@@ -937,6 +1256,17 @@ if [ "$marked_code" -eq 0 ] && cmp -s "$WORK/marked/typo.iyi" "$WORK/marked/typo
 else
   echo "  fix behind a byte order mark (exit $marked_code):"; sed 's/^/    /' "$WORK/marked.txt" | head -3; status=1
 fi
+# The edit is printed in backticks, the way messages write code. In single
+# quotes the Char an edit writes was quoted a second time: `fixed
+# split.iyi:4:14: '" "' -> '' ''`, which reads as two empty strings.
+mkdir -p "$WORK/splitfix"
+printf 'module t\n\ns = "a b"\nputs s.split(" ").size\n' > "$WORK/splitfix/split.iyi"
+(cd "$WORK/splitfix" && "$IYI" fix split.iyi) > "$WORK/splitfix.txt" 2>&1
+if grep -qF "fixed split.iyi:4:14: \`\" \"\` -> \`' '\`" "$WORK/splitfix.txt"; then
+  echo "  fix prints a string-to-char edit as \`\" \"\` -> \`' '\`"
+else
+  echo "  fix printed its edit as:"; sed 's/^/    /' "$WORK/splitfix.txt" | head -3; status=1
+fi
 # The formats a program reads name a file the way a repository does, on
 # every system. On Windows `vet -f json`, `csv` and `codecov` wrote
 # `app\helpers.iyi` (`app\\helpers.iyi` in JSON), which codecov's
@@ -971,6 +1301,19 @@ refuses "an artifact directory that is not there" "needs a directory of .iyimod 
 # mods/app/lib.iyimod", about the file the author had just been looking at.
 refuses "an artifact where --use-iyimod's directory goes" "is a file" -- \
   "$IYI" build --use-iyimod mods/app/lib.iyimod -o u4 user.iyi
+# An artifact a `--no-codegen` build wrote carries declarations and nothing
+# to link. A build against one went to the linker, which said `LNK2019:
+# unresolved external symbol` 19 times and named the artifact nowhere. A
+# front-end build against it is what it is for, and still takes it.
+"$IYI" build --no-codegen --emit-iyimod nocg user.iyi > nocg.log 2>&1 ||
+  { echo "  a --no-codegen build wrote no artifact:"; sed -n '1,3p' nocg.log; status=1; }
+refuses "a --no-codegen artifact, linked against" "holds declarations only" -- \
+  "$IYI" build --use-iyimod nocg -o u5 user.iyi
+if "$IYI" build --no-codegen --use-iyimod nocg user.iyi > nocg2.log 2>&1; then
+  echo "  a --no-codegen artifact, typechecked against: taken"
+else
+  echo "  a --no-codegen artifact, typechecked against:"; sed -n '1,3p' nocg2.log; status=1
+fi
 
 echo
 echo "== what the daemon refuses"
@@ -1043,6 +1386,28 @@ case "$(uname -s)" in
       env IYI_CACHE_DIR="$WORK/$(printf 'c%.0s' $(seq 1 120))" "$IYI" daemon build -o d6 good.iyi
     ;;
 esac
+
+echo
+echo "== what an artifact keeps to a type"
+# `protected` travels as written: through the artifact `Box.new(4).secret`
+# typed, and the link failed on a symbol the module never meant anyone
+# outside to ask for, where the source says "protected method 'secret'
+# called". And `mod dump` writes a method's visibility, which it left off
+# `private def hidden` too.
+mkdir -p "$WORK/vis/app"
+printf 'module app/vis\n\npub class Box\n  @n : Int32\n\n  def initialize(@n : Int32)\n  end\n\n  def value : Int32\n    @n\n  end\n\n  protected def secret : Int32\n    @n * 2\n  end\n\n  private def hidden : Int32\n    @n * 3\n  end\nend\n' > "$WORK/vis/app/vis.iyi"
+printf 'import app/vis::{Box}\n\nputs Box.new(4).value\n' > "$WORK/vis/ok.iyi"
+printf 'import app/vis::{Box}\n\nputs Box.new(4).secret\n' > "$WORK/vis/secret.iyi"
+(cd "$WORK/vis" && "$IYI" build --emit-iyimod mods -o ok ok.iyi && mv app/vis.iyi vis.source) > "$WORK/vis.log" 2>&1 ||
+  { echo "  the protected module does not build:"; sed -n '1,3p' "$WORK/vis.log"; status=1; }
+refuses "a protected method, through its artifact" "protected method 'secret' called" -- \
+  "$IYI" build --use-iyimod "$WORK/vis/mods" -o "$WORK/vis/u" "$WORK/vis/secret.iyi"
+"$IYI" mod dump "$WORK/vis/mods/app/vis.iyimod" > "$WORK/visdump.log" 2>&1
+if grep -qF "protected def secret : Int32" "$WORK/visdump.log" && grep -qF "private def hidden : Int32" "$WORK/visdump.log"; then
+  echo "  mod dump writes protected and private as the module did"
+else
+  echo "  mod dump dropped a visibility:"; grep -E "def (secret|hidden)" "$WORK/visdump.log"; status=1
+fi
 
 echo
 echo "== where a program is written, and where its library is looked for"
@@ -1223,6 +1588,16 @@ else
   sed -n '1,8p' "$WORK/lost.txt"
   status=1
 fi
+# And `--crystal`'s prelude, which is the other library's: the Windows zip
+# does not carry it, and the answer was the `shards install` advice.
+env IYI_PATH="$WORK/nowhere" "$IYI" build --crystal -o lost good.iyi > "$WORK/lostcr.txt" 2>&1
+if grep -q 'shards install' "$WORK/lostcr.txt" || ! grep -q "The Windows zip does not include it" "$WORK/lostcr.txt"; then
+  echo "  a missing --crystal prelude: did not say whose library is missing"
+  sed -n '1,8p' "$WORK/lostcr.txt"
+  status=1
+else
+  echo "  a missing --crystal prelude: says it is the other library, which the Windows zip does not carry"
+fi
 # And the formatter, asked about a file that is not there. It printed
 # "file or directory does not exist" and exited 0, so a CI line that
 # reads `iyi tool format --check "$FILE"` passed on a path with a typo -
@@ -1311,6 +1686,17 @@ puts value
 IYI
 refuses "a macro that declares a name ending in !" "part of a name in iyi" -- \
   "$IYI" build -o "$WORK/macro_name" "$WORK/macro_name.iyi"
+# A derive may read its declaration only (SPEC.md II.4). Its `macro
+# finished` ran after it, and an escaped `all_subclasses` in one answered
+# `A,B` beside a `B` declared below the derived struct; its `run` ran the
+# script and the method answered what the script printed.
+printf 'class Base\nend\n\nclass A < Base\nend\n\nmacro fin_in(declaration)\n  macro finished\n    def all_subs : String\n      \\{{ Base.all_subclasses.map(&.name.stringify).join(",") }}\n    end\n  end\nend\n\nstruct X\n  def initialize\n  end\n\n  derive fin_in\nend\n\nclass B < Base\nend\n\nputs X.new.all_subs\n' > "$WORK/derivehook.iyi"
+refuses "a macro finished inside a derive" '`macro finished` is not available to a derive' -- \
+  "$IYI" run "$WORK/derivehook.iyi"
+printf 'puts "\\"generated\\""\n' > "$WORK/gen.cr"
+printf 'macro r(declaration)\n  def got : String\n    {{ run("./gen.cr").stringify }}\n  end\nend\n\nstruct X\n  def initialize\n  end\n\n  derive r\nend\n\nputs X.new.got\n' > "$WORK/deriverun.iyi"
+refuses "a run inside a derive" '`run` is not available to a derive' -- \
+  "$IYI" run "$WORK/deriverun.iyi"
 
 # And the other direction, which is the one that cost something: `!` is the
 # operator a caller's signature is written for, and no macro could produce
@@ -1477,6 +1863,18 @@ else
   echo "  --crystal refused a module that is not std:"; head -3 own_crystal.log; status=1
 fi
 
+# An unmarked macro is the module's own through its artifact as from its
+# source: the declarations wrote it `pub macro`, so `App::Mac.inner` ran
+# and printed 1 where the source says "does not export 'inner'".
+mkdir -p "$WORK/mac/app"
+printf 'module app/mac\n\nmacro inner\n  1\nend\n\npub macro outer\n  2\nend\n' > "$WORK/mac/app/mac.iyi"
+printf 'import app/mac\n\nputs App::Mac.outer\n' > "$WORK/mac/ok.iyi"
+printf 'import app/mac\n\nputs App::Mac.inner\n' > "$WORK/mac/inner.iyi"
+(cd "$WORK/mac" && "$IYI" build --emit-iyimod mods -o ok ok.iyi && mv app/mac.iyi mac.source) > "$WORK/mac.log" 2>&1 ||
+  { echo "  the macro module does not build:"; sed -n '1,3p' "$WORK/mac.log"; status=1; }
+refuses "an unmarked macro, through its artifact" "does not export 'inner'" -- \
+  "$IYI" build --use-iyimod "$WORK/mac/mods" -o "$WORK/mac/u" "$WORK/mac/inner.iyi"
+
 echo "== what the other verbs refuse, and what one of them prints"
 # `doc`, `migrate`, `bind` and the rest of `mod` were never in this file,
 # and every one of them failed the standard the verbs above hold to: `doc`
@@ -1531,6 +1929,24 @@ else
   sed -n '1,20p' interp.out | cat -A
   status=1
 fi
+# A macro whose expansion runs it again expanded until the stack ran out:
+# "Stack overflow (e.g., infinite or very deep recursion)" after 5 to 17
+# seconds, for a macro calling itself, two calling each other, and an
+# `inherited` hook whose subclass sets it off again. Refused 64 levels
+# deep, and a recursion that ends short of that still runs.
+printf 'macro m(x)\n  m({{ x }})\nend\n\nm(1)\n' > macroself.iyi
+refuses "a macro that calls itself" "macro expansion nested more than 64 deep" -- "$IYI" check macroself.iyi
+printf 'macro a\n  b\nend\n\nmacro b\n  a\nend\n\na\n' > macropair.iyi
+refuses "two macros that call each other" "macro expansion nested more than 64 deep" -- "$IYI" check macropair.iyi
+printf 'class Base\n  macro inherited\n    class Sub < {{ @type }}\n    end\n  end\nend\n\nclass A < Base\nend\n' > macrohook.iyi
+refuses "an inherited hook its subclass sets off" "macro expansion nested more than 64 deep" -- \
+  "$IYI" check macrohook.iyi
+printf 'macro down(n)\n  {%% if n > 0 %%}\n    down({{ n - 1 }})\n  {%% else %%}\n    puts "bottom"\n  {%% end %%}\nend\n\ndown(60)\n' > macrodown.iyi
+if [ "$("$IYI" run macrodown.iyi 2>&1 | tr -d '\r')" = "bottom" ]; then
+  echo "  a macro recursion 61 levels deep that ends still runs"
+else
+  echo "  a macro recursion 61 levels deep that ends:"; "$IYI" run macrodown.iyi 2>&1 | sed -n '1,3p'; status=1
+fi
 # The caret under a line with tabs inside it: every character before the
 # column was counted as one space, so two tabs that pushed `nope` to
 # column 34 left the caret at 17. The caret line carries the shown line's
@@ -1573,6 +1989,17 @@ else
   sed -n '1,6p' absnew.out; cat absnew.json; echo
   status=1
 fi
+# A generic whose instance variable holds the same generic one level
+# deeper made instances until the stack ran out, used or not, and so did
+# an associated type wrapping its receiver: "Stack overflow" after 6 to 19
+# seconds. Refused as a call that builds such a type already was.
+printf 'struct S(T)\n  @x : S(Array(T))?\nend\n' > genivar.iyi
+refuses "a generic holding itself one level deeper" "generic type too nested: S(Array(Array(" -- \
+  "$IYI" check genivar.iyi
+refuses "and the refusal is at the generic" "genivar.iyi:1:1" -- "$IYI" check genivar.iyi
+printf 'pub trait C\n  type Elem\n  abstract def first : Elem\nend\n\npub struct Box(T)\n  def initialize(@v : T)\n  end\nend\n\nimpl C for Box(T) forall T\n  type Elem = Box(Array(T))\n\n  def first : Box(Array(T))\n    Box.new([@v])\n  end\nend\n\nputs Box.new(1).first\n' > genassoc.iyi
+refuses "an associated type wrapping its receiver" "generic type too nested: Box(Array(Array(" -- \
+  "$IYI" check genassoc.iyi
 refuses "doc on bytes that are not text" "not a valid iyi source file" -- \
   "$IYI" doc binary.iyi
 refuses "doc on a file that declares no module" "declares no module" -- \
@@ -1600,6 +2027,13 @@ refuses "a flag where --out's directory goes" "--check is a flag" -- \
   "$IYI" migrate tree --out --check
 refuses "a flag where --mods' directory goes" "--mods takes a directory" -- \
   "$IYI" bind --mods --lib
+# A flag a verb does not have is refused by name. `bind --bogus` was a
+# shard, and the answer was "no lib/ here"; `migrate --bogus` was a tree
+# that was "no such directory"; `lsp --bogus extra` served a session.
+refuses "a flag bind does not have" "bind: unknown flag --bogus" -- "$IYI" bind --bogus
+refuses "a flag migrate does not have" "migrate: unknown flag --bogus" -- "$IYI" migrate --bogus
+refuses "a flag lsp does not have" "lsp: unknown flag --bogus" -- "$IYI" lsp --bogus extra
+refuses "an argument lsp does not take" "lsp takes no arguments, and 'extra' is one" -- "$IYI" lsp extra
 # A file where a directory goes is not a directory that is missing:
 # `--lib shard.yml` said "no shard.yml/ here; run `shards install`" and
 # `--mods shard.yml` died of mkdir's "File exists"; an empty shard name
@@ -1662,6 +2096,24 @@ if [ -n "$kernel_file" ] && [ -r "$kernel_file" ]; then
     "$IYI" doc unreadable.iyi
 else
   echo "  a module the kernel will not hand over: no /proc here, nothing to drive"
+fi
+# Source nested deeper than the compiler reads is refused with a sentence at
+# the place. `iyi check` died of "Stack overflow (e.g., infinite or very
+# deep recursion)" and pages of frames on 1,200 nested `(`, on 300 calls left
+# open with a named argument each, and on a chain of 4,000 `+`; the language
+# server died with it. A file deeper than any in the repository still reads.
+printf 'module deep\n\nputs %s1%s\n' "$(printf '(%.0s' $(seq 1200))" "$(printf ')%.0s' $(seq 1200))" > deep.iyi
+refuses "1,200 nested parentheses" "nesting deeper than 128 levels" -- "$IYI" check deep.iyi
+printf 'module deepopen\n\ndef f(x)\n  x\nend\n\nputs %s\n' "$(printf 'f(x: %.0s' $(seq 300))" > deepopen.iyi
+refuses "300 calls left open" "nesting deeper than 128 levels" -- "$IYI" check deepopen.iyi
+printf 'module chain\n\nx = 1\nputs x%s\n' "$(printf ' + x%.0s' $(seq 4000))" > chain.iyi
+refuses "a chain of 4,000 +" "nested deeper than 1000 levels" -- "$IYI" check chain.iyi
+printf 'module shallow\n\nx = 1\nputs %s1%s%s\n' "$(printf '(%.0s' $(seq 100))" "$(printf ')%.0s' $(seq 100))" \
+  "$(printf ' + x%.0s' $(seq 800))" > shallow.iyi
+if "$IYI" check shallow.iyi > shallow.log 2>&1; then
+  echo "  100 nested parentheses and a chain of 800 + read"
+else
+  echo "  100 nested parentheses and a chain of 800 +:"; sed -n '1,3p' shallow.log; status=1
 fi
 
 echo

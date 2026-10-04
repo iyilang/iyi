@@ -734,11 +734,10 @@ module ::IyiFormat
            code_point(val.to_i64)
          when Int64
            code_point(val)
-         when UInt8
-           code_point(val.to_i64)
          when UInt64
-           # `UInt16` and `UInt32` arrive here widened, and all three were
-           # the first character of their digits: `%c` of 65_u32 was "6".
+           # `UInt8`, `UInt16` and `UInt32` arrive widened, and the last two
+           # and this were the first character of their digits: `%c` of
+           # 65_u32 was "6".
            code_point(val)
          else
            first = ' '
@@ -777,6 +776,11 @@ module ::IyiFormat
       return format_arg(verb == 'u' ? val.to_i64 & 255_i64 : val.to_i64, verb, minus, plus, space, zero, hash, width, precision)
     when Int16
       return format_arg(verb == 'u' ? val.to_i64 & 65535_i64 : val.to_i64, verb, minus, plus, space, zero, hash, width, precision)
+    when UInt8
+      # Widened as `Int8` is: it had every integer verb's branch of its own
+      # and none of the float verbs', so `%f` of 200_u8 panicked "wants a
+      # number" where `%d` printed 200.
+      return format_arg(val.to_i64, verb, minus, plus, space, zero, hash, width, precision)
     when UInt16, UInt32
       return format_arg(val.to_u64, verb, minus, plus, space, zero, hash, width, precision)
     when Float32
@@ -801,8 +805,6 @@ module ::IyiFormat
         format_int64(val, 10, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
         format_uint64(val, 10, false, true, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 10, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -818,23 +820,24 @@ module ::IyiFormat
         format_uint64(val.unsafe_to_u64, 10, false, false, minus, plus, space, zero, hash, width, precision)
       when UInt64
         format_uint64(val, 10, false, false, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 10, false, false, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
         not_a_number(val, verb)
       end
     when 'x'
+      # The sign flags hold in every base, as `%d`'s: a negative value is
+      # written with its `-` (`%x` of -255 is -ff), so `+` and space are
+      # the other bases' too, as the other library and Python have them.
+      # `%+x` of 255 printed ff, and a column of signed deltas lost its signs
+      # on one side. Only `%u` is the word's bits, and never signed.
       case val
       when Int32
-        format_int64(val.to_i64, 16, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 16, false, true, minus, plus, space, zero, hash, width, precision)
       when Int64
-        format_int64(val, 16, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val, 16, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
-        format_uint64(val, 16, false, false, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 16, false, false, minus, plus, space, zero, hash, width, precision)
+        format_uint64(val, 16, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -843,13 +846,11 @@ module ::IyiFormat
     when 'X'
       case val
       when Int32
-        format_int64(val.to_i64, 16, true, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 16, true, true, minus, plus, space, zero, hash, width, precision)
       when Int64
-        format_int64(val, 16, true, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val, 16, true, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
-        format_uint64(val, 16, true, false, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 16, true, false, minus, plus, space, zero, hash, width, precision)
+        format_uint64(val, 16, true, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -858,13 +859,11 @@ module ::IyiFormat
     when 'o'
       case val
       when Int32
-        format_int64(val.to_i64, 8, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 8, false, true, minus, plus, space, zero, hash, width, precision)
       when Int64
-        format_int64(val, 8, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val, 8, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
-        format_uint64(val, 8, false, false, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 8, false, false, minus, plus, space, zero, hash, width, precision)
+        format_uint64(val, 8, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -873,13 +872,11 @@ module ::IyiFormat
     when 'b'
       case val
       when Int32
-        format_int64(val.to_i64, 2, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val.to_i64, 2, false, true, minus, plus, space, zero, hash, width, precision)
       when Int64
-        format_int64(val, 2, false, false, minus, plus, space, zero, hash, width, precision)
+        format_int64(val, 2, false, true, minus, plus, space, zero, hash, width, precision)
       when UInt64
-        format_uint64(val, 2, false, false, minus, plus, space, zero, hash, width, precision)
-      when UInt8
-        format_int64(val.to_i64, 2, false, false, minus, plus, space, zero, hash, width, precision)
+        format_uint64(val, 2, false, true, minus, plus, space, zero, hash, width, precision)
       when Float64
         format_truncated(val, verb, minus, plus, space, zero, hash, width, precision)
       else
@@ -955,8 +952,12 @@ module ::IyiFormat
            end
     if base == 0
       return format_arg(val.to_f64, verb, minus, plus, space, zero, hash, width, precision) if verb == 'f' || verb == 'e' || verb == 'E' || verb == 'g' || verb == 'G'
-      return format_arg(val.to_s, verb, minus, plus, space, zero, hash, width, precision) if verb == 's' || verb == 'p'
-      raise "%#{verb} wants a character, and #{val} is a #{val.class}" if verb == 'c'
+      # The value's own text, as every other integer's: written as its
+      # digits and then asked again as a string, `%p` of 65_i128 was "65" in
+      # quotes, the string's inspection; and `%c` is a code point here too,
+      # where it was refused as "wants a character".
+      return format_string_arg(verb == 'p' ? val.inspect : val.to_s, minus, width, precision) if verb == 's' || verb == 'p'
+      return format_char_arg(code_point(val), minus, width) if verb == 'c'
       raise "unknown format specifier '%#{verb}'"
     end
     # `%u` is the word's bits, as an `Int64`'s are: `%u` of -5_i128
@@ -972,7 +973,7 @@ module ::IyiFormat
     digits = negative ? text[1, text.bytesize - 1] : text
     digits = digits.upcase if verb == 'X'
     digits = "" if digits == "0" && precision == 0
-    sign = negative ? "-" : ((verb == 'd' || verb == 'i') ? (plus ? "+" : (space ? " " : "")) : "")
+    sign = negative ? "-" : (verb != 'u' ? (plus ? "+" : (space ? " " : "")) : "")
     prefix = ""
     if hash && text != "0"
       prefix = base == 16 ? (verb == 'X' ? "0X" : "0x") : (base == 8 ? "0o" : (base == 2 ? "0b" : ""))
@@ -1047,6 +1048,24 @@ module ::IyiFormat
 end
 
 pub def sprintf(format_string : String, *args : *T) : String forall T
+  sprintf(format_string, args)
+end
+
+# The argument list may be one array or tuple, as the other library takes
+# it: `"%s, %s, %s, D" % ['A', 'B', 'C']`, its own example, panicked "too
+# few arguments for format string" here, and `"[%s]" % ["A"]` printed
+# `[["A"]]` where it prints `[A]`. Two overloads rather than one taking
+# `Array | Tuple`: a union with Array in it cannot be written into an
+# artifact ("can't use Array(T) in unions yet").
+pub def sprintf(format_string : String, args : Array) : String
+  format_list(format_string, args)
+end
+
+pub def sprintf(format_string : String, args : Tuple) : String
+  format_list(format_string, args)
+end
+
+private def format_list(format_string : String, args) : String
   index = 0
   format_bytesize = format_string.bytesize
   format_ptr = format_string.to_unsafe
@@ -1159,7 +1178,16 @@ pub def sprintf(format_string : String, *args : *T) : String forall T
 end
 
 pub def printf(format_string : String, *args : *T) : Nil forall T
-  print sprintf(format_string, *args)
+  print sprintf(format_string, args)
+end
+
+# The argument list as one array or tuple, as `sprintf` takes it.
+pub def printf(format_string : String, args : Array) : Nil
+  print sprintf(format_string, args)
+end
+
+pub def printf(format_string : String, args : Tuple) : Nil
+  print sprintf(format_string, args)
 end
 
 # Qualified, because a reopening is not inside the module that writes it:

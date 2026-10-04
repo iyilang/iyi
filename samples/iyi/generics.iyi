@@ -1,6 +1,6 @@
 # Implementing a trait for a generic type — SPEC.md II.7.
 #
-#   ./bin/crystal run samples/iyi/generics.iyi
+#   ./bin/iyi run samples/iyi/generics.iyi
 
 module samples/generics
 

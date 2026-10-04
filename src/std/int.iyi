@@ -20,9 +20,10 @@
 # converts by truncating first, so `127.9.to_i8` is 127 and `(-0.5).to_u16`
 # is 0, and what is refused is a truncation the type does not hold; `//` and
 # `%` by zero panic "division by zero" / "modulo by zero"; `digits` of a
-# negative number, a base under 2, a `chr` outside 0..127, and a `to_s` base
-# outside 2..36 are refused with a sentence. There is no `Int32::MAX`: the
-# edges of a type are its literals, and that holds for every type here.
+# negative number, a base under 2, a `chr` of a surrogate or past
+# 0x10FFFF, and a `to_s` base outside 2..36 are refused with a sentence.
+# There is no `Int32::MAX`: the edges of a type are its literals, and that
+# holds for every type here.
 #
 # Against a double every integer compares exactly, `<=>` included:
 # `9007199254740993_i128 == 9007199254740992.0` is false. The prelude's own
@@ -297,7 +298,7 @@ module std/int
     # `127.9.to_i8` is 127 and `(-0.5).to_u16` is 0, where the range was
     # once checked on the untruncated value and both were refused. NaN and
     # the infinities are refused. The prelude's own five (`to_i`, `to_i32`,
-    # `to_i64`, `to_u8`, `to_u64`) still check before truncating.
+    # `to_i64`, `to_u8`, `to_u64`) are the compiler's and say the same.
     {% for conv in convs %}
       {% if conv[1] == "Int128" || conv[1] == "UInt128" %}
         # Not the instruction: a double to a 128-bit integer is a call
@@ -523,7 +524,12 @@ module std/int
 {% end %}
 
 struct ::Int
-  def <=>(other : self) : Int32
+  # Against any integer, as the other library's `Int#<=>` is, the widths
+  # compared exactly by the primitives above. Against `self` only, an
+  # `Int64` beside an `Int32` did not type, and once `std/traits` added
+  # `Int32#<=>(Int32)` the literal in `1 <=> 1_i64` cast to that and to
+  # `Float64` both: "ambiguous call" where the other library answers 0.
+  def <=>(other : ::Int) : Int32
     self < other ? -1 : (self > other ? 1 : 0)
   end
 
@@ -574,10 +580,12 @@ struct ::Int
     result
   end
 
-  # The character with this code, ASCII: the prelude's `Int32#chr`
-  # contract for every integer type.
+  # The character with this code point: the prelude's `Int32#chr` contract
+  # for every integer type, every code point but the surrogates. It stopped
+  # at ASCII after the prelude's had moved on, so `233.chr` was 'é' and
+  # `233_i64.chr` panicked "233 is out of char range".
   def chr : Char
-    raise "#{self} is out of char range" if self < 0 || self > 127
-    to_u8.unsafe_chr
+    raise "#{self} is out of char range" if self < 0 || self > 0x10FFFF || (self >= 0xD800 && self <= 0xDFFF)
+    to_i32.unsafe_chr
   end
 end

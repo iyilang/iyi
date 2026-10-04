@@ -1,6 +1,6 @@
 # Errors are ordinary union members — SPEC.md III.1.
 #
-#   ./bin/crystal run samples/iyi/errors.iyi
+#   ./bin/iyi run samples/iyi/errors.iyi
 #
 # No `Result` wrapper, no exception hierarchy, no new type machinery: unions
 # already exist and already carry a type id. What makes a member an *error*

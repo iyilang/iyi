@@ -8,7 +8,7 @@
 #    while `bytesize` counts raw bytes.
 #    Following the prelude's established convention, all string indexing
 #    (`[]`, `[start, count]`), slice operations, and search offsets
-#    (`index`, `rindex`, `sub`, `gsub`, `split`, `count`) are strictly
+#    (`index`, `rindex`, `sub`, `gsub`, `split`) are strictly
 #    BYTE-INDEXED.
 #    For example, with `s = "héllo"`, `s.size` is 5, `s.bytesize` is 6,
 #    `s[1]` is byte 195 (0xC3), `s[2]` is byte 169 (0xA9), and `s.index('l')`
@@ -88,21 +88,6 @@ struct ::Char
     (self >= 'A' && self <= 'Z') ? (ord + 32).unsafe_chr : self
   end
 
-  def bytesize : Int32
-    cp = ord
-    if cp < 0x80
-      1
-    elsif cp < 0x800
-      2
-    elsif cp < 0x10000
-      3
-    elsif cp <= 0x10FFFF
-      4
-    else
-      1
-    end
-  end
-
   def to_i : Int32
     to_i(10)
   end
@@ -134,16 +119,11 @@ struct ::Char
 end
 
 class ::String
-  # The whitespace `blank?`, `lstrip` and `rstrip` look through is the one
-  # `Char#ascii_whitespace?` names, `\v` and `\f` included - the prelude's
-  # `whitespace?`, so `strip` with no argument agrees with these.
+  # The whitespace `blank?`, `lstrip` and `rstrip` look through is the
+  # prelude's `Char#whitespace?`, decoded, so `strip` with no argument agrees
+  # with these and with the other library: `"\u3000".blank?` was false.
   def blank? : Bool
-    i = 0
-    while i < bytesize
-      return false unless to_unsafe[i].unsafe_chr.ascii_whitespace?
-      i = i + 1
-    end
-    true
+    space_end == bytesize
   end
 
   def presence : String?
@@ -151,11 +131,8 @@ class ::String
   end
 
   def lstrip : String
-    i = 0
-    while i < bytesize && to_unsafe[i].unsafe_chr.ascii_whitespace?
-      i = i + 1
-    end
-    byte_slice(i, bytesize - i)
+    first = space_end
+    byte_slice(first, bytesize - first)
   end
 
   # A `Char` above ASCII is more than one byte, and this family narrowed it
@@ -252,11 +229,7 @@ class ::String
   end
 
   def rstrip : String
-    last = bytesize
-    while last > 0 && to_unsafe[last - 1].unsafe_chr.ascii_whitespace?
-      last = last - 1
-    end
-    byte_slice(0, last)
+    byte_slice(0, space_start(0))
   end
 
   def rstrip(char : Char) : String
@@ -331,18 +304,21 @@ class ::String
     ends_with?(char.to_s)
   end
 
-  def split(separator : String, limit : Int32 = 0) : Array(String)
-    return [self] if limit == 1
-    return [] of String if empty? && limit < 0
+  # No limit is `nil`, and one of 1 or less is the string whole, as the
+  # other library answers both. A negative limit split everything, and 0
+  # stood for none: `"a,b".split(",", -1)` was `["a", "b"]` here and
+  # `["a,b"]` there. An empty string is one empty piece whatever the
+  # limit, as it is without one: `"".split(",", -1)` was `[]`.
+  def split(separator : String, limit : Int32? = nil) : Array(String)
+    return [self] if empty? || (limit && limit <= 1)
+    limit = limit || 0
 
     # Characters, and the limit counts them as it counts any other piece:
-    # `"abc".split("", 2)` is `["a", "bc"]`. An empty string is one empty
-    # piece, as it is with any other separator. A byte that begins no
+    # `"abc".split("", 2)` is `["a", "bc"]`. A byte that begins no
     # character is a U+FFFD piece and the rest starts at the byte after it:
     # it moved on by the bytes of the character written, and 80 61 62 split
     # in two was C2 80 and `b`, the `a` lost.
     if separator.empty?
-      return [self] if empty?
       pieces = [] of String
       each_point do |point, at|
         return pieces << byte_slice(at, bytesize - at) if limit > 1 && pieces.size == limit - 1
@@ -365,16 +341,17 @@ class ::String
     pieces
   end
 
-  def split(separator : Char, limit : Int32) : Array(String)
+  def split(separator : Char, limit : Int32?) : Array(String)
     split(separator.to_s, limit)
   end
 
   def split : Array(String)
-    split(0)
+    split(nil)
   end
 
-  def split(limit : Int32) : Array(String)
-    return [self] if limit == 1
+  def split(limit : Int32?) : Array(String)
+    return [self] if limit && limit <= 1
+    limit = limit || 0
     pieces = [] of String
     in_token = false
     token_start = 0
@@ -608,8 +585,10 @@ class ::String
   # Mapped per character. The 256-entry byte table this used could not hold
   # a character above ASCII: `"a☃".tr("☃", "x")` answered `"axxx"`, one `x`
   # per byte of the character it was asked to replace once. Both sets name
-  # runs the way the other library does: `a-z` is the twenty-six letters,
-  # and a `-` at either end is itself.
+  # runs: `a-z` is the twenty-six letters, and a `-` at either end is
+  # itself, as the other library's `delete` sets read them. Its `tr` pairs
+  # the characters positionally, a `-` among them, so
+  # `"bab".tr("a-c", "A-C")` is `"bAb"` there and `"BAB"` here.
   #
   # Both sets in ASCII - the common case, and a DNA complement's - are one
   # 256-entry byte table built once and one pass over the bytes, which a
@@ -714,16 +693,20 @@ class ::String
   end
 
   def delete(char : Char) : String
-    delete(char.to_s)
+    deleted { |c| c == char }
   end
 
-  # Characters, not bytes: a 256-entry byte mask cannot hold a character
-  # above ASCII, and deleting one byte of one leaves the rest behind.
-  def delete(chars : String) : String
-    return self if chars.empty?
-    named = chars.chars
+  # The characters in every one of *sets*, as `count` reads them. Characters,
+  # not bytes: a 256-entry byte mask cannot hold a character above ASCII,
+  # and deleting one byte of one leaves the rest behind.
+  def delete(*sets : String) : String
+    compiled = compiled_sets(sets)
+    deleted { |c| in_sets?(c.ord, compiled) }
+  end
+
+  private def deleted(& : Char -> Bool) : String
     String.build(bytesize) do |io|
-      each_char { |c| io << c unless named.includes?(c) }
+      each_char { |c| io << c unless yield c }
     end
   end
 
@@ -745,19 +728,23 @@ class ::String
   end
 
   def squeeze(char : Char) : String
-    squeeze(char.to_s)
+    squeezed { |c| c == char }
   end
 
-  # A run of the same character becomes one of it. Compared per character,
-  # so a multi-byte one is a run rather than three bytes that never match.
-  def squeeze(chars : String) : String
-    return self if chars.empty?
-    named = chars.chars
+  # A run of the same character in every one of *sets* becomes one of it.
+  # Compared per character, so a multi-byte one is a run rather than three
+  # bytes that never match.
+  def squeeze(*sets : String) : String
+    compiled = compiled_sets(sets)
+    squeezed { |c| in_sets?(c.ord, compiled) }
+  end
+
+  private def squeezed(& : Char -> Bool) : String
     String.build(bytesize) do |io|
       started = false
       previous = ' '
       each_char do |c|
-        next if started && c == previous && named.includes?(c)
+        next if started && c == previous && (yield c)
         io << c
         previous = c
         started = true
@@ -766,19 +753,96 @@ class ::String
   end
 
   def count(char : Char) : Int32
-    count(char.to_s)
+    total = 0
+    each_char { |c| total = total + 1 if c == char }
+    total
   end
 
-  def count(search : String) : Int32
-    return 0 if search.empty? || search.bytesize > bytesize
-    c = 0
-    start = 0
-    s_len = search.bytesize
-    while (idx = index(search, start))
-      c = c + 1
-      start = idx + s_len
+  # The characters in every one of *sets*, a set read as the other
+  # library's `Char#in_set?` reads one: `"hello world".count("a-z")` is 10
+  # and `"hello".count("^l")` is 3. This counted *sets* as a substring, so
+  # `"banana".count("an")` was 2 here and 5 there, and a range or a `^`
+  # was text: `count("a-z")` was 0, and `delete` and `squeeze` took the
+  # set as a list of the characters written.
+  def count(*sets : String) : Int32
+    compiled = compiled_sets(sets)
+    total = 0
+    each_char { |c| total = total + 1 if in_sets?(c.ord, compiled) }
+    total
+  end
+
+  private def compiled_sets(sets : Tuple) : Array(Array(Int32))
+    compiled = Array(Array(Int32)).new(sets.size)
+    i = 0
+    while i < sets.size
+      compiled << set_runs(sets[i])
+      i = i + 1
     end
-    c
+    compiled
+  end
+
+  # A set compiled once, as runs of code points `low, high, answer` in the
+  # order the set names them, and last the answer for a character in none.
+  # The reading is the other library's: a `^` first negates the set, `a-z`
+  # is a run and one that runs backwards a mistake, a `-` first or last is
+  # itself, and a `\` makes the `^` or `-` after it itself. That reader
+  # answers at the first spelling a character matches, which is why the
+  # order is kept: `"^-a"` is the run `^-a`, not a negation.
+  private def set_runs(set : String) : Array(Int32)
+    runs = [] of Int32
+    kept = 1
+    ranging = false
+    previous = -1
+    set.each_char do |char|
+      point = char.ord
+      if point == 94 && previous < 0
+        kept = 0
+        previous = point
+        next
+      end
+      if point == 45
+        if previous >= 0 && previous != 92
+          ranging = true
+          kept = 1 if previous == 94
+          next
+        end
+        runs << point << point << kept
+      end
+      if ranging
+        raise "text: set range #{previous.unsafe_chr}-#{char} runs backwards" if previous > point
+        runs << previous << point << kept
+        ranging = false
+      elsif point != 92
+        runs << point << point << kept
+      end
+      previous = point
+    end
+    runs << 45 << 45 << kept if ranging
+    runs << 92 << 92 << kept if previous == 92
+    runs << 1 - kept
+    runs
+  end
+
+  # Whether *point* is in every compiled set: the first run holding it
+  # answers for its set, and the set's last entry answers otherwise.
+  private def in_sets?(point : Int32, compiled : Array(Array(Int32))) : Bool
+    s = 0
+    while s < compiled.size
+      runs = compiled[s]
+      last = runs.size - 1
+      answer = runs[last]
+      i = 0
+      while i < last
+        if runs[i] <= point && point <= runs[i + 1]
+          answer = runs[i + 2]
+          break
+        end
+        i = i + 3
+      end
+      return false if answer == 0
+      s = s + 1
+    end
+    true
   end
 
   # The width is in characters, because `size` is and because a centred
@@ -869,19 +933,20 @@ class ::String
     to_i?(base) || raise "not a number in base #{base}: #{inspect}"
   end
 
+  # Whitespace before and after the number is not part of it, as the other
+  # library reads one (`Char#whitespace?`, so a no-break space too); inside
+  # it is still refused. `" 42".to_i64?`, `"ff ".to_i?(16)` and a line
+  # read with its `\n` were nil here, and 42 and 255 there.
   def to_i?(base : Int32) : Int32?
     raise "base #{base} out of range (2..36)" if base < 2 || base > 36
-    return nil if empty?
+    index = space_end
+    stop = space_start(index)
+    return nil if index == stop
 
-    index = 0
-    negative = false
-    if self[0] == '-'
-      return nil if bytesize == 1
-      negative = true
-      index = 1
-    elsif self[0] == '+'
-      return nil if bytesize == 1
-      index = 1
+    negative = to_unsafe[index] == 45_u8
+    if negative || to_unsafe[index] == 43_u8
+      return nil if index + 1 == stop
+      index = index + 1
     end
 
     # Accumulated as a negative magnitude, because that is the range that
@@ -895,7 +960,7 @@ class ::String
     cutoff = 0 - (limit - bound * base)
 
     value = 0
-    while index < bytesize
+    while index < stop
       b = to_unsafe[index]
       digit = -1
       if b >= 48_u8 && b <= 57_u8
@@ -935,12 +1000,13 @@ class ::String
 
   def to_u64?(base : Int32) : UInt64?
     raise "base #{base} out of range (2..36)" if base < 2 || base > 36
-    return nil if empty?
-    index = to_unsafe[0] == 43_u8 ? 1 : 0
-    return nil if index == bytesize
+    index = space_end
+    stop = space_start(index)
+    index = index + 1 if index < stop && to_unsafe[index] == 43_u8
+    return nil if index == stop
     radix = base.to_u64
     value = 0_u64
-    while index < bytesize
+    while index < stop
       b = to_unsafe[index]
       digit = if b >= 48_u8 && b <= 57_u8
                 (b - 48_u8).to_u64
@@ -985,17 +1051,14 @@ class ::String
 
   def to_i64?(base : Int32) : Int64?
     raise "base #{base} out of range (2..36)" if base < 2 || base > 36
-    return nil if empty?
+    index = space_end
+    stop = space_start(index)
+    return nil if index == stop
 
-    index = 0
-    negative = false
-    if self[0] == '-'
-      return nil if bytesize == 1
-      negative = true
-      index = 1
-    elsif self[0] == '+'
-      return nil if bytesize == 1
-      index = 1
+    negative = to_unsafe[index] == 45_u8
+    if negative || to_unsafe[index] == 43_u8
+      return nil if index + 1 == stop
+      index = index + 1
     end
 
     # The same negative accumulation, for the type whose own `MIN` a program
@@ -1006,7 +1069,7 @@ class ::String
     cutoff = 0_i64 - (limit - bound * radix)
 
     value = 0_i64
-    while index < bytesize
+    while index < stop
       b = to_unsafe[index]
       digit = -1_i64
       if b >= 48_u8 && b <= 57_u8
@@ -1029,37 +1092,50 @@ class ::String
     0_i64 - value
   end
 
+  # The other library's reading, whitespace around it aside: a sign, then
+  # `inf`, `infinity` or `nan` in any case (a `nan` may close with a `(...)`
+  # of letters, digits and `_`), or decimal digits. Text whose value leaves
+  # the range is nil, as that reader's ERANGE makes it: nonzero digits that
+  # round to zero, or digits that round past the largest double. Here
+  # `"1e400".to_f?` was Infinity, `"1e-400".to_f?` 0.0, and only `Infinity`
+  # and `NaN` spelled so were words: `"inf".to_f?` was nil.
   def to_f? : Float64?
-    return nil if empty?
-    # `to_f` reads a sign before either word, NaN's too: "-NaN" and "+NaN"
-    # were NaN there and nil here.
-    return to_f if self == "NaN" || self == "-NaN" || self == "+NaN" || self == "Infinity" || self == "-Infinity" || self == "+Infinity"
-
     bytes = to_unsafe
-    size = bytesize
-    at = 0
-    if bytes[0] == 45_u8 || bytes[0] == 43_u8
-      at = 1
+    first = space_end
+    stop = space_start(first)
+    at = first
+    negative = at < stop && bytes[at] == 45_u8
+    at = at + 1 if negative || (at < stop && bytes[at] == 43_u8)
+    return nil if at >= stop
+
+    if word_at?(at, stop, "nan")
+      return nil unless at + 3 == stop || nan_payload?(at + 3, stop)
+      return 0.0 / 0.0
     end
-    return nil if at >= size
+    if word_at?(at, stop, "inf")
+      return nil unless at + 3 == stop || (at + 8 == stop && word_at?(at + 3, stop, "inity"))
+      return negative ? -1.0 / 0.0 : 1.0 / 0.0
+    end
 
     seen_point = false
     any_digit = false
+    nonzero = false
 
-    while at < size
+    while at < stop
       b = bytes[at]
       if b >= 48_u8 && b <= 57_u8
         any_digit = true
+        nonzero = true if b != 48_u8
       elsif b == 46_u8 && !seen_point
         seen_point = true
       elsif (b == 101_u8 || b == 69_u8) && any_digit
         at = at + 1
-        return nil if at >= size
+        return nil if at >= stop
         if bytes[at] == 45_u8 || bytes[at] == 43_u8
           at = at + 1
         end
-        return nil if at >= size
-        while at < size
+        return nil if at >= stop
+        while at < stop
           eb = bytes[at]
           return nil if eb < 48_u8 || eb > 57_u8
           at = at + 1
@@ -1072,7 +1148,34 @@ class ::String
     end
 
     return nil unless any_digit
-    to_f
+    value = IyiFloatText.parse(first == 0 && stop == bytesize ? self : byte_slice(first, stop - first))
+    return nil if nonzero && value == 0.0
+    return nil if value * 0.0 != 0.0
+    value
+  end
+
+  # Whether the bytes at *at* spell *word*, which is lower-case, in any case.
+  private def word_at?(at : Int32, stop : Int32, word : String) : Bool
+    return false if at + word.bytesize > stop
+    i = 0
+    while i < word.bytesize
+      return false unless (to_unsafe[at + i] | 0x20_u8) == word.to_unsafe[i]
+      i = i + 1
+    end
+    true
+  end
+
+  # A `(...)` of letters, digits and `_` running to *stop*.
+  private def nan_payload?(at : Int32, stop : Int32) : Bool
+    return false unless stop - at >= 2 && to_unsafe[at] == 40_u8 && to_unsafe[stop - 1] == 41_u8
+    i = at + 1
+    while i < stop - 1
+      b = to_unsafe[i]
+      letter = (b | 0x20_u8) >= 97_u8 && (b | 0x20_u8) <= 122_u8
+      return false unless letter || (b >= 48_u8 && b <= 57_u8) || b == 95_u8
+      i = i + 1
+    end
+    true
   end
 
   # The characters in reverse, found from the back by `each_char`'s rule,

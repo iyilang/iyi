@@ -193,7 +193,8 @@ module Iyi
       type = lookup_scope.lookup_type_var(node,
         free_vars: free_vars,
         find_root_generic_type_parameters: find_root_generic_type_parameters,
-        remove_alias: false)
+        remove_alias: false,
+        self_type: (@scope || lookup_scope).instance_type)
 
       case type
       when Const
@@ -1100,6 +1101,8 @@ module Iyi
       var = lookup_class_var(target)
       target.var = var
       var.thread_local = true if thread_local
+      # iyi: a write after the initializer, for the thread gate.
+      var.iyi_written ||= {node.as(ASTNode), @typed_def}
 
       if casted_value = check_automatic_cast(value, var.type, node)
         value = casted_value
@@ -2075,6 +2078,10 @@ module Iyi
 
       node.exp.try &.accept self
 
+      if typed_def.name == "initialize" || typed_def.name.starts_with?("initialize:")
+        iyi_check_initialize_exit(node)
+      end
+
       node.target = typed_def
 
       typed_def.bind_to(node_exp_or_nil_literal(node))
@@ -2084,6 +2091,41 @@ module Iyi
       node.type = @program.no_return
 
       false
+    end
+
+    # iyi: `new` answers the object whatever its `initialize` returns, so a
+    # `!` there dropped the error, and either a `!` or a `return` left every
+    # field it had not reached yet unassigned: `C.new("x")` with `@v =
+    # parse(s)!` answered a `C` whose `v` read 0 and whose `name.size` was a
+    # memory fault (SPEC.md III.1.2 has the error go to the caller, and here
+    # there is none). A `return` after every field is set is still an early
+    # exit, and `std/regex`'s `RxRuns` keeps one.
+    private def iyi_check_initialize_exit(node : Return)
+      if node.from_propagate?
+        error = node.exp.try(&.type?) || "E"
+        node.raise <<-MSG
+          `!` can't propagate out of `initialize`
+
+          `new` answers the object whatever `initialize` returns, so the #{error} would be dropped and the object built with the fields not assigned yet left uninitialized. Decide before building: write a constructor `def self.build(...) : #{scope} | #{error}` that propagates with `!` and then calls `new` with values that cannot fail — see SPEC.md III.1.2.
+          MSG
+      end
+
+      return unless node.location.try(&.original_filename.try(&.ends_with?(".iyi")))
+
+      unassigned = scope.all_instance_vars.compact_map do |name, ivar|
+        next if scope.has_instance_var_initializer?(name)
+        next if (var = @vars[name]?) && !var.nil_if_read?
+        type = ivar.type?
+        next if !type || type.includes_type?(@program.nil)
+        name
+      end
+      return if unassigned.empty?
+
+      node.raise <<-MSG
+        `return` can't leave `initialize` before #{unassigned.join(", ")} #{unassigned.size == 1 ? "is" : "are"} assigned
+
+        `new` answers the object whatever `initialize` returns, so the object would be built with #{unassigned.size == 1 ? "that field" : "those fields"} uninitialized. Assign #{unassigned.size == 1 ? "it" : "them"} first, or decide before building with a constructor `def self.build(...) : #{scope} | E` that calls `new` only once it can — see SPEC.md III.1.2.
+        MSG
     end
 
     def end_visit(node : Splat)
@@ -2127,7 +2169,17 @@ module Iyi
       if errors.empty?
         verb = construct == "!" ? "propagate" : "recover"
         section = construct == "!" ? "III.1" : "III.1.3"
-        node.raise "`#{construct}` has no error to #{verb}: no member of #{type} implements `Error`. `#{construct}` is for a union with an error member — see SPEC.md #{section}"
+        message = "`#{construct}` has no error to #{verb}: no member of #{type} implements `Error`. `#{construct}` is for a union with an error member — see SPEC.md #{section}"
+        # `xs.uniq!`, `s.upcase!`: the other library's in-place spelling of
+        # a method whose plain name is here, so the `!` reached this rule
+        # and the naming rule `sort!` and `map!` are told was never said.
+        if construct == "!" && (bang = node.iyi_bang_call)
+          name, receiver = bang
+          in_place = "#{name}_in_place"
+          instead = type.has_def?(in_place) ? "call `#{receiver}.#{in_place}`, which changes it" : "reassign the copy, `#{receiver} = #{receiver}.#{name}`"
+          message += "\n`#{name}!` is the other library's in-place spelling, and `!` cannot end a name here (SPEC.md III.1.7a): #{instead}"
+        end
+        node.raise message
       end
 
       # iyi: `!` hands the error to the caller, so the enclosing signature has
@@ -2136,7 +2188,11 @@ module Iyi
       # which is true and says nothing about the operator that put it there or
       # about the two ways out.
       if construct == "!" && (enclosing = @typed_def) && (restriction = enclosing.return_type)
-        declared = begin
+        # The annotation as the call resolved it (`Call#check_return_type`).
+        # Looked up again from here, the one on a def inside `module
+        # wrongerr` never reached the check below, and the mistake still got
+        # the sentence this replaces.
+        declared = enclosing.freeze_type || begin
           current_type.lookup_type?(restriction, allow_typeof: false)
         rescue
           nil
@@ -2150,6 +2206,21 @@ module Iyi
                        "#{declared}, which has no error member. Give it one " \
                        "(`#{declared} | #{errors.first}`), or handle the error here " \
                        "with `case` — see SPEC.md III.1"
+          end
+
+          # iyi: and somewhere for *this* error. One the signature does not
+          # list was reported by the other library at the signature, "method
+          # ::g must return (Int32 | ParseErr) but it is returning IOErr", with
+          # nothing pointing at the `!`. The test is the one that sentence
+          # comes from, member by member.
+          missing = errors.reject(&.implements?(declared))
+          unless missing.empty?
+            node.raise "`!` propagates #{missing.map(&.to_s).join(" or ")} out of " \
+                       "`#{enclosing.name}`, and `#{enclosing.name}` returns " \
+                       "#{declared}, which does not include #{missing.size == 1 ? "it" : "them"}. " \
+                       "There is no implicit conversion: add #{missing.size == 1 ? "it" : "them"} " \
+                       "to the signature (an alias keeps a long one short), or handle " \
+                       "the error here with `case` — see SPEC.md III.1.2 and III.1.6"
           end
         end
       end
@@ -3026,7 +3097,10 @@ module Iyi
       when InstanceVar
         lookup_instance_var exp
       when ClassVar
-        visit_class_var exp
+        # iyi: the pointer can write it, as an assignment does.
+        var = visit_class_var exp
+        var.iyi_written ||= {node.as(ASTNode), @typed_def}
+        var
       when Global
         node.raise "BUG: there should be no use of global variables other than $~ and $?"
       when Path
@@ -3280,14 +3354,18 @@ module Iyi
       # sentence rather than a silent nothing. `.cr` sources keep theirs,
       # and so does the handler `defer` itself lowers to, which is the
       # registry's pop and carries the flag that says so.
+      #
+      # Said at the keyword: a def's or a block's handler starts where its
+      # body does, and `def foo ... rescue` was reported at `raise "x"`.
       if @program.iyi_prelude? && !node.iyi_defer? && node.location.try(&.original_filename.try(&.ends_with?(".iyi")))
         if node.rescues || node.else
-          node.raise "iyi has no exceptions to rescue: an error is a value the caller handles (SPEC.md III.1), " \
-                     "and a panic is caught at a task boundary (III.1.4), never here - this `rescue` would not run. " \
-                     "Return the error, or read the task's `value`"
-        elsif node.ensure
-          node.raise "iyi has no `ensure`: a panic unwinds by registry and skips it (SPEC.md III.1.4). " \
-                     "Write `defer`, which runs on return, on `!` and on a panic"
+          (node.rescues.try(&.first) || node).raise "iyi has no exceptions to rescue: an error is a value the caller handles (SPEC.md III.1), " \
+                                                    "and a panic is caught at a task boundary (III.1.4), never here - this `rescue` would not run. " \
+                                                    "Return the error, or read the task's `value`"
+        elsif node.ensure && (at = node.ensure_location || node.location)
+          ::raise TypeException.new("iyi has no `ensure`: a panic unwinds by registry and skips it (SPEC.md III.1.4). " \
+                                    "Write `defer`, which runs on return, on `!` and on a panic",
+            at.line_number, at.column_number, at.filename, "ensure".size)
         end
       end
 

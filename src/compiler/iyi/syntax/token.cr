@@ -391,6 +391,7 @@ module Iyi
       @delimiter_state = other.delimiter_state
       @macro_state = other.macro_state
       @doc_buffer = other.doc_buffer
+      @start = other.start
     end
 
     def to_s(io : IO) : Nil

@@ -102,12 +102,20 @@ fi
 ./app/app | grep -q 'v1.1.0' || { echo "cache-built program answered differently"; exit 1; }
 
 # ── 3. Failure proof: a package import needs a manifest ──────────────────
+# The require line it names is the repository's: the whole path first, for
+# the package's root module. It used to drop the last segment and answer
+# `require example.test/user v1.2.3`, the organisation.
 step "failure proof: a dotted import without iyi.mod names the manifest"
 mkdir -p bare
 printf 'import example.test/user/liba\nputs 1\n' > bare/main.iyi
 (cd bare && "$IYI" build main.iyi -o bare) > bare.log 2>&1
 if [ $? -eq 0 ] || ! grep -q 'iyi.mod' bare.log; then
   echo "the refusal did not name the manifest:"
+  tail -6 bare.log
+  exit 1
+fi
+if ! grep -qF 'as `require example.test/user/liba v1.2.3`' bare.log; then
+  echo "the refusal did not name the repository's require line:"
   tail -6 bare.log
   exit 1
 fi
@@ -417,6 +425,13 @@ step "iyi doc prints a prelude type's surface"
 grep -q '^class String' prelude-doc.txt || { echo "the type header is missing:"; head -5 prelude-doc.txt; exit 1; }
 grep -q '  def to_i : Int32' prelude-doc.txt || { echo "a method is missing:"; cat prelude-doc.txt; exit 1; }
 grep -q '  def size : Int32' prelude-doc.txt || { echo "size is missing"; exit 1; }
+# A generic type's header carries its parameters once, as it is declared:
+# the list was printed after a name that already held it, `class
+# Array(T)(T)` and `tuple Tuple(*T)(T) < Value`.
+"$IYI" doc Array > array-doc.txt 2>&1 || { cat array-doc.txt; exit 1; }
+grep -qx 'class Array(T)' array-doc.txt || { echo "Array's header is not \`class Array(T)\`:"; grep -m1 '^class' array-doc.txt; exit 1; }
+"$IYI" doc Tuple > tuple-doc.txt 2>&1 || { cat tuple-doc.txt; exit 1; }
+grep -qx 'tuple Tuple(\*T) < Value' tuple-doc.txt || { echo "Tuple's header is not \`tuple Tuple(*T) < Value\`:"; grep -m1 '^tuple' tuple-doc.txt; exit 1; }
 # A method, as the Int32 check below reads it: the doc carries the type's
 # comments too, and the word in `String.new`'s ("the byte was allocated
 # for that") failed the old `grep allocate` with no method in sight.
@@ -441,6 +456,12 @@ grep -q 'the prelude has no type Nope' nope.txt || { echo "the unknown type was 
 grep -q '^class String' index.txt || { echo "the index lacks String:"; cat index.txt; exit 1; }
 grep -q '^class Hash(K, V)' index.txt || { echo "the index lacks Hash(K, V):"; cat index.txt; exit 1; }
 grep -q 'Regex\|Int128\|IyiHeap' index.txt && { echo "the index lists what the prelude does not offer:"; cat index.txt; exit 1; }
+# An alias is its target's other name, and documents as the target does:
+# `iyi doc IO` printed `alias IO` and `end`, with neither `IyiIO` nor one
+# thing an IO can do.
+"$IYI" doc IO > io-doc.txt 2>&1 || { cat io-doc.txt; exit 1; }
+grep -qx 'alias IO = IyiIO' io-doc.txt || { echo "IO's target is not named:"; cat io-doc.txt; exit 1; }
+grep -q '^  def flush' io-doc.txt || { echo "IO's surface is missing:"; cat io-doc.txt; exit 1; }
 
 # ── 10b. `iyi doc app/greeter`: the spelling the language is built on ─────
 # A module's path *is* its file's path (R-1, IV.6), and it is what
@@ -455,9 +476,31 @@ diff -u doc.txt modpath-doc.txt > modpath-diff.txt 2>&1 || {
   head -10 modpath-diff.txt
   exit 1
 }
+# A subject spelled as a module path and found nowhere is a missing module,
+# named, with where it was looked for: it was told to give "a module path
+# (`iyi doc app/greeter`)", which is what it had given.
 "$IYI" doc docs/nosuch > missing-mod.txt 2>&1 && { echo "a module that is not there was documented"; exit 1; }
-grep -q 'expected a module path' missing-mod.txt || {
-  echo "the refusal does not name the module-path form:"; cat missing-mod.txt; exit 1; }
+grep -q "can't find module 'docs/nosuch'. .*docs/nosuch.iyi.* looked for under" missing-mod.txt || {
+  echo "the refusal does not name the missing module:"; cat missing-mod.txt; exit 1; }
+# And one subject a run: `iyi doc docs/docd extra junk` printed docd's
+# surface at exit 0 and dropped the rest without a word.
+"$IYI" doc docs/docd extra junk > extra-doc.txt 2>&1 && { echo "a second subject was dropped, exit 0"; exit 1; }
+grep -q "'extra' is a second" extra-doc.txt || {
+  echo "the second subject is not named:"; cat extra-doc.txt; exit 1; }
+# A module whose source is not there and whose artifact is, in the
+# workspace's `mods`, documents from the artifact, as every other verb
+# reads it: with only `mods/app/twice.iyimod`, `iyi doc app/twice` was told
+# to give "a module path".
+mkdir -p docmods/app
+printf 'module app/twice\n\n# Doubles it.\npub def twice(n : Int32) : Int32\n  n * 2\nend\n' > docmods/app/twice.iyi
+printf 'import app/twice\n' > docmods/main.iyi
+(cd docmods && "$IYI" doc app/twice) > twice-doc.txt 2>&1 || { cat twice-doc.txt; exit 1; }
+(cd docmods && "$IYI" build --no-codegen --emit-iyimod mods main.iyi) > emit-mods.txt 2>&1 || { cat emit-mods.txt; exit 1; }
+rm docmods/app/twice.iyi
+(cd docmods && "$IYI" doc app/twice) > mods-doc.txt 2>&1 || {
+  echo "the module in mods was not documented:"; cat mods-doc.txt; exit 1; }
+diff -u twice-doc.txt mods-doc.txt > mods-diff.txt 2>&1 || {
+  echo "the artifact in mods and the source answered differently:"; head -10 mods-diff.txt; exit 1; }
 
 echo "workdir $WORK"
 echo "packages gate: every step held"

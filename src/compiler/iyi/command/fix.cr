@@ -273,8 +273,11 @@ class Iyi::Command
       end
       STDOUT.puts
     else
+      # In backticks, as the messages write code: in single quotes the Char
+      # an edit writes was quoted again, `'" "' -> '' ''`, which reads as
+      # two empty strings.
       applied.each do |(line, column, from, to)|
-        puts "fixed #{file}:#{line}:#{column}: '#{from}' -> '#{to}'"
+        puts "fixed #{file}:#{line}:#{column}: `#{from}` -> `#{to}`"
       end
       if remaining
         STDERR.puts "#{file}:#{remaining.line}:#{remaining.column}: #{remaining.message}"

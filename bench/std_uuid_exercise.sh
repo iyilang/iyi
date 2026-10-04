@@ -140,6 +140,37 @@ PY
 fi
 
 echo
+echo "== proving the value check can fail when the bytes are shared again"
+# Held as the caller's array, a UUID changed with the buffer it was made from.
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3, so the broken copy could not be made"
+else
+  rm -rf "$WORK/patched"
+  mkdir -p "$WORK/patched/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/uuid.iyi").read_text()
+old = '@bytes = bytes.dup'
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not unique")
+Path("$WORK/patched/std/uuid.iyi").write_text(src.replace(old, '@bytes = bytes', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_uuid_exercise.iyi" >"$WORK/mut-value.out" 2>&1; then
+    echo "  the exercise PASSED with the caller's array kept"
+    status=1
+  elif grep -qF "a UUID keeps its bytes when the buffer it was made from is reused" "$WORK/mut-value.out"; then
+    echo "  a UUID sharing its caller's array is caught"
+  else
+    echo "  the broken copy failed somewhere other than the value check"
+    sed -n '1,5p' "$WORK/mut-value.out"
+    status=1
+  fi
+fi
+
+echo
 echo "== what parse refuses"
 # A hyphen anywhere but 8, 13, 18 and 23 of the 36: every `-` was taken
 # out wherever it stood, and these were read as UUIDs. A probe program per

@@ -560,12 +560,30 @@ module Iyi
       IyiLLVMBuilder.new builder, llvm_typer, c_printf_fun
     end
 
+    # iyi: whether this build may make what its main module defines private
+    # to it, which a single module (`--release`) does with every type id,
+    # constant, class variable and runtime `fun`.
+    #
+    # Not when an artifact's object code links in beside it (SPEC.md IV.1g).
+    # That code is the units of a build with many modules, and a unit reaches
+    # all of these by name in the main module: `x + 1` calls
+    # `__iyi_raise_overflow`, a class's `new` reads `X:type_id` and
+    # `X:headed`, `group` reads `IyiScheduler`'s class variables. Internal,
+    # they were invisible to it, and `--release --use-iyimod` linked no module
+    # that did any of that: `unresolved external symbol __iyi_raise_overflow`
+    # for a module of one `x + 1`, 126 symbols for one that used `group`. They
+    # keep the linkage a build of many modules gives them, which is what every
+    # consumer without `--release` already links against.
+    def iyi_internalise? : Bool
+      @single_module && @program.iyi_artifact_objects.empty?
+    end
+
     def define_symbol_table(llvm_mod, llvm_typer)
       llvm_mod.globals[SYMBOL_TABLE_NAME]? || begin
         global = llvm_mod.globals.add llvm_typer.llvm_type(@program.string).array(@symbol_table_values.size), SYMBOL_TABLE_NAME
         if llvm_mod != @main_mod
           global.linkage = LLVM::Linkage::External
-        elsif @single_module
+        elsif iyi_internalise?
           global.linkage = LLVM::Linkage::Internal
         end
         global.global_constant = true
@@ -578,7 +596,7 @@ module Iyi
       global = @llvm_mod.globals.add(initializer.type, info.name)
       if @llvm_mod != @main_mod
         global.linkage = LLVM::Linkage::External
-      elsif @single_module
+      elsif iyi_internalise?
         global.linkage = LLVM::Linkage::Internal
       end
       global.global_constant = true
@@ -687,6 +705,7 @@ module Iyi
         iyi_define_all_symbol_values
         iyi_define_all_match_funs
         iyi_define_all_artifact_const_reads
+        iyi_define_msvc_catch_globals if @program.has_flag?("msvc")
       end
 
       # iyi: the mark loop runs inside the built program, so the pointer
@@ -1246,6 +1265,7 @@ module Iyi
       set_ensure_exception_handler(node)
 
       with_cloned_context do
+        context.repeats = true
         cond = node.cond.single_expression
         endless_while = cond.true_literal?
 
@@ -1893,7 +1913,7 @@ module Iyi
       global = @main_mod.globals[map_name]?
       unless global
         global = @main_mod.globals.add(@main_llvm_typer.llvm_type(@program.string).array(@program.llvm_id.@ids.size), map_name)
-        global.linkage = LLVM::Linkage::Internal if @single_module
+        global.linkage = LLVM::Linkage::Internal if iyi_internalise?
         global.initializer = create_type_id_to_class_name_map
         global.global_constant = true
       end
@@ -2254,7 +2274,7 @@ module Iyi
       func = add_typed_fun(@main_mod, name, type)
       context.fun = func.func
       context.fun_type = type
-      context.fun.linkage = LLVM::Linkage::Internal if @single_module
+      context.fun.linkage = LLVM::Linkage::Internal if iyi_internalise?
       if needs_alloca
         new_entry_block
         yield func.func

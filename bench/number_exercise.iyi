@@ -57,6 +57,14 @@ assert_true("99999999999999999999".to_i? == nil, "number: far too large is nil")
 assert_true("12abc".to_i? == nil, "number: trailing letters are nil")
 assert_true("".to_i? == nil, "number: empty is nil")
 assert_true("-".to_i? == nil, "number: a lone sign is nil")
+# Whitespace on either side is not in the way: `to_i?`, `to_i` and `to_f`
+# take `Char#whitespace?` there, as the other library's `whitespace: true`
+# does. A line read with its `\n` still on was nil, and `" 42 ".to_i`
+# panicked. Inside the number, alone, or U+0085 (a control), it is no
+# number still.
+assert_true(" 42".to_i? == 42 && "42\n".to_i? == 42 && "\u00A0-7\u3000".to_i? == -7 && " 42 ".to_i == 42, "number: whitespace around an integer")
+assert_true("4 2".to_i?.nil? && "+ 1".to_i?.nil? && " ".to_i?.nil? && "42\u0085".to_i?.nil?, "number: whitespace inside, alone, or U+0085 is no integer")
+assert_true(" 1.5 ".to_f == 1.5 && "\t2.5e3\n".to_f == 2500.0 && "\u20281e-3".to_f == 0.001, "number: whitespace around a float")
 
 # ---- 3. Division and remainder, which have to agree with each other
 assert_int(7 // 2, 3, "number: division truncates")
@@ -80,33 +88,40 @@ assert_true((-9223372036854775808_i64 % -1_i64) == 0_i64, "number: int64 min rem
 # constant, an enum value, a StaticArray's size and a macro. The compiler
 # folded them with the other library's floored operators, so `-7 // 2` as
 # a constant was -4 beside the -3 of the line above, `-7 % 2` was 1, `7 %
-# -2` was -1, `8 << -1` was 4 and `-8 >> 40` was 0, and a StaticArray sized
-# `-7 % 3 + 3` held 5 elements where the same expression at run time is 2.
-# The compiler folds by the rules of the file the operator is written in
-# (`MathInterpreter.iyi_rules?`): iyi's here, the other library's in its own.
+# -2` was -1 and `-8 >> 40` was 0, and a StaticArray sized `-7 % 3 + 3`
+# held 5 elements where the same expression at run time is 2. The
+# compiler folds by the rules of the file the operator is written in
+# (`MathInterpreter.iyi_rules?`): iyi's here, the other library's in its
+# own. A negative count shifts the other way folded, as it does at run
+# time (section 7): it folded to 0, so `8 << -1` was 0 and `8 >> -1` and
+# `{{ 8 >> -1 }}` were 0 where the line answers 4 and 16.
 FOLDED_DIV     = -7 // 2
 FOLDED_REM     = -7 % 2
 FOLDED_REM_NEG = 7 % -2
 FOLDED_SHL     = 8 << -1
 FOLDED_SHR     = -8 >> 40
+FOLDED_SHR_NEG = 8 >> -1
 FOLDED_SIZE    = -7 % 3 + 3
 
 enum Folded
-  Div = -7 // 2
-  Rem = -7 % 2
-  Shl = 8 << -1
+  Div    = -7 // 2
+  Rem    = -7 % 2
+  Shl    = 8 << -1
+  ShrNeg = 64 >> -2
 end
 
 assert_int(FOLDED_DIV, -3, "number: a constant's // truncates as the line's does")
 assert_int(FOLDED_REM, -1, "number: a constant's % takes the dividend's sign")
 assert_int(FOLDED_REM_NEG, 1, "number: a constant's % ignores the divisor's sign")
-assert_int(FOLDED_SHL, 0, "number: a constant shifted by a negative count is 0")
+assert_int(FOLDED_SHL, 4, "number: a constant shifted left by a negative count shifts right")
+assert_int(FOLDED_SHR_NEG, 16, "number: a constant shifted right by a negative count shifts left")
 assert_int(FOLDED_SHR, -1, "number: a constant shifted right past the width keeps its sign")
-assert_true(Folded::Div.value == -3 && Folded::Rem.value == -1 && Folded::Shl.value == 0,
+assert_true(Folded::Div.value == -3 && Folded::Rem.value == -1 && Folded::Shl.value == 4 && Folded::ShrNeg.value == 256,
   "number: an enum value folds as the line does")
 assert_int(sizeof(StaticArray(Int32, FOLDED_SIZE)), 8, "number: a StaticArray's size folds % as the line does")
 assert_int({{ -7 // 2 }}, -3, "number: a macro's // truncates")
 assert_int({{ -7 % 2 }}, -1, "number: a macro's % takes the dividend's sign")
+assert_int({{ 8 >> -1 }}, 16, "number: a macro shifted by a negative count shifts the other way")
 
 # A shift's width was read off the whole number union the folder holds a
 # value in, 256 bits, so a count from the type's own width up to 255
@@ -189,6 +204,18 @@ assert_int([1.0, nan, 0.5].sorted.size, 3, "number: sorting with nan keeps the c
 # Toward zero, the same direction `//` takes.
 assert_int(2.9.to_i, 2, "number: to_i truncates")
 assert_int((-2.9).to_i, -2, "number: to_i truncates toward zero")
+# A float truncates first, and what is refused is a truncation the type
+# does not hold - the rule std/int and std/float already kept. The
+# prelude's own five checked the untruncated value, so `255.5.to_u8` and
+# `(-0.5).to_u8` panicked while std/int's `255.5.to_u16` was 255. The last
+# doubles under 2^63 and 2^64 are here too; past each is a panic, driven by
+# `bench/number_exercise.sh`.
+truncated = [255.5.to_u8.to_s, 255.99.to_u8.to_s, (-0.5).to_u8.to_s, (-0.99).to_u64.to_s,
+             2147483647.9.to_i.to_s, (-2147483648.9).to_i32.to_s,
+             9223372036854774784.0.to_i64.to_s, (-9223372036854775808.0).to_i64.to_s,
+             18446744073709549568.0.to_u64.to_s]
+assert_str(truncated.join(" "), "255 255 0 0 2147483647 -2147483648 9223372036854774784 -9223372036854775808 18446744073709549568",
+  "number: a float truncates first and is refused only past the type")
 assert_true((-0.0).abs.to_s == "0.0" && (-2.5).abs == 2.5, "number: abs clears the sign of a zero too")
 assert_true((-1.5).floor == -2.0, "number: floor goes down")
 assert_true((-1.5).ceil == -1.0, "number: ceil goes up")
@@ -292,5 +319,28 @@ assert_true((-8 >> -1) == -16 && (-8 >> 40) == -1 && (8 << 32) == 0, "number: a 
 assert_int(233.chr.ord, 233, "number: chr reads a code point past ASCII")
 assert_str('é'.ord.chr.to_s, "é", "number: ord and chr round trip")
 assert_int(0x10FFFF.chr.ord, 0x10FFFF, "number: chr reads the last code point")
+
+# ---- 8. A whole power, rounded once
+#
+# `**` squared in plain doubles, every step rounded: 392 of `1.1 ** i` for
+# 1..400 were not the nearest double, `1.1 ** 100` was 13780.612339822364
+# and `0.9999999 ** 10000000` was 854,604 ulp out. Each digest is FNV-1a
+# over the bits of every power in its sweep, the same fold Python makes
+# over `float(Fraction(base) ** i)`, which is correctly rounded; the
+# spot values are Python's, the last two from `decimal` at 80 digits.
+def power_digest(base : Float64, from : Int32, to : Int32) : UInt64
+  digest = 0xCBF29CE484222325_u64
+  (from..to).each { |i| digest = (digest ^ IyiFloatText.bits_of(base ** i)) &* 0x100000001B3_u64 }
+  digest
+end
+
+assert_true(power_digest(1.1, -400, 400) == 0x80D4C132DD1D11BA_u64, "number: 1.1 ** -400..400 each rounded once")
+assert_true(power_digest(0.7, -300, 300) == 0xAA2E0DC0C0D687ED_u64, "number: 0.7 ** -300..300 each rounded once")
+assert_true(power_digest(10.0, -330, 319) == 0xC597CD85B0DE1BE1_u64, "number: 10.0 ** -330..319 each rounded once, to the subnormals and past the top")
+assert_str((1.1 ** 100).to_s, "13780.61233982238", "number: 1.1 ** 100")
+assert_str((0.7 ** 23).to_s, "0.0002736874734008088", "number: 0.7 ** 23")
+assert_str((10.0 ** 100).to_s, "1.0e+100", "number: 10.0 ** 100")
+assert_str((1.0000001 ** 1000000).to_s, "1.1051709126143208", "number: 1.0000001 ** 1000000")
+assert_str((0.9999999 ** 10000000).to_s, "0.367879422971105", "number: 0.9999999 ** 10000000")
 
 puts "all number checks passed"

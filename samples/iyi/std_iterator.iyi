@@ -10,7 +10,7 @@ module samples/std_iterator
 
 import std/traits::{Comparable, Num}
 
-import std/iterator::{Iterator, ArrayIterator}
+import std/iterator::{Iterator, ArrayIterator, Stop}
 
 # An infinite sequence generator. Eagerly evaluating this would hang or OOM;
 # lazily evaluating it pulls only what the pipeline asks for.
@@ -26,7 +26,7 @@ end
 impl Iterator for NaturalNumbers
   type Elem = Int32
 
-  def next : Int32?
+  def next : Int32 | Stop
     @pulls = @pulls + 1
     val = @current
     @current = @current + 1

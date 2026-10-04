@@ -151,6 +151,8 @@ mutate "only the whole alphanumeric run looked up" \
   '              n = n - 1 if cp < 0' '              n = 1 if cp < 0' 'the longest name that is an entity'
 mutate "escape to an IO drops the bytes after the last reference" \
   '    io.write(raw + run_start, len - run_start) if len > run_start' '    nil' 'escape to an IO'
+mutate "every name read without its ;" \
+  'if cp >= 0 && !legacy_name?(cp) &&' 'if cp >= 0 && false &&' 'only a legacy name goes without its'
 
 echo
 if [ "$status" -eq 0 ]; then

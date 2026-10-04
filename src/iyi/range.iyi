@@ -1,14 +1,10 @@
 # Ranges — SPEC.md, "0.1.0", item 3.
 #
-# `1..10` is not syntax the prelude can decline: the compiler expands a range
-# literal to `Range.new(from, to, exclusive)` (literal_expander.cr), and the
-# type itself is predefined so the compiler can refer to it. What was missing
-# was every method on it, so `(1..10).each` answered "wrong number of arguments
-# for 'Range(B, E).new' (given 3, expected 0)" — a message about a constructor
-# nobody wrote, for the second loop anybody writes.
-#
-# There is no `Enumerable` on it, no `step`, no reverse iteration: a range
-# in this prelude counts up by one and stops.
+# The compiler expands a range literal to `Range.new(from, to, exclusive)`
+# (literal_expander.cr) and predefines the type to refer to it; with no
+# methods, `(1..10).each` was refused with "wrong number of arguments for
+# 'Range(B, E).new'", a constructor nobody wrote. A range here counts up by
+# one and stops: no `Enumerable`, no `step`, no reverse iteration.
 struct Range(B, E)
   getter begin : B
   getter end : E
@@ -82,5 +78,11 @@ struct Range(B, E)
   def hash : Int32
     value = (@begin.hash &* 31) &+ @end.hash
     @exclusive ? (value &* 31) &+ 1 : value &* 31
+  end
+
+  # `1..5` and `1...3`, each end inspected and a nil one left out, as the
+  # other library writes one; `Object#to_s` printed `Range(Int32, Int32)`.
+  def to_s : String
+    (@begin.nil? ? "" : @begin.inspect) + (@exclusive ? "..." : "..") + (@end.nil? ? "" : @end.inspect)
   end
 end

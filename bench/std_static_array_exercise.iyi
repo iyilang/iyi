@@ -48,6 +48,16 @@ into << " "
 StaticArray(Int32, 2).new { |i| i + 1 }.inspect(into)
 assert_str "StaticArray[\"a\", \"b\"] StaticArray[1, 2]", into.to_s, "to_s and inspect into an IO"
 puts "  10,000 elements as to_a.to_s writes them, within the bound"
+# Into an IO, the same text: each element was asked for `inspect(io)`,
+# which no prelude type has, so neither of these compiled.
+import std/io::{Memory}
+
+written = Memory.new
+StaticArray(Int32, 3).new { |i| i + 1 }.to_s(written)
+written.write(" ")
+StaticArray(String, 2).new { |i| i == 0 ? "a" : "b" }.inspect(written)
+assert_str "StaticArray[1, 2, 3] StaticArray[\"a\", \"b\"]", written.to_s, "to_s(io) and inspect(io)"
+puts "  to_s(io) and inspect(io) write what to_s answers"
 
 puts "\n== compare"
 # `<=>` forwarded to a `Slice#<=>` that does not exist, so this section did
@@ -72,6 +82,19 @@ f = StaticArray(Int32, 4).new(0)
 f.fill(7, 1, 2147483647)
 assert_str "StaticArray[0, 7, 7, 7]", f.to_s, "fill with a count to the top of Int32"
 puts "  a huge count runs to the end"
+
+# A negative count and a start past the end are refused, as the other
+# library refuses them: a return for any count of zero or less came first,
+# and both answered the array untouched without a word. A refusal is a
+# panic, so the shell runs these two in a process of their own.
+case Program.args[0]?
+when "probe_fill_negative_count"
+  f.fill(7, 0, -1)
+  puts "  fill(7, 0, -1) was not refused"
+when "probe_fill_start_past_end"
+  f.fill(7, 9, 0)
+  puts "  fill(7, 9, 0) of four was not refused"
+end
 
 puts "\n== index past Int32"
 # Counted in Int64 by `index_within` and narrowed after: narrowed first,

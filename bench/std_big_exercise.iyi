@@ -572,6 +572,68 @@ parse_ms = (huge_parsed - huge_printed) // 1000000
 raise "base: printing a long value costs what parsing it does" unless print_ms < parse_ms * 4
 puts "    long print: 3 ** 600000 prints in under four times its parse"
 
+# A long divisor and a long quotient divide by the recursion `to_s` splits
+# with, on the magnitudes, the signs given after; everything else by long
+# division, which costs the product of the two lengths, as `//`, `%` and
+# `divmod` all did. Each answer is checked as what truncating division is
+# - `a == q * b + r`, `r` shorter than `b` and of `a`'s sign - for every
+# pair of signs, either side of the divisor's 65,536 bits and the
+# quotient's 16,384 where it switches, a divisor of all ones and a power of
+# two, and a value many times its divisor's length.
+def exact_bits(bits : Int32, seed : UInt64) : BigInt
+  s = seed
+  low = String.build do |io|
+    io << "0"
+    ((bits - 1) // 4).times do
+      s = s &* 6364136223846793005_u64 &+ 1442695040888963407_u64
+      io << "0123456789abcdef"[(s >> 60).to_i32]
+    end
+  end
+  (BigInt.one << (bits - 1)) + BigInt.new(low, 16)
+end
+
+divisions = [
+  {exact_bits(65536 + 16384, 1_u64), exact_bits(65536, 2_u64)},
+  {exact_bits(65536 + 16385, 3_u64), exact_bits(65536, 4_u64)},
+  {exact_bits(65537 + 16384, 5_u64), exact_bits(65537, 6_u64)},
+  {exact_bits(65537 + 16386, 7_u64), exact_bits(65537, 8_u64)},
+  {exact_bits(98304 + 40000, 9_u64), exact_bits(98304, 10_u64)},
+  {exact_bits(70000 * 5, 11_u64), exact_bits(70000, 12_u64)},
+  {(BigInt.one << 180000) - BigInt.one, (BigInt.one << 70001) - BigInt.one},
+  {exact_bits(180000, 13_u64), BigInt.one << 70000},
+]
+divisions.each do |pair|
+  [{1, 1}, {1, -1}, {-1, 1}, {-1, -1}].each do |signs|
+    a = signs[0] < 0 ? -pair[0] : pair[0]
+    b = signs[1] < 0 ? -pair[1] : pair[1]
+    q, r = a.divmod(b)
+    raise "div: long a == q * b + r" unless q * b + r == a
+    raise "div: long remainder shorter than the divisor" unless r.cmp_abs(b) < 0
+    raise "div: long remainder of the dividend's sign" unless r.zero? || r.negative? == a.negative?
+    raise "div: long // and % agree with divmod" unless a // b == q && a % b == r
+  end
+end
+
+# And in time: a value twice its divisor's 262,144 bits divides in under
+# four times the product that checks it, the best of three each. Long
+# division took seven times the product in a plain build, a ratio that
+# grows with the length; the recursion takes about two.
+wide_b = exact_bits(262144, 14_u64)
+wide_a = exact_bits(524288, 15_u64)
+divide_ns = 9223372036854775807_i64
+product_ns = 9223372036854775807_i64
+3.times do
+  started = __iyi_monotonic_ns
+  wide_q, wide_r = wide_a.divmod(wide_b)
+  divided = __iyi_monotonic_ns
+  raise "div: long a == q * b + r" unless wide_q * wide_b + wide_r == wide_a
+  multiplied = __iyi_monotonic_ns
+  divide_ns = divided - started if divided - started < divide_ns
+  product_ns = multiplied - divided if multiplied - divided < product_ns
+end
+raise "div: a long division took #{divide_ns // 1000000} ms, the product #{product_ns // 1000000} ms" unless divide_ns < product_ns * 4
+puts "    long division: every sign either side of both switches, and a long divisor in under four products"
+
 # Trailing zeros are counted once and divided out once: one divmod by ten
 # per zero made the hash of `1.` and 40,000 zeros, and `3.div(3, 40000)`,
 # take 725 ms each. Counting prints the digits, so this runs after printing

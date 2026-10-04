@@ -31,7 +31,7 @@ puts [1, 2, 3].zip(["a", "b", "c"]) # => [{1, "a"}, {2, "b"}, {3, "c"}]
 
 letters = ["b", "a", "c"]
 puts letters.index("c").inspect # => 2
-puts letters.delete("a")        # => true
+puts letters.delete("a")        # => a
 puts letters                    # => ["b", "c"]
 
 # 3. A line built piece by piece, then ended.

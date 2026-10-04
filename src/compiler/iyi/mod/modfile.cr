@@ -23,10 +23,11 @@
 # `replace` builds a required module from a directory on this machine
 # instead of its tag: the module being written beside the one that uses
 # it, or a fork checked out to try. It is the program's own decision, so
-# only the manifest beside the entry file is obeyed; one in a dependency's
+# only the program's own manifest is obeyed; one in a dependency's
 # manifest is read and ignored, as Go does, or a library could redirect
 # its consumers' builds. The target is spelled as a directory - `./`,
-# `../` or absolute - so it can never be mistaken for a module path.
+# `../` or absolute - so it can never be mistaken for a module path, and
+# in double quotes when it holds a space: `=> "../my lib"`.
 #
 # `#` comments a line out. Versions are `vMAJOR.MINOR.PATCH` — the `v` is
 # part of the spelling because it is part of the git tag the fetcher asks
@@ -128,14 +129,23 @@ module Iyi::Mod
           end
           requirements << Requirement.new(path, version, short_name, reaches)
         when "replace"
-          unless fields.size == 4 && fields[2] == "=>"
+          # The directory is the rest of the line after `=>`, read from the
+          # line rather than its words, so one written in quotes may hold a
+          # space: `C:\Users\First Last\lib` is an ordinary place for one on
+          # Windows. Split on spaces, `=> "../greet lib"` was refused as
+          # "`replace` takes a path and a directory" - the line's shape
+          # blamed for its directory's name.
+          head, arrow, target = line.partition("=>")
+          names = head.split
+          target = target.strip
+          unless names.size == 2 && !arrow.empty? && !target.empty?
             raise ModError.new("#{source}:#{line_number}: `replace` takes a path and a directory, as `replace <path> => ../dir`")
           end
-          path = check_path(fields[1], source, line_number)
+          path = check_path(names[1], source, line_number)
           if replacements.has_key?(path)
             raise ModError.new("#{source}:#{line_number}: #{path} is already replaced; one directory builds it")
           end
-          replacements[path] = check_directory(fields[3], source, line_number)
+          replacements[path] = check_directory(target, source, line_number)
         else
           raise ModError.new("#{source}:#{line_number}: `#{fields.first}` is not a directive; `module`, `require` and `replace` are the three")
         end
@@ -339,12 +349,31 @@ module Iyi::Mod
     end
 
     # A replacement's target: a directory, spelled so it cannot be read as
-    # a module path - `./x`, `../x`, `/abs`, or on Windows `C:\x` and `C:/x`.
-    private def self.check_directory(target : String, source : String, line_number : Int32) : String
+    # a module path - `./x`, `../x`, `/abs`, `C:\x`, `C:/x`, and `.\x` and
+    # `..\x`, Windows' own relative spelling, which every other verb takes
+    # and which was refused here as "'..\greetlib' is not a directory" about
+    # a directory that was there. All of them on every system, as Go's
+    # go.mod reads them: a manifest moves between machines. In double
+    # quotes when it holds a space; the quotes are not part of it, and
+    # nothing inside is an escape, so `"C:\Users\First Last\lib"` is that
+    # directory.
+    private def self.check_directory(written : String, source : String, line_number : Int32) : String
+      target = written
+      if written.starts_with?('"')
+        unless written.size >= 2 && written.ends_with?('"') && written.count('"') == 2
+          raise ModError.new("#{source}:#{line_number}: #{written} opens a quote it does not close; " \
+                             "a directory with a space is written whole in double quotes, `=> \"../my lib\"`")
+        end
+        target = written[1...-1]
+      elsif written.each_char.any?(&.whitespace?)
+        raise ModError.new("#{source}:#{line_number}: '#{written}' holds a space; a directory with one is written " \
+                           "in double quotes, `=> \"#{written}\"`")
+      end
       drive = target.size >= 3 && target[0].ascii_letter? && target[1] == ':' && target[2].in?('/', '\\')
-      unless target.starts_with?("./") || target.starts_with?("../") || target.starts_with?('/') ||
-             target == "." || target == ".." || drive
-        raise ModError.new("#{source}:#{line_number}: '#{target}' is not a directory; a replacement is spelled `./dir`, `../dir` or an absolute path, so it is never a module path")
+      relative = {"./", "../", ".\\", "..\\"}.any? { |start| target.starts_with?(start) }
+      unless relative || target.starts_with?('/') || target == "." || target == ".." || drive
+        raise ModError.new("#{source}:#{line_number}: '#{target}' is not spelled as a directory; a replacement is spelled " \
+                           "`./dir`, `../dir` or an absolute path, so it is never a module path")
       end
       target
     end

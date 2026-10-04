@@ -617,19 +617,68 @@ module Iyi
     #
     # To, in each branch:
     #
-    #     it = %temp
-    #     serve(it)
+    #     %it = %temp
+    #     it = %it
+    #     serve(%it)
     #
     # An assignment rather than anything new, so `it` picks up the narrowing the
     # branch's `is_a?` already did — in the second branch it is an `IOError`,
     # not the whole union. It also means `it` outlives the `case` exactly the
     # way a variable assigned inside an `if` does, which is the rule iyi already
     # has for every other branch body.
+    #
+    # The branch reads a variable of its own rather than `it`, because `it` is
+    # one variable for the whole scope and a variable a proc or a task captures
+    # is not narrowed. Read as `it`, `in Int32 then ->{ it + 1 }` was refused
+    # with "expected argument #1 to 'String#+' to be String, not Int32", and so
+    # was every later `case` in the scope that did `it + 1`; `g.spawn { total
+    # += it }` was refused over `(Int32 | String)`.
     private def bind_it(node : Case, body : ASTNode, subject : ASTNode?)
       return body unless node.binds_it? && subject
 
-      assign = Assign.new(Var.new("it").at(body), subject.clone).at(body)
-      Expressions.new([assign, body] of ASTNode).at(body)
+      hidden = new_temp_var.at(body)
+      # A copy: the `case` keeps its branches as they were written, `it` and
+      # all, for whatever reads them after the expansion.
+      body = body.clone
+      body.accept ItRenamer.new(hidden.name)
+      bind = Assign.new(hidden, subject.clone).at(body)
+      keep = Assign.new(Var.new("it").at(body), hidden.clone).at(body)
+      Expressions.new([bind, keep, body] of ASTNode).at(body)
+    end
+
+    # Points the `it` of one branch at the variable `bind_it` gave it.
+    private class ItRenamer < Visitor
+      def initialize(@name : String)
+      end
+
+      def visit(node : Var)
+        node.name = @name if node.name == "it"
+        false
+      end
+
+      # A nested `case` binds its own `it` in its branches; its subject and its
+      # conditions are still read in this one.
+      def visit(node : Case)
+        return true unless node.binds_it?
+        node.cond.try &.accept self
+        node.whens.each { |wh| wh.conds.each &.accept self }
+        false
+      end
+
+      # So does a proc with a parameter of that name.
+      def visit(node : Def)
+        node.args.none? { |arg| arg.name == "it" }
+      end
+
+      # Macro code is text until the main visitor expands it, and the `it` it
+      # reads then is the one every branch still assigns.
+      def visit(node : MacroIf | MacroFor | MacroExpression | MacroVerbatim | MacroLiteral)
+        false
+      end
+
+      def visit(node : ASTNode)
+        true
+      end
     end
 
     def expand(node : Case)
@@ -816,15 +865,36 @@ module Iyi
     #       qux
     #     end
     #
+    # iyi: under iyi's prelude the select answers a third value, whether
+    # the arm's operation happened, and takes the first bound arm's index
+    # (-1 for none), the arm a cancelled task's `Cancelled` goes to:
+    #
+    #     %index, %value, %happened = ::Channel.select({foo_select_action, bar_select_action}, 1)
+    #     case %index
+    #     when 0
+    #       if %happened
+    #         body
+    #       end
+    #     when 1
+    #       ...
+    #
     def expand(node : Select)
       index_name = @program.new_temp_var_name
       value_name = @program.new_temp_var_name
+      # iyi: the select's third answer, whether the arm's operation
+      # happened.
+      happened_name = @program.new_temp_var_name if @program.iyi_prelude?
 
       targets = [Var.new(index_name).at(node), Var.new(value_name).at(node)] of ASTNode
+      targets << Var.new(happened_name).at(node) if happened_name
       channel = Path.global("Channel").at(node)
 
       tuple_values = [] of ASTNode
       case_whens = [] of When
+      # iyi: the arm a cancelled task's `Cancelled` goes to, -1 for none
+      # (`Channel.select`). It went to the first arm, and an unbound first
+      # arm dropped it: a loop around the select never saw its cancel.
+      first_bound = -1
 
       node.whens.each_with_index do |a_when, index|
         condition = a_when.conds.first
@@ -834,8 +904,19 @@ module Iyi
           cloned_call.name = select_action_name(cloned_call.name)
           tuple_values << cloned_call
 
-          case_whens << When.new([NumberLiteral.new(index).at(node)] of ASTNode, a_when.body.clone)
+          body = a_when.body.clone
+          # iyi: an arm nobody binds runs its body only when its operation
+          # happened. `when out.send(1)` ran its body on a closed channel
+          # and in a cancelled task, where nothing was sent; bound, the
+          # arm sees that answer itself. It asked whether the answer was
+          # an `Error`, and a `Channel(Boom)`'s receive took its `Boom`
+          # and skipped the body.
+          if happened_name
+            body = If.new(Var.new(happened_name).at(node), body).at(node)
+          end
+          case_whens << When.new([NumberLiteral.new(index).at(node)] of ASTNode, body)
         when Assign
+          first_bound = index if first_bound < 0
           cloned_call = condition.value.as(Call).clone
           cloned_call.name = select_action_name(cloned_call.name)
           tuple_values << cloned_call
@@ -856,11 +937,9 @@ module Iyi
         case_else = Call.new("raise", StringLiteral.new("BUG: invalid select index"), global: true).at(node)
       end
 
-      call = Call.new(
-        channel,
-        node.else ? "non_blocking_select" : "select",
-        TupleLiteral.new(tuple_values).at(node),
-      ).at(node)
+      args = [TupleLiteral.new(tuple_values).at(node)] of ASTNode
+      args << NumberLiteral.new(first_bound).at(node) if happened_name
+      call = Call.new(channel, node.else ? "non_blocking_select" : "select", args).at(node)
       multi = MultiAssign.new(targets, [call] of ASTNode)
       case_cond = Var.new(index_name).at(node)
       a_case = Case.new(case_cond, case_whens, case_else, exhaustive: false).at(node)

@@ -74,6 +74,13 @@ if ! timeout 60 ./exercise > answers.txt 2>&1; then
   exit 1
 fi
 grep -q 'every property held' answers.txt || { cat answers.txt; exit 1; }
+# A panic on a task's stack is printed and the program goes on, so the
+# scheduler's own complaint is looked for here (step 16a's select race).
+if grep -q 'a done fiber was scheduled' answers.txt; then
+  echo "the exercise scheduled a finished fiber:"
+  grep -m3 'a done fiber' answers.txt
+  exit 1
+fi
 
 step "exercise, release build"
 if ! "$IYI" build --release "$REPO/bench/concurrency_exercise.iyi" -o exercise-release > build-release.log 2>&1; then
@@ -87,6 +94,11 @@ if ! timeout 60 ./exercise-release > answers-release.txt 2>&1; then
   exit 1
 fi
 grep -q 'every property held' answers-release.txt || { cat answers-release.txt; exit 1; }
+if grep -q 'a done fiber was scheduled' answers-release.txt; then
+  echo "the release exercise scheduled a finished fiber:"
+  grep -m3 'a done fiber' answers-release.txt
+  exit 1
+fi
 
 # ── 1b. A fiber reading stdin parks, and is cancelled there ───────────────
 # bench/stdin_park.iyi, fed by a pipe that answers a second after the
@@ -467,6 +479,74 @@ fi
 if ! grep -q "this group answers its block's last expression" build-bang-tail.log; then
   echo "an \`end!\` on a group whose block ends in its own expression was refused, but not as itself:"
   tail -8 build-bang-tail.log
+  exit 1
+fi
+
+# ── 3f. A task spawned on a group whose block has ended is a panic ────────
+# A handle can be kept past its block (`saved = g`), and a task spawned on
+# it there had no scope left to join it: the program printed "leak
+# returning", exited 0, and the task never ran. III.4.1 says a task cannot
+# outlive the scope that started it, so the spawn is the bug, said there.
+step "a task spawned on a group whose block has ended is refused at run time"
+cat > late_spawn.iyi <<'IYI'
+module late_spawn
+
+saved = nil.as(IyiGroup?)
+group do |g|
+  saved = g
+  g.spawn { 0 }
+end
+if late = saved
+  late.spawn do
+    puts "the late task ran"
+    0
+  end
+end
+puts "the late spawn returned"
+IYI
+if ! "$IYI" build late_spawn.iyi -o late_spawn > build-late-spawn.log 2>&1; then
+  echo "late spawn probe failed to build:"
+  tail -5 build-late-spawn.log
+  exit 1
+fi
+timeout 30 ./late_spawn > late_spawn.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q 'panic: a task spawned on a group whose block has ended' late_spawn.txt ||
+   grep -q '^the late' late_spawn.txt; then
+  echo "a task spawned on an ended group exited $code:"
+  cat late_spawn.txt
+  exit 1
+fi
+
+# ── 3g. The join names the first failure, not the last spawned ───────────
+# Two tasks that panic: both are printed where they happen, first then
+# second, and the join owes one re-raise for the pair. It walked its
+# children newest first and named "a task panicked: second", where III.4.3
+# says the first failing task is the one that leaves the group.
+step "a group's join re-raises the first task that panicked"
+cat > two_panics.iyi <<'IYI'
+module two_panics
+
+def bomb(m : String) : Int32
+  raise m
+end
+
+group do |g|
+  g.spawn { bomb("first") }
+  g.spawn { bomb("second") }
+end
+IYI
+if ! "$IYI" build two_panics.iyi -o two_panics > build-two-panics.log 2>&1; then
+  echo "two panics probe failed to build:"
+  tail -5 build-two-panics.log
+  exit 1
+fi
+timeout 30 ./two_panics > two_panics.txt 2>&1
+code=$?
+if [ "$code" -ne 1 ] || ! grep -q 'panic: a task panicked: first' two_panics.txt ||
+   grep -q 'a task panicked: second' two_panics.txt; then
+  echo "two panicking tasks joined with exit $code and not the first named:"
+  cat two_panics.txt
   exit 1
 fi
 

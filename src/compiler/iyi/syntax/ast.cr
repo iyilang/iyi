@@ -963,6 +963,18 @@ module Iyi
     # of a call a Crystal file is free to mean differently.
     property? iyi_group = false
 
+    # iyi: written with an attached `!`, which propagates here and is the
+    # other library's mutating spelling, so `a.sort!` is asked of `sort`
+    # and the undefined-method hint names `sort_in_place` (SPEC.md III.1.7a).
+    property? iyi_banged = false
+
+    # iyi: where the `//` this receiverless call stands to the right of
+    # begins. `x = 1 // the answer` is a comment in the languages people
+    # come from and integer division here, so the words after it are calls,
+    # and "undefined local variable or method 'answer'" pointed at the last
+    # word of the comment without a word about the `//`.
+    property iyi_after_floor_div : Location?
+
     # iyi: this call's answer came out of an *open* set — a module's including
     # types, or a generic's instantiations (SPEC.md III.6).
     #
@@ -1025,6 +1037,8 @@ module Iyi
       clone.expansion = expansion?
       clone.iyi_group = iyi_group?
       clone.iyi_open_dispatch = iyi_open_dispatch?
+      clone.iyi_banged = iyi_banged?
+      clone.iyi_after_floor_div = iyi_after_floor_div
       clone
     end
 
@@ -1915,6 +1929,10 @@ module Iyi
     # leaves this nil; one a compiler-known construct wrote has rules
     # (SPEC.md III.1.1).
     property error_construct : String? = nil
+    # iyi: for `xs.uniq!`, the method's name and its receiver's source -
+    # a `!` attached to a method call, which is the other library's in-place
+    # spelling when the call answers no error (SPEC.md III.1.7a).
+    property iyi_bang_call : {String, String}? = nil
 
     def initialize(@obj, @const, @nil_check = false)
     end
@@ -1927,6 +1945,7 @@ module Iyi
     def clone_without_location
       clone = IsA.new(@obj.clone, @const.clone, @nil_check)
       clone.error_construct = error_construct
+      clone.iyi_bang_call = iyi_bang_call
       clone
     end
 
@@ -2902,6 +2921,10 @@ module Iyi
       ex.implicit = implicit
       ex.suffix = suffix
       ex.iyi_defer = iyi_defer?
+      # iyi: a def's body is cloned when it is typed, and the `ensure` it
+      # carries is refused at its keyword (MainVisitor, ExceptionHandler).
+      ex.else_location = else_location
+      ex.ensure_location = ensure_location
       ex
     end
 

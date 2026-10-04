@@ -62,16 +62,21 @@ pub def loop(& : -> Nil) : Nil
   end
 end
 
-# Terminates execution immediately, optionally printing message to stderr.
+# Terminates the program with *status*, after writing *message* to
+# standard error as a line, as `puts` writes one: a message that already
+# ends in a newline gets no second one, as in the other library.
+#
+# The ending is `exit`'s, as the other library's `abort` is its `exit`:
+# what the task deferred runs, and what a stream set to `sync = false`
+# holds is written. This wrote through the runtime's own `__iyi_write` and
+# ended with `__iyi_exit`, which skip both: `STDOUT.sync = false`,
+# `puts "before"`, `abort "bye"` left standard output empty, a `defer`
+# around the call never ran, and a line buffered on standard error before
+# the message was lost.
 pub def abort(message : String? = nil, status : Int32 = 1) : NoReturn
   if message
-    __iyi_write(2, message.to_unsafe.as(Void*), message.bytesize.to_u64)
-    # A line, as `puts` writes one: a message that already ends in a
-    # newline gets no second one, as in the other library.
-    unless message.ends_with?("\n")
-      nl = "\n"
-      __iyi_write(2, nl.to_unsafe.as(Void*), 1_u64)
-    end
+    STDERR.print(message)
+    STDERR.print("\n") unless message.ends_with?("\n")
   end
-  __iyi_exit(status)
+  exit(status)
 end

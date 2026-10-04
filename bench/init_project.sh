@@ -105,6 +105,16 @@ say "a path the manifest would refuse is refused before anything is written" \
 "$IYI" init "$(printf 'x\nrequire a.b/c v1.0.0\n#/hello')" inj > inj.txt 2>&1
 say "a path with a newline in it is refused, and nothing written" \
   "$([ $? -ne 0 ] && grep -q 'is not a module path' inj.txt && [ ! -e inj ]; echo $?)"
+# A name whose camelcase is a type of the prelude names that type: `init
+# class` wrote `module class`, whose first run was "Class is not a module,
+# it's a metaclass", and `string`, `set`, `file` and twenty more wrote a
+# project that did not build. Refused by name, and nothing written.
+"$IYI" init example.com/me/string clash > clash.txt 2>&1
+say "a name that is a prelude type is refused, naming the type" \
+  "$([ $? -ne 0 ] && grep -q "String is already the prelude's class" clash.txt && [ ! -e clash ]; echo $?)"
+"$IYI" init class klass > klass.txt 2>&1
+say "and so is one that is the prelude's metaclass" \
+  "$([ $? -ne 0 ] && grep -q "Class is already the prelude's metaclass" klass.txt && [ ! -e klass ]; echo $?)"
 "$IYI" init > none.txt 2>&1
 say "no module path is a usage error that shows the form" \
   "$([ $? -ne 0 ] && grep -q 'example.com/me/hello' none.txt; echo $?)"

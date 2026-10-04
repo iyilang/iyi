@@ -59,25 +59,48 @@ module Iyi::Lsp
     KEEP = 8
 
     # The last compile, keyed by exactly what determines it: the path,
-    # the buffer, and the sibling buffers. One keystroke triggers
-    # diagnostics, then often hover, highlight, inlay hints — the same
-    # question compiled four times is the same answer computed once.
-    # This is not incremental state: the key *is* the whole input, so a
-    # hit can never differ from a recompile.
+    # the buffer, the sibling buffers, and the files on disk it read or
+    # looked for (`@memo_disk`). One keystroke triggers diagnostics, then
+    # often hover, highlight, inlay hints — the same question compiled
+    # four times is the same answer computed once. This is not
+    # incremental state: the key *is* the whole input, so a hit can never
+    # differ from a recompile.
+    #
+    # The disk half is checked, not hashed into the key: a stat per file
+    # the compile touched. It was the buffers alone, so an imported module
+    # renamed, deleted or written back on disk - `git checkout`, an
+    # agent's write - left the importer's verdict as it was, pull after
+    # pull, until its own buffer was edited: `name` renamed to `title` in
+    # `geo/b.iyi` answered `[]`, and with `geo/b.iyi` written back, "can't
+    # find module 'geo/b'".
     @memo_key : {String, UInt64, UInt64}?
     @memo : {Compiler::Result?, Array(Diag)}?
+    @memo_disk = [] of {String, UInt64}
+    # What the latest `compile` touched on disk, for `check` to keep.
+    @touched = [] of {String, UInt64}
 
     # Compile one buffer as its own entry, front end only. Returns the
     # typed result and no diagnostics, or nil and what went wrong.
     def check(path : String, text : String, overrides : Hash(String, String)) : {Compiler::Result?, Array(Diag)}
       key = {path, text.hash, overrides.hash}
-      if @memo_key == key && (hit = @memo)
+      if @memo_key == key && (hit = @memo) && @memo_disk.all? { |(file, stamp)| Analysis.disk_stamp(file) == stamp }
         return hit
       end
       answer = compile(path, text, overrides)
       @memo_key = key
       @memo = answer
+      @memo_disk = @touched
       answer
+    end
+
+    # A file on disk as it stands, folded to a number: its size and its
+    # modification time, or zero where it is not there.
+    def self.disk_stamp(file : String) : UInt64
+      info = File.info?(file)
+      return 0_u64 unless info
+      info.size.to_u64! &* 1099511628211_u64 &+ info.modification_time.to_unix_ns.to_u64!
+    rescue File::Error
+      0_u64
     end
 
     # The server's open set, which is what `@last_good` is allowed to
@@ -115,9 +138,13 @@ module Iyi::Lsp
     end
 
     private def compile(path : String, text : String, overrides : Hash(String, String)) : {Compiler::Result?, Array(Diag)}
+      # IV.6 read backwards, as a build reads it: `<root>/calc/parser.iyi`
+      # resolves its `import calc/lexer` from `<root>`, and its packages
+      # through `<root>/iyi.mod` (`Compiler.entry_root_of`).
+      root = Compiler.entry_root_of(path, text)
       table =
         begin
-          Mod::Installer.table_for(File.dirname(path))
+          Mod::Installer.table_for(root)
         rescue ex : Mod::ModError
           return {nil, [Diag.new(1, 1, 0, ex.message.to_s, nil, [] of {String, Int32, Int32, String})]}
         end
@@ -129,9 +156,6 @@ module Iyi::Lsp
       compiler.iyi_mod_table = table
       compiler.iyi_file_overrides = overrides
       compiler.stdout = IO::Memory.new
-      # IV.6 read backwards, as a build reads it: `<root>/calc/parser.iyi`
-      # resolves its `import calc/lexer` from `<root>`.
-      root = Compiler.header_root_of(path, text)
       compiler.iyi_project_root = root
       compiler.stderr = IO::Memory.new
 
@@ -151,14 +175,23 @@ module Iyi::Lsp
       # sources present is compiled exactly as it was before this, and a
       # directory under some other name leaves the server saying what it
       # said.
-      if artifacts = Compiler.workspace_artifacts(root || File.dirname(path))
+      if artifacts = Compiler.workspace_artifacts(root)
         compiler.use_iyimod = artifacts
         compiler.iyi_prefers_source = true
       end
 
-      result = compiler.compile(
+      # `compile_configure_program` rather than `compile`, to hand the
+      # program the set it records every module path it asks about in
+      # (`Program#iyi_probes`); the header root `compile` would adopt is
+      # the project root set above.
+      probes = Set(String).new
+      program = nil
+      result = compiler.compile_configure_program(
         Compiler::Source.new(path, text),
-        File.tempname("iyi-lsp", nil))
+        File.tempname("iyi-lsp", nil)) do |configured|
+        configured.iyi_probes = probes
+        program = configured
+      end
       if @open.includes?(path)
         @last_good.delete(path)
         @last_good[path] = result
@@ -180,6 +213,26 @@ module Iyi::Lsp
       {nil, [to_diag(ex, path)]}
     rescue ex : Iyi::Error
       {nil, [Diag.new(1, 1, 0, ex.message.to_s, nil, [] of {String, Int32, Int32, String})]}
+    ensure
+      @touched = touched_by(path, root, program, probes)
+    end
+
+    # Every file a compile of *path* read from disk or looked for there,
+    # each with its stamp now: the modules and library files it required,
+    # every candidate an import was looked for at (found or not, so a
+    # module written into place is seen), and the manifest and sum at the
+    # root. A failed compile counts what it got to. The buffer itself is
+    # the memo key's business.
+    private def touched_by(path : String, root : String?, program : Program?, probes : Set(String)?) : Array({String, UInt64})
+      files = Set(String).new
+      program.try &.requires.each { |file| files << file }
+      probes.try &.each { |file| files << file }
+      if root
+        files << File.join(root, Mod::Installer::MANIFEST)
+        files << File.join(root, Mod::Sum::FILE)
+      end
+      files.delete(path)
+      files.map { |file| {file, Analysis.disk_stamp(file)} }
     end
 
     # The typed result to answer a cursor question from: this buffer's
@@ -190,9 +243,12 @@ module Iyi::Lsp
     def result_for(path : String, text : String, overrides : Hash(String, String)) : Compiler::Result?
       result, _ = check(path, text, overrides)
       return result if result
-      if cached = @last_good[path]?
-        return aligned(path, text, overrides) || cached
-      end
+      # Only as laid over the buffer's lines (`aligned`): the last good
+      # program as it was names lines the buffer no longer has where
+      # they are. Nil where the two cannot be laid together, and the
+      # question is answered with nothing rather than with the old text's
+      # line numbers.
+      return aligned(path, text, overrides) if @last_good[path]?
       # Kept until one of the two compiles works: dropping it on a try
       # that failed — a sibling buffer mid-edit is enough — would spend
       # the fallback on the one question that could not use it and
@@ -205,7 +261,7 @@ module Iyi::Lsp
           # The seed is the clean text, not the buffer's: laid over the
           # buffer's lines as the last good program is, or a successor
           # answered every line below the edit from the line above it.
-          return aligned(path, text, overrides) || seeded
+          return aligned(path, text, overrides)
         end
       end
       nil
@@ -217,8 +273,8 @@ module Iyi::Lsp
     # read against the wrong line: press Enter, type half a statement,
     # and hover, definition and highlight below it answered about the
     # line above, their ranges a line off. One compile per buffer text,
-    # and only once a question needs the fallback; nil where the two
-    # cannot be aligned, and the caller answers as it did.
+    # and only once a question needs the fallback; nil where the text
+    # laid over the buffer's lines does not compile.
     @aligned_key : {String, UInt64, UInt64}?
     @aligned : Compiler::Result?
 
@@ -228,7 +284,7 @@ module Iyi::Lsp
       return @aligned if @aligned_key == key
       @aligned_key = key
       @aligned = nil
-      return nil unless candidate = Lsp.rebase(good, text)
+      candidate = Lsp.rebase(good, text)
       return @aligned = @last_good[path]? if candidate == good
       @aligned = compile(path, candidate, overrides)[0]
     end
@@ -321,6 +377,61 @@ module Iyi::Lsp
         end
         items
       end
+    end
+
+    # Completion after `expr.`, where `expr` is more than a name -
+    # `b.value`, `"x"`, `[1]`: its methods, from the type the compile gave
+    # the expression spanning *start_column* to *end_column* on *line*.
+    # *text* is the buffer without the `.` and what follows it, so the
+    # expression stands as written.
+    def expression_methods_at(path : String, text : String, overrides : Hash(String, String), line : Int32, start_column : Int32, end_column : Int32) : Array({String, String, Int32})
+      result = result_for(path, text, overrides)
+      return [] of {String, String, Int32} unless result
+      type = ExpressionTypeVisitor.new(path, line, start_column, end_column).find(result)
+      return [] of {String, String, Int32} unless type
+      methods_of(type, kind: 2) # Method
+    end
+
+    # Completion after `Name::`: what can follow the `::` - the types and
+    # constants *written* names. A function cannot (`App::Shapes::total`
+    # is a parse error), and a private type is the module's own.
+    def members_at(path : String, text : String, overrides : Hash(String, String), line : Int32, column : Int32, written : String) : Array({String, String, Int32})
+      result = result_for(path, text, overrides)
+      return [] of {String, String, Int32} unless result
+      scope = {} of String => Type
+      ContextVisitor.new(Location.new(path, line, column)).process(result).contexts.try &.each do |ctx|
+        ctx.each { |name, type| scope[name] ||= type }
+      end
+      owner = receiver_type(result, path, scope, written)
+      return [] of {String, String, Int32} unless owner
+      items = [] of {String, String, Int32}
+      owner.instance_type.types?.try &.each do |name, member|
+        next if member.private? || member.metaclass?
+        if member.is_a?(Const)
+          items << {name, "#{written}::#{name}", 21} # Constant
+        else
+          items << {name, "#{member.type_desc} #{written}::#{name}", completion_kind_of(member)}
+        end
+      end
+      items
+    end
+
+    # LSP CompletionItemKind, from what the type is.
+    private def completion_kind_of(type : Type) : Int32
+      case kind_of(type)
+      when 11 then 8  # Interface
+      when 10 then 13 # Enum
+      when 23 then 22 # Struct
+      when  2 then 9  # Module
+      else         7  # Class
+      end
+    end
+
+    # Definition of a macro call: where the macro it expanded is written.
+    def macro_definition_at(path : String, text : String, overrides : Hash(String, String), line : Int32, column : Int32) : Location?
+      result = result_for(path, text, overrides)
+      return nil unless result
+      MacroCallVisitor.new(Location.new(path, line, column)).find(result)
     end
 
     # One overload a signature-help answer offers: the label as the
@@ -490,6 +601,28 @@ module Iyi::Lsp
       locations
     end
 
+    # Implementation from a method of a trait - its requirement or its
+    # default - or from one that answers it: the def of that name and arity
+    # on every type that implements the trait, linked the way references
+    # link them (`ReferencesVisitor#link_trait_methods`). It answered null
+    # from `abstract def area`, which is the one place implementation is
+    # asked from. Empty for a method no trait names.
+    def method_implementations_at(path : String, text : String, overrides : Hash(String, String), line : Int32, column : Int32) : Array(Location)
+      result = result_for(path, text, overrides)
+      return [] of Location unless result
+      visitor = ReferencesVisitor.new(Location.new(path, line, column))
+      return [] of Location unless visitor.process(result)
+      adopted = visitor.adopted
+      return [] of Location unless adopted.any? { |a_def| a_def.owner?.try(&.instance_type.trait?) }
+      locations = [] of Location
+      adopted.each do |a_def|
+        next if a_def.abstract? || a_def.owner?.try(&.instance_type.trait?)
+        location = a_def.name_location || a_def.location
+        locations << location if location && location.filename.is_a?(String)
+      end
+      locations.uniq!
+    end
+
     # One type as a hierarchy node names it: the short name, where it
     # is declared, and its LSP SymbolKind.
     record TypeSite, name : String, location : Location, kind : Int32
@@ -629,7 +762,9 @@ module Iyi::Lsp
         return found
       end
       within = scope["self"]? || unit_self_of(result, path)
-      within.try(&.instance_type.lookup_path(receiver.split("::"))).as?(Type)
+      # A script's top level has neither, and `App::Shapes` is found from
+      # the program's own namespace.
+      (within.try(&.instance_type) || result.program).lookup_path(receiver.split("::")).as?(Type)
     end
 
     # One entry per name, nearest ancestor wins — the same order a call
@@ -828,13 +963,91 @@ module Iyi::Lsp
     end
   end
 
+  # iyi: the macro a call under the cursor expanded, by where it is
+  # written - in top-level code or a typed instance of a def.
+  class MacroCallVisitor < Visitor
+    include TypedDefProcessor
+
+    @found : Location? = nil
+
+    def initialize(@target_location : Location)
+    end
+
+    def find(result : Compiler::Result) : Location?
+      result.node.accept self
+      process_result result unless @found
+      @found
+    end
+
+    def process_typed_def(typed_def : Def) : Nil
+      typed_def.accept self unless @found
+    end
+
+    def visit(node : Call)
+      return false if @found
+      if node.location && @target_location.between?(node.name_location, node.name_end_location) &&
+         (expanded = node.expanded_macro)
+        @found = expanded.location
+        return false
+      end
+      true
+    end
+
+    def visit(node)
+      !@found
+    end
+  end
+
+  # iyi: the type the compile gave the expression written from
+  # *start_column* to *end_column* on *line* of *file* - in top-level code
+  # or inside any typed instance of a def, which is where a def body's
+  # nodes carry types. The receiver of `b.value.` is such a span.
+  class ExpressionTypeVisitor < Visitor
+    include TypedDefProcessor
+
+    @found : Type? = nil
+    @target_location : Location
+
+    def initialize(@file : String, @line : Int32, @start_column : Int32, @end_column : Int32)
+      @target_location = Location.new(@file, @line, @start_column)
+    end
+
+    def find(result : Compiler::Result) : Type?
+      result.node.accept self
+      process_result result unless @found
+      @found
+    end
+
+    def process_typed_def(typed_def : Def) : Nil
+      typed_def.accept self unless @found
+    end
+
+    def visit(node)
+      return false if @found
+      if (start = node.location) && (stop = node.end_location) &&
+         start.line_number == @line && start.column_number == @start_column &&
+         stop.line_number == @line && stop.column_number == @end_column &&
+         (filename = start.filename).is_a?(String) && Location.same_file?(filename, @file) &&
+         (type = node.type?)
+        @found = type
+        return false
+      end
+      true
+    end
+  end
+
   # iyi: *good* laid over *now*'s lines. The lines the two share at the
   # start and at the end stay where *now* has them, and the lines between
   # are *good*'s, padded with blank lines to *now*'s count, so every
-  # position outside the edit names the same line in both. Nil where
-  # *good* has more lines there than *now*: removed lines cannot be put
-  # back without moving the ones after them.
-  def self.rebase(good : String, now : String) : String?
+  # position outside the edit names the same line in both. Where *good*
+  # has more lines there than *now*, the lines between are all blank:
+  # removed lines cannot be put back without moving the ones after them,
+  # and a question inside the edit has no line of *good*'s to be about.
+  # This answered nil there, and the caller answered from *good* as it
+  # was - a highlight below two edits that removed eleven lines named
+  # line 312 of a 306-line buffer, and every other line it named was the
+  # old text's.
+  def self.rebase(good : String, now : String) : String
     good_lines = good.split('\n')
     now_lines = now.split('\n')
     limit = {good_lines.size, now_lines.size}.min
@@ -848,7 +1061,7 @@ module Iyi::Lsp
     end
     inner = good_lines.size - prefix - suffix
     room = now_lines.size - prefix - suffix
-    return nil if inner > room
+    inner = 0 if inner > room
     lines = good_lines[0, prefix + inner]
     (room - inner).times { lines << "" }
     lines.concat good_lines[good_lines.size - suffix, suffix]

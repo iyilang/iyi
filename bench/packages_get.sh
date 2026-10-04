@@ -54,7 +54,9 @@
 # gone is a major, at the path `/v2`, and the manifest has to say it first;
 # before v1 a break is a minor. An example program beside the library is
 # nobody's surface, a release written with `using` is still read, and a
-# version already tagged is refused.
+# version already tagged is refused. A constant, a nested type, a type's
+# macro, an enum member and an alias's target are surface; a requirement
+# new on a trait is a major and a defaulted parameter appended a minor.
 #
 # Then what a move changes in what the project uses: an export whose
 # signature moved is "changed" with the lines that write it - a comment
@@ -224,6 +226,19 @@ grep -q "example.test/user/libb is already at v1.0.0" get4.log || fail "libb's s
 "$IYI" run use.iyi > run2.log 2>&1 || { fail "the program did not build after -u"; cat run2.log; }
 grep -q "liba 1.3.0" run2.log || fail "after -u the program ran '$(cat run2.log)'"
 
+step "the build cache's rotation keeps package checkouts"
+# The cache keeps its ten newest build directories, and `mod` was one more
+# entry to it: eleven builds after a `get` the checkouts were gone, and a
+# project that had just built answered "cannot fetch" with no network.
+# Eleven newer directories stand in for the builds; one build rotates.
+for i in 0 1 2 3 4 5 6 7 8 9 10; do mkdir -p "$IYI_CACHE_DIR/rotate-$i"; done
+"$IYI" build -o rotate use.iyi > rotate.log 2>&1 || { fail "the build that rotates the cache failed"; cat rotate.log; }
+[ -d "$IYI_CACHE_DIR/mod" ] || fail "the rotation deleted the package checkouts in $IYI_CACHE_DIR/mod"
+IYI_MOD_MIRROR="$WORK/no-mirror" "$IYI" run use.iyi > rotate-run.log 2>&1 ||
+  fail "with no mirror, the program did not build from the cache: $(cat rotate-run.log)"
+rm -rf "$IYI_CACHE_DIR"/rotate-*
+[ "$status" -eq 0 ] && echo "  eleven newer build directories and a build: mod kept, the program builds with no mirror"
+
 step "a manifest saved with a byte order mark is read, and keeps it"
 # As PowerShell 5.1's `Out-File -Encoding utf8` writes one. It was refused
 # as "`\uFEFFmodule` is not a directive", and every verb with it.
@@ -259,6 +274,20 @@ if [ $? -eq 0 ] || ! grep -q "is major version 2, and v1.1.0 is not; v1.1.0 is e
   fail "a /v2 line at a v1 version was not refused by name: $(cat major-bad.log)"
 fi
 [ "$status" -eq 0 ] && echo "  the plain path stays on v1; /v2 fetched from liba's repository at v2.0.0; mismatched lines refused"
+
+step "the prelude's own verbs do not fetch the project's packages"
+# `doc String`, `doc prelude` and `init` compile the prelude alone, and did
+# it as an empty file in the working directory, whose iyi.mod was resolved:
+# a requirement not in the cache, with no network, answered "the prelude
+# does not compile: cannot fetch ...".
+mkdir -p "$WORK/offline" && cd "$WORK/offline" || exit 1
+printf 'module example.test/user/offline\nrequire example.test/user/nope v1.0.0\n' > iyi.mod
+for verb in "doc String" "doc prelude" "init tool tools/tool"; do
+  # shellcheck disable=SC2086 # the verb's words are its arguments
+  "$IYI" $verb > offline.log 2>&1 || fail "\`$verb\` in a project whose requirement cannot be fetched: $(head -2 offline.log)"
+done
+cd "$WORK/app" || exit 1
+[ "$status" -eq 0 ] && echo "  doc String, doc prelude and init answer with a requirement that cannot be fetched"
 
 step "what get refuses leaves iyi.mod as it was"
 refused "a version that is not a tag" "has no v1.9.9; its versions are v1.0.0, v1.1.0, v1.2.0-rc.1, v1.3.0" \
@@ -331,6 +360,20 @@ grep -q "beside the app, edited" replace2.log || fail "the edit did not build: $
 grep -q "example.test/user/liba builds from ../liba-local, which replaces it" replace3.log || fail "get did not say the line moves nothing: $(cat replace3.log)"
 [ "$status" -eq 0 ] && echo "  built from ../liba-local, directly and through libb; edits build; iyi.sum never records it"
 
+step "vet reports the program, not the packages it builds from"
+# A package's unused export is its author's to act on, as std's is: `iyi
+# vet` printed the cached libb's and the replacement's beside the program's
+# own and exited 1, which no change to the program could fix.
+printf '\npub def unused_here : Int32\n  1\nend\n' >> "$WORK/liba-local/liba.iyi"
+printf 'import example.test/user/liba::{greeting}\nimport example.test/user/libb::*\n\ndef own_unused : Int32\n  1\nend\n\nputs greeting\n' > "$WORK/rapp/vet.iyi"
+(cd "$WORK/rapp" && "$IYI" vet vet.iyi) > vet.log 2>&1
+vet_code=$?
+if [ "$vet_code" -ne 1 ] || ! grep -q "own_unused" vet.log || grep -q "unused_here\|number" vet.log; then
+  fail "vet answered $vet_code, naming the packages' defs or not the program's:"; sed 's/^/    /' vet.log
+else
+  echo "  vet names the program's unused def, and neither the cached libb's nor the replacement's"
+fi
+
 step "a dependency's own replace is ignored"
 mkrepo "$WORK/work/libc"
 printf 'module example.test/user/libc\nrequire example.test/user/liba v1.1.0\nreplace example.test/user/liba => ../elsewhere\n' > "$WORK/work/libc/iyi.mod"
@@ -370,7 +413,31 @@ mkdir -p "$WORK/nomod"
 bad_replace "a directory with no iyi.mod" ../nomod "has no iyi.mod"
 mkdir -p "$WORK/othermod" && printf 'module example.test/user/other\n' > "$WORK/othermod/iyi.mod"
 bad_replace "a directory holding another module" ../othermod "says it is 'example.test/user/other'"
-bad_replace "a target spelled like a module path" liba-local "is not a directory"
+bad_replace "a target spelled like a module path" liba-local "is not spelled as a directory"
+bad_replace "a directory with a space, unquoted" "../liba local" "holds a space; a directory with one is written in double quotes"
+
+step "a replacement in quotes may hold a space, and Windows' own spelling is one"
+# On Windows `C:\Users\First Last\` is an ordinary place for a project, and
+# the line was split on spaces: `=> "../greet lib"` was refused as "takes a
+# path and a directory". `..\lib`, the native relative spelling every other
+# verb takes, was refused as "'..\lib' is not a directory".
+good_replace() { # good_replace <label> <target>
+  printf 'module example.test/user/rapp\n\nrequire example.test/user/liba v1.0.0\n\nreplace example.test/user/liba => %s\n' "$2" > "$WORK/rapp/iyi.mod"
+  (cd "$WORK/rapp" && "$IYI" run use.iyi) > good.log 2>&1
+  if [ $? -ne 0 ] || ! grep -q "liba from beside the app" good.log; then
+    fail "$1: not built from the replacement:"; sed 's/^/    /' good.log
+  else
+    echo "  $1: built from the replacement"
+  fi
+}
+cp -r "$WORK/liba-local" "$WORK/liba local"
+good_replace "\"../liba local\"" '"../liba local"'
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    good_replace "..\\liba-local" '..\liba-local'
+    good_replace ".\\..\\liba-local" '.\..\liba-local'
+    ;;
+esac
 
 step "mod tidy says what the source imports"
 mkdir -p "$WORK/tapp"
@@ -682,6 +749,108 @@ git commit -qam additive
 "$IYI" mod release v1.2.0 > relrc2.log 2>&1 || fail "v1.2.0 after v1.1.0 and an rc, adding a def, was refused: $(cat relrc2.log)"
 [ "$status" -eq 0 ] && echo "  an rc that removed: v2.0.0 from v1.1.0; a release that adds after it: v1.2.0"
 
+step "mod release of a package inside another repository"
+# The enclosing repository's tags are not the package's: a new package in
+# one took its `v0.16.2` for its last release, checked the whole repository
+# out to compare, and answered "v0.16.2 has no iyi.mod at ...". Uncommitted,
+# it is told so; committed, with no tag that holds it, it has no release.
+RELN="$WORK/reln"
+mkrepo "$RELN"
+cd "$RELN" || exit 1
+printf 'outside\n' > README && git add -A && git commit -qm outer && git tag v0.16.2
+mkdir -p pkg && cd pkg || exit 1
+printf 'module example.test/user/pkg\n' > iyi.mod
+printf 'module pkg\n\npub def f : Int32\n  1\nend\n' > pkg.iyi
+if "$IYI" mod release > reln.log 2>&1 || ! grep -q "commit the package first" reln.log; then
+  fail "an uncommitted package inside a repository was not told so: $(cat reln.log)"
+fi
+git add -A && git commit -qm pkg
+"$IYI" mod release > reln2.log 2>&1 && grep -q "no release before this one" reln2.log ||
+  fail "a package no tag holds was compared with one: $(cat reln2.log)"
+[ "$status" -eq 0 ] && echo "  uncommitted: told so; committed under the repository's v0.16.2: no release before this one"
+
+step "mod release: every name a consumer writes is surface"
+# Each edit below is made to v1.0.0 alone and removes a name a consumer of
+# v1.0.0 writes: a constant, a type nested in an exported one (gone, or
+# made private), a type's macro, an enum member, what an alias names. Each
+# was "the surface is as it was", v1.0.1, and the consumer of v1.0.0 then
+# stopped on `undefined constant Kit::LIMIT` and the like. An `abstract
+# def` new on a trait that was there breaks every impl of it, and was a
+# minor; a defaulted parameter appended to a def breaks no call, and was a
+# def gone and a new major at /v2. A constant's value moved is a patch.
+RELK="$WORK/relk"
+mkrepo "$RELK"
+cd "$RELK" || exit 1
+printf 'module example.test/user/kit\n' > iyi.mod
+cat > kit.iyi <<'EOF'
+module kit
+
+pub trait Shape
+  abstract def area : Int32
+end
+
+pub class Box
+  getter v : Int32
+
+  def initialize(@v : Int32)
+  end
+
+  macro def_twice(name)
+    def {{name.id}} : Int32
+      @v * 2
+    end
+  end
+
+  pub class Inner
+    def id : Int32
+      1
+    end
+  end
+end
+
+pub LIMIT = 10
+
+pub def scale(x : Int32) : Int32
+  x * 2
+end
+
+pub enum Color
+  Red
+  Green
+  Blue
+end
+
+pub alias Pair = Tuple(Int32, String)
+EOF
+git add -A && git commit -qm one && git tag v1.0.0
+# relk <label> <answer> <sed script>: v1.0.0's kit.iyi edited by the script
+# and committed is released as <answer>.
+relk() {
+  git checkout -q v1.0.0 -- kit.iyi
+  sed -i.bak "$3" kit.iyi && rm -f kit.iyi.bak
+  git commit -qam "$1"
+  "$IYI" mod release > relk.log 2>&1 || fail "mod release failed on $1: $(cat relk.log)"
+  grep -q "the next release is $2" relk.log || fail "$1 was not $2: $(cat relk.log)"
+}
+relk "a constant gone" "v2.0.0" '/^pub LIMIT = 10$/d'
+grep -q "gone  kit: const LIMIT" relk.log || fail "the gone constant was not named: $(cat relk.log)"
+relk "a nested type gone" "v2.0.0" 's/  pub class Inner/  pub class Inside/'
+grep -q "gone  kit: class Box::Inner" relk.log || fail "the gone nested type was not named: $(cat relk.log)"
+relk "a nested type made private" "v2.0.0" 's/  pub class Inner/  private class Inner/'
+relk "a type's macro gone" "v2.0.0" 's/macro def_twice/macro def_double/'
+grep -q "gone  kit: Box.macro def_twice(name)" relk.log || fail "the gone macro was not named: $(cat relk.log)"
+relk "an enum member gone" "v2.0.0" '/^  Blue$/d'
+grep -q "gone  kit: member Color::Blue" relk.log || fail "the gone member was not named: $(cat relk.log)"
+relk "an alias retargeted" "v2.0.0" 's/Tuple(Int32, String)/Tuple(String, Int32)/'
+relk "a requirement new on a trait" "v2.0.0" 's/  abstract def area : Int32/&\n  abstract def perimeter : Int32/'
+grep -q "new   kit: Shape.abstract def perimeter : Int32 - a requirement" relk.log ||
+  fail "the new requirement was not named as one: $(cat relk.log)"
+relk "a defaulted parameter appended" "v1.1.0" 's/def scale(x : Int32)/def scale(x : Int32, by : Int32 = 2)/; s/  x \* 2/  x * by/'
+grep -q "grown kit: def scale(x : Int32) : Int32 -> def scale(x : Int32, by : Int32 = 2) : Int32" relk.log ||
+  fail "the grown def was not named: $(cat relk.log)"
+relk "a constant's value moved" "v1.0.1" 's/^pub LIMIT = 10$/pub LIMIT = 11/'
+[ "$status" -eq 0 ] && echo "  a constant, a nested type, a type's macro, a member, an alias's target gone, a trait's requirement new: v2.0.0; a defaulted parameter: v1.1.0; a value: v1.0.1"
+
 step "get says what a move changes in what the project uses"
 mkrepo "$WORK/work/libi"
 printf 'module example.test/user/libi\n' > "$WORK/work/libi/iyi.mod"
@@ -804,6 +973,28 @@ GIT_CONFIG_GLOBAL="$WORK/crlf.gitconfig" "$IYI" get example.test/user/libn > sum
 got="$(awk '$1 == "example.test/user/libn" { print $3 }' iyi.sum)"
 [ "$got" = "s1:$expected" ] || fail "libn's sum is $got, where the tag's bytes and paths make s1:$expected"
 [ "$status" -eq 0 ] && echo "  s1:$expected, from the tag's paths and bytes, with a CRLF-asking git"
+
+step "a module in a subdirectory reads the manifest at the root its header names"
+# `greet/greeter.iyi` declares `module greet/greeter`, so its root is the
+# directory above `greet/`, and iyi.mod is there. `run main.iyi` built it,
+# and every verb asked of the module itself read the manifest beside it:
+# `check` said "no requirement covers 'example.test/user/liba'", the test
+# beside it "does not build", `check --affected` "3 consumer(s) checked, 2
+# broke", and `mod context` "does not resolve".
+mkdir -p "$WORK/sapp/greet" && cd "$WORK/sapp" || exit 1
+printf 'module example.test/user/sapp\nrequire example.test/user/liba v1.1.0\n' > iyi.mod
+printf 'module greet/greeter\n\nimport example.test/user/liba\n\npub def hello : String\n  "greeter says " + Liba.greeting\nend\n' > greet/greeter.iyi
+printf 'module greet/greeter_test\n\nimport greet/greeter\n\nassert Greet::Greeter.hello == "greeter says liba 1.1.0", "hello"\n' > greet/greeter_test.iyi
+printf 'import greet/greeter\n\nputs Greet::Greeter.hello\n' > main.iyi
+"$IYI" run main.iyi > sub-run.log 2>&1 && grep -q "greeter says liba 1.1.0" sub-run.log || fail "the entry did not build: $(cat sub-run.log)"
+"$IYI" check greet/greeter.iyi > sub-check.log 2>&1 || fail "check of the module alone: $(cat sub-check.log)"
+(cd greet && "$IYI" check greeter.iyi) > sub-check2.log 2>&1 || fail "check from inside greet/: $(cat sub-check2.log)"
+"$IYI" test > sub-test.log 2>&1 && grep -q "^1 passed, 0 failed" sub-test.log || fail "the test beside the module: $(cat sub-test.log)"
+"$IYI" check --affected greet/greeter.iyi > sub-aff.log 2>&1 && grep -q "^3 consumer(s) checked, all compile" sub-aff.log ||
+  fail "check --affected of the module: $(cat sub-aff.log)"
+"$IYI" mod context greet/greeter.iyi > sub-ctx.log 2>&1 && grep -q "def greeting : String" sub-ctx.log ||
+  fail "mod context of the module: $(head -5 sub-ctx.log)"
+[ "$status" -eq 0 ] && echo "  greet/greeter.iyi: check, its test, check --affected and mod context resolve liba through the root's iyi.mod"
 
 echo
 if [ "$status" -eq 0 ]; then

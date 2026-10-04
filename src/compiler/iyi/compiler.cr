@@ -339,6 +339,19 @@ module Iyi
       root.empty? ? "/" : root
     end
 
+    # The directory a build of *path* is answered from: the root its header
+    # names, or its own directory when the header names none. The manifest
+    # is read there, and a workspace keeps `mods` there, for every verb
+    # that compiles - a build, `check`, `test`, `mod context`, the language
+    # server. The manifest was read beside the entry, so in a project whose
+    # `iyi.mod` sits above `greet/`, `iyi run main.iyi` built
+    # `greet/greeter.iyi` and `iyi check greet/greeter.iyi` refused it with
+    # "no requirement covers 'example.test/user/liba'"; the test beside it
+    # "does not build", and `check --affected` said two consumers broke.
+    def self.entry_root_of(path : String, text : String) : String
+      header_root_of(path, text) || File.dirname(path)
+    end
+
     # Compiles against an already-analysed prelude. This is the same split the
     # fork probe measures (SPEC.md IV.1a): the top-level pass runs over the user
     # file only, and every pass after it runs over both trees, because they walk
@@ -390,9 +403,9 @@ module Iyi
       # never computed is not one it can be said to have decided against.
       if table = @iyi_mod_table
         program.iyi_mod_table = table
-      elsif filename = program.filename
+      elsif entry = sources.first?
         begin
-          program.iyi_mod_table = Mod::Installer.table_for(File.dirname(filename))
+          program.iyi_mod_table = Mod::Installer.table_for(Compiler.entry_root_of(entry.filename, entry.code))
         rescue ex : Mod::ModError
           raise Error.new(ex.message)
         end
@@ -937,6 +950,10 @@ module Iyi
           end
         end
         artifact.filled = true
+        # Said in the file, because the file is what a consumer has: one from
+        # a build that generated nothing is refused where a build links
+        # (`Artifact#declarations_only`).
+        artifact.declarations_only = units.nil?
         IyiMod.write artifact, path
       end
     end
@@ -968,11 +985,13 @@ module Iyi
             signatures.each do |item|
               signature = IyiMod.signature(item.def)
               functions << signature
-              # A module's own `pub def` that takes a block is the consumer's
-              # to compile for the same reason, and the module name is the
-              # container the far side looks it up under.
+              # A module's own `pub def` that takes a block, or has `forall`
+              # parameters, is the consumer's to compile for the same reason,
+              # and the module name is the container the far side looks it up
+              # under.
               if !item.def.abstract? &&
-                 (iyi_takes_block?(item.def) || iyi_widened_parameters?(type, item.def))
+                 (IyiMod.caller_instantiated?(item.def) || iyi_widened_parameters?(type, item.def) ||
+                 IyiMod.answer_travels?(item.def))
                 iyi_record_mono_body program, filename, module_name, signature, item.def
               end
             end
@@ -999,7 +1018,7 @@ module Iyi
 
             signature = IyiMod.signature(item.def, check_block: false)
             carried_functions << signature
-            if iyi_takes_block?(item.def)
+            if IyiMod.caller_instantiated?(item.def) || IyiMod.answer_travels?(item.def)
               iyi_record_mono_body program, filename, module_name, signature, item.def
             end
           end
@@ -1080,6 +1099,15 @@ module Iyi
             travels: true)
           next
         end
+        # Whether this file writes the type down at all. A def that uses
+        # `{{@type}}` is copied onto each subclass a call reaches, and the copy
+        # keeps the location of the def it was copied from, so the producing
+        # program's own `class User < Model` gave kit/lib a `User#type_name`
+        # located in kit/lib. Carried, `class ::Main::User` ended up in the
+        # library's artifact: the same program built from it was refused with
+        # `superclass mismatch for class Main::User`, and a consumer with a
+        # `struct User` of its own with `User is not a struct, it's a class`.
+        named_here = type.locations.try &.any? { |location| location.original_filename == filename }
         {type, type.metaclass}.each do |side|
           side.as?(ModuleType).try &.defs.try &.each_value do |items|
             items.each do |item|
@@ -1089,6 +1117,7 @@ module Iyi
               # macro wrote is located in its expansion, not in the file.
               next unless a_def.location.try(&.original_filename) == filename
               next if a_def.iyi_from_impl? || a_def.new? || a_def.abstract?
+              next if a_def.macro_def? && !named_here
               # The compiler's instructions are not this module's to describe;
               # the ones it wrote `@[Primitive]` above are. `std/float` writes
               # the whole matrix for `::Float32` this way.
@@ -1114,8 +1143,7 @@ module Iyi
         # are the prelude's or another module's, and either way they arrive
         # with the type; an include under this module's namespace could not
         # have been written anywhere but here.
-        included = (own ? iyi_included_modules(type).select(&.starts_with?(own_prefix)) : [] of String)
-          .map { |name| iyi_absolute_name(name) }
+        included = own ? iyi_included_modules(type).select(&.lchop("::").starts_with?(own_prefix)) : [] of String
         # The fields of a type this file declares under a foreign name.
         # Nothing else on this side carries a field: a type the module does
         # not own arrives with its own, and one it owns is declared in the
@@ -1134,7 +1162,12 @@ module Iyi
         # = 1000_u64` written on a reopened `::File` is this module's to
         # carry however little of `::File` is.
         class_vars = iyi_class_vars_written_in(type, filename)
-        next if methods.empty? && included.empty? && fields.empty? && class_vars.empty?
+        # And the macros written here on it, which are its surface as its
+        # methods are: `std/static_array` writes `macro [](*args)` on
+        # `::StaticArray`, and neither a consumer of the artifact nor `iyi
+        # doc` had it.
+        macros = iyi_macros_on(type, filename)
+        next if methods.empty? && included.empty? && fields.empty? && class_vars.empty? && macros.empty?
         methods.sort_by! &.name
 
         # `Tuple` and `NamedTuple` describe themselves as "tuple" and "named
@@ -1154,6 +1187,7 @@ module Iyi
           includes: included,
           usings: iyi_type_usings(program, type, filename),
           types: [] of IyiMod::TypeDecl,
+          macros: macros,
         )
       end
       declarations.sort_by! &.name
@@ -1168,14 +1202,6 @@ module Iyi
       locations = type.locations
       return false if locations.nil? || locations.empty?
       locations.all? { |location| location.original_filename == filename }
-    end
-
-    # iyi: one name written so it resolves from anywhere, which is what the
-    # reopened section needs: its text is rendered inside the module, where
-    # `Float` is the module `Std::Float` before it is the prelude's type.
-    private def iyi_absolute_name(name : String) : String
-      return name if name.empty? || name.starts_with?("::")
-      "::#{name}"
     end
 
     # iyi: the imports' names written inside *type*'s own body, as the
@@ -1782,13 +1808,17 @@ module Iyi
       if type.is_a?(GenericReferenceStorageType)
         annotations << "@[Primitive(:ReferenceStorageType)]"
       end
+      annotations.concat iyi_read_annotations(type)
 
       IyiMod::TypeDecl.new(
         name: name,
         kind: iyi_type_kind(type),
         type_parameters: type_parameters,
         assoc_types: assoc_types,
-        supertraits: type.responds_to?(:supertraits) ? type.supertraits.map(&.to_s) : [] of String,
+        # The trait's own parameters stay bare: `trait Ord(T) : Cmp(T)` was
+        # written `::Lib::Ord::Cmp(::T)`, and the consumer stopped on
+        # "undefined constant ::T".
+        supertraits: type.responds_to?(:supertraits) ? type.supertraits.map { |supertrait| IyiMod.absolute_type(supertrait.to_s, type.is_a?(GenericType) ? type.type_vars : [] of String) } : [] of String,
         # None for the type the annotation above makes: its `@type_id` is
         # the compiler's, and a compiler handed one back refuses it —
         # "can't declare instance variables in ReferenceStorage(T)". What
@@ -1916,7 +1946,7 @@ module Iyi
       type.process_value
       written = type.@value.to_s
       return written unless written.empty? || written == name
-      type.aliased_type?.try(&.to_s) || written
+      type.aliased_type?.try { |aliased| IyiMod.absolute_type(aliased.to_s) } || written
     end
 
     # iyi: the types declared under *type* that a consumer needs to have rather
@@ -1976,6 +2006,28 @@ module Iyi
           next
         end
 
+        # An annotation the module keeps to itself, because what travels is
+        # written under it: `iyi_read_annotations` puts `@[Zone]` above a type
+        # and a travelling body asks `{{ @type.annotation(Zone) }}`, and a
+        # consumer without it said `undefined constant Zone`. It has nothing
+        # but its name, as an exported one has, and no `private` in front:
+        # unmarked is what keeps it the module's own, and `private annotation`
+        # is refused with "can't apply visibility modifier".
+        if declared.is_a?(AnnotationType)
+          declarations << IyiMod::TypeDecl.new(
+            name: name,
+            kind: declared.type_desc,
+            type_parameters: [] of String,
+            assoc_types: [] of String,
+            supertraits: [] of String,
+            fields: [] of {String, String, String},
+            methods: [] of IyiMod::Signature,
+            visibility: "",
+            doc: declared.doc || "",
+          )
+          next
+        end
+
         # An enum, which travels as its members whichever side it is on. This
         # is the same declaration the exported path writes, and the carried
         # side used to fall through to the class branch below: it wrote the
@@ -2004,6 +2056,7 @@ module Iyi
             supertraits: [] of String,
             fields: [] of {String, String, String},
             class_vars: collect_iyi_class_vars(declared),
+            annotations: iyi_read_annotations(declared),
             methods: iyi_carried_methods(program, filename, container, declared),
             visibility: declared.private? ? "private" : "",
             types: iyi_carried_types(program, filename, declared, path: container),
@@ -2043,6 +2096,7 @@ module Iyi
           supertraits: [] of String,
           fields: collect_iyi_fields(declared),
           class_vars: collect_iyi_class_vars(declared),
+          annotations: iyi_read_annotations(declared),
           methods: iyi_carried_methods(program, filename, container, declared),
           visibility: declared.private? ? "private" : "",
           types: iyi_carried_types(program, filename, declared, path: container),
@@ -2189,9 +2243,15 @@ module Iyi
     # abstract def on non-abstract class`, which is where `std/log` stopped.
     # `Iyi::Bind` writes it into `kind` the same way, and
     # `render_type_header` prints the string as it is.
+    #
+    # Less the word `generic`, which is the description and not the keyword:
+    # `render_type_header` takes it off the front, and behind `abstract` it
+    # stayed, so `pub abstract class GA(T)` came back as `pub abstract generic
+    # class GA(T)` — "pub abstract takes a class, a struct or a def" from the
+    # artifact reader, and the same line in `iyi doc` and `mod context`.
     private def iyi_type_kind(type : Type) : String
       abstract_type = type.responds_to?(:abstract?) && type.abstract?
-      abstract_type ? "abstract #{type.type_desc}" : type.type_desc
+      abstract_type ? "abstract #{type.type_desc.lchop("generic ")}" : type.type_desc
     end
 
     # iyi: what a class inherits from, empty where it inherits from the root
@@ -2211,13 +2271,13 @@ module Iyi
     # be writing what the keyword already says. Devirtualised, for the reason
     # `iyi_type_name` gives.
     #
-    # Written relative to the namespace the class is declared in, which is
-    # what makes `inheritance_order` able to place it: that walk matches the
-    # names in a declaration against its *siblings*, so a superclass spelled
-    # `Std::Io::Reader` beside a sibling called `Reader` matched nothing and
-    # `pub class Sized < Std::Io::Reader` was rendered above the class it
-    # names — `undefined constant Std::Io::Reader`, about a type eleven
-    # lines below.
+    # Written relative to the namespace the class is declared in when it is
+    # declared there too, which is what makes `inheritance_order` able to
+    # place it: that walk matches the names in a declaration against its
+    # *siblings*, so a superclass spelled `Std::Io::Reader` beside a sibling
+    # called `Reader` matched nothing and `pub class Sized < Std::Io::Reader`
+    # was rendered above the class it names — `undefined constant
+    # Std::Io::Reader`, about a type eleven lines below. See `iyi_edge_name`.
     private def iyi_superclass_name(type : Type) : String
       return "" unless type.responds_to?(:superclass)
       superclass = type.superclass
@@ -2230,11 +2290,26 @@ module Iyi
       # here, which is the one place the rule below is wrong.
       return name if type.is_a?(GenericReferenceStorageType)
       return "" if name == "Reference" || name == "Struct" || name == "Value"
-      if type.is_a?(NamedType)
-        prefix = "#{type.namespace}::"
-        return name.lchop(prefix) if prefix != "::" && name.starts_with?(prefix)
-      end
-      name
+      iyi_edge_name(type, name)
+    end
+
+    # iyi: a type a declaration of *type* is written in terms of - its
+    # superclass, an include - as the declaration's text names it.
+    #
+    # Relative to *type*'s namespace where it is a sibling, for
+    # `inheritance_order`, and global everywhere else, because the text is
+    # read inside the module: `pub class Oops < ::Exception` beside an
+    # `app/exception` came back `< Exception`, which there is
+    # `App::Exception`. See `IyiMod.absolute_type`.
+    private def iyi_edge_name(type : Type, name : String) : String
+      absolute = IyiMod.absolute_type(name, iyi_parameter_names(type))
+      type.is_a?(NamedType) ? absolute.lchop("::#{type.namespace}::") : absolute
+    end
+
+    # iyi: the type parameters *type* declares, which a name written inside
+    # it may use and which name no type.
+    private def iyi_parameter_names(type : Type) : Array(String)
+      type.as?(GenericType).try(&.type_vars) || [] of String
     end
 
     # iyi: the modules a type includes, written back as the renderer's
@@ -2254,9 +2329,9 @@ module Iyi
     # include as much as a plain module is and is not a `ModuleType`, which
     # is the distinction `Iyi::Bind` learned the same way.
     #
-    # Relative to the namespace, for the reason `iyi_superclass_name` is:
-    # `inheritance_order` places a declaration by matching these names
-    # against its siblings.
+    # Relative to the namespace where they are siblings, for the reason
+    # `iyi_superclass_name` is: `inheritance_order` places a declaration by
+    # matching these names against its siblings.
     private def iyi_included_modules(type : Type) : Array(String)
       names = [] of String
       return names unless type.responds_to?(:parents)
@@ -2264,7 +2339,6 @@ module Iyi
       return names unless parents
 
       superclass = type.responds_to?(:superclass) ? type.superclass : nil
-      prefix = type.is_a?(NamedType) ? "#{type.namespace}::" : "::"
       parents.each do |parent|
         next if superclass && parent.same?(superclass)
         next unless parent.is_a?(ModuleType) || parent.is_a?(GenericModuleInstanceType)
@@ -2276,11 +2350,42 @@ module Iyi
         # record; this is for what the author wrote `include` above.
         next if parent.trait?
 
-        name = parent.devirtualize.to_s
-        name = name.lchop(prefix) if prefix != "::" && name.starts_with?(prefix)
+        name = iyi_edge_name(type, parent.devirtualize.to_s)
         names << name unless names.includes?(name)
       end
       names
+    end
+
+    # iyi: the annotations written above *type* that only a macro reads, as
+    # the lines `render_type_declaration` writes back above it.
+    #
+    # A def using `{{@type}}` travels and is expanded again on the far side,
+    # so what it asks of `@type` has to arrive with the type.
+    # `bench/migrate_fixture`'s `Report#priced?` is `{{
+    # @type.annotation(Shop::Priced) ? true : false }}` over an
+    # `@[Shop::Priced] class Report`; the declaration arrived bare, and the
+    # program built from the artifacts printed `priced? false` where the
+    # source build printed `priced? true`.
+    #
+    # Not the compiler's own, which `Program` declares at the top: each does
+    # something besides being read, and the ones a declaration needs are
+    # written by their own rules (`@[Share]` in `iyi_type_declaration`,
+    # `@[Flags]` on an enum, `@[Link]` on a lib). The path is an edge, for
+    # `inheritance_order`: an annotation has to be declared above the type it
+    # is written over.
+    private def iyi_read_annotations(type : Type) : Array(String)
+      written = [] of String
+      type.annotations.try &.each do |annotation_type, values|
+        next if annotation_type.namespace.is_a?(Program)
+        name = iyi_edge_name(type, annotation_type.to_s)
+        path = Path.new(name.lchop("::").split("::"), name.starts_with?("::"))
+        values.each do |value|
+          copy = value.clone
+          copy.path = path
+          written << copy.to_s
+        end
+      end
+      written
     end
 
     # One side of a type's methods — its own, or its metaclass's.
@@ -2328,18 +2433,26 @@ module Iyi
 
           signature = IyiMod.signature(item.def)
           methods << signature
-          # A block-taking def travels whatever type it is on: it is
-          # instantiated with the caller's block inside it, so the consumer is
-          # what compiles it — the same reason a generic's method and a trait's
-          # default travel (SPEC.md IV.1g).
+          # A block-taking or `forall` def travels whatever type it is on: it
+          # is instantiated with the caller's block inside it, or at the
+          # caller's types, so the consumer is what compiles it — the same
+          # reason a generic's method and a trait's default travel (SPEC.md
+          # IV.1g).
           #
           # And a def whose machine code enumerates an open type's members, or
           # which calls one that does, for the reason III.6 gives: the set is
           # the whole program's, so the answer is too. `Iyi::OpenTravel` marked
           # it before this ran.
-          if (travels || iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
-             iyi_widened_parameters?(type, item.def)) &&
-             !item.def.abstract?
+          #
+          # And a def whose body uses `{{@type}}` and the like, which is
+          # expanded again for each receiver a call reaches: a consumer's
+          # `class User < Model` is a receiver this build never saw, so only
+          # its own expansion can answer. Kept behind, `type_name` was a header
+          # and the consumer's link ended on `Model+@Model#type_name:String`,
+          # where the source build printed `Main::User`.
+          if (travels || IyiMod.caller_instantiated?(item.def) || item.def.iyi_open_travel? ||
+             item.def.macro_def? || iyi_widened_parameters?(type, item.def) ||
+             IyiMod.answer_travels?(item.def)) && !item.def.abstract?
             iyi_record_mono_body program, filename, container, signature, item.def
           end
         end
@@ -2443,8 +2556,8 @@ module Iyi
 
             signature = IyiMod.signature(item.def, check_block: false)
             signatures << signature
-            # The same three reasons the exported side travels for: a
-            # block-taking body is the caller's, one whose code answers for
+            # The same reasons the exported side travels for: a block-taking
+            # or `forall` body is the caller's, one whose code answers for
             # an open set is the program's (SPEC.md III.6), and one whose
             # parameter is written wider than its callers has no symbol the
             # consumer can ask for. A header for any of them would promise a
@@ -2453,8 +2566,8 @@ module Iyi
             # module it keeps to itself, and the link ended on
             # `decode_int32<IyiIO+>`.
             if travels || (stencilled && side.same?(type)) ||
-               iyi_takes_block?(item.def) || item.def.iyi_open_travel? ||
-               iyi_widened_parameters?(type, item.def)
+               IyiMod.caller_instantiated?(item.def) || item.def.iyi_open_travel? || item.def.macro_def? ||
+               iyi_widened_parameters?(type, item.def) || IyiMod.answer_travels?(item.def)
               iyi_record_mono_body program, filename, container, signature, item.def
             end
           end
@@ -2472,12 +2585,6 @@ module Iyi
     # `src/std` spells it — so the last name is what is compared.
     private def iyi_primitive_written?(a_def : Def) : Bool
       !!a_def.all_annotations.try &.any? { |ann| ann.path.names.last? == "Primitive" }
-    end
-
-    # iyi: whether a def is instantiated per call site because it takes a
-    # block — `&block : …` or a bare `yield` (SPEC.md IV.1g).
-    private def iyi_takes_block?(a_def : Def) : Bool
-      !!(a_def.block_arg || a_def.block_arity)
     end
 
     # iyi: whether a consumer would ask for a symbol this build had no reason
@@ -2625,13 +2732,31 @@ module Iyi
 
     # The macros declared on one type, which is the same question one level in:
     # a class may declare a macro and a method of that class may call it, and
-    # the method's body is what travels.
-    private def iyi_macros_on(type : Type?) : Array(String)
-      sources = [] of String
-      type.try &.metaclass.as?(ModuleType).try &.macros.try &.each_value do |overloads|
-        overloads.each { |a_macro| sources << a_macro.to_s }
+    # the method's body is what travels. Each with its doc comment
+    # (`IyiMod.macro_source`), in the order of the macros themselves. With
+    # *filename*, only those written there: a type this module reopens has
+    # the macros of whoever declared it too.
+    #
+    # Its hooks as well — `macro inherited`, `included`, `extended`,
+    # `method_added` — which `add_macro` files under `hooks` and not under
+    # `macros`, so reading the one table carried none of them. Written back
+    # as the macros they were, the consumer's own reading registers them
+    # again, and a consumer's `class Mine < P` runs P's hook the way the
+    # source build does: without it `Mine.new.kind` was `undefined method
+    # 'kind' for Main::Mine`, and a registry hook added nothing and printed
+    # `[]` where the source build printed `["Main::Mine"]`.
+    private def iyi_macros_on(type : Type?, filename : String? = nil) : Array(String)
+      macros = [] of Macro
+      metaclass = type.try &.metaclass.as?(ModuleType)
+      metaclass.try &.macros.try &.each_value do |overloads|
+        overloads.each do |a_macro|
+          macros << a_macro if filename.nil? || a_macro.location.try(&.original_filename) == filename
+        end
       end
-      sources.sort!
+      metaclass.try &.hooks.try &.each do |hook|
+        macros << hook.macro if filename.nil? || hook.macro.location.try(&.original_filename) == filename
+      end
+      macros.sort_by!(&.to_s).map { |a_macro| IyiMod.macro_source(a_macro) }
     end
 
     private def iyi_record_mono_body(program : Program, filename : String,
@@ -2686,7 +2811,7 @@ module Iyi
         # recorded as `?` rather than guessed at — the same convention an
         # unannotated signature takes, and equally visible in `mod dump`.
         resolved = variable.type?
-        fields << {name, resolved ? iyi_type_name(resolved) : "?", defaults[name]? || ""}
+        fields << {name, resolved ? iyi_type_name(resolved, type) : "?", defaults[name]? || ""}
       end
       fields
     end
@@ -2724,13 +2849,22 @@ module Iyi
     # measured are. A virtual type inside a generic argument —
     # `Array(IyiIO+)` — would still print as it prints; a rule that covers
     # what was measured is the one worth having.
-    private def iyi_type_name(type : Type) : String
-      if type.is_a?(UnionType) && type.union_types.any? { |member| member.devirtualize != member }
-        names = [] of String
-        type.union_types.each { |member| names << member.devirtualize.to_s }
-        return names.join(" | ")
-      end
-      type.devirtualize.to_s
+    #
+    # And global, every name in it, because the declaration is read inside
+    # the module: `@pair : ::Tuple(Int32, Int32)` beside an `app/tuple` came
+    # back `@pair : Tuple(Int32, Int32)` and the consumer said "App::Tuple is
+    # not a generic type". *owner* is the type the name is written in, whose
+    # parameters stay as they are. See `IyiMod.absolute_type`.
+    private def iyi_type_name(type : Type, owner : Type) : String
+      text =
+        if type.is_a?(UnionType) && type.union_types.any? { |member| member.devirtualize != member }
+          names = [] of String
+          type.union_types.each { |member| names << member.devirtualize.to_s }
+          names.join(" | ")
+        else
+          type.devirtualize.to_s
+        end
+      IyiMod.absolute_type(text, iyi_parameter_names(owner))
     end
 
     # iyi: a type's own class variables, for `TypeDecl#class_vars` (SPEC.md
@@ -2768,7 +2902,7 @@ module Iyi
         annotations = variable.thread_local? ? ["@[ThreadLocal]"] : [] of String
         # The same reading a field's type gets, and for the same reason.
         resolved = variable.type?
-        class_vars << IyiMod::ClassVarDecl.new(name, resolved ? iyi_type_name(resolved) : "?",
+        class_vars << IyiMod::ClassVarDecl.new(name, resolved ? iyi_type_name(resolved, type) : "?",
           initialiser, annotations)
       end
       class_vars
@@ -3045,16 +3179,17 @@ module Iyi
       program.iyi_prefers_source = @iyi_prefers_source
       program.iyi_wants_object_code = !@no_codegen
       program.iyi_rewrites_artifacts = !@emit_iyimod.nil?
-      # iyi: the manifest, if the entry file's directory has one (III.7) —
-      # or the table a tool prepared, which wins because the tool resolved
-      # the *user's* manifest and the entry may be a dependency with none.
+      # iyi: the manifest, if the root the entry is answered from has one
+      # (III.7, `Compiler.entry_root_of`) — or the table a tool prepared,
+      # which wins because the tool resolved the *user's* manifest and the
+      # entry may be a dependency with none.
       # A manifest failure is a build error with the manifest's name in it,
       # not a compiler bug banner.
       if table = @iyi_mod_table
         program.iyi_mod_table = table
-      elsif filename = program.filename
+      elsif entry = sources.first?
         begin
-          program.iyi_mod_table = Mod::Installer.table_for(File.dirname(filename))
+          program.iyi_mod_table = Mod::Installer.table_for(Compiler.entry_root_of(entry.filename, entry.code))
         rescue ex : Mod::ModError
           raise Error.new(ex.message)
         end

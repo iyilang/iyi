@@ -152,9 +152,11 @@ class IyiIO
   # failed read leaves the limit at -1 as `fill_buffer` does, which is
   # what `read_failed?` reports. In Int64, up to one byte past what a
   # string holds: in Int32, doubling 1 GiB panicked "arithmetic overflow",
-  # and `File.read` of any file over 1 GiB - 64 KiB with it.
-  def read_all : String
+  # and `File.read` of any file over 1 GiB - 64 KiB with it. *size* is
+  # what the file says it holds, for `read_sized`.
+  def read_all(size : Int64 = 0_i64) : String
     raise "cannot read from closed IO" if @closed
+    return read_sized(size.to_i32) if size > 0_i64 && size < 2147483647_i64 && @read_pos >= @read_limit && !@eof
 
     capacity = 8192_i64
     buffer = Pointer(UInt8).malloc(capacity.to_u64)
@@ -192,6 +194,23 @@ class IyiIO
     end
   end
 
+  # Straight into the string: grown and then copied out, `File.read` of a
+  # 256 MB file peaked at 774 MB of working set, three times the file. A
+  # file that came up short is cut to what came; one that grew reads on.
+  private def read_sized(size : Int32) : String
+    filled = 0
+    got = 0_i64
+    text = String.new(size) do |buffer|
+      while filled < size && (got = low_level_read(@fd, (buffer + filled).as(Void*), (size - filled).to_u64)) > 0_i64
+        filled = filled + got.to_i32
+      end
+    end
+    return fill_buffer > 0 ? text + read_all : text if filled == size
+    @read_limit = got < 0_i64 ? -1 : 0
+    @eof = true
+    text[0, filled]
+  end
+
   def read_line(chomp : Bool = false) : String?
     raise "cannot read from closed IO" if @closed
 
@@ -201,34 +220,17 @@ class IyiIO
       return nil if filled <= 0
     end
 
-    # Fast path: scan current buffer for newline
-    found = -1
-    i = @read_pos
-    while i < @read_limit
-      if @read_buffer[i] == 10_u8
-        found = i
-        break
-      end
-      i = i + 1
+    # Fast path: the line is in the buffer, one copy.
+    found = @read_pos
+    while found < @read_limit && @read_buffer[found] != 10_u8
+      found = found + 1
     end
-
-    if found >= 0
-      take_count = found - @read_pos + 1
+    if found < @read_limit
       start_ptr = @read_buffer + @read_pos
+      len = found - @read_pos + 1
       @read_pos = found + 1
-
-      if chomp
-        len = take_count
-        len = len - 1 if len > 0 && start_ptr[len - 1] == 10_u8
-        len = len - 1 if len > 0 && start_ptr[len - 1] == 13_u8
-        return String.new(len) do |target|
-          target.copy_from(start_ptr, len)
-        end
-      else
-        return String.new(take_count) do |target|
-          target.copy_from(start_ptr, take_count)
-        end
-      end
+      len = len - (len > 1 && start_ptr[len - 2] == 13_u8 ? 2 : 1) if chomp
+      return String.new(len) { |target| target.copy_from(start_ptr, len) }
     end
 
     # Multi-buffer path: accumulate until newline or EOF. The capacity is
@@ -240,16 +242,12 @@ class IyiIO
     while true
       avail = @read_limit - @read_pos
       if avail > 0
-        found_idx = -1
         j = @read_pos
-        while j < @read_limit
-          if @read_buffer[j] == 10_u8
-            found_idx = j
-            break
-          end
+        while j < @read_limit && @read_buffer[j] != 10_u8
           j = j + 1
         end
-        take = found_idx >= 0 ? found_idx - @read_pos + 1 : avail
+        newline = j < @read_limit
+        take = newline ? j - @read_pos + 1 : avail
         wanted = line_len.to_i64 + take
         raise "a line is past the 2147483647 bytes a string holds" if wanted > 2147483647
         if wanted > line_cap
@@ -261,7 +259,7 @@ class IyiIO
         (line_buf + line_len).copy_from(@read_buffer + @read_pos, take)
         line_len = wanted.to_i32
         @read_pos = @read_pos + take
-        break if found_idx >= 0
+        break if newline
       end
 
       break if @eof
@@ -272,17 +270,9 @@ class IyiIO
     return nil if line_len == 0 && @eof
 
     # A `\r` ends a line only before a `\n`; a final lone one is kept.
-    if chomp && line_len > 0 && line_buf[line_len - 1] == 10_u8
-      len = line_len - 1
-      len = len - 1 if len > 0 && line_buf[len - 1] == 13_u8
-      String.new(len) do |target|
-        target.copy_from(line_buf, len)
-      end
-    else
-      String.new(line_len) do |target|
-        target.copy_from(line_buf, line_len)
-      end
-    end
+    len = line_len
+    len = len - (len > 1 && line_buf[len - 2] == 13_u8 ? 2 : 1) if chomp && len > 0 && line_buf[len - 1] == 10_u8
+    String.new(len) { |target| target.copy_from(line_buf, len) }
   end
 
   def gets(chomp : Bool = false) : String?
@@ -330,10 +320,11 @@ class IyiIO
     write(text.to_unsafe, text.bytesize)
   end
 
+  # One write of the line on a sync stream: the text and its newline as two
+  # let another thread's line in between - 750 of 80,000 lines from four.
   def write_line(text : String = "") : Nil
-    write(text)
-    write("\n")
-    flush if @sync
+    write(@sync ? text + "\n" : text)
+    write("\n") unless @sync
   end
 
   def print(text : String) : Nil
@@ -344,10 +335,9 @@ class IyiIO
     write(value.to_s)
   end
 
-  # A string that already ends its line is written as it is, as Crystal's
-  # `puts` writes it: `puts File.read(path)` printed a blank line after the
-  # file, and the same program under `--crystal` did not. Anything else is
-  # its `to_s` and a newline, whatever that ends with, as there.
+  # A string that already ends its line is written as it is, as the other
+  # library's `puts` writes it: `puts File.read(path)` printed a blank line
+  # after the file, `--crystal` none. A value's `to_s` always gets a newline.
   def puts(text : String) : Nil
     text.bytesize > 0 && text.to_unsafe[text.bytesize - 1] == 10_u8 ? write(text) : write_line(text)
   end

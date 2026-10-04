@@ -96,6 +96,7 @@ echo
 echo "== every section reported"
 for phrase in "Signal.wait answered INT, and the process lived" \
               "the next wait answered at once" \
+              "two arrivals nobody waited for are one" \
               "one request served, the listener closed, the group joined" \
               "the waiter left with Cancelled"; do
   if ! grep -q "$phrase" "$WORK/signal-plain.out" 2>/dev/null; then

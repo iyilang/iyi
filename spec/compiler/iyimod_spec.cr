@@ -41,9 +41,12 @@ private def signature(name : String,
                       block_parameter = "",
                       free_variables = [] of String,
                       receiver = "",
-                      required = false)
+                      required = false,
+                      free_variable_bounds = [] of {String, String},
+                      where_bounds = [] of {String, String})
   Iyi::IyiMod::Signature.new(name, receiver, parameters, block_parameter,
-    return_type, free_variables, required)
+    return_type, free_variables, required,
+    free_variable_bounds: free_variable_bounds, where_bounds: where_bounds)
 end
 
 private def type_declaration(name : String,
@@ -360,6 +363,26 @@ describe Iyi::IyiMod do
       read[1].required.should be_true
       read[2].receiver.should eq "self"
       read[3].parameters.should eq ["*values : T", "**options"]
+    end
+  end
+
+  # A bound is checked where a call matches (II.6 §3), so a consumer that
+  # has only the artifact needs it as much as the names. The format carried
+  # `forall T` for `forall T : Show` and nothing for `where Elem : Show`, and
+  # a consumer accepted calls the source build refused.
+  it "round-trips and renders a def's bounds" do
+    signatures = [
+      signature("render", ["x : T", "y : U"], "String", free_variables: ["T", "U"],
+        free_variable_bounds: [{"T", "Show"}]),
+      signature("shown", return_type: "String", where_bounds: [{"Elem", "Show"}, {"Key", "Cmp"}]),
+    ]
+
+    with_temporary_file do |path|
+      Iyi::IyiMod.write sample_artifact(exports: signatures), path
+      read = Iyi::IyiMod.read(path).exports.functions
+
+      Iyi::IyiMod.render_signature(read[0]).should eq "def render(x : T, y : U) : String forall T : Show, U"
+      Iyi::IyiMod.render_signature(read[1]).should eq "def shown : String where Elem : Show, Key : Cmp"
     end
   end
 
@@ -845,7 +868,7 @@ describe Iyi::IyiMod do
       artifact = Iyi::IyiMod.read(File.join("mods", "app", "box.iyimod"))
       secret = artifact.exports.types.find! { |declaration| declaration.name == "Secret" }
       secret.visibility.should eq "private"
-      secret.fields.should eq [{"@n", "Int32", ""}]
+      secret.fields.should eq [{"@n", "::Int32", ""}]
       # Headers, and only headers. The consumer cannot reach them and the
       # module's own object code already defines them — but a body that
       # travels calls them, and a call it cannot typecheck is refused before
@@ -1385,7 +1408,7 @@ describe Iyi::IyiMod do
 
       tally = artifact.exports.types.find { |type| type.name == "Tally" }.should_not be_nil
       tally.class_vars.map { |class_var| {class_var.name, class_var.type, class_var.value} }
-        .should eq [{"@@cache", "(String | Nil)", ""}, {"@@seen", "Int32", "0"}]
+        .should eq [{"@@cache", "(::String | ::Nil)", ""}, {"@@seen", "::Int32", "0"}]
       tally.class_vars.map(&.annotations).should eq [[] of String, [] of String]
 
       File.delete "app/counter.iyi"
@@ -2138,6 +2161,15 @@ describe Iyi::IyiMod do
   # artifact said "object code (none)", and a `--release` consumer of it
   # internalised the declarations it read and the IR was refused -
   # "Global is external, but doesn't have external or weak linkage!".
+  #
+  # And a `--release` consumer made private what that object code reaches
+  # by name in the program that links it. `x // 2` reaches nothing, so this
+  # passed while a module with a checked `+` did not link
+  # (`__iyi_raise_overflow`), nor one with a class (`:type_id`, `:headed`);
+  # on Windows a `defer` names the `void*` type descriptor, which a consumer
+  # with no `defer` of its own never defined. A struct changed through a
+  # getter is the last line: called rather than inlined, the getter answered
+  # a copy and the bump was lost, in the build writing the artifact too.
   it "carries object code from a release build to a release consumer" do
     with_tempdir("iyimod_release_object_code") do
       Dir.mkdir_p "boot"
@@ -2149,6 +2181,34 @@ describe Iyi::IyiMod do
             x // 2
           end
         end
+
+        pub struct Counter
+          property n : Int32
+
+          def initialize(@n : Int32)
+          end
+
+          def bump : Nil
+            @n += 1
+          end
+        end
+
+        pub class Holder
+          property counter : Counter
+
+          def initialize(@counter : Counter)
+          end
+        end
+
+        pub def add1(x : Int32) : Int32
+          x + 1
+        end
+
+        pub def with_defer(log : Array(String)) : Int32
+          defer log << "defer"
+          log << "body"
+          7
+        end
         IYI
       File.write "main.iyi", <<-IYI
         module main
@@ -2156,16 +2216,24 @@ describe Iyi::IyiMod do
         import boot/half
 
         puts Boot::Half::Half.of(84)
+        puts Boot::Half.add1(41)
+        h = Boot::Half::Holder.new(Boot::Half::Counter.new(1))
+        h.counter.bump
+        puts h.counter.n
+        log = [] of String
+        puts Boot::Half.with_defer(log)
+        puts log.join(",")
         IYI
 
       source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "42\n42\n2\n7\nbody,defer"
 
       producer = create_spec_compiler
       producer.prelude = "iyi/prelude"
       producer.release!
       producer.emit_iyimod = "mods"
       producer.compile source, File.expand_path("from-source")
-      `./from-source`.chomp.should eq "42"
+      `./from-source`.chomp.should eq expected
 
       artifact = Iyi::IyiMod.read(File.join("mods", "boot", "half.iyimod"), want_object_code: true)
       artifact.object_code.empty?.should be_false
@@ -2177,7 +2245,84 @@ describe Iyi::IyiMod do
       consumer.release!
       consumer.use_iyimod = "mods"
       consumer.compile source, File.expand_path("from-artifact")
-      `./from-artifact`.chomp.should eq "42"
+      `./from-artifact`.chomp.should eq expected
+    end
+  end
+
+  # The same reach without `--release`, where each type is a unit of its own
+  # and only two things were missing. A getter's caller has only a header,
+  # and a call answers a copy where the inlined body answered the field
+  # itself: `h.counter.bump` left 1 in the build writing the artifact and in
+  # the one reading it. And on Windows a module's `defer` is a catch pad over
+  # `void*`, whose type descriptor the main module defines when its own code
+  # first asks - which a consumer with no `defer`, `rescue` or `raise` of its
+  # own never did: `unresolved external symbol ... (??_R0PEAX@8)`.
+  it "changes a struct through an artifact's getter, and links its defer" do
+    with_tempdir("iyimod_getter_and_defer") do
+      Dir.mkdir_p "boot"
+      File.write "boot/shelf.iyi", <<-IYI
+        module boot/shelf
+
+        pub struct Counter
+          property n : Int32
+
+          def initialize(@n : Int32)
+          end
+
+          def me : self
+            self
+          end
+
+          def bump : Nil
+            @n += 1
+          end
+        end
+
+        pub class Holder
+          property counter : Counter
+
+          def initialize(@counter : Counter)
+          end
+        end
+
+        pub def with_defer(log : Array(String)) : Int32
+          defer log << "defer"
+          log << "body"
+          7
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import boot/shelf
+
+        h = Boot::Shelf::Holder.new(Boot::Shelf::Counter.new(1))
+        h.counter.bump
+        puts h.counter.n
+        c = Boot::Shelf::Counter.new(1)
+        c.me.bump
+        puts c.n
+        log = [] of String
+        puts Boot::Shelf.with_defer(log)
+        puts log.join(",")
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+      expected = "2\n2\n7\nbody,defer"
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.compile source, File.expand_path("from-source")
+      `./from-source`.chomp.should eq expected
+
+      File.delete "boot/shelf.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.compile source, File.expand_path("from-artifact")
+      `./from-artifact`.chomp.should eq expected
     end
   end
 
@@ -2905,8 +3050,9 @@ describe Iyi::IyiMod do
       end
       declarations.should contain "pub abstract class Sink"
       declarations.should contain "pub class Doubler < Sink"
-      # The field, named and not printed: no `+`.
-      declarations.should contain "@sink : Boot::Sink::Sink\n"
+      # The field, named and not printed: no `+`, and global, because it is
+      # read inside the module.
+      declarations.should contain "@sink : ::Boot::Sink::Sink\n"
 
       File.delete "boot/sink.iyi"
 
@@ -4506,8 +4652,9 @@ describe Iyi::IyiMod do
       # In the order they were declared, because that order is the layout: a
       # field's offset is its position in this list, and a consumer compiling a
       # body of this module's has to reach the same field the module's own
-      # object code does.
-      declaration.fields.should eq [{"@item", "T", ""}, {"@count", "Int32", ""}]
+      # object code does. Global, the type parameter excepted: the declaration
+      # is read inside the module (`IyiMod.absolute_type`).
+      declaration.fields.should eq [{"@item", "T", ""}, {"@count", "::Int32", ""}]
     end
   end
 
@@ -4948,7 +5095,7 @@ describe Iyi::IyiMod do
     # reader of this file has to be able to tell from "carried and exported".
     text.should contain "  pub trait Greet"
     text.should contain "    def greet : String"
-    text.should contain "  impl Greet for User"
+    text.should contain "  impl ::Greet for ::User"
   end
 
   # II.6 keeps a trait's parameters and its associated types apart — the first
@@ -4990,7 +5137,7 @@ describe Iyi::IyiMod do
     # `generic` is how a type describes itself, not how anyone declares one.
     text.should contain "  pub trait Enumerable : Cmp"
     text.should contain "    type Elem"
-    text.should contain "  impl Std::Enumerable::Enumerable for Std::List::List(T) forall T : Cmp"
+    text.should contain "  impl ::Std::Enumerable::Enumerable for ::Std::List::List(T) forall T : Cmp"
     text.should contain "    type Elem = T"
   end
 
@@ -5014,10 +5161,10 @@ describe Iyi::IyiMod do
     text.should contain "pub trait Greet\n  abstract def greet : String\nend\n"
     # An `abstract def` ends at its signature and takes no `end` of its own.
     text.should_not contain "abstract def greet : String\n  end"
-    text.should contain "impl Greet for User\nend\n"
+    text.should contain "impl ::Greet for ::User\nend\n"
     # The impl comes after the type it targets, because the requirement check
     # reads the methods off the target rather than out of the impl's body.
-    text.index("pub trait Greet").not_nil!.should be < text.index("impl Greet for User").not_nil!
+    text.index("pub trait Greet").not_nil!.should be < text.index("impl ::Greet for ::User").not_nil!
   end
 
   it "renders a generic type and the impl that answers its associated type" do
@@ -5032,7 +5179,7 @@ describe Iyi::IyiMod do
 
     text.should contain "pub struct List(T)"
     text.should contain "  def each(& : (T -> Nil)) : Nil\n  end\n"
-    text.should contain "impl Std::Enumerable::Enumerable for Std::List::List(T) forall T\n  type Elem = T\nend\n"
+    text.should contain "impl ::Std::Enumerable::Enumerable for ::Std::List::List(T) forall T\n  type Elem = T\nend\n"
   end
 
   # A `--release` consumer is one LLVM module, and one module gives every

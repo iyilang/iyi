@@ -61,7 +61,7 @@ module Iyi
         name = name.gsub { |char| char.in?('<', '>', ':', '"', '/', '\\', '|', '?', '*') || char.ord < 32 ? '-' : char }
         name += "-" if name.ends_with?(' ') || name.ends_with?('.')
       {% end %}
-      output_dir = File.join(dir, bounded_name(name))
+      output_dir = File.join(dir, bounded_name(name, dir))
       Dir.mkdir_p(output_dir)
       output_dir
     end
@@ -71,18 +71,39 @@ module Iyi
     # file system takes, on any platform; on Windows the cache directory's
     # own path passes MAX_PATH far sooner - a program at a 222-character
     # path, which Windows opens, did not build: "The system cannot find the
-    # path specified", for a cache directory 262 characters long. Past
-    # NAME_LIMIT the name keeps its end - the file and the directories
-    # nearest it, the part a person reads - behind a digest of the whole,
-    # which is what keeps two deep paths that end alike apart. The objects
-    # inside have names of their own of about sixty characters, and the
-    # cache root is the rest of what MAX_PATH has to hold.
+    # path specified", for a cache directory 262 characters long. Past the
+    # limit the name keeps its end - the file and the directories nearest
+    # it, the part a person reads - behind a digest of the whole, which is
+    # what keeps two deep paths that end alike apart.
     NAME_LIMIT = 100
 
-    private def bounded_name(name : String) : String
-      return name if name.size <= NAME_LIMIT
+    # On Windows the limit is also what MAX_PATH leaves after the cache root
+    # and the longest file written inside: a unit's object is at most 50
+    # characters of name, the optimization suffix and `.obj.tmp`, and the
+    # separators. A fixed 100 assumed a short root, and IYI_CACHE_DIR is the
+    # author's: under a 101-character root a program's 96-character name
+    # left its 61-character object 260 characters long, and `iyi run`
+    # stopped at "a codegen thread failed: Error renaming file ...: The
+    # system cannot find the path specified".
+    WINDOWS_PATH_LIMIT = 259
+    OBJECT_NAME_SIZE   =  61
+
+    private def bounded_name(name : String, root : String) : String
+      limit = NAME_LIMIT
+      {% if flag?(:win32) %}
+        limit = Math.min(limit, WINDOWS_PATH_LIMIT - root.size - 1 - 1 - OBJECT_NAME_SIZE)
+        # A digest and one character of the path is the shortest name that
+        # is still this program's; a root that leaves less than that leaves
+        # no room for any build, and saying so beats a failed rename.
+        if limit < 34
+          raise Iyi::Error.new("the cache directory #{root} is #{root.size} characters long, and the files a build " \
+                               "writes under it would pass Windows' #{WINDOWS_PATH_LIMIT + 1}-character path limit. " \
+                               "Point #{cache_dir_variable} at a directory of at most #{WINDOWS_PATH_LIMIT - 2 - OBJECT_NAME_SIZE - 34} characters")
+        end
+      {% end %}
+      return name if name.size <= limit
       digest = ::Crystal::Digest::MD5.hexdigest(name)
-      "#{digest}-#{name[(name.size - (NAME_LIMIT - digest.size - 1))..]}"
+      "#{digest}-#{name[(name.size - (limit - digest.size - 1))..]}"
     end
 
     # Keeps the 10 most recently used directories in the cache,
@@ -182,9 +203,10 @@ module Iyi
     # Which of the two names above the author actually set: a sentence
     # about `IYI_CACHE_DIR` read by somebody who set `CRYSTAL_CACHE_DIR`
     # names a variable they do not have, and this compiler answers under
-    # both names (see `Config.env`).
+    # both names (see `Config.env`). Neither set is the default's, and
+    # IYI_CACHE_DIR is the one to set.
     private def cache_dir_variable : String
-      ENV["IYI_CACHE_DIR"]? ? "IYI_CACHE_DIR" : "CRYSTAL_CACHE_DIR"
+      ENV["IYI_CACHE_DIR"]? || !ENV["CRYSTAL_CACHE_DIR"]? ? "IYI_CACHE_DIR" : "CRYSTAL_CACHE_DIR"
     end
 
     private def cleanup_dirs(entries)
@@ -226,8 +248,20 @@ module Iyi
       true
     end
 
+    # iyi: what the cache root holds besides build directories, which the
+    # rotation leaves alone. `mod` is every package checkout `iyi get` made
+    # (`Mod::Fetcher`), and a checkout is what iyi.sum pins, not a build's
+    # leftovers: its modification time moves only when a new host's
+    # directory is made under it, so eleven builds after a `get` it was the
+    # oldest entry and was deleted, and a project that had built a minute
+    # earlier answered "cannot fetch example.com/me/greet v0.1.0" offline.
+    # `clear_cache` still removes it. The root's files - `msvc-probe`,
+    # `linker-probe`, the link templates - are not directories and the
+    # rotation passes over them already.
+    NOT_BUILDS = {"mod"}
+
     private def gather_cache_entries(dir)
-      Dir.children(dir).map! { |name| File.join(dir, name) }
+      Dir.children(dir).reject!(&.in?(NOT_BUILDS)).map! { |name| File.join(dir, name) }
     end
   end
 end

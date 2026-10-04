@@ -144,6 +144,11 @@ prove_fails "Enumerable each_cons_pair broken" no_cons_pair "enumerable.iyi" "en
 prove_fails "Enumerable to_h corrupted" no_to_h "enumerable.iyi" "enum: to_h" \
   's/result\[pair\[0\]\] = pair\[1\]/result[pair[0]] = 0/'
 
+# 6b. `take` pulling past the nth element again: with the guard for a
+#     zero count gone, `take(0)` pulls an element and keeps it.
+prove_fails "take(0) pulls an element" take_zero_pulls "enumerable.iyi" "enum: take pulls no element past the nth" \
+  's/^    return result if n == 0$/    result/'
+
 # 7. String hash_key is the length
 prove_fails "Hashable String hash_key is length" no_strhash "traits.iyi" "Hashable: String hash_key is the string" \
   's/hash # FNV, not the length/size/'
@@ -205,9 +210,11 @@ prove_fails "min_by refuses a nil answer" nil_min_by "enumerable.iyi" "panic: mi
 prove_fails "minmax_by refuses a nil answer" nil_minmax_by "enumerable.iyi" "panic: minmax_by of an empty collection" \
   's/raise "minmax_by of an empty collection" if entry\[2\]\.nil?/raise "minmax_by of an empty collection" if entry[0].nil?/'
 
-# 19. `includes?` asking `<=>` again.
-prove_fails "includes? by ordering" cmp_includes "enumerable.iyi" "enum: includes? asks ==" \
-  's/return true if e == value/return true if (e <=> value) == 0/'
+# 19. `includes?` asking anything but `==` again: a hash, which agrees for
+#     two NaNs. (`<=>`, which it asked once, no longer compiles here: the
+#     exercise asks it of a list of arrays now, and an array has no `<=>`.)
+prove_fails "includes? by hash" hash_includes "enumerable.iyi" "enum: includes? asks ==" \
+  's/return true if e == value/return true if e.hash == value.hash/'
 
 echo
 echo "== one mistake, one sentence, whichever tower answers"
@@ -269,6 +276,10 @@ panics_with "minmax_by of an empty list" minmax_by_empty "minmax_by of an empty 
   'List(Int32).new([] of Int32).minmax_by { |x| x }[0]'
 panics_with "groups of nothing" in_groups_zero "group size must be positive" \
   'List(Int32).new([1, 2, 3]).in_groups_of(0, 0)'
+# A zip with a shorter collection is refused, as the other library refuses
+# it: the pairs stopped at the shorter, and an element went unsaid.
+panics_with "a zip with a shorter collection" zip_shorter "index 3 out of range for 3 elements" \
+  'List(Int32).new([1, 2, 3, 4]).zip(List(Int32).new([5, 6, 7])).size'
 
 echo
 echo "== the library is iyi all the way down"
@@ -436,13 +447,24 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
   if ! (cd "$work" && "$IYI" build --emit-iyimod mods -o from-source "$source") \
        > "$work/emit.log" 2>&1; then
     unconsumable="$unconsumable $name"
-    echo "  $name: cannot write its artifacts: $(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-140)"
+    why="$(grep -m1 -E 'Error|BUG' "$work/emit.log" | cut -c1-140)"
+    # A failure with no Error line was seen twice, under a loaded machine,
+    # and its log was gone with the work directory: name its last lines.
+    [ -n "$why" ] || why="no Error line; it ended: $(tail -3 "$work/emit.log" | tr '\n' ' ' | cut -c1-200)"
+    echo "  $name: cannot write its artifacts: $why"
     continue
   fi
-  if ! (cd "$work" && "$IYI" build --use-iyimod mods -o from-artifact "$source") \
-       > "$work/use.log" 2>&1; then
+  (cd "$work" && "$IYI" build --use-iyimod mods -o from-artifact "$source") \
+    > "$work/use.log" 2>&1
+  use_status=$?
+  if [ "$use_status" -ne 0 ]; then
     unconsumable="$unconsumable $name"
-    echo "  $name: $(grep -m1 -E 'Error|BUG|undefined' "$work/use.log" | cut -c1-140)"
+    # A failure with no such line printed the name and nothing after it:
+    # std_compress_exercise did, once, and the next runs consumed it
+    # cleanly. The status and the log's last line say what it was.
+    said="$(grep -m1 -E 'Error|BUG|undefined' "$work/use.log")"
+    [ -n "$said" ] || said="exits $use_status: $(tail -n 1 "$work/use.log")"
+    echo "  $name: $(printf '%s' "$said" | cut -c1-140)"
     continue
   fi
   "$work/from-source" > "$work/source.out" 2>&1
@@ -486,6 +508,32 @@ if [ -n "$unconsumable" ]; then
   status=1
 else
   echo "  all $(ls "$REPO"/bench/std_*_exercise.iyi | wc -l | tr -d ' ') exercises answer the same from source and from artifacts"
+fi
+
+echo
+echo "== a panic std raises names no site from its artifact either"
+# A panic the library raises prints no site, the library's own line not
+# being where the bug is - but that test knew `src/std/` and not an
+# artifact's path, and from artifacts `Deque#pop` of an empty deque printed
+# `at mods\std\deque.iyimod:297`, which its build from source did not.
+site="$WORK/r1/panic_site"
+mkdir -p "$site/mods"
+printf 'import std/deque::{Deque}\n\nDeque(Int32).new.pop\n' > "$site/pop.iyi"
+if (cd "$site" && "$IYI" build --emit-iyimod mods -o from-source pop.iyi \
+      && "$IYI" build --use-iyimod mods -o from-artifact pop.iyi) > "$site/build.log" 2>&1; then
+  "$site/from-source" > "$site/source.out" 2>&1
+  "$site/from-artifact" > "$site/artifact.out" 2>&1
+  # The first line and the absence of a site, not the whole stream: darwin
+  # prints a backtrace after it, and its addresses differ between builds.
+  if [ "$(head -1 "$site/source.out")" != "$(head -1 "$site/artifact.out")" ] || grep -q '^  at ' "$site/artifact.out"; then
+    echo "  FAIL: from artifacts the panic reads"; sed -n '1,4p' "$site/artifact.out" | sed 's/^/    /'
+    status=1
+  else
+    echo "  both print: $(head -1 "$site/artifact.out")"
+  fi
+else
+  echo "  FAIL: did not build: $(grep -m1 -E 'Error|BUG' "$site/build.log" | cut -c1-140)"
+  status=1
 fi
 
 echo

@@ -32,6 +32,17 @@ assert_true span.total_seconds >= 0.0, "realtime"
 assert_true !tms.to_s.includes?("0.000000   0.000000"), "measure prints no CPU columns it did not measure: #{tms.to_s}"
 puts "  measure label and non-negative real time, and no CPU columns"
 
+puts "\n== one width for a rate with a unit and one without"
+# A rate under 1,000 has no unit and a blank in its place, as the other
+# library pads it: without one its column was a character narrower, and
+# the `(` after it stood one place left of the row above.
+entry = Benchmark::IPS::Entry.new("x", -> { nil })
+entry.mean = 594.7
+plain = entry.human_mean
+entry.mean = 597_800_000.0
+assert_str "[ 594.70 ] [ 597.80M]", "[#{plain}] [#{entry.human_mean}]", "human_mean pads the missing unit"
+puts "  594.7 and 597,800,000 per second print 8 characters each"
+
 puts "\n== integer seconds, and only what is measured"
 # Seconds as integers, as the other library takes them: it asked
 # `Time.seconds`, and `Job.new(1, 1)` did not compile.
@@ -50,5 +61,14 @@ if Program.args[0]? == "print"
   end
 end
 puts "  integer seconds build a job"
+# A fraction of a second is kept, as the other library's `0.2.seconds`
+# keeps it: narrowed to whole seconds, `Job.new(0.2, 0.1)` warmed up and
+# measured for no time at all. A bound, not a measurement: at least the
+# 0.3 s asked for.
+fractional = Benchmark::IPS::Job.new(0.2, 0.1)
+fractional.report("nothing") { nil }
+took = Benchmark.realtime { fractional.execute }.total_seconds
+assert_true took >= 0.3, "Job.new(0.2, 0.1) ran for #{took} s"
+puts "  Job.new(0.2, 0.1) runs for at least 0.3 s"
 
 puts "\nALL CHECKS PASSED"

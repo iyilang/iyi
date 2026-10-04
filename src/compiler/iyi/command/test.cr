@@ -128,7 +128,16 @@ class Iyi::Command
     manifest_changed = affected.select do |changed|
       File.basename(changed).in?(Iyi::Mod::Installer::MANIFEST, Iyi::Mod::Sum::FILE)
     end
-    unless affected.empty? || !manifest_changed.empty?
+    # A changed file no import can name is the same largest change: the
+    # prelude is compiled by every test and imported by none, and a file
+    # that is not a module reaches a test through a macro (`Eiy.embed`,
+    # `read_file`) or while it runs. An edit to `page.eiy` was answered "0
+    # to run, 1 skipped: no test's imports reach the change", and the test
+    # that renders it failed under a plain `iyi test`.
+    unimported = affected.select do |changed|
+      File.file?(changed) && !manifest_changed.includes?(changed) && outside_every_closure?(changed)
+    end
+    unless affected.empty? || !manifest_changed.empty? || !unimported.empty?
       # A changed file that no longer exists cannot be proven untouched by
       # anything. The closure does see a deleted *import* now — an import
       # names a path, and the path outlives the file — but a test also
@@ -197,6 +206,11 @@ class Iyi::Command
               json.array { manifest_changed.each { |name| json.scalar name } }
             end
           end
+          unless unimported.empty?
+            json.field "affected_not_imported" do
+              json.array { unimported.each { |name| json.scalar name } }
+            end
+          end
         end
       end
       STDOUT.puts
@@ -210,6 +224,10 @@ class Iyi::Command
         puts "#{manifest_changed.join(", ")} changed, so every test ran: the " \
              "requirements are what every package import resolves through"
       end
+      unless unimported.empty?
+        puts "#{unimported.join(", ")} is not a module an import can name, so every test ran: " \
+             "the prelude, a file a macro reads and a fixture reach a test without an import"
+      end
       unless discount_off.empty?
         puts "#{discount_off.join(", ")} is not there, so every test ran: " \
              "a file that is gone cannot be proven untouched by anything"
@@ -219,6 +237,22 @@ class Iyi::Command
     end
 
     exit 1 unless failed.zero?
+  end
+
+  # iyi: whether no import closure can hold *path*, so no selection by
+  # closure can discount anything for it: a file that is not a module
+  # (`page.eiy`, a fixture, a `.cr` file), or one of the prelude's, which
+  # every program compiles and no import names. `--affected
+  # src/iyi/prelude.iyi` answered "0 to run, 1 skipped".
+  private def outside_every_closure?(path : String) : Bool
+    return true unless File.extname(path).compare(".iyi", case_insensitive: true) == 0
+    key = Iyi.file_key(File.expand_path(path))
+    IyiPath.default_paths.each do |entry|
+      prelude = File.expand_path(File.join(entry, "iyi"))
+      next unless File.file?(File.join(prelude, "prelude.iyi"))
+      return !Iyi.path_under?(key, Iyi.file_key(prelude)).nil?
+    end
+    false
   end
 
   # The test's transitive import closure, as absolute paths, the test file
@@ -234,11 +268,12 @@ class Iyi::Command
   # the closure dropped what it could not open.
   private def test_import_closure(file : String) : Set(String)?
     entry = File.expand_path(file)
-    # IV.6 read backwards, the same rule the LSP applies: a file whose
-    # path ends with its own `module` header's path names the project
-    # root above both, and imports resolve from there — the way a build
-    # would. A header-less script keeps the entry-dir rule.
-    entry_dir = closure_root_of(entry) || File.dirname(entry)
+    # IV.6 read backwards, the rule a build applies
+    # (`Compiler.entry_root_of`): a file whose path ends with its own
+    # `module` header's path names the project root above both, and its
+    # imports and its manifest resolve from there. A header-less script
+    # keeps the entry-dir rule.
+    entry_dir = closure_root_of(entry)
     table = Mod::Installer.table_for(entry_dir)
     closure = Set(String).new
     entry_imports = test_imports_of(entry)
@@ -272,10 +307,10 @@ class Iyi::Command
   # IV.6 read backwards, which is the build's own rule: one reading of it,
   # because a selection that placed a test differently from the build that
   # compiles it would discount the wrong tests.
-  private def closure_root_of(path : String) : String?
-    Compiler.header_root_of(path, File.read(path))
+  private def closure_root_of(path : String) : String
+    Compiler.entry_root_of(path, File.read(path))
   rescue IO::Error
-    nil
+    File.dirname(path)
   end
 
   private def run_one_test(file : String, deadline : Float64) : {file: String, status: String, seconds: Float64, output: String}

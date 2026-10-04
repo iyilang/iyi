@@ -436,6 +436,299 @@ def span_text(text, rng):
     return units[2 * rng["start"]["character"]:2 * rng["end"]["character"]].decode("utf-16-le")
 
 
+def applied(text, edits):
+    """*text* with LSP TextEdits (UTF-16 positions, one line each) applied."""
+    rows = text.split("\n")
+    for e in sorted(edits, key=lambda e: (e["range"]["start"]["line"], e["range"]["start"]["character"]), reverse=True):
+        line = e["range"]["start"]["line"]
+        units = rows[line].encode("utf-16-le")
+        start, end = 2 * e["range"]["start"]["character"], 2 * e["range"]["end"]["character"]
+        rows[line] = (units[:start].decode("utf-16-le") + e["newText"] + units[end:].decode("utf-16-le"))
+    return "\n".join(rows)
+
+
+def library_rename_step(c):
+    """73d. `puts` renamed from a buffer: the edit rewrote the compiler's
+    own `src/iyi/io.iyi`, after a walk of the workspace that took two
+    minutes over 145 files. Refused, before the walk."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-library")
+    sayer = opened(c, own, "sayer.iyi", "module sayer\n\nputs 1\n")
+    at_puts = {"textDocument": {"uri": sayer}, "position": {"line": 2, "character": 1}}
+    renamed = c.send("textDocument/rename", dict(at_puts, newName="say"))
+    prepared = c.send("textDocument/prepareRename", at_puts)
+    c.send("textDocument/didClose", {"textDocument": {"uri": sayer}}, wait=False)
+    shutil.rmtree(own, ignore_errors=True)
+    codes = [(r.get("error") or {}).get("code") for r in (renamed, prepared)]
+    message = (renamed.get("error") or {}).get("message", "")
+    step("73d", "a def in the compiler's library is refused a rename",
+         codes == [-32803, -32803] and "library" in message,
+         f"codes {codes}: {message[:70] or json.dumps(renamed.get('result'))[:70]}")
+
+
+def traits_disk_and_completion():
+    """A trait method renamed, a module changed on disk under an open
+    buffer, a module file moved, and the cursor questions that answered
+    null: each step failed before its fix."""
+    root = tempfile.mkdtemp(prefix="iyi-lsp-traits")
+    shapes = ("module app/shapes\n\n# Anything with an area.\npub trait Shape\n  abstract def area : Int32\nend\n\n"
+              "pub class Square\n  getter side : Int32\n\n  def initialize(@side : Int32)\n  end\nend\n\n"
+              "impl Shape for Square\n  def area : Int32\n    @side * @side\n  end\nend\n\n"
+              "pub class Box(T)\n  getter value : T\n\n  def initialize(@value : T)\n  end\nend\n\n"
+              "pub macro double(x)\n  {{x}} * 2\nend\n\n"
+              "pub def total(s : Shape) : Int32\n  s.area\nend\n")
+    main = ("import app/shapes::{Square, Box, total, double}\n\n"
+            "sq = Square.new(3)\nb = Box.new(\"hi\")\nputs sq.area + total(sq)\nputs b.value\nputs double(4)\n")
+    os.makedirs(os.path.join(root, "app"))
+    with open(os.path.join(root, "app", "shapes.iyi"), "w") as f:
+        f.write(shapes)
+    k = Client()
+    k.send("initialize", {"rootUri": file_uri(root), "capabilities": {
+        "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": True}}}})
+    k.send("initialized", {}, wait=False)
+    # 72a. A client that can be asked is asked to watch the files a
+    #      verdict reads, once, by the proxy. Read off what arrives before
+    #      the answer to a request sent after `initialized`, so a server
+    #      that never asks fails the step rather than hanging it.
+    arrived = []
+    probe = k.request_nowait("workspace/symbol", {"query": "Shape"})
+    k.wait_for(lambda m: arrived.append(m) is None and m.get("id") == probe)
+    asked = next((m for m in arrived if m.get("method") == "client/registerCapability"), None)
+    watchers = [w["globPattern"] for r in (asked or {}).get("params", {}).get("registrations", [])
+                for w in r["registerOptions"]["watchers"]]
+    if asked:
+        answer = json.dumps({"jsonrpc": "2.0", "id": asked["id"], "result": None}).encode()
+        k.raw(b"Content-Length: %d\r\n\r\n%s" % (len(answer), answer))
+    step("72a", "the server asks a client that can be asked to watch iyi files",
+         "**/*.iyi" in watchers, f"watchers {watchers}")
+
+    shapes_uri = opened(k, root, os.path.join("app", "shapes.iyi"), shapes)
+    main_uri = opened(k, root, "main.iyi", main)
+
+    # 72b. A rename of a method an impl gives a type renames the trait's
+    #      requirement too: it left `abstract def area`, and the program
+    #      said `impl Shape for Square is missing a method required by the
+    #      trait: area`.
+    reply = k.send("textDocument/rename", {"textDocument": {"uri": main_uri},
+                                           "position": {"line": 4, "character": at(main, 4, "area")},
+                                           "newName": "surface"})
+    changes = (reply.get("result") or {}).get("changes") or {}
+    moved = os.path.join(tempfile.mkdtemp(prefix="iyi-lsp-renamed"))
+    os.makedirs(os.path.join(moved, "app"))
+    for rel, text, uri in ((os.path.join("app", "shapes.iyi"), shapes, shapes_uri), ("main.iyi", main, main_uri)):
+        with open(os.path.join(moved, rel), "w") as f:
+            f.write(applied(text, changes.get(uri, [])))
+    checked = subprocess.run([os.path.abspath(IYI), "check", "main.iyi"], cwd=moved, capture_output=True, text=True)
+    step("72b", "renaming an impl's method renames the trait's requirement, and the program compiles",
+         checked.returncode == 0 and "abstract def surface" in open(os.path.join(moved, "app", "shapes.iyi")).read(),
+         (checked.stdout + checked.stderr).strip()[:80] or "check passes")
+
+    # 72c. Implementation from the requirement is the impl's def, and its
+    #      references reach the calls: both answered the requirement alone.
+    reply = k.send("textDocument/implementation", {"textDocument": {"uri": shapes_uri},
+                                                   "position": {"line": 4, "character": at(shapes, 4, "area")}})
+    lines = [l["range"]["start"]["line"] for l in reply.get("result") or []]
+    reply = k.send("textDocument/references", {"textDocument": {"uri": shapes_uri},
+                                               "position": {"line": 4, "character": at(shapes, 4, "area")},
+                                               "context": {"includeDeclaration": False}})
+    callers = sorted((r["uri"].rsplit("/", 1)[-1], r["range"]["start"]["line"]) for r in reply.get("result") or [])
+    step("72c", "from `abstract def area`: implementation is the impl's def, references reach every call",
+         lines == [15] and ("main.iyi", 4) in callers and ("shapes.iyi", 32) in callers, f"impl {lines}, refs {callers}")
+
+    def labels(text, line, character):
+        k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 2},
+                                          "contentChanges": [{"text": text}]}, wait=False)
+        k.diagnostics(main_uri)
+        reply = k.send("textDocument/completion", {"textDocument": {"uri": main_uri},
+                                                   "position": {"line": line, "character": character}})
+        result = reply.get("result") or {}
+        return [i["label"] for i in (result.get("items", []) if isinstance(result, dict) else result)]
+
+    # 72d. Completion after an expression that is not a bare name: the
+    #      receiver was the run of name characters before the dot.
+    after_call = labels(main + "b.value.\n", 7, 8)
+    after_literal = labels(main + "\"x\".\n", 7, 4)
+    step("72d", "completion after `b.value.` and `\"x\".` lists String's methods",
+         "size" in after_call and "size" in after_literal, f"{after_call[:4]} / {after_literal[:4]}")
+
+    # 72e. After `App::Shapes::` the module's types, and in an import's
+    #      braces what it exports and the line has not selected yet; both
+    #      offered the scope's locals and the keywords.
+    members = labels(main + "x = App::Shapes::\n", 7, 17)
+    selectable = labels(main.replace("::{Square, Box, total, double}", "::{Square, }"), 0, 28)
+    step("72e", "`App::Shapes::` lists its types; `import app/shapes::{Square, |` its other exports",
+         {"Square", "Box", "Shape"} <= set(members) and "def" not in members and
+         {"Box", "total", "double"} <= set(selectable) and "Square" not in selectable and "def" not in selectable,
+         f"{sorted(members)[:5]} / {sorted(selectable)}")
+    k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 3},
+                                      "contentChanges": [{"text": main}]}, wait=False)
+    k.diagnostics(main_uri)
+
+    # 72f. A macro is a definition and an export like a def: definition on
+    #      `double(4)` and completion of `doub` with its import answered
+    #      null and nothing.
+    reply = k.send("textDocument/definition", {"textDocument": {"uri": main_uri},
+                                               "position": {"line": 6, "character": at(main, 6, "double")}})
+    found = [(d["uri"].rsplit("/", 1)[-1], d["range"]["start"]["line"]) for d in reply.get("result") or []]
+    unimported = main.replace("::{Square, Box, total, double}", "::{Square, Box, total}").replace("puts double(4)", "puts doub")
+    k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 4},
+                                      "contentChanges": [{"text": unimported}]}, wait=False)
+    k.diagnostics(main_uri)
+    reply = k.send("textDocument/completion", {"textDocument": {"uri": main_uri},
+                                               "position": {"line": 6, "character": 9}})
+    offered = [(i["label"], [e["newText"] for e in i.get("additionalTextEdits", [])])
+               for i in (reply.get("result") or {}).get("items", []) if i["label"] == "double"]
+    step("72f", "definition on a macro call is the macro; `doub` offers it with its import",
+         found == [("shapes.iyi", 27)] and offered == [("double", ["import app/shapes::{Square, Box, total, double}"])],
+         f"{found} / {offered}")
+    k.send("textDocument/didChange", {"textDocument": {"uri": main_uri, "version": 5},
+                                      "contentChanges": [{"text": main}]}, wait=False)
+    k.diagnostics(main_uri)
+
+    # 72g. A type's name: hover on the trait in `impl Shape for Square`
+    #      answers its declaration, and references on `Square` say why there
+    #      is no list instead of null, which reads as "unused".
+    reply = k.send("textDocument/hover", {"textDocument": {"uri": shapes_uri},
+                                          "position": {"line": 14, "character": at(shapes, 14, "Shape")}})
+    hover = ((reply.get("result") or {}).get("contents") or {}).get("value", "")
+    reply = k.send("textDocument/references", {"textDocument": {"uri": main_uri},
+                                               "position": {"line": 2, "character": at(main, 2, "Square")},
+                                               "context": {"includeDeclaration": True}})
+    refused = reply.get("error") or {}
+    step("72g", "hover on a trait in an impl is its declaration; references on a type say it is a type",
+         "pub trait Shape" in hover and refused.get("code") == -32803 and "Square is a type" in refused.get("message", ""),
+         f"{hover[:30]!r} / {refused.get('message', '')[:40]}")
+
+    # 72h. A module an open buffer imports, changed on disk: the verdict is
+    #      compiled again. It was memoised on the buffers alone, so every
+    #      pull answered what the buffer last had.
+    os.makedirs(os.path.join(root, "geo"))
+    dog = os.path.join(root, "geo", "b.iyi")
+    original = "module geo/b\n\npub def name : String\n  \"dog\"\nend\n"
+    with open(dog, "w") as f:
+        f.write(original)
+    user = "import geo/b\n\nputs Geo::B.name\n"
+    user_uri = opened(k, root, "user.iyi", user)
+
+    def pulled():
+        reply = k.send("textDocument/diagnostic", {"textDocument": {"uri": user_uri}})
+        return [d["message"].split("\n")[0][:40] for d in (reply.get("result") or {}).get("items", [])]
+
+    with open(dog, "w") as f:
+        f.write(original.replace("def name", "def title"))
+    renamed = pulled()
+    os.remove(dog)
+    deleted = pulled()
+    with open(dog, "w") as f:
+        f.write(original)
+    restored = pulled()
+    step("72h", "a pull after an imported module is renamed, deleted and written back answers each",
+         any("undefined method 'name'" in m for m in renamed) and any("can't find module 'geo/b'" in m for m in deleted)
+         and restored == [], f"{renamed} / {deleted} / {restored}")
+
+    # 72i. And the push verdict, on `workspace/didChangeWatchedFiles`: the
+    #      open buffer that imports the changed module is published again.
+    with open(dog, "w") as f:
+        f.write(original.replace("def name", "def title"))
+    k.send("workspace/didChangeWatchedFiles", {"changes": [{"uri": file_uri(dog), "type": 2}]}, wait=False)
+    # What is published before the answer to a request sent after it: the
+    # server works in order, so a server that publishes nothing fails the
+    # step rather than hanging it.
+    arrived = []
+    probe = k.request_nowait("workspace/symbol", {"query": "zz"})
+    k.wait_for(lambda m: arrived.append(m) is None and m.get("id") == probe)
+    pushed = [d for m in arrived if m.get("method") == "textDocument/publishDiagnostics"
+              and m["params"]["uri"] == user_uri for d in m["params"]["diagnostics"]]
+    step("72i", "a watched-file change republishes the open buffer that imports it",
+         any("undefined method 'name'" in d["message"] for d in pushed), f"{[d['message'][:40] for d in pushed]}")
+    with open(dog, "w") as f:
+        f.write(original)
+
+    # 72j. Moving a module's file renames the names that spell it: the edit
+    #      moved the import to `geo/c` and left `Geo::B.name`.
+    reply = k.send("workspace/willRenameFiles", {"files": [
+        {"oldUri": file_uri(dog), "newUri": file_uri(os.path.join(root, "geo", "c.iyi"))}]})
+    edits = ((reply.get("result") or {}).get("changes") or {}).get(user_uri, [])
+    step("72j", "moving geo/b.iyi to geo/c.iyi rewrites `Geo::B` in the importer",
+         applied(user, edits) == "import geo/c\n\nputs Geo::C.name\n", repr(applied(user, edits)))
+    k.send("shutdown", {})
+    k.send("exit", {}, wait=False)
+    k.proc.wait(timeout=10)
+
+
+def document_bound_steps(c):
+    """Answers outside the document, and answers past the JSON builder's
+    nesting: -32603 where the client was owed a range."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-bounds")
+    # 73e. Deep nesting against the JSON builder's 99 levels: a selection
+    #      inside 100 nested parentheses and the outline of 50 nested
+    #      classes answered -32603 "Nesting of 100 is too deep".
+    deep = opened(c, own, "deep.iyi", "x = " + "(" * 100 + "1" + ")" * 100 + "\nputs x\n")
+    chosen = c.send("textDocument/selectionRange", {"textDocument": {"uri": deep},
+                                                    "positions": [{"line": 0, "character": 104}]})
+    depth, node = 0, (chosen.get("result") or [None])[0]
+    while node:
+        depth, node = depth + 1, node.get("parent")
+    classes = "".join(f"class C{n}\n" for n in range(50)) + "end\n" * 50
+    nested = opened(c, own, "nested.iyi", classes)
+    outline = c.send("textDocument/documentSymbol", {"textDocument": {"uri": nested}})
+    listed = []
+    pending = list(outline.get("result") or [])
+    while pending:
+        symbol = pending.pop()
+        listed.append(symbol["name"])
+        pending.extend(symbol.get("children", []))
+    step("73e", "a deep selection and a deep outline are answered, every class listed",
+         "error" not in chosen and depth > 1 and "error" not in outline and
+         sorted(listed) == sorted(f"C{n}" for n in range(50)),
+         f"{depth} nested range(s), {len(listed)} of 50 classes")
+
+    # 73f. A question in a buffer that does not compile, below two lines
+    #      removed: the last good program could not be laid over the
+    #      buffer's lines, and was answered from as it was - a highlight
+    #      named the old text's lines, one past the end among them. The
+    #      edited lines are left out of it now, and every line it names
+    #      holds the name.
+    stale_text = ("module stale\n\ndef twice(n : Int32) : Int32\n  n * 2\nend\n\n"
+                  "a = 1\nb = 2\nc = 3\nputs twice(a)\nputs twice(a + 1)\nputs twice(a + 2)\n")
+    stale = opened(c, own, "stale.iyi", stale_text)
+    removed = {"start": {"line": 7, "character": 0}, "end": {"line": 8, "character": 5}}
+    c.send("textDocument/didChange", {"textDocument": {"uri": stale, "version": 2},
+                                      "contentChanges": [{"range": removed, "text": "b = ("}]}, wait=False)
+    c.diagnostics(stale)
+    now = "\n".join(stale_text.split("\n")[:7] + ["b = ("] + stale_text.split("\n")[9:])
+    marks = c.send("textDocument/documentHighlight", {"textDocument": {"uri": stale},
+                                                      "position": {"line": 10, "character": 6}})
+    rows = now.split("\n")
+    lines = [h["range"]["start"]["line"] for h in marks.get("result") or []]
+    named = [span_text(now, h["range"]) if h["range"]["start"]["line"] < len(rows) else None
+             for h in marks.get("result") or []]
+    step("73f", "below removed lines, a broken buffer's answers name its own lines",
+         bool(named) and all(t == "twice" for t in named),
+         f"highlights on lines {lines} of {len(rows)}: {named}")
+
+    # 73g. A codeAction range read its lines as `.as_i`: line 2^31 answered
+    #      -32603 "Arithmetic overflow", where every other position past
+    #      the protocol's uinteger is held at the bound.
+    far = {"line": 2 ** 31, "character": 0}
+    acted = c.send("textDocument/codeAction", {"textDocument": {"uri": stale}, "range": {"start": far, "end": far},
+                                               "context": {"diagnostics": []}})
+    step("73g", "a codeAction range past 2^31 - 1 is answered",
+         "error" not in acted, json.dumps(acted.get("error") or acted.get("result"))[:70])
+
+    # 73h. A selection asked past the document came back as asked: line 9
+    #      of a two-line buffer, and 2^30 for the protocol's largest
+    #      position. Held to the document now, as an edit is.
+    short = opened(c, own, "short.iyi", "module short\n\nputs 1\n")
+    edge = c.send("textDocument/selectionRange", {"textDocument": {"uri": short}, "positions": [
+        {"line": 9, "character": 2}, {"line": 2 ** 31 - 1, "character": 2 ** 31 - 1}]})
+    ends = [(r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in edge.get("result") or []]
+    step("73h", "a selection asked past the document is held to its end",
+         ends == [(3, 0), (3, 0)], f"ranges at {ends}")
+    for uri in (deep, nested, stale, short):
+        c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
+    shutil.rmtree(own, ignore_errors=True)
+
+
 def fuzz_steps(c, work):
     """What a fuzz over the library and the samples found: 441,870
     requests from positions nobody chose. Each step failed before its fix."""
@@ -564,6 +857,211 @@ def fuzz_steps(c, work):
     got = [(r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in reply.get("result") or []]
     step("52s", "a selection range asked outside the text stays inside it",
          len(got) == 2 and got[0][0] == 2 and got[0][1] <= 6 and got[1] == (3, 0), str(got))
+
+
+def kill_workers(c):
+    """Kill the proxy's workers - its children started from its own
+    binary, not a console host Windows may have given it - and whatever
+    each of them started, and wait for them to be gone. A process a
+    compile started (a macro's `system`) holds the worker's pipes on
+    Windows, where handles are inherited, and the proxy reads no death
+    until it ends too. Returns how many workers there were; none where
+    children cannot be listed, and the step that asked reports itself
+    unmeasured."""
+    import signal
+    try:
+        own = os.path.normcase(process_binary(c.proc.pid))
+    except OSError:
+        # darwin has no /proc to read a binary from: unmeasured there.
+        return 0
+    found = []
+    for pid in children(c.proc.pid):
+        try:
+            if os.path.normcase(process_binary(pid)) == own:
+                found.append(pid)
+        except OSError:
+            continue
+    doomed, pending = [], list(found)
+    while pending:
+        pid = pending.pop()
+        doomed.append(pid)
+        pending.extend(children(pid))
+    for pid in reversed(doomed):
+        try:
+            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        except OSError:
+            pass
+    deadline = time.monotonic() + 10
+    while any(pid in children(c.proc.pid) for pid in found) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    # The proxy reads the worker's pipe closing on its own fiber.
+    time.sleep(0.5)
+    return len(found)
+
+
+def buffer_steps(c):
+    """A worker's death and a malformed burst: the proxy's buffers and the
+    worker's stopped being the editor's."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-buffers")
+    # 73a. A worker dies, and the next thing the person does is type one
+    #      character. The proxy took the change into its own buffer, then
+    #      spawned a successor, handed it that buffer (`iyi/adopt`) and
+    #      forwarded the change as well: `def ab` with a `c` typed after
+    #      it was `abcc` to the worker and `abc` to the editor, and every
+    #      answer after it was about a text nobody had.
+    twice_uri = opened(c, own, "twice.iyi", "def ab\nend\n")
+    killed = kill_workers(c)
+    c.send("textDocument/didChange", {"textDocument": {"uri": twice_uri, "version": 2}, "contentChanges": [
+        {"range": {"start": {"line": 0, "character": 6}, "end": {"line": 0, "character": 6}}, "text": "c"}]},
+        wait=False)
+    reply = c.send("textDocument/documentSymbol", {"textDocument": {"uri": twice_uri}})
+    names = [s["name"] for s in reply.get("result") or []]
+    step("73a", "after a worker dies, the change that follows is applied once",
+         (not killed and names) or names == ["abc"],
+         f"{killed or 'unmeasured'} worker(s) killed, then the outline is {names}")
+
+    # 73b. A readable change and, queued behind it, a change whose params
+    #      are null: the worker read the second while gathering the burst,
+    #      raised on its shape, and dropped both - the outline stayed
+    #      empty, where the proxy kept the edit and the two buffers parted.
+    #      Driven against the worker alone, behind a compile, so both are
+    #      queued when it gets to them.
+    w = Client(("lsp", "--worker"))
+    w.send("initialize", {"rootUri": file_uri(own), "capabilities": {}})
+    w.send("initialized", {}, wait=False)
+    burst = file_uri(os.path.join(own, "burst.iyi"))
+    w.send("textDocument/didOpen", {"textDocument": {"uri": burst, "languageId": "iyi", "version": 1,
+                                                     "text": ""}}, wait=False)
+    w.diagnostics(burst)
+    with open(os.path.join(own, "busy.iyi"), "w") as f:
+        f.write("module busy\n\nputs 1\n")
+    busy = w.write_batch([
+        ("textDocument/diagnostic", {"textDocument": {"uri": file_uri(os.path.join(own, "busy.iyi"))}}, True),
+        ("textDocument/didChange", {"textDocument": {"uri": burst, "version": 2},
+                                    "contentChanges": [{"text": "def added_by_edit\nend\n"}]}, False),
+        ("textDocument/didChange", None, False),
+    ])
+    w.wait_for(lambda m: m.get("id") == busy[0])
+    reply = w.send("textDocument/documentSymbol", {"textDocument": {"uri": burst}})
+    names = [s["name"] for s in reply.get("result") or []]
+    w.send("shutdown", {})
+    w.send("exit", {}, wait=False)
+    w.proc.wait(timeout=10)
+    step("73b", "a change of the wrong shape queued behind a readable one takes only itself",
+         names == ["added_by_edit"], f"outline {names}")
+
+    # 73c. and a worker that dies while the person is in a buffer is not
+    #      followed by one that compiles that buffer before anything else.
+    #      A buffer whose compile overflowed the stack killed every worker
+    #      the proxy started, because each was warmed on the focused file
+    #      first: every request about any file answered -32603 for as long
+    #      as it stayed focused. Here the death is a kill during a compile
+    #      that waits 30 s, and the outline of another file has to be
+    #      answered well inside that.
+    # Windows only: the workers are listed and killed there, and elsewhere
+    # the 30 s compile ran to its end on every recompile of the buffer and
+    # held the session past the watchdog (Linux CI, step 53 never answered).
+    if os.name == "nt":
+        pause = "ping -n 31 127.0.0.1" if os.name == "nt" else "sleep 30"
+        slow_text = f'module slow\n\n{{% system("{pause}") %}}\nputs 1\n'
+        slow_uri = file_uri(os.path.join(own, "slow.iyi"))
+        c.send("textDocument/didOpen", {"textDocument": {"uri": slow_uri, "languageId": "iyi", "version": 1,
+                                                         "text": slow_text}}, wait=False)
+        # Killed well inside the two quiet seconds the proxy retires a worker
+        # in: a retirement first would start a worker this kill did not list.
+        time.sleep(0.5)
+        killed = kill_workers(c)
+        started = time.monotonic()
+        reply = c.send("textDocument/documentSymbol", {"textDocument": {"uri": twice_uri}})
+        elapsed = time.monotonic() - started
+        for uri in (slow_uri, twice_uri):
+            c.send("textDocument/didClose", {"textDocument": {"uri": uri}}, wait=False)
+        shutil.rmtree(own, ignore_errors=True)
+        step("73c", "a successor is not warmed on the buffer its predecessor died in",
+             not killed or ("result" in reply and elapsed < 10),
+             f"{killed or 'unmeasured'} worker(s) killed, another file's outline answered "
+             f"{'within' if elapsed < 10 else 'past'} 10 s")
+    else:
+        shutil.rmtree(own, ignore_errors=True)
+        print("step 73c a successor is not warmed on the buffer its predecessor died in: "
+              "unmeasured here, the workers are killed on Windows only", flush=True)
+
+
+def held_open(work, seconds):
+    """A path a macro's `read_file` waits on for *seconds*, then reads
+    as empty: a FIFO on POSIX, a named pipe on Windows. A compile that
+    reads it lasts as long as the gate says, on any machine. Once let
+    go of, the path is gone, and a later compile of the same text
+    fails at once rather than waiting again."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateNamedPipeW.restype = wintypes.HANDLE
+        kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR] + [wintypes.DWORD] * 6 + [ctypes.c_void_p]
+        kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        path = r"\\.\pipe\iyi-lsp-held-%d" % os.getpid()
+        # Outbound, bytes, one instance. A reader connects to it before
+        # this side has asked for one, and reads until it is closed.
+        handle = kernel.CreateNamedPipeW(path, 2, 0, 1, 0, 0, 0, None)
+
+        def release():
+            time.sleep(seconds)
+            kernel.ConnectNamedPipe(handle, None)
+            kernel.CloseHandle(handle)
+    else:
+        path = os.path.join(work, "held")
+        os.mkfifo(path)
+
+        def release():
+            time.sleep(seconds)
+            # Blocks until the reader has opened it, so the reader sees
+            # the end of the file rather than no file.
+            writer = os.open(path, os.O_WRONLY)
+            os.unlink(path)
+            os.close(writer)
+    threading.Thread(target=release, daemon=True).start()
+    return path
+
+
+def held_verdict_step():
+    """74a. A change whose compile outlasts the quiet the proxy replaces
+    a worker in (`Proxy::RETIRE_IDLE`, two seconds). A change is a
+    notification and has no id, so the proxy counted the worker idle,
+    replaced it two seconds into the compile, and the successor adopted
+    the buffer and published nothing: a client waiting on the verdict
+    waited for ever. `lsp_memory.py`'s paced session stopped that way
+    held to two cores beside a busy loop, where a compile ran past two
+    seconds. The compile here reads a pipe the gate holds for four, so
+    the timing is the gate's and not the machine's."""
+    own = tempfile.mkdtemp(prefix="iyi-lsp-held")
+    h = Client()
+    h.send("initialize", {"rootUri": file_uri(own), "capabilities": {}})
+    h.send("initialized", {}, wait=False)
+    held_uri = opened(h, own, "held.iyi", "module held\n\nputs 1\n")
+    spelled = held_open(own, 4).replace("\\", "\\\\")
+    h.send("textDocument/didChange", {"textDocument": {"uri": held_uri, "version": 2}, "contentChanges": [
+        {"text": f'module held\n\n{{{{ read_file("{spelled}") }}}}\nputs 1\n'}]}, wait=False)
+    # Past the hold, and past the quiet after it: a verdict still owed by
+    # then is one nobody is going to send. The hover asked now is the
+    # bound on the wait - whichever comes first says which happened.
+    time.sleep(7)
+    asked = h.request_nowait("textDocument/hover", {"textDocument": {"uri": held_uri},
+                                                    "position": {"line": 3, "character": 0}})
+    first = h.wait_for(lambda m: m.get("id") == asked or (
+        m.get("method") == "textDocument/publishDiagnostics" and m["params"]["uri"] == held_uri
+        and m["params"].get("version") == 2))
+    if first.get("id") != asked:
+        h.wait_for(lambda m: m.get("id") == asked)
+    h.send("shutdown", {})
+    h.send("exit", {}, wait=False)
+    h.proc.wait(timeout=10)
+    shutil.rmtree(own, ignore_errors=True)
+    step("74a", "a change whose compile outlasts the idle replacement still gets its verdict",
+         first.get("id") != asked,
+         "the verdict came before a hover asked after it" if first.get("id") != asked
+         else "the hover was answered and the verdict never came")
 
 
 def main():
@@ -2338,6 +2836,17 @@ def main():
     cr.diagnostics(crlf_app)
     reply = cr.send("textDocument/completion", {"textDocument": {"uri": crlf_app},
                                                 "position": {"line": 2, "character": 8}})
+    # 73i. and an import that is the last line, with no line ending after
+    #      it: the insert went to the line after it, which the document
+    #      does not have - `ch\nimport std/json` was handed an edit at 2:0.
+    #      It goes at the end of the last line, behind a line ending.
+    tail_text = "puts sho\nimport std/json"
+    tail = file_uri(os.path.join(crlf_root, "tail.iyi"))
+    cr.send("textDocument/didOpen", {"textDocument": {"uri": tail, "languageId": "iyi", "version": 1,
+                                                       "text": tail_text}}, wait=False)
+    cr.diagnostics(tail)
+    tailed = cr.send("textDocument/completion", {"textDocument": {"uri": tail},
+                                                 "position": {"line": 0, "character": 8}})
     cr.send("shutdown", {})
     cr.send("exit", {}, wait=False)
     cr.proc.wait(timeout=10)
@@ -2345,6 +2854,11 @@ def main():
              for e in i.get("additionalTextEdits", [])]
     step("70k", "an auto-import into a CRLF buffer ends its line in CRLF",
          texts == ["import greet::{shout}\r\n"], f"edits {texts!r}")
+    at_end = [(e["range"]["start"]["line"], e["range"]["start"]["character"], e["newText"])
+              for i in (tailed.get("result") or {}).get("items", []) if i["label"] == "shout"
+              for e in i.get("additionalTextEdits", [])]
+    step("73i", "an auto-import after a last line with no line ending stays in the document",
+         at_end == [(1, 15, "\nimport greet::{shout}")], f"edits {at_end!r}")
 
     # 37. fuzzy ranks below prefix but still answers: `ucs` finds
     #     upcase on the receiver, tiered after any prefix match.
@@ -2770,6 +3284,30 @@ def main():
              f"{len(links)} link(s): {sorted(os.path.basename(t) for t in by_line.values())}")
         c.send("textDocument/didClose", {"textDocument": {"uri": pkg_uri}},
                wait=False)
+
+        # 48a. A module in a subdirectory reads the manifest at the root its
+        #      header names. `greet/greeter.iyi`, declaring `module
+        #      greet/greeter`, was compiled with the manifest beside it -
+        #      there is none in `greet/` - and the editor showed "no
+        #      requirement covers 'example.test/user/liba'" on a module a
+        #      build of the app compiles.
+        greet_dir = os.path.join(os.path.dirname(pkg_path), "greet")
+        os.makedirs(greet_dir, exist_ok=True)
+        greeter = os.path.join(greet_dir, "greeter.iyi")
+        greeter_text = ("module greet/greeter\n\nimport example.test/user/liba\n\n"
+                        "pub def hello : String\n  \"greeter says \" + Liba.greeting\nend\n")
+        with open(greeter, "w") as f:
+            f.write(greeter_text)
+        greeter_uri = file_uri(greeter)
+        c.send("textDocument/didOpen",
+               {"textDocument": {"uri": greeter_uri, "languageId": "iyi",
+                                 "version": 1, "text": greeter_text}}, wait=False)
+        greeter_diags = c.diagnostics(greeter_uri)["diagnostics"]
+        step("48a", "a module in a subdirectory resolves a package through the root's iyi.mod",
+             greeter_diags == [],
+             greeter_diags[0]["message"].splitlines()[0][:70] if greeter_diags else "no diagnostics")
+        c.send("textDocument/didClose", {"textDocument": {"uri": greeter_uri}},
+               wait=False)
     else:
         step(48, "a document link follows a package import into the cache",
              False, "the package fixture needs git, which this run has none of")
@@ -2898,6 +3436,7 @@ def main():
          reply.get("error", {}).get("code") == -32803
          and "nothing renameable" in reply["error"]["message"],
          json.dumps(reply.get("error"))[:80])
+    library_rename_step(c)
     reply = c.send("workspace/executeCommand", {"command": "iyi.nonesuch", "arguments": []})
     step("52h", "an unknown command is invalid params",
          reply.get("error", {}).get("code") == -32602
@@ -2928,6 +3467,7 @@ def main():
     step("70j", "a position past the end is answered, a misshapen one is invalid params",
          not overflowed and codes == [-32602] * 3 and not leaked,
          f"overflowed {overflowed[:1]}, codes {codes}, leaked {len(leaked)}")
+    document_bound_steps(c)
 
     # 52i. A hover inside `x.or(0)`: the `or` tests a variable of the
     # compiler's own, and the cursor context looked it up among the names
@@ -3015,6 +3555,9 @@ def main():
     step("60c", "a change that cannot be read is skipped, and the next one applies",
          [d["range"]["start"]["line"] for d in items if "nope" in d["message"]] == [2],
          f"{len(items)} item(s): {items and items[0]['message'][:50]}")
+    buffer_steps(c)
+    traits_disk_and_completion()
+    held_verdict_step()
     # 53. shutdown/exit: the server leaves when told, not before — and
     # between the two it answers a request with the code the protocol has
     # for it rather than an empty result.

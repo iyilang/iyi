@@ -363,12 +363,8 @@ patched_fails "a reader chomps a lone CR" patched_cr_reader "lines(chomp) on a S
 # The descriptor stream's lines are the prelude's `read_line`, so its copy
 # is the one broken.
 patched_fails "a file chomps a lone CR" patched_cr_file "lines(chomp) on a file keeps a CR that ends it" \
-  '    if chomp && line_len > 0 && line_buf[line_len - 1] == 10_u8
-      len = line_len - 1
-      len = len - 1 if len > 0 && line_buf[len - 1] == 13_u8=>    if chomp
-      len = line_len
-      len = len - 1 if len > 0 && line_buf[len - 1] == 10_u8
-      len = len - 1 if len > 0 && line_buf[len - 1] == 13_u8' \
+  '    len = len - (len > 1 && line_buf[len - 2] == 13_u8 ? 2 : 1) if chomp && len > 0 && line_buf[len - 1] == 10_u8=>    len = len - 1 if chomp && len > 0 && line_buf[len - 1] == 10_u8
+    len = len - 1 if chomp && len > 0 && line_buf[len - 1] == 13_u8' \
   iyi/io.iyi
 
 echo

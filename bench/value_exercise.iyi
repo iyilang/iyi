@@ -122,6 +122,10 @@ assert_true(((1..3) != (1...3)), "range: != follows ==")
 assert_int((1..3).hash, (1..3).hash, "range: equal ranges hash the same")
 assert_true((1..3).hash != (1...3).hash, "range: the flag changes the hash")
 assert_true((1..3).hash != (1..4).hash, "range: a bound changes the hash")
+# A range prints as it is written, each end inspected, as the other
+# library's does: `Object#to_s` printed the type, `Range(Int32, Int32)`.
+assert_str((1..5).to_s, "1..5", "range: to_s is the literal")
+assert_str("#{1...3} #{[-2..-1]} #{("a".."b").inspect} #{(1..nil).inspect}", "1...3 [-2..-1] \"a\"..\"b\" 1..", "range: exclusive, inside an array, ends inspected, an open end left out")
 
 # A `when` is `===`, which was `==` everywhere: a range arm, a tuple of
 # types and a union of types matched nothing and fell to `else`.
@@ -242,6 +246,20 @@ retried.label = "second"
 assert_int(retried.retries, 3, "getter: an untyped default is the field's value")
 assert_int(retried.names.size, 1, "getter: an untyped default is the field's own object")
 assert_str(retried.label, "second", "property: an untyped default is written over")
+
+# ---- 7. A struct of the program's own, which is its fields as the other
+# library's is. `Object#==` answered false, so a struct was not equal to
+# itself, `includes?` missed it and a struct key was never found again.
+struct Point
+  def initialize(@x : Int32, @label : String)
+  end
+end
+
+point = Point.new(1, "a")
+assert_true(point == point && point == Point.new(1, "a"), "struct: equal to itself and to its copy")
+assert_true(point != Point.new(2, "a") && point != Point.new(1, "b"), "struct: a field changes it")
+assert_true([point].includes?(Point.new(1, "a")), "struct: includes? finds its copy")
+assert_str({point => "found"}[Point.new(1, "a")]? || "missing", "found", "struct: a hash key found")
 
 puts "all value checks passed"
 

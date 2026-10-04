@@ -54,6 +54,14 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # is file inclusion inside one unit, which is how the prelude is written.
     if !node.iyi_prelude? && @program.iyi_prelude? &&
        relative_to.try(&.ends_with?(".iyi")) && !filename.starts_with?('.')
+      # `require "json"` was told to write `import json`, which reaches
+      # Crystal's `src/json.cr` and fails inside it; iyi's own is std's.
+      if iyi_std_module?("std/#{filename}")
+        node.raise "iyi has no `require`: iyi's own `#{filename}` is a module of its " \
+                   "standard library, reached with `import std/#{filename}` (SPEC.md R-1). " \
+                   "`--crystal` gives a program Crystal's library instead, and there " \
+                   "`require` means what it means in Crystal"
+      end
       node.raise "iyi has no `require`. A module is reached with " \
                  "`import #{filename}`, and it is a path to a file rather than " \
                  "a library name (SPEC.md R-1). There is no standard library " \
@@ -117,6 +125,15 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
           note << "IYI_PATH sets that list, and unsetting it uses the one "
           note << "this compiler was built with"
         end
+      elsif node.iyi_prelude?
+        # iyi: the other half, the prelude `--crystal` injects, which is
+        # Crystal's library and not iyi's. The Windows zip does not carry
+        # it (Makefile.win says why), and `iyi run --crystal x.iyi` from an
+        # install answered with the `shards install` advice below.
+        notes << "This is the prelude `--crystal` gives a program: Crystal's standard library, " \
+                 "a directory on the search path that iyi's own library does not need. " \
+                 "The Windows zip does not include it; a checkout of iyi's source has it in `src`, " \
+                 "and IYI_PATH can name that directory"
       else
         notes << <<-NOTE
           If you're trying to require a shard:
@@ -209,9 +226,22 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     # find `github.com/user/lib.iyi`" would be technically true and useless.
     package = resolve_package(path)
     if package.nil? && path.includes?('.')
+      # The repository is a prefix of the path, and which one only the
+      # repositories know: `iyi mod tidy` asks them, longest first, down to
+      # two segments, since a host alone is never a module. The line used
+      # to drop the last segment, so the root module of a package,
+      # `example.test/user/liba`, was told `require example.test/user`.
+      segments = path.split('/')
+      repositories = segments.size < 2 ? [path] : segments.size.downto(2).map { |count| segments[0, count].join('/') }.to_a
+      inside = ""
+      if repositories.size > 1
+        above = repositories[1..].map { |prefix| "`#{prefix}`" }.join(" or ")
+        inside = ", or the package the module is inside (#{above}) - `iyi mod tidy` finds which"
+      end
       node.raise "no requirement covers '#{path}'. A dotted path is a " \
-                 "package (SPEC.md III.7); the file beside the entry file " \
-                 "that declares one is `iyi.mod`, as `require #{path[0, path.rindex('/') || path.size]} v1.2.3`"
+                 "package (SPEC.md III.7); the file that declares one is " \
+                 "`iyi.mod`, at the root the entry's `module` header names or beside " \
+                 "the entry, as `require #{repositories.first} v1.2.3`#{inside}"
     end
 
     # iyi: the artifact, if there is one (SPEC.md IV.1). This is R-1's contract
@@ -249,12 +279,28 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       # file that is there: `import calc/ad` beside `calc/add.iyi` is a typo,
       # and the sentence about the rule read as if the rule were the problem.
       hint = ""
-      if similar = Levenshtein.find(path, import_siblings(path))
+      if iyi_std_module?("std/#{path}")
+        # `import math`: the module is std's, and the siblings of a bare
+        # name are the project root's files.
+        hint = "\nDid you mean `std/#{path}`?"
+      elsif similar = Levenshtein.find(path, import_siblings(path))
         hint = "\nDid you mean `#{similar}`?"
       end
       node.raise "can't find module '#{path}'. A module's path is its file's " \
                  "path, so this one is `#{path}.iyi`, resolved from the " \
                  "directory of the file being built and then from `IYI_PATH`#{hint}"
+    end
+
+    # iyi: `import json` under iyi's own prelude found Crystal's
+    # `src/json.cr` on `IYI_PATH`, beside the prelude, and the build died
+    # inside it - "undefined constant Deque" at src/json/from_json.cr:61,
+    # then a hint to import `std/deque`, which mended nothing. That library
+    # is written against the other prelude (the converse is refused below),
+    # so it is refused at the line that reached it.
+    if artifact_path.nil? && package.nil? && @program.iyi_prelude? && iyi_crystal_library_source?(path, filename)
+      own = iyi_std_module?("std/#{path}") ? "; iyi's own is `import std/#{path}`" : ""
+      node.raise "`#{path}` here is Crystal's library (#{filename}), which builds " \
+                 "only under `--crystal`, against Crystal's prelude#{own}"
     end
 
     # iyi: iyi's own standard library, reached by a program built against
@@ -503,6 +549,17 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     posix = ::Path[filename].to_posix.to_s
     return false unless index = posix.rindex("/std/")
     File.file?(File.join(posix[0, index], "iyi", "prelude.iyi"))
+  end
+
+  # iyi: whether *filename*, which *path* resolved to, is a `.cr` file of
+  # Crystal's library: one on an `IYI_PATH` entry that also holds iyi's
+  # prelude, which is where the two libraries ship side by side.
+  private def iyi_crystal_library_source?(path : String, filename : String) : Bool
+    return false unless filename.ends_with?(".cr")
+    @program.iyi_path.entries.any? do |entry|
+      Iyi.native_path(File.join(entry, "#{path}.cr")) == filename &&
+        File.file?(File.join(entry, "iyi", "prelude.iyi"))
+    end
   end
 
   # iyi: whether *path* names a module of iyi's own standard library on
@@ -931,6 +988,18 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
                  "Run `iyi bind` again (or, for a boundary bound by hand, its fill " \
                  "build) and read what it says — a shard can hold code its own " \
                  "compilation never types, and a boundary asks for all of it."
+    end
+
+    # iyi: an artifact from a build that generated no code (SPEC.md IV.1g),
+    # where this build links. `build --no-codegen --emit-iyimod` writes the
+    # declarations and nothing to link, and `iyi run --use-iyimod mods` on
+    # one ended in 19 `LNK2019: unresolved external symbol` lines and
+    # `LNK1120`, exit 1120, naming the artifact nowhere.
+    if artifact.declarations_only && @program.iyi_wants_object_code
+      node.raise "#{Iyi.relative_filename(artifact_path)} holds declarations only: the build " \
+                 "that wrote it was given --no-codegen, so every method \"#{artifact.module_name}\" " \
+                 "declares would be an undefined symbol at the link. Rebuild it without " \
+                 "--no-codegen, or pass --no-codegen here to typecheck against it"
     end
 
     unless artifact.object_code.empty?
@@ -1588,14 +1657,25 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
   # What is left is what the rule is for: a statement in a type body. `puts
   # "x"` there has no declaration to ride on and nothing carries it, so a
   # program built against the artifact would run without it.
-  private def iyi_type_body_initialiser?(node : ASTNode) : Bool
+  #
+  # And a class's field default is the third thing that rides on one:
+  # `TypeDecl#fields` carries `@id = 0` beside the field it initialises, from
+  # `instance_vars_initializers`, and the consumer's `new` runs it. Counted as
+  # a statement, `pub class A; @id = 0; end` made the artifact refuse every
+  # consumer of the module, where the source build printed 0. A *module's*
+  # field default stays a statement: it is handed to whatever includes the
+  # module at the moment of the include, so a consumer's includer is never
+  # given it, and *fields* is false there.
+  private def iyi_type_body_initialiser?(node : ASTNode, fields = false) : Bool
     case node
     when Expressions
-      node.expressions.any? { |child| iyi_type_body_initialiser?(child) }
-    when ClassDef, ModuleDef
+      node.expressions.any? { |child| iyi_type_body_initialiser?(child, fields) }
+    when ClassDef
+      iyi_type_body_initialiser?(node.body, true)
+    when ModuleDef
       iyi_type_body_initialiser?(node.body)
     when VisibilityModifier
-      iyi_type_body_initialiser?(node.exp)
+      iyi_type_body_initialiser?(node.exp, fields)
     when Assign
       # iyi: an instance variable's initialiser is the third. `@items = [] of
       # Item` runs in every `initialize`, not when the type body is read, and
@@ -1604,10 +1684,10 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       # (`TypeDecl#fields`) where the consumer compiles it. Read as a
       # statement it refused the module.
       target = node.target
-      !(target.is_a?(Path) || target.is_a?(ClassVar) || target.is_a?(InstanceVar))
+      !(target.is_a?(Path) || target.is_a?(ClassVar) || (fields && target.is_a?(InstanceVar)))
     else
       if expansion = iyi_expansion(node)
-        iyi_type_body_initialiser?(expansion)
+        iyi_type_body_initialiser?(expansion, fields)
       else
         iyi_initialiser?(node)
       end
@@ -1633,7 +1713,7 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
     when VisibilityModifier
       iyi_uncarried_initialiser?(node.exp)
     when ClassDef
-      iyi_type_body_initialiser?(node.body)
+      iyi_type_body_initialiser?(node)
     when TraitDef, ImplDef
       iyi_initialiser?(node.body)
     when LibDef

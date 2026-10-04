@@ -56,6 +56,26 @@ safe direction: a false positive retains a dead object, only a false
 negative frees a live one. `bench/mark_exercise.sh` proves the precision
 differentially and proves the check fails when the lookup is disabled.
 
+The stack is conservative too, and an optimised build decides what is on
+it. Two ways a dead structure stayed marked were measured and closed. A
+helper the top level called once was inlined into `__iyi_main`, whose
+frame lives as long as the program, and its array spilled to a slot of
+that frame nothing wrote again: 312 MB stayed marked through three
+`GC.collect` under --release, where a debug build freed it all. The
+compiler keeps a call the top level makes once out of line
+(`keep_call_out_of_main`, codegen/call.cr). And the collector's own
+frames are built over what earlier, deeper calls left on the stack, so a
+slot one of them never wrote held a returned helper's 32 MB array:
+`IyiMark.collect` zeroes 2 KiB of dead stack under itself first, as
+Boehm's `GC_clear_a_few_frames` does. Two cases stay open, both
+measured. A helper inlined into a top-level *loop* can leave its last
+pass's structure in that frame (156 MB after a two-pass loop of the same
+helper), because keeping calls in a loop out of line cost a loop of a
+small function 2.6 times its time (613 ms against 240). And a debug
+build's own `collect` frame sits above the zeroed stretch, where a
+stale word kept the 32 MB. `bench/root_exercise.sh` checks both closed
+cases in its --release run.
+
 Stage 6 sweeps what this stage decided, and the collector runs *itself*: an
 allocation-pressure trigger in the allocator's one funnel runs a collection
 when the bytes allocated since the last one cross the budget, and the budget

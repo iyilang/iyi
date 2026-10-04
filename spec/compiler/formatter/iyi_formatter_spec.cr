@@ -9,12 +9,15 @@ require "../../../src/compiler/iyi/formatter"
 # a different language from the one it is about.
 #
 # Every case here is written the way this repository writes it, so what these
-# assert is that the formatter leaves correct code alone. The two that change
-# something are the ones that show it is running at all.
+# assert is that the formatter leaves correct code alone, and that a second
+# pass over what it wrote changes nothing. The cases that change something
+# show it is running at all, or that a comment or a trailing space no longer
+# decides the layout.
 private def assert_iyi_format(input, output = input, file = __FILE__, line = __LINE__)
   it "formats #{input.inspect}", file, line do
     result = Iyi.format("#{input}\n", filename: "spec.iyi")
     result.should eq("#{output}\n"), file: file, line: line
+    Iyi.format(result, filename: "spec.iyi").should eq(result), file: file, line: line
   end
 end
 
@@ -36,10 +39,26 @@ describe "Formatter on iyi" do
   assert_iyi_format "module m\n\nimport web/dsl::{get, run}\n\nget \"/\" do |env|\n  \"hi\"\nend"
   assert_iyi_format "import app/greeter::*\n\nputs 1"
 
+  # A line break after `::` is space to the parser, as in front of a path:
+  # `::` / `puts 2` is `::puts 2`, and fmt asked for the name at the line
+  # break and answered "there's a bug formatting".
+  assert_iyi_format "puts 1\n::\nputs 2", "puts 1\n::puts 2"
+
   # A keyword-prefixed segment: `end` and `def` start these names, and the
   # slash after one is what the parser had to take out of the lexer's hands.
   assert_iyi_format "module endpoint/handler"
   assert_iyi_format "module m\n\nimport defs/shared"
+
+  # A comment or a trailing space after a call's or a def's `(` sits before
+  # the line break that puts the arguments on their own lines. A comment
+  # there put the first argument at column 0 (a def also lined its later
+  # parameters up under the `(`), and `f( ` became `f(1,`.
+  assert_iyi_format "x = Planet.new( # c\n  1.5,\n  2.5)"
+  assert_iyi_format "def f\n  x = foo( # c\n    1,\n    2)\nend"
+  assert_iyi_format "x = foo( # c\n  # first\n  1,\n)"
+  assert_iyi_format "foo( # c\n  a: 1,\n  b: 2)"
+  assert_iyi_format "def initialize( # c\n  scheme : String? = nil,\n  host : String? = nil,\n)\nend"
+  assert_iyi_format "f( \n  1,\n  2)", "f(\n  1,\n  2)"
 
   # R-2: what a module exports says so.
   assert_iyi_format "module m\n\npub def polite(name : String) : String\n  name\nend"
@@ -61,6 +80,20 @@ describe "Formatter on iyi" do
   assert_iyi_format "module m\n\npub abstract struct Shape\n  abstract def area : Int32\nend"
   assert_iyi_format "module m\n\npub abstract def title : String"
 
+  # A comment after `nil?` is the line's, as after `is_a?(T)`: the comment
+  # line under `if x.nil? # c` went to column 3, and the one under `raise
+  # "x" if pwd.nil? # c` to the column of `pwd`.
+  assert_iyi_format "if x.nil? # c\n  # body\n  x = 1\nend"
+  assert_iyi_format "while x.nil? # c\n  # body\n  x = 1\nend"
+  assert_iyi_format "raise \"x\" if pwd.nil? # c\n# next\nputs 1"
+
+  # A suffix `if`/`unless` on an `if`/`unless` block. The keyword in front
+  # was taken for the prefix form: fmt wrote the inner block, asked for
+  # `if` at the line break after its condition, and died.
+  assert_iyi_format "if true\n  puts 1\nend if false"
+  assert_iyi_format "unless false\n  puts 1\nend unless true"
+  assert_iyi_format "if a\n  1\nelse\n  2\nend if b"
+
   # Traits, their supertraits, and the associated types they declare.
   assert_iyi_format "module m\n\npub trait Show\n  abstract def show : String\nend"
   assert_iyi_format "module m\n\npub trait Ord : Cmp\n  abstract def cmp(other : self) : Int32\nend"
@@ -73,10 +106,55 @@ describe "Formatter on iyi" do
   assert_iyi_format "module m\n\nimpl Show for Box(T) forall T : Show\n  def show : String\n    \"b\"\n  end\nend"
   assert_iyi_format "module m\n\nimpl Each for Nums\n  type Elem = Int32\n\n  def each(& : Int32 -> Nil) : Nil\n  end\nend"
 
+  # Headers the parser read as something they do not say, and fmt then
+  # died on: a splat trait parameter it dropped, a trait spelled as a
+  # static array or a pointer, a `case` whose `in` it took for the
+  # value, and a `def` followed at once by a bracket or a backtick, which
+  # it skipped. Each is a syntax error now, where fmt answered "there's a
+  # bug formatting" and check passed or blamed a name the line lacks.
+  it "refuses headers the parser used to misread" do
+    {
+      "pub trait Num(*T)\nend"              => "a trait's type parameter cannot be a splat",
+      "impl Greet[0] for User\nend"         => "expected a trait name after `impl`",
+      "impl Greet* for User\nend"           => "expected a trait name after `impl`",
+      "impl Greet(x: Int32) for User\nend"  => "expected a trait name after `impl`",
+      "case\nin\nend"                       => "requires a case expression",
+      "def{ f(x : Int32) : Int32\n  x\nend" => "expecting a name after 'def', not '{'",
+      "def[ f(x : Int32) : Int32\n  x\nend" => "expecting a name after 'def', not '['",
+      "def` f : Int32\n  1\nend"            => "parentheses are mandatory",
+    }.each do |source, message|
+      expect_raises(Iyi::SyntaxException, message) { Iyi.format(source, filename: "spec.iyi") }
+    end
+  end
+
   # A bound on a name the signature mentions rather than introduces (II.6),
-  # and one on a name it introduces (II.7).
-  assert_iyi_format "module m\n\ndef includes?(value : Elem) : Bool where Elem : Cmp\n  true\nend"
+  # inside the trait whose associated type it is - `where` outside every
+  # type is refused - and one on a name it introduces (II.7).
+  assert_iyi_format "trait Seq\n  def includes?(value : Elem) : Bool where Elem : Cmp\n    true\n  end\nend"
   assert_iyi_format "module m\n\npub def announce(item : T) : String forall T : Greet\n  item.greet\nend"
+
+  # A comment ending a header: the comment lines under it are the body's,
+  # where they went to the header's own column after type parameters, a
+  # union return type, `forall`, `where`, a supertrait or a `[`/`{`.
+  assert_iyi_format "class Box(T) # c\n  # doc\n  def f\n  end\nend"
+  assert_iyi_format "pub struct Box(T) # c\n  # doc\n  getter value : T\nend"
+  assert_iyi_format "module Foo(T) # c\n  # doc\n  def f\n  end\nend"
+  assert_iyi_format "def g : Int32 | Nil # c\n  # body\n  nil\nend"
+  assert_iyi_format "class A\n  def self.decode(x) : String | Err # c\n    # body\n    nil\n  end\nend"
+  assert_iyi_format "trait Seq\n  def f(x : T) : Nil where T : Foo # c\n    # body\n    nil\n  end\nend"
+  assert_iyi_format "impl Show for Box(T) forall T # c\n  # doc\n  def show : String\n    \"x\"\n  end\nend"
+  assert_iyi_format "impl Show for Box(T) forall T : Show # c\n  # doc\n  def show : String\n    \"x\"\n  end\nend"
+  assert_iyi_format "pub trait Num : Comparable # c\n  # doc\n  abstract def x : Int32\nend"
+  assert_iyi_format "x = [ # c\n  # first\n  1,\n]"
+  assert_iyi_format "h = { # c\n  # first\n  1 => 2,\n}"
+
+  # A `{` block's or a proc's body that starts on the opener's line and
+  # runs over several: a comment ending its last line took the `}` into it,
+  # so the block closed nothing, or closed the lines after it.
+  assert_iyi_format "[1].each { |i| puts i\nputs 2 # c\n}"
+  assert_iyi_format "def f\n  [1].each { |i| puts i\n  puts 2 # c\n  }\nend"
+  assert_iyi_format "x = -> { puts 1\nputs 2 # c\n}\nx.call"
+  assert_iyi_format "x = -> do puts 1\nputs 2 # c\nend\nx.call"
 
   # Errors: propagation, recovery, and the panic that takes no default.
   assert_iyi_format "module m\n\nvalue = read(path)!"
@@ -89,6 +167,14 @@ describe "Formatter on iyi" do
   # Recovery on the line under its call, as a call chain is broken.
   assert_iyi_format "module m\n\nvalue = read(path)\n  .or(0)"
   assert_iyi_format "module m\n\nvalue = read(path)\n  .or_panic"
+
+  # asm: a comment after an operand section keeps the next section under
+  # the first colon, where it went to column 1; a comment line between two
+  # sections stays on its line there, where it went up to the line before
+  # with a blank line after it, and a second pass moved the section again.
+  assert_iyi_format "def f\n  asm(\"cpuid\" : \"={rax}\"(leaf) # c\n              : \"{rax}\"(1_u64))\nend"
+  assert_iyi_format "def f\n  asm(\"cpuid\" : \"={rax}\"(leaf)\n              : \"{rax}\"(1_u64)\n# c\n              : \"rbx\")\nend",
+    "def f\n  asm(\"cpuid\" : \"={rax}\"(leaf)\n              : \"{rax}\"(1_u64)\n              # c\n              : \"rbx\")\nend"
 
   # And the list itself, held against the parser's, because a case per
   # declaration only helps while the cases are all of them. `parse_pub` is
@@ -109,6 +195,10 @@ describe "Formatter on iyi" do
     (taken - covered).should be_empty
     (covered - taken).should be_empty
   end
+
+  # Aligned comments move the comments, not the code: the `)` after a
+  # comment on an earlier argument's line was written `bbbbbbbb  )`.
+  assert_iyi_format "begin\n  f(a,        # c\n    bbbbbbbb) # d\nend           # e"
 
   # The samples, twice: a formatter that is not a fixed point rewrites a
   # file on every save, and the samples are the tree's own code, so the
@@ -141,6 +231,10 @@ describe "Formatter on iyi" do
     end
   end
 
+  # Comments line up where a terminal draws them, a wide character taking
+  # two cells: counted one each, the first `#` here sat two cells right.
+  assert_iyi_format "x = \"日本\" # c\nyy = \"ab\"  # d"
+
   # Running at all: these two are wrong on the way in and right on the way out.
   assert_iyi_format "module m\n\npub    def   polite(name : String) : String\n  name\nend",
     "module m\n\npub def polite(name : String) : String\n  name\nend"
@@ -156,4 +250,12 @@ describe "Formatter on iyi" do
     "module m\n\nmacro twice\n  v = read()!\n  puts v\nend"
   assert_iyi_format "module m\n\nmacro plain\n v = 1\n   puts v\n  end",
     "module m\n\nmacro plain\n  v = 1\n  puts v\nend"
+
+  # A macro body that starts with a blank line and then a line at column 0
+  # was "there's a bug formatting": the parser's line break took the blank
+  # line, and the formatter's handed it back as text the parser has no node
+  # for.
+  assert_iyi_format "macro m\n\n{{ 1 }}\nend"
+  assert_iyi_format "macro m\n\n{% if true %}puts \"yes\"{% end %}\nend"
+  assert_iyi_format "macro twice(x)\n\n# c\n  {{x}}\nend"
 end

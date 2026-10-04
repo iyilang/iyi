@@ -273,6 +273,21 @@ def main():
          and first.get("spec") == ["III.1.7"],
          f"edit {first.get('suggested_edit')}, spec {first.get('spec')}")
 
+    # 4a''. Advice an agent follows has to compile. For a nilable argument
+    # to a trait parameter the message said "Write `impl Show for (Int32 |
+    # Nil)`", which is refused as a union impl (SPEC.md II.1).
+    write("advice.iyi", (
+        "trait Show\n  abstract def show : String\nend\n\n"
+        "impl Show for Int32\n  def show : String\n    \"i\"\n  end\nend\n\n"
+        "def f(x : Show) : String\n  x.show\nend\n\n"
+        "v = Program.args.size > 10 ? 1 : nil\nputs f(v)\n"
+    ))
+    said = run("check", "advice.iyi", cwd=work).stderr
+    step("a nilable argument to a trait is told to narrow, not to write a union impl",
+         "`Nil` does not (SPEC.md II.1). v can be nil here: narrow it first (`if v`)" in said
+         and "impl Show for (Int32 | Nil)" not in said, "")
+    os.remove(os.path.join(work, "advice.iyi"))  # later steps walk the directory
+
     # 4a'''. An error inside a macro's expansion is placed at the call, the
     # expansion is named, and nothing offers an edit there. The frame kept
     # the line and column it had in the expansion under the calling file's
@@ -328,6 +343,15 @@ def main():
          and (cause.get("expansion") or {}).get("macro") == "m",
          f"at {cause.get('line')}:{cause.get('column')}, expansion {cause.get('expansion')}")
 
+    # 4a'''-nil. Under a nilable `x + 1` the error went on to say the
+    # prelude is small by rule and `iyi build --crystal` gives the other
+    # library, whose `Nil` has no `+` either; the narrowing is the answer.
+    write("advice_nil.iyi", "x = Program.args.size > 10 ? 1 : nil\nputs x + 1\n")
+    said = run("check", "advice_nil.iyi", cwd=work).stderr
+    step("a nilable receiver is not sent to the other library",
+         "x can be nil here" in said and "small by rule" not in said, "")
+    os.remove(os.path.join(work, "advice_nil.iyi"))
+
     # 4a''. the cap, and the verdict after it. `fix` applies at most
     # thirty-two edits in a run, and the verdict used to be read from a
     # variable only the `break` paths set - so a run whose every round
@@ -357,6 +381,18 @@ def main():
          and run("check", "capped.iyi", cwd=work).returncode == 0,
          f"applied {len(fixed['applied'])}, clean {fixed['clean']}")
     os.remove(os.path.join(work, "capped.iyi"))
+
+    # 4a-enum. `impl Enumerable` without its import was "can't implement
+    # Enumerable(T), it's a generic module" - the compiler declares that
+    # module - where `impl Comparable` is told the import.
+    write("advice_enum.iyi", (
+        "struct Nums\nend\n\n"
+        "impl Enumerable for Nums\n  def each(& : Int32 -> Nil) : Nil\n  end\nend\n"
+    ))
+    said = run("check", "advice_enum.iyi", cwd=work).stderr
+    step("`impl Enumerable` without its import names the import",
+         "`Enumerable` comes with `import std/enumerable::{Enumerable}`" in said, "")
+    os.remove(os.path.join(work, "advice_enum.iyi"))
 
     # 4b. the blind spot, closed as a language rule: an uncalled body is
     # typed against its declared signature (definition-site typing,
@@ -395,6 +431,73 @@ def main():
     ))
     step("and the honest unexported def is clean",
          run("check", "unexported.iyi", cwd=work).returncode == 0, "")
+
+    # And a script, which has no module header: its top-level defs are
+    # the program's, and the program is a module to the compiler, so the
+    # rule took it for a mixin and typed none of them. `def g(x : Int32) :
+    # String` with `x` for a body passed `check` while nothing called it,
+    # and the same def below a `module` header was refused.
+    write("script.iyi", "def g(x : Int32) : String\n  x\nend\n")
+    proc = run("check", "script.iyi", cwd=work)
+    step("a script's uncalled top-level def is typed at its definition",
+         proc.returncode == 1 and "must return String but it is returning Int32" in (proc.stdout + proc.stderr),
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
+    write("script.iyi", "def g(x : Int32) : String\n  x.to_s\nend\n")
+    step("and the honest script is clean",
+         run("check", "script.iyi", cwd=work).returncode == 0, "")
+
+    # And the shapes the probe used to leave to callers: a class method, a
+    # parameter with a default, one with an external name, a splat, a
+    # named-only parameter and an abstract class's. Each def below answers
+    # a String for an Int32, and each compiled and ran; every one is
+    # reported now, each at its own line.
+    shapes = (
+        "module app7\n\n"
+        "abstract class Animal\n  abstract def name : String\nend\n\n"
+        "class Dog < Animal\n  def name : String\n    \"d\"\n  end\nend\n\n"
+        "class C\n  def self.make : Int32\n    \"not an int\"\n  end\nend\n\n"
+        "def a(x : Animal) : Int32\n  x.name\nend\n\n"
+        "def b(x : Int32 = 1) : Int32\n  \"default\"\nend\n\n"
+        "def c(to x : Int32) : Int32\n  \"external\"\nend\n\n"
+        "def d(*xs : Int32) : Int32\n  \"splat\"\nend\n\n"
+        "def e(x : Int32, *, y : Int32) : Int32\n  \"named only\"\nend\n"
+    )
+    write("shapes.iyi", shapes)
+    proc = run("check", "-f", "json", "shapes.iyi", cwd=work)
+    lines = sorted({frame["line"] for frame in json.loads(proc.stderr or proc.stdout or "[]")
+                    if "instantiating" not in frame["message"]})
+    step("a class method, a default, an external name, a splat, a named-only and an abstract parameter are typed",
+         proc.returncode == 1 and lines == [14, 19, 23, 27, 31, 35], f"lines {lines}")
+    write("shapes.iyi", shapes.replace("\"not an int\"", "1").replace("x.name", "x.name.size")
+          .replace("\"default\"", "x").replace("\"external\"", "x").replace("\"splat\"", "xs.size")
+          .replace("\"named only\"", "x + y"))
+    proc = run("check", "shapes.iyi", cwd=work)
+    step("and the honest shapes are clean", proc.returncode == 0,
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
+
+    # And a def a macro wrote, typed where its module's other defs are.
+    # `module kit/bool` is the namespace `Kit::Bool`, and `kit/flag` does
+    # not import it, so its bare `Bool` means the type - except that code
+    # expanded from `{% if %}` was asked about as if no file had written
+    # it, and met `Kit::Bool` on the climb. Imported beside `kit/bool`,
+    # `Flag.on` was "expected argument #1 to 'Kit::Flag::Flag.on' to be
+    # Kit::Bool, not Bool"; R-2c typing every def put the same refusal on
+    # std/dir's `remove_directory`, so a program importing every std
+    # module did not compile.
+    os.makedirs(os.path.join(work, "kit"), exist_ok=True)
+    write("kit/bool.iyi", "module kit/bool\n\npub def yes : ::Bool\n  true\nend\n")
+    write("kit/flag.iyi", (
+        "module kit/flag\n\n"
+        "pub class Flag\n"
+        "  {% if true %}\n    def self.on(given : Bool) : Bool\n      given\n    end\n  {% end %}\n\n"
+        "  {% if true %}\n    def self.off : Bool\n      false\n    end\n  {% end %}\n"
+        "end\n"
+    ))
+    write("flags.iyi", "import kit/bool\nimport kit/flag::{Flag}\n\nputs Flag.on(true)\n")
+    proc = run("run", "flags.iyi", cwd=work)
+    step("a def a macro expanded names the types its own file sees, beside a module named for one",
+         proc.returncode == 0 and proc.stdout.strip() == "true",
+         " ".join((proc.stdout + proc.stderr).strip().splitlines()[-1:]))
 
     # And a type nobody exports, and a method an `impl` block gives it:
     # both were caller-typed, so with nothing constructing the type a

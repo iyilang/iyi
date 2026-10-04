@@ -45,6 +45,11 @@ assert_str("&unknown;", HTML.unescape("&unknown;"), "unknown named entity is kep
 assert_str("a <b> & c \"d\" 'e' café", HTML.unescape(HTML.escape("a <b> & c \"d\" 'e' café")), "escape then unescape")
 assert_str("<b", HTML.unescape("&ltb"), "the longest name that is an entity: &lt, then b")
 assert_str("©2024 &x ¬it; ∉", HTML.unescape("&copy2024 &ampx &notit; &notin;"), "the longest name wins, with or without a semicolon")
+# Only a legacy name - `amp`, `lt`, `gt`, `quot`, the Latin-1 ones - goes
+# without its `;` in HTML5's table: `&lang=en` was `〈=en`, `&ge=5` was
+# `≥=5` and `&notin` was `∉`, where Python's `html.unescape` keeps the
+# first two and answers `¬in`.
+assert_str("?q=x&lang=en a&ge=5 ¬in ∉ &hellip … ©", HTML.unescape("?q=x&lang=en a&ge=5 &notin &notin; &hellip &hellip; &copy"), "only a legacy name goes without its ;")
 puts "  named, decimal, hex, astral, overflow, unknown, longest name, round trip"
 
 puts "\nALL CHECKS PASSED"

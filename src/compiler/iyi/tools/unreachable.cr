@@ -18,6 +18,15 @@ module Iyi
 
       unreachable.excludes.concat IyiPath.default_paths.map { |path| ::Path[path].expand.to_posix.to_s }
       unreachable.excludes.concat config.excludes.map { |path| ::Path[path].expand.to_posix.to_s }
+      # iyi: and every package the manifest builds from - its checkout in
+      # the cache, or the directory a `replace` names. A package is no more
+      # this program's than std is: `iyi vet app.iyi` in an app calling one
+      # of greet's two exports printed `..\cache\mod\example.com\me\greet@v0.1.0\
+      # greet.iyi:7:1  Greet#unused_here` and exited 1, a finding only the
+      # package's author can act on. Rows starting `@` are short names.
+      result.program.iyi_mod_table.each do |(prefix, dir)|
+        unreachable.excludes << ::Path[dir].expand.to_posix.to_s unless prefix.starts_with?('@')
+      end
 
       tallies = unreachable.process(result)
       tallies.sort_by! do |a_def, _|

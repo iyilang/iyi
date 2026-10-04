@@ -240,6 +240,25 @@ File.chmod(both_name, 0o644)
 File.delete(both_name)
 puts "  and one that is read-only and open at once"
 
+# A directory renamed onto a file is refused, as POSIX `rename` refuses it
+# (ENOTDIR), and the file stays: Windows' MoveFileExW replaced the file
+# with the directory, and its contents were gone.
+moved_dir = sandbox + "/rename_dir_source"
+kept_file = sandbox + "/rename_dir_onto.txt"
+Dir.mkdir(moved_dir) unless Dir.exists?(moved_dir)
+File.write(kept_file, "kept")
+dir_onto_file = "renamed"
+group do |g|
+  outcome = g.spawn { File.rename(moved_dir, kept_file); 0 }.value
+  dir_onto_file = outcome.is_a?(Panicked) ? "refused" : "renamed"
+  0
+end
+assert_str "refused", dir_onto_file, "a directory renamed onto a file"
+assert_true File.file?(kept_file) && File.read(kept_file) == "kept", "the file a directory was renamed onto is still the file"
+Dir.delete(moved_dir)
+File.delete(kept_file)
+puts "  a directory is not renamed onto a file"
+
 puts "\n== directory and file queries"
 assert_true File.exists?(sandbox), "sandbox directory exists"
 assert_true File.directory?(sandbox), "sandbox is a directory"

@@ -4,7 +4,8 @@
 #   * normalize, dirname, basename, extension, stem, parts, parents on a
 #     corpus, printed as `oracle` lines the shell script replays through
 #     python3's posixpath.
-#   * join and `/`, with an anchored right-hand side winning.
+#   * join and `/`, with an anchored right-hand side winning, and on
+#     Windows a root or a drive-relative name read on the left's drive.
 #   * relative_to on a corpus (replayed through posixpath.relpath), and
 #     the two refusals: different anchors, a base that climbs through `..`.
 #   * expand under an explicit base and under `PWD`, `home:` under `HOME`.
@@ -100,6 +101,11 @@ assert_str("a|b", Path.posix("a/b").parts.join("|"), "parts of a relative path")
 assert_str("/,/a,/a/b", Path.posix("/a/b/c").parents.map { |p| p.to_s }.join(","), "parents of an absolute path, outermost first")
 assert_str(".,a,a/b", Path.posix("a/b/c").parents.map { |p| p.to_s }.join(","), "parents of a relative path start at .")
 assert_str("", Path.posix("/").parents.map { |p| p.to_s }.join(","), "the root has no parent")
+# Each ancestor keeps the spelling `parent` keeps: rebuilt and joined with
+# `\`, `Path.windows("C:/a/b/c")` had `C:/a\b` where its `parent` is `C:/a/b`.
+assert_str("C:/,C:/a,C:/a/b", Path.windows("C:/a/b/c").parents.map { |p| p.to_s }.join(","), "parents keep the separators they were written with")
+assert_str(".,a,a/.", Path.windows("a/./b").parents.map { |p| p.to_s }.join(","), "parents of a relative Windows path written with /")
+assert_str(Path.windows("C:/a/b/c").parent.to_s, Path.windows("C:/a/b/c").parents.last.to_s, "the last parent is parent")
 assert_str("/a", Path.posix("/a/b").parent.to_s, "parent")
 seen = 0
 Path.posix("/a/b").each_part { |part| seen += 1 }
@@ -228,6 +234,23 @@ assert_str("C:\\base\\\u00e9", Path.windows("C:\u00e9").expand(base).to_s, "a dr
 assert_str("D:\\\u00e9x", Path.windows("D:\u00e9x").expand(base).to_s, "a non-ASCII name on another drive expands whole")
 # Only a bare drive joins without a separator; `foo:` is a name.
 assert_str("foo:\\bar", Path.windows("foo:").join("bar").to_s, "only a bare drive joins without a separator")
+# A Windows anchor can be half of one, and the other half is the left
+# side's, as ntpath joins: `C:\a` joined with `\b` was `\b`, a root on
+# whatever drive is current, and with `C:b` it was `C:b`.
+assert_str("C:\\b", Path.windows("C:\\a").join("\\b").to_s, "a root joined onto a drive path stays on the drive")
+assert_str("\\\\srv\\sh\\y", Path.windows("\\\\srv\\sh\\x").join("/y").normalize.to_s, "a root joined onto a share stays on the share")
+# `\\?\UNC\server\share` is `\\server\share` written long, and the share
+# is its drive, as Python reads it: the drive was `\\?\UNC`, and a path on
+# one share was relative to another.
+long_unc = Path.windows("\\\\?\\UNC\\srv\\sh\\x")
+assert_str("\\\\?\\UNC\\srv\\sh", long_unc.drive.to_s, "a long UNC path's drive runs through the share")
+assert_str("//?/unc/srv/sh", Path.windows("//?/unc/srv/sh/x").drive.to_s, "in any case, with either separator")
+assert_str("x", long_unc.relative_to("\\\\?\\UNC\\srv\\sh").to_s, "a long UNC path relative to its own share")
+assert_true(Path.windows("\\\\?\\UNC\\srv\\other\\x").relative_to?("\\\\?\\UNC\\srv\\sh").nil?, "is not relative to another share")
+puts "  \\\\?\\UNC\\server\\share is a share's drive"
+assert_str("C:\\a\\b", Path.windows("C:\\a").join("c:b").to_s, "a drive-relative name on the same drive goes under the left side")
+assert_str("D:b", Path.windows("C:\\a").join("D:b").to_s, "a drive-relative name on another drive is the answer by itself")
+assert_str("\\b", Path.windows("a").join("\\b").to_s, "a root joined onto a name with no drive is the answer by itself")
 # `/` and `\` are one separator to `==` and to a hash as well.
 assert_true(Path.windows("C:/a") == Path.windows("C:\\a"), "/ and \\ are one separator in ==")
 assert_true(h[Path.windows("c:/a")]? == 1, "and in the hash")
@@ -251,9 +274,16 @@ assert_true(Path.posix("a") < Path.posix("b"), "Path <")
 assert_true(Path.posix("b") > Path.posix("a"), "Path >")
 assert_str("a,b,c", [Path.posix("c"), Path.posix("a"), Path.posix("b")].sorted.map { |p| p.to_s }.join(","), "sorted")
 assert_true((Path.posix("a") <=> Path.posix("a")) == 0, "<=> equal")
-assert_str("Path[\"a\"]", Path.posix("a").inspect, "inspect")
+assert_str("Path[\"a\"]", Path["a"].inspect, "inspect of a native path")
+# A path of the kind this platform does not use names its constructor, as
+# the other library writes it: `Path.posix("/usr/bin")` on Windows was
+# `Path["/usr/bin"]`, which names a Windows path.
+posix_said = Path.posix("/usr/bin").native? ? "Path[\"/usr/bin\"]" : "Path.posix(\"/usr/bin\")"
+windows_said = Path.windows("C:\\x").native? ? "Path[\"C:\\\\x\"]" : "Path.windows(\"C:\\\\x\")"
+assert_str(posix_said, Path.posix("/usr/bin").inspect, "inspect of a POSIX path")
+assert_str(windows_said, Path.windows("C:\\x").inspect, "inspect of a Windows path")
 assert_true(Path.posix("").empty?, "empty?")
 assert_true(Path.new("x").native?, "Path.new is native")
-puts "  <, >, <=>, sorted, inspect verified"
+puts "  <, >, <=>, sorted, inspect verified, a path of the other kind naming its constructor"
 
 puts "\nALL CHECKS PASSED"

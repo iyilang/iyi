@@ -841,6 +841,17 @@ pub struct Time
     "#{Time.pad4(y)}-#{Time.pad2(m)}-#{Time.pad2(d)} #{Time.pad2(h)}:#{Time.pad2(mi)}:#{Time.pad2(s)} UTC"
   end
 
+  # As the other library writes it: the date and time, the nanoseconds
+  # when there are any, and `Z`. There was no `inspect`, so it was `to_s`,
+  # and `Time.utc(2024, 1, 1, 0, 0, 0, nanosecond: 5)` inspected as
+  # `2024-01-01 00:00:00 UTC`, the same as `Time.utc(2024, 1, 1)`, which
+  # `==` tells apart from it.
+  def inspect : String
+    text = to_s
+    base = text[0, text.bytesize - 4]
+    @nanoseconds == 0 ? "#{base}Z" : "#{base}.#{Time.pad9(@nanoseconds)}Z"
+  end
+
   # Parses an RFC 3339 / ISO 8601 string into a UTC Time.
   # Handles forms like:
   #   2024-02-29T12:30:45Z

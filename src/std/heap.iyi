@@ -1,9 +1,9 @@
 # A binary heap over `Comparable`.
 #
 # `push` and `pop` keep the smallest element at the root, so
-# `Heap(Int32)` is a min-heap. Empty `pop` / `peek` is
-# `pop of an empty heap`. The order is the trait's `<=>`, the same
-# three-way `Enumerable#sorted` reads.
+# `Heap(Int32)` is a min-heap. Empty `pop` and `peek` panic with
+# `pop of an empty heap` and `peek of an empty heap`. The order is
+# the trait's `<=>`, the same three-way `Enumerable#sorted` reads.
 
 module std/heap
 

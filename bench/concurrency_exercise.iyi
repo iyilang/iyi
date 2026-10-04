@@ -366,6 +366,57 @@ stale_holding = wait_readable(stale_fds[0].to_i32, 300)
 fail("a wait on an empty pipe answered #{stale_quiet}, and then on one holding three bytes #{stale_holding}") unless stale_quiet == false && stale_holding == true
 puts "a wait after a timed-out one found the bytes waiting"
 
+# ── 5d. A handle read on one thread reads on another ────────────────────
+# Windows only: each thread has its own completion port and a handle
+# belongs to one, so a pipe read on the main thread and then on a worker
+# had the worker's completions go to the main thread's port, and its read
+# - deadline and all - waited forever. Fifty bytes already in the pipe
+# answer the worker's first reads at once, which would leave fifty stray
+# completions on its port if moving the handle lost the "skip a completion
+# that answered at once" mode; the late read then woke on one of them.
+{% if flag?(:win32) %}
+  class Handoff
+    @@outcome = Pointer(Atomic(UInt64)).malloc(1_u64)
+
+    def self.outcome : Pointer(Atomic(UInt64))
+      @@outcome
+    end
+  end
+
+  # The worker's half, a def so nothing of the program's is captured:
+  # fifty one-byte reads the pipe already holds, then the late five.
+  def handoff_reads(fd : Int64) : Nil
+    buffer = Pointer(UInt8).malloc(8_u64)
+    ones = 0
+    while ones < 50 && IyiScheduler.read_current(fd, buffer.as(Void*), 1_u64, 3000) == 1_i64
+      ones = ones + 1
+    end
+    late = IyiScheduler.read_current(fd, buffer.as(Void*), 5_u64, 3000)
+    whole = ones == 50 && late == 5_i64 && buffer[0] == 102_u8 && buffer[4] == 108_u8
+    Handoff.outcome.value.set(whole ? 1_u64 : 2_u64)
+  end
+
+  handoff = make_pipe
+  handed = Pointer(UInt8).malloc(64_u64)
+  __iyi_write(handoff[1], "a".to_unsafe.as(Void*), 1_u64)
+  fail("the main thread's read of the pipe to hand over failed") unless iyi_read(handoff[0], handed.as(Void*), 1_u64) == 1_i64
+  __iyi_write(handoff[1], ("0123456789" * 5).to_unsafe.as(Void*), 50_u64)
+  handed_fd = handoff[0]
+  receiver = IyiThread.start { handoff_reads(handed_fd) }
+  sleep(200)
+  __iyi_write(handoff[1], "final".to_unsafe.as(Void*), 5_u64)
+  waited = 0
+  while Handoff.outcome.value.get == 0_u64 && waited < 500
+    sleep(10)
+    waited = waited + 1
+  end
+  handoff_outcome = Handoff.outcome.value.get
+  fail("a pipe read on the main thread and then on a worker hung there for 5 s") if handoff_outcome == 0_u64
+  fail("a pipe handed to a worker thread answered its reads wrongly") unless handoff_outcome == 1_u64
+  receiver.join
+  puts "a pipe read on the main thread was read on a worker, its late bytes too"
+{% end %}
+
 # ── 6. A closed channel drains, then refuses, and wakes the parked ──────
 late = Channel(Int32).new(1)
 closed_saw = ""
@@ -441,6 +492,52 @@ end
 fail("readers of a panicked task saw #{broken_readers}") unless broken_readers == "PP"
 puts "three fibers read one task's value, and two read a panicked one's"
 
+# ── 7c. A cancel reaches a task reading a task outside its groups ────────
+# A cancelled reader waits for a task the cancel reached too, which ends,
+# and stops at any other: its defers run, and its own handle answers
+# `Panicked`, since `value` has no `Cancelled` (III.4.2). It waited: a
+# reader of an outer group's task held its failed group until that task
+# ended, 6 s here against a 5 s bound, and with an outer task waiting on
+# the inner group's end the program died "deadlock".
+def read_outer(outer_task : IyiTask(Int32), log : Array(String)) : Int32
+  defer log << "reader's defer ran"
+  got = outer_task.value
+  log << "reader read #{got.is_a?(Int32) ? got : -1}"
+  0
+end
+
+release = Channel(Int32).new(1)
+reader_log = [] of String
+reader_said = ""
+inner_ms = 0_i64
+started = __iyi_monotonic_ns
+group do |g|
+  outer_task = g.spawn do
+    select
+    when released = release.receive
+      nil
+    when timeout(6000)
+      nil
+    end
+    7
+  end
+  group do |h|
+    reader = h.spawn { read_outer(outer_task, reader_log) }
+    h.spawn do
+      sleep(20)
+      TaskFailed.new
+    end
+    said = reader.value
+    reader_said = said.is_a?(Panicked) ? said.message : "a value"
+  end
+  inner_ms = elapsed_ms(started)
+  release.send(1)
+end
+fail("a cancelled reader of an outer task held its group #{inner_ms} ms") if inner_ms >= 5000
+heard_reader = reader_log.join(", ")
+fail("a cancelled reader of an outer task: #{heard_reader}; its handle said #{reader_said}") unless heard_reader == "reader's defer ran" && reader_said == "a task stopped by its cancellation has no value"
+puts "a cancel stopped a task reading an outer group's task, under 5 s, and its defer ran"
+
 # ── 8. The join is deferred: an early return cannot leak a task ─────────
 def leaves_early(finished : Pointer(Int32)) : Nil
   group do |g|
@@ -458,6 +555,127 @@ flag.value = 0
 leaves_early(flag)
 fail("a `return` out of the group block left its task running") unless flag.value == 1
 puts "an early return still joined the group"
+
+# ── 8b. A group left early, or cancelled from outside, cancels its tasks ─
+#
+# III.4.2: "A group cancels its remaining children when the block leaves
+# early, when a child fails under the group's policy, or when an enclosing
+# group is cancelled." Only the policy held: `return 5` out of a block
+# beside a task's 2-second sleep took the 2 seconds and the sleep answered
+# in full, and so did a task's own group when the group around the task
+# failed - its owner waited in the inner join, or on a typed group's
+# values, and no cancel reached either park. Every sleep here is 10 s,
+# against a 5 s bound; a task started by a cancelled one is cancelled too.
+def napped(ms : Int32) : String
+  sleep(ms).is_a?(Cancelled) ? "cancelled" : "slept"
+end
+
+def refusal(fails : Bool) : Int32 | TaskFailed
+  return TaskFailed.new if fails
+  0
+end
+
+def leave_by_return(log : Array(String)) : Int32
+  group do |g|
+    g.spawn do
+      log << "return " + napped(10000)
+      0
+    end
+    return 5
+  end
+  0
+end
+
+def leave_by_bang(log : Array(String)) : Int32 | TaskFailed
+  group do |g|
+    g.spawn do
+      log << "! " + napped(10000)
+      0
+    end
+    refusal(true)!
+  end
+  0
+end
+
+def typed_inner(log : Array(String)) : Tuple(String, Int32) | Cancelled | Panicked
+  group do |h|
+    a = h.spawn do
+      saw = napped(10000)
+      log << "typed " + saw
+      saw
+    end
+    b = h.spawn { 2 }
+  end!
+end
+
+early = [] of String
+started = __iyi_monotonic_ns
+fail("a `return 5` out of a group block answered something else") unless leave_by_return(early) == 5
+fail("a `!` out of a group block did not leave as the error") unless leave_by_bang(early).is_a?(TaskFailed)
+group do |g|
+  g.spawn do
+    early << "break " + napped(10000)
+    0
+  end
+  break
+end
+fail("leaving a group block early took #{elapsed_ms(started)} ms beside 10 s sleeps") if elapsed_ms(started) >= 5000
+fail("leaving a group block early did not cancel its task: #{early}") unless early == ["return cancelled", "! cancelled", "break cancelled"]
+puts "a block left by `return`, `!` or `break` cancelled its sleeping task, under 5 s"
+
+outer = [] of String
+started = __iyi_monotonic_ns
+group do |g|
+  g.spawn do
+    group do |h|
+      h.spawn do
+        outer << "joined " + napped(10000)
+        0
+      end
+    end
+    0
+  end
+  g.spawn do
+    answered = typed_inner(outer)
+    outer << "typed answered " + (answered.is_a?(Tuple(String, Int32)) ? answered[0] : "an error")
+    0
+  end
+  g.spawn do
+    outer << "owner " + napped(10000)
+    group do |h|
+      h.spawn do
+        outer << "started late " + napped(10000)
+        0
+      end
+    end
+    0
+  end
+  g.spawn do
+    sleep(20)
+    TaskFailed.new
+  end
+end
+fail("a failing group took #{elapsed_ms(started)} ms to stop its grandchildren") if elapsed_ms(started) >= 5000
+heard = outer.sorted.join(", ")
+unless heard == "joined cancelled, owner cancelled, started late cancelled, typed answered cancelled, typed cancelled"
+  fail("a cancel did not reach a task's own group: #{heard}")
+end
+puts "a failing group cancelled its tasks' own groups, joined, read or started late, under 5 s"
+
+# A group a failure has cancelled stays cancelled: a task spawned on it
+# after the failure slept its full 2000 ms, and the group's join with it.
+late_saw = ""
+started = __iyi_monotonic_ns
+group do |g|
+  g.spawn { TaskFailed.new }
+  sleep(10)
+  g.spawn do
+    late_saw = napped(10000)
+    0
+  end
+end
+fail("a task spawned on a failed group #{late_saw}, and the group took #{elapsed_ms(started)} ms") unless late_saw == "cancelled" && elapsed_ms(started) < 5000
+puts "a task spawned on a group after its failure started cancelled, under 5 s"
 
 # ── 9. A rendezvous send parks until its value is taken ─────────────────
 #
@@ -697,6 +915,172 @@ end
 fail("select else: got #{took_else}") unless took_else == "else"
 puts "select with nothing ready took its else"
 
+# ── 16a. `when timeout(ms)`, and an arm nobody binds ────────────────────
+#
+# The timeout arm the other library's `select` has was "undefined method
+# 'timeout_select_action'". An unbound send arm ran its body when nothing
+# was sent: on a closed channel, and in a cancelled task.
+idle_arm = Channel(Int32).new
+timeout_seen = ""
+started = __iyi_monotonic_ns
+select
+when idle_got = idle_arm.receive
+  timeout_seen = "received"
+when timeout(50)
+  timeout_seen = "timed out"
+end
+waited_ms = elapsed_ms(started)
+fail("select timeout: #{timeout_seen} after #{waited_ms} ms") unless timeout_seen == "timed out" && waited_ms >= 45 && waited_ms < 5000
+early_arm = Channel(Int32).new
+timeout_seen = ""
+group do |g|
+  g.spawn do
+    sleep(10)
+    early_arm.send(4)
+    0
+  end
+  g.spawn do
+    select
+    when early_got = early_arm.receive
+      timeout_seen = "received #{early_got}"
+    when timeout(5000)
+      timeout_seen = "timed out"
+    end
+    0
+  end
+end
+fail("select timeout: a value sent first answered #{timeout_seen}") unless timeout_seen == "received 4"
+
+# A select whose deadline passes while a sender wakes it, before it runs,
+# is woken by both: the clock is read before the run queue every 256th
+# park, and it queued the fiber a second time - "a done fiber was
+# scheduled", which the .sh looks for in this program's output.
+racing = Channel(Int32).new(1)
+raced = 0
+timed = 0
+600.times do |round|
+  (round % 5).times { sleep(0) }
+  group do |g|
+    g.spawn do
+      select
+      when race_got = racing.receive
+        raced = raced + 1
+      when timeout(1)
+        racing.receive
+        timed = timed + 1
+      end
+      0
+    end
+    g.spawn do
+      until_ns = __iyi_monotonic_ns + 1500000_i64
+      while __iyi_monotonic_ns < until_ns
+      end
+      racing.send(1)
+      0
+    end
+  end
+end
+# Which arm takes the value is the scheduler's: the receive here, and on
+# darwin's runner the timeout once in 600. Every round ends, each value
+# taken once.
+fail("select timeout: #{raced + timed} of 600 rounds took their value") unless raced + timed == 600
+
+unbound_ran = [] of String
+shut = Channel(Int32).new(1)
+shut.close
+select
+when shut.send(1)
+  unbound_ran << "closed"
+end
+unheard = Channel(Int32).new
+group do |g|
+  g.spawn do
+    sleep(50)
+    select
+    when unheard.send(1)
+      unbound_ran << "cancelled"
+    end
+    0
+  end
+  g.spawn do
+    sleep(10)
+    TaskFailed.new
+  end
+end
+fail("an unbound send arm ran its body with nothing sent: #{unbound_ran}") unless unbound_ran.empty?
+puts "a select timed out, lost no value to its deadline, and ran no unbound arm whose send did not happen"
+
+# An unbound receive that took a value runs its body, whatever the value:
+# the arm asked whether its answer was an `Error`, so a `Channel(TaskFailed)`
+# gave up its value and the body was skipped. A `Channel(ChannelClosed)` is
+# the exact case: the value is the very type a closed channel answers.
+errors_in = Channel(TaskFailed).new(1)
+errors_in.send(TaskFailed.new)
+closes_in = Channel(ChannelClosed).new(1)
+closes_in.send(ChannelClosed.new)
+delivered_ran = [] of String
+select
+when errors_in.receive
+  delivered_ran << "error"
+end
+select
+when closes_in.receive
+  delivered_ran << "closed value"
+end
+fail("an unbound receive took a value and ran its body for #{delivered_ran}") unless delivered_ran == ["error", "closed value"]
+puts "an unbound receive ran its body for a TaskFailed and a ChannelClosed it took"
+
+# A cancelled task's select gives `Cancelled` to its first bound arm, and
+# with no arm bound the task stops, its defers run. It went to the first
+# arm, bound or not, and an unbound one runs nothing: a heartbeat loop
+# around `when timeout(10)` spun at a full core and its group's join
+# waited forever. Each loop here gives up at 5 s.
+def beat_until_bound(data : Channel(Int32), log : Array(String), give_up : Int64) : Int32
+  while __iyi_monotonic_ns < give_up
+    select
+    when timeout(10)
+      nil
+    when beat = data.receive
+      if beat.is_a?(Cancelled)
+        log << "its bound arm saw Cancelled"
+        return 0
+      end
+    end
+  end
+  log << "no arm saw its cancel"
+  0
+end
+
+def beat_until_quit(quit : Channel(Int32), log : Array(String), give_up : Int64) : Int32
+  defer log << "the unbound loop's defer ran"
+  while __iyi_monotonic_ns < give_up
+    select
+    when quit.receive
+      break
+    when timeout(10)
+      nil
+    end
+  end
+  log << "the unbound loop ran on"
+  0
+end
+
+beats = Channel(Int32).new
+quits = Channel(Int32).new
+beat_log = [] of String
+started = __iyi_monotonic_ns
+group do |g|
+  g.spawn { beat_until_bound(beats, beat_log, started + 5000000000_i64) }
+  g.spawn { beat_until_quit(quits, beat_log, started + 5000000000_i64) }
+  g.spawn do
+    sleep(30)
+    TaskFailed.new
+  end
+end
+heard_beats = beat_log.sorted.join(", ")
+fail("a cancelled select: #{heard_beats}, after #{elapsed_ms(started)} ms") unless heard_beats == "its bound arm saw Cancelled, the unbound loop's defer ran" && elapsed_ms(started) < 4000
+puts "a cancelled select gave Cancelled to its bound arm, and stopped a task with none, under 4 s"
+
 # ── 16b. A ring of tasks passing a value allocates nothing per message ──
 #
 # Every park took a node from the heap - a receiver's and, where the
@@ -870,6 +1254,142 @@ puts "a parked sender's receipt survived the next sender's park"
   puts "200000 selects beside an idle channel kept under 256 KiB more"
 {% end %}
 
+# ── 16e. A channel keeps no value it has handed out ─────────────────────
+#
+# A buffered channel's ring kept every value until a later send wrote over
+# its slot, and a rendezvous channel's spare send node kept the last value
+# parked through it: 50 messages of 4 MB through a channel of 50, all
+# received, kept 190 MiB, and 48 MB through a rendezvous 238 MiB, for as
+# long as the channels lived. Nor does it keep a value it never
+# delivered: a select's 48 MB send arm that timed out kept 45 MiB, a
+# cancelled send 46 MiB and a send a close refused 46 MiB more. 64 MB
+# each here, against 16 MiB.
+{% unless flag?(:gc_none) || flag?(:gc_boehm) %}
+  class KeptChannels
+    getter buffered : Channel(String)
+    getter rendezvous : Channel(String)
+    getter timed_out : Channel(String)
+    getter cancelled_send : Channel(String)
+    getter refused : Channel(String)
+
+    def initialize
+      @buffered = Channel(String).new(16)
+      @rendezvous = Channel(String).new
+      @timed_out = Channel(String).new
+      @cancelled_send = Channel(String).new
+      @refused = Channel(String).new
+    end
+  end
+
+  def kept_now : UInt64
+    GC.collect
+    GC.stats.bytes_kept_by_last_sweep
+  end
+
+  def through_buffered(ch : Channel(String)) : Nil
+    16.times do |i|
+      ch.send("#{i}" + ("v" * 4000000))
+      ch.receive
+    end
+  end
+
+  def through_rendezvous(ch : Channel(String)) : Nil
+    group do |g|
+      g.spawn do
+        ch.send("r" * 64000000)
+        0
+      end
+      g.spawn do
+        sleep(5)
+        ch.receive
+        0
+      end
+    end
+  end
+
+  # In a task, whose stack goes when it ends: on the main stack a slot the
+  # select's frames left kept the value whatever the channel did.
+  def offer_timing_out(ch : Channel(String)) : Nil
+    group do |g|
+      g.spawn do
+        select
+        when ch.send("t" * 64000000)
+          fail("channel: a send nobody received was delivered")
+        when timeout(5)
+          nil
+        end
+        0
+      end
+    end
+  end
+
+  def offer_cancelled(ch : Channel(String)) : Nil
+    group do |g|
+      g.spawn do
+        ch.send("c" * 64000000)
+        0
+      end
+      g.spawn do
+        sleep(5)
+        TaskFailed.new
+      end
+    end
+  end
+
+  def offer_refused(ch : Channel(String)) : Nil
+    group do |g|
+      g.spawn do
+        ch.send("x" * 64000000)
+        0
+      end
+      g.spawn do
+        sleep(5)
+        ch.close
+        0
+      end
+    end
+  end
+
+  # Writes over the stack a finished call left, so what stays kept is the
+  # channels' and not a stale frame's.
+  def scrub_stack(depth : Int32) : Int32
+    a = 0_u64
+    b = 0_u64
+    depth > 0 ? scrub_stack(depth - 1) + (a + b).to_i32 : 0
+  end
+
+  holding = KeptChannels.new
+  kept_before = kept_now
+  through_buffered(holding.buffered)
+  scrub_stack(50)
+  kept_buffered = kept_now
+  through_rendezvous(holding.rendezvous)
+  scrub_stack(50)
+  kept_rendezvous = kept_now
+  mib = 1048576_u64
+  grew = kept_buffered > kept_before ? kept_buffered - kept_before : 0_u64
+  fail("channel: 64 MB received through a buffered channel left #{grew // mib} MiB kept") if grew > 16_u64 * mib
+  grew = kept_rendezvous > kept_before ? kept_rendezvous - kept_before : 0_u64
+  fail("channel: 64 MB received through a rendezvous left #{grew // mib} MiB kept") if grew > 16_u64 * mib
+  offer_timing_out(holding.timed_out)
+  scrub_stack(50)
+  kept_offered = kept_now
+  grew = kept_offered > kept_rendezvous ? kept_offered - kept_rendezvous : 0_u64
+  fail("channel: a 64 MB select send arm that timed out left #{grew // mib} MiB kept") if grew > 16_u64 * mib
+  offer_cancelled(holding.cancelled_send)
+  scrub_stack(50)
+  kept_cancelled = kept_now
+  grew = kept_cancelled > kept_offered ? kept_cancelled - kept_offered : 0_u64
+  fail("channel: a cancelled 64 MB send left #{grew // mib} MiB kept") if grew > 16_u64 * mib
+  offer_refused(holding.refused)
+  scrub_stack(50)
+  kept_refused = kept_now
+  grew = kept_refused > kept_cancelled ? kept_refused - kept_cancelled : 0_u64
+  fail("channel: a 64 MB send a close refused left #{grew // mib} MiB kept") if grew > 16_u64 * mib
+  puts "a live channel kept under 16 MiB of the 64 MB it handed out, buffered or rendezvous, and of each 64 MB it never delivered"
+  holding.buffered.close
+{% end %}
+
 # ── 17. The typed group — III.4.9 ────────────────────────────────────────
 #
 # Two direct spawns make the group a value: the tuple of what they
@@ -949,6 +1469,21 @@ end
 stopped = fetch_stopped(true)
 fail("typed group: a sibling's Cancelled left in place of the failure that cancelled it") unless stopped.is_a?(TaskFailed)
 puts "a typed group answered the failure that stopped it, not the Cancelled it caused"
+
+# `_ =` is the explicit discard (III.4.9): no slot in the tuple. It took
+# one, and `{30, 40}` came back for `{40}`. Its failure still stopped the
+# group, and still leaves it.
+def fetch_discarding(fail_discarded : Bool) : Tuple(Int32) | TaskFailed | Cancelled | Panicked
+  group do |g|
+    _ = g.spawn { fail_discarded ? TaskFailed.new : 1 }
+    y = g.spawn { 2 }
+  end!
+end
+
+one_slot = fetch_discarding(false)
+fail("typed group, one spawn discarded: not the one-slot tuple {2}") unless one_slot.is_a?(Tuple(Int32)) && one_slot[0] == 2
+fail("typed group: a discarded task's failure did not leave") unless fetch_discarding(true).is_a?(TaskFailed)
+puts "a typed group gave a discarded spawn no slot, and its failure still left"
 
 # A task that panics is the typed group's `Panicked` (III.1.4): reading a
 # value catches its task's panic, and the values are read before the join.

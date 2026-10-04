@@ -74,6 +74,15 @@ raise "string: to_f? invalid text" unless "bad".to_f?.nil?
 raise "string: to_f? double dot" unless "1.2.3".to_f?.nil?
 raise "string: to_f? double sign" unless "--5".to_f?.nil?
 raise "string: to_f? empty" unless "".to_f?.nil?
+# Out of the range is nil, as the other library's ERANGE makes it, and
+# `inf`, `infinity` and `nan` are words in any case: `"1e400".to_f?` was
+# Infinity, `"1e-400".to_f?` 0.0, and `"inf".to_f?` nil.
+raise "string: to_f? out of range is nil" unless "1e400".to_f?.nil? && "-1e400".to_f?.nil? && "1e-400".to_f?.nil? && "1.7976931348623159e308".to_f?.nil?
+raise "string: to_f? at the edges of the range" unless "4.9e-324".to_f? == 5.0e-324 && "1.7976931348623157e308".to_f? == 1.7976931348623157e308 && "0e500".to_f? == 0.0
+nan_word = "nan".to_f?
+raise "string: to_f? words in any case" unless "INF".to_f? == 1.0 / 0.0 && "-Infinity".to_f? == -1.0 / 0.0 && "infinity".to_f? == 1.0 / 0.0 && nan_word && nan_word != nan_word && "infin".to_f?.nil?
+raise "string: to_f? inside whitespace" unless " 1.5 ".to_f? == 1.5 && "\n2\r\n".to_f? == 2.0 && " - ".to_f?.nil? && "1 .5".to_f?.nil?
+puts "    to_f? out of range is nil, its words in any case, and whitespace around it is not part of it"
 puts "    base conversion: to_i, to_i64 with bases 2..36, and nilable to_f? verified"
 
 # 4. Whitespace, strip, chomp, chop, and blank/presence
@@ -152,6 +161,13 @@ raise "string: split vertical tab and form feed" unless sp6.size == 4 && sp6[1] 
 sp7 = "abc".split("", 2)
 raise "string: split empty separator limit" unless sp7.size == 2 && sp7[0] == "a" && sp7[1] == "bc"
 raise "string: split empty string on empty separator" unless "".split("").size == 1
+# A limit of 1 or less is the string whole and no limit is `nil`, as the
+# other library splits: `"a,b".split(",", -1)` was `["a", "b"]`, and
+# `"".split(",", -1)` was `[]` where `"".split(",")` was `[""]`.
+raise "string: split limit 1 or less" unless "a,b".split(",", -1) == ["a,b"] && "a,b".split(",", 0) == ["a,b"] && "a b".split(-1) == ["a b"] && "abc".split("", -1) == ["abc"] && "a,b".split(',', 0) == ["a,b"]
+raise "string: split of an empty string" unless "".split(",", -1) == [""] && "".split(",", 3) == [""] && "".split(-1) == [""] && "".split == [] of String
+raise "string: split without a limit" unless "a,b,c".split(",", nil) == ["a", "b", "c"] && "a b c".split(nil) == ["a", "b", "c"]
+puts "    split: a limit of 1 or less is the string whole, and an empty string one empty piece"
 
 part1 = "host:port:8080".partition(":")
 raise "string: partition found" unless part1[0] == "host" && part1[1] == ":" && part1[2] == "port:8080"
@@ -224,12 +240,23 @@ raise "string: squeeze all" unless "yellow  moon".squeeze == "yelow mon"
 raise "string: squeeze char" unless "yellow  moon".squeeze('o') == "yellow  mon"
 raise "string: squeeze chars" unless "yellow  moon".squeeze(" l") == "yelow moon"
 raise "string: count char" unless "banana".count('a') == 3
-raise "string: count str" unless "banana".count("an") == 2
-raise "string: center char pad" unless "hello".center(11, '-') == "---hello---"
-raise "string: center str pad" unless "hello".center(12, "-=") == "-=-hello-=-="
-# A run of a character, not of a byte: `耀` is E8 80 80.
+# A run of a character, not of a byte: `耀` is E8 80 80. Ahead of the sets
+# below, whose wide run `à-ê` a broken decoder reads as running backwards.
 raise "string: squeeze multi-byte run" unless "ééé".squeeze == "é"
 raise "string: squeeze inside a character" unless "耀".squeeze == "耀"
+# A set as the other library's `Char#in_set?` reads one: runs, a leading
+# `^` negating, a `\` making the next `^` or `-` itself, and several sets
+# intersected. `count(String)` counted a substring (`"banana".count("an")`
+# was 2), and a range or a `^` was text to all three: `count("a-z")` was 0
+# and `"aaabbbccc".squeeze("a-c")` was "abbbc".
+raise "string: count a set" unless "banana".count("an") == 5 && "hello world".count("a-z") == 10 && "hello".count("^l") == 3 && "hello world".count("lo", "o") == 2
+raise "string: delete and squeeze a set" unless "hello world".delete("a-k") == "llo worl" && "aaabbbccc".squeeze("a-c") == "abc" && "aaabbbccc".squeeze("a-c", "^b") == "abbbc" && "hello".delete("l", "lo") == "heo"
+raise "string: a set's own characters" unless "a^b-".count("^-") == 1 && "a^b".count("\\^") == 1 && "a-b".count("a\\-b") == 3 && "a-b".count("a-") == 2 && "a^b".count("^") == 3 && "abc".count("") == 0
+raise "string: a set of wide characters" unless "héllo".count("^é") == 4 && "héllo".delete("à-ê") == "hllo"
+raise "string: a char is itself, not a set" unless "a^b".delete('^') == "ab" && "a--b".squeeze('-') == "a-b" && "a^b".count('^') == 1
+puts "    count, delete and squeeze read a character set: runs, ^, \\ and several sets"
+raise "string: center char pad" unless "hello".center(11, '-') == "---hello---"
+raise "string: center str pad" unless "hello".center(12, "-=") == "-=-hello-=-="
 puts "    transformations: tr, delete, squeeze, count, and center verified"
 
 # 9. UTF-8 awareness and byte/character boundaries
@@ -349,7 +376,7 @@ puts "    utf8 awareness: multi-byte characters, byte indexing, chars decoding, 
 raise "utf8: lstrip char" unless "☃a☃".lstrip('☃') == "a☃"
 raise "utf8: rstrip char" unless "☃a☃".rstrip('☃') == "☃a"
 raise "utf8: ends_with char" unless "a☃".ends_with?('☃')
-raise "utf8: split char" unless "a☃b".split('☃', 0).size == 2
+raise "utf8: split char" unless "a☃b".split('☃', 2).size == 2
 raise "utf8: index char" unless "a☃b".index('☃', 0) == 1
 raise "utf8: rindex char" unless "a☃b".rindex('☃') == 1
 raise "utf8: delete char" unless "a☃b".delete('☃') == "ab"
@@ -432,5 +459,51 @@ raise "string: gsub empty block" unless "ab".gsub("") { |m| "<#{m}>" } == "<>a<>
 unpaired = String.new(2) { |b| b[0] = 0xC3_u8; b[1] = 0x41_u8 }
 raise "string: gsub empty keeps a byte that begins no character" unless unpaired.gsub("", "-").bytes == [0x2D_u8, 0xC3_u8, 0x2D_u8, 0x41_u8, 0x2D_u8]
 puts "    gsub with an empty search writes the replacement before every character and at the end"
+
+# Whitespace is the other library's `Char#whitespace?`: above ASCII the
+# Zs, Zl and Zp characters, decoded, and not U+0085 or a stray byte. The
+# prelude's `strip` and these three read bytes as ASCII and kept them all.
+raise "prelude: strip unicode whitespace" unless "\u3000\u00A0b\u2028\u00A0\u3000".strip == "b" && " \u0085x\u0085".strip.bytesize == 5 && "a \x80".strip.bytesize == 3 && "xà\u00A0".strip == "xà"
+raise "string: unicode whitespace" unless "\u2000\u3000".blank? && "\u3000a\u202F".lstrip == "a\u202F" && "\u3000a\u202F".rstrip == "\u3000a" && !"\u0085".blank?
+puts "    whitespace above ASCII: strip, lstrip, rstrip and blank? take Zs, Zl and Zp"
+
+# Whitespace around a number is not part of it, as the other library reads
+# one, and inside it is still refused: `" 42".to_i64?`, `"ff ".to_i?(16)`
+# and a line read with its `\n` were nil. They read the whitespace and
+# the decoder above, and come after their checks: ahead of them, a
+# `whitespace?` blind to U+00A0 or a broken decoder stopped here first.
+raise "string: numbers inside whitespace" unless " 42\n".to_i64? == 42_i64 && "\u00a0ff ".to_i?(16) == 255 && "\t7 ".to_u64? == 7_u64 && "\u3000-3".to_i64?(10) == -3_i64
+raise "string: whitespace inside a number" unless "4 2".to_i64?.nil? && "- 5".to_i?(10).nil? && " ".to_u64?.nil? && "42\u0085".to_i64?.nil?
+puts "    to_i?, to_i64? and to_u64? read a number inside whitespace"
+
+# `==` compares thirty-two bytes a step and then the rest one at a time:
+# every length to 70 - two whole steps and a tail - against itself, its
+# copy, one byte longer, and one byte changed at each position in turn.
+wrong = 0
+(0..70).each do |n|
+  base = "q" * n
+  wrong += 1 unless base == base && base == "q" * n && base != "q" * (n + 1)
+  n.times { |at| wrong += 1 if base == base[0, at] + "r" + base[at + 1, n] }
+end
+raise "prelude: == at every length and position (#{wrong} wrong)" unless wrong == 0
+puts "    == at every length to 70, a byte changed at each position"
+
+# Ill-formed bytes through chop, the strips that take a set and reverse,
+# each one character by itself as `each_char` reads it (`point_width` in
+# the module). Last, so a broken decoder or set stops at its own check
+# above first.
+# The last character `each_char` reads, an ill-formed byte one of its
+# own (`point_width` in the module): every `10xxxxxx` byte was cut with
+# the byte before it, so `"\t\xE2\x82".chop` was `"\t"`.
+raise "string: chop an ill-formed byte" unless "\t\xE2\x82".chop == "\t\xE2" && "é\x80".chop == "é" && "a\xF0\x9F\x98".chop == "a\xF0\x9F" && "\xC0\x80".chop == "\xC0"
+# The strips that take a set read the same characters: a lead byte
+# kept the `10xxxxxx` bytes after it, so `"a\x80".lstrip("a")` stripped
+# nothing and a cut `€`, E2 82, was found inside the `€` of the set.
+raise "string: strip a set past an ill-formed byte" unless "a\x80".lstrip("a") == "\x80" && "\r\x80".strip("c\rß") == "\x80" && "x\xE2\x82".rstrip("€") == "x\xE2\x82" && "\xE2\x82x".lstrip("€") == "\xE2\x82x"
+# A byte that begins no character is one by itself, as `each_char` reads
+# it (`point_width` in the module): reversed with the byte before it,
+# `" \x80é".reverse` was `"é \x80"`.
+ill_formed = [" \x80é", "abc\x80\x80\x80\x80", "\xE2\x82x", "é\x80\xBFa", "\xED\xA0\x80b", "\xF4\x90\x80\x80z", "\xC0\x80"]
+raise "utf8: reverse an ill-formed byte" unless " \x80é".reverse == "é\x80 " && ill_formed.all? { |text| text.reverse.chars == text.chars.reversed && text.reverse.reverse == text }
 
 puts "all std/text checks passed"

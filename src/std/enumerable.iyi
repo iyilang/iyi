@@ -22,8 +22,8 @@
 #     `reduce`, `accumulate` and eight more. `U` belongs to the method, not to
 #     the trait.
 #   * `where Elem : Comparable` — about a quarter of `Enumerable` is valid
-#     only for some element types. `max`, `min`, `sum`, `product`, `tally`, `sorted`,
-#     `includes?` and `minmax` say so instead of duck-typing. `sum` and
+#     only for some element types. `max`, `min`, `sum`, `product`, `tally`, `sorted`
+#     and `minmax` say so instead of duck-typing. `sum` and
 #     `product` also need `Num` to require `self.zero` and `self.one`: an
 #     identity belongs to the type, since an empty collection has no element
 #     to ask.
@@ -217,10 +217,16 @@ pub trait Enumerable
     # here, so this is the one place that has to say so. Zero still answers
     # `[]`: an empty prefix is a real answer to a real question.
     raise "negative count: #{n}" if n < 0
+    # And it stops at the nth element rather than at the one after it, as
+    # the other library's `first(n)` does: the check came before the
+    # append, so every call pulled one element more than it kept, and a
+    # source read once (a pipe, a generator) lost it - `take(2)` twice
+    # over 1..6 answered [1, 2] and then [4, 5], and `take(0)` pulled one.
     result = [] of Elem
+    return result if n == 0
     each do |e|
-      return result if result.size >= n
       result << e
+      return result if result.size >= n
     end
     result
   end
@@ -273,8 +279,12 @@ pub trait Enumerable
     end
   end
 
-  def each_with_object(obj : U, & : U, Elem -> Nil) : U forall U
-    each { |e| yield obj, e }
+  # The element first and the memo second, as the other library yields them.
+  # It was the reverse, so `[[1], [2]].each_with_object([] of Int32) { |x,
+  # acc| acc.concat(x) }` compiled under both and answered `[]` here: the
+  # element was the one mutated (SPEC.md III.1.7a's worst shape).
+  def each_with_object(obj : U, & : Elem, U -> Nil) : U forall U
+    each { |e| yield e, obj }
     obj
   end
 
@@ -306,8 +316,10 @@ pub trait Enumerable
 
   # Equality, as `Array#includes?` asks it: `<=>` answering 0 is ordering,
   # and for a float it said a NaN was present in a list of NaNs, which no
-  # `==` says and `[nan].includes?(nan)` does not.
-  def includes?(value : Elem) : Bool where Elem : Comparable
+  # `==` says and `[nan].includes?(nan)` does not. And so no bound: every
+  # type has `==`, and the `Comparable` one left from the `<=>` days
+  # refused a list of arrays, of nilable numbers or of any class.
+  def includes?(value : Elem) : Bool
     each { |e| return true if e == value }
     false
   end
@@ -616,8 +628,11 @@ pub trait Enumerable
     theirs = other.to_a
     result = [] of Tuple(Elem, O::Elem)
     i = 0
+    # As many pairs as this collection has elements, and a shorter *other*
+    # refused at its first missing index, as the other library refuses it:
+    # the pairs stopped at the shorter, and an element went without a word.
     each do |e|
-      result << {e, theirs[i]} if i < theirs.size
+      result << {e, theirs[i]}
       i = i + 1
     end
     result

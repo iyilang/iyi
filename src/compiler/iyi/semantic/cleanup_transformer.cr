@@ -650,7 +650,8 @@ module Iyi
     # value it captures must be `Share` (SPEC.md III.4.4, III.4.11). The
     # block became a proc when the call was typed, and the proc's def knows
     # which of the enclosing variables it closed over; each one's type is
-    # asked, and `self` too when the block reached an instance variable.
+    # asked, and `self` too when the block reached an instance variable or
+    # called one of self's methods receiverless.
     def check_thread_captures_share(node : Call, target_def : Def)
       return unless target_def.name == "start"
       owner = target_def.owner
@@ -660,6 +661,8 @@ module Iyi
       fun_literal = block.fun_literal
       return unless fun_literal.is_a?(ProcLiteral)
       a_def = fun_literal.def
+      check_thread_constants_share(a_def)
+      check_thread_class_vars_share(a_def)
       return unless a_def.closure?
 
       vars = a_def.vars
@@ -688,7 +691,13 @@ module Iyi
         end
       end
 
-      if captures_self
+      # `bump` written for `self.bump` reaches self as `@n` does, and the
+      # closure's variables do not list it: a block calling `bump` twenty
+      # million times beside its starter's twenty million compiled and
+      # counted 28936626 of 40000000, where `@n += 1` in the block was
+      # refused. A receiverless call to a method that takes self is a
+      # capture of self.
+      if captures_self || ReceiverlessSelfCalls.any?(a_def.body)
         if self_type = @current_def.try(&.owner)
           unless self_type.is_a?(Program) || self_type.metaclass?
             if why = Iyi::Share.reason(self_type)
@@ -717,7 +726,7 @@ module Iyi
       inside = CaptureAssignments.new(@program, meta, nil, a_def.vars)
       a_def.body.accept inside
       if first = inside.assigns.first?
-        first[0].raise "the block IyiThread.start runs on another thread assigns `#{name}`, a local of the code that started the thread, so the two threads share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic` or behind a `Mutex`"
+        first[0].raise "the block IyiThread.start runs on another thread assigns `#{name}`, a local of the code that started the thread, so the two threads share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`"
       end
 
       scope = meta.context
@@ -728,9 +737,12 @@ module Iyi
       outside = CaptureAssignments.new(@program, meta, start, vars)
       body.try &.accept(outside)
       line = start.location.try(&.line_number)
+      # Only `Atomic`: the advice also said "or behind a `Mutex`", and iyi
+      # has none to keep a value behind (`Mutex.new` is an undefined
+      # constant).
       advice = "so the thread and the code that started it share one mutable cell: a data race (SPEC.md III.4.4). " \
                "Capture a local that is assigned once (a block's own locals are new on every call), " \
-               "or keep the value in an `Atomic` or behind a `Mutex`"
+               "or keep the value in an `Atomic`"
       # Not found, or found assigned nowhere: the walk does not know this
       # scope, and the typer's answer stands.
       unless outside.found_start? && !outside.assigns.empty?
@@ -748,6 +760,109 @@ module Iyi
           end
         next unless why
         assign.raise "`#{name}` is assigned here, #{why}, and the block IyiThread.start runs on another thread (line #{line}) captures it, #{advice}"
+      end
+    end
+
+    # iyi: a constant is module-level state the block names in its own text,
+    # so it is no variable the closure lists, and a block reading only
+    # constants is no closure at all: `COUNTS = [0]` with `COUNTS[0] += 1`
+    # run a million times in the block and a million by its starter
+    # compiled and printed 1061337 (SPEC.md III.4.5). Each constant the
+    # block, its inlined blocks and its procs name is asked what a captured
+    # variable is. One that a method the block calls reads is reached
+    # through the call, and is not seen here.
+    def check_thread_constants_share(a_def : Def) : Nil
+      named = NamedConstants.new
+      a_def.body.accept named
+      named.paths.each do |path, type|
+        if why = Iyi::Share.reason(type)
+          path.raise "the block IyiThread.start runs on another thread names the constant `#{path} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+        end
+      end
+    end
+
+    # Every constant a body names, once each, with its value's type.
+    class NamedConstants < Visitor
+      getter paths = [] of {Path, Type}
+      @seen = Set(Const).new
+
+      def visit(node : Path) : Bool
+        const = node.target_const
+        type = node.type?
+        @paths << {node, type} if const && type && @seen.add?(const)
+        false
+      end
+
+      def visit(node : ASTNode) : Bool
+        true
+      end
+    end
+
+    # iyi: a class variable is module-level state as a constant is (SPEC.md
+    # III.4.5), named in the block's own text with nothing the closure
+    # lists: a class method whose thread block and starter each ran
+    # `@@count += 1` two million times compiled, and printed 2548908 and
+    # 2461914 of 4000000. One only its initializer writes is a value, asked
+    # what a constant is. One written again - by the block, or anywhere
+    # the typer reached - is one cell every thread that names it shares,
+    # refused as a captured local assigned after the start is. A
+    # thread-local one is every thread's own, and neither.
+    def check_thread_class_vars_share(a_def : Def) : Nil
+      named = NamedClassVars.new
+      a_def.body.accept named
+      advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`"
+      named.vars.each do |class_var, var|
+        next if var.thread_local?
+        if assign = named.assigns[var]?
+          assign.raise "the block IyiThread.start runs on another thread assigns `#{class_var.name}`, a class variable, #{advice}"
+        end
+        if written = var.iyi_written
+          write, in_def = written
+          where = if in_def && in_def.name != "->"
+                    "in `#{in_def.name}`"
+                  elsif location = write.location
+                    "at line #{location.line_number}"
+                  else
+                    "outside it"
+                  end
+          class_var.raise "the block IyiThread.start runs on another thread names the class variable `#{class_var.name}`, which is written after its initializer (#{where}), #{advice}"
+        end
+        type = var.type?
+        next unless type
+        if why = Iyi::Share.reason(type)
+          class_var.raise "the block IyiThread.start runs on another thread names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+        end
+      end
+    end
+
+    # Every class variable a body names, once each, with the variable it
+    # is, and the first assignment to each.
+    class NamedClassVars < Visitor
+      getter vars = [] of {ClassVar, MetaTypeVar}
+      getter assigns = {} of MetaTypeVar => ASTNode
+      @seen = Set(MetaTypeVar).new
+
+      def initialize
+        @assigns.compare_by_identity
+        @seen.compare_by_identity
+      end
+
+      def visit(node : Assign) : Bool
+        target = node.target
+        if target.is_a?(ClassVar) && (var = target.var?)
+          @assigns[var] ||= node
+        end
+        true
+      end
+
+      def visit(node : ClassVar) : Bool
+        var = node.var?
+        @vars << {node, var} if var && @seen.add?(var)
+        false
+      end
+
+      def visit(node : ASTNode) : Bool
+        true
       end
     end
 
@@ -889,6 +1004,35 @@ module Iyi
 
       def visit(node : ASTNode)
         true
+      end
+    end
+
+    # Whether a body, its inlined blocks and the procs inside it included,
+    # calls a method on self without writing a receiver. A call is one when
+    # its method takes a self argument, which is what codegen passes self
+    # for: not a top-level def, a class method of a plain type, or a
+    # function an import names (receiverless, but the module's).
+    class ReceiverlessSelfCalls < Visitor
+      getter? found = false
+
+      def self.any?(body : ASTNode) : Bool
+        visitor = new
+        body.accept visitor
+        visitor.found?
+      end
+
+      def visit(node : Call) : Bool
+        return false if @found
+        target_defs = node.target_defs
+        if !node.obj && !node.uses_with_scope? && target_defs && target_defs.any?(&.owner.passed_as_self?)
+          @found = true
+          return false
+        end
+        true
+      end
+
+      def visit(node : ASTNode) : Bool
+        !@found
       end
     end
 

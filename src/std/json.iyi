@@ -104,6 +104,15 @@ class StringBuffer
       target.copy_from(ptr, len)
     end
   end
+
+  # The bytes appended since *start*, as a String.
+  def slice_from(start : Int32) : String
+    len = @size - start
+    ptr = @buffer + start
+    String.new(len) do |target|
+      target.copy_from(ptr, len)
+    end
+  end
 end
 
 # The length of the well-formed UTF-8 sequence that starts at *at*, or,
@@ -602,8 +611,18 @@ pub struct Any
     b.to_s
   end
 
+  # A string as itself and null as nothing, as `YAML::Any#to_s` and the
+  # other library answer them; a number, a boolean or a collection as its
+  # JSON text. A string was its JSON text too, so `"hello #{doc["name"]}"`
+  # printed `hello "Ada"`, and null printed `null`.
   def to_s : String
-    to_json
+    if s = as_s?
+      s
+    elsif @raw.nil?
+      ""
+    else
+      to_json
+    end
   end
 
   def inspect : String
@@ -1997,6 +2016,9 @@ pub class Builder
   @indent_str : String?
   @level : Int32
   @states : Array(Int32)
+  # The key texts of every object still open, innermost last, each with the
+  # String it was written from.
+  @keys : Array(Hash(String, String))
 
   property max_nesting : Int32
   property ascii_only : Bool
@@ -2006,6 +2028,7 @@ pub class Builder
     @indent_str = nil
     @level = 0
     @states = [ROOT]
+    @keys = [] of Hash(String, String)
     @max_nesting = MAX_NESTING
     @ascii_only = false
   end
@@ -2228,6 +2251,7 @@ pub class Builder
     @level = @level + 1
     raise "nesting depth of #{@level} exceeds maximum depth #{@max_nesting}" if @level > @max_nesting
     @states << OBJECT_FIRST
+    @keys << Hash(String, String).new
   end
 
   def end_object : Nil
@@ -2235,6 +2259,7 @@ pub class Builder
     raise "end_object with a field's value still due" if st == OBJECT_VALUE
     raise "end_object without start_object" unless st == OBJECT_FIRST || st == OBJECT_NEXT
     @states.pop
+    @keys.pop
     @level = @level - 1
     write_indent if st == OBJECT_NEXT
     @buffer.append(125_u8) # '}'
@@ -2246,14 +2271,27 @@ pub class Builder
     end_object
   end
 
-  # A key; the value that follows it is written by the next call.
+  # A key; the value that follows it is written by the next call. A key
+  # whose text is one this object already holds is refused, naming both:
+  # the reader refuses a duplicate key, and the builder wrote one - a key
+  # given twice, or two Strings whose bytes are not UTF-8 and are both
+  # written as U+FFFD (`{"a\xFF" => 1, "a\xFE" => 2}` was written
+  # `{"a\uFFFD":1,"a\uFFFD":2}`, and `JSON.parse` refused it).
   def field(name : String) : Nil
     st = state
     raise "a field outside an object" unless st == OBJECT_FIRST || st == OBJECT_NEXT
     @buffer.append(44_u8) if st == OBJECT_NEXT # ','
     set_state(OBJECT_VALUE)
     write_indent
+    from = @buffer.size
     write_escaped_string(name)
+    text = @buffer.slice_from(from)
+    keys = @keys.last
+    if earlier = keys[text]?
+      raise "the key #{name.inspect} is written twice in one object" if earlier == name
+      raise "the keys #{earlier.inspect} and #{name.inspect} are both written as #{text}"
+    end
+    keys[text] = name
     @buffer.append(58_u8)                         # ':'
     @buffer.append(32_u8) unless @indent_str.nil? # ' '
   end

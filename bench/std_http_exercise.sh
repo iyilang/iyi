@@ -345,9 +345,10 @@ PY
 mutate "a status parsed as zero" '{code, reason}' '{0, reason}'
 mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca + 0_u8 if ca >= 65_u8 && ca <= 90_u8'
 mutate "a chunked body left as it came" 'body = decode_chunked(body)' 'body = body + ""'
-mutate "a server that forgets keep-alive" 'wrote.is_a?(Int32) && !close' 'wrote.is_a?(Int32) && false'
+mutate "a server that forgets keep-alive" 'wrote.is_a?(Int32) && !closing' 'wrote.is_a?(Int32) && false'
+mutate "a block's Connection: close dropped" 'closing = true if HTTP.has_token?(said, "close")' ''
 mutate "Connection read as one value" 'HTTP.has_token?(conn, "close")' 'HTTP.same_name?(HTTP.trim(conn), "close")'
-mutate "a server that answers every request 200" 'Response.new(400, reason' 'Response.new(200, reason'
+mutate "a server that answers every request 200" 'Response.new(parsed.status, reason' 'Response.new(200, reason'
 mutate "a server that parses the body so far after every read" 'while have < wanted' 'while have < rest.bytesize + 1'
 mutate "a server that parses a chunked body again after every read" '        read = HTTP.read_chunked(buffer, parsed.consumed, MAX_BODY) { wait_read(client, listener, idle) }' '        more = wait_read(client, listener, idle)
         return unless more
@@ -363,6 +364,7 @@ mutate "a server that adds each read to the head so far and searches all of it" 
 mutate "a server that waits on a client partway through a body" 'got = read_body(client, rest, wanted, listener, idle)' 'got = read_body(client, rest, wanted, listener, nil)'
 mutate "a server that cuts each request off the front of the read" 'start = parsed.consumed' 'buffer = buffer[parsed.consumed, buffer.bytesize - parsed.consumed]'
 mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
+mutate "a client that reads a head for as long as it comes" 'got, ends = read_head(got, at, Server::MAX_HEAD)' 'got, ends = read_head(got, at, 2147483647)'
 mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
 mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle)' '          accepted = client
           g.spawn do
@@ -398,6 +400,7 @@ mutate "a signed or low status read as one" 'code_text.bytesize == 3 && digits?(
 mutate "any version under HTTP/" 'sp1 && sp1 == 8 && digits?(line[5, 1]) && line.to_unsafe[6] == 46_u8 && digits?(line[7, 1])' 'sp1'
 mutate "an interim answer taken for the answer" 'break unless status >= 100 && status < 200 && status != 101 && start < text.bytesize' 'break'
 mutate "a 204 written with a body and a length" 'bodiless = (response.status >= 100 && response.status < 200) || response.status == 204 || response.status == 304' 'bodiless = false'
+mutate "an empty line before a request read as one" 'while at + 1 < text.bytesize && p[at] == 13_u8' 'while false && p[at] == 13_u8'
 mutate "a client that reads an answer with a length to the close" 'while answer.bytesize.to_i64 < need' 'while true'
 mutate "a client that reads a chunked answer to the close" 'if te = final.header("Transfer-Encoding")' 'if te = nil.as(String?)'
 mutate "an absolute-form target handed on whole" 'if authority = HTTP.absolute_form(target)' 'if authority = nil.as(Int32?)'

@@ -226,9 +226,20 @@ pub struct HttpDatagram
     @quarter_stream_id * 4_u64
   end
 
-  # Creates an HTTP Datagram associated with the given HTTP/3 stream ID.
+  # Creates an HTTP Datagram associated with the given HTTP/3 stream ID,
+  # which is a client-initiated bidirectional stream: RFC 9297 Section 2.1
+  # associates a datagram with no other kind, and that is why the division
+  # by four always comes out even. Any other stream ID is refused. It was
+  # divided down instead, so `from_stream_id(19_u64, payload)` was a
+  # datagram for stream 16 - another request's - and `stream_id` answered
+  # 16. A stream ID past 2^62 - 1 is left to `new`, whose sentence names
+  # the quarter it would be.
   def self.from_stream_id(stream_id : UInt64, payload : Bytes) : self
-    new(stream_id // 4_u64, payload)
+    quarter = stream_id // 4_u64
+    if quarter <= MAX_QUARTER_STREAM_ID && (stream_id & 3_u64) != 0_u64
+      raise "http datagram stream id #{stream_id} is not a client-initiated bidirectional stream (RFC 9297 Section 2.1)"
+    end
+    new(quarter, payload)
   end
 
   # Encodes this datagram into the wire format:

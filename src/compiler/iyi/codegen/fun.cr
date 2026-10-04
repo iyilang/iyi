@@ -23,15 +23,20 @@ class Iyi::CodeGenVisitor
     iyi_record_unit_lib(target_def)
 
     # iyi: a method that takes a block is instantiated with the caller's block
-    # inlined into it, so its machine code belongs to whoever wrote the block
-    # and not to the module that declared the method (SPEC.md IV.1g).
+    # inlined into it, and a `forall` method at the caller's types, so its
+    # machine code belongs to whoever wrote the call and not to the module
+    # that declared the method (SPEC.md IV.1g).
     #
     # Emitted here, private to this unit, and so absent from the artifact —
     # which is what the consumer needs, because it makes its own from the body
     # that travels in `MonoBodies`. Left in the module's own unit it was a
     # duplicate symbol for a block the producer happened to write, and a
-    # missing one for every block it did not.
-    if iyi_block_instantiated?(target_def, self_type)
+    # missing one for every block it did not. A `forall` def left there also
+    # took the producer's own types into the library's artifact:
+    # `wrap(Meters.new)` in a program put `Lib::Box2::Box(Q4::Meters)` in
+    # `lib/box2`'s type ids, and every other program importing it was refused
+    # because it "cannot name it".
+    if iyi_caller_instantiated?(target_def, self_type)
       here = ModuleInfo.new(@llvm_mod, @llvm_typer, self.builder)
       func = typed_fun?(@llvm_mod, mangled_name) ||
              codegen_fun(mangled_name, target_def, self_type, fun_module_info: here, iyi_internal: true)
@@ -150,12 +155,26 @@ class Iyi::CodeGenVisitor
   end
 
   # iyi: whether this def's machine code is the caller's rather than the
-  # module's — a block-taking method of a module whose artifact is being
-  # written (SPEC.md IV.1g).
-  private def iyi_block_instantiated?(target_def, self_type) : Bool
+  # module's — a block-taking or `forall` method of a module whose artifact
+  # is being written (SPEC.md IV.1g, `IyiMod.caller_instantiated?`).
+  private def iyi_caller_instantiated?(target_def, self_type) : Bool
     return false if @program.iyi_exported_owners.empty?
-    return false unless target_def.block_arg || target_def.block_arity
+    return false unless IyiMod.caller_instantiated?(target_def)
     @program.iyi_exported_owners.includes?(self_type.instance_type)
+  end
+
+  # iyi: the refusal for a call to a method an artifact declares and none
+  # defines, naming the module the declaration came from — the parser read
+  # it under the artifact's path, and `iyi_artifact_modules` is keyed on that.
+  private def iyi_refuse_unreached(target_def : Def, self_type) : NoReturn
+    file = target_def.location.try(&.original_filename)
+    module_name = file.try { |path| @program.iyi_artifact_modules[path]? } || file || "an imported module"
+    owner = target_def.owner? || self_type
+    target_def.raise "#{module_name}'s artifact declares `#{Call.def_full_name(owner, target_def)}`, " \
+                     "and its object code has no symbol for it: the build that wrote the artifact " \
+                     "never reached it. An artifact carries the machine code its producing build " \
+                     "compiled (SPEC.md IV.1g). Write #{module_name}'s artifact again from a build " \
+                     "that calls it, or build against #{module_name}'s source"
   end
 
   # The unit a callee should be copied into, or nil to route it normally.
@@ -281,6 +300,18 @@ class Iyi::CodeGenVisitor
       # guesses at.
       compiled_elsewhere = !is_fun_literal &&
                            @program.iyi_artifact_symbols.includes?(mangled_name)
+
+      # iyi: and a header no artifact defines a symbol for is a call the link
+      # cannot answer. An artifact carries the machine code its producing
+      # build reached (SPEC.md IV.1g), so a method that build never called is
+      # declared in it and compiled nowhere — and left to the linker the
+      # program ended on `LNK2019 unresolved external symbol` and a mangled
+      # `.2A.Kit.3A..3A.Lib.40.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E.`,
+      # naming no module. Refused here, where the module is still known.
+      if target_def.iyi_from_artifact? && !compiled_elsewhere && !is_fun_literal &&
+         !target_def.is_a?(External)
+        iyi_refuse_unreached target_def, self_type
+      end
 
       needs_body = (!target_def.is_a?(External) || is_exported_fun) &&
                    !target_def.iyi_from_artifact? &&
@@ -658,7 +689,7 @@ class Iyi::CodeGenVisitor
       context.fun.call_convention = call_convention
     end
 
-    if @single_module && (mangled_name.starts_with?("__crystal_") || mangled_name.starts_with?("__iyi_"))
+    if iyi_internalise? && (mangled_name.starts_with?("__crystal_") || mangled_name.starts_with?("__iyi_"))
       # FIXME: macos ld fails to link when the personality fun is internal; it
       # might work with lld so we might want to check the linker?
       #

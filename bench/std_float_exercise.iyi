@@ -26,6 +26,11 @@ assert_true 4.0_f32 / 2.0_f32 == 2.0_f32, "div"
 assert_true (-1.5_f32).abs == 1.5_f32, "abs"
 assert_true (-0.0_f32).abs.to_f64.to_s == "0.0", "abs clears the sign of a zero"
 puts "  Float32 + / abs"
+# An integer over an integer is a double, as the other library divides
+# one: `7 / 2` printed 3.5 until this module was imported, and then was
+# "ambiguous call", its `2` cast to both a double and a single.
+assert_true 7 / 2 == 3.5 && 7_i64 / 2 == 3.5 && 7 / 2_i64 == 3.5 && 7_u8 / 2_u8 == 3.5 && 1 / 4_i128 == 0.25, "an integer over an integer is a double"
+puts "  an integer over an integer is a double, whatever the widths"
 
 puts "\n== constants"
 assert_true Float32::MAX > 1.0_f32, "max"
@@ -160,12 +165,13 @@ assert_str "-0.0", (-0.0).remainder(2.0).to_s, "(-0.0).remainder(2.0) is -0.0"
 assert_str "-0.0", (-0.0_f32).remainder(2.0_f32).to_s, "(-0.0_f32).remainder(2.0_f32) is -0.0"
 assert_str "-0.0", (-4.0).remainder(2.0).to_s, "(-4.0).remainder(2.0) is -0.0"
 # `x ** Int32::MIN` negated the exponent and panicked "arithmetic
-# overflow"; it is one over the 2^31st power, squared the way every other
-# exponent is.
+# overflow"; the exponent is counted in an Int64 now. 5.444710317852295e-94
+# is the power rounded once (Python's `decimal` at 80 digits); squaring in
+# plain doubles answered 5.444710383108578e-94.
 assert_true 2.0 ** -2147483648 == 0.0, "2.0 ** Int32::MIN is 0.0"
 assert_true (0.5 ** -2147483648).infinite? == 1, "0.5 ** Int32::MIN is Infinity"
 assert_true (-1.0) ** -2147483648 == 1.0, "-1.0 ** Int32::MIN is 1.0"
-assert_str "5.444710383108578e-94", (1.0000001 ** -2147483648).to_s, "1.0000001 ** Int32::MIN"
+assert_str "5.444710317852295e-94", (1.0000001 ** -2147483648).to_s, "1.0000001 ** Int32::MIN"
 assert_true 2.0_f32 ** -2147483648 == 0.0_f32, "2.0_f32 ** Int32::MIN is 0.0"
 puts "  a zero keeps its sign; ** takes the smallest Int32"
 

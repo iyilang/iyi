@@ -224,6 +224,61 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # A union impl is refused (SPEC.md II.1), so the advice for a nilable
+    # argument was "Write `impl Show for (Int32 | Nil)`", which the next
+    # build refused.
+    it "names the narrowing, not a union impl, for a nilable argument to a trait" do
+      code = <<-CODE
+        trait Show
+          abstract def show : String
+        end
+
+        impl Show for Int32
+          def show : String
+            "i"
+          end
+        end
+
+        def f(x : Show) : String
+          x.show
+        end
+
+        def make(b : Bool) : Int32?
+          if b
+            1
+          end
+        end
+
+        v = make(true)
+        f(v)
+        CODE
+      assert_error code, "a union implements a trait when every member does, and `Nil` does not (SPEC.md II.1). v can be nil here: narrow it first (`if v`)"
+      exception = expect_raises(Iyi::TypeException) { semantic code }
+      exception.to_s.should_not contain("impl Show for (Int32 | Nil)")
+    end
+
+    it "names each member that lacks the trait" do
+      assert_error <<-CODE, "and `Char` and `String` do not (SPEC.md II.1). A union's impl is not writable; write `impl Show for Char` and `impl Show for String`"
+        trait Show
+          abstract def show : String
+        end
+
+        def f(x : Show) : String
+          x.show
+        end
+
+        def pick(b : Bool) : String | Char
+          if b
+            "s"
+          else
+            'c'
+          end
+        end
+
+        f(pick(true))
+        CODE
+    end
+
     it "says the narrowing form for an instance variable" do
       assert_error <<-CODE, "@v can be nil here: narrow it first (`if value = @v`)"
         class B
@@ -246,6 +301,104 @@ describe "Semantic: iyi" do
 
         A.new.g
         CODE
+    end
+
+    # The other library's `Nil` has no `size` either, so the size rule's
+    # `--crystal` note sent a nilable receiver nowhere useful.
+    it "keeps the size rule's note off a nil" do
+      exception = expect_raises(Iyi::TypeException) do
+        semantic <<-CODE
+          class B
+            def size
+              1
+            end
+          end
+
+          def make(b : Bool) : B?
+            if b
+              B.new
+            end
+          end
+
+          x = make(true)
+          x.size
+          CODE
+      end
+      exception.to_s.should contain("x can be nil here")
+      exception.to_s.should_not contain("small by rule")
+    end
+
+    # HuntDiag3: the receiver's own text, not the words `the receiver` in
+    # a code span, and why `if make(true)` narrows nothing.
+    it "says the narrowing for a call receiver in its own text" do
+      assert_error <<-CODE, "`make(true)` can be nil here, and a call is made again each time it is written, so `if make(true)` narrows nothing: bind it and narrow the variable (`if value = make(true)`", filename: "x.iyi"
+        class B
+          def size
+            1
+          end
+        end
+
+        def make(b : Bool) : B?
+          if b
+            B.new
+          end
+        end
+
+        make(true).size
+        CODE
+    end
+
+    it "names the error members and their three idioms" do
+      exception = expect_raises(Iyi::TypeException) do
+        semantic <<-CODE, filename: "x.iyi"
+          class A
+            def size
+              1
+            end
+          end
+
+          struct E
+          end
+
+          impl Error for E
+            def message : String
+              "e"
+            end
+          end
+
+          def g(b : Bool) : A | E
+            return E.new if b
+            A.new
+          end
+
+          v = g(false)
+          v.size
+          CODE
+      end
+      exception.to_s.should contain("`v` can be `E` here, an error (SPEC.md III.1): give it an answer (`v.or(default)`), tell them apart (`case v` with `in A` and `in E`), or propagate it from a def that returns it (`v!`)")
+      exception.to_s.should_not contain("small by rule")
+    end
+
+    it "says what a C-family comment after code is" do
+      assert_error "x = 1 // the answer", "`//` at 1:7 is integer division, so the words after it are read as code: a comment starts with `#`", filename: "x.iyi"
+    end
+
+    it "names the spelling of another language's method" do
+      assert_error "class A\nend\nA.new.trim", "`strip` is the spelling here", filename: "x.iyi"
+      assert_error "class A\nend\nA.new.lenght", "`size` is the spelling here", filename: "x.iyi"
+      assert_error "class A\nend\nA.new.to_string", "`to_s` is the spelling here", filename: "x.iyi"
+    end
+
+    it "names the in-place spelling of a method whose plain name is here" do
+      assert_error "class A\n  def uniq\n    self\n  end\nend\na = A.new\na.uniq!", "`uniq!` is the other library's in-place spelling, and `!` cannot end a name here (SPEC.md III.1.7a): reassign the copy, `a = a.uniq`", filename: "x.iyi"
+    end
+
+    it "says a setter in initialize is not the field" do
+      assert_error "class P\n  @x : Int32\n\n  def initialize(x : Int32)\n    self.x = x\n  end\nend\nP.new(1)", "`self.x = x` calls a setter, and does not assign the field", filename: "x.iyi"
+    end
+
+    it "suggests an ancestor's method one case away over the type's own" do
+      assert_error "class P\n  def to_s\n    \"\"\n  end\nend\nclass C < P\n  def to_i\n    1\n  end\nend\nC.new.to_S", "Did you mean 'to_s'?", filename: "x.iyi"
     end
   end
 
@@ -285,6 +438,10 @@ describe "Semantic: iyi" do
       assert_error "x = 5_u64\nx.unsafe_to_u32", "`unsafe_to_u32` on UInt64 is in `std/int`"
     end
 
+    it "names std/float for a method the floats have there" do
+      assert_error "x = 1.5_f32\nx.to_f64", "`to_f64` on Float32 is in `std/float`"
+    end
+
     it "names puts value.inspect for p" do
       assert_error "p 1", "`puts value.inspect` is the spelling here; `p` comes with `import std/kernel::{p}`"
     end
@@ -292,6 +449,19 @@ describe "Semantic: iyi" do
     it "names elsif for elif, and a plain assignment for let" do
       assert_error "x = true\nif x\n  1\nelif x\n  2\nend", "`elsif` is the spelling here."
       assert_error "let x = 1", "There is no `let`: a variable is `x = 1`"
+    end
+
+    it "names a variable for const and mut, double quotes for a Char, and forall for a lone T" do
+      assert_error "const x = 5", "There is no `const`: a variable is `x = 1`, and a constant is an upper-case name"
+      assert_error "let mut x = 5", "There is no `mut`: a variable is `x = 1`, and any variable can be assigned again"
+      assert_error %(class Strs\n  def join(sep : String) : String\n    sep\n  end\nend\nStrs.new.join(',')), %(Did you mean ","? `join` takes a `String`, written in double quotes)
+      assert_error "struct U\nend\ndef hello(x : T) : String\n  \"\"\nend\nhello(U.new)", "`T` names no type here: a method's own type parameter is introduced by `forall`"
+    end
+
+    it "names the shadowed type, a trait superclass and an Exception subclass" do
+      assert_error "struct Box\n  def size : Int32\n    1\n  end\nend\nmodule Inner\n  struct Box\n    def twice : Int32\n      size * 2\n    end\n  end\nend\nInner::Box.new.twice",
+        "`Inner::Box` is a new type, declared at x.iyi:7, that shadows `::Box`, and `size` is on `::Box`", filename: "x.iyi"
+      assert_error "trait Greet\n  abstract def greet : String\nend\nstruct U < Greet\nend", "it's a trait. A type implements a trait after its declaration: `impl Greet for U`"
     end
 
     it "names size, to_s and nil for len, str and null" do
@@ -440,6 +610,21 @@ describe "Semantic: iyi" do
           2
         end
         CODE
+    end
+
+    # A def's or a block's handler starts where its body does, and the
+    # refusal pointed at the body's first statement, not at the keyword.
+    it "points at the `rescue` and the `ensure` of a def" do
+      {"rescue" => "iyi has no exceptions to rescue", "ensure" => "iyi has no `ensure`"}.each do |keyword, message|
+        ex = expect_raises(TypeException) do
+          semantic "def foo\n  1\n#{keyword}\n  2\nend\nfoo", filename: "prog.iyi"
+        end
+        while (inner = ex.inner).is_a?(TypeException)
+          ex = inner
+        end
+        ex.message.to_s.should contain(message)
+        {ex.line_number, ex.column_number}.should eq({3, 1})
+      end
     end
 
     it "keeps a Crystal file's rescue" do
@@ -808,6 +993,21 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # `Enumerable` is a module the compiler declares, so without the import
+    # the name found it and the refusal said "it's a generic module", where
+    # `impl Comparable` is told the import.
+    it "names std/enumerable for `impl Enumerable` without the import" do
+      assert_error <<-CODE, "`Enumerable` comes with `import std/enumerable::{Enumerable}`", filename: "nums.iyi"
+        struct Nums
+        end
+
+        impl Enumerable for Nums
+          def each(& : Int32 -> Nil) : Nil
+          end
+        end
+        CODE
+    end
+
     it "refuses to implement a trait for a trait" do
       # A blanket impl in disguise: it would give every implementer of one
       # trait a second one, from a module that has heard of neither.
@@ -829,6 +1029,33 @@ describe "Semantic: iyi" do
             end
           end
         end
+        CODE
+    end
+
+    # A module that is not a trait is refused as a target for the reason a
+    # written `include Greet` is: an impl for it gave every includer the
+    # trait with no impl of its own, and `struct Y; include M` answered
+    # `is_a?(Showable)` true.
+    it "refuses to implement a trait for a module" do
+      assert_error <<-CODE, "can't implement Showable for M, it's a module. A trait is implemented for a type"
+        trait Showable
+          abstract def show : Int32
+        end
+
+        module M
+        end
+
+        impl Showable for M
+          def show : Int32
+            1
+          end
+        end
+
+        struct Y
+          include M
+        end
+
+        Y.new.show
         CODE
     end
 
@@ -872,6 +1099,57 @@ describe "Semantic: iyi" do
             end
           end
         end
+        CODE
+    end
+
+    # A method of the required name answered the requirement whatever it
+    # took, and the other library's abstract-def pass reported the mismatch
+    # at the struct, naming no impl.
+    it "reports a requirement answered with other parameters, at the impl" do
+      assert_error <<-CODE, "impl App::Show::Showable for App::Show::Foo does not answer App::Show::Showable#show(n : Int32): App::Show::Foo#show(n : String) takes other parameters"
+        module App
+          module Show
+            trait Showable
+              abstract def show(n : Int32) : String
+            end
+
+            struct Foo
+            end
+
+            impl Showable for Foo
+              def show(n : String) : String
+                n
+              end
+            end
+          end
+        end
+        CODE
+    end
+
+    # `self` in a requirement is the implementing type, so the impl may
+    # write the type. It was read as the trait, and refused.
+    it "accepts the implementing type where a requirement says self" do
+      assert_type(<<-CODE) { int32 }
+        trait Cmp
+          abstract def cmp(other : self) : Int32
+        end
+
+        struct Foo
+          def initialize(@v : Int32)
+          end
+
+          def v : Int32
+            @v
+          end
+        end
+
+        impl Cmp for Foo
+          def cmp(other : Foo) : Int32
+            other.v
+          end
+        end
+
+        Foo.new(2).cmp(Foo.new(1))
         CODE
     end
 
@@ -953,6 +1231,38 @@ describe "Semantic: iyi" do
 
         App::Show.render(App::Show::Foo.new)
         CODE
+    end
+
+    # A requirement's own `forall` variable in its return type was looked up
+    # in the trait, which has no `U`: "can't resolve return type U", however
+    # the impl answered it, and the same in an abstract class. The impl's
+    # variable answers it where it stands in the requirement's place.
+    it "answers a requirement whose return names its own forall variable" do
+      code = <<-CODE
+        trait Ident
+          abstract def ident(x : U) : U forall U
+        end
+
+        abstract class Base
+          abstract def same(x : U) : U forall U
+        end
+
+        class A < Base
+          def same(x : V) : V forall V
+            x
+          end
+        end
+
+        impl Ident for A
+          def ident(x : V) : %s forall V
+            %s
+          end
+        end
+
+        {A.new.ident('a'), A.new.same(1)}
+        CODE
+      assert_type(code % {"V", "x"}) { tuple_of([char, int32]) }
+      assert_error code % {"Int32", "1"}, "this method must return U, which is the return type of the overridden method Ident#ident(x : U) forall U, or a subtype of it, not Int32"
     end
   end
 
@@ -1187,6 +1497,180 @@ describe "Semantic: iyi" do
         Derived.new.f
         CODE
     end
+
+    # Two traits can require one method, and a type implement both. The
+    # second impl's method replaced the first one's, so a call through the
+    # first trait ran the second's.
+    it "refuses an impl writing a method another trait's impl answers" do
+      assert_error <<-CODE, "and impl B for Y writes it again. A type has one method of a name and parameters"
+        trait A
+          abstract def name : Int32
+        end
+
+        trait B
+          abstract def name : Int32
+        end
+
+        struct Y
+        end
+
+        impl A for Y
+          def name : Int32
+            1
+          end
+        end
+
+        impl B for Y
+          def name : Int32
+            2
+          end
+        end
+        CODE
+    end
+
+    # And two impls of one parameterised trait, whose methods take the same
+    # arguments: the second silently won (SPEC.md II.6).
+    it "refuses two impls of a parameterised trait answering one method" do
+      assert_error <<-CODE, "App::Conv::User#into is what impl App::Conv::Into(String) for App::Conv::User answers"
+        module App
+          module Conv
+            trait Into(T)
+              abstract def into : T
+            end
+
+            struct User
+            end
+
+            impl Into(String) for User
+              def into : String
+                "u"
+              end
+            end
+
+            impl Into(Int32) for User
+              def into : Int32
+                1
+              end
+            end
+          end
+        end
+        CODE
+    end
+
+    # The same collisions met through a default method, which reaches the
+    # type by the impl's include: a call through the first trait ran the
+    # second's default, or the method the second impl wrote over it.
+    it "refuses a default method another trait's impl answers too" do
+      code = <<-CODE
+        trait A
+          def name : String
+            "a"
+          end
+        end
+
+        trait B
+          %s
+        end
+
+        struct Y
+        end
+
+        impl A for Y
+        end
+
+        impl B for Y
+          %s
+        end
+        CODE
+      assert_error code % {"def name : String\n    \"b\"\n  end", ""},
+        "Y#name is what impl A for Y answers with A's default"
+      assert_error code % {"def name : String\n    \"b\"\n  end", ""},
+        "and impl B for Y answers it again with B's default. A type has one method of a name and parameters"
+      assert_error code % {"abstract def name : String", "def name : String\n    \"b\"\n  end"},
+        "and impl B for Y writes it again. A type has one method of a name and parameters"
+    end
+
+    it "refuses two parameterisations of a trait whose default takes the same arguments" do
+      code = <<-CODE
+        trait Conv(T)
+          abstract def conv(x : T) : String
+
+          def twice(x : T) : Int32
+            1
+          end
+
+          %s
+        end
+
+        struct U
+        end
+
+        impl Conv(String) for U
+          def conv(x : String) : String
+            x
+          end
+        end
+
+        impl Conv(Int32) for U
+          def conv(x : Int32) : String
+            "i"
+          end
+        end
+
+        U.new.twice(1)
+        CODE
+      assert_type(code % "") { int32 }
+      assert_error code % "def tname : String\n    T.to_s\n  end",
+        "U#tname is what impl Conv(String) for U answers with Conv(String)'s default"
+    end
+
+    # What stands for both traits by design is left alone: a method the type
+    # writes itself, and a trait layered on another, whose default answers
+    # the other's requirement - `Indexable`'s `each` and `first` beside
+    # `Enumerable`'s.
+    it "leaves a default alone where the type writes the method or the traits are layered" do
+      assert_type(<<-CODE) { tuple_of([string, int32]) }
+        trait A
+          def name : String
+            "a"
+          end
+
+          abstract def each : Int32
+
+          def first : Int32
+            each
+          end
+        end
+
+        trait B
+          def name : String
+            "b"
+          end
+
+          def each : Int32
+            1
+          end
+
+          def first : Int32
+            2
+          end
+        end
+
+        struct Y
+          def name : String
+            "y"
+          end
+        end
+
+        impl B for Y
+        end
+
+        impl A for Y
+        end
+
+        {Y.new.name, Y.new.first}
+        CODE
+    end
   end
 
   describe "generic impls (SPEC.md II.7)" do
@@ -1288,6 +1772,41 @@ describe "Semantic: iyi" do
 
         impl Showable for Pair(T, Int32) forall T
           def show
+            1
+          end
+        end
+        CODE
+    end
+
+    # A splat parameter is bound the way it was declared. `Tuple(*T) forall
+    # T` was told T was not one of the `forall` names.
+    it "binds a splat parameter written with its splat" do
+      assert_type(<<-CODE) { int32 }
+        trait Sized
+          abstract def count : Int32
+        end
+
+        impl Sized for Tuple(*X) forall X
+          def count : Int32
+            1
+          end
+        end
+
+        {1, 2}.count
+        CODE
+    end
+
+    # The refusal names one parameter for each the generic declares, splat
+    # included. Built from the written arguments, `Proc(Int32)` was told to
+    # write `Proc(T) forall T`, which is refused for its arity.
+    it "suggests the splat generic's own parameters" do
+      assert_error <<-CODE, "Write `impl Sized for Proc(*T, R) forall T, R`"
+        trait Sized
+          abstract def count : Int32
+        end
+
+        impl Sized for Proc(Int32)
+          def count : Int32
             1
           end
         end
@@ -1430,6 +1949,36 @@ describe "Semantic: iyi" do
         end
         CODE
     end
+
+    # `impl Show for Box(T) forall T` lists the generic `Box(T)` among Show's
+    # includers. The recursive-struct check walked that list, never met
+    # `Box(Show)`, and the compiler overflowed its stack laying it out.
+    it "refuses a generic struct holding a trait it implements" do
+      assert_error <<-CODE, "recursive struct Box(Show) detected"
+        trait Show
+          abstract def show : Int32
+        end
+
+        struct Box(T)
+          def initialize(@value : T)
+          end
+        end
+
+        impl Show for Box(T) forall T
+          def show : Int32
+            1
+          end
+        end
+
+        impl Show for Int32
+          def show : Int32
+            2
+          end
+        end
+
+        Box(Show).new(1)
+        CODE
+    end
   end
 
   # A bound on a *method*'s free variable, which is a different mechanism from
@@ -1567,6 +2116,54 @@ describe "Semantic: iyi" do
 
         App.f(1)
         CODE
+    end
+
+    # Read as a path, `Into(String)` was any `Into`: a type with only `impl
+    # Into(Int32)` met it, under `forall` and under `where` alike.
+    it "checks a parameterised bound at its arguments" do
+      code = <<-CODE
+        trait Into(T)
+          abstract def into : T
+        end
+
+        struct B
+        end
+
+        impl Into(%s) for B
+          def into : %s
+            %s
+          end
+        end
+
+        trait Bag
+          type Elem
+          abstract def items : Array(Elem)
+
+          def conv : Int32 where Elem : Into(String)
+            1
+          end
+        end
+
+        struct S
+        end
+
+        impl Bag for S
+          type Elem = B
+
+          def items : Array(B)
+            [B.new]
+          end
+        end
+
+        def as_s(x : T) : Int32 forall T : Into(String)
+          1
+        end
+
+        %s
+        CODE
+      assert_type(code % {"String", "String", "\"b\"", "{as_s(B.new), S.new.conv}"}) { tuple_of([int32, int32]) }
+      assert_error code % {"Int32", "Int32", "2", "as_s(B.new)"}, "B does not implement Into(String), required by `T` in `as_s`"
+      assert_error code % {"Int32", "Int32", "2", "S.new.conv"}, "B does not implement Into(String), required by `where Elem : Into(String)` in `conv`"
     end
   end
 
@@ -1755,6 +2352,45 @@ describe "Semantic: iyi" do
           end
         end
         CODE
+    end
+
+    # `trait Ord(T) : Cmp(T)` was a parse error at the `(`. The supertrait is
+    # read at each impl's arguments: `impl Ord(N)` needs `Cmp(N)`, and an
+    # `impl Cmp(String)` is not that.
+    it "reads a parameterised supertrait at the impl's arguments" do
+      code = <<-CODE
+        module App
+          module Cmp
+            trait Cmp(T)
+              abstract def cmp(other : T) : Int32
+            end
+
+            trait Ord(T) : Cmp(T)
+              def gt(other : T) : Int32
+                cmp(other)
+              end
+            end
+
+            struct N
+              def initialize
+              end
+            end
+
+            impl Cmp(%s) for N
+              def cmp(other : %s) : Int32
+                1
+              end
+            end
+
+            impl Ord(N) for N
+            end
+          end
+        end
+
+        App::Cmp::N.new.gt(App::Cmp::N.new)
+        CODE
+      assert_type(code % {"N", "N"}) { int32 }
+      assert_error code % {"String", "String"}, "impl App::Cmp::Ord(App::Cmp::N) for App::Cmp::N needs an impl of App::Cmp::Cmp(App::Cmp::N) for App::Cmp::N first"
     end
   end
 
@@ -2160,6 +2796,57 @@ describe "Semantic: iyi" do
         end
         CODE
     end
+
+    # A subtrait's default naming its supertrait's associated type was
+    # "undefined constant Elem", though its body could call `items`.
+    it "lets a default name the required trait's associated type" do
+      assert_type(<<-CODE) { tuple_of([int32, string]) }
+        module App
+          module Coll
+            trait Bag
+              type Elem
+              abstract def item : Elem
+            end
+
+            trait Sorted : Bag
+              def smallest : Elem
+                item.as(Elem)
+              end
+            end
+
+            struct S
+            end
+
+            impl Bag for S
+              type Elem = Int32
+
+              def item : Int32
+                3
+              end
+            end
+
+            impl Sorted for S
+            end
+
+            struct W
+            end
+
+            impl Bag for W
+              type Elem = String
+
+              def item : String
+                "b"
+              end
+            end
+
+            impl Sorted for W
+            end
+          end
+        end
+
+        {App::Coll::S.new.smallest, App::Coll::W.new.smallest}
+        CODE
+    end
   end
 
   # iyi: errors are ordinary union members (SPEC.md III.1). `Error` is the
@@ -2227,6 +2914,39 @@ describe "Semantic: iyi" do
               case result
               in String then 1
               end
+            end
+          end
+        end
+
+        App::Fails.go
+        CODE
+    end
+
+    it "types a call from its declared error union, not from its body" do
+      # SPEC.md III.1.8, IV.2: the signature is the contract. Typed from the
+      # body, `never` was `Int32` and `never!` was refused as having "no error
+      # to propagate", while a build reading `never` from its `.iyimod` typed
+      # it `Int32 | IOError`.
+      assert_type(<<-CODE, filename: "x.iyi") { union_of(int32, types["App"].types["Fails"].types["IOError"]) }
+        module App
+          module Fails
+            struct IOError
+              def initialize
+              end
+            end
+
+            impl Error for IOError
+              def message : String
+                "boom"
+              end
+            end
+
+            def self.never : Int32 | IOError
+              1
+            end
+
+            def self.go : Int32 | IOError
+              never!
             end
           end
         end
@@ -2360,6 +3080,49 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "reports an error member the enclosing signature does not list at the `!`" do
+      # It was the other library's "must return (Int32 | ParseError) but it
+      # is returning IOError", reported at the signature.
+      assert_error <<-CODE, "`!` propagates App::Fails::IOError out of `go`, and `go` returns (App::Fails::ParseError | Int32), which does not include it", filename: "x.iyi"
+        module App
+          module Fails
+            struct IOError
+              def initialize
+              end
+            end
+
+            impl Error for IOError
+              def message : String
+                "boom"
+              end
+            end
+
+            struct ParseError
+              def initialize
+              end
+            end
+
+            impl Error for ParseError
+              def message : String
+                "bad"
+              end
+            end
+
+            def self.read(missing : Bool) : Int32 | IOError
+              return IOError.new if missing
+              1
+            end
+
+            def self.go : Int32 | ParseError
+              read(false)!
+            end
+          end
+        end
+
+        App::Fails.go
+        CODE
+    end
+
     it "does not make Nil an error" do
       # III.1.5: absence and failure stay distinct, so `T?` is not an error
       # union and nothing here touches it.
@@ -2374,6 +3137,76 @@ describe "Semantic: iyi" do
         end
 
         App::Fails.maybe(false)
+        CODE
+    end
+
+    it "refuses `!` in initialize, where `new` would drop the error" do
+      assert_error <<-CODE, "`!` can't propagate out of `initialize`", filename: "x.iyi"
+        module App
+          module Fails
+            struct ParseError
+              def initialize
+              end
+            end
+
+            impl Error for ParseError
+              def message : String
+                "bad"
+              end
+            end
+
+            def self.parse(bad : Bool) : Int32 | ParseError
+              return ParseError.new if bad
+              1
+            end
+
+            class Box
+              @value : Int32
+
+              def initialize(bad : Bool)
+                @value = Fails.parse(bad)!
+              end
+            end
+          end
+        end
+
+        App::Fails::Box.new(true)
+        CODE
+    end
+
+    it "refuses a `return` in initialize that leaves a field unassigned" do
+      assert_error <<-CODE, "`return` can't leave `initialize` before @name is assigned", filename: "x.iyi"
+        class Box
+          @value : Int32
+          @name : String
+
+          def initialize(early : Bool)
+            @value = 1
+            return if early
+            @name = "named"
+          end
+        end
+
+        Box.new(true)
+        CODE
+    end
+
+    it "keeps a `return` in initialize once every field is assigned" do
+      # `std/regex`'s `RxRuns` stops there when the automaton does not apply.
+      assert_no_errors <<-CODE, filename: "x.iyi"
+        class Box
+          @value : Int32
+          @name : String
+
+          def initialize(early : Bool)
+            @value = 1
+            @name = "named"
+            return if early
+            @value = 2
+          end
+        end
+
+        Box.new(true)
         CODE
     end
 
@@ -2871,6 +3704,26 @@ describe "Semantic: iyi" do
         end
 
         Numbers.new.sort
+        CRYSTAL
+    end
+
+    # `a.sort!` is the other library's in-place sort; offered the copy
+    # `sorted`, the call became `a.sorted` and left `a` unsorted.
+    it "names the in-place form when the verb was written with `!`" do
+      assert_error <<-CRYSTAL, "'sort_in_place' is what this library calls it", filename: "x.iyi"
+        module app/thing
+
+        struct Numbers
+          def sorted : Int32
+            1
+          end
+
+          def sort_in_place : Int32
+            1
+          end
+        end
+
+        Numbers.new.sort!
         CRYSTAL
     end
 
@@ -3552,6 +4405,52 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    it "refuses a constant the block names whose type is not shareable" do
+      assert_error(stub + <<-CODE, "names the constant `TALLY : Tally`, which is not Share: Tally's field @total is assigned in `bump` (SPEC.md III.4.5)", filename: "x.iyi")
+        class Tally
+          def initialize
+            @total = 0
+          end
+
+          def bump : Nil
+            @total = 1
+          end
+        end
+
+        LIMIT = 3
+        TALLY = Tally.new
+        IyiThread.start do
+          LIMIT
+          TALLY.bump
+          nil
+        end
+        CODE
+    end
+
+    it "refuses a class variable the block names that a method writes after its initializer" do
+      assert_error(stub + <<-CODE, "names the class variable `@@total`, which is written after its initializer (in `bump`), so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5)", filename: "x.iyi")
+        class Tally
+          @@total = 0
+          @@limit = 3
+
+          def self.bump : Nil
+            @@total = 1
+          end
+
+          def self.run : Nil
+            IyiThread.start do
+              @@limit
+              @@total
+              nil
+            end
+          end
+        end
+
+        Tally.bump
+        Tally.run
+        CODE
+    end
+
     it "refuses a captured value whose type has a setter" do
       assert_error(stub + <<-CODE, "the block IyiThread.start runs on another thread captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=` (SPEC.md III.4.4)", filename: "x.iyi")
         class Counter
@@ -3591,6 +4490,25 @@ describe "Semantic: iyi" do
         tally = Tally.new
         IyiThread.start do
           tally.total
+          nil
+        end
+        CODE
+    end
+
+    it "refuses a captured value whose field a method takes the address of" do
+      assert_error(stub + <<-CODE, "captures `counter : Counter`, which is not Share: Counter's field @n is given out by `pointerof` in `slot` (SPEC.md III.4.4)", filename: "x.iyi")
+        class Counter
+          def initialize(@n : Int32)
+          end
+
+          def slot : Pointer(Int32)
+            pointerof(@n)
+          end
+        end
+
+        counter = Counter.new(0)
+        IyiThread.start do
+          counter.slot
           nil
         end
         CODE
@@ -3701,6 +4619,29 @@ describe "Semantic: iyi" do
           def go : Nil
             IyiThread.start do
               @done
+              nil
+            end
+          end
+        end
+
+        Worker.new.go
+        CODE
+    end
+
+    it "refuses a self reached by a receiverless call whose type is not shareable" do
+      assert_error(stub + <<-CODE, "captures `self : Worker`, which is not Share: Worker's field @done is assigned in `finish` (SPEC.md III.4.4)", filename: "x.iyi")
+        class Worker
+          def initialize
+            @done = false
+          end
+
+          def finish : Nil
+            @done = true
+          end
+
+          def go : Nil
+            IyiThread.start do
+              finish
               nil
             end
           end

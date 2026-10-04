@@ -71,13 +71,13 @@ fi
 
 echo
 echo "== every format section reported"
-for phrase in "width:" "alignment:" "zero pad:" "precision:" "base:" "negative:" "boundary:" "general:" "tower:"; do
+for phrase in "width:" "alignment:" "zero pad:" "precision:" "base:" "negative:" "boundary:" "general:" "tower:" "list arguments:"; do
   grep -q "$phrase" "$WORK/format-plain.out" 2>/dev/null || {
     echo "  MISSING: nothing reported for $phrase"
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  width, alignment, zero pad, precision, base, negative, boundary, and general all reported"
+[ "$status" -eq 0 ] && echo "  width, alignment, zero pad, precision, base, negative, boundary, general, tower and the argument list all reported"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -134,6 +134,10 @@ prove_fails "alignment ignored" no_align "format: alignment" \
 prove_fails "zero pad broken" no_zero "format: zero pad" \
   's/sign + prefix + ("0" \* pad_count) + digits/sign + prefix + (" " * pad_count) + digits/'
 
+# 3b. An array one argument again rather than the argument list.
+prove_fails "an array is one argument again" no_list "too few arguments for format string" \
+  's/^pub def sprintf(format_string : String, args : Array) : String$/private def sprintf_no_list(format_string : String, args : Array) : String/'
+
 # 4. Float rounding dropped (always rounds down): the half-to-even test in
 #    `scaled_digits` is the one place every float digit is decided.
 prove_fails "precision rounding broken" no_prec "format: precision float round up" \
@@ -163,11 +167,15 @@ prove_fails "the digits are the value's, all of them" no_exact "format: exact la
 
 # 5. Base conversion broken (binary emits decimal)
 prove_fails "base conversion broken" no_base "format: base" \
-  's/format_int64(val\.to_i64, 2, false, false/format_int64(val.to_i64, 10, false, false/'
+  's/format_int64(val\.to_i64, 2, false, true/format_int64(val.to_i64, 10, false, true/'
 
 # 6. Negative number sign flag broken (space flag dropped)
 prove_fails "sign flag broken" no_neg "format: sign space positive" \
   's/sign = " "/sign = ""/'
+
+# 6b. Hex unsigned again for a sign flag, while its `-` stays.
+prove_fails "hex sign flags dropped" no_hex_sign "format: sign flags in other bases" \
+  's/format_int64(val\.to_i64, 16, false, true/format_int64(val.to_i64, 16, false, false/'
 
 # 7. Boundary case broken (precision 0 on value 0 produces "0" instead of "")
 prove_fails "boundary zero precision broken" no_bound "format: boundary" \
@@ -190,6 +198,10 @@ prove_fails "NaN drops the sign flags" no_nan_sign "general: NaN takes the sign 
   's/plus ? "+NaN" : (space ? " NaN" : "NaN")/"NaN"/'
 prove_fails "%g fixed from %f's places" no_g_digits "precision must be at most 400, not 403" \
   's/^        fixed = "0\." + ("0" \* (0 - exp - 1)) + sig$/        fixed = IyiFloatText.format_fixed(val.abs, prec - 1 - exp)/'
+
+# 10. An Int128's `%p` asked of its digits as a string again: 65_i128 in quotes.
+prove_fails "an Int128's %p asked of its digits again" no_wide_text "format: Int128 text and code point" \
+  "s/verb == 'p' ? val\.inspect : val\.to_s/verb == 'p' ? val.to_s.inspect : val.to_s/"
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -51,11 +51,11 @@ class Iyi::CodeGenVisitor
       # https://bugs.llvm.org/show_bug.cgi?id=42932
       # so we just use global in that case.
       {% if compare_versions(Crystal::LLVM_VERSION, "9.0.0") < 0 %}
-        if @single_module && !(type.is_a?(IntegerType) && (type.kind.i128? || type.kind.u128?))
+        if iyi_internalise? && !(type.is_a?(IntegerType) && (type.kind.i128? || type.kind.u128?))
           global.linkage = LLVM::Linkage::Internal
         end
       {% else %}
-        global.linkage = LLVM::Linkage::Internal if @single_module
+        global.linkage = LLVM::Linkage::Internal if iyi_internalise?
       {% end %}
 
       declare_const_debug_info(global, const) if @debug.variables?
@@ -94,7 +94,7 @@ class Iyi::CodeGenVisitor
     unless initialized_flag
       initialized_flag = @main_mod.globals.add(@main_llvm_context.int1, initialized_flag_name)
       initialized_flag.initializer = @main_llvm_context.int1.const_int(0)
-      initialized_flag.linkage = LLVM::Linkage::Internal if @single_module
+      initialized_flag.linkage = LLVM::Linkage::Internal if iyi_internalise?
     end
     initialized_flag
   end

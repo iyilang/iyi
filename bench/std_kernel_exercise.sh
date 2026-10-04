@@ -6,7 +6,8 @@
 # Proves the exercise holds plain and --release, that a broken module is
 # caught, that output helpers emit expected content, and that abort
 # terminates execution with status codes and stderr messages, a message
-# that ends in a newline written as one line.
+# that ends in a newline written as one line, and ends as `exit` does:
+# what was deferred runs and what the streams buffered is written.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -254,6 +255,61 @@ PY
     status=1
   else
     echo "  a newline written after one already there is caught"
+  fi
+fi
+
+# The ending is `exit`'s, as the other library's `abort` is its `exit`:
+# what was deferred runs, and what a stream set to `sync = false` holds is
+# written, standard error's line before the message. `abort` ended with the
+# runtime's own `__iyi_exit`: standard output came back empty, the cleanup
+# never ran and the buffered error line was lost.
+abort_ends_as_exit() { # abort_ends_as_exit <label> <name>
+  local label="$1" name="$2"
+  printf 'module main\n\nimport std/kernel::{abort}\n\ndef work : Nil\n  defer { puts "cleanup ran" }\n  STDOUT.sync = false\n  STDERR.sync = false\n  puts "buffered line"\n  STDERR.puts "buffered error"\n  abort("the message", 4)\nend\n\nwork\n' > "$WORK/$name.iyi"
+  if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: the program did not build"
+    sed -n '1,10p' "$WORK/$name.build"
+    return 1
+  fi
+  "$WORK/$name" > "$WORK/$name.out" 2> "$WORK/$name.err"
+  local exit_code=$?
+  printf 'buffered line\ncleanup ran\n' > "$WORK/$name.want_out"
+  printf 'buffered error\nthe message\n' > "$WORK/$name.want_err"
+  if [ "$exit_code" -ne 4 ]; then
+    echo "  $label: exited $exit_code, not 4"
+    return 1
+  fi
+  if ! cmp -s "$WORK/$name.out" "$WORK/$name.want_out"; then
+    echo "  $label: standard output was $(od -An -c "$WORK/$name.out" | tr -s ' ')"
+    return 1
+  fi
+  if ! cmp -s "$WORK/$name.err" "$WORK/$name.want_err"; then
+    echo "  $label: standard error was $(od -An -c "$WORK/$name.err" | tr -s ' ')"
+    return 1
+  fi
+  echo "  $label: the cleanup ran and both buffered streams were written, the message last"
+}
+abort_ends_as_exit "abort ends as exit does" abort_exit || status=1
+
+if [ -n "$PY" ]; then
+  mkdir -p "$WORK/rawexit/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/kernel.iyi").read_text()
+old = '  exit(status)\n'
+if src.count(old) != 1:
+    raise SystemExit("patch site missing")
+Path("$WORK/rawexit/std/kernel.iyi").write_text(src.replace(old, '  __iyi_exit(status)\n', 1))
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the raw-exit patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/rawexit${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" \
+       abort_ends_as_exit "raw exit (broken copy)" abort_rawexit >/dev/null; then
+    echo "  an abort that skips the cleanups and the flush PASSED"
+    status=1
+  else
+    echo "  an abort that skips the cleanups and the flush is caught"
   fi
 fi
 

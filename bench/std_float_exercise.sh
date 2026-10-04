@@ -133,6 +133,30 @@ refuses "a double // zero" f64_div0 "division by zero" '1.0 // 0.0'
 refuses "a single // zero" f32_div0 "division by zero" '1.0_f32 // 0.0_f32'
 
 echo
+echo "== what a program without the import is told"
+# The error names the import: `-x` on a Float64 was "wrong number of
+# arguments for 'Float64#-' (given 0, expected 1)" and nothing more, and
+# `1.5_f32.to_f64` was sent to `iyi build --crystal`.
+told() { # told <label> <name> <phrase> <program>
+  local label="$1" name="$2" phrase="$3" program="$4"
+  printf '%s\n' "$program" > "$WORK/$name.iyi"
+  if "$IYI" check "$WORK/$name.iyi" > "$WORK/$name.check" 2>&1; then
+    echo "  $label: it type-checked without the import"
+    status=1
+    return
+  fi
+  if ! grep -qF -- "$phrase" "$WORK/$name.check"; then
+    echo "  $label: refused, but not naming the import:"
+    sed -n '1,12p' "$WORK/$name.check"
+    status=1
+    return
+  fi
+  printf '  %s: "%s"\n' "$label" "$phrase"
+}
+told "-x on a Float64" told_neg '`-` with no arguments on Float64 is in `std/float`' $'x = 1.5\nputs -x'
+told "to_f64 on a Float32" told_to_f64 '`to_f64` on Float32 is in `std/float`' $'x = 1.5_f32\nputs x.to_f64'
+
+echo
 echo "== proving the checks can fail when the module is broken"
 mkdir -p "$WORK/patched/std"
 if [ -z "$PY" ]; then
@@ -209,8 +233,10 @@ breaks "the prelude's round without its zero" round iyi/float.iyi \
 breaks "round(mode) without its zero" round_mode std/number.iyi \
   'return self if self == 0.0' '# return self if self == 0.0' \
   '(-0.0).round(TiesAway) is -0.0'
-breaks "** Int32::MIN without the square" pow_min iyi/float.iyi \
-  'return 1.0 / (half * half)' 'return 1.0 / half' \
+# `**` squares its base in double-double and rounds once; with the base
+# squared in plain doubles, `1.0000001 ** Int32::MIN` is 5.444710059167897e-94.
+breaks "** Int32::MIN squared in plain doubles" pow_min iyi/float.iyi \
+  'base, low = IyiFloatText.product(base, low, base, low) if count > 0' 'base, low = base * base, 0.0 if count > 0' \
   '1.0000001 ** Int32::MIN'
 
 echo

@@ -241,7 +241,8 @@ match_broken "? as one byte" q_byte '            pi = glob_char(s, sn, pi)[1]' '
 match_broken "braces read as text" brace_text '        elsif c == 123_u8' '        elsif c == 0_u8' "braces choose a branch"
 match_broken "a negated class read plain" class_neg '            negated = true' '            negated = false' "a class and its negation"
 case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    match_broken "a directory renamed onto a file" dir_onto_file '        raise "Cannot rename #{o} to #{n}: #{n} is not a directory" if onto != -1 && (onto & 0x10) == 0' '' "a directory renamed onto a file" ;;
   *) match_broken "a backslash read as itself" no_escape '      if c == 92_u8
         raise "File.match?: a pattern ends' '      if false
         raise "File.match?: a pattern ends' "a backslash escapes" ;;

@@ -240,7 +240,12 @@ raise "format: negative float plus sign failed" if n10 != "   -3.14"
 n11 = sprintf("%+8.2f", 3.14)
 raise "format: positive float plus sign failed" if n11 != "   +3.14"
 
-puts "    negative: signed values, explicit + and space signs, and negative non-decimal bases"
+# The sign flags hold in every base that writes a `-`: `%+x` of 255 printed
+# ff where -255 printed -ff, as did an Int128's. `%u` alone stays unsigned.
+n12 = sprintf("%+x|% o|%+#b|%+X|% x|%+u", 255, 8, 5, 255_i128, 0, 5)
+raise "format: sign flags in other bases failed" if n12 != "+ff| 10|+0b101|+FF| 0|5"
+
+puts "    negative: signed values, explicit + and space signs in every base, and negative non-decimal bases"
 
 # 7. Boundary cases: wider than field, precision 0, minimum and maximum integers.
 bd1 = sprintf("%3s", "abcdef")
@@ -437,7 +442,16 @@ raise "format: Float32 text failed: #{t5}" if t5 != "[0.1|0.1|1.5 ]"
 # -5_i16 printed 18446744073709551611, an `Int64`'s, and of -5_i128 -5.
 t6 = sprintf("[%u|%u|%u|%d]", -5_i8, -5_i16, -5_i128, -5_i16)
 raise "format: unsigned of a narrow or wide word failed: #{t6}" if t6 != "[251|65531|340282366920938463463374607431768211451|-5]"
-puts "    tower: Int8 to UInt128 and Float32, and %c of any code point"
+# `%p` and `%s` of an `Int128` are its own text, and `%c` its code point:
+# `%p` of 65_i128 was "65" in quotes, and `%c` of 65_u128 was refused.
+t8 = sprintf("[%p|%-4s|%c|%3c]", 65_i128, -7_i128, 65_u128, 233_i128)
+raise "format: Int128 text and code point failed: #{t8}" if t8 != "[65|-7  |A|  é]"
+# The float verbs of a `UInt8` are its double's, as of every other width:
+# it had a branch of its own under each integer verb and none under these,
+# so `%f` of 200_u8 panicked "wants a number" where `%d` printed 200.
+t9 = sprintf("[%f|%e|%E|%g|%G|%.1f|%d|%x|%c]", 200_u8, 200_u8, 0_u8, 255_u8, 7_u8, 7_u8, 200_u8, 200_u8, 65_u8)
+raise "format: the float verbs of a UInt8 failed: #{t9}" if t9 != "[200.000000|2.000000e+02|0.000000E+00|255|7|7.0|200|c8|A]"
+puts "    tower: Int8 to UInt128 and Float32 under every verb, and %c of any code point"
 
 # A float past an `Int64` under an integer verb is its own integer, every
 # digit, as Python writes it; NaN, a width or precision past an `Int32`
@@ -455,5 +469,15 @@ raise "format: a precision past Int32 was #{r3.inspect}" if r3 != "precision mus
 r4 = refusal { sprintf("%.402g", 0.1) }
 raise "format: %.402g was #{r4.inspect}" if r4 != "precision must be at most 401, not 402"
 puts "    integer verbs: a float past Int64 is its own integer; NaN, a field past Int32 and %g past 401 digits are refused by name"
+
+# The arguments may come as one array or tuple, as the other library takes
+# them: its own example, `"%s, %s, %s, D" % ['A', 'B', 'C']`, panicked "too
+# few arguments", and `"[%s]" % ["A"]` printed [["A"]].
+l1 = "%s, %s, %s, D" % ['A', 'B', 'C']
+l2 = "[%s]" % ["A"]
+l3 = sprintf("%d+%d=%s", [1, 2, 3])
+l4 = sprintf("%s=%.1f", {"pi", 3.14159})
+raise "format: list arguments failed: #{l1}|#{l2}|#{l3}|#{l4}" if "#{l1}|#{l2}|#{l3}|#{l4}" != "A, B, C, D|[A]|1+2=3|pi=3.1"
+puts "    list arguments: an array or a tuple is the argument list"
 
 puts "    all format checks passed"

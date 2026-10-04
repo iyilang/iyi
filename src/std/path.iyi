@@ -8,7 +8,9 @@
 # or a bare root (`\`). A Windows path is absolute only with both a drive
 # and a root, so `C:foo` (drive-relative) and `\foo` (rooted) are not.
 # DOS device paths (`\\.\`, `\\?\`) are not recognised: they read as UNC
-# shares named `.` and `?`. Windows names compare case-insensitively: in
+# shares named `.` and `?`, except `\\?\UNC\server\share`, the long form
+# of `\\server\share`, whose drive runs through the share as Python's
+# reads it. Windows names compare case-insensitively: in
 # every script on Windows, as its file systems fold them, and in ASCII
 # letters alone where the program was built for another platform.
 #
@@ -122,8 +124,13 @@ pub struct Path
     io.write(@name)
   end
 
+  # A path of the kind this platform does not use names its constructor,
+  # as the other library writes it: `Path.posix("/usr/bin")` on Windows
+  # inspected as `Path["/usr/bin"]`, a Windows path, which `==` tells
+  # apart from it.
   def inspect : String
-    "Path[" + @name.inspect + "]"
+    return "Path[" + @name.inspect + "]" if native?
+    (posix? ? "Path.posix(" : "Path.windows(") + @name.inspect + ")"
   end
 
   def inspect(io : IO) : Nil
@@ -185,8 +192,12 @@ pub struct Path
 
     return {0, 0} unless sep?(b0)
     if len >= 5 && sep?(ptr[1]) && !sep?(ptr[2])
-      # "\\server\share": a host run, a separator, a share run
-      i = 2
+      # "\\server\share": a host run, a separator, a share run. After
+      # `\\?\UNC\` the host comes after the prefix: read as host `?` and
+      # share `UNC`, `\\?\UNC\srv\sh\x` had the drive `\\?\UNC`, and
+      # `\\?\UNC\srv\other\x` relative to `\\?\UNC\srv\sh` was `..\other\x`,
+      # across shares.
+      i = long_unc? ? 8 : 2
       while i < len && !sep?(ptr[i])
         i = i + 1
       end
@@ -203,6 +214,14 @@ pub struct Path
       end
     end
     {0, 1}
+  end
+
+  # `\\?\UNC\` at the start, `UNC` in any case and either separator, as
+  # Python's `splitroot` matches it.
+  private def long_unc? : Bool
+    ptr = @name.to_unsafe
+    return false unless @name.bytesize > 8 && ptr[2] == 63_u8 && sep?(ptr[3]) && sep?(ptr[7])
+    (ptr[4] | 32_u8) == 117_u8 && (ptr[5] | 32_u8) == 110_u8 && (ptr[6] | 32_u8) == 99_u8
   end
 
   def drive : String?
@@ -312,19 +331,28 @@ pub struct Path
   end
 
   # Every ancestor, the outermost first: `"a/b/c"` has `"."`, `"a"`,
-  # `"a/b"`; `"/a/b"` has `"/"`, `"/a"`.
+  # `"a/b"`; `"/a/b"` has `"/"`, `"/a"`. Each is a `parent` of the one
+  # after it, so it keeps the spelling `parent` keeps: rebuilt from
+  # `parts` and joined with `separator`, `Path.windows("C:/a/b/c")` had
+  # `"C:/a\\b"` where its `parent` is `"C:/a/b"`.
   def parents : Array(Path)
     res = [] of Path
     return res if @name.empty?
-    all = parts
-    _, anchor_end = anchor_indices
-    if anchor_end == 0 && all.first != "."
-      res << Path.new(".", @kind)
+    child = self
+    up = parent
+    while up.to_s != child.to_s
+      res << up
+      child = up
+      up = up.parent
     end
-    i = 1
-    while i < all.size
-      res << Path.new(build_name(all, i), @kind)
+    i = 0
+    j = res.size - 1
+    while i < j
+      outer = res[j]
+      res[j] = res[i]
+      res[i] = outer
       i = i + 1
+      j = j - 1
     end
     res
   end
@@ -406,12 +434,25 @@ pub struct Path
   end
 
   # `self` with *part* under it; a *part* with an anchor of its own is
-  # the answer by itself, and an empty one changes nothing.
+  # the answer by itself, and an empty one changes nothing. A Windows
+  # anchor can be half of one, and then the other half is `self`'s, as
+  # ntpath joins and Windows reads the name: a root with no drive is on
+  # `self`'s drive, and a drive-relative *part* on `self`'s drive goes
+  # under `self`. Answered by itself, `C:\a` joined with `\b` was `\b`,
+  # a root on whatever drive is current, and with `C:b` it was `C:b`,
+  # where `expand` read both on `C:\a`.
   def join(part : String) : Path
     return self if part.empty?
     p = Path.new(part, @kind)
-    return p if p.anchor
     return p if @name.empty?
+    if p.anchor
+      own = drive
+      their = p.drive
+      return Path.new(own + part, @kind) if own && their.nil?
+      return p unless own && their && p.root.nil? && compare_names(own, their) == 0
+      part = part[their.bytesize, part.bytesize - their.bytesize]
+      return self if part.empty?
+    end
 
     # Nor after a bare drive: `C:` is the current directory on C:, and
     # `C:` joined with `foo` is `C:foo`, the way `normalize` spells it;
@@ -565,25 +606,18 @@ pub struct Path
                  Path.new(pwd || raise("cannot expand #{@name.inspect}: no base given, and neither PWD nor the process's own directory answers"), @kind)
                end
     raise "cannot expand #{@name.inspect}: base #{base_dir.name.inspect} is not absolute" unless base_dir.absolute?
-    # A Windows path can be anchored and still not absolute, and `join`
-    # hands back an anchored part as it is: `\foo` and `C:foo` came out
-    # as themselves, where the answer promised is absolute. `\foo` is
-    # rooted on the base's drive. `C:foo` is under the base when the base
-    # is on C:, and under C:'s root otherwise, which is what Windows makes
-    # of a drive this process has not been to.
+    # A Windows path can be anchored and still not absolute. `join` puts
+    # `\foo` on the base's drive and `C:foo` under the base when the base
+    # is on C:; on another drive `C:foo` is under C:'s root, which is what
+    # Windows makes of a drive this process has not been to.
     unless posix?
       drive = p.drive
-      if drive && p.root.nil?
+      base_drive = base_dir.drive
+      if drive && p.root.nil? && !(base_drive && compare_names(base_drive, drive) == 0)
         # Bytes, as the slice counts: `size` counts characters, and
         # `C:é` expanded to a cut-off `C:\b\` plus half of the `é`.
         rest = p.name[drive.bytesize, p.name.bytesize - drive.bytesize]
-        base_drive = base_dir.drive
-        if base_drive && base_drive.downcase == drive.downcase
-          return base_dir.join(rest).normalize
-        end
         return Path.new(drive + separator + rest, @kind).normalize
-      elsif drive.nil? && p.root
-        return Path.new((base_dir.drive || "") + p.name, @kind).normalize
       end
     end
     base_dir.join(p).normalize

@@ -1897,6 +1897,22 @@ module Iyi
       end
 
       instance = self.new_generic_instance(program, self, instance_type_vars)
+
+      # iyi: an instance whose own instance variable - or associated type -
+      # holds the same generic one level deeper makes another such instance
+      # here, and that one another: `struct S(T)` with `@x : S(Array(T))?`
+      # made S(Array(Array(T))) and on, with nothing using S at all, until
+      # the stack overflowed in `unbound?` after 6 to 19 seconds. Refused at
+      # the bound `generic_type_too_nested?` sets for a type a call makes,
+      # at the generic's declaration, since no node is at hand here.
+      if instance.generic_nest > 300
+        message = "generic type too nested: #{instance}"
+        if location = locations.try(&.first?)
+          raise TypeException.new(message, location)
+        end
+        raise TypeException.new(message)
+      end
+
       generic_types[type_vars] = instance
 
       if instance.is_a?(GenericClassInstanceType) && !instance.superclass

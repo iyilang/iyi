@@ -464,14 +464,15 @@ pub struct Deflate
   #
   # *expected* is how long the caller thinks the result is - gzip's
   # trailer says - so that the result is one allocation rather than a
-  # guess grown by doubling. Held to what the stream could expand to, so a
-  # trailer that lies is not an allocation it asked for.
-  def self.inflate(data : String, start : Int32, expected : Int64 = 0_i64) : {String, Int32}
+  # guess grown by doubling; -1, the default, is no idea, and the guess is
+  # three times the stream's bytes. Held to what the stream could expand
+  # to, so a trailer that lies is not an allocation it asked for.
+  def self.inflate(data : String, start : Int32, expected : Int64 = -1_i64) : {String, Int32}
     t = Tables.new
     r = BitReader.new(data, start)
     guess = (data.bytesize - start).to_i64 * 3_i64 + 64_i64
     most = (data.bytesize - start).to_i64 * 1032_i64 + 64_i64
-    guess = expected + 64_i64 if expected > guess && expected <= most && expected < 1073741824_i64
+    guess = expected + 64_i64 if expected >= 0_i64 && expected <= most && expected < 1073741824_i64
     sink = ByteBuffer.new(guess.to_i32)
     fixed_lit : Huffman? = nil
     fixed_dist : Huffman? = nil
@@ -736,8 +737,15 @@ pub struct Gzip
     pos = pos + 2 if (flags & 2) != 0 # FHCRC
     raise "gzip: the stream ends inside its header" if data.bytesize < pos
     # The last member's trailer names its length; for a file of one
-    # member, that is the length the result will have.
-    expected = data.bytesize >= pos + 8 ? get_le(p + (data.bytesize - 4).to_i64).to_i64 : 0_i64
+    # member, that is the length the result will have, and the first
+    # member is sized by it. A member after the first is in a file of
+    # several, where nothing before it is inflated says how long it is, and
+    # it grows from nothing: sized by the last trailer, or by three times
+    # the bytes after it, every member allocated what the rest of the file
+    # could hold, and a hundred two-byte members ahead of one of 64 MB took
+    # 2.5 s to read where Python's gzip took 0.15.
+    expected = 0_i64
+    expected = get_le(p + (data.bytesize - 4).to_i64).to_i64 if start == 0 && data.bytesize >= pos + 8
     sink, used = Deflate.inflate(data, pos, expected)
     raise "gzip: the stream ends before its trailer" if data.bytesize - used < 8
     want_crc = get_le(p + used.to_i64)

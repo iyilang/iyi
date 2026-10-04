@@ -82,6 +82,12 @@ assert_str "http://a%40b@h/", given.to_s, "a user given to the setter is encoded
 assert_str "a@b", given.user.to_s, "and read back decoded"
 puts "  userinfo keeps its escapes"
 
+# A normalized host is lower case and its escapes' hex digits upper-case,
+# both rules of RFC 3986 section 6.2.2.1: `downcase` alone normalized
+# `%C3%A9.EXAMPLE` to `%c3%a9.example`.
+assert_str "http://%C3%A9.example/", URI.parse("HTTP://%c3%A9.EXAMPLE:80/").normalize.to_s, "a host's escapes are normalized to upper case"
+puts "  a normalized host is lower case, its escapes upper case"
+
 puts "\n== refuse"
 assert_true URI.parse?("https://ex.com/a b").nil?, "space refused"
 puts "  a space in the reference is refused"
@@ -108,6 +114,16 @@ base = URI.parse("http://a/b/c/d;p?q")
  {"g;x=1/../y", "http://a/b/c/y"}].each do |pair|
   assert_str pair[1], base.resolve(pair[0]).to_s, "#{pair[0]} resolves"
 end
+# A relative reference normalizes to one that resolves where it did. The
+# algorithm of section 5.2.4 is for a path merged with a base: run on a
+# relative reference alone it made `a/..` the root, `/`, and `../x` a
+# sibling, `x`.
+[{"a/..", "./"}, {"../x", "../x"}, {".", "./"}, {"..", "../"}, {"a/../../x", "../x"}, {"a/..//x", ".//x"}, {"./a/./b", "a/b"}].each do |pair|
+  ref = URI.parse(pair[0])
+  assert_str pair[1], ref.normalize.to_s, "#{pair[0]} normalized"
+  assert_str base.resolve(ref).to_s, base.resolve(ref.normalize).to_s, "#{pair[0]} normalized resolves where it did"
+end
+puts "  a relative reference normalized resolves where it did"
 # Linear in the path: each step sliced the rest of the path into a new
 # string, and 132 KB of `/a/./b/../c` took 21 s to normalize under `iyi run`
 # where splitting it took 4 ms. A bound, not a benchmark: twenty times the

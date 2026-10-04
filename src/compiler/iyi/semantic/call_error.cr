@@ -79,6 +79,13 @@ class Iyi::Path
       self.raise("undefined constant #{self}\n#{hint}")
     end
 
+    # iyi: `App::Util.helper(1)` with no `import app/util` was "undefined
+    # constant App::Util", with the module a file away under the very path
+    # the name maps to.
+    if names.size >= 2 && Iyi::Lexer.iyi_source?(location.try(&.filename)) && (hint = iyi_unimported_module_hint(type.program))
+      self.raise("undefined constant #{self}\n#{hint}")
+    end
+
     # iyi: Crystal's name for a thing the prelude spells otherwise, for
     # someone arriving with Crystal's spelling in their fingers. First,
     # because where the table has a sentence it says more than the scan
@@ -103,6 +110,16 @@ class Iyi::Path
     end
 
     self.raise("undefined constant #{self}")
+  end
+
+  # The module a qualified name maps to, `app/util` for `App::Util` (IV.6
+  # #6), when that file is where an import would find it: beside the
+  # entry, under the root its header names, or on `IYI_PATH`.
+  private def iyi_unimported_module_hint(program) : String?
+    written = names.map(&.underscore).join('/')
+    roots = [program.iyi_project_root || program.filename.try { |entry| File.dirname(entry) }, program.iyi_header_root]
+    return nil unless (roots.compact + program.iyi_path.entries).any? { |root| File.file?(File.join(root, "#{written}.iyi")) }
+    "`#{self}` is module `#{written}`, which this file has not imported: `import #{written}` (SPEC.md R-2b)"
   end
 
   # The qualified name of the one package module called *name*, when it
@@ -152,10 +169,12 @@ class Iyi::Path
   # Read off the search path the way an import is resolved, and only on
   # the error path. A string walk rather than a `Regex`: the compiler
   # links no pcre2 (SPEC.md III.9), and one regex here was enough to make
-  # it.
+  # it. Public for the impl refusal too: `Enumerable` is a module the
+  # compiler declares, so `impl Enumerable for Nums` without the import
+  # finds that module instead of an undefined constant.
   IYI_STD_DECLARERS = {"pub class ", "pub struct ", "pub module ", "pub trait ", "pub enum ", "pub alias "}
 
-  private def iyi_std_declares_hint(program, name : String) : String?
+  def iyi_std_declares_hint(program, name : String) : String?
     program.iyi_path.entries.each do |entry|
       dir = File.join(entry, "std")
       next unless Dir.exists?(dir)
@@ -217,6 +236,17 @@ module Iyi
     "Dict"  => "`Hash(K, V)` is the name here: `{\"a\" => 1}` is a `Hash(String, Int32)`.",
     "Map"   => "`Hash(K, V)` is the name here: `{\"a\" => 1}` is a `Hash(String, Int32)`.",
     "Set"   => "`Set(T)` comes with `import std/set`; it is declared at the root, so the import alone is enough to write `Set(Int32).new`.",
+    # Rust's, Java's and TypeScript's names for what a type here is
+    # called, or is not called at all.
+    "HashMap"   => "`Hash(K, V)` is the name here: `{\"a\" => 1}` is a `Hash(String, Int32)`.",
+    "BTreeMap"  => "`Hash(K, V)` is the name here: `{\"a\" => 1}` is a `Hash(String, Int32)`.",
+    "Boolean"   => "`Bool` is the name here.",
+    "Str"       => "`String` is the name here.",
+    "Result"    => "There is no `Result`: an error is a member of the return type's union, `Int32 | ParseError`, with `impl Error for ParseError` (SPEC.md III.1).",
+    "Option"    => "There is no `Option`: a value that may be nil is `T?`, `Int32?`.",
+    "Mutex"     => "There is no `Mutex`: an `Atomic(Int32)` keeps a shared count (SPEC.md III.4.10), and a `Channel` hands values between tasks.",
+    "Thread"    => "A kernel thread is `IyiThread.start { ... }` (SPEC.md III.4.11); a task is `g.spawn { ... }` inside `group do |g| ... end`.",
+    "WaitGroup" => "A `group do |g| ... end` waits for every task it started (SPEC.md III.4.9).",
   }
 
   IYI_ARRIVAL_CALL_HINTS = {
@@ -230,6 +260,12 @@ module Iyi
     "spawn"   => "`spawn` is a group's: `group do |g| g.spawn { ... } end` (SPEC.md III.4). A task has a boundary, and the group is it.",
     "let"     => "There is no `let`: a variable is `x = 1`, and its type is the value's.",
     "var"     => "There is no `var`: a variable is `x = 1`, and its type is the value's.",
+    # `const x = 5`, the line TypeScript writes most, was "undefined method
+    # 'const'" with nothing after it: the parser names `const MAX = 5` and
+    # leaves a lower-case name to the call. `let mut x` stopped at `mut`.
+    "const"   => "There is no `const`: a variable is `x = 1`, and a constant is an upper-case name, `MAX = 1`.",
+    "val"     => "There is no `val`: a variable is `x = 1`, and a constant is an upper-case name, `MAX = 1`.",
+    "mut"     => "There is no `mut`: a variable is `x = 1`, and any variable can be assigned again.",
     "elif"    => "`elsif` is the spelling here.",
     "elseif"  => "`elsif` is the spelling here.",
     "println" => "`puts` is the spelling here; it ends the line.",
@@ -245,6 +281,13 @@ module Iyi
     "catch" => "iyi has no exceptions to catch: an error is a value the caller handles, and `!` propagates it (SPEC.md III.1, III.1.7a).",
     "range" => "A range is written `(0...3)` — `...` excludes the end, `..` includes it — and `(0...3).each do |i| ... end` iterates it.",
     "echo"  => "`puts` is the spelling here; it ends the line.",
+    # A call in this table is one with no receiver, so the method table's
+    # `parseInt` never met `parseInt("3")`.
+    "parseInt" => "`.to_i` is the spelling here: `\"3\".to_i`, and it panics on what is not a number.",
+    # JavaScript's, Python's and Rust's concurrency words. Each was
+    # "undefined method" with nothing after it.
+    "await" => "There is no `await`: a task started with `t = g.spawn { fetch }` inside `group do |g|` ... `end` answers with `t.value`, which waits for it (SPEC.md III.4).",
+    "async" => "There is no `async`: concurrency is a group, `group do |g|` ... `end`, and each `g.spawn { ... }` in it is a task (SPEC.md III.4).",
   }
 
   # A method called on a receiver in Crystal's spelling, and
@@ -270,6 +313,26 @@ module Iyi
     "decode_string" => "`Base64.decode` answers a String here - the other library's `decode_string` (`import std/base64`).",
     "toString"      => "`to_s` is the spelling here: `1.to_s`.",
     "parseInt"      => "`to_i` is the spelling here: `\"1\".to_i`, and it panics on what is not a number.",
+    # More of them, each of which drew the size rule and `iyi build
+    # --crystal`: the method is here under another name, and no other
+    # library is what the reader needs. `get`, `join` and `await` are
+    # read only where the receiver is a Hash or a task (`raise_undefined_method`).
+    "len"         => "`size` is the spelling here: `xs.size`, `s.size`.",
+    "to_string"   => "`to_s` is the spelling here: `1.to_s`.",
+    "unwrap"      => "There is no `unwrap`: `.or_panic` takes the value out of a union with an error member, `.or(default)` gives the error an answer, and a nil is narrowed (`if x`) or given an answer (`x || default`).",
+    "unwrap_or"   => "There is no `unwrap_or`: `.or(default)` gives an error member an answer, and `x || default` gives a nil one.",
+    "contains"    => "`includes?` is the spelling here: `xs.includes?(2)`, `s.includes?(\"a\")`.",
+    "contains?"   => "`includes?` is the spelling here: `xs.includes?(2)`, `s.includes?(\"a\")`.",
+    "trim"        => "`strip` is the spelling here: `s.strip`.",
+    "upper"       => "`upcase` is the spelling here: `s.upcase`.",
+    "lower"       => "`downcase` is the spelling here: `s.downcase`.",
+    "toUpperCase" => "`upcase` is the spelling here: `s.upcase`.",
+    "toLowerCase" => "`downcase` is the spelling here: `s.downcase`.",
+    "clone"       => "`dup` is the copy here: `ys = xs.dup`.",
+    "iter"        => "There is no `iter`: a collection takes the block itself, `xs.map { |x| x * 2 }`.",
+    "get"         => "`h[key]?` is the lookup here: it answers nil for a missing key, and `h[key]` panics on one.",
+    "join"        => "`t.value` waits for a task and answers what its block did (SPEC.md III.4).",
+    "await"       => "`t.value` waits for a task and answers what its block did (SPEC.md III.4); there is no `await`.",
     # `Array#sum` asks the element type for its zero, because an empty
     # array has no element to ask. A type that is not a number has none,
     # and the sentence a person is missing is what to use instead.
@@ -604,14 +667,19 @@ class Iyi::Call
     # `index`, `chomp` — the prelude takes a `Char` and there is exactly
     # one right spelling. Say it, and hand it over as an edit spanning the
     # literal, so `iyi fix` and the editor's quickfix apply it without a
-    # round (AI_FIRST.md §5, the fourth run).
+    # round (AI_FIRST.md §5, the fourth run). The other direction is the
+    # same guess learned from it: `xs.join(',')` and `s.includes?('a')`
+    # were "expected argument #1 ... to be String, not Char" and no edit.
     char_fix = nil
     char_span = nil
-    if arg.is_a?(StringLiteral) && arg.value.size == 1 && expected_types.size == 1 && expected_types.first.is_a?(CharType)
+    sole = expected_types.first if expected_types.size == 1
+    if arg.is_a?(StringLiteral) && arg.value.size == 1 && sole.is_a?(CharType)
       char_fix = arg.value[0].inspect
-      if (from = arg.location) && (to = arg.end_location) && from.line_number == to.line_number
-        char_span = to.column_number - from.column_number + 1
-      end
+    elsif arg.is_a?(CharLiteral) && sole && sole == program.string
+      char_fix = arg.value.to_s.inspect
+    end
+    if char_fix && arg && (from = arg.location) && (to = arg.end_location) && from.line_number == to.line_number
+      char_span = to.column_number - from.column_number + 1
     end
 
     raise_no_overload_matches(arg || self, defs, arg_types, inner_exception, suggestion: char_span ? char_fix : nil, size: char_span) do |str|
@@ -641,7 +709,12 @@ class Iyi::Call
         to_sentence(str, expected_types, " or ")
         str << ", not #{actual_type.devirtualize}"
 
-        if char_fix
+        if char_fix && arg.is_a?(CharLiteral)
+          str.puts
+          str.puts
+          str << "Did you mean #{char_fix}? `#{def_name}` takes a `String`, written in double quotes; "
+          str << "single quotes make a `Char`"
+        elsif char_fix
           str.puts
           str.puts
           str << "Did you mean #{char_fix}? A one-character string is still a "
@@ -656,10 +729,14 @@ class Iyi::Call
           actual = actual_type.devirtualize
           str.puts
           str.puts
-          str << "`#{actual}` does not implement `#{wanted}`. Write "
-          str << "`impl #{wanted} for #{actual}` in the module that declares "
-          str << "`#{wanted}` or in the one that declares `#{actual}` — R-3 "
-          str << "allows those two and no others (SPEC.md IV.4)"
+          if actual.is_a?(UnionType)
+            iyi_union_lacks_trait(str, actual, wanted.as(Type), arg)
+          else
+            str << "`#{actual}` does not implement `#{wanted}`. Write "
+            str << "`impl #{wanted} for #{actual}` in the module that declares "
+            str << "`#{wanted}` or in the one that declares `#{actual}` — R-3 "
+            str << "allows those two and no others (SPEC.md IV.4)"
+          end
         end
 
         # iyi: a unit somebody arriving from Crystal has otherwise
@@ -681,6 +758,39 @@ class Iyi::Call
         str << ", "
       end
       str << element
+    end
+  end
+
+  # iyi: a union implements a trait when every member does, and an impl for
+  # the union itself is refused (SPEC.md II.1), so the advice names the
+  # members. It used to be "Write `impl Show for (Int32 | Nil)`", which the
+  # next build answered with "can't implement a trait for (Int32 | Nil),
+  # it's a union". A nil is the usual missing member, and there the answer
+  # is mostly the narrowing, not an impl.
+  private def iyi_union_lacks_trait(str : IO, actual : UnionType, wanted : Type, arg : ASTNode?) : Nil
+    lacking = actual.union_types.map(&.devirtualize).reject(&.implements?(wanted)).uniq!
+    str << "`#{actual}` does not implement `#{wanted}`: a union implements a trait when every member does"
+    if lacking.empty?
+      str << " (SPEC.md II.1)"
+      return
+    end
+    str << ", and "
+    to_sentence(str, lacking.map { |type| "`#{type}`" }, " and ")
+    str << (lacking.size == 1 ? " does not" : " do not")
+    str << " (SPEC.md II.1). "
+    if lacking.size == 1 && lacking.first.nil_type?
+      value = arg.is_a?(Var) ? arg.name : nil
+      if value
+        str << "#{value} can be nil here: narrow it first (`if #{value}`) or give the nil an answer (`#{value} || default`)"
+      else
+        str << "Narrow the nil first (`if value = ...`) or give it an answer (`... || default`)"
+      end
+      str << "; a nil with an answer of its own is `impl #{wanted} for Nil`, in the module that declares `#{wanted}`"
+    else
+      str << "A union's impl is not writable; write "
+      to_sentence(str, lacking.map { |type| "`impl #{wanted} for #{type}`" }, " and ")
+      str << ", each in the module that declares `#{wanted}` or in the one that declares the member — R-3 "
+      str << "allows those two and no others (SPEC.md IV.4)"
     end
   end
 
@@ -930,31 +1040,64 @@ class Iyi::Call
   # small by rule and concluded `UInt32` had no methods at all. The names
   # are read off the module's text: a `def`, a `%w(...)` operator list, or
   # a quoted conversion name.
-  private def iyi_std_int_hint(program, name : String, owner) : String?
-    return nil unless owner.instance_type.is_a?(IntegerType)
+  #
+  # The floats are `std/float`'s the same way: `Float32`'s methods and what
+  # `Float64` still lacked, unary `-` among it. Without it `1.5_f32.to_f64`
+  # was sent to `--crystal` and `-x` on a `Float64` was "wrong number of
+  # arguments", neither naming the import. *size* is the arguments the call
+  # gave, for that second shape: the module must declare the name with
+  # none, or with some, to be the answer. A module the program already
+  # loaded is not: its methods are there, so the call is wrong otherwise.
+  IYI_STD_NUMBER_MODULES = {
+    "int"   => "the module that makes the whole integer tower usable",
+    "float" => "the module that makes `Float32` a number and gives `Float64` what the prelude leaves out",
+  }
+
+  private def iyi_std_number_hint(program, name : String, owner, size : Int32? = nil) : String?
+    module_name =
+      case owner.instance_type
+      when IntegerType then "int"
+      when FloatType   then "float"
+      else                  return nil
+      end
+    loaded = "std/#{module_name}"
+    return nil if program.iyi_module_paths.has_value?(loaded) || program.iyi_artifact_modules.has_value?(loaded)
     program.iyi_path.entries.each do |entry|
-      path = File.join(entry, "std", "int.iyi")
+      path = File.join(entry, "std", "#{module_name}.iyi")
       next unless File.file?(path)
       text = File.read(path)
-      return nil unless iyi_std_int_names?(text, name)
-      return "`#{name}` on #{owner.instance_type} is in `std/int`, the module that makes " \
-             "the whole integer tower usable: `import std/int`."
+      return nil unless iyi_std_number_names?(text, name)
+      return nil unless size.nil? || iyi_std_number_takes?(text, name, size)
+      taking = size.nil? ? "" : " with #{size == 0 ? "no" : size} argument#{size == 1 ? "" : "s"}"
+      return "`#{name}`#{taking} on #{owner.instance_type} is in `std/#{module_name}`, " \
+             "#{IYI_STD_NUMBER_MODULES[module_name]}: `import std/#{module_name}`."
     end
     nil
   end
 
-  # Whether std/int's *text* declares *name*: a `def`, an operator in a
+  # Whether *text* declares *name* taking no argument (`def - : Float32`, a
+  # quoted conversion name) or, for a *size* above zero, taking some (`def
+  # name(`, an operator in a `%w(...)` list the template writes binary).
+  private def iyi_std_number_takes?(text : String, name : String, size : Int32) : Bool
+    if size == 0
+      text.includes?("def #{name} :") || text.includes?("\"#{name}\"")
+    else
+      text.includes?("def #{name}(") || iyi_std_number_listed?(text, name)
+    end
+  end
+
+  # Whether a number module's *text* declares *name*: a `def`, an operator in a
   # `%w(...)` list, or a quoted conversion name - and the two families
   # written from those by a prefix in the template, `def &{{ op.id }}` for
   # the wrapping `&+ &- &*` and `def unsafe_{{ conv[0].id }}` for the
   # unchecked conversions. Without the prefixes, `x &* 33_u32` on a
   # `UInt32` - a checksum's first line - was told the prelude is small by
   # rule, and a port concluded `UInt32` had no methods at all.
-  private def iyi_std_int_names?(text : String, name : String) : Bool
+  private def iyi_std_number_names?(text : String, name : String) : Bool
     return true if text.includes?("def #{name}(") || text.includes?("def #{name} ") || text.includes?("\"#{name}\"")
-    return true if iyi_std_int_listed?(text, name)
+    return true if iyi_std_number_listed?(text, name)
     if name.size > 1 && name.starts_with?('&') && text.includes?("def &{{")
-      return true if iyi_std_int_listed?(text, name[1..])
+      return true if iyi_std_number_listed?(text, name[1..])
     end
     if name.starts_with?("unsafe_") && text.includes?("def unsafe_{{")
       return true if text.includes?("\"#{name.lchop("unsafe_")}\"")
@@ -962,7 +1105,7 @@ class Iyi::Call
     false
   end
 
-  private def iyi_std_int_listed?(text : String, name : String) : Bool
+  private def iyi_std_number_listed?(text : String, name : String) : Bool
     text.each_line.any? do |line|
       line.includes?("%w(") && line.split("%w(", 2)[1].split(')', 2)[0].split(' ').includes?(name)
     end
@@ -1120,6 +1263,74 @@ class Iyi::Call
     nil
   end
 
+  # iyi: `GC.collect` after `import std/gc`: the bare import keeps the
+  # module's names qualified (SPEC.md R-2b), so `GC` is the prelude's own
+  # `GC` - which has no `collect` - and the error went on to the prelude's
+  # size rule and `--crystal`, while the module the file imported exports a
+  # `GC` that has it. The same R-2b answer `iyi_out_of_reach_hint` gives a
+  # function, for a type the prelude also declares.
+  private def iyi_shadowed_type_hint(def_name : String, owner, obj) : String?
+    return nil unless owner.is_a?(MetaclassType) && obj.is_a?(Path) && obj.names.size == 1
+    name = obj.names.first
+    exporting = [] of ModuleType
+    iyi_each_unit(program) do |mod|
+      next unless mod.exported_name?(name)
+      type = mod.types?.try &.[name]?
+      exporting << mod if type && !type.same?(owner.instance_type) && !type.metaclass.lookup_defs(def_name).empty?
+    end
+    return nil if exporting.empty?
+    written = exporting.map { |mod| iyi_written_path(mod) }
+    "`#{name}` here is the prelude's, and #{written.map { |path| "`#{path}`" }.join(" and ")} " \
+    "exports a `#{name}` that has `#{def_name}`, which this file has not brought into scope. " \
+    "Import it by name, `import #{written.first}::{#{name}}`, or write it as " \
+    "`#{exporting.first}::#{name}` (SPEC.md R-2b)"
+  end
+
+  # iyi: `class String` in `module app/main` declares `App::Main::String`, a
+  # type of the module's own, and `String` in that file means it from then
+  # on. Measured before: `upcase + "!"` in its `def shout` was "undefined
+  # local variable or method 'upcase' for App::Main::String", `self * 2`
+  # in a `struct Int32` was "undefined method '*' for App::Main::Int32",
+  # and a `struct Thing` beside `import app/util::*` was "undefined local
+  # variable or method 'n' for Thing": each named a type the program did
+  # not know it had declared. Said where one of two types with one name
+  # has the method and the other is the receiver, and only of a type that
+  # declares no instance variable - a reopen's shape, not a type's.
+  private def iyi_shadowing_type_hint(def_name : String, owner) : String?
+    meta = owner.is_a?(MetaclassType)
+    type = meta ? owner.instance_type : owner
+    return nil unless type.is_a?(NamedType)
+    has = ->(other : Type) { !other.same?(type) && !(meta ? other.metaclass : other).lookup_defs(def_name).empty? }
+    # Declared in a file of the program's: the compiler's own types and the
+    # macro-made integers have no such file, the library's are under it.
+    declared = ->(other : Type) do
+      file = other.locations.try(&.first?).try(&.filename)
+      file.is_a?(String) && !Iyi.library_source?(file)
+    end
+    others = [] of Type
+    program.types[type.name]?.try { |other| others << other }
+    iyi_each_unit(program) { |mod| mod.types?.try(&.[type.name]?).try { |other| others << other } }
+    if declared.call(type)
+      shadow = type
+      shadowed = others.find { |other| has.call(other) }
+    else
+      shadow = others.find { |other| has.call(other) && declared.call(other) }
+      shadowed = type
+    end
+    return nil unless shadow.is_a?(InstanceVarContainer) && shadowed && shadow.all_instance_vars.empty?
+    return nil unless (location = shadow.locations.try(&.first?)) && (file = location.filename).is_a?(String)
+    top = shadowed.namespace.is_a?(Program)
+    shown = top ? "::#{type.name}" : shadowed.to_s
+    add = if top
+            "A method is added to `#{shown}` with `#{shadow.type_desc} #{shown}`"
+          else
+            "Another module's type is closed (SPEC.md R-3): a method for it is a `def` taking one, " \
+            "or a trait of this module's with `impl Trait for #{type.name}`"
+          end
+    "`#{shadow}` is a new type, declared at #{::Path[file].basename}:#{location.line_number}, that shadows " \
+    "`#{shown}`, and `#{def_name}` is on `#{shadow.same?(type) ? shown : shadow}`. #{add}."
+  end
+
   # The written form of a unit's path: `App::Greeter` is `app/greeter`, which
   # is what an import is spelled with and what the file is called.
   private def iyi_written_path(type : Type) : String
@@ -1154,6 +1365,17 @@ class Iyi::Call
     end
 
     nil
+  end
+
+  # iyi: `sort_in_place` for `a.sort!`. The `!` was written attached, and in
+  # the other library that is the mutating `sort!`: offered the participle,
+  # the call became `a.sorted` and `a` stayed unsorted. Both spellings the
+  # library has are asked: `sort_in_place_by` and `sort_by_in_place`.
+  private def iyi_in_place_for(def_name : String, owner) : String?
+    verb, sep, rest = def_name.partition('_')
+    {"#{def_name}_in_place", "#{verb}_in_place#{sep}#{rest}"}.find do |candidate|
+      owner.lookup_defs(candidate).any?(&.visibility.public?)
+    end
   end
 
   # Every name the scope's imports brought into unqualified reach,
@@ -1194,6 +1416,80 @@ class Iyi::Call
     Levenshtein.find(def_name, candidates)
   end
 
+  # iyi: the `IYI_ARRIVAL_METHOD_HINTS` entry a method name is met with.
+  # `xs.lenght` misspells another language's name, and is as far from
+  # `size` as `length` is, so a long name near a long key is read as that
+  # key. The names other types have for something else are kept to the
+  # receiver that has the answer: `get` to a type with `[]?`, `clone` to
+  # one with `dup`, `join` and `await` to a task.
+  private def iyi_arrival_method_key(def_name : String, owner : Type) : String?
+    hints = Iyi::IYI_ARRIVAL_METHOD_HINTS
+    key = def_name if hints.has_key?(def_name)
+    if !key && def_name.size >= 5
+      key = Levenshtein.find(def_name, hints.keys.select { |name| name.size >= 5 && name[0].ascii_letter? })
+    end
+    case key
+    when "get"           then key if owner.has_def?("[]?")
+    when "clone"         then key if owner.has_def?("dup")
+    when "join", "await" then key if owner.to_s.starts_with?("IyiTask(")
+    else                      key
+    end
+  end
+
+  # iyi: the receiver as a hint can write it in code: its own source when
+  # that is one short line. The nil hint said `the receiver` for anything
+  # but a variable, inside code spans: "(`if value = the receiver`)".
+  private def iyi_receiver_code(obj : ASTNode) : String?
+    text = obj.to_s
+    text unless text.includes?('\n') || text.size > 60
+  end
+
+  private def iyi_nil_receiver_hint(obj : ASTNode, def_name : String) : String
+    String.build do |str|
+      case def_name
+      when "try"     then str << "There is no `try`. "
+      when "not_nil" then str << "There is no `not_nil!`: `!` propagates an error here (SPEC.md III.1.7a). "
+      end
+      receiver = iyi_receiver_code(obj)
+      if obj.is_a?(Var)
+        str << receiver << " can be nil here: narrow it first (`if " << receiver << "`) or give the nil an answer (`" << receiver << " || default`)"
+      elsif obj.is_a?(InstanceVar)
+        str << receiver << " can be nil here: narrow it first (`if value = " << receiver << "`) or give the nil an answer (`" << receiver << " || default`)"
+      elsif receiver.nil?
+        str << "The receiver can be nil here: bind it to a variable and narrow that (`if value = ...`), or give the nil an answer with `||`"
+      elsif obj.is_a?(Call)
+        # `if name(1)` and then `name(1).upcase` narrows nothing: the
+        # second `name(1)` is another call, with another answer.
+        str << '`' << receiver << "` can be nil here, and a call is made again each time it is written, so `if " << receiver << "` narrows nothing: "
+        str << "bind it and narrow the variable (`if value = " << receiver << "`, then use `value`) or give the nil an answer (`" << receiver << " || default`)"
+      else
+        str << '`' << receiver << "` can be nil here: narrow it first (`if value = " << receiver << "`) or give the nil an answer (`" << receiver << " || default`)"
+      end
+    end
+  end
+
+  # iyi: a method missing on an error member of the receiver's union: the
+  # value was used as though it could not fail. `ch.receive + 1` was sent
+  # to the prelude's size rule and `iyi build --crystal`, and a `T | E` of
+  # the program's own had no hint at all.
+  private def iyi_error_receiver_hint(obj : ASTNode, union : UnionType) : String
+    errors, values = union.union_types.partition(&.error?)
+    receiver = iyi_receiver_code(obj)
+    String.build do |str|
+      str << (receiver ? "`#{receiver}`" : "The receiver") << " can be "
+      to_sentence(str, errors.map { |type| "`#{type}`" }, " or ")
+      str << " here, " << (errors.size == 1 ? "an error" : "errors") << " (SPEC.md III.1): "
+      if receiver && !values.empty?
+        bound = obj.is_a?(Var) || obj.is_a?(InstanceVar) ? receiver : "value = #{receiver}"
+        str << "give " << (errors.size == 1 ? "it" : "them") << " an answer (`" << receiver << ".or(default)`), tell them apart (`case " << bound << "` with `in "
+        str << values.join(" | ") << "` and `in " << errors.join(", ") << "`), or propagate "
+        str << (errors.size == 1 ? "it" : "them") << " from a def that returns " << (errors.size == 1 ? "it" : "them") << " (`" << receiver << "!`)"
+      else
+        str << "give them an answer with `.or(default)`, tell them apart with `case`, or propagate them from a def that returns them with `!`"
+      end
+    end
+  end
+
   private def raise_undefined_method(owner, def_name, obj)
     check_macro_wrong_number_of_arguments(owner, def_name)
 
@@ -1212,6 +1508,10 @@ class Iyi::Call
     # `x.i_a?(T)` was "undefined method" with nothing near it. They are
     # names a call can be a typo of like any other.
     similar_name ||= Levenshtein.find(def_name, IYI_PSEUDO_METHODS) if obj && def_name.size >= 3
+    # iyi: and for `a.sort!` the receiver's own in-place name, ahead of any
+    # near spelling: `a.reverse!` is no request for the copy `reversed`.
+    in_place = iyi_in_place_for(def_name, owner) if iyi_banged?
+    similar_name = nil if in_place
 
     # The name that the span under this error can be *replaced with* — set
     # only where that is literally true: the suggestion names a different
@@ -1256,12 +1556,24 @@ class Iyi::Call
         msg << colorize(" (compile-time type is #{obj.type})").yellow.bold
         # iyi: a nilable receiver is the commonest shape this error takes,
         # and the sentence above names the type without saying what to
-        # do; the two idioms are one line each.
+        # do; the two idioms are one line each. An error member is the
+        # same shape with three (SPEC.md III.1).
         if owner.is_a?(NilType)
-          receiver = obj.is_a?(Var) || obj.is_a?(InstanceVar) ? obj.to_s : "the receiver"
-          narrowed = obj.is_a?(Var) ? "if #{receiver}" : "if value = #{receiver}"
-          msg << '\n' << "#{receiver} can be nil here: narrow it first (`#{narrowed}`) or give the nil an answer (`#{receiver} || default`)"
+          msg << '\n' << iyi_nil_receiver_hint(obj, def_name)
+          receiver_hinted = true
+        elsif owner.error? && (union = obj.type).is_a?(UnionType)
+          msg << '\n' << iyi_error_receiver_hint(obj, union)
+          receiver_hinted = true
         end
+      end
+
+      # iyi: the name is a word of a C-family comment (`x = 1 // the
+      # answer`), which is integer division by `the(answer)` here. A
+      # near name is still said, but not carried as the edit: `iyi fix`
+      # would rewrite a word of the comment.
+      floor_div = iyi_after_floor_div unless obj
+      if floor_div
+        msg << '\n' << "`//` at #{floor_div.line_number}:#{floor_div.column_number} is integer division, so the words after it are read as code: a comment starts with `#` (`x = 1 # the answer`)."
       end
 
       if similar_name
@@ -1280,7 +1592,7 @@ class Iyi::Call
           msg << "'#{similar_name}' is what that library calls it, and `!` cannot end a name in iyi (SPEC.md III.1.7): no call written here can spell it. Reach it through a Crystal-side method whose name this language can write."
         else
           msg << "Did you mean '#{similar_name}'?"
-          suggested_edit = similar_name
+          suggested_edit = similar_name unless floor_div
         end
       end
 
@@ -1292,7 +1604,7 @@ class Iyi::Call
       # Crystal writes the plain verb, and "undefined method 'sort'" is true
       # and teaches nothing. The suggestion machinery above will not reach it —
       # `sort` to `sorted` is two edits — so the rule says it instead.
-      if !similar_name && (participle = iyi_participle_for(def_name, owner))
+      if !similar_name && (participle = in_place || iyi_participle_for(def_name, owner))
         msg << '\n' << "'#{participle}' is what this library calls it: `!` cannot end a name here, so the copy takes the participle and the one that changes the receiver says so (SPEC.md III.1.7a)"
         # The participle *is* the name to type here — as much an edit as
         # a Levenshtein hit, and the reason the rule exists.
@@ -1309,18 +1621,25 @@ class Iyi::Call
       if !obj && !similar_name && (arrival = Iyi::IYI_ARRIVAL_CALL_HINTS[def_name]?)
         msg << '\n' << arrival
       end
-      # iyi: the method itself, on this integer, one import away: said
-      # before a spelling that is merely near it (`to_u32` is not a typo of
-      # `to_i32`) and before an arrival note meant for another receiver.
-      if obj && (integers = iyi_std_int_hint(program, def_name, owner))
-        msg << '\n' << integers
-      elsif obj && !similar_name && (arrival = Iyi::IYI_ARRIVAL_METHOD_HINTS[def_name]?)
-        fits = case def_name
-               when "/" then owner.is_a?(IntegerType)
-               when "%" then owner.to_s == "String"
-               else          true
+      # A type that shadows another of its name comes first: every note
+      # below is about the receiver the call reached, which is the wrong one.
+      if shadowing = iyi_shadowing_type_hint(def_name, owner)
+        msg << '\n' << shadowing
+        # iyi: the method itself, on this number, one import away: said
+        # before a spelling that is merely near it (`to_u32` is not a typo of
+        # `to_i32`) and before an arrival note meant for another receiver.
+      elsif obj && (numbers = iyi_std_number_hint(program, def_name, owner))
+        msg << '\n' << numbers
+      elsif obj && !similar_name && (key = iyi_arrival_method_key(def_name, owner))
+        fits = case key
+               when "/"              then owner.is_a?(IntegerType)
+               when "%"              then owner.to_s == "String"
+               when "try", "not_nil" then !receiver_hinted # the nil hint opens with it
+               else                       true
                end
-        msg << '\n' << arrival if fits
+        msg << '\n' << Iyi::IYI_ARRIVAL_METHOD_HINTS[key] if fits
+      elsif obj && (shadowed = iyi_shadowed_type_hint(def_name, owner, obj))
+        msg << '\n' << shadowed
       elsif obj && !similar_name && !participle && iyi_prelude_type?(owner)
         # iyi: a method Crystal's library has and this one does not, on a
         # type the prelude declares, with nothing near it in spelling:
@@ -1330,7 +1649,12 @@ class Iyi::Call
         bare = owner.instance_type.to_s.split('(').first
         if reachable = iyi_std_method_hint(program, def_name, owner)
           msg << '\n' << reachable
-        else
+        elsif !receiver_hinted
+          # Not for a nil or an error member: the other library's `Nil`
+          # has no `+` either, nor has any library `Cancelled#+`, and the
+          # receiver's other members are what the call was written for, so
+          # the note sent a nilable `x + 1` to `--crystal` under the hint
+          # that is the answer.
           msg << '\n' << "iyi's prelude has no `#{def_name}` on #{owner}: it is small by rule - a method enters when a program in the repository needs it (SPEC.md III.1). `iyi doc #{bare}` lists what it has; `iyi build --crystal` gives a program Crystal's library instead (README.md, \"The library a program has\")."
         end
       end
@@ -1392,6 +1716,12 @@ class Iyi::Call
 
         str << '+' if min_splat != Int32::MAX
         str << ")\n"
+      end
+      # iyi: the overload the call wanted may be a std module's: `-x` on a
+      # `Float64` is `std/float`'s unary `-`, and the binary ones listed
+      # below are all the prelude has.
+      if obj && !named_args_types && (numbers = iyi_std_number_hint(program, def_name, owner, arg_types.size))
+        str << numbers << '\n'
       end
       str << "Overloads are:"
       append_matches(defs, arg_types, str)

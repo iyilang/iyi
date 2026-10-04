@@ -53,6 +53,14 @@ class Iyi::Program
   end
 
   def parse_macro_source(generated_source, macro_expansion_pragmas, the_macro, node, vars, current_def = nil, inside_type = false, inside_exp = false, visibility : Visibility = :public, &)
+    # iyi: an expansion is read back as source, and the lexer raises for a
+    # byte that is not UTF-8 - which every parse of a file turns into a
+    # sentence, and nothing here did: `puts {{ "\xff".id }}` ended `check` in
+    # "Unexpected byte 0xff at position 0, malformed UTF-8
+    # (InvalidByteSequenceError)" and a stack trace. Refused at the call.
+    unless generated_source.valid_encoding?
+      node.raise "macro expansion is not UTF-8 text: it holds a byte that is no character (a \"\\xff\" in a string it writes out, say), and an expansion is read back as source"
+    end
     parser = @program.new_parser(generated_source, var_scopes: [vars.dup])
     virtual = VirtualFile.new(the_macro, generated_source, node.location)
     virtual.line_origins = line_origins_of(generated_source, macro_expansion_pragmas)
@@ -63,8 +71,28 @@ class Iyi::Program
     parser.fun_nest = 1 if current_def && current_def.is_a?(External)
     parser.type_nest = 1 if inside_type
     parser.wants_doc = @program.wants_doc?
+    # iyi: see `VirtualFile#depth`.
+    if virtual.depth > VirtualFile::DEPTH_LIMIT
+      node.raise "macro expansion nested more than #{VirtualFile::DEPTH_LIMIT} deep: a macro whose expansion runs it again (a call of itself, of a macro that calls it back, or a class that sets off the `inherited` hook that wrote it) has to stop before that"
+    end
     generated_node = Prof.span("  macro: reparse") { yield parser }
     Prof.span("  macro: normalize") { normalize(generated_node, inside_exp: inside_exp, current_def: current_def) }
+  end
+
+  # iyi: a hook a derive defines (`macro finished`, `inherited`, `included`,
+  # `extended`, `method_added`) runs after the derive has returned, against
+  # whatever the rest of the program declares, which is the whole-program
+  # answer R-5 keeps from a derive (SPEC.md II.4). Refused while the derive
+  # expands. A derive's `macro finished` holding an escaped
+  # `{{ Base.all_subclasses }}` answered `A,B` beside a `B` declared after
+  # the derived struct, past the refusal `all_subclasses` has in a derive.
+  def iyi_refuse_hook_in_derive(node : Macro) : Nil
+    return unless expanding_derive? && node.name.in?(Iyi::IyiMod::MACRO_HOOKS)
+
+    node.raise "`macro #{node.name}` is not available to a derive: a hook runs " \
+               "after the derive, against the whole program, and a derive may only " \
+               "read the declaration it is attached to and what that declaration's " \
+               "types implement — see SPEC.md II.4"
   end
 
   # iyi: an inline macro's `LocOriginPragma`s as lines: the expansion's
@@ -152,7 +180,27 @@ class Iyi::Program
       return CompiledMacroRun.new(executable_path, time.elapsed, true)
     end
 
-    result = host_compiler.compile Compiler::Source.new(filename, source), executable_path
+    # iyi: linked under this process's own name and renamed into place. The
+    # directory is one per helper and shared by every compiler on the
+    # machine, and the link went straight to `macro_run`: two `iyi check` of
+    # the eiy exercise at once, its helper stale, failed one of the two in
+    # each of 4 rounds with "LNK1104: cannot open file ...\macro_run" -
+    # Windows will not write over a program that is running, and the other
+    # compiler was running it. A rename is whole, so whoever starts the
+    # program starts the old one or the new one, never half of one. Windows
+    # refuses that rename too while the old one runs; then this process
+    # keeps its own copy until it exits, and records nothing, since the
+    # requires below would vouch for a `macro_run` that is still the old
+    # program.
+    staging_path = "#{executable_path}.#{Process.pid}"
+    sweep_macro_run_leftovers(program_dir, executable_path)
+    result = host_compiler.compile Compiler::Source.new(filename, source), staging_path
+    begin
+      File.rename(staging_path, executable_path)
+    rescue File::Error
+      at_exit { File.delete?(staging_path) rescue nil }
+      return CompiledMacroRun.new(staging_path, time.elapsed, false)
+    end
 
     # Write the new files from which 'filename' depends into the cache dir
     # (here we store how to obtain these files, because a require might use
@@ -173,6 +221,21 @@ class Iyi::Program
     end
 
     CompiledMacroRun.new(executable_path, time.elapsed, false)
+  end
+
+  # The copies `macro_compile` kept and a killed compiler left, an hour
+  # after: a younger one may be one another compiler has just linked and not
+  # yet started, and a copy that is running refuses the delete anyway.
+  private def sweep_macro_run_leftovers(program_dir, executable_path) : Nil
+    prefix = "#{File.basename(executable_path)}."
+    cutoff = Time.utc - 1.hour
+    Dir.each_child(program_dir) do |name|
+      next unless name.starts_with?(prefix)
+      path = File.join(program_dir, name)
+      next unless (info = File.info?(path)) && info.modification_time < cutoff
+      File.delete?(path) rescue nil
+    end
+  rescue File::Error
   end
 
   @host_compiler : Compiler?

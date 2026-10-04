@@ -121,6 +121,10 @@ panics_with "an index past the end" index_past "out of range for 2 elements" "[1
 panics_with "an index before the start" index_before "out of range for 2 elements" "[1, 2][-5]"
 panics_with "a key nobody put in" missing_key "no such key" "({} of Int32 => Int32)[5]"
 panics_with "a negative count" negative_count "negative count" "[1, 2].first(-1).size"
+# A zip with a shorter array is refused, as the other library refuses it:
+# the pairs stopped at the shorter, and the third element went unsaid.
+panics_with "a zip with a shorter array" zip_shorter "index 2 out of range for 2 elements" "[1, 2, 3].zip([4, 5]).size"
+panics_with "a block zip with a shorter array" zip_block_shorter "index 2 out of range for 2 elements" "[1, 2, 3].zip([4, 5]) { |a, b| a + b }"
 
 echo
 echo "== proving the checks can fail, one broken method at a time"
@@ -231,6 +235,11 @@ prove_fails "each walks the gone entries" each_gone hash.iyi \
   "hash: each counts what size says" \
   's/^      yield @keys\[entry\], @values\[entry\] unless @gone.address != 0_u64 \&\& @gone\[entry\]$/      yield @keys[entry], @values[entry]/'
 
+# 4b. `each` from entry 0 again, over every key deleted at the front.
+prove_fails "each starts before the gone at the front" each_from_zero hash.iyi \
+  "hash: 40,000 oldest keys taken in" \
+  's/^    entry = @first$/    entry = 0/'
+
 # 5. A set that keeps duplicates, which is the one thing a set is.
 prove_fails "a set forgets its members" dup_set set.iyi \
   "set: the other one is still in" \
@@ -272,6 +281,11 @@ prove_fails "a tuple hash that barely mixes" weak_tuple object.iyi \
 prove_fails "an array hashed by its type" type_hashed_array array.iyi \
   "hash: a 300 by 300 grid of arrays spreads" \
   's/^    value.hash$/    crystal_type_id/'
+
+# 12. `max_by` reading its keys with `<` alone, so a NaN key never wins.
+prove_fails "max_by passes over a NaN key" nan_max_by array.iyi \
+  "array: max_by of a NaN key is the NaN" \
+  's/^      if best_key < key || (key.is_a?(Float) \&\& key != key \&\& best_key == best_key)$/      if best_key < key/'
 
 echo
 echo "== and what an empty receiver says when it is asked for a size"

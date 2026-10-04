@@ -7,7 +7,7 @@
 # here for a different reason: everything else in `samples/iyi` is a page long,
 # and a language that has only been used for pages has not been used. This is
 # three modules and a scanner, a parser and an evaluator, the shape of every
-# real program that reads something, written against iyi's own 19,832-line
+# real program that reads something, written against iyi's own 20,323-line
 # library and nothing else.
 #
 # What it cost to write is recorded where it landed. `String#[]`, `String#[](start,
@@ -21,26 +21,32 @@ import calc/parser::{parse, Statement, SyntaxError}
 import calc/ast::{Number, Name, Binary, UnknownName, DividedByZero}
 
 # What runs when nothing is piped in, so that the sample is a program rather
-# than a prompt. CI runs it this way.
+# than a prompt. CI runs it this way. Its last two lines are errors on
+# purpose, and the demo exits 0 with them.
 DEMO = "x = 2 + 3 * 4
 y = (x - 4) / 2
 x + y * 10
 missing + 1
 1 / 0"
 
-pub def run(source : String) : Nil
+# Whether every statement answered. An error goes to standard error, and
+# input with one makes the program exit 1: all of them went to standard
+# output at exit 0, so `echo 1 / 0 | iyi run samples/iyi/calc.iyi && next`
+# ran `next`.
+pub def run(source : String) : Bool
   tokens = scan(source)
   if tokens.is_a?(BadCharacter)
-    puts "error: #{tokens.message}"
-    return
+    stderr.puts "error: #{tokens.message}"
+    return false
   end
 
   program = parse(tokens)
   if program.is_a?(SyntaxError)
-    puts "error: #{program.message}"
-    return
+    stderr.puts "error: #{program.message}"
+    return false
   end
 
+  answered = true
   scope = {} of String => Int32
   program.each do |statement|
     value = statement.body.evaluate(scope)
@@ -54,10 +60,19 @@ pub def run(source : String) : Nil
     else
       # `value` is an error member of the union, and every one of them answers
       # `message` because they implement `Error` (SPEC.md III.1).
-      puts "error: #{value.message}"
+      stderr.puts "error: #{value.message}"
+      answered = false
     end
   end
+  answered
 end
 
-typed = read_input
-run(typed.empty? ? DEMO : typed)
+# Input that is only line ends is nothing piped in: PowerShell's `"" |`
+# sends a CRLF. And its pipe starts what it sends with a byte order mark,
+# which is not part of the program: "unexpected character at 0".
+typed = read_input.lchop('\uFEFF')
+if typed.strip.empty?
+  run(DEMO)
+elsif !run(typed)
+  exit 1
+end

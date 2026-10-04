@@ -4,6 +4,2788 @@
 
 ### Fixed
 
+- **A change's verdict is published even when its compile outlasts the
+  quiet the language server replaces a worker in.** A didChange is a
+  notification, so the proxy counted a worker compiling one as idle, and
+  two seconds with nothing on the wire replaced it mid-compile: the
+  successor adopted the buffer and published nothing, and a client
+  waiting on the verdict waited for ever. Held to two cores beside a busy
+  loop, `bench/lsp_memory.py`'s paced session stopped at its 36th edit,
+  the worker replaced 2.06 s after the change; Windows CI stopped in the
+  same step with "step 4 never finished" [INFERENCE: the same way]. A
+  worker owes each change's verdict, by its version, until it publishes
+  it, and neither the quiet nor the memory bound retires it before then.
+  Step 74a of `bench/lsp_session.py` holds a change's compile for four
+  seconds on a pipe its macro reads; the old proxy answered the hover
+  asked after it and never sent the verdict.
+
+- **A trait with a parameterised supertrait reads back from its
+  artifact.** The artifact qualified every name in the supertrait,
+  the trait's own parameter included, so `pub trait Ord(T) : Cmp(T)`
+  was written `pub trait Ord(T) : ::Lib::Ord::Cmp(::T)` and a consumer
+  stopped on "undefined constant ::T" (measured by FixGenSem before
+  the fix). The trait's parameters stay bare, and the consumer's
+  `N.new(2).gt(N.new(1))` prints `true` as the source build does.
+  `bench/samples_roundtrip.sh`'s `supertrait` case builds it from
+  source and from the artifact.
+
+- **A `forall` def read from a module's artifact compiles at the
+  consumer's types, and the producer's own types stay out of the
+  library's artifact.** A `forall` def's body stayed behind and its
+  instantiations went into the module's object code, so the artifact
+  served only the calls its producing build happened to make:
+  `lib/box2`'s `count(x : T) : Int32 forall T`, written from a build
+  that called `count(1)`, refused a consumer's `count("s")` because its
+  object code "has no symbol for it", and `Conv#pair` and `Conv.one`
+  the same. A producer calling `wrap(Meters.new)` put
+  `Lib::Box2::Box(Q4::Meters)` in `lib/box2`'s type ids, and every other
+  program importing it was refused at the import ("numbers ..., and this
+  build cannot name it"). A `forall` def's body now travels the way a
+  block-taking def's does, its instantiations are compiled in the
+  caller's unit, and both consumers print what the source build prints.
+  A call to an artifact def whose parameter is a bare generic (`args :
+  Tuple`), which `std/format`'s travelling `sprintf` makes, ended codegen
+  on "BUG: called create_llvm_type for K"; it is keyed on the argument's
+  own type. `bench/samples_roundtrip.sh`'s `forall` case writes the
+  artifact from one program and reads it from another; the old compiler
+  was refused at the import.
+
+- **A module's `forall T : Trait` and `where Elem : Trait` bounds hold
+  when it is read from its artifact.** A signature in the `.iyimod`
+  carried a def's free variables and no bounds, so `mod dump` showed
+  `def render(x : T) : String forall T` and `def shown : String`, and a
+  consumer accepted calls the source build refuses:
+  `Pair.new(Dog.new, Dog.new).shown`, for a `Dog` with a `show` method
+  and no `impl Show`, printed `dog,dog`, and `Pair.new(1.5, 2.5).shown`
+  stopped on `undefined method 'show' for Float64` inside the artifact's
+  own text. A signature carries both kinds of bound (format v56), `mod
+  dump` renders them, and the consumer refuses those calls with the
+  source build's message: `Float64 does not implement Gl::Core::Show,
+  required by `where Elem : Gl::Core::Show` in `shown``.
+  `spec/compiler/iyimod_spec.cr` round-trips and renders both, and
+  `bench/samples_roundtrip.sh`'s `forall` case checks both refusals
+  from an artifact; the old compiler built a `shown` over `Float64` to
+  `undefined method 'show' for Float64`.
+
+- **A subtrait's default may name its supertrait's associated type.**
+  `def smallest : Elem` in `trait Sorted : Bag` was "undefined constant
+  Elem", though its body could call `Bag`'s `items`. The name is read
+  through the implementing type, as the body's calls are, so `S` (Elem =
+  Int32) prints 3 and `W` (Elem = String) prints `b`, in a signature and
+  in a body (`Array(Elem).new`). `bench/verbs_exercise.sh` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  answered "undefined constant Elem".
+
+- **A trait may require a parameterised trait.** `trait Ord(T) :
+  Cmp(T)` was "expecting any of these tokens: ;, NEWLINE, SPACE (not
+  '(')". It compiles now, and the requirement is read at each impl's
+  arguments: `impl Ord(N) for N` needs `impl Cmp(N) for N`, and with only
+  `impl Cmp(String)` it answers "impl Ord(N) for N needs an impl of
+  Cmp(N) for N first". `bench/verbs_exercise.sh`,
+  `spec/compiler/parser/parser_spec.cr` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  stopped at the `(`. [INFERENCE] Through a `.iyimod` the supertrait is
+  still written with its parameter qualified (`::T`), see compiler.cr.
+
+- **`where` is refused where it bounds nothing.** On an `abstract def`
+  it was dropped: `abstract def first : Elem where Elem : Show` with
+  `Elem = Float64` compiled and printed 1.5. Beside a top-level
+  `forall`, `def f(x : T) forall T where T : Show` passed the refusal
+  `where` alone gets. Both are refused at the parse now: "`where` can't
+  bound a requirement: every impl answers an `abstract def`" and the
+  `forall T : Show` sentence. `bench/verbs_exercise.sh` and
+  `spec/compiler/parser/parser_spec.cr` check it; the old compiler
+  printed 1.5.
+
+- **A requirement whose return type names its own `forall` variable is
+  checked against the impl's.** `abstract def ident(x : U) : U forall U`
+  (and `: Array(U)`, and the same in an abstract class) was "can't
+  resolve return type U" however the impl answered it. The impl's
+  variable answers it where it stands in the requirement's place, so
+  `def ident(x : V) : V forall V` runs and `: Int32` is refused as "this
+  method must return U ... not Int32". `bench/verbs_exercise.sh` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  answered "can't resolve return type Array(U)".
+
+- **Default methods of two traits that meet on one type are refused,
+  naming both.** The refusal of two impls writing one method did not see
+  defaults: `Named` and `Column` each defaulting `label` had a call
+  through `Named` print "column", Column's impl writing `label` over
+  Named's default did the same, and `impl Conv(String)` beside `impl
+  Conv(Int32)`, whose trait defaults `tname`, printed "Int32" through
+  `Conv(String)`. The second impl answers "User#label is what impl Named
+  for User answers with Named's default (...), and impl Column for User
+  answers it again with Column's default" now. A method the type writes
+  itself, and traits layered one on the other (`Indexable` over
+  `Enumerable`), are left alone. `bench/verbs_exercise.sh` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  printed `column`.
+
+- **A parameterised trait as a bound is checked at its arguments.**
+  `forall T : Into(String)` and `where Elem : Into(String)` were read as
+  `Into`, so a type with only `impl Into(Int32)` met them and printed 2,
+  and on the def's line `(Float64)` became the body's first statement.
+  It answers "B does not implement Into(String), required by `T` in
+  `as_s`" (and "required by `where Elem : Into(String)` in `conv`") now.
+  `bench/verbs_exercise.sh`, `spec/compiler/parser/parser_spec.cr` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  printed 2.
+
+- **A generic struct holding a trait it implements is refused as a
+  recursive struct.** `Box(Show).new(1)` beside `impl Show for Box(T)
+  forall T` ended in "Stack overflow" inside the compiler, ~12k frames
+  of gc_field_offsets, while the non-generic `W` with `@value : Show`
+  was "recursive struct W detected": the check walked the generic
+  `Box(T)` and never met `Box(Show)`. It answers "recursive struct
+  Box(Show) detected" now (also `Pair(Show, Int32)`, `Wrap(Show)`).
+  `bench/verbs_exercise.sh` and `spec/compiler/semantic/iyi_spec.cr`
+  check it; the old compiler overflowed its stack.
+
+- **A nilable trait in a field, an array or a generic argument compiles
+  when a generic type implements the trait.** With `impl Show for Gen(T)
+  forall T` anywhere in the program, `@s : Show?`, `[nil, 1] of Show?`
+  and `Box(Show?)` ended in "BUG: called create_llvm_type for T": the
+  union was laid out with the generic `Gen(T)` itself among its members.
+  It is laid out with Gen's instances now, and the four HuntGenerics
+  programs print `true`, `2`, `true` and `i1`/`G`.
+  `bench/verbs_exercise.sh` checks it; the old compiler stopped with the
+  BUG line.
+
+- **A small chunk freed while a stop lands in the middle of the free is
+  not linked onto a list the pause dropped.** `IyiHeap.free` changed the
+  thread's own free list outside the allocator's bracket, so a stop
+  could catch it between writing the chunk's entry and storing the list
+  head; the pause dropped every list and turned the epoch, and on resume
+  the chunk went back onto the dropped list, whose chunks the sweep then
+  handed out a second time. `stamp` later wrote through a tagged list
+  word and the program died of a memory fault. Measured with a program
+  that frees bursts of small chunks across collections: the old runtime
+  failed 25 of 30 runs (master's 16 of 20), and 0 of 30 with the free
+  inside the bracket. `bench/concurrent_mark.sh` runs that program ten
+  times and proves the check with the bracket removed.
+
+- **A type error says which type was meant, and what to write.** Measured
+  with the previous compiler: `class String` in `module app/main` gave
+  "undefined local variable or method 'upcase' for App::Main::String"
+  with no word that a new type had been declared, and `struct Int32`
+  "undefined method '*' for App::Main::Int32"; the error now names the
+  declaration, the type it shadows and `struct ::Int32`. `xs.join(',')`
+  and `s.includes?('a')` had no did-you-mean, where `split(",")` did;
+  both now carry `","` as the edit. `const x = 5` and `let mut x = 5`
+  were "undefined method 'const'" and "undefined method 'mut'" alone; a
+  lone `x : T` was "Did you mean 'U'?"; `impl Greet for W` above `struct
+  W` was "undefined constant W" and now gives the line it is declared on;
+  `struct U < Greet` stopped at "it's a trait"; `App::Util` without its
+  import was "undefined constant App::Util"; a file whose header is
+  `module app/other` was told to write `module app/wrong` above it; and
+  `class MyError < Exception` compiled, then listed `Reference.new()` for
+  `MyError.new("bad")`. Each now names the iyi spelling.
+  `spec/compiler/semantic/iyi_spec.cr` checks them; the old compiler gave
+  the answers quoted.
+
+- **The parser names the iyi spelling for import paths, braced bodies and
+  impl headers.** Measured with the previous compiler: `import
+  app/util.iyi` was told to add `require app/util.iyi v1.2.3` to
+  `iyi.mod`; `import "app/util"`, `import ./app/util` and `import
+  App::Util` were "expecting token 'IDENT', not ..." and `import
+  app\util` "unknown token: 'u'"; each is now one sentence with `import
+  app/util` as the edit `iyi fix` applies. Go's `if err != nil {` was
+  "void value expression" at the `return` and a braced `while` a missing
+  `end` at the end of the file; `module app/dash-name` was told a header
+  is the first statement of its file and to write `module App::Dash`; a
+  `module App::Upper` header was a missing `end`; `struct U : Greet` was
+  "unexpected token: \":\""; `impl Greet, Loud for U` and Rust's `impl
+  Point` were "expecting identifier 'for'"; `def f : (Int32, String)` and
+  `impl Greet for U, V` were "expecting token '->'"; `def hello(x : T)
+  where T : Greet` passed `check` uncalled and, called, was "undefined
+  constant T / Did you mean 'U'?" (now `forall` is the edit);
+  `App::Util::helper(1)` was "expecting token 'CONST', not 'helper'"; and
+  `$counter` was told to "use @@class_variables instead". Each names what
+  to write. `spec/compiler/parser/parser_spec.cr` checks them; the old
+  compiler gave the answers quoted.
+
+- **A type error names what to write instead of the prelude's size
+  rule.** Measured with the previous compiler: `name(1).upcase` on a
+  `String?` said "the receiver can be nil here: narrow it first (`if
+  value = the receiver`)", code that does not parse; `ch.receive + 1`
+  and `t.value + 1` said the prelude is small by rule and pointed at
+  `iyi build --crystal`, and a program's own `Int32 | E` had no hint;
+  `xs.len()`, `.trim`, `.to_string`, `.unwrap`, `.clone`, `h.get(k)`,
+  `t.await` and `xs.lenght` got the size rule or nothing; `import json`
+  died in src/json/from_json.cr:61 on "undefined constant Deque", and
+  `require "json"` advised `import json`; `xs.uniq!` said only that `!`
+  had no error to propagate; `self.x = x` in `initialize` claimed `@x` was
+  set in other initializers and advised making it nilable; `Channel.new`
+  was reported at src/iyi/concurrency.iyi:3098; `"007".to_S` was told
+  "Did you mean 'to_f'?" and `iyi fix` wrote it; `x = 1 // the answer`
+  was "undefined local variable or method 'answer'" alone. Now: "`name(1)`
+  can be nil here, and a call is made again each time it is written, so
+  `if name(1)` narrows nothing: bind it"; "`v` can be `Cancelled` or
+  `ChannelClosed` here, errors (SPEC.md III.1): give them an answer
+  (`v.or(default)`), tell them apart (`case v` ...), or propagate them
+  ... (`v!`)"; "`size` is the spelling here", "`strip`", "`to_s`",
+  "`.or_panic`", "`dup`", "`h[key]?`", "`t.value`"; "`json` here is
+  Crystal's library ..., which builds only under `--crystal`; iyi's own
+  is `import std/json`" and `import math` adds "Did you mean
+  `std/math`?"; "`uniq!` is the other library's in-place spelling ...:
+  reassign the copy, `xs = xs.uniq`"; "`self.x = x` calls a setter, and
+  does not assign the field"; "`Channel.new` can't infer `T` ...:
+  `Channel(Int32).new`" at the user's line; "Did you mean 'to_s'?"
+  (a case-only difference wins, and a parent's nearer name is seen); and
+  "`//` at 1:7 is integer division". `Result`, `Option`, `HashMap`,
+  `Boolean`, `Mutex`, `Thread`, `await` and `async` get arrival hints.
+  `spec/compiler/semantic/iyi_spec.cr` checks them; the old compiler gave
+  the answers quoted above.
+
+- **The parser names the iyi spelling for the syntax other languages
+  write first.** Each of these was a token error or a report far from the
+  mistake, measured with the previous compiler: `// say hi` was
+  "unexpected token: \"say\"" and `/* say hi */` was told to `import
+  std/regex`; a bodiless `def greet : String` in a one-method trait was
+  "expecting identifier 'end', not 'EOF'" on a line past the file, as was
+  `impl Greet for U {`; `x = g()?` was "can't use variable name 'x'
+  inside assignment" on the next line; `fn main() {` was "'main' is not
+  expected to be invoked with a block" and `package main` listed the
+  runtime's `main(argc, argv)`; `println!(...)` got a paragraph about
+  `sort_in_place`; `def add(a, b):` drew a warning to run `iyi fmt`;
+  `case x` / `in 1` listed what `in` takes; `match x` was "unexpected
+  'in'"; `x := 5` was "unknown token: ' '"; `interface Greet` was
+  "unexpected 'end'"; `Array<Int32>.new` was "unexpected token: \".\"";
+  `Err("bad")` was "expecting token ':', not ')'"; `x as Int64` was
+  "there's no self in this scope"; `f"hi"`, `"""` and `Puts "x"` were
+  "unexpected token: \"DELIMITER_START\""; `export def` and `async def`
+  were "can't declare def dynamically"; `x : i32` was a bare token error.
+  Each is now refused at the token with the spelling here: "`//` opens
+  no comment here: a comment starts with `#`", "`def greet : String` has
+  no `end` of its own: it took the trait's `end` ... `abstract def greet
+  : String`", "`?` starts a ternary here ...: `g()!`" (carried as the
+  edit `iyi fix` applies), "there is no `fn`: a function is `def main(args)
+  : Type`", "`println!` is Rust's macro ...: `puts x`", "a block is not
+  opened with `:` and indentation here", "a value is matched with `when
+  1 then ...`", "there is no `:=`", "there is no `interface`: ... a
+  `trait`", "type arguments are written in parentheses: `Array(Int32)`",
+  "there is no `Some(...)`", "`as` is a method call here ...:
+  `x.as(Int64)`", "there is no `f\"...\"` prefix", "there is no `export`:
+  `pub def f : Int32`" and "Rust's `i32` is `Int32` here". A `.cr` file
+  parses as before. `spec/compiler/parser/parser_spec.cr` checks each;
+  the old compiler answered with the token errors above.
+
+- **On one core a thread waiting for the runtime lock gets it.** The
+  lock was a test-and-set, and a holder runs its unlock and its next lock
+  back to back, so on one core a waiter ran only while the holder was
+  preempted, and found the lock held. Under `start /affinity 1`, five
+  threads started and joined beside a thread looping `GC.collect` did
+  not end in 30 s, and ten beside one taking the lock in a loop for
+  2,000 increments a turn not in 60; at 50 a turn they took 22 s. A spinner
+  that sees no release in 128 turns counts itself on the lock's word,
+  and a free lock with one counted is not taken at a newcomer's first
+  look: the newcomer gives the core away once. A collection gives the
+  core away too once it has released the threads it stopped, which on
+  one core had only the instants between two stops to run in. Both
+  shapes take 0.4 to 1.2 s now, the ten 0.7 to 1 s, and twenty threads
+  beside allocation-driven collections 45 to 54 ms against 3.3 s.
+  Uncontended, a take and release cost what they did, 9.7 to 10.3 ns
+  against 9.9 to 10.5; 48 threads taking the lock on twelve cores take
+  1.6 to 1.9 times one thread's turns, against 1.4 to 1.7.
+  `bench/thread_exercise.sh` step 4c holds both shapes to 10 s on one
+  core, and takes the count and the yield out as its failure proof; the
+  old runtime printed nothing in 30 s.
+
+- **On Windows a collection no longer reads a stopped thread's guard
+  page.** A stop scanned each stopped thread's stack from its saved sp,
+  and a thread, or a task on its fiber stack, stopped after a frame moved
+  sp below the committed stack and before it first touched the new page
+  has sp in that stack's `PAGE_GUARD` page. Read from the collecting
+  thread, the page raised `STATUS_GUARD_PAGE_VIOLATION` there and lost
+  its guard: on a thread's stack nothing claims that, and the process
+  died with 0x80000001 and nothing printed; on a fiber's, the overflow
+  handler reported a "stack overflow" nobody had. Four threads each
+  starting threads that recurse 2,000 frames and run two tasks of 400,
+  beside a thread collecting in a loop: ten runs in ten died within a
+  second. The scan asks `VirtualQuery` and starts at the first committed
+  page above sp that is not a guard page, where everything the thread
+  wrote is: ten runs of two seconds in ten end.
+  `bench/thread_exercise.sh` step 7c runs it three times, and puts the
+  scan from sp back as its failure proof; the old runtime died in ten
+  runs of ten, five with exit 0x80000001 and nothing printed and five
+  with `iyi: panic: stack overflow`.
+
+- **A live `Channel` keeps no value it was offered and never
+  delivered.** Only a delivery emptied a send node, and the channel keeps
+  its last node: a 48 MB select send arm that timed out kept 45 MiB, a
+  48 MB send whose task was cancelled 46 MiB more, and one a close refused
+  46 MiB more, for as long as each channel lived. A failed send and a
+  losing select arm let go of the value now: the cancelled and refused
+  sends keep 0 MiB, and the timed-out arm, run in a task, 0 MiB against
+  45 MiB (on the main stack a slot the select's frames left still holds
+  it). `bench/concurrency_exercise.iyi` checks each at 64 MB against
+  16 MiB; the old runtime kept 61 MiB for the timed-out arm and 61 MiB
+  for the cancelled send.
+
+- **A task spawned on a group after a failure cancelled it starts
+  cancelled.** The group kept no cancelled state, and a task started
+  only copied its spawner's flag: one spawned 10 ms after a sibling
+  returned an error "slept the full 2000 ms; group took 2034 ms". The
+  group stays cancelled now, and that task's sleep answers `Cancelled` at
+  once: the group takes 10 ms (SPEC.md III.4.3).
+  `bench/concurrency_exercise.iyi` checks it under 5 s; the old runtime's
+  task slept, and the group took 10010 ms.
+
+- **A cancel reaches a task reading the value of a task outside its
+  groups.** The reader stayed on that task's joiner chain, which no
+  cancel walks: an inner group whose reader awaited an outer group's
+  3-second task "ended after 3030 ms" though it failed at 20 ms, and with
+  an outer task waiting on the inner group's end the program died "iyi:
+  panic: deadlock: every fiber is blocked and nothing can wake one". The
+  cancelled reader stops now, as a `select` with no bound arm does, since
+  `value` has no `Cancelled` to answer: the inner group ends at 20 ms and
+  the second program prints "done". A reader of a task the cancel did
+  reach still waits for it. `bench/concurrency_exercise.iyi` checks the
+  group under 5 s and the reader's defer; the old runtime held it
+  6000 ms.
+
+- **A cancelled task's `select` gives `Cancelled` to its first bound arm,
+  and with no bound arm the task stops.** The select answered `Cancelled`
+  to its first arm, and an unbound first arm runs nothing, so a heartbeat
+  loop of `when timeout(10)` and a bound receive, or of `when quit.receive`
+  and `when timeout(10)`, never saw its cancel: it spun at a full core
+  (5,000,000 select rounds in 860 ms) and its group's join never ended,
+  killed by a 10 s timeout both ways. The first arm that binds receives
+  it now; with none, the task stops where it is, its defers run, its group
+  counts it cancelled rather than failed, and its handle's `value` answers
+  `Panicked` ("a task stopped by its cancellation has no value"). Both
+  loops end with their group, 50 ms after the sibling's failure (SPEC.md
+  III.4.6). `bench/concurrency_exercise.iyi` checks both under 4 s; the
+  old runtime answered "no arm saw its cancel, the unbound loop ran on"
+  at its 5 s give-up.
+
+- **An unbound `select` arm runs its body whenever its operation
+  happened, whatever the value.** The arm asked whether its answer was an
+  `Error`, so a receive from a `Channel(Boom)` took the `Boom` and skipped
+  its body ("unbound receive took a value: true; body ran: false"), and of
+  two values from a `Channel(Int32 | Boom)` one body ran. The select
+  answers whether the operation happened beside the value now, so a
+  `Channel(ChannelClosed)`'s delivered value runs it too, and a closed
+  channel still runs nothing. `bench/concurrency_exercise.iyi` checks a
+  `TaskFailed` and a `ChannelClosed` taken by unbound receives; the old
+  expansion ran neither body.
+
+- **`zip` refuses a shorter other collection at its first missing
+  index, as the other library does.** `Array#zip`, its block form and
+  `Enumerable#zip` stopped at the shorter, so `[1, 2, 3].zip([4, 5])`
+  answered `[{1, 4}, {2, 5}]` and dropped 3 without a word; the other
+  library raises IndexError, the block form after yielding the two pairs
+  it has. The entry that added the block form said it stopped at the
+  shorter "as Crystal 1.21 yields them", which was not so, and SPEC.md
+  records no decision for it. All three panic now with `index 2 out of
+  range for 2 elements`, the block form after its two pairs; a longer
+  other still gives as many pairs as the receiver holds, and the lazy
+  `Iterator#zip` still stops at the shorter, as the other library's does.
+  **The answer changes:** `samples/iyi/collections.iyi` zipped five
+  numbers with four words and zips four now, printing the same line, and
+  `bench/std_indexable_exercise.iyi`'s block-zip check, which pinned the
+  stop, takes a longer other. `bench/collections_exercise.sh` and
+  `bench/std_exercise.sh` check the refusals; the old prelude answered 2
+  and the old std/enumerable 3.
+
+- **`Array#max_by` and `min_by` place a NaN key where `<=>` does, above
+  every number.** They read the keys with `<`, which is false both ways
+  against NaN, so `[1.0, NaN, 0.5].max_by(&.itself)` was 1.0 and
+  `[NaN, 1.0].min_by(&.itself)` NaN, where `max`, `max_of`, `minmax_by`
+  and std/enumerable's `max_by`, all `<=>` with NaN last, answer NaN and
+  1.0. A NaN float key now wins `max_by` and loses `min_by`, the first of
+  equal NaNs kept; other keys are compared as before. The other library
+  refuses all of these ("Comparison of NaN and 1.0 failed"); here `<=>`
+  is the total order the entry for `Float64#<=>` describes, and the two
+  methods agree with it. `bench/collections_exercise.iyi` checks three
+  cases and its `.sh` proves the `max_by` one fails with `<` alone; the
+  old prelude answered 1.0. The prelude keeps its line count.
+
+- **`Time#inspect` writes the nanoseconds when there are any, in the
+  other library's form.** `Time` had no `inspect`, so it was `to_s`, and
+  `Time.utc(2024, 1, 1, 0, 0, 0, nanosecond: 5).inspect` was
+  `2024-01-01 00:00:00 UTC`, the same as `Time.utc(2024, 1, 1)`, which
+  `==` tells apart from it. They are `2024-01-01 00:00:00.000000005Z`
+  and `2024-01-01 00:00:00Z` now, as the other library inspects them;
+  `to_s` is unchanged. **The answer changes** for every `inspect` of a
+  `Time`, an array of times included. `bench/std_time_exercise.iyi`
+  checks both; the old module answered `2024-01-01 00:00:00 UTC`.
+
+- **`Path#inspect` writes `Path.posix(...)` or `Path.windows(...)` for a
+  path of the kind the platform does not use, as the other library
+  does.** `Path.posix("/usr/bin").inspect` on Windows was
+  `Path["/usr/bin"]`, which spells a Windows path and is not `==` to it.
+  A native path still inspects as `Path[...]`. **The answer changes** for
+  a non-native path; nothing in src/std, bench or samples read it.
+  `bench/std_path_exercise.iyi` checks both kinds on either platform; the
+  old module answered `Path["/usr/bin"]`.
+
+- **`Path#parents` and `#each_parent` keep the spelling the path was
+  written with, as `parent` does and the other library's do.** Each
+  ancestor was rebuilt from `parts` and joined with the kind's separator,
+  so `Path.windows("C:/a/b/c").parents` was `["C:/", "C:/a", "C:/a\\b"]`,
+  two separators in one list and a last parent other than `parent`
+  (`C:/a/b`), and `Path.windows("a/b/c")` gave `a\\b`. Each ancestor is
+  a `parent` of the next now, `["C:/", "C:/a", "C:/a/b"]`, and the
+  answers match the other library's for 15 spellings of both kinds
+  (drive, UNC, `C:a`, `..\x`, trailing and doubled separators).
+  `bench/std_path_exercise.iyi` checks it; the old module answered
+  `C:/,C:/a,C:/a\b`.
+
+- **`CSV.parse` refuses text after a closing quote and a quote inside an
+  unquoted field, at their line and column, as the other library
+  refuses them.** `CSV.parse(%("a"b,c))` answered `[["ab", "c"]]`,
+  `%(x,"b"""c")` `[["x", "b\"c\""]]` and `%(a"b,c)` `[["a\"b", "c"]]`,
+  fields RFC 4180 has no grammar for. They panic now with `expecting
+  comma, newline or end, not 'b' at line 1, column 4`, `... not 'c' at
+  line 1, column 8` and `unexpected quote at line 1, column 2`, the other
+  library's sentences in this module's lower case. The column counts
+  characters, and a line ends at LF, CRLF or a lone CR once each: the
+  other library counts a CRLF as two lines, so `h1,h2\r\nv1,v"2` is
+  line 2 here and line 3 there. The place is counted only on the way
+  out. `bench/std_csv_exercise.iyi` checks four refusals and a closing
+  quote before a comma and before a CRLF, and its `.sh` proves both
+  refusals load-bearing; the old module answered `parsed [["ab", "c"]]`.
+  The lone-CR check gained a twin with no quote in it, because a lone CR
+  dropped now meets the quote refusal before that check.
+
+- **`sample(n)` on any `Indexable` is *n* distinct elements, the count
+  std/random's `Array#sample` answers, and `sample` is a random
+  element.** `Indexable#sample(Int32)` took the number as the seed of a
+  generator of its own, so `[10, 20, 30, 40, 50].sample(3)` answered 20
+  without `import std/random` and three elements with it,
+  `Deque.new([10, 20, 30, 40, 50]).sample(3)` answered 20 either way, and
+  `sample` answered the middle element, 30, on every run; the other
+  library answers three random distinct elements and one random one.
+  `Indexable` has std/random's two now, `sample(random = nil)` and
+  `sample(n, random = nil)`, making the same draws in the same order: a
+  `Deque` of 1..10 sampled three with `Random.new(5)` picks `[7, 8, 4]`,
+  as an array here and the other library do. std/indexable imports
+  std/random for the generator. **The answer changes**, and
+  `sample(seed)` is gone; its one caller, `bench/std_indexable_exercise.iyi`,
+  takes a generator. That exercise checks a collection other than an
+  array choosing what an array chooses, and its `.sh` proves the check
+  fails with the reservoir broken, in place of the seed mutation; the old
+  module refused the check's `sample(3, Random.new(5))` ("given 2,
+  expected 0..1") and answered 20, 20 and 30 for the three calls above.
+
+- **`JSON::Any#to_s` is a string itself and null nothing, as
+  `YAML::Any#to_s` and the other library answer them.** It was the JSON
+  text for every kind, so `"hello #{doc["name"]}"` printed `hello "Ada"`
+  and `JSON.parse("null").to_s` was `null`, where the other library
+  prints `hello Ada` and an empty string. A number or a boolean is its
+  JSON text still, which is the other library's text for each (2.5,
+  1.0e+20, true, 7 measured); an array or an object is its JSON text
+  too, where the other library writes `{"a" => JSON::Any([1, "x"])}`,
+  and `inspect` stays the JSON text. **The answer changes** for a string
+  and for null; no caller in src/std, src/iyi, bench or samples read
+  `to_s` of an `Any`. `bench/std_json_exercise.iyi` checks a string, null,
+  a number and a boolean; the old module printed `hello "Ada"`.
+
+- **An iterator yields a nil element instead of stopping at it: the end
+  of a pull is `Stop`, which is no element.** `next` answered `Elem?`,
+  nil for the end, so `Iterator.of([1, nil, 3]).to_a` was `[1]`,
+  `Iterator.of([nil, nil]).count` 0, `Iterator.of_values({"a" => nil,
+  "b" => 1}).to_a` `[]`, and a `map` whose block answered nil ended the
+  stream there, all without a word; the other library answers
+  `[1, nil, 3]`, 3 and `[nil, 1]`, its `next` answering `Iterator::Stop`
+  in the same place. `next` answers `Elem | Stop` now, `Stop` a struct
+  with nothing in it (`import std/iterator::{Iterator, Stop}`). **The
+  protocol changes:** an iterator written outside std answers `Stop.new`
+  at its end and tests a pull with `is_a?(Stop)`. There were 28
+  implementors - 23 adaptors and sources in std/iterator, `ListIterator`,
+  `Slice`'s `SliceIterator`, `NumericStepIterator`, the counter in
+  `bench/std_iterator_exercise.iyi` and the one in
+  `samples/iyi/std_iterator.iyi` - and all of them, with
+  `bench/std_steppable_exercise.iyi`'s pulls, are moved. A compile-time
+  refusal of a nilable `Elem` was the other way, and would have left
+  `Iterator.of([1, nil, 3])` and a `map` to nil unusable where the other
+  library answers them. Each adaptor writes `next` once now, as
+  `NumericStepIterator` did; the `impl` repeated it. The `map`, `select`,
+  `zip` and `take` mutations of `bench/std_iterator_exercise.sh` patch
+  the new text. `bench/std_iterator_exercise.iyi` checks five nil-element
+  cases and its `.sh` proves them load-bearing with `each` stopping at a
+  nil again; the old module answered `[1]`, 0, `[]`, `[1]` and
+  `[{"x", 0}]` for them, and the new exercise does not build against it
+  ("Std::Iterator has no `Stop`").
+- **`Iterator.of` takes an endless range and counts up from its
+  beginning, as the other library does; a beginless one is refused at the
+  call.** `Iterator.of((1..)).first(3).to_a` was accepted and then refused
+  from inside `src/std/iterator.iyi:421`, "expected argument #1 to
+  'Int32#<' to be ... not Nil", a line of the library. It answers
+  `[1, 2, 3]` now, and `Iterator.of((1..)).step(3).first(4).to_a`
+  `[1, 4, 7, 10]` as there. `Iterator.of(..5)` is refused at the
+  caller's line: "Iterator.of takes a range with a beginning: a beginless
+  range has no first element to count up from".
+  `bench/std_iterator_exercise.iyi` checks the endless range; the old
+  module did not build it, with the refusal above.
+
+- **`Float64#**` with an `Int32` exponent answers the nearest double: all
+  2,052 powers of 1.1, 0.7 and 10.0 checked against Python's `Fraction`
+  are correctly rounded, where 1,879 were not.** It squared and multiplied
+  in plain doubles, rounding at every step: `1.1 ** 100` was
+  13780.612339822364 (the nearest double is 13780.61233982238),
+  `10.0 ** 100` was 1.0000000000000002e+100, `0.9999999 ** 10000000`
+  0.36787942292366493 (0.367879422971105), and the worst of
+  `1.1 ** -400..400` was 48.2 ulp out. It squares in double-double now,
+  the power and the base each a pair of doubles good to some 106 bits
+  (Dekker's product, the factors split by mask so none overflows), and
+  rounds once at the end; a product below 2^-969 is taken 2^108 up so its
+  error terms do not underflow, which kept `10.0 ** -312` and
+  `10.0 ** -317` off by a subnormal step. A negative exponent powers the
+  reciprocal, itself a pair, and `Int32::MIN` is counted in an Int64.
+  `Float32#**` (`std/float`) goes through it. The other library's `**`
+  on Windows misses 5 of the 2,052 by an ulp (`10.0 ** 23`, `1.1 ** 317`,
+  `0.7 ** 10` among them), so there the two answer differently and iyi's
+  is the nearest. `bench/number_exercise.iyi` checks the three sweeps by
+  a digest of their bits folded the same way in Python, and spot values;
+  `bench/std_float_exercise.iyi`'s `1.0000001 ** Int32::MIN` is
+  5.444710317852295e-94 (Python's `decimal` at 80 digits), where it
+  pinned the old 5.444710383108578e-94. The old prelude failed the first
+  sweep.
+
+- **`String#inspect` and `Char#inspect` escape what they hold, as the
+  other library's do, so an inspected value reads back as the one
+  inspected.** Neither escaped anything: `["a\", \"b"].inspect` printed
+  `["a", "b"]`, two strings for one, `{"k" => "a\tb"}` printed a raw tab,
+  `"say \"hi\"\n"` a raw quote and line break, and `'\''.inspect` was
+  `'''`. A string now escapes `"`, `\` and `#{`, a character `'` and `\`;
+  `\a \b \t \n \v \f \r \e` by letter, NUL as `'\0'` in a character and
+  `\u0000` in a string; whatever the new `Char#printable?` refuses as
+  `\uXXXX` or `\u{XXXXX}`; and a byte that is no UTF-8 as `\xFF`.
+  `printable?` is the other library's: not a control (Cc), format (Cf) or
+  private-use (Co) character of Unicode 15, nor whitespace but the space.
+  All 90 lines of a probe over C0, C1, the format characters, private use,
+  noncharacters and astral planes print as the other library prints them.
+  Array, Hash, Tuple and Range inspect their members, so they escape too.
+  `bench/collections_exercise.iyi` checks it; the old prelude printed
+  `["a", "b"]`.
+
+- **`String#to_i?`, `to_i` and `to_f` read a number with whitespace on
+  either side, as the other library's `whitespace: true` does.** They
+  read the whole string or nothing: `" 42".to_i?` and `"42\n".to_i?` were
+  nil, so a line read with its `\n` still on was no number, and
+  `" 42 ".to_i` and `" 1.5 ".to_f` panicked "not a number". They skip
+  `Char#whitespace?` at both ends now, Unicode's as the other library's:
+  `"\u00A0-7\u3000".to_i?` is -7, and `"42\u0085".to_i?` is still nil
+  (U+0085 is a control), as are `"4 2"`, `"+ 1"` and `" "`. `to_f` takes
+  a slice only when there is whitespace to drop. `bench/number_exercise.iyi`
+  checks it; the old prelude failed "whitespace around an integer".
+
+- **A range prints as it is written, `1..5`, `1...3`, `"a".."b"`, as
+  the other library's does.** `Range` had no `to_s`, so `Object#to_s`
+  answered the type: `puts 1..5` printed `Range(Int32, Int32)`, and
+  `[1..2].inspect` `[Range(Int32, Int32)]`, with no import that mended it.
+  Each end is inspected and a nil end left out (`1..`); `inspect` is
+  `Object#inspect`, the same text. `bench/value_exercise.iyi` checks it;
+  the old prelude printed `Range(Int32, Int32)`.
+
+- **A hash whose first key is a tuple, named tuple or hash prints with a
+  space inside its braces, `{ {1, 2} => 3 }`, as the other library's does
+  and as a tuple's first member already did.** `Hash#to_s` wrote
+  `{{1, 2} => 3}`, and nested, `{{1, 2} => {{3, 4} => 5}}`: `{{` reads
+  back as a macro. The first key decides, by its type as `Tuple#to_s`
+  decides, so `{1 => { {3, 4} => 5 }}` pads the inner hash alone.
+  `bench/collections_exercise.iyi` checks it; the old prelude printed
+  `{{1, 2} => {{3, 4} => 5}}`.
+
+- **`Array#delete` removes every element equal to its argument and
+  answers the last one removed, or nil, as the other library's does.** It
+  removed the first alone and answered whether there was one, so
+  `x = [1, 2, 1, 3, 1]; x.delete(1)` answered true and left
+  `[2, 1, 3, 1]` where the other library answers 1 and leaves `[2, 3]`,
+  the same call compiling under both and leaving different arrays. It is
+  one compacting pass now, `delete(value : T) : T?`. The one caller that
+  read the answer, `samples/iyi/grid.iyi`, prints `a` where it printed
+  `true`; no caller in `src/std`, `src/iyi` or `bench` used it.
+  `bench/collections_exercise.iyi` checks it; the old prelude failed
+  "array: delete takes every equal element".
+
+- **`Char#+` refuses to land on a surrogate, as `chr` and the other
+  library's `Char#+` refuse it.** It checked the two ends of the code
+  points alone, so `('\u{D7FF}' + 1).ord` was 55296, U+D800, and its `to_s`
+  the three bytes ED A0 80, which every other method reads back as three
+  U+FFFD. It goes through `Int32#chr` now and panics "55296 is out of char
+  range" as `0xD800.chr` does; the other library raises "0xd800 out of
+  char range". `bench/number_exercise.sh` drives the panic; the old
+  prelude answered 55296.
+
+- **`samples/iyi/calc` reads what Windows pipes, and an error exits 1.** Its
+  lexer had no case for `\r`: `x = 2 + 3 * 4` and `x * 10` with CRLF line
+  ends answered "error: unexpected character at 13", and `echo 2 + 3 * 4|`
+  in cmd "at 9"; and every error went to standard output at exit 0, so `1 /
+  0` piped in said "error: divided by zero" and exited 0. `\r` is whitespace
+  now, the byte order mark PowerShell's pipe starts with is dropped, input
+  that is only line ends runs the demo, and an error is written to standard
+  error, exiting 1 for input that was typed; the demo, whose last two lines
+  are errors on purpose, exits 0. `bench/samples_roundtrip.sh` pipes both
+  into the sample; the old one answered `unexpected character at 13` and
+  exited 0.
+
+- **`--crystal` without the other library on the search path says which
+  library is missing.** The Windows zip carries iyi's prelude and `std` and
+  not the other library, which README said it did, and `iyi run --crystal`
+  from it answered "can't find file 'prelude'" and then "If you're trying to
+  require a shard: - Did you remember to run `shards install`?". The
+  injected `--crystal` prelude now has a note of its own: what it is, that
+  the Windows zip does not include it, and that a source checkout's `src`
+  named in IYI_PATH has it; README's zip paragraph says the zip carries two
+  of the three libraries and why. `bench/verbs_exercise.sh` builds
+  `--crystal` with IYI_PATH pointed at nothing; the old compiler gave the
+  shards advice.
+
+- **`iyi fix` prints its edit so a Char reads as one.** The text replaced
+  and its replacement were wrapped in single quotes, and the Char an edit
+  writes was quoted twice: `fixed split.iyi:4:14: '" "' -> '' ''`, which
+  reads as two empty strings. They are printed in backticks now, as the
+  messages write code: ``fixed split.iyi:4:14: `" "` -> `' '` ``.
+  `bench/verbs_exercise.sh` checks the line; the old compiler printed the
+  quotes.
+
+- **A program builds under a long cache directory on Windows.** A program's
+  directory in the cache was bounded at 100 characters on the assumption
+  that the cache root is short, and IYI_CACHE_DIR is the author's: under a
+  120-character root, a program 245 characters deep failed with "a codegen
+  thread failed: Error opening file with mode 'w': '...o0.bc'" ("The system
+  cannot find the path specified"), its object past Windows' 260. The bound
+  is now what MAX_PATH leaves after the root and the longest object a build
+  writes, and a root that leaves no room, 163 characters or more, is refused
+  as "... would pass Windows' 260-character path limit. Point IYI_CACHE_DIR
+  at a directory of at most 162 characters", where a build under a
+  170-character root failed the same way as above. `bench/verbs_exercise.sh`
+  runs the deep program under a 120-character root and asks for the refusal
+  at 170; the old compiler failed both.
+
+- **`iyi mod release` in a package inside another repository compares only
+  the package's own releases.** Every `v*` tag in the enclosing repository
+  was taken for one: an uncommitted package in a repository tagged `v0.16.2`
+  had that tag checked out, the whole repository with it, and the answer was
+  "Error: mod release: v0.16.2 has no iyi.mod at pkg", and committed it
+  answered the same. HEAD has to hold the package now, or the answer says to
+  commit it first, and the release compared is the highest tag whose tree
+  holds the package's iyi.mod: committed under that `v0.16.2`, the package
+  has "no release before this one". `bench/packages_get.sh` asks both; the
+  old compiler failed both.
+
+- **`iyi doc String`, `iyi doc prelude` and `iyi init` work in a project
+  whose packages cannot be fetched.** Each compiles the prelude alone, as an
+  empty file in the working directory, and that file's root resolved the
+  project's iyi.mod: with a requirement not in the cache and no network, all
+  three answered "Error: the prelude does not compile: cannot fetch
+  example.test/user/nope v1.0.0 from ..." and exited 1, the reason cut after
+  its first line. The prelude imports no package, and is compiled with none
+  now. `bench/packages_get.sh` runs the three in a project requiring a
+  module the mirror does not have; the old compiler failed all three.
+
+- **A `replace` directory may hold a space, in double quotes, and may be
+  spelled `..\lib`.** The line was split on spaces, so `replace
+  example.test/user/liba => "../liba local"` and the same unquoted were both
+  refused as "`replace` takes a path and a directory, as `replace <path> =>
+  ../dir`", which blames the line's shape: on Windows `C:\Users\First Last\`
+  is an ordinary place for a project. And `..\liba-local` and
+  `.\..\liba-local`, the native relative spelling every other verb takes,
+  were refused as "'..\liba-local' is not a directory" about a directory
+  that was there. The directory is the rest of the line after `=>` now;
+  quoted, it builds; unquoted with a space it is refused as "holds a space;
+  a directory with one is written in double quotes"; `.\` and `..\` are
+  directory spellings on every system, as in Go's go.mod; and a target
+  spelled like a module path is "not spelled as a directory".
+  `bench/packages_get.sh` builds from all three spellings and asks for both
+  refusals; the old compiler refused the three and gave the old sentences.
+
+- **`iyi vet` reports the program, not the packages it builds from.** std's
+  unused methods were left out of what it reports and a package's were not:
+  in a project requiring libb, with liba replaced by a directory beside it,
+  `iyi vet vet.iyi` printed
+  `..\cache\mod\example.test\user\libb@v1.0.0\libb.iyi:3:1 Libb#number` and
+  `..\liba-local\liba.iyi:7:1 Liba#unused_here` beside the program's own
+  `own_unused` and exited 1, for exports only the packages' authors can act
+  on. Every directory the manifest builds a package from, a checkout or a
+  `replace` target, is left out now, as std is. `bench/packages_get.sh` vets
+  that program and wants `own_unused` alone; the old compiler named all
+  three.
+
+- **A project whose packages are in the cache still builds offline after
+  other builds.** The cache keeps its ten newest build directories, and
+  `mod`, where `iyi get` puts every package checkout, was one more entry to
+  it: its modification time moves only when a new host's directory is made
+  under it, so eleven builds after a `get` it was the oldest and was
+  deleted, and the program that had built from the cache a minute before
+  answered "Error: cannot fetch example.test/user/liba v1.3.0 from ..." with
+  the mirror gone. The rotation passes over `mod` now; `clear_cache` still
+  removes it. `bench/packages_get.sh` makes eleven newer directories, builds
+  once, and builds again with no mirror; the old compiler deleted `mod` and
+  failed that build.
+
+- **`String#split` with a limit of 1 or less answers the string whole, and
+  an empty string one empty piece, as the other library's does.** A negative
+  limit split everything and 0 meant no limit, so `"a,b".split(",", -1)` and
+  `"a b".split(-1)` were `["a", "b"]` where the other library answers
+  `["a,b"]` and `["a b"]`; and `"".split(",", -1)` was `[]` though
+  `"".split(",")` was `[""]`. No limit is `nil` now (`limit : Int32? = nil`
+  in `split(String)`, and `Int32?` in `split(Char, limit)` and
+  `split(limit)`), and 0 is a limit like any other. Twenty-nine calls answer
+  as the other library's. The one caller that passed 0 for no limit,
+  `bench/std_text_exercise.iyi`'s `"a☃b".split('☃', 0)`, passes 2.
+  `bench/std_text_exercise.iyi` checks the limits; the old module answered
+  `["a", "b"]` for `"a,b".split(",", -1)` and did not compile
+  `split(",", nil)`.
+
+- **`String#to_f?` answers nil for text out of a double's range and reads
+  `inf`, `infinity` and `nan` in any case, as the other library's does.** It
+  checked the spelling and answered whatever the digits came to:
+  `"1e400".to_f?` was Infinity, `"-1e400".to_f?` -Infinity and
+  `"1e-400".to_f?` 0.0, where the other library answers nil for all three;
+  and only `Infinity` and `NaN` spelled so were words, so `"inf"`, `"INF"`,
+  `"infinity"` and `"nan"` were nil. Text with a nonzero digit that rounds
+  to zero, or digits that round past the largest double, is nil now, and the
+  subnormals stay (`"4.9e-324"` is 5.0e-324); the words take a sign and any
+  case, and `nan` a closing `(...)` of letters, digits and `_`. Whitespace
+  around the number is skipped, as the integer readers skip it. Sixty-seven
+  spellings answer as the other library's. `bench/std_text_exercise.iyi`
+  checks them; the old module answered Infinity for `"1e400".to_f?`.
+
+- **`String#to_i?(base)`, `#to_i64?` and `#to_u64?` read a number with
+  whitespace around it, as the other library's readers do.** They refused
+  any whitespace, so `" 42".to_i64?`, `"ff ".to_i?(16)` and a line read with
+  its `\n` still on were nil, and `to_i64` panicked "not a number", where
+  the other library answers 42 and 255. Leading and trailing
+  `Char#whitespace?` characters are skipped now (a no-break space and U+3000
+  among them, U+0085 not), and whitespace inside the number or after its
+  sign is still refused. Eighteen spellings under `to_i64?`, `to_u64?`,
+  `to_i?(16)` and `to_i64?(36)` answer as the other library's.
+  `bench/std_text_exercise.iyi` checks it; the old module answered nil for
+  `" 42\n".to_i64?`.
+
+- **`7 / 2` and `1 <=> 1_i64` compile whatever is imported, and answer what
+  the other library answers.** `std/float` gave every integer a `/(Float32)`
+  beside its `/(Float64)`, so the literal in `7 / 2` cast to both and
+  importing `std/float` turned a line that printed 3.5 into "ambiguous call,
+  implicit cast of 2 matches all of Float64, Float32". `Int#<=>` took only
+  `self`, so once `std/traits` added `Int32#<=>(Int32)` (imported through
+  `std/enumerable`, `std/indexable` or `std/steppable`) the `1_i64` in
+  `1 <=> 1_i64` cast to `Int32` and to `Float64`: "ambiguous call", where
+  the other library answers 0. An integer over any integer is a `Float64`
+  now (`Int#/(Int)`, in `std/float`), and `Int#<=>` takes any integer, the
+  widths compared exactly by the cross-width primitives; `a <=> b` of an
+  `Int32` and an `Int64` variable, which did not type, answers 0 as there.
+  `bench/std_float_exercise.iyi` and `bench/std_int_exercise.iyi` check
+  both; the old modules answered "ambiguous call" at each.
+
+- **`%f`, `%e`, `%E`, `%g` and `%G` format a `UInt8`, as they do every other
+  integer width.** `"%f" % 200_u8` panicked "%f wants a number, and 200 is a
+  UInt8" where `%d` printed 200 and the other library prints 200.000000:
+  `UInt8` had a branch of its own under each integer verb and none under the
+  float verbs, and unlike `Int8`, `Int16`, `UInt16` and `UInt32` it was not
+  widened first. It is widened to `Int64` as `Int8` is, and its seven
+  integer branches are gone. Thirteen values from `Int8` to `UInt128` under
+  seventeen verbs print what the other library prints, 239 lines alike.
+  `bench/format_exercise.iyi` checks the float verbs of a `UInt8`; the old
+  module panicked "%f wants a number, and 200 is a UInt8".
+
+- **`String#count`, `#delete` and `#squeeze` read a character set as the
+  other library's do.** `count(String)` counted a substring, so
+  `"banana".count("an")` was 2 where the other library answers 5, and all
+  three read their argument as the characters written:
+  `"hello world".count("a-z")` was 0, `"hello world".delete("a-k")` came
+  back unchanged, `"aaabbbccc".squeeze("a-c")` was "abbbc" and
+  `"hello".count("^l")` was 0. A set is read by `Char#in_set?`'s rules now,
+  compiled once per call: `a-z` is a run and one that runs backwards panics,
+  a leading `^` negates, a `\` makes the `^` or `-` after it itself, and a
+  `-` first or last is itself. Several sets intersect (`count("lo", "o")`),
+  and `count`, `delete` and `squeeze` of a `Char` compare that character, so
+  `delete('^')` deletes a caret. In 569 random sets over `abc^-\z_é☃`, and
+  in the other library's own spec cases for the three, they answer as there.
+  No caller in src/std, src/iyi, bench or samples counted a substring of
+  more than one character but the exercise's own check, which now expects 5.
+  `bench/std_text_exercise.iyi` checks the sets; the old module did not
+  compile `count("lo", "o")` (wrong number of arguments) and counted `"an"`
+  in banana as 2.
+
+- **`each_with_object` yields the element first and the memo second, as the
+  other library does.** It yielded `(memo, element)`, so
+  `[[1], [2]].each_with_object([] of Int32) { |x, acc| acc.concat(x) }`
+  compiled under both libraries and answered `[]` here, the elements mutated
+  and the memo not, where the other library answers `[1, 2]`; with a `Hash`
+  memo the same call did not compile (undefined method '[]=' for String).
+  The block is `& : Elem, U -> Nil` now, and its callers changed with it:
+  `samples/iyi/collections.iyi`, `samples/iyi/immutable.iyi` and
+  `bench/std_exercise.iyi` wrote `|o, e|`. `bench/std_exercise.iyi` checks
+  that `[[3], [1, 4]]` collects `[3, 1, 4]`; the old module did not compile
+  its element-first block (undefined method '*' for Array(Int32)).
+
+- **Source nested deeper than the compiler reads is refused with a
+  sentence.** The parser and every pass after it recurse on the
+  compiler's stack, and `iyi check` died with "Stack overflow (e.g.,
+  infinite or very deep recursion)" and pages of frames on 300 calls left
+  open with a named argument each, on 1,200 nested `(` and on a chain of
+  4,000 `+`; the language server died with it, and a buffer like that
+  open in an editor answered every request -32603. The parser now stops
+  at 128 levels of its own descent, "nesting deeper than 128 levels", and
+  at a tree 1,000 deep, which a chain of operators or calls grows without
+  any nesting, "an expression nested deeper than 1000 levels", each a
+  syntax error at the place. The deepest file in src/, bench/, samples/,
+  spec/ and the other library's src/ is 23 levels and a tree 39 deep; the
+  limits sit under half of where the parser and under a third of where
+  the later passes overflowed. `spec/compiler/parser/parser_spec.cr` and
+  `bench/verbs_exercise.sh` check both; the old compiler overflowed on
+  the three verbs cases.
+
+- **Two compilers that run the same macro helper at once both build.**
+  Every compiler on the machine links the helper a macro `run`s (std/eiy's
+  template compiler) into one cache directory, and it linked it straight
+  to `macro_run`. Windows will not write over a program that is running,
+  so two `iyi build` of the eiy exercise at once, the helper stale,
+  failed one of the two in each of 4 rounds with "LNK1104: cannot open
+  file ...\macro_run", and the language server's `workspace/diagnostic`
+  answered -32603 for the same reason. The helper is linked under the
+  compiler's process id now and renamed into place; when Windows refuses
+  the rename because the old helper is running, that compiler runs its
+  own copy, records nothing for it, and deletes it when it exits.
+  `bench/std_eiy_exercise.sh` runs four rounds of two builds at once; the
+  old compiler failed 4 of the 8.
+
+- **An auto-import after a last import with no line ending stays in the
+  document.** The new `import` was inserted at the start of the line after
+  the last import, and when that import was the file's last line with no
+  line ending the line did not exist: `ch\nimport std/json` was handed an
+  edit at 2:0, and a client that holds an edit to the last line glued the
+  import onto `import std/json`. It goes at the end of that line now,
+  behind the buffer's own line ending (1:15, `\nimport ...`). Step 73i of
+  `bench/lsp_session.py` checks it; the old server answered 2:0.
+
+- **selectionRange and documentSymbol answer deep nesting.** A cursor
+  inside 100 nested parentheses and the outline of 50 nested classes
+  answered -32603 "Nesting of 100 is too deep", the JSON builder's limit.
+  A selection keeps its 32 innermost and 32 outermost spans, and an
+  outline nests 32 levels and lists anything deeper beside its parent,
+  so every symbol is still listed. Step 73e of `bench/lsp_session.py`
+  checks both; the old server answered neither.
+
+- **A cursor question in a broken buffer below removed lines names the
+  buffer's own lines.** The last good program is laid over the buffer's
+  lines for such an answer, and where lines had been removed it could
+  not be, so the answer came from the old text as it was: a highlight
+  after two edits that removed eleven lines of
+  `bench/std_regex_exercise.iyi` named line 312 of a 306-line buffer.
+  The removed span is laid down as blank lines now, and an answer is
+  never taken from the unaligned program. Step 73f of
+  `bench/lsp_session.py` checks it; the old server highlighted lines
+  [2, 9, 10, 11] of 12, the last of them a blank line, where the name is
+  on [2, 8, 9, 10].
+
+- **A codeAction range past line 2^31 - 1 is answered.** Its lines were
+  read with `.as_i`, and line 2^31 or 2^40 answered -32603 "Arithmetic
+  overflow" where hover and inlayHint hold such a line at the bound.
+  They go through `position_of` now. Step 73g of `bench/lsp_session.py`
+  checks it; the old server answered the overflow.
+
+- **selectionRange at a position outside the document is held to the
+  document.** Where no span held the position, the answer was the
+  position as sent: line 9 of a one-line buffer, and 2^30 for the
+  protocol's largest position. It is held to the last line and that
+  line's end now, as an edit's position is. Step 73h of
+  `bench/lsp_session.py` checks it; the old server answered (9, 2) and
+  (1073741824, 1073741824) for a three-line buffer.
+
+- **One `workspace/diagnostic` stays near the worker's memory bound.** A
+  pull compiled every file of the workspace in one worker, which has no
+  collector, and freed nothing until it answered; the proxy retires a
+  worker at 512 MB, but only between requests. Measured with the old
+  server: 1,443 MB of working set for the 36 files of `samples/iyi`,
+  3.1 GB for the 92 of `bench` and 5.4 GB for 145. The worker stops
+  between two files once it has cost 512 MB and answers the files it
+  judged; the proxy retires it, asks a fresh worker for the rest with
+  those files' ids, and answers the client once with every file: 553 MB
+  for `samples/iyi` and 512 MB for `bench` now. `bench/lsp_memory.py`
+  ("a workspace pull is bounded too") pulls `samples/iyi` cold and again
+  with the ids it was given, which must be all `unchanged`, under 760 MB;
+  the old server peaked at 1,329 MB there.
+
+- **Renaming a call to a prelude def is refused, before any workspace
+  walk.** `puts` renamed to `say` from a buffer answered a WorkspaceEdit
+  for the toolchain's own `src/iyi/io.iyi`, line 447 (`def puts(text :
+  String) : Nil`), with no error, and in a 145-file workspace the walk to
+  build it took two minutes, answering nothing else meanwhile. Rename and
+  prepareRename read where the def is declared from the cursor's own
+  compile and refuse with -32803 when that is under the compiler's
+  library path, or outside every workspace folder in a file the editor
+  does not hold: "'puts' is declared in ...\\src\\iyi\\io.iyi, the
+  compiler's library: a rename would rewrite a file that programs
+  outside this workspace read, and leave their calls behind". Step 73d of
+  `bench/lsp_session.py` checks both requests; the old server answered
+  the rename with the edit and prepareRename with a range.
+
+- **After a language-server worker dies, the next edit is applied once.**
+  The proxy took a didChange into its own buffer first, then found no
+  worker, started one, handed it that buffer (`iyi/adopt`) and forwarded
+  the change as well: `def ab` with one `c` typed after a worker's death
+  was `abcc` to the worker and `abc` to the editor, and every later
+  answer for the file was about a text nobody had. The change is posted
+  before the proxy's buffer takes it now. Step 73a of
+  `bench/lsp_session.py` checks it; the old server's outline was
+  `['abcc']`.
+
+- **A didChange of the wrong shape queued behind a readable one is
+  refused alone.** While gathering a typing burst the worker read the
+  queued frame's `params.textDocument.uri` and `contentChanges` as the
+  protocol spells them, so params that were null, lacked `textDocument`
+  or named a uri of 5 raised, and the whole notification was dropped -
+  the readable change with it, while the proxy kept that change and the
+  two buffers parted. The queued frame is read by its shape before it is
+  taken now, and one of the wrong shape ends the burst. Step 73b of
+  `bench/lsp_session.py` checks it; the old worker's outline was `[]`
+  where it is `['added_by_edit']`.
+
+- **A successor is not warmed on the buffer its predecessor died in.**
+  The proxy warms each new worker by compiling the focused file, so a
+  buffer whose compile killed the worker (600 open parentheses overflowed
+  the parser's stack) killed every successor too, and every request in
+  the session, about any file, answered -32603 "did not survive" for as
+  long as it stayed focused. The focused text a worker died holding is
+  remembered and not warmed until it is edited. Step 73c of
+  `bench/lsp_session.py` kills a worker mid-compile of a buffer whose
+  macro waits 30 s and asks another file's outline; the old proxy
+  answered it only after recompiling that buffer, past 10 s.
+
+- **A program's error stream no longer carries "Unable to load debug
+  information" for an exception nobody printed.** On Windows every `raise`
+  loads the debug information (the stack cannot be walked without it), and
+  a failed load was printed there and then: under heavy parallel load
+  `iyi check -f json` put "Unable to load debug information:
+  SymInitializeW: (RuntimeError)" and a frame in front of its JSON, about
+  8 times in 50,000 runs. The failure is kept and printed the first time a
+  backtrace is decoded, which is what the load was for. Measured with DbgHelp
+  initialised beforehand, which makes the load fail every time: a rescued
+  `raise` printed the failure before the program's own first line, and
+  prints nothing now until the backtrace is asked for.
+  `spec/std/exception/call_stack_spec.cr` checks the order. [INFERENCE]
+  The intermittent failure under load is the same SymInitializeW error;
+  it was not reproduced in isolation (0 of 240).
+
+- **A generic that holds itself one level deeper is refused instead of
+  overflowing the stack.** `struct S(T)` with `@x : S(Array(T))?` - used or
+  not - `@x : S(S(T))?`, and `impl C for Box(T) forall T` with
+  `type Elem = Box(Array(T))` each made a deeper instance of the generic
+  for every instance made, until "Stack overflow" in `types.cr` after 6 to
+  19 seconds. Instantiation stops at the nest a written type is already
+  held to, and refuses at the generic's declaration: "generic type too
+  nested: S(Array(Array(...". `bench/verbs_exercise.sh` checks the
+  instance-variable and associated-type shapes; the old compiler answered
+  the stack overflow.
+
+- **A macro whose expansion runs it again is refused 64 levels deep.**
+  `macro m(x)` holding `m({{ x }})`, two macros calling each other, and an
+  `inherited` hook that declares a subclass of `{{ @type }}` expanded until
+  the stack ran out: "Stack overflow (e.g., infinite or very deep
+  recursion)" after 5 to 17 seconds, in `Lexer.iyi_source?`. Each
+  expansion counts the expansions it sits inside, and one more than 64
+  deep is refused at the call: "macro expansion nested more than 64 deep".
+  The bound is short of the stack for both shapes (a self-call ran out
+  near 4,900 levels, the `inherited` hook near 125) and a recursion that
+  ends inside it still runs. `bench/verbs_exercise.sh` checks the three
+  shapes and a 61-level recursion that prints `bottom`; the old compiler
+  answered the stack overflow.
+
+- **A macro whose expansion is not UTF-8 text is refused at the call.**
+  `puts {{ "\xff".id }}`, `m("\xff")` through a macro writing `{{ x.id }}`,
+  and a `# {{ "\xff".id }}` comment in a macro body ended `check` in
+  "Unexpected byte 0xff at position 0, malformed UTF-8
+  (InvalidByteSequenceError)" and a stack trace from `lexer.cr`: an
+  expansion is read back as source, and nothing checked it first. It is
+  refused now at the call, `macrobyte.iyi:1:6`: "macro expansion is not
+  UTF-8 text". `bench/verbs_exercise.sh` checks the sentence and the
+  place; the old compiler answered the exception.
+
+- **A `def initialize` in a trait, or in an impl for a lib struct or a
+  metaclass, compiles.** `pub trait Wt` holding a `def initialize` ended
+  `check`, `build` and `vet` in "Missing hash key: Wt (KeyError)" and a
+  stack trace through `type_guess_visitor.cr`, and so did
+  `impl Tq for LibQ::CS` and `impl Tq for Int32.class` with one; the type
+  guesser opened its list of a type's `initialize` methods only for a
+  `class`, `struct` or `module` it visited. The list is opened where an
+  `initialize` is recorded, so a trait's `initialize` is a default method
+  like any other: `impl Wt for B` makes `B.new(1)` and the impl for the lib
+  struct makes `LibQ::CS.new`. `bench/verbs_exercise.sh` runs both ("an
+  initialize in a trait and in an impl for a lib struct makes the value");
+  the old compiler answered the KeyError.
+
+- **A `!` whose error the enclosing signature does not list is reported
+  at the `!`.** It was the other library's "method Wrongerr.g must
+  return (Int32 | Wrongerr::ParseErr) but it is returning
+  Wrongerr::IOErr", at the signature's return type, with nothing
+  pointing at the operator. It now names the error, the def and its
+  return type, and the two ways out (widen the signature, or handle it
+  with `case`), at the `!`. The check reads the annotation the call
+  resolved: looked up again from the `!`, the one on a def inside a
+  module never reached it. `bench/verbs_exercise.sh` checks the line
+  and the sentence; the old compiler answered at the signature, 30:9.
+
+- **`!` in `initialize` is refused, and so is a `return` there that
+  leaves a field unassigned.** `new` answers the object whatever
+  `initialize` returns, so `@v = parse(s)!` dropped the error and built a
+  `C` whose `name.size` was "the program died of a memory fault", and an
+  early `return` before `@name = "named"` did the same. The `!` gets
+  "`!` can't propagate out of `initialize`", which points at a
+  `def self.build(...) : C | ParseErr` constructor, and the `return` gets
+  "`return` can't leave `initialize` before @name is assigned". A
+  `return` after every field is set, as `std/regex`'s `RxRuns` has, still
+  compiles. `bench/verbs_exercise.sh` checks both; the old compiler built
+  both programs, and both died of a memory fault.
+
+- **A def whose return type names an error member answers that whole
+  union, from source as through its artifact, even when its body never
+  fails.** A call was typed from the def's body and only checked against
+  the annotation, so `pub def never_fails : Int32 | LibErr` with the body
+  `1` was `Int32`: `never_fails()!` was refused with "`!` has no error to
+  propagate: no member of Int32 implements `Error`", `.or` the same way,
+  and a `case` with no `LibErr` branch compiled. A build reading the
+  module from its `.iyimod` types the call from the annotation, so the
+  same program built from source and failed to link through the artifact
+  (LNK2019 on `never_fails:(Int32 | Lib::Errs::LibErr)`). Such a def's
+  type is its declared union now, virtual where the artifact path reads
+  it virtual, so both builds type, check and mangle the call alike. A
+  signature with no error member keeps its body's type: widened
+  everywhere, `def stdout : IyiIO` answered `IyiIO+`, and the html, io,
+  static_array and symbol exercises failed to link from their artifacts
+  on `Std::Io::Sized#write`. `bench/verbs_exercise.sh` builds such a
+  module and runs it from source and through its artifact; the old
+  compiler refused the `!`.
+
+- **A splat trait parameter, a static array or pointer as an `impl`'s
+  trait, a `case` / `in` with no value, and a `def` followed at once by
+  `{`, `[` or a backtick are syntax errors.** The parser read each as
+  something else, and `fmt` answered "there's a bug formatting", exit 1,
+  on all eight forms below. `pub trait Num(*T)` lost the `*` and was
+  checked as `Num(T)`: `impl Num(Int32, String) for Int32` answered
+  "wrong number of type arguments for Num(T) (given 2, expected 1)".
+  `impl Greet[0] for User` answered "can't implement StaticArray(T, N),
+  it's a generic struct", and named arguments, `impl Greet(x: Int32)`,
+  were dropped. `case` / `in` / `end` answered "undefined local variable
+  or method 'in'". `def{ f(x : Int32)`, `def[ f(...)` and ``def` f`` were
+  each checked as `def f`, exit 0. Each stops at its line now: "a
+  trait's type parameter cannot be a splat", "expected a trait name after
+  `impl`", "exhaustive case (case ... in) requires a case expression",
+  "expecting a name after 'def', not '{'".
+  `spec/compiler/formatter/iyi_formatter_spec.cr` requires a syntax error
+  from each of the eight; the old compiler raised the formatter's
+  internal error on all of them.
+
+- **`fmt` formats a `::` call whose name is on the next line.** The
+  parser reads `::` / `puts 2` as `::puts 2`, as it reads a path, and
+  `fmt` asked for the name at the line break: "there's a bug
+  formatting", exit 1, on a file `iyi check` passed. It writes `::puts
+  2` now. `spec/compiler/formatter/iyi_formatter_spec.cr` formats `puts
+  1` / `::` / `puts 2`; the old formatter raised "expecting NUMBER, not
+  `IDENT, puts`".
+
+- **`fmt` formats a suffix `if` or `unless` on an `if` or `unless`
+  block.** `if true` / `puts 1` / `end if false` compiled, and `fmt`
+  answered "there's a bug formatting", exit 1: it told the suffix form
+  from the block form by the keyword in front, which was the inner
+  block's `if`, wrote that block, and asked for `if` at the line break
+  after `true`. `end unless` and an `if`/`else` block under `if` failed
+  the same way. The suffix form is now the one whose body starts where
+  the node does. `spec/compiler/formatter/iyi_formatter_spec.cr` formats
+  all three; the old formatter raised "expecting keyword if, not
+  `NEWLINE`".
+
+- **A `{` block or proc whose body starts on the opener's line keeps its
+  `}` or `end` out of a comment ending the body's last line.** `fmt`
+  wrote `[1].each { |i| puts i` / `puts 2 # c` / `}` as `puts 2 # c }`,
+  exit 0, and the result did not parse: "expecting token '}', not
+  'EOF'". In `x = -> { puts 1` / `puts 2 # c` / `}` / `x.call` the `}`
+  went into the comment and the proc took in `x.call`: "can't use
+  variable name 'x' inside assignment to variable 'x'". A `-> do` body
+  ended `# c end`. The closer goes on the next line now, at the block's
+  indentation. `spec/compiler/formatter/iyi_formatter_spec.cr` formats a
+  block, a block in a def, a `{` proc and a `do` proc of this shape and
+  requires each unchanged; the old formatter wrote `puts 2 # c }` and
+  `puts 2 # c end`.
+
+- **Calling a method that the build writing an artifact never reached is
+  refused, naming the module, instead of failing at link.** An artifact
+  carries the machine code its producing build compiled, and a program
+  that wrote kit/lib's artifact without calling `fb_public` left it
+  declared and defined nowhere: a consumer calling it ended on `LNK2019
+  unresolved external symbol
+  .2A.Kit.3A..3A.Lib.40.Kit.3A..3A.Lib.3A..3A.fb_public.3C.Int32.3E..3A.Int32`.
+  It stops now on "kit/lib's artifact declares `Kit::Lib.fb_public(x :
+  Int32)`, and its object code has no symbol for it: the build that wrote
+  the artifact never reached it", debug and release. The same symbol
+  missing from an artifact that another artifact's object code calls is
+  still a link error. The `unreached` case of `bench/samples_roundtrip.sh`
+  checks it; the old compiler answered the LNK2019.
+
+- **A method whose body uses `{{@type}}` works on a consumer's subclass,
+  and a producer's subclass no longer leaks into the library's
+  artifact.** Such a method is expanded again for every receiver, and its
+  body stayed behind as a header: a consumer's `class User < Model` ended
+  on LNK2019 `Model+@Model#type_name:String`, where the source build
+  printed `Main::User`. And the copy the compiler makes on a subclass kept
+  the library's location, so a program writing the artifact with its own
+  `class User < Model` gave kit/lib a `class ::Main::User`: the same
+  program built from it was "superclass mismatch for class Main::User",
+  and another consumer with a `struct User` was "User is not a struct,
+  it's a class". The body travels now, and a copy on a type the library
+  never names stays out. The `macro_def` case of
+  `bench/samples_roundtrip.sh` checks it; the old compiler stopped on the
+  superclass mismatch.
+
+- **A type's macro hooks (`macro inherited`, `included`, `extended`,
+  `method_added`) travel in its artifact, and run as they do from
+  source.** They are kept apart from a type's other macros and the
+  artifact read only those, so none travelled: with a hook that defines
+  `def kind`, a consumer's `class Mine < P` was "undefined method 'kind'
+  for Main::Mine", and with one that registers the subclass, both the
+  library's `One < P` and the consumer's `Mine < P` built and printed
+  `[]` where the source build printed `["Kit::Lib::One"]` and
+  `["Main::Mine"]`. The hooks are written into the declaration now; the
+  consumer registers them as it reads it, and runs them for the library's
+  subclasses it reads as for its own, so all three print what the source
+  build prints. The `hooks` case of `bench/samples_roundtrip.sh` checks
+  it; the old compiler stopped on the undefined `kind`.
+
+- **An abstract generic type is written back as `abstract class` and
+  `abstract struct`.** Its kind was recorded as `abstract generic class`,
+  and only a leading `generic` is taken off when it is rendered, so `pub
+  abstract class GA(T)` came back `pub abstract generic class GA(T)`:
+  every build reading the artifact stopped on "`pub abstract` takes a
+  class, a struct or a def" (a private one on "unexpected token:
+  \"generic\""), and `iyi doc` printed the same line from source. The
+  word is dropped behind `abstract` now, the artifact builds and runs, and
+  `iyi doc` prints `pub abstract class GA(T)`. The `abstract_generic` case
+  of `bench/samples_roundtrip.sh` checks it; the old compiler stopped on
+  the `pub abstract` refusal.
+
+- **A class whose fields have defaults written in its body (`@id = 0`,
+  `@items = [] of T`) can be imported from its artifact.** Such a default
+  counted as a statement in a type body, so the artifact refused every
+  consumer: "\"kit/lib\" has code inside a type body that has to run",
+  where the source build printed the default. The artifact already carries
+  it beside the field and the consumer's `new` runs it, so a class's field
+  default is exempt now; a module's is still refused, because it is handed
+  to an includer only as the include is read. The `field_default` case of
+  `bench/samples_roundtrip.sh` checks it; the old compiler refused the
+  import.
+
+- **A method with an empty body travels in the artifact as one, so the
+  consumer compiles it rather than asking the linker for it.** The
+  reader tells a header from a travelled body by whether there is a body,
+  and an empty one listed in `MonoBodies` came back as a header: every
+  build reading the artifact ended on LNK2019, for `G(Int32)@G(T)#noop:Nil`
+  (an empty method of a generic class), `S(String)@S(T)#initialize:Nil`
+  (any generic struct with no `initialize` written), `each_none<&Proc…>`
+  (an empty block-taking def), an empty trait default, and the
+  `initialize` of a library's `abstract struct` under a consumer's
+  subclass. An empty travelled body is written `nil` now, which is what it
+  answers, and each of them prints what the source build prints. The
+  `empty_body` case of `bench/samples_roundtrip.sh` checks it; the old
+  compiler ended on those three LNK2019s.
+
+- **A yielding method an `impl` gives a type of the module's own travels
+  in the artifact, so a consumer can call it.** `impl Walk for B` with a
+  block-taking `walk` on a struct `kit/lib` declares carried a header and
+  no body, because an impl for a non-generic type of the module's own
+  ships as machine code, and a block-taking method has none: the
+  consumer's link ended on `Kit::Lib::B#walk<&Proc(Int32, Nil)>:Nil`.
+  `impl Enumerable for R` did the same to `each`, and `R.new(3).map {}`
+  stopped on "can't use `yield` inside a proc literal or captured block"
+  inside Enumerable's travelling `map`. The body travels now, as an
+  ordinary block-taking def's does, and both print what the source build
+  prints, debug and release. The `impl_block` case of
+  `bench/samples_roundtrip.sh` checks it; the old compiler stopped on the
+  `yield` refusal.
+
+- **On Windows `File.symlink` writes a `/` in the target as `\`.** The
+  target went to `CreateSymbolicLinkW` as written, and Go's `os.Symlink`
+  converts it because "'/' does not work in link's content", so a link
+  to `sub/t.txt` probably pointed at nothing [INFERENCE: not measured;
+  this machine refuses the call with error 1314, no Developer Mode]. The
+  target's separators are backslashed before the call now. No bench
+  checks it, for the same reason.
+
+- **On Windows a refused `Dir.mkdir`, `mkdir_p`, `delete` or `open` says
+  why.** Each said the path and nothing else: "Cannot create directory:
+  db" for a directory that was there and for one under a missing
+  parent, "Cannot remove directory: db" for one that was not empty. They
+  end in Windows' number and its sentence for it now, as `File`'s
+  refusals do: "Windows error 183: Cannot create a file when that file
+  already exists", "Windows error 3: The system cannot find the path
+  specified", "Windows error 145: The directory is not empty". The POSIX
+  arms are unchanged. `bench/std_dir_exercise.iyi` checks five refusals;
+  the old module answered "Cannot create directory: <path>" with nothing
+  after it.
+
+- **`Path.windows` reads `\\?\UNC\server\share` with the share as its
+  drive, as Python does.** The prefix was read as a share of its own,
+  host `?` and share `UNC`: the drive of `\\?\UNC\srv\sh\x` was
+  `\\?\UNC`, and `\\?\UNC\srv\other\x` was relative to
+  `\\?\UNC\srv\sh` as `..\other\x`, across shares. After `\\?\UNC\`, in
+  any case and with either separator, the server and share come next,
+  so the drive is `\\?\UNC\srv\sh` and `relative_to?` across shares is
+  nil. `bench/std_path_exercise.iyi` checks the drive and both
+  `relative_to`s; the old module answered `\\?\UNC`.
+
+- **`Server.serve` answers a body past its limit 413 and a head past
+  its limit 431.** Both were answered 400, as a request that is not
+  HTTP: `Content-Length: 99999999999` got "HTTP/1.1 400 Bad Request" and
+  "body past 67108864 bytes". A body declared past `Server::MAX_BODY`,
+  or a chunk size past it, is answered 413 Content Too Large (RFC 9110
+  §15.5.14) now, and a head past `Server::MAX_HEAD` 431 Request Header
+  Fields Too Large (RFC 6585 §5); anything else is still a 400, and
+  `ParsedRequest#status` says which. `bench/std_http_exercise.iyi` checks
+  both limits in `parse_request` and both 413s over a socket; the old
+  module answered "400 body past 67108864 bytes".
+
+- **`HTTP.request` percent-encodes the bytes of a URL's path and query
+  past 127.** `HTTP.get("http://127.0.0.1:P/ü/ç?ş=1")` sent the request
+  line `GET /ü/ç?ş=1 HTTP/1.1`, raw UTF-8 where RFC 9112 §3.2 wants an
+  ASCII target. `format_request` writes each such byte as `%` and two
+  hex digits now, `GET /%C3%BC/%C3%A7?%C5%9F=1 HTTP/1.1`, as Go's client
+  does. `bench/std_http_exercise.iyi` formats that request; without the
+  encoding the line went out raw.
+
+- **`Response#header_values` keeps a field's lines apart, so two
+  `Set-Cookie` lines can be read as two.** A repeated field was there
+  only joined with ", ", as `header` documents, and a cookie's `Expires`
+  date has a comma of its own: two cookies read as "a=1; Expires=Wed, 21
+  Oct 2026 07:28:00 GMT, b=2; Path=/", which no split takes back apart
+  (RFC 9110 §5.3 makes `Set-Cookie` the exception to the join).
+  `header_values(name)` answers each line's value in order, one for a
+  field on one line and none for a field that is not there; `header`
+  and `headers` still join. `bench/std_http_exercise.iyi` parses two
+  `Set-Cookie` lines and reads them over a socket under a chunked body
+  and under a length; with the lines not kept it answered the joined
+  value.
+
+- **A connect to `localhost` that 127.0.0.1 refuses is tried at ::1.**
+  `IyiSocket.connect`, and so `HTTP.get`, took `localhost` for 127.0.0.1
+  alone, while Windows names ::1 first and dev servers often listen
+  there: against a listener on ::1 only, `HTTP.get` answered "cannot
+  connect to localhost:P: connection refused" after 2016 ms. A refused
+  or unreachable 127.0.0.1 is tried again at ::1 now, and the module's
+  header says so. Windows takes 2 s to refuse the first connect, so the
+  ::1 listener is reached in 2017 ms, and a port nobody holds is refused
+  in 4059 ms where it was about 2 s. `bench/socket_exercise.iyi` connects
+  to `localhost` against a listener on ::1 only; the old module answered
+  a `SocketError`.
+
+- **A module's overloads called unqualified with a union argument run
+  the overload the value picks.** With `pub def fr_show(x : Int32)` and
+  `pub def fr_show(x : String)` in `kit/lib2`, `fr_show(v)` for a
+  `v : Int32 | String` matched each overload against the caller's self,
+  which is never the module, so no arm was taken and the call ran into
+  `unreachable`: `import kit/lib2::*` and `import kit/lib2::{fr_show}` at
+  the top level printed `iyi: out of memory`, the same call inside a def
+  or from a class nested in the module declaring the overloads stopped on
+  `Process hit a breakpoint`, and from inside another module the program
+  died of a memory fault. `Kit::Lib2.fr_show(v)` worked. A module's
+  function takes no receiver, so the dispatch now matches it on its
+  arguments alone, and all of these print `int`/`str` in debug and
+  release builds. bench/verbs_exercise.sh checks it; the old compiler
+  answered a memory fault in the plain build and printed nothing in the
+  release build.
+
+- **On Windows `File.rename` refuses to put a directory where a file is,
+  as POSIX `rename` refuses it.** `MoveFileExW` replaced the file with
+  the directory: `File.rename("d", "f.txt")` left `f.txt` a directory and
+  the file's contents gone, where POSIX `rename` answers ENOTDIR and the
+  Linux arm says "Cannot rename" [INFERENCE: from the code and POSIX,
+  not run on Linux here]. It panics "... is not a directory" now, and
+  the file stays. `bench/std_file_exercise.iyi` renames a directory onto
+  a file; the old module renamed it.
+
+- **`Server.serve` skips the empty lines before a request line, as RFC
+  9112 §2.2 asks of a server.** A client that ended a body with one more
+  CRLF had its next request on the connection answered 400 and closed:
+  "not a request line: \"\"" after one empty line, "empty request" after
+  two. They are passed over, by `Server.parse_request` too.
+  `bench/std_http_exercise.iyi` sends a body with a CRLF after it and a
+  request after that; the old module answered 400 "empty request".
+
+- **`Server.serve` closes the connection after an answer whose
+  `Connection` says `close`.** The block's line was dropped,
+  `Connection: keep-alive` written in its place, and the next request on
+  the connection read and served; Go's server and Python's close it
+  [INFERENCE: from their sources, not run here]. The answer says `close`
+  now and the connection ends after it. `bench/std_http_exercise.iyi`
+  answers `Connection: close` from the block; the old module wrote
+  "keep-alive" and served the request after it.
+
+- **`HTTP.request` refuses an answer whose head runs past a megabyte.**
+  The head was read for as long as it came: 256 MB of one field cost the
+  client 824 MB of memory before it panicked "no header terminator" at
+  the server's close, and a head that never ended took all there was. It
+  reads as far as `Server::MAX_HEAD`, the 1 MiB the server takes of a
+  request's head, and panics "HTTP: response headers past 1048576
+  bytes" past it, 21 ms into the same 256 MB. `bench/std_http_exercise.iyi`
+  writes one field until the client stops taking it: 26 to 28 pieces of
+  64 KB go now, and all 1,024 of a 64 MB cap with the limit taken out;
+  the old module answered "HTTP: no header terminator".
+
+- **A refused `rescue` or `ensure` is reported at the keyword.** On a
+  def or a block the handler starts where the body does, so `def foo :
+  Int32` / `raise "x"` / `rescue` was reported at line 3, `raise "x"`,
+  and a def's `ensure` at `puts "a"`. The refusal now points at the
+  `rescue` or `ensure` it refuses, and a def's body, which is cloned when
+  it is typed, keeps the `ensure` keyword's location. Checked in
+  `spec/compiler/semantic/iyi_spec.cr`; the old compiler reported line
+  2, column 3 for a keyword on line 3.
+
+- **`a.sort!` suggests `sort_in_place`.** In the other library `sort!`
+  sorts in place, and the hint answered "undefined method 'sort' for
+  Array(Int32) / 'sorted' is what this library calls it": following it
+  wrote `a.sorted`, a copy, and left `a` unsorted. A call written with an
+  attached `!` is now offered the receiver's in-place name when it has
+  one - `sort_in_place`, `sort_in_place_by`, `sort_by_in_place` - and
+  other calls still get the participle. Checked in
+  `spec/compiler/semantic/iyi_spec.cr`; the old compiler named `sorted`.
+
+- **`.or_panic("msg")` is refused with a sentence about `.or_panic`.**
+  It was "expecting token ')', not 'DELIMITER_START'", a sentence about
+  the lexer's tokens, where a misused `.or` already gets one about itself.
+  It now says "`.or_panic` takes no argument: it panics with the error's
+  own `message`; for a default use `.or(value)`". Checked in
+  `spec/compiler/parser/parser_spec.cr`; the old parser gave the token
+  message.
+
+- **`!` in a proc literal written inside a `defer` is accepted.** The
+  parser counted the `defer` through the literal's body, so `defer
+  puts((->(s : String) { parse(s)! }).call("x").class)` was refused with
+  "`!` can't propagate out of a `defer`", while `return` in the same
+  place compiled. The `!` returns from the proc and leaves no cleanup;
+  the program now prints `ParseErr`. A `!` in a block inside a `defer` is
+  still refused, since a block's `!` returns from the enclosing function.
+  `spec/compiler/parser/parser_spec.cr` checks both; the old parser
+  refused the proc.
+
+- **`!` works inside the blocks of `Array#sorted` and `#sorted_by`.**
+  Both captured their block only to hand it to `sort_in_place` and
+  `sort_in_place_by`, so `xs.sorted_by { |x| key_of(x)! }` in a def
+  returning `Array(Int32) | BadKey` was refused with "`!` can't propagate
+  out of a block that runs as a proc ... it is kept and called later,
+  maybe by a task", while `each`, `select`, `sum` and `map` took the same
+  `!`. The block runs before the sort answers, and both now hand it on
+  through `yield`, so `!` returns the error from the def. Checked in
+  `bench/collections_exercise.iyi`; the old prelude refused that file.
+
+- **A group's join re-raises the first task that panicked, not the last
+  one spawned.** The join owes one re-raise for the panics nobody read,
+  and it walked its children newest first: two tasks that both panicked,
+  `bomb("first")` then `bomb("second")`, were printed at their sites in
+  that order and the join ended the program on `iyi: panic: a task
+  panicked: second`. III.4.3 says the first failing task is the one that
+  leaves the group, and the group already records it. The join names that
+  one now - `a task panicked: first` - and marks every unread panic
+  delivered. `bench/concurrency_exercise.sh` step 3g checks it; the old
+  runtime named `second`.
+
+- **A tuple and a named tuple are `Hashable`, so `group_by`, `tally`,
+  `tally_by`, `index_by` and `to_h` take one as the key.** Each has the
+  `==` and the `hash` a `Hash` asks of a key, and neither implemented the
+  trait those methods ask for: `group_by { |x| {x % 2, x % 3} }`, the usual
+  way to group by two things, was refused with "Tuple(Int32, Int32) does
+  not implement Std::Traits::Hashable", and `tally_by { |x| {parity: x %
+  2} }` with "NamedTuple(parity: Int32) does not implement" the same.
+  `std/traits` implements it for both, and imports `std/tuple`, where a
+  named tuple's `==` and `hash` are. `bench/std_exercise.iyi` checks both,
+  and its source and artifact runs print the same; the old module answered
+  "Tuple(Int32, Int32) does not implement Std::Traits::Hashable".
+
+- **A module's artifact names the types the compiler resolved from the
+  top level, so a module beside an `app/tuple`, an `app/std` or an
+  `app/exception` reads back as it compiled.** The declarations a
+  consumer compiles against are read inside the module, and the artifact
+  wrote a resolved name without its `::`: `impl Show for ::Tuple(*T)` came
+  back `for Tuple(*T)` and a field or class variable of type
+  `::Tuple(Int32, Int32)` came back `Tuple(Int32, Int32)`, each "App::Tuple
+  is not a generic type"; a supertrait `::Std::Traits::Hashable` beside an
+  `app/std` was "undefined constant Std::Traits::Hashable", and a
+  superclass `::Exception` beside an `app/exception` was "App::Exception
+  is not a class, it's a module". `std/traits` could not import
+  `std/tuple` for the same reason ("Std::Tuple is not a generic type"). An
+  impl of a parameterised trait did not read back at all: `impl
+  Into(String) for User` was written `impl App::Lib::Into(T)(String) for
+  App::Lib::User`, "expecting identifier 'for', not '('", and `iyi doc`
+  showed `impl Into(T)(String) for User`. Impl headers, supertraits,
+  superclasses, includes and field and class-variable types are written
+  global now (`::Tuple(::Int32, ::Int32)`), relative only where a
+  superclass or an include is a sibling, and an impl names its trait once.
+  `bench/verbs_exercise.sh` builds such a module and runs it from source
+  and through its artifact; the old compiler stopped on the
+  `Into(T)(String)` line.
+
+- **Taking a `Hash`'s oldest key and deleting it until none is left is
+  linear: 40,000 keys take under a millisecond, where they took 197 ms.**
+  `delete` marks an entry gone where it stands, and `each` started at entry
+  0, so every key taken stepped over every key taken before it; that is
+  quadratic, 1,391 ms in a plain build. The table now keeps the other
+  library's `@first`: every entry before it is gone, `delete` moves it past
+  the gone ones at the front, and `each` starts there.
+  `bench/collections_exercise.sh` checks a 50 ms bound at 40,000; the old
+  prelude failed it at 197 ms.
+
+- **`String#==` is ten times faster on long strings: 1,000 compares of two
+  equal megabytes take 22 ms optimised, as Python's take 20.** It compared
+  a byte at a time, and the early exit kept LLVM from vectorising the loop:
+  230 ms for the same compares, eleven times Python. It compares four
+  8-byte words a step and the tail a byte at a time, and the same string is
+  equal to itself without the walk. `bench/std_text_exercise.iyi` checks
+  every length to 70 with one byte changed at each position, and
+  `bench/std_text_scale_exercise.sh` checks a 120 ms bound; the old prelude
+  took 624 ms there.
+
+- **`File.read` holds the file once: a 256 MB read peaks at 260 MB of
+  working set, where it peaked at 774.** `read_all` grew a buffer by
+  doubling, with the old and new blocks both live during each `realloc`,
+  and then copied it into the string while the buffer was still alive,
+  three times the file at the peak (1 GB took 3,078 MB). `File.read` now
+  asks the file its size (`fstat` on Linux, `GetFileSizeEx` on Windows)
+  and reads straight into a string of that size. A file that comes up short
+  is cut to what came, and one that grew is read on. A pipe, a console or a
+  `/proc` file, which have no size, still grow the buffer, and so does
+  darwin, where either call would be a libSystem symbol the floor lists do
+  not name. The same read went from 293 to 88 ms, optimised.
+  `bench/io_exercise.sh` checks it; the old prelude answered `read_all
+  268435456 774`, past its 384 MB bound.
+
+- **`chop`, `reverse` and the strips that take a set read an ill-formed
+  byte as one character, as `each_char` and `size` do.** Each took a
+  character to be a lead byte and every `10xxxxxx` byte after it, so a
+  stray byte joined the character before it: `"\t\xE2\x82".chop` (two
+  characters after the tab) was `"\t"`, `" \x80é".reverse` was `"é \x80"`,
+  `"a\x80".lstrip("a")` and `"é\x80".lstrip("é")` stripped nothing, and
+  a cut `€`, E2 82, was found inside the `€` of a set, so
+  `"x\xE2\x82".rstrip("€")` was `"x"`. A character is one well-formed
+  sequence or one byte now, looked for at most three bytes back, so a
+  run of stray bytes stays linear. Well-formed text answers as before.
+  `bench/std_text_exercise.iyi` chops, reverses and strips ill-formed
+  text; the old module answered `"\t"` for the chop.
+
+- **`fmt` lines up end-of-line comments by the cells a terminal draws, a
+  wide character taking two.** `x = "日本" # c` over `yy = "ab" # d` was
+  written `x = "日本"  # c` / `yy = "ab" # d`: counted one each, the two
+  CJK characters left the first `#` two cells right of the second. The
+  padding counts cells now, as the error caret does.
+  `spec/compiler/formatter/iyi_formatter_spec.cr` formats the pair; the
+  old formatter wrote `x = "日本"  # c`.
+
+- **`fmt` no longer puts spaces in front of a call's `)` after a comment
+  on an earlier argument's line.** Inside a `begin`, `f(a, # c` /
+  `bbbbbbbb)` was written `bbbbbbbb  )`, with or without comments on the
+  lines around it to align: the comment after the comma made the closing
+  `)` take the block's indentation, which only a `)` starting its own
+  line needs. `spec/compiler/formatter/iyi_formatter_spec.cr` formats the
+  case with aligned comments; the old formatter wrote
+  `    bbbbbbbb  ) # d`.
+
+- **`fmt` keeps the comment line under `if x.nil? # c` at the body's
+  indentation.** It went to column 3 (column 6 under `while`), and under
+  `raise "x" if pwd.nil? # c` the next comment line went to column 13,
+  the column of `pwd`. `nil?` skipped the space after it as `.as (T)`
+  skips the one before its `(`, and so wrote the comment, and the lines
+  after it, inside the condition's indentation. A space before a comment
+  is left to the line now, as after `is_a?(T)`.
+  `spec/compiler/formatter/iyi_formatter_spec.cr` formats `if`, `while`
+  and a suffix `if`; the old formatter wrote `   # body`.
+
+- **`fmt` puts a call's or a def's arguments on their own lines after a
+  comment or a trailing space following its `(`.** `x = Planet.new( # c`
+  / `  1.5,` / `  2.5)` was written with `1.5,` at column 0;
+  `def initialize( # c` put its first parameter at column 0 and lined the
+  rest up under the `(`; `foo( # c` / `  a: 1,` put `a: 1,` at column 0;
+  and `f( ` with a trailing space, then `  1,` / `  2)`, became `f(1,` /
+  `  2)`. The formatter looked for the line break right after the `(` and
+  found the comment or the space instead. It looks past them now, and
+  each gets the layout the same call has without them.
+  `spec/compiler/formatter/iyi_formatter_spec.cr` formats six such calls
+  and defs; the old formatter wrote `1.5,` at column 0.
+
+- **`fmt` indents the comment lines under a header that ends in a comment
+  with the body.** After `class Box(T) # c`, `module Foo(T) # c`,
+  `def g : Int32 | Nil # c`, `def f(x : T) : Nil where T : Foo # c`,
+  `impl Show for Box(T) forall T # c`, `trait Num : Comparable # c`,
+  `x = [ # c` or `h = { # c`, the comment line below went to the
+  header's own column - column 0 at the top level, 2 instead of 4 inside
+  a class - and stayed there on every pass. The header's last part wrote
+  the comment, its line break and the lines after it before the body's
+  indentation was set; it leaves them to the body now, as
+  `def f : Int32 # c` and `struct Foo # c` always did. (A union ending a
+  line before a comment line and a def is now set apart from them as any
+  other type is.) `spec/compiler/formatter/iyi_formatter_spec.cr` formats
+  eleven such headers; the old formatter wrote `# doc` at column 0 under
+  `class Box(T) # c`.
+
+- **`fmt` formats a macro whose body starts with a blank line and then a
+  line at column 0.** `macro m` / (blank) / `{{ 1 }}` / `end` compiled,
+  and `fmt` answered "there's a bug formatting", exit 1: the parser's
+  line break after the header takes the blank lines, the formatter's
+  lexer hands them back as a piece of macro text, and the parser has no
+  node for it. A `{% %}` line or a comment at column 0 failed the same
+  way, so `fmt` could write a file it then refused. The blank lines are
+  written as they are now. `spec/compiler/formatter/iyi_formatter_spec.cr`
+  formats the three shapes; the old formatter raised "expecting
+  MACRO_EXPRESSION_START, not `MACRO_LITERAL`" on the first.
+
+- **`fmt` keeps an `asm` section under the first colon after a comment,
+  and settles on it in one pass.** A comment ending an operand section's
+  line was written with its line break, and the next `: ...` went to
+  column 1. A comment line between two sections went up to the end of the
+  line before it, with a blank line under it, and a second `fmt` moved the
+  next section to column 1: `fmt` and then `fmt --check` on such a file
+  answered "produced changes", exit 1. The comment stays after its
+  section, a comment line goes under the colons, and the sections stay
+  lined up. `spec/compiler/formatter/iyi_formatter_spec.cr` formats both
+  layouts, and now formats every case's output a second time; the old
+  formatter wrote the section after `"={rax}"(leaf) # c` as
+  ` : "{rax}"(1_u64))`, at column 1.
+
+- **A def a macro expands names the types its own file sees, so every
+  std module compiles beside `std/bool` again.** Code a macro expands is
+  located in a virtual file, and the import wall (SPEC.md R-1) read that
+  as no writer at all, so the climb out of a unit's namespace kept a
+  sibling unit the file never imported. `std/dir` writes `private def
+  self.remove_directory(...) : Bool` inside `{% if flag?(:win32) %}`, and
+  beside `std/bool` that `Bool` was `Std::Bool`. Once R-2c typed
+  `Dir.delete` and `Dir.delete?`, which call it, at their definitions, the
+  program `bench/std_exercise.sh` builds from every std module failed with
+  "method Std::Dir::Dir.remove_directory must return Std::Bool but it is
+  returning Bool" (2 errors); before R-2c a call to `Dir.delete?` beside
+  `std/bool` was refused the same way. The file that expanded the macro is
+  the writer now, as it already was for file-private types.
+  `bench/agent_loop.py` runs a `{% if %}` class method of a module
+  imported beside one named `kit/bool`; the old compiler answered
+  "expected argument #1 to 'Kit::Flag::Flag.on' to be Kit::Bool, not
+  Bool".
+
+- **A `--release` build returns what a helper the top level called once
+  built and dropped.** LLVM inlined the helper into `__iyi_main`, whose
+  frame lives as long as the program, and spilled its array to a slot of
+  that frame nothing wrote again, so the conservative stack scan kept it:
+  `make` filling an array with 4,000 arrays of 80 KB, called once, left
+  `live after 3 collections: 312 MB` under --release where a debug build
+  printed `0 MB`. A call the top level makes once now stays a call, at no
+  measured cost (three --release programs within run-to-run noise). One
+  inside a top-level loop or block is still inlined and can leave its last
+  pass's structure behind (156 MB after a two-pass loop of the same
+  helper), because keeping those out of line cost a loop of a small
+  function 2.6 times its time. `bench/root_exercise.sh` checks the once
+  case in a --release build; the old compiler answered `dropped: under 8 MB
+  marked after three collections (false)`.
+
+- **`GC.collect` no longer keeps a returned helper's data alive through a
+  stale word in the collector's own frames.** The collector's frames are
+  built over what earlier, deeper calls left on the stack, and a slot one
+  of them never wrote still held the helper's array: in
+  `bench/root_exercise.iyi` the collection after a helper built 32 MB and
+  returned still marked 33,566,736 bytes of it under --release, from a word
+  184 bytes under the caller's stack pointer. `collect` now zeroes 2 KiB of
+  dead stack under itself first, as Boehm's `GC_clear_a_few_frames` does. A
+  debug build's own `collect` frame is above that stretch and can still
+  hold such a word, so the check asserts in the --release build.
+  `bench/root_exercise.sh` runs it; the old prelude answered `dead helper:
+  33566736 bytes the helper built were still marked after it returned`.
+
+- **References, prepareRename and rename on a type's name say it is a
+  type instead of answering null.** `textDocument/references` and
+  `prepareRename` on `Square` answered null, which an editor and an
+  agent read as "nothing uses it". The typed graph they read binds a
+  call to its def and has no record of a type's uses in annotations and
+  declarations, so a list from it would be partial and a rename would
+  leave the rest behind; the request is refused (RequestFailed) with
+  "Square is a type, and references and rename follow defs, their calls
+  and local variables". `bench/lsp_session.py` step 72g asks; the old
+  server answered null.
+
+- **Completion works after any receiver, after `X::` and inside an
+  import's braces, and a macro is offered and found like a def.** The
+  receiver was the run of name characters before the dot, so `b.value.`,
+  `sq.side.`, `"x".` and `[1].` got nothing; `App::Shapes::` and
+  `import app/shapes::{Square, |` offered the scope's locals and the
+  keywords, none of which can go there; a `pub macro` was never offered,
+  and definition on a macro call answered null. The receiver is now the
+  expression before the dot, typed where it is written; `X::` lists the
+  types and constants inside `X`; an import's braces list what the
+  module exports and the line has not selected yet; a `pub macro` is
+  offered with its import edit as a `pub def` is; and definition on a
+  macro call goes to the macro. `bench/lsp_session.py` steps 72d, 72e
+  and 72f check each; the old server answered `[]`, the locals and the
+  keywords, and null.
+
+- **Moving a module's file rewrites the qualified names that spell
+  it.** `workspace/willRenameFiles` for `geo/b.iyi` to `geo/c.iyi`
+  rewrote the header and `import geo/b` and left `puts
+  Geo::B::Dog.new.name`, a name the moved module no longer has. Every
+  path that begins with the module's camelcase name (`Geo::B`,
+  `::Geo::B`) is rewritten to the new one as well, read off the parse,
+  so a string or a comment that says `Geo::B` is left alone.
+  `bench/lsp_session.py` step 72j moves a module and reads the importer
+  back; the old server answered `puts Geo::B.name`.
+
+- **Rename, references and implementation treat a trait's requirement
+  and every method that answers it as one method.** A rename on
+  `sq.area` rewrote the def in `impl Shape for Square` and every call and
+  left `abstract def area`, so the program it left said "impl Shape for
+  Square is missing a method required by the trait: area"; references
+  from the requirement answered the requirement alone, implementation
+  from it answered null, and hover on `Shape` in `impl Shape for Square`
+  answered null. The requirement, its default and the def of that name
+  and arity on every implementing type are adopted together now (not
+  the stub of the witness struct definition-site typing builds),
+  implementation from a trait's method answers each implementor's def,
+  and hover on a type's name answers its declaration and doc comment.
+  `bench/lsp_session.py` steps 72b, 72c and 72g rename through an impl
+  and compile the result, and ask implementation, references and hover;
+  the old server's rename left a program that does not compile.
+
+- **An open file's diagnostics follow the modules it imports when they
+  change on disk.** The server memoised a verdict on the buffers alone,
+  so a module an open buffer imports, renamed, deleted or written back by
+  another process, left every pull answering what the buffer last had:
+  with `name` renamed to `title` in `geo/b.iyi` the pull answered `[]`,
+  with the file deleted still `[]`, and with it written back "can't
+  find module 'geo/b'" until the buffer itself was edited; and
+  `workspace/didChangeWatchedFiles` was not handled at all. A verdict is
+  compiled again now when a file its compile read, or looked for and did
+  not find, has changed size or time; the proxy asks a client that can
+  be asked to watch `**/*.iyi`, `iyi.mod` and `iyi.sum`; and a watched
+  change republishes the open buffers whose imports moved.
+  `bench/lsp_session.py` steps 72a, 72h and 72i check the registration,
+  a pull after a rename, a delete and a restore, and the push after a
+  watched change; the old server registered nothing and answered `[]`,
+  `[]` and `[]`.
+
+- **Two impls answering one method on one type are refused, naming
+  both.** Two traits that require a method of the same name could both be
+  implemented for a type, and the second impl's method replaced the
+  first one's: `impl Named for User` and `impl Column for User` each
+  wrote `label`, and `greet(user)`, a call through `Named`, printed
+  `Hello, user_name`, Column's answer. Across modules too: two libraries
+  each implementing its own trait for `String` with a `tag`, each impl
+  legal under R-3, made the first library's `show` print `tx sees ty`;
+  and two impls of one parameterised trait, `Into(String)` and
+  `Into(Int32)` (the gap SPEC.md II.6 recorded), printed the second's 1.
+  Each is refused at the second impl's method now: "Y#name is what impl A
+  for Y answers (...), and impl B for Y writes it again ... rename one
+  trait's method, or implement one of them for a type that wraps Y".
+  `bench/verbs_exercise.sh` and `spec/compiler/semantic/iyi_spec.cr`
+  check them; the old compiler printed `from B` for a call through `A`.
+
+- **A reopen may not replace a method another module wrote.** Only the
+  prelude's methods were held to R-3's no-replacing rule, so two modules
+  each reopening `::String` with a `tag` of its own had the first one's
+  `via_x` print the second's `y`. The second is refused at the reopen
+  now: "String#tag is lib/x's method, and this replaces it (...) ... Give
+  it a name lib/x does not use"; a module still adds methods, and
+  replaces the ones it wrote. `bench/verbs_exercise.sh` and
+  `spec/compiler/iyi_import_spec.cr` check it; the old compiler printed
+  `y`.
+
+- **A trait requirement answered with other parameters is refused at
+  the impl, naming it, and `self` may be answered with the implementing
+  type.** Only the name was compared, so `def go(x : String)` for
+  `abstract def go(x : Int32)` was reported by the other library's
+  abstract-def pass as "abstract `def A#go(x : Int32)` must be
+  implemented by Y", at `struct Y` and naming no impl; and `impl
+  Comparable for X` with `def <=>(other : X)` was refused the same way,
+  "abstract `def Std::Traits::Comparable#<=>(other : self)` must be
+  implemented by X", because `self` was read as the trait. The impl
+  answers "impl A for Y does not answer A#go(x : Int32): Y#go(x : String)
+  takes other parameters, so a call through A has no method to run" now,
+  and `self` in a requirement is the implementing type, so the
+  Comparable impl compiles and `V.new(2) > V.new(1)` prints `true`.
+  `bench/verbs_exercise.sh` and `spec/compiler/semantic/iyi_spec.cr`
+  check both; the old compiler gave the two errors at the struct.
+
+- **An impl binds a splat generic with its splat, and the refusal of a
+  specialised impl names a spelling that compiles.** `impl Show for
+  Tuple(*T) forall T` answered "expected one of the type parameters
+  introduced by `forall` (T)", and `impl Show for Proc(Int32)` was told
+  "Write `impl Show for Proc(T) forall T`", which answered "wrong number
+  of type vars for Proc(*T, R) (given 1, expected 2)"; `Hash(String,
+  Int32)` was told `Hash(T) forall T` the same way. The refusal names
+  one parameter for each the generic declares now, the splat with its
+  `*` - `impl Show for Proc(*T, R) forall T, R`, `Hash(K, V) forall K,
+  V` - and that spelling binds: `{1, 2, 3}.show` prints `tup3`.
+  `bench/verbs_exercise.sh` and `spec/compiler/semantic/iyi_spec.cr`
+  check it; the old compiler refused `Tuple(*T)` and suggested
+  `Proc(T)`.
+
+- **An impl for a module that is not a trait is refused.** `impl Show
+  for M`, with `M` a plain module, was accepted, and every type that
+  wrote `include M` acquired the trait with no impl of its own for R-3 to
+  check: a `struct Y; include M` printed `via M` for `Y.new.show` and
+  `true` for `Y.new.is_a?(Show)`, and an `impl Show for Y` beside it
+  was accepted too, where a second impl of one trait is refused. It
+  answers "can't implement Show for M, it's a module. A trait is
+  implemented for a type, and a module is not one: every type that
+  includes M would get Show with no impl of its own for R-3 to check"
+  now, and SPEC.md II.8's table has the row. `bench/verbs_exercise.sh`
+  and `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler
+  checked the program clean.
+
+- **A program whose own threads hold every core no longer pays
+  seconds for its first collection.** The first collection starts the
+  mark helpers, and it waited for each to reach its park, which a new
+  thread does only once the scheduler gives it a core: beside 24
+  threads computing on twelve cores, 300,000 small allocations on the
+  main thread took 1.4 to 4.3 s, against 26 to 387 ms with no helpers.
+  Each helper is handed the generation it waits past when it is made,
+  so one that runs late joins the next mark as a helper woken late
+  does, and nothing waits for it to run: 53 to 125 ms, beside 30 to
+  112 with no helpers. `bench/concurrent_mark.sh` checks it on Windows,
+  the run with helpers held to four times the run without and 100 ms;
+  the old runtime took 2,334 ms against a bound of 184.
+
+- **Threads past the core count share the runtime lock, and are
+  stopped, without waiting out each other's timeslices.** The lock only
+  spun, so a holder preempted with it held every spinner up for a whole
+  timeslice: 64 threads of 20,000 small arrays each
+  (`r2_alloc_threads`) ran 1.8 to 20 s on twelve cores against 0.23 to
+  0.40 for twelve threads, and 48 threads taking the lock in turn took
+  30 to 35 times what one thread took for all of their turns. Every
+  128th turn of the spin gives the core away now (`SwitchToThread` on
+  Windows, `sched_yield` on Linux): 1.3 to 1.5 times, and the 64
+  threads 0.3 to 0.8 s. Windows' stop also waited for each suspend
+  before it asked for the next, and a thread with no core takes its
+  suspend only when the scheduler runs it: beside 48 threads computing
+  a stop took 85 to 275 ms. Every suspend is asked first now: 0 to 13
+  ms. `bench/thread_exercise.sh` step 4b checks both on Windows; the
+  old runtime answered "FAIL: lock: 48 threads taking the runtime lock
+  took 8043 ms, past 5 times the 243 ms one thread took for all their
+  turns", and with the suspends asked one at a time "FAIL: stop: five
+  collections stopped 48 threads that only compute in 307 ms each, past
+  60". darwin's spin is unchanged: its `yield_cpu` is the CPU's hint,
+  and a scheduler yield there is a libSystem name the floor does not
+  carry. [INFERENCE] Linux gains as Windows did; not run there.
+
+- **A proc or a task that captures a `case` branch's `it` sees it at that
+  branch's type, and the other `case`s in the scope keep theirs.** `it` was
+  one variable for the whole scope, and a variable a closure captures is
+  not narrowed: `in Int32 then ->{ it + 1 }` was refused with "expected
+  argument #1 to 'String#+' to be String, not Int32", `in Int32 then
+  g.spawn { total += it }` with "expected argument #1 to 'Int32#+' to be
+  Int32, not (Int32 | String)", and a later `case` that did `it + 1`
+  without capturing anything was refused the same way once an earlier one
+  had captured `it`. Each branch reads a variable of its own now, assigned
+  the narrowed value; `it` is still assigned too, so it outlives the
+  `case` as SPEC.md III.1.1 says. `bench/runtime_exercise.iyi` step 17
+  captures `it` in a task and in a proc and reads a later `case`'s; the
+  old compiler refused the step at its `g.spawn` line.
+
+- **A constant, an enum value and a macro shift by a negative count the
+  other way, as the line that computes the same expression does.** The
+  folder still answered 0 for a negative count (-1 for a negative value
+  shifted right) after the prelude's `<<` and `>>` learned to shift the
+  other way, so `C = 8 >> -1` and `{{ 8 >> -1 }}` were 0 where run time
+  answers 16, an enum's `64 >> -2` was 0 against 256, `C = 8 << -1` was 0
+  against 4, `-8 >> -1` was -1 against -16 and `{{ 255_u8 >> -1 }}` was 0
+  against 254. A negative count folds as a shift the other way now, past
+  the width included. `bench/number_exercise.iyi` checks a constant and an
+  enum value each way and a macro, and the row that pinned `8 << -1` at 0
+  says 4; the old compiler answered 0 there.
+
+- **`BigInt#divmod`, `//` and `%` divide long values in less than
+  quadratic time.** Every division was Knuth's long division, whose cost
+  is the product of the quotient's length and the divisor's, and the
+  recursive division `to_s` had been given was reached by `to_s` alone:
+  a value twice a 2,097,152-bit divisor took 4.9 s in a release build,
+  four times as long per doubling. A divisor past 65,536 bits with a
+  quotient past 16,384 now goes to the recursion, on the magnitudes,
+  with the truncating signs given after; that division takes 2.0 s, and
+  76 divisions either side of both thresholds in every sign agree with
+  Python's. `bench/std_big_exercise.iyi` checks `a == q * b + r`, the
+  remainder's size and its sign for every pair of signs either side of
+  both thresholds, and holds a 524,288-by-262,144-bit division under
+  four times its product; the old module took seven.
+
+- **`std/json` writes no object with a key twice.** The reader refuses
+  a duplicate key, and the builder wrote one: `JSON.build` with
+  `field("x", 1)` and `field("x", 2)` wrote `{"x":1,"x":2}`, and
+  `JSON.to_json({"a\xFF" => 1, "a\xFE" => 2})` wrote both keys as
+  `"a\uFFFD"`, since bytes that are not UTF-8 are written as U+FFFD -
+  `JSON.parse` refused both documents it had written. The builder keeps
+  the text of every key of each open object and refuses a repeat:
+  "the key \"x\" is written twice in one object", or for two keys
+  written as one text, "the keys ... and ... are both written as ...",
+  the sentence `to_json` already gave `nil` and `"null"`.
+  `bench/std_json_exercise.iyi` checks both and that one key in two
+  nested objects is no repeat; the old module answered "accepted".
+
+- **`std/xml`'s `add_child` moves a node, and refuses to put one under
+  itself.** The child stayed among its old parent's children as well,
+  so `b.add_child(x)` for an `x` under `a` wrote `<r><a><x/></a><b><x/>
+  </b></r>`, and an attribute set on `x` afterwards showed in both
+  places; and a node added under itself or one of its descendants made
+  a loop that `to_xml` followed until "stack overflow: the stack ran
+  out". The child is taken out of its old parent first now, as a DOM's
+  `appendChild` does, a loop is refused ("a node cannot be added under
+  itself or one of its own descendants"), and so is a document as a
+  child. The parser appends the nodes it has just made through a
+  method of its own, so reading a document asks nothing more of it.
+  `Node#==` is identity now: it compared ids, which a `Document` counts
+  apart from a `Node`, so the first `Document.new` was `==` the first
+  `Node.new_element`. `bench/std_xml_exercise.iyi` moves a node, edits
+  it and checks the written document, checks the loop's sentence, and
+  adds an element to a document that shares its id; the old module
+  wrote the moved node twice, and with ids compared the document and
+  the element were one node.
+
+- **`std/xml`'s `to_xml` refuses what its parser would refuse, and an
+  encoding cannot write markup into the declaration.** The serializer
+  checked a name only against XML 1.0's `Name`, which takes any colon,
+  and wrote `version` and `encoding` between quotes as they were. So
+  `Node.new_element("p:a")` with `p` declared nowhere was written
+  `<p:a/>`, `:x`, `a:` and `p:x:y` were written as names, `p:v` and
+  `q:v` with `p` and `q` bound to one uri were written side by side, a
+  `Document` with two root elements, none, or text beside the root was
+  written, and `Document.new(encoding: "x\" standalone=\"maybe")`
+  closed the declaration's quote and wrote an attribute of its own; a
+  version like `2` or an encoding like `ISO-8859-1` was written as well.
+  The module's own parser refused every one of those documents ("is
+  not declared", "is not a qualified name", "given twice", "a second
+  root element"). `to_xml` refuses each now with a sentence naming it,
+  as it already refused a name that is not an XML name; a prefix
+  declared by an `xmlns:` attribute set on the element or an ancestor
+  counts as declared. `bench/std_xml_exercise.iyi` asks `to_xml` of
+  eight such trees and checks each sentence; the old module wrote
+  `<p:a/>` ("wrote it").
+
+- **A class variable an `IyiThread` block names must be written only by
+  its initializer, and be Share (SPEC.md III.4.5).** The thread gate asked
+  about captured locals, `self` and constants, and a class variable is
+  none of them: a class method whose thread block and starter each ran
+  `@@count += 1` two million times compiled and printed 2548908 and
+  2461914 of 4000000, and fifty million times each, 70122760, 63226363
+  and 59290015 of 100000000. A class variable written after its
+  initializer - by the block, by any method the program calls, or
+  through `pointerof` - is refused by name now ("assigns `@@count`, a
+  class variable, so every thread that reaches it shares one mutable
+  cell"; "names the class variable `@@count`, which is written after its
+  initializer (in `bump`)"), and one only its initializer writes must be
+  Share, as a constant must; a thread-local one is every thread's own,
+  and is not asked. `bench/thread_exercise.sh` builds the three
+  refusals and reads an Int32, a String and a `List(String)` class
+  variable from a thread; the old compiler built all three refusals.
+
+- **On Windows a handle read on one thread reads on another.** Each
+  thread has its own completion port and a handle belongs to one, and
+  every operation associated the handle and ignored the refusal (error
+  87): a socket read on the main thread and handed to a worker kept its
+  completions on the main thread's port, and the worker's read, 3-second
+  deadline and all, waited until the process was killed. Each operation
+  now moves the handle to the running thread's port
+  (FileReplaceCompletionInformation, Windows 8.1); a handle on no port
+  refuses the move and is associated as before. The move clears the
+  skip-on-success mode, so the mode is set after it: without that, 50
+  reads that answered at once left 50 completions, and the next read
+  woke on one of them with a stale byte. The handoff reads `second`
+  after 154 ms now. `bench/concurrency_exercise.iyi` step 5d reads a
+  pipe on the main thread and then on a worker, fifty bytes that answer
+  at once and five that come 200 ms later; the old association failed it
+  with "a pipe read on the main thread and then on a worker hung there
+  for 5 s". A one-byte loopback ping-pong of 20,000 round trips took
+  648 ms, best of ten, against 610 ms before, on a machine busy enough
+  that the means were 703 and 798 ms.
+
+- **`select` has `when timeout(ms)`, and an arm nobody binds runs its
+  body only when its operation happened.** SPEC III.4.6 carries `select`
+  over from the other library, and its timeout arm was "undefined method
+  'timeout_select_action'" here. It is an arm now, in milliseconds as
+  `sleep` is: the select waits in the sleep heap at the deadline as well
+  as in its channels' queues. A value handed over in the turn the
+  deadline passed still wins; the first build of it queued such a select
+  twice, "a done fiber was scheduled", and the clock now skips a fiber
+  already woken. An unbound arm - `when out.send(1)` - ran its body when
+  the send answered `ChannelClosed` or `Cancelled` and nothing was sent;
+  a bound arm still sees that answer. `bench/concurrency_exercise.iyi`
+  step 16a checks the timeout, 600 sends racing a 1 ms deadline, and
+  both unbound cases, and `bench/concurrency_exercise.sh` fails on "a
+  done fiber was scheduled". The old compiler answered
+  `["closed", "cancelled"]` for the two unbound arms, and the old
+  runtime did not compile `timeout(50)`.
+
+- **A live `Channel` keeps no value it has handed out.** A buffered
+  channel's ring kept each value until a later send wrote over its
+  slot, and a rendezvous channel kept the last value parked through it
+  in the send node it saves for its next sender: 50 messages of 4 MB
+  through `Channel(String).new(50)`, every one received, kept 190 MiB,
+  and a 48 MB message through a rendezvous kept 238 MiB, for as long as
+  the channel lived. The slot and the node's box are cleared as the
+  value is read, and the same program keeps 3 MiB and 0 MiB.
+  `bench/concurrency_exercise.iyi` step 16e passes 64 MB each way
+  against a 16 MiB bound; the runtime without the clearing failed it
+  with "64 MB received through a buffered channel left 61 MiB kept",
+  and with only the ring cleared "64 MB received through a rendezvous
+  left 61 MiB kept".
+
+- **On Windows the collector sizes its mark helpers by the cores the
+  process may run on.** `IyiThread.core_count` answered the machine's
+  count whatever the process's affinity mask, which the Linux arm
+  counts: under `start /affinity 1` or `/affinity 3` on twelve cores it
+  answered 12, so a mark started 11 helpers, and eight threads
+  allocating on one core took 3,077 ms where they took 178 with no
+  helper. It counts the mask's bits now, and takes the machine's count
+  only for a process across processor groups, which has no one mask:
+  1, 2 and 4 under `/affinity 1`, `3` and `F00`.
+  `bench/thread_exercise.sh` step 3b runs under masks 1 and 3; the old
+  runtime answered `core_count=12 default_helpers=11` for both.
+
+- **On Windows a thread is named on its line before any collection can
+  stop it.** `IyiThread.start` linked the new thread's line for the
+  stops under the runtime lock and the thread ran at once, while its
+  handle reached the line only after the lock was released: a stop in
+  between suspended NULL, read sp 0 and scanned the running thread's
+  stack from address 0. 37 runs and about 700,000 starts never landed
+  there, but with that window held open 2 ms five runs in five died of
+  a memory fault within 0.8 s. The thread is created suspended now, its
+  handle written under the lock, and resumed after; with the same 2 ms
+  there every run ends well. `bench/thread_exercise.sh` step 7b holds
+  every start open 2 ms while two threads collect, and its failure
+  proof puts the old order back: "iyi: the program died of a memory
+  fault" in the first run.
+
+- **A thread lets go of its block once it runs, and `join` unmaps its
+  line.** Every thread object ever started stayed on the list that
+  roots a body until its thread runs it, so nothing its block captured
+  was ever collected: 2,000 threads, each joined, each block capturing
+  64 KiB, kept 156 MiB through a collection, and each thread's line kept
+  a mapping of its own. A thread takes itself off that list under the
+  runtime lock before its body runs now, and its join unmaps the line:
+  the same 2,000 threads keep 0 MiB. `bench/thread_exercise.iyi` step 1c
+  holds 256 of them under 4 MiB and asks Windows whether a joined
+  thread's line is still mapped; the old runtime kept 20 MiB more.
+
+- **A second `join` of a thread returns at once.** On Windows it waited
+  on, and closed, the thread's handle again, whatever handle had that
+  value by then: with a thread started after the first join and
+  sleeping 2 s, the second join took 2,000 ms, waiting on the newer
+  thread, and then closed that thread's handle. A joined thread answers
+  at once now. `bench/thread_exercise.iyi` step 1c joins twenty
+  finished threads twice, each beside a newer thread that waits for the
+  second join to return; the old runtime's second join waited on the
+  newer thread until it gave up at 20 s.
+
+- **`GC.collect` after a bare `import std/gc` is told to import `GC` by
+  name.** The bare import keeps the module's names qualified (SPEC.md
+  R-2b), so `GC` was the prelude's own, and the error said "iyi's
+  prelude has no `collect` on GC:Module: it is small by rule ... `iyi
+  build --crystal` gives a program Crystal's library instead", where
+  every other bare import gets the R-2b hint. When a loaded module
+  exports a type of the receiver's name that has the method, the error
+  says so now: "`GC` here is the prelude's, and `std/gc` exports a `GC`
+  that has `collect` ... Import it by name, `import std/gc::{GC}`".
+  `bench/std_gc_exercise.sh` checks it; the old compiler gave the
+  size-rule note.
+
+- **A package import with no requirement suggests the repository's
+  `require` line.** `import example.test/user/liba` without an `iyi.mod`
+  said to write `require example.test/user v1.2.3`: the last segment was
+  always dropped, so a package's root module was sent to the
+  organisation. The message names the whole path first, `require
+  example.test/user/liba v1.2.3`, then the packages it could be inside
+  (`example.test/user`), longest first as `iyi mod tidy` tries them.
+  `bench/packages_resolve.sh` checks the line; the old compiler named
+  `example.test/user`.
+
+- **`impl Enumerable for Nums` without the import names the import.** The
+  compiler itself declares `Enumerable` and `Indexable`, so in an `.iyi`
+  file without `import std/enumerable` the name found that module and the
+  refusal said "can't implement Enumerable(T), it's a generic module.
+  Only a trait can be implemented", where `impl Comparable` is told
+  "`Comparable` comes with `import std/traits::{Comparable}`". The
+  refusal adds "`Enumerable` comes with `import
+  std/enumerable::{Enumerable}`" now. `bench/agent_loop.py` and
+  `spec/compiler/semantic/iyi_spec.cr` check it; the old compiler gave
+  the generic-module sentence alone.
+
+- **A float method `std/float` has names `import std/float`.** `-x` on a
+  `Float64` said "wrong number of arguments for 'Float64#-' (given 0,
+  expected 1)" and listed the binary overloads, and `1.5_f32.to_f64`
+  said the prelude is small by rule and pointed at `iyi build --crystal`;
+  `std/float` declares both. The hint `std/int` gives the integers now
+  covers the floats: "`-` with no arguments on Float64 is in
+  `std/float`, ...: `import std/float`." and "`to_f64` on Float32 is in
+  `std/float`", which is also what `sprintf("%f", 1.5_f32)` without the
+  import is told now, from inside `std/format`. A program that already
+  loads the module is not told to import it. `bench/std_float_exercise.sh`
+  checks both; the old compiler named no import.
+
+- **A method missing on a nilable receiver no longer ends with the
+  prelude's size rule.** `x + 1` with `x : Int32 | Nil` said, under "x
+  can be nil here: narrow it first", "iyi's prelude has no `+` on Nil: it
+  is small by rule ... `iyi build --crystal` gives a program Crystal's
+  library instead", and the other library's `Nil` has no `+` either. The
+  note is left off for `Nil`; the narrowing is the answer.
+  `spec/compiler/semantic/iyi_spec.cr` and `bench/agent_loop.py` check
+  it; the old compiler printed the note.
+
+- **A nilable argument to a trait parameter is told to narrow the nil, not
+  to write an impl for the union.** `f(v)` with `v : Int32 | Nil` and
+  `f(x : Show)` said "Write `impl Show for (Int32 | Nil)` in the module
+  that declares `Show` or in the one that declares `(Int32 | Nil)`", and
+  writing that is refused: "can't implement a trait for (Int32 | Nil),
+  it's a union" (SPEC.md II.1). The advice names the members that lack
+  the impl now: "a union implements a trait when every member does, and
+  `Nil` does not (SPEC.md II.1). v can be nil here: narrow it first (`if
+  v`) or give the nil an answer (`v || default`)", and for other members
+  one `impl Show for Char` per member. `spec/compiler/semantic/iyi_spec.cr`
+  and `bench/agent_loop.py` check it; the old compiler advised the union
+  impl.
+
+- **`def group` is refused in an iyi file, as `def or` is.** III.4.9
+  makes `group` a reserved name: a bare `group do ... end` is the task
+  group wherever it is written. A class's own `def group(& : Spawner
+  -> Int32)` compiled, and a call to it in the class, `group do |p|
+  p.spawn { 41 } end`, was lowered as a group and refused with
+  "undefined method 'join' for Spawner". `def group` and `def
+  self.group` outside the prelude are refused now: "`group` is a
+  reserved name in iyi ... (SPEC.md III.4.9)". std/socket's
+  `IPv6Address#group(index)`, the one other, is `hextet(index)`.
+  `spec/compiler/parser/parser_spec.cr` and `bench/verbs_exercise.sh`
+  hold it; the old compiler accepted the def.
+
+- **A `!` with a space before it no longer propagates.** III.1.2
+  makes the operator attached-only, and `v = g(-1) !` in a def
+  returning `Int32 | IOErr` compiled and returned `IOErr`: the call's
+  argument list swallows the space after its `)`, so the `!` looked
+  attached; after `(w) !` or `w.itself !` the same `!` negated the
+  next line instead. A detached `!` with nothing after it on its line
+  is refused now, naming the attached form: "a `!` with a space before
+  it doesn't propagate: write it attached, `g(-1)!`". `f !x` still
+  means `f(!x)`. `spec/compiler/parser/parser_spec.cr` and
+  `bench/verbs_exercise.sh` hold it; the old compiler accepted the
+  program.
+
+- **A derive may no longer write a macro hook or call `run`.** II.4
+  forbids a derive the whole-program questions, and only
+  `subclasses`, `all_subclasses` and `includers` were refused: a
+  derive whose body was `macro finished` holding an escaped `{{
+  Base.all_subclasses ... }}` printed `A,B` beside a `B` declared
+  below the derived struct, a derive's `macro finished` defined a
+  method that ran (`late`), and `{{ run("./gen.cr") }}` in a derive
+  ran the script and the method answered `"generated"`. A hook
+  (`finished`, `inherited`, `included`, `extended`, `method_added`)
+  written while a derive expands is refused with "`macro finished` is
+  not available to a derive: a hook runs after the derive, against the
+  whole program", and `run` with "it runs another program".
+  `spec/compiler/iyi_derive_spec.cr` and `bench/verbs_exercise.sh`
+  hold both; the old compiler printed `A,B` and `"generated"`, exit 0.
+
+- **A struct changed through a getter or a `self`-returning method of a
+  module's type changes the original in every build mode.** From source
+  the call is inlined and answers the field itself; the build writing the
+  artifact called it so the module had a symbol, and the consumer had
+  only a header to call, so each answered a copy: `h.counter.bump` then
+  `h.counter.n` printed 1 under `--emit-iyimod`, `--release
+  --emit-iyimod` and `--use-iyimod`, 2 from source, and `c.me.bump` the
+  same. The writing build inlines such a body and still emits the symbol,
+  and the body travels in the artifact (`IyiMod.answer_travels?`), so the
+  consumer inlines it too. `bench/samples_roundtrip.sh` checks both
+  through each mode, `--release` included; the old compiler answered 1.
+
+- **`protected` travels in a module's artifact, and `mod dump` writes a
+  method's visibility.** From source `Box.new(4).secret` is `protected
+  method 'secret' called for App::Vis::Box`; through the artifact the
+  call typed and the link ended on an unresolved `Box#secret` symbol,
+  because a signature carried `private` and nothing else. `mod dump`
+  printed `def secret : Int32` and `def hidden : Int32` for a `protected
+  def` and a `private def`. Both visibilities are carried and written now
+  - in the dump, the declarations a consumer compiles and the surface -
+  and the artifact build refuses the call as the source build does.
+  `bench/verbs_exercise.sh` checks it; the old compiler went on to the
+  link.
+
+- **An unmarked macro is the module's own through its artifact too.**
+  From source `App::Lib.inner` is refused with `App::Lib does not export
+  'inner'`; built with `--use-iyimod` and the source gone it compiled and
+  printed 1, and `mod dump --declarations` wrote the macro `pub macro
+  inner`: the declarations marked every carried macro exported, a rule
+  meant for a shard's, which arrive unmarked. An iyi module's macros are
+  now written as the module wrote them, and the artifact build gives the
+  source build's refusal. `bench/verbs_exercise.sh` checks it; the old
+  compiler built the program.
+
+- **A setter that writes no return type works through its module's
+  artifact.** R-2 lets `def n=(v : Int32)` go without one, and the
+  artifact carried it as a header with none, so a consumer built with
+  `--use-iyimod` typed `b.n = 5` as `Nil` and the link ended on
+  `unresolved external symbol ...Box.23.n.3D..3C.Int32.3E..3A.Nil` where
+  the module had emitted `...:Int32`; from source the program printed 5.
+  A setter's answer is the argument's type at each call, which no header
+  can say, so its body now travels and the consumer compiles it, as it
+  does a block-taking def's. `bench/verbs_exercise.sh` checks it; the old
+  compiler failed that link.
+
+- **`iyi mod release` sees every name a consumer writes, and rates a new
+  trait requirement and a defaulted parameter right.** Deleting `pub
+  LIMIT = 10`, a `pub class Inner` nested in an exported class (or making
+  it `private`), a type's `macro def_twice`, an enum member, or retargeting
+  `pub alias Pair` was `compared with v1.0.0: 1 module, 0 things gone, 0
+  new` and `the next release is v1.0.1: the surface is as it was`, and a
+  consumer of v1.0.0 stopped on `undefined constant Kit::LIMIT` and the
+  like. `abstract def perimeter : Int32` added to a `pub trait` was `v1.1.0
+  holds what changed`, though every `impl` of the trait broke; `by : Int32
+  = 2` appended to `pub def scale` was `gone  shapes: def scale(x : Int32)
+  : Int32` and a new major at a `/v2` path, though every call still built.
+  The surface now carries constants (by name: a value moved breaks no one
+  who names it, and the type is not in the artifact), enum members, what
+  an alias names, a type's macros and every nested type not `private`; a
+  requirement new on a type that was there is a break (`new ... - a
+  requirement, which every impl of it has to add`), and a def that only
+  gained defaulted parameters is `grown`, a minor. `bench/packages_get.sh`
+  checks all eight and a constant's value moved (a patch); the old
+  compiler answered v1.0.1 for the deleted constant.
+
+- **`iyi doc` and `iyi mod context` list a type's macros, and a macro's
+  doc comment.** `iyi doc std/eiy` printed `pub struct Eiy` with its
+  methods and none of `macro embed(filename, io_name)`, `macro
+  render(filename)` and `macro def_to_s(filename)`, which are how the
+  module is used; `iyi doc std/static_array` had no `macro [](*args)`,
+  which was not in the artifact at all (it is written on a reopened
+  `::StaticArray`); `mod context --json` carried no macro; and `iyi doc
+  std/derives` printed `pub macro described(declaration)` without the two
+  lines above it saying what it does. A macro now travels with its doc
+  comment, the hashes taken without it so a doc edit moves neither, and
+  the surface writes each macro's line under its doc: a type's after its
+  methods, a reopened type's too. `bench/mod_context.sh` checks it; the
+  old compiler answered `the surface left out a macro or its doc` for
+  all ten lines and docs it asks for.
+
+- **A float converts to an integer by truncating first, under every
+  name.** The prelude's five (`to_i`, `to_i32`, `to_i64`, `to_u8`,
+  `to_u64`) checked the untruncated value while std/int's and std/float's
+  truncate first, so one rule had two answers: `255.5.to_u8` and
+  `(-0.5).to_u8` panicked "arithmetic overflow" where `255.5.to_u16` was
+  255 and `(-0.5).to_u16` 0, and `2147483647.9.to_i` panicked. What is
+  refused now is a truncation the type does not hold, NaN and the
+  infinities: those three answer 255, 0 and 2147483647, and `256.0.to_u8`,
+  `(-1.0).to_u8` and `2147483648.0.to_i` panic. This reverses the pin on
+  `2147483647.9.to_i`, which matched the other library; under `--crystal`
+  its own rule still holds. `bench/number_exercise.iyi` and `.sh` check
+  the edges both sides; the old compiler panicked at `255.5.to_u8`.
+
+- **On Windows a module that uses `defer` or `group` links from its
+  artifact into any program.** Its catch pad names the `void*` type
+  descriptor, which the main module defined only when the program's own
+  code first raised, rescued or deferred, so a consumer with none of its
+  own ended on `LNK2001: unresolved external symbol "void * `RTTI Type
+  Descriptor'" (??_R0PEAX@8)` for a module whose one def was `defer log
+  << "lib-defer"`. The descriptor and the throw info are defined whenever
+  an artifact's object code links in. `bench/samples_roundtrip.sh` and
+  `spec/compiler/iyimod_spec.cr` consume a `defer` and a `group` from an
+  artifact; the old compiler failed the link.
+
+- **A `--release` program links the object code of the artifacts it
+  reads.** A single-module build made private everything its main module
+  defines - runtime `fun`s, type ids, `:headed` bytes, constants, class
+  variables - and an artifact's object code reaches them by name, so
+  `--release --use-iyimod` linked only a module that reached none of
+  them, as the spec's `x // 2` does: a module whose one def was `x + 1`
+  ended on `LNK2019: unresolved external symbol __iyi_raise_overflow`, a
+  class on `Holder:type_id` and `:headed`, a `group` on 126 symbols. They
+  keep the linkage a build of many modules gives them whenever an
+  artifact's object code links in, and the release consumer prints what
+  the source build prints. `bench/samples_roundtrip.sh` builds a module
+  with each of these `--release` both ways, and
+  `spec/compiler/iyimod_spec.cr`'s release case gained them; the old
+  compiler failed both links.
+
+- **A `Server.serve` block that panics ends its own connection, not the
+  server.** The connection's task belonged to `serve`'s group and nobody
+  read its answer, so the panic cancelled the other connections - a
+  kept-alive client's next request found its connection gone ("cannot
+  read from socket: the connection was aborted") - and `serve` panicked
+  "a task panicked: handler failed" when its listener closed. Each
+  connection runs in a group of its own whose answer is read, as Go's
+  server recovers a handler: the panic is printed where it happened, that
+  connection closes, and the others are served. `bench/std_http_exercise.iyi`
+  panics a block between two requests on another kept connection; the old
+  module closed that one too and panicked "a task panicked".
+
+- **`group_by`, `tally`, `tally_by`, `index_by` and `to_h` take an array,
+  nil or a symbol as a key.** Each asks `Hashable` of its key, and
+  `std/traits` implemented it for the scalars alone: `tally` of a list of
+  arrays was refused with "Array(Int32) does not implement
+  Std::Traits::Hashable, required by `where Elem : Std::Traits::Hashable`
+  in `tally`", and a list of nilable numbers and an `index_by` answering
+  symbols were refused the same way, where the table each builds takes
+  them. `Array`, `Nil` and `Symbol` implement it now, by the `hash` each
+  already had. A tuple key is still refused: its impl does not survive
+  the module's artifact yet. `bench/std_exercise.iyi` counts and groups by
+  all three; the old module did not compile them.
+
+- **`iyi migrate` of one file below the source root writes its sidecar
+  beside the module.** The sidecar of a reopening (`struct Int32`) was
+  put under the file's directory and the module path's own directory
+  again: `iyi migrate src/shop/counter.cr` wrote `src/shop/counter.iyi`
+  and `src/shop/shop/counter_crystal.cr`, and the next command it
+  printed, `iyi check --crystal src/shop/counter.iyi`, answered `can't
+  find file './counter_crystal.cr'`. Module and sidecar are placed by
+  one rule now, and the check is clean. `bench/migrate_gate.sh` migrates
+  such a file and checks it; the old verb wrote
+  `src/sub/sub/counter_crystal.cr`.
+
+- **`iyi lsp`, `iyi bind` and `iyi migrate` refuse a flag they do not
+  have, by name.** `iyi lsp --bogus extra` served a session as if it
+  were `iyi lsp`, `iyi bind --bogus` was a shard named `--bogus` and
+  answered `bind: no lib/ here; run shards install first`, and `iyi
+  migrate --bogus` was a tree, `migrate: no such directory: --bogus`.
+  Each says `<verb>: unknown flag --bogus` now, as `test`, `init` and
+  `get` do; `lsp` refuses an argument too, and still takes `--stdio`,
+  which LSP's own guidance has a client pass. A flag after `bind`'s shard
+  names is refused rather than bound. `bench/verbs_exercise.sh` checks
+  each; the old verbs answered as above, and `lsp` exited 0.
+
+- **`iyi doc` names a module it cannot find, and refuses what it was
+  not asked to read.** A module path that resolved nowhere was told what
+  it already was: `iyi doc std/sett` answered `expected a module path
+  (`iyi doc app/greeter`), a .iyi file, a .iyimod artifact, or a type of
+  the prelude`. It answers `can't find module 'std/sett'`, the file that
+  name means and every directory it was looked for under. `iyi doc
+  std/set extra junk` printed std/set's surface at exit 0 and dropped the
+  rest; a second argument is refused by name now (`doc reads one module,
+  file or type at a time, and 'extra' is a second`), and so is a flag
+  `doc` does not have. And a module path reaches the workspace's `mods`
+  after the sources, as the other verbs do: with only
+  `mods/docs/docd.iyimod` beside it, `iyi doc docs/docd` answered
+  `expected a module path`, and it prints the artifact's surface now, the
+  one the source gave. `bench/packages_resolve.sh` checks all three; the
+  old verb answered `expected a module path` twice and printed the
+  surface with the extra arguments dropped.
+
+- **`iyi doc IO` names what `IO` is an alias of, and prints what it
+  can do.** An alias had no branch of its own: stdout was `alias IO` and
+  `end`, exit 0, with neither `IyiIO` nor one method. It prints `alias IO
+  = IyiIO`, then IyiIO's surface (`close`, `flush`, `gets`, `puts` ...).
+  `bench/packages_resolve.sh` checks the line and `flush`; the old verb
+  printed `alias IO` and `end`.
+
+- **`iyi doc` prints a generic prelude type's parameters once.** The
+  type's own name already carries them, and a second list followed:
+  `class Array(T)(T)`, `class Hash(K, V)(K, V)`, `tuple Tuple(*T)(T) <
+  Value`, `function Proc(*T, R)(T, R) < Value`. The header reads as the
+  declaration does now, `class Array(T)` and `tuple Tuple(*T) < Value`.
+  `bench/packages_resolve.sh` checks Array's and Tuple's headers; the old
+  verb printed `class Array(T)(T)`.
+
+- **`init` refuses a name whose root module would be a type of the
+  prelude, and names the type.** The root module is the name's camelcase,
+  a top-level type like every type of the prelude, and only the grammar
+  was asked: `iyi init class` wrote `class.iyi`, exit 0, whose first run
+  was `Error: Class is not a module, it's a metaclass`, and `string`,
+  `set`, `file`, `int`, `nil` and twenty more wrote projects that did not
+  build either. `init` asks the prelude now and refuses before writing
+  anything: `init: class names its root module `class`, which is the type
+  Class, and Class is already the prelude's metaclass`. `io`, `time`,
+  `json` and `kemal` are written as before. `bench/init_project.sh` inits
+  `example.com/me/string` and `class`; the old verb wrote both.
+
+- **R-2c types a script's top-level defs, class methods, and defs whose
+  parameters have a default, an external name, a splat, a named-only
+  place or an abstract class's type.** Each was left to its callers, so
+  a wrong body nothing called compiled. A header-less script holding
+  `def g(x : Int32) : String` with `x` for a body passed `check` with no
+  output, exit 0, where the same def below a `module` header was refused:
+  the program is a module to the compiler, and was taken for a mixin.
+  `def self.make : Int32` answering `"not an int"` compiled and the
+  program printed `1`; `def b(x : Int32 = 1)`, `def c(to x : Int32)`,
+  `def d(*xs : Int32)`, `def e(x : Int32, *, y : Int32)` and `def a(x :
+  Animal)` with `Animal` abstract, each answering a String for an Int32,
+  printed `compiled`. Each is typed at its definition now: a class method
+  on its class, an abstract class's methods and parameters through its
+  virtual type, as a caller's value arrives, a default's place and a
+  named-only parameter with a value, a splat with one element. SPEC.md's
+  R-2c row lists what stays out of reach (generic types, `forall` and
+  double-splat defs, defs a macro writes). `bench/agent_loop.py` checks a
+  script and the six shapes, each reported at its own line; the old
+  compiler's `check` exited 0 on both. The wider rule found one body in
+  the library that did not type for its own signature: `Process.run`
+  copied an `env` declared as three hash types with one `each` block,
+  which answers "type must be Nil, not (String | Nil)" for an `env` of
+  that union; it copies by key now.
+
+- **The refusal of a local an `IyiThread` block shares with its starter
+  advises `Atomic` alone.** Both forms ended "keep the value in an
+  `Atomic` or behind a `Mutex`", and iyi has no `Mutex`: `m = Mutex.new`
+  is "undefined constant Mutex". The advice names `Atomic` only now.
+  `bench/thread_exercise.sh` step 6b checks both refusals for it; the old
+  compiler named a `Mutex`.
+
+- **An `IyiThread` block that calls a method of `self` without a
+  receiver captures `self`, which must be Share.** `self` was asked only
+  when the block read an instance variable: in a Counter method, a block
+  calling `bump` (which does `@n += 1`) twenty million times beside its
+  starter's twenty million compiled and counted 28936626 of 40000000,
+  while `@n += 1` written in the block was refused. A receiverless call
+  to a method that takes `self` is the capture now, inside an inner proc
+  too, and the program is refused with "captures `self : Counter`, which
+  is not Share: Counter's field @n is assigned in `bump`"; a Share
+  self's method and a class method called the same way still build and
+  run. `bench/thread_exercise.sh` step 6 builds both; the old compiler
+  built the racing one.
+
+- **A constant an `IyiThread` block names must be Share, as a captured
+  variable must (SPEC.md III.4.5).** The thread gate asked only the
+  variables the block closed over and `self`, and a constant is neither,
+  so a block reading only constants was not even a closure: `COUNTS =
+  [0]` with `COUNTS[0] += 1` run a million times by a thread and a
+  million by its starter compiled and printed 1061337, and `C2 =
+  Counter.new` bumped the same way printed 1404865. Each constant the
+  block, its inner blocks and its procs name is asked now, and the
+  program is refused with "names the constant `COUNTS : Array(Int32)`,
+  which is not Share"; an integer, a String or a `List` constant is read
+  as before. A constant that a method the block calls reads is reached
+  through the call and is still not checked. `bench/thread_exercise.sh`
+  step 6d builds both and the legal form; the old compiler built both.
+
+- **A field a method takes the address of with `pointerof` makes its
+  type not Share.** The scan for a field assigned outside `initialize`
+  saw assignments and setters only, so `def poke; pointerof(@n).value +=
+  1` read as no write: a Counter captured by an `IyiThread` block
+  compiled, and two threads poking it 100 million times each counted
+  122761325 of 200000000. A field whose address a method other than
+  `initialize` takes is mutable now, and the capture is refused with
+  "Counter's field @n is given out by `pointerof` in `poke`".
+  `bench/thread_exercise.sh` step 6 builds it and
+  `spec/compiler/semantic/iyi_spec.cr` holds the shape; the old compiler
+  built it.
+
+- **A line `puts` writes to `STDOUT` or `STDERR` comes out whole when
+  several threads print at once.** Both are sync, and `write_line` wrote
+  the text and then its newline as two writes, so another thread's line
+  could land between them: four `IyiThread`s of 20,000 `puts` each left 750
+  of 80,000 lines merged into a file and 717 into a pipe. A sync stream now
+  writes the text and its newline in one write; a buffered one is
+  unchanged. `bench/thread_exercise.sh` checks it; the old prelude left
+  3,510 of 80,000 lines broken there.
+
+- **A panic a `std` module raises prints no site when the module comes
+  from its artifact, as it prints none built from source.** `raise` knew a
+  library file by `src/std/` and `src/iyi/` alone, so `Deque(Int32).new.pop`
+  built with `--use-iyimod mods` printed `at mods\std\deque.iyimod:297`
+  under the panic, a line in the library that is not where the bug is, and
+  the two builds of one program disagreed. A `.iyimod` path under a `std`
+  directory is a library site now. `bench/std_exercise.sh` checks it; the
+  old prelude printed that line.
+
+- **A struct with no `==` of its own equals another of its type whose
+  fields are equal, as the other library's `Struct#==` has it.** `Object#==`
+  answers false, so a struct was not even equal to itself: for `b =
+  Bar.new(1)`, `b == b` and `[b].includes?(b)` were false and `{b =>
+  "found"}[b]?` was nil. `Struct#==` now compares each instance variable
+  with its own `==`; a struct of another type is still unequal. Hashing
+  stays `Object#hash`, every value of the type in one slot, correct and
+  slow. `bench/value_exercise.sh` checks it; the old prelude failed at
+  "struct: equal to itself and to its copy".
+
+- **`arr.sort_in_place` with no block sorts the array in place by `<`.**
+  SPEC.md III.1.7a pairs it with `sorted` and the compiler's hint for
+  `sort!` names both, but only `sorted` had the blockless form: the call was
+  refused with "'Array(Int32)#sort_in_place' is expected to be invoked with
+  a block". It now sorts the receiver, stable, and answers it.
+  `bench/collections_exercise.sh` checks it; the old prelude refused the
+  check at compile time.
+
+- **`strip`, `lstrip`, `rstrip` and `blank?` take the whitespace the other
+  library's `Char#whitespace?` names, above ASCII too.** All four read bytes
+  and knew ASCII alone: `"b\u00A0".strip` kept its 3 bytes, `"\u3000".blank?`
+  was false and `'\u00A0'.whitespace?` false, so an INI value or key read
+  with a no-break or ideographic space kept it. `Char#whitespace?` now
+  answers the space and `\t` to `\r`, and above ASCII Unicode's Zs, Zl and
+  Zp (not U+0085, a control, as there), and the four decode characters at
+  either end, so a stray byte or the A0 that ends `à` is never taken for a
+  space. `Char#to_s` and `String::Builder#<<` share one encoder,
+  `Char#each_byte`, with `Char#bytesize` moved into the prelude from
+  `std/text`. `bench/std_text_exercise.sh` checks it; the old prelude
+  answered `"b\u00A0".strip.bytesize` 3 and failed at "prelude: strip
+  unicode whitespace".
+
+- **A `.iyimod` written by a `--no-codegen` build is refused by name
+  where a build links against it.** It carries declarations and no
+  object code, and nothing in the file said so: `iyi run --use-iyimod
+  mods main.iyi` against one ended in 19 `LNK2019: unresolved external
+  symbol` lines and `LNK1120`, exit 1120, naming the artifact nowhere.
+  The header records it now - `.iyimod` is v55, so a v54 artifact is
+  refused and rebuilt - `mod dump` says "written by a --no-codegen
+  build", and a build that links answers "mods\kit\api.iyimod holds
+  declarations only: the build that wrote it was given --no-codegen
+  ... Rebuild it without --no-codegen, or pass --no-codegen here to
+  typecheck against it"; a front-end build still reads it.
+  `bench/verbs_exercise.sh` links against one and typechecks against
+  it; the old compiler went to the linker.
+
+- **`test --affected` and `check --affected` run everything when a
+  changed file is one no import can name.** The selection knows parsed
+  imports alone, so a template a test renders, a fixture it reads, and
+  the prelude every test compiles were in no closure: after an edit to
+  `page.eiy`, `iyi test --affected page.eiy` answered "0 to run, 1
+  skipped: no test's imports reach the change" while the test rendering
+  it failed under a plain `iyi test`; `check --affected page.eiy` on a
+  template that no longer parsed said "0 consumer(s) checked, all
+  compile", exit 0; and `--affected src/iyi/prelude.iyi` skipped every
+  test. A changed file that is not a `.iyi`, or that sits under the
+  prelude's directory, turns the discount off now and says why, as
+  `iyi.mod` and a deleted file already did (`affected_not_imported`
+  under `--json`). `bench/test_verb.sh` changes a template and the
+  prelude, and breaks the template under `check --affected`; the old
+  compiler answered "0 to run, 4 skipped".
+
+- **A module in a subdirectory resolves its packages through the
+  manifest at the root its header names, under every verb.** The
+  manifest was read beside the file each verb was given, so in a project
+  whose `iyi.mod` sits above `greet/`, `iyi run main.iyi` printed
+  `greeter says liba 1.0.0` while `iyi check greet/greeter.iyi` answered
+  "no requirement covers 'example.test/user/liba'", `iyi test` said the
+  test beside the module "does not build", `check --affected
+  greet/greeter.iyi` said "3 consumer(s) checked, 2 broke", `mod
+  context` said the import "does not resolve", and the language server
+  put the refusal on the import line. A build, `check`, `test`, `check
+  --affected`, `mod context` and the server read `iyi.mod` and `mods` at
+  the root the entry's `module` header names now, or beside the entry
+  when it names none (`Compiler.entry_root_of`). `bench/packages_get.sh`
+  checks such a module, runs its test, checks its ripple and asks `mod
+  context` about it, and `bench/lsp_session.py` opens it; the old
+  compiler refused each, as above.
+
+- **`chr` takes every code point in every integer width.** The
+  prelude's `Int32#chr` reads every code point but the surrogates, and
+  `std/int`'s `chr`, which says it keeps that contract for the rest of
+  the tower, still stopped at ASCII: `233.chr` was 'é' while
+  `233_i64.chr`, `233_u8.chr` and `0x263A_u32.chr` panicked "233 is out
+  of char range". Every width answers the character now, and refuses a
+  surrogate or a value past 0x10FFFF as `Int32#chr` does.
+  `bench/std_int_exercise.iyi` reads code points past ASCII in five
+  widths; the old module panicked "233 is out of char range".
+
+- **`_ = g.spawn { }` in a typed group takes no tuple slot.** III.4.9
+  names `_ =` as the explicit discard, and the expansion gave it a slot
+  like any spawn: `_ = g.spawn { read(a) }` beside
+  `g.spawn { read(a + 1) }` answered `{30, 40}`, typed
+  `Tuple(Int32, Int32)`. It answers `{40}`, `Tuple(Int32)`, now, and a
+  group whose spawns are all discarded answers `{}`. The discarded
+  task's value is still read, so a failure that stopped the group still
+  leaves as its error and a panic still arrives as `Panicked`.
+  `bench/concurrency_exercise.iyi` step 17 checks both; the old
+  compiler refused it with "method ::fetch_discarding must return
+  (Cancelled | Panicked | TaskFailed | Tuple(Int32)) but it is returning
+  (Panicked | TaskFailed | Tuple(Int32, Int32))".
+
+- **A group cancels its tasks when its block is left early, and when
+  the task holding it open is cancelled.** SPEC III.4.2 names three
+  causes and only a failing child's was built. `return 5` out of a
+  block beside a task's 2-second sleep answered after 2,000 ms with the
+  sleep run in full, and a task's own group was not stopped when the
+  group around that task failed: its grandchild slept the full 2
+  seconds, because a task parked in a join was the one park no cancel
+  reached. A `return`, `break` or `!` out of the block now cancels what
+  it started before the join waits (0 ms), and cancelling a task
+  cancels the tasks of every group it holds open, wherever it is
+  parked - in their join, reading a typed group's values, or asleep in
+  the block - and a task it starts afterwards starts cancelled.
+  `bench/concurrency_exercise.iyi` step 8b checks each; the old runtime
+  failed it with "leaving a group block early took 30013 ms beside 10 s
+  sleeps", and the runtime without the walk over held groups with "a
+  failing group took 10018 ms to stop its grandchildren".
+
+- **A task spawned on a group whose block has ended is a panic.** A
+  handle kept past its block (`saved = g`) still spawned, and the task
+  had no scope left to join it: it never ran, nothing reported it, and
+  the program printed "the late spawn returned" and exited 0 (reading
+  the task's `value` ran it outside any scope). III.4.1 says a task
+  cannot outlive the scope that started it, so the spawn panics now:
+  "a task spawned on a group whose block has ended: no scope is left to
+  join it", exit 1. `bench/concurrency_exercise.sh` step 3f checks it;
+  the old runtime exited 0 there.
+
+- **`HTML.unescape` reads a name without its `;` only where HTML5 does:
+  `amp`, `lt`, `gt`, `quot` and the Latin-1 names.** Any of the module's
+  253 names matched without a `;`, so `?q=x&lang=en` came out
+  `?q=x〈=en`, `a&ge=5` came out `a≥=5` and `&notin` came out `∉`, where
+  HTML5's table has those names with the `;` alone and Python's
+  `html.unescape` keeps the first two and answers `¬in`. 19,046 random
+  strings agree with Python's `html.unescape` over the module's names
+  (U+10FFFF left out: a noncharacter Python drops and HTML5 keeps).
+  `bench/std_html_exercise.iyi` checks each, and the `.sh` proves the
+  check fails with every name read without its `;`; the old module
+  answered `?q=x〈=en a≥=5 ∉ ∉ … … ©`.
+
+- **`std/hpack` counts 32 octets a field in the header list size, as
+  RFC 7540 6.5.2 defines the size SETTINGS_MAX_HEADER_LIST_SIZE limits.**
+  `Decoder#max_header_list_size` summed names and values alone, so two
+  `:method: GET` were 20 octets and passed a limit of 70, and 120 fields
+  `x-a: 1` passed a limit of 4096; Python's `hpack` refuses both. A field
+  adds its name, its value and 32 now. 1,764 header blocks from Python's
+  `hpack` encoder, a quarter of them corrupted, decode to the same
+  headers or the same refusal, and 9,000 Huffman encodes and decodes
+  agree with its nghttp2 table. `bench/std_hpack_exercise.iyi` checks one
+  field within 70 and two past it, and the `.sh` proves the check fails
+  without the 32; the old module decoded both.
+
+- **On Windows `Path#join` keeps the left side's drive for a root or a
+  drive-relative name, as ntpath joins.** A right-hand side with any
+  anchor was the answer by itself, so `Path.windows("C:\\a").join("\\b")`
+  was `\b`, a root on whatever drive is current, and `join("c:b")` was
+  `c:b`, where `expand` already read both on `C:\a`; `File.join`
+  answered the same. A root with no drive lands on the left side's drive
+  now (`C:\b`), and a drive-relative name on the same drive goes under
+  the left side (`C:\a\b`); a name on another drive is still the answer
+  by itself, and POSIX paths are unchanged. `expand` reads rooted and
+  same-drive names through `join`. Of 6,000 random pairs, normalized,
+  three differ from Python's `ntpath.join`: two where ntpath compares
+  `//srv/sh` and `\\srv\sh` as strings, one a share whose name ends in
+  a colon. `bench/std_path_exercise.iyi` checks each case and the `.sh`
+  proves the check fails with the drive dropped; the old module answered
+  `\b`.
+
+- **`Box(T).unbox` of a null pointer is nil when `T` admits nil.** It
+  panicked "Unboxing null pointer" for every `T`, so
+  `Box(String?).unbox` of the null a C callback is handed when there is
+  no data refused, where the other library answers nil for `String?`.
+  A nilable `T` answers nil now, and any other `T` still panics.
+  `bench/std_box_exercise.iyi` unboxes a null as `String?` and as
+  `Int32?`; the old module panicked "Unboxing null pointer".
+
+- **`take(n)` and `first(n)` on an `Enumerable` stop at the nth
+  element.** The count was checked before each append, so every call
+  pulled one element more than it kept, and a source read once (a pipe,
+  a generator) lost it. Over a source of 1 to 6, `take(0)`, `take(2)`
+  and `first(2)` answered `[] [2, 3] [5, 6]`. They answer
+  `[] [1, 2] [3, 4]` now, as the other library's `first(n)` does.
+  `bench/std_exercise.iyi` checks it on a source read once; the old
+  module answered `[] [2, 3] [5, 6]`.
+
+- **`includes?` on a `List`, `Deque`, `Slice` or any other `Enumerable`
+  takes every element type.** It asks `==`, which every type has, and
+  was still bounded `where Elem : Comparable` from when it asked `<=>`:
+  `Deque(Array(Int32))#includes?([2])` was refused with "Array(Int32)
+  does not implement Std::Traits::Comparable, required by `where Elem :
+  Comparable` in `includes?`" while `index([2])` answered 1, and
+  `List(Int32?)#includes?(nil)` was refused the same way. The bound is
+  gone. `bench/std_exercise.iyi` asks both; the old module did not
+  compile them.
+
+- **`URI#normalize` leaves a relative reference pointing where it
+  did.** Section 5.2.4's dot-segment algorithm is for a path already
+  merged with a base, and `normalize` ran it on a relative reference's
+  own path: `a/..` became `/`, the root, `../x` became `x`, `.` and
+  `..` became the empty reference, and `a/../../x` became `/x`. Against
+  `http://h/a/b/c`, `a/..` resolves to `http://h/a/b/` and what
+  `normalize` made of it to `http://h/`; a probe of 29,484 random
+  references against five bases failed 20,893 checks of resolving the
+  same before and after, or of a second `normalize` changing nothing.
+  A relative reference with a rootless path has its dot segments taken
+  out as any base would take them now, keeping a `..` that climbs past
+  its own segments: `./`, `../x`, `./`, `../`, `../x`, and the probe
+  fails none. `bench/std_uri_exercise.iyi` normalizes seven references
+  and resolves each both ways; the old module answered `/` for `a/..`.
+
+- **`URI#normalize` writes a host's escapes with upper-case hex
+  digits.** RFC 3986 section 6.2.2.1 normalizes a host to lower case
+  and the hex digits of a percent escape to upper case; `normalize`
+  lower-cased the whole host, escapes included, so
+  `HTTP://%c3%A9.EXAMPLE:80/` came out `http://%c3%a9.example/`. The
+  host is lowered and its escapes' digits raised now.
+  `bench/std_uri_exercise.iyi` normalizes that URI; the old module
+  answered `http://%c3%a9.example/`.
+
+- **`<%-` keeps the blanks before it when another tag stands before it
+  on its line.** The module says `<%-` drops the indentation before a
+  tag that is the first thing on its line, but text with no line break
+  in it was taken as indentation wherever it stood: `<%= a %>  <%- b %>`
+  lost the two spaces between its tags, and so did blanks after an
+  escaped `<%% %>`. Blanks are dropped now only where the text opens its
+  line: at the template's start, after a line break, or in what a `-%>`
+  left. `bench/std_eiy_exercise.iyi` pins the generated source of
+  `<%= a %>  <%- b %><% c -%>  <%- d %>`; the old module wrote no
+  `out.print("  ")` between the first two tags.
+
+- **An error in a control tag's code is reported at the template's own
+  column.** A space was put before control code that did not open with
+  one, so everything on the code's first line stood a column right of
+  where the template has it: `<%undefined_x%>` on line 2 was refused at
+  `2:4`, the caret under its `n`, where the name starts at column 3.
+  The code follows its location straight now, as an output tag's does.
+  `bench/std_eiy_exercise.iyi` pins the generated source of `<%x = 1%>`
+  and the `.sh` builds a template whose `<%nonexistent_thing%>` must
+  stop at `2:5`; the old module wrote `#<loc:"t.eiy",1,3> x = 1`.
+
+- **`Gzip.decompress` reads a file of many members in the time its
+  members take.** Every member was sized by the file's last trailer, or
+  by three times the bytes after it, so each allocated what the rest of
+  the file could hold. In release builds, a hundred two-byte members
+  ahead of one of 64 MB took 2,489 ms and 1,600 of them 36,028 ms, where
+  Python's gzip took 152 and 317; 500 members of 64 KB, the shape bgzip
+  writes, took 2,942 ms where 125 took 218. Only the first member is
+  sized by the trailer now, the one a file of one member has, and a
+  member after it grows from nothing: the same files read in 309,
+  219, 234 and 60 ms. `bench/std_compress_exercise.iyi` holds a
+  thousand members ahead of one of 8 MB to six times that member alone
+  and 100 ms; the old module took 2,751 ms where the one took 60.
+
+- **`HttpDatagram.from_stream_id` refuses a stream ID that is no
+  client-initiated bidirectional stream.** RFC 9297 Section 2.1
+  associates an HTTP Datagram with a request stream and nothing else,
+  which is why its Quarter Stream ID is the stream ID divided by four
+  with nothing left over. The module divided any stream ID down, so
+  `from_stream_id(19_u64, payload)` built a datagram for stream 16,
+  another request's, and its `stream_id` answered 16; the exercise had
+  pinned that. A stream ID that is not a multiple of four is refused
+  with a sentence naming the section now, and one past 2^62 - 1 is still
+  refused by the quarter it would be. `bench/std_capsule_exercise.iyi`
+  round-trips request streams up to 2^62 - 4 and
+  `bench/std_capsule_exercise.sh` checks that streams 19 and 1 are
+  refused; the old module answered quarter 4 and stream 16 for 19.
+
+- **`abort` ends the program as `exit` does: what the task deferred
+  runs, and buffered output is written.** It wrote its message with the
+  runtime's own `__iyi_write` and ended with `__iyi_exit`, which skip
+  both: after `STDOUT.sync = false` and `puts "before"`, `abort "bye"`
+  left standard output empty, a `defer` around the call never ran, and a
+  line buffered on standard error before the message was lost. The
+  message goes through `STDERR` now and the program ends with `exit`, as
+  the other library's `abort` is `STDERR.puts` and `exit`.
+  `bench/std_kernel_exercise.sh` aborts with both streams buffered and a
+  cleanup deferred, compares both streams byte for byte, and proves the
+  check fails on a copy that ends with `__iyi_exit`; the old module
+  printed nothing on standard output and only "the message" on
+  standard error.
+
+- **`+` and space sign `%x`, `%X`, `%o` and `%b` as they sign `%d`.**
+  Those verbs write a negative value with its `-` (`%x` of -255 is -ff)
+  but dropped both flags for the rest: `sprintf("%+x|% o|%+#b|%+X|% x",
+  255, 8, 5, 255_i128, 0)` printed `ff|10|0b101|FF|0`, so a column of
+  signed deltas lost its signs on one side, against the module's own
+  "always show sign" and against the other library and Python, which
+  print `+ff| 10|+0b101|+FF| 0`. It prints that now; `%u`, the word's
+  bits, stays unsigned. `bench/format_exercise.iyi` checks every base,
+  and its `.sh` proves the check fails with hex unsigned again; the old
+  module answered `ff|10|0b101|FF|0|5`.
+
+- **`%p` and `%s` of an `Int128` or `UInt128` are its own text, and `%c`
+  its code point.** The value was written as digits and formatted again
+  as a string, so `%p` of 65_i128 printed `"65"` in quotes where `%p` of
+  65 prints 65, and `%c` of 65_u128 panicked "%c wants a character, and
+  65 is a UInt128" where `%c` of every other integer is its code point.
+  They answer 65 and A now. `bench/format_exercise.iyi` checks both, and
+  its `.sh` proves the check fails with the digits formatted again as a
+  string; the old module panicked "%c wants a character, and 65 is a
+  UInt128".
+
+- **`sprintf`, `printf` and `String#%` take one array or tuple as the
+  argument list, as the other library does.** An array was one argument:
+  `"%s, %s, %s, D" % ['A', 'B', 'C']`, the other library's own example
+  for `String#%`, panicked "too few arguments for format string", and
+  `"[%s]" % ["A"]` printed `[["A"]]` where that library prints `[A]`.
+  A lone array or tuple is now the list for `sprintf(format, list)` and
+  `printf(format, list)` too; arguments written out are read as before.
+  **The answer changes** for a lone tuple: `sprintf("%s", {1, 2})`
+  printed `{1, 2}` and now panics "too many arguments for format string:
+  2 given, 1 used", as two arguments for one specifier do.
+  `bench/format_exercise.iyi` formats an array and a tuple each way, and
+  its `.sh` proves the check fails with an array taken as one argument;
+  the old module panicked "too few arguments for format string".
+
+- **`Benchmark.ips` lines up a rate under 1,000 per second with one
+  that has a unit.** `human_mean` answered `" 594.70"` beside
+  `" 597.80M"`, a character narrower, so that row's `(` and every
+  column after it stood one place left of the row above. A blank stands
+  where the unit goes now, as the other library pads it.
+  `bench/std_benchmark_exercise.iyi` checks both widths; the old module
+  answered `[ 594.70] [ 597.80M]`.
+
+- **`Benchmark::IPS::Job.new(0.5, 0.25)` keeps the fractions of a
+  second.** The seconds were narrowed with `to_i64`, so a fractional
+  calculation or warm-up time was zero and the job warmed up and
+  measured for no time at all, where the other library's
+  `0.5.seconds` is half a second. A fraction is kept to the nanosecond
+  now, and whole seconds are taken as they were.
+  `bench/std_benchmark_exercise.iyi` holds `Job.new(0.2, 0.1)` to a
+  0.3 s floor; the old module ran it in 2.7e-6 s.
+
+- **`fill(value, offset, count)` past the end names an index outside
+  the collection when the offset is negative.** The end was counted
+  from the offset as written, so `[1, 2, 3, 4, 5].fill(0, -2, 5)`
+  panicked "index 3 out of range for 5 elements", naming an index that
+  is one of the five. It is counted from where the offset lands now:
+  "index 8 out of range for 5 elements", as `fill(0, 3, 5)` says.
+  `Array` and `Deque` share it through `IndexableMutable`.
+  `bench/std_indexable_exercise.sh` probes it; the old module named
+  index 3.
+
+- **`StaticArray#fill(value, start, count)` refuses a negative count
+  and a start past the end.** A return for any count of zero or less
+  came before the start was checked, so `fill(7, 0, -1)` and
+  `fill(7, 9, 0)` of four elements answered the array untouched and
+  said nothing, where the other library and `Slice#fill` refuse both.
+  They panic with "negative count: -1" and "Start out of bounds" now.
+  `bench/std_static_array_exercise.sh` runs each in a process of its
+  own; the old module ran `fill(7, 0, -1)` to the end unrefused.
+
+- **`StaticArray#to_s(io)` and `inspect(io)` compile and write what
+  `to_s` answers.** Each element was asked for `inspect(io)`, which no
+  prelude type has, and the `IyiIO` for `<<`, which only `import
+  std/io` gives it: `StaticArray[1, 2, 3].to_s(STDOUT)` was refused
+  with "wrong number of arguments for 'Int32#inspect' (given 1,
+  expected 0)", and without `std/io` with "undefined method '<<' for
+  IyiIO". Both write the text `to_s` builds now, as
+  `BitArray#to_s(io)` does. `bench/std_static_array_exercise.iyi`
+  writes both into an `IO::Memory`; the old module did not compile it.
+
+- **`OptionParser` reads `--color [WHEN]` as a value that may be left
+  out.** The brackets were not read, so a bracketed value was a required
+  one: `--color` last panicked "flag --color needs a value", `--color -v`
+  handed `-v` to `--color` as its value instead of running it, and `-l
+  --color` did the same with `--color`. `--name [VALUE]`, `-n [VALUE]`
+  and `-n[VALUE]` now take the next argument unless there is none or it
+  is a flag the parser knows, and are called with "" otherwise, as the
+  other library reads optional values. `bench/std_option_parser_exercise.iyi`
+  parses each spelling with and without its value, and the `.sh` proves
+  the check fails with the brackets read as a required value; the old
+  module answered
+  `color=-v,color=never,color=always,l=3,l=--color,z=9,z=--color`.
+
+- **A `UUID` keeps its own sixteen bytes.** `UUID.new(bytes)` held the
+  caller's array and `bytes` handed it back, so a buffer reused for the
+  next record changed the UUID already made from it: `UUID.new(b)` read
+  `00000000-0000-0000-0000-000000000000`, and after `b[0] = 255_u8` it
+  read `ff000000-0000-0000-0000-000000000000`. Writing to `u.bytes`
+  changed a UUID that was already a hash key, and its table then
+  answered nil for it. The bytes are copied in, and `bytes` answers a
+  copy, as the other library's UUID is a value. `v4` and `parse` hand
+  over the array they fill without a second copy.
+  `bench/std_uuid_exercise.iyi` reuses a buffer and writes to `bytes`,
+  and the `.sh` proves the check fails with the caller's array kept; the
+  old module answered `ff000000-0000-0000-0000-000000000000`.
+
+- **`Atomic(Int64).fence`, and every fence asked of an instance's
+  class, compiles.** `std/atomic` declared the fence instruction on
+  `Atomic(T)` itself, and a call on a generic instance's class passes
+  that class as a first argument, where the code generator reads the
+  ordering: `Atomic.fence` built, and `Atomic(Int64).fence` or
+  `Atomic(UInt8).fence_acquire` stopped the compiler with "Multiple
+  assignment count mismatch (IndexError)" and "you've found a bug in
+  the iyi compiler". The instruction is declared on the prelude's
+  `IyiAtomic` beside the other four now, which is where the prelude's
+  own comment says an atomic instruction must go for this reason.
+  `bench/std_atomic_exercise.iyi` asks each fence of an instance's
+  class; the old module did not compile it.
+
+- **On Windows two Ctrl-Breaks that arrive before a `Signal.wait` are
+  one INT, and the wait answers it.** The console handler added each
+  arrival's bit to the arrivals rather than setting it, so two INTs
+  nobody had taken yet were 4 + 4 = 8, the bit of no signal a wait
+  names, and the `Signal.wait(Signal::INT)` after them never answered:
+  measured, one and three Ctrl-Breaks were answered INT, two and four
+  parked the waiter until its watchdog cancelled it. The bit is set
+  with a compare-and-set loop now, so a pending signal is a bit on
+  Windows as it is on Linux and darwin. `bench/std_signal_exercise.iyi`
+  sends two Ctrl-Breaks and checks that the next wait answers INT and
+  the one after it waits for a third, on every platform now; the old
+  module answered "the first of two answered Cancelled" after the
+  five-second watchdog.
+
 - **`Set`, `Deque` and `StaticArray` compare and combine across element
   types both ways.** `Set(Int32) == Set(Int32?)` was false where the
   other order was true, and `&`, `^`, `-`, `subset_of?` and
@@ -16979,7 +19761,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 19,832-line library and nothing else. Every other
+  written against iyi's own 20,323-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

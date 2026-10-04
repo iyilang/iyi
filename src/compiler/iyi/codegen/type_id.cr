@@ -115,7 +115,7 @@ class Iyi::CodeGenVisitor
       next if @main_mod.globals[name]?
 
       global = @main_mod.globals.add(@main_llvm_context.int32, name)
-      global.linkage = LLVM::Linkage::Internal if @single_module
+      global.linkage = LLVM::Linkage::Internal if iyi_internalise?
       global.initializer = @main_llvm_context.int32.const_int(@program.llvm_id.type_id(type))
       global.global_constant = true
     end
@@ -171,7 +171,7 @@ class Iyi::CodeGenVisitor
     global = @main_mod.globals[type_id_name]?
     unless global
       global = @main_mod.globals.add(@main_llvm_context.int32, type_id_name)
-      global.linkage = LLVM::Linkage::Internal if @single_module
+      global.linkage = LLVM::Linkage::Internal if iyi_internalise?
       global.initializer = @main_llvm_context.int32.const_int(@program.llvm_id.type_id(type))
       global.global_constant = true
     end

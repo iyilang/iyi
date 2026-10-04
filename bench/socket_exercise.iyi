@@ -260,6 +260,21 @@ named_conn.close
 named.close
 puts "localhost: ok"
 
+# 8c. A connect to `localhost` reaches a listener on ::1 alone: Windows
+#     names both addresses and dev servers often bind ::1, where the
+#     connect went to 127.0.0.1 only and was "connection refused".
+v6_only = IyiSocket.listen("::1", 0)
+v6_client = IyiSocket.connect("localhost", v6_only.local_port)
+raise "localhost_v6: the connect answered #{v6_client.inspect}" unless v6_client.is_a?(IyiSocket)
+v6_conn = v6_only.accept.or_panic
+v6_client.write("over ::1")
+heard_v6 = v6_conn.read(64).or_panic
+raise "localhost_v6: the server read #{heard_v6.inspect}" unless heard_v6 == "over ::1"
+v6_client.close
+v6_conn.close
+v6_only.close
+puts "localhost_v6: ok"
+
 # 9. A unix socket: a listener at a path, a connection to it, bytes each
 #    way, the path as the listener's address and no port. Closing the
 #    listener takes the path away - a connect to it is then a value, and
@@ -314,7 +329,8 @@ puts "unix: ok"
 # 10. Timeouts. A read that waits past `read_timeout_ms` answers a
 #     `SocketError` that says so, and the connection still works; a read
 #     answered before its deadline leaves no deadline behind - its fiber
-#     sleeps past it and lives; a write into a peer that never reads times
+#     sleeps past it and lives, and its next read, with no deadline, waits
+#     for its bytes; a write into a peer that never reads times
 #     out the same way. A sibling ends each wait after two seconds if the
 #     timeout does not, so a broken one is a failure here and not a hang.
 t_server = IyiSocket.listen(0)
@@ -371,6 +387,37 @@ group do |g|
 end
 raise "timeout: the early read got #{t_early.inspect}" unless t_early == "soon"
 raise "timeout: the read's old deadline woke its fiber #{400 - t_slept} ms early" if t_slept < 390
+# And the next wait, a read with no deadline of its own, is not ended by
+# the one the read before it left behind. The sleep above no longer shows
+# that: a sleep writes its own deadline over the one left in the heap,
+# and a fiber already woken is not queued twice. A deadline left behind
+# under a read with none answered it "timed out" at the old deadline.
+t_conn.read_timeout_ms = 200
+t_next = ""
+group do |g|
+  g.spawn do
+    t_conn.read(16).or_panic
+    t_conn.read_timeout_ms = nil
+    t_answer = t_conn.read(16)
+    case t_answer
+    in SocketError
+      t_next = t_answer.timed_out? ? "timed out" : t_answer.message
+    in String
+      t_next = t_answer
+    in Cancelled
+      t_next = "cancelled"
+    end
+    0
+  end
+  g.spawn do
+    sleep(20)
+    t_client.write("soon")
+    sleep(380)
+    t_client.write("late")
+    0
+  end
+end
+raise "timeout: a read with no deadline, after one answered before its own, answered #{t_next}" unless t_next == "late"
 t_client.write_timeout_ms = 100
 t_chunk = "t" * 65536
 t_wrote = t_client.write(t_chunk)

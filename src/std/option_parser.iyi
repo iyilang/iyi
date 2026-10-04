@@ -1,7 +1,8 @@
 # Flag parsing, written in iyi.
 #
 # `on("--name VALUE", "help") { |v| ... }` and `on("-h", "help") { }`
-# register flags. `parse` walks `Program.args` (or the array given),
+# register flags, and `on("--color [WHEN]", "help")` one whose value may
+# be left out. `parse` walks `Program.args` (or the array given),
 # calls the blocks, and answers the leftover operands.
 #
 # What the person typed wrong is the program's to answer, the way
@@ -16,15 +17,24 @@
 module std/option_parser
 
 pub class OptionParser
-  @long : Hash(String, {Bool, (String -> Nil)})
-  @short : Hash(String, {Bool, (String -> Nil)})
+  # What a flag does with the argument after it: `--name VALUE` needs one,
+  # `--color [WHEN]` takes one unless it is missing or is a flag itself,
+  # and `--verbose` takes none.
+  enum Value
+    None
+    Required
+    Optional
+  end
+
+  @long : Hash(String, {Value, (String -> Nil)})
+  @short : Hash(String, {Value, (String -> Nil)})
   @help : Array(String)
   @invalid : (String -> Nil)?
   @missing : (String -> Nil)?
 
   def initialize
-    @long = {} of String => {Bool, (String -> Nil)}
-    @short = {} of String => {Bool, (String -> Nil)}
+    @long = {} of String => {Value, (String -> Nil)}
+    @short = {} of String => {Value, (String -> Nil)}
     @help = [] of String
     @invalid = nil
     @missing = nil
@@ -55,27 +65,45 @@ pub class OptionParser
   # form was: `--name=VALUE` was stored under the key `--name=VALUE`, which
   # no argument ever looks up, and `-nVALUE` refused itself as not a flag.
   # A short flag is one character, not one byte: `-é` was refused too.
+  #
+  # A bracketed value, `--color [WHEN]`, `-c [WHEN]` or `-c[WHEN]`, may be
+  # left out, as the other library reads the brackets. It was a required
+  # value: `--color` last panicked "flag --color needs a value", and
+  # `--color -v` handed `-v` to `--color` instead of running it.
   def on(flag : String, description : String, &block : String -> Nil) : Nil
     @help << "  #{flag}  #{description}"
-    takes = flag.includes?(" ")
     name = flag.split(' ')[0]
+    takes = flag.includes?(" ") ? Value::Required : Value::None
+    takes = Value::Optional if bracketed?(flag[name.bytesize, flag.bytesize - name.bytesize].strip)
     if name.starts_with?("--")
       eq = name.index('=')
       if eq
-        takes = true
+        takes = Value::Required
         name = name[0, eq]
       end
       @long[name] = {takes, block}
     elsif name.starts_with?("-") && name.bytesize >= 2
       at = char_end(name, 1)
       if at < name.bytesize
-        takes = true
+        takes = bracketed?(name[at, name.bytesize - at]) ? Value::Optional : Value::Required
         name = name[0, at]
       end
       @short[name] = {takes, block}
     else
       raise "option: not a flag: #{flag}"
     end
+  end
+
+  # `[WHEN]`: a name in brackets, the way a usage line marks what may be
+  # left out.
+  private def bracketed?(text : String) : Bool
+    text.bytesize >= 3 && text.starts_with?("[") && text.ends_with?("]")
+  end
+
+  # Whether *arg* is a flag this parser knows, which an optional value
+  # never takes as its own, as the other library leaves it to run.
+  private def known?(arg : String) : Bool
+    @long.has_key?(arg) || @short.has_key?(arg)
   end
 
   # Where the character starting at byte *at* ends: a short flag is `-`
@@ -113,7 +141,7 @@ pub class OptionParser
           spec = @long[name]?
           if !spec
             invalid(name, "unknown flag: #{name}")
-          elsif !spec[0]
+          elsif spec[0].none?
             invalid(name, "flag #{name} takes no value")
           else
             spec[1].call(val)
@@ -122,13 +150,13 @@ pub class OptionParser
           spec = @long[a]?
           if !spec
             invalid(a, "unknown flag: #{a}")
-          elsif spec[0]
+          elsif spec[0].none?
+            spec[1].call("")
+          elsif i + 1 < n && (spec[0].required? || !known?(args[i + 1]))
             i = i + 1
-            if i >= n
-              missing(a)
-            else
-              spec[1].call(args[i])
-            end
+            spec[1].call(args[i])
+          elsif spec[0].required?
+            missing(a)
           else
             spec[1].call("")
           end
@@ -139,16 +167,16 @@ pub class OptionParser
         spec = @short[name]?
         if !spec
           invalid(name, "unknown flag: #{name}")
-        elsif spec[0]
+        elsif !spec[0].none?
           if a.bytesize > at
             spec[1].call(a[at, a.bytesize - at])
-          else
+          elsif i + 1 < n && (spec[0].required? || !known?(args[i + 1]))
             i = i + 1
-            if i >= n
-              missing(name)
-            else
-              spec[1].call(args[i])
-            end
+            spec[1].call(args[i])
+          elsif spec[0].required?
+            missing(name)
+          else
+            spec[1].call("")
           end
         elsif a.bytesize == at
           spec[1].call("")
@@ -177,7 +205,7 @@ pub class OptionParser
       e = char_end(a, pos)
       spec = @short["-" + a[pos, e - pos]]?
       return false unless spec
-      return true if spec[0]
+      return true unless spec[0].none?
       pos = e
     end
     true
@@ -189,7 +217,7 @@ pub class OptionParser
       e = char_end(a, pos)
       spec = @short["-" + a[pos, e - pos]]?
       if spec
-        if spec[0]
+        unless spec[0].none?
           spec[1].call(a[e, a.bytesize - e])
           return
         end

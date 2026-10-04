@@ -252,10 +252,10 @@ module Iyi::Mod
     end
 
     private def self.cache_target(path : String, version : SemanticVersion) : String
-      # One entry under the compiler's cache root. The cache keeps its ten
-      # most recent build directories and `mod` rides the same policy: a
-      # pruned checkout is a refetch, which is what a cache being a cache
-      # means.
+      # One entry under the compiler's cache root. The build rotation, which
+      # keeps the ten most recent build directories, leaves `mod` alone
+      # (`CacheDir::NOT_BUILDS`): a checkout iyi.sum pins is what a build
+      # with no network reads, and `clear_cache` is what removes it.
       Iyi::CacheDir.instance.join(File.join("mod", "#{path}@v#{version}"))
     end
   end

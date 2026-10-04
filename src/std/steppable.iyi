@@ -1,6 +1,6 @@
 module std/steppable
 
-import std/iterator::{Iterator}
+import std/iterator::{Iterator, Stop}
 
 # Implements a step method for iterating from a value.
 # T needs `+`, `-`, `<=>`, and comparison with the integer 0 (`>` / `<`).
@@ -35,8 +35,8 @@ pub class NumericStepIterator(T)
     value.is_a?(::Float) && value != value
   end
 
-  def next : T?
-    return nil if @reached_end
+  def next : T | Stop
+    return Stop.new if @reached_end
     limit = @limit
 
     if @at_start
@@ -44,17 +44,17 @@ pub class NumericStepIterator(T)
       if !limit.nil?
         if unordered?(limit) || unordered?(@current) || unordered?(@step)
           @reached_end = true
-          return nil
+          return Stop.new
         end
         sign = (limit <=> @current)
         if sign == 0
           @reached_end = true
-          return @exclusive ? nil : @current
+          return @exclusive ? Stop.new : @current
         end
         step_sign = @step > 0 ? 1 : (@step < 0 ? -1 : 0)
         if sign != step_sign
           @reached_end = true
-          return nil
+          return Stop.new
         end
       end
       return @current
@@ -87,7 +87,7 @@ pub class NumericStepIterator(T)
       # two. Both walks end here.
       if @current.is_a?(::Float) && (unordered?(limit - @step) || unordered?(@current + @step))
         @reached_end = true
-        return nil
+        return Stop.new
       end
       gap = ((limit - @step) <=> @current)
       if gap == step_sign
@@ -99,7 +99,7 @@ pub class NumericStepIterator(T)
         return @current
       else
         @reached_end = true
-        return nil
+        return Stop.new
       end
     end
 
@@ -108,12 +108,12 @@ pub class NumericStepIterator(T)
     if step_sign > 0
       if cmp > 0 || (cmp == 0 && @exclusive)
         @reached_end = true
-        return nil
+        return Stop.new
       end
     else
       if cmp < 0 || (cmp == 0 && @exclusive)
         @reached_end = true
-        return nil
+        return Stop.new
       end
     end
     @reached_end = true if cmp == 0
@@ -123,7 +123,7 @@ pub class NumericStepIterator(T)
 
   def sum(initial : U) : U forall U
     acc = initial
-    while !(item = self.next).nil?
+    until (item = self.next).is_a?(Stop)
       acc = acc + item
     end
     acc
@@ -149,7 +149,7 @@ pub trait Steppable
   # Iterates from self to limit incrementing by step_val on each iteration.
   def step(*, to limit : self? = nil, by step_val : self, exclusive : ::Bool = false, & : self -> ::Nil) : ::Nil
     iter = self.step(to: limit, by: step_val, exclusive: exclusive)
-    while !(item = iter.next).nil?
+    until (item = iter.next).is_a?(Stop)
       yield item
     end
   end

@@ -3,32 +3,31 @@
 # Two dense arrays in insertion order, keys and values, and an index over
 # them: open addressing with linear probing from the key's hash to the
 # position of its entry, `-1` where a slot is free. The compact layout
-# Python's dictionary and Crystal's `Hash` both settled on, because
-# iteration then follows the order things went in — the order a word count prints its words, and the
-# order a person expects — and because the index is one array of integers
-# rather than a copy of the keys. Deletion marks the entry gone and its
-# index slot a tombstone, `-2`, which a probe steps over and an insert may
-# take; the dense arrays close their gaps when they next grow. It closed
-# the gap at once and rebuilt the index, the whole table per deletion, and
-# emptying a set of 20,000 took 0.95 s.
+# Python's dictionary and the other library's `Hash` both settled on:
+# iteration follows the order things went in - the order a word count
+# prints its words - and the index is one array of integers rather than a
+# copy of the keys. Deletion marks the entry gone and its index slot a
+# tombstone, `-2`, which a probe steps over and an insert may take; the
+# dense arrays close their gaps when they next grow. Closing the gap at
+# once and rebuilding the index emptied a set of 20,000 in 0.95 s.
 #
-# Hashing is `key.hash`, defined per type in this prelude. It is deliberately
-# not iyi's `Hashable` trait: that trait lives in `src/std`, which is the
-# opt-in library, and a prelude that depended on it would have the dependency
-# backwards.
+# Hashing is `key.hash`, defined per type in this prelude, and not iyi's
+# `Hashable` trait: that lives in `src/std`, the opt-in library, and a
+# prelude that depended on it would have the dependency backwards.
 class Hash(K, V)
   @keys : Pointer(K)
   @values : Pointer(V)
   @index : Pointer(Int32)
   # Live entries; `@used` counts the dense slots written, gone ones too,
-  # and `@gone` marks which are gone - null until the first deletion.
+  # `@gone` marks which are gone - null until the first deletion - and
+  # every entry before `@first` is gone, as in the other library's `Hash`.
   @size : Int32
   @used : Int32
   @gone : Pointer(Bool)
+  @first : Int32 = 0
   # Entries the dense arrays can hold; the index holds twice as many slots,
-  # so it is never more than half full and a probe always stops. Zero
-  # until the first entry: a table made and never written - a trie's
-  # leaves, each with children it will not have - costs no storage.
+  # so it is at most half full and a probe always stops. Zero until the
+  # first entry: a table never written - a trie's leaves - costs nothing.
   @capacity : Int32
   # What `[]` answers for a key that is not there, when the table was made
   # with one: `Hash(String, Int32).new(0)`, or a block that is handed the
@@ -107,7 +106,9 @@ class Hash(K, V)
 
   # The value the key had, or nil. The entry is marked gone where it
   # stands, so the order of what remains is the order it went in, and its
-  # index slot becomes a tombstone.
+  # index slot becomes a tombstone. `each` starts past the gone at the
+  # front: from entry 0, taking the oldest key and deleting it until none
+  # was left stepped over every one gone before, 197 ms for 40,000.
   def delete(key : K) : V?
     return nil if @capacity == 0
     slot = slot_for(key)
@@ -123,6 +124,9 @@ class Hash(K, V)
       end
     end
     @gone[entry] = true
+    while @first < @used && @gone[@first]
+      @first = @first + 1
+    end
     @index[slot] = -2
     @size = @size - 1
     value
@@ -130,7 +134,7 @@ class Hash(K, V)
 
   # Every pair, in the order it went in.
   def each(& : K, V -> Nil) : Nil
-    entry = 0
+    entry = @first
     while entry < @used
       yield @keys[entry], @values[entry] unless @gone.address != 0_u64 && @gone[entry]
       entry = entry + 1
@@ -158,11 +162,13 @@ class Hash(K, V)
     result
   end
 
-  # `{"a" => 1, "b" => 2}`, in insertion order, both sides inspected.
+  # `{"a" => 1}`, in insertion order, both sides inspected; a first key in
+  # braces is spaced off, `{ {1, 2} => 3 }`, as a tuple's: `{{` is a macro.
   def to_s : String
     parts = [] of String
     each { |key, value| parts << key.inspect + " => " + value.inspect }
-    "{" + parts.join(", ") + "}"
+    pad = @size > 0 && (@keys[@first].is_a?(Tuple) || @keys[@first].is_a?(NamedTuple) || @keys[@first].is_a?(Hash)) ? " " : ""
+    "{" + pad + parts.join(", ") + pad + "}"
   end
 
   def inspect : String
@@ -193,14 +199,6 @@ class Hash(K, V)
     tombstone < 0 ? slot : tombstone
   end
 
-  private def clear_index : Nil
-    slot = 0
-    while slot < @capacity * 2
-      @index[slot] = -1
-      slot = slot + 1
-    end
-  end
-
   # Twice the room - or the same room, when half of what is written is gone
   # - the gone entries left behind, and the index rebuilt over what is live:
   # the dense arrays keep their order, so nothing is re-inserted.
@@ -214,7 +212,7 @@ class Hash(K, V)
     @values = Pointer(V).malloc(@capacity.to_u64)
     @index = Pointer(Int32).malloc((@capacity * 2).to_u64)
     @gone = Pointer(Bool).new(0_u64)
-    kept = 0
+    kept = @first = 0
     entry = 0
     while entry < old_used
       unless old_gone.address != 0_u64 && old_gone[entry]
@@ -230,7 +228,11 @@ class Hash(K, V)
 
   # The index over the dense arrays as they stand, from nothing.
   private def rebuild_index : Nil
-    clear_index
+    slot = 0
+    while slot < @capacity * 2
+      @index[slot] = -1
+      slot = slot + 1
+    end
     entry = 0
     while entry < @used
       @index[slot_for(@keys[entry])] = entry

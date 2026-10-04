@@ -224,7 +224,7 @@ pub class Dir
       stream = Pointer(UInt8).malloc((16 + WIN32_FIND_DATAW_BYTES).to_u64)
       handle = LibKernel32.FindFirstFileW(pattern, (stream + 16).as(Void*))
       if handle.address == 0xFFFFFFFFFFFFFFFF_u64
-        raise "Cannot open directory: #{dir_path}"
+        raise "Cannot open directory: #{dir_path}: #{File.win_error}"
       end
       words = stream.as(Int64*)
       words[0] = handle.address.to_i64
@@ -533,9 +533,13 @@ pub class Dir
         raise "Cannot create directory: #{p}"
       end
     {% elsif flag?(:win32) %}
+      # With Windows' own sentence for why, as `File`'s refusals have it:
+      # "Cannot create directory: db" said the same for a directory that
+      # was there, a parent that was not and a name Windows forbids.
       wide = __iyi_wide_path(c_str(p))
-      if wide.address == 0_u64 || LibKernel32.CreateDirectoryW(wide, Pointer(Void).new(0_u64)) == 0
-        raise "Cannot create directory: #{p}"
+      raise "Cannot create directory: #{p}: the path is not valid UTF-8" if wide.address == 0_u64
+      if LibKernel32.CreateDirectoryW(wide, Pointer(Void).new(0_u64)) == 0
+        raise "Cannot create directory: #{p}: #{File.win_error}"
       end
     {% end %}
   end
@@ -556,6 +560,9 @@ pub class Dir
     # `\\?\` path, which Windows does not parse again, `/` is not a
     # separator at all, so every segment after the first was refused.
     acc = ""
+    # Why the first directory that could not be made was refused, said if
+    # the path is still not there at the end: the ones under it fail for it.
+    refusal = ""
     segments.each do |seg|
       if acc.empty?
         acc = seg
@@ -575,14 +582,14 @@ pub class Dir
           # past MAX_PATH while the first segments are not, and those are
           # created by their plain relative names.
           acc_wide = __iyi_wide_path(c_str(acc))
-          if acc_wide.address != 0_u64
-            LibKernel32.CreateDirectoryW(acc_wide, Pointer(Void).new(0_u64))
+          if acc_wide.address != 0_u64 && LibKernel32.CreateDirectoryW(acc_wide, Pointer(Void).new(0_u64)) == 0
+            refusal = ": #{File.win_error}" if refusal.empty?
           end
         {% end %}
       end
     end
 
-    raise "Cannot create directory: #{p_str}" unless exists?(p_str)
+    raise "Cannot create directory: #{p_str}#{refusal}" unless exists?(p_str)
   end
 
   def self.delete(path : String | Path) : Nil
@@ -593,8 +600,9 @@ pub class Dir
       end
     {% elsif flag?(:win32) %}
       wide = __iyi_wide_path(c_str(p))
-      if wide.address == 0_u64 || !remove_directory(wide)
-        raise "Cannot remove directory: #{p}"
+      raise "Cannot remove directory: #{p}: the path is not valid UTF-8" if wide.address == 0_u64
+      unless remove_directory(wide)
+        raise "Cannot remove directory: #{p}: #{File.win_error}"
       end
     {% end %}
   end

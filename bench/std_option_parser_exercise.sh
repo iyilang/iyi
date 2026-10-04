@@ -178,17 +178,21 @@ PY
     $'      return true unless spec\n' \
     "each mistake reaches its handler, in order"
   caught_at long-eq "--out=FILE kept whole" \
-    $'      if eq\n        takes = true\n        name = name[0, eq]\n      end\n' \
+    $'      if eq\n        takes = Value::Required\n        name = name[0, eq]\n      end\n' \
     '' \
     "--out=FILE takes a value"
   caught_at short-glued "-oFILE kept whole" \
-    $'      if at < name.bytesize\n        takes = true\n        name = name[0, at]\n      end\n' \
+    $'      if at < name.bytesize\n        takes = bracketed?(name[at, name.bytesize - at]) ? Value::Optional : Value::Required\n        name = name[0, at]\n      end\n' \
     '' \
     "-oFILE takes a value"
   caught_at one-byte "a short flag cut at one byte" \
     '    width = b < 0xC0_u8 ? 1 : (b < 0xE0_u8 ? 2 : (b < 0xF0_u8 ? 3 : 4))' \
     '    width = b < 0xC0_u8 ? 1 : 1' \
     "a short flag is one character"
+  caught_at optional "a bracketed value read as a required one" \
+    $'    takes = Value::Optional if bracketed?' \
+    $'    takes = Value::Required if bracketed?' \
+    "a bracketed value may be left out"
 fi
 
 echo

@@ -161,11 +161,16 @@ struct ::StaticArray(T, N)
   end
 
   # Fills *count* elements starting at *start* with *value*.
+  #
+  # A negative count and a start outside are refused before anything is
+  # filled, as the other library and `Slice#fill` refuse them: an early
+  # return for `c <= 0` came first, so `fill(7, 0, -1)` and `fill(7, 9, 0)`
+  # of four elements answered the array untouched and said nothing.
   def fill(value : T, start : Int, count : Int) : self
     s = start.to_i64
     s += N if s < 0
     c = count.to_i64
-    return self if c <= 0
+    raise "negative count: #{count}" if c < 0
     raise "Start out of bounds" if s < 0 || s > N
     # In `Int64`, as `index_within` counts, until the start is inside and the
     # count is cut to the room left: narrowed first, a count of 2^32
@@ -418,11 +423,12 @@ struct ::StaticArray(T, N)
     c
   end
 
-  # Each element as its `inspect` answers, as `to_s` below writes it: this
-  # asked each for `inspect(io)`, which the prelude's own types do not
-  # have, so it failed to compile for every element type but `Symbol`.
+  # The text `to_s` builds, written as `BitArray#to_s(io)` writes it. It
+  # asked each element for `inspect(io)`, which no prelude type has, and
+  # `IyiIO` for `<<`, which only `import std/io` gives it: `to_s(STDOUT)`
+  # of a `StaticArray(Int32, 3)` did not compile, and `inspect(io)` with it.
   def to_s(io : IO) : Nil
-    io << to_s
+    io.write(to_s)
   end
 
   # Into one builder: adding each element to the text so far copied that

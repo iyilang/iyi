@@ -51,4 +51,22 @@ assert_true by_id.size == by_text.size && by_id[UUID.parse(texts[4321])]? == by_
 assert_true keyed_ns <= texted_ns * 20 + 200_000_000_i64, "hash table: 16000 UUID keys took #{keyed_ns // 1000000} ms where String keys took #{texted_ns // 1000000} ms"
 puts "  UUIDs hash as they compare; 16,000 keys within twenty times their texts' time and 200 ms"
 
+puts "\n== a value"
+# The bytes are the UUID's own. Held as the caller's array, a buffer reused
+# for the next record turned the UUID made from it into the next one too,
+# and a change through the array `bytes` answered moved a UUID that was a
+# hash key out of its table's reach.
+buffer = Array(UInt8).new(16) { 0_u8 }
+first = UUID.new(buffer)
+buffer[0] = 255_u8
+second = UUID.new(buffer)
+assert_str "00000000-0000-0000-0000-000000000000", first.to_s, "a UUID keeps its bytes when the buffer it was made from is reused"
+assert_str "ff000000-0000-0000-0000-000000000000", second.to_s, "the next UUID from the buffer"
+keyed = {} of UUID => Int32
+keyed[first] = 1
+first.bytes[1] = 255_u8
+assert_str "00000000-0000-0000-0000-000000000000", first.to_s, "writing to the array `bytes` answered changes no UUID"
+assert_true keyed[first]? == 1, "a UUID key is found after its `bytes` were written to"
+puts "  a reused buffer and a write to `bytes` change no UUID"
+
 puts "\nALL CHECKS PASSED"

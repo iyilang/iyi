@@ -953,7 +953,9 @@ module Iyi
       found_comment = false
       found_first_newline = false
 
-      found_comment = skip_space
+      # A comment after the opener ends the line, and comment lines under it
+      # go with the elements: `x = [ # c` put the `# first` below at column 0.
+      found_comment = skip_space(@indent + 2)
       if found_comment || @token.type.newline?
         # add one level of indentation for contents if a newline is present
         offset = @indent + 2
@@ -1366,7 +1368,11 @@ module Iyi
 
         accept type
 
-        skip_space
+        # What follows the last type is the caller's, as after any other type:
+        # skipped here, the comment ending `def g : Int32 | Nil # c` was
+        # written with the comment lines under it at the `def`'s indentation
+        # rather than the body's.
+        skip_space unless last?(i, node.types) && !node.parens?
       end
 
       write_token :OP_RPAREN if node.parens?
@@ -1396,7 +1402,13 @@ module Iyi
     end
 
     def visit_if_or_unless(node, keyword : Keyword)
-      if !@token.keyword?(keyword) && node.else.is_a?(Nop)
+      # The suffix form is the one whose body starts where the node does: the
+      # keyword in front is no test when that body is itself an `if` block -
+      # `if a` / `puts 1` / `end if b` took the prefix path at the inner `if`,
+      # wrote its body and asked for `if` where the source had a line break,
+      # and fmt answered "there's a bug formatting" on code that compiled.
+      suffix = !@token.keyword?(keyword) || (!node.location.nil? && node.then.location == node.location)
+      if suffix && node.else.is_a?(Nop)
         # Suffix if/unless
         accept node.then
         write_keyword " ", keyword, " "
@@ -1609,9 +1621,13 @@ module Iyi
           write_token " ", :OP_COLON, " "
           skip_space_or_newline
           accept bound
+          # What follows the last bound is the body's: skipped here, a comment
+          # ending the line was written with the comment lines under it at the
+          # `def`'s indentation rather than the body's.
+          break if i == last_where
           skip_space
           if @token.type.op_comma?
-            write ", " unless i == last_where
+            write ", "
             next_token_skip_space_or_newline
           end
         end
@@ -1655,7 +1671,10 @@ module Iyi
       @indent = @column + 1
 
       write_token :OP_LPAREN
-      skip_space
+      # A comment after "(" leaves the newline after it to the check below:
+      # written with it, `def initialize( # c` lost the indentation mode, put
+      # its first parameter at column 0 and lined the rest up under the "(".
+      skip_space(consume_newline: false)
 
       # When "(" follows newline, it turns on two spaces indentation mode.
       if @token.type.newline?
@@ -1928,6 +1947,19 @@ module Iyi
         return format_macro_end
       end
 
+      # The parser's newline token after the header takes every blank line
+      # below it, and this lexer, which counts whitespace, hands those back as
+      # a literal of their own. When the body's first line starts at column 0
+      # with `{{`, `{%` or a comment, the parser has no node for that literal
+      # and the node after it met it instead: `macro m`, a blank line,
+      # `{{ 1 }}` was "there's a bug formatting". The blank lines are kept.
+      first = body.is_a?(Expressions) ? body.expressions.first : body
+      if @token.type.macro_literal? && newlines_only?(@token.raw) &&
+         !(first.is_a?(MacroLiteral) && newlines_only?(first.value[0, 1]))
+        write @token.raw, no_rstrip: true
+        next_macro_token
+      end
+
       inside_macro do
         no_indent do
           format_nested body, write_end_line: false, write_indent: false
@@ -1946,6 +1978,10 @@ module Iyi
       write "end"
       next_token
       false
+    end
+
+    private def newlines_only?(text)
+      !text.empty? && text.each_char.all?(&.in?('\n', '\r'))
     end
 
     def visit(node : MacroLiteral)
@@ -2638,7 +2674,13 @@ module Iyi
         return false
       end
 
-      write_token :OP_COLON_COLON if node.global?
+      if node.global?
+        # The parser reads a line break after `::` as space, as it does in
+        # front of a path: `::` / `puts 2` is `::puts 2`, and the name was
+        # asked for at the line break, "there's a bug formatting".
+        write_token :OP_COLON_COLON
+        skip_space_or_newline
+      end
 
       if obj
         # This handles unary operators written in prefix notation.
@@ -2884,8 +2926,11 @@ module Iyi
       found_comment = false
 
       # For special calls we want to format `.as (Int32)` into `.as(Int32)`
-      # so we remove the space between "as" and "(".
-      skip_space if special_call
+      # so we remove the space between "as" and "(". A space before a comment
+      # is left to the caller, as after any other call: skipped here, the
+      # comment after `if x.nil?` was written inside the condition's
+      # indentation, and the comment line under it went to column 3.
+      skip_space if special_call && @token.type.space? && @lexer.current_char != '#'
 
       # If the call has a single argument which is a parenthesized `Expressions`,
       # we skip whitespace between the method name and the arg. The parenthesized
@@ -3013,6 +3058,11 @@ module Iyi
       has_newlines = false
       found_comment = false
 
+      # A space or a comment after `(` comes before the newline that puts the
+      # arguments on their own lines. Looking at it first, `f( ` with a
+      # trailing space was written `f(1,`, and `Planet.new( # c` put its
+      # first argument at column 0.
+      skip_space(consume_newline: false)
       if @token.type.newline?
         if do_consume_newlines
           indent(needed_indent) { consume_newlines }
@@ -3069,12 +3119,13 @@ module Iyi
     end
 
     def format_named_args(args, named_args, needed_indent)
-      skip_space(needed_indent)
-
       named_args_column = needed_indent
 
-      if args.empty?
-      else
+      # With no positional argument, what follows `(` is the first named
+      # argument's, and `format_args_simple` reads a comment there with the
+      # newline after it. Written here, `foo( # c` put `a: 1` at column 0.
+      unless args.empty?
+        skip_space(needed_indent)
         write_token :OP_COMMA
         found_comment = skip_space(needed_indent)
         if found_comment || @token.type.newline?
@@ -3129,7 +3180,11 @@ module Iyi
             end
           end
         elsif found_comment
-          write_indent(column)
+          # A comment after an earlier argument's comma says nothing about
+          # this line: `f(a, # c` over `bbbbbbbb)` inside a `begin` was
+          # written `bbbbbbbb  )`, the block's indentation put in front of
+          # the `)`. Only a `)` that starts its line takes it.
+          write_indent(column) if @wrote_newline
         end
         check :OP_RPAREN
 
@@ -3239,7 +3294,16 @@ module Iyi
             accept body
           end
           skip_space_or_newline
-          write " "
+          # A comment ending the body's last line has not taken the line
+          # break with it (that is the `}`'s to decide), and a `}` written
+          # after it closed nothing: `each { |i| puts i` / `puts 2 # c` / `}`
+          # came back with `# c }`, and the file no longer parsed.
+          if @wrote_comment
+            write_line
+            write_indent
+          else
+            write " "
+          end
         end
         write_token :OP_RCURLY
       else
@@ -3741,8 +3805,9 @@ module Iyi
           accept supertrait
           # `skip_space` and not `skip_space_or_newline`: what follows the last
           # supertrait is the trait's body, and a comment on the next line
-          # belongs to it rather than to this line.
-          skip_space
+          # belongs to it rather than to this line - at the body's indentation,
+          # where `trait Num : Comparable # c` put it at the trait's own.
+          skip_space(@indent + 2)
           if @token.type.op_comma?
             write ", " unless last?(i, supertraits)
             next_token_skip_space_or_newline
@@ -3790,12 +3855,16 @@ module Iyi
         next_token_skip_space_or_newline
         type_vars.each_with_index do |type_var, i|
           write type_var
-          next_token_skip_space
+          # A comment ending the header is the body's, and so are the comment
+          # lines under it: `impl Show for Box(T) forall T # c` put them at
+          # the `impl`'s indentation.
+          next_token
+          skip_space(@indent + 2)
           if @token.type.op_colon?
             write " : "
             next_token_skip_space_or_newline
             accept node.type_var_bounds.not_nil![type_var]
-            skip_space
+            skip_space(@indent + 2)
           end
           if @token.type.op_comma?
             write ", " unless last?(i, type_vars)
@@ -3985,8 +4054,10 @@ module Iyi
             next_token_skip_space_or_newline
           end
         end
+        # What follows `)` is the caller's: skipped here, a comment ending
+        # `class Box(T) # c` was written with the comment lines under it at
+        # the class's indentation rather than its body's.
         write_token :OP_RPAREN
-        skip_space
       end
     end
 
@@ -4751,6 +4822,12 @@ module Iyi
         skip_space_or_newline
       end
 
+      # A body on the opener's line can end its last line in a comment, which
+      # has not taken the line break with it: `-> { puts 1` / `puts 2 # c` /
+      # `}` came back with `# c }`, and the `}` closed nothing, or closed the
+      # lines after it - `x.call` went into `x`'s own body. `do` had `# c end`.
+      write_line if @wrote_comment
+
       if is_do
         check_end
         write_indent
@@ -4931,6 +5008,9 @@ module Iyi
 
         write_line unless @wrote_newline
         write_indent
+      elsif @wrote_newline
+        # A comment after the last section ended the line.
+        write_indent
       end
 
       write_token :OP_RPAREN
@@ -4962,23 +5042,32 @@ module Iyi
 
       parts.each_with_index do |part, i|
         yield part
-        skip_space
+        # A comment ending the line leaves its newline to the checks below,
+        # which put the next section under the first colon. Written with the
+        # newline, it left the next `: ...` at column 1, and a comment line
+        # between two sections went up to the end of the line before it,
+        # with a blank line after it that a second pass turned into the
+        # column-1 layout.
+        found_comment = skip_space(consume_newline: false)
 
         if @token.type.op_comma?
           write "," unless last?(i, parts)
-          next_token_skip_space
+          next_token
+          found_comment = skip_space(consume_newline: false)
         end
 
         if @token.type.newline?
           if last?(i, parts)
-            next_token_skip_space_or_newline
+            skip_space_or_newline(colon_column, last: true)
             if @token.type.op_colon? || @token.type.op_colon_colon?
-              write_line
+              write_line unless @wrote_newline
               write_indent(colon_column)
+            elsif found_comment
+              write_line unless @wrote_newline
             end
           else
             consume_newlines
-            write_indent(last?(i, parts) ? colon_column : column)
+            write_indent(column)
             skip_space_or_newline
           end
         else
@@ -5516,41 +5605,51 @@ module Iyi
 
     # Align series of successive comments
     def align_comments(lines)
-      max_column = nil
+      max_cells = nil
 
       lines.each_with_index do |line, i|
         comment_column = @comment_columns[i]?
         if comment_column
-          if max_column
-            lines[i] = align_comment line, i, comment_column, max_column
-          else
-            max_column = find_max_column(lines, i + 1, comment_column)
-            lines[i] = align_comment line, i, comment_column, max_column
-          end
+          max_cells ||= find_max_cells(lines, i)
+          lines[i] = align_comment line, comment_column, max_cells
         else
-          max_column = nil
+          max_cells = nil
         end
       end
     end
 
-    def find_max_column(lines, base, max)
-      while base < @comment_columns.size
-        comment_column = @comment_columns[base]?
-        break unless comment_column
-
-        max = comment_column if comment_column > max
+    def find_max_cells(lines, base)
+      max = 0
+      while (comment_column = @comment_columns[base]?) && (line = lines[base]?)
+        max = Math.max(max, cells_before(line, comment_column))
         base += 1
       end
-
       max
     end
 
-    def align_comment(line, i, comment_column, max_column)
-      return line if comment_column == max_column
+    # The cells a terminal draws the text in front of *column* in, a wide
+    # character taking two. Counted in characters, `x = "日本" # c` over
+    # `yy = "ab" # d` put the first `#` two cells right of the second. In an
+    # iyi file only: the other language's library is held to its own
+    # formatter, which counts characters, and its doc comments' wide
+    # examples were realigned by this.
+    private def cells_before(line, column)
+      return column if line.ascii_only? || !Lexer.iyi_source?(@filename)
+
+      cells = 0
+      line.each_char_with_index do |char, index|
+        break if index == column
+        cells += CodeError.display_width(char)
+      end
+      cells
+    end
+
+    def align_comment(line, comment_column, max_cells)
+      gap = max_cells - cells_before(line, comment_column)
+      return line if gap <= 0
 
       source_line = line[0...comment_column]
       comment_line = line[comment_column..-1]
-      gap = max_column - comment_column
 
       result = String.build do |str|
         str << source_line

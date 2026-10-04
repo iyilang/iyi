@@ -20,7 +20,23 @@ class Iyi::VirtualFile
   # `raise` is.
   property line_origins : Hash(Int32, Int32)? = nil
 
+  # iyi: how many expansions this one sits inside, itself included: 1 for a
+  # macro called from a file. A macro that expands to a call of itself, or
+  # of one that calls it back, never stops expanding, and nothing counted:
+  # `macro m(x)` holding `m({{ x }})` ran the compiler into a stack overflow
+  # after 5 to 17 seconds, in `Lexer.iyi_source?`, which walks this chain.
+  # `Program#parse_macro_source` refuses an expansion deeper than
+  # `DEPTH_LIMIT`.
+  getter depth : Int32
+
+  # Far past any expansion that ends, and short of the stack: a self-call
+  # ran out near 4,900 levels, and an `inherited` hook whose class sets it
+  # off again, which nests a namespace and a superclass each time, near 125.
+  DEPTH_LIMIT = 64
+
   def initialize(@macro : Macro, @source : String, @expanded_location : Location?)
+    outer = @expanded_location.try(&.filename)
+    @depth = outer.is_a?(VirtualFile) ? outer.depth + 1 : 1
   end
 
   def to_s(io : IO) : Nil

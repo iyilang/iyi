@@ -125,7 +125,7 @@ class Iyi::CodeGenVisitor
     # records the hard way).
     initializer = @main_llvm_context.int64.const_array(words.map { |word| int64(word.to_i64) })
     table = @main_mod.globals.add(initializer.type, "#{GC_LAYOUTS_NAME}:table")
-    table.linkage = LLVM::Linkage::Internal if @single_module
+    table.linkage = LLVM::Linkage::Internal if iyi_internalise?
     table.global_constant = true
     table.initializer = initializer
 
@@ -189,7 +189,7 @@ class Iyi::CodeGenVisitor
       next unless type.is_a?(NonGenericClassType) || type.is_a?(GenericClassInstanceType)
       name = "#{type.llvm_name}:headed"
       global = @main_mod.globals[name]? || @main_mod.globals.add(@main_llvm_context.int8, name)
-      global.linkage = LLVM::Linkage::Internal if @single_module
+      global.linkage = LLVM::Linkage::Internal if iyi_internalise?
       global.initializer = @main_llvm_context.int8.const_int(iyi_headed?(type) ? 1 : 0)
       global.global_constant = true
     end

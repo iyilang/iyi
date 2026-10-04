@@ -846,7 +846,11 @@ def kill_workers(c):
     children cannot be listed, and the step that asked reports itself
     unmeasured."""
     import signal
-    own = os.path.normcase(process_binary(c.proc.pid))
+    try:
+        own = os.path.normcase(process_binary(c.proc.pid))
+    except OSError:
+        # darwin has no /proc to read a binary from: unmeasured there.
+        return 0
     found = []
     for pid in children(c.proc.pid):
         try:

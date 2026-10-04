@@ -164,8 +164,8 @@ gc_panics_with "realloc to -64" realloc_neg "negative size: -64" 'GC.realloc(GC.
 
 echo
 echo "== proving the checks can fail when the module is broken"
-prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
-  local label="$1" dir="$2" phrase="$3" script="$4"
+prove_fails() { # prove_fails <label> <dir> <phrase> <sed script> [runs]
+  local label="$1" dir="$2" phrase="$3" script="$4" runs="${5:-1}"
   mkdir -p "$WORK/$dir/std"
   sed -e "$script" "$REPO/src/std/gc.iyi" > "$WORK/$dir/std/gc.iyi"
   if cmp -s "$REPO/src/std/gc.iyi" "$WORK/$dir/std/gc.iyi"; then
@@ -179,10 +179,16 @@ prove_fails() { # prove_fails <label> <dir> <phrase> <sed script>
     status=1
     return
   fi
-  "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
-  local exit_code=$?
+  # A race is run until it is caught, up to *runs* times.
+  local run=1 exit_code=0
+  while [ "$run" -le "$runs" ]; do
+    "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+    exit_code=$?
+    [ "$exit_code" -ne 0 ] && break
+    run=$((run + 1))
+  done
   if [ "$exit_code" -eq 0 ]; then
-    echo "  $label: the exercise still passed, so it does not test this"
+    echo "  $label: the exercise still passed in $runs run(s), so it does not test this"
     status=1
     return
   fi
@@ -211,10 +217,12 @@ prove_fails "free does nothing" free_noop "a freed chunk is not" \
 # platform's to arrange, so the proofs run where they were measured.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    # Races: 20 in 20 and 10 in 10 where measured, and one Windows runner
+    # once ran the second clean, so each runs up to five times.
     prove_fails "stats walks without the lock" stats_unlocked "memory fault" \
-      '/def self.stats/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d}'
+      '/def self.stats/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d}' 5
     prove_fails "is_heap_ptr walks without the lock" is_heap_unlocked "memory fault" \
-      '/def self.is_heap_ptr/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d}'
+      '/def self.is_heap_ptr/,/^  end/{/^    IyiHeap\.lock$/d; /^    IyiHeap\.unlock$/d}' 5
     ;;
   *)
     echo "  stats and is_heap_ptr walking without the lock: not proven here, the races were measured on Windows"

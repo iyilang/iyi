@@ -53,8 +53,12 @@ def watchdog(seconds):
         while True:
             time.sleep(5)
             if time.monotonic() - LAST["at"] > seconds:
-                print(f"step {LAST['step'] + 1} never finished: no answer in "
-                      f"{seconds} s after step {LAST['step']}", flush=True)
+                if "label" in LAST:
+                    print(f"the step after step {LAST['label']} never finished: no answer "
+                          f"in {seconds} s", flush=True)
+                else:
+                    print(f"step {LAST['step'] + 1} never finished: no answer in "
+                          f"{seconds} s after step {LAST['step']}", flush=True)
                 # What was asked and who was left to answer it: a hang on a
                 # Windows runner said nothing more than the line above.
                 print(f"  the last request sent: {LAST.get('sent', '(none)')}", flush=True)
@@ -343,8 +347,13 @@ class Client:
 def step(n, name, ok, detail=""):
     mark = "ok" if ok else "FAIL"
     print(f"step {n:2} {name}: {mark}  {detail}", flush=True)
+    # Every step restarts the watchdog's clock and is the one it names,
+    # lettered ones too. Counted at numbered steps only, a hang right
+    # after 18m (a new session's first verdict) was reported as "step 19
+    # never finished ... after step 18", and read as foldingRange's.
+    LAST["label"], LAST["at"] = n, time.monotonic()
     if isinstance(n, int):
-        LAST["step"], LAST["at"] = n, time.monotonic()
+        LAST["step"] = n
     if not ok:
         sys.exit(1)
 
@@ -985,6 +994,24 @@ def buffer_steps(c):
         shutil.rmtree(own, ignore_errors=True)
         print("step 73c a successor is not warmed on the buffer its predecessor died in: "
               "unmeasured here, the workers are killed on Windows only", flush=True)
+
+
+def restore_binary(backup, binary):
+    """Put the binary step 46 moved aside back. A Windows runner refused
+    the rename back once with "being used by another process", the
+    request already answered and no server started from the file since:
+    a scanner's handle on a freshly renamed executable [INFERENCE]. Ten
+    seconds of retries; a server that kept the file open still fails
+    here, with the error it got."""
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.replace(backup, binary)
+            return
+        except PermissionError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.2)
 
 
 def held_open(work, seconds):
@@ -3133,7 +3160,7 @@ def main():
             reply = c.send("textDocument/diagnostic",
                            {"textDocument": {"uri": greet_uri}})
         finally:
-            shutil.move(backup, binary)
+            restore_binary(backup, binary)
         held = (reply.get("result") or {}).get("kind") == "full"
         step(46, "a rebuilt binary does not lobotomise the session",
              held and "error" not in reply,

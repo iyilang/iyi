@@ -1153,8 +1153,11 @@ jobs:
     # the compiler, its daemon and the tarball (22m07s) and walking the
     # collector-free floor (11m32s). Five minutes of headroom is a red
     # build for the next step anybody adds, and the step that found this
-    # was measured at 2m20s.
-    timeout-minutes: 90
+    # was measured at 2m20s. A hundred and twenty since: the three runs
+    # that finished before it took 77, 83 and 83 minutes, and two were
+    # cancelled at ninety in their last steps (the test verb, then
+    # `daemon_protocol.py`), the gates they had run all green.
+    timeout-minutes: 120
     name: "An iyi program, run on darwin arm64"
     steps:
       - uses: actions/checkout@v7

@@ -12,8 +12,9 @@ so the grammar paints instantly and the server's tokens — the truth —
 override it the moment they arrive. It covers only what cannot drift:
 comments, strings, numbers, keywords, capitalized types, def names.
 
-The one prerequisite everywhere: `iyi` on your `PATH` (or spell the
-absolute path where the config names the command).
+To use the language server, put `iyi` on your `PATH` (or spell the
+absolute path where the config names the command). The Vim syntax plugin
+also works without the compiler or a language server.
 
 ## VS Code
 
@@ -67,7 +68,17 @@ once, then **Settings → Access Tokens**. The namespace is unverified until
 you [claim it](https://github.com/EclipseFdn/open-vsx.org/issues), which
 only changes the badge on the listing, not the install.
 
+## Vim and Neovim syntax
+
+The plugin in [`vim/`](vim/) detects `.iyi` files, highlights syntax, and
+sets comment formatting and two-space indentation. See its
+[installation instructions](vim/README.md) for Vim packages and Neovim.
+It works independently of the language server.
+
 ## Neovim (0.11+)
+
+Install the syntax plugin above for highlighting before LSP tokens arrive.
+
 
 ```lua
 vim.filetype.add { extension = { iyi = "iyi" } }

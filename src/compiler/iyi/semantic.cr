@@ -29,8 +29,9 @@ class Iyi::Program
 
   # The passes that follow the top-level ones, split out so that the prelude
   # fork probe can run the top-level pass over the prelude and over the user
-  # file separately and then finish over the combined tree. Calling
-  # `top_level_semantic` and then this is exactly `semantic`.
+  # file separately and then finish over the combined tree.
+  # `semantic` also appends definition-typing probes between these passes;
+  # the fork probe currently omits that step.
   #
   # *also_check* is for the fork probe, whose prelude was processed by a
   # different `TypeDeclarationProcessor` in the parent. Its class-var check has
@@ -55,6 +56,10 @@ class Iyi::Program
     # give an error otherwise
     processor.check_non_nilable_class_vars_without_initializers
     also_check.try &.check_non_nilable_class_vars_without_initializers
+
+    # Definition typing has now declared the imported witnesses. Resolve
+    # deferred union/generic matches strictly before typing consumer bodies.
+    Prof.span("restored artifact references") { resolve_iyi_artifact_refs }
 
     result = @progress_tracker.stage("Semantic (main)") do
       Prof.span("main: visit_main") do
@@ -121,7 +126,7 @@ class Iyi::Program
     # by name. Asked per import it was a stricter order than the question: `pg`
     # declares `PG` and `PQ`, each names the other, and no order of two
     # boundaries answers both. See `Program::IyiArtifactRef`.
-    Prof.span("artifact references") { resolve_iyi_artifact_refs }
+    Prof.span("artifact references") { resolve_iyi_artifact_refs(defer_witness_matches: true) }
 
     @progress_tracker.stage("Semantic (new)") do
       Prof.span("new methods") { define_new_methods(new_expansions) }

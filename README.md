@@ -3,6 +3,7 @@
 [![iyi](https://github.com/iyilang/iyi/actions/workflows/iyi.yml/badge.svg)](https://github.com/iyilang/iyi/actions/workflows/iyi.yml)
 [![licence](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](LICENSE)
 [![site](https://img.shields.io/badge/site-iyi--lang.com-black.svg)](https://iyi-lang.com)
+[![packages](https://img.shields.io/badge/packages-iyipacks-blue.svg)](https://iyipacks.mx.ee/)
 
 **A language built for Developer & Agentic Experience, Portability, Performance,
 and Efficiency.** (*iyi* is Turkish for "good".)
@@ -540,6 +541,11 @@ than the package's exported surface changed since its last tag, and `replace
 example.com/someone/lib => ../lib` builds one from a directory beside the
 project while both are being written. `bench/init_project.sh` holds the claim that both files are
 right the moment they land, on Linux and on Windows.
+
+Looking for a package? [iyipacks](https://iyipacks.mx.ee/) is a community
+directory for browsing and searching iyi's standard library modules and
+iyi packages on GitHub. Browse by category, follow a package to its source,
+and add a dependency with `iyi get` as described above.
 
 ### An editor, in one stanza
 

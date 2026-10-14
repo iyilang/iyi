@@ -1,0 +1,130 @@
+# Exercises `std/crypto`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_crypto_exercise.iyi
+
+module bench/std_crypto_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def hex(bytes : Array(UInt8)) : String
+  digits = "0123456789abcdef"
+  text = ""
+  bytes.each do |b|
+    text = text + digits[b.to_i32 >> 4].to_s + digits[b.to_i32 & 15].to_s
+  end
+  text
+end
+
+def run_of(byte : UInt8, count : Int32) : Array(UInt8)
+  Array(UInt8).new(count, byte)
+end
+
+def range_of(first : Int32, last : Int32) : Array(UInt8)
+  Array(UInt8).new(last - first + 1) { |i| (first + i).to_u8 }
+end
+
+import std/digest::{MD5, SHA1, SHA224, SHA256, SHA384, SHA512}
+import std/crypto::{HMAC, HKDF, PBKDF2, Subtle}
+
+# RFC 4231's cases 1, 2, 6 and 7 for the SHA-2s and the same messages for
+# MD5 and SHA-1 (RFC 2202 has the first two): a short key, a key shorter
+# than the message, and a 131-byte key, longer than both block sizes, so
+# it is hashed first. Python's hmac gives these.
+puts "== hmac"
+key1 = run_of(0x0b_u8, 20)
+key6 = run_of(0xaa_u8, 131)
+data7 = "This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm."
+assert_str "5ccec34ea9656392457fa1ac27f08fbc", HMAC.hexdigest(MD5, key1, "Hi There"), "hmac-md5 case 1"
+assert_str "750c783e6ab0b503eaa86e310a5db738", HMAC.hexdigest(MD5, "Jefe", "what do ya want for nothing?"), "hmac-md5 case 2"
+assert_str "bfecaf4efff90a3a668f3922fec3762d", HMAC.hexdigest(MD5, key6, "Test Using Larger Than Block-Size Key - Hash Key First"), "hmac-md5 case 6"
+assert_str "09b8ae7b15adbbb243aca3491b51512b", HMAC.hexdigest(MD5, key6, data7), "hmac-md5 case 7"
+assert_str "b617318655057264e28bc0b6fb378c8ef146be00", HMAC.hexdigest(SHA1, key1, "Hi There"), "hmac-sha1 case 1"
+assert_str "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79", HMAC.hexdigest(SHA1, "Jefe", "what do ya want for nothing?"), "hmac-sha1 case 2"
+assert_str "90d0dace1c1bdc957339307803160335bde6df2b", HMAC.hexdigest(SHA1, key6, "Test Using Larger Than Block-Size Key - Hash Key First"), "hmac-sha1 case 6"
+assert_str "217e44bb08b6e06a2d6c30f3cb9f537f97c63356", HMAC.hexdigest(SHA1, key6, data7), "hmac-sha1 case 7"
+assert_str "896fb1128abbdf196832107cd49df33f47b4b1169912ba4f53684b22", HMAC.hexdigest(SHA224, key1, "Hi There"), "hmac-sha224 case 1"
+assert_str "a30e01098bc6dbbf45690f3a7e9e6d0f8bbea2a39e6148008fd05e44", HMAC.hexdigest(SHA224, "Jefe", "what do ya want for nothing?"), "hmac-sha224 case 2"
+assert_str "95e9a0db962095adaebe9b2d6f0dbce2d499f112f2d2b7273fa6870e", HMAC.hexdigest(SHA224, key6, "Test Using Larger Than Block-Size Key - Hash Key First"), "hmac-sha224 case 6"
+assert_str "3a854166ac5d9f023f54d517d0b39dbd946770db9c2b95c9f6f565d1", HMAC.hexdigest(SHA224, key6, data7), "hmac-sha224 case 7"
+assert_str "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7", HMAC.hexdigest(SHA256, key1, "Hi There"), "hmac-sha256 case 1"
+assert_str "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", HMAC.hexdigest(SHA256, "Jefe", "what do ya want for nothing?"), "hmac-sha256 case 2"
+assert_str "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54", HMAC.hexdigest(SHA256, key6, "Test Using Larger Than Block-Size Key - Hash Key First"), "hmac-sha256 case 6"
+assert_str "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2", HMAC.hexdigest(SHA256, key6, data7), "hmac-sha256 case 7"
+assert_str "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6", HMAC.hexdigest(SHA384, key1, "Hi There"), "hmac-sha384 case 1"
+assert_str "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649", HMAC.hexdigest(SHA384, "Jefe", "what do ya want for nothing?"), "hmac-sha384 case 2"
+assert_str "4ece084485813e9088d2c63a041bc5b44f9ef1012a2b588f3cd11f05033ac4c60c2ef6ab4030fe8296248df163f44952", HMAC.hexdigest(SHA384, key6, "Test Using Larger Than Block-Size Key - Hash Key First"), "hmac-sha384 case 6"
+assert_str "6617178e941f020d351e2f254e8fd32c602420feb0b8fb9adccebb82461e99c5a678cc31e799176d3860e6110c46523e", HMAC.hexdigest(SHA384, key6, data7), "hmac-sha384 case 7"
+assert_str "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854", HMAC.hexdigest(SHA512, key1, "Hi There"), "hmac-sha512 case 1"
+assert_str "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737", HMAC.hexdigest(SHA512, "Jefe", "what do ya want for nothing?"), "hmac-sha512 case 2"
+assert_str "80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598", HMAC.hexdigest(SHA512, key6, "Test Using Larger Than Block-Size Key - Hash Key First"), "hmac-sha512 case 6"
+assert_str "e37b6a775dc87dbaa4dfa9f96e5e3ffddebd71f8867289865df5a32d20cdc944b6022cac3c4982b10d5eeb55c3e4de15134676fb6de0446065c97440fa8c6a58", HMAC.hexdigest(SHA512, key6, data7), "hmac-sha512 case 7"
+assert_str "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7", hex(HMAC.digest(SHA256, key1, [72_u8, 105_u8, 32_u8, 84_u8, 104_u8, 101_u8, 114_u8, 101_u8])), "hmac digest of an Array(UInt8) message"
+puts "  HMAC over six hashes, RFC 4231 and 2202"
+
+puts "\n== hmac streaming"
+mac = HMAC.new(SHA256, "Jefe")
+mac.update("what do ya ")
+mac.update("want for nothing?")
+assert_str "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", mac.hexfinal, "a message in two pieces"
+mac.reset
+mac.update("what do ya want for nothing?")
+assert_str "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", mac.hexfinal, "the same key after reset"
+mac.reset
+assert_str HMAC.hexdigest(SHA256, "Jefe", ""), mac.hexfinal, "reset forgets the message before it"
+into = Array(UInt8).new(40, 9_u8)
+mac.reset
+mac.update("what do ya want for nothing?")
+mac.final(into)
+assert_true hex(into[0, 32]) == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843" && into[32] == 9_u8, "final into a buffer writes the MAC and nothing past it"
+assert_true HMAC.new(SHA512, "k").digest_size == 64 && HMAC.new(MD5, "k").digest_size == 16, "digest sizes"
+puts "  update, reset and final into a buffer"
+
+# RFC 5869's cases 1 to 4: lengths that end mid-block, 80-byte inputs,
+# an empty salt and info, and SHA-1.
+puts "\n== hkdf"
+ikm = run_of(0x0b_u8, 22)
+salt = range_of(0x00, 0x0c)
+info = range_of(0xf0, 0xf9)
+prk = HKDF.extract(SHA256, salt, ikm)
+assert_str "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5", hex(prk), "case 1 prk"
+assert_str "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865", hex(HKDF.expand(SHA256, prk, info, 42)), "case 1 okm"
+assert_str "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87", hex(HKDF.derive(SHA256, range_of(0x00, 0x4f), range_of(0x60, 0xaf), range_of(0xb0, 0xff), 82)), "case 2 okm"
+assert_str "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04", hex(HKDF.extract(SHA256, "", ikm)), "case 3 prk, an empty salt"
+assert_str "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8", hex(HKDF.derive(SHA256, ikm, "", "", 42)), "case 3 okm"
+assert_str "085a01ea1b10f36933068b56efa5ad81a4f14b822f5b091568a9cdd4f155fda2c22e422478d305f3f896", hex(HKDF.derive(SHA1, run_of(0x0b_u8, 11), salt, info, 42)), "case 4, SHA-1"
+assert_true HKDF.expand(SHA256, prk, info, 255 * 32).size == 8160, "the longest expansion"
+assert_true HKDF.expand(SHA256, prk, info, 0).size == 0, "no bytes"
+assert_str hex(HKDF.expand(SHA256, prk, info, 42))[0, 40], hex(HKDF.expand(SHA256, prk, info, 20)), "a shorter output is a prefix of a longer one"
+puts "  RFC 5869 cases 1 to 4"
+
+# RFC 6070's SHA-1 cases, a NUL inside the password and the salt among
+# them, and SHA-256 and SHA-512 from Python's hashlib, one of which needs
+# two blocks of output and part of a third.
+puts "\n== pbkdf2"
+assert_str "0c60c80f961f0e71f3a9b524af6012062fe037a6", hex(PBKDF2.derive(SHA1, "password", "salt", 1, 20)), "sha1, 1 iteration"
+assert_str "4b007901b765489abead49d926f721d065a429c1", hex(PBKDF2.derive(SHA1, "password", "salt", 4096, 20)), "sha1, 4096 iterations"
+assert_str "3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038", hex(PBKDF2.derive(SHA1, "passwordPASSWORDpassword", "saltSALTsaltSALTsaltSALTsaltSALTsalt", 4096, 25)), "sha1, 25 bytes"
+assert_str "56fa6aa75548099dcc37d7f03425e0c3", hex(PBKDF2.derive(SHA1, "pass\0word", "sa\0lt", 4096, 16)), "sha1, NUL bytes"
+assert_str "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b", hex(PBKDF2.derive(SHA256, "password", "salt", 1, 32)), "sha256, 1 iteration"
+assert_str "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134af7ad98c1b458ce3f", hex(PBKDF2.derive(SHA256, "password", "salt", 4096, 40)), "sha256, 40 bytes"
+assert_str "afe6c5530785b6cc6b1c6453384731bd5ee432ee549fd42fb6695779ad8a1c5bf59de69c48f774efc4007d5298f9033c0241d5ab69305e7b64eceeb8d834cfec6afdec3c1c23982a121f2d4be008889378a49a0dfb104f0d2856e38f44271cdaf6de4341", hex(PBKDF2.derive(SHA512, "password", "salt", 1000, 100)), "sha512, 100 bytes"
+puts "  RFC 6070 and SHA-2"
+
+puts "\n== constant-time compare"
+assert_true Subtle.constant_time_compare("secret", "secret"), "equal strings"
+assert_true !Subtle.constant_time_compare("secret", "Secret"), "first byte differs"
+assert_true !Subtle.constant_time_compare("secret", "secreT"), "last byte differs"
+assert_true !Subtle.constant_time_compare("secret", "secrets"), "a prefix"
+assert_true Subtle.constant_time_compare("", ""), "empty"
+assert_true Subtle.constant_time_compare(HMAC.digest(SHA256, "k", "m"), HMAC.digest(SHA256, "k", "m")), "two MACs"
+assert_true Subtle.constant_time_compare("abc", [97_u8, 98_u8, 99_u8]), "a string against its bytes"
+puts "  equal, unequal at either end, and of other sizes"
+
+puts "\nALL CHECKS PASSED"

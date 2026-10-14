@@ -22,6 +22,20 @@
   against Python's hashlib, 1,280 bytes fed in uneven pieces, five
   refusals, and four broken copies of the module, each caught at the
   check that names it.
+- **`std/crypto`: HMAC, HKDF, PBKDF2 and a constant-time compare.**
+  `HMAC.hexdigest(SHA256, key, message)`, or `HMAC.new(SHA256, key)` with
+  `update`, `final` and `reset`; `HKDF.extract`, `expand` and `derive`;
+  `PBKDF2.derive(SHA256, password, salt, iterations, length)`; and
+  `Subtle.constant_time_compare(a, b)`, which reads every byte and so
+  takes the same time wherever two MACs differ. Any of the six hashes can
+  be named. The keyed state is computed once and copied back on `reset`,
+  so PBKDF2 allocates nothing per round: 600,000 rounds of HMAC-SHA256
+  take 231 ms `--release`, against 142 ms for Python's hashlib over
+  OpenSSL. Held by `bench/std_crypto_exercise.sh`: RFC 4231's and 2202's
+  HMAC cases over all six hashes, RFC 5869's four HKDF cases, RFC 6070's
+  PBKDF2 cases and SHA-2 ones from Python, seven refusals, and six broken
+  copies of the module. No cipher, signature or TLS yet: these are what
+  a TLS 1.3 written in iyi would start from.
 - **A program connects by host name, through iyi's own resolver.**
   `IyiSocket.connect("example.com", 80)` and
   `HTTP.get("http://example.com/")` panicked with "cannot resolve address"

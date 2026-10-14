@@ -4,6 +4,22 @@
 
 ### Added
 
+- **`std/digest` has SHA-3 (`SHA3_224`, `SHA3_256`, `SHA3_384`,
+  `SHA3_512`) and the extendable-output `SHAKE128` and `SHAKE256`.**
+  FIPS 202's Keccak-f[1600] on 64-bit lanes, in iyi. The four SHA-3s are
+  `Digest`s like the SHA-2s: `update` in pieces, `final`, `hexfinal`,
+  `dup`, `copy_from`, `reset`, the rate as `block_size`. A SHAKE takes
+  `update`, then `read(n)` as often as wanted, each read going on where
+  the last stopped; `update` after a read is refused ("update after
+  read; reset first"), as are negative counts. The gate holds NIST's
+  example values (the empty message and 200 bytes of 0xa3, 512 bytes of
+  SHAKE output), every length to 300 bytes, 3,000 random messages fed
+  in random pieces against python's hashlib with SHAKE reads split at
+  random against one read, and proofs that a wrong round constant, a
+  rho rotation off by one, the padding byte 0x01 for 0x06 and SHA3-256
+  at the wrong rate are each caught. Measured with `--release` on 4 MB:
+  SHA3-256 21 ms and a SHAKE128 read 22 ms, against SHA-256's 11 and
+  hashlib's (OpenSSL) 6 and 5.
 - **`std/http`: the client's `timeout_ms`.** `HTTP.request`, `HTTP.open`,
   `HTTP.upgrade` and `HTTPClient.new` take one: it bounds the connect and
   each read and write after it - a pause, not the whole exchange, as

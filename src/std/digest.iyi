@@ -1,13 +1,15 @@
 # Digests, written in iyi: MD5, SHA-1, the SHA-2 family (SHA-224, SHA-256,
-# SHA-384, SHA-512), CRC-32 and Adler-32.
+# SHA-384, SHA-512), the SHA-3 family (SHA3-224, SHA3-256, SHA3-384,
+# SHA3-512) with its extendable-output functions SHAKE128 and SHAKE256,
+# CRC-32 and Adler-32.
 #
 # Nothing here reaches OpenSSL, zlib or compiler-rt. The words are the
-# RFCs' and FIPS 180-4's (1321, 3174, 6234, 1950, ISO 3309); the
+# RFCs' and FIPS 180-4's and FIPS 202's (1321, 3174, 6234, 1950, ISO 3309); the
 # arithmetic is `std/int`'s wrapping `&+` and the shifts. `hexdigest`
 # answers lowercase hex. MD5 and SHA-1 are the checksums they always
 # were, not a lock.
 #
-# The six hashes are each a `Digest`. `SHA256.hexdigest(data)` and
+# The ten hashes are each a `Digest`. `SHA256.hexdigest(data)` and
 # `SHA256.hash_bytes(data)` hash one piece of data; `SHA256.new`, then
 # `update` as often as the data arrives, then `final` or `hexfinal` once,
 # hash it in pieces. Data is a `String`, whose bytes are hashed, or an
@@ -17,7 +19,9 @@
 # message from its keyed state, and `dup` is a copy that shares nothing.
 # CRC-32 and Adler-32 are checksums: a `checksum` of one piece, and an
 # `update` that goes on from a checksum already taken, as std/compress's
-# streams take theirs.
+# streams take theirs. SHAKE128 and SHAKE256 are not a `Digest`, having
+# no one size: `update` as the data arrives, then `read(n)` as often as
+# more output is wanted, each read going on where the last one stopped.
 
 module std/digest
 
@@ -694,6 +698,341 @@ pub class SHA384 < SHA512
     @h[5] = 0x8eb44a8768581511_u64
     @h[6] = 0xdb0c2e0d64f98fa7_u64
     @h[7] = 0x47b5481dbefa4fa4_u64
+  end
+end
+
+# FIPS 202's Keccak-f[1600]: twenty-five 64-bit lanes, lane x + 5y at
+# index x + 5y, a lane's bytes least significant first. The rotations
+# and the order rho and pi visit the lanes in are walked as one cycle
+# (lane 1, then each lane pi sends it to), the compact form of the
+# Keccak team's reference, so the step needs one lane of temporary.
+struct Keccak
+  @@tables = Pointer(UInt64).new(0_u64)
+
+  # The 24 iota round constants, then the 24 rho offsets of the lanes the
+  # cycle visits, then the 24 lanes themselves, FIPS 202 sections 3.2.2
+  # to 3.2.5.
+  private def self.tables : Pointer(UInt64)
+    return @@tables if @@tables.address != 0_u64
+    words = [
+      0x0000000000000001_u64, 0x0000000000008082_u64, 0x800000000000808a_u64, 0x8000000080008000_u64,
+      0x000000000000808b_u64, 0x0000000080000001_u64, 0x8000000080008081_u64, 0x8000000000008009_u64,
+      0x000000000000008a_u64, 0x0000000000000088_u64, 0x0000000080008009_u64, 0x000000008000000a_u64,
+      0x000000008000808b_u64, 0x800000000000008b_u64, 0x8000000000008089_u64, 0x8000000000008003_u64,
+      0x8000000000008002_u64, 0x8000000000000080_u64, 0x000000000000800a_u64, 0x800000008000000a_u64,
+      0x8000000080008081_u64, 0x8000000000008080_u64, 0x0000000080000001_u64, 0x8000000080008008_u64,
+      1_u64, 3_u64, 6_u64, 10_u64, 15_u64, 21_u64, 28_u64, 36_u64, 45_u64, 55_u64, 2_u64, 14_u64,
+      27_u64, 41_u64, 56_u64, 8_u64, 25_u64, 43_u64, 62_u64, 18_u64, 39_u64, 61_u64, 20_u64, 44_u64,
+      10_u64, 7_u64, 11_u64, 17_u64, 18_u64, 3_u64, 5_u64, 16_u64, 8_u64, 21_u64, 24_u64, 4_u64,
+      15_u64, 23_u64, 19_u64, 13_u64, 12_u64, 2_u64, 20_u64, 14_u64, 22_u64, 9_u64, 6_u64, 1_u64,
+    ]
+    table = Pointer(UInt64).malloc(72_u64)
+    table.copy_from(words.to_unsafe, 72)
+    @@tables = table
+    table
+  end
+
+  # Every rotation here is by 1 to 63, so no branch for a zero.
+  private def self.rotl(x : UInt64, n : Int32) : UInt64
+    x.unsafe_shl(n) | x.unsafe_shr(64 - n)
+  end
+
+  # The 24 rounds over the 25 lanes at *a*; *c* is five lanes of scratch.
+  def self.permute(a : Pointer(UInt64), c : Pointer(UInt64)) : Nil
+    t = tables
+    round = 0
+    while round < 24
+      # theta: each lane takes the parity of the two columns beside it.
+      x = 0
+      while x < 5
+        c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20]
+        x = x + 1
+      end
+      x = 0
+      while x < 5
+        d = c[(x + 4) % 5] ^ rotl(c[(x + 1) % 5], 1)
+        y = 0
+        while y < 25
+          a[x + y] = a[x + y] ^ d
+          y = y + 5
+        end
+        x = x + 1
+      end
+      # rho and pi together, along the cycle.
+      last = a[1]
+      i = 0
+      while i < 24
+        j = t[48 + i].to_i32
+        moved = a[j]
+        a[j] = rotl(last, t[24 + i].to_i32)
+        last = moved
+        i = i + 1
+      end
+      # chi, a row at a time.
+      y = 0
+      while y < 25
+        x = 0
+        while x < 5
+          c[x] = a[y + x]
+          x = x + 1
+        end
+        x = 0
+        while x < 5
+          a[y + x] = c[x] ^ ((~c[(x + 1) % 5]) & c[(x + 2) % 5])
+          x = x + 1
+        end
+        y = y + 5
+      end
+      # iota.
+      a[0] = a[0] ^ t[round]
+      round = round + 1
+    end
+  end
+
+  # One block of *rate* bytes xored into the lanes, then the permutation.
+  def self.absorb(a : Pointer(UInt64), c : Pointer(UInt64), block : Pointer(UInt8), rate : Int32) : Nil
+    i = 0
+    while i < rate // 8
+      p = block + (i * 8).to_i64
+      lane = 0_u64
+      k = 7
+      while k >= 0
+        lane = lane.unsafe_shl(8) | p[k].to_u64
+        k = k - 1
+      end
+      a[i] = a[i] ^ lane
+      i = i + 1
+    end
+    permute(a, c)
+  end
+
+  # The last block: the domain's suffix bits (0x06 for SHA-3's `01`, 0x1f
+  # for SHAKE's `1111`) with pad10*1's first one bit after them, zeros,
+  # and pad10*1's last one bit at the top of the block's last byte. A
+  # suffix landing in the last byte shares it with that bit.
+  def self.pad(a : Pointer(UInt64), c : Pointer(UInt64), block : Pointer(UInt8), fill : Int32, rate : Int32, suffix : UInt8) : Nil
+    block[fill] = suffix
+    i = fill + 1
+    while i < rate
+      block[i] = 0_u8
+      i = i + 1
+    end
+    block[rate - 1] = block[rate - 1] | 0x80_u8
+    absorb(a, c, block, rate)
+  end
+
+  def self.byte(a : Pointer(UInt64), i : Int32) : UInt8
+    (a[i >> 3].unsafe_shr((i & 7) * 8) & 255_u64).to_u8
+  end
+end
+
+# SHA-3, FIPS 202 section 6.1: Keccak[c] with a capacity twice the
+# digest, so a rate (the `block_size`) of 200 bytes less two digests.
+# The sponge has no length field, so the base's cutting into blocks is
+# kept and its padding is replaced. The digest is shorter than the rate
+# in all four, so it is the first bytes of the state after the last
+# block, with no further permutation.
+pub abstract class SHA3 < Digest
+  @a : Pointer(UInt64)
+  @c : Pointer(UInt64)
+
+  def initialize(rate : Int32)
+    @a = Pointer(UInt64).malloc(25_u64)
+    @c = Pointer(UInt64).malloc(5_u64)
+    super(rate)
+  end
+
+  private def start : Nil
+    i = 0
+    while i < 25
+      @a[i] = 0_u64
+      i = i + 1
+    end
+  end
+
+  # `copy_from` has refused another algorithm by then; `as?` rather than
+  # `as` because a cast from an unrelated digest is a compile error.
+  private def take_state(other : Digest) : Nil
+    from = other.as?(SHA3)
+    @a.copy_from(from.@a, 25) if from
+  end
+
+  private def write_state(dst : Pointer(UInt8)) : Nil
+    i = 0
+    while i < digest_size
+      dst[i] = Keccak.byte(@a, i)
+      i = i + 1
+    end
+  end
+
+  private def compress(block : Pointer(UInt8)) : Nil
+    Keccak.absorb(@a, @c, block, @block_size)
+  end
+
+  private def pad : Nil
+    Keccak.pad(@a, @c, @block, @fill, @block_size, 0x06_u8)
+    @fill = 0
+  end
+end
+
+pub class SHA3_224 < SHA3
+  def initialize
+    super(144)
+  end
+
+  def digest_size : Int32
+    28
+  end
+end
+
+pub class SHA3_256 < SHA3
+  def initialize
+    super(200 - 2 * 32)
+  end
+
+  def digest_size : Int32
+    32
+  end
+end
+
+pub class SHA3_384 < SHA3
+  def initialize
+    super(104)
+  end
+
+  def digest_size : Int32
+    48
+  end
+end
+
+pub class SHA3_512 < SHA3
+  def initialize
+    super(72)
+  end
+
+  def digest_size : Int32
+    64
+  end
+end
+
+# SHAKE128 and SHAKE256, FIPS 202 section 6.2: the sponge at a capacity of
+# 256 and 512 bits, as much output as is asked for. `update` absorbs;
+# the first `read` pads and every `read` squeezes on from where the last
+# stopped, so reads of 3 and 5 bytes are the first 8 bytes of one read.
+# Absorbing after squeezing would be a different function, not more
+# input, and is refused until `reset`.
+pub abstract class Shake
+  @a : Pointer(UInt64)
+  @c : Pointer(UInt64)
+  @block : Pointer(UInt8)
+  @rate : Int32
+  @fill : Int32
+  @squeezing : Bool
+
+  def initialize(rate : Int32)
+    @rate = rate
+    @a = Pointer(UInt64).malloc(25_u64)
+    @c = Pointer(UInt64).malloc(5_u64)
+    @block = Pointer(UInt8).malloc(rate.to_u64)
+    @fill = 0
+    @squeezing = false
+  end
+
+  # *count* bytes of the output for *data*.
+  def self.hash_bytes(data : String | Array(UInt8), count : Int32) : Array(UInt8)
+    new.update(data).read(count)
+  end
+
+  def self.hexdigest(data : String | Array(UInt8), count : Int32) : String
+    DigestUtil.hex(hash_bytes(data, count), count)
+  end
+
+  # Bytes absorbed at a time: 168 for SHAKE128, 136 for SHAKE256.
+  def block_size : Int32
+    @rate
+  end
+
+  def reset : Nil
+    i = 0
+    while i < 25
+      @a[i] = 0_u64
+      i = i + 1
+    end
+    @fill = 0
+    @squeezing = false
+  end
+
+  def update(data : String) : self
+    update(data.to_unsafe, data.bytesize)
+  end
+
+  def update(data : Array(UInt8)) : self
+    update(data.to_unsafe, data.size)
+  end
+
+  def update(data : Pointer(UInt8), count : Int32) : self
+    raise "#{self.class}: update after read; reset first" if @squeezing
+    raise "#{self.class}: a negative count of bytes: #{count}" if count < 0
+    done = 0
+    if @fill > 0
+      take = @rate - @fill
+      take = count if count < take
+      (@block + @fill.to_i64).copy_from(data, take)
+      @fill = @fill + take
+      done = take
+      if @fill == @rate
+        Keccak.absorb(@a, @c, @block, @rate)
+        @fill = 0
+      end
+    end
+    while count - done >= @rate
+      Keccak.absorb(@a, @c, data + done.to_i64, @rate)
+      done = done + @rate
+    end
+    if done < count
+      @block.copy_from(data + done.to_i64, count - done)
+      @fill = count - done
+    end
+    self
+  end
+
+  # The next `dst.size` bytes of output into *dst*, with no array made.
+  # While squeezing, `@fill` counts the bytes of the state given out.
+  def read(dst : Array(UInt8)) : Nil
+    unless @squeezing
+      Keccak.pad(@a, @c, @block, @fill, @rate, 0x1f_u8)
+      @fill = 0
+      @squeezing = true
+    end
+    i = 0
+    while i < dst.size
+      if @fill == @rate
+        Keccak.permute(@a, @c)
+        @fill = 0
+      end
+      dst[i] = Keccak.byte(@a, @fill)
+      @fill = @fill + 1
+      i = i + 1
+    end
+  end
+
+  def read(count : Int32) : Array(UInt8)
+    raise "#{self.class}: a negative count of bytes to read: #{count}" if count < 0
+    bytes = Array(UInt8).new(count, 0_u8)
+    read(bytes)
+    bytes
+  end
+end
+
+pub class SHAKE128 < Shake
+  def initialize
+    super(168)
+  end
+end
+
+pub class SHAKE256 < Shake
+  def initialize
+    super(136)
   end
 end
 

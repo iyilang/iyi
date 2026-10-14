@@ -13,7 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/digest::{Digest, MD5, SHA1, SHA224, SHA256, SHA384, SHA512, CRC32, Adler32}
+import std/digest::{Digest, MD5, SHA1, SHA224, SHA256, SHA384, SHA512, SHA3_224, SHA3_256, SHA3_384, SHA3_512, SHAKE128, SHAKE256, CRC32, Adler32}
 
 puts "== md5"
 assert_str "d41d8cd98f00b204e9800998ecf8427e", MD5.hexdigest(""), "empty"
@@ -125,6 +125,64 @@ into = Array(UInt8).new(40, 7_u8)
 SHA256.new.update("abc").final(into)
 assert_true into[0] == 0xba_u8 && into[31] == 0xad_u8 && into[32] == 7_u8, "final into an array writes the digest and nothing past it"
 puts "  dup, reset, copy_from and final into a buffer"
+
+# FIPS 202's examples as NIST publishes them (csrc.nist.gov, "Example
+# Values"): the empty message and 1,600 bits of 0xa3, 200 bytes, which
+# is more than every rate and so absorbs a whole block and pads another.
+# SHAKE's 1,600-bit examples give 4,096 bits of output: its last 16 bytes
+# here, and SHA-256 of all 512, which python's hashlib also gives.
+puts "\n== sha-3"
+a3 = Array(UInt8).new(200, 0xa3_u8)
+assert_str "6b4e03423667dbb73b6e15454f0eb1abd4597f9a1b078e3f5b5a6bc7", SHA3_224.hexdigest(""), "sha3-224 empty"
+assert_str "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a", SHA3_256.hexdigest(""), "sha3-256 empty"
+assert_str "0c63a75b845e4f7d01107d852e4c2485c51a50aaaa94fc61995e71bbee983a2ac3713831264adb47fb6bd1e058d5f004", SHA3_384.hexdigest(""), "sha3-384 empty"
+assert_str "a69f73cca23a9ac5c8b567dc185a756e97c982164fe25859e0d1dcc1475c80a615b2123af1f5f94c11e3e9402c3ac558f500199d95b6d3e301758586281dcd26", SHA3_512.hexdigest(""), "sha3-512 empty"
+assert_str "9376816aba503f72f96ce7eb65ac095deee3be4bf9bbc2a1cb7e11e0", SHA3_224.hexdigest(a3), "sha3-224 of 200 bytes of 0xa3"
+assert_str "79f38adec5c20307a98ef76e8324afbfd46cfd81b22e3973c65fa1bd9de31787", SHA3_256.hexdigest(a3), "sha3-256 of 200 bytes of 0xa3"
+assert_str "1881de2ca7e41ef95dc4732b8f5f002b189cc1e42b74168ed1732649ce1dbcdd76197a31fd55ee989f2d7050dd473e8f", SHA3_384.hexdigest(a3), "sha3-384 of 200 bytes of 0xa3"
+assert_str "e76dfad22084a8b1467fcf2ffa58361bec7628edf5f3fdc0e4805dc48caeeca81b7c13c30adf52a3659584739a2df46be589c51ca1a4a8416df6545a1ce8ba00", SHA3_512.hexdigest(a3), "sha3-512 of 200 bytes of 0xa3"
+assert_str "7f9c2ba4e88f827d616045507605853ed73b8093f6efbc88eb1a6eacfa66ef26", SHAKE128.hexdigest("", 32), "shake128 empty"
+assert_str "46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f", SHAKE256.hexdigest("", 32), "shake256 empty"
+long128 = SHAKE128.hash_bytes(a3, 512)
+long256 = SHAKE256.hash_bytes(a3, 512)
+assert_str "c1134ff48c4e5e770824f32bdcc5b4f80376fa3d2a957297ce5728780bb8551c", SHA256.hexdigest(long128), "shake128 of 200 bytes of 0xa3, 512 bytes out"
+assert_str "5324d170930075b539d5b2752dfe21dca1a2172f5fc7f48ab6f468162ab458ea", SHA256.hexdigest(long256), "shake256 of 200 bytes of 0xa3, 512 bytes out"
+assert_str "f17d7259ab075216c0699511643b6439", SHAKE128.hexdigest(a3, 512)[992, 32], "shake128's last 16 of 512 bytes"
+assert_str "ca92bf0be5615e96959d767197a0beeb", SHAKE256.hexdigest(a3, 512)[992, 32], "shake256's last 16 of 512 bytes"
+assert_true SHA3_224.new.block_size == 144 && SHA3_256.new.block_size == 136 && SHA3_384.new.block_size == 104 && SHA3_512.new.block_size == 72, "sha3 rates"
+assert_true SHAKE128.new.block_size == 168 && SHAKE256.new.block_size == 136, "shake rates"
+assert_str "be2be6e6c147e29e18ee15898183f629374e212f58b3870d51d77eea41c6e238", chain(SHA3_224), "sha3-224 lengths 0..300"
+assert_str "10ffe9e389e3016f3d7f929bb6816eaa2fa4b56e53a0144623c7309cf4fc33d9", chain(SHA3_256), "sha3-256 lengths 0..300"
+assert_str "618d1675e5bd5aa12f0c1104afb30097057d48adc05bdc414da2c98d1d2146ef", chain(SHA3_384), "sha3-384 lengths 0..300"
+assert_str "24789ebaf0d13822b010648e28e37c75dec683b516e978eaa85390d2c3827232", chain(SHA3_512), "sha3-512 lengths 0..300"
+assert_str in_pieces(SHA3_256.new, bytes), SHA3_256.hexdigest(bytes), "sha3-256 in pieces"
+assert_str in_pieces(SHA3_512.new, bytes), SHA3_512.hexdigest(bytes), "sha3-512 in pieces"
+puts "  SHA3-224, SHA3-256, SHA3-384, SHA3-512, SHAKE128 and SHAKE256 on FIPS 202's messages"
+
+# Reads of 0 to 40 bytes, joined, are the one read of their total, across
+# both rates' block ends; and a dup and a reset behave as SHA-2's do.
+puts "\n== shake reads"
+whole = SHAKE128.new.update("abc").read(2000)
+x = SHAKE128.new.update("abc")
+at = 0
+step = 0
+while at < 2000
+  n = step % 41
+  n = 2000 - at if at + n > 2000
+  piece = x.read(n)
+  piece.each_with_index { |byte, i| assert_true byte == whole[at + i], "shake128 read in pieces, byte #{at + i}" }
+  at = at + n
+  step = step + 1
+end
+x.reset
+x.update("abc")
+assert_true x.read(2000) == whole, "shake reset reads again"
+s3 = SHA3_384.new
+s3.update("ab")
+s3copy = s3.dup
+s3copy.update("c")
+assert_str SHA3_384.hexdigest("abc"), s3copy.hexfinal, "a sha3 dup goes on from where it was copied"
+puts "  reads in pieces against one read, reset and dup"
 
 puts "\n== checksum"
 assert_str "00000000", CRC32.hexdigest(""), "crc empty"

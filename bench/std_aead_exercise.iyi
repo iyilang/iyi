@@ -1,0 +1,291 @@
+# Exercises `std/aead`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_aead_exercise.iyi
+
+module bench/std_aead_exercise
+
+import std/aead::{AES, AesGcm, ChaCha20, Poly1305, ChaCha20Poly1305, AeadError}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+# The bytes a hex string spells.
+def b(hex : String) : String
+  p = hex.to_unsafe
+  String.new(hex.bytesize // 2) do |buf|
+    i = 0
+    while i < hex.bytesize // 2
+      hi = p[i * 2].to_i32
+      lo = p[i * 2 + 1].to_i32
+      hi = hi >= 97 ? hi - 87 : hi - 48
+      lo = lo >= 97 ? lo - 87 : lo - 48
+      buf[i] = (hi * 16 + lo).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def hex(bytes : String) : String
+  digits = "0123456789abcdef".to_unsafe
+  p = bytes.to_unsafe
+  String.new(bytes.bytesize * 2) do |buf|
+    i = 0
+    while i < bytes.bytesize
+      buf[i * 2] = digits[p[i].to_i32 >> 4]
+      buf[i * 2 + 1] = digits[p[i].to_i32 & 15]
+      i = i + 1
+    end
+  end
+end
+
+def array_of(bytes : String) : Array(UInt8)
+  Array(UInt8).new(bytes.bytesize) { |i| bytes.to_unsafe[i] }
+end
+
+# *bytes* with bit *bit* of byte *at* turned.
+def flip(bytes : String, at : Int32, bit : Int32) : String
+  String.new(bytes.bytesize) do |buf|
+    buf.copy_from(bytes.to_unsafe, bytes.bytesize)
+    buf[at] = buf[at] ^ 1_u8.unsafe_shl(bit)
+  end
+end
+
+# What `open` answered, as hex, or the error's sentence.
+def opened(result : String | AeadError) : String
+  result.is_a?(String) ? hex(result) : "refused: #{result.message}"
+end
+
+def refused?(result : String | AeadError) : Bool
+  result.is_a?(AeadError)
+end
+
+# FIPS 197's worked example (appendix B) and its three example vectors
+# (appendix C), one per key size, each through the cipher and back
+# through the inverse cipher.
+puts "== aes"
+aes = AES.new(b("2b7e151628aed2a6abf7158809cf4f3c"))
+assert_str "3925841d02dc09fbdc118597196a0b32", hex(aes.encrypt_block(b("3243f6a8885a308d313198a2e0370734"))), "fips 197 appendix b"
+assert_str "3243f6a8885a308d313198a2e0370734", hex(aes.decrypt_block(b("3925841d02dc09fbdc118597196a0b32"))), "fips 197 appendix b, inverse"
+plain = b("00112233445566778899aabbccddeeff")
+aes = AES.new(b("000102030405060708090a0b0c0d0e0f"))
+assert_str "69c4e0d86a7b0430d8cdb78070b4c55a", hex(aes.encrypt_block(plain)), "fips 197 c.1 cipher"
+assert_str hex(plain), hex(aes.decrypt_block(b("69c4e0d86a7b0430d8cdb78070b4c55a"))), "fips 197 c.1 inverse cipher"
+aes = AES.new(b("000102030405060708090a0b0c0d0e0f1011121314151617"))
+assert_str "dda97ca4864cdfe06eaf70a0ec0d7191", hex(aes.encrypt_block(plain)), "fips 197 c.2 cipher"
+assert_str hex(plain), hex(aes.decrypt_block(b("dda97ca4864cdfe06eaf70a0ec0d7191"))), "fips 197 c.2 inverse cipher"
+aes = AES.new(b("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"))
+assert_str "8ea2b7ca516745bfeafc49904b496089", hex(aes.encrypt_block(plain)), "fips 197 c.3 cipher"
+assert_str hex(plain), hex(aes.decrypt_block(b("8ea2b7ca516745bfeafc49904b496089"))), "fips 197 c.3 inverse cipher"
+assert_str "8ea2b7ca516745bfeafc49904b496089", hex(AES.new(array_of(b("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"))).encrypt_block(array_of(plain))), "a key and a block given as Array(UInt8)"
+puts "  FIPS 197 appendices B and C, 128, 192 and 256-bit keys, both ways"
+
+# The GCM specification's (McGrew and Viega, revised, 2005) test cases
+# with a 96-bit nonce: 1 to 4 under AES-128, 7 to 10 under AES-192, 13
+# to 16 under AES-256 - no plaintext, one zero block, four blocks, and
+# 60 bytes with 20 of additional data, so a last block of each cut
+# short. Cases 5, 6, 11, 12, 17 and 18 are 8 and 60-byte nonces, which
+# this refuses (the gate's refusals).
+puts "\n== aes-gcm"
+p64 = b("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255")
+p60 = p64[0, 60]
+aad20 = b("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+nonce = b("cafebabefacedbaddecaf888")
+zero_nonce = b("000000000000000000000000")
+zero_block = b("00000000000000000000000000000000")
+k128 = b("feffe9928665731c6d6a8f9467308308")
+k192 = b("feffe9928665731c6d6a8f9467308308feffe9928665731c")
+k256 = b("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308")
+
+g = AesGcm.new(b("00000000000000000000000000000000"))
+assert_str "58e2fccefa7e3061367f1d57a4e7455a", hex(g.seal(zero_nonce, "")), "gcm test case 1"
+assert_str "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf", hex(g.seal(zero_nonce, zero_block)), "gcm test case 2"
+g = AesGcm.new(k128)
+case3 = "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f5985" + "4d5c2af327cd64a62cf35abd2ba6fab4"
+case4 = "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091" + "5bc94fbc3221a5db94fae95ae7121a47"
+assert_str case3, hex(g.seal(nonce, p64)), "gcm test case 3"
+assert_str case4, hex(g.seal(nonce, p60, aad20)), "gcm test case 4"
+assert_str hex(p64), opened(g.open(nonce, b(case3))), "gcm test case 3 opens"
+assert_str hex(p60), opened(g.open(nonce, b(case4), aad20)), "gcm test case 4 opens"
+
+g = AesGcm.new(b("000000000000000000000000000000000000000000000000"))
+assert_str "cd33b28ac773f74ba00ed1f312572435", hex(g.seal(zero_nonce, "")), "gcm test case 7"
+assert_str "98e7247c07f0fe411c267e4384b0f6002ff58d80033927ab8ef4d4587514f0fb", hex(g.seal(zero_nonce, zero_block)), "gcm test case 8"
+g = AesGcm.new(k192)
+case9 = "3980ca0b3c00e841eb06fac4872a2757859e1ceaa6efd984628593b40ca1e19c7d773d00c144c525ac619d18c84a3f4718e2448b2fe324d9ccda2710acade256" + "9924a7c8587336bfb118024db8674a14"
+case10 = "3980ca0b3c00e841eb06fac4872a2757859e1ceaa6efd984628593b40ca1e19c7d773d00c144c525ac619d18c84a3f4718e2448b2fe324d9ccda2710" + "2519498e80f1478f37ba55bd6d27618c"
+assert_str case9, hex(g.seal(nonce, p64)), "gcm test case 9"
+assert_str case10, hex(g.seal(nonce, p60, aad20)), "gcm test case 10"
+assert_str hex(p64), opened(g.open(nonce, b(case9))), "gcm test case 9 opens"
+assert_str hex(p60), opened(g.open(nonce, b(case10), aad20)), "gcm test case 10 opens"
+
+g = AesGcm.new(b("0000000000000000000000000000000000000000000000000000000000000000"))
+assert_str "530f8afbc74536b9a963b4f1c4cb738b", hex(g.seal(zero_nonce, "")), "gcm test case 13"
+assert_str "cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919", hex(g.seal(zero_nonce, zero_block)), "gcm test case 14"
+g = AesGcm.new(k256)
+case15 = "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662898015ad" + "b094dac5d93471bdec1a502270e3cc6c"
+case16 = "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662" + "76fc6ece0f4e1768cddf8853bb2d551b"
+assert_str case15, hex(g.seal(nonce, p64)), "gcm test case 15"
+assert_str case16, hex(g.seal(nonce, p60, aad20)), "gcm test case 16"
+assert_str hex(p64), opened(g.open(nonce, b(case15))), "gcm test case 15 opens"
+assert_str hex(p60), opened(g.open(nonce, b(case16), aad20)), "gcm test case 16 opens"
+assert_str case16, hex(AesGcm.new(array_of(k256)).seal(array_of(nonce), array_of(p60), array_of(aad20))), "a key, nonce, plaintext and additional data given as Array(UInt8)"
+assert_str hex(p60), opened(AesGcm.new(k256).open(nonce, array_of(b(case16)), array_of(aad20))), "sealed bytes given as Array(UInt8)"
+assert_str case16, hex(g.seal(nonce, p60, aad20)), "the same key seals the same message the same way twice"
+puts "  the GCM specification's 12 cases with a 96-bit nonce, sealed and opened"
+
+# Each of these changes what test case 4 sealed, or what it is opened
+# with, and `open` must answer an error and no plaintext.
+puts "\n== aes-gcm refuses what was not sealed"
+g = AesGcm.new(k128)
+sealed = b(case4)
+assert_true refused?(g.open(nonce, flip(sealed, 60, 0), aad20)), "gcm: a tag with its first byte flipped is refused"
+assert_true refused?(g.open(nonce, flip(sealed, 75, 7), aad20)), "gcm: a tag with its last byte flipped is refused"
+assert_true refused?(g.open(nonce, flip(sealed, 0, 0), aad20)), "gcm: a ciphertext with its first bit flipped is refused"
+assert_true refused?(g.open(nonce, flip(sealed, 59, 7), aad20)), "gcm: a ciphertext with its last bit flipped is refused"
+assert_true refused?(g.open(nonce, sealed, flip(aad20, 19, 0))), "gcm: other additional data is refused"
+assert_true refused?(g.open(nonce, sealed)), "gcm: no additional data is refused"
+assert_true refused?(g.open(flip(nonce, 11, 0), sealed, aad20)), "gcm: another nonce is refused"
+assert_true refused?(AesGcm.new(k256).open(nonce, sealed, aad20)), "gcm: another key is refused"
+assert_true refused?(g.open(nonce, sealed[0, 75], aad20)), "gcm: sealed bytes cut by one are refused"
+assert_true refused?(g.open(nonce, sealed + "x", aad20)), "gcm: sealed bytes with one more are refused"
+assert_str "refused: AesGcm: the tag does not match: the sealed bytes, the additional data, the nonce or the key is not what was sealed", opened(g.open(nonce, flip(sealed, 60, 0), aad20)), "gcm: the refusal says why"
+assert_str "refused: AesGcm: 15 bytes cannot be sealed: the tag alone is 16", opened(g.open(nonce, sealed[0, 15])), "gcm: fifteen bytes are refused, saying why"
+assert_str "refused: AesGcm: 0 bytes cannot be sealed: the tag alone is 16", opened(g.open(nonce, "")), "gcm: no bytes are refused"
+assert_str "", opened(g.open(nonce, g.seal(nonce, "", "header"), "header")), "gcm: an empty plaintext is its tag alone and opens"
+puts "  a flipped tag, ciphertext, additional data or nonce, another key, a length changed"
+
+# RFC 8439's block function vector (§2.3.2), its encryption example
+# (§2.4.2), and appendix A.1's five blocks and A.2's three messages. A
+# block of key stream is 64 zero bytes XORed.
+puts "\n== chacha20"
+k = b("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+zeros = String.new(64) { |buf| 64.times { |i| buf[i] = 0_u8 } }
+assert_str "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4ed2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e", hex(ChaCha20.new(k, b("000000090000004a00000000"), 1_u32).xor(zeros)), "rfc 8439 2.3.2 block"
+sunscreen = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it."
+sunscreen_ct = "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0bf91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d807ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab77937365af90bbf74a35be6b40b8eedf2785e42874d"
+assert_str sunscreen_ct, hex(ChaCha20.new(k, b("000000000000004a00000000"), 1_u32).xor(sunscreen)), "rfc 8439 2.4.2 sunscreen"
+assert_str sunscreen, ChaCha20.new(k, b("000000000000004a00000000"), 1_u32).xor(b(sunscreen_ct)), "rfc 8439 2.4.2 decrypts"
+key0 = b("0000000000000000000000000000000000000000000000000000000000000000")
+key1 = b("0000000000000000000000000000000000000000000000000000000000000001")
+assert_str "76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7da41597c5157488d7724e03fb8d84a376a43b8f41518a11cc387b669b2ee6586", hex(ChaCha20.new(key0, zero_nonce).xor(zeros)), "rfc 8439 a.1 #1"
+assert_str "9f07e7be5551387a98ba977c732d080dcb0f29a048e3656912c6533e32ee7aed29b721769ce64e43d57133b074d839d531ed1f28510afb45ace10a1f4b794d6f", hex(ChaCha20.new(key0, zero_nonce, 1_u32).xor(zeros)), "rfc 8439 a.1 #2"
+assert_str "3aeb5224ecf849929b9d828db1ced4dd832025e8018b8160b82284f3c949aa5a8eca00bbb4a73bdad192b5c42f73f2fd4e273644c8b36125a64addeb006c13a0", hex(ChaCha20.new(key1, zero_nonce, 1_u32).xor(zeros)), "rfc 8439 a.1 #3"
+assert_str "72d54dfbf12ec44b362692df94137f328fea8da73990265ec1bbbea1ae9af0ca13b25aa26cb4a648cb9b9d1be65b2c0924a66c54d545ec1b7374f4872e99f096", hex(ChaCha20.new(b("00ff000000000000000000000000000000000000000000000000000000000000"), zero_nonce, 2_u32).xor(zeros)), "rfc 8439 a.1 #4"
+assert_str "c2c64d378cd536374ae204b9ef933fcd1a8b2288b3dfa49672ab765b54ee27c78a970e0e955c14f3a88e741b97c286f75f8fc299e8148362fa198a39531bed6d", hex(ChaCha20.new(key0, b("000000000000000000000002")).xor(zeros)), "rfc 8439 a.1 #5"
+ietf = "Any submission to the IETF intended by the Contributor for publication as all or part of an IETF Internet-Draft or RFC and any statement made within the context of an IETF activity is considered an \"IETF Contribution\". Such statements include oral statements in IETF sessions, as well as written and electronic communications made at any time or place, which are addressed to"
+ietf_ct = "a3fbf07df3fa2fde4f376ca23e82737041605d9f4f4f57bd8cff2c1d4b7955ec2a97948bd3722915c8f3d337f7d370050e9e96d647b7c39f56e031ca5eb6250d4042e02785ececfa4b4bb5e8ead0440e20b6e8db09d881a7c6132f420e52795042bdfa7773d8a9051447b3291ce1411c680465552aa6c405b7764d5e87bea85ad00f8449ed8f72d0d662ab052691ca66424bc86d2df80ea41f43abf937d3259dc4b2d0dfb48a6c9139ddd7f76966e928e635553ba76c5c879d7b35d49eb2e62b0871cdac638939e25e8a1e0ef9d5280fa8ca328b351c3c765989cbcf3daa8b6ccc3aaf9f3979c92b3720fc88dc95ed84a1be059c6499b9fda236e7e818b04b0bc39c1e876b193bfe5569753f88128cc08aaa9b63d1a16f80ef2554d7189c411f5869ca52c5b83fa36ff216b9c1d30062bebcfd2dc5bce0911934fda79a86f6e698ced759c3ff9b6477338f3da4f9cd8514ea9982ccafb341b2384dd902f3d1ab7ac61dd29c6f21ba5b862f3730e37cfdc4fd806c22f221"
+jabberwocky = "'Twas brillig, and the slithy toves\nDid gyre and gimble in the wabe:\nAll mimsy were the borogoves,\nAnd the mome raths outgrabe."
+k3 = b("1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0")
+assert_str "76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7da41597c5157488d7724e03fb8d84a376a43b8f41518a11cc387b669b2ee6586", hex(ChaCha20.new(key0, zero_nonce, 0_u32).xor(zeros)), "rfc 8439 a.2 #1"
+assert_str ietf_ct, hex(ChaCha20.new(key1, b("000000000000000000000002"), 1_u32).xor(ietf)), "rfc 8439 a.2 #2"
+assert_str "62e6347f95ed87a45ffae7426f27a1df5fb69110044c0d73118effa95b01e5cf166d3df2d721caf9b21e5fb14c616871fd84c54f9d65b283196c7fe4f60553ebf39c6402c42234e32a356b3e764312a61a5532055716ead6962568f87d3f3f7704c6a8d1bcd1bf4d50d6154b6da731b187b58dfd728afa36757a797ac188d1", hex(ChaCha20.new(k3, b("000000000000000000000002"), 42_u32).xor(jabberwocky)), "rfc 8439 a.2 #3"
+# A.2 #2 again in pieces that end inside a block, on its edge and past
+# it: the stream goes on from where each piece stopped.
+stream = ChaCha20.new(key1, b("000000000000000000000002"), 1_u32)
+pieces = ""
+at = 0
+[1, 5, 58, 64, 1, 63, 65, 100].each do |n|
+  pieces = pieces + stream.xor(ietf[at, n])
+  at = at + n
+end
+pieces = pieces + stream.xor(ietf[at, ietf.bytesize - at])
+assert_str ietf_ct, hex(pieces), "chacha20 in pieces"
+assert_str "", stream.xor(""), "no bytes after the last"
+assert_str hex(ChaCha20.new(key1, zero_nonce, 0xffffffff_u32).xor(zeros)), hex(ChaCha20.new(key1, zero_nonce, 0xfffffffe_u32).xor(zeros + zeros)[64, 64]), "the last block, 2^32 - 1, is there"
+puts "  RFC 8439 2.3.2, 2.4.2, A.1 #1 to #5, A.2 #1 to #3, and in pieces"
+
+# RFC 8439's §2.5.2 and appendix A.3's eleven, the last seven of them
+# the edges of the reduction mod 2^130 - 5; then in pieces.
+puts "\n== poly1305"
+assert_str "a8061dc1305136c6c22b8baf0c0127a9", hex(Poly1305.mac(b("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b"), "Cryptographic Forum Research Group")), "rfc 8439 2.5.2"
+r_only = b("36e5f6b5c5e06070f0efca96227a863e")
+none = b("00000000000000000000000000000000")
+ones = b("ffffffffffffffffffffffffffffffff")
+assert_str "00000000000000000000000000000000", hex(Poly1305.mac(key0, zeros)), "rfc 8439 a.3 #1"
+assert_str "36e5f6b5c5e06070f0efca96227a863e", hex(Poly1305.mac(none + r_only, ietf)), "rfc 8439 a.3 #2"
+assert_str "f3477e7cd95417af89a6b8794c310cf0", hex(Poly1305.mac(r_only + none, ietf)), "rfc 8439 a.3 #3"
+assert_str "4541669a7eaaee61e708dc7cbcc5eb62", hex(Poly1305.mac(k3, jabberwocky)), "rfc 8439 a.3 #4"
+r2 = b("02000000000000000000000000000000")
+r1 = b("01000000000000000000000000000000")
+r14 = b("01000000000000000400000000000000")
+assert_str "03000000000000000000000000000000", hex(Poly1305.mac(r2 + none, ones)), "rfc 8439 a.3 #5"
+assert_str "03000000000000000000000000000000", hex(Poly1305.mac(r2 + ones, r2)), "rfc 8439 a.3 #6"
+assert_str "05000000000000000000000000000000", hex(Poly1305.mac(r1 + none, ones + b("f0ffffffffffffffffffffffffffffff11000000000000000000000000000000"))), "rfc 8439 a.3 #7"
+assert_str "00000000000000000000000000000000", hex(Poly1305.mac(r1 + none, ones + b("fbfefefefefefefefefefefefefefefe01010101010101010101010101010101"))), "rfc 8439 a.3 #8"
+assert_str "faffffffffffffffffffffffffffffff", hex(Poly1305.mac(r2 + none, b("fdffffffffffffffffffffffffffffff"))), "rfc 8439 a.3 #9"
+assert_str "14000000000000005500000000000000", hex(Poly1305.mac(r14 + none, b("e33594d7505e43b900000000000000003394d7505e4379cd01000000000000000000000000000000000000000000000001000000000000000000000000000000"))), "rfc 8439 a.3 #10"
+assert_str "13000000000000000000000000000000", hex(Poly1305.mac(r14 + none, b("e33594d7505e43b900000000000000003394d7505e4379cd010000000000000000000000000000000000000000000000"))), "rfc 8439 a.3 #11"
+mac = Poly1305.new(none + r_only)
+at = 0
+[1, 15, 16, 17, 33, 2, 0, 64].each do |n|
+  mac.update(ietf[at, n])
+  at = at + n
+end
+mac.update(array_of(ietf[at, ietf.bytesize - at]))
+assert_str "36e5f6b5c5e06070f0efca96227a863e", hex(mac.final), "poly1305 in pieces"
+puts "  RFC 8439 2.5.2, A.3 #1 to #11, and in pieces"
+
+# The one-time key is the first 32 bytes of block 0 (§2.6): §2.6.2 and
+# appendix A.4's three.
+puts "\n== poly1305 key generation"
+assert_str "8ad5a08b905f81cc815040274ab29471a833b637e3fd0da508dbb8e2fdd1a646", hex(ChaCha20.new(b("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"), b("000000000001020304050607")).xor(zeros[0, 32])), "rfc 8439 2.6.2"
+assert_str "76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7", hex(ChaCha20.new(key0, zero_nonce).xor(zeros[0, 32])), "rfc 8439 a.4 #1"
+assert_str "ecfa254f845f647473d3cb140da9e87606cb33066c447b87bc2666dde3fbb739", hex(ChaCha20.new(key1, b("000000000000000000000002")).xor(zeros[0, 32])), "rfc 8439 a.4 #2"
+assert_str "965e3bc6f9ec7ed9560808f4d229f94b137ff275ca9b3fcbdd59deaad23310ae", hex(ChaCha20.new(k3, b("000000000000000000000002")).xor(zeros[0, 32])), "rfc 8439 a.4 #3"
+puts "  RFC 8439 2.6.2 and A.4 #1 to #3"
+
+# §2.8.2's example, sealed and opened, and appendix A.5's message, which
+# the RFC only decrypts.
+puts "\n== chacha20-poly1305"
+box = ChaCha20Poly1305.new(b("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"))
+nonce_282 = b("070000004041424344454647")
+aad_282 = b("50515253c0c1c2c3c4c5c6c7")
+sealed_282 = "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116" + "1ae10b594f09e26a7e902ecbd0600691"
+assert_str sealed_282, hex(box.seal(nonce_282, sunscreen, aad_282)), "rfc 8439 2.8.2"
+assert_str hex(sunscreen), opened(box.open(nonce_282, b(sealed_282), aad_282)), "rfc 8439 2.8.2 opens"
+sealed_a5 = b("64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb24c6cfc18755d43eea09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf332f830e710b97ce98c8a84abd0b948114ad176e008d33bd60f982b1ff37c8559797a06ef4f0ef61c186324e2b3506383606907b6a7c02b0f9f6157b53c867e4b9166c767b804d46a59b5216cde7a4e99040c5a40433225ee282a1b0a06c523eaf4534d7f83fa1155b0047718cbc546a0d072b04b3564eea1b422273f548271a0bb2316053fa76991955ebd63159434ecebb4e466dae5a1073a6727627097a1049e617d91d361094fa68f0ff77987130305beaba2eda04df997b714d6c6f2c29a6ad5cb4022b02709b" + "eead9d67890cbb22392336fea1851f38")
+drafts = "Internet-Drafts are draft documents valid for a maximum of six months and may be updated, replaced, or obsoleted by other documents at any time. It is inappropriate to use Internet-Drafts as reference material or to cite them other than as /“work in progress./”"
+assert_str hex(drafts), opened(ChaCha20Poly1305.new(k3).open(b("000000000102030405060708"), sealed_a5, b("f33388860000000000004e91"))), "rfc 8439 a.5"
+assert_str hex(sealed_a5), hex(ChaCha20Poly1305.new(array_of(k3)).seal(array_of(b("000000000102030405060708")), array_of(drafts), array_of(b("f33388860000000000004e91")))), "a.5 sealed again from Array(UInt8)"
+puts "  RFC 8439 2.8.2 sealed and opened, A.5 opened and sealed again"
+
+puts "\n== chacha20-poly1305 refuses what was not sealed"
+sealed = b(sealed_282)
+assert_true refused?(box.open(nonce_282, flip(sealed, 114, 0), aad_282)), "chacha20-poly1305: a tag with its first byte flipped is refused"
+assert_true refused?(box.open(nonce_282, flip(sealed, 129, 7), aad_282)), "chacha20-poly1305: a tag with its last byte flipped is refused"
+assert_true refused?(box.open(nonce_282, flip(sealed, 0, 0), aad_282)), "chacha20-poly1305: a ciphertext with its first bit flipped is refused"
+assert_true refused?(box.open(nonce_282, sealed, flip(aad_282, 0, 0))), "chacha20-poly1305: other additional data is refused"
+assert_true refused?(box.open(nonce_282, sealed)), "chacha20-poly1305: no additional data is refused"
+assert_true refused?(box.open(flip(nonce_282, 0, 0), sealed, aad_282)), "chacha20-poly1305: another nonce is refused"
+assert_true refused?(ChaCha20Poly1305.new(k3).open(nonce_282, sealed, aad_282)), "chacha20-poly1305: another key is refused"
+assert_true refused?(box.open(nonce_282, sealed[0, 129], aad_282)), "chacha20-poly1305: sealed bytes cut by one are refused"
+# The lengths are in the tag, so additional data moved into the
+# ciphertext's place is not the same message.
+assert_true refused?(box.open(nonce_282, box.seal(nonce_282, "", aad_282 + "x"), aad_282)), "chacha20-poly1305: a byte moved out of the additional data is refused"
+assert_str "refused: ChaCha20Poly1305: the tag does not match: the sealed bytes, the additional data, the nonce or the key is not what was sealed", opened(box.open(nonce_282, flip(sealed, 114, 0), aad_282)), "chacha20-poly1305: the refusal says why"
+assert_str "refused: ChaCha20Poly1305: 15 bytes cannot be sealed: the tag alone is 16", opened(box.open(nonce_282, sealed[0, 15])), "chacha20-poly1305: fifteen bytes are refused, saying why"
+assert_str "", opened(box.open(nonce_282, box.seal(nonce_282, ""))), "chacha20-poly1305: an empty plaintext is its tag alone and opens"
+puts "  a flipped tag, ciphertext, additional data or nonce, another key, a length changed"
+
+# An AeadError is an `Error`, so `!` hands it up a function that answers
+# one, as any error value goes.
+def open_twice(box : ChaCha20Poly1305, nonce : String, outer : String, aad : String) : String | AeadError
+  inner = box.open(nonce, outer, aad)!
+  box.open(nonce, inner, aad)
+end
+
+puts "\n== errors are values"
+twice = box.seal(nonce_282, box.seal(nonce_282, "inside", "ad"), "ad")
+assert_str hex("inside"), opened(open_twice(box, nonce_282, twice, "ad")), "a message sealed twice opens twice"
+passed = open_twice(box, nonce_282, flip(twice, 0, 0), "ad")
+assert_true passed.is_a?(AeadError), "the outer refusal is handed up by !"
+assert_true passed.is_a?(Error), "an AeadError is an Error"
+puts "  ! passes an AeadError up; it is an Error"
+
+puts "\nALL CHECKS PASSED"

@@ -4,6 +4,43 @@
 
 ### Added
 
+- **`std/aead`: authenticated encryption in iyi - AES-GCM and
+  ChaCha20-Poly1305, and AES, ChaCha20 and Poly1305 on their own.** A
+  program that had to seal a cookie or a file had a MAC and no cipher.
+  `AesGcm.new(key)` (16, 24 or 32 bytes; NIST SP 800-38D, 96-bit nonce,
+  128-bit tag) and `ChaCha20Poly1305.new(key)` (RFC 8439 §2.8) both
+  `seal(nonce, plaintext, aad = "")`, answering the ciphertext and the
+  tag after it, the layout Python's `cryptography` and Go use, and
+  `open(nonce, sealed, aad = "")`, answering the plaintext or an
+  `AeadError`: the tag is checked before a byte is decrypted, compared
+  with every byte's difference OR-ed together, and a forged, damaged or
+  short message is a value, not a panic. `AES` encrypts and decrypts a
+  block (FIPS 197), `ChaCha20` XORs its key stream over data in pieces
+  from any 32-bit counter, `Poly1305` MACs a message in pieces. No table
+  is indexed by a secret: AES is BearSSL's bitsliced `aes_ct64`, four
+  blocks at a time through Boyar and Peralta's 115-gate S-box, the key
+  schedule through the same gates; GHASH is BearSSL's `ghash_ctmul64`,
+  carry-less products from integer multiplies; Poly1305 is
+  poly1305-donna's 26-bit limbs with a masked final reduction. Keys and
+  nonces come from the caller, so std/aead imports only std/int and
+  reaches nothing. Refused with a sentence: a key or nonce of the wrong
+  size (GCM's 8 and 60-byte nonces among them), an AES block that is not
+  16 bytes, a ChaCha20 stream run past block 2^32 - 1, a Poly1305 used
+  after `final`. Measured on one x86_64 Linux machine (a QEMU CPU with
+  AES-NI, no carry-less multiply), --release, sealing 16 MiB: AES-128-GCM
+  221 MB/s, AES-256-GCM 179, ChaCha20-Poly1305 790, against Python's
+  `cryptography` (OpenSSL) 875, 880 and 1581. Held by
+  `bench/std_aead_exercise.sh`: FIPS 197's appendix B and C vectors both
+  ways, the GCM specification's twelve 96-bit-nonce test cases sealed and
+  opened, RFC 8439's §2.3.2 to §2.8.2 and appendix A.1 to A.5 vectors, a
+  flipped tag, ciphertext, additional data or nonce, another key and a
+  changed length refused under each AEAD, then 3,000 AES-GCM and
+  3,000 ChaCha20-Poly1305 random messages where iyi's sealing is
+  Python's, Python opens iyi's and iyi opens Python's and refuses a
+  tampered copy of each, 500 ChaCha20 streams and 500 Poly1305 messages
+  in random pieces and 1,000 AES blocks both ways against Python; the
+  throughput recorded, eighteen refusals by their sentences, and
+  seventeen broken copies caught at the check that names them.
 - **`std/tar`: tar archives read and written in iyi, `.tar.gz` both
   ways.** `TarReader.new(io)` reads an archive from any `IyiIO` as a
   stream, gzip or not by its first bytes: `next_entry` answers each

@@ -4,6 +4,34 @@
 
 ### Added
 
+- **`std/password`: `Bcrypt` and `Scrypt` hash passwords.** A program that
+  stores passwords had PBKDF2 and no format to keep it in. They are a
+  module apart from std/crypto because bcrypt's salt comes from
+  `Random::Secure`: std/crypto reaches nothing, and a package that only
+  uses HMAC should not reach std/random, the clocks and the environment.
+  `Bcrypt.hash(password, cost = 11)` answers the 60-character `$2b$`
+  string OpenBSD, Crystal and Python's `bcrypt` write, its 16 bytes of
+  salt from `Random::Secure`, on a Blowfish (EksBlowfish) written in
+  iyi; `Bcrypt.verify(password, hash)` reads `$2a$`, `$2b$` and `$2y$`
+  and compares through `Subtle.constant_time_compare`. The key is
+  OpenBSD's: the password up to a NUL, cut to 72 bytes. A cost outside 4
+  to 31 panics with a sentence; a stored hash that is malformed, or whose
+  cost is out of range, verifies false. `Scrypt.derive(password, salt,
+  n, r, p, length, max_memory = 32 MiB)` is RFC 7914 on std/crypto's
+  PBKDF2-HMAC-SHA256 and a Salsa20/8 core, and refuses an *n* that is
+  not a power of two above 1 or not below 2^(16r), an *r*, *p* or length
+  below one, and parameters whose memory, counted as OpenSSL counts it,
+  is past the limit, so it accepts what Python's `hashlib.scrypt` does.
+  Measured on one x86_64 Linux machine, --release: bcrypt at cost 10
+  37 ms against Python's `bcrypt` 39 ms, scrypt at n = 16384, r = 8
+  18 ms against `hashlib.scrypt`'s 23 ms. Held by
+  `bench/std_password_exercise.sh`: RFC 7914's vectors 1 to 3 and its
+  fourth refused at the default limit, 30 random cases against
+  `hashlib.scrypt`, the 20 jBCrypt vectors at costs 6 to 12, 16 hashes
+  from Python's `bcrypt` verified and 10 of iyi's verified by it, the
+  cost-10 time recorded, eleven refusals by their sentences, and five
+  broken copies caught: a wrong S-box word, the salt unused, the cost
+  ignored, Salsa20 at six rounds, BlockMix's blocks in order.
 - **`std/string_scanner`: `StringScanner`, the other library's lexical
   scanner, matching at its offset with std/regex's own machine; and
   `Regex#match_at`, the match that begins at a given byte.**

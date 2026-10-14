@@ -4,6 +4,34 @@
 
 ### Added
 
+- **`std/csv` reads a row at a time (`CSVReader`) and writes to a
+  stream (`CSVWriter`).** `CSV.parse` held the whole document and its
+  every row, and panicked at a malformed one. `CSVReader` reads a
+  `String` or an `IyiIO` through a 64 KiB window: `next_row` gives the
+  fields, `next` and `each` a `CSVRow` that also answers by the header's
+  names (`row["name"]`, `row["missing"]?`) under `headers: true`, blank
+  lines passed over and a repeated name answering its last column, as
+  Python's `DictReader` has them. The separator and the quote are the
+  caller's; `strip: true` drops spaces and tabs around unquoted fields;
+  `same_size: true` refuses a row whose length is not the first's.
+  RFC 4180's rules as `CSV.parse` reads them: doubled quotes, LF, CRLF
+  and a lone CR, line breaks inside quotes, a byte order mark read past.
+  A quote inside an unquoted field, text after a closing quote, a quote
+  open at the end, a UTF-16 mark and a short row under `same_size` are a
+  `CSVError` value with its line and column (in characters, a CRLF one
+  line end), answered again after. `CSVWriter` quotes a field only when it
+  holds the separator, the quote or a line break, or begins or ends with
+  a space or a tab, writes a row of one empty field `""`, and quotes all
+  of them under `quote_all: true`; LF, CRLF or CR ends a row. A separator
+  or quote that is not one ASCII character, the two the same, another
+  line end and a header name the header lacks are refused with a
+  sentence. `bench/std_csv_exercise.sh` holds Python's `csv` both ways
+  on three generated 3,000-row corpora (separators, both quotes, every
+  line end, characters of up to four bytes), `DictReader` against header
+  access on 2,000 ragged rows, CRLFs, doubled quotes and characters split
+  across the window, a 51 MB file read keeping 90 KB alive at the most
+  and 464 bytes allocated a row (bound: 1 MiB, 1 KiB), seven refusals,
+  and 18 broken copies each caught at the check that names it.
 - **`IyiSocket#remote_address` and `#remote_port`, and
   `Request#remote_address`.** A server had no way to name the client it
   was answering: a socket said its own address and port and not the

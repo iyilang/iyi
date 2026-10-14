@@ -11,6 +11,38 @@
 # a field that did not open with one, are refused at their line and
 # column, as the other library refuses them. A byte order mark is read
 # past, and a UTF-16 document is refused by its.
+#
+# `CSVReader` reads the same rules a row at a time, from a `String` or an
+# `IyiIO`, so a file far larger than memory is read through a 64 KiB
+# window and one field's buffer, both reused: `next_row` gives the fields,
+# `next` a `CSVRow` that also answers by the header's names when the
+# reader was made with `headers: true` (the first row; a later name of
+# the same text wins, and blank lines are passed over, as Python's
+# `csv.DictReader` has them). The separator and the quote are the
+# caller's, one ASCII character each, neither a line end and not the
+# same one; `strip: true` drops spaces and tabs around a field that is
+# not quoted and around a quoted one's quotes; `same_size: true` refuses
+# a row whose field count is not the first row's (or the header's).
+#
+# What the reader is given comes from outside, so what is wrong with it
+# is a `CSVError`, a value with the line and the column (in characters,
+# from 1, a CRLF one line end) where it went wrong: a quote inside a
+# field that did not open with one, text after a closing quote, a quote
+# still open at the end (named where it opened), a row of the wrong size
+# under `same_size`, a UTF-16 byte order mark, a field past what a string
+# holds, and a stream whose read failed. After one, the reader answers
+# the same error again: where the next row begins is not knowable.
+# `CSV.parse` keeps panicking with the same sentences, as it always has.
+#
+# `CSVWriter` writes rows to an `IyiIO`, each ended by its line end (LF,
+# or CRLF as RFC 4180 has it, or CR). A field is quoted when it holds the
+# separator, the quote or a line break, and when it starts or ends with a
+# space or a tab, which a `strip: true` reader would otherwise drop; a row
+# of one empty field is `""` (bare, it is a blank line, a row of none),
+# and a first field that opens with U+FEFF is quoted so it is not read
+# past as a byte order mark. `quote_all: true` quotes every field. Python's
+# `csv` module reads what it writes, and it reads what Python's writes;
+# `bench/std_csv_exercise.sh` holds both directions on a generated corpus.
 
 module std/csv
 
@@ -209,5 +241,577 @@ pub struct CSV
       end
       dst[o] = 34_u8
     end
+  end
+end
+
+# What is wrong with a document, and where: *line* and *column* count from
+# 1, the column in characters.
+pub struct CSVError
+  getter message : String
+  getter line : Int32
+  getter column : Int32
+
+  def initialize(@message : String, @line : Int32, @column : Int32)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for CSVError
+  def message : String
+    @message
+  end
+end
+
+# The checks a reader and a writer share.
+struct CSVBytes
+  # One byte each, so a field's bytes are compared without decoding; not a
+  # line end, which would end the row; and not the same, which would make
+  # every separator a quote.
+  def self.check(who : String, separator : Char, quote : Char) : Nil
+    raise "#{who}: the separator must be one ASCII character other than a line end, not #{separator.inspect}" unless plain?(separator)
+    raise "#{who}: the quote must be one ASCII character other than a line end, not #{quote.inspect}" unless plain?(quote)
+    raise "#{who}: the separator and the quote are both #{quote.inspect}" if separator == quote
+  end
+
+  def self.plain?(c : Char) : Bool
+    c.ord > 0 && c.ord < 128 && c != '\n' && c != '\r'
+  end
+end
+
+# One row as `CSVReader#next` gives it: its fields, by position or by the
+# header's names.
+pub class CSVRow
+  getter fields : Array(String)
+  # The header row, or none when the reader was made without one.
+  getter headers : Array(String)
+  # The line the row starts on.
+  getter line : Int32
+  @index : Hash(String, Int32)
+
+  def initialize(@fields : Array(String), @headers : Array(String), @index : Hash(String, Int32), @line : Int32)
+  end
+
+  def size : Int32
+    @fields.size
+  end
+
+  def [](at : Int32) : String
+    @fields[at]
+  end
+
+  def []?(at : Int32) : String?
+    @fields[at]?
+  end
+
+  # The field under the header *name*: "" when this row is too short to
+  # have one, which is the document's doing. A name the header does not
+  # have is the program's, and panics.
+  def [](name : String) : String
+    at = @index[name]?
+    raise "CSVRow: no column is named #{name.inspect}; the header is #{@headers.inspect}" unless at
+    @fields[at]? || ""
+  end
+
+  # The field under the header *name*, or nil when the header has no such
+  # name or this row is too short to reach it.
+  def []?(name : String) : String?
+    at = @index[name]?
+    return nil unless at
+    @fields[at]?
+  end
+
+  # The header's names to this row's fields, as far as both go.
+  def to_h : Hash(String, String)
+    h = {} of String => String
+    i = 0
+    while i < @headers.size && i < @fields.size
+      h[@headers[i]] = @fields[i]
+      i = i + 1
+    end
+    h
+  end
+end
+
+# Rows read one at a time from a `String` or an `IyiIO`.
+#
+# ```
+# reader = CSVReader.new(File.open("people.csv"), headers: true)
+# while row = reader.next.or_panic
+#   puts row["name"]
+# end
+# ```
+pub class CSVReader
+  # Where in a field the reader is.
+  START  = 0 # before its first byte
+  BARE   = 1 # inside one that did not open with a quote
+  QUOTED = 2 # inside a quoted one
+  CLOSED = 3 # just past a quote inside a quoted one: doubled, or the close
+  AFTER  = 4 # past the closing quote, passing over spaces (strip only)
+
+  # How much of a stream is read at a time.
+  CHUNK = 65536
+
+  @io : IyiIO | Nil = nil
+  # The text read from: the whole document, or the stream's current chunk,
+  # held so its bytes stay alive while *buf* points into them.
+  @text : String = ""
+  @buf : Pointer(UInt8)
+  @pos : Int32 = 0
+  @limit : Int32 = 0
+  @ended : Bool = true
+  @begun : Bool = false
+  @done : Bool = false
+  @failed : CSVError | Nil = nil
+  @sep : UInt8 = 44_u8
+  @quote : UInt8 = 34_u8
+  @strip : Bool = false
+  @same_size : Bool = false
+  @has_headers : Bool = false
+  @header : Array(String) | Nil = nil
+  @index : Hash(String, Int32) = {} of String => Int32
+  @width : Int32 = -1
+  @line : Int32 = 1
+  @column : Int32 = 1
+  @row_line : Int32 = 1
+  @prev_cr : Bool = false
+  @field : Pointer(UInt8)
+  @fcap : Int32 = 0
+  @flen : Int32 = 0
+
+  def initialize(text : String, separator : Char = ',', quote : Char = '"', headers : Bool = false, strip : Bool = false, same_size : Bool = false)
+    CSVBytes.check("CSVReader", separator, quote)
+    @text = text
+    @buf = text.to_unsafe
+    @limit = text.bytesize
+    @sep = separator.ord.to_u8
+    @quote = quote.ord.to_u8
+    @has_headers = headers
+    @strip = strip
+    @same_size = same_size
+    @fcap = 256
+    @field = Pointer(UInt8).malloc(256_u64)
+  end
+
+  # Reads *io* as far as each row needs, CHUNK bytes at a time; it is not
+  # closed.
+  def initialize(io : IyiIO, separator : Char = ',', quote : Char = '"', headers : Bool = false, strip : Bool = false, same_size : Bool = false)
+    CSVBytes.check("CSVReader", separator, quote)
+    @io = io
+    @ended = false
+    @buf = @text.to_unsafe
+    @sep = separator.ord.to_u8
+    @quote = quote.ord.to_u8
+    @has_headers = headers
+    @strip = strip
+    @same_size = same_size
+    @fcap = 256
+    @field = Pointer(UInt8).malloc(256_u64)
+  end
+
+  # The header row, read now if no row has been. Only for a reader made
+  # with `headers: true`: on any other, the first row is a row.
+  def headers : Array(String) | CSVError
+    raise "CSVReader: there is no header row; the reader was made without headers: true" unless @has_headers
+    if bad = load_header
+      return bad
+    end
+    @header || [] of String
+  end
+
+  # The next row's fields, nil past the last, or what is wrong with the
+  # document there. A blank line is a row of no fields, except under a
+  # header, where it is passed over.
+  def next_row : Array(String) | CSVError | Nil
+    if @has_headers
+      if bad = load_header
+        return bad
+      end
+    end
+    while true
+      got = read_fields
+      return got unless got.is_a?(Array(String))
+      next if got.empty? && @has_headers
+      if @same_size
+        if @width < 0
+          @width = got.size
+        elsif got.size != @width
+          first = @has_headers ? "the header" : "the first row"
+          return fail(CSVError.new("csv: the row at line #{@row_line} has #{got.size} fields, and #{first} has #{@width}", @row_line, 1))
+        end
+      end
+      return got
+    end
+  end
+
+  # The next row with its header's names, nil past the last.
+  def next : CSVRow | CSVError | Nil
+    got = next_row
+    return got unless got.is_a?(Array(String))
+    CSVRow.new(got, @header || [] of String, @index, @row_line)
+  end
+
+  # Each row left, in order; the error that stopped them, if one did.
+  def each(& : CSVRow -> Nil) : Nil | CSVError
+    while true
+      got = self.next
+      return got if got.is_a?(CSVError)
+      return nil unless got
+      yield got
+    end
+  end
+
+  private def load_header : CSVError | Nil
+    return nil unless @header.nil?
+    got = read_fields
+    return got if got.is_a?(CSVError)
+    head = got || [] of String
+    @header = head
+    i = 0
+    while i < head.size
+      @index[head[i]] = i
+      i = i + 1
+    end
+    @width = head.size if @same_size
+    nil
+  end
+
+  private def fail(error : CSVError) : CSVError
+    @failed = error
+    @done = true
+    error
+  end
+
+  # The fields of the next line, a row of none for a blank one.
+  private def read_fields : Array(String) | CSVError | Nil
+    if failed = @failed
+      return failed
+    end
+    return nil if @done
+    unless @begun
+      @begun = true
+      if bad = begin_marks
+        return fail(bad)
+      end
+    end
+    fields = [] of String
+    state = START
+    touched = false
+    @flen = 0
+    @row_line = @line
+    quote_line = 0
+    quote_column = 0
+    while true
+      if @pos >= @limit
+        break unless refill
+      end
+      b = @buf[@pos]
+      if state == BARE || state == QUOTED
+        # A run of ordinary bytes is copied at once: byte by byte, a field
+        # was a call and a bounds check per byte.
+        if b != @quote && b != 10_u8 && b != 13_u8 && (state == QUOTED || b != @sep)
+          run = @pos
+          while run < @limit
+            c = @buf[run]
+            break if c == @quote || c == 10_u8 || c == 13_u8 || (state == BARE && c == @sep)
+            @column = @column + 1 if (c & 0xC0_u8) != 0x80_u8
+            run = run + 1
+          end
+          return too_long unless append(@buf + @pos, run - @pos)
+          @pos = run
+          @prev_cr = false
+          next
+        end
+        if state == QUOTED
+          if b == @quote
+            state = CLOSED
+          else
+            # A line break inside quotes is the field's.
+            return too_long unless append(@buf + @pos, 1)
+          end
+        elsif b == @sep
+          fields << take_field(true)
+          state = START
+        elsif b == @quote
+          # `a"b` was a guess at what an unpaired quote meant; RFC 4180
+          # has no such field.
+          return fail(CSVError.new("csv: unexpected quote at line #{@line}, column #{@column}", @line, @column))
+        else
+          fields << take_field(true)
+          step(b)
+          return fields
+        end
+      elsif state == START
+        if b == 10_u8 && @prev_cr && fields.empty? && !touched
+          # The LF of a CRLF whose CR ended the last row.
+        elsif b == @quote
+          state = QUOTED
+          touched = true
+          quote_line = @line
+          quote_column = @column
+        elsif b == @sep
+          fields << ""
+          touched = true
+        elsif line_end?(b)
+          fields << "" if touched
+          step(b)
+          return fields
+        elsif space?(b)
+          touched = true
+        else
+          return too_long unless append(@buf + @pos, 1)
+          state = BARE
+          touched = true
+        end
+      elsif b == @sep
+        fields << take_field(false)
+        state = START
+      elsif line_end?(b)
+        fields << take_field(false)
+        step(b)
+        return fields
+      elsif state == CLOSED && b == @quote
+        return too_long unless append(@buf + @pos, 1)
+        state = QUOTED
+      elsif space?(b)
+        state = AFTER
+      else
+        # `"a"b` was the field `ab`.
+        return fail(CSVError.new("csv: expecting #{@sep.unsafe_chr.inspect}, newline or end, not #{char_here} at line #{@line}, column #{@column}", @line, @column))
+      end
+      step(b)
+    end
+    if failed = @failed
+      return failed
+    end
+    @done = true
+    if state == QUOTED
+      return fail(CSVError.new("csv: unterminated quoted field, opened at line #{quote_line}, column #{quote_column}", quote_line, quote_column))
+    end
+    if state == START
+      return nil if fields.empty? && !touched
+      fields << ""
+    else
+      fields << take_field(state == BARE)
+    end
+    fields
+  end
+
+  # Past the byte at *pos*, counting lines and columns: a CR ends a line,
+  # and so does an LF unless it follows one.
+  private def step(b : UInt8) : Nil
+    @pos = @pos + 1
+    if b == 10_u8
+      @line = @line + 1 unless @prev_cr
+      @column = 1
+      @prev_cr = false
+    elsif b == 13_u8
+      @line = @line + 1
+      @column = 1
+      @prev_cr = true
+    else
+      @prev_cr = false
+      @column = @column + 1 if (b & 0xC0_u8) != 0x80_u8
+    end
+  end
+
+  private def line_end?(b : UInt8) : Bool
+    b == 10_u8 || b == 13_u8
+  end
+
+  # A space or a tab under `strip: true`, unless it is the separator.
+  private def space?(b : UInt8) : Bool
+    @strip && (b == 32_u8 || b == 9_u8) && b != @sep
+  end
+
+  # The field so far, the buffer emptied for the next. An unquoted one
+  # loses its trailing spaces and tabs under `strip: true`.
+  private def take_field(bare : Bool) : String
+    n = @flen
+    if bare && @strip
+      while n > 0 && space?(@field[n - 1])
+        n = n - 1
+      end
+    end
+    @flen = 0
+    field = @field
+    String.new(n) { |dst| dst.copy_from(field, n) }
+  end
+
+  # *count* bytes onto the field, false when that would make it longer than
+  # a string holds. The buffer doubles, in Int64: in Int32, past 1 GiB the
+  # doubling overflowed.
+  private def append(from : Pointer(UInt8), count : Int32) : Bool
+    want = @flen.to_i64 + count.to_i64
+    return false if want > 2147483647_i64
+    if want > @fcap.to_i64
+      cap = @fcap.to_i64
+      while cap < want
+        cap = cap * 2
+      end
+      cap = 2147483647_i64 if cap > 2147483647_i64
+      @field = @field.realloc(cap.to_u64)
+      @fcap = cap.to_i32
+    end
+    (@field + @flen).copy_from(from, count)
+    @flen = want.to_i32
+    true
+  end
+
+  private def too_long : CSVError
+    fail(CSVError.new("csv: the field at line #{@line}, column #{@column} is past the 2147483647 bytes a string holds", @line, @column))
+  end
+
+  # The character at *pos*, for an error to name, as much of it as is read.
+  private def char_here : String
+    b = @buf[@pos]
+    len = b < 0x80_u8 ? 1 : (b < 0xE0_u8 ? 2 : (b < 0xF0_u8 ? 3 : 4))
+    len = @limit - @pos if len > @limit - @pos
+    from = @buf + @pos
+    "'" + String.new(len) { |dst| dst.copy_from(from, len) } + "'"
+  end
+
+  # The next chunk of the stream, false at its end or when its read failed.
+  private def refill : Bool
+    return false if @ended
+    io = @io
+    return false unless io
+    more = io.read_bytes(CHUNK)
+    if more.bytesize == 0
+      @ended = true
+      if io.read_failed?
+        fail(CSVError.new("csv: the stream's read failed at line #{@line}, column #{@column}", @line, @column))
+      end
+      return false
+    end
+    @text = more
+    @buf = more.to_unsafe
+    @pos = 0
+    @limit = more.bytesize
+    true
+  end
+
+  # A UTF-8 byte order mark, which Excel writes into every "CSV UTF-8"
+  # file, is read past; a UTF-16 one (Windows PowerShell 5.1's `Out-File`)
+  # is an error, its fields would read with a NUL between their letters.
+  # A stream is read until three bytes are in hand, or it ends.
+  private def begin_marks : CSVError | Nil
+    if io = @io
+      while @limit < 3 && !@ended
+        more = io.read_bytes(CHUNK)
+        if more.bytesize == 0
+          @ended = true
+        else
+          @text = @text + more
+          @buf = @text.to_unsafe
+          @limit = @text.bytesize
+        end
+      end
+    end
+    p = @buf
+    if @limit >= 2 && ((p[0] == 0xFF_u8 && p[1] == 0xFE_u8) || (p[0] == 0xFE_u8 && p[1] == 0xFF_u8))
+      return CSVError.new("csv: the document is UTF-16, by its byte order mark, and is read as UTF-8", 1, 1)
+    end
+    @pos = 3 if @limit >= 3 && p[0] == 0xEF_u8 && p[1] == 0xBB_u8 && p[2] == 0xBF_u8
+    nil
+  end
+end
+
+# Rows written to an `IyiIO`, quoted where a reader needs them to be.
+#
+# ```
+# out = CSVWriter.new(STDOUT, line_end: "\r\n")
+# out.row(["name", "says"])
+# out.row(["Ada", "\"hello\", she said"])
+# ```
+pub class CSVWriter
+  @io : IyiIO
+  @sep : UInt8
+  @quote : UInt8
+  @quote_all : Bool
+  @line_end : String
+  @rows : Int32 = 0
+
+  def initialize(@io : IyiIO, separator : Char = ',', quote : Char = '"', quote_all : Bool = false, line_end : String = "\n")
+    CSVBytes.check("CSVWriter", separator, quote)
+    unless line_end == "\n" || line_end == "\r\n" || line_end == "\r"
+      raise "CSVWriter: a line ends with \"\\n\", \"\\r\\n\" or \"\\r\", not #{line_end.inspect}"
+    end
+    @sep = separator.ord.to_u8
+    @quote = quote.ord.to_u8
+    @quote_all = quote_all
+    @line_end = line_end
+  end
+
+  # The rows written so far.
+  def rows : Int32
+    @rows
+  end
+
+  # One row, and its line end.
+  def row(fields : Array(String)) : Nil
+    lone = fields.size == 1 && fields[0].empty?
+    i = 0
+    while i < fields.size
+      put(@sep) if i > 0
+      f = fields[i]
+      # A first field opening with U+FEFF would be read past as a byte
+      # order mark; one empty field alone would be a blank line.
+      marked = @rows == 0 && i == 0 && f.starts_with?('\uFEFF')
+      if @quote_all || lone || marked || needs_quotes?(f)
+        write_quoted(f)
+      else
+        @io.write(f)
+      end
+      i = i + 1
+    end
+    @io.write(@line_end)
+    @rows = @rows + 1
+  end
+
+  def flush : Nil
+    @io.flush
+  end
+
+  private def needs_quotes?(f : String) : Bool
+    n = f.bytesize
+    return false if n == 0
+    p = f.to_unsafe
+    # Spaces at either end would be lost to a `strip: true` reader.
+    return true if p[0] == 32_u8 || p[0] == 9_u8 || p[n - 1] == 32_u8 || p[n - 1] == 9_u8
+    i = 0
+    while i < n
+      b = p[i]
+      return true if b == @sep || b == @quote || b == 10_u8 || b == 13_u8
+      i = i + 1
+    end
+    false
+  end
+
+  # Between quotes, each quote in it doubled; the runs between them written
+  # whole.
+  private def write_quoted(f : String) : Nil
+    put(@quote)
+    p = f.to_unsafe
+    n = f.bytesize
+    from = 0
+    i = 0
+    while i < n
+      if p[i] == @quote
+        @io.write(p + from, i + 1 - from)
+        put(@quote)
+        from = i + 1
+      end
+      i = i + 1
+    end
+    @io.write(p + from, n - from)
+    put(@quote)
+  end
+
+  private def put(b : UInt8) : Nil
+    one = b
+    @io.write(pointerof(one), 1)
   end
 end

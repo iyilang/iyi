@@ -4,6 +4,35 @@
 
 ### Added
 
+- **`std/mutex`: `Mutex(T)`, and the compiler checks every block that
+  reaches the value behind it.** SPEC.md III.4.4 named `Mutex(T)` as the
+  escape `Share` leaves for state that has to be shared and changed, and
+  it was an undefined constant. Now `Mutex.new { [] of Int32 }` makes
+  one, and `lock { |a| ... }`, `get { |a| a.size }` and `update { |n| n
+  + 1 }` run their block with the lock held, answering `Cancelled` when
+  the waiting task is cancelled. `Mutex(Array(Int32))` is Share although
+  `Array(Int32)` is not - a new `@[Share(owns: true)]` that travels in an
+  artifact as itself - so `IyiThread.start`'s block may capture it. That
+  is sound because only the blocks reach the value: its value comes from
+  the constructor's block (the one that takes a value is private), every
+  such block may capture only Share values (`self`, constants and class
+  variables included), and what `get` answers must be Share. A captured
+  array, a value handed in from outside, a nested lock reaching the outer
+  value and `m.get { |a| a }` are compile errors naming the variable or
+  the answer. A waiter spins briefly when the holder is on another
+  thread, yields to its own thread's other tasks, then sleeps a
+  millisecond at a time; a thread with nothing else to run sleeps in the
+  kernel until the release (a futex on Linux, a semaphore on Windows). A
+  task locking what it holds, and a holder parked where nothing can wake
+  it, panic saying so; a panicking block releases the lock. The compiler's
+  advice for a captured cell two threads write now names `Mutex` beside
+  `Atomic`. Held by `bench/std_mutex_exercise.sh`: five threads and
+  500,000 locked increments of two cells each, none lost or torn; twenty
+  tasks parking inside the lock; a thread asleep in the kernel until a
+  release 150 ms later; a cancelled waiter; seven programs the compiler
+  refuses; and four broken copies of the module caught, one by hanging.
+  `spec/compiler/semantic/iyi_spec.cr` and `iyimod_spec.cr` hold the
+  check and the marker across an artifact.
 - **`Time` has time zones: `Time::Location`, read from the machine's own
   zone database.** A `Time` was a UTC instant and a zone was an offset
   passed by hand. Now a `Time` carries the `Location` it is read in:

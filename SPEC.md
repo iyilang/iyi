@@ -2677,12 +2677,28 @@ spawned 10 ms after it slept its full 2,000 ms, and the group's join with it.
 
 A marker trait, `Share`, decided structurally: a type is shareable if every
 field is shareable and none is mutable, or if it is a synchronised type that
-owns its contents: `Mutex(T)` is shareable when `T` is. A value that is not
-shareable cannot be captured by a spawned block or sent over a channel.
+owns its contents: `Mutex(T)` is shareable whatever `T` is, because nothing
+but the blocks it runs reaches what it holds, and each of those blocks is
+checked where it is written. A value that is not shareable cannot be
+captured by a spawned block or sent over a channel.
 
-**Built, as written, with the obligations below met — but for `Mutex(T)`,
-which does not exist yet (`undefined constant Mutex`): the synchronised
-types `Share` trusts today are `Atomic(T)` (III.4.10) and `List(T)`.** `Iyi::Share`
+**Built, as written, with the obligations below met. The synchronised
+types `Share` trusts are `Atomic(T)` (III.4.10), `List(T)` and
+`Mutex(T)` (`src/std/mutex.iyi`).** The two readings this paragraph once
+had of `Mutex(T)` — "shareable when `T` is", and III.4.7's
+`Mutex(Array(T))` as the escape — were settled for the second, and the
+soundness it needs is the compiler's, not a convention's: the value is
+made by the block `Mutex.new` runs, the constructor that takes a value is
+private, and every block `Mutex.new`, `lock`, `get` and `update` run may
+capture only `Share` values — `self` and the constants and class
+variables it names included — while what `get` answers must be `Share`
+too, since it leaves the lock. A block that breaks either is refused
+where it is written (`CleanupTransformer#check_share_boundary`), so a
+captured array, a value handed in from outside, a nested lock reaching
+the outer value and `m.get { |a| a }` are compile errors. The trust is
+`@[Share(owns: true)]`, which travels in an artifact as itself. What the
+check does not see is the edge the thread check has too: a method the
+block calls that stores its argument somewhere global. `Iyi::Share`
 (`src/compiler/iyi/semantic/share.cr`) decides a type structurally: a
 field is mutable if any method other than `initialize` assigns it, by any
 spelling (the structural scan reads the type's own methods, those its
@@ -3270,7 +3286,7 @@ III.4.8's: one thread interleaves only at parks. III.4.11 removed the
 reason, and III.4.4 has it built. What this section changed is the list
 of types `Share` trusts rather than checks: `Atomic(T)` is the first
 synchronised type in the prelude, shareable by construction, `@[Share]`
-on its declaration, and it joins `List(T)` there before `Mutex(T)` exists.
+on its declaration, beside `List(T)`, and `Mutex(T)` (`@[Share(owns: true)]`) joined them.
 
 #### III.4.11 A kernel thread: **BUILT — `IyiThread`, not a task, and the collector stops it**
 
@@ -3293,8 +3309,8 @@ the scheduler's queues are one thread's, and a value handed from one
 thread to another is a data race — which the type system now refuses at
 the door it has: the block `IyiThread.start` runs may capture only
 `Share` values (III.4.4, built below), so what crosses threads is
-`Atomic(T)`, immutable values, and memory a program reaches through
-`Pointer` and keeps straight itself, `Pointer` being what the marker
+`Atomic(T)`, immutable values, state kept behind a `Mutex(T)`, and memory
+a program reaches through `Pointer` and keeps straight itself, `Pointer` being what the marker
 refuses by name. A thread is not offered as a spelling for
 concurrency; `group` is. It is offered because the collector's parallel
 stages (GC_DESIGN.md 7 and 8) and a scheduler with M threads need one,

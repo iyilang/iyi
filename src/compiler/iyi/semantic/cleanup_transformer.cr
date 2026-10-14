@@ -594,7 +594,7 @@ module Iyi
           elsif obj_type && obj_type.extern? && node.name.ends_with?('=')
             check_args_are_not_closure node, "can't set closure as C #{obj_type.type_desc} member"
           end
-          check_thread_captures_share(node, target_defs[0])
+          check_share_boundary(node, target_defs[0])
         end
 
         current_def = @current_def
@@ -646,23 +646,55 @@ module Iyi
       node
     end
 
-    # iyi: `IyiThread.start { }`'s block runs on another thread, so every
-    # value it captures must be `Share` (SPEC.md III.4.4, III.4.11). The
-    # block became a proc when the call was typed, and the proc's def knows
-    # which of the enclosing variables it closed over; each one's type is
-    # asked, and `self` too when the block reached an instance variable or
-    # called one of self's methods receiverless.
-    def check_thread_captures_share(node : Call, target_def : Def)
-      return unless target_def.name == "start"
+    # iyi: a block that crosses a `Share` boundary may capture only `Share`
+    # values (SPEC.md III.4.4). Two blocks cross one. `IyiThread.start { }`'s
+    # runs on another thread (III.4.11). And the block a method of an owning
+    # type runs (`@[Share(owns: true)]`, `Mutex#lock` and the rest) reaches
+    # the value the type keeps behind its lock: what the block captures
+    # would come within reach of that value, so it must be Share, and what
+    # the call answers leaves the lock, so it must be Share too. That is
+    # what lets `Mutex(Array(Int32))` be Share although `Array(Int32)` is
+    # not: nothing but these blocks reaches the array.
+    #
+    # The block became a proc when the call was typed, and the proc's def
+    # knows which of the enclosing variables it closed over; each one's type
+    # is asked, and `self` too when the block reached an instance variable
+    # or called one of self's methods receiverless.
+    def check_share_boundary(node : Call, target_def : Def)
       owner = target_def.owner
-      return unless owner.metaclass? && owner.instance_type.to_s == "IyiThread"
+      thread = target_def.name == "start" && owner.metaclass? && owner.instance_type.to_s == "IyiThread"
+      owning = thread ? nil : share_owning_type(owner)
+      return unless thread || owning
       block = node.block
       return unless block
       fun_literal = block.fun_literal
       return unless fun_literal.is_a?(ProcLiteral)
       a_def = fun_literal.def
-      check_thread_constants_share(a_def)
-      check_thread_class_vars_share(a_def)
+
+      if owning
+        name = owning.to_s.split("::").last.split('(').first
+        subject = if owner.metaclass?
+                    "the block #{name}.#{target_def.name} makes the #{name}'s value in"
+                  else
+                    "the block #{name}##{target_def.name} runs behind the #{name}'s lock"
+                  end
+        consequence = "whatever the block can reach, the value behind the lock can reach, and the lock no longer guards it (SPEC.md III.4.4)"
+        # What the call answers has left the lock: a constructor answers
+        # the owning type itself, which is Share, and a method that answers
+        # the block's value must answer one that is.
+        if !owner.metaclass? && (answer = node.type?)
+          if why = Iyi::Share.reason(answer)
+            node.raise "#{name}##{target_def.name} answers `#{answer}`, which is not Share: #{why}; what a block behind the #{name}'s lock answers leaves the lock, and the lock no longer guards it. Answer a Share value - a count, a copy's numbers, a String - or use `lock`, which answers nil (SPEC.md III.4.4)"
+          end
+        end
+        check_share_constants(a_def, subject, consequence)
+        check_share_class_var_types(a_def, subject, consequence)
+      else
+        subject = "the block IyiThread.start runs on another thread"
+        consequence = "(SPEC.md III.4.4)"
+        check_thread_constants_share(a_def)
+        check_thread_class_vars_share(a_def)
+      end
       return unless a_def.closure?
 
       vars = a_def.vars
@@ -685,9 +717,12 @@ module Iyi
           type = meta.type?
           next unless type
           if why = Iyi::Share.reason(type)
-            captured.raise "the block IyiThread.start runs on another thread captures `#{captured.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.4)"
+            captured.raise "#{subject} captures `#{captured.name} : #{type}`, which is not Share: #{why}#{owning ? "; " : " "}#{consequence}"
           end
-          check_thread_capture_assigned_once(node, captured, meta, a_def)
+          # A block behind a lock runs in the task that called it, so a
+          # local it assigns is that task's alone; only a thread's block
+          # shares the cell.
+          check_thread_capture_assigned_once(node, captured, meta, a_def) if thread
         end
       end
 
@@ -701,9 +736,43 @@ module Iyi
         if self_type = @current_def.try(&.owner)
           unless self_type.is_a?(Program) || self_type.metaclass?
             if why = Iyi::Share.reason(self_type)
-              block.raise "the block IyiThread.start runs on another thread captures `self : #{self_type}`, which is not Share: #{why} (SPEC.md III.4.4)"
+              block.raise "#{subject} captures `self : #{self_type}`, which is not Share: #{why}#{owning ? "; " : " "}#{consequence}"
             end
           end
+        end
+      end
+    end
+
+    # The owning type a method belongs to, its class method or its
+    # instance's: `Mutex` for `Mutex.new` and for `Mutex(Array(Int32))#lock`.
+    private def share_owning_type(owner : Type) : Type?
+      type = owner.metaclass? ? owner.instance_type : owner
+      type = type.generic_type.as(Type) if type.is_a?(GenericClassInstanceType)
+      type.iyi_share_owns? ? type : nil
+    end
+
+    # A constant or a class variable a block behind a lock names is a way
+    # out of it and a way in, as a captured variable is: its type must be
+    # Share. Whether another thread writes the cell is the thread check's
+    # question, not this one's.
+    def check_share_constants(a_def : Def, subject : String, consequence : String) : Nil
+      named = NamedConstants.new
+      a_def.body.accept named
+      named.paths.each do |path, type|
+        if why = Iyi::Share.reason(type)
+          path.raise "#{subject} names the constant `#{path} : #{type}`, which is not Share: #{why}; #{consequence}"
+        end
+      end
+    end
+
+    def check_share_class_var_types(a_def : Def, subject : String, consequence : String) : Nil
+      named = NamedClassVars.new
+      a_def.body.accept named
+      named.vars.each do |class_var, var|
+        type = var.type?
+        next unless type
+        if why = Iyi::Share.reason(type)
+          class_var.raise "#{subject} names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why}; #{consequence}"
         end
       end
     end
@@ -726,7 +795,7 @@ module Iyi
       inside = CaptureAssignments.new(@program, meta, nil, a_def.vars)
       a_def.body.accept inside
       if first = inside.assigns.first?
-        first[0].raise "the block IyiThread.start runs on another thread assigns `#{name}`, a local of the code that started the thread, so the two threads share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`"
+        first[0].raise "the block IyiThread.start runs on another thread assigns `#{name}`, a local of the code that started the thread, so the two threads share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)"
       end
 
       scope = meta.context
@@ -737,12 +806,9 @@ module Iyi
       outside = CaptureAssignments.new(@program, meta, start, vars)
       body.try &.accept(outside)
       line = start.location.try(&.line_number)
-      # Only `Atomic`: the advice also said "or behind a `Mutex`", and iyi
-      # has none to keep a value behind (`Mutex.new` is an undefined
-      # constant).
       advice = "so the thread and the code that started it share one mutable cell: a data race (SPEC.md III.4.4). " \
                "Capture a local that is assigned once (a block's own locals are new on every call), " \
-               "or keep the value in an `Atomic`"
+               "or keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)"
       # Not found, or found assigned nowhere: the walk does not know this
       # scope, and the typer's answer stands.
       unless outside.found_start? && !outside.assigns.empty?
@@ -810,7 +876,7 @@ module Iyi
     def check_thread_class_vars_share(a_def : Def) : Nil
       named = NamedClassVars.new
       a_def.body.accept named
-      advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`"
+      advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)"
       named.vars.each do |class_var, var|
         next if var.thread_local?
         if assign = named.assigns[var]?

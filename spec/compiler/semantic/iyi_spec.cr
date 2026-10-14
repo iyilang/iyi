@@ -4604,6 +4604,108 @@ describe "Semantic: iyi" do
         CODE
     end
 
+    # `@[Share(owns: true)]`: the synchronised type that owns its contents
+    # (`Mutex(T)`), Share whatever it holds, because only the blocks its
+    # methods run reach the value, and those blocks are checked instead.
+    owning = <<-OWNING
+      struct Proc
+        @[Primitive(:proc_call)]
+        @[Raises]
+        def call(*args : *T) : R
+        end
+      end
+
+      class Bag
+        def initialize
+          @n = 0
+        end
+
+        def add(k : Int32) : Nil
+          @n = k
+        end
+
+        def n : Int32
+          @n
+        end
+      end
+
+      @[Share(owns: true)]
+      class Guard(T)
+        @value : T
+
+        def self.new(&block : -> U) : Guard(U) forall U
+          Guard(U).build(block.call)
+        end
+
+        protected def self.build(value : T) : Guard(T)
+          new(value)
+        end
+
+        private def initialize(@value : T)
+        end
+
+        def lock(&block : T -> _) : Nil
+          block.call(@value)
+          nil
+        end
+
+        def get(&block : T -> R) : R forall R
+          block.call(@value)
+        end
+      end
+
+      OWNING
+
+    it "lets a thread capture an owning type of a value that is not Share" do
+      assert_type(stub + owning + <<-CODE, filename: "x.iyi") { int32 }
+        guard = Guard.new { Bag.new }
+        step = 2
+        IyiThread.start do
+          guard.lock { |bag| bag.add(step) }
+          nil
+        end
+        guard.get { |bag| bag.n }
+        CODE
+    end
+
+    it "refuses a block behind the lock that captures a value that is not Share" do
+      assert_error(stub + owning + <<-CODE, "the block Guard#lock runs behind the Guard's lock captures `other : Bag`, which is not Share: Bag's field @n is assigned in `add`; whatever the block can reach, the value behind the lock can reach", filename: "x.iyi")
+        guard = Guard.new { Bag.new }
+        other = Bag.new
+        guard.lock { |bag| other.add(bag.n) }
+        CODE
+    end
+
+    it "refuses an answer that is not Share leaving the lock" do
+      assert_error(stub + owning + <<-CODE, "Guard#get answers `Bag`, which is not Share: Bag's field @n is assigned in `add`; what a block behind the Guard's lock answers leaves the lock", filename: "x.iyi")
+        guard = Guard.new { Bag.new }
+        guard.get { |bag| bag }
+        CODE
+    end
+
+    it "refuses a constructor's block that hands in a value something else holds" do
+      assert_error(stub + owning + <<-CODE, "the block Guard.new makes the Guard's value in captures `other : Bag`, which is not Share", filename: "x.iyi")
+        other = Bag.new
+        Guard.new { other }
+        CODE
+    end
+
+    it "refuses a constant that is not Share named behind the lock" do
+      assert_error(stub + owning + <<-CODE, "the block Guard#lock runs behind the Guard's lock names the constant `KEPT : Bag`, which is not Share", filename: "x.iyi")
+        KEPT = Bag.new
+        guard = Guard.new { 1 }
+        guard.lock { |n| KEPT.add(n) }
+        CODE
+    end
+
+    it "refuses a Share argument it does not know" do
+      assert_error(<<-CODE, "unknown Share named argument, valid arguments are: 'owns'", filename: "x.iyi")
+        @[Share(own: true)]
+        class Box
+        end
+        CODE
+    end
+
     it "trusts a type marked @[Share] whatever its fields do" do
       assert_type(stub + <<-CODE, filename: "x.iyi") { nil_type }
         @[Share]

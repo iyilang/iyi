@@ -1791,7 +1791,10 @@ module Iyi
       # not carry the marker.
       annotations = [] of String
       if type.is_a?(ClassType) && Iyi::Share.shareable?(type)
-        annotations << "@[Share]"
+        # An owning type says so, or its consumer would read it as trusted
+        # only when its arguments are, and `Mutex(Array(Int32))` would stop
+        # being Share at the artifact's edge.
+        annotations << (type.iyi_share_owns? ? "@[Share(owns: true)]" : "@[Share]")
       end
       # And `@[Primitive(:ReferenceStorageType)]`, which is not decoration
       # either: the annotation is what makes the compiler create this

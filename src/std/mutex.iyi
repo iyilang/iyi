@@ -1,0 +1,264 @@
+# `Mutex(T)`: a value two tasks or two threads may both change, kept behind
+# a lock. SPEC.md III.4.4's synchronised type that owns its contents, and the
+# escape the `Share` rule leaves for state that has to be shared and has to
+# change: `Mutex(Array(Int32))` may be captured by `IyiThread.start`'s block
+# although `Array(Int32)` may not.
+#
+#     import std/mutex::{Mutex}
+#
+#     totals = Mutex.new { {} of String => Int32 }
+#     totals.lock { |t| t["seen"] = (t["seen"]? || 0) + 1 }.or_panic
+#     seen = totals.get { |t| t.size }.or_panic
+#     count = Mutex.new { 0 }
+#     count.update { |n| n + 1 }.or_panic
+#
+# **Only a block reaches the value, and the compiler checks every block.**
+# The value is made by the block `Mutex.new` runs, so nothing outside holds
+# it, and is reached only inside the blocks `lock`, `get` and `update` run
+# with the lock held. Each of those blocks may capture only `Share` values -
+# a captured array would be within reach of the value and outside the lock
+# at once - and what `get` answers must be `Share`, since it leaves the
+# lock. A block that breaks either is refused where it is written, naming
+# the variable or the answer (`CleanupTransformer#check_share_boundary`).
+# What the check does not see is a method the block calls that stores its
+# argument somewhere global; that is the same edge the thread check has.
+#
+# **Waiting.** A task that finds the lock held waits without holding its
+# thread hostage. If the holder is on another thread, it first spins a few
+# turns, which is what a short critical section wants. Then, if its own
+# thread has other work - runnable tasks, sleepers, tasks waiting on I/O -
+# it yields to them, and after sixteen yields sleeps a millisecond at a
+# time, so a holder parked on I/O costs the waiter no core. If its thread
+# has nothing else to do and the holder is elsewhere, the thread sleeps in
+# the kernel until the release: a futex on the lock's word on Linux, a
+# semaphore on Windows; darwin, which has neither on the floor, sleeps the
+# millisecond. A waiting task is cancellable, as every blocking call is
+# (III.4.2): `lock`, `get` and `update` answer `Cancelled` then, and the
+# block does not run.
+#
+# **What is refused.** A task locking a Mutex it already holds would wait
+# for itself, and panics saying so. A holder parked on the waiter's own
+# thread with nothing left there to wake it is a deadlock, and panics
+# saying that too. A panic inside the block releases the lock as it leaves
+# (`defer`), so a task that dies does not take the lock with it.
+#
+# The lock is not fair: a task arriving as it is released may take it ahead
+# of one that waited. A Windows semaphore made for a contended Mutex is
+# kept for the program's life.
+
+module std/mutex
+
+@[Share(owns: true)]
+pub class Mutex(T)
+  @value : T
+  # Bit 0 is the lock. The high 32 bits count the threads asleep in the
+  # kernel waiting for it, which a release wakes one of.
+  @word : Atomic(UInt64)
+  # The task holding it and the thread that task runs on, by object id;
+  # 0 when it is free.
+  @holder : Atomic(UInt64)
+  @holder_thread : Atomic(UInt64)
+  # Windows' doorbell: a semaphore made by the first thread to sleep here.
+  @doorbell : Atomic(UInt64)
+
+  # Spins before a waiter gives its thread's turn away; yields before it
+  # sleeps a millisecond at a time; one sleeper on the word's high half.
+  SPINS  =            100
+  YIELDS =             16
+  WAITER = 4294967296_u64
+
+  # The value is the block's: made here, so nothing outside holds it. The
+  # constructor that takes a value is private for that reason.
+  def self.new(&block : -> U) : Mutex(U) forall U
+    Mutex(U).build(block.call)
+  end
+
+  protected def self.build(value : T) : Mutex(T)
+    new(value)
+  end
+
+  private def initialize(@value : T)
+    @word = Atomic(UInt64).new(0_u64)
+    @holder = Atomic(UInt64).new(0_u64)
+    @holder_thread = Atomic(UInt64).new(0_u64)
+    @doorbell = Atomic(UInt64).new(0_u64)
+  end
+
+  # Runs the block with the value, the lock held; answers nil, or
+  # `Cancelled` when the task was cancelled while it waited.
+  def lock(&block : T -> _) : Nil | Cancelled
+    if refused = acquire
+      return refused
+    end
+    defer release
+    block.call(@value)
+    nil
+  end
+
+  # The block's answer, worked out with the lock held. It must be `Share`,
+  # because it leaves the lock.
+  def get(&block : T -> R) : R | Cancelled forall R
+    if refused = acquire
+      return refused
+    end
+    defer release
+    block.call(@value)
+  end
+
+  # The value replaced by the block's answer, with the lock held: what a
+  # number or any other value type wants, which a block cannot change in
+  # place.
+  def update(&block : T -> T) : Nil | Cancelled
+    if refused = acquire
+      return refused
+    end
+    defer release
+    @value = block.call(@value)
+    nil
+  end
+
+  # Whether some task holds it now: an answer that may be old by the time
+  # it is read, for a report rather than a decision.
+  def locked? : Bool
+    @word.get & 1_u64 != 0_u64
+  end
+
+  private def acquire : Cancelled?
+    me = Mutex.task_id
+    return nil if take(me)
+    if @holder.get == me
+      raise "Mutex: this task already holds the lock, and a second lock would wait for itself"
+    end
+    {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+      turns = 0
+      waits = 0
+      while true
+        return nil if take(me)
+        elsewhere = @holder_thread.get != Mutex.thread_id
+        {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+          if elsewhere && turns < SPINS && IyiThread.program_threads > 1_u64
+            IyiThread.spin_pause
+            turns = turns + 1
+            next
+          end
+        {% end %}
+        busy = Mutex.thread_busy?
+        if !elsewhere && !busy && locked?
+          raise "Mutex: deadlock: the task holding this lock is parked on this thread, and nothing left on this thread can wake it"
+        end
+        {% if !flag?(:gc_none) && !flag?(:gc_boehm) && !flag?(:darwin) %}
+          if elsewhere && !busy
+            sleep_in_kernel
+            @holder.set(me)
+            @holder_thread.set(Mutex.thread_id)
+            return nil
+          end
+        {% end %}
+        waited = IyiScheduler.sleep_current(waits < YIELDS ? 0 : 1)
+        waits = waits + 1
+        return waited if waited.is_a?(Cancelled)
+      end
+      nil
+    {% else %}
+      # One thread and no tasks: a lock held here is held by its caller.
+      raise "Mutex: this program's one thread already holds the lock, and a second lock would wait for itself"
+    {% end %}
+  end
+
+  # One try: the lock taken and its holder recorded, or false.
+  private def take(me : UInt64) : Bool
+    seen = @word.get
+    return false if seen & 1_u64 != 0_u64
+    return false unless @word.compare_and_set(seen, seen | 1_u64)[1]
+    @holder.set(me)
+    @holder_thread.set(Mutex.thread_id)
+    true
+  end
+
+  private def release : Nil
+    @holder.set(0_u64)
+    @holder_thread.set(0_u64)
+    before = @word.sub(1_u64)
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
+      if before >= WAITER
+        __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@word).address.to_i64, IYI_FUTEX_WAKE, 1_i64, 0_i64, 0_i64, 0_i64)
+      end
+    {% elsif !flag?(:gc_none) && !flag?(:gc_boehm) && flag?(:win32) && flag?(:x86_64) %}
+      if before >= WAITER
+        LibC.ReleaseSemaphore(Pointer(Void).new(@doorbell.get), 1_i32, Pointer(Int32).new(0_u64))
+      end
+    {% end %}
+  end
+
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:win32) && flag?(:x86_64))) %}
+    # The thread sleeps until a release, counted on the word's high half so
+    # the release knows to ring. Taking the lock and uncounting are one
+    # exchange, so no release can find a count that has already left.
+    private def sleep_in_kernel : Nil
+      {% if flag?(:win32) %}
+        bell = doorbell
+      {% end %}
+      @word.add(WAITER)
+      while true
+        seen = @word.get
+        if seen & 1_u64 == 0_u64
+          break if @word.compare_and_set(seen, (seen | 1_u64) - WAITER)[1]
+          next
+        end
+        {% if flag?(:linux) %}
+          # The futex reads the word's low half - the lock bit - and sleeps
+          # only while it still reads as held; a release between the load
+          # above and here changes it, and the futex answers at once.
+          __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@word).address.to_i64, IYI_FUTEX_WAIT, (seen & 0xFFFFFFFF_u64).to_i64, 0_i64, 0_i64, 0_i64)
+        {% else %}
+          LibC.WaitForSingleObject(bell, -1_i32)
+        {% end %}
+      end
+    end
+  {% end %}
+
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && flag?(:win32) && flag?(:x86_64) %}
+    # Made once, by whichever sleeper is first; one that loses the race
+    # closes its own. Made before a sleeper counts itself, so a release
+    # that sees the count finds the semaphore.
+    private def doorbell : Void*
+      bell = @doorbell.get
+      return Pointer(Void).new(bell) if bell != 0_u64
+      made = LibC.CreateSemaphoreW(Pointer(Void).new(0_u64), 0_i32, 0x7FFFFFFF_i32, Pointer(UInt16).new(0_u64)).address
+      raise "Mutex: Windows refused a semaphore to sleep on" if made == 0_u64
+      seen, won = @doorbell.compare_and_set(0_u64, made)
+      return Pointer(Void).new(made) if won
+      LibC.CloseHandle(Pointer(Void).new(made))
+      Pointer(Void).new(seen)
+    end
+  {% end %}
+
+  {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+    protected def self.task_id : UInt64
+      IyiScheduler.current.object_id
+    end
+
+    protected def self.thread_id : UInt64
+      IyiScheduler.state.object_id
+    end
+
+    # Whether this thread has anything to run besides the waiting task:
+    # tasks ready to run, tasks asleep, tasks waiting on I/O.
+    protected def self.thread_busy? : Bool
+      st = IyiScheduler.state
+      busy = !st.run_head.nil? || !st.sleep_head.nil? || !st.io_head.nil?
+      {% if flag?(:win32) %}
+        busy = busy || !st.stdin_waiter.nil?
+      {% end %}
+      busy
+    end
+  {% else %}
+    protected def self.task_id : UInt64
+      1_u64
+    end
+
+    protected def self.thread_id : UInt64
+      1_u64
+    end
+  {% end %}
+end

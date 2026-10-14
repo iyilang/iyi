@@ -31,6 +31,15 @@ module Iyi
     # for a type whose bodies it cannot see.
     property? iyi_share_trusted = false
 
+    # iyi: `@[Share(owns: true)]` (SPEC.md III.4.4): the synchronised type
+    # that owns its contents, shareable whatever its type arguments are,
+    # because nothing reaches what it holds except a block it runs - and
+    # every such block is checked where it is written (`CleanupTransformer
+    # #check_share_boundary`). `Mutex(T)` is the one; `Mutex(Array(T))` is
+    # Share although `Array(T)` is not. Implies `iyi_share_trusted`, and
+    # travels in an artifact as the same annotation.
+    property? iyi_share_owns = false
+
     def initialize(@program : Program)
     end
 

@@ -233,8 +233,23 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
       if annotation_type == @program.share_annotation
         # iyi: trust, not a check (SPEC.md III.4.4). Any struct or class,
         # generic or not; the generic's instances inherit the trust and are
-        # then shareable when their arguments are.
+        # then shareable when their arguments are. `owns: true` is the
+        # synchronised type that owns its contents: shareable whatever its
+        # arguments are, its blocks checked at every call instead.
         type.iyi_share_trusted = true
+        unless ann.args.empty?
+          ann.raise "Share annotation can't have positional arguments, only named arguments: 'owns'"
+        end
+        ann.named_args.try &.each do |named_arg|
+          unless named_arg.name == "owns"
+            named_arg.raise "unknown Share named argument, valid arguments are: 'owns'"
+          end
+          value = named_arg.value
+          unless value.is_a?(BoolLiteral)
+            named_arg.raise "Share's 'owns' is true or false"
+          end
+          type.iyi_share_owns = value.value
+        end
       end
 
       if node.struct? && type.is_a?(NonGenericClassType)

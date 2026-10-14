@@ -17,8 +17,9 @@
 # What a thread is not, said here rather than found: it is not a task. No
 # group owns it, nothing cancels it, no channel crosses it — `Channel` is
 # one thread's, and `Share` (SPEC.md III.4.4) is what will say so at
-# compile time. What crosses threads today is `Atomic(T)` and memory the
-# program keeps straight itself. A thread gets a scheduler state and a heap
+# compile time. What crosses threads today is `Atomic(T)`, state behind a
+# `Mutex(T)` (std/mutex), and memory the program keeps straight itself. A
+# thread gets a scheduler state and a heap
 # cache of its own on first touch, so it may spawn fibers and it allocates
 # without a lock; the world it shares is the centre behind the runtime's
 # one lock, and the collector, which stops it.

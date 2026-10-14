@@ -1,0 +1,169 @@
+# Exercises `std/mutex`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_mutex_exercise.iyi
+
+module bench/std_mutex_exercise
+
+import std/mutex::{Mutex}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+pub struct Stop
+  def initialize
+  end
+end
+
+impl Error for Stop
+  def message : String
+    "stop"
+  end
+end
+
+def now_ms : Int64
+  __iyi_monotonic_ns // 1000000_i64
+end
+
+puts "== a value behind a lock"
+names = Mutex.new { [] of String }
+names.lock { |list| list << "ada" }.or_panic
+names.lock { |list| list << "grace" }.or_panic
+assert_true(names.get { |list| list.size }.or_panic == 2, "two names went in")
+assert_true(names.get { |list| list.join(",") }.or_panic == "ada,grace", "and read back in order")
+count = Mutex.new { 0 }
+3.times { count.update { |n| n + 1 }.or_panic }
+assert_true(count.get { |n| n }.or_panic == 3, "a number replaced three times")
+assert_true(!count.locked?, "free when no block runs")
+inside = count.get { |n| count.locked? }.or_panic
+assert_true(inside, "held while its block runs")
+puts "  lock, get and update; a String answer and a number replaced"
+
+# Twenty tasks on one thread each read, park and write fifty times. The park
+# inside the block is what makes it a critical section on one thread: without
+# the lock another task runs between the read and the write, and its
+# increment is lost.
+puts "\n== tasks that park while they hold it"
+tally = Mutex.new { [0] }
+group do |g|
+  20.times do
+    g.spawn do
+      50.times do
+        tally.lock do |cell|
+          seen = cell[0]
+          sleep(0)
+          cell[0] = seen + 1
+        end.or_panic
+      end
+      0
+    end
+  end
+end
+total = tally.get { |cell| cell[0] }.or_panic
+assert_true(total == 1000, "twenty tasks parking inside the lock counted #{total} of 1000")
+puts "  twenty tasks, a park inside each of a thousand increments, none lost"
+
+# Four kernel threads and the main one, each adding to one array behind the
+# lock. `Mutex(Array(Int32))` is Share although the array is not, so the
+# threads' blocks may capture it.
+puts "\n== threads"
+shared = Mutex.new { [0, 0] }
+rounds = 100000
+threads = (0...4).map do |index|
+  IyiThread.start do
+    rounds.times do
+      shared.lock do |cells|
+        cells[0] = cells[0] + 1
+        cells[1] = cells[1] + 2
+      end.or_panic
+    end
+    nil
+  end
+end
+rounds.times do
+  shared.lock do |cells|
+    cells[0] = cells[0] + 1
+    cells[1] = cells[1] + 2
+  end.or_panic
+end
+threads.each(&.join)
+sums = shared.get { |cells| {cells[0], cells[1]} }.or_panic
+assert_true(sums[0] == 5 * rounds && sums[1] == 10 * rounds, "five threads' increments came to #{sums[0]} and #{sums[1]}, not #{5 * rounds} and #{10 * rounds}")
+puts "  five threads, #{5 * rounds} increments of two cells each, none lost or torn"
+
+# The main thread waits with nothing else to run while a thread holds the
+# lock for 150 ms: it sleeps until the release, and wakes for it.
+puts "\n== a thread asleep until the release"
+slow = Mutex.new { [0] }
+started = Atomic(Int64).new(0_i64)
+holder = IyiThread.start do
+  slow.lock do |cell|
+    started.set(1_i64)
+    sleep(150)
+    cell[0] = 7
+  end.or_panic
+  nil
+end
+while started.get == 0_i64
+  sleep(1)
+end
+began = now_ms
+got = slow.get { |cell| cell[0] }.or_panic
+waited = now_ms - began
+holder.join
+assert_true(got == 7, "the waiter read #{got}, not what the holder wrote before it released")
+assert_true(waited >= 100, "the waiter came through after #{waited} ms, before the holder's 150 ms were up")
+puts "  the waiter read what the holder wrote, once it released"
+
+# A failing sibling cancels a task waiting for the lock, and its block does
+# not run; the holder's own sleep is cancelled too, and its release frees
+# the lock for the next.
+puts "\n== cancelled while it waits"
+guarded = Mutex.new { [0] }
+waiter_saw = ""
+holding = Atomic(Int64).new(0_i64)
+began = now_ms
+group do |g|
+  g.spawn do
+    guarded.lock do |cell|
+      holding.set(1_i64)
+      sleep(5000)
+      cell[0] = cell[0] + 1
+    end
+    0
+  end
+  g.spawn do
+    while holding.get == 0_i64
+      sleep(1)
+    end
+    outcome = guarded.lock { |cell| cell[0] = 100 }
+    waiter_saw = outcome.is_a?(Cancelled) ? "cancelled" : "ran"
+    0
+  end
+  g.spawn do
+    sleep(50)
+    Stop.new
+  end
+end
+elapsed = now_ms - began
+assert_true(waiter_saw == "cancelled", "the waiting task's lock answered #{waiter_saw.inspect}, not Cancelled")
+assert_true(elapsed < 2000, "cancellation took #{elapsed} ms against a 5 s hold")
+assert_true(!guarded.locked? && guarded.get { |cell| cell[0] }.or_panic == 1, "the cancelled holder released, and the waiter's block never ran")
+puts "  a waiting task answered Cancelled, its block unrun, and the holder released"
+
+puts "\n== what it refuses"
+said = assert_panics("already holds the lock") do
+  count.lock { |n| count.lock { |m| m } }
+end
+assert_true(!count.locked?, "the panic released the lock it held")
+assert_true(count.get { |n| n }.or_panic == 3, "and the value is as it was")
+assert_panics("boom") do
+  names.lock { |list| raise "boom" }
+end
+assert_true(!names.locked?, "a panic inside the block released the lock")
+names.lock { |list| list << "linus" }.or_panic
+assert_true(names.get { |list| list.size }.or_panic == 3, "and the next lock took it")
+puts "  a second lock by its holder panics, and a panicking block releases"
+
+puts "\nALL CHECKS PASSED"

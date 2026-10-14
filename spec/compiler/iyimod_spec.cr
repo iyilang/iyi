@@ -4757,6 +4757,82 @@ describe Iyi::IyiMod do
     end
   end
 
+  # An owning type travels as one: read back as `@[Share]` alone it would be
+  # Share only when its argument is, and `Guard(Counter)` - the escape the
+  # marker exists for - would stop being Share at the artifact's edge.
+  it "carries an owning type's Share marker, and a consumer's thread reads it" do
+    with_tempdir("iyimod_share_owns") do
+      Dir.mkdir_p "std"
+      File.write "std/guard.iyi", <<-IYI
+        module std/guard
+
+        pub class Counter
+          @count : Int32
+
+          def initialize
+            @count = 0
+          end
+
+          def bump : Nil
+            @count = @count + 1
+          end
+        end
+
+        @[Share(owns: true)]
+        pub class Guard(T)
+          @value : T
+
+          def self.new(&block : -> U) : Guard(U) forall U
+            Guard(U).build(block.call)
+          end
+
+          protected def self.build(value : T) : Guard(T)
+            new(value)
+          end
+
+          private def initialize(@value : T)
+          end
+
+          def lock(&block : T -> _) : Nil
+            block.call(@value)
+            nil
+          end
+        end
+        IYI
+      File.write "main.iyi", <<-IYI
+        module main
+
+        import std/guard::{Guard, Counter}
+
+        guard = Guard.new { Counter.new }
+        t = IyiThread.start do
+          guard.lock { |counter| counter.bump }
+          nil
+        end
+        t.join
+        IYI
+
+      source = Iyi::Compiler::Source.new(File.expand_path("main.iyi"), File.read("main.iyi"))
+
+      producer = create_spec_compiler
+      producer.prelude = "iyi/prelude"
+      producer.emit_iyimod = "mods"
+      producer.no_codegen = true
+      producer.compile source, File.expand_path("unused")
+
+      types = Iyi::IyiMod.read(File.join("mods", "std", "guard.iyimod")).exports.types
+      types.find! { |candidate| candidate.name == "Guard" }.annotations.should eq ["@[Share(owns: true)]"]
+
+      File.delete "std/guard.iyi"
+
+      consumer = create_spec_compiler
+      consumer.prelude = "iyi/prelude"
+      consumer.use_iyimod = "mods"
+      consumer.no_codegen = true
+      consumer.compile source, File.expand_path("unused")
+    end
+  end
+
   it "renders a type's fields into the declarations a consumer reads" do
     declaration = type_declaration("List", "generic struct",
       type_parameters: ["T"],

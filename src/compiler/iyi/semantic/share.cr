@@ -5,9 +5,12 @@
 # shareable, where a field is mutable if any method other than `initialize`
 # assigns it or a setter `field=` is defined for it; or it is trusted
 # (`@[Share]`), shareable whenever its type arguments are, for the short
-# list that owns what it holds. Everything is a type-level fact: no
-# ownership, no borrowing, no flow — R-3's closed types are what make it
-# computable once per declaration.
+# list that owns what it holds; or it owns its contents (`@[Share(owns:
+# true)]`, `Mutex(T)`), shareable whatever its arguments are, because only
+# a block it runs reaches what it holds and each such block is checked
+# where it is written. Everything is a type-level fact: no ownership, no
+# borrowing, no flow — R-3's closed types are what make it computable
+# once per declaration.
 #
 # The mutation half reads bodies, so it can only be answered for a type
 # declared in this compilation. A type read from an artifact carries the
@@ -16,7 +19,8 @@
 # what a consumer sees of it is fields and method headers, and a header
 # cannot say whether the body assigns.
 #
-# What it gates today: the block `IyiThread.start` captures (III.4.11), in
+# What it gates today: the block `IyiThread.start` captures (III.4.11), and
+# the block an owning type's method runs (`Mutex#lock` and the rest), in
 # `CleanupTransformer`. A channel's element type is next, with the channel
 # that crosses threads.
 module Iyi::Share
@@ -98,7 +102,7 @@ module Iyi::Share
       nil
     when GenericClassInstanceType
       if trusted?(type)
-        trusted_arguments(type, visiting)
+        type.generic_type.iyi_share_owns? ? nil : trusted_arguments(type, visiting)
       elsif type.generic_type.iyi_from_artifact?
         "#{type} came from an artifact whose producer did not find it shareable"
       else

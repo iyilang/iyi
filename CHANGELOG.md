@@ -4,6 +4,35 @@
 
 ### Added
 
+- **`std/router`: requests sent to handlers by pattern, Go 1.22's
+  `ServeMux`.** `router.handle("GET /users/{id}") { |req, params| ... }`
+  registers a handler and `Server.serve(l) { |req| router.call(req) }`
+  routes by it. Patterns are `[METHOD ][HOST]/path`: `{name}` takes a
+  segment, a last `{name...}` the rest, a trailing `/` a subtree, `{$}`
+  the end; `GET` takes `HEAD` too; wildcard values are percent-decoded a
+  segment at a time, so `%2F` stays inside one. The most specific
+  pattern wins whatever the order they were registered in, a host's
+  pattern before one without, and two patterns neither of which is more
+  specific but which share a request are refused when the second is
+  registered, with a sentence naming both and the request
+  (`"/index.html" conflicts with "GET /": it matches more methods but a
+  more specific path, and both match GET "/index.html"`). A path
+  matched only under other methods is 405 with `Allow`, `/x` is
+  redirected to a registered `/x/` (301), a path with `.`, `..` or `//`
+  to its cleaned form, a malformed escape is 400, anything else 404.
+  Malformed patterns are refused by their sentence, and so is a
+  pattern registered after the router answered its first request, so
+  the table is never written while it is read. `Pattern.parse`,
+  `relation` and `conflict` are the comparisons as values. Held by
+  `bench/std_router_exercise.sh`, plain and `--release`: every pattern
+  and example in Go's `ServeMux` documentation in a table of 70
+  requests, 23 pairs of patterns and 32 patterns read; the same tables
+  handed to Go 1.25's own `ServeMux` give the same answer for every
+  row (the four patterns Go takes and this refuses - unclean paths, a
+  malformed escape - left out); Python's `http.client` against a served
+  router for 405 and `Allow`, 301s, HEAD and 400; seven refusals by
+  their sentence; fourteen broken copies of the module caught. 200,000
+  requests routed against 21 patterns in 165 ms.
 - **`std/sse`: server-sent events (WHATWG HTML §9.2) on both ends of
   std/http.** `SSE.stream { |events| events.send(data, event:, id:,
   retry:); events.comment(text) }` answers a request with a 200

@@ -4,6 +4,19 @@
 
 ### Added
 
+- **`std/cookie`: `Cookie` and `CookieJar` (RFC 6265).** `Cookie.parse`
+  reads a `Set-Cookie` line as §5.2 has a user agent read one - any case,
+  unknown attributes passed over, `Expires` in RFC 9110's three date
+  forms, `Max-Age` before it - and `to_set_cookie` writes one, refusing a
+  name that is not a token or a value with a byte a cookie cannot hold.
+  `CookieJar`, handed to `HTTP.request(..., jar:)`, keeps what answers
+  set by domain and path, replaces and removes (`Max-Age=0`) as §5.3
+  says, and sends back what matches a URL, longer paths first, never a
+  `Secure` cookie over plain http; a `Domain` of one label or of another
+  site is refused. Held by `bench/std_cookie_exercise.sh`: Python's
+  `http.cookies` reads every attribute the module writes, Python's
+  `http.cookiejar` keeps and sends back what a std/http server sets
+  with it, and eight broken copies are caught.
 - **`std/http`: bodies are streams both ways, and the client and server
   do what the web expects of them.** A body was a string, read whole
   before the block ran and handed out whole, so a download cost its size

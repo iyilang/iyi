@@ -1,0 +1,150 @@
+# Exercises `std/cookie`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_cookie_exercise.iyi
+
+module bench/std_cookie_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/cookie::{Cookie, CookieJar}
+import std/http::{HTTP, Response, Server}
+import std/socket::{IyiSocket}
+import std/time::{Time}
+
+# What `work` answers, or "refused: <why>" when it raises: run as a task,
+# whose value catches the panic.
+def answer(&work : -> String) : String
+  said = "no answer"
+  group do |g|
+    task = g.spawn { work.call }
+    case got = task.value
+    in Panicked
+      said = "refused: " + got.message
+    in String
+      said = got
+    end
+    0
+  end
+  said
+end
+
+
+# Modes the gate script runs: `lines` prints Set-Cookie lines for Python's
+# `http.cookies` to read; `serve` prints a port and answers until `/stop`.
+args = Program.args
+if args.size > 0 && args[0] == "lines"
+  puts Cookie.new("session", "abc123", path: "/", http_only: true).to_set_cookie
+  puts Cookie.new("theme", "dark", path: "/app", max_age: 3600_i64, secure: true, same_site: "Lax").to_set_cookie
+  puts Cookie.new("lang", "en-US", domain: "example.com", expires: Time.utc(2037, 10, 21, 7, 28, 0)).to_set_cookie
+  __iyi_exit(0)
+end
+if args.size > 0 && args[0] == "serve"
+  serving = IyiSocket.listen("127.0.0.1", 0)
+  puts serving.local_port
+  Server.serve(serving) do |req|
+    if req.path == "/stop"
+      serving.close
+      Response.new(200, "bye")
+    elsif req.path == "/login"
+      r = Response.new(200, "in")
+      r.add_header("Set-Cookie", Cookie.new("session", "s3cr3t", path: "/", http_only: true).to_set_cookie)
+      r.add_header("Set-Cookie", Cookie.new("theme", "dark", path: "/", max_age: 3600_i64).to_set_cookie)
+      r.add_header("Set-Cookie", Cookie.new("deep", "1", path: "/deep").to_set_cookie)
+      r
+    elsif req.path == "/logout"
+      r = Response.new(200, "out")
+      r.add_header("Set-Cookie", Cookie.new("session", "", path: "/", max_age: 0_i64).to_set_cookie)
+      r
+    else
+      cookies = req.cookies
+      Response.new(200, "#{cookies["session"]? || "-"} #{cookies["theme"]? || "-"} #{cookies["deep"]? || "-"}")
+    end
+  end
+  __iyi_exit(0)
+end
+
+puts "== cookies"
+# RFC 6265: a Set-Cookie line read as a user agent reads one, written as a
+# server writes one, and a jar that sends back what matches.
+c1 = Cookie.parse("SID=31d4d96e407aad42; Path=/; Secure; HttpOnly; SameSite=Lax; Domain=.Example.com")
+if c1
+  assert_true c1.name == "SID" && c1.value == "31d4d96e407aad42" && c1.path == "/" && c1.secure && c1.http_only, "a Set-Cookie line read"
+  assert_str "example.com", c1.domain || "", "its domain, lower case, the leading dot gone"
+  assert_str "Lax", c1.same_site || "", "SameSite"
+else
+  raise "ASSERTION FAILED: a Set-Cookie line read"
+end
+dated = Cookie.parse("lang=en-US; Expires=Wed, 21 Oct 2037 07:28:00 GMT")
+dated_at = dated ? dated.expires : nil
+assert_true !dated_at.nil? && dated_at.to_s == Time.utc(2037, 10, 21, 7, 28, 0).to_s, "Expires read: #{dated_at}"
+aged = Cookie.parse("a=b; Max-Age=60; Expires=Wed, 21 Oct 2015 07:28:00 GMT")
+assert_true !aged.nil? && !aged.expired?(Time.utc) && aged.max_age == 60_i64, "Max-Age wins over Expires"
+assert_true Cookie.parse("no pair here").nil?, "a line with no pair is no cookie"
+assert_true Cookie.parse("=v").nil?, "nor one with no name"
+quoted = Cookie.parse("a=\"q\"")
+assert_str "q", quoted ? quoted.value : "", "a quoted value loses its quotes"
+assert_str "a=1; Path=/x; Max-Age=30; Secure; HttpOnly; SameSite=Strict", Cookie.new("a", "1", path: "/x", max_age: 30_i64, secure: true, http_only: true, same_site: "Strict").to_set_cookie, "a Set-Cookie line written"
+assert_str "b=2; Expires=Wed, 21 Oct 2037 07:28:00 GMT", Cookie.new("b", "2", expires: Time.utc(2037, 10, 21, 7, 28, 0)).to_set_cookie, "with an Expires date"
+assert_str "refused: Cookie: a has a byte a cookie value cannot hold: \"x;y\"", answer { Cookie.new("a", "x;y").to_set_cookie }, "a value with a semicolon refused"
+assert_str "refused: Cookie: not a cookie name: \"a b\"", answer { Cookie.new("a b", "1").to_set_cookie }, "a name with a space refused"
+pairs = Cookie.parse_header("a=1; b=\"x y\"; a=2; junk")
+assert_true pairs.size == 2 && pairs["a"]? == "1" && pairs["b"]? == "x y", "a Cookie header's pairs, the first of a name kept"
+jar = CookieJar.new
+set = Response.new(200, "")
+set.add_header("Set-Cookie", "host=1")
+set.add_header("Set-Cookie", "wide=2; Domain=example.com; Path=/")
+set.add_header("Set-Cookie", "deep=3; Path=/a/b")
+set.add_header("Set-Cookie", "safe=4; Secure")
+set.add_header("Set-Cookie", "public=5; Domain=com")
+set.add_header("Set-Cookie", "elsewhere=6; Domain=other.org")
+set.add_header("Set-Cookie", "old=7; Expires=Wed, 21 Oct 2015 07:28:00 GMT")
+jar.update("http://www.example.com/c", set)
+assert_true jar.size == 4, "a jar keeps four of seven: not a one-label domain, another site's, or one set lapsed (#{jar.size})"
+assert_str "deep=3; host=1; wide=2", jar.header_for("http://www.example.com/a/b/x") || "", "the longer path first, then the older; Secure not over http"
+assert_str "host=1; wide=2", jar.header_for("http://www.example.com/a/") || "", "a path that does not match"
+assert_str "host=1; wide=2", jar.header_for("http://www.example.com/a/bc") || "", "a path matches at a slash, not inside a name"
+assert_str "wide=2", jar.header_for("http://shop.example.com/") || "", "a Domain cookie goes to a subdomain, a host cookie does not"
+assert_true jar.header_for("http://example.org/").nil?, "nothing to another site"
+gone = Response.new(200, "")
+gone.add_header("Set-Cookie", "host=; Max-Age=0")
+jar.update("http://www.example.com/c", gone)
+assert_str "wide=2", jar.header_for("http://www.example.com/a/") || "", "Max-Age=0 removes a cookie"
+both = HTTP.parse_response("HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Expires=Wed, 21 Oct 2037 07:28:00 GMT\r\nSet-Cookie: b=2\r\nContent-Length: 0\r\n\r\n")
+assert_true Cookie.from_response(both).size == 2 && Cookie.from_response(both)[0].name == "a" && Cookie.from_response(both)[1].name == "b", "an answer's cookies, each line its own, a date's comma and all"
+jar_l = IyiSocket.listen("127.0.0.1", 0)
+jar_base = "http://127.0.0.1:#{jar_l.local_port}"
+group do |g|
+  g.spawn do
+    Server.serve(jar_l) do |req|
+      if req.path == "/stop"
+        jar_l.close
+        Response.new(200, "bye")
+      elsif req.path == "/login"
+        r = Response.new(302, "", {"Location" => "/home"})
+        r.add_header("Set-Cookie", Cookie.new("session", "abc", path: "/").to_set_cookie)
+        r
+      else
+        Response.new(200, "session=#{req.cookies["session"]? || "-"}")
+      end
+    end
+    0
+  end
+  g.spawn do
+    net_jar = CookieJar.new
+    assert_str "session=abc", HTTP.request("GET", jar_base + "/login", jar: net_jar).or_panic.body, "a cookie set by a redirect goes with the request it leads to"
+    assert_str "session=abc", HTTP.request("GET", jar_base + "/again", jar: net_jar).or_panic.body, "and with the next"
+    assert_str "session=-", HTTP.get(jar_base + "/again").or_panic.body, "and not without the jar"
+    HTTP.get(jar_base + "/stop").or_panic
+    0
+  end
+end
+puts "  Set-Cookie read and written, refusals, a Cookie header, a jar's domains, paths, Secure and expiry, through a redirect"
+
+puts "\nALL CHECKS PASSED"

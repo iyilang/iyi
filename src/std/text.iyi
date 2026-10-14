@@ -37,15 +37,15 @@
 #    to `String`; import both and each call takes the one its argument names.
 #
 # 4. Scope and omissions from Crystal's string.cr (5,922 lines):
-#    Crystal's stdlib carries large Unicode normalization tables (NFC, NFD),
-#    case folding across every script, grapheme clustering, regex matching,
-#    iconv encoding conversions, C string null-byte guards, and decades of
-#    legacy Ruby compatibility aliases.
-#    iyi omits those tables and wrappers to adhere to SPEC.md III.9 dependency
-#    and footprint floors. This library provides the core operations that real
-#    programs reach for: whitespace stripping, splitting, joining, indexing,
-#    substitutions, transformations (tr, squeeze, delete, count, center),
-#    character inspection, and robust conversions with nilable failure paths.
+#    Normalization (NFC, NFD, NFKC, NFKD), case folding and the Unicode
+#    categories are `std/unicode`'s, and regex matching is `std/regex`'s.
+#    What neither module nor this one carries: grapheme clustering, iconv
+#    encoding conversions, C string null-byte guards, and decades of legacy
+#    Ruby compatibility aliases. This library provides the core operations
+#    that real programs reach for: whitespace stripping, splitting, joining,
+#    indexing, substitutions, transformations (tr, squeeze, delete, count,
+#    center), character inspection, and robust conversions with nilable
+#    failure paths.
 #
 # Written against iyi's own prelude, and only that one. Its `index`, `split`
 # and `sub` are byte-indexed by the convention above, which is not Crystal's,

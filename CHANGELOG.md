@@ -4,6 +4,30 @@
 
 ### Added
 
+- **`std/curve25519`: X25519 key agreement (RFC 7748) and Ed25519
+  signatures (RFC 8032), in iyi.** `X25519.public_key(private)`,
+  `X25519.shared(private, peer_public) : String | CurveError`,
+  `Ed25519.public_key(seed)`, `Ed25519.sign(seed, message)` and
+  `Ed25519.verify(public, message, signature) : Bool`, on a field of
+  five 51-bit limbs multiplied in `UInt128`, with no branch or index on a
+  secret: a Montgomery ladder with masked swaps, and signing's base-point
+  multiplication a 4-bit window read from its table by masks. Keys and
+  seeds come from the caller and the module imports only std/int and
+  std/digest's SHA-512, so it reaches nothing. `shared` answers a
+  `CurveError` for a peer key of the wrong size and for the all-zero
+  secret a small-order point gives (RFC 7748 §6.1). `verify` is §5.1.7
+  read strictly with the cofactorless equation: an S of L or more (the
+  S + L malleation) and a key that is not a canonical encoding (y of p
+  or more, x = 0 with the sign bit) answer false - OpenSSL takes the
+  latter two, the gate records. A private key or seed that is not 32
+  bytes is refused with a sentence. `bench/std_curve25519_exercise.sh`
+  holds RFC 7748's §5.2 vectors and its 1, 1,000 and (in the release
+  build, about 25 seconds) 1,000,000 iterations, the §6.1 exchange,
+  seven small-order points, RFC 8032's five §7.1 vectors, 2,000 X25519
+  cases and 4,000 Ed25519 ones against Python's `cryptography` both
+  ways, six refusals and 12 broken copies each caught at the check that
+  names it. Measured --release: a shared secret 21 microseconds
+  (OpenSSL 19), a verification 43 (47), a signature 68 (17).
 - **`std/csv` reads a row at a time (`CSVReader`) and writes to a
   stream (`CSVWriter`).** `CSV.parse` held the whole document and its
   every row, and panicked at a malformed one. `CSVReader` reads a

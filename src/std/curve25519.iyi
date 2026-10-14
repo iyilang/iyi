@@ -1,0 +1,860 @@
+# X25519 (RFC 7748) and Ed25519 (RFC 8032), written in iyi on the field
+# of integers modulo 2^255 - 19.
+#
+#     import std/curve25519::{X25519, Ed25519, CurveError}
+#
+#     mine = X25519.public_key(private_key)            # 32 bytes
+#     secret = X25519.shared(private_key, their_public)!  # or a CurveError
+#     public = Ed25519.public_key(seed)                # 32 bytes
+#     signature = Ed25519.sign(seed, message)          # 64 bytes
+#     Ed25519.verify(public, message, signature)       # true or false
+#
+# Keys, seeds, messages and signatures are a `String`, whose bytes are
+# taken, or an `Array(UInt8)`; what comes back is a `String` of raw bytes.
+# The caller brings every secret: a private key or a seed is 32 bytes from
+# wherever the caller draws them. This module imports nothing past std/int
+# and std/digest's SHA-512, so a package that signs or agrees on a key is
+# not counted as reaching the operating system (`iyi mod reach`);
+# `Random::Secure.random_bytes(32)` from std/random is where a fresh key
+# comes from.
+#
+# The field. An element is five 51-bit limbs in `UInt64`s, the products
+# taken in `UInt128` and folded back with 2^255 = 19 (mod p), as
+# curve25519-donna-c64 and Go's `crypto/internal/edwards25519/field` do;
+# inversion is Fermat's, the fixed chain of 254 squarings and 11 products
+# for z^(p-2). Every operation on an element runs the same instructions
+# whatever its value: no branch and no memory index depends on a secret.
+# The two things that pick by a secret bit are a mask: the Montgomery
+# ladder's swap (`cswap`) and the window lookup in a scalar multiplication,
+# which reads all sixteen entries and keeps one with `&` and `|`.
+#
+# X25519 is the RFC 7748 §5 ladder over the clamped scalar, 255 steps. The
+# peer's u-coordinate has its top bit masked and is otherwise taken as it
+# comes, non-canonical values too, as the RFC says it must be. `shared`
+# refuses, as a `CurveError`, an all-zero shared secret (RFC 7748 §6.1:
+# the peer sent a point of small order, and the secret is one the peer
+# chose rather than agreed), and a peer key that is not 32 bytes.
+#
+# Ed25519 is RFC 8032 §5.1, points in extended coordinates (X:Y:Z:T) with
+# the complete addition formulas of §5.1.4. Signing multiplies the base
+# point by secret scalars in constant time: 4-bit windows, each looked up
+# from a table of sixteen multiples by masks. Verification works on public
+# values only, so it skips zero windows and branches freely, and it is
+# strict where RFC 8032 §5.1.7 is: a signature whose S is not below the
+# group order L is refused (the S + L malleation), and so is a public key
+# that is not a canonical encoding (a y of p or more, or x = 0 with the
+# sign bit set) or not a point on the curve. The equation checked is the
+# cofactorless one, [S]B = R + [k]A, as R' = [S]B - [k]A encoded and
+# compared with the signature's R bytes: an encoding this module writes is
+# always canonical, so the bytes are equal exactly when R decodes and is
+# the same point, which is §5.1.7's decoding of R without a square root.
+# The cofactored equation, [8][S]B = [8]R + [8][k]A, accepts more
+# signatures (ones with a small-order component, which no signer following
+# §5.1.6 makes), and RFC 8032 allows either. A public key of small order
+# is not refused: the RFC does not ask it, and the identity's canonical
+# encoding decodes. Set beside OpenSSL, through Python's `cryptography`,
+# this verify agreed on 2,500 signatures good and bad (the gate's kinds)
+# and is stricter in one place: OpenSSL takes the identity spelled with
+# y = p + 1, or with x = 0 and the sign bit set, as a key, and §5.1.3 says
+# decoding fails for both.
+#
+# Measured on one x86_64 Linux machine, --release, the best of five runs
+# of 200: a shared secret took 21 microseconds against `cryptography`'s
+# (OpenSSL's) 19, a verification 43 against 47, and a signature 68
+# against 17; a signature works the public key out from the seed again
+# and multiplies the base point twice, by a table it builds each time,
+# where OpenSSL keeps both. A plain build took 116, 228 and 522, the
+# average of 100 or 200.
+#
+# Refused with a sentence, as the caller's own misuse: a private key or a
+# seed that is not 32 bytes. Data from outside is answered as a value: a
+# peer key of the wrong size or an all-zero secret is a `CurveError`, and
+# a public key or signature that is malformed, of the wrong size or
+# non-canonical makes `verify` answer false.
+
+module std/curve25519
+
+import std/int
+import std/digest::{SHA512}
+
+# What is wrong with a peer's key: `message` is the sentence.
+pub struct CurveError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for CurveError
+  def message : String
+    @message
+  end
+end
+
+# X25519, RFC 7748 §5: the u-coordinate of a clamped scalar times a point
+# on Curve25519. The private key is any 32 bytes; it is clamped here
+# (bits 0 to 2 and 255 cleared, bit 254 set), so the caller need not.
+pub struct X25519
+  # The public key of *private_key*: its multiple of the base point, u = 9.
+  def self.public_key(private_key : String | Array(UInt8)) : String
+    k, n = CurveBytes.of(private_key)
+    raise "X25519: a private key is 32 bytes, not #{n}" unless n == 32
+    result = CurveLadder.x25519(k, CurveField.new(9_u64, 0_u64, 0_u64, 0_u64, 0_u64))
+    String.new(32) { |buf| result.to_bytes(buf) }
+  end
+
+  # The secret *private_key* shares with the owner of *peer_public*. A
+  # peer key that is not 32 bytes, and a secret of all zeros (a peer key of
+  # small order, RFC 7748 §6.1), are a `CurveError`. Whether the secret was
+  # zero is the one thing that leaves the ladder by a branch, and it says
+  # nothing of the private key: which keys give zero depends on the peer's.
+  def self.shared(private_key : String | Array(UInt8), peer_public : String | Array(UInt8)) : String | CurveError
+    k, n = CurveBytes.of(private_key)
+    raise "X25519: a private key is 32 bytes, not #{n}" unless n == 32
+    u, m = CurveBytes.of(peer_public)
+    return CurveError.new("X25519: a public key is 32 bytes, not #{m}") unless m == 32
+    result = CurveLadder.x25519(k, CurveField.from_bytes(u))
+    secret = String.new(32) { |buf| result.to_bytes(buf) }
+    p = secret.to_unsafe
+    seen = 0_u8
+    i = 0
+    while i < 32
+      seen = seen | p[i]
+      i = i + 1
+    end
+    if seen == 0_u8
+      return CurveError.new("X25519: the shared secret is all zero bytes: the peer's public key is a point of small order (RFC 7748 section 6.1)")
+    end
+    secret
+  end
+end
+
+# Ed25519, RFC 8032 §5.1: the seed is the 32-byte private key; SHA-512 of
+# it gives the secret scalar (its first half, clamped) and the prefix the
+# per-message nonce is hashed from (its second half). Signing is
+# deterministic: one seed and one message give one signature.
+pub struct Ed25519
+  # The 32-byte public key of *seed*, RFC 8032 §5.1.5.
+  def self.public_key(seed : String | Array(UInt8)) : String
+    h = expand(seed)
+    a = CurvePoint.base_mult(h.to_unsafe)
+    String.new(32) { |buf| a.encode(buf) }
+  end
+
+  # The 64-byte signature of *message* under *seed*, RFC 8032 §5.1.6:
+  # R = [r]B for r = SHA-512(prefix || M) mod L, then
+  # S = (r + SHA-512(R || A || M) * s) mod L. The public key A is worked
+  # out again from the seed, which costs a second multiplication of the
+  # base point; the two are each a fixed-window constant-time one.
+  def self.sign(seed : String | Array(UInt8), message : String | Array(UInt8)) : String
+    h = expand(seed)
+    hp = h.to_unsafe
+    mp, mn = CurveBytes.of(message)
+    public = uninitialized UInt8[32]
+    pp = pointerof(public).as(Pointer(UInt8))
+    CurvePoint.base_mult(hp).encode(pp)
+    nonce = SHA512.new.update(hp + 32, 32).update(mp, mn).final
+    r = uninitialized UInt8[32]
+    rp = pointerof(r).as(Pointer(UInt8))
+    CurveScalar.reduce_bytes(nonce.to_unsafe, rp)
+    String.new(64) do |sig|
+      CurvePoint.base_mult(rp).encode(sig)
+      challenge = SHA512.new.update(sig, 32).update(pp, 32).update(mp, mn).final
+      k = uninitialized UInt8[32]
+      kp = pointerof(k).as(Pointer(UInt8))
+      CurveScalar.reduce_bytes(challenge.to_unsafe, kp)
+      CurveScalar.mul_add(kp, hp, rp, sig + 32)
+    end
+  end
+
+  # Whether *signature* is *public_key*'s signature of *message*, RFC 8032
+  # §5.1.7 with the cofactorless equation (the header says why). False,
+  # not a panic, for a key or signature of the wrong size, a key that is
+  # not a canonical encoding of a point on the curve, and an S of L or
+  # more.
+  def self.verify(public_key : String | Array(UInt8), message : String | Array(UInt8), signature : String | Array(UInt8)) : Bool
+    ap, an = CurveBytes.of(public_key)
+    mp, mn = CurveBytes.of(message)
+    sp, sn = CurveBytes.of(signature)
+    return false unless an == 32 && sn == 64
+    return false unless CurveScalar.canonical?(sp + 32)
+    a = CurvePoint.decode(ap)
+    return false unless a
+    challenge = SHA512.new.update(sp, 32).update(ap, 32).update(mp, mn).final
+    k = uninitialized UInt8[32]
+    kp = pointerof(k).as(Pointer(UInt8))
+    CurveScalar.reduce_bytes(challenge.to_unsafe, kp)
+    check = uninitialized UInt8[32]
+    cp = pointerof(check).as(Pointer(UInt8))
+    CurvePoint.double_mult_vartime(sp + 32, kp, a).encode(cp)
+    i = 0
+    while i < 32
+      return false unless cp[i] == sp[i]
+      i = i + 1
+    end
+    true
+  end
+
+  # SHA-512 of the seed, its first half clamped into the secret scalar.
+  private def self.expand(seed : String | Array(UInt8)) : Array(UInt8)
+    sp, n = CurveBytes.of(seed)
+    raise "Ed25519: a seed is 32 bytes, not #{n}" unless n == 32
+    h = SHA512.new.update(sp, 32).final
+    h[0] = h[0] & 248_u8
+    h[31] = (h[31] & 127_u8) | 64_u8
+    h
+  end
+end
+
+# The Montgomery ladder of RFC 7748 §5, in the RFC's own names.
+struct CurveLadder
+  def self.x25519(scalar : Pointer(UInt8), x1 : CurveField) : CurveField
+    clamped = uninitialized UInt8[32]
+    k = pointerof(clamped).as(Pointer(UInt8))
+    i = 0
+    while i < 32
+      k[i] = scalar[i]
+      i = i + 1
+    end
+    k[0] = k[0] & 248_u8
+    k[31] = (k[31] & 127_u8) | 64_u8
+    x2 = CurveField.one
+    z2 = CurveField.zero
+    x3 = x1
+    z3 = CurveField.one
+    swap = 0_u64
+    t = 254
+    while t >= 0
+      # The bit's position is the loop's, not the key's; the bit itself is
+      # only ever a mask.
+      bit = k[t >> 3].to_u64.unsafe_shr(t & 7) & 1_u64
+      swap = swap ^ bit
+      mask = 0_u64 &- swap
+      x2, x3 = CurveField.cswap(mask, x2, x3)
+      z2, z3 = CurveField.cswap(mask, z2, z3)
+      swap = bit
+      a = x2 + z2
+      aa = a.square
+      b = x2 - z2
+      bb = b.square
+      e = aa - bb
+      c = x3 + z3
+      d = x3 - z3
+      da = d * a
+      cb = c * b
+      x3 = (da + cb).square
+      z3 = x1 * (da - cb).square
+      x2 = aa * bb
+      # a24 = (486662 - 2) / 4.
+      z2 = e * (aa + e.mul_small(121665_u64))
+      t = t - 1
+    end
+    mask = 0_u64 &- swap
+    x2, x3 = CurveField.cswap(mask, x2, x3)
+    z2, z3 = CurveField.cswap(mask, z2, z3)
+    x2 * z2.invert
+  end
+end
+
+# An element of GF(2^255 - 19): l0 + l1 2^51 + l2 2^102 + l3 2^153 +
+# l4 2^204. Between operations each limb is below 2^52 (a little over
+# 2^51 after a carry), which leaves the room a product's sums need: a
+# column of five products of 52-bit limbs, the high four times 19, stays
+# under 2^111.
+struct CurveField
+  MASK =    0x7ffffffffffff_u64
+  ALL  = 0xffffffffffffffff_u64
+
+  getter l0 : UInt64
+  getter l1 : UInt64
+  getter l2 : UInt64
+  getter l3 : UInt64
+  getter l4 : UInt64
+
+  def initialize(@l0 : UInt64, @l1 : UInt64, @l2 : UInt64, @l3 : UInt64, @l4 : UInt64)
+  end
+
+  def self.zero : CurveField
+    new(0_u64, 0_u64, 0_u64, 0_u64, 0_u64)
+  end
+
+  def self.one : CurveField
+    new(1_u64, 0_u64, 0_u64, 0_u64, 0_u64)
+  end
+
+  # d = -121665/121666, the Edwards curve's constant, and 2d.
+  def self.d : CurveField
+    new(0x34dca135978a3_u64, 0x1a8283b156ebd_u64, 0x5e7a26001c029_u64, 0x739c663a03cbb_u64, 0x52036cee2b6ff_u64)
+  end
+
+  def self.d2 : CurveField
+    new(0x69b9426b2f159_u64, 0x35050762add7a_u64, 0x3cf44c0038052_u64, 0x6738cc7407977_u64, 0x2406d9dc56dff_u64)
+  end
+
+  # 2^((p - 1) / 4), a square root of -1.
+  def self.sqrt_m1 : CurveField
+    new(0x61b274a0ea0b0_u64, 0xd5a5fc8f189d_u64, 0x7ef5e9cbd0c60_u64, 0x78595a6804c9e_u64, 0x2b8324804fc1d_u64)
+  end
+
+  # 32 bytes little-endian, bit 255 dropped (RFC 7748 §5 masks it, and RFC
+  # 8032 §5.1.3 reads it apart as x's sign). A value from p up to 2^255 - 1
+  # is kept as it is and reduces in the arithmetic.
+  def self.from_bytes(b : Pointer(UInt8)) : CurveField
+    w0 = CurveBytes.load64(b)
+    w1 = CurveBytes.load64(b + 8)
+    w2 = CurveBytes.load64(b + 16)
+    w3 = CurveBytes.load64(b + 24)
+    new(w0 & MASK,
+      (w0.unsafe_shr(51) | w1.unsafe_shl(13)) & MASK,
+      (w1.unsafe_shr(38) | w2.unsafe_shl(26)) & MASK,
+      (w2.unsafe_shr(25) | w3.unsafe_shl(39)) & MASK,
+      w3.unsafe_shr(12) & MASK)
+  end
+
+  # The canonical 32 bytes, little-endian, of the value reduced below p.
+  def to_bytes(dst : Pointer(UInt8)) : Nil
+    r = reduced
+    CurveBytes.store64(dst, r.l0 | r.l1.unsafe_shl(51))
+    CurveBytes.store64(dst + 8, r.l1.unsafe_shr(13) | r.l2.unsafe_shl(38))
+    CurveBytes.store64(dst + 16, r.l2.unsafe_shr(26) | r.l3.unsafe_shl(25))
+    CurveBytes.store64(dst + 24, r.l3.unsafe_shr(39) | r.l4.unsafe_shl(12))
+  end
+
+  # The limbs carried below 2^51 and the value brought below p: after a
+  # carry it is under 2^255 + 2^18, and it is p or more exactly when adding
+  # 19 carries out of bit 255, so that carry, times 19, is added back and
+  # bit 255 dropped. No branch: the carry is a number.
+  def reduced : CurveField
+    v = CurveField.carried(@l0, @l1, @l2, @l3, @l4)
+    c = (v.l0 &+ 19_u64).unsafe_shr(51)
+    c = (v.l1 &+ c).unsafe_shr(51)
+    c = (v.l2 &+ c).unsafe_shr(51)
+    c = (v.l3 &+ c).unsafe_shr(51)
+    c = (v.l4 &+ c).unsafe_shr(51)
+    r0 = v.l0 &+ c &* 19_u64
+    r1 = v.l1 &+ r0.unsafe_shr(51)
+    r2 = v.l2 &+ r1.unsafe_shr(51)
+    r3 = v.l3 &+ r2.unsafe_shr(51)
+    r4 = v.l4 &+ r3.unsafe_shr(51)
+    CurveField.new(r0 & MASK, r1 & MASK, r2 & MASK, r3 & MASK, r4 & MASK)
+  end
+
+  # Each limb's bits past 51 moved to the next, the top one's times 19 to
+  # the bottom (2^255 = 19 mod p).
+  def self.carried(l0 : UInt64, l1 : UInt64, l2 : UInt64, l3 : UInt64, l4 : UInt64) : CurveField
+    new((l0 & MASK) &+ l4.unsafe_shr(51) &* 19_u64,
+      (l1 & MASK) &+ l0.unsafe_shr(51),
+      (l2 & MASK) &+ l1.unsafe_shr(51),
+      (l3 & MASK) &+ l2.unsafe_shr(51),
+      (l4 & MASK) &+ l3.unsafe_shr(51))
+  end
+
+  def +(o : CurveField) : CurveField
+    CurveField.carried(@l0 &+ o.l0, @l1 &+ o.l1, @l2 &+ o.l2, @l3 &+ o.l3, @l4 &+ o.l4)
+  end
+
+  # 2p added first, limb by limb, so no limb goes below zero.
+  def -(o : CurveField) : CurveField
+    CurveField.carried((@l0 &+ 0xfffffffffffda_u64) &- o.l0,
+      (@l1 &+ 0xffffffffffffe_u64) &- o.l1,
+      (@l2 &+ 0xffffffffffffe_u64) &- o.l2,
+      (@l3 &+ 0xffffffffffffe_u64) &- o.l3,
+      (@l4 &+ 0xffffffffffffe_u64) &- o.l4)
+  end
+
+  def negate : CurveField
+    CurveField.zero - self
+  end
+
+  # The schoolbook product, a limb past the top folded back times 19.
+  def *(o : CurveField) : CurveField
+    a0 = @l0
+    a1 = @l1
+    a2 = @l2
+    a3 = @l3
+    a4 = @l4
+    b0 = o.l0
+    b1 = o.l1
+    b2 = o.l2
+    b3 = o.l3
+    b4 = o.l4
+    a1_19 = a1 &* 19_u64
+    a2_19 = a2 &* 19_u64
+    a3_19 = a3 &* 19_u64
+    a4_19 = a4 &* 19_u64
+    r0 = m(a0, b0) &+ m(a1_19, b4) &+ m(a2_19, b3) &+ m(a3_19, b2) &+ m(a4_19, b1)
+    r1 = m(a0, b1) &+ m(a1, b0) &+ m(a2_19, b4) &+ m(a3_19, b3) &+ m(a4_19, b2)
+    r2 = m(a0, b2) &+ m(a1, b1) &+ m(a2, b0) &+ m(a3_19, b4) &+ m(a4_19, b3)
+    r3 = m(a0, b3) &+ m(a1, b2) &+ m(a2, b1) &+ m(a3, b0) &+ m(a4_19, b4)
+    r4 = m(a0, b4) &+ m(a1, b3) &+ m(a2, b2) &+ m(a3, b1) &+ m(a4, b0)
+    CurveField.wide(r0, r1, r2, r3, r4)
+  end
+
+  # The product with itself, the symmetric terms taken once and doubled.
+  def square : CurveField
+    l0 = @l0
+    l1 = @l1
+    l2 = @l2
+    l3 = @l3
+    l4 = @l4
+    l0_2 = l0 &* 2_u64
+    l1_2 = l1 &* 2_u64
+    l1_38 = l1 &* 38_u64
+    l2_38 = l2 &* 38_u64
+    l3_38 = l3 &* 38_u64
+    l3_19 = l3 &* 19_u64
+    l4_19 = l4 &* 19_u64
+    r0 = m(l0, l0) &+ m(l1_38, l4) &+ m(l2_38, l3)
+    r1 = m(l0_2, l1) &+ m(l2_38, l4) &+ m(l3_19, l3)
+    r2 = m(l0_2, l2) &+ m(l1, l1) &+ m(l3_38, l4)
+    r3 = m(l0_2, l3) &+ m(l1_2, l2) &+ m(l4_19, l4)
+    r4 = m(l0_2, l4) &+ m(l1_2, l3) &+ m(l2, l2)
+    CurveField.wide(r0, r1, r2, r3, r4)
+  end
+
+  # The product with a small constant (the ladder's a24, below 2^17).
+  def mul_small(s : UInt64) : CurveField
+    CurveField.wide(m(@l0, s), m(@l1, s), m(@l2, s), m(@l3, s), m(@l4, s))
+  end
+
+  def square_times(n : Int32) : CurveField
+    r = self
+    i = 0
+    while i < n
+      r = r.square
+      i = i + 1
+    end
+    r
+  end
+
+  # Five 128-bit columns back to limbs: each column's bits past 51 go to
+  # the next (the top one's times 19 to the bottom), then one carry more.
+  # The widest column is under 2^111, so every carry fits 60 bits.
+  def self.wide(r0 : UInt128, r1 : UInt128, r2 : UInt128, r3 : UInt128, r4 : UInt128) : CurveField
+    c0 = r0.unsafe_shr(51).unsafe_to_u64
+    c1 = r1.unsafe_shr(51).unsafe_to_u64
+    c2 = r2.unsafe_shr(51).unsafe_to_u64
+    c3 = r3.unsafe_shr(51).unsafe_to_u64
+    c4 = r4.unsafe_shr(51).unsafe_to_u64
+    carried((r0.unsafe_to_u64 & MASK) &+ c4 &* 19_u64,
+      (r1.unsafe_to_u64 & MASK) &+ c0,
+      (r2.unsafe_to_u64 & MASK) &+ c1,
+      (r3.unsafe_to_u64 & MASK) &+ c2,
+      (r4.unsafe_to_u64 & MASK) &+ c3)
+  end
+
+  # z^(2^250 - 1), and z^11 on the way, the shared start of the two
+  # exponentiations below (the chain is curve25519-donna's).
+  def pow_2_250_1 : {CurveField, CurveField}
+    z2 = square
+    z9 = z2.square.square * self
+    z11 = z9 * z2
+    z2_5_0 = z11.square * z9
+    z2_10_0 = z2_5_0.square_times(5) * z2_5_0
+    z2_20_0 = z2_10_0.square_times(10) * z2_10_0
+    z2_40_0 = z2_20_0.square_times(20) * z2_20_0
+    z2_50_0 = z2_40_0.square_times(10) * z2_10_0
+    z2_100_0 = z2_50_0.square_times(50) * z2_50_0
+    z2_200_0 = z2_100_0.square_times(100) * z2_100_0
+    {z2_200_0.square_times(50) * z2_50_0, z11}
+  end
+
+  # z^(p - 2) = z^(2^255 - 21), which is 1/z, and 0 for 0.
+  def invert : CurveField
+    t, z11 = pow_2_250_1
+    t.square_times(5) * z11
+  end
+
+  # z^((p - 5) / 8) = z^(2^252 - 3), the square root's exponent (RFC 8032
+  # §5.1.3).
+  def pow22523 : CurveField
+    t, z11 = pow_2_250_1
+    t.square_times(2) * self
+  end
+
+  # The low bit of the reduced value: x's sign in an Ed25519 encoding.
+  def parity : UInt8
+    (reduced.l0 & 1_u64).unsafe_to_u8
+  end
+
+  # Whether the two are the same element. Branches on the answer, and is
+  # used only on public values (decoding a public key).
+  def equals?(o : CurveField) : Bool
+    (self - o).zero?
+  end
+
+  def zero? : Bool
+    r = reduced
+    (r.l0 | r.l1 | r.l2 | r.l3 | r.l4) == 0_u64
+  end
+
+  # *a* where *mask* is all ones, *b* where it is zero.
+  def self.select(mask : UInt64, a : CurveField, b : CurveField) : CurveField
+    keep = mask ^ ALL
+    new((a.l0 & mask) | (b.l0 & keep),
+      (a.l1 & mask) | (b.l1 & keep),
+      (a.l2 & mask) | (b.l2 & keep),
+      (a.l3 & mask) | (b.l3 & keep),
+      (a.l4 & mask) | (b.l4 & keep))
+  end
+
+  # The two traded where *mask* is all ones, kept where it is zero.
+  def self.cswap(mask : UInt64, a : CurveField, b : CurveField) : {CurveField, CurveField}
+    t0 = mask & (a.l0 ^ b.l0)
+    t1 = mask & (a.l1 ^ b.l1)
+    t2 = mask & (a.l2 ^ b.l2)
+    t3 = mask & (a.l3 ^ b.l3)
+    t4 = mask & (a.l4 ^ b.l4)
+    {new(a.l0 ^ t0, a.l1 ^ t1, a.l2 ^ t2, a.l3 ^ t3, a.l4 ^ t4),
+     new(b.l0 ^ t0, b.l1 ^ t1, b.l2 ^ t2, b.l3 ^ t3, b.l4 ^ t4)}
+  end
+
+  private def m(a : UInt64, b : UInt64) : UInt128
+    a.to_u128 &* b.to_u128
+  end
+end
+
+# A point of edwards25519, -x^2 + y^2 = 1 + d x^2 y^2, in extended
+# coordinates: x = X/Z, y = Y/Z, x y = T/Z (RFC 8032 §5.1.4).
+struct CurvePoint
+  getter x : CurveField
+  getter y : CurveField
+  getter z : CurveField
+  getter t : CurveField
+
+  def initialize(@x : CurveField, @y : CurveField, @z : CurveField, @t : CurveField)
+  end
+
+  def self.identity : CurvePoint
+    new(CurveField.zero, CurveField.one, CurveField.one, CurveField.zero)
+  end
+
+  # B, RFC 8032 §5.1: y = 4/5 and x even.
+  def self.base : CurvePoint
+    new(CurveField.new(0x62d608f25d51a_u64, 0x412a4b4f6592a_u64, 0x75b7171a4b31d_u64, 0x1ff60527118fe_u64, 0x216936d3cd6e5_u64),
+      CurveField.new(0x6666666666658_u64, 0x4cccccccccccc_u64, 0x1999999999999_u64, 0x3333333333333_u64, 0x6666666666666_u64),
+      CurveField.one,
+      CurveField.new(0x68ab3a5b7dda3_u64, 0xeea2a5eadbb_u64, 0x2af8df483c27e_u64, 0x332b375274732_u64, 0x67875f0fd78b7_u64))
+  end
+
+  # Doubling, RFC 8032 §5.1.4.
+  def double : CurvePoint
+    a = @x.square
+    b = @y.square
+    zz = @z.square
+    c = zz + zz
+    h = a + b
+    e = h - (@x + @y).square
+    g = a - b
+    f = c + g
+    CurvePoint.new(e * f, g * h, f * g, e * h)
+  end
+
+  # The complete addition of RFC 8032 §5.1.4, with the second point's sums
+  # and products made ahead (`CurveCached`): right for every pair, a point
+  # and itself and the identity included.
+  def add(q : CurveCached) : CurvePoint
+    a = (@y - @x) * q.ymx
+    b = (@y + @x) * q.ypx
+    c = @t * q.t2d
+    d = @z * q.z2
+    e = b - a
+    f = d - c
+    g = d + c
+    h = b + a
+    CurvePoint.new(e * f, g * h, f * g, e * h)
+  end
+
+  # The addition of -q: x and T negated, which trades Y + X and Y - X.
+  def sub(q : CurveCached) : CurvePoint
+    a = (@y - @x) * q.ypx
+    b = (@y + @x) * q.ymx
+    c = @t * q.t2d
+    d = @z * q.z2
+    e = b - a
+    f = d + c
+    g = d - c
+    h = b + a
+    CurvePoint.new(e * f, g * h, f * g, e * h)
+  end
+
+  def cached : CurveCached
+    CurveCached.new(@y + @x, @y - @x, @z + @z, @t * CurveField.d2)
+  end
+
+  # RFC 8032 §5.1.2: y's 255 bits, and x's low bit in bit 255.
+  def encode(dst : Pointer(UInt8)) : Nil
+    inverse = @z.invert
+    (@y * inverse).to_bytes(dst)
+    dst[31] = dst[31] | (@x * inverse).parity.unsafe_shl(7)
+  end
+
+  # RFC 8032 §5.1.3, strict: nil for a y of p or more, for a y with no x on
+  # the curve, and for x = 0 with the sign bit set, so only the one
+  # canonical encoding of each point decodes. On public bytes only.
+  def self.decode(src : Pointer(UInt8)) : CurvePoint | Nil
+    y = CurveField.from_bytes(src)
+    again = uninitialized UInt8[32]
+    ap = pointerof(again).as(Pointer(UInt8))
+    y.to_bytes(ap)
+    i = 0
+    while i < 31
+      return nil unless ap[i] == src[i]
+      i = i + 1
+    end
+    return nil unless ap[31] == src[31] & 127_u8
+    sign = src[31].unsafe_shr(7)
+    one = CurveField.one
+    yy = y.square
+    u = yy - one
+    v = yy * CurveField.d + one
+    v3 = v.square * v
+    x = u * v3 * (u * v3.square * v).pow22523
+    vxx = v * x.square
+    unless vxx.equals?(u)
+      return nil unless vxx.equals?(u.negate)
+      x = x * CurveField.sqrt_m1
+    end
+    return nil if sign == 1_u8 && x.zero?
+    x = x.negate unless x.parity == sign
+    CurvePoint.new(x, y, one, x * y)
+  end
+
+  # [k]B for a secret 32-byte little-endian *k*, in constant time: 64
+  # windows of 4 bits from the top, each four doublings and one addition
+  # of the window's multiple, read from the table by masks. Adding the
+  # identity for a zero window is an addition like any other.
+  def self.base_mult(k : Pointer(UInt8)) : CurvePoint
+    table = uninitialized CurveCached[16]
+    tp = pointerof(table).as(Pointer(CurveCached))
+    fill(base, tp)
+    q = identity
+    i = 63
+    while i >= 0
+      q = q.double.double.double.double if i < 63
+      q = q.add(CurveCached.lookup(tp, nibble(k, i)))
+      i = i - 1
+    end
+    q
+  end
+
+  # [s]B - [k]A for public *s*, *k* and *a*, both in one pass of doublings
+  # (Straus), zero windows skipped: what verification computes.
+  def self.double_mult_vartime(s : Pointer(UInt8), k : Pointer(UInt8), a : CurvePoint) : CurvePoint
+    tb = uninitialized CurveCached[16]
+    ta = uninitialized CurveCached[16]
+    bp = pointerof(tb).as(Pointer(CurveCached))
+    ap = pointerof(ta).as(Pointer(CurveCached))
+    fill(base, bp)
+    fill(a, ap)
+    q = identity
+    i = 63
+    while i >= 0
+      q = q.double.double.double.double if i < 63
+      ns = nibble(s, i)
+      q = q.add(bp[ns.to_i32]) unless ns == 0_u64
+      nk = nibble(k, i)
+      q = q.sub(ap[nk.to_i32]) unless nk == 0_u64
+      i = i - 1
+    end
+    q
+  end
+
+  # [0]P to [15]P.
+  private def self.fill(p : CurvePoint, table : Pointer(CurveCached)) : Nil
+    table[0] = CurveCached.identity
+    c = p.cached
+    table[1] = c
+    acc = p
+    i = 2
+    while i < 16
+      acc = acc.add(c)
+      table[i] = acc.cached
+      i = i + 1
+    end
+  end
+
+  # The *i*th 4-bit window of a 32-byte little-endian scalar.
+  private def self.nibble(k : Pointer(UInt8), i : Int32) : UInt64
+    k[i >> 1].to_u64.unsafe_shr((i & 1) * 4) & 15_u64
+  end
+end
+
+# A point made ready to be added: Y + X, Y - X, 2Z and 2dT.
+struct CurveCached
+  getter ypx : CurveField
+  getter ymx : CurveField
+  getter z2 : CurveField
+  getter t2d : CurveField
+
+  def initialize(@ypx : CurveField, @ymx : CurveField, @z2 : CurveField, @t2d : CurveField)
+  end
+
+  def self.identity : CurveCached
+    new(CurveField.one, CurveField.one, CurveField.one + CurveField.one, CurveField.zero)
+  end
+
+  # table[index], every entry read and all but one masked away, so which
+  # one was wanted leaves no trace in what memory was touched.
+  def self.lookup(table : Pointer(CurveCached), index : UInt64) : CurveCached
+    r = table[0]
+    j = 1
+    while j < 16
+      diff = j.to_u64 ^ index
+      # All ones when diff is zero: (diff | -diff) has its top bit set for
+      # every other value.
+      mask = (diff | (0_u64 &- diff)).unsafe_shr(63) &- 1_u64
+      e = table[j]
+      r = CurveCached.new(CurveField.select(mask, e.ypx, r.ypx),
+        CurveField.select(mask, e.ymx, r.ymx),
+        CurveField.select(mask, e.z2, r.z2),
+        CurveField.select(mask, e.t2d, r.t2d))
+      j = j + 1
+    end
+    r
+  end
+end
+
+# Scalars modulo the group order L = 2^252 + 27742317777372353535851937790883648493,
+# as four 64-bit limbs. Reduction is a bit at a time from the top, r = 2r +
+# bit and then L taken off r unless that borrows, the choice by mask: 512
+# steps for a SHA-512 output, the same steps whatever the bits. Slower
+# than Barrett's reduction and plainly constant in time; it is a few
+# microseconds next to the scalar multiplications around it.
+struct CurveScalar
+  L0 = 0x5812631a5cf5d3ed_u64
+  L1 = 0x14def9dea2f79cd6_u64
+  L2 =                  0_u64
+  L3 = 0x1000000000000000_u64
+
+  # 64 little-endian bytes (a SHA-512 output) mod L, into 32 at *dst*.
+  def self.reduce_bytes(src : Pointer(UInt8), dst : Pointer(UInt8)) : Nil
+    words = uninitialized UInt64[8]
+    w = pointerof(words).as(Pointer(UInt64))
+    i = 0
+    while i < 8
+      w[i] = CurveBytes.load64(src + i * 8)
+      i = i + 1
+    end
+    reduce_words(w, 8, dst)
+  end
+
+  # (k * s + r) mod L, RFC 8032 §5.1.6's S: the 512-bit k * s worked out in
+  # full, r added, and the sum reduced. *s* is the clamped secret scalar,
+  # below 2^255 and not reduced first, as the RFC has it.
+  def self.mul_add(k : Pointer(UInt8), s : Pointer(UInt8), r : Pointer(UInt8), dst : Pointer(UInt8)) : Nil
+    words = uninitialized UInt64[8]
+    w = pointerof(words).as(Pointer(UInt64))
+    i = 0
+    while i < 4
+      w[i] = CurveBytes.load64(r + i * 8)
+      w[i + 4] = 0_u64
+      i = i + 1
+    end
+    i = 0
+    while i < 4
+      ki = CurveBytes.load64(k + i * 8).to_u128
+      carry = 0_u128
+      j = 0
+      while j < 4
+        # (2^64 - 1)^2 + 2 (2^64 - 1) is 2^128 - 1: a product, a limb and
+        # a carry fit.
+        sum = ki &* CurveBytes.load64(s + j * 8).to_u128 &+ w[i + j].to_u128 &+ carry
+        w[i + j] = sum.unsafe_to_u64
+        carry = sum.unsafe_shr(64)
+        j = j + 1
+      end
+      # Ripple the carry up; r's own carry out of the low half rides here.
+      at = i + 4
+      while at < 8
+        sum = w[at].to_u128 &+ carry
+        w[at] = sum.unsafe_to_u64
+        carry = sum.unsafe_shr(64)
+        at = at + 1
+      end
+      i = i + 1
+    end
+    reduce_words(w, 8, dst)
+  end
+
+  # Whether 32 little-endian bytes are below L: RFC 8032 §5.1.7's check on
+  # S. Public, so it may say so as soon as it knows.
+  def self.canonical?(s : Pointer(UInt8)) : Bool
+    s0 = CurveBytes.load64(s)
+    s1 = CurveBytes.load64(s + 8)
+    s2 = CurveBytes.load64(s + 16)
+    s3 = CurveBytes.load64(s + 24)
+    _, _, _, _, borrow = minus_l(s0, s1, s2, s3)
+    borrow == 1_u64
+  end
+
+  private def self.reduce_words(w : Pointer(UInt64), count : Int32, dst : Pointer(UInt8)) : Nil
+    r0 = 0_u64
+    r1 = 0_u64
+    r2 = 0_u64
+    r3 = 0_u64
+    i = count * 64 - 1
+    while i >= 0
+      bit = w[i >> 6].unsafe_shr(i & 63) & 1_u64
+      # r is below L < 2^253, so 2r + 1 fits the four limbs.
+      r3 = r3.unsafe_shl(1) | r2.unsafe_shr(63)
+      r2 = r2.unsafe_shl(1) | r1.unsafe_shr(63)
+      r1 = r1.unsafe_shl(1) | r0.unsafe_shr(63)
+      r0 = r0.unsafe_shl(1) | bit
+      t0, t1, t2, t3, borrow = minus_l(r0, r1, r2, r3)
+      # Keep r where r - L borrowed, take r - L where it did not.
+      keep = 0_u64 &- borrow
+      take = keep ^ 0xffffffffffffffff_u64
+      r0 = (r0 & keep) | (t0 & take)
+      r1 = (r1 & keep) | (t1 & take)
+      r2 = (r2 & keep) | (t2 & take)
+      r3 = (r3 & keep) | (t3 & take)
+      i = i - 1
+    end
+    CurveBytes.store64(dst, r0)
+    CurveBytes.store64(dst + 8, r1)
+    CurveBytes.store64(dst + 16, r2)
+    CurveBytes.store64(dst + 24, r3)
+  end
+
+  # r - L in four limbs, and 1 if it borrowed (r < L), else 0: the borrow
+  # is the top bit of a 128-bit difference, not a comparison.
+  private def self.minus_l(r0 : UInt64, r1 : UInt64, r2 : UInt64, r3 : UInt64) : {UInt64, UInt64, UInt64, UInt64, UInt64}
+    d0 = r0.to_u128 &- L0.to_u128
+    b = d0.unsafe_shr(127).unsafe_to_u64
+    d1 = r1.to_u128 &- L1.to_u128 &- b.to_u128
+    b = d1.unsafe_shr(127).unsafe_to_u64
+    d2 = r2.to_u128 &- L2.to_u128 &- b.to_u128
+    b = d2.unsafe_shr(127).unsafe_to_u64
+    d3 = r3.to_u128 &- L3.to_u128 &- b.to_u128
+    b = d3.unsafe_shr(127).unsafe_to_u64
+    {d0.unsafe_to_u64, d1.unsafe_to_u64, d2.unsafe_to_u64, d3.unsafe_to_u64, b}
+  end
+end
+
+struct CurveBytes
+  def self.of(data : String | Array(UInt8)) : {Pointer(UInt8), Int32}
+    if data.is_a?(String)
+      {data.to_unsafe, data.bytesize}
+    else
+      {data.to_unsafe, data.size}
+    end
+  end
+
+  def self.load64(p : Pointer(UInt8)) : UInt64
+    p[0].to_u64 | p[1].to_u64.unsafe_shl(8) | p[2].to_u64.unsafe_shl(16) | p[3].to_u64.unsafe_shl(24) |
+      p[4].to_u64.unsafe_shl(32) | p[5].to_u64.unsafe_shl(40) | p[6].to_u64.unsafe_shl(48) | p[7].to_u64.unsafe_shl(56)
+  end
+
+  def self.store64(dst : Pointer(UInt8), v : UInt64) : Nil
+    i = 0
+    while i < 8
+      dst[i] = v.unsafe_shr(i * 8).unsafe_to_u8
+      i = i + 1
+    end
+  end
+end

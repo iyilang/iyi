@@ -1,0 +1,1225 @@
+# Tar archives - POSIX.1-2001 pax and ustar (IEEE Std 1003.1, the `pax`
+# utility's "ustar Interchange Format" and "pax Interchange Format"),
+# read and written in iyi, with GNU's long names and the old v7 header
+# read as well, and `.tar.gz` through the DEFLATE of `std/compress`.
+#
+# `TarReader` reads an archive as the format means it to be read: from
+# the front, a 512-byte header and then the entry's data padded to a
+# block, entry after entry, over any `IyiIO` - a file, a socket, a pipe -
+# with no seeking. `next_entry` answers the next `TarEntry`, and the
+# entry's `read` and `read_all` give its data; data an entry's caller did
+# not read is read past by the next `next_entry`, so a listing reads
+# every byte once and keeps none. The first bytes say whether the stream
+# is gzip (RFC 1952's 1f 8b): if they do, everything after is read
+# through `Inflater`, as Python's `tarfile.open(mode="r:*")` and GNU
+# `tar -x` without `-z` take one.
+#
+# A header is believed only once its checksum is: the sum of its bytes
+# with the checksum field counted as spaces, unsigned as POSIX sums it,
+# or signed as some old writers summed it, which Python's `tarfile`
+# accepts too. Its magic says which header it is: "ustar\0" "00" is POSIX,
+# whose prefix field (155 bytes) is the front of a name longer than the
+# 100-byte name field; "ustar " " \0" is GNU, whose bytes at that place
+# are something else and are not read; anything else is v7, where a
+# regular file whose name ends in `/` is a directory (as Python and Go
+# read it). Numbers are octal, ended by a NUL or a space; a field whose
+# first byte has its high bit set is GNU's base-256, which Python's
+# GNU_FORMAT writes for a size past 8 GiB or an id past 2,097,151, and
+# which is read, negative numbers included. Two headers come before the
+# one they describe and are folded into it: a pax extended header
+# (typeflag `x`), records `"<length> <key>=<value>\n"` whose `path`,
+# `linkpath`, `size`, `mtime` (seconds with a decimal fraction, which is
+# kept to the nanosecond), `uid`, `gid`, `uname` and `gname` stand in for
+# the header's fields; and GNU's `././@LongLink` (`L` for the name, `K`
+# for the link's target). A global pax header (`g`) holds for every entry
+# after it until another says otherwise. Every record an entry was given
+# is in `TarEntry#pax`, the ones this module does not read too. A name
+# is its bytes as written, UTF-8 by every writer this was checked
+# against; a directory's trailing `/` is kept, as Go keeps it.
+#
+# The end is a block of zeros, as POSIX writes two of them; a stream
+# that ends at a block boundary without one is taken as ended too, as
+# Python and GNU tar take it. What is wrong with an archive is a
+# `TarError`, a value, and every call after it answers the same one: a
+# header whose checksum does not add up; a number field that is not a
+# number; a header, or an entry's data, cut short; a pax record that is
+# not one, or a pax `size`, `mtime`, `uid` or `gid` that is not a
+# number; an extended header (pax or GNU) past 1 MiB, which is held in
+# memory whole and so is bounded, as Go bounds it; an extended header
+# with no entry after it; and a gzip stream that `Inflater` refuses. In a
+# gzip archive the rest of the stream after the zero block is read, so
+# the gzip trailer's CRC-32 and length vouch for every byte handed out:
+# content that changed is refused by the `next_entry` that finds the end.
+#
+# `TarWriter` writes ustar headers to an `IyiIO`, POSIX's magic, as
+# Python's default PAX_FORMAT and GNU `tar --format=posix` do, and puts a
+# pax header in front of an entry only when a field does not fit its
+# place: a name past 100 bytes that no `/` splits into a prefix of at
+# most 155 and a name of at most 100 (the split Python makes), a link
+# target past 100 bytes, a user or group name past 32, a size past
+# 8 GiB - 1 (eleven octal digits), an id past 2,097,151, a modification
+# time before 1970 or after 2242; and a name, target, user or group name
+# that is not ASCII, which POSIX's portable character set does not hold
+# and pax's UTF-8 records do (Python writes those the same way). A field
+# a pax record stands in for holds what fits of it, a number zero.
+# Modification times are written in whole seconds. `finish` writes the
+# end - two zero blocks - and pads the archive to a multiple of 10,240
+# bytes, the record size Python and GNU tar write. `TarWriter.new(io,
+# gzip: true)` writes the archive through `Deflater` in the gzip
+# envelope, 128 KiB at a time.
+#
+# `TarReader#extract(dir)` writes the entries under *dir* as they come:
+# directories, regular files, symbolic links and hard links, with the
+# permission bits of their mode (setuid, setgid and sticky are not given
+# to what an archive made) and their modification time. It refuses "tar
+# slip" (the zip slip of Snyk, 2018, in a tar): a name that is absolute
+# or has a `..` part; a symbolic link whose target is absolute, climbs
+# above *dir* from the link's own directory, or goes down and back up
+# (`a/../b`), which could pass through a link the archive made; a hard
+# link whose target is not a regular file the archive already put under
+# *dir*; and any entry that would be written through a symbolic link on
+# the way to it - so a link the archive made cannot carry a later entry
+# outside. On Windows a name with `\` or `:` is refused too. A file that
+# is there already is replaced, not written through, and a device or
+# FIFO is refused by name. The archive is read once, so what came before
+# a refused entry has been written: a stream cannot be checked whole
+# first, as `ZipReader#extract` checks a zip's directory.
+#
+# Left out: writing GNU or v7 headers, sparse files (GNU `S` and pax's
+# `GNU.sparse` records are read as an entry whose data is what was
+# stored), access and change times (kept in `pax`, not read), ACLs and
+# extended attributes (likewise), multi-volume archives, appending, and
+# devices made on extraction.
+
+module std/tar
+
+import std/compress::{Deflater, Inflater, Envelope, CompressError}
+import std/time::{Time}
+import std/file::{File}
+import std/dir::{Dir}
+
+# What is wrong with an archive: `message` is the sentence, which names
+# the entry, or the header's offset in the (uncompressed) stream.
+pub struct TarError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for TarError
+  def message : String
+    @message
+  end
+end
+
+# What an entry is, by its typeflag. `Other` is any typeflag this module
+# has no name for; `TarEntry#type_name` names it.
+pub enum TarType
+  Regular
+  Hardlink
+  Symlink
+  CharDevice
+  BlockDevice
+  Directory
+  Fifo
+  Contiguous
+  Other
+end
+
+# Which header an entry was read from: `Pax` when a pax record was folded
+# into it, else by the header's magic.
+pub enum TarFormat
+  V7
+  Ustar
+  Gnu
+  Pax
+end
+
+# The header's fields as numbers and names, and the format's constants.
+struct TarBytes
+  BLOCK = 512
+  # Ten-kilobyte records: what `finish` pads the archive to.
+  RECORD = 10240
+  # Eleven octal digits, a size or a modification time's header field.
+  MAX_OCTAL11 = 8589934591_i64
+  # Seven octal digits, an id's.
+  MAX_OCTAL7 = 2097151_i64
+  # The most an extended header (pax or GNU) may hold.
+  MAX_SPECIAL = 1048576_i64
+
+  # The bytes of *p* from *at*, up to *len* or the first NUL.
+  def self.cstr(p : Pointer(UInt8), at : Int32, len : Int32) : String
+    n = 0
+    while n < len && p[at + n] != 0_u8
+      n = n + 1
+    end
+    String.new(n) { |dst| dst.copy_from(p + at, n) }
+  end
+
+  # The first NUL of *s*, or its end.
+  def self.cut_nul(s : String) : String
+    p = s.to_unsafe
+    i = 0
+    while i < s.bytesize
+      return s[0, i] if p[i] == 0_u8
+      i = i + 1
+    end
+    s
+  end
+
+  # A number field: octal digits between spaces and ended by a NUL, or
+  # GNU's base-256 when the first byte's high bit is set (bit 6 of it set
+  # is a negative number, two's complement, as Go reads it). Nil when it
+  # is neither, or past what an Int64 holds.
+  def self.number(p : Pointer(UInt8), at : Int32, len : Int32) : Int64?
+    if p[at] & 0x80_u8 != 0_u8
+      inv = p[at] & 0x40_u8 != 0_u8 ? 0xff_u8 : 0_u8
+      x = 0_u64
+      i = 0
+      while i < len
+        c = p[at + i] ^ inv
+        c = c & 0x7f_u8 if i == 0
+        return nil if x >> 56 != 0_u64
+        x = (x << 8) | c.to_u64
+        i = i + 1
+      end
+      return nil if x >> 63 != 0_u64
+      return inv == 0xff_u8 ? ~(x.to_i64) : x.to_i64
+    end
+    stop = 0
+    while stop < len && p[at + stop] != 0_u8
+      stop = stop + 1
+    end
+    i = 0
+    while i < stop && p[at + i] == 32_u8
+      i = i + 1
+    end
+    j = stop
+    while j > i && p[at + j - 1] == 32_u8
+      j = j - 1
+    end
+    v = 0_i64
+    while i < j
+      d = p[at + i]
+      return nil if d < 48_u8 || d > 55_u8
+      return nil if v > 1152921504606846975_i64
+      v = (v << 3) | (d - 48_u8).to_i64
+      i = i + 1
+    end
+    v
+  end
+
+  # Unsigned and signed sums of a header's bytes, its checksum field
+  # counted as eight spaces.
+  def self.sums(p : Pointer(UInt8)) : {Int64, Int64}
+    u = 0_i64
+    s = 0_i64
+    i = 0
+    while i < BLOCK
+      b = i >= 148 && i < 156 ? 32_u8 : p[i]
+      u = u + b.to_i64
+      s = s + (b < 0x80_u8 ? b.to_i64 : b.to_i64 - 256_i64)
+      i = i + 1
+    end
+    {u, s}
+  end
+
+  def self.zero?(p : Pointer(UInt8)) : Bool
+    i = 0
+    while i < BLOCK
+      return false unless p[i] == 0_u8
+      i = i + 1
+    end
+    true
+  end
+
+  def self.ascii?(s : String) : Bool
+    p = s.to_unsafe
+    i = 0
+    while i < s.bytesize
+      return false if p[i] >= 0x80_u8
+      i = i + 1
+    end
+    true
+  end
+
+  # A decimal pax number: digits, nothing else.
+  def self.decimal(s : String) : Int64?
+    return nil if s.empty? || s.bytesize > 18
+    p = s.to_unsafe
+    v = 0_i64
+    i = 0
+    while i < s.bytesize
+      return nil if p[i] < 48_u8 || p[i] > 57_u8
+      v = v * 10_i64 + (p[i] - 48_u8).to_i64
+      i = i + 1
+    end
+    v
+  end
+
+  # A pax time, `[-]seconds[.fraction]`, as {seconds, nanoseconds} with
+  # the nanoseconds 0 to 999,999,999: -1.25 is {-2, 750000000}. Digits
+  # past the ninth of the fraction are dropped.
+  def self.pax_time(s : String) : {Int64, Int32}?
+    negative = s.starts_with?("-")
+    body = negative ? s[1, s.bytesize - 1] : s
+    dot = body.index('.')
+    whole = dot ? body[0, dot] : body
+    frac = dot ? body[dot + 1, body.bytesize - dot - 1] : ""
+    secs = decimal(whole)
+    return nil unless secs
+    nanos = 0
+    fp = frac.to_unsafe
+    i = 0
+    while i < frac.bytesize
+      return nil if fp[i] < 48_u8 || fp[i] > 57_u8
+      nanos = nanos * 10 + (fp[i] - 48_u8).to_i32 if i < 9
+      i = i + 1
+    end
+    while i < 9
+      nanos = nanos * 10
+      i = i + 1
+    end
+    return {secs, nanos} unless negative
+    return {-secs, 0} if nanos == 0
+    {-secs - 1_i64, 1000000000 - nanos}
+  end
+
+  # The name each typeflag is known by, for a sentence about it.
+  def self.type_name(flag : UInt8) : String
+    case flag
+    when 0_u8, 48_u8 then "regular file"
+    when 49_u8       then "hard link"
+    when 50_u8       then "symbolic link"
+    when 51_u8       then "character device"
+    when 52_u8       then "block device"
+    when 53_u8       then "directory"
+    when 54_u8       then "FIFO"
+    when 55_u8       then "contiguous file"
+    when 83_u8       then "GNU sparse file"
+    when 86_u8       then "GNU volume header"
+    when 77_u8       then "GNU multi-volume continuation"
+    when 68_u8       then "GNU directory listing"
+    else
+      flag >= 32_u8 && flag < 127_u8 ? "type '#{flag.unsafe_chr}'" : "type #{flag}"
+    end
+  end
+
+  def self.put_octal(dst : Pointer(UInt8), at : Int32, width : Int32, v : Int64) : Nil
+    digits = v.to_s(8)
+    pad = width - 1 - digits.bytesize
+    i = 0
+    while i < pad
+      dst[at + i] = 48_u8
+      i = i + 1
+    end
+    (dst + at + pad).copy_from(digits.to_unsafe, digits.bytesize)
+    dst[at + width - 1] = 0_u8
+  end
+
+  def self.put_str(dst : Pointer(UInt8), at : Int32, s : String) : Nil
+    (dst + at).copy_from(s.to_unsafe, s.bytesize)
+  end
+
+  # The longest front of *s* that fits *n* bytes and does not cut a
+  # UTF-8 character.
+  def self.fit(s : String, n : Int32) : String
+    return s if s.bytesize <= n
+    cut = n
+    while cut > 0 && s.to_unsafe[cut] & 0xc0_u8 == 0x80_u8
+      cut = cut - 1
+    end
+    s[0, cut]
+  end
+end
+
+# The archive's bytes before the gzip question is answered: the first
+# block, then the stream.
+class TarFeed
+  def initialize(@io : IyiIO, @first : String)
+  end
+
+  def next : String?
+    unless @first.empty?
+      got = @first
+      @first = ""
+      return got
+    end
+    piece = @io.read_bytes(65536)
+    piece.empty? ? nil : piece
+  end
+end
+
+# One entry's header, read by `TarReader#next_entry`; its data is read
+# with `read` and `read_all` until the reader moves on.
+pub class TarEntry
+  # The name: a pax `path`, a GNU long name, the ustar prefix and name
+  # joined by `/`, or the name field, the first of these there is.
+  getter name : String
+  # A link's target, the same way: pax `linkpath`, GNU `K`, the field.
+  getter linkname : String
+  # The size the header (or a pax `size`) declares. Links, devices,
+  # FIFOs and directories carry no data whatever it says, as POSIX
+  # specifies and Go reads them.
+  getter size : Int64
+  getter mode : Int32
+  getter uid : Int64
+  getter gid : Int64
+  getter uname : String
+  getter gname : String
+  getter mtime : Time
+  # The typeflag byte as written.
+  getter typeflag : UInt8
+  getter devmajor : Int64
+  getter devminor : Int64
+  # Every pax record given to this entry, the global ones under the ones
+  # of its own.
+  getter pax : Hash(String, String)
+  getter format : TarFormat
+  # Where its header is, from the start of the (uncompressed) archive.
+  getter offset : Int64
+  getter type : TarType
+  @reader : TarReader
+  @index : Int32
+
+  def initialize(@reader : TarReader, @index : Int32, @name : String, @linkname : String, @size : Int64, @mode : Int32,
+                 @uid : Int64, @gid : Int64, @uname : String, @gname : String, @mtime : Time, @typeflag : UInt8,
+                 @devmajor : Int64, @devminor : Int64, @pax : Hash(String, String), @format : TarFormat, @offset : Int64)
+    @type = case @typeflag
+            when 0_u8
+              @name.ends_with?("/") ? TarType::Directory : TarType::Regular
+            when 48_u8 then TarType::Regular
+            when 49_u8 then TarType::Hardlink
+            when 50_u8 then TarType::Symlink
+            when 51_u8 then TarType::CharDevice
+            when 52_u8 then TarType::BlockDevice
+            when 53_u8 then TarType::Directory
+            when 54_u8 then TarType::Fifo
+            when 55_u8 then TarType::Contiguous
+            else            TarType::Other
+            end
+  end
+
+  def index : Int32
+    @index
+  end
+
+  def file? : Bool
+    @type == TarType::Regular || @type == TarType::Contiguous
+  end
+
+  def directory? : Bool
+    @type == TarType::Directory
+  end
+
+  def symlink? : Bool
+    @type == TarType::Symlink
+  end
+
+  def hardlink? : Bool
+    @type == TarType::Hardlink
+  end
+
+  # What the typeflag names, for a sentence: "regular file", "FIFO",
+  # "GNU sparse file", "type 'Q'".
+  def type_name : String
+    @type == TarType::Directory ? "directory" : TarBytes.type_name(@typeflag)
+  end
+
+  # How many bytes of data follow the header: the size, or none for a
+  # type that carries none.
+  def data_size : Int64
+    case @type
+    when TarType::Hardlink, TarType::Symlink, TarType::CharDevice, TarType::BlockDevice, TarType::Directory, TarType::Fifo
+      0_i64
+    else
+      @size
+    end
+  end
+
+  # Up to *max* bytes of the data, "" at its end; or what is wrong with
+  # the archive. Only until the reader's next `next_entry`: a read after
+  # it is a panic, as is a *max* below 1.
+  def read(max : Int32 = 65536) : String | TarError
+    @reader.entry_read(self, max)
+  end
+
+  # The whole of the data (what is left of it).
+  def read_all : String | TarError
+    @reader.entry_read_all(self)
+  end
+end
+
+# An archive read entry by entry.
+#
+# ```
+# tar = TarReader.new(File.open("src.tar.gz"))
+# while entry = tar.next_entry.or_panic
+#   puts "#{entry.name} #{entry.size}"
+#   text = entry.read_all.or_panic if entry.name == "README"
+# end
+# ```
+pub class TarReader
+  @io : IyiIO
+  @inflater : Inflater | Nil
+  @pending : String
+  @started : Bool
+  @gzip : Bool
+  @offset : Int64
+  @left : Int64
+  @pad : Int64
+  @index : Int32
+  @current : TarEntry | Nil
+  @ended : Bool
+  @failed : TarError | Nil
+  @global : Hash(String, String)
+
+  # The archive *io* holds from where it is, plain or gzip.
+  def initialize(@io : IyiIO)
+    @inflater = nil
+    @pending = ""
+    @started = false
+    @gzip = false
+    @offset = 0_i64
+    @left = 0_i64
+    @pad = 0_i64
+    @index = 0
+    @current = nil
+    @ended = false
+    @failed = nil
+    @global = {} of String => String
+  end
+
+  # Whether the stream is gzip; known once the first entry is asked for.
+  def gzip? : Bool
+    @gzip
+  end
+
+  # The next entry, its header read and checked; nil at the end. The
+  # data of the entry before, as much as was not read, is read past.
+  def next_entry : TarEntry | Nil | TarError
+    if failed = @failed
+      return failed
+    end
+    return nil if @ended
+    got = advance
+    @failed = got if got.is_a?(TarError)
+    got
+  end
+
+  # Why *name* may not be written under a directory, or nil when it may.
+  # *windows* refuses the separator and the drive Windows reads in it.
+  def self.unsafe_name(name : String, windows : Bool = false) : String?
+    return "the name is empty" if name.empty?
+    return "the name is absolute" if name.starts_with?("/")
+    return "the name holds a \\, a separator on Windows" if windows && name.includes?("\\")
+    return "the name holds a :, a drive or a stream on Windows" if windows && name.includes?(":")
+    return "the name holds a NUL byte" if name.includes?("\u0000")
+    return "the name climbs out with .." if name.split('/').includes?("..")
+    nil
+  end
+
+  # Why a symbolic link *name* to *target* may not be made under a
+  # directory, or nil when it may: the target must be relative, may climb
+  # with `..` no higher than the link's own directory, and only before
+  # its first other part - after one, the part could be a link itself and
+  # the `..` would climb from wherever that points.
+  def self.unsafe_link(name : String, target : String, windows : Bool = false) : String?
+    return "the target is empty" if target.empty?
+    return "the target is absolute" if target.starts_with?("/")
+    return "the target holds a \\, a separator on Windows" if windows && target.includes?("\\")
+    return "the target holds a :, a drive or a stream on Windows" if windows && target.includes?(":")
+    return "the target holds a NUL byte" if target.includes?("\u0000")
+    depth = TarReader.parts(name).size - 1
+    ups = 0
+    down = false
+    TarReader.parts(target).each do |part|
+      if part == ".."
+        return "the target goes down and back up with .., which extract does not follow" if down
+        ups = ups + 1
+        return "the target climbs out with .." if ups > depth
+      else
+        down = true
+      end
+    end
+    nil
+  end
+
+  # *path*'s parts, without empty ones and `.`.
+  def self.parts(path : String) : Array(String)
+    path.split('/').reject { |p| p.empty? || p == "." }
+  end
+
+  # Every entry written under *dir* (made if it is not there), as it is
+  # read; see the module's comment for what is refused. Answers the first
+  # error, the archive's or the refusal's; a file cut short is deleted.
+  def extract(dir : String) : Nil | TarError
+    windows = {% if flag?(:win32) %} true {% else %} false {% end %}
+    Dir.mkdir_p(dir)
+    later = [] of {String, Int32, Int64}
+    while true
+      e = next_entry!
+      break unless e
+      reason = TarReader.unsafe_name(e.name, windows)
+      return TarError.new("tar: #{e.name.inspect} would be extracted outside the directory (tar slip): #{reason}") if reason
+      parts = TarReader.parts(e.name)
+      if parts.empty?
+        next if e.directory?
+        return TarError.new("tar: #{e.name.inspect} names the directory itself, and is a #{e.type_name}")
+      end
+      unless e.file? || e.directory? || e.symlink? || e.hardlink?
+        return TarError.new("tar: #{e.name.inspect} is a #{e.type_name}, which extract does not make")
+      end
+      if e.symlink?
+        why = TarReader.unsafe_link(e.name, e.linkname, windows)
+        return TarError.new("tar: the symbolic link #{e.name.inspect} points at #{e.linkname.inspect}, outside the directory (tar slip): #{why}") if why
+      end
+      target = ""
+      if e.hardlink?
+        why = TarReader.unsafe_name(e.linkname, windows)
+        return TarError.new("tar: the hard link #{e.name.inspect} names #{e.linkname.inspect}, outside the directory (tar slip): #{why}") if why
+        tparts = TarReader.parts(e.linkname)
+        return TarError.new("tar: the hard link #{e.name.inspect} names the directory itself") if tparts.empty?
+        through(dir, tparts, e.linkname)!
+        target = dir + "/" + tparts.join("/")
+        tinfo = File.info?(target, follow_symlinks: false)
+        unless tinfo && tinfo.file?
+          return TarError.new("tar: the hard link #{e.name.inspect} names #{e.linkname.inspect}, which is not a regular file extracted before it")
+        end
+      end
+      through(dir, parts, e.name)!
+      parent = parts.size > 1 ? dir + "/" + parts[0, parts.size - 1].join("/") : dir
+      Dir.mkdir_p(parent)
+      path = dir + "/" + parts.join("/")
+      there = File.info?(path, follow_symlinks: false)
+      if there
+        if there.directory? && !there.symlink?
+          return TarError.new("tar: #{e.name.inspect} is a directory on disk, and a #{e.type_name} in the archive") unless e.directory?
+        else
+          File.delete(path)
+          there = nil
+        end
+      end
+      secs = e.mtime.to_unix
+      if e.directory?
+        Dir.mkdir(path) unless there
+        later << {path, e.mode & 0o777, secs}
+      elsif e.symlink?
+        File.symlink(e.linkname, path)
+      elsif e.hardlink?
+        File.link(target, path)
+      else
+        io = File.open(path, "w")
+        failed = nil.as(TarError | Nil)
+        while true
+          piece = e.read(65536)
+          if piece.is_a?(TarError)
+            failed = piece
+            break
+          end
+          break if piece.empty?
+          io.write(piece)
+        end
+        io.close
+        if fault = failed
+          File.delete(path)
+          return fault
+        end
+        File.chmod(path, e.mode & 0o777)
+        File.touch(path, secs) if secs > 0_i64
+      end
+    end
+    # Directories last, the last made first: one without write permission
+    # still took its entries, and its time is not moved by them.
+    k = later.size - 1
+    while k >= 0
+      d = later[k]
+      File.chmod(d[0], d[1])
+      File.touch(d[0], d[2]) if d[2] > 0_i64
+      k = k - 1
+    end
+    nil
+  end
+
+  # Nil when no part of *dir*/*parts* before the last is a symbolic link
+  # or other than a directory.
+  private def through(dir : String, parts : Array(String), name : String) : Nil | TarError
+    path = dir
+    i = 0
+    while i < parts.size - 1
+      path = path + "/" + parts[i]
+      info = File.info?(path, follow_symlinks: false)
+      if info
+        if info.symlink?
+          return TarError.new("tar: #{name.inspect} would be written through the symbolic link #{parts[0, i + 1].join("/").inspect} (tar slip)")
+        end
+        return TarError.new("tar: #{name.inspect} needs #{parts[0, i + 1].join("/").inspect} to be a directory, and it is not one") unless info.directory?
+      end
+      i = i + 1
+    end
+    nil
+  end
+
+  # For `TarEntry#read`.
+  def entry_read(entry : TarEntry, max : Int32) : String | TarError
+    raise "TarEntry: read wants at least one byte, not #{max}" if max < 1
+    check_current(entry)
+    if failed = @failed
+      return failed
+    end
+    return "" if @left == 0_i64
+    n = @left < max.to_i64 ? @left.to_i32 : max
+    got = take(n)
+    if got.is_a?(TarError)
+      @failed = got
+      return got
+    end
+    if got.bytesize < n
+      fault = TarError.new("tar: the archive ends inside #{entry.name.inspect}'s data, #{entry.data_size - @left + got.bytesize.to_i64} of #{entry.data_size} bytes in")
+      @failed = fault
+      return fault
+    end
+    @left = @left - n.to_i64
+    got
+  end
+
+  # For `TarEntry#read_all`.
+  def entry_read_all(entry : TarEntry) : String | TarError
+    check_current(entry)
+    if @left > 2147483647_i64
+      return TarError.new("tar: #{entry.name.inspect} holds #{@left} bytes, more than a string holds; read it with read")
+    end
+    out = String::Builder.new(@left.to_i32 + 1)
+    while true
+      piece = entry_read(entry, 65536)!
+      break if piece.empty?
+      out << piece
+    end
+    out.to_s
+  end
+
+  private def check_current(entry : TarEntry) : Nil
+    current = @current
+    unless current && current.index == entry.index && entry.index == @index
+      raise "TarEntry: #{entry.name.inspect} was read past; its data is read before the next next_entry"
+    end
+  end
+
+  # Up to *n* bytes of the archive, fewer only where it ends.
+  private def take(n : Int32) : String | TarError
+    start unless @started
+    got = if inflater = @inflater
+            first = ""
+            out = nil.as(String::Builder | Nil)
+            while true
+              have = (out ? out.bytesize : first.bytesize)
+              break if have >= n
+              piece = inflater.read(n - have)
+              return TarError.new("tar: the gzip stream is corrupt: #{piece.message}") if piece.is_a?(CompressError)
+              break if piece.empty?
+              if b = out
+                b << piece
+              elsif first.empty?
+                first = piece
+              else
+                b = String::Builder.new(n)
+                b << first << piece
+                out = b
+              end
+            end
+            out ? out.to_s : first
+          elsif @pending.empty?
+            @io.read_bytes(n)
+          elsif @pending.bytesize >= n
+            head = @pending[0, n]
+            @pending = @pending[n, @pending.bytesize - n]
+            head
+          else
+            head = @pending
+            @pending = ""
+            head + @io.read_bytes(n - head.bytesize)
+          end
+    @offset = @offset + got.bytesize.to_i64
+    got
+  end
+
+  # The first block, which says whether the stream is gzip.
+  private def start : Nil
+    @started = true
+    first = @io.read_bytes(TarBytes::BLOCK)
+    if first.bytesize >= 2 && first.to_unsafe[0] == 0x1f_u8 && first.to_unsafe[1] == 0x8b_u8
+      @gzip = true
+      feed = TarFeed.new(@io, first)
+      @inflater = Inflater.new(Envelope::Gzip) { feed.next }
+    else
+      @pending = first
+    end
+  end
+
+  # *count* bytes read past, or the archive ending inside them.
+  private def skip(count : Int64, what : String) : Nil | TarError
+    left = count
+    while left > 0_i64
+      n = left < 65536_i64 ? left.to_i32 : 65536
+      got = take(n)!
+      return TarError.new("tar: the archive ends inside #{what}") if got.bytesize < n
+      left = left - n.to_i64
+    end
+    nil
+  end
+
+  # At the end of a gzip archive, the rest of the gzip stream read - the
+  # record's padding, as GNU tar writes it - so its CRC-32 and length
+  # are checked: the data handed out before them is vouched for at last.
+  private def drain : Nil | TarError
+    if inflater = @inflater
+      while true
+        piece = inflater.read(65536)
+        return TarError.new("tar: the gzip stream is corrupt: #{piece.message}") if piece.is_a?(CompressError)
+        break if piece.empty?
+      end
+    end
+    nil
+  end
+
+  private def advance : TarEntry | Nil | TarError
+    if current = @current
+      skip(@left + @pad, "#{current.name.inspect}'s data")!
+      @left = 0_i64
+      @pad = 0_i64
+      @current = nil
+    end
+    local = {} of String => String
+    long_name = nil.as(String | Nil)
+    long_link = nil.as(String | Nil)
+    extended = nil.as(String | Nil)
+    while true
+      at = @offset
+      block = take(TarBytes::BLOCK)!
+      p = block.to_unsafe
+      if block.empty? || (block.bytesize == TarBytes::BLOCK && TarBytes.zero?(p))
+        if what = extended
+          return TarError.new("tar: the archive ends after the #{what} at offset #{@offset - TarBytes::BLOCK}, with no entry for it")
+        end
+        drain!
+        @ended = true
+        return nil
+      end
+      return TarError.new("tar: the archive ends inside the header at offset #{at}, #{block.bytesize} of 512 bytes in") if block.bytesize < TarBytes::BLOCK
+      stored = TarBytes.number(p, 148, 8)
+      unless stored
+        return TarError.new("tar: the block at offset #{at} is not a tar header: its checksum field holds #{TarBytes.cstr(p, 148, 8).inspect}")
+      end
+      unsigned, signed = TarBytes.sums(p)
+      unless stored == unsigned || stored == signed
+        return TarError.new("tar: the header at offset #{at} says checksum #{stored}, and its bytes sum to #{unsigned}: it is corrupt, or not a tar header")
+      end
+      flag = p[156]
+      size = field(p, 124, 12, "size", at)!
+      return TarError.new("tar: the header at offset #{at} has a negative size, #{size}") if size < 0_i64
+      pad = (TarBytes::BLOCK.to_i64 - size % TarBytes::BLOCK.to_i64) % TarBytes::BLOCK.to_i64
+      if flag == 120_u8 || flag == 103_u8 || flag == 76_u8 || flag == 75_u8
+        what = case flag
+               when 120_u8 then "pax extended header"
+               when 103_u8 then "pax global header"
+               when  76_u8 then "GNU long name"
+               else             "GNU long link name"
+               end
+        if size > TarBytes::MAX_SPECIAL
+          return TarError.new("tar: the #{what} at offset #{at} is #{size} bytes, past the #{TarBytes::MAX_SPECIAL} this reader holds")
+        end
+        data = take(size.to_i32)!
+        return TarError.new("tar: the archive ends inside the #{what} at offset #{at}") if data.bytesize.to_i64 < size
+        skip(pad, "the #{what} at offset #{at}")!
+        case flag
+        when 120_u8
+          TarReader.records(data, at, local, false)!
+          extended = what
+        when 103_u8
+          TarReader.records(data, at, @global, true)!
+        when 76_u8
+          long_name = TarBytes.cut_nul(data)
+          extended = what
+        else
+          long_link = TarBytes.cut_nul(data)
+          extended = what
+        end
+        next
+      end
+      return entry(p, at, flag, size, pad, local, long_name, long_link)
+    end
+    nil
+  end
+
+  private def field(p : Pointer(UInt8), at : Int32, len : Int32, label : String, header_at : Int64) : Int64 | TarError
+    v = TarBytes.number(p, at, len)
+    return TarError.new("tar: the header at offset #{header_at} has a #{label} field that is not a number: #{TarBytes.cstr(p, at, len).inspect}") unless v
+    v
+  end
+
+  # A pax header's records into *into*. A global record with no value
+  # takes the key away; an entry's keeps it, empty, which stands for the
+  # header's own field.
+  def self.records(data : String, at : Int64, into : Hash(String, String), global : Bool) : Nil | TarError
+    p = data.to_unsafe
+    n = data.bytesize
+    i = 0
+    while i < n
+      break if p[i] == 0_u8
+      j = i
+      len = 0
+      while j < n && p[j] >= 48_u8 && p[j] <= 57_u8 && len <= n
+        len = len * 10 + (p[j] - 48_u8).to_i32
+        j = j + 1
+      end
+      if j == i || j >= n || p[j] != 32_u8 || len <= j - i + 1 || len > n - i || p[i + len - 1] != 10_u8
+        return TarError.new("tar: the pax header at offset #{at} holds a record that is not one, at byte #{i} of its data")
+      end
+      record = data[j + 1, i + len - 1 - (j + 1)]
+      eq = record.index('=')
+      unless eq && eq > 0
+        return TarError.new("tar: the pax header at offset #{at} holds a record with no key=value, at byte #{i} of its data")
+      end
+      key = record[0, eq]
+      value = record[eq + 1, record.bytesize - eq - 1]
+      if global && value.empty?
+        into.delete(key)
+      else
+        into[key] = value
+      end
+      i = i + len
+    end
+    nil
+  end
+
+  private def entry(p : Pointer(UInt8), at : Int64, flag : UInt8, size : Int64, pad : Int64, local : Hash(String, String),
+                    long_name : String?, long_link : String?) : TarEntry | TarError
+    magic = TarBytes.cstr(p, 257, 6)
+    posix = magic == "ustar" && p[263] == 48_u8 && p[264] == 48_u8
+    gnu = magic == "ustar " && p[263] == 32_u8
+    format = posix ? TarFormat::Ustar : (gnu ? TarFormat::Gnu : TarFormat::V7)
+    name = TarBytes.cstr(p, 0, 100)
+    if posix
+      prefix = TarBytes.cstr(p, 345, 155)
+      name = prefix + "/" + name unless prefix.empty?
+    end
+    linkname = TarBytes.cstr(p, 157, 100)
+    mode = field(p, 100, 8, "mode", at)!
+    uid = field(p, 108, 8, "uid", at)!
+    gid = field(p, 116, 8, "gid", at)!
+    secs = field(p, 136, 12, "mtime", at)!
+    nanos = 0
+    uname = format == TarFormat::V7 ? "" : TarBytes.cstr(p, 265, 32)
+    gname = format == TarFormat::V7 ? "" : TarBytes.cstr(p, 297, 32)
+    devmajor = 0_i64
+    devminor = 0_i64
+    if format != TarFormat::V7
+      devmajor = field(p, 329, 8, "devmajor", at)!
+      devminor = field(p, 337, 8, "devminor", at)!
+    end
+    if n = long_name
+      name = n
+    end
+    if l = long_link
+      linkname = l
+    end
+    pax = {} of String => String
+    @global.each { |k, v| pax[k] = v }
+    local.each do |k, v|
+      if v.empty?
+        pax.delete(k)
+      else
+        pax[k] = v
+      end
+    end
+    format = TarFormat::Pax unless pax.empty?
+    label = "the pax header before offset #{at}"
+    pax.each do |k, v|
+      case k
+      when "path"     then name = v
+      when "linkpath" then linkname = v
+      when "uname"    then uname = v
+      when "gname"    then gname = v
+      when "size", "uid", "gid"
+        num = TarBytes.decimal(v)
+        return TarError.new("tar: #{label} has a #{k} that is not a number: #{v.inspect}") unless num
+        if k == "size"
+          size = num
+          pad = (TarBytes::BLOCK.to_i64 - size % TarBytes::BLOCK.to_i64) % TarBytes::BLOCK.to_i64
+        elsif k == "uid"
+          uid = num
+        else
+          gid = num
+        end
+      when "mtime"
+        t = TarBytes.pax_time(v)
+        return TarError.new("tar: #{label} has an mtime that is not a time: #{v.inspect}") unless t
+        secs = t[0]
+        nanos = t[1]
+      end
+    end
+    if mode < 0_i64 || mode > 2147483647_i64
+      return TarError.new("tar: the header at offset #{at} has a mode past 32 bits, #{mode}")
+    end
+    if secs < Time::MIN_SECONDS || secs > Time::MAX_SECONDS - 1_i64
+      return TarError.new("tar: the header at offset #{at} has an mtime of #{secs} seconds, past the years a Time holds")
+    end
+    @index = @index + 1
+    e = TarEntry.new(self, @index, name, linkname, size, mode.to_i32, uid, gid, uname, gname, Time.unix(secs, nanos), flag,
+      devmajor, devminor, pax, format, at)
+    @current = e
+    @left = e.data_size
+    @pad = @left == 0_i64 ? 0_i64 : pad
+    e
+  end
+end
+
+# An archive written to an `IyiIO`, an entry at a time.
+#
+# ```
+# File.open("out.tar.gz", "w") do |io|
+#   tar = TarWriter.new(io, gzip: true)
+#   tar.add("README", text)
+#   tar.add_directory("bin")
+#   tar.add("bin/run", script, mode: 0o755)
+#   tar.add_symlink("latest", "bin/run")
+#   tar.finish
+# end
+# ```
+#
+# What is wrong with the calls is a panic: a name that is empty, holds a
+# NUL or is absolute; a link without a target; a negative size, id or
+# a mode outside 0 to 0o7777; a source that ends before the size it was
+# said to hold; an `add` after `finish`, and `finish` twice.
+pub class TarWriter
+  @io : IyiIO
+  @deflater : Deflater | Nil
+  @held : String::Builder
+  @finished : Bool
+  @at : Int64
+
+  # *gzip* writes the archive through `Deflater` in the gzip envelope.
+  def initialize(@io : IyiIO, gzip : Bool = false)
+    @deflater = gzip ? Deflater.new(Envelope::Gzip) : nil
+    @held = String::Builder.new(1024)
+    @finished = false
+    @at = 0_i64
+  end
+
+  # *data* as the regular file *name*.
+  def add(name : String, data : String, mode : Int32 = 0o644, mtime : Time = Time.utc, uid : Int64 = 0_i64, gid : Int64 = 0_i64,
+          uname : String = "", gname : String = "") : Nil
+    check(name)
+    header(name, "", 48_u8, data.bytesize.to_i64, mode, mtime, uid, gid, uname, gname)
+    emit(data)
+    pad(data.bytesize.to_i64)
+  end
+
+  # *size* bytes of *source* as the regular file *name*, copied as they
+  # are read. *source* is not closed.
+  def add(name : String, source : IyiIO, size : Int64, mode : Int32 = 0o644, mtime : Time = Time.utc, uid : Int64 = 0_i64,
+          gid : Int64 = 0_i64, uname : String = "", gname : String = "") : Nil
+    check(name)
+    raise "TarWriter: #{name.inspect} is to hold #{size} bytes; a size is not negative" if size < 0_i64
+    header(name, "", 48_u8, size, mode, mtime, uid, gid, uname, gname)
+    left = size
+    while left > 0_i64
+      piece = source.read_bytes(left < 65536_i64 ? left.to_i32 : 65536)
+      raise "TarWriter: #{name.inspect} is to hold #{size} bytes, and its source ended after #{size - left}" if piece.empty?
+      emit(piece)
+      left = left - piece.bytesize.to_i64
+    end
+    pad(size)
+  end
+
+  # A directory: *name* with a `/` after it if it has none.
+  def add_directory(name : String, mode : Int32 = 0o755, mtime : Time = Time.utc, uid : Int64 = 0_i64, gid : Int64 = 0_i64,
+                    uname : String = "", gname : String = "") : Nil
+    check(name)
+    name = name + "/" unless name.ends_with?("/")
+    header(name, "", 53_u8, 0_i64, mode, mtime, uid, gid, uname, gname)
+  end
+
+  # A symbolic link *name* to *target*, which is written as it is given.
+  def add_symlink(name : String, target : String, mode : Int32 = 0o777, mtime : Time = Time.utc, uid : Int64 = 0_i64,
+                  gid : Int64 = 0_i64, uname : String = "", gname : String = "") : Nil
+    check(name)
+    check_target(name, target)
+    header(name, target, 50_u8, 0_i64, mode, mtime, uid, gid, uname, gname)
+  end
+
+  # A hard link *name* to the entry *target*, earlier in the archive.
+  def add_hardlink(name : String, target : String, mode : Int32 = 0o644, mtime : Time = Time.utc, uid : Int64 = 0_i64,
+                   gid : Int64 = 0_i64, uname : String = "", gname : String = "") : Nil
+    check(name)
+    check_target(name, target)
+    header(name, target, 49_u8, 0_i64, mode, mtime, uid, gid, uname, gname)
+  end
+
+  # The end: two zero blocks, then zeros to a 10,240-byte record; then
+  # the gzip trailer, if gzip; then *io* is flushed. Once only.
+  def finish : Nil
+    raise "TarWriter: finish was called twice" if @finished
+    @finished = true
+    total = @at + 2_i64 * TarBytes::BLOCK.to_i64
+    tail = (TarBytes::RECORD.to_i64 - total % TarBytes::RECORD.to_i64) % TarBytes::RECORD.to_i64
+    emit("\u0000" * (2 * TarBytes::BLOCK + tail.to_i32))
+    if deflater = @deflater
+      @io.write(deflater.compress(@held.to_s)) if @held.bytesize > 0
+      @held = String::Builder.new(16)
+      @io.write(deflater.finish)
+    end
+    @io.flush
+  end
+
+  private def check(name : String) : Nil
+    raise "TarWriter: add after finish" if @finished
+    raise "TarWriter: an entry needs a name" if name.empty?
+    raise "TarWriter: #{name.inspect} holds a NUL byte, which ends a name in a tar header" if name.includes?("\u0000")
+    raise "TarWriter: #{name.inspect} is absolute; a name in an archive is relative" if name.starts_with?("/")
+  end
+
+  private def check_target(name : String, target : String) : Nil
+    raise "TarWriter: the link #{name.inspect} needs a target" if target.empty?
+    raise "TarWriter: the link #{name.inspect}'s target holds a NUL byte" if target.includes?("\u0000")
+  end
+
+  # *name* as {prefix, name} for a ustar header, or nil when it does not
+  # split: the longest prefix of at most 155 bytes ending at a `/` whose
+  # rest is 1 to 100 bytes, as Python splits it.
+  private def split(name : String) : {String, String}?
+    n = name.bytesize
+    return {"", name} if n <= 100
+    cut = n - 1 < 155 ? n - 1 : 155
+    while cut > 0 && name.to_unsafe[cut] != 47_u8
+      cut = cut - 1
+    end
+    return nil if cut <= 0 || n - cut - 1 > 100 || n - cut - 1 == 0
+    {name[0, cut], name[cut + 1, n - cut - 1]}
+  end
+
+  private def header(name : String, linkname : String, flag : UInt8, size : Int64, mode : Int32, mtime : Time, uid : Int64, gid : Int64,
+                     uname : String, gname : String) : Nil
+    raise "TarWriter: #{name.inspect} has mode 0o#{mode.to_s(8)}; a mode is 0 to 0o7777" if mode < 0 || mode > 0o7777
+    raise "TarWriter: #{name.inspect} has uid #{uid}; an id is not negative" if uid < 0_i64
+    raise "TarWriter: #{name.inspect} has gid #{gid}; an id is not negative" if gid < 0_i64
+    records = [] of {String, String}
+    parts = TarBytes.ascii?(name) ? split(name) : nil
+    unless parts
+      records << {"path", name}
+      parts = {"", TarBytes.fit(name, 100)}
+    end
+    link_field = linkname
+    if linkname.bytesize > 100 || !TarBytes.ascii?(linkname)
+      records << {"linkpath", linkname}
+      link_field = TarBytes.fit(linkname, 100)
+    end
+    size_field = size
+    if size > TarBytes::MAX_OCTAL11
+      records << {"size", size.to_s}
+      size_field = 0_i64
+    end
+    secs = mtime.to_unix
+    secs_field = secs
+    if secs < 0_i64 || secs > TarBytes::MAX_OCTAL11
+      records << {"mtime", secs.to_s}
+      secs_field = 0_i64
+    end
+    uid_field = uid
+    if uid > TarBytes::MAX_OCTAL7
+      records << {"uid", uid.to_s}
+      uid_field = 0_i64
+    end
+    gid_field = gid
+    if gid > TarBytes::MAX_OCTAL7
+      records << {"gid", gid.to_s}
+      gid_field = 0_i64
+    end
+    uname_field = uname
+    if uname.bytesize > 32 || !TarBytes.ascii?(uname)
+      records << {"uname", uname}
+      uname_field = TarBytes.fit(uname, 32)
+    end
+    gname_field = gname
+    if gname.bytesize > 32 || !TarBytes.ascii?(gname)
+      records << {"gname", gname}
+      gname_field = TarBytes.fit(gname, 32)
+    end
+    unless records.empty?
+      body = String::Builder.new
+      records.each { |r| body << TarWriter.record(r[0], r[1]) }
+      data = body.to_s
+      emit(block("././@PaxHeader", "", 120_u8, data.bytesize.to_i64, 0o644, 0_i64, 0_i64, 0_i64, "", "", ""))
+      emit(data)
+      pad(data.bytesize.to_i64)
+    end
+    emit(block(parts[1], link_field, flag, size_field, mode, secs_field, uid_field, gid_field, uname_field, gname_field, parts[0]))
+  end
+
+  # One pax record: its length counts its own digits.
+  def self.record(key : String, value : String) : String
+    rest = key.bytesize + value.bytesize + 3
+    digits = 1
+    while (rest + digits).to_s.bytesize > digits
+      digits = digits + 1
+    end
+    len = rest + digits
+    "#{len} #{key}=#{value}\n"
+  end
+
+  private def block(name : String, linkname : String, flag : UInt8, size : Int64, mode : Int32, mtime : Int64, uid : Int64, gid : Int64,
+                    uname : String, gname : String, prefix : String) : String
+    String.new(TarBytes::BLOCK) do |dst|
+      i = 0
+      while i < TarBytes::BLOCK
+        dst[i] = 0_u8
+        i = i + 1
+      end
+      TarBytes.put_str(dst, 0, name)
+      TarBytes.put_octal(dst, 100, 8, mode.to_i64)
+      TarBytes.put_octal(dst, 108, 8, uid)
+      TarBytes.put_octal(dst, 116, 8, gid)
+      TarBytes.put_octal(dst, 124, 12, size)
+      TarBytes.put_octal(dst, 136, 12, mtime)
+      dst[156] = flag
+      TarBytes.put_str(dst, 157, linkname)
+      TarBytes.put_str(dst, 257, "ustar")
+      dst[263] = 48_u8
+      dst[264] = 48_u8
+      TarBytes.put_str(dst, 265, uname)
+      TarBytes.put_str(dst, 297, gname)
+      TarBytes.put_octal(dst, 329, 8, 0_i64)
+      TarBytes.put_octal(dst, 337, 8, 0_i64)
+      TarBytes.put_str(dst, 345, prefix)
+      sum = TarBytes.sums(dst)[0]
+      TarBytes.put_octal(dst, 148, 7, sum)
+      dst[155] = 32_u8
+    end
+  end
+
+  private def pad(size : Int64) : Nil
+    rest = (TarBytes::BLOCK.to_i64 - size % TarBytes::BLOCK.to_i64) % TarBytes::BLOCK.to_i64
+    emit("\u0000" * rest.to_i32) if rest > 0_i64
+  end
+
+  # Bytes to *io*, or held and deflated 128 KiB at a time: each
+  # `Deflater#compress` starts its window afresh, so pieces as small as a
+  # header would not compress at all.
+  private def emit(bytes : String) : Nil
+    @at = @at + bytes.bytesize.to_i64
+    if deflater = @deflater
+      @held << bytes
+      if @held.bytesize >= 131072
+        @io.write(deflater.compress(@held.to_s))
+        @held = String::Builder.new(131072 + 65536)
+      end
+    else
+      @io.write(bytes)
+    end
+  end
+end

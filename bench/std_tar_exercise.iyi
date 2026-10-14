@@ -1,0 +1,694 @@
+# Exercises `std/tar`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_tar_exercise.iyi
+#     ./bin/iyi run bench/std_tar_exercise.iyi <work>
+#
+# With a directory, the archives Python's `tarfile` (and GNU `tar`, where
+# the tool is there) wrote into it are read and compared with what
+# Python read from them, the `.expect` beside each; and the archives this
+# module writes are left there as `out-*`, each with an `.expect` made
+# from what was asked to be written, for Python and GNU tar to read
+# back. `bench/std_tar_exercise.sh` is the other half of that
+# conversation. Without one, a scratch directory is used for the
+# extraction checks and removed after.
+
+module bench/std_tar_exercise
+
+import std/tar::{TarReader, TarWriter, TarEntry, TarError, TarType, TarFormat}
+import std/digest::{CRC32}
+import std/io::{Memory}
+import std/time::{Time}
+import std/file::{File}
+import std/dir::{Dir}
+import std/file_utils::{FileUtils}
+import std/random::{Random}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+# Zeros, as many as asked, from one buffer: a source for an entry past
+# 8 GiB that costs no memory and no time to make.
+class ZeroSource < IyiIO
+  ZEROS = "\u0000" * 65536
+
+  def initialize(@head : String, @left : Int64)
+    super(-1_i64, 16, false)
+  end
+
+  def read_bytes(count : Int32) : String
+    unless @head.empty?
+      n = count < @head.bytesize ? count : @head.bytesize
+      got = @head[0, n]
+      @head = @head[n, @head.bytesize - n]
+      return got
+    end
+    n = @left < count.to_i64 ? @left.to_i32 : count
+    @left = @left - n.to_i64
+    n == 65536 ? ZEROS : "\u0000" * n
+  end
+end
+
+# A writer that counts what it is given and keeps the first bytes.
+class CountingSink < IyiIO
+  getter total : Int64
+  getter head : String::Builder
+
+  def initialize
+    super(-1_i64, 16, false)
+    @total = 0_i64
+    @head = String::Builder.new
+  end
+
+  def write(bytes : Pointer(UInt8), count : Int32) : Nil
+    i = 0
+    while i < count && @head.bytesize < 4096
+      @head.write_byte(bytes[i])
+      i = i + 1
+    end
+    @total = @total + count.to_i64
+  end
+
+  def flush : Nil
+  end
+end
+
+# What an archive holds: each entry with its data.
+def listed(data : String, label : String) : Array({TarEntry, String})
+  out = [] of {TarEntry, String}
+  r = TarReader.new(Memory.new(data))
+  while true
+    e = r.next_entry
+    raise "ASSERTION FAILED: #{label}: refused with #{e.message.inspect}" if e.is_a?(TarError)
+    break unless e
+    body = e.read_all
+    raise "ASSERTION FAILED: #{label}: #{e.name.inspect} refused with #{body.message.inspect}" if body.is_a?(TarError)
+    out << {e, body}
+  end
+  out
+end
+
+# The first error reading every entry and all its data answers.
+def first_error(data : String) : TarError?
+  r = TarReader.new(Memory.new(data))
+  while true
+    e = r.next_entry
+    return e if e.is_a?(TarError)
+    return nil unless e
+    body = e.read_all
+    return body if body.is_a?(TarError)
+  end
+  nil
+end
+
+def refused(data : String, phrase : String, label : String) : Nil
+  fault = first_error(data)
+  raise "ASSERTION FAILED: #{label}: read instead of refusing" unless fault
+  assert_true fault.message.includes?(phrase), "#{label}: refused with #{fault.message.inspect}, which does not say #{phrase.inspect}"
+  puts "  #{label}: #{fault.message}"
+end
+
+def octal(v : Int64, width : Int32) : String
+  v.to_s(8).rjust(width - 1, '0') + "\u0000"
+end
+
+def field(s : String, width : Int32) : String
+  s + "\u0000" * (width - s.bytesize)
+end
+
+# A header built here, by the format's table and not by the module, with
+# its checksum: for archives the writer would not write. A directory is
+# 0o755 unless said otherwise, so a scratch directory stays removable.
+def raw(name : String, flag : Char, size : Int64, linkname : String = "", mode : Int64 = -1_i64, mtime : Int64 = 1700000000_i64,
+        magic : String = "ustar\u000000", uname : String = "", prefix : String = "", uid : Int64 = 0_i64) : String
+  b = String::Builder.new(512)
+  m = mode >= 0_i64 ? mode : (flag == '5' ? 0o755_i64 : 0o644_i64)
+  b << field(name, 100) << octal(m, 8) << octal(uid, 8) << octal(0_i64, 8) << octal(size, 12) << octal(mtime, 12)
+  b << "        " << flag << field(linkname, 100) << field(magic, 8) << field(uname, 32) << field("", 32)
+  b << octal(0_i64, 8) << octal(0_i64, 8) << field(prefix, 155) << field("", 12)
+  resum(b.to_s, 0)
+end
+
+# The header at *at* with its checksum made again.
+def resum(s : String, at : Int32) : String
+  sum = 0_i64
+  i = 0
+  while i < 512
+    sum = sum + (i >= 148 && i < 156 ? 32_i64 : s.to_unsafe[at + i].to_i64)
+    i = i + 1
+  end
+  patched(s, at + 148, sum.to_s(8).rjust(6, '0') + "\u0000 ")
+end
+
+# *s* with the bytes at *at* replaced by *by*.
+def patched(s : String, at : Int32, by : String) : String
+  String.new(s.bytesize) do |dst|
+    dst.copy_from(s.to_unsafe, s.bytesize)
+    (dst + at).copy_from(by.to_unsafe, by.bytesize)
+  end
+end
+
+def bytes(values : Array(Int32)) : String
+  String.new(values.size) do |dst|
+    i = 0
+    while i < values.size
+      dst[i] = values[i].to_u8
+      i = i + 1
+    end
+  end
+end
+
+def padded(data : String) : String
+  rest = (512 - data.bytesize % 512) % 512
+  data + "\u0000" * rest
+end
+
+def prec(key : String, value : String) : String
+  body = " #{key}=#{value}\n"
+  n = body.bytesize + 1
+  while (n.to_s + body).bytesize != n
+    n = n + 1
+  end
+  n.to_s + body
+end
+
+# A pax header (`x`, or `g` global) with *records*, and its data.
+def pax(records : String, flag : Char = 'x') : String
+  raw("././@PaxHeader", flag, records.bytesize.to_i64) + padded(records)
+end
+
+END_BLOCKS = "\u0000" * 1024
+
+def count_of(s : String, what : String) : Int32
+  n = 0
+  at = 0
+  while hit = s.byte_index(what, at)
+    n = n + 1
+    at = hit + what.bytesize
+  end
+  n
+end
+
+def bytes_of(n : Int32, seed : Int32) : String
+  rng = Random.new(seed.to_u64)
+  String.new(n) do |dst|
+    i = 0
+    while i < n
+      dst[i] = rng.rand(256).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def text_of(n : Int32) : String
+  line = "the quick brown fox jumps over the lazy dog, line "
+  out = String::Builder.new(n + 64)
+  k = 0
+  while out.bytesize < n
+    out << line << k << '\n'
+    k = k + 1
+  end
+  out.to_s[0, n]
+end
+
+# A time as Python's pax reads it: whole seconds, or with the fraction's
+# digits, trailing zeros dropped.
+def stamp(t : Time) : String
+  secs = t.to_unix
+  ns = t.nanosecond
+  return secs.to_s if ns == 0
+  if secs >= 0_i64
+    frac = ns.to_s.rjust(9, '0')
+    whole = secs.to_s
+  else
+    frac = (1000000000 - ns).to_s.rjust(9, '0')
+    whole = "-" + (-(secs + 1_i64)).to_s
+  end
+  while frac.ends_with?("0")
+    frac = frac[0, frac.bytesize - 1]
+  end
+  whole + "." + frac
+end
+
+def kind_of(e : TarEntry) : String
+  return "file" if e.file?
+  case e.type
+  when TarType::Directory   then "dir"
+  when TarType::Symlink     then "symlink"
+  when TarType::Hardlink    then "hardlink"
+  when TarType::CharDevice  then "chr"
+  when TarType::BlockDevice then "blk"
+  when TarType::Fifo        then "fifo"
+  else                           "other"
+  end
+end
+
+def without_slash(name : String) : String
+  n = name
+  while n.ends_with?("/")
+    n = n[0, n.bytesize - 1]
+  end
+  n
+end
+
+def line(name : String, kind : String, size : Int64, mode : Int32, mtime : String, uid : Int64, gid : Int64, uname : String,
+         gname : String, linkname : String, crc : String) : String
+  "entry\t#{name}\t#{kind}\t#{size}\t#{mode.to_s(8)}\t#{mtime}\t#{uid}\t#{gid}\t#{uname}\t#{gname}\t#{linkname}\t#{crc}\n"
+end
+
+# An archive's entries as the `.expect` lines Python writes for its own.
+def expect_lines(data : String, label : String) : String
+  out = String::Builder.new
+  listed(data, label).each do |pair|
+    e = pair[0]
+    kind = kind_of(e)
+    name = kind == "dir" ? without_slash(e.name) : e.name
+    crc = kind == "file" ? CRC32.checksum(pair[1]).to_s : "-"
+    out << line(name, kind, e.size, e.mode, stamp(e.mtime), e.uid, e.gid, e.uname, e.gname, e.linkname, crc)
+  end
+  out.to_s
+end
+
+# One entry to write, and the line it must be read back as.
+class Spec
+  getter kind : String
+  getter name : String
+  getter body : String
+  getter mode : Int32
+  getter mtime : Int64
+  getter uid : Int64
+  getter gid : Int64
+  getter uname : String
+  getter gname : String
+  getter needs_pax : Bool
+
+  def initialize(@kind : String, @name : String, @body : String, @mode : Int32, @mtime : Int64, @uid : Int64, @gid : Int64,
+                 @uname : String, @gname : String, @needs_pax : Bool)
+  end
+
+  def write(w : TarWriter) : Nil
+    t = Time.unix(@mtime)
+    case @kind
+    when "file"     then w.add(@name, @body, mode: @mode, mtime: t, uid: @uid, gid: @gid, uname: @uname, gname: @gname)
+    when "dir"      then w.add_directory(@name, mode: @mode, mtime: t, uid: @uid, gid: @gid, uname: @uname, gname: @gname)
+    when "symlink"  then w.add_symlink(@name, @body, mode: @mode, mtime: t, uid: @uid, gid: @gid, uname: @uname, gname: @gname)
+    when "hardlink" then w.add_hardlink(@name, @body, mode: @mode, mtime: t, uid: @uid, gid: @gid, uname: @uname, gname: @gname)
+    end
+  end
+
+  def expect : String
+    file = @kind == "file"
+    line(@name, @kind, file ? @body.bytesize.to_i64 : 0_i64, @mode, @mtime.to_s, @uid, @gid, @uname, @gname, file ? "" : @body,
+      file ? CRC32.checksum(@body).to_s : "-")
+  end
+end
+
+work = Program.args.size > 0 ? Program.args[0] : Dir.tempdir + "/iyi_tar_exercise_#{Time.utc.to_unix_ms}"
+scratch = Program.args.size == 0
+Dir.mkdir_p(work)
+t0 = 1700000000_i64
+
+puts "== round trips"
+binary = bytes_of(100000, 7)
+text = text_of(300000)
+split_name = "dir/" + "p" * 60 + "/" + "q" * 80 + ".txt"
+long_name = "dir/" + "L" * 180
+specs = [
+  Spec.new("file", "hello.txt", "hello, world\n", 0o644, t0, 1000_i64, 1000_i64, "naruto", "users", false),
+  Spec.new("file", "binary.bin", binary, 0o600, t0, 0_i64, 0_i64, "", "", false),
+  Spec.new("file", "text.txt", text, 0o644, t0 + 1_i64, 0_i64, 0_i64, "", "", false),
+  Spec.new("file", "empty", "", 0o644, t0, 0_i64, 0_i64, "", "", false),
+  Spec.new("dir", "dir", "", 0o755, t0, 0_i64, 0_i64, "", "", false),
+  Spec.new("file", "dir/script.sh", "#!/bin/sh\necho hi\n", 0o755, t0, 0_i64, 0_i64, "", "", false),
+  Spec.new("file", split_name, "split", 0o644, t0, 0_i64, 0_i64, "", "", false),
+  Spec.new("file", long_name, "long", 0o644, t0, 0_i64, 0_i64, "", "", true),
+  Spec.new("dir", "dir/çay ğ", "", 0o755, t0, 0_i64, 0_i64, "", "", true),
+  Spec.new("file", "dir/çay ğ/日本語.txt", "こんにちは", 0o644, t0, 0_i64, 0_i64, "", "", true),
+  Spec.new("symlink", "dir/link-to-hello", "../hello.txt", 0o777, t0, 0_i64, 0_i64, "", "", false),
+  Spec.new("symlink", "long-link", long_name, 0o777, t0, 0_i64, 0_i64, "", "", true),
+  Spec.new("hardlink", "hello-again.txt", "hello.txt", 0o644, t0, 1000_i64, 1000_i64, "naruto", "users", false),
+  Spec.new("file", "old.txt", "before 1970", 0o644, -1000_i64, 0_i64, 0_i64, "", "", true),
+  Spec.new("file", "future.txt", "after 2242", 0o644, 9000000000_i64, 0_i64, 0_i64, "", "", true),
+  Spec.new("file", "big-ids.txt", "ids", 0o644, t0, 3000000_i64, 4000000_i64, "u" * 40, "g", true),
+  Spec.new("file", "owner.txt", "owner", 0o644, t0, 0_i64, 0_i64, "kullanıcı", "grüp", true),
+]
+mem = Memory.new
+w = TarWriter.new(mem)
+specs.each { |s| s.write(w) }
+w.finish
+round = mem.to_s
+want = String.build { |b| specs.each { |s| b << s.expect } }
+assert_str want, expect_lines(round, "round trip"), "every entry read back as it was written"
+got = listed(round, "round trip")
+got.each_with_index do |pair, i|
+  e = pair[0]
+  s = specs[i]
+  assert_true (e.format == TarFormat::Pax) == s.needs_pax, "#{s.name}: a pax header only where a field does not fit (#{e.format})"
+  assert_true e.format == TarFormat::Pax || e.format == TarFormat::Ustar, "#{s.name}: written as ustar"
+  assert_true e.directory? == (s.kind == "dir") && e.symlink? == (s.kind == "symlink") && e.hardlink? == (s.kind == "hardlink"), "#{s.name}: its type"
+end
+assert_true count_of(round, "././@PaxHeader") == specs.count { |s| s.needs_pax }, "one pax header per entry that needs one"
+assert_true round.bytesize % 10240 == 0, "the archive is whole 10240-byte records (#{round.bytesize})"
+assert_true round.ends_with?(END_BLOCKS), "the archive ends with two zero blocks"
+split_at = round.byte_index("q" * 80).as(Int32)
+assert_true split_at % 512 == 0 && round[split_at + 345, 64] == "dir/" + "p" * 60, "a 149-byte name split into prefix and name, no pax header"
+assert_true round.byte_index("path=dir/çay ğ/日本語.txt\n") != nil, "a non-ASCII name carried in a pax path"
+assert_true round.byte_index("15 uid=3000000\n") != nil && round.byte_index("15 gid=4000000\n") != nil, "ids past seven octal digits in pax"
+assert_true round.byte_index("15 mtime=-1000\n") != nil && round.byte_index("20 mtime=9000000000\n") != nil, "times before 1970 and after 2242 in pax"
+assert_true listed(round, "round trip")[0][0].uname == "naruto", "uname read"
+mem = Memory.new
+TarWriter.new(mem).finish
+empty_archive = mem.to_s
+assert_true empty_archive.bytesize == 10240 && listed(empty_archive, "an empty archive").empty?, "an empty archive: one record of zeros"
+# Cut at a block boundary before any zero block, it still lists every
+# entry, as Python and GNU tar read it.
+cut = round.bytesize
+while cut >= 512 && round[cut - 512, 512] == "\u0000" * 512
+  cut = cut - 512
+end
+assert_true listed(round[0, cut], "no end blocks").size == specs.size, "an archive with no zero block at its end lists every entry"
+puts "  #{specs.size} entries, #{round.bytesize} bytes, #{count_of(round, "././@PaxHeader")} pax headers"
+
+puts "== streaming reads"
+{1, 7, 512, 65536}.each do |max|
+  r = TarReader.new(Memory.new(round))
+  i = 0
+  while e = r.next_entry.as(TarEntry | Nil)
+    b = String::Builder.new
+    while true
+      piece = e.read(max).as(String)
+      assert_true piece.bytesize <= max, "a read of #{max} answered #{piece.bytesize} bytes"
+      break if piece.empty?
+      b << piece
+    end
+    want_body = specs[i].kind == "file" ? specs[i].body : ""
+    assert_true b.to_s == want_body, "#{specs[i].name} read #{max} bytes at a time"
+    assert_str "", e.read(10).as(String), "#{specs[i].name}: a read after the end answers \"\""
+    i = i + 1
+  end
+  assert_true i == specs.size, "every entry streamed at #{max}"
+end
+# Data not read is read past; data half read is too, and the rest of it
+# is what read_all answers.
+r = TarReader.new(Memory.new(round))
+names = [] of String
+while e = r.next_entry.as(TarEntry | Nil)
+  names << e.name
+  if e.name == "text.txt"
+    first = e.read(1000).as(String)
+    assert_str text[0, 1000], first, "the first 1000 bytes"
+    assert_str text[1000, text.bytesize - 1000], e.read_all.as(String), "read_all answers what is left"
+  elsif e.name == "binary.bin"
+    e.read(777)
+  end
+end
+assert_true names == specs.map { |s| s.kind == "dir" ? s.name + "/" : s.name }, "unread data is read past: every name in order"
+puts "  every entry read at 1, 7, 512 and 65536 bytes a read; unread data read past"
+
+puts "== headers"
+# v7: no magic, no user names, a directory is a regular file named with
+# a trailing slash.
+v7 = raw("olddir/", '\u0000', 0_i64, magic: "", uname: "ignored") +
+     raw("olddir/old.txt", '\u0000', 3_i64, magic: "") + padded("old") +
+     raw("o2.txt", '0', 2_i64, magic: "", prefix: "not-a-prefix") + padded("o2") + END_BLOCKS
+v = listed(v7, "v7")
+assert_true v.size == 3 && v[0][0].format == TarFormat::V7, "v7: three entries"
+assert_true v[0][0].directory? && v[0][0].typeflag == 0_u8, "a v7 directory: typeflag NUL and a trailing slash"
+assert_true v[0][0].uname == "", "v7: no user name is read where v7 had none"
+assert_true v[1][0].file? && v[1][1] == "old", "v7: a regular file"
+assert_str "o2.txt", v[2][0].name, "v7: the prefix field is not a prefix"
+# GNU's magic: what is at the prefix's place is not a prefix.
+gnu = raw("g.txt", '0', 1_i64, magic: "ustar  \u0000", prefix: "atime-and-more") + padded("g") + END_BLOCKS
+gl = listed(gnu, "gnu magic")
+assert_true gl[0][0].format == TarFormat::Gnu && gl[0][0].name == "g.txt", "GNU magic: the name alone"
+# The prefix is read for POSIX's magic.
+pre = raw("name.txt", '0', 0_i64, prefix: "the/prefix") + END_BLOCKS
+assert_str "the/prefix/name.txt", listed(pre, "prefix")[0][0].name, "a ustar prefix joined with /"
+# GNU base-256: a size of 1000, a mtime of -1000.
+b256 = raw("b.bin", '0', 0_i64, magic: "ustar  \u0000")
+b256 = patched(b256, 124, bytes([0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x03, 0xe8]))
+b256 = patched(b256, 136, bytes([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfc, 0x18]))
+b256 = resum(b256, 0) + padded("x" * 1000) + END_BLOCKS
+bl = listed(b256, "base-256 size 1000 and negative base-256 mtime -1000")
+assert_true bl[0][0].size == 1000_i64 && bl[0][1] == "x" * 1000, "base-256 size 1000"
+assert_true bl[0][0].mtime.to_unix == -1000_i64, "negative base-256 mtime -1000 (#{bl[0][0].mtime.to_unix})"
+huge = patched(raw("h", '0', 0_i64, magic: "ustar  \u0000"), 136, bytes([0x80, 0, 0, 0, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]))
+refused(resum(huge, 0) + END_BLOCKS, "past the years a Time holds", "a base-256 mtime past what a Time holds")
+# Octal between spaces, as old writers padded it.
+sp = patched(raw("s.txt", '0', 0_i64), 124, "    1750 \u0000\u0000\u0000")
+assert_true listed(resum(sp, 0) + padded("y" * 1000) + END_BLOCKS, "spaces")[0][0].size == 1000_i64, "an octal size between spaces"
+# A checksum summed with signed bytes, as some old writers summed it.
+signed = raw("é.txt", '0', 0_i64)
+sum = 0_i64
+k = 0
+while k < 512
+  c = k >= 148 && k < 156 ? 32_i64 : signed.to_unsafe[k].to_i64
+  sum = sum + (c >= 128_i64 ? c - 256_i64 : c)
+  k = k + 1
+end
+signed = patched(signed, 148, sum.to_s(8).rjust(6, '0') + "\u0000 ")
+assert_str "é.txt", listed(signed + END_BLOCKS, "a signed checksum is accepted")[0][0].name, "a signed checksum is accepted"
+# pax records stand in for the header's fields.
+px = pax(prec("path", "a/very/" + "long" * 40) + prec("linkpath", "t" * 120) + prec("uid", "77777777") + prec("gid", "5") +
+         prec("uname", "pax-user") + prec("gname", "pax-group") + prec("mtime", "1700000000.5") + prec("size", "5") +
+         prec("comment", "kept")) + raw("short", '0', 0_i64, uname: "header-user") + padded("12345") + END_BLOCKS
+pe = listed(px, "pax records")[0]
+assert_true pe[0].name == "a/very/" + "long" * 40 && pe[0].linkname == "t" * 120, "pax path and linkpath"
+assert_true pe[0].uid == 77777777_i64 && pe[0].gid == 5_i64 && pe[0].uname == "pax-user" && pe[0].gname == "pax-group", "pax ids and names"
+assert_true pe[0].size == 5_i64 && pe[1] == "12345", "a pax size over the header's 0"
+assert_true pe[0].mtime.to_unix == 1700000000_i64 && pe[0].mtime.nanosecond == 500000000, "a fractional pax mtime"
+assert_true pe[0].pax["comment"] == "kept" && pe[0].format == TarFormat::Pax, "records the module does not read are kept"
+neg = pax(prec("mtime", "-1.25")) + raw("n", '0', 0_i64) + pax(prec("mtime", "1.123456789123")) + raw("m", '0', 0_i64) + END_BLOCKS
+nl = listed(neg, "negative pax mtime")
+assert_true nl[0][0].mtime.to_unix == -2_i64 && nl[0][0].mtime.nanosecond == 750000000, "a negative fractional pax mtime: -1.25 is -2 and 0.75"
+assert_str "-1.25", stamp(nl[0][0].mtime), "-1.25 written back"
+assert_true nl[1][0].mtime.nanosecond == 123456789, "digits past the ninth dropped"
+# A global header holds for every entry after it; an entry's own empty
+# record stands for the header's field; a global empty record ends it.
+gh = pax(prec("uname", "globe"), 'g') + raw("g1", '0', 0_i64, uname: "h1") + raw("g2", '0', 0_i64, uname: "h2") +
+     pax(prec("uname", "")) + raw("g3", '0', 0_i64, uname: "h3") +
+     pax(prec("uname", ""), 'g') + raw("g4", '0', 0_i64, uname: "h4") + END_BLOCKS
+gg = listed(gh, "global")
+assert_true gg.size == 4, "a global header is not an entry"
+assert_true gg[0][0].uname == "globe" && gg[1][0].uname == "globe", "a global pax header holds for every entry after it"
+assert_true gg[2][0].uname == "h3", "an empty record stands for the header's own field"
+assert_true gg[3][0].uname == "h4" && gg[3][0].format == TarFormat::Ustar, "a global empty record ends the global one"
+# GNU's long names, for the name and for the link.
+ln = "n" * 150
+lk = "k" * 130
+gnul = raw("././@LongLink", 'L', (ln.bytesize + 1).to_i64, magic: "ustar  \u0000") + padded(ln + "\u0000") +
+       raw("././@LongLink", 'K', (lk.bytesize + 1).to_i64, magic: "ustar  \u0000") + padded(lk + "\u0000") +
+       raw("n" * 99, '2', 0_i64, linkname: "k" * 99, magic: "ustar  \u0000") + END_BLOCKS
+ge = listed(gnul, "GNU long names")[0][0]
+assert_true ge.name == ln && ge.linkname == lk && ge.symlink? && ge.format == TarFormat::Gnu, "GNU long name and long link name"
+# Types that carry no data, whatever their size says: the next header is
+# right after.
+nodata = raw("d/", '5', 5_i64) + raw("after", '0', 2_i64) + padded("ok") + END_BLOCKS
+nd = listed(nodata, "a directory's size carries no data")
+assert_true nd.size == 2 && nd[0][0].size == 5_i64 && nd[0][1] == "" && nd[1][1] == "ok", "a directory's size carries no data"
+# Every type named.
+types = raw("c", '3', 0_i64) + raw("b", '4', 0_i64) + raw("f", '6', 0_i64) + raw("q", 'Q', 0_i64) + raw("s", 'S', 0_i64) +
+        raw("c7", '7', 1_i64) + padded("7") + END_BLOCKS
+tl = listed(types, "types")
+assert_str "character device|block device|FIFO|type 'Q'|GNU sparse file|contiguous file", tl.map { |p| p[0].type_name }.join("|"), "types named"
+assert_true tl[0][0].type == TarType::CharDevice && tl[2][0].type == TarType::Fifo && tl[3][0].type == TarType::Other, "types"
+assert_true tl[5][0].file? && tl[5][1] == "7", "a contiguous file is a file"
+puts "  v7, GNU, base-256, signed checksums, pax records, global headers, long names, types"
+
+puts "== past 8 GiB"
+big = 8589934593_i64
+sink = CountingSink.new
+w = TarWriter.new(sink)
+w.add("big.bin", ZeroSource.new("", big), big, mtime: Time.unix(t0))
+w.finish
+head = sink.head.to_s
+assert_true head.byte_index("19 size=8589934593\n") != nil, "past 8 GiB: a pax size record"
+assert_true head[1024 + 124, 12] == "00000000000\u0000", "past 8 GiB: the header's size field is zero"
+total = 1536_i64 + big + 511_i64 + 1024_i64
+total = total + (10240_i64 - total % 10240_i64) % 10240_i64
+assert_true sink.total == total, "past 8 GiB: #{sink.total} bytes written, #{total} wanted"
+r = TarReader.new(ZeroSource.new(head[0, 1536], total - 1536_i64))
+e = r.next_entry.as(TarEntry)
+assert_true e.size == big && e.format == TarFormat::Pax, "past 8 GiB: the size read back from pax"
+assert_true e.read_all.is_a?(TarError), "past 8 GiB: read_all refuses what a string cannot hold"
+seen = 0_i64
+while true
+  piece = e.read(65536).as(String)
+  break if piece.empty?
+  seen = seen + piece.bytesize.to_i64
+end
+assert_true seen == big && r.next_entry.as(TarEntry | Nil).nil?, "past 8 GiB: every byte read, then the end"
+r = TarReader.new(ZeroSource.new(head[0, 1536], total - 1536_i64))
+r.next_entry.as(TarEntry)
+assert_true r.next_entry.as(TarEntry | Nil).nil?, "past 8 GiB: read past unread"
+puts "  #{big} bytes written and read back, size in pax"
+
+puts "== gzip"
+mem = Memory.new
+w = TarWriter.new(mem, gzip: true)
+specs.each { |s| s.write(w) }
+w.finish
+gz = mem.to_s
+assert_true gz.to_unsafe[0] == 0x1f_u8 && gz.to_unsafe[1] == 0x8b_u8, "written as gzip"
+assert_true gz.bytesize < round.bytesize // 2, "and smaller (#{gz.bytesize} of #{round.bytesize})"
+assert_str want, expect_lines(gz, "gzip read: every entry as it was written"), "gzip read: every entry as it was written"
+r = TarReader.new(Memory.new(gz))
+r.next_entry
+assert_true r.gzip?, "gzip read through the magic"
+r = TarReader.new(Memory.new(round))
+r.next_entry
+assert_true !r.gzip?, "a plain archive is not gzip"
+# The trailer's CRC-32 is read at the end, past the zero blocks: content
+# that changed is refused there.
+crc_at = gz.bytesize - 8
+refused(patched(gz, crc_at, bytes([gz.to_unsafe[crc_at].to_i32 ^ 1])), "tar: the gzip stream is corrupt", "a gzip CRC-32 that disagrees is refused at the end")
+refused(gz[0, gz.bytesize // 2], "tar: the gzip stream is corrupt", "a gzip stream cut short")
+refused(patched(gz, gz.bytesize // 2, bytes([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])), "tar: ", "a gzip stream with bytes overwritten")
+puts "  #{gz.bytesize} bytes gzip for #{round.bytesize}"
+
+puts "== refused as a value"
+refused("x" * 600, "is not a tar header", "not an archive")
+flipped = patched(round, 0, "j")
+refused(flipped, "tar: the header at offset 0 says checksum", "a corrupted checksum is refused")
+refused(round[0, 300], "ends inside the header at offset 0, 300 of 512 bytes in", "a header cut short")
+refused(round[0, 520], "ends inside \"hello.txt\"'s data, 8 of 13 bytes in", "an entry cut short")
+r = TarReader.new(Memory.new(round[0, 1000]))
+r.next_entry
+second = r.next_entry
+assert_true second.is_a?(TarError) && second.message.includes?("ends inside \"hello.txt\"'s data"), "an entry's padding cut short, read past"
+again = r.next_entry
+assert_true again.is_a?(TarError) && again.message == second.as(TarError).message, "an error answered again"
+refused(raw("././@PaxHeader", 'x', 2000000_i64) + "\u0000" * 4096, "is 2000000 bytes, past the 1048576 this reader holds", "an extended header past 1 MiB")
+refused(pax("12 path=a\n") + raw("a", '0', 0_i64) + END_BLOCKS, "a record that is not one", "a pax record whose length is wrong")
+refused(pax("10 patha\n\n") + raw("a", '0', 0_i64) + END_BLOCKS, "no key=value", "a pax record with no =")
+refused(pax(prec("size", "12x")) + raw("a", '0', 0_i64) + END_BLOCKS, "has a size that is not a number", "a pax size not a number")
+refused(pax(prec("mtime", "1.2.3")) + raw("a", '0', 0_i64) + END_BLOCKS, "an mtime that is not a time", "a pax mtime not a time")
+refused(pax(prec("uid", "-1")) + raw("a", '0', 0_i64) + END_BLOCKS, "has a uid that is not a number", "a pax uid not a number")
+refused(resum(patched(raw("a", '0', 0_i64), 124, "1234567x901\u0000"), 0) + END_BLOCKS, "has a size field that is not a number", "a size field not a number")
+refused(pax(prec("path", "lost")) + END_BLOCKS, "with no entry for it", "a pax header with nothing after it")
+refused(raw("././@LongLink", 'L', 5_i64, magic: "ustar  \u0000") + padded("long\u0000"), "GNU long name", "a GNU long name with nothing after it")
+puts "  every refusal above is a TarError naming what is wrong"
+
+puts "== extract"
+good = work + "/extracted"
+FileUtils.rm_rf(good)
+done = TarReader.new(Memory.new(round)).extract(good)
+raise "ASSERTION FAILED: extract: #{done.message}" if done.is_a?(TarError)
+specs.each do |s|
+  path = good + "/" + s.name
+  case s.kind
+  when "file"
+    assert_str s.body, File.read(path), "extract: #{s.name}"
+    assert_true File.info(path).permissions.to_i & 0o777 == s.mode, "extract: #{s.name} has mode #{s.mode.to_s(8)} (#{File.info(path).permissions.to_i.to_s(8)})"
+    if s.mtime > 0_i64
+      assert_true File.info(path).modification_time == s.mtime, "extract: #{s.name}'s time #{File.info(path).modification_time}"
+    end
+  when "dir"
+    assert_true Dir.exists?(path), "extract: the directory #{s.name}"
+    assert_true File.info(path).permissions.to_i & 0o777 == s.mode, "extract: #{s.name}'s mode"
+  when "symlink"
+    assert_true File.symlink?(path) && File.readlink(path) == s.body, "extract: the symbolic link #{s.name}"
+  when "hardlink"
+    assert_true File.info(path).same_file?(File.info(good + "/" + s.body)), "extract: the hard link #{s.name} is #{s.body}"
+  end
+end
+assert_str "hello, world\n", File.read(good + "/dir/link-to-hello"), "extract: a link read through"
+# Into a directory that has the files already: replaced, not written
+# through a link that stands where a file goes.
+File.delete(good + "/empty")
+File.write(work + "/outside.txt", "outside")
+File.symlink(work + "/outside.txt", good + "/empty")
+done = TarReader.new(Memory.new(round)).extract(good)
+raise "ASSERTION FAILED: extract again: #{done.message}" if done.is_a?(TarError)
+assert_str "outside", File.read(work + "/outside.txt"), "extract again: a link where a file goes is replaced, not written through"
+assert_true !File.symlink?(good + "/empty"), "extract again: the file is a file"
+
+def slip(work : String, archive : String, phrase : String, label : String) : Nil
+  dir = work + "/slip"
+  FileUtils.rm_rf(dir)
+  FileUtils.rm_rf(work + "/evil.txt")
+  got = TarReader.new(Memory.new(archive)).extract(dir)
+  raise "ASSERTION FAILED: #{label}: extracted instead of refusing" unless got.is_a?(TarError)
+  assert_true got.message.includes?(phrase), "#{label}: refused with #{got.message.inspect}, which does not say #{phrase.inspect}"
+  assert_true !File.exists?(work + "/evil.txt"), "#{label}: nothing written outside"
+  puts "  #{got.message}"
+end
+
+evil = padded("evil")
+slip(work, raw("../evil.txt", '0', 4_i64) + evil + END_BLOCKS, "would be extracted outside the directory (tar slip): the name climbs out with ..", "tar slip ../evil.txt")
+slip(work, raw("a/../../evil.txt", '0', 4_i64) + evil + END_BLOCKS, "climbs out with ..", "tar slip a/../../evil.txt")
+slip(work, raw(work + "/evil.txt", '0', 4_i64) + evil + END_BLOCKS, "the name is absolute", "tar slip an absolute name")
+slip(work, pax(prec("path", "../evil.txt")) + raw("safe.txt", '0', 4_i64) + evil + END_BLOCKS, "climbs out with ..", "tar slip through a pax path")
+slip(work, raw("l", '2', 0_i64, linkname: work) + raw("l/evil.txt", '0', 4_i64) + evil + END_BLOCKS, "the target is absolute", "a symbolic link to an absolute path")
+slip(work, raw("sub/l", '2', 0_i64, linkname: "../..") + END_BLOCKS, "the target climbs out with ..", "a symbolic link climbing out")
+slip(work, raw("sub/x", '2', 0_i64, linkname: "..") + raw("w", '2', 0_i64, linkname: "sub/x/..") + END_BLOCKS,
+  "goes down and back up", "a link going down and back up")
+slip(work, raw("sub/", '5', 0_i64) + raw("l", '2', 0_i64, linkname: "sub") + raw("l/evil.txt", '0', 4_i64) + evil + END_BLOCKS,
+  "would be written through the symbolic link \"l\"", "written through a symbolic link")
+slip(work, raw("h", '1', 0_i64, linkname: "../evil.txt") + END_BLOCKS, "the hard link \"h\" names \"../evil.txt\", outside the directory", "a hard link outside")
+slip(work, raw("h", '1', 0_i64, linkname: "missing") + END_BLOCKS, "which is not a regular file extracted before it", "a hard link to nothing")
+slip(work, raw("sub/", '5', 0_i64) + raw("sub/s", '2', 0_i64, linkname: "../outside") + raw("h", '1', 0_i64, linkname: "sub/s") + END_BLOCKS,
+  "which is not a regular file extracted before it", "a hard link to a symbolic link is refused")
+slip(work, raw("dev", '3', 0_i64) + END_BLOCKS, "\"dev\" is a character device, which extract does not make", "a device refused")
+slip(work, raw("./", '5', 0_i64) + raw(".", '0', 0_i64) + END_BLOCKS, "names the directory itself", "a file named .")
+assert_true TarReader.unsafe_name("a\\..\\evil", windows: true).as(String).includes?("separator on Windows"), "Windows: a backslash"
+assert_true TarReader.unsafe_name("C:evil", windows: true).as(String).includes?("a drive"), "Windows: a drive"
+assert_true TarReader.unsafe_name("Foo::Bar.3pm").nil?, "a colon is a name's own elsewhere"
+assert_true TarReader.unsafe_link("a/b/l", "../../x").nil? && TarReader.unsafe_link("l", "./a/./b").nil?, "links that stay inside"
+# A file cut short is not left behind.
+bad = work + "/bad"
+FileUtils.rm_rf(bad)
+cut_short = TarReader.new(Memory.new(round[0, 520])).extract(bad)
+assert_true cut_short.is_a?(TarError) && !File.exists?(bad + "/hello.txt"), "extract: a file cut short is deleted"
+# A directory without write permission still takes its entries.
+ro = work + "/ro"
+FileUtils.rm_rf(ro)
+done = TarReader.new(Memory.new(raw("locked/", '5', 0_i64, mode: 0o555_i64) + raw("locked/in.txt", '0', 2_i64) + padded("in") + END_BLOCKS)).extract(ro)
+raise "ASSERTION FAILED: a read-only directory: #{done.message}" if done.is_a?(TarError)
+assert_true File.read(ro + "/locked/in.txt") == "in" && File.info(ro + "/locked").permissions.to_i & 0o777 == 0o555, "a directory's mode set after its entries"
+File.chmod(ro + "/locked", 0o755)
+
+if !scratch && File.exists?(work + "/index.txt")
+  puts "== what python wrote"
+  File.read(work + "/index.txt").lines.each do |name|
+    next if name.empty?
+    data = File.read(work + "/" + name)
+    stem = name.ends_with?(".gz") ? name[0, name.bytesize - 7] : name[0, name.bytesize - 4]
+    expected = File.read(work + "/" + stem + ".expect")
+    assert_str expected, expect_lines(data, name), "#{name}: entries as Python read them"
+    io = File.open(work + "/" + name)
+    from_file = 0
+    r = TarReader.new(io)
+    while r.next_entry.as(TarEntry | Nil)
+      from_file = from_file + 1
+    end
+    io.close
+    assert_true from_file == count_of(expected, "entry\t"), "#{name} from the file: every entry"
+    out_dir = work + "/x-" + stem
+    FileUtils.rm_rf(out_dir)
+    done = TarReader.new(Memory.new(data)).extract(out_dir)
+    if name.includes?("special")
+      assert_true done.is_a?(TarError) && done.message.includes?("\"dev/null\" is a character device"), "#{name}: a device is refused by name"
+    elsif done.is_a?(TarError)
+      raise "ASSERTION FAILED: #{name}: extract: #{done.message}"
+    end
+    puts "  #{name}: #{from_file} entries"
+  end
+  py = File.read(work + "/py-ustar.tar")
+  refused(patched(py, 3, "#"), "says checksum", "py-ustar.tar with a byte flipped: a corrupted checksum is refused")
+
+  puts "== written for python"
+  File.write(work + "/out-round.tar", round)
+  File.write(work + "/out-round.expect", want)
+  File.write(work + "/out-round.tar.gz", gz)
+  File.write(work + "/out-corrupt.tar", flipped)
+  puts "  out-round.tar, out-round.tar.gz, out-corrupt.tar"
+end
+
+FileUtils.rm_rf(work) if scratch
+puts "ALL CHECKS PASSED"

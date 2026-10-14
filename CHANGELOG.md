@@ -4,6 +4,35 @@
 
 ### Added
 
+- **`std/tar`: tar archives read and written in iyi, `.tar.gz` both
+  ways.** `TarReader.new(io)` reads an archive from any `IyiIO` as a
+  stream, gzip or not by its first bytes: `next_entry` answers each
+  `TarEntry` - name, size, mode, mtime (to the nanosecond from a pax
+  record), uid, gid, uname, gname, link target, type (regular, directory,
+  symbolic and hard link, others named: "FIFO", "GNU sparse file") and
+  every pax record - and `read`/`read_all` its data, which the next
+  `next_entry` reads past when it was not read. POSIX ustar and pax
+  (extended and global headers), GNU's `././@LongLink` names and
+  base-256 numbers and old v7 headers are read. `TarWriter.new(io,
+  gzip: false)` writes ustar headers, a pax header only for a field that
+  does not fit (a name no `/` splits into 155 and 100 bytes, a size past
+  8 GiB, an id, time, user name or non-ASCII name past what ustar holds),
+  and the two zero blocks. `TarReader#extract(dir)` makes directories,
+  files, symbolic and hard links with their permission bits and times,
+  and refuses tar slip: an absolute name or a `..` part, a link whose
+  target is absolute, climbs above *dir* or goes down and back up, a hard
+  link to anything but a file it extracted, and any entry written
+  through a link on disk. What is wrong with an archive is a `TarError`:
+  a checksum that does not add up, a number field that is not one, a
+  header or data cut short, a malformed pax record, an extended header
+  past 1 MiB, a gzip stream whose CRC-32 disagrees - checked at the end,
+  past the zero blocks. Held by `bench/std_tar_exercise.sh`: Python's
+  `tarfile` reads what iyi wrote (ustar, pax long and unicode names, gz)
+  and iyi reads what Python wrote (USTAR, GNU, PAX with a global header,
+  gz), GNU tar 1.35 lists and extracts iyi's archives and iyi reads and
+  extracts GNU tar's gnu, posix, ustar, v7 and gzip archives; an 8 GiB +
+  1 entry written and read back; a corrupted checksum refused by both
+  sides; thirteen tar slips refused; 26 broken copies caught.
 - **`std/idna`: Punycode (RFC 3492) and host names to and from ASCII
   (IDNA2008), and `URI.ascii_host`.** `Punycode.encode` writes any
   string's Punycode and `Punycode.decode` reads it back, or answers a

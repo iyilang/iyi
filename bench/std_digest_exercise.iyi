@@ -13,7 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/digest::{MD5, SHA1, SHA256, CRC32, Adler32}
+import std/digest::{Digest, MD5, SHA1, SHA224, SHA256, SHA384, SHA512, CRC32, Adler32}
 
 puts "== md5"
 assert_str "d41d8cd98f00b204e9800998ecf8427e", MD5.hexdigest(""), "empty"
@@ -25,7 +25,106 @@ assert_str "da39a3ee5e6b4b0d3255bfef95601890afd80709", SHA1.hexdigest(""), "sha1
 assert_str "a9993e364706816aba3e25717850c26c9cd0d89d", SHA1.hexdigest("abc"), "sha1 abc"
 assert_str "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", SHA256.hexdigest(""), "sha256 empty"
 assert_str "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", SHA256.hexdigest("abc"), "sha256 abc"
+assert_str "df81eea14671ce970fb1052e9f5dd6dbda652ed37423ed3624120ec1534784a7", SHA256.hexdigest("fooø"), "sha256 of a string's bytes, not its characters"
 puts "  SHA-1 and SHA-256"
+
+# FIPS 180-4's examples: one block, two blocks of 448 and 896 bits (the
+# length field forced into a block of its own), and a million a's.
+puts "\n== sha-2"
+m448 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+m896 = "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
+million = "a" * 1000000
+assert_str "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7", SHA224.hexdigest("abc"), "sha224 abc"
+assert_str "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f", SHA224.hexdigest(""), "sha224 empty"
+assert_str "75388b16512776cc5dba5da1fd890150b0c6455cb4f58b1952522525", SHA224.hexdigest(m448), "sha224 448 bits"
+assert_str "20794655980c91d8bbb4c1ea97618a4bf03f42581948b2ee4ee7ad67", SHA224.hexdigest(million), "sha224 a million a's"
+assert_str "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", SHA256.hexdigest(m448), "sha256 448 bits"
+assert_str "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0", SHA256.hexdigest(million), "sha256 a million a's"
+assert_str "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7", SHA384.hexdigest("abc"), "sha384 abc"
+assert_str "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b", SHA384.hexdigest(""), "sha384 empty"
+assert_str "09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039", SHA384.hexdigest(m896), "sha384 896 bits"
+assert_str "9d0e1809716474cb086e834e310a4a1ced149e9c00f248527972cec5704c2a5b07b8b3dc38ecc4ebae97ddd87f3d8985", SHA384.hexdigest(million), "sha384 a million a's"
+assert_str "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f", SHA512.hexdigest("abc"), "sha512 abc"
+assert_str "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e", SHA512.hexdigest(""), "sha512 empty"
+assert_str "204a8fc6dda82f0a0ced7beb8e08a41657c16ef468b228a8279be331a703c33596fd15c13b1b07f9aa1d3bea57789ca031ad85c7a71dd70354ec631238ca3445", SHA512.hexdigest(m448), "sha512 448 bits"
+assert_str "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909", SHA512.hexdigest(m896), "sha512 896 bits"
+assert_str "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973ebde0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b", SHA512.hexdigest(million), "sha512 a million a's"
+assert_true SHA512.hash_bytes("abc").size == 64 && SHA384.hash_bytes("abc").size == 48 && SHA224.hash_bytes("abc").size == 28, "digest sizes"
+assert_true SHA512.new.block_size == 128 && SHA384.new.block_size == 128 && SHA224.new.block_size == 64 && MD5.new.block_size == 64, "block sizes"
+puts "  SHA-224, SHA-256, SHA-384 and SHA-512 on FIPS 180-4's messages"
+
+# Every message length from 0 to 300 bytes, which crosses each place the
+# padding can fall for both block sizes: the hex digests of each, joined,
+# hashed once more. Python's hashlib gives these.
+puts "\n== every length"
+
+def chain(algorithm : H.class) : String forall H
+  joined = ""
+  n = 0
+  while n <= 300
+    joined = joined + algorithm.hexdigest("a" * n)
+    n = n + 1
+  end
+  SHA256.hexdigest(joined)
+end
+
+assert_str "27452e6cf089495b517655679d0a5c4285eae74ac242a82ddf3e7056e69a6e50", chain(MD5), "md5 lengths 0..300"
+assert_str "13c163778aff2d852f9b4f1ae660d9e229888173a4dc54b0411459757b6badc4", chain(SHA1), "sha1 lengths 0..300"
+assert_str "c5d85bca0cf36324f09e3359c05a87d92483519c7a2676da490d2b726d8347f1", chain(SHA224), "sha224 lengths 0..300"
+assert_str "1d2ef37f10edc523a59e4fa147289061bd7b8b98a208a636c2b3334c56a5838d", chain(SHA256), "sha256 lengths 0..300"
+assert_str "33a3b0c3f322c61b2e2bb9a6e9feebe78e8839fbf636fb4b2920aa17ecd73428", chain(SHA384), "sha384 lengths 0..300"
+assert_str "1d3846c8feab28aac0bc7c7079d241a7017202a8f3d2b1eb488e81fbb9491ef4", chain(SHA512), "sha512 lengths 0..300"
+puts "  six hashes over every length to 300 bytes"
+
+# 1,280 bytes, 0 to 255 five times, given in pieces of 1, 8, 15, ...
+# bytes: a piece that fills a part-filled block, one that spans blocks,
+# and one that leaves a remainder all happen.
+puts "\n== in pieces"
+bytes = Array(UInt8).new(1280) { |i| (i % 256).to_u8 }
+
+def in_pieces(d : Digest, bytes : Array(UInt8)) : String
+  i = 0
+  step = 1
+  while i < bytes.size
+    stop = i + step > bytes.size ? bytes.size : i + step
+    d.update(bytes.to_unsafe + i.to_i64, stop - i)
+    i = stop
+    step = step + 7
+  end
+  d.hexfinal
+end
+
+assert_str "82829f1f3f2bb0f18b25f278e5bba8bd", in_pieces(MD5.new, bytes), "md5 in pieces"
+assert_str "e37a04cb2353309f5cff4ee036cfb91a5e31cefd", in_pieces(SHA1.new, bytes), "sha1 in pieces"
+assert_str "e2e07ef955598bf865c30a5dca2ac6af0711cf7b28d37f58a81acef3", in_pieces(SHA224.new, bytes), "sha224 in pieces"
+assert_str "d414b085826eb06778483ba35564dc849e643359f69ed9747878ba6e54985bed", in_pieces(SHA256.new, bytes), "sha256 in pieces"
+assert_str "f5943b1fe9e4b5bd3b45c83ef1e748f5e0f095f405a67d11a37016e5e908a4c5033bf084186d1e352db6fdda24dda58c", in_pieces(SHA384.new, bytes), "sha384 in pieces"
+assert_str "c93f55ccf2fa8c82699ff9b58afe3591242b135d908a6d865e17e38adb41c21d1d5359e51273036373d54d20b5659cc87e6e7b381ff027d33f971416cc590f90", in_pieces(SHA512.new, bytes), "sha512 in pieces"
+assert_str SHA256.hexdigest(bytes), SHA256.new.update(bytes).hexfinal, "an Array(UInt8) whole"
+puts "  1,280 bytes in growing pieces, against the whole"
+
+puts "\n== state"
+d = SHA512.new
+d.update("ab")
+copy = d.dup
+d.update("x")
+copy.update("c")
+assert_str SHA512.hexdigest("abc"), copy.hexfinal, "a dup goes on from where it was copied"
+assert_str SHA512.hexdigest("abx"), d.hexfinal, "and the original is untouched by it"
+d.reset
+d.update("abc")
+assert_str SHA512.hexdigest("abc"), d.hexfinal, "reset after final hashes again"
+keyed = SHA256.new
+keyed.update("a" * 100)
+e = SHA256.new
+e.update("unrelated")
+e.copy_from(keyed)
+e.update("b")
+assert_str SHA256.hexdigest("a" * 100 + "b"), e.hexfinal, "copy_from takes the bytes taken and the block in progress"
+into = Array(UInt8).new(40, 7_u8)
+SHA256.new.update("abc").final(into)
+assert_true into[0] == 0xba_u8 && into[31] == 0xad_u8 && into[32] == 7_u8, "final into an array writes the digest and nothing past it"
+puts "  dup, reset, copy_from and final into a buffer"
 
 puts "\n== checksum"
 assert_str "00000000", CRC32.hexdigest(""), "crc empty"

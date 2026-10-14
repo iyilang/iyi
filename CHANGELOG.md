@@ -4,6 +4,24 @@
 
 ### Added
 
+- **`std/digest` has SHA-224, SHA-384 and SHA-512, and every hash takes
+  its data in pieces.** It had MD5, SHA-1 and SHA-256, each a single
+  `hexdigest(String)`. Now the six are one `Digest`:
+  `SHA512.hexdigest(data)` and `hash_bytes(data)` as before, taking a
+  `String` or an `Array(UInt8)`, or `SHA512.new`, then `update`, then
+  `final`/`hexfinal`, with `reset`, `dup`, `final(dst)` writing into an
+  array the caller holds, and `copy_from` taking another digest's state
+  with nothing allocated. A second `final`, an `update` after one, a
+  buffer too short and another algorithm's state are each refused by
+  name. Each digest compresses whole blocks straight from the caller's
+  bytes into a state allocated once, where every block had allocated its
+  own schedule and the whole message was copied padded first. 8 MB hashes
+  2.5 to 4 times faster (`--release`: SHA-256 53 ms to 21, SHA-1 50 to 14,
+  MD5 28 to 10). Held by `bench/std_digest_exercise.sh`: FIPS 180-4's
+  messages, a million a's, every length from 0 to 300 bytes for all six
+  against Python's hashlib, 1,280 bytes fed in uneven pieces, five
+  refusals, and four broken copies of the module, each caught at the
+  check that names it.
 - **A program connects by host name, through iyi's own resolver.**
   `IyiSocket.connect("example.com", 80)` and
   `HTTP.get("http://example.com/")` panicked with "cannot resolve address"

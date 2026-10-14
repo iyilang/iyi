@@ -55,6 +55,13 @@
   draws, exact lengths and even byte counts, measures bias at 3·2^30 and
   3·2^62, and proves a silent source, a dropped rejection and a dropped
   inclusive end are each caught.
+- **`UUID.v7`: the time in milliseconds, then random bits, each UUID
+  sorting after the last.** RFC 9562's database key was missing. The 12
+  bits after the version are a counter that starts at a random 11 bits
+  each millisecond, so UUIDs made in the same millisecond still sort in
+  the order they were made; past 4,095 the stamp moves on early. The
+  exercise checks version, variant, the stamp against the clock and order
+  over 10,000 UUIDs, and proves a frozen counter is caught.
 - **`File.open` takes every mode the other library does - `r`, `w`, `a`,
   `r+`, `w+`, `a+`, each with an optional `b` - and a `perm` for the file
   it creates.** It accepted only `"r"` and `"w"`, so a program could not
@@ -86,6 +93,17 @@
   and `--release`, checks the site and exit status from outside the
   program, and proves every check can fail against 16 patched copies of
   the prelude; `bench/test_verb.sh` holds the verb's side.
+
+### Fixed
+
+- **`UUID.v4` draws its bits from the operating system, so a UUID can no
+  longer be predicted from another.** It was sixteen outputs of a fresh
+  PCG generator: every UUID was a function of 127 bits of generator state
+  that PCG makes no promise to hide, where version 4 promises 122
+  unpredictable bits, and a UUID handed out as a token said enough to
+  guess the next. It takes its bytes from `Random::Secure` now.
+  `bench/std_uuid_exercise.sh` proves v4 stays unique with every
+  `Random.new` seeded alike, and that a PCG-drawn v4 is caught.
 
 ### Changed
 

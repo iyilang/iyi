@@ -4,6 +4,20 @@
 
 ### Added
 
+- **`std/http`: the server closes a connection that takes too long.**
+  `Server.serve(listener, timeout_ms: 60000)`: a request's head must have
+  arrived within the limit, counted from when the server starts waiting
+  for it - a kept connection's idle time included - however its bytes
+  are spread over reads, and no read of a body or write of an answer may
+  wait longer; a connection that does is closed. Before it, a client
+  that sent a byte of its head every few seconds (Slowloris) held a
+  connection and its fiber for as long as it liked, and so did one that
+  connected and sent nothing, or read none of its answer. A minute by
+  default, nginx's `client_header_timeout`; 0 for none. A connection
+  handed over by `Response.upgrade` is the protocol's and waits as it
+  likes. Held by `bench/std_http_exercise.sh`'s `== timeouts`, a head sent
+  a byte every 100 ms against a 400 ms limit among them, and two broken
+  copies of the module caught.
 - **`std/zip`: ZIP archives read and written in iyi, `ZipReader` and
   `ZipWriter`, over std/compress's DEFLATE and std/digest's CRC-32.**
   `ZipReader.open` takes the archive as a `String` or as a file it reads

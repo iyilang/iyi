@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every http section reported"
-for phrase in "== request" "== response" "== messages at the edges" "== over a socket" "== the server, from a raw socket" "== a burst of connections" "== bodies as streams" "== content codings" "== redirects" "== forms" "== kept connections" "== upgrades"; do
+for phrase in "== request" "== response" "== messages at the edges" "== over a socket" "== the server, from a raw socket" "== a burst of connections" "== bodies as streams" "== content codings" "== redirects" "== forms" "== kept connections" "== timeouts" "== upgrades"; do
   if ! grep -q "$phrase" "$WORK/http-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -542,7 +542,7 @@ mutate "a client that reads a head for as long as it comes" 'conn.read_head(Serv
 mutate "a server that never says 100 Continue" '    if head.expects
       socket = conn.socket' '    if false
       socket = conn.socket'
-mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress)' '          accepted = client
+mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms)' '          accepted = client
           g.spawn do
             handle(accepted, handler)
             0
@@ -599,6 +599,10 @@ mutate "a client that keeps a connection the answer closed" 'keep = got.starts_w
 mutate "a client that holds a connection for whatever was left unread" 'client && @keep && !@conn.ended? && @reader.drain(65536_i64)' 'client && @keep && !@conn.ended? && @reader.drain(9223372036854775807_i64)'
 mutate "a GET not sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head ||' 'retry = false && (head ||'
 mutate "a POST sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head || same_name?(method, "GET") || same_name?(method, "PUT") || same_name?(method, "DELETE") || same_name?(method, "OPTIONS") || same_name?(method, "TRACE"))' 'retry = body.is_a?(String)'
+mutate "a head given as long as each read is short" '      conn.deadline_in(timeout_ms)
+' ''
+mutate "an upgraded connection held to the server's timeout" '      conn.unlimited
+' ''
 mutate "a boundary that falls across reads missed" 'safe = @held.bytesize - (@delimiter.bytesize - 1)' 'safe = @held.bytesize'
 
 echo

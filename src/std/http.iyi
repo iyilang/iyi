@@ -117,6 +117,10 @@ class Conn
   @failure : Cancelled | SocketError | Nil
   @listener : IyiSocket?
   @idle : Hash(UInt64, IyiSocket)?
+  # When the head being read must have arrived by (monotonic ns, 0 for no
+  # such time), and how long one read may wait otherwise.
+  @deadline : Int64 = 0_i64
+  @gap : Int32? = nil
 
   ROOM = 16384
 
@@ -182,6 +186,14 @@ class Conn
       return false if listener.closed?
     end
     make_room
+    if @deadline > 0_i64
+      left = (@deadline - __iyi_monotonic_ns) // 1000000_i64
+      if left <= 0_i64
+        @failure = SocketError.timed_out("read a request's head")
+        return false
+      end
+      @socket.read_timeout_ms = left.to_i32
+    end
     if idle = @idle
       idle[@socket.object_id] = @socket
     end
@@ -204,6 +216,34 @@ class Conn
       @failure = got
       false
     end
+  end
+
+  # Each read may wait *gap* ms, and the socket's writes as long (nil: as
+  # long as it takes).
+  def gap=(gap : Int32?) : Int32?
+    @socket.read_timeout_ms = gap
+    @socket.write_timeout_ms = gap
+    @gap = gap
+  end
+
+  # What arrives from here must have arrived within *ms* (0: no limit),
+  # however it is spread over reads: a read's own limit is a pause, and a
+  # client that sends a byte a little inside it holds a connection for as
+  # long as it likes.
+  def deadline_in(ms : Int32) : Nil
+    @deadline = ms > 0 ? __iyi_monotonic_ns + ms.to_i64 * 1000000_i64 : 0_i64
+  end
+
+  def no_deadline : Nil
+    @deadline = 0_i64
+    @socket.read_timeout_ms = @gap
+  end
+
+  # The connection is someone else's protocol's now, which waits as it
+  # likes: no deadline and no limit on a read or a write.
+  def unlimited : Nil
+    @deadline = 0_i64
+    self.gap = nil
   end
 
   # Reads until *count* bytes have arrived; false when they cannot.
@@ -1126,7 +1166,18 @@ pub struct Server
   # *stream_bodies*: the block reads each request's body from `body_io`
   # rather than being handed it whole. *compress*: an answer whose type
   # std/mime calls compressible goes gzip to a client that accepts it.
-  def self.serve(listener : IyiSocket, stream_bodies : Bool = false, compress : Bool = false, &handler : Request -> Response) : Nil
+  #
+  # *timeout_ms*: a request's head must have arrived within it, counted
+  # from when the server starts waiting for one - a kept-alive connection's
+  # idle time included - and no read of a body nor write of an answer may
+  # wait longer; a connection that does is closed. Without it, a client
+  # that sends a byte of its head every few seconds (Slowloris) holds a
+  # connection and its fiber for as long as it likes, and so does one that
+  # reads none of its answer. A minute by default, nginx's
+  # `client_header_timeout`; 0 for none. A connection handed over by
+  # `Response.upgrade` waits as its protocol likes.
+  def self.serve(listener : IyiSocket, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, &handler : Request -> Response) : Nil
+    raise "HTTP: a timeout of #{timeout_ms} ms" if timeout_ms < 0
     idle = {} of UInt64 => IyiSocket
     group do |g|
       pause = 5
@@ -1142,7 +1193,7 @@ pub struct Server
           pause = pause * 2 if pause < 1000
         in IyiSocket
           pause = 5
-          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress)
+          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms)
         end
       end
       idle.each { |_, waiting| waiting.close }
@@ -1163,11 +1214,11 @@ pub struct Server
   # Go's server does. Unread, the panic reached `serve`'s group, which
   # cancelled every other connection and the accept loop and panicked "a
   # task panicked": one request whose block failed took the server down.
-  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, IyiSocket), stream_bodies : Bool, compress : Bool) : Nil
+  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, IyiSocket), stream_bodies : Bool, compress : Bool, timeout_ms : Int32) : Nil
     g.spawn do
       group do |own|
         served = own.spawn do
-          handle(client, handler, listener, idle, stream_bodies, compress)
+          handle(client, handler, listener, idle, stream_bodies, compress, timeout_ms)
           0
         end
         served.value
@@ -1181,11 +1232,14 @@ pub struct Server
   # not HTTP is answered with why and the connection closed, since the
   # bytes after it cannot be trusted to be a request either. Requests that
   # came in one read are read where they lie, one after another.
-  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, IyiSocket)? = nil, stream_bodies : Bool = false, compress : Bool = false) : Nil
+  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, IyiSocket)? = nil, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 0) : Nil
     defer client.close
     conn = Conn.new(client, listener, idle)
+    conn.gap = timeout_ms if timeout_ms > 0
     while true
+      conn.deadline_in(timeout_ms)
       got = conn.read_head(MAX_HEAD, "request", true)
+      conn.no_deadline
       case got
       in Nil
         return
@@ -1263,6 +1317,7 @@ pub struct Server
     if takeover = response.takeover
       return false unless socket.write(format_head(response, false, false, nil, false, true)).is_a?(Int32)
       leftover = conn.leftover
+      conn.unlimited
       conn.held { takeover.call(socket, leftover) }
       return false
     end

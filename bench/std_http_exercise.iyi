@@ -1403,6 +1403,119 @@ end
 assert_true rude_served == 2, "the server answered twice, not #{rude_served} times"
 puts "  ten requests on one connection, a close, 30 KB left unread and kept, 200 KB left and closed, a GET sent again, a POST not"
 
+puts "\n== timeouts"
+
+# `timeout_ms`: a request's head must have arrived within it, from when
+# the server starts waiting - idle time on a kept connection included -
+# however its bytes are spread; a connection handed over by an upgrade is
+# not held to it. Each client here measures whether the server closed on
+# it (the read ends) or kept it (the client's own 3 s read limit runs out).
+def closed_on?(c : IyiSocket) : Bool
+  c.read_timeout_ms = 3000
+  while true
+    got = c.read(4096)
+    return false if got.is_a?(SocketError) && got.timed_out?
+    return true unless got.is_a?(String)
+    return true if got.bytesize == 0
+  end
+  false
+end
+
+slow_l = IyiSocket.listen("127.0.0.1", 0)
+slow_port = slow_l.local_port
+group do |g|
+  g.spawn do
+    Server.serve(slow_l, timeout_ms: 400) do |req|
+      if req.path == "/stop"
+        slow_l.close
+        Response.new(200, "bye")
+      elsif req.header("Upgrade") == "echo"
+        Response.upgrade({"Upgrade" => "echo", "Connection" => "Upgrade"}) do |sock, _|
+          got = sock.read(100)
+          sock.write("echo:" + got) if got.is_a?(String)
+          nil
+        end
+      else
+        Response.new(200, "ok")
+      end
+    end
+    0
+  end
+  g.spawn do
+    silent = IyiSocket.connect("127.0.0.1", slow_port).or_panic
+    started = __iyi_monotonic_ns
+    assert_true closed_on?(silent), "a client that sends nothing is closed"
+    silent_ms = (__iyi_monotonic_ns - started) // 1000000_i64
+    silent.close
+    assert_true silent_ms >= 300 && silent_ms < 2000, "after the timeout: #{silent_ms} ms"
+    # A byte every 100 ms: every pause inside the limit, the head never
+    # done within it.
+    loris = IyiSocket.connect("127.0.0.1", slow_port).or_panic
+    "GET / HTTP/1.1\r\nHost: x\r\nX-Slow: abcdefghijklmn".each_char do |ch|
+      loris.write(ch.to_s)
+      sleep(100)
+    end
+    # Its end, a second and a half after its start: answered only by a
+    # server that waited for it.
+    loris.write("\r\n\r\n")
+    loris.read_timeout_ms = 3000
+    loris_heard = ""
+    while true
+      got = loris.read(4096)
+      break unless got.is_a?(String) && got.bytesize > 0
+      loris_heard = loris_heard + got
+    end
+    loris.close
+    assert_str "", loris_heard, "a head sent a byte every 100 ms is closed, not answered"
+    # In pieces, but inside the limit, it is answered.
+    quick = IyiSocket.connect("127.0.0.1", slow_port).or_panic
+    quick.write("GET /a HTTP/1.1\r\n").or_panic
+    sleep(100)
+    quick.write("Host: x\r\n").or_panic
+    sleep(100)
+    quick.write("\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(quick)).body == "ok", "a head in pieces inside the limit is answered"
+    # And the kept connection, idle past the limit, is closed.
+    sleep(700)
+    assert_true closed_on?(quick), "a kept connection idle past the limit is closed"
+    quick.close
+    # A connection handed over waits as its protocol likes.
+    up = HTTP.upgrade("http://127.0.0.1:#{slow_port}/chat", "echo").or_panic
+    sleep(700)
+    up.socket.write("late").or_panic
+    heard = up.leftover
+    while heard.bytesize < 9
+      got = up.socket.read(100)
+      break unless got.is_a?(String) && got.bytesize > 0
+      heard = heard + got
+    end
+    up.socket.close
+    assert_str "echo:late", heard, "an upgraded connection idle past the limit"
+    HTTP.get("http://127.0.0.1:#{slow_port}/stop").or_panic
+    0
+  end
+end
+# With none, an idle connection is kept.
+none_l = IyiSocket.listen("127.0.0.1", 0)
+group do |g|
+  g.spawn do
+    Server.serve(none_l, timeout_ms: 0) do |req|
+      none_l.close if req.path == "/stop"
+      Response.new(200, "ok")
+    end
+    0
+  end
+  g.spawn do
+    waiting = IyiSocket.connect("127.0.0.1", none_l.local_port).or_panic
+    sleep(700)
+    waiting.write("GET /stop HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    assert_true HTTP.parse_response(read_response(waiting)).body == "ok", "timeout_ms: 0 keeps an idle connection"
+    waiting.close
+    0
+  end
+end
+puts "  nothing sent, a byte every 100 ms, a head in pieces in time, an idle kept connection, an upgrade, no timeout"
+
 puts "\n== upgrades"
 # A 101 hands the connection to the block, with the bytes the client sent
 # after its request; the client is handed it the same way.

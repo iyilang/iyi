@@ -4,6 +4,31 @@
 
 ### Added
 
+- **`std/system`: the machine's name, the CPUs a process may use, the
+  page size.** `System.hostname`, `System.cpu_count` and
+  `System.page_size`, the other library's `System` plus the page size its
+  runtime keeps to itself. `hostname` is the kernel's node name: `uname`'s
+  on Linux, libSystem's `gethostname` on darwin,
+  `GetComputerNameExW(ComputerNameDnsHostname)` on Windows, read every
+  time. `cpu_count` is the CPUs *this process* may run on, not the
+  machine's: the bits of `sched_getaffinity` on Linux, its buffer grown
+  past 1,024 CPUs when the kernel's mask is larger, and the online list in
+  `/sys/devices/system/cpu/online` only when the call is refused;
+  `hw.activecpu` then `hw.logicalcpu` on darwin; the process affinity mask
+  on Windows, and every group's active processors for a process spread
+  across groups. `page_size` is `AT_PAGESZ` from `/proc/self/auxv` on
+  Linux (16 and 64 KiB aarch64 kernels included), `getpagesize` on darwin,
+  `GetSystemInfo`'s `dwPageSize` on Windows, read once. Linux is raw
+  syscalls, as the rest of std is there. A kernel that answers neither
+  affinity nor the online list, or a Linux without the auxiliary vector,
+  panics naming what was refused rather than answering a made-up count.
+  Held by `bench/std_system_exercise.sh`: Python's `socket.gethostname()`,
+  `len(os.sched_getaffinity(0))` and `os.sysconf('SC_PAGE_SIZE')`, then
+  `uname -n`, `nproc` and `getconf PAGESIZE`, all agreeing plain and
+  `--release`; `taskset -c 0` and `taskset -c 0,2` answered 1 and 2;
+  patched copies proving the online fallback is `os.cpu_count()` and a
+  2-byte first mask is grown to fit; both refusals by their sentence; and
+  seven broken copies of the module caught at the check that names each.
 - **`std/websocket`: RFC 6455, both ends, over std/http.** A server's
   block answers `WebSocket.upgrade(req) { |ws| ... }`: a version 13
   handshake is answered 101 with its `Sec-WebSocket-Accept` and the block

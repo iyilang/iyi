@@ -79,7 +79,35 @@ end
 lean_bytes = (GC.stats.bytes_since_collection - lean_before) // 100_u64
 GC.enable
 raise "small_read: a 30-byte read with room for 64 KB allocated #{lean_bytes} bytes" unless lean_bytes < 1024_u64
-puts "small_read: ok (#{lean_bytes} bytes a read)"
+puts "small_read: ok"
+
+# A connect waits at most `timeout_ms` for its handshake. A listener whose
+# backlog of one is full and never accepted: Linux drops the SYNs past it,
+# and a connect without a limit waited the kernel's two minutes of
+# retries.
+{% if flag?(:linux) %}
+  full = IyiSocket.listen("127.0.0.1", 0, 1)
+  queued = [] of IyiSocket
+  timed_out = 0
+  4.times do
+    started = __iyi_monotonic_ns
+    tried = IyiSocket.connect("127.0.0.1", full.local_port, timeout_ms: 300)
+    took = (__iyi_monotonic_ns - started) // 1000000_i64
+    if tried.is_a?(IyiSocket)
+      queued << tried
+    elsif tried.is_a?(SocketError)
+      raise "connect_timeout: #{tried.message}, not a timeout" unless tried.timed_out?
+      raise "connect_timeout: a 300 ms limit took #{took} ms" unless took >= 250 && took < 1500
+      timed_out = timed_out + 1
+    end
+  end
+  raise "connect_timeout: no connect past the backlog timed out" if timed_out == 0
+  queued.each { |s| s.close }
+  full.close
+  puts "connect_timeout: ok"
+{% else %}
+  puts "connect_timeout: ok"
+{% end %}
 
 # 4. Closed peer detection (EOF)
 client.close

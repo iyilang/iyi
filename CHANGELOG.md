@@ -4,6 +4,16 @@
 
 ### Added
 
+- **`std/socket`: `IyiSocket.connect(host, port, timeout_ms)`.** A
+  connect waited as long as the kernel did - on Linux about two minutes
+  of SYN retries for a host that drops them, a full listen backlog among
+  them - and a program had no way to ask for less. Now each address's
+  handshake waits at most *timeout_ms*, and one that runs out is a
+  `SocketError` whose `timed_out?` is true before the next address is
+  tried. The resolver's own TCP query already had a bound; this is the
+  same one for the program's connect. Held by
+  `bench/socket_exercise.sh`: a listener with a backlog of one, full and
+  never accepted, times out the connects past it in 300 ms.
 - **`std/http`: the server closes a connection that takes too long.**
   `Server.serve(listener, timeout_ms: 60000)`: a request's head must have
   arrived within the limit, counted from when the server starts waiting

@@ -363,12 +363,18 @@ pub class IyiSocket
   # `unresolved?` is true and whose sentence names the host. It panicked,
   # "cannot resolve address: \"example.com\"", for every name but
   # `localhost`, so `HTTP.get("http://example.com/")` could not run.
-  def self.connect(host : String, port : Int32) : IyiSocket | Cancelled | SocketError
-    return connect_named(host, port, Resolver.system) if named?(host)
+  #
+  # *timeout_ms* bounds each address's handshake (-1: as long as the
+  # kernel waits, which on Linux is about two minutes of SYN retries for
+  # a host that drops them); one that runs out is a `SocketError` whose
+  # `timed_out?` is true, and the next address is tried.
+  def self.connect(host : String, port : Int32, timeout_ms : Int32 = -1) : IyiSocket | Cancelled | SocketError
+    raise "negative timeout: #{timeout_ms}" if timeout_ms < -1
+    return connect_named(host, port, Resolver.system, timeout_ms) if named?(host)
     addr, family = sockaddr(host, port)
-    got = connect_to(addr, family, endpoint(host, port))
+    got = connect_to(addr, family, endpoint(host, port), timeout_ms)
     if localhost?(host) && got.is_a?(SocketError) && (got.refused? || got.unreachable?)
-      six = connect_to(make_sockaddr_in6(parse_ipv6("::1"), port), AF_INET6, endpoint(host, port))
+      six = connect_to(make_sockaddr_in6(parse_ipv6("::1"), port), AF_INET6, endpoint(host, port), timeout_ms)
       return six unless six.is_a?(SocketError)
     end
     got
@@ -377,9 +383,9 @@ pub class IyiSocket
   # The same, with a host name resolved by *resolver*: name servers, a
   # hosts file and search list of the program's choosing, rather than the
   # machine's. An address and `localhost` are what they are either way.
-  def self.connect(host : String, port : Int32, resolver : Resolver) : IyiSocket | Cancelled | SocketError
-    return connect_named(host, port, resolver) if named?(host)
-    connect(host, port)
+  def self.connect(host : String, port : Int32, resolver : Resolver, timeout_ms : Int32 = -1) : IyiSocket | Cancelled | SocketError
+    return connect_named(host, port, resolver, timeout_ms) if named?(host)
+    connect(host, port, timeout_ms)
   end
 
   # A host that is a name to look up rather than an address to read: a
@@ -391,7 +397,7 @@ pub class IyiSocket
     !localhost?(host) && DnsName.valid?(host)
   end
 
-  private def self.connect_named(host : String, port : Int32, resolver : Resolver) : IyiSocket | Cancelled | SocketError
+  private def self.connect_named(host : String, port : Int32, resolver : Resolver, timeout_ms : Int32) : IyiSocket | Cancelled | SocketError
     # The port is refused before the name is asked about, as it is for an
     # address: a port that is not one is the program's mistake whatever
     # the name turns out to be.
@@ -406,9 +412,9 @@ pub class IyiSocket
     while index < found.size
       address = found[index]
       got = if address.is_a?(IPv4Address)
-              connect_to(make_sockaddr_in(address, port), AF_INET, "#{endpoint(host, port)} (#{address})")
+              connect_to(make_sockaddr_in(address, port), AF_INET, "#{endpoint(host, port)} (#{address})", timeout_ms)
             else
-              connect_to(make_sockaddr_in6(address, port), AF_INET6, "#{endpoint(host, port)} (#{address})")
+              connect_to(make_sockaddr_in6(address, port), AF_INET6, "#{endpoint(host, port)} (#{address})", timeout_ms)
             end
       return got unless got.is_a?(SocketError)
       first = got if first.nil?

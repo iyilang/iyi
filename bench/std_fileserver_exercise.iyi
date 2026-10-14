@@ -1,0 +1,137 @@
+# Exercises `std/fileserver`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_fileserver_exercise.iyi
+
+module bench/std_fileserver_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/fileserver::{FileServer}
+import std/http::{HTTP, Response, Server}
+import std/socket::{IyiSocket}
+import std/file::{File}
+import std/dir::{Dir}
+import std/random::{Random}
+
+# One response off a raw socket: the head, then the body its length
+# promises (the server always writes one), without reading past it.
+def read_response(c : IyiSocket) : String
+  buf = ""
+  while true
+    if split = HTTP.find_headers_end(buf)
+      need = 0
+      HTTP.split_crlf(buf[0, split]).each do |line|
+        colon = line.index(':')
+        next unless colon
+        if HTTP.same_name?(line[0, colon], "Content-Length")
+          need = line[colon + 1, line.bytesize - colon - 1].strip.to_i
+        end
+      end
+      have = buf.bytesize - split - 4
+      return buf if have >= need
+    end
+    chunk = c.read(4096).or_panic
+    raise "the server closed mid-response" if chunk.bytesize == 0
+    buf = buf + chunk
+  end
+end
+
+
+# `serve DIR` prints a port and serves DIR until `/stop`, for the gate
+# script's Python client.
+args = Program.args
+if args.size > 1 && args[0] == "serve"
+  serving = IyiSocket.listen("127.0.0.1", 0)
+  puts serving.local_port
+  root = args[1]
+  Server.serve(serving) do |req|
+    if req.path == "/stop"
+      serving.close
+      Response.new(200, "bye")
+    else
+      FileServer.serve(root, req)
+    end
+  end
+  __iyi_exit(0)
+end
+
+stream_dir = Dir.tempdir + "/iyi_fileserver_exercise_" + Random::Secure.hex(6)
+puts "== files"
+# `Server.static`: types, Last-Modified and ETag, 304s, one byte range,
+# 416, a directory's index, and no way out of the root.
+Dir.mkdir_p(stream_dir + "/www/docs")
+File.write(stream_dir + "/www/index.html", "<h1>home</h1>")
+File.write(stream_dir + "/www/data.json", "{\"a\":1}")
+File.write(stream_dir + "/www/docs/a b.txt", "0123456789abcdefghij")
+File.write(stream_dir + "/secret.txt", "secret")
+files_l = IyiSocket.listen("127.0.0.1", 0)
+files_port = files_l.local_port
+files_base = "http://127.0.0.1:#{files_port}"
+group do |g|
+  g.spawn do
+    Server.serve(files_l) do |req|
+      if req.path == "/stop"
+        files_l.close
+        Response.new(200, "bye")
+      else
+        FileServer.serve(stream_dir + "/www", req)
+      end
+    end
+    0
+  end
+  g.spawn do
+    home = HTTP.get(files_base + "/").or_panic
+    assert_true home.status == 200 && home.body == "<h1>home</h1>" && home.header("Content-Type") == "text/html; charset=utf-8", "/ is the index: #{home.header("Content-Type")}"
+    data = HTTP.get(files_base + "/data.json").or_panic
+    assert_true data.header("Content-Type") == "application/json; charset=utf-8" && data.header("Accept-Ranges") == "bytes", "a type from the extension"
+    spaced = HTTP.get(files_base + "/docs/a%20b.txt").or_panic
+    assert_true spaced.status == 200 && spaced.body == "0123456789abcdefghij" && spaced.header("Content-Type") == "text/plain; charset=utf-8", "a percent-encoded name"
+    stamp = spaced.header("Last-Modified") || ""
+    tag = spaced.header("ETag") || ""
+    assert_true stamp.ends_with?(" GMT") && tag.starts_with?("\""), "Last-Modified and ETag: #{stamp} #{tag}"
+    assert_true HTTP.get(files_base + "/docs/a%20b.txt", {"If-Modified-Since" => stamp}).or_panic.status == 304, "If-Modified-Since answers 304"
+    assert_true HTTP.get(files_base + "/docs/a%20b.txt", {"If-None-Match" => "W/" + tag}).or_panic.status == 304, "If-None-Match, weakly compared, answers 304"
+    assert_true HTTP.get(files_base + "/docs/a%20b.txt", {"If-None-Match" => "\"other\"", "If-Modified-Since" => stamp}).or_panic.status == 200, "If-None-Match goes before If-Modified-Since"
+    ranges = [{"bytes=0-3", "0123", "bytes 0-3/20"}, {"bytes=16-", "ghij", "bytes 16-19/20"}, {"bytes=-3", "hij", "bytes 17-19/20"}, {"bytes=18-99", "ij", "bytes 18-19/20"}]
+    ranges.each do |want|
+      part = HTTP.get(files_base + "/docs/a%20b.txt", {"Range" => want[0]}).or_panic
+      assert_true part.status == 206 && part.body == want[1] && part.header("Content-Range") == want[2], "#{want[0]}: #{part.status} #{part.body.inspect} #{part.header("Content-Range")}"
+    end
+    assert_true HTTP.get(files_base + "/docs/a%20b.txt", {"Range" => "bytes=0-1,4-5"}).or_panic.status == 200, "several ranges are the whole file"
+    assert_true HTTP.get(files_base + "/docs/a%20b.txt", {"Range" => "bytes=0-3", "If-Range" => "\"other\""}).or_panic.status == 200, "a range under another version's If-Range is the whole file"
+    assert_true HTTP.get(files_base + "/docs/a%20b.txt", {"Range" => "bytes=0-3", "If-Range" => tag}).or_panic.status == 206, "and under this one's is the range"
+    past = HTTP.get(files_base + "/docs/a%20b.txt", {"Range" => "bytes=20-"}).or_panic
+    assert_true past.status == 416 && past.header("Content-Range") == "bytes */20", "a range past the end is 416"
+    dir = HTTP.request("GET", files_base + "/docs?x=1", redirects: 0).or_panic
+    assert_true dir.status == 301 && dir.header("Location") == "/docs/?x=1", "a directory without its slash is redirected"
+    assert_true HTTP.get(files_base + "/docs/").or_panic.status == 404, "a directory with no index is 404"
+    posted = HTTP.post(files_base + "/data.json", "x").or_panic
+    assert_true posted.status == 405 && posted.header("Allow") == "GET, HEAD", "a POST is 405"
+    escape = IyiSocket.connect("127.0.0.1", files_port).or_panic
+    ["/../secret.txt", "/docs/../../secret.txt", "/%2e%2e/secret.txt", "/docs/..%2f..%2fsecret.txt", "/x%00.txt"].each do |sneaky|
+      escape.write("GET #{sneaky} HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+      escaped = HTTP.parse_response(read_response(escape))
+      assert_true escaped.status == 404 && !escaped.body.includes?("secret"), "#{sneaky} stays inside the root: #{escaped.status}"
+    end
+    escape.write("HEAD /data.json HTTP/1.1\r\nHost: x\r\n\r\n").or_panic
+    headed = escape.read(4096).or_panic
+    assert_true headed.includes?("Content-Length: 7\r\n") && headed.ends_with?("\r\n\r\n"), "a HEAD names the length and sends nothing"
+    escape.close
+    HTTP.get(files_base + "/stop").or_panic
+    0
+  end
+end
+puts "  index, types, a percent-encoded name, 304 both ways, four ranges, several, If-Range, 416, directories, 405, five ways out of the root, HEAD"
+
+# The files the section wrote.
+[stream_dir + "/secret.txt", stream_dir + "/www/index.html", stream_dir + "/www/data.json", stream_dir + "/www/docs/a b.txt"].each { |path| File.delete(path) }
+[stream_dir + "/www/docs", stream_dir + "/www", stream_dir].each { |path| Dir.delete(path) }
+
+puts "\nALL CHECKS PASSED"

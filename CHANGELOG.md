@@ -4,6 +4,17 @@
 
 ### Added
 
+- **`std/fileserver`: a directory served over std/http.**
+  `FileServer.serve(root, request)` answers GET and HEAD from the files
+  under *root* (405 otherwise): types from std/mime, `Last-Modified` and
+  an `ETag`, 304 for `If-None-Match` or, without it, `If-Modified-Since`,
+  one byte range as 206 (`If-Range` honoured, a suffix range included,
+  past the end 416), a directory's index and a 301 to its slash, and a
+  404 for `..`, an encoded `..`, a NUL or a backslash. The file goes out
+  as it is read, from where the range starts. Held by
+  `bench/std_fileserver_exercise.sh`: Python's `http.client` reads a 300
+  KB file whole and in three ranges across the server's pieces, both
+  304s, a HEAD and a redirect, and eight broken copies are caught.
 - **`std/cookie`: `Cookie` and `CookieJar` (RFC 6265).** `Cookie.parse`
   reads a `Set-Cookie` line as §5.2 has a user agent read one - any case,
   unknown attributes passed over, `Expires` in RFC 9110's three date

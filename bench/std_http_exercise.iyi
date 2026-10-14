@@ -13,7 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/http::{HTTP, Response, Request, Server, HTTPError, MultipartBuilder, Part}
+import std/http::{HTTP, HTTPClient, Response, Request, Server, HTTPError, MultipartBuilder, Part}
 import std/socket::{IyiSocket, SocketError}
 import std/gc::{GC}
 import std/compress::{Gzip, Zlib, Deflate}
@@ -1314,6 +1314,94 @@ trap = MultipartBuilder.new.field("a", "x").field("b", "\r\n--" + held.boundary 
 assert_true trap.boundary != held.boundary && !trap.finish.includes?("\r\n--" + trap.boundary + "\r\n\r\n"), "a part that holds the boundary the parts would make moves it"
 assert_str "refused: HTTP: a multipart part's data holds its boundary", answer { auto.field("late", "\r\n--" + auto.boundary).finish }, "a part added after the boundary is chosen may not hold it"
 puts "  urlencoded, three parts, seven-byte pieces, preamble and padding, a part cut short, no boundary, refusals"
+
+puts "\n== kept connections"
+# An `HTTPClient` sends its requests to a server over the connection the
+# last answer left open, and opens another only when it must: the answer
+# said `close`, or left more than 64 KiB unread, or the server closed the
+# connection while it waited - a GET then goes again on a new one, a POST
+# does not.
+kept_l = IyiSocket.listen("127.0.0.1", 0)
+kept_base = "http://127.0.0.1:#{kept_l.local_port}"
+group do |g|
+  g.spawn do
+    Server.serve(kept_l, compress: true) do |req|
+      if req.path == "/stop"
+        kept_l.close
+        Response.new(200, "bye")
+      elsif req.path == "/close"
+        Response.new(200, "closing", {"Connection" => "close"})
+      elsif req.path == "/mid"
+        Response.new(200, "m" * 30000, {"Content-Type" => "image/png"})
+      elsif req.path == "/big"
+        Response.new(200, "b" * 200000, {"Content-Type" => "image/png"})
+      elsif req.path == "/text"
+        Response.new(200, "t" * 200000, {"Content-Type" => "text/plain"})
+      else
+        Response.new(200, req.method + " " + req.path + " " + req.body)
+      end
+    end
+    0
+  end
+  g.spawn do
+    kc = HTTPClient.new
+    10.times { |i| assert_str "GET /n#{i} ", kc.get(kept_base + "/n#{i}").or_panic.body, "request #{i} on a kept connection" }
+    assert_true kc.connections_made == 1 && kc.connections_reused == 9, "ten requests, one connection: #{kc.connections_made} made, #{kc.connections_reused} reused"
+    assert_str "POST /p data", kc.post(kept_base + "/p", "data").or_panic.body, "a POST on it"
+    assert_str "closing", kc.get(kept_base + "/close").or_panic.body, "an answer that says close"
+    assert_str "GET /after ", kc.get(kept_base + "/after").or_panic.body, "the request after it"
+    assert_true kc.connections_made == 2 && kc.connections_reused == 11, "goes on a new connection, the closed one not tried: #{kc.connections_made} made, #{kc.connections_reused} reused"
+    zipped = kc.get(kept_base + "/text").or_panic
+    assert_true zipped.decoded? && zipped.body.bytesize == 200000, "a gzip answer on a kept connection"
+    kc.open("GET", kept_base + "/mid") { |r| r.body_io.read(10).or_panic.bytesize }.or_panic
+    kc.get(kept_base + "/x").or_panic
+    assert_true kc.connections_made == 2, "30 KB left unread is read past and the connection kept: #{kc.connections_made} made"
+    kc.open("GET", kept_base + "/big") { |r| r.body_io.read(10).or_panic.bytesize }.or_panic
+    assert_str "GET /y ", kc.get(kept_base + "/y").or_panic.body, "the request after 200 KB left unread"
+    assert_true kc.connections_made == 3, "goes on a new connection, the old one closed rather than read: #{kc.connections_made} made"
+    kc.get(kept_base + "/stop")
+    kc.close
+    0
+  end
+end
+# A server that closes each connection a moment after its answer, without
+# saying so: what a kept-alive server's idle timeout does.
+rude = IyiSocket.listen("127.0.0.1", 0)
+rude_base = "http://127.0.0.1:#{rude.local_port}"
+rude_served = 0
+group do |g|
+  g.spawn do
+    while true
+      peer = rude.accept
+      break unless peer.is_a?(IyiSocket)
+      got = ""
+      while !got.includes?("\r\n\r\n")
+        piece = peer.read(4096)
+        break unless piece.is_a?(String) && piece.bytesize > 0
+        got = got + piece
+      end
+      rude_served = rude_served + 1
+      peer.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+      sleep(50)
+      peer.close
+    end
+    0
+  end
+  g.spawn do
+    rc = HTTPClient.new
+    assert_str "ok", rc.get(rude_base + "/a").or_panic.body, "the first answer"
+    sleep(150)
+    assert_str "ok", rc.get(rude_base + "/b").or_panic.body, "a GET whose kept connection the server closed goes again on a new one"
+    sleep(150)
+    refused = rc.post(rude_base + "/c", "x")
+    assert_true !refused.is_a?(Response), "a POST whose kept connection the server closed is not sent again"
+    rc.close
+    rude.close
+    0
+  end
+end
+assert_true rude_served == 2, "the server answered twice, not #{rude_served} times"
+puts "  ten requests on one connection, a close, 30 KB left unread and kept, 200 KB left and closed, a GET sent again, a POST not"
 
 puts "\n== upgrades"
 # A 101 hands the connection to the block, with the bytes the client sent

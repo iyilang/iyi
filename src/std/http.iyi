@@ -15,9 +15,12 @@
 # cookies a caller wrote are not carried to another host. A body coded
 # `gzip` or `deflate` is decoded as it arrives, unless the caller asked
 # for a coding itself; a `jar:` (std/cookie's `CookieJar`) keeps what
-# `Set-Cookie` sets and sends it back. Response headers are read by name without regard to
-# case, a field on several lines is one field with its values joined by
-# ", " (`header_values` keeps the lines apart, as a `Set-Cookie` must be
+# `Set-Cookie` sets and sends it back. Each `HTTP` request is a
+# connection of its own; an `HTTPClient` keeps the connections its
+# answers leave open and sends the next request to that server over one.
+# Response headers are read by name without regard to case, a field on
+# several lines is one field with its values joined by ", "
+# (`header_values` keeps the lines apart, as a `Set-Cookie` must be
 # read), and interim 1xx answers are read past.
 #
 # **The server.** `Server.serve(listener) { |request| Response }`: a
@@ -59,8 +62,7 @@
 # that speaks HTTP as of one that opens a socket.
 #
 # Not here: TLS, HTTP/2 (std/hpack and std/capsule are its pieces, not a
-# server), a pool of kept-alive client connections - each request is one
-# connection - and proxies.
+# server), pipelining requests on a kept connection, and proxies.
 
 module std/http
 
@@ -381,7 +383,13 @@ pub class BodyReader
     BodyReader.new(nil, TEXT, text.bytesize.to_i64, 9223372036854775807_i64, text)
   end
 
-  # Whether every byte of the body has been read.
+  # Whether the body ends where the connection does: nothing can follow
+  # it on the connection.
+  def to_close? : Bool
+    @kind == CLOSE
+  end
+
+  # Whether every byte of the body has been read, the framing's end too.
   def finished? : Bool
     return false unless @finished && @coding.nil?
     if inflater = @inflater
@@ -414,7 +422,19 @@ pub class BodyReader
     end
     if inflater = @inflater
       got = inflater.read(max)
-      return got if got.is_a?(String)
+      if got.is_a?(String)
+        return got if got.bytesize > 0
+        # The coded stream has ended; the framing has not until its last
+        # chunk or byte is read, and a kept connection's next answer
+        # starts after it. What follows the stream inside the body is
+        # passed over, as zlib's own reader does with what follows a
+        # gzip member it cannot read.
+        until @finished
+          rest = raw(65536)
+          return rest unless rest.is_a?(String)
+        end
+        return ""
+      end
       if fault = @fault
         return fault
       end
@@ -1560,12 +1580,141 @@ end
 class Exchange
   getter conn : Conn
   getter response : Response
+  # The client the connection goes back to, and whether it may: the
+  # answer was HTTP/1.1, did not say `close`, and is framed by a length
+  # or chunks rather than by the connection's end.
+  @client : HTTPClient?
+  @key : String
+  @keep : Bool
 
-  def initialize(@conn : Conn, @response : Response)
+  # The body as it came off the connection: the response's own `body_io`
+  # is a string once `load` has read it.
+  @reader : BodyReader
+
+  def initialize(@conn : Conn, @response : Response, @client : HTTPClient? = nil, @key : String = "", @keep : Bool = false)
+    @reader = @response.body_io
   end
 
+  # The connection closed, or handed back to its client once the body has
+  # been read to its end - what the caller left of it read past, up to
+  # 64 KiB, and the connection closed past that, as Go's client does.
   def close : Nil
-    @conn.close
+    client = @client
+    if client && @keep && !@conn.ended? && @reader.drain(65536_i64) && @conn.available == 0
+      client.give_back(@key, @conn)
+    else
+      @conn.close
+    end
+  end
+end
+
+# Requests that keep their connections: an `HTTPClient` holds the connections
+# its answers left open, by host and port, and the next request to that
+# server goes over one of them instead of a new one - the TCP handshake,
+# and the slow start after it, paid once rather than per request. Its
+# methods are `HTTP`'s, redirects, cookies and decoding included:
+#
+# ```
+# client = HTTPClient.new
+# client.get("http://127.0.0.1:8080/a")
+# client.get("http://127.0.0.1:8080/b") # the same connection
+# client.close
+# ```
+#
+# A connection goes back once its answer has been read to the end (inside
+# `open`, up to 64 KiB left unread is read past for it) and the answer
+# allows it; at most *idle* wait per server, and the rest close. A server
+# may close an idle connection whenever it likes (RFC 9112 §9.3.1), so a
+# request whose kept connection turns out closed - the write fails, or it
+# ends before a byte of an answer - is sent again once on a new one, when
+# its method is idempotent (RFC 9110 §9.2.2) and its body a string;
+# anything else answers the failure. One task at a time per request: two
+# tasks sending at once take two connections, and a client is not for
+# sharing across threads.
+pub class HTTPClient
+  @idle : Hash(String, Array(Conn))
+  @limit : Int32
+  @made : Int32
+  @reused : Int32
+
+  def initialize(idle : Int32 = 4)
+    raise "HTTP: a client keeps 0 or more idle connections, not #{idle}" if idle < 0
+    @idle = {} of String => Array(Conn)
+    @limit = idle
+    @made = 0
+    @reused = 0
+  end
+
+  # Connections this client has opened, and requests sent over one it
+  # kept: what a program reads to see that its connections are kept.
+  def connections_made : Int32
+    @made
+  end
+
+  def connections_reused : Int32
+    @reused
+  end
+
+  def request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true) : Response | Cancelled | SocketError | HTTPError
+    HTTP.open(method, url, headers, body, redirects, jar, decompress, self) { |response| response.load }
+  end
+
+  def open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
+    HTTP.open(method, url, headers, body, redirects, jar, decompress, self) { |response| block.call(response) }
+  end
+
+  def get(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
+    request("GET", url, headers)
+  end
+
+  def head(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
+    request("HEAD", url, headers)
+  end
+
+  def post(url : String, body : String | IyiIO = "", headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
+    request("POST", url, headers, body)
+  end
+
+  def put(url : String, body : String | IyiIO = "", headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
+    request("PUT", url, headers, body)
+  end
+
+  def delete(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
+    request("DELETE", url, headers)
+  end
+
+  # Every idle connection closed. The client may be used after; it opens
+  # new ones.
+  def close : Nil
+    @idle.each do |_, conns|
+      conns.each { |conn| conn.close }
+    end
+    @idle = {} of String => Array(Conn)
+  end
+
+  # A kept connection to *key*, nil when none waits.
+  protected def take(key : String) : Conn?
+    if waiting = @idle[key]?
+      if conn = waiting.pop?
+        @reused = @reused + 1
+        return conn
+      end
+    end
+    nil
+  end
+
+  protected def made : Nil
+    @made = @made + 1
+  end
+
+  protected def give_back(key : String, conn : Conn) : Nil
+    waiting = @idle[key]? || [] of Conn
+    if waiting.size >= @limit
+      conn.close
+      return
+    end
+    waiting << conn
+    @idle[key] = waiting
   end
 end
 
@@ -1731,14 +1880,14 @@ pub struct HTTP
   # `Cookie` written by the caller are not sent to another host. One more
   # than *redirects* is an `HTTPError`; with 0 the first answer is the
   # block's.
-  def self.open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
+  def self.open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, client : HTTPClient? = nil, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
     current = url
     verb = method
     sent = headers
     payload = body
     hops = 0
     while true
-      exchange = exchange(verb, current, sent, payload, jar, decompress, nil)
+      exchange = exchange(verb, current, sent, payload, jar, decompress, nil, client)
       return exchange unless exchange.is_a?(Exchange)
       response = exchange.response
       location = response.header("Location")
@@ -1770,7 +1919,7 @@ pub struct HTTP
   def self.upgrade(url : String, protocol : String, headers : Hash(String, String) = {} of String => String) : Upgraded | Cancelled | SocketError | HTTPError
     sent = headers.dup
     sent["Upgrade"] = protocol
-    exchange = exchange("GET", url, sent, "", nil, false, "Upgrade")
+    exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil)
     return exchange unless exchange.is_a?(Exchange)
     response = exchange.response
     if response.status != 101
@@ -1817,10 +1966,11 @@ pub struct HTTP
     kept
   end
 
-  # Connect, write the request, read the answer's head past any 1xx, and
-  # frame its body; the body itself is still to come. *connection* is
-  # `Upgrade` for `HTTP.upgrade`, `close` otherwise.
-  private def self.exchange(method : String, url : String, headers : Hash(String, String), body : String | IyiIO, jar : CookieStore?, decompress : Bool, upgrade : String?) : Exchange | Cancelled | SocketError | HTTPError
+  # Connect - or take a connection *client* kept - write the request, read
+  # the answer's head past any 1xx, and frame its body; the body itself is
+  # still to come. *upgrade* is `Upgrade` for `HTTP.upgrade`; otherwise
+  # the request says `close`, or `keep-alive` for a client.
+  private def self.exchange(method : String, url : String, headers : Hash(String, String), body : String | IyiIO, jar : CookieStore?, decompress : Bool, upgrade : String?, client : HTTPClient?) : Exchange | Cancelled | SocketError | HTTPError
     uri = URI.parse?(url)
     return HTTPError.new("not a URL: #{url.inspect}") unless uri
     scheme = uri.scheme
@@ -1857,47 +2007,75 @@ pub struct HTTP
       end
     end
     head = same_name?(method, "HEAD")
-    connection = upgrade || "close"
-    socket = IyiSocket.connect(host, port)!
+    key = host.downcase + ":" + port.to_s
+    connection = upgrade || (client ? "keep-alive" : "close")
+    # Sent again once, on a new connection, when a kept one turns out to
+    # have been closed by the server before it answered.
+    retry = body.is_a?(String) && (head || same_name?(method, "GET") || same_name?(method, "PUT") || same_name?(method, "DELETE") || same_name?(method, "OPTIONS") || same_name?(method, "TRACE"))
+    while true
+      conn = nil.as(Conn?)
+      if keeping = client
+        conn = keeping.take(key) unless upgrade
+      end
+      reused = !conn.nil?
+      unless conn
+        socket = IyiSocket.connect(host, port)!
+        client.made if client
+        conn = Conn.new(socket)
+      end
+      failed = send_request(conn.socket, method, path, host_line, sent, body, connection)
+      if failed
+        conn.close
+        next if reused && retry
+        return failed
+      end
+      answer = read_answer(conn, url, method, head, asked, jar, client, key)
+      if answer.is_a?(Nil)
+        conn.close
+        next if reused && retry
+        if fault = conn.failure
+          return fault
+        end
+        return HTTPError.new("the connection ended before an answer")
+      end
+      conn.close unless answer.is_a?(Exchange)
+      return answer
+    end
+  end
+
+  # The request on *socket*: its head, and a string body with it or an
+  # `IyiIO` body chunked after it. Nil once written, or why not.
+  private def self.send_request(socket : IyiSocket, method : String, path : String, host_line : String, sent : Hash(String, String), body : String | IyiIO, connection : String) : Cancelled | SocketError | Nil
     case body
     in String
       length = body.bytesize > 0 || same_name?(method, "POST") || same_name?(method, "PUT") || same_name?(method, "PATCH") ? body.bytesize.to_i64 : nil
       text = request_head(method, path, host_line, sent, length, false, connection)
       wrote = socket.write(body.bytesize > 0 && body.bytesize < 65536 ? text + body : text)
-      unless wrote.is_a?(Int32)
-        socket.close
-        return wrote
-      end
+      return wrote unless wrote.is_a?(Int32)
       if body.bytesize >= 65536
         wrote = socket.write(body)
-        unless wrote.is_a?(Int32)
-          socket.close
-          return wrote
-        end
+        return wrote unless wrote.is_a?(Int32)
       end
     in IyiIO
       wrote = socket.write(request_head(method, path, host_line, sent, nil, true, connection))
-      unless wrote.is_a?(Int32)
-        socket.close
-        return wrote
-      end
+      return wrote unless wrote.is_a?(Int32)
       writer = BodyWriter.new(socket, true)
       while true
         piece = body.read_bytes(65536)
         break if piece.bytesize == 0
         failed = writer.write(piece)
-        unless failed.nil?
-          socket.close
-          return failed
-        end
+        return failed unless failed.nil?
       end
       finished = writer.finish
-      unless finished.nil?
-        socket.close
-        return finished
-      end
+      return finished unless finished.nil?
     end
-    conn = Conn.new(socket)
+    nil
+  end
+
+  # The answer on *conn*: its head read past any 1xx and its body framed.
+  # Nil when the connection ends before a byte of one, which on a kept
+  # connection is the server having closed it while it waited.
+  private def self.read_answer(conn : Conn, url : String, method : String, head : Bool, asked : Bool, jar : CookieStore?, client : HTTPClient?, key : String) : Exchange | Cancelled | SocketError | HTTPError | Nil
     while true
       # As far as the server's limit on a request's head, and no further: a
       # head that did not end was read for as long as it came, 256 MB of one
@@ -1905,40 +2083,35 @@ pub struct HTTP
       got = conn.read_head(Server::MAX_HEAD, "response")
       case got
       in Nil
-        conn.close
+        return HTTPError.new("no header terminator") if conn.available > 0
         if fault = conn.failure
-          return fault
+          return fault unless fault.is_a?(SocketError)
         end
-        return HTTPError.new(conn.available > 0 ? "no header terminator" : "the connection ended before an answer")
+        return nil
       in HTTPError
-        conn.close
         return got
       in String
         parsed = parse_response_head(got)
-        if parsed.is_a?(HTTPError)
-          conn.close
-          return parsed
-        end
+        return parsed if parsed.is_a?(HTTPError)
         status, reason, fields, apart = parsed
         next if status >= 100 && status < 200 && status != 101
         reader = body_framing(conn, status, fields, head)
-        if reader.is_a?(HTTPError)
-          conn.close
-          return reader
-        end
+        return reader if reader.is_a?(HTTPError)
         decoded = false
         if asked && !reader.finished?
           decoded = undo_coding(reader, fields)
-          if decoded.is_a?(HTTPError)
-            conn.close
-            return decoded
-          end
+          return decoded if decoded.is_a?(HTTPError)
         end
         response = Response.new(status, reason, fields, apart, reader, url, decoded)
         if keeper = jar
           keeper.update(url, response)
         end
-        return Exchange.new(conn, response)
+        keep = false
+        if client
+          said = header_in(fields, "Connection")
+          keep = got.starts_with?("HTTP/1.1 ") && !reader.to_close? && status != 101 && (said.nil? || !has_token?(said, "close"))
+        end
+        return Exchange.new(conn, response, client, key, keep)
       end
     end
   end

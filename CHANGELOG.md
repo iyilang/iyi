@@ -4,6 +4,26 @@
 
 ### Added
 
+- **`std/http`: `HTTPClient` keeps its connections.** Each `HTTP`
+  request opened a connection of its own and closed it, so a program
+  talking to one server paid a TCP handshake per request. An
+  `HTTPClient` has `HTTP`'s methods - redirects, cookies and decoding
+  included - and keeps the connection an answer leaves open, by host and
+  port, at most four waiting per server: ten requests go over one
+  connection, `connections_made` and `connections_reused` say so. A
+  connection goes back once its answer has been read to the end, what
+  an `open` block left unread read past up to 64 KiB and the connection
+  closed past that, as Go's client does; an HTTP/1.0 answer, one that
+  says `close` and one the connection's end frames are not kept. A
+  server may close an idle connection whenever it likes (RFC 9112
+  §9.3.1), so a request whose kept connection turns out closed is sent
+  again once on a new one when its method is idempotent and its body a
+  string (RFC 9110 §9.2.2), and a POST answers the failure. A gzip body
+  now reads the end of its framing after the end of its stream, where the
+  last chunk was left on the connection for the next answer to start
+  with. Held by `bench/std_http_exercise.sh`'s `== kept connections`, a
+  server that closes each connection a moment after its answer among
+  them, and five broken copies of the module caught.
 - **`std/password`: `Bcrypt` and `Scrypt` hash passwords.** A program that
   stores passwords had PBKDF2 and no format to keep it in. They are a
   module apart from std/crypto because bcrypt's salt comes from

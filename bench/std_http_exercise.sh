@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every http section reported"
-for phrase in "== request" "== response" "== messages at the edges" "== over a socket" "== the server, from a raw socket" "== a burst of connections" "== bodies as streams" "== content codings" "== redirects" "== forms" "== upgrades"; do
+for phrase in "== request" "== response" "== messages at the edges" "== over a socket" "== the server, from a raw socket" "== a burst of connections" "== bodies as streams" "== content codings" "== redirects" "== forms" "== kept connections" "== upgrades"; do
   if ! grep -q "$phrase" "$WORK/http-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -594,6 +594,11 @@ mutate "a redirect that never changes the method" 'unless keeps || (status != 30
 mutate "credentials carried to another host" 'sent = without(sent, ["Authorization", "Proxy-Authorization", "Cookie"]) unless same_authority?(current, target)' ''
 mutate "a part that does not end at its boundary" '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]
           @part_done = true' '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]'
+mutate "a client that never keeps a connection" 'conn = keeping.take(key) unless upgrade' ''
+mutate "a client that keeps a connection the answer closed" 'keep = got.starts_with?("HTTP/1.1 ") && !reader.to_close? && status != 101 && (said.nil? || !has_token?(said, "close"))' 'keep = true'
+mutate "a client that holds a connection for whatever was left unread" 'client && @keep && !@conn.ended? && @reader.drain(65536_i64)' 'client && @keep && !@conn.ended? && @reader.drain(9223372036854775807_i64)'
+mutate "a GET not sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head ||' 'retry = false && (head ||'
+mutate "a POST sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head || same_name?(method, "GET") || same_name?(method, "PUT") || same_name?(method, "DELETE") || same_name?(method, "OPTIONS") || same_name?(method, "TRACE"))' 'retry = body.is_a?(String)'
 mutate "a boundary that falls across reads missed" 'safe = @held.bytesize - (@delimiter.bytesize - 1)' 'safe = @held.bytesize'
 
 echo

@@ -22,6 +22,25 @@
   where every table block takes a key and a value. Held by
   `bench/collections_exercise.sh`, which drives every refusal and proves
   every new section can fail.
+- **`std/time` formats and parses with the other library's strftime
+  directives, and reads every HTTP date RFC 9110 names.** The module could
+  only write and read RFC 3339. `Time::Format`, `Time#to_s(format,
+  offset)`, `Time.parse`/`parse_utc` and the named formats `HTTP_DATE`,
+  `RFC_2822`, `RFC_3339` and `ISO_8601_DATE`/`_DATE_TIME`/`_TIME` now
+  write an instant at a fixed offset and read it back. They take every
+  directive the other library does, plus `-`, `_`, `0` and `^` on every
+  number or name. `HTTP_DATE` reads the IMF-fixdate, RFC 850 (two-digit
+  years by the 50-year rule) and asctime. Bad text comes back as a
+  `TimeParseError` that names the byte and what was wrong, never a
+  panic: a month name that is not one, a day the month lacks, a field out
+  of range, an unknown zone and trailing text. `calendar_week`,
+  `week_date` and `shift(months:)` (clamped to the month's last day) come
+  with it. `parse_rfc3339` reads through the same parser and keeps its
+  sentences. Held by `bench/std_time_exercise.sh`: every directive
+  against fixed instants, 75,200 round trips, the three HTTP forms, 54
+  refusals, plain and `--release`, and eight broken copies of the module
+  each caught. There is still no `Time::Location`: an offset is seconds
+  east of UTC.
 - **`File.open` takes every mode the other library does - `r`, `w`, `a`,
   `r+`, `w+`, `a+`, each with an optional `b` - and a `perm` for the file
   it creates.** It accepted only `"r"` and `"w"`, so a program could not

@@ -14,8 +14,16 @@
 #   * ISO 8601 / RFC 3339 serialization (fraction digits 0, 3, 6, 9) and parsing
 #     with timezone offset conversions.
 #   * Comparable trait implementation via `Std::Traits::Comparable`.
+#   * `Time::Format`: every directive and flag written against fixed instants,
+#     round trips through patterns and every named format (HTTP date, RFC
+#     2822, RFC 3339, ISO 8601), RFC 9110's three HTTP date forms, bad text
+#     refused as a `TimeParseError` rather than a panic, ISO weeks and
+#     `shift(months:)`; the same program optimised (`--release`).
 #   * Negative proofs: the exercise script breaks the leap-year rule, roundtrip
-#     arithmetic, and RFC 3339 offset handling, asserting each is caught.
+#     arithmetic, RFC 3339 offset handling, and eight parts of `Time::Format`
+#     (month names, both offset directions, trailing text, RFC 9110's year
+#     rule, the month's last day, ISO weeks, the 12-hour clock), asserting
+#     each is caught.
 #   * Dependency floor: audits symbols and libraries to prove zero new dependencies.
 #
 # Needs `make` for bin/iyi, plus `nm`, and `otool` on Darwin or `readelf` on Linux.
@@ -120,14 +128,25 @@ echo "== the std/time exercise"
 build_and_run "std_time" exercise-time "$REPO/bench/std_time_exercise.iyi"
 
 echo
+echo "== the same program with optimisation on (--release)"
+build_and_run "release" exercise-time-release "$REPO/bench/std_time_exercise.iyi" --release >/dev/null
+if ! grep -q "ALL CHECKS PASSED" "$WORK/exercise-time-release.out" 2>/dev/null; then
+  echo "  release: missing pass sentinel"
+  sed -n '1,15p' "$WORK/exercise-time-release.out" 2>/dev/null | sed 's/^/    /'
+  status=1
+else
+  echo "  every check passed with --release too"
+fi
+
+echo
 echo "== every time check reported"
-for check in "known-value table" "leap-year rules" "scattered roundtrip" "platform clocks" "span construction" "RFC 3339" "time comparison" "hash keys" "ALL CHECKS PASSED"; do
+for check in "known-value table" "leap-year rules" "scattered roundtrip" "platform clocks" "span construction" "RFC 3339" "time comparison" "hash keys" "strftime directives" "format round-trips" "RFC 9110 date forms" "parse refusals" "ISO weeks and month arithmetic" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-time.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339, Comparable and hash keys all reported"
+[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339, Comparable, hash keys, directives, round trips, HTTP dates, refusals, ISO weeks and month arithmetic all reported"
 
 # ---------------------------------------------------------------------------
 # Negative failure proofs
@@ -204,6 +223,53 @@ with open('$WORK/patched_tz/std/time.iyi', 'w') as f:
     echo "  the broken RFC 3339 timezone offset was caught (exit $tz_exit)"
   fi
 fi
+
+# Each of these breaks one part of `Time::Format` in a copy of the module
+# and proves the exercise fails against it. The copy is compared with the
+# original first: a replacement that matches nothing would leave the module
+# whole, and the proof would pass while proving nothing.
+format_break_caught() { # format_break_caught <label> <name> <old> <new>
+  local label="$1" name="$2"
+  if [ -z "$PY" ]; then
+    echo "  $label: skipped, no working python3 to make the broken copy"
+    return
+  fi
+  mkdir -p "$WORK/patched_$name/std"
+  OLD="$3" NEW="$4" SRC="$REPO/src/std/time.iyi" DST="$WORK/patched_$name/std/time.iyi" "$PY" -c "
+import os
+content = open(os.environ['SRC']).read()
+old = os.environ['OLD']
+if content.count(old) != 1:
+    raise SystemExit('the text to break is in std/time %d times, not once: %r' % (content.count(old), old))
+open(os.environ['DST'], 'w').write(content.replace(old, os.environ['NEW']))
+" || { echo "  $label: the broken copy could not be made"; status=1; return; }
+  if (IYI_PATH="$WORK/patched_$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_time_exercise.iyi" >"$WORK/$name-fail.out" 2>&1); then
+    echo "  $label: the exercise PASSED against the broken copy (it should have failed)"
+    status=1
+  else
+    echo "  $label: caught ($(grep -m1 -o 'ASSERTION FAILED: .\{0,90\}' "$WORK/$name-fail.out" || sed -n '1p' "$WORK/$name-fail.out"))"
+  fi
+}
+
+echo
+echo "== negative proofs: broken parts of Time::Format are caught"
+format_break_caught "a month name read one month early" month_name \
+  '    @month = index + 1' '    @month = index'
+format_break_caught "an offset written the wrong way" format_offset \
+  'local = time.seconds + @offset.to_i64' 'local = time.seconds - @offset.to_i64'
+format_break_caught "an offset read the wrong way" parse_offset \
+  'seconds = local - offset.to_i64 +' 'seconds = local + offset.to_i64 +'
+format_break_caught "text after the pattern accepted" trailing \
+  'return true if @pos >= @len
+        fail("unexpected text after the time")' 'return true'
+format_break_caught "RFC 850's two-digit year read without RFC 9110's rule" recent_year \
+  'year > now + 50_i64 ? year - 100_i64 : year' 'year'
+format_break_caught "a day the month does not have accepted" month_day \
+  'if @day < 1 || @day > last' 'if @day < 1'
+format_break_caught "an ISO week counted from the wrong Monday" iso_week \
+  'week = (day_of_year - day_of_week + 10) // 7' 'week = (day_of_year - day_of_week + 11) // 7'
+format_break_caught "the afternoon an hour short" twelve_hour \
+  'hour += 12 unless hour == 12' 'hour += 11 unless hour == 12'
 
 echo
 echo "== what the parser and the formatter refuse"
@@ -294,6 +360,18 @@ time_panics_with "the negation of the smallest span" span_neg "Span overflows" \
   '-Span.seconds(-9223372036854775808_i64)'
 time_panics_with "a time plus a span past Int64" time_add "Span overflows" \
   'Time.utc(2024, 1, 1) + Span.seconds(9223372036854775807_i64)'
+# The program's own mistakes in `Time::Format` panic, as the constructor's
+# do: an offset of a day or more, a week the year does not have, an offset
+# RFC 3339 cannot write, a shift past the years an Int32 holds. Bad text is
+# not among them: that is a `TimeParseError`, which the exercise checks.
+time_panics_with "an offset of a day" offset_day "offset out of range: 86400 seconds is a day or more from UTC" \
+  'Time.utc(2024, 1, 1).to_s("%F", 86400)'
+time_panics_with "a week the year does not have" week53 "invalid week: 2024 has weeks 1 to 52, not 53" \
+  'Time.week_date(2024, 53, 1)'
+time_panics_with "an RFC 3339 offset with seconds" rfc3339_seconds "an RFC 3339 offset is whole minutes, not 30 seconds" \
+  'Time::Format::RFC_3339.format(Time.utc(2024, 1, 1), 0, 30)'
+time_panics_with "a month past the last year" shift_far "year out of range: 2147483647-12-01T00:00:00Z shifted by 0 years and 1 months is in year 2147483648" \
+  'Time.utc(2147483647, 12, 1).shift(months: 1)'
 # And the one RFC 3339 allows that the constructor does not: a leap second
 # is read as the second after 59, not refused.
 printf 'module main\n\nimport std/time::{Time}\n\nputs Time.parse_rfc3339("2016-12-31T23:59:60Z").to_rfc3339\n' > "$WORK/leap.iyi"

@@ -12,6 +12,11 @@
 #   * ISO 8601 / RFC 3339 serialization (fraction digits 0, 3, 6, 9) and parsing
 #     with timezone offset conversions.
 #   * Comparable trait implementation via `Std::Traits::Comparable`.
+#   * `Time::Format`: every directive written against fixed instants (a leap
+#     day, December 31st, years below 1000 and below 0, offsets either side
+#     of UTC, nanoseconds), round trips through every pattern and named
+#     format, RFC 9110's three HTTP date forms, bad text refused as a
+#     `TimeParseError` with its sentence, ISO weeks and month arithmetic.
 #
 # Run via:
 #     ./bin/iyi run bench/std_time_exercise.iyi
@@ -20,7 +25,7 @@ module bench/std_time_exercise
 
 import std/format::{printf}
 
-import std/time::{Time, Span, DayOfWeek}
+import std/time::{Time, Span, DayOfWeek, TimeParseError}
 
 def assert_true(cond : Bool, msg : String) : Nil
   if !cond
@@ -31,6 +36,35 @@ end
 def assert_equal(expected : Int64, actual : Int64, msg : String) : Nil
   if expected != actual
     raise "ASSERTION FAILED: #{msg} (expected #{expected}, got #{actual})"
+  end
+end
+
+def assert_text(expected : String, actual : String, msg : String) : Nil
+  if expected != actual
+    raise "ASSERTION FAILED: #{msg} (expected #{expected.inspect}, got #{actual.inspect})"
+  end
+end
+
+def parsed(result : Time | TimeParseError, msg : String) : Time
+  case result
+  when TimeParseError
+    raise "ASSERTION FAILED: #{msg}: refused with #{result.message.inspect}"
+  else
+    result
+  end
+end
+
+# Bad text is answered, not panicked on: each of these is a value the
+# program goes on from, carrying the sentence that names what was wrong.
+def refused(result : Time | TimeParseError, phrase : String, msg : String) : TimeParseError
+  case result
+  when TimeParseError
+    if !result.message.includes?(phrase)
+      raise "ASSERTION FAILED: #{msg}: refused with #{result.message.inspect}, which does not say #{phrase.inspect}"
+    end
+    result
+  else
+    raise "ASSERTION FAILED: #{msg}: read as #{result.to_rfc3339(9)}, where it is not that time"
   end
 end
 
@@ -373,5 +407,298 @@ assert_true(spans.size == 16000 && spans[Span.new(4321_i64 * 37_i64, 4321 * 7919
 assert_true(times_ns <= pairs_ns * 20 + 200_000_000_i64, "hash table: 16000 Time keys took #{times_ns // 1000000} ms where tuples took #{pairs_ns // 1000000} ms")
 assert_true(spans_ns <= pairs_ns * 20 + 200_000_000_i64, "hash table: 16000 Span keys took #{spans_ns // 1000000} ms where tuples took #{pairs_ns // 1000000} ms")
 puts "  times, spans and days hash as they compare; 16,000 time keys and 16,000 span keys each within twenty times their tuples' time and 200 ms"
+
+# ---------------------------------------------------------------------------
+# Time::Format directives
+# ---------------------------------------------------------------------------
+
+puts "\n== strftime directives"
+# Each answer was checked against glibc's strftime where the two agree, and
+# against Crystal's formatter where they do not (`%p` is lowercase, `%C` is
+# unpadded).
+leap = Time.utc(2024, 2, 29, 15, 4, 5, 0, 123456789)
+[
+  {"%Y", "2024"}, {"%C", "20"}, {"%y", "24"}, {"%m", "02"}, {"%_m", " 2"}, {"%-m", "2"},
+  {"%B", "February"}, {"%^B", "FEBRUARY"}, {"%b", "Feb"}, {"%h", "Feb"}, {"%^b", "FEB"},
+  {"%d", "29"}, {"%-d", "29"}, {"%e", "29"}, {"%j", "060"}, {"%H", "15"}, {"%-H", "15"},
+  {"%k", "15"}, {"%I", "03"}, {"%l", " 3"}, {"%M", "04"}, {"%S", "05"}, {"%L", "123"},
+  {"%N", "123456789"}, {"%3N", "123"}, {"%6N", "123456"}, {"%9N", "123456789"},
+  {"%p", "pm"}, {"%P", "PM"}, {"%A", "Thursday"}, {"%^A", "THURSDAY"}, {"%a", "Thu"},
+  {"%^a", "THU"}, {"%u", "4"}, {"%w", "4"}, {"%Z", "UTC"}, {"%^Z", "UTC"}, {"%z", "+0000"},
+  {"%:z", "+00:00"}, {"%::z", "+00:00:00"}, {"%s", "1709219045"}, {"%F", "2024-02-29"},
+  {"%T", "15:04:05"}, {"%R", "15:04"}, {"%D", "02/29/24"}, {"%r", "03:04:05 PM"},
+  {"%c", "Thu Feb 29 15:04:05 2024"}, {"%x", "02/29/24"}, {"%X", "15:04:05"}, {"%%", "%"},
+  {"%G-W%V-%u", "2024-W09-4"}, {"%g", "24"}, {"%n", "\n"}, {"%t", "\t"},
+  {"%Q", "%Q"}, {"%-", "%-"}, {"%_x", "%_x"}, {"%:Y", "%:Y"}, {"100%", "100%"},
+  {"at %H:%M on %A", "at 15:04 on Thursday"}, {"%Y年%m月", "2024年02月"},
+].each do |row|
+  assert_text(row[1], leap.to_s(row[0]), "2024-02-29T15:04:05.123456789Z as #{row[0].inspect}")
+end
+
+# The last second of a year, a Sunday, in the last ISO week of 2023; an
+# hour east of it, the first of 2024 and of its first week.
+dec31 = Time.utc(2023, 12, 31, 23, 59, 59, 0, 1)
+assert_text("2023-12-31 23:59:59.000000001 365 Sun 7 0 2023-W52-7 11 pm 000", dec31.to_s("%F %T.%N %j %a %u %w %G-W%V-%u %I %p %L"), "December 31st")
+assert_text("2024-01-01 00:59:59 001 Mon +01:00 +0100 2024-W01-1 12 am", dec31.to_s("%F %T %j %a %Z %z %G-W%V-%u %I %p", 3600), "December 31st an hour east")
+# Years below 1000 and below 0: four digits and the sign in front, as
+# `to_rfc3339` writes them; the century and the last two digits floored.
+assert_text("0999 9 99 999 0999-03-07 Thursday 066 0999-W10-4", Time.utc(999, 3, 7, 5, 6, 7).to_s("%Y %C %y %-Y %F %A %j %G-W%V-%u"), "year 999")
+assert_text("-0001 -1 99 -0001-01-01 Friday", Time.utc(-1, 1, 1).to_s("%Y %C %y %F %A"), "year -1")
+assert_text("12345-06-07", Time.utc(12345, 6, 7).to_s("%F"), "year 12345")
+assert_text("2020-W53-5", Time.utc(2021, 1, 1).to_s("%G-W%V-%u"), "2021-01-01 is in 2020's week 53")
+assert_text("2025-W01-1 25", Time.utc(2024, 12, 30).to_s("%G-W%V-%u %g"), "2024-12-30 is in 2025's first week")
+assert_text("12 12 am 12:00:00 AM 00  0", Time.utc(2024, 1, 1).to_s("%I %l %p %r %H %k"), "midnight on a 12-hour clock")
+assert_text("12 pm 12:30:00 PM", Time.utc(2024, 1, 1, 12, 30, 0).to_s("%I %p %r"), "noon on a 12-hour clock")
+# Either side of UTC: the wall clock and date move, the instant does not.
+assert_text("2024-02-29 07:04:05 -08:00 -0800 -08:00 -08:00:00 1709219045", leap.to_s("%F %T %Z %z %:z %::z %s", -28800), "eight hours west")
+assert_text("2024-02-29 20:49:05 +05:45 +0545", leap.to_s("%F %T %Z %z", 20700), "Nepal")
+assert_text("2024-02-29 22:30:00 060 Thu -0230", Time.utc(2024, 3, 1, 1, 0, 0).to_s("%F %T %j %a %z", -9000), "west across midnight into the leap day")
+assert_text("+05:30:15 +0530 +05:30:15", leap.to_s("%Z %z %::z", 19815), "an offset with seconds")
+assert_text("-1 1969-12-31 23:59:59", Time.unix(-1_i64).to_s("%s %F %T"), "the second before the epoch")
+assert_text("999 999 999999 999999999 999999999", Time.unix(0_i64, 999999999).to_s("%L %3N %6N %9N %N"), "the last nanosecond of a second")
+assert_text("000 000001 000001000", Time.unix(0_i64, 1000).to_s("%L %6N %N"), "a microsecond")
+# The flags on every number: none, spaces, zeros.
+assert_text("5 3 7 8 9 7 65 24| 5| 7|05|07|5| 3", Time.utc(2024, 3, 5, 7, 8, 9).to_s("%-d %-m %-H %-M %-S %-I %-j %-y|%_d|%_H|%0e|%0k|%-e|%_m"), "padding flags")
+assert_text("Thu, 29 Feb 2024 15:04:05 GMT", leap.to_rfc1123, "to_rfc1123")
+assert_text("Thu, 29 Feb 2024 15:04:05 GMT", Time::Format::HTTP_DATE.format(leap), "HTTP_DATE")
+assert_text("Thu, 29 Feb 2024 15:04:05 +0000", leap.to_rfc2822, "to_rfc2822")
+assert_text("Fri, 1 Mar 2024 00:34:05 +0930", leap.to_rfc2822(34200), "to_rfc2822 east across midnight")
+assert_text("2024-02-29T10:04:05.123456789-05:00", Time::Format::RFC_3339.format(leap, 9, -18000), "RFC_3339 at an offset")
+assert_text(leap.to_rfc3339(3), Time::Format::RFC_3339.format(leap, 3), "RFC_3339 at UTC is to_rfc3339")
+assert_text("2024-02-29T15:04:05Z", Time::Format::ISO_8601_DATE_TIME.format(leap), "ISO_8601_DATE_TIME")
+assert_text("2024-02-29", Time::Format::ISO_8601_DATE.format(leap), "ISO_8601_DATE")
+assert_text("15:04:05Z 20:34:05+05:30", "#{Time::Format::ISO_8601_TIME.format(leap)} #{Time::Format::ISO_8601_TIME.format(leap, 19800)}", "ISO_8601_TIME")
+assert_text("2024-02-29 16:04:05", Time::Format.new("%F %T", 3600).format(leap), "a format's own offset")
+puts "  every directive, flag and named format written against leap days, December 31st, years 999, -1 and 12345, and offsets either side of UTC"
+
+# ---------------------------------------------------------------------------
+# Round trips
+# ---------------------------------------------------------------------------
+
+puts "\n== format round-trips"
+round_patterns = [
+  "%Y-%m-%dT%H:%M:%S.%N%::z", "%a, %d %b %Y %I:%M:%S.%6N %p %:z", "%G-W%V-%u %H%M%S.%3N %z",
+  "%A %B %-d %Y %k:%M:%S.%9N %Z", "%s.%N", "%Y-%j %T.%L %z", "%c %z", "%Y%m%d%H%M%S%N%z",
+  "%^a %^B %e %l:%M:%S %P %Y %::z", "%D %r %z", "%-m/%-d/%Y %-H:%-M:%-S %z",
+]
+round_offsets = [0, 3600, -3600, 19800, -28800, 20700, -34200, 50400, -43200, 86340, -86340]
+round_trips = 0
+exact_trips = 0
+state = 88172645463325252_i64
+first_second = -62135596800_i64
+# A day in from either end of the years 0001..9999, so the widest offsets
+# keep every pattern's four-digit year four digits.
+seconds_range = 253402300799_i64 - first_second - 2_i64 * 86400_i64
+400.times do |i|
+  state = state ^ (state << 13)
+  state = state ^ (state >> 7)
+  state = state ^ (state << 17)
+  sec = first_second + 86400_i64 + (state & 9223372036854775807_i64) % seconds_range
+  t = Time.unix(sec, ((state >> 3) & 0x3fffffff_i64).to_i32 % 1000000000)
+  round_offsets.each do |offset|
+    round_patterns.each do |pattern|
+      text = t.to_s(pattern, offset)
+      back = parsed(Time::Format.new(pattern).parse(text), "#{text.inspect} read back by #{pattern.inspect}")
+      assert_text(text, back.to_s(pattern, offset), "#{pattern.inspect} at #{offset} round-trips #{t.inspect}")
+      if pattern.includes?("%N") || pattern.includes?("%9N")
+        assert_true(back == t, "#{text.inspect} by #{pattern.inspect} is #{t.inspect}, not #{back.inspect}")
+        exact_trips += 1
+      end
+      round_trips += 1
+    end
+    whole = Time.unix(sec)
+    assert_true(parsed(Time.parse_rfc2822(whole.to_rfc2822(offset)), "RFC 2822") == whole, "RFC 2822 at #{offset} round-trips #{whole.inspect}")
+    assert_true(parsed(Time::Format::RFC_3339.parse(Time::Format::RFC_3339.format(t, 9, offset)), "RFC 3339") == t, "RFC 3339 at #{offset} round-trips #{t.inspect}")
+    assert_true(Time.parse_rfc3339(Time::Format::RFC_3339.format(t, 9, offset)) == t, "parse_rfc3339 reads RFC_3339 at #{offset}")
+    assert_true(parsed(Time.parse_iso8601(Time::Format::ISO_8601_DATE_TIME.format(whole, offset)), "ISO 8601") == whole, "ISO 8601 at #{offset} round-trips #{whole.inspect}")
+    date = Time::Format::ISO_8601_DATE.format(t, offset)
+    assert_text(date, parsed(Time::Format::ISO_8601_DATE.parse(date, offset), "ISO date").to_s("%F", offset), "ISO 8601 date at #{offset}")
+    clock = Time::Format::ISO_8601_TIME.format(whole, offset)
+    assert_text(clock, Time::Format::ISO_8601_TIME.format(parsed(Time::Format::ISO_8601_TIME.parse(clock), "ISO time"), offset), "ISO 8601 time at #{offset}")
+    round_trips += 6
+  end
+  whole = Time.unix(sec)
+  assert_true(parsed(Time.parse_rfc1123(whole.to_rfc1123), "HTTP date") == whole, "HTTP date round-trips #{whole.inspect}")
+  round_trips += 1
+end
+# The years past four digits and below zero come back through `%F`, as
+# they do through RFC 3339.
+[Time.utc(-1, 1, 1), Time.utc(12345, 6, 7, 8, 9, 10), Time.unix(Time::MIN_SECONDS), Time.unix(Time::MAX_SECONDS)].each do |t|
+  assert_true(parsed(Time.parse_utc(t.to_s("%F %T"), "%F %T"), "wide year") == t, "#{t.inspect} round-trips through %F %T")
+end
+assert_true(parsed(Time.parse_utc("20240229", "%Y%m%d"), "basic date") == Time.utc(2024, 2, 29), "%Y%m%d reads four digits of year")
+assert_true(parsed(Time.parse("2024-02-29 12:00", "%F %R", -28800), "default offset") == Time.utc(2024, 2, 29, 20, 0, 0), "a text with no zone is read at the offset given")
+assert_true(parsed(Time.parse("2024-02-29 12:00 +0100", "%F %R %z", -28800), "own offset") == Time.utc(2024, 2, 29, 11, 0, 0), "a text's own offset wins over the one given")
+assert_true(parsed(Time.parse_utc("16/02/15  4:35:50 am", "%y/%m/%d %l:%M:%S %p"), "12-hour") == Time.utc(2016, 2, 15, 4, 35, 50), "a 12-hour clock and a two-digit year")
+assert_true(parsed(Time.parse_utc("68", "%y"), "pivot").year == 2068 && parsed(Time.parse_utc("69", "%y"), "pivot").year == 1969, "a two-digit year is 1969..2068, as POSIX and the other library read it")
+assert_true(parsed(Time.parse_utc("20 24", "%C %y"), "century").year == 2024, "a century and a year in it")
+assert_true(parsed(Time.parse_utc("2016-12-31T23:59:60Z", "%FT%T%z"), "leap second") == Time.utc(2017, 1, 1), "a leap second is the second after 59")
+assert_true(parsed(Time.parse_utc("2024-02-29 15:04:05.123456789123", "%F %T.%N"), "long fraction") == leap, "%N reads past nine digits and drops the rest")
+assert_true(parsed(Time.parse_utc("15:04:05.12", "%T.%3N"), "short fraction").nanosecond == 120000000, "%3N scales two digits")
+assert_true(parsed(Time.parse_utc("2024-W09-4", "%G-W%V-%u"), "week date") == Time.utc(2024, 2, 29), "%G-W%V-%u names a day")
+assert_true(parsed(Time.parse_utc("2024-060", "%Y-%j"), "ordinal") == Time.utc(2024, 2, 29), "%j names a day")
+assert_true(parsed(Time.parse_utc("thursday 29 FEBRUARY 2024", "%A %d %B %Y"), "names").month == 2, "names are read in any case")
+assert_true(parsed(Time.parse_utc("2024-02-29 15:04:05 UTC", "%F %T %Z"), "UTC") == Time.utc(2024, 2, 29, 15, 4, 5), "%Z reads UTC")
+assert_true(parsed(Time.parse_utc("2024-02-29T15:04:05+05:30:15", "%FT%T%::z"), "offset seconds") == Time.utc(2024, 2, 29, 9, 33, 50), "%::z reads an offset's seconds")
+assert_true(parsed(Time.parse_utc("1709219045", "%s"), "%s") == Time.utc(2024, 2, 29, 15, 4, 5), "%s reads the epoch")
+[{"2016-02-15", "%F"}, {"20160215", ""}, {"2016-046", ""}, {"2016046", ""}, {"2016-W07-1", ""}, {"2016W071", ""}].each do |row|
+  assert_true(parsed(Time::Format::ISO_8601_DATE.parse(row[0]), "ISO date #{row[0]}") == Time.utc(2016, 2, 15), "ISO 8601 reads #{row[0]}")
+end
+["2016-02-15T04:35:50Z", "20160215T043550Z", "2016-02-15T04:35:50+00:00", "2016-02-15T06:35:50+0200", "2016-046T04:35:50Z", "2016-W07-1T04:35:50Z", "2016-02-15T04:35:50.000Z", "2016-02-15T04:35.8333333333Z", "2016-02-15T04.59722222Z"].each do |text|
+  back = parsed(Time.parse_iso8601(text), "ISO 8601 #{text}")
+  assert_true((back - Time.utc(2016, 2, 15, 4, 35, 50)).total_seconds.abs < 0.01, "ISO 8601 reads #{text} as #{back.inspect}")
+end
+assert_true(parsed(Time::Format::ISO_8601_TIME.parse("04:35:50Z"), "ISO time") == Time.utc(1, 1, 1, 4, 35, 50), "ISO 8601 time is read on 0001-01-01")
+assert_true(parsed(Time.parse_rfc2822("Mon, 15 Feb 2016 04:35:50 UTC"), "UTC") == Time.utc(2016, 2, 15, 4, 35, 50), "RFC 2822 reads UTC as Crystal does")
+assert_true(parsed(Time.parse_rfc2822(" (a comment (nested)) 15 Feb 16 04:35 (no seconds) EST"), "obsolete") == Time.utc(2016, 2, 15, 9, 35, 0), "RFC 2822's comments, two-digit year, no seconds and EST")
+assert_true(parsed(Time.parse_rfc2822("Mon, 15 Feb 116 04:35:50 -0800"), "three digits").year == 2016, "RFC 2822's three-digit year is added to 1900")
+assert_true(parsed(Time.parse_rfc2822("Mon, 15 Feb 49 04:35:50 Z"), "military").year == 2049, "RFC 2822: 49 is 2049, and a military zone is -0000")
+puts "  #{round_trips} round trips through #{round_patterns.size} patterns, #{round_offsets.size} offsets and every named format, #{exact_trips} of them to the nanosecond"
+
+# ---------------------------------------------------------------------------
+# RFC 9110's HTTP dates
+# ---------------------------------------------------------------------------
+
+puts "\n== RFC 9110 date forms"
+nov6 = Time.utc(1994, 11, 6, 8, 49, 37)
+["Sun, 06 Nov 1994 08:49:37 GMT", "Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994", "Sun, 06-Nov-1994 08:49:37 GMT", "Sunday, 06 Nov 1994 08:49:37 GMT"].each do |text|
+  assert_true(parsed(Time.parse_rfc1123(text), text) == nov6, "#{text.inspect} is 1994-11-06T08:49:37Z")
+  assert_true(parsed(Time::Format::HTTP_DATE.parse(text), text) == nov6, "HTTP_DATE reads #{text.inspect}")
+end
+assert_true(parsed(Time.parse_rfc1123("Wed Nov 16 08:49:37 1994"), "asctime") == Time.utc(1994, 11, 16, 8, 49, 37), "asctime with a two-digit day")
+# Section 5.6.7: a two-digit year more than 50 years ahead is the last year
+# in the past with those digits. Measured against this year, not against a
+# pivot fixed when the code was written.
+this_year = Time.utc.year
+[{10, this_year + 10}, {50, this_year + 50}, {51, this_year - 49}, {60, this_year - 40}, {0, this_year}].each do |row|
+  year = row[1]
+  text = "Thursday, 01-Jan-#{Time.pad2((year % 100 + 100) % 100)} 00:00:00 GMT"
+  assert_equal(year.to_i64, parsed(Time.parse_rfc1123(text), text).year.to_i64, "RFC 850 year #{row[0]} years ahead of #{this_year}")
+end
+puts "  the IMF-fixdate, RFC 850 and asctime forms all read as one instant, and RFC 850's two-digit year by section 5.6.7's 50-year rule"
+
+# ---------------------------------------------------------------------------
+# Refusals
+# ---------------------------------------------------------------------------
+
+puts "\n== parse refusals"
+refusals = 0
+[
+  {"%d %B %Y", "06 Novembre 1994", "\"Novembre\" is not a month name"},
+  {"%a %F", "Funday 2024-01-01", "\"Funday\" is not a day name"},
+  {"%b", "Nove", "\"Nove\" is not a month's three-letter name"},
+  {"%F", "2024-13-01", "a month runs 1 to 12, not 13"},
+  {"%F", "2024-00-01", "a month runs 1 to 12, not 0"},
+  {"%F", "2023-02-29", "2023-02 has days 1 to 28, not day 29"},
+  {"%F", "2024-02-30", "2024-02 has days 1 to 29, not day 30"},
+  {"%F", "2024-04-00", "2024-04 has days 1 to 30, not day 0"},
+  {"%F %T", "2024-01-01 24:00:00", "an hour runs 0 to 23, not 24"},
+  {"%F %T", "2024-01-01 23:60:00", "a minute runs 0 to 59, not 60"},
+  {"%F %T", "2024-01-01 23:59:61", "a second runs 0 to 60, the 60th a leap second, not 61"},
+  {"%F", "2024-01-01 junk", "unexpected text after the time at byte 10"},
+  {"%F", "2024-01", "expected '-' but the text ended at byte 7"},
+  {"%F", "", "expected a year at byte 0"},
+  {"%F", "2024/01/01", "expected '-' at byte 4"},
+  {"%F %T %z", "2024-01-01 00:00:00 +24:00", "an offset runs to 23:59:59, and 24:00:00 is past it"},
+  {"%F %T %z", "2024-01-01 00:00:00 +05:99", "an offset runs to 23:59:59, and 05:99:00 is past it"},
+  {"%F %T %z", "2024-01-01 00:00:00 +5", "expected the offset's hours as two digits"},
+  {"%F %T %z", "2024-01-01 00:00:00 CET", "expected a time zone: Z, UTC or an offset"},
+  {"%I:%M:%S %p", "13:00:00 PM", "a 12-hour clock runs 1 to 12, not 13"},
+  {"%I:%M:%S %p", "00:00:00 AM", "a 12-hour clock runs 1 to 12, not 0"},
+  {"%I:%M:%S %p", "10:00:00 XM", "expected am or pm"},
+  {"%F %Z", "2024-01-01 CET", "the time zone \"CET\" needs the tz database"},
+  {"%u", "8", "a day of the week runs 1 (Monday) to 7 (Sunday), not 8"},
+  {"%w", "7", "a day of the week runs 0 (Sunday) to 6 (Saturday), not 7"},
+  {"%G-W%V-%u", "2024-W53-1", "2024 has weeks 1 to 52, not week 53"},
+  {"%Y-%j", "2023-366", "2023 has days 1 to 365 of the year, not day 366"},
+  {"%s", "99999999999999999999", "seconds since the epoch is past what an Int64 holds"},
+  {"%s", "9223372036854775807", "year out of range: 9223372036854775807 seconds from the epoch"},
+  {"%F", "2147483648-01-01", "year out of range: 2147483648 is past the years an Int32 holds"},
+  {"%F %T %z", "2147483647-12-31 23:59:59 -0100", "year out of range"},
+  {"%Y年", "2024月", "expected the pattern's text at byte 4"},
+].each do |row|
+  error = refused(Time.parse_utc(row[1], row[0]), row[2], "#{row[1].inspect} by #{row[0].inspect}")
+  assert_text(row[1], error.input, "a refusal carries the text it refused")
+  refusals += 1
+end
+[
+  {Time.parse_rfc1123("Sun, 06 Nox 1994 08:49:37 GMT"), "\"Nox\" is not a month's three-letter name at byte 8"},
+  {Time.parse_rfc1123("Sun, 06 Nov 1994 08:49:37 GMT extra"), "unexpected text after the time at byte 29"},
+  {Time.parse_rfc1123("Sunday, 06-Nov-994 08:49:37 GMT"), "expected a year of two or four digits"},
+  {Time.parse_rfc1123("Sun, 31 Nov 1994 08:49:37 GMT"), "1994-11 has days 1 to 30, not day 31"},
+  {Time.parse_rfc1123("Sun, 06 Nov 1994 08:49 GMT"), "expected ':' at byte 22"},
+  {Time.parse_rfc1123("Sun Nov  6 08:49:37 94"), "expected a year of four digits"},
+  {Time.parse_rfc1123("Sun, 06 Nov 1994 08:49:37 XYZ"), "\"XYZ\" is not a time zone RFC 2822 names"},
+  {Time.parse_rfc1123(""), "expected a day name at byte 0"},
+  {Time.parse_rfc2822("Mon, 15 Feb 2016 04:35:50 +0000 (unclosed"), "a comment is not closed at byte 32"},
+  {Time.parse_rfc2822("Mon, 15 Feb 2016 04:35:50 +00:00"), "expected an offset without a colon"},
+  {Time.parse_rfc2822("Mon, 15 Feb 2016 04:35:50"), "expected a space"},
+  {Time.parse_iso8601("2016-02-15T04:35:50"), "expected Z or an offset such as +05:30 at byte 19"},
+  {Time.parse_iso8601("2016-02-15T04:3550Z"), "expected ':' between the minutes and the seconds"},
+  {Time.parse_iso8601("2016-W07-8T04:35:50Z"), "a day of the week runs 1 (Monday) to 7 (Sunday), not 8"},
+  {Time::Format::ISO_8601_DATE.parse("2016-0"), "expected a month and day, or a day of the year"},
+  {Time::Format::ISO_8601_DATE.parse("2016-02"), "expected '-' but the text ended at byte 7"},
+  {Time::Format::ISO_8601_DATE.parse("2016-W54-1"), "2016 has weeks 1 to 52, not week 54"},
+  {Time::Format.new("%F %T").parse("2024-01-01 00:00:00"), "the text names no time zone, and no offset was given to read it at"},
+  {Time::Format::RFC_3339.parse("2024-02-30T00:00:00Z"), "invalid day in RFC 3339 string: 30"},
+  {Time::Format::RFC_3339.parse("2024-02-29T12:00:00Zjunk"), "trailing text after the timezone in RFC 3339 string"},
+  {Time::Format::RFC_3339.parse("2024-02-29T12:30:45²Z"), "invalid timezone designator in RFC 3339: ²"},
+  {Time::Format::RFC_3339.parse("2147483647-12-31T23:59:59-01:00"), "year out of range: 67767976233536399 seconds from the epoch"},
+].each do |row|
+  refused(row[0], row[1], row[1])
+  refusals += 1
+end
+assert_equal(8_i64, refused(Time.parse_rfc1123("Sun, 06 Nox 1994 08:49:37 GMT"), "Nox", "position").position.to_i64, "the refusal names the byte it stood at")
+puts "  #{refusals} bad texts refused as a TimeParseError naming what was wrong: names, fields out of range, days months do not have, trailing text, zones and offsets"
+
+# ---------------------------------------------------------------------------
+# ISO weeks and month arithmetic
+# ---------------------------------------------------------------------------
+
+puts "\n== ISO weeks and month arithmetic"
+assert_true(Time.utc(2021, 1, 1).calendar_week == {2020, 53}, "2021-01-01 is in week 53 of 2020")
+assert_true(Time.utc(2024, 12, 30).calendar_week == {2025, 1}, "2024-12-30 is in week 1 of 2025")
+assert_true(Time.utc(2015, 12, 31).calendar_week == {2015, 53}, "2015-12-31 is in week 53 of 2015")
+assert_true(Time.utc(2026, 1, 1).calendar_week == {2026, 1}, "2026-01-01 is in week 1 of 2026")
+assert_true(Time.week_date(2016, 1, 1) == Time.utc(2016, 1, 4), "the first day of 2016's first week is January 4th")
+assert_true(Time.week_date(2020, 53, 5, 10, 20, 30) == Time.utc(2021, 1, 1, 10, 20, 30), "a week date in the next calendar year")
+assert_equal(53_i64, Time.weeks_in_year(2020).to_i64, "2020 has 53 weeks")
+assert_equal(52_i64, Time.weeks_in_year(2021).to_i64, "2021 has 52 weeks")
+week_days = 0
+day = Time.utc(1990, 1, 1)
+last_week = {1990, 1}
+while day.year < 2036
+  week = day.calendar_week
+  dow = day.day_of_week.value
+  assert_true(Time.week_date(week[0], week[1], dow) == day, "#{day.inspect} is its own week date #{week}")
+  assert_true(week[1] >= 1 && week[1] <= Time.weeks_in_year(week[0]), "#{day.inspect}'s week is one its year has")
+  if dow == 1 && week_days > 0
+    assert_true(week == {last_week[0], last_week[1] + 1} || week == {last_week[0] + 1, 1}, "the week after #{last_week} is #{week}")
+  end
+  last_week = week
+  week_days += 1
+  day = day + Span.days(1_i64)
+end
+[
+  {Time.utc(2024, 1, 31), 0, 1, Time.utc(2024, 2, 29)},
+  {Time.utc(2023, 1, 31), 0, 1, Time.utc(2023, 2, 28)},
+  {Time.utc(2024, 3, 31), 0, -1, Time.utc(2024, 2, 29)},
+  {Time.utc(2024, 2, 29), 1, 0, Time.utc(2025, 2, 28)},
+  {Time.utc(2024, 2, 29), 4, 0, Time.utc(2028, 2, 29)},
+  {Time.utc(2024, 12, 15), 0, 1, Time.utc(2025, 1, 15)},
+  {Time.utc(2024, 1, 15), 0, -1, Time.utc(2023, 12, 15)},
+  {Time.utc(2024, 1, 15), 0, -13, Time.utc(2022, 12, 15)},
+  {Time.utc(2024, 1, 15), 0, 25, Time.utc(2026, 2, 15)},
+  {Time.utc(2024, 1, 31, 10, 20, 30, 500), 0, 1, Time.utc(2024, 2, 29, 10, 20, 30, 500)},
+  {Time.utc(-1, 3, 31), 0, -1, Time.utc(-1, 2, 28)},
+  {Time.utc(1, 3, 31), -1, -1, Time.utc(0, 2, 29)},
+].each do |row|
+  assert_true(row[0].shift(years: row[1], months: row[2]) == row[3], "#{row[0].inspect} shifted #{row[1]} years and #{row[2]} months is #{row[3].inspect}")
+end
+assert_true(Time.utc(2018, 8, 31).shift(months: 1, days: -1) == Time.utc(2018, 9, 29), "months before days, as Crystal shifts")
+assert_true(Time.utc(2018, 8, 31).shift(days: -1).shift(months: 1) == Time.utc(2018, 9, 30), "days then months is another answer")
+assert_true(Time.utc(2024, 1, 1).shift(weeks: 2, hours: 3, minutes: 4, seconds: 5, nanoseconds: 6) == Time.utc(2024, 1, 15, 3, 4, 5, 0, 6), "the smaller units")
+assert_true(Time.utc(2024, 3, 1).shift(nanoseconds: -1) == Time.utc(2024, 2, 29, 23, 59, 59, 0, 999999999), "a nanosecond back across the leap day")
+puts "  #{week_days} days from 1990 to 2035 are their own ISO week dates, weeks step by one, and months shift to the last day a month has"
 
 puts "\nALL CHECKS PASSED"

@@ -2,22 +2,51 @@
 # the kernel wants; errors panic with the path.
 
 class File
-  def self.open(path : String, mode : String = "r", buffer_size : Int32 = 4096) : IyiIO
-    fd = if mode == "r"
-           __iyi_open_read(c_path(path))
-         elsif mode == "w"
-           __iyi_open_write(c_path(path))
-         else
-           raise "unsupported mode: #{mode}"
-         end
+  # Crystal's mode strings: "r", "w", "a", each with a "+" that adds the
+  # other direction, and a "b" anywhere after the letter that changes
+  # nothing, as POSIX has no text mode. "a" is the kernel's append - every
+  # write lands at the end whatever the position says, so two writers
+  # appending to one log do not overwrite each other - and not a seek to
+  # the end at open. *perm* is the mode a file the open creates gets, less
+  # the umask; a file already there keeps its own. *buffer_size* stays
+  # third so the callers that pass it by position keep working.
+  #
+  # One stream reads and writes through two buffers, so between a read and
+  # a write in "r+" or "w+" move with `seek` (std/file), as C's stdio asks
+  # of `fopen`'s "+" modes: a write after a read otherwise lands past the
+  # read-ahead, and a read after a write misses what is still buffered.
+  def self.open(path : String, mode : String = "r", buffer_size : Int32 = 4096, perm : Int32 = 0o644) : IyiIO
+    flags = open_flags(mode)
+    read = flags & 1 != 0
+    write = flags & 2 != 0
+    create = flags & 4 != 0
+    truncate = flags & 8 != 0
+    append = flags & 16 != 0
+    fd = __iyi_open_file(c_path(path), read, write, create, truncate, append, perm)
     raise "cannot open #{path}" if fd < 0_i64
     IyiIO.new(fd, buffer_size, false)
   end
 
-  def self.open(path : String, mode : String = "r", buffer_size : Int32 = 4096, & : IyiIO -> Nil) : Nil
-    io = open(path, mode, buffer_size)
+  def self.open(path : String, mode : String = "r", buffer_size : Int32 = 4096, perm : Int32 = 0o644, & : IyiIO -> Nil) : Nil
+    io = open(path, mode, buffer_size, perm)
     defer io.close
     yield io
+  end
+
+  # The mode as bits: 1 read, 2 write, 4 create, 8 truncate, 16 append.
+  # "b" goes after the letter, before or after the "+", once, as Crystal
+  # spells it.
+  private def self.open_flags(mode : String) : Int32
+    case mode
+    when "r", "rb"          then 1
+    when "w", "wb"          then 2 | 4 | 8
+    when "a", "ab"          then 2 | 4 | 16
+    when "r+", "r+b", "rb+" then 1 | 2
+    when "w+", "w+b", "wb+" then 1 | 2 | 4 | 8
+    when "a+", "a+b", "ab+" then 1 | 2 | 4 | 16
+    else
+      raise "unsupported mode: #{mode} (the modes are r, w, a, r+, w+ and a+, each with an optional b)"
+    end
   end
 
   def self.read(path : String) : String

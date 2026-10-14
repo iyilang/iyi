@@ -173,6 +173,18 @@ end
     __iyi_openat(path, 577, 420)
   end
 
+  # `File.open`'s every mode: O_RDONLY 0, O_WRONLY 1, O_RDWR 2, O_CREAT 64,
+  # O_TRUNC 512, O_APPEND 1024, the same numbers on x86_64 and aarch64.
+  # *perm* reaches only a file the call creates; the umask is applied by
+  # the kernel.
+  def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
+    flags = read && write ? 2 : (write ? 1 : 0)
+    flags = flags | 64 if create
+    flags = flags | 512 if truncate
+    flags = flags | 1024 if append
+    __iyi_openat(path, flags, perm)
+  end
+
   def __iyi_openat(path : UInt8*, flags : Int32, mode : Int32) : Int64
     result = uninitialized Int64
     {% if flag?(:x86_64) %}
@@ -356,6 +368,17 @@ end
     # so writing to `File.tempfile`'s 0600 file made it world-readable
     # here and nowhere else.
     LibC.open(path, 1537, 420).to_i64
+  end
+
+  # `File.open`'s every mode in darwin's numbers: O_WRONLY 1, O_RDWR 2,
+  # O_APPEND 0x8, O_CREAT 0x200, O_TRUNC 0x400. The mode goes through the
+  # variadic `open` as `__iyi_open_write`'s does.
+  def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
+    flags = read && write ? 2 : (write ? 1 : 0)
+    flags = flags | 0x200 if create
+    flags = flags | 0x400 if truncate
+    flags = flags | 0x8 if append
+    LibC.open(path, flags, perm).to_i64
   end
 
   def __iyi_close(fd : Int64) : Nil
@@ -1066,6 +1089,35 @@ end
     handle.address.to_i64
   end
 
+  # `File.open`'s every mode. Append is the access asked for, not a seek:
+  # a handle with FILE_APPEND_DATA and without FILE_WRITE_DATA has every
+  # write put at the end by the system, atomically against other writers,
+  # whatever its position - the access Go asks for O_APPEND, GENERIC_WRITE's
+  # 0x120116 less FILE_WRITE_DATA (0x2). The disposition is CREATE_ALWAYS
+  # (2) for a truncating create, OPEN_ALWAYS (4) for append's, and
+  # OPEN_EXISTING (3) otherwise. A *perm* without the owner's write bit is
+  # FILE_ATTRIBUTE_READONLY (0x1) on the file the call creates, the one
+  # bit of a POSIX mode Windows has; the handle itself still writes, as
+  # POSIX's does. A hidden or system file a truncating create refuses is
+  # emptied in place, as `__iyi_open_write` does.
+  def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
+    wide = __iyi_wide_path(path)
+    return -1_i64 if wide.address == 0_u64
+    access = read ? -2147483648 : 0
+    access = access | (append ? 0x120114 : 1073741824) if write
+    disposition = create ? (truncate ? 2 : 4) : 3
+    attributes = perm & 0o200 == 0 ? 1 : 128
+    handle = LibC.CreateFileW(wide, access, 7, nil, disposition, attributes, Pointer(Void).new(0_u64))
+    if handle.address &+ 1_u64 == 0_u64 && disposition == 2 && LibC.GetLastError == 5
+      existing = LibC.GetFileAttributesW(wide)
+      if existing != -1 && (existing & 0x10) == 0 && (existing & 0x6) != 0
+        handle = LibC.CreateFileW(wide, access, 7, nil, 5, 128, Pointer(Void).new(0_u64))
+      end
+    end
+    return -1_i64 if handle.address &+ 1_u64 == 0_u64
+    handle.address.to_i64
+  end
+
   def __iyi_close(fd : Int64) : Nil
     LibC.CloseHandle(Pointer(Void).new(fd.to_u64))
   end
@@ -1218,6 +1270,10 @@ end
   end
 
   def __iyi_open_write(path : UInt8*) : Int64
+    raise "File is not available on wasm32-wasi: path_open needs a preopened directory fd"
+  end
+
+  def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
     raise "File is not available on wasm32-wasi: path_open needs a preopened directory fd"
   end
 

@@ -442,6 +442,57 @@ sio.close
 File.delete(fseek)
 puts "  seek and pos read a file from where they say"
 
+puts "\n== open modes"
+fmode = sandbox + "/std_file_ex_modes.txt"
+File.delete(fmode) if File.exists?(fmode)
+File.open(fmode, "a") { |io| io.print "one" }
+File.open(fmode, "ab") { |io| io.print "two" }
+assert_str "onetwo", File.read(fmode), "append twice keeps both writes"
+aio = File.open(fmode, "a")
+aio.seek(0)
+aio.print "three"
+aio.close
+assert_str "onetwothree", File.read(fmode), "append after a seek still appends"
+File.write(fmode, "abcdef")
+rio = File.open(fmode, "r+")
+rio.print "XY"
+rio.seek(4)
+rio.print "Z"
+rio.close
+assert_str "XYcdZf", File.read(fmode), "r+ overwrites in place without truncating"
+rio = File.open(fmode, "rb+")
+assert_str "XYc", rio.read_bytes(3), "r+ reads from the start"
+rio.close
+wio = File.open(fmode, "w+")
+assert_true wio.read_bytes(10) == "", "w+ truncates"
+wio.print "fresh"
+wio.seek(0)
+assert_str "fresh", wio.read_bytes(10), "w+ reads back what it wrote"
+wio.close
+aio = File.open(fmode, "a+")
+assert_str "fre", aio.read_bytes(3), "a+ reads from the start"
+aio.print "!"
+aio.seek(0)
+assert_str "fresh!", aio.read_bytes(10), "a+ appends at the end"
+assert_true aio.pos == 6_i64, "a+ pos after reading to the end"
+aio.close
+File.delete(fmode)
+{% if flag?(:win32) %}
+  # Windows keeps the owner's write bit alone, as FILE_ATTRIBUTE_READONLY.
+  File.open(fmode, "w", 4096, 0o444) { |io| io.print "x" }
+  assert_true (File.info(fmode).permissions.value & 0o200) == 0, "perm honoured on creation"
+  File.chmod(fmode, 0o644)
+{% else %}
+  File.open(fmode, "w", 4096, 0o600) { |io| io.print "x" }
+  assert_true (File.info(fmode).permissions.value & 0o777) == 0o600, "perm honoured on creation"
+  File.chmod(fmode, 0o644)
+  File.open(fmode, "a", 4096, 0o600) { |io| io.print "y" }
+  assert_true (File.info(fmode).permissions.value & 0o777) == 0o644, "perm leaves a file already there alone"
+{% end %}
+assert_true File.read(fmode).starts_with?("x"), "a file created with perm holds its write"
+File.delete(fmode)
+puts "  every open mode reads and writes where Crystal's does"
+
 puts "\n== delete"
 File.delete(f1)
 assert_true !File.exists?(f1), "f1 deleted"

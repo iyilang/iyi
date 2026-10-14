@@ -1116,8 +1116,9 @@ marked PROPOSED are the parts that will move under you.
   `read_all` the rest, `write` and `flush` go the other way, and
   `read_input` is `stdin.read_all` under its old name.
   `File.read`, `File.write`, `File.exists?` and `File.delete` are the
-  whole-file surface, and `File.open(path, "r"|"w")` is the same stream
-  over a file. `samples/iyi/files.iyi` writes, reads and deletes its file;
+  whole-file surface, and `File.open(path, mode)` with the other library's
+  `r`, `w`, `a`, `r+`, `w+` and `a+` is the same stream over a file.
+  `samples/iyi/files.iyi` writes, reads and deletes its file;
   `samples/iyi/io.iyi` reads a line at a time. Sockets and format strings
   are `src/std/` modules, so a program that imports neither carries
   neither. `--crystal` is the other library and has all of it; everything

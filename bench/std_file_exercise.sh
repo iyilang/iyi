@@ -96,6 +96,7 @@ for phrase in "== write, read, and append" \
               "== metadata and permissions" \
               "== directory and file queries" \
               "== paths, links, and content comparison" \
+              "== open modes" \
               "== delete"; do
   if ! grep -q "$phrase" "$WORK/file-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
@@ -383,15 +384,21 @@ else
   status=1
 fi
 
-# A copy of the library with one site replaced, in std/file or in the
-# prelude's File: broken_copy <dir> <std|prelude> <old> <new>.
+# A copy of the library with one site replaced, in std/file, in the
+# prelude's File, or in the prelude's own intrinsics:
+# broken_copy <dir> <std|prelude|intrinsic> <old> <new>.
 broken_copy() {
   local dir="$1" which="$2" source target
-  if [ "$which" = prelude ]; then
+  if [ "$which" = prelude ] || [ "$which" = intrinsic ]; then
     mkdir -p "$WORK/$dir/iyi"
     cp "$REPO"/src/iyi/*.iyi "$WORK/$dir/iyi/"
-    source="$REPO/src/iyi/file.iyi"
-    target="$WORK/$dir/iyi/file.iyi"
+    if [ "$which" = prelude ]; then
+      source="$REPO/src/iyi/file.iyi"
+      target="$WORK/$dir/iyi/file.iyi"
+    else
+      source="$REPO/src/iyi/prelude.iyi"
+      target="$WORK/$dir/iyi/prelude.iyi"
+    fi
   else
     mkdir -p "$WORK/$dir/std"
     source="$REPO/src/std/file.iyi"
@@ -435,6 +442,41 @@ exercise_broken "a last line's lone \\r taken off" lone_cr std \
       rem_len = rem_len - 1 if rem_len > 0 && ptr[line_start + rem_len - 1] == 13_u8
       res << ' \
   "read_lines keeps a last line's lone"
+# File.open's modes, each mechanism taken out of a copy that compiles.
+exercise_broken "append that is not asked of the kernel" no_append prelude \
+  '    append = flags & 16 != 0' '    append = false' \
+  "append twice keeps both writes"
+exercise_broken "r+ that truncates" rplus_trunc prelude \
+  '    when "r+", "r+b", "rb+" then 1 | 2' '    when "r+", "r+b", "rb+" then 1 | 2 | 8' \
+  "r+ overwrites in place without truncating"
+exercise_broken "w+ that does not truncate" wplus_keep prelude \
+  '    when "w+", "w+b", "wb+" then 1 | 2 | 4 | 8' '    when "w+", "w+b", "wb+" then 1 | 2 | 4' \
+  "w+ truncates"
+exercise_broken "a+ that cannot read" aplus_noread prelude \
+  '    when "a+", "a+b", "ab+" then 1 | 2 | 4 | 16' '    when "a+", "a+b", "ab+" then 2 | 4 | 16' \
+  "a+ reads from the start"
+if [ "$(uname -s)" = Linux ] || [ "$(uname -s)" = Darwin ]; then
+  exercise_broken "a perm that is not passed" perm_dropped prelude \
+    '    fd = __iyi_open_file(c_path(path), read, write, create, truncate, append, perm)' \
+    '    fd = __iyi_open_file(c_path(path), read, write, create, truncate, append, 0o644)' \
+    "perm honoured on creation"
+fi
+# Append as a seek to the end at open, which is what a library without
+# O_APPEND does: two appends pass, and a write after a seek lands where
+# the seek put it. The seek is x86_64 Linux's `lseek` (8), made by hand
+# because the prelude has no lseek of its own.
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+  exercise_broken "append as a seek to the end at open" append_seek intrinsic \
+    '    flags = flags | 1024 if append
+    __iyi_openat(path, flags, perm)' \
+    '    fd = __iyi_openat(path, flags, perm)
+    if append && fd >= 0_i64
+      moved = uninitialized Int64
+      asm("syscall" : "={rax}"(moved) : "{rax}"(8_i64), "{rdi}"(fd), "{rsi}"(0_i64), "{rdx}"(2_i64) : "rcx", "r11", "memory" : "volatile")
+    end
+    fd' \
+    "append after a seek still appends"
+fi
 # A user mode 000 does not stop - root, which a CI container runs as -
 # reads every file, so the exercise skips these two checks there and a
 # broken copy has nothing to fail.
@@ -503,8 +545,10 @@ refuses "each_line of a path that does not exist" each_line_nonexistent "cannot 
   'File.each_line("'"$WORK"'/does_not_exist.txt") { |l| puts l }'
 refuses "each_line of a directory" each_line_dir "it is a directory, or the read failed" \
   'File.each_line("'"$WORK"'") { |l| puts l }'
-refuses "unsupported append open mode" append_mode "unsupported mode: a" \
-  'File.open("'"$WORK"'/foo.txt", "a")'
+refuses "an open mode Crystal does not have" unknown_mode "the modes are r, w, a, r+, w+ and a+" \
+  'File.open("'"$WORK"'/foo.txt", "rw")'
+refuses "a mode with a b before its letter" b_first_mode "unsupported mode: br" \
+  'File.open("'"$WORK"'/foo.txt", "br")'
 refuses "info on a path that does not exist" info_nonexistent "File not found: " \
   'File.info("'"$WORK"'/does_not_exist.txt")'
 refuses "real_path of an empty path" realpath_empty "Cannot resolve realpath for " \

@@ -22,13 +22,28 @@
   where every table block takes a key and a value. Held by
   `bench/collections_exercise.sh`, which drives every refusal and proves
   every new section can fail.
+- **`File.open` takes every mode the other library does - `r`, `w`, `a`,
+  `r+`, `w+`, `a+`, each with an optional `b` - and a `perm` for the file
+  it creates.** It accepted only `"r"` and `"w"`, so a program could not
+  append to a log. Append is the kernel's own: O_APPEND on Linux and
+  darwin, and on Windows a handle with FILE_APPEND_DATA but no
+  FILE_WRITE_DATA, so every write lands at the end, even after a seek,
+  and concurrent writers do not overwrite each other. `r+` writes in
+  place without truncating, `w+` truncates and reads back, and `a+` reads
+  from the start and appends at the end. `perm` (default 0o644, less the
+  umask) applies only to a file the open creates; on Windows a `perm`
+  without the owner's write bit makes the file read-only. Any other mode
+  is refused with a sentence that names the valid ones. In the `+` modes,
+  `seek` between a read and a write, as C's stdio asks. Held by
+  `bench/std_file_exercise.sh`'s "open modes" section, plain and
+  `--release`, with six broken copies each caught.
 
 ### Changed
 
 - **Some answers change.** `Hash#==` compares pairs in any order and
   `Hash#hash` follows the contents, where both were the object's
   identity, so `{"a" => 1} == {"a" => 1}` is true and an equal table
-  finds a key.
+  finds a key. `File.open(path, "a")` appends where it was refused.
 
 ## 0.17.0 — 2026-10-14
 

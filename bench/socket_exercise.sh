@@ -207,6 +207,10 @@ prove_fails "closed peer EOF missed" badoff "closed_peer:" \
 prove_fails "a socket read that takes all it may read from the heap" heapread "small_read:" \
   '{ sub(/if count < first \|\| max_bytes == first$/, "if false"); print }'
 
+# The peer's name asked of this end: `getsockname` for `getpeername`.
+prove_fails "the peer's address read from this end" peername "remote_port:" \
+  '{ sub(/return nil if IyiSocket.__sys_getpeername\(@fd, addr, pointerof\(len\)\) < 0$/, "return nil if IyiSocket.__sys_getsockname(@fd, addr, pointerof(len)) < 0"); print }'
+
 # 5. A write to a gone peer panicking, as it did
 prove_fails "a gone peer is a panic" panicwrite "cannot write to socket" \
   '{ sub(/return SocketError.new\("write to socket", n < 0_i64 \? IyiSocket.__sys_code\(n\) : 0\) if n <= 0_i64/, "raise \"cannot write to socket\" if n <= 0_i64"); print }'

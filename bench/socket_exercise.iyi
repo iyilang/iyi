@@ -81,6 +81,12 @@ GC.enable
 raise "small_read: a 30-byte read with room for 64 KB allocated #{lean_bytes} bytes" unless lean_bytes < 1024_u64
 puts "small_read: ok"
 
+# Each end names the other as the other names itself.
+raise "remote_address: #{conn.remote_address.inspect}, not #{client.local_address}" unless conn.remote_address == client.local_address
+raise "remote_port: #{conn.remote_port.inspect}, not #{client.local_port}" unless conn.remote_port == client.local_port
+raise "remote_address: the client's #{client.remote_address.inspect}" unless client.remote_address == "127.0.0.1" && client.remote_port == port
+puts "remote_address: ok"
+
 # A connect waits at most `timeout_ms` for its handshake. A listener whose
 # backlog of one is full and never accepted: Linux drops the SYNs past it,
 # and a connect without a limit waited the kernel's two minutes of

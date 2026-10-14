@@ -825,17 +825,22 @@ pub class Request
   getter query : String?
   getter headers : Hash(String, String)
   getter version : String
+  # The client's address, as the server's socket saw it (no port): nil
+  # for a request a program made, or when the client had already gone. A
+  # proxy in front is what this names; `X-Forwarded-For` is the proxy's
+  # word, and a header any client can write.
+  getter remote_address : String?
   @reader : BodyReader
   @text : String?
 
   # A request whose body is in hand: what `parse_request` answers.
-  def initialize(@method : String, @path : String, @query : String?, @headers : Hash(String, String), body : String, @version : String = "HTTP/1.1")
+  def initialize(@method : String, @path : String, @query : String?, @headers : Hash(String, String), body : String, @version : String = "HTTP/1.1", @remote_address : String? = nil)
     @reader = BodyReader.text(body)
     @text = body
   end
 
   # A request whose body is still on the connection.
-  def initialize(@method : String, @path : String, @query : String?, @headers : Hash(String, String), @version : String, @reader : BodyReader)
+  def initialize(@method : String, @path : String, @query : String?, @headers : Hash(String, String), @version : String, @reader : BodyReader, @remote_address : String? = nil)
     @text = nil
   end
 
@@ -1238,6 +1243,7 @@ pub struct Server
     defer client.close
     conn = Conn.new(client, listener, idle)
     conn.gap = timeout_ms if timeout_ms > 0
+    remote = client.remote_address
     while true
       conn.deadline_in(timeout_ms)
       got = conn.read_head(MAX_HEAD, "request", true)
@@ -1256,12 +1262,12 @@ pub struct Server
         end
         head = parsed
         reader = body_reader(conn, head)
-        req = Request.new(head.method, head.path, head.query, head.headers, head.version, reader)
+        req = Request.new(head.method, head.path, head.query, head.headers, head.version, reader, remote)
         unless stream_bodies
           body = reader.read_all(MAX_BODY.to_i64)
           case body
           in String
-            req = Request.new(head.method, head.path, head.query, head.headers, body, head.version)
+            req = Request.new(head.method, head.path, head.query, head.headers, body, head.version, remote)
           in HTTPError
             # A client that went is not answered; one that sent a body that
             # is not one is told why.

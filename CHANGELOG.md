@@ -4,6 +4,17 @@
 
 ### Added
 
+- **`IyiSocket#remote_address` and `#remote_port`, and
+  `Request#remote_address`.** A server had no way to name the client it
+  was answering: a socket said its own address and port and not the
+  other end's. Now `remote_address` and `remote_port` are the peer's as
+  `local_address` and `local_port` are this end's (`getpeername` by
+  syscall on Linux, from libSystem on darwin, Winsock on Windows; nil
+  when the peer has already gone), and std/http's server hands each
+  request its client's address. Held by `bench/socket_exercise.sh`, each
+  end naming the other as the other names itself, and
+  `bench/std_http_exercise.sh`, a request naming 127.0.0.1; a broken copy
+  of each is caught.
 - **`std/digest` has SHA-3 (`SHA3_224`, `SHA3_256`, `SHA3_384`,
   `SHA3_512`) and the extendable-output `SHAKE128` and `SHAKE256`.**
   FIPS 202's Keccak-f[1600] on 64-bit lanes, in iyi. The four SHA-3s are

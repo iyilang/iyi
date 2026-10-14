@@ -605,6 +605,7 @@ mutate "an upgraded connection held to the server's timeout" '      conn.unlimit
 ' ''
 mutate "a client that waits for an answer as long as it takes" '        conn.gap = timeout_ms if timeout_ms > 0
       end' '      end'
+mutate "a request that does not name its client" '    remote = client.remote_address' '    remote = nil.as(String?)'
 mutate "a boundary that falls across reads missed" 'safe = @held.bytesize - (@delimiter.bytesize - 1)' 'safe = @held.bytesize'
 
 echo

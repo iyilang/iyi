@@ -758,18 +758,52 @@ pub class IyiSocket
 
   def local_address : String
     raise "socket is closed" if @fd < 0
+    addr = IyiSocket.__address_room
+    len = 128_u32
+    res = IyiSocket.__sys_getsockname(@fd, addr, pointerof(len))
+    raise "cannot get local address" if res < 0
+    IyiSocket.__address_text(addr, @family)
+  end
+
+  # The other end's address and port, as `local_address` and
+  # `local_port` give this end's: what a server logs a client by. A unix
+  # socket's peer has a path at most, often none (""), and no port. Nil
+  # when the other end is gone - the connection was reset or never made -
+  # which is the peer's doing and no fault of the program's.
+  def remote_address : String?
+    raise "socket is closed" if @fd < 0
+    addr = IyiSocket.__address_room
+    len = 128_u32
+    return nil if IyiSocket.__sys_getpeername(@fd, addr, pointerof(len)) < 0
+    IyiSocket.__address_text(addr, @family)
+  end
+
+  def remote_port : Int32?
+    raise "socket is closed" if @fd < 0
+    raise "a unix socket has no port" if @family == AF_UNIX
+    addr = Pointer(UInt8).malloc(128_u64)
+    len = 128_u32
+    return nil if IyiSocket.__sys_getpeername(@fd, addr, pointerof(len)) < 0
+    (addr[2].to_i32 << 8) | addr[3].to_i32
+  end
+
+  # Room for any family's `sockaddr`, zeroed, so a unix path the kernel
+  # did not end with a NUL still ends.
+  def self.__address_room : Pointer(UInt8)
     addr = Pointer(UInt8).malloc(128_u64)
     index = 0
     while index < 128
       addr[index] = 0_u8
       index = index + 1
     end
-    len = 128_u32
-    res = IyiSocket.__sys_getsockname(@fd, addr, pointerof(len))
-    raise "cannot get local address" if res < 0
+    addr
+  end
 
-    return IPv6Address.new(addr + 8_u64).to_s if @family == AF_INET6
-    if @family == AF_UNIX
+  # A `sockaddr` the kernel filled, as text: dotted IPv4, IPv6 written as
+  # RFC 5952 has it, or a unix socket's path.
+  def self.__address_text(addr : Pointer(UInt8), family : Int32) : String
+    return IPv6Address.new(addr + 8_u64).to_s if family == AF_INET6
+    if family == AF_UNIX
       # The path after the family, to its NUL: the listener's, and for an
       # accepted end whatever the platform reports (Linux: the listener's
       # path; an empty one answers "").
@@ -1108,6 +1142,7 @@ pub class IyiSocket
       fun send(fd : Int32, buf : Void*, len : UInt64, flags : Int32) : Int64
       fun recv(fd : Int32, buf : Void*, len : UInt64, flags : Int32) : Int64
       fun getsockname(fd : Int32, addr : Void*, addrlen : UInt32*) : Int32
+      fun getpeername(fd : Int32, addr : Void*, addrlen : UInt32*) : Int32
       fun setsockopt(fd : Int32, level : Int32, optname : Int32, optval : Void*, optlen : UInt32) : Int32
       fun getsockopt(fd : Int32, level : Int32, optname : Int32, optval : Void*, optlen : UInt32*) : Int32
       fun fcntl(fd : Int32, cmd : Int32, ...) : Int32
@@ -1182,6 +1217,10 @@ pub class IyiSocket
 
     def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
       LibC.getsockname(fd, addr.as(Void*), addrlen)
+    end
+
+    def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      LibC.getpeername(fd, addr.as(Void*), addrlen)
     end
 
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
@@ -1265,6 +1304,7 @@ pub class IyiSocket
       SYS_BIND        =  49_i64
       SYS_LISTEN      =  50_i64
       SYS_GETSOCKNAME =  51_i64
+      SYS_GETPEERNAME =  52_i64
       SYS_SETSOCKOPT  =  54_i64
       SYS_GETSOCKOPT  =  55_i64
       SYS_FCNTL       =  72_i64
@@ -1276,6 +1316,7 @@ pub class IyiSocket
       SYS_ACCEPT      = 202_i64
       SYS_CONNECT     = 203_i64
       SYS_GETSOCKNAME = 204_i64
+      SYS_GETPEERNAME = 205_i64
       SYS_SENDTO      = 206_i64
       SYS_RECVFROM    = 207_i64
       SYS_SETSOCKOPT  = 208_i64
@@ -1394,6 +1435,10 @@ pub class IyiSocket
       __sys3(SYS_GETSOCKNAME, fd.to_i64, addr.address.to_i64, addrlen.address.to_i64).to_i32
     end
 
+    def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      __sys3(SYS_GETPEERNAME, fd.to_i64, addr.address.to_i64, addrlen.address.to_i64).to_i32
+    end
+
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
       val = 1_i32
       __sys5(SYS_SETSOCKOPT, fd.to_i64, 1_i64, 2_i64, pointerof(val).address.to_i64, 4_i64).to_i32
@@ -1506,6 +1551,7 @@ pub class IyiSocket
       fun shutdown(s : UInt64, how : Int32) : Int32
       fun closesocket(s : UInt64) : Int32
       fun getsockname(s : UInt64, addr : Void*, addrlen : Int32*) : Int32
+      fun getpeername(s : UInt64, addr : Void*, addrlen : Int32*) : Int32
       fun setsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*, optlen : Int32) : Int32
       fun getsockopt(s : UInt64, level : Int32, optname : Int32, optval : Void*, optlen : Int32*) : Int32
       fun ioctlsocket(s : UInt64, cmd : Int32, argp : Int32*) : Int32
@@ -1894,6 +1940,10 @@ pub class IyiSocket
 
     def self.__sys_getsockname(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
       LibWs2_32.getsockname(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
+    end
+
+    def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      LibWs2_32.getpeername(__sys_handle(fd), addr.as(Void*), addrlen.as(Pointer(Int32)))
     end
 
     # Not SO_REUSEADDR, which on Windows lets a *different* socket bind a

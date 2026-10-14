@@ -1331,6 +1331,8 @@ group do |g|
         Response.new(200, "bye")
       elsif req.path == "/close"
         Response.new(200, "closing", {"Connection" => "close"})
+      elsif req.path == "/who"
+        Response.new(200, req.remote_address || "-")
       elsif req.path == "/mid"
         Response.new(200, "m" * 30000, {"Content-Type" => "image/png"})
       elsif req.path == "/big"
@@ -1348,9 +1350,10 @@ group do |g|
     10.times { |i| assert_str "GET /n#{i} ", kc.get(kept_base + "/n#{i}").or_panic.body, "request #{i} on a kept connection" }
     assert_true kc.connections_made == 1 && kc.connections_reused == 9, "ten requests, one connection: #{kc.connections_made} made, #{kc.connections_reused} reused"
     assert_str "POST /p data", kc.post(kept_base + "/p", "data").or_panic.body, "a POST on it"
+    assert_str "127.0.0.1", kc.get(kept_base + "/who").or_panic.body, "the request names the client's address"
     assert_str "closing", kc.get(kept_base + "/close").or_panic.body, "an answer that says close"
     assert_str "GET /after ", kc.get(kept_base + "/after").or_panic.body, "the request after it"
-    assert_true kc.connections_made == 2 && kc.connections_reused == 11, "goes on a new connection, the closed one not tried: #{kc.connections_made} made, #{kc.connections_reused} reused"
+    assert_true kc.connections_made == 2 && kc.connections_reused == 12, "goes on a new connection, the closed one not tried: #{kc.connections_made} made, #{kc.connections_reused} reused"
     zipped = kc.get(kept_base + "/text").or_panic
     assert_true zipped.decoded? && zipped.body.bytesize == 200000, "a gzip answer on a kept connection"
     kc.open("GET", kept_base + "/mid") { |r| r.body_io.read(10).or_panic.bytesize }.or_panic

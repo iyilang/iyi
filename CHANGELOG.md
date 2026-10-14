@@ -4,6 +4,14 @@
 
 ### Added
 
+- **`std/mime`: media types by extension, and what goes with them.**
+  `MIME.from_extension("a.svg")` answers `image/svg+xml`, `extensions`
+  the other way, `compressible?` whether gzip is worth it, `with_charset`
+  adds `charset=utf-8` to text, JSON, JavaScript and XML, and `parse?`
+  reads a `Content-Type` as RFC 9110 §8.3.1 has it. The table is written
+  out, not read from the machine, so a server answers the same type
+  everywhere; `bench/std_mime_exercise.sh` checks it against Python's
+  `mimetypes`, five differences named and kept.
 - **`std/compress`: `Inflater` and `Deflater`, a stream a piece at a
   time.** `Inflater.new(Envelope::Gzip) { next_bytes }` reads compressed
   bytes from its block only when it has none left, and `read(max)`

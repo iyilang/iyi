@@ -1,0 +1,348 @@
+# Media types for naming and serving files: the type a file name's
+# extension stands for, the extensions a type is written with, whether a
+# type is worth compressing on the wire, the type with its charset, and
+# RFC 9110's `type/subtype; name=value` parsed.
+#
+# The table is fixed and lives here. Crystal's `MIME` and Python's
+# `mimetypes` read `/etc/mime.types` and its relatives, so the same name
+# answers differently on two machines; this one reads no file and answers
+# the same everywhere. The values are IANA's registrations where one
+# exists and what browsers and Go's `mime` send where none does:
+# `.js` and `.mjs` are `text/javascript` (RFC 9239), `.xml` is
+# `application/xml` (RFC 7303 prefers it to `text/xml`), `.ico` is IANA's
+# `image/vnd.microsoft.icon` rather than the older `image/x-icon`, which
+# browsers accept as well. Every entry is checked against Python's table
+# by bench/std_mime_exercise.sh, which lists the few deliberate
+# differences and why.
+#
+# Left out: registering types at run time, which would make the answer
+# depend on what ran before, and sniffing a type from the bytes of a
+# file. Extensions are looked up by the last dot of the base name only,
+# so `a.tar.gz` is `application/gzip`, as every server answers it.
+
+module std/mime
+
+pub struct MIME
+  # Extension without its dot, lowercase, then the media type. The first
+  # entry of a type is not special; `extensions` sorts them.
+  TABLE = [
+    {"html", "text/html"}, {"htm", "text/html"},
+    {"css", "text/css"},
+    {"js", "text/javascript"}, {"mjs", "text/javascript"},
+    {"json", "application/json"},
+    # A source map is JSON; browsers fetch it as such.
+    {"map", "application/json"},
+    {"jsonld", "application/ld+json"},
+    {"webmanifest", "application/manifest+json"},
+    {"xml", "application/xml"},
+    {"rss", "application/rss+xml"},
+    {"atom", "application/atom+xml"},
+    {"txt", "text/plain"}, {"ini", "text/plain"},
+    {"csv", "text/csv"},
+    {"md", "text/markdown"},
+    {"ics", "text/calendar"},
+    {"vcf", "text/vcard"},
+    {"yaml", "application/yaml"}, {"yml", "application/yaml"},
+    {"toml", "application/toml"},
+    {"sh", "application/x-sh"},
+    {"py", "text/x-python"},
+    {"rb", "application/x-ruby"},
+    {"c", "text/x-csrc"},
+    {"h", "text/x-chdr"},
+    {"cpp", "text/x-c++src"},
+    {"java", "text/x-java"},
+    {"go", "text/x-go"},
+    {"rs", "text/x-rust"},
+    {"svg", "image/svg+xml"},
+    {"png", "image/png"},
+    {"jpg", "image/jpeg"}, {"jpeg", "image/jpeg"},
+    {"gif", "image/gif"},
+    {"webp", "image/webp"},
+    {"avif", "image/avif"},
+    {"ico", "image/vnd.microsoft.icon"},
+    {"bmp", "image/bmp"},
+    {"tif", "image/tiff"}, {"tiff", "image/tiff"},
+    {"woff", "font/woff"},
+    {"woff2", "font/woff2"},
+    {"ttf", "font/ttf"},
+    {"otf", "font/otf"},
+    {"eot", "application/vnd.ms-fontobject"},
+    {"pdf", "application/pdf"},
+    {"rtf", "application/rtf"},
+    {"epub", "application/epub+zip"},
+    {"zip", "application/zip"},
+    {"gz", "application/gzip"}, {"tgz", "application/gzip"},
+    {"tar", "application/x-tar"},
+    {"bz2", "application/x-bzip2"},
+    {"xz", "application/x-xz"},
+    {"7z", "application/x-7z-compressed"},
+    {"rar", "application/vnd.rar"},
+    {"wasm", "application/wasm"},
+    {"mp3", "audio/mpeg"},
+    {"wav", "audio/wav"},
+    {"ogg", "audio/ogg"}, {"oga", "audio/ogg"}, {"opus", "audio/ogg"},
+    {"ogv", "video/ogg"},
+    {"flac", "audio/flac"},
+    {"m4a", "audio/mp4"},
+    {"aac", "audio/aac"},
+    {"mp4", "video/mp4"}, {"m4v", "video/mp4"},
+    {"webm", "video/webm"},
+    {"mov", "video/quicktime"},
+    {"avi", "video/x-msvideo"},
+    {"mkv", "video/matroska"},
+    {"mpeg", "video/mpeg"}, {"mpg", "video/mpeg"},
+    {"doc", "application/msword"},
+    {"docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    {"xls", "application/vnd.ms-excel"},
+    {"xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    {"ppt", "application/vnd.ms-powerpoint"},
+    {"pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+    {"odt", "application/vnd.oasis.opendocument.text"},
+    {"ods", "application/vnd.oasis.opendocument.spreadsheet"},
+    {"odp", "application/vnd.oasis.opendocument.presentation"},
+    {"apk", "application/vnd.android.package-archive"},
+    {"dmg", "application/x-apple-diskimage"},
+    {"exe", "application/vnd.microsoft.portable-executable"},
+    {"msi", "application/x-msi"},
+    {"iso", "application/x-iso9660-image"},
+    {"bin", "application/octet-stream"},
+    {"jar", "application/java-archive"},
+  ]
+
+  @@by_extension : Hash(String, String)?
+  @@by_type : Hash(String, Array(String))?
+
+  # Built on the first lookup, once; a lookup after that is a hash probe.
+  private def self.by_extension : Hash(String, String)
+    @@by_extension ||= begin
+      map = Hash(String, String).new
+      TABLE.each { |entry| map[entry[0]] = entry[1] }
+      map
+    end
+  end
+
+  private def self.by_type : Hash(String, Array(String))
+    @@by_type ||= begin
+      map = Hash(String, Array(String)).new
+      TABLE.each do |entry|
+        list = map[entry[1]]? || (map[entry[1]] = Array(String).new)
+        list << "." + entry[0]
+      end
+      map.each_value(&.sort_in_place)
+      map
+    end
+  end
+
+  # The text lowercased, and the text itself when it has no uppercase
+  # ASCII, which is nearly always, so nothing is allocated for it.
+  private def self.lower(text : String) : String
+    bytes = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      b = bytes[i]
+      return text.downcase if b >= 'A'.ord.to_u8 && b <= 'Z'.ord.to_u8
+      i = i + 1
+    end
+    text
+  end
+
+  # The media type for a file name or extension: ".html", "html",
+  # "index.HTML" and "a/b.tar.gz" (by its last extension) all work, in
+  # any case. A path whose base name has no dot has no extension; a bare
+  # word is taken as the extension itself. Nil when unknown.
+  def self.from_extension?(name : String) : String?
+    bytes = name.to_unsafe
+    size = name.bytesize
+    dot = -1
+    i = size - 1
+    while i >= 0
+      b = bytes[i]
+      if b == '.'.ord.to_u8
+        dot = i
+        break
+      end
+      return nil if b == '/'.ord.to_u8 || b == '\\'.ord.to_u8
+      i = i - 1
+    end
+    ext = dot < 0 ? name : slice(name, dot + 1, size - dot - 1)
+    return nil if ext.empty?
+    by_extension[lower(ext)]?
+  end
+
+  # The same, falling back to *default*.
+  def self.from_extension(name : String, default : String = "application/octet-stream") : String
+    from_extension?(name) || default
+  end
+
+  # The extensions a media type is written with, dotted and sorted
+  # ("text/html" is [".htm", ".html"]). Parameters are ignored and case
+  # does not matter; empty when the type is unknown. The array is a fresh
+  # copy the caller may change.
+  def self.extensions(media_type : String) : Array(String)
+    essence = essence_of(media_type)
+    return Array(String).new if essence.nil?
+    list = by_type[essence]?
+    list ? list.dup : Array(String).new
+  end
+
+  # Whether a body of this type shrinks under gzip or deflate: text,
+  # JSON, JavaScript, XML and their `+json`/`+xml` kin (SVG among them),
+  # YAML, TOML, scripts, WebAssembly, uncompressed fonts and archives,
+  # bitmaps and icons. Not images, audio and video that are already
+  # compressed, nor zip, gzip and the other archives, nor WOFF and WOFF2,
+  # which are compressed fonts. WebAssembly is included because its code
+  # roughly halves under gzip, which is why servers compress it.
+  def self.compressible?(media_type : String) : Bool
+    essence = essence_of(media_type)
+    return false if essence.nil?
+    return true if essence.starts_with?("text/")
+    return true if essence.ends_with?("+json") || essence.ends_with?("+xml") || essence.ends_with?("+yaml")
+    case essence
+    when "application/json", "application/javascript", "application/ecmascript",
+         "application/xml", "application/yaml", "application/toml",
+         "application/x-sh", "application/x-ruby", "application/wasm",
+         "application/x-tar", "application/vnd.ms-fontobject",
+         "font/ttf", "font/otf", "image/bmp", "image/vnd.microsoft.icon", "image/x-icon"
+      true
+    else
+      false
+    end
+  end
+
+  # The media type with `; charset=utf-8` added when it is text, JSON,
+  # JavaScript or XML (`+json` and `+xml` included) and names no charset
+  # yet. Anything else, and anything that does not parse, comes back as
+  # given.
+  def self.with_charset(media_type : String) : String
+    parsed = parse?(media_type)
+    return media_type if parsed.nil?
+    essence, params = parsed
+    return media_type if params.has_key?("charset")
+    textual = essence.starts_with?("text/") || essence.ends_with?("+json") || essence.ends_with?("+xml") ||
+              essence == "application/json" || essence == "application/javascript" || essence == "application/xml"
+    textual ? media_type + "; charset=utf-8" : media_type
+  end
+
+  # RFC 9110 §8.3.1: `type/subtype` followed by `; name=value` parameters,
+  # whitespace allowed around the semicolons and at either end, a value a
+  # token or a quoted string whose backslash escapes are undone. Answers
+  # the type lowercased and the parameters with lowercased names and
+  # values as written; a name given twice keeps its last value. Nil when
+  # any part is not a token, a parameter has no `=`, or a quote is left
+  # open.
+  def self.parse?(value : String) : {String, Hash(String, String)}?
+    bytes = value.to_unsafe
+    size = value.bytesize
+    pos = skip_ows(bytes, 0, size)
+    type_start = pos
+    pos = skip_token(bytes, pos, size)
+    return nil if pos == type_start || pos >= size || bytes[pos] != '/'.ord.to_u8
+    pos = pos + 1
+    sub_start = pos
+    pos = skip_token(bytes, pos, size)
+    return nil if pos == sub_start
+    essence = lower(slice(value, type_start, pos - type_start))
+    params = Hash(String, String).new
+    loop do
+      pos = skip_ows(bytes, pos, size)
+      break if pos >= size
+      return nil unless bytes[pos] == ';'.ord.to_u8
+      pos = skip_ows(bytes, pos + 1, size)
+      # An empty parameter, as in `a/b;` or `a/b; ; c=d`, is allowed.
+      next if pos >= size || bytes[pos] == ';'.ord.to_u8
+      name_start = pos
+      pos = skip_token(bytes, pos, size)
+      return nil if pos == name_start || pos >= size || bytes[pos] != '='.ord.to_u8
+      name = lower(slice(value, name_start, pos - name_start))
+      pos = pos + 1
+      if pos < size && bytes[pos] == '"'.ord.to_u8
+        unquoted = unquote(value, pos)
+        return nil if unquoted.nil?
+        params[name] = unquoted[0]
+        pos = unquoted[1]
+      else
+        value_start = pos
+        pos = skip_token(bytes, pos, size)
+        return nil if pos == value_start
+        params[name] = slice(value, value_start, pos - value_start)
+      end
+    end
+    {essence, params}
+  end
+
+  # The type and subtype lowercased, or nil when the value does not parse.
+  private def self.essence_of(media_type : String) : String?
+    parsed = parse?(media_type)
+    parsed ? parsed[0] : nil
+  end
+
+  private def self.skip_ows(bytes : Pointer(UInt8), pos : Int32, size : Int32) : Int32
+    while pos < size && (bytes[pos] == ' '.ord.to_u8 || bytes[pos] == '\t'.ord.to_u8)
+      pos = pos + 1
+    end
+    pos
+  end
+
+  private def self.skip_token(bytes : Pointer(UInt8), pos : Int32, size : Int32) : Int32
+    while pos < size && token_byte?(bytes[pos])
+      pos = pos + 1
+    end
+    pos
+  end
+
+  # tchar: a letter, a digit, or one of ``!#$%&'*+-.^_`|~``.
+  private def self.token_byte?(b : UInt8) : Bool
+    return true if b >= 'a'.ord.to_u8 && b <= 'z'.ord.to_u8
+    return true if b >= 'A'.ord.to_u8 && b <= 'Z'.ord.to_u8
+    return true if b >= '0'.ord.to_u8 && b <= '9'.ord.to_u8
+    case b.unsafe_chr
+    when '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~'
+      true
+    else
+      false
+    end
+  end
+
+  # The bytes of *text* from *start*, *count* of them, as a string.
+  private def self.slice(text : String, start : Int32, count : Int32) : String
+    String.new(count) { |dst| dst.copy_from(text.to_unsafe + start, count) }
+  end
+
+  # The quoted string opening at *start*, unescaped, and the position
+  # after its closing quote. A control byte other than a tab inside, or a
+  # string that never closes, is nil. The first pass measures and checks,
+  # the second copies, so the value is allocated once.
+  private def self.unquote(value : String, start : Int32) : {String, Int32}?
+    bytes = value.to_unsafe
+    size = value.bytesize
+    pos = start + 1
+    count = 0
+    close = -1
+    while pos < size
+      b = bytes[pos]
+      if b == '"'.ord.to_u8
+        close = pos
+        break
+      elsif b == '\\'.ord.to_u8
+        return nil if pos + 1 >= size
+        pos = pos + 1
+        b = bytes[pos]
+      end
+      return nil if (b < 0x20_u8 && b != '\t'.ord.to_u8) || b == 0x7f_u8
+      count = count + 1
+      pos = pos + 1
+    end
+    return nil if close < 0
+    text = String.new(count) do |dst|
+      at = start + 1
+      i = 0
+      while at < close
+        at = at + 1 if bytes[at] == '\\'.ord.to_u8
+        dst[i] = bytes[at]
+        i = i + 1
+        at = at + 1
+      end
+    end
+    {text, close + 1}
+  end
+end

@@ -4,6 +4,56 @@
 
 ### Added
 
+- **`std/http`: bodies are streams both ways, and the client and server
+  do what the web expects of them.** A body was a string, read whole
+  before the block ran and handed out whole, so a download cost its size
+  and an upload could not start before its last byte. Now
+  `HTTP.open(method, url) { |response| ... }` hands the block the answer
+  with its body still on the wire, read a piece at a time from
+  `response.body_io` (a `BodyReader`), and a request's body may be an
+  `IyiIO`, sent chunked as it is read. `Server.serve(listener,
+  stream_bodies: true)` hands the block a request whose body it reads as
+  it arrives - what it leaves unread is read past up to a megabyte, past
+  which the connection is closed - and an answer may be an `IyiIO`
+  copied out and closed, or `Response.stream { |w| ... }`, whose writes go
+  out as chunks as they are made (to the close for an HTTP/1.0 client).
+  `Response.upgrade(headers) { |socket, leftover| ... }` answers 101 and
+  hands the connection over, and `HTTP.upgrade(url, protocol)` is the
+  client's side; std/websocket is built on the two. What the other end
+  does wrong is an `HTTPError` value beside `Cancelled` and
+  `SocketError` - a malformed head, a body cut short, a broken chunk, a
+  corrupt gzip - with the same sentences `.or_panic` printed before.
+  The client asks for `gzip, deflate` and undoes either as it arrives
+  (deflate in zlib's envelope, or bare, told apart by zlib's header
+  check); `Server.serve(compress: true)` sends gzip to a client that
+  takes it (`q=0` refuses, `*` accepts), for types std/mime calls
+  compressible, past a kilobyte, a stream a write at a time, with `Vary:
+  Accept-Encoding`. Redirects are followed as RFC 9110 §15.4 has them,
+  ten by default: 301 and 302 make a POST a GET, 303 anything but a HEAD,
+  307 and 308 keep the method and body (a stream that cannot be sent
+  again hands the 3xx back), and `Authorization`, `Proxy-Authorization`
+  and `Cookie` do not cross to another host; `jar:` takes a
+  `CookieStore` (std/cookie's `CookieJar`). `Request#form` reads a
+  urlencoded body after the query; `Request#multipart` reads
+  `multipart/form-data` a part at a time as it arrives, a boundary split
+  across reads included, and `MultipartBuilder` writes one under a
+  boundary made from the parts' SHA-1, so none of them holds it and the
+  same fields make the same body. The module still reaches what
+  std/socket reaches and nothing of its own - no file, and no clock,
+  environment or randomness past a name lookup's - and the gate checks
+  its imports say so: cookies are std/cookie's and files
+  std/fileserver's, since each needs what std/http does not. A server's
+  connection now reads into one buffer of its own, so the socket is
+  never asked for a string per read; a chunk size whose CRLF came in the
+  next read is found where the buffer moved it, where the body was read
+  as cut short. A connection handed over by an upgrade is closed with
+  the listener, where `serve` waited for its client to leave. Held by
+  `bench/std_http_exercise.sh`: five new sections, Python's
+  `http.client`, `gzip`, `zlib` and `email` package against the server,
+  the client against a Python server sending gzip, deflate both ways, a
+  303 and a chunked upload, and thirteen more broken copies of the module
+  caught; the socket's own small-read allocation, which the server no
+  longer exercises, is held by `bench/socket_exercise.sh` now.
 - **`std/mime`: media types by extension, and what goes with them.**
   `MIME.from_extension("a.svg")` answers `image/svg+xml`, `extensions`
   the other way, `compressible?` whether gzip is worth it, `with_charset`

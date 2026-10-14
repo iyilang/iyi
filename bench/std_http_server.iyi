@@ -1,5 +1,6 @@
 # A server for `bench/std_http_exercise.sh` to drive from Python: prints
-# its port, serves until `/stop`, echoes what it was sent.
+# its port, serves until `/stop`, echoes what it was sent. Compressing,
+# so Python's gzip reads what it sends, and reading multipart bodies.
 module bench/std_http_server
 
 import std/http::{Server, Response}
@@ -7,7 +8,7 @@ import std/socket::{IyiSocket}
 
 listener = IyiSocket.listen(0)
 puts listener.local_port
-Server.serve(listener) do |req|
+Server.serve(listener, compress: true) do |req|
   if req.path == "/stop"
     listener.close
     Response.new(200, "stopping")
@@ -15,6 +16,23 @@ Server.serve(listener) do |req|
     Response.new(200, req.body, {"X-Method" => req.method, "X-Query" => req.query || "-", "Content-Type" => req.header("Content-Type") || "-"})
   elsif req.path == "/big"
     Response.new(200, "x" * 1000000)
+  elsif req.path == "/text"
+    Response.new(200, "all work and no play makes jack a dull boy\n" * 2500, {"Content-Type" => "text/plain"})
+  elsif req.path == "/stream"
+    Response.stream(200, {"Content-Type" => "text/plain"}) do |w|
+      10.times { |i| w.write("piece #{i} " * 100 + "\n") }
+      nil
+    end
+  elsif req.path == "/parts"
+    said = ""
+    if parts = req.multipart
+      while true
+        part = parts.next_part.or_panic
+        break unless part
+        said = said + "#{part.name || "-"}|#{part.filename || "-"}|#{part.content_type || "-"}|#{part.read_all.or_panic};"
+      end
+    end
+    Response.new(200, said)
   else
     Response.new(404, "no #{req.path}\n")
   end

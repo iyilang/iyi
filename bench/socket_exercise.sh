@@ -203,6 +203,9 @@ prove_fails "short read size mismatch" badshort "short_read:" \
 # 3. Broken closed peer detection (does not answer empty string on EOF)
 prove_fails "closed peer EOF missed" badoff "closed_peer:" \
   '{ sub(/return "" if count == 0$/, "return \"eof_missed\" if count == 0"); print }'
+# 4. A small read that takes the whole room it was given from the heap
+prove_fails "a socket read that takes all it may read from the heap" heapread "small_read:" \
+  '{ sub(/if count < first \|\| max_bytes == first$/, "if false"); print }'
 
 # 5. A write to a gone peer panicking, as it did
 prove_fails "a gone peer is a panic" panicwrite "cannot write to socket" \

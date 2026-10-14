@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every http section reported"
-for phrase in "== request" "== response" "== messages at the edges" "== over a socket" "== the server, from a raw socket" "== a burst of connections"; do
+for phrase in "== request" "== response" "== messages at the edges" "== over a socket" "== the server, from a raw socket" "== a burst of connections" "== bodies as streams" "== content codings" "== redirects" "== forms" "== upgrades"; do
   if ! grep -q "$phrase" "$WORK/http-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -87,6 +87,20 @@ echo "== the same program with optimisation on (--release)"
 build_and_run "release" http-release --release >/dev/null
 if ! grep -q "ALL CHECKS PASSED" "$WORK/http-release.out" 2>/dev/null; then
   echo "release: missing pass sentinel"
+  status=1
+fi
+
+echo
+echo "== what the module reaches"
+# What std/socket reaches and nothing of its own: cookies (the clock) and
+# files are std/cookie's and std/fileserver's, and a multipart boundary is
+# the parts' own hash, not the system's randomness. These are the modules
+# it may import, and none but std/socket reaches anything.
+imports=$(grep -oE '^import std/[a-z_]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
+if [ "$imports" = "std/compress std/digest std/mime std/socket std/uri " ]; then
+  echo "  std/socket, and std/compress, std/digest, std/mime and std/uri, which reach nothing"
+else
+  echo "  std/http imports $imports"
   status=1
 fi
 
@@ -175,7 +189,11 @@ if "$IYI" build -o "$WORK/server" "$REPO/bench/std_http_server.iyi" >"$WORK/serv
     echo "  skipped: no working python3, so its http.client was not run against the server"
     kill "$server_pid" 2>/dev/null
   elif PORT="$port" "$PY" - <<'PY'
-import http.client, os, sys
+import http.client, os, sys, gzip, zlib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email.mime.text import MIMEText
+import email.policy
 port = int(os.environ["PORT"])
 c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
 bad = 0
@@ -196,10 +214,27 @@ check(r.status == 200 and len(body) == 1000000 and body == b"x" * 1000000, f"a m
 c.request("PUT", "/echo", body=iter([b"ab", b"cd", b"e"]), encode_chunked=True)
 r = c.getresponse(); body = r.read()
 check(r.status == 200 and body == b"abcde" and r.getheader("X-Method") == "PUT", f"chunked: {r.status} {body!r}")
+# gzip, which Python's own gzip undoes: whole, and a stream a piece at a time
+c.request("GET", "/text", headers={"Accept-Encoding": "gzip"}); r = c.getresponse(); body = r.read()
+check(r.getheader("Content-Encoding") == "gzip" and gzip.decompress(body) == b"all work and no play makes jack a dull boy\n" * 2500, f"gzip: {r.getheader('Content-Encoding')} {len(body)} bytes")
+c.request("GET", "/stream", headers={"Accept-Encoding": "gzip"}); r = c.getresponse(); body = r.read()
+d = zlib.decompressobj(31)
+plain = d.decompress(body) + d.flush()
+check(r.getheader("Content-Encoding") == "gzip" and d.eof and plain == b"".join((("piece %d " % i) * 100 + "\n").encode() for i in range(10)), f"a gzip stream: {len(plain)} bytes, eof {d.eof}")
+# multipart as Python's email package writes it
+m = MIMEMultipart("form-data", boundary="py-boundary-1")
+f = MIMEText("hello", "plain"); del f["Content-Type"]; del f["MIME-Version"]; del f["Content-Transfer-Encoding"]
+f.add_header("Content-Disposition", "form-data", name="greeting"); m.attach(f)
+u = MIMEBase("application", "json"); u.set_payload('{"k": [1, 2]}'); del u["MIME-Version"]
+u.add_header("Content-Disposition", "form-data", name="doc", filename="d.json"); m.attach(u)
+whole = m.as_bytes(policy=email.policy.HTTP)
+body = whole[whole.index(b"\r\n\r\n") + 4:]
+c.request("POST", "/parts", body=body, headers={"Content-Type": m["Content-Type"]}); r = c.getresponse(); got = r.read()
+check(got == b'greeting|-|-|hello;doc|d.json|application/json|{"k": [1, 2]};', f"multipart from Python: {got!r}")
 c.request("GET", "/stop"); r = c.getresponse(); body = r.read()
 check(r.status == 200 and body == b"stopping", "stop")
 c.close()
-print("  four requests on one connection, a chunked one, a megabyte, and stop")
+print("  requests on one connection, a chunked one, a megabyte, gzip whole and streamed, multipart, and stop")
 sys.exit(1 if bad else 0)
 PY
   then
@@ -228,7 +263,7 @@ else
   cat > "$WORK/reset_client.iyi" <<'IYI'
 module main
 
-import std/http::{HTTP, Response}
+import std/http::{HTTP, Response, HTTPError}
 import std/socket::{SocketError}
 
 case got = HTTP.get("http://127.0.0.1:#{Program.args[0]}/x")
@@ -236,6 +271,8 @@ in Response
   puts "#{got.status} #{got.body}"
 in SocketError
   puts "SocketError: #{got.message}"
+in HTTPError
+  puts "HTTPError: #{got.message}"
 in Cancelled
   puts "Cancelled"
 end
@@ -270,6 +307,122 @@ PY
       echo "  a whole 200 that the server resets after is the 200"
     else
       echo "  the client answered: $said"
+      status=1
+    fi
+  fi
+fi
+
+echo
+echo "== the client against Python's server"
+# What Python's zlib writes - gzip, deflate in zlib's envelope and bare -
+# undone by the client as it arrives; a redirect chain; a multipart body
+# the client built, read back by Python's email parser; and a chunked
+# upload from a stream, read by Python's server.
+if [ -z "$PY" ]; then
+  echo "  skipped: no working python3 to serve with"
+else
+  printf 'one line of the upload\n%.0s' $(seq 1 4000) > "$WORK/upload.txt"
+  cat > "$WORK/py_client.iyi" <<'IYI'
+module main
+
+import std/http::{HTTP, MultipartBuilder}
+import std/file::{File}
+
+base = "http://127.0.0.1:#{Program.args[0]}"
+["/gzip", "/deflate", "/raw-deflate"].each do |path|
+  r = HTTP.get(base + path).or_panic
+  puts "#{path} #{r.decoded?} #{r.body.bytesize} #{r.body == "python's own words " * 1000}"
+end
+hop = HTTP.post(base + "/hop", "dropped").or_panic
+puts "hop #{hop.status} #{hop.body} #{hop.url}"
+built = MultipartBuilder.new
+built.field("name", "value")
+built.file("upload", "notes.txt", "a\r\nb--c\r\n")
+parts = HTTP.post(base + "/parts", built.finish, {"Content-Type" => built.content_type}).or_panic
+puts "parts #{parts.body}"
+up = HTTP.put(base + "/upload", File.open(Program.args[1])).or_panic
+puts "upload #{up.body}"
+HTTP.get(base + "/stop")
+IYI
+  if ! "$IYI" build -o "$WORK/py_client" "$WORK/py_client.iyi" > "$WORK/py_client.build" 2>&1; then
+    echo "  the client did not build"
+    sed -n '1,8p' "$WORK/py_client.build"
+    status=1
+  else
+    "$PY" - > "$WORK/py_server.out" 2>&1 <<'PY' &
+import gzip, zlib, sys, email.parser, email.policy
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+text = b"python's own words " * 1000
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a): pass
+    def answer(self, status, body, headers=()):
+        self.send_response(status)
+        for k, v in headers: self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        accepts = self.headers.get("Accept-Encoding", "")
+        if self.path == "/gzip":
+            self.answer(200, gzip.compress(text), [("Content-Encoding", "gzip")])
+        elif self.path == "/deflate":
+            self.answer(200, zlib.compress(text), [("Content-Encoding", "deflate")])
+        elif self.path == "/raw-deflate":
+            c = zlib.compressobj(9, zlib.DEFLATED, -15)
+            self.answer(200, c.compress(text) + c.flush(), [("Content-Encoding", "deflate")])
+        elif self.path == "/landed":
+            self.answer(200, f"{self.command} accepts={accepts}".encode())
+        elif self.path == "/stop":
+            self.answer(200, b"bye")
+            self.server.done = True
+        else:
+            self.answer(404, b"no")
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(n)
+        if self.path == "/hop":
+            self.answer(303, b"", [("Location", "/landed")])
+        elif self.path == "/parts":
+            msg = email.parser.BytesParser(policy=email.policy.HTTP).parsebytes(
+                b"Content-Type: " + self.headers["Content-Type"].encode() + b"\r\n\r\n" + body)
+            said = ";".join(f"{p.get_param('name', header='content-disposition')}|{p.get_filename()}|{p.get_content_type()}|{p.get_payload(decode=True)!r}" for p in msg.iter_parts())
+            self.answer(200, said.encode())
+    def do_PUT(self):
+        size = 0
+        chunks = 0
+        if self.headers.get("Transfer-Encoding") == "chunked":
+            while True:
+                n = int(self.rfile.readline().split(b";")[0], 16)
+                if n == 0:
+                    self.rfile.readline()
+                    break
+                size += len(self.rfile.read(n)); self.rfile.readline(); chunks += 1
+        self.answer(200, f"{size} bytes in {chunks} chunks".encode())
+
+s = HTTPServer(("127.0.0.1", 0), Handler)
+s.done = False
+print(s.server_address[1], flush=True)
+while not s.done:
+    s.handle_request()
+PY
+    py_pid=$!
+    pport=$(await_port "$WORK/py_server.out" "$py_pid")
+    said=$(timeout 60 "$WORK/py_client" "$pport" "$WORK/upload.txt" 2>&1)
+    wait "$py_pid" 2>/dev/null
+    expected="/gzip true 19000 true
+/deflate true 19000 true
+/raw-deflate true 19000 true
+hop 200 GET accepts=gzip, deflate http://127.0.0.1:$pport/landed
+parts name|None|text/plain|b'value';upload|notes.txt|text/plain|b'a\\r\\nb--c\\r\\n'
+upload 92000 bytes in 2 chunks"
+    if [ "$said" = "$expected" ]; then
+      echo "  gzip, deflate both ways, a 303 to a GET, multipart read by Python's email parser, a chunked upload"
+    else
+      echo "  the client and Python's server disagree:"
+      printf '%s\n' "$said" | sed 's/^/    got:  /'
+      printf '%s\n' "$expected" | sed 's/^/    want: /'
       status=1
     fi
   fi
@@ -345,28 +498,51 @@ PY
 mutate "a status parsed as zero" '{code, reason}' '{0, reason}'
 mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca + 0_u8 if ca >= 65_u8 && ca <= 90_u8'
 mutate "a chunked body left as it came" 'body = decode_chunked(body)' 'body = body + ""'
-mutate "a server that forgets keep-alive" 'wrote.is_a?(Int32) && !closing' 'wrote.is_a?(Int32) && false'
+mutate "a server that forgets keep-alive" 'socket.write(format_response(response, head, closing)).is_a?(Int32) && !closing' 'socket.write(format_response(response, head, closing)).is_a?(Int32) && false'
 mutate "a block's Connection: close dropped" 'closing = true if HTTP.has_token?(said, "close")' ''
 mutate "Connection read as one value" 'HTTP.has_token?(conn, "close")' 'HTTP.same_name?(HTTP.trim(conn), "close")'
-mutate "a server that answers every request 200" 'Response.new(parsed.status, reason' 'Response.new(200, reason'
-mutate "a server that parses the body so far after every read" 'while have < wanted' 'while have < rest.bytesize + 1'
-mutate "a server that parses a chunked body again after every read" '        read = HTTP.read_chunked(buffer, parsed.consumed, MAX_BODY) { wait_read(client, listener, idle) }' '        more = wait_read(client, listener, idle)
-        return unless more
-        buffer = buffer + more
-        next if more.bytesize > 0
-        read = HTTP.read_chunked(buffer, parsed.consumed, MAX_BODY) { wait_read(client, listener, idle) }'
-mutate "a server that holds a body at its declared length, not at what has arrived" 'have = have + more.bytesize' 'have = have + more.bytesize
-      String::Builder.new(wanted) if pieces.size == 2'
-mutate "a server that adds each read to the head so far and searches all of it" '        text, ends = HTTP.read_head(rest, 0, MAX_HEAD) { wait_read(client, listener, idle) }' '        more = wait_read(client, listener, idle)
-        return unless more
-        text = rest + more
-        ends = HTTP.find_headers_end(text)'
-mutate "a server that waits on a client partway through a body" 'got = read_body(client, rest, wanted, listener, idle)' 'got = read_body(client, rest, wanted, listener, nil)'
-mutate "a server that cuts each request off the front of the read" 'start = parsed.consumed' 'buffer = buffer[parsed.consumed, buffer.bytesize - parsed.consumed]'
-mutate "a client that copies its answer so far per read" 'answer << chunk' 'answer << answer.to_s[0, 0] + chunk'
-mutate "a client that reads a head for as long as it comes" 'got, ends = read_head(got, at, Server::MAX_HEAD)' 'got, ends = read_head(got, at, 2147483647)'
-mutate "a server that never says 100 Continue" 'if parsed.expects && !continued' 'if false'
-mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle)' '          accepted = client
+mutate "a server that answers every request 200" 'Response.new(error.status, error.reason' 'Response.new(200, error.reason'
+mutate "a server that joins the body so far after every read" '      pieces << got
+    end' '      pieces = [pieces.join + got]
+    end'
+mutate "a server that keeps a chunked body so far beside it, copied per piece" '      want = @left if want > @left
+      want = max.to_i64 if want > max.to_i64
+      piece = conn.take(want.to_i32)
+      @left = @left - piece.bytesize.to_i64
+      @total = @total + piece.bytesize.to_i64
+      if @left == 0_i64' '      want = @left if want > @left
+      want = max.to_i64 if want > max.to_i64
+      piece = conn.take(want.to_i32)
+      @text = @text + piece
+      @left = @left - piece.bytesize.to_i64
+      @total = @total + piece.bytesize.to_i64
+      if @left == 0_i64'
+mutate "a server that holds a body at its declared length, not at what has arrived" '      pieces << got
+    end' '      Pointer(UInt8).malloc(@declared.to_u64) if pieces.size == 1
+      pieces << got
+    end'
+mutate "a server that copies the head so far at every read" '      @searched = @stop
+      return HTTPError.new("#{what} headers past #{limit} bytes", 431) if available > limit' '      @searched = @stop
+      String.new(available) do |copy|
+        copy.copy_from(@data + @start.to_i64, available)
+        nil
+      end
+      return HTTPError.new("#{what} headers past #{limit} bytes", 431) if available > limit'
+mutate "a server that waits on a client partway through a request" 'conn = Conn.new(client, listener, idle)' 'conn = Conn.new(client, listener, nil)'
+mutate "a server that moves the rest of the read to a buffer of its own per request" '  def consume(count : Int32) : Nil
+    @start = @start + count' '  def consume(count : Int32) : Nil
+    rest = Pointer(UInt8).malloc(@capacity.to_u64)
+    rest.copy_from(@data + @start.to_i64, @stop - @start)
+    @data = rest
+    @stop = @stop - @start
+    @searched = @searched - @start
+    @start = 0
+    @start = @start + count'
+mutate "a client that reads a head for as long as it comes" 'conn.read_head(Server::MAX_HEAD, "response")' 'conn.read_head(2147483647, "response")'
+mutate "a server that never says 100 Continue" '    if head.expects
+      socket = conn.socket' '    if false
+      socket = conn.socket'
+mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress)' '          accepted = client
           g.spawn do
             handle(accepted, handler)
             0
@@ -374,7 +550,6 @@ mutate "a server whose tasks share the accept loop's variable" '          spawn_
 mutate "a coding this client cannot undo read as chunked" 'return "transfer coding #{coding.inspect} is not one this client decodes" unless same_name?(coding, "chunked")' 'next unless same_name?(coding, "chunked")'
 mutate "a body chunked twice decoded as if once" 'return "Transfer-Encoding #{te.inspect} is chunked twice" if chunked > 1' ''
 mutate "a length past Int32's read as no number" 'return 2147483648_i64 if n > 2147483647_i64' 'return nil if n > 2147483647_i64'
-mutate "a socket read that takes all it may read from the heap" 'if count < first || max_bytes == first' 'if false' socket.iyi
 mutate "a malformed chunked body that raises in the server" 'return "not a chunk size: #{size_text.inspect}" unless size' 'raise "HTTP: not a chunk size: #{size_text.inspect}" unless size'
 mutate "a chunk's end added past Int32's" 'return nil if size > n - i - 2' 'return nil if i + size + 2 > n'
 mutate "a decoded chunk's end added past Int32's" 'raise "HTTP: chunked body ends inside a chunk" if size > n - i' 'raise "HTTP: chunked body ends inside a chunk" if i + size > n'
@@ -388,8 +563,8 @@ mutate "a status written outside 100 to 999" 'unless response.status >= 100 && r
 mutate "a reason written with a line break in it" '    raise "HTTP: the reason contains a line break" if HTTP.has_break?(response.reason)
     raise "HTTP: the reason contains a control character" if HTTP.control?(response.reason)
 ' ''
-mutate "control characters let into a reason" 'raise "HTTP: not a status line: #{line}" if control?(reason)' ''
-mutate "Host: a and Host: b on one request served as one" 'return ParsedRequest.new(nil, "Host on #{hosts} lines", true, 0) if hosts > 1' ''
+mutate "control characters let into a reason" 'return HTTPError.new("not a status line: #{line}") if control?(reason)' ''
+mutate "Host: a and Host: b on one request served as one" 'return HTTPError.new("Host on #{hosts} lines") if hosts > 1' ''
 mutate "an HTTP/1.1 request with no Host served" 'hosts == 0 && version == "HTTP/1.1"' 'false'
 mutate "a Host that is not a host served" 'unless HTTP.host?(value)' 'if false'
 mutate "an absolute-form target's authority left for the Host line's" 'headers[host_name] = named' ''
@@ -399,13 +574,27 @@ mutate "chunks beside a length that keep the connection" 'close = true if stub.h
 mutate "a signed or low status read as one" 'code_text.bytesize == 3 && digits?(code_text) && code >= 100' 'code_text.bytesize == 3'
 mutate "any version under HTTP/" 'sp1 && sp1 == 8 && digits?(line[5, 1]) && line.to_unsafe[6] == 46_u8 && digits?(line[7, 1])' 'sp1'
 mutate "an interim answer taken for the answer" 'break unless status >= 100 && status < 200 && status != 101 && start < text.bytesize' 'break'
-mutate "a 204 written with a body and a length" 'bodiless = (response.status >= 100 && response.status < 200) || response.status == 204 || response.status == 304' 'bodiless = false'
+mutate "a 204 written with a body and a length" '    (status >= 100 && status < 200) || status == 204 || status == 304' '    false'
 mutate "an empty line before a request read as one" 'while at + 1 < text.bytesize && p[at] == 13_u8' 'while false && p[at] == 13_u8'
-mutate "a client that reads an answer with a length to the close" 'while answer.bytesize.to_i64 < need' 'while true'
-mutate "a client that reads a chunked answer to the close" 'if te = final.header("Transfer-Encoding")' 'if te = nil.as(String?)'
+mutate "a client that reads an answer with a length to the close" 'return BodyReader.new(conn, BodyReader::LENGTH, n, unlimited)' 'return BodyReader.new(conn, BodyReader::CLOSE, n, unlimited)'
+mutate "a client that reads a chunked answer to the close" 'return BodyReader.new(conn, BodyReader::CHUNKED, 0_i64, unlimited)' 'return BodyReader.new(conn, BodyReader::CLOSE, 0_i64, unlimited)'
 mutate "an absolute-form target handed on whole" 'if authority = HTTP.absolute_form(target)' 'if authority = nil.as(Int32?)'
 mutate "a caller's length written beside a body it does not measure" 'unless head || response.status == 304' 'unless true'
 mutate "a caller's chunked framing written beside a length" 'raise "HTTP: #{name} is not written; the body goes with its length" if HTTP.same_name?(name, "Transfer-Encoding")' ''
+mutate "a line's search kept as a place in a buffer that moves" 'searched = at - @start' 'searched = at'
+mutate "a connection handed over and left open past the listener's close" 'conn.held { takeover.call(socket, leftover) }' 'takeover.call(socket, leftover)'
+mutate "a block's unread body read for as long as it comes" 'reader.drain(MAX_DRAIN.to_i64)' 'reader.drain(9223372036854775807_i64)'
+mutate "a q of 0 taken for gzip" 'weight = zero_weight?(kv[2, kv.bytesize - 2]) ? 0.0 : 1.0' 'weight = 1.0'
+mutate "a short body compressed" 'response.body.bytesize >= COMPRESS_FROM' 'response.body.bytesize >= 0'
+mutate "an image compressed" 'return false unless type && MIME.compressible?(type)' 'return false unless type'
+mutate "a gzip answer that does not vary" 'headers["Vary"] = "Accept-Encoding"' ''
+mutate "a bare deflate stream read as zlib's" 'envelope = Envelope::Raw unless zlib' ''
+mutate "a decoded body that keeps the coded body's fields" 'fields.reject_in_place { |key, _| same_name?(key, "Content-Encoding") || same_name?(key, "Content-Length") }' ''
+mutate "a redirect that never changes the method" 'unless keeps || (status != 303 && !same_name?(verb, "POST")) || same_name?(verb, "HEAD")' 'unless true'
+mutate "credentials carried to another host" 'sent = without(sent, ["Authorization", "Proxy-Authorization", "Cookie"]) unless same_authority?(current, target)' ''
+mutate "a part that does not end at its boundary" '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]
+          @part_done = true' '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]'
+mutate "a boundary that falls across reads missed" 'safe = @held.bytesize - (@delimiter.bytesize - 1)' 'safe = @held.bytesize'
 
 echo
 if [ "$status" -eq 0 ]; then

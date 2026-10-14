@@ -12,6 +12,7 @@
 
 import std/socket::{IyiSocket, SocketError, IPv6Address}
 import std/env::{ENV}
+import std/gc::{GC}
 
 args = Program.args
 if args.size > 0 && args[0] == "refused"
@@ -62,6 +63,23 @@ c3 = conn.read(4).or_panic
 raise "short_read: chunk 3 size mismatch" if c3.bytesize != 4
 raise "short_read: chunk 3 content mismatch" if c3 != "CDEF"
 puts "short_read: ok"
+
+# A small read asked for with room for much more costs what arrived: a
+# heap buffer of the whole 64 KB per read was garbage the size of the
+# room for every answer - a server reading 64 KB at a time made 64 KB of
+# it per 30-byte request. std/http's buffer of its own measured it there
+# until the server stopped asking the socket for strings.
+GC.disable
+lean_before = GC.stats.bytes_since_collection
+100.times do
+  client.write("thirty bytes of one request..\n")
+  got = conn.read(65536).or_panic
+  raise "small_read: #{got.bytesize} bytes, not 30" unless got.bytesize == 30
+end
+lean_bytes = (GC.stats.bytes_since_collection - lean_before) // 100_u64
+GC.enable
+raise "small_read: a 30-byte read with room for 64 KB allocated #{lean_bytes} bytes" unless lean_bytes < 1024_u64
+puts "small_read: ok (#{lean_bytes} bytes a read)"
 
 # 4. Closed peer detection (EOF)
 client.close

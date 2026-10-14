@@ -1,56 +1,999 @@
-# HTTP/1.1 over `IyiSocket`, written in iyi: a client, and a server.
+# HTTP/1.1 over `IyiSocket`, written in iyi: a client, a server, and the
+# bodies between them as streams.
 #
-# `HTTP.get`, `head`, `post`, `put`, `delete` and the `request` under
-# them speak `http://` only, to a host name (resolved as `IyiSocket.connect`
-# resolves one, through iyi's own resolver), an IPv4 address, an IPv6 one
-# in brackets (`http://[::1]:8080/`) or `localhost`. TLS is not in 0.x. A
-# request carries the caller's headers and body; the response's headers
-# are read by name without regard to case, a field on several lines is
-# one field with its values joined by ", " (`header_values` keeps the
-# lines apart, as a `Set-Cookie` must be read), interim 1xx answers are
-# read past, and a chunked body arrives joined. `format_request` /
-# `parse_response` are the text; `request` writes one and reads the
-# other. A status line that is not HTTP is refused with the first line,
-# a header with a control character in its value is refused either way,
-# and one that would break the request's own lines is refused before it
-# is written.
+# **The client.** `HTTP.get`, `head`, `post`, `put`, `delete` and the
+# `request` under them speak `http://` only, to a host name (resolved as
+# `IyiSocket.connect` resolves one, through iyi's own resolver), an IPv4
+# address, an IPv6 one in brackets (`http://[::1]:8080/`) or `localhost`.
+# TLS is not in 0.x. Each answers the whole `Response`; `HTTP.open(...) {
+# |response| ... }` answers the block's value instead, the body still on
+# the wire: `response.body_io.read` takes it a piece at a time, so a
+# download of any size costs what one piece costs. A request's body is a
+# `String`, sent with its length, or an `IyiIO`, sent chunked as it is
+# read. Redirects (301, 302, 303, 307, 308) are followed, ten at most by
+# default, the method becoming GET where a browser's does; credentials and
+# cookies a caller wrote are not carried to another host. A body coded
+# `gzip` or `deflate` is decoded as it arrives, unless the caller asked
+# for a coding itself; a `jar:` (std/cookie's `CookieJar`) keeps what
+# `Set-Cookie` sets and sends it back. Response headers are read by name without regard to
+# case, a field on several lines is one field with its values joined by
+# ", " (`header_values` keeps the lines apart, as a `Set-Cookie` must be
+# read), and interim 1xx answers are read past.
 #
-# `Server.serve(listener) { |request| Response }` is the other side: a
+# **The server.** `Server.serve(listener) { |request| Response }`: a
 # fiber per connection under a group, each connection kept alive across
 # requests until the client or the block's answer says `Connection:
 # close`, the client closes, or sends something that is not HTTP
 # (answered 400 and closed; a body past `Server::MAX_BODY` 413, a head
-# past `Server::MAX_HEAD` 431). The block gets a
-# `Request` — method, path (an absolute-form target's own), query,
-# headers, body, read to the length the client declared or de-chunked —
-# and answers a `Response`, which is written with its length; a 1xx, 204
-# or 304 is written with neither. A `HEAD` is answered without the body. The
-# socket parks under the runtime, so a slow client costs one fiber; the
-# listener's `close` ends `serve`. Both halves are the same module so
-# what one writes the other reads, and `bench/std_http_exercise.sh`
-# runs the client against the server and the server against Python's.
+# past `Server::MAX_HEAD` 431). The block gets a `Request` - method, path
+# (an absolute-form target's own), query, headers, body - and answers a
+# `Response`. By default the body is read whole before the block runs;
+# with `stream_bodies: true` the block reads `request.body_io` itself, and
+# what it leaves unread is read past, up to a megabyte, or the connection
+# closed. An answer is a `String`, written with its length; an `IyiIO`,
+# copied out and closed (with its length when the block gave a
+# `Content-Length`, chunked otherwise); a `Response.stream { |w| ... }`
+# whose block writes as it goes; or a `Response.upgrade`, after whose 101
+# the connection belongs to the block (std/websocket's). With `compress:
+# true` an answer whose type is worth compressing goes `gzip` to a client
+# that accepts it. std/fileserver answers a request from a directory.
+# The socket parks under the runtime, so a slow client costs one fiber;
+# the listener's `close` ends `serve`.
+#
+# **Errors are values.** What the other end does wrong - a malformed head,
+# a body cut short, a broken chunk, a corrupt gzip - is an `HTTPError`
+# beside `Cancelled` and `SocketError`; `!` passes it up and `.or_panic`
+# refuses it with its sentence. What a program does wrong - a header with
+# a line break in it, a status of 2000 - is a panic, before anything is
+# written. `format_request`, `parse_request`, `format_response` and
+# `parse_response` are the text of whole messages, pure, for a program
+# and for the gate; both halves are this one module, so what one writes
+# the other reads, and `bench/std_http_exercise.sh` runs the client
+# against the server and both against Python's.
+#
+# **What it reaches.** What std/socket reaches and nothing of its own:
+# no file, and no clock, environment or randomness beyond what a socket's
+# name lookup uses. Cookies with their expiry are std/cookie's, a
+# directory served is std/fileserver's, and a multipart boundary is made
+# from the parts' own hash, so `iyi mod reach` says the same of a package
+# that speaks HTTP as of one that opens a socket.
+#
+# Not here: TLS, HTTP/2 (std/hpack and std/capsule are its pieces, not a
+# server), a pool of kept-alive client connections - each request is one
+# connection - and proxies.
 
 module std/http
 
 import std/socket::{IyiSocket, SocketError}
-import std/uri::{URI}
+import std/uri::{URI, Params}
+import std/mime::{MIME}
+import std/compress::{Inflater, Deflater, Envelope, Gzip, CompressError}
+import std/digest::{SHA1}
 
-pub struct Response
+# What the other end did that HTTP does not allow, as a value: `reason` is
+# the sentence, `status` the answer a server gives a request that did it
+# (400, or 413 and 431 for the limits). `message` says it is HTTP's.
+pub struct HTTPError
+  getter reason : String
+  getter status : Int32
+
+  def initialize(@reason : String, @status : Int32 = 400)
+  end
+
+  def to_s : String
+    "HTTP: " + @reason
+  end
+end
+
+impl Error for HTTPError
+  def message : String
+    "HTTP: " + @reason
+  end
+end
+
+# The bytes a connection has delivered that nothing has taken yet, and the
+# socket the next come from. Heads, chunk sizes and bodies are all read
+# out of this one buffer, where they lie: requests that came in one read
+# are parsed in place, and a head that comes a piece at a time is searched
+# only where the new piece could end it. It grows for a head as large as
+# the limit allows, and otherwise stays the size of a read.
+#
+# Under `serve`, *listener* and *idle*: no read starts once the listener
+# is closed, and every read waits with the connection in *idle*, for
+# `serve` to close when the listener closes - one partway through a
+# request as much as one between requests.
+class Conn
+  @socket : IyiSocket
+  @data : Pointer(UInt8)
+  @capacity : Int32
+  @start : Int32
+  @stop : Int32
+  # Where a head's blank line may still begin: the bytes before it have
+  # been searched.
+  @searched : Int32
+  @ended : Bool
+  @failure : Cancelled | SocketError | Nil
+  @listener : IyiSocket?
+  @idle : Hash(UInt64, IyiSocket)?
+
+  ROOM = 16384
+
+  def initialize(@socket : IyiSocket, @listener : IyiSocket? = nil, @idle : Hash(UInt64, IyiSocket)? = nil)
+    @capacity = ROOM
+    @data = Pointer(UInt8).malloc(@capacity.to_u64)
+    @start = 0
+    @stop = 0
+    @searched = 0
+    @ended = false
+    @failure = nil
+  end
+
+  def socket : IyiSocket
+    @socket
+  end
+
+  def failure : Cancelled | SocketError | Nil
+    @failure
+  end
+
+  # Whether the other end closed its side.
+  def ended? : Bool
+    @ended
+  end
+
+  def available : Int32
+    @stop - @start
+  end
+
+  # The byte *at* bytes past what has been taken, which must have arrived.
+  def peek(at : Int32) : UInt8
+    @data[@start + at]
+  end
+
+  def consume(count : Int32) : Nil
+    @start = @start + count
+    @searched = @start if @searched < @start
+  end
+
+  # Up to *max* of the bytes that have arrived, taken; none are read.
+  def take(max : Int32) : String
+    count = available < max ? available : max
+    piece = String.new(count) do |buf|
+      buf.copy_from(@data + @start.to_i64, count)
+    end
+    consume(count)
+    piece
+  end
+
+  # Everything that has arrived and nothing has taken: what a connection
+  # handed to another protocol starts with.
+  def leftover : String
+    take(available)
+  end
+
+  # One read appended to what has arrived. False at the other end's close,
+  # on a failure (kept in `failure`), and under `serve` once the listener
+  # is closed.
+  def fill : Bool
+    return false if @ended || !@failure.nil?
+    if listener = @listener
+      return false if listener.closed?
+    end
+    make_room
+    if idle = @idle
+      idle[@socket.object_id] = @socket
+    end
+    got = @socket.read(@data + @stop.to_i64, @capacity - @stop)
+    if idle = @idle
+      idle.delete(@socket.object_id)
+    end
+    case got
+    in Int32
+      if got == 0
+        @ended = true
+        return false
+      end
+      @stop = @stop + got
+      true
+    in Cancelled
+      @failure = got
+      false
+    in SocketError
+      @failure = got
+      false
+    end
+  end
+
+  # Reads until *count* bytes have arrived; false when they cannot.
+  def need(count : Int32) : Bool
+    while available < count
+      return false unless fill
+    end
+    true
+  end
+
+  # Room for a read: what has been taken moves out of the way, and a
+  # buffer full of what has not doubles.
+  private def make_room : Nil
+    if @start == @stop
+      @start = 0
+      @stop = 0
+      @searched = 0
+    elsif @capacity - @stop < ROOM // 4 && @start > 0
+      held = @stop - @start
+      # Down, front to back: no byte is written before it is read.
+      @data.copy_from(@data + @start.to_i64, held)
+      @searched = @searched - @start
+      @searched = 0 if @searched < 0
+      @stop = held
+      @start = 0
+    end
+    if @capacity - @stop < ROOM // 4
+      @capacity = @capacity * 2
+      @data = @data.realloc(@capacity.to_u64)
+    end
+  end
+
+  # A head: what comes before the next blank line, taken with it. Empty
+  # lines before it are skipped when *blank_first* (RFC 9112 §2.2 has a
+  # server ignore them). Nil when the connection ends first - `failure`
+  # says whether it failed, and `available` whether part of a head had
+  # come - and an error past *limit* bytes.
+  def read_head(limit : Int32, what : String, blank_first : Bool = false) : String | HTTPError | Nil
+    while true
+      if blank_first
+        while available >= 2 && peek(0) == 13_u8 && peek(1) == 10_u8
+          consume(2)
+        end
+        if available == 1 && peek(0) == 13_u8
+          return nil unless fill
+          next
+        end
+      end
+      from = @searched - 3
+      from = @start if from < @start
+      at = from
+      while at + 3 < @stop
+        if @data[at] == 13_u8 && @data[at + 1] == 10_u8 && @data[at + 2] == 13_u8 && @data[at + 3] == 10_u8
+          head = String.new(at - @start) do |buf|
+            buf.copy_from(@data + @start.to_i64, at - @start)
+          end
+          consume(at + 4 - @start)
+          return head
+        end
+        at = at + 1
+      end
+      @searched = @stop
+      return HTTPError.new("#{what} headers past #{limit} bytes", 431) if available > limit
+      return nil unless fill
+    end
+  end
+
+  # A line ended by CRLF, taken with it: a chunk's size, a trailer. An
+  # error past *limit* bytes; nil when the connection ends first. Where
+  # the search has reached is kept from the start of what is held, since
+  # a read moves what is held to the front of the buffer: kept as a
+  # place in the buffer, it pointed past the line once a chunk's size
+  # arrived apart from its CRLF, and the body was read as cut short.
+  def read_line(limit : Int32, what : String) : String | HTTPError | Nil
+    searched = 0
+    while true
+      at = @start + searched
+      while at + 1 < @stop
+        if @data[at] == 13_u8 && @data[at + 1] == 10_u8
+          line = String.new(at - @start) do |buf|
+            buf.copy_from(@data + @start.to_i64, at - @start)
+          end
+          consume(at + 2 - @start)
+          return line
+        end
+        at = at + 1
+      end
+      searched = at - @start
+      return HTTPError.new("#{what} past #{limit} bytes") if available > limit
+      return nil unless fill
+    end
+  end
+
+  # *block* run with the connection counted among the idle ones, which a
+  # close of the listener closes: an upgraded connection's protocol reads
+  # it for as long as it lasts, and `serve` waited for that - a WebSocket
+  # client that stayed kept `serve` from returning after its listener was
+  # closed, for as long as it stayed. Go's server does not wait for a
+  # connection it handed over; this one cannot leave a task behind, so it
+  # closes the connection under the protocol, whose next read or write
+  # answers that it closed. A listener closed before the block starts
+  # closes the connection at once.
+  def held(& : -> Nil) : Nil
+    idle = @idle
+    listener = @listener
+    if idle && listener
+      if listener.closed?
+        @socket.close
+      else
+        idle[@socket.object_id] = @socket
+      end
+    end
+    yield
+    idle.delete(@socket.object_id) if idle
+  end
+
+  def close : Nil
+    @socket.close
+  end
+end
+
+# A body as it arrives: from a connection, framed by its length, by chunks
+# or by the connection's close, or from a string already in hand. `read`
+# answers the next piece, "" once the body is done; what the other end
+# does wrong is an `HTTPError`, and a connection that fails or is
+# cancelled answers that. The first failure is kept: every read after it
+# answers the same. A body coded `gzip` or `deflate` is decoded as it is
+# read when the client asked for that.
+#
+# A body has a limit: past it a read answers an `HTTPError` with status
+# 413. The server's is `Server::MAX_BODY`; a client's is none.
+pub class BodyReader
+  EMPTY   = 0
+  LENGTH  = 1
+  CHUNKED = 2
+  CLOSE   = 3
+  TEXT    = 4
+
+  @conn : Conn?
+  @kind : Int32
+  # LENGTH: bytes still to come. CHUNKED: bytes left of this chunk, -1
+  # when a size line comes next.
+  @left : Int64
+  @declared : Int64
+  @limit : Int64
+  @total : Int64
+  @finished : Bool
+  @fault : HTTPError | Cancelled | SocketError | Nil
+  @text : String
+  @at : Int32
+  # Called once, before the first read that has to wait on the socket: a
+  # server answers `Expect: 100-continue` there, and not before the body
+  # is wanted.
+  @hello : Proc(Bool)?
+  # The coding undone as the body is read (`decode`): the stream, and
+  # until it starts, the envelope it was asked for and the bytes read to
+  # tell deflate's two forms apart.
+  @inflater : Inflater?
+  @coding : Envelope?
+  @first : String?
+
+  def initialize(@conn : Conn?, @kind : Int32, length : Int64, @limit : Int64, @text : String = "", hello : Proc(Bool)? = nil)
+    @left = @kind == CHUNKED ? -1_i64 : length
+    @declared = length
+    @total = 0_i64
+    @finished = @kind == EMPTY || (@kind == LENGTH && length == 0_i64) || (@kind == TEXT && @text.bytesize == 0)
+    @fault = nil
+    @at = 0
+    @hello = hello
+    @inflater = nil
+    @coding = nil
+    @first = nil
+  end
+
+  # A body that is a string already in hand.
+  def self.text(text : String) : BodyReader
+    BodyReader.new(nil, TEXT, text.bytesize.to_i64, 9223372036854775807_i64, text)
+  end
+
+  # Whether every byte of the body has been read.
+  def finished? : Bool
+    return false unless @finished && @coding.nil?
+    if inflater = @inflater
+      return inflater.finished?
+    end
+    true
+  end
+
+  # The body's coding undone from here on: `Envelope::Gzip` for gzip,
+  # `Envelope::Zlib` for HTTP's deflate - which some servers send as the
+  # bare stream instead, without zlib's two bytes of header, so the first
+  # two bytes are looked at first, and a pair that is not a zlib header
+  # (RFC 1950 §2.2: method 8, a multiple of 31) is read as the bare
+  # stream. A body that does not decode is an `HTTPError` naming the
+  # coding and why.
+  def decode(envelope : Envelope) : Nil
+    @coding = envelope
+  end
+
+  # The next piece of the body, at most *max* bytes; "" when it is done.
+  def read(max : Int32 = 65536) : String | Cancelled | SocketError | HTTPError
+    if fault = @fault
+      return fault
+    end
+    raise "BodyReader: a read of #{max} bytes" if max < 1
+    if coding = @coding
+      @coding = nil
+      started = start_inflater(coding)
+      return started unless started.nil?
+    end
+    if inflater = @inflater
+      got = inflater.read(max)
+      return got if got.is_a?(String)
+      if fault = @fault
+        return fault
+      end
+      return remember(HTTPError.new("the body's coding: " + got.message))
+    end
+    raw(max)
+  end
+
+  private def start_inflater(coding : Envelope) : Cancelled | SocketError | HTTPError | Nil
+    envelope = coding
+    if coding == Envelope::Zlib
+      first = ""
+      while first.bytesize < 2
+        got = raw(65536)
+        return got unless got.is_a?(String)
+        break if got.bytesize == 0
+        first = first + got
+      end
+      p = first.to_unsafe
+      zlib = first.bytesize >= 2 && (p[0] & 15_u8) == 8_u8 && ((p[0].to_i32 << 8) | p[1].to_i32) % 31 == 0
+      envelope = Envelope::Raw unless zlib
+      @first = first
+    end
+    @inflater = Inflater.new(envelope) { feed }
+    nil
+  end
+
+  # The inflater's source: the bytes read to sniff the envelope, then the
+  # framing's, nil at its end or when it fails - the failure is kept, and
+  # answered in place of the inflater's "ends early".
+  private def feed : String?
+    if first = @first
+      @first = nil
+      return first if first.bytesize > 0
+    end
+    got = raw(65536)
+    unless got.is_a?(String)
+      @fault = got
+      return nil
+    end
+    got.bytesize == 0 ? nil : got
+  end
+
+  # The rest of the body as one string, refused past *limit* bytes (413).
+  # The pieces are kept as they arrive and joined once: a builder of the
+  # length a head declared was made before any of it had come, and a head
+  # that declared 64 MB and sent two bytes cost the server 64 MB.
+  def read_all(limit : Int64 = 2147483647_i64) : String | Cancelled | SocketError | HTTPError
+    pieces = [] of String
+    total = 0_i64
+    while true
+      got = read(65536)
+      return got unless got.is_a?(String)
+      break if got.bytesize == 0
+      total = total + got.bytesize.to_i64
+      if total > limit
+        return remember(HTTPError.new("body past #{limit} bytes", 413))
+      end
+      pieces << got
+    end
+    return "" if pieces.empty?
+    return pieces[0] if pieces.size == 1
+    String.new(total.to_i32) do |whole|
+      at = 0
+      pieces.each do |piece|
+        (whole + at.to_i64).copy_from(piece.to_unsafe, piece.bytesize)
+        at = at + piece.bytesize
+      end
+      nil
+    end
+  end
+
+  # Reads past the rest of the body, *limit* bytes at most: whether it
+  # ended within them. A server reads past what a block left unread, so
+  # the next request on the connection starts where it should.
+  def drain(limit : Int64) : Bool
+    seen = 0_i64
+    while true
+      got = read(65536)
+      return false unless got.is_a?(String)
+      return true if got.bytesize == 0
+      seen = seen + got.bytesize.to_i64
+      return false if seen > limit
+    end
+  end
+
+  protected def remember(fault : HTTPError | Cancelled | SocketError) : HTTPError | Cancelled | SocketError
+    @fault = fault
+    fault
+  end
+
+  # The body's bytes as the framing delivers them, before any decoding.
+  protected def raw(max : Int32) : String | Cancelled | SocketError | HTTPError
+    return "" if @finished
+    case @kind
+    when TEXT
+      take = @text.bytesize - @at
+      take = max if take > max
+      piece = @text[@at, take]
+      @at = @at + take
+      @finished = true if @at == @text.bytesize
+      piece
+    when LENGTH
+      conn = connection
+      return short(conn) unless arrived(conn)
+      want = conn.available.to_i64
+      want = @left if want > @left
+      want = max.to_i64 if want > max.to_i64
+      piece = conn.take(want.to_i32)
+      @left = @left - piece.bytesize.to_i64
+      @total = @total + piece.bytesize.to_i64
+      @finished = true if @left == 0_i64
+      piece
+    when CHUNKED
+      conn = connection
+      if @left == -1_i64
+        size = chunk_size(conn)
+        return size unless size.is_a?(Int64)
+        if size == 0_i64
+          return trailers(conn)
+        end
+        if size > @limit - @total
+          return remember(HTTPError.new("chunked body past #{@limit} bytes", 413))
+        end
+        @left = size
+      end
+      unless arrived(conn)
+        return failed(conn) || remember(HTTPError.new("chunked body ends inside a chunk"))
+      end
+      want = conn.available.to_i64
+      want = @left if want > @left
+      want = max.to_i64 if want > max.to_i64
+      piece = conn.take(want.to_i32)
+      @left = @left - piece.bytesize.to_i64
+      @total = @total + piece.bytesize.to_i64
+      if @left == 0_i64
+        unless conn.need(2)
+          return failed(conn) || remember(HTTPError.new("chunked body ends inside a chunk"))
+        end
+        unless conn.peek(0) == 13_u8 && conn.peek(1) == 10_u8
+          return remember(HTTPError.new("chunked body: a chunk is not followed by CRLF"))
+        end
+        conn.consume(2)
+        @left = -1_i64
+      end
+      piece
+    when CLOSE
+      conn = connection
+      unless arrived(conn)
+        if fault = conn.failure
+          return remember(fault)
+        end
+        @finished = true
+        return ""
+      end
+      want = conn.available
+      want = max if want > max
+      piece = conn.take(want)
+      @total = @total + piece.bytesize.to_i64
+      if @total > @limit
+        return remember(HTTPError.new("body past #{@limit} bytes", 413))
+      end
+      piece
+    else
+      @finished = true
+      ""
+    end
+  end
+
+  private def connection : Conn
+    conn = @conn
+    raise "BodyReader: a body on no connection" unless conn
+    conn
+  end
+
+  # Whether some of the body has arrived to be taken, reading for it.
+  private def arrived(conn : Conn) : Bool
+    return true if conn.available > 0
+    if hello = @hello
+      @hello = nil
+      unless hello.call
+        return false
+      end
+    end
+    conn.fill
+  end
+
+  private def short(conn : Conn) : Cancelled | SocketError | HTTPError
+    failed(conn) || remember(HTTPError.new("the body ended after #{@declared - @left} of its #{@declared} bytes"))
+  end
+
+  private def failed(conn : Conn) : Cancelled | SocketError | Nil
+    fault = conn.failure
+    return nil if fault.nil?
+    @fault = fault
+    fault
+  end
+
+  # A chunk's size line (RFC 9112 §7.1): hexadecimal, extensions after
+  # `;` ignored.
+  private def chunk_size(conn : Conn) : Int64 | Cancelled | SocketError | HTTPError
+    if hello = @hello
+      if conn.available == 0
+        @hello = nil
+        return remember(HTTPError.new("the connection failed before the body")) unless hello.call
+      end
+    end
+    line = conn.read_line(4096, "a chunk size line")
+    case line
+    in Nil
+      failed(conn) || remember(HTTPError.new("chunked body ends before its last chunk"))
+    in HTTPError
+      remember(line)
+    in String
+      text = line
+      if semi = text.index(';')
+        text = text[0, semi]
+      end
+      size = HTTP.hex(HTTP.trim(text))
+      return remember(HTTPError.new("chunked body: not a chunk size: #{line.inspect}")) unless size
+      size.to_i64
+    end
+  end
+
+  # What follows the last chunk: trailers, which nothing here reads, and
+  # the blank line that ends them.
+  private def trailers(conn : Conn) : String | Cancelled | SocketError | HTTPError
+    while true
+      line = conn.read_line(4096, "trailers")
+      case line
+      in Nil
+        return failed(conn) || remember(HTTPError.new("chunked body ends inside its trailers"))
+      in HTTPError
+        return remember(line)
+      in String
+        if line.bytesize == 0
+          @finished = true
+          return ""
+        end
+      end
+    end
+    ""
+  end
+end
+
+# What a streamed body is written to: an answer's `Response.stream`
+# block's, and a client's upload from an `IyiIO`. Each `write` goes out as
+# one chunk (RFC 9112 §7.1), or as it is where the connection's close ends
+# the body, so a block that writes a line a second is read a line a
+# second. Under a server's `compress`, each write is a gzip piece flushed
+# whole (std/compress's `Deflater`), which decodes as it arrives too. The
+# first failure is kept, and every write after it answers it; `finish`,
+# which the server calls when the block returns, writes the end.
+pub class BodyWriter
+  @socket : IyiSocket
+  @chunked : Bool
+  @deflater : Deflater?
+  @fault : Cancelled | SocketError | Nil
+  @written : Int64
+  @done : Bool
+
+  def initialize(@socket : IyiSocket, @chunked : Bool, @deflater : Deflater? = nil)
+    @fault = nil
+    @written = 0_i64
+    @done = false
+  end
+
+  # Bytes of the body written so far, before any framing or coding.
+  def written : Int64
+    @written
+  end
+
+  def write(text : String) : Nil | Cancelled | SocketError
+    if fault = @fault
+      return fault
+    end
+    raise "BodyWriter: a write after the body's end" if @done
+    return nil if text.bytesize == 0
+    @written = @written + text.bytesize.to_i64
+    if deflater = @deflater
+      return put(deflater.compress(text))
+    end
+    put(text)
+  end
+
+  # The end of the body: the gzip trailer, and the last chunk with the
+  # blank line after it. Once; the server's call after a block that
+  # finished its own body writes nothing.
+  def finish : Nil | Cancelled | SocketError
+    if fault = @fault
+      return fault
+    end
+    return nil if @done
+    @done = true
+    if deflater = @deflater
+      put(deflater.finish)
+    end
+    send("0\r\n\r\n") if @chunked && @fault.nil?
+    @fault
+  end
+
+  # One chunk in one write when it is small - a write each for the size,
+  # the bytes and the CRLF cost three system calls a chunk - and the bytes
+  # apart when it is large, rather than copied to join them.
+  private def put(text : String) : Nil | Cancelled | SocketError
+    return nil if text.bytesize == 0
+    if @chunked
+      size = HTTP.hex_text(text.bytesize.to_i64)
+      if text.bytesize <= 16384
+        send(size + "\r\n" + text + "\r\n")
+      else
+        return @fault unless send(size + "\r\n")
+        return @fault unless send(text)
+        send("\r\n")
+      end
+    else
+      send(text)
+    end
+    @fault
+  end
+
+  private def send(text : String) : Bool
+    got = @socket.write(text)
+    case got
+    in Int32
+      true
+    in Cancelled
+      @fault = got
+      false
+    in SocketError
+      @fault = got
+      false
+    end
+  end
+end
+
+# What a server's block is handed: one request. Its body is `body`, read
+# whole before the block ran, or under `stream_bodies` read by the block
+# from `body_io` as it arrives; `body` then reads the rest itself, and a
+# body that cannot be read - the client went, or sent one that is not
+# HTTP - ends the connection with that sentence rather than be answered as
+# if it were whole.
+pub class Request
+  getter method : String
+  getter path : String
+  getter query : String?
+  getter headers : Hash(String, String)
+  getter version : String
+  @reader : BodyReader
+  @text : String?
+
+  # A request whose body is in hand: what `parse_request` answers.
+  def initialize(@method : String, @path : String, @query : String?, @headers : Hash(String, String), body : String, @version : String = "HTTP/1.1")
+    @reader = BodyReader.text(body)
+    @text = body
+  end
+
+  # A request whose body is still on the connection.
+  def initialize(@method : String, @path : String, @query : String?, @headers : Hash(String, String), @version : String, @reader : BodyReader)
+    @text = nil
+  end
+
+  def header(name : String) : String?
+    @headers.each do |key, value|
+      return value if HTTP.same_name?(key, name)
+    end
+    nil
+  end
+
+  def body_io : BodyReader
+    @reader
+  end
+
+  def body : String
+    if text = @text
+      return text
+    end
+    got = @reader.read_all(Server::MAX_BODY.to_i64)
+    raise got.message unless got.is_a?(String)
+    @text = got
+    got
+  end
+
+  # The pairs of the request's `Cookie` header, the first of a name kept.
+  def cookies : Hash(String, String)
+    found = header("Cookie")
+    found ? HTTP.cookie_pairs(found) : {} of String => String
+  end
+
+  # The fields of a form: the query's, and an
+  # `application/x-www-form-urlencoded` body's after them. The body is
+  # read for it.
+  def form : Params
+    fields = Params.parse(@query || "")
+    type = header("Content-Type")
+    if type
+      parsed = MIME.parse?(type)
+      if parsed && parsed[0] == "application/x-www-form-urlencoded"
+        Params.parse(body).each { |name, value| fields.add(name, value) }
+      end
+    end
+    fields
+  end
+
+  # The body as `multipart/form-data` parts, read as they arrive; nil when
+  # the `Content-Type` is not multipart or names no boundary.
+  def multipart : Multipart?
+    type = header("Content-Type")
+    return nil unless type
+    boundary = Multipart.boundary(type)
+    return nil unless boundary
+    Multipart.new(@text ? BodyReader.text(@text || "") : @reader, boundary)
+  end
+end
+
+# What `HTTP.request`'s `jar:` keeps cookies in: the `Cookie` header a
+# request to a URL carries, and an answer's `Set-Cookie` lines taken in.
+# std/cookie's `CookieJar` is one; std/http itself reads no clock, so the
+# expiry of a cookie is the store's to keep.
+pub trait CookieStore
+  abstract def header_for(url : String) : String?
+  abstract def update(url : String, response : Response) : Nil
+end
+
+# A response: what a server's block answers, and what a client is handed.
+#
+# To write one: `Response.new(200, "hello")`, a status and a string;
+# `Response.new(200, io)`, a stream the server copies out and closes, with
+# the caller's `Content-Length` when it gives one and chunked otherwise;
+# `Response.stream(200) { |w| w.write("...") }`, whose block writes as it
+# goes; `Response.upgrade(headers) { |socket, leftover| ... }`, a 101 after
+# which the connection is the block's. `add_header` writes a field on a
+# line of its own, as each `Set-Cookie` must be.
+#
+# What a client is handed: the status, reason and headers, and the body -
+# `body` whole, or `body_io` as it arrives inside `HTTP.open`'s block.
+pub class Response
   getter status : Int32
   getter reason : String
   getter headers : Hash(String, String)
-  getter body : String
-  # The values of each field the server sent on more than one line, by
-  # its name in `headers`, one entry a line.
-  @apart : Hash(String, Array(String))? = nil
+  # The values of each field on more than one line, by its name in
+  # `headers`, one entry a line.
+  @apart : Hash(String, Array(String))?
+  @body : String
+  @source : IyiIO?
+  @writer : Proc(BodyWriter, Nil)?
+  @takeover : Proc(IyiSocket, String, Nil)?
+  @reader : BodyReader?
+  @url : String?
+  @decoded : Bool
 
   def initialize(@status : Int32, @reason : String, @headers : Hash(String, String), @body : String, @apart : Hash(String, Array(String))? = nil)
+    @source = nil
+    @writer = nil
+    @takeover = nil
+    @reader = nil
+    @url = nil
+    @decoded = false
+  end
+
+  # A response a client read: its body comes from *reader*, and *url* is
+  # where it came from.
+  def initialize(@status : Int32, @reason : String, @headers : Hash(String, String), @apart : Hash(String, Array(String))?, reader : BodyReader, url : String, @decoded : Bool)
+    @body = ""
+    @source = nil
+    @writer = nil
+    @takeover = nil
+    @reader = reader
+    @url = url
   end
 
   # A response to write: the reason is the status's own, the headers the
   # caller's. `Response.new(200, "hello")` is the common shape.
   def initialize(@status : Int32, @body : String = "", @headers : Hash(String, String) = {} of String => String)
     @reason = HTTP.reason_for(@status)
+    @apart = nil
+    @source = nil
+    @writer = nil
+    @takeover = nil
+    @reader = nil
+    @url = nil
+    @decoded = false
+  end
+
+  # A response whose body is *source*, copied out by the server and
+  # closed after.
+  def initialize(@status : Int32, source : IyiIO, @headers : Hash(String, String) = {} of String => String)
+    @reason = HTTP.reason_for(@status)
+    @body = ""
+    @apart = nil
+    @source = source
+    @writer = nil
+    @takeover = nil
+    @reader = nil
+    @url = nil
+    @decoded = false
+  end
+
+  # A response whose body the block writes as it goes, chunked.
+  def self.stream(status : Int32, headers : Hash(String, String) = {} of String => String, &writer : BodyWriter -> Nil) : Response
+    response = Response.new(status, "", headers)
+    response.writer = writer
+    response
+  end
+
+  # A 101 Switching Protocols with *headers* (`Upgrade` and the
+  # protocol's own), after which the connection is the block's: it is
+  # handed the socket and the bytes the client sent after its request,
+  # and the connection closes when it returns.
+  def self.upgrade(headers : Hash(String, String), &takeover : (IyiSocket, String) -> Nil) : Response
+    response = Response.new(101, "", headers)
+    response.takeover = takeover
+    response
+  end
+
+  protected def writer=(writer : Proc(BodyWriter, Nil)) : Proc(BodyWriter, Nil)
+    @writer = writer
+  end
+
+  protected def takeover=(takeover : Proc(IyiSocket, String, Nil)) : Proc(IyiSocket, String, Nil)
+    @takeover = takeover
+  end
+
+  def source : IyiIO?
+    @source
+  end
+
+  def writer : Proc(BodyWriter, Nil)?
+    @writer
+  end
+
+  def takeover : Proc(IyiSocket, String, Nil)?
+    @takeover
+  end
+
+  # The URL the answer came from, after any redirects; nil for one a
+  # program made.
+  def url : String?
+    @url
+  end
+
+  # Whether the client undid the body's `gzip` or `deflate` coding; the
+  # `Content-Encoding` and `Content-Length` that described it are gone
+  # from the headers then.
+  def decoded? : Bool
+    @decoded
+  end
+
+  # The body: whole. Inside `HTTP.open`'s block it is read here, the first
+  # time it is asked for, and a body that cannot be read panics with why;
+  # `body_io` answers that as a value.
+  def body : String
+    if reader = @reader
+      got = reader.read_all
+      raise got.message unless got.is_a?(String)
+      @body = got
+      @reader = nil
+    end
+    @body
+  end
+
+  # The body as it arrives. For a response a program made, its string.
+  def body_io : BodyReader
+    if reader = @reader
+      return reader
+    end
+    BodyReader.text(@body)
+  end
+
+  # The body read whole into the response, which is answered; why not,
+  # when it cannot be.
+  def load : Response | Cancelled | SocketError | HTTPError
+    if reader = @reader
+      got = reader.read_all
+      return got unless got.is_a?(String)
+      @body = got
+      @reader = nil
+    end
+    self
   end
 
   # A header by name, as the server spelled it or otherwise: a field
@@ -78,10 +1021,29 @@ pub struct Response
     found ? [found] : [] of String
   end
 
-  # The same answer with *body* for its body: the client reads a chunked
-  # body after the head it parsed.
-  protected def with_body(body : String) : Response
-    Response.new(@status, @reason, @headers, body, @apart)
+  # One more line of the field *name*, written on a line of its own: what
+  # two `Set-Cookie`s need, since the ", " a field's lines are joined with
+  # is part of a cookie's date.
+  def add_header(name : String, value : String) : Nil
+    spelled = name
+    @headers.each do |key, _|
+      spelled = key if HTTP.same_name?(key, name)
+    end
+    apart = @apart || {} of String => Array(String)
+    @apart = apart
+    if existing = @headers[spelled]?
+      apart[spelled] = [existing] unless apart.has_key?(spelled)
+      apart[spelled] << value
+      @headers[spelled] = existing + ", " + value
+    else
+      @headers[spelled] = value
+    end
+  end
+
+  # The lines of each field written on more than one, by its name in
+  # `headers`; nil when every field is on one line.
+  def apart : Hash(String, Array(String))?
+    @apart
   end
 
   def success? : Bool
@@ -89,49 +1051,35 @@ pub struct Response
   end
 end
 
-# What a server's block is handed: one request, read whole.
-pub struct Request
-  getter method : String
-  getter path : String
-  getter query : String?
-  getter headers : Hash(String, String)
-  getter body : String
-
-  def initialize(@method : String, @path : String, @query : String?, @headers : Hash(String, String), @body : String)
-  end
-
-  def header(name : String) : String?
-    @headers.each do |key, value|
-      return value if HTTP.same_name?(key, name)
-    end
-    nil
-  end
-end
-
 # The pieces of one request as they came off the wire, or why not: a
 # request line and headers, the body they promise, and whether the
-# client asked for the connection to close after.
+# client asked for the connection to close after. `consumed` is where it
+# ends in the text it was read from; `status` the answer an error gets.
 struct ParsedRequest
   getter request : Request?
   getter error : String?
   getter close : Bool
   getter consumed : Int32
-  # For a request whose head is in and whose body is not: the bytes the
-  # whole request takes, when its `Content-Length` says. 0 otherwise.
-  getter wanted : Int32
-  # And whether that head asked `Expect: 100-continue`: the client waits
-  # to be told to send the body.
-  getter expects : Bool
-  # A chunked request whose head is in and whose body is not: the request
-  # with an empty body, `consumed` bytes of head behind it. The server
-  # reads the body as it arrives (`HTTP.read_chunked`).
-  getter chunked : Request?
-  # The status *error* is answered with: 413 for a body past `MAX_BODY`
-  # (RFC 9110 §15.5.14), 431 for a head past `MAX_HEAD` (RFC 6585 §5),
-  # and 400 for a request that is not HTTP. Both limits were a 400.
   getter status : Int32
 
-  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32, @wanted : Int32 = 0, @expects : Bool = false, @chunked : Request? = nil, @status : Int32 = 400)
+  def initialize(@request : Request?, @error : String?, @close : Bool, @consumed : Int32, @status : Int32 = 400)
+  end
+end
+
+# A request's head, read and checked: everything but the body, and how
+# the body is framed - `length` bytes, chunks, or none.
+struct RequestHead
+  getter method : String
+  getter path : String
+  getter query : String?
+  getter headers : Hash(String, String)
+  getter version : String
+  getter close : Bool
+  getter chunked : Bool
+  getter length : Int64
+  getter expects : Bool
+
+  def initialize(@method : String, @path : String, @query : String?, @headers : Hash(String, String), @version : String, @close : Bool, @chunked : Bool, @length : Int64, @expects : Bool)
   end
 end
 
@@ -139,6 +1087,13 @@ pub struct Server
   # A request too large to be a request: 1 MiB of headers, 64 MiB of body.
   MAX_HEAD =  1048576
   MAX_BODY = 67108864
+  # What a streaming block may leave unread and still have the connection
+  # kept: the rest is read past up to this much, and past it the
+  # connection is closed rather than read for as long as the client sends.
+  MAX_DRAIN = 1048576
+  # A string body shorter than this goes uncompressed: the gzip envelope
+  # and the fixed code cost more than they save under it.
+  COMPRESS_FROM = 1024
 
   # Serve `listener` until it is closed. The block runs on the
   # connection's fiber, once per request; what it answers is written back.
@@ -147,7 +1102,11 @@ pub struct Server
   # answer is written: a keep-alive client that sat idle kept `serve` from
   # returning for as long as it stayed, and so did one that had sent
   # what has arrived of a request so far - one byte of it was enough.
-  def self.serve(listener : IyiSocket, &handler : Request -> Response) : Nil
+  #
+  # *stream_bodies*: the block reads each request's body from `body_io`
+  # rather than being handed it whole. *compress*: an answer whose type
+  # std/mime calls compressible goes gzip to a client that accepts it.
+  def self.serve(listener : IyiSocket, stream_bodies : Bool = false, compress : Bool = false, &handler : Request -> Response) : Nil
     idle = {} of UInt64 => IyiSocket
     group do |g|
       pause = 5
@@ -163,7 +1122,7 @@ pub struct Server
           pause = pause * 2 if pause < 1000
         in IyiSocket
           pause = 5
-          spawn_handler(g, client, handler, listener, idle)
+          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress)
         end
       end
       idle.each { |_, waiting| waiting.close }
@@ -184,11 +1143,11 @@ pub struct Server
   # Go's server does. Unread, the panic reached `serve`'s group, which
   # cancelled every other connection and the accept loop and panicked "a
   # task panicked": one request whose block failed took the server down.
-  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, IyiSocket)) : Nil
+  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, IyiSocket), stream_bodies : Bool, compress : Bool) : Nil
     g.spawn do
       group do |own|
         served = own.spawn do
-          handle(client, handler, listener, idle)
+          handle(client, handler, listener, idle, stream_bodies, compress)
           0
         end
         served.value
@@ -199,180 +1158,256 @@ pub struct Server
   end
 
   # One connection: requests until the client is done. A request that is
-  # not HTTP is answered 400 and the connection closed, since the bytes
-  # after it cannot be trusted to be a request either.
-  #
-  # Under `serve`, *listener* and *idle*: every read waits with the
-  # connection in *idle*, for `serve` to close once the listener is, and
-  # none starts once the listener is closed (`wait_read`).
-  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, IyiSocket)? = nil) : Nil
+  # not HTTP is answered with why and the connection closed, since the
+  # bytes after it cannot be trusted to be a request either. Requests that
+  # came in one read are read where they lie, one after another.
+  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, IyiSocket)? = nil, stream_bodies : Bool = false, compress : Bool = false) : Nil
     defer client.close
-    buffer = ""
-    # Where the next request starts in *buffer*: requests that came in one
-    # read are parsed where they lie in what has arrived, and what is left
-    # moves to the front once, before the next read. Cut off the front one
-    # by one, the rest of the read was copied twice per request: 32,000
-    # requests written at once cost the server 0.25 ms each, and the same
-    # requests one at a time 0.06 ms.
-    start = 0
-    continued = false
+    conn = Conn.new(client, listener, idle)
     while true
-      # Past the empty lines a client may send before a request: RFC 9112
-      # §2.2 has a server ignore them. Some clients end a body with an extra
-      # CRLF, and the request after it on the connection was answered 400
-      # "not a request line" and closed.
-      start = HTTP.past_empty_lines(buffer, start)
-      parsed = parse_request(buffer, start)
-      if req = parsed.request
-        continued = false
-        start = parsed.consumed
-        return unless answered?(client, handler, req, parsed.close)
-        next
-      end
-      if reason = parsed.error
-        client.write(format_response(Response.new(parsed.status, reason + "\n"), false, true))
+      got = conn.read_head(MAX_HEAD, "request", true)
+      case got
+      in Nil
         return
-      end
-      # A chunked body is decoded as it arrives. It was added to what came
-      # before and the whole request parsed again after every read, a copy
-      # of the body so far per read: 16 MB took 11.5 s chunked and 0.24 s
-      # with a `Content-Length`.
-      if head = parsed.chunked
-        if !continued && parsed.expects
-          return unless client.write("HTTP/1.1 100 Continue\r\n\r\n").is_a?(Int32)
-        end
-        continued = false
-        # From where the head ends in what has arrived, each read waiting
-        # where `serve` can close it.
-        read = HTTP.read_chunked(buffer, parsed.consumed, MAX_BODY) { wait_read(client, listener, idle) }
-        return if read.nil?
-        if read.is_a?(String)
-          # Past the limit is a body too large, as `parse_request` answers
-          # one whose chunks are all in.
-          too_large = read == "chunked body past #{MAX_BODY} bytes"
-          client.write(format_response(Response.new(too_large ? 413 : 400, read + "\n"), false, true))
+      in HTTPError
+        refuse(client, got)
+        return
+      in String
+        parsed = parse_head(got)
+        if parsed.is_a?(HTTPError)
+          refuse(client, parsed)
           return
         end
-        body, buffer = read
-        start = 0
-        return unless answered?(client, handler, Request.new(head.method, head.path, head.query, head.headers, body), parsed.close)
-        next
-      end
-      # A client that sent `Expect: 100-continue` holds its body back until
-      # it is told to send it, and curl gives up waiting after a second:
-      # every upload past a megabyte took a second longer than it needed.
-      if parsed.expects && !continued
-        continued = true
-        return unless client.write("HTTP/1.1 100 Continue\r\n\r\n").is_a?(Int32)
-      end
-      # Not a whole request yet: read more of it, or stop at the client's
-      # close.
-      rest = start == 0 ? buffer : buffer[start, buffer.bytesize - start]
-      wanted = parsed.wanted - start
-      start = 0
-      if wanted > 0
-        # The head says how long the request is: read until it is all here
-        # and parse once. Adding each read to what came before and parsing
-        # it all again was a copy of the body so far per read: a 5 MB upload
-        # took 1.1 s, 20 MB 3 s, where Go's server takes 10 and 40 ms.
-        got = read_body(client, rest, wanted, listener, idle)
-        return unless got
-        buffer = got
-      else
-        text, ends = HTTP.read_head(rest, 0, MAX_HEAD) { wait_read(client, listener, idle) }
-        return unless ends || text.bytesize > MAX_HEAD
-        buffer = text
+        head = parsed
+        reader = body_reader(conn, head)
+        req = Request.new(head.method, head.path, head.query, head.headers, head.version, reader)
+        unless stream_bodies
+          body = reader.read_all(MAX_BODY.to_i64)
+          case body
+          in String
+            req = Request.new(head.method, head.path, head.query, head.headers, body, head.version)
+          in HTTPError
+            # A client that went is not answered; one that sent a body that
+            # is not one is told why.
+            refuse(client, body) unless conn.ended?
+            return
+          in Cancelled
+            return
+          in SocketError
+            return
+          end
+        end
+        return unless answered?(conn, handler.call(req), req, head.close, compress)
+        return unless reader.finished? || reader.drain(MAX_DRAIN.to_i64)
       end
     end
   end
 
-  # The client's next bytes, nil when none are to come: it closed, the read
-  # failed, or under `serve` the listener is closed. The connection waits
-  # in *idle*, for `serve` to close when the listener closes. Only one
-  # between requests did: one partway through a request - its head, its
-  # body, a chunk - was waited for, and a client that had sent part of one
-  # held `serve`, with what has arrived of it, until it left.
-  private def self.wait_read(client : IyiSocket, listener : IyiSocket?, idle : Hash(UInt64, IyiSocket)?) : String?
-    return nil if listener && listener.closed?
-    idle[client.object_id] = client if idle
-    got = client.read(65536)
-    idle.delete(client.object_id) if idle
-    return nil unless got.is_a?(String) && got.bytesize > 0
-    got
-  end
-
-  # A request whose head says it is *wanted* bytes long, *rest* of them
-  # here: the reads after it kept as they arrive, and joined once the last
-  # is in. Nil when the client goes first. A builder of the whole declared
-  # length was made before any of the body had come: a head that declared
-  # 64 MB and two bytes after it cost the server 64 MB, and six such
-  # connections 450 MB. What is held now is what has arrived.
-  private def self.read_body(client : IyiSocket, rest : String, wanted : Int32, listener : IyiSocket?, idle : Hash(UInt64, IyiSocket)?) : String?
-    pieces = [rest]
-    have = rest.bytesize
-    while have < wanted
-      more = wait_read(client, listener, idle)
-      return nil unless more
-      pieces << more
-      have = have + more.bytesize
+  # The body *head* promises, read from *conn*: under the server's limit,
+  # and with `Expect: 100-continue` answered the first time the body is
+  # waited for - not before it is wanted, and not when it has already
+  # come. A client told nothing holds its body back, and curl waits a
+  # second before every upload past a megabyte.
+  private def self.body_reader(conn : Conn, head : RequestHead) : BodyReader
+    hello = nil.as(Proc(Bool)?)
+    if head.expects
+      socket = conn.socket
+      hello = -> { socket.write("HTTP/1.1 100 Continue\r\n\r\n").is_a?(Int32) }
     end
-    String.new(have) do |whole|
-      at = 0
-      pieces.each do |piece|
-        (whole + at.to_i64).copy_from(piece.to_unsafe, piece.bytesize)
-        at = at + piece.bytesize
-      end
-      nil
+    if head.chunked
+      BodyReader.new(conn, BodyReader::CHUNKED, 0_i64, MAX_BODY.to_i64, "", hello)
+    elsif head.length > 0_i64
+      BodyReader.new(conn, BodyReader::LENGTH, head.length, MAX_BODY.to_i64, "", hello)
+    else
+      BodyReader.new(conn, BodyReader::EMPTY, 0_i64, MAX_BODY.to_i64)
     end
   end
 
-  # The handler's answer to *req*, written: whether the connection goes on.
+  private def self.refuse(client : IyiSocket, error : HTTPError) : Nil
+    client.write(format_response(Response.new(error.status, error.reason + "\n"), false, true))
+  end
+
+  # The block's answer to *req*, written: whether the connection goes on.
   # A client that went away before its answer is gone; its connection ends
   # here, and the server goes on. An answer whose own `Connection` says
   # `close` closes the connection after it, as Go's server and Python's
   # do: the line was dropped, `keep-alive` written in its place, and the
   # next request served on a connection the block had ended.
-  private def self.answered?(client : IyiSocket, handler : Proc(Request, Response), req : Request, close : Bool) : Bool
-    response = handler.call(req)
+  private def self.answered?(conn : Conn, response : Response, req : Request, close : Bool, compress : Bool) : Bool
     closing = close
     if said = response.header("Connection")
       closing = true if HTTP.has_token?(said, "close")
     end
-    wrote = client.write(format_response(response, HTTP.same_name?(req.method, "HEAD"), closing))
-    wrote.is_a?(Int32) && !closing
+    socket = conn.socket
+    head = HTTP.same_name?(req.method, "HEAD")
+    if takeover = response.takeover
+      return false unless socket.write(format_head(response, false, false, nil, false, true)).is_a?(Int32)
+      leftover = conn.leftover
+      conn.held { takeover.call(socket, leftover) }
+      return false
+    end
+    gzip = compress && Server.gzip_for?(req, response)
+    if source = response.source
+      defer source.close
+      return send_source(socket, response, source, head, closing, req.version == "HTTP/1.0", gzip)
+    end
+    if writer = response.writer
+      return send_stream(socket, response, writer, head, closing, req.version == "HTTP/1.0", gzip)
+    end
+    response = Server.gzipped(response) if gzip && response.body.bytesize >= COMPRESS_FROM
+    socket.write(format_response(response, head, closing)).is_a?(Int32) && !closing
+  end
+
+  # A stream copied out: *length* bytes of it when the block gave a
+  # `Content-Length`, which closes the connection if the stream has fewer;
+  # chunked otherwise, or to the close for an HTTP/1.0 client, which reads
+  # no chunks.
+  private def self.send_source(socket : IyiSocket, response : Response, source : IyiIO, head : Bool, close : Bool, old : Bool, gzip : Bool) : Bool
+    length = nil.as(Int64?)
+    if declared = response.header("Content-Length")
+      n = HTTP.content_length(declared)
+      raise "HTTP: Content-Length #{declared.inspect} is not a number" unless n
+      length = n
+    end
+    gzip = false if length
+    bodiless = HTTP.bodiless?(response.status)
+    chunked = length.nil? && !old && !head && !bodiless
+    closing = close || (length.nil? && !chunked && !head && !bodiless)
+    response = Server.coded(response) if gzip
+    return false unless socket.write(format_head(response, head, closing, length, chunked)).is_a?(Int32)
+    return !closing if head || bodiless
+    if want = length
+      left = want
+      while left > 0_i64
+        piece = source.read_bytes(left > 65536_i64 ? 65536 : left.to_i32)
+        return false if piece.bytesize == 0
+        return false unless socket.write(piece).is_a?(Int32)
+        left = left - piece.bytesize.to_i64
+      end
+      return !closing
+    end
+    writer = Server.writer_for(socket, chunked, gzip)
+    while true
+      piece = source.read_bytes(65536)
+      break if piece.bytesize == 0
+      return false unless writer.write(piece).nil?
+    end
+    writer.finish.nil? && !closing
+  end
+
+  # A body the block writes as it goes: chunked, or to the close for an
+  # HTTP/1.0 client. A HEAD is answered without running the block.
+  private def self.send_stream(socket : IyiSocket, response : Response, writer_block : Proc(BodyWriter, Nil), head : Bool, close : Bool, old : Bool, gzip : Bool) : Bool
+    bodiless = HTTP.bodiless?(response.status)
+    chunked = !old && !head && !bodiless
+    closing = close || (!chunked && !head && !bodiless)
+    response = Server.coded(response) if gzip
+    return false unless socket.write(format_head(response, head, closing, nil, chunked)).is_a?(Int32)
+    return !closing if head || bodiless
+    writer = Server.writer_for(socket, chunked, gzip)
+    writer_block.call(writer)
+    writer.finish.nil? && !closing
+  end
+
+  # Whether *response* goes gzip to the client of *req*: the client said
+  # it takes gzip (RFC 9110 §12.5.3, a `q` of 0 refusing it), the answer
+  # has a body and a type worth compressing, and no coding of its own.
+  def self.gzip_for?(req : Request, response : Response) : Bool
+    return false if response.header("Content-Encoding")
+    status = response.status
+    return false if status < 200 || HTTP.bodiless?(status) || status == 206
+    type = response.header("Content-Type")
+    return false unless type && MIME.compressible?(type)
+    accepted = req.header("Accept-Encoding")
+    return false unless accepted
+    HTTP.accepts?(accepted, "gzip")
+  end
+
+  # The headers a gzip body goes with: the coding, and `Vary` so that a
+  # cache keeps the two answers apart. A `Content-Length` the block gave
+  # is the plain body's, and goes.
+  protected def self.coded(response : Response) : Response
+    headers = {} of String => String
+    response.headers.each do |name, value|
+      headers[name] = value unless HTTP.same_name?(name, "Content-Length")
+    end
+    headers["Content-Encoding"] = "gzip"
+    vary = response.header("Vary")
+    if vary.nil?
+      headers["Vary"] = "Accept-Encoding"
+    elsif !HTTP.has_token?(vary, "Accept-Encoding")
+      named = "Vary"
+      headers.each { |name, _| named = name if HTTP.same_name?(name, "Vary") }
+      headers[named] = vary + ", Accept-Encoding"
+    end
+    coded = Response.new(response.status, response.reason, headers, response.body, response.apart)
+    coded
+  end
+
+  # A string body compressed whole, with the headers that say so.
+  protected def self.gzipped(response : Response) : Response
+    coded = Server.coded(response)
+    Response.new(coded.status, coded.reason, coded.headers, HTTP.gzip(response.body), coded.apart)
+  end
+
+  protected def self.writer_for(socket : IyiSocket, chunked : Bool, gzip : Bool) : BodyWriter
+    gzip ? HTTP.gzip_writer(socket, chunked) : BodyWriter.new(socket, chunked)
   end
 
   # A request at *from* in `text`, if a whole one is there. No request and
-  # no error means "not yet". `consumed` and `wanted` count from the start
-  # of `text`: a server parses each request where it lies in
-  # what has arrived, and copies none of what follows it.
+  # no error means "not yet". `consumed` counts from the start of `text`.
   def self.parse_request(text : String, from : Int32 = 0) : ParsedRequest
     from = HTTP.past_empty_lines(text, from)
     split_at = HTTP.find_headers_end(text, from)
     unless split_at
-      return ParsedRequest.new(nil, "request headers past #{MAX_HEAD} bytes", true, 0, status: 431) if text.bytesize - from > MAX_HEAD
+      return ParsedRequest.new(nil, "request headers past #{MAX_HEAD} bytes", true, 0, 431) if text.bytesize - from > MAX_HEAD
       return ParsedRequest.new(nil, nil, false, 0)
     end
-    lines = HTTP.split_crlf(text[from, split_at - from])
-    return ParsedRequest.new(nil, "empty request", true, 0) if lines.size == 0
+    parsed = parse_head(text[from, split_at - from])
+    return ParsedRequest.new(nil, parsed.reason, true, 0, parsed.status) if parsed.is_a?(HTTPError)
+    head = parsed
+    body_start = split_at + 4
+    if head.chunked
+      # Its end is looked for where it lies in what has arrived.
+      case done = HTTP.chunked_end(text, body_start)
+      in Nil
+        return ParsedRequest.new(nil, nil, head.close, 0)
+      in String
+        return ParsedRequest.new(nil, "chunked body: #{done}", true, 0)
+      in Int32
+        return ParsedRequest.new(nil, "chunked body past #{MAX_BODY} bytes", true, 0, 413) if done - body_start > MAX_BODY
+        body = HTTP.decode_chunked(text[body_start, done - body_start])
+        return ParsedRequest.new(Request.new(head.method, head.path, head.query, head.headers, body), nil, head.close, done)
+      end
+    end
+    length = head.length.to_i32
+    return ParsedRequest.new(nil, nil, false, 0) if text.bytesize - body_start < length
+    ParsedRequest.new(Request.new(head.method, head.path, head.query, head.headers, text[body_start, length]), nil, head.close, body_start + length)
+  end
+
+  # A request's head - the text before its blank line - read and checked,
+  # or why it is not one.
+  def self.parse_head(text : String) : RequestHead | HTTPError
+    lines = HTTP.split_crlf(text)
+    return HTTPError.new("empty request") if lines.size == 0
     first = lines[0]
     sp1 = first.index(' ')
-    return ParsedRequest.new(nil, "not a request line: #{first.inspect}", true, 0) unless sp1
+    return HTTPError.new("not a request line: #{first.inspect}") unless sp1
     rest = first[sp1 + 1, first.bytesize - sp1 - 1]
     sp2 = rest.index(' ')
-    return ParsedRequest.new(nil, "not a request line: #{first.inspect}", true, 0) unless sp2
+    return HTTPError.new("not a request line: #{first.inspect}") unless sp2
     method = first[0, sp1]
     target = rest[0, sp2]
     version = rest[sp2 + 1, rest.bytesize - sp2 - 1]
-    return ParsedRequest.new(nil, "not a method: #{method.inspect}", true, 0) unless HTTP.token?(method)
-    return ParsedRequest.new(nil, "not an HTTP/1 request: #{version.inspect}", true, 0) unless version == "HTTP/1.1" || version == "HTTP/1.0"
+    return HTTPError.new("not a method: #{method.inspect}") unless HTTP.token?(method)
+    return HTTPError.new("not an HTTP/1 request: #{version.inspect}") unless version == "HTTP/1.1" || version == "HTTP/1.0"
     # A control byte in the target - a bare CR, a NUL - is not part of any
     # URI (RFC 9112 §2.2, §3.2); passed on, a query with a line break in it
     # broke the answer of a block that echoed it into a header.
-    return ParsedRequest.new(nil, "not a request target: #{target.inspect}", true, 0) if target.bytesize == 0 || HTTP.control?(target)
+    return HTTPError.new("not a request target: #{target.inspect}") if target.bytesize == 0 || HTTP.control?(target)
     headers = case fields = HTTP.parse_fields(lines)
               in String
-                return ParsedRequest.new(nil, fields, true, 0)
+                return HTTPError.new(fields)
               in Hash(String, String)
                 fields
               end
@@ -384,12 +1419,12 @@ pub struct Server
     lines.each do |line|
       hosts = hosts + 1 if line.bytesize > 4 && line.to_unsafe[4] == 58_u8 && HTTP.same_name?(line[0, 4], "Host")
     end
-    return ParsedRequest.new(nil, "Host on #{hosts} lines", true, 0) if hosts > 1
-    return ParsedRequest.new(nil, "an HTTP/1.1 request without Host", true, 0) if hosts == 0 && version == "HTTP/1.1"
+    return HTTPError.new("Host on #{hosts} lines") if hosts > 1
+    return HTTPError.new("an HTTP/1.1 request without Host") if hosts == 0 && version == "HTTP/1.1"
     host_name = "Host"
     headers.each do |name, value|
       next unless HTTP.same_name?(name, "Host")
-      return ParsedRequest.new(nil, "not a host: #{value.inspect}", true, 0) unless HTTP.host?(value)
+      return HTTPError.new("not a host: #{value.inspect}") unless HTTP.host?(value)
       host_name = name
     end
     # The absolute form (RFC 9112 §3.2.2), which a server must accept,
@@ -407,7 +1442,7 @@ pub struct Server
       # http://b/` under `Host: a` asks b. The block reads it as the Host;
       # it was handed the line's, and had no way to the target's.
       named = target[authority, after_authority - authority]
-      return ParsedRequest.new(nil, "not a host: #{named.inspect}", true, 0) unless named.bytesize > 0 && HTTP.host?(named)
+      return HTTPError.new("not a host: #{named.inspect}") unless named.bytesize > 0 && HTTP.host?(named)
       headers[host_name] = named
       origin = target[after_authority, target.bytesize - after_authority]
       origin = "/" + origin if origin.bytesize == 0 || origin.starts_with?("?")
@@ -427,55 +1462,47 @@ pub struct Server
     if conn = stub.header("Connection")
       close = HTTP.has_token?(conn, "close") || (version == "HTTP/1.0" && !HTTP.has_token?(conn, "keep-alive"))
     end
-    body_start = split_at + 4
-    # The body is read where it lies in what has arrived: cut off with all
-    # that came after it, the rest of the read was copied per request.
     expects = version == "HTTP/1.1" && HTTP.same_name?(HTTP.trim(stub.header("Expect") || ""), "100-continue")
     if te = stub.header("Transfer-Encoding")
-      return ParsedRequest.new(nil, "transfer encoding #{te.inspect} is not chunked", true, 0) unless HTTP.same_name?(HTTP.trim(te), "chunked")
+      return HTTPError.new("transfer encoding #{te.inspect} is not chunked") unless HTTP.same_name?(HTTP.trim(te), "chunked")
       # A length beside the chunks, or chunks in HTTP/1.0, is framing that
       # a reader ahead of this one may have taken otherwise (RFC 9112 §6.1,
       # §6.3): the connection closes after the answer, where what followed
       # was read as the next request.
       close = true if stub.header("Content-Length") || version == "HTTP/1.0"
-      # A body that is not chunked is a 400, as any request that is not
-      # HTTP: `chunked_end` raised, and the connection's task panicked with
-      # no answer, and `serve` with it once the listener closed. Its end is
-      # looked for where it lies in what has arrived, too.
-      case done = HTTP.chunked_end(text, body_start)
-      in Nil
-        return ParsedRequest.new(nil, nil, close, body_start, 0, expects, Request.new(method, path, query, headers, ""))
-      in String
-        return ParsedRequest.new(nil, "chunked body: #{done}", true, 0)
-      in Int32
-        return ParsedRequest.new(nil, "chunked body past #{MAX_BODY} bytes", true, 0, status: 413) if done - body_start > MAX_BODY
-        body = HTTP.decode_chunked(text[body_start, done - body_start])
-        return ParsedRequest.new(Request.new(method, path, query, headers, body), nil, close, done)
-      end
+      return RequestHead.new(method, path, query, headers, version, close, true, 0_i64, expects)
     end
-    length = 0
+    length = 0_i64
     if cl = stub.header("Content-Length")
       n = HTTP.content_length(cl)
-      return ParsedRequest.new(nil, "Content-Length is not a number: #{cl.inspect}", true, 0) unless n
+      return HTTPError.new("Content-Length is not a number: #{cl.inspect}") unless n
       # A length past 2147483647 is one too, read as one past it: it was
       # answered "not a number", where it is a body too large.
-      return ParsedRequest.new(nil, "body past #{MAX_BODY} bytes", true, 0, status: 413) if n > MAX_BODY.to_i64
-      length = n.to_i32
+      return HTTPError.new("body past #{MAX_BODY} bytes", 413) if n > MAX_BODY.to_i64
+      length = n
     end
-    # Short of its length, the rest is waited for (`wanted`) - the bytes
-    # it will take, not a copy of what has arrived.
-    return ParsedRequest.new(nil, nil, false, 0, body_start + length, expects) if text.bytesize - body_start < length
-    ParsedRequest.new(Request.new(method, path, query, headers, text[body_start, length]), nil, close, body_start + length)
+    RequestHead.new(method, path, query, headers, version, close, false, length, expects)
   end
 
-  # The response as it goes on the wire. `Content-Length` is the body's
-  # (or the caller's, for a HEAD that describes a body it does not send),
-  # `Connection` says what the connection will do next. A 1xx, 204 or 304
-  # has no content (RFC 9110 §15), and writes neither a body nor a length
-  # of its own (§8.6): the body was read by the client as the start of the
-  # next answer, and `Content-Length: 0` on a 304 told a cache that the
-  # resource had become empty.
+  # The response as it goes on the wire, whole: `format_head` for its
+  # string body, and the body.
   def self.format_response(response : Response, head : Bool, close : Bool) : String
+    text = format_head(response, head, close, response.body.bytesize.to_i64, false)
+    head || HTTP.bodiless?(response.status) ? text : text + response.body
+  end
+
+  # A response's head. `Content-Length` is *length*'s - the caller's own
+  # line is checked against it, and kept only where no body follows it: a
+  # HEAD, or a 304 that names the length a 200 would have (RFC 9110 §8.6) -
+  # or `Transfer-Encoding: chunked` when *chunked*, or neither for a body
+  # the connection's close ends. `Connection` says what the connection will
+  # do next, except on an *upgrade*, whose own line says it. A 1xx, 204 or
+  # 304 has no content (RFC 9110 §15), and writes neither a body nor a
+  # length of its own (§8.6): the body was read by the client as the start
+  # of the next answer, and `Content-Length: 0` on a 304 told a cache that
+  # the resource had become empty. A field added on lines of its own
+  # (`add_header`) is written a line each.
+  def self.format_head(response : Response, head : Bool, close : Bool, length : Int64?, chunked : Bool, upgrade : Bool = false) : String
     # A status line the client half reads as written, refused otherwise as
     # a request's lines are: `Response.new(200, "OK\r\nSet-Cookie: a=1",
     # ...)` went out with a header of its own in the reason, and 2000 as
@@ -483,39 +1510,78 @@ pub struct Server
     raise "HTTP: not a status: #{response.status}" unless response.status >= 100 && response.status <= 999
     raise "HTTP: the reason contains a line break" if HTTP.has_break?(response.reason)
     raise "HTTP: the reason contains a control character" if HTTP.control?(response.reason)
-    text = "HTTP/1.1 #{response.status} #{response.reason}\r\n"
+    text = String::Builder.new
+    text << "HTTP/1.1 " << response.status << " " << response.reason << "\r\n"
     has_length = false
+    apart = response.apart
     response.headers.each do |name, value|
       raise "HTTP: not a header name: #{name.inspect}" unless HTTP.token?(name)
+      lines = nil.as(Array(String)?)
+      if split = apart
+        lines = split[name]?
+      end
       raise "HTTP: header #{name} contains a line break" if HTTP.has_break?(value)
       raise "HTTP: header #{name} contains a control character" if HTTP.control?(value)
-      next if HTTP.same_name?(name, "Connection")
-      # The body is written whole, after its length: a caller's chunked
-      # framing went out beside `Content-Length` (RFC 9112 §6.1), and a
-      # caller's length was written whatever the body was, so "2" on
-      # "hello" was read as "he" and "llo" began the next answer. A length
-      # is the caller's only where no body follows it: a HEAD, or a 304
-      # that names the length a 200 would have (RFC 9110 §8.6).
+      next if HTTP.same_name?(name, "Connection") && !upgrade
+      # The body goes with its length or its chunks, which are the server's
+      # to write: a caller's chunked framing went out beside
+      # `Content-Length` (RFC 9112 §6.1), and a caller's length was written
+      # whatever the body was, so "2" on "hello" was read as "he" and "llo"
+      # began the next answer.
       raise "HTTP: #{name} is not written; the body goes with its length" if HTTP.same_name?(name, "Transfer-Encoding")
       if HTTP.same_name?(name, "Content-Length")
-        unless head || response.status == 304
+        unless head || response.status == 304 || length.nil?
           n = HTTP.content_length(value)
-          raise "HTTP: #{name} #{value.inspect} is not the body's #{response.body.bytesize} bytes" unless n && n == response.body.bytesize.to_i64
+          raise "HTTP: #{name} #{value.inspect} is not the body's #{length} bytes" unless n && n == length
         end
         has_length = true
       end
-      text = text + name + ": " + value + "\r\n"
+      if each_line = lines
+        each_line.each { |line| text << name << ": " << line << "\r\n" }
+      else
+        text << name << ": " << value << "\r\n"
+      end
     end
-    bodiless = (response.status >= 100 && response.status < 200) || response.status == 204 || response.status == 304
-    text = text + "Content-Length: #{response.body.bytesize}\r\n" unless has_length || bodiless
-    text = text + (close ? "Connection: close\r\n" : "Connection: keep-alive\r\n")
-    text = text + "\r\n"
-    head || bodiless ? text : text + response.body
+    unless has_length || HTTP.bodiless?(response.status)
+      if chunked
+        text << "Transfer-Encoding: chunked\r\n"
+      elsif written = length
+        text << "Content-Length: " << written << "\r\n"
+      end
+    end
+    text << (close ? "Connection: close\r\n" : "Connection: keep-alive\r\n") unless upgrade
+    text << "\r\n"
+    text.to_s
+  end
+end
+
+# A request on its way: the connection, and the answer whose head has been
+# read. `close` ends it; inside `HTTP.open` that is done for the caller.
+class Exchange
+  getter conn : Conn
+  getter response : Response
+
+  def initialize(@conn : Conn, @response : Response)
+  end
+
+  def close : Nil
+    @conn.close
+  end
+end
+
+# What `HTTP.upgrade` answers: the 101, and the connection, which is the
+# caller's now - the socket, and the bytes the server sent after its head.
+pub class Upgraded
+  getter response : Response
+  getter socket : IyiSocket
+  getter leftover : String
+
+  def initialize(@response : Response, @socket : IyiSocket, @leftover : String)
   end
 end
 
 pub struct HTTP
-  # The request as it goes on the wire. `Host`, `Connection` and
+  # The request as it goes on the wire, whole. `Host`, `Connection` and
   # `Content-Length` are the request's own lines; a caller's header of
   # that name is refused rather than sent twice. A body's length is
   # always written for the methods a body belongs to, so `POST` with
@@ -523,10 +1589,19 @@ pub struct HTTP
   # 127 goes as `%` and two hex digits: a request target is ASCII (RFC
   # 9112 §3.2, RFC 3986 §2.1), and `/ü` went out as its UTF-8 bytes, raw.
   def self.format_request(method : String, path : String, host : String, body : String = "", headers : Hash(String, String) = {} of String => String) : String
+    length = body.bytesize > 0 || same_name?(method, "POST") || same_name?(method, "PUT") || same_name?(method, "PATCH") ? body.bytesize.to_i64 : nil
+    request_head(method, path, host, headers, length, false, "close") + body
+  end
+
+  # A request's head: the request line, `Host`, `Connection` (*connection*:
+  # `close`, or `Upgrade`), the caller's headers, and the body's framing -
+  # *length*, chunks, or none.
+  def self.request_head(method : String, path : String, host : String, headers : Hash(String, String), length : Int64?, chunked : Bool, connection : String) : String
     raise "HTTP: not a method: #{method.inspect}" unless token?(method)
     raise "HTTP: not a request path: #{path.inspect}" if path.bytesize == 0 || has_space_or_control?(path)
     raise "HTTP: not a host: #{host.inspect}" if host.bytesize == 0 || has_space_or_control?(host)
-    req = "#{method} #{ascii_target(path)} HTTP/1.1\r\nHost: #{host}\r\nConnection: close\r\n"
+    req = String::Builder.new
+    req << method << " " << ascii_target(path) << " HTTP/1.1\r\nHost: " << host << "\r\nConnection: " << connection << "\r\n"
     headers.each do |name, value|
       raise "HTTP: not a header name: #{name.inspect}" unless token?(name)
       raise "HTTP: header #{name} contains a line break" if has_break?(value)
@@ -534,26 +1609,31 @@ pub struct HTTP
       if same_name?(name, "Host") || same_name?(name, "Connection") || same_name?(name, "Content-Length")
         raise "HTTP: #{name} is the request's own header"
       end
-      # A request's body goes with its length, never chunked: a caller's
-      # `Transfer-Encoding: chunked` was written beside `Content-Length`,
-      # a pair RFC 9112 §6.2 forbids, over a body that was not chunked, and
-      # the module's own server, which reads the chunks first, took "abc"
-      # for an unfinished chunk size and waited for the rest.
+      # A request's body goes with its length or its chunks, which are the
+      # request's to write: a caller's `Transfer-Encoding: chunked` was
+      # written beside `Content-Length`, a pair RFC 9112 §6.2 forbids,
+      # over a body that was not chunked, and the module's own server,
+      # which reads the chunks first, took "abc" for an unfinished chunk
+      # size and waited for the rest.
       raise "HTTP: #{name} is not sent; a request's body goes with its length" if same_name?(name, "Transfer-Encoding")
-      req = req + name + ": " + value + "\r\n"
+      req << name << ": " << value << "\r\n"
     end
-    if body.bytesize > 0 || same_name?(method, "POST") || same_name?(method, "PUT") || same_name?(method, "PATCH")
-      req = req + "Content-Length: #{body.bytesize}\r\n"
+    if chunked
+      req << "Transfer-Encoding: chunked\r\n"
+    elsif sent = length
+      req << "Content-Length: " << sent << "\r\n"
     end
-    req + "\r\n" + body
+    req << "\r\n"
+    req.to_s
   end
 
-  # The response as it came off the wire. `head` says the request was a
-  # `HEAD`, whose answer carries the headers of a body it does not send.
-  # An interim answer - `100 Continue`, `103 Early Hints` - is read past to
-  # the final one after it (RFC 9110 §15.2): the server here answers
-  # `Expect: 100-continue` with a 100, and `HTTP.post` returned the 100.
-  # A `101` switches protocols, and HTTP ends with it.
+  # The response as it came off the wire, whole. `head` says the request
+  # was a `HEAD`, whose answer carries the headers of a body it does not
+  # send. An interim answer - `100 Continue`, `103 Early Hints` - is read
+  # past to the final one after it (RFC 9110 §15.2). A `101` switches
+  # protocols, and HTTP ends with it. What is not a response panics with
+  # why: this is the text a program has in hand; the client answers the
+  # same sentences as `HTTPError`s.
   def self.parse_response(text : String, head : Bool = false) : Response
     start = 0
     status = 0
@@ -563,25 +1643,15 @@ pub struct HTTP
     while true
       split_at = find_headers_end(text, start)
       raise "HTTP: no header terminator" unless split_at
-      lines = split_crlf(text[start, split_at - start])
-      raise "HTTP: empty response" if lines.size == 0
-      status, reason = parse_status(lines[0])
-      # A repeated field's lines, kept for `header_values`, the last head's.
-      lines_of = {} of String => Array(String)
-      headers = case fields = parse_fields(lines, unfold: true, apart: lines_of)
-                in String
-                  raise "HTTP: " + fields
-                in Hash(String, String)
-                  fields
-                end
-      apart = lines_of.empty? ? nil : lines_of
+      parsed = parse_response_head(text[start, split_at - start])
+      raise parsed.message if parsed.is_a?(HTTPError)
+      status, reason, headers, apart = parsed
       start = split_at + 4
       break unless status >= 100 && status < 200 && status != 101 && start < text.bytesize
     end
     body = text[start, text.bytesize - start]
-    response = Response.new(status, reason, headers, "", apart)
-    return response if head || status == 204 || status == 304 || (status >= 100 && status < 200)
-    if te = response.header("Transfer-Encoding")
+    return Response.new(status, reason, headers, "", apart) if head || bodiless?(status)
+    if te = header_in(headers, "Transfer-Encoding")
       # Chunked, once and last, is the coding this client decodes (RFC 9112
       # §6.3): `gzip, chunked` and two `chunked` lines were taken for no
       # coding at all, and the chunks came back as the body of a 200,
@@ -590,7 +1660,7 @@ pub struct HTTP
         raise "HTTP: " + refused
       end
       body = decode_chunked(body)
-    elsif cl = response.header("Content-Length")
+    elsif cl = header_in(headers, "Content-Length")
       n = content_length(cl)
       raise "HTTP: Content-Length is not a number: #{cl.inspect}" unless n
       raise "HTTP: Content-Length #{cl.inspect} is past the 2147483647 bytes a string holds" if n > 2147483647_i64
@@ -602,6 +1672,423 @@ pub struct HTTP
       body = body[0, length] if length < body.bytesize
     end
     Response.new(status, reason, headers, body, apart)
+  end
+
+  # A response's head - the text before its blank line - read: status,
+  # reason, the fields, and the lines of those on more than one. A line
+  # that begins with a blank continues the field above it (obs-fold, RFC
+  # 9112 §5.2), which a user agent joins on with one space.
+  def self.parse_response_head(text : String) : {Int32, String, Hash(String, String), Hash(String, Array(String))?} | HTTPError
+    lines = split_crlf(text)
+    return HTTPError.new("empty response") if lines.size == 0
+    line = status_line(lines[0])
+    return line if line.is_a?(HTTPError)
+    status, reason = line
+    lines_of = {} of String => Array(String)
+    headers = case fields = parse_fields(lines, unfold: true, apart: lines_of)
+              in String
+                return HTTPError.new(fields)
+              in Hash(String, String)
+                fields
+              end
+    {status, reason, headers, lines_of.empty? ? nil : lines_of}
+  end
+
+  # A 1xx, 204 or 304: an answer with no content (RFC 9110 §15).
+  def self.bodiless?(status : Int32) : Bool
+    (status >= 100 && status < 200) || status == 204 || status == 304
+  end
+
+  private def self.header_in(headers : Hash(String, String), name : String) : String?
+    headers.each do |key, value|
+      return value if same_name?(key, name)
+    end
+    nil
+  end
+
+  # One request and its whole answer: the answer as `open` hands it, its
+  # body read. Redirects are followed, *redirects* at most; *jar* keeps
+  # the cookies the answers set and sends them back; *decompress* asks for
+  # gzip and undoes it. A refused or reset connection answers
+  # `SocketError`; a task cancelled answers `Cancelled`; what the server
+  # does wrong answers `HTTPError`. `!` passes any of them up, `.or_panic`
+  # refuses it.
+  def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true) : Response | Cancelled | SocketError | HTTPError
+    open(method, url, headers, body, redirects, jar, decompress) { |response| response.load }
+  end
+
+  # One request, and the block's answer to the response, its body still
+  # arriving: `response.body_io.read` takes it a piece at a time, and
+  # `response.body` all of it. The connection closes when the block
+  # returns. A body of *body* is a string, sent with its length, or an
+  # `IyiIO`, sent chunked as it is read - which a redirect that keeps the
+  # method (307, 308) cannot send again, so that answer is handed to the
+  # block as it is.
+  #
+  # The redirects followed are RFC 9110 §15.4's: 301 and 302 make a POST a
+  # GET, 303 makes anything but a HEAD a GET, and 307 and 308 keep the
+  # method and the body. `Authorization`, `Proxy-Authorization` and
+  # `Cookie` written by the caller are not sent to another host. One more
+  # than *redirects* is an `HTTPError`; with 0 the first answer is the
+  # block's.
+  def self.open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
+    current = url
+    verb = method
+    sent = headers
+    payload = body
+    hops = 0
+    while true
+      exchange = exchange(verb, current, sent, payload, jar, decompress, nil)
+      return exchange unless exchange.is_a?(Exchange)
+      response = exchange.response
+      location = response.header("Location")
+      status = response.status
+      redirect = location && (status == 301 || status == 302 || status == 303 || status == 307 || status == 308)
+      keeps = status == 307 || status == 308
+      if redirect && location && redirects > 0 && !(keeps && payload.is_a?(IyiIO))
+        exchange.close
+        return HTTPError.new("stopped after #{redirects} redirects, at #{current}") if hops == redirects
+        target = redirected(current, location)
+        return target if target.is_a?(HTTPError)
+        unless keeps || (status != 303 && !same_name?(verb, "POST")) || same_name?(verb, "HEAD")
+          verb = "GET"
+          payload = ""
+          sent = without(sent, ["Content-Type", "Content-Encoding"])
+        end
+        sent = without(sent, ["Authorization", "Proxy-Authorization", "Cookie"]) unless same_authority?(current, target)
+        current = target
+        hops = hops + 1
+        next
+      end
+      return handed(exchange, block)
+    end
+  end
+
+  # The 101 an upgrade to *protocol* is answered with, and the connection,
+  # which is the caller's from then on: std/websocket's handshake. Any
+  # other answer is an `HTTPError` naming it.
+  def self.upgrade(url : String, protocol : String, headers : Hash(String, String) = {} of String => String) : Upgraded | Cancelled | SocketError | HTTPError
+    sent = headers.dup
+    sent["Upgrade"] = protocol
+    exchange = exchange("GET", url, sent, "", nil, false, "Upgrade")
+    return exchange unless exchange.is_a?(Exchange)
+    response = exchange.response
+    if response.status != 101
+      exchange.close
+      return HTTPError.new("the server answered #{response.status} #{response.reason} to an upgrade to #{protocol}, not 101 Switching Protocols")
+    end
+    Upgraded.new(response, exchange.conn.socket, exchange.conn.leftover)
+  end
+
+  private def self.handed(exchange : Exchange, block : Proc(Response, R)) : R forall R
+    defer exchange.close
+    block.call(exchange.response)
+  end
+
+  # *location* read against *current*: a redirect's target, or why it is
+  # not one this client follows.
+  private def self.redirected(current : String, location : String) : String | HTTPError
+    base = URI.parse?(current)
+    return HTTPError.new("a redirect from #{current.inspect}, which is not a URL") unless base
+    target = URI.parse?(location)
+    return HTTPError.new("a redirect to #{location.inspect}, which is not a URL") unless target
+    resolved = base.resolve(target)
+    scheme = resolved.scheme
+    scheme = scheme.downcase if scheme
+    return HTTPError.new("redirected to #{resolved}, and TLS is not in 0.x") if scheme == "https"
+    return HTTPError.new("redirected to #{resolved}, which is not http://") unless scheme == "http"
+    resolved.to_s
+  end
+
+  private def self.same_authority?(a : String, b : String) : Bool
+    ua = URI.parse?(a)
+    ub = URI.parse?(b)
+    return false unless ua && ub
+    (ua.hostname || "").downcase == (ub.hostname || "").downcase && (ua.port || 80) == (ub.port || 80)
+  end
+
+  private def self.without(headers : Hash(String, String), names : Array(String)) : Hash(String, String)
+    kept = {} of String => String
+    headers.each do |name, value|
+      dropped = false
+      names.each { |n| dropped = true if same_name?(name, n) }
+      kept[name] = value unless dropped
+    end
+    kept
+  end
+
+  # Connect, write the request, read the answer's head past any 1xx, and
+  # frame its body; the body itself is still to come. *connection* is
+  # `Upgrade` for `HTTP.upgrade`, `close` otherwise.
+  private def self.exchange(method : String, url : String, headers : Hash(String, String), body : String | IyiIO, jar : CookieStore?, decompress : Bool, upgrade : String?) : Exchange | Cancelled | SocketError | HTTPError
+    uri = URI.parse?(url)
+    return HTTPError.new("not a URL: #{url.inspect}") unless uri
+    scheme = uri.scheme
+    # In any case (RFC 3986 §3.1): `HTTP://host/` was "only http://".
+    scheme = scheme.downcase if scheme
+    return HTTPError.new("TLS is not in 0.x; use http://") if scheme == "https"
+    return HTTPError.new("only http://") unless scheme == "http"
+    host = uri.hostname
+    return HTTPError.new("missing host") unless host
+    path = uri.path
+    path = "/" if path.bytesize == 0
+    if q = uri.query
+      path = path + "?" + q
+    end
+    port = uri.port || 80
+    # An IPv6 literal in its brackets, as the URL wrote it (RFC 9110
+    # §7.2): `hostname` is the address without them, and `Host: ::1:8080`
+    # named no host a server can split from its port.
+    named = host.includes?(":") ? "[#{host}]" : host
+    host_line = port == 80 ? named : "#{named}:#{port}"
+    sent = headers
+    asked = decompress && header_in(headers, "Accept-Encoding").nil?
+    cookies = nil.as(String?)
+    if keeper = jar
+      cookies = keeper.header_for(url)
+    end
+    if asked || cookies
+      sent = headers.dup
+      sent["Accept-Encoding"] = "gzip, deflate" if asked
+      if cookies
+        own = header_in(headers, "Cookie")
+        sent = without(sent, ["Cookie"]) if own
+        sent["Cookie"] = own ? own + "; " + cookies : cookies
+      end
+    end
+    head = same_name?(method, "HEAD")
+    connection = upgrade || "close"
+    socket = IyiSocket.connect(host, port)!
+    case body
+    in String
+      length = body.bytesize > 0 || same_name?(method, "POST") || same_name?(method, "PUT") || same_name?(method, "PATCH") ? body.bytesize.to_i64 : nil
+      text = request_head(method, path, host_line, sent, length, false, connection)
+      wrote = socket.write(body.bytesize > 0 && body.bytesize < 65536 ? text + body : text)
+      unless wrote.is_a?(Int32)
+        socket.close
+        return wrote
+      end
+      if body.bytesize >= 65536
+        wrote = socket.write(body)
+        unless wrote.is_a?(Int32)
+          socket.close
+          return wrote
+        end
+      end
+    in IyiIO
+      wrote = socket.write(request_head(method, path, host_line, sent, nil, true, connection))
+      unless wrote.is_a?(Int32)
+        socket.close
+        return wrote
+      end
+      writer = BodyWriter.new(socket, true)
+      while true
+        piece = body.read_bytes(65536)
+        break if piece.bytesize == 0
+        failed = writer.write(piece)
+        unless failed.nil?
+          socket.close
+          return failed
+        end
+      end
+      finished = writer.finish
+      unless finished.nil?
+        socket.close
+        return finished
+      end
+    end
+    conn = Conn.new(socket)
+    while true
+      # As far as the server's limit on a request's head, and no further: a
+      # head that did not end was read for as long as it came, 256 MB of one
+      # field cost the client 824 MB, and one that never ended took it all.
+      got = conn.read_head(Server::MAX_HEAD, "response")
+      case got
+      in Nil
+        conn.close
+        if fault = conn.failure
+          return fault
+        end
+        return HTTPError.new(conn.available > 0 ? "no header terminator" : "the connection ended before an answer")
+      in HTTPError
+        conn.close
+        return got
+      in String
+        parsed = parse_response_head(got)
+        if parsed.is_a?(HTTPError)
+          conn.close
+          return parsed
+        end
+        status, reason, fields, apart = parsed
+        next if status >= 100 && status < 200 && status != 101
+        reader = body_framing(conn, status, fields, head)
+        if reader.is_a?(HTTPError)
+          conn.close
+          return reader
+        end
+        decoded = false
+        if asked && !reader.finished?
+          decoded = undo_coding(reader, fields)
+          if decoded.is_a?(HTTPError)
+            conn.close
+            return decoded
+          end
+        end
+        response = Response.new(status, reason, fields, apart, reader, url, decoded)
+        if keeper = jar
+          keeper.update(url, response)
+        end
+        return Exchange.new(conn, response)
+      end
+    end
+  end
+
+  # How an answer's body is framed (RFC 9112 §6.3): none for a HEAD, a
+  # 1xx, a 204 or a 304; chunks; a length; or the connection's close.
+  private def self.body_framing(conn : Conn, status : Int32, fields : Hash(String, String), head : Bool) : BodyReader | HTTPError
+    unlimited = 9223372036854775807_i64
+    return BodyReader.new(conn, BodyReader::EMPTY, 0_i64, unlimited) if head || bodiless?(status) || status == 101
+    if te = header_in(fields, "Transfer-Encoding")
+      if refused = coding_refused(te)
+        return HTTPError.new(refused)
+      end
+      return BodyReader.new(conn, BodyReader::CHUNKED, 0_i64, unlimited)
+    end
+    if cl = header_in(fields, "Content-Length")
+      n = content_length(cl)
+      return HTTPError.new("Content-Length is not a number: #{cl.inspect}") unless n
+      return BodyReader.new(conn, BodyReader::LENGTH, n, unlimited)
+    end
+    BodyReader.new(conn, BodyReader::CLOSE, 0_i64, unlimited)
+  end
+
+  # The answer's `Content-Encoding` undone as the body is read, when it is
+  # one coding this client asked for: gzip (and its old name x-gzip), or
+  # deflate - zlib's envelope, as RFC 9110 §8.4.1.2 says, or the bare
+  # stream some servers send under the name, told apart by zlib's header
+  # check. The fields that described the coded body go. Another coding is
+  # left as it came, for the caller, with the headers that say so.
+  private def self.undo_coding(reader : BodyReader, fields : Hash(String, String)) : Bool | HTTPError
+    coding = header_in(fields, "Content-Encoding")
+    return false unless coding
+    name = trim(coding).downcase
+    envelope = if name == "gzip" || name == "x-gzip"
+                 Envelope::Gzip
+               elsif name == "deflate"
+                 Envelope::Zlib
+               else
+                 return false
+               end
+    reader.decode(envelope)
+    fields.reject_in_place { |key, _| same_name?(key, "Content-Encoding") || same_name?(key, "Content-Length") }
+    true
+  end
+
+  def self.get(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
+    request("GET", url, headers)
+  end
+
+  def self.head(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
+    request("HEAD", url, headers)
+  end
+
+  def self.post(url : String, body : String | IyiIO = "", headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
+    request("POST", url, headers, body)
+  end
+
+  def self.put(url : String, body : String | IyiIO = "", headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
+    request("PUT", url, headers, body)
+  end
+
+  def self.delete(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
+    request("DELETE", url, headers)
+  end
+
+  # *text* in gzip, whole: an answer's body under a server's `compress`.
+  def self.gzip(text : String) : String
+    Gzip.compress(text)
+  end
+
+  # A writer whose body goes out in gzip as it is written.
+  def self.gzip_writer(socket : IyiSocket, chunked : Bool) : BodyWriter
+    BodyWriter.new(socket, chunked, Deflater.new(Envelope::Gzip))
+  end
+
+  # Whether a list of codings a client accepts (`Accept-Encoding`, RFC
+  # 9110 §12.5.3) takes *coding*: named, or `*`, with a `q` above 0.
+  def self.accepts?(list : String, coding : String) : Bool
+    starred = false
+    list.split(',').each do |part|
+      item = trim(part)
+      next if item.bytesize == 0
+      name = item
+      weight = 1.0
+      if semi = item.index(';')
+        name = trim(item[0, semi])
+        params = item[semi + 1, item.bytesize - semi - 1]
+        params.split(';').each do |param|
+          kv = trim(param)
+          if kv.bytesize > 2 && (kv.starts_with?("q=") || kv.starts_with?("Q="))
+            weight = zero_weight?(kv[2, kv.bytesize - 2]) ? 0.0 : 1.0
+          end
+        end
+      end
+      return weight > 0.0 if same_name?(name, coding)
+      starred = weight > 0.0 if name == "*"
+    end
+    starred
+  end
+
+  # A `q` of 0, `0.`, `0.000`: the one weight that refuses (RFC 9110
+  # §12.4.2); anything else is some preference, and a `q` that is not a
+  # number is not a refusal either.
+  private def self.zero_weight?(text : String) : Bool
+    p = text.to_unsafe
+    return false unless text.bytesize > 0 && p[0] == 48_u8
+    i = 1
+    while i < text.bytesize
+      return false unless p[i] == 48_u8 || p[i] == 46_u8
+      i = i + 1
+    end
+    true
+  end
+
+  # The pairs of a request's `Cookie` header, `a=1; b=2` (RFC 6265 §4.2),
+  # a value's quotes taken off; the first of a name is kept, as a server
+  # reads the most specific cookie first.
+  def self.cookie_pairs(value : String) : Hash(String, String)
+    found = {} of String => String
+    value.split(';').each do |part|
+      eq = part.index('=')
+      next unless eq
+      name = trim(part[0, eq])
+      next if name.bytesize == 0
+      text = trim(part[eq + 1, part.bytesize - eq - 1])
+      text = text[1, text.bytesize - 2] if text.bytesize >= 2 && text.starts_with?("\"") && text.ends_with?("\"")
+      found[name] = text unless found.has_key?(name)
+    end
+    found
+  end
+
+  # *n* in lowercase hexadecimal: a chunk's size line.
+  def self.hex_text(n : Int64) : String
+    return "0" if n == 0
+    digits = "0123456789abcdef".to_unsafe
+    count = 0
+    probe = n
+    while probe > 0
+      count = count + 1
+      probe = probe >> 4
+    end
+    String.new(count) do |buf|
+      i = count - 1
+      value = n
+      while i >= 0
+        buf[i] = digits[(value & 15_i64).to_i32]
+        value = value >> 4
+        i = i - 1
+      end
+    end
   end
 
   # Why an answer's `Transfer-Encoding` is not one this client decodes,
@@ -746,7 +2233,7 @@ pub struct HTTP
       if semi = size_text.index(';')
         size_text = size_text[0, semi]
       end
-      size = parse_hex(trim(size_text))
+      size = hex(trim(size_text))
       raise "HTTP: not a chunk size: #{size_text.inspect}" unless size
       i = line_end + 2
       break if size == 0
@@ -801,127 +2288,6 @@ pub struct HTTP
     end
     lines << text[start, n - start] if start < n
     lines
-  end
-
-  # One request, one answer, one connection, which `Connection: close`
-  # asks the server to close. The answer is read as far as its framing
-  # says (RFC 9112 §6.3) - its length, its last chunk, or its head alone
-  # for a `HEAD`, a 1xx, 204 or 304 - and to the server's close only when it
-  # has neither a length nor chunks. A head past `Server::MAX_HEAD`, the
-  # megabyte the server takes of a request's, is refused. The socket parks
-  # under the runtime, so a request from a task answers `Cancelled` when
-  # the task is; a refused or reset connection answers `SocketError`; `!`
-  # passes either up, `.or_panic` refuses it.
-  def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String = "") : Response | Cancelled | SocketError
-    uri = URI.parse(url)
-    scheme = uri.scheme
-    # In any case (RFC 3986 §3.1): `HTTP://host/` was "only http://".
-    scheme = scheme.downcase if scheme
-    raise "HTTP: TLS is not in 0.x; use http://" if scheme == "https"
-    raise "HTTP: only http://" unless scheme == "http"
-    host = uri.hostname
-    raise "HTTP: missing host" unless host
-    path = uri.path
-    path = "/" if path.bytesize == 0
-    if q = uri.query
-      path = path + "?" + q
-    end
-    port = uri.port
-    port = 80 unless port
-    # An IPv6 literal in its brackets, as the URL wrote it (RFC 9110
-    # §7.2): `hostname` is the address without them, and `Host: ::1:8080`
-    # named no host a server can split from its port.
-    named = host.includes?(":") ? "[#{host}]" : host
-    host_line = port == 80 ? named : "#{named}:#{port}"
-    text = format_request(method, path, host_line, body, headers)
-    sock = IyiSocket.connect(host, port)!
-    defer sock.close
-    sock.write(text)!
-    head = same_name?(method, "HEAD")
-    # Read to the close, an answer the server reset after it was whole came
-    # back as `SocketError`, and one from a server that held the connection
-    # open waited for it: a 2-byte body took 3 s. Nothing past what its
-    # framing says is read.
-    failed = nil.as(Cancelled | SocketError | Nil)
-    reader = -> do
-      read = sock.read(65536)
-      failed = read unless read.is_a?(String)
-      read.is_a?(String) && read.bytesize > 0 ? read : nil
-    end
-    got = ""
-    at = 0
-    while true
-      # As far as the server's limit on a request's head, and no further: a
-      # head that did not end was read for as long as it came, 256 MB of one
-      # field cost the client 824 MB, and one that never ended took it all.
-      got, ends = read_head(got, at, Server::MAX_HEAD) { reader.call }
-      if failure = failed
-        return failure
-      end
-      raise "HTTP: response headers past #{Server::MAX_HEAD} bytes" if ends.nil? && got.bytesize - at > Server::MAX_HEAD
-      # The connection ended before a head did: refused as it was, or the
-      # interim answer it ended after is the answer.
-      return parse_response(got, head) unless ends
-      body_start = ends + 4
-      final = parse_response(got[0, body_start], true)
-      status = final.status
-      if status >= 100 && status < 200 && status != 101
-        at = body_start
-        next
-      end
-      return final if head || status == 204 || status == 304 || status == 101
-      if te = final.header("Transfer-Encoding")
-        if refused = coding_refused(te)
-          raise "HTTP: " + refused
-        end
-        read = read_chunked(got, body_start, 2147483647) { reader.call }
-        if failure = failed
-          return failure
-        end
-        raise "HTTP: chunked body ends before its last chunk" if read.nil?
-        raise "HTTP: " + read if read.is_a?(String)
-        body, _ = read
-        return final.with_body(body)
-      end
-      need = 9223372036854775807_i64
-      if cl = final.header("Content-Length")
-        n = content_length(cl)
-        # Not a length, or past what a string holds: refused as it was.
-        return parse_response(got, head) unless n && n <= 2147483647_i64
-        need = body_start.to_i64 + n
-      end
-      # Into one builder, in large reads: adding each 4 KB read to the
-      # answer so far copied it once per read, and a 24 MB answer took
-      # minutes.
-      answer = String::Builder.new
-      answer << got
-      while answer.bytesize.to_i64 < need
-        chunk = sock.read(65536)!
-        break if chunk.bytesize == 0
-        answer << chunk
-      end
-      return parse_response(answer.to_s, head)
-    end
-  end
-
-  def self.get(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError
-    request("GET", url, headers)
-  end
-
-  def self.head(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError
-    request("HEAD", url, headers)
-  end
-
-  def self.post(url : String, body : String = "", headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError
-    request("POST", url, headers, body)
-  end
-
-  def self.put(url : String, body : String = "", headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError
-    request("PUT", url, headers, body)
-  end
-
-  def self.delete(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError
-    request("DELETE", url, headers)
   end
 
   # Two field names for the same field: ASCII case is the only difference
@@ -1076,7 +2442,9 @@ pub struct HTTP
     nil
   end
 
-  private def self.parse_hex(text : String) : Int32?
+  # The value of a chunk size's hex digits, nil for anything else or for
+  # one past what an Int32 holds.
+  def self.hex(text : String) : Int32?
     return nil if text.bytesize == 0
     p = text.to_unsafe
     value = 0
@@ -1099,21 +2467,22 @@ pub struct HTTP
     value
   end
 
-  private def self.parse_status(line : String) : {Int32, String}
+  # A status line read: the status and its reason, or why it is not one.
+  def self.status_line(line : String) : {Int32, String} | HTTPError
     # HTTP/1.1 200 OK: the version is `HTTP/` DIGIT "." DIGIT and the
     # status three digits from 100 (RFC 9112 §2.3, §4). Read by `to_i?`, a
     # sign was a digit, so `+20` and `-99` were statuses, and so were 000
     # to 099; `HTTP/x` was a version, and a reason could hold a bare CR.
-    raise "HTTP: not a status line: #{line}" unless line.starts_with?("HTTP/")
+    return HTTPError.new("not a status line: #{line}") unless line.starts_with?("HTTP/")
     sp1 = line.index(' ')
-    raise "HTTP: not a status line: #{line}" unless sp1 && sp1 == 8 && digits?(line[5, 1]) && line.to_unsafe[6] == 46_u8 && digits?(line[7, 1])
+    return HTTPError.new("not a status line: #{line}") unless sp1 && sp1 == 8 && digits?(line[5, 1]) && line.to_unsafe[6] == 46_u8 && digits?(line[7, 1])
     rest = line[sp1 + 1, line.bytesize - sp1 - 1]
     sp2 = rest.index(' ')
     code_text = sp2 ? rest[0, sp2] : rest
     code = code_text.to_i?
-    raise "HTTP: not a status line: #{line}" unless code && code_text.bytesize == 3 && digits?(code_text) && code >= 100
+    return HTTPError.new("not a status line: #{line}") unless code && code_text.bytesize == 3 && digits?(code_text) && code >= 100
     reason = sp2 ? rest[sp2 + 1, rest.bytesize - sp2 - 1] : ""
-    raise "HTTP: not a status line: #{line}" if control?(reason)
+    return HTTPError.new("not a status line: #{line}") if control?(reason)
     {code, reason}
   end
 
@@ -1131,24 +2500,40 @@ pub struct HTTP
   # server writes; a status this table does not know gets its class's.
   def self.reason_for(status : Int32) : String
     case status
+    when 100 then "Continue"
+    when 101 then "Switching Protocols"
     when 200 then "OK"
     when 201 then "Created"
     when 202 then "Accepted"
     when 204 then "No Content"
+    when 206 then "Partial Content"
     when 301 then "Moved Permanently"
     when 302 then "Found"
+    when 303 then "See Other"
     when 304 then "Not Modified"
+    when 307 then "Temporary Redirect"
+    when 308 then "Permanent Redirect"
     when 400 then "Bad Request"
     when 401 then "Unauthorized"
     when 403 then "Forbidden"
     when 404 then "Not Found"
     when 405 then "Method Not Allowed"
     when 408 then "Request Timeout"
+    when 409 then "Conflict"
+    when 410 then "Gone"
+    when 411 then "Length Required"
+    when 412 then "Precondition Failed"
     when 413 then "Content Too Large"
+    when 415 then "Unsupported Media Type"
+    when 416 then "Range Not Satisfiable"
+    when 426 then "Upgrade Required"
+    when 429 then "Too Many Requests"
     when 431 then "Request Header Fields Too Large"
     when 500 then "Internal Server Error"
     when 501 then "Not Implemented"
+    when 502 then "Bad Gateway"
     when 503 then "Service Unavailable"
+    when 504 then "Gateway Timeout"
     else
       if status < 200
         "Informational"
@@ -1162,138 +2547,6 @@ pub struct HTTP
         "Server Error"
       end
     end
-  end
-
-  # A head as it arrives: *held*, then what *client* reads after it, until
-  # a blank line at or after *from* ends a head, or more than *limit*
-  # bytes after *from* hold none. The text, and where its head ends - nil
-  # when *client* ran out first. Each read is searched once, with the three
-  # bytes before it where a blank line may have begun, and kept in one
-  # builder; a first read that holds a whole head is the text as it came.
-  # Adding each read to the head so far and searching all of
-  # what has arrived again cost the server 8.8 s for a 1 MB head that came
-  # 128 bytes at a time, and 0.06 s for the same head in one piece.
-  def self.read_head(held : String, from : Int32, limit : Int32, &client : -> String?) : {String, Int32?}
-    if found = find_headers_end(held, from)
-      return {held, found}
-    end
-    size = held.bytesize
-    edge = size - from > 3 ? held[size - 3, 3] : held[from, size - from]
-    text = nil.as(String::Builder?)
-    while size - from <= limit
-      chunk = read_more(client)
-      break unless chunk
-      found = nil.as(Int32?)
-      if edge.bytesize > 0
-        probe = edge + chunk[0, chunk.bytesize < 3 ? chunk.bytesize : 3]
-        if at = find_headers_end(probe)
-          found = size - edge.bytesize + at
-        end
-      end
-      if found.nil?
-        if at = find_headers_end(chunk)
-          found = size + at
-        end
-      end
-      return {chunk, found} if found && size == 0
-      built = text
-      unless built
-        built = String::Builder.new(size + chunk.bytesize)
-        built << held
-        text = built
-      end
-      built << chunk
-      size = size + chunk.bytesize
-      return {built.to_s, found} if found
-      tail = chunk.bytesize >= 3 ? chunk : edge + chunk
-      edge = tail.bytesize > 3 ? tail[tail.bytesize - 3, 3] : tail
-    end
-    if built = text
-      return {built.to_s, nil}
-    end
-    {held, nil}
-  end
-
-  # A chunked body as it arrives, from *from* in *held* and then what
-  # *client* reads: the body and what came after it, the reason it is not
-  # one, or nil when the connection ended first. Each read is decoded into
-  # the body once; only an unfinished size line is carried to the next.
-  def self.read_chunked(held : String, from : Int32, limit : Int32, &client : -> String?) : {String, String} | String | Nil
-    body = String::Builder.new
-    data = held
-    pos = from
-    total = 0
-    while true
-      line_end = find_crlf(data, pos)
-      while line_end.nil?
-        return "a chunk size line past 4096 bytes" if data.bytesize - pos > 4096
-        more = read_more(client)
-        return nil unless more
-        data = data[pos, data.bytesize - pos] + more
-        pos = 0
-        line_end = find_crlf(data, pos)
-      end
-      size_text = data[pos, line_end - pos]
-      if semi = size_text.index(';')
-        size_text = size_text[0, semi]
-      end
-      size = parse_hex(trim(size_text))
-      unless size
-        return "not a chunk size: #{size_text.inspect}"
-      end
-      pos = line_end + 2
-      if size == 0
-        # Trailers, then a blank line.
-        while true
-          t_end = find_crlf(data, pos)
-          while t_end.nil?
-            return "trailers past 4096 bytes" if data.bytesize - pos > 4096
-            more = read_more(client)
-            return nil unless more
-            data = data[pos, data.bytesize - pos] + more
-            pos = 0
-            t_end = find_crlf(data, pos)
-          end
-          if t_end == pos
-            pos = pos + 2
-            return {body.to_s, data[pos, data.bytesize - pos]}
-          end
-          pos = t_end + 2
-        end
-      end
-      return "chunked body past #{limit} bytes" if size > limit - total
-      total = total + size
-      remaining = size
-      while remaining > 0
-        if pos == data.bytesize
-          more = read_more(client)
-          return nil unless more
-          data = more
-          pos = 0
-        end
-        take = data.bytesize - pos
-        take = remaining if take > remaining
-        body.write(data.to_unsafe + pos, take)
-        pos = pos + take
-        remaining = remaining - take
-      end
-      while data.bytesize - pos < 2
-        more = read_more(client)
-        return nil unless more
-        data = data[pos, data.bytesize - pos] + more
-        pos = 0
-      end
-      return "a chunk is not followed by CRLF" unless data.to_unsafe[pos] == 13_u8 && data.to_unsafe[pos + 1] == 10_u8
-      pos = pos + 2
-    end
-  end
-
-  # The next of what has arrived, for `read_head` and `read_chunked`: what
-  # the caller's *client* reads, nil when none is to come. The server's
-  # waits where `serve` can close it, the client's keeps the socket's
-  # failure to answer with.
-  private def self.read_more(client : Proc(String?)) : String?
-    client.call
   end
 
   # Where a chunked body that starts at *from* ends in `text` — the byte
@@ -1311,7 +2564,7 @@ pub struct HTTP
       if semi = size_text.index(';')
         size_text = size_text[0, semi]
       end
-      size = parse_hex(trim(size_text))
+      size = hex(trim(size_text))
       return "not a chunk size: #{size_text.inspect}" unless size
       i = line_end + 2
       if size == 0
@@ -1345,5 +2598,355 @@ pub struct HTTP
       last = last - 1
     end
     s[first, last - first]
+  end
+end
+
+# A `multipart/form-data` body (RFC 7578) read a part at a time, as it
+# arrives: `next_part` answers the next `Part`, nil after the last, and a
+# part's `read` answers its bytes up to the boundary, "" at its end. A part
+# not read to its end is read past by the next `next_part`. The body of a
+# request is `Request#multipart`'s; any `BodyReader` and boundary will do.
+# A part's head is refused past 16 KiB, and a body that ends before its
+# closing boundary is an `HTTPError`.
+pub class Multipart
+  @body : BodyReader
+  # `\r\n--` and the boundary: what ends a part.
+  @delimiter : String
+  @held : String
+  @started : Bool
+  @done : Bool
+  @current : Part?
+  # Whether the part being read has met its boundary, which is consumed
+  # with the part's last bytes.
+  @part_done : Bool
+
+  HEAD_LIMIT = 16384
+
+  def initialize(@body : BodyReader, boundary : String)
+    raise "HTTP: a multipart boundary is 1 to 70 characters, not #{boundary.bytesize}" if boundary.bytesize < 1 || boundary.bytesize > 70
+    @delimiter = "\r\n--" + boundary
+    # A body starts with its first boundary without a CRLF before it; one
+    # is put there, so every boundary is found the same way.
+    @held = "\r\n"
+    @started = false
+    @done = false
+    @current = nil
+    @part_done = false
+  end
+
+  # The boundary a `Content-Type` of `multipart/...` names, nil when it
+  # names none.
+  def self.boundary(content_type : String) : String?
+    parsed = MIME.parse?(content_type)
+    return nil unless parsed
+    media, params = parsed
+    return nil unless media.starts_with?("multipart/")
+    params["boundary"]?
+  end
+
+  # The next part, nil after the last.
+  def next_part : Part | Nil | Cancelled | SocketError | HTTPError
+    return nil if @done
+    if part = @current
+      until part.finished?
+        got = part.read(65536)
+        return got unless got.is_a?(String)
+      end
+      @current = nil
+    else
+      # Past the preamble to the first boundary.
+      until @started
+        found = find(@delimiter)
+        if found >= 0
+          @held = @held[found + @delimiter.bytesize, @held.bytesize - found - @delimiter.bytesize]
+          @started = true
+        else
+          keep = @delimiter.bytesize - 1
+          @held = @held[@held.bytesize - keep, keep] if @held.bytesize > keep
+          more = pull
+          return more unless more.is_a?(Bool)
+          return HTTPError.new("multipart body ends before its first boundary") unless more
+        end
+      end
+    end
+    # After a boundary: `--` ends the body, CRLF begins a part's head.
+    while @held.bytesize < 2
+      more = pull
+      return more unless more.is_a?(Bool)
+      return HTTPError.new("multipart body ends after a boundary") unless more
+    end
+    if @held.starts_with?("--")
+      @done = true
+      return nil
+    end
+    # Transport padding (spaces and tabs) may stand before the CRLF.
+    skip = 0
+    while true
+      while skip >= @held.bytesize
+        more = pull
+        return more unless more.is_a?(Bool)
+        return HTTPError.new("multipart body ends after a boundary") unless more
+      end
+      c = @held.to_unsafe[skip]
+      break unless c == 32_u8 || c == 9_u8
+      skip = skip + 1
+    end
+    @held = @held[skip, @held.bytesize - skip] if skip > 0
+    while @held.bytesize < 2
+      more = pull
+      return more unless more.is_a?(Bool)
+      return HTTPError.new("multipart body ends after a boundary") unless more
+    end
+    return HTTPError.new("a multipart boundary is not followed by CRLF") unless @held.starts_with?("\r\n")
+    @held = @held[2, @held.bytesize - 2]
+    head_end = find("\r\n\r\n")
+    while head_end < 0
+      return HTTPError.new("a multipart part's head past #{HEAD_LIMIT} bytes") if @held.bytesize > HEAD_LIMIT
+      more = pull
+      return more unless more.is_a?(Bool)
+      unless more
+        # A part with no fields at all: its blank line is the head's end.
+        return HTTPError.new("multipart body ends inside a part's head") unless @held.starts_with?("\r\n")
+        break
+      end
+      head_end = find("\r\n\r\n")
+    end
+    headers = {} of String => String
+    if @held.starts_with?("\r\n")
+      @held = @held[2, @held.bytesize - 2]
+    else
+      lines = HTTP.split_crlf("\r\n" + @held[0, head_end])
+      fields = HTTP.parse_fields(lines)
+      return HTTPError.new("a multipart part's head: #{fields}") if fields.is_a?(String)
+      headers = fields
+      @held = @held[head_end + 4, @held.bytesize - head_end - 4]
+    end
+    part = Part.new(self, headers)
+    @current = part
+    @part_done = false
+    part
+  end
+
+  # Where *pattern* is in what is held, -1 when it is not there yet.
+  protected def find(pattern : String) : Int32
+    @held.byte_index(pattern) || -1
+  end
+
+  # One more piece of the body onto what is held: false at its end.
+  protected def pull : Bool | Cancelled | SocketError | HTTPError
+    got = @body.read(65536)
+    return got unless got.is_a?(String)
+    return false if got.bytesize == 0
+    @held = @held + got
+    true
+  end
+
+  # Up to *max* bytes of the part being read, "" at its boundary. What is
+  # held back is what may yet be the start of the boundary.
+  protected def part_read(max : Int32) : String | Cancelled | SocketError | HTTPError
+    return "" if @part_done
+    while true
+      if at = @held.byte_index(@delimiter)
+        take = at < max ? at : max
+        piece = @held[0, take]
+        @held = @held[take, @held.bytesize - take]
+        if take == at
+          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]
+          @part_done = true
+        end
+        return piece
+      end
+      safe = @held.bytesize - (@delimiter.bytesize - 1)
+      if safe > 0
+        take = safe < max ? safe : max
+        piece = @held[0, take]
+        @held = @held[take, @held.bytesize - take]
+        return piece
+      end
+      more = pull
+      return more unless more.is_a?(Bool)
+      return HTTPError.new("multipart body ends inside a part") unless more
+    end
+  end
+end
+
+# One part of a multipart body: its head's fields, its name and file name
+# from `Content-Disposition`, and its bytes, read up to its boundary.
+pub class Part
+  getter headers : Hash(String, String)
+  @owner : Multipart
+  @finished : Bool
+  @pending : String?
+
+  def initialize(@owner : Multipart, @headers : Hash(String, String))
+    @finished = false
+    @pending = nil
+  end
+
+  def header(name : String) : String?
+    @headers.each do |key, value|
+      return value if HTTP.same_name?(key, name)
+    end
+    nil
+  end
+
+  # The form field's name, `name=` of `Content-Disposition`.
+  def name : String?
+    disposition("name")
+  end
+
+  # The file name a browser sent the part under, `filename=`.
+  def filename : String?
+    disposition("filename")
+  end
+
+  def content_type : String?
+    header("Content-Type")
+  end
+
+  def finished? : Bool
+    @finished
+  end
+
+  # The part's next bytes, at most *max*; "" at its end.
+  def read(max : Int32 = 65536) : String | Cancelled | SocketError | HTTPError
+    return "" if @finished
+    got = @owner.part_read(max)
+    @finished = true if got.is_a?(String) && got.bytesize == 0
+    got
+  end
+
+  # The rest of the part as one string, refused past *limit* bytes.
+  def read_all(limit : Int64 = 2147483647_i64) : String | Cancelled | SocketError | HTTPError
+    text = String::Builder.new
+    total = 0_i64
+    while true
+      got = read(65536)
+      return got unless got.is_a?(String)
+      break if got.bytesize == 0
+      total = total + got.bytesize.to_i64
+      return HTTPError.new("a multipart part past #{limit} bytes", 413) if total > limit
+      text << got
+    end
+    text.to_s
+  end
+
+  private def disposition(key : String) : String?
+    value = header("Content-Disposition")
+    return nil unless value
+    parsed = MIME.parse?("x/" + value)
+    if parsed
+      return parsed[1][key]?
+    end
+    nil
+  end
+end
+
+# A multipart/form-data body to send: fields and files in order. Its
+# boundary is chosen when the body is first asked for - `finish`,
+# `content_type` or `boundary`, whichever comes first, after which no
+# part is added - as `iyi-` and 32 hex digits of the parts' SHA-1, made
+# again from itself in the rare case a part holds it: so it is none of
+# the parts' bytes by construction rather than by chance, the same
+# fields make the same body, and std/http reaches no source of
+# randomness for it. A boundary given to `new` is used as it is, and a
+# part that holds it is refused.
+pub class MultipartBuilder
+  @boundary : String?
+  @parts : Array({String, String?, String?, String})
+
+  def initialize(boundary : String? = nil)
+    if given = boundary
+      raise "HTTP: a multipart boundary is 1 to 70 characters, not #{given.bytesize}" if given.bytesize < 1 || given.bytesize > 70
+    end
+    @boundary = boundary
+    @parts = [] of {String, String?, String?, String}
+  end
+
+  def boundary : String
+    if chosen = @boundary
+      return chosen
+    end
+    digest = SHA1.new
+    @parts.each do |part|
+      digest.update(part[0])
+      digest.update(part[1] || "")
+      digest.update(part[2] || "")
+      digest.update(part[3])
+    end
+    chosen = "iyi-" + digest.hexfinal[0, 32]
+    while @parts.any? { |part| MultipartBuilder.holds?(part[3], chosen) }
+      chosen = "iyi-" + SHA1.hexdigest(chosen)[0, 32]
+    end
+    @boundary = chosen
+    chosen
+  end
+
+  def content_type : String
+    "multipart/form-data; boundary=" + boundary
+  end
+
+  def field(name : String, value : String) : self
+    add(name, nil, nil, value)
+  end
+
+  def file(name : String, filename : String, data : String, content_type : String = MIME.from_extension(filename)) : self
+    add(name, filename, content_type, data)
+  end
+
+  # The body, closing boundary and all.
+  def finish : String
+    mark = boundary
+    text = String::Builder.new
+    @parts.each do |part|
+      text << "--" << mark << "\r\n"
+      text << "Content-Disposition: form-data; name=\"" << MultipartBuilder.quoted(part[0]) << "\""
+      if file = part[1]
+        text << "; filename=\"" << MultipartBuilder.quoted(file) << "\""
+      end
+      text << "\r\n"
+      if kind = part[2]
+        text << "Content-Type: " << kind << "\r\n"
+      end
+      text << "\r\n" << part[3] << "\r\n"
+    end
+    text << "--" << mark << "--\r\n"
+    text.to_s
+  end
+
+  private def add(name : String, filename : String?, type : String?, data : String) : self
+    if mark = @boundary
+      raise "HTTP: a multipart part's data holds its boundary" if MultipartBuilder.holds?(data, mark)
+    end
+    if kind = type
+      raise "HTTP: a part's Content-Type contains a line break" if HTTP.has_break?(kind)
+    end
+    @parts << {name, filename, type, data}
+    self
+  end
+
+  # The boundary ends a part where it follows a CRLF, the part's first
+  # bytes included, which follow the head's blank line.
+  protected def self.holds?(data : String, mark : String) : Bool
+    ("\r\n" + data).includes?("\r\n--" + mark)
+  end
+
+  # A name inside quotes, as browsers write one: a quote and a line break
+  # percent-encoded (the WHATWG form encoding), so no field can end the
+  # parameter or the line early.
+  protected def self.quoted(text : String) : String
+    built = String::Builder.new
+    text.each_char do |c|
+      if c == '"'
+        built << "%22"
+      elsif c == '\r'
+        built << "%0D"
+      elsif c == '\n'
+        built << "%0A"
+      else
+        built << c
+      end
+    end
+    built.to_s
   end
 end

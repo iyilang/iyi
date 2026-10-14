@@ -4,6 +4,39 @@
 
 ### Added
 
+- **`Time` has time zones: `Time::Location`, read from the machine's own
+  zone database.** A `Time` was a UTC instant and a zone was an offset
+  passed by hand. Now a `Time` carries the `Location` it is read in:
+  `Location.load("Europe/Istanbul")` reads the IANA database's TZif file
+  (RFC 8536, versions 1 to 4, `$ZONEINFO` then `/usr/share/zoneinfo`,
+  `/usr/share/lib/zoneinfo` and `/etc/zoneinfo`); `Location.local` is
+  `TZ` (a name, a path, or a POSIX rule such as
+  `CET-1CEST,M3.5.0,M10.5.0/3`) or `/etc/localtime`, and on Windows the
+  system's rule from `GetTimeZoneInformation`; `Location.fixed(19800)`,
+  `Location::UTC` and `Location.read_zoneinfo(name, bytes)` complete it.
+  `Time.local`, `Time.local(y, m, d, ..., location:)`, `time.in(loc)`,
+  `to_utc`, `to_local`, `offset`, `zone`, `utc?` and `local?` are new, and
+  the date, clock, `to_s`, `inspect`, `to_rfc3339`, `to_rfc2822` and `%Z`
+  read the time in its location (`2024-07-01 14:00:00 +02:00`, `CEST`),
+  while `==`, `<=>` and `hash` stay the instant's. A slim file's future
+  is its footer's rule, so 2099 reads as 2024 does. A wall time a change
+  skips is read past the gap and one it repeats as the earlier instant,
+  as Python's `fold=0` and Go read them; `shift(days:)` moves the date on
+  the wall clock and a `Span` stays exact. `Time.parse(text, pattern,
+  location)`, `Time.parse_local` and `Time::Format.new(pattern, location)`
+  read a text with no zone on that location's clock. A missing zone or a
+  malformed file is a `LocationError` value naming what was wrong, never
+  a panic, and a header that counts more than any zone holds is refused
+  before anything is allocated. Every existing UTC result is unchanged.
+  Held by `bench/std_time_exercise.sh`: TZif files built by the exercise,
+  so it runs the same on every machine; 572,040 offsets, abbreviations,
+  summer flags and wall-clock readings over fifteen zones (Lord Howe's
+  half-hour summer, Dublin's negative one, Apia's skipped day among
+  them) identical to Python's zoneinfo; twelve `TZ` settings hour by
+  hour through 2024 and 2025 identical to glibc; and seven broken copies
+  of the module caught. A `Time` stays shareable across tasks and
+  threads. Reading `TZ` and `ZONEINFO` reaches the C runtime's `environ`,
+  as std/env does; no library is added.
 - **`std/digest` has SHA-224, SHA-384 and SHA-512, and every hash takes
   its data in pieces.** It had MD5, SHA-1 and SHA-256, each a single
   `hexdigest(String)`. Now the six are one `Digest`:

@@ -345,8 +345,8 @@ programs under `bench/`, 84 run and pass unattended on a Windows 11
 machine. The three that do not are the three that cannot: one whose pass
 *is* a crash, one that waits for a client its gate supplies, and one that
 reads the two environment variables its gate pins. What is missing is named
-in the entry: no `Time::Location`, and a symbolic link needs a privilege
-Windows does not hand out.
+in the entry: no zone database of Windows' own, and a symbolic link needs a
+privilege Windows does not hand out.
 
 **Performance — Crystal's backend, and now one measurement of its own.**
 Native code through LLVM, the same GC. `python3 bench/runtime.py` runs the same
@@ -1207,7 +1207,10 @@ marked PROPOSED are the parts that will move under you.
   others, its output read through overlapped named pipes on the completion
   port and its end posted there by `RegisterWaitForSingleObject`, so a
   program waiting for a child keeps serving its other tasks.
-  What is *not* here: there is no `Time::Location`; a
+  What is *not* here: Windows keeps no IANA zone database, so
+  `Time::Location.local` there is the system's rule from
+  `GetTimeZoneInformation`, its zones named by their offsets, and
+  `Location.load` reads only what `$ZONEINFO` points at; a
   symbolic link needs a privilege Windows grants to an administrator or
   to Developer Mode, so the file exercise asks first and says what it
   skipped; the daemon is POSIX-only (`poll(2)` and `fork`), so the

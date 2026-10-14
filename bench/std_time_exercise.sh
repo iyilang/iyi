@@ -19,11 +19,16 @@
 #     2822, RFC 3339, ISO 8601), RFC 9110's three HTTP date forms, bad text
 #     refused as a `TimeParseError` rather than a panic, ISO weeks and
 #     `shift(months:)`; the same program optimised (`--release`).
+#   * `Time::Location`: the exercise's own TZif files; then the machine's
+#     zone database read for fifteen zones and checked against Python's
+#     zoneinfo, and twelve `TZ` settings against glibc's `localtime`.
 #   * Negative proofs: the exercise script breaks the leap-year rule, roundtrip
-#     arithmetic, RFC 3339 offset handling, and eight parts of `Time::Format`
+#     arithmetic, RFC 3339 offset handling, eight parts of `Time::Format`
 #     (month names, both offset directions, trailing text, RFC 9110's year
-#     rule, the month's last day, ISO weeks, the 12-hour clock), asserting
-#     each is caught.
+#     rule, the month's last day, ISO weeks, the 12-hour clock) and seven of
+#     `Time::Location` (a rule's weekday, the footer, the version 2 block,
+#     signed words, header counts, a repeated wall time, a shifted day),
+#     asserting each is caught.
 #   * Dependency floor: audits symbols and libraries to prove zero new dependencies.
 #
 # Needs `make` for bin/iyi, plus `nm`, and `otool` on Darwin or `readelf` on Linux.
@@ -78,6 +83,10 @@ symbols() {
     sed -e 's/^ *//' -e 's/^U  *//' -e 's/@.*$//' |
     awk '{ print $NF }' |
     sed -e 's/^_//' |
+    # glibc's `environ` is a weak alias of `__environ`, and which one a
+    # binary names is the libc's choice; bench/dependency_floor.sh reads
+    # them as one name too.
+    sed -e 's/^_environ$/environ/' |
     grep -v '^$' |
     sort -u
 }
@@ -140,13 +149,13 @@ fi
 
 echo
 echo "== every time check reported"
-for check in "known-value table" "leap-year rules" "scattered roundtrip" "platform clocks" "span construction" "RFC 3339" "time comparison" "hash keys" "strftime directives" "format round-trips" "RFC 9110 date forms" "parse refusals" "ISO weeks and month arithmetic" "ALL CHECKS PASSED"; do
+for check in "known-value table" "leap-year rules" "scattered roundtrip" "platform clocks" "span construction" "RFC 3339" "time comparison" "hash keys" "strftime directives" "format round-trips" "RFC 9110 date forms" "parse refusals" "ISO weeks and month arithmetic" "== locations" "times in a location" "wall clocks in a location" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-time.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339, Comparable, hash keys, directives, round trips, HTTP dates, refusals, ISO weeks and month arithmetic all reported"
+[ "$status" -eq 0 ] && echo "  known-value table, leap-year rules, roundtrip, clocks, spans, RFC 3339, Comparable, hash keys, directives, round trips, HTTP dates, refusals, ISO weeks, month arithmetic and locations all reported"
 
 # ---------------------------------------------------------------------------
 # Negative failure proofs
@@ -258,7 +267,9 @@ format_break_caught "a month name read one month early" month_name \
 format_break_caught "an offset written the wrong way" format_offset \
   'local = time.seconds + @offset.to_i64' 'local = time.seconds - @offset.to_i64'
 format_break_caught "an offset read the wrong way" parse_offset \
-  'seconds = local - offset.to_i64 +' 'seconds = local + offset.to_i64 +'
+  '                    wall - offset.to_i64
+                  elsif location' '                    wall + offset.to_i64
+                  elsif location'
 format_break_caught "text after the pattern accepted" trailing \
   'return true if @pos >= @len
         fail("unexpected text after the time")' 'return true'
@@ -270,6 +281,167 @@ format_break_caught "an ISO week counted from the wrong Monday" iso_week \
   'week = (day_of_year - day_of_week + 10) // 7' 'week = (day_of_year - day_of_week + 11) // 7'
 format_break_caught "the afternoon an hour short" twelve_hour \
   'hour += 12 unless hour == 12' 'hour += 11 unless hour == 12'
+
+echo
+echo "== negative proofs: broken parts of Time::Location are caught"
+format_break_caught "a rule's Sunday counted from the wrong weekday" rule_weekday \
+  'weekday = Time.floor_mod(first + 4_i64, 7_i64)' 'weekday = Time.floor_mod(first + 3_i64, 7_i64)'
+format_break_caught "a TZif footer passed over" footer \
+  'if width == 8 && stop < size && p[stop] == 10_u8' 'if false'
+format_break_caught "the version 2 block read where version 1's is" version_two \
+  '      at = 44 + first
+' '      at = 0
+'
+format_break_caught "a 32-bit word read unsigned" signed_word \
+  'value >= 2147483648_i64 ? value - 4294967296_i64 : value' 'value'
+format_break_caught "a header's counts trusted" header_counts \
+  'return nil if count > 1000000_i64 ||' 'return nil if false ||'
+format_break_caught "a repeated wall time read as the later instant" resolve_earlier \
+  'best = candidate if lookup_range(candidate)[0].offset == offset && candidate < best' 'best = candidate if lookup_range(candidate)[0].offset == offset && candidate > best'
+format_break_caught "a day shifted by 24 hours rather than on the wall clock" shift_wall \
+  'moved = Time.new(@location.resolve(date), @nanoseconds, @location)' 'moved = Time.new(date - @offset.to_i64, @nanoseconds, @location)'
+
+echo
+echo "== locations against the machine's own zone database"
+# Python's zoneinfo reads the same TZif files with code of its own, so a
+# difference is a reading of the files, not of the data. For each zone: the
+# offset, abbreviation and summer flag at 3,000 instants from 1800 to 2140
+# and at every hour of 2024 and 2099 - the last read from the footer's rule
+# - and the instant each of those hours, half past, reads as on the wall
+# clock, which is Python's `fold=0`. The zones are chosen for what they
+# hold: half-hour and 45-minute offsets, a 30-minute summer, a summer
+# that spans New Year, negative summer time, a skipped day.
+zones="Europe/Berlin America/New_York Australia/Sydney Australia/Lord_Howe Asia/Kolkata America/Sao_Paulo Pacific/Apia Africa/Casablanca Europe/Dublin Pacific/Chatham America/St_Johns Europe/Istanbul Asia/Tehran UTC Etc/GMT+5"
+if [ -z "$PY" ] || ! "$PY" -c 'import zoneinfo; zoneinfo.ZoneInfo("Europe/Berlin")' >/dev/null 2>&1 || [ ! -f /usr/share/zoneinfo/Europe/Berlin ]; then
+  echo "  skipped: this machine has no zone database, or no Python zoneinfo to read it with"
+else
+  cat >"$WORK/zones.iyi" <<'IYI'
+module zones
+import std/time::{Time, Location}
+
+Program.args.each do |name|
+  loc = Location.load(name).or_panic
+  seed = 12345_i64
+  3000.times do
+    seed = (seed * 1103515245_i64 + 12345_i64) % 2147483648_i64
+    unix = -5364662400_i64 + seed * 5_i64
+    z = loc.lookup(unix)
+    puts "#{name} at #{unix} #{z.offset} #{z.name} #{z.dst?}"
+  end
+  [2024, 2099].each do |year|
+    start = Time.utc(year, 1, 1).to_unix
+    h = 0_i64
+    while h < 8784_i64
+      unix = start + h * 3600_i64
+      z = loc.lookup(unix)
+      puts "#{name} at #{unix} #{z.offset} #{z.name} #{z.dst?}"
+      wall = Time.unix(unix + 1800_i64)
+      local = Time.local(wall.year, wall.month, wall.day, wall.hour, wall.minute, wall.second, location: loc)
+      puts "#{name} wall #{wall.year}-#{wall.month}-#{wall.day} #{wall.hour}:#{wall.minute} #{local.to_unix} #{local.hour}:#{local.minute}"
+      h = h + 1_i64
+    end
+  end
+end
+IYI
+  cat >"$WORK/zones.py" <<'PY'
+import sys
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+for name in sys.argv[1:]:
+    z = ZoneInfo(name)
+    def at(unix):
+        l = (epoch + timedelta(seconds=unix)).astimezone(z)
+        print(f"{name} at {unix} {int(l.utcoffset().total_seconds())} {l.tzname()} {'true' if l.dst() else 'false'}")
+    seed = 12345
+    for _ in range(3000):
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        at(-5364662400 + seed * 5)
+    for year in (2024, 2099):
+        start = int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp())
+        for h in range(8784):
+            unix = start + h * 3600
+            at(unix)
+            w = datetime(1970, 1, 1) + timedelta(seconds=unix + 1800)
+            inst = int(w.replace(tzinfo=z).timestamp())
+            back = (epoch + timedelta(seconds=inst)).astimezone(z)
+            print(f"{name} wall {w.year}-{w.month}-{w.day} {w.hour}:{w.minute} {inst} {back.hour}:{back.minute}")
+PY
+  if ! "$IYI" build --release -o "$WORK/zones" "$WORK/zones.iyi" >"$WORK/zones.build.log" 2>&1; then
+    echo "  the zone reader did not build:"; tail -5 "$WORK/zones.build.log" | sed 's/^/    /'
+    status=1
+  else
+    "$WORK/zones" $zones >"$WORK/zones.iyi.out" 2>&1
+    "$PY" "$WORK/zones.py" $zones >"$WORK/zones.py.out" 2>&1
+    if cmp -s "$WORK/zones.iyi.out" "$WORK/zones.py.out"; then
+      echo "  $(wc -l <"$WORK/zones.iyi.out" | tr -d ' ') offsets, abbreviations, summer flags and wall clocks over $(echo $zones | wc -w | tr -d ' ') zones agree with Python's zoneinfo"
+    else
+      echo "  std/time and Python's zoneinfo read the database differently:"
+      diff "$WORK/zones.py.out" "$WORK/zones.iyi.out" | sed -n '1,8p' | sed 's/^/    /'
+      status=1
+    fi
+  fi
+fi
+
+echo
+echo "== the local zone, and the TZ variable, against the C library"
+# glibc's `localtime` is the oracle for what `TZ` means: a name, a
+# leading colon, a POSIX rule with each of its three day forms, a quoted
+# name, a negative transition time, a negative summer, an offset alone,
+# and no TZ at all, which is /etc/localtime. Two readings are left out on
+# purpose, both glibc's own: a summer named without dates is the United
+# States' since 2007 here, as in Go, where glibc falls back on an older
+# table; and a rule whose summer runs all year (`J1/0,J365/25`) holds
+# across New Year here, as RFC 8536 says, where glibc works out one year.
+if [ "$(uname -s)" != Linux ] || [ -z "$PY" ]; then
+  echo "  skipped: the oracle is glibc's localtime, read through Python, on Linux"
+else
+  cat >"$WORK/tzvar.iyi" <<'IYI'
+module tzvar
+import std/time::{Time, Location}
+
+loc = Location.local
+start = Time.utc(2024, 1, 1).to_unix
+h = 0_i64
+while h < 17568_i64
+  unix = start + h * 3600_i64
+  z = loc.lookup(unix)
+  puts "#{unix} #{z.offset} #{z.name} #{z.dst?}"
+  h = h + 1_i64
+end
+IYI
+  cat >"$WORK/tzvar.py" <<'PY'
+import time
+start = 1704067200
+for h in range(17568):
+    l = time.localtime(start + h * 3600)
+    print(f"{start + h * 3600} {l.tm_gmtoff} {l.tm_zone} {'true' if l.tm_isdst > 0 else 'false'}")
+PY
+  if ! "$IYI" build -o "$WORK/tzvar" "$WORK/tzvar.iyi" >"$WORK/tzvar.build.log" 2>&1; then
+    echo "  the TZ reader did not build:"; tail -5 "$WORK/tzvar.build.log" | sed 's/^/    /'
+    status=1
+  else
+    agreed=0
+    for tz in "EST5EDT,M3.2.0,M11.1.0" "<+0330>-3:30" "CET-1CEST,M3.5.0,M10.5.0/3" "AEST-10AEDT,M10.1.0,M4.1.0/3" "XXX3YYY,J60/2,J300/2" "XXX3YYY,59/2,299/2" "IST-1GMT0,M10.5.0,M3.5.0/1" "<-03>3<-02>,M3.5.0/-2,M10.5.0/-1" ":Europe/Berlin" "Asia/Tokyo" "UTC0" "unset"; do
+      if [ "$tz" = unset ]; then
+        [ -f /etc/localtime ] || continue
+        env -u TZ "$WORK/tzvar" >"$WORK/tzvar.iyi.out" 2>&1
+        env -u TZ "$PY" "$WORK/tzvar.py" >"$WORK/tzvar.py.out" 2>&1
+      else
+        TZ="$tz" "$WORK/tzvar" >"$WORK/tzvar.iyi.out" 2>&1
+        TZ="$tz" "$PY" "$WORK/tzvar.py" >"$WORK/tzvar.py.out" 2>&1
+      fi
+      if cmp -s "$WORK/tzvar.iyi.out" "$WORK/tzvar.py.out"; then
+        agreed=$((agreed + 1))
+      else
+        echo "  TZ=$tz is read differently from glibc:"
+        diff "$WORK/tzvar.py.out" "$WORK/tzvar.iyi.out" | sed -n '1,6p' | sed 's/^/    /'
+        status=1
+      fi
+    done
+    echo "  $agreed TZ settings read as glibc reads them, every hour of 2024 and 2025"
+  fi
+fi
 
 echo
 echo "== what the parser and the formatter refuse"
@@ -388,9 +560,13 @@ fi
 
 echo
 echo "== the dependency floor, measured against the std_time exercise binary"
+# `environ` is the C runtime's table of the environment, which `Location`
+# reads for TZ and ZONEINFO through the prelude as std/env does
+# (bench/dependency_floor.sh allows it for the same reason); it is a
+# symbol of the libc already linked, not a library.
 case "$(uname -s)" in
   Linux)
-    allowed_symbols="$FLOOR_BASE_LINUX"
+    allowed_symbols="$FLOOR_BASE_LINUX environ"
     if ! command -v readelf >/dev/null 2>&1; then
       echo "  readelf is required on Linux to read NEEDED entries" >&2
       exit 2
@@ -400,7 +576,7 @@ case "$(uname -s)" in
     # The base is every darwin program's (bench/floor_base.sh); the socket
     # and file names beside it are what this exercise's binary asks for on
     # top, each libSystem's, which the `allowed_libs` check below proves.
-    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect getsockname listen open recv send setsockopt socket unlink"
+    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect environ getsockname listen open recv send setsockopt socket unlink"
     ;;
 esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"

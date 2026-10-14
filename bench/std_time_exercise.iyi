@@ -17,6 +17,13 @@
 #     of UTC, nanoseconds), round trips through every pattern and named
 #     format, RFC 9110's three HTTP date forms, bad text refused as a
 #     `TimeParseError` with its sentence, ISO weeks and month arithmetic.
+#   * `Time::Location`: TZif files of versions 1 and 2 made here, their
+#     transitions and their footer's rule in both hemispheres, nine broken
+#     files and three names outside the database refused as a
+#     `LocationError`; times read,
+#     written, compared and hashed in a location; wall clocks read across
+#     a skipped and a repeated hour, days shifted on the wall clock, and a
+#     parse at a location.
 #
 # Run via:
 #     ./bin/iyi run bench/std_time_exercise.iyi
@@ -25,7 +32,7 @@ module bench/std_time_exercise
 
 import std/format::{printf}
 
-import std/time::{Time, Span, DayOfWeek, TimeParseError}
+import std/time::{Time, Span, DayOfWeek, TimeParseError, Location, LocationError}
 
 def assert_true(cond : Bool, msg : String) : Nil
   if !cond
@@ -606,7 +613,7 @@ refusals = 0
   {"%I:%M:%S %p", "13:00:00 PM", "a 12-hour clock runs 1 to 12, not 13"},
   {"%I:%M:%S %p", "00:00:00 AM", "a 12-hour clock runs 1 to 12, not 0"},
   {"%I:%M:%S %p", "10:00:00 XM", "expected am or pm"},
-  {"%F %Z", "2024-01-01 CET", "the time zone \"CET\" needs the tz database"},
+  {"%F %Z", "2024-01-01 CET", "the time zone \"CET\" is not one %Z reads"},
   {"%u", "8", "a day of the week runs 1 (Monday) to 7 (Sunday), not 8"},
   {"%w", "7", "a day of the week runs 0 (Sunday) to 6 (Saturday), not 7"},
   {"%G-W%V-%u", "2024-W53-1", "2024 has weeks 1 to 52, not week 53"},
@@ -700,5 +707,181 @@ assert_true(Time.utc(2018, 8, 31).shift(days: -1).shift(months: 1) == Time.utc(2
 assert_true(Time.utc(2024, 1, 1).shift(weeks: 2, hours: 3, minutes: 4, seconds: 5, nanoseconds: 6) == Time.utc(2024, 1, 15, 3, 4, 5, 0, 6), "the smaller units")
 assert_true(Time.utc(2024, 3, 1).shift(nanoseconds: -1) == Time.utc(2024, 2, 29, 23, 59, 59, 0, 999999999), "a nanosecond back across the leap day")
 puts "  #{week_days} days from 1990 to 2035 are their own ISO week dates, weeks step by one, and months shift to the last day a month has"
+
+# ---------------------------------------------------------------------------
+# Locations
+# ---------------------------------------------------------------------------
+
+# A TZif file, RFC 8536, made here so the checks read the same on a machine
+# with no zone database: a header, its version 1 block (one local time
+# type and no transitions, as the slim files write it), then the version
+# 2 header and block with 64-bit times, then the footer's rule.
+def tzif_be(sink : Array(UInt8), n : Int64, width : Int32) : Nil
+  shift = (width - 1) * 8
+  while shift >= 0
+    sink << ((n >> shift) & 255_i64).to_u8
+    shift -= 8
+  end
+end
+
+def tzif_header(sink : Array(UInt8), version : UInt8, count : Int64, type_count : Int64, char_count : Int64) : Nil
+  sink << 84_u8 << 90_u8 << 105_u8 << 102_u8 << version
+  15.times { sink << 0_u8 }
+  [0_i64, 0_i64, 0_i64, count, type_count, char_count].each { |n| tzif_be(sink, n, 4) }
+end
+
+def tzif_block(sink : Array(UInt8), times : Array(Int64), indexes : Array(UInt8), types : Array({Int64, UInt8, UInt8}), chars : String, width : Int32) : Nil
+  times.each { |t| tzif_be(sink, t, width) }
+  indexes.each { |i| sink << i }
+  types.each do |type|
+    tzif_be(sink, type[0], 4)
+    sink << type[1] << type[2]
+  end
+  tzif_text(sink, chars)
+end
+
+def tzif_text(sink : Array(UInt8), text : String) : Nil
+  text.bytesize.times { |i| sink << text.to_unsafe[i] }
+end
+
+def tzif_bytes(version : UInt8, times : Array(Int64), indexes : Array(UInt8), types : Array({Int64, UInt8, UInt8}), chars : String, footer : String) : String
+  bytes = [] of UInt8
+  if version == 0_u8
+    tzif_header(bytes, version, times.size.to_i64, types.size.to_i64, chars.bytesize.to_i64)
+    tzif_block(bytes, times, indexes, types, chars, 4)
+  else
+    tzif_header(bytes, version, 0_i64, 1_i64, 4_i64)
+    tzif_be(bytes, 0_i64, 4)
+    bytes << 0_u8 << 0_u8
+    tzif_text(bytes, "UTC\u0000")
+    tzif_header(bytes, version, times.size.to_i64, types.size.to_i64, chars.bytesize.to_i64)
+    tzif_block(bytes, times, indexes, types, chars, 8)
+    bytes << 10_u8
+    tzif_text(bytes, footer)
+    bytes << 10_u8
+  end
+  String.new(bytes.size) { |buf| buf.copy_from(bytes.to_unsafe, bytes.size) }
+end
+
+def location(result : Location | LocationError, msg : String) : Location
+  case result
+  when LocationError
+    raise "ASSERTION FAILED: #{msg}: refused with #{result.message.inspect}"
+  else
+    result
+  end
+end
+
+def location_refused(result : Location | LocationError, phrase : String, msg : String) : Nil
+  case result
+  when LocationError
+    raise "ASSERTION FAILED: #{msg}: refused with #{result.message.inspect}, which does not say #{phrase.inspect}" unless result.message.includes?(phrase)
+  else
+    raise "ASSERTION FAILED: #{msg}: read as #{result.inspect}"
+  end
+end
+
+puts "\n== locations"
+# Local mean time until 1893, then Central European Time by the footer's
+# rule, which holds for every time after the last transition: summer from
+# 01:00 UTC on the last Sunday of March to 01:00 UTC on the last Sunday of
+# October. Berlin's own file says the same for 2024.
+cet_types = [{3208_i64, 0_u8, 0_u8}, {3600_i64, 0_u8, 4_u8}, {7200_i64, 1_u8, 8_u8}]
+cet = location(Location.read_zoneinfo("Test/CET", tzif_bytes(50_u8, [-2429830408_i64], [1_u8], cet_types, "LMT\u0000CET\u0000CEST\u0000", "CET-1CEST,M3.5.0,M10.5.0/3")), "a version 2 file")
+assert_text("Test/CET", cet.name, "the name it was read under")
+[
+  {-2429830409_i64, 3208, "LMT", false},
+  {-2429830408_i64, 3600, "CET", false},
+  {1711846799_i64, 3600, "CET", false},
+  {1711846800_i64, 7200, "CEST", true},
+  {1729990799_i64, 7200, "CEST", true},
+  {1729990800_i64, 3600, "CET", false},
+  {4118068800_i64, 7200, "CEST", true},
+].each do |row|
+  zone = cet.lookup(row[0])
+  assert_true(zone.offset == row[1] && zone.name == row[2] && zone.dst? == row[3], "at #{row[0]} Test/CET is #{row[2]} #{row[1]}, not #{zone.name} #{zone.offset}")
+end
+# The southern hemisphere's summer spans New Year: from 02:00 on October's
+# first Sunday to 03:00 summer time on April's.
+sydney = location(Location.read_zoneinfo("Test/Sydney", tzif_bytes(51_u8, [] of Int64, [] of UInt8, [{36000_i64, 0_u8, 0_u8}], "AEST\u0000", "AEST-10AEDT,M10.1.0,M4.1.0/3")), "a file of no transitions and a rule")
+[{1705320000_i64, 39600}, {1712419199_i64, 39600}, {1712419200_i64, 36000}, {1728143999_i64, 36000}, {1728144000_i64, 39600}].each do |row|
+  assert_true(sydney.lookup(row[0]).offset == row[1], "at #{row[0]} Test/Sydney is #{row[1]} east of UTC, not #{sydney.lookup(row[0]).offset}")
+end
+# Version 1: 32-bit times and no footer, the last transition holding for
+# every time after it.
+v1 = location(Location.read_zoneinfo("Test/V1", tzif_bytes(0_u8, [0_i64, 100000_i64], [1_u8, 0_u8], [{-18000_i64, 0_u8, 0_u8}, {-14400_i64, 1_u8, 4_u8}], "EST\u0000EDT\u0000", "")), "a version 1 file")
+assert_true(v1.lookup(-1_i64).offset == -18000 && v1.lookup(0_i64).offset == -14400 && v1.lookup(100000_i64).name == "EST" && v1.lookup(1000000000000_i64).name == "EST", "version 1's transitions, the first type before them and the last after")
+puts "  a TZif file's transitions, its footer's rule in both hemispheres, and version 1's 32-bit times"
+
+good = tzif_bytes(50_u8, [-2429830408_i64], [1_u8], cet_types, "LMT\u0000CET\u0000CEST\u0000", "CET-1CEST,M3.5.0,M10.5.0/3")
+# Byte-exact copies: the fixture is binary, and a String index counts
+# characters.
+cut = String.new(good.bytesize - 40) { |buf| buf.copy_from(good.to_unsafe, good.bytesize - 40) }
+unmarked = String.new(good.bytesize) do |buf|
+  buf.copy_from(good.to_unsafe, good.bytesize)
+  buf[0] = 88_u8
+end
+location_refused(Location.read_zoneinfo("x", "TZif"), "shorter than its header", "four bytes")
+location_refused(Location.read_zoneinfo("x", unmarked), "does not begin with TZif", "the wrong magic")
+location_refused(Location.read_zoneinfo("x", cut), "data block runs to byte", "a file cut short")
+# A header that counts two billion transitions is refused before anything
+# is allocated or added up.
+bomb = String.new(44) do |buf|
+  44.times { |i| buf[i] = 0_u8 }
+  buf[0] = 84_u8
+  buf[1] = 90_u8
+  buf[2] = 105_u8
+  buf[3] = 102_u8
+  buf[32] = 127_u8
+  buf[39] = 1_u8
+end
+location_refused(Location.read_zoneinfo("x", bomb), "counts more than any zone holds", "a header of two billion transitions")
+location_refused(Location.read_zoneinfo("x", tzif_bytes(50_u8, [0_i64], [3_u8], cet_types, "LMT\u0000CET\u0000CEST\u0000", "")), "names local time type 3 of 3", "a transition to a type there is not")
+location_refused(Location.read_zoneinfo("x", tzif_bytes(50_u8, [5_i64, 5_i64], [1_u8, 2_u8], cet_types, "LMT\u0000CET\u0000CEST\u0000", "")), "out of order at 1", "two transitions at one instant")
+location_refused(Location.read_zoneinfo("x", tzif_bytes(50_u8, [] of Int64, [] of UInt8, [{86400_i64, 0_u8, 0_u8}], "BIG\u0000", "")), "a day or more", "an offset of a day")
+location_refused(Location.read_zoneinfo("x", tzif_bytes(50_u8, [] of Int64, [] of UInt8, [{0_i64, 0_u8, 9_u8}], "UTC\u0000", "")), "abbreviation byte 9 of 4", "an abbreviation past the letters")
+location_refused(Location.read_zoneinfo("x", tzif_bytes(50_u8, [] of Int64, [] of UInt8, [] of {Int64, UInt8, UInt8}, "", "")), "no local time types", "no types at all")
+location_refused(Location.load("../etc/passwd"), "invalid location name", "a name that climbs out of the database")
+location_refused(Location.load("/etc/localtime"), "invalid location name", "an absolute path")
+location_refused(Location.load("No/Such_Zone"), "no time zone named \"No/Such_Zone\"", "a name no directory has")
+assert_true(location(Location.load("UTC"), "UTC").utc? && location(Location.load(""), "the empty name").utc?, "UTC and the empty name are UTC without a file")
+puts "  short, unmarked, truncated and inconsistent files, and names outside the database, are each a LocationError"
+
+puts "\n== times in a location"
+noon = Time.utc(2024, 7, 1, 12).in(cet)
+assert_true(noon.hour == 14 && noon.offset == 7200 && noon.zone.name == "CEST" && noon.zone.dst?, "noon UTC is 14:00 CEST")
+assert_true(noon == Time.utc(2024, 7, 1, 12) && noon.hash == Time.utc(2024, 7, 1, 12).hash, "a time is its instant to == and hash, wherever it is read")
+assert_text("2024-07-01 14:00:00 +02:00", noon.to_s, "to_s writes the offset")
+assert_text("2024-07-01 14:00:00 +02:00 Test/CET", noon.inspect, "inspect writes the location")
+assert_text("2024-07-01T14:00:00+02:00", noon.to_rfc3339, "to_rfc3339 at the time's own offset")
+assert_text("2024-07-01T12:00:00Z", noon.to_utc.to_rfc3339, "and in UTC")
+assert_text("Mon, 1 Jul 2024 14:00:00 +0200", noon.to_rfc2822, "to_rfc2822 at its own offset")
+assert_text("2024-07-01 14:00:00 CEST +02:00", noon.to_s("%F %T %Z %:z"), "%Z is the abbreviation")
+assert_text("2024-07-01 12:00:00 +00:00", noon.to_s("%F %T %:z", 0), "an offset given is the offset written")
+assert_text("2024-01-01 13:00:00 CET", Time::Format.new("%F %T %Z", cet).format(Time.utc(2024, 1, 1, 12)), "a Format at a location writes every time there")
+assert_text("Sun, 06 Nov 1994 08:49:37 GMT", Time.utc(1994, 11, 6, 8, 49, 37).in(cet).to_rfc1123, "the HTTP date is GMT wherever the time is")
+lmt = Time.utc(1850, 1, 1).in(cet)
+assert_text("1850-01-01 00:53:28 +00:53:28 Test/CET", lmt.inspect, "local mean time keeps its seconds")
+assert_text("1850-01-01T00:00:00Z", lmt.to_rfc3339, "an offset RFC 3339 cannot write is written in UTC")
+fixed = Location.fixed(19800)
+assert_true(fixed.fixed? && fixed.name == "+05:30" && !fixed.utc? && Location::UTC.utc?, "a fixed location is named by its offset")
+assert_text("2024-01-01 05:30:00 +05:30", Time.utc(2024, 1, 1).in(fixed).inspect, "a fixed location inspects without a name")
+assert_true(Time.utc.utc? && !Time.utc.in(Location.fixed(0)).utc?, "UTC is the location, not offset 0")
+puts "  read, written, compared and hashed in a location: CEST, local mean time, a fixed offset"
+
+puts "\n== wall clocks in a location"
+assert_equal(1711848600_i64, Time.local(2024, 3, 31, 2, 30, location: cet).to_unix, "02:30 on the morning summer begins is read past the gap")
+assert_text("2024-03-31 03:30:00 +02:00", Time.local(2024, 3, 31, 2, 30, location: cet).to_s, "as 03:30 CEST")
+assert_equal(1729989000_i64, Time.local(2024, 10, 27, 2, 30, location: cet).to_unix, "02:30 the morning summer ends is the earlier of the two")
+assert_equal(1719828000_i64, Time.local(2024, 7, 1, 12, location: cet).to_unix, "noon in summer")
+saturday = Time.local(2024, 3, 30, 12, location: cet)
+assert_text("2024-03-31 12:00:00 +02:00", saturday.shift(days: 1).to_s, "a day shifted across the change keeps the clock")
+assert_equal(82800_i64, (saturday.shift(days: 1) - saturday).to_i, "and is 23 hours")
+assert_text("2024-03-31 13:00:00 +02:00", (saturday + Span.days(1)).to_s, "a span of a day is 24 hours")
+assert_text("2024-04-30 12:00:00 +02:00", saturday.shift(months: 1).to_s, "a month shifted the same way")
+assert_text("2024-03-31 03:30:00 +02:00", parsed(Time.parse("2024-03-31 02:30", "%F %H:%M", cet), "a parse at a location").to_s, "a text with no zone is the location's wall clock")
+assert_text("2024-07-01 14:00:00 +02:00", parsed(Time.parse("2024-07-01 12:00 +00:00", "%F %H:%M %:z", cet), "a parse with a zone").to_s, "a text with a zone is read there and answered in the location")
+assert_text("2024-07-01 14:00:00 +02:00", parsed(Time::Format.new("%s", cet).parse("1719835200"), "seconds at a location").to_s, "%s in a location")
+puts "  a skipped hour read past, a repeated one read as the first, days on the wall clock, and a parse at a location"
 
 puts "\nALL CHECKS PASSED"

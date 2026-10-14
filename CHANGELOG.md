@@ -4,6 +4,42 @@
 
 ### Added
 
+- **`std/term`: `Term.tty?`, `Term.size`, `Term.raw { }`, `Term.no_echo { }`
+  and `Term.read_password`, terminal control without a C library.**
+  `tty?(io or fd)` is the prelude's `__iyi_isatty`, the same answer
+  `std/colorize` already uses, not a second copy of it. `size` answers
+  `{rows, columns}` from TIOCGWINSZ (Linux, darwin) or the console
+  window (Windows), asking standard output, then standard error, then
+  standard input; nil when there is no terminal, and also for 0 by 0,
+  which is what a pseudo-terminal nobody sized answers. `raw` and
+  `no_echo` save the mode, change it, run the block, answer its value,
+  and put the saved mode back with a `defer`, so it comes back when the
+  block returns, when a `!` returns early and when the block panics. Raw
+  is termios(3)'s `cfmakeraw` set, as Go's x/term `makeRaw` and Crystal's
+  `cfmakeraw` write it out; echo off is Crystal's `noecho` set (ECHO,
+  ECHOE, ECHOK, ECHONL); a password adds what Go's `readPassword` forces
+  on (ICANON, ISIG, ICRNL), so it is read as an edited line even from
+  inside raw mode. The prompt goes to standard error, and standard input
+  that is not a terminal is read as it is, so `echo pw | prog` works.
+  Linux makes TCGETS/TCSETS `ioctl` system calls by hand, darwin calls
+  libSystem's `tcgetattr`/`tcsetattr`/`ioctl`, and Windows calls
+  `GetConsoleMode`/`SetConsoleMode`/`GetConsoleScreenBufferInfo`. Refused:
+  a stream that is not a terminal is a `TermError`, and the block does not
+  run ("cannot enter raw mode on standard input: not a terminal"); a
+  closed stream panics ("Term: cannot enter raw mode on a closed stream").
+  `bench/std_term_exercise.sh` holds it, plain and `--release`, by
+  driving both builds through a pseudo-terminal from Python's `pty`
+  module. In raw mode a byte arrives without a newline, Ctrl-C arrives as
+  byte 3 and does not raise SIGINT (a control run without raw mode is
+  killed by SIGINT), and CR stays CR. Echo off and the password show
+  nothing typed. The terminal's termios is compared before and after each
+  block, and after a panic in one, with Python's `tcgetattr` and with
+  `stty -g`. The mode bits are checked against Python's own termios
+  constants. `size` follows the TIOCSWINSZ the driver sets, and agrees
+  with `stty size` and `os.get_terminal_size`. A pipe, a file and
+  /dev/null are not terminals. Four refusals are matched by their exact
+  sentence, the binary is checked for any libc terminal symbol, and
+  twelve broken copies of the module are each caught.
 - **`std/yaml`: `derive yaml_serializable`, std/json's derive over YAML.**
   A struct or class that derives it gets `to_yaml : String`,
   `self.from_yaml(text) : self` and `initialize(yaml : Any)`, and

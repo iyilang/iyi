@@ -1,0 +1,233 @@
+# Exercises `std/term`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_term_exercise.iyi
+#
+# With no argument it checks what holds without a terminal: a pipe and a
+# file are not terminals, have no size, and refuse raw mode and echo off
+# with the block not run; a password is read from a pipe as it is. It runs
+# a copy of itself (`pipes`) with a pipe on every standard stream for
+# that, so the answer does not depend on how the exercise itself was
+# started.
+#
+# The other arguments are the programs bench/std_term_exercise.sh runs
+# inside a pseudo-terminal it drives from Python's `pty` module: each
+# prints `READY <mode>` once the terminal is in the mode, so the driver
+# can read the terminal's termios from the other side before it types.
+
+module bench/std_term_exercise
+
+import std/term::{Term, TermError}
+import std/process::{Process}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String?, actual : String?, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def show(size : {Int32, Int32}?) : String
+  if size
+    "#{size[0]} #{size[1]}"
+  else
+    "none"
+  end
+end
+
+def say(text : String) : Nil
+  # `\r\n` by hand: in raw mode the terminal no longer turns `\n` into it,
+  # and the driver reads lines either way.
+  STDOUT.write(text + "\r\n")
+end
+
+mode = Program.args.size > 0 ? Program.args[0] : ""
+
+case mode
+when "pipes"
+  # Every standard stream is a pipe here (see the top).
+  puts "in #{Term.tty?(STDIN)}"
+  puts "out #{Term.tty?(STDOUT)}"
+  puts "err #{Term.tty?(STDERR)}"
+  puts "fd #{Term.tty?(0)} #{Term.tty?(1)} #{Term.tty?(2_i64)}"
+  puts "size #{show(Term.size)} #{show(Term.size(STDIN))} #{show(Term.size(1))}"
+  ran = false
+  raw = Term.raw(STDIN) do
+    ran = true
+    7
+  end
+  if raw.is_a?(TermError)
+    puts "raw #{raw.message} | #{raw.not_a_terminal?} ran=#{ran}"
+  else
+    puts "raw answered #{raw} ran=#{ran}"
+  end
+  quiet = Term.no_echo { ran = true }
+  if quiet.is_a?(TermError)
+    puts "noecho #{quiet.message} ran=#{ran}"
+  else
+    puts "noecho answered ran=#{ran}"
+  end
+  3.times { puts "pw #{Term.read_password("Password: ").inspect}" }
+  puts "code #{raw.is_a?(TermError) ? raw.code : -1}"
+  exit 0
+when "tty"
+  say "TTY in=#{Term.tty?(STDIN)} out=#{Term.tty?(STDOUT)} err=#{Term.tty?(STDERR)} fd0=#{Term.tty?(0)}"
+  exit 0
+when "size"
+  # A size per line typed, until `q`.
+  while true
+    say "SIZE #{show(Term.size)} in=#{show(Term.size(STDIN))} out=#{show(Term.size(STDOUT))}"
+    line = STDIN.read_line(chomp: true)
+    break if line.nil? || line == "q"
+  end
+  exit 0
+when "cooked"
+  # The control experiment: without `Term.raw`, a line is echoed, a byte
+  # waits for its newline, and Ctrl-C ends the program.
+  say "READY cooked-line"
+  say "LINE #{STDIN.read_line(chomp: true).inspect}"
+  say "READY cooked"
+  got = STDIN.read_bytes(1)
+  say "BYTE #{got.bytesize > 0 ? got.to_unsafe[0] : -1}"
+  exit 0
+when "raw"
+  answer = Term.raw(STDIN) do
+    say "READY raw"
+    first = STDIN.read_bytes(1)
+    say "BYTE #{first.to_unsafe[0]}"
+    second = STDIN.read_bytes(1)
+    say "BYTE #{second.to_unsafe[0]}"
+    third = STDIN.read_bytes(1)
+    say "BYTE #{third.to_unsafe[0]}"
+    "kept"
+  end
+  if answer.is_a?(TermError)
+    say "ERROR #{answer.message}"
+    exit 1
+  end
+  say "DONE raw #{answer}"
+  exit 0
+when "noecho"
+  answer = Term.no_echo do
+    say "READY noecho"
+    STDIN.read_line(chomp: true)
+  end
+  if answer.is_a?(TermError)
+    say "ERROR #{answer.message}"
+    exit 1
+  end
+  say "LINE #{answer.inspect}"
+  say "DONE noecho"
+  exit 0
+when "password"
+  # The prompt is what tells the driver the mode is set: it is written
+  # after the change, on standard error, which is the terminal here too.
+  say "PW #{Term.read_password("Password: ").inspect}"
+  say "PW #{Term.read_password("Again: ").inspect}"
+  say "DONE password"
+  exit 0
+when "panic-raw"
+  Term.raw do
+    say "READY panic-raw"
+    STDIN.read_bytes(1)
+    raise "boom inside raw"
+  end
+  say "UNREACHED"
+  exit 0
+when "panic-noecho"
+  Term.no_echo do
+    say "READY panic-noecho"
+    STDIN.read_line
+    raise "boom inside no_echo"
+  end
+  say "UNREACHED"
+  exit 0
+when "password-in-raw"
+  # A program already in raw mode asks for a password: the line is read as
+  # a line, and the Enter key's CR ends it, because the password mode
+  # turns ICANON and ICRNL back on for the read.
+  Term.raw do
+    say "PW #{Term.read_password("Password: ").inspect}"
+    say "READY back-in-raw"
+    STDIN.read_bytes(1)
+    nil
+  end
+  say "DONE password-in-raw"
+  exit 0
+when "nested"
+  # Raw inside echo-off: leaving raw puts echo-off back, not the
+  # terminal's first mode, and leaving echo-off puts that back.
+  Term.no_echo do
+    Term.raw do
+      say "READY nested-raw"
+      STDIN.read_bytes(1)
+      nil
+    end
+    say "READY nested-noecho"
+    STDIN.read_line
+  end
+  say "DONE nested"
+  exit 0
+end
+
+puts "== tty? on a pipe, a file and descriptors that are not open"
+exe = Process.executable
+assert_true !exe.nil?, "the exercise knows its own path"
+if exe
+  done = Process.run(exe, ["pipes"], input: "hunter2\r\nsecond\n").or_panic
+  # The lines before the exit status: a module that misjudges a pipe for
+  # a terminal ends this child in a panic, and the line that says which
+  # answer was wrong is the one to read.
+  lines = done.stdout.split('\n')
+  assert_str "in false", lines[0]?, "tty? is false for a pipe on standard input"
+  assert_str "out false", lines[1]?, "tty? is false for a pipe on standard output"
+  assert_str "err false", lines[2]?, "tty? is false for a pipe on standard error"
+  assert_str "fd false false false", lines[3]?, "tty? by descriptor agrees"
+
+  puts "== size without a terminal"
+  assert_str "size none none none", lines[4]?, "no terminal has no size"
+
+  puts "== raw and no_echo refuse a stream that is not a terminal"
+  assert_str "raw cannot enter raw mode on standard input: not a terminal | true ran=false", lines[5]?, "raw refuses a pipe and does not run the block"
+  assert_str "noecho cannot turn echo off on standard input: not a terminal ran=false", lines[6]?, "no_echo refuses a pipe and does not run the block"
+
+  puts "== read_password from a pipe"
+  assert_str "pw \"hunter2\"", lines[7]?, "a password piped in is read, its CR LF taken off"
+  assert_str "pw \"second\"", lines[8]?, "the next line is the next password"
+  assert_str "pw nil", lines[9]?, "the end of the input is nil"
+  assert_str "Password: Password: Password: ", done.stderr, "the prompt goes to standard error, once per ask"
+  # ENOTTY, 25 on Linux and darwin; Windows' code is whatever
+  # `GetConsoleMode` left, and `not_a_terminal?` above is what holds there.
+  {% unless flag?(:win32) %}
+    assert_str "code 25", lines[10]?, "the error carries ENOTTY"
+  {% end %}
+  assert_true done.success?, "the pipes child exited 0 (#{done.exit_code}): #{done.stderr}"
+end
+
+puts "== a file and closed streams"
+probe = (exe || "term") + ".probe"
+File.write(probe, "x")
+file = File.open(probe)
+assert_true !Term.tty?(file), "tty? is false for a file"
+assert_true Term.size(file).nil?, "a file has no size"
+in_file = Term.raw(file) { 1 }
+assert_true in_file.is_a?(TermError), "raw on a file is a TermError"
+if in_file.is_a?(TermError)
+  assert_true in_file.not_a_terminal?, "a file is not a terminal"
+  assert_true in_file.message.ends_with?(": not a terminal"), "the message says why: #{in_file.message}"
+end
+file.close
+assert_true !Term.tty?(file), "tty? is false for a closed stream"
+assert_true Term.size(file).nil?, "a closed stream has no size"
+File.delete(probe)
+assert_true !Term.tty?(-1), "tty? is false for -1"
+assert_true !Term.tty?(987654), "tty? is false for a descriptor that is not open"
+assert_true Term.size(-1).nil?, "-1 has no size"
+{% unless flag?(:win32) %}
+  null = File.open("/dev/null")
+  assert_true !Term.tty?(null), "tty? is false for /dev/null, a character device that is no terminal"
+  null.close
+{% end %}
+
+puts "ALL CHECKS PASSED"

@@ -1,0 +1,621 @@
+# DNS: the wire format, the resolver's configuration file and the hosts
+# file, read by iyi itself.
+#
+# Why iyi has its own:
+# A name is turned into an address by libc's getaddrinfo everywhere else,
+# and on Linux that is libc.so, the NSS modules it loads by name at run
+# time (libnss_files, libnss_dns, and whatever else /etc/nsswitch.conf
+# lists) and libresolv's state. That is the dependency floor SPEC.md III.9
+# keeps a program off, and the reason `std/socket` read numeric addresses
+# and `localhost` only. A stub resolver is small: it asks the name servers
+# the machine is configured with, over UDP and then TCP, and reads what
+# they answer. This module is the part of it that is arithmetic over bytes
+# and text - building a query, reading an answer, reading
+# `/etc/resolv.conf` and `/etc/hosts` - and `std/socket`'s `Resolver` is
+# the part that talks to the network. They are two modules because the
+# talking needs `std/socket` and `std/socket` needs this to connect by
+# name; an import cycle is refused (R-1).
+#
+# What an answer is trusted with:
+# The answer to a query is read only if it carries the query's 16-bit ID,
+# is a response, and repeats the question asked - the name (in any case),
+# the type and the class; anything else on the port is somebody else's and
+# is ignored, which is what makes a blind forger guess both the ID and the
+# port the resolver asked from. A name inside an answer is read with its
+# compression pointers held to RFC 1035's rule that a pointer refers to an
+# *earlier* occurrence: each pointer must point before the place the
+# previous one led to, so a loop - a pointer to itself, or two pointing at
+# each other - and a pointer past the end are refused as malformed rather
+# than followed. A CNAME chain is followed at most `DnsMessage::MAX_CNAMES`
+# links, which ends a loop of aliases the same way.
+#
+# What it does not do: no EDNS(0), so a UDP answer is at most 512 bytes and
+# a larger one comes back truncated and is asked again over TCP; no cache,
+# so every lookup asks; no DNSSEC validation; no reverse lookups.
+
+module std/dns
+
+import std/slice::{Bytes, Slice}
+
+# Why a name was not resolved. One type with a question per answer, as
+# `SocketError` has, so a caller tells a name that does not exist
+# (`not_found?`, NXDOMAIN - authoritative, not worth asking again) from a
+# server that failed (`server_failure?`, SERVFAIL - maybe worth asking
+# again later) without reading a sentence.
+pub struct DnsError
+  NOT_FOUND      = 1
+  NO_ADDRESS     = 2
+  SERVER_FAILURE = 3
+  REFUSED        = 4
+  TIMED_OUT      = 5
+  MALFORMED      = 6
+  UNREACHABLE    = 7
+  INVALID_NAME   = 8
+
+  getter kind : Int32
+  # The name as the caller wrote it.
+  getter name : String
+  # The server whose answer this is, `address:port`; empty when no server
+  # was asked.
+  getter server : String
+  getter detail : String
+
+  def initialize(@kind : Int32, @name : String, @server : String = "", @detail : String = "")
+  end
+
+  # The same failure, said about *name*: a failure found while reading
+  # bytes knows no name, and the resolver that asked does.
+  def about(name : String, server : String) : DnsError
+    DnsError.new(@kind, name, server, @detail)
+  end
+
+  # NXDOMAIN: the name does not exist.
+  def not_found? : ::Bool
+    @kind == NOT_FOUND
+  end
+
+  # The name exists and has no address of the kind asked for (NOERROR
+  # with no records, "NODATA").
+  def no_address? : ::Bool
+    @kind == NO_ADDRESS
+  end
+
+  # SERVFAIL from every server asked.
+  def server_failure? : ::Bool
+    @kind == SERVER_FAILURE
+  end
+
+  # REFUSED, FORMERR or NOTIMP: the server would not answer this query.
+  def refused? : ::Bool
+    @kind == REFUSED
+  end
+
+  # No server answered within the timeout, on any attempt.
+  def timed_out? : ::Bool
+    @kind == TIMED_OUT
+  end
+
+  # An answer that carried the query's ID and question and could not be
+  # read: a compression loop, a pointer past the end, a record running off
+  # the message, an alias chain that does not end.
+  def malformed? : ::Bool
+    @kind == MALFORMED
+  end
+
+  # The server could not be reached: nothing listens on its port (an ICMP
+  # refusal), no route to it, or the TCP connection the truncated answer
+  # needed failed.
+  def unreachable? : ::Bool
+    @kind == UNREACHABLE
+  end
+
+  # Not a host name at all, so nothing was asked.
+  def invalid_name? : ::Bool
+    @kind == INVALID_NAME
+  end
+
+  def reason : String
+    said = case @kind
+           when NOT_FOUND      then "the name does not exist (NXDOMAIN)"
+           when NO_ADDRESS     then "the name has no address"
+           when SERVER_FAILURE then "the name server failed (SERVFAIL)"
+           when REFUSED        then "the name server refused the query (#{@detail})"
+           when TIMED_OUT      then "no name server answered in time"
+           when MALFORMED      then "the answer was malformed: #{@detail}"
+           when UNREACHABLE    then "the name server could not be reached: #{@detail}"
+           when INVALID_NAME   then "not a host name: #{@detail}"
+           else                     "error #{@kind}"
+           end
+    @server.empty? ? said : "#{said}; asked #{@server}"
+  end
+end
+
+impl Error for DnsError
+  def message : String
+    "cannot resolve #{name}: #{reason}"
+  end
+end
+
+# What a host name may be, and the names a short one stands for.
+pub struct DnsName
+  # RFC 1035's 255 bytes on the wire are 253 characters written out.
+  MAX_LENGTH = 253
+
+  # A host name as RFC 1123 and glibc's `res_hnok` read one: labels of 1 to
+  # 63 letters, digits, `-` and `_`, no label starting with `-`, at most
+  # 253 characters, one trailing dot allowed. The last label must not be
+  # all digits (RFC 3696 2: no top-level domain is), so `999.1.1.1` and
+  # `1.2.3` stay what the numeric parser refuses rather than becoming
+  # questions to a name server.
+  def self.valid?(name : String) : ::Bool
+    why(name).nil?
+  end
+
+  # Why *name* is not a host name, or nil when it is.
+  def self.why(name : String) : String?
+    size = name.bytesize
+    raw = name.to_unsafe
+    size = size - 1 if size > 1 && raw[size - 1] == 46_u8
+    return "empty" if size == 0
+    return "longer than #{MAX_LENGTH} characters" if size > MAX_LENGTH
+    label = 0
+    digits = true
+    index = 0
+    while index < size
+      byte = raw[index]
+      if byte == 46_u8
+        return "an empty label" if label == 0
+        label = 0
+        digits = true
+      else
+        digit = byte >= 48_u8 && byte <= 57_u8
+        letter = (byte | 32_u8) >= 97_u8 && (byte | 32_u8) <= 122_u8
+        return "#{name.inspect} has a byte no host name has" unless digit || letter || byte == 45_u8 || byte == 95_u8
+        return "a label starts with '-'" if byte == 45_u8 && label == 0
+        label = label + 1
+        return "a label longer than 63 characters" if label > 63
+        digits = false unless digit
+      end
+      index = index + 1
+    end
+    return "an empty label" if label == 0
+    return "the last label is all digits, which no domain is" if digits
+    nil
+  end
+
+  # *name* without the trailing dot that makes it absolute.
+  def self.relative(name : String) : String
+    size = name.bytesize
+    size > 1 && name.to_unsafe[size - 1] == 46_u8 ? name[0, size - 1] : name
+  end
+
+  # Two names are the same name in any case (RFC 4343), with or without
+  # the trailing dot.
+  def self.same?(a : String, b : String) : ::Bool
+    left = relative(a)
+    right = relative(b)
+    return false unless left.bytesize == right.bytesize
+    x = left.to_unsafe
+    y = right.to_unsafe
+    index = 0
+    while index < left.bytesize
+      p = x[index]
+      q = y[index]
+      p = p | 32_u8 if p >= 65_u8 && p <= 90_u8
+      q = q | 32_u8 if q >= 65_u8 && q <= 90_u8
+      return false unless p == q
+      index = index + 1
+    end
+    true
+  end
+
+  # The fully qualified names a lookup of *name* asks for, in order, as
+  # resolv.conf(5) says: a name ending in `.` is only itself; one with at
+  # least *ndots* dots is tried as it is first and then under each search
+  # domain; one with fewer is tried under each search domain first and as
+  # it is last. A candidate longer than a name can be is left out.
+  def self.candidates(name : String, search : Array(String), ndots : Int32) : Array(String)
+    size = name.bytesize
+    return [relative(name)] if size > 1 && name.to_unsafe[size - 1] == 46_u8
+    dots = 0
+    index = 0
+    while index < size
+      dots = dots + 1 if name.to_unsafe[index] == 46_u8
+      index = index + 1
+    end
+    under = [] of String
+    search.each do |domain|
+      suffix = relative(domain)
+      next if suffix.empty? || suffix == "."
+      joined = "#{name}.#{suffix}"
+      under << joined if joined.bytesize <= MAX_LENGTH
+    end
+    answer = [] of String
+    answer << name if dots >= ndots
+    under.each { |candidate| answer << candidate }
+    answer << name if dots < ndots
+    answer
+  end
+end
+
+# One resource record from an answer section.
+pub struct DnsRecord
+  A     =  1
+  CNAME =  5
+  AAAA  = 28
+  IN    =  1
+
+  getter name : String
+  getter type : Int32
+  getter record_class : Int32
+  getter ttl : UInt32
+  # The record's data as it came: four bytes for an A record, sixteen for
+  # an AAAA, the encoded name for a CNAME.
+  getter data : Bytes
+  # A CNAME's target, read with compression; empty for any other type.
+  getter target : String
+
+  def initialize(@name : String, @type : Int32, @record_class : Int32, @ttl : UInt32, @data : Bytes, @target : String)
+  end
+end
+
+# A query, and the reading of an answer to one.
+pub struct DnsMessage
+  # The aliases one lookup follows, in one answer and across the queries a
+  # dangling chain needs: glibc and musl both stop well short of this, and
+  # a longer chain is a loop or an attack.
+  MAX_CNAMES = 8
+
+  RCODE_NOERROR  = 0
+  RCODE_FORMERR  = 1
+  RCODE_SERVFAIL = 2
+  RCODE_NXDOMAIN = 3
+  RCODE_NOTIMP   = 4
+  RCODE_REFUSED  = 5
+
+  getter id : UInt16
+  getter flags : Int32
+  # The question the answer repeats; empty with `question_type` 0 when it
+  # repeats none.
+  getter question_name : String
+  getter question_type : Int32
+  getter question_class : Int32
+  getter answers : Array(DnsRecord)
+
+  def initialize(@id : UInt16, @flags : Int32, @question_name : String, @question_type : Int32,
+                 @question_class : Int32, @answers : Array(DnsRecord))
+  end
+
+  def response? : ::Bool
+    @flags & 0x8000 != 0
+  end
+
+  def opcode : Int32
+    (@flags >> 11) & 15
+  end
+
+  # TC: the answer did not fit in the datagram and is to be asked again
+  # over TCP. Its records are not read: what is there is a fragment.
+  def truncated? : ::Bool
+    @flags & 0x0200 != 0
+  end
+
+  def rcode : Int32
+    @flags & 15
+  end
+
+  # The query for *name*'s records of *type*, class IN, with recursion
+  # desired: a 12-byte header and one question. *name* is a host name
+  # (`DnsName.valid?`); a trailing dot is dropped.
+  def self.query(id : UInt16, name : String, type : Int32) : Bytes
+    relative = DnsName.relative(name)
+    size = 12 + relative.bytesize + 2 + 4
+    packet = Bytes.new(size)
+    raw = packet.to_unsafe
+    index = 0
+    while index < size
+      raw[index] = 0_u8
+      index = index + 1
+    end
+    raw[0] = (id >> 8).to_u8
+    raw[1] = (id & 255_u16).to_u8
+    raw[2] = 1_u8 # RD
+    raw[5] = 1_u8 # QDCOUNT
+    at = 12
+    text = relative.to_unsafe
+    start = 0
+    index = 0
+    while index <= relative.bytesize
+      if index == relative.bytesize || text[index] == 46_u8
+        length = index - start
+        raw[at] = length.to_u8
+        (raw + at + 1).copy_from(text + start, length)
+        at = at + 1 + length
+        start = index + 1
+      end
+      index = index + 1
+    end
+    raw[at] = 0_u8
+    raw[at + 1] = (type >> 8).to_u8
+    raw[at + 2] = (type & 255).to_u8
+    raw[at + 3] = 0_u8
+    raw[at + 4] = DnsRecord::IN.to_u8
+    packet
+  end
+
+  # The ID in a datagram's first two bytes, or -1 when it is too short to
+  # be a message: what the resolver reads before it reads anything else.
+  def self.id_of(packet : Bytes) : Int32
+    return -1 if packet.size < 12
+    (packet[0].to_i32 << 8) | packet[1].to_i32
+  end
+
+  # The message in *packet*: its header, its one question, and - unless it
+  # is truncated - its answer section. Anything that does not fit the
+  # bytes is `DnsError` with `malformed?`, never a read past them.
+  def self.parse(packet : Bytes) : DnsMessage | DnsError
+    size = packet.size
+    raw = packet.to_unsafe
+    return malformed("#{size} bytes, shorter than a header") if size < 12
+    id = ((raw[0].to_u16 << 8) | raw[1].to_u16)
+    flags = (raw[2].to_i32 << 8) | raw[3].to_i32
+    questions = u16(raw, 4)
+    count = u16(raw, 6)
+    return malformed("#{questions} questions; a query has one") if questions > 1
+    at = 12
+    question_name = ""
+    question_type = 0
+    question_class = 0
+    if questions == 1
+      read = read_name(packet, at)
+      return malformed("the question's name") if read.nil?
+      question_name, at = read
+      return malformed("the question runs past the message") if at + 4 > size
+      question_type = u16(raw, at)
+      question_class = u16(raw, at + 2)
+      at = at + 4
+    end
+    answers = [] of DnsRecord
+    if flags & 0x0200 == 0
+      index = 0
+      while index < count
+        read = read_name(packet, at)
+        return malformed("answer #{index + 1}'s name") if read.nil?
+        owner, at = read
+        return malformed("answer #{index + 1} runs past the message") if at + 10 > size
+        type = u16(raw, at)
+        klass = u16(raw, at + 2)
+        ttl = (raw[at + 4].to_u32 << 24) | (raw[at + 5].to_u32 << 16) | (raw[at + 6].to_u32 << 8) | raw[at + 7].to_u32
+        length = u16(raw, at + 8)
+        at = at + 10
+        return malformed("answer #{index + 1}'s data runs past the message") if at + length > size
+        data = Bytes.new(length)
+        data.to_unsafe.copy_from(raw + at, length)
+        target = ""
+        if klass == DnsRecord::IN
+          return malformed("an A record of #{length} bytes") if type == DnsRecord::A && length != 4
+          return malformed("an AAAA record of #{length} bytes") if type == DnsRecord::AAAA && length != 16
+          if type == DnsRecord::CNAME
+            # Read where it sits in the message, not out of the copy: its
+            # compression pointers are offsets into the whole message. It
+            # must end inside its own data.
+            alias_read = read_name(packet, at)
+            return malformed("answer #{index + 1}'s CNAME target") if alias_read.nil?
+            target, ends = alias_read
+            return malformed("answer #{index + 1}'s CNAME target runs past its data") if ends > at + length
+          end
+        end
+        answers << DnsRecord.new(owner, type, klass, ttl, data, target)
+        at = at + length
+        index = index + 1
+      end
+    end
+    DnsMessage.new(id, flags, question_name, question_type, question_class, answers)
+  end
+
+  # Whether this is the answer to query *id* for *name* and *type*: a
+  # response, a standard query's, with the ID, and repeating the question.
+  # A refusal of the query (SERVFAIL, REFUSED, FORMERR, NOTIMP) may come
+  # without the question, as some servers send it; an answer that says
+  # anything about the name - NOERROR or NXDOMAIN - must carry it.
+  def answers?(id : UInt16, name : String, type : Int32) : ::Bool
+    return false unless response? && opcode == 0 && @id == id
+    if @question_type == 0 && @question_name.empty?
+      return rcode != RCODE_NOERROR && rcode != RCODE_NXDOMAIN
+    end
+    DnsName.same?(@question_name, name) && @question_type == type && @question_class == DnsRecord::IN
+  end
+
+  # The addresses of *type* this answer gives *name*, following CNAMEs:
+  # the records for the end of the chain, the name the chain ended at, and
+  # how many links it took. No addresses and a different name is a chain
+  # that left this answer before it ended, which the resolver asks about
+  # next. A chain of more than *budget* links is malformed.
+  def addresses(name : String, type : Int32, budget : Int32 = MAX_CNAMES) : Tuple(Array(Bytes), String, Int32) | DnsError
+    target = name
+    links = 0
+    while true
+      found = [] of Bytes
+      next_name = ""
+      @answers.each do |record|
+        next unless record.record_class == DnsRecord::IN && DnsName.same?(record.name, target)
+        found << record.data if record.type == type
+        next_name = record.target if record.type == DnsRecord::CNAME && next_name.empty?
+      end
+      return {found, target, links} unless found.empty? && !next_name.empty?
+      links = links + 1
+      return DnsMessage.malformed("a chain of more than #{budget} CNAMEs, or a loop of them") if links > budget
+      target = next_name
+    end
+  end
+
+  # The name at *at* in *packet*, and the offset just past it where it
+  # sits; nil when it cannot be read. Labels are 1 to 63 bytes, a label may
+  # not hold a `.` (it would read as two), the name is at most 255 bytes on
+  # the wire, and each compression pointer must point before the place the
+  # name was last read from - RFC 1035 4.1.4's "prior occurrence" - so the
+  # positions strictly fall and a loop cannot be written.
+  def self.read_name(packet : Bytes, at : Int32) : Tuple(String, Int32)?
+    size = packet.size
+    raw = packet.to_unsafe
+    position = at
+    floor = at
+    ends = -1
+    wire = 0
+    text = String::Builder.new
+    while true
+      return nil if position < 0 || position >= size
+      length = raw[position].to_i32
+      if length == 0
+        ends = position + 1 if ends < 0
+        break
+      end
+      case length & 0xC0
+      when 0
+        return nil if position + 1 + length > size
+        wire = wire + 1 + length
+        return nil if wire > 254
+        text << '.' if text.bytesize > 0
+        index = 0
+        while index < length
+          byte = raw[position + 1 + index]
+          return nil if byte == 46_u8
+          text.write_byte(byte)
+          index = index + 1
+        end
+        position = position + 1 + length
+      when 0xC0
+        return nil if position + 1 >= size
+        pointer = ((length & 0x3F) << 8) | raw[position + 1].to_i32
+        ends = position + 2 if ends < 0
+        return nil unless pointer < floor
+        floor = pointer
+        position = pointer
+      else
+        # 0x40 and 0x80: RFC 6891's extended label types, which no answer
+        # to a query of ours uses.
+        return nil
+      end
+    end
+    {text.to_s, ends}
+  end
+
+  def self.malformed(why : String) : DnsError
+    DnsError.new(DnsError::MALFORMED, "", "", why)
+  end
+
+  private def self.u16(raw : Pointer(UInt8), at : Int32) : Int32
+    (raw[at].to_i32 << 8) | raw[at + 1].to_i32
+  end
+end
+
+# `/etc/resolv.conf`, as resolv.conf(5) describes it and glibc reads it.
+pub struct ResolvConf
+  # glibc's MAXNS: a fourth `nameserver` line is ignored there too.
+  MAX_NAMESERVERS = 3
+
+  # Each an address as written - IPv4, or IPv6 without a zone - optionally
+  # with a port (`192.0.2.1:5353`, `[2001:db8::1]:5353`), which
+  # resolv.conf itself never has and a resolver built in a program may.
+  getter nameservers : Array(String)
+  getter search : Array(String)
+  getter ndots : Int32
+  getter timeout_ms : Int32
+  getter attempts : Int32
+
+  def initialize(@nameservers : Array(String) = [] of String, @search : Array(String) = [] of String,
+                 @ndots : Int32 = 1, @timeout_ms : Int32 = 5000, @attempts : Int32 = 2)
+  end
+
+  # The keywords glibc reads: `nameserver`, `domain`, `search` (the later
+  # of `domain` and `search` wins, as there) and `options` with `ndots:`,
+  # `timeout:` (seconds) and `attempts:`, each held to glibc's bounds - 15,
+  # 30 and 5. A `#` or `;` starts a comment. Anything else is ignored, as
+  # glibc ignores it: a file other programs read too is not this module's
+  # to refuse.
+  def self.parse(text : String) : ResolvConf
+    nameservers = [] of String
+    search = [] of String
+    ndots = 1
+    timeout_ms = 5000
+    attempts = 2
+    text.split('\n').each do |line|
+      words = DnsText.words(line)
+      next if words.empty?
+      case words[0]
+      when "nameserver"
+        nameservers << words[1] if words.size > 1 && nameservers.size < MAX_NAMESERVERS
+      when "domain"
+        search = words.size > 1 ? [words[1]] : [] of String
+      when "search"
+        search = words[1, words.size - 1]
+      when "options"
+        index = 1
+        while index < words.size
+          option = words[index]
+          if option.starts_with?("ndots:")
+            value = option[6, option.bytesize - 6].to_i?
+            ndots = value < 0 ? 0 : (value > 15 ? 15 : value) if value.is_a?(Int32)
+          elsif option.starts_with?("timeout:")
+            value = option[8, option.bytesize - 8].to_i?
+            timeout_ms = (value < 1 ? 1 : (value > 30 ? 30 : value)) * 1000 if value.is_a?(Int32)
+          elsif option.starts_with?("attempts:")
+            value = option[9, option.bytesize - 9].to_i?
+            attempts = value < 1 ? 1 : (value > 5 ? 5 : value) if value.is_a?(Int32)
+          end
+          index = index + 1
+        end
+      end
+    end
+    ResolvConf.new(nameservers, search, ndots, timeout_ms, attempts)
+  end
+end
+
+# The hosts file: an address, then the names it answers for.
+pub struct HostsFile
+  # The addresses *text* gives *name*, as written and in the file's order:
+  # every line whose names include it, in any case and with or without a
+  # trailing dot. A line with an address and no name says nothing.
+  def self.lookup(text : String, name : String) : Array(String)
+    found = [] of String
+    text.split('\n').each do |line|
+      words = DnsText.words(line)
+      next if words.size < 2
+      index = 1
+      while index < words.size
+        if DnsName.same?(words[index], name)
+          found << words[0]
+          break
+        end
+        index = index + 1
+      end
+    end
+    found
+  end
+end
+
+struct DnsText
+  # A line's words, split on spaces, tabs and a carriage return (a file
+  # written on Windows), to the first `#` or `;`.
+  def self.words(line : String) : Array(String)
+    words = [] of String
+    raw = line.to_unsafe
+    size = line.bytesize
+    start = -1
+    index = 0
+    while index <= size
+      byte = index < size ? raw[index] : 32_u8
+      stop = byte == 35_u8 || byte == 59_u8
+      blank = byte == 32_u8 || byte == 9_u8 || byte == 13_u8 || stop
+      if blank
+        words << line[start, index - start] if start >= 0
+        start = -1
+        break if stop
+      elsif start < 0
+        start = index
+      end
+      index = index + 1
+    end
+    words
+  end
+end

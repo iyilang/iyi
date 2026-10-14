@@ -567,7 +567,10 @@ while IFS= read -r annotation; do
     '@[Link("gc", pkg_config: "bdw-gc")]') ;;
     # Windows has no kernel32 name for OS entropy: `RtlGenRandom` lives in
     # advapi32, which ships with every Windows the way kernel32 does, and
-    # `std/random` is its one caller (SPEC.md III.10's inventory says so).
+    # `std/random` calls it; `std/socket` reads the registry there for the
+    # name servers Windows was configured with, which the platform's own
+    # resolver API would have taken iphlpapi or dnsapi to ask (SPEC.md
+    # III.10's inventory says so).
     '@[Link("advapi32")]') ;;
     # Windows' sockets are Winsock's: `ws2_32` is the platform's network
     # interface the way kernel32 is its process interface, it ships with

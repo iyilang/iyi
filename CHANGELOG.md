@@ -4,6 +4,25 @@
 
 ### Added
 
+- **A program connects by host name, through iyi's own resolver.**
+  `IyiSocket.connect("example.com", 80)` and
+  `HTTP.get("http://example.com/")` panicked with "cannot resolve address"
+  for every name but `localhost`, because getaddrinfo would have brought
+  in libc.so and NSS. `std/dns` now reads `/etc/hosts` and
+  `/etc/resolv.conf` (`nameserver`, `search`, `domain`, `ndots`,
+  `timeout`, `attempts`), and on Windows the registry through advapi32,
+  so no new DLL. `std/socket`'s `Resolver` asks over UDP with a random ID
+  from `Random::Secure`, on a socket connected to the server; it ignores
+  answers whose ID or question do not match, asks again over TCP when TC
+  is set, follows at most 8 CNAMEs, and refuses compression loops and
+  out-of-range pointers. NXDOMAIN, SERVFAIL, timeout and a malformed
+  answer are separate `DnsError` questions, and a name that does not
+  resolve comes back from `connect` as a `SocketError` naming the host.
+  Held by `bench/std_dns_exercise.sh`: a name server inside the program
+  answers 24 sections, plain and `--release`, and eleven broken copies of
+  the resolver are each caught. There is no EDNS(0), answer cache, DNSSEC
+  or reverse lookup, and addresses are tried one after another rather
+  than raced.
 - **An array answers for its spans, and a table for everything a program
   asks of it, without an import.** `Array` had `[]` for one index and
   nothing for part of itself: `a[1, 2]`, `a[1..]`, `a[..-2]`, their `[]?`
@@ -110,7 +129,9 @@
 - **Some answers change.** `Hash#==` compares pairs in any order and
   `Hash#hash` follows the contents, where both were the object's
   identity, so `{"a" => 1} == {"a" => 1}` is true and an equal table
-  finds a key. `File.open(path, "a")` appends where it was refused.
+  finds a key. `IyiSocket.connect` given a host name resolves it, and a
+  name that does not resolve is a returned `SocketError` rather than a
+  panic. `File.open(path, "a")` appends where it was refused.
 - **New prelude names.** `assert_eq`, `assert_ne`, `assert_nil`,
   `assert_in_delta`, `assert_includes`, `assert_error`, `assert_ok`,
   `assert_panics` and `test(name, &)` are the prelude's, so a script

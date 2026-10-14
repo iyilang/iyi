@@ -1,0 +1,472 @@
+# Exercises `std/dns` and the resolver `std/socket` builds on it.
+#
+# Run via:
+#     ./bin/iyi run bench/std_dns_exercise.iyi
+#
+# Hermetic: the name server is this program. A UDP responder and a TCP
+# responder on 127.0.0.1 answer packets built here byte by byte - A, AAAA,
+# CNAME chains, NXDOMAIN, SERVFAIL, an answer with the wrong ID, one from
+# the wrong address, a truncated one, a compression loop, silence - and a
+# `Resolver` pointed at them is held to what each should come to. Nothing
+# leaves the machine. Each section prints "<name>: ok".
+
+module bench/std_dns_exercise
+
+import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf}
+import std/socket::{IPAddress, IyiSocket, Resolver, SocketError}
+import std/udp::{UdpSocket}
+import std/slice::{Bytes}
+import std/env::{ENV}
+
+def check(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def same(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected}\n  got      #{actual}" unless expected == actual
+end
+
+def bytes_of(values : Array(UInt8)) : Bytes
+  copy = Bytes.new(values.size)
+  index = 0
+  while index < values.size
+    copy[index] = values[index]
+    index = index + 1
+  end
+  copy
+end
+
+# A name as the wire writes it: length-prefixed labels and a zero.
+def wire_name(name : String) : Array(UInt8)
+  buf = [] of UInt8
+  name.split('.').each do |label|
+    next if label.empty?
+    buf << label.bytesize.to_u8
+    index = 0
+    while index < label.bytesize
+      buf << label.to_unsafe[index]
+      index = index + 1
+    end
+  end
+  buf << 0_u8
+  buf
+end
+
+def push16(buf : Array(UInt8), value : Int32) : Nil
+  buf << ((value >> 8) & 255).to_u8
+  buf << (value & 255).to_u8
+end
+
+# An answer to *query*: its header with QR, RD and RA set, *rcode*, TC
+# when *truncated*, *count* answers to come, and the question as asked.
+def answer_head(query : Bytes, rcode : Int32, count : Int32, truncated : Bool = false) : Array(UInt8)
+  buf = [] of UInt8
+  index = 0
+  while index < query.size
+    buf << query[index]
+    index = index + 1
+  end
+  flags = 0x8180 | rcode | (truncated ? 0x0200 : 0)
+  buf[2] = ((flags >> 8) & 255).to_u8
+  buf[3] = (flags & 255).to_u8
+  buf[6] = 0_u8
+  buf[7] = count.to_u8
+  buf
+end
+
+# One resource record, class IN, TTL 60.
+def add_record(buf : Array(UInt8), owner : Array(UInt8), type : Int32, data : Array(UInt8)) : Nil
+  owner.each { |byte| buf << byte }
+  push16(buf, type)
+  push16(buf, 1)
+  push16(buf, 0)
+  push16(buf, 60)
+  push16(buf, data.size)
+  data.each { |byte| buf << byte }
+end
+
+# A pointer to the question's name, which sits at offset 12.
+QUESTION = [0xC0_u8, 12_u8]
+
+def a_data(a : Int32, b : Int32, c : Int32, d : Int32) : Array(UInt8)
+  [a.to_u8, b.to_u8, c.to_u8, d.to_u8]
+end
+
+def aaaa_data(last : Int32) : Array(UInt8)
+  data = [0x20_u8, 0x01_u8, 0x0d_u8, 0xb8_u8] of UInt8
+  index = 4
+  while index < 15
+    data << 0_u8
+    index = index + 1
+  end
+  data << last.to_u8
+  data
+end
+
+def show(got : Array(IPAddress) | DnsError | Cancelled) : String
+  case got
+  in Array(IPAddress)
+    got.map(&.to_s).join(" ")
+  in DnsError
+    "error: #{got.message}"
+  in Cancelled
+    "cancelled"
+  end
+end
+
+def error_of(got : Array(IPAddress) | DnsError | Cancelled, label : String) : DnsError
+  raise "ASSERTION FAILED: #{label}: expected a failure, got #{show(got)}" unless got.is_a?(DnsError)
+  got
+end
+
+# --- The wire format, with no network ---
+
+query = DnsMessage.query(0xBEEF_u16, "a.Test.", DnsRecord::AAAA)
+expected = [0xBE, 0xEF, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 97, 4, 84, 101, 115, 116, 0, 0, 28, 0, 1]
+same expected.size.to_s, query.size.to_s, "query size"
+index = 0
+while index < expected.size
+  check query[index] == expected[index].to_u8, "query byte #{index}: #{query[index]} where #{expected[index]}"
+  index = index + 1
+end
+parsed = DnsMessage.parse(query)
+check parsed.is_a?(DnsMessage), "a query parses"
+check !parsed.as(DnsMessage).response?, "a query is not a response"
+puts "query_bytes: ok"
+
+# Names with compression: a name at 12, a second pointing into it, a
+# third pointing at the second - each pointer earlier than the last.
+packet = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] of UInt8
+wire_name("example.test").each { |byte| packet << byte }             # 12..25
+packet << 3_u8; packet << 119_u8; packet << 119_u8; packet << 119_u8 # 26: "www"
+packet << 0xC0_u8; packet << 12_u8                                   # -> example.test
+packet << 1_u8; packet << 120_u8                                     # 32: "x"
+packet << 0xC0_u8; packet << 26_u8                                   # -> www.example.test
+read = DnsMessage.read_name(bytes_of(packet), 32)
+check !read.nil?, "a chain of backward pointers reads"
+same "x.www.example.test", read.as(Tuple(String, Int32))[0], "decompressed name"
+same "36", read.as(Tuple(String, Int32))[1].to_s, "the name ends after its first pointer"
+
+itself = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 12] of UInt8
+check DnsMessage.read_name(bytes_of(itself), 12).nil?, "a pointer to itself is refused"
+pair = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 97, 0xC0, 16, 1, 98, 0xC0, 12] of UInt8
+check DnsMessage.read_name(bytes_of(pair), 16).nil?, "two names pointing at each other are refused"
+forward = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 16, 0, 0, 1, 97, 0] of UInt8
+check DnsMessage.read_name(bytes_of(forward), 12).nil?, "a forward pointer is refused"
+past = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0xFF] of UInt8
+check DnsMessage.read_name(bytes_of(past), 12).nil?, "a pointer past the end is refused"
+short = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 97, 98] of UInt8
+check DnsMessage.read_name(bytes_of(short), 12).nil?, "a label past the end is refused"
+dotted = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 97, 46, 98, 0] of UInt8
+check DnsMessage.read_name(bytes_of(dotted), 12).nil?, "a label holding a dot is refused"
+puts "compression: ok"
+
+check DnsName.valid?("example.com"), "a host name"
+check DnsName.valid?("_srv.example.com."), "an underscore and a trailing dot"
+check !DnsName.valid?("1.2.3.4"), "a dotted quad is not a host name"
+check !DnsName.valid?("999.1.1.1"), "nor a bad one"
+check !DnsName.valid?("localhost.."), "an empty label"
+check !DnsName.valid?("-a.example"), "a label starting with a hyphen"
+check !DnsName.valid?("a b.example"), "a space"
+check !DnsName.valid?("#{"x" * 64}.example"), "a 64-byte label"
+same "db.corp.test db.test db", DnsName.candidates("db", ["corp.test", "test."], 1).join(" "), "a short name tries the search list first"
+same "a.b a.b.corp.test", DnsName.candidates("a.b", ["corp.test"], 1).join(" "), "a name with ndots tries itself first"
+same "a.b.corp.test a.b", DnsName.candidates("a.b", ["corp.test"], 2).join(" "), "ndots:2"
+same "a.b", DnsName.candidates("a.b.", ["corp.test"], 5).join(" "), "an absolute name is only itself"
+conf = ResolvConf.parse("# comment\n; another\nnameserver 192.0.2.53\nnameserver 2001:db8::53 # trailing\ndomain old.test\nsearch corp.test test\noptions rotate ndots:3 timeout:2 attempts:4\nnameserver 192.0.2.54\nnameserver 192.0.2.55\n")
+same "192.0.2.53 2001:db8::53 192.0.2.54", conf.nameservers.join(" "), "three name servers, as glibc keeps"
+same "corp.test test", conf.search.join(" "), "the later of domain and search"
+check conf.ndots == 3 && conf.timeout_ms == 2000 && conf.attempts == 4, "options"
+bounded = ResolvConf.parse("options ndots:40 timeout:0 attempts:9\n")
+check bounded.ndots == 15 && bounded.timeout_ms == 1000 && bounded.attempts == 5, "options held to glibc's bounds"
+same "10.0.0.7 ::7", HostsFile.lookup("127.0.0.1 localhost\n10.0.0.7 Box box.lan # c\n#10.0.0.8 box\n::7\tbox.\n", "BOX").join(" "), "hosts lines, in order, any case"
+puts "codec: ok"
+
+# --- A name server in this process ---
+
+server = UdpSocket.bind("127.0.0.1", 0)
+port = server.local_port
+tcp = IyiSocket.listen("127.0.0.1", port)
+forger = UdpSocket.bind("127.0.0.1", 0)
+log = [] of String
+slow_seen = 0
+
+# The answer to one query, by name: what each section below asks about.
+def respond(server : UdpSocket, forger : UdpSocket, query : Bytes, host : String, peer_port : Int32, log : Array(String), slow_seen : Int32) : Int32
+  parsed = DnsMessage.parse(query)
+  return slow_seen unless parsed.is_a?(DnsMessage)
+  name = parsed.question_name.downcase
+  type = parsed.question_type
+  log << "#{name}/#{type == 1 ? "A" : "AAAA"}"
+  buf = [] of UInt8
+  if type == DnsRecord::AAAA
+    case name
+    when "a.test", "alias.test", "dangling.test"
+      buf = answer_head(query, 0, 1)
+      add_record(buf, QUESTION, DnsRecord::AAAA, aaaa_data(1))
+    when "nx.test", "db.corp.test"
+      buf = answer_head(query, 3, 0)
+    when "multi.test"
+      buf = answer_head(query, 0, 1)
+      v6 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] of UInt8
+      add_record(buf, QUESTION, DnsRecord::AAAA, v6)
+    when "silent.test"
+      return slow_seen
+    else
+      buf = answer_head(query, 0, 0)
+    end
+    server.send_to(bytes_of(buf), host, peer_port)
+    return slow_seen
+  end
+  case name
+  when "a.test", "db.test"
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, name == "a.test" ? a_data(192, 0, 2, 1) : a_data(192, 0, 2, 10))
+  when "web.test"
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, a_data(127, 0, 0, 1))
+  when "multi.test"
+    # 127.0.0.1 holds nothing on the port asked; ::1 does.
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, a_data(127, 0, 0, 1))
+  when "alias.test"
+    # alias.test CNAME mid.test, mid.test CNAME a.test, a.test A: the
+    # second and third owners are pointers into the record before.
+    buf = answer_head(query, 0, 3)
+    first_target = buf.size + 12
+    add_record(buf, QUESTION, DnsRecord::CNAME, wire_name("mid.test"))
+    second_target = buf.size + 12
+    add_record(buf, [0xC0_u8, first_target.to_u8], DnsRecord::CNAME, wire_name("a.test"))
+    add_record(buf, [0xC0_u8, second_target.to_u8], DnsRecord::A, a_data(192, 0, 2, 1))
+  when "dangling.test"
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::CNAME, wire_name("a.test"))
+  when "loop.test"
+    buf = answer_head(query, 0, 2)
+    add_record(buf, QUESTION, DnsRecord::CNAME, wire_name("other.test"))
+    add_record(buf, wire_name("other.test"), DnsRecord::CNAME, wire_name("loop.test"))
+  when "nx.test", "db.corp.test"
+    buf = answer_head(query, 3, 0)
+  when "fail.test"
+    buf = answer_head(query, 2, 0)
+  when "nodata.test"
+    buf = answer_head(query, 0, 0)
+  when "badid.test"
+    # The wrong ID first, then the right ID with another question, then
+    # the answer: only the last is the resolver's.
+    wrong = answer_head(query, 0, 1)
+    wrong[1] = wrong[1] ^ 1_u8
+    add_record(wrong, QUESTION, DnsRecord::A, a_data(6, 6, 6, 6))
+    server.send_to(bytes_of(wrong), host, peer_port)
+    other = answer_head(query, 0, 1)
+    other = other[0, 12]
+    wire_name("other.test").each { |byte| other << byte }
+    push16(other, 1)
+    push16(other, 1)
+    add_record(other, QUESTION, DnsRecord::A, a_data(6, 6, 6, 7))
+    server.send_to(bytes_of(other), host, peer_port)
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, a_data(192, 0, 2, 7))
+  when "forged.test"
+    # A perfect answer from the wrong port, sent first: the socket is
+    # connected to the server, so the kernel never hands it over.
+    fake = answer_head(query, 0, 1)
+    add_record(fake, QUESTION, DnsRecord::A, a_data(6, 6, 6, 8))
+    forger.send_to(bytes_of(fake), host, peer_port)
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, a_data(192, 0, 2, 8))
+  when "big.test"
+    buf = answer_head(query, 0, 0, true)
+  when "ptrloop.test"
+    buf = answer_head(query, 0, 1)
+    at = buf.size
+    add_record(buf, [0xC0_u8, at.to_u8], DnsRecord::A, a_data(6, 6, 6, 9))
+  when "slow.test"
+    slow_seen = slow_seen + 1
+    return slow_seen if slow_seen == 1
+    buf = answer_head(query, 0, 1)
+    add_record(buf, QUESTION, DnsRecord::A, a_data(192, 0, 2, 11))
+  when "silent.test"
+    return slow_seen
+  else
+    buf = answer_head(query, 3, 0)
+  end
+  server.send_to(bytes_of(buf), host, peer_port)
+  slow_seen
+end
+
+# The TCP side: big.test's whole answer, framed.
+def respond_tcp(conn : IyiSocket) : Nil
+  head = Bytes.new(2)
+  got = 0
+  while got < 2
+    n = conn.read(head.to_unsafe + got, 2 - got)
+    return unless n.is_a?(Int32) && n > 0
+    got = got + n
+  end
+  size = (head[0].to_i32 << 8) | head[1].to_i32
+  query = Bytes.new(size)
+  got = 0
+  while got < size
+    n = conn.read(query.to_unsafe + got, size - got)
+    return unless n.is_a?(Int32) && n > 0
+    got = got + n
+  end
+  buf = answer_head(query, 0, 40)
+  index = 0
+  while index < 40
+    add_record(buf, QUESTION, DnsRecord::A, a_data(192, 0, 3, index + 1))
+    index = index + 1
+  end
+  framed = [] of UInt8
+  push16(framed, buf.size)
+  buf.each { |byte| framed << byte }
+  conn.write(bytes_of(framed).to_unsafe, framed.size)
+end
+
+hosts_file = "192.0.2.50 pinned.test\n2001:db8::50 pinned.test\n"
+resolver = Resolver.new(["127.0.0.1:#{port}"], search: ["corp.test", "test"], ndots: 1,
+  timeout_ms: 300, attempts: 2, hosts: hosts_file)
+
+group do |g|
+  g.spawn do
+    while true
+      got = server.receive_from(1500)
+      break if got.is_a?(Cancelled)
+      slow_seen = respond(server, forger, got[0], got[1], got[2], log, slow_seen)
+    end
+    0
+  end
+  g.spawn do
+    while true
+      conn = tcp.accept
+      break if conn.is_a?(Cancelled)
+      if conn.is_a?(IyiSocket)
+        respond_tcp(conn)
+        conn.close
+      end
+    end
+    0
+  end
+  g.spawn do
+    same "192.0.2.1 2001:db8::1", show(resolver.resolve("a.test")), "A and then AAAA"
+    puts "a_record: ok"
+    puts "aaaa_record: ok"
+
+    same "192.0.2.1 2001:db8::1", show(resolver.resolve("alias.test.")), "a CNAME chain in one answer"
+    puts "cname_chain: ok"
+
+    log.clear
+    same "192.0.2.1 2001:db8::1", show(resolver.resolve("dangling.test")), "a chain that leaves the answer"
+    check log.includes?("a.test/A"), "the chain's end is asked about: #{log.join(" ")}"
+    puts "cname_dangling: ok"
+
+    looped = error_of(resolver.resolve("loop.test"), "a CNAME loop")
+    check looped.malformed?, "a CNAME loop is malformed: #{looped.message}"
+    puts "cname_loop: ok"
+
+    missing = error_of(resolver.resolve("nx.test."), "NXDOMAIN")
+    check missing.not_found? && !missing.server_failure?, "NXDOMAIN is not_found?: #{missing.message}"
+    same "cannot resolve nx.test.: the name does not exist (NXDOMAIN); asked 127.0.0.1:#{port}", missing.message, "NXDOMAIN's sentence"
+    puts "nxdomain: ok"
+
+    failing = error_of(resolver.resolve("fail.test."), "SERVFAIL")
+    check failing.server_failure? && !failing.not_found?, "SERVFAIL is server_failure?: #{failing.message}"
+    puts "servfail: ok"
+
+    empty = error_of(resolver.resolve("nodata.test."), "NODATA")
+    check empty.no_address? && !empty.not_found?, "a name with no records is no_address?: #{empty.message}"
+    puts "nodata: ok"
+
+    same "192.0.2.7", show(resolver.resolve("badid.test.")), "a wrong ID and a wrong question are ignored"
+    puts "mismatched_id: ok"
+
+    same "192.0.2.8", show(resolver.resolve("forged.test.")), "a datagram from another port is not read"
+    puts "forged_source: ok"
+
+    big = resolver.resolve("big.test.")
+    check big.is_a?(Array(IPAddress)) && big.size == 40, "a truncated answer is asked again over TCP: #{show(big)}"
+    same "192.0.3.40", big.as(Array(IPAddress))[39].to_s, "the TCP answer's last record"
+    puts "truncated_tcp: ok"
+
+    pointer = error_of(resolver.resolve("ptrloop.test."), "a compression loop")
+    check pointer.malformed?, "a compression loop is malformed: #{pointer.message}"
+    puts "pointer_loop: ok"
+
+    slow_seen = 0
+    log.clear
+    same "192.0.2.11", show(resolver.resolve("slow.test.")), "the second attempt is answered"
+    check log.count { |entry| entry == "slow.test/A" } == 2, "asked twice: #{log.join(" ")}"
+    puts "retry: ok"
+
+    started = Resolver.now_ms
+    quiet = error_of(resolver.resolve("silent.test."), "silence")
+    took = Resolver.now_ms - started
+    check quiet.timed_out?, "silence is timed_out?: #{quiet.message}"
+    check took >= 550 && took < 3000, "two attempts of 300 ms each took #{took} ms"
+    puts "timeout: ok"
+
+    log.clear
+    same "192.0.2.50 2001:db8::50", show(resolver.resolve("PINNED.test")), "the hosts file answers"
+    check log.empty?, "and no server was asked: #{log.join(" ")}"
+    puts "hosts_override: ok"
+
+    log.clear
+    same "192.0.2.10", show(resolver.resolve("db")), "db under the search list"
+    same "db.corp.test/A db.test/A db.test/AAAA", log.join(" "), "the search list in order"
+    puts "search_list: ok"
+
+    same "127.0.0.1 ::1", show(resolver.resolve("localhost")), "localhost never leaves the machine"
+    same "192.0.2.1", show(resolver.resolve("192.0.2.1")), "an address is itself"
+    check error_of(resolver.resolve("a b"), "a space").invalid_name?, "not a host name"
+    puts "literals: ok"
+
+    dir = ENV["TMPDIR"]? || "/tmp"
+    conf_path = "#{dir}/iyi-dns-exercise-resolv.conf"
+    hosts_path = "#{dir}/iyi-dns-exercise-hosts"
+    File.write(conf_path, "nameserver 127.0.0.1:#{port}\nsearch test\noptions ndots:1 timeout:1 attempts:1\n")
+    File.write(hosts_path, "192.0.2.60 filed.test\n")
+    filed = Resolver.from_files(conf_path, hosts_path)
+    same "127.0.0.1:#{port}", filed.nameservers.join(" "), "the configured server"
+    same "192.0.2.60", show(filed.resolve("filed.test")), "the configured hosts file"
+    same "192.0.2.10", show(filed.resolve("db")), "the configured search list"
+    nowhere = Resolver.from_files("#{dir}/no-such-resolv.conf", "#{dir}/no-such-hosts")
+    check nowhere.nameservers.size > 0, "a missing resolv.conf falls back to the loopback server"
+    File.delete(conf_path)
+    File.delete(hosts_path)
+    puts "from_files: ok"
+
+    listener = IyiSocket.listen("127.0.0.1", 0)
+    connected = IyiSocket.connect("web.test", listener.local_port, resolver)
+    check connected.is_a?(IyiSocket), "connect by name: #{connected.is_a?(SocketError) ? connected.message : "cancelled"}"
+    peer = listener.accept
+    check peer.is_a?(IyiSocket), "the listener accepts the connection made by name"
+    connected.as(IyiSocket).write("by name")
+    same "by name", peer.as(IyiSocket).read(16).as(String), "bytes over a connection made by name"
+    connected.as(IyiSocket).close
+    peer.as(IyiSocket).close
+    listener.close
+    puts "connect_by_name: ok"
+
+    six = IyiSocket.listen("::1", 0)
+    fallback = IyiSocket.connect("multi.test", six.local_port, resolver)
+    check fallback.is_a?(IyiSocket), "a refused IPv4 address falls back to IPv6: #{fallback.is_a?(SocketError) ? fallback.message : "cancelled"}"
+    fallback.as(IyiSocket).close
+    six.close
+    puts "connect_fallback: ok"
+
+    unresolved = IyiSocket.connect("nx.test.", 80, resolver)
+    check unresolved.is_a?(SocketError), "an unresolved name is a SocketError"
+    failure = unresolved.as(SocketError)
+    check failure.unresolved? && failure.dns_error.as(DnsError).not_found?, "unresolved? and not_found?"
+    check failure.message.starts_with?("cannot resolve nx.test.: the name does not exist"), "the sentence names the host: #{failure.message}"
+    puts "unresolved_connect: ok"
+
+    server.close
+    forger.close
+    tcp.close
+    0
+  end
+end
+
+puts "all checks passed"

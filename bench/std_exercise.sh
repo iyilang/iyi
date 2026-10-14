@@ -332,10 +332,11 @@ PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2
 # The `@[Link]`s an exempt module may carry: the DLLs Windows itself ships,
 # named in SPEC.md III.10's inventory. `std/random` is here for `advapi32` —
 # the OS entropy `Random::Secure` reads is `RtlGenRandom`, and Windows has
-# no kernel32 name for it — and `std/socket` and `std/udp` for `ws2_32`,
-# because Winsock is the whole of Windows' network interface and a socket
-# call has nowhere else to come from. Everything else in this list reaches
-# the platform through a `lib` block alone.
+# no kernel32 name for it — and `std/socket` for it too, the registry its
+# resolver reads the name servers from; `std/socket` and `std/udp` for
+# `ws2_32`, because Winsock is the whole of Windows' network interface and
+# a socket call has nowhere else to come from. Everything else in this
+# list reaches the platform through a `lib` block alone.
 PLATFORM_LINKS='@\[Link\("(kernel32|advapi32|ws2_32)"\)\]'
 reaching=""
 foreign=""

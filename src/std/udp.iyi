@@ -861,7 +861,8 @@ pub class UdpSocket
                       routine : Void*) : Int32
       fun WSAGetOverlappedResult(s : UInt64, overlapped : Void*, transferred : Int32*,
                                  wait : Int32, flags : Int32*) : Int32
-      fun WSAPoll(fdarray : PollFd*, nfds : Int32, timeout : Int32) : Int32
+      # `Void*`, as `std/socket` declares it: one symbol, one signature.
+      fun WSAPoll(fdarray : Void*, nfds : Int32, timeout : Int32) : Int32
 
       # Both are kept on the caller's frame rather than the heap: the kernel
       # reads and writes them after a post, while the fiber is parked, and a
@@ -1063,7 +1064,7 @@ pub class UdpSocket
     # epoll and kqueue arms do with theirs.
     def self.__sys_poll_read(fd : Int32, timeout_ms : Int32) : ::Bool
       entry = LibWs2_32::PollFd.new(fd: __sys_handle(fd), events: POLLRDNORM, revents: 0_i16)
-      LibWs2_32.WSAPoll(pointerof(entry), 1, timeout_ms) > 0
+      LibWs2_32.WSAPoll(pointerof(entry).as(Void*), 1, timeout_ms) > 0
     end
 
     def self.__is_eagain(res : Int64) : ::Bool

@@ -4,6 +4,31 @@
 
 ### Added
 
+- **`std/file_utils`: `FileUtils.cp`, `cp_r`, `rm_r`, `rm_rf`, `mv` and
+  `compare_file`, the tree operations, in a module of their own.** `cp`
+  copies a file's bytes and its permission bits, into a directory under
+  its own name when the destination is one; `cp_r` copies a tree as
+  `cp -R` does, links made again as links and never followed, each
+  directory given its source's bits after it is filled; `rm_r` removes a
+  tree and never follows a link - a link to a directory outside the tree
+  is removed and that directory left whole, and `link/` is the link, not
+  the directory POSIX resolves it to; `rm_rf` accepts a path that is not
+  there; `mv` is one rename on a device and, across two (`File.info`'s
+  `dev`), a copy then a removal; `compare_file` reads both files a piece
+  at a time up to the first difference. Bytes cross in 64 KiB pieces
+  through one buffer: a 64 MiB copy allocates 64 KiB, and 256 MiB copies
+  in 0.05-0.08 s where coreutils `cp` takes 0.06-0.10 s. Refused by
+  sentence, as `std/file` refuses: a file onto itself, a directory to
+  `cp`, a tree into itself, a FIFO, socket or device in a tree, a move
+  across devices onto what `rename(2)` would refuse, and a move whose
+  source holds a read-only directory - which the copy could not have
+  removed afterwards, leaving the tree in both places. Nothing new is
+  bound: the calls are `std/file`'s, `std/dir`'s and the prelude's.
+  `bench/std_file_utils_exercise.sh` holds it, plain and `--release`:
+  `cp_r` against `shutil.copytree(symlinks=True)` and `filecmp.dircmp`,
+  `compare_file` against `filecmp.cmp` on 26 pairs, a move to /dev/shm
+  against `shutil.move`, twelve refusals by their exact sentence, and
+  eleven broken copies of the module each caught.
 - **`std/system`: the machine's name, the CPUs a process may use, the
   page size.** `System.hostname`, `System.cpu_count` and
   `System.page_size`, the other library's `System` plus the page size its

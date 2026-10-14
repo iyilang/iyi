@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+## 0.17.0 — 2026-10-14
+
+**About two hundred and thirty fixes, and the `windows-0.17.0-3` and
+`windows-0.17.0-4` branches**, many of them found by generated programs
+whose answers SPEC.md fixes - 2,680 concurrency programs, and 1,500
+multi-module programs built from source and from artifacts. A group
+cancels its tasks when its block is left early or its owner is
+cancelled, a task spawned on a group whose block has ended is a panic,
+`select` has `when timeout(ms)`, a captured local that a kept block
+assigns is refused instead of tearing under a thread, and a line `puts`
+writes from several threads comes out whole. `forall` and `where`
+bounds, parameterised supertraits, macro hooks, `protected` and
+`{{@type}}` bodies travel in a `.iyimod`, and six programs a module's
+artifacts could not build now build from them. The language server
+completes after any receiver, after `X::` and inside an import's braces,
+and moving a module's file rewrites the qualified names that spell it.
+`String#==` is ten times faster on long strings, and `File.read` holds
+the file once.
+
+**Some programs that compiled are refused:** two impls answering one
+method on one type, an impl for a module that is not a trait, a trait
+requirement answered with other parameters, a reopen replacing a method
+another module wrote, `!` in `initialize`, `def group`, `where` bounding
+nothing, a derive writing a macro hook, and an `IyiThread` block naming a
+constant, a class variable or `self` that is not Share. **Some answers
+change:** `Array#delete` removes every equal element, `each_with_object`
+yields the element before the memo, a struct with no `==` of its own
+compares its fields, `sample(n)` is *n* distinct elements, `zip` refuses
+a shorter collection, `strip` takes Unicode whitespace, `String#inspect`,
+`Range#to_s` and `JSON::Any#to_s` print as the other library's do, an
+iterator yields a nil element, a float converts to an integer by
+truncating first, a group's join re-raises the first task that panicked,
+and `abort` runs what the task deferred. `.iyimod` is v56 - v55 records
+a `--no-codegen` build, v56 carries `forall` and `where` bounds - so
+every 0.16 artifact is refused and rebuilt.
+
 ### Fixed
 
 - **A captured local that a kept block assigns is refused, as one

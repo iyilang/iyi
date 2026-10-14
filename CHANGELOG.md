@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Added
+
+- **An array answers for its spans, and a table for everything a program
+  asks of it, without an import.** `Array` had `[]` for one index and
+  nothing for part of itself: `a[1, 2]`, `a[1..]`, `a[..-2]`, their `[]?`
+  and `[]=` forms, `truncate`, `push`, `unshift`, `pop?`, `first?`,
+  `last(n)`, `flatten`, `transpose`, `-`, `&`, `|`, `*` and `uniq` by a
+  key are the prelude's now, with the other library's edges - a start of
+  `size` is the empty tail, one past it is refused naming the index, an
+  end past the last stops at it. `Hash` had thirteen methods; it has
+  `fetch`, `dig`, `merge` and `merge_in_place`, `update`,
+  `transform_values`/`transform_keys`, `select`/`reject` and their
+  `_in_place` forms, `each_key`/`each_value`, `has_value?`, `key_for`,
+  `invert`, `compact`, `clear`, `dup`, `first_key?`, `shift`,
+  `values_at`, `put_if_absent`, `delete` with a block,
+  `count`/`any?`/`all?`/`sum`/`map` over its pairs and `sorted_by`.
+  `Hash` stays out of `Enumerable`, whose `each` hands on one element
+  where every table block takes a key and a value. Held by
+  `bench/collections_exercise.sh`, which drives every refusal and proves
+  every new section can fail.
+
+### Changed
+
+- **Some answers change.** `Hash#==` compares pairs in any order and
+  `Hash#hash` follows the contents, where both were the object's
+  identity, so `{"a" => 1} == {"a" => 1}` is true and an equal table
+  finds a key.
+
 ## 0.17.0 — 2026-10-14
 
 **About two hundred and thirty fixes, and the `windows-0.17.0-3` and

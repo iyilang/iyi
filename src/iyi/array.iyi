@@ -88,6 +88,31 @@ class Array(T)
     self
   end
 
+  # `<<` by the other library's name, and with several values at once: the
+  # room for all of them is made in one step.
+  def push(value : T) : Array(T)
+    self << value
+  end
+
+  def push(*values : T) : Array(T)
+    splice(@size, 0, values.size) { |at| values[at] }
+    self
+  end
+
+  # In front, in the order written: `[3].unshift(1, 2)` is `[1, 2, 3]`.
+  # Every element moves up to make the room, so a queue that grows at the
+  # front is quadratic where one that grows at the back and drains with
+  # `shift` is not.
+  def unshift(value : T) : Array(T)
+    splice(0, 0, 1) { |_| value }
+    self
+  end
+
+  def unshift(*values : T) : Array(T)
+    splice(0, 0, values.size) { |at| values[at] }
+    self
+  end
+
   # A negative index counts from the end, so `a[-1]` is the last element.
   # Still out of range after that wrap (or empty) raises, same message.
   def [](index : Int32) : T
@@ -108,6 +133,77 @@ class Array(T)
     index = @size + index if index < 0
     raise "index #{asked} out of range for #{@size} elements" if index < 0 || index >= @size
     @buffer[index] = value
+  end
+
+  # `a[1, 2]`: *count* elements from *start*, or as many as there are. A
+  # start that wraps below zero or lies past the end is refused, as an index
+  # is; a start of exactly `size` is the empty tail, `[]`, as in the other
+  # library, because the position after the last is where an append goes.
+  def [](start : Int32, count : Int32) : Array(T)
+    span = span?(start, count) || raise "index #{start} out of range for #{@size} elements"
+    copy_span(span[0], span[1])
+  end
+
+  # The same span, or nil where `[]` would refuse the start. A negative
+  # count is a mistake in the call rather than an answer about this array,
+  # and is refused by both.
+  def []?(start : Int32, count : Int32) : Array(T)?
+    span = span?(start, count)
+    span ? copy_span(span[0], span[1]) : nil
+  end
+
+  # `a[1..2]`, `a[1...-1]`, `a[2..]`, `a[..1]`: either end may be negative,
+  # and an end past the last element stops at it. The start is held to what
+  # `[](start, count)` holds it to, so `[1, 2, 3][3..]` is `[]` and
+  # `[1, 2, 3][4..]` is refused: a range that begins outside the array asks
+  # about elements that are not there.
+  def [](range : Range(B, E)) : Array(T) forall B, E
+    span = range_span?(range) || raise "range #{range} out of range for #{@size} elements"
+    copy_span(span[0], span[1])
+  end
+
+  def []?(range : Range(B, E)) : Array(T)? forall B, E
+    span = range_span?(range)
+    span ? copy_span(span[0], span[1]) : nil
+  end
+
+  # `a[1, 2] = x` puts one element where the span was, and `a[1, 2] = [x,
+  # y, z]` puts all of them there: the array grows or shrinks by the
+  # difference, as the other library's does. A start of `size` appends.
+  def []=(start : Int32, count : Int32, value : T) : T
+    span = span?(start, count) || raise "index #{start} out of range for #{@size} elements"
+    splice(span[0], span[1], 1) { |_| value }
+    value
+  end
+
+  def []=(start : Int32, count : Int32, values : Array(T)) : Array(T)
+    span = span?(start, count) || raise "index #{start} out of range for #{@size} elements"
+    splice_array(span[0], span[1], values)
+    values
+  end
+
+  def []=(range : Range(B, E), value : T) : T forall B, E
+    span = range_span?(range) || raise "range #{range} out of range for #{@size} elements"
+    splice(span[0], span[1], 1) { |_| value }
+    value
+  end
+
+  def []=(range : Range(B, E), values : Array(T)) : Array(T) forall B, E
+    span = range_span?(range) || raise "range #{range} out of range for #{@size} elements"
+    splice_array(span[0], span[1], values)
+    values
+  end
+
+  # Keeps only the span, in place, and answers this array: `truncate(1, 2)`
+  # leaves the second and third, refusing a start `[](start, count)` refuses.
+  def truncate(start : Int32, count : Int32) : Array(T)
+    span = span?(start, count) || raise "index #{start} out of range for #{@size} elements"
+    keep_span(span[0], span[1])
+  end
+
+  def truncate(range : Range(B, E)) : Array(T) forall B, E
+    span = range_span?(range) || raise "range #{range} out of range for #{@size} elements"
+    keep_span(span[0], span[1])
   end
 
   def each(& : T -> Nil) : Nil
@@ -269,6 +365,12 @@ class Array(T)
     @buffer[@size]
   end
 
+  # The last element or nil, the stack's twin of `shift?`: `while item =
+  # stack.pop?` empties it from the top.
+  def pop? : T?
+    empty? ? nil : pop
+  end
+
   # Removes and returns the first element. The buffer steps past it rather
   # than the rest moving down: moving them made draining a queue quadratic,
   # and `while item = queue.shift?` - how the prelude says a queue is
@@ -391,6 +493,12 @@ class Array(T)
     @buffer[0]
   end
 
+  # And the nilable question beside it, as `last?` is beside `last`: without
+  # an import a program had `last?` and not `first?`.
+  def first? : T?
+    empty? ? nil : @buffer[0]
+  end
+
   # The first `n`, or all of them when there are fewer: a prefix, not a
   # question, so it never panics.
   def first(n : Int32) : Array(T)
@@ -403,6 +511,13 @@ class Array(T)
       index = index + 1
     end
     result
+  end
+
+  # The last `n`, in their order, or all of them when there are fewer.
+  def last(n : Int32) : Array(T)
+    raise "negative count: #{n}" if n < 0
+    count = n < @size ? n : @size
+    copy_span(@size - count, count)
   end
 
   def select(& : T -> Bool) : Array(T)
@@ -489,6 +604,108 @@ class Array(T)
       next if seen.has_key?(value)
       seen[value] = true
       result << value
+    end
+    result
+  end
+
+  # Each element whose key is the first of its kind, in the order met: the
+  # key is the block's, so `words.uniq(&.downcase)` keeps one spelling.
+  def uniq(& : T -> U) : Array(T) forall U
+    result = Array(T).new(@size)
+    seen = {} of U => Bool
+    each do |value|
+      key = yield value
+      next if seen.has_key?(key)
+      seen[key] = true
+      result << value
+    end
+    result
+  end
+
+  # The elements not in *other*, duplicates and order kept: `[1, 1, 2, 3] -
+  # [2]` is `[1, 1, 3]`. Equality is `==`, asked of a table when *other* is
+  # long enough for a search of it per element to cost more than building
+  # one, as the other library decides at sixteen.
+  def -(other : Array(T)) : Array(T)
+    result = Array(T).new(@size)
+    if other.size <= 16
+      each { |value| result << value unless other.includes?(value) }
+    else
+      present = other.presence
+      each { |value| result << value unless present.has_key?(value) }
+    end
+    result
+  end
+
+  # The elements in both, each once, in this array's order. Taking a value
+  # out of the table as it is kept is what keeps it once.
+  def &(other : Array(T)) : Array(T)
+    present = other.presence
+    result = Array(T).new(@size < other.size ? @size : other.size)
+    each do |value|
+      next unless present.has_key?(value)
+      present.delete(value)
+      result << value
+    end
+    result
+  end
+
+  # The elements in either, each once, this array's first: `[1, 2] | [2,
+  # "a"]` is `[1, 2, "a"]`, whose element type is both arrays'.
+  def |(other : Array(U)) : Array(T | U) forall U
+    result = Array(T | U).new(@size + other.size)
+    seen = Hash(T | U, Bool).new
+    each do |value|
+      next if seen.has_key?(value)
+      seen[value] = true
+      result << value
+    end
+    other.each do |value|
+      next if seen.has_key?(value)
+      seen[value] = true
+      result << value
+    end
+    result
+  end
+
+  # This array *times* times over, one after the other: `[1, 2] * 2` is
+  # `[1, 2, 1, 2]`, and zero times is empty.
+  def *(times : Int32) : Array(T)
+    raise "negative count: #{times}" if times < 0
+    result = Array(T).new(@size * times)
+    round = 0
+    while round < times
+      each { |value| result << value }
+      round = round + 1
+    end
+    result
+  end
+
+  # Every element that is not an array, from every array nested inside at
+  # any depth, in the order they are written: `[[1, [2]], 3]` is `[1, 2,
+  # 3]`. The element type is computed the same way, through every level, so
+  # `[[1], [[2]]].flatten` is an `Array(Int32)`.
+  def flatten
+    result = Array(typeof(flatten_element(self))).new(@size)
+    each { |value| flatten_into(result, value) }
+    result
+  end
+
+  # Rows into columns: `[[1, 2], [3, 4]].transpose` is `[[1, 3], [2, 4]]`.
+  # Rows of different lengths have no columns to give, and are refused with
+  # the first row that differs.
+  def transpose
+    width = empty? ? 0 : @buffer[0].size
+    each_with_index do |row, at|
+      raise "transpose of rows of unequal size: row #{at} has #{row.size} elements, row 0 has #{width}" unless row.size == width
+    end
+    result = Array(Array(typeof(@buffer[0][0]))).new(width)
+    column = 0
+    while column < width
+      line = Array(typeof(@buffer[0][0])).new(@size)
+      each { |row| line << row[column] }
+      result << line
+      column = column + 1
     end
     result
   end
@@ -581,7 +798,15 @@ class Array(T)
   end
 
   private def grow : Nil
+    reserve(@size + 1)
+  end
+
+  # Room for *needed* elements: twice the capacity, which keeps a run of
+  # `<<` linear, or *needed* itself when a splice asks for more than that.
+  private def reserve(needed : Int32) : Nil
+    return if needed <= @capacity
     capacity = @capacity == 0 ? 4 : @capacity * 2
+    capacity = needed if capacity < needed
     buffer = Pointer(T).malloc(capacity.to_u64)
     index = 0
     while index < @size
@@ -590,5 +815,115 @@ class Array(T)
     end
     @buffer = buffer
     @capacity = capacity
+  end
+
+  # The start and count a `(start, count)` call names: the start wrapped
+  # once when negative, the count cut to what is there, and nil for a start
+  # outside `0..size`. A negative count is refused here, for every caller.
+  private def span?(start : Int32, count : Int32) : Tuple(Int32, Int32)?
+    raise "negative count: #{count}" if count < 0
+    index = start < 0 ? @size + start : start
+    return nil if index < 0 || index > @size
+    {index, count < @size - index ? count : @size - index}
+  end
+
+  # The same for a range, either end of which may be nil or negative. An
+  # end at or past the last element is the last element, which is checked
+  # before `+ 1` makes an inclusive end exclusive: `a[0..Int32::MAX]` would
+  # otherwise overflow on the way to meaning "all of it".
+  private def range_span?(range : Range(B, E)) : Tuple(Int32, Int32)? forall B, E
+    from = range.begin
+    start = from.nil? ? 0 : from
+    start = @size + start if start < 0
+    return nil if start < 0 || start > @size
+    to = range.end
+    stop = to.nil? ? @size : (to < 0 ? @size + to : to)
+    if stop >= @size
+      stop = @size
+    elsif !range.exclusive?
+      stop = stop + 1
+    end
+    {start, stop > start ? stop - start : 0}
+  end
+
+  private def copy_span(start : Int32, count : Int32) : Array(T)
+    result = Array(T).new(count)
+    index = 0
+    while index < count
+      result << @buffer[start + index]
+      index = index + 1
+    end
+    result
+  end
+
+  # The *count* elements at *index* replaced by *length* the block answers
+  # for each position, the rest moved once to make or close the room. The
+  # span is already checked.
+  private def splice(index : Int32, count : Int32, length : Int32, & : Int32 -> T) : Nil
+    final = @size - count + length
+    after = index + count
+    if length > count
+      reserve(final)
+      at = @size - 1
+      while at >= after
+        @buffer[at + length - count] = @buffer[at]
+        at = at - 1
+      end
+    elsif length < count
+      at = after
+      while at < @size
+        @buffer[at - count + length] = @buffer[at]
+        at = at + 1
+      end
+    end
+    at = 0
+    while at < length
+      @buffer[index + at] = yield at
+      at = at + 1
+    end
+    @size = final
+  end
+
+  # An array spliced into itself is read from a copy: the move that makes
+  # the room would otherwise shift what is about to be read.
+  private def splice_array(index : Int32, count : Int32, values : Array(T)) : Nil
+    source = values.object_id == object_id ? values.dup : values
+    splice(index, count, source.size) { |at| source[at] }
+  end
+
+  # The span kept in place and the rest dropped. The buffer steps past what
+  # is dropped in front, as `shift` steps past one element, so nothing is
+  # moved.
+  private def keep_span(start : Int32, count : Int32) : Array(T)
+    @buffer = @buffer + start
+    @capacity = @capacity - start
+    @size = count
+    self
+  end
+
+  # A table of the elements, which `-` and `&` ask instead of searching.
+  protected def presence : Hash(T, Bool)
+    table = {} of T => Bool
+    each { |value| table[value] = true }
+    table
+  end
+
+  # :nodoc:
+  # The innermost element type, for `flatten`'s array: never called, only
+  # typed.
+  private def flatten_element(value)
+    if value.is_a?(Array)
+      flatten_element(value[0])
+    else
+      value
+    end
+  end
+
+  private def flatten_into(result, value) : Nil
+    if value.is_a?(Array)
+      value.each { |inner| flatten_into(result, inner) }
+    else
+      result << value
+    end
   end
 end

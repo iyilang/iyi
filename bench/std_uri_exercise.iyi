@@ -14,6 +14,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
 end
 
 import std/uri::{URI, Params}
+import std/idna::{IdnaError}
 
 puts "== hash"
 # URIs hash as they compare. Without a `hash` of its own a URI hashed to its
@@ -143,5 +144,27 @@ puts "\n== encode"
 assert_str "peter+%2B+paul", URI.encode("peter + paul", space_to_plus: true), "a '+' is %2B once a space is '+'"
 assert_str " +", URI.decode(URI.encode(" +", space_to_plus: true), plus_to_space: true), "encode with space_to_plus is undone by decode"
 puts "  a literal + is encoded when + stands for a space"
+
+puts "\n== ascii host"
+# The host DNS looks up: escapes decoded as the UTF-8 RFC 3986 section
+# 3.2.2 has them stand for, then std/idna's to_ascii. `hostname` stays
+# what the reference wrote.
+idn = URI.parse("https://B%C3%BCcher.example:8443/x")
+assert_str "B%C3%BCcher.example", idn.hostname.to_s, "hostname is the host as written"
+[{"Bücher.example", "xn--bcher-kva.example"}, {"b%C3%BCcher.example", "xn--bcher-kva.example"},
+ {"例え.テスト", "xn--r8jz45g.xn--zckzah"}, {"Example.COM", "example.com"}, {"127.0.0.1", "127.0.0.1"},
+ {"[::1]", "[::1]"}, {"[fe80::1%25eth0]", "[fe80::1%25eth0]"}, {"", ""}].each do |pair|
+  got = URI.ascii_host(pair[0])
+  raise "ASSERTION FAILED: ascii host #{pair[0]}: refused with #{got.message.inspect}" if got.is_a?(IdnaError)
+  assert_str pair[1], got, "ascii host #{pair[0]}"
+end
+[{"a%zzb.example", "IDNA: \"a%zzb.example\" has a malformed percent escape"},
+ {"a%2Fb.example", "IDNA: label \"a/b\" holds '/', which a host name does not"},
+ {"BÜCHER.example", "IDNA: label \"BÜCHER\" holds U+00DC, which IDNA2008 does not allow; case folding and NFKC make it \"ü\", which UTS #46 would map it to and this module does not"}].each do |pair|
+  got = URI.ascii_host(pair[0])
+  raise "ASSERTION FAILED: ascii host #{pair[0]}: accepted as #{got.inspect}" unless got.is_a?(IdnaError)
+  assert_str pair[1], got.message, "ascii host #{pair[0]} refused"
+end
+puts "  a host's escapes decoded and carried to ASCII; IP literals and an empty host as they are"
 
 puts "\nALL CHECKS PASSED"

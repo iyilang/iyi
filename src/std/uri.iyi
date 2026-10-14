@@ -16,10 +16,15 @@
 #
 # What the parser refuses is listed at `parse?`. What it does not check:
 # percent escapes (`decode` does), and the shape of a bracketed host.
+#
+# A host is kept as the reference wrote it; `URI.ascii_host` is the form
+# DNS looks up and an HTTP `Host` header carries, an internationalized
+# name in its `xn--` labels by `std/idna`.
 
 module std/uri
 
 import std/text
+import std/idna::{IDNA, IdnaError}
 
 # An ordered multi-value collection representing URI query parameters
 # or application/x-www-form-urlencoded form data.
@@ -266,6 +271,21 @@ pub class URI
     else
       h
     end
+  end
+
+  # *host* as DNS looks it up and an HTTP `Host` header carries it: a
+  # registered name's escapes decoded, since RFC 3986 section 3.2.2 has
+  # them stand for UTF-8, and the name carried by `IDNA.to_ascii`, so
+  # `Bücher.example` and `b%C3%BCcher.example` are both
+  # `xn--bcher-kva.example`. An IP literal in brackets and an empty host
+  # (`file:///x`) are answered as they are. What `IDNA.to_ascii` refuses
+  # is its `IdnaError`, and so is a malformed escape. `hostname` is not
+  # this: it answers what the reference wrote.
+  def self.ascii_host(host : String) : String | IdnaError
+    return host if host.empty? || (host.starts_with?('[') && host.ends_with?("]"))
+    name = host.index('%') ? URI.decode?(host) : host
+    return IdnaError.new("IDNA: #{host.inspect} has a malformed percent escape") unless name
+    IDNA.to_ascii(name)
   end
 
   # The user and the password are kept as the reference wrote them, escapes

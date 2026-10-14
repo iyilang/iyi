@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every uri section reported"
-for phrase in "== parse" "== refuse" "== dot segments" "== hash" "== encode"; do
+for phrase in "== parse" "== refuse" "== dot segments" "== hash" "== encode" "== ascii host"; do
   if ! grep -q "$phrase" "$WORK/uri-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -161,6 +161,31 @@ PY
   else
     echo "  the plus copy failed, but not at its check"
     tail -3 "$WORK/plus.out" | sed 's/^/    /'
+    status=1
+  fi
+
+  # ascii_host handing IDNA the host with its escapes still in it:
+  # `b%C3%BCcher` is refused for its `%` rather than read as `bücher`.
+  mkdir -p "$WORK/escaped/std"
+  "$PY" - <<PY
+from pathlib import Path
+src = Path("$REPO/src/std/uri.iyi").read_text(encoding="utf-8")
+old = "    name = host.index('%') ? URI.decode?(host) : host"
+if old not in src:
+    raise SystemExit("patch site missing")
+Path("$WORK/escaped/std/uri.iyi").write_text(src.replace(old, "    name = host", 1), encoding="utf-8")
+PY
+  if [ $? -ne 0 ]; then
+    echo "  the escaped-host patch did not apply"
+    status=1
+  elif IYI_PATH="$WORK/escaped${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_uri_exercise.iyi" >"$WORK/escaped.out" 2>&1; then
+    echo "  the exercise PASSED with a host's escapes left in it"
+    status=1
+  elif grep -q "ascii host b%C3%BCcher.example" "$WORK/escaped.out"; then
+    echo "  a host's escapes left in it are caught"
+  else
+    echo "  the escaped-host copy failed, but not at its check"
+    tail -3 "$WORK/escaped.out" | sed 's/^/    /'
     status=1
   fi
 fi

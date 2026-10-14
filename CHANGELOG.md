@@ -4,6 +4,42 @@
 
 ### Added
 
+- **`std/idna`: Punycode (RFC 3492) and host names to and from ASCII
+  (IDNA2008), and `URI.ascii_host`.** `Punycode.encode` writes any
+  string's Punycode and `Punycode.decode` reads it back, or answers a
+  `PunycodeError` for a byte that is not ASCII, one that is not a base-36
+  digit, input that ends inside a number, overflow, and a code point past
+  U+10FFFF or a surrogate; the arithmetic is 64-bit, so a delta past 32
+  bits (U+10FFFF after 3,000 basic code points) reads back.
+  `IDNA.to_ascii("bücher.example")` is `"xn--bcher-kva.example"` and
+  `IDNA.to_unicode` is the way back, label by label at `.` and the three
+  full stops UTS #46 treats as one, a trailing dot kept, ASCII
+  lower-cased. Refused as an `IdnaError` naming the label and the code
+  point: an empty label, a leading or trailing hyphen, `--` at the third
+  and fourth characters outside `xn--`, an `xn--` label that does not
+  decode or decodes to ASCII, a U-label not in NFC or beginning with a
+  combining mark, a code point RFC 5892 does not allow - the property is
+  derived from `std/unicode` by the RFC's own rules, and `IDNA.property`
+  answers it - or a CONTEXTO one out of its context, a label past 63
+  octets and a name past 253 in ASCII. Not done, and the module says so:
+  no UTS #46 mapping (`BÜCHER`, full-width letters and ligatures are
+  refused with what folding and NFKC make of them, not mapped), no
+  transitional `ß`, the joiners refused because their CONTEXTJ rule needs
+  Joining_Type, no Bidi rule. `URI.ascii_host(host)` decodes a host's
+  escapes and carries it through `to_ascii`, IP literals and an empty
+  host as they are; `URI#hostname` is unchanged. Held by
+  `bench/std_idna_exercise.sh`, plain and `--release`: the 19 samples of
+  RFC 3492 section 7.1; 312 strings encoded and decoded as Python's
+  `punycode` codec does; 50 real names (IANA's IDN test domains, IDN
+  country TLDs) agreeing both ways with the `idna` package 3.11 and, but
+  for `ß`, with Python's IDNA2003 codec; 28 bad names refused by both, and
+  the three known differences (an underscore label, the Bidi rule, ZWNJ in
+  Persian) checked to differ as documented; `IDNA.property` against the
+  package's table on all 294,579 code points Unicode 16 assigns, the ten
+  that differ being the package's own slip (OUTLINED DIGIT ZERO to NINE,
+  whose NFKC is an ASCII digit); seven refusals by their sentence; twelve
+  broken copies of the module caught. `bench/std_uri_exercise.sh` holds
+  `ascii_host` and catches one more broken copy.
 - **`std/curve25519`: X25519 key agreement (RFC 7748) and Ed25519
   signatures (RFC 8032), in iyi.** `X25519.public_key(private)`,
   `X25519.shared(private, peer_public) : String | CurveError`,

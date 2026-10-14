@@ -23,6 +23,28 @@
   the resolver are each caught. There is no EDNS(0), answer cache, DNSSEC
   or reverse lookup, and addresses are tried one after another rather
   than raced.
+- **`std/regex` has groups, flags and Unicode, and stays linear.** It
+  matched bytes with no capture groups and refused inline flags, `\p{..}`
+  and flagged literals. Now the Pike VM reads UTF-8 code points and gives
+  each thread its own capture positions, so `Regex#match` returns a
+  `Regex::MatchData` (`[]`, names, `begin`/`end` in characters,
+  `byte_begin`/`byte_end` in bytes, `pre_match`, `captures`,
+  `named_captures`). `String#sub`/`gsub` read `\1` and `\k<name>`, and
+  `String#scan`, `=~`, `index` and `case … when /x/` work.
+  `Regex::Options` (`IGNORE_CASE` with Unicode simple folding, `MULTILINE`
+  as the other library means it, `DOTALL`, `EXTENDED`) and RE2's
+  `(?imsxU)` are supported, as are `\p{L}`…`\p{Greek}` over every general
+  category and script, `Regex.escape` and `Regex.union`. `/a/i`, `/a/m`
+  and `/a/x` compile to `Regex.compile` with those options, in their own
+  constant. `(a|a)*b` against 30,000 a's answers in about 0.1 s.
+  Backreferences, lookaround and the other non-regular constructs are
+  still refused by name, and there is no `$~`. Held by
+  `bench/std_regex_exercise.sh`, checked against Python's `re` for every
+  group span on 1,490 more cases plus a 20-second clock with its failure
+  proof, and by `spec/compiler/normalize/regex_spec.cr`. The price is on
+  the general path only: three VM-bound patterns over 8 MB take 0.68 s
+  where they took 0.45 s (`--release`); the literal and run fast paths
+  are unchanged.
 - **An array answers for its spans, and a table for everything a program
   asks of it, without an import.** `Array` had `[]` for one index and
   nothing for part of itself: `a[1, 2]`, `a[1..]`, `a[..-2]`, their `[]?`
@@ -128,10 +150,17 @@
 
 - **Some answers change.** `Hash#==` compares pairs in any order and
   `Hash#hash` follows the contents, where both were the object's
-  identity, so `{"a" => 1} == {"a" => 1}` is true and an equal table
-  finds a key. `IyiSocket.connect` given a host name resolves it, and a
-  name that does not resolve is a returned `SocketError` rather than a
-  panic. `File.open(path, "a")` appends where it was refused.
+  identity, so `{"a" => 1} == {"a" => 1}` is true and an equal table finds
+  a key. In `std/regex`, `.`, negated classes, `\D`/`\W`/`\S` and `\P`
+  consume a whole UTF-8 character rather than a byte, `\xHH` is the code
+  point U+00HH, a class may hold non-ASCII, and a pattern that is not
+  valid UTF-8 is refused; `String#gsub(regex, String)` reads `\0`-`\9`,
+  `\k<name>` and `\\` in its replacement, as the other library's does,
+  where it inserted them as written (`Regex#replace` still does), and
+  `String#gsub(regex, &)` yields the text and its `MatchData`.
+  `IyiSocket.connect` given a host name resolves it, and a name that does
+  not resolve is a returned `SocketError` rather than a panic.
+  `File.open(path, "a")` appends where it was refused.
 - **New prelude names.** `assert_eq`, `assert_ne`, `assert_nil`,
   `assert_in_delta`, `assert_includes`, `assert_error`, `assert_ok`,
   `assert_panics` and `test(name, &)` are the prelude's, so a script

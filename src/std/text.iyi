@@ -31,10 +31,10 @@
 #    out-of-band allocations are used.
 #
 # 3. Regular expressions:
-#    iyi programs (`.iyi`) have no runtime `Regex` engine: `Iyi::Rx` is a
-#    linear-time engine internal to the compiler that serves compile-time
-#    macros only. `sub` and `gsub` here operate on exact string and character
-#    patterns.
+#    `sub` and `gsub` here take exact string and character patterns. A
+#    pattern is `std/regex`'s `Regex`, iyi's own linear-time engine, which
+#    adds `match`, `=~`, `index`, `sub`, `gsub` and `scan` taking a `Regex`
+#    to `String`; import both and each call takes the one its argument names.
 #
 # 4. Scope and omissions from Crystal's string.cr (5,922 lines):
 #    Crystal's stdlib carries large Unicode normalization tables (NFC, NFD),

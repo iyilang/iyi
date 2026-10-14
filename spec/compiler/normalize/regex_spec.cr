@@ -74,5 +74,59 @@ describe "Normalize: regex literal" do
         LiteralExpander.new(Program.new).expand(parse(%q(/foo/), filename: "foo.iyi"))
       end
     end
+
+    # iyi: `std/regex` takes `i`, `m` and `x` as `Regex::Options` of the
+    # numbers the lexer writes, so a flagged literal is `Regex.compile` with
+    # them rather than refused, and the flags are in the constant's name:
+    # `/foo/` and `/foo/i` are two constants.
+    it "carries a literal's flags to Regex.compile as Options" do
+      program = iyi_regex_program
+      expander = LiteralExpander.new(program)
+      plain = expander.expand(parse(%q(/foo/), filename: "foo.iyi"))
+      folded = expander.expand(parse(%q(/foo/i), filename: "foo.iyi"))
+      all = expander.expand(parse(%q(/foo/imx), filename: "foo.iyi"))
+
+      plain.to_s.should eq(Program.iyi_regex_const_name("foo"))
+      folded.to_s.should eq(Program.iyi_regex_const_name("foo", Iyi::RegexOptions::IGNORE_CASE))
+      folded.to_s.should_not eq(plain.to_s)
+      all.to_s.should_not eq(folded.to_s)
+
+      program.types[plain.to_s].as(Iyi::Const).value.to_s.should eq(%q(::Std::Regex::Regex.compile("foo")))
+      program.types[folded.to_s].as(Iyi::Const).value.to_s.should eq(%q(::Std::Regex::Regex.compile("foo", ::Std::Regex::Regex::Options.new(1))))
+      program.types[all.to_s].as(Iyi::Const).value.to_s.should eq(%q(::Std::Regex::Regex.compile("foo", ::Std::Regex::Regex::Options.new(15))))
+      program.iyi_regex_constants[folded.to_s].should eq({"foo", Iyi::RegexOptions::IGNORE_CASE})
+    end
+
+    it "keeps the name a literal without flags always had" do
+      key = "3:foo"
+      Program.iyi_regex_const_name("foo").should eq("#{Program::IYI_REGEX_CONST_PREFIX}#{::Crystal::Digest::MD5.hexdigest(key)}")
+      Program.iyi_regex_const_name("foo", Iyi::RegexOptions::None).should eq(Program.iyi_regex_const_name("foo"))
+    end
+
+    it "carries the flags of an interpolated literal, which is no constant" do
+      node = LiteralExpander.new(iyi_regex_program).expand(parse(%q(/#{"f"}oo/m), filename: "foo.iyi"))
+      node.to_s.should eq(%q(::Std::Regex::Regex.compile("#{"f"}oo", ::Std::Regex::Regex::Options.new(6))))
+    end
+
+    it "refuses a flag std/regex has no option for" do
+      literal = Iyi::RegexLiteral.new(Iyi::StringLiteral.new("foo"), Iyi::RegexOptions::Reserved)
+      literal.location = Iyi::Location.new("foo.iyi", 1, 1)
+      expect_raises(Iyi::TypeException, "`std/regex` has no flag for Reserved") do
+        LiteralExpander.new(iyi_regex_program).expand(literal)
+      end
+    end
   end
+end
+
+# A program with a `Std::Regex::Regex` in it, which is what tells the
+# expander that `std/regex` was imported.
+private def iyi_regex_program : Program
+  semantic(<<-CODE).program
+    module Std
+      module Regex
+        struct Regex
+        end
+      end
+    end
+    CODE
 end

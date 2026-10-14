@@ -4256,11 +4256,12 @@ linear-time engine III.10 promises, so the sugar moves no line there
 either. It was refused while that library had no runtime `Regex`, and kept
 refused after `std/regex` arrived, so a port wrote every pattern as a
 string (crystal-metric's review asked for it back). The literal is cached
-as the other library's is, one constant per pattern, named apart from that
-library's (`$Regex:iyi:<digest>`) so an artifact's consumer rebuilds it
-with the engine it was built with. Without `import std/regex` it is refused
-by name, and so is a flag (`/a/i`), which that engine does not take -
-compiled without it, `/a/i` would have answered `false` for `"A"`.
+as the other library's is, one constant per pattern and flags, named apart
+from that library's (`$Regex:iyi:<digest>`, the flags in the digest when
+there are any) so an artifact's consumer rebuilds it with the engine and
+flags it was built with. Without `import std/regex` it is refused by name;
+its flags `i`, `m` and `x` are `Regex::Options` of the same numbers, `m`
+meaning what it means in the other library, and any other flag is refused.
 `bench/std_regex_exercise.sh` holds all of it, a module's literal through
 its artifact included. And `pub` did not admit an
 **alias** or an **annotation**, which are both surface: a name for a type

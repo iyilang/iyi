@@ -769,8 +769,31 @@ module Iyi
     # artifact knows which library to build it with.
     IYI_REGEX_CONST_PREFIX = "$Regex:iyi:"
 
-    def self.iyi_regex_const_name(pattern : String) : String
-      "#{IYI_REGEX_CONST_PREFIX}#{::Crystal::Digest::MD5.hexdigest("#{pattern.bytesize}:#{pattern}")}"
+    # The flags are in the digest because they are in the pattern's meaning:
+    # `/a/` and `/a/i` in one program are two constants. Only when there are
+    # any, so a literal without flags keeps the name every artifact written
+    # before flags existed already refers to; and behind an `f`, so the two
+    # kinds of key can never spell each other - one without flags starts
+    # with the pattern's length, a digit.
+    def self.iyi_regex_const_name(pattern : String, options : RegexOptions = RegexOptions::None) : String
+      key = "#{pattern.bytesize}:#{pattern}"
+      key = "f#{options.value}:#{key}" unless options.value == 0
+      "#{IYI_REGEX_CONST_PREFIX}#{::Crystal::Digest::MD5.hexdigest(key)}"
+    end
+
+    # iyi: what an iyi regex literal's constant is built with, by the
+    # expander and again by a consumer rebuilding the constant from an
+    # artifact: `Std::Regex::Regex.compile` of the pattern, and its flags as
+    # `Std::Regex::Regex::Options` of the same number when it has any. The
+    # numbers are the other library's on both sides, which is what lets them
+    # pass through unchanged. *at* is the node or location every part is
+    # placed at.
+    def self.iyi_regex_compile_call(value : ASTNode, options : RegexOptions, at) : Call
+      regex = Path.global(["Std", "Regex", "Regex"]).at(at)
+      return Call.new(regex, "compile", value).at(at) if options.value == 0
+      flags = Call.new(Path.global(["Std", "Regex", "Regex", "Options"]).at(at), "new",
+        NumberLiteral.new(options.value.to_s).at(at)).at(at)
+      Call.new(regex, "compile", value, flags).at(at)
     end
 
     # iyi: the imports' names each file's module unit writes, by absolute

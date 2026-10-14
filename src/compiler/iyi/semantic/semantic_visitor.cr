@@ -1273,9 +1273,10 @@ abstract class Iyi::SemanticVisitor < Iyi::Visitor
       options = RegexOptions.new(regex.options.to_i32)
       value =
         if regex.name.starts_with?(Program::IYI_REGEX_CONST_PREFIX)
-          # An iyi module's literal, rebuilt the way it was built.
-          Call.new(Path.global(["Std", "Regex", "Regex"]).at(location), "compile",
-            StringLiteral.new(regex.pattern).at(location)).at(location)
+          # An iyi module's literal, rebuilt the way it was built, its flags
+          # included: without them `/a/i` read from an artifact would match
+          # only `a`.
+          Program.iyi_regex_compile_call(StringLiteral.new(regex.pattern).at(location), options, location)
         else
           Call.new(
             Path.global("Regex").at(location), "new",

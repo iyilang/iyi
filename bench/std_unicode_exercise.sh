@@ -75,7 +75,7 @@ fi
 
 echo
 echo "== every unicode section reported"
-for phrase in "== letter" "== valid" "== case"; do
+for phrase in "== letter" "== valid" "== case" "== categories, scripts and case orbits"; do
   if ! grep -q "$phrase" "$WORK/unicode-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -139,6 +139,13 @@ mutate "digraph upcase missing" \
 mutate "final sigma judged without the letters before it" \
   'if cp == 0x3A3 && !options.ascii? && !options.fold? && final_sigma?(source, index)' \
   'if cp == 0x3A3 && !options.ascii? && !options.fold? && final_sigma?(source, index) && index > from'
+mutate "a category read from the wrong column" \
+  'at < 0 ? "Cn" : category_names[table.to_unsafe[at + 2]]' \
+  'at < 0 ? "Cn" : category_names[table.to_unsafe[at + 1] % 29]'
+mutate "an orbit without CaseFolding's S rows" \
+  '      join_orbit(map, data[row + 1], data[row])
+      row = row + 2' \
+  '      row = row + 2'
 
 echo
 if [ "$status" -eq 0 ]; then

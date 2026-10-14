@@ -10,13 +10,21 @@ version it was written from. The repository already carries that data, and
 both libraries answering from one table is what lets
 `bench/std_unicode_exercise.sh` diff them.
 
-Two properties are not in it, because the compatibility library has no use
-for them: Cased and Case_Ignorable, which decide the final sigma. They are
-read from `DerivedCoreProperties.txt` of the same release, fetched from
-unicode.org as `scripts/generate_unicode_data.cr` fetches the rest. Before
-they were generated, the module approximated them by hand (Ll, Lu and Lt for
-Cased; every mark and a list of eighteen code points for Case_Ignorable) and
-chose the wrong sigma in 378 of 20,000 sampled strings.
+Some properties are not in it, because the compatibility library has no
+use for them, and are read from the UCD files of the same release, fetched
+from unicode.org as `scripts/generate_unicode_data.cr` fetches the rest:
+
+* Cased and Case_Ignorable, which decide the final sigma, from
+  `DerivedCoreProperties.txt`. Before they were generated, the module
+  approximated them by hand (Ll, Lu and Lt for Cased; every mark and a list
+  of eighteen code points for Case_Ignorable) and chose the wrong sigma in
+  378 of 20,000 sampled strings.
+* Every general category, the punctuation and symbol ones included, from
+  `UnicodeData.txt`, and every script from `Scripts.txt`: `std/regex` asks
+  for them by name, `\\p{P}` and `\\p{Greek}`, and `data.cr` has neither the
+  P and S categories nor any script. The categories `data.cr` does have are
+  checked against these code point for code point, so the two sources
+  cannot drift apart unnoticed.
 
 What is written, between the `# tables-begin` and `# tables-end` lines of the
 module, is one string constant per table: decimal integers separated by
@@ -104,6 +112,98 @@ def derived_core_properties(ucd: str, names: tuple[str, ...]) -> dict[str, set[i
     return properties
 
 
+# The general categories in the order the module's CATEGORY_NAMES lists them,
+# which is the order a GENERAL_CATEGORY row's third integer counts in. Cn is
+# not among them: an unassigned code point is in no row.
+CATEGORIES = (
+    "Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No",
+    "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po", "Sm", "Sc", "Sk", "So",
+    "Zs", "Zl", "Zp", "Cc", "Cf", "Cs", "Co",
+)
+
+
+def fetch(ucd: str, name: str) -> str:
+    url = UCD_ROOT.format(version=ucd) + name
+    with urllib.request.urlopen(url) as response:
+        return response.read().decode("utf-8")
+
+
+def labelled_runs(points: dict[int, int]) -> list[tuple[int, int, int]]:
+    """`{from, to, label}` rows: each maximal run of consecutive code points with one label."""
+    rows: list[list[int]] = []
+    for point in sorted(points):
+        label = points[point]
+        if rows and rows[-1][1] == point - 1 and rows[-1][2] == label:
+            rows[-1][1] = point
+        else:
+            rows.append([point, point, label])
+    return [tuple(row) for row in rows]
+
+
+def general_categories(ucd: str) -> dict[int, str]:
+    """Every assigned code point's general category, from UnicodeData.txt of release *ucd*.
+
+    The file names no release inside it, so `main` checks the categories
+    `data.cr` also has against these, which is what pins the release.
+    """
+    categories: dict[int, str] = {}
+    first = None
+    for line in fetch(ucd, "UnicodeData.txt").splitlines():
+        fields = line.split(";")
+        if len(fields) < 3:
+            continue
+        point, name, category = int(fields[0], 16), fields[1], fields[2]
+        if name.endswith(", First>"):
+            first = point
+            continue
+        start = first if name.endswith(", Last>") and first is not None else point
+        first = None
+        for each in range(start, point + 1):
+            categories[each] = category
+    unknown = set(categories.values()) - set(CATEGORIES)
+    if unknown:
+        sys.exit(f"UnicodeData.txt names categories this module does not: {sorted(unknown)}")
+    return categories
+
+
+def scripts(ucd: str) -> dict[int, str]:
+    """Every code point's script, from Scripts.txt of release *ucd*; Unknown is not listed."""
+    text = fetch(ucd, "Scripts.txt")
+    if not text.startswith(f"# Scripts-{ucd}.txt"):
+        sys.exit(f"Scripts.txt does not name release {ucd} on its first line")
+    found: dict[int, str] = {}
+    for line in text.splitlines():
+        fields = [field.strip() for field in line.split("#", 1)[0].split(";")]
+        if len(fields) < 2:
+            continue
+        span = fields[0].split("..")
+        for point in range(int(span[0], 16), int(span[-1], 16) + 1):
+            found[point] = fields[1]
+    if not found:
+        sys.exit("Scripts.txt has no script lines")
+    return found
+
+
+def simple_only_foldings(ucd: str) -> list[tuple[int, int]]:
+    """The `S` rows of CaseFolding.txt of release *ucd*: simple foldings of code points that also have a full one.
+
+    `data.cr` keeps the full folding of these and drops the simple one, so
+    `foldcase` leaves `ẞ` as it is; a case-insensitive match needs the
+    simple one, since RE2's `(?i)ß` matches `ẞ`.
+    """
+    text = fetch(ucd, "CaseFolding.txt")
+    if not text.startswith(f"# CaseFolding-{ucd}.txt"):
+        sys.exit(f"CaseFolding.txt does not name release {ucd} on its first line")
+    rows = []
+    for line in text.splitlines():
+        fields = [field.strip() for field in line.split("#", 1)[0].split(";")]
+        if len(fields) >= 3 and fields[1] == "S":
+            rows.append((int(fields[0], 16), int(fields[2], 16)))
+    if not rows:
+        sys.exit("CaseFolding.txt has no S rows")
+    return sorted(rows)
+
+
 def expand(strided: list[tuple[int, ...]]) -> set[int]:
     """The code points a `{from, to, stride}` table names."""
     points: set[int] = set()
@@ -163,6 +263,27 @@ def literal(name: str, comment: str, values: list[int]) -> str:
     return "\n".join(out)
 
 
+def words(name: str, comment: str, names: list[str] | tuple[str, ...]) -> str:
+    """A string constant of names separated by commas, wrapped as `literal` wraps integers."""
+    text = ",".join(names)
+    lines = []
+    while text:
+        if len(text) <= WIDTH:
+            lines.append(text)
+            break
+        cut = text.rfind(",", 0, WIDTH) + 1
+        lines.append(text[:cut])
+        text = text[cut:]
+    prefix = f"  {name} = "
+    pad = " " * len(prefix)
+    out = [f"  # {comment}"]
+    for index, line in enumerate(lines):
+        lead = prefix if index == 0 else pad
+        tail = " \\" if index < len(lines) - 1 else ""
+        out.append(f'{lead}"{line}"{tail}')
+    return "\n".join(out)
+
+
 def main() -> None:
     tables = read_tables(DATA.read_text(encoding="utf-8"))
     ucd = version(UNICODE.read_text(encoding="utf-8"))
@@ -209,6 +330,18 @@ def main() -> None:
         for key, result in tables["canonical_compositions"]
     )
 
+    categories = general_categories(ucd)
+    for name in ("Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nd", "Nl", "No",
+                 "Zs", "Zl", "Zp", "Cc", "Cf", "Cs", "Co"):
+        ours = {point for point, category in categories.items() if category == name}
+        if ours != expand(tables[f"category_{name}"]):
+            sys.exit(f"UnicodeData.txt and {DATA.relative_to(REPO)} disagree on {name}: not release {ucd}?")
+    general_category = labelled_runs({point: CATEGORIES.index(category) for point, category in categories.items()})
+    by_script = scripts(ucd)
+    script_names = sorted(set(by_script.values()))
+    script = labelled_runs({point: script_names.index(name) for point, name in by_script.items()})
+    simple_fold = simple_only_foldings(ucd)
+
     sections = [
         f'  # The version of the Unicode Character Database the tables below were written from.\n  VERSION = "{ucd}"',
         literal("LETTER", f"{len(letter)} rows of {{from, to, stride}}: the code points of general category L (Lu, Ll, Lt, Lm, Lo).", flat(letter)),
@@ -234,6 +367,11 @@ def main() -> None:
         literal("COMPATIBILITY_DECOMPOSITION", f"{len(compat)} rows of {{code point, offset, count}}: compatibility decomposition mappings as windows of COMPATIBILITY_DATA.", flat(compat)),
         literal("COMPATIBILITY_DATA", f"{len(compat_data)} code points: the windows COMPATIBILITY_DECOMPOSITION names.", compat_data),
         literal("COMPOSITION", f"{len(compositions)} rows of {{first, second, composed}}: canonical compositions, the exclusions already left out, sorted by first then second.", flat(compositions)),
+        words("CATEGORY_NAMES", "The general categories GENERAL_CATEGORY counts in, from 0; Cn, unassigned, is the absence of a row.", CATEGORIES),
+        literal("GENERAL_CATEGORY", f"{len(general_category)} rows of {{from, to, category}}: every assigned code point's general category, by its place in CATEGORY_NAMES.", flat(general_category)),
+        words("SCRIPT_NAMES", "The scripts SCRIPT counts in, from 0, as Scripts.txt names them; Unknown is the absence of a row.", script_names),
+        literal("SCRIPT", f"{len(script)} rows of {{from, to, script}}: every code point's script, by its place in SCRIPT_NAMES.", flat(script)),
+        literal("SIMPLE_FOLD", f"{len(simple_fold)} rows of {{code point, folded}}: the simple foldings CaseFolding.txt marks S, of code points whose full folding SPECIAL_FOLD holds.", flat(simple_fold)),
     ]
 
     module = MODULE.read_text(encoding="utf-8")

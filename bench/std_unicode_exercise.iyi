@@ -82,4 +82,31 @@ assert_str "ας\u0903α", Unicode.downcase("ΑΣ\u0903Α"), "a spacing mark end
 assert_str "\u216Bς", Unicode.capitalize("\u216BΣ"), "capitalize judges the final sigma by the same properties"
 puts "  the final sigma by the Cased and Case_Ignorable properties"
 
+# What `std/regex` builds `\p{..}` and case-insensitive classes from. The
+# categories and scripts are read from UnicodeData.txt and Scripts.txt, and
+# an orbit is the C and S rows of CaseFolding.txt read backwards.
+puts "\n== categories, scripts and case orbits"
+assert_str "Lu", Unicode.general_category('A'), "A is Lu"
+assert_str "Po", Unicode.general_category('!'), "! is Po"
+assert_str "Sc", Unicode.general_category('€'), "€ is Sc"
+assert_str "Pi", Unicode.general_category('«'), "« is Pi"
+assert_str "Cn", Unicode.general_category('\u0378'), "an unassigned code point is Cn"
+assert_str "Greek", Unicode.script('λ'), "λ is Greek"
+assert_str "Han", Unicode.script('中'), "中 is Han"
+assert_str "Common", Unicode.script('1'), "1 is Common"
+assert_str "Unknown", Unicode.script('\u0378'), "an unassigned code point is Unknown"
+punct = Unicode.property_ranges("P") || [] of Int32
+assert_true punct[0] == 33 && punct[1] == 35 && punct.size % 2 == 0, "P starts at ! to #"
+greek = Unicode.property_ranges("Greek") || [] of Int32
+assert_true greek[0] == 0x370 && greek[1] == 0x373, "Greek starts at U+0370"
+assert_true (Unicode.property_ranges("Lu") || [] of Int32)[0, 2] == [65, 90], "Lu starts at A to Z"
+assert_true Unicode.property_ranges("Klingon").nil?, "a name the UCD does not have is nil"
+assert_true Unicode.case_orbit('k') == ['K', 'k', '\u212A'], "k, K and the Kelvin sign"
+assert_true Unicode.case_orbit('ẞ') == ['ß', 'ẞ'], "ß and ẞ, by CaseFolding's S row"
+assert_true Unicode.case_orbit('1') == ['1'], "a character without case is alone"
+orbits = 0
+Unicode.each_case_orbit { |orbit| orbits = orbits + 1 if orbit.size > 1 }
+assert_true orbits > 1000, "every orbit of more than one, #{orbits} of them"
+puts "  general_category, script, property_ranges, case_orbit and each_case_orbit"
+
 puts "\nALL CHECKS PASSED"

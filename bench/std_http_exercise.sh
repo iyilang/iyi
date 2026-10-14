@@ -603,6 +603,8 @@ mutate "a head given as long as each read is short" '      conn.deadline_in(time
 ' ''
 mutate "an upgraded connection held to the server's timeout" '      conn.unlimited
 ' ''
+mutate "a client that waits for an answer as long as it takes" '        conn.gap = timeout_ms if timeout_ms > 0
+      end' '      end'
 mutate "a boundary that falls across reads missed" 'safe = @held.bytesize - (@delimiter.bytesize - 1)' 'safe = @held.bytesize'
 
 echo

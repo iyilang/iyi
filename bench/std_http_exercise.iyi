@@ -1514,7 +1514,33 @@ group do |g|
     0
   end
 end
-puts "  nothing sent, a byte every 100 ms, a head in pieces in time, an idle kept connection, an upgrade, no timeout"
+# The client's: a server that takes the request and never answers.
+mute = IyiSocket.listen("127.0.0.1", 0)
+mute_base = "http://127.0.0.1:#{mute.local_port}"
+group do |g|
+  g.spawn do
+    muted = [] of IyiSocket
+    while true
+      peer = mute.accept
+      break unless peer.is_a?(IyiSocket)
+      muted << peer
+    end
+    muted.each { |peer| peer.close }
+    0
+  end
+  g.spawn do
+    started = __iyi_monotonic_ns
+    hung = HTTP.request("GET", mute_base + "/", timeout_ms: 300)
+    hung_ms = (__iyi_monotonic_ns - started) // 1000000_i64
+    assert_true hung.is_a?(SocketError) && hung.timed_out?, "a request no answer comes to is a timeout"
+    assert_true hung_ms >= 250 && hung_ms < 2000, "after the timeout: #{hung_ms} ms"
+    kept_hung = HTTPClient.new(timeout_ms: 300).get(mute_base + "/")
+    assert_true kept_hung.is_a?(SocketError) && kept_hung.timed_out?, "and through an HTTPClient"
+    mute.close
+    0
+  end
+end
+puts "  nothing sent, a byte every 100 ms, a head in pieces in time, an idle kept connection, an upgrade, no timeout, a client's"
 
 puts "\n== upgrades"
 # A 101 hands the connection to the block, with the bytes the client sent

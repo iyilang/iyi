@@ -39,7 +39,9 @@
 # whose block writes as it goes; or a `Response.upgrade`, after whose 101
 # the connection belongs to the block (std/websocket's). With `compress:
 # true` an answer whose type is worth compressing goes `gzip` to a client
-# that accepts it. std/fileserver answers a request from a directory.
+# that accepts it. Beside it: std/router routes requests by pattern as
+# Go's ServeMux does, std/fileserver answers them from a directory,
+# std/sse streams events, and std/websocket takes a connection over.
 # The socket parks under the runtime, so a slow client costs one fiber;
 # the listener's `close` ends `serve`.
 #
@@ -1689,11 +1691,14 @@ end
 pub class HTTPClient
   @idle : Hash(String, Array(Conn))
   @limit : Int32
+  @timeout_ms : Int32
   @made : Int32
   @reused : Int32
 
-  def initialize(idle : Int32 = 4)
+  # *timeout_ms* is `HTTP.open`'s, for every request the client sends.
+  def initialize(idle : Int32 = 4, @timeout_ms : Int32 = 0)
     raise "HTTP: a client keeps 0 or more idle connections, not #{idle}" if idle < 0
+    raise "HTTP: a timeout of #{@timeout_ms} ms" if @timeout_ms < 0
     @idle = {} of String => Array(Conn)
     @limit = idle
     @made = 0
@@ -1711,11 +1716,11 @@ pub class HTTPClient
   end
 
   def request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true) : Response | Cancelled | SocketError | HTTPError
-    HTTP.open(method, url, headers, body, redirects, jar, decompress, self) { |response| response.load }
+    HTTP.open(method, url, headers, body, redirects, jar, decompress, self, @timeout_ms) { |response| response.load }
   end
 
   def open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
-    HTTP.open(method, url, headers, body, redirects, jar, decompress, self) { |response| block.call(response) }
+    HTTP.open(method, url, headers, body, redirects, jar, decompress, self, @timeout_ms) { |response| block.call(response) }
   end
 
   def get(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
@@ -1917,8 +1922,8 @@ pub struct HTTP
   # `SocketError`; a task cancelled answers `Cancelled`; what the server
   # does wrong answers `HTTPError`. `!` passes any of them up, `.or_panic`
   # refuses it.
-  def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true) : Response | Cancelled | SocketError | HTTPError
-    open(method, url, headers, body, redirects, jar, decompress) { |response| response.load }
+  def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, timeout_ms : Int32 = 0) : Response | Cancelled | SocketError | HTTPError
+    open(method, url, headers, body, redirects, jar, decompress, nil, timeout_ms) { |response| response.load }
   end
 
   # One request, and the block's answer to the response, its body still
@@ -1935,14 +1940,22 @@ pub struct HTTP
   # `Cookie` written by the caller are not sent to another host. One more
   # than *redirects* is an `HTTPError`; with 0 the first answer is the
   # block's.
-  def self.open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, client : HTTPClient? = nil, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
+  #
+  # *timeout_ms* bounds the connect, and each read and write after it -
+  # a pause, not the whole exchange, as Python's `timeout` is: a body that
+  # keeps arriving is read for as long as it takes. One that runs out is a
+  # `SocketError` whose `timed_out?` is true. 0, the default, waits as
+  # long as the server does, as Go's and Python's clients do; a client
+  # that talks to servers it does not control should give one.
+  def self.open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, client : HTTPClient? = nil, timeout_ms : Int32 = 0, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
+    raise "HTTP: a timeout of #{timeout_ms} ms" if timeout_ms < 0
     current = url
     verb = method
     sent = headers
     payload = body
     hops = 0
     while true
-      exchange = exchange(verb, current, sent, payload, jar, decompress, nil, client)
+      exchange = exchange(verb, current, sent, payload, jar, decompress, nil, client, timeout_ms)
       return exchange unless exchange.is_a?(Exchange)
       response = exchange.response
       location = response.header("Location")
@@ -1971,16 +1984,18 @@ pub struct HTTP
   # The 101 an upgrade to *protocol* is answered with, and the connection,
   # which is the caller's from then on: std/websocket's handshake. Any
   # other answer is an `HTTPError` naming it.
-  def self.upgrade(url : String, protocol : String, headers : Hash(String, String) = {} of String => String) : Upgraded | Cancelled | SocketError | HTTPError
+  def self.upgrade(url : String, protocol : String, headers : Hash(String, String) = {} of String => String, timeout_ms : Int32 = 0) : Upgraded | Cancelled | SocketError | HTTPError
     sent = headers.dup
     sent["Upgrade"] = protocol
-    exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil)
+    exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms)
     return exchange unless exchange.is_a?(Exchange)
     response = exchange.response
     if response.status != 101
       exchange.close
       return HTTPError.new("the server answered #{response.status} #{response.reason} to an upgrade to #{protocol}, not 101 Switching Protocols")
     end
+    # The protocol after it waits as it likes.
+    exchange.conn.unlimited
     Upgraded.new(response, exchange.conn.socket, exchange.conn.leftover)
   end
 
@@ -2025,7 +2040,7 @@ pub struct HTTP
   # the answer's head past any 1xx, and frame its body; the body itself is
   # still to come. *upgrade* is `Upgrade` for `HTTP.upgrade`; otherwise
   # the request says `close`, or `keep-alive` for a client.
-  private def self.exchange(method : String, url : String, headers : Hash(String, String), body : String | IyiIO, jar : CookieStore?, decompress : Bool, upgrade : String?, client : HTTPClient?) : Exchange | Cancelled | SocketError | HTTPError
+  private def self.exchange(method : String, url : String, headers : Hash(String, String), body : String | IyiIO, jar : CookieStore?, decompress : Bool, upgrade : String?, client : HTTPClient?, timeout_ms : Int32) : Exchange | Cancelled | SocketError | HTTPError
     uri = URI.parse?(url)
     return HTTPError.new("not a URL: #{url.inspect}") unless uri
     scheme = uri.scheme
@@ -2074,9 +2089,10 @@ pub struct HTTP
       end
       reused = !conn.nil?
       unless conn
-        socket = IyiSocket.connect(host, port)!
+        socket = IyiSocket.connect(host, port, timeout_ms > 0 ? timeout_ms : -1)!
         client.made if client
         conn = Conn.new(socket)
+        conn.gap = timeout_ms if timeout_ms > 0
       end
       failed = send_request(conn.socket, method, path, host_line, sent, body, connection)
       if failed

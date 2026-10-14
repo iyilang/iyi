@@ -4,6 +4,16 @@
 
 ### Added
 
+- **`std/http`: the client's `timeout_ms`.** `HTTP.request`, `HTTP.open`,
+  `HTTP.upgrade` and `HTTPClient.new` take one: it bounds the connect and
+  each read and write after it - a pause, not the whole exchange, as
+  Python's `timeout` is - and one that runs out is a `SocketError` whose
+  `timed_out?` is true. A server that took the request and never
+  answered held the client for as long as it stayed; 0, the default,
+  still waits as long as the server does, as Go's and Python's clients
+  do. An upgraded connection's protocol waits as it likes. Held by
+  `bench/std_http_exercise.sh`: a server that accepts and never answers
+  is a timeout in 300 ms, through `HTTP` and through an `HTTPClient`.
 - **`std/router`: requests sent to handlers by pattern, Go 1.22's
   `ServeMux`.** `router.handle("GET /users/{id}") { |req, params| ... }`
   registers a handler and `Server.serve(l) { |req| router.call(req) }`

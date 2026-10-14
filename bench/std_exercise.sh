@@ -319,6 +319,13 @@ echo "== the library is iyi all the way down"
 # `execve` by syscall on Linux, `posix_spawn` from libSystem on darwin,
 # `CreateProcessW` from kernel32 on Windows.
 #
+# `system` asks the machine about itself, and `term` sets a terminal's
+# mode: `uname`, `sched_getaffinity` and `ioctl` by syscall on Linux,
+# `gethostname`, `getpagesize`, `sysctlbyname`, `tcgetattr`, `tcsetattr`
+# and `ioctl` from libSystem on darwin, and kernel32's own calls on
+# Windows - there is no other place a host name, a CPU mask or a termios
+# comes from.
+#
 # Every other module is iyi over the prelude's own intrinsics: no `lib`,
 # no `fun`, no inline `asm`, no `@[Link]`. A binding that appears anywhere
 # else is a dependency being taken on without a word.
@@ -346,7 +353,7 @@ for source in "$REPO"/src/std/*.iyi; do
     # `std/path` folds a Windows name's case the way NTFS does, which is
     # the platform's own table (LCMapStringEx); ASCII alone called `C:\Ä`
     # and `c:\ä` two names.
-    socket|time|debug|file|dir|udp|random|signal|process|path)
+    socket|time|debug|file|dir|udp|random|signal|process|path|system|term)
       # Named libraries only: a `lib` block of platform bindings is the
       # exemption, an `@[Link]` to something the platform does not supply is
       # not covered by it.

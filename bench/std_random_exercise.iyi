@@ -87,4 +87,135 @@ five.shuffle_in_place(Random.new(3))
 assert_true five.to_a == [2, 3, 4, 1, 5], "a local shuffled in place"
 puts "  shuffle_in_place, in a field and in a local, seeded as the other library seeds it"
 
+puts "\n== secure"
+# Every byte from the operating system. A source that answered one value,
+# or the same short cycle, is what these catch: 10,000 draws of 32 bits
+# hold a repeat about one run in a hundred, so a handful is the bound,
+# and 10,000 tokens of 128 bits hold none.
+draws = {} of UInt32 => Bool
+10000.times { draws[Random::Secure.next_u] = true }
+assert_true draws.size >= 9990, "10,000 secure draws hold only #{draws.size} distinct values"
+tokens = {} of String => Bool
+10000.times { tokens[Random::Secure.hex] = true }
+assert_true tokens.size == 10000, "10,000 secure 128-bit tokens repeat: #{tokens.size} distinct"
+[0, 1, 3, 4, 5, 16, 1000, 1048576].each do |n|
+  assert_true Random::Secure.random_bytes(n).size == n, "random_bytes(#{n}) answers #{n} bytes"
+end
+filled = Array(UInt8).new(7) { 0_u8 }
+Random::Secure.random_bytes(filled)
+assert_true filled.size == 7, "a buffer filled in place keeps its size"
+assert_true Random::Secure.hex(5).bytesize == 10, "hex(5) is ten digits"
+assert_true Random::Secure.hex.bytesize == 32, "hex is sixteen bytes unless asked"
+assert_true Random::Secure.base64(5).bytesize == 8 && Random::Secure.base64(5).ends_with?("="), "base64(5) is eight characters, padded"
+assert_true Random::Secure.urlsafe_base64(5).bytesize == 7, "urlsafe_base64(5) is seven characters, unpadded"
+assert_true Random::Secure.urlsafe_base64(5, padding: true).bytesize == 8, "urlsafe_base64(5, padding: true) is padded to eight"
+assert_true Random::Secure.urlsafe_base64.bytesize == 22, "urlsafe_base64 is sixteen bytes unless asked"
+# 2^20 bytes, about 4,096 of each value: a source stuck on a value, or
+# reaching only some, leaves a bucket far outside 4,096 +/- 7 deviations.
+counts = Array(Int32).new(256) { 0 }
+Random::Secure.random_bytes(1048576).each { |b| counts[b.to_i32] = counts[b.to_i32] + 1 }
+low_count = counts.min
+high_count = counts.max
+assert_true low_count > 3640 && high_count < 4550, "secure bytes spread evenly: the rarest value came #{low_count} times, the commonest #{high_count}"
+# No modulo bias. Below 3 * 2^30, a draw taken mod the bound without
+# throwing any away lands under 2^30 half the time; an even one, a third
+# of it. 30,000 draws put a third at 0.333 +/- 0.003.
+under = 0
+30000.times { under = under + 1 if Random::Secure.rand(3221225472_u32) < 1073741824_u32 }
+assert_true under > 9300 && under < 10700, "rand(3 * 2^30) is unbiased: #{under} of 30,000 draws under 2^30, a third expected"
+under = 0
+30000.times { under = under + 1 if Random::Secure.rand(13835058055282163712_u64) < 4611686018427387904_u64 }
+assert_true under > 9300 && under < 10700, "rand(3 * 2^62) is unbiased: #{under} of 30,000 draws under 2^62, a third expected"
+secure = Random::Secure.new
+die = secure.rand(1..6)
+assert_true die >= 1 && die <= 6, "a Random::Secure instance draws as a Random"
+assert_true [1, 2, 3, 4, 5].shuffle(secure).sorted == [1, 2, 3, 4, 5], "and shuffles as one"
+puts "  secure draws are distinct, exact in length, even across byte values and unbiased"
+
+puts "\n== bounds"
+
+# Every value of a small range comes out and nothing outside it does,
+# both ends included or the last left out; a range of one value answers
+# it; the whole of Int32 and Int64 draws without overflowing.
+# Counted from the low end and stopped at the high one, since a step past
+# the top of Int64 would overflow.
+def covers(seen : Hash(Int64, Bool), low : Int64, high : Int64) : Bool
+  v = low
+  while true
+    return false unless seen.has_key?(v)
+    return seen.size.to_i64 == high - low + 1_i64 if v == high
+    v = v + 1_i64
+  end
+  false
+end
+
+gen = Random::Secure.new
+seen = {} of Int64 => Bool
+2000.times { seen[gen.rand(-3..3).to_i64] = true }
+assert_true covers(seen, -3_i64, 3_i64), "rand(-3..3) draws each of -3..3 and nothing else: #{seen.keys.sorted}"
+seen = {} of Int64 => Bool
+2000.times { seen[gen.rand(-3...3).to_i64] = true }
+assert_true covers(seen, -3_i64, 2_i64), "rand(-3...3) leaves 3 out: #{seen.keys.sorted}"
+seen = {} of Int64 => Bool
+2000.times { seen[gen.rand(2147483646..2147483647).to_i64] = true }
+assert_true covers(seen, 2147483646_i64, 2147483647_i64), "rand at the top of Int32 reaches both ends: #{seen.keys.sorted}"
+seen = {} of Int64 => Bool
+2000.times { seen[gen.rand(-2147483648..-2147483647).to_i64] = true }
+assert_true covers(seen, -2147483648_i64, -2147483647_i64), "rand at the bottom of Int32 reaches both ends: #{seen.keys.sorted}"
+seen = {} of Int64 => Bool
+2000.times { seen[gen.rand(9223372036854775805_i64..9223372036854775807_i64)] = true }
+assert_true covers(seen, 9223372036854775805_i64, 9223372036854775807_i64), "rand at the top of Int64 reaches every value: #{seen.keys.sorted}"
+seen = {} of Int64 => Bool
+2000.times { seen[gen.rand(-9223372036854775808_i64...-9223372036854775806_i64)] = true }
+assert_true covers(seen, -9223372036854775808_i64, -9223372036854775807_i64), "rand at the bottom of Int64 leaves its end out: #{seen.keys.sorted}"
+assert_true gen.rand(5..5) == 5 && gen.rand(5...6) == 5, "a range of one Int32 answers it"
+assert_true gen.rand(7_i64..7_i64) == 7_i64, "a range of one Int64 answers it"
+assert_true gen.rand(1.5..1.5) == 1.5, "a range of one Float64 answers it"
+negatives = 0
+1000.times { negatives = negatives + 1 if gen.rand(-2147483648..2147483647) < 0 }
+assert_true negatives > 400 && negatives < 600, "the whole of Int32 is drawn from: #{negatives} of 1,000 negative"
+negatives = 0
+1000.times { negatives = negatives + 1 if gen.rand(-9223372036854775808_i64..9223372036854775807_i64) < 0_i64 }
+assert_true negatives > 400 && negatives < 600, "the whole of Int64 is drawn from: #{negatives} of 1,000 negative"
+1000.times do
+  x = gen.rand(0.5)
+  assert_true x >= 0.0 && x < 0.5, "rand(0.5) is in [0, 0.5): #{x}"
+  y = gen.rand(-1.0...1.0)
+  assert_true y >= -1.0 && y < 1.0, "rand(-1.0...1.0) is in [-1, 1): #{y}"
+  z = gen.rand(2.0..3.0)
+  assert_true z >= 2.0 && z <= 3.0, "rand(2.0..3.0) is in [2, 3]: #{z}"
+  w = gen.rand(10_000_000_000_i64)
+  assert_true w >= 0_i64 && w < 10_000_000_000_i64, "rand(10^10) is in 0...10^10: #{w}"
+  u = gen.rand(1_u64)
+  assert_true u == 0_u64, "rand(1) is 0"
+end
+assert_true Random.rand(10) < 10 && Random.rand(-2..2) <= 2 && Random.rand < 1.000001, "class-level draws are in their bounds"
+assert_true Random.hex(4).bytesize == 8 && Random.random_bytes(3).size == 3, "class-level bytes have their lengths"
+puts "  every range is drawn from end to end and never past it"
+
+puts "\n== seeded draws"
+# Every value below is what the other library's `Random.new(42)` answers
+# for these calls in this order, from a transcription of its
+# `rand_int`/`rand_range`/`random_bytes` checked against the values above.
+s = Random.new(42)
+assert_true s.rand(1_000_000_000_000_i64) == 107436103504_i64, "rand(10^12), two draws"
+assert_true s.rand(10_i64) == 9_i64, "rand(10) as an Int64, one draw"
+assert_true s.rand(18446744073709551615_u64) == 3880768681294632521_u64, "rand(2^64 - 1)"
+assert_true s.rand(13835058055282163712_u64) == 11692330343565999570_u64, "rand(3 * 2^62)"
+assert_true s.rand(3221225472_u32) == 272411090_u32, "rand(3 * 2^30)"
+assert_true s.rand(-5..5) == 2, "rand(-5..5)"
+assert_true s.rand(-5...5) == -3, "rand(-5...5)"
+assert_true s.rand(-2147483648..2147483647) == 809514014, "the whole of Int32"
+assert_true s.rand(-1_000_000_000_000_i64..1_000_000_000_000_i64) == 27367588185_i64, "an Int64 range"
+assert_true s.rand(-9223372036854775808_i64..9223372036854775807_i64) == 2660358092746142558_i64, "the whole of Int64"
+assert_true s.rand(2.5) == 0.3671523012328243, "rand(2.5)"
+assert_true s.rand(1.0...2.0) == 1.778590988449749, "rand(1.0...2.0)"
+assert_true s.rand(1.0..2.0) == 1.9004080927732632, "rand(1.0..2.0)"
+assert_true s.random_bytes(6) == [193_u8, 86_u8, 195_u8, 71_u8, 86_u8, 48_u8], "random_bytes(6), four bytes a draw, low first"
+assert_str "777cd3", s.hex(3), "hex(3)"
+assert_str "tK75H3c=", s.base64(5), "base64(5)"
+assert_str "k_Cb82s", s.urlsafe_base64(5), "urlsafe_base64(5)"
+assert_str "h6fnSEg=", s.urlsafe_base64(5, padding: true), "urlsafe_base64(5, padding: true)"
+puts "  a seeded generator draws Int64, UInt64, ranges, floats and bytes as the other library does"
+
 puts "\nALL CHECKS PASSED"

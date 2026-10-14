@@ -41,6 +41,20 @@
   refusals, plain and `--release`, and eight broken copies of the module
   each caught. There is still no `Time::Location`: an offset is seconds
   east of UTC.
+- **`Random::Secure` answers every byte from the operating system's
+  entropy.** `std/random` only had a PCG generator. `Random::Secure` reads
+  `getrandom` by syscall on Linux (short reads and EINTR asked again,
+  `/dev/urandom` on a kernel without it), `arc4random_buf` on darwin,
+  `RtlGenRandom` on Windows and WASI's `random_get` on wasm32, and
+  buffers nothing a `fork` could copy. It is a `Random`, so `rand`, `hex`,
+  `base64`, `urlsafe_base64` and `random_bytes` work on it and at class
+  level (`Random::Secure.hex`). `Random` itself draws `Int64`, `UInt64`
+  and `UInt32` bounds, `Int32`/`Int64`/`Float64` ranges and `Float64`
+  bounds without modulo bias, and a seeded generator answers the other
+  library's numbers. `bench/std_random_exercise.sh` holds 10,000 distinct
+  draws, exact lengths and even byte counts, measures bias at 3·2^30 and
+  3·2^62, and proves a silent source, a dropped rejection and a dropped
+  inclusive end are each caught.
 - **`File.open` takes every mode the other library does - `r`, `w`, `a`,
   `r+`, `w+`, `a+`, each with an optional `b` - and a `perm` for the file
   it creates.** It accepted only `"r"` and `"w"`, so a program could not

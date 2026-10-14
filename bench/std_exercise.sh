@@ -303,10 +303,13 @@ echo "== the library is iyi all the way down"
 # syscalls on Linux, libSystem on darwin, and the floor names every symbol
 # they add there.
 #
-# `random` joined them for Windows alone: `/dev/urandom` is a file on the
+# `random` joined them for Windows first: `/dev/urandom` is a file on the
 # POSIX targets and there is no such path there, so its win32 arm asks the
 # OS for the bytes. Before that arm, `Random.new` panicked on Windows and
-# took `std/uuid`, `Array#sample` and `#shuffle` with it.
+# took `std/uuid`, `Array#sample` and `#shuffle` with it. `Random::Secure`
+# then made it a platform module everywhere: `getrandom` by syscall on
+# Linux, `arc4random_buf` from libSystem on darwin, WASI's `random_get` on
+# wasm32.
 #
 # `signal` installs a handler, which is the platform's act and nobody
 # else's: `rt_sigaction` on Linux, `sigaction` and `pipe` from libSystem on
@@ -328,7 +331,7 @@ echo "== the library is iyi all the way down"
 PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2_32'
 # The `@[Link]`s an exempt module may carry: the DLLs Windows itself ships,
 # named in SPEC.md III.10's inventory. `std/random` is here for `advapi32` —
-# the OS entropy `Random.new` seeds from is `RtlGenRandom`, and Windows has
+# the OS entropy `Random::Secure` reads is `RtlGenRandom`, and Windows has
 # no kernel32 name for it — and `std/socket` and `std/udp` for `ws2_32`,
 # because Winsock is the whole of Windows' network interface and a socket
 # call has nowhere else to come from. Everything else in this list reaches

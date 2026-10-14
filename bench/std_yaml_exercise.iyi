@@ -5,7 +5,8 @@
 
 module bench/std_yaml_exercise
 
-import std/yaml::{YAML, Any, Parser}
+import std/yaml::{YAML, Any, Parser, yaml_serializable}
+import std/json::{JSON, serializable}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
@@ -23,6 +24,79 @@ def refused(source : String, sentence : String) : Nil
   assert_str(sentence, err, "refusal of #{source.inspect}")
   raise "ASSERTION FAILED: parse? answered a value for #{source.inspect}" unless YAML.parse?(source).nil?
   puts "  #{err}"
+end
+
+# The sentence `action` panicked with, or what it answered when it did not.
+def panic_of(action : Proc(String)) : String
+  said = "unread"
+  group do |g|
+    task = g.spawn { action.call }
+    answer = task.value
+    said = answer.is_a?(Panicked) ? answer.message : answer
+  end
+  said
+end
+
+# Derived types for the `derive yaml_serializable` section. `Inner` and
+# `Record` derive std/json's `serializable` as well, which is how a type
+# that is both spells it, and what lets the corpus below hand Python the
+# same value as JSON.
+struct Inner
+  getter x : Int32
+  getter label : String?
+
+  def initialize(@x : Int32, @label : String?)
+  end
+
+  derive serializable, yaml_serializable
+end
+
+struct Record
+  getter name : String
+  getter tags : Array(String)
+  getter weights : Hash(String, Float64)
+  getter count : Int64
+  getter small : UInt8
+  getter big : UInt64
+  getter ratio : Float64
+  getter flag : Bool
+  getter note : String?
+  getter inner : Inner
+  getter inners : Array(Inner)
+  getter maybe : Inner?
+
+  def initialize(@name : String, @tags : Array(String), @weights : Hash(String, Float64), @count : Int64, @small : UInt8, @big : UInt64, @ratio : Float64, @flag : Bool, @note : String?, @inner : Inner, @inners : Array(Inner), @maybe : Inner?)
+  end
+
+  derive serializable, yaml_serializable
+end
+
+struct Spot
+  getter x : Float64
+  getter name : String
+  getter note : String?
+
+  derive yaml_serializable
+end
+
+# Fields with defaults, as the json exercise's `Listener` has them.
+struct Listener
+  @port : Int32 = 8080
+  @host : String? = "localhost"
+  getter port
+  getter host
+  getter name : String
+
+  derive yaml_serializable
+end
+
+struct Kinds
+  getter any : Any
+  getter by_number : Hash(Int32, String)
+  getter maybes : Array(Int32?)
+  getter empty : Array(String)
+
+  derive yaml_serializable
 end
 
 # The document `source` reads to, or a failed assertion naming `msg` (not
@@ -330,5 +404,74 @@ assert_true in_task, "the deepest document is parsed, compared, printed, hashed 
 puts "  duplicate keys, quotes, tabs, flow, aliases, escapes, explicit keys, cycles,"
 puts "  control characters, stray entries, directives, tags, surrogates, alias expansion"
 puts "  entries after a key, text after a comment, '#', '?' and '-' starting a flow node"
+
+puts "\n== derive yaml_serializable"
+# Strings a reader could take for something else, as values and as keys:
+# 1.2 scalars of other kinds, 1.1 booleans, numbers and dates, indicators,
+# markers, blanks at either end, controls, a byte order mark, a 1.1 line
+# break, and plain text.
+tricky = ["yes", "No", "on", "OFF", "y", "n", "=", "1_000", "0b101", "22:30", "2001-12-14", "1:30.5", "+12", "-.5", "0777", "0x1F",
+          "1e3", "1st", "<<", "~", "null", "true", "- a", "? a", "?x", "a: b", "a #b", "#c", "[x]", "{y}", "&a", "*a", "!t", "|", "> f",
+          "%p", "@q", "`r", "'s'", "\"t\"", "", " lead", "trail ", "multi\nline", "tab\there", "\u0080c1", "\uFEFFbom", "\u2028ls",
+          "café ☃", "---", "...", "-", ":", "a:b", "x,y", ".inf", ".5", "plain words"]
+weights = Hash(String, Float64).new
+tricky.each_with_index { |text, index| weights[text] = index * 0.5 }
+no_weights = Hash(String, Float64).new
+records = [
+  Record.new("full", tricky, weights, -9223372036854775807_i64 - 1, 255_u8, 9223372036854775807_u64, 0.1 + 0.2, true, "seen",
+    Inner.new(1, "one"), [Inner.new(2, nil), Inner.new(-3, "yes")], Inner.new(4, "")),
+  Record.new("on", [] of String, no_weights, 9223372036854775807_i64, 0_u8, 0_u64, 1.0e20, false, nil,
+    Inner.new(0, nil), [] of Inner, nil),
+  Record.new("22:30", ["1.0e-05"], {"-0" => -0.0, "1e300" => 1.0e300}, 0_i64, 7_u8, 1_u64, 1.0e-5, true, "\n",
+    Inner.new(2147483647, "\u2029"), [Inner.new(-2147483648, "~")], Inner.new(5, "<<")),
+]
+# The corpus first, before any check here can stop the program: the gate
+# hands each line to Python, whose `yaml` must read the YAML to what its
+# `json` reads the JSON to. The YAML text travels as a JSON string.
+records.each do |record|
+  puts "CORPUS #{record.to_json}\t#{JSON.to_json(record.to_yaml)}"
+end
+records.each do |record|
+  assert_str(record.to_json, Record.from_yaml(record.to_yaml).to_json, "a nested derived type reads back from its YAML: #{record.name}")
+  assert_str(record.to_yaml, Record.from_json(record.to_json).to_yaml, "a type deriving both writes the same YAML after a JSON round trip: #{record.name}")
+end
+puts "  three records of every field kind, nested, read back equal through YAML and through JSON"
+
+assert_str("x: 1.0\nname: a\nnote: null\n", panic_of(-> { Spot.from_yaml("x: 1\nname: a\n").to_yaml }), "a missing key for a nilable field without a default holds nil")
+spot = Spot.from_yaml("x: 1\nextra: [1, {deep: null}]\nname: a\n")
+assert_true(spot.x == 1.0 && spot.name == "a" && spot.note.nil?, "a derived type read, an unknown key passed over, a missing nilable key nil")
+assert_str("x: 1.0\nname: a\nnote: null\n", spot.to_yaml, "a derived type written, a nil field as null")
+assert_str("x: 1.5\nname: \"yes\"\nnote: \"22:30\"\n", Spot.from_yaml("x: 1.5\nname: \"yes\"\nnote: \"22:30\"\n").to_yaml, "\"yes\" and \"22:30\" are quoted when written")
+assert_str("x: 0.5\nname: \"1st\"\nnote: \"=\"\n", Spot.from_yaml("{x: .5, name: '1st', note: '='}").to_yaml, "a digit-led string and '=' are quoted when written")
+merged_spot = Spot.from_yaml("base: &b {x: 2, name: m}\n<<: *b\nname: n\n")
+assert_true(merged_spot.x == 2.0 && merged_spot.name == "n", "a merged mapping fills a derived type's fields, its own key winning")
+assert_true(Spot.from_yaml("x: 1\nname: a\nnote:\n").note.nil?, "an empty value for a nilable field is nil")
+spots = YAML.from_yaml("- {x: 1, name: p}\n- {x: 2, name: q, note: r}\n", Array(Spot))
+assert_true(spots.size == 2 && spots[1].note == "r", "YAML.from_yaml into an array of a derived type")
+assert_str("- x: 1.0\n  name: p\n  note: null\n- x: 2.0\n  name: q\n  note: r\n", YAML.to_yaml(spots), "YAML.to_yaml of an array of a derived type")
+puts "  unknown keys passed over, nil fields, merges, quoting of what would read as something else"
+
+assert_str("port: 1\nhost: localhost\nname: x\n", Listener.from_yaml("name: x\nport: 1\n").to_yaml, "a nilable field keeps its default for a missing key")
+assert_str("port: 8080\nhost: localhost\nname: x\n", Listener.from_yaml("name: x\n").to_yaml, "a field keeps its default for a missing key")
+assert_str("port: 2\nhost: null\nname: x\n", Listener.from_yaml("host: null\nname: x\nport: 2\n").to_yaml, "a key that is there wins over the default, null included")
+assert_str("port: 8080\nhost: localhost\nname: x\n", panic_of(-> { Listener.from_yaml("port: ~\nname: x\n").to_yaml }), "a null for a field with a default its type does not admit keeps the default")
+puts "  defaults kept for a missing key and for a null their type does not admit"
+
+kinds = Kinds.from_yaml("any: {a: [1, x]}\nby_number: {1: one, -2: two}\nmaybes: [1, null, ~, 3]\nempty: []\n")
+assert_str("any:\n  a:\n    - 1\n    - x\nby_number:\n  1: one\n  -2: two\nmaybes:\n  - 1\n  - null\n  - null\n  - 3\nempty: []\n", kinds.to_yaml, "Any, integer keys, nil entries and an empty array written")
+assert_str(kinds.to_yaml, Kinds.from_yaml(kinds.to_yaml).to_yaml, "Any, integer keys and nil entries read back")
+numbered = YAML.from_yaml(YAML.to_yaml({3 => [1.5, nil], 4 => [] of Float64?}), Hash(Int32, Array(Float64?)))
+assert_true(numbered[3][0] == 1.5 && numbered[3][1].nil? && numbered[4].empty?, "YAML.to_yaml and from_yaml of a Hash(Int32, Array(Float64?))")
+puts "  Any, Hash(Int32, String), Array(Int32?) and empty collections read and written"
+
+assert_str("YAML for Spot has no key \"name\"", panic_of(-> { Spot.from_yaml("x: 1\n").to_yaml }), "a missing field refused by name")
+assert_str("expected a mapping for Spot, not a sequence", panic_of(-> { Spot.from_yaml("- x: 1\n").to_yaml }), "a sequence refused where a derived type is read")
+assert_str("expected a float, not null", panic_of(-> { Spot.from_yaml("x:\nname: a\n").to_yaml }), "a null for a field without a default refused as not its type")
+assert_str("expected a string, not an integer", panic_of(-> { Spot.from_yaml("x: 1\nname: 5\n").to_yaml }), "an integer refused for a String field")
+assert_str("integer 3000000000 out of Int32 range", panic_of(-> { Inner.from_yaml("x: 3000000000\n").to_yaml }), "an integer past Int32 refused")
+assert_str("expected an integer, not a string", panic_of(-> { YAML.from_yaml("{x: 1}", Hash(Int32, Int32)).size.to_s }), "a string key refused for Hash(Int32, V)")
+assert_str("the UInt64 9223372036854775808 is past 9223372036854775807, the largest integer YAML reads back", panic_of(-> { YAML.to_yaml(9223372036854775808_u64) }), "a UInt64 past Int64 refused when written")
+assert_str("duplicate key \"x\" at line 2, column 1", panic_of(-> { Spot.from_yaml("x: 1\nx: 2\nname: a\n").to_yaml }), "a document the parser refuses is refused with its sentence")
+puts "  a missing key, a sequence, a null, a wrong kind, Int32 and UInt64 ranges and a bad document refused"
 
 puts "\nALL CHECKS PASSED"

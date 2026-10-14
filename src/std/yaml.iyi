@@ -60,8 +60,15 @@
 # reads to an equal value: numbers, booleans and nil stay what they are as
 # values and as keys, a string that would read as something else is
 # quoted, and a character a reader would not take raw (a control, a byte
-# order mark, a 1.1 line break) is escaped. A collection cannot be written
-# as a key.
+# order mark, a 1.1 line break) is escaped. "Something else" includes what
+# a YAML 1.1 reader makes of it, since PyYAML is what reads most of these
+# files on the other end: `yes`, `off`, `=` and anything starting with a
+# digit are quoted too. A collection cannot be written as a key.
+#
+# `derive yaml_serializable` makes a type read and write itself as a
+# mapping, a key per field, as std/json's `derive serializable` does for
+# JSON; `YAML.to_yaml`, `YAML.from_yaml`, `YAML.to_any` and
+# `YAML.read_value` are what it writes with.
 #
 # `Any` holds a document: `raw` is the union, `as_x`/`as_x?` are the
 # pairs, `[]`/`[]?`/`dig`/`dig?` walk it, `==` is structural and `hash`
@@ -2364,7 +2371,29 @@ class Emitter
       return false if b == 35_u8 && i > 0 && blank_byte?(bytes[i - 1])
       i = i + 1
     end
+    return false if other_in_1_1?(text, bytes, size)
     Scalar.resolve(text).kind == Any::KIND_STRING
+  end
+
+  # Whether a YAML 1.1 reader takes the text for something other than a
+  # string. PyYAML 6.0.3, the reader most programs on the other end use,
+  # reads `yes`, `No`, `on` and `OFF` as booleans, `1_000`, `0b101`,
+  # `0777` (as 511) and `22:30` (as 1350) as integers, `1:30.5` as a
+  # float, `2001-12-14` as a date, and refuses `=` (its "value" tag has no
+  # constructor); written plain, each was a string here and something
+  # else there. A string whose first character after an optional sign is
+  # a digit is quoted whatever follows: every 1.1 number and timestamp
+  # starts so, and `1st` quoted reads back as the same string anywhere,
+  # where telling it from `1_000` would be a second number reader. `y` and
+  # `n` are booleans in the 1.1 type repository though PyYAML reads them
+  # as strings, so they are quoted too.
+  private def other_in_1_1?(text : String, bytes : Pointer(UInt8), size : Int32) : Bool
+    case text
+    when "y", "Y", "n", "N", "yes", "Yes", "YES", "no", "No", "NO", "on", "On", "ON", "off", "Off", "OFF", "="
+      return true
+    end
+    i = bytes[0] == 43_u8 || bytes[0] == 45_u8 ? 1 : 0
+    i < size && bytes[i] >= 48_u8 && bytes[i] <= 57_u8
   end
 
   private def indicator?(b : UInt8) : Bool
@@ -2445,6 +2474,94 @@ class Emitter
   end
 end
 
+# A type that can write itself as an `Any`. `YAML.to_yaml` and
+# `YAML.to_any` accept any value whose type implements it, as a `derive
+# yaml_serializable` type does.
+pub trait ToYAML
+  abstract def to_yaml_any : Any
+end
+
+# `derive yaml_serializable`, in a struct or class whose fields are written
+# with their types: the type reads and writes itself as a YAML mapping, a
+# key per field, named as the field is, in the order the fields are
+# written.
+#
+#     pub struct Coord
+#       getter x : Float64
+#       getter name : String
+#       derive yaml_serializable
+#     end
+#
+#     Coord.from_yaml("x: 1.5\nname: a\n").x   # => 1.5
+#     coord.to_yaml                            # => "x: 1.5\nname: a\n"
+#
+# It is std/json's `derive serializable` over YAML, field for field: a
+# value is read and written as `YAML.read_value` and `YAML.to_any` read and
+# write its type (the built-in scalars, an `Array` or `Hash` of them, an
+# `Any`, another serializable type, each of them or nil), and `to_yaml`
+# writes through `YAML.dump`, so a string that would read as something
+# else is quoted. A key the type has no field for is passed over; a field
+# with no key keeps its default when it is written with one, as does a
+# field with a default whose key holds null where its type does not admit
+# nil; a field with neither is refused by name unless its type admits nil,
+# which it then holds. Anchors, aliases and `<<` merges are the parser's,
+# so a mapping merged into another fills its fields.
+#
+# The macro is named for its format because a derive names a macro bare:
+# with std/json's `serializable` imported as well, a second `serializable`
+# was refused as "'serializable' is ambiguous here", and `derive` takes no
+# qualified name. A type that is both writes `derive serializable,
+# yaml_serializable`; what the two generate shares no method (`to_json`,
+# `from_json` and `initialize(pull)` against `to_yaml`, `from_yaml`,
+# `to_yaml_any` and `initialize(yaml)`).
+pub macro yaml_serializable(declaration)
+  impl ::Std::Yaml::ToYAML for {{ declaration[:name].id }}
+    def to_yaml_any : ::Std::Yaml::Any
+      yaml_pairs = Hash(::Std::Yaml::Any, ::Std::Yaml::Any).new
+      {% for field in declaration[:fields] %}
+        yaml_pairs[::Std::Yaml::Any.new({{ field[:name][1..] }})] = ::Std::Yaml::YAML.to_any({{ field[:name].id }})
+      {% end %}
+      ::Std::Yaml::Any.new(yaml_pairs)
+    end
+  end
+
+  def to_yaml : String
+    ::Std::Yaml::YAML.dump(to_yaml_any)
+  end
+
+  def self.from_yaml(text : String) : self
+    ::Std::Yaml::YAML.from_yaml(text, self)
+  end
+
+  def initialize(yaml : ::Std::Yaml::Any)
+    yaml_pairs = yaml.as_h? || raise "expected a mapping for #{ {{ declaration[:name] }} }, not #{yaml.kind_name}"
+    # A key that is not there is nil from `[]?`; a key holding null is an
+    # `Any` that is `null?`. Each field's type is asked of the field
+    # (`typeof`), as std/json's derive asks it, and whether it has a
+    # default is asked of the type when this method is compiled, since the
+    # declaration carries names and types only.
+    {% for field in declaration[:fields] %}
+      yaml_found_{{ field[:name][1..].id }} = yaml_pairs[::Std::Yaml::Any.new({{ field[:name][1..] }})]?
+      \{% if @type.instance_vars.any? { |ivar| ivar.name.stringify == {{ field[:name][1..] }} && ivar.has_default_value? } %}
+        {% if field[:type].nilable? %}
+          unless yaml_found_{{ field[:name][1..].id }}.nil?
+            {{ field[:name].id }} = yaml_found_{{ field[:name][1..].id }}.null? ? nil : ::Std::Yaml::YAML.read_value(yaml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }} || raise("")))
+          end
+        {% else %}
+          if !yaml_found_{{ field[:name][1..].id }}.nil? && !yaml_found_{{ field[:name][1..].id }}.null?
+            {{ field[:name].id }} = ::Std::Yaml::YAML.read_value(yaml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }}))
+          end
+        {% end %}
+      \{% elsif {{ field[:type].nilable? }} %}
+        {{ field[:name].id }} = yaml_found_{{ field[:name][1..].id }}.nil? || yaml_found_{{ field[:name][1..].id }}.null? ? nil : ::Std::Yaml::YAML.read_value(yaml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }} || raise("")))
+      \{% else %}
+        raise "YAML for #{ {{ declaration[:name] }} } has no key #{ {{ field[:name][1..] }}.inspect }" if yaml_found_{{ field[:name][1..].id }}.nil?
+        {{ field[:name].id }} = ::Std::Yaml::YAML.read_value(yaml_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }}))
+      \{% end %}
+    {% end %}
+  end
+end
+
 pub struct YAML
   # The first document of `text`, or nil when the stream is not YAML this
   # module reads (the whole stream is checked, not just the first
@@ -2480,5 +2597,153 @@ pub struct YAML
   # Block YAML for `value`, ending in a line break.
   def self.dump(value : Any) : String
     Emitter.new.dump(value)
+  end
+
+  # Block YAML for any value `to_any` knows, written as `dump` writes it.
+  def self.to_yaml(obj : T) : String forall T
+    dump(to_any(obj))
+  end
+
+  # The document `text` holds, read into `type`: `Nil`, `Bool`, `Int32`,
+  # `Int64`, `UInt8`, `UInt64`, `Float64`, `String`, `Any`, a type with
+  # `derive yaml_serializable`, one of those or `nil`, or an `Array` or a
+  # `Hash` of those. Text that is not YAML panics as `parse` does; a value
+  # of another kind, or an integer outside the type, is refused.
+  def self.from_yaml(text : String, type : T.class) : T forall T
+    read_value(parse(text), type)
+  end
+
+  # The `Any` a value is written as: the value or `nil`, the way
+  # `JSON.to_json` takes it. A nil is taken out here, before the rest
+  # dispatches, for the reason std/json's `write_or_null` gives: handed to
+  # `write_value` whole, `Int32 | Nil` matches the `ToYAML` overload as
+  # one type and does not build.
+  def self.to_any(val : T) : Any forall T
+    if val.nil?
+      Any.new(nil)
+    else
+      write_value(val)
+    end
+  end
+
+  def self.write_value(val : Nil) : Any
+    Any.new(nil)
+  end
+
+  def self.write_value(val : Bool) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : Int32) : Any
+    Any.new(val.to_i64)
+  end
+
+  def self.write_value(val : Int64) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : UInt8) : Any
+    Any.new(val.to_i64)
+  end
+
+  # A YAML integer is read as an `Int64`, and one past it as a float, so a
+  # `UInt64` above 9223372036854775807 would read back as a different
+  # number: it is refused rather than written.
+  def self.write_value(val : UInt64) : Any
+    raise "the UInt64 #{val} is past 9223372036854775807, the largest integer YAML reads back" if val > 9223372036854775807_u64
+    Any.new(val.to_i64)
+  end
+
+  def self.write_value(val : Float64) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : String) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : Any) : Any
+    val
+  end
+
+  def self.write_value(val : Array(T)) : Any forall T
+    Any.new(val.map { |item| to_any(item) })
+  end
+
+  # A key of any type `to_any` writes as a scalar: YAML keys are typed,
+  # so `Hash(Int32, String)` is written with integer keys and reads back
+  # as itself. A collection key is refused by `dump`.
+  def self.write_value(val : Hash(K, V)) : Any forall K, V
+    pairs = Hash(Any, Any).new
+    val.each { |key, item| pairs[to_any(key)] = to_any(item) }
+    Any.new(pairs)
+  end
+
+  def self.write_value(val : T) : Any forall T : ToYAML
+    val.to_yaml_any
+  end
+
+  def self.read_value(value : Any, type : Nil.class) : Nil
+    value.as_nil
+  end
+
+  def self.read_value(value : Any, type : Bool.class) : Bool
+    value.as_bool
+  end
+
+  def self.read_value(value : Any, type : Int32.class) : Int32
+    v = value.as_i
+    raise "integer #{v} out of Int32 range" if v < -2147483648_i64 || v > 2147483647_i64
+    v.to_i32
+  end
+
+  def self.read_value(value : Any, type : Int64.class) : Int64
+    value.as_i
+  end
+
+  def self.read_value(value : Any, type : UInt8.class) : UInt8
+    v = value.as_i
+    raise "integer #{v} out of UInt8 range" if v < 0_i64 || v > 255_i64
+    v.to_u8
+  end
+
+  def self.read_value(value : Any, type : UInt64.class) : UInt64
+    v = value.as_i
+    raise "integer #{v} out of UInt64 range" if v < 0_i64
+    v.to_u64
+  end
+
+  # A float, or an integer widened to one: `y: 2` is the Float64 2.0.
+  def self.read_value(value : Any, type : Float64.class) : Float64
+    value.as_f
+  end
+
+  def self.read_value(value : Any, type : String.class) : String
+    value.as_s
+  end
+
+  def self.read_value(value : Any, type : Any.class) : Any
+    value
+  end
+
+  def self.read_value(value : Any, type : Array(T).class) : Array(T) forall T
+    value.as_a.map { |item| read_value(item, T) }
+  end
+
+  def self.read_value(value : Any, type : Hash(K, V).class) : Hash(K, V) forall K, V
+    h = Hash(K, V).new
+    value.as_h.each { |key, item| h[read_value(key, K)] = read_value(item, V) }
+    h
+  end
+
+  # A type that reads itself, the `initialize(yaml)` a `derive
+  # yaml_serializable` wrote; a type that admits nil reads null as the nil
+  # and anything else as the other type, as std/json's `read_value` does.
+  def self.read_value(value : Any, type : T.class) : T forall T
+    {% if T.nilable? %}
+      value.null? ? nil : read_value(value, typeof(nil.as(T) || raise("")))
+    {% else %}
+      T.new(value)
+    {% end %}
   end
 end

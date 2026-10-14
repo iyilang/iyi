@@ -4,6 +4,35 @@
 
 ### Added
 
+- **`std/yaml`: `derive yaml_serializable`, std/json's derive over YAML.**
+  A struct or class that derives it gets `to_yaml : String`,
+  `self.from_yaml(text) : self` and `initialize(yaml : Any)`, and
+  implements the new `ToYAML` trait: a mapping, a key per field in the
+  order the fields are written, each value read and written as
+  `YAML.read_value` and `YAML.to_any` take its type (Bool, Int32, Int64,
+  UInt8, UInt64, Float64, String, `Any`, an `Array` or a `Hash` of them,
+  keys typed as YAML's are, another derived type, each of them or nil).
+  Unknown keys are passed over, a field with a default keeps it for a
+  missing key or a null its type does not admit, a nilable field holds
+  nil, and merges and aliases fill fields as the parser builds them. It is
+  named for its format because a derive takes a bare name and a second
+  `serializable` was refused as ambiguous: a type that is both writes
+  `derive serializable, yaml_serializable`. `YAML.to_yaml(value)` and
+  `YAML.from_yaml(text, Type)` are the module-level pair. Refused, each
+  with its sentence: a missing key with neither default nor nil (`YAML for
+  Spot has no key "name"`), a document that is not a mapping, a value of
+  another kind, an integer past Int32/UInt8, and a UInt64 past Int64 on
+  the way out, which this reader would bring back as a float. `YAML.dump`
+  now also quotes what a YAML 1.1 reader takes for another kind: PyYAML
+  6.0.3 read the plain `yes` as True, `22:30` as 1350, `0777` as 511 and
+  refused `=`, so the 1.1 booleans, `=` and any string starting with a
+  digit are quoted. Held by `bench/std_yaml_exercise.sh`: records of every
+  field kind, nested, read back equal through YAML and through JSON;
+  Python's `yaml` (SafeLoader and libyaml's CSafeLoader) reads each
+  `to_yaml` to what its `json` reads the same value's `to_json` to; four
+  refusal programs by their exact panic; and eight broken copies of the
+  module caught at the check that names each, the 1.1 one also failing the
+  Python comparison.
 - **`std/file_utils`: `FileUtils.cp`, `cp_r`, `rm_r`, `rm_rf`, `mv` and
   `compare_file`, the tree operations, in a module of their own.** `cp`
   copies a file's bytes and its permission bits, into a directory under

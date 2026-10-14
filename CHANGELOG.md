@@ -4,6 +4,21 @@
 
 ### Added
 
+- **`std/compress`: `Inflater` and `Deflater`, a stream a piece at a
+  time.** `Inflater.new(Envelope::Gzip) { next_bytes }` reads compressed
+  bytes from its block only when it has none left, and `read(max)`
+  answers what has been decoded so far - a 32 KiB window and what waits
+  to be read, whatever the stream's size; a corrupt stream, a bad
+  checksum or one that ends early is a `CompressError` value, after which
+  every read answers the same. `Deflater#compress(piece)` answers whole
+  blocks ending in zlib's sync flush, so what has been written decodes
+  without waiting for more, and `finish` writes the trailer. The
+  one-shot `Deflate`, `Zlib` and `Gzip` decoders are the same decoder
+  over a whole string, keeping their panics' sentences, and got faster:
+  20 MB of Python's gzip from 224 to 187 ms (75 to 62 ms with
+  `--release`). A gzip header's own checksum (FHCRC) is checked now; it
+  was skipped. std/digest's `CRC32.update` and `Adler32.update` carry a
+  checksum across pieces, as zlib's do.
 - **`std/mutex`: `Mutex(T)`, and the compiler checks every block that
   reaches the value behind it.** SPEC.md III.4.4 named `Mutex(T)` as the
   escape `Share` leaves for state that has to be shared and changed, and

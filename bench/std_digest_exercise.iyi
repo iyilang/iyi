@@ -138,6 +138,38 @@ assert_str "fb3469c3", CRC32.hexdigest(ones), "crc of 11,104 bytes of 0xc3 0xbf"
 assert_str "73c4b541", Adler32.hexdigest(ones), "adler of 11,104 bytes of 0xc3 0xbf"
 puts "  CRC-32 and Adler-32"
 
+# `update` goes on from a finished checksum, so a message cut anywhere and
+# taken in its pieces is the checksum of the whole: every cut of 300
+# bytes, and cuts either side of 5,552 bytes in the long one, where
+# Adler-32's reduction falls inside the first piece or straddles the two.
+def crc_in_pieces(s : String, cut : Int32) : UInt32
+  CRC32.update(CRC32.update(0_u32, s.to_unsafe, cut), s.to_unsafe + cut.to_i64, s.bytesize - cut)
+end
+
+def adler_in_pieces(s : String, cut : Int32) : UInt32
+  Adler32.update(Adler32.update(1_u32, s.to_unsafe, cut), s.to_unsafe + cut.to_i64, s.bytesize - cut)
+end
+
+mixed = String.new(300) do |dst|
+  i = 0
+  while i < 300
+    dst[i] = ((i * 37 + 11) & 0xff).to_u8
+    i = i + 1
+  end
+end
+cut = 0
+while cut <= 300
+  assert_true crc_in_pieces(mixed, cut) == CRC32.checksum(mixed), "crc in pieces, cut at #{cut}"
+  assert_true adler_in_pieces(mixed, cut) == Adler32.checksum(mixed), "adler in pieces, cut at #{cut}"
+  cut = cut + 1
+end
+[1, 5551, 5552, 5553, 7000, 11103].each do |at|
+  assert_true crc_in_pieces(ones, at) == CRC32.checksum(ones), "crc in pieces of the long one, cut at #{at}"
+  assert_true adler_in_pieces(ones, at) == Adler32.checksum(ones), "adler in pieces of the long one, cut at #{at}"
+end
+assert_true CRC32.update(0_u32, mixed.to_unsafe, 0) == 0_u32 && Adler32.update(1_u32, mixed.to_unsafe, 0) == 1_u32, "nothing taken is the start"
+puts "  CRC-32 and Adler-32 in pieces, cut anywhere"
+
 # What a checksum costs against a pass that only adds the bytes up: CRC-32
 # went a bit at a time and Adler-32 reduced twice a byte, 36 and 7 times
 # the pass in a plain build. A release build turns the pass into vector

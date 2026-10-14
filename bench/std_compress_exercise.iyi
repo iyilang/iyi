@@ -5,17 +5,104 @@
 #     ./bin/iyi run bench/std_compress_exercise.iyi <fixtures>
 #
 # With a directory, the streams zlib wrote there (every level, every
-# envelope) are read back and compared, and this module's own streams are
+# envelope) are read back and compared, whole and through `Inflater` a
+# piece at a time, Python's own gzip and zlib streams are read through
+# tiny reads, and this module's streams - `Deflate` and `Deflater` - are
 # written beside them for zlib to read; `bench/std_compress_exercise.sh`
 # is the other half of that conversation.
 
 module bench/std_compress_exercise
 
-import std/compress::{Deflate, Zlib, Gzip}
+import std/compress::{Deflate, Zlib, Gzip, Inflater, Deflater, Envelope, CompressError}
+import std/digest::{CRC32}
 import std/random::{Random}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+# A source that gives *stream* *piece* bytes at a time and counts what it
+# has been asked for, so a check can say how far the decoder pulled.
+class Feed
+  getter calls : Int32
+  getter at : Int32
+
+  def initialize(@stream : String, @piece : Int32)
+    @at = 0
+    @calls = 0
+  end
+
+  def next : String?
+    @calls = @calls + 1
+    return nil if @at >= @stream.bytesize
+    n = @piece
+    n = @stream.bytesize - @at if n > @stream.bytesize - @at
+    src = @stream.to_unsafe + @at.to_i64
+    @at = @at + n
+    String.new(n) { |dst| dst.copy_from(src, n) }
+  end
+end
+
+# Every byte an Inflater gives, *max* at most a read, or the error it
+# answers instead.
+def drain(z : Inflater, max : Int32) : String | CompressError
+  all = String::Builder.new
+  while true
+    piece = z.read(max)
+    case piece
+    when CompressError
+      return piece
+    else
+      assert_true piece.bytesize <= max, "a read of #{max} answered #{piece.bytesize} bytes"
+      break if piece.bytesize == 0
+      all << piece
+    end
+  end
+  assert_true z.finished?, "an Inflater that answered \"\" is finished"
+  all.to_s
+end
+
+def stream_through(envelope : Envelope, stream : String, piece : Int32, max : Int32) : String | CompressError
+  feed = Feed.new(stream, piece)
+  z = Inflater.new(envelope) { feed.next }
+  drain(z, max)
+end
+
+# The bytes, where the stream must read.
+def streamed(envelope : Envelope, stream : String, piece : Int32, max : Int32, label : String) : String
+  got = stream_through(envelope, stream, piece, max)
+  case got
+  when CompressError
+    raise "ASSERTION FAILED: #{label}, #{piece} bytes a piece and #{max} a read: refused with #{got.message.inspect}"
+  else
+    got
+  end
+end
+
+# The error, where the stream must not read; its sentence must say *phrase*.
+def refused(envelope : Envelope, stream : String, piece : Int32, phrase : String, label : String) : CompressError
+  got = stream_through(envelope, stream, piece, 65536)
+  case got
+  when CompressError
+    assert_true got.message.includes?(phrase), "#{label}: refused with #{got.message.inspect}, which does not say #{phrase.inspect}"
+    got
+  else
+    raise "ASSERTION FAILED: #{label}: read #{got.bytesize} bytes instead of refusing"
+  end
+end
+
+# The stream fed one byte, seven bytes and all at once, each read back
+# the same.
+def every_feed(envelope : Envelope, stream : String, plain : String, label : String) : Nil
+  whole = stream.bytesize > 0 ? stream.bytesize : 1
+  {1, 7, whole}.each do |piece|
+    assert_true streamed(envelope, stream, piece, 65536, label) == plain, "#{label}, #{piece} bytes a piece"
+  end
+end
+
+def piece_of(s : String, from : Int32, n : Int32) : String
+  src = s.to_unsafe + from.to_i64
+  String.new(n) { |dst| dst.copy_from(src, n) }
 end
 
 def bytes(values : Array(Int32)) : String
@@ -192,6 +279,234 @@ end
 assert_true best_many <= best_one * 6 + 100_000_000_i64, "a thousand members and one of 8 MB took #{best_many // 1000000} ms where that one took #{best_one // 1000000} ms"
 puts "  a thousand members ahead of one of 8 MB within six times that one and 100 ms"
 
+puts "\n== streaming inflate"
+# The same streams through `Inflater`, a byte at a time, seven at a time
+# and whole: a piece boundary falls inside every header, code, extra-bits
+# field, stored length and trailer somewhere among them.
+corpora = [{"nothing", ""}, {"one byte", "x"}, {"repetitive text", text}, {"a run of one byte", run_of(97, 100000)},
+           {"every byte value", every_byte(40)}, {"random bytes", random}, {"a repeat from 20 KiB back", far + random_bytes(20000, 11_u64) + far}]
+corpora.each do |pair|
+  every_feed(Envelope::Raw, Deflate.compress(pair[1]), pair[1], "#{pair[0]}, raw")
+  every_feed(Envelope::Zlib, Zlib.compress(pair[1]), pair[1], "#{pair[0]}, zlib")
+  every_feed(Envelope::Gzip, Gzip.compress(pair[1]), pair[1], "#{pair[0]}, gzip")
+end
+puts "  #{corpora.size} corpora in three envelopes, fed a byte, seven bytes and whole"
+every_feed(Envelope::Raw, stored, "hello", "a stored block")
+every_feed(Envelope::Raw, two, "hi!!!", "two stored blocks")
+every_feed(Envelope::Raw, mixed, "hello hello hello hello world, stored", "a code block, an empty stored block and a stored one")
+mixed_streams.each do |pair|
+  every_feed(Envelope::Raw, pair[0], pair[1], "a code block, then stored ones: #{pair[1]}")
+end
+every_feed(Envelope::Raw, lone_distance, "aaaa", "a lone one-bit distance code")
+every_feed(Envelope::Raw, lone_end, "", "a lone one-bit end-of-block code")
+every_feed(Envelope::Zlib, bytes([0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]), "", "zlib's own empty stream")
+every_feed(Envelope::Gzip, bytes([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]), "", "gzip's own empty stream")
+puts "  the format's own words, the same three ways"
+# The window: 32 KiB of noise four times over is matches from exactly
+# 32,768 back, the farthest a distance reaches, and read a few bytes at a
+# time the buffer slides under them again and again, each slide followed
+# by a match that reaches the oldest byte it kept.
+noise = random_bytes(32768, 13_u64)
+far_back = noise * 4
+far_stream = Deflate.compress(far_back)
+assert_true far_stream.bytesize < 32768 + 32768 // 8 + 2000, "the repeats are matches (#{far_stream.bytesize} bytes)"
+assert_true streamed(Envelope::Raw, far_stream, 7, 100, "matches from 32 KiB back") == far_back, "matches from 32 KiB back, 100 bytes a read"
+assert_true streamed(Envelope::Raw, far_stream, 4096, 1, "matches from 32 KiB back") == far_back, "matches from 32 KiB back, a byte a read"
+assert_true streamed(Envelope::Zlib, Zlib.compress(far_back), 1, 997, "matches from 32 KiB back") == far_back, "matches from 32 KiB back, zlib"
+assert_true streamed(Envelope::Gzip, Gzip.compress(far_back), 3, 65536, "matches from 32 KiB back") == far_back, "matches from 32 KiB back, gzip"
+puts "  matches from 32 KiB back, across the window's slides, read a byte and 100 bytes at a time"
+# A read answers as soon as it has bytes and going on would ask the
+# source for more: the first bytes of a long stream come out long before
+# the stream has all been fed.
+long_gzip = Gzip.compress(text)
+feed = Feed.new(long_gzip, 1)
+early = Inflater.new(Envelope::Gzip) { feed.next }
+first = early.read
+case first
+when CompressError
+  raise "ASSERTION FAILED: the first read refused with #{first.message}"
+else
+  assert_true first.bytesize > 0 && feed.at < long_gzip.bytesize // 4, "the first read answered #{first.bytesize} bytes after #{feed.at} of #{long_gzip.bytesize} fed"
+end
+assert_true !early.finished? && early.leftover == "", "an Inflater part way is not finished and has nothing left over"
+puts "  the first read answers after #{feed.at} of #{long_gzip.bytesize} bytes fed"
+
+puts "\n== refused as a value"
+# A stream that is not what it says is a `CompressError` from `read`, the
+# sentence the whole-string calls panic with, and not a panic: every
+# proper prefix, every byte flipped, and each check by name.
+sample = "the quick brown fox jumps over the lazy dog, the lazy dog sleeps\n" * 3
+[{Envelope::Raw, Deflate.compress(sample)}, {Envelope::Zlib, Zlib.compress(sample)}, {Envelope::Gzip, Gzip.compress(sample)}].each do |pair|
+  envelope = pair[0]
+  whole = pair[1]
+  cut = 0
+  while cut < whole.bytesize
+    {1, cut > 0 ? cut : 1}.each do |piece|
+      got = stream_through(envelope, piece_of(whole, 0, cut), piece, 65536)
+      case got
+      when CompressError
+        said = got.message
+        assert_true said.includes?(" ends ") || said.includes?(" shorter "), "#{envelope} cut at #{cut}: #{said.inspect} does not say the stream ended"
+      else
+        raise "ASSERTION FAILED: #{envelope} cut at #{cut} read #{got.bytesize} bytes instead of refusing"
+      end
+    end
+    cut = cut + 1
+  end
+  # A raw stream has no checksum, so a flipped byte can decode to other
+  # bytes; an envelope's checksum, or its decoding, refuses every one.
+  unless envelope == Envelope::Raw
+    from = envelope == Envelope::Zlib ? 2 : 10
+    at = from
+    while at < whole.bytesize
+      flipped = String.new(whole.bytesize) do |dst|
+        dst.copy_from(whole.to_unsafe, whole.bytesize)
+        dst[at] = dst[at] ^ 0x55_u8
+      end
+      got = stream_through(envelope, flipped, 5, 65536)
+      assert_true got.is_a?(CompressError), "#{envelope} with byte #{at} flipped read back"
+      at = at + 1
+    end
+  end
+end
+puts "  every prefix of a stream in each envelope ends early, and every byte flipped in zlib and gzip is refused"
+sample_gzip = Gzip.compress(sample)
+bad_crc = String.new(sample_gzip.bytesize) do |dst|
+  dst.copy_from(sample_gzip.to_unsafe, sample_gzip.bytesize)
+  dst[sample_gzip.bytesize - 8] = dst[sample_gzip.bytesize - 8] ^ 1_u8
+end
+bad_len = String.new(sample_gzip.bytesize) do |dst|
+  dst.copy_from(sample_gzip.to_unsafe, sample_gzip.bytesize)
+  dst[sample_gzip.bytesize - 4] = dst[sample_gzip.bytesize - 4] ^ 1_u8
+end
+sample_zlib = Zlib.compress(sample)
+bad_adler = String.new(sample_zlib.bytesize) do |dst|
+  dst.copy_from(sample_zlib.to_unsafe, sample_zlib.bytesize)
+  dst[sample_zlib.bytesize - 1] = dst[sample_zlib.bytesize - 1] ^ 1_u8
+end
+# FHCRC: the header's own CRC-16, right and wrong.
+hcrc_head = bytes([0x1f, 0x8b, 8, 2, 0, 0, 0, 0, 0, 0xff])
+hcrc = CRC32.checksum(hcrc_head) & 0xffff_u32
+abc = Gzip.compress("abc")
+abc_body = piece_of(abc, 10, abc.bytesize - 10)
+good_hcrc = hcrc_head + bytes([(hcrc & 0xff_u32).to_i32, (hcrc >> 8).to_i32]) + abc_body
+bad_hcrc = hcrc_head + bytes([(hcrc & 0xff_u32).to_i32 ^ 1, (hcrc >> 8).to_i32]) + abc_body
+every_feed(Envelope::Gzip, good_hcrc, "abc", "a gzip header with its CRC-16")
+[1, 4096].each do |piece|
+  refused(Envelope::Gzip, bad_crc, piece, "gzip: the checksum does not match (", "a gzip CRC-32 one bit off")
+  refused(Envelope::Gzip, bad_len, piece, "gzip: the length does not match (#{sample.bytesize}, stream says #{sample.bytesize ^ 1})", "a gzip length one bit off")
+  refused(Envelope::Zlib, bad_adler, piece, "zlib: the checksum does not match (", "a zlib Adler-32 one bit off")
+  refused(Envelope::Gzip, bad_hcrc, piece, "gzip: the header checksum does not match", "a gzip header CRC-16 one bit off")
+  refused(Envelope::Gzip, bytes([0x1f, 0x8b, 8, 0x20, 0, 0, 0, 0, 0, 0xff, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0]), piece, "gzip: a reserved header flag is set (FLG 32)", "a reserved gzip flag")
+  refused(Envelope::Gzip, bytes([0x1f, 0x8c, 8, 0, 0, 0, 0, 0, 0, 0xff, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0]), piece, "gzip: not a gzip stream", "a gzip stream that is not one")
+  refused(Envelope::Gzip, bytes([0x1f, 0x8b, 8, 8, 0, 0, 0, 0, 0, 0xff, 0x61, 0x62, 0x63]), piece, "gzip: the stream ends inside its header", "a gzip name that never ends")
+  refused(Envelope::Zlib, bytes([0x78, 0xbb, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]), piece, "zlib: a preset dictionary is not supported", "a zlib preset dictionary")
+  refused(Envelope::Zlib, bytes([0x78, 0x9d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]), piece, "zlib: the header check failed", "a zlib header whose check fails")
+  refused(Envelope::Zlib, bytes([0x77, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]), piece, "zlib: not a deflate stream (method 7)", "a zlib header that is not deflate")
+  refused(Envelope::Raw, bytes([0x07]), piece, "DEFLATE: block type 3 is reserved", "a reserved block type")
+  refused(Envelope::Raw, bytes([0x01, 0x05, 0x00, 0x00, 0x00, 0x68]), piece, "DEFLATE: a stored block's length does not match its complement", "a stored length that is not its complement")
+  refused(Envelope::Raw, bytes([0x01, 0x05, 0x00, 0xfa, 0xff, 0x68]), piece, "DEFLATE: the stream ends inside a stored block", "a stored block cut short")
+  # A literal, then a match two bytes back where one has been written.
+  refused(Envelope::Raw, bytes([0x4b, 0x04, 0x42, 0x00]), piece, "DEFLATE: a distance reaches before the output began", "a distance before the output")
+  refused(Envelope::Raw, bytes([0x05, 0xc0, 0x01, 0x04, 0x00, 0x00, 0x00, 0x80, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13]),
+    piece, "DEFLATE: the literal/length code is incomplete", "an incomplete literal/length code")
+end
+# And once refused, refused for good: the same error to every read after.
+feed = Feed.new(bad_crc, 64)
+broken = Inflater.new(Envelope::Gzip) { feed.next }
+said = drain(broken, 65536)
+again = broken.read
+assert_true said.is_a?(CompressError) && again.is_a?(CompressError) && again.message == said.message, "a second read after the error answers it again"
+assert_true !broken.finished? && broken.leftover == "", "a refused stream is not finished"
+puts "  checksums, lengths, headers, block types, stored lengths and distances refused by name, read a byte and 4 KiB at a time"
+
+puts "\n== gzip members and what follows"
+every_feed(Envelope::Gzip, joined, "first\nsecond\n", "three gzip members")
+every_feed(Envelope::Gzip, two_members, "abcd", "two gzip members")
+every_feed(Envelope::Gzip, Gzip.compress("first\n") + "\0\0\0\0", "first\n", "zero padding after the last member")
+# What follows the stream is the caller's: the next request on the
+# connection. zlib and raw streams end where their trailer does, and the
+# source is not asked for a byte past it; a gzip stream ends where no
+# member follows, which takes one byte more to see.
+tail = "HTTP/1.1 200 OK\r\n"
+[{Envelope::Raw, Deflate.compress(text)}, {Envelope::Zlib, Zlib.compress(text)}, {Envelope::Gzip, Gzip.compress(text)},
+ {Envelope::Gzip, joined}].each do |pair|
+  envelope = pair[0]
+  stream = pair[1]
+  plain = envelope == Envelope::Gzip && stream == joined ? "first\nsecond\n" : text
+  all = stream + tail
+  {1, 7, 1000, all.bytesize}.each do |piece|
+    feed = Feed.new(all, piece)
+    z = Inflater.new(envelope) { feed.next }
+    got = drain(z, 65536)
+    assert_true got == plain, "#{envelope} followed by more, #{piece} bytes a piece"
+    assert_true z.leftover == piece_of(all, stream.bytesize, feed.at - stream.bytesize), "#{envelope}, #{piece} bytes a piece: what is left over is what was fed past the stream (#{z.leftover.inspect})"
+    if piece == 1
+      past = envelope == Envelope::Gzip ? 1 : 0
+      assert_true feed.at == stream.bytesize + past, "#{envelope}, a byte a piece: the source was asked for #{feed.at - stream.bytesize} bytes past the stream"
+    end
+  end
+end
+# Bytes that start like a member and are not one are left over too, fed
+# a byte at a time: as far as it took to see that no member follows.
+{ {"\x1f", "\x1f"}, {"\x1fx", "\x1fx"}, {"\0\0\0\0", "\0"} }.each do |pair|
+  feed = Feed.new(Gzip.compress("ab") + pair[0], 1)
+  z = Inflater.new(Envelope::Gzip) { feed.next }
+  assert_true drain(z, 65536) == "ab" && z.leftover == pair[1], "a gzip stream followed by #{pair[0].inspect} leaves #{pair[1].inspect} over (#{z.leftover.inspect})"
+end
+puts "  members read as one stream, and what follows a stream is left over, the source asked for nothing more than it took to see the end"
+
+puts "\n== deflater"
+
+# Pieces written as they come, each a sync flush: what has been written
+# decodes to every byte given so far without another byte of stream.
+def read_exactly(z : Inflater, n : Int32, label : String) : String
+  all = String::Builder.new
+  got = 0
+  while got < n
+    piece = z.read(n - got)
+    case piece
+    when CompressError
+      raise "ASSERTION FAILED: #{label}: refused with #{piece.message.inspect}"
+    else
+      assert_true piece.bytesize > 0, "#{label}: the stream ended after #{got} of #{n} bytes"
+      all << piece
+      got = got + piece.bytesize
+    end
+  end
+  all.to_s
+end
+
+pieces = [piece_of(text, 0, 5000), "", random_bytes(5000, 21_u64), run_of(98, 70000), "x", piece_of(text, 5000, text.bytesize - 5000)]
+given = pieces.join
+deflated = [] of String
+[Envelope::Raw, Envelope::Zlib, Envelope::Gzip].each do |envelope|
+  d = Deflater.new(envelope)
+  written = ""
+  so_far = ""
+  pieces.each do |piece|
+    written = written + d.compress(piece)
+    so_far = so_far + piece
+    next if so_far.bytesize == 0
+    feed = Feed.new(written, written.bytesize)
+    z = Inflater.new(envelope) { feed.next }
+    assert_true read_exactly(z, so_far.bytesize, "#{envelope} after #{so_far.bytesize} bytes") == so_far, "#{envelope}: what was written decodes to all #{so_far.bytesize} bytes given"
+    assert_true feed.calls == 1, "#{envelope}: and the decoder asked for nothing more (#{feed.calls} calls)"
+  end
+  stream = written + d.finish
+  every_feed(envelope, stream, given, "#{envelope} from a Deflater")
+  whole = envelope == Envelope::Raw ? Deflate.decompress(stream) : (envelope == Envelope::Zlib ? Zlib.decompress(stream) : Gzip.decompress(stream))
+  assert_true whole == given, "#{envelope} from a Deflater, read whole"
+  deflated << stream
+end
+assert_true Deflater.new(Envelope::Raw).finish == bytes([0x03, 0x00]), "an empty raw Deflater is an empty fixed block"
+assert_true Deflater.new(Envelope::Zlib).finish == bytes([0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]), "an empty zlib Deflater is zlib's own empty stream"
+assert_true Deflater.new(Envelope::Gzip).finish == Gzip.compress(""), "an empty gzip Deflater is Gzip.compress of nothing"
+head_first = Deflater.new(Envelope::Gzip)
+assert_true head_first.compress("").bytesize == 10 && head_first.compress("") == "", "the header comes with the first call, empty or not, and once"
+puts "  #{pieces.size} pieces in three envelopes, each decodable as it was written, and the whole read back every way"
+
 args = Program.args
 if args.size > 0
   dir = args[0]
@@ -212,6 +527,40 @@ if args.size > 0
   end
   assert_true Gzip.decompress(File.read("#{dir}/fields.gzip")) == File.read("#{dir}/text.bin"), "a gzip header with a name, a comment, an extra field and a header CRC"
   puts "  a gzip header's optional fields are walked past"
+
+  puts "\n== streaming zlib's streams"
+  names.each do |name|
+    plain = File.read("#{dir}/#{name}.bin")
+    levels.each do |level|
+      every_feed(Envelope::Raw, File.read("#{dir}/#{name}.#{level}.raw"), plain, "#{name} at level #{level}, raw")
+      every_feed(Envelope::Zlib, File.read("#{dir}/#{name}.#{level}.zlib"), plain, "#{name} at level #{level}, zlib")
+      every_feed(Envelope::Gzip, File.read("#{dir}/#{name}.#{level}.gzip"), plain, "#{name} at level #{level}, gzip")
+    end
+    puts "  #{name}: zlib's twelve streams fed a byte, seven bytes and whole"
+  end
+  every_feed(Envelope::Gzip, File.read("#{dir}/fields.gzip"), File.read("#{dir}/text.bin"), "a gzip header with every field")
+  puts "  and the gzip header with every optional field and its CRC-16"
+
+  puts "\n== python's streams through tiny reads"
+  # Python's gzip and zlib modules on noise and on repetition, read a
+  # byte, three and seventeen bytes at a time from pieces of other sizes.
+  ["py_random", "py_repeat", "py_members"].each do |name|
+    plain = File.read("#{dir}/#{name}.bin")
+    exts = name == "py_members" ? [{"gz", Envelope::Gzip}] : [{"gz", Envelope::Gzip}, {"zlib", Envelope::Zlib}, {"raw", Envelope::Raw}]
+    exts.each do |pair|
+      stream = File.read("#{dir}/#{name}.#{pair[0]}")
+      { {stream.bytesize, 1}, {1, 3}, {5, 17}, {4096, 1} }.each do |shape|
+        assert_true streamed(pair[1], stream, shape[0], shape[1], "#{name}.#{pair[0]}") == plain, "#{name}.#{pair[0]}, #{shape[0]} bytes a piece and #{shape[1]} a read"
+      end
+    end
+    puts "  #{name}: #{plain.bytesize} bytes, read back byte for byte"
+  end
+
+  # What the Deflater wrote, for zlib to read (the .sh).
+  File.write("#{dir}/deflater.bin", given)
+  File.write("#{dir}/deflater.raw", deflated[0])
+  File.write("#{dir}/deflater.zlib", deflated[1])
+  File.write("#{dir}/deflater.gzip", deflated[2])
 end
 
 puts "\nALL CHECKS PASSED"

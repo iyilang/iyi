@@ -96,7 +96,7 @@ echo "== what a digest refuses"
 cat >"$WORK/refuse.iyi" <<'IYI'
 module refuse
 
-import std/digest::{SHA1, SHA256, SHA224}
+import std/digest::{SHA1, SHA256, SHA224, CRC32, Adler32}
 
 d = SHA256.new
 case Program.args[0]
@@ -112,6 +112,10 @@ when "short-buffer"
   d.final(Array(UInt8).new(31, 0_u8))
 when "negative-count"
   d.update("abc".to_unsafe, -1)
+when "crc-negative-count"
+  CRC32.update(0_u32, "abc".to_unsafe, -1)
+when "adler-negative-count"
+  Adler32.update(1_u32, "abc".to_unsafe, -1)
 end
 puts "accepted"
 IYI
@@ -131,6 +135,8 @@ refuse update-after-final "update after final; reset first"
 refuse other-algorithm "cannot take the state of a"
 refuse short-buffer "31 bytes cannot hold a 32-byte digest"
 refuse negative-count "a negative count of bytes: -1"
+refuse crc-negative-count "CRC32: a negative count of bytes: -1"
+refuse adler-negative-count "Adler32: a negative count of bytes: -1"
 
 echo
 echo "== proving the checks can fail when the module is broken"
@@ -179,6 +185,13 @@ prove_broken "a short piece filling the block it cannot fill" "in pieces" \
 prove_broken "copy_from without the block in progress" "a dup goes on from where it was copied" \
   '    @fill = other.@fill
 ' ''
+# A checksum of one piece starts from 0 (CRC-32) and 1 (Adler-32), so an
+# `update` that drops what it was given still answers every one-piece
+# check; only the checks in pieces see it.
+prove_broken "a CRC-32 update that forgets the checksum it goes on from" "crc in pieces" \
+  '    crc = crc ^ 0xffffffff_u32' '    crc = 0xffffffff_u32'
+prove_broken "an Adler-32 update that forgets the sum of sums" "adler in pieces" \
+  '    b = sum.unsafe_shr(16) % 65521_u32' '    b = 0_u32'
 
 # The checksums' costs, against the shapes they had: CRC-32 a bit at a
 # time, Adler-32 reduced every byte.

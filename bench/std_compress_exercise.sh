@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Exercises `std/compress`: DEFLATE, zlib and gzip in iyi, against the
-# zlib Python carries as the oracle in both directions.
+# Exercises `std/compress`: DEFLATE, zlib and gzip in iyi, whole and a
+# piece at a time (`Inflater`, `Deflater`), against the zlib Python
+# carries as the oracle in both directions.
 #
 #     bash bench/std_compress_exercise.sh
 set -u
@@ -62,7 +63,7 @@ if [ -z "$PY" ]; then
   exit 0
 fi
 if ! "$PY" - "$WORK/fixtures" "$REPO/src/std/compress.iyi" <<'PY'
-import os, random, struct, sys, zlib
+import gzip, os, random, struct, sys, zlib
 out, source = sys.argv[1], sys.argv[2]
 
 def deflate(data, level, wbits):
@@ -93,16 +94,32 @@ header += struct.pack("<H", len(extra)) + extra + b"a-name.txt\0" + b"a comment\
 header += struct.pack("<H", zlib.crc32(header) & 0xffff)
 body = deflate(text, 6, -15)
 open(os.path.join(out, "fields.gzip"), "wb").write(header + body + struct.pack("<II", zlib.crc32(text), len(text)))
+# Python's own gzip and zlib modules, for `Inflater` to read through tiny
+# reads: noise, repetition, and three members of different levels.
+prng = random.Random(20261014)
+python = {
+    "py_random": bytes(prng.getrandbits(8) for _ in range(100000)),
+    "py_repeat": b"".join(b"%d: the same few words again and again\n" % (i % 50) for i in range(8000)),
+}
+for name, data in python.items():
+    open(os.path.join(out, name + ".bin"), "wb").write(data)
+    open(os.path.join(out, name + ".gz"), "wb").write(gzip.compress(data))
+    open(os.path.join(out, name + ".zlib"), "wb").write(zlib.compress(data))
+    open(os.path.join(out, name + ".raw"), "wb").write(deflate(data, 6, -15))
+parts = [python["py_repeat"][:30000], python["py_random"][:20000], b"the last member\n"]
+open(os.path.join(out, "py_members.bin"), "wb").write(b"".join(parts))
+open(os.path.join(out, "py_members.gz"), "wb").write(gzip.compress(parts[0], 9) + gzip.compress(parts[1], 1) + gzip.compress(parts[2]))
 PY
 then
   echo "the zlib oracle could not be written; nothing below would be measuring the module" >&2
   exit 2
 fi
 # Six corpora, each `.bin` plus four levels in three envelopes, and the
-# gzip header with every field: 6 * 13 + 1.
+# gzip header with every field: 6 * 13 + 1; then Python's two corpora in
+# three envelopes and its three members, each with its `.bin`: 2 * 4 + 2.
 fixture_count="$(find "$WORK/fixtures" -type f | wc -l | tr -d ' ')"
-if [ "$fixture_count" -ne 79 ]; then
-  echo "the zlib oracle wrote $fixture_count files where 79 were expected" >&2
+if [ "$fixture_count" -ne 89 ]; then
+  echo "the zlib oracle wrote $fixture_count files where 89 were expected" >&2
   exit 2
 fi
 
@@ -136,7 +153,9 @@ fi
 
 echo
 echo "== every compress section reported"
-for phrase in "== round trips" "== what the match finder finds" "== the format's own words" "== against zlib"; do
+for phrase in "== round trips" "== what the match finder finds" "== the format's own words" "== streaming inflate" \
+              "== refused as a value" "== gzip members and what follows" "== deflater" "== against zlib" \
+              "== streaming zlib's streams" "== python's streams through tiny reads"; do
   if ! grep -q "$phrase" "$WORK/compress-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -172,6 +191,34 @@ sys.exit(1 if bad else 0)
 PY
 
 echo
+echo "== what the Deflater wrote, read by zlib"
+# Six pieces, each a sync flush, then the final block: zlib reads the
+# stream whole and 13 bytes at a time through a decompressobj, and the
+# gzip one through Python's gzip module too.
+"$PY" - "$WORK/fixtures" <<'PY' || status=1
+import gzip, os, sys, zlib
+d = sys.argv[1]
+bad = 0
+plain = open(os.path.join(d, "deflater.bin"), "rb").read()
+for env, wbits in (("raw", -15), ("zlib", 15), ("gzip", 31)):
+    path = os.path.join(d, "deflater." + env)
+    if not os.path.exists(path):
+        print(f"  deflater.{env}: iyi wrote nothing"); bad += 1; continue
+    stream = open(path, "rb").read()
+    try:
+        back = zlib.decompress(stream, wbits)
+        o = zlib.decompressobj(wbits)
+        pieces = b"".join(o.decompress(stream[i:i + 13]) for i in range(0, len(stream), 13)) + o.flush()
+        module = gzip.decompress(stream) if env == "gzip" else plain
+    except (zlib.error, OSError) as e:
+        print(f"  deflater.{env}: refused: {e}"); bad += 1; continue
+    if back != plain or pieces != plain or module != plain:
+        print(f"  deflater.{env}: read {len(back)}, {len(pieces)} and {len(module)} bytes, not the {len(plain)} written"); bad += 1; continue
+    print(f"  deflater.{env}: {len(stream)} bytes, {len(plain)} back whole and 13 bytes at a time")
+sys.exit(1 if bad else 0)
+PY
+
+echo
 echo "== the same program with optimisation on (--release)"
 build_and_run "release" compress-release --release >/dev/null
 if ! grep -q "ALL CHECKS PASSED" "$WORK/compress-release.out" 2>/dev/null; then
@@ -183,7 +230,7 @@ echo
 echo "== what a stream refuses, by name"
 refuses() { # refuses <label> <name> <phrase> <expression>
   local label="$1" name="$2" phrase="$3" expression="$4"
-  printf 'module main\n\nimport std/compress::{Deflate, Zlib, Gzip}\n\n\ndef bytes(values : Array(Int32)) : String\n  String.new(values.size) do |dst|\n    i = 0\n    while i < values.size\n      dst[i] = values[i].to_u8\n      i = i + 1\n    end\n  end\nend\n\nputs (%s).bytesize\n' \
+  printf 'module main\n\nimport std/compress::{Deflate, Zlib, Gzip, Deflater, Inflater, Envelope}\n\n\ndef bytes(values : Array(Int32)) : String\n  String.new(values.size) do |dst|\n    i = 0\n    while i < values.size\n      dst[i] = values[i].to_u8\n      i = i + 1\n    end\n  end\nend\n\nputs (%s).bytesize\n' \
     "$expression" > "$WORK/$name.iyi"
   if ! "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
     echo "  $label: the program did not build"
@@ -246,16 +293,25 @@ refuses "an incomplete distance code" dist_incomplete "DEFLATE: the distance cod
   'Deflate.decompress(bytes([0x0d, 0xc1, 0x01, 0x04, 0x00, 0x00, 0x00, 0x80, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xdf, 0x16]))'
 refuses "a second gzip member cut short" gzip_member_cut "gzip: the stream is shorter than its header" \
   'Gzip.decompress(bytes([0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0x4b, 0x4c, 0x02, 0x00, 0x6d, 0x48, 0x83, 0x9e, 0x02, 0x00, 0x00, 0x00, 0x1f, 0x8b, 0x08]))'
+# A stream refused by `Inflater` is a value the exercise checks; what is
+# left to panic is the caller's own mistake: a stream finished twice or
+# written after its end, and a read of no bytes.
+refuses "a Deflater finished twice" deflater_twice "Deflater: finish was called twice" \
+  '(d = Deflater.new(Envelope::Gzip); d.finish; d.finish)'
+refuses "a Deflater written after its finish" deflater_after "Deflater: compress after finish" \
+  '(d = Deflater.new(Envelope::Zlib); d.finish; d.compress("more"))'
+refuses "a read of no bytes" read_zero "Inflater: read wants at least one byte, not 0" \
+  '(Inflater.new(Envelope::Raw) { nil }.read(0); "")'
 
 echo
 echo "== proving the checks can fail when the module is broken"
 mutations=0
-mutate() { # mutate <label> <old> <new>
+mutate() { # mutate <label> <old> <new> [<phrase>]
   # A binary of its own each: on Windows the last one's file can still be
   # held a moment after it ended, and the next link over it failed with
   # LNK1104.
   mutations=$((mutations + 1))
-  local label="$1" old="$2" new="$3"
+  local label="$1" old="$2" new="$3" phrase="${4:-}"
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
   if ! OLD="$old" NEW="$new" "$PY" - <<PY
@@ -279,16 +335,34 @@ PY
   elif "$WORK/mut-$mutations.bin" >"$WORK/mut.out" 2>&1; then
     echo "  $label: the exercise PASSED on a broken module"
     status=1
+  elif [ -n "$phrase" ] && ! grep -qF "$phrase" "$WORK/mut.out"; then
+    echo "  $label: failed, but not at the check that names '$phrase':"
+    tail -2 "$WORK/mut.out" | sed 's/^/    /'
+    status=1
   else
     echo "  $label: caught"
   fi
 }
-mutate "a back-reference copied from one byte off" '@data[@size + i] = @data[src + i]' '@data[@size + i] = @data[src + i + 1]'
+mutate "a back-reference copied from one byte off" 'dst[i] = src[i]' 'dst[i] = src[i + 1]'
 mutate "a Huffman code written the wrong way round" 'put(rev, len)' 'put(code, len)'
 mutate "a match finder that never looks" 'chain < 64' 'chain < 0'
 mutate "a length table off by one" '@lbase = fill([3, 4, 5, 6' '@lbase = fill([3, 4, 5, 7'
-mutate "a back-reference copied a word from one byte off" '(@data + (src + i)).as(Pointer(UInt64))' '(@data + (src + i + 1)).as(Pointer(UInt64))'
+mutate "a back-reference copied a word from one byte off" '(dst + i.to_i64).as(Pointer(UInt64)).value = (src + i.to_i64)' '(dst + i.to_i64).as(Pointer(UInt64)).value = (src + (i + 1).to_i64)'
 mutate "a code table indexed by the code's bits unreversed" '(((code >> bit) & 1) << (len - 1 - bit))' '(((code >> bit) & 1) << bit)'
+# The streaming decoder's own: the slide that keeps the window, the
+# trailers, the read that answers what it has, and what is left over.
+mutate "a window slid one byte short" 'keep = @pos - WINDOW' 'keep = @pos - WINDOW + 1' \
+  "matches from 32 KiB back"
+mutate "a gzip CRC-32 never compared" 'unless @check == want_crc' 'unless true' \
+  "Gzip with byte"
+mutate "a zlib Adler-32 never compared" '#{Zlib.hex(want)})") unless @check == want' '#{Zlib.hex(want)})") unless true' \
+  "Zlib with byte"
+mutate "a read that waits for more input though it has bytes to give" 'SYMBOL_BITS = 48' 'SYMBOL_BITS = 0' \
+  "the first read answered"
+mutate "a leftover without the bytes loaded ahead" 'held = @count // 8
+    rest = @in_end - @in_pos' 'held = 0
+    rest = @in_end - @in_pos' \
+  "what is left over is what was fed past the stream"
 
 echo
 if [ "$status" -eq 0 ]; then

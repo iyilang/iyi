@@ -15,7 +15,9 @@
 # and a second `final` until `reset`. `copy_from` takes another digest's
 # state without allocating, which is how std/crypto's HMAC starts each
 # message from its keyed state, and `dup` is a copy that shares nothing.
-# CRC-32 and Adler-32 are checksums: a `checksum` and no state.
+# CRC-32 and Adler-32 are checksums: a `checksum` of one piece, and an
+# `update` that goes on from a checksum already taken, as std/compress's
+# streams take theirs.
 
 module std/digest
 
@@ -695,15 +697,26 @@ pub class SHA384 < SHA512
   end
 end
 
+# `checksum(data)` is the CRC-32 of *data*. `update(crc, data, count)` goes
+# on from a CRC-32 already taken, zlib's `crc32(crc, buf, len)` convention:
+# what goes in and what comes out are finished checksums, the inversion
+# before and after done inside, so 0 is the start (the CRC-32 of nothing)
+# and `update(update(0, a), b)` is the CRC-32 of *a* then *b*, the same
+# number `checksum` answers for the two joined.
 pub struct CRC32
+  def self.checksum(data : String) : UInt32
+    update(0_u32, data.to_unsafe, data.bytesize)
+  end
+
   # Eight bytes a step through eight tables (slicing-by-8), where it had
   # been one bit a step: twenty megabytes took 105 ms, which was most of
   # what `Gzip.decompress` spent, the inflating itself taking 30.
-  def self.checksum(data : String) : UInt32
+  def self.update(crc : UInt32, data : Pointer(UInt8), count : Int32) : UInt32
+    raise "CRC32: a negative count of bytes: #{count}" if count < 0
     t = tables
-    crc = 0xffffffff_u32
-    p = data.to_unsafe
-    n = data.bytesize
+    crc = crc ^ 0xffffffff_u32
+    p = data
+    n = count
     i = 0
     while i + 8 <= n
       one = crc ^ (p[i].to_u32 | p[i + 1].to_u32.unsafe_shl(8) | p[i + 2].to_u32.unsafe_shl(16) | p[i + 3].to_u32.unsafe_shl(24))
@@ -756,12 +769,20 @@ pub struct CRC32
   end
 end
 
+# The same convention as `CRC32`: `update(sum, data, count)` goes on from a
+# finished Adler-32, and 1 is the start (the Adler-32 of nothing), as in
+# zlib's `adler32(adler, buf, len)`.
 pub struct Adler32
   def self.checksum(data : String) : UInt32
-    a = 1_u32
-    b = 0_u32
-    p = data.to_unsafe
-    n = data.bytesize
+    update(1_u32, data.to_unsafe, data.bytesize)
+  end
+
+  def self.update(sum : UInt32, data : Pointer(UInt8), count : Int32) : UInt32
+    raise "Adler32: a negative count of bytes: #{count}" if count < 0
+    a = (sum & 0xffff_u32) % 65521_u32
+    b = sum.unsafe_shr(16) % 65521_u32
+    p = data
+    n = count
     i = 0
     # The modulo once per 5,552 bytes, the most that cannot carry `b` past
     # 32 bits, rather than twice a byte.

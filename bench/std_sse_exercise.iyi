@@ -1,0 +1,502 @@
+# Exercises `std/sse`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_sse_exercise.iyi
+#
+# With arguments it is the gate script's peer: `serve` serves streams for
+# Python and curl to read, `corpus FILE` reads the generated corpus and
+# prints what it parsed, `client BASE` reads a Python server's streams.
+
+module bench/std_sse_exercise
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+import std/sse::{SSE, SSEError, Event, EventParser, EventWriter}
+import std/http::{HTTP, HTTPError, Request, Response, Server}
+import std/socket::{IyiSocket, SocketError}
+
+def bytes(list : Array(Int32)) : String
+  String.new(list.size) do |p|
+    list.each_with_index { |b, i| p[i] = b.to_u8 }
+  end
+end
+
+# The bytes of *text* in hex, two digits each.
+def hex(text : String) : String
+  p = text.to_unsafe
+  out_text = String::Builder.new
+  i = 0
+  while i < text.bytesize
+    h = p[i].to_i32.to_s(16)
+    out_text << (h.bytesize == 1 ? "0" + h : h)
+    i = i + 1
+  end
+  out_text.to_s
+end
+
+def unhex(text : String) : String
+  p = text.to_unsafe
+  String.new(text.bytesize // 2) do |buf|
+    i = 0
+    while i < text.bytesize // 2
+      buf[i] = (nibble(p[2 * i]) * 16 + nibble(p[2 * i + 1])).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def nibble(c : UInt8) : Int32
+  c >= 97_u8 ? c.to_i32 - 87 : c.to_i32 - 48
+end
+
+def event_text(e : Event) : String
+  "#{e.event}|#{e.data}|#{e.id}"
+end
+
+# *text* parsed as a whole stream - fed whole, or in pieces of *piece*
+# bytes - its events one a line, then the last event ID and the
+# reconnection time.
+def parse(text : String, piece : Int32 = 0) : String
+  parser = EventParser.new
+  seen = [] of String
+  if piece == 0
+    parser.feed(text) { |e| seen << event_text(e) }
+  else
+    at = 0
+    while at < text.bytesize
+      parser.feed(text[at, piece]) { |e| seen << event_text(e) }
+      at = at + piece
+    end
+  end
+  parser.finish
+  seen << "last=#{parser.last_event_id} retry=#{parser.retry || "-"}"
+  seen.join("\n")
+end
+
+def chunk(text : String) : String
+  text.bytesize.to_s(16) + "\r\n" + text + "\r\n"
+end
+
+EVENT_HEAD   = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+CHUNKED_HEAD = "HTTP/1.1 200 OK\r\nContent-Type: Text/Event-Stream; charset=utf-8\r\nTransfer-Encoding: chunked\r\n\r\n"
+
+# A server that answers each connection with the next of *answers*,
+# exactly as written, then closes it: a stream dropped where the test
+# wants it. Answers the request heads it read and the milliseconds
+# between one connection and the next (0 for the first).
+def scripted(answers : Array(String), &client : String -> Nil) : {Array(String), Array(Int64)}
+  l = IyiSocket.listen("127.0.0.1", 0)
+  base = "http://127.0.0.1:#{l.local_port}/stream"
+  heads = [] of String
+  gaps = [] of Int64
+  group do |g|
+    g.spawn do
+      last = 0_i64
+      answers.each do |answer|
+        s = l.accept
+        break unless s.is_a?(IyiSocket)
+        now = __iyi_monotonic_ns
+        gaps << (last == 0_i64 ? 0_i64 : (now - last) // 1000000_i64)
+        last = now
+        head = ""
+        while !head.ends_with?("\r\n\r\n")
+          got = s.read(1)
+          break unless got.is_a?(String) && got.bytesize > 0
+          head = head + got
+        end
+        heads << head
+        s.write(answer)
+        s.close
+      end
+      l.close unless l.closed?
+      0
+    end
+    client.call(base)
+    l.close unless l.closed?
+    0
+  end
+  {heads, gaps}
+end
+
+def header_in(head : String, name : String) : String?
+  HTTP.split_crlf(head).each do |line|
+    colon = line.index(':')
+    next unless colon
+    return HTTP.trim(line[colon + 1, line.bytesize - colon - 1]) if HTTP.same_name?(line[0, colon], name)
+  end
+  nil
+end
+
+def outcome_text(got : Nil | Cancelled | SocketError | HTTPError | SSEError) : String
+  case got
+  in Nil
+    "nil"
+  in SSEError
+    "SSEError #{got.status}: #{got.message}"
+  in SocketError
+    "SocketError: #{got.message}"
+  in HTTPError
+    "HTTPError: #{got.message}"
+  in Cancelled
+    "Cancelled"
+  end
+end
+
+# The events the gate's servers send, in order: what `serve` answers
+# /events with and the round trip below reads back.
+def feed_events(events : EventWriter) : Nil
+  events.comment("hello")
+  events.send("first")
+  events.send("two\nlines", event: "update", id: "7")
+  events.send("crlf\r\nand\rcr")
+  events.send("", id: "")
+  events.send("  spaced")
+  events.send("ü € 😀", retry: 1500)
+  events.comment("multi\nline")
+  events.send("last\n", event: "")
+end
+
+FEED_TEXT = ": hello\n" \
+            "data: first\n\n" \
+            "event: update\nid: 7\ndata: two\ndata: lines\n\n" \
+            "data: crlf\ndata: and\ndata: cr\n\n" \
+            "id: \ndata:\n\n" \
+            "data:   spaced\n\n" \
+            "retry: 1500\ndata: ü € 😀\n\n" \
+            ": multi\n: line\n" \
+            "event: \ndata: last\ndata:\n\n"
+
+FEED_PARSED = "message|first|\n" \
+              "update|two\nlines|7\n" \
+              "message|crlf\nand\ncr|7\n" \
+              "message||\n" \
+              "message|  spaced|\n" \
+              "message|ü € 😀|\n" \
+              "message|last\n|\n" \
+              "last= retry=1500"
+
+# The routes `serve` and the round trip share: /events, /ticks (a tick
+# every 5 ms until the client goes, at most 2000), /ticks-status (what
+# that loop ended with), /resume (three events after `Last-Event-ID`).
+class Routes
+  getter ticks_end : Int32
+  getter ticks_gone : Bool
+
+  def initialize
+    @ticks_end = -1
+    @ticks_gone = false
+  end
+
+  def answer(req : Request) : Response
+    case req.path
+    when "/events"
+      SSE.stream { |events| feed_events(events) }
+    when "/headers"
+      SSE.stream({"Cache-Control" => "no-transform", "X-Accel-Buffering" => "no"}) { |events| events.send("x") }
+    when "/ticks"
+      SSE.stream do |events|
+        n = 0
+        while !events.gone? && n < 2000
+          events.send("tick #{n}", id: n.to_s)
+          sleep(5)
+          n = n + 1
+        end
+        @ticks_gone = events.gone?
+        @ticks_end = n
+      end
+    when "/ticks-status"
+      Response.new(200, @ticks_end < 0 ? "running" : "ended #{@ticks_gone} #{@ticks_end}")
+    when "/resume"
+      from = (req.header("Last-Event-ID") || "0").to_i
+      SSE.stream do |events|
+        [1, 2, 3].each { |k| events.send("after #{from}", id: (from + k).to_s) }
+      end
+    else
+      Response.new(404, "no\n")
+    end
+  end
+end
+
+args = Program.args
+
+# `serve`: a port, then streams until /stop, for Python and curl.
+if args.size > 0 && args[0] == "serve"
+  serving = IyiSocket.listen("127.0.0.1", 0)
+  puts serving.local_port
+  routes = Routes.new
+  Server.serve(serving) do |req|
+    if req.path == "/stop"
+      serving.close
+      Response.new(200, "bye")
+    else
+      routes.answer(req)
+    end
+  end
+  __iyi_exit(0)
+end
+
+# `corpus FILE`: each line a stream in hex, fed in pieces of 1 to 7
+# bytes; a case's events a line each, `E` and the type, data and ID in
+# hex, then `L` the last event ID and `R` the reconnection time.
+if args.size > 1 && args[0] == "corpus"
+  seed = 12345_i64
+  # A line each, the empty stream an empty line; the file's last line
+  # end leaves one more piece, which is none.
+  lines = File.read(args[1]).split('\n')
+  lines.pop
+  lines.each do |line|
+    text = unhex(line)
+    parser = EventParser.new
+    at = 0
+    while at < text.bytesize
+      seed = (seed * 1103515245_i64 + 12345_i64) % 2147483648_i64
+      size = (seed % 7_i64).to_i32 + 1
+      parser.feed(text[at, size]) do |e|
+        puts "E #{hex(e.event)} #{hex(e.data)} #{hex(e.id)}"
+      end
+      at = at + size
+    end
+    parser.finish
+    puts "L #{hex(parser.last_event_id)} R #{parser.retry || "-"}"
+  end
+  __iyi_exit(0)
+end
+
+# `client BASE`: the Python server's streams, read; a line each for what
+# came and how each ended.
+if args.size > 1 && args[0] == "client"
+  base = args[1]
+  got = SSE.open(base + "/drop", {"X-Probe" => "1"}, retry: 5000, reconnects: 1) do |e|
+    puts "event #{hex(e.event)} #{hex(e.data)} #{hex(e.id)}"
+    true
+  end
+  puts "drop: #{outcome_text(got)}"
+  forever_seen = 0
+  got = SSE.open(base + "/forever", last_event_id: "41") do |e|
+    forever_seen = forever_seen + 1
+    puts "forever #{e.data} #{e.id}"
+    forever_seen < 3
+  end
+  puts "forever: #{outcome_text(got)}"
+  got = SSE.open(base + "/plain", retry: 10) { |e| true }
+  puts "plain: #{outcome_text(got)}"
+  got = SSE.open(base + "/quiet", retry: 10, reconnects: 2) { |e| true }
+  puts "quiet: #{outcome_text(got)}"
+  __iyi_exit(0)
+end
+
+puts "== the standard's examples"
+# §9.2's own streams. Where the standard's text says a stream is
+# "followed by a blank line", it is read both as printed and with one.
+assert_str "message|This is the first message.|\nmessage|This is the second message, it\nhas two lines.|\nlast= retry=-",
+  parse("data: This is the first message.\n\ndata: This is the second message, it\ndata: has two lines.\n\ndata: This is the third message."),
+  "the introduction's three messages, the last not ended"
+assert_str "add|73857293|\nremove|2153|\nadd|113411|\nlast= retry=-",
+  parse("event: add\ndata: 73857293\n\nevent: remove\ndata: 2153\n\nevent: add\ndata: 113411\n\n"),
+  "add and remove: an event's type"
+assert_str "message|YHOO\n+2\n10|\nlast= retry=-", parse("data: YHOO\ndata: +2\ndata: 10\n\n"), "YHOO: data lines joined with LF, the last removed"
+assert_str "message|first event|1\nmessage|second event|\nmessage| third event|\nlast= retry=-",
+  parse(": test stream\n\ndata: first event\nid: 1\n\ndata:second event\nid\n\ndata:  third event\n\n"),
+  "the four blocks: a comment, an id, an empty id, one space stripped"
+assert_str "message|first event|1\nmessage|second event|\nlast= retry=-",
+  parse(": test stream\n\ndata: first event\nid: 1\n\ndata:second event\nid\n\ndata:  third event\n"),
+  "the four blocks as printed: the last needs its blank line"
+assert_str "message||\nmessage|\n|\nlast= retry=-", parse("data\n\ndata\ndata\n\ndata:"), "data with no colon, twice, and a block not ended"
+assert_str "message|test|\nmessage|test|\nlast= retry=-", parse("data:test\n\ndata: test\n\n"), "the space after the colon is ignored"
+puts "  six streams of §9.2, read as the standard says they are"
+
+puts "\n== the interpretation's corners"
+bom = bytes([0xEF, 0xBB, 0xBF])
+assert_str "message|a|\nlast= retry=-", parse(bom + "data: a\n\n"), "a leading BOM is dropped"
+assert_str "message|b|\nlast= retry=-", parse(bom + bom + "data: a\n\ndata: b\n\n"), "a second BOM is part of the first line's name"
+assert_str "message|a|\nlast= retry=-", parse("data: a\n\n" + bom + "data: b\n\n"), "a BOM later is not dropped"
+assert_str "message|a\nb|\nlast= retry=-", parse("data: a\rdata: b\r\r"), "CR alone ends a line"
+assert_str "message|a|\nmessage|b|\nlast= retry=-", parse("data: a\r\n\r\ndata: b\n\r\n"), "CRLF and LF and CRLF"
+assert_str "last= retry=-", parse("Data: x\n\nDATA: y\n\ndata : z\n\n"), "field names are compared exactly"
+assert_str "message|a:b|\nmessage|:x|\nlast= retry=-", parse("data: a:b\n\ndata::x\n\n"), "a value keeps the colons after the first"
+assert_str "message|x|1\nlast=1 retry=-", parse("id: 1\n\nid: 2" + bytes([0]) + "\ndata: x\n\n"), "an id with a NUL is ignored"
+assert_str "last= retry=-", parse("id: 5\ndata: x"), "the last event ID is set at the blank line"
+assert_str "last=5 retry=-", parse("id: 5\n\n"), "a blank line sets the last event ID with no event"
+assert_str "last= retry=100", parse("retry: 100\n"), "retry: digits"
+["retry: 1a\n", "retry: -1\n", "retry:\n", "retry: 1.5\n", "retry:  100\n", "retry: ١\n"].each do |bad|
+  assert_str "last= retry=-", parse(bad), "retry: digits alone, not #{bad.inspect}"
+end
+assert_str "last= retry=2147483647", parse("retry: 99999999999999999999\n"), "retry saturates"
+assert_str "x|1|\nmessage|2|\nlast= retry=-", parse("event: x\ndata: 1\n\ndata: 2\n\n"), "the type does not carry over"
+assert_str "message|1|\nlast= retry=-", parse("event: x\n\ndata: 1\n\n"), "the type goes with a blank line that dispatches nothing"
+assert_str "message|a|\nlast= retry=-", parse("event:\ndata: a\n\n"), "an empty type is message"
+assert_str "message|a\uFFFDb\uFFFD\uFFFD\uFFFD|\nlast= retry=-", parse("data: a" + bytes([0xFF]) + "b" + bytes([0xED, 0xA0, 0x80]) + "\n\n"), "ill-formed bytes are U+FFFD"
+assert_str "message|a\uFFFD|\nlast= retry=-", parse("data: a" + bytes([0xE2, 0x82]) + "\n\n"), "a sequence cut by a line end is U+FFFD"
+assert_str "message|a\u0000b|\nlast= retry=-", parse("data: a" + bytes([0]) + "b\n\n"), "a NUL in data is data"
+assert_str "message|a|\nlast= retry=-", parse("data: a\n\ndata: b\n"), "an event not ended is discarded"
+puts "  BOMs, CR, exact names, colons, NUL ids, retry forms, types, ill-formed bytes, an unended event"
+
+puts "\n== pieces of any size"
+split = EventParser.new
+seen = [] of String
+["data: a\r", "\ndata: b\r", "\n\r", "\n"].each { |part| split.feed(part) { |e| seen << event_text(e) } }
+assert_str "message|a\nb|", seen.join(";"), "a CRLF split between pieces is one line end"
+utf = "data: é\n\n"
+split = EventParser.new
+seen = [] of String
+[utf[0, 7], utf[7, 3]].each { |part| split.feed(part) { |e| seen << event_text(e) } }
+assert_str "message|é|", seen.join(";"), "a character split between pieces is whole"
+cases = [
+  ": test stream\n\ndata: first event\nid: 1\n\ndata:second event\nid\n\ndata:  third event\n\n",
+  "data: a\r\n\r\ndata: b\r\rdata: c\n\n",
+  bom + "event: é\r\ndata: ü € 😀\r\nid: 9\r\nretry: 25\r\n\r\n",
+  "data: x" + bytes([0xF0, 0x9F]) + "\n\n" + "data: y\r",
+]
+cases.each do |text|
+  whole = parse(text)
+  [1, 2, 3, 5].each do |piece|
+    assert_str whole, parse(text, piece), "#{text.inspect} in pieces of #{piece}"
+  end
+end
+puts "  four streams whole and in pieces of 1, 2, 3, 5; a CRLF and a character split"
+
+puts "\n== the server's lines, and its own client reading them"
+listener = IyiSocket.listen("127.0.0.1", 0)
+base = "http://127.0.0.1:#{listener.local_port}"
+routes = Routes.new
+group do |g|
+  g.spawn do
+    Server.serve(listener) do |req|
+      if req.path == "/stop"
+        listener.close
+        Response.new(200, "bye")
+      else
+        routes.answer(req)
+      end
+    end
+    0
+  end
+  raw = HTTP.get(base + "/events").or_panic
+  assert_str FEED_TEXT, raw.body, "the lines SSE.stream writes"
+  assert_true raw.header("Content-Type") == "text/event-stream" && raw.header("Cache-Control") == "no-cache", "text/event-stream, no-cache: #{raw.headers}"
+  assert_true raw.header("Transfer-Encoding") == "chunked", "the stream is chunked"
+  own = HTTP.get(base + "/headers").or_panic
+  assert_true own.header("Cache-Control") == "no-transform" && own.header("X-Accel-Buffering") == "no" && own.header("Content-Type") == "text/event-stream", "a caller's Cache-Control replaces no-cache: #{own.headers}"
+  read = [] of String
+  got = SSE.open(base + "/events") do |e|
+    read << event_text(e)
+    e.data != "last\n"
+  end
+  assert_str "nil", outcome_text(got), "the client stops when its block says so"
+  assert_str FEED_PARSED, read.join("\n") + "\nlast= retry=1500", "SSE.open reads what SSE.stream wrote"
+  resumed = [] of String
+  got = SSE.open(base + "/resume", last_event_id: "41") do |e|
+    resumed << event_text(e)
+    resumed.size < 3
+  end
+  assert_str "message|after 41|42;message|after 41|43;message|after 41|44", resumed.join(";"), "last_event_id: goes out as Last-Event-ID"
+  ticks = [] of String
+  SSE.open(base + "/ticks") do |e|
+    ticks << e.id
+    ticks.size < 3
+  end
+  assert_str "0 1 2", ticks.join(" "), "three ticks"
+  status = "running"
+  tries = 0
+  while status == "running" && tries < 400
+    sleep(5)
+    status = HTTP.get(base + "/ticks-status").or_panic.body
+    tries = tries + 1
+  end
+  assert_true status.starts_with?("ended true ") && routes.ticks_end < 2000, "a client gone ends the stream's loop, and gone? says so: #{status}"
+  HTTP.get(base + "/stop").or_panic
+  0
+end
+puts "  every line as written, the headers, a round trip, Last-Event-ID served, a client gone (#{routes.ticks_end} ticks written)"
+
+puts "\n== reconnection"
+# Five connections: cut mid-chunk inside an event, ended by the close,
+# then a 204. Each answer checks what the request before it left behind.
+received = [] of String
+outcome = "none"
+heads, gaps = scripted([
+  CHUNKED_HEAD + chunk("retry: 30\n\nid: 1\ndata: one\n\nid: 2\ndata: two\n\n") + chunk("id: 3\ndata: thr"),
+  EVENT_HEAD + "data: three\n\nid: 4" + bytes([0]) + "x\ndata: four\n\n",
+  EVENT_HEAD + "id\ndata: five\n\n",
+  EVENT_HEAD + "id: z" + bytes([1]) + "\ndata: six\n\n",
+  "HTTP/1.1 204 No Content\r\n\r\n",
+  EVENT_HEAD + "data: never\n\n",
+]) do |url|
+  outcome = outcome_text(SSE.open(url, {"X-Probe" => "1"}, retry: 2000, reconnects: 5) do |e|
+    received << "#{e.data}/#{e.id}"
+    true
+  end)
+end
+assert_true heads.size == 5, "five connections, the last a 204: #{heads.size} connections, #{outcome}"
+first = heads[0]
+assert_true header_in(first, "Accept") == "text/event-stream" && header_in(first, "Cache-Control") == "no-cache" && header_in(first, "X-Probe") == "1", "the request's headers: #{first.inspect}"
+assert_true header_in(first, "Last-Event-ID").nil?, "no Last-Event-ID before there is one"
+assert_true header_in(heads[1], "Last-Event-ID") == "2", "Last-Event-ID after a cut stream: #{heads[1].inspect}"
+assert_true header_in(heads[2], "Last-Event-ID") == "2", "a resumed stream keeps its place: #{heads[2].inspect}"
+assert_true header_in(heads[3], "Last-Event-ID").nil?, "an empty id resets it: #{heads[3].inspect}"
+assert_true header_in(heads[4], "Last-Event-ID").nil?, "an id with a control character is not sent: #{heads[4].inspect}"
+assert_str "one/1 two/2 three/2 four/2 five/ six/z\u0001", received.join(" "), "the events across five connections"
+assert_str "SSEError 204: SSE: the server answered 204, not 200", outcome, "a 204 fails the connection"
+[1, 2, 3, 4].each do |k|
+  assert_true gaps[k] >= 30_i64 && gaps[k] < 1500_i64, "the stream's retry sets the delay: #{gaps}"
+end
+puts "  six events over five connections, Last-Event-ID 2, 2, none, none, delays #{gaps[1]} to #{gaps[4]} ms after retry: 30"
+
+stopped = [] of String
+heads, gaps = scripted([EVENT_HEAD + "data: 1\n\ndata: 2\n\ndata: 3\n\n", EVENT_HEAD]) do |url|
+  outcome = outcome_text(SSE.open(url) do |e|
+    stopped << e.data
+    stopped.size < 2
+  end)
+end
+assert_true outcome == "nil" && stopped.join(" ") == "1 2" && heads.size == 1, "false stops at once: #{outcome} #{stopped} #{heads.size}"
+
+counted = 0
+heads, gaps = scripted([
+  EVENT_HEAD + "data: a\n\n",
+  EVENT_HEAD + "data: b\n\n",
+  EVENT_HEAD,
+  EVENT_HEAD + ": nothing\n\n",
+  EVENT_HEAD + "data: never\n\n",
+]) do |url|
+  outcome = outcome_text(SSE.open(url, retry: 10, reconnects: 1) do |e|
+    counted = counted + 1
+    true
+  end)
+end
+assert_true heads.size == 4 && counted == 2, "a connection that brings an event starts the count again: #{heads.size} connections"
+assert_str "SSEError 200: SSE: the stream ended with no event, 2 times in a row", outcome, "reconnects: 1 gives up on the second empty stream"
+
+closed = IyiSocket.listen("127.0.0.1", 0)
+closed_port = closed.local_port
+closed.close
+refused = SSE.open("http://127.0.0.1:#{closed_port}/", retry: 10, reconnects: 2) { |e| true }
+assert_true refused.is_a?(SocketError), "a server not there is its SocketError, after the reconnections: #{outcome_text(refused)}"
+puts "  false stops at once; the count starts again after an event; a refused connection is its SocketError"
+
+puts "\n== failing the connection"
+[
+  {"HTTP/1.1 404 Not Found\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: x\n\n", "SSEError 404: SSE: the server answered 404, not 200", "a 404 fails the connection"},
+  {"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\ndata: x\n\n", "SSEError 200: SSE: the answer is \"text/plain\", not text/event-stream", "text/plain fails the connection"},
+  {"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\ndata: x\n\n", "SSEError 200: SSE: the answer is untyped, not text/event-stream", "no Content-Type fails the connection"},
+  {"HTTP/1.1 200 OK\r\nContent-Type: text/event-streams\r\nConnection: close\r\n\r\ndata: x\n\n", "SSEError 200: SSE: the answer is \"text/event-streams\", not text/event-stream", "a type that only starts so fails the connection"},
+].each do |want|
+  events = 0
+  heads, gaps = scripted([want[0], want[0]]) do |url|
+    outcome = outcome_text(SSE.open(url, retry: 10, reconnects: 3) do |e|
+      events = events + 1
+      true
+    end)
+  end
+  assert_str want[1], outcome, want[2]
+  assert_true heads.size == 1 && events == 0, "#{want[2]}, with no event and no reconnection: #{heads.size} #{events}"
+end
+puts "  404, text/plain, no type, a near type: an SSEError each, one request"
+
+puts "\nALL CHECKS PASSED"

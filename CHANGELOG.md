@@ -4,6 +4,34 @@
 
 ### Added
 
+- **`std/sse`: server-sent events (WHATWG HTML §9.2) on both ends of
+  std/http.** `SSE.stream { |events| events.send(data, event:, id:,
+  retry:); events.comment(text) }` answers a request with a 200
+  `text/event-stream`, `Cache-Control: no-cache`, each event one chunk
+  sent at once, data cut into `data:` lines at CRLF, CR and LF; a line
+  break in an event type, a line break or NUL in an id, a negative retry
+  and text that is not UTF-8 are refused before they are written, and a
+  client gone is the write's `SocketError` and `gone?`, so the block's
+  loop ends on a value. `SSE.open(url, last_event_id:, reconnects:,
+  retry:) { |event| true }` reads one through `HTTP.open` with `Accept:
+  text/event-stream` and `Last-Event-ID`, fails the connection on an
+  answer that is not a 200 `text/event-stream` (an `SSEError`), and
+  reconnects after a drop or an end with the last event ID and the
+  stream's `retry:` delay, giving up once *reconnects* + 1 connections
+  in a row brought no event. `EventParser` is §9.2.6's interpretation fed in
+  pieces of any size - one BOM, CRLF/CR/LF, a CR and its LF split
+  between pieces, comments, one space after the colon, `id` with NUL
+  ignored, `retry` digits alone, ill-formed bytes as U+FFFD, an unended
+  event discarded. A reconnection's parser takes over the last event ID
+  rather than starting empty as the text says, which is what Chromium
+  does and what keeps a resumed stream's place. Held by
+  `bench/std_sse_exercise.sh`: the standard's six example streams; 807
+  generated streams (352 events) parsed the same as a Python
+  transcription of the algorithm; the client against a Python server
+  that cuts it mid-chunk three times (Last-Event-ID none, 2, 2, none;
+  delays of 50 ms from `retry: 50` against the caller's 5000); the
+  server read byte for byte by Python and `curl -N`; ten refusals; and
+  twenty broken copies of the module caught.
 - **`std/socket`: `IyiSocket.connect(host, port, timeout_ms)`.** A
   connect waited as long as the kernel did - on Linux about two minutes
   of SYN retries for a host that drops them, a full listen backlog among

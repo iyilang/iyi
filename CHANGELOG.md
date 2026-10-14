@@ -4,6 +4,39 @@
 
 ### Added
 
+- **`std/websocket`: RFC 6455, both ends, over std/http.** A server's
+  block answers `WebSocket.upgrade(req) { |ws| ... }`: a version 13
+  handshake is answered 101 with its `Sec-WebSocket-Accept` and the block
+  gets the connection, anything else 400 saying why, another version 426
+  naming 13, and the first of the server's `protocols` the client offered
+  is chosen. `WebSocket.connect("ws://...", headers, protocols)` sends a
+  key of 16 bytes from `Random::Secure` through `HTTP.upgrade` and refuses
+  a 101 whose accept, `Upgrade`, `Connection`, extensions or protocol do
+  not answer what was sent; `wss://` is refused, as TLS is not in 0.x.
+  `send`, `send_binary`, `ping`, `receive` (a `Message`, nil after the
+  close handshake) and `close(code, reason)`, with `close_code`,
+  `close_reason` and `protocol`. Client frames are masked with four fresh
+  bytes each; fragments are reassembled around pings, which are answered,
+  and pongs; the bytes that came with the handshake are read first. What
+  the peer does wrong fails the connection with the code §7.1.7 names - a
+  reserved bit or opcode, a mask where there must be none or none where
+  there must be one, a fragmented or long control frame, a 64-bit length
+  with its high bit, a close code no peer sends: 1002; text or a close
+  reason that is not UTF-8, checked across fragments as they arrive:
+  1007; a message past `max_message` (16 MiB): 1009, refused on the
+  declared length before anything is read or allocated, so a frame
+  claiming 2^62 bytes costs its head. Errors are `WebSocketError` values
+  with that code; what a program does wrong (text that is not UTF-8, a
+  close code 1005, a long ping) panics before anything is written. Two
+  tasks sending on one connection take turns a frame at a time, where the
+  runtime refused the second write ("two fibers writing one fd"). 128 MiB
+  as 16 MiB messages crosses loopback, masked, in 70 ms (`--release`).
+  Held by `bench/std_websocket_exercise.sh`: RFC 6455's own examples byte
+  for byte, every fault above from hand-made frames, the close handshake
+  from both ends, a Python client and a Python server written from the
+  RFC over raw sockets, Node's `WebSocket` client where Node is installed,
+  and twenty-one broken copies of the module caught at the check that
+  names each.
 - **`std/fileserver`: a directory served over std/http.**
   `FileServer.serve(root, request)` answers GET and HEAD from the files
   under *root* (405 otherwise): types from std/mime, `Last-Modified` and

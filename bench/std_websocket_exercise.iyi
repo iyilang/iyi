@@ -1,0 +1,917 @@
+# Exercises `std/websocket`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_websocket_exercise.iyi
+#
+# With the argument `serve` it is an echo server for the peers
+# bench/std_websocket_exercise.sh runs against it: it prints its port,
+# echoes every message, and stops at the text "stop". With `connect PORT`
+# it is the client the script's Python server talks to.
+
+module bench/std_websocket_exercise
+
+import std/websocket::{WebSocket, WebSocketError, Message}
+import std/http::{HTTP, Request, Response, Server, HTTPError}
+import std/socket::{IyiSocket, SocketError}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+# What `work` answers, or "refused: <why>" when it panics: run as a task,
+# whose value catches the panic.
+def answer(&work : -> String) : String
+  said = "no answer"
+  group do |g|
+    task = g.spawn { work.call }
+    case got = task.value
+    in Panicked
+      said = "refused: " + got.message
+    in String
+      said = got
+    end
+    0
+  end
+  said
+end
+
+def bytes(list : Array(Int32)) : String
+  String.new(list.size) do |p|
+    list.each_with_index { |b, i| p[i] = b.to_u8 }
+  end
+end
+
+# The bytes of *text* in hex, a space between them.
+def hex(text : String) : String
+  p = text.to_unsafe
+  parts = [] of String
+  i = 0
+  while i < text.bytesize
+    h = p[i].to_i32.to_s(16)
+    parts << (h.bytesize == 1 ? "0" + h : h)
+    i = i + 1
+  end
+  parts.join(" ")
+end
+
+# *n* bytes that are not all the same: byte i is i * 7 + 3, mod 256.
+def pattern(n : Int32) : String
+  String.new(n) do |p|
+    i = 0
+    while i < n
+      p[i] = ((i * 7 + 3) & 255).to_u8
+      i = i + 1
+    end
+  end
+end
+
+MASK = [0x37, 0xfa, 0x21, 0x3d]
+
+# A frame as the test writes it, by hand and not by the module: *op*,
+# *fin*, the reserved bits *rsv* (already shifted into the first byte),
+# the payload masked with *mask* when there is one, and the length the
+# head declares, which is the payload's unless *declared* says otherwise.
+def frame(op : Int32, payload : String, fin : Bool = true, mask : Array(Int32)? = MASK, rsv : Int32 = 0, declared : Int64 = -1_i64) : String
+  n = declared >= 0_i64 ? declared : payload.bytesize.to_i64
+  head = [] of Int32
+  head << ((fin ? 128 : 0) | rsv | op)
+  mbit = mask ? 128 : 0
+  if n < 126_i64
+    head << (mbit | n.to_i32)
+  elsif n < 65536_i64
+    head << (mbit | 126)
+    head << (n >> 8).to_i32
+    head << (n & 255_i64).to_i32
+  else
+    head << (mbit | 127)
+    k = 7
+    while k >= 0
+      head << ((n >> (8 * k)) & 255_i64).to_i32
+      k = k - 1
+    end
+  end
+  body = payload
+  if m = mask
+    head.concat(m)
+    src = payload.to_unsafe
+    body = String.new(payload.bytesize) do |p|
+      i = 0
+      while i < payload.bytesize
+        p[i] = src[i] ^ m[i & 3].to_u8
+        i = i + 1
+      end
+    end
+  end
+  bytes(head) + body
+end
+
+# A frame as the raw peer read it.
+struct RawFrame
+  getter b0 : Int32
+  getter b1 : Int32
+  getter key : String
+  getter payload : String
+
+  def initialize(@b0 : Int32, @b1 : Int32, @key : String, @payload : String)
+  end
+
+  def op : Int32
+    @b0 & 15
+  end
+
+  def fin? : Bool
+    (@b0 & 128) != 0
+  end
+
+  def masked? : Bool
+    (@b1 & 128) != 0
+  end
+
+  # The code a close frame carries; 0 for none.
+  def code : Int32
+    return 0 if @payload.bytesize < 2
+    (@payload.to_unsafe[0].to_i32 << 8) | @payload.to_unsafe[1].to_i32
+  end
+
+  def reason : String
+    @payload.bytesize > 2 ? @payload[2, @payload.bytesize - 2] : ""
+  end
+end
+
+# The other end of a connection, byte by byte: what the module's frames
+# are read with, and what hand-made frames are written with.
+class Raw
+  getter sock : IyiSocket
+  @buf : String
+  @failure : String
+
+  # A peer that should have written and did not fails the check after
+  # five seconds rather than hang the exercise.
+  def initialize(@sock : IyiSocket)
+    @buf = ""
+    @failure = ""
+    @sock.read_timeout_ms = 5000
+  end
+
+  def write(text : String) : Nil
+    @sock.write(text).or_panic
+    nil
+  end
+
+  # *n* bytes, or nil when they did not come, and `@failure` says why.
+  def read_exact?(n : Int32) : String?
+    if @buf.bytesize < n
+      io = String::Builder.new(n)
+      io << @buf
+      have = @buf.bytesize
+      failed = ""
+      while have < n
+        chunk = @sock.read(65536)
+        unless chunk.is_a?(String)
+          failed = "#{n} bytes were expected and #{have} came: #{chunk.message}"
+          break
+        end
+        if chunk.bytesize == 0
+          failed = "the connection ended with #{have} of #{n} bytes"
+          break
+        end
+        io << chunk
+        have = have + chunk.bytesize
+      end
+      @buf = io.to_s
+      unless failed.empty?
+        @failure = failed
+        return nil
+      end
+    end
+    got = @buf[0, n]
+    @buf = @buf[n, @buf.bytesize - n]
+    got
+  end
+
+  def read_exact(n : Int32) : String
+    got = read_exact?(n)
+    raise "ASSERTION FAILED: #{@failure}" unless got
+    got
+  end
+
+  # Whether the other end closed, with nothing left unread.
+  def ended? : Bool
+    return false if @buf.bytesize > 0
+    @sock.read_timeout_ms = 10000
+    got = @sock.read(1)
+    got.is_a?(String) && got.bytesize == 0
+  end
+
+  def next_frame : RawFrame
+    f = next_frame?
+    raise "ASSERTION FAILED: #{@failure}" unless f
+    f
+  end
+
+  # The next frame, or nil when it did not come whole.
+  def next_frame? : RawFrame?
+    head = read_exact?(2)
+    return nil unless head
+    b0 = head.to_unsafe[0].to_i32
+    b1 = head.to_unsafe[1].to_i32
+    n = (b1 & 127).to_i64
+    if n == 126_i64
+      ext = read_exact?(2)
+      return nil unless ext
+      n = ((ext.to_unsafe[0].to_i32 << 8) | ext.to_unsafe[1].to_i32).to_i64
+    elsif n == 127_i64
+      ext = read_exact?(8)
+      return nil unless ext
+      n = 0_i64
+      8.times { |i| n = (n << 8) | ext.to_unsafe[i].to_i64 }
+    end
+    key = ""
+    if (b1 & 128) != 0
+      got = read_exact?(4)
+      return nil unless got
+      key = got
+    end
+    payload = read_exact?(n.to_i32)
+    return nil unless payload
+    if key.bytesize == 4
+      k = key.to_unsafe
+      src = payload.to_unsafe
+      size = payload.bytesize
+      payload = String.new(size) do |p|
+        i = 0
+        while i < size
+          p[i] = src[i] ^ k[i & 3]
+          i = i + 1
+        end
+      end
+    end
+    RawFrame.new(b0, b1, key, payload)
+  end
+end
+
+# Two ends of one TCP connection: the connecting one, then the accepted.
+def pair : {IyiSocket, IyiSocket}
+  l = IyiSocket.listen("127.0.0.1", 0)
+  c = IyiSocket.connect("127.0.0.1", l.local_port).or_panic
+  s = l.accept.or_panic
+  l.close
+  {c, s}
+end
+
+# The message `receive` answered; anything else fails the check.
+def message(got : Message | Nil | Cancelled | SocketError | WebSocketError) : Message
+  return got if got.is_a?(Message)
+  raise "ASSERTION FAILED: a message was expected, not #{said(got)}"
+end
+
+# What a message, an end or an error is, as one line.
+def said(got : Message | Nil | Cancelled | SocketError | WebSocketError) : String
+  case got
+  in Message
+    "#{got.text? ? "text" : "binary"} #{got.data.bytesize > 64 ? got.data.bytesize.to_s + " bytes" : got.data.inspect}"
+  in Nil
+    "end"
+  in Cancelled
+    "cancelled"
+  in SocketError
+    "SocketError #{got.message}"
+  in WebSocketError
+    "#{got.code} #{got.message}"
+  end
+end
+
+# What a server's end makes of *wire*, written by a raw client: what
+# `receive` answered, then what the client read back - the close frame's
+# code, and whether the connection then ended.
+def server_fault(wire : String, max : Int32 = WebSocket::MAX_MESSAGE) : String
+  a, b = pair
+  raw = Raw.new(a)
+  ws = WebSocket.new(b, "", false, nil, max)
+  b.read_timeout_ms = 5000
+  got = "nothing"
+  group do |g|
+    g.spawn do
+      raw.write(wire)
+      0
+    end
+    got = said(ws.receive)
+    0
+  end
+  unless ws.closed?
+    a.close
+    b.close
+    return "#{got} | open"
+  end
+  f = raw.next_frame?
+  ended = f ? raw.ended? : false
+  a.close
+  return "#{got} | no close" unless f
+  return "#{got} | op #{f.op}#{f.masked? ? " masked" : ""}" unless f.op == 8 && !f.masked?
+  "#{got} | close #{f.code}#{ended ? "" : " NOT ENDED"}"
+end
+
+# What a client's end makes of *wire*, written by a raw server.
+def client_fault(wire : String) : String
+  a, b = pair
+  raw = Raw.new(b)
+  ws = WebSocket.new(a, "", true)
+  a.read_timeout_ms = 5000
+  raw.write(wire)
+  got = "nothing"
+  closing = "no close"
+  group do |g|
+    g.spawn do
+      got = said(ws.receive)
+      0
+    end
+    g.spawn do
+      if f = raw.next_frame?
+        closing = f.op == 8 && f.masked? ? "close #{f.code}" : "op #{f.op}"
+      end
+      # The server's part: it ends the connection after a close.
+      b.close
+      0
+    end
+    0
+  end
+  a.close unless ws.closed?
+  got + " | " + closing
+end
+
+# What `connect`, offering "chat", makes of a server that answers its
+# handshake with *status* and *lines*, and *after* in the same write.
+# *accept* is "right", a `Sec-WebSocket-Accept` that answers the
+# client's key; "wrong", the one for §1.3's key; or "none". An open
+# connection is "open <protocol> <the first message>".
+def fake_server(lines : String, after : String = "", accept : String = "right", status : String = "HTTP/1.1 101 Switching Protocols") : String
+  l = IyiSocket.listen("127.0.0.1", 0)
+  port = l.local_port
+  result = "nothing"
+  group do |g|
+    g.spawn do
+      s = l.accept.or_panic
+      raw = Raw.new(s)
+      head = ""
+      while !head.ends_with?("\r\n\r\n")
+        head = head + raw.read_exact(1)
+      end
+      key = "dGhlIHNhbXBsZSBub25jZQ=="
+      if accept == "right"
+        HTTP.split_crlf(head).each do |line|
+          key = HTTP.trim(line[18, line.bytesize - 18]) if line.downcase.starts_with?("sec-websocket-key:")
+        end
+      end
+      answer_line = accept == "none" ? "" : "Sec-WebSocket-Accept: " + WebSocket.accept(key) + "\r\n"
+      raw.write(status + "\r\n" + lines + answer_line + "\r\n" + after)
+      # Whatever the client sends next - its close, or nothing before it
+      # goes - a close answers, and the connection ends.
+      got = s.read(4096)
+      s.write(bytes([0x88, 0x02, 0x03, 0xe8])) if got.is_a?(String) && got.bytesize > 0
+      s.close
+      0
+    end
+    got = WebSocket.connect("ws://127.0.0.1:#{port}/", protocols: ["chat"])
+    case got
+    in WebSocket
+      result = "open #{got.protocol || "-"} " + said(got.receive)
+      got.close
+    in HTTPError
+      result = got.message
+    in WebSocketError
+      result = got.message
+    in SocketError
+      result = got.message
+    in Cancelled
+      result = "cancelled"
+    end
+    0
+  end
+  l.close
+  result
+end
+
+def handshake(extra : Hash(String, String) = {} of String => String, without : String = "", method : String = "GET", version : String = "HTTP/1.1") : Request
+  h = {"Host" => "x", "Upgrade" => "websocket", "Connection" => "keep-alive, Upgrade",
+       "Sec-WebSocket-Version" => "13", "Sec-WebSocket-Key" => "dGhlIHNhbXBsZSBub25jZQ=="}
+  h.delete(without)
+  extra.each { |k, v| h[k] = v }
+  Request.new(method, "/chat", nil, h, "", version)
+end
+
+# The status, the body and the headers named of `upgrade`'s answer.
+def upgraded(req : Request, protocols : Array(String) = [] of String) : String
+  r = WebSocket.upgrade(req, protocols) { |ws| ws.close }
+  text = "#{r.status} #{r.body.inspect}"
+  ["Upgrade", "Connection", "Sec-WebSocket-Accept", "Sec-WebSocket-Protocol", "Sec-WebSocket-Version"].each do |name|
+    if v = r.header(name)
+      text = text + " #{name}=#{v}"
+    end
+  end
+  text
+end
+
+# --- the echo server the script's peers talk to ---------------------------
+
+def echo(ws : WebSocket, listener : IyiSocket) : Nil
+  while true
+    got = ws.receive
+    case got
+    in Message
+      if got.text? && got.data == "stop"
+        listener.close
+        ws.close(1001, "stopping")
+        return
+      end
+      got.text? ? ws.send(got.data) : ws.send_binary(got.data)
+    in Nil
+      return
+    in Cancelled
+      return
+    in SocketError
+      return
+    in WebSocketError
+      return
+    end
+  end
+end
+
+def serve : Nil
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  puts listener.local_port
+  Server.serve(listener) do |req|
+    WebSocket.upgrade(req, ["chat", "superchat"]) { |ws| echo(ws, listener) }
+  end
+  puts "stopped"
+end
+
+# --- the client the script's Python server talks to -----------------------
+
+def connect(port : String) : Nil
+  ws = WebSocket.connect("ws://127.0.0.1:#{port}/chat?x=1", {"X-Test" => "1"}, ["chat", "superchat"]).or_panic
+  puts "protocol #{ws.protocol || "-"}"
+  3.times do
+    got = ws.receive.or_panic
+    case got
+    in Message
+      puts said(got)
+      (got.text? ? ws.send(got.data) : ws.send_binary(got.data)).or_panic
+    in Nil
+      puts "ended early"
+    end
+  end
+  ws.send("é and ✓").or_panic
+  puts said(ws.receive)
+  puts "closed #{ws.close_code} #{ws.close_reason}"
+end
+
+if Program.args.size > 0
+  if Program.args[0] == "serve"
+    serve
+  elsif Program.args[0] == "connect"
+    connect(Program.args[1])
+  end
+  exit 0
+end
+
+puts "== handshake"
+# RFC 6455 §1.3's own example.
+assert_str "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", WebSocket.accept("dGhlIHNhbXBsZSBub25jZQ=="), "the accept value of §1.3's key"
+assert_str "101 \"\" Upgrade=websocket Connection=Upgrade Sec-WebSocket-Accept=s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", upgraded(handshake), "a handshake is answered 101"
+assert_str "101 \"\" Upgrade=websocket Connection=Upgrade Sec-WebSocket-Accept=s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", upgraded(handshake({"Upgrade" => "WebSocket", "Connection" => "upgrade"})), "Upgrade and Connection in any case"
+assert_str "400 \"a WebSocket handshake is a GET, not POST\\n\"", upgraded(handshake(method: "POST")), "a POST"
+assert_str "400 \"a WebSocket handshake is HTTP/1.1, not HTTP/1.0\\n\"", upgraded(handshake(version: "HTTP/1.0")), "HTTP/1.0"
+assert_str "400 \"Upgrade does not name websocket\\n\"", upgraded(handshake(without: "Upgrade")), "no Upgrade"
+assert_str "400 \"Upgrade does not name websocket\\n\"", upgraded(handshake({"Upgrade" => "h2c"})), "an upgrade to h2c"
+assert_str "400 \"Connection does not hold upgrade\\n\"", upgraded(handshake({"Connection" => "keep-alive"})), "no upgrade in Connection"
+assert_str "400 \"no Sec-WebSocket-Version\\n\"", upgraded(handshake(without: "Sec-WebSocket-Version")), "no version"
+assert_str "426 \"Sec-WebSocket-Version 8 is not 13\\n\" Sec-WebSocket-Version=13", upgraded(handshake({"Sec-WebSocket-Version" => "8"})), "version 8 is 426 naming 13"
+assert_str "400 \"no Sec-WebSocket-Key\\n\"", upgraded(handshake(without: "Sec-WebSocket-Key")), "no key"
+["c2hvcnQ=", "dGhlIHNhbXBsZSBub25jZQ", "dGhlIHNhbXBsZSBub25jZQ=!", "dGhlIHNhbXBsZSBub25jZ-==", "dGhlIHNhbXBsZSBub25jZQ==, dGhlIHNhbXBsZSBub25jZQ=="].each do |bad|
+  assert_str "400 \"Sec-WebSocket-Key is not 16 bytes in base64\\n\"", upgraded(handshake({"Sec-WebSocket-Key" => bad})), "key #{bad.inspect}"
+end
+# The server's order is the preference; nothing in common is no protocol.
+chosen = upgraded(handshake({"Sec-WebSocket-Protocol" => "superchat, chat"}), ["chat", "superchat"])
+assert_true chosen.ends_with?(" Sec-WebSocket-Protocol=chat"), "the server's first protocol the client offered: #{chosen}"
+assert_true !upgraded(handshake({"Sec-WebSocket-Protocol" => "mqtt"}), ["chat"]).includes?("Protocol="), "no protocol in common names none"
+assert_true !upgraded(handshake, ["chat"]).includes?("Protocol="), "a client that offers none is given none"
+puts "  §1.3's accept value, 101 with it, 400 for seven faults and five bad keys, 426 naming 13, the server's protocol order"
+
+puts "\n== frames a server reads"
+# §5.7's examples, byte for byte.
+assert_str "81 85 37 fa 21 3d 7f 9f 4d 51 58", hex(frame(1, "Hello")), "the test's frame writer agrees with §5.7"
+a, b = pair
+raw = Raw.new(a)
+ws = WebSocket.new(b, "", false)
+raw.write(bytes([0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58]))
+assert_str "text \"Hello\"", said(ws.receive), "§5.7's masked Hello"
+# Fragments, with a ping between them, which is answered unmasked with
+# its own payload, and a pong, which is read past.
+raw.write(frame(1, "Hel", fin: false) + frame(9, "Hello") + frame(10, "unasked") + frame(0, "lo"))
+assert_str "text \"Hello\"", said(ws.receive), "§5.7's fragmented Hello around a ping and a pong"
+assert_str "8a 05 48 65 6c 6c 6f", hex(raw.read_exact(7)), "§5.7's pong: unmasked, the ping's payload"
+# Empty messages, and empty fragments.
+raw.write(frame(1, "") + frame(2, "", fin: false) + frame(0, "", fin: false) + frame(0, ""))
+assert_str "text \"\"", said(ws.receive), "an empty text"
+assert_str "binary \"\"", said(ws.receive), "a binary of three empty fragments"
+# Binary is bytes, and is not checked as text.
+raw.write(frame(2, bytes([0xff, 0xc0])))
+got = message(ws.receive)
+assert_true got.binary? && got.data == bytes([0xff, 0xc0]), "binary that is not UTF-8"
+# A character split between two fragments is whole.
+raw.write(frame(1, bytes([0x63, 0x61, 0x66, 0xc3]), fin: false) + frame(0, bytes([0xa9])))
+assert_str "text \"café\"", said(ws.receive), "é split between two fragments"
+raw.write(frame(1, bytes([0xf0, 0x9f]), fin: false) + frame(0, bytes([0x98]), fin: false) + frame(0, bytes([0x80])))
+assert_str "text \"😀\"", said(ws.receive), "a four-byte character over three fragments"
+# The three lengths: 7 bits, 16 (§5.7's 256 bytes), 64 (65536).
+group do |g|
+  g.spawn do
+    raw.write(frame(2, pattern(125)) + frame(2, pattern(126)) + frame(2, pattern(256)) + frame(2, pattern(65535)) + frame(2, pattern(65536)) + frame(2, pattern(1000000)))
+    0
+  end
+  [125, 126, 256, 65535, 65536, 1000000].each do |n|
+    got = message(ws.receive)
+    assert_true got.binary? && got.data == pattern(n), "a binary of #{n} bytes"
+  end
+  0
+end
+assert_str "82 7e 01 00", hex(frame(2, pattern(256), mask: nil)[0, 4]), "the test writes 256 as §5.7 does"
+assert_str "82 7f 00 00 00 00 00 01 00 00", hex(frame(2, pattern(65536), mask: nil)[0, 10]), "the test writes 65536 as §5.7 does"
+# A message in many fragments whose sizes cross the read buffer's.
+group do |g|
+  g.spawn do
+    whole = pattern(300000)
+    at = 0
+    sizes = [1, 7, 125, 126, 16383, 16384, 16385, 70000]
+    k = 0
+    while at < whole.bytesize
+      n = sizes[k % sizes.size]
+      n = whole.bytesize - at if n > whole.bytesize - at
+      raw.write(frame(at == 0 ? 2 : 0, whole[at, n], fin: at + n == whole.bytesize))
+      at = at + n
+      k = k + 1
+    end
+    0
+  end
+  got = message(ws.receive)
+  assert_true got.binary? && got.data == pattern(300000), "300000 bytes in fragments of 1 to 70000"
+  0
+end
+a.close
+ws.receive
+puts "  §5.7's frames, fragments around control frames, a character across fragments, 7, 16 and 64-bit lengths"
+
+# What arrived after the handshake's head is read first: a whole frame,
+# then half of one whose rest is on the socket.
+a, b = pair
+raw = Raw.new(a)
+first = frame(1, "from the handshake's read")
+second = frame(2, pattern(40000))
+ws = WebSocket.new(b, first + second[0, 20000], false)
+group do |g|
+  g.spawn do
+    raw.write(second[20000, second.bytesize - 20000] + frame(1, "after"))
+    0
+  end
+  assert_str "text \"from the handshake's read\"", said(ws.receive), "a frame in the leftover"
+  assert_str "binary 40000 bytes", said(ws.receive), "a frame begun in the leftover"
+  assert_str "text \"after\"", said(ws.receive), "then the socket"
+  0
+end
+a.close
+puts "  the bytes after the handshake are read first, a frame split between them and the socket"
+
+puts "\n== frames a server writes"
+a, b = pair
+raw = Raw.new(a)
+ws = WebSocket.new(b, "", false)
+ws.send("hi").or_panic
+assert_str "81 02 68 69", hex(raw.read_exact(4)), "a text frame, unmasked"
+ws.ping("p").or_panic
+assert_str "89 01 70", hex(raw.read_exact(3)), "a ping"
+group do |g|
+  g.spawn do
+    ws.send_binary(pattern(300)).or_panic
+    ws.send_binary(pattern(70000)).or_panic
+    0
+  end
+  f = raw.next_frame
+  assert_true f.b0 == 0x82 && f.b1 == 126 && f.payload == pattern(300), "300 bytes with a 16-bit length"
+  f = raw.next_frame
+  assert_true f.b0 == 0x82 && f.b1 == 127 && f.payload == pattern(70000), "70000 bytes with a 64-bit length"
+  0
+end
+# Two tasks sending at once: the 16 MiB frame fills the socket's buffers
+# and its write parks partway, and the other task's frames wait for it
+# rather than land inside it.
+huge = pattern(16777216)
+group do |g|
+  g.spawn do
+    ws.send_binary(huge).or_panic
+    0
+  end
+  g.spawn do
+    ws.send("between").or_panic
+    ws.ping("too").or_panic
+    0
+  end
+  f = raw.next_frame
+  assert_true f.b0 == 0x82 && f.payload.bytesize == huge.bytesize && f.payload == huge, "16 MiB written whole while another task sends"
+  f = raw.next_frame
+  assert_true f.b0 == 0x81 && f.payload == "between", "the other task's text after it"
+  f = raw.next_frame
+  assert_true f.b0 == 0x89 && f.payload == "too", "and its ping"
+  0
+end
+a.close
+b.close
+puts "  unmasked, final, the shortest length that holds the payload; a frame at a time between tasks"
+
+puts "\n== frames a client writes"
+a, b = pair
+raw = Raw.new(b)
+ws = WebSocket.new(a, "", true)
+keys = [] of String
+group do |g|
+  g.spawn do
+    (0..20).each { |n| ws.send_binary(pattern(n)).or_panic }
+    ws.send("masked").or_panic
+    ws.send_binary(pattern(100001)).or_panic
+    0
+  end
+  (0..20).each do |n|
+    f = raw.next_frame
+    assert_true f.masked? && f.op == 2 && f.fin?, "a client's frame of #{n} bytes is masked"
+    assert_str hex(pattern(n)), hex(f.payload), "a client's #{n} bytes, unmasked by the reader"
+    keys << f.key
+  end
+  f = raw.next_frame
+  assert_true f.masked? && f.op == 1 && f.payload == "masked", "a client's text is masked"
+  keys << f.key
+  f = raw.next_frame
+  assert_true f.masked? && f.payload == pattern(100001), "a client's 100001 bytes are masked"
+  keys << f.key
+  0
+end
+distinct = [] of String
+keys.each { |k| distinct << k unless distinct.includes?(k) }
+assert_true distinct.size == keys.size, "every frame has a key of its own: #{distinct.size} of #{keys.size}"
+assert_true !keys.includes?(bytes([0, 0, 0, 0])), "no key is zero"
+# A server's unmasked frames are what a client reads.
+raw.write(frame(1, "to the client", mask: nil) + frame(9, "ping", mask: nil))
+assert_str "text \"to the client\"", said(ws.receive), "a server's unmasked text"
+raw.write(frame(1, "x", mask: nil))
+assert_str "text \"x\"", said(ws.receive), "after the ping"
+f = raw.next_frame
+assert_true f.op == 10 && f.masked? && f.payload == "ping", "a client's pong is masked"
+a.close
+b.close
+puts "  #{keys.size} frames, each masked with a key of its own, 0 to 20 bytes past each word boundary"
+
+puts "\n== what a server refuses"
+assert_str "1002 WebSocket: a client's frame is not masked | close 1002", server_fault(frame(1, "bare", mask: nil)), "an unmasked client frame"
+assert_str "1002 WebSocket: reserved bits set in a frame, and no extension was agreed that uses them | close 1002", server_fault(frame(1, "x", rsv: 0x40)), "RSV1"
+assert_str "1002 WebSocket: reserved bits set in a frame, and no extension was agreed that uses them | close 1002", server_fault(frame(1, "x", rsv: 0x20)), "RSV2"
+assert_str "1002 WebSocket: reserved bits set in a frame, and no extension was agreed that uses them | close 1002", server_fault(frame(1, "x", rsv: 0x10)), "RSV3"
+[3, 4, 5, 6, 7, 11, 12, 13, 14, 15].each do |op|
+  assert_str "1002 WebSocket: opcode #{op} is reserved | close 1002", server_fault(frame(op, "x")), "opcode #{op}"
+end
+assert_str "1002 WebSocket: a control frame is fragmented | close 1002", server_fault(frame(9, "x", fin: false)), "a fragmented ping"
+assert_str "1002 WebSocket: a control frame claims more than 125 bytes | close 1002", server_fault(frame(9, pattern(126))), "a ping of 126 bytes"
+assert_str "1002 WebSocket: a control frame claims more than 125 bytes | close 1002", server_fault(frame(8, pattern(126))), "a close of 126 bytes"
+assert_str "1002 WebSocket: a continuation frame with no message to continue | close 1002", server_fault(frame(0, "x")), "a continuation alone"
+assert_str "1002 WebSocket: a new message before the last one's final frame | close 1002", server_fault(frame(1, "a", fin: false) + frame(1, "b")), "a text inside a text"
+assert_str "1002 WebSocket: a 64-bit length with its high bit set | close 1002", server_fault(frame(2, "", declared: 0x7fffffffffffffff_i64)[0, 2] + bytes([0x80, 0, 0, 0, 0, 0, 0, 0]) + bytes(MASK)), "a 64-bit length with its high bit set"
+# Text that is not UTF-8, and text that stops inside a character.
+[[0xc0, 0x80], [0xe0, 0x80, 0x80], [0xed, 0xa0, 0x80], [0xf4, 0x90, 0x80, 0x80], [0xf8, 0x88, 0x80, 0x80, 0x80], [0xff], [0x80], [0x63, 0xc3]].each do |seq|
+  assert_str "1007 WebSocket: a text message that is not UTF-8 | close 1007", server_fault(frame(1, bytes(seq))), "#{hex(bytes(seq))} as text"
+end
+assert_str "1007 WebSocket: a text message that ends inside a character | close 1007", server_fault(frame(1, bytes([0x61, 0xc3]), fin: false) + frame(0, "")), "a fragmented text ending inside é"
+# A fragment that cannot be UTF-8 fails the message there, before its
+# final frame, which never comes.
+assert_str "1007 WebSocket: a text message that is not UTF-8 | close 1007", server_fault(frame(1, "fine", fin: false) + frame(0, bytes([0xff]), fin: false)), "a bad fragment before the end"
+# Past the limit, refused on the length declared, before anything is read.
+assert_str "1009 WebSocket: a message past the 1000 bytes this end takes | close 1009", server_fault(frame(2, "", declared: 1001_i64), 1000), "1001 declared bytes past 1000"
+assert_str "1009 WebSocket: a message past the 16777216 bytes this end takes | close 1009", server_fault(frame(2, "", declared: 0x4000000000000000_i64)), "2^62 declared bytes, with none sent"
+assert_str "1009 WebSocket: a message past the 1000 bytes this end takes | close 1009", server_fault(frame(2, pattern(600), fin: false) + frame(0, "", declared: 401_i64), 1000), "fragments that pass 1000 together"
+# A close the peer may not send.
+assert_str "1002 WebSocket: a close frame of one byte; a code is two | close 1002", server_fault(frame(8, bytes([3]))), "a one-byte close"
+[0, 999, 1004, 1005, 1006, 1015, 1016, 1100, 2000, 2999, 5000, 65535].each do |code|
+  assert_str "1002 WebSocket: close code #{code} is not one a peer sends | close 1002", server_fault(frame(8, bytes([code >> 8, code & 255]))), "close code #{code}"
+end
+assert_str "1007 WebSocket: a close reason that is not UTF-8 | close 1007", server_fault(frame(8, bytes([3, 232, 0xff]))), "a close reason that is not UTF-8"
+# A connection that ends partway through a frame, with no close.
+a, b = pair
+raw = Raw.new(a)
+ws = WebSocket.new(b, "", false)
+raw.write(frame(1, "cut short")[0, 9])
+a.close
+assert_str "1006 WebSocket: the connection ended without a close frame", said(ws.receive), "the peer gone partway through a frame"
+assert_true ws.closed? && ws.close_code == 1006, "1006 is the close code then"
+assert_str "end", said(ws.receive), "a closed connection receives nothing"
+puts "  1002 for nine faults, 1007 for text and a reason that are not UTF-8, 1009 on the declared length, 1006 for a cut"
+
+puts "\n== what a client refuses"
+assert_str "1002 WebSocket: a server's frame is masked | close 1002", client_fault(frame(1, "masked")), "a masked server frame"
+assert_str "1007 WebSocket: a text message that is not UTF-8 | close 1007", client_fault(frame(1, bytes([0xc3, 0x28]), mask: nil)), "a server's text that is not UTF-8"
+assert_str "1009 WebSocket: a message past the 16777216 bytes this end takes | close 1009", client_fault(frame(2, "", mask: nil, declared: 16777217_i64)), "a server's message past the client's limit"
+puts "  a masked server frame, text that is not UTF-8, a message past the limit"
+
+puts "\n== what a client's handshake refuses"
+ok = "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+assert_str "open - text \"with the 101\"", fake_server(ok, frame(1, "with the 101", mask: nil)), "a frame that came with the 101"
+assert_str "open chat text \"x\"", fake_server(ok + "Sec-WebSocket-Protocol: chat\r\n", frame(1, "x", mask: nil)), "the protocol offered"
+assert_str "WebSocket: the server's Sec-WebSocket-Accept \"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\" does not answer the key sent", fake_server(ok, accept: "wrong"), "a wrong accept"
+assert_str "WebSocket: the server's 101 has no Sec-WebSocket-Accept", fake_server(ok, accept: "none"), "no accept"
+assert_str "WebSocket: the server's 101 does not upgrade to websocket", fake_server("Upgrade: h2c\r\nConnection: Upgrade\r\n"), "an upgrade to h2c"
+assert_str "WebSocket: the server's 101 has no Connection: Upgrade", fake_server("Upgrade: websocket\r\n"), "no Connection"
+assert_str "WebSocket: the server agreed to extensions \"permessage-deflate\", and none were offered", fake_server(ok + "Sec-WebSocket-Extensions: permessage-deflate\r\n"), "an extension nobody offered"
+assert_str "WebSocket: the server chose protocol \"mqtt\", which was not offered", fake_server(ok + "Sec-WebSocket-Protocol: mqtt\r\n"), "a protocol nobody offered"
+assert_str "HTTP: the server answered 426 Upgrade Required to an upgrade to websocket, not 101 Switching Protocols", fake_server("Sec-WebSocket-Version: 13\r\nContent-Length: 0\r\n", status: "HTTP/1.1 426 Upgrade Required"), "a 426"
+puts "  a frame with the 101, an offered protocol; a wrong or missing accept, Upgrade, Connection, an extension, a protocol not offered, a 426"
+
+puts "\n== close handshake"
+# The peer closes: its code is echoed, and the server ends the connection.
+[1000, 1001, 1003, 1007, 1011, 1012, 1014, 3000, 4999].each do |code|
+  a, b = pair
+  raw = Raw.new(a)
+  ws = WebSocket.new(b, "", false)
+  raw.write(frame(8, bytes([code >> 8, code & 255]) + "bye"))
+  assert_str "end", said(ws.receive), "a close #{code} ends receive"
+  assert_true ws.closed? && ws.close_code == code && ws.close_reason == "bye", "close_code #{code}"
+  f = raw.next_frame
+  assert_true f.op == 8 && f.code == code && f.reason == "" && !f.masked?, "a close #{code} is echoed with its code"
+  assert_true raw.ended?, "the server ends the connection after the close handshake"
+  a.close
+end
+a, b = pair
+raw = Raw.new(a)
+ws = WebSocket.new(b, "", false)
+raw.write(frame(1, "last") + frame(8, ""))
+assert_str "text \"last\"", said(ws.receive), "a message before the close"
+assert_str "end", said(ws.receive), "an empty close"
+assert_true ws.close_code == 1005, "an empty close is 1005, not #{ws.close_code}"
+assert_str "88 00", hex(raw.read_exact(2)), "an empty close is echoed empty"
+assert_str "1005 WebSocket: the connection is closed", said(ws.send("late")), "send after the close"
+a.close
+# This end closes: the close goes out, what the peer sends before its own
+# close is read past, and the peer's close ends it.
+a, b = pair
+raw = Raw.new(a)
+ws = WebSocket.new(b, "", false)
+group do |g|
+  g.spawn do
+    f = raw.next_frame
+    assert_true f.op == 8 && f.code == 4000 && f.reason == "done", "the server's close carries its code and reason"
+    raw.write(frame(1, "in flight") + frame(9, "late ping") + frame(8, bytes([0x0f, 0xa0])))
+    0
+  end
+  assert_true ws.close(4000, "done").nil?, "close answers nil once the peer's close came"
+  0
+end
+assert_true ws.closed? && ws.close_code == 4000, "the code the peer echoed"
+assert_true raw.ended?, "and the connection is ended"
+assert_str "end", said(ws.receive), "receive after close"
+assert_true ws.close.nil?, "a second close does nothing"
+a.close
+# A client's close: the server answers it and ends the connection, which
+# the client waits for.
+a, b = pair
+raw = Raw.new(b)
+ws = WebSocket.new(a, "", true)
+group do |g|
+  g.spawn do
+    f = raw.next_frame
+    assert_true f.op == 8 && f.masked? && f.code == 1000, "the client's close is masked, 1000"
+    raw.write(frame(8, bytes([3, 232]), mask: nil))
+    b.close
+    0
+  end
+  assert_true ws.close.nil?, "a client's close"
+  0
+end
+assert_true ws.closed? && ws.close_code == 1000, "the client's close handshake"
+# A peer that ends the connection without answering the close.
+a, b = pair
+raw = Raw.new(a)
+ws = WebSocket.new(b, "", false)
+unanswered = "nothing"
+group do |g|
+  g.spawn do
+    raw.next_frame
+    a.close
+    0
+  end
+  unanswered = said(ws.close)
+  0
+end
+assert_str "1006 WebSocket: the connection ended without a close frame", unanswered, "a close nobody answers"
+assert_true ws.closed? && ws.close_code == 1006, "a peer that never answers the close leaves 1006, not #{ws.close_code}"
+puts "  nine codes echoed, an empty close, a close from each end, messages read past while closing"
+
+puts "\n== what a program is refused"
+a, b = pair
+ws = WebSocket.new(b, "", false)
+assert_str "refused: WebSocket: send's text is not UTF-8; send_binary sends bytes", answer { ws.send(bytes([0xff])); "sent" }, "text that is not UTF-8"
+assert_str "refused: WebSocket: a ping carries at most 125 bytes, not 126", answer { ws.ping(pattern(126)); "sent" }, "a long ping"
+assert_str "refused: WebSocket: close code 1005 is not one an endpoint sends: 1000-1003, 1007-1014 or 3000-4999", answer { ws.close(1005); "sent" }, "close 1005"
+assert_str "refused: WebSocket: a close reason is at most 123 bytes, not 124", answer { ws.close(1000, String.new(124) { |p| 124.times { |i| p[i] = 120_u8 } }); "sent" }, "a long reason"
+assert_str "refused: WebSocket: sec-websocket-key is the handshake's own header", answer { WebSocket.connect("ws://127.0.0.1:1/", {"sec-websocket-key" => "x"}); "sent" }, "a caller's key, in any case"
+assert_str "refused: WebSocket: protocol \"a b\" is not a token", answer { WebSocket.connect("ws://127.0.0.1:1/", protocols: ["a b"]); "sent" }, "a protocol that is not a token"
+assert_true !ws.closed?, "a refused call writes nothing"
+a.close
+b.close
+puts "  text that is not UTF-8, a long ping, close 1005, a long reason, the handshake's own header, a bad protocol"
+
+puts "\n== client and server over std/http"
+listener = IyiSocket.listen("127.0.0.1", 0)
+port = listener.local_port
+seen = [] of String
+group do |g|
+  g.spawn do
+    Server.serve(listener) do |req|
+      if req.path == "/plain"
+        Response.new(200, "plain")
+      elsif req.path == "/small"
+        WebSocket.upgrade(req, max_message: 1000) { |ws| echo(ws, listener) }
+      elsif req.path == "/bye"
+        WebSocket.upgrade(req) { |ws| ws.close(4001, "server done") }
+      elsif req.path == "/greet"
+        WebSocket.upgrade(req) do |ws|
+          ws.send("first")
+          echo(ws, listener)
+        end
+      else
+        WebSocket.upgrade(req, ["chat", "superchat"]) do |ws|
+          seen << (req.header("X-Test") || "-")
+          echo(ws, listener)
+        end
+      end
+    end
+    0
+  end
+  g.spawn do
+    ws = WebSocket.connect("ws://127.0.0.1:#{port}/echo", {"X-Test" => "yes"}, ["superchat", "chat"]).or_panic
+    assert_str "chat", ws.protocol || "-", "the server's protocol order"
+    ws.send("hello").or_panic
+    assert_str "text \"hello\"", said(ws.receive), "an echoed text"
+    ws.ping("are you there").or_panic
+    big = pattern(1048576)
+    ws.send_binary(big).or_panic
+    echoed = message(ws.receive)
+    assert_true echoed.binary? && echoed.data == big, "a megabyte echoed"
+    100.times { |i| ws.send("n=#{i}").or_panic }
+    100.times { |i| assert_str "text \"n=#{i}\"", said(ws.receive), "message #{i} of 100 in order" }
+    assert_true ws.close.nil? && ws.closed? && ws.close_code == 1000, "the client's close over std/http"
+    assert_str "yes", seen[0], "the caller's header reached the server"
+
+    # The server's limit.
+    small = WebSocket.connect("ws://127.0.0.1:#{port}/small").or_panic
+    small.send_binary(pattern(1001)).or_panic
+    assert_str "end", said(small.receive), "a message past the server's limit"
+    assert_true small.close_code == 1009, "1009 from the server, not #{small.close_code}"
+    # The server closes.
+    bye = WebSocket.connect("ws://127.0.0.1:#{port}/bye").or_panic
+    assert_str "end", said(bye.receive), "the server's close"
+    assert_true bye.close_code == 4001 && bye.close_reason == "server done", "the server's code and reason"
+    # The server writes first.
+    greet = WebSocket.connect("ws://127.0.0.1:#{port}/greet").or_panic
+    assert_str "text \"first\"", said(greet.receive), "a message the server wrote before the client"
+    greet.close
+
+    # What the client refuses.
+    plain = WebSocket.connect("ws://127.0.0.1:#{port}/plain")
+    assert_true plain.is_a?(HTTPError), "a 200 is not an upgrade"
+    assert_str "HTTP: the server answered 200 OK to an upgrade to websocket, not 101 Switching Protocols", plain.as(HTTPError).message, "the 200's error"
+    assert_str "WebSocket: TLS is not in 0.x; use ws://", WebSocket.connect("wss://127.0.0.1:#{port}/").as(WebSocketError).message, "wss"
+    assert_str "WebSocket: not a ws:// URL: \"http://127.0.0.1/\"", WebSocket.connect("http://127.0.0.1/").as(WebSocketError).message, "http"
+    upper = WebSocket.connect("WS://127.0.0.1:#{port}/echo").or_panic
+    upper.close
+
+    # A raw handshake with a frame in the same write: the server reads
+    # the frame from what came after the head.
+    rs = IyiSocket.connect("127.0.0.1", port).or_panic
+    rr = Raw.new(rs)
+    rr.write("GET /echo HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n" + frame(1, "riding along"))
+    head = ""
+    while !head.ends_with?("\r\n\r\n")
+      head = head + rr.read_exact(1)
+    end
+    assert_true head.starts_with?("HTTP/1.1 101 Switching Protocols\r\n") && head.includes?("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"), "a raw handshake's 101: #{head}"
+    f = rr.next_frame
+    assert_true f.op == 1 && f.payload == "riding along", "the frame that came with the handshake"
+    rr.write(frame(1, "stop"))
+    f = rr.next_frame
+    assert_true f.op == 8 && f.code == 1001, "the server's close on stop"
+    rs.close
+    0
+  end
+  0
+end
+puts "  protocol, echo, a megabyte, 100 in order, the server's limit and close, a frame with the handshake, refusals"
+
+puts "\nALL CHECKS PASSED"

@@ -4,6 +4,38 @@
 
 ### Added
 
+- **`std/string_scanner`: `StringScanner`, the other library's lexical
+  scanner, matching at its offset with std/regex's own machine; and
+  `Regex#match_at`, the match that begins at a given byte.**
+  `scan`, `skip`, `check` and `matches?` match at the offset (a `Regex`,
+  a `String`, a `Char`, or for the first three a count of characters);
+  `scan_until`, `skip_until` and `check_until` search forward and take
+  everything up to the match's end. `[]` and `[]?` read the last match's
+  groups by number, from the end, or by name; `offset`/`offset=`,
+  `eos?`, `rest`, `peek`, `matched?`, `reset`, `terminate` and
+  `inspect`, which writes `#<StringScanner 5/16 …s ‣is …>` as the other
+  library does. Offsets are bytes, as every position in iyi is, and
+  `skip` answers bytes so the offset moves by what it says; counts stay
+  characters, so `scan(2)` on `文字列` is `文字`. A regex is matched at
+  the offset by the new `Regex#match_at` (Python's `pattern.match(text,
+  pos)`), a Pike VM run that starts no thread after the offset, so a
+  failed `scan` costs what the pattern read, not the rest of the text;
+  `^` and `\b` still see the whole text, as there. Refused, with a
+  sentence: an offset that is negative, past the end, or inside a
+  character; a negative count; a group the last match does not have,
+  one that took no part, and any group after a miss. Input is never
+  refused: a miss is nil, and the exercise's tokenizer answers its own
+  `LexError` value for source it cannot read.
+  `bench/std_string_scanner_exercise.sh` holds it, plain and `--release`:
+  the other library's StringScanner spec ported (multi-byte cases in
+  bytes), a tokenizer for a small language, seven refusal programs
+  checked for their exact sentence, `match_at` against Python's
+  `re.match(text, pos)` on 47,840 pattern, text and offset triples with
+  no difference, the tokenizer against one written with Python's `re`
+  over 300 generated programs (1,094 tokens, 155 errors) with the same
+  answer, and nine broken copies of the module each caught at the check
+  that names them. `bench/std_regex_exercise.sh` gains a section on
+  `match_at` and the proof that a run which still searches ahead fails it.
 - **`std/term`: `Term.tty?`, `Term.size`, `Term.raw { }`, `Term.no_echo { }`
   and `Term.read_password`, terminal control without a C library.**
   `tty?(io or fd)` is the prelude's `__iyi_isatty`, the same answer

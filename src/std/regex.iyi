@@ -35,8 +35,10 @@
 # once, and `MULTILINE_ONLY` and `DOTALL` are each half.
 #
 # `match?` is the whole string; `find` the first match; `match` its
-# groups; `scan` every non-overlapping match; `split` and `replace` read
-# those, and an empty match costs no text. A literal, `/a+b/i`, is
+# groups; `match_at` the match that begins at a given byte, which is what
+# std/string_scanner reads tokens with; `scan` every non-overlapping
+# match; `split` and `replace` read those, and an empty match costs no
+# text. A literal, `/a+b/i`, is
 # `Regex.compile("a+b", Options::IGNORE_CASE)` compiled once for the
 # program. There is no `$~`: a match is a value `match` answers, never a
 # variable a call sets behind the program's back.
@@ -741,6 +743,19 @@ pub struct Regex
     span ? span[0] : nil
   end
 
+  # The match that begins exactly at byte *pos*, with its groups, or nil:
+  # the other library's `match_at_byte_index` with `MatchOptions::ANCHORED`,
+  # Python's `pattern.match(text, pos)`, what a scanner asks at its
+  # offset. As there, the text before *pos* is still the text: `^` and
+  # `\A` mean its start, not *pos*, and `\b` sees the byte before *pos*.
+  # A negative *pos* counts from the end, as `match`'s does.
+  def match_at(text : String, pos : Int32) : MatchData?
+    pos = text.bytesize + pos if pos < 0
+    return nil if pos < 0 || pos > text.bytesize
+    slots = @nfa.capture_at(text, pos, @names.size * 2)
+    slots ? MatchData.new(self, text, slots) : nil
+  end
+
   # Where the first match begins, in bytes, or nil. It sets nothing: the
   # other library's `=~` also fills `$~`, which iyi does not have, and a
   # program that wants the groups asks `match`.
@@ -1013,6 +1028,15 @@ class RxNfa
     run = RxRun.new(self, text, slots)
     run.search(from, false, forbid) ? run.slots : nil
   end
+
+  # The leftmost-first match that begins at `from` and nowhere else, with
+  # the first *slots* capture positions. No thread starts after `from`, so
+  # the run ends as soon as the threads that did start have all died: the
+  # cost is the match's length, not the rest of the text's.
+  def capture_at(text : String, from : Int32, slots : Int32) : Array(Int32)?
+    run = RxRun.new(self, text, slots)
+    run.search(from, false, -1, true) ? run.slots : nil
+  end
 end
 
 # One pass of the Pike VM over one text. Two thread lists, each a state
@@ -1090,10 +1114,11 @@ class RxRun
   end
 
   # `whole`: anchored at `from`, and only a match reaching the text's end
-  # counts. Otherwise a fresh thread starts at every character until some
-  # thread has matched, after which only the threads ahead of it in
-  # priority may still change the answer.
-  def search(from : Int32, whole : Bool, forbid : Int32) : Bool
+  # counts. `anchored`: anchored at `from`, any match counts. Otherwise a
+  # fresh thread starts at every character until some thread has matched,
+  # after which only the threads ahead of it in priority may still change
+  # the answer.
+  def search(from : Int32, whole : Bool, forbid : Int32, anchored : Bool = false) : Bool
     matched = false
     pos = from
     @gen = @gen + 1
@@ -1139,11 +1164,11 @@ class RxRun
       end
       break if pos >= @n
       pos = pos + width
-      if !matched && !whole
+      if !matched && !whole && !anchored
         fresh(pos)
         add(true, @nfa.start, pos)
       end
-      break if @nxt_size == 0 && (whole || matched)
+      break if @nxt_size == 0 && (whole || anchored || matched)
       tmp_state = @cur_state
       @cur_state = @nxt_state
       @nxt_state = tmp_state

@@ -197,7 +197,7 @@ fi
 
 echo
 echo "== every regex section reported"
-for phrase in "== match" "== leftmost-first" "== an empty match costs no text" "== the syntax the header lists" "== linear time" "== against Python's re" "== groups and flags against Python's re" "== a regex literal" "== captures" "== flags" "== Unicode" "== escape and union" "== the text side with groups"; do
+for phrase in "== match" "== leftmost-first" "== an empty match costs no text" "== the syntax the header lists" "== linear time" "== against Python's re" "== groups and flags against Python's re" "== a regex literal" "== captures" "== flags" "== Unicode" "== escape and union" "== the text side with groups" "== anchored at an offset"; do
   if ! grep -q "$phrase" "$WORK/regex-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -499,6 +499,9 @@ mutate "\\p{^..} not negated" 'negated = property(set) != negated' 'property(set
 mutate "\\Q..\\E taken unescaped" '            io.write_byte(92_u8) if c < 128_u8 && !word?(c)' '' "\\Q..\\E is the text itself"
 mutate "an escape that leaves spaces" 'special = " .' 'special = ".' "under EXTENDED too"
 mutate "a union that drops a pattern's flags" '    pattern.to_s' '    pattern.source' "union of a pattern keeps its flags to itself"
+# An anchored run that still starts a thread at every later character is
+# a search: `match_at` would find `3-z` from offset 1.
+mutate "match_at that searches ahead" '      if !matched && !whole && !anchored' '      if !matched && !whole' "match_at does not search ahead"
 
 # Linear time, held to a clock: the pathological pattern built from this
 # module runs in a few milliseconds and must finish within 20 seconds. The

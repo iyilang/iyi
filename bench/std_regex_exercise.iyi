@@ -598,4 +598,20 @@ assert_str "date", kind, "Regex#=== in a case"
 assert_true Regex.compile("b") === "abc" && !(Regex.compile("z") === "abc"), "=== finds the pattern anywhere"
 puts "  sub and gsub with \\0-\\9, \\k<name> and blocks; scan with groups; =~, index, match, case"
 
+puts "\n== anchored at an offset"
+anchored = Regex.compile("(\\d+)-(?<tail>[a-z]+)")
+at = must(anchored.match_at("ab12-xy 3-z", 2))
+assert_true at.byte_begin(0) == 2 && at[1] == "12" && at["tail"] == "xy", "match_at answers the match at its byte, with groups"
+assert_true anchored.match_at("ab12-xy 3-z", 1).nil?, "match_at does not search ahead"
+assert_true must(anchored.match_at("ab12-xy 3-z", 8))[0] == "3-z", "and finds the later one where it begins"
+assert_true must(anchored.match_at("ab12-xy", 3))[1] == "2", "it begins wherever it is put"
+assert_true Regex.compile("^b").match_at("ab", 1).nil? && !Regex.compile("^a").match_at("ab", 0).nil?, "^ is the text's start, not the offset"
+assert_true Regex.compile("\\bb").match_at("ab", 1).nil? && !Regex.compile("\\Bb").match_at("ab", 1).nil?, "\\b sees the byte before the offset"
+assert_true must(Regex.compile("a|ab").match_at("xab", 1))[0] == "a", "leftmost-first at the offset too"
+assert_true must(Regex.compile("x*").match_at("abc", 3))[0] == "", "an empty match at the end"
+assert_true Regex.compile("a").match_at("abc", 4).nil?, "an offset past the end matches nothing"
+assert_true must(Regex.compile("é+").match_at("xéé", 1))[0] == "éé" && must(Regex.compile("c").match_at("abc", -1))[0] == "c", "bytes, and a negative offset counts from the end"
+assert_true must(Regex.compile("b+").match_at("abbb", 1)).byte_end(0) == 4 && Regex.compile("b").match_at("abbb", 0).nil?, "a literal pattern anchors too"
+puts "  match_at: groups, no search ahead, ^ and \\b see the whole text"
+
 puts "\nALL CHECKS PASSED"

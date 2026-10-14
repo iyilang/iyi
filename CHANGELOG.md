@@ -37,6 +37,22 @@
   `seek` between a read and a write, as C's stdio asks. Held by
   `bench/std_file_exercise.sh`'s "open modes" section, plain and
   `--release`, with six broken copies each caught.
+- **A failing test says what it expected, what came, and where.**
+  `assert(a == b)` said only "assertion failed", so the first thing a
+  failing test asked of its reader was a `puts` and another run. The
+  prelude now has, with no import, `assert_eq`/`assert_ne` (both values
+  via `inspect`, plus the first differing line of a multi-line text),
+  `assert_nil`, `assert_in_delta`, `assert_includes`, `assert_error(T) { }`
+  and `assert_ok { }` for error unions (each giving the narrowed value
+  back), and `assert_panics(containing) { }`, which catches the panic as
+  the `Panicked` value of a task it runs. `test "name" { }` runs each case
+  as its own task, prints `ok -`/`FAIL -`, carries on past a failure and
+  exits 1 at the end if any case failed, which is still the only thing
+  `iyi test` reads. A caught panic still prints its `iyi: panic:` line.
+  `bench/assertions_exercise.sh` drives each assertion both ways, plain
+  and `--release`, checks the site and exit status from outside the
+  program, and proves every check can fail against 16 patched copies of
+  the prelude; `bench/test_verb.sh` holds the verb's side.
 
 ### Changed
 
@@ -44,6 +60,12 @@
   `Hash#hash` follows the contents, where both were the object's
   identity, so `{"a" => 1} == {"a" => 1}` is true and an equal table
   finds a key. `File.open(path, "a")` appends where it was refused.
+- **New prelude names.** `assert_eq`, `assert_ne`, `assert_nil`,
+  `assert_in_delta`, `assert_includes`, `assert_error`, `assert_ok`,
+  `assert_panics` and `test(name, &)` are the prelude's, so a script
+  without a `module` line that defines one of the same shape is refused
+  by the rule against redefining a prelude method; a file with a `module`
+  line is unaffected.
 
 ## 0.17.0 — 2026-10-14
 

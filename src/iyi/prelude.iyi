@@ -9268,6 +9268,11 @@ def assert(condition : Bool, message : String = "", file : String = __FILE__, li
   raise(message.empty? ? "assertion failed" : "assertion failed: " + message, file, line)
 end
 
+# The assertions that name their values - `assert_eq`, `assert_error`,
+# `assert_panics`, named `test` cases and the rest - with no import, as
+# `assert` has none.
+require "./testing"
+
 # What a wait answers when its task was cancelled (III.4.2): an error
 # member. Here, not in the runtime: `IyiSocket` answers it on every target.
 pub struct Cancelled
@@ -9864,6 +9869,9 @@ fun main(argc : Int32, argv : UInt8**) : Int32
     __iyi_win_install_fault_handler
   {% end %}
   LibIyiMain.__iyi_main(argc, argv)
+  # Named `test` cases keep going past a failure, so the program's own code
+  # ends normally and the exit status is theirs to give (testing.iyi).
+  status = IyiTestCases.verdict
   __iyi_flush_std
   {% if flag?(:win32) %}
     # Not back into the C runtime, whose `exit` is `ExitProcess`, for the
@@ -9875,9 +9883,9 @@ fun main(argc : Int32, argv : UInt8**) : Int32
     # never ended, 20 in 40 held to four cores, and 0 in 1,000 through
     # `TerminateProcess`.
     LibC.fflush(Pointer(Void).new(0_u64))
-    __iyi_exit(0)
+    __iyi_exit(status)
   {% end %}
-  0
+  status
 end
 
 {% if flag?(:wasm32) %}
@@ -9894,7 +9902,8 @@ end
   # it is for every other target.
   fun __main_argc_argv(argc : Int32, argv : UInt8**) : Int32
     LibIyiMain.__iyi_main(argc, argv)
+    status = IyiTestCases.verdict
     __iyi_flush_std
-    0
+    status
   end
 {% end %}

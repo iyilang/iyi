@@ -5557,7 +5557,7 @@ module Iyi
       "todo"      => "`raise \"not yet\"` panics (SPEC.md III.1.4)",
       "vec"       => "an array is its literal, `[1, 2, 3]`, and an empty one says its type, `[] of Int32`",
       "assert"    => "`assert x == 1, \"why\"` panics when the condition is false",
-      "assert_eq" => "`assert a == b, \"why\"` panics when they differ",
+      "assert_eq" => "`assert_eq a, b, \"why\"` panics showing both values when they differ",
     }
 
     # iyi: whether the current `!` token has a space or tab right before it.

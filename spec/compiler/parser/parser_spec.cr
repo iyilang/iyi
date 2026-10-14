@@ -4731,6 +4731,7 @@ end").as(ClassDef)
           "package main\nputs 1\n"                                 => "there is no `package`",
           "println!(\"{}\", 1)\n"                                  => "`println!` is Rust's macro",
           "v = vec![1, 2]\n"                                       => "`vec!` is Rust's macro",
+          "assert_eq!(1, 2)\n"                                     => "`assert_eq!` is Rust's macro, and iyi has none of those: `assert_eq a, b, \"why\"` panics showing both values",
           "def add(a, b):\n  a + b\nend\n"                         => "a block is not opened with `:` and indentation",
           "x = 3\nif x > 1:\n  puts x\nend\n"                      => "a block is not opened with `:` and indentation",
           "case 3\nin 1 then puts 1\nend\n"                        => "`in 1` matches a value, and `in` matches types: a value is matched with `when 1 then ...`",

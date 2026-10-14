@@ -401,6 +401,13 @@ jobs:
       - name: Arrays, hashes and sets at their edges
         run: bash bench/collections_exercise.sh
 
+      # The assertions a test is written in, with no import: each one held
+      # and failed, its message naming the values and the caller's line,
+      # named cases running past a failure to an exit of 1, and every check
+      # proved able to fail against a patched copy of the prelude.
+      - name: The prelude's assertions
+        run: bash bench/assertions_exercise.sh
+
       # And what the commands say when they refuse. Every case is a mistake
       # a person makes at the command line, and the claim is one sentence
       # rather than a stack trace: `iyi daemon start --socket <a path past
@@ -2197,6 +2204,7 @@ jobs:
           bash bench/enum_exercise.sh
           bash bench/float_text.sh
           bash bench/collections_exercise.sh
+          bash bench/assertions_exercise.sh
           bash bench/runtime_exercise.sh
           bash bench/server_load.sh
           bash bench/defer_cost.sh

@@ -4,6 +4,50 @@
 
 ### Added
 
+- **`std/zip`: ZIP archives read and written in iyi, `ZipReader` and
+  `ZipWriter`, over std/compress's DEFLATE and std/digest's CRC-32.**
+  `ZipReader.open` takes the archive as a `String` or as a file it reads
+  only where it must (by `seek`), finds the end record by scanning back
+  over the comment, and lists the central directory: name, sizes,
+  CRC-32, method, MS-DOS time as a `Time`, flags. Names are UTF-8 under
+  bit 11, code page 437 otherwise, and Info-ZIP's Unicode Path field is
+  taken when its CRC-32 matches. ZIP64 extended fields and end records
+  carry what 16 and 32 bits do not. `open(entry)` streams the content
+  and checks the CRC-32, the size and a data descriptor's CRC-32 before
+  the last piece is handed out; `read(entry)` is the whole of it, and
+  `extract(dir)` writes the archive under a directory. `ZipWriter` writes
+  to any `IyiIO` without seeking: an entry from a `String`, stored or
+  deflated; one streamed from an `IyiIO` with a data descriptor;
+  directories; UTF-8 names flagged; ZIP64 where a value needs it, or
+  everywhere with `zip64: true`; the central directory at `finish`.
+  Refused as a `ZipError`: no end record, a central directory past the
+  file, a split archive, an encrypted entry, a method other than stored
+  and deflate (named: "compressed with bzip2 (method 12)"), a local
+  header missing or naming another file, entries that overlap (the
+  overlapping-file zip bomb, refused at `open` before anything is read),
+  a total uncompressed size past the caller's `limit`, content that does
+  not match its CRC-32 or size or inflates past its declared size, and
+  for `extract` a name that is absolute, climbs out with `..`, or holds
+  `\` or `:` (zip slip), checked for every entry before anything is
+  written. Misuse panics: an `add` after `finish`, `finish` twice, a
+  name that is empty, absolute, holds a `\` or is already there.
+  `bench/std_zip_exercise.sh` holds it, plain and `--release`: Python's
+  `zipfile` reads what `ZipWriter` wrote (stored, deflated, streamed
+  with descriptors, empty entries and an empty archive, UTF-8 names,
+  ZIP64 forced, and 70,000 entries through the ZIP64 end record), its
+  listing line for line what the exercise wrote, and Info-ZIP's `unzip
+  -t` finds no errors; `ZipReader` reads what Python wrote (stored,
+  deflated at levels 1, 6 and 9, a comment, `force_zip64`, ZIP64 with
+  the limit lowered so the central directory carries it, 66,000 entries,
+  data descriptors from an unseekable stream, UTF-8, code page 437 and
+  Unicode Path names, a comment holding a false end record) and what
+  `zip -r` wrote to a file and to a pipe, each listed as Python lists it,
+  from the string and from the file. Thirty refusals (twenty-five
+  malformed archives, five zip-slip names) are checked by their sentence,
+  ten panics by theirs, and seventeen broken copies of the module fail at
+  the check that names the break. Measured: 50 MB of text written
+  deflated in 145 ms and read back in 65 to 70 ms, where Python over C
+  zlib reads it in 35 ms.
 - **`std/http`: `HTTPClient` keeps its connections.** Each `HTTP`
   request opened a connection of its own and closed it, so a program
   talking to one server paid a TCP handshake per request. An

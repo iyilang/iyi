@@ -556,6 +556,9 @@ git -C "$WORK/work/libr" add -A && git -C "$WORK/work/libr" commit -qm one
 git init -q --bare "$WORK/mirror/example.test/user/libr"
 (cd "$WORK" && publish libr v1.0.0)
 # v1.1.0 reaches the network through std/http, and C behind a platform.
+# std/socket brings what it imports: std/random for a DNS query's ID,
+# which reads the clock through std/time, which reads the zone from the
+# environment through std/env - all four are what the package reaches.
 cat > "$WORK/work/libr/libr.iyi" <<'EOF'
 module libr
 
@@ -582,16 +585,16 @@ printf 'module example.test/user/rapp\n' > iyi.mod
 grep -q "example.test/user/libr v1.0.0, new: nothing outside the language" reach1.log ||
   fail "a pure package's reach was not said, or its test's std/file was counted: $(cat reach1.log)"
 "$IYI" get example.test/user/libr@v1.1.0 > reach2.log 2>&1 || { fail "get libr@v1.1.0 failed"; cat reach2.log; }
-grep -q "libr v1.0.0 -> v1.1.0: now reaches std/socket.*; links m; C LibM.cos" reach2.log ||
+grep -q "libr v1.0.0 -> v1.1.0: now reaches std/env, std/random, std/socket, std/time; links m; C LibM.cos" reach2.log ||
   fail "the upgrade's new reach was not said: $(cat reach2.log)"
 grep -q "std/json" reach2.log && fail "a std module that calls nothing was counted as reach: $(cat reach2.log)"
 "$IYI" mod reach > reach3.log 2>&1 || { fail "mod reach failed"; cat reach3.log; }
-grep -q "^example.test/user/libr v1.1.0: std/socket.*; links m; C LibM.cos" reach3.log ||
+grep -q "^example.test/user/libr v1.1.0: std/env, std/random, std/socket, std/time; links m; C LibM.cos" reach3.log ||
   fail "mod reach did not list the build's reach: $(cat reach3.log)"
 "$IYI" get example.test/user/libr@v1.2.0 > reach4.log 2>&1 || { fail "get libr@v1.2.0 failed"; cat reach4.log; }
-grep -q "libr v1.1.0 -> v1.2.0: no longer reaches std/socket.*; links m; C LibM.cos" reach4.log ||
+grep -q "libr v1.1.0 -> v1.2.0: no longer reaches std/env, std/random, std/socket, std/time; links m; C LibM.cos" reach4.log ||
   fail "what the upgrade stopped reaching was not said: $(cat reach4.log)"
-[ "$status" -eq 0 ] && echo "  new: nothing; v1.1.0 adds std/socket (through std/http), libm, LibM.cos; v1.2.0 drops them"
+[ "$status" -eq 0 ] && echo "  new: nothing; v1.1.0 adds std/socket and what it imports (through std/http), libm, LibM.cos; v1.2.0 drops them"
 
 step "a commit no tag names is a pseudo-version"
 # The committer times are fixed, so the order of the pseudo-versions is
@@ -925,17 +928,17 @@ printf 'import example.test/user/libr::{version}\n\nputs version\n' > main.iyi
 "$IYI" run main.iyi > lim1.log 2>&1 && grep -q "^1.0.0$" lim1.log || fail "a pure version under reaches nothing did not build: $(cat lim1.log)"
 cp iyi.mod iyi.mod.before; cp iyi.sum iyi.sum.before
 if "$IYI" get example.test/user/libr@v1.1.0 > lim2.log 2>&1 ||
-   ! grep -q "example.test/user/libr v1.1.0 reaches std/socket, C, which its line in iyi.mod does not allow" lim2.log; then
+   ! grep -q "example.test/user/libr v1.1.0 reaches std/env, std/random, std/socket, std/time, C, which its line in iyi.mod does not allow" lim2.log; then
   fail "a get past reaches nothing was not refused by what it reaches: $(cat lim2.log)"
 fi
 cmp -s iyi.mod iyi.mod.before && cmp -s iyi.sum iyi.sum.before || fail "a refused get changed iyi.mod or iyi.sum"
-printf 'module example.test/user/lapp\nrequire example.test/user/libr v1.0.0 reaches std/socket, C\n' > iyi.mod
+printf 'module example.test/user/lapp\nrequire example.test/user/libr v1.0.0 reaches std/env, std/random, std/socket, std/time, C\n' > iyi.mod
 "$IYI" get example.test/user/libr@v1.1.0 > lim3.log 2>&1 || fail "a get inside the widened limit was refused: $(cat lim3.log)"
-grep -qx "require example.test/user/libr v1.1.0 reaches std/socket, C" iyi.mod || fail "get did not keep the reaches clause: $(grep require iyi.mod)"
+grep -qx "require example.test/user/libr v1.1.0 reaches std/env, std/random, std/socket, std/time, C" iyi.mod || fail "get did not keep the reaches clause: $(grep require iyi.mod)"
 printf 'module example.test/user/lapp\nrequire example.test/user/libr v1.1.0 reaches std/sockt, Files\n' > iyi.mod
 "$IYI" run main.iyi > lim4.log 2>&1
 grep -q "\`Files\` is not something a package reaches" lim4.log || fail "a word that is not a reach was not refused: $(cat lim4.log)"
-[ "$status" -eq 0 ] && echo "  reaches nothing: v1.0.0 builds, v1.1.0 refused as std/socket, C with nothing written; widened: allowed and kept"
+[ "$status" -eq 0 ] && echo "  reaches nothing: v1.0.0 builds, v1.1.0 refused as std/env, std/random, std/socket, std/time, C with nothing written; widened: allowed and kept"
 
 step "a package's sum is the same on every platform"
 # SHA-1 over each file's path and committed bytes (sum.cr), so the sum is

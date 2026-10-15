@@ -1185,8 +1185,8 @@ group do |g|
         Response.new(302, "", {"Location" => "sub/../echo"})
       when "/loop"
         Response.new(302, "", {"Location" => "/loop"})
-      when "/tls"
-        Response.new(302, "", {"Location" => "https://127.0.0.1/"})
+      when "/ftp"
+        Response.new(302, "", {"Location" => "ftp://127.0.0.1/"})
       when "/echo"
         Response.new(200, "#{req.method} #{req.query || "-"} #{req.body} auth=#{req.header("Authorization") || "-"} type=#{req.header("Content-Type") || "-"}")
       else
@@ -1217,8 +1217,8 @@ group do |g|
     assert_str "GET -  auth=- type=-", HTTP.get(hop_base + "/relative").or_panic.body, "a relative Location is read against the URL"
     loop = HTTP.get(hop_base + "/loop")
     assert_true loop.is_a?(HTTPError) && loop.message == "HTTP: stopped after 10 redirects, at #{hop_base}/loop", "a loop stops after ten"
-    tls = HTTP.get(hop_base + "/tls")
-    assert_true tls.is_a?(HTTPError) && tls.message.includes?("TLS is not in 0.x"), "a redirect to https is refused"
+    away_scheme = HTTP.get(hop_base + "/ftp")
+    assert_true away_scheme.is_a?(HTTPError) && away_scheme.message.includes?("which is not http:// or https://"), "a redirect to ftp:// is refused"
     unfollowed = HTTP.request("GET", hop_base + "/302", redirects: 0).or_panic
     assert_true unfollowed.status == 302 && unfollowed.header("Location") == "/echo?from=302", "redirects: 0 hands back the 302"
     streamed = HTTP.post(hop_base + "/307", File.open(stream_dir + "/up.bin")).or_panic

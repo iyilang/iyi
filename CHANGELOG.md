@@ -4,6 +4,23 @@
 
 ### Added
 
+- **`std/http` speaks `https://`, over std/tls.** `HTTP.get`, `request`,
+  `open`, `HTTPClient` and redirects take `https://` URLs. The connection
+  is TLS 1.3, its certificate checked for the URL's host against the
+  system's roots, or against `HTTP.tls_config`'s, which a program sets for
+  roots of its own. A kept connection is kept per scheme, host and port.
+  A credential is not carried from `https://` to `http://` at the same
+  name. A handshake refused is an `HTTPError` with TLS's sentence; a
+  failure after it is a `SocketError` whose new `layer_reason` holds
+  TLS's words (`SocketError.layered`). `https://` had been refused as
+  "TLS is not in 0.x", and a redirect to it the same. An upgrade over
+  `https://` (a WebSocket's `wss://`) is still refused, now saying so
+  rather than that TLS is missing. Held by `bench/std_http_exercise.sh`'s
+  new section against Python's own `ssl` server held to TLS 1.3:
+  - gzip undone over TLS, a 303 followed on `https://`, a kept
+    connection used twice;
+  - a host the certificate does not name refused, `wss://` refused;
+  - a copy of the module that sends `https://` in the clear caught.
 - **`std/tls`: a TLS 1.3 client (RFC 8446), the last piece, on iyi's own
   cryptography and certificates.** `TlsClient.connect(host, port)` makes a
   connection whose server's chain std/x509 checked to the system's roots
@@ -1110,6 +1127,13 @@
   `Random.new` seeded alike, and that a PCG-drawn v4 is caught.
 
 ### Changed
+
+- **A package that speaks HTTP reaches what std/tls does.** std/http
+  imports std/tls for `https://`, so `iyi mod reach` counts what reading
+  the system's trusted roots needs (files, on Linux) and the entropy of a
+  handshake. A `require ... reaches` line written for a package over
+  std/http names those too now, or `iyi get` refuses it. Go's `net/http`
+  carries `crypto/tls` the same way.
 
 - **The std modules' exercises run in shards beside the foundation, on
   Linux, Windows and darwin.** One after another inside the std job they

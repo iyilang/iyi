@@ -92,17 +92,18 @@ fi
 
 echo
 echo "== what the module reaches"
-# What std/socket reaches and nothing of its own: cookies (the clock) and
-# files are std/cookie's and std/fileserver's, and a multipart boundary is
-# the parts' own hash, not the system's randomness. A deadline reads the
-# monotonic clock through std/time rather than the runtime's hook, and
-# std/socket brings std/time already (a DNS query's ID is std/random's,
-# which reads the clock), so it adds nothing to what the module reaches.
-# These are the modules it may import, and none but std/socket and
-# std/time reaches anything.
+# What std/socket reaches, and std/tls for https:// - the operating
+# system's trusted roots and its entropy - and nothing of its own: cookies
+# (the clock) and files are std/cookie's and std/fileserver's, and a
+# multipart boundary is the parts' own hash, not the system's randomness.
+# A deadline reads the monotonic clock through std/time rather than the
+# runtime's hook, and std/socket brings std/time already (a DNS query's ID
+# is std/random's, which reads the clock), so it adds nothing to what the
+# module reaches. These are the modules it may import, and none but
+# std/socket, std/time and std/tls reaches anything.
 imports=$(grep -oE '^import std/[a-z_]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
-if [ "$imports" = "std/compress std/digest std/mime std/socket std/time std/uri " ]; then
-  echo "  std/socket and std/time, and std/compress, std/digest, std/mime and std/uri, which reach nothing"
+if [ "$imports" = "std/compress std/digest std/mime std/socket std/time std/tls std/uri " ]; then
+  echo "  std/socket, std/time and std/tls, and std/compress, std/digest, std/mime and std/uri, which reach nothing"
 else
   echo "  std/http imports $imports"
   status=1
@@ -144,8 +145,8 @@ refuses "a header the request writes itself" header_own "is the request.s own he
   'HTTP.format_request("GET", "/", "127.0.0.1", "", {"content-length" => "5"})'
 refuses "a caller's Transfer-Encoding" header_te "a request's body goes with its length" \
   'HTTP.format_request("POST", "/", "127.0.0.1", "abc", {"Transfer-Encoding" => "chunked"})'
-refuses "https" scheme_tls "HTTP: TLS is not in 0.x" \
-  'HTTP.get("https://127.0.0.1/").or_panic.status'
+refuses "a scheme that is not HTTP's" scheme_ftp "HTTP: only http:// and https://" \
+  'HTTP.get("ftp://127.0.0.1/").or_panic.status'
 refuses "a Content-Length that is not a number" length_text "HTTP: Content-Length is not a number" \
   'HTTP.parse_response("HTTP/1.1 200 OK\r\nContent-Length: many\r\n\r\nabc").body'
 refuses "a Content-Length past Int32's" length_large "HTTP: Content-Length \"3000000000\" is past the 2147483647 bytes a string holds" \
@@ -428,6 +429,155 @@ upload 92000 bytes in 2 chunks"
       printf '%s\n' "$said" | sed 's/^/    got:  /'
       printf '%s\n' "$expected" | sed 's/^/    want: /'
       status=1
+    fi
+  fi
+fi
+
+echo
+echo "== https:// against Python's own TLS server"
+# Python's ssl module is OpenSSL's TLS, held to 1.3 here, serving under a
+# certificate for localhost from a root made for the run: gzip undone over
+# TLS, a 303 followed on the same scheme, a kept connection used twice, a
+# host the certificate does not name refused, and wss:// refused by name.
+# Then the same client against a copy of the module that sends https://
+# in the clear, which must not answer the same.
+if [ -z "$PY" ] || ! "$PY" -c 'import ssl; from cryptography import x509' >/dev/null 2>&1; then
+  echo "  skipped: no python3 with ssl and cryptography to serve TLS with"
+else
+  "$PY" - "$WORK/tls" <<'PY'
+import datetime as dt, ipaddress, os, sys
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+out = sys.argv[1]; os.makedirs(out, exist_ok=True)
+now = dt.datetime.now(dt.timezone.utc)
+def name(cn): return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+ca_key = ec.generate_private_key(ec.SECP256R1())
+ca = (x509.CertificateBuilder().subject_name(name("http gate root")).issuer_name(name("http gate root"))
+      .public_key(ca_key.public_key()).serial_number(1).not_valid_before(now - dt.timedelta(days=1))
+      .not_valid_after(now + dt.timedelta(days=2)).add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+      .sign(ca_key, hashes.SHA256()))
+key = ec.generate_private_key(ec.SECP256R1())
+leaf = (x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(ca.subject)
+        .public_key(key.public_key()).serial_number(2).not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=2))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+        .sign(ca_key, hashes.SHA256()))
+open(f"{out}/root.pem", "wb").write(ca.public_bytes(serialization.Encoding.PEM))
+open(f"{out}/leaf.pem", "wb").write(leaf.public_bytes(serialization.Encoding.PEM))
+open(f"{out}/leaf.key", "wb").write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+PY
+  cat > "$WORK/tls_client.iyi" <<'IYI'
+module main
+
+import std/http::{HTTP, HTTPClient, HTTPError}
+import std/tls::{TlsConfig}
+import std/x509::{Certificate}
+import std/file::{File}
+
+config = TlsConfig.new
+config.roots = Certificate.from_pem(File.read(Program.args[1])).or_panic
+HTTP.tls_config = config
+base = "https://localhost:#{Program.args[0]}"
+r = HTTP.get(base + "/gzip").or_panic
+puts "gzip #{r.decoded?} #{r.body == "python's own words " * 1000}"
+hop = HTTP.post(base + "/hop", "dropped").or_panic
+puts "hop #{hop.status} #{hop.body} #{hop.url}"
+client = HTTPClient.new
+2.times { client.get(base + "/landed").or_panic }
+puts "kept #{client.connections_made} made, #{client.connections_reused} reused"
+client.close
+other = HTTP.get("https://127.0.0.1:#{Program.args[0]}/landed")
+puts "other #{other.is_a?(HTTPError) ? other.message : other.inspect}"
+up = HTTP.upgrade(base + "/", "websocket")
+puts "upgrade #{up.is_a?(HTTPError) ? up.message : up.inspect}"
+HTTP.get(base + "/stop")
+IYI
+  serve_tls() {
+    "$PY" - "$WORK/tls" > "$WORK/tls_server.out" 2>&1 <<'PY' &
+import gzip, ssl, sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
+text = b"python's own words " * 1000
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a): pass
+    def answer(self, status, body, headers=()):
+        self.send_response(status)
+        for k, v in headers: self.send_header(k, v)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path == "/gzip":
+            self.answer(200, gzip.compress(text), [("Content-Encoding", "gzip")])
+        elif self.path == "/landed":
+            self.answer(200, self.command.encode())
+        elif self.path == "/stop":
+            self.answer(200, b"bye")
+            self.server.done = True
+        else:
+            self.answer(404, b"no")
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        self.answer(303, b"", [("Location", "/landed")])
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.minimum_version = ssl.TLSVersion.TLSv1_3
+context.load_cert_chain(f"{sys.argv[1]}/leaf.pem", f"{sys.argv[1]}/leaf.key")
+s = HTTPServer(("127.0.0.1", 0), Handler)
+s.socket = context.wrap_socket(s.socket, server_side=True)
+s.done = False
+s.timeout = 30
+print(s.server_address[1], flush=True)
+while not s.done:
+    s.handle_request()
+PY
+    tls_pid=$!
+  }
+  if ! "$IYI" build -o "$WORK/tls_client" "$WORK/tls_client.iyi" > "$WORK/tls_client.build" 2>&1; then
+    echo "  the client did not build"
+    sed -n '1,8p' "$WORK/tls_client.build"
+    status=1
+  else
+    serve_tls
+    tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
+    said=$(timeout 60 "$WORK/tls_client" "$tport" "$WORK/tls/root.pem" 2>&1)
+    kill "$tls_pid" 2>/dev/null
+    wait "$tls_pid" 2>/dev/null
+    expected="gzip true true
+hop 200 GET https://localhost:$tport/landed
+kept 1 made, 1 reused
+other HTTP: tls: the server's certificate is not trusted: x509: CN=localhost is not valid for 127.0.0.1: it names localhost (bad_certificate)
+upgrade HTTP: an upgrade over https:// (wss://): a connection handed over under TLS is not here yet"
+    if [ "$said" = "$expected" ]; then
+      echo "  gzip over TLS 1.3, a 303 on https://, a kept connection used twice, a host the certificate does not name, wss:// refused"
+    else
+      echo "  the client and Python's TLS server disagree:"
+      printf '%s\n' "$said" | sed 's/^/    got:  /'
+      printf '%s\n' "$expected" | sed 's/^/    want: /'
+      status=1
+    fi
+    # And the proof: https:// written in the clear does not answer so.
+    mkdir -p "$WORK/clear/std"
+    sed 's/^        if secure$/        if false/' "$REPO/src/std/http.iyi" > "$WORK/clear/std/http.iyi"
+    if cmp -s "$REPO/src/std/http.iyi" "$WORK/clear/std/http.iyi"; then
+      echo "  the patch that sends https:// in the clear changed nothing, so it proves nothing"
+      status=1
+    elif ! IYI_PATH="$WORK/clear${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/tls_clear" "$WORK/tls_client.iyi" > "$WORK/tls_clear.build" 2>&1; then
+      echo "  the client over the clear-text copy did not build"
+      status=1
+    else
+      serve_tls
+      tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
+      clear=$(timeout 60 "$WORK/tls_clear" "$tport" "$WORK/tls/root.pem" 2>&1)
+      kill "$tls_pid" 2>/dev/null
+      wait "$tls_pid" 2>/dev/null
+      if [ "$clear" = "$expected" ]; then
+        echo "  https:// sent in the clear answered the same, so the section does not test TLS"
+        status=1
+      else
+        echo "  https:// sent in the clear is caught: $(printf '%s' "$clear" | head -1 | cut -c1-90)"
+      fi
     fi
   fi
 fi

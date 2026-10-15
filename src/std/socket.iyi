@@ -168,17 +168,30 @@ pub alias IPAddress = IPv4Address | IPv6Address
 
 # A connection's own failure: which operation, and the platform's error
 # number for why - or, for a host name that could not be turned into an
-# address, the resolver's `DnsError`, and no number (`code` 0).
+# address, the resolver's `DnsError`, and no number (`code` 0); or, for a
+# protocol layered on the connection (TLS), that protocol's own sentence,
+# and no number either.
 pub struct SocketError
   getter operation : String
   getter code : Int32
   # Why the host's name did not resolve; nil for every other failure.
   getter dns_error : DnsError? = nil
+  # What the protocol over the connection said went wrong; nil otherwise.
+  getter layer_reason : String? = nil
 
   def initialize(@operation : String, @code : Int32)
   end
 
   def initialize(@operation : String, @code : Int32, @dns_error : DnsError?)
+  end
+
+  # A failure of the protocol over the connection, in its words: `cannot
+  # read from example.com: tls: a record that does not decrypt`.
+  def self.layered(operation : String, reason : String) : SocketError
+    SocketError.new(operation, 0, nil, reason)
+  end
+
+  def initialize(@operation : String, @code : Int32, @dns_error : DnsError?, @layer_reason : String?)
   end
 
   # The host was a name, and no address came of it: `dns_error` says why
@@ -213,6 +226,9 @@ pub struct SocketError
   end
 
   def reason : String
+    if (layered = @layer_reason).is_a?(String)
+      return layered
+    end
     if (dns = @dns_error).is_a?(DnsError)
       return dns.reason
     end

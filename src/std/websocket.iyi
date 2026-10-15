@@ -25,8 +25,9 @@
 # `Connection` say websocket, whose `Sec-WebSocket-Accept` is the key's,
 # that agrees to no extension, and names no protocol the client did not
 # offer. Each of these refused is a `WebSocketError`; a server that does
-# not answer 101 is the `HTTPError` `HTTP.upgrade` names it with. TLS is
-# not in 0.x, so `wss://` is refused before anything is sent.
+# not answer 101 is the `HTTPError` `HTTP.upgrade` names it with. `wss://`
+# is refused before anything is sent: std/tls speaks `https://`, and a
+# connection handed over to another protocol under TLS is not here yet.
 #
 # **The connection.** `send(text)`, `send_binary(bytes)` and `ping` write
 # one frame each: no message is split into fragments on the way out.
@@ -288,7 +289,7 @@ pub class WebSocket
     end
     colon = url.index(':')
     scheme = colon ? url[0, colon].downcase : ""
-    return WebSocketError.new("TLS is not in 0.x; use ws://") if scheme == "wss"
+    return WebSocketError.new("wss:// is not here yet: a connection handed over under TLS; use ws://") if scheme == "wss"
     return WebSocketError.new("not a ws:// URL: #{url.inspect}") unless scheme == "ws" && colon
     target = "http" + url[colon, url.bytesize - colon]
     nonce = Pointer(UInt8).malloc(16_u64)

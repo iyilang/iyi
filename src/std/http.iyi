@@ -2,10 +2,12 @@
 # bodies between them as streams.
 #
 # **The client.** `HTTP.get`, `head`, `post`, `put`, `delete` and the
-# `request` under them speak `http://` only, to a host name (resolved as
-# `IyiSocket.connect` resolves one, through iyi's own resolver), an IPv4
-# address, an IPv6 one in brackets (`http://[::1]:8080/`) or `localhost`.
-# TLS is not in 0.x. Each answers the whole `Response`; `HTTP.open(...) {
+# `request` under them speak `http://` and `https://`, to a host name
+# (resolved as `IyiSocket.connect` resolves one, through iyi's own
+# resolver), an IPv4 address, an IPv6 one in brackets
+# (`http://[::1]:8080/`) or `localhost`. `https://` is std/tls's TLS 1.3,
+# the server's certificate checked for the host against the system's roots
+# or `HTTP.tls_config`'s. Each answers the whole `Response`; `HTTP.open(...) {
 # |response| ... }` answers the block's value instead, the body still on
 # the wire: `response.body_io.read` takes it a piece at a time, so a
 # download of any size costs what one piece costs. A request's body is a
@@ -56,19 +58,21 @@
 # the other reads, and `bench/std_http_exercise.sh` runs the client
 # against the server and both against Python's.
 #
-# **What it reaches.** What std/socket reaches and nothing of its own:
-# no file, and no clock, environment or randomness beyond what a socket's
-# name lookup uses. Cookies with their expiry are std/cookie's, a
-# directory served is std/fileserver's, and a multipart boundary is made
-# from the parts' own hash, so `iyi mod reach` says the same of a package
-# that speaks HTTP as of one that opens a socket.
+# **What it reaches.** What std/socket reaches, and for `https://` what
+# std/tls does - the operating system's trusted roots and its entropy -
+# and nothing of its own: no file, and no clock or environment beyond
+# those. Cookies with their expiry are std/cookie's, a directory served is
+# std/fileserver's, and a multipart boundary is made from the parts' own
+# hash.
 #
-# Not here: TLS, HTTP/2 (std/hpack and std/capsule are its pieces, not a
+# Not here: a server over TLS, an upgrade over `https://` (a WebSocket's
+# `wss://`), HTTP/2 (std/hpack and std/capsule are its pieces, not a
 # server), pipelining requests on a kept connection, and proxies.
 
 module std/http
 
 import std/socket::{IyiSocket, SocketError}
+import std/tls::{TlsClient, TlsConfig, TlsError}
 import std/uri::{URI, Params}
 import std/mime::{MIME}
 import std/compress::{Inflater, Deflater, Envelope, Gzip, CompressError}
@@ -127,10 +131,13 @@ class Conn
   # such time), and how long one read may wait otherwise.
   @deadline : Int64 = 0_i64
   @gap : Int32? = nil
+  # A client's `https://` connection: TLS over the socket, which every
+  # read and write then goes through. The socket's timeouts are TLS's too.
+  @stream : TlsStream? = nil
 
   ROOM = 16384
 
-  def initialize(@socket : IyiSocket, @listener : IyiSocket? = nil, @idle : Hash(UInt64, IyiSocket)? = nil)
+  def initialize(@socket : IyiSocket, @listener : IyiSocket? = nil, @idle : Hash(UInt64, IyiSocket)? = nil, @stream : TlsStream? = nil)
     @capacity = ROOM
     @data = Pointer(UInt8).malloc(@capacity.to_u64)
     @start = 0
@@ -142,6 +149,11 @@ class Conn
 
   def socket : IyiSocket
     @socket
+  end
+
+  # What a request is written to: TLS over the socket, or the socket.
+  def transport : IyiSocket | TlsStream
+    @stream || @socket
   end
 
   def failure : Cancelled | SocketError | Nil
@@ -203,7 +215,8 @@ class Conn
     if idle = @idle
       idle[@socket.object_id] = @socket
     end
-    got = @socket.read(@data + @stop.to_i64, @capacity - @stop)
+    stream = @stream
+    got = stream ? stream.read(@data + @stop.to_i64, @capacity - @stop) : @socket.read(@data + @stop.to_i64, @capacity - @stop)
     if idle = @idle
       idle.delete(@socket.object_id)
     end
@@ -367,7 +380,53 @@ class Conn
   end
 
   def close : Nil
-    @socket.close
+    if stream = @stream
+      stream.close
+    else
+      @socket.close
+    end
+  end
+end
+
+# A TLS connection as a `Conn` and a `BodyWriter` use a socket: read into
+# their buffer, written to, closed. What TLS refuses is a `SocketError`
+# carrying TLS's own sentence (`layer_reason`), so the client's answers
+# keep the types they have over a plain socket.
+class TlsStream
+  @tls : TlsClient
+  @host : String
+  # What TLS handed over and the buffer has not taken yet.
+  @pending : String = ""
+  @at : Int32 = 0
+
+  def initialize(@tls : TlsClient, @host : String)
+  end
+
+  # Up to *count* bytes into *buffer*: 0 once the server closed with
+  # close_notify.
+  def read(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
+    if @at >= @pending.bytesize
+      got = @tls.read(16384)
+      return SocketError.layered("read from #{@host}", got.message) if got.is_a?(TlsError)
+      return 0 if got.empty?
+      @pending = got
+      @at = 0
+    end
+    n = @pending.bytesize - @at
+    n = count if n > count
+    buffer.copy_from(@pending.to_unsafe + @at.to_i64, n)
+    @at = @at + n
+    n
+  end
+
+  def write(text : String) : Int32 | Cancelled | SocketError
+    sent = @tls.write(text)
+    return SocketError.layered("write to #{@host}", sent.message) if sent.is_a?(TlsError)
+    sent
+  end
+
+  def close : Nil
+    @tls.close
   end
 end
 
@@ -735,14 +794,14 @@ end
 # first failure is kept, and every write after it answers it; `finish`,
 # which the server calls when the block returns, writes the end.
 pub class BodyWriter
-  @socket : IyiSocket
+  @socket : IyiSocket | TlsStream
   @chunked : Bool
   @deflater : Deflater?
   @fault : Cancelled | SocketError | Nil
   @written : Int64
   @done : Bool
 
-  def initialize(@socket : IyiSocket, @chunked : Bool, @deflater : Deflater? = nil)
+  def initialize(@socket : IyiSocket | TlsStream, @chunked : Bool, @deflater : Deflater? = nil)
     @fault = nil
     @written = 0_i64
     @done = false
@@ -1800,6 +1859,25 @@ pub class Upgraded
 end
 
 pub struct HTTP
+  @@tls : TlsConfig? = nil
+
+  # What an `https://` request is checked against and offers: the
+  # system's roots, and ALPN's `http/1.1`, unless a program sets its own -
+  # roots of its own for a server it runs, say.
+  def self.tls_config : TlsConfig
+    if held = @@tls
+      return held
+    end
+    config = TlsConfig.new
+    config.alpn = ["http/1.1"]
+    @@tls = config
+    config
+  end
+
+  def self.tls_config=(config : TlsConfig) : TlsConfig
+    @@tls = config
+  end
+
   # The request as it goes on the wire, whole. `Host`, `Connection` and
   # `Content-Length` are the request's own lines; a caller's header of
   # that name is refused rather than sent twice. A body's length is
@@ -1995,6 +2073,10 @@ pub struct HTTP
   # which is the caller's from then on: std/websocket's handshake. Any
   # other answer is an `HTTPError` naming it.
   def self.upgrade(url : String, protocol : String, headers : Hash(String, String) = {} of String => String, timeout_ms : Int32 = 0) : Upgraded | Cancelled | SocketError | HTTPError
+    target = URI.parse?(url)
+    if target && (target.scheme || "").downcase == "https"
+      return HTTPError.new("an upgrade over https:// (wss://): a connection handed over under TLS is not here yet")
+    end
     sent = headers.dup
     sent["Upgrade"] = protocol
     exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms)
@@ -2024,16 +2106,21 @@ pub struct HTTP
     resolved = base.resolve(target)
     scheme = resolved.scheme
     scheme = scheme.downcase if scheme
-    return HTTPError.new("redirected to #{resolved}, and TLS is not in 0.x") if scheme == "https"
-    return HTTPError.new("redirected to #{resolved}, which is not http://") unless scheme == "http"
+    return HTTPError.new("redirected to #{resolved}, which is not http:// or https://") unless scheme == "http" || scheme == "https"
     resolved.to_s
   end
 
+  # The same scheme, host and port: a credential sent to one is not sent on
+  # to another, nor from `https://` to `http://` at the same name.
   private def self.same_authority?(a : String, b : String) : Bool
     ua = URI.parse?(a)
     ub = URI.parse?(b)
     return false unless ua && ub
-    (ua.hostname || "").downcase == (ub.hostname || "").downcase && (ua.port || 80) == (ub.port || 80)
+    sa = (ua.scheme || "").downcase
+    sb = (ub.scheme || "").downcase
+    return false unless sa == sb
+    default = sa == "https" ? 443 : 80
+    (ua.hostname || "").downcase == (ub.hostname || "").downcase && (ua.port || default) == (ub.port || default)
   end
 
   private def self.without(headers : Hash(String, String), names : Array(String)) : Hash(String, String)
@@ -2056,8 +2143,8 @@ pub struct HTTP
     scheme = uri.scheme
     # In any case (RFC 3986 §3.1): `HTTP://host/` was "only http://".
     scheme = scheme.downcase if scheme
-    return HTTPError.new("TLS is not in 0.x; use http://") if scheme == "https"
-    return HTTPError.new("only http://") unless scheme == "http"
+    return HTTPError.new("only http:// and https://") unless scheme == "http" || scheme == "https"
+    secure = scheme == "https"
     host = uri.hostname
     return HTTPError.new("missing host") unless host
     path = uri.path
@@ -2065,12 +2152,13 @@ pub struct HTTP
     if q = uri.query
       path = path + "?" + q
     end
-    port = uri.port || 80
+    default_port = secure ? 443 : 80
+    port = uri.port || default_port
     # An IPv6 literal in its brackets, as the URL wrote it (RFC 9110
     # §7.2): `hostname` is the address without them, and `Host: ::1:8080`
     # named no host a server can split from its port.
     named = host.includes?(":") ? "[#{host}]" : host
-    host_line = port == 80 ? named : "#{named}:#{port}"
+    host_line = port == default_port ? named : "#{named}:#{port}"
     sent = headers
     asked = decompress && header_in(headers, "Accept-Encoding").nil?
     cookies = nil.as(String?)
@@ -2087,7 +2175,7 @@ pub struct HTTP
       end
     end
     head = same_name?(method, "HEAD")
-    key = host.downcase + ":" + port.to_s
+    key = (secure ? "https://" : "http://") + host.downcase + ":" + port.to_s
     connection = upgrade || (client ? "keep-alive" : "close")
     # Sent again once, on a new connection, when a kept one turns out to
     # have been closed by the server before it answered.
@@ -2101,10 +2189,21 @@ pub struct HTTP
       unless conn
         socket = IyiSocket.connect(host, port, timeout_ms > 0 ? timeout_ms : -1)!
         client.made if client
-        conn = Conn.new(socket)
+        if secure
+          # The handshake waits as long as a read does.
+          if timeout_ms > 0
+            socket.read_timeout_ms = timeout_ms
+            socket.write_timeout_ms = timeout_ms
+          end
+          tls = TlsClient.over(socket, host, tls_config)
+          return HTTPError.new(tls.message) if tls.is_a?(TlsError)
+          conn = Conn.new(socket, stream: TlsStream.new(tls, host))
+        else
+          conn = Conn.new(socket)
+        end
         conn.gap = timeout_ms if timeout_ms > 0
       end
-      failed = send_request(conn.socket, method, path, host_line, sent, body, connection)
+      failed = send_request(conn.transport, method, path, host_line, sent, body, connection)
       if failed
         conn.close
         next if reused && retry
@@ -2126,7 +2225,7 @@ pub struct HTTP
 
   # The request on *socket*: its head, and a string body with it or an
   # `IyiIO` body chunked after it. Nil once written, or why not.
-  private def self.send_request(socket : IyiSocket, method : String, path : String, host_line : String, sent : Hash(String, String), body : String | IyiIO, connection : String) : Cancelled | SocketError | Nil
+  private def self.send_request(socket : IyiSocket | TlsStream, method : String, path : String, host_line : String, sent : Hash(String, String), body : String | IyiIO, connection : String) : Cancelled | SocketError | Nil
     case body
     in String
       length = body.bytesize > 0 || same_name?(method, "POST") || same_name?(method, "PUT") || same_name?(method, "PATCH") ? body.bytesize.to_i64 : nil

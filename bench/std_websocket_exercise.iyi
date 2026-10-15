@@ -887,7 +887,7 @@ group do |g|
     plain = WebSocket.connect("ws://127.0.0.1:#{port}/plain")
     assert_true plain.is_a?(HTTPError), "a 200 is not an upgrade"
     assert_str "HTTP: the server answered 200 OK to an upgrade to websocket, not 101 Switching Protocols", plain.as(HTTPError).message, "the 200's error"
-    assert_str "WebSocket: TLS is not in 0.x; use ws://", WebSocket.connect("wss://127.0.0.1:#{port}/").as(WebSocketError).message, "wss"
+    assert_str "WebSocket: wss:// is not here yet: a connection handed over under TLS; use ws://", WebSocket.connect("wss://127.0.0.1:#{port}/").as(WebSocketError).message, "wss"
     assert_str "WebSocket: not a ws:// URL: \"http://127.0.0.1/\"", WebSocket.connect("http://127.0.0.1/").as(WebSocketError).message, "http"
     upper = WebSocket.connect("WS://127.0.0.1:#{port}/echo").or_panic
     upper.close

@@ -4,6 +4,25 @@
 
 ### Added
 
+- **std/signal handles, ignores and resets signals, and knows USR1, USR2,
+  WINCH, PIPE, ALRM and CHLD.** It could only wait for HUP, INT, QUIT and
+  TERM: no handler that keeps running, no way to ignore a signal or give
+  one its default back, and no user signals at all.
+  - `Signal.each(*signals) { |s| ... }` runs its block for each arrival in
+    its task until the task is cancelled: a handler a group owns.
+  - `Signal.ignore(*signals)` sets the action to nothing and drops an
+    arrival already kept; `Signal.reset(*signals)` restores the default.
+    A later `wait` or `each` takes the signal again.
+  - The members carry each platform's numbers (darwin's USR1 is 30).
+    Windows refuses every signal but INT and TERM by name, and ignores and
+    resets INT (Ctrl-C and Ctrl-Break) alone.
+
+  Held by `bench/std_signal_exercise.sh`: a handler for USR1 and USR2, an
+  arrival dropped by an ignore, an ignored signal the process outlives, a
+  reset TERM that ends it as 143, and four broken copies (a handler that
+  never runs its block, an undropped arrival, an ignore that keeps the
+  default, a reset that keeps it ignored).
+
 - **`Mutex#wait_for` is the condition variable, with the condition and its
   action one step.** A task that had to wait until a Mutex's value was
   ready - a queue with an item in it - could only take the lock again and

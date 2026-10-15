@@ -41,6 +41,18 @@ impl Error for TimedOut
   end
 end
 
+# How a task that has seen enough ends the `Signal.each` beside it.
+pub struct Handled
+  def initialize
+  end
+end
+
+impl Error for Handled
+  def message : String
+    "the handler's task has seen what it waited for"
+  end
+end
+
 def fail(message : String) : NoReturn
   puts "FAIL: #{message}"
   __iyi_exit(1)
@@ -68,6 +80,20 @@ def interrupt_self : Nil
     __iyi_conc_syscall3(62_i64, __iyi_conc_syscall3(39_i64, 0_i64, 0_i64, 0_i64), 2_i64, 0_i64)
   {% else %}
     __iyi_conc_syscall3(129_i64, __iyi_conc_syscall3(172_i64, 0_i64, 0_i64, 0_i64), 2_i64, 0_i64)
+  {% end %}
+end
+
+# *signal* sent to this process; Windows can send itself INT alone.
+def send_self(signal : Signal) : Nil
+  {% if flag?(:win32) %}
+    fail("Windows sends itself INT alone, not #{signal}") unless signal == Signal::INT
+    interrupt_self
+  {% elsif flag?(:darwin) %}
+    LibC.pthread_kill(LibC.pthread_self, signal.value)
+  {% elsif flag?(:x86_64) %}
+    __iyi_conc_syscall3(62_i64, __iyi_conc_syscall3(39_i64, 0_i64, 0_i64, 0_i64), signal.value.to_i64, 0_i64)
+  {% else %}
+    __iyi_conc_syscall3(129_i64, __iyi_conc_syscall3(172_i64, 0_i64, 0_i64, 0_i64), signal.value.to_i64, 0_i64)
   {% end %}
 end
 
@@ -104,6 +130,30 @@ if Program.args.size > 0 && Program.args[0] == "external"
     end
   end
   puts "stopped on #{got}"
+  __iyi_exit(0)
+end
+
+# The shell's side of a reset: an ignored signal leaves the process alive,
+# and the same signal after `Signal.reset` ends it - TERM on Linux and
+# darwin, which the shell reads as death by TERM, and on Windows a
+# Ctrl-Break into the program's own console.
+def reset_probe : Signal
+  {% if flag?(:win32) %}
+    Signal::INT
+  {% else %}
+    Signal::TERM
+  {% end %}
+end
+
+if Program.args.size > 0 && Program.args[0] == "reset"
+  Signal.ignore(reset_probe)
+  send_self(reset_probe)
+  sleep(50)
+  puts "an ignored #{reset_probe} left the process alive"
+  Signal.reset(reset_probe)
+  send_self(reset_probe)
+  sleep(200)
+  puts "the process outlived #{reset_probe} after its reset"
   __iyi_exit(0)
 end
 
@@ -215,6 +265,76 @@ end
 fail("the request in flight was answered #{answered.inspect}") unless answered == "served one"
 fail("served #{served}") unless served == 1
 puts "  one request served, the listener closed, the group joined"
+
+# Two signals a task's handler takes, on Windows the one it can send.
+def first_probe : Signal
+  {% if flag?(:win32) %}
+    Signal::INT
+  {% else %}
+    Signal::USR1
+  {% end %}
+end
+
+def second_probe : Signal
+  {% if flag?(:win32) %}
+    Signal::INT
+  {% else %}
+    Signal::USR2
+  {% end %}
+end
+
+puts "== a task's handler, and signals ignored"
+handled = [] of String
+group do |g|
+  g.spawn do
+    Signal.each(first_probe, second_probe) { |signal| handled << signal.to_s }
+  end
+  g.spawn do
+    sleep(20)
+    send_self(first_probe)
+    sleep(50)
+    send_self(second_probe)
+    waited = watchdog(-> { handled.size >= 2 })
+    waited.nil? ? Handled.new : waited
+  end
+end
+fail("the handler saw #{handled}") unless handled == [first_probe.to_s, second_probe.to_s]
+puts "  Signal.each ran its block for #{handled.join(" and ")}, and ended with its task"
+
+# Kept with nobody waiting, then ignored: the arrival is dropped with it,
+# and the next wait - which takes the signal back - waits for a new one.
+send_self(second_probe)
+sleep(50)
+Signal.ignore(second_probe)
+after_ignore = ""
+group do |g|
+  g.spawn do
+    signal = Signal.wait(second_probe)
+    after_ignore = "taken before the next was sent" if after_ignore == ""
+    signal.is_a?(Cancelled) ? signal : 0
+  end
+  g.spawn do
+    sleep(100)
+    after_ignore = "waited for the next" if after_ignore == ""
+    send_self(second_probe)
+    0
+  end
+  g.spawn { watchdog(-> { after_ignore != "" }) }
+end
+fail("an arrival kept before the ignore was #{after_ignore}") unless after_ignore == "waited for the next"
+puts "  an arrival kept before the ignore was dropped, and a wait took the signal back"
+
+# Ignored with no handler of this module's: its default, the end of the
+# process, is not taken.
+Signal.ignore(first_probe)
+send_self(first_probe)
+sleep(50)
+puts "  an ignored #{first_probe} left the process alive"
+{% if flag?(:win32) %}
+  assert_panics("has no Windows console event") { Signal.wait(Signal::USR1) }
+  assert_panics("Windows can ignore INT (Ctrl-C and Ctrl-Break) alone, not TERM") { Signal.ignore(Signal::TERM) }
+  puts "  Windows refuses USR1 and an ignored TERM by name"
+{% end %}
 
 puts "== a cancelled task's wait answers Cancelled"
 outcome = ""

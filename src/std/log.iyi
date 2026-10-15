@@ -256,7 +256,9 @@ pub class AsyncBackend < Backend
       @writer = IyiThread.start do
         out = IyiIO.new(handle)
         while true
-          batch = queue.wait_for { |q| q.take }.or_panic
+          batch = queue.wait_for { |q| q.take }
+          # A thread is no task, and nothing cancels it.
+          raise "AsyncBackend: the writer thread was cancelled" if batch.is_a?(Cancelled)
           out.write(batch[0])
           out.flush
           break if batch[1]

@@ -1516,10 +1516,11 @@ struct DwarfResolver
     end
 
     # The file's `.debug_line` (offset, size), `.symtab` and the string
-    # table it names, into *answer*[0..5]; a pair stays 0 when absent.
+    # table it names, `.debug_info`, `.debug_abbrev` and `.debug_str`, into
+    # *answer*[0..11]; a pair stays 0 when absent.
     def self.sections(base : UInt64, size : UInt64, answer : Pointer(UInt64)) : Nil
       index = 0
-      while index < 6
+      while index < 12
         answer[index] = 0_u64
         index = index + 1
       end
@@ -1547,16 +1548,39 @@ struct DwarfResolver
               answer[4] = string_offset
               answer[5] = string_length
             end
-          elsif name_is?(base, size, names &+ field(base, size, header, 4_u64), ".debug_line")
-            answer[0] = offset
-            answer[1] = length
+          else
+            name = names &+ field(base, size, header, 4_u64)
+            slot = -1
+            slot = 0 if name_is?(base, size, name, ".debug_line")
+            slot = 6 if name_is?(base, size, name, ".debug_info")
+            slot = 8 if name_is?(base, size, name, ".debug_abbrev")
+            slot = 10 if name_is?(base, size, name, ".debug_str")
+            if slot >= 0
+              answer[slot] = offset
+              answer[slot + 1] = length
+            end
           end
         end
         section = section + 1_u64
       end
     end
 
-    # The function *address* lies in, by `.symtab`; "" for none.
+    # The bytes at *at* up to a NUL, or up to *limit*: "" past the file.
+    def self.file_string(base : UInt64, size : UInt64, at : UInt64, limit : UInt64) : String
+      limit = size if limit > size
+      return "" if at >= limit
+      start = Pointer(UInt8).new(base &+ at)
+      most = (limit - at).unsafe_to_i64
+      length = 0_i64
+      while length < most && (start + length).value != 0_u8
+        length = length + 1_i64
+      end
+      String.new(length.to_i32) { |dst| dst.copy_from(start, length.to_i32) }
+    end
+
+    # The function *address* lies in, by `.symtab`; "" for none. What a
+    # program stripped of its debug information still answers, in the
+    # linker's spelling: an older GNU ld cuts a name at its `@`.
     def self.symbol_at(base : UInt64, size : UInt64, table : Pointer(UInt64), address : UInt64) : String
       count = table[3] // 24_u64
       index = 0_u64
@@ -1567,18 +1591,179 @@ struct DwarfResolver
           if address >= start && address - start < field(base, size, entry &+ 16_u64, 8_u64)
             name = field(base, size, entry, 4_u64)
             return "" if name >= table[5]
-            at = Pointer(UInt8).new(base &+ table[4] &+ name)
-            limit = (table[5] - name).unsafe_to_i64
-            length = 0_i64
-            while length < limit && (at + length).value != 0_u8
-              length = length + 1_i64
-            end
-            return String.new(length.to_i32) { |dst| dst.copy_from(at, length.to_i32) }
+            return file_string(base, size, table[4] &+ name, table[4] &+ table[5])
           end
         end
         index = index + 1_u64
       end
       ""
+    end
+
+    # A ULEB128 in the file at *cursor*, which it moves past it; it stops
+    # at the file's end. An SLEB128 is passed over the same way.
+    def self.file_uleb(base : UInt64, size : UInt64, cursor : Pointer(UInt64)) : UInt64
+      result = 0_u64
+      shift = 0
+      while cursor.value < size
+        byte = Pointer(UInt8).new(base &+ cursor.value).value.to_u64
+        cursor.value = cursor.value + 1_u64
+        result = result | (byte & 0x7f_u64).unsafe_shl(shift) if shift < 64
+        return result if (byte & 0x80_u64) == 0_u64
+        shift = shift + 7
+      end
+      result
+    end
+
+    # One attribute's value, read in its form at *cursor* and passed over:
+    # an address, a constant, an offset, or for an inline string the file
+    # offset it starts at. False for a form this does not know, which ends
+    # the unit's walk.
+    def self.form_value(base : UInt64, size : UInt64, cursor : Pointer(UInt64), form : UInt64,
+                        address_size : UInt64, version : UInt64, value : Pointer(UInt64)) : ::Bool
+      at = cursor.value
+      value.value = 0_u64
+      width = 0_u64
+      case form
+      when 0x01_u64
+        width = address_size
+      when 0x0b_u64, 0x0c_u64, 0x11_u64
+        width = 1_u64
+      when 0x05_u64, 0x12_u64
+        width = 2_u64
+      when 0x06_u64, 0x13_u64, 0x0e_u64, 0x17_u64
+        width = 4_u64
+      when 0x10_u64
+        width = version <= 2_u64 ? address_size : 4_u64
+      when 0x07_u64, 0x14_u64, 0x20_u64
+        width = 8_u64
+      when 0x0d_u64, 0x0f_u64, 0x15_u64
+        value.value = file_uleb(base, size, cursor)
+        return cursor.value <= size
+      when 0x08_u64
+        value.value = at
+        while at < size && Pointer(UInt8).new(base &+ at).value != 0_u8
+          at = at + 1_u64
+        end
+        cursor.value = at + 1_u64
+        return cursor.value <= size
+      when 0x09_u64, 0x18_u64
+        length = file_uleb(base, size, cursor)
+        cursor.value = cursor.value &+ length
+        return cursor.value <= size
+      when 0x0a_u64
+        cursor.value = at &+ 1_u64 &+ field(base, size, at, 1_u64)
+        return cursor.value <= size
+      when 0x03_u64
+        cursor.value = at &+ 2_u64 &+ field(base, size, at, 2_u64)
+        return cursor.value <= size
+      when 0x04_u64
+        cursor.value = at &+ 4_u64 &+ field(base, size, at, 4_u64)
+        return cursor.value <= size
+      when 0x19_u64
+        return true
+      when 0x16_u64
+        actual = file_uleb(base, size, cursor)
+        return actual != 0x16_u64 && form_value(base, size, cursor, actual, address_size, version, value)
+      else
+        return false
+      end
+      value.value = field(base, size, at, width)
+      cursor.value = at &+ width
+      cursor.value <= size
+    end
+
+    # For each of *addresses*, the DW_AT_name of the subprogram whose
+    # low_pc..high_pc holds it, into *names*: one pass over `.debug_info`
+    # for every frame. A version 2 to 4 unit is read; others are passed
+    # over, and so is a function DWARF gives no name or no single range.
+    def self.subprogram_names(base : UInt64, size : UInt64, table : Pointer(UInt64),
+                              addresses : Array(UInt64), names : Array(String)) : Nil
+      unit = table[6]
+      info_end = table[6] &+ table[7]
+      while unit &+ 11_u64 <= info_end
+        length = field(base, size, unit, 4_u64)
+        break if length == 0_u64 || length >= 0xfffffff0_u64
+        unit_end = unit &+ 4_u64 &+ length
+        break if unit_end > info_end
+        version = field(base, size, unit &+ 4_u64, 2_u64)
+        if version >= 2_u64 && version <= 4_u64
+          abbrevs = table[8] &+ field(base, size, unit &+ 6_u64, 4_u64)
+          address_size = field(base, size, unit &+ 10_u64, 1_u64)
+          unit_names(base, size, table, unit &+ 11_u64, unit_end, abbrevs, address_size, version, addresses, names)
+        end
+        unit = unit_end
+      end
+    end
+
+    def self.unit_names(base : UInt64, size : UInt64, table : Pointer(UInt64), start : UInt64, unit_end : UInt64,
+                        abbrevs : UInt64, address_size : UInt64, version : UInt64,
+                        addresses : Array(UInt64), names : Array(String)) : Nil
+      # The unit's abbreviations: each code's tag, and where its attribute
+      # and form pairs begin.
+      codes = [] of UInt64
+      tags = [] of UInt64
+      specs = [] of UInt64
+      at = abbrevs
+      abbrev_end = table[8] &+ table[9]
+      while at < abbrev_end
+        code = file_uleb(base, size, pointerof(at))
+        break if code == 0_u64
+        tags << file_uleb(base, size, pointerof(at))
+        at = at + 1_u64
+        codes << code
+        specs << at
+        while at < abbrev_end
+          attribute = file_uleb(base, size, pointerof(at))
+          form = file_uleb(base, size, pointerof(at))
+          break if attribute == 0_u64 && form == 0_u64
+        end
+      end
+
+      cursor = start
+      while cursor < unit_end
+        code = file_uleb(base, size, pointerof(cursor))
+        next if code == 0_u64
+        index = -1
+        if code <= codes.size.to_u64 && codes[(code - 1_u64).unsafe_to_i32] == code
+          index = (code - 1_u64).unsafe_to_i32
+        else
+          codes.each_with_index { |known, i| index = i if known == code }
+        end
+        return if index < 0
+        spec = specs[index]
+        low = 0_u64
+        high = 0_u64
+        has_low = false
+        has_high = false
+        high_is_offset = false
+        name_at = 0_u64
+        while true
+          attribute = file_uleb(base, size, pointerof(spec))
+          form = file_uleb(base, size, pointerof(spec))
+          break if attribute == 0_u64 && form == 0_u64
+          value = 0_u64
+          return unless form_value(base, size, pointerof(cursor), form, address_size, version, pointerof(value))
+          case attribute
+          when 0x11_u64 # DW_AT_low_pc
+            low = value
+            has_low = true
+          when 0x12_u64 # DW_AT_high_pc: an address, or since version 4 a length
+            high = value
+            has_high = true
+            high_is_offset = form != 0x01_u64
+          when 0x03_u64 # DW_AT_name
+            name_at = form == 0x0e_u64 ? table[10] &+ value : (form == 0x08_u64 ? value : 0_u64)
+          end
+        end
+        if tags[index] == 0x2e_u64 && has_low && has_high && name_at != 0_u64
+          finish = high_is_offset ? low &+ high : high
+          addresses.each_with_index do |address, i|
+            if names[i].empty? && address >= low && address < finish
+              names[i] = file_string(base, size, name_at, size)
+            end
+          end
+        end
+      end
     end
   {% end %}
 
@@ -1736,19 +1921,31 @@ struct DwarfResolver
       bias = pointerof(layout).as(Pointer(UInt64))[0]
       size = 0_u64
       base = map_self(pointerof(size))
-      found = uninitialized UInt64[6]
+      found = uninitialized UInt64[12]
       table = pointerof(found).as(Pointer(UInt64))
       sections(base, size, table) if base != 0_u64
+      # Every frame handed here is a return address: the call is the byte
+      # before it, as in the walk.
+      addresses = [] of UInt64
+      names = [] of String
+      i = 0
+      while i < count
+        addresses << ((frames + i).value.address &- bias &- 1_u64)
+        names << ""
+        i = i + 1
+      end
+      # The name DWARF gives a function, as Windows' PDB gives it: the
+      # linker leaves it whole, where an older GNU ld cut `.symtab`'s at
+      # its `@` and named every method of a type for the type alone.
+      subprogram_names(base, size, table, addresses, names) if base != 0_u64 && table[7] != 0_u64
       i = 0
       while i < count
         raw_pc = (frames + i).value.address
-        # Every frame handed here is a return address: the call is the
-        # byte before it, as in the walk.
-        address = raw_pc &- bias &- 1_u64
-        fn_name = ""
+        address = addresses[i]
+        fn_name = names[i]
         location = nil
         if base != 0_u64
-          fn_name = symbol_at(base, size, table, address) if table[3] != 0_u64
+          fn_name = symbol_at(base, size, table, address) if fn_name.empty? && table[3] != 0_u64
           location = resolve_line(address, Pointer(UInt8).new(base &+ table[0]), table[1].unsafe_to_i64) if table[1] != 0_u64
         end
         line_out = i.to_s + "   " + (fn_name.empty? ? "[0x" + raw_pc.to_s(16) + "]" : fn_name)

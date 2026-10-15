@@ -227,9 +227,9 @@ deep_holds() { # deep_holds <output>
     grep -q "deep.iyi:$line" "$out" || { echo "a frame at deep.iyi:$line"; return; }
   done
   if [ "$PLATFORM" = linux ]; then
-    grep -qE "^0 +[^ ]*gamma[^ ]* at .*deep\.iyi:6:" "$out" &&
-      grep -qE "^1 +[^ ]*beta[^ ]* at .*deep\.iyi:11:" "$out" &&
-      grep -qE "^2 +[^ ]*alpha[^ ]* at .*deep\.iyi:15:" "$out" ||
+    grep -qE "^0 +gamma at .*deep\.iyi:6:" "$out" &&
+      grep -qE "^1 +beta at .*deep\.iyi:11:" "$out" &&
+      grep -qE "^2 +alpha at .*deep\.iyi:15:" "$out" ||
       echo "frames 0 to 2 are gamma, beta and alpha"
   fi
 }
@@ -306,10 +306,11 @@ if [ "$PLATFORM" = linux ]; then
   # A stripped copy prints its frames as addresses, and the load base is
   # the program's first mapping, which it prints before it panics: each
   # address, less that base and the one byte back to its call, is asked
-  # of `nm` (which function holds it) and `addr2line` (which line) on the
-  # unstripped program - and both answers must be what the resolver
-  # printed for the same frame. The raise is line 7, its callers 12, 16
-  # and 22.
+  # of `addr2line -f` (which function DWARF names, which line) on the
+  # unstripped program - and both must be what the resolver printed for
+  # the same frame. A copy stripped of its debug information alone names
+  # its frames by `.symtab`, each the symbol `nm` says holds the address.
+  # The raise is line 7, its callers 12, 16 and 22.
   echo "== the walk and the names, against binutils"
   cat > "$WORK/probe.iyi" <<'EOF'
 module probe
@@ -341,34 +342,49 @@ EOF
     sed 's/^/    /' "$WORK/probe.build"
   else
     cp "$WORK/probe" "$WORK/probe-stripped" && strip "$WORK/probe-stripped"
+    cp "$WORK/probe" "$WORK/probe-nodebug" && strip -g "$WORK/probe-nodebug"
     "$WORK/probe-stripped" > "$WORK/stripped.out" 2> "$WORK/stripped.err"
     "$WORK/probe" > /dev/null 2> "$WORK/named.err"
-    if ! "$PY" - "$WORK/probe" "$WORK/stripped.out" "$WORK/stripped.err" "$WORK/named.err" <<'PY'
+    "$WORK/probe-nodebug" > "$WORK/nodebug.out" 2> "$WORK/nodebug.err"
+    if ! "$PY" - "$WORK/probe" "$WORK/stripped.out" "$WORK/stripped.err" "$WORK/named.err" "$WORK/nodebug.out" "$WORK/nodebug.err" <<'PY'
 import re, subprocess, sys
-program, out, raw, named = sys.argv[1:]
-base = int(re.search(r"^base ([0-9a-f]+)$", open(out).read(), re.M).group(1), 16)
+program, out, raw, named, nodebug_out, nodebug = sys.argv[1:]
+def base_of(path):
+    return int(re.search(r"^base ([0-9a-f]+)$", open(path).read(), re.M).group(1), 16)
+base = base_of(out)
 addresses = [int(m, 16) for m in re.findall(r"^\d+ +\[0x([0-9a-f]+)\]$", open(raw).read(), re.M)]
 printed = re.findall(r"^\d+ +(\S+) at (\S+):(\d+):\d+$", open(named).read(), re.M)
+links = [a - base - 1 for a in addresses]
+answers = subprocess.run(["addr2line", "-f", "-e", program] + ["%x" % a for a in links],
+                         capture_output=True, text=True).stdout.splitlines()
+if len(addresses) < 4 or len(addresses) != len(printed):
+    sys.exit("  the stripped copy printed %d addresses and the program named %d frames" % (len(addresses), len(printed)))
+bad = 0
+for index, (name, path, number) in enumerate(printed):
+    function, where = answers[2 * index], answers[2 * index + 1].split(" ")[0]
+    if function != name or where != "%s:%s" % (path, number):
+        print("  frame %d: printed %s at %s:%s; addr2line says %s at %s" % (index, name, path, number, function, where))
+        bad += 1
 functions = []
 for line in subprocess.run(["nm", "-S", "--defined-only", program], capture_output=True, text=True).stdout.splitlines():
     parts = line.split(" ", 3)
     if len(parts) == 4 and parts[2] in ("t", "T"):
         functions.append((int(parts[0], 16), int(parts[1], 16), parts[3]))
-links = [a - base - 1 for a in addresses]
-lines = subprocess.run(["addr2line", "-e", program] + ["%x" % a for a in links],
-                       capture_output=True, text=True).stdout.splitlines()
-if len(addresses) < 4 or len(addresses) != len(printed):
-    sys.exit("  the stripped copy printed %d addresses and the program named %d frames" % (len(addresses), len(printed)))
-bad = 0
-for index, (link, (name, path, number)) in enumerate(zip(links, printed)):
+fallback = re.findall(r"^\d+ +(.+) \[0x([0-9a-f]+)\]$", open(nodebug).read(), re.M)
+nodebug_base = base_of(nodebug_out)
+if len(fallback) != len(printed):
+    print("  the copy without debug information named %d frames, the program %d" % (len(fallback), len(printed)))
+    bad += 1
+for index, (name, address) in enumerate(fallback):
+    link = int(address, 16) - nodebug_base - 1
     holders = [f[2] for f in functions if f[0] <= link < f[0] + f[1]]
-    where = lines[index].split(" ")[0]
-    if holders != [name] or where != "%s:%s" % (path, number):
-        print("  frame %d: printed %s at %s:%s; nm says %s, addr2line %s" % (index, name, path, number, holders, where))
+    if holders != [name]:
+        print("  frame %d without debug information: printed %s; nm says %s" % (index, name, holders))
         bad += 1
 if bad:
     sys.exit(1)
-print("  %d frames: each the function nm and the line addr2line name for its address" % len(printed))
+print("  %d frames: each the function and line addr2line names for its address" % len(printed))
+print("  without debug information, each the symbol nm says holds it")
 PY
     then
       fail "the resolver and binutils disagree"
@@ -428,8 +444,8 @@ end
 EOF
   if "$IYI" build -o "$WORK/task" "$WORK/task.iyi" > "$WORK/task.build" 2>&1; then
     "$WORK/task" > "$WORK/task.out" 2>&1
-    if grep -qE "^0 +[^ ]*inner[^ ]* at .*task\.iyi:6:" "$WORK/task.out" &&
-       grep -qE "^1 +[^ ]*outer[^ ]* at .*task\.iyi:11:" "$WORK/task.out" &&
+    if grep -qE "^0 +inner at .*task\.iyi:6:" "$WORK/task.out" &&
+       grep -qE "^1 +outer at .*task\.iyi:11:" "$WORK/task.out" &&
        grep -qE "^2 +[^ ]* at .*task\.iyi:16:" "$WORK/task.out"; then
       echo "  a task's panic: inner, outer and the spawned block, on the task's own stack"
     else
@@ -562,13 +578,14 @@ PY
   # A CFA defined by the frame pointer refused.
   prove_broken "the frame pointer never a CFA base" "a frame at deep.iyi:11" \
     'elsif state[0] == FP_COLUMN && fp_known' 'elsif false' --frame-pointers always
-  # A symbol named for every address past its start.
-  prove_broken "a symbol's size ignored" "frames 0 to 2 are gamma, beta and alpha" \
-    'if address >= start && address - start < field(base, size, entry &+ 16_u64, 8_u64)' \
-    'if address >= start'
+  # A subprogram's high_pc, which DWARF 4 writes as a length, read as the
+  # address it ends at: no function holds a frame, and each is named by
+  # `.symtab` instead.
+  prove_broken "a subprogram's length read as its end" "frames 0 to 2 are gamma, beta and alpha" \
+    'finish = high_is_offset ? low &+ high : high' 'finish = high'
   # The name and line of the return address rather than the call.
   prove_broken "the resolver reading the return address" "frames 0 to 2 are gamma, beta and alpha" \
-    'address = raw_pc &- bias &- 1_u64' 'address = raw_pc &- bias'
+    'addresses << ((frames + i).value.address &- bias &- 1_u64)' 'addresses << ((frames + i).value.address &- bias)'
   echo "  $proofs broken copies"
 fi
 

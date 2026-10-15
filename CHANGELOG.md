@@ -10,14 +10,19 @@
   walk there and an iyi function keeps no frame pointer to follow. The
   module walks the stack itself now, by the program's own `.eh_frame`,
   read in memory through `.eh_frame_hdr`, from registers it reads with
-  `asm`. Then it maps `/proc/self/exe` and names each frame by `.symtab`
-  and `.debug_line`. Nothing of libc or libgcc is asked for, so it is the
-  same on glibc and musl and on a task's own stack. The prelude gained an
-  `IyiPanic.capturer` hook beside the resolver, and a program that does
-  not import the module captures nothing. Held by
+  `asm`. Then it maps `/proc/self/exe` and names each frame by the
+  subprogram `.debug_info` gives it - `gamma`, as Windows' PDB says
+  `inner` - and its line by `.debug_line`. `.symtab` names a frame only
+  in a program stripped of its debug information: an older GNU ld, the
+  one in CI's image, cuts a symbol at its `@`, and every method of a
+  type came out as `*Deep`. Nothing of libc or libgcc is asked for, so
+  it is the same on glibc and musl and on a task's own stack. The
+  prelude gained an `IyiPanic.capturer` hook beside the resolver, and a
+  program that does not import the module captures nothing. Held by
   `bench/std_debug_exercise.sh`:
-  - each frame's function and line are what `nm` and `addr2line` answer
-    for the address a stripped copy prints;
+  - each frame's function and line are what `addr2line -f` answers for
+    the address a stripped copy prints, and without debug information
+    each name is the symbol `nm` says holds it;
   - the walk holds under `--release`, under `--frame-pointers always`,
     in a task, and stripped;
   - six broken copies of the walk and the reader are caught.

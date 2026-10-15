@@ -9,10 +9,12 @@
 #
 # Each platform's own store, as Go's crypto/x509 reads it:
 #
-# - Linux: `$SSL_CERT_FILE` and every file in each directory of
-#   `$SSL_CERT_DIR` (colon-separated) when either is set - the variables
-#   OpenSSL reads, which is how a container or a test names its own roots.
-#   Otherwise the first bundle of the ones the distributions write
+# - Everywhere: `$SSL_CERT_FILE` and every file in each directory of
+#   `$SSL_CERT_DIR` when either is set - the variables OpenSSL reads, which
+#   is how a container or a test names its own roots. The directories are
+#   a list as `PATH` is: `:` between them, `;` on Windows, where a drive
+#   letter owns the colon.
+# - Linux, otherwise: the first bundle of the ones the distributions write
 #   (Debian's, Fedora's, openSUSE's, RHEL's, Alpine's), and when there is
 #   none, every file in `/etc/ssl/certs` and `/etc/pki/tls/certs`.
 # - darwin: Security.framework's system anchors
@@ -109,7 +111,8 @@ pub struct SystemRoots
     dirs = ENV["SSL_CERT_DIR"]?
     if (file && !file.empty?) || (dirs && !dirs.empty?)
       collected.read_file(file) if file && !file.empty?
-      dirs.split(':').each { |dir| collected.read_directory(dir) unless dir.empty? } if dirs && !dirs.empty?
+      separator = {% if flag?(:win32) %} ';' {% else %} ':' {% end %}
+      dirs.split(separator).each { |dir| collected.read_directory(dir) unless dir.empty? } if dirs && !dirs.empty?
       return collected.answer("$SSL_CERT_FILE and $SSL_CERT_DIR (#{[file, dirs].compact.join(", ")})")
     end
     {% if flag?(:darwin) %}

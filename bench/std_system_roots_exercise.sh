@@ -203,7 +203,7 @@ prove_broken "an unreadable block not counted" "a broken block counted 0 times" 
   '    if certificate.is_a?(X509Error)
       @unreadable = @unreadable + 1' '    if certificate.is_a?(X509Error)'
 prove_broken "\$SSL_CERT_DIR passed over" "a file and a directory" \
-  "      dirs.split(':').each { |dir| collected.read_directory(dir) unless dir.empty? } if dirs && !dirs.empty?" ''
+  '      dirs.split(separator).each { |dir| collected.read_directory(dir) unless dir.empty? } if dirs && !dirs.empty?' ''
 prove_broken "an empty store answered as a store" "a bundle with no root refused" \
   '    return X509Error.new("no root certificates in #{where}") if @certificates.empty?' ''
 # A bundle's certificates dropped: the platform's own store is the first

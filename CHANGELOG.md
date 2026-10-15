@@ -4,6 +4,21 @@
 
 ### Added
 
+- **`std/base32`: Base32 and Base32hex (RFC 4648 sections 6 and 7).**
+  `Base32.encode(data, padding: true)` and `Base32Hex.encode`, and
+  `decode(text) : Array(UInt8) | Base32Error` reading either case with
+  padding optional, refusing as a value a byte outside the alphabet
+  (whitespace included), data after the padding, padding too short or
+  too long, a last group of 1, 3 or 6 characters, and a last character
+  that sets bits past the data, naming the canonical one. Pure: it
+  imports nothing. Held by `bench/std_base32_exercise.sh`, plain and
+  `--release`: section 10's vectors both alphabets padded and not, 2,400
+  answers on 300 random byte strings against Python's `b32encode`,
+  `b32hexencode` and their decoders, 1,500 texts broken at random
+  answered as Python's `b32decode` does but for the 70 whose bits past
+  the data Python ignores, the 256 canonical two-character texts out of
+  1,024, six error sentences through `.or_panic`, eight broken copies
+  caught (an alphabet swap among them).
 - **`std/aead`: authenticated encryption in iyi - AES-GCM and
   ChaCha20-Poly1305, and AES, ChaCha20 and Poly1305 on their own.** A
   program that had to seal a cookie or a file had a MAC and no cipher.

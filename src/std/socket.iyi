@@ -2286,6 +2286,10 @@ pub class IyiSocket
       -1
     end
 
+    def self.__sys_getpeername(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32)) : Int32
+      -1
+    end
+
     def self.__sys_set_reuseaddr(fd : Int32) : Int32
       -1
     end

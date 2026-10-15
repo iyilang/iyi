@@ -1534,56 +1534,6 @@ module Iyi
       end
     end
 
-    # iyi: the pointer maps of the types this module owns, for the `Layouts`
-    # section (GC_DESIGN.md Stage 1).
-    #
-    # The set is the walk `collect_iyi_unit_names` does, kept as types rather
-    # than names, with one relaxation: a generic the module declares
-    # contributes each instantiation this build has, because an instantiation
-    # is monomorphic and has a layout. An uninstantiated generic contributes
-    # nothing: one entry serving two instantiations by shape is R-4's
-    # per-GC-shape keying, which nothing implements yet, so no entry pretends.
-    #
-    # Only a type laid out as an object gets a map: a class, a struct, or an
-    # instantiation of one. `InstanceVarContainer` is not that filter, because
-    # a module and a trait are containers too, and a trait's indirection is
-    # the union of its implementors, which is exactly not a layout. A module,
-    # an enum and an alias declare no fields of their own to scan in any
-    # case.
-    private def collect_iyi_layouts(program : Program, module_type : ModuleType) : Array({String, IyiMod::TypeLayout})
-      types = [] of Type
-      collect_iyi_layout_types module_type, types
-
-      layouts = [] of {String, IyiMod::TypeLayout}
-      types.each do |type|
-        next unless type.is_a?(NonGenericClassType) || type.is_a?(GenericClassInstanceType)
-        next if type.is_a?(GenericType) || type.is_a?(StaticArrayInstanceType)
-        layouts << {type.to_s, program.gc_type_layout(type)}
-      end
-
-      # Sorted, for the reason `mono_bodies` is: a walk's order is not a fact
-      # about the module, and an artifact that changed between two identical
-      # builds would defeat IV.3.
-      layouts.sort_by! &.[0]
-      layouts
-    end
-
-    # The walk `collect_iyi_unit_names` does, keeping the types. A generic is
-    # not collected itself (it has no layout); each instantiation of it in
-    # this build is.
-    private def collect_iyi_layout_types(type : ModuleType, types : Array(Type)) : Nil
-      type.types?.try &.each_value do |declared|
-        if declared.is_a?(GenericType)
-          declared.instantiated_types.each do |instance|
-            types << instance unless instance.unbound?
-          end
-        else
-          types << declared
-        end
-        collect_iyi_layout_types declared, types if declared.is_a?(ModuleType)
-      end
-    end
-
     # The unit names of every type declared under *type*, recursively.
     #
     # A unit is named after the type that owns the methods in it, and **a
@@ -1600,8 +1550,14 @@ module Iyi
     # fails on a duplicate symbol. Carrying an instantiation would also be true
     # only while the two builds are the same build, which is the arrangement
     # this file exists to end.
+    #
+    # A module with a `module` header of its own is not walked into: `pkg/child`
+    # is the namespace `Pkg::Child`, inside `pkg`'s `Pkg`, and it has an
+    # artifact of its own. Walked into, `pkg.iyimod` carried the child's units
+    # a second time and a program built from both failed to link.
     private def collect_iyi_unit_names(type : ModuleType, names : Array(String)) : Nil
       type.types?.try &.each_value do |declared|
+        next if declared.iyi_unit?
         unless declared.is_a?(GenericType)
           names << declared.to_s
           virtual = iyi_virtual_unit_name(declared)
@@ -1634,6 +1590,7 @@ module Iyi
     # their names — `try_inline_call` is handed an owner, not a string.
     private def collect_iyi_owners(type : ModuleType, owners : Set(Type)) : Nil
       type.types?.try &.each_value do |declared|
+        next if declared.iyi_unit?
         unless declared.is_a?(GenericType)
           owners << declared
           # And the virtual form, for the reason `iyi_virtual_unit_name` gives:
@@ -1690,6 +1647,7 @@ module Iyi
     # this build is.
     private def collect_iyi_layout_types(type : ModuleType, types : Array(Type)) : Nil
       type.types?.try &.each_value do |declared|
+        next if declared.iyi_unit?
         if declared.is_a?(GenericType)
           declared.instantiated_types.each do |instance|
             types << instance unless instance.unbound?
@@ -1984,6 +1942,10 @@ module Iyi
       declarations = [] of IyiMod::TypeDecl
       type.types?.try &.each do |name, declared|
         next if carried.try &.includes?(name)
+        # Another module's: it carries its own declarations (see
+        # `collect_iyi_unit_names`), and carrying them here declared its
+        # aliases twice.
+        next if declared.iyi_unit?
         container = path.empty? ? name : "#{path}::#{name}"
 
         # An alias has neither a layout nor an id, and it travels for the other

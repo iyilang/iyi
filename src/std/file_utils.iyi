@@ -20,7 +20,7 @@
 # `std/dir` and the prelude's descriptor calls `File.open` itself reads
 # with (`__iyi_open_file`, `__iyi_file_read`, `__iyi_file_write`), so it
 # compiles for every target those do and has no platform arm of its own.
-# Crystal keeps the same split - `File` and `Dir` for the calls,
+# The other library keeps the same split - `File` and `Dir` for the calls,
 # `FileUtils` for the trees - and a program ported from it finds the
 # names where it looks. What `std/file` and `std/dir` already have is not
 # repeated: `File.symlink`, `File.symlink?`, `File.readlink` and

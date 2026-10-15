@@ -72,7 +72,7 @@
 #     time through `ReadConsoleW` already.
 #
 # Every change is made at once (TCSANOW: TCSETS on Linux, `tcsetattr` with
-# TCSANOW on darwin), as Go and Crystal make it, so input typed ahead of the
+# TCSANOW on darwin), as Go and the other library make it, so input typed ahead of the
 # block is not thrown away; TCSAFLUSH, Python's `getpass` choice, would
 # discard it.
 #

@@ -98,7 +98,7 @@ module refuse
 
 import std/mime::{MIME}
 
-MIME.register(".cr", "text/crystal")
+MIME.register(".iyi", "text/x-iyi")
 puts "accepted"
 IYI
 cat >"$WORK/malformed.iyi" <<'IYI'

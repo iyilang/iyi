@@ -24,6 +24,17 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
+# A link's target as `File.readlink` answers it: Windows keeps a `/` in
+# the target as `\`, because `File.symlink` writes it so (a `/` there
+# points at nothing), and readlink reads back what was kept.
+def as_stored(target : String) : String
+  {% if flag?(:win32) %}
+    target.split('/').join("\\")
+  {% else %}
+    target
+  {% end %}
+end
+
 # What *work* panicked with, or "done" when it did not: run as a task,
 # whose value catches the panic.
 def refusal_of(&work : -> Nil) : String
@@ -201,8 +212,8 @@ assert_true Dir.exists?(copy + "/void") && Dir.empty?(copy + "/void"), "cp_r cop
   assert_true mode_of(copy + "/sub/deeper") == 0o750, "cp_r keeps a directory's bits"
 {% end %}
 if links
-  assert_true File.symlink?(copy + "/sub/up") && File.readlink(copy + "/sub/up") == "../top.txt", "cp_r copies a link as a link"
-  assert_true File.symlink?(copy + "/out") && File.readlink(copy + "/out") == outside, "cp_r copies a link out of the tree as a link"
+  assert_true File.symlink?(copy + "/sub/up") && File.readlink(copy + "/sub/up") == as_stored("../top.txt"), "cp_r copies a link as a link"
+  assert_true File.symlink?(copy + "/out") && File.readlink(copy + "/out") == as_stored(outside), "cp_r copies a link out of the tree as a link"
   assert_true File.symlink?(copy + "/dangling") && File.readlink(copy + "/dangling") == "dangling-target", "cp_r copies a dangling link"
   assert_str "top", File.read(copy + "/sub/up"), "the copied link resolves inside the copy"
   FileUtils.cp_r(tree + "/out/", sandbox + "/through")
@@ -303,7 +314,7 @@ if there && there.dev != here.dev && there.dev != 0_i64 && here.dev != 0_i64
   assert_true !Dir.exists?(sandbox + "/voyage"), "mv across devices removes the tree it moved"
   assert_true FileUtils.compare_file(tree + "/sub/deeper/big.bin", away + "/voyage/sub/deeper/big.bin"), "mv across devices keeps a tree's files"
   if links
-    assert_true File.readlink(away + "/voyage/out") == outside, "mv across devices keeps a link as a link"
+    assert_true File.readlink(away + "/voyage/out") == as_stored(outside), "mv across devices keeps a link as a link"
     assert_str "not yours", File.read(outside + "/keep.txt"), "mv across devices leaves a link's target where it was"
   end
   # Onto what rename would refuse, refused the same way and nothing lost.

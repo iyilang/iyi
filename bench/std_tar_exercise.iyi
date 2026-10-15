@@ -32,6 +32,17 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
+# A link's target as `File.readlink` answers it: Windows keeps a `/` in
+# the target as `\`, because `File.symlink` writes it so (a `/` there
+# points at nothing), and readlink reads back what was kept.
+def as_stored(target : String) : String
+  {% if flag?(:win32) %}
+    target.split('/').join("\\")
+  {% else %}
+    target
+  {% end %}
+end
+
 # Zeros, as many as asked, from one buffer: a source for an entry past
 # 8 GiB that costs no memory and no time to make.
 class ZeroSource < IyiIO
@@ -584,15 +595,21 @@ specs.each do |s|
   case s.kind
   when "file"
     assert_str s.body, File.read(path), "extract: #{s.name}"
-    assert_true File.info(path).permissions.to_i & 0o777 == s.mode, "extract: #{s.name} has mode #{s.mode.to_s(8)} (#{File.info(path).permissions.to_i.to_s(8)})"
+    # Windows has no permission bits beyond read-only, so a mode written
+    # into the archive has nothing there to land in.
+    {% unless flag?(:win32) %}
+      assert_true File.info(path).permissions.to_i & 0o777 == s.mode, "extract: #{s.name} has mode #{s.mode.to_s(8)} (#{File.info(path).permissions.to_i.to_s(8)})"
+    {% end %}
     if s.mtime > 0_i64
       assert_true File.info(path).modification_time == s.mtime, "extract: #{s.name}'s time #{File.info(path).modification_time}"
     end
   when "dir"
     assert_true Dir.exists?(path), "extract: the directory #{s.name}"
-    assert_true File.info(path).permissions.to_i & 0o777 == s.mode, "extract: #{s.name}'s mode"
+    {% unless flag?(:win32) %}
+      assert_true File.info(path).permissions.to_i & 0o777 == s.mode, "extract: #{s.name}'s mode"
+    {% end %}
   when "symlink"
-    assert_true File.symlink?(path) && File.readlink(path) == s.body, "extract: the symbolic link #{s.name}"
+    assert_true File.symlink?(path) && File.readlink(path) == as_stored(s.body), "extract: the symbolic link #{s.name}"
   when "hardlink"
     assert_true File.info(path).same_file?(File.info(good + "/" + s.body)), "extract: the hard link #{s.name} is #{s.body}"
   end
@@ -650,7 +667,10 @@ ro = work + "/ro"
 FileUtils.rm_rf(ro)
 done = TarReader.new(Memory.new(raw("locked/", '5', 0_i64, mode: 0o555_i64) + raw("locked/in.txt", '0', 2_i64) + padded("in") + END_BLOCKS)).extract(ro)
 raise "ASSERTION FAILED: a read-only directory: #{done.message}" if done.is_a?(TarError)
-assert_true File.read(ro + "/locked/in.txt") == "in" && File.info(ro + "/locked").permissions.to_i & 0o777 == 0o555, "a directory's mode set after its entries"
+assert_str "in", File.read(ro + "/locked/in.txt"), "a read-only directory still takes its entries"
+{% unless flag?(:win32) %}
+  assert_true File.info(ro + "/locked").permissions.to_i & 0o777 == 0o555, "a directory's mode set after its entries"
+{% end %}
 File.chmod(ro + "/locked", 0o755)
 
 if !scratch && File.exists?(work + "/index.txt")

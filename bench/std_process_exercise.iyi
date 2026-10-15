@@ -95,12 +95,24 @@ if mode = args[0]?
     stdout.write("#{Process.pid}\n")
   when "trap"
     {% unless flag?(:win32) %}
-      stdout.write("ready\n")
-      stdout.flush
-      Signal.wait(Signal::TERM)
-      stdout.write("asked to stop\n")
-      stdout.flush
-      __iyi_exit(3)
+      # "ready" once the wait has parked, which installs the handler: said
+      # before it, a TERM sent at once met the default action and ended the
+      # child, which a slow machine - aarch64 under qemu - showed.
+      group do |g|
+        g.spawn do
+          Signal.wait(Signal::TERM)
+          stdout.write("asked to stop\n")
+          stdout.flush
+          __iyi_exit(3)
+          0
+        end
+        g.spawn do
+          sleep(50)
+          stdout.write("ready\n")
+          stdout.flush
+          0
+        end
+      end
     {% end %}
   when "spawninherit"
     # Writes, starts itself sharing this stream, writes again: the three

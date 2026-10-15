@@ -769,7 +769,11 @@ group do |g|
   fail("the cancelled read did not answer Cancelled") unless read_cancelled
   stuck_end = stuck.status
   fail("the cancelled read's child was left running") unless stuck_end
-  {% unless flag?(:win32) %}
+  # Ended by the cancellation, not by its own end thirty seconds on: a kill
+  # is signal 9, and on Windows the exit code 1 the job is ended with.
+  {% if flag?(:win32) %}
+    fail("the cancelled read's child ended with exit code #{stuck_end.exit_code}, not the kill's 1") unless stuck_end.exit_code == 1
+  {% else %}
     fail("the cancelled read's child ended with signal #{stuck_end.signal}") unless stuck_end.signal == 9
   {% end %}
   puts "  the read answered Cancelled, with the child it read from ended and collected"

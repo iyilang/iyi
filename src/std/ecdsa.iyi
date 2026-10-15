@@ -1,0 +1,373 @@
+# ECDSA signatures checked (FIPS 186-5, SEC 1), written in iyi, on the
+# NIST curves P-256, P-384 and P-521.
+#
+#     import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
+#
+#     key = EcdsaPublicKey.from_spki(spki_der).or_panic     # what X.509 carries
+#     key.verify(EcdsaHash::SHA256, message, signature)     # Bool
+#     key = EcdsaPublicKey.from_point(EcdsaCurve::P256, point).or_panic
+#
+# Checking only, as std/rsa is. A TLS client checks a server's signatures
+# and a certificate's, and makes none: there is no private key here and no
+# secret, so the arithmetic is std/big's, plain and variable-time. The key
+# a client agrees on is X25519's (std/curve25519), which is constant-time.
+#
+# All three curves, not only P-256: of the roots a system trusts, most
+# that are not RSA are P-384 (35 of the 39 on the machine this was written
+# on), and one is P-521. A curve is named by its OID in the key's
+# AlgorithmIdentifier (RFC 5480): prime256v1, secp384r1, secp521r1.
+# Explicit curve parameters are refused, as RFC 5480 says a certificate
+# must not carry them.
+#
+# A key is a point on its curve. `from_point` takes the uncompressed
+# encoding (0x04, then x and y at the curve's width) and refuses the rest:
+# a compressed point, which RFC 5480 lets an implementation decline; a
+# coordinate not below the field's prime; a point that does not satisfy
+# the curve's equation. Every one of these curves has cofactor 1, so a
+# point on the curve that is not the identity is a point of the group.
+#
+# `verify` is SEC 1 section 4.1.4. The signature is the DER of
+# Ecdsa-Sig-Value, SEQUENCE { r INTEGER, s INTEGER }, as both X.509 and TLS
+# 1.3 carry it, read through std/asn1's strict DER: no trailing bytes, no
+# integer written longer than it is, no negative r or s. Each of r and s
+# must be in [1, n - 1]. The digest is cut to n's length in bits when it
+# is longer (P-256 under SHA-384). u1·G + u2·Q is taken in one pass over
+# the bits of both (Shamir's trick) in Jacobian coordinates, with the
+# cases a general addition misses handled by name: a point added to
+# itself, a point added to its negative, the identity on either side.
+#
+# A signature that is not one is `false`, whatever the reason.
+#
+# Pure computation: std/big's arithmetic, std/digest's hashes.
+
+module std/ecdsa
+
+import std/asn1::{Der, DerValue, DerTag, Asn1Error}
+import std/big::{BigInt}
+import std/digest::{SHA256, SHA384, SHA512}
+
+# What reading a key answers for bytes that are not an ECDSA public key.
+pub struct EcdsaError
+  getter message : String
+
+  def initialize(message : String)
+    @message = "ecdsa: #{message}"
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for EcdsaError
+  def message : String
+    @message
+  end
+end
+
+# The hashes a signature is made over.
+pub enum EcdsaHash
+  SHA256
+  SHA384
+  SHA512
+
+  def digest(data : Array(UInt8)) : Array(UInt8)
+    case self
+    when EcdsaHash::SHA256 then Std::Digest::SHA256.hash_bytes(data)
+    when EcdsaHash::SHA384 then Std::Digest::SHA384.hash_bytes(data)
+    else                        Std::Digest::SHA512.hash_bytes(data)
+    end
+  end
+end
+
+# The curves a key can be on.
+pub enum EcdsaCurve
+  P256
+  P384
+  P521
+
+  # The curve's OID, as a key's AlgorithmIdentifier names it.
+  def oid : String
+    case self
+    when EcdsaCurve::P256 then "1.2.840.10045.3.1.7"
+    when EcdsaCurve::P384 then "1.3.132.0.34"
+    else                       "1.3.132.0.35"
+    end
+  end
+
+  # The length of the group's order n in bits.
+  def bits : Int32
+    case self
+    when EcdsaCurve::P256 then 256
+    when EcdsaCurve::P384 then 384
+    else                       521
+    end
+  end
+
+  # The bytes a coordinate, or a scalar, is written in.
+  def size : Int32
+    (bits + 7) // 8
+  end
+
+  def self.from_oid(oid : String) : EcdsaCurve?
+    return EcdsaCurve::P256 if oid == EcdsaCurve::P256.oid
+    return EcdsaCurve::P384 if oid == EcdsaCurve::P384.oid
+    return EcdsaCurve::P521 if oid == EcdsaCurve::P521.oid
+    nil
+  end
+end
+
+pub struct EcdsaPublicKey
+  getter curve : EcdsaCurve
+  getter x : BigInt
+  getter y : BigInt
+  @group : EcdsaGroup
+
+  EC_PUBLIC_KEY = "1.2.840.10045.2.1"
+
+  def initialize(@curve : EcdsaCurve, @x : BigInt, @y : BigInt, @group : EcdsaGroup)
+  end
+
+  # The key from a point in SEC 1's uncompressed encoding (section 2.3.3):
+  # 0x04, then x and y big-endian at the curve's width.
+  def self.from_point(curve : EcdsaCurve, point : Array(UInt8)) : EcdsaPublicKey | EcdsaError
+    size = curve.size
+    if point.size == size + 1 && (point[0] == 2_u8 || point[0] == 3_u8)
+      return EcdsaError.new("a compressed point, which this does not take")
+    end
+    unless point.size == 2 * size + 1 && point[0] == 4_u8
+      return EcdsaError.new("a point of #{point.size} bytes, not the #{2 * size + 1} of an uncompressed #{curve} point")
+    end
+    x = BigInt.from_bytes(point[1, size])
+    y = BigInt.from_bytes(point[1 + size, size])
+    group = EcdsaGroup.of(curve)
+    return EcdsaError.new("a coordinate not below the field's prime") unless x < group.p && y < group.p
+    return EcdsaError.new("a point that is not on #{curve}") unless group.on_curve?(x, y)
+    EcdsaPublicKey.new(curve, x, y, group)
+  end
+
+  # A SubjectPublicKeyInfo (RFC 5280 section 4.1.2.7) naming
+  # id-ecPublicKey and one of the three curves (RFC 5480 section 2.1.1).
+  def self.from_spki(der : Array(UInt8)) : EcdsaPublicKey | EcdsaError
+    value = EcdsaBytes.asn1_value(Der.parse(der))!
+    from_spki(value)
+  end
+
+  def self.from_spki(value : DerValue) : EcdsaPublicKey | EcdsaError
+    fields = EcdsaBytes.asn1_values(value.sequence)!
+    return EcdsaError.new("a SubjectPublicKeyInfo of #{fields.size} values, not 2") unless fields.size == 2
+    algorithm = EcdsaBytes.asn1_values(fields[0].sequence)!
+    return EcdsaError.new("an AlgorithmIdentifier with no algorithm") if algorithm.empty?
+    oid = EcdsaBytes.asn1_text(algorithm[0].oid)!
+    return EcdsaError.new("a key for #{oid}, not id-ecPublicKey (#{EC_PUBLIC_KEY})") unless oid == EC_PUBLIC_KEY
+    unless algorithm.size == 2 && algorithm[1].universal?(DerTag::OBJECT_IDENTIFIER)
+      return EcdsaError.new("id-ecPublicKey's parameters are not a named curve")
+    end
+    named = EcdsaBytes.asn1_text(algorithm[1].oid)!
+    curve = EcdsaCurve.from_oid(named)
+    return EcdsaError.new("a key on curve #{named}, not P-256, P-384 or P-521") unless curve
+    from_point(curve, EcdsaBytes.asn1_bytes(fields[1].bit_string)!)
+  end
+
+  # Whether *signature*, the DER of an Ecdsa-Sig-Value, is this key's
+  # signature of *message* under *hash*.
+  def verify(hash : EcdsaHash, message : Array(UInt8) | String, signature : Array(UInt8)) : Bool
+    parsed = Der.parse(signature)
+    return false if parsed.is_a?(Asn1Error)
+    fields = parsed.sequence
+    return false if fields.is_a?(Asn1Error)
+    return false unless fields.size == 2
+    r_bytes = fields[0].unsigned_integer
+    return false if r_bytes.is_a?(Asn1Error)
+    s_bytes = fields[1].unsigned_integer
+    return false if s_bytes.is_a?(Asn1Error)
+    check(hash.digest(EcdsaBytes.of(message)), BigInt.from_bytes(r_bytes), BigInt.from_bytes(s_bytes))
+  end
+
+  # SEC 1 section 4.1.4, steps 1 and 3 to 8.
+  private def check(digest : Array(UInt8), r : BigInt, s : BigInt) : Bool
+    n = @group.n
+    return false unless r.positive? && r < n && s.positive? && s < n
+    e = BigInt.from_bytes(digest)
+    excess = digest.size * 8 - @curve.bits
+    e = e >> excess if excess > 0
+    w = s.pow_mod(n - BigInt.new(2), n)
+    u1 = (e * w) % n
+    u2 = (r * w) % n
+    sum = @group.combine(u1, u2, @x, @y)
+    return false if sum.z.zero?
+    @group.affine_x(sum) % n == r
+  end
+end
+
+# A point in Jacobian coordinates: (X / Z^2, Y / Z^3), the identity where
+# Z is zero.
+struct EcdsaPoint
+  getter x : BigInt
+  getter y : BigInt
+  getter z : BigInt
+
+  def initialize(@x : BigInt, @y : BigInt, @z : BigInt)
+  end
+
+  def self.identity : EcdsaPoint
+    EcdsaPoint.new(BigInt.one, BigInt.one, BigInt.zero)
+  end
+end
+
+# A curve's numbers and its arithmetic: y^2 = x^3 - 3x + b over the
+# integers modulo the prime p, the group of order n generated by G.
+struct EcdsaGroup
+  getter p : BigInt
+  getter n : BigInt
+  getter b : BigInt
+  getter gx : BigInt
+  getter gy : BigInt
+  getter size : Int32
+
+  def initialize(@p : BigInt, @n : BigInt, @b : BigInt, @gx : BigInt, @gy : BigInt, @size : Int32)
+  end
+
+  # FIPS 186-5's domain parameters (SP 800-186 section 3.2.1).
+  def self.of(curve : EcdsaCurve) : EcdsaGroup
+    case curve
+    when EcdsaCurve::P256
+      EcdsaGroup.new(
+        BigInt.from_hex("ffffffff00000001000000000000000000000000ffffffffffffffffffffffff"),
+        BigInt.from_hex("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551"),
+        BigInt.from_hex("5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b"),
+        BigInt.from_hex("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),
+        BigInt.from_hex("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"),
+        curve.size)
+    when EcdsaCurve::P384
+      EcdsaGroup.new(
+        BigInt.from_hex("fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff"),
+        BigInt.from_hex("ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973"),
+        BigInt.from_hex("b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef"),
+        BigInt.from_hex("aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7"),
+        BigInt.from_hex("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f"),
+        curve.size)
+    else
+      EcdsaGroup.new(
+        BigInt.from_hex("01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+        BigInt.from_hex("01fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa51868783bf2f966b7fcc0148f709a5d03bb5c9b8899c47aebb6fb71e91386409"),
+        BigInt.from_hex("0051953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00"),
+        BigInt.from_hex("00c6858e06b70404e9cd9e3ecb662395b4429c648139053fb521f828af606b4d3dbaa14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429bf97e7e31c2e5bd66"),
+        BigInt.from_hex("011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c24088be94769fd16650"),
+        curve.size)
+    end
+  end
+
+  def on_curve?(x : BigInt, y : BigInt) : Bool
+    reduce(y * y) == reduce(x * x * x - x * BigInt.new(3) + @b)
+  end
+
+  # u1·G + u2·Q, both scalars' bits read together from the top: one
+  # doubling a bit, and one addition of G, Q or G + Q where either is set.
+  def combine(u1 : BigInt, u2 : BigInt, qx : BigInt, qy : BigInt) : EcdsaPoint
+    g = EcdsaPoint.new(@gx, @gy, BigInt.one)
+    q = EcdsaPoint.new(qx, qy, BigInt.one)
+    both = add(g, q)
+    a = u1.to_bytes(@size)
+    c = u2.to_bytes(@size)
+    return EcdsaPoint.identity unless a && c
+    acc = EcdsaPoint.identity
+    i = 0
+    while i < @size
+      bit = 7
+      while bit >= 0
+        acc = double(acc)
+        x = (a[i] >> bit) & 1_u8
+        y = (c[i] >> bit) & 1_u8
+        if x == 1_u8 && y == 1_u8
+          acc = add(acc, both)
+        elsif x == 1_u8
+          acc = add(acc, g)
+        elsif y == 1_u8
+          acc = add(acc, q)
+        end
+        bit = bit - 1
+      end
+      i = i + 1
+    end
+    acc
+  end
+
+  # The affine x of a point that is not the identity.
+  def affine_x(point : EcdsaPoint) : BigInt
+    z_inverse = point.z.pow_mod(@p - BigInt.new(2), @p)
+    reduce(point.x * z_inverse * z_inverse)
+  end
+
+  # dbl-2001-b, for a = -3.
+  def double(point : EcdsaPoint) : EcdsaPoint
+    return point if point.z.zero?
+    return EcdsaPoint.identity if point.y.zero?
+    delta = reduce(point.z * point.z)
+    gamma = reduce(point.y * point.y)
+    beta = reduce(point.x * gamma)
+    alpha = reduce((point.x - delta) * (point.x + delta) * BigInt.new(3))
+    x3 = reduce(alpha * alpha - beta * BigInt.new(8))
+    sum = point.y + point.z
+    z3 = reduce(sum * sum - gamma - delta)
+    y3 = reduce(alpha * (beta * BigInt.new(4) - x3) - gamma * gamma * BigInt.new(8))
+    EcdsaPoint.new(x3, y3, z3)
+  end
+
+  # add-1998-cmo-2, with the two cases it cannot take: equal x, which is
+  # the same point (a doubling) or its negative (the identity).
+  def add(one : EcdsaPoint, other : EcdsaPoint) : EcdsaPoint
+    return other if one.z.zero?
+    return one if other.z.zero?
+    z1z1 = reduce(one.z * one.z)
+    z2z2 = reduce(other.z * other.z)
+    u1 = reduce(one.x * z2z2)
+    u2 = reduce(other.x * z1z1)
+    s1 = reduce(one.y * other.z * z2z2)
+    s2 = reduce(other.y * one.z * z1z1)
+    h = reduce(u2 - u1)
+    r = reduce(s2 - s1)
+    if h.zero?
+      return r.zero? ? double(one) : EcdsaPoint.identity
+    end
+    hh = reduce(h * h)
+    hhh = reduce(hh * h)
+    v = reduce(u1 * hh)
+    x3 = reduce(r * r - hhh - v * BigInt.new(2))
+    y3 = reduce(r * (v - x3) - s1 * hhh)
+    z3 = reduce(one.z * other.z * h)
+    EcdsaPoint.new(x3, y3, z3)
+  end
+
+  # *value* modulo p, in [0, p).
+  def reduce(value : BigInt) : BigInt
+    rest = value % @p
+    rest.negative? ? rest + @p : rest
+  end
+end
+
+# Messages as bytes, and std/asn1's errors as this one's.
+struct EcdsaBytes
+  def self.of(message : Array(UInt8) | String) : Array(UInt8)
+    return message if message.is_a?(Array(UInt8))
+    Array(UInt8).new(message.bytesize) { |i| message.to_unsafe[i] }
+  end
+
+  # One helper a type, as std/rsa has: an Asn1Error read as a key's
+  # refusal.
+  def self.asn1_value(answer : DerValue | Asn1Error) : DerValue | EcdsaError
+    answer.is_a?(Asn1Error) ? EcdsaError.new(answer.message) : answer
+  end
+
+  def self.asn1_values(answer : Array(DerValue) | Asn1Error) : Array(DerValue) | EcdsaError
+    answer.is_a?(Asn1Error) ? EcdsaError.new(answer.message) : answer
+  end
+
+  def self.asn1_bytes(answer : Array(UInt8) | Asn1Error) : Array(UInt8) | EcdsaError
+    answer.is_a?(Asn1Error) ? EcdsaError.new(answer.message) : answer
+  end
+
+  def self.asn1_text(answer : String | Asn1Error) : String | EcdsaError
+    answer.is_a?(Asn1Error) ? EcdsaError.new(answer.message) : answer
+  end
+end

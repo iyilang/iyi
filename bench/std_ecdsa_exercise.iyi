@@ -1,0 +1,179 @@
+# Exercises std/ecdsa: ECDSA signatures checked on P-256, P-384 and P-521,
+# and keys read and refused.
+#
+# With no argument: signatures Python's cryptography made, each curve
+# under each hash, the digest cut where it is longer than the group's
+# order (P-256 under SHA-512); signatures made by hand that break one rule
+# each - r or s zero, n, or past n, r and s swapped, a third INTEGER, a
+# byte after the signature, r negative or written a byte longer than DER
+# allows, a SET for the SEQUENCE - and n - s, which is the other valid
+# signature and is taken. Keys whose private value is 1 and n - 1, so that
+# u1·G + u2·Q meets a doubling (Q = G) and the identity (Q = -G). Then
+# keys that are not keys. The modes the gate script drives:
+#   verify FILE   each line `spki hash message signature`, in hex,
+#                 answered `true`, `false` or `key: <why>`;
+#   roots DIR     each certificate's own signature checked with its own
+#                 key, where both are ECDSA: `name true|false|skip`.
+
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
+import std/asn1::{Der, DerValue, Asn1Error}
+import std/dir::{Dir}
+import std/file::{File}
+
+def check(cond : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless cond
+end
+
+def b(hex : String) : Array(UInt8)
+  p = hex.to_unsafe
+  Array(UInt8).new(hex.bytesize // 2) do |i|
+    hi = p[i * 2].to_i32
+    lo = p[i * 2 + 1].to_i32
+    hi = hi >= 97 ? hi - 87 : hi - 48
+    lo = lo >= 97 ? lo - 87 : lo - 48
+    (hi * 16 + lo).to_u8
+  end
+end
+
+def hash_named(name : String) : EcdsaHash
+  case name
+  when "SHA256" then EcdsaHash::SHA256
+  when "SHA384" then EcdsaHash::SHA384
+  else               EcdsaHash::SHA512
+  end
+end
+
+def refused(der : String, phrase : String, label : String) : Nil
+  answer = EcdsaPublicKey.from_spki(b(der))
+  raise "ASSERTION FAILED: #{label}: accepted" unless answer.is_a?(EcdsaError)
+  check answer.message.includes?(phrase), "#{label}: refused with #{answer.message.inspect}, not #{phrase.inspect}"
+end
+
+def read_file(path : String) : Array(UInt8)
+  data = File.read(path)
+  Array(UInt8).new(data.bytesize) { |i| data.to_unsafe[i] }
+end
+
+# The hash a certificate's ecdsa-with-SHA* signature algorithm names.
+def certificate_hash(algorithm : Array(DerValue)) : String?
+  case algorithm[0].oid.or_panic
+  when "1.2.840.10045.4.3.2" then "SHA256"
+  when "1.2.840.10045.4.3.3" then "SHA384"
+  when "1.2.840.10045.4.3.4" then "SHA512"
+  else                            nil
+  end
+end
+
+K_P256 = "3059301306072a8648ce3d020106082a8648ce3d030107034200041ce8bd42f847d37ba2a624ea4f21ffdbac7682974b514df89b538e95ac7cbe0e9870c79029b37954a86c95e5f5b9cd4b2569c8dc102d2be6937d839b0d42da58"
+K_P384 = "3076301006072a8648ce3d020106052b8104002203620004fe0c3cb060804499a77253fabbada45aede09bc7bac20038933f049a077494310cce9cadc3bf6a5e1420ad22a6004f38b4c12c31d43e79ce554ca4f6f0a60e5782427105575445cb40aaf25b0edd54663402410a98d24125806a68b2930b8c0f"
+K_P521 = "30819b301006072a8648ce3d020106052b81040023038186000400d954daf98c82f7b174ab7ea21f06f08e32292efd6d3f35904cc36b7dab44c9d3a1b0e5be5c6258adf0fc74d9d57ae63ef549f01235223a9edab4f9b88a8326ca88000fd348880f7dad1561c778f66307c939d5b3207991e49817c3e3da4f770c4dea86acecf6b39de4d991a15d40dd4632886a027f9eed09d61b434d9cc86f943281c4"
+K_D1   = "3059301306072a8648ce3d020106082a8648ce3d030107034200046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+K_DNEG = "3059301306072a8648ce3d020106082a8648ce3d030107034200046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a"
+
+# key, hash, message, signature, verdict, what it holds
+SIGNATURES = [
+  {K_P256, "SHA256", "abc", "304402203488dd85b2e8c4e82b6f500935fda75c25e3269043cee72182bd61f71bd9fe44022072409dacd33f989e77b07a66e97340a0ada2ff739b218b28c50412b33b4c64ea", true, "P256 SHA256"},
+  {K_P256, "SHA384", "abc", "3045022100b31d8f799a2da0a0153a60a0f08f95e921f3800d819447367efdbda457e9c83602207aec81ed2698f5020882bb48d1d76138ddb1b5dae48d18782345cdbd45f5ff88", true, "P256 SHA384"},
+  {K_P256, "SHA512", "abc", "30460221008d49a1fdcca7a00afa4ce64a67b32b34409eae4d7a4e726ca9687088cb39c21d022100b63d5a97d72ab75ea3d316e0e0b5d11ad7e3b6b1c4ab6e8cb21b4f1ae900b7bf", true, "P256 SHA512"},
+  {K_P384, "SHA256", "abc", "3065023100a07368e463c1b69891a007e48c899146b5f44133f4528c741c591ca87c2211862ddde2d2f9b113d046e2cf7006e5979902304631ebcc848373a7ae835ca0ab3b0f1376931e82c8188c62d6b96dbe5b7ad155498c41a05adc29a730f51c0a2544d535", true, "P384 SHA256"},
+  {K_P384, "SHA384", "abc", "30640230526e7d4189ed6650a5825cb7c90044ececa00f548cf6aa1be82bc8383c2fff86ea95d665e64d59c82a487ff20d54f6df0230483ef8dc52a6ce03d93b0725184d2e094339df68ea46897b008e937f2565c1443ba77656608582d7c0e920695e176022", true, "P384 SHA384"},
+  {K_P384, "SHA512", "abc", "3066023100dbf70feabb4a7dfbdd26475516ebffd5f600331549421ff382c1d217a8654817016ee986bab512927abf449ea37cf57e023100df9398442a0565a6a835fbc3cae7e607cdbdefb65e71cb7c452056aaf04425845cf72dcd44bab19732254e112c5d4d34", true, "P384 SHA512"},
+  {K_P521, "SHA256", "abc", "308188024201d261991d1aed191557d5aef3c9b9b3cc8ca95af079c9488b92e56c1491c2a9a372402f292e03cc3a017f528bdfabb576e67b19cb4f48359a40c683795e82211218024201b3d59682df4cf306e25f1921679728cb841931065e86252d0b68338e41707f2efedb77ab46f2ea587f6c64a3de99e98115978b30a9f4c7cc359567d1fea9e1a4bd", true, "P521 SHA256"},
+  {K_P521, "SHA384", "abc", "3081880242015432604e97377dcee784c6ba9f3e90ae94532dbdf2aaa1effbd1a2ed095395435e396ab1bc7c8dd0b65c50fba4e4218df644a6dbaab97e63b3dae9049478a217580242009c507571230c421543e1291563264bda928474a3078735d79ecbc84bdf38216328795eb0887b100a13815bb083eb159ff7e9576af1c4e473f19cf6f54d508e3c41", true, "P521 SHA384"},
+  {K_P521, "SHA512", "abc", "3081880242011a361475c1404165fe0c294a9fd0f215af490cf9b325f0d427f583610b77492e0a916b1cdfd05d7a363a968d358a478c434909db7ae31cfaf3142dd4db40727b3f024201674553096be7ff8a291a7d13b04f36748e9c5dea9204797dc501521ee7312e5795c4cfe7d79eb4a40b1b78471f45ecbe85e46e90e185e48b14f712c5412bedd588", true, "P521 SHA512"},
+  {K_P256, "SHA256", "abd", "304402202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b20220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0", false, "another message"},
+  {K_P256, "SHA384", "abc", "304402202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b20220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0", false, "another hash"},
+  {K_P384, "SHA256", "abc", "304402202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b20220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0", false, "another key"},
+  {K_P256, "SHA256", "abc", "304402202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b20220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e1", false, "a bit of s"},
+  {K_P256, "SHA256", "abc", "304502202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b2022100b6d4b97557eef99036ce3176858b30c51550962a4f7afb63ac9b4c5a4ed63171", true, "s as n - s, the other valid signature"},
+  {K_P256, "SHA256", "abc", "30440220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e002202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b2", false, "r and s swapped"},
+  {K_P256, "SHA256", "abc", "30250201000220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0", false, "r zero"},
+  {K_P256, "SHA256", "abc", "302502202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b2020100", false, "s zero"},
+  {K_P256, "SHA256", "abc", "3045022100ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc6325510220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0", false, "r as n"},
+  {K_P256, "SHA256", "abc", "304502202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b2022100ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", false, "s as n"},
+  {K_P256, "SHA256", "abc", "30450221012ce6667353432fab1a4a1fcfa7339c720cb06757b66060c246fc87a423af2e030220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0", false, "r plus n"},
+  {K_P256, "SHA256", "abc", "304502202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b2022101492b4688a8110671c931ce897a74cf3a647d5f30feb441a63ad8492ba9f01931", false, "s plus n"},
+  {K_P256, "SHA256", "abc", "304402202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b20220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e000", false, "a byte after the signature"},
+  {K_P256, "SHA256", "abc", "304702202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b20220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0020101", false, "a third INTEGER"},
+  {K_P256, "SHA256", "abc", "30450221002ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b20220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0", false, "r written a byte longer than DER allows"},
+  {K_P256, "SHA256", "abc", "3044022080b98f03685b9b693ba04df7da9cb5fd2dd416ea60419970061afe7f50225c6702205726a28a9f6fb705c61e7e18343c856b7e5bc5736119dd66a29e9cebcf2d16c0", false, "r negative"},
+  {K_P256, "SHA256", "abc", "314402202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b20220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0", false, "a SET for the SEQUENCE"},
+  {K_P256, "SHA256", "abc", "", false, "no signature"},
+  {K_D1, "SHA256", "abc", "30460221009936d0e2c7c944ec346a47a4cf8b05d91bfd643562fd68ccdd202716222cc9b602210095317b060c343b9d1fe52cedb4bb80c4173804117c9e2f3637b5c23e41028113", true, "D1 over abc"},
+  {K_D1, "SHA256", "the identity and the doubling", "304402202a630ed593026741b4c0667d1d057a846ad6a0a0199eb174b8eb66a3d808de8d022039454fb4c17b2f797cf0e73c33f086e64f76b427de008dfbed6488991b84de72", true, "D1 over the identity and the doubling"},
+  {K_DNEG, "SHA256", "abc", "30450220034d4a5b4e9253d9806032f75a6aa060debc4fd3b5e1aefcb2b6b887b982e6e1022100d0468c95d10954564fa00fb6f3eb207315ef49a9bce9a6095e70e767eee5fc0b", true, "DNEG over abc"},
+  {K_DNEG, "SHA256", "the identity and the doubling", "30450221009c83326efcbdaf39dce28e6784b689092ac82a8de5a35b784d109b744ed6a7fd022055ac4109475385accb80d64f4f2c58328fd0240871cee359abb74e9842a7dabd", true, "DNEG over the identity and the doubling"},
+  {K_P256, "SHA512", "a digest longer than n", "30440220008c4e677fc84a7c53472dbdbe7f758685f84511cde07fe5f136ce10ae2bbb2a022068653826ed1bead0dd3473dc1b9692382fbc2a7cb6ffbfd02a04829da0ea8fa4", true, "P-256 SHA-512 cut"},
+]
+
+COMPRESSED    = "3039301306072a8648ce3d020106082a8648ce3d030107032200021ce8bd42f847d37ba2a624ea4f21ffdbac7682974b514df89b538e95ac7cbe0e"
+OFF_CURVE     = "3059301306072a8648ce3d020106082a8648ce3d030107034200041ce8bd42f847d37ba2a624ea4f21ffdbac7682974b514df89b538e95ac7cbe0e9870c79029b37954a86c95e5f5b9cd4b2569c8dc102d2be6937d839b0d42da59"
+PAST_P        = "3059301306072a8648ce3d020106082a8648ce3d03010703420004ffffffff00000001000000000000000000000000ffffffffffffffffffffffff9870c79029b37954a86c95e5f5b9cd4b2569c8dc102d2be6937d839b0d42da58"
+SHORT_POINT   = "3058301306072a8648ce3d020106082a8648ce3d030107034100041ce8bd42f847d37ba2a624ea4f21ffdbac7682974b514df89b538e95ac7cbe0e9870c79029b37954a86c95e5f5b9cd4b2569c8dc102d2be6937d839b0d42da"
+SECP256K1     = "3056301006072a8648ce3d020106052b8104000a03420004e654999a9fc36418f64772a4f7f4b29602924c2ed3d24c58c19cfc07b4ecfb12057d9d03ec2597a4eae777e955cd9df1d9d9c0d0047ba2ee807e4f7958e0116a"
+EXPLICIT      = "3054300e06072a8648ce3d02013003020101034200041ce8bd42f847d37ba2a624ea4f21ffdbac7682974b514df89b538e95ac7cbe0e9870c79029b37954a86c95e5f5b9cd4b2569c8dc102d2be6937d839b0d42da58"
+RSA_KEY       = "30819f300d06092a864886f70d010101050003818d0030818902818100e8d5cf3c9c637ab7397f2b6f37348aa90468ca0c24e5e42cf431423f37f4509af2c26603654d69ad72f4f23defca498d0cc74a0deced5c45bb15edbbf51b64359dca098f8aaf4ece83dc1a4fb3da811ef21c5703abcf657c9506104ed4da819968870faf39a6e7aea63b6e73cb4146439021f1853ead705910660346f6e412970203010001"
+POINT_ON_P384 = "3056301006072a8648ce3d020106052b81040022034200041ce8bd42f847d37ba2a624ea4f21ffdbac7682974b514df89b538e95ac7cbe0e9870c79029b37954a86c95e5f5b9cd4b2569c8dc102d2be6937d839b0d42da58"
+POINT_P256    = "041ce8bd42f847d37ba2a624ea4f21ffdbac7682974b514df89b538e95ac7cbe0e9870c79029b37954a86c95e5f5b9cd4b2569c8dc102d2be6937d839b0d42da58"
+
+args = Program.args
+
+if args.size > 0 && args[0] == "verify"
+  File.read(args[1]).lines.each do |line|
+    next if line.empty?
+    f = line.split(' ')
+    key = EcdsaPublicKey.from_spki(b(f[0]))
+    if key.is_a?(EcdsaError)
+      puts "key: #{key.message}"
+    else
+      puts key.verify(hash_named(f[1]), b(f[2]), f.size > 3 ? b(f[3]) : [] of UInt8)
+    end
+  end
+  exit 0
+end
+
+if args.size > 0 && args[0] == "roots"
+  Dir.children(args[1]).sorted.each do |name|
+    cert = Der.parse(read_file(args[1] + "/" + name)).or_panic.sequence.or_panic
+    tbs = cert[0].sequence.or_panic
+    at = tbs[0].context?(0) ? 1 : 0
+    hash = certificate_hash(cert[1].sequence.or_panic)
+    key = EcdsaPublicKey.from_spki(tbs[at + 5])
+    if hash.nil? || key.is_a?(EcdsaError)
+      puts "#{name} skip"
+      next
+    end
+    puts "#{name} #{key.verify(hash_named(hash), cert[0].raw, cert[2].bit_string.or_panic)}"
+  end
+  exit 0
+end
+
+puts "== signatures Python's cryptography made"
+p256 = EcdsaPublicKey.from_spki(b(K_P256)).or_panic
+p384 = EcdsaPublicKey.from_spki(b(K_P384)).or_panic
+p521 = EcdsaPublicKey.from_spki(b(K_P521)).or_panic
+check p256.curve == EcdsaCurve::P256, "a P-256 key read as #{p256.curve}"
+check p384.curve == EcdsaCurve::P384, "a P-384 key read as #{p384.curve}"
+check p521.curve == EcdsaCurve::P521, "a P-521 key read as #{p521.curve}"
+SIGNATURES.each do |c|
+  key = EcdsaPublicKey.from_spki(b(c[0])).or_panic
+  got = key.verify(hash_named(c[1]), c[2], b(c[3]))
+  check got == c[4], "#{c[5]} (#{key.curve} #{c[1]}): expected #{c[4]}, got #{got}"
+end
+puts "  #{SIGNATURES.count { |c| c[4] }} accepted and #{SIGNATURES.count { |c| !c[4] }} refused as they should be"
+check p256.verify(EcdsaHash::SHA256, b("616263"), b(SIGNATURES[0][3])), "a message given as bytes"
+from_point = EcdsaPublicKey.from_point(EcdsaCurve::P256, b(POINT_P256)).or_panic
+check from_point.x == p256.x && from_point.y == p256.y, "a point read as the key that carries it"
+
+puts "== keys that are not keys"
+refused COMPRESSED, "a compressed point", "a compressed point refused"
+refused OFF_CURVE, "not on P256", "a point off the curve refused"
+refused PAST_P, "not below the field's prime", "a coordinate past p refused"
+refused SHORT_POINT, "not the 65 of an uncompressed", "a point a byte short refused"
+refused POINT_ON_P384, "not the 97 of an uncompressed", "a P-256 point named P-384 refused"
+refused SECP256K1, "not P-256, P-384 or P-521", "secp256k1 refused"
+refused EXPLICIT, "not a named curve", "explicit curve parameters refused"
+refused RSA_KEY, "not id-ecPublicKey", "an RSA key refused"
+refused "020101", "expected a SEQUENCE", "an INTEGER where a key goes refused"
+
+puts "\nALL CHECKS PASSED"

@@ -4,6 +4,25 @@
 
 ### Added
 
+- **`std/ecdsa`: ECDSA signatures checked on P-256, P-384 and P-521, the
+  third piece of a TLS client.** Of the roots a system trusts, the ones
+  that are not RSA are ECDSA, and most of those are P-384, so a client
+  that checked P-256 alone would refuse most EC chains.
+  `EcdsaPublicKey.from_spki` reads id-ecPublicKey with a named curve (RFC
+  5480) and `from_point` an uncompressed point, refusing a compressed
+  one, a coordinate not below p, a point off its curve, another curve and
+  explicit parameters. `verify` reads the signature as strict DER through
+  std/asn1, holds r and s to [1, n - 1], cuts a digest longer than n, and
+  takes u1·G + u2·Q in one pass with the doubling and the identity handled
+  where an addition meets them. Checking only, so the arithmetic is
+  std/big's; nothing secret is computed. Held by
+  `bench/std_ecdsa_exercise.sh`, plain and `--release`: signatures Python's
+  cryptography made and ones made by hand that break one rule each (n - s
+  taken, as it is valid); keys whose private value is 1 and n - 1; 600
+  random signatures over the three curves and three hashes, most of them
+  broken, against Python's verdicts; every ECDSA root on the machine (39
+  here) verified with its own key; and 12 broken copies of the module
+  each caught.
 - **`BigInt.from_bytes` and `BigInt#to_bytes(size)`: a big integer read
   from and written to big-endian bytes.** Keys, signatures and curve
   points are big-endian byte strings, and std/big could only parse text,

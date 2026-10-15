@@ -160,12 +160,17 @@ class Context(ctypes.Structure):
                 ("axis", ctypes.c_void_p), ("namespaces", ctypes.c_void_p), ("nsNr", ctypes.c_int),
                 ("user", ctypes.c_void_p), ("contextSize", ctypes.c_int), ("proximityPosition", ctypes.c_int)]
 
+# Both handlers are held for the whole run: libxml2 keeps the address, and
+# a thunk ctypes has freed is jumped into on the next error - which in
+# CI's container crashed Python.
 ERRFUNC = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_char_p)
 quiet = ERRFUNC(lambda ctx, msg: None)
 lib.xmlSetGenericErrorFunc.argtypes = [ctypes.c_void_p, ERRFUNC]
 lib.xmlSetGenericErrorFunc(None, quiet)
-lib.xmlSetStructuredErrorFunc.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-lib.xmlSetStructuredErrorFunc(None, ctypes.cast(ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)(lambda a, b: None), ctypes.c_void_p))
+STRUCTURED = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
+quiet_structured = STRUCTURED(lambda ctx, error: None)
+lib.xmlSetStructuredErrorFunc.argtypes = [ctypes.c_void_p, STRUCTURED]
+lib.xmlSetStructuredErrorFunc(None, quiet_structured)
 lib.xmlReadMemory.restype = ctypes.c_void_p
 lib.xmlReadMemory.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
 lib.xmlXPathNewContext.restype = ctypes.c_void_p

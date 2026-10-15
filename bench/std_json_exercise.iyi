@@ -629,6 +629,79 @@ end
 assert_text "{\"port\":8080,\"host\":\"localhost\",\"name\":\"x\"}", null_port, "a null for a field with a default its type does not admit keeps the default"
 puts "  read, written and round-tripped: nested, arrays, hashes, nil, unknown keys, defaults, a missing key refused"
 
+# `@[JSON::Field(...)]` on each field, the other library's options: a key
+# of its own, left out either way, a nil left out, and a converter; and
+# enums, written by their underscored names, a flags enum as the array of
+# its members.
+enum Shade
+  Light
+  DarkRed
+  HTTPBlue
+end
+
+@[Flags]
+enum Access
+  Read
+  Write
+  Exec
+end
+
+# Money kept as cents, written as a decimal string.
+struct Cents
+  def self.to_json(value : Int64, json : Builder) : Nil
+    json.string("#{value // 100}.#{(value % 100).to_s.rjust(2, '0')}")
+  end
+
+  def self.from_json(pull : PullParser) : Int64
+    parts = pull.read_string.split('.')
+    parts[0].to_i.to_i64 * 100 + parts[1].to_i.to_i64
+  end
+end
+
+struct Account
+  @[JSON::Field(key: "userName")]
+  getter user_name : String
+  @[JSON::Field(ignore: true)]
+  getter secret : String = "kept"
+  @[JSON::Field(emit_null: false)]
+  getter nick : String?
+  @[JSON::Field(ignore_serialize: true)]
+  getter password : String = ""
+  @[JSON::Field(ignore_deserialize: true)]
+  getter version : Int32 = 3
+  @[JSON::Field(converter: Cents)]
+  getter balance : Int64
+  getter shade : Shade
+  getter access : Access
+
+  derive serializable
+end
+
+account = Account.from_json(%({"userName": "ada", "secret": "sent", "nick": null, "password": "pw", "version": 9, "balance": "12.05", "shade": "dark_red", "access": ["read", "exec"]}))
+assert_true account.user_name == "ada", "a field read under its key: #{account.user_name}"
+assert_true account.secret == "kept", "an ignored field keeps its default, its key there or not"
+assert_true account.password == "pw" && account.version == 3, "ignore_serialize is read, ignore_deserialize is not"
+assert_true account.balance == 1205_i64, "a converter reads the field: #{account.balance}"
+assert_true account.shade == Shade::DarkRed && account.access == (Access::Read | Access::Exec), "an enum read by its underscored name, a flags enum by its members"
+assert_text "{\"userName\":\"ada\",\"version\":3,\"balance\":\"12.05\",\"shade\":\"dark_red\",\"access\":[\"read\",\"exec\"]}", account.to_json, "renamed, ignored, emit_null: false, converted and enums written"
+nicked = Account.from_json(%({"userName": "b", "nick": "n", "balance": "0.07", "shade": "HTTP_BLUE", "access": []}))
+assert_text "{\"userName\":\"b\",\"nick\":\"n\",\"version\":3,\"balance\":\"0.07\",\"shade\":\"http_blue\",\"access\":[]}", nicked.to_json, "a nick there is written, a name matched in any case, no flags as []"
+assert_text nicked.to_json, Account.from_json(nicked.to_json).to_json, "an account round-trips"
+assert_true JSON.from_json("2", Shade) == Shade::HTTPBlue && JSON.from_json(%("light"), Shade) == Shade::Light, "an enum read by its value and by its name"
+assert_text "\"http_blue\"", JSON.to_json(Shade::HTTPBlue), "an enum written alone"
+assert_text "[\"dark_red\",\"light\"]", JSON.to_json([Shade::DarkRed, Shade::Light]), "an array of an enum"
+not_a_shade = "accepted"
+group do |g|
+  reader = g.spawn do
+    JSON.from_json(%("purple"), Shade)
+    0
+  end
+  answer = reader.value
+  not_a_shade = answer.message if answer.is_a?(Panicked)
+end
+assert_true not_a_shade.includes?("\"purple\" is no ") && not_a_shade.includes?("member (light, dark_red, http_blue)"), "a name no member has, refused naming them: #{not_a_shade}"
+puts "  JSON::Field: a key, ignored either way, a nil left out, a converter; enums by name and value, flags as arrays, a name refused"
+
 # ---------------------------------------------------------------------------
 # Refusals
 # ---------------------------------------------------------------------------

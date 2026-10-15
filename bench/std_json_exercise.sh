@@ -187,6 +187,36 @@ refuses "a build that left an array open" build_open "to_s with an array still o
   'puts JSON.build { |b| b.start_array }'
 
 echo
+echo "== what derive serializable refuses when the type is compiled, by name"
+compile_refuses() { # compile_refuses <label> <name> <phrase> <fields>
+  local label="$1" name="$2" phrase="$3" fields="$4"
+  printf 'module main\n\nimport std/json::{JSON, serializable}\n\nstruct Typed\n%s\n  derive serializable\nend\n\nputs Typed.from_json(%%({"a": 1, "b": 2})).to_json\n' \
+    "$fields" > "$WORK/$name.iyi"
+  if "$IYI" build -o "$WORK/$name" "$WORK/$name.iyi" > "$WORK/$name.build" 2>&1; then
+    echo "  $label: it built"
+    status=1
+  elif ! grep -q "$phrase" "$WORK/$name.build"; then
+    echo "  $label: refused, but not with '$phrase'"
+    grep -m2 'Error' "$WORK/$name.build"
+    status=1
+  else
+    echo "  $label: $(grep -m1 -o "$phrase.*" "$WORK/$name.build")"
+  fi
+}
+compile_refuses "an option JSON::Field does not have" unknown_option "a: name is not an option" \
+  '  @[JSON::Field(name: "x")]
+  getter a : Int32'
+compile_refuses "a key that is not a string" number_key "a: key: is a string, not 5" \
+  '  @[JSON::Field(key: 5)]
+  getter a : Int32'
+compile_refuses "two fields under one key" one_key "two fields from the key \"b\"" \
+  '  @[JSON::Field(key: "b")]
+  getter a : Int32
+  getter b : Int32'
+compile_refuses "a field never read with neither a default nor nil" unread "a: a field that is not read needs a default, or a type that admits nil" \
+  '  @[JSON::Field(ignore: true)]
+  getter a : Int32'
+echo
 echo "== proving the checks can fail when a repeated key is accepted"
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3, so the broken copy could not be made"
@@ -281,15 +311,13 @@ broken "a substring for every number" "walking an object allocates" \
 broken "a number scaled by the wrong power" "ASSERTION FAILED" \
   'f = mantissa.to_f64 / POW10[0 - power]' 'f = mantissa.to_f64 / POW10[1 - power]'
 broken "a derive that reads an unknown key's first token only" "ASSERTION FAILED\|expected\|unexpected" \
-  '        else
-          pull.skip
-        end
-      {% end %}' '        else
-          pull.read_next
-        end
-      {% end %}'
+  '          else
+            pull.skip
+          end' '          else
+            pull.read_next
+          end'
 broken "a derive that refuses a missing key without its name" "a missing field refused by name" \
-  'has no key #{ {{ field[:name][1..] }}.inspect }' 'is missing a key'
+  'has no key #{ \{{ json_key_{{ field[:name][1..].id }} }}.inspect }' 'is missing a key'
 broken "a derive that reads a null into the other type" "ASSERTION FAILED\|expected" \
   'pull.read_null? ? nil : ::Std::Json::JSON.read_value' '::Std::Json::JSON.read_value'
 broken "a repeat past the scanned keys let through" "a repeat past the scanned keys" \
@@ -300,6 +328,22 @@ broken "bytes that are not UTF-8 written through by to_json" "to_json writes byt
         # Bytes that are not a code point'
 broken "a null refused for a field with a default" "a null for a field with a default its type does not admit keeps the default" \
   'pull.read_null? ? nil : ::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))' '::Std::Json::JSON.read_value(pull, typeof({{ field[:name].id }}))'
+# JSON::Field's options and the enums, each broken where it is applied.
+broken "a JSON::Field key ignored when written" "renamed, ignored, emit_null: false, converted and enums written" \
+  "          \{% json_key = json_ann && json_ann[:key] ? json_ann[:key] : {{ field[:name][1..] }} %}" \
+  "          \{% json_key = {{ field[:name][1..] }} %}"
+broken "emit_null: false ignored" "renamed, ignored, emit_null: false, converted and enums written" \
+  "= json_ann && json_ann[:emit_null] == false %}" "= false %}"
+broken "a converter passed over when written" "renamed, ignored, emit_null: false, converted and enums written" \
+  '\{{ json_converter_{{ field[:name][1..].id }} }}.to_json({{ field[:name].id }}, json)' '::Std::Json::JSON.write_value({{ field[:name].id }}, json)'
+broken "an ignored field read anyway" "an ignored field keeps its default" \
+  '        \{% json_read = !(json_ann && (json_ann[:ignore] || json_ann[:ignore_deserialize])) %}' '        \{% json_read = !(json_ann && json_ann[:ignore_deserialize]) %}'
+broken "an enum written by its own name" "renamed, ignored, emit_null: false, converted and enums written" \
+  'if member = T.from_value?(val.value)
+        b.string(underscore(member.to_s))' 'if member = T.from_value?(val.value)
+        b.string(member.to_s)'
+broken "an enum name matched as written" "is no Bench::StdJsonExercise::Shade member\|ASSERTION FAILED" \
+  '    wanted = enum_key(text)' '    wanted = text'
 
 echo
 if [ "$status" -eq 0 ]; then

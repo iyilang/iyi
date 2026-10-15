@@ -4,6 +4,30 @@
 
 ### Added
 
+- **`derive serializable` takes the other library's `@[JSON::Field(...)]`,
+  and enums read and write themselves as JSON.** Every field was written
+  under its own name, so the first API with camelCase keys could not be
+  read, nor a field kept out, nor a nil left out, nor a value converted.
+  An enum field did not compile at all.
+  - `key:`, `ignore:`, `ignore_serialize:`, `ignore_deserialize:`,
+    `emit_null:` and `converter:` (a type with `self.to_json(value, json)`
+    and `self.from_json(pull)`) are read off each field when the type's
+    methods are compiled.
+  - An option it does not know, a key that is not a string, two fields
+    under one key, and a field never read with neither a default nor nil
+    are refused there, naming the type and the field.
+  - A nil field is still written as `null` unless `emit_null: false`; the
+    other library leaves it out unless asked.
+  - An enum is written by its underscored name (`DarkRed` as `"dark_red"`),
+    a `@[Flags]` enum as the array of its members. It is read by name, in
+    any case and with or without underscores, or by value. A name no
+    member has is refused, naming the members.
+
+  Held by `bench/std_json_exercise.sh`: every option read and written and
+  round-tripped, the four compile-time refusals, and six broken copies
+  each caught at its check. `Time` is not among the values: std/json does
+  not depend on std/time.
+
 - **std/process starts a program this one talks to while it runs, and
   replaces this program with another.** `Process.run` was the one call:
   it waited for the end and handed back two texts, so a program could not

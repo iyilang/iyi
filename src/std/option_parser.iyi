@@ -5,6 +5,25 @@
 # be left out. `parse` walks `Program.args` (or the array given),
 # calls the blocks, and answers the leftover operands.
 #
+#     op = OptionParser.new
+#     op.banner = "usage: tool [options] COMMAND"
+#     op.on("-v", "--verbose", "say more") { verbose = true }
+#     op.on("-n NAME", "--name=NAME", "who") { |v| name = v }
+#     op.separator("commands:")
+#     op.on("deploy", "ship it") do
+#       op.on("-f", "--force", "even if dirty") { force = true }
+#     end
+#     puts op   # the banner, then a line for each flag and command
+#
+# A pair, `-v` and `--verbose`, is one flag spelled two ways; a value
+# either spelling states, `-n NAME` or `--name=NAME`, both take.
+#
+# A command is a name with no dash, and is one only as the first operand:
+# `tool deploy -f` runs `deploy`'s block, which registers what follows it
+# - its flags, and the commands below it, which replace the ones beside
+# it. Flags registered before the command still apply after it, where the
+# other library forgets them; a name after an operand is an operand.
+#
 # What the person typed wrong is the program's to answer, the way
 # Crystal's `OptionParser` has it: `invalid_option { |flag| ... }` is
 # handed an unknown flag and a value given to a flag that takes none,
@@ -28,16 +47,37 @@ pub class OptionParser
 
   @long : Hash(String, {Value, (String -> Nil)})
   @short : Hash(String, {Value, (String -> Nil)})
-  @help : Array(String)
+  # The help's lines, each marked when it is a command's, which a command
+  # matched takes away with the commands beside it.
+  @help : Array({String, Bool})
+  @commands : Hash(String, (String -> Nil))
+  @banner : String?
   @invalid : (String -> Nil)?
   @missing : (String -> Nil)?
 
   def initialize
     @long = {} of String => {Value, (String -> Nil)}
     @short = {} of String => {Value, (String -> Nil)}
-    @help = [] of String
+    @help = [] of {String, Bool}
+    @commands = {} of String => (String -> Nil)
+    @banner = nil
     @invalid = nil
     @missing = nil
+  end
+
+  # The help's first line, "options:" until it is set.
+  def banner=(text : String) : Nil
+    @banner = text
+  end
+
+  def banner : String?
+    @banner
+  end
+
+  # A line of its own in the help, between the flags and commands
+  # registered before it and after it.
+  def separator(text : String) : Nil
+    @help << {text, false}
   end
 
   def invalid_option(&block : String -> Nil) : Nil
@@ -71,7 +111,33 @@ pub class OptionParser
   # value: `--color` last panicked "flag --color needs a value", and
   # `--color -v` handed `-v` to `--color` instead of running it.
   def on(flag : String, description : String, &block : String -> Nil) : Nil
-    @help << "  #{flag}  #{description}"
+    unless flag.starts_with?("-")
+      raise "option: not a flag or a command: #{flag}" if flag.empty? || flag.includes?(" ")
+      @commands[flag] = block
+      @help << {"  #{flag}  #{description}", true}
+      return
+    end
+    name, takes = spelled(flag)
+    @help << {"  #{flag}  #{description}", false}
+    store(name, takes, block)
+  end
+
+  # One flag spelled two ways, `-v` and `--verbose`: the value either
+  # states, both take.
+  def on(short : String, long : String, description : String, &block : String -> Nil) : Nil
+    first, first_takes = spelled(short)
+    second, second_takes = spelled(long)
+    if !first_takes.none? && !second_takes.none? && first_takes != second_takes
+      raise "option: #{short} and #{long} differ on the value: one needs it, the other may leave it out"
+    end
+    takes = first_takes.none? ? second_takes : first_takes
+    @help << {"  #{short}, #{long}  #{description}", false}
+    store(first, takes, block)
+    store(second, takes, block)
+  end
+
+  # The name *flag* is looked up by, and what it does with a value.
+  private def spelled(flag : String) : {String, Value}
     name = flag.split(' ')[0]
     takes = flag.includes?(" ") ? Value::Required : Value::None
     takes = Value::Optional if bracketed?(flag[name.bytesize, flag.bytesize - name.bytesize].strip)
@@ -81,16 +147,23 @@ pub class OptionParser
         takes = Value::Required
         name = name[0, eq]
       end
-      @long[name] = {takes, block}
     elsif name.starts_with?("-") && name.bytesize >= 2
       at = char_end(name, 1)
       if at < name.bytesize
         takes = bracketed?(name[at, name.bytesize - at]) ? Value::Optional : Value::Required
         name = name[0, at]
       end
-      @short[name] = {takes, block}
     else
       raise "option: not a flag: #{flag}"
+    end
+    {name, takes}
+  end
+
+  private def store(name : String, takes : Value, block : String -> Nil) : Nil
+    if name.starts_with?("--")
+      @long[name] = {takes, block}
+    else
+      @short[name] = {takes, block}
     end
   end
 
@@ -186,7 +259,16 @@ pub class OptionParser
           invalid(name, "flag #{name} takes no value")
         end
       else
-        rest << a
+        command = rest.empty? ? @commands[a]? : nil
+        if command
+          # The level below is the block's to register: the commands beside
+          # this one, and their lines in the help, are gone.
+          @commands.clear
+          @help = @help.reject { |entry| entry[1] }
+          command.call(a)
+        else
+          rest << a
+        end
       end
       i = i + 1
     end
@@ -228,8 +310,12 @@ pub class OptionParser
   end
 
   def help : String
-    lines = ["options:"]
-    @help.each { |h| lines << h }
+    lines = [@banner || "options:"]
+    @help.each { |entry| lines << entry[0] }
     lines.join("\n")
+  end
+
+  def to_s : String
+    help
   end
 end

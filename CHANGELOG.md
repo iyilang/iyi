@@ -4,6 +4,26 @@
 
 ### Added
 
+- **OptionParser takes `-v, --verbose` pairs, a banner, help sections and
+  subcommands.** Each flag had one spelling, the help always opened with
+  "options:", and a command line with a verb - `tool deploy -f` - could
+  not be read.
+  - `on("-n NAME", "--name=NAME", "who") { |v| ... }` is one flag spelled
+    two ways; a value either spelling states, both take, and spellings
+    that disagree about it are refused by name.
+  - `banner=`, `separator(text)`, and `to_s`, so `puts parser` prints the
+    help.
+  - `on("deploy", "ship it") { ... }` is a command, matched as the first
+    operand. Its block registers the next level's flags and commands,
+    which replace the commands beside it, in the parser and in the help.
+    Flags registered before it still apply after it, where the other
+    library forgets them.
+
+  Held by `bench/std_option_parser_exercise.sh`: the help before and
+  after a command, both spellings of three pairs, a nested command, a
+  command after an operand, three refusals, and six broken copies, each
+  caught at its own check.
+
 - **`std/number_format` writes numbers as people read them, exactly:
   `1234567.format` is "1,234,567", `1_234_567.humanize` "1.23M",
   `1536.humanize_bytes` "1.5KiB".** There was no way to group digits or

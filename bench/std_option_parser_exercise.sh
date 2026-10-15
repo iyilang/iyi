@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every option_parser section reported"
-for phrase in "== flags" "== short bundles and the value spellings"; do
+for phrase in "== flags" "== short bundles and the value spellings" "== pairs, a banner and commands"; do
   if ! grep -q "$phrase" "$WORK/option_parser-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -193,6 +193,30 @@ PY
     $'    takes = Value::Optional if bracketed?' \
     $'    takes = Value::Required if bracketed?' \
     "a bracketed value may be left out"
+  caught_at one-spelling "a pair stored under its first spelling alone" \
+    $'    store(first, takes, block)\n    store(second, takes, block)\n' \
+    $'    store(first, takes, block)\n' \
+    "the long spelling of a pair runs the same block"
+  caught_at unshared "a pair whose spellings keep their own values" \
+    '    takes = first_takes.none? ? second_takes : first_takes' \
+    '    takes = first_takes' \
+    "the long spelling of a pair runs the same block"
+  caught_at anywhere "a command matched after an operand" \
+    'command = rest.empty? ? @commands[a]? : nil' \
+    'command = @commands[a]?' \
+    "a command after an operand is an operand"
+  caught_at uncleared "a command that leaves the commands beside it" \
+    $'          @commands.clear\n' \
+    '' \
+    "a command's own commands replace the ones beside it"
+  caught_at stale-help "a help that keeps the commands left behind" \
+    $'          @help = @help.reject { |entry| entry[1] }\n' \
+    '' \
+    "the help after a command is its level's"
+  caught_at no-banner "a banner the help never shows" \
+    'lines = [@banner || "options:"]' \
+    'lines = ["options:"]' \
+    "the banner, the pairs and the commands in the help"
 fi
 
 echo

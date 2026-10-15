@@ -106,4 +106,36 @@ assert_str "color=,v,color=never,color=always,l=3,l=,color=x,z=9,z=,color=", cho
 assert_true left_over.empty?, "an optional value took x, #{left_over.inspect}"
 puts "  --color [WHEN], -l [LEVEL] and -z[N] run with or without a value"
 
+puts "\n== pairs, a banner and commands"
+said = [] of String
+tool = OptionParser.new
+tool.banner = "usage: tool [options] COMMAND"
+tool.on("-v", "--verbose", "say more") { |v| said << "v" }
+tool.on("-n NAME", "--name=NAME", "who") { |v| said << "n=" + v }
+tool.on("-c", "--color [WHEN]", "colour") { |v| said << "c=" + v }
+tool.separator("commands:")
+tool.on("deploy", "ship it") do |command|
+  said << command
+  tool.banner = "usage: tool deploy [options]"
+  tool.on("-f", "--force", "even if dirty") { |v| said << "f" }
+  tool.on("now", "without waiting") { |c| said << c }
+end
+tool.on("status", "show the state") { |c| said << c }
+tool.invalid_option { |flag| said << "invalid " + flag }
+assert_str "usage: tool [options] COMMAND\n  -v, --verbose  say more\n  -n NAME, --name=NAME  who\n  -c, --color [WHEN]  colour\ncommands:\n  deploy  ship it\n  status  show the state", tool.to_s, "the banner, the pairs and the commands in the help"
+# `status` comes after `now`, where no command is registered any more.
+left_tool = tool.parse(["--verbose", "-v", "-n", "ada", "--name=bo", "-c", "-v", "--color=red", "deploy", "-f", "--force", "now", "status", "x"])
+assert_str "status,x", left_tool.join(","), "a command's own commands replace the ones beside it"
+assert_str "v,v,n=ada,n=bo,c=,v,c=red,deploy,f,f,now", said.join(","), "the long spelling of a pair runs the same block, with the value either spelling states"
+assert_str "usage: tool deploy [options]\n  -v, --verbose  say more\n  -n NAME, --name=NAME  who\n  -c, --color [WHEN]  colour\ncommands:\n  -f, --force  even if dirty", tool.help, "the help after a command is its level's"
+late = OptionParser.new
+late_ran = [] of String
+late.on("deploy", "ship it") { |c| late_ran << c }
+late_left = late.parse(["x", "deploy"])
+assert_true late_ran.empty? && late_left.join(",") == "x,deploy", "a command after an operand is an operand"
+assert_panics("option: -n NAME and --name [NAME] differ on the value: one needs it, the other may leave it out") { late.on("-n NAME", "--name [NAME]", "who") { |v| } }
+assert_panics("option: not a flag or a command: deploy now") { late.on("deploy now", "two words") { |v| } }
+assert_panics("option: not a flag: -") { late.on("-", "a dash") { |v| } }
+puts "  -v and --verbose are one flag, a command is the first operand, and its block registers the next level"
+
 puts "\nALL CHECKS PASSED"

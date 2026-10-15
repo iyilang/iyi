@@ -213,6 +213,10 @@ ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3
 # user's trust settings, each certificate's DER, and the release of every
 # copy. Linux reads a bundle file instead; Windows asks crypt32.
 ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN SecTrustCopyAnchorCertificates SecTrustSettingsCopyCertificates SecTrustSettingsCopyTrustSettings SecCertificateCopyData CFArrayGetCount CFArrayGetValueAtIndex CFDataGetBytePtr CFDataGetLength CFDictionaryGetValue CFNumberGetValue CFRelease CFStringCreateWithCString"
+# `flock` is an open file's whole-file lock, `IyiIO#flock_*` in std/file:
+# libSystem's call, which Linux makes as a system call and Windows as
+# kernel32's `LockFileEx`.
+ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN flock"
 ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.

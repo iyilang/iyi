@@ -182,6 +182,12 @@ COMPILER="$REPO/.build/iyi"
 # same with `uname`, `/proc/self/auxv` and `ioctl` by syscall.
 # `getpeername` joined with `IyiSocket#remote_address`, the other end's
 # name as `getsockname` gives this end's; Linux's is a syscall.
+# `std/user` asks libSystem who an account is: `getuid` and `getgid` for
+# this process, `getpwuid_r`, `getpwnam_r`, `getgrgid_r` and `getgrnam_r`
+# for a user or a group by id or name, and `getgrouplist` for a user's
+# groups. darwin's accounts are Directory Services', which these calls are
+# the door to; Linux spells the same with `getuid` and `getgid` by syscall
+# and reads `/etc/passwd` and `/etc/group` itself.
 # The eight 128-bit helpers - `__divti3`, `__modti3`, `__udivti3`,
 # `__umodti3` and the four int-to-float conversions - are calls LLVM makes
 # for a division or conversion no instruction does, and arrived when
@@ -189,7 +195,7 @@ COMPILER="$REPO/.build/iyi"
 # the optimiser cannot see. libSystem re-exports compiler-rt, which
 # defines them; Linux links libgcc's copies into the program; Windows has
 # neither and the prelude's win32 arm defines them itself.
-ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername"
+ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername getuid getgid getpwuid_r getpwnam_r getgrgid_r getgrnam_r getgrouplist"
 ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.
@@ -576,7 +582,10 @@ while IFS= read -r annotation; do
     # `std/random` calls it; `std/socket` reads the registry there for the
     # name servers Windows was configured with, which the platform's own
     # resolver API would have taken iphlpapi or dnsapi to ask (SPEC.md
-    # III.10's inventory says so).
+    # III.10's inventory says so); `std/user` asks it for the account name
+    # (`GetUserNameW`) and the process token's SIDs, which are advapi32's
+    # alone, and leaves netapi32's account database and userenv's profile
+    # call unlinked.
     '@[Link("advapi32")]') ;;
     # Windows' sockets are Winsock's: `ws2_32` is the platform's network
     # interface the way kernel32 is its process interface, it ships with

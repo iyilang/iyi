@@ -47,6 +47,26 @@
   the data Python ignores, the 256 canonical two-character texts out of
   1,024, six error sentences through `.or_panic`, eight broken copies
   caught (an alphabet swap among them).
+- **`std/user`: who the program runs as, and the accounts and groups the
+  machine knows.** `User.current`, `User.find_by_name`/`find_by_id`,
+  `Group.find_by_name`/`find_by_id` and `User#group_ids`, with the other
+  library's field names (`name`, `id`, `group_id`, `full_name`, `home`,
+  `shell`; a group's `members`). An id is a `String`, as Windows' SID is,
+  and an account nobody has is nil, never a panic. On Linux the answer is
+  `/etc/passwd` and `/etc/group`, read here by glibc's rules for a line
+  (ids compared as numbers, the first match winning, NIS `+`/`-` lines
+  skipped); the NSS modules after `files` - LDAP, sssd, systemd's dynamic
+  users - are not consulted, as Go's pure-Go reader does not consult them.
+  `User.current` is `getuid(2)`, and a uid the files lack falls back to
+  `$USER` and `$HOME` as Go's does. darwin asks libSystem's `getpw*_r`,
+  `getgr*_r` and `getgrouplist`. Windows answers the current user alone,
+  through advapi32 (`GetUserNameW`, the token's SIDs, `%USERPROFILE%`);
+  every other lookup there needs netapi32, which an iyi program does not
+  link, and panics saying so. Held by `bench/std_user_exercise.sh`, plain
+  and `--release`: Go's `os/user` reader and Python's `pwd`, `grp`,
+  `os.getuid` and `os.getgrouplist` answer a fixture as the module does,
+  `getent` and `id -G` agree on this machine, and 16 broken copies are
+  each caught.
 - **`std/aead`: authenticated encryption in iyi - AES-GCM and
   ChaCha20-Poly1305, and AES, ChaCha20 and Poly1305 on their own.** A
   program that had to seal a cookie or a file had a MAC and no cipher.

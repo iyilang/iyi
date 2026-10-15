@@ -48,9 +48,12 @@ FLOOR_LIBS_PROGRAM="libSystem libc.so ld-linux libgcc_s"
 #                     environment, all of them the C runtime and none of
 #                     them a library iyi took on
 # That is the runtime's floor - the collector, the scheduler and threads
-# are kernel32's - and a program may add two, each through one module:
-#   advapi32.dll      `RtlGenRandom`, the OS entropy `std/random` reads, and
-#                     `std/random` is its only caller (SPEC.md III.10)
+# are kernel32's - and a program may add two, each through the modules
+# named:
+#   advapi32.dll      `RtlGenRandom`, the OS entropy `std/random` reads;
+#                     the registry `std/socket` reads the name servers
+#                     from; the account name and token SIDs `std/user`
+#                     answers `User.current` with (SPEC.md III.10)
 #   ws2_32.dll        Winsock, the platform's network interface, reached by
 #                     `std/socket` and `std/udp` and nothing else
 #                     (SPEC.md III.10)

@@ -326,6 +326,13 @@ echo "== the library is iyi all the way down"
 # Windows - there is no other place a host name, a CPU mask or a termios
 # comes from.
 #
+# `user` asks who an account is: `getuid` and `getgid` by syscall on Linux,
+# which reads `/etc/passwd` and `/etc/group` itself; `getpwuid_r`,
+# `getpwnam_r`, `getgrgid_r`, `getgrnam_r` and `getgrouplist` from
+# libSystem on darwin, where Directory Services and not a file answers;
+# and advapi32's `GetUserNameW` and the process token's SIDs on Windows.
+# An account database is the operating system's, and has no other door.
+#
 # Every other module is iyi over the prelude's own intrinsics: no `lib`,
 # no `fun`, no inline `asm`, no `@[Link]`. A binding that appears anywhere
 # else is a dependency being taken on without a word.
@@ -340,10 +347,13 @@ PLATFORM_LIBS='LibC|LibSystem|LibKernel32|LibWasi|LibLLVMMath|LibAdvapi32|LibWs2
 # named in SPEC.md III.10's inventory. `std/random` is here for `advapi32` —
 # the OS entropy `Random::Secure` reads is `RtlGenRandom`, and Windows has
 # no kernel32 name for it — and `std/socket` for it too, the registry its
-# resolver reads the name servers from; `std/socket` and `std/udp` for
-# `ws2_32`, because Winsock is the whole of Windows' network interface and
-# a socket call has nowhere else to come from. Everything else in this
-# list reaches the platform through a `lib` block alone.
+# resolver reads the name servers from, and `std/user` for the account name
+# and the process token's SIDs (`GetUserNameW`, `OpenProcessToken`,
+# `GetTokenInformation`, `ConvertSidToStringSidW`), which are advapi32's
+# and nobody else's; `std/socket` and `std/udp` for `ws2_32`, because
+# Winsock is the whole of Windows' network interface and a socket call has
+# nowhere else to come from. Everything else in this list reaches the
+# platform through a `lib` block alone.
 PLATFORM_LINKS='@\[Link\("(kernel32|advapi32|ws2_32)"\)\]'
 reaching=""
 foreign=""
@@ -353,7 +363,7 @@ for source in "$REPO"/src/std/*.iyi; do
     # `std/path` folds a Windows name's case the way NTFS does, which is
     # the platform's own table (LCMapStringEx); ASCII alone called `C:\Ä`
     # and `c:\ä` two names.
-    socket|time|debug|file|dir|udp|random|signal|process|path|system|term)
+    socket|time|debug|file|dir|udp|random|signal|process|path|system|term|user)
       # Named libraries only: a `lib` block of platform bindings is the
       # exemption, an `@[Link]` to something the platform does not supply is
       # not covered by it.

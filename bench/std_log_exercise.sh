@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every log section reported"
-for phrase in "== info" "== child" "== empty segments"; do
+for phrase in "== info" "== child" "== empty segments" "== data and context" "== the level from LOG_LEVEL"; do
   if ! grep -q "$phrase" "$WORK/log-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -138,6 +138,56 @@ PY
   else
     echo "  a source that drops a leading dot is caught"
   fi
+
+  # Data and context, each mechanism taken out of a copy that compiles:
+  # the exercise must stop at the check written for it.
+  caught_at() { # caught_at <dir> <label> <old> <new> <check>
+    local dir="$1" label="$2"
+    mkdir -p "$WORK/$dir/std"
+    OLD="$3" NEW="$4" DEST="$WORK/$dir/std/log.iyi" "$PY" - <<PY
+import os
+from pathlib import Path
+src = Path("$REPO/src/std/log.iyi").read_text()
+old, new = os.environ["OLD"], os.environ["NEW"]
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not unique")
+Path(os.environ["DEST"]).write_text(src.replace(old, new, 1))
+PY
+    if [ $? -ne 0 ]; then
+      echo "  the $label patch did not apply"
+      status=1
+    elif IYI_PATH="$WORK/$dir${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_log_exercise.iyi" >"$WORK/$dir.out" 2>&1; then
+      echo "  the exercise PASSED with $label"
+      status=1
+    elif grep -q "ASSERTION FAILED: $5" "$WORK/$dir.out"; then
+      echo "  $label is caught"
+    else
+      echo "  $label failed, but not at \"$5\""
+      tail -3 "$WORK/$dir.out" | sed 's/^/    /'
+      status=1
+    fi
+  }
+  caught_at unbound "a bound logger that forgets its data" \
+    '    Logger.new(@source, nil, nil, self, node)' '    Logger.new(@source, nil, nil, self, nil)' \
+    "a bound logger's data, then the call's"
+  caught_at contextless "an entry without the task's context" \
+    '    found = Log.context
+' '    found = {} of String => String
+' \
+    "a context's data on every entry in its block"
+  caught_at unrestored "a context left open after its block" \
+    '    defer restore(id, own)
+' '' \
+    "the inner context closes with its block"
+  caught_at orphaned "a task that does not look to its starter" \
+    '      fiber = group.owner' '      return nil' \
+    "a task finds its starter's context"
+  caught_at unquoted "a value written without its quotes" \
+    '    plain ? value : value.inspect' '    value' \
+    "a value with a space, a quote or = in it, or none, quoted"
+  caught_at envless "a level that never reads LOG_LEVEL" \
+    '        level = Severity.parse?(name.strip) || raise' '        level = default_level || raise' \
+    "LOG_LEVEL sets the level"
 fi
 
 echo

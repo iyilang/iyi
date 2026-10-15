@@ -4,6 +4,29 @@
 
 ### Added
 
+- **std/log entries carry data, and a task's context reaches every entry
+  it and the tasks it starts write.** A log line was a message and
+  nothing else, so a request's id had to be pasted into every message,
+  and nothing set the level from the environment.
+  - `log.info("query", rows: 3)` adds data to one entry,
+    `Log.for("db").bind(pool: "main")` to every entry of a logger and
+    its children, and `Log.with_context(request_id: id) { ... }` to every
+    entry of the task for the block's length, each over the one before.
+    `Entry#data` holds them; `DefaultFormatter` writes ` -- key=value`,
+    quoting a value a reader could not tell the end of.
+  - A task without a context of its own finds the one its starter has
+    open, up the groups that started it - where the other library's new
+    fiber starts with none - and a context stays out of the tasks beside
+    it. The prelude's `IyiGroup` gains `owner`, the task that opened it,
+    for that walk. A program that opens no context never looks.
+  - `Log.setup_from_env` reads `LOG_LEVEL`, a severity's name in any case,
+    and refuses one that is not, naming the severities.
+
+  Held by `bench/std_log_exercise.sh`: two new sections and six broken
+  copies - a bound logger that forgets, an entry without its context, a
+  context left open, a task that does not look to its starter, a value
+  unquoted, and a level that never reads the variable.
+
 - **An open file takes a whole-file lock: `flock_exclusive`,
   `flock_shared`, `try_flock_*` and `flock_unlock`.** Two programs that
   shared a file - a pid file, a cache, a log rotated by one of them - had

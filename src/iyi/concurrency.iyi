@@ -2907,6 +2907,9 @@ class IyiGroup
   @joiner : IyiFiber?
   # The group its owner had open when this one opened (`open_group`).
   getter outer : IyiGroup?
+  # The task that opened it, whose tasks these are: what a task inherits
+  # from the one that started it - std/log's context - is found through it.
+  getter owner : IyiFiber
   # Joined, so its scope is over: a handle kept past it spawned a task
   # that never ran, and nothing said so (III.4.1).
   @ended : Bool
@@ -2922,8 +2925,9 @@ class IyiGroup
     @joiner = nil
     @ended = false
     @cancelled = false
-    @outer = IyiScheduler.current.open_group
-    IyiScheduler.current.open_group = self
+    @owner = IyiScheduler.current
+    @outer = @owner.open_group
+    @owner.open_group = self
   end
 
   # Start a task. The block is compiled once and carried as a proc; its

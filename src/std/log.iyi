@@ -22,10 +22,28 @@
 #
 # Logging is synchronous: the entry is written before the call returns,
 # in the calling thread, with no queue between.
+#
+# **Data.** An entry carries keys and values besides its message, from
+# three places, each over the one before:
+#
+#     Log.with_context(request_id: id) do      # every entry in this task
+#       db = Log.for("db").bind(pool: "main")  # every entry of a logger
+#       db.info("query", rows: 3)              # one entry
+#     end
+#
+# `with_context` holds for the block, in the task that runs it and in the
+# tasks it starts, which find their starter's context while it is open -
+# where the other library's new fiber starts with none. `DefaultFormatter`
+# writes the data after the message, `... - db: query -- request_id=7
+# pool=main rows=3`, a value with a space, quote or `=` in it quoted.
+#
+# `Log.setup_from_env` sets the root's level from `LOG_LEVEL`.
 
 module std/log
 
 import std/time::{Time}
+import std/tuple
+import std/mutex::{Mutex}
 
 pub enum Severity
   Trace  = 0
@@ -96,8 +114,37 @@ pub struct Entry
   getter severity : Severity
   getter message : String
   getter timestamp : Time
+  # The task's context, the logger's bound data and the call's own, in
+  # that order, a later key's value over an earlier's.
+  getter data : Hash(String, String)
 
-  def initialize(@source : String, @severity : Severity, @message : String, @timestamp : Time = Time.utc)
+  def initialize(@source : String, @severity : Severity, @message : String, @timestamp : Time = Time.utc, @data : Hash(String, String) = {} of String => String)
+  end
+end
+
+# Keys and values, the newest first: immutable, so a task's context can sit
+# in the table every thread reads.
+pub class Metadata
+  getter key : String
+  getter value : String
+  getter rest : Metadata?
+
+  def initialize(@key : String, @value : String, @rest : Metadata?)
+  end
+
+  # Into *into*, the oldest first, so a later key's value replaces an
+  # earlier one's.
+  def merge_into(into : Hash(String, String)) : Nil
+    if older = @rest
+      older.merge_into(into)
+    end
+    into[@key] = @value
+  end
+
+  def to_h : Hash(String, String)
+    found = {} of String => String
+    merge_into(found)
+    found
   end
 end
 
@@ -113,11 +160,17 @@ end
 pub class DefaultFormatter < Formatter
   def format(entry : Entry) : String
     head = "#{entry.timestamp.to_rfc3339(6)} #{entry.severity.label}"
-    if entry.source.empty?
-      "#{head} - #{entry.message}"
-    else
-      "#{head} - #{entry.source}: #{entry.message}"
-    end
+    text = entry.source.empty? ? "#{head} - #{entry.message}" : "#{head} - #{entry.source}: #{entry.message}"
+    return text if entry.data.empty?
+    pairs = [] of String
+    entry.data.each { |key, value| pairs << "#{key}=#{quoted(value)}" }
+    "#{text} -- #{pairs.join(" ")}"
+  end
+
+  # A value as it is, unless a reader could not tell where it ends.
+  private def quoted(value : String) : String
+    plain = !value.empty? && !value.includes?(" ") && !value.includes?("\"") && !value.includes?("=") && !value.includes?("\n")
+    plain ? value : value.inspect
   end
 end
 
@@ -174,12 +227,23 @@ pub class Logger
   @backend : Backend?
   @parent : Logger?
   @children : Hash(String, Logger)
+  # What `bind` gave this logger, on every entry it and its children write.
+  @bound : Metadata?
 
-  def initialize(@source : String, level : Severity? = nil, backend : Backend? = nil, parent : Logger? = nil)
+  def initialize(@source : String, level : Severity? = nil, backend : Backend? = nil, parent : Logger? = nil, bound : Metadata? = nil)
     @level = level
     @backend = backend
     @parent = parent
     @children = Hash(String, Logger).new
+    @bound = bound
+  end
+
+  # A logger for the same source, its level and backend this one's, whose
+  # entries all carry *data*: a request's id, a connection's peer.
+  def bind(**data) : Logger
+    node = @bound
+    data.each { |key, value| node = Metadata.new(key.to_s, value.to_s, node) }
+    Logger.new(@source, nil, nil, self, node)
   end
 
   # This logger's own level, or the nearest ancestor's; Info at a root
@@ -251,74 +315,91 @@ pub class Logger
 
   # None is a level and not a severity: an entry logged at None was
   # written by a logger set to None, the one level meant to write nothing.
-  def log(severity : Severity, message : String) : Nil
+  def log(severity : Severity, message : String, **data) : Nil
     return if severity < level || severity == Severity::None
     if b = backend
-      b.write(Entry.new(@source, severity, message))
+      b.write(Entry.new(@source, severity, message, Time.utc, entry_data(data)))
     end
   end
 
-  def log(severity : Severity, &block : -> String) : Nil
+  def log(severity : Severity, **data, &block : -> String) : Nil
     return if severity < level || severity == Severity::None
     if b = backend
-      b.write(Entry.new(@source, severity, block.call))
+      b.write(Entry.new(@source, severity, block.call, Time.utc, entry_data(data)))
     end
   end
 
-  def trace(message : String) : Nil
-    log(Severity::Trace, message)
+  private def entry_data(data) : Hash(String, String)
+    found = Log.context
+    bound_into(found)
+    data.each { |key, value| found[key.to_s] = value.to_s }
+    found
   end
 
-  def trace(&b : -> String) : Nil
-    log(Severity::Trace, &b)
+  # The data `bind` gave this logger and its parents, the root's first.
+  protected def bound_into(found : Hash(String, String)) : Nil
+    if parent = @parent
+      parent.bound_into(found)
+    end
+    if node = @bound
+      node.merge_into(found)
+    end
   end
 
-  def debug(message : String) : Nil
-    log(Severity::Debug, message)
+  def trace(message : String, **data) : Nil
+    log(Severity::Trace, message, **data)
   end
 
-  def debug(&b : -> String) : Nil
-    log(Severity::Debug, &b)
+  def trace(**data, &b : -> String) : Nil
+    log(Severity::Trace, **data, &b)
   end
 
-  def info(message : String) : Nil
-    log(Severity::Info, message)
+  def debug(message : String, **data) : Nil
+    log(Severity::Debug, message, **data)
   end
 
-  def info(&b : -> String) : Nil
-    log(Severity::Info, &b)
+  def debug(**data, &b : -> String) : Nil
+    log(Severity::Debug, **data, &b)
   end
 
-  def notice(message : String) : Nil
-    log(Severity::Notice, message)
+  def info(message : String, **data) : Nil
+    log(Severity::Info, message, **data)
   end
 
-  def notice(&b : -> String) : Nil
-    log(Severity::Notice, &b)
+  def info(**data, &b : -> String) : Nil
+    log(Severity::Info, **data, &b)
   end
 
-  def warn(message : String) : Nil
-    log(Severity::Warn, message)
+  def notice(message : String, **data) : Nil
+    log(Severity::Notice, message, **data)
   end
 
-  def warn(&b : -> String) : Nil
-    log(Severity::Warn, &b)
+  def notice(**data, &b : -> String) : Nil
+    log(Severity::Notice, **data, &b)
   end
 
-  def error(message : String) : Nil
-    log(Severity::Error, message)
+  def warn(message : String, **data) : Nil
+    log(Severity::Warn, message, **data)
   end
 
-  def error(&b : -> String) : Nil
-    log(Severity::Error, &b)
+  def warn(**data, &b : -> String) : Nil
+    log(Severity::Warn, **data, &b)
   end
 
-  def fatal(message : String) : Nil
-    log(Severity::Fatal, message)
+  def error(message : String, **data) : Nil
+    log(Severity::Error, message, **data)
   end
 
-  def fatal(&b : -> String) : Nil
-    log(Severity::Fatal, &b)
+  def error(**data, &b : -> String) : Nil
+    log(Severity::Error, **data, &b)
+  end
+
+  def fatal(message : String, **data) : Nil
+    log(Severity::Fatal, message, **data)
+  end
+
+  def fatal(**data, &b : -> String) : Nil
+    log(Severity::Fatal, **data, &b)
   end
 
   def trace? : Bool
@@ -372,8 +453,93 @@ pub class Log
     r
   end
 
+  # `setup`, the level read from *variable* - a severity's name, any case
+  # - or *default_level* when it is unset or empty. A name that is no
+  # severity is refused, the severities named.
+  def self.setup_from_env(default_level : Severity = Severity::Info, backend : Backend = IOBackend.new(STDOUT), variable : String = "LOG_LEVEL") : Logger
+    level = default_level
+    if name = Program.env(variable)
+      unless name.strip.empty?
+        level = Severity.parse?(name.strip) || raise "Log.setup_from_env: #{variable}=#{name} is no severity (trace, debug, info, notice, warn, error, fatal or none)"
+      end
+    end
+    setup(level, backend)
+  end
+
   def self.for(source : String) : Logger
     root.for(source)
+  end
+
+  # Every task's open contexts, by the task's fiber; how many are open, so
+  # a program that opens none never looks.
+  @@contexts : Mutex(Hash(UInt64, Metadata)) = Mutex.new { {} of UInt64 => Metadata }
+  @@open : Atomic(UInt64) = Atomic(UInt64).new(0_u64)
+
+  # Runs the block with *data* on every entry logged in this task and in
+  # the tasks it starts, over the context already open, and answers the
+  # block's answer. The context before it is back when the block ends,
+  # panic or not.
+  def self.with_context(**data, &block : -> R) : R forall R
+    id = IyiScheduler.current.object_id
+    own = context_of(id)
+    node = context_node
+    data.each { |key, value| node = Metadata.new(key.to_s, value.to_s, node) }
+    @@open.add(1_u64)
+    store(id, node)
+    defer restore(id, own)
+    block.call
+  end
+
+  # The data this task's open contexts give an entry, the outermost first.
+  def self.context : Hash(String, String)
+    found = {} of String => String
+    return found if @@open.get == 0_u64
+    if node = context_node
+      node.merge_into(found)
+    end
+    found
+  end
+
+  # The innermost context open for this task: its own, or the nearest
+  # starter's, up the groups that started it.
+  private def self.context_node : Metadata?
+    fiber = IyiScheduler.current
+    while true
+      if node = context_of(fiber.object_id)
+        return node
+      end
+      group = fiber.group
+      return nil unless group
+      fiber = group.owner
+    end
+  end
+
+  # The table's blocks never park, so a wait for it is another thread's
+  # moment, and a cancelled task, which a wait answers Cancelled, asks
+  # again.
+  private def self.context_of(id : UInt64) : Metadata?
+    while true
+      found = @@contexts.get { |table| table[id]? }
+      return found unless found.is_a?(Cancelled)
+    end
+  end
+
+  private def self.store(id : UInt64, node : Metadata?) : Nil
+    while true
+      done = @@contexts.lock do |table|
+        if node
+          table[id] = node
+        else
+          table.delete(id)
+        end
+      end
+      return unless done.is_a?(Cancelled)
+    end
+  end
+
+  private def self.restore(id : UInt64, own : Metadata?) : Nil
+    store(id, own)
+    @@open.sub(1_u64)
   end
 
   def self.level : Severity
@@ -392,59 +558,59 @@ pub class Log
     root.backend = backend
   end
 
-  def self.trace(msg : String) : Nil
-    root.trace(msg)
+  def self.trace(msg : String, **data) : Nil
+    root.trace(msg, **data)
   end
 
-  def self.trace(&b : -> String) : Nil
-    root.trace(&b)
+  def self.trace(**data, &b : -> String) : Nil
+    root.trace(**data, &b)
   end
 
-  def self.debug(msg : String) : Nil
-    root.debug(msg)
+  def self.debug(msg : String, **data) : Nil
+    root.debug(msg, **data)
   end
 
-  def self.debug(&b : -> String) : Nil
-    root.debug(&b)
+  def self.debug(**data, &b : -> String) : Nil
+    root.debug(**data, &b)
   end
 
-  def self.info(msg : String) : Nil
-    root.info(msg)
+  def self.info(msg : String, **data) : Nil
+    root.info(msg, **data)
   end
 
-  def self.info(&b : -> String) : Nil
-    root.info(&b)
+  def self.info(**data, &b : -> String) : Nil
+    root.info(**data, &b)
   end
 
-  def self.notice(msg : String) : Nil
-    root.notice(msg)
+  def self.notice(msg : String, **data) : Nil
+    root.notice(msg, **data)
   end
 
-  def self.notice(&b : -> String) : Nil
-    root.notice(&b)
+  def self.notice(**data, &b : -> String) : Nil
+    root.notice(**data, &b)
   end
 
-  def self.warn(msg : String) : Nil
-    root.warn(msg)
+  def self.warn(msg : String, **data) : Nil
+    root.warn(msg, **data)
   end
 
-  def self.warn(&b : -> String) : Nil
-    root.warn(&b)
+  def self.warn(**data, &b : -> String) : Nil
+    root.warn(**data, &b)
   end
 
-  def self.error(msg : String) : Nil
-    root.error(msg)
+  def self.error(msg : String, **data) : Nil
+    root.error(msg, **data)
   end
 
-  def self.error(&b : -> String) : Nil
-    root.error(&b)
+  def self.error(**data, &b : -> String) : Nil
+    root.error(**data, &b)
   end
 
-  def self.fatal(msg : String) : Nil
-    root.fatal(msg)
+  def self.fatal(msg : String, **data) : Nil
+    root.fatal(msg, **data)
   end
 
-  def self.fatal(&b : -> String) : Nil
-    root.fatal(&b)
+  def self.fatal(**data, &b : -> String) : Nil
+    root.fatal(**data, &b)
   end
 end

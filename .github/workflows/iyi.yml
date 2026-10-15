@@ -1855,6 +1855,9 @@ jobs:
       #                      bench/arena_exercise.sh asserts and a tally
       #                      cannot
       #   wasm32_exercise    a wasm32 program
+      #   std_debug_cross    its pass is a panic, whose trace cross-run
+      #                      reads on aarch64 and musl; Windows' own trace
+      #                      is bench/panics.sh's
       #
       # The sockets came off this list when `std/socket` and `std/udp` got
       # their Winsock arms, and `std_file_exercise` came off it when the
@@ -1869,7 +1872,7 @@ jobs:
           # it - a line two seconds in - and an empty stdin is its failure.
           $skip = @(
             "std_http_server.iyi", "arena_large_probe.iyi", "wasm32_exercise.iyi",
-            "stdin_park.iyi"
+            "stdin_park.iyi", "std_debug_cross.iyi"
           )
           $env:TEST_SANDBOX = Join-Path $env:RUNNER_TEMP "sandbox"
           $env:IYI_FILE_SANDBOX = Join-Path $env:RUNNER_TEMP "filesandbox"

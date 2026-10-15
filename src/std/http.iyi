@@ -73,6 +73,10 @@ import std/uri::{URI, Params}
 import std/mime::{MIME}
 import std/compress::{Inflater, Deflater, Envelope, Gzip, CompressError}
 import std/digest::{SHA1}
+# The clock a deadline is read on. std/time's, not the runtime's hook: the
+# clock is std/time's to reach, and a module that reads it through its own
+# hook call is counted by `iyi mod reach` as reaching past the language.
+import std/time::{Time}
 
 # What the other end did that HTTP does not allow, as a value: `reason` is
 # the sentence, `status` the answer a server gives a request that did it
@@ -189,7 +193,7 @@ class Conn
     end
     make_room
     if @deadline > 0_i64
-      left = (@deadline - __iyi_monotonic_ns) // 1000000_i64
+      left = (@deadline - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
       if left <= 0_i64
         @failure = SocketError.timed_out("read a request's head")
         return false
@@ -233,7 +237,7 @@ class Conn
   # client that sends a byte a little inside it holds a connection for as
   # long as it likes.
   def deadline_in(ms : Int32) : Nil
-    @deadline = ms > 0 ? __iyi_monotonic_ns + ms.to_i64 * 1000000_i64 : 0_i64
+    @deadline = ms > 0 ? Time.monotonic_nanoseconds.to_i64 + ms.to_i64 * 1000000_i64 : 0_i64
   end
 
   def no_deadline : Nil

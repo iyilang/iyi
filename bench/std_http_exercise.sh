@@ -94,11 +94,15 @@ echo
 echo "== what the module reaches"
 # What std/socket reaches and nothing of its own: cookies (the clock) and
 # files are std/cookie's and std/fileserver's, and a multipart boundary is
-# the parts' own hash, not the system's randomness. These are the modules
-# it may import, and none but std/socket reaches anything.
+# the parts' own hash, not the system's randomness. A deadline reads the
+# monotonic clock through std/time rather than the runtime's hook, and
+# std/socket brings std/time already (a DNS query's ID is std/random's,
+# which reads the clock), so it adds nothing to what the module reaches.
+# These are the modules it may import, and none but std/socket and
+# std/time reaches anything.
 imports=$(grep -oE '^import std/[a-z_]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
-if [ "$imports" = "std/compress std/digest std/mime std/socket std/uri " ]; then
-  echo "  std/socket, and std/compress, std/digest, std/mime and std/uri, which reach nothing"
+if [ "$imports" = "std/compress std/digest std/mime std/socket std/time std/uri " ]; then
+  echo "  std/socket and std/time, and std/compress, std/digest, std/mime and std/uri, which reach nothing"
 else
   echo "  std/http imports $imports"
   status=1

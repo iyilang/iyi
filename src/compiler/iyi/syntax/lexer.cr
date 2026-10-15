@@ -1984,7 +1984,9 @@ module Iyi
           beginning_of_line = false
           case next_char
           when 'd'
-            if whitespace && !ident_part_or_end?(peek_next_char) && peek_next_char != ':'
+            # iyi: `end!` closes a block and propagates its error, so it
+            # counts as an `end` here, the way `next_token` reads it.
+            if whitespace && (!ident_part_or_end?(peek_next_char) || (@iyi && peek_next_char == '!')) && peek_next_char != ':'
               if nest == 0 && control_nest == 0
                 next_char :MACRO_END
                 @token.macro_state = Token::MacroState.default

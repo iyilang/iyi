@@ -25,6 +25,10 @@
   the variable by reopening `class ::Lib::Sub::Sub`, which declared it
   under `Reference`, and the subclass's own artifact was refused with a
   superclass mismatch. Held by `spec/compiler/iyimod_spec.cr` (#125).
+- **`end!` inside a macro body closes its block.** The macro scanner
+  counted `do` and not `end!` as an `end`, so a macro holding `each_item
+  do |i| ... end!` was "unterminated macro". Held by
+  `spec/compiler/parser/parser_spec.cr` (#126).
 
 ## 0.17.0 — 2026-10-14
 

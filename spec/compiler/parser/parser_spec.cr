@@ -4423,6 +4423,11 @@ end").as(ClassDef)
         node.body.to_s.should contain("trait = 2")
       end
 
+      it "closes a block with end! inside a macro body" do
+        node = parse("macro define_sum\n  def sum : Int32 | Fail\n    each_item do |i|\n    end!\n    1\n  end\n\n  def after\n  end\nend", filename: "x.iyi").as(Macro)
+        node.body.to_s.should contain("def after")
+      end
+
       it "parses an impl" do
         node = parse("impl Greet for User\ndef greet\nend\nend").as(ImplDef)
         node.trait.should eq(Path.new(["Greet"]))

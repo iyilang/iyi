@@ -196,6 +196,12 @@ COMPILER="$REPO/.build/iyi"
 # defines them; Linux links libgcc's copies into the program; Windows has
 # neither and the prelude's win32 arm defines them itself.
 ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername getuid getgid getpwuid_r getpwnam_r getgrgid_r getgrnam_r getgrouplist"
+# `std/system_roots` reads the roots darwin trusts, which are kept behind
+# Security.framework and nowhere else - no file holds them - and arrive in
+# CoreFoundation's containers: the anchors and the administrator's and
+# user's trust settings, each certificate's DER, and the release of every
+# copy. Linux reads a bundle file instead; Windows asks crypt32.
+ALLOWED_SYMBOLS_DARWIN="$ALLOWED_SYMBOLS_DARWIN SecTrustCopyAnchorCertificates SecTrustSettingsCopyCertificates SecTrustSettingsCopyTrustSettings SecCertificateCopyData CFArrayGetCount CFArrayGetValueAtIndex CFDataGetBytePtr CFDataGetLength CFDictionaryGetValue CFNumberGetValue CFRelease CFStringCreateWithCString"
 ALLOWED_SYMBOLS_LINUX="$FLOOR_BASE_LINUX environ"
 
 # What a program may link. The platform libc only.
@@ -392,9 +398,10 @@ imports_audit() { # imports_audit <program> <binary>
   for dll in $extra; do
     echo "THE FLOOR MOVED: $program imports $dll"
   done
-  echo "A program iyi builds may import the process interface, OS entropy, Winsock
-and the MSVC runtime, each with a reason in SPEC.md III.10. Another DLL is a
-dependency being taken on, and it needs a reason there before a line here."
+  echo "A program iyi builds may import the process interface, OS entropy, Winsock,
+the certificate stores and the MSVC runtime, each with a reason in SPEC.md
+III.10. Another DLL is a dependency being taken on, and it needs a reason
+there before a line here."
   status=1
 }
 
@@ -594,6 +601,14 @@ while IFS= read -r annotation; do
     # `AcceptEx` and `ConnectEx` are mswsock's exports reached through
     # `WSAIoctl`, so they add no second annotation.
     '@[Link("ws2_32")]') ;;
+    # The trusted roots are each platform's own, kept where only its own
+    # interface reaches: crypt32's stores on Windows, Security.framework's
+    # anchors and trust settings on darwin with CoreFoundation's containers
+    # around them. `std/system_roots` is their only caller (SPEC.md
+    # III.10's inventory says so); Linux's are a file.
+    '@[Link("crypt32")]') ;;
+    '@[Link(framework: "Security")]') ;;
+    '@[Link(framework: "CoreFoundation")]') ;;
     *)
       echo "  THE FLOOR MOVED: the library declares $annotation"
       echo "  A library iyi ships links the platform libc and, opt-in, a"

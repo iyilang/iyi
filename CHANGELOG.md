@@ -4,6 +4,31 @@
 
 ### Added
 
+- **`std/system_roots`: the roots the operating system trusts, read as
+  std/x509 certificates, the fifth piece of a TLS client.**
+  `X509.verify` needs roots, and they are each platform's own.
+  `SystemRoots.load` answers them, each once, with a count of those
+  std/x509 cannot read and where they came from. On Linux they are
+  `$SSL_CERT_FILE` and `$SSL_CERT_DIR` when set, otherwise the first of
+  the distributions' bundle files, otherwise `/etc/ssl/certs` and
+  `/etc/pki/tls/certs`. On darwin they are Security.framework's anchors,
+  with the administrator's and then the user's trust settings applied (a
+  root trusted without constraint added, one denied taken away). On
+  Windows they are crypt32's ROOT store less its Disallowed store. **The
+  floor moved, by the owner's decision**: crypt32.dll on Windows and the
+  Security and CoreFoundation frameworks on darwin, reached by this
+  module alone. SPEC.md III.10's inventory gives the reason, and
+  `bench/floor_base.sh`, `bench/dependency_floor.sh`,
+  `bench/std_dependency_floor.sh` and `bench/std_exercise.sh` allow them
+  for it and nothing else. std/x509 stays pure. Held by
+  `bench/std_system_roots_exercise.sh`, plain and `--release`: the
+  platform's store read (at least one root, none twice), the variables
+  over written files (a root twice beside a broken block, a directory, an
+  empty bundle refused), the Linux store the same certificates Python
+  reads from the same bundle (121 here, by SHA-256), and 5 broken copies
+  of the module each caught. The darwin and Windows arms are type-checked
+  by cross-compiling here and run by the exercise on those platforms'
+  CI.
 - **`std/x509`: certificates read and chains checked (RFC 5280), the
   fourth piece of a TLS client.** With DER, RSA and ECDSA in place there
   was still nothing that could say whether a server's certificates lead

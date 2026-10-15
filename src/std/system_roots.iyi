@@ -1,0 +1,321 @@
+# The root certificates the operating system trusts, read as std/x509
+# certificates: the `roots` a TLS client hands `X509.verify`.
+#
+#     import std/system_roots::{SystemRoots}
+#     import std/x509::{X509}
+#
+#     store = SystemRoots.load.or_panic        # certificates, unreadable, source
+#     X509.verify(leaf, intermediates, store.certificates, "example.com")
+#
+# Each platform's own store, as Go's crypto/x509 reads it:
+#
+# - Linux: `$SSL_CERT_FILE` and every file in each directory of
+#   `$SSL_CERT_DIR` (colon-separated) when either is set - the variables
+#   OpenSSL reads, which is how a container or a test names its own roots.
+#   Otherwise the first bundle of the ones the distributions write
+#   (Debian's, Fedora's, openSUSE's, RHEL's, Alpine's), and when there is
+#   none, every file in `/etc/ssl/certs` and `/etc/pki/tls/certs`.
+# - darwin: Security.framework's system anchors
+#   (`SecTrustCopyAnchorCertificates`), with the trust settings an
+#   administrator and then the user made on top (`SecTrustSettings`, the
+#   user's over the administrator's): a certificate trusted as a root with
+#   no constraint is added, and one denied, for any use, is taken away. A
+#   setting constrained to a policy, an application or a key usage is not
+#   one this can apply, so it adds nothing; a denial is honoured whatever
+#   it is constrained to, as refusing too much is the safe side.
+# - Windows: crypt32's ROOT store (`CertOpenSystemStoreW`), less what the
+#   Disallowed store holds. Windows fills the ROOT store as it meets roots
+#   it does not have yet, through its own chain building; a root it has
+#   never fetched is not there to read, and a chain to it is refused.
+#
+# The same certificate twice is kept once. One that std/x509 cannot read -
+# a key type it does not take, a DSA root on an old system - is counted in
+# `unreadable`, not an error: a store is used for what it holds. No
+# certificate at all is an `X509Error` naming where it looked.
+#
+# This module is what reaches the operating system (`iyi mod reach`):
+# std/x509 itself is pure computation, and a program that brings its own
+# roots does not link crypt32 or Security.framework.
+
+module std/system_roots
+
+import std/x509::{Certificate, X509Error}
+import std/env::{ENV}
+import std/dir::{Dir}
+import std/file::{File}
+
+{% unless flag?(:linux) || flag?(:darwin) || flag?(:win32) %}
+  {% raise "std/system_roots reads the operating system's trusted roots, and this target has none: " \
+           "Linux, darwin and Windows do." %}
+{% end %}
+
+{% if flag?(:darwin) %}
+  # Security.framework's anchors and trust settings, and the CoreFoundation
+  # containers they come in. Every Copy is released.
+  @[Link(framework: "Security")]
+  lib LibSecurity
+    fun SecTrustCopyAnchorCertificates(anchors : Void**) : Int32
+    fun SecTrustSettingsCopyCertificates(domain : UInt32, certificates : Void**) : Int32
+    fun SecTrustSettingsCopyTrustSettings(certificate : Void*, domain : UInt32, settings : Void**) : Int32
+    fun SecCertificateCopyData(certificate : Void*) : Void*
+  end
+
+  @[Link(framework: "CoreFoundation")]
+  lib LibCoreFoundation
+    fun CFArrayGetCount(array : Void*) : Int64
+    fun CFArrayGetValueAtIndex(array : Void*, index : Int64) : Void*
+    fun CFDataGetLength(data : Void*) : Int64
+    fun CFDataGetBytePtr(data : Void*) : UInt8*
+    fun CFDictionaryGetValue(dictionary : Void*, key : Void*) : Void*
+    fun CFNumberGetValue(number : Void*, type : Int64, value : Void*) : UInt8
+    fun CFStringCreateWithCString(allocator : Void*, text : UInt8*, encoding : UInt32) : Void*
+    fun CFRelease(object : Void*) : Void
+  end
+{% elsif flag?(:win32) %}
+  # crypt32 is the certificate store's interface and nothing else's: the
+  # stores are not files and kernel32 has no call that opens one.
+  @[Link("crypt32")]
+  lib LibCrypt32
+    fun CertOpenSystemStoreW(provider : Void*, name : UInt16*) : Void*
+    fun CertEnumCertificatesInStore(store : Void*, previous : Void*) : Void*
+    fun CertCloseStore(store : Void*, flags : UInt32) : Int32
+  end
+{% end %}
+
+pub struct SystemRoots
+  # The certificates, each once, in the order the store gave them.
+  getter certificates : Array(Certificate)
+  # How many entries std/x509 could not read.
+  getter unreadable : Int32
+  # Where they came from: files, or the platform's store by name.
+  getter source : String
+
+  # The Linux bundles, in the order Go's crypto/x509 tries them.
+  BUNDLES = ["/etc/ssl/certs/ca-certificates.crt",
+             "/etc/pki/tls/certs/ca-bundle.crt",
+             "/etc/ssl/ca-bundle.pem",
+             "/etc/pki/tls/cacert.pem",
+             "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+             "/etc/ssl/cert.pem"]
+  DIRECTORIES = ["/etc/ssl/certs", "/etc/pki/tls/certs"]
+
+  def initialize(@certificates : Array(Certificate), @unreadable : Int32, @source : String)
+  end
+
+  # The operating system's trusted roots, or why there are none.
+  def self.load : SystemRoots | X509Error
+    collected = SystemRootsCollector.new
+    file = ENV["SSL_CERT_FILE"]?
+    dirs = ENV["SSL_CERT_DIR"]?
+    if (file && !file.empty?) || (dirs && !dirs.empty?)
+      collected.read_file(file) if file && !file.empty?
+      dirs.split(':').each { |dir| collected.read_directory(dir) unless dir.empty? } if dirs && !dirs.empty?
+      return collected.answer("$SSL_CERT_FILE and $SSL_CERT_DIR (#{[file, dirs].compact.join(", ")})")
+    end
+    {% if flag?(:darwin) %}
+      SystemRootsDarwin.read(collected)
+      collected.answer("Security.framework's anchors and trust settings")
+    {% elsif flag?(:win32) %}
+      SystemRootsWindows.read(collected)
+      collected.answer("the Windows ROOT store, less the Disallowed store")
+    {% else %}
+      BUNDLES.each do |bundle|
+        next unless File.file?(bundle) && File.readable?(bundle)
+        collected.read_file(bundle)
+        return collected.answer(bundle) unless collected.empty?
+      end
+      DIRECTORIES.each { |dir| collected.read_directory(dir) }
+      collected.answer("#{BUNDLES.join(", ")}, #{DIRECTORIES.join(" and ")}")
+    {% end %}
+  end
+end
+
+# Certificates gathered once each, by their DER.
+class SystemRootsCollector
+  getter certificates : Array(Certificate) = [] of Certificate
+  getter unreadable : Int32 = 0
+  @seen : Hash(String, Int32) = {} of String => Int32
+  @denied : Hash(String, Bool) = {} of String => Bool
+
+  def initialize
+  end
+
+  def empty? : Bool
+    @certificates.empty?
+  end
+
+  # One certificate's DER: kept, unless it was seen or denied.
+  def add(der : Array(UInt8)) : Nil
+    key = SystemRootsCollector.key(der)
+    return if @seen.has_key?(key) || @denied.has_key?(key)
+    certificate = Certificate.parse(der)
+    if certificate.is_a?(X509Error)
+      @unreadable = @unreadable + 1
+    else
+      @seen[key] = @certificates.size
+      @certificates << certificate
+    end
+  end
+
+  # A certificate the platform says not to trust: dropped if kept, and
+  # never kept after.
+  def deny(der : Array(UInt8)) : Nil
+    key = SystemRootsCollector.key(der)
+    @denied[key] = true
+    at = @seen[key]?
+    return unless at
+    @certificates = @certificates.reject { |c| SystemRootsCollector.key(c.raw) == key }
+    @seen = {} of String => Int32
+    @certificates.each_with_index { |c, i| @seen[SystemRootsCollector.key(c.raw)] = i }
+  end
+
+  # Every CERTIFICATE block of a PEM file; a file that cannot be read, or
+  # whose PEM is broken, adds nothing.
+  def read_file(path : String) : Nil
+    return unless File.file?(path) && File.readable?(path)
+    blocks = Certificate.pem_blocks(File.read(path))
+    if blocks.is_a?(X509Error)
+      @unreadable = @unreadable + 1
+      return
+    end
+    blocks.each { |der| add(der) }
+  end
+
+  def read_directory(path : String) : Nil
+    return unless File.directory?(path)
+    Dir.children(path).sorted.each { |name| read_file(path + "/" + name) }
+  end
+
+  def answer(where : String) : SystemRoots | X509Error
+    return X509Error.new("no root certificates in #{where}") if @certificates.empty?
+    SystemRoots.new(@certificates, @unreadable, where)
+  end
+
+  # A certificate's identity: its DER, as text a Hash can key.
+  def self.key(der : Array(UInt8)) : String
+    String.build do |io|
+      der.each do |b|
+        io << "0123456789abcdef"[b.to_i32 >> 4]
+        io << "0123456789abcdef"[b.to_i32 & 15]
+      end
+    end
+  end
+end
+
+{% if flag?(:darwin) %}
+  struct SystemRootsDarwin
+    USER                 =          0_u32
+    ADMIN                =          1_u32
+    UTF8                 = 0x08000100_u32
+    SINT32               =          3_i64
+    RESULT_TRUST_ROOT    =              1
+    RESULT_TRUST_AS_ROOT =              2
+    RESULT_DENY          =              3
+
+    def self.read(collected : SystemRootsCollector) : Nil
+      anchors = Pointer(Void).new(0_u64)
+      if LibSecurity.SecTrustCopyAnchorCertificates(pointerof(anchors)) == 0 && anchors.address != 0
+        each_certificate(anchors) { |certificate| collected.add(bytes(certificate)) }
+        LibCoreFoundation.CFRelease(anchors)
+      end
+      result_key = string("kSecTrustSettingsResult")
+      constraints = ["kSecTrustSettingsPolicy", "kSecTrustSettingsApplication",
+                     "kSecTrustSettingsPolicyString", "kSecTrustSettingsKeyUsage"].map { |k| string(k) }
+      [ADMIN, USER].each do |domain|
+        certificates = Pointer(Void).new(0_u64)
+        next unless LibSecurity.SecTrustSettingsCopyCertificates(domain, pointerof(certificates)) == 0 && certificates.address != 0
+        each_certificate(certificates) do |certificate|
+          case verdict(certificate, domain, result_key, constraints)
+          when  1 then collected.add(bytes(certificate))
+          when -1 then collected.deny(bytes(certificate))
+          end
+        end
+        LibCoreFoundation.CFRelease(certificates)
+      end
+      constraints.each { |k| LibCoreFoundation.CFRelease(k) }
+      LibCoreFoundation.CFRelease(result_key)
+    end
+
+    # 1 trusted as a root without constraint, -1 denied, 0 neither.
+    private def self.verdict(certificate : Void*, domain : UInt32, result_key : Void*, constraints : Array(Void*)) : Int32
+      settings = Pointer(Void).new(0_u64)
+      return 0 unless LibSecurity.SecTrustSettingsCopyTrustSettings(certificate, domain, pointerof(settings)) == 0 && settings.address != 0
+      count = LibCoreFoundation.CFArrayGetCount(settings)
+      # No settings at all is "always trust" for a root.
+      answer = count == 0 ? 1 : 0
+      i = 0_i64
+      while i < count
+        setting = LibCoreFoundation.CFArrayGetValueAtIndex(settings, i)
+        result = RESULT_TRUST_ROOT
+        number = LibCoreFoundation.CFDictionaryGetValue(setting, result_key)
+        unless number.address == 0
+          value = 0
+          LibCoreFoundation.CFNumberGetValue(number, SINT32, pointerof(value).as(Void*))
+          result = value
+        end
+        if result == RESULT_DENY
+          answer = -1
+          break
+        end
+        constrained = constraints.any? { |k| LibCoreFoundation.CFDictionaryGetValue(setting, k).address != 0 }
+        answer = 1 if !constrained && (result == RESULT_TRUST_ROOT || result == RESULT_TRUST_AS_ROOT)
+        i = i + 1
+      end
+      LibCoreFoundation.CFRelease(settings)
+      answer
+    end
+
+    private def self.each_certificate(array : Void*, & : Void* -> Nil) : Nil
+      count = LibCoreFoundation.CFArrayGetCount(array)
+      i = 0_i64
+      while i < count
+        yield LibCoreFoundation.CFArrayGetValueAtIndex(array, i)
+        i = i + 1
+      end
+    end
+
+    private def self.bytes(certificate : Void*) : Array(UInt8)
+      data = LibSecurity.SecCertificateCopyData(certificate)
+      return [] of UInt8 if data.address == 0
+      size = LibCoreFoundation.CFDataGetLength(data).to_i32
+      start = LibCoreFoundation.CFDataGetBytePtr(data)
+      copied = Array(UInt8).new(size) { |i| start[i] }
+      LibCoreFoundation.CFRelease(data)
+      copied
+    end
+
+    private def self.string(text : String) : Void*
+      LibCoreFoundation.CFStringCreateWithCString(Pointer(Void).new(0_u64), text.to_unsafe, UTF8)
+    end
+  end
+{% elsif flag?(:win32) %}
+  struct SystemRootsWindows
+    def self.read(collected : SystemRootsCollector) : Nil
+      each_der("ROOT") { |der| collected.add(der) }
+      each_der("Disallowed") { |der| collected.deny(der) }
+    end
+
+    # Every certificate's DER in the system store *name*. A CERT_CONTEXT
+    # is { DWORD encoding; BYTE* encoded; DWORD size; ... } on the 64-bit
+    # ABI: the bytes' pointer at 8, their count at 16. The enumeration
+    # frees the context it is handed, so the last one needs no release.
+    private def self.each_der(name : String, & : Array(UInt8) -> Nil) : Nil
+      wide = Array(UInt16).new(name.bytesize + 1, 0_u16)
+      i = 0
+      while i < name.bytesize
+        wide[i] = name.to_unsafe[i].to_u16
+        i = i + 1
+      end
+      store = LibCrypt32.CertOpenSystemStoreW(Pointer(Void).new(0_u64), wide.to_unsafe)
+      return if store.address == 0
+      context = LibCrypt32.CertEnumCertificatesInStore(store, Pointer(Void).new(0_u64))
+      until context.address == 0
+        start = (context.as(UInt8*) + 8_i64).as(Pointer(UInt8)*)[0]
+        size = (context.as(UInt8*) + 16_i64).as(UInt32*)[0].to_i32
+        yield Array(UInt8).new(size) { |k| start[k] }
+        context = LibCrypt32.CertEnumCertificatesInStore(store, context)
+      end
+      LibCrypt32.CertCloseStore(store, 0_u32)
+    end
+  end
+{% end %}

@@ -79,7 +79,7 @@ fi
 
 echo
 echo "== every mutex section reported"
-for phrase in "== a value behind a lock" "== tasks that park while they hold it" "== threads" "== a thread asleep until the release" "== cancelled while it waits" "== what it refuses"; do
+for phrase in "== a value behind a lock" "== tasks that park while they hold it" "== threads" "== a thread asleep until the release" "== cancelled while it waits" "== waiting for the value to change" "== what it refuses"; do
   if ! grep -q "$phrase" "$WORK/mutex-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -260,12 +260,28 @@ prove_broken "a block that does not release" "already holds the lock" \
   end
 
   # The block'"'"'s answer'
+# A release that does not count itself as a change: a waiter reads its own
+# release as one, checks again at once, and spins with the lock in turn,
+# never yielding to the producer on its thread.
+prove_broken "a release not counted as a change" hangs \
+  '    @changes.add(1_u64)
+' ''
+# The refusal of a wait nothing could end, taken out: the wait sleeps on.
+prove_broken "a wait nothing could end left to wait" hangs \
+  '        if !busy && alone
+          raise "Mutex#wait_for: deadlock: nothing is left to change the value - no other task on this thread, and no other thread"
+        end
+' ''
 case "$(uname -s)" in
   Linux)
     # A thread asleep on the futex is woken by the release and nothing
     # else; without the wake it sleeps for good.
     prove_broken "a release that does not wake a sleeping thread" hangs \
       '        __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@word).address.to_i64, IYI_FUTEX_WAKE, 1_i64, 0_i64, 0_i64, 0_i64)
+' ''
+    # The same for a thread asleep waiting for a change.
+    prove_broken "a release that does not wake a thread waiting for a change" hangs \
+      '        __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@changes).address.to_i64, IYI_FUTEX_WAKE, 0x7FFFFFFF_i64, 0_i64, 0_i64, 0_i64)
 ' ''
     ;;
 esac

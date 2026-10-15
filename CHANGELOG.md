@@ -4,6 +4,24 @@
 
 ### Added
 
+- **`Mutex#wait_for` is the condition variable, with the condition and its
+  action one step.** A task that had to wait until a Mutex's value was
+  ready - a queue with an item in it - could only take the lock again and
+  again. `wait_for` runs its block with the lock held each time another
+  task has had the lock, until the block answers something other than
+  nil, and answers that:
+  `queue.wait_for { |q| q.empty? ? nil : q.shift }`.
+  - Between runs the task holds no lock and waits as `lock` does: on
+    Linux a thread with nothing else to run sleeps on a futex over the
+    count of releases, which each release moves and wakes.
+  - Cancellable. A wait nothing could end - one thread, nothing else on
+    it - panics, saying so.
+
+  Held by `bench/std_mutex_exercise.sh`: a queue between tasks, one
+  between threads, a wait the kernel slept through, a cancelled wait, the
+  refusal, and four broken copies (an uncounted release, the refusal
+  taken out, and each futex wake left out).
+
 - **`derive serializable` takes the other library's `@[JSON::Field(...)]`,
   and enums read and write themselves as JSON.** Every field was written
   under its own name, so the first API with camelCase keys could not be

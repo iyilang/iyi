@@ -152,6 +152,70 @@ assert_true(elapsed < 2000, "cancellation took #{elapsed} ms against a 5 s hold"
 assert_true(!guarded.locked? && guarded.get { |cell| cell[0] }.or_panic == 1, "the cancelled holder released, and the waiter's block never ran")
 puts "  a waiting task answered Cancelled, its block unrun, and the holder released"
 
+# A queue a task waits on while another fills it: each `wait_for` runs its
+# block once the queue has changed, and takes an item only when there is
+# one, the test and the take one step.
+puts "\n== waiting for the value to change"
+queue = Mutex.new { [] of Int32 }
+taken = [] of Int32
+group do |g|
+  g.spawn do
+    5.times do |item|
+      sleep(10)
+      queue.lock { |q| q << item }.or_panic
+    end
+    0
+  end
+  5.times do
+    taken << queue.wait_for { |q| q.empty? ? nil : q.shift }.or_panic
+  end
+end
+assert_true(taken == [0, 1, 2, 3, 4], "a task waiting on another's queue took #{taken}")
+
+# Across threads: a producer thread, and the main thread waiting with
+# nothing else to run, which on Linux sleeps in the kernel until a release.
+items = Mutex.new { [] of Int32 }
+producer = IyiThread.start do
+  1000.times do |item|
+    items.lock { |q| q << item }.or_panic
+    sleep(1) if item % 250 == 0
+  end
+  nil
+end
+sum = 0
+1000.times { sum = sum + items.wait_for { |q| q.empty? ? nil : q.shift }.or_panic }
+producer.join
+assert_true(sum == 499500, "a thousand items from another thread summed to #{sum}")
+
+late = Mutex.new { [0] }
+writer = IyiThread.start do
+  sleep(150)
+  late.lock { |cell| cell[0] = 9 }.or_panic
+  nil
+end
+began = now_ms
+seen_late = late.wait_for { |cell| cell[0] == 0 ? nil : cell[0] }.or_panic
+waited_late = now_ms - began
+writer.join
+assert_true(seen_late == 9 && waited_late >= 100 && waited_late < 2000, "a wait for a write 150 ms away answered #{seen_late} after #{waited_late} ms")
+
+# A failing sibling cancels a task waiting for a change that never comes.
+never = Mutex.new { [0] }
+outcome_never = ""
+group do |g|
+  g.spawn do
+    got_never = never.wait_for { |cell| cell[0] == 0 ? nil : cell[0] }
+    outcome_never = got_never.is_a?(Cancelled) ? "cancelled" : "answered"
+    0
+  end
+  g.spawn do
+    sleep(30)
+    Stop.new
+  end
+end
+assert_true(outcome_never == "cancelled", "a wait nothing ends, its sibling failed: #{outcome_never}")
+puts "  a queue between tasks and one between threads, a wait the kernel slept through, and a cancelled one"
+
 puts "\n== what it refuses"
 said = assert_panics("already holds the lock") do
   count.lock { |n| count.lock { |m| m } }
@@ -165,5 +229,10 @@ assert_true(!names.locked?, "a panic inside the block released the lock")
 names.lock { |list| list << "linus" }.or_panic
 assert_true(names.get { |list| list.size }.or_panic == 3, "and the next lock took it")
 puts "  a second lock by its holder panics, and a panicking block releases"
+said_alone = assert_panics("nothing is left to change the value") do
+  count.wait_for { |n| n > 100 ? n : nil }
+end
+assert_true(!count.locked?, "the refused wait holds no lock")
+puts "  a wait nothing could end panics, naming why"
 
 puts "\nALL CHECKS PASSED"

@@ -12,6 +12,12 @@
 #     count = Mutex.new { 0 }
 #     count.update { |n| n + 1 }.or_panic
 #
+# **Waiting for a change.** `wait_for` is the condition variable, with the
+# condition and its action one step: its block runs with the lock held each
+# time another task has had the lock, until it answers something other than
+# nil, which `wait_for` answers. A consumer takes from a queue a producer
+# fills with `queue.wait_for { |q| q.empty? ? nil : q.shift }`.
+#
 # **Only a block reaches the value, and the compiler checks every block.**
 # The value is made by the block `Mutex.new` runs, so nothing outside holds
 # it, and is reached only inside the blocks `lock`, `get` and `update` run
@@ -60,6 +66,10 @@ pub class Mutex(T)
   @holder_thread : Atomic(UInt64)
   # Windows' doorbell: a semaphore made by the first thread to sleep here.
   @doorbell : Atomic(UInt64)
+  # How many times the lock has been released, which `wait_for` watches
+  # for a change, and how many threads sleep in the kernel watching it.
+  @changes : Atomic(UInt64)
+  @change_sleepers : Atomic(UInt64)
 
   # Spins before a waiter gives its thread's turn away; yields before it
   # sleeps a millisecond at a time; one sleeper on the word's high half.
@@ -82,6 +92,8 @@ pub class Mutex(T)
     @holder = Atomic(UInt64).new(0_u64)
     @holder_thread = Atomic(UInt64).new(0_u64)
     @doorbell = Atomic(UInt64).new(0_u64)
+    @changes = Atomic(UInt64).new(0_u64)
+    @change_sleepers = Atomic(UInt64).new(0_u64)
   end
 
   # Runs the block with the value, the lock held; answers nil, or
@@ -115,6 +127,77 @@ pub class Mutex(T)
     defer release
     @value = block.call(@value)
     nil
+  end
+
+  # Runs the block with the lock held each time the value changes, until it
+  # answers something other than nil, and answers that: a condition and
+  # what is done once it holds, in one step no other task can come between.
+  #
+  #     queue = Mutex.new { [] of Int32 }
+  #     job = queue.wait_for { |q| q.empty? ? nil : q.shift }.or_panic
+  #
+  # A change is any lock, get, update or wait_for of this Mutex by another
+  # task; between them the waiter holds no lock, and what it does while it
+  # waits is `lock`'s: yields, then sleeps a millisecond at a time, and on
+  # Linux a thread with nothing else to run sleeps in the kernel until the
+  # next release. Cancellable, as `lock` is. A wait nothing could end - one
+  # thread, and nothing else on it to run - panics saying so.
+  def wait_for(&block : T -> R?) : R | Cancelled forall R
+    waits = 0
+    while true
+      if refused = acquire
+        return refused
+      end
+      # Read with the lock held, so the only release before the wait below
+      # is this task's own: one more than this is another task's.
+      mine = @changes.get + 1_u64
+      answer = held(block)
+      return answer unless answer.nil?
+      waited = await_change(mine, waits)
+      return waited if waited.is_a?(Cancelled)
+      waits = waits + 1
+    end
+  end
+
+  private def held(block : T -> R?) : R? forall R
+    defer release
+    block.call(@value)
+  end
+
+  # Parks until the count of releases is past *mine*, the one this task's
+  # own release made.
+  private def await_change(mine : UInt64, waits : Int32) : Nil | Cancelled
+    {% if (flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64)) %}
+      while @changes.get == mine
+        busy = Mutex.thread_busy?
+        alone = true
+        {% if !flag?(:gc_none) && !flag?(:gc_boehm) %}
+          alone = IyiThread.program_threads <= 1_u64
+        {% end %}
+        if !busy && alone
+          raise "Mutex#wait_for: deadlock: nothing is left to change the value - no other task on this thread, and no other thread"
+        end
+        {% if !flag?(:gc_none) && !flag?(:gc_boehm) && flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
+          if !busy && waits >= YIELDS
+            # Counted before the count of releases is looked at again, so a
+            # release that misses the sleeper has already moved the count,
+            # and the futex, which compares it, answers at once.
+            @change_sleepers.add(1_u64)
+            if @changes.get == mine
+              __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@changes).address.to_i64, IYI_FUTEX_WAIT, (mine & 0xFFFFFFFF_u64).to_i64, 0_i64, 0_i64, 0_i64)
+            end
+            @change_sleepers.sub(1_u64)
+            next
+          end
+        {% end %}
+        waited = IyiScheduler.sleep_current(waits < YIELDS ? 0 : 1)
+        return waited if waited.is_a?(Cancelled)
+        waits = waits + 1
+      end
+      nil
+    {% else %}
+      raise "Mutex#wait_for: deadlock: this program's one thread waits, and nothing else can change the value"
+    {% end %}
   end
 
   # Whether some task holds it now: an answer that may be old by the time
@@ -178,10 +261,16 @@ pub class Mutex(T)
   private def release : Nil
     @holder.set(0_u64)
     @holder_thread.set(0_u64)
+    # A change for `wait_for`, counted before the lock is free, so a waiter
+    # that takes the lock next sees it.
+    @changes.add(1_u64)
     before = @word.sub(1_u64)
     {% if !flag?(:gc_none) && !flag?(:gc_boehm) && flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
       if before >= WAITER
         __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@word).address.to_i64, IYI_FUTEX_WAKE, 1_i64, 0_i64, 0_i64, 0_i64)
+      end
+      if @change_sleepers.get != 0_u64
+        __iyi_conc_syscall6(IYI_SYS_FUTEX, pointerof(@changes).address.to_i64, IYI_FUTEX_WAKE, 0x7FFFFFFF_i64, 0_i64, 0_i64, 0_i64)
       end
     {% elsif !flag?(:gc_none) && !flag?(:gc_boehm) && flag?(:win32) && flag?(:x86_64) %}
       if before >= WAITER

@@ -183,8 +183,13 @@ pub class PipeReader < IyiIO
     moved.to_i64
   end
 
+  # A panic under a condition that always holds, then a value of the
+  # declared type: a body that is only a panic is NoReturn, the type its
+  # machine code is named by, and a build from std/io's artifact names the
+  # call by the declared one (as std/user's lookups do; SPEC.md IV.1g).
   private def low_level_write(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
-    raise "a pipe's reader is not written to"
+    raise "a pipe's reader is not written to" if count >= 0_u64
+    -1_i64
   end
 
   private def low_level_close(target_fd : Int64) : Nil
@@ -211,8 +216,10 @@ pub class PipeWriter < IyiIO
     raise "a write to a full pipe, its task cancelled while it waited"
   end
 
+  # As the reader's write: a panic, and the declared type.
   private def low_level_read(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
-    raise "a pipe's writer is not read from"
+    raise "a pipe's writer is not read from" if count >= 0_u64
+    -1_i64
   end
 
   private def low_level_close(target_fd : Int64) : Nil

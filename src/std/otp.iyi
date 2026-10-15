@@ -1,0 +1,444 @@
+# One-time passwords, written in iyi: HOTP (RFC 4226), TOTP (RFC 6238),
+# and the `otpauth://` key URI an authenticator app reads from a QR code
+# (Google Authenticator's Key Uri Format, which is the de facto spec:
+# https://github.com/google/google-authenticator/wiki/Key-Uri-Format).
+#
+#     import std/otp::{HOTP, TOTP, OTPAuth, OTPAlgorithm, OTPError}
+#
+#     HOTP.code(secret, 1_i64)                       # "287082"
+#     TOTP.code(secret, 59_i64, 30, 8)               # "94287082"
+#     TOTP.now(secret)                               # by the clock
+#     TOTP.verify(secret, "287082", unix_time)       # true or false
+#     OTPAuth.totp(secret, "alice@example.com", "Example").to_s
+#     OTPAuth.parse(uri)                             # an OTPAuth or an OTPError
+#
+# A secret is an `Array(UInt8)`, never a `String`: a secret is handed
+# around as base32 text, and a `String` here could be read as that text
+# or as its bytes, so a key typed into the wrong one would make codes that
+# match nothing and say nothing. `Base32.decode` (std/base32) turns the
+# text into the bytes, and `OTPAuth.parse` does it for a URI's secret.
+#
+# HOTP is RFC 4226 section 5.3: HMAC of the counter's eight bytes,
+# big-endian, under the secret; four bytes at the offset the last byte's
+# low nibble names ("dynamic truncation"), their top bit cleared; that
+# number modulo 10^digits, written with its leading zeros. TOTP is HOTP
+# with the counter the Unix time divided by the step, T0 = 0 (RFC 6238
+# section 4). Both take SHA-1, SHA-256 or SHA-512 (`OTPAlgorithm`), the
+# three RFC 6238 names, on std/crypto's HMAC. Digits run from 6, RFC
+# 4226's floor (R-4), to 10, past which the 31-bit number has no more to
+# give; authenticator apps read 6 and 8.
+#
+# `TOTP.verify` takes the code from the steps *window* either side of
+# *unix_time* as well, RFC 6238 section 5.2's allowance for a clock that
+# is off and a user who is slow; the default is one step each way, the
+# most that section recommends. Every candidate in the window is computed
+# and compared with std/crypto's `Subtle.constant_time_compare`, all of
+# them, so the time a guess takes does not say whether it was near. What
+# it does not do is remember: section 5.2 says a code once accepted must
+# not be accepted again, and that needs the last step a user was let in
+# at, which is the caller's to keep.
+#
+# The clock, and why this module imports std/time: `TOTP.now` is what a
+# server calls, every time, and a TOTP module that cannot say what the
+# code is now is half of one. So std/otp reaches std/time, and through
+# it the wall clock and the environment (`TZ`, `ZONEINFO`), as std/cookie
+# does for the same reason; `iyi mod reach` counts that for every program
+# importing this. Everything else is a pure function of its arguments:
+# `HOTP.code` of a counter, `TOTP.code` and `TOTP.verify` of an explicit
+# Unix time, which is how the RFCs' vectors are checked and how a program
+# with a clock of its own (a test, a replay) calls them; `TOTP.now` is
+# the one call that reads the clock. Splitting `now` into a module of its
+# own would make a module and a gate for a line. std/base32 is the split
+# that matters: it is a codec other code needs without any of this, and
+# it reaches nothing.
+#
+# `OTPAuth` builds and reads `otpauth://totp/Issuer:account?secret=...`.
+# Built: the label is the issuer, a colon and the account, each
+# percent-encoded (everything but RFC 3986's unreserved characters), and
+# the parameters are `secret` (base32, upper case, no padding, as the
+# format asks), `issuer`, `counter` for HOTP, then `algorithm`, `digits`
+# and `period` only when they are not the defaults SHA1, 6 and 30, so the
+# common URI is the short one Google's own example shows. Read: the
+# scheme and type in any case; `%XX` escapes in the label and values, `+`
+# as a space in values; the account after the label's first colon
+# (written or `%3A`), leading spaces dropped; parameters the format does
+# not name (`image`) passed over. An issuer in the label and one in the
+# parameters must agree.
+#
+# Refused with a sentence, as misuse: an empty secret, digits outside 6 to
+# 10, a step or period below one, a negative counter or Unix time, a
+# negative window, a colon in an issuer or account being built (the
+# format gives a colon no escape). Refused as an `OTPError`, because a URI
+# is data: anything else `parse` cannot read, each naming what.
+
+module std/otp
+
+import std/digest::{SHA1, SHA256, SHA512}
+import std/crypto::{HMAC, Subtle}
+import std/base32::{Base32, Base32Error}
+import std/time::{Time}
+
+# The HMAC hash, by the name RFC 6238 and the key URI format give it.
+pub enum OTPAlgorithm
+  SHA1
+  SHA256
+  SHA512
+end
+
+# What `OTPAuth.parse` answers for a URI it cannot read.
+pub struct OTPError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for OTPError
+  def message : String
+    @message
+  end
+end
+
+pub struct HOTP
+  def self.code(secret : Array(UInt8), counter : Int64, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1) : String
+    raise "HOTP: the secret is empty" if secret.size == 0
+    raise "HOTP: the counter must not be negative, not #{counter}" if counter < 0
+    raise "HOTP: digits must be from 6 to 10, not #{digits}" if digits < 6 || digits > 10
+    # The counter as eight bytes, most significant first (RFC 4226
+    # section 5.2).
+    message = Array(UInt8).new(8, 0_u8)
+    k = 0
+    while k < 8
+      message[k] = ((counter >> (56 - 8 * k)) & 255_i64).to_u8
+      k = k + 1
+    end
+    mac = OTPMac.digest(algorithm, secret, message)
+    # Dynamic truncation, section 5.3: the last byte's low four bits are
+    # where the four bytes start, so it is 0 to 15 and the four always fit
+    # a SHA-1 MAC's twenty.
+    offset = mac[mac.size - 1].to_i32 & 15
+    binary = ((mac[offset].to_i32 & 0x7F) << 24) | (mac[offset + 1].to_i32 << 16) | (mac[offset + 2].to_i32 << 8) | mac[offset + 3].to_i32
+    modulus = 1_i64
+    digits.times { modulus = modulus * 10_i64 }
+    (binary.to_i64 % modulus).to_s.rjust(digits, '0')
+  end
+end
+
+pub struct TOTP
+  def self.code(secret : Array(UInt8), unix_time : Int64, step : Int32 = 30, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1) : String
+    HOTP.code(secret, counter(unix_time, step), digits, algorithm)
+  end
+
+  # The code for this second by the wall clock.
+  def self.now(secret : Array(UInt8), step : Int32 = 30, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1) : String
+    code(secret, Time.utc.to_unix, step, digits, algorithm)
+  end
+
+  # Whether *code* is the code for *unix_time*'s step or one of the
+  # *window* steps either side of it. A code of the wrong length is false
+  # at once; the length of the right one is not a secret.
+  def self.verify(secret : Array(UInt8), code : String, unix_time : Int64, window : Int32 = 1, step : Int32 = 30, digits : Int32 = 6, algorithm : OTPAlgorithm = OTPAlgorithm::SHA1) : Bool
+    raise "TOTP: the window must not be negative, not #{window}" if window < 0
+    at = counter(unix_time, step)
+    hits = 0
+    k = -window
+    while k <= window
+      # Steps before the epoch have no code; the first ones after it have
+      # fewer neighbours to check.
+      if at + k >= 0
+        hits = hits + 1 if Subtle.constant_time_compare(HOTP.code(secret, at + k, digits, algorithm), code)
+      end
+      k = k + 1
+    end
+    hits > 0
+  end
+
+  private def self.counter(unix_time : Int64, step : Int32) : Int64
+    raise "TOTP: the step must be at least 1 second, not #{step}" if step < 1
+    raise "TOTP: the Unix time must not be negative, not #{unix_time}" if unix_time < 0
+    unix_time // step.to_i64
+  end
+end
+
+struct OTPMac
+  def self.digest(algorithm : OTPAlgorithm, secret : Array(UInt8), message : Array(UInt8)) : Array(UInt8)
+    if algorithm == OTPAlgorithm::SHA256
+      HMAC.digest(SHA256, secret, message)
+    elsif algorithm == OTPAlgorithm::SHA512
+      HMAC.digest(SHA512, secret, message)
+    else
+      HMAC.digest(SHA1, secret, message)
+    end
+  end
+end
+
+# A key URI: what an authenticator app needs to make the codes a server
+# will check. `counter` is nil for TOTP and the next counter for HOTP;
+# `period` is TOTP's step and 30, unused, for HOTP.
+pub struct OTPAuth
+  getter secret : Array(UInt8)
+  getter account : String
+  getter issuer : String
+  getter algorithm : OTPAlgorithm
+  getter digits : Int32
+  getter period : Int32
+  getter counter : Int64?
+
+  def initialize(@secret : Array(UInt8), @account : String, @issuer : String, @algorithm : OTPAlgorithm, @digits : Int32, @period : Int32, @counter : Int64?)
+    raise "OTPAuth: the secret is empty" if @secret.size == 0
+    raise "OTPAuth: the account is empty" if @account.bytesize == 0
+    raise "OTPAuth: the account #{@account.inspect} holds a colon, which the label cannot carry" if OTPText.colon?(@account)
+    raise "OTPAuth: the issuer #{@issuer.inspect} holds a colon, which the label cannot carry" if OTPText.colon?(@issuer)
+    raise "OTPAuth: digits must be from 6 to 10, not #{@digits}" if @digits < 6 || @digits > 10
+    raise "OTPAuth: the period must be at least 1 second, not #{@period}" if @period < 1
+    if count = @counter
+      raise "OTPAuth: the counter must not be negative, not #{count}" if count < 0
+    end
+  end
+
+  # An empty *issuer* is none: the label is the account alone and no
+  # `issuer` parameter is written.
+  def self.totp(secret : Array(UInt8), account : String, issuer : String = "", algorithm : OTPAlgorithm = OTPAlgorithm::SHA1, digits : Int32 = 6, period : Int32 = 30) : OTPAuth
+    new(secret, account, issuer, algorithm, digits, period, nil)
+  end
+
+  def self.hotp(secret : Array(UInt8), account : String, counter : Int64, issuer : String = "", algorithm : OTPAlgorithm = OTPAlgorithm::SHA1, digits : Int32 = 6) : OTPAuth
+    new(secret, account, issuer, algorithm, digits, 30, counter)
+  end
+
+  def hotp? : Bool
+    !@counter.nil?
+  end
+
+  def to_s : String
+    String.build do |io|
+      io << (hotp? ? "otpauth://hotp/" : "otpauth://totp/")
+      if @issuer.bytesize > 0
+        OTPText.escape(io, @issuer)
+        io << ":"
+      end
+      OTPText.escape(io, @account)
+      io << "?secret=" << Base32.encode(@secret, padding: false)
+      if @issuer.bytesize > 0
+        io << "&issuer="
+        OTPText.escape(io, @issuer)
+      end
+      if count = @counter
+        io << "&counter=" << count.to_s
+      end
+      if @algorithm == OTPAlgorithm::SHA256
+        io << "&algorithm=SHA256"
+      elsif @algorithm == OTPAlgorithm::SHA512
+        io << "&algorithm=SHA512"
+      end
+      io << "&digits=" << @digits.to_s if @digits != 6
+      io << "&period=" << @period.to_s if @period != 30 && !hotp?
+    end
+  end
+
+  def self.parse(uri : String) : OTPAuth | OTPError
+    src = uri.to_unsafe
+    n = uri.bytesize
+    return OTPError.new("otpauth: the URI does not begin with otpauth://") unless n >= 10 && OTPText.slice(uri, 0, 10).downcase == "otpauth://"
+    slash = OTPText.find(uri, 47_u8, 10, n)
+    return OTPError.new("otpauth: no label after the type") if slash < 0
+    kind = OTPText.slice(uri, 10, slash).downcase
+    return OTPError.new("otpauth: the type is #{kind.inspect}, not totp or hotp") unless kind == "totp" || kind == "hotp"
+    question = OTPText.find(uri, 63_u8, slash + 1, n)
+    label_end = question < 0 ? n : question
+    label = OTPText.unescape(OTPText.slice(uri, slash + 1, label_end), false, "the label")
+    return label if label.is_a?(OTPError)
+    colon = OTPText.find(label, 58_u8, 0, label.bytesize)
+    label_issuer = colon < 0 ? "" : OTPText.slice(label, 0, colon)
+    account = colon < 0 ? label : OTPText.slice(label, colon + 1, label.bytesize)
+    while account.bytesize > 0 && account.to_unsafe[0] == 32_u8
+      account = OTPText.slice(account, 1, account.bytesize)
+    end
+    return OTPError.new("otpauth: the label names no account") if account.bytesize == 0
+    return OTPError.new("otpauth: the account #{account.inspect} holds a colon") if OTPText.colon?(account)
+
+    secret_text = ""
+    issuer_text = ""
+    algorithm_text = ""
+    digits_text = ""
+    period_text = ""
+    counter_text = ""
+    seen = [] of String
+    at = question < 0 ? n : question + 1
+    while at < n
+      amp = OTPText.find(uri, 38_u8, at, n)
+      stop = amp < 0 ? n : amp
+      if stop > at
+        eq = OTPText.find(uri, 61_u8, at, stop)
+        key = OTPText.slice(uri, at, eq < 0 ? stop : eq)
+        if key == "secret" || key == "issuer" || key == "algorithm" || key == "digits" || key == "period" || key == "counter"
+          return OTPError.new("otpauth: the #{key} parameter appears twice") if seen.includes?(key)
+          seen << key
+          value = OTPText.unescape(eq < 0 ? "" : OTPText.slice(uri, eq + 1, stop), true, "the #{key} parameter")
+          return value if value.is_a?(OTPError)
+          if key == "secret"
+            secret_text = value
+          elsif key == "issuer"
+            issuer_text = value
+          elsif key == "algorithm"
+            algorithm_text = value
+          elsif key == "digits"
+            digits_text = value
+          elsif key == "period"
+            period_text = value
+          else
+            counter_text = value
+          end
+        end
+      end
+      at = stop + 1
+    end
+
+    return OTPError.new("otpauth: no secret parameter") unless seen.includes?("secret")
+    secret = Base32.decode(secret_text)
+    return OTPError.new("otpauth: the secret is not base32: #{secret.message}") if secret.is_a?(Base32Error)
+    return OTPError.new("otpauth: the secret is empty") if secret.size == 0
+    issuer = label_issuer
+    if seen.includes?("issuer")
+      if colon >= 0 && label_issuer != issuer_text
+        return OTPError.new("otpauth: the label's issuer #{label_issuer.inspect} and the issuer parameter #{issuer_text.inspect} differ")
+      end
+      issuer = issuer_text
+    end
+    return OTPError.new("otpauth: the issuer #{issuer.inspect} holds a colon") if OTPText.colon?(issuer)
+    algorithm = OTPAlgorithm::SHA1
+    if seen.includes?("algorithm")
+      name = algorithm_text.upcase
+      if name == "SHA256"
+        algorithm = OTPAlgorithm::SHA256
+      elsif name == "SHA512"
+        algorithm = OTPAlgorithm::SHA512
+      elsif name != "SHA1"
+        return OTPError.new("otpauth: the algorithm is #{algorithm_text.inspect}, not SHA1, SHA256 or SHA512")
+      end
+    end
+    digits = 6
+    if seen.includes?("digits")
+      d = OTPText.number(digits_text, "digits", 2147483647_i64)
+      return d if d.is_a?(OTPError)
+      return OTPError.new("otpauth: digits must be from 6 to 10, not #{d}") if d < 6_i64 || d > 10_i64
+      digits = d.to_i32
+    end
+    period = 30
+    counter = nil.as(Int64?)
+    if kind == "totp"
+      if seen.includes?("period")
+        p = OTPText.number(period_text, "the period", 2147483647_i64)
+        return p if p.is_a?(OTPError)
+        return OTPError.new("otpauth: the period must be at least 1 second, not 0") if p == 0_i64
+        period = p.to_i32
+      end
+    else
+      return OTPError.new("otpauth: an hotp URI needs a counter parameter") unless seen.includes?("counter")
+      c = OTPText.number(counter_text, "the counter", 9223372036854775807_i64)
+      return c if c.is_a?(OTPError)
+      counter = c
+    end
+    OTPAuth.new(secret, account, issuer, algorithm, digits, period, counter)
+  end
+end
+
+struct OTPText
+  def self.colon?(text : String) : Bool
+    find(text, 58_u8, 0, text.bytesize) >= 0
+  end
+
+  # The first *byte* in *text* from *from* up to *stop*, or -1.
+  def self.find(text : String, byte : UInt8, from : Int32, stop : Int32) : Int32
+    src = text.to_unsafe
+    i = from
+    while i < stop
+      return i if src[i] == byte
+      i = i + 1
+    end
+    -1
+  end
+
+  # The bytes of *text* from *start* up to *stop*.
+  def self.slice(text : String, start : Int32, stop : Int32) : String
+    src = text.to_unsafe + start.to_i64
+    String.new(stop - start) { |dst| dst.copy_from(src, stop - start) }
+  end
+
+  # Every byte but RFC 3986's unreserved ones as `%XX`, upper case.
+  def self.escape(io : String::Builder, text : String) : Nil
+    hex = "0123456789ABCDEF".to_unsafe
+    src = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      b = src[i]
+      if (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8) || b == 45_u8 || b == 46_u8 || b == 95_u8 || b == 126_u8
+        io.write_byte(b)
+      else
+        io.write_byte(37_u8)
+        io.write_byte(hex[b.to_i32 >> 4])
+        io.write_byte(hex[b.to_i32 & 15])
+      end
+      i = i + 1
+    end
+  end
+
+  def self.unescape(text : String, plus : Bool, what : String) : String | OTPError
+    src = text.to_unsafe
+    n = text.bytesize
+    buffer = Array(UInt8).new(n, 0_u8)
+    o = 0
+    i = 0
+    while i < n
+      b = src[i]
+      if b == 37_u8
+        hi = i + 2 < n ? hex_value(src[i + 1]) : -1
+        lo = i + 2 < n ? hex_value(src[i + 2]) : -1
+        if hi < 0 || lo < 0
+          return OTPError.new("otpauth: the % at byte #{i} of #{what} is not followed by two hexadecimal digits")
+        end
+        buffer[o] = (hi * 16 + lo).to_u8
+        i = i + 3
+      else
+        buffer[o] = plus && b == 43_u8 ? 32_u8 : b
+        i = i + 1
+      end
+      o = o + 1
+    end
+    String.new(o) { |dst| dst.copy_from(buffer.to_unsafe, o) }
+  end
+
+  # A decimal number of ASCII digits, at most *max*.
+  def self.number(text : String, what : String, max : Int64) : Int64 | OTPError
+    src = text.to_unsafe
+    return OTPError.new("otpauth: #{what} is empty") if text.bytesize == 0
+    value = 0_i64
+    i = 0
+    while i < text.bytesize
+      d = src[i].to_i32 - 48
+      return OTPError.new("otpauth: #{what} is #{text.inspect}, not a number") if d < 0 || d > 9
+      if value > (max - d.to_i64) // 10_i64
+        return OTPError.new("otpauth: #{what} is #{text}, past #{max}")
+      end
+      value = value * 10_i64 + d.to_i64
+      i = i + 1
+    end
+    value
+  end
+
+  private def self.hex_value(b : UInt8) : Int32
+    if b >= 48_u8 && b <= 57_u8
+      b.to_i32 - 48
+    elsif b >= 65_u8 && b <= 70_u8
+      b.to_i32 - 55
+    elsif b >= 97_u8 && b <= 102_u8
+      b.to_i32 - 87
+    else
+      -1
+    end
+  end
+end

@@ -4,6 +4,34 @@
 
 ### Added
 
+- **`std/otp`: HOTP (RFC 4226), TOTP (RFC 6238) and `otpauth://` key
+  URIs.** A server that wanted a second factor had HMAC and no code.
+  `HOTP.code(secret, counter, digits = 6, algorithm = SHA1)` and
+  `TOTP.code(secret, unix_time, step = 30, digits = 6, algorithm)` over
+  `OTPAlgorithm::SHA1`, `SHA256` and `SHA512` on std/crypto's HMAC, 6 to
+  10 digits; `TOTP.now(secret)` by the wall clock; `TOTP.verify(secret,
+  code, unix_time, window = 1)` takes the steps either side, comparing
+  every candidate with `Subtle.constant_time_compare`, and leaves
+  remembering a used step to the caller, which the module says. A secret
+  is an `Array(UInt8)`, never a `String`, so base32 text cannot be passed
+  where its bytes were meant. `OTPAuth.totp`/`.hotp(...).to_s` writes
+  Google's Key Uri Format - label and values percent-encoded, the secret
+  base32 without padding, `algorithm`, `digits` and `period` only when
+  not the defaults - and `OTPAuth.parse` reads it back, or answers an
+  `OTPError` for another scheme or type, no account, no or bad secret,
+  issuers that disagree, an unknown algorithm, digits outside 6 to 10, a
+  bad period or counter, a parameter given twice, a broken escape. The
+  module imports std/time for `now` alone and says so: everything else
+  is a pure function of an explicit counter or time. Held by
+  `bench/std_otp_exercise.sh`, plain and `--release`: RFC 4226 appendix
+  D's ten codes and truncated numbers, RFC 6238 appendix B's six times
+  under all three hashes, the window's edges; 400 codes and 300
+  verifications against an HOTP written on Python's `hmac` over random
+  secrets, counters to 2^63, times, steps and digits; 150 URIs written
+  here read back by `urllib.parse` and 150 Python wrote read here; 14
+  refusals by their sentence; ten broken copies of the module caught
+  (the truncation offset, the counter's byte order, the window one step
+  short and one long, among them).
 - **`std/base32`: Base32 and Base32hex (RFC 4648 sections 6 and 7).**
   `Base32.encode(data, padding: true)` and `Base32Hex.encode`, and
   `decode(text) : Array(UInt8) | Base32Error` reading either case with

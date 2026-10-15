@@ -117,8 +117,8 @@ broken "a base64 pair written backwards" base64 Base64Encode \
 broken "a regex automaton that keeps every bit" regex RegexDna \
   'state = (state.unsafe_shl(1_u64) | heads) & masks[src[i].to_i32]' 'state = state.unsafe_shl(1_u64) | heads'
 broken "a derive that reads no field's key" json JsonParseSerializable \
-  '        when {{ field[:name][1..] }}
-' '        when {{ field[:name][1..] }} + "?"
+  '              when \{{ json_key_{{ field[:name][1..].id }} }}
+' '              when \{{ json_key_{{ field[:name][1..].id }} }} + "?"
 '
 
 echo

@@ -103,9 +103,11 @@ describe "Normalize: regex literal" do
       Program.iyi_regex_const_name("foo", Iyi::RegexOptions::None).should eq(Program.iyi_regex_const_name("foo"))
     end
 
+    # `#{"f"}` would be folded into the text and cached like any literal, so
+    # the interpolation names a call, which is only known when it runs.
     it "carries the flags of an interpolated literal, which is no constant" do
-      node = LiteralExpander.new(iyi_regex_program).expand(parse(%q(/#{"f"}oo/m), filename: "foo.iyi"))
-      node.to_s.should eq(%q(::Std::Regex::Regex.compile("#{"f"}oo", ::Std::Regex::Regex::Options.new(6))))
+      node = LiteralExpander.new(iyi_regex_program).expand(parse(%q(/#{prefix}oo/m), filename: "foo.iyi"))
+      node.to_s.should eq(%q(::Std::Regex::Regex.compile("#{prefix}oo", ::Std::Regex::Regex::Options.new(6))))
     end
 
     it "refuses a flag std/regex has no option for" do

@@ -221,6 +221,110 @@ pub class MemoryBackend < Backend
   end
 end
 
+# Entries written by a thread of their own, so a call that logs does not
+# wait for the write: the entry is formatted where it is logged and
+# queued, and a writer thread writes what has queued up since its last
+# write, in order, in one write, to *io*'s descriptor.
+#
+#     AsyncBackend.open do |backend|   # closed, and drained, at the end
+#       Log.setup(Severity::Info, backend)
+#       ...
+#     end
+#
+# `close` waits for every queued entry to be written and the thread to
+# end; an entry written after it is refused. Entries queued when a program
+# ends without `close` are lost, which the block form rules out. The
+# backend is the thread that made it's, as every object not Share is.
+#
+# A thread needs the collector and a target with threads: under
+# `-Dgc_none` or `-Dgc_boehm`, or on another target, `new` refuses.
+pub class AsyncBackend < Backend
+  property formatter : Formatter
+  @queue : Mutex(AsyncQueue)
+  @closed : Bool
+  {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+    @writer : IyiThread? = nil
+  {% end %}
+
+  def initialize(io : IO = STDOUT, @formatter : Formatter = DefaultFormatter.new)
+    @queue = Mutex.new { AsyncQueue.new }
+    @closed = false
+    handle = io.handle
+    raise "AsyncBackend: the IO has no descriptor to write to" if handle < 0_i64
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+      queue = @queue
+      @writer = IyiThread.start do
+        out = IyiIO.new(handle)
+        while true
+          batch = queue.wait_for { |q| q.take }.or_panic
+          out.write(batch[0])
+          out.flush
+          break if batch[1]
+        end
+        nil
+      end
+    {% else %}
+      raise "AsyncBackend: this build has no threads to write with (the collector's threads, on Linux, darwin arm64 and Windows x86_64)"
+    {% end %}
+  end
+
+  # A backend for the block, closed and drained when the block ends.
+  def self.open(io : IO = STDOUT, formatter : Formatter = DefaultFormatter.new, &block : AsyncBackend -> R) : R forall R
+    backend = new(io, formatter)
+    defer backend.close
+    block.call(backend)
+  end
+
+  def write(entry : Entry) : Nil
+    raise "AsyncBackend: an entry written after close" if @closed
+    line = @formatter.format(entry) + "\n"
+    while true
+      return unless @queue.lock { |q| q.push(line) }.is_a?(Cancelled)
+    end
+  end
+
+  def close : Nil
+    return if @closed
+    @closed = true
+    while true
+      break unless @queue.lock { |q| q.close }.is_a?(Cancelled)
+    end
+    {% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || (flag?(:darwin) && flag?(:aarch64)) || (flag?(:win32) && flag?(:x86_64))) %}
+      if writer = @writer
+        writer.join
+      end
+    {% end %}
+  end
+end
+
+# The lines an `AsyncBackend` has queued, behind its Mutex.
+class AsyncQueue
+  @lines : Array(String)
+  @closed : Bool
+
+  def initialize
+    @lines = [] of String
+    @closed = false
+  end
+
+  def push(line : String) : Nil
+    @lines << line
+  end
+
+  def close : Nil
+    @closed = true
+  end
+
+  # Every line queued, as one string, and whether the queue is closed:
+  # nil while it is empty and open, which the writer waits through.
+  def take : {String, Bool}?
+    return nil if @lines.empty? && !@closed
+    text = @lines.join
+    @lines = [] of String
+    {text, @closed}
+  end
+end
+
 pub class Logger
   getter source : String
   @level : Severity?
@@ -480,7 +584,7 @@ pub class Log
   # block's answer. The context before it is back when the block ends,
   # panic or not.
   def self.with_context(**data, &block : -> R) : R forall R
-    id = IyiScheduler.current.object_id
+    id = task_key
     own = context_of(id)
     node = context_node
     data.each { |key, value| node = Metadata.new(key.to_s, value.to_s, node) }
@@ -500,18 +604,32 @@ pub class Log
     found
   end
 
+  # This task's key in the table, its fiber's id; 0 on wasm32, which has
+  # no tasks, its one program the one task.
+  private def self.task_key : UInt64
+    {% if flag?(:wasm32) %}
+      0_u64
+    {% else %}
+      IyiScheduler.current.object_id
+    {% end %}
+  end
+
   # The innermost context open for this task: its own, or the nearest
   # starter's, up the groups that started it.
   private def self.context_node : Metadata?
-    fiber = IyiScheduler.current
-    while true
-      if node = context_of(fiber.object_id)
-        return node
+    {% if flag?(:wasm32) %}
+      context_of(0_u64)
+    {% else %}
+      fiber = IyiScheduler.current
+      while true
+        if node = context_of(fiber.object_id)
+          return node
+        end
+        group = fiber.group
+        return nil unless group
+        fiber = group.owner
       end
-      group = fiber.group
-      return nil unless group
-      fiber = group.owner
-    end
+    {% end %}
   end
 
   # The table's blocks never park, so a wait for it is another thread's

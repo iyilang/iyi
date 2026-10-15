@@ -13,9 +13,18 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/log::{Log, MemoryBackend, Severity, DefaultFormatter, Entry}
+import std/log::{Log, MemoryBackend, Severity, DefaultFormatter, Entry, AsyncBackend, Formatter}
 import std/env::{ENV}
 import std/time::{Time}
+import std/file::{File}
+import std/dir::{Dir}
+
+# The message alone, so a file of them reads back exactly.
+class MessageOnly < Formatter
+  def format(entry : Entry) : String
+    entry.message
+  end
+end
 
 # An entry's data as `key=value` pairs in order.
 def pairs(entry : Entry) : String
@@ -140,5 +149,28 @@ ENV["LOG_LEVEL"] = "loud"
 assert_panics("Log.setup_from_env: LOG_LEVEL=loud is no severity") { Log.setup_from_env(backend: notes) }
 ENV.delete("LOG_LEVEL")
 puts "  a severity's name in any case, the default when unset or empty, and a refusal naming the severities"
+
+puts "\n== written by a thread of its own"
+async_path = Dir.tempdir + "/std_log_exercise_async.log"
+async_file = File.open(async_path, "w")
+AsyncBackend.open(async_file, MessageOnly.new) do |backend|
+  Log.setup(Severity::Info, backend)
+  1000.times { |i| Log.info("line #{i}") }
+end
+async_file.close
+written = File.read(async_path)
+expected = String.build { |io| 1000.times { |i| io << "line " << i << "\n" } }
+assert_true written == expected, "every entry, in order, written by the thread: #{written.size} bytes of #{expected.size}"
+late_file = File.open(async_path, "w")
+late = AsyncBackend.new(late_file, MessageOnly.new)
+late.write(Entry.new("", Severity::Info, "one"))
+late.close
+late.close
+assert_panics("AsyncBackend: an entry written after close") { late.write(Entry.new("", Severity::Info, "two")) }
+late_file.close
+assert_true File.read(async_path) == "one\n", "close drained the queue, and a second close did nothing"
+File.delete(async_path)
+Log.setup(Severity::Info, MemoryBackend.new)
+puts "  a thousand entries in order from a writer thread, drained by close, and a write after it refused"
 
 puts "\nALL CHECKS PASSED"

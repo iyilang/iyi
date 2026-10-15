@@ -4,6 +4,21 @@
 
 ### Added
 
+- **`AsyncBackend` writes log entries from a thread of its own, so a call
+  that logs does not wait for the write.** Every backend wrote in the
+  calling task, which a slow disk or a full pipe held up.
+  - The entry is formatted where it is logged and queued behind a
+    `Mutex`; a writer thread waits with `Mutex#wait_for`, writes what has
+    queued up in one write, and ends on `close`, which drains the queue
+    first. An entry written after `close` is refused.
+  - `AsyncBackend.open { |backend| ... }` closes it when the block ends.
+  - It needs the collector's threads (Linux, darwin arm64, Windows
+    x86_64); elsewhere `new` refuses by name.
+
+  Held by `bench/std_log_exercise.sh`: a thousand entries read back in
+  order from a file, a drain by `close`, the refusal, and two broken
+  copies (an entry without its newline, a write after close let through).
+
 - **std/log entries carry data, and a task's context reaches every entry
   it and the tasks it starts write.** A log line was a message and
   nothing else, so a request's id had to be pasted into every message,

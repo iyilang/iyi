@@ -446,7 +446,9 @@ assert_str "SSEError 204: SSE: the server answered 204, not 200", outcome, "a 20
 [1, 2, 3, 4].each do |k|
   assert_true gaps[k] >= 30_i64 && gaps[k] < 1500_i64, "the stream's retry sets the delay: #{gaps}"
 end
-puts "  six events over five connections, Last-Event-ID 2, 2, none, none, delays #{gaps[1]} to #{gaps[4]} ms after retry: 30"
+# The bound held, not the delays measured: those are the clock's, and this
+# output is compared between a build from source and one from artifacts.
+puts "  six events over five connections, Last-Event-ID 2, 2, none, none, each reconnect at least 30 ms after retry: 30"
 
 stopped = [] of String
 heads, gaps = scripted([EVENT_HEAD + "data: 1\n\ndata: 2\n\ndata: 3\n\n", EVENT_HEAD]) do |url|

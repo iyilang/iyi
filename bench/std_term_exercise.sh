@@ -144,6 +144,26 @@ def stty_g(slave):
     return subprocess.run(["stty", "-g"], stdin=slave, capture_output=True, text=True).stdout.strip()
 
 
+# The bit the kernel keeps for itself on darwin (see `Pty.restored`); 0
+# elsewhere, where the kernel leaves the local flags as the program set them.
+KERNEL_LFLAG = getattr(termios, "PENDIN", 0) if sys.platform == "darwin" else 0
+
+
+def kernel_free(attrs):
+    attrs = list(attrs)
+    attrs[3] = attrs[3] & ~KERNEL_LFLAG
+    return attrs
+
+
+def stty_kernel_free(text):
+    # `stty -g` is iflag:oflag:cflag:lflag:... in hex on both platforms.
+    fields = text.split(":")
+    if len(fields) > 3 and KERNEL_LFLAG:
+        fields[3] = format(int(fields[3], 16) & ~KERNEL_LFLAG, "x")
+    return ":".join(fields)
+
+
+
 class Pty:
     def __init__(self, mode, rows=24, cols=80):
         self.master, self.slave = os.openpty()
@@ -231,16 +251,19 @@ class Pty:
 
     def restored(self, label):
         # Read while the leader holds the terminal. One that cannot be read
-        # is this check failing, said by name.
+        # is this check failing, said by name. Compared without PENDIN on
+        # darwin: BSD's tty layer sets it itself whenever ICANON comes back
+        # on, to retype pending input, so a terminal a program restored
+        # exactly reads back with it until the next read clears it.
         try:
-            after = termios.tcgetattr(self.slave)
+            after = kernel_free(termios.tcgetattr(self.slave))
             detail = f"before {self.before[:4]} after {after[:4]}"
         except termios.error as error:
             after = None
             detail = f"the terminal could not be read after the program: {error}"
-        check(f"{label}: the termios is the one before (Python tcgetattr)", after == self.before, detail)
-        after_stty = stty_g(self.slave)
-        check(f"{label}: `stty -g` before and after agree", after_stty == self.before_stty,
+        check(f"{label}: the termios is the one before (Python tcgetattr)", after == kernel_free(self.before), detail)
+        after_stty = stty_kernel_free(stty_g(self.slave))
+        check(f"{label}: `stty -g` before and after agree", after_stty == stty_kernel_free(self.before_stty),
               f"{self.before_stty} / {after_stty}")
 
     def close(self):

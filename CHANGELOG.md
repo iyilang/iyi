@@ -4,6 +4,30 @@
 
 ### Added
 
+- **`std/asn1`: ASN.1 values read from DER (X.690), the first piece of
+  a TLS client.** A certificate, a key and a signature are DER, and
+  nothing here could read one. `Der.parse(bytes)` answers the one value
+  the bytes hold, or an `Asn1Error` naming the offset; a value is a view
+  into those bytes, read one level at a time through `children`,
+  `sequence`, `set` and `explicit(n)`, with `raw` its own bytes for a
+  signature to be checked over. The typed readers - `boolean`, `null`,
+  `integer`, `integer_bytes`, `unsigned_integer`, `oid`, `bit_string`,
+  `bit_string_bits`, `octet_string`, `string` (UTF8String, PrintableString,
+  IA5String, NumericString, VisibleString, TeletexString as ISO-8859-1,
+  BMPString, UniversalString) and `time` (UTCTime as RFC 5280 reads it,
+  GeneralizedTime) - hold DER to its one encoding: an indefinite or
+  non-minimal length, a high-form tag that fits the low one, a redundant
+  INTEGER byte, a subidentifier's leading 0x80, set unused bits, a BOOLEAN
+  other than 0x00 or 0xFF, a primitive type written constructed and a
+  time not in its one form are each refused as a value. `Der.walk` reads a
+  whole tree on a stack of its own and refuses one nested past 64. Held
+  by `bench/std_asn1_exercise.sh`, plain and `--release`: every rule both
+  ways on hand-written values; every value of the machine's root
+  certificates (7,725 in 121 on this one) at the offset, depth, header,
+  length, form and tag `openssl asn1parse` reads; each certificate's
+  serial, signature algorithm, validity and name attributes as Python's
+  `cryptography` reads them; 4,000 certificates broken at random read
+  without a panic; and 18 broken copies of the module each caught.
 - **`std/otp`: HOTP (RFC 4226), TOTP (RFC 6238) and `otpauth://` key
   URIs.** A server that wanted a second factor had HMAC and no code.
   `HOTP.code(secret, counter, digits = 6, algorithm = SHA1)` and

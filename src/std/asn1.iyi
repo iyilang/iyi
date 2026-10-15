@@ -1,0 +1,663 @@
+# ASN.1 values read from DER (ITU-T X.690, the Distinguished Encoding
+# Rules), written in iyi: what a certificate, a key or a signature is
+# written in.
+#
+#     import std/asn1::{Der, DerValue, DerClass, Asn1Error}
+#
+#     cert = Der.parse(bytes).or_panic       # exactly one value, nothing after
+#     tbs = cert.children.or_panic[0]        # a SEQUENCE's elements
+#     tbs.raw                                # its own bytes, header included
+#     serial = tbs.children.or_panic[1].unsigned_integer.or_panic
+#     algorithm = seq[0].oid.or_panic        # "1.2.840.113549.1.1.11"
+#     not_after = validity[1].time.or_panic  # a Time, from UTCTime or GeneralizedTime
+#
+# Reading only. A TLS client reads certificates and verifies signatures;
+# it writes no DER, so there is no writer here to be wrong.
+#
+# A value is a view into the bytes it was read from: `content` and `raw`
+# copy, nothing else does, and `children` reads one level at a time. A
+# caller walks as deep as its schema asks and no deeper, so nothing here
+# recurses on what the input says; `Der.walk` is the one walk over a whole
+# tree, and it stops at `MAX_DEPTH`.
+#
+# DER is one encoding for each value, and a reader that takes a second one
+# lets two different byte strings carry one certificate. Each of these is
+# an `Asn1Error` naming the offset, never a value made up or a byte
+# skipped:
+#   * an indefinite length (0x80), which is BER's and not DER's;
+#   * a length written longer than it has to be: the long form for a
+#     length under 128, or a leading zero byte in it;
+#   * a tag number written in the high form when it fits the low one, or
+#     with a leading 0x80 byte;
+#   * a length past the bytes that are there, or bytes after the value;
+#   * a type DER makes primitive written constructed (an INTEGER, a BIT
+#     STRING, a string, a time), or a SEQUENCE or SET written primitive;
+#   * an INTEGER with a redundant leading 0x00 or 0xFF byte, or none at all;
+#   * a BOOLEAN that is not 0x00 or 0xFF, a NULL with content;
+#   * an OBJECT IDENTIFIER subidentifier with a leading 0x80 byte, or one
+#     left unterminated;
+#   * a BIT STRING whose unused bits are more than 7, or not zero;
+#   * a time that is not the one form DER allows (below), or not a date.
+# DER also sorts the elements of a SET OF by their encodings. That is not
+# checked: a certificate's names are SETs of one, and OpenSSL and Go take
+# an unsorted SET too.
+#
+# Times. A UTCTime is exactly `YYMMDDHHMMSSZ`, a two-digit year 50 to 99
+# being 1950 to 1999 and 00 to 49 being 2000 to 2049, as RFC 5280 section
+# 4.1.2.5.1 reads it. A GeneralizedTime is `YYYYMMDDHHMMSSZ` with, as
+# X.690 section 11.7 allows, a fraction of a second after a `.` that does
+# not end in a zero. Both end in `Z`: DER writes no other zone. RFC 5280
+# forbids the fraction in a certificate, which is std/x509's to refuse.
+#
+# Strings. UTF8String must be well-formed UTF-8. PrintableString holds
+# only its alphabet - letters, digits, space and `'()+,-./:=?` - and
+# IA5String only ASCII, NumericString digits and space, VisibleString the
+# printable ASCII. BMPString is UTF-16 big-endian without surrogates
+# (UCS-2) and UniversalString UTF-32 big-endian; both are answered as
+# UTF-8. TeletexString (T.61) is read as ISO-8859-1, the way Go and
+# OpenSSL read the certificates that still carry one.
+#
+# UTF-8 is checked here rather than through std/unicode, whose tables
+# every program reading a certificate would otherwise compile.
+#
+# Pure computation over the bytes given: no platform, no clock, no
+# randomness. std/time is imported for its `Time` alone.
+
+module std/asn1
+
+import std/time::{Time}
+
+# What `Der.parse`, `children` and the typed readers answer for bytes that
+# are not the DER they were asked for: a sentence, and the offset in the
+# bytes `Der.parse` was given where the trouble is.
+pub struct Asn1Error
+  getter message : String
+  getter offset : Int32
+
+  def initialize(message : String, @offset : Int32)
+    @message = "asn1: #{message} at offset #{@offset}"
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for Asn1Error
+  def message : String
+    @message
+  end
+end
+
+# The two bits at the top of an identifier byte.
+pub enum DerClass
+  Universal
+  Application
+  ContextSpecific
+  Private
+end
+
+# The universal tag numbers this module reads (X.680 section 8.6).
+pub struct DerTag
+  BOOLEAN           =  1
+  INTEGER           =  2
+  BIT_STRING        =  3
+  OCTET_STRING      =  4
+  NULL              =  5
+  OBJECT_IDENTIFIER =  6
+  ENUMERATED        = 10
+  UTF8_STRING       = 12
+  SEQUENCE          = 16
+  SET               = 17
+  NUMERIC_STRING    = 18
+  PRINTABLE_STRING  = 19
+  TELETEX_STRING    = 20
+  IA5_STRING        = 22
+  UTC_TIME          = 23
+  GENERALIZED_TIME  = 24
+  VISIBLE_STRING    = 26
+  UNIVERSAL_STRING  = 28
+  BMP_STRING        = 30
+end
+
+pub struct Der
+  # How deep `walk` goes before it refuses. A certificate is six or seven
+  # deep; a value nested further is someone's attempt at the stack.
+  MAX_DEPTH = 64
+
+  # The one value *bytes* hold, and nothing after it.
+  def self.parse(bytes : Array(UInt8)) : DerValue | Asn1Error
+    value = DerValue.read(bytes, 0, bytes.size)!
+    if value.end_offset != bytes.size
+      return Asn1Error.new("#{bytes.size - value.end_offset} bytes after the value", value.end_offset)
+    end
+    value
+  end
+
+  # Every value under *value*, *value* first, in the order they are
+  # written, each with its depth below it: the whole tree read and every
+  # length and tag checked. Primitive contents are not decoded; that is
+  # the typed readers' job, asked of the values a schema names.
+  def self.walk(value : DerValue, & : DerValue, Int32 -> Nil) : Nil | Asn1Error
+    # A stack of its own rather than the call stack, so a value nested a
+    # million deep is a refusal at depth 65 and not an overflow, and in
+    # the order written: each value's children pushed last first.
+    stack = [{value, 0}]
+    until stack.empty?
+      item = stack.pop
+      current = item[0]
+      depth = item[1]
+      return Asn1Error.new("a value nested deeper than #{MAX_DEPTH}", current.offset) if depth > MAX_DEPTH
+      yield current, depth
+      if current.constructed?
+        inner = current.children!
+        i = inner.size - 1
+        while i >= 0
+          stack << {inner[i], depth + 1}
+          i = i - 1
+        end
+      end
+    end
+    nil
+  end
+end
+
+# One value: its identifier, and where its header and content are in the
+# bytes it was read from.
+pub struct DerValue
+  getter tag_class : DerClass
+  getter tag : Int32
+  getter offset : Int32
+  getter header_size : Int32
+  getter content_size : Int32
+  @constructed : Bool
+  @data : Array(UInt8)
+
+  def initialize(@data : Array(UInt8), @tag_class : DerClass, @constructed : Bool, @tag : Int32,
+                 @offset : Int32, @header_size : Int32, @content_size : Int32)
+  end
+
+  def constructed? : Bool
+    @constructed
+  end
+
+  # The offset of the first content byte, and of the byte after the value.
+  def content_offset : Int32
+    @offset + @header_size
+  end
+
+  def end_offset : Int32
+    content_offset + @content_size
+  end
+
+  def universal?(tag : Int32) : Bool
+    @tag_class == DerClass::Universal && @tag == tag
+  end
+
+  def context?(tag : Int32) : Bool
+    @tag_class == DerClass::ContextSpecific && @tag == tag
+  end
+
+  # The content bytes, copied.
+  def content : Array(UInt8)
+    Array(UInt8).new(@content_size) { |i| @data[content_offset + i] }
+  end
+
+  # The whole value as it was written, header included: what a signature
+  # over a certificate's `tbsCertificate` is computed on.
+  def raw : Array(UInt8)
+    Array(UInt8).new(@header_size + @content_size) { |i| @data[@offset + i] }
+  end
+
+  # The values a constructed value holds, read one level down.
+  def children : Array(DerValue) | Asn1Error
+    return Asn1Error.new("#{describe} is primitive and holds no values", @offset) unless @constructed
+    found = [] of DerValue
+    at = content_offset
+    stop = end_offset
+    while at < stop
+      child = DerValue.read(@data, at, stop)!
+      found << child
+      at = child.end_offset
+    end
+    found
+  end
+
+  # A SEQUENCE's elements: `children`, after checking it is one.
+  def sequence : Array(DerValue) | Asn1Error
+    expect_constructed(DerTag::SEQUENCE, "a SEQUENCE")!
+    children
+  end
+
+  # A SET's elements.
+  def set : Array(DerValue) | Asn1Error
+    expect_constructed(DerTag::SET, "a SET")!
+    children
+  end
+
+  # The one value inside an explicit context tag `[n]`, as X.509 writes a
+  # certificate's version and extensions.
+  def explicit(tag : Int32) : DerValue | Asn1Error
+    unless context?(tag) && @constructed
+      return Asn1Error.new("expected an explicit [#{tag}], found #{describe}", @offset)
+    end
+    inner = children!
+    return Asn1Error.new("an explicit [#{tag}] holds #{inner.size} values, not one", @offset) unless inner.size == 1
+    inner[0]
+  end
+
+  def boolean : Bool | Asn1Error
+    expect_primitive(DerTag::BOOLEAN, "a BOOLEAN")!
+    return Asn1Error.new("a BOOLEAN of #{@content_size} bytes, where DER writes one", @offset) unless @content_size == 1
+    byte = @data[content_offset]
+    return true if byte == 0xFF_u8
+    return false if byte == 0x00_u8
+    Asn1Error.new("a BOOLEAN of 0x#{byte.to_s(16)}, where DER writes 0x00 or 0xFF", content_offset)
+  end
+
+  def null : Nil | Asn1Error
+    expect_primitive(DerTag::NULL, "a NULL")!
+    return Asn1Error.new("a NULL with #{@content_size} bytes of content", @offset) unless @content_size == 0
+    nil
+  end
+
+  # An INTEGER that fits an Int64.
+  def integer : Int64 | Asn1Error
+    bytes = integer_bytes!
+    return Asn1Error.new("an INTEGER of #{bytes.size} bytes, past an Int64", @offset) if bytes.size > 8
+    value = bytes[0] >= 0x80_u8 ? -1_i64 : 0_i64
+    bytes.each { |b| value = (value << 8) | b.to_i64 }
+    value
+  end
+
+  # An INTEGER's two's-complement bytes, as written: checked to be the
+  # fewest that hold it.
+  def integer_bytes : Array(UInt8) | Asn1Error
+    unless universal?(DerTag::INTEGER) || universal?(DerTag::ENUMERATED)
+      return Asn1Error.new("expected an INTEGER, found #{describe}", @offset)
+    end
+    return Asn1Error.new("an INTEGER written constructed", @offset) if @constructed
+    return Asn1Error.new("an INTEGER with no bytes", @offset) if @content_size == 0
+    if @content_size > 1
+      first = @data[content_offset]
+      second = @data[content_offset + 1]
+      if (first == 0x00_u8 && second < 0x80_u8) || (first == 0xFF_u8 && second >= 0x80_u8)
+        return Asn1Error.new("an INTEGER with a redundant leading byte", content_offset)
+      end
+    end
+    content
+  end
+
+  # A non-negative INTEGER's magnitude, big-endian, without the 0x00 a
+  # high bit makes DER write: an RSA modulus, a serial number. A negative
+  # one is refused.
+  def unsigned_integer : Array(UInt8) | Asn1Error
+    bytes = integer_bytes!
+    return Asn1Error.new("a negative INTEGER where a non-negative one is expected", @offset) if bytes[0] >= 0x80_u8
+    bytes.size > 1 && bytes[0] == 0_u8 ? bytes[1, bytes.size - 1] : bytes
+  end
+
+  # An OBJECT IDENTIFIER in dotted form, `"2.5.4.3"`. A subidentifier past
+  # an Int64 is refused: no algorithm or attribute is one.
+  def oid : String | Asn1Error
+    expect_primitive(DerTag::OBJECT_IDENTIFIER, "an OBJECT IDENTIFIER")!
+    return Asn1Error.new("an OBJECT IDENTIFIER with no bytes", @offset) if @content_size == 0
+    parts = [] of Int64
+    at = content_offset
+    stop = end_offset
+    while at < stop
+      start = at
+      return Asn1Error.new("a subidentifier with a leading 0x80 byte", at) if @data[at] == 0x80_u8
+      value = 0_i64
+      loop do
+        return Asn1Error.new("a subidentifier left unterminated", start) if at >= stop
+        return Asn1Error.new("a subidentifier past an Int64", start) if value > 72057594037927935_i64
+        byte = @data[at]
+        value = (value << 7) | (byte & 0x7F_u8).to_i64
+        at = at + 1
+        break if byte < 0x80_u8
+      end
+      parts << value
+    end
+    # The first subidentifier is the first two arcs: 40 * X + Y, where X
+    # is 0, 1 or 2 and only under 2 is Y below 40.
+    first = parts[0]
+    head = first < 40 ? "0.#{first}" : (first < 80 ? "1.#{first - 40}" : "2.#{first - 80}")
+    String.build do |io|
+      io << head
+      i = 1
+      while i < parts.size
+        io << '.' << parts[i]
+        i = i + 1
+      end
+    end
+  end
+
+  # A BIT STRING whose bits fill whole bytes: a key, a signature.
+  def bit_string : Array(UInt8) | Asn1Error
+    bits = bit_string_bits!
+    unless bits[1] == 0
+      return Asn1Error.new("a BIT STRING with #{bits[1]} unused bits where whole bytes are expected", @offset)
+    end
+    bits[0]
+  end
+
+  # A BIT STRING's bytes and how many bits at the end of the last are not
+  # part of it, which DER sets to zero: a flags field such as keyUsage.
+  def bit_string_bits : {Array(UInt8), Int32} | Asn1Error
+    expect_primitive(DerTag::BIT_STRING, "a BIT STRING")!
+    return Asn1Error.new("a BIT STRING with no bytes", @offset) if @content_size == 0
+    unused = @data[content_offset].to_i32
+    return Asn1Error.new("a BIT STRING with #{unused} unused bits, past 7", content_offset) if unused > 7
+    if @content_size == 1
+      return Asn1Error.new("an empty BIT STRING with #{unused} unused bits", content_offset) unless unused == 0
+      return {[] of UInt8, 0}
+    end
+    last = @data[end_offset - 1]
+    if unused > 0 && last & ((1_u8 << unused) - 1_u8) != 0_u8
+      return Asn1Error.new("a BIT STRING whose unused bits are not zero", end_offset - 1)
+    end
+    {Array(UInt8).new(@content_size - 1) { |i| @data[content_offset + 1 + i] }, unused}
+  end
+
+  def octet_string : Array(UInt8) | Asn1Error
+    expect_primitive(DerTag::OCTET_STRING, "an OCTET STRING")!
+    content
+  end
+
+  # Any of the string types X.509 names are written in, as UTF-8.
+  def string : String | Asn1Error
+    return Asn1Error.new("expected a string, found #{describe}", @offset) unless @tag_class == DerClass::Universal
+    return Asn1Error.new("#{describe} written constructed", @offset) if @constructed
+    case @tag
+    when DerTag::UTF8_STRING
+      return Asn1Error.new("a UTF8String that is not UTF-8", content_offset) unless DerText.utf8?(@data, content_offset, end_offset)
+      ascii_text
+    when DerTag::PRINTABLE_STRING
+      bad = DerText.first_outside(@data, content_offset, end_offset) { |b| DerText.printable?(b) }
+      return Asn1Error.new("a PrintableString holding 0x#{@data[bad].to_s(16)}", bad) if bad >= 0
+      ascii_text
+    when DerTag::IA5_STRING
+      bad = DerText.first_outside(@data, content_offset, end_offset) { |b| b < 0x80_u8 }
+      return Asn1Error.new("an IA5String holding 0x#{@data[bad].to_s(16)}", bad) if bad >= 0
+      ascii_text
+    when DerTag::NUMERIC_STRING
+      bad = DerText.first_outside(@data, content_offset, end_offset) { |b| b == 0x20_u8 || (b >= 0x30_u8 && b <= 0x39_u8) }
+      return Asn1Error.new("a NumericString holding 0x#{@data[bad].to_s(16)}", bad) if bad >= 0
+      ascii_text
+    when DerTag::VISIBLE_STRING
+      bad = DerText.first_outside(@data, content_offset, end_offset) { |b| b >= 0x20_u8 && b <= 0x7E_u8 }
+      return Asn1Error.new("a VisibleString holding 0x#{@data[bad].to_s(16)}", bad) if bad >= 0
+      ascii_text
+    when DerTag::TELETEX_STRING
+      String.build do |io|
+        i = content_offset
+        while i < end_offset
+          io << @data[i].to_i32.chr
+          i = i + 1
+        end
+      end
+    when DerTag::BMP_STRING
+      return Asn1Error.new("a BMPString of an odd #{@content_size} bytes", @offset) if @content_size.odd?
+      wide(2)
+    when DerTag::UNIVERSAL_STRING
+      return Asn1Error.new("a UniversalString of #{@content_size} bytes, not a multiple of 4", @offset) unless @content_size % 4 == 0
+      wide(4)
+    else
+      Asn1Error.new("expected a string, found #{describe}", @offset)
+    end
+  end
+
+  # A UTCTime or a GeneralizedTime, in the one form DER writes each.
+  def time : Time | Asn1Error
+    return Asn1Error.new("expected a time, found #{describe}", @offset) unless @tag_class == DerClass::Universal
+    return Asn1Error.new("#{describe} written constructed", @offset) if @constructed
+    case @tag
+    when DerTag::UTC_TIME
+      return Asn1Error.new("a UTCTime of #{@content_size} bytes, where DER writes YYMMDDHHMMSSZ", @offset) unless @content_size == 13
+      return Asn1Error.new("a UTCTime that does not end in Z", end_offset - 1) unless @data[end_offset - 1] == 'Z'.ord.to_u8
+      yy = digits(content_offset, 2)!
+      year = yy >= 50 ? 1900 + yy : 2000 + yy
+      clock(year, content_offset + 2, 0)
+    when DerTag::GENERALIZED_TIME
+      return Asn1Error.new("a GeneralizedTime of #{@content_size} bytes, shorter than YYYYMMDDHHMMSSZ", @offset) if @content_size < 15
+      return Asn1Error.new("a GeneralizedTime that does not end in Z", end_offset - 1) unless @data[end_offset - 1] == 'Z'.ord.to_u8
+      year = digits(content_offset, 4)!
+      nanos = 0
+      if @content_size > 15
+        dot = content_offset + 14
+        return Asn1Error.new("a GeneralizedTime with text between the seconds and the Z", dot) unless @data[dot] == '.'.ord.to_u8
+        count = end_offset - 1 - (dot + 1)
+        return Asn1Error.new("a GeneralizedTime with a . and no fraction", dot) if count == 0
+        return Asn1Error.new("a GeneralizedTime fraction past nanoseconds", dot) if count > 9
+        return Asn1Error.new("a GeneralizedTime fraction that ends in 0", end_offset - 2) if @data[end_offset - 2] == '0'.ord.to_u8
+        nanos = digits(dot + 1, count)!
+        (9 - count).times { nanos = nanos * 10 }
+      end
+      clock(year, content_offset + 4, nanos)
+    else
+      Asn1Error.new("expected a time, found #{describe}", @offset)
+    end
+  end
+
+  # The identifier, said the way an error names it: `INTEGER`,
+  # `[0] constructed`, `APPLICATION 3`.
+  def describe : String
+    name = case @tag_class
+           when DerClass::Universal       then DerValue.universal_name(@tag)
+           when DerClass::ContextSpecific then "[#{@tag}]"
+           when DerClass::Application     then "APPLICATION #{@tag}"
+           else                                "PRIVATE #{@tag}"
+           end
+    @constructed ? "#{name} constructed" : name
+  end
+
+  def self.universal_name(tag : Int32) : String
+    case tag
+    when DerTag::BOOLEAN           then "BOOLEAN"
+    when DerTag::INTEGER           then "INTEGER"
+    when DerTag::BIT_STRING        then "BIT STRING"
+    when DerTag::OCTET_STRING      then "OCTET STRING"
+    when DerTag::NULL              then "NULL"
+    when DerTag::OBJECT_IDENTIFIER then "OBJECT IDENTIFIER"
+    when DerTag::ENUMERATED        then "ENUMERATED"
+    when DerTag::UTF8_STRING       then "UTF8String"
+    when DerTag::SEQUENCE          then "SEQUENCE"
+    when DerTag::SET               then "SET"
+    when DerTag::NUMERIC_STRING    then "NumericString"
+    when DerTag::PRINTABLE_STRING  then "PrintableString"
+    when DerTag::TELETEX_STRING    then "TeletexString"
+    when DerTag::IA5_STRING        then "IA5String"
+    when DerTag::UTC_TIME          then "UTCTime"
+    when DerTag::GENERALIZED_TIME  then "GeneralizedTime"
+    when DerTag::VISIBLE_STRING    then "VisibleString"
+    when DerTag::UNIVERSAL_STRING  then "UniversalString"
+    when DerTag::BMP_STRING        then "BMPString"
+    else                                "UNIVERSAL #{tag}"
+    end
+  end
+
+  # One value's header at *at*, its content within *stop*.
+  def self.read(data : Array(UInt8), at : Int32, stop : Int32) : DerValue | Asn1Error
+    start = at
+    return Asn1Error.new("a value expected and the bytes ended", at) if at >= stop
+    first = data[at]
+    at = at + 1
+    tag_class = case first >> 6
+                when 0_u8 then DerClass::Universal
+                when 1_u8 then DerClass::Application
+                when 2_u8 then DerClass::ContextSpecific
+                else           DerClass::Private
+                end
+    constructed = first & 0x20_u8 != 0_u8
+    tag = (first & 0x1F_u8).to_i32
+    if tag == 0x1F
+      # The high form: base 128, most significant first, for a number the
+      # five low bits cannot hold.
+      return Asn1Error.new("a tag number with a leading 0x80 byte", at) if at < stop && data[at] == 0x80_u8
+      tag = 0
+      loop do
+        return Asn1Error.new("a tag number left unterminated", start) if at >= stop
+        return Asn1Error.new("a tag number past an Int32", start) if tag > 16777215
+        byte = data[at]
+        tag = (tag << 7) | (byte & 0x7F_u8).to_i32
+        at = at + 1
+        break if byte < 0x80_u8
+      end
+      return Asn1Error.new("a tag number of #{tag} written in the high form", start) if tag < 0x1F
+    end
+    return Asn1Error.new("a length expected and the bytes ended", at) if at >= stop
+    lead = data[at]
+    at = at + 1
+    size = 0
+    if lead < 0x80_u8
+      size = lead.to_i32
+    elsif lead == 0x80_u8
+      return Asn1Error.new("an indefinite length, which is BER's and not DER's", at - 1)
+    else
+      count = (lead & 0x7F_u8).to_i32
+      return Asn1Error.new("a length of #{count} bytes, past the 4 this reader takes", at - 1) if count > 4
+      return Asn1Error.new("a length cut short", at - 1) if at + count > stop
+      return Asn1Error.new("a length with a leading zero byte", at) if data[at] == 0_u8
+      long = 0_i64
+      count.times do
+        long = (long << 8) | data[at].to_i64
+        at = at + 1
+      end
+      return Asn1Error.new("a length of #{long} in the long form, which DER writes short", start) if long < 128
+      return Asn1Error.new("a length of #{long}, past what an Int32 holds", start) if long > 2147483647_i64
+      size = long.to_i32
+    end
+    if size > stop - at
+      return Asn1Error.new("a length of #{size} where #{stop - at} bytes are left", start)
+    end
+    value = DerValue.new(data, tag_class, constructed, tag, start, at - start, size)
+    if tag_class == DerClass::Universal
+      if (tag == DerTag::SEQUENCE || tag == DerTag::SET) && !constructed
+        return Asn1Error.new("a #{universal_name(tag)} written primitive", start)
+      end
+      if constructed && tag != DerTag::SEQUENCE && tag != DerTag::SET
+        return Asn1Error.new("a #{universal_name(tag)} written constructed, which DER writes primitive", start)
+      end
+    end
+    value
+  end
+
+  private def expect_primitive(tag : Int32, what : String) : Nil | Asn1Error
+    return Asn1Error.new("expected #{what}, found #{describe}", @offset) unless universal?(tag)
+    return Asn1Error.new("#{what} written constructed", @offset) if @constructed
+    nil
+  end
+
+  private def expect_constructed(tag : Int32, what : String) : Nil | Asn1Error
+    return Asn1Error.new("expected #{what}, found #{describe}", @offset) unless universal?(tag) && @constructed
+    nil
+  end
+
+  private def ascii_text : String
+    String.new(@content_size) { |p| p.copy_from(@data.to_unsafe + content_offset.to_i64, @content_size) }
+  end
+
+  # BMPString (*width* 2) or UniversalString (4), big-endian, to UTF-8.
+  private def wide(width : Int32) : String | Asn1Error
+    built = String.build do |io|
+      i = content_offset
+      while i < end_offset
+        code = 0
+        width.times { |k| code = (code << 8) | @data[i + k].to_i32 }
+        if (code >= 0xD800 && code <= 0xDFFF) || code > 0x10FFFF
+          return Asn1Error.new("a #{width == 2 ? "BMPString" : "UniversalString"} holding U+#{code.to_s(16)}, which is no character", i)
+        end
+        io << code.chr
+        i = i + width
+      end
+    end
+    built
+  end
+
+  # *count* ASCII digits at *at*, as a number.
+  private def digits(at : Int32, count : Int32) : Int32 | Asn1Error
+    value = 0
+    count.times do |k|
+      byte = @data[at + k]
+      return Asn1Error.new("a time with 0x#{byte.to_s(16)} where a digit goes", at + k) unless byte >= 0x30_u8 && byte <= 0x39_u8
+      value = value * 10 + (byte - 0x30_u8).to_i32
+    end
+    value
+  end
+
+  # MMDDHHMMSS at *at*, checked to be a moment that is there.
+  private def clock(year : Int32, at : Int32, nanos : Int32) : Time | Asn1Error
+    month = digits(at, 2)!
+    day = digits(at + 2, 2)!
+    hour = digits(at + 4, 2)!
+    minute = digits(at + 6, 2)!
+    second = digits(at + 8, 2)!
+    return Asn1Error.new("a time in month #{month}", at) unless month >= 1 && month <= 12
+    days = Time.days_in_month(year, month)
+    return Asn1Error.new("a time on day #{day} of a month of #{days}", at + 2) unless day >= 1 && day <= days
+    return Asn1Error.new("a time at hour #{hour}", at + 4) unless hour <= 23
+    return Asn1Error.new("a time at minute #{minute}", at + 6) unless minute <= 59
+    return Asn1Error.new("a time at second #{second}", at + 8) unless second <= 59
+    Time.utc(year, month, day, hour, minute, second, nanosecond: nanos)
+  end
+end
+
+# The byte rules of the string types.
+struct DerText
+  def self.printable?(b : UInt8) : Bool
+    return true if (b >= 0x41_u8 && b <= 0x5A_u8) || (b >= 0x61_u8 && b <= 0x7A_u8) || (b >= 0x30_u8 && b <= 0x39_u8)
+    b == 0x20_u8 || b == 0x27_u8 || b == 0x28_u8 || b == 0x29_u8 || b == 0x2B_u8 || b == 0x2C_u8 ||
+      b == 0x2D_u8 || b == 0x2E_u8 || b == 0x2F_u8 || b == 0x3A_u8 || b == 0x3D_u8 || b == 0x3F_u8
+  end
+
+  # The first offset in [*from*, *stop*) whose byte the block refuses, or -1.
+  def self.first_outside(data : Array(UInt8), from : Int32, stop : Int32, & : UInt8 -> Bool) : Int32
+    i = from
+    while i < stop
+      return i unless yield data[i]
+      i = i + 1
+    end
+    -1
+  end
+
+  # Well-formed UTF-8 (RFC 3629): no overlong form, no surrogate, nothing
+  # past U+10FFFF, no sequence cut short.
+  def self.utf8?(data : Array(UInt8), from : Int32, stop : Int32) : Bool
+    i = from
+    while i < stop
+      b = data[i]
+      if b < 0x80_u8
+        i = i + 1
+        next
+      end
+      need, low, high = if b >= 0xC2_u8 && b <= 0xDF_u8
+                          {1, 0x80_u8, 0xBF_u8}
+                        elsif b == 0xE0_u8
+                          {2, 0xA0_u8, 0xBF_u8}
+                        elsif (b >= 0xE1_u8 && b <= 0xEC_u8) || b == 0xEE_u8 || b == 0xEF_u8
+                          {2, 0x80_u8, 0xBF_u8}
+                        elsif b == 0xED_u8
+                          {2, 0x80_u8, 0x9F_u8}
+                        elsif b == 0xF0_u8
+                          {3, 0x90_u8, 0xBF_u8}
+                        elsif b >= 0xF1_u8 && b <= 0xF3_u8
+                          {3, 0x80_u8, 0xBF_u8}
+                        elsif b == 0xF4_u8
+                          {3, 0x80_u8, 0x8F_u8}
+                        else
+                          return false
+                        end
+      return false if i + need >= stop
+      second = data[i + 1]
+      return false unless second >= low && second <= high
+      k = 2
+      while k <= need
+        return false unless data[i + k] >= 0x80_u8 && data[i + k] <= 0xBF_u8
+        k = k + 1
+      end
+      i = i + need + 1
+    end
+    true
+  end
+end

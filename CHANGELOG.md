@@ -4,6 +4,30 @@
 
 ### Added
 
+- **`std/x509`: certificates read and chains checked (RFC 5280), the
+  fourth piece of a TLS client.** With DER, RSA and ECDSA in place there
+  was still nothing that could say whether a server's certificates lead
+  to a trusted root. `Certificate.parse` reads a certificate through
+  std/asn1 and its key through std/rsa or std/ecdsa, with
+  basicConstraints, keyUsage, extKeyUsage, subjectAltName and
+  nameConstraints, refusing an extension written twice and a signature
+  algorithm that differs inside and out; `Certificate.from_pem` reads a
+  bundle without letting a bad byte reach std/base64's panic.
+  `X509.verify(leaf, intermediates, roots, host, now)` builds the chain
+  issuer by issuer, trying every candidate under a name before giving
+  up, and holds each issuer to its time, cA, keyCertSign,
+  pathLenConstraint, extKeyUsage and name constraints (DNS and IP; any
+  other kind refuses the chain) and to its signature; the leaf to its
+  time, serverAuth, not being a CA, and the host, matched against
+  subjectAltName alone with a wildcard for exactly one leftmost label. An
+  unknown critical extension refuses its certificate, and so does SHA-1.
+  Each refusal says why. Held by `bench/std_x509_exercise.sh`, plain and
+  `--release`: 44 chains made with Python's cryptography, each verdict
+  the one Python's own verifier gives and each refusal for its reason;
+  200 fresh chains over random keys, depths and 20 kinds of defect
+  against that verifier; every certificate in the CA bundle (121 here)
+  read as Python reads it; and 20 broken copies of the module each
+  caught.
 - **`std/ecdsa`: ECDSA signatures checked on P-256, P-384 and P-521, the
   third piece of a TLS client.** Of the roots a system trusts, the ones
   that are not RSA are ECDSA, and most of those are P-384, so a client

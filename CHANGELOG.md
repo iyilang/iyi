@@ -1189,7 +1189,12 @@
     spells `b/c` as `b\c`;
   - tar ran Git's GNU tar on Windows, which the Python oracle then
     reached as System32's bsdtar; GNU tar's fixtures are not written
-    there.
+    there;
+  - tar's Python wrote its `.expect` files with `\r\n`, and its proof of
+    the drive-path rule is caught there by the slip through the
+    exercise's own `C:` directory, which comes first;
+  - file_utils asked Windows to refuse a FIFO, which Git's shell
+    emulates as a plain file.
 
 - **A program builds from artifacts whose code reads a class variable
   through a subclassed owner, or asks a value its class.** Both go through

@@ -361,7 +361,11 @@ landing="$R/dir/sub/dir"
 [ "$PSEP" = ';' ] && landing="$R/dir/sub\\dir"
 refuses "cp_r into itself" "Cannot copy $R/dir to $landing: $landing is inside the tree being copied" cp_r "$R/dir" "$R/dir/sub"
 refuses "cp_r under a missing directory" "Cannot copy $R/dir to $R/no/where: the directory $R/no does not exist" cp_r "$R/dir" "$R/no/where"
-if command -v mkfifo >/dev/null 2>&1 && mkfifo "$R/dir/pipe" 2>/dev/null; then
+# Git's shell on Windows answers `mkfifo` with an MSYS emulation, an
+# ordinary file to a native program: Windows has no FIFO to refuse.
+if [ "$PSEP" = ';' ]; then
+  echo "  cp_r of a FIFO: Windows has none, so unmeasured"
+elif command -v mkfifo >/dev/null 2>&1 && mkfifo "$R/dir/pipe" 2>/dev/null; then
   refuses "cp_r of a FIFO" "Cannot copy $R/dir/pipe: it is a FIFO, not a file, a directory or a link" cp_r "$R/dir" "$R/copied"
   rm -f "$R/dir/pipe"
 else

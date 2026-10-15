@@ -123,7 +123,9 @@ index = []
 def expect(name):
     path = os.path.join(d, name)
     stem = name[:-7] if name.endswith(".tar.gz") else name[:-4]
-    with open(os.path.join(d, stem + ".expect"), "w", encoding="utf-8") as f:
+    # `newline=""`: Windows' text mode writes `\r\n`, which the exercise
+    # then reads as part of each entry's last field.
+    with open(os.path.join(d, stem + ".expect"), "w", encoding="utf-8", newline="") as f:
         f.write(lines_of(path))
     index.append(name)
 
@@ -242,7 +244,7 @@ if gnutar:
         subprocess.run([gnutar, "--format=" + fmt] + flags + ["-C", tree, "-cf", os.path.join(d, name)] + members, check=True)
         expect(name)
 
-with open(os.path.join(d, "index.txt"), "w") as f:
+with open(os.path.join(d, "index.txt"), "w", newline="") as f:
     f.write("\n".join(index) + "\n")
 PY
 then
@@ -536,7 +538,15 @@ prove_broken "a non-ASCII name written without pax" "dir/çay ğ: a pax header o
 prove_broken "a name climbing out with .. extracted" "tar slip ../evil.txt" \
   '    return "the name climbs out with .." if name.split('"'"'/'"'"').includes?("..")
 ' ''
-prove_broken "a Windows drive path named only for its separator" "Windows: \"C:\\\\evil\" is absolute" \
+# On Windows the exercise's own directory is a drive path, so the slip
+# through it is the first check the broken copy fails; elsewhere it is the
+# drive path the exercise writes for the purpose.
+if [ "$PSEP" = ';' ]; then
+  drive_check="tar slip an absolute name"
+else
+  drive_check="Windows: \"C:\\\\evil\" is absolute"
+fi
+prove_broken "a Windows drive path named only for its separator" "$drive_check" \
   'path.starts_with?("\\")
     return false if path.bytesize < 3' 'path.starts_with?("\\")
     return false'

@@ -4,6 +4,42 @@
 
 ### Added
 
+- **std/xml evaluates XPath 1.0, all of it, and answers what the
+  recommendation says where libxml2 does not.** A document could be walked
+  and searched by name, but there was no query language; the other
+  library's `xpath` methods are libxml2's.
+  - `Node#xpath`, `#xpath_nodes`, `#xpath_node`, `#xpath_string`,
+    `#xpath_float` and `#xpath_bool`, with namespaces and variables, and
+    `XPath.parse` to compile once. The thirteen axes, every node test,
+    predicates, filter expressions, unions, section 3.4's comparisons and
+    the 27 core functions, `id()` by `xml:id` and the DTD's ID attributes
+    (which `Document#id_attributes` now keeps) and `lang()` included.
+  - Attribute and namespace nodes are `XPathNode`s, as the tree keeps
+    them as values. A run of text and CDATA is one text node, as section
+    5.7 says.
+  - A malformed expression is refused with what was expected and the
+    column. A function given the wrong type, a variable not given or a
+    prefix bound nowhere is refused when the expression runs, the prefix
+    even when no node reaches its step.
+  - Where libxml2 departs from the recommendation, this follows the
+    recommendation:
+    - numbers are the shortest round trip, written out in full
+      (`0.3333333333333333`, not libxml2's 15 digits or `-1e-07`);
+    - `1e0` is refused;
+    - an attribute's following axis holds its element's children;
+    - `xmlns=""` leaves no namespace node;
+    - an empty CDATA section is no text node;
+    - `id(' a')` finds `a`.
+
+  Held by `bench/std_xml_exercise.sh`:
+  - section 2.5's paths and section 4's examples worked out by hand;
+  - 29 refusals;
+  - 10,000 seeded expressions over 100 documents, compared node by node
+    with libxml2 through ctypes on Linux and darwin, which must reject a
+    node-set out of order, a number one ulp off and a wrong string;
+  - 4,000 number conversions checked against the recommendation's text;
+  - 17 broken copies, each caught at its named check.
+
 - **`BigFloat`: binary floating point at any precision, every result
   rounded once to the nearest, ties to even.** std/big had integers,
   decimals and fractions, but no float wider than a double; the other

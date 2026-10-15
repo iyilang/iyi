@@ -27,7 +27,7 @@
 
 module bench/std_xml_exercise
 
-import std/xml::{Document, Node, NodeType, Parser, Attribute, Namespace}
+import std/xml::{Document, Node, NodeType, Parser, Attribute, Namespace, XPath, XPathNode, XPathKind, XPathValue}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
@@ -570,5 +570,692 @@ while i < docs.size
   i = i + 1
 end
 puts "  #{docs.size} documents serialized for the differential"
+
+# ---------------------------------------------------------------------------
+# XPath
+# ---------------------------------------------------------------------------
+
+# A value as one line: a node-set as its nodes, a number by `string()`.
+def xp_show(value : XPathValue) : String
+  case value
+  when Array(XPathNode)
+    value.map { |n| xp_node(n) }.join(" ")
+  when Float64
+    XPath.to_s(value)
+  when Bool
+    value ? "true" : "false"
+  else
+    value
+  end
+end
+
+def xp_node(n : XPathNode) : String
+  case n.kind
+  when XPathKind::Root      then "/"
+  when XPathKind::Element   then n.name
+  when XPathKind::Attribute then "@#{n.name}=#{n.text}"
+  when XPathKind::Namespace then "ns:#{n.name}=#{n.text}"
+  when XPathKind::Text      then n.text.inspect
+  when XPathKind::Comment   then "<!--#{n.text}-->"
+  else                           "<?#{n.name}?>"
+  end
+end
+
+def xp(node : Node, expression : String, expected : String, namespaces : Hash(String, String)? = nil) : Nil
+  assert_equal(expected, xp_show(node.xpath(expression, namespaces)), "xpath #{expression}")
+end
+
+puts "\n== xpath"
+book = Std::Xml.parse(
+  "<doc>" +
+  "<chapter><title>One</title><para type=\"warning\">p1</para><para>p2</para></chapter>" +
+  "<chapter><title>Two</title><section><para>p3</para></section><para type=\"warning\">p4</para><para lang=\"en\">p5</para></chapter>" +
+  "<chapter><title>Introduction</title><para>p6</para></chapter>" +
+  "</doc>")
+# Section 2.5's abbreviated syntax, each answer worked out from the text.
+xp(book, "count(//para)", "6")
+xp(book, "//para[2]", "para para")
+xp(book, "string(//para[2])", "p2")
+xp(book, "(//para)[2]", "para")
+xp(book, "string((//para)[last()])", "p6")
+xp(book, "/doc/chapter[2]/para[last()]/text()", "\"p5\"")
+xp(book, "/doc/chapter[title='Introduction']/para", "para")
+xp(book, "string(/doc/chapter[title='Introduction']/para)", "p6")
+xp(book, "//para[@type='warning'][2]", "")
+xp(book, "string((//para[@type='warning'])[2])", "p4")
+xp(book, "count(/doc/chapter[title])", "3")
+xp(book, "count(//*)", "14")
+xp(book, "//section/ancestor::*", "doc chapter")
+xp(book, "name(//section/ancestor::*[1])", "chapter")
+xp(book, "string(//section/ancestor::*[1]/title)", "Two")
+xp(book, "name(//title[.='Two']/following-sibling::*[1])", "section")
+xp(book, "string(//para[.='p5']/preceding-sibling::*[1])", "p4")
+xp(book, "string(//para[.='p5']/preceding-sibling::*[last()])", "Two")
+xp(book, "//para[.='p3']/preceding::*", "chapter title para para title")
+xp(book, "string(//para[.='p3']/preceding::*[1])", "Two")
+xp(book, "string(//para[.='p3']/preceding::*[last()])", "Onep1p2")
+xp(book, "//para[.='p3']/following::*", "para para chapter title para")
+xp(book, "count(//para[.='p3']/ancestor-or-self::*)", "4")
+xp(book, "//title | //section", "title title section title")
+xp(book, "count(//title | //title | //section/..)", "4")
+xp(book, "/doc/chapter[position() = last() - 1]/title/text()", "\"Two\"")
+xp(book, "//chapter[para[@lang]]/title/text()", "\"Two\"")
+xp(book, "//*[self::title or self::section][2]", "section")
+xp(book, "//para[not(@type)][. != 'p2']/text()", "\"p3\" \"p5\" \"p6\"")
+xp(book, "/", "/")
+xp(book, "/*", "doc")
+xp(book, "/..", "")
+xp(book, "//para/@type", "@type=warning @type=warning")
+xp(book, "//@*/..", "para para para")
+xp(book, "//chapter[2]/descendant::para[2]", "para")
+xp(book, "string(//chapter[2]/descendant::para[2])", "p4")
+xp(book, "sum(//chapter[1]//para/@type/../preceding-sibling::*/following::text()[1]) = 0", "false")
+# Comparisons (section 3.4): a node-set is compared by its nodes, any one
+# of them making it true; a boolean takes the other side's boolean.
+xp(book, "//para = 'p3'", "true")
+xp(book, "//para != 'p3'", "true")
+xp(book, "//nothing = //nothing", "false")
+xp(book, "//nothing != 'x'", "false")
+xp(book, "//title = //para", "false")
+xp(book, "//para = true()", "true")
+xp(book, "//nothing = false()", "true")
+xp(book, "count(//para) > 5", "true")
+# A node-set on the right: the number is the left operand still.
+fives = Std::Xml.parse("<r><n>5</n></r>")
+xp(fives, "3 < //n", "true")
+xp(fives, "//n < 3", "false")
+xp(fives, "'3' < //n", "true")
+xp(fives, "6 > //n", "true")
+xp(fives, "//n > 6", "false")
+xp(book, "'2' < '10'", "true")
+xp(book, "'a' < 'b'", "false")
+xp(book, "true() = 'x'", "true")
+xp(book, "0 = false()", "true")
+xp(book, "'' = false()", "true")
+xp(book, "1 < 2 < 3", "true")
+xp(book, "3 > 2 > 1", "false")
+xp(book, "0 div 0 = 0 div 0", "false")
+xp(book, "0 div 0 != 0 div 0", "true")
+xp(book, "2 = 2.0", "true")
+xp(book, "- - 2", "2")
+xp(book, "-2 - -2", "0")
+# Section 3.7's lexical rules: `*` and `div` by what comes before them.
+div = Std::Xml.parse("<div><div>3</div><mod>2</mod></div>").root
+xp(div, "div div div", "1")
+xp(div, "div mod mod", "1")
+xp(div, "mod div div", "0.6666666666666666")
+xp(div, "count(*)*2", "4")
+xp(div, "child::div * child::mod", "6")
+xp(div, "div * mod", "6")
+xp(div, "string(div)", "3")
+# The functions of section 4, the recommendation's own examples first.
+xp(book, "substring('12345', 2, 3)", "234")
+xp(book, "substring('12345', 2)", "2345")
+xp(book, "substring('12345', 1.5, 2.6)", "234")
+xp(book, "substring('12345', 0, 3)", "12")
+xp(book, "substring('12345', 0 div 0, 3)", "")
+xp(book, "substring('12345', 1, 0 div 0)", "")
+xp(book, "substring('12345', -42, 1 div 0)", "12345")
+xp(book, "substring('12345', -1 div 0, 1 div 0)", "")
+xp(book, "substring('çağdaş', 2, 3)", "ağd")
+xp(book, "substring-before('1999/04/01', '/')", "1999")
+xp(book, "substring-after('1999/04/01', '/')", "04/01")
+xp(book, "substring-after('1999/04/01', '19')", "99/04/01")
+xp(book, "substring-before('abc', 'x')", "")
+xp(book, "substring-after('abc', '')", "abc")
+xp(book, "translate('bar', 'abc', 'ABC')", "BAr")
+xp(book, "translate('--aaa--', 'abc-', 'ABC')", "AAA")
+xp(book, "translate('şeker', 'şş', 'sx')", "seker")
+xp(book, "normalize-space('  a \t b \n c  ')", "a b c")
+xp(book, "string-length('çağ日本')", "5")
+xp(book, "string-length(//title[1])", "3")
+xp(book, "concat('a', 1, true(), //title)", "a1trueOne")
+xp(book, "starts-with('abc', '')", "true")
+xp(book, "contains('abc', 'bd')", "false")
+xp(book, "boolean(//nothing)", "false")
+xp(book, "boolean('false')", "true")
+xp(book, "boolean(0 div 0)", "false")
+xp(book, "not(-0)", "true")
+xp(book, "name(/*)", "doc")
+xp(book, "name(//nothing)", "")
+xp(book, "local-name()", "")
+xp(book, "count(//para[position() mod 2 = 1])", "4")
+xp(book, "sum(//nothing)", "0")
+# Numbers (sections 3.5 and 4.4): the fewest digits that read back, with
+# no exponent; round toward positive infinity, keeping a zero's sign.
+xp(book, "1 div 3", "0.3333333333333333")
+xp(book, "0.1 + 0.2", "0.30000000000000004")
+xp(book, "1000000000 * 1000000000 * 1000", "1000000000000000000000")
+xp(book, "0.000001", "0.000001")
+xp(book, "-1 div 1024", "-0.0009765625")
+xp(book, "1 div 0", "Infinity")
+xp(book, "-1 div 0", "-Infinity")
+xp(book, "0 div 0", "NaN")
+xp(book, "-0", "0")
+xp(book, "2.50", "2.5")
+xp(book, ".5 + 5.", "5.5")
+xp(book, "number(' 12.5 ')", "12.5")
+xp(book, "number('1e3')", "NaN")
+xp(book, "number('+1')", "NaN")
+xp(book, "number('.5')", "0.5")
+xp(book, "number('5.')", "5")
+xp(book, "number('-')", "NaN")
+xp(book, "number('')", "NaN")
+xp(book, "number('- 1')", "NaN")
+xp(book, "number(true())", "1")
+xp(book, "round(2.5)", "3")
+xp(book, "round(-2.5)", "-2")
+xp(book, "1 div round(-0.4)", "-Infinity")
+xp(book, "1 div round(-0.5)", "-Infinity")
+xp(book, "round(0.49999999999999994)", "0")
+xp(book, "round(1 div 0)", "Infinity")
+xp(book, "floor(-1.5)", "-2")
+xp(book, "ceiling(-1.5)", "-1")
+xp(book, "1 div ceiling(-0.5)", "-Infinity")
+xp(book, "5 mod 2", "1")
+xp(book, "5 mod -2", "1")
+xp(book, "-5 mod 2", "-1")
+xp(book, "-5 mod -2", "-1")
+xp(book, "5.5 mod 2", "1.5")
+xp(book, "1 mod 0", "NaN")
+xp(book, "1 div (-4 mod 2)", "-Infinity")
+xp(book, "7 mod (1 div 0)", "7")
+puts "  section 2.5's paths, section 3.4's comparisons and section 4's functions answer as the recommendation works them"
+
+# Namespaces: a prefix is the uri it stands for, and an unprefixed name is
+# in no namespace, whatever default is declared.
+spaced = Std::Xml.parse("<r xmlns=\"urn:d\" xmlns:p=\"urn:p\"><p:a p:k=\"1\" k=\"2\"/><b xmlns=\"\"><c/></b></r>")
+d_ns = {"d" => "urn:d"}
+xp(spaced, "count(//*)", "4")
+xp(spaced, "//r", "")
+xp(spaced, "//d:r", "r", d_ns)
+xp(spaced, "//p:a", "p:a")
+xp(spaced, "//p:a", "p:a", {"p" => "urn:p"})
+xp(spaced, "//x:a", "p:a", {"x" => "urn:p"})
+xp(spaced, "//p:a", "", {"p" => "urn:other"})
+xp(spaced, "//p:a/@p:k", "@p:k=1")
+xp(spaced, "//p:a/@k", "@k=2")
+xp(spaced, "//b/c", "c")
+xp(spaced, "namespace-uri(//c)", "")
+xp(spaced, "namespace-uri(/*)", "urn:d")
+xp(spaced, "name(//p:a/@p:k)", "p:k")
+xp(spaced, "local-name(//p:a)", "a")
+xp(spaced, "count(//p:*)", "1")
+xp(spaced, "count(//@p:*)", "1")
+xp(spaced, "count(//@*)", "2")
+xp(spaced, "/*/namespace::*", "ns:=urn:d ns:p=urn:p ns:xml=http://www.w3.org/XML/1998/namespace")
+xp(spaced, "//c/namespace::*", "ns:p=urn:p ns:xml=http://www.w3.org/XML/1998/namespace")
+xp(spaced, "string(/*/namespace::p)", "urn:p")
+xp(spaced, "count(//namespace::xml)", "4")
+xp(spaced, "name(//c/namespace::*[1])", "p")
+xp(spaced, "//namespace::p/..", "r p:a b c")
+puts "  namespaces: prefixes by uri, given or declared; no default for an unprefixed name; namespace nodes"
+
+# An attribute comes before its element's children: they follow it.
+attrs = Std::Xml.parse("<r><a x=\"1\" y=\"2\"><b/>t</a><c/></r>")
+xp(attrs, "//@x/following::node()", "b \"t\" c")
+xp(attrs, "//@x/preceding::node()", "")
+xp(attrs, "//@x/parent::*", "a")
+xp(attrs, "//@x/ancestor::*", "r a")
+xp(attrs, "//@x/following-sibling::node()", "")
+xp(attrs, "//@y/preceding-sibling::node()", "")
+xp(attrs, "//@x/self::node()", "@x=1")
+xp(attrs, "//@x/child::node()", "")
+xp(attrs, "(//@y | //b | //@x | //a)", "a @x=1 @y=2 b")
+xp(attrs, "//b/preceding::node()", "")
+xp(attrs, "//c/preceding::node()", "a b \"t\"")
+puts "  attribute nodes: after their element, before its children"
+
+# Text: a run of text and CDATA is one text node, an empty one none, and
+# text beside the root element no node at all.
+texts = Std::Xml.parse("<!--top--><r>a<![CDATA[<b>]]>c<!--m--><![CDATA[]]><e/>tail&amp;more</r>")
+xp(texts, "/r/text()", "\"a<b>c\" \"tail&more\"")
+xp(texts, "count(/r/node())", "4")
+xp(texts, "/node()", "<!--top--> r")
+xp(texts, "string(/r/text()[1])", "a<b>c")
+xp(texts, "/r/text()[1]/following-sibling::node()", "<!--m--> e \"tail&more\"")
+xp(texts, "/r/e/preceding-sibling::node()[1]", "<!--m-->")
+xp(texts, "string(/r)", "a<b>ctail&more")
+xp(texts, "/r/comment()/following::text()", "\"tail&more\"")
+xp(texts, "count(//text()[. = ''])", "0")
+built = Node.new_element("r")
+built.add_child(Node.new_text("x"))
+built.add_child(Node.new_text(""))
+built.add_child(Node.new_cdata("y"))
+xp(built, "text()", "\"xy\"")
+xp(built, "/", "r")
+# A document built with text beside its root element: no node there.
+framed = Document.new
+framed.add_child(Node.new_text("\n"))
+framed.add_child(Node.new_element("r"))
+xp(framed, "/node()", "r")
+xp(framed, "count(//text())", "0")
+puts "  text nodes: a run of text and CDATA is one, an empty run none"
+
+# Processing instructions and comments.
+pis = Std::Xml.parse("<?a one?><r><?b two?><!--c--></r>")
+xp(pis, "//processing-instruction()", "<?a?> <?b?>")
+xp(pis, "//processing-instruction('b')", "<?b?>")
+xp(pis, "string(//processing-instruction('a'))", "one")
+xp(pis, "name((//processing-instruction())[2])", "b")
+xp(pis, "name(//processing-instruction()[2])", "")
+xp(pis, "//comment()", "<!--c-->")
+puts "  processing instructions and comments"
+
+# id(): an xml:id, or an attribute the DTD declares of type ID.
+ids = Std::Xml.parse("<!DOCTYPE r [<!ATTLIST e key ID #IMPLIED>]><r><e key=\"k1\"/><e key=\"k2\"/><f xml:id=\"x1\"/><g key=\"k3\"/><e key=\"k1\"/></r>")
+xp(ids, "count(id('k1 k2'))", "2")
+xp(ids, "id('  k2  ')/@key", "@key=k2")
+xp(ids, "id('k3')", "")
+xp(ids, "name(id('x1'))", "f")
+xp(ids, "count(id(//e/@key))", "2")
+xp(ids, "count(id('k1')/preceding-sibling::*)", "0")
+xp(ids, "id('k2 x1 k2 nothing')", "e f")
+xp(Std::Xml.parse("<r><f xml:id=\"x1\"/></r>"), "name(id('x1'))", "f")
+puts "  id(): xml:id and the DTD's ID attributes, the first element to carry a value"
+
+# lang(): the nearest xml:lang, matched in any case, a subtag at a hyphen.
+langs = Std::Xml.parse("<r xml:lang=\"en-US\"><a/><b xml:lang=\"de\"><c/></b></r>")
+xp(langs, "count(//*[lang('en')])", "2")
+xp(langs, "count(//*[lang('EN-us')])", "2")
+xp(langs, "count(//*[lang('e')])", "0")
+xp(langs, "name((//*[lang('DE')])[last()])", "c")
+xp(langs, "//*[lang('DE')][last()]", "b c")
+xp(langs, "count(//@*[lang('en')])", "1")
+puts "  lang(): the nearest xml:lang, any case, up to a hyphen"
+
+# Variables, and an expression compiled once.
+vars = Hash(String, XPathValue).new
+vars["n"] = 2.0
+vars["s"] = "p3"
+vars["t"] = true
+vars["set"] = book.xpath_nodes("//title")
+assert_equal("p2", book.xpath_string("string(//para[$n])", nil, vars), "xpath $n")
+assert_equal("true", book.xpath_bool("//para = $s", nil, vars) ? "true" : "false", "xpath $s")
+assert_equal("Two", book.xpath_string("string($set[2])", nil, vars), "xpath $set filtered")
+assert_equal("3", XPath.to_s(book.xpath_float("count($set | //title)", nil, vars)), "xpath $set union")
+assert_equal("true", book.xpath_bool("$t and $set", nil, vars) ? "true" : "false", "xpath $t")
+compiled = XPath.parse("count(child::*)")
+assert_equal("compiled count(child::*)", "compiled #{compiled.source}", "XPath#source")
+assert_equal("3", XPath.to_s(compiled.number(book.root)), "a compiled expression at the root element")
+assert_equal("3", XPath.to_s(compiled.number(book.xpath_nodes("//chapter")[0])), "and at the first chapter")
+first_title = book.xpath_node("//title")
+assert_true(!first_title.nil? && first_title.text == "One", "xpath_node is the first in document order")
+assert_true(book.xpath_node("//nothing").nil?, "xpath_node of an empty node-set is nil")
+type_attr = book.xpath_nodes("//@type")[0]
+assert_equal("2", XPath.to_s(XPath.parse("count(../following-sibling::*) + count(..)").number(type_attr)), "an attribute node as the context node")
+assert_true(type_attr == book.xpath_nodes("//para[1]/@type")[0], "the same attribute node is ==")
+type_attribute = type_attr.attribute
+assert_true(!type_attribute.nil? && type_attribute.value == "warning", "XPathNode#attribute")
+assert_equal("type=\"warning\"", type_attr.to_s, "an attribute node's to_s")
+puts "  variables, compiled expressions, attribute nodes as context nodes"
+
+# Malformed expressions are refused with what was expected and where.
+bad = [
+  {"", "expected an expression, found the end at column 1"},
+  {"//", "expected a step after '//', found the end at column 3"},
+  {"a/", "expected a step after '/', found the end at column 3"},
+  {"a[1", "expected ']', found the end at column 4"},
+  {"(1", "expected ')', found the end at column 3"},
+  {"f(1)", "unknown function f() at column 1"},
+  {"count()", "count() takes 1 argument, not 0 at column 1"},
+  {"concat('a')", "concat() takes at least 2 arguments, not 1 at column 1"},
+  {"substring('a')", "substring() takes 2 or 3 arguments, not 1 at column 1"},
+  {"bogus::a", "unknown axis 'bogus' at column 1"},
+  {"1 !", "expected '!=', found '!' at column 3"},
+  {"'open", "unterminated string literal at column 1"},
+  {"1e3", "expected an operator, found 'e3' at column 2"},
+  {"a b", "expected an operator, found 'b' at column 3"},
+  {"$", "expected a variable name after '$' at column 1"},
+  {"child::foo()", "expected a node test, found 'foo' at column 8"},
+  {"a | ", "expected an expression, found the end at column 5"},
+  {"1 +", "expected an expression, found the end at column 4"},
+  {"a:", "unexpected ':' outside a name at column 2"},
+  {"#", "unexpected '#' at column 1"},
+  {"processing-instruction(1)", "expected ')' to close processing-instruction(, found '1' at column 24"},
+]
+bad.each do |pair|
+  assert_true(XPath.parse?(pair[0]).nil?, "XPath.parse? refuses #{pair[0].inspect}")
+  said = assert_panics("XPath #{pair[0].inspect}: #{pair[1]}") { XPath.parse(pair[0]) }
+  puts "  #{said}"
+end
+# What only a value can show is refused when the expression runs.
+assert_panics("count() takes a node-set, not a number") { book.xpath("count(1)") }
+assert_panics("'|' takes a node-set, not a string") { book.xpath("//a | 'x'") }
+assert_panics("a predicate takes a node-set, not a number") { book.xpath("(1)[1]") }
+assert_panics("'/' takes a node-set, not a string") { book.xpath("'a'/b") }
+assert_panics("no value was given for the variable $v") { book.xpath("$v + 1") }
+assert_panics("the prefix 'z' is bound to no namespace") { book.xpath("//z:a") }
+assert_panics("is a number, not a node-set") { book.xpath_nodes("1 + 1") }
+puts "  refusals: malformed expressions with the column, and the wrong types when they run"
+
+# Random documents and expressions for libxml2 to answer as well:
+# `bench/std_xml_exercise.sh` parses each `oracle xpdoc:` with it and
+# evaluates each `oracle xp:` there, comparing the type and the value - a
+# node-set node by node, each node by its place in document order. What
+# libxml2 answers otherwise is kept out, the recommendation followed here
+# and its answer held by a named check above: a number written as a
+# string by anything but an integer or a short fraction, an empty CDATA
+# section, a blank before `id()`'s first word, and the following axis of
+# an attribute. So is the order of an element's namespace nodes, which
+# section 5.4 leaves to the implementation.
+class XPathCases
+  @state = 0x9E3779B97F4A7C15_u64
+  # Set while a step may run from an attribute node: after an attribute
+  # step, in its predicates, after an arbitrary node-set.
+  @attribute_context = false
+
+  def next : UInt64
+    x = @state
+    x = x ^ x.unsafe_shr(12_u64)
+    x = x ^ x.unsafe_shl(25_u64)
+    x = x ^ x.unsafe_shr(27_u64)
+    @state = x
+    x &* 0x2545F4914F6CDD1D_u64
+  end
+
+  def below(n : Int32) : Int32
+    (self.next % n.to_u64).to_i64.to_i32
+  end
+
+  def pick(choices : Array(String)) : String
+    choices[below(choices.size)]
+  end
+
+  # -- documents
+
+  def document : String
+    parts = [] of String
+    parts << "<!DOCTYPE r [<!ATTLIST a id ID #IMPLIED><!ATTLIST p:d key ID #IMPLIED>]>" if below(3) == 0
+    parts << "<!--lead-->" if below(4) == 0
+    parts << "<?t1 top?>" if below(4) == 0
+    lang = below(2) == 0 ? " xml:lang=\"#{pick(["en", "en-GB", "de"])}\"" : ""
+    parts << "<r xmlns:p=\"urn:p\" xmlns:q=\"urn:q\"#{lang}>"
+    content(parts, 1)
+    parts << "</r>"
+    parts << "<!--trail-->" if below(4) == 0
+    parts.join("")
+  end
+
+  private def content(parts : Array(String), depth : Int32) : Nil
+    count = below(depth > 3 ? 3 : 6)
+    count.times do
+      k = below(10)
+      if k < 4 && depth < 5
+        element(parts, depth)
+      elsif k < 7
+        parts << pick(["x", "7", " 2.5 ", "foo bar", "en", "-3", "10", "a&amp;b", "çay", "日本", " ", "1.5", "k1", "&lt;k2&gt;"])
+      elsif k == 7
+        # Never empty: libxml2 makes an empty section an empty text node,
+        # which section 5.7 says no text node is.
+        parts << "<![CDATA[#{pick(["<b>", "7", "x y", "]]"])}]]>"
+      elsif k == 8
+        parts << "<!--#{pick(["c", "7", " note "])}-->"
+      else
+        parts << "<?#{pick(["t1", "t2"])} #{pick(["x", "1", "y z"])}?>"
+      end
+    end
+  end
+
+  private def element(parts : Array(String), depth : Int32) : Nil
+    name = pick(["a", "b", "c", "d", "p:d", "q:e", "p:a", "a", "b"])
+    tag = ["<", name]
+    tag << " xmlns=\"urn:d\"" if below(8) == 0
+    tag << " xmlns:p=\"urn:p2\"" if below(12) == 0
+    chosen = [] of String
+    below(4).times do
+      attr = pick(["x", "y", "id", "key", "p:z", "q:x", "xml:id", "xml:lang"])
+      next if chosen.includes?(attr)
+      chosen << attr
+      value = if attr == "id" || attr == "key" || attr == "xml:id"
+                pick(["k1", "k2", "k3", "x1"])
+              elsif attr == "xml:lang"
+                pick(["en", "en-GB", "EN", "de", "fr-CA"])
+              else
+                pick(["1", "2", "10", "2.5", "-3", "en", "foo", "foo bar", " 7 ", "k1", "x", "a&amp;b", ""])
+              end
+      tag << " #{attr}=\"#{value}\""
+    end
+    if below(4) == 0
+      tag << "/>"
+      parts << tag.join("")
+      return
+    end
+    tag << ">"
+    parts << tag.join("")
+    content(parts, depth + 1)
+    parts << "</#{name}>"
+  end
+
+  # -- expressions, by the type they evaluate to
+
+  def expression : String
+    case below(10)
+    when 0, 1, 2, 3 then node_set(3)
+    when 4          then namespace_set
+    when 5, 6       then number(3, false)
+    when 7, 8       then string(3)
+    else                 boolean(3)
+    end
+  end
+
+  # `/` alone is parenthesised: section 3.7 reads the name after a bare
+  # `/` - `/ and x` - as a step, `/and`. And `id()` is given no blank
+  # before its first word: libxml2's then finds nothing.
+  def node_set(depth : Int32) : String
+    k = depth > 0 ? below(12) : below(6)
+    case k
+    when 0    then relative(depth)
+    when 1, 2 then "//" + relative(depth)
+    when 3    then "/" + relative(depth)
+    when 4    then "//@#{pick(["*", "x", "y", "id", "key", "p:z", "q:x", "q:*", "xml:lang", "xml:id"])}"
+    when 5    then "(/)"
+    when 6, 7 then "//" + relative(depth)
+    when 8    then "#{node_set(depth - 1)} | #{node_set(depth - 1)}"
+    when 9
+      filtered = node_set(depth - 1)
+      saved = @attribute_context
+      @attribute_context = true
+      filter = predicate(depth - 1)
+      @attribute_context = saved
+      "(#{filtered})[#{filter}]"
+    when 10 then "id(#{below(2) == 0 ? "'#{pick(["k1", "k2 x1", "k3  k1 ", "nothing"])}'" : node_set(depth - 1)})"
+    else
+      saved = @attribute_context
+      @attribute_context = true
+      path = "(#{node_set(depth - 1)})/#{relative(depth - 1)}"
+      @attribute_context = saved
+      path
+    end
+  end
+
+  # Namespace nodes, where only which ones they are can show.
+  private def namespace_set : String
+    path = below(2) == 0 ? "//*" : node_set(1)
+    "#{path}/namespace::#{pick(["*", "p", "q", "xml", "*"])}"
+  end
+
+  private def relative(depth : Int32) : String
+    saved = @attribute_context
+    steps = [step(depth)]
+    (below(3)).times { steps << (below(3) == 0 ? "//" : "/") + step(depth) }
+    @attribute_context = saved
+    steps.join("")
+  end
+
+  private def step(depth : Int32) : String
+    axis = pick(["", "", "", "@", ".", "..", "child::", "descendant::", "descendant-or-self::", "parent::",
+                 "ancestor::", "ancestor-or-self::", "following-sibling::", "preceding-sibling::",
+                 "following::", "preceding::", "attribute::", "self::"])
+    axis = "preceding::" if axis == "following::" && @attribute_context
+    return axis if axis == "." || axis == ".."
+    attribute = axis == "@" || axis == "attribute::"
+    @attribute_context = true if attribute
+    test = if attribute
+             pick(["*", "x", "y", "id", "key", "p:z", "q:x", "q:*", "xml:lang", "xml:id", "node()", "text()"])
+           else
+             pick(["*", "a", "b", "c", "d", "r", "p:d", "q:e", "p:a", "p:*", "d:a", "node()", "node()", "text()",
+                   "comment()", "processing-instruction()", "processing-instruction('t1')", "*"])
+           end
+    predicates = [] of String
+    count = below(5)
+    count = count < 3 ? 0 : (depth > 0 ? count - 2 : 1)
+    count.times { predicates << "[#{predicate(depth - 1)}]" }
+    axis + test + predicates.join("")
+  end
+
+  private def predicate(depth : Int32) : String
+    case below(9)
+    when 0    then (below(3) + 1).to_s
+    when 1    then "last()"
+    when 2    then "position() #{pick(["<", ">", "=", "!=", "<=", ">="])} #{below(3) + 1}"
+    when 3    then pick(["position() mod 2 = 0", "last() - 1", "position() = last()"])
+    when 4, 5 then boolean(depth)
+    when 6    then node_set(depth)
+    when 7    then number(depth, false)
+    else           "@#{pick(["x", "y", "id", "p:z"])}"
+    end
+  end
+
+  # *safe* keeps out what a string would show differently in libxml2:
+  # `div`, and literals with more digits than a fifteen-digit print keeps.
+  def number(depth : Int32, safe : Bool) : String
+    k = depth > 0 ? below(12) : below(4)
+    case k
+    when 0 then pick(["0", "1", "2", "3", "7", "10", "2.5", ".5", "7.", "-1", "0.25"])
+    when 1 then "count(#{node_set(depth - 1)})"
+    when 2 then "number(#{below(2) == 0 ? node_set(depth - 1) : string(depth - 1)})"
+    when 3 then "string-length(#{string(depth - 1)})"
+    when 4 then "sum(#{node_set(depth - 1)})"
+    when 5, 6, 7
+      op = safe ? pick(["+", "-", "*", "mod"]) : pick(["+", "-", "*", "mod", "div"])
+      "(#{number(depth - 1, safe)} #{op} #{number(depth - 1, safe)})"
+    when 8  then "-#{number(depth - 1, safe)}"
+    when 9  then "#{pick(["floor", "ceiling", "round"])}(#{number(depth - 1, safe)})"
+    when 10 then pick(["position()", "last()"])
+    else         "number(#{boolean(depth - 1)})"
+    end
+  end
+
+  def string(depth : Int32) : String
+    k = depth > 0 ? below(10) : below(2)
+    case k
+    when 0 then "'#{pick(["x", "foo bar", " 7 ", "", "en", "çay", "a&b", "2.5"])}'"
+    when 1 then "string(#{node_set(depth - 1)})"
+    when 2 then "#{pick(["name", "local-name", "namespace-uri"])}(#{node_set(depth - 1)})"
+    when 3
+      third = below(2) == 0 ? ", #{string(depth - 1)}" : ""
+      "concat(#{string(depth - 1)}, #{string(depth - 1)}#{third})"
+    when 4
+      length = below(2) == 0 ? ", #{number(depth - 1, true)}" : ""
+      "substring(#{string(depth - 1)}, #{number(depth - 1, true)}#{length})"
+    when 5 then "#{pick(["substring-before", "substring-after"])}(#{string(depth - 1)}, '#{pick(["a", " ", "o", "", "x"])}')"
+    when 6 then "translate(#{string(depth - 1)}, '#{pick(["abc", "o ", "x", "ça"])}', '#{pick(["ABC", "-", "", "Ç"])}')"
+    when 7 then "normalize-space(#{string(depth - 1)})"
+    when 8 then "string(#{number(depth - 1, true)})"
+    else        "string(#{boolean(depth - 1)})"
+    end
+  end
+
+  def boolean(depth : Int32) : String
+    k = depth > 0 ? below(8) : below(2)
+    case k
+    when 0, 1 then "#{operand(depth - 1)} #{pick(["=", "!=", "<", "<=", ">", ">="])} #{operand(depth - 1)}"
+    when 2    then "(#{boolean(depth - 1)} #{pick(["and", "or"])} #{boolean(depth - 1)})"
+    when 3    then "not(#{boolean(depth - 1)})"
+    when 4    then "boolean(#{operand(depth - 1)})"
+    when 5    then "#{pick(["contains", "starts-with"])}(#{string(depth - 1)}, #{string(depth - 1)})"
+    when 6    then "lang('#{pick(["en", "EN", "de", "fr", "en-gb"])}')"
+    else           pick(["true()", "false()"])
+    end
+  end
+
+  private def operand(depth : Int32) : String
+    case below(5)
+    when 0, 1 then node_set(depth)
+    when 2    then number(depth, false)
+    when 3    then string(depth)
+    else           depth > 0 ? boolean(depth) : pick(["true()", "false()", "namespace::q = 'urn:q'"])
+    end
+  end
+
+  # -- number conversions
+
+  # A double of any magnitude: random bits, or a short decimal.
+  def double : Float64
+    case below(4)
+    when 0
+      bits = self.next & 0x7FEFFFFFFFFFFFFF_u64
+      bits = bits | 0x8000000000000000_u64 if below(2) == 0
+      IyiFloatText.from_bits(bits)
+    when 1 then (below(2000001) - 1000000).to_f64 / 64.0
+    when 2 then (below(1000) + 1).to_f64 * (10.0 ** (below(44) - 22))
+    else        (self.next.unsafe_shr(11_u64)).to_f64 / (2.0 ** below(80))
+    end
+  end
+
+  # A string number() might be given: digits, points, signs, spaces.
+  def numeral : String
+    if below(3) == 0
+      parts = [] of String
+      (below(25) + 1).times { parts << pick(["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]) }
+      digits = parts.join("")
+      point = below(digits.bytesize + 1)
+      return "#{below(2) == 0 ? "-" : ""}#{digits[0, point]}.#{digits[point, digits.bytesize - point]}"
+    end
+    alphabet = ["0", "1", "5", "9", ".", "-", " ", "+", "e", "00", "7"]
+    parts = [] of String
+    below(7).times { parts << pick(alphabet) }
+    parts.join("")
+  end
+end
+
+# Each node's place in document order, as libxml2's tree is walked.
+def xp_places(doc : Document) : Hash(UInt64, Int32)
+  places = Hash(UInt64, Int32).new
+  doc.xpath_nodes("/descendant-or-self::node()").each_with_index { |n, i| places[n.node.object_id] = i }
+  places
+end
+
+def xp_identity(n : XPathNode, places : Hash(UInt64, Int32)) : String
+  place = places[n.node.object_id]
+  case n.kind
+  when XPathKind::Attribute then "#{place}@#{n.index}"
+  when XPathKind::Namespace then "#{place}~#{n.name}"
+  else                           place.to_s
+  end
+end
+
+puts "\n== xpath oracle cases"
+cases = XPathCases.new
+spaces = {"p" => "urn:p", "q" => "urn:q", "d" => "urn:d", "p2" => "urn:p2"}
+total = 0
+100.times do |doc_number|
+  text = cases.document
+  doc = Std::Xml.parse(text)
+  places = xp_places(doc)
+  puts "oracle xpdoc: #{doc_number}\t#{text}"
+  100.times do
+    expression = cases.expression
+    value = doc.xpath(expression, spaces)
+    shown = case value
+            when Array(XPathNode) then "nodes\t" + value.map { |n| xp_identity(n, places) }.join(" ")
+            when Float64          then "num\t#{value}"
+            when Bool             then "bool\t#{value}"
+            else                       "str\t#{value}"
+            end
+    puts "oracle xp: #{doc_number}\t#{expression}\t#{shown}"
+    total = total + 1
+  end
+end
+2000.times do
+  x = cases.double
+  puts "oracle xpnum: #{x}\t#{XPath.number_string(x)}"
+end
+2000.times do
+  s = cases.numeral
+  puts "oracle xpread: #{s}\t#{XPath.string_number(s)}"
+end
+puts "  #{total} expressions over 100 documents, 2000 numbers written and 2000 strings read, for the oracle"
 
 puts "\nALL CHECKS PASSED"

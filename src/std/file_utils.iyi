@@ -134,7 +134,11 @@ pub struct FileUtils
   def self.cp_r(src : String | Path, dst : String | Path) : Nil
     s = src.to_s
     d = dst.to_s
-    info = File.info?(s, follow_symlinks: false)
+    # `link/` is asked of the directory it names. POSIX's lstat does that
+    # for a trailing separator itself; Windows answers the link, and the
+    # copy was a link where the directory was asked for.
+    named = s.ends_with?("/") || s.ends_with?(File::SEPARATOR_STRING)
+    info = File.info?(s, follow_symlinks: named)
     raise "Cannot copy #{s} to #{d}: #{s} does not exist" unless info
     target = Dir.exists?(d) ? File.join(d, File.basename(s)) : d
     if info.directory?

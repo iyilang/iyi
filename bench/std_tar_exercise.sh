@@ -46,11 +46,18 @@ status=0
 export IYI_PATH="$REPO/src${PSEP}$REPO/samples/iyi"
 
 # GNU tar, when `tar` is GNU's: bsdtar and busybox read and write other
-# dialects and are not what this checks against.
+# dialects and are not what this checks against. Not on Windows: Git's
+# shell finds its GNU tar, Python's subprocess finds System32's bsdtar,
+# and GNU tar reads a `C:` path as a remote host's.
 GNUTAR=""
-if command -v tar >/dev/null 2>&1 && tar --version 2>/dev/null | grep -q "GNU tar"; then
-  GNUTAR=tar
-fi
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) ;;
+  *)
+    if command -v tar >/dev/null 2>&1 && tar --version 2>/dev/null | grep -q "GNU tar"; then
+      GNUTAR=tar
+    fi
+    ;;
+esac
 
 # The archives Python (and GNU tar) write, each with the `.expect` Python
 # reads from it: per entry its name, kind, size, mode, mtime (a pax

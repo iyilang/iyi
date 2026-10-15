@@ -201,7 +201,10 @@ def walk(top):
             rel = os.path.relpath(path, top)
             st = os.lstat(path)
             if stat.S_ISLNK(st.st_mode):
-                seen[rel] = ("link", os.readlink(path))
+                # Windows' os.symlink writes a target's / as \, so Python's
+                # copy holds b\c where cp_r kept the source's b/c: the same
+                # place, compared as one.
+                seen[rel] = ("link", os.readlink(path).replace(os.sep, "/"))
             elif stat.S_ISDIR(st.st_mode):
                 seen[rel] = ("dir", oct(stat.S_IMODE(st.st_mode)))
             else:

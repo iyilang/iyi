@@ -1144,9 +1144,16 @@
   - zip expected the flags a writing ZipFile listed rather than those it
     wrote;
   - user's Python oracle overflowed on `nobody`'s gid, and user asked
-    Windows for sections it is not asked;
+    Windows for sections it is not asked; under root in one group, its
+    check of the first group indexed an empty list, and its proof that
+    group_ids reads `/etc/group` had nothing to see;
   - term's and file_utils' proofs patched an arm Windows does not
-    compile, or asked root for a refusal root never meets.
+    compile, or asked root for a refusal root never meets;
+  - file_utils compared a link's target as spelled, and Windows' Python
+    spells `b/c` as `b\c`;
+  - tar ran Git's GNU tar on Windows, which the Python oracle then
+    reached as System32's bsdtar; GNU tar's fixtures are not written
+    there.
 
 - **A program builds from artifacts whose code reads a class variable
   through a subclassed owner, or asks a value its class.** Both go through

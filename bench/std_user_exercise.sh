@@ -590,9 +590,15 @@ else
         UserFiles.each_line(UserFiles::GROUP)" "wanted = number.to_s
         found = nil
         UserFiles.each_line(UserFiles::PASSWD)"
-  # group_ids reading the passwd file for the groups.
-  prove_broken "group_ids reading /etc/passwd" "current's group_ids is os.getgrouplist" python \
-    'group_ids(Group.parse(UserFiles.read(UserFiles::GROUP) || ""))' 'group_ids(Group.parse(UserFiles.read(UserFiles::PASSWD) || ""))'
+  # group_ids reading the passwd file for the groups. A user in its primary
+  # group alone - root in a container - has the same answer either way, so
+  # there is nothing for the check to see.
+  if [ "$(id -G 2>/dev/null | wc -w | tr -d ' ')" = 1 ]; then
+    echo "  this user is in one group, so the proof that group_ids reads /etc/group is unmeasured"
+  else
+    prove_broken "group_ids reading /etc/passwd" "current's group_ids is os.getgrouplist" python \
+      'group_ids(Group.parse(UserFiles.read(UserFiles::GROUP) || ""))' 'group_ids(Group.parse(UserFiles.read(UserFiles::PASSWD) || ""))'
+  fi
   # The effective lookup skipped: every current user the fallback.
   prove_broken "current never looked up" "current is find_by_id of its own id" plain \
     'return found if found' ''

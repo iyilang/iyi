@@ -257,7 +257,9 @@ end
     assert_str fields(me), fields(User.find_by_name(me.name)), "and find_by_name of its own name"
   end
   ids = me.group_ids
-  assert_str me.group_id, ids[0], "group_ids starts with the primary group"
+  # Asked of the list rather than its first element: a root with no other
+  # group, left without its primary one, panicked on the index instead.
+  assert_str me.group_id, ids.first? || "(none)", "group_ids starts with the primary group"
   ids.each_with_index do |id, index|
     assert_true ids.index(id) == index, "group_ids holds #{id} once"
   end

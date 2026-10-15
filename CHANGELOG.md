@@ -4,6 +4,31 @@
 
 ### Added
 
+- **`std/number_format` writes numbers as people read them, exactly:
+  `1234567.format` is "1,234,567", `1_234_567.humanize` "1.23M",
+  `1536.humanize_bytes` "1.5KiB".** There was no way to group digits or
+  scale a quantity to a prefix.
+  - `Number#format(separator, delimiter, decimal_places, group:,
+    only_significant:)` rounds the double's own value half to even
+    (`1.005` to two places is "1.00"), writes a float's shortest digits in
+    full without places, and gives a zero no sign.
+  - `Number#humanize(precision, separator, delimiter, significant:,
+    unit_separator:)` scales to SI prefixes from q to Q, by significant
+    digits or by places, and rounds into the next prefix: 999,999 is "1M".
+  - `Int#humanize_bytes(precision, separator, significant:,
+    unit_separator:, format:)` divides by 1024 into IEC's KiB ... EiB or
+    JEDEC's KB ... EB. It writes `KiB`, where the other library writes
+    `kiB`, and a trimmed fraction drops its point: "1k", where that
+    library writes "1.0k".
+
+  Held by `bench/std_number_format_exercise.sh`: named examples, five
+  refusals, 25,902 cases checked against Python's exact `decimal` - random
+  doubles, singles, integers and byte counts, plus the ties, carries and
+  powers of ten where rounding decides - and identical from the
+  `--release` build, and eight broken copies, six caught at named checks
+  and two by the oracle. The oracle found one bug before it shipped:
+  1023.5 KiB at four digits printed "1MiB" for 0.9995 MiB.
+
 - **std/signal handles, ignores and resets signals, and knows USR1, USR2,
   WINCH, PIPE, ALRM and CHLD.** It could only wait for HUP, INT, QUIT and
   TERM: no handler that keeps running, no way to ignore a signal or give

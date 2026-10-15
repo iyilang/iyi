@@ -493,12 +493,14 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-# prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
-# copy of the module with <old> replaced, at the check that names <phrase>.
+# prove_broken <label> <phrase> <old> <new> [<other phrase>]: the exercise
+# must fail on a copy of the module with <old> replaced, at the check that
+# names <phrase> - or <other phrase>, where the platform decides which of
+# two checks a break meets first.
 mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
-  local label="$1" phrase="$2"
+  local label="$1" phrase="$2" other="${5:-}"
   if [ -z "$PY" ]; then
     echo "  no python3 on this machine, so the $label proof is unmeasured"
     return
@@ -525,11 +527,13 @@ PY
   elif timeout -k 5 120 "$WORK/mut-$mutations" >"$WORK/mut.out" 2>&1; then
     echo "  the exercise PASSED on $label"
     status=1
-  elif grep -qF -- "$phrase" "$WORK/mut.out"; then
+  elif grep -qF -- "$phrase" "$WORK/mut.out" || { [ -n "$other" ] && grep -qF -- "$other" "$WORK/mut.out"; }; then
     echo "  $label is caught"
   else
     echo "  $label failed, but not where it should have:"
-    grep -v '^iyi: panic: WebSocket: ' "$WORK/mut.out" | tail -3 | sed 's/^/    /'
+    # The panic that ended it, not the run's last lines: on darwin those
+    # are the frames printed after the message.
+    grep -v '^iyi: panic: WebSocket: ' "$WORK/mut.out" | grep -m3 -E '^iyi: panic|ASSERTION' | sed 's/^/    /'
     status=1
   fi
 }
@@ -576,12 +580,15 @@ prove_broken "a close echoed without its code" "is echoed with its code" \
 prove_broken "a close reason that need not be UTF-8" "a close reason that is not UTF-8" \
   '      return fail(1007, "a close reason that is not UTF-8") unless WebSocket.utf8_scan(reason.to_unsafe, reason.bytesize, 0) == 0' ''
 # The runtime refuses a second task's write to a socket another task's
-# write is parked on, so without the wait one of them panics.
+# write is parked on, so without the wait one of them panics - where the
+# first write parks before the second comes. Where the socket's buffers
+# take the second write while the first waits (darwin's), the second
+# frame lands inside the first, which the 16 MiB check finds.
 prove_broken "two tasks writing at once" "two fibers writing one fd" \
   '    while @writing
       sleep(1)!
     end
-' ''
+' '' "16 MiB written whole while another task sends"
 
 echo
 if [ "$status" -eq 0 ]; then

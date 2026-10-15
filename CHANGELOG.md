@@ -1194,7 +1194,11 @@
     the drive-path rule is caught there by the slip through the
     exercise's own `C:` directory, which comes first;
   - file_utils asked Windows to refuse a FIFO, which Git's shell
-    emulates as a plain file.
+    emulates as a plain file;
+  - websocket's proof that two writers wait for each other expected the
+    runtime's refusal of a second parked writer, where darwin's socket
+    buffers take the second write and split the first frame instead,
+    which the 16 MiB check names.
 
 - **A program builds from artifacts whose code reads a class variable
   through a subclassed owner, or asks a value its class.** Both go through

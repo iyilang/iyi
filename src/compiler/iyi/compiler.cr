@@ -2931,7 +2931,13 @@ module Iyi
         # assignment and has no `location` of its own, and it is exactly the
         # shape a consumer cannot infer.
         location = variable.location || variable.initializer.try(&.node.location)
-        names << name if location.try(&.original_filename) == filename
+        next unless location.try(&.original_filename) == filename
+        # A subclass's copy of an ancestor's variable carries the ancestor's
+        # location. It is declared where the subclass is: a base class's
+        # artifact reopening `class ::Lib::Sub::Sub` for it declared `Sub`
+        # with no superclass, and `lib/sub`'s own artifact was refused.
+        next if type.ancestors.any? { |ancestor| ancestor.responds_to?(:class_vars?) && ancestor.class_vars?.try &.has_key?(name) }
+        names << name
       end
       return [] of IyiMod::ClassVarDecl unless written
       collect_iyi_class_vars(type).select { |class_var| written.includes?(class_var.name) }

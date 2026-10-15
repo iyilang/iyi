@@ -5358,6 +5358,55 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A class variable on a base class is copied onto each subclass. The base
+  # module's artifact declared the copy on `Sub`, a type of another module,
+  # and that reopening declared `Sub` under `Reference` before `lib/sub`'s
+  # own artifact was read.
+  it "leaves a subclass in another module to that module's artifact" do
+    with_tempdir("iyimod_inherited_class_var") do
+      modules = {"lib/base.iyi" => <<-BASE, "lib/sub.iyi" => <<-SUB}
+        module lib/base
+
+        pub abstract class Base
+          @@count = 0
+
+          def self.bump : Int32
+            @@count += 1
+          end
+
+          def initialize
+          end
+
+          def count : Int32
+            @@count
+          end
+        end
+        BASE
+        module lib/sub
+
+        import lib/base::*
+
+        pub class Sub < Base
+        end
+        SUB
+      main = <<-IYI
+        module main
+
+        import lib/base::*
+        import lib/sub::*
+
+        Base.bump
+        Sub.bump
+        Sub.bump
+        puts Sub.new.count
+        puts Base.bump
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "2\n2\n"
+      from_artifact.should eq from_source
+    end
+  end
+
   # `@items = [] of String` in a type body runs in `initialize`, the way the
   # typed `@items : Array(String) = [] of String` does, and travels the same
   # way. Read as a statement it refused every consumer: "has code inside a

@@ -20,6 +20,11 @@
   written with only the narrower symbol behind them. Their bodies travel
   now, as a widened public def's already did. Held by
   `spec/compiler/iyimod_spec.cr` (#123).
+- **A class variable on a base class leaves a subclass in another module
+  alone.** The base module's artifact declared the subclass's copy of
+  the variable by reopening `class ::Lib::Sub::Sub`, which declared it
+  under `Reference`, and the subclass's own artifact was refused with a
+  superclass mismatch. Held by `spec/compiler/iyimod_spec.cr` (#125).
 
 ## 0.17.0 — 2026-10-14
 

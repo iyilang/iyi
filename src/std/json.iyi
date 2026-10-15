@@ -2618,15 +2618,19 @@ pub struct JSON
     key.to_s
   end
 
-  def self.write_value(val : T, b : Builder) : Nil forall T : ToJSON
-    val.to_json(b)
-  end
-
-  # An enum member, as the other library writes one: its name underscored
-  # (`Color::DarkRed` is `"dark_red"`), and a `@[Flags]` enum as the array
-  # of its members' names. A value no member has is written as its number.
-  def self.write_value(val : Enum, b : Builder) : Nil
-    write_enum(val, typeof(val), b)
+  # A `ToJSON` value writes itself. An enum member is written as the other
+  # library writes one: its name underscored (`Color::DarkRed` is
+  # `"dark_red"`), and a `@[Flags]` enum as the array of its members'
+  # names; a value no member has is written as its number. Told apart here
+  # and not by an overload restricted to `Enum`, which a program built
+  # from this module's artifact read as a class and could not pass an enum
+  # to.
+  def self.write_value(val : T, b : Builder) : Nil forall T
+    {% if T < ::Enum %}
+      write_enum(val, T, b)
+    {% else %}
+      val.to_json(b)
+    {% end %}
   end
 
   # The enum's own type as a free variable, which a bound cannot give: an

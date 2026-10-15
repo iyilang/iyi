@@ -75,10 +75,6 @@ class Reference
 end
 
 class Class
-  @[Primitive(:class_crystal_instance_type_id)]
-  def crystal_instance_type_id : Int32
-  end
-
   # The same type, whatever static type the class value has: `Sub ==
   # Sub.as(Base.class)` is true. A class value is its metaclass's id.
   def ==(other : Class) : Bool

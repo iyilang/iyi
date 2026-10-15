@@ -650,6 +650,16 @@ xp(book, "//@*/..", "para para para")
 xp(book, "//chapter[2]/descendant::para[2]", "para")
 xp(book, "string(//chapter[2]/descendant::para[2])", "p4")
 xp(book, "sum(//chapter[1]//para/@type/../preceding-sibling::*/following::text()[1]) = 0", "false")
+# `.` is self::node() and `//` is /descendant-or-self::node()/ (section
+# 2.5), so `.//.` at the document is the document and all under it.
+# libxml2 2.9, darwin's, leaves the document out when a path of `.` steps
+# alone is the whole expression; inside parentheses it answers this.
+dots = Std::Xml.parse("<r><n>5</n></r>")
+xp(dots, ".//.", "/ r n \"5\"")
+xp(dots, "/.//.", "/ r n \"5\"")
+xp(dots, "././/./.", "/ r n \"5\"")
+xp(dots, "(.//.)", "/ r n \"5\"")
+xp(dots.root, ".//.", "r n \"5\"")
 # Comparisons (section 3.4): a node-set is compared by its nodes, any one
 # of them making it true; a boolean takes the other side's boolean.
 xp(book, "//para = 'p3'", "true")
@@ -936,9 +946,10 @@ puts "  refusals: malformed expressions with the column, and the wrong types whe
 # libxml2 answers otherwise is kept out, the recommendation followed here
 # and its answer held by a named check above: a number written as a
 # string by anything but an integer or a short fraction, an empty CDATA
-# section, a blank before `id()`'s first word, and the following axis of
-# an attribute. So is the order of an element's namespace nodes, which
-# section 5.4 leaves to the implementation.
+# section, a blank before `id()`'s first word, the following axis of an
+# attribute, and - libxml2 2.9's, darwin's - a whole expression that is a
+# path of `.` steps with a `//`. So is the order of an element's
+# namespace nodes, which section 5.4 leaves to the implementation.
 class XPathCases
   @state = 0x9E3779B97F4A7C15_u64
   # Set while a step may run from an attribute node: after an attribute
@@ -1226,6 +1237,40 @@ def xp_identity(n : XPathNode, places : Hash(UInt64, Int32)) : String
   end
 end
 
+# A path of `.` steps alone with a `//` among them - `.//.`, `/.//.`,
+# `././/./.` - which libxml2 2.9 answers without the context node when it
+# is the whole expression; the named check under section 2.5's cases
+# holds the answer instead.
+def libxml2_dot_path?(expression : String) : Bool
+  state = 0
+  double = false
+  expression.each_char do |c|
+    if c != ' '
+      if c == '.' && state != 2 && state != 5
+        state = 2
+      elsif c == '/' && state == 0
+        state = 1
+      elsif c == '/' && state == 2
+        state = 3
+      elsif c == '/' && state == 3
+        state = 4
+        double = true
+      else
+        state = 5
+      end
+    end
+  end
+  state == 2 && double
+end
+
+assert_true libxml2_dot_path?(".//."), "'.//.' is libxml2 2.9's dot path"
+assert_true libxml2_dot_path?("/.//."), "'/.//.' is libxml2 2.9's dot path"
+assert_true libxml2_dot_path?("././/./."), "'././/./.' is libxml2 2.9's dot path"
+assert_true !libxml2_dot_path?("//."), "'//.' is answered right by libxml2 2.9"
+assert_true !libxml2_dot_path?(".//.."), "'.//..' is answered right by libxml2 2.9"
+assert_true !libxml2_dot_path?("./."), "'./.' has no '//'"
+assert_true !libxml2_dot_path?("(.//.)"), "'(.//.)' is answered right by libxml2 2.9"
+
 puts "\n== xpath oracle cases"
 cases = XPathCases.new
 spaces = {"p" => "urn:p", "q" => "urn:q", "d" => "urn:d", "p2" => "urn:p2"}
@@ -1237,15 +1282,17 @@ total = 0
   puts "oracle xpdoc: #{doc_number}\t#{text}"
   100.times do
     expression = cases.expression
-    value = doc.xpath(expression, spaces)
-    shown = case value
-            when Array(XPathNode) then "nodes\t" + value.map { |n| xp_identity(n, places) }.join(" ")
-            when Float64          then "num\t#{value}"
-            when Bool             then "bool\t#{value}"
-            else                       "str\t#{value}"
-            end
-    puts "oracle xp: #{doc_number}\t#{expression}\t#{shown}"
-    total = total + 1
+    unless libxml2_dot_path?(expression)
+      value = doc.xpath(expression, spaces)
+      shown = case value
+              when Array(XPathNode) then "nodes\t" + value.map { |n| xp_identity(n, places) }.join(" ")
+              when Float64          then "num\t#{value}"
+              when Bool             then "bool\t#{value}"
+              else                       "str\t#{value}"
+              end
+      puts "oracle xp: #{doc_number}\t#{expression}\t#{shown}"
+      total = total + 1
+    end
   end
 end
 2000.times do

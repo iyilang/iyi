@@ -2786,7 +2786,9 @@ pub alias XPathValue = Array(XPathNode) | Float64 | String | Bool
 #   * `xmlns=""` leaves no namespace node for the default namespace;
 #   * an empty CDATA section is no text node (section 5.7);
 #   * `id()` splits its argument on white space wherever it is: libxml2
-#     finds nothing for `id(' a')`.
+#     finds nothing for `id(' a')`;
+#   * `.//.` (or `/.//.`) as the whole expression holds the context node
+#     itself; libxml2 2.9, which darwin carries, leaves it out.
 #
 # `parse` panics on a malformed expression with what was expected and the
 # column; `parse?` answers nil. Evaluation panics on what only a value can

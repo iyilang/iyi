@@ -96,12 +96,14 @@
     - an attribute's following axis holds its element's children;
     - `xmlns=""` leaves no namespace node;
     - an empty CDATA section is no text node;
-    - `id(' a')` finds `a`.
+    - `id(' a')` finds `a`;
+    - `.//.` as the whole expression keeps the context node, which
+      libxml2 2.9 (darwin's) leaves out.
 
   Held by `bench/std_xml_exercise.sh`:
   - section 2.5's paths and section 4's examples worked out by hand;
   - 29 refusals;
-  - 10,000 seeded expressions over 100 documents, compared node by node
+  - 9,999 seeded expressions over 100 documents, compared node by node
     with libxml2 through ctypes on Linux and darwin, which must reject a
     node-set out of order, a number one ulp off and a wrong string;
   - 4,000 number conversions checked against the recommendation's text;

@@ -638,11 +638,13 @@ step "a raise inside a macro written in place names its own line"
 
 # ── 9a. a program that imports `std/debug` gets its callers named: the
 #      resolver reads the program's own debug information — DWARF beside a
-#      Mach-O, the CodeView PDB the linker wrote beside a PE — and a frame
-#      is a function and a source line rather than an address. This is the
-#      whole of what `std/debug` is for, and it was never gated. ────────
-case "$(uname -s)" in
-  Darwin | MINGW* | MSYS* | CYGWIN* | Windows_NT)
+#      Mach-O, the CodeView PDB the linker wrote beside a PE, the ELF's
+#      own `.symtab` and `.debug_line` after the module's own walk of
+#      `.eh_frame` — and a frame is a function and a source line rather
+#      than an address. This is the whole of what `std/debug` is for, and
+#      it was never gated. ────────
+case "$(uname -s)-$(uname -m)" in
+  Darwin-* | MINGW* | MSYS* | CYGWIN* | Windows_NT-* | Linux-x86_64 | Linux-aarch64)
     cat > "$work/named.iyi" <<'EOF'
 module named
 
@@ -677,6 +679,11 @@ $out"
     case "$(uname -s)" in
       MINGW* | MSYS* | CYGWIN* | Windows_NT)
         echo "$out" | grep -qE "^0 +inner at .*named\.iyi:6$" ||
+          fail "the trace does not start at the function that raised, named.iyi:6:
+$out"
+        ;;
+      Linux)
+        echo "$out" | grep -qE "^0 +[^ ]*inner[^ ]* at .*named\.iyi:6:" ||
           fail "the trace does not start at the function that raised, named.iyi:6:
 $out"
         ;;

@@ -297,7 +297,10 @@ echo "== the library is iyi all the way down"
 # (`open`, `mmap`, `munmap`, `lseek`, `close`). Every one of those is in
 # libSystem, the platform libc `bench/dependency_floor.sh` already permits, so
 # this costs no library: a program importing `std/debug` still links
-# libSystem and nothing else, which the floor checks separately.
+# libSystem and nothing else, which the floor checks separately. On Linux it
+# walks the stack itself, reading the registers with `asm` and the image
+# through the linker's `__ehdr_start`, and maps `/proc/self/exe` through the
+# prelude's raw syscalls: libc is asked for nothing there.
 #
 # `file`, `dir` and `udp` are platform modules of `socket`'s shape: raw
 # syscalls on Linux, libSystem on darwin, and the floor names every symbol

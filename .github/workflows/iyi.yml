@@ -1062,6 +1062,13 @@ jobs:
             -o cross/process-aarch64 bench/std_process_exercise.iyi
           ./bin/iyi build --cross-compile --target x86_64-linux-musl \
             -o cross/process-musl bench/std_process_exercise.iyi
+          # std/debug's own stack walk on the other instruction set - its
+          # register numbers and its capture are aarch64's - and linked
+          # against the other libc's start files.
+          ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
+            -o cross/debug-aarch64 bench/std_debug_cross.iyi
+          ./bin/iyi build --cross-compile --target x86_64-linux-musl \
+            -o cross/debug-musl bench/std_debug_cross.iyi
 
           # The Windows probe: the two shapes whose output has been seen wrong,
           # a case conversion and a number rendered into a string — then the
@@ -1138,13 +1145,24 @@ jobs:
             cc conc-musl.o -o conc-musl &&
             ./conc-musl > conc.txt &&
             cc process-musl.o -o process-musl &&
-            timeout 300 ./process-musl > process.txt 2>&1
+            timeout 300 ./process-musl > process.txt 2>&1 &&
+            cc debug-musl.o -o debug-musl &&
+            { ./debug-musl > debug-musl.txt 2>&1; true; }
           ' || status=$?
-          echo "== process.txt"; cat cross/process.txt 2>/dev/null || echo "(not written)"
+          for out in process debug-musl; do
+            echo "== $out.txt"; cat "cross/$out.txt" 2>/dev/null || echo "(not written)"
+          done
           [ "${status:-0}" -eq 0 ]
           diff cross/expected.txt cross/got.txt && echo "musl: same output"
           grep -q "every property held" cross/conc.txt && echo "musl: III.4 held"
-          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "musl: std/process held"
+          # A failed `&&` list stops a `bash -e` step only when it is the
+          # last command, so these two say so themselves.
+          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "musl: std/process held" || exit 1
+          # The panic is the program's exit; the trace is what is checked.
+          { grep -qE "^0 +[^ ]*gamma[^ ]* at .*std_debug_cross\.iyi:15:" cross/debug-musl.txt &&
+            grep -qE "^1 +[^ ]*beta[^ ]* at .*std_debug_cross\.iyi:20:" cross/debug-musl.txt &&
+            grep -qE "^2 +[^ ]*alpha[^ ]* at .*std_debug_cross\.iyi:24:" cross/debug-musl.txt &&
+            echo "musl: std/debug named every frame"; } || exit 1
 
       # Every program's output goes to a file and the chain stops at the
       # first failure, which is why a red run here used to say nothing but
@@ -1166,9 +1184,11 @@ jobs:
               gcc threads-aarch64.o -o threads-aarch64 &&
               timeout 300 ./threads-aarch64 4 > threads.txt 2>&1 &&
               gcc process-aarch64.o -o process-aarch64 &&
-              timeout 300 ./process-aarch64 > process.txt 2>&1
+              timeout 300 ./process-aarch64 > process.txt 2>&1 &&
+              gcc debug-aarch64.o -o debug-aarch64 &&
+              { timeout 120 ./debug-aarch64 > debug-aarch64.txt 2>&1; true; }
             ' || status=$?
-          for out in got conc floor threads process; do
+          for out in got conc floor threads process debug-aarch64; do
             echo "== $out.txt"; cat "cross/$out.txt" 2>/dev/null || echo "(not written)"
           done
           [ "${status:-0}" -eq 0 ]
@@ -1178,7 +1198,11 @@ jobs:
           # kernel's ABI and the asm, which is what this arm is for.
           grep -q "every property held" cross/floor.txt && echo "aarch64: the thread floor held"
           grep -q "every property held" cross/threads.txt && echo "aarch64: threads under the collector held"
-          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "aarch64: std/process held"
+          grep -q "ALL CHECKS PASSED" cross/process.txt && echo "aarch64: std/process held" || exit 1
+          { grep -qE "^0 +[^ ]*gamma[^ ]* at .*std_debug_cross\.iyi:15:" cross/debug-aarch64.txt &&
+            grep -qE "^1 +[^ ]*beta[^ ]* at .*std_debug_cross\.iyi:20:" cross/debug-aarch64.txt &&
+            grep -qE "^2 +[^ ]*alpha[^ ]* at .*std_debug_cross\.iyi:24:" cross/debug-aarch64.txt &&
+            echo "aarch64: std/debug named every frame"; } || exit 1
 
   # darwin arm64 is a run target now (SPEC.md III.4.8): the concurrency
   # runtime's kqueue arm, the panic registry and every sample run natively on

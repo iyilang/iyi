@@ -9,8 +9,11 @@
 #   Windows (x86-64): the PE headers the loader mapped, and the CodeView
 #     PDB the linker wrote beside the exe. A program with no PDB next to
 #     it — a released zip ships none — prints its frames as addresses.
-#
-# Linux ELF reader: not yet built.
+#   Linux (x86-64, aarch64): the stack walked by the program's own
+#     `.eh_frame`, then `/proc/self/exe`'s `.symtab` and `.debug_line`.
+#     The prelude has no walk of its own on Linux; importing this module
+#     installs one beside the resolver. A stripped program prints its
+#     frames as addresses.
 
 module std/debug
 
@@ -116,9 +119,16 @@ struct DwarfResolver
 
     while cu_cursor.address < cu_end.address
       unit_len = (cu_cursor.as(Pointer(Int32)).value) & 0xffffffff_i64
-      break if unit_len == 0_i64
+      # 0xffffffff opens a 64-bit unit, whose fields are all wider.
+      break if unit_len == 0_i64 || unit_len == 0xffffffff_i64
       unit_finish = cu_cursor + 4_i64 + unit_len
       version = (cu_cursor + 4).value.to_i32 | ((cu_cursor + 5).value.to_i32.unsafe_shl(8))
+      # Version 5 lays its header out anew (a C object linked in may carry
+      # one): passed over rather than read as version 4.
+      if version < 2 || version > 4
+        cu_cursor = unit_finish
+        next
+      end
       header_len = (cu_cursor + 6).as(Pointer(Int32)).value & 0xffffffff_i64
       program_start = cu_cursor + 10_i64 + header_len
 
@@ -980,6 +990,598 @@ struct DwarfResolver
     end
   {% end %}
 
+  {% if flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
+    # ── Linux: the walk, then the names ─────────────────────────────────
+    #
+    # An iyi function keeps no frame pointer, so the stack is walked by the
+    # call frame information the linker gathers into `.eh_frame` and
+    # indexes in `.eh_frame_hdr` - both loaded with the program, and read
+    # here in place. Of a frame's registers the walk follows three: the
+    # stack pointer, which is the CFA a frame's caller had; the frame
+    # pointer, which a function may define its CFA by; and the return
+    # address. A frame whose rules ask for anything else - an expression,
+    # a register copied into another - ends the walk where it stands, and
+    # so does an address outside the program: libc's own frames above
+    # `main` carry tables this does not read.
+    #
+    # Then the names: `/proc/self/exe` mapped, its `.symtab` for the
+    # function an address lies in, its `.debug_line` for the line, both
+    # measured from the address the linker gave it, which is the running
+    # one less the load bias. Every field of the file is read through a
+    # bounds check: this runs after a panic.
+    {% if flag?(:x86_64) %}
+      SP_COLUMN  =   7_i64
+      FP_COLUMN  =   6_i64
+      RA_COLUMN  =  16_i64
+      SYS_LSEEK  =   8_i64
+      SYS_MMAP   =   9_i64
+      SYS_MUNMAP =  11_i64
+    {% else %}
+      SP_COLUMN  =  31_i64
+      FP_COLUMN  =  29_i64
+      RA_COLUMN  =  30_i64
+      SYS_LSEEK  =  62_i64
+      SYS_MMAP   = 222_i64
+      SYS_MUNMAP = 215_i64
+    {% end %}
+
+    # How a register of the caller is found, per column the walk follows.
+    # A rule's state is six numbers: the CFA's register and offset, then
+    # the frame pointer's rule and offset, then the return address's.
+    RULE_SAME       = 0_i64
+    RULE_OFFSET     = 1_i64
+    RULE_UNDEFINED  = 2_i64
+    RULE_VAL_OFFSET = 3_i64
+    RULE_UNKNOWN    = 4_i64
+
+    # The ELF header's address, the linker's `__ehdr_start`, as the thread
+    # runtime reads it: in a def, so only a program that imports this
+    # module references the symbol.
+    def self.ehdr_start : UInt64
+      header = uninitialized UInt64
+      {% if flag?(:x86_64) %}
+        asm("leaq __ehdr_start(%rip), $0" : "=r"(header) ::: "volatile")
+      {% else %}
+        asm("adrp $0, __ehdr_start
+             add $0, $0, :lo12:__ehdr_start" : "=r"(header) ::: "volatile")
+      {% end %}
+      header
+    end
+
+    # The load bias - where the program runs less where it was linked -
+    # into *answer*[0], and the running address of its `.eh_frame_hdr`, or
+    # 0, into *answer*[1], both from the program headers in memory.
+    def self.image(answer : Pointer(UInt64)) : Nil
+      header = ehdr_start
+      phoff = Pointer(UInt64).new(header + 32_u64).value
+      phentsize = little(Pointer(UInt8).new(header + 54_u64), 2)
+      phnum = little(Pointer(UInt8).new(header + 56_u64), 2)
+      bias = 0_u64
+      found = false
+      eh = 0_u64
+      index = 0_u64
+      while index < phnum
+        entry = header &+ phoff &+ index &* phentsize
+        kind = little(Pointer(UInt8).new(entry), 4)
+        vaddr = Pointer(UInt64).new(entry + 16_u64).value
+        if kind == 1_u64 && !found && Pointer(UInt64).new(entry + 8_u64).value == 0_u64
+          bias = header &- vaddr
+          found = true
+        end
+        eh = vaddr if kind == 0x6474e550_u64
+        index = index + 1_u64
+      end
+      answer[0] = bias
+      answer[1] = eh == 0_u64 ? 0_u64 : bias &+ eh
+    end
+
+    # *width* bytes at *at*, little-endian. The prelude converts no
+    # integer narrower than 64 bits but a byte, so a field is read a byte
+    # at a time rather than through a `UInt16*` or `UInt32*`.
+    def self.little(at : Pointer(UInt8), width : Int32) : UInt64
+      value = 0_u64
+      index = width - 1
+      while index >= 0
+        value = value.unsafe_shl(8) | (at + index).value.to_u64
+        index = index - 1
+      end
+      value
+    end
+
+    # The same, sign-extended from its *width* bytes.
+    def self.little_signed(at : Pointer(UInt8), width : Int32) : UInt64
+      value = little(at, width)
+      top = 1_u64.unsafe_shl(width * 8 - 1)
+      (value & top) != 0_u64 ? value | (0_u64 &- top.unsafe_shl(1)) : value
+    end
+
+    # A pointer as `.eh_frame` encodes one: the low nibble its width and
+    # sign, the next three bits what it is measured from - nothing, its
+    # own address, or *data_base*.
+    def self.read_encoded(cursor_ptr : Pointer(Pointer(UInt8)), encoding : Int32, data_base : UInt64) : UInt64
+      cursor = cursor_ptr.value
+      start = cursor.address
+      value = 0_u64
+      case encoding & 0x0f
+      when 0x00, 0x04, 0x0c
+        value = cursor.as(Pointer(UInt64)).value
+        cursor = cursor + 8_i64
+      when 0x01
+        value = read_uleb128(pointerof(cursor))
+      when 0x02
+        value = little(cursor, 2)
+        cursor = cursor + 2_i64
+      when 0x03
+        value = little(cursor, 4)
+        cursor = cursor + 4_i64
+      when 0x09
+        value = read_sleb128(pointerof(cursor)).unsafe_to_u64
+      when 0x0a
+        value = little_signed(cursor, 2)
+        cursor = cursor + 2_i64
+      when 0x0b
+        value = little_signed(cursor, 4)
+        cursor = cursor + 4_i64
+      end
+      cursor_ptr.value = cursor
+      case encoding & 0x70
+      when 0x10
+        value = value &+ start
+      when 0x30
+        value = value &+ data_base
+      end
+      value
+    end
+
+    # The FDE whose code holds *pc*, found in `.eh_frame_hdr`'s table of
+    # starts, sorted and written relative to the header; 0 for none.
+    def self.find_fde(eh : UInt64, pc : UInt64) : UInt64
+      return 0_u64 if eh == 0_u64
+      header = Pointer(UInt8).new(eh)
+      return 0_u64 unless header.value == 1_u8 && (header + 3).value == 0x3b_u8
+      cursor = header + 4_i64
+      read_encoded(pointerof(cursor), (header + 1).value.to_i32, eh)
+      count = read_encoded(pointerof(cursor), (header + 2).value.to_i32, eh).unsafe_to_i64
+      table = cursor
+      low = 0_i64
+      high = count
+      found = -1_i64
+      while low < high
+        middle = low + (high - low).unsafe_shr(1)
+        start = eh &+ little_signed(table + middle * 8_i64, 4)
+        if start <= pc
+          found = middle
+          low = middle + 1_i64
+        else
+          high = middle
+        end
+      end
+      return 0_u64 if found < 0_i64
+      eh &+ little_signed(table + found * 8_i64 + 4_i64, 4)
+    end
+
+    def self.set_rule(state : Pointer(Int64), column : Int64, kind : Int64, offset : Int64) : Nil
+      if column == FP_COLUMN
+        state[2] = kind
+        state[3] = offset
+      elsif column == RA_COLUMN
+        state[4] = kind
+        state[5] = offset
+      end
+    end
+
+    # DW_CFA_restore: the rule the CIE's own program left, or, while that
+    # program runs, the rule a register starts with.
+    def self.restore_rule(state : Pointer(Int64), initial : Pointer(Int64), column : Int64) : Nil
+      if initial.address == 0_u64
+        set_rule(state, column, RULE_SAME, 0_i64)
+      elsif column == FP_COLUMN
+        set_rule(state, column, initial[2], initial[3])
+      elsif column == RA_COLUMN
+        set_rule(state, column, initial[4], initial[5])
+      end
+    end
+
+    # Runs a CFA program from *start* to *finish*, stopping at the first
+    # row past *target*: the rules then in *state* are *target*'s. False
+    # for an instruction it does not know, which ends the walk.
+    def self.run_cfa(start : Pointer(UInt8), finish : Pointer(UInt8), target : UInt64, loc_start : UInt64,
+                     code_align : UInt64, data_align : Int64, encoding : Int32,
+                     state : Pointer(Int64), initial : Pointer(Int64)) : ::Bool
+      saved = uninitialized Int64[48]
+      stack = pointerof(saved).as(Pointer(Int64))
+      depth = 0
+      cursor = start
+      loc = loc_start
+      while cursor.address < finish.address
+        op = cursor.value.to_i32
+        cursor = cursor + 1_i64
+        high = op & 0xc0
+        if high == 0x40
+          loc = loc &+ (op & 0x3f).to_u64 &* code_align
+          return true if loc > target
+        elsif high == 0x80
+          set_rule(state, (op & 0x3f).to_i64, RULE_OFFSET, read_uleb128(pointerof(cursor)).unsafe_to_i64 &* data_align)
+        elsif high == 0xc0
+          restore_rule(state, initial, (op & 0x3f).to_i64)
+        else
+          case op
+          when 0x00, 0x2d
+            # nop; and aarch64's negate_ra_state, which iyi code never signs
+          when 0x01
+            loc = read_encoded(pointerof(cursor), encoding, 0_u64)
+            return true if loc > target
+          when 0x02
+            loc = loc &+ cursor.value.to_u64 &* code_align
+            cursor = cursor + 1_i64
+            return true if loc > target
+          when 0x03
+            loc = loc &+ little(cursor, 2) &* code_align
+            cursor = cursor + 2_i64
+            return true if loc > target
+          when 0x04
+            loc = loc &+ little(cursor, 4) &* code_align
+            cursor = cursor + 4_i64
+            return true if loc > target
+          when 0x05
+            column = read_uleb128(pointerof(cursor)).unsafe_to_i64
+            set_rule(state, column, RULE_OFFSET, read_uleb128(pointerof(cursor)).unsafe_to_i64 &* data_align)
+          when 0x06
+            restore_rule(state, initial, read_uleb128(pointerof(cursor)).unsafe_to_i64)
+          when 0x07
+            set_rule(state, read_uleb128(pointerof(cursor)).unsafe_to_i64, RULE_UNDEFINED, 0_i64)
+          when 0x08
+            set_rule(state, read_uleb128(pointerof(cursor)).unsafe_to_i64, RULE_SAME, 0_i64)
+          when 0x09
+            column = read_uleb128(pointerof(cursor)).unsafe_to_i64
+            read_uleb128(pointerof(cursor))
+            set_rule(state, column, RULE_UNKNOWN, 0_i64)
+          when 0x0a
+            return false if depth >= 8
+            index = 0
+            while index < 6
+              stack[depth * 6 + index] = state[index]
+              index = index + 1
+            end
+            depth = depth + 1
+          when 0x0b
+            return false if depth == 0
+            depth = depth - 1
+            index = 0
+            while index < 6
+              state[index] = stack[depth * 6 + index]
+              index = index + 1
+            end
+          when 0x0c
+            state[0] = read_uleb128(pointerof(cursor)).unsafe_to_i64
+            state[1] = read_uleb128(pointerof(cursor)).unsafe_to_i64
+          when 0x0d
+            state[0] = read_uleb128(pointerof(cursor)).unsafe_to_i64
+          when 0x0e
+            state[1] = read_uleb128(pointerof(cursor)).unsafe_to_i64
+          when 0x0f
+            cursor = cursor + read_uleb128(pointerof(cursor)).unsafe_to_i64
+            state[0] = -1_i64
+          when 0x10, 0x16
+            column = read_uleb128(pointerof(cursor)).unsafe_to_i64
+            cursor = cursor + read_uleb128(pointerof(cursor)).unsafe_to_i64
+            set_rule(state, column, RULE_UNKNOWN, 0_i64)
+          when 0x11
+            column = read_uleb128(pointerof(cursor)).unsafe_to_i64
+            set_rule(state, column, RULE_OFFSET, read_sleb128(pointerof(cursor)) &* data_align)
+          when 0x12
+            state[0] = read_uleb128(pointerof(cursor)).unsafe_to_i64
+            state[1] = read_sleb128(pointerof(cursor)) &* data_align
+          when 0x13
+            state[1] = read_sleb128(pointerof(cursor)) &* data_align
+          when 0x14
+            column = read_uleb128(pointerof(cursor)).unsafe_to_i64
+            set_rule(state, column, RULE_VAL_OFFSET, read_uleb128(pointerof(cursor)).unsafe_to_i64 &* data_align)
+          when 0x15
+            column = read_uleb128(pointerof(cursor)).unsafe_to_i64
+            set_rule(state, column, RULE_VAL_OFFSET, read_sleb128(pointerof(cursor)) &* data_align)
+          when 0x2e
+            read_uleb128(pointerof(cursor))
+          when 0x2f
+            column = read_uleb128(pointerof(cursor)).unsafe_to_i64
+            set_rule(state, column, RULE_OFFSET, 0_i64 &- read_uleb128(pointerof(cursor)).unsafe_to_i64 &* data_align)
+          else
+            return false
+          end
+        end
+      end
+      true
+    end
+
+    # *pc*'s rules into *state*: its FDE's CIE read for the alignments, the
+    # pointer encoding and the program every FDE of it starts with, then
+    # the FDE's own program up to *pc*. False for a CIE or an FDE this
+    # does not read, or a *pc* outside the FDE.
+    def self.frame_rules(fde : UInt64, pc : UInt64, state : Pointer(Int64)) : ::Bool
+      entry = Pointer(UInt8).new(fde)
+      length = little(entry, 4).unsafe_to_i64
+      return false if length == 0_i64 || length == 0xffffffff_i64
+      fde_end = entry + 4_i64 + length
+      cie_offset = little(entry + 4_i64, 4).unsafe_to_i64
+      return false if cie_offset == 0_i64
+      cie = entry + (4_i64 - cie_offset)
+      cie_length = little(cie, 4).unsafe_to_i64
+      return false if cie_length == 0_i64 || cie_length == 0xffffffff_i64
+      return false unless little(cie + 4_i64, 4) == 0_u64
+      cie_end = cie + 4_i64 + cie_length
+      version = (cie + 8).value
+      augmentation = cie + 9_i64
+      cursor = augmentation
+      while cursor.value != 0_u8
+        cursor = cursor + 1_i64
+      end
+      augmentation_end = cursor
+      cursor = cursor + 1_i64
+      sized = augmentation.value == 122_u8
+      if augmentation.value == 101_u8 && (augmentation + 1).value == 104_u8
+        cursor = cursor + 8_i64
+      elsif !sized && augmentation.value != 0_u8
+        return false
+      end
+      code_align = read_uleb128(pointerof(cursor))
+      data_align = read_sleb128(pointerof(cursor))
+      ra_column = 0_i64
+      if version == 1_u8
+        ra_column = cursor.value.to_i64
+        cursor = cursor + 1_i64
+      else
+        ra_column = read_uleb128(pointerof(cursor)).unsafe_to_i64
+      end
+      return false unless ra_column == RA_COLUMN
+      encoding = 0
+      if sized
+        data_length = read_uleb128(pointerof(cursor)).unsafe_to_i64
+        data_end = cursor + data_length
+        letter = augmentation + 1_i64
+        while letter.address < augmentation_end.address
+          case letter.value
+          when 82_u8 # R: how the FDE's addresses are written
+            encoding = cursor.value.to_i32
+            cursor = cursor + 1_i64
+          when 80_u8 # P: a personality routine, skipped
+            personality = cursor.value.to_i32
+            cursor = cursor + 1_i64
+            read_encoded(pointerof(cursor), personality, 0_u64)
+          when 76_u8 # L: the LSDA's encoding
+            cursor = cursor + 1_i64
+          when 83_u8, 66_u8, 71_u8
+            # S, B, G: a signal frame, BTI, MTE - nothing to read
+          else
+            return false
+          end
+          letter = letter + 1_i64
+        end
+        cursor = data_end
+      end
+      cie_program = cursor
+
+      cursor = entry + 8_i64
+      pc_begin = read_encoded(pointerof(cursor), encoding, 0_u64)
+      pc_range = read_encoded(pointerof(cursor), encoding & 0x0f, 0_u64)
+      return false unless pc >= pc_begin && pc &- pc_begin < pc_range
+      cursor = cursor + read_uleb128(pointerof(cursor)).unsafe_to_i64 if sized
+
+      state[0] = -1_i64
+      state[1] = 0_i64
+      state[2] = RULE_SAME
+      state[3] = 0_i64
+      state[4] = RULE_SAME
+      state[5] = 0_i64
+      nothing = Pointer(Int64).new(0_u64)
+      return false unless run_cfa(cie_program, cie_end, 0xffffffffffffffff_u64, 0_u64, code_align, data_align, encoding, state, nothing)
+      first = uninitialized Int64[6]
+      initial = pointerof(first).as(Pointer(Int64))
+      index = 0
+      while index < 6
+        initial[index] = state[index]
+        index = index + 1
+      end
+      run_cfa(cursor, fde_end, pc, pc_begin, code_align, data_align, encoding, state, initial)
+    end
+
+    # The walk. Its own registers are read where the walk starts, then each
+    # frame's rules give its caller's; a frame is kept when its CFA lies
+    # above *above*, so the frames below the caller's marker - this one,
+    # the hook's - are not. `@[NoInline]` so the registers read are this
+    # function's, whose rules the walk then looks up.
+    @[NoInline]
+    def self.capture(frames : Pointer(Void*), limit : Int32, above : UInt64) : Int32
+      spilled = uninitialized UInt64[4]
+      registers = pointerof(spilled).as(Pointer(UInt64))
+      {% if flag?(:x86_64) %}
+        asm("movq %rsp, 0($0)
+             movq %rbp, 8($0)
+             leaq 0(%rip), %rax
+             movq %rax, 16($0)" :: "r"(registers) : "rax", "memory" : "volatile")
+        registers[3] = 0_u64
+      {% else %}
+        asm("mov x9, sp
+             str x9, [$0]
+             str x29, [$0, #8]
+             adr x9, .
+             str x9, [$0, #16]
+             str x30, [$0, #24]" :: "r"(registers) : "x9", "memory" : "volatile")
+      {% end %}
+      sp = registers[0]
+      fp = registers[1]
+      pc = registers[2]
+      ra = registers[3]
+      fp_known = true
+
+      layout = uninitialized UInt64[2]
+      image(pointerof(layout).as(Pointer(UInt64)))
+      eh = pointerof(layout).as(Pointer(UInt64))[1]
+      rules = uninitialized Int64[6]
+      state = pointerof(rules).as(Pointer(Int64))
+
+      count = 0
+      first = true
+      while count < limit
+        # A caller's address is the one after its call: the call itself,
+        # whose rules are the ones that held, is the byte before.
+        lookup = first ? pc : pc &- 1_u64
+        fde = find_fde(eh, lookup)
+        break if fde == 0_u64
+        break unless frame_rules(fde, lookup, state)
+        base = 0_u64
+        if state[0] == SP_COLUMN
+          base = sp
+        elsif state[0] == FP_COLUMN && fp_known
+          base = fp
+        else
+          break
+        end
+        cfa = base &+ state[1].unsafe_to_u64
+        # A stack only grows down, and no iyi frame is 16 MiB: past either,
+        # the rules were not this frame's, and nothing more is read.
+        break if cfa < sp || cfa &- sp > 0x1000000_u64
+        if !first && cfa > above
+          frames[count] = Pointer(Void).new(pc)
+          count = count + 1
+        end
+
+        caller_fp = fp
+        caller_fp_known = fp_known
+        case state[2]
+        when RULE_OFFSET
+          slot = cfa &+ state[3].unsafe_to_u64
+          break unless slot >= sp && slot &+ 8_u64 <= cfa
+          caller_fp = Pointer(UInt64).new(slot).value
+          caller_fp_known = true
+        when RULE_VAL_OFFSET
+          caller_fp = cfa &+ state[3].unsafe_to_u64
+          caller_fp_known = true
+        when RULE_SAME
+        else
+          caller_fp_known = false
+        end
+        caller_ra = 0_u64
+        case state[4]
+        when RULE_OFFSET
+          slot = cfa &+ state[5].unsafe_to_u64
+          break unless slot >= sp && slot &+ 8_u64 <= cfa
+          caller_ra = Pointer(UInt64).new(slot).value
+        when RULE_VAL_OFFSET
+          caller_ra = cfa &+ state[5].unsafe_to_u64
+        when RULE_SAME
+          caller_ra = ra
+        else
+          break
+        end
+        break if caller_ra == 0_u64
+        break if cfa == sp && caller_ra == pc
+        sp = cfa
+        fp = caller_fp
+        fp_known = caller_fp_known
+        ra = caller_ra
+        pc = caller_ra
+        first = false
+      end
+      count
+    end
+
+    # A field of the mapped file, or 0 where it would run past the end.
+    def self.field(base : UInt64, size : UInt64, offset : UInt64, width : UInt64) : UInt64
+      return 0_u64 if offset > size || size - offset < width
+      little(Pointer(UInt8).new(base &+ offset), width.unsafe_to_i32)
+    end
+
+    # `/proc/self/exe` mapped whole, its size into *size_out*; 0 when it
+    # cannot be.
+    def self.map_self(size_out : Pointer(UInt64)) : UInt64
+      fd = __iyi_open_read("/proc/self/exe".to_unsafe)
+      return 0_u64 if fd < 0_i64
+      size = __iyi_conc_syscall3(SYS_LSEEK, fd, 0_i64, 2_i64)
+      mapped = size > 0_i64 ? __iyi_conc_syscall6(SYS_MMAP, 0_i64, size, 1_i64, 2_i64, fd, 0_i64) : -1_i64
+      __iyi_close(fd)
+      return 0_u64 if mapped < 0_i64
+      size_out.value = size.unsafe_to_u64
+      mapped.unsafe_to_u64
+    end
+
+    def self.name_is?(base : UInt64, size : UInt64, offset : UInt64, want : String) : ::Bool
+      return false if offset > size || size - offset <= want.bytesize.to_u64
+      at = Pointer(UInt8).new(base &+ offset)
+      index = 0
+      while index < want.bytesize
+        return false if (at + index).value != want.to_unsafe[index]
+        index = index + 1
+      end
+      (at + index).value == 0_u8
+    end
+
+    # The file's `.debug_line` (offset, size), `.symtab` and the string
+    # table it names, into *answer*[0..5]; a pair stays 0 when absent.
+    def self.sections(base : UInt64, size : UInt64, answer : Pointer(UInt64)) : Nil
+      index = 0
+      while index < 6
+        answer[index] = 0_u64
+        index = index + 1
+      end
+      return unless field(base, size, 0_u64, 4_u64) == 0x464c457f_u64 && field(base, size, 4_u64, 1_u64) == 2_u64
+      shoff = field(base, size, 0x28_u64, 8_u64)
+      entsize = field(base, size, 0x3a_u64, 2_u64)
+      count = field(base, size, 0x3c_u64, 2_u64)
+      names_index = field(base, size, 0x3e_u64, 2_u64)
+      return if entsize < 64_u64 || names_index >= count
+      names = field(base, size, shoff &+ names_index &* entsize &+ 24_u64, 8_u64)
+      section = 0_u64
+      while section < count
+        header = shoff &+ section &* entsize
+        offset = field(base, size, header &+ 24_u64, 8_u64)
+        length = field(base, size, header &+ 32_u64, 8_u64)
+        if offset <= size && size - offset >= length
+          if field(base, size, header &+ 4_u64, 4_u64) == 2_u64 && field(base, size, header &+ 56_u64, 8_u64) == 24_u64
+            link = field(base, size, header &+ 40_u64, 4_u64)
+            strings = shoff &+ link &* entsize
+            string_offset = field(base, size, strings &+ 24_u64, 8_u64)
+            string_length = field(base, size, strings &+ 32_u64, 8_u64)
+            if link < count && string_offset <= size && size - string_offset >= string_length
+              answer[2] = offset
+              answer[3] = length
+              answer[4] = string_offset
+              answer[5] = string_length
+            end
+          elsif name_is?(base, size, names &+ field(base, size, header, 4_u64), ".debug_line")
+            answer[0] = offset
+            answer[1] = length
+          end
+        end
+        section = section + 1_u64
+      end
+    end
+
+    # The function *address* lies in, by `.symtab`; "" for none.
+    def self.symbol_at(base : UInt64, size : UInt64, table : Pointer(UInt64), address : UInt64) : String
+      count = table[3] // 24_u64
+      index = 0_u64
+      while index < count
+        entry = table[2] &+ index &* 24_u64
+        if field(base, size, entry &+ 4_u64, 1_u64) & 0xf_u64 == 2_u64 && field(base, size, entry &+ 6_u64, 2_u64) != 0_u64
+          start = field(base, size, entry &+ 8_u64, 8_u64)
+          if address >= start && address - start < field(base, size, entry &+ 16_u64, 8_u64)
+            name = field(base, size, entry, 4_u64)
+            return "" if name >= table[5]
+            at = Pointer(UInt8).new(base &+ table[4] &+ name)
+            limit = (table[5] - name).unsafe_to_i64
+            length = 0_i64
+            while length < limit && (at + length).value != 0_u8
+              length = length + 1_i64
+            end
+            return String.new(length.to_i32) { |dst| dst.copy_from(at, length.to_i32) }
+          end
+        end
+        index = index + 1_u64
+      end
+      ""
+    end
+  {% end %}
+
   def self.resolve_frames(frames : Pointer(Void*), count : Int32) : Nil
     {% if flag?(:darwin) %}
       slide = LibC._dyld_get_image_vmaddr_slide(0).to_u64
@@ -1128,8 +1730,41 @@ struct DwarfResolver
         i = i + 1
       end
       pdb_close
+    {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
+      layout = uninitialized UInt64[2]
+      image(pointerof(layout).as(Pointer(UInt64)))
+      bias = pointerof(layout).as(Pointer(UInt64))[0]
+      size = 0_u64
+      base = map_self(pointerof(size))
+      found = uninitialized UInt64[6]
+      table = pointerof(found).as(Pointer(UInt64))
+      sections(base, size, table) if base != 0_u64
+      i = 0
+      while i < count
+        raw_pc = (frames + i).value.address
+        # Every frame handed here is a return address: the call is the
+        # byte before it, as in the walk.
+        address = raw_pc &- bias &- 1_u64
+        fn_name = ""
+        location = nil
+        if base != 0_u64
+          fn_name = symbol_at(base, size, table, address) if table[3] != 0_u64
+          location = resolve_line(address, Pointer(UInt8).new(base &+ table[0]), table[1].unsafe_to_i64) if table[1] != 0_u64
+        end
+        line_out = i.to_s + "   " + (fn_name.empty? ? "[0x" + raw_pc.to_s(16) + "]" : fn_name)
+        if loc = location
+          line_out = line_out + " at " + loc
+        elsif !fn_name.empty?
+          # A name and no line: the address beside it. Neither: the
+          # address alone, as Windows prints a frame it cannot name.
+          line_out = line_out + " [0x" + raw_pc.to_s(16) + "]"
+        end
+        say(line_out + "\n")
+        i = i + 1
+      end
+      __iyi_conc_syscall3(SYS_MUNMAP, base.unsafe_to_i64, size.unsafe_to_i64, 0_i64) if base != 0_u64
     {% else %}
-      # Fallback for platforms without native DWARF reader yet
+      # A platform with no reader: the addresses alone.
       i = 0
       while i < count
         raw_pc = (frames + i).value.address
@@ -1145,3 +1780,9 @@ end
 IyiPanic.resolver = ->(frames : Pointer(Void*), count : Int32) {
   DwarfResolver.resolve_frames(frames, count)
 }
+
+{% if flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
+  IyiPanic.capturer = ->(frames : Pointer(Void*), limit : Int32, above : UInt64) {
+    DwarfResolver.capture(frames, limit, above)
+  }
+{% end %}

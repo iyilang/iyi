@@ -4,6 +4,28 @@
 
 ### Added
 
+- **A panic on Linux names its callers, file, line and column, in a
+  program that imports std/debug.** darwin and Windows did; Linux printed
+  the message and the raise's own line, because the prelude had no stack
+  walk there and an iyi function keeps no frame pointer to follow. The
+  module walks the stack itself now, by the program's own `.eh_frame`,
+  read in memory through `.eh_frame_hdr`, from registers it reads with
+  `asm`. Then it maps `/proc/self/exe` and names each frame by `.symtab`
+  and `.debug_line`. Nothing of libc or libgcc is asked for, so it is the
+  same on glibc and musl and on a task's own stack. The prelude gained an
+  `IyiPanic.capturer` hook beside the resolver, and a program that does
+  not import the module captures nothing. Held by
+  `bench/std_debug_exercise.sh`:
+  - each frame's function and line are what `nm` and `addr2line` answer
+    for the address a stripped copy prints;
+  - the walk holds under `--release`, under `--frame-pointers always`,
+    in a task, and stripped;
+  - six broken copies of the walk and the reader are caught.
+
+  `bench/panics.sh` §9a measures Linux now. CI's cross-run runs
+  `bench/std_debug_cross.iyi` on aarch64 under emulation and on musl.
+  Inlined frames are named for the function they were inlined into.
+
 - **`std/http` speaks `https://`, over std/tls.** `HTTP.get`, `request`,
   `open`, `HTTPClient` and redirects take `https://` URLs. The connection
   is TLS 1.3, its certificate checked for the URL's host against the
@@ -1137,8 +1159,8 @@
   - system read the page size from a `sysconf` Windows' Python lacks;
   - tar set a link's time with `follow_symlinks=False`, which Windows
     has not;
-  - tar printed a path that differs each run, so its source and artifact
-    runs disagreed;
+  - tar printed a path that differs each run, and sse the reconnect
+    delays it measured, so their source and artifact runs disagreed;
   - darwin's `link(2)` follows a symbolic link, which tar's proof now
     expects there;
   - zip expected the flags a writing ZipFile listed rather than those it
@@ -21060,7 +21082,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 21,333-line library and nothing else. Every other
+  written against iyi's own 21,364-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

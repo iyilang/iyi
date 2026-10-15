@@ -9168,6 +9168,11 @@ end
 # depends on (III.1.3): the fiber never resumes.
 class IyiPanic
   @@resolver : Proc(Pointer(Void*), Int32, Nil)? = nil
+  # Linux has no stack walk to call: a program that imports `std/debug`
+  # installs one, which fills the buffer with the return addresses of the
+  # frames whose CFA lies above the address it is given, and answers how
+  # many. A program that does not import it captures nothing.
+  @@capturer : Proc(Pointer(Void*), Int32, UInt64, Int32)? = nil
 
   def self.resolver=(r : Proc(Pointer(Void*), Int32, Nil)?) : Nil
     @@resolver = r
@@ -9175,6 +9180,14 @@ class IyiPanic
 
   def self.resolver
     @@resolver
+  end
+
+  def self.capturer=(c : Proc(Pointer(Void*), Int32, UInt64, Int32)?) : Nil
+    @@capturer = c
+  end
+
+  def self.capturer
+    @@capturer
   end
 end
 
@@ -9218,6 +9231,17 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
     # darwin arm asks for, so a resolver written against one works on both.
     callstack = uninitialized Void*[64]
     count = LibC.RtlCaptureStackBackTrace(1, 64, pointerof(callstack).as(Void**), Pointer(Int32).new(0_u64)) & 0xFFFF
+  {% elsif flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
+    # The walk is `std/debug`'s, when a program imported it. *marker* lives
+    # in this function's frame, so the frames whose CFA lies above it are
+    # this one and its callers': the capturer's own are below, and the
+    # first answered is this function's, skipped below as darwin skips it.
+    callstack = uninitialized Void*[64]
+    count = 0
+    if c = IyiPanic.capturer
+      marker = 0_u64
+      count = c.call(pointerof(callstack).as(Void**), 64, pointerof(marker).address)
+    end
   {% end %}
   __iyi_say("iyi: panic: ")
   __iyi_say(message)
@@ -9249,6 +9273,13 @@ def raise(message : String, file : String = __FILE__, line : Int32 = __LINE__) :
     if r = IyiPanic.resolver
       if count > 0
         r.call(pointerof(callstack).as(Void**), count)
+      end
+    end
+  {% end %}
+  {% if flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64)) %}
+    if count > 1
+      if r = IyiPanic.resolver
+        r.call(pointerof(callstack).as(Void**) + 1, count - 1)
       end
     end
   {% end %}

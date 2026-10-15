@@ -1,0 +1,27 @@
+# std/debug's walk where this repository's own gate cannot run it: CI
+# cross-compiles this for aarch64 and for musl and runs it in its
+# cross-run job (`.github/workflows/iyi.yml`), where the trace must name
+# gamma at the raise, line 15, then beta and alpha at their calls, lines
+# 20 and 24. The x86-64 glibc arm is bench/std_debug_exercise.sh's.
+#
+# aarch64 is the other half of the walk: its own register numbers (sp 31,
+# the frame pointer 29, the return address in x30) and its own capture.
+# musl is the other libc's link, whose start files are not glibc's.
+module std_debug_cross
+
+import std/debug
+
+def gamma(n : Int32) : Int32
+  raise "boom"
+  n
+end
+
+def beta(n : Int32) : Int32
+  gamma(n)
+end
+
+def alpha(n : Int32) : Int32
+  beta(n)
+end
+
+puts alpha(1)

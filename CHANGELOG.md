@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A trait value cast to a union of some of its implementers reads the
+  right value.** With `Val` implemented by `Nil`, `String` and `Int64`,
+  `x.as(String?)` on a `Val` was typed `Val` and compiled as an upcast, so
+  `"s"` read back as garbage and `nil` as `""`. The cast narrows to
+  `String | Nil` now. Held by `spec/compiler/semantic/cast_spec.cr` (#121).
+
 ## 0.17.0 — 2026-10-14
 
 **About two hundred and thirty fixes, and the `windows-0.17.0-3` and

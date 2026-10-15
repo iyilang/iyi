@@ -330,7 +330,7 @@ travel() { # travel <case> <expected output>, with $TRAVEL/<case>/{kit/lib.iyi,m
     echo "travel: $name answers from its artifact as from source"
   fi
 }
-mkdir -p "$TRAVEL"/{impl_block,abstract_generic,empty_body,field_default,hooks,macro_def,annotated,unreached}/kit
+mkdir -p "$TRAVEL"/{impl_block,abstract_generic,empty_body,field_default,virtual_class_var,hooks,macro_def,annotated,unreached}/kit
 cat > "$TRAVEL/impl_block/kit/lib.iyi" <<'IYI'
 module kit/lib
 
@@ -453,6 +453,42 @@ import kit/lib::*
 puts A.new.describe
 IYI
 travel field_default "7 0"
+# A class variable read through a virtual owner: `look` and `count` are
+# called on `Base+` and `Base+.class` because `Sub < Base`, so the module's
+# object code calls `~Kit::Lib::Base+::table:read` and its metaclass twin,
+# which are main-module functions. `main` reads no class variable itself,
+# so nothing but the artifact's record can tell it to define them.
+cat > "$TRAVEL/virtual_class_var/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub class Base
+  @@table = [3, 4]
+
+  def look : Int32
+    @@table[0]
+  end
+
+  def self.count : Int32
+    @@table.size
+  end
+end
+
+pub class Sub < Base
+end
+
+pub def answer : String
+  items = [Base.new, Sub.new] of Base
+  "#{items.map(&.look)} #{items.map { |item| item.class.count }}"
+end
+IYI
+cat > "$TRAVEL/virtual_class_var/main.iyi" <<'IYI'
+module main
+
+import kit/lib::{answer}
+
+puts answer
+IYI
+travel virtual_class_var "[3, 3] [2, 2]"
 cat > "$TRAVEL/hooks/kit/lib.iyi" <<'IYI'
 module kit/lib
 

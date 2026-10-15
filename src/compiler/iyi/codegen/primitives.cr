@@ -1124,6 +1124,19 @@ class Iyi::CodeGenVisitor
     type_id(type.metaclass)
   end
 
+  # iyi: `~metaclass` is defined in the main module the first time code
+  # in this build asks a virtual type for its class. An artifact's object
+  # code that asks declares the function and leaves it to the program's
+  # main module, which defined it only when the program's own code had
+  # asked too: `import std/password::{Scrypt}` and one call to it linked
+  # with "undefined reference to `~metaclass'" from std/digest's own
+  # `#{self.class}`, under `--use-iyimod` alone. A build that links
+  # artifacts defines it whatever its own code asked.
+  def iyi_define_metaclass_fun : Nil
+    name = "~metaclass"
+    create_metaclass_fun(name) unless typed_fun?(@main_mod, name)
+  end
+
   def codegen_primitive_proc_call(node, target_def, call_args)
     location = @call_location
     set_current_debug_location(location) if location && @debug.line_numbers?

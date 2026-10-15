@@ -213,15 +213,14 @@ class Iyi::CodeGenVisitor
     owner = class_var.owner
     case owner
     when VirtualType
-      # iyi: nothing is recorded here, and SPEC.md IV.2 says why. A read
-      # through a virtual owner goes through a main-module function that
-      # dispatches on the receiver's type id, and the main module never
-      # travels — so a consumer owes a function it is never told about. No
-      # measurement has reached it: the one that looked like it turned out to
-      # be a hash keyed on a name, and a rule with nothing behind it is worse
-      # than a gap that is written down.
+      # iyi: a read through a virtual owner goes through a main-module
+      # function that dispatches on the receiver's type id, and the main
+      # module never travels, so the consumer is told: `Owner+::@@name`, the
+      # `+` being what the function is named for (SPEC.md IV.2).
+      iyi_record_unit_virtual_class_var class_var, "#{owner.base_type}+"
       return read_virtual_class_var_ptr(class_var, owner)
     when VirtualMetaclassType
+      iyi_record_unit_virtual_class_var class_var, "#{owner.base_type}+.class"
       return read_virtual_metaclass_class_var_ptr(class_var, owner)
     end
 
@@ -276,8 +275,26 @@ class Iyi::CodeGenVisitor
   end
 
   # iyi: which unit reads a class variable through a virtual owner (SPEC.md
-  # IV.2). The third of the three ways `IyiMod::ClassVarRef` records.
-  # `Owner::@@name`, which is what tells one class variable from another.
+  # IV.2), the third of the ways `IyiMod::ClassVarRef` records: the owner
+  # spelled with its `+` (and `.class` for a class method's read), which is
+  # what the consumer defines `~Owner+::name:read` for. `std/digest`'s
+  # `SHA256#round_constants` reads `@@k` through `SHA256+`, because
+  # `SHA224 < SHA256`, and a program that reached it only through
+  # `std/password`'s artifact ended on "undefined reference to
+  # `~Std::Digest::SHA256+::k:read`". The flag is false: the function reads
+  # the variable on the ordinary path, lazy or not, in the consumer's main
+  # module.
+  private def iyi_record_unit_virtual_class_var(class_var : MetaTypeVar, owner : String) : Nil
+    return if @program.iyi_exported_owners.empty?
+    return if @llvm_mod == @main_mod
+
+    unit = (@program.iyi_unit_class_vars[@llvm_mod.name] ||= {} of String => Bool)
+    name = "#{owner}::#{class_var.name}"
+    unit[name] = unit[name]? || false
+  end
+
+  # iyi: `Owner::@@name`, which is what tells one class variable from another
+  # (SPEC.md IV.2).
   #
   # The owner devirtualised, because `ASN1::BER+` is how a virtual type prints
   # and the name a consumer looks a variable up by is the class's.

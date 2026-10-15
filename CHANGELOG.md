@@ -872,6 +872,21 @@
 
 ### Fixed
 
+- **A program builds from artifacts whose code reads a class variable
+  through a subclassed owner, or asks a value its class.** Both go through
+  functions the main module defines - `~Owner+::name:read`, which
+  dispatches on the receiver's type, and `~metaclass` - and the main
+  module never travels, so the consumer defined them only when its own
+  code made the same read. `import std/password::{Scrypt}` and one
+  `Scrypt.derive` linked from artifacts ended on "undefined reference to
+  `~Std::Digest::SHA256+::k:read`", because `SHA224 < SHA256` makes
+  `SHA256`'s round constants a virtual read, and on `~metaclass` from
+  std/digest's `#{self.class}`. An artifact now records a virtual read as
+  `Owner+::@@name` (`+.class` for a class method's), the consumer defines
+  that read over its own subclasses, and a build that links artifacts
+  defines `~metaclass` whatever its own code asked. Held by the
+  `virtual_class_var` case of `bench/samples_roundtrip.sh`, which failed
+  to link on both names before.
 - **`UUID.v4` draws its bits from the operating system, so a UUID can no
   longer be predicted from another.** It was sixteen outputs of a fresh
   PCG generator: every UUID was a function of 127 bits of generator state

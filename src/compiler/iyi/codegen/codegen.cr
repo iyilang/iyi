@@ -454,6 +454,11 @@ module Iyi
         owner_name, separator, name = qualified.partition("::@@")
         next if separator.empty?
 
+        # `Owner+::@@name` is a read through the virtual owner, and what the
+        # unit calls is `~Owner+::name:read` (`+.class` for a class method's).
+        virtual = owner_name.ends_with?("+.class") ? :metaclass : (owner_name.ends_with?("+") ? :instance : nil)
+        owner_name = owner_name.rchop("+.class").rchop("+") if virtual
+
         # A type private to a file prints without its file, so the name that
         # travelled is the plain one and the program's own namespace does not
         # hold it: Crystal's Windows `ConsoleUtils` is private to
@@ -476,11 +481,42 @@ module Iyi
         owners.each do |owner|
           next unless owner.is_a?(ClassVarContainer)
 
+          if virtual
+            iyi_define_virtual_class_var_read owner, "@@#{name}", virtual == :metaclass
+            next
+          end
+
           class_var = owner.class_vars?.try &.[]?("@@#{name}")
           next unless class_var && class_var.type?
 
           iyi_define_class_var class_var, lazy
         end
+      end
+    end
+
+    # The dispatching read an artifact's unit calls for a class variable it
+    # reached through a virtual owner, defined over this program's own
+    # subclasses - which are the producer's and any the consumer added - the
+    # way `read_virtual_class_var_ptr` defines it for the program's own read.
+    # The variable itself is read inside it on the ordinary path, so its
+    # global, its flag and its initialiser come with it. A type this program
+    # never subclassed has no virtual type, and nothing could call the read.
+    private def iyi_define_virtual_class_var_read(owner : Type, name : String, metaclass : Bool) : Nil
+      virtual = owner.virtual_type!
+      return unless virtual.is_a?(VirtualType)
+
+      if metaclass
+        meta = virtual.metaclass
+        return unless meta.is_a?(VirtualMetaclassType)
+        class_var = meta.lookup_class_var?(name)
+        return unless class_var && class_var.type?
+        fun_name = "~#{class_var_global_name(class_var)}:read"
+        typed_fun?(@main_mod, fun_name) || create_read_virtual_metaclass_var_ptr_function(fun_name, class_var, meta)
+      else
+        class_var = virtual.lookup_class_var?(name)
+        return unless class_var && class_var.type?
+        fun_name = "~#{class_var_global_name(class_var)}:read"
+        typed_fun?(@main_mod, fun_name) || create_read_virtual_class_var_ptr_function(fun_name, class_var, virtual)
       end
     end
 
@@ -704,6 +740,7 @@ module Iyi
         iyi_define_all_type_ids
         iyi_define_all_symbol_values
         iyi_define_all_match_funs
+        iyi_define_metaclass_fun
         iyi_define_all_artifact_const_reads
         iyi_define_msvc_catch_globals if @program.has_flag?("msvc")
       end

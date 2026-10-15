@@ -49,8 +49,15 @@ cd "$WORK" || exit 1
 
 status=0
 
+# Each sample writes and reads its own directory of artifacts. An emitting
+# build writes every module it imports, from what that build compiled, so
+# one shared directory let a later sample rewrite an earlier one's: once
+# `std/time` imported `std/list`, `std_time` wrote `std/iterator`'s artifact
+# from a build that never made a `Stop`, and `std_iterator` read that one.
+# The claim here is per program - its own modules' artifacts, their source
+# gone - so the directory is too.
 for sample in $SAMPLES; do
-  if ! "$IYI" build --emit-iyimod mods -o "from-source-$sample" "$sample.iyi" >"emit-$sample.log" 2>&1; then
+  if ! "$IYI" build --emit-iyimod "mods-$sample" -o "from-source-$sample" "$sample.iyi" >"emit-$sample.log" 2>&1; then
     echo "$sample: writing artifacts failed"
     tail -5 "emit-$sample.log"
     status=1
@@ -65,7 +72,7 @@ rm -rf app std boot kemal
 
 for sample in $SAMPLES; do
   [ -f "from-source-$sample" ] || continue
-  if ! "$IYI" build --use-iyimod mods -o "from-artifact-$sample" "$sample.iyi" >"use-$sample.log" 2>&1; then
+  if ! "$IYI" build --use-iyimod "mods-$sample" -o "from-artifact-$sample" "$sample.iyi" >"use-$sample.log" 2>&1; then
     echo "$sample: building from artifacts failed"
     tail -12 "use-$sample.log"
     status=1

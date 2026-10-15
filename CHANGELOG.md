@@ -14,6 +14,12 @@
   so a program built from the artifact picked another overload. A union
   before `.class` is parenthesized now. Held by
   `spec/compiler/parser/to_s_spec.cr` (#122).
+- **A def compiled narrower than its parameter links from an artifact.**
+  `name_of(klass : Base.class)` called with a subclass, and a private
+  `build(uri : Int32 | String)` reached with a `String`, were declared as
+  written with only the narrower symbol behind them. Their bodies travel
+  now, as a widened public def's already did. Held by
+  `spec/compiler/iyimod_spec.cr` (#123).
 
 ## 0.17.0 — 2026-10-14
 

@@ -5315,6 +5315,49 @@ describe Iyi::IyiMod do
     end
   end
 
+  # Two parameters the producer compiled narrower than written: a class
+  # parameter called with the consumer's own subclass, and a private def's
+  # union reached from a travelling body with one member. Each was declared
+  # as written with no symbol behind it.
+  it "links a def whose parameter is a class or a private union" do
+    with_tempdir("iyimod_narrow_instantiation") do
+      modules = {"lib/u.iyi" => <<-IYI}
+        module lib/u
+
+        pub abstract class Base
+          def initialize
+          end
+        end
+
+        pub def name_of(klass : Base.class) : String
+          klass.to_s
+        end
+
+        pub def open(uri : Int32 | String) : String
+          build(uri)
+        end
+
+        def build(uri : Int32 | String) : String
+          "built \#{uri}"
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/u::*
+
+        class Sub < Base
+        end
+
+        puts name_of(Sub)
+        puts open("x")
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "Main::Sub\nbuilt x\n"
+      from_artifact.should eq from_source
+    end
+  end
+
   # `@items = [] of String` in a type body runs in `initialize`, the way the
   # typed `@items : Array(String) = [] of String` does, and travels the same
   # way. Read as a statement it refused every consumer: "has code inside a

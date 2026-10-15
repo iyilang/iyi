@@ -1018,7 +1018,11 @@ module Iyi
 
             signature = IyiMod.signature(item.def, check_block: false)
             carried_functions << signature
-            if IyiMod.caller_instantiated?(item.def) || IyiMod.answer_travels?(item.def)
+            # A widened one too: an exported body that travels calls it at
+            # what it holds, and the consumer keys that call on the
+            # declaration (`iyi_widened_parameters?`).
+            if IyiMod.caller_instantiated?(item.def) || iyi_widened_parameters?(type, item.def) ||
+               IyiMod.answer_travels?(item.def)
               iyi_record_mono_body program, filename, module_name, signature, item.def
             end
           end
@@ -2692,11 +2696,16 @@ module Iyi
     # instantiated `area_of(x : Shape)` at each type its callers passed -
     # `area_of<Sq>`, and `area_of<Main::Tri>` for the consumer's own type -
     # while a consumer reading the declaration asked for `area_of<Shape>`.
+    #
+    # So is a class with subclasses written `.class`. `Base.class` already
+    # looks up as `Base+.class`, its own virtual type, and the producer
+    # emitted `name_of<Main::Sub.class>` for a call passing `Sub`.
     private def iyi_widened_type?(owner : Type, written : ASTNode) : Bool
       declared = owner.lookup_type?(written)
       return false unless declared.is_a?(Type)
       return false if declared.is_a?(TypeParameter)
-      declared.is_a?(UnionType) || declared.module? || declared.virtual_type != declared
+      declared.is_a?(UnionType) || declared.module? || declared.is_a?(VirtualMetaclassType) ||
+        declared.virtual_type != declared
     end
 
     # Records one body against `IyiMod.mono_body_key`.

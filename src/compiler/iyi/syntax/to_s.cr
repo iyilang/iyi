@@ -1268,8 +1268,14 @@ module Iyi
       false
     end
 
+    # iyi: `Int32?.class` is a `Union` without parens; written bare it reads
+    # back as `Int32 | Nil.class`.
     def visit(node : Metaclass)
-      node.name.accept self
+      name = node.name
+      needs_parens = name.is_a?(Union) && !name.parens?
+      @str << "(" if needs_parens
+      name.accept self
+      @str << ")" if needs_parens
       @str << ".class"
       false
     end

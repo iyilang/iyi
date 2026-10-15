@@ -9,6 +9,11 @@
   `x.as(String?)` on a `Val` was typed `Val` and compiled as an upcast, so
   `"s"` read back as garbage and `nil` as `""`. The cast narrows to
   `String | Nil` now. Held by `spec/compiler/semantic/cast_spec.cr` (#121).
+- **An `Int32?.class` parameter reads back from an artifact.** It was
+  written as `Int32 | ::Nil.class`, which reads as `Int32 | (Nil.class)`,
+  so a program built from the artifact picked another overload. A union
+  before `.class` is parenthesized now. Held by
+  `spec/compiler/parser/to_s_spec.cr` (#122).
 
 ## 0.17.0 — 2026-10-14
 

@@ -522,6 +522,10 @@ prove_broken "a non-ASCII name written without pax" "dir/çay ğ: a pax header o
 prove_broken "a name climbing out with .. extracted" "tar slip ../evil.txt" \
   '    return "the name climbs out with .." if name.split('"'"'/'"'"').includes?("..")
 ' ''
+prove_broken "a Windows drive path named only for its separator" "Windows: \"C:\\\\evil\" is absolute" \
+  'path.starts_with?("\\")
+    return false if path.bytesize < 3' 'path.starts_with?("\\")
+    return false'
 prove_broken "a link climbing out made" "a symbolic link climbing out" \
   '        return "the target climbs out with .." if ups > depth
 ' ''

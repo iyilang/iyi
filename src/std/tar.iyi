@@ -516,7 +516,7 @@ pub class TarReader
   # *windows* refuses the separator and the drive Windows reads in it.
   def self.unsafe_name(name : String, windows : Bool = false) : String?
     return "the name is empty" if name.empty?
-    return "the name is absolute" if name.starts_with?("/")
+    return "the name is absolute" if name.starts_with?("/") || (windows && TarReader.windows_absolute?(name))
     return "the name holds a \\, a separator on Windows" if windows && name.includes?("\\")
     return "the name holds a :, a drive or a stream on Windows" if windows && name.includes?(":")
     return "the name holds a NUL byte" if name.includes?("\u0000")
@@ -531,7 +531,7 @@ pub class TarReader
   # the `..` would climb from wherever that points.
   def self.unsafe_link(name : String, target : String, windows : Bool = false) : String?
     return "the target is empty" if target.empty?
-    return "the target is absolute" if target.starts_with?("/")
+    return "the target is absolute" if target.starts_with?("/") || (windows && TarReader.windows_absolute?(target))
     return "the target holds a \\, a separator on Windows" if windows && target.includes?("\\")
     return "the target holds a :, a drive or a stream on Windows" if windows && target.includes?(":")
     return "the target holds a NUL byte" if target.includes?("\u0000")
@@ -548,6 +548,18 @@ pub class TarReader
       end
     end
     nil
+  end
+
+  # A path Windows reads from a root rather than from where it is put:
+  # `\x`, or a drive with its separator, `C:\x` and `C:/x`. Refused anyway
+  # for its `\` or its `:`, but the sentence names what it is. `C:x`, the
+  # drive's own working directory, is not one, and is refused for its `:`.
+  def self.windows_absolute?(path : String) : Bool
+    return true if path.starts_with?("\\")
+    return false if path.bytesize < 3
+    p = path.to_unsafe
+    letter = (p[0] | 0x20_u8) >= 97_u8 && (p[0] | 0x20_u8) <= 122_u8
+    letter && p[1] == 58_u8 && (p[2] == 47_u8 || p[2] == 92_u8)
   end
 
   # *path*'s parts, without empty ones and `.`.

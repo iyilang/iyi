@@ -655,6 +655,11 @@ slip(work, raw("dev", '3', 0_i64) + END_BLOCKS, "\"dev\" is a character device, 
 slip(work, raw("./", '5', 0_i64) + raw(".", '0', 0_i64) + END_BLOCKS, "names the directory itself", "a file named .")
 assert_true TarReader.unsafe_name("a\\..\\evil", windows: true).as(String).includes?("separator on Windows"), "Windows: a backslash"
 assert_true TarReader.unsafe_name("C:evil", windows: true).as(String).includes?("a drive"), "Windows: a drive"
+["C:\\evil", "c:/evil", "\\evil", "\\\\server\\share\\evil"].each do |name|
+  assert_true TarReader.unsafe_name(name, windows: true) == "the name is absolute", "Windows: #{name.inspect} is absolute"
+  assert_true TarReader.unsafe_link("l", name, windows: true) == "the target is absolute", "Windows: a link to #{name.inspect} is absolute"
+end
+assert_true TarReader.unsafe_name("C:\\evil").nil? || !TarReader.unsafe_name("C:\\evil").as(String).includes?("absolute"), "elsewhere a drive is a name's own"
 assert_true TarReader.unsafe_name("Foo::Bar.3pm").nil?, "a colon is a name's own elsewhere"
 assert_true TarReader.unsafe_link("a/b/l", "../../x").nil? && TarReader.unsafe_link("l", "./a/./b").nil?, "links that stay inside"
 # A file cut short is not left behind.

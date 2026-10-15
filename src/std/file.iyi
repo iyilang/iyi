@@ -41,7 +41,6 @@ import std/path::{Path}
     # compile on darwin.
     fun stat = stat64(path : UInt8*, buf : Void*) : Int32
     fun lstat = lstat64(path : UInt8*, buf : Stat*) : Int32
-    fun fstat = fstat64(fd : Int32, buf : Stat*) : Int32
     fun rename(oldpath : UInt8*, newpath : UInt8*) : Int32
     fun link(oldpath : UInt8*, newpath : UInt8*) : Int32
     fun symlink(target : UInt8*, linkpath : UInt8*) : Int32

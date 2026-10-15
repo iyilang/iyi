@@ -343,7 +343,9 @@ case "$(uname -s)" in
     # and file names beside it are what this exercise's binary asks for on
     # top, each libSystem's, which the `allowed_libs` check below proves
     # independently: this binary still links libSystem and nothing else.
-    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect getsockname listen open recv send setsockopt socket unlink"
+    # `fstat64` is the runtime's read asking whether standard input is a
+    # regular file, which a socket's read shares the code of.
+    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect fstat64 getsockname listen open recv send setsockopt socket unlink"
     ;;
 esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"

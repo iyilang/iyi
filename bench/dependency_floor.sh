@@ -147,8 +147,8 @@ COMPILER="$REPO/.build/iyi"
 # mkdir, rmdir) and `std/udp` (sendto, recvfrom) joined the way `IyiSocket`
 # did: libSystem is darwin's interface, and on Linux each is a raw syscall
 # the object does not name. What the modules declare but their gates never
-# reach (fstat64, chown) is not on the list; the floor is
-# what a program leaves undefined, not what a module could ask.
+# reach (chown) is not on the list; the floor is what a program leaves
+# undefined, not what a module could ask.
 # `fcntl` and `getsockopt` joined when the socket started parking: every
 # socket is O_NONBLOCK now, and a connect that is in progress reads
 # SO_ERROR when the poller says it finished. Linux does both by syscall.
@@ -195,7 +195,15 @@ COMPILER="$REPO/.build/iyi"
 # the optimiser cannot see. libSystem re-exports compiler-rt, which
 # defines them; Linux links libgcc's copies into the program; Windows has
 # neither and the prelude's win32 arm defines them itself.
-ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername getuid getgid getpwuid_r getpwnam_r getgrgid_r getgrnam_r getgrouplist"
+# `fstat64` came back off that unreached list for a hang: a program
+# reading a regular file as standard input waits on kqueue before each
+# read, and kqueue's EVFILT_READ never fires at a file's end, so darwin
+# asks whether standard input is a regular file and reads it unwaited
+# (`bench/std_io_exercise.sh` holds it). Every program that reads a
+# stream - standard input, a pipe, a socket - links the name, and only
+# standard input makes the call; Linux's epoll refuses a regular file
+# and says the same by syscall.
+ALLOWED_SYMBOLS_DARWIN="$FLOOR_BASE_DARWIN __divti3 __modti3 __udivti3 __umodti3 __floattidf __floattisf __floatuntidf __floatuntisf accept access bind chmod close connect environ getsockname isatty listen open pthread_join recv send setsockopt socket unlink utimes stat64 lstat64 rename link symlink readlink realpath truncate opendir readdir closedir rewinddir getcwd chdir mkdir rmdir sendto recvfrom fcntl getsockopt lseek arc4random_buf posix_spawn posix_spawn_file_actions_init posix_spawn_file_actions_destroy posix_spawn_file_actions_adddup2 posix_spawn_file_actions_addchdir_np posix_spawnattr_init posix_spawnattr_destroy posix_spawnattr_setflags posix_spawnattr_setsigmask waitpid kill _NSGetExecutablePath gethostname getpagesize tcgetattr tcsetattr ioctl getpeername getuid getgid getpwuid_r getpwnam_r getgrgid_r getgrnam_r getgrouplist fstat64"
 # `std/system_roots` reads the roots darwin trusts, which are kept behind
 # Security.framework and nowhere else - no file holds them - and arrive in
 # CoreFoundation's containers: the anchors and the administrator's and

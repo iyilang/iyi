@@ -529,6 +529,55 @@ m.rewind
 puts m.read_char'
 
 # ---------------------------------------------------------------------------
+# Standard input from a file and from a pipe
+# ---------------------------------------------------------------------------
+#
+# The runtime waits for a stream before it reads one, and on darwin that
+# wait is kqueue's, whose EVFILT_READ on a regular file fires only while
+# the offset is short of the end: a program reading `< file` read every
+# line and then waited forever for the end. Two of the crypto gates' Python
+# oracles hung there for an hour each. The same lines, through a pipe, are
+# the wait that still has to happen.
+echo
+echo "== standard input read to its end, from a file and from a pipe"
+cat >"$WORK/lines.iyi" <<'IYI'
+module lines
+
+count = 0
+bytes = 0
+while line = STDIN.gets(chomp: true)
+  count = count + 1
+  bytes = bytes + line.bytesize
+end
+puts "#{count} #{bytes}"
+IYI
+if ! "$IYI" build -o "$WORK/lines" "$WORK/lines.iyi" >"$WORK/lines.build.log" 2>&1; then
+  echo "  the line counter did not build"
+  sed -n '1,6p' "$WORK/lines.build.log"
+  status=1
+else
+  i=0
+  while [ "$i" -lt 2000 ]; do
+    printf 'line %d of the input\n' "$i"
+    i=$((i + 1))
+  done >"$WORK/lines.txt"
+  want="2000 $(($(wc -c <"$WORK/lines.txt" | tr -d ' ') - 2000))"
+  got_file="$(timeout -k 5 30 "$WORK/lines" <"$WORK/lines.txt" 2>&1)"
+  file_code=$?
+  got_pipe="$(cat "$WORK/lines.txt" | timeout -k 5 30 "$WORK/lines" 2>&1)"
+  pipe_code=$?
+  if [ "$file_code" -ne 0 ] || [ "$got_file" != "$want" ]; then
+    echo "  FAIL: < file answered \"$got_file\" (exit $file_code), not \"$want\": 124 is the wait at the end that never ended"
+    status=1
+  elif [ "$pipe_code" -ne 0 ] || [ "$got_pipe" != "$want" ]; then
+    echo "  FAIL: a pipe answered \"$got_pipe\" (exit $pipe_code), not \"$want\""
+    status=1
+  else
+    echo "  2000 lines from a file and from a pipe, each read to its end"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Dependency floor audit
 # ---------------------------------------------------------------------------
 
@@ -563,8 +612,9 @@ case "$(uname -s)" in
     # and file names beside it are what this exercise's binary asks for on
     # top, each libSystem's, which the `allowed_libs` check below proves.
     # `lseek` is std/file's `pos`, which the exercise asks a file for to
-    # prove std/io's `Memory#pos` answers the same type.
-    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect getsockname listen lseek open recv send setsockopt socket unlink"
+    # prove std/io's `Memory#pos` answers the same type. `fstat64` is the
+    # runtime's read asking whether standard input is a regular file.
+    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect fstat64 getsockname listen lseek open recv send setsockopt socket unlink"
     ;;
 esac
 if [ -n "$DUMPBIN" ]; then

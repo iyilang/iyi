@@ -576,7 +576,9 @@ case "$(uname -s)" in
     # The base is every darwin program's (bench/floor_base.sh); the socket
     # and file names beside it are what this exercise's binary asks for on
     # top, each libSystem's, which the `allowed_libs` check below proves.
-    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect environ getsockname listen open recv send setsockopt socket unlink"
+    # `fstat64` is the runtime's read asking whether standard input is a
+    # regular file, which a socket's read shares the code of.
+    allowed_symbols="$FLOOR_BASE_DARWIN accept bind chmod close connect environ fstat64 getsockname listen open recv send setsockopt socket unlink"
     ;;
 esac
 allowed_libs="$FLOOR_LIBS_PROGRAM"

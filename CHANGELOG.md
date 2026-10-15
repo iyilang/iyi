@@ -1129,6 +1129,21 @@
 
 ### Fixed
 
+- **A program on darwin reads standard input redirected from a file to its
+  end, and stops.** The runtime waits for a stream before it reads it, and
+  darwin's wait is kqueue's. kqueue takes a regular file where Linux's
+  epoll refuses one, and its EVFILT_READ fires only while the file's
+  offset is short of the end. So `./prog < input.txt` read every line,
+  then waited for the end of input forever. CI's crypto gates feed their
+  oracle programs this way, and two of them held a darwin runner for an
+  hour each until the job's limit. darwin now asks `fstat64` whether
+  standard input is a regular file and reads one without the wait, which
+  is what epoll's refusal comes to on Linux. `fstat64` joins darwin's
+  floor with that reason (`bench/dependency_floor.sh`), and std/file's
+  unused declaration of it is gone, since a symbol takes one signature.
+  Held by `bench/std_io_exercise.sh`: 2000 lines read to their end from
+  a file and from a pipe, under a timeout.
+
 - **An ECDSA signature whose r or s is tagged ENUMERATED is refused.**
   `DerValue#integer` and `integer_bytes` took an ENUMERATED (0x0a) as an
   INTEGER (0x02), since the two are written alike. So std/ecdsa verified
@@ -21110,7 +21125,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 21,364-line library and nothing else. Every other
+  written against iyi's own 21,389-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

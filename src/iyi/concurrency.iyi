@@ -243,10 +243,12 @@ end
 {% end %}
 
 {% if flag?(:darwin) %}
-  # libSystem, reopened for the five calls the runtime makes. `__error`
-  # is how darwin spells errno's address; the poller needs it to tell
-  # EINTR from a real failure, because a library call answers -1 where a
-  # raw syscall answers -errno.
+  # libSystem, reopened for the calls the runtime makes. `__error` is how
+  # darwin spells errno's address; the poller needs it to tell EINTR from
+  # a real failure, because a library call answers -1 where a raw syscall
+  # answers -errno. `fstat64` is here for a read's one question, whether
+  # standard input is a regular file (`IyiScheduler.read_posix`); bound
+  # here alone, since one C symbol takes one signature in a program.
   lib LibC
     fun mmap(addr : Void*, len : UInt64, prot : Int32, flags : Int32, fd : Int32, offset : Int64) : Void*
     fun mprotect(addr : Void*, len : UInt64, prot : Int32) : Int32
@@ -254,6 +256,7 @@ end
     fun kevent(kq : Int32, changelist : Void*, nchanges : Int32, eventlist : Void*, nevents : Int32, timeout : Void*) : Int32
     fun clock_gettime_nsec_np(clock_id : Int32) : UInt64
     fun error_location = __error : Int32*
+    fun fstat = fstat64(fd : Int32, buf : Void*) : Int32
   end
 
   # One kevent change, packed by hand for the reason the epoll_event is:
@@ -2297,9 +2300,31 @@ class IyiScheduler
   end
 
   def self.read_posix(fd : Int32, buffer : Void*, count : UInt64) : Int64 | Cancelled
+    {% if flag?(:darwin) %}
+      # kqueue takes a regular file, where epoll refuses one, and its
+      # EVFILT_READ fires only while the file's offset is short of its end:
+      # a wait at the end never ended, and a program reading `< file` hung
+      # after its last line. A file never blocks, so it is read unwaited,
+      # which is what epoll's refusal comes to on Linux. Standard input
+      # alone is asked: it is where a shell puts a file, a file a program
+      # opens is read through std/file, and a socket's read is not made to
+      # pay for the question.
+      return __iyi_read(fd, buffer, count) if fd == 0 && regular_file?(fd)
+    {% end %}
     wait_readable_posix(fd)!
     __iyi_read(fd, buffer, count)
   end
+
+  {% if flag?(:darwin) %}
+    # Whether *fd* is a regular file: S_IFREG in `st_mode`, the two bytes
+    # at offset 4 of darwin's `struct stat64`, which is 144 bytes long.
+    def self.regular_file?(fd : Int32) : Bool
+      stat = uninitialized UInt64[24]
+      bytes = pointerof(stat).as(Pointer(UInt8))
+      return false if LibC.fstat(fd, bytes.as(Void*)) != 0
+      ((bytes + 5).value & 0xF0_u8) == 0x80_u8
+    end
+  {% end %}
 
   # The fiber waiting on *fd* in *direction*, off the list and the poller.
   def self.io_take(fd : Int32, direction : Int32) : IyiFiber?

@@ -43,7 +43,6 @@ def read_response(c : IyiSocket) : String
   end
 end
 
-
 # `serve DIR` prints a port and serves DIR until `/stop`, for the gate
 # script's Python client.
 args = Program.args

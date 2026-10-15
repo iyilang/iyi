@@ -35,7 +35,6 @@ def answer(&work : -> String) : String
   said
 end
 
-
 # Modes the gate script runs: `lines` prints Set-Cookie lines for Python's
 # `http.cookies` to read; `serve` prints a port and answers until `/stop`.
 args = Program.args

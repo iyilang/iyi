@@ -188,7 +188,16 @@ else
     echo "  -Dgc_boehm: 500 held targets answered, $cleared_count of 500 cleared through libgc's links"
   fi
 fi
-if ! "$IYI" build --no-codegen --target wasm32-wasi -o "$WORK/wasm" "$WORK/collectors.iyi" >"$WORK/wasm.build.log" 2>&1; then
+# Windows' LLVM carries x86 and AArch64 only (bench/verbs_exercise.sh holds
+# that refusal); Linux's and darwin's carry WebAssembly, so there a failed
+# compile is a failure.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) wasm_backend=0 ;;
+  *) wasm_backend=1 ;;
+esac
+if [ "$wasm_backend" -eq 0 ]; then
+  echo "  wasm32: not built here, this compiler's LLVM has no WebAssembly back end"
+elif ! "$IYI" build --no-codegen --target wasm32-wasi -o "$WORK/wasm" "$WORK/collectors.iyi" >"$WORK/wasm.build.log" 2>&1; then
   echo "  wasm32: the program does not compile"
   tail -8 "$WORK/wasm.build.log"
   status=1

@@ -4,6 +4,34 @@
 
 ### Added
 
+- **`std/tls`: a TLS 1.3 client (RFC 8446), the last piece, on iyi's own
+  cryptography and certificates.** `TlsClient.connect(host, port)` makes a
+  connection whose server's chain std/x509 checked to the system's roots
+  (or `TlsConfig#roots`) for that host, then `read`, `write` and `close`;
+  `TlsClient.over(socket, host)` does the same over a connected socket.
+  TLS 1.3 alone, with AES-128-GCM, AES-256-GCM and ChaCha20-Poly1305 and
+  an X25519 key exchange, a HelloRetryRequest answered for a cookie and
+  refused for another group. The server's CertificateVerify is checked
+  under ECDSA on the curve its scheme names or RSASSA-PSS, never PKCS #1
+  v1.5, and its Finished in constant time before anything is sent under
+  the application keys. SNI, ALPN, the middlebox ChangeCipherSpec, an empty
+  Certificate for a server that asks, KeyUpdate, NewSessionTicket set
+  aside, close_notify. Every extension or record the protocol does not
+  allow is refused with a sentence naming it and its alert. There is no
+  switch that turns a check off. `TlsKeySchedule` and `TlsRecordCipher`
+  are the key schedule and record protection on their own. Held by
+  `bench/std_tls_exercise.sh`, plain and `--release`:
+  - RFC 8448's simple 1-RTT trace byte for byte, every secret, both
+    Finished values, and the records sealed and opened;
+  - 35 scenarios of `bench/std_tls_server.py`, a TLS 1.3 server over
+    Python's cryptography that breaks one rule each, 13 holding and 22
+    refused for their reasons;
+  - OpenSSL's `s_server` in 11 configurations;
+  - 19 broken copies of the module, each caught.
+  
+  Measured beyond the gate: `HEAD /` to Google, GitHub, Cloudflare,
+  example.com, Let's Encrypt and Wikipedia over the system's roots. Not
+  audited, and not to be called secure until it is.
 - **`std/system_roots`: the roots the operating system trusts, read as
   std/x509 certificates, the fifth piece of a TLS client.**
   `X509.verify` needs roots, and they are each platform's own.

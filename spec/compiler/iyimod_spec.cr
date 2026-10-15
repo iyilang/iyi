@@ -5407,6 +5407,56 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A generic body with macro code travels as text and is expanded by the
+  # consumer, under the artifact's path. That path is no `.iyi`, so the
+  # expansion was lexed as the other language's and `raw!` was a method name.
+  it "reads a propagation in a travelled body's macro code" do
+    with_tempdir("iyimod_macro_propagate") do
+      modules = {"lib/r.iyi" => <<-IYI}
+        module lib/r
+
+        pub class Fail
+          def initialize
+          end
+        end
+
+        impl Error for Fail
+          def message : String
+            "fail"
+          end
+        end
+
+        pub class Reader
+          def initialize
+          end
+
+          def raw : Int32 | Fail
+            7
+          end
+
+          def get(klass : T.class) : T | Fail forall T
+            {% if T == Int32 %}
+              value = raw!
+              value
+            {% else %}
+              Fail.new
+            {% end %}
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/r::*
+
+        puts Reader.new.get(Int32).or_panic
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "7\n"
+      from_artifact.should eq from_source
+    end
+  end
+
   # `@items = [] of String` in a type body runs in `initialize`, the way the
   # typed `@items : Array(String) = [] of String` does, and travels the same
   # way. Read as a statement it refused every consumer: "has code inside a

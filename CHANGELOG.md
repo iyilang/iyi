@@ -29,6 +29,12 @@
   counted `do` and not `end!` as an `end`, so a macro holding `each_item
   do |i| ... end!` was "unterminated macro". Held by
   `spec/compiler/parser/parser_spec.cr` (#126).
+- **A travelled body's macro code reads `!` as propagation.** A generic
+  method with `{% if %}` in its body travels as text, and its expansion
+  ended at the artifact's path, which is no `.iyi`, so `raw!` was read as
+  a call to a method named `raw!`. The expansion is read as iyi when the
+  artifact was built from iyi. Held by `spec/compiler/iyimod_spec.cr`
+  (#127).
 
 ## 0.17.0 — 2026-10-14
 

@@ -4,6 +4,26 @@
 
 ### Added
 
+- **`std/rsa`: RSA signatures checked, PKCS #1 v1.5 and PSS (RFC 8017),
+  the second piece of a TLS client.** `RsaPublicKey.from_spki` reads the
+  key a certificate carries (rsaEncryption with its NULL parameters) and
+  `from_pkcs1` a bare RSAPublicKey, refusing a modulus that is even or
+  outside 1024 to 16384 bits and an exponent that is even, under 3 or
+  past 2^31 - 1. `verify_pkcs1v15` builds the one encoding a signature
+  over the message can have and compares the whole of it, rather than
+  parsing what the signature opens to, which is how the Bleichenbacher
+  and BERserk forgeries got through; `verify_pss` is EMSA-PSS-VERIFY with
+  MGF1, the salt as long as the digest unless named. SHA-1, SHA-256,
+  SHA-384 and SHA-512. A signature that is not one is `false`, whatever
+  the reason. A signature that is not k bytes long is refused as RFC 8017
+  says, where OpenSSL's PSS path takes one with its leading zero byte
+  dropped. Held by `bench/std_rsa_exercise.sh`, plain and `--release`:
+  signatures Python's cryptography made and encodings made by hand that
+  each break one rule with the digest still matching; 600 signatures over
+  six key sizes, both schemes, four hashes and every salt length PSS
+  allows, half of them broken, against Python's verdicts; every RSA root
+  certificate on the machine verified with its own key (82 here); and 13
+  broken copies of the module each caught.
 - **`std/asn1`: ASN.1 values read from DER (X.690), the first piece of
   a TLS client.** A certificate, a key and a signature are DER, and
   nothing here could read one. `Der.parse(bytes)` answers the one value

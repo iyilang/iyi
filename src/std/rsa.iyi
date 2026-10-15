@@ -1,0 +1,328 @@
+# RSA signatures checked (RFC 8017), written in iyi: PKCS #1 v1.5 and
+# PSS, over SHA-1, SHA-256, SHA-384 and SHA-512.
+#
+#     import std/rsa::{RsaPublicKey, RsaHash, RsaError}
+#
+#     key = RsaPublicKey.from_spki(spki_der).or_panic   # what X.509 carries
+#     key.verify_pkcs1v15(RsaHash::SHA256, message, signature)   # Bool
+#     key.verify_pss(RsaHash::SHA256, message, signature)        # salt as long as the hash
+#     key.verify_pss(RsaHash::SHA384, message, signature, salt_length: 0)
+#
+# Checking only. A TLS client verifies a server's signatures and signs
+# nothing, so there is no private key here, no padding to make and no
+# timing to guard: every value checked is public.
+#
+# A key is read from DER through std/asn1: a SubjectPublicKeyInfo naming
+# rsaEncryption with NULL parameters (RFC 3279 section 2.3.1), or a bare
+# RSAPublicKey. What is not a key is an `RsaError`: a modulus that is even,
+# under 1024 bits or over 16384; an exponent that is even, under 3 or over
+# 2^31 - 1, the bound Go's crypto/rsa holds a public exponent to.
+#
+# `verify_pkcs1v15` builds the one encoding a signature over the message
+# can have - 0x00 0x01, the 0xFF padding, 0x00, the hash's DigestInfo and
+# the digest - and compares the whole of it. It does not parse what the
+# signature opens to: the forgeries of Bleichenbacher (2006) and of the
+# BERserk family were parsers that took a DigestInfo with room left over.
+#
+# `verify_pss` is EMSA-PSS-VERIFY (section 9.1.2), its mask MGF1 over the
+# same hash. The salt is as long as the digest unless *salt_length* says
+# otherwise: TLS 1.3 asks for exactly that (RFC 8446 section 4.2.3), and a
+# certificate's RSASSA-PSS parameters name theirs.
+#
+# A signature that is not one is `false`, whatever the reason: the wrong
+# length, a value not below the modulus, padding that does not match. A
+# caller acts on the answer alone, and a reason given for a failed check
+# is what the padding-oracle attacks were made of.
+#
+# Pure computation: std/big's arithmetic, std/digest's hashes.
+
+module std/rsa
+
+import std/asn1::{Der, DerValue, DerTag, Asn1Error}
+import std/big::{BigInt}
+import std/digest::{SHA1, SHA256, SHA384, SHA512}
+
+# What reading a key answers for bytes that are not an RSA public key.
+pub struct RsaError
+  getter message : String
+
+  def initialize(message : String)
+    @message = "rsa: #{message}"
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for RsaError
+  def message : String
+    @message
+  end
+end
+
+# The hashes a signature is made over.
+pub enum RsaHash
+  SHA1
+  SHA256
+  SHA384
+  SHA512
+
+  def digest(data : Array(UInt8)) : Array(UInt8)
+    case self
+    when RsaHash::SHA1   then Std::Digest::SHA1.hash_bytes(data)
+    when RsaHash::SHA256 then Std::Digest::SHA256.hash_bytes(data)
+    when RsaHash::SHA384 then Std::Digest::SHA384.hash_bytes(data)
+    else                      Std::Digest::SHA512.hash_bytes(data)
+    end
+  end
+
+  def size : Int32
+    case self
+    when RsaHash::SHA1   then 20
+    when RsaHash::SHA256 then 32
+    when RsaHash::SHA384 then 48
+    else                      64
+    end
+  end
+
+  # The DER of a DigestInfo up to the digest itself (RFC 8017 section 9.2,
+  # note 1): the algorithm's OID with NULL parameters, then the OCTET
+  # STRING's header.
+  def digest_info_prefix : Array(UInt8)
+    hex = case self
+          when RsaHash::SHA1   then "3021300906052b0e03021a05000414"
+          when RsaHash::SHA256 then "3031300d060960864801650304020105000420"
+          when RsaHash::SHA384 then "3041300d060960864801650304020205000430"
+          else                      "3051300d060960864801650304020305000440"
+          end
+    RsaBytes.from_hex(hex)
+  end
+end
+
+pub struct RsaPublicKey
+  getter modulus : BigInt
+  getter exponent : BigInt
+  # The modulus's length in bits, and in bytes: a signature's length.
+  getter bits : Int32
+  getter size : Int32
+
+  RSA_ENCRYPTION = "1.2.840.113549.1.1.1"
+  MIN_BITS       =  1024
+  MAX_BITS       = 16384
+
+  # The key from a modulus and an exponent, each big-endian.
+  def self.new(modulus : Array(UInt8), exponent : Array(UInt8)) : RsaPublicKey | RsaError
+    n = RsaBytes.to_big(modulus)
+    e = RsaBytes.to_big(exponent)
+    bits = RsaBytes.bit_length(modulus)
+    return RsaError.new("a modulus of #{bits} bits, under the #{MIN_BITS} this takes") if bits < MIN_BITS
+    return RsaError.new("a modulus of #{bits} bits, past the #{MAX_BITS} this takes") if bits > MAX_BITS
+    return RsaError.new("an even modulus, which is no product of two odd primes") if n.even?
+    ebits = RsaBytes.bit_length(exponent)
+    return RsaError.new("a public exponent past 2^31 - 1") if ebits > 31
+    return RsaError.new("a public exponent under 3") if e < BigInt.new(3)
+    return RsaError.new("an even public exponent") if e.even?
+    RsaPublicKey.new(n, e, bits)
+  end
+
+  def initialize(@modulus : BigInt, @exponent : BigInt, @bits : Int32)
+    @size = (@bits + 7) // 8
+  end
+
+  # An RSAPublicKey (RFC 8017 appendix A.1.1): SEQUENCE { modulus, exponent }.
+  def self.from_pkcs1(der : Array(UInt8)) : RsaPublicKey | RsaError
+    value = RsaBytes.asn1_value(Der.parse(der))!
+    fields = RsaBytes.asn1_values(value.sequence)!
+    return RsaError.new("an RSAPublicKey of #{fields.size} values, not 2") unless fields.size == 2
+    n = RsaBytes.asn1_bytes(fields[0].unsigned_integer)!
+    e = RsaBytes.asn1_bytes(fields[1].unsigned_integer)!
+    RsaPublicKey.new(n, e)
+  end
+
+  # A SubjectPublicKeyInfo (RFC 5280 section 4.1.2.7) naming rsaEncryption.
+  def self.from_spki(der : Array(UInt8)) : RsaPublicKey | RsaError
+    value = RsaBytes.asn1_value(Der.parse(der))!
+    from_spki(value)
+  end
+
+  def self.from_spki(value : DerValue) : RsaPublicKey | RsaError
+    fields = RsaBytes.asn1_values(value.sequence)!
+    return RsaError.new("a SubjectPublicKeyInfo of #{fields.size} values, not 2") unless fields.size == 2
+    algorithm = RsaBytes.asn1_values(fields[0].sequence)!
+    return RsaError.new("an AlgorithmIdentifier with no algorithm") if algorithm.empty?
+    oid = RsaBytes.asn1_text(algorithm[0].oid)!
+    return RsaError.new("a key for #{oid}, not rsaEncryption (#{RSA_ENCRYPTION})") unless oid == RSA_ENCRYPTION
+    unless algorithm.size == 2 && algorithm[1].universal?(DerTag::NULL) && !algorithm[1].null.is_a?(Asn1Error)
+      return RsaError.new("rsaEncryption's parameters are not the NULL RFC 3279 gives it")
+    end
+    from_pkcs1(RsaBytes.asn1_bytes(fields[1].bit_string)!)
+  end
+
+  # Whether *signature* is the PKCS #1 v1.5 signature (RSASSA-PKCS1-v1_5,
+  # section 8.2.2) of *message* under *hash*.
+  def verify_pkcs1v15(hash : RsaHash, message : Array(UInt8) | String, signature : Array(UInt8)) : Bool
+    em = open(signature)
+    return false unless em
+    prefix = hash.digest_info_prefix
+    t_len = prefix.size + hash.size
+    return false if @size < t_len + 11
+    expected = Array(UInt8).new(@size, 0xFF_u8)
+    expected[0] = 0_u8
+    expected[1] = 1_u8
+    expected[@size - t_len - 1] = 0_u8
+    prefix.each_with_index { |b, i| expected[@size - t_len + i] = b }
+    hash.digest(RsaBytes.of(message)).each_with_index { |b, i| expected[@size - hash.size + i] = b }
+    em == expected
+  end
+
+  # Whether *signature* is an RSASSA-PSS signature (section 8.1.2) of
+  # *message* under *hash*, MGF1 over the same hash, with a salt of
+  # *salt_length* bytes (the digest's length when nil).
+  def verify_pss(hash : RsaHash, message : Array(UInt8) | String, signature : Array(UInt8), salt_length : Int32? = nil) : Bool
+    s_len = salt_length || hash.size
+    return false if s_len < 0
+    m = open_value(signature)
+    return false unless m
+    # EMSA-PSS-VERIFY (section 9.1.2) with emBits = modBits - 1, whose
+    # encoding is one byte shorter when modBits - 1 is a multiple of 8.
+    em_bits = @bits - 1
+    em_len = (em_bits + 7) // 8
+    em = RsaBytes.to_bytes(m, em_len)
+    return false unless em
+    h_len = hash.size
+    return false if em_len < h_len + s_len + 2
+    return false unless em[em_len - 1] == 0xBC_u8
+    db_len = em_len - h_len - 1
+    h = em[db_len, h_len]
+    top = 8 * em_len - em_bits
+    return false unless top == 0 || em[0] >> (8 - top) == 0_u8
+    mask = RsaBytes.mgf1(hash, h, db_len)
+    db = Array(UInt8).new(db_len) { |i| em[i] ^ mask[i] }
+    db[0] = db[0] & (0xFF_u8 >> top) if top > 0
+    pad = db_len - s_len - 1
+    i = 0
+    while i < pad
+      return false unless db[i] == 0_u8
+      i = i + 1
+    end
+    return false unless db[pad] == 1_u8
+    m_prime = Array(UInt8).new(8, 0_u8) + hash.digest(RsaBytes.of(message)) + db[db_len - s_len, s_len]
+    hash.digest(m_prime) == h
+  end
+
+  # RSAVP1 (section 5.2.2) and I2OSP into the modulus's length: the
+  # encoded message a signature opens to, or nil for one that is not a
+  # signature under this key.
+  private def open(signature : Array(UInt8)) : Array(UInt8)?
+    m = open_value(signature)
+    return nil unless m
+    RsaBytes.to_bytes(m, @size)
+  end
+
+  private def open_value(signature : Array(UInt8)) : BigInt?
+    return nil unless signature.size == @size
+    s = RsaBytes.to_big(signature)
+    return nil unless s < @modulus
+    s.pow_mod(@exponent, @modulus)
+  end
+end
+
+# Bytes to and from std/big's integers, and the mask PSS needs.
+struct RsaBytes
+  # The big-endian *bytes* as a non-negative BigInt. std/big keeps 32 bits
+  # in each 64-bit limb, least significant limb first, so that a 32x32
+  # product and its carries fit the word: four bytes a limb.
+  def self.to_big(bytes : Array(UInt8)) : BigInt
+    limbs = Array(UInt64).new((bytes.size + 3) // 4, 0_u64)
+    i = 0
+    n = bytes.size
+    while i < n
+      # Byte i from the end lands at bit (i % 4) * 8 of limb i // 4.
+      limbs[i // 4] = limbs[i // 4] | (bytes[n - 1 - i].to_u64 << ((i % 4) * 8))
+      i = i + 1
+    end
+    BigInt.new(1, limbs)
+  end
+
+  # *value* big-endian in exactly *size* bytes, or nil when it does not
+  # fit them.
+  def self.to_bytes(value : BigInt, size : Int32) : Array(UInt8)?
+    bytes = Array(UInt8).new(size, 0_u8)
+    value.limbs.each_with_index do |limb, li|
+      4.times do |k|
+        byte = ((limb >> (k * 8)) & 0xFF_u64).to_u8
+        at = li * 4 + k
+        if at >= size
+          return nil unless byte == 0_u8
+        else
+          bytes[size - 1 - at] = byte
+        end
+      end
+    end
+    bytes
+  end
+
+  # The length in bits of the big-endian *bytes*, leading zeros not counted.
+  def self.bit_length(bytes : Array(UInt8)) : Int32
+    i = 0
+    while i < bytes.size && bytes[i] == 0_u8
+      i = i + 1
+    end
+    return 0 if i == bytes.size
+    top = bytes[i]
+    bits = 0
+    while top > 0_u8
+      bits = bits + 1
+      top = top >> 1
+    end
+    (bytes.size - i - 1) * 8 + bits
+  end
+
+  # MGF1 (appendix B.2.1): *size* bytes of Hash(seed || counter) blocks.
+  def self.mgf1(hash : RsaHash, seed : Array(UInt8), size : Int32) : Array(UInt8)
+    mask = [] of UInt8
+    counter = 0_u32
+    while mask.size < size
+      block = seed + [(counter >> 24).to_u8, ((counter >> 16) & 0xFF_u32).to_u8,
+                      ((counter >> 8) & 0xFF_u32).to_u8, (counter & 0xFF_u32).to_u8]
+      mask.concat(hash.digest(block))
+      counter = counter + 1
+    end
+    mask[0, size]
+  end
+
+  def self.of(message : Array(UInt8) | String) : Array(UInt8)
+    return message if message.is_a?(Array(UInt8))
+    Array(UInt8).new(message.bytesize) { |i| message.to_unsafe[i] }
+  end
+
+  def self.from_hex(hex : String) : Array(UInt8)
+    p = hex.to_unsafe
+    Array(UInt8).new(hex.bytesize // 2) do |i|
+      hi = p[i * 2].to_i32
+      lo = p[i * 2 + 1].to_i32
+      hi = hi >= 97 ? hi - 87 : hi - 48
+      lo = lo >= 97 ? lo - 87 : lo - 48
+      (hi * 16 + lo).to_u8
+    end
+  end
+
+  # std/asn1's answer as this module's: the value, or an RsaError saying
+  # what was not a key.
+  def self.asn1_value(answer : DerValue | Asn1Error) : DerValue | RsaError
+    answer.is_a?(Asn1Error) ? RsaError.new(answer.message) : answer
+  end
+
+  def self.asn1_values(answer : Array(DerValue) | Asn1Error) : Array(DerValue) | RsaError
+    answer.is_a?(Asn1Error) ? RsaError.new(answer.message) : answer
+  end
+
+  def self.asn1_bytes(answer : Array(UInt8) | Asn1Error) : Array(UInt8) | RsaError
+    answer.is_a?(Asn1Error) ? RsaError.new(answer.message) : answer
+  end
+
+  def self.asn1_text(answer : String | Asn1Error) : String | RsaError
+    answer.is_a?(Asn1Error) ? RsaError.new(answer.message) : answer
+  end
+end

@@ -113,8 +113,8 @@ pub struct RsaPublicKey
 
   # The key from a modulus and an exponent, each big-endian.
   def self.new(modulus : Array(UInt8), exponent : Array(UInt8)) : RsaPublicKey | RsaError
-    n = RsaBytes.to_big(modulus)
-    e = RsaBytes.to_big(exponent)
+    n = BigInt.from_bytes(modulus)
+    e = BigInt.from_bytes(exponent)
     bits = RsaBytes.bit_length(modulus)
     return RsaError.new("a modulus of #{bits} bits, under the #{MIN_BITS} this takes") if bits < MIN_BITS
     return RsaError.new("a modulus of #{bits} bits, past the #{MAX_BITS} this takes") if bits > MAX_BITS
@@ -188,7 +188,7 @@ pub struct RsaPublicKey
     # encoding is one byte shorter when modBits - 1 is a multiple of 8.
     em_bits = @bits - 1
     em_len = (em_bits + 7) // 8
-    em = RsaBytes.to_bytes(m, em_len)
+    em = m.to_bytes(em_len)
     return false unless em
     h_len = hash.size
     return false if em_len < h_len + s_len + 2
@@ -217,52 +217,19 @@ pub struct RsaPublicKey
   private def open(signature : Array(UInt8)) : Array(UInt8)?
     m = open_value(signature)
     return nil unless m
-    RsaBytes.to_bytes(m, @size)
+    m.to_bytes(@size)
   end
 
   private def open_value(signature : Array(UInt8)) : BigInt?
     return nil unless signature.size == @size
-    s = RsaBytes.to_big(signature)
+    s = BigInt.from_bytes(signature)
     return nil unless s < @modulus
     s.pow_mod(@exponent, @modulus)
   end
 end
 
-# Bytes to and from std/big's integers, and the mask PSS needs.
+# The lengths and the mask PSS needs, and std/asn1's errors as this one's.
 struct RsaBytes
-  # The big-endian *bytes* as a non-negative BigInt. std/big keeps 32 bits
-  # in each 64-bit limb, least significant limb first, so that a 32x32
-  # product and its carries fit the word: four bytes a limb.
-  def self.to_big(bytes : Array(UInt8)) : BigInt
-    limbs = Array(UInt64).new((bytes.size + 3) // 4, 0_u64)
-    i = 0
-    n = bytes.size
-    while i < n
-      # Byte i from the end lands at bit (i % 4) * 8 of limb i // 4.
-      limbs[i // 4] = limbs[i // 4] | (bytes[n - 1 - i].to_u64 << ((i % 4) * 8))
-      i = i + 1
-    end
-    BigInt.new(1, limbs)
-  end
-
-  # *value* big-endian in exactly *size* bytes, or nil when it does not
-  # fit them.
-  def self.to_bytes(value : BigInt, size : Int32) : Array(UInt8)?
-    bytes = Array(UInt8).new(size, 0_u8)
-    value.limbs.each_with_index do |limb, li|
-      4.times do |k|
-        byte = ((limb >> (k * 8)) & 0xFF_u64).to_u8
-        at = li * 4 + k
-        if at >= size
-          return nil unless byte == 0_u8
-        else
-          bytes[size - 1 - at] = byte
-        end
-      end
-    end
-    bytes
-  end
-
   # The length in bits of the big-endian *bytes*, leading zeros not counted.
   def self.bit_length(bytes : Array(UInt8)) : Int32
     i = 0

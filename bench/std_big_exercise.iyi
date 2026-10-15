@@ -72,6 +72,24 @@ raise "overflow: i32 min fits" unless min_i32.to_i32? == -2147483648
 raise "overflow: i32 pos nil" unless (max_i32 + 1).to_i32?.nil?
 raise "overflow: i32 neg nil" unless (min_i32 - 1).to_i32?.nil?
 
+# Bytes both ways, big-endian at a fixed width, as keys and signatures are.
+bytes = [0x01_u8, 0x02_u8, 0x03_u8, 0x04_u8, 0x05_u8, 0x06_u8, 0x07_u8, 0x08_u8, 0x09_u8]
+raise "bytes: from_bytes" unless BigInt.from_bytes(bytes) == BigInt.from_hex("010203040506070809")
+raise "bytes: round trip" unless BigInt.from_bytes(bytes).to_bytes(9) == bytes
+raise "bytes: zeros in front" unless BigInt.from_bytes([0xAB_u8]).to_bytes(4) == [0_u8, 0_u8, 0_u8, 0xAB_u8]
+raise "bytes: leading zeros read" unless BigInt.from_bytes([0_u8, 0_u8, 0x7F_u8]) == BigInt.new(127)
+raise "bytes: zero" unless BigInt.from_bytes([] of UInt8).zero? && BigInt.zero.to_bytes(2) == [0_u8, 0_u8]
+raise "bytes: too wide refused" unless BigInt.from_hex("10000").to_bytes(2).nil?
+raise "bytes: negative refused" unless BigInt.new(-1).to_bytes(8).nil?
+# Built from bytes, not from `**`: this section runs before the arithmetic
+# ones, and a broken multiply is to be caught there, by its own name.
+wide_bytes = Array(UInt8).new(256, 0_u8)
+wide_bytes[0] = 0x80_u8
+wide_bytes[254] = 0x30_u8
+wide_bytes[255] = 0x39_u8
+wide = BigInt.from_bytes(wide_bytes)
+raise "bytes: a 2048-bit value" unless wide.to_bytes(256) == wide_bytes && wide.to_bytes(255).nil?
+
 puts "    construction and conversions: integers, strings, prefixes, and overflow detection verified"
 
 # 2. Predicates, Abs, Negate, Comparison

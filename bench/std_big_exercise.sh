@@ -336,6 +336,12 @@ prove_fails "addition carry dropped" no_add_carry "known: fib(100)" \
 prove_fails "multiplication broken" no_mul "arith: mul" \
   's/r\[i + j\] = prod \& 0xFFFFFFFF_u64/r[i + j] = 0_u64/'
 
+# Bytes read little-endian, and a value too wide for its width cut short
+prove_fails "bytes read in the wrong order" bytes_order "bytes: from_bytes" \
+  's/bytes\[n - 1 - i\]\.to_u64 << /bytes[i].to_u64 << /'
+prove_fails "a value cut to its width" bytes_cut "bytes: too wide refused" \
+  's/          return nil unless byte == 0_u8/          next_byte = byte/'
+
 # 3. Negation broken (identity instead of negate)
 prove_fails "negate broken" no_negate "negate: positive" \
   's/BigInt\.new(-@sign, @limbs\.dup)/self/'

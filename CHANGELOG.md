@@ -4,6 +4,16 @@
 
 ### Added
 
+- **`BigInt.from_bytes` and `BigInt#to_bytes(size)`: a big integer read
+  from and written to big-endian bytes.** Keys, signatures and curve
+  points are big-endian byte strings, and std/big could only parse text,
+  so std/rsa carried its own conversion over BigInt's limbs, and the next
+  cryptography module would have carried another. `to_bytes` writes
+  exactly *size* bytes, zeros in front, and answers nil for a negative
+  value or one that does not fit rather than cutting it short. std/rsa
+  uses them now. Held by `bench/std_big_exercise.sh`: round trips at 9
+  and 256 bytes, leading zeros, zero, and the two refusals, with a byte
+  order reversed and a too-wide value cut short each caught.
 - **`std/rsa`: RSA signatures checked, PKCS #1 v1.5 and PSS (RFC 8017),
   the second piece of a TLS client.** `RsaPublicKey.from_spki` reads the
   key a certificate carries (rsaEncryption with its NULL parameters) and

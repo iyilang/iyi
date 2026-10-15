@@ -94,6 +94,46 @@ pub struct BigInt
     parse(str, 16)
   end
 
+  # The big-endian *bytes* as a non-negative BigInt: a key, a signature, a
+  # coordinate as cryptography writes them. Four bytes a limb, the low
+  # limb from the last four.
+  def self.from_bytes(bytes : Array(UInt8)) : BigInt
+    limbs = Array(UInt64).new((bytes.size + 3) // 4, 0_u64)
+    n = bytes.size
+    i = 0
+    while i < n
+      limbs[i // 4] = limbs[i // 4] | (bytes[n - 1 - i].to_u64 << ((i % 4) * 8))
+      i = i + 1
+    end
+    BigInt.new(1, limbs)
+  end
+
+  # The value big-endian in exactly *size* bytes, zeros in front: the
+  # inverse of `from_bytes` at a fixed width, which is how a signature or a
+  # coordinate is written. Nil for a negative value or one that does not
+  # fit, never a value cut short.
+  def to_bytes(size : Int32) : Array(UInt8)?
+    return nil if negative? || size < 0
+    bytes = Array(UInt8).new(size, 0_u8)
+    i = 0
+    while i < @limbs.size
+      limb = @limbs[i]
+      k = 0
+      while k < 4
+        byte = ((limb >> (k * 8)) & 0xFF_u64).to_u8
+        at = i * 4 + k
+        if at >= size
+          return nil unless byte == 0_u8
+        else
+          bytes[size - 1 - at] = byte
+        end
+        k = k + 1
+      end
+      i = i + 1
+    end
+    bytes
+  end
+
   # Parses a string with full error checking.
   def self.parse(str : String, base : Int32 = 10) : BigInt
     raise "invalid base: #{base} (must be 2..36)" if base < 2 || base > 36

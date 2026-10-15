@@ -26,14 +26,13 @@ nothing references, collect, 300 more allocations, and 299 of them come back
 from addresses the sweep reclaimed. A rooted object keeps every byte, comes out
 white, and its chunk is not handed out again.
 
-Finalizers and weak references are not built, and not for lack of time.
-Nothing in this language defines a finalizer, there is no `def finalize`
-anywhere in `src/iyi` or `samples/iyi`, so a finalizer queue would be a
-mechanism no program could put an entry in. Weak references are registration
-based and the standard library's `WeakRef` is on the `--crystal` side, so there
-is no table here to walk and null out. Both wait on the language having the
-feature. Statistics are the honest subset, counted as the walk goes: chunks
-swept, chunks kept, bytes freed, collections run.
+Finalizers are not built, and not for lack of time. Nothing in this language
+defines a finalizer, there is no `def finalize` anywhere in `src/iyi` or
+`samples/iyi`, so a finalizer queue would be a mechanism no program could put
+an entry in. Weak references waited on the same answer until `std/weak_ref`
+gave them a user, and are built now (Stage 6's third item, below). Statistics
+are the honest subset, counted as the walk goes: chunks swept, chunks kept,
+bytes freed, collections run.
 
 Stage 5: the mark phase. Roots go gray through Stage 3's walker, a queue in its
 own mapping drains, each object's payload is scanned to the bound its size
@@ -1726,10 +1725,21 @@ Each stage is independently verifiable; the tree is never left broken between th
    - Then free the object.
    - Finalizers must not allocate or spawn tasks (enforce in design docs; runtime check deferred).
 
-3. **Weak References:**
-   - A weak reference is a pointer that does not prevent marking.
-   - At the end of the mark phase, before sweep, walk weak-reference tables and null out pointers to white objects.
-   - A weak reference returning `nil` after a collection is expected behavior; no finalizer or error.
+3. **Weak References:** built, as `IyiWeak` under `std/weak_ref`.
+   - A weak reference is a *cell*: eight bytes of atomic memory, which the mark
+     blackens and never scans, holding the target's address. Reading it is one
+     load into a register, where the next stop's root walk finds it, so a read
+     never races the clearing.
+   - The cells are registered in a table under the runtime lock. At the end of
+     every mark, before the epoch turns and the sweep can reuse anything
+     (`scavenge`), a cell left white is forgotten (its `WeakRef` is garbage) and
+     a live cell whose target is white is zeroed. A concurrent mark clears in its
+     second stop, after the last drain. wasm32's collector clears between its
+     mark and its sweep, and libgc does the same through
+     `GC_general_register_disappearing_link`.
+   - A weak reference returning `nil` after a collection is expected behavior;
+     no finalizer or error. `bench/std_weak_ref_exercise.sh` holds it, with
+     four threads reading beside marks that run beside the program.
 
 4. **Heap Statistics:**
    - Track: bytes allocated, bytes freed, pause time, number of collections, objects finalized.

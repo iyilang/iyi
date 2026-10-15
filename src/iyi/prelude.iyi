@@ -1353,6 +1353,11 @@ require "./file"
     fun malloc = GC_malloc(size : UInt64) : Void*
     fun malloc_atomic = GC_malloc_atomic(size : UInt64) : Void*
     fun realloc = GC_realloc(pointer : Void*, size : UInt64) : Void*
+    # `IyiWeak`'s two: the start of the block an address is in (null for
+    # one libgc did not hand out), and a link libgc zeroes when the block
+    # it names is found unreachable.
+    fun base = GC_base(pointer : Void*) : Void*
+    fun general_register_disappearing_link = GC_general_register_disappearing_link(link : Void**, object : Void*) : Int32
   end
 
   # Codegen emits calls to these by name for every allocation under the
@@ -5870,10 +5875,9 @@ require "./file"
       # `samples/iyi`, so a finalizer queue would be a mechanism no program
       # could put an entry in, which is the shape SPEC.md III.4.8 refused for a
       # concurrency marker and the shape this collector has refused twice
-      # already. **Weak references**: the same answer. They are registration
-      # based and the standard library's `WeakRef` lives on the `--crystal`
-      # side, so there is no table here to walk and null out. Both wait on the
-      # language having the feature rather than on the collector.
+      # already. **Weak references** waited on the same answer until
+      # std/weak_ref gave them a user; they are cleared before the sweep,
+      # at the end of the mark (`scavenge`, `IyiWeak`), not here.
       # The sweep is lazy since the thread cutover, the way Go's is: a
       # collection marks, stamps a new epoch, and returns; every arena behind
       # the epoch is sweep debt, and the debt is paid one arena at a time by
@@ -6589,6 +6593,10 @@ require "./file"
       SPARE_BELOW = 67108864_u64
 
       def self.scavenge : Nil
+        # The mark is complete and the epoch has not turned: what is white
+        # is unreachable and still unswept, which is the one moment a weak
+        # reference to it can be forgotten before its memory is reused.
+        IyiWeak.clear
         # Every free list dropped first - the centre's and each stopped
         # thread's cache's - which is what lets a mapping go back without
         # a walk of the lists for its chunks, and what `begin_sweep` says
@@ -8364,6 +8372,7 @@ require "./file"
 
         def self.collect : Nil
           mark
+          IyiWeak.clear
           sweep
 
           budget = @@bytes_marked * 2_u64
@@ -8498,6 +8507,160 @@ require "./file"
              "Teach src/iyi/prelude.iyi a branch for this platform rather than " \
              "linking something absent." %}
   {% end %}
+{% end %}
+
+# iyi: weak references (GC_DESIGN.md, "Weak References"), the mechanism
+# under std/weak_ref. A weak reference is a *cell*: eight bytes of atomic
+# memory - which no collector here scans - holding the target's address.
+# Nothing about the cell keeps the target alive, and reading it is one
+# load that puts the address in a register, where every collection's root
+# walk finds it: a read either happened before a stop, and the target
+# lives through it, or it happens after, and sees what the stop left.
+#
+# What clears a cell is the collector's: the owned one zeroes, at the end
+# of every mark and before the epoch turns, each registered cell whose
+# target the mark left white, and forgets each cell left white itself (its
+# `WeakRef` is garbage); libgc does the same through a disappearing link;
+# a build that never collects never clears. An address no collector handed
+# out - a literal's - is never cleared, because nothing frees it.
+{% if flag?(:gc_boehm) %}
+  class IyiWeak
+    def self.cell(address : UInt64) : Pointer(UInt64)
+      cell = __iyi_malloc_atomic64(8_u64).as(Pointer(UInt64))
+      cell.value = address
+      # libgc wants the block's own start, eight bytes under the address
+      # `__iyi_malloc64` answers (its type word), and has none for memory
+      # it did not hand out.
+      block = LibGC.base(Pointer(Void).new(address))
+      LibGC.general_register_disappearing_link(cell.as(Pointer(Pointer(Void))), block) if block.address != 0
+      cell
+    end
+
+    # libgc keeps its own table, and drops a link whose cell died with it.
+    def self.registered : UInt64
+      0_u64
+    end
+  end
+{% elsif (!flag?(:gc_none) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || flag?(:win32))) || (flag?(:wasm32) && !flag?(:gc_none)) %}
+  class IyiWeak
+    # Every live weak reference's cell, by address, in atomic memory: the
+    # table is read by `clear` and by nothing that marks.
+    @@cells : Pointer(UInt64) = Pointer(UInt64).new(0_u64)
+    @@count : UInt64 = 0_u64
+    @@capacity : UInt64 = 0_u64
+
+    def self.cell(address : UInt64) : Pointer(UInt64)
+      cell = __iyi_malloc_atomic64(8_u64).as(Pointer(UInt64))
+      cell.value = address
+      register(cell.address)
+      cell
+    end
+
+    # Under the runtime lock, which every collection takes before it stops
+    # a thread, so no stop finds the table half written. A larger table is
+    # allocated with the lock released - an allocation may collect, and
+    # the collection takes the lock - and installed only if nobody grew the
+    # table meanwhile.
+    def self.register(cell : UInt64) : Nil
+      while true
+        lock
+        if @@count < @@capacity
+          (@@cells + @@count.to_i64).value = cell
+          @@count = @@count + 1_u64
+          unlock
+          return
+        end
+        wanted = @@capacity == 0_u64 ? 64_u64 : @@capacity * 2_u64
+        unlock
+        fresh = __iyi_malloc_atomic64(wanted * 8_u64).as(Pointer(UInt64))
+        lock
+        if @@capacity < wanted
+          index = 0_u64
+          while index < @@count
+            (fresh + index.to_i64).value = (@@cells + index.to_i64).value
+            index = index + 1_u64
+          end
+          @@cells = fresh
+          @@capacity = wanted
+        end
+        unlock
+      end
+    end
+
+    # The cells the table holds: one per weak reference the last mark
+    # found alive, and each made since.
+    def self.registered : UInt64
+      @@count
+    end
+
+    # The end of a mark, the world stopped: a cell left white belongs to a
+    # weak reference nothing holds, and leaves the table; a live cell whose
+    # target is white is zeroed, before the sweep can hand the target's
+    # memory to anyone else.
+    def self.clear : Nil
+      kept = 0_u64
+      index = 0_u64
+      while index < @@count
+        cell = (@@cells + index.to_i64).value
+        if live?(cell)
+          target = Pointer(UInt64).new(cell).value
+          Pointer(UInt64).new(cell).value = 0_u64 if target != 0_u64 && !live?(target)
+          (@@cells + kept.to_i64).value = cell
+          kept = kept + 1_u64
+        end
+        index = index + 1_u64
+      end
+      @@count = kept
+    end
+
+    {% if flag?(:wasm32) %}
+      # One thread, and a collection only where an allocation is made.
+      def self.lock : Nil
+      end
+
+      def self.unlock : Nil
+      end
+
+      # Whether the mark that just ended reached the object at *address*;
+      # an address the heap did not hand out is nobody's to free.
+      def self.live?(address : UInt64) : Bool
+        base = IyiHeap.base_of(address)
+        base == 0_u64 || IyiMark.colour(base) != IyiMark::WHITE
+      end
+    {% else %}
+      def self.lock : Nil
+        IyiRuntimeLock.lock
+      end
+
+      def self.unlock : Nil
+        IyiRuntimeLock.unlock
+      end
+
+      # Whether the mark that just ended reached the object at *address*:
+      # its colour byte, or a large object's header word. An address in no
+      # arena and no large node is nobody's to free.
+      def self.live?(address : UInt64) : Bool
+        base = IyiRoots.base_of(address)
+        return true if base == 0_u64
+        byte = IyiHeap.mark_byte_of(base)
+        colour = byte == 0_u64 ? IyiHeap.read64(base - 8_u64) : IyiHeap.read8(byte)
+        colour & IyiMark::COLOUR != IyiMark::WHITE
+      end
+    {% end %}
+  end
+{% else %}
+  class IyiWeak
+    # Nothing here collects, so nothing is ever cleared.
+    def self.cell(address : UInt64) : Pointer(UInt64)
+      cell = __iyi_malloc_atomic64(8_u64).as(Pointer(UInt64))
+      cell.value = address
+      cell
+    end
+
+    def self.registered : UInt64
+      0_u64
+    end
+  end
 {% end %}
 
 {% if flag?(:arm) || flag?(:wasm32) %}

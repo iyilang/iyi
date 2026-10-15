@@ -513,19 +513,23 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
     tail -n 6 "$failed_out" | sed 's/^/    /'
     continue
   fi
-  # Two exercises print something no two builds can agree on, and for them
+  # Three exercises print something no two builds can agree on, and for them
   # the exit status is the whole of the promise: each raises on its own
   # assertions, so a wrong answer is a non-zero exit either way.
   #
   #   * `std_gc_exercise` prints how many bytes a collection freed, which
   #     is a property of what the build allocated and not of the program.
   #   * `std_time_exercise` prints the clock.
+  #   * `std_weak_ref_exercise` prints how many targets a conservative root
+  #     still reached - a register's leftover, which two builds allocate
+  #     differently - and how many reads four threads made beside the
+  #     collector in two seconds.
   #
   # Named rather than guessed at. A rule that decided this by running the
   # binary twice would pass the clock and still fail the collector, whose
   # two runs agree with each other and not across builds.
   case "$name" in
-    std_gc_exercise | std_time_exercise)
+    std_gc_exercise | std_time_exercise | std_weak_ref_exercise)
       continue
       ;;
   esac

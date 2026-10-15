@@ -6,6 +6,10 @@
 # 3. Rooted object survival from both globals and the shadow stack.
 # 4. Precision of layout scanning (pointer fields followed, integer fields ignored).
 # 5. Realloc memory preservation.
+# 6. Weak references: a held target answered, one nothing holds cleared by
+#    the collection, before its memory is reused.
+
+import std/weak_ref::{WeakRef}
 
 def count(value : UInt64) : String
   value.to_i64.to_s
@@ -287,5 +291,42 @@ while bidx < 64
   bidx = bidx + 1
 end
 puts "realloc: data preserved across buffer growth"
+
+# === 6. Weak References ===
+puts "== weak references =="
+
+# Made in a frame of their own: no slot of the caller's holds a target.
+def make_weak(held : Array(Node), refs : Array(WeakRef(Node))) : Nil
+  widx = 0
+  while widx < 200
+    node = Node.new(widx)
+    held << node if widx.even?
+    refs << WeakRef.new(node)
+    widx = widx + 1
+  end
+end
+
+weak_held = [] of Node
+weak_refs = [] of WeakRef(Node)
+make_weak(weak_held, weak_refs)
+wipe_stack_frame
+IyiMark.collect
+weak_kept = 0
+weak_cleared = 0
+widx = 0
+while widx < 200
+  target = weak_refs[widx].value
+  if widx.even?
+    weak_kept = weak_kept + 1 if !target.nil? && target.object_id == weak_held[widx // 2].object_id && target.value == widx
+  elsif target.nil?
+    weak_cleared = weak_cleared + 1
+  elsif target.value != widx
+    raise "weak: reference #{widx} answered memory that is no longer its target"
+  end
+  widx = widx + 1
+end
+raise "weak: #{weak_kept} of 100 held targets answered themselves" if weak_kept != 100
+raise "weak: #{weak_cleared} of 100 targets nothing held were cleared" if weak_cleared < 95
+puts "weak: 100 held targets answered, #{weak_cleared} of 100 others cleared by the collection"
 
 puts "all wasm32 collector checks passed"

@@ -4,6 +4,38 @@
 
 ### Added
 
+- **`WeakRef(T)`: std/weak_ref names an object without keeping it alive,
+  and the collector forgets it before reusing the memory.** There was no
+  weak reference: GC_DESIGN.md had deferred them until something could
+  register one, so a cache or an observer list held everything it pointed
+  at forever.
+  - `WeakRef.new(target)` and `#value`, which is the target while
+    anything else holds it and nil from the first collection that finds
+    nothing does. `WeakRef(Int32)` is refused when it is compiled.
+  - The address lives in an eight-byte atomic cell, which no collector
+    here scans. Reading it is a single load into a register, where the
+    next stop's root walk finds it, so a read never races the clearing.
+  - The owned collector registers each cell and, at the end of every mark
+    (`scavenge`, before the epoch turns), zeroes the cells whose target is
+    white and forgets the cells that are white themselves; a concurrent
+    mark does it in its second stop.
+  - wasm32's collector clears between its mark and its sweep; libgc clears
+    through a disappearing link; `-Dgc_none` never clears. An object no
+    collector allocated - a literal - is never cleared.
+
+  Held by `bench/std_weak_ref_exercise.sh`:
+  - 500 held and 500 dropped targets;
+  - 200,000 objects made where the dead ones were, 500 at their very
+    addresses, with every cleared reference still nil;
+  - 10,000 dead references forgotten;
+  - four threads reading through marks that run beside the program, 120
+    to 320 million reads a run, every one nil or the object intact;
+  - libgc, `-Dgc_none` and wasm32 builds;
+  - five broken prelude copies, each caught by name - a cell never zeroed
+    answers freed memory.
+
+  `bench/wasm32_exercise.sh` runs the clearing under wasmtime.
+
 - **std/xml evaluates XPath 1.0, all of it, and answers what the
   recommendation says where libxml2 does not.** A document could be walked
   and searched by name, but there was no query language; the other

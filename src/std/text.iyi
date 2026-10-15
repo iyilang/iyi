@@ -37,11 +37,11 @@
 #    to `String`; import both and each call takes the one its argument names.
 #
 # 4. Scope and omissions from Crystal's string.cr (5,922 lines):
-#    Normalization (NFC, NFD, NFKC, NFKD), case folding and the Unicode
-#    categories are `std/unicode`'s, and regex matching is `std/regex`'s.
-#    What neither module nor this one carries: grapheme clustering, iconv
-#    encoding conversions, C string null-byte guards, and decades of legacy
-#    Ruby compatibility aliases. This library provides the core operations
+#    Normalization (NFC, NFD, NFKC, NFKD), case folding, the Unicode
+#    categories and grapheme clusters are `std/unicode`'s, and regex
+#    matching is `std/regex`'s. What neither module nor this one carries:
+#    iconv encoding conversions, C string null-byte guards, and decades of
+#    legacy Ruby compatibility aliases. This library provides the core operations
 #    that real programs reach for: whitespace stripping, splitting, joining,
 #    indexing, substitutions, transformations (tr, squeeze, delete, count,
 #    center), character inspection, and robust conversions with nilable

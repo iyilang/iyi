@@ -25,6 +25,10 @@ from unicode.org as `scripts/generate_unicode_data.cr` fetches the rest:
   P and S categories nor any script. The categories `data.cr` does have are
   checked against these code point for code point, so the two sources
   cannot drift apart unnoticed.
+* The grapheme cluster properties UAX #29 segments a string by: each code
+  point's Grapheme_Cluster_Break from `auxiliary/GraphemeBreakProperty.txt`,
+  Extended_Pictographic from `emoji/emoji-data.txt`, and Indic_Conjunct_Break
+  from `DerivedCoreProperties.txt`, packed into one value per code point.
 
 What is written, between the `# tables-begin` and `# tables-end` lines of the
 module, is one string constant per table: decimal integers separated by
@@ -120,6 +124,54 @@ CATEGORIES = (
     "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po", "Sm", "Sc", "Sk", "So",
     "Zs", "Zl", "Zp", "Cc", "Cf", "Cs", "Co",
 )
+
+# Grapheme_Cluster_Break, in the order a GRAPHEME row's low four bits count
+# from 1; Other is 0. `std/unicode`'s grapheme segmentation names the same
+# numbers.
+GRAPHEME_BREAKS = (
+    "Prepend", "CR", "LF", "Control", "Extend", "Regional_Indicator", "SpacingMark",
+    "L", "V", "T", "LV", "LVT", "ZWJ",
+)
+# Indic_Conjunct_Break, counting from 1 in a GRAPHEME row's bits 5 and 6;
+# None is 0.
+CONJUNCT_BREAKS = ("Consonant", "Extend", "Linker")
+
+
+def property_lines(text: str):
+    """Each `XXXX..YYYY ; field ; field # comment` line as (from, to, [fields])."""
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in line.split(";")]
+        span = parts[0].split("..")
+        yield int(span[0], 16), int(span[-1], 16), parts[1:]
+
+
+def grapheme_values(ucd: str) -> dict[int, int]:
+    """Every code point with a grapheme property, as GRAPHEME packs it."""
+    values: dict[int, int] = {}
+
+    def mark(low: int, high: int, bits: int) -> None:
+        for point in range(low, high + 1):
+            values[point] = values.get(point, 0) | bits
+
+    breaks = fetch(ucd, "auxiliary/GraphemeBreakProperty.txt")
+    if not breaks.startswith(f"# GraphemeBreakProperty-{ucd}.txt"):
+        sys.exit(f"GraphemeBreakProperty.txt does not name release {ucd} on its first line")
+    for low, high, fields in property_lines(breaks):
+        mark(low, high, GRAPHEME_BREAKS.index(fields[0]) + 1)
+    emoji = fetch(ucd, "emoji/emoji-data.txt")
+    if f"# Version: {ucd.rsplit('.', 1)[0]}\n" not in emoji[:2000]:
+        sys.exit(f"emoji-data.txt does not name release {ucd} in its header")
+    for low, high, fields in property_lines(emoji):
+        if fields[0] == "Extended_Pictographic":
+            mark(low, high, 16)
+    derived = fetch(ucd, "DerivedCoreProperties.txt")
+    for low, high, fields in property_lines(derived):
+        if fields[0] == "InCB":
+            mark(low, high, (CONJUNCT_BREAKS.index(fields[1]) + 1) << 5)
+    return values
 
 
 def fetch(ucd: str, name: str) -> str:
@@ -341,6 +393,7 @@ def main() -> None:
     script_names = sorted(set(by_script.values()))
     script = labelled_runs({point: script_names.index(name) for point, name in by_script.items()})
     simple_fold = simple_only_foldings(ucd)
+    grapheme = labelled_runs(grapheme_values(ucd))
 
     sections = [
         f'  # The version of the Unicode Character Database the tables below were written from.\n  VERSION = "{ucd}"',
@@ -372,6 +425,7 @@ def main() -> None:
         words("SCRIPT_NAMES", "The scripts SCRIPT counts in, from 0, as Scripts.txt names them; Unknown is the absence of a row.", script_names),
         literal("SCRIPT", f"{len(script)} rows of {{from, to, script}}: every code point's script, by its place in SCRIPT_NAMES.", flat(script)),
         literal("SIMPLE_FOLD", f"{len(simple_fold)} rows of {{code point, folded}}: the simple foldings CaseFolding.txt marks S, of code points whose full folding SPECIAL_FOLD holds.", flat(simple_fold)),
+        literal("GRAPHEME", f"{len(grapheme)} rows of {{from, to, value}}: a code point's Grapheme_Cluster_Break in the low four bits (1 + its place in the generator's GRAPHEME_BREAKS, 0 for Other), 16 when it is Extended_Pictographic, and its Indic_Conjunct_Break from bit 5 (1 Consonant, 2 Extend, 3 Linker).", flat(grapheme)),
     ]
 
     module = MODULE.read_text(encoding="utf-8")

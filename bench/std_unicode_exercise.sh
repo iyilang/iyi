@@ -75,7 +75,7 @@ fi
 
 echo
 echo "== every unicode section reported"
-for phrase in "== letter" "== valid" "== case" "== categories, scripts and case orbits"; do
+for phrase in "== letter" "== valid" "== case" "== categories, scripts and case orbits" "== grapheme clusters"; do
   if ! grep -q "$phrase" "$WORK/unicode-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -89,6 +89,77 @@ build_and_run "release" unicode-release --release >/dev/null
 if ! grep -q "ALL CHECKS PASSED" "$WORK/unicode-release.out" 2>/dev/null; then
   echo "release: missing pass sentinel"
   status=1
+fi
+
+# Every case of Unicode's own GraphemeBreakTest.txt, which the repository
+# carries as the other library's generated spec (the GB9c cases it leaves
+# pending included): each string is segmented by the plain and the
+# optimised build, and every cluster compared with the file's.
+echo
+echo "== grapheme clusters against GraphemeBreakTest.txt"
+if [ -z "$PY" ]; then
+  echo "  no python on this machine, so the grapheme oracle is unmeasured"
+else
+  cat >"$WORK/graphemes.py" <<'PY'
+import re, subprocess, sys
+
+spec, programs = sys.argv[1], sys.argv[2:]
+
+
+def decode(literal):
+    """A literal's code points, from the escapes the spec writes."""
+    points, i = [], 0
+    while i < len(literal):
+        c = literal[i]
+        if c != "\\":
+            points.append(ord(c))
+            i += 1
+            continue
+        e = literal[i + 1]
+        if e == "u" and literal[i + 2] == "{":
+            end = literal.index("}", i)
+            points.append(int(literal[i + 3:end], 16))
+            i = end + 1
+        elif e == "u":
+            points.append(int(literal[i + 2:i + 6], 16))
+            i += 6
+        else:
+            points.append({"r": 13, "n": 10, "0": 0, "t": 9, "\\": 92, '"': 34, "'": 39}[e])
+            i += 2
+    return points
+
+
+cases = []
+for line in open(spec, encoding="utf-8"):
+    found = re.search(r'it_iterates_graphemes "((?:[^"\\]|\\.)*)", \[(.*?)\]\s*}?\s*#', line)
+    if not found:
+        continue
+    clusters = [decode(t[1]) for t in re.findall(r"""(["'])((?:(?!\1)[^\\]|\\.)*)\1""", found.group(2))]
+    text = decode(found.group(1))
+    if sum(clusters, []) != text:
+        sys.exit("a case whose clusters are not its text: " + line[:80])
+    cases.append((text, clusters))
+if len(cases) < 700:
+    sys.exit(f"only {len(cases)} cases read from {spec}")
+feed = "".join(" ".join(map(str, text)) + "\n" for text, _ in cases)
+status = 0
+for program in programs:
+    out = subprocess.run([program, "graphemes"], input=feed, capture_output=True, text=True).stdout.splitlines()
+    wrong = []
+    for (text, clusters), said in zip(cases, out + [""] * len(cases)):
+        want = "|".join(" ".join(map(str, c)) for c in clusters)
+        if said != want:
+            wrong.append(f"{' '.join('%04X' % p for p in text)}: wrote {said!r}, the file says {want!r}")
+    if wrong:
+        status = 1
+        print(f"  {program.rsplit('/', 1)[-1]}: {len(wrong)} of {len(cases)} cases split otherwise:")
+        for w in wrong[:6]:
+            print("    " + w)
+    else:
+        print(f"  {program.rsplit('/', 1)[-1]}: all {len(cases)} cases split as the file splits them")
+sys.exit(status)
+PY
+  "$PY" "$WORK/graphemes.py" "$REPO/spec/std/string/grapheme_break_spec.cr" "$WORK/unicode-plain" "$WORK/unicode-release" || status=1
 fi
 
 echo
@@ -146,6 +217,15 @@ mutate "an orbit without CaseFolding's S rows" \
   '      join_orbit(map, data[row + 1], data[row])
       row = row + 2' \
   '      row = row + 2'
+# The grapheme rules, each taken out of a copy that compiles.
+mutate "a conjunct broken at its consonant (GB9c)" \
+  '    return false if linked && after >> 5 == INCB_CONSONANT' ''
+mutate "an emoji sequence broken at its ZWJ (GB11)" \
+  '    return false if joined && after & PICTOGRAPHIC != 0' ''
+mutate "regional indicators paired from the wrong one" \
+  'indicators % 2 == 1' 'indicators % 2 == 0'
+mutate "CR and LF apart" \
+  '    return false if left == GCB_CR && right == GCB_LF' ''
 
 echo
 if [ "$status" -eq 0 ]; then

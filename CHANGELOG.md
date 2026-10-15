@@ -4,6 +4,27 @@
 
 ### Added
 
+- **std/unicode splits a string into grapheme clusters, every rule of UAX
+  #29 through Unicode 17's Indic conjuncts.** A program could count bytes
+  and code points but not what a reader counts: `"🇹🇷🇩🇪"` was eight code
+  points, `"e\u0301"` two.
+  - `String#graphemes`, `#each_grapheme` and `#grapheme_size`, and the
+    same on `Unicode.`: a combining mark stays with its letter, regional
+    indicators pair into flags, a ZWJ emoji sequence is one cluster
+    (GB11), a Devanagari conjunct is one (GB9c, which the other library
+    leaves pending), and a piece of ill-formed UTF-8 is a cluster of its
+    own.
+  - The properties - Grapheme_Cluster_Break, Extended_Pictographic and
+    Indic_Conjunct_Break - are one table of 1,631 rows that
+    `scripts/generate_unicode_std.py` now writes from UCD 17.0.0 beside
+    the module's others, which it rewrote byte for byte.
+
+  Held by `bench/std_unicode_exercise.sh`: all 766 cases of Unicode's
+  `GraphemeBreakTest.txt`, as the repository carries them, split exactly
+  as the file splits them by the plain and the `--release` builds; named
+  examples; and four broken copies (GB9c, GB11, regional indicator
+  parity, CR LF), each caught at its own check.
+
 - **A socket is a stream, and `IyiIO.pipe` joins two tasks: one `IyiIO`
   reads and writes files, sockets, pipes and memory alike.** A socket was
   not an `IyiIO`: nothing written against streams - `read_line`, `puts`,

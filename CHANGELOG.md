@@ -4,6 +4,28 @@
 
 ### Added
 
+- **A socket is a stream, and `IyiIO.pipe` joins two tasks: one `IyiIO`
+  reads and writes files, sockets, pipes and memory alike.** A socket was
+  not an `IyiIO`: nothing written against streams - `read_line`, `puts`,
+  `IyiIO.copy` - could take one, and `IyiSocket#to_io` answered a stream
+  over the descriptor that read a socket with nothing yet to read as
+  failed. There was no pipe between tasks.
+  - `IyiSocket#to_io` answers a `SocketIO`, the same one every time, whose
+    reads and writes are the socket's own: they park the task and keep its
+    timeouts. A read the socket refuses ends the stream with
+    `read_failed?` true; a write it refuses panics, naming the reason, as
+    any stream's failed write does.
+  - `IyiIO.pipe(capacity = 16)` answers a `PipeReader` and a
+    `PipeWriter` over a channel: each write is delivered at once, a write
+    waits while *capacity* writes are unread, closing the writer ends the
+    reader, and a write after the reader closed is refused.
+
+  Held by `bench/socket_exercise.sh` (lines both ways, two lines from one
+  write, a 100,000-byte line, a timed-out read; two broken copies) and
+  `bench/std_io_exercise.sh` (a writer waiting for room, order, a clean
+  end, a copy of 170,000 bytes through 4 KB reads, the refusals; three
+  broken copies). std/io's floor is unchanged.
+
 - **`AsyncBackend` writes log entries from a thread of its own, so a call
   that logs does not wait for the write.** Every backend wrote in the
   calling task, which a slow disk or a full pipe held up.

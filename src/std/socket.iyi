@@ -314,6 +314,43 @@ impl Error for SocketError
   end
 end
 
+{% if @top_level.has_constant?("IyiIO") %}
+  # A socket as a stream, for what is written against streams: `read_line`,
+  # `puts`, `IyiIO.copy` between it and a file or a pipe. Its reads and
+  # writes are the socket's own, which park the task and keep its
+  # timeouts. A stream has no error to answer, so a read the socket refuses
+  # ends the stream, `read_failed?` true, and a write it refuses panics,
+  # naming the reason; a program that answers those reads the socket.
+  # Writes are buffered: `flush`, or `IyiIO.copy`, which flushes, sends
+  # them. Closing it closes the socket.
+  pub class SocketIO < IyiIO
+    getter socket : IyiSocket
+
+    def initialize(@socket : IyiSocket, buffer_size : Int32 = 4096)
+      super(-1_i64, buffer_size, false)
+    end
+
+    # A cancelled read is withdrawn (-2), not the end.
+    private def low_level_read(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
+      got = @socket.read(buffer.as(Pointer(UInt8)), count > 1073741824_u64 ? 1073741824 : count.to_i64.to_i32)
+      return -2_i64 if got.is_a?(Cancelled)
+      return -1_i64 if got.is_a?(SocketError)
+      got.to_i64
+    end
+
+    private def low_level_write(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
+      put = @socket.write(buffer.as(Pointer(UInt8)), count > 1073741824_u64 ? 1073741824 : count.to_i64.to_i32)
+      raise "a write to a socket, its task cancelled while it waited" if put.is_a?(Cancelled)
+      raise put.message if put.is_a?(SocketError)
+      put.to_i64
+    end
+
+    private def low_level_close(target_fd : Int64) : Nil
+      @socket.close
+    end
+  end
+{% end %}
+
 pub class IyiSocket
   getter fd : Int32
 
@@ -352,8 +389,18 @@ pub class IyiSocket
   end
 
   {% if @top_level.has_constant?("IyiIO") %}
-    def to_io : IyiIO
-      IyiIO.new(@fd)
+    @io : Std::Socket::SocketIO? = nil
+
+    # This socket as a stream (`SocketIO`), the same one every time, so
+    # what one read took ahead the next reads. It was a stream over the
+    # descriptor that read a socket with nothing yet to read as failed.
+    def to_io : Std::Socket::SocketIO
+      if made = @io
+        return made
+      end
+      made = Std::Socket::SocketIO.new(self)
+      @io = made
+      made
     end
   {% end %}
 

@@ -684,4 +684,50 @@ puts "closed_under_read: ok"
   puts "reset_after_chunk: ok"
 {% end %}
 
+# A socket as a stream: lines through `to_io`, which is the same stream
+# every time - two lines sent in one write reach the second `read_line`
+# from the first one's read-ahead - a long line through the buffers, and a
+# read the socket refuses as the end, which `read_failed?` tells apart.
+stream_server = IyiSocket.listen("127.0.0.1", 0)
+stream_port = stream_server.local_port
+stream_heard = [] of String
+long_line = "x" * 100_000
+group do |g|
+  g.spawn do
+    peer = stream_server.accept.or_panic
+    peer.read_timeout_ms = 2000
+    while line = peer.to_io.read_line(chomp: true)
+      stream_heard << line
+      peer.to_io.puts "echo #{line.bytesize > 20 ? line.bytesize.to_s : line}"
+      peer.to_io.flush
+    end
+    peer.to_io.close
+    0
+  end
+  g.spawn do
+    talker = IyiSocket.connect("127.0.0.1", stream_port).or_panic
+    io = talker.to_io
+    io.write("one\ntwo\n")
+    io.flush
+    replies = [io.read_line(chomp: true), io.read_line(chomp: true)]
+    raise "stream: two lines in one write answered #{replies}" unless replies == ["echo one", "echo two"]
+    io.puts long_line
+    io.flush
+    long_reply = io.read_line(chomp: true)
+    raise "stream: a 100,000-byte line answered #{long_reply}" unless long_reply == "echo 100000"
+    io.close
+    0
+  end
+end
+raise "stream: the server heard #{stream_heard.size} lines" unless stream_heard.size == 3 && stream_heard[2] == long_line
+quiet_talker = IyiSocket.connect("127.0.0.1", stream_port).or_panic
+quiet_peer = stream_server.accept.or_panic
+quiet_peer.read_timeout_ms = 50
+quiet = quiet_peer.to_io
+raise "stream: a timed-out read is the end, and read_failed? says it failed" unless quiet.read_line.nil? && quiet.read_failed?
+quiet.close
+quiet_talker.close
+stream_server.close
+puts "stream: ok"
+
 puts "socket_exercise: all checks passed"

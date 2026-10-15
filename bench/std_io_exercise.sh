@@ -168,13 +168,13 @@ fi
 
 echo
 echo "== every io check reported"
-for check in "== memory" "== descriptor stream" "== byte format" "== sized and delimited" "== hexdump" "== multi writer" "ALL CHECKS PASSED"; do
+for check in "== memory" "== descriptor stream" "== byte format" "== sized and delimited" "== hexdump" "== multi writer" "== a pipe between tasks" "ALL CHECKS PASSED"; do
   if ! grep -q "$check" "$WORK/exercise-io.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  memory, descriptor stream, byte format, sized/delimited, hexdump and multi writer all reported"
+[ "$status" -eq 0 ] && echo "  memory, descriptor stream, byte format, sized/delimited, hexdump, multi writer and pipe all reported"
 
 # ---------------------------------------------------------------------------
 # Oracles: python3's struct for every encoding, python3's hexdump -C for every dump
@@ -366,6 +366,15 @@ patched_fails "a file chomps a lone CR" patched_cr_file "lines(chomp) on a file 
   '    len = len - (len > 1 && line_buf[len - 2] == 13_u8 ? 2 : 1) if chomp && len > 0 && line_buf[len - 1] == 10_u8=>    len = len - 1 if chomp && len > 0 && line_buf[len - 1] == 10_u8
     len = len - 1 if chomp && len > 0 && line_buf[len - 1] == 13_u8' \
   iyi/io.iyi
+
+echo
+echo "== negative proof: a pipe that holds writes, ends badly or drops a piece is caught"
+patched_fails "a pipe's writer that buffers" patched_pipe_buffered "a pipe's writer waits while its room is full" \
+  '    super(-1_i64, 4096, true)=>    super(-1_i64, 4096, false)'
+patched_fails "a pipe's end taken for a failure" patched_pipe_failed "a pipe whose writer closed ended cleanly" \
+  '      return 0_i64 if got.is_a?(ChannelClosed)=>      return -1_i64 if got.is_a?(ChannelClosed)'
+patched_fails "a piece larger than the read, its rest dropped" patched_pipe_dropped "a copy through a pipe arrives whole" \
+  '    @taken = @taken + moved=>    @taken = @piece.bytesize'
 
 echo
 echo "== negative proof: a Delimited that answers eof from its inner stream is caught"

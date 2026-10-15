@@ -131,6 +131,93 @@ class ::IyiIO
     print(value)
     self
   end
+
+  # The two ends of a pipe between tasks: what is written to the writer is
+  # read from the reader, in order.
+  #
+  #     reader, writer = IyiIO.pipe
+  #     group do |g|
+  #       g.spawn { IyiIO.copy(file, writer); writer.close; 0 }
+  #       g.spawn { IyiIO.copy(reader, socket.io); 0 }
+  #     end
+  #
+  # Each write is delivered at once, as one piece, and a write waits while
+  # *capacity* pieces are unread; a read waits for one. Closing the writer
+  # ends the reader after the last piece; closing the reader refuses the
+  # next write, as a pipe whose reader is gone does. The pipe is its
+  # thread's, for the tasks on the thread that made it.
+  def self.pipe(capacity : Int32 = 16) : {Std::Io::PipeReader, Std::Io::PipeWriter}
+    raise "a pipe holds at least one write, not #{capacity}" if capacity < 1
+    channel = Channel(String).new(capacity)
+    {Std::Io::PipeReader.new(channel), Std::Io::PipeWriter.new(channel)}
+  end
+end
+
+# The reading end of `IyiIO.pipe`.
+pub class PipeReader < IyiIO
+  @channel : Channel(String)
+  # The piece being read, and how much of it is read.
+  @piece : String
+  @taken : Int32
+
+  def initialize(@channel : Channel(String))
+    super(-1_i64, 4096, false)
+    @piece = ""
+    @taken = 0
+  end
+
+  # A cancelled wait is withdrawn (-2), not the end: the next read waits
+  # again.
+  private def low_level_read(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
+    while @taken >= @piece.bytesize
+      got = @channel.receive
+      return 0_i64 if got.is_a?(ChannelClosed)
+      return -2_i64 if got.is_a?(Cancelled)
+      @piece = got
+      @taken = 0
+    end
+    left = @piece.bytesize - @taken
+    moved = count < left.to_u64 ? count.to_i64.to_i32 : left
+    buffer.as(Pointer(UInt8)).copy_from(@piece.to_unsafe + @taken, moved)
+    @taken = @taken + moved
+    moved.to_i64
+  end
+
+  private def low_level_write(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
+    raise "a pipe's reader is not written to"
+  end
+
+  private def low_level_close(target_fd : Int64) : Nil
+    @channel.close
+  end
+end
+
+# The writing end of `IyiIO.pipe`: every write is sent at once.
+pub class PipeWriter < IyiIO
+  @channel : Channel(String)
+
+  def initialize(@channel : Channel(String))
+    super(-1_i64, 4096, true)
+  end
+
+  # A write is a stream's, which has no error to answer: one the pipe
+  # refuses panics, saying why, as a write to a closed descriptor does.
+  private def low_level_write(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
+    size = count.to_i64.to_i32
+    piece = String.new(size) { |target| target.copy_from(buffer.as(Pointer(UInt8)), size) }
+    sent = @channel.send(piece)
+    return count.to_i64 if sent.nil?
+    raise "a write to a pipe whose reader is closed" if sent.is_a?(ChannelClosed)
+    raise "a write to a full pipe, its task cancelled while it waited"
+  end
+
+  private def low_level_read(target_fd : Int64, buffer : Void*, count : UInt64) : Int64
+    raise "a pipe's writer is not read from"
+  end
+
+  private def low_level_close(target_fd : Int64) : Nil
+    @channel.close
+  end
 end
 
 # An `IyiIO` over bytes in memory. Writes land at the cursor and grow the

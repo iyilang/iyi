@@ -466,4 +466,61 @@ Hexdump.new(MultiWriter.new([left, right] of IyiIO)).dump("ab")
 assert_str("00000000  61 62                                             |ab|\n", right.to_s, "a Hexdump through a MultiWriter")
 puts "  MultiWriter puts, <<, write_byte, print, flush, close and use as an IyiIO verified"
 
+# ---------------------------------------------------------------------------
+# A pipe between tasks
+# ---------------------------------------------------------------------------
+
+puts "\n== a pipe between tasks"
+# Two pieces of room and a reader that starts late: the writer stops after
+# two writes until the reader takes them, and every write reaches the
+# reader whole and in order; closing the writer is the reader's end.
+pipe_in, pipe_out = IyiIO.pipe(2)
+pipe_events = [] of String
+group do |g|
+  g.spawn do
+    5.times do |i|
+      pipe_out.puts "line #{i}"
+      pipe_events << "wrote #{i}"
+    end
+    pipe_out.close
+    0
+  end
+  g.spawn do
+    sleep(20)
+    pipe_events << "reading"
+    while line = pipe_in.read_line(chomp: true)
+      pipe_events << "read #{line}"
+    end
+    0
+  end
+end
+assert_str("wrote 0,wrote 1,reading", pipe_events[0, 3].join(","), "a pipe's writer waits while its room is full")
+assert_true(pipe_events.select { |e| e.starts_with?("read ") } == ["read line 0", "read line 1", "read line 2", "read line 3", "read line 4"], "every write read whole and in order: #{pipe_events}")
+assert_true(!pipe_in.read_failed?, "a pipe whose writer closed ended cleanly")
+# A copy through a pipe, in 4 KB writes, and one write of 20,000 bytes that
+# a 4 KB read takes in parts: every byte arrives.
+copy_in, copy_out = IyiIO.pipe
+copy_sink = Memory.new
+group do |g|
+  g.spawn do
+    IyiIO.copy(Memory.new("abc" * 50_000), copy_out)
+    copy_out.write("z" * 20_000)
+    copy_out.close
+    0
+  end
+  g.spawn do
+    IyiIO.copy(copy_in, copy_sink)
+    0
+  end
+end
+copied = copy_sink.to_s
+assert_int(170_000_i64, copied.bytesize.to_i64, "a copy through a pipe arrives whole")
+assert_true(copied.ends_with?("abc" + "z" * 20_000), "and in order")
+# The reader gone, the next write refused, as a pipe's is.
+gone_in, gone_out = IyiIO.pipe
+gone_in.close
+assert_panics("a write to a pipe whose reader is closed") { gone_out.puts "nobody" }
+assert_panics("a pipe holds at least one write, not 0") { IyiIO.pipe(0) }
+puts "  a pipe's writer waits for room, its reader for a write, a close ends it, and a write past a closed reader is refused"
+
 puts "\nALL CHECKS PASSED"

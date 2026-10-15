@@ -1434,7 +1434,9 @@ PS1
     step "failure proof: a program that ends back in the C runtime hangs under a collection"
     mkdir -p crt-end/iyi
     cp "$REPO"/src/iyi/*.iyi crt-end/iyi/
-    awk '/^    LibC\.fflush\(Pointer\(Void\)\.new\(0_u64\)\)$/ || /^    __iyi_exit\(0\)$/ { found++; next } { print } END { if (found != 2) exit 3 }' \
+    # The pair is the win32 end of `fun main`; `def exit` writes the same
+    # `__iyi_exit(status)` line, so only the one after the flush is taken.
+    awk 'after && /^    __iyi_exit\(status\)$/ { found++; after = 0; next } { after = 0 } /^    LibC\.fflush\(Pointer\(Void\)\.new\(0_u64\)\)$/ { found++; after = 1; next } { print } END { if (found != 2) exit 3 }' \
       "$REPO/src/iyi/prelude.iyi" > crt-end/iyi/prelude.iyi || { echo "the end this proof removes is not in the prelude any more"; exit 1; }
     if ! IYI_PATH="$WORK/crt-end${PSEP}$REPO/src" "$IYI" build --release ends.iyi -o ends-in-crt > build-crt-end.log 2>&1; then
       cat build-crt-end.log; exit 1

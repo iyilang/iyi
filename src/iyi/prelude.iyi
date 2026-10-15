@@ -1092,20 +1092,20 @@ end
   # `File.open`'s every mode. Append is the access asked for, not a seek:
   # a handle with FILE_APPEND_DATA and without FILE_WRITE_DATA has every
   # write put at the end by the system, atomically against other writers,
-  # whatever its position - the access Go asks for O_APPEND, GENERIC_WRITE's
-  # 0x120116 less FILE_WRITE_DATA (0x2). The disposition is CREATE_ALWAYS
-  # (2) for a truncating create, OPEN_ALWAYS (4) for append's, and
-  # OPEN_EXISTING (3) otherwise. A *perm* without the owner's write bit is
-  # FILE_ATTRIBUTE_READONLY (0x1) on the file the call creates, the one
-  # bit of a POSIX mode Windows has; the handle itself still writes, as
-  # POSIX's does. A hidden or system file a truncating create refuses is
-  # emptied in place, as `__iyi_open_write` does.
+  # whatever its position - Go's O_APPEND, GENERIC_WRITE's 0x120116 less
+  # FILE_WRITE_DATA (0x2). The disposition is CREATE_ALWAYS (2) for a
+  # truncating create, OPEN_ALWAYS (4) for append's, TRUNCATE_EXISTING (5)
+  # for a truncate alone, as O_TRUNC is, and OPEN_EXISTING (3) otherwise.
+  # A *perm* without the owner's write bit is FILE_ATTRIBUTE_READONLY (0x1)
+  # on the file the call creates, the one bit of a POSIX mode Windows has;
+  # the handle itself still writes, as POSIX's does. A hidden or system file
+  # a truncating create refuses is emptied in place, as `__iyi_open_write` does.
   def __iyi_open_file(path : UInt8*, read : Bool, write : Bool, create : Bool, truncate : Bool, append : Bool, perm : Int32) : Int64
     wide = __iyi_wide_path(path)
     return -1_i64 if wide.address == 0_u64
     access = read ? -2147483648 : 0
     access = access | (append ? 0x120114 : 1073741824) if write
-    disposition = create ? (truncate ? 2 : 4) : 3
+    disposition = create ? (truncate ? 2 : 4) : (truncate ? 5 : 3)
     attributes = perm & 0o200 == 0 ? 1 : 128
     handle = LibC.CreateFileW(wide, access, 7, nil, disposition, attributes, Pointer(Void).new(0_u64))
     if handle.address &+ 1_u64 == 0_u64 && disposition == 2 && LibC.GetLastError == 5

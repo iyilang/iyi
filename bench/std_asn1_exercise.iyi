@@ -161,7 +161,8 @@ if args.size > 0 && args[0] == "robust"
       next if v.constructed? || v.tag_class != DerClass::Universal
       case v.tag
       when DerTag::BOOLEAN                            then v.boolean
-      when DerTag::INTEGER, DerTag::ENUMERATED        then v.integer_bytes
+      when DerTag::INTEGER                            then v.integer_bytes
+      when DerTag::ENUMERATED                         then v.enumerated_bytes
       when DerTag::BIT_STRING                         then v.bit_string_bits
       when DerTag::NULL                               then v.null
       when DerTag::OBJECT_IDENTIFIER                  then v.oid
@@ -219,7 +220,10 @@ refused one("0202 ffff").integer, "redundant leading byte", "a redundant 0xff re
 refused one("0200").integer, "no bytes", "an empty INTEGER refused"
 refused one("0201ff").unsigned_integer, "negative", "a negative where unsigned is asked refused"
 refused one("0400").integer, "expected an INTEGER", "an OCTET STRING asked as an INTEGER refused"
-check one("0a0102").integer.or_panic == 2_i64, "an ENUMERATED reads as an integer"
+check one("0a0102").enumerated.or_panic == 2_i64, "an ENUMERATED reads as one"
+refused one("0a0102").integer, "expected an INTEGER, found ENUMERATED", "an ENUMERATED asked as an INTEGER refused"
+refused one("020102").enumerated, "expected an ENUMERATED, found INTEGER", "an INTEGER asked as an ENUMERATED refused"
+refused one("0a020001").enumerated, "an ENUMERATED with a redundant leading byte", "an ENUMERATED held to INTEGER's rules"
 
 puts "== object identifiers"
 check one("06092a864886f70d01010b").oid.or_panic == "1.2.840.113549.1.1.11", "sha256WithRSAEncryption"

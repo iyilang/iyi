@@ -325,6 +325,10 @@ prove_broken "a constructed INTEGER taken" "a constructed INTEGER refused" \
   'if constructed && tag != DerTag::SEQUENCE && tag != DerTag::SET' 'if false'
 prove_broken "a redundant INTEGER byte taken" "a redundant 0x00 refused" \
   'if (first == 0x00_u8 && second < 0x80_u8) || (first == 0xFF_u8 && second >= 0x80_u8)' 'if false'
+# An ENUMERATED taken for an INTEGER: the shape that let an ECDSA signature
+# with r or s tagged 0x0a verify.
+prove_broken "an ENUMERATED read as an INTEGER" "an ENUMERATED asked as an INTEGER refused" \
+  'unless universal?(DerTag::INTEGER)' 'unless universal?(DerTag::INTEGER) || universal?(DerTag::ENUMERATED)'
 prove_broken "a subidentifier's leading 0x80 taken" "a subidentifier with a leading 0x80 refused" \
   '      return Asn1Error.new("a subidentifier with a leading 0x80 byte", at) if @data[at] == 0x80_u8' ''
 prove_broken "a set unused bit taken" "an unused bit set refused" \

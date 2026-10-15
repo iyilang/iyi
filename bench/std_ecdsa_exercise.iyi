@@ -86,6 +86,10 @@ SIGNATURES = [
   {K_P384, "SHA256", "abc", "304402202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b20220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0", false, "another key"},
   {K_P256, "SHA256", "abc", "304402202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b20220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e1", false, "a bit of s"},
   {K_P256, "SHA256", "abc", "304502202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b2022100b6d4b97557eef99036ce3176858b30c51550962a4f7afb63ac9b4c5a4ed63171", true, "s as n - s, the other valid signature"},
+  # Line 75's signature with r, then s, tagged ENUMERATED (0x0a): the same
+  # numbers, which is why a reader that took either verified it.
+  {K_P256, "SHA256", "abc", "30440a203488dd85b2e8c4e82b6f500935fda75c25e3269043cee72182bd61f71bd9fe44022072409dacd33f989e77b07a66e97340a0ada2ff739b218b28c50412b33b4c64ea", false, "r tagged ENUMERATED"},
+  {K_P256, "SHA256", "abc", "304402203488dd85b2e8c4e82b6f500935fda75c25e3269043cee72182bd61f71bd9fe440a2072409dacd33f989e77b07a66e97340a0ada2ff739b218b28c50412b33b4c64ea", false, "s tagged ENUMERATED"},
   {K_P256, "SHA256", "abc", "30440220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e002202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b2", false, "r and s swapped"},
   {K_P256, "SHA256", "abc", "30250201000220492b4689a8110670c931ce897a74cf3aa7966483579ca321471e7e68ad8cf3e0", false, "r zero"},
   {K_P256, "SHA256", "abc", "302502202ce6667453432faa1a4a1fcfa7339c724fc96caa0f48c23d5342bce1274c08b2020100", false, "s zero"},

@@ -1124,6 +1124,20 @@
 
 ### Fixed
 
+- **An ECDSA signature whose r or s is tagged ENUMERATED is refused.**
+  `DerValue#integer` and `integer_bytes` took an ENUMERATED (0x0a) as an
+  INTEGER (0x02), since the two are written alike. So std/ecdsa verified
+  a signature with one bit of a tag flipped, where DER, OpenSSL and
+  Python's `cryptography` refuse it. r and s were the signer's own, so
+  nothing was forged, but one signature had two encodings that verified.
+  rsa's and x509's integers were read the same way. An ENUMERATED is read
+  by `enumerated` and `enumerated_bytes` now, held to the same
+  fewest-bytes rule. Found by the ecdsa gate's 600 random signatures
+  against Python, which met it about once a run once CI had
+  `cryptography`: 6 in 120,000 cases before, none after. Held by
+  `bench/std_asn1_exercise.sh` (an ENUMERATED asked as an INTEGER is
+  refused; a copy that takes one is caught) and by two fixed signatures
+  in `bench/std_ecdsa_exercise.iyi`, r and then s tagged 0x0a.
 - **std/user on darwin answers the groups of an account whose gid is past
   2^31, and on Windows its lookups build from std/user's artifact.**
   darwin's `getgrouplist` takes a gid as an `int`, and the module checked

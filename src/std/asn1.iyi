@@ -263,29 +263,48 @@ pub struct DerValue
 
   # An INTEGER that fits an Int64.
   def integer : Int64 | Asn1Error
-    bytes = integer_bytes!
-    return Asn1Error.new("an INTEGER of #{bytes.size} bytes, past an Int64", @offset) if bytes.size > 8
-    value = bytes[0] >= 0x80_u8 ? -1_i64 : 0_i64
-    bytes.each { |b| value = (value << 8) | b.to_i64 }
-    value
+    int64(integer_bytes!, "an INTEGER")
   end
 
   # An INTEGER's two's-complement bytes, as written: checked to be the
-  # fewest that hold it.
+  # fewest that hold it. Only an INTEGER: an ENUMERATED is written the same
+  # way under another tag, and reading one here took an Ecdsa-Sig-Value
+  # whose r or s was tagged ENUMERATED - a signature no DER reader accepts.
   def integer_bytes : Array(UInt8) | Asn1Error
-    unless universal?(DerTag::INTEGER) || universal?(DerTag::ENUMERATED)
-      return Asn1Error.new("expected an INTEGER, found #{describe}", @offset)
-    end
-    return Asn1Error.new("an INTEGER written constructed", @offset) if @constructed
-    return Asn1Error.new("an INTEGER with no bytes", @offset) if @content_size == 0
+    return Asn1Error.new("expected an INTEGER, found #{describe}", @offset) unless universal?(DerTag::INTEGER)
+    fewest_bytes("an INTEGER")
+  end
+
+  # An ENUMERATED that fits an Int64: a CRL entry's reason code, an
+  # OCSP response's status.
+  def enumerated : Int64 | Asn1Error
+    int64(enumerated_bytes!, "an ENUMERATED")
+  end
+
+  # An ENUMERATED's two's-complement bytes, held to INTEGER's rules.
+  def enumerated_bytes : Array(UInt8) | Asn1Error
+    return Asn1Error.new("expected an ENUMERATED, found #{describe}", @offset) unless universal?(DerTag::ENUMERATED)
+    fewest_bytes("an ENUMERATED")
+  end
+
+  private def fewest_bytes(what : String) : Array(UInt8) | Asn1Error
+    return Asn1Error.new("#{what} written constructed", @offset) if @constructed
+    return Asn1Error.new("#{what} with no bytes", @offset) if @content_size == 0
     if @content_size > 1
       first = @data[content_offset]
       second = @data[content_offset + 1]
       if (first == 0x00_u8 && second < 0x80_u8) || (first == 0xFF_u8 && second >= 0x80_u8)
-        return Asn1Error.new("an INTEGER with a redundant leading byte", content_offset)
+        return Asn1Error.new("#{what} with a redundant leading byte", content_offset)
       end
     end
     content
+  end
+
+  private def int64(bytes : Array(UInt8), what : String) : Int64 | Asn1Error
+    return Asn1Error.new("#{what} of #{bytes.size} bytes, past an Int64", @offset) if bytes.size > 8
+    value = bytes[0] >= 0x80_u8 ? -1_i64 : 0_i64
+    bytes.each { |b| value = (value << 8) | b.to_i64 }
+    value
   end
 
   # A non-negative INTEGER's magnitude, big-endian, without the 0x00 a

@@ -2909,6 +2909,78 @@ describe Iyi::IyiMod do
     end
   end
 
+  # The other side of the one above: a module under this one's path is not
+  # a module this one keeps.
+  #
+  # `pkg/child` is the namespace `Pkg::Child`, inside `pkg`'s `Pkg`, and the
+  # walks that gather `pkg`'s artifact went into every module they found
+  # there. `pkg.iyimod` carried the child's declarations, aliases and
+  # machine code a second time, so a program built from both artifacts was
+  # refused (`alias Num is already defined`) or failed to link (LNK2005).
+  # A module with a `module` header of its own has its own artifact; the
+  # walks stop at it.
+  it "leaves a module under its path to that module's own artifact" do
+    with_tempdir("iyimod_nested_unit") do
+      modules = {
+        "pkg/child.iyi" => <<-IYI,
+          module pkg/child
+
+          pub alias Num = Int32 | Int64
+
+          pub class Foo
+            def initialize(@x : Int32)
+            end
+
+            def x : Int32
+              @x
+            end
+          end
+
+          pub def make : Foo
+            Foo.new(3)
+          end
+          IYI
+        "pkg.iyi" => <<-IYI,
+          module pkg
+
+          import pkg/child::*
+
+          pub def run : Int32
+            n : Num = make.x
+            n.to_i32 * 2
+          end
+          IYI
+      }
+      main = <<-IYI
+        module main
+
+        import pkg
+        import pkg/child::*
+
+        puts Pkg.run
+        puts make.x
+        IYI
+
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "6\n3\n"
+      from_artifact.should eq from_source
+
+      parent = Iyi::IyiMod.read(File.join("mods", "pkg.iyimod"))
+      child = Iyi::IyiMod.read(File.join("mods", "pkg", "child.iyimod"))
+
+      parent.object_code.map(&.name).select(&.starts_with?("Pkg::Child")).should be_empty
+      parent.layouts.map(&.[0]).select(&.starts_with?("Pkg::Child")).should be_empty
+      (parent.object_code.map(&.name) & child.object_code.map(&.name)).should be_empty
+
+      declarations = String.build do |io|
+        Iyi::IyiMod.declarations(parent, io)
+      end
+      declarations.should_not contain "class Foo"
+      declarations.should_not contain "def make"
+      declarations.should_not contain "alias Num"
+    end
+  end
+
   # A generic's splat parameter is part of its declaration.
   #
   # `*T` and `T` are different things and the parser says so: `struct

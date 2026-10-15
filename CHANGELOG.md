@@ -39,6 +39,14 @@
   no `==`, so `Object#==` answered false for `Sub == Sub` and for
   `Sub.as(Base.class) == Sub`. Held by
   `spec/compiler/codegen/iyi_case_equality_spec.cr` (#128).
+- **A module's artifact leaves the modules under its path to their own.**
+  `pkg/child` is the namespace `Pkg::Child`, inside `pkg`'s `Pkg`, and the
+  walks that gather `pkg.iyimod` went into it: the artifact carried the
+  child's declarations, aliases, layouts and machine code a second time,
+  so a program importing both and built from artifacts was refused with
+  `alias ... is already defined` or failed to link on duplicate symbols.
+  The walks stop at a module with a `module` header of its own. Held by
+  `spec/compiler/iyimod_spec.cr`. (#124)
 
 ## 0.17.0 — 2026-10-14
 

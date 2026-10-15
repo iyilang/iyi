@@ -226,10 +226,13 @@ assert_str "top", File.read(sandbox + "/shelf/tree/top.txt"), "cp_r into a direc
 FileUtils.cp_r(a, sandbox + "/shelf")
 assert_str "alpha\n", File.read(sandbox + "/shelf/a.txt"), "cp_r of a file is cp"
 said = refusal_of { FileUtils.cp_r(tree, tree + "/sub") }
-assert_str "Cannot copy #{tree} to #{tree}/sub/tree: #{tree}/sub/tree is inside the tree being copied", said, "cp_r refuses a tree into itself"
+# The landing is `File.join`ed, as cp_r names it: `\` before the name on Windows.
+landing = File.join(tree + "/sub", "tree")
+assert_str "Cannot copy #{tree} to #{landing}: #{landing} is inside the tree being copied", said, "cp_r refuses a tree into itself"
 assert_true !Dir.exists?(tree + "/sub/tree"), "a refused copy into itself made nothing"
 said = refusal_of { FileUtils.cp_r(tree, tree) }
-assert_str "Cannot copy #{tree} to #{tree}/tree: #{tree}/tree is inside the tree being copied", said, "cp_r refuses a tree into its own directory"
+landing = File.join(tree, "tree")
+assert_str "Cannot copy #{tree} to #{landing}: #{landing} is inside the tree being copied", said, "cp_r refuses a tree into its own directory"
 said = refusal_of { FileUtils.cp_r(sandbox + "/missing", sandbox + "/x") }
 assert_str "Cannot copy #{sandbox}/missing to #{sandbox}/x: #{sandbox}/missing does not exist", said, "cp_r of nothing is refused"
 puts "  files, modes, hidden and unicode names, empty directories#{links ? ", links as links" : ""}; into itself refused"

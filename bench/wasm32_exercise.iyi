@@ -295,22 +295,42 @@ puts "realloc: data preserved across buffer growth"
 # === 6. Weak References ===
 puts "== weak references =="
 
-# Made in a frame of their own: no slot of the caller's holds a target.
-def make_weak(held : Array(Node), refs : Array(WeakRef(Node))) : Nil
+# The references and the targets held live in class variables, which the
+# root walk reads in the data section, and the trigger is off while they
+# are made: in an optimised build a value held only in a wasm local is no
+# root - LLVM keeps it out of linear memory, where the walk looks - and a
+# collection in the middle frees it (iyi-std-gaps.md, "wasm32 --release").
+# That hole is the collector's, not this section's subject.
+class WeakRoots
+  @@held = [] of Node
+  @@refs = [] of WeakRef(Node)
+
+  def self.held : Array(Node)
+    @@held
+  end
+
+  def self.refs : Array(WeakRef(Node))
+    @@refs
+  end
+end
+
+def make_weak : Nil
   widx = 0
   while widx < 200
     node = Node.new(widx)
-    held << node if widx.even?
-    refs << WeakRef.new(node)
+    WeakRoots.held << node if widx.even?
+    WeakRoots.refs << WeakRef.new(node)
     widx = widx + 1
   end
 end
 
-weak_held = [] of Node
-weak_refs = [] of WeakRef(Node)
-make_weak(weak_held, weak_refs)
+IyiMark.auto = false
+make_weak
+IyiMark.auto = true
 wipe_stack_frame
 IyiMark.collect
+weak_held = WeakRoots.held
+weak_refs = WeakRoots.refs
 weak_kept = 0
 weak_cleared = 0
 widx = 0

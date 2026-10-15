@@ -188,6 +188,11 @@ prove_fails "stack root failure" no_stack "survival:" \
 prove_fails "layout precision failure" no_precision "precision:" \
   '{ if ($0 ~ /entry = has_table && type_id != 0_u64/) { sub(/entry = has_table && type_id != 0_u64 \? layout_search\(table, entry_count, type_id\) : 0_u64/, "entry = 0_u64") } print }'
 
+# 4. Break weak references: the collection never clears a cell, so a
+#    reference whose target was swept answers its memory or never goes nil.
+prove_fails "weak cells never cleared" no_weak "weak:" \
+  '{ if ($0 ~ /^          IyiWeak\.clear$/) next; print }'
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "wasm32 collector: allocation, reclamation, survival, precision and negative proofs all hold"

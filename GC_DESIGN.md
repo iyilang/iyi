@@ -1846,6 +1846,17 @@ Each stage is independently verifiable; the tree is never left broken between th
    - Root discovery: linear memory scan from stacksave to __heap_base, and globals from 0 to __data_end.
    - Mark and sweep: mark-queue with layout table traversal; sweep into free lists and large object tracking.
    - Verified: bench/wasm32_exercise.sh passes under wasmtime in default and release modes.
+   - **Not sound in an optimised build.** The walk reads linear memory, and an
+     optimised build keeps a pointer in a wasm local, which is not in linear
+     memory and which nothing can scan: an object held only by a local is
+     freed by a collection that comes while it is held. A top-level array
+     of 200 objects, a collection, 2,000 more allocations: the array reads
+     back empty under `--release` and whole without it; the same in a
+     function ends the program. The exercise passes in release because it
+     roots what it keeps through `pointerof` and class variables. The fix
+     is the compiler's - every pointer local and temporary kept in linear
+     memory across a call that may collect: LLVM's shadow-stack GC strategy
+     with `llvm.gcroot`, or Binaryen's `--spill-pointers` after the link.
 
 3. **Platform-Specific Pointer Maps:** (Measured and verified)
    - Codegen emits target-specific TypeLayout entries for each build target based on LLVM target data.

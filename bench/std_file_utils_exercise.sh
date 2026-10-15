@@ -353,7 +353,10 @@ refuses() {
 refuses "cp of nothing" "Cannot copy $R/none to $R/x: $R/none does not exist" cp "$R/none" "$R/x"
 refuses "cp of a directory" "Cannot copy $R/dir to $R/x: $R/dir is a directory, which cp_r copies" cp "$R/dir" "$R/x"
 refuses "cp onto itself" "Cannot copy $R/file to $R/file: they are the same file" cp "$R/file" "$R/file"
-refuses "cp_r into itself" "Cannot copy $R/dir to $R/dir/sub/dir: $R/dir/sub/dir is inside the tree being copied" cp_r "$R/dir" "$R/dir/sub"
+# The landing is `File.join`ed, which is `\` on Windows.
+landing="$R/dir/sub/dir"
+[ "$PSEP" = ';' ] && landing="$R/dir/sub\\dir"
+refuses "cp_r into itself" "Cannot copy $R/dir to $landing: $landing is inside the tree being copied" cp_r "$R/dir" "$R/dir/sub"
 refuses "cp_r under a missing directory" "Cannot copy $R/dir to $R/no/where: the directory $R/no does not exist" cp_r "$R/dir" "$R/no/where"
 if command -v mkfifo >/dev/null 2>&1 && mkfifo "$R/dir/pipe" 2>/dev/null; then
   refuses "cp_r of a FIFO" "Cannot copy $R/dir/pipe: it is a FIFO, not a file, a directory or a link" cp_r "$R/dir" "$R/copied"
@@ -440,8 +443,14 @@ prove_broken "a removal that follows a link" "a link's target survives rm_r: the
         remove_entry(child, child_info) if child_info' \
   '        child_info = File.info?(child)
         remove_entry(child, child_info) if child_info'
+# Windows' lstat of `link\` is the link, separator or none, and the bits
+# a file keeps there are one: the exercise asks both only elsewhere.
+if [ "$PSEP" = ';' ]; then
+  echo "  a trailing separator and a file's mode bits are POSIX's questions, so those two proofs are unmeasured on Windows"
+else
 prove_broken "link/ followed to its directory" "a link's target survives rm_r of link/" \
   '    while n > 1 && separator?(bytes[n - 1])' '    while false && separator?(bytes[n - 1])'
+fi
 prove_broken "a file read whole" "a 64 MiB copy allocates" \
   '    buffer = Pointer(UInt8).malloc(PIECE.to_u64)' \
   '    whole = File.read(from)
@@ -451,9 +460,11 @@ prove_broken "a file read whole" "a 64 MiB copy allocates" \
     File.chmod(to, mode)
     return if mode >= 0
     buffer = Pointer(UInt8).malloc(PIECE.to_u64)'
+if [ "$PSEP" != ';' ]; then
 prove_broken "permission bits dropped" "cp onto a file gives it the source's bits" \
   '    __iyi_close(sink)
     File.chmod(to, mode)' '    __iyi_close(sink)'
+fi
 prove_broken "a file copied onto itself" "cp of a file onto itself is refused" \
   '    raise "Cannot copy #{s} to #{target}: they are the same file" if File.same?(s, target)
     copy_file' '    copy_file'
@@ -464,8 +475,14 @@ prove_broken "a tree copied into itself" "stack overflow: the stack ran out" \
 if [ -n "$OTHER" ]; then
   prove_broken "a move across devices tried as a rename" "mv across devices moves a file" \
     '    if info.dev == landing.dev || info.dev == 0_i64 || landing.dev == 0_i64' '    if true'
-  prove_broken "a source it cannot remove copied anyway" "mv across devices refuses a source it could not remove" \
-    '      raise "Cannot move #{s} to #{target}: #{stuck} is read-only, so the source could not be removed after the copy" if stuck' ''
+  # Root writes anywhere, so there the exercise has no read-only source
+  # to be refused, and this proof nothing to show.
+  if [ "$(id -u 2>/dev/null)" = 0 ]; then
+    echo "  root writes every directory, so the proof that a read-only source is refused is unmeasured"
+  else
+    prove_broken "a source it cannot remove copied anyway" "mv across devices refuses a source it could not remove" \
+      '      raise "Cannot move #{s} to #{target}: #{stuck} is read-only, so the source could not be removed after the copy" if stuck' ''
+  fi
 else
   echo "  no second device, so the cross-device move's proof is unmeasured"
 fi

@@ -589,8 +589,14 @@ case "$(uname -s)" in
       'VMIN_AT     = 17 + 6' 'VMIN_AT     = 16 + 6'
     ;;
 esac
+# Both platforms' arms of the refusal, so the proof means something on the
+# one that compiles each: the POSIX line alone left Windows' intact.
 prove_broken "a refusal that is not reported" "raw refuses a pipe and does not run the block" plain \
-  '      return TermError.new(operation, fd, code, code != 25) if code != 0
+  '    {% if flag?(:win32) %}
+      return TermError.new(operation, fd, code, false) if code != 0
+    {% else %}
+      return TermError.new(operation, fd, code, code != 25) if code != 0
+    {% end %}
 ' ''
 prove_broken "the prompt on standard output" "a password piped in is read" plain \
   'STDERR.write(prompt) unless prompt.empty?' 'STDOUT.write(prompt) unless prompt.empty?'

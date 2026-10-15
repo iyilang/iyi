@@ -97,12 +97,13 @@ build_and_run() {
 PY_HOST="" PY_CPUS="" PY_ONLINE="" PY_PAGE="" PIN="" PIN_CPUS=""
 if [ -n "$PY" ]; then
   "$PY" - >"$WORK/oracle" <<'PY'
-import os, socket
+import mmap, os, socket
 mask = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else []
 print(socket.gethostname())
 print(len(mask) if mask else os.cpu_count())
 print(os.cpu_count())
-print(os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else "")
+# Windows' Python has no sysconf; mmap's PAGESIZE is the page there too.
+print(os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else mmap.PAGESIZE)
 if len(mask) >= 3:
     print("%d,%d" % (mask[0], mask[2]))
 elif len(mask) == 2:

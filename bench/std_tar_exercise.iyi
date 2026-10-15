@@ -633,7 +633,11 @@ def slip(work : String, archive : String, phrase : String, label : String) : Nil
   raise "ASSERTION FAILED: #{label}: extracted instead of refusing" unless got.is_a?(TarError)
   assert_true got.message.includes?(phrase), "#{label}: refused with #{got.message.inspect}, which does not say #{phrase.inspect}"
   assert_true !File.exists?(work + "/evil.txt"), "#{label}: nothing written outside"
-  puts "  #{got.message}"
+  # A sentence that names the run's own directory is shown by what it says,
+  # not where: the directory is new each run, and the output is compared
+  # between a build from source and one from artifacts.
+  shown = got.message.includes?("iyi_tar_exercise_") ? "#{label}: refused, #{phrase}" : got.message
+  puts "  #{shown}"
 end
 
 evil = padded("evil")

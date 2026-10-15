@@ -136,8 +136,11 @@ fi
 
 echo
 echo "== the table against Python's mimetypes"
-# `mimetypes.init([])` keeps Python to its built-in table, so neither side
-# reads /etc/mime.types. Every extension both know must agree, except the
+# A fresh `mimetypes.MimeTypes()` is Python's built-in table and nothing
+# else, so neither side reads the machine's. `mimetypes.init([])` was
+# meant to be: but it reads the system's files anyway on a first call, and
+# the registry on Windows, and darwin's /etc/apache2/mime.types answered
+# 13 extensions differently. Every extension both know must agree, except the
 # pairs below, each a deliberate choice: `.ext python-value` lines.
 #   .tgz  application/x-gtar-compressed  a tgz is a gzip stream; Go, nginx
 #                                        and browsers send application/gzip.
@@ -155,6 +158,17 @@ echo "== the table against Python's mimetypes"
 #   .mjs  application/javascript
 #   .xml  text/xml                       RFC 7303 prefers application/xml.
 #   .mkv  video/x-matroska               registered as video/matroska.
+# And newer Pythons (3.13, 3.14) moved these, each away from what servers
+# send, so ours stays:
+#   .vcf  text/x-vcard                   RFC 6350 registered text/vcard.
+#   .c .h text/plain                     Apache and nginx name the language.
+#   .rtf  text/rtf                       both are registered; application/rtf
+#                                        is what servers send.
+#   .wav  audio/vnd.wave                 RFC 2361's; browsers send audio/wav.
+#   .opus audio/opus                     an .opus file is Ogg (RFC 7845 §9).
+#   .m4v  video/x-m4v                    Apple's private name for MP4 video.
+#   .avi  video/vnd.avi                  servers and browsers send x-msvideo.
+#   .exe  application/octet-stream       IANA's portable-executable is kept.
 ALLOWED='.tgz application/x-gtar-compressed
 .wav audio/x-wav
 .rs application/rls-services+xml
@@ -163,7 +177,16 @@ ALLOWED='.tgz application/x-gtar-compressed
 .js application/javascript
 .mjs application/javascript
 .xml text/xml
-.mkv video/x-matroska'
+.mkv video/x-matroska
+.vcf text/x-vcard
+.c text/plain
+.h text/plain
+.rtf text/rtf
+.wav audio/vnd.wave
+.opus audio/opus
+.m4v video/x-m4v
+.avi video/vnd.avi
+.exe application/octet-stream'
 if [ -z "$PY" ]; then
   echo "  no python3 on this machine, so the comparison is unmeasured"
 elif ! "$WORK/mime-plain" table >"$WORK/table.txt" 2>&1; then
@@ -171,14 +194,14 @@ elif ! "$WORK/mime-plain" table >"$WORK/table.txt" 2>&1; then
   status=1
 elif ! ALLOWED="$ALLOWED" TABLE="$WORK/table.txt" "$PY" - <<'PY'
 import mimetypes, os, sys
-mimetypes.init([])
+builtin = mimetypes.MimeTypes().types_map[True]
 allowed = set(os.environ["ALLOWED"].splitlines())
 bad = 0
 both = 0
 used = set()
 for line in open(os.environ["TABLE"]):
     ext, ours = line.split()
-    theirs = mimetypes.types_map.get(ext)
+    theirs = builtin.get(ext)
     if theirs is None:
         continue
     both += 1

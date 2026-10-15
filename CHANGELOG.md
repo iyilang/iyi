@@ -1102,6 +1102,52 @@
 
 ### Fixed
 
+- **std/user on darwin answers the groups of an account whose gid is past
+  2^31, and on Windows its lookups build from std/user's artifact.**
+  darwin's `getgrouplist` takes a gid as an `int`, and the module checked
+  `nobody`'s 4294967294 into one, which panics, then read each group
+  back through a checked conversion. The bits are reinterpreted both ways
+  now. On Windows the lookups that panic were a panic and nothing else.
+  A method's machine code is named by the type its body has, so their
+  symbols were NoReturn's, and a program built from the artifact looked
+  for the declared type's (`User#group_ids`: "its object code has no
+  symbol for it"). They panic under a condition that always holds now
+  and are typed as declared. Held by `bench/std_user_exercise.sh` against
+  Python on darwin and by `bench/std_exercise.sh`'s from-artifacts run on
+  Windows. Neither had run in CI before the shards.
+- **`File.open` on Windows truncates when asked to without creating.** The
+  open mapped "truncate, don't create" to `OPEN_EXISTING` and kept the
+  file's bytes. No mode asks for that today, but the mapping was the
+  floor's and is POSIX's now: `TRUNCATE_EXISTING`. The proof in
+  `bench/std_file_exercise.sh` that an `r+` which truncates is caught now
+  catches it on Windows too.
+- **`$SSL_CERT_DIR` is a list as `PATH` is on Windows, `;`-separated.**
+  std/system_roots split it on `:`, and `C:/...` came apart at the drive.
+- **The std gates hold on darwin and Windows, where they had not run.**
+  The std job ran out of time before reaching most module exercises on
+  those two platforms, so the first sharded run found what had always
+  been there:
+  - csv's `case` inside `$(...)` was a syntax error to macOS's bash 3.2;
+  - mime's oracle read the machine's own types (`mimetypes.init([])`
+    still loads them) and newer Pythons' table; it is held to Python's
+    built-in table now, with 3.13's and 3.14's moves allowed by name;
+  - Python wrote the string scanner's programs and zip's expectations
+    with `\r\n` in Windows' text mode;
+  - sse timed a 50 ms wait with Windows' 15.6 ms clock;
+  - system read the page size from a `sysconf` Windows' Python lacks;
+  - tar set a link's time with `follow_symlinks=False`, which Windows
+    has not;
+  - tar printed a path that differs each run, so its source and artifact
+    runs disagreed;
+  - darwin's `link(2)` follows a symbolic link, which tar's proof now
+    expects there;
+  - zip expected the flags a writing ZipFile listed rather than those it
+    wrote;
+  - user's Python oracle overflowed on `nobody`'s gid, and user asked
+    Windows for sections it is not asked;
+  - term's and file_utils' proofs patched an arm Windows does not
+    compile, or asked root for a refusal root never meets.
+
 - **A program builds from artifacts whose code reads a class variable
   through a subclassed owner, or asks a value its class.** Both go through
   functions the main module defines - `~Owner+::name:read`, which

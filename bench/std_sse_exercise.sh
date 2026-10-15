@@ -386,7 +386,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         name = self.path.strip("/")
         with lock:
-            seen[name].append((time.monotonic(), dict(self.headers)))
+            # perf_counter, not monotonic: Windows' monotonic moves in
+            # steps of 15.6 ms, and a 50 ms wait read as 47.
+            seen[name].append((time.perf_counter(), dict(self.headers)))
             n = len(seen[name]) - 1
         if name == "drop":
             if n == 3:

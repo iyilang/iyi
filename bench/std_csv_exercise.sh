@@ -204,8 +204,10 @@ with open(f"{work}/py.dump", "w", newline="", encoding="utf-8") as f:
     f.write(dump(rows))
 PY
     names="sep=$1 quote=$2 $3 $4"
-    ch_sep=$(case $1 in comma) echo ",";; semi) echo ";";; tab) echo "tab";; esac)
-    ch_quote=$(case $2 in dq) echo '"';; sq) echo "'";; esac)
+    # Assigned in a case, not read out of one in `$(...)`: macOS's bash 3.2
+    # reads `;;` inside a command substitution as the end of the line.
+    case $1 in comma) ch_sep="," ;; semi) ch_sep=";" ;; tab) ch_sep="tab" ;; esac
+    case $2 in dq) ch_quote='"' ;; sq) ch_quote="'" ;; esac
     if ! "$WORK/oracle" read "$WORK/py.csv" "$ch_sep" "$ch_quote" >"$WORK/iyi.dump" 2>"$WORK/oracle.err"; then
       echo "  $names: Python's file was refused: $(head -1 "$WORK/oracle.err")"
       status=1

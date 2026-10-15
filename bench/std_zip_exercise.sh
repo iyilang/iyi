@@ -87,7 +87,8 @@ def expect(name):
         for i in z.infolist():
             assert zlib.crc32(z.read(i)) == i.CRC, (name, i.filename)
         text_ = lines_of(z)
-    with open(path[:-4] + ".expect", "w", encoding="utf-8") as f:
+    # newline="": Windows' text mode wrote \r\n, which the listing is not.
+    with open(path[:-4] + ".expect", "w", encoding="utf-8", newline="") as f:
         f.write(text_)
     index.append(name)
 
@@ -200,7 +201,16 @@ with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr(info("real.txt"), b"the real directory has this\n")
     z.comment = b"before " + b"PK\x05\x06" + bytes(18) + b" after"
     listed = lines_of(z)
-with open(path[:-4] + ".expect", "w", encoding="utf-8") as f:
+# The flags as the central directory holds them, read from the bytes at
+# the real end record: a writing ZipFile's own listing carried 0x800 on
+# darwin's Python where the archive it wrote has 0.
+import struct
+data = open(path, "rb").read()
+end = len(data) - 22 - len(b"before " + b"PK\x05\x06" + bytes(18) + b" after")
+directory = struct.unpack_from("<I", data, end + 16)[0]
+flags = struct.unpack_from("<H", data, directory + 8)[0]
+listed = "".join(l.rsplit("\t", 1)[0] + "\t" + str(flags) + "\n" if l.startswith("entry\t") else l + "\n" for l in listed.splitlines())
+with open(path[:-4] + ".expect", "w", encoding="utf-8", newline="") as f:
     f.write(listed)
 index.append("py-fakesig.zip")
 
@@ -233,7 +243,7 @@ if shutil.which("zip"):
 else:
     print("  no zip(1) on this machine: the zip -r archives are not compared")
 
-with open(os.path.join(d, "index.txt"), "w") as f:
+with open(os.path.join(d, "index.txt"), "w", newline="") as f:
     f.write("\n".join(index) + "\n")
 PY
 then

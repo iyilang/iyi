@@ -241,8 +241,10 @@ lines = []
 for k, program in enumerate(programs):
     lines.append(f"== program {k}")
     lines.extend(tokenize(program))
-open(sys.argv[2], "w", encoding="utf-8").write("\x1e".join(programs))
-open(sys.argv[3], "w").write("\n".join(lines) + "\n")
+# newline="": Windows' text mode wrote each \n of a program as \r\n, and
+# the scanner read the bytes it was given, a byte later than Python.
+open(sys.argv[2], "w", encoding="utf-8", newline="").write("\x1e".join(programs))
+open(sys.argv[3], "w", newline="").write("\n".join(lines) + "\n")
 PY
 then
   echo "  the programs were not written"

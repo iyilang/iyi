@@ -91,11 +91,40 @@ build_and_run() {
 # session of its own, so Ctrl-C has a foreground group to signal - and
 # prints `ok:` or `FAIL:` per check.
 cat >"$WORK/drive.py" <<'PY'
-import fcntl, os, select, signal, struct, subprocess, sys, termios, time
+import fcntl, itertools, os, select, signal, struct, subprocess, sys, termios, time
 
 PROGRAM = sys.argv[1]
 ONLY = sys.argv[2:]  # names of checks to run, all when empty
 failures = []
+# Each line as it is printed: a run the gate's `timeout` ends kept nothing
+# of what it had found, and a darwin run that ran out said not one word.
+sys.stdout.reconfigure(line_buffering=True)
+
+# The session's leader, which owns the terminal and outlives the program it
+# runs in its foreground group: darwin revokes a terminal whose session
+# leader has gone, so with the program as leader the terminal could not be
+# read after it, and every check of the mode left behind failed there. It
+# catches SIGINT and SIGQUIT with a handler, which exec puts back to the
+# default, so Ctrl-C still reaches the program; it writes the program's pid
+# and then its exit status, and waits to be killed.
+HERE = os.path.dirname(os.path.abspath(__file__))
+LEADER = os.path.join(HERE, "leader.py")
+with open(LEADER, "w") as leader:
+    leader.write("""import os, signal, subprocess, sys, time
+signal.signal(signal.SIGINT, lambda number, frame: None)
+signal.signal(signal.SIGQUIT, lambda number, frame: None)
+status = sys.argv[1]
+child = subprocess.Popen(sys.argv[2:])
+with open(status + ".pid", "w") as f:
+    f.write(str(child.pid))
+code = child.wait()
+with open(status + ".part", "w") as f:
+    f.write(str(code))
+os.rename(status + ".part", status)
+while True:
+    time.sleep(60)
+""")
+RUNS = itertools.count()
 
 
 def check(name, ok, detail=""):
@@ -134,9 +163,11 @@ class Pty:
             # signal: without it Ctrl-C would be a byte in every mode.
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
-        self.proc = subprocess.Popen([PROGRAM, mode], stdin=self.slave, stdout=self.slave,
-                                     stderr=self.slave, start_new_session=True,
-                                     preexec_fn=controlling)
+        # The leader's status file: the program's exit, once it has one.
+        self.status = os.path.join(HERE, f"status-{next(RUNS)}")
+        self.proc = subprocess.Popen([sys.executable, LEADER, self.status, PROGRAM, mode],
+                                     stdin=self.slave, stdout=self.slave, stderr=self.slave,
+                                     start_new_session=True, preexec_fn=controlling)
         self.seen = b""
 
     def read_until(self, token, timeout=10.0):
@@ -179,20 +210,28 @@ class Pty:
     def now(self):
         return termios.tcgetattr(self.slave)
 
+    # The program's exit status, from its leader: a negative number for the
+    # signal that ended it, as subprocess says. One still running past
+    # *timeout* is killed.
     def finish(self, timeout=10.0):
-        try:
-            code = self.proc.wait(timeout)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            code = self.proc.wait()
+        deadline = time.monotonic() + timeout
+        while not os.path.exists(self.status) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not os.path.exists(self.status):
+            try:
+                os.kill(int(open(self.status + ".pid").read()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+            later = time.monotonic() + 5.0
+            while not os.path.exists(self.status) and time.monotonic() < later:
+                time.sleep(0.02)
+        code = int(open(self.status).read()) if os.path.exists(self.status) else None
         self.quiet_for(0.2)
         return code
 
     def restored(self, label):
-        # A terminal that cannot be read after the program is not the one it
-        # found: darwin answers ENOTTY on the slave once a program has gone
-        # and left the mode its own, and that is this check failing, said by
-        # name, where it stopped the driver before the checks after it.
+        # Read while the leader holds the terminal. One that cannot be read
+        # is this check failing, said by name.
         try:
             after = termios.tcgetattr(self.slave)
             detail = f"before {self.before[:4]} after {after[:4]}"

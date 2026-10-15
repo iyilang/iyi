@@ -4,6 +4,41 @@
 
 ### Added
 
+- **std/http speaks HTTP/2 (RFC 9113): the server beside HTTP/1.1 on one
+  listener, the client over TLS where ALPN chooses `h2` and in the clear
+  with prior knowledge.** HPACK was there and nothing used it: every
+  request was HTTP/1.1, and a program that offered `h2` in
+  `HTTP.tls_config.alpn` got HTTP/1.1 written onto an HTTP/2 connection.
+  - `serve` answers a connection that opens with the preface as HTTP/2,
+    and runs the same block for every stream. Request and answer bodies
+    stay streams: strings, `IyiIO`s and `Response.stream` writers, gzip,
+    a 413 past the limit. An upgrade is reset with HTTP_1_1_REQUIRED.
+  - The client uses `h2` when ALPN chose it, and
+    `HTTPClient.new(prior_knowledge: true)` speaks h2c. A kept connection
+    carries request after request until GOAWAY.
+  - A stream's reset leaves the connection; a refused stream is sent
+    again once.
+  - The frames: every connection and stream error of §5–6; padding,
+    priority (read and ignored), trailers, 1xx; SETTINGS applied. A header
+    block is bounded while it is still arriving, so a flood of
+    CONTINUATION frames is refused, not held.
+  - Flow control: the connection's window opens again on receipt, a
+    stream's as its body is read. Frames go out in one write per burst:
+    they went one write each at first, and Nagle with delayed ACK cost
+    40 ms a request (200 requests took 16 s, now 0.23 s for the whole
+    exercise).
+
+  Held by `bench/std_http_exercise.sh` and `bench/http2_exercise.iyi`:
+  - iyi to iyi, plain and `--release`;
+  - 31 raw-frame cases, each answered with RFC 9113's GOAWAY or
+    RST_STREAM code;
+  - curl (nghttp2);
+  - Node's client: 100 GETs and 20 uploads at once under a 1000-byte
+    window, and a stream cancelled mid-answer;
+  - this client against Node's server, in the clear and under TLS with
+    ALPN: padding, CONTINUATION, trailers, a 103, a 256-byte HPACK table;
+  - 13 broken copies, each caught by name.
+
 - **`WeakRef(T)`: std/weak_ref names an object without keeping it alive,
   and the collector forgets it before reusing the memory.** There was no
   weak reference: GC_DESIGN.md had deferred them until something could

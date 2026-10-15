@@ -1,5 +1,5 @@
-# HTTP/1.1 over `IyiSocket`, written in iyi: a client, a server, and the
-# bodies between them as streams.
+# HTTP/1.1 and HTTP/2 over `IyiSocket`, written in iyi: a client, a server,
+# and the bodies between them as streams.
 #
 # **The client.** `HTTP.get`, `head`, `post`, `put`, `delete` and the
 # `request` under them speak `http://` and `https://`, to a host name
@@ -58,6 +58,18 @@
 # the other reads, and `bench/std_http_exercise.sh` runs the client
 # against the server and both against Python's.
 #
+# **HTTP/2** (RFC 9113, the section near the end of this file): the same
+# requests and answers as frames over one connection. `serve` takes a
+# connection that opens with HTTP/2's preface as HTTP/2 (h2c with prior
+# knowledge) beside HTTP/1.1 on the same listener; the client speaks it
+# where TLS's ALPN chose `h2` - offered once a program lists it in
+# `HTTP.tls_config.alpn` - and over `http://` from an
+# `HTTPClient.new(prior_knowledge: true)`. A server's block, a request's
+# body and an answer's are what they are over HTTP/1.1; `version` says
+# `HTTP/2`. bench/http2_exercise.iyi and the gate hold it against curl,
+# Node's own HTTP/2 both ways (TLS with ALPN included) and RFC 9113's
+# error rules frame by frame.
+#
 # **What it reaches.** What std/socket reaches, and for `https://` what
 # std/tls does - the operating system's trusted roots and its entropy -
 # and nothing of its own: no file, and no clock or environment beyond
@@ -66,8 +78,9 @@
 # hash.
 #
 # Not here: a server over TLS, an upgrade over `https://` (a WebSocket's
-# `wss://`), HTTP/2 (std/hpack and std/capsule are its pieces, not a
-# server), pipelining requests on a kept connection, and proxies.
+# `wss://`), HTTP/2's server push and its upgrade from HTTP/1.1 (which RFC
+# 9113 retired), pipelining requests on a kept HTTP/1.1 connection, and
+# proxies.
 
 module std/http
 
@@ -77,6 +90,10 @@ import std/uri::{URI, Params}
 import std/mime::{MIME}
 import std/compress::{Inflater, Deflater, Envelope, Gzip, CompressError}
 import std/digest::{SHA1}
+# HTTP/2's header compression (RFC 7541), named in full where it is used,
+# and the byte slices it reads and writes.
+import std/hpack
+import std/slice
 # The clock a deadline is read on. std/time's, not the runtime's hook: the
 # clock is std/time's to reach, and a module that reads it through its own
 # hook call is counted by `iyi mod reach` as reaching past the language.
@@ -134,6 +151,8 @@ class Conn
   # A client's `https://` connection: TLS over the socket, which every
   # read and write then goes through. The socket's timeouts are TLS's too.
   @stream : TlsStream? = nil
+  # The HTTP/2 connection over it, when the two ends speak that.
+  property h2 : H2Connection? = nil
 
   ROOM = 16384
 
@@ -379,7 +398,12 @@ class Conn
     idle.delete(@socket.object_id) if idle
   end
 
+  # A connection speaking HTTP/2 says GOAWAY first, so the other end knows
+  # no request was lost in the close.
   def close : Nil
+    if h2 = @h2
+      h2.goaway
+    end
     if stream = @stream
       stream.close
     else
@@ -446,8 +470,12 @@ pub class BodyReader
   CHUNKED = 2
   CLOSE   = 3
   TEXT    = 4
+  # An HTTP/2 stream's DATA frames.
+  FRAMES = 5
 
   @conn : Conn?
+  @frames : H2Connection? = nil
+  @frames_id : Int32 = 0
   @kind : Int32
   # LENGTH: bytes still to come. CHUNKED: bytes left of this chunk, -1
   # when a size line comes next.
@@ -486,6 +514,18 @@ pub class BodyReader
   # A body that is a string already in hand.
   def self.text(text : String) : BodyReader
     BodyReader.new(nil, TEXT, text.bytesize.to_i64, 9223372036854775807_i64, text)
+  end
+
+  # A body that arrives as an HTTP/2 stream's DATA: refused past *limit*.
+  protected def self.frames(h2 : H2Connection, id : Int32, limit : Int64) : BodyReader
+    reader = BodyReader.new(nil, FRAMES, 0_i64, limit)
+    reader.on_frames(h2, id)
+    reader
+  end
+
+  protected def on_frames(h2 : H2Connection, id : Int32) : Nil
+    @frames = h2
+    @frames_id = id
   end
 
   # Whether the body ends where the connection does: nothing can follow
@@ -703,6 +743,18 @@ pub class BodyReader
         return remember(HTTPError.new("body past #{@limit} bytes", 413))
       end
       piece
+    when FRAMES
+      h2 = @frames
+      raise "BodyReader: an HTTP/2 body on no connection" unless h2
+      got = h2.body_piece(@frames_id, max)
+      return remember(got) unless got.is_a?(String)
+      if got.bytesize == 0
+        @finished = true
+        return ""
+      end
+      @total = @total + got.bytesize.to_i64
+      return remember(HTTPError.new("body past #{@limit} bytes", 413)) if @total > @limit
+      got
     else
       @finished = true
       ""
@@ -794,14 +846,14 @@ end
 # first failure is kept, and every write after it answers it; `finish`,
 # which the server calls when the block returns, writes the end.
 pub class BodyWriter
-  @socket : IyiSocket | TlsStream
+  @socket : IyiSocket | TlsStream | H2Out
   @chunked : Bool
   @deflater : Deflater?
   @fault : Cancelled | SocketError | Nil
   @written : Int64
   @done : Bool
 
-  def initialize(@socket : IyiSocket | TlsStream, @chunked : Bool, @deflater : Deflater? = nil)
+  def initialize(@socket : IyiSocket | TlsStream | H2Out, @chunked : Bool, @deflater : Deflater? = nil)
     @fault = nil
     @written = 0_i64
     @done = false
@@ -1301,12 +1353,20 @@ pub struct Server
   # One connection: requests until the client is done. A request that is
   # not HTTP is answered with why and the connection closed, since the
   # bytes after it cannot be trusted to be a request either. Requests that
-  # came in one read are read where they lie, one after another.
+  # came in one read are read where they lie, one after another. A
+  # connection that opens with HTTP/2's preface is served as HTTP/2.
   def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, IyiSocket)? = nil, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 0) : Nil
     defer client.close
     conn = Conn.new(client, listener, idle)
     conn.gap = timeout_ms if timeout_ms > 0
     remote = client.remote_address
+    conn.deadline_in(timeout_ms)
+    preface = h2_preface?(conn)
+    conn.no_deadline
+    if preface
+      serve_h2(conn, handler, stream_bodies, compress, remote)
+      return
+    end
     while true
       conn.deadline_in(timeout_ms)
       got = conn.read_head(MAX_HEAD, "request", true)
@@ -1346,6 +1406,57 @@ pub struct Server
         return unless reader.finished? || reader.drain(MAX_DRAIN.to_i64)
       end
     end
+  end
+
+  # Whether the connection opens with HTTP/2's preface, taken if it does:
+  # read only as far as the bytes agree with it, so a request of HTTP/1.1
+  # shorter than the preface is never waited on for more.
+  private def self.h2_preface?(conn : Conn) : Bool
+    wanted = H2Connection::PREFACE
+    seen = 0
+    while seen < wanted.bytesize
+      return false if conn.available <= seen && !conn.fill
+      while seen < conn.available && seen < wanted.bytesize
+        return false if conn.peek(seen) != wanted.to_unsafe[seen]
+        seen = seen + 1
+      end
+    end
+    conn.consume(wanted.bytesize)
+    true
+  end
+
+  # An HTTP/2 connection (RFC 9113): its requests, one stream at a time.
+  # A body is read whole before the block runs unless *stream_bodies*,
+  # as over HTTP/1.1; one past `MAX_BODY` is answered 413 on its stream.
+  private def self.serve_h2(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?) : Nil
+    h2 = H2Connection.new(conn, true, MAX_BODY.to_i64)
+    return unless h2.start
+    while id = h2.next_request
+      req = h2.request(id, remote)
+      if req.nil?
+        h2.done(id)
+        next
+      end
+      unless stream_bodies
+        body = req.body_io.read_all(MAX_BODY.to_i64)
+        case body
+        in String
+          req = Request.new(req.method, req.path, req.query, req.headers, body, "HTTP/2", remote)
+        in HTTPError
+          h2.refuse_request(id, 413, body.reason) if body.status == 413
+          h2.done(id)
+          next
+        in Cancelled
+          break
+        in SocketError
+          break
+        end
+      end
+      answered = h2.answer(id, handler.call(req), req, compress)
+      h2.done(id)
+      break unless answered
+    end
+    h2.goaway
   end
 
   # The body *head* promises, read from *conn*: under the server's limit,
@@ -1716,6 +1827,8 @@ class Exchange
   # The body as it came off the connection: the response's own `body_io`
   # is a string once `load` has read it.
   @reader : BodyReader
+  # The HTTP/2 stream the answer came on, 0 over HTTP/1.1.
+  property h2_id : Int32 = 0
 
   def initialize(@conn : Conn, @response : Response, @client : HTTPClient? = nil, @key : String = "", @keep : Bool = false)
     @reader = @response.body_io
@@ -1723,9 +1836,21 @@ class Exchange
 
   # The connection closed, or handed back to its client once the body has
   # been read to its end - what the caller left of it read past, up to
-  # 64 KiB, and the connection closed past that, as Go's client does.
+  # 64 KiB, and the connection closed past that, as Go's client does. An
+  # HTTP/2 answer left unread past that is cancelled on its stream alone,
+  # and the connection goes back while it can take another request.
   def close : Nil
     client = @client
+    if h2 = @conn.h2
+      @reader.drain(65536_i64)
+      h2.forget(@h2_id)
+      if client && h2.usable?
+        client.give_back(@key, @conn)
+      else
+        @conn.close
+      end
+      return
+    end
     if client && @keep && !@conn.ended? && @reader.drain(65536_i64) && @conn.available == 0
       client.give_back(@key, @conn)
     else
@@ -1757,15 +1882,22 @@ end
 # anything else answers the failure. One task at a time per request: two
 # tasks sending at once take two connections, and a client is not for
 # sharing across threads.
+#
+# Over HTTP/2 - `https://` where ALPN chose `h2`, or `http://` with
+# *prior_knowledge* (h2c, RFC 9113 §3.3) - a kept connection carries the
+# next request on a new stream, until the server says GOAWAY.
 pub class HTTPClient
   @idle : Hash(String, Array(Conn))
   @limit : Int32
   @timeout_ms : Int32
   @made : Int32
   @reused : Int32
+  # `http://` spoken as HTTP/2 from the first byte, without asking: for a
+  # server known to take it.
+  getter prior_knowledge : Bool
 
   # *timeout_ms* is `HTTP.open`'s, for every request the client sends.
-  def initialize(idle : Int32 = 4, @timeout_ms : Int32 = 0)
+  def initialize(idle : Int32 = 4, @timeout_ms : Int32 = 0, @prior_knowledge : Bool = false)
     raise "HTTP: a client keeps 0 or more idle connections, not #{idle}" if idle < 0
     raise "HTTP: a timeout of #{@timeout_ms} ms" if @timeout_ms < 0
     @idle = {} of String => Array(Conn)
@@ -1821,10 +1953,16 @@ pub class HTTPClient
     @idle = {} of String => Array(Conn)
   end
 
-  # A kept connection to *key*, nil when none waits.
+  # A kept connection to *key*, nil when none waits. An HTTP/2 connection
+  # that can take no more requests is closed rather than handed out.
   protected def take(key : String) : Conn?
     if waiting = @idle[key]?
-      if conn = waiting.pop?
+      while conn = waiting.pop?
+        h2 = conn.h2
+        if h2 && !h2.usable?
+          conn.close
+          next
+        end
         @reused = @reused + 1
         return conn
       end
@@ -2180,6 +2318,7 @@ pub struct HTTP
     # Sent again once, on a new connection, when a kept one turns out to
     # have been closed by the server before it answered.
     retry = body.is_a?(String) && (head || same_name?(method, "GET") || same_name?(method, "PUT") || same_name?(method, "DELETE") || same_name?(method, "OPTIONS") || same_name?(method, "TRACE"))
+    refused_before = false
     while true
       conn = nil.as(Conn?)
       if keeping = client
@@ -2198,10 +2337,45 @@ pub struct HTTP
           tls = TlsClient.over(socket, host, tls_config)
           return HTTPError.new(tls.message) if tls.is_a?(TlsError)
           conn = Conn.new(socket, stream: TlsStream.new(tls, host))
+          speaks_h2 = tls.alpn_protocol == "h2"
         else
           conn = Conn.new(socket)
+          speaks_h2 = upgrade.nil? && !client.nil? && client.prior_knowledge
         end
         conn.gap = timeout_ms if timeout_ms > 0
+        if speaks_h2
+          h2 = H2Connection.new(conn, false)
+          conn.h2 = h2
+          unless h2.start
+            conn.close
+            return h2.failure || HTTPError.new("HTTP/2: the connection could not be started")
+          end
+        end
+      end
+      if h2 = conn.h2
+        answer = h2_exchange(conn, h2, method, secure ? "https" : "http", host_line, path, sent, body, url, head, asked, jar, client, key)
+        return answer if answer.is_a?(Exchange)
+        refused = h2.refused?
+        if h2.usable?
+          # One stream's trouble: the connection carries the next request.
+          if keeping = client
+            keeping.give_back(key, conn)
+          else
+            conn.close
+          end
+        else
+          conn.close
+          # A kept connection the server had begun to close: the request
+          # is sent again on a new one, as over HTTP/1.1.
+          next if reused && retry
+        end
+        # A refused stream was not processed (RFC 9113 §8.7): sent again
+        # once, which an idempotent request with a string body may be.
+        if refused && retry && !refused_before
+          refused_before = true
+          next
+        end
+        return answer
       end
       failed = send_request(conn.transport, method, path, host_line, sent, body, connection)
       if failed
@@ -2221,6 +2395,59 @@ pub struct HTTP
       conn.close unless answer.is_a?(Exchange)
       return answer
     end
+  end
+
+  # A request over HTTP/2: a stream of its own on *h2*, the answer's final
+  # head read, and its body framed by the stream's DATA. The fields come
+  # back as an HTTP/1.1 answer's do, a name on several fields one field
+  # with its values joined by ", " and kept apart in `header_values`; an
+  # HTTP/2 answer has no reason phrase, so the status's own is given.
+  private def self.h2_exchange(conn : Conn, h2 : H2Connection, method : String, scheme : String, authority : String, path : String, sent : Hash(String, String), body : String | IyiIO, url : String, head : Bool, asked : Bool, jar : CookieStore?, client : HTTPClient?, key : String) : Exchange | Cancelled | SocketError | HTTPError
+    id = h2.send_request(method, scheme, authority, path, sent, body)
+    return id unless id.is_a?(Int32)
+    fields = h2.answer_head(id)
+    unless fields.is_a?(Array(Std::Hpack::HeaderField))
+      h2.forget(id)
+      return fields
+    end
+    status = 0
+    headers = {} of String => String
+    apart = {} of String => Array(String)
+    fields.each do |f|
+      if f.name == ":status"
+        status = f.value.to_i
+        next
+      end
+      if had = headers[f.name]?
+        if values = apart[f.name]?
+          values << f.value
+        else
+          apart[f.name] = [had, f.value]
+        end
+      else
+        headers[f.name] = f.value
+      end
+    end
+    apart.each { |name, values| headers[name] = values.join(", ") }
+    s = h2.stream(id)
+    unlimited = 9223372036854775807_i64
+    empty = head || bodiless?(status) || (!s.nil? && s.ended && s.pieces.empty?)
+    reader = empty ? BodyReader.new(nil, BodyReader::EMPTY, 0_i64, unlimited) : BodyReader.frames(h2, id, unlimited)
+    decoded = false
+    if asked && !reader.finished?
+      decoded = undo_coding(reader, headers)
+      if decoded.is_a?(HTTPError)
+        h2.forget(id)
+        return decoded
+      end
+    end
+    response = Response.new(status, reason_for(status), headers, apart.empty? ? nil : apart, reader, url, decoded)
+    if keeper = jar
+      keeper.update(url, response)
+    end
+    exchange = Exchange.new(conn, response, client, key, true)
+    exchange.h2_id = id
+    exchange
   end
 
   # The request on *socket*: its head, and a string body with it or an
@@ -2363,7 +2590,7 @@ pub struct HTTP
   end
 
   # A writer whose body goes out in gzip as it is written.
-  def self.gzip_writer(socket : IyiSocket, chunked : Bool) : BodyWriter
+  def self.gzip_writer(socket : IyiSocket | TlsStream | H2Out, chunked : Bool) : BodyWriter
     BodyWriter.new(socket, chunked, Deflater.new(Envelope::Gzip))
   end
 
@@ -3301,5 +3528,1142 @@ pub class MultipartBuilder
       end
     end
     built.to_s
+  end
+end
+
+# -- HTTP/2 (RFC 9113) -------------------------------------------------------
+#
+# The same requests and answers, as frames over one connection. A server's
+# connection whose first bytes are HTTP/2's preface is served this way
+# (h2c, the prior-knowledge start of RFC 9113 §3.3); a client speaks it
+# where TLS's ALPN chose `h2` - offered when a program lists it in
+# `HTTP.tls_config.alpn` - and, over `http://`, from an
+# `HTTPClient.new(prior_knowledge: true)`.
+#
+# One fiber runs a connection. It reads frames, and whatever must wait - a
+# body's next piece, a window to send in, the next request - reads frames
+# until it can go on, keeping what completes for other streams meanwhile:
+# no frame is ever written by two writers, and no lock is taken. A
+# server's block runs for one stream at a time, as for one HTTP/1.1
+# connection; a client sends one request at a time over its connection.
+#
+# Flow control: the connection's window is opened again as DATA arrives,
+# and a stream's as its body is read, so a body nobody reads holds its
+# sender at the stream's window rather than filling this process. Server
+# push is not offered (SETTINGS_ENABLE_PUSH 0) and a PUSH_PROMISE is the
+# error it then is; priority signals are read and ignored (§5.3). A header
+# block - HEADERS and its CONTINUATIONs - past the limit on a head is
+# refused as it arrives, not after it has been held whole.
+class H2Stream
+  getter id : Int32
+  # The head, decoded: a request's, or an answer's final one.
+  property fields : Array(Std::Hpack::HeaderField)? = nil
+  # DATA arrived and not yet read, and the body's bytes so far.
+  property pieces : Array(String) = [] of String
+  property received : Int64 = 0_i64
+  # A `content-length` the head gave, -1 for none.
+  property declared : Int64 = -1_i64
+  # The peer's END_STREAM; a RST_STREAM's code (either side's), -1 for none.
+  property ended : Bool = false
+  property reset : Int32 = -1
+  property send_window : Int64
+  property recv_window : Int64
+  # This end's END_STREAM went out.
+  property sent_end : Bool = false
+  # A server's request past its limit on a body: answered 413.
+  property too_large : Bool = false
+
+  def initialize(@id : Int32, @send_window : Int64, @recv_window : Int64)
+  end
+end
+
+class H2Connection
+  DATA          = 0
+  HEADERS       = 1
+  PRIORITY      = 2
+  RST_STREAM    = 3
+  SETTINGS      = 4
+  PUSH_PROMISE  = 5
+  PING          = 6
+  GOAWAY        = 7
+  WINDOW_UPDATE = 8
+  CONTINUATION  = 9
+
+  END_STREAM    =    1
+  ACK           =    1
+  END_HEADERS   =    4
+  PADDED        =    8
+  PRIORITY_FLAG = 0x20
+
+  NO_ERROR           =  0
+  PROTOCOL_ERROR     =  1
+  INTERNAL_ERROR     =  2
+  FLOW_CONTROL_ERROR =  3
+  STREAM_CLOSED      =  5
+  FRAME_SIZE_ERROR   =  6
+  REFUSED_STREAM     =  7
+  CANCEL             =  8
+  COMPRESSION_ERROR  =  9
+  ENHANCE_YOUR_CALM  = 11
+  HTTP_1_1_REQUIRED  = 13
+
+  HEAD_BLOCK    = 0
+  TRAILER_BLOCK = 1
+  IGNORED_BLOCK = 2
+  CLOSED_BLOCK  = 3
+  REFUSED_BLOCK = 4
+  # A head on a stream long closed: decoded, then a connection error.
+  STALE_BLOCK = 5
+
+  PREFACE = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+  # The windows and the frame size every connection starts with (§6.5.2,
+  # §6.9.2), and the largest window there is.
+  WINDOW     =      65535_i64
+  FRAME      =          16384
+  MAX_WINDOW = 2147483647_i64
+  # What this end takes: streams open at once, and a head's fields - their
+  # names, values and 32 octets each (§6.5.2), the same limit as a
+  # HTTP/1.1 head's bytes.
+  STREAMS     =     100
+  HEADER_LIST = 1048576
+
+  getter conn : Conn
+  getter failure : HTTPError | Cancelled | SocketError | Nil
+  @server : Bool
+  @streams : Hash(Int32, H2Stream)
+  @send_window : Int64
+  @recv_window : Int64
+  @peer_window : Int64
+  @peer_frame : Int32
+  @peer_streams : Int64
+  @encoder : Std::Hpack::Encoder
+  @decoder : Std::Hpack::Decoder
+  # The highest stream the peer opened (a server's), the next this end
+  # opens (a client's).
+  @highest : Int32
+  @next_id : Int32
+  # A header block still open: its stream, its bytes, its END_STREAM, and
+  # what it is - a head, trailers, or a block decoded only to keep the
+  # connection's HPACK table (a stream reset or closed, or refused).
+  @block_stream : Int32
+  @block : Array(UInt8)
+  @block_end : Bool
+  @block_mode : Int32
+  # The stream a server's block is answering, kept while it does.
+  @current : Int32
+  # Streams this end reset lately: frames the peer sent before it heard
+  # are dropped (§5.4.2), where on another closed stream they are errors.
+  @reset_lately : Array(Int32)
+  # Frames written and not yet sent: sent together before any read that
+  # may wait, and once they pass PENDING - a frame a write had Nagle hold
+  # each small one back for the last one's ACK, 40 ms a request.
+  @pending : Array(String)
+  @pending_size : Int32
+
+  PENDING = 65536
+  # A server's streams whose head has come, in order.
+  @ready : Array(Int32)
+  # The last stream the peer's GOAWAY said it would answer, -1 for none.
+  @goaway : Int32
+  @settled : Bool
+  # A request's body is refused past it (a server's).
+  @limit : Int64
+
+  def initialize(@conn : Conn, @server : Bool, @limit : Int64 = 9223372036854775807_i64)
+    @streams = Hash(Int32, H2Stream).new
+    @send_window = WINDOW
+    @recv_window = WINDOW
+    @peer_window = WINDOW
+    @peer_frame = FRAME
+    @peer_streams = 2147483647_i64
+    @encoder = Std::Hpack::Encoder.new
+    @decoder = Std::Hpack::Decoder.new(max_header_list_size: HEADER_LIST)
+    @highest = 0
+    @next_id = 1
+    @block_stream = 0
+    @block = [] of UInt8
+    @block_end = false
+    @block_mode = HEAD_BLOCK
+    @current = 0
+    @reset_lately = [] of Int32
+    @pending = [] of String
+    @pending_size = 0
+    @ready = [] of Int32
+    @goaway = -1
+    @settled = false
+    @failure = nil
+  end
+
+  # This end's first frames: the client's preface, then SETTINGS - push
+  # off, and the streams a server takes at once.
+  def start : Bool
+    settings = @server ? H2Connection.setting(3, STREAMS) + H2Connection.setting(6, HEADER_LIST) : H2Connection.setting(2, 0) + H2Connection.setting(6, HEADER_LIST)
+    unless @server
+      @pending << PREFACE
+      @pending_size = @pending_size + PREFACE.bytesize
+    end
+    write_frame(SETTINGS, 0, 0, settings) && flush
+  end
+
+  def stream(id : Int32) : H2Stream?
+    @streams[id]?
+  end
+
+  # Whether a new request may go on this connection: it has not failed,
+  # the server has not said it is going away, and stream numbers remain.
+  def usable? : Bool
+    @failure.nil? && @goaway < 0 && @next_id < 2147483000 && !@conn.ended?
+  end
+
+  # Whether the last request's stream was refused unprocessed (§8.7):
+  # REFUSED_STREAM, or past the last stream a GOAWAY said it would answer.
+  @refused : Bool = false
+
+  def refused? : Bool
+    @refused
+  end
+
+  # -- reading
+
+  # One frame read and acted on. False once the connection is over: the
+  # peer closed it, it failed (`failure`), or it broke the protocol, which
+  # has been answered with a GOAWAY that says how.
+  def read_frame : Bool
+    return false unless @failure.nil?
+    return false unless flush
+    return ended unless @conn.need(9)
+    length = (@conn.peek(0).to_i32 << 16) | (@conn.peek(1).to_i32 << 8) | @conn.peek(2).to_i32
+    type = @conn.peek(3).to_i32
+    flags = @conn.peek(4).to_i32
+    id = ((@conn.peek(5).to_i32 & 0x7F) << 24) | (@conn.peek(6).to_i32 << 16) | (@conn.peek(7).to_i32 << 8) | @conn.peek(8).to_i32
+    return fail(FRAME_SIZE_ERROR, "a frame of #{length} bytes, past the #{FRAME} this end takes") if length > FRAME
+    return ended unless @conn.need(9 + length)
+    @conn.consume(9)
+    payload = @conn.take(length)
+    if @block_stream != 0 && (type != CONTINUATION || id != @block_stream)
+      return fail(PROTOCOL_ERROR, "a header block broken off by another frame")
+    end
+    if !@settled && (type != SETTINGS || flags & ACK != 0)
+      return fail(PROTOCOL_ERROR, "the connection does not begin with SETTINGS")
+    end
+    case type
+    when DATA          then on_data(id, flags, payload)
+    when HEADERS       then on_headers(id, flags, payload)
+    when PRIORITY      then on_priority(id, payload)
+    when RST_STREAM    then on_reset(id, payload)
+    when SETTINGS      then on_settings(id, flags, payload)
+    when PUSH_PROMISE  then fail(PROTOCOL_ERROR, "a PUSH_PROMISE, where push was not offered")
+    when PING          then on_ping(id, flags, payload)
+    when GOAWAY        then on_goaway(id, payload)
+    when WINDOW_UPDATE then on_window(id, payload)
+    when CONTINUATION  then on_continuation(id, flags, payload)
+    else                    true
+    end
+  end
+
+  # The peer closed, or the read failed.
+  private def ended : Bool
+    if fault = @conn.failure
+      @failure = fault
+    elsif @conn.available > 0 || @block_stream != 0
+      @failure = HTTPError.new("HTTP/2: the connection ended inside a frame")
+    end
+    false
+  end
+
+  # A connection error (§5.4.1): GOAWAY with its code and why, and no more.
+  private def fail(code : Int32, why : String) : Bool
+    if @failure.nil?
+      write_frame(GOAWAY, 0, 0, H2Connection.u32(@highest) + H2Connection.u32(code) + why)
+      flush
+    end
+    @failure = HTTPError.new("HTTP/2: #{why} (#{H2Connection.error_name(code)})")
+    false
+  end
+
+  # A stream error (§5.4.2): RST_STREAM, and the stream is over.
+  private def refuse(id : Int32, code : Int32) : Bool
+    if s = @streams[id]?
+      s.reset = code
+      s.ended = true
+      s.pieces.clear
+    end
+    # A server forgets the stream, unless its block is answering it and
+    # finds out from the stream itself.
+    @streams.delete(id) if @server && id != @current
+    reset_lately(id)
+    write_frame(RST_STREAM, 0, id, H2Connection.u32(code))
+  end
+
+  private def reset_lately(id : Int32) : Nil
+    @reset_lately << id
+    @reset_lately.shift if @reset_lately.size > 64
+  end
+
+  # A stream the peer may not use yet: one it has not opened, or one this
+  # end has not.
+  private def idle?(id : Int32) : Bool
+    if @server
+      id % 2 == 0 || id > @highest
+    else
+      id % 2 == 0 || id >= @next_id
+    end
+  end
+
+  # The payload without its padding (§6.1), or nil when the padding claims
+  # more than the frame holds.
+  private def unpadded(flags : Int32, payload : String) : String?
+    return payload if flags & PADDED == 0
+    return nil if payload.bytesize < 1
+    pad = payload.to_unsafe[0].to_i32
+    return nil if pad >= payload.bytesize
+    payload[1, payload.bytesize - 1 - pad]
+  end
+
+  private def on_data(id : Int32, flags : Int32, payload : String) : Bool
+    return fail(PROTOCOL_ERROR, "DATA on stream 0") if id == 0
+    body = unpadded(flags, payload)
+    return fail(PROTOCOL_ERROR, "DATA whose padding is longer than the frame") if body.nil?
+    size = payload.bytesize.to_i64
+    return fail(FLOW_CONTROL_ERROR, "DATA past the connection's window") if size > @recv_window
+    # The connection's window opens again at once: what holds a sender
+    # back is the stream's.
+    if size > 0_i64
+      return false unless write_frame(WINDOW_UPDATE, 0, 0, H2Connection.u32(size.to_i32))
+    end
+    s = @streams[id]?
+    if s.nil?
+      return fail(PROTOCOL_ERROR, "DATA on a stream never opened") if idle?(id)
+      # A stream this end reset: what was in flight is dropped (§5.4.2);
+      # on any other closed stream DATA is an error (§5.1).
+      return true if @reset_lately.includes?(id)
+      return refuse(id, STREAM_CLOSED)
+    end
+    return true if s.reset >= 0
+    return refuse(id, STREAM_CLOSED) if s.ended
+    return refuse(id, PROTOCOL_ERROR) if s.fields.nil?
+    return refuse(id, FLOW_CONTROL_ERROR) if size > s.recv_window
+    s.recv_window = s.recv_window - size
+    # Padding is nobody's to read: its share of the window comes back now.
+    padding = size - body.bytesize.to_i64
+    if padding > 0_i64 && flags & END_STREAM == 0
+      s.recv_window = s.recv_window + padding
+      return false unless write_frame(WINDOW_UPDATE, 0, id, H2Connection.u32(padding.to_i32))
+    end
+    s.received = s.received + body.bytesize.to_i64
+    return refuse(id, PROTOCOL_ERROR) if s.declared >= 0_i64 && s.received > s.declared
+    if @server && s.received > @limit
+      s.too_large = true
+      s.pieces.clear
+    elsif body.bytesize > 0
+      s.pieces << body
+    end
+    if flags & END_STREAM != 0
+      s.ended = true
+      return refuse(id, PROTOCOL_ERROR) if s.declared >= 0_i64 && s.received != s.declared
+    end
+    true
+  end
+
+  private def on_headers(id : Int32, flags : Int32, payload : String) : Bool
+    return fail(PROTOCOL_ERROR, "HEADERS on stream 0") if id == 0
+    block = unpadded(flags, payload)
+    return fail(PROTOCOL_ERROR, "HEADERS whose padding is longer than the frame") if block.nil?
+    if flags & PRIORITY_FLAG != 0
+      return fail(FRAME_SIZE_ERROR, "HEADERS too short for the priority it says it has") if block.bytesize < 5
+      p = block.to_unsafe
+      depends = ((p[0].to_i32 & 0x7F) << 24) | (p[1].to_i32 << 16) | (p[2].to_i32 << 8) | p[3].to_i32
+      block = block[5, block.bytesize - 5]
+      return refuse(id, PROTOCOL_ERROR) if depends == id
+    end
+    s = @streams[id]?
+    mode = HEAD_BLOCK
+    if s.nil?
+      if @server
+        return fail(PROTOCOL_ERROR, "a stream opened with the even number #{id}") if id % 2 == 0
+        if id > @highest
+          @highest = id
+          s = H2Stream.new(id, @peer_window, WINDOW)
+          @streams[id] = s
+          # Past the streams a server takes at once, the head is still read -
+          # the HPACK table is the connection's - and the stream refused.
+          mode = REFUSED_BLOCK if open_count > STREAMS
+        else
+          mode = @reset_lately.includes?(id) ? IGNORED_BLOCK : STALE_BLOCK
+        end
+      else
+        return fail(PROTOCOL_ERROR, "HEADERS on a stream this client did not open") if idle?(id)
+        mode = @reset_lately.includes?(id) ? IGNORED_BLOCK : STALE_BLOCK
+      end
+    elsif s.reset >= 0
+      mode = IGNORED_BLOCK
+    elsif s.ended
+      mode = CLOSED_BLOCK
+    elsif s.fields
+      mode = TRAILER_BLOCK
+    end
+    @block_stream = id
+    @block = [] of UInt8
+    @block_end = flags & END_STREAM != 0
+    @block_mode = mode
+    return false unless gather(block)
+    flags & END_HEADERS != 0 ? close_block : true
+  end
+
+  private def on_continuation(id : Int32, flags : Int32, payload : String) : Bool
+    return fail(PROTOCOL_ERROR, "CONTINUATION with no header block open") if @block_stream == 0
+    return false unless gather(payload)
+    flags & END_HEADERS != 0 ? close_block : true
+  end
+
+  # A piece of the open header block, refused past what a head may hold:
+  # CONTINUATION after CONTINUATION is no way to make this end keep more.
+  private def gather(piece : String) : Bool
+    return fail(ENHANCE_YOUR_CALM, "a header block past #{HEADER_LIST} bytes") if @block.size + piece.bytesize > HEADER_LIST
+    p = piece.to_unsafe
+    i = 0
+    while i < piece.bytesize
+      @block << p[i]
+      i = i + 1
+    end
+    true
+  end
+
+  private def close_block : Bool
+    id = @block_stream
+    @block_stream = 0
+    bytes = Std::Hpack::Bytes.new(@block.size) { |i| @block[i] }
+    @block = [] of UInt8
+    decoded = @decoder.decode(bytes)
+    return fail(COMPRESSION_ERROR, "a header block that does not decode: #{decoded.message}") if decoded.is_a?(Std::Hpack::HpackError)
+    s = @streams[id]?
+    case @block_mode
+    when IGNORED_BLOCK
+      return true
+    when CLOSED_BLOCK
+      return refuse(id, STREAM_CLOSED)
+    when REFUSED_BLOCK
+      return refuse(id, REFUSED_STREAM)
+    when STALE_BLOCK
+      return fail(STREAM_CLOSED, "HEADERS on stream #{id}, which is closed")
+    end
+    return true if s.nil?
+    if @block_mode == TRAILER_BLOCK
+      # Trailers: the end of the stream, and no pseudo-header in them.
+      return refuse(id, PROTOCOL_ERROR) unless @block_end
+      decoded.each { |f| return refuse(id, PROTOCOL_ERROR) if f.name.starts_with?(":") }
+      s.ended = true
+      return refuse(id, PROTOCOL_ERROR) if @server && s.declared >= 0_i64 && s.received != s.declared
+      return true
+    end
+    if @server
+      return refuse(id, PROTOCOL_ERROR) if H2Connection.request_flaw(decoded)
+    else
+      status = H2Connection.answer_status(decoded)
+      return refuse(id, PROTOCOL_ERROR) if status.nil?
+      # An interim answer: the final one is still to come.
+      if status < 200
+        return refuse(id, PROTOCOL_ERROR) if @block_end
+        return true
+      end
+    end
+    s.fields = decoded
+    if declared = H2Connection.field(decoded, "content-length")
+      n = HTTP.content_length(declared)
+      return refuse(id, PROTOCOL_ERROR) unless n
+      s.declared = n
+    end
+    if @block_end
+      s.ended = true
+      # A request that ends with its head has no body to have a length.
+      return refuse(id, PROTOCOL_ERROR) if @server && s.declared > 0_i64
+    end
+    @ready << id if @server
+    true
+  end
+
+  private def open_count : Int32
+    n = 0
+    @streams.each { |_, s| n = n + 1 if s.reset < 0 && !(s.ended && s.sent_end) }
+    n
+  end
+
+  private def on_priority(id : Int32, payload : String) : Bool
+    return fail(PROTOCOL_ERROR, "PRIORITY on stream 0") if id == 0
+    return refuse(id, FRAME_SIZE_ERROR) if payload.bytesize != 5
+    p = payload.to_unsafe
+    depends = ((p[0].to_i32 & 0x7F) << 24) | (p[1].to_i32 << 16) | (p[2].to_i32 << 8) | p[3].to_i32
+    return refuse(id, PROTOCOL_ERROR) if depends == id
+    true
+  end
+
+  private def on_reset(id : Int32, payload : String) : Bool
+    return fail(PROTOCOL_ERROR, "RST_STREAM on stream 0") if id == 0
+    return fail(FRAME_SIZE_ERROR, "RST_STREAM of #{payload.bytesize} bytes") if payload.bytesize != 4
+    return fail(PROTOCOL_ERROR, "RST_STREAM on a stream never opened") if idle?(id) && @streams[id]?.nil?
+    if s = @streams[id]?
+      s.reset = H2Connection.read_u32(payload, 0)
+      s.ended = true
+      s.pieces.clear
+    end
+    true
+  end
+
+  private def on_settings(id : Int32, flags : Int32, payload : String) : Bool
+    return fail(PROTOCOL_ERROR, "SETTINGS on stream #{id}") if id != 0
+    if flags & ACK != 0
+      return fail(FRAME_SIZE_ERROR, "a SETTINGS acknowledgement that carries #{payload.bytesize} bytes") if payload.bytesize != 0
+      return true
+    end
+    return fail(FRAME_SIZE_ERROR, "SETTINGS of #{payload.bytesize} bytes, not a multiple of 6") if payload.bytesize % 6 != 0
+    at = 0
+    while at < payload.bytesize
+      p = payload.to_unsafe
+      name = (p[at].to_i32 << 8) | p[at + 1].to_i32
+      value = H2Connection.read_u32(payload, at + 2).to_i64 & 0xFFFFFFFF_i64
+      case name
+      when 1
+        @encoder.protocol_max_table_size = value > 2147483647_i64 ? 2147483647 : value.to_i32
+      when 2
+        return fail(PROTOCOL_ERROR, "SETTINGS_ENABLE_PUSH of #{value}") if value > 1_i64
+        return fail(PROTOCOL_ERROR, "a server asking for push") if !@server && value == 1_i64
+      when 3
+        @peer_streams = value
+      when 4
+        return fail(FLOW_CONTROL_ERROR, "SETTINGS_INITIAL_WINDOW_SIZE of #{value}, past 2^31-1") if value > MAX_WINDOW
+        delta = value - @peer_window
+        @streams.each do |_, s|
+          s.send_window = s.send_window + delta
+          return fail(FLOW_CONTROL_ERROR, "a stream's window past 2^31-1") if s.send_window > MAX_WINDOW
+        end
+        @peer_window = value
+      when 5
+        return fail(PROTOCOL_ERROR, "SETTINGS_MAX_FRAME_SIZE of #{value}") if value < 16384_i64 || value > 16777215_i64
+        @peer_frame = value.to_i32
+      end
+      at = at + 6
+    end
+    @settled = true
+    write_frame(SETTINGS, ACK, 0, "")
+  end
+
+  private def on_ping(id : Int32, flags : Int32, payload : String) : Bool
+    return fail(PROTOCOL_ERROR, "PING on stream #{id}") if id != 0
+    return fail(FRAME_SIZE_ERROR, "PING of #{payload.bytesize} bytes") if payload.bytesize != 8
+    return true if flags & ACK != 0
+    write_frame(PING, ACK, 0, payload)
+  end
+
+  private def on_goaway(id : Int32, payload : String) : Bool
+    return fail(PROTOCOL_ERROR, "GOAWAY on stream #{id}") if id != 0
+    return fail(FRAME_SIZE_ERROR, "GOAWAY of #{payload.bytesize} bytes") if payload.bytesize < 8
+    @goaway = H2Connection.read_u32(payload, 0) & 0x7FFFFFFF
+    # What the peer will not answer is refused, and may be sent again
+    # on another connection (§6.8).
+    @streams.each do |sid, s|
+      if sid > @goaway && s.reset < 0 && !s.ended
+        s.reset = REFUSED_STREAM
+        s.ended = true
+      end
+    end
+    true
+  end
+
+  private def on_window(id : Int32, payload : String) : Bool
+    return fail(FRAME_SIZE_ERROR, "WINDOW_UPDATE of #{payload.bytesize} bytes") if payload.bytesize != 4
+    increment = (H2Connection.read_u32(payload, 0) & 0x7FFFFFFF).to_i64
+    if id == 0
+      return fail(PROTOCOL_ERROR, "a WINDOW_UPDATE of 0 for the connection") if increment == 0_i64
+      @send_window = @send_window + increment
+      return fail(FLOW_CONTROL_ERROR, "the connection's window past 2^31-1") if @send_window > MAX_WINDOW
+      return true
+    end
+    s = @streams[id]?
+    if s.nil?
+      return fail(PROTOCOL_ERROR, "WINDOW_UPDATE on a stream never opened") if idle?(id)
+      return true
+    end
+    return refuse(id, PROTOCOL_ERROR) if increment == 0_i64
+    s.send_window = s.send_window + increment
+    return refuse(id, FLOW_CONTROL_ERROR) if s.send_window > MAX_WINDOW
+    true
+  end
+
+  # -- writing
+
+  # One frame, in one write.
+  def write_frame(type : Int32, flags : Int32, id : Int32, payload : String) : Bool
+    return false unless @failure.nil? || (type == GOAWAY && @failure.is_a?(HTTPError))
+    n = payload.bytesize
+    head = String.new(9) do |b|
+      b[0] = ((n >> 16) & 0xFF).to_u8
+      b[1] = ((n >> 8) & 0xFF).to_u8
+      b[2] = (n & 0xFF).to_u8
+      b[3] = (type & 0xFF).to_u8
+      b[4] = (flags & 0xFF).to_u8
+      b[5] = (((id >> 24) & 0x7F) & 0xFF).to_u8
+      b[6] = ((id >> 16) & 0xFF).to_u8
+      b[7] = ((id >> 8) & 0xFF).to_u8
+      b[8] = (id & 0xFF).to_u8
+      nil
+    end
+    @pending << head
+    @pending << payload if n > 0
+    @pending_size = @pending_size + 9 + n
+    @pending_size >= PENDING ? flush : true
+  end
+
+  # What has been written, sent in one write.
+  def flush : Bool
+    return @failure.nil? if @pending.empty?
+    whole = @pending.size == 1 ? @pending[0] : @pending.join("")
+    @pending.clear
+    @pending_size = 0
+    got = @conn.transport.write(whole)
+    return true if got.is_a?(Int32)
+    @failure = got if @failure.nil?
+    false
+  end
+
+  # A head: HEADERS, and CONTINUATION after it for what one frame of the
+  # peer's size does not hold.
+  def send_headers(id : Int32, fields : Array(Std::Hpack::HeaderField), end_stream : Bool) : Bool
+    encoded = @encoder.encode(fields)
+    block = String.new(encoded.size) do |b|
+      b.copy_from(encoded.to_unsafe, encoded.size)
+      nil
+    end
+    at = 0
+    first = true
+    while first || at < block.bytesize
+      take = block.bytesize - at
+      take = @peer_frame if take > @peer_frame
+      last = at + take == block.bytesize
+      flags = last ? END_HEADERS : 0
+      if first
+        flags = flags | END_STREAM if end_stream
+        return false unless write_frame(HEADERS, flags, id, block[at, take])
+      else
+        return false unless write_frame(CONTINUATION, flags, id, block[at, take])
+      end
+      at = at + take
+      first = false
+    end
+    if end_stream
+      if s = @streams[id]?
+        s.sent_end = true
+      end
+    end
+    true
+  end
+
+  # *text* on stream *id* as the windows allow, frames read while they are
+  # shut. False when the stream or the connection ends first.
+  def send_data(id : Int32, text : String, end_stream : Bool) : Bool
+    s = @streams[id]?
+    return false if s.nil?
+    at = 0
+    while at < text.bytesize
+      return false if s.reset >= 0 || !@failure.nil?
+      room = text.bytesize - at
+      room = @peer_frame if room > @peer_frame
+      room = @send_window.to_i32 if @send_window < room.to_i64
+      room = s.send_window.to_i32 if s.send_window < room.to_i64
+      if room <= 0
+        return false unless read_frame
+        next
+      end
+      last = end_stream && at + room == text.bytesize
+      @send_window = @send_window - room.to_i64
+      s.send_window = s.send_window - room.to_i64
+      return false unless write_frame(DATA, last ? END_STREAM : 0, id, text[at, room])
+      at = at + room
+      s.sent_end = true if last
+    end
+    if end_stream && !s.sent_end
+      return false if s.reset >= 0
+      return false unless write_frame(DATA, END_STREAM, id, "")
+      s.sent_end = true
+    end
+    true
+  end
+
+  # The next piece of stream *id*'s body, "" at its end; frames are read
+  # until one comes. What is taken opens the stream's window again.
+  def body_piece(id : Int32, max : Int32) : String | HTTPError | Cancelled | SocketError
+    while true
+      s = @streams[id]?
+      return HTTPError.new("HTTP/2: stream #{id} is gone") if s.nil?
+      return HTTPError.new("body past #{@limit} bytes", 413) if s.too_large
+      if s.pieces.size > 0
+        piece = s.pieces[0]
+        if piece.bytesize > max
+          s.pieces[0] = piece[max, piece.bytesize - max]
+          piece = piece[0, max]
+        else
+          s.pieces.shift
+        end
+        unless s.ended
+          s.recv_window = s.recv_window + piece.bytesize.to_i64
+          write_frame(WINDOW_UPDATE, 0, id, H2Connection.u32(piece.bytesize))
+        end
+        return piece
+      end
+      if s.reset >= 0
+        return HTTPError.new("HTTP/2: the stream was reset (#{H2Connection.error_name(s.reset)})")
+      end
+      return "" if s.ended
+      unless read_frame
+        if fault = @failure
+          return fault
+        end
+        return HTTPError.new("HTTP/2: the connection ended inside a body")
+      end
+    end
+  end
+
+  # -- a server's side
+
+  # The next stream whose request's head has come: frames are read until
+  # one has. Nil at the connection's end.
+  def next_request : Int32?
+    while true
+      while id = @ready.shift?
+        s = @streams[id]?
+        if s && s.reset < 0
+          @current = id
+          return id
+        end
+        @streams.delete(id)
+      end
+      return nil unless read_frame
+    end
+  end
+
+  # The request stream *id* carries, its body to be read as it comes; nil
+  # when its head is not one (it has been reset already).
+  def request(id : Int32, remote : String?) : Request?
+    s = @streams[id]?
+    return nil unless s
+    fields = s.fields
+    return nil unless fields
+    method = ""
+    target = ""
+    authority = nil.as(String?)
+    headers = {} of String => String
+    fields.each do |f|
+      case f.name
+      when ":method"    then method = f.value
+      when ":path"      then target = f.value
+      when ":authority" then authority = f.value
+      when ":scheme"    then nil
+      else
+        H2Connection.join(headers, f.name, f.value)
+      end
+    end
+    if host = authority
+      headers["host"] = host unless headers.has_key?("host")
+    end
+    path = target
+    query = nil.as(String?)
+    if mark = target.index('?')
+      path = target[0, mark]
+      query = target[mark + 1, target.bytesize - mark - 1]
+    end
+    reader = s.ended && s.pieces.empty? && !s.too_large ? BodyReader.new(nil, BodyReader::EMPTY, 0_i64, @limit) : BodyReader.frames(self, id, @limit)
+    Request.new(method, path, query, headers, "HTTP/2", reader, remote)
+  end
+
+  # The block's answer to stream *id*: its head, then its body as the
+  # windows allow. False when the connection is over.
+  def answer(id : Int32, response : Response, req : Request, compress : Bool) : Bool
+    s = @streams[id]?
+    return @failure.nil? if s.nil? || s.reset >= 0
+    # 101 has no meaning here (§8.6): the client is told to use HTTP/1.1.
+    if response.takeover
+      refuse(id, HTTP_1_1_REQUIRED)
+      return @failure.nil?
+    end
+    head = HTTP.same_name?(req.method, "HEAD")
+    bodiless = HTTP.bodiless?(response.status)
+    gzip = compress && Server.gzip_for?(req, response)
+    if source = response.source
+      defer source.close
+      length = nil.as(Int64?)
+      if declared = response.header("Content-Length")
+        n = HTTP.content_length(declared)
+        raise "HTTP: Content-Length #{declared.inspect} is not a number" unless n
+        length = n
+      end
+      gzip = false if length
+      shown = gzip ? Server.coded(response) : response
+      return false unless send_headers(id, H2Connection.answer_fields(shown, length, head), head || bodiless)
+      return @failure.nil? if head || bodiless
+      sink = H2Out.new(self, id)
+      writer = gzip ? HTTP.gzip_writer(sink, false) : BodyWriter.new(sink, false)
+      while true
+        piece = source.read_bytes(16384)
+        break if piece.bytesize == 0
+        break unless writer.write(piece).nil?
+      end
+      writer.finish
+      return finish_answer(s)
+    end
+    if block = response.writer
+      shown = gzip ? Server.coded(response) : response
+      return false unless send_headers(id, H2Connection.answer_fields(shown, nil, head), head || bodiless)
+      return @failure.nil? if head || bodiless
+      sink = H2Out.new(self, id)
+      writer = gzip ? HTTP.gzip_writer(sink, false) : BodyWriter.new(sink, false)
+      block.call(writer)
+      writer.finish
+      return finish_answer(s)
+    end
+    response = Server.gzipped(response) if gzip && response.body.bytesize >= Server::COMPRESS_FROM
+    body = response.body
+    empty = head || bodiless || body.bytesize == 0
+    return false unless send_headers(id, H2Connection.answer_fields(response, bodiless ? nil : body.bytesize.to_i64, head), empty)
+    return @failure.nil? if empty
+    send_data(id, body, true)
+    @failure.nil?
+  end
+
+  private def finish_answer(s : H2Stream) : Bool
+    return @failure.nil? if s.reset >= 0
+    send_data(s.id, "", true) unless s.sent_end
+    @failure.nil?
+  end
+
+  # A stream the server is done with: a request body still coming is
+  # stopped (§8.1, RST_STREAM NO_ERROR after a whole answer), and the
+  # stream forgotten.
+  def done(id : Int32) : Nil
+    if s = @streams[id]?
+      if !s.ended && s.reset < 0 && @failure.nil?
+        reset_lately(id)
+        write_frame(RST_STREAM, 0, id, H2Connection.u32(NO_ERROR))
+      end
+    end
+    @streams.delete(id)
+    @current = 0
+  end
+
+  # A server's refusal of a request it cannot serve: the status, and the
+  # stream ended.
+  def refuse_request(id : Int32, status : Int32, why : String) : Bool
+    fields = [Std::Hpack::HeaderField.new(":status", status.to_s), Std::Hpack::HeaderField.new("content-type", "text/plain"),
+              Std::Hpack::HeaderField.new("content-length", (why.bytesize + 1).to_s)]
+    return false unless send_headers(id, fields, false)
+    send_data(id, why + "\n", true)
+  end
+
+  # GOAWAY: no new stream, the last one this end answered named.
+  def goaway(code : Int32 = NO_ERROR) : Nil
+    return unless @failure.nil?
+    write_frame(GOAWAY, 0, 0, H2Connection.u32(@highest) + H2Connection.u32(code))
+    flush
+  end
+
+  # -- a client's side
+
+  # A request on a new stream: its head, and its body as the windows allow.
+  def send_request(method : String, scheme : String, authority : String, path : String, headers : Hash(String, String), body : String | IyiIO) : Int32 | HTTPError | Cancelled | SocketError
+    @refused = false
+    id = @next_id
+    @next_id = @next_id + 2
+    s = H2Stream.new(id, @peer_window, WINDOW)
+    @streams[id] = s
+    fields = [Std::Hpack::HeaderField.new(":method", method), Std::Hpack::HeaderField.new(":scheme", scheme),
+              Std::Hpack::HeaderField.new(":authority", authority), Std::Hpack::HeaderField.new(":path", path)]
+    headers.each do |name, value|
+      lower = name.downcase
+      next if H2Connection.connection_specific?(lower) || lower == "host"
+      raise "HTTP: header #{name} contains a line break" if HTTP.has_break?(value)
+      raise "HTTP: header #{name} contains a control character" if HTTP.control?(value)
+      fields << Std::Hpack::HeaderField.new(lower, value, lower == "authorization" || lower == "proxy-authorization")
+    end
+    sending = true
+    case body
+    in String
+      if body.bytesize > 0 || HTTP.same_name?(method, "POST") || HTTP.same_name?(method, "PUT") || HTTP.same_name?(method, "PATCH")
+        given = false
+        headers.each { |k, _| given = true if HTTP.same_name?(k, "content-length") }
+        fields << Std::Hpack::HeaderField.new("content-length", body.bytesize.to_s) unless given
+      end
+      sending = send_headers(id, fields, body.bytesize == 0) && (body.bytesize == 0 || send_data(id, body, true))
+    in IyiIO
+      sending = send_headers(id, fields, false)
+      while sending
+        piece = body.read_bytes(16384)
+        if piece.bytesize == 0
+          sending = send_data(id, "", true)
+          break
+        end
+        sending = send_data(id, piece, false)
+      end
+    end
+    unless sending
+      if fault = @failure
+        return fault
+      end
+      if s.reset >= 0
+        @refused = s.reset == REFUSED_STREAM
+        return HTTPError.new("HTTP/2: the server reset the request (#{H2Connection.error_name(s.reset)})")
+      end
+      return HTTPError.new("HTTP/2: the request could not be sent")
+    end
+    id
+  end
+
+  # The final head of stream *id*'s answer: frames read until it comes.
+  def answer_head(id : Int32) : Array(Std::Hpack::HeaderField) | HTTPError | Cancelled | SocketError
+    while true
+      s = @streams[id]?
+      return HTTPError.new("HTTP/2: stream #{id} is gone") if s.nil?
+      if fields = s.fields
+        return fields
+      end
+      if s.reset >= 0
+        @refused = s.reset == REFUSED_STREAM
+        return HTTPError.new("HTTP/2: the server refused the request (REFUSED_STREAM)") if @refused
+        return HTTPError.new("HTTP/2: the server reset the request (#{H2Connection.error_name(s.reset)})")
+      end
+      unless read_frame
+        if fault = @failure
+          return fault
+        end
+        return HTTPError.new("HTTP/2: the connection ended before an answer")
+      end
+    end
+  end
+
+  # The client is done with stream *id*: what is left of its answer is
+  # cancelled, and the stream forgotten.
+  def forget(id : Int32) : Nil
+    if s = @streams[id]?
+      if !s.ended && s.reset < 0 && @failure.nil?
+        reset_lately(id)
+        write_frame(RST_STREAM, 0, id, H2Connection.u32(CANCEL))
+      end
+    end
+    @streams.delete(id)
+  end
+
+  # -- what a head is
+
+  # Why a request's head is malformed (§8.1.1, §8.2, §8.3.1), or nil: its
+  # pseudo-header fields - known, once each, before every other field, the
+  # ones its method needs - and its fields - lower case, no connection
+  # field, `te` only `trailers`, no value beginning or ending in white
+  # space or holding NUL, CR or LF.
+  def self.request_flaw(fields : Array(Std::Hpack::HeaderField)) : String?
+    method = nil.as(String?)
+    path = nil.as(String?)
+    scheme = nil.as(String?)
+    authority = nil.as(String?)
+    regular = false
+    fields.each do |f|
+      name = f.name
+      if name.starts_with?(":")
+        return "a pseudo-header after a field" if regular
+        case name
+        when ":method"
+          return ":method twice" unless method.nil?
+          method = f.value
+        when ":path"
+          return ":path twice" unless path.nil?
+          path = f.value
+        when ":scheme"
+          return ":scheme twice" unless scheme.nil?
+          scheme = f.value
+        when ":authority"
+          return ":authority twice" unless authority.nil?
+          authority = f.value
+        else
+          return "the pseudo-header #{name}"
+        end
+      else
+        regular = true
+        flaw = field_flaw(f)
+        return flaw if flaw
+      end
+    end
+    return "no :method" if method.nil?
+    if method == "CONNECT"
+      return "CONNECT with :scheme or :path" unless scheme.nil? && path.nil?
+      return "CONNECT without :authority" if authority.nil?
+    else
+      return "no :scheme" if scheme.nil?
+      return "no :path, or an empty one" if path.nil? || path.empty?
+    end
+    nil
+  end
+
+  # An answer's final status, or nil when its head is malformed.
+  def self.answer_status(fields : Array(Std::Hpack::HeaderField)) : Int32?
+    status = nil.as(Int32?)
+    regular = false
+    fields.each do |f|
+      if f.name.starts_with?(":")
+        return nil if regular || f.name != ":status" || !status.nil?
+        v = f.value
+        return nil unless v.bytesize == 3
+        v.each_byte { |b| return nil unless b >= 48_u8 && b <= 57_u8 }
+        status = v.to_i
+      else
+        regular = true
+        return nil if field_flaw(f)
+      end
+    end
+    status
+  end
+
+  def self.field_flaw(f : Std::Hpack::HeaderField) : String?
+    name = f.name
+    return "an empty field name" if name.empty?
+    name.each_byte { |b| return "the field name #{name.inspect} is not lower case" if b >= 65_u8 && b <= 90_u8 }
+    return "the field name #{name.inspect}" unless HTTP.token?(name)
+    return "the connection-specific field #{name}" if connection_specific?(name)
+    return "te other than trailers" if name == "te" && f.value != "trailers"
+    v = f.value
+    v.each_byte { |b| return "a value holding NUL, CR or LF" if b == 0_u8 || b == 13_u8 || b == 10_u8 }
+    if v.bytesize > 0
+      first = v.to_unsafe[0]
+      last = v.to_unsafe[v.bytesize - 1]
+      return "a value beginning or ending in white space" if first == 32_u8 || first == 9_u8 || last == 32_u8 || last == 9_u8
+    end
+    nil
+  end
+
+  def self.connection_specific?(name : String) : Bool
+    name == "connection" || name == "keep-alive" || name == "proxy-connection" || name == "transfer-encoding" || name == "upgrade"
+  end
+
+  # An answer's fields: `:status` first, then each header on a field of its
+  # own, its name in lower case; what only HTTP/1.1 means is dropped, and
+  # the length written when the body's is known.
+  def self.answer_fields(response : Response, length : Int64?, head : Bool) : Array(Std::Hpack::HeaderField)
+    raise "HTTP: not a status: #{response.status}" unless response.status >= 100 && response.status <= 999
+    fields = [Std::Hpack::HeaderField.new(":status", response.status.to_s)]
+    has_length = false
+    apart = response.apart
+    response.headers.each do |name, value|
+      raise "HTTP: not a header name: #{name.inspect}" unless HTTP.token?(name)
+      raise "HTTP: header #{name} contains a line break" if HTTP.has_break?(value)
+      raise "HTTP: header #{name} contains a control character" if HTTP.control?(value)
+      lower = name.downcase
+      raise "HTTP: #{name} is not written; the body goes with its length" if lower == "transfer-encoding"
+      next if connection_specific?(lower)
+      if lower == "content-length"
+        unless head || response.status == 304 || length.nil?
+          n = HTTP.content_length(value)
+          raise "HTTP: #{name} #{value.inspect} is not the body's #{length} bytes" unless n && n == length
+        end
+        has_length = true
+      end
+      lines = nil.as(Array(String)?)
+      if split = apart
+        lines = split[name]?
+      end
+      if each_line = lines
+        each_line.each { |line| fields << Std::Hpack::HeaderField.new(lower, H2Connection.trimmed(line)) }
+      else
+        fields << Std::Hpack::HeaderField.new(lower, H2Connection.trimmed(value))
+      end
+    end
+    if !has_length && !HTTP.bodiless?(response.status)
+      if written = length
+        fields << Std::Hpack::HeaderField.new("content-length", written.to_s)
+      end
+    end
+    fields
+  end
+
+  # A value with the white space at its ends gone, which HTTP/1.1 reads
+  # past and HTTP/2 refuses.
+  def self.trimmed(value : String) : String
+    return value if value.empty?
+    first = value.to_unsafe[0]
+    last = value.to_unsafe[value.bytesize - 1]
+    return value unless first == 32_u8 || first == 9_u8 || last == 32_u8 || last == 9_u8
+    HTTP.trim(value)
+  end
+
+  # *value* added to the field *name*: a second line joined to the first
+  # as HTTP/1.1 joins them, cookies with "; " (§8.2.3).
+  def self.join(headers : Hash(String, String), name : String, value : String) : Nil
+    if had = headers[name]?
+      headers[name] = had + (name == "cookie" ? "; " : ", ") + value
+    else
+      headers[name] = value
+    end
+  end
+
+  def self.field(fields : Array(Std::Hpack::HeaderField), name : String) : String?
+    fields.each { |f| return f.value if f.name == name }
+    nil
+  end
+
+  def self.setting(name : Int32, value : Int32) : String
+    String.new(6) do |b|
+      b[0] = ((name >> 8) & 0xFF).to_u8
+      b[1] = (name & 0xFF).to_u8
+      b[2] = ((value >> 24) & 0xFF).to_u8
+      b[3] = ((value >> 16) & 0xFF).to_u8
+      b[4] = ((value >> 8) & 0xFF).to_u8
+      b[5] = (value & 0xFF).to_u8
+      nil
+    end
+  end
+
+  def self.u32(value : Int32) : String
+    String.new(4) do |b|
+      b[0] = ((value >> 24) & 0xFF).to_u8
+      b[1] = ((value >> 16) & 0xFF).to_u8
+      b[2] = ((value >> 8) & 0xFF).to_u8
+      b[3] = (value & 0xFF).to_u8
+      nil
+    end
+  end
+
+  def self.read_u32(text : String, at : Int32) : Int32
+    p = text.to_unsafe
+    (p[at].to_i32 << 24) | (p[at + 1].to_i32 << 16) | (p[at + 2].to_i32 << 8) | p[at + 3].to_i32
+  end
+
+  def self.error_name(code : Int32) : String
+    case code
+    when  0 then "NO_ERROR"
+    when  1 then "PROTOCOL_ERROR"
+    when  2 then "INTERNAL_ERROR"
+    when  3 then "FLOW_CONTROL_ERROR"
+    when  4 then "SETTINGS_TIMEOUT"
+    when  5 then "STREAM_CLOSED"
+    when  6 then "FRAME_SIZE_ERROR"
+    when  7 then "REFUSED_STREAM"
+    when  8 then "CANCEL"
+    when  9 then "COMPRESSION_ERROR"
+    when 10 then "CONNECT_ERROR"
+    when 11 then "ENHANCE_YOUR_CALM"
+    when 12 then "INADEQUATE_SECURITY"
+    when 13 then "HTTP_1_1_REQUIRED"
+    else         "error #{code}"
+    end
+  end
+end
+
+# What a `BodyWriter` writes to for an HTTP/2 answer: DATA frames on one
+# stream, as its windows allow.
+class H2Out
+  def initialize(@h2 : H2Connection, @id : Int32)
+  end
+
+  # Each write goes out at once: a block writing as it goes (events, a
+  # progress line) is read as it writes.
+  def write(text : String) : Int32 | Cancelled | SocketError
+    return text.bytesize if @h2.send_data(@id, text, false) && @h2.flush
+    fault = @h2.failure
+    return fault if fault.is_a?(Cancelled) || fault.is_a?(SocketError)
+    SocketError.layered("write an HTTP/2 answer", fault ? fault.message : "the client reset the stream")
   end
 end

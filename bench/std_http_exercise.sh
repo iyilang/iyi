@@ -100,10 +100,11 @@ echo "== what the module reaches"
 # runtime's hook, and std/socket brings std/time already (a DNS query's ID
 # is std/random's, which reads the clock), so it adds nothing to what the
 # module reaches. These are the modules it may import, and none but
-# std/socket, std/time and std/tls reaches anything.
+# std/socket, std/time and std/tls reaches anything: HTTP/2's std/hpack
+# and the byte slices it reads are iyi over the prelude.
 imports=$(grep -oE '^import std/[a-z_]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
-if [ "$imports" = "std/compress std/digest std/mime std/socket std/time std/tls std/uri " ]; then
-  echo "  std/socket, std/time and std/tls, and std/compress, std/digest, std/mime and std/uri, which reach nothing"
+if [ "$imports" = "std/compress std/digest std/hpack std/mime std/slice std/socket std/time std/tls std/uri " ]; then
+  echo "  std/socket, std/time and std/tls, and std/compress, std/digest, std/hpack, std/mime, std/slice and std/uri, which reach nothing"
 else
   echo "  std/http imports $imports"
   status=1
@@ -583,6 +584,386 @@ upgrade HTTP: an upgrade over https:// (wss://): a connection handed over under 
 fi
 
 echo
+echo "== HTTP/2: the server and the client together (bench/http2_exercise.iyi)"
+# h2c with prior knowledge both ways: every shape of body through the
+# windows, gzip, cookies, a redirect, 200 requests on one connection, and
+# what HTTP/2 refuses. Plain and --release.
+H2BIN="$WORK/h2"
+h2_built=0
+if ! "$IYI" build -o "$H2BIN" "$REPO/bench/http2_exercise.iyi" >"$WORK/h2.build.log" 2>&1; then
+  echo "  build failed"
+  tail -12 "$WORK/h2.build.log"
+  status=1
+else
+  h2_built=1
+  timeout -k 5 120 "$H2BIN" >"$WORK/h2.out" 2>&1
+  code=$?
+  sed 's/^/  /' "$WORK/h2.out"
+  if [ "$code" -ne 0 ] || ! grep -q "ALL CHECKS PASSED" "$WORK/h2.out"; then
+    echo "  the HTTP/2 exercise did not hold (exit $code)"
+    status=1
+  fi
+  if ! "$IYI" build --release -o "$WORK/h2-release" "$REPO/bench/http2_exercise.iyi" >"$WORK/h2r.build.log" 2>&1; then
+    echo "  --release: build failed"
+    tail -8 "$WORK/h2r.build.log"
+    status=1
+  elif ! timeout -k 5 120 "$WORK/h2-release" >"$WORK/h2r.out" 2>&1 || ! grep -q "ALL CHECKS PASSED" "$WORK/h2r.out"; then
+    echo "  --release: the HTTP/2 exercise did not hold"
+    tail -6 "$WORK/h2r.out"
+    status=1
+  else
+    echo "  and the same with --release"
+  fi
+fi
+
+# The exercise's server, for the peers below: up until a GET of /quit.
+h2_serve() {
+  rm -f "$WORK/h2.port"
+  "$H2BIN" serve "$WORK/h2.port" >"$WORK/h2-serve.log" 2>&1 &
+  H2PID=$!
+  for _ in $(seq 1 100); do
+    [ -s "$WORK/h2.port" ] && break
+    sleep 0.1
+  done
+  H2PORT="$(cat "$WORK/h2.port" 2>/dev/null)"
+}
+h2_stop() {
+  if [ -n "$PY" ]; then
+    "$PY" -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:$H2PORT/quit').read()" >/dev/null 2>&1
+  elif command -v curl >/dev/null 2>&1; then
+    curl -s "http://127.0.0.1:$H2PORT/quit" >/dev/null 2>&1
+  fi
+  ( sleep 10; kill "$H2PID" 2>/dev/null ) &
+  wait "$H2PID" 2>/dev/null
+}
+
+echo
+echo "== HTTP/2: raw frames against the server (RFC 9113's errors)"
+# Each case a connection of its own, its frames written by hand - the
+# header blocks as HPACK literals without indexing - and the answer read
+# as frames: the GOAWAY a connection error ends with and its code, or the
+# RST_STREAM a stream error is, the connection then still answering PING.
+if [ "$h2_built" -ne 1 ] || [ -z "$PY" ]; then
+  echo "  skipped: no server built, or no python3 to write frames with"
+else
+  h2_serve
+  cat >"$WORK/h2frames.py" <<'PY'
+import socket, struct, sys
+port = int(sys.argv[1])
+PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+NAMES = {0: "NO_ERROR", 1: "PROTOCOL_ERROR", 3: "FLOW_CONTROL_ERROR", 5: "STREAM_CLOSED", 6: "FRAME_SIZE_ERROR",
+         9: "COMPRESSION_ERROR", 11: "ENHANCE_YOUR_CALM", 7: "REFUSED_STREAM"}
+
+def frame(kind, flags, stream, payload=b""):
+    return struct.pack(">I", len(payload))[1:] + bytes([kind, flags]) + struct.pack(">I", stream) + payload
+
+def lit(name, value):
+    def s(b):
+        assert len(b) < 127
+        return bytes([len(b)]) + b
+    return b"\x00" + s(name.encode()) + s(value.encode())
+
+def request(method="GET", path="/echo", extra=(), drop=()):
+    fields = [(":method", method), (":scheme", "http"), (":path", path), (":authority", "127.0.0.1")]
+    fields = [f for f in fields if f[0] not in drop] + list(extra)
+    return b"".join(lit(k, v) for k, v in fields)
+
+SETTINGS = frame(4, 0, 0)
+
+def frames_of(sock):
+    data = b""
+    while True:
+        while len(data) >= 9:
+            n = int.from_bytes(data[:3], "big")
+            if len(data) < 9 + n:
+                break
+            yield data[3], data[4], int.from_bytes(data[5:9], "big") & 0x7FFFFFFF, data[9:9 + n]
+            data = data[9 + n:]
+        try:
+            more = sock.recv(65536)
+        except (socket.timeout, ConnectionResetError):
+            return
+        if not more:
+            return
+        data += more
+
+def run(sent, settings=True):
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        sock.sendall(PREFACE + (SETTINGS if settings else b"") + sent)
+    except OSError:
+        pass  # the server answered and closed before it had read it all
+    return sock
+
+def goaway(sent, settings=True):
+    sock = run(sent, settings)
+    for kind, flags, stream, payload in frames_of(sock):
+        if kind == 7:
+            return int.from_bytes(payload[4:8], "big")
+    return None
+
+def reset_then_ping(sent):
+    sock = run(sent)
+    code = None
+    for kind, flags, stream, payload in frames_of(sock):
+        if kind == 3 and stream == 1 and code is None:
+            code = int.from_bytes(payload, "big")
+            try:
+                sock.sendall(frame(6, 0, 0, b"pingpong"))
+            except OSError:
+                return code, False
+        elif kind == 6 and flags & 1 and payload == b"pingpong":
+            return code, True
+        elif kind == 7:
+            return code, False
+    return code, False
+
+failures = 0
+def expect(name, got, want):
+    global failures
+    if got == want:
+        print(f"  {name}: {NAMES.get(want, want)}")
+    else:
+        failures += 1
+        print(f"  FAIL: {name}: {NAMES.get(got, got)} where {NAMES.get(want, want)} is the answer")
+
+def stream_error(name, sent, want):
+    global failures
+    code, alive = reset_then_ping(sent)
+    if code == want and alive:
+        print(f"  {name}: RST_STREAM {NAMES.get(want, want)}, and the connection answers PING after")
+    else:
+        failures += 1
+        print(f"  FAIL: {name}: RST_STREAM {NAMES.get(code, code)}, alive {alive}, where {NAMES.get(want, want)} and alive")
+
+# The ordinary: SETTINGS acknowledged, PING answered, an unknown frame type
+# passed over.
+sock = run(frame(0xFA, 0, 0, b"ignored") + frame(6, 0, 0, b"12345678"))
+acked = pinged = False
+for kind, flags, stream, payload in frames_of(sock):
+    acked = acked or (kind == 4 and flags & 1 == 1)
+    if kind == 6 and flags & 1 and payload == b"12345678":
+        pinged = True
+        break
+if acked and pinged:
+    print("  SETTINGS acknowledged, an unknown frame type passed over, PING answered with its bytes")
+else:
+    failures += 1
+    print(f"  FAIL: SETTINGS acknowledged {acked}, PING answered {pinged}")
+
+expect("the first frame not SETTINGS", goaway(frame(6, 0, 0, b"12345678"), settings=False), 1)
+expect("DATA on stream 0", goaway(frame(0, 0, 0, b"x")), 1)
+expect("a frame past 16384 bytes", goaway(frame(0, 0, 1, b"x" * 16385)), 6)
+expect("SETTINGS of 5 bytes", goaway(frame(4, 0, 0, b"\x00\x04\x00\x00\x00")), 6)
+expect("SETTINGS_INITIAL_WINDOW_SIZE past 2^31-1", goaway(frame(4, 0, 0, b"\x00\x04\x80\x00\x00\x00")), 3)
+expect("SETTINGS_MAX_FRAME_SIZE under 16384", goaway(frame(4, 0, 0, b"\x00\x05\x00\x00\x00\x64")), 1)
+expect("SETTINGS_ENABLE_PUSH of 2", goaway(frame(4, 0, 0, b"\x00\x02\x00\x00\x00\x02")), 1)
+expect("PING of 7 bytes", goaway(frame(6, 0, 0, b"1234567")), 6)
+expect("a WINDOW_UPDATE of 0 for the connection", goaway(frame(8, 0, 0, b"\x00\x00\x00\x00")), 1)
+expect("the connection's window past 2^31-1", goaway(frame(8, 0, 0, b"\x7f\xff\xff\xff")), 3)
+expect("a stream with an even number", goaway(frame(1, 5, 2, request())), 1)
+expect("a header block broken off by another frame", goaway(frame(1, 1, 1, request()) + frame(6, 0, 0, b"12345678")), 1)
+expect("CONTINUATION with no header block open", goaway(frame(9, 4, 1, request())), 1)
+expect("a CONTINUATION flood", goaway(frame(1, 1, 1, request()) + b"".join(frame(9, 0, 1, b"\x00" * 16000) for _ in range(70))), 11)
+expect("a header block that does not decode", goaway(frame(1, 5, 1, b"\x80")), 9)
+expect("a PUSH_PROMISE from a client", goaway(frame(5, 4, 0, b"\x00\x00\x00\x02")), 1)
+expect("RST_STREAM on a stream never opened", goaway(frame(3, 0, 5, b"\x00\x00\x00\x08")), 1)
+expect("HEADERS on a closed stream", goaway(frame(1, 5, 1, request()) + frame(1, 5, 1, request())), 5)
+stream_error("a field name in upper case", frame(1, 5, 1, request(extra=[("X-Up", "1")])), 1)
+stream_error("no :method", frame(1, 5, 1, request(drop=[":method"])), 1)
+stream_error("an empty :path", frame(1, 5, 1, request(path="")), 1)
+stream_error("a connection-specific field", frame(1, 5, 1, request(extra=[("connection", "keep-alive")])), 1)
+stream_error("te other than trailers", frame(1, 5, 1, request(extra=[("te", "gzip")])), 1)
+stream_error("a value ending in white space", frame(1, 5, 1, request(extra=[("x-a", "b ")])), 1)
+stream_error("an unknown pseudo-header", frame(1, 5, 1, request(extra=[(":protocol", "x")])), 1)
+stream_error("a pseudo-header after a field", frame(1, 5, 1, lit("x-a", "1") + request()), 1)
+stream_error("a body shorter than its content-length",
+             frame(1, 4, 1, request("POST", extra=[("content-length", "10")])) + frame(0, 1, 1, b"12345"), 1)
+stream_error("trailers without END_STREAM",
+             frame(1, 4, 1, request("POST")) + frame(0, 0, 1, b"12345") + frame(1, 4, 1, lit("x-t", "1")), 1)
+stream_error("a stream depending on itself", frame(2, 0, 1, b"\x00\x00\x00\x01\x10"), 1)
+sys.exit(1 if failures else 0)
+PY
+  "$PY" "$WORK/h2frames.py" "$H2PORT" || status=1
+  h2_stop
+fi
+
+echo
+echo "== HTTP/2: curl against the server"
+if [ "$h2_built" -ne 1 ] || ! command -v curl >/dev/null 2>&1 || ! curl --version | grep -q 'HTTP2'; then
+  echo "  skipped: no curl that speaks HTTP/2"
+else
+  h2_serve
+  base="http://127.0.0.1:$H2PORT"
+  ok=1
+  got="$(curl -sS --http2-prior-knowledge -H 'X-Test: curl' "$base/echo?x=1")"
+  [ "$got" = "GET /echo x=1 HTTP/2 host=127.0.0.1:$H2PORT length=0 fnv=cbf29ce484222325 x=curl" ] || { echo "  FAIL: GET answered '$got'"; ok=0; }
+  if [ -n "$PY" ]; then
+    "$PY" -c "import sys; sys.stdout.buffer.write(bytes((i * 31 + 7) & 255 for i in range(300000)))" >"$WORK/up.bin"
+    got="$(curl -sS --http2-prior-knowledge -X PUT --data-binary @"$WORK/up.bin" "$base/echo")"
+    want="PUT /echo  HTTP/2 host=127.0.0.1:$H2PORT length=300000 fnv=$("$PY" -c "
+h = 0xcbf29ce484222325
+for i in range(300000):
+    h ^= (i * 31 + 7) & 255
+    h = (h * 0x100000001b3) % 2**64
+print(format(h, 'x'))") x="
+    [ "$got" = "$want" ] || { echo "  FAIL: a 300 KB PUT answered '$got'"; ok=0; }
+  fi
+  curl -sS --http2-prior-knowledge -I "$base/big?n=12345" | tr -d '\r' >"$WORK/curl-head"
+  grep -qx 'HTTP/2 200 ' "$WORK/curl-head" && grep -qx 'content-length: 12345' "$WORK/curl-head" || { echo "  FAIL: HEAD: $(cat "$WORK/curl-head" | tr '\n' ' ')"; ok=0; }
+  got="$(curl -sS --http2-prior-knowledge --compressed "$base/text" | head -c 54)"
+  [ "$got" = "hello, compressible world. hello, compressible world. " ] || { echo "  FAIL: gzip: '$got'"; ok=0; }
+  got="$(curl -sS --http2-prior-knowledge -w '<%{num_connects}>' "$base/echo?a" "$base/echo?b" "$base/echo?c" | grep -o '<[0-9]*>' | tr -d '\n')"
+  [ "$got" = "<1><0><0>" ] || { echo "  FAIL: three requests took connections '$got'"; ok=0; }
+  [ "$ok" -eq 1 ] && echo "  GET, a 300 KB PUT, HEAD, gzip, and three requests over one connection, as curl (nghttp2) sends and reads them" || status=1
+  h2_stop
+fi
+
+# Node's own HTTP/2 (nghttp2 under node:http2): the client against this
+# server, and this client against its server - in the clear and under TLS
+# with ALPN - with settings this end never sends itself: a 1000-byte window,
+# a 256-byte HPACK table, padding on every frame, CONTINUATION, trailers and
+# a 103 before the answer.
+NODE=""
+command -v node >/dev/null 2>&1 && node -e "require('http2')" >/dev/null 2>&1 && NODE=node
+
+echo
+echo "== HTTP/2: Node's client against the server"
+if [ "$h2_built" -ne 1 ] || [ -z "$NODE" ]; then
+  echo "  skipped: no node to be the client"
+else
+  cat >"$WORK/h2-client.js" <<'JS'
+const http2 = require("http2"), zlib = require("zlib");
+const port = process.argv[2];
+const pattern = (n) => { const b = Buffer.alloc(n); for (let i = 0; i < n; i++) b[i] = (i * 31 + 7) & 255; return b; };
+const fnv = (buf) => { let h = 0xcbf29ce484222325n; for (const x of buf) { h ^= BigInt(x); h = (h * 0x100000001b3n) & 0xffffffffffffffffn; } return h.toString(16); };
+const session = http2.connect(`http://127.0.0.1:${port}`, { settings: { initialWindowSize: 1000, headerTableSize: 256 } });
+session.on("error", (e) => { console.log("  FAIL: session error " + e.message); process.exit(1); });
+const ask = (headers, body, cancelAfter) => new Promise((resolve, reject) => {
+  const req = session.request(headers);
+  const chunks = []; let head = null;
+  req.on("response", (h) => { head = h; });
+  req.on("data", (c) => { chunks.push(c); if (cancelAfter) req.close(http2.constants.NGHTTP2_CANCEL); });
+  req.on("close", () => resolve({ head, data: Buffer.concat(chunks), code: req.rstCode }));
+  req.on("error", (e) => { if (!cancelAfter) reject(e); });
+  if (body) req.end(body); else req.end();
+});
+const fail = (what) => { console.log("  FAIL: " + what); process.exit(1); };
+(async () => {
+  const bigs = await Promise.all([...Array(100)].map(() => ask({ ":path": "/big?n=100000" })));
+  bigs.forEach((r, i) => { if (!r.data.equals(pattern(100000))) fail(`concurrent GET ${i}: ${r.data.length} bytes`); });
+  const ups = [...Array(20)].map((_, i) => pattern(250000 + i * 1000));
+  const echoed = await Promise.all(ups.map((u) => ask({ ":method": "POST", ":path": "/echo" }, u)));
+  echoed.forEach((r, i) => { if (!r.data.toString().includes(`length=${ups[i].length} fnv=${fnv(ups[i])}`)) fail(`upload ${i}: ${r.data}`); });
+  const head = await ask({ ":method": "HEAD", ":path": "/big?n=777" });
+  if (head.head[":status"] !== 200 || head.head["content-length"] !== "777" || head.data.length !== 0) fail("HEAD");
+  const gz = await ask({ ":path": "/text", "accept-encoding": "gzip" });
+  if (gz.head["content-encoding"] !== "gzip" || zlib.gunzipSync(gz.data).toString() !== "hello, compressible world. ".repeat(400)) fail("gzip");
+  const cut = await ask({ ":path": "/big?n=5000000" }, null, true);
+  const after = await ask({ ":path": "/echo?after=cancel" });
+  if (!after.data.toString().startsWith("GET /echo after=cancel HTTP/2")) fail("a request after a cancelled one: " + after.data);
+  const cookies = await ask({ ":path": "/cookie" });
+  const set = cookies.head["set-cookie"];
+  if (!Array.isArray(set) || set.join("|") !== "a=1|b=2; Path=/") fail("set-cookie " + JSON.stringify(set));
+  const none = await ask({ ":path": "/missing" });
+  if (none.head[":status"] !== 404) fail("404");
+  console.log("  100 GETs at once and 20 uploads at once over one connection, under a 1000-byte window; HEAD, gzip, a stream cancelled mid-answer and the next request served, Set-Cookie twice, 404");
+  session.close();
+})().catch((e) => fail(e.message));
+JS
+  h2_serve
+  timeout -k 5 120 "$NODE" "$WORK/h2-client.js" "$H2PORT" || status=1
+  h2_stop
+fi
+
+echo
+echo "== HTTP/2: the client against Node's server"
+if [ "$h2_built" -ne 1 ] || [ -z "$NODE" ]; then
+  echo "  skipped: no node to be the server"
+else
+  cat >"$WORK/h2-server.js" <<'JS'
+const http2 = require("http2"), zlib = require("zlib"), fs = require("fs");
+const [mode, portFile, logFile, cert, key] = process.argv.slice(2);
+const pattern = (n) => { const b = Buffer.alloc(n); for (let i = 0; i < n; i++) b[i] = (i * 31 + 7) & 255; return b; };
+const fnv = (buf) => { let h = 0xcbf29ce484222325n; for (const x of buf) { h ^= BigInt(x); h = (h * 0x100000001b3n) & 0xffffffffffffffffn; } return h.toString(16); };
+const log = (line) => fs.appendFileSync(logFile, line + "\n");
+// A header block past 16384 bytes goes as HEADERS and CONTINUATION; Node
+// refuses to send one past maxSendHeaderBlockLength, 64 KiB unless raised.
+const options = { settings: { initialWindowSize: 1000, headerTableSize: 256, maxConcurrentStreams: 5 },
+                  maxSendHeaderBlockLength: 262144,
+                  paddingStrategy: http2.constants.PADDING_STRATEGY_MAX };
+const server = mode === "tls" ? http2.createSecureServer({ ...options, cert: fs.readFileSync(cert), key: fs.readFileSync(key) })
+                              : http2.createServer(options);
+const text = "hello, compressible world. ".repeat(400);
+server.on("stream", (stream, headers) => {
+  const path = headers[":path"];
+  const send = (body, extra = {}, logged = body, big = 0, cookies = "") => {
+    stream.respond({ ":status": 200, ...extra });
+    stream.end(body);
+    log(`${path} 200 ${logged.length} ${fnv(logged)} big=${big} cookies=${cookies}`);
+  };
+  if (path === "/echo?x=1") send(Buffer.from(`${headers[":method"]} ${path} x-test=${headers["x-test"]}`));
+  else if (path === "/big?n=1000000") send(pattern(1000000));
+  else if (path === "/trailers") {
+    stream.respond({ ":status": 200 }, { waitForTrailers: true });
+    stream.on("wantTrailers", () => stream.sendTrailers({ "x-trailer": "yes" }));
+    stream.end("with trailers");
+    log(`${path} 200 13 ${fnv(Buffer.from("with trailers"))} big=0 cookies=`);
+  } else if (path === "/early") {
+    stream.additionalHeaders({ ":status": 103, link: "</a.css>; rel=preload" });
+    send(Buffer.from("after early hints"));
+  } else if (path === "/headers") send(Buffer.from("big headers"), { "x-big": "a".repeat(70000) }, Buffer.from("big headers"), 70000);
+  else if (path === "/padded?n=50000") send(pattern(50000));
+  else if (path === "/gzip") send(zlib.gzipSync(text), { "content-encoding": "gzip" }, Buffer.from(text));
+  else if (path === "/cookies") send(Buffer.from("cookies"), { "set-cookie": ["a=1", "b=2"] }, Buffer.from("cookies"), 0, "a=1|b=2");
+  else if (path === "/upload") {
+    const parts = [];
+    stream.on("data", (c) => parts.push(c));
+    stream.on("end", () => {
+      const all = Buffer.concat(parts);
+      const answer = `length=${all.length} fnv=${fnv(all)}`;
+      stream.respond({ ":status": 200 });
+      stream.end(answer);
+      log(`/upload 200 ${answer}`);
+    });
+  } else { stream.respond({ ":status": 404 }); stream.end(); }
+});
+server.listen(0, "127.0.0.1", () => fs.writeFileSync(portFile, String(server.address().port)));
+JS
+  h2_fetch() { # h2_fetch <label> <mode> <scheme> [roots]
+    local label="$1" mode="$2" scheme="$3" roots="${4:-}"
+    rm -f "$WORK/node.port" "$WORK/node.log"
+    "$NODE" "$WORK/h2-server.js" "$mode" "$WORK/node.port" "$WORK/node.log" "$WORK/tls/leaf.pem" "$WORK/tls/leaf.key" &
+    local npid=$!
+    for _ in $(seq 1 100); do
+      [ -s "$WORK/node.port" ] && break
+      sleep 0.1
+    done
+    local host=127.0.0.1
+    [ "$scheme" = "https" ] && host=localhost
+    timeout -k 5 120 "$H2BIN" fetch "$scheme://$host:$(cat "$WORK/node.port")" $roots >"$WORK/fetch.out" 2>&1
+    kill "$npid" 2>/dev/null
+    wait "$npid" 2>/dev/null
+    if ! grep -qx "connections 1" "$WORK/fetch.out"; then
+      echo "  $label: FAIL: $(grep -v '^/' "$WORK/fetch.out" | head -n 3 | tr '\n' ' ')"
+      status=1
+    elif ! diff <(grep '^/' "$WORK/fetch.out") "$WORK/node.log" >"$WORK/fetch.diff"; then
+      echo "  $label: FAIL: what the client read is not what Node sent"
+      sed 's/^/    /' "$WORK/fetch.diff" | head -n 12
+      status=1
+    else
+      echo "  $label: $(grep -c '^/' "$WORK/fetch.out") answers read as Node sent them, over one connection - padded frames, CONTINUATION, trailers, a 103, gzip, two set-cookie, and a 3 MB upload through a 1000-byte window"
+    fi
+  }
+  h2_fetch "h2c" h2c http
+  if [ -s "$WORK/tls/root.pem" ] && [ -s "$WORK/tls/leaf.key" ]; then
+    h2_fetch "TLS, ALPN h2" tls https "$WORK/tls/root.pem"
+  else
+    echo "  TLS: skipped: no certificate from the https:// section above"
+  fi
+fi
+
+echo
 echo "== the server under load"
 if command -v wrk >/dev/null 2>&1; then
   "$IYI" build --release -o "$WORK/server-release" "$REPO/bench/std_http_server.iyi" >"$WORK/server-release.build.log" 2>&1
@@ -758,9 +1139,143 @@ mutate "a head given as long as each read is short" '      conn.deadline_in(time
 mutate "an upgraded connection held to the server's timeout" '      conn.unlimited
 ' ''
 mutate "a client that waits for an answer as long as it takes" '        conn.gap = timeout_ms if timeout_ms > 0
-      end' '      end'
+        if speaks_h2' '        if speaks_h2'
 mutate "a request that does not name its client" '    remote = client.remote_address' '    remote = nil.as(String?)'
 mutate "a boundary that falls across reads missed" 'safe = @held.bytesize - (@delimiter.bytesize - 1)' 'safe = @held.bytesize'
+
+# HTTP/2, each mechanism taken out of a copy that compiles: the iyi-to-iyi
+# exercise stops at the check that names it, or the raw frames find the
+# answer RFC 9113 asks for missing.
+h2_patched() { # h2_patched <name> <old> <new>: a broken http2_exercise in $WORK/<name>.bin
+  rm -rf "$WORK/$1"
+  mkdir -p "$WORK/$1/std"
+  OLD="$2" NEW="$3" "$PY" - "$REPO/src/std/http.iyi" "$WORK/$1/std/http.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+old = os.environ["OLD"]
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not unique: " + old)
+open(sys.argv[2], "w", encoding="utf-8").write(src.replace(old, os.environ["NEW"], 1))
+PY
+  [ $? -eq 0 ] || return 1
+  IYI_PATH="$WORK/$1${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/$1.bin" "$REPO/bench/http2_exercise.iyi" >"$WORK/$1.log" 2>&1
+}
+h2_breaks() { # h2_breaks <label> <name> <old> <new> <check>
+  local label="$1" name="$2" old="$3" new="$4" check="$5"
+  if [ "$h2_built" -ne 1 ] || [ -z "$PY" ]; then
+    echo "  $label: skipped, no HTTP/2 exercise or no python3"
+  elif ! h2_patched "$name" "$old" "$new"; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
+    status=1
+  else
+    timeout -k 5 120 "$WORK/$name.bin" >"$WORK/$name.out" 2>&1
+    if grep -q "ALL CHECKS PASSED" "$WORK/$name.out"; then
+      echo "  $label: the HTTP/2 exercise PASSED on a broken module"
+      status=1
+    elif ! grep -qF -- "ASSERTION FAILED: $check" "$WORK/$name.out"; then
+      echo "  $label: it failed, but not at '$check'"
+      grep -m2 'panic\|FAILED' "$WORK/$name.out" | sed 's/^/    /'
+      status=1
+    else
+      echo "  $label: caught at \"$check\""
+    fi
+  fi
+}
+# h2_node_breaks <label> <name> <old> <new>: Node's client, which holds a
+# server to the 1000-byte windows it advertises, fails on the broken one.
+h2_node_breaks() {
+  local label="$1" name="$2" old="$3" new="$4"
+  if [ "$h2_built" -ne 1 ] || [ -z "$PY" ] || [ -z "$NODE" ] || [ ! -s "$WORK/h2-client.js" ]; then
+    echo "  $label: skipped, no HTTP/2 server, python3 or node"
+  elif ! h2_patched "$name" "$old" "$new"; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
+    status=1
+  else
+    local good="$H2BIN"
+    H2BIN="$WORK/$name.bin"
+    h2_serve
+    timeout -k 5 120 "$NODE" "$WORK/h2-client.js" "$H2PORT" >"$WORK/$name.out" 2>&1
+    local code=$?
+    h2_stop
+    H2BIN="$good"
+    if [ "$code" -ne 0 ] && grep -q "FAIL\|FLOW_CONTROL" "$WORK/$name.out"; then
+      echo "  $label: caught by Node's client: $(grep -m1 'FAIL' "$WORK/$name.out" | sed 's/^ *//')"
+    else
+      echo "  $label: Node's client did not fail on a broken server (exit $code)"
+      status=1
+    fi
+  fi
+}
+h2_frames_breaks() { # h2_frames_breaks <label> <name> <old> <new> <case>
+  local label="$1" name="$2" old="$3" new="$4" case_name="$5"
+  if [ "$h2_built" -ne 1 ] || [ -z "$PY" ] || [ ! -s "$WORK/h2frames.py" ]; then
+    echo "  $label: skipped, no HTTP/2 server, python3 or frames to send it"
+  elif ! h2_patched "$name" "$old" "$new"; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
+    status=1
+  else
+    local good="$H2BIN"
+    H2BIN="$WORK/$name.bin"
+    h2_serve
+    timeout -k 5 300 "$PY" "$WORK/h2frames.py" "$H2PORT" >"$WORK/$name.out" 2>&1
+    h2_stop
+    H2BIN="$good"
+    if grep -qF -- "FAIL: $case_name:" "$WORK/$name.out"; then
+      echo "  $label: caught by the frames for \"$case_name\""
+    else
+      echo "  $label: the frames for \"$case_name\" did not fail on a broken server"
+      status=1
+    fi
+  fi
+}
+h2_breaks "a stream's window never opened again" h2_stream_window \
+  '          write_frame(WINDOW_UPDATE, 0, id, H2Connection.u32(piece.bytesize))' '          nil' \
+  'a megabyte up through the windows'
+h2_breaks "the connection's window never opened again" h2_conn_window \
+  '      return false unless write_frame(WINDOW_UPDATE, 0, 0, H2Connection.u32(size.to_i32))' '      nil' \
+  'a megabyte up through the windows'
+h2_node_breaks "the peer's stream window passed over" h2_peer_window \
+  '      room = s.send_window.to_i32 if s.send_window < room.to_i64' '      nil'
+h2_breaks "the preface not recognised" h2_preface \
+  '        return false if conn.peek(seen) != wanted.to_unsafe[seen]' '        return false' \
+  'GET over HTTP/2'
+h2_breaks "Set-Cookie lines joined into one field" h2_cookies \
+  '        each_line.each { |line| fields << Std::Hpack::HeaderField.new(lower, H2Connection.trimmed(line)) }' \
+  '        fields << Std::Hpack::HeaderField.new(lower, H2Connection.trimmed(value))' \
+  'Set-Cookie on fields of their own'
+h2_breaks "an upgrade reset as if cancelled" h2_upgrade \
+  '      refuse(id, HTTP_1_1_REQUIRED)' '      refuse(id, CANCEL)' \
+  'an upgrade is reset with HTTP_1_1_REQUIRED'
+h2_breaks "a stream's reset taking its connection" h2_reset_closes \
+  '        if h2.usable?
+          # One stream' '        if false
+          # One stream' \
+  "a stream's reset leaves its connection"
+h2_breaks "a gzip answer left coded" h2_gzip \
+  '      decoded = undo_coding(reader, headers)
+      if decoded.is_a?(HTTPError)
+        h2.forget(id)' '      decoded = false
+      if decoded.is_a?(HTTPError)
+        h2.forget(id)' \
+  'a gzip answer decoded as it is read'
+h2_frames_breaks "a request's fields unchecked" h2_fields \
+  '      return refuse(id, PROTOCOL_ERROR) if H2Connection.request_flaw(decoded)' '      nil' \
+  'a field name in upper case'
+h2_frames_breaks "a header block held whatever its size" h2_flood \
+  '    return fail(ENHANCE_YOUR_CALM, "a header block past #{HEADER_LIST} bytes") if @block.size + piece.bytesize > HEADER_LIST' '    nil' \
+  'a CONTINUATION flood'
+h2_frames_breaks "the first frame taken whatever it is" h2_first \
+  '    if !@settled && (type != SETTINGS || flags & ACK != 0)' '    if false' \
+  'the first frame not SETTINGS'
+h2_frames_breaks "a frame of any size read" h2_frame_size \
+  '    return fail(FRAME_SIZE_ERROR, "a frame of #{length} bytes, past the #{FRAME} this end takes") if length > FRAME' '    nil' \
+  'a frame past 16384 bytes'
+h2_frames_breaks "HEADERS on a closed stream passed over" h2_stale \
+  '          mode = @reset_lately.includes?(id) ? IGNORED_BLOCK : STALE_BLOCK' '          mode = IGNORED_BLOCK' \
+  'HEADERS on a closed stream'
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -29,7 +29,9 @@ name: iyi
 #                    by cross-compiling: an edit to `src/lib_c` or
 #                    `src/crystal/system` is invisible here until somebody
 #   binary           the thing a person downloads, unpacked somewhere else
-#   std              the native standard library (src/std/) and its module exercises
+#   std              the native standard library (src/std/): its foundation here,
+#                    its modules' exercises in the std-siblings shards (and the
+#                    windows- and darwin- shards beside their own jobs)
 #
 # Every job carries a `timeout-minutes`. The default is six hours, and these
 # jobs start daemons, listen on sockets, serve HTTP, soak an LSP and run
@@ -850,13 +852,46 @@ jobs:
       - run: chmod +x .build/crystal
       - name: Build iyi binary
         run: make -o .build/crystal iyi
-      - name: The standard library foundation and discovered exercises
+      # The foundation's own sections; the modules' exercises are the
+      # std-siblings shards below, side by side.
+      - name: The standard library foundation
+        env:
+          STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh
       # crystal-metric's port: twenty-six benchmarks that check their own
       # answers against the Crystal program's, over one program that uses
       # the library together; four broken modules prove it can fail.
       - name: crystal-metric's port answers as Crystal does
         run: bash bench/metric_port.sh
+
+  # Every module's own exercise, in three shards (bench/std_siblings.sh).
+  # One after another they ran past the std job's hour: 39 of 91 had run at
+  # sixty minutes, std/http's proofs alone thirteen of them, on top of the
+  # foundation's twenty-five. Interleaved, each shard carries a third.
+  std-siblings:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: crystallang/crystal:1.21.0-build
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    name: "The standard library's module exercises, shard ${{ matrix.shard }} of 3"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build iyi binary
+        run: make -o .build/crystal iyi
+      - name: The module exercises of this shard
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} 3
 
   targets:
     needs: build
@@ -1323,7 +1358,12 @@ jobs:
       # patched a branch this platform never compiles). Every one had been
       # green on Linux for a release. `std_exercise.sh` drives the whole
       # set and fails on any of them, and the gate-per-module rule with it.
-      - name: The native standard library and its module exercises
+      # The foundation's own sections; the modules' exercises are the
+      # darwin-std-siblings shards below, which ran this job past its two
+      # hours when they were a step here.
+      - name: The native standard library's foundation
+        env:
+          STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh
 
       # `std/socket`'s gate is named from before the `std_` prefix, so the
@@ -1442,6 +1482,40 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+  # Every module's own exercise on darwin, in four shards
+  # (bench/std_siblings.sh), each building its own compiler from the same
+  # cached static LLVM: as one step of the job above they ran it past its
+  # hundred and twenty minutes, seventy of them in that step alone.
+  darwin-std-siblings:
+    runs-on: macos-14
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    name: "The standard library's module exercises on darwin, shard ${{ matrix.shard }} of 4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install the bootstrap toolchain
+        run: |
+          brew install crystal coreutils pkgconf
+          echo "$(brew --prefix)/opt/coreutils/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Restore the static LLVM
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/llvm-static
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      - name: Build the static LLVM (cache miss)
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
+      - name: Build `iyi`
+        run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
+      - name: The module exercises of this shard, on darwin
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 
   # A Windows binary, run twenty times, and every run held to the right
   # answer. Three things used to happen: it printed the right answer, it
@@ -2114,10 +2188,13 @@ jobs:
           bash bench/parallel_mark.sh
           bash bench/concurrent_mark.sh
 
-      - name: The standard library's gates, on Windows
+      # The foundation's own sections; the modules' exercises are the
+      # windows-std-siblings shards below.
+      - name: The standard library's foundation, on Windows
         shell: bash
         env:
           PYTHONUNBUFFERED: "1"
+          STD_SIBLINGS: "0"
         run: bash bench/std_exercise.sh
 
       # The socket gate, which the sweep above does not reach (its name is
@@ -2126,6 +2203,51 @@ jobs:
       - name: Sockets, on Windows
         shell: bash
         run: bash bench/socket_exercise.sh
+
+  # Every module's own exercise on Windows, in four shards
+  # (bench/std_siblings.sh): one after another, with the collector's gates
+  # and the foundation before them, they ran past this job's ninety minutes.
+  windows-std-siblings:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    name: "The standard library's module exercises on Windows, shard ${{ matrix.shard }} of 4"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: 1.21.0
+
+      - name: What this machine has
+        shell: pwsh
+        run: |
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+            choco install make --no-progress -y
+          }
+          $lib = (crystal env CRYSTAL_LIBRARY_PATH).Trim()
+          $llvm = (Get-Content "$lib\llvm_VERSION")[0].Trim()
+          "CRYSTAL_LIBRARY_PATH=$lib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LLVM_VERSION=$llvm" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the fork's compiler, then `iyi`
+        shell: cmd
+        run: |
+          make -f Makefile.win crystal || exit /b 1
+          make -f Makefile.win iyi
+
+      - name: The module exercises of this shard, on Windows
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 
   # The gates the Linux job runs that no Windows job did: the runtime's
   # own exercises, the boundaries bound from Crystal's library, the floors,
@@ -2732,10 +2854,10 @@ jobs:
   # red would ship a claim nobody on that platform can reproduce.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binary, darwin, clean-room, iyi, compiler-specs, stdlib-specs,
-            samples, std, targets, cross-objects, cross-run, wasi-run,
+    needs: [binary, darwin, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
+            samples, std, std-siblings, targets, cross-objects, cross-run, wasi-run,
             windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
-            windows-gates, windows-compiler-specs,
+            windows-std-siblings, windows-gates, windows-compiler-specs,
             wasm32-collector]
     runs-on: ubuntu-24.04
     timeout-minutes: 15

@@ -638,19 +638,12 @@ fi
 
 echo
 echo "== discovering and running sibling std exercises"
-found_siblings=0
-for sibling in "$REPO"/bench/std_*_exercise.sh; do
-  [ -f "$sibling" ] || continue
-  [ "$(basename "$sibling")" = "std_exercise.sh" ] && continue
-  found_siblings=$((found_siblings + 1))
-  echo "-- running sibling: $(basename "$sibling")"
-  if ! bash "$sibling"; then
-    echo "FAIL: sibling $(basename "$sibling") failed"
-    status=1
-  fi
-done
-if [ "$found_siblings" -eq 0 ]; then
-  echo "  (no sibling exercises found yet)"
+# Every module's own exercise, through bench/std_siblings.sh, which CI runs
+# in shards side by side instead: `STD_SIBLINGS=0` leaves them to it.
+if [ "${STD_SIBLINGS:-1}" = 0 ]; then
+  echo "  left to bench/std_siblings.sh (STD_SIBLINGS=0)"
+elif ! bash "$REPO/bench/std_siblings.sh"; then
+  status=1
 fi
 
 echo

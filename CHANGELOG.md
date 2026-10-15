@@ -1083,6 +1083,18 @@
 
 ### Changed
 
+- **The std modules' exercises run in shards beside the foundation, on
+  Linux, Windows and darwin.** One after another inside the std job they
+  outgrew its hour: 39 of 91 had run at sixty minutes, std/http's proofs
+  alone taking thirteen, and the Windows and darwin jobs were cut at their
+  ninety and hundred and twenty the same way. `bench/std_siblings.sh K N`
+  runs every N-th exercise from the K-th, interleaved so the slow ones
+  spread out; `bench/std_exercise.sh` runs it whole after its own
+  sections unless `STD_SIBLINGS=0`, which is how the three jobs run the
+  foundation while `std-siblings` (three shards), `windows-std-siblings`
+  and `darwin-std-siblings` (four each) run the rest side by side. The
+  release job waits on all of them.
+
 - **Some answers change.** `Hash#==` compares pairs in any order and
   `Hash#hash` follows the contents, where both were the object's
   identity, so `{"a" => 1} == {"a" => 1}` is true and an equal table finds

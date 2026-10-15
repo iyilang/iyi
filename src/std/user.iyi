@@ -168,7 +168,8 @@ pub struct User
   # The account called *name*, or nil when there is none.
   def self.find_by_name(name : String) : User?
     {% if flag?(:win32) %}
-      raise "User.find_by_name is not answered on Windows: the account database is netapi32's, which an iyi program does not link"
+      raise "User.find_by_name is not answered on Windows: the account database is netapi32's, which an iyi program does not link" if name.bytesize >= 0
+      nil.as(User?)
     {% else %}
       # No account name holds a NUL, and darwin would read the bytes in
       # front of one as the name asked for.
@@ -194,7 +195,8 @@ pub struct User
   # it is: `"0"` and `"00"` are both root.
   def self.find_by_id(id : String) : User?
     {% if flag?(:win32) %}
-      raise "User.find_by_id is not answered on Windows: the account database is netapi32's, which an iyi program does not link"
+      raise "User.find_by_id is not answered on Windows: the account database is netapi32's, which an iyi program does not link" if id.bytesize >= 0
+      nil.as(User?)
     {% else %}
       number = UserFiles.decimal(id)
       return nil if number.nil?
@@ -232,7 +234,8 @@ pub struct User
   # every other the system lists it in, each once.
   def group_ids : Array(String)
     {% if flag?(:win32) %}
-      raise "User#group_ids is not answered on Windows: the account database is netapi32's, which an iyi program does not link"
+      raise "User#group_ids is not answered on Windows: the account database is netapi32's, which an iyi program does not link" if name.bytesize >= 0
+      [] of String
     {% elsif flag?(:linux) %}
       group_ids(Group.parse(UserFiles.read(UserFiles::GROUP) || ""))
     {% else %}
@@ -293,7 +296,8 @@ pub struct Group
   # The group called *name*, or nil when there is none.
   def self.find_by_name(name : String) : Group?
     {% if flag?(:win32) %}
-      raise "Group.find_by_name is not answered on Windows: the account database is netapi32's, which an iyi program does not link"
+      raise "Group.find_by_name is not answered on Windows: the account database is netapi32's, which an iyi program does not link" if name.bytesize >= 0
+      nil.as(Group?)
     {% else %}
       return nil if name.empty? || name.includes?("\0")
       {% if flag?(:linux) %}
@@ -316,7 +320,8 @@ pub struct Group
   # group id; compared as a number, as `User.find_by_id` compares.
   def self.find_by_id(id : String) : Group?
     {% if flag?(:win32) %}
-      raise "Group.find_by_id is not answered on Windows: the account database is netapi32's, which an iyi program does not link"
+      raise "Group.find_by_id is not answered on Windows: the account database is netapi32's, which an iyi program does not link" if id.bytesize >= 0
+      nil.as(Group?)
     {% else %}
       number = UserFiles.decimal(id)
       return nil if number.nil?
@@ -371,6 +376,14 @@ end
 # What `User` and `Group` share: reading the files on Linux, the number
 # rule for an id, and the platform calls.
 struct UserFiles
+  # The lookups that panic on Windows panic under a condition that always
+  # holds, then answer a value of their declared type, so each keeps on
+  # Windows the type it has elsewhere. A method's machine code is named by
+  # the type its body has: a body that is only a panic is NoReturn, and a
+  # build from std/user's artifact, which names the call by the declared
+  # type, looked for code the artifact's own build had named otherwise
+  # (`User#group_ids` on Windows; SPEC.md IV.1g).
+
   PASSWD = "/etc/passwd"
   GROUP  = "/etc/group"
 
@@ -539,14 +552,20 @@ struct UserFiles
     # it needs when the array is too small, which is grown and asked again.
     def self.darwin_group_ids(name : String, base : UInt32) : Array(String)
       ids = [] of String
+      # darwin's getgrouplist takes the gid as an `int`: the same 32 bits
+      # read signed, so `nobody`'s 4294967294 goes as -2. `to_i32` checked
+      # the value and panicked on it.
+      bits = base
+      signed = pointerof(bits).as(Int32*).value
       room = 64
       while room <= 65536
         groups = Pointer(Int32).malloc(room.to_u64)
         count = room
-        if LibC.getgrouplist(name.to_unsafe, base.to_i32, groups, pointerof(count)) >= 0
+        if LibC.getgrouplist(name.to_unsafe, signed, groups, pointerof(count)) >= 0
           index = 0
           while index < count
-            ids << groups[index].to_u32.to_s
+            id = groups[index]
+            ids << pointerof(id).as(UInt32*).value.to_s
             index = index + 1
           end
           return ids

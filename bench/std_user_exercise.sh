@@ -124,8 +124,11 @@ def rows(path, least):
 def user(p):
     return [p.pw_name, str(p.pw_uid), str(p.pw_gid), p.pw_gecos.split(",")[0], p.pw_dir, p.pw_shell]
 
+# darwin's getgrouplist takes the gid as a C int, and `nobody`'s 4294967294
+# overflowed it: passed as its signed self, every answer read back unsigned.
 def groups(p):
-    return ",".join(str(g) for g in os.getgrouplist(p.pw_name, p.pw_gid))
+    gid = p.pw_gid - (1 << 32) if p.pw_gid >= 1 << 31 else p.pw_gid
+    return ",".join(str(g & 0xFFFFFFFF) for g in os.getgrouplist(p.pw_name, gid))
 
 def group(g):
     return [g.gr_name, str(g.gr_gid), ",".join(g.gr_mem)]
@@ -182,8 +185,15 @@ build_and_run "plain" user-plain
 
 echo
 echo "== every user section reported"
-for phrase in "== the current user" "== root" "== missing names and ids are nil" \
-  "== the fixture, as the parsers read it" "== another program agrees"; do
+# Windows answers the current user and nothing else by name or number
+# (std/user's header), so the exercise asks those three only elsewhere.
+if [ "$PSEP" = ';' ]; then
+  sections=("== the fixture, as the parsers read it" "== another program agrees")
+else
+  sections=("== the current user" "== root" "== missing names and ids are nil"
+    "== the fixture, as the parsers read it" "== another program agrees")
+fi
+for phrase in "${sections[@]}"; do
   if ! grep -q "$phrase" "$WORK/user-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1

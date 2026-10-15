@@ -83,4 +83,28 @@ describe "Codegen: iyi case equality" do
         IYI
     end
   end
+
+  # `Object#==` answered false for any class, itself included.
+  it "compares classes by the type they are" do
+    with_tempdir("iyi-class-equality") do
+      run_iyi("classes", <<-'IYI').should eq("true\ntrue\nfalse\nfalse\ntrue\nfalse\n")
+        abstract class Base
+        end
+
+        class Sub < Base
+        end
+
+        class Other < Base
+        end
+
+        klass = Sub.as(Base.class)
+        puts klass == Sub
+        puts Sub == Sub
+        puts klass == Other
+        puts klass == Base
+        puts Array(Int32) == Array(Int32)
+        puts Int32 == String
+        IYI
+    end
+  end
 end

@@ -35,6 +35,10 @@
   a call to a method named `raw!`. The expansion is read as iyi when the
   artifact was built from iyi. Held by `spec/compiler/iyimod_spec.cr`
   (#127).
+- **Two classes compare equal when they are the same type.** `Class` had
+  no `==`, so `Object#==` answered false for `Sub == Sub` and for
+  `Sub.as(Base.class) == Sub`. Held by
+  `spec/compiler/codegen/iyi_case_equality_spec.cr` (#128).
 
 ## 0.17.0 — 2026-10-14
 

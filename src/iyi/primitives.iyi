@@ -79,6 +79,12 @@ class Class
   def crystal_instance_type_id : Int32
   end
 
+  # The same type, whatever static type the class value has: `Sub ==
+  # Sub.as(Base.class)` is true. A class value is its metaclass's id.
+  def ==(other : Class) : Bool
+    crystal_type_id == other.crystal_type_id
+  end
+
   # `Int32 === 1`, and `Int32 | String` as a value: a `when` asks these of
   # the types in a tuple of types and of a union it is written with.
   def ===(other) : Bool

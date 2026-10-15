@@ -11,10 +11,10 @@
 
 module bench/std_process_exercise
 
-import std/process::{Process, ProcessResult, ProcessError}
+import std/process::{Process, ProcessResult, ProcessError, ProcessStatus, ChildProcess, Redirect, ChildInputClosed}
 import std/env::{ENV}
 import std/dir::{Dir}
-{% if flag?(:linux) %}
+{% unless flag?(:win32) %}
   import std/signal::{Signal}
 {% end %}
 
@@ -83,6 +83,66 @@ end
 args = Program.args
 if mode = args[0]?
   case mode
+  when "lines"
+    # Answers each line as it comes, so its parent can talk to it while it
+    # runs, and says when its input has ended.
+    while line = stdin.gets(chomp: true)
+      stdout.write("got: #{line}\n")
+      stdout.flush
+    end
+    stdout.write("input ended\n")
+  when "pid"
+    stdout.write("#{Process.pid}\n")
+  when "trap"
+    {% unless flag?(:win32) %}
+      stdout.write("ready\n")
+      stdout.flush
+      Signal.wait(Signal::TERM)
+      stdout.write("asked to stop\n")
+      stdout.flush
+      __iyi_exit(3)
+    {% end %}
+  when "spawninherit"
+    # Writes, starts itself sharing this stream, writes again: the three
+    # land in order, because a spawn that shares a stream flushes it first.
+    stdout.write("before\n")
+    grandchild = started_child(Process.spawn(Process.executable || "", ["argv", "inherited"]), "spawninherit")
+    grandchild.wait
+    stdout.write("after\n")
+  when "exec"
+    # Writes, then becomes this program again in another directory, as
+    # `argv replaced`: the write lands first, and nothing after the call.
+    stdout.write("before the exec\n")
+    refused = Process.exec(Process.executable || "", ["argv", "replaced"], chdir: args[1])
+    fail("exec answered: #{refused.message}")
+  when "execexit"
+    Process.exec(Process.executable || "", ["exit", "5"])
+    fail("exec into exit 5 answered")
+  when "execenv"
+    Process.exec(Process.executable || "", ["env", "IYI_EXEC_VALUE"], env: {"IYI_EXEC_VALUE" => "carried"})
+    fail("exec with env: answered")
+  when "execpid"
+    stdout.write("#{Process.pid}\n")
+    Process.exec(Process.executable || "", ["pid"])
+    fail("exec into pid answered")
+  when "execmissing"
+    refused = Process.exec("no-such-program-iyi-exec")
+    stdout.write("#{refused.message}\n")
+    stdout.write("still here\n")
+  when "execnoexec"
+    # A program that is found and that the system cannot run, asked for in
+    # another directory: the exec answers, and this program is where it was.
+    before = Dir.current
+    refused = Process.exec(args[1], chdir: "/")
+    stdout.write("#{refused.reason}\n")
+    stdout.write(Dir.current == before ? "in the same directory\n" : "moved to #{Dir.current}\n")
+  when "execfds"
+    # An open file of this program's, then the exec: the program it
+    # becomes counts what it holds besides its three streams.
+    held = File.open(args[1], "w")
+    Process.exec(Process.executable || "", ["fds"])
+    held.close
+    fail("exec into fds answered")
   when "argv"
     index = 1
     while index < args.size
@@ -163,6 +223,43 @@ def ran(answer : ProcessResult | ProcessError | Cancelled, what : String) : Proc
     fail("#{what}: #{answer.message}")
   else
     fail("#{what}: answered Cancelled")
+  end
+end
+
+def started_child(answer : ChildProcess | ProcessError, what : String) : ChildProcess
+  case answer
+  when ChildProcess
+    answer
+  else
+    fail("#{what}: #{answer.message}")
+  end
+end
+
+def waited(answer : ProcessStatus | Cancelled, what : String) : ProcessStatus
+  case answer
+  when ProcessStatus
+    answer
+  else
+    fail("#{what}: wait answered Cancelled")
+  end
+end
+
+def text_of(answer : String | Cancelled, what : String) : String
+  case answer
+  when String
+    answer
+  else
+    fail("#{what}: the read answered Cancelled")
+  end
+end
+
+# Asks `ended?` for up to five seconds: a child just ended is collected by
+# the next ask, without a wait.
+def noticed_end(child : ChildProcess, what : String) : Nil
+  started = __iyi_monotonic_ns
+  until child.ended?
+    fail("ended? never said #{what} had ended") if elapsed_ms(started) > 5000_i64
+    sleep(5)
   end
 end
 
@@ -537,6 +634,170 @@ group do |g|
       puts "  #{spawned} children started under a stream of TERMs, and none reached this program"
     {% end %}
   {% end %}
+
+  puts "== a spawned child, talked to line by line while it runs"
+  talker = started_child(Process.spawn(me, ["lines"], input: Redirect::Pipe, output: Redirect::Pipe), "lines")
+  fail("a spawned child's pid is #{talker.pid}") unless talker.pid > 0_i64 && talker.pid != Process.pid
+  ["first", "second, with spaces", "ünïcode-日本"].each do |text|
+    written = talker.stdin.write("#{text}\n")
+    fail("writing #{text} to a running child was refused") unless written.nil?
+    heard_line = talker.stdout.read_line
+    fail("the child answered #{heard_line.inspect} to #{text}") unless heard_line == "got: #{text}"
+  end
+  # Asked once it has answered, while it waits for more.
+  fail("a child that waits for its input has ended") if talker.ended?
+  fail("a child that waits for its input has a status") unless talker.status.nil?
+  talker.stdin.close
+  rest = text_of(talker.stdout.read_all, "lines")
+  fail("after its input closed the child said #{rest.inspect}") unless rest == "input ended\n"
+  talked = waited(talker.wait, "lines")
+  fail("the talker ended #{talked.exit_code}") unless talked.success?
+  fail("an ended child says it runs") unless talker.ended? && talker.status
+  fail("its stdout read past its end") unless talker.stdout.read_line.nil?
+  puts "  three lines answered one at a time while the child ran, then its input closed and it ended 0"
+
+  puts "== a spawned child's pid is its own"
+  teller = started_child(Process.spawn(me, ["pid"], output: Redirect::Pipe), "pid")
+  told = text_of(teller.stdout.read_all, "pid")
+  waited(teller.wait, "pid")
+  fail("the child said its pid is #{told.inspect}, and the handle says #{teller.pid}") unless told == "#{teller.pid}\n"
+  puts "  the child's Process.pid is the handle's pid"
+
+  puts "== a spawned child's input is closed by a wait"
+  # `cat` reads to the end of its input: a wait that left the pipe open
+  # would wait for a child that waits for this program.
+  catter = started_child(Process.spawn(me, ["cat"], input: Redirect::Pipe, output: Redirect::Null, error: Redirect::Null), "cat")
+  catter.stdin.write("for the cat\n")
+  fail("a cat whose input the wait closed did not end 0") unless waited(catter.wait, "cat").success?
+  closed_after = catter.stdin.write("more")
+  fail("a write after the wait was not refused") unless closed_after.is_a?(ChildInputClosed)
+  fail("the refusal said #{closed_after.message}") unless closed_after.message == "process #{catter.pid} closed its input"
+  puts "  the wait closed the child's input and the child ended; a write after it was refused, ChildInputClosed"
+
+  puts "== both streams of a spawned child, read at once"
+  flooder = started_child(Process.spawn(me, ["flood", "1048576"], output: Redirect::Pipe, error: Redirect::Pipe), "flood")
+  out_bytes = 0
+  err_bytes = 0
+  group do |f|
+    f.spawn do
+      got = flooder.stderr.read_all
+      err_bytes = got.bytesize if got.is_a?(String)
+      0
+    end
+    got = flooder.stdout.read_all
+    out_bytes = got.bytesize if got.is_a?(String)
+  end
+  fail("the flood ended badly") unless waited(flooder.wait, "flood").success?
+  fail("read #{out_bytes} of stdout and #{err_bytes} of stderr") unless out_bytes == 1048576 && err_bytes == 1048576
+  puts "  #{out_bytes} bytes of stdout and #{err_bytes} of stderr, read on two tasks while the child wrote both"
+
+  puts "== the null device, both ways"
+  nulled = started_child(Process.spawn(me, ["stdin"], input: Redirect::Null, output: Redirect::Pipe), "stdin")
+  nothing_read = text_of(nulled.stdout.read_all, "stdin")
+  waited(nulled.wait, "stdin")
+  fail("a child given the null device as input read #{nothing_read.inspect}") unless nothing_read == "stdin had 0 bytes\n"
+  quiet = started_child(Process.spawn(me, ["flood", "262144"], output: Redirect::Null, error: Redirect::Null), "flood")
+  fail("a child writing to the null device did not end 0") unless waited(quiet.wait, "flood").success?
+  puts "  read nothing from it, and wrote 256 KiB of each stream into it"
+
+  puts "== an inherited stream is this program's own"
+  relayed = ran(Process.run(me, ["spawninherit"]), "spawninherit")
+  fail("the shared stream read #{relayed.stdout.inspect}") unless relayed.stdout == "before\n[inherited]\nafter\n"
+  puts "  a grandchild wrote into its parent's own stdout, in order"
+
+  puts "== a write to a child that closed its input"
+  deaf = started_child(Process.spawn(me, ["deaf"], input: Redirect::Pipe, output: Redirect::Pipe), "deaf")
+  fail("the deaf child did not say it was not reading") unless deaf.stdout.read_line == "not reading"
+  noticed_end(deaf, "the deaf child")
+  refused_write = deaf.stdin.write("x" * 1048576)
+  fail("a write to a child that had ended was not refused") unless refused_write.is_a?(ChildInputClosed)
+  waited(deaf.wait, "deaf")
+  puts "  refused, ChildInputClosed: the child had ended, and this program carried on"
+
+  puts "== a spawned child ended from here"
+  sleeper = started_child(Process.spawn(me, ["sleep", "30000"], output: Redirect::Null), "sleep")
+  fail("a sleeping child has ended") if sleeper.ended?
+  sleeper.kill
+  noticed_end(sleeper, "the killed child")
+  killed_end = waited(sleeper.wait, "sleep")
+  sleeper.kill
+  {% if flag?(:win32) %}
+    fail("killed: exit #{killed_end.exit_code}") unless killed_end.exit_code == 1 && killed_end.signal == 0
+    puts "  killed: exit code 1, ended? said so without a wait, and a second kill did nothing"
+  {% else %}
+    fail("killed: signal #{killed_end.signal}, exit #{killed_end.exit_code}") unless killed_end.signal == 9 && killed_end.exit_code == 137
+    puts "  killed: signal 9, exit code 137, ended? said so without a wait, and a second kill did nothing"
+
+    asleep = started_child(Process.spawn(me, ["sleep", "30000"], output: Redirect::Null), "sleep")
+    asleep.terminate
+    terminated = waited(asleep.wait, "sleep")
+    fail("terminated: signal #{terminated.signal}, exit #{terminated.exit_code}") unless terminated.signal == 15 && terminated.exit_code == 143
+    puts "  terminated: signal 15, exit code 143"
+
+    trapper = started_child(Process.spawn(me, ["trap"], output: Redirect::Pipe), "trap")
+    fail("the trapping child did not say it was ready") unless trapper.stdout.read_line == "ready"
+    trapper.signal(15)
+    fail("the trapping child did not hear its TERM") unless trapper.stdout.read_line == "asked to stop"
+    trapped = waited(trapper.wait, "trap")
+    fail("the trapping child ended #{trapped.exit_code}, signal #{trapped.signal}") unless trapped.exit_code == 3 && trapped.signal == 0
+    puts "  a TERM a child waits for is its to answer: it said so and ended 3"
+  {% end %}
+
+  puts "== a cancelled read ends its child"
+  stuck = started_child(Process.spawn(me, ["sleep", "30000"], output: Redirect::Pipe), "sleep")
+  read_cancelled = false
+  group do |c|
+    c.spawn do
+      read_cancelled = stuck.stdout.read_all.is_a?(Cancelled)
+      0
+    end
+    sleep(200)
+    c.cancel_children
+  end
+  fail("the cancelled read did not answer Cancelled") unless read_cancelled
+  stuck_end = stuck.status
+  fail("the cancelled read's child was left running") unless stuck_end
+  {% unless flag?(:win32) %}
+    fail("the cancelled read's child ended with signal #{stuck_end.signal}") unless stuck_end.signal == 9
+  {% end %}
+  puts "  the read answered Cancelled, with the child it read from ended and collected"
+
+  puts "== a program replaced by another"
+  replaced = ran(Process.run(me, ["exec", directory_of(me)]), "exec")
+  fail("the exec printed #{replaced.stdout.inspect}") unless replaced.stdout == "before the exec\n[replaced]\n" && replaced.success?
+  passed_on = ran(Process.run(me, ["execexit"]), "execexit")
+  fail("a program exec'd into exit 5 ended #{passed_on.exit_code}") unless passed_on.exit_code == 5 && passed_on.stdout == "exiting\n"
+  carried = ran(Process.run(me, ["execenv"]), "execenv")
+  fail("exec's env: arrived as #{carried.stdout.inspect}") unless carried.stdout == "carried\n"
+  stayed = ran(Process.run(me, ["execmissing"]), "execmissing")
+  unless stayed.stdout == "cannot run no-such-program-iyi-exec: no such program\nstill here\n"
+    fail("an exec that could not start a program answered #{stayed.stdout.inspect}")
+  end
+  {% unless flag?(:win32) %}
+    kept = ran(Process.run(me, ["execpid"]), "execpid")
+    pids = kept.stdout.split('\n')
+    fail("the pid before and after the exec: #{kept.stdout.inspect}") unless pids.size >= 2 && pids[0] == pids[1] && !pids[0].empty?
+    puts "  the program it became kept its pid"
+  {% end %}
+  {% if flag?(:linux) %}
+    exec_held_path = "#{directory_of(me)}/iyi-process-exec-held.txt"
+    exec_held = ran(Process.run(me, ["execfds", exec_held_path]), "execfds")
+    File.delete(exec_held_path) if File.exists?(exec_held_path)
+    fail("after an exec the program held #{exec_held.stdout.chomp('\n')} of the old one's descriptors") unless exec_held.stdout == "0\n"
+    puts "  and held none of the old program's descriptors, an open file and the poller's included"
+  {% end %}
+  {% unless flag?(:win32) %}
+    garbage = "#{directory_of(me)}/iyi-process-not-a-program"
+    File.write(garbage, "not a program, and no #! line\n")
+    ran(Process.run("/bin/chmod", ["755", garbage]), "chmod")
+    unrunnable = ran(Process.run(me, ["execnoexec", garbage]), "execnoexec")
+    File.delete(garbage)
+    unless unrunnable.stdout == "not a format this system can run\nin the same directory\n"
+      fail("an exec the system could not run answered #{unrunnable.stdout.inspect}")
+    end
+    puts "  an exec the system could not run, asked for in another directory, left this program where it was"
+  {% end %}
+  puts "  its output landed after this program's, its exit code and env: carried, and a refusal left it running"
 
   done = true
   g.cancel_children

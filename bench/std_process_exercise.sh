@@ -126,7 +126,17 @@ for phrase in "arguments came back as they went" \
               "none read, and this program carries on" \
               "written straight to the terminal" \
               "a sibling ticked all its ticks while the child slept" \
-              "answered Cancelled, with its child ended"; do
+              "answered Cancelled, with its child ended" \
+              "three lines answered one at a time while the child ran" \
+              "the child's Process.pid is the handle's pid" \
+              "the wait closed the child's input and the child ended" \
+              "read on two tasks while the child wrote both" \
+              "read nothing from it, and wrote 256 KiB of each stream into it" \
+              "a grandchild wrote into its parent's own stdout, in order" \
+              "refused, ChildInputClosed: the child had ended" \
+              "ended? said so without a wait, and a second kill did nothing" \
+              "the read answered Cancelled, with the child it read from ended and collected" \
+              "its exit code and env: carried, and a refusal left it running"; do
   if ! grep -q "$phrase" "$WORK/process-plain.out" 2>/dev/null; then
     echo "  missing: $phrase"
     status=1
@@ -137,11 +147,16 @@ if [ "$PLATFORM" = windows ]; then
   grep -q "a working directory Windows will not take" "$WORK/process-plain.out" || { echo "  missing: the long working directory"; status=1; }
 else
   grep -q "signal 9, exit code 137" "$WORK/process-plain.out" || { echo "  missing: the signalled child"; status=1; }
+  grep -q "terminated: signal 15, exit code 143" "$WORK/process-plain.out" || { echo "  missing: the terminated child"; status=1; }
+  grep -q "a TERM a child waits for is its to answer" "$WORK/process-plain.out" || { echo "  missing: the trapping child"; status=1; }
+  grep -q "the program it became kept its pid" "$WORK/process-plain.out" || { echo "  missing: exec's pid"; status=1; }
+  grep -q "left this program where it was" "$WORK/process-plain.out" || { echo "  missing: a failed exec's directory"; status=1; }
   grep -q "a name held twice is removed whole for the child" "$WORK/process-plain.out" || { echo "  missing: a name held twice, removed for the child"; status=1; }
   if [ "$PLATFORM" = linux ]; then
     for phrase in "none of this program's descriptors" \
                   "refused with EMFILE" \
-                  "children started under a stream of TERMs"; do
+                  "children started under a stream of TERMs" \
+                  "held none of the old program's descriptors"; do
       grep -q "$phrase" "$WORK/process-plain.out" || { echo "  missing: $phrase"; status=1; }
     done
   fi
@@ -166,6 +181,50 @@ else
   status=1
 fi
 
+echo "== what a spawned child's handle refuses, and the sentence it says"
+cat >"$WORK/refuse.iyi" <<'IYI'
+module refuse
+
+import std/process::{Process, Redirect}
+
+exit 0 if Program.args[0]? == "child"
+me = Process.executable || ""
+case Program.args[0]?
+when "unpiped"
+  child = Process.spawn(me, ["child"]).or_panic
+  child.wait
+  child.stdout.read_line
+when "closed"
+  child = Process.spawn(me, ["child"], input: Redirect::Pipe).or_panic
+  child.wait
+  child.stdin.write("late").or_panic
+when "missing"
+  Process.spawn("no-such-program-iyi-spawn").or_panic
+end
+IYI
+if ! "$IYI" build -o "$WORK/refuse" "$WORK/refuse.iyi" >"$WORK/refuse.log" 2>&1; then
+  echo "  the refusal program did not build"
+  tail -5 "$WORK/refuse.log" | sed 's/^/    /'
+  status=1
+else
+  for case_and_sentence in "unpiped|ChildProcess#stdout: process [0-9]*'s output was not asked for as Redirect::Pipe" \
+                           "closed|panic: process [0-9]* closed its input" \
+                           "missing|cannot run no-such-program-iyi-spawn: no such program"; do
+    which="${case_and_sentence%%|*}"
+    sentence="${case_and_sentence#*|}"
+    "$WORK/refuse" "$which" >"$WORK/refuse-$which.out" 2>&1
+    code=$?
+    if [ "$code" -ne 1 ] || ! grep -q "$sentence" "$WORK/refuse-$which.out"; then
+      echo "  $which: exit $code, and not \"$sentence\":"
+      sed -n '1,3p' "$WORK/refuse-$which.out" | sed 's/^/    /'
+      status=1
+    else
+      echo "  $which: $(grep -m1 -o "$sentence" "$WORK/refuse-$which.out")"
+    fi
+  done
+fi
+
+echo
 echo
 echo "== proving the checks can fail when the module is broken"
 # patched <name> <old> <new> [<old> <new>...]: a copy of std with the pairs
@@ -275,7 +334,42 @@ else
   esac
 
   prove unenvironed "env: ignored" "with env: the child read" \
-    "    environment = ProcessChild.environment(env)" "    environment = nil.as(Array(String)?)"
+    "    environment = environment(who, env)" "    environment = nil.as(Array(String)?)"
+
+  # The handle's own: a spawn whose pipes are never made, a wait that
+  # leaves the child's input open under a child reading to its end, a
+  # cancelled read that leaves its child running.
+  prove unpiped "Redirect::Pipe taken for Inherit" "to a running child was refused" \
+    "    when Redirect::Pipe then PIPE" "    when Redirect::Pipe then INHERIT"
+  prove openwait "a wait that leaves the input open" "did not finish within" \
+    "    @child.close_input
+    @child.await_end" "    @child.await_end"
+  prove keptchild "a cancelled read that leaves its child running" "the cancelled read's child" \
+    "    kill
+    reap unless @ended" "    reap unless @ended"
+  case "$PLATFORM" in
+    linux)
+      prove unpolled "ended? that never collects an end" "ended? never said" \
+        "        return false unless answered == @pid.to_i64" "        return false"
+      ;;
+    darwin)
+      prove unpolled "ended? that never collects an end" "ended? never said" \
+        "        return false unless LibC.waitpid(@pid, pointerof(status), 1) == @pid" "        return false"
+      ;;
+  esac
+  if [ "$PLATFORM" != windows ]; then
+    prove killterm "terminate sending KILL" "terminated: signal 9" \
+      "      @child.send_signal(15)" "      @child.send_signal(9)"
+  fi
+  case "$PLATFORM" in
+    linux)
+      prove execheld "an exec that keeps every descriptor" "after an exec the program held" \
+        "        __iyi_conc_syscall3(SYS_CLOSE_RANGE, 3_i64, 0xFFFFFFFF_i64, 4_i64)
+        failed = __iyi_conc_syscall3(SYS_EXECVE" "        failed = __iyi_conc_syscall3(SYS_EXECVE"
+      prove execstayed "an exec that does not go back to its directory" "an exec the system could not run answered" \
+        "        __iyi_conc_syscall3(SYS_CHDIR, ProcessChild.c_text(back).address.to_i64, 0_i64, 0_i64) if chdir" ""
+      ;;
+  esac
   if [ "$PLATFORM" != windows ]; then
     # A removal that takes the first entry of a name and leaves the second,
     # which the child then reads.
@@ -286,7 +380,7 @@ else
 
   prove unkilled "the kill taken out" "the cancelled run took" \
     "        child.kill
-" ""
+        g.cancel_children" "        g.cancel_children"
 
   # SIGPIPE's default is the end of the program, which is the proof: the
   # run ends with 128 + 13 and says nothing after the deaf child. Started

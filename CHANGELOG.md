@@ -4,6 +4,41 @@
 
 ### Added
 
+- **std/process starts a program this one talks to while it runs, and
+  replaces this program with another.** `Process.run` was the one call:
+  it waited for the end and handed back two texts, so a program could not
+  feed a child line by line, read it as it wrote, ask whether it had
+  ended, or stop it.
+  - `Process.spawn` answers a `ChildProcess` at once. Each stream is a
+    `Redirect`: `Pipe`, `Inherit` (the default, flushed first) or `Null`.
+    `stdin.write` and `close`, `stdout`/`stderr` with `read`, `read_line`
+    and `read_all`, all parked on the poller. `pid`; `wait`, which closes
+    the input first, for a `ProcessStatus`; `ended?` and `status` without
+    waiting; `terminate`, `kill` and `signal`. Windows has no signals:
+    there `terminate` and `kill` end the child's job.
+  - A cancelled task's call ends the child before it answers `Cancelled`,
+    as `run` does. A write to a child that closed its input is
+    `ChildInputClosed`.
+  - `Process.exec` replaces this program, keeping its pid and its three
+    streams and no other descriptor: `execve` on Linux, `posix_spawn`
+    with POSIX_SPAWN_SETEXEC on darwin. It answers only with a
+    `ProcessError`, in the directory it was in. Windows cannot replace a
+    program, so there it runs one and ends with its exit code.
+  - `Process.pid` is this program's id.
+
+  `run` is built on the same start, which now takes three stream modes.
+  darwin's floor gains `getpid` and `posix_spawn_file_actions_addinherit_np`.
+  Held by `bench/std_process_exercise.sh`:
+  - three lines answered one at a time while the child ran;
+  - 1 MiB of each stream read on two tasks;
+  - the null device both ways, and an inherited stream landing in order;
+  - kill, terminate and a TERM a child answers itself;
+  - a cancelled read that ends its child;
+  - exec's output, exit code, `env:`, pid and descriptors, and a failed
+    exec that leaves the directory alone;
+  - the refusal sentences through `.or_panic`;
+  - nine new broken copies, each caught at its check.
+
 - **A panic on Linux names its callers, file, line and column, in a
   program that imports std/debug.** darwin and Windows did; Linux printed
   the message and the raise's own line, because the prelude had no stack

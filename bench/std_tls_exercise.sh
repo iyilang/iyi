@@ -138,15 +138,31 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) windows=yes ;;
   *) windows=no ;;
 esac
-if [ "$windows" = yes ] || ! command -v openssl >/dev/null 2>&1 || [ -z "$PY" ]; then
+# OpenSSL itself: macOS's `openssl` is LibreSSL, whose `req -x509` adds its
+# configuration's own `v3_ca` to the extensions asked for - a CA with two
+# basicConstraints, which x509 rightly refuses - so Homebrew's OpenSSL 3
+# is asked where it is installed. And every certificate is made from a
+# configuration written here, so its extensions are the ones below and
+# no library's defaults.
+OPENSSL=openssl
+for candidate in /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
+  if [ -x "$candidate" ]; then
+    OPENSSL="$candidate"
+    break
+  fi
+done
+if [ "$windows" = yes ] || ! command -v "$OPENSSL" >/dev/null 2>&1 || [ -z "$PY" ]; then
   echo "  no openssl and python here (or Windows, whose s_server this gate does not drive), so OpenSSL goes unasked"
 else
+  echo "  $("$OPENSSL" version)"
   PKI="$WORK/pki"
   mkdir -p "$PKI"
   (
     cd "$PKI" || exit 1
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout ca.key -out ca.pem -days 30 \
-      -subj /CN=Interop-Root -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign
+    printf '[ req ]\ndistinguished_name = dn\nprompt = no\n[ dn ]\nCN = Interop-Root\n[ ca ]\nbasicConstraints = critical,CA:TRUE\nkeyUsage = critical,keyCertSign\n' >ca.cnf
+    printf '[ req ]\ndistinguished_name = dn\nprompt = no\n[ dn ]\nCN = localhost\n' >leaf.cnf
+    "$OPENSSL" req -x509 -config ca.cnf -extensions ca -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout ca.key -out ca.pem -days 30
     printf 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' >leaf.ext
     for kind in p256 p384 rsa; do
       case $kind in
@@ -155,8 +171,8 @@ else
         rsa) opt="-newkey rsa:2048" ;;
       esac
       # shellcheck disable=SC2086
-      openssl req $opt -nodes -keyout $kind.key -out $kind.csr -subj /CN=localhost &&
-        openssl x509 -req -in $kind.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out $kind.pem -days 20 -extfile leaf.ext
+      "$OPENSSL" req -new -config leaf.cnf $opt -nodes -keyout $kind.key -out $kind.csr &&
+        "$OPENSSL" x509 -req -in $kind.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out $kind.pem -days 20 -extfile leaf.ext
     done
   ) >"$WORK/pki.log" 2>&1
   interop=0
@@ -165,7 +181,7 @@ else
     local label="$1" want="$2" host="$3" alpn="$4" port pid got
     shift 4
     port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-    openssl s_server -accept "127.0.0.1:$port" -www "$@" >"$WORK/s_server.log" 2>&1 </dev/null &
+    "$OPENSSL" s_server -accept "127.0.0.1:$port" -www "$@" >"$WORK/s_server.log" 2>&1 </dev/null &
     pid=$!
     for _ in $(seq 1 50); do
       "$PY" -c "import socket; socket.create_connection(('127.0.0.1', $port), 1).close()" 2>/dev/null && break

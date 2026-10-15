@@ -189,9 +189,17 @@ class Pty:
         return code
 
     def restored(self, label):
-        after = termios.tcgetattr(self.slave)
-        check(f"{label}: the termios is the one before (Python tcgetattr)", after == self.before,
-              f"before {self.before[:4]} after {after[:4]}")
+        # A terminal that cannot be read after the program is not the one it
+        # found: darwin answers ENOTTY on the slave once a program has gone
+        # and left the mode its own, and that is this check failing, said by
+        # name, where it stopped the driver before the checks after it.
+        try:
+            after = termios.tcgetattr(self.slave)
+            detail = f"before {self.before[:4]} after {after[:4]}"
+        except termios.error as error:
+            after = None
+            detail = f"the terminal could not be read after the program: {error}"
+        check(f"{label}: the termios is the one before (Python tcgetattr)", after == self.before, detail)
         after_stty = stty_g(self.slave)
         check(f"{label}: `stty -g` before and after agree", after_stty == self.before_stty,
               f"{self.before_stty} / {after_stty}")

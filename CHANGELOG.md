@@ -1253,7 +1253,19 @@
   - websocket's proof that two writers wait for each other expected the
     runtime's refusal of a second parked writer, where darwin's socket
     buffers take the second write and split the first frame instead,
-    which the 16 MiB check names.
+    which the 16 MiB check names;
+  - tls made its certificates with macOS's `openssl`, which is LibreSSL
+    and adds its configuration's `v3_ca` to `-addext`: a CA with
+    basicConstraints twice, which x509 rightly refused. Homebrew's OpenSSL
+    3 is asked where it is installed, and every certificate comes from a
+    configuration the gate writes;
+  - file_utils' proof of a tree copied into itself expected the stack to
+    run out, where darwin's 1024-byte paths run out first and the
+    exercise's own check names the break;
+  - term's driver stopped on an ENOTTY from a terminal a broken copy had
+    left behind on darwin, before the check that names it;
+  - the concurrency and runtime gates hold the runtime's darwin symbols
+    as an exact list, which now carries `fstat64`.
 
 - **A program builds from artifacts whose code reads a class variable
   through a subclassed owner, or asks a value its class.** Both go through

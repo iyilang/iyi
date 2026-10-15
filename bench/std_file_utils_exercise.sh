@@ -399,10 +399,11 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-# prove_broken <label> <phrase> <old> <new>: the exercise, built against a
-# copy of the module with <old> replaced, must fail at the check that
-# names <phrase>, under a clock: a tree copied into itself is a walk that
-# only the length of a path ends.
+# prove_broken <label> <phrase> <old> <new> [<other phrase>]: the exercise,
+# built against a copy of the module with <old> replaced, must fail at the
+# check that names <phrase> - or <other phrase>, where the platform decides
+# which of two checks a break meets first - under a clock: a tree copied
+# into itself is a walk that only the length of a path ends.
 n=0
 prove_broken() {
   if [ -z "$PY" ]; then
@@ -437,7 +438,7 @@ PY
   if [ "$code" -eq 0 ]; then
     echo "  the exercise PASSED on $1"
     status=1
-  elif grep -qF "$2" "$dir/out"; then
+  elif grep -qF "$2" "$dir/out" || { [ -n "${5:-}" ] && grep -qF "$5" "$dir/out"; }; then
     echo "  $1 is caught"
   else
     echo "  $1 failed, but not where it should have:"
@@ -476,9 +477,12 @@ prove_broken "a file copied onto itself" "cp of a file onto itself is refused" \
   '    raise "Cannot copy #{s} to #{target}: they are the same file" if File.same?(s, target)
     copy_file' '    copy_file'
 # Without the guard the copy lists each directory it has just made and
-# copies it again, deeper, until the stack runs out.
+# copies it again, deeper, until something gives: Linux's stack runs out
+# before its 4096-byte path does, and darwin's 1024-byte path runs out
+# first, so its copy is refused and the exercise's own check fails.
 prove_broken "a tree copied into itself" "stack overflow: the stack ran out" \
-  '      if landing == root || landing.starts_with?(inside)' '      if false'
+  '      if landing == root || landing.starts_with?(inside)' '      if false' \
+  "ASSERTION FAILED: cp_r refuses a tree into itself"
 if [ -n "$OTHER" ]; then
   prove_broken "a move across devices tried as a rename" "mv across devices moves a file" \
     '    if info.dev == landing.dev || info.dev == 0_i64 || landing.dev == 0_i64' '    if true'

@@ -4,6 +4,25 @@
 
 ### Added
 
+- **An open file takes a whole-file lock: `flock_exclusive`,
+  `flock_shared`, `try_flock_*` and `flock_unlock`.** Two programs that
+  shared a file - a pid file, a cache, a log rotated by one of them - had
+  no way to keep out of each other.
+  - The waiting forms wait a task at a time, retrying after 1, 2, 4 ...
+    64 ms while the thread runs its other tasks, and answer `Cancelled`
+    when their task is cancelled. The block forms unlock after the block,
+    even when it panics. `try_flock_*` answers at once.
+  - Linux and darwin lock with `flock(2)`, which only other locks heed.
+    Windows locks every byte with `LockFileEx`, which is mandatory and
+    counts each lock a handle takes; the module documents both.
+
+  Held by `bench/std_file_exercise.sh`: two opens of one file kept out of
+  each other's exclusive lock and sharing a shared one, a task waiting
+  for another's lock, a cancelled wait, a lock given back on close and by
+  a panicking block, and four broken copies - contention read as taken
+  (each platform's own error), an unlock that unlocks nothing, a wait
+  that does not wait, and a block that keeps its lock.
+
 - **OptionParser takes `-v, --verbose` pairs, a banner, help sections and
   subcommands.** Each flag had one spelling, the help always opened with
   "options:", and a command line with a verb - `tool deploy -f` - could

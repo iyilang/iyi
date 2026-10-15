@@ -13,6 +13,18 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
+# How a task fails the group that a task waiting for a lock is in.
+pub struct LockStop
+  def initialize
+  end
+end
+
+impl Error for LockStop
+  def message : String
+    "the waiting task's sibling failed"
+  end
+end
+
 import std/file::{File}
 import std/dir::{Dir}
 import std/gc::{GC}
@@ -441,6 +453,62 @@ assert_str "78", sio.read_bytes(2), "seek: pos="
 sio.close
 File.delete(fseek)
 puts "  seek and pos read a file from where they say"
+
+# Two opens of one file are two holders, in one process as in two.
+puts "\n== locks"
+flock_path = sandbox + "/std_file_ex_lock"
+File.write(flock_path, "")
+holder = File.open(flock_path, "r+")
+other = File.open(flock_path, "r+")
+holder.flock_exclusive.or_panic
+assert_true !other.try_flock_exclusive && !other.try_flock_shared, "locks: an exclusive lock keeps another open file out"
+holder.flock_unlock
+assert_true other.try_flock_shared, "locks: unlocked, another file takes it"
+assert_true holder.try_flock_shared, "locks: shared locks are held together"
+assert_true !holder.try_flock_exclusive, "locks: an exclusive lock is refused while another file shares"
+holder.flock_unlock
+other.flock_unlock
+lock_order = [] of String
+group do |g|
+  g.spawn do
+    holder.flock_exclusive.or_panic
+    lock_order << "held"
+    sleep(100)
+    lock_order << "released"
+    holder.flock_unlock
+    0
+  end
+  g.spawn do
+    sleep(10)
+    other.flock_exclusive.or_panic
+    lock_order << "taken"
+    other.flock_unlock
+    0
+  end
+end
+assert_true lock_order == ["held", "released", "taken"], "locks: a lock another task holds is waited for, #{lock_order}"
+holder.flock_exclusive.or_panic
+lock_outcome = ""
+group do |g|
+  g.spawn do
+    got = other.flock_exclusive
+    lock_outcome = got.is_a?(Cancelled) ? "cancelled" : "taken"
+    0
+  end
+  g.spawn do
+    sleep(30)
+    LockStop.new
+  end
+end
+assert_true lock_outcome == "cancelled", "locks: a wait whose task is cancelled answers Cancelled, not #{lock_outcome}"
+holder.close
+assert_true other.try_flock_exclusive, "locks: closing the file gave the lock back"
+other.flock_unlock
+assert_panics("inside the lock") { other.flock_exclusive { raise "inside the lock" } }
+File.open(flock_path, "r+") { |probe| assert_true probe.try_flock_exclusive, "locks: a block that panics unlocks" }
+other.close
+File.delete(flock_path)
+puts "  exclusive and shared locks between two opens, a wait, a cancelled wait, and a lock given back on close"
 
 puts "\n== open modes"
 fmode = sandbox + "/std_file_ex_modes.txt"

@@ -96,6 +96,7 @@ for phrase in "== write, read, and append" \
               "== metadata and permissions" \
               "== directory and file queries" \
               "== paths, links, and content comparison" \
+              "== locks" \
               "== open modes" \
               "== delete"; do
   if ! grep -q "$phrase" "$WORK/file-plain.out" 2>/dev/null; then
@@ -455,6 +456,47 @@ exercise_broken "w+ that does not truncate" wplus_keep prelude \
 exercise_broken "a+ that cannot read" aplus_noread prelude \
   '    when "a+", "a+b", "ab+" then 1 | 2 | 4 | 16' '    when "a+", "a+b", "ab+" then 2 | 4 | 16' \
   "a+ reads from the start"
+# The locks, each mechanism taken out of a copy that compiles. Contention
+# and the unlock are each platform's own call.
+case "$(uname -s)" in
+  Linux)
+    contention_old='return false if done == -11_i64'
+    contention_new='return true if done == -11_i64'
+    unlock_old='      Std::File::LibC.sys(Std::File::LibC::SYS_FLOCK, handle, 8_i64, 0_i64)'
+    ;;
+  Darwin)
+    contention_old='return false if errno == 35'
+    contention_new='return true if errno == 35'
+    unlock_old='      Std::File::LibC.flock(fd, 8)'
+    ;;
+  *)
+    contention_old='return false if error == 33 # ERROR_LOCK_VIOLATION'
+    contention_new='return true if error == 33'
+    unlock_old='      Std::File::LibKernel32.UnlockFileEx(Pointer(Void).new(handle.to_u64), 0_u32, 0xFFFFFFFF_u32, 0xFFFFFFFF_u32, overlapped.as(Void*))'
+    ;;
+esac
+exercise_broken "a lock another file holds read as taken" lock_contention std \
+  "$contention_old" "$contention_new" \
+  "locks: an exclusive lock keeps another open file out"
+exercise_broken "an unlock that unlocks nothing" lock_kept std \
+  "$unlock_old" '      nil' \
+  "locks: unlocked, another file takes it"
+exercise_broken "a wait that does not wait" lock_nowait std \
+  '      slept = ::sleep(delay)
+      return slept if slept.is_a?(Cancelled)' \
+  '      return nil' \
+  "locks: a lock another task holds is waited for"
+exercise_broken "a block that keeps its lock after a panic" lock_block std \
+  '    defer flock_unlock
+    block.call
+  end
+
+  def flock_shared(&block' \
+  '    block.call
+  end
+
+  def flock_shared(&block' \
+  "locks: a block that panics unlocks"
 if [ "$(uname -s)" = Linux ] || [ "$(uname -s)" = Darwin ]; then
   exercise_broken "a perm that is not passed" perm_dropped prelude \
     '    fd = __iyi_open_file(c_path(path), read, write, create, truncate, append, perm)' \

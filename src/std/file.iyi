@@ -54,6 +54,9 @@ import std/path::{Path}
     fun utimes(path : UInt8*, times : Void*) : Int32
     fun arc4random_buf(buffer : Void*, count : UInt64) : Void
     fun lseek(fd : Int32, offset : Int64, whence : Int32) : Int64
+    fun flock(fd : Int32, operation : Int32) : Int32
+    # Where this thread's errno is, as std/udp binds it.
+    fun __error : Int32*
   end
 {% elsif flag?(:win32) %}
   # The calls below name this `Std::File::LibKernel32` in full, the way the
@@ -133,6 +136,10 @@ import std/path::{Path}
     fun GetSystemTimeAsFileTime(time : Int64*) : Void
     fun SetFilePointerEx(handle : Void*, distance : Int64, new_pointer : Int64*, method : Int32) : Int32
     fun SetEndOfFile(handle : Void*) : Int32
+    # `IyiIO#flock_*`: a lock over every byte, its offset in the zeroed
+    # OVERLAPPED.
+    fun LockFileEx(handle : Void*, flags : UInt32, reserved : UInt32, low : UInt32, high : UInt32, overlapped : Void*) : Int32
+    fun UnlockFileEx(handle : Void*, reserved : UInt32, low : UInt32, high : UInt32, overlapped : Void*) : Int32
     # Where Windows says scratch files go, which `Dir.tempdir` asks too.
     fun GetTempPathW(buffer_count : Int32, buffer : UInt16*) : Int32
     # What a link points at, and where a path really goes. Both were
@@ -293,6 +300,7 @@ import std/path::{Path}
       SYS_UTIMENSAT  = 280_i64
       SYS_GETRANDOM  = 318_i64
       SYS_LSEEK      =   8_i64
+      SYS_FLOCK      =  73_i64
     {% else %}
       SYS_NEWFSTATAT =  79_i64
       SYS_FSTAT      =  80_i64
@@ -310,6 +318,7 @@ import std/path::{Path}
       SYS_UTIMENSAT  =  88_i64
       SYS_GETRANDOM  = 278_i64
       SYS_LSEEK      =  62_i64
+      SYS_FLOCK      =  32_i64
     {% end %}
 
     def self.stat(path : UInt8*, buf : Stat*) : Int32
@@ -2076,6 +2085,120 @@ class ::IyiIO
 
   def pos=(position : Int64) : Int64
     seek(position, Seek::Set)
+  end
+
+  # Advisory locks on the whole file, the other library's `flock_*`: a
+  # shared one many holders may have at once, an exclusive one a single
+  # holder. The holder is this open file - another `File.open` of the same
+  # path, in this process or another, is another holder - until
+  # `flock_unlock`, or until the file is closed.
+  #
+  #     File.open("app.lock", "w") do |f|
+  #       f.flock_exclusive { run_alone }.or_panic
+  #     end
+  #
+  # A lock another holder has is waited for a task at a time: tried again
+  # after 1, 2, 4 ... 64 ms, the thread's other tasks running meanwhile,
+  # and cancellable. `try_flock_*` answers at once whether it took it.
+  #
+  # Linux and darwin lock with `flock(2)`, which only other locks heed, and
+  # turn a shared lock this file holds into an exclusive one in place.
+  # Windows locks every byte with `LockFileEx`, which is mandatory - while
+  # one handle holds it exclusively, another handle's reads and writes of
+  # the file fail - and counts each lock a handle takes: unlock a shared
+  # lock before taking the exclusive one.
+  def flock_exclusive : Nil | Cancelled
+    flock_wait(true)
+  end
+
+  def flock_shared : Nil | Cancelled
+    flock_wait(false)
+  end
+
+  # The block's answer, run with the lock held and unlocked after it, even
+  # when the block panics.
+  def flock_exclusive(&block : -> R) : R | Cancelled forall R
+    waited = flock_wait(true)
+    return waited if waited.is_a?(Cancelled)
+    defer flock_unlock
+    block.call
+  end
+
+  def flock_shared(&block : -> R) : R | Cancelled forall R
+    waited = flock_wait(false)
+    return waited if waited.is_a?(Cancelled)
+    defer flock_unlock
+    block.call
+  end
+
+  def try_flock_exclusive : Bool
+    flock_try(true)
+  end
+
+  def try_flock_shared : Bool
+    flock_try(false)
+  end
+
+  # Gives the lock back; one this file does not hold is no error.
+  def flock_unlock : Nil
+    raise "cannot unlock a closed IO" if closed?
+    {% if flag?(:win32) %}
+      overlapped = Pointer(UInt64).malloc(4_u64)
+      Std::File::LibKernel32.UnlockFileEx(Pointer(Void).new(handle.to_u64), 0_u32, 0xFFFFFFFF_u32, 0xFFFFFFFF_u32, overlapped.as(Void*))
+    {% elsif flag?(:darwin) %}
+      Std::File::LibC.flock(fd, 8)
+    {% elsif flag?(:wasm32) %}
+      raise "flock is not available on wasm32-wasi"
+    {% else %}
+      Std::File::LibC.sys(Std::File::LibC::SYS_FLOCK, handle, 8_i64, 0_i64)
+    {% end %}
+    nil
+  end
+
+  private def flock_wait(exclusive : Bool) : Nil | Cancelled
+    delay = 1
+    while true
+      return nil if flock_try(exclusive)
+      slept = ::sleep(delay)
+      return slept if slept.is_a?(Cancelled)
+      delay = delay * 2 if delay < 64
+    end
+  end
+
+  # Whether the lock was taken; contention is false, any other failure a
+  # panic naming it.
+  private def flock_try(exclusive : Bool) : Bool
+    raise "cannot lock a closed IO" if closed?
+    {% if flag?(:win32) %}
+      # LOCKFILE_FAIL_IMMEDIATELY (1), and LOCKFILE_EXCLUSIVE_LOCK (2).
+      overlapped = Pointer(UInt64).malloc(4_u64)
+      flags = exclusive ? 3_u32 : 1_u32
+      return true if Std::File::LibKernel32.LockFileEx(Pointer(Void).new(handle.to_u64), flags, 0_u32, 0xFFFFFFFF_u32, 0xFFFFFFFF_u32, overlapped.as(Void*)) != 0
+      error = Std::File::LibKernel32.GetLastError
+      return false if error == 33 # ERROR_LOCK_VIOLATION
+      raise "flock: LockFileEx failed (error #{error})"
+    {% elsif flag?(:darwin) %}
+      # LOCK_SH (1) or LOCK_EX (2), with LOCK_NB (4).
+      operation = exclusive ? 6 : 5
+      while true
+        return true if Std::File::LibC.flock(fd, operation) == 0
+        errno = Std::File::LibC.__error.value
+        # EWOULDBLOCK is another holder's lock; EINTR, a signal: again.
+        return false if errno == 35
+        raise "flock failed (errno #{errno})" unless errno == 4
+      end
+    {% elsif flag?(:wasm32) %}
+      raise "flock is not available on wasm32-wasi"
+    {% else %}
+      operation = exclusive ? 6_i64 : 5_i64
+      while true
+        done = Std::File::LibC.sys(Std::File::LibC::SYS_FLOCK, handle, operation, 0_i64)
+        return true if done == 0_i64
+        # EWOULDBLOCK is another holder's lock; EINTR, a signal: again.
+        return false if done == -11_i64
+        raise "flock failed (errno #{-done})" unless done == -4_i64
+      end
+    {% end %}
   end
 
   # The kernel's move: the new offset, or a negative error. A stream with

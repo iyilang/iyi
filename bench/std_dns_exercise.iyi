@@ -16,7 +16,7 @@ import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf
 import std/socket::{IPAddress, IyiSocket, Resolver, SocketError}
 import std/udp::{UdpSocket}
 import std/slice::{Bytes}
-import std/env::{ENV}
+import std/dir::{Dir}
 
 def check(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
@@ -421,7 +421,9 @@ group do |g|
     check error_of(resolver.resolve("a b"), "a space").invalid_name?, "not a host name"
     puts "literals: ok"
 
-    dir = ENV["TMPDIR"]? || "/tmp"
+    # `Dir.tempdir`, not `/tmp`: Windows has no such directory, and the
+    # files are read back by path, so they must land where this user writes.
+    dir = Dir.tempdir
     conf_path = "#{dir}/iyi-dns-exercise-resolv.conf"
     hosts_path = "#{dir}/iyi-dns-exercise-hosts"
     File.write(conf_path, "nameserver 127.0.0.1:#{port}\nsearch test\noptions ndots:1 timeout:1 attempts:1\n")

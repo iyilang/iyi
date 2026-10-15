@@ -21,7 +21,7 @@
 #
 # Every section prints a progress line and raises on mismatch.
 
-import std/big::{BigInt, BigDecimal, BigRational}
+import std/big::{BigInt, BigDecimal, BigRational, BigFloat}
 import std/gc::{GC}
 
 # The bytes one call allocates, with the collector held back so that the
@@ -663,5 +663,88 @@ strip_ms = (__iyi_monotonic_ns - strip_started) // 1000000
 raise "decimal: zeros stripped #{strip_quotient.scale}" unless strip_hash == BigDecimal.new("1").hash && strip_quotient.to_s == "1" && strip_quotient.scale == 0
 raise "decimal: 40,000 trailing zeros took #{strip_ms} ms to strip" unless strip_ms < 500
 puts "    decimal zeros: 40,000 trailing zeros stripped under 500 ms"
+
+# Binary floats: named answers, the refusals, and random cases printed for
+# the gate to round exactly in python: arithmetic, square roots, parsing,
+# the shortest decimal, the nearest double and the integer roundings, at
+# precisions from one bit to 256.
+puts "binary floats:"
+raise "flt: the square root of two to 256 bits" unless BigFloat.new(2, 256).sqrt.to_s == "1.4142135623730950488016887242096980785696718753769480731766797379907324784621"
+raise "flt: 0.1 at 24 bits read back as a double" unless BigFloat.new("0.1", 24).to_f64 == 0.10000000149011612
+raise "flt: ties to even" unless BigFloat.new(BigInt.new(5_i64), 2).to_s == "4.0" && BigFloat.new(BigInt.new(7_i64), 2).to_s == "8.0"
+raise "flt: an addend under the last place" unless (BigFloat.new(1) + BigFloat.new("1e-50")).to_s == "1.0" && (BigFloat.new(1, 300) + BigFloat.new("1e-50", 300)).to_s == "1.00000000000000000000000000000000000000000000000001"
+raise "flt: equal at two precisions" unless BigFloat.new(1.5) == BigFloat.new(1.5, 300) && BigFloat.new(1.5).hash == BigFloat.new(1.5, 300).hash
+raise "flt: round, floor, ceil" unless BigFloat.new("2.5").round.to_s == "2.0" && BigFloat.new("-2.5").round.to_s == "-2.0" && BigFloat.new("-1.25").floor.to_s == "-2.0" && BigFloat.new("1.25").ceil.to_s == "2.0"
+raise "flt: the largest value a double holds and past it" unless BigFloat.new("1e400").to_f64 == 1.0 / 0.0 && BigFloat.new("1e-400").to_f64 == 0.0
+assert_panics("BigFloat: division by zero") { BigFloat.new(1) / BigFloat.new(0) }
+assert_panics("BigFloat: the square root of a negative number") { BigFloat.new(-4).sqrt }
+assert_panics("BigFloat: not a number: \"1.5x\"") { BigFloat.new("1.5x") }
+assert_panics("BigFloat: a precision of 0 bits; it is at least 1") { BigFloat.new(1, 0) }
+assert_panics("is not a finite number") { BigFloat.new(0.0 / 0.0) }
+
+class FloatCases
+  @state = 0x2545F4914F6CDD1D_u64
+
+  def next : UInt64
+    x = @state
+    x = x ^ x.unsafe_shr(12_u64)
+    x = x ^ x.unsafe_shl(25_u64)
+    x = x ^ x.unsafe_shr(27_u64)
+    @state = x
+    x &* 0x2545F4914F6CDD1D_u64
+  end
+
+  def below(n : Int32) : Int32
+    (self.next % n.to_u64).to_i64.to_i32
+  end
+
+  # A value of up to ten bits more than *precision*, rounded to it, times
+  # a power of two, now and then zero or negative.
+  def float(precision : Int32) : BigFloat
+    return BigFloat.new(0, precision) if below(20) == 0
+    m = BigInt.zero
+    ((precision + 72) // 63).times { m = (m << 63) + BigInt.new(self.next.unsafe_shr(1_u64).to_i64) }
+    m = m >> below(precision + 10) if m > BigInt.one
+    m = BigInt.one if m.zero?
+    # A power of two is exact at any precision, so the value keeps its own.
+    x = BigFloat.new(m, precision) * (BigFloat.new(2, precision) ** (below(600) - 300))
+    below(2) == 0 ? -x : x
+  end
+
+  def decimal : String
+    String.build do |io|
+      io << "-" if below(2) == 0
+      io << (self.next % 1000000_u64).to_s
+      io << "." << (self.next % 100000000000_u64).to_s if below(2) == 0
+      io << "e" << (below(120) - 60).to_s if below(2) == 0
+    end
+  end
+end
+
+float_cases = FloatCases.new
+precisions = [1, 2, 24, 53, 64, 100, 128, 256]
+400.times do
+  p = precisions[float_cases.below(8)]
+  a = float_cases.float(p)
+  b = float_cases.float(float_cases.below(4) == 0 ? precisions[float_cases.below(8)] : p)
+  raise "flt: a case made at #{a.precision} bits, not #{p}" unless a.precision == p
+  q = p > b.precision ? p : b.precision
+  puts "oracle flt: #{q} add #{a.to_big_r} #{b.to_big_r} = #{(a + b).to_big_r}"
+  puts "oracle flt: #{q} sub #{a.to_big_r} #{b.to_big_r} = #{(a - b).to_big_r}"
+  puts "oracle flt: #{q} mul #{a.to_big_r} #{b.to_big_r} = #{(a * b).to_big_r}"
+  puts "oracle flt: #{q} div #{a.to_big_r} #{b.to_big_r} = #{(a / b).to_big_r}" unless b.zero?
+  puts "oracle flt: #{p} sqrt #{a.abs.to_big_r} _ = #{a.abs.sqrt.to_big_r}"
+  puts "oracle flt: #{p} str #{a.to_big_r} _ = #{a}"
+  puts "oracle flt: #{p} f64 #{a.to_big_r} _ = #{a.to_f64}"
+  puts "oracle flt: #{p} round #{a.to_big_r} _ = #{a.round.to_big_r}"
+  puts "oracle flt: #{p} floor #{a.to_big_r} _ = #{a.floor.to_big_r}"
+  puts "oracle flt: #{p} ceil #{a.to_big_r} _ = #{a.ceil.to_big_r}"
+  puts "oracle flt: #{p} trunc #{a.to_big_r} _ = #{a.trunc.to_big_r}"
+  text = float_cases.decimal
+  puts "oracle flt: #{p} parse #{text} _ = #{BigFloat.new(text, p).to_big_r}"
+  power = float_cases.below(9) - 4
+  puts "oracle flt: #{p} pow #{a.to_big_r} #{power} = #{(a ** power).to_big_r}" unless a.zero? && power < 0
+end
+puts "    binary floats: named answers, the refusals, and #{400} random cases of each operation for the oracle"
 
 puts "all std/big checks passed"

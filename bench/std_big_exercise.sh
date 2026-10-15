@@ -91,7 +91,7 @@ fi
 
 echo
 echo "== every big number section reported"
-for phrase in "construction and conversions:" "predicates and comparisons:" "basic arithmetic:" "division corner cases:" "bitwise operations:" "known large values:" "round trips:" "modular exponentiation:" "algebraic identities:" "karatsuba:" "hashing:" "decimal arithmetic:" "rational arithmetic:" "base round trips:" "long print:"; do
+for phrase in "construction and conversions:" "predicates and comparisons:" "basic arithmetic:" "division corner cases:" "bitwise operations:" "known large values:" "round trips:" "modular exponentiation:" "algebraic identities:" "karatsuba:" "hashing:" "decimal arithmetic:" "rational arithmetic:" "base round trips:" "long print:" "binary floats:"; do
   if ! grep -q "$phrase" "$WORK/big-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -182,13 +182,128 @@ def rat(a, op, b):
     if op == "/": return str(A / B)
     return str({"+": A + B, "-": A - B, "*": A * B}[op])
 
-counts = {"dec": 0, "cmp": 0, "rat": 0, "base": 0}
+import math
+
+# BigFloat: a value rounded to p bits, ties to even, from its exact value.
+def round_bits(x, p):
+    if x == 0:
+        return Fraction(0)
+    sign, a = (-1 if x < 0 else 1), abs(x)
+    n, d = a.numerator, a.denominator
+    k = n.bit_length() - d.bit_length() - p
+    while True:
+        num, den = n << max(-k, 0), d << max(k, 0)
+        q, r = divmod(num, den)
+        if q.bit_length() > p:
+            k += 1
+            continue
+        if q.bit_length() < p:
+            k -= 1
+            continue
+        if 2 * r > den or (2 * r == den and q % 2):
+            q += 1
+        if q.bit_length() > p:
+            q >>= 1
+            k += 1
+        return sign * Fraction(q) * Fraction(2) ** k
+
+# The square root rounded to p bits, from integer square roots: y below is
+# the root's square in units of its last place.
+def sqrt_bits(x, p):
+    if x == 0:
+        return Fraction(0)
+    k = (x.numerator.bit_length() - x.denominator.bit_length()) // 2 - p
+    while True:
+        y = x / Fraction(4) ** k
+        q = math.isqrt(y.numerator // y.denominator)
+        if q.bit_length() > p:
+            k += 1
+            continue
+        if q.bit_length() < p:
+            k -= 1
+            continue
+        half = Fraction(2 * q + 1, 2) ** 2
+        if y > half or (y == half and q % 2):
+            q += 1
+        if q.bit_length() > p:
+            q >>= 1
+            k += 1
+        return Fraction(q) * Fraction(2) ** k
+
+# BigFloat#to_s's layout: positional for a leading digit from 10^-4 to
+# 10^14, an exponent outside.
+def place(digits, point):
+    if -4 <= point < 15:
+        if point >= 0:
+            whole = point + 1
+            if len(digits) <= whole:
+                return digits + "0" * (whole - len(digits)) + ".0"
+            return digits[:whole] + "." + digits[whole:]
+        return "0." + "0" * (-1 - point) + digits
+    return digits[0] + "." + (digits[1:] or "0") + "e" + ("-" if point < 0 else "+") + str(abs(point))
+
+# The fewest significant digits that read back at p bits, found by trying
+# one, two, three ... the nearest of each, ties to even.
+def shortest(v, p):
+    if v == 0:
+        return "0.0"
+    a = abs(v)
+    lead = len(str(a.numerator)) - len(str(a.denominator))
+    while Fraction(10) ** lead > a:
+        lead -= 1
+    while Fraction(10) ** (lead + 1) <= a:
+        lead += 1
+    n = 1
+    while True:
+        last = lead - n + 1
+        t = a / Fraction(10) ** last
+        q = t.numerator // t.denominator
+        rest = t - q
+        if rest > Fraction(1, 2) or (rest == Fraction(1, 2) and q % 2):
+            q += 1
+        if round_bits(Fraction(q) * Fraction(10) ** last, p) == a:
+            break
+        n += 1
+    digits = str(q).rstrip("0") or "0"
+    return ("-" if v < 0 else "") + place(digits, last + len(str(q)) - 1)
+
+def flt(lhs, got):
+    p, op, a, b = lhs.split(" ")
+    p = int(p)
+    if op == "parse":
+        return frac(got) == round_bits(Fraction(Decimal(a)), p), "the rounded decimal"
+    A = frac(a)
+    if op == "str":
+        want = shortest(A, p)
+        return got == want, want
+    if op == "f64":
+        return float(got) == float(A), repr(float(A))
+    if op == "sqrt":
+        want = sqrt_bits(A, p)
+    elif op in ("round", "floor", "ceil", "trunc"):
+        whole = {"round": round(A), "floor": math.floor(A), "ceil": math.ceil(A), "trunc": int(A)}[op]
+        want = round_bits(Fraction(whole), p)
+    elif op == "pow":
+        want = round_bits(A ** int(b), p)
+    else:
+        B = frac(b)
+        want = round_bits({"add": A + B, "sub": A - B, "mul": A * B, "div": A / B if B else None}[op], p)
+    return frac(got) == want, str(want)
+
+counts = {"dec": 0, "cmp": 0, "rat": 0, "base": 0, "flt": 0}
 bad = 0
 for line in sys.stdin:
     if not line.startswith("oracle "):
         continue
     kind, rest = line[7:].split(": ", 1)
     lhs, got = rest.rstrip("\n").split(" = ")
+    if kind == "flt":
+        counts[kind] += 1
+        held, want = flt(lhs, got)
+        if not held:
+            bad += 1
+            print(f"  oracle disagrees: flt {lhs[:160]}: std/big said {got[:160]}, python said {want[:160]}")
+        continue
     if kind == "base":
         base, digits = lhs.split(" ")
         want = str(int(digits, int(base)))
@@ -206,7 +321,7 @@ for line in sys.stdin:
         bad += 1
         print(f"  oracle disagrees: {kind} {lhs}: std/big said {got}, python said {want}")
 print(f"  oracle lines checked: {counts}")
-floor = {"dec": 100, "cmp": 20, "rat": 60, "base": 70}
+floor = {"dec": 100, "cmp": 20, "rat": 60, "base": 70, "flt": 4000}
 for kind, need in floor.items():
     if counts[kind] < need:
         bad += 1
@@ -233,6 +348,36 @@ elif sed 's|^oracle dec: 2 / 3 = 0.66666666666666666667$|oracle dec: 2 / 3 = 0.6
   status=1
 else
   echo "  the oracle rejects a quotient one unit off in the last place"
+fi
+# And a binary float one unit off in its last place: the first product
+# that is not zero, moved by one place of its precision.
+if [ -n "$PY" ]; then
+  if "$PY" - "$WORK/big-plain.out" >"$WORK/flt-broken.out" 2>&1 <<'PY'
+import sys
+from fractions import Fraction
+lines = open(sys.argv[1]).read().splitlines()
+for i, line in enumerate(lines):
+    if line.startswith("oracle flt: ") and " mul " in line and not line.endswith(" = 0"):
+        lhs, got = line.rsplit(" = ", 1)
+        n, _, d = got.partition("/")
+        value = Fraction(int(n), int(d or 1))
+        p = int(lhs.split(" ")[2])
+        k = abs(value).numerator.bit_length() - abs(value).denominator.bit_length() - p
+        lines[i] = lhs + " = " + str(value + Fraction(2) ** k)
+        break
+print("\n".join(lines))
+PY
+  then
+    if "$PY" "$WORK/oracle.py" <"$WORK/flt-broken.out" >"$WORK/oracle-flt-broken.out" 2>&1; then
+      echo "  the oracle accepted a product one place off, so it checks no binary float"
+      status=1
+    else
+      echo "  the oracle rejects a binary float product one place off"
+    fi
+  else
+    echo "  the broken binary float line could not be made"
+    status=1
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -440,6 +585,53 @@ prove_fails "rational to_f64 through BigDecimal" no_rat_f64 "rational: to_f64 ti
   's/^    return 0.0 if zero?$/    return to_big_d.to_f64/'
 prove_fails "rational to_f64 ties away from even" no_rat_even "rational: to_f64 subnormal ties to even" \
   's/^    q = q + half if (q \& half) != 0_i64 \&\& (q \& (3_i64 \* half - 1_i64)) != 0_i64$/    q = q + half if (q \& half) != 0_i64/'
+
+# BigFloat's rounding, each taken out of a copy that compiles: four the
+# exercise's own checks stop at, and one only the exact oracle can see,
+# which must then reject the copy's binary float lines of that operation.
+prove_fails "binary float ties rounded away from even" no_flt_even "flt: ties to even" \
+  's/q = q + BigInt.one if twice > 0 || (twice == 0 \&\& q.odd?)/q = q + BigInt.one if twice >= 0/'
+prove_fails "a binary float addend dropped too soon" no_flt_sum "flt: an addend under the last place" \
+  's/gap > precision.to_i64 + 2_i64/gap > 2_i64/'
+prove_fails "a binary float rounded to an integer away from even" no_flt_round "flt: round, floor, ceil" \
+  's/whole = whole + BigInt.one if against > 0 || (against == 0 \&\& whole.odd?)/whole = whole + BigInt.one if against >= 0/'
+oracle_fails() { # oracle_fails <label> <dir> <op> <sed script>
+  local label="$1" dir="$2" op="$3" sed_script="$4"
+  if [ -z "$PY" ]; then
+    echo "  $label: no python3 to judge the copy with, unmeasured"
+    return
+  fi
+  mkdir -p "$WORK/$dir/std"
+  sed -e "$sed_script" "$REPO/src/std/big.iyi" > "$WORK/$dir/std/big.iyi"
+  if cmp -s "$REPO/src/std/big.iyi" "$WORK/$dir/std/big.iyi"; then
+    echo "  $label: the patch changed nothing, so this proves nothing"
+    status=1
+    return
+  fi
+  if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build -o "$WORK/$dir/program" "$REPO/bench/std_big_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+    echo "  $label: the patched big library did not build"
+    sed -n '1,12p' "$WORK/$dir/build.log"
+    status=1
+    return
+  fi
+  "$WORK/$dir/program" >"$WORK/$dir/out" 2>&1
+  if "$PY" "$WORK/oracle.py" <"$WORK/$dir/out" >"$WORK/$dir/verdict" 2>&1; then
+    echo "  $label: the oracle passed the copy, so it does not test this"
+    status=1
+  elif ! grep -q "oracle disagrees: flt [0-9]* $op " "$WORK/$dir/verdict"; then
+    echo "  $label: the oracle failed the copy, but not on $op"
+    sed -n '1,3p' "$WORK/$dir/verdict"
+    status=1
+  else
+    echo "  $label: the oracle rejects $(grep -c "oracle disagrees: flt [0-9]* $op " "$WORK/$dir/verdict") $op lines"
+  fi
+}
+oracle_fails "a square root without its sticky bit" no_flt_sticky sqrt \
+  's/sticky = root \* root == square ? BigInt.zero : BigInt.one/sticky = BigInt.zero/'
+# Digits past the fewest that read back: the 256-bit root of two is
+# written longer than its known 77 digits.
+prove_fails "a decimal longer than it needs" no_flt_shortest "flt: the square root of two to 256 bits" \
+  's/^        high = middle$/        low = middle + 1/'
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -1,4 +1,4 @@
-# Arbitrary precision numbers: BigInt, BigDecimal and BigRational.
+# Arbitrary precision numbers: BigInt, BigDecimal, BigRational and BigFloat.
 #
 # Everything here is iyi all the way down: no GMP, no libc, no `lib` (SPEC.md
 # III.9, III.10). The module refuses what it cannot answer with a sentence and
@@ -31,6 +31,10 @@
 #
 # BigRational is a reduced numerator/denominator pair with a positive
 # denominator; every operation reduces, so `==` and `hash` are structural.
+#
+# BigFloat is a binary float of any precision, `±mantissa · 2^exponent`
+# with the mantissa exactly `precision` bits, each result rounded once to
+# the nearest, ties to even, from its exact value (see `BigFloat`).
 
 module std/big
 
@@ -2228,6 +2232,537 @@ impl Num for BigRational
 end
 
 impl Hashable for BigRational
+  def hash_key : Int32
+    hash
+  end
+end
+
+# A binary floating-point number of any precision: `±mantissa · 2^exponent`,
+# the mantissa exactly *precision* bits long (128 unless asked), every
+# result rounded once, to the nearest value of that many bits, ties to even
+# - the rounding IEEE 754 gives a double, at any width. The other library's
+# BigFloat is GMP's `mpf`, which truncates and keeps more bits than it was
+# asked for; this one answers what MPFR does.
+#
+#     a = BigFloat.new(2, 256)
+#     a.sqrt.to_s
+#     # => "1.4142135623730950488016887242096980785696718753769480731766797379907324784621"
+#     BigFloat.new("0.1", 24).to_f64   # => 0.10000000149011612
+#
+# An operation between two answers at the larger precision; with an
+# integer, at the BigFloat's. `to_s` writes the fewest decimal digits that
+# read back to the same value at its precision, positional from 1e-4 to
+# below 1e15 and with an exponent outside, as `Float64#to_s` writes. There
+# is no NaN or infinity: dividing by zero, the square root of a negative
+# number, a NaN or an infinite double, a precision under 1 and a string
+# that is no number are refused.
+pub struct BigFloat
+  DEFAULT_PRECISION = 128
+
+  getter precision : Int32
+  @negative : Bool
+  # 0, or exactly *precision* bits.
+  @mantissa : BigInt
+  @exponent : Int64
+
+  protected def initialize(@negative : Bool, @mantissa : BigInt, @exponent : Int64, @precision : Int32)
+  end
+
+  def self.new(value : Int32, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    new(BigInt.new(value.to_i64), precision)
+  end
+
+  def self.new(value : Int64, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    new(BigInt.new(value), precision)
+  end
+
+  def self.new(value : BigInt, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    rounded(value.negative?, value.abs, BigInt.one, 0_i64, precision)
+  end
+
+  # The double's exact value, rounded to *precision* bits.
+  def self.new(value : Float64, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    holder = Pointer(Float64).malloc(1_u64)
+    holder.value = value
+    bits = Pointer(UInt64).new(holder.address).value
+    exponent_bits = bits.unsafe_shr(52_u64) & 2047_u64
+    fraction = bits & 4503599627370495_u64
+    raise "BigFloat: #{value} is not a finite number" if exponent_bits == 2047_u64
+    f = exponent_bits == 0_u64 ? fraction : fraction | 4503599627370496_u64
+    e = exponent_bits == 0_u64 ? -1074_i64 : exponent_bits.to_i64 - 1075_i64
+    rounded(bits.unsafe_shr(63_u64) != 0_u64, BigInt.new(f.to_i64), BigInt.one, e, precision)
+  end
+
+  def self.new(value : BigRational, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    rounded(value.numerator.negative?, value.numerator.abs, value.denominator, 0_i64, precision)
+  end
+
+  def self.new(value : BigDecimal, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    if value.scale >= 0
+      rounded(value.value.negative?, value.value.abs, BigInt.new(10_i64) ** value.scale, 0_i64, precision)
+    else
+      rounded(value.value.negative?, value.value.abs * (BigInt.new(10_i64) ** (0 - value.scale)), BigInt.one, 0_i64, precision)
+    end
+  end
+
+  # A decimal - `-12.5`, `1e-30`, `6.02214076E23` - rounded to *precision*
+  # bits; anything else is refused.
+  def self.new(text : String, precision : Int32 = DEFAULT_PRECISION) : BigFloat
+    parse?(text, precision) || raise "BigFloat: not a number: #{text.inspect}"
+  end
+
+  # As `new`, nil for a string that is no number.
+  def self.parse?(text : String, precision : Int32 = DEFAULT_PRECISION) : BigFloat?
+    check(precision)
+    bytes = text.to_unsafe
+    size = text.bytesize
+    at = 0
+    negative = false
+    if at < size && (bytes[at] == 45_u8 || bytes[at] == 43_u8)
+      negative = bytes[at] == 45_u8
+      at = at + 1
+    end
+    digits = BigInt.zero
+    seen = 0
+    scale = 0_i64
+    while at < size && bytes[at] >= 48_u8 && bytes[at] <= 57_u8
+      digits = digits * 10 + (bytes[at] - 48_u8).to_i32
+      seen = seen + 1
+      at = at + 1
+    end
+    if at < size && bytes[at] == 46_u8
+      at = at + 1
+      while at < size && bytes[at] >= 48_u8 && bytes[at] <= 57_u8
+        digits = digits * 10 + (bytes[at] - 48_u8).to_i32
+        scale = scale - 1_i64
+        seen = seen + 1
+        at = at + 1
+      end
+    end
+    return nil if seen == 0
+    if at < size && (bytes[at] == 101_u8 || bytes[at] == 69_u8)
+      at = at + 1
+      down = false
+      if at < size && (bytes[at] == 45_u8 || bytes[at] == 43_u8)
+        down = bytes[at] == 45_u8
+        at = at + 1
+      end
+      power = 0_i64
+      exponent_digits = 0
+      while at < size && bytes[at] >= 48_u8 && bytes[at] <= 57_u8
+        power = power * 10_i64 + (bytes[at] - 48_u8).to_i64
+        return nil if power > 100_000_000_i64
+        exponent_digits = exponent_digits + 1
+        at = at + 1
+      end
+      return nil if exponent_digits == 0
+      scale = scale + (down ? 0_i64 - power : power)
+    end
+    return nil if at != size
+    if scale >= 0_i64
+      rounded(negative, digits * (BigInt.new(10_i64) ** scale.to_i32), BigInt.one, 0_i64, precision)
+    else
+      rounded(negative, digits, BigInt.new(10_i64) ** (0_i64 - scale).to_i32, 0_i64, precision)
+    end
+  end
+
+  # *num*/*den* · 2^*shift* (both non-negative, *den* not zero), rounded to
+  # *precision* bits, ties to even: every value here is made by this, from
+  # an exact one.
+  protected def self.rounded(negative : Bool, num : BigInt, den : BigInt, shift : Int64, precision : Int32) : BigFloat
+    check(precision)
+    return new(false, BigInt.zero, 0_i64, precision) if num.zero?
+    # num/den lies in [2^(gap - 1), 2^(gap + 1)), so its quotient by 2^k
+    # has precision or precision + 1 bits; one too many moves k up.
+    k = (BigInt.bit_length(num) - BigInt.bit_length(den) - precision).to_i64
+    while true
+      # The remainder is of the divisor actually used, which is den
+      # scaled up when k is not negative.
+      divisor = k >= 0_i64 ? den << k.to_i32 : den
+      q, r = k >= 0_i64 ? num.divmod(divisor) : (num << (0_i64 - k).to_i32).divmod(divisor)
+      if BigInt.bit_length(q) > precision
+        k = k + 1_i64
+        next
+      end
+      twice = (r << 1) <=> divisor
+      q = q + BigInt.one if twice > 0 || (twice == 0 && q.odd?)
+      if BigInt.bit_length(q) > precision
+        q = q >> 1
+        k = k + 1_i64
+      end
+      return new(negative, q, k + shift, precision)
+    end
+  end
+
+  protected def self.check(precision : Int32) : Nil
+    raise "BigFloat: a precision of #{precision} bits; it is at least 1" if precision < 1
+  end
+
+  def zero? : Bool
+    @mantissa.zero?
+  end
+
+  def negative? : Bool
+    @negative
+  end
+
+  def positive? : Bool
+    !@negative && !zero?
+  end
+
+  protected def mantissa : BigInt
+    @mantissa
+  end
+
+  protected def exponent : Int64
+    @exponent
+  end
+
+  # The place above the leading bit: 2^(top - 1) <= |self| < 2^top.
+  protected def top : Int64
+    @exponent + BigInt.bit_length(@mantissa).to_i64
+  end
+
+  # This value at another precision, rounded if it is fewer bits.
+  def with_precision(bits : Int32) : BigFloat
+    BigFloat.rounded(@negative, @mantissa, BigInt.one, @exponent, bits)
+  end
+
+  def - : BigFloat
+    BigFloat.new(zero? ? false : !@negative, @mantissa, @exponent, @precision)
+  end
+
+  def + : BigFloat
+    self
+  end
+
+  def abs : BigFloat
+    @negative ? -self : self
+  end
+
+  def +(other : BigFloat) : BigFloat
+    sum(other, @precision > other.precision ? @precision : other.precision)
+  end
+
+  def -(other : BigFloat) : BigFloat
+    sum(-other, @precision > other.precision ? @precision : other.precision)
+  end
+
+  def *(other : BigFloat) : BigFloat
+    BigFloat.rounded(@negative != other.negative?, @mantissa * other.mantissa, BigInt.one, @exponent + other.exponent, @precision > other.precision ? @precision : other.precision)
+  end
+
+  def /(other : BigFloat) : BigFloat
+    raise "BigFloat: division by zero" if other.zero?
+    BigFloat.rounded(@negative != other.negative?, @mantissa, other.mantissa, @exponent - other.exponent, @precision > other.precision ? @precision : other.precision)
+  end
+
+  def +(other : Int32 | Int64 | BigInt) : BigFloat
+    sum(BigFloat.exactly(other), @precision)
+  end
+
+  def -(other : Int32 | Int64 | BigInt) : BigFloat
+    sum(-BigFloat.exactly(other), @precision)
+  end
+
+  def *(other : Int32 | Int64 | BigInt) : BigFloat
+    exact = BigFloat.exactly(other)
+    BigFloat.rounded(@negative != exact.negative?, @mantissa * exact.mantissa, BigInt.one, @exponent + exact.exponent, @precision)
+  end
+
+  def /(other : Int32 | Int64 | BigInt) : BigFloat
+    exact = BigFloat.exactly(other)
+    raise "BigFloat: division by zero" if exact.zero?
+    BigFloat.rounded(@negative != exact.negative?, @mantissa, exact.mantissa, @exponent - exact.exponent, @precision)
+  end
+
+  # An integer at exactly the bits it has.
+  protected def self.exactly(value : Int32 | Int64 | BigInt) : BigFloat
+    whole = value.is_a?(BigInt) ? value : BigInt.new(value.to_i64)
+    bits = BigInt.bit_length(whole.abs)
+    rounded(whole.negative?, whole.abs, BigInt.one, 0_i64, bits < 1 ? 1 : bits)
+  end
+
+  # The exact sum, rounded once. An addend more than *precision* + 2 bits
+  # below the other cannot move it - it is under a quarter of the larger's
+  # last place, even where that place halves below a power of two - and
+  # is not shifted out to a size it would only be rounded away from.
+  protected def sum(other : BigFloat, precision : Int32) : BigFloat
+    return other.with_precision(precision) if zero?
+    return with_precision(precision) if other.zero?
+    gap = top - other.top
+    return with_precision(precision) if gap > precision.to_i64 + 2_i64
+    return other.with_precision(precision) if 0_i64 - gap > precision.to_i64 + 2_i64
+    low = @exponent < other.exponent ? @exponent : other.exponent
+    mine = @mantissa << (@exponent - low).to_i32
+    theirs = other.mantissa << (other.exponent - low).to_i32
+    total = (@negative ? -mine : mine) + (other.negative? ? -theirs : theirs)
+    BigFloat.rounded(total.negative?, total.abs, BigInt.one, low, precision)
+  end
+
+  # The square root, rounded once. The mantissa is widened to at least
+  # 2·precision + 4 bits over an even power of two, so the integer root
+  # has two bits past the ones kept, and a root that is not exact carries a
+  # half below its last bit into the rounding, which no tie can be.
+  def sqrt : BigFloat
+    raise "BigFloat: the square root of a negative number" if @negative
+    return self if zero?
+    widen = 2 * @precision + 4 - BigInt.bit_length(@mantissa)
+    widen = 0 if widen < 0
+    widen = widen + 1 if (@exponent - widen.to_i64) % 2_i64 != 0_i64
+    square = @mantissa << widen
+    root = BigFloat.isqrt(square)
+    sticky = root * root == square ? BigInt.zero : BigInt.one
+    BigFloat.rounded(false, (root << 1) + sticky, BigInt.new(2_i64), (@exponent - widen.to_i64) // 2_i64, @precision)
+  end
+
+  # The largest integer whose square is at most *value*, by Newton's
+  # method from above.
+  protected def self.isqrt(value : BigInt) : BigInt
+    return value if value < BigInt.new(2_i64)
+    x = BigInt.one << ((BigInt.bit_length(value) + 1) // 2)
+    while true
+      y = (x + value // x) >> 1
+      return x if y >= x
+      x = y
+    end
+  end
+
+  # The power, its exact value rounded once; a negative exponent is the
+  # reciprocal of the power, rounded once.
+  def **(exponent : Int32) : BigFloat
+    odd = exponent % 2 != 0
+    if exponent < 0
+      raise "BigFloat: division by zero" if zero?
+      power = @mantissa ** (0 - exponent)
+      return BigFloat.rounded(@negative && odd, BigInt.one, power, 0_i64 - @exponent * (0 - exponent).to_i64, @precision)
+    end
+    BigFloat.rounded(@negative && odd, @mantissa ** exponent, BigInt.one, @exponent * exponent.to_i64, @precision)
+  end
+
+  # The exact value as a fraction.
+  def to_big_r : BigRational
+    if @exponent >= 0_i64
+      BigRational.new(signed(@mantissa << @exponent.to_i32), BigInt.one)
+    else
+      BigRational.new(signed(@mantissa), BigInt.one << (0_i64 - @exponent).to_i32)
+    end
+  end
+
+  private def signed(value : BigInt) : BigInt
+    @negative ? -value : value
+  end
+
+  # The double nearest, ties to even; past the largest double, infinite,
+  # and below the smallest, zero.
+  def to_f64 : Float64
+    return 0.0 if @mantissa.zero?
+    if top > 1025_i64
+      infinity = Pointer(UInt64).malloc(1_u64)
+      infinity.value = @negative ? 0xFFF0000000000000_u64 : 0x7FF0000000000000_u64
+      return Pointer(Float64).new(infinity.address).value
+    end
+    return @negative ? -0.0 : 0.0 if top < -1080_i64
+    to_big_r.to_f64
+  end
+
+  # Toward zero, floor, ceiling, and to the nearest integer, ties to even.
+  def to_big_i : BigInt
+    trunc_whole
+  end
+
+  def trunc : BigFloat
+    whole = trunc_whole
+    BigFloat.rounded(whole.negative?, whole.abs, BigInt.one, 0_i64, @precision)
+  end
+
+  def floor : BigFloat
+    whole = trunc_whole
+    whole = whole - BigInt.one if @negative && !exact_whole?
+    BigFloat.rounded(whole.negative?, whole.abs, BigInt.one, 0_i64, @precision)
+  end
+
+  def ceil : BigFloat
+    whole = trunc_whole
+    whole = whole + BigInt.one if !@negative && !zero? && !exact_whole?
+    BigFloat.rounded(whole.negative?, whole.abs, BigInt.one, 0_i64, @precision)
+  end
+
+  # Under one half is zero; from there the fraction is at most
+  # *precision* bits, compared with one half exactly.
+  def round : BigFloat
+    return self if exact_whole?
+    return BigFloat.rounded(false, BigInt.zero, BigInt.one, 0_i64, @precision) if top < 0_i64
+    drop = (0_i64 - @exponent).to_i32
+    whole = @mantissa >> drop
+    rest = @mantissa - (whole << drop)
+    against = rest <=> (BigInt.one << (drop - 1))
+    whole = whole + BigInt.one if against > 0 || (against == 0 && whole.odd?)
+    BigFloat.rounded(@negative && !whole.zero?, whole, BigInt.one, 0_i64, @precision)
+  end
+
+  protected def trunc_whole : BigInt
+    return signed(@mantissa << @exponent.to_i32) if @exponent >= 0_i64
+    return BigInt.zero if top <= 0_i64
+    signed(@mantissa >> (0_i64 - @exponent).to_i32)
+  end
+
+  private def exact_whole? : Bool
+    return true if @exponent >= 0_i64 || zero?
+    return false if top <= 0_i64
+    drop = (0_i64 - @exponent).to_i32
+    (@mantissa >> drop) << drop == @mantissa
+  end
+
+  # The fewest decimal digits that read back as this value at its
+  # precision, the nearest such when there are two; written as
+  # `Float64#to_s` writes a double.
+  def to_s : String
+    return "0.0" if zero?
+    lead = decimal_lead
+    # Enough digits always read back: ceil(precision · log10 2) + 1.
+    low = 1
+    high = (@precision.to_i64 * 30103_i64 // 100000_i64 + 2_i64).to_i32
+    while low < high
+      middle = (low + high) // 2
+      candidate = decimal_digits(middle, lead)
+      if reads_back?(candidate[0], candidate[1])
+        high = middle
+      else
+        low = middle + 1
+      end
+    end
+    best = decimal_digits(low, lead)
+    text = best[0].to_s
+    # Trailing zeros are the place's, not digits: 100 is one digit.
+    stop = text.bytesize
+    while stop > 1 && text.to_unsafe[stop - 1] == 48_u8
+      stop = stop - 1
+    end
+    point = best[1] + text.bytesize.to_i64 - 1_i64
+    (@negative ? "-" : "") + BigFloat.place(text[0, stop], point)
+  end
+
+  def inspect : String
+    to_s
+  end
+
+  # *digits* with its first digit at 10^*point*, as `Float64#to_s` puts
+  # a point: positional from 10^-4 to 10^14, an exponent outside.
+  protected def self.place(digits : String, point : Int64) : String
+    if point >= -4_i64 && point < 15_i64
+      if point >= 0_i64
+        whole_size = point.to_i32 + 1
+        if digits.bytesize <= whole_size
+          return digits + "0" * (whole_size - digits.bytesize) + ".0"
+        end
+        return digits[0, whole_size] + "." + digits[whole_size, digits.bytesize - whole_size]
+      end
+      return "0." + "0" * (-1_i64 - point).to_i32 + digits
+    end
+    fraction = digits.bytesize > 1 ? digits[1, digits.bytesize - 1] : "0"
+    digits[0, 1] + "." + fraction + "e" + (point < 0_i64 ? "-" : "+") + point.abs.to_s
+  end
+
+  # The power of ten of the leading decimal digit: 10^lead <= |self| <
+  # 10^(lead + 1), exactly.
+  private def decimal_lead : Int64
+    lead = ((top - 1_i64) * 30103_i64) // 100000_i64
+    lead = lead - 1_i64 if top - 1_i64 < 0_i64
+    while compare_power(lead) < 0
+      lead = lead - 1_i64
+    end
+    while compare_power(lead + 1_i64) >= 0
+      lead = lead + 1_i64
+    end
+    lead
+  end
+
+  # |self| against 10^*power*, exactly.
+  private def compare_power(power : Int64) : Int32
+    left = @mantissa
+    right = BigInt.one
+    if @exponent >= 0_i64
+      left = left << @exponent.to_i32
+    else
+      right = right << (0_i64 - @exponent).to_i32
+    end
+    if power >= 0_i64
+      right = right * (BigInt.new(10_i64) ** power.to_i32)
+    else
+      left = left * (BigInt.new(10_i64) ** (0_i64 - power).to_i32)
+    end
+    left <=> right
+  end
+
+  # |self| to *count* significant digits, ties to even: the digits as an
+  # integer and the power of ten of the last one. A carry to one more digit
+  # is the next power's first.
+  private def decimal_digits(count : Int32, lead : Int64) : {BigInt, Int64}
+    last = lead - count.to_i64 + 1_i64
+    num = @mantissa
+    den = BigInt.one
+    if @exponent >= 0_i64
+      num = num << @exponent.to_i32
+    else
+      den = den << (0_i64 - @exponent).to_i32
+    end
+    if last >= 0_i64
+      den = den * (BigInt.new(10_i64) ** last.to_i32)
+    else
+      num = num * (BigInt.new(10_i64) ** (0_i64 - last).to_i32)
+    end
+    q, r = num.divmod(den)
+    twice = (r << 1) <=> den
+    q = q + BigInt.one if twice > 0 || (twice == 0 && q.odd?)
+    {q, last}
+  end
+
+  # Whether *digits* · 10^*last* rounds back to this value.
+  private def reads_back?(digits : BigInt, last : Int64) : Bool
+    back = if last >= 0_i64
+             BigFloat.rounded(@negative, digits * (BigInt.new(10_i64) ** last.to_i32), BigInt.one, 0_i64, @precision)
+           else
+             BigFloat.rounded(@negative, digits, BigInt.new(10_i64) ** (0_i64 - last).to_i32, 0_i64, @precision)
+           end
+    back.mantissa == @mantissa && back.exponent == @exponent
+  end
+
+  # Equal values hash alike whatever their precision: the mantissa without
+  # its trailing zero bits.
+  def hash : Int32
+    return 0 if zero?
+    m = @mantissa
+    e = @exponent
+    while !m.odd?
+      m = m >> 1
+      e = e + 1_i64
+    end
+    (m.hash &* 31 &+ e.to_i32) &* (@negative ? -1 : 1)
+  end
+
+  def ==(other : BigFloat) : Bool
+    (self <=> other) == 0
+  end
+end
+
+impl Comparable for BigFloat
+  def <=>(other : self) : Int32
+    return 0 if zero? && other.zero?
+    return (other.negative? ? 1 : -1) if zero?
+    return (negative? ? -1 : 1) if other.zero?
+    return (negative? ? -1 : 1) if negative? != other.negative?
+    magnitude = if top != other.top
+                  top > other.top ? 1 : -1
+                else
+                  low = exponent < other.exponent ? exponent : other.exponent
+                  (mantissa << (exponent - low).to_i32) <=> (other.mantissa << (other.exponent - low).to_i32)
+                end
+    negative? ? 0 - magnitude : magnitude
+  end
+end
+
+impl Hashable for BigFloat
   def hash_key : Int32
     hash
   end

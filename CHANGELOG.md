@@ -4,6 +4,28 @@
 
 ### Added
 
+- **`BigFloat`: binary floating point at any precision, every result
+  rounded once to the nearest, ties to even.** std/big had integers,
+  decimals and fractions, but no float wider than a double; the other
+  library's BigFloat is GMP's `mpf`, which truncates and keeps bits it was
+  not asked for.
+  - `BigFloat.new(value, precision = 128)` from an integer, a BigInt, a
+    double (exactly), a fraction, a decimal or a string; `+ - * /`, `**`
+    and `sqrt`, each rounded once from the exact result; `round` (ties to
+    even), `floor`, `ceil`, `trunc`, `to_big_i`, `to_big_r` (exact),
+    `to_f64` (the nearest double), and `to_s`, the fewest decimal digits
+    that read back, laid out as `Float64#to_s` lays out a double.
+  - Equal values hash alike at any precision. There is no NaN or
+    infinity: division by zero, a negative square root, a NaN double, a
+    precision under one bit and a malformed string are refused by name.
+
+  Held by `bench/std_big_exercise.sh`: named answers (√2 to 256 bits,
+  ties, an addend under the last place), five refusals, 5,162 random cases
+  at precisions from 1 to 256 bits checked against Python's exact
+  fractions - arithmetic, roots, powers, parsing, the shortest decimal,
+  the nearest double, the integer roundings - and five broken copies,
+  three caught at named checks and two by the oracle.
+
 - **std/unicode splits a string into grapheme clusters, every rule of UAX
   #29 through Unicode 17's Indic conjuncts.** A program could count bytes
   and code points but not what a reader counts: `"🇹🇷🇩🇪"` was eight code

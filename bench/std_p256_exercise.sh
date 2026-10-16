@@ -135,8 +135,8 @@ for i in range(1500):
     signature = key.sign(message, ec.ECDSA(names[name](), deterministic_signing=True))
     cases.append(f"{name} {d:064x} {message.hex()}")
     want.append(f"{public.x:x} {public.y:x} {signature.hex()}")
-open(sys.argv[1], "w").write("\n".join(cases) + "\n")
-open(sys.argv[2], "w").write("\n".join(want) + "\n")
+open(sys.argv[1], "w", newline="\n").write("\n".join(cases) + "\n")
+open(sys.argv[2], "w", newline="\n").write("\n".join(want) + "\n")
 PY
   "$WORK/p256-release" oracle "$WORK/cases.txt" >"$WORK/got.txt" 2>&1
   if diff "$WORK/want.txt" "$WORK/got.txt" >"$WORK/oracle.diff"; then
@@ -192,8 +192,8 @@ put("version2.sec1", tlv(0x30, bytes.fromhex("020102") + tlv(0x04, d)),
     "refused: ecdsa: the private key: an ECPrivateKey whose version is not 1")
 put("short.sec1", tlv(0x30, bytes.fromhex("020101") + tlv(0x04, d[1:])),
     "refused: ecdsa: a P-256 private key is 32 bytes, not 31")
-open(os.path.join(out, "list"), "w").write("\n".join(listed) + "\n")
-open(os.path.join(out, "want"), "w").write("\n".join(want) + "\n")
+open(os.path.join(out, "list"), "w", newline="\n").write("\n".join(listed) + "\n")
+open(os.path.join(out, "want"), "w", newline="\n").write("\n".join(want) + "\n")
 PY
   "$WORK/p256-release" keys "$WORK/keys" >"$WORK/keys.out" 2>&1
   if diff "$WORK/keys/want" "$WORK/keys.out" >"$WORK/keys.diff"; then

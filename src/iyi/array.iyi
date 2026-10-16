@@ -50,9 +50,21 @@ class Array(T)
   # The two in order, as a new array; neither operand changes.
   def +(other : Array(T)) : Array(T)
     joined = Array(T).new(@size + other.size)
-    each { |value| joined << value }
-    other.each { |value| joined << value }
+    joined.append(@buffer, @size)
+    joined.append(other.to_unsafe, other.size)
     joined
+  end
+
+  # *count* elements from *source* after the last: the room made once and
+  # the elements copied as `Pointer#copy_from` copies, each store the one
+  # `<<` makes - without `<<`'s check and call for every element, which
+  # was most of what joining two arrays of bytes cost. *source* is read
+  # after the room is made, so it must not be this array's own buffer
+  # unless the room is already there.
+  protected def append(source : Pointer(T), count : Int32) : Nil
+    reserve(@size + count)
+    (@buffer + @size).copy_from(source, count)
+    @size = @size + count
   end
 
   # An array of *capacity* elements that are not written yet. The literal
@@ -274,12 +286,10 @@ class Array(T)
   # size while `<<` grew it, so `[1, 2].concat(itself)` grew the buffer until
   # the capacity arithmetic overflowed. The length is read once.
   def concat(other : Array(T)) : Array(T)
-    index = 0
     taking = other.size
-    while index < taking
-      self << other[index]
-      index = index + 1
-    end
+    # The room first: `a.concat(a)` reads the buffer it is copied into.
+    reserve(@size + taking)
+    append(other.to_unsafe, taking)
     self
   end
 
@@ -770,7 +780,7 @@ class Array(T)
 
   def dup : Array(T)
     copy = Array(T).new(@size)
-    each { |value| copy << value }
+    copy.append(@buffer, @size)
     copy
   end
 
@@ -808,11 +818,7 @@ class Array(T)
     capacity = @capacity == 0 ? 4 : @capacity * 2
     capacity = needed if capacity < needed
     buffer = Pointer(T).malloc(capacity.to_u64)
-    index = 0
-    while index < @size
-      buffer[index] = @buffer[index]
-      index = index + 1
-    end
+    buffer.copy_from(@buffer, @size)
     @buffer = buffer
     @capacity = capacity
   end
@@ -848,11 +854,7 @@ class Array(T)
 
   private def copy_span(start : Int32, count : Int32) : Array(T)
     result = Array(T).new(count)
-    index = 0
-    while index < count
-      result << @buffer[start + index]
-      index = index + 1
-    end
+    result.append(@buffer + start, count)
     result
   end
 

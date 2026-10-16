@@ -93,11 +93,13 @@ check(HTTP.decode_chunked(chunked) == seq, "HTTP.decode_chunked")
 padded = "x".center(seq.bytesize, "-=")
 check(padded.bytesize == seq.bytesize && padded.starts_with?("-=-="), "center with a cycled pad")
 
-# A needle that almost matches everywhere: sixteen thousand `a` and a `b`,
-# looked for in eight megabytes of `a`. Compared from each position in
-# turn that is a hundred billion byte comparisons.
+# A needle that almost matches everywhere: sixty-five thousand `a` and a
+# `b`, looked for in eight megabytes of `a`. Compared from each position
+# in turn that is half a trillion byte comparisons: at sixteen thousand,
+# a copy compared from each position took 40 s here and under the
+# gate's 20 on a darwin arm64 runner, so the clock proved nothing there.
 run = "a" * seq.bytesize
-near = "a" * 16384 + "b"
+near = "a" * 65536 + "b"
 check(run.index(near).nil?, "index of a near miss")
 check(!run.includes?(near), "includes? of a near miss")
 check(run.split(near).size == 1, "split on a near miss")

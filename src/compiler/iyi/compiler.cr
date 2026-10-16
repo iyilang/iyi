@@ -793,7 +793,7 @@ module Iyi
       artifact = IyiMod.read path
       units_by_name = units.to_h { |unit| {unit.original_name, unit} }
       artifact.object_code = collect_iyi_object_code(names, units_by_name)
-      artifact.type_ids = collect_iyi_type_ids(program, names)
+      artifact.type_ids = collect_iyi_type_ids(program, names, type)
       artifact.constants = collect_iyi_constants(program, names)
       artifact.regexes = collect_iyi_regexes(program, artifact.constants)
       artifact.class_vars = collect_iyi_unit_class_vars(program, names)
@@ -934,7 +934,7 @@ module Iyi
         # A list of what a module defines is only worth having if it is the
         # list of what it *has*.
         carried = artifact.object_code.map(&.name)
-        artifact.type_ids = collect_iyi_type_ids(program, unit_names)
+        artifact.type_ids = collect_iyi_type_ids(program, unit_names, program.iyi_module_type(artifact.module_name))
         artifact.constants = collect_iyi_constants(program, unit_names)
         artifact.regexes = collect_iyi_regexes(program, artifact.constants)
         artifact.class_vars = collect_iyi_unit_class_vars(program, unit_names)
@@ -1378,7 +1378,7 @@ module Iyi
     #
     # The cost is a longer list — `Kemal` goes from 303 names to 642 — and a
     # name is a string.
-    private def collect_iyi_type_ids(program : Program, unit_names : Array(String)) : Array(String)
+    private def collect_iyi_type_ids(program : Program, unit_names : Array(String), module_type : ModuleType?) : Array(String)
       names = Set(String).new
       unit_names.each do |unit_name|
         program.iyi_unit_type_ids[unit_name]?.try &.each do |type|
@@ -1391,9 +1391,28 @@ module Iyi
         end
       end
 
+      # A witness can affect a trait-valued field's ABI even when no carried
+      # instruction numbers it. Walk the module's declarations directly: unit
+      # names also include virtual types and are not a source-type lookup API.
+      if module_type
+        collect_iyi_witness_type_ids(program, module_type, names)
+      end
+
       # Sorted, because a set's order is not a fact about the module and an
       # artifact that changed between two identical builds would defeat IV.3.
       names.to_a.sort!
+    end
+
+    private def collect_iyi_witness_type_ids(program : Program, owner : ModuleType, names : Set(String)) : Nil
+      owner.types?.try &.each_value do |declared|
+        if declared.is_a?(TraitType)
+          witness = DefinitionTyping.witness_name(declared)
+          names << witness if program.types?.try(&.has_key?(witness))
+        end
+        if declared.is_a?(ModuleType)
+          collect_iyi_witness_type_ids(program, declared, names)
+        end
+      end
     end
 
     # iyi: the constants the module's object code reads, by name, for

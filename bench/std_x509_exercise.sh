@@ -435,7 +435,7 @@ prove_broken "a duplicate extension taken" "an extension written twice refused" 
 # Unchecked, the bad byte reaches std/base64, which panics: the refusal
 # the check expects never comes.
 prove_broken "PEM's base64 unchecked" "base64: invalid byte" \
-  '      return X509Error.new("a CERTIFICATE block with byte #{b} in its base64, at #{i}") unless ok' ''
+  '      return X509Error.new("a #{label} block with byte #{b} in its base64, at #{i}") unless ok' ''
 prove_broken "an Ed25519 key's parameters taken" "an Ed25519 key whose algorithm carries parameters refused" \
   '      return X509Error.new("an Ed25519 key with parameters, which RFC 8410 says are absent") unless algorithm.size == 1' ''
 prove_broken "an Ed25519 signature unchecked" "an Ed25519 leaf signed by another key under the root's name: expected a refusal" \

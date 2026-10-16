@@ -289,6 +289,12 @@ end
 pub struct X509
   MAX_CHAIN = 10
 
+  # The DER of every block labelled *label* in a PEM text - `"CERTIFICATE"`
+  # or `"PRIVATE KEY"` - each checked to be base64 before it is decoded.
+  def self.pem(text : String, label : String) : Array(Array(UInt8)) | X509Error
+    X509Pem.blocks(text, label)
+  end
+
   # The chain from *leaf* to one of *roots*, through *intermediates*, for
   # *host* (nil: any) at *now* - leaf first, root last - or why there is
   # none. See the module's header for what is checked.
@@ -813,35 +819,34 @@ struct X509Names
   end
 end
 
-# PEM (RFC 7468): the base64 lines between a `-----BEGIN CERTIFICATE-----`
-# line and its END line, checked before they are decoded, as std/base64
-# panics on what is not base64. Text outside the blocks is passed over, as
-# a bundle's comments are.
+# PEM (RFC 7468): the base64 lines between a `-----BEGIN <label>-----` line
+# and its END line, checked before they are decoded, as std/base64 panics
+# on what is not base64. Text outside the blocks is passed over, as a
+# bundle's comments are.
 struct X509Pem
-  BEGIN = "-----BEGIN CERTIFICATE-----"
-  END   = "-----END CERTIFICATE-----"
-
-  def self.blocks(text : String) : Array(Array(UInt8)) | X509Error
+  def self.blocks(text : String, label : String = "CERTIFICATE") : Array(Array(UInt8)) | X509Error
+    opening = "-----BEGIN #{label}-----"
+    closing = "-----END #{label}-----"
     found = [] of Array(UInt8)
     body = nil
     text.lines.each do |raw_line|
       line = raw_line.strip
       current = body
       if current.nil?
-        body = String::Builder.new if line == BEGIN
-      elsif line == END
-        found << decode(current.to_s)!
+        body = String::Builder.new if line == opening
+      elsif line == closing
+        found << decode(current.to_s, label)!
         body = nil
       else
         current << line
       end
     end
-    return X509Error.new("a CERTIFICATE block with no END line") unless body.nil?
+    return X509Error.new("a #{label} block with no END line") unless body.nil?
     found
   end
 
-  private def self.decode(text : String) : Array(UInt8) | X509Error
-    return X509Error.new("a CERTIFICATE block whose base64 is #{text.bytesize} bytes, not a multiple of 4") unless text.bytesize % 4 == 0 && text.bytesize > 0
+  private def self.decode(text : String, label : String) : Array(UInt8) | X509Error
+    return X509Error.new("a #{label} block whose base64 is #{text.bytesize} bytes, not a multiple of 4") unless text.bytesize % 4 == 0 && text.bytesize > 0
     padding = 0
     padding = 1 if text.ends_with?("=")
     padding = 2 if text.ends_with?("==")
@@ -851,7 +856,7 @@ struct X509Pem
       b = p[i]
       letter = (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8)
       ok = letter || b == 43_u8 || b == 47_u8 || (b == 61_u8 && i >= text.bytesize - padding)
-      return X509Error.new("a CERTIFICATE block with byte #{b} in its base64, at #{i}") unless ok
+      return X509Error.new("a #{label} block with byte #{b} in its base64, at #{i}") unless ok
       i = i + 1
     end
     decoded = Base64.decode(text)

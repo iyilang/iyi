@@ -9,10 +9,14 @@
 # 1.3 server written over Python's cryptography that breaks the protocol
 # one rule at a time - against the client, connects to OpenSSL's own
 # s_server across its suites, key types, a HelloRetryRequest, a request
-# for a client certificate and ALPN, shows an error value's sentence
+# for a client certificate and ALPN. Then the server: its configurations
+# judged, and the exercise serving bench/std_tls_client.py - the scripted
+# client's every scenario, a handshake checked step by step or one rule
+# broken and the alert named - the std/tls client, Python's ssl,
+# OpenSSL's s_client, curl and Node. It shows an error value's sentence
 # through `.or_panic`, and proves on broken copies of the module that the
 # checks fail where they say, the handshake's own against the scripted
-# server.
+# peers.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -221,6 +225,201 @@ else
 fi
 
 echo
+echo "== the server: TlsServer against a scripted client and real ones"
+# An Ed25519 leaf under a P-256 root, made here, and keys that are not a
+# server's: TlsServerConfig must refuse each for its reason. Then the
+# exercise's `serve` mode, one connection at a time, against
+# bench/std_tls_client.py - every scenario a correct handshake or one rule
+# broken, each answered with the alert RFC 8446 names - and against
+# clients that are not this one's: the std/tls client, Python's ssl,
+# OpenSSL's s_client across suites, a HelloRetryRequest and refusals,
+# curl, and Node.
+SRV="$WORK/srv"
+mkdir -p "$SRV"
+served=no
+if [ -z "$PY" ] || ! "$PY" -c 'from cryptography.hazmat.primitives.asymmetric import ed25519, x25519' >/dev/null 2>&1; then
+  echo "  no python cryptography here, so the server goes unasked"
+else
+  "$PY" - "$SRV" <<'PY'
+import datetime as dt, os, sys
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+out = sys.argv[1]
+now = dt.datetime.now(dt.timezone.utc)
+def name(cn): return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+def write(file, data): open(os.path.join(out, file), "wb").write(data)
+def pem(c): return c.public_bytes(serialization.Encoding.PEM)
+def pkcs8(k): return k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+def raw(k): return k.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+def der_pem(der):
+    import base64
+    text = base64.b64encode(der).decode()
+    return ("-----BEGIN PRIVATE KEY-----\n" + "\n".join(text[i:i + 64] for i in range(0, len(text), 64)) + "\n-----END PRIVATE KEY-----\n").encode()
+def tlv(tag, content):
+    n = len(content)
+    return bytes([tag]) + (bytes([n]) if n < 128 else bytes([0x81, n])) + content
+root_key = ec.generate_private_key(ec.SECP256R1())
+root = (x509.CertificateBuilder().subject_name(name("Gate Root")).issuer_name(name("Gate Root"))
+        .public_key(root_key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(days=1)).not_valid_after(now + dt.timedelta(days=30))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.KeyUsage(False, False, False, False, False, True, True, False, False), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(root_key.public_key()), critical=False)
+        .sign(root_key, hashes.SHA256()))
+def leaf_for(key):
+    return (x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(root.subject)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(days=1)).not_valid_after(now + dt.timedelta(days=20))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(True, False, False, False, False, False, False, False, False), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(root_key.public_key()), critical=False)
+            .sign(root_key, hashes.SHA256()))
+key = ed25519.Ed25519PrivateKey.generate()
+other = ed25519.Ed25519PrivateKey.generate()
+ec_key = ec.generate_private_key(ec.SECP256R1())
+write("chain.pem", pem(leaf_for(key)) + pem(root))
+write("roots.pem", pem(root))
+write("key.pem", pkcs8(key))
+write("leaf.pem", pem(leaf_for(key)))
+write("other.key", pkcs8(other))
+write("p256.pem", pem(leaf_for(ec_key)) + pem(root))
+write("ec.key", pkcs8(ec_key))
+write("two.key", pkcs8(key) + pkcs8(other))
+seed = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption())
+algorithm = bytes.fromhex("300506032b6570")
+inner = tlv(0x04, tlv(0x04, seed))
+write("v2.key", der_pem(tlv(0x30, bytes.fromhex("020101") + algorithm + inner + tlv(0x81, b"\x00" + raw(key)))))
+write("v2-wrong.key", der_pem(tlv(0x30, bytes.fromhex("020101") + algorithm + inner + tlv(0x81, b"\x00" + raw(other)))))
+write("v0-public.key", der_pem(tlv(0x30, bytes.fromhex("020100") + algorithm + inner + tlv(0x81, b"\x00" + raw(key)))))
+write("params.key", der_pem(tlv(0x30, bytes.fromhex("020100") + bytes.fromhex("300706032b65700500") + inner)))
+PY
+  # The configurations, judged by the binary given: each line the files,
+  # what must be said.
+  cat >"$WORK/server-configs.sh" <<'SH'
+bin="$1"; dir="$2"; failed=0
+check() {
+  local label="$1" chain="$2" key="$3" want="$4" got
+  got="$("$bin" config "$dir/$chain" "$dir/$key" 2>&1)"
+  if printf '%s' "$got" | grep -qF -e "$want"; then
+    echo "  $label: $got"
+  else
+    echo "  FAIL $label: expected \"$want\", got: $got"
+    failed=1
+  fi
+}
+check "a chain and its key" chain.pem key.pem "config: 2 certificates, leaf CN=localhost"
+check "a version 2 key with its public key" chain.pem v2.key "config: 2 certificates"
+check "another key" chain.pem other.key "the private key is not the certificate's"
+check "a P-256 certificate" p256.pem key.pem "the certificate's key is not Ed25519"
+check "a P-256 key" chain.pem ec.key "the private key is for 1.2.840.10045.2.1, not Ed25519"
+check "two keys" chain.pem two.key "2 PRIVATE KEY blocks, not one"
+check "no key" chain.pem chain.pem "0 PRIVATE KEY blocks, not one"
+check "no certificate" key.pem key.pem "the certificates: none"
+check "a version 2 key carrying another public key" chain.pem v2-wrong.key "its public key is not the seed's"
+check "a version 1 key carrying a public key" chain.pem v0-public.key "a public key in version 0"
+check "an Ed25519 algorithm with parameters" chain.pem params.key "an Ed25519 algorithm with parameters"
+exit $failed
+SH
+  if ! bash "$WORK/server-configs.sh" "$WORK/tls-release" "$SRV"; then
+    status=1
+  fi
+  "$WORK/tls-release" serve "$SRV" 1000 >"$WORK/serve.log" 2>&1 &
+  SERVE_PID=$!
+  for _ in $(seq 1 100); do
+    [ -s "$SRV/port" ] && break
+    sleep 0.1
+  done
+  if [ ! -s "$SRV/port" ]; then
+    echo "  the server did not start:"
+    sed 's/^/    /' "$WORK/serve.log" | head -5
+    status=1
+  else
+    served=yes
+    port="$(cat "$SRV/port")"
+    # served <label> <expected phrase> <command...>: the command's output
+    # must hold the phrase.
+    served_ok=0
+    served_check() {
+      local label="$1" want="$2" got
+      shift 2
+      got="$("$@" 2>&1 | tr -d '\r')"
+      if printf '%s' "$got" | grep -qF -e "$want"; then
+        served_ok=$((served_ok + 1))
+        echo "  $label: $(printf '%s' "$got" | grep -F -e "$want" | head -1)"
+      else
+        echo "  $label: expected \"$want\", got: $(printf '%s' "$got" | tail -3)"
+        status=1
+      fi
+    }
+    if "$PY" "$REPO/bench/std_tls_client.py" "$port" "$SRV/roots.pem" >"$WORK/client.out" 2>&1; then
+      echo "  the scripted client: $(tail -1 "$WORK/client.out")"
+    else
+      grep -F "FAIL" "$WORK/client.out" | sed 's/^/  /'
+      tail -1 "$WORK/client.out" | sed 's/^/  /'
+      status=1
+    fi
+    served_check "the std/tls client, ALPN h2" "HTTP/1.0 200 ok TLS_AES_128_GCM_SHA256 alpn=h2" \
+      "$WORK/tls-release" get "$port" "$SRV/roots.pem" localhost h2
+    served_check "the std/tls client for a name the certificate does not hold" "is not valid for example.com" \
+      "$WORK/tls-release" get "$port" "$SRV/roots.pem" example.com
+    served_check "Python's ssl" "TLSv1.3 http/1.1 name=localhost alpn=http/1.1" "$PY" -c '
+import socket, ssl, sys
+ctx = ssl.create_default_context(cafile=sys.argv[2])
+ctx.set_alpn_protocols(["http/1.1"])
+with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10), server_hostname="localhost") as s:
+    s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+    data = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    print(s.version(), s.selected_alpn_protocol(), data.decode().split("\r\n\r\n")[1].strip())
+' "$port" "$SRV/roots.pem"
+    if [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1; then
+      # -ign_eof: the request's end on stdin is not the end of the answer.
+      sclient() {
+        printf 'GET / HTTP/1.0\r\n\r\n' | "$OPENSSL" s_client -connect "127.0.0.1:$port" -servername localhost \
+          -CAfile "$SRV/roots.pem" -verify_return_error -ign_eof "$@" 2>&1
+      }
+      served_check "OpenSSL, AES-128-GCM" "name=localhost alpn=- TLS_AES_128_GCM_SHA256" sclient -tls1_3 -ciphersuites TLS_AES_128_GCM_SHA256
+      served_check "OpenSSL, AES-256-GCM" "name=localhost alpn=- TLS_AES_256_GCM_SHA384" sclient -tls1_3 -ciphersuites TLS_AES_256_GCM_SHA384
+      served_check "OpenSSL, ChaCha20-Poly1305" "name=localhost alpn=- TLS_CHACHA20_POLY1305_SHA256" sclient -tls1_3 -ciphersuites TLS_CHACHA20_POLY1305_SHA256
+      served_check "OpenSSL, ALPN" "name=localhost alpn=h2" sclient -tls1_3 -alpn h2,http/1.1
+      hrr() { sclient -tls1_3 -groups P-256:X25519 -msg | grep -c '<<< TLS 1.3, Handshake \[length [0-9a-f]*\], ServerHello'; }
+      served_check "OpenSSL, a P-256 share first: a HelloRetryRequest, then a ServerHello" "2" hrr
+      served_check "OpenSSL, TLS 1.2 alone" "alert protocol version" sclient -tls1_2
+      served_check "OpenSSL, groups without X25519" "alert handshake failure" sclient -tls1_3 -groups P-256
+      served_check "OpenSSL, no ed25519 among its signature algorithms" "alert handshake failure" sclient -tls1_3 -sigalgs ECDSA+SHA256:RSA-PSS+SHA256
+      served_check "OpenSSL, ALPN this server does not speak" "no application protocol" sclient -tls1_3 -alpn spdy/3
+    else
+      echo "  no openssl here (or Windows), so s_client goes unasked"
+    fi
+    if command -v curl >/dev/null 2>&1; then
+      served_check "curl" "name=localhost alpn=http/1.1" curl -sS --http1.1 --cacert "$SRV/roots.pem" \
+        --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/"
+    fi
+    if command -v node >/dev/null 2>&1; then
+      served_check "Node's tls" "name=localhost alpn=h2" node -e '
+const tls = require("tls"), fs = require("fs");
+const s = tls.connect({host: "127.0.0.1", port: +process.argv[1], servername: "localhost",
+  ca: fs.readFileSync(process.argv[2]), ALPNProtocols: ["h2"]}, () => s.write("GET / HTTP/1.0\r\n\r\n"));
+let got = ""; s.on("data", d => got += d); s.on("end", () => console.log(s.alpnProtocol, got));
+s.on("error", e => console.log("error", e.message));
+' "$port" "$SRV/roots.pem"
+    fi
+    echo "  $served_ok answers from other clients as they should be"
+    kill "$SERVE_PID" 2>/dev/null
+    wait "$SERVE_PID" 2>/dev/null
+  fi
+fi
+
+echo
 echo "== an error value's sentence, through .or_panic"
 if [ "$scripted" = no ]; then
   echo "  no scripted server to refuse a handshake, so the sentence goes unshown"
@@ -250,17 +449,20 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-# prove_broken <label> <phrase> <old> <new> [scenarios]: the exercise must
-# fail on a copy of the module with <old> replaced, at the check that names
-# <phrase> - over the trace, or against the scripted server.
+# prove_broken <label> <phrase> <old> <new> [mode]: the exercise must fail
+# on a copy of the module with <old> replaced, at the check that names
+# <phrase> - over the trace; against the scripted server (`scenarios`);
+# as a server, before the scripted client (`server`, whose report must
+# name the scenario); or judging the server's configurations (`config`).
 mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
   mkdir -p "$WORK/patched/std"
   local mode="${5:-trace}"
-  if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; }; then
-    echo "  no scripted server or python3 here, so the $1 proof is unmeasured"
+  if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; } ||
+     { { [ "$mode" = server ] || [ "$mode" = config ]; } && [ "$served" = no ]; }; then
+    echo "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
   fi
   if ! OLD="$3" NEW="$4" "$PY" - <<PY
@@ -274,6 +476,44 @@ PY
   then
     echo "  the $1 patch did not apply"
     status=1
+    return
+  fi
+  if [ "$mode" = server ] || [ "$mode" = config ]; then
+    if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched/tlsx" \
+         "$REPO/bench/std_tls_exercise.iyi" >"$WORK/patched/build.log" 2>&1; then
+      echo "  the $1 copy did not build:"
+      tail -3 "$WORK/patched/build.log" | sed 's/^/    /'
+      status=1
+      return
+    fi
+    local rc
+    if [ "$mode" = config ]; then
+      bash "$WORK/server-configs.sh" "$WORK/patched/tlsx" "$SRV" >"$WORK/mut.out" 2>&1
+      rc=$?
+    else
+      mkdir -p "$WORK/patched/srv"
+      cp "$SRV/chain.pem" "$SRV/key.pem" "$WORK/patched/srv/"
+      "$WORK/patched/tlsx" serve "$WORK/patched/srv" 1000 >"$WORK/patched/serve.log" 2>&1 &
+      local pid=$!
+      for _ in $(seq 1 100); do
+        [ -s "$WORK/patched/srv/port" ] && break
+        sleep 0.1
+      done
+      "$PY" "$REPO/bench/std_tls_client.py" "$(cat "$WORK/patched/srv/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" >"$WORK/mut.out" 2>&1
+      rc=$?
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+    fi
+    if [ "$rc" -eq 0 ]; then
+      echo "  the server held on $1"
+      status=1
+    elif grep -qF -e "$2" "$WORK/mut.out"; then
+      echo "  $1 is caught"
+    else
+      echo "  $1 failed, but not where it should have:"
+      grep -F "FAIL" "$WORK/mut.out" | head -2 | sed 's/^/    /'
+      status=1
+    fi
     return
   fi
   if [ "$mode" = scenarios ]; then
@@ -310,11 +550,15 @@ prove_broken "the sequence number XORed into the nonce's front" "the server's da
 prove_broken "a record's length in its additional data left out" "the client's Finished sealed as the trace's record" \
   '    length = inner.size + 16' '    length = inner.size'
 prove_broken "the server's Finished unchecked" "bad-finished: refused with" \
-  '    unless Subtle.constant_time_compare(message[4, message.size - 4], expected)' '    if false' scenarios
+  '    unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
+      return TlsError.new("the server'"'"'s Finished' '    if false
+      return TlsError.new("the server'"'"'s Finished' scenarios
 prove_broken "CertificateVerify unchecked" "bad-cv: refused with" \
   '    return TlsError.new("the server'"'"'s CertificateVerify is not its key'"'"'s signature (decrypt_error)") unless ok' '' scenarios
 prove_broken "CertificateVerify over the client's context string" "ok: refused" \
-  '"TLS 1.3, server CertificateVerify"' '"TLS 1.3, client CertificateVerify"' scenarios
+  '"TLS 1.3, server CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
+    key = leaf.public_key' '"TLS 1.3, client CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
+    key = leaf.public_key' scenarios
 prove_broken "an ECDSA scheme taken for any curve" "cv-wrong-curve: refused with" \
   'unless key.is_a?(EcdsaPublicKey) && key.curve == curve' 'unless key.is_a?(EcdsaPublicKey)' scenarios
 prove_broken "an Ed25519 CertificateVerify unchecked" "bad-cv-ed25519: expected a refusal" \
@@ -342,6 +586,55 @@ prove_broken "an unknown extension in EncryptedExtensions passed over" "unsolici
 prove_broken "a share of small order taken" "zero-share:" \
   '    return TlsError.new("the server'"'"'s X25519 share gives no secret (illegal_parameter)") if shared.is_a?(CurveError)' \
   '    shared = X25519.public_key(private_key) if shared.is_a?(CurveError)' scenarios
+# The server's own checks, each before the scripted client: the scenario
+# that breaks the rule must be reported as answered wrongly.
+prove_broken "the client's Finished unchecked" "FAIL bad-finished " \
+  '    unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
+      return TlsError.new("the client'"'"'s Finished' '    if false
+      return TlsError.new("the client'"'"'s Finished' server
+prove_broken "the server's CertificateVerify over the client's context string" "FAIL ok " \
+  '"TLS 1.3, server CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
+    signature = @config.sign(signed)' '"TLS 1.3, client CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
+    signature = @config.sign(signed)' server
+prove_broken "the server's HelloRetryRequest transcript restarted as something else" "FAIL hrr " \
+  '      @transcript = [254_u8, 0_u8, 0_u8, first.size.to_u8] + first + retry' '      @transcript = first + retry' server
+prove_broken "the server's writes kept on its handshake keys after its Finished" "FAIL ok " \
+  '    @writer = TlsRecordCipher.new(@suite, @schedule, server_application)
+    @write_secret = server_application' '    @write_secret = server_application' server
+prove_broken "early data under keys the server lacks not passed over" "FAIL early-skip " \
+  '      if opened.is_a?(TlsError) && @early_left > 0 && body.size <= @early_left' '      if false' server
+prove_broken "early data before a second ClientHello not passed over" "FAIL early-after-hrr " \
+  '        if @early_left > 0 && body.size <= @early_left' '        if false' server
+prove_broken "a ChangeCipherSpec during the handshake not passed over" "FAIL ccs " \
+  '      if type == TlsRecords::CHANGE_CIPHER_SPEC && @handshaking' '      if type == TlsRecords::CHANGE_CIPHER_SPEC && false' server
+prove_broken "a ClientHello's duplicate extension taken" "FAIL dup-ext " \
+  '      return TlsError.new("extension #{type} twice in a ClientHello (illegal_parameter)") if seen.includes?(type)' '' server
+prove_broken "pre_shared_key's place unchecked" "FAIL psk-not-last " \
+  '      return TlsError.new("pre_shared_key not last in a ClientHello (illegal_parameter)") if seen.includes?(41)' '' server
+prove_broken "a compression method taken" "FAIL compression " \
+  '    return TlsError.new("a ClientHello whose compression methods are not null alone (illegal_parameter)") unless compression == [0_u8]' '' server
+prove_broken "a session id of any length echoed" "FAIL long-session " \
+  '    return TlsError.new("a ClientHello with a session id of #{session.size} bytes (illegal_parameter)") if session.size > 32' '' server
+prove_broken "a client without ed25519 answered anyway" "FAIL no-ed25519 " \
+  '    return TlsError.new("the client does not take Ed25519 signatures, the only kind this server makes (handshake_failure)") unless schemes.includes?(0x0807)' '' server
+prove_broken "a second ClientHello's session id unchecked" "FAIL hrr-other-session " \
+  '      return TlsError.new("a second ClientHello with another session id (illegal_parameter)") unless again.session == offer.session' '' server
+prove_broken "the server's suite order put before the client's" "FAIL client-order " \
+  '    @suite = offer.suites.find { |s| SUITES.includes?(s) } || 0' '    @suite = SUITES.find { |s| offer.suites.includes?(s) } || 0' server
+prove_broken "the client's ALPN order put before the server's" "FAIL alpn-order " \
+  '    @config.alpn.find { |protocol| wanted.includes?(protocol) }' '    wanted.find { |protocol| @config.alpn.includes?(protocol) }' server
+prove_broken "an ALPN offer with nothing in common answered anyway" "FAIL alpn-mismatch " \
+  '    if (wanted = offer.alpn) && !@config.alpn.empty? && @alpn_protocol.nil?' '    if (wanted = offer.alpn) && @config.alpn.empty? && @alpn_protocol.nil?' server
+prove_broken "no alert sent before hanging up" "FAIL dup-ext " \
+  '    code = TlsBytes.alert_code(error.message)' '    code = nil.as(UInt8?)' server
+prove_broken "an alert in the clear after the server's keys" "FAIL bad-finished " \
+  '      if @writer
+        send_protected(TlsRecords::ALERT, content)' '      if false
+        send_protected(TlsRecords::ALERT, content)' server
+prove_broken "a private key that is not the certificate's taken" "FAIL another key" \
+  '    return TlsError.new("the private key is not the certificate'"'"'s") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes' '' config
+prove_broken "a PKCS #8 public key unchecked" "FAIL a version 2 key carrying another public key" \
+  '        return TlsError.new("the private key: its public key is not the seed'"'"'s") unless bits.size == 33 && bits[0] == 0_u8 && bits[1, 32] == TlsBytes.of(Ed25519.public_key(seed))' '' config
 
 echo
 if [ "$status" -eq 0 ]; then

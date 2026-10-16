@@ -4,6 +4,36 @@
 
 ### Added
 
+- **std/tls has a server: `TlsServer` and `TlsServerConfig`, TLS 1.3 with
+  an Ed25519 certificate.** std/tls was a client only, so an iyi program
+  could not take a TLS connection at all.
+  - `TlsServerConfig.from_pem(chain, key)` takes the chain, leaf first,
+    and a PKCS #8 Ed25519 key (RFC 8410 §7, version 1 or 2), refusing a
+    key that is not the leaf's; `alpn` lists the protocols spoken.
+  - `TlsServer.over(socket, config)` runs the handshake: the client's
+    suite order, X25519 with a HelloRetryRequest when no share came, the
+    server's ALPN order (none in common is `no_application_protocol`),
+    CertificateVerify signed with std/curve25519's constant-time Ed25519,
+    the client's Finished checked in constant time. Early data is refused
+    and its records passed over (§4.2.10); every malformed ClientHello is
+    refused with the alert §4 and §9.2 name, sent to the client - in the
+    clear before the keys, under them after.
+  - Only Ed25519 signs: std/ecdsa and std/rsa verify only, on variable-time
+    std/big. OpenSSL, Python, curl, Node and Go take it; browsers do not.
+  - The client and the server share one record layer
+    (`TlsConnection`): records, alerts, KeyUpdate, close_notify. The
+    client's sentences are unchanged; it now takes a plaintext alert
+    anywhere in the handshake, and names every alert of RFC 8446 §6.
+  - `X509.pem(text, label)` reads any PEM block, `PRIVATE KEY` among them.
+
+  Held by `bench/std_tls_exercise.sh`: eleven configurations judged; a new
+  scripted client, `bench/std_tls_client.py`, checks a handshake step by
+  step - the chain, CertificateVerify with Python's Ed25519, Finished
+  against its own transcript, a KeyUpdate - and breaks one rule in each of
+  38 scenarios; the std/tls client, Python's ssl, OpenSSL's s_client (each
+  suite, a HelloRetryRequest, four refusals), curl and Node; 20 more broken
+  copies.
+
 - **The std/tls client offers `ed25519` and takes a server whose
   certificate is Ed25519.** Its signature_algorithms named ECDSA and
   RSA-PSS only, so a server with an Ed25519 certificate - OpenSSL with an

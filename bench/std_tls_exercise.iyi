@@ -1,4 +1,4 @@
-# Exercises std/tls: a TLS 1.3 client.
+# Exercises std/tls: a TLS 1.3 client and server.
 #
 # With no argument: RFC 8448's "Simple 1-RTT Handshake" trace, held byte for
 # byte through the key schedule and the record protection - every secret
@@ -12,11 +12,19 @@
 #                       for its reason;
 #   get PORT ROOTS HOST [ALPN]
 #                       GET / over a connection to 127.0.0.1:PORT for HOST,
-#                       its status line printed, or why it was refused.
+#                       its status line printed, or why it was refused;
+#   serve DIR COUNT     a TlsServer on 127.0.0.1, its port written to
+#                       DIR/port, with DIR/chain.pem and DIR/key.pem and
+#                       ALPN h2 and http/1.1: COUNT connections, one at a
+#                       time, each line "held ..." or "refused: why".
+#                       Bytes are echoed as "echo:..."; a request ending
+#                       in a blank line is answered `HTTP/1.0 200 ok` and
+#                       what was agreed, then close_notify;
+#   config CHAIN KEY    TlsServerConfig.from_pem's answer.
 
-import std/tls::{TlsClient, TlsConfig, TlsError, TlsKeySchedule, TlsRecordCipher}
+import std/tls::{TlsClient, TlsConfig, TlsError, TlsKeySchedule, TlsRecordCipher, TlsServer, TlsServerConfig}
 import std/x509::{Certificate}
-import std/socket::{IyiSocket}
+import std/socket::{IyiSocket, SocketError}
 import std/file::{File}
 
 def check(cond : Bool, label : String) : Nil
@@ -159,6 +167,61 @@ if args.size > 0 && args[0] == "get"
   conn.write("GET / HTTP/1.0\r\n\r\n")
   got = drain(conn)
   puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}"
+  exit 0
+end
+
+if args.size > 0 && args[0] == "config"
+  answer = TlsServerConfig.from_pem(File.read(args[1]), File.read(args[2]))
+  if answer.is_a?(TlsError)
+    puts "refused: #{answer.message}"
+  else
+    puts "config: #{answer.chain.size} certificates, leaf #{answer.leaf.subject_name}"
+  end
+  exit 0
+end
+
+# What one connection to the server mode says it agreed, for a reply.
+def agreed(conn : TlsServer) : String
+  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite}"
+end
+
+def serve_one(conn : TlsServer) : String
+  received = ""
+  while true
+    chunk = conn.read
+    return "held #{agreed(conn)}, then #{chunk.message}" if chunk.is_a?(TlsError)
+    return "held #{agreed(conn)}, closed by the client after #{received.bytesize} bytes" if chunk.empty?
+    received = received + chunk
+    if received.includes?("\r\n\r\n") || received.includes?("\n\n")
+      conn.write("HTTP/1.0 200 ok\r\n\r\n#{agreed(conn)}\n")
+      conn.close
+      return "held #{agreed(conn)}, answered"
+    end
+    conn.write("echo:" + chunk)
+  end
+  ""
+end
+
+if args.size > 0 && args[0] == "serve"
+  config = TlsServerConfig.from_pem(File.read(args[1] + "/chain.pem"), File.read(args[1] + "/key.pem")).or_panic
+  config.alpn = ["h2", "http/1.1"]
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1] + "/port", listener.local_port.to_s)
+  args[2].to_i.times do
+    socket = listener.accept
+    unless socket.is_a?(IyiSocket)
+      puts "no connection"
+      next
+    end
+    socket.read_timeout_ms = 15000
+    conn = TlsServer.over(socket, config)
+    if conn.is_a?(TlsError)
+      puts "refused: #{conn.message}"
+    else
+      puts serve_one(conn)
+    end
+    STDOUT.flush
+  end
   exit 0
 end
 

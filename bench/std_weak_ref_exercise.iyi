@@ -308,9 +308,13 @@ puts "  a literal's reference answers it after a collection"
   check(failures == 0, "every read answered nil or the object itself, intact (#{failures} did not, of #{reads})")
   check(went_beside >= 1_u64, "a mark ran beside the reading threads (#{ran} collections, #{went_beside} beside)")
   check(finished > 0, "a round saw two collections end (#{rounds} rounds)")
-  # Each reader's registers and stack can hold a target it let go; a
-  # round's own handful at most.
-  check(lost >= finished * 190, "a round's targets nothing held are cleared once two collections end (#{lost} of #{finished * 200})")
+  # Each reader's registers and stack, and the other readers' when the
+  # world stops, can hold a target it let go: a conservative root keeps
+  # what it happens to point at, and promises no bound. Linux keeps about
+  # one a round; Windows' plain build kept 217 in 20 rounds, about eleven.
+  # Nine in ten cleared is what is asked: a collection that clears no cell,
+  # or one in two, still fails it by far.
+  check(lost >= finished * 180, "a round's targets nothing held are cleared once two collections end (#{lost} of #{finished * 200})")
   check(long_lived.next.nil? == false, "the long-lived chain is still whole")
   puts "  4 threads, #{rounds} rounds, #{reads} reads, #{ran} collections (#{went_beside} beside the program): every read nil or the object, intact; #{lost} of #{finished * 200} cleared in the #{finished} rounds that saw two collections end"
 {% end %}

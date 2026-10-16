@@ -2,9 +2,10 @@
 #
 #   ./bin/iyi run bench/http2_exercise.iyi                  # iyi to iyi
 #   ./bin/iyi run bench/http2_exercise.iyi serve PORTFILE   # a server for others
-#   ./bin/iyi run bench/http2_exercise.iyi serve-tls PORTFILE CHAIN.pem KEY.pem
+#   ./bin/iyi run bench/http2_exercise.iyi serve-tls PORTFILE CHAIN.pem KEY.pem [CLIENT_ROOTS.pem]
 #   ./bin/iyi run bench/http2_exercise.iyi fetch BASE [ROOTS.pem]
 #   ./bin/iyi run bench/http2_exercise.iyi tls-get BASE ROOTS.pem [ALPN,...]
+#   ./bin/iyi run bench/http2_exercise.iyi whoami BASE ROOTS.pem [CHAIN.pem KEY.pem]
 #
 # The first runs an h2c server and a client with prior knowledge in one
 # program: requests and answers of every shape - string, stream and pipe
@@ -16,14 +17,17 @@
 # std/tls's server, ALPN offering h2 and http/1.1; `fetch` is the client
 # against Node's server, and prints what it read for the gate to compare;
 # `tls-get` is the client against `serve-tls`, offering *ALPN* (h2 and
-# http/1.1 unless named).
+# http/1.1 unless named). With CLIENT_ROOTS `serve-tls` asks each client
+# for its certificate, and `/whoami` answers the one it presented;
+# `whoami` asks that over h2, over http/1.1 and through an upgrade,
+# presenting CHAIN and KEY when given.
 
 module bench/http2_exercise
 
-import std/http::{HTTP, HTTPClient, Response, Request, Server, HTTPError}
+import std/http::{HTTP, HTTPClient, Response, Request, Server, HTTPError, Upgraded}
 import std/socket::{IyiSocket, SocketError}
 import std/io
-import std/tls::{TlsConfig, TlsServerConfig}
+import std/tls::{TlsConfig, TlsIdentity, TlsServerConfig}
 import std/x509::{Certificate}
 import std/file::{File}
 
@@ -113,6 +117,11 @@ def answer(req : Request) : Response
     r
   when "/upgrade"
     Response.upgrade({"Upgrade" => "x"}) { |_socket, _left| nil }
+  when "/whoami"
+    Response.new(200, req.peer_certificates.empty? ? "peer=-" : "peer=#{req.peer_certificates[0].subject_name} #{req.version}")
+  when "/whoami-upgrade"
+    peer = req.peer_certificates.empty? ? "-" : req.peer_certificates[0].subject_name
+    Response.upgrade({"Upgrade" => "x", "X-Peer" => peer}) { |_socket, _left| nil }
   when "/empty"
     Response.new(204, "")
   else
@@ -144,6 +153,7 @@ end
 if mode == "serve-tls"
   config = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic
   config.alpn = ["h2", "http/1.1"]
+  config.client_roots = Certificate.from_pem(File.read(args[4])).or_panic if args.size > 4
   listener = IyiSocket.listen("127.0.0.1", 0)
   File.write(args[1], listener.local_port.to_s)
   serve_on(listener, true, config)
@@ -166,6 +176,43 @@ if mode == "tls-get"
   puts "post #{posted.status} #{posted.body.includes?("length=500000 fnv=#{fnv(sent)}")}"
   puts "connections #{client.connections_made}"
   client.close
+  exit 0
+end
+
+if mode == "whoami"
+  base = args[1]
+  ["h2,http/1.1", "http/1.1"].each do |alpn|
+    config = TlsConfig.new
+    config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+    config.alpn = alpn.split(',')
+    config.identity = TlsIdentity.from_pem(File.read(args[3]), File.read(args[4])).or_panic if args.size > 4
+    HTTP.tls_config = config
+    client = HTTPClient.new
+    got = client.get(base + "/whoami")
+    case got
+    in Response
+      puts "#{alpn}: #{got.status} #{got.body}"
+    in HTTPError
+      puts "#{alpn}: #{got.message}"
+    in SocketError
+      puts "#{alpn}: #{got.message}"
+    in Cancelled
+      puts "#{alpn}: cancelled"
+    end
+    client.close
+  end
+  upgraded = HTTP.upgrade(base + "/whoami-upgrade", "x")
+  case upgraded
+  in Upgraded
+    puts "upgrade: #{upgraded.response.status} #{upgraded.response.header("x-peer") || "?"}"
+    upgraded.socket.close
+  in HTTPError
+    puts "upgrade: #{upgraded.message}"
+  in SocketError
+    puts "upgrade: #{upgraded.message}"
+  in Cancelled
+    puts "upgrade: cancelled"
+  end
   exit 0
 end
 

@@ -101,10 +101,11 @@ echo "== what the module reaches"
 # is std/random's, which reads the clock), so it adds nothing to what the
 # module reaches. These are the modules it may import, and none but
 # std/socket, std/time and std/tls reaches anything: HTTP/2's std/hpack
-# and the byte slices it reads are iyi over the prelude.
-imports=$(grep -oE '^import std/[a-z_]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
-if [ "$imports" = "std/compress std/digest std/hpack std/mime std/slice std/socket std/time std/tls std/uri " ]; then
-  echo "  std/socket, std/time and std/tls, and std/compress, std/digest, std/hpack, std/mime, std/slice and std/uri, which reach nothing"
+# and the byte slices it reads are iyi over the prelude, and std/x509 -
+# the certificate a request carries - is std/tls's own already.
+imports=$(grep -oE '^import std/[a-z_0-9]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
+if [ "$imports" = "std/compress std/digest std/hpack std/mime std/slice std/socket std/time std/tls std/uri std/x509 " ]; then
+  echo "  std/socket, std/time and std/tls (std/x509 its own), and std/compress, std/digest, std/hpack, std/mime, std/slice and std/uri, which reach nothing"
 else
   echo "  std/http imports $imports"
   status=1
@@ -1073,6 +1074,50 @@ https_checks() {
   wait "$tpid" 2>/dev/null
   return $failed
 }
+# mtls_checks <binary>: its serve-tls asking for a client's certificate
+# under the gate's root, and its own client presenting the localhost leaf
+# over h2, over http/1.1 and through an upgrade - the handler must see
+# that certificate - then presenting none, refused each way; and Python
+# presenting the leaf. Answers the number that failed.
+mtls_checks() {
+  local bin="$1" failed=0 got want mport mpid
+  rm -f "$WORK/mtls.port"
+  "$bin" serve-tls "$WORK/mtls.port" "$WORK/tls/ed.pem" "$WORK/tls/ed.key" "$WORK/tls/root.pem" >"$WORK/mtls.log" 2>&1 &
+  mpid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$WORK/mtls.port" ] && break
+    sleep 0.1
+  done
+  mport="$(cat "$WORK/mtls.port" 2>/dev/null)"
+  local base="https://localhost:$mport"
+  got="$(timeout -k 5 60 "$bin" whoami "$base" "$WORK/tls/root.pem" "$WORK/tls/leaf.pem" "$WORK/tls/leaf.key" 2>&1 | tr '\n' '|')"
+  want="h2,http/1.1: 200 peer=CN=localhost HTTP/2|http/1.1: 200 peer=CN=localhost HTTP/1.1|upgrade: 101 CN=localhost|"
+  [ "$got" = "$want" ] || { echo "  FAIL: a client certificate presented: $got"; failed=$((failed + 1)); }
+  local refused="cannot read from localhost: tls: the server sent alert certificate_required (116)"
+  got="$(timeout -k 5 60 "$bin" whoami "$base" "$WORK/tls/root.pem" 2>&1 | tr '\n' '|')"
+  want="h2,http/1.1: $refused|http/1.1: $refused|upgrade: $refused|"
+  [ "$got" = "$want" ] || { echo "  FAIL: no client certificate: $got"; failed=$((failed + 1)); }
+  if [ -n "$PY" ]; then
+    got="$("$PY" -c '
+import socket, ssl, sys
+ctx = ssl.create_default_context(cafile=sys.argv[2])
+ctx.load_cert_chain(sys.argv[3], sys.argv[4])
+with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=20), server_hostname="localhost") as s:
+    s.sendall(b"GET /whoami HTTP/1.0\r\nHost: localhost\r\n\r\n")
+    data = b""
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+print(data.decode().split("\r\n\r\n")[1])
+' "$mport" "$WORK/tls/root.pem" "$WORK/tls/leaf.pem" "$WORK/tls/leaf.key" 2>&1)"
+    [ "$got" = "peer=CN=localhost HTTP/1.0" ] || { echo "  FAIL: Python presenting a certificate: $got"; failed=$((failed + 1)); }
+  fi
+  kill "$mpid" 2>/dev/null
+  wait "$mpid" 2>/dev/null
+  return $failed
+}
 if [ "$h2_built" -ne 1 ] || [ ! -s "$WORK/tls/ed.key" ]; then
   echo "  skipped: no HTTP/2 exercise or no Ed25519 certificate from the https:// section above"
   https_ready=0
@@ -1093,6 +1138,11 @@ else
       status=1
     fi
   done
+  if mtls_checks "$H2BIN"; then
+    echo "  a client's certificate asked for: the handler sees it over h2, http/1.1 and an upgrade; none is refused; Python's presented"
+  else
+    status=1
+  fi
 fi
 
 echo
@@ -1434,6 +1484,32 @@ https_breaks "the TLS handshake skipped" https_plain \
 https_breaks "no close_notify at the end" https_notify \
   '    secured.close
   end' '  end'
+# The client's certificate, lost on the way to the handler or the server:
+# the mTLS checks must fail.
+mtls_breaks() { # mtls_breaks <label> <name> <old> <new>
+  local label="$1" name="$2" old="$3" new="$4"
+  if [ "$https_ready" -ne 1 ] || [ -z "$PY" ]; then
+    echo "  $label: skipped, no HTTPS server to break"
+  elif ! h2_patched "$name" "$old" "$new"; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
+    status=1
+  elif mtls_checks "$WORK/$name.bin" >"$WORK/$name.out" 2>&1; then
+    echo "  $label: the client-certificate checks passed on a broken copy"
+    status=1
+  else
+    echo "  $label: caught: $(grep -m1 'FAIL' "$WORK/$name.out" | sed 's/^ *FAIL: //' | cut -c1-120)"
+  fi
+}
+mtls_breaks "an HTTP/1.1 request without the client's certificate" mtls_h1 \
+  '        req.peer_certificates = peer
+        return unless answered?' '        return unless answered?'
+mtls_breaks "an HTTP/2 request without the client's certificate" mtls_h2 \
+  '      req.peer_certificates = peer
+      answered = h2.answer' '      answered = h2.answer'
+mtls_breaks "an upgrade's handshake presenting no certificate" mtls_upgrade \
+  '            offered.identity = tls_config.identity
+' ''
 
 echo
 if [ "$status" -eq 0 ]; then

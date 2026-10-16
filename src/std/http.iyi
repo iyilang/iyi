@@ -50,6 +50,9 @@
 # connection is TLS, its handshake first and close_notify last; inside
 # it, as in the clear, a connection that opens with HTTP/2's preface - as
 # one whose ALPN chose `h2` does - is served HTTP/2, any other HTTP/1.1.
+# A config with `client_roots` asks each client for its certificate, and
+# a request carries the chain it presented in `peer_certificates`; an
+# `https://` request presents `HTTP.tls_config`'s `identity` when asked.
 #
 # **Errors are values.** What the other end does wrong - a malformed head,
 # a body cut short, a broken chunk, a corrupt gzip - is an `HTTPError`
@@ -90,6 +93,7 @@ module std/http
 
 import std/socket::{IyiSocket, SocketError}
 import std/tls::{TlsClient, TlsConfig, TlsConnection, TlsError, TlsServer, TlsServerConfig}
+import std/x509::{Certificate}
 import std/uri::{URI, Params}
 import std/mime::{MIME}
 import std/compress::{Inflater, Deflater, Envelope, Gzip, CompressError}
@@ -429,6 +433,12 @@ pub class TlsStream
   @at : Int32 = 0
 
   def initialize(@tls : TlsConnection, @host : String)
+  end
+
+  # The peer's certificate chain, leaf first, as the handshake checked it:
+  # the server's, at a client; the client's, at a server that asked.
+  def peer_certificates : Array(Certificate)
+    @tls.peer_certificates
   end
 
   # Up to *count* bytes into *buffer*: 0 once the peer closed with
@@ -980,6 +990,10 @@ pub class Request
   # proxy in front is what this names; `X-Forwarded-For` is the proxy's
   # word, and a header any client can write.
   getter remote_address : String?
+  # The client's certificate chain, leaf first, as std/tls checked it:
+  # under `serve(tls:)` with `client_roots` set, the certificate the
+  # client presented; empty otherwise.
+  property peer_certificates : Array(Certificate) = [] of Certificate
   @reader : BodyReader
   @text : String?
 
@@ -1421,11 +1435,12 @@ pub struct Server
     conn = Conn.new(client, listener, idle, stream)
     conn.gap = timeout_ms if timeout_ms > 0
     remote = client.remote_address
+    peer = stream ? stream.peer_certificates : [] of Certificate
     conn.deadline_in(timeout_ms)
     preface = h2_preface?(conn)
     conn.no_deadline
     if preface
-      serve_h2(conn, handler, stream_bodies, compress, remote)
+      serve_h2(conn, handler, stream_bodies, compress, remote, peer)
       return
     end
     while true
@@ -1463,6 +1478,7 @@ pub struct Server
             return
           end
         end
+        req.peer_certificates = peer
         return unless answered?(conn, handler.call(req), req, head.close, compress)
         return unless reader.finished? || reader.drain(MAX_DRAIN.to_i64)
       end
@@ -1489,7 +1505,7 @@ pub struct Server
   # An HTTP/2 connection (RFC 9113): its requests, one stream at a time.
   # A body is read whole before the block runs unless *stream_bodies*,
   # as over HTTP/1.1; one past `MAX_BODY` is answered 413 on its stream.
-  private def self.serve_h2(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?) : Nil
+  private def self.serve_h2(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?, peer : Array(Certificate)) : Nil
     h2 = H2Connection.new(conn, true, MAX_BODY.to_i64)
     return unless h2.start
     while id = h2.next_request
@@ -1513,6 +1529,7 @@ pub struct Server
           break
         end
       end
+      req.peer_certificates = peer
       answered = h2.answer(id, handler.call(req), req, compress)
       h2.done(id)
       break unless answered
@@ -2399,6 +2416,7 @@ pub struct HTTP
             offered = TlsConfig.new
             offered.roots = tls_config.roots
             offered.now = tls_config.now
+            offered.identity = tls_config.identity
             offered.alpn = ["http/1.1"]
           end
           tls = TlsClient.over(socket, host, offered)

@@ -4,6 +4,21 @@
 
 ### Added
 
+- **Client certificates over HTTPS: a handler sees the one a client
+  presented, and the client presents `HTTP.tls_config`'s identity.**
+  `Server.serve(tls:)` could ask for a client's certificate once std/tls
+  could, but no request carried it, and an upgrade over `https://` made
+  its own `TlsConfig` and left the identity out.
+  - `Request#peer_certificates` is the chain std/tls checked, over
+    HTTP/1.1 and HTTP/2 alike; `TlsStream#peer_certificates` beside it.
+  - `HTTP.upgrade` (and so `wss://`) presents the identity too.
+
+  Held by `bench/std_http_exercise.sh`: a server asking under the gate's
+  root, the iyi client presenting the localhost leaf over h2, http/1.1 and
+  an upgrade with the handler seeing it each time, none refused each way,
+  Python presenting it; three broken copies - each protocol's request
+  without the chain, an upgrade presenting nothing.
+
 - **std/tls's server waits for the rest of a refused client's flight
   before it closes.** A refusal mid-flight - a client certificate the
   server turns down, with CertificateVerify and Finished still on the way

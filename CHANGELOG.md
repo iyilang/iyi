@@ -4,6 +4,54 @@
 
 ### Added
 
+- **A TLS read that times out leaves the connection open, and says it
+  timed out.** Every failed read ended the connection: a read timeout set
+  to poll a TLS socket closed it, and std/http's `timed_out?` was false
+  over `https://` - a WebSocket's own idle wait ended without close_notify.
+  - `TlsError#timed_out?` and `#cancelled?` mark a read that waited past
+    its timeout or was cancelled; nothing it read is lost, and the next
+    read goes on. std/http's `TlsStream` answers `SocketError.timed_out`
+    and `Cancelled` for them, as a socket does.
+
+  Held by the scripted server's `slow-echo` (a read at 300 ms times out,
+  the next reads the echo) and a broken copy.
+
+- **std/tls's errors carry their alert as a field: `TlsError#alert`,
+  `TlsAlert`.** What went on the wire was read back out of the sentence's
+  last parentheses, so rewording a message could change the protocol.
+  The sentences read as before.
+
+  Held by every alert the gate's scenarios expect, and a broken copy that
+  sends none.
+
+- **A TLS read writes nothing; KeyUpdate and close_notify go out from
+  writes.** A read answered a peer's KeyUpdate and its close_notify at
+  once, writing from the reading task while another could be writing.
+  - A KeyUpdate asking for one back is answered before this side's next
+    application data (RFC 8446 section 4.6.3); a close_notify received
+    leaves this side able to write, and its own goes out with `close`.
+  - `write` moves to new keys past `key_limit` records (2^23 by default,
+    under section 5.5's bound for AES-GCM), and `key_update(request)` does
+    so on demand.
+
+  Held by the scripted server's `keyupdate` (the client's answer comes
+  with its next write) and `client-rekey` (two KeyUpdates at a limit of
+  two records, then one asking back), with three broken copies.
+
+- **std/tls holds to eight more of RFC 8446's rules.** A CertificateRequest
+  in the handshake has an empty context (4.3.2); certificate entries carry
+  no extensions nobody asked for, either end (4.4.2); a server_name
+  acknowledgement is empty and answers a name sent; a ClientHello's
+  server_name is one ASCII host name; early data ends at the second
+  ClientHello, and only a record that does not decrypt is passed over as
+  early data; user_canceled after the handshake is a warning; a second
+  ClientHello without the chosen suite, or offering early data again, is
+  refused - both had no scenario; and `read(0)` is refused as the
+  program's mistake, since "" is the peer's close.
+
+  Held by eleven scenarios across the scripted server and client, and a
+  broken copy each.
+
 - **A search for a certificate chain is bounded: 100 signature checks,
   and ten certificates a Certificate message.** Intermediates under one
   name, each a CA signing the others, made `X509.verify` try every order

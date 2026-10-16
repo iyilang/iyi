@@ -880,7 +880,7 @@ prove_broken "an Ed25519 CertificateVerify unchecked" "bad-cv-ed25519: expected 
 prove_broken "a server's Certificate of any length searched" "cert-many:" \
   '      return TlsError.new("a Certificate of more than #{X509::MAX_CHAIN} certificates", TlsAlert::BAD_CERTIFICATE) if chain.size == X509::MAX_CHAIN' '' scenarios
 prove_broken "a client's handshake bounded by each wait alone" "slow-server: refused with" \
-  '    return @socket.read(16384 + 5) if @deadline_ns == 0_i64' '    return @socket.read(16384 + 5) if true' scenarios
+  '    return @socket.read(buffer, count) if @deadline_ns == 0_i64' '    return @socket.read(buffer, count) if true' scenarios
 prove_broken "a KeyUpdate's request taken whatever it is" "keyupdate-bad:" \
   '        return TlsError.new("a KeyUpdate asking #{message[4]}", TlsAlert::ILLEGAL_PARAMETER) unless message[4] <= 1_u8' '' scenarios
 prove_broken "handshake bytes after the ServerHello taken under the keys" "sh-and-more:" \
@@ -1012,7 +1012,7 @@ prove_broken "a server_name's own certificate passed over" "FAIL sni-other " \
 prove_broken "a client that hangs up without an alert" "FAIL no alert read by OpenSSL" \
   '    return client.fail(problem) if problem' '    return problem if problem' client-alert
 prove_broken "a handshake bounded by each wait alone" "FAIL slow-hello " \
-  '    return @socket.read(16384 + 5) if @deadline_ns == 0_i64' '    return @socket.read(16384 + 5) if true' server
+  '    return @socket.read(buffer, count) if @deadline_ns == 0_i64' '    return @socket.read(buffer, count) if true' server
 prove_broken "a handshake message rebuilt for each record of it" "FAIL byte-records " \
   '    @handshake.concat(content)' '    @handshake = @handshake + content' server
 prove_broken "ChangeCipherSpec records passed over without end" "FAIL ccs-flood " \

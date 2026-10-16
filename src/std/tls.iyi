@@ -322,15 +322,15 @@ pub class TlsRecordCipher
              end
     return TlsError.new("a record that does not decrypt", TlsAlert::BAD_RECORD_MAC) if opened.is_a?(AeadError)
     @sequence = @sequence + 1
-    inner = TlsBytes.of(opened)
-    at = inner.size - 1
+    inner = opened.to_unsafe
+    at = opened.bytesize - 1
     # The content type is the last byte that is not padding.
     while at >= 0 && inner[at] == 0_u8
       at = at - 1
     end
     return TlsError.new("a record with no content type", TlsAlert::UNEXPECTED_MESSAGE) if at < 0
     return TlsError.new("a record of #{at} bytes, past the 2^14 allowed", TlsAlert::RECORD_OVERFLOW) if at > TlsRecords::MAX_PLAINTEXT
-    {inner[at], inner[0, at]}
+    {inner[at], TlsBytes.bytes(inner, at)}
   end
 end
 
@@ -373,12 +373,14 @@ pub abstract class TlsConnection
   @peer : String
   @place : String
   # What the socket gave and the records have not taken yet, from
-  # `@inbox_at`; handshake bytes not yet a message, from `@handshake_at`.
-  # Each is read forward and compacted only when more comes, so a peer
-  # that sends a message a byte a record costs what it sends, not its
-  # square.
-  @inbox : Array(UInt8) = [] of UInt8
+  # `@inbox_at` to `@inbox_end`; handshake bytes not yet a message, from
+  # `@handshake_at`. Each is read forward and compacted only when more
+  # comes, so a peer that sends a message a byte a record costs what it
+  # sends, not its square. The inbox is two records' room, which the
+  # socket reads into in place; it is made at the first read.
+  @inbox : Pointer(UInt8) = Pointer(UInt8).new(0_u64)
   @inbox_at : Int32 = 0
+  @inbox_end : Int32 = 0
   @handshake : Array(UInt8) = [] of UInt8
   @handshake_at : Int32 = 0
   # ChangeCipherSpec records passed over: a peer sends one (appendix D.4).
@@ -840,50 +842,59 @@ pub abstract class TlsConnection
   private def read_record : {Array(UInt8), Array(UInt8)} | TlsError
     filled = fill(5)
     return filled if filled
-    header = @inbox[@inbox_at, 5]
+    header = Array(UInt8).new(5) { |i| @inbox[@inbox_at + i] }
     return TlsError.new("a record with version #{header[1]}.#{header[2]}", TlsAlert::DECODE_ERROR) unless header[1] == 3_u8
     length = (header[3].to_i32 << 8) | header[4].to_i32
     return TlsError.new("a record of #{length} bytes, past the 2^14 + 256 allowed", TlsAlert::RECORD_OVERFLOW) if length > TlsRecords::MAX_CIPHERTEXT
     filled = fill(5 + length)
     return filled if filled
-    body = @inbox[@inbox_at + 5, length]
+    body = TlsBytes.bytes(@inbox + (@inbox_at + 5), length)
     @inbox_at = @inbox_at + 5 + length
     {header, body}
   end
 
-  # At least *size* bytes in the inbox past `@inbox_at`.
+  INBOX_SIZE = 2 * (5 + TlsRecords::MAX_CIPHERTEXT)
+
+  # At least *size* bytes (a record's, at most) in the inbox past
+  # `@inbox_at`.
   private def fill(size : Int32) : TlsError?
-    while @inbox.size - @inbox_at < size
-      if @inbox_at > 0
-        @inbox = @inbox[@inbox_at, @inbox.size - @inbox_at]
+    @inbox = Pointer(UInt8).malloc(INBOX_SIZE.to_u64) if @inbox.address == 0_u64
+    while @inbox_end - @inbox_at < size
+      # What is left moves to the front when the rest of a record would
+      # not fit behind it; nothing left starts the inbox over.
+      if @inbox_at == @inbox_end
+        @inbox_at = 0
+        @inbox_end = 0
+      elsif @inbox_at > 0 && INBOX_SIZE - @inbox_at < size
+        # What is left is less than *size*, at most half the inbox, and
+        # `@inbox_at` is past that half: the two do not overlap.
+        @inbox.copy_from(@inbox + @inbox_at, @inbox_end - @inbox_at)
+        @inbox_end = @inbox_end - @inbox_at
         @inbox_at = 0
       end
-      got = read_socket
+      got = read_socket(@inbox + @inbox_end, INBOX_SIZE - @inbox_end)
       return got if got.is_a?(TlsError)
       # A wait past the socket's timeout, or a cancelled one, takes nothing
       # from the stream: what came so far stays in the inbox, and a read
       # after it goes on from there.
       return TlsError.new("the connection to #{@place} failed: #{got.message}", timed_out: got.timed_out?) if got.is_a?(SocketError)
-      return TlsError.new("the read from #{@place} was cancelled", cancelled: true) unless got.is_a?(String)
-      return TlsError.new("#{@place} closed the connection without close_notify") if got.empty?
-      at = 0
-      while at < got.bytesize
-        @inbox << got.to_unsafe[at]
-        at = at + 1
-      end
+      return TlsError.new("the read from #{@place} was cancelled", cancelled: true) unless got.is_a?(Int32)
+      return TlsError.new("#{@place} closed the connection without close_notify") if got == 0
+      @inbox_end = @inbox_end + got
     end
     nil
   end
 
-  # One read of the socket, its wait cut to what is left of the deadline.
-  private def read_socket : String | Cancelled | SocketError | TlsError
-    return @socket.read(16384 + 5) if @deadline_ns == 0_i64
+  # One read of the socket into *buffer*, up to *count* bytes, its wait
+  # cut to what is left of the deadline.
+  private def read_socket(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError | TlsError
+    return @socket.read(buffer, count) if @deadline_ns == 0_i64
     left = (@deadline_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
     return TlsError.new("#{@place} took past the time given to #{@handshaking ? "the handshake" : "the read"}", timed_out: true) if left <= 0
     timeout = @socket.read_timeout_ms
     cut = timeout.nil? || timeout <= 0 || timeout > left
     @socket.read_timeout_ms = left.to_i32 if cut
-    got = @socket.read(16384 + 5)
+    got = @socket.read(buffer, count)
     @socket.read_timeout_ms = timeout
     # A wait the deadline cut short ends at the deadline, not the socket's.
     if cut && got.is_a?(SocketError) && got.timed_out?
@@ -2053,7 +2064,15 @@ end
 
 struct TlsBytes
   def self.of(text : String) : Array(UInt8)
-    Array(UInt8).new(text.bytesize) { |i| text.to_unsafe[i] }
+    bytes(text.to_unsafe, text.bytesize)
+  end
+
+  # The *count* bytes at *source*, copied once: a record's worth on every
+  # read, so not first filled with zeros.
+  def self.bytes(source : Pointer(UInt8), count : Int32) : Array(UInt8)
+    bytes = Array(UInt8).unsafe_build(count)
+    bytes.to_unsafe.copy_from(source, count)
+    bytes
   end
 
   def self.text(bytes : Array(UInt8)) : String

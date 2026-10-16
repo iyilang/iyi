@@ -1843,20 +1843,35 @@ Each stage is independently verifiable; the tree is never left broken between th
 
 2. **wasm32 Integration:** (Completed for wasm32-wasi)
    - Allocator: linear memory watermark with 64 KiB size-classed arenas, chunk headers, and free list reuse.
-   - Root discovery: linear memory scan from stacksave to __heap_base, and globals from 0 to __data_end.
+   - Root discovery: linear memory scan from stacksave to __heap_base, and globals from 0 to __data_end; the compiler keeps in a stack slot every value a call may outlive (`src/compiler/iyi/wasm_roots.cr`), so a value held only in a wasm local is in linear memory too.
    - Mark and sweep: mark-queue with layout table traversal; sweep into free lists and large object tracking.
    - Verified: bench/wasm32_exercise.sh passes under wasmtime in default and release modes.
-   - **Not sound in an optimised build.** The walk reads linear memory, and an
-     optimised build keeps a pointer in a wasm local, which is not in linear
-     memory and which nothing can scan: an object held only by a local is
-     freed by a collection that comes while it is held. A top-level array
-     of 200 objects, a collection, 2,000 more allocations: the array reads
-     back empty under `--release` and whole without it; the same in a
-     function ends the program. The exercise passes in release because it
-     roots what it keeps through `pointerof` and class variables. The fix
-     is the compiler's - every pointer local and temporary kept in linear
-     memory across a call that may collect: LLVM's shadow-stack GC strategy
-     with `llvm.gcroot`, or Binaryen's `--spill-pointers` after the link.
+   - **Locals are roots (closed).** The walk reads linear memory, and a wasm
+     local is not in it: an object held only by a value the backend kept in
+     a local was freed by a collection that came while it was held. Under
+     `--release` a top-level array of 200 objects read back empty after a
+     collection and the same in a function ended the program; a plain build
+     lost a temporary - `pair(Box.new(40), Box.new(2))` added to 1848, the
+     first box freed while the second was made. The fix is a pass the
+     compiler runs on wasm32 after optimisation, plain or not
+     (`src/compiler/iyi/wasm_roots.cr`): every parameter and instruction
+     whose type can carry an address (a pointer, an integer of 32 bits or
+     more, an aggregate) that is used past a call - in another block, by a
+     phi, or in its block with a call between - is stored to an alloca of
+     its own where it is defined, with a volatile store. SSA values do not
+     change, so one store keeps the value reachable while its frame lives.
+     LLVM's `llvm.gcroot` covers allocas only, and Binaryen's
+     `--spill-pointers` i32 locals only and is another tool to ship; this
+     covers temporaries and integers and is part of the compiler.
+     `bench/wasm32_exercise.sh` section 7 holds objects in locals alone -
+     an array at the top level and in a function, a call's arguments, a
+     chain, a union made in place - across a collection with the stack
+     scrubbed beneath it, and the weak section holds its arrays in locals
+     with the trigger on; the compiler without the pass fails both, plain
+     and `--release`, and each of four rules removed (parameters, a call in
+     the block, a use elsewhere, integers) fails one. The cost under
+     `--release`: an allocation-heavy tree build 0.14 s to 0.19 s, an
+     arithmetic loop unchanged, the binary 5% larger.
 
 3. **Platform-Specific Pointer Maps:** (Measured and verified)
    - Codegen emits target-specific TypeLayout entries for each build target based on LLVM target data.

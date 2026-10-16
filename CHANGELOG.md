@@ -4,6 +4,27 @@
 
 ### Added
 
+- **wasm32: an object held only by a local is a root, plain and
+  `--release`.** The collector reads linear memory and a WebAssembly local
+  is not in it, so an object held by a value the backend kept in a local
+  was freed while held: under `--release` a top-level array read back
+  empty after a collection and the same in a function ended the program; a
+  plain build freed a call's first argument while the second was made.
+  - A compiler pass for wasm32 (`src/compiler/iyi/wasm_roots.cr`), after
+    optimisation: every parameter and instruction that can carry an address
+    and is used past a call is stored, where it is defined, to a stack slot
+    of its own, which the collector's stack walk reads.
+  - The wasm32 exercise's weak check holds its arrays in locals again, with
+    the collector free to run, as it did before the hole was found.
+  - The cost under `--release`: an allocation-heavy tree build 0.14 s to
+    0.19 s, an arithmetic loop unchanged, the binary 5% larger.
+
+  Held by `bench/wasm32_exercise.sh`'s new section 7 - an array at the top
+  level and in a function, a call's arguments, a chain, a union made in
+  place, held across a collection with the stack scrubbed beneath it -
+  which the compiler without the pass fails plain and `--release`, and
+  which fails with any of four of the pass's rules removed.
+
 - **std/tls's server takes a secp256r1 (P-256) key share beside X25519.**
   A client without X25519 - Windows' Schannel, as CI showed - was refused
   (handshake_failure).

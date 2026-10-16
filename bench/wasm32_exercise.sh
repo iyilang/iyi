@@ -115,13 +115,13 @@ fi
 
 echo
 echo "== every check reported =="
-for check in "allocation:" "reclamation:" "survival:" "precision:" "realloc:" "weak:"; do
+for check in "allocation:" "reclamation:" "survival:" "precision:" "realloc:" "weak:" "locals:"; do
   if ! grep -q "$check" "$WORK/wasm32-ex.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
   fi
 done
-[ "$status" -eq 0 ] && echo "  allocation, reclamation, survival, precision, realloc and weak references all reported"
+[ "$status" -eq 0 ] && echo "  allocation, reclamation, survival, precision, realloc, weak references and locals all reported"
 
 echo
 echo "== the same program with optimisation on (--release) =="

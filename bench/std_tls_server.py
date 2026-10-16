@@ -24,7 +24,7 @@ import sys
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, hmac, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa, x25519
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa, x25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 from cryptography.x509.oid import NameOID
@@ -33,6 +33,7 @@ SCENARIOS = {
     "ok": "a correct handshake, ECDSA P-256 leaf, AES-128-GCM",
     "rsa": "an RSA leaf signing CertificateVerify with RSASSA-PSS",
     "p384": "a P-384 leaf signing with ecdsa_secp384r1_sha384",
+    "ed25519": "an Ed25519 leaf signing CertificateVerify with ed25519",
     "aes256": "TLS_AES_256_GCM_SHA384, the SHA-384 key schedule",
     "chacha": "TLS_CHACHA20_POLY1305_SHA256",
     "ccs": "a ChangeCipherSpec before the encrypted flight",
@@ -45,6 +46,8 @@ SCENARIOS = {
     "ticket": "a NewSessionTicket before the echo",
     "bad-finished": "a Finished one bit off",
     "bad-cv": "a CertificateVerify signature one bit off",
+    "bad-cv-ed25519": "an Ed25519 CertificateVerify one bit off",
+    "cv-ed25519-p256": "a P-256 key's signature named ed25519",
     "cv-pkcs1": "CertificateVerify under rsa_pkcs1_sha256",
     "cv-wrong-curve": "a P-384 key named ecdsa_secp256r1_sha256",
     "suite-unoffered": "TLS_AES_128_CCM_SHA256, which was not offered",
@@ -94,7 +97,8 @@ class Pki:
         other_key = ec.generate_private_key(ec.SECP256R1())
         other = issue("Other Root", other_key, name("Other Root"), other_key, True)
         self.keys = {"p256": ec.generate_private_key(ec.SECP256R1()), "p384": ec.generate_private_key(ec.SECP384R1()),
-                     "rsa": rsa.generate_private_key(public_exponent=65537, key_size=2048)}
+                     "rsa": rsa.generate_private_key(public_exponent=65537, key_size=2048),
+                     "ed25519": ed25519.Ed25519PrivateKey.generate()}
         self.leaves = {k: issue("leaf", v, self.inter.subject, self.inter_key, False, ["*.tls.test"]) for k, v in self.keys.items()}
         self.wrong_host = issue("leaf", self.keys["p256"], self.inter.subject, self.inter_key, False, ["other.example"])
         self.expired = issue("leaf", self.keys["p256"], self.inter.subject, self.inter_key, False, ["*.tls.test"],
@@ -289,7 +293,8 @@ class Conn:
         messages = [message(8, struct.pack(">H", len(ee_ext)) + ee_ext)]
         if s == "certreq":
             messages.append(message(13, b"\x00" + struct.pack(">H", 8) + ext(13, struct.pack(">H", 2) + b"\x04\x03")))
-        kind = {"rsa": "rsa", "cv-pkcs1": "rsa", "p384": "p384", "cv-wrong-curve": "p384"}.get(s, "p256")
+        kind = {"rsa": "rsa", "cv-pkcs1": "rsa", "p384": "p384", "cv-wrong-curve": "p384", "ed25519": "ed25519",
+                "bad-cv-ed25519": "ed25519"}.get(s, "p256")
         leaf = {"wrong-host": self.pki.wrong_host, "expired": self.pki.expired, "untrusted": self.pki.untrusted}.get(s, self.pki.leaves[kind])
         entries = b"" if s == "cert-empty" else b"".join(len(der(c)).to_bytes(3, "big") + der(c) + b"\x00\x00" for c in (leaf, self.pki.inter))
         messages.append(message(11, b"\x00" + len(entries).to_bytes(3, "big") + entries))
@@ -307,9 +312,13 @@ class Conn:
                 scheme, sig = 0x0503, k.sign(signed, ec.ECDSA(hashes.SHA384()))
             elif kind == "p384":
                 scheme, sig = 0x0403, k.sign(signed, ec.ECDSA(hashes.SHA256()))
+            elif kind == "ed25519":
+                scheme, sig = 0x0807, k.sign(signed)
+            elif s == "cv-ed25519-p256":
+                scheme, sig = 0x0807, k.sign(signed, ec.ECDSA(hashes.SHA256()))
             else:
                 scheme, sig = 0x0403, k.sign(signed, ec.ECDSA(hashes.SHA256()))
-            if s == "bad-cv":
+            if s in ("bad-cv", "bad-cv-ed25519"):
                 sig = sig[:-1] + bytes([sig[-1] ^ 1])
             messages.append(message(15, struct.pack(">HH", scheme, len(sig)) + sig))
         transcript += b"".join(messages)

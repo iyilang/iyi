@@ -4,6 +4,19 @@
 
 ### Added
 
+- **The std/tls client offers `ed25519` and takes a server whose
+  certificate is Ed25519.** Its signature_algorithms named ECDSA and
+  RSA-PSS only, so a server with an Ed25519 certificate - OpenSSL with an
+  Ed25519 key, for one - could not be reached. The client now offers
+  scheme 0x0807 and checks a CertificateVerify under it with the leaf's
+  `Ed25519PublicKey`; the scheme named for a key of another kind is
+  refused (illegal_parameter).
+
+  Held by `bench/std_tls_exercise.sh`: the scripted server's Ed25519 leaf,
+  its CertificateVerify one bit off, and a P-256 signature named
+  `ed25519`; OpenSSL's `s_server` with an Ed25519 key; one more broken
+  copy.
+
 - **std/x509 reads Ed25519 keys and checks Ed25519 signatures (RFC
   8410), and std/curve25519 has `Ed25519PublicKey`.** A certificate with
   an Ed25519 key was refused as "a key for 1.3.101.112, which this does

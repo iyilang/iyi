@@ -164,11 +164,12 @@ else
     "$OPENSSL" req -x509 -config ca.cnf -extensions ca -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
       -keyout ca.key -out ca.pem -days 30
     printf 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' >leaf.ext
-    for kind in p256 p384 rsa; do
+    for kind in p256 p384 rsa ed25519; do
       case $kind in
         p256) opt="-newkey ec -pkeyopt ec_paramgen_curve:P-256" ;;
         p384) opt="-newkey ec -pkeyopt ec_paramgen_curve:P-384" ;;
         rsa) opt="-newkey rsa:2048" ;;
+        ed25519) opt="-newkey ed25519" ;;
       esac
       # shellcheck disable=SC2086
       "$OPENSSL" req -new -config leaf.cnf $opt -nodes -keyout $kind.key -out $kind.csr &&
@@ -206,6 +207,7 @@ else
   interop "P-256, the default suites" "HTTP/1.0 200 ok TLS_AES_128_GCM_SHA256" localhost - -tls1_3 -cert p256.pem -key p256.key
   interop "P-384" "HTTP/1.0 200 ok" localhost - -tls1_3 -cert p384.pem -key p384.key
   interop "RSA, CertificateVerify under RSASSA-PSS" "HTTP/1.0 200 ok" localhost - -tls1_3 -cert rsa.pem -key rsa.key
+  interop "Ed25519, CertificateVerify under ed25519" "HTTP/1.0 200 ok" localhost - -tls1_3 -cert ed25519.pem -key ed25519.key
   interop "AES-256-GCM alone" "HTTP/1.0 200 ok TLS_AES_256_GCM_SHA384" localhost - -tls1_3 -cert p256.pem -key p256.key -ciphersuites TLS_AES_256_GCM_SHA384
   interop "ChaCha20-Poly1305 alone" "HTTP/1.0 200 ok TLS_CHACHA20_POLY1305_SHA256" localhost - -tls1_3 -cert p256.pem -key p256.key -ciphersuites TLS_CHACHA20_POLY1305_SHA256
   interop "stateless, so a HelloRetryRequest with a cookie" "HTTP/1.0 200 ok" localhost - -tls1_3 -cert p256.pem -key p256.key -stateless
@@ -315,6 +317,8 @@ prove_broken "CertificateVerify over the client's context string" "ok: refused" 
   '"TLS 1.3, server CertificateVerify"' '"TLS 1.3, client CertificateVerify"' scenarios
 prove_broken "an ECDSA scheme taken for any curve" "cv-wrong-curve: refused with" \
   'unless key.is_a?(EcdsaPublicKey) && key.curve == curve' 'unless key.is_a?(EcdsaPublicKey)' scenarios
+prove_broken "an Ed25519 CertificateVerify unchecked" "bad-cv-ed25519: expected a refusal" \
+  '           key.verify(signed, signature)' '           true' scenarios
 prove_broken "the session id's echo unchecked" "no-echo: refused with" \
   '    return TlsError.new("a ServerHello that does not echo the session id (illegal_parameter)") unless echo == session' '' scenarios
 prove_broken "the certificate checked for no host" "wrong-host: refused with" \

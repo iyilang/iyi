@@ -53,12 +53,14 @@ end
 
 # scenario, whether it holds, and the phrase its refusal says
 SCENARIOS = [
-  {"ok", true, ""}, {"rsa", true, ""}, {"p384", true, ""}, {"aes256", true, "TLS_AES_256_GCM_SHA384"},
+  {"ok", true, ""}, {"rsa", true, ""}, {"p384", true, ""}, {"ed25519", true, ""}, {"aes256", true, "TLS_AES_256_GCM_SHA384"},
   {"chacha", true, "TLS_CHACHA20_POLY1305_SHA256"}, {"ccs", true, ""}, {"fragmented", true, ""},
   {"certreq", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"keyupdate", true, ""},
   {"big", true, ""}, {"ticket", true, ""},
   {"bad-finished", false, "Finished does not match the handshake (decrypt_error)"},
   {"bad-cv", false, "CertificateVerify is not its key's signature (decrypt_error)"},
+  {"bad-cv-ed25519", false, "CertificateVerify is not its key's signature (decrypt_error)"},
+  {"cv-ed25519-p256", false, "scheme 0x807 for a key that is not Ed25519"},
   {"cv-pkcs1", false, "CertificateVerify under scheme 0x401"},
   {"cv-wrong-curve", false, "scheme 0x403 for a key that is not on its curve"},
   {"suite-unoffered", false, "cipher suite 0x1304, which was not offered"},

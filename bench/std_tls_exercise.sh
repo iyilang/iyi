@@ -489,14 +489,18 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
     fi
     # curl on LibreSSL (macOS's) or schannel (Windows') takes no Ed25519
     # certificate, and is refused it, rightly; on OpenSSL it takes both.
-    # Schannel (Windows') offers no X25519: it is answered in secp256r1.
+    # Schannel (Windows') offers no X25519: it is answered in secp256r1. It
+    # also asks whether a certificate was revoked, which these made here
+    # cannot say: "the revocation status is unknown" unless told not to.
+    local norevoke=()
+    curl --version 2>/dev/null | head -1 | grep -q 'Schannel' && norevoke=(--ssl-no-revoke)
     if command -v curl >/dev/null 2>&1 && { [ "$kind" = p256 ] || curl --version | head -1 | grep -q 'OpenSSL/'; }; then
       local before=$served_ok
-      served_check "curl, $kind" "name=localhost alpn=http/1.1" curl -sS --http1.1 --cacert "$SRV/roots.pem" \
+      served_check "curl, $kind" "name=localhost alpn=http/1.1" curl -sS --http1.1 ${norevoke[@]+"${norevoke[@]}"} --cacert "$SRV/roots.pem" \
         --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/"
       # Refused: what curl's TLS said of the handshake, step by step.
       if [ "$served_ok" -eq "$before" ]; then
-        curl -v --http1.1 --cacert "$SRV/roots.pem" --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/" 2>&1 |
+        curl -v --http1.1 ${norevoke[@]+"${norevoke[@]}"} --cacert "$SRV/roots.pem" --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/" 2>&1 |
           grep -i 'schannel\|tls\|ssl\|alpn' | tail -n 14 | sed 's/^/    /'
       fi
     elif command -v curl >/dev/null 2>&1; then

@@ -65,6 +65,18 @@ class Iyi::Program
     virtual = VirtualFile.new(the_macro, generated_source, node.location)
     virtual.line_origins = line_origins_of(generated_source, macro_expansion_pragmas)
     parser.filename = virtual
+    # iyi: an expansion inside a body read from an artifact ends at the
+    # artifact's path, which is no `.iyi`, so `raw!` was read as a call to a
+    # method named `raw!`. The module the artifact was built from decides.
+    unless parser.iyi?
+      origin = virtual.expanded_location.try(&.filename)
+      while origin.is_a?(VirtualFile)
+        origin = origin.expanded_location.try(&.filename)
+      end
+      if origin.is_a?(String) && (source = @program.iyi_artifact_source_paths[origin]?)
+        parser.iyi = Lexer.iyi_source?(source)
+      end
+    end
     parser.macro_expansion_pragmas = macro_expansion_pragmas
     parser.visibility = visibility
     parser.def_nest = 1 if current_def && !current_def.is_a?(External)

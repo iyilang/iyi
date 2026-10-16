@@ -2909,6 +2909,78 @@ describe Iyi::IyiMod do
     end
   end
 
+  # The other side of the one above: a module under this one's path is not
+  # a module this one keeps.
+  #
+  # `pkg/child` is the namespace `Pkg::Child`, inside `pkg`'s `Pkg`, and the
+  # walks that gather `pkg`'s artifact went into every module they found
+  # there. `pkg.iyimod` carried the child's declarations, aliases and
+  # machine code a second time, so a program built from both artifacts was
+  # refused (`alias Num is already defined`) or failed to link (LNK2005).
+  # A module with a `module` header of its own has its own artifact; the
+  # walks stop at it.
+  it "leaves a module under its path to that module's own artifact" do
+    with_tempdir("iyimod_nested_unit") do
+      modules = {
+        "pkg/child.iyi" => <<-IYI,
+          module pkg/child
+
+          pub alias Num = Int32 | Int64
+
+          pub class Foo
+            def initialize(@x : Int32)
+            end
+
+            def x : Int32
+              @x
+            end
+          end
+
+          pub def make : Foo
+            Foo.new(3)
+          end
+          IYI
+        "pkg.iyi" => <<-IYI,
+          module pkg
+
+          import pkg/child::*
+
+          pub def run : Int32
+            n : Num = make.x
+            n.to_i32 * 2
+          end
+          IYI
+      }
+      main = <<-IYI
+        module main
+
+        import pkg
+        import pkg/child::*
+
+        puts Pkg.run
+        puts make.x
+        IYI
+
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "6\n3\n"
+      from_artifact.should eq from_source
+
+      parent = Iyi::IyiMod.read(File.join("mods", "pkg.iyimod"))
+      child = Iyi::IyiMod.read(File.join("mods", "pkg", "child.iyimod"))
+
+      parent.object_code.map(&.name).select(&.starts_with?("Pkg::Child")).should be_empty
+      parent.layouts.map(&.[0]).select(&.starts_with?("Pkg::Child")).should be_empty
+      (parent.object_code.map(&.name) & child.object_code.map(&.name)).should be_empty
+
+      declarations = String.build do |io|
+        Iyi::IyiMod.declarations(parent, io)
+      end
+      declarations.should_not contain "class Foo"
+      declarations.should_not contain "def make"
+      declarations.should_not contain "alias Num"
+    end
+  end
+
   # A generic's splat parameter is part of its declaration.
   #
   # `*T` and `T` are different things and the parser says so: `struct
@@ -5387,6 +5459,148 @@ describe Iyi::IyiMod do
         IYI
       from_source, from_artifact = iyimod_round_trip(modules, main)
       from_source.should eq "10\n13\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # Two parameters the producer compiled narrower than written: a class
+  # parameter called with the consumer's own subclass, and a private def's
+  # union reached from a travelling body with one member. Each was declared
+  # as written with no symbol behind it.
+  it "links a def whose parameter is a class or a private union" do
+    with_tempdir("iyimod_narrow_instantiation") do
+      modules = {"lib/u.iyi" => <<-IYI}
+        module lib/u
+
+        pub abstract class Base
+          def initialize
+          end
+        end
+
+        pub def name_of(klass : Base.class) : String
+          klass.to_s
+        end
+
+        pub def open(uri : Int32 | String) : String
+          build(uri)
+        end
+
+        def build(uri : Int32 | String) : String
+          "built \#{uri}"
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/u::*
+
+        class Sub < Base
+        end
+
+        puts name_of(Sub)
+        puts open("x")
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "Main::Sub\nbuilt x\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # A class variable on a base class is copied onto each subclass. The base
+  # module's artifact declared the copy on `Sub`, a type of another module,
+  # and that reopening declared `Sub` under `Reference` before `lib/sub`'s
+  # own artifact was read.
+  it "leaves a subclass in another module to that module's artifact" do
+    with_tempdir("iyimod_inherited_class_var") do
+      modules = {"lib/base.iyi" => <<-BASE, "lib/sub.iyi" => <<-SUB}
+        module lib/base
+
+        pub abstract class Base
+          @@count = 0
+
+          def self.bump : Int32
+            @@count += 1
+          end
+
+          def initialize
+          end
+
+          def count : Int32
+            @@count
+          end
+        end
+        BASE
+        module lib/sub
+
+        import lib/base::*
+
+        pub class Sub < Base
+        end
+        SUB
+      main = <<-IYI
+        module main
+
+        import lib/base::*
+        import lib/sub::*
+
+        Base.bump
+        Sub.bump
+        Sub.bump
+        puts Sub.new.count
+        puts Base.bump
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "2\n2\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # A generic body with macro code travels as text and is expanded by the
+  # consumer, under the artifact's path. That path is no `.iyi`, so the
+  # expansion was lexed as the other language's and `raw!` was a method name.
+  it "reads a propagation in a travelled body's macro code" do
+    with_tempdir("iyimod_macro_propagate") do
+      modules = {"lib/r.iyi" => <<-IYI}
+        module lib/r
+
+        pub class Fail
+          def initialize
+          end
+        end
+
+        impl Error for Fail
+          def message : String
+            "fail"
+          end
+        end
+
+        pub class Reader
+          def initialize
+          end
+
+          def raw : Int32 | Fail
+            7
+          end
+
+          def get(klass : T.class) : T | Fail forall T
+            {% if T == Int32 %}
+              value = raw!
+              value
+            {% else %}
+              Fail.new
+            {% end %}
+          end
+        end
+        IYI
+      main = <<-IYI
+        module main
+
+        import lib/r::*
+
+        puts Reader.new.get(Int32).or_panic
+        IYI
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "7\n"
       from_artifact.should eq from_source
     end
   end

@@ -1968,6 +1968,50 @@
   `bench/std_uuid_exercise.sh` proves v4 stays unique with every
   `Random.new` seeded alike, and that a PCG-drawn v4 is caught.
 
+- **A trait value cast to a union of some of its implementers reads the
+  right value.** With `Val` implemented by `Nil`, `String` and `Int64`,
+  `x.as(String?)` on a `Val` was typed `Val` and compiled as an upcast, so
+  `"s"` read back as garbage and `nil` as `""`. The cast narrows to
+  `String | Nil` now. Held by `spec/compiler/semantic/cast_spec.cr` (#121).
+- **An `Int32?.class` parameter reads back from an artifact.** It was
+  written as `Int32 | ::Nil.class`, which reads as `Int32 | (Nil.class)`,
+  so a program built from the artifact picked another overload. A union
+  before `.class` is parenthesized now. Held by
+  `spec/compiler/parser/to_s_spec.cr` (#122).
+- **A def compiled narrower than its parameter links from an artifact.**
+  `name_of(klass : Base.class)` called with a subclass, and a private
+  `build(uri : Int32 | String)` reached with a `String`, were declared as
+  written with only the narrower symbol behind them. Their bodies travel
+  now, as a widened public def's already did. Held by
+  `spec/compiler/iyimod_spec.cr` (#123).
+- **A class variable on a base class leaves a subclass in another module
+  alone.** The base module's artifact declared the subclass's copy of
+  the variable by reopening `class ::Lib::Sub::Sub`, which declared it
+  under `Reference`, and the subclass's own artifact was refused with a
+  superclass mismatch. Held by `spec/compiler/iyimod_spec.cr` (#125).
+- **`end!` inside a macro body closes its block.** The macro scanner
+  counted `do` and not `end!` as an `end`, so a macro holding `each_item
+  do |i| ... end!` was "unterminated macro". Held by
+  `spec/compiler/parser/parser_spec.cr` (#126).
+- **A travelled body's macro code reads `!` as propagation.** A generic
+  method with `{% if %}` in its body travels as text, and its expansion
+  ended at the artifact's path, which is no `.iyi`, so `raw!` was read as
+  a call to a method named `raw!`. The expansion is read as iyi when the
+  artifact was built from iyi. Held by `spec/compiler/iyimod_spec.cr`
+  (#127).
+- **Two classes compare equal when they are the same type.** `Class` had
+  no `==`, so `Object#==` answered false for `Sub == Sub` and for
+  `Sub.as(Base.class) == Sub`. Held by
+  `spec/compiler/codegen/iyi_case_equality_spec.cr` (#128).
+- **A module's artifact leaves the modules under its path to their own.**
+  `pkg/child` is the namespace `Pkg::Child`, inside `pkg`'s `Pkg`, and the
+  walks that gather `pkg.iyimod` went into it: the artifact carried the
+  child's declarations, aliases, layouts and machine code a second time,
+  so a program importing both and built from artifacts was refused with
+  `alias ... is already defined` or failed to link on duplicate symbols.
+  The walks stop at a module with a `module` header of its own. Held by
+  `spec/compiler/iyimod_spec.cr`. (#124)
+
 ### Changed
 
 - **A package that speaks HTTP reaches what std/tls does.** std/http
@@ -21849,7 +21893,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 21,556-line library and nothing else. Every other
+  written against iyi's own 21,558-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

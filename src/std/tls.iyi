@@ -554,6 +554,19 @@ pub abstract class TlsConnection
   # The peer asked this side to move its keys: done before its next write.
   @update_owed : Bool = false
 
+  # The exporter's secret (section 7.1), over the handshake to the server's
+  # Finished.
+  @exporter_secret : Array(UInt8) = [] of UInt8
+
+  # *length* bytes bound to this connection, for *label* and *context*
+  # (RFC 8446 section 7.5, RFC 5705's interface): the same at both ends and
+  # nowhere else - a channel binding, or keys for another protocol riding
+  # on this one. No context is the empty one, as TLS 1.3 has it.
+  def export_keying_material(label : String, context : Array(UInt8) = [] of UInt8, length : Int32 = 32) : Array(UInt8)
+    secret = @schedule.derive_secret(@exporter_secret, label, [] of UInt8)
+    @schedule.expand_label(secret, "exporter", @schedule.hash(context), length)
+  end
+
   # close_notify, then the socket closed.
   def close : Nil
     return if @closed
@@ -1030,6 +1043,7 @@ pub class TlsClient < TlsConnection
     master = @schedule.master_secret(handshake_secret)
     client_application = @schedule.derive_secret(master, "c ap traffic", @transcript)
     server_application = @schedule.derive_secret(master, "s ap traffic", @transcript)
+    @exporter_secret = @schedule.derive_secret(master, "exp master", @transcript)
 
     # The client's flight: a ChangeCipherSpec for middleboxes (appendix
     # D.4); if a certificate was asked for, the identity's with its
@@ -1435,8 +1449,29 @@ pub class TlsServerConfig
   property client_required : Bool = true
   # The time a client's certificate is checked at; now when nil.
   property now : Time? = nil
+  # More identities, each shown to a client that asks by server_name (RFC
+  # 6066) for a host its certificate names; `identity` to any other.
+  getter others : Array(TlsIdentity) = [] of TlsIdentity
 
   def initialize(@identity : TlsIdentity)
+  end
+
+  # *identity* shown to a client asking for a host its certificate names.
+  def add_identity(identity : TlsIdentity) : TlsServerConfig
+    @others << identity
+    self
+  end
+
+  # The identity a client asking for *name*, taking signatures under
+  # *schemes*, is shown: the first of `others` that names the host and whose
+  # scheme the client takes, else `identity` if it takes that; nil when it
+  # takes none of them.
+  def identity_for(name : String?, schemes : Array(Int32)) : TlsIdentity?
+    if name
+      @others.each { |other| return other if other.leaf.matches_host?(name) && schemes.includes?(other.scheme) }
+    end
+    return @identity if schemes.includes?(@identity.scheme)
+    nil
   end
 
   # `TlsIdentity.from_pem`'s identity, as a server's.
@@ -1567,6 +1602,9 @@ end
 pub class TlsServer < TlsConnection
   # The host the client named (server_name, RFC 6066), if it named one.
   getter server_name : String? = nil
+  # The certificate and key this connection was shown under: the config's
+  # `identity`, or one of its `others` the client asked for by name.
+  getter identity : TlsIdentity
   @config : TlsServerConfig
   # Whether a ChangeCipherSpec went out after the first hello (appendix D.4).
   @sent_ccs : Bool = false
@@ -1578,6 +1616,7 @@ pub class TlsServer < TlsConnection
 
   def initialize(socket : IyiSocket, @config : TlsServerConfig)
     super(socket, "the client", "the client")
+    @identity = @config.identity
   end
 
   def server_side? : Bool
@@ -1700,6 +1739,7 @@ pub class TlsServer < TlsConnection
     master = @schedule.master_secret(handshake_secret)
     client_application = @schedule.derive_secret(master, "c ap traffic", @transcript)
     server_application = @schedule.derive_secret(master, "s ap traffic", @transcript)
+    @exporter_secret = @schedule.derive_secret(master, "exp master", @transcript)
     # This side's Finished is sent: what it writes from here, an alert
     # included, is under the application keys (section 7.3), as a client
     # reads it.
@@ -1849,9 +1889,11 @@ pub class TlsServer < TlsConnection
     return TlsError.new("a ClientHello whose compression methods are not null alone", TlsAlert::ILLEGAL_PARAMETER) unless compression == [0_u8]
     return TlsError.new("the client offers no cipher suite this server has", TlsAlert::HANDSHAKE_FAILURE) unless suites.any? { |s| SUITES.includes?(s) }
     return TlsError.new("a ClientHello with no signature_algorithms", TlsAlert::MISSING_EXTENSION) unless schemes
-    unless schemes.includes?(@config.scheme)
-      return TlsError.new("the client does not take #{TlsIdentity.scheme_name(@config.scheme)} signatures, the only kind this server's key makes", TlsAlert::HANDSHAKE_FAILURE)
+    chosen = @config.identity_for(server_name, schemes)
+    unless chosen
+      return TlsError.new("the client does not take #{TlsIdentity.scheme_name(@config.scheme)} signatures, which this server's key for it makes", TlsAlert::HANDSHAKE_FAILURE)
     end
+    @identity = chosen
     return TlsError.new("a ClientHello with no supported_groups", TlsAlert::MISSING_EXTENSION) unless groups
     return TlsError.new("a ClientHello with no key_share", TlsAlert::MISSING_EXTENSION) unless shares
     unless groups.includes?(GROUP_X25519) || groups.includes?(GROUP_SECP256R1)
@@ -1946,7 +1988,7 @@ pub class TlsServer < TlsConnection
 
   private def certificate_message : Array(UInt8)
     entries = [] of UInt8
-    @config.chain.each { |der| entries = entries + TlsBytes.u24(der.size) + der + [0_u8, 0_u8] }
+    @identity.chain.each { |der| entries = entries + TlsBytes.u24(der.size) + der + [0_u8, 0_u8] }
     TlsBytes.message(11, [0_u8] + TlsBytes.u24(entries.size) + entries)
   end
 
@@ -1954,8 +1996,8 @@ pub class TlsServer < TlsConnection
   # the server's context string, a zero and the transcript's hash, signed.
   private def certificate_verify : Array(UInt8)
     signed = Array(UInt8).new(64, 0x20_u8) + TlsBytes.of("TLS 1.3, server CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
-    signature = @config.sign(signed)
-    TlsBytes.message(15, TlsBytes.u16(@config.scheme) + TlsBytes.u16(signature.size) + signature)
+    signature = @identity.sign(signed)
+    TlsBytes.message(15, TlsBytes.u16(@identity.scheme) + TlsBytes.u16(signature.size) + signature)
   end
 end
 

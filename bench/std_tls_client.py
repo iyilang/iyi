@@ -105,6 +105,10 @@ SCENARIOS = {
     # under the handshake keys with no content type is refused.
     "early-malformed": ("early data offered, then a handshake record with no content type", ("alert", 10)),
     "sni-two": ("a server_name with two host names", ("alert", 47)),
+    # Two identities: the one whose certificate names the host asked for,
+    # and the default for any other.
+    "sni-other": ("a server_name of other.test: its own certificate", ("held", "shown=CN=other.test")),
+    "sni-unknown": ("a server_name no certificate names: the default", ("held", "shown=CN=localhost")),
     "sni-bad": ("a server_name that is no host name", ("alert", 50)),
     "oversize": ("a plaintext record past 2^14 bytes", ("alert", 22)),
     "not-hello": ("a ServerHello where the ClientHello belongs", ("alert", 10)),
@@ -286,6 +290,8 @@ def scenario(c, name):
         kw["sni"] = None
         kw["order"] = ["groups", "sigalgs", "versions", "shares", ext(0, struct.pack(">H", len(names)) + names)]
     if name == "sni-bad": kw["sni"] = "bad host"
+    if name == "sni-other": kw["sni"] = "other.test"
+    if name == "sni-unknown": kw["sni"] = "unknown.test"
     if name == "dup-ext": kw["order"] = ["sni", "groups", "sigalgs", "groups", "versions", "shares"]
     if name == "psk-not-last":
         kw["early"] = True

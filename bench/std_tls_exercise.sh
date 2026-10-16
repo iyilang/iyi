@@ -256,6 +256,39 @@ else
   else
     status=1
   fi
+  # client_export <binary>: what its std/tls client exports for a label,
+  # against what OpenSSL's server exports for it (RFC 8446 section 7.5).
+  client_export() {
+    local port pid got theirs
+    port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+    # One connection, not -www: only then does s_server print what it
+    # exported. Its stdin stays open, as at EOF it would shut down; and a
+    # probe of the port would be that one connection, so its ACCEPT is
+    # waited for instead.
+    : >"$WORK/s_server-export.log"
+    { sleep 6 | "$OPENSSL" s_server -accept "127.0.0.1:$port" -naccept 1 -tls1_3 -cert "$PKI/p256.pem" -key "$PKI/p256.key" \
+      -keymatexport "EXPERIMENTAL iyi" -keymatexportlen 16 >"$WORK/s_server-export.log" 2>&1; } &
+    pid=$!
+    for _ in $(seq 1 50); do
+      grep -q ACCEPT "$WORK/s_server-export.log" && break
+      sleep 0.1
+    done
+    got="$(TLS_EXPORT="EXPERIMENTAL iyi" "$1" get "$port" "$PKI/ca.pem" localhost 2>&1 | grep -o 'exported=[0-9a-f]*' | cut -d= -f2)"
+    # The server goes when its stdin ends, after the connection.
+    wait "$pid" 2>/dev/null
+    theirs="$(grep -o 'Keying material: [0-9A-Fa-f]*' "$WORK/s_server-export.log" | head -1 | cut -d' ' -f3 | tr 'A-F' 'a-f')"
+    if [ -n "$got" ] && [ "$got" = "$theirs" ]; then
+      echo "  exported for \"EXPERIMENTAL iyi\", the same at both ends: $got"
+      return 0
+    fi
+    echo "  FAIL the client exported '$got', OpenSSL's server '$theirs'"
+    return 1
+  }
+  if client_export "$WORK/tls-release"; then
+    interop=$((interop + 1))
+  else
+    status=1
+  fi
   interop "TLS 1.2 alone" "alert protocol_version (70)" localhost - -tls1_2 -cert p256.pem -key p256.key
   interop "secp256r1 alone, asked for by a HelloRetryRequest" "HTTP/1.0 200 ok" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-256
   interop "groups the client offers none of" "alert handshake_failure (40)" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-384
@@ -318,14 +351,14 @@ root = (x509.CertificateBuilder().subject_name(name("Gate Root")).issuer_name(na
         .add_extension(x509.KeyUsage(False, False, False, False, False, True, True, False, False), critical=True)
         .add_extension(x509.SubjectKeyIdentifier.from_public_key(root_key.public_key()), critical=False)
         .sign(root_key, hashes.SHA256()))
-def leaf_for(key):
-    return (x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(root.subject)
+def leaf_for(key, host="localhost"):
+    return (x509.CertificateBuilder().subject_name(name(host)).issuer_name(root.subject)
             .public_key(key.public_key()).serial_number(x509.random_serial_number())
             .not_valid_before(now - dt.timedelta(days=1)).not_valid_after(now + dt.timedelta(days=20))
             .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
             .add_extension(x509.KeyUsage(True, False, False, False, False, False, False, False, False), critical=True)
             .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(host)]), critical=False)
             .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
             .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(root_key.public_key()), critical=False)
             .sign(root_key, hashes.SHA256()))
@@ -355,6 +388,12 @@ write("p256/key.pem", pkcs8(ec_key))
 write("ec-sec1.key", ec_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
 write("p384.key", pkcs8(ec.generate_private_key(ec.SECP384R1())))
 write("other-ec.key", pkcs8(ec.generate_private_key(ec.SECP256R1())))
+# A second identity, for other.test, beside each server's own: shown to a
+# client that asks for that host by server_name.
+other_host = ec.generate_private_key(ec.SECP256R1())
+for where in ("", "p256/"):
+    write(where + "other-chain.pem", pem(leaf_for(other_host, "other.test")) + pem(root))
+    write(where + "other-key.pem", pkcs8(other_host))
 # The same Ed25519 server asking for a client's certificate under its own
 # root: certificates from it for clientAuth (P-256 and Ed25519), one from
 # another root, and one for serverAuth alone.
@@ -514,6 +553,16 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
         served_check "OpenSSL, ed25519, no ed25519 among its signature algorithms" "SSL alert number 40" sclient -tls1_3 -sigalgs ECDSA+SHA256:RSA-PSS+SHA256
       fi
       served_check "OpenSSL, $kind, ALPN this server does not speak" "SSL alert number 120" sclient -tls1_3 -alpn spdy/3
+      # What the server exports for a label, in its answer, against what
+      # OpenSSL's client exports for it.
+      export_both() {
+        local out ours theirs
+        out="$(sclient -tls1_3 -keymatexport "EXPERIMENTAL iyi" -keymatexportlen 16)"
+        ours="$(printf '%s' "$out" | grep -o 'exported=[0-9a-f]*' | head -1 | cut -d= -f2)"
+        theirs="$(printf '%s' "$out" | grep -o 'Keying material: [0-9A-Fa-f]*' | head -1 | cut -d' ' -f3 | tr 'A-F' 'a-f')"
+        [ -n "$ours" ] && [ "$ours" = "$theirs" ] && echo "the same at both ends: $ours" || echo "server $ours, OpenSSL $theirs"
+      }
+      served_check "OpenSSL, $kind, exported keying material" "the same at both ends" export_both
     else
       echo "  no openssl here (or Windows), so s_client goes unasked"
     fi
@@ -716,7 +765,7 @@ prove_broken() {
   local mode="${5:-trace}"
   if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; } ||
      { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ]; } && [ "$served" = no ]; } ||
-     { [ "$mode" = client-alert ] && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
+     { { [ "$mode" = client-alert ] || [ "$mode" = client-export ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
     echo "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
   fi
@@ -733,7 +782,7 @@ PY
     status=1
     return
   fi
-  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ]; then
+  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ]; then
     if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched/tlsx" \
          "$REPO/bench/std_tls_exercise.iyi" >"$WORK/patched/build.log" 2>&1; then
       echo "  the $1 copy did not build:"
@@ -747,6 +796,9 @@ PY
       rc=$?
     elif [ "$mode" = client-alert ]; then
       client_alert "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
+      rc=$?
+    elif [ "$mode" = client-export ]; then
+      client_export "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
       rc=$?
     else
       mkdir -p "$WORK/patched/srv"
@@ -898,8 +950,8 @@ prove_broken "the client's Finished unchecked" "FAIL bad-finished " \
       return TlsError.new("the client'"'"'s Finished' server
 prove_broken "the server's CertificateVerify over the client's context string" "FAIL ok " \
   '"TLS 1.3, server CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
-    signature = @config.sign(signed)' '"TLS 1.3, client CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
-    signature = @config.sign(signed)' server
+    signature = @identity.sign(signed)' '"TLS 1.3, client CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
+    signature = @identity.sign(signed)' server
 prove_broken "the server's HelloRetryRequest transcript restarted as something else" "FAIL hrr " \
   '      @transcript = [254_u8, 0_u8, 0_u8, first.size.to_u8] + first + retry' '      @transcript = first + retry' server
 prove_broken "the server's writes kept on its handshake keys after its Finished" "FAIL ok " \
@@ -920,9 +972,9 @@ prove_broken "a compression method taken" "FAIL compression " \
 prove_broken "a session id of any length echoed" "FAIL long-session " \
   '    return TlsError.new("a ClientHello with a session id of #{session.size} bytes", TlsAlert::ILLEGAL_PARAMETER) if session.size > 32' '' server
 prove_broken "a client without ed25519 answered anyway" "FAIL no-ed25519 " \
-  '    unless schemes.includes?(@config.scheme)' '    if false' server
+  '    return @identity if schemes.includes?(@identity.scheme)' '    return @identity' server
 prove_broken "a client without ecdsa_secp256r1_sha256 answered anyway by a P-256 server" "FAIL no-p256 " \
-  '    unless schemes.includes?(@config.scheme)' '    if false' server-p256
+  '    return @identity if schemes.includes?(@identity.scheme)' '    return @identity' server-p256
 prove_broken "a P-256 CertificateVerify signed over SHA-384" "FAIL ok " \
   '      key.sign(EcdsaHash::SHA256, content)' '      key.sign(EcdsaHash::SHA384, content)' server-p256
 prove_broken "a P-256 key that is not the certificate's taken" "FAIL another P-256 key" \
@@ -947,6 +999,16 @@ prove_broken "a HelloRetryRequest for secp256r1 whatever the groups" "FAIL hrr "
   '      group = offer.groups.includes?(GROUP_X25519) ? GROUP_X25519 : GROUP_SECP256R1' '      group = GROUP_SECP256R1' server
 prove_broken "the server's secp256r1 share not its key's" "FAIL p256-share " \
   '      public = ephemeral.public_point' '      public = p256_ephemeral.public_point' server
+prove_broken "an exporter under another label" "FAIL the client exported" \
+  '    @schedule.expand_label(secret, "exporter", @schedule.hash(context), length)' '    @schedule.expand_label(secret, "exported", @schedule.hash(context), length)' client-export
+prove_broken "the exporter's secret over the transcript to the client's flight" "FAIL the client exported" \
+  '    @exporter_secret = @schedule.derive_secret(master, "exp master", @transcript)
+
+    # The client'"'"'s flight:' '    @exporter_secret = @schedule.derive_secret(master, "exp master", @transcript + @transcript)
+
+    # The client'"'"'s flight:' client-export
+prove_broken "a server_name's own certificate passed over" "FAIL sni-other " \
+  '      @others.each { |other| return other if other.leaf.matches_host?(name) && schemes.includes?(other.scheme) }' '' server
 prove_broken "a client that hangs up without an alert" "FAIL no alert read by OpenSSL" \
   '    return client.fail(problem) if problem' '    return problem if problem' client-alert
 prove_broken "a handshake bounded by each wait alone" "FAIL slow-hello " \

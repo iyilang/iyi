@@ -82,6 +82,10 @@ SCENARIOS = {
     "keyupdate-bad": "a KeyUpdate whose request is 2",
     "slow-echo": "the echo a second and a half late",
     "client-rekey": "the client's records read across its KeyUpdates, counted",
+    "certreq-context": "a CertificateRequest with a request context, in the handshake",
+    "cert-entry-ext": "a certificate entry with a status_request extension nobody asked for",
+    "sni-ack-data": "a server_name acknowledgement that is not empty",
+    "user-canceled": "a user_canceled warning before the echo",
 }
 
 NOW = dt.datetime.now(dt.timezone.utc)
@@ -347,11 +351,15 @@ class Conn:
             ee_ext += ext(16, struct.pack(">H", 7) + b"\x06spdy/3")
         if s == "unsolicited-ext":
             ee_ext += ext(0xff01, b"")
+        if s == "sni-ack-data":
+            ee_ext += ext(0, b"\x00")
         messages = [message(8, struct.pack(">H", len(ee_ext)) + ee_ext)]
         if s == "certreq":
             messages.append(message(13, b"\x00" + struct.pack(">H", 8) + ext(13, struct.pack(">H", 2) + b"\x04\x03")))
         if s == "certreq-ed25519":
             messages.append(message(13, b"\x00" + struct.pack(">H", 10) + ext(13, struct.pack(">H", 4) + b"\x04\x03\x08\x07")))
+        if s == "certreq-context":
+            messages.append(message(13, b"\x02ab" + struct.pack(">H", 8) + ext(13, struct.pack(">H", 2) + b"\x04\x03")))
         if s == "certreq-no-sigalgs":
             messages.append(message(13, b"\x00" + struct.pack(">H", 4) + ext(0xff02, b"")))
         kind = {"rsa": "rsa", "cv-pkcs1": "rsa", "p384": "p384", "cv-wrong-curve": "p384", "ed25519": "ed25519",
@@ -359,7 +367,8 @@ class Conn:
         leaf = {"wrong-host": self.pki.wrong_host, "expired": self.pki.expired, "untrusted": self.pki.untrusted,
                 "ku-no-sign": self.pki.no_sign}.get(s, self.pki.leaves[kind])
         sent = (leaf, self.pki.inter) * (6 if s == "cert-many" else 1)
-        entries = b"" if s == "cert-empty" else b"".join(len(der(c)).to_bytes(3, "big") + der(c) + b"\x00\x00" for c in sent)
+        entry_ext = b"\x00\x04" + ext(5, b"") if s == "cert-entry-ext" else b"\x00\x00"
+        entries = b"" if s == "cert-empty" else b"".join(len(der(c)).to_bytes(3, "big") + der(c) + entry_ext for c in sent)
         messages.append(message(11, b"\x00" + len(entries).to_bytes(3, "big") + entries))
         if s == "cert-empty":
             messages.append(message(15, b"\x04\x03\x00\x00"))
@@ -409,7 +418,8 @@ class Conn:
         else:
             self.sock.sendall(writer.seal(22, flight, corrupt=(s == "bad-record-mac")))
         if s in ("bad-finished", "bad-cv", "cv-pkcs1", "cv-wrong-curve", "unsolicited-ext", "alpn-unoffered",
-                 "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs", "cert-many", "ku-no-sign"):
+                 "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs", "cert-many", "ku-no-sign",
+                 "certreq-context", "cert-entry-ext", "sni-ack-data"):
             return
 
         master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))
@@ -516,6 +526,8 @@ class Conn:
             self.sock.sendall(writer.seal(23, b"echo:" + data))
             self.sock.sendall(writer.seal(21, b"\x01\x00"))
             return
+        if s == "user-canceled":
+            self.sock.sendall(writer.seal(21, b"\x01\x5a"))
         if s == "slow-echo":
             # Past the client's read timeout: its first read times out, and
             # the same connection reads the echo after.

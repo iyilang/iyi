@@ -96,6 +96,16 @@ SCENARIOS = {
     "alpn-empty-name": ("an ALPN list holding an empty name", ("alert", 50)),
     "hrr-no-share": ("a second ClientHello still without X25519", ("alert", 47)),
     "hrr-other-session": ("a second ClientHello with another session id", ("alert", 47)),
+    "hrr-other-suite": ("a second ClientHello without the suite the HelloRetryRequest chose", ("alert", 47)),
+    "hrr-early-again": ("a second ClientHello offering early data", ("alert", 47)),
+    # Early data is over at the second ClientHello: a record that does not
+    # open is refused after it, where it was passed over.
+    "junk-after-hrr": ("a record that does not decrypt, after the second ClientHello", ("alert", 20)),
+    # Only a record that does not decrypt is passed over as early data: one
+    # under the handshake keys with no content type is refused.
+    "early-malformed": ("early data offered, then a handshake record with no content type", ("alert", 10)),
+    "sni-two": ("a server_name with two host names", ("alert", 47)),
+    "sni-bad": ("a server_name that is no host name", ("alert", 50)),
     "oversize": ("a plaintext record past 2^14 bytes", ("alert", 22)),
     "not-hello": ("a ServerHello where the ClientHello belongs", ("alert", 10)),
     "cut-hello": ("a ClientHello whose extensions run past its end", ("alert", 50)),
@@ -117,6 +127,7 @@ MTLS = {
     "mtls-untrusted": ("a client certificate from another root", ("alert", 42)),
     "mtls-server-only": ("a client certificate for serverAuth only", ("alert", 42)),
     "mtls-long-chain": ("a client Certificate of twelve certificates", ("alert", 42)),
+    "mtls-entry-ext": ("a client certificate entry with an extension", ("alert", 110)),
     # Asked of a server told a certificate is not required.
     "mtls-optional-none": ("no client certificate, where one is not required", ("held", "peer=-")),
 }
@@ -246,7 +257,8 @@ def scenario(c, name):
     ec_key = ec.generate_private_key(ec.SECP256R1())
     ec_share = ec_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
     p384_share = b"\x04" + os.urandom(96)
-    hrr_names = ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session", "hrr-p256")
+    hrr_names = ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session", "hrr-p256", "hrr-other-suite", "hrr-early-again",
+                 "junk-after-hrr")
     p256_names = ("p256-share", "hrr-p256")
     session = os.urandom(32)
     kw = {}
@@ -268,7 +280,12 @@ def scenario(c, name):
     if name in ("bad-p256-share", "short-p256-share"):
         kw["groups"] = (0x17,)
         kw["shares"] = {0x17: ec_share[:-1] + bytes([ec_share[-1] ^ 1]) if name == "bad-p256-share" else ec_share[:64]}
-    if name in ("early-skip", "early-after-hrr"): kw["early"] = True
+    if name in ("early-skip", "early-after-hrr", "junk-after-hrr", "early-malformed"): kw["early"] = True
+    if name == "sni-two":
+        names = b"".join(b"\x00" + struct.pack(">H", len(n)) + n for n in (b"localhost", b"other.test"))
+        kw["sni"] = None
+        kw["order"] = ["groups", "sigalgs", "versions", "shares", ext(0, struct.pack(">H", len(names)) + names)]
+    if name == "sni-bad": kw["sni"] = "bad host"
     if name == "dup-ext": kw["order"] = ["sni", "groups", "sigalgs", "groups", "versions", "shares"]
     if name == "psk-not-last":
         kw["early"] = True
@@ -357,7 +374,12 @@ def scenario(c, name):
                 c.sock.sendall(bytes([23, 3, 3]) + struct.pack(">H", len(junk)) + junk)
         c.sock.sendall(plain(20, b"\x01"))
         again = dict(kw)
-        again.pop("early", None)
+        if name == "hrr-early-again":
+            again["early"] = True
+        else:
+            again.pop("early", None)
+        if name == "hrr-other-suite":
+            again["suites"] = tuple(x for x in (0x1301, 0x1302, 0x1303) if x != suite)
         if name == "hrr-p256":
             again["shares"] = {0x17: ec_share}
         elif name != "hrr-no-share":
@@ -454,7 +476,8 @@ def scenario(c, name):
             presented = message(11, b"\x00" + bytes(3))
         else:
             context = b"\x01\x07" if name in ("mtls-context", "mtls-late") else b"\x00"
-            entries = b"".join(len(d).to_bytes(3, "big") + d + b"\x00\x00" for d in ders * (6 if name == "mtls-long-chain" else 1))
+            extension = b"\x00\x04" + ext(5, b"") if name == "mtls-entry-ext" else b"\x00\x00"
+            entries = b"".join(len(d).to_bytes(3, "big") + d + extension for d in ders * (6 if name == "mtls-long-chain" else 1))
             presented = message(11, context + len(entries).to_bytes(3, "big") + entries)
         c.sock.sendall(writer.seal(22, presented))
         transcript += presented
@@ -481,6 +504,13 @@ def scenario(c, name):
         c.sock.sendall(writer.seal(22, message(11, b"\x00\x00\x00\x00")))
     elif name == "data-before-finished":
         c.sock.sendall(writer.seal(23, b"too soon"))
+    elif name in ("junk-after-hrr", "early-malformed"):
+        if name == "junk-after-hrr":
+            junk = os.urandom(100)
+            c.sock.sendall(bytes([23, 3, 3]) + struct.pack(">H", len(junk)) + junk)
+        else:
+            c.sock.sendall(writer.seal(0, bytes(5)))
+        c.sock.sendall(writer.seal(22, message(20, schedule.finished(c_hs, transcript))))
     else:
         verify_data = schedule.finished(c_hs, transcript)
         if name == "bad-finished":

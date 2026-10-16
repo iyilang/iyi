@@ -668,6 +668,34 @@ IYI
   else
     echo "  tls: the server sent alert handshake_failure (40)"
   fi
+  # A read of nothing would answer "", which is the peer's close: refused
+  # as a mistake of the program's, by name.
+  cat >"$WORK/readzero.iyi" <<'IYI'
+module readzero
+
+import std/tls::{TlsClient, TlsConfig}
+import std/socket::{IyiSocket}
+import std/x509::{Certificate}
+import std/file::{File}
+import std/env::{ENV}
+
+config = TlsConfig.new
+config.roots = Certificate.from_pem(File.read(ENV["TLS_DIR"] + "/roots.pem")).or_panic
+socket = IyiSocket.connect("127.0.0.1", File.read(ENV["TLS_DIR"] + "/port").to_i)
+raise "no socket" unless socket.is_a?(IyiSocket)
+conn = TlsClient.over(socket, "ok.tls.test", config).or_panic
+conn.read(0)
+puts "read nothing"
+IYI
+  if TLS_DIR="$SERVER_DIR" "$IYI" run "$WORK/readzero.iyi" >"$WORK/readzero.out" 2>&1; then
+    echo "  a read of 0 bytes was taken"
+    status=1
+  elif ! grep -qF "a TLS read of 0 bytes: at least 1" "$WORK/readzero.out"; then
+    echo "  a read of 0 bytes was refused without saying why: $(tr -d '\r' <"$WORK/readzero.out" | tail -1)"
+    status=1
+  else
+    echo "  a TLS read of 0 bytes: at least 1"
+  fi
 fi
 
 echo
@@ -817,6 +845,14 @@ prove_broken "no new keys at the key limit" "client-rekey:" \
   '    return nil unless @update_owed || writer.sequence >= @key_limit' '    return nil unless @update_owed' scenarios
 prove_broken "key_update(true) sent as a KeyUpdate asking nothing" "client-rekey:" \
   '    sent = send_protected(TlsRecords::HANDSHAKE, TlsBytes.message(24, [request ? 1_u8 : 0_u8]))' '    sent = send_protected(TlsRecords::HANDSHAKE, TlsBytes.message(24, [0_u8]))' scenarios
+prove_broken "a CertificateRequest's context taken in the handshake" "certreq-context:" \
+  '    return TlsError.new("a CertificateRequest with a request context in the handshake", TlsAlert::ILLEGAL_PARAMETER) unless context.empty?' '' scenarios
+prove_broken "a certificate entry's extensions passed over" "cert-entry-ext:" \
+  '      return TlsError.new("a certificate entry with extensions nobody asked for", TlsAlert::UNSUPPORTED_EXTENSION) unless entry_extensions.empty?' '' scenarios
+prove_broken "a server_name acknowledgement with something in it taken" "sni-ack-data:" \
+  '        return TlsError.new("a server_name acknowledgement that is not empty", TlsAlert::DECODE_ERROR) unless data.empty?' '' scenarios
+prove_broken "user_canceled after the handshake taken as an end" "user-canceled:" \
+  '        next if content.size == 2 && content[1] == TlsAlert::USER_CANCELED' '' scenarios
 prove_broken "the session id's echo unchecked" "no-echo: refused with" \
   '    return TlsError.new("a ServerHello that does not echo the session id", TlsAlert::ILLEGAL_PARAMETER) unless echo == session' '' scenarios
 prove_broken "the certificate checked for no host" "wrong-host: refused with" \
@@ -870,7 +906,7 @@ prove_broken "the server's writes kept on its handshake keys after its Finished"
   '    @writer = TlsRecordCipher.new(@suite, @schedule, server_application)
     @write_secret = server_application' '    @write_secret = server_application' server
 prove_broken "early data under keys the server lacks not passed over" "FAIL early-skip " \
-  '      if opened.is_a?(TlsError) && @early_left > 0 && body.size <= @early_left' '      if false' server
+  '      if opened.is_a?(TlsError) && opened.alert == TlsAlert::BAD_RECORD_MAC && @early_left > 0 && body.size <= @early_left' '      if false' server
 prove_broken "early data before a second ClientHello not passed over" "FAIL early-after-hrr " \
   '        if @early_left > 0 && body.size <= @early_left' '        if false' server
 prove_broken "a ChangeCipherSpec during the handshake not passed over" "FAIL ccs " \
@@ -923,6 +959,21 @@ prove_broken "a ChangeCipherSpec before the ClientHello passed over" "FAIL ccs-f
   '    return TlsError.new("a ChangeCipherSpec before the ClientHello", TlsAlert::UNEXPECTED_MESSAGE) if server_side? && @transcript.empty?' '' server
 prove_broken "handshake bytes after the ClientHello taken under the keys" "FAIL hello-and-more " \
   '    return TlsError.new("handshake bytes after the ClientHello in its record", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0' '' server
+prove_broken "a second ClientHello's suite unchecked" "FAIL hrr-other-suite " \
+  '      return TlsError.new("a second ClientHello that leaves out the suite chosen", TlsAlert::ILLEGAL_PARAMETER) unless again.suites.includes?(@suite)' '' server
+prove_broken "early data in a second ClientHello taken" "FAIL hrr-early-again " \
+  '      return TlsError.new("a second ClientHello offering early data", TlsAlert::ILLEGAL_PARAMETER) if again.early_data' '' server
+prove_broken "early data passed over after the second ClientHello" "FAIL junk-after-hrr " \
+  '      # (section 4.2.10): nothing after it is passed over.
+      @early_left = 0' '      # (section 4.2.10): nothing after it is passed over.' server
+prove_broken "any record that does not open passed over as early data" "FAIL early-malformed " \
+  'opened.alert == TlsAlert::BAD_RECORD_MAC && ' '' server
+prove_broken "a server_name of two host names taken" "FAIL sni-two " \
+  '          return TlsError.new("a server_name with two host names", TlsAlert::ILLEGAL_PARAMETER) if server_name' '' server
+prove_broken "a server_name of any bytes taken" "FAIL sni-bad " \
+  '          unless name.all? { |b| b > 0x20_u8 && b < 0x7F_u8 } && name[name.size - 1] != 0x2E_u8' '          unless true' server
+prove_broken "a client certificate entry's extensions passed over" "FAIL mtls-entry-ext " \
+  '      return TlsError.new("a client certificate entry with extensions nobody asked for", TlsAlert::UNSUPPORTED_EXTENSION) unless entry_extensions.empty?' '' server-mtls
 prove_broken "a CertificateRequest sent to a client the server was not told to ask" "FAIL ok " \
   '    if @config.client_roots
       request = certificate_request' '    if true

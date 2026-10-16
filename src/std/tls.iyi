@@ -447,6 +447,8 @@ pub abstract class TlsConnection
   # Up to *max* bytes the peer sent: "" once it has closed with
   # close_notify. The socket's read timeout bounds the whole call.
   def read(max : Int32 = 16384) : String | TlsError
+    # "" is the peer's close: a read of nothing would look like one.
+    raise "a TLS read of #{max} bytes: at least 1" if max < 1
     timeout = @socket.read_timeout_ms
     within(timeout && timeout > 0 ? timeout : 0) { read_now(max) }
   end
@@ -481,6 +483,9 @@ pub abstract class TlsConnection
         problem = post_handshake(content)
         return fail(problem) if problem
       when TlsRecords::ALERT
+        # user_canceled after the handshake is a warning (section 6.1): the
+        # close_notify meant to follow it is what ends the reading.
+        next if content.size == 2 && content[1] == TlsAlert::USER_CANCELED
         answer = alert(content)
         return fail(answer) if answer
         # close_notify: no more from the peer. This side's own goes out
@@ -809,7 +814,7 @@ pub abstract class TlsConnection
       opened = reader.open(header, body)
       # Early data this server refused is under keys it does not have: a
       # record that does not open is passed over while the allowance lasts.
-      if opened.is_a?(TlsError) && @early_left > 0 && body.size <= @early_left
+      if opened.is_a?(TlsError) && opened.alert == TlsAlert::BAD_RECORD_MAC && @early_left > 0 && body.size <= @early_left
         @early_left = @early_left - body.size
         next
       end
@@ -1076,6 +1081,9 @@ pub class TlsClient < TlsConnection
     context = reader.bytes(reader.u8)
     list = TlsReader.new(reader.bytes(reader.u16))
     return TlsError.new("a CertificateRequest cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
+    # Section 4.3.2: the context is for authentication after the handshake,
+    # which this client does not offer; in the handshake it is empty.
+    return TlsError.new("a CertificateRequest with a request context in the handshake", TlsAlert::ILLEGAL_PARAMETER) unless context.empty?
     schemes = nil
     seen = [] of Int32
     until list.done?
@@ -1245,9 +1253,14 @@ pub class TlsClient < TlsConnection
       return TlsError.new("extension #{type} twice in EncryptedExtensions", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
       seen << type
       case type
-      when 0, 10
-        # server_name's empty acknowledgement, and the groups the server
-        # would rather, which a client may note and need not.
+      when 0
+        # server_name's acknowledgement (RFC 6066 section 3): empty, and
+        # only of a name this client sent - none goes for an address.
+        return TlsError.new("a server_name acknowledgement of a name not sent", TlsAlert::UNSUPPORTED_EXTENSION) if TlsBytes.ip_literal?(@host)
+        return TlsError.new("a server_name acknowledgement that is not empty", TlsAlert::DECODE_ERROR) unless data.empty?
+      when 10
+        # The groups the server would rather, which a client may note and
+        # need not.
       when 16
         return TlsError.new("an ALPN answer to no offer", TlsAlert::UNSUPPORTED_EXTENSION) if @config.alpn.empty?
         field = TlsReader.new(data)
@@ -1275,8 +1288,11 @@ pub class TlsClient < TlsConnection
       # more is work for std/x509 before anything is proven.
       return TlsError.new("a Certificate of more than #{X509::MAX_CHAIN} certificates", TlsAlert::BAD_CERTIFICATE) if chain.size == X509::MAX_CHAIN
       der = list.bytes(list.u24)
-      list.bytes(list.u16)
+      entry_extensions = list.bytes(list.u16)
       return TlsError.new("a Certificate message cut short", TlsAlert::DECODE_ERROR) if list.short?
+      # Section 4.4.2: an entry's extensions answer the ClientHello's, and
+      # this client asks for none (no status_request, no SCT).
+      return TlsError.new("a certificate entry with extensions nobody asked for", TlsAlert::UNSUPPORTED_EXTENSION) unless entry_extensions.empty?
       certificate = Certificate.parse(der)
       return TlsError.new("the server's certificate #{chain.size}: #{certificate.message}", TlsAlert::BAD_CERTIFICATE) if certificate.is_a?(X509Error)
       chain << certificate
@@ -1615,6 +1631,9 @@ pub class TlsServer < TlsConnection
       return hello if hello.is_a?(TlsError)
       return TlsError.new("#{TlsBytes.handshake_name(hello[0])} where the second ClientHello belongs", TlsAlert::UNEXPECTED_MESSAGE) unless hello[0] == 1_u8
       again = client_hello(hello)
+      # Early data comes before the second ClientHello or not at all
+      # (section 4.2.10): nothing after it is passed over.
+      @early_left = 0
       return again if again.is_a?(TlsError)
       return TlsError.new("a second ClientHello with no #{group_name(group)} share", TlsAlert::ILLEGAL_PARAMETER) unless again.share(group)
       return TlsError.new("a second ClientHello with another session id", TlsAlert::ILLEGAL_PARAMETER) unless again.session == offer.session
@@ -1773,7 +1792,14 @@ pub class TlsServer < TlsConnection
           kind = names.u8
           name = names.bytes(names.u16)
           return TlsError.new("a server_name cut short", TlsAlert::DECODE_ERROR) if names.short? || name.empty?
-          server_name = TlsBytes.text(name) if kind == 0 && server_name.nil?
+          next unless kind == 0
+          # RFC 6066 section 3: one host_name, ASCII - a byte past 0x7E or
+          # below 0x21 is no host's - and without the trailing dot.
+          return TlsError.new("a server_name with two host names", TlsAlert::ILLEGAL_PARAMETER) if server_name
+          unless name.all? { |b| b > 0x20_u8 && b < 0x7F_u8 } && name[name.size - 1] != 0x2E_u8
+            return TlsError.new("a server_name that is not a host name", TlsAlert::DECODE_ERROR)
+          end
+          server_name = TlsBytes.text(name)
         end
       when 10
         groups = TlsBytes.u16_list(field.bytes(field.u16))
@@ -1883,8 +1909,10 @@ pub class TlsServer < TlsConnection
     until list.done?
       return TlsError.new("a client Certificate of more than #{X509::MAX_CHAIN} certificates", TlsAlert::BAD_CERTIFICATE) if chain.size == X509::MAX_CHAIN
       der = list.bytes(list.u24)
-      list.bytes(list.u16)
+      entry_extensions = list.bytes(list.u16)
       return TlsError.new("a client Certificate cut short", TlsAlert::DECODE_ERROR) if list.short?
+      # Section 4.4.2: the CertificateRequest asked for no entry extensions.
+      return TlsError.new("a client certificate entry with extensions nobody asked for", TlsAlert::UNSUPPORTED_EXTENSION) unless entry_extensions.empty?
       certificate = Certificate.parse(der)
       return TlsError.new("the client's certificate #{chain.size}: #{certificate.message}", TlsAlert::BAD_CERTIFICATE) if certificate.is_a?(X509Error)
       chain << certificate

@@ -100,6 +100,10 @@ SCENARIOS = [
   {"sh-and-more", false, "handshake bytes after the ServerHello in its record (unexpected_message)"},
   {"ku-no-sign", false, "does not allow digitalSignature, which a CertificateVerify is (bad_certificate)"},
   {"keyupdate-bad", true, "read: a KeyUpdate asking 2 (illegal_parameter)"},
+  {"certreq-context", false, "a CertificateRequest with a request context in the handshake (illegal_parameter)"},
+  {"cert-entry-ext", false, "a certificate entry with extensions nobody asked for (unsupported_extension)"},
+  {"sni-ack-data", false, "a server_name acknowledgement that is not empty (decode_error)"},
+  {"user-canceled", true, ""},
 ]
 
 CLIENT_HELLO           = "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001"

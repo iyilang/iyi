@@ -227,8 +227,38 @@ else
   interop "a client certificate asked for" "HTTP/1.0 200 ok" localhost - -tls1_3 -cert p256.pem -key p256.key -verify 1
   interop "ALPN" "alpn=http/1.1" localhost http/1.1 -tls1_3 -cert p256.pem -key p256.key -alpn http/1.1
   interop "a host the certificate does not name" "is not valid for example.com" example.com - -tls1_3 -cert p256.pem -key p256.key
+  # client_alert <binary>: its std/tls client refusing OpenSSL's server for
+  # a host the certificate does not name; s_server must have read alert 42
+  # (bad_certificate), which it can only under the client's handshake keys.
+  client_alert() {
+    local port pid
+    port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+    "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -tls1_3 -cert "$PKI/p256.pem" -key "$PKI/p256.key" \
+      >"$WORK/s_server-alert.log" 2>&1 </dev/null &
+    pid=$!
+    for _ in $(seq 1 50); do
+      "$PY" -c "import socket; socket.create_connection(('127.0.0.1', $port), 1).close()" 2>/dev/null && break
+      sleep 0.1
+    done
+    "$1" get "$port" "$PKI/ca.pem" example.com >/dev/null 2>&1
+    sleep 0.3
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    if grep -q "SSL alert number 42" "$WORK/s_server-alert.log"; then
+      echo "  the std/tls client's refusal, as OpenSSL read it: alert bad_certificate (42)"
+      return 0
+    fi
+    echo "  FAIL no alert read by OpenSSL: $(tail -2 "$WORK/s_server-alert.log" | tr '\n' ' ')"
+    return 1
+  }
+  if client_alert "$WORK/tls-release"; then
+    interop=$((interop + 1))
+  else
+    status=1
+  fi
   interop "TLS 1.2 alone" "alert protocol_version (70)" localhost - -tls1_2 -cert p256.pem -key p256.key
-  interop "groups without X25519" "alert handshake_failure (40)" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-256
+  interop "secp256r1 alone, asked for by a HelloRetryRequest" "HTTP/1.0 200 ok" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-256
+  interop "groups the client offers none of" "alert handshake_failure (40)" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-384
   # A client certificate required and checked: -verify_return_error ends
   # the handshake on any fault OpenSSL finds in the chain or its signature.
   mtls=(-tls1_3 -cert p256.pem -key p256.key -Verify 1 -verify_return_error -CAfile ca.pem)
@@ -657,7 +687,8 @@ prove_broken() {
   mkdir -p "$WORK/patched/std"
   local mode="${5:-trace}"
   if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; } ||
-     { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ]; } && [ "$served" = no ]; }; then
+     { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ]; } && [ "$served" = no ]; } ||
+     { [ "$mode" = client-alert ] && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
     echo "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
   fi
@@ -674,7 +705,7 @@ PY
     status=1
     return
   fi
-  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ]; then
+  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ]; then
     if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched/tlsx" \
          "$REPO/bench/std_tls_exercise.iyi" >"$WORK/patched/build.log" 2>&1; then
       echo "  the $1 copy did not build:"
@@ -685,6 +716,9 @@ PY
     local rc
     if [ "$mode" = config ]; then
       bash "$WORK/server-configs.sh" "$WORK/patched/tlsx" "$SRV" >"$WORK/mut.out" 2>&1
+      rc=$?
+    elif [ "$mode" = client-alert ]; then
+      client_alert "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
       rc=$?
     else
       mkdir -p "$WORK/patched/srv"
@@ -763,6 +797,18 @@ prove_broken "an ECDSA scheme taken for any curve" "cv-wrong-curve: refused with
   'unless key.is_a?(EcdsaPublicKey) && key.curve == curve' 'unless key.is_a?(EcdsaPublicKey)' scenarios
 prove_broken "an Ed25519 CertificateVerify unchecked" "bad-cv-ed25519: expected a refusal" \
   '           key.verify(signed, signature)' '           true' scenarios
+prove_broken "a server's Certificate of any length searched" "cert-many:" \
+  '      return TlsError.new("a Certificate of more than #{X509::MAX_CHAIN} certificates (bad_certificate)") if chain.size == X509::MAX_CHAIN' '' scenarios
+prove_broken "a client's handshake bounded by each wait alone" "slow-server: refused with" \
+  '    return @socket.read(16384 + 5) if @deadline_ns == 0_i64' '    return @socket.read(16384 + 5) if true' scenarios
+prove_broken "a KeyUpdate's request taken whatever it is" "keyupdate-bad:" \
+  '        return TlsError.new("a KeyUpdate asking #{message[4]} (illegal_parameter)") unless message[4] <= 1_u8' '' scenarios
+prove_broken "handshake bytes after the ServerHello taken under the keys" "sh-and-more:" \
+  '    return TlsError.new("handshake bytes after the ServerHello in its record (unexpected_message)") unless handshake_left == 0' '' scenarios
+prove_broken "a leaf whose keyUsage forbids signing taken" "ku-no-sign:" \
+  '    if (usage = leaf.key_usage) && (usage >> Certificate::KEY_DIGITAL_SIGNATURE) & 1 == 0' '    if false' scenarios
+prove_broken "a client Certificate past 2^14 bytes sent in one record" "certreq-ed25519:" \
+  '        sent = send_flight(presented)' '        sent = send_protected(TlsRecords::HANDSHAKE, presented)' scenarios
 prove_broken "the session id's echo unchecked" "no-echo: refused with" \
   '    return TlsError.new("a ServerHello that does not echo the session id (illegal_parameter)") unless echo == session' '' scenarios
 prove_broken "the certificate checked for no host" "wrong-host: refused with" \
@@ -788,7 +834,7 @@ prove_broken "the client's CertificateVerify over the server's context string" "
 prove_broken "a CertificateRequest without signature_algorithms passed over" "certreq-no-sigalgs: refused with" \
   '    return TlsError.new("a CertificateRequest with no signature_algorithms (missing_extension)") unless schemes' '    return nil unless schemes' scenarios
 prove_broken "handshake bytes after Finished passed over" "trailing-after-finished: refused with" \
-  '    return TlsError.new("handshake bytes left after the server'"'"'s Finished (unexpected_message)") unless @handshake.empty?' '' scenarios
+  '    return TlsError.new("handshake bytes left after the server'"'"'s Finished (unexpected_message)") unless handshake_left == 0' '' scenarios
 prove_broken "ALPN answers taken whatever they are" "alpn-unoffered: refused with" \
   'return TlsError.new("the server chose #{chosen.inspect} by ALPN, which was not offered (no_application_protocol)") unless @config.alpn.includes?(chosen)' '' scenarios
 prove_broken "an unknown extension in EncryptedExtensions passed over" "unsolicited-ext: refused with" \
@@ -796,8 +842,12 @@ prove_broken "an unknown extension in EncryptedExtensions passed over" "unsolici
 # Past the refusal, any 32 bytes stand in for the secret: the handshake
 # goes on to a server that has already hung up.
 prove_broken "a share of small order taken" "zero-share:" \
-  '    return TlsError.new("the server'"'"'s X25519 share gives no secret (illegal_parameter)") if shared.is_a?(CurveError)' \
-  '    shared = X25519.public_key(private_key) if shared.is_a?(CurveError)' scenarios
+  '      return TlsError.new("the server'"'"'s X25519 share gives no secret (illegal_parameter)") if shared.is_a?(CurveError)' \
+  '      shared = X25519.public_key(private_key) if shared.is_a?(CurveError)' scenarios
+prove_broken "a HelloRetryRequest for secp256r1 answered with X25519 again" "hrr-p256: refused" \
+  '      if reply[2] == GROUP_SECP256R1' '      if false' scenarios
+prove_broken "a ServerHello's share taken in a group its ClientHello did not send" "sh-wrong-group: refused with" \
+  '    return TlsError.new("a ServerHello'"'"'s share in #{group_name(reply[2])}, where the share sent was #{group_name(group)}'"'"'s (illegal_parameter)") unless reply[2] == group' '' scenarios
 # The server's own checks, each before the scripted client: the scenario
 # that breaks the rule must be reported as answered wrongly.
 prove_broken "the client's Finished unchecked" "FAIL bad-finished " \
@@ -820,9 +870,9 @@ prove_broken "early data before a second ClientHello not passed over" "FAIL earl
 prove_broken "a ChangeCipherSpec during the handshake not passed over" "FAIL ccs " \
   '      if type == TlsRecords::CHANGE_CIPHER_SPEC && @handshaking' '      if type == TlsRecords::CHANGE_CIPHER_SPEC && false' server
 prove_broken "a ClientHello's duplicate extension taken" "FAIL dup-ext " \
-  '      return TlsError.new("extension #{type} twice in a ClientHello (illegal_parameter)") if seen.includes?(type)' '' server
+  '      return TlsError.new("extension #{type} twice in a ClientHello (illegal_parameter)") if seen.has_key?(type)' '' server
 prove_broken "pre_shared_key's place unchecked" "FAIL psk-not-last " \
-  '      return TlsError.new("pre_shared_key not last in a ClientHello (illegal_parameter)") if seen.includes?(41)' '' server
+  '      return TlsError.new("pre_shared_key not last in a ClientHello (illegal_parameter)") if seen.has_key?(41)' '' server
 prove_broken "a compression method taken" "FAIL compression " \
   '    return TlsError.new("a ClientHello whose compression methods are not null alone (illegal_parameter)") unless compression == [0_u8]' '' server
 prove_broken "a session id of any length echoed" "FAIL long-session " \
@@ -850,11 +900,23 @@ prove_broken "an alert in the clear after the server's keys" "FAIL bad-finished 
 prove_broken "a private key that is not the certificate's taken" "FAIL another key" \
   '    return TlsError.new("the private key is not the certificate'"'"'s") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes' '' config
 prove_broken "a secp256r1 share taken before an X25519 one" "FAIL both-shares " \
-  '    @x25519 ? TlsServer::GROUP_X25519 : (@p256 ? TlsServer::GROUP_SECP256R1 : 0)' '    @p256 ? TlsServer::GROUP_SECP256R1 : (@x25519 ? TlsServer::GROUP_X25519 : 0)' server
+  '    @x25519 ? TlsConnection::GROUP_X25519 : (@p256 ? TlsConnection::GROUP_SECP256R1 : 0)' '    @p256 ? TlsConnection::GROUP_SECP256R1 : (@x25519 ? TlsConnection::GROUP_X25519 : 0)' server
 prove_broken "a HelloRetryRequest for secp256r1 whatever the groups" "FAIL hrr " \
   '      group = offer.groups.includes?(GROUP_X25519) ? GROUP_X25519 : GROUP_SECP256R1' '      group = GROUP_SECP256R1' server
 prove_broken "the server's secp256r1 share not its key's" "FAIL p256-share " \
   '      public = ephemeral.public_point' '      public = p256_ephemeral.public_point' server
+prove_broken "a client that hangs up without an alert" "FAIL no alert read by OpenSSL" \
+  '    return client.fail(problem) if problem' '    return problem if problem' client-alert
+prove_broken "a handshake bounded by each wait alone" "FAIL slow-hello " \
+  '    return @socket.read(16384 + 5) if @deadline_ns == 0_i64' '    return @socket.read(16384 + 5) if true' server
+prove_broken "a handshake message rebuilt for each record of it" "FAIL byte-records " \
+  '    @handshake.concat(content)' '    @handshake = @handshake + content' server
+prove_broken "ChangeCipherSpec records passed over without end" "FAIL ccs-flood " \
+  '    return TlsError.new("more than #{MAX_CCS} ChangeCipherSpec records (unexpected_message)") if @ccs_seen > MAX_CCS' '' server
+prove_broken "a ChangeCipherSpec before the ClientHello passed over" "FAIL ccs-first " \
+  '    return TlsError.new("a ChangeCipherSpec before the ClientHello (unexpected_message)") if server_side? && @transcript.empty?' '' server
+prove_broken "handshake bytes after the ClientHello taken under the keys" "FAIL hello-and-more " \
+  '    return TlsError.new("handshake bytes after the ClientHello in its record (unexpected_message)") unless handshake_left == 0' '' server
 prove_broken "a CertificateRequest sent to a client the server was not told to ask" "FAIL ok " \
   '    if @config.client_roots
       request = certificate_request' '    if true
@@ -872,9 +934,11 @@ prove_broken "a client Certificate's request context unchecked" "FAIL mtls-conte
 prove_broken "a certificate required where it is optional" "FAIL mtls-optional-none " \
   '      return TlsError.new("the client sent no certificate (certificate_required)") if @config.client_required' '      return TlsError.new("the client sent no certificate (certificate_required)")' server-mtls-optional
 prove_broken "a refused client's flight left unread at the close" "FAIL mtls-late " \
-  '      linger unless sent' '' server-mtls
+  '      linger if server_side? && !sent' '' server-mtls
 prove_broken "a client certificate with no CertificateVerify after it taken" "FAIL mtls-no-cv " \
   '    return TlsError.new("#{TlsBytes.handshake_name(verify[0])} where the client'"'"'s CertificateVerify belongs (unexpected_message)") unless verify[0] == 15_u8' '' server-mtls
+prove_broken "a client Certificate of any length searched" "FAIL mtls-long-chain " \
+  '      return TlsError.new("a client Certificate of more than #{X509::MAX_CHAIN} certificates (bad_certificate)") if chain.size == X509::MAX_CHAIN' '' server-mtls
 prove_broken "a client's chain taken as its own roots" "FAIL mtls-untrusted " \
   'X509.verify(chain[0], chain[1, chain.size - 1], roots, nil,' 'X509.verify(chain[0], chain[1, chain.size - 1], roots + chain[1, chain.size - 1], nil,' server-mtls
 prove_broken "a PKCS #8 public key unchecked" "FAIL a version 2 key carrying another public key" \

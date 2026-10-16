@@ -4,6 +4,67 @@
 
 ### Added
 
+- **A search for a certificate chain is bounded: 100 signature checks,
+  and ten certificates a Certificate message.** Intermediates under one
+  name, each a CA signing the others, made `X509.verify` try every order
+  of them before any trust: seven took 13,700 checks, and a 64 KiB
+  Certificate holds far more - a client's certificate could stall a
+  server that asks for one, and a server any client that connects.
+  - `X509::MAX_SIGNATURE_CHECKS` (100, as Go's path builder has it) ends
+    the search with "no chain ... within 100 signature checks".
+  - std/tls refuses a Certificate of more than `X509::MAX_CHAIN` (10)
+    certificates, either end, before reading them (bad_certificate).
+
+  Held by `bench/std_x509_exercise.sh` (seven same-name intermediates,
+  refused within the bound; a copy without it is caught) and
+  `bench/std_tls_exercise.sh` (twelve certificates from the scripted
+  server and from the scripted client refused; two broken copies).
+
+- **std/tls reads what a peer sends in time that grows with it, not with
+  its square.** Each record copied the message read so far, and each read
+  the rest of the buffer: a 60 KB ClientHello a byte to a record took the
+  server 3.2 s and gigabytes of copying, before any key.
+  - Records and handshake bytes are read forward from an offset and
+    compacted only when more comes; the same ClientHello takes 0.05 s.
+  - ChangeCipherSpec records are passed over 16 times at most, and never
+    before a server has a ClientHello (unexpected_message).
+  - A ClientHello's extensions and key shares are checked against sets.
+
+  Held by the scripted client's `byte-records` (answered within 1.5 s),
+  `ccs-flood` and `ccs-first`, each with a broken copy.
+
+- **A TLS handshake has a deadline: 30 s, or the caller's.** The socket's
+  timeout bounds each wait, and a peer sending a byte now and then made
+  each wait short and the handshake endless - a fiber and a descriptor
+  held for days.
+  - `TlsServer.over` and `TlsClient.over` take `timeout_ms`
+    (`HANDSHAKE_TIMEOUT_MS`, 30,000; 0 for none); `TlsClient.connect`'s
+    bounds the handshake too, and std/http passes its own `timeout_ms`.
+  - Past the handshake, one `read` is bounded as a whole by the socket's
+    read timeout, so std/http's deadlines hold over TLS as in the clear.
+
+  Held by the scripted client's `slow-hello` and the scripted server's
+  `slow-server`, each cut off at a 3 s bound, with a broken copy each.
+
+- **std/tls's client sends the alert its refusal names, under its
+  handshake keys.** It only closed: a server saw an end where
+  bad_certificate or decrypt_error belonged (RFC 8446 section 6.2).
+
+  Held by `bench/std_tls_exercise.sh`: OpenSSL's `s_server` reads alert 42
+  from a client refusing a certificate for another host, and a copy that
+  hangs up without it is caught.
+
+- **std/tls's client offers secp256r1 beside X25519 and follows a
+  HelloRetryRequest for it.** A server that takes P-256 alone could not be
+  reached.
+  - A HelloRetryRequest for a group not offered, or for X25519 whose share
+    was sent, is refused (illegal_parameter, section 4.1.4); a ServerHello
+    whose share is not in the group the client sent is refused.
+
+  Held by OpenSSL's `s_server -groups P-256` answering, the scripted
+  server's `hrr-p256` (finished in P-256), `hrr-group` and
+  `sh-wrong-group`, with two broken copies.
+
 - **std/cookie sends `Secure` cookies over `https://`.** It never sent
   one, since std/http had been plain http: a session cookie set over
   HTTPS did not come back.
@@ -11,6 +72,22 @@
     over `https://` only (RFC 6265 section 5.4; 6265bis on setting).
 
   Held by `bench/std_cookie_exercise.sh`, with three broken copies.
+
+- **std/tls holds to four more of RFC 8446's rules.**
+  - Handshake messages do not cross a key change (section 5.1): bytes
+    after a ServerHello, a last ClientHello or a KeyUpdate in their
+    record are refused (unexpected_message).
+  - A leaf whose keyUsage leaves out digitalSignature signs no
+    CertificateVerify (section 4.4.2.2, bad_certificate).
+  - A KeyUpdate asking neither 0 nor 1 is illegal_parameter, and an empty
+    Certificate from a server decode_error, as sections 4.6.3 and 4.4.2.4
+    name them.
+  - A client's Certificate past 2^14 bytes goes in as many records as it
+    takes.
+
+  Held by the scripted server's `sh-and-more`, `ku-no-sign`,
+  `keyupdate-bad` and a client certificate of 20 KB, and the scripted
+  client's `hello-and-more`, each with a broken copy.
 
 - **wasm32: an object held only by a local is a root, plain and
   `--release`.** The collector reads linear memory and a WebAssembly local

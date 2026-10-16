@@ -79,6 +79,16 @@ SCENARIOS = {
     "no-p256": ("signature_algorithms without ecdsa_secp256r1_sha256",
                 {"ed25519": ("held", "name=localhost"), "p256": ("alert", 40)}),
     "no-group": ("groups without X25519 or secp256r1", ("alert", 40)),
+    # A ClientHello of 60 KB, a byte to a record: what the server does with
+    # it must grow with what was sent, not with its square.
+    # 0.05 s here; 3.2 s when each record copied the message so far.
+    "byte-records": ("a 60 KB ClientHello a byte to a record, answered within 1.5 s", ("held", "TLS_AES_128_GCM_SHA256")),
+    "ccs-flood": ("seventeen ChangeCipherSpec records after the ClientHello", ("alert", 10)),
+    "ccs-first": ("a ChangeCipherSpec before the ClientHello", ("alert", 10)),
+    "hello-and-more": ("a Finished in the ClientHello's record", ("alert", 10)),
+    # A byte every half second: the server, given 3 s for a handshake,
+    # hangs up within 6, where a bound on each wait alone held on.
+    "slow-hello": ("a ClientHello a byte every half second", ("ended", 6)),
     "tls12": ("supported_versions TLS 1.2 alone", ("alert", 70)),
     "no-versions": ("no supported_versions: TLS 1.2", ("alert", 70)),
     "no-suite": ("TLS_AES_128_CCM_SHA256 alone", ("alert", 40)),
@@ -106,6 +116,7 @@ MTLS = {
     "mtls-wrong-scheme": ("a CertificateVerify under a scheme not the key's", ("alert", 47)),
     "mtls-untrusted": ("a client certificate from another root", ("alert", 42)),
     "mtls-server-only": ("a client certificate for serverAuth only", ("alert", 42)),
+    "mtls-long-chain": ("a client Certificate of twelve certificates", ("alert", 42)),
     # Asked of a server told a certificate is not required.
     "mtls-optional-none": ("no client certificate, where one is not required", ("held", "peer=-")),
 }
@@ -275,21 +286,49 @@ def scenario(c, name):
     if name == "no-group":
         kw["groups"] = (0x18,)
         kw["shares"] = {0x18: p384_share}
+    if name == "byte-records":
+        kw["order"] = ["sni", "groups", "sigalgs", "versions", "shares", ext(21, bytes(60000))]
     if name == "tls12": kw["versions"] = (0x0303,)
     if name == "no-versions": kw["versions"] = None
     if name == "no-suite": kw["suites"] = (0x1304,)
     if name == "alpn-mismatch": kw["alpn"] = ["spdy/3"]
     if name == "alpn-empty-name": kw["alpn"] = ["h2", ""]
     ch = client_hello(session, share, **kw)
+    if name == "slow-hello":
+        record = bytes([22, 3, 1]) + struct.pack(">H", len(ch)) + ch
+        started = time.monotonic()
+        c.sock.settimeout(0.5)
+        for b in record:
+            if time.monotonic() - started > 12:
+                break
+            try:
+                c.sock.sendall(bytes([b]))
+                if c.sock.recv(1) == b"":
+                    return ("ended", time.monotonic() - started)
+            except socket.timeout:
+                continue
+            except OSError:
+                return ("ended", time.monotonic() - started)
+        return ("held on", time.monotonic() - started)
     if name == "cut-hello":
         ch = ch[:4] + ch[4:-1]
         ch = bytes([1]) + (len(ch) - 4).to_bytes(3, "big") + ch[4:]
     if name == "not-hello":
         ch = bytes([2]) + ch[1:]
+    if name == "ccs-first":
+        c.sock.sendall(plain(20, b"\x01"))
     if name == "oversize":
         c.sock.sendall(bytes([22, 3, 1]) + struct.pack(">H", 16385) + ch + bytes(16385 - len(ch)))
+    elif name == "byte-records":
+        started = time.monotonic()
+        c.sock.sendall(b"".join(bytes([22, 3, 1, 0, 1, b]) for b in ch))
+    elif name == "hello-and-more":
+        more = ch + message(20, bytes(32))
+        c.sock.sendall(bytes([22, 3, 1]) + struct.pack(">H", len(more)) + more)
     else:
         c.sock.sendall(bytes([22, 3, 1]) + struct.pack(">H", len(ch)) + ch)
+    if name == "ccs-flood":
+        c.sock.sendall(plain(20, b"\x01") * 17)
     if kw.get("early"):
         # Early data under keys the server does not have: it must pass over
         # these records.
@@ -298,6 +337,9 @@ def scenario(c, name):
             c.sock.sendall(bytes([23, 3, 3]) + struct.pack(">H", len(junk)) + junk)
     transcript = ch
     sh = c.message()
+    if name == "byte-records":
+        took = time.monotonic() - started
+        assert took < 1.5, f"the ServerHello came {took:.1f} s after a ClientHello a byte to a record"
     assert sh[0] == 2, f"message {sh[0]} where the ServerHello belongs"
     random, sid, suite, exts = parse_server_hello(sh)
     assert sid == session, "the session id not echoed"
@@ -412,7 +454,7 @@ def scenario(c, name):
             presented = message(11, b"\x00" + bytes(3))
         else:
             context = b"\x01\x07" if name in ("mtls-context", "mtls-late") else b"\x00"
-            entries = b"".join(len(d).to_bytes(3, "big") + d + b"\x00\x00" for d in ders)
+            entries = b"".join(len(d).to_bytes(3, "big") + d + b"\x00\x00" for d in ders * (6 if name == "mtls-long-chain" else 1))
             presented = message(11, context + len(entries).to_bytes(3, "big") + entries)
         c.sock.sendall(writer.seal(22, presented))
         transcript += presented
@@ -499,6 +541,8 @@ def main():
             print(f"{name}: ok, {outcome[1].splitlines()[-1]}")
         elif kind == "alert" and outcome == ("alert", want):
             print(f"{name}: ok, alert {want}")
+        elif kind == "ended" and outcome[0] == "ended" and outcome[1] < want:
+            print(f"{name}: ok, hung up after {outcome[1]:.1f} s")
         else:
             failures += 1
             print(f"FAIL {name} ({what}): expected {kind} {want!r}, got {outcome!r}")

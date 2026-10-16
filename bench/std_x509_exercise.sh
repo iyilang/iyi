@@ -83,7 +83,7 @@ fi
 
 echo
 echo "== every x509 section reported"
-for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== a client's certificate (X509Purpose::Client)"; do
+for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded"; do
   if ! grep -q "$phrase" "$WORK/x509-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -445,6 +445,8 @@ prove_broken "an Ed25519 signature unchecked" "an Ed25519 leaf signed by another
 prove_broken "an Ed25519 signature's parameters taken" "an Ed25519 signature whose algorithm carries parameters: expected a refusal" \
   '    when X509Oids::ED25519
       return "#{@signature_algorithm} with parameters" unless @signature_parameters.nil?' '    when X509Oids::ED25519'
+prove_broken "a search for a chain without a bound" "seven intermediates signing each other: refused with" \
+  '  MAX_SIGNATURE_CHECKS = 100' '  MAX_SIGNATURE_CHECKS = 1_000_000'
 prove_broken "an Ed25519 key off the curve taken" "an Ed25519 key off the curve refused" \
   '    return CurveError.new("Ed25519: the public key is not a point on the curve, or not its canonical encoding") unless CurvePoint.decode(p)' '' curve25519
 

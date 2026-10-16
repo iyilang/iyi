@@ -67,7 +67,7 @@ end
 SCENARIOS = [
   {"ok", true, ""}, {"rsa", true, ""}, {"p384", true, ""}, {"ed25519", true, ""}, {"aes256", true, "TLS_AES_256_GCM_SHA384"},
   {"chacha", true, "TLS_CHACHA20_POLY1305_SHA256"}, {"ccs", true, ""}, {"fragmented", true, ""},
-  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"keyupdate", true, ""},
+  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"hrr-p256", true, ""}, {"keyupdate", true, ""},
   {"big", true, ""}, {"ticket", true, ""},
   {"bad-finished", false, "Finished does not match the handshake (decrypt_error)"},
   {"bad-cv", false, "CertificateVerify is not its key's signature (decrypt_error)"},
@@ -78,7 +78,7 @@ SCENARIOS = [
   {"suite-unoffered", false, "cipher suite 0x1304, which was not offered"},
   {"tls12", false, "does not speak TLS 1.3 (protocol_version)"},
   {"no-echo", false, "does not echo the session id"},
-  {"hrr-group", false, "HelloRetryRequest for group 23; this client offers X25519 alone"},
+  {"hrr-group", false, "a HelloRetryRequest for group 24, which was not offered (illegal_parameter)"},
   {"unsolicited-ext", false, "extension 65281 in EncryptedExtensions, which was not offered"},
   {"alpn-unoffered", false, "chose \"spdy/3\" by ALPN, which was not offered"},
   {"wrong-host", false, "is not valid for wrong-host.tls.test"},
@@ -87,13 +87,19 @@ SCENARIOS = [
   {"bad-record-mac", false, "a record that does not decrypt (bad_record_mac)"},
   {"oversize", false, "past the 2^14 + 256 allowed (record_overflow)"},
   {"alert", false, "the server sent alert handshake_failure (40)"},
-  {"cert-empty", false, "the server sent no certificate"},
+  {"cert-empty", false, "the server sent no certificate (decode_error)"},
   {"app-data-in-handshake", false, "a record of type 23 during the handshake"},
   {"trailing-after-finished", false, "handshake bytes left after the server's Finished"},
   {"zero-share", false, "X25519 share gives no secret"},
   {"compression", false, "a ServerHello with compression"},
   {"sh-extension", false, "extension 65280 in a ServerHello, which was not offered"},
   {"certreq-no-sigalgs", false, "a CertificateRequest with no signature_algorithms (missing_extension)"},
+  {"cert-many", false, "a Certificate of more than 10 certificates (bad_certificate)"},
+  {"slow-server", false, "took past the time given to the handshake"},
+  {"sh-wrong-group", false, "a ServerHello's share in secp256r1, where the share sent was X25519's (illegal_parameter)"},
+  {"sh-and-more", false, "handshake bytes after the ServerHello in its record (unexpected_message)"},
+  {"ku-no-sign", false, "does not allow digitalSignature, which a CertificateVerify is (bad_certificate)"},
+  {"keyupdate-bad", true, "read: a KeyUpdate asking 2 (illegal_parameter)"},
 ]
 
 CLIENT_HELLO           = "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001"
@@ -135,15 +141,21 @@ if args.size > 0 && args[0] == "scenarios"
     socket = IyiSocket.connect("127.0.0.1", port)
     check socket.is_a?(IyiSocket), "#{s[0]}: no connection to the scripted server"
     next unless socket.is_a?(IyiSocket)
-    conn = TlsClient.over(socket, s[0] + ".tls.test", config)
+    # Three seconds for a handshake: the slow server is cut off within it.
+    conn = TlsClient.over(socket, s[0] + ".tls.test", config, 3000)
     if s[1]
       check !conn.is_a?(TlsError), "#{s[0]}: refused: #{conn.is_a?(TlsError) ? conn.message : ""}"
       next unless conn.is_a?(TlsClient)
-      check conn.cipher_suite.includes?(s[2]) || conn.alpn_protocol == s[2] || s[2].empty?, "#{s[0]}: #{conn.cipher_suite}, alpn #{conn.alpn_protocol.inspect}"
       conn.write("hello")
       got = drain(conn)
-      expected = s[0] == "big" ? 40000 : 10
-      check got.starts_with?("echo:hello") && got.size == expected, "#{s[0]}: the echo came back as #{got[0, 60].inspect} (#{got.size} bytes)"
+      if s[2].starts_with?("read: ")
+        # Refused after the handshake: what the read says.
+        check got.includes?(s[2][6, s[2].size - 6]), "#{s[0]}: read #{got[0, 120].inspect}"
+      else
+        check conn.cipher_suite.includes?(s[2]) || conn.alpn_protocol == s[2] || s[2].empty?, "#{s[0]}: #{conn.cipher_suite}, alpn #{conn.alpn_protocol.inspect}"
+        expected = s[0] == "big" ? 40000 : 10
+        check got.starts_with?("echo:hello") && got.size == expected, "#{s[0]}: the echo came back as #{got[0, 60].inspect} (#{got.size} bytes)"
+      end
       held = held + 1
     else
       check conn.is_a?(TlsError), "#{s[0]}: expected a refusal, got a connection"
@@ -227,7 +239,9 @@ if args.size > 0 && args[0] == "serve"
       next
     end
     socket.read_timeout_ms = 15000
-    conn = TlsServer.over(socket, config)
+    # Three seconds to finish a handshake, so a peer that drips one in is
+    # cut off while the gate waits.
+    conn = TlsServer.over(socket, config, 3000)
     if conn.is_a?(TlsError)
       puts "refused: #{conn.message}"
     else

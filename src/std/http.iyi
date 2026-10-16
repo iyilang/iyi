@@ -1425,7 +1425,7 @@ pub struct Server
       client.read_timeout_ms = timeout_ms
       client.write_timeout_ms = timeout_ms
     end
-    secured = TlsServer.over(client, config)
+    secured = TlsServer.over(client, config, timeout_ms > 0 ? timeout_ms : TlsServer::HANDSHAKE_TIMEOUT_MS)
     return if secured.is_a?(TlsError)
     serve_connection(client, TlsStream.new(secured, "the client"), handler, listener, idle, stream_bodies, compress, timeout_ms)
     secured.close
@@ -2447,7 +2447,7 @@ pub struct HTTP
             offered.identity = tls_config.identity
             offered.alpn = ["http/1.1"]
           end
-          tls = TlsClient.over(socket, host, offered)
+          tls = TlsClient.over(socket, host, offered, timeout_ms > 0 ? timeout_ms : TlsClient::HANDSHAKE_TIMEOUT_MS)
           return HTTPError.new(tls.message) if tls.is_a?(TlsError)
           conn = Conn.new(socket, stream: TlsStream.new(tls, host))
           speaks_h2 = upgrade.nil? && tls.alpn_protocol == "h2"

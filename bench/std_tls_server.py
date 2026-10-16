@@ -22,6 +22,7 @@ import datetime as dt
 import os
 import socket
 import struct
+import time
 import sys
 
 from cryptography import x509
@@ -56,7 +57,9 @@ SCENARIOS = {
     "suite-unoffered": "TLS_AES_128_CCM_SHA256, which was not offered",
     "tls12": "a ServerHello with no supported_versions: TLS 1.2",
     "no-echo": "a ServerHello that does not echo the session id",
-    "hrr-group": "a HelloRetryRequest for secp256r1",
+    "hrr-group": "a HelloRetryRequest for secp384r1, which the client does not offer",
+    "hrr-p256": "a HelloRetryRequest for secp256r1, then the handshake in it",
+    "sh-wrong-group": "a ServerHello's share in secp256r1, the client's having been X25519's",
     "unsolicited-ext": "an extension in EncryptedExtensions nobody offered",
     "alpn-unoffered": "ALPN answered with a protocol not offered",
     "wrong-host": "a certificate for another name",
@@ -72,6 +75,11 @@ SCENARIOS = {
     "compression": "a ServerHello with a compression method",
     "sh-extension": "an extension in the ServerHello nobody offered",
     "certreq-no-sigalgs": "a CertificateRequest without signature_algorithms",
+    "cert-many": "a Certificate of twelve certificates, the chain six times over",
+    "slow-server": "a ServerHello a byte every half second, for ten seconds, then a hang-up",
+    "sh-and-more": "EncryptedExtensions in the clear, in the ServerHello's record",
+    "ku-no-sign": "a leaf whose keyUsage is keyEncipherment alone",
+    "keyupdate-bad": "a KeyUpdate whose request is 2",
 }
 
 NOW = dt.datetime.now(dt.timezone.utc)
@@ -82,13 +90,15 @@ def name(cn):
     return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
 
 
-def issue(subject, key, issuer, issuer_key, ca, sans=None, start=NOW - DAY, end=NOW + 30 * DAY):
+def issue(subject, key, issuer, issuer_key, ca, sans=None, start=NOW - DAY, end=NOW + 30 * DAY, extra=()):
     b = (x509.CertificateBuilder().subject_name(name(subject)).issuer_name(issuer)
          .public_key(key.public_key()).serial_number(x509.random_serial_number())
          .not_valid_before(start).not_valid_after(end)
          .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True))
     if sans:
         b = b.add_extension(x509.SubjectAlternativeName([x509.DNSName(s) for s in sans]), critical=False)
+    for extension, critical in extra:
+        b = b.add_extension(extension, critical=critical)
     return b.sign(issuer_key, hashes.SHA256())
 
 
@@ -109,7 +119,13 @@ class Pki:
                              start=NOW - 30 * DAY, end=NOW - DAY)
         self.untrusted = issue("leaf", self.keys["p256"], other.subject, other_key, False, ["*.tls.test"])
         self.client_key = ed25519.Ed25519PrivateKey.generate()
-        self.client = issue("client", self.client_key, self.inter.subject, self.inter_key, False)
+        # Past 16 KiB, with an extension nobody reads: a client's Certificate
+        # must come in more than one record.
+        bulk = x509.UnrecognizedExtension(x509.ObjectIdentifier("1.3.6.1.4.1.32473.1"), b"\x04\x82\x4e\x20" + bytes(20000))
+        self.client = issue("client", self.client_key, self.inter.subject, self.inter_key, False, extra=[(bulk, False)])
+        # A leaf whose keyUsage is keyEncipherment alone: it may not sign.
+        no_sign = x509.KeyUsage(False, False, True, False, False, False, False, False, False)
+        self.no_sign = issue("leaf", self.keys["p256"], self.inter.subject, self.inter_key, False, ["*.tls.test"], extra=[(no_sign, True)])
 
 
 def der(cert):
@@ -248,17 +264,30 @@ class Conn:
             return
         suite = {"aes256": 0x1302, "chacha": 0x1303, "suite-unoffered": 0x1304}.get(s, 0x1301)
         schedule = Schedule(0x1301 if suite == 0x1304 else suite)
-        if s in ("hrr-cookie", "hrr-group"):
+        groups = exts.get(10, b"")
+        if s in ("hrr-cookie", "hrr-group", "hrr-p256"):
+            offered = [int.from_bytes(groups[k:k + 2], "big") for k in range(2, len(groups), 2)]
+            assert 0x17 in offered, f"secp256r1 not among the client's groups {offered}"
             retry_random = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
-            e = ext(43, b"\x03\x04") + (ext(44, struct.pack(">H", 8) + b"cookie!!") if s == "hrr-cookie" else ext(51, b"\x00\x17"))
+            asked = {"hrr-cookie": ext(44, struct.pack(">H", 8) + b"cookie!!"), "hrr-group": ext(51, b"\x00\x18"),
+                     "hrr-p256": ext(51, b"\x00\x17")}[s]
+            e = ext(43, b"\x03\x04") + asked
             hrr = message(2, b"\x03\x03" + retry_random + bytes([len(sid)]) + sid + struct.pack(">HB", suite, 0) + struct.pack(">H", len(e)) + e)
             self.sock.sendall(plain(22, hrr))
             if s == "hrr-group":
                 return
             first = schedule.digest(ch)
             ch2, sid, suites, sni, share, alpn, exts = self.client_hello()
-            assert exts.get(44) == struct.pack(">H", 8) + b"cookie!!", "no cookie echoed"
+            if s == "hrr-cookie":
+                assert exts.get(44) == struct.pack(">H", 8) + b"cookie!!", "no cookie echoed"
             transcript = bytes([254, 0, 0, len(first)]) + first + hrr + ch2
+        if s == "hrr-p256":
+            # The second ClientHello's one share, in secp256r1.
+            ks = exts.get(51, b"")
+            g, l = struct.unpack(">HH", ks[2:6])
+            assert g == 0x17 and l == 65 and len(ks) == 6 + l, "the second ClientHello's share is not one secp256r1 point"
+            peer_point = ks[6:6 + l]
+            ec_key = ec.generate_private_key(ec.SECP256R1())
         key = x25519.X25519PrivateKey.generate()
         mine = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         if s == "zero-share":
@@ -266,20 +295,40 @@ class Conn:
         e = b""
         if s != "tls12":
             e += ext(43, b"\x03\x04")
-        e += ext(51, b"\x00\x1d" + struct.pack(">H", 32) + mine)
+        if s in ("hrr-p256", "sh-wrong-group"):
+            other = ec_key if s == "hrr-p256" else ec.generate_private_key(ec.SECP256R1())
+            mine = other.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+            e += ext(51, b"\x00\x17" + struct.pack(">H", 65) + mine)
+        else:
+            e += ext(51, b"\x00\x1d" + struct.pack(">H", 32) + mine)
         if s == "sh-extension":
             e += ext(0xff00, b"")
         echo = b"\x00" * len(sid) if s == "no-echo" else sid
         sh = message(2, b"\x03\x03" + os.urandom(32) + bytes([len(echo)]) + echo + struct.pack(">HB", suite, 1 if s == "compression" else 0)
                      + struct.pack(">H", len(e)) + e)
-        record = plain(22, sh)
+        record = plain(22, sh + (message(8, b"\x00\x00") if s == "sh-and-more" else b""))
         if s == "oversize":
             record = bytes([22, 3, 3]) + struct.pack(">H", 16384 + 257) + sh + b"\x00" * (16384 + 257 - len(sh))
+        if s == "slow-server":
+            started = time.monotonic()
+            for b in record:
+                if time.monotonic() - started > 10:
+                    return
+                try:
+                    self.sock.sendall(bytes([b]))
+                except OSError:
+                    return
+                time.sleep(0.5)
+            return
         self.sock.sendall(record)
-        if s in ("tls12", "no-echo", "suite-unoffered", "zero-share", "compression", "sh-extension", "oversize"):
+        if s in ("tls12", "no-echo", "suite-unoffered", "zero-share", "compression", "sh-extension", "oversize", "sh-wrong-group",
+                 "sh-and-more"):
             return
         transcript += sh
-        shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(share))
+        if s == "hrr-p256":
+            shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), peer_point))
+        else:
+            shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(share))
         early = schedule.extract(bytes(schedule.size), bytes(schedule.size))
         hs = schedule.extract(schedule.derive(early, b"derived", b""), shared)
         c_hs = schedule.derive(hs, b"c hs traffic", transcript)
@@ -305,8 +354,10 @@ class Conn:
             messages.append(message(13, b"\x00" + struct.pack(">H", 4) + ext(0xff02, b"")))
         kind = {"rsa": "rsa", "cv-pkcs1": "rsa", "p384": "p384", "cv-wrong-curve": "p384", "ed25519": "ed25519",
                 "bad-cv-ed25519": "ed25519"}.get(s, "p256")
-        leaf = {"wrong-host": self.pki.wrong_host, "expired": self.pki.expired, "untrusted": self.pki.untrusted}.get(s, self.pki.leaves[kind])
-        entries = b"" if s == "cert-empty" else b"".join(len(der(c)).to_bytes(3, "big") + der(c) + b"\x00\x00" for c in (leaf, self.pki.inter))
+        leaf = {"wrong-host": self.pki.wrong_host, "expired": self.pki.expired, "untrusted": self.pki.untrusted,
+                "ku-no-sign": self.pki.no_sign}.get(s, self.pki.leaves[kind])
+        sent = (leaf, self.pki.inter) * (6 if s == "cert-many" else 1)
+        entries = b"" if s == "cert-empty" else b"".join(len(der(c)).to_bytes(3, "big") + der(c) + b"\x00\x00" for c in sent)
         messages.append(message(11, b"\x00" + len(entries).to_bytes(3, "big") + entries))
         if s == "cert-empty":
             messages.append(message(15, b"\x04\x03\x00\x00"))
@@ -356,7 +407,7 @@ class Conn:
         else:
             self.sock.sendall(writer.seal(22, flight, corrupt=(s == "bad-record-mac")))
         if s in ("bad-finished", "bad-cv", "cv-pkcs1", "cv-wrong-curve", "unsolicited-ext", "alpn-unoffered",
-                 "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs"):
+                 "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs", "cert-many", "ku-no-sign"):
             return
 
         master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))
@@ -369,12 +420,26 @@ class Conn:
         # Alerts go under the server's application keys: its own Finished
         # switched them (section 7.3), and the client reads so.
         alert = lambda code: self.sock.sendall(Cipher(schedule, s_ap).seal(21, bytes([2, code])))
+        pending = b""
+
+        # The client's next handshake message, from as many records as it
+        # takes, none past the 2^14 bytes of content section 5.1 allows.
+        def next_message():
+            nonlocal pending
+            while len(pending) < 4 or len(pending) < 4 + int.from_bytes(pending[1:4], "big"):
+                header, body = self.record()
+                if header[0] == 20:
+                    continue
+                type_, data = reader.open(header, body)
+                assert type_ == 22, f"a record of type {type_} in the client's flight"
+                assert len(data) <= 16384, f"a record of {len(data)} bytes of content, past 2^14"
+                pending += data
+            size = 4 + int.from_bytes(pending[1:4], "big")
+            out, pending = pending[:size], pending[size:]
+            return out
+
         while True:
-            header, body = self.record()
-            if header[0] == 20:
-                continue
-            type_, content = reader.open(header, body)
-            assert type_ == 22
+            content = next_message()
             if content[0] == 11 and s == "certreq-ed25519":
                 # The identity's chain, its one certificate with no
                 # extensions, under the request's empty context.
@@ -423,6 +488,9 @@ class Conn:
         header, body = self.record()
         type_, data = reader.open(header, body)
         assert type_ == 23
+        if s == "keyupdate-bad":
+            self.sock.sendall(writer.seal(22, message(24, b"\x02")))
+            return
         if s == "keyupdate":
             # Asked once the client has written, so its answer comes when it
             # next reads: the KeyUpdate under its old keys, then the echo

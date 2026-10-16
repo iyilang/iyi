@@ -126,7 +126,9 @@ pub struct Certificate
   getter unhandled_critical : Array(String)
   @signature_parameters : DerValue?
 
-  KEY_CERT_SIGN = 5
+  # keyUsage bits (RFC 5280 section 4.2.1.3), counted from the first.
+  KEY_DIGITAL_SIGNATURE = 0
+  KEY_CERT_SIGN         = 5
 
   def initialize(@raw : Array(UInt8), @tbs : Array(UInt8), @version : Int32, @serial : Array(UInt8),
                  @issuer : Array(UInt8), @subject : Array(UInt8), @subject_name : String, @issuer_name : String,
@@ -289,6 +291,12 @@ end
 
 pub struct X509
   MAX_CHAIN = 10
+  # Signature checks one search for a chain may make, whatever the chain:
+  # a peer's intermediates under one name, each signing the others, made
+  # the search try every order of them - seven took 13,700 checks, and a
+  # Certificate message holds far more than seven. The other library's
+  # path builder in Go stops at the same 100.
+  MAX_SIGNATURE_CHECKS = 100
 
   # The DER of every block labelled *label* in a PEM text - `"CERTIFICATE"`
   # or `"PRIVATE KEY"` - each checked to be base64 before it is decoded.
@@ -307,8 +315,12 @@ pub struct X509
     problem = leaf_error(leaf, host, now, purpose)
     return X509Error.new(problem) if problem
     failures = [] of String
-    chain = grow([leaf], intermediates, roots, now, failures, purpose)
+    checks = [0]
+    chain = grow([leaf], intermediates, roots, now, failures, purpose, checks)
     return chain if chain
+    if checks[0] > MAX_SIGNATURE_CHECKS
+      return X509Error.new("no chain from #{leaf.subject_name} within #{MAX_SIGNATURE_CHECKS} signature checks")
+    end
     return X509Error.new(failures[0]) unless failures.empty?
     X509Error.new("no certificate here issued #{leaf.issuer_name}, the issuer of #{leaf.subject_name}")
   end
@@ -331,12 +343,16 @@ pub struct X509
   end
 
   # The chain grown from *chain* to a root, trying every issuer that
-  # matches, or nil; why each candidate failed goes to *failures*.
+  # matches, or nil; why each candidate failed goes to *failures*. Each
+  # candidate weighed counts in *checks*, and past `MAX_SIGNATURE_CHECKS`
+  # the search gives up.
   private def self.grow(chain : Array(Certificate), intermediates : Array(Certificate), roots : Array(Certificate),
-                        now : Time, failures : Array(String), purpose : X509Purpose) : Array(Certificate)?
+                        now : Time, failures : Array(String), purpose : X509Purpose, checks : Array(Int32)) : Array(Certificate)?
     child = chain[chain.size - 1]
     roots.each do |root|
       next unless root.subject == child.issuer
+      checks[0] += 1
+      return nil if checks[0] > MAX_SIGNATURE_CHECKS
       problem = issuer_error(child, root, chain, now, purpose)
       if problem
         failures << problem
@@ -348,13 +364,16 @@ pub struct X509
     intermediates.each do |candidate|
       next unless candidate.subject == child.issuer
       next if chain.any? { |c| c.raw == candidate.raw }
+      checks[0] += 1
+      return nil if checks[0] > MAX_SIGNATURE_CHECKS
       problem = issuer_error(child, candidate, chain, now, purpose)
       if problem
         failures << problem
         next
       end
-      found = grow(chain + [candidate], intermediates, roots, now, failures, purpose)
+      found = grow(chain + [candidate], intermediates, roots, now, failures, purpose, checks)
       return found if found
+      return nil if checks[0] > MAX_SIGNATURE_CHECKS
     end
     nil
   end

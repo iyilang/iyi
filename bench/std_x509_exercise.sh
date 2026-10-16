@@ -5,8 +5,9 @@
 #
 # The exercise holds chains Python's cryptography made, each judged as
 # Python's own verifier judges it and each refusal for its reason, hosts
-# matched, and certificates that are not certificates; this gate runs it
-# plain and --release, holds 200 fresh chains - random keys, depths and
+# matched, certificates that are not certificates, and Ed25519 keys and
+# signatures (RFC 8410); this gate runs it plain and --release, holds 200
+# fresh chains - random keys (P-256, P-384, RSA, Ed25519), depths and
 # defects - to Python's verifier, reads every certificate in the machine's
 # CA bundle as Python reads it, shows an error value's sentence through
 # `.or_panic`, and proves on broken copies of the module that the checks
@@ -82,7 +83,7 @@ fi
 
 echo
 echo "== every x509 section reported"
-for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates"; do
+for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)"; do
   if ! grep -q "$phrase" "$WORK/x509-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -100,20 +101,26 @@ fi
 
 echo
 echo "== 200 fresh chains held to Python's verifier"
-# Keys drawn from a pool of P-256, P-384 and 2048-bit RSA; zero to two
-# intermediates; and one defect or none: a host the leaf does not name,
-# a certificate out of its time, an issuer that is not a CA or may not
-# sign or allows no CA under it, extKeyUsage without serverAuth, a leaf
-# that is a CA, an unknown critical extension, a signature by another key
-# under the issuer's name, an intermediate left out, a wildcard, an IP.
+# Keys drawn from a pool of P-256, P-384, 2048-bit RSA and Ed25519; zero
+# to two intermediates; and one defect or none: a host the leaf does not
+# name, a certificate out of its time, an issuer that is not a CA or may
+# not sign or allows no CA under it, extKeyUsage without serverAuth, a
+# leaf that is a CA, an unknown critical extension, a signature by another
+# key under the issuer's name, an intermediate left out, a wildcard, an IP.
+# Python's verifier refuses an Ed25519 issuer outright (the Web PKI's
+# rule; std/x509 takes one, as OpenSSL and Go do), so a chain with one is
+# judged as its twin - the same chain, each Ed25519 key swapped for an EC
+# key of its own - and every link of the real one is held to Python's own
+# Ed25519 check.
 if [ -z "$PY" ] || ! "$PY" -c 'from cryptography.x509 import verification' >/dev/null 2>&1; then
   echo "  no python cryptography with a verifier here, so the chains go uncompared"
 else
   "$PY" - "$WORK/cases.txt" "$WORK/want.txt" <<'PY'
-import datetime as dt, ipaddress, os, random, sys
+import datetime as dt, ipaddress, os, random, sys, zlib
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from cryptography.x509 import verification as v
 NOW = dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc)
@@ -121,8 +128,12 @@ DAY = dt.timedelta(days=1)
 rng = random.Random(int.from_bytes(os.urandom(8), "big"))
 pool = [ec.generate_private_key(ec.SECP256R1()) for _ in range(6)] + \
        [ec.generate_private_key(ec.SECP384R1()) for _ in range(4)] + \
-       [rsa.generate_private_key(public_exponent=65537, key_size=2048) for _ in range(4)]
+       [rsa.generate_private_key(public_exponent=65537, key_size=2048) for _ in range(4)] + \
+       [ed25519.Ed25519PrivateKey.generate() for _ in range(4)]
+def is_ed(key): return isinstance(key, ed25519.Ed25519PrivateKey)
+TWIN = {id(k): ec.generate_private_key(ec.SECP256R1()) for k in pool if is_ed(k)}
 def name(cn): return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+# The hash by the name, not a draw, so a chain and its twin are signed alike.
 def cert(cn, key, issuer, issuer_key, ca, path_len=None, cert_sign=True, eku=None, sans=None,
          start=NOW - 30 * DAY, end=NOW + 300 * DAY, unknown=False, bc=True):
     b = (x509.CertificateBuilder().subject_name(name(cn)).issuer_name(issuer)
@@ -140,23 +151,23 @@ def cert(cn, key, issuer, issuer_key, ca, path_len=None, cert_sign=True, eku=Non
         b = b.add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_key.public_key()), critical=False)
     if unknown:
         b = b.add_extension(x509.UnrecognizedExtension(x509.ObjectIdentifier("1.3.6.1.4.1.55555.7"), b"\x05\x00"), critical=True)
-    return b.sign(issuer_key, hashes.SHA256() if isinstance(issuer_key, rsa.RSAPrivateKey) or rng.random() < 0.7 else hashes.SHA384())
+    if is_ed(issuer_key):
+        return b.sign(issuer_key, None)
+    sha384 = not isinstance(issuer_key, rsa.RSAPrivateKey) and zlib.crc32(cn.encode()) % 10 < 3
+    return b.sign(issuer_key, hashes.SHA384() if sha384 else hashes.SHA256())
 DEFECTS = ["none", "none", "none", "host", "leaf_expired", "leaf_early", "issuer_expired", "not_ca", "no_bc", "no_cert_sign",
            "path_len", "leaf_client", "issuer_client", "leaf_ca", "unknown_leaf", "unknown_issuer", "wrong_signer",
            "missing", "wildcard", "wildcard_deep", "ip", "ip_other"]
-cases, want = [], []
-def hexes(cs): return ",".join(c.public_bytes(serialization.Encoding.DER).hex() for c in cs) or "-"
-for i in range(200):
-    defect = rng.choice(DEFECTS)
-    depth = rng.randrange(3)
-    if defect in ("path_len", "missing"): depth = 2
-    if defect in ("issuer_expired", "not_ca", "no_bc", "no_cert_sign", "issuer_client", "unknown_issuer"): depth = max(depth, 1)
-    keys = rng.sample(pool, depth + 2)
-    root_key = keys[0]
+# One case built from its drawn keys, each passed through *swap*: the
+# leaf, the intermediates as handed over, the root, and the chain in order
+# from the root down.
+def build(i, defect, depth, keys, wrong, order, sans, swap):
+    def k_(k): return swap(k)
+    root_key = k_(keys[0])
     root = cert(f"Root {i}", root_key, name(f"Root {i}"), root_key, True)
     chain, issuer, issuer_key = [], root, root_key
     for d in range(depth):
-        k = keys[d + 1]
+        k = k_(keys[d + 1])
         top = d == depth - 1
         kw = {}
         if top:
@@ -170,33 +181,65 @@ for i in range(200):
         ca_flag = kw.pop("ca_flag", True)
         inter = cert(f"Inter {i}.{d}", k, issuer.subject, issuer_key, ca_flag, **kw)
         chain.append(inter); issuer, issuer_key = inter, k
-    host = f"www{i}.example.com"
-    sans = [x509.DNSName(host)]
     kw = {}
-    if defect == "host": host = f"mail{i}.example.com"
     if defect == "leaf_expired": kw["end"] = NOW - DAY
     if defect == "leaf_early": kw["start"] = NOW + DAY
     if defect == "leaf_client": kw["eku"] = [ExtendedKeyUsageOID.CLIENT_AUTH]
     if defect == "unknown_leaf": kw["unknown"] = True
+    signer = k_(wrong) if defect == "wrong_signer" else issuer_key
+    leaf = cert(f"leaf {i}", k_(keys[-1]), issuer.subject, signer, defect == "leaf_ca", sans=sans, **kw)
+    inters = list(reversed(chain))
+    if defect == "missing": inters = inters[1:]
+    return leaf, [inters[j] for j in order], root, [root] + chain + [leaf]
+cases, want = [], []
+twinned = 0
+ed_keys = 0
+def hexes(cs): return ",".join(c.public_bytes(serialization.Encoding.DER).hex() for c in cs) or "-"
+for i in range(200):
+    defect = rng.choice(DEFECTS)
+    depth = rng.randrange(3)
+    if defect in ("path_len", "missing"): depth = 2
+    if defect in ("issuer_expired", "not_ca", "no_bc", "no_cert_sign", "issuer_client", "unknown_issuer"): depth = max(depth, 1)
+    keys = rng.sample(pool, depth + 2)
+    wrong = rng.choice([k for k in pool if k is not keys[-2]]) if defect == "wrong_signer" else None
+    order = list(range(depth - 1 if defect == "missing" else depth))
+    rng.shuffle(order)
+    host = f"www{i}.example.com"
+    sans = [x509.DNSName(host)]
+    if defect == "host": host = f"mail{i}.example.com"
     if defect == "wildcard": sans = [x509.DNSName("*.example.com")]
     if defect == "wildcard_deep": sans = [x509.DNSName("*.example.com")]; host = f"a.www{i}.example.com"
     if defect in ("ip", "ip_other"):
         sans = [x509.IPAddress(ipaddress.ip_address(f"192.0.2.{i % 250 + 1}"))]
         host = f"192.0.2.{i % 250 + 1}" if defect == "ip" else f"198.51.100.{i % 250 + 1}"
-    signer = keys[-1] if defect != "wrong_signer" else rng.choice([k for k in pool if k is not issuer_key])
-    leaf = cert(f"leaf {i}", keys[-1], issuer.subject, signer if defect == "wrong_signer" else issuer_key,
-                defect == "leaf_ca", sans=sans, **kw)
-    inters = list(reversed(chain))
-    if defect == "missing": inters = inters[1:]
-    rng.shuffle(inters)
+    leaf, inters, root, ordered = build(i, defect, depth, keys, wrong, order, sans, lambda k: k)
+    ed_keys += sum(1 for k in keys if is_ed(k))
+    if any(is_ed(k) for k in keys[:-1]) or (wrong is not None and is_ed(wrong)):
+        twinned += 1
+        # Every link of the real chain, by Python's own signature check:
+        # each holds but the leaf's when another key signed it - which
+        # Python answers with ValueError when that key is of another kind
+        # than the issuer's.
+        for upper, lower in zip(ordered, ordered[1:]):
+            try:
+                lower.verify_directly_issued_by(upper)
+                good = True
+            except (InvalidSignature, ValueError):
+                good = False
+            if good != (lower is not leaf or defect != "wrong_signer"):
+                raise SystemExit(f"case {i} ({defect}): Python's check of {lower.subject.rfc4514_string()} says {good}")
+        judged = build(i, defect, depth, keys, wrong, order, sans, lambda k: TWIN.get(id(k), k))
+    else:
+        judged = (leaf, inters, root, ordered)
     subject = v.IPAddress(ipaddress.ip_address(host)) if defect in ("ip", "ip_other") else v.DNSName(host)
     try:
-        v.PolicyBuilder().store(v.Store([root])).time(NOW).build_server_verifier(subject).verify(leaf, inters)
+        v.PolicyBuilder().store(v.Store([judged[2]])).time(NOW).build_server_verifier(subject).verify(judged[0], judged[1])
         verdict = "true"
     except v.VerificationError:
         verdict = "false"
     cases.append(f"{host} {hexes([leaf])} {hexes(inters)} {hexes([root])} {defect}")
     want.append(verdict)
+print(f"  {ed_keys} Ed25519 keys among the cases; {twinned} chains with an Ed25519 signer judged by their twins")
 open(sys.argv[1], "w").write("\n".join(cases) + "\n")
 open(sys.argv[2], "w").write("\n".join(want) + "\n")
 PY
@@ -308,8 +351,9 @@ fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
-# prove_broken <label> <phrase> <old> <new>: the exercise must fail on a
-# copy of the module with <old> replaced, at the check that names <phrase>.
+# prove_broken <label> <phrase> <old> <new> [module]: the exercise must
+# fail on a copy of the module (std/x509 unless named) with <old>
+# replaced, at the check that names <phrase>.
 mutations=0
 prove_broken() {
   mutations=$((mutations + 1))
@@ -319,13 +363,14 @@ prove_broken() {
     echo "  no python3 on this machine, so the $1 proof is unmeasured"
     return
   fi
-  if ! OLD="$3" NEW="$4" "$PY" - <<PY
+  if ! OLD="$3" NEW="$4" MODULE="${5:-x509}" "$PY" - <<PY
 import os
 from pathlib import Path
-src = Path("$REPO/src/std/x509.iyi").read_text(encoding="utf-8")
+module = os.environ["MODULE"]
+src = Path("$REPO/src/std/" + module + ".iyi").read_text(encoding="utf-8")
 if src.count(os.environ["OLD"]) != 1:
     raise SystemExit("patch site missing or not one")
-Path("$WORK/patched/std/x509.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1), encoding="utf-8")
+Path("$WORK/patched/std/" + module + ".iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1), encoding="utf-8")
 PY
   then
     echo "  the $1 patch did not apply"
@@ -391,6 +436,15 @@ prove_broken "a duplicate extension taken" "an extension written twice refused" 
 # the check expects never comes.
 prove_broken "PEM's base64 unchecked" "base64: invalid byte" \
   '      return X509Error.new("a CERTIFICATE block with byte #{b} in its base64, at #{i}") unless ok' ''
+prove_broken "an Ed25519 key's parameters taken" "an Ed25519 key whose algorithm carries parameters refused" \
+  '      return X509Error.new("an Ed25519 key with parameters, which RFC 8410 says are absent") unless algorithm.size == 1' ''
+prove_broken "an Ed25519 signature unchecked" "an Ed25519 leaf signed by another key under the root's name: expected a refusal" \
+  '      return nil if key.verify(@tbs, @signature)' '      return nil'
+prove_broken "an Ed25519 signature's parameters taken" "an Ed25519 signature whose algorithm carries parameters: expected a refusal" \
+  '    when X509Oids::ED25519
+      return "#{@signature_algorithm} with parameters" unless @signature_parameters.nil?' '    when X509Oids::ED25519'
+prove_broken "an Ed25519 key off the curve taken" "an Ed25519 key off the curve refused" \
+  '    return CurveError.new("Ed25519: the public key is not a point on the curve, or not its canonical encoding") unless CurvePoint.decode(p)' '' curve25519
 
 echo
 if [ "$status" -eq 0 ]; then

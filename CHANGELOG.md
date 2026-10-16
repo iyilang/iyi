@@ -4,6 +4,26 @@
 
 ### Added
 
+- **std/x509 reads Ed25519 keys and checks Ed25519 signatures (RFC
+  8410), and std/curve25519 has `Ed25519PublicKey`.** A certificate with
+  an Ed25519 key was refused as "a key for 1.3.101.112, which this does
+  not read", so a private CA or a server on Ed25519 could not be trusted.
+  - `Certificate#public_key` is `RsaPublicKey | EcdsaPublicKey |
+    Ed25519PublicKey`; the key is checked once, where it is read, to be a
+    canonical point on the curve. A key or signature algorithm with
+    parameters is refused, as RFC 8410 says they are absent.
+  - A chain may be signed with Ed25519 at any link, as OpenSSL and Go take
+    it; Python's Web PKI verifier refuses an Ed25519 issuer outright.
+  - A signature of one kind under an issuer's key of another now names
+    both kinds.
+
+  Held by `bench/std_x509_exercise.sh`: named certificates (three chains
+  held, three refused, three keys refused, `y = p` refused); the 200
+  random chains now draw Ed25519 keys too, a chain with an Ed25519 signer
+  judged by Python as its twin with EC keys in their place and every link
+  of the real one held to Python's own Ed25519 check; 4 more broken
+  copies, one of std/curve25519.
+
 - **std/http speaks HTTP/2 (RFC 9113): the server beside HTTP/1.1 on one
   listener, the client over TLS where ALPN chooses `h2` and in the clear
   with prior knowledge.** HPACK was there and nothing used it: every

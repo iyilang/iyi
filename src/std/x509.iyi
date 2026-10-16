@@ -9,16 +9,16 @@
 #     # the chain from leaf to root, or an X509Error saying why there is none
 #
 # `Certificate.parse` reads a certificate's DER through std/asn1 and its
-# key through std/rsa or std/ecdsa: version, serial, issuer and subject
-# (kept as their DER, which is what a chain matches), validity, key,
-# signature, and the extensions a chain is checked by - basicConstraints,
-# keyUsage, extKeyUsage, subjectAltName's DNS names and IP addresses,
-# nameConstraints, and the key identifiers. An extension that appears
-# twice is refused. One that is critical and not among these is kept by
-# name, and a chain through its certificate is refused: RFC 5280 section
-# 4.2 says a certificate with a critical extension it does not understand
-# must not be used. The signature algorithm written inside the signed part
-# must be the one written outside it.
+# key through std/rsa, std/ecdsa or std/curve25519: version, serial,
+# issuer and subject (kept as their DER, which is what a chain matches),
+# validity, key, signature, and the extensions a chain is checked by -
+# basicConstraints, keyUsage, extKeyUsage, subjectAltName's DNS names and
+# IP addresses, nameConstraints, and the key identifiers. An extension
+# that appears twice is refused. One that is critical and not among these
+# is kept by name, and a chain through its certificate is refused: RFC
+# 5280 section 4.2 says a certificate with a critical extension it does
+# not understand must not be used. The signature algorithm written inside
+# the signed part must be the one written outside it.
 #
 # `X509.verify` builds a chain from the leaf to one of the given roots,
 # through the given intermediates, matching each certificate's issuer to a
@@ -42,18 +42,21 @@
 # address, v4 or v6, against the iPAddress entries.
 #
 # Signatures: RSA PKCS #1 v1.5 and PSS, and ECDSA, under SHA-256, SHA-384
-# and SHA-512. A certificate signed under SHA-1 is refused, as every
-# browser refuses one. A root's own signature is not checked: a root is
-# trusted for being in the store, not for what it says about itself.
+# and SHA-512, and Ed25519 (RFC 8410: the key's and the signature's
+# AlgorithmIdentifier carry no parameters at all). A certificate signed
+# under SHA-1 is refused, as every browser refuses one. A root's own
+# signature is not checked: a root is trusted for being in the store, not
+# for what it says about itself.
 #
-# Pure computation: std/asn1, std/rsa, std/ecdsa, std/base64 for PEM and
-# std/idna for a host written in Unicode.
+# Pure computation: std/asn1, std/rsa, std/ecdsa, std/curve25519,
+# std/base64 for PEM and std/idna for a host written in Unicode.
 
 module std/x509
 
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
 import std/rsa::{RsaPublicKey, RsaHash, RsaError}
 import std/ecdsa::{EcdsaPublicKey, EcdsaHash, EcdsaError}
+import std/curve25519::{Ed25519PublicKey, CurveError}
 import std/time::{Time}
 import std/base64::{Base64}
 import std/idna::{IDNA, IdnaError}
@@ -93,7 +96,7 @@ pub struct Certificate
   getter issuer_name : String
   getter not_before : Time
   getter not_after : Time
-  getter public_key : RsaPublicKey | EcdsaPublicKey
+  getter public_key : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey
   # The signature algorithm's OID, and the signature.
   getter signature_algorithm : String
   getter signature : Array(UInt8)
@@ -126,7 +129,7 @@ pub struct Certificate
 
   def initialize(@raw : Array(UInt8), @tbs : Array(UInt8), @version : Int32, @serial : Array(UInt8),
                  @issuer : Array(UInt8), @subject : Array(UInt8), @subject_name : String, @issuer_name : String,
-                 @not_before : Time, @not_after : Time, @public_key : RsaPublicKey | EcdsaPublicKey,
+                 @not_before : Time, @not_after : Time, @public_key : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey,
                  @signature_algorithm : String, @signature_parameters : DerValue?, @signature : Array(UInt8),
                  extensions : X509Extensions)
     @basic_constraints = extensions.basic_constraints
@@ -229,7 +232,7 @@ pub struct Certificate
     case @signature_algorithm
     when X509Oids::SHA256_RSA, X509Oids::SHA384_RSA, X509Oids::SHA512_RSA
       return "#{@signature_algorithm} with parameters that are not NULL" unless X509Keys.null_or_absent?(@signature_parameters)
-      return "an RSA signature under #{issuer.subject_name}'s ECDSA key" unless key.is_a?(RsaPublicKey)
+      return "an RSA signature under #{issuer.subject_name}'s #{X509Keys.kind(key)} key" unless key.is_a?(RsaPublicKey)
       hash = case @signature_algorithm
              when X509Oids::SHA256_RSA then RsaHash::SHA256
              when X509Oids::SHA384_RSA then RsaHash::SHA384
@@ -237,7 +240,7 @@ pub struct Certificate
              end
       return nil if key.verify_pkcs1v15(hash, @tbs, @signature)
     when X509Oids::RSA_PSS
-      return "an RSA signature under #{issuer.subject_name}'s ECDSA key" unless key.is_a?(RsaPublicKey)
+      return "an RSA signature under #{issuer.subject_name}'s #{X509Keys.kind(key)} key" unless key.is_a?(RsaPublicKey)
       parameters = @signature_parameters
       return "RSASSA-PSS without its parameters" unless parameters
       pss = X509Keys.pss(parameters)
@@ -245,13 +248,17 @@ pub struct Certificate
       return nil if key.verify_pss(pss[0], @tbs, @signature, salt_length: pss[1])
     when X509Oids::ECDSA_SHA256, X509Oids::ECDSA_SHA384, X509Oids::ECDSA_SHA512
       return "#{@signature_algorithm} with parameters" unless @signature_parameters.nil?
-      return "an ECDSA signature under #{issuer.subject_name}'s RSA key" unless key.is_a?(EcdsaPublicKey)
+      return "an ECDSA signature under #{issuer.subject_name}'s #{X509Keys.kind(key)} key" unless key.is_a?(EcdsaPublicKey)
       hash = case @signature_algorithm
              when X509Oids::ECDSA_SHA256 then EcdsaHash::SHA256
              when X509Oids::ECDSA_SHA384 then EcdsaHash::SHA384
              else                             EcdsaHash::SHA512
              end
       return nil if key.verify(hash, @tbs, @signature)
+    when X509Oids::ED25519
+      return "#{@signature_algorithm} with parameters" unless @signature_parameters.nil?
+      return "an Ed25519 signature under #{issuer.subject_name}'s #{X509Keys.kind(key)} key" unless key.is_a?(Ed25519PublicKey)
+      return nil if key.verify(@tbs, @signature)
     when X509Oids::SHA1_RSA, X509Oids::ECDSA_SHA1
       return "#{@subject_name} is signed under SHA-1, which is refused"
     else
@@ -403,6 +410,7 @@ struct X509Oids
   SHA512                 = "2.16.840.1.101.3.4.2.3"
   RSA_ENCRYPTION         = "1.2.840.113549.1.1.1"
   EC_PUBLIC_KEY          = "1.2.840.10045.2.1"
+  ED25519                = "1.3.101.112"
   SUBJECT_KEY_ID         = "2.5.29.14"
   KEY_USAGE              = "2.5.29.15"
   SUBJECT_ALT_NAME       = "2.5.29.17"
@@ -544,7 +552,7 @@ end
 
 # Keys from a SubjectPublicKeyInfo, and RSASSA-PSS's parameters.
 struct X509Keys
-  def self.read(spki : DerValue) : RsaPublicKey | EcdsaPublicKey | X509Error
+  def self.read(spki : DerValue) : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey | X509Error
     fields = X509Asn1.values(spki.sequence)!
     return X509Error.new("a SubjectPublicKeyInfo of #{fields.size} values, not 2") unless fields.size == 2
     algorithm = X509Asn1.values(fields[0].sequence)!
@@ -559,8 +567,23 @@ struct X509Keys
       key = EcdsaPublicKey.from_spki(spki)
       return X509Error.new(key.message) if key.is_a?(EcdsaError)
       key
+    when X509Oids::ED25519
+      # RFC 8410 section 3: the parameters MUST be absent.
+      return X509Error.new("an Ed25519 key with parameters, which RFC 8410 says are absent") unless algorithm.size == 1
+      key = Ed25519PublicKey.from_bytes(X509Asn1.bytes(fields[1].bit_string)!)
+      return X509Error.new(key.message) if key.is_a?(CurveError)
+      key
     else
       X509Error.new("a key for #{oid}, which this does not read")
+    end
+  end
+
+  # A key's kind, for a sentence.
+  def self.kind(key : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey) : String
+    case key
+    when RsaPublicKey   then "RSA"
+    when EcdsaPublicKey then "ECDSA"
+    else                     "Ed25519"
     end
   end
 

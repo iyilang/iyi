@@ -864,10 +864,12 @@ jobs:
       - name: crystal-metric's port answers as Crystal does
         run: bash bench/metric_port.sh
 
-  # Every module's own exercise, in three shards (bench/std_siblings.sh).
+  # Every module's own exercise, in four shards (bench/std_siblings.sh).
   # One after another they ran past the std job's hour: 39 of 91 had run at
   # sixty minutes, std/http's proofs alone thirteen of them, on top of the
-  # foundation's twenty-five. Interleaved, each shard carries a third.
+  # foundation's twenty-five. Interleaved, each shard carries a quarter:
+  # in three, the shard with std/http - 21 minutes of HTTPS under two
+  # certificates and its proofs - ran past 45.
   std-siblings:
     needs: build
     runs-on: ubuntu-24.04
@@ -877,8 +879,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
-    name: "The standard library's module exercises, shard ${{ matrix.shard }} of 3"
+        shard: [1, 2, 3, 4]
+    name: "The standard library's module exercises, shard ${{ matrix.shard }} of 4"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -898,7 +900,7 @@ jobs:
           apt-get update -qq && apt-get install -y -qq python3 python3-pip > /dev/null
           python3 -m pip install -q --break-system-packages cryptography
       - name: The module exercises of this shard
-        run: bash bench/std_siblings.sh ${{ matrix.shard }} 3
+        run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 
   targets:
     needs: build

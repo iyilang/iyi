@@ -46,10 +46,10 @@
 # std/sse streams events, and std/websocket takes a connection over.
 # The socket parks under the runtime, so a slow client costs one fiber;
 # the listener's `close` ends `serve`. With `tls:` a `TlsServerConfig`
-# (std/tls's server: TLS 1.3, an Ed25519 certificate) every connection is
-# TLS, its handshake first and close_notify last; inside it, as in the
-# clear, a connection that opens with HTTP/2's preface - as one whose ALPN
-# chose `h2` does - is served HTTP/2, any other HTTP/1.1.
+# (std/tls's server: TLS 1.3, an Ed25519 or P-256 certificate) every
+# connection is TLS, its handshake first and close_notify last; inside
+# it, as in the clear, a connection that opens with HTTP/2's preface - as
+# one whose ALPN chose `h2` does - is served HTTP/2, any other HTTP/1.1.
 #
 # **Errors are values.** What the other end does wrong - a malformed head,
 # a body cut short, a broken chunk, a corrupt gzip - is an `HTTPError`

@@ -40,15 +40,16 @@
 # (NewSessionTicket is read and set aside).
 #
 # The server. `TlsServerConfig.from_pem` takes the chain, leaf first, and
-# the leaf's private key as PKCS #8 (RFC 8410 section 7); the key must be
-# Ed25519 and the leaf's. CertificateVerify is signed with std/curve25519's
-# Ed25519, whose base-point multiplication is constant-time: the key does
-# not leak through how long a handshake takes. P-256 and RSA are not
-# signed with, as std/ecdsa and std/rsa only verify, on std/big's
-# variable-time arithmetic; so a client must take ed25519 - OpenSSL,
-# Python, curl, Node and Go do, browsers do not. The client's suite order
-# chooses the suite; the server's ALPN order chooses the protocol, and a
-# client that offers protocols and none of the server's is refused
+# the leaf's private key: PKCS #8 (an Ed25519 key, RFC 8410 section 7, or
+# a P-256 one) or SEC 1; the key must be the leaf's. CertificateVerify is
+# signed by the key's kind, ed25519 or ecdsa_secp256r1_sha256, with
+# std/curve25519 or std/p256, both constant-time: the key does not leak
+# through how long a handshake takes. RSA is not signed with, as std/rsa
+# only verifies, on std/big's variable-time arithmetic. A client must take
+# the key's scheme: every browser takes P-256; OpenSSL, Python, curl, Node
+# and Go take both. The client's suite order chooses the suite; the
+# server's ALPN order chooses the protocol, and a client that offers
+# protocols and none of the server's is refused
 # (no_application_protocol, RFC 7301). A ClientHello without an X25519
 # share, where X25519 is among its groups, is asked again
 # (HelloRetryRequest, no cookie). Early data is refused: its records are
@@ -77,7 +78,8 @@ import std/socket::{IyiSocket, SocketError}
 import std/x509::{Certificate, X509, X509Error}
 import std/system_roots::{SystemRoots}
 import std/rsa::{RsaPublicKey, RsaHash}
-import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash}
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
+import std/p256::{P256PrivateKey}
 import std/curve25519::{X25519, Ed25519, Ed25519PublicKey, CurveError}
 import std/asn1::{Der, Asn1Error}
 import std/aead::{AesGcm, ChaCha20Poly1305, AeadError}
@@ -923,39 +925,90 @@ pub class TlsClient < TlsConnection
   end
 end
 
-# What a server presents: its certificate chain, leaf first, and the
-# Ed25519 key that signs for it; and the protocols it speaks by ALPN.
+# What a server presents: its certificate chain, leaf first, and the key
+# that signs for it - Ed25519, or ECDSA on P-256 (std/p256), both in
+# constant time; and the protocols it speaks by ALPN.
 pub class TlsServerConfig
   # The chain as sent, leaf first, each certificate's DER.
   getter chain : Array(Array(UInt8))
   getter leaf : Certificate
+  # The scheme CertificateVerify is signed under, by the key's kind:
+  # ed25519 (0x0807) or ecdsa_secp256r1_sha256 (0x0403).
+  getter scheme : Int32
   # Protocols this server speaks by ALPN (RFC 7301), most wanted first; a
   # client that offers some and none of these is refused. None when empty.
   property alpn : Array(String) = [] of String
-  @seed : Array(UInt8)
+  @seed : Array(UInt8)?
+  @p256 : P256PrivateKey?
 
-  def initialize(@chain : Array(Array(UInt8)), @leaf : Certificate, @seed : Array(UInt8))
+  ED25519 = 0x0807
+  P256    = 0x0403
+
+  def initialize(@chain : Array(Array(UInt8)), @leaf : Certificate, @scheme : Int32, @seed : Array(UInt8)?, @p256 : P256PrivateKey?)
   end
 
   # The chain in *certificates*' CERTIFICATE blocks, leaf first, and the
-  # Ed25519 key in *private_key*'s PRIVATE KEY block (PKCS #8, RFC 8410
-  # section 7) - or why they are not a server's.
+  # leaf's private key in *private_key*: a PRIVATE KEY block (PKCS #8, an
+  # Ed25519 key as RFC 8410 section 7 writes it or a P-256 one as RFC 5915
+  # does) or an EC PRIVATE KEY block (SEC 1) - or why they are not a
+  # server's.
   def self.from_pem(certificates : String, private_key : String) : TlsServerConfig | TlsError
     chain = X509.pem(certificates, "CERTIFICATE")
     return TlsError.new("the certificates: #{chain.message}") if chain.is_a?(X509Error)
-    keys = X509.pem(private_key, "PRIVATE KEY")
-    return TlsError.new("the private key: #{keys.message}") if keys.is_a?(X509Error)
-    return TlsError.new("the private key: #{keys.size} PRIVATE KEY blocks, not one") unless keys.size == 1
-    seed = TlsKeys.ed25519_seed(keys[0])
-    return seed if seed.is_a?(TlsError)
-    from_der(chain, seed)
+    pkcs8 = X509.pem(private_key, "PRIVATE KEY")
+    return TlsError.new("the private key: #{pkcs8.message}") if pkcs8.is_a?(X509Error)
+    sec1 = X509.pem(private_key, "EC PRIVATE KEY")
+    return TlsError.new("the private key: #{sec1.message}") if sec1.is_a?(X509Error)
+    count = pkcs8.size + sec1.size
+    return TlsError.new("the private key: #{count} blocks of PRIVATE KEY or EC PRIVATE KEY, not one") unless count == 1
+    if sec1.size == 1
+      key = P256PrivateKey.from_sec1(sec1[0])
+      return TlsError.new(key.message) if key.is_a?(EcdsaError)
+      return from_der(chain, key)
+    end
+    algorithm = TlsKeys.algorithm(pkcs8[0])
+    return algorithm if algorithm.is_a?(TlsError)
+    case algorithm
+    when "1.3.101.112"
+      seed = TlsKeys.ed25519_seed(pkcs8[0])
+      return seed if seed.is_a?(TlsError)
+      from_der(chain, seed)
+    when "1.2.840.10045.2.1"
+      key = P256PrivateKey.from_pkcs8(pkcs8[0])
+      return TlsError.new(key.message) if key.is_a?(EcdsaError)
+      from_der(chain, key)
+    else
+      TlsError.new("the private key is for #{algorithm}, not Ed25519 (1.3.101.112) or an EC key (1.2.840.10045.2.1)")
+    end
   end
 
   # *chain*'s certificates, leaf first, and the 32-byte Ed25519 *seed*
   # that is the leaf's private key.
   def self.from_der(chain : Array(Array(UInt8)), seed : Array(UInt8)) : TlsServerConfig | TlsError
-    return TlsError.new("the certificates: none") if chain.empty?
     return TlsError.new("the private key: an Ed25519 seed is 32 bytes, not #{seed.size}") unless seed.size == 32
+    leaf = leaf_of(chain)
+    return leaf if leaf.is_a?(TlsError)
+    key = leaf.public_key
+    return TlsError.new("the certificate's key is not Ed25519, as the private key is") unless key.is_a?(Ed25519PublicKey)
+    return TlsError.new("the private key is not the certificate's") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes
+    TlsServerConfig.new(chain, leaf, ED25519, seed.dup, nil)
+  end
+
+  # *chain*'s certificates, leaf first, and the P-256 *key* that is the
+  # leaf's.
+  def self.from_der(chain : Array(Array(UInt8)), key : P256PrivateKey) : TlsServerConfig | TlsError
+    leaf = leaf_of(chain)
+    return leaf if leaf.is_a?(TlsError)
+    public = leaf.public_key
+    unless public.is_a?(EcdsaPublicKey) && public.curve == EcdsaCurve::P256
+      return TlsError.new("the certificate's key is not P-256, as the private key is")
+    end
+    return TlsError.new("the private key is not the certificate's") unless public.x == key.public_key.x && public.y == key.public_key.y
+    TlsServerConfig.new(chain, leaf, P256, nil, key)
+  end
+
+  private def self.leaf_of(chain : Array(Array(UInt8))) : Certificate | TlsError
+    return TlsError.new("the certificates: none") if chain.empty?
     leaf = nil
     chain.each_with_index do |der, i|
       certificate = Certificate.parse(der)
@@ -963,20 +1016,43 @@ pub class TlsServerConfig
       leaf = certificate if i == 0
     end
     return TlsError.new("the certificates: none") unless leaf
-    key = leaf.public_key
-    return TlsError.new("the certificate's key is not Ed25519, the only kind this server signs with") unless key.is_a?(Ed25519PublicKey)
-    return TlsError.new("the private key is not the certificate's") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes
-    TlsServerConfig.new(chain, leaf, seed.dup)
+    leaf
   end
 
-  # The leaf key's signature of *content*: what CertificateVerify carries.
+  # The leaf key's signature of *content* under `scheme`: what
+  # CertificateVerify carries.
   def sign(content : Array(UInt8)) : Array(UInt8)
-    TlsBytes.of(Ed25519.sign(@seed, content))
+    if key = @p256
+      key.sign(EcdsaHash::SHA256, content)
+    elsif seed = @seed
+      TlsBytes.of(Ed25519.sign(seed, content))
+    else
+      [] of UInt8
+    end
+  end
+
+  # A scheme by the name RFC 8446 gives it.
+  def self.scheme_name(scheme : Int32) : String
+    scheme == P256 ? "ecdsa_secp256r1_sha256" : "ed25519"
   end
 end
 
 # A PKCS #8 private key read (RFC 5958; RFC 8410 section 7 for Ed25519).
 struct TlsKeys
+  # The algorithm a PKCS #8 OneAsymmetricKey names, by its OID.
+  def self.algorithm(der : Array(UInt8)) : String | TlsError
+    top = Der.parse(der)
+    return TlsError.new("the private key: #{top.message}") if top.is_a?(Asn1Error)
+    fields = top.sequence
+    return TlsError.new("the private key: #{fields.message}") if fields.is_a?(Asn1Error)
+    return TlsError.new("the private key: a OneAsymmetricKey of #{fields.size} values") if fields.size < 3
+    algorithm = fields[1].sequence
+    return TlsError.new("the private key: an AlgorithmIdentifier that is not a SEQUENCE") if algorithm.is_a?(Asn1Error) || algorithm.empty?
+    oid = algorithm[0].oid
+    return TlsError.new("the private key: not an AlgorithmIdentifier") if oid.is_a?(Asn1Error)
+    oid
+  end
+
   # The seed of an Ed25519 OneAsymmetricKey: version 0 or 1, the algorithm
   # 1.3.101.112 with no parameters, and the CurvePrivateKey - an OCTET
   # STRING of 32 bytes - inside the privateKey OCTET STRING. Attributes and
@@ -1300,7 +1376,9 @@ pub class TlsServer < TlsConnection
     return TlsError.new("a ClientHello whose compression methods are not null alone (illegal_parameter)") unless compression == [0_u8]
     return TlsError.new("the client offers no cipher suite this server has (handshake_failure)") unless suites.any? { |s| SUITES.includes?(s) }
     return TlsError.new("a ClientHello with no signature_algorithms (missing_extension)") unless schemes
-    return TlsError.new("the client does not take Ed25519 signatures, the only kind this server makes (handshake_failure)") unless schemes.includes?(0x0807)
+    unless schemes.includes?(@config.scheme)
+      return TlsError.new("the client does not take #{TlsServerConfig.scheme_name(@config.scheme)} signatures, the only kind this server's key makes (handshake_failure)")
+    end
     return TlsError.new("a ClientHello with no supported_groups (missing_extension)") unless groups
     return TlsError.new("a ClientHello with no key_share (missing_extension)") unless shares
     return TlsError.new("the client does not offer X25519, the only group this server has (handshake_failure)") unless groups.includes?(0x1d)
@@ -1343,12 +1421,12 @@ pub class TlsServer < TlsConnection
     TlsBytes.message(11, [0_u8] + TlsBytes.u24(entries.size) + entries)
   end
 
-  # CertificateVerify (section 4.4.3) under ed25519: 64 spaces, the server's
-  # context string, a zero and the transcript's hash, signed.
+  # CertificateVerify (section 4.4.3) under the key's scheme: 64 spaces,
+  # the server's context string, a zero and the transcript's hash, signed.
   private def certificate_verify : Array(UInt8)
     signed = Array(UInt8).new(64, 0x20_u8) + TlsBytes.of("TLS 1.3, server CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
     signature = @config.sign(signed)
-    TlsBytes.message(15, TlsBytes.u16(0x0807) + TlsBytes.u16(signature.size) + signature)
+    TlsBytes.message(15, TlsBytes.u16(@config.scheme) + TlsBytes.u16(signature.size) + signature)
   end
 
   # Handshake messages under the handshake keys, in records of at most 2^14

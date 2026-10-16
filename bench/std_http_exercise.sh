@@ -466,10 +466,14 @@ leaf = (x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(ca
         .public_key(key.public_key()).serial_number(2).not_valid_before(now - dt.timedelta(days=1))
         .not_valid_after(now + dt.timedelta(days=2))
         .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
         .sign(ca_key, hashes.SHA256()))
 open(f"{out}/root.pem", "wb").write(ca.public_bytes(serialization.Encoding.PEM))
 open(f"{out}/leaf.pem", "wb").write(leaf.public_bytes(serialization.Encoding.PEM))
 open(f"{out}/leaf.key", "wb").write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+# The same P-256 leaf with its root, for std/tls's server to send.
+open(f"{out}/p256.pem", "wb").write(leaf.public_bytes(serialization.Encoding.PEM) + ca.public_bytes(serialization.Encoding.PEM))
 # An Ed25519 leaf for the same name, the one std/tls's server signs with.
 from cryptography.hazmat.primitives.asymmetric import ed25519
 ed_key = ed25519.Ed25519PrivateKey.generate()
@@ -981,19 +985,20 @@ JS
 fi
 
 echo
-echo "== HTTPS: the server over std/tls (an Ed25519 certificate, ALPN h2 and http/1.1)"
+echo "== HTTPS: the server over std/tls (Ed25519 and P-256 certificates, ALPN h2 and http/1.1)"
 # `Server.serve(tls:)`: the exercise's server behind TlsServer, asked by
 # the iyi client over h2 and over http/1.1, curl both ways, Node's client
 # (100 GETs and 20 uploads at once under a 1000-byte window), Python
 # reading an HTTP/1.0 answer to the end - which must close with
 # close_notify - an upgrade answered 501, and a TLS 1.2 client refused
-# with the next request still served.
-# https_checks <binary>: every check against that binary's serve-tls;
-# answers the number that failed.
+# with the next request still served; once with an Ed25519 certificate
+# and once with a P-256 one.
+# https_checks <binary> <chain> <key>: every check against that binary's
+# serve-tls; answers the number that failed.
 https_checks() {
-  local bin="$1" failed=0 got want tport tpid
+  local bin="$1" chain="$2" key="$3" failed=0 got want tport tpid
   rm -f "$WORK/h2tls.port"
-  "$bin" serve-tls "$WORK/h2tls.port" "$WORK/tls/ed.pem" "$WORK/tls/ed.key" >"$WORK/h2tls.log" 2>&1 &
+  "$bin" serve-tls "$WORK/h2tls.port" "$chain" "$key" >"$WORK/h2tls.log" 2>&1 &
   tpid=$!
   for _ in $(seq 1 100); do
     [ -s "$WORK/h2tls.port" ] && break
@@ -1060,12 +1065,17 @@ if [ "$h2_built" -ne 1 ] || [ ! -s "$WORK/tls/ed.key" ]; then
   https_ready=0
 else
   https_ready=1
-  if https_checks "$H2BIN"; then
-    echo "  the iyi client over h2 and http/1.1, curl both ways, gzip, three requests on one connection, an upgrade refused 501,"
-    echo "  TLS 1.2 refused and the next request served, Python reading to close_notify, Node's 100 GETs and 20 uploads at once"
-  else
-    status=1
-  fi
+  for kind in ed p256; do
+    chain="$WORK/tls/$kind.pem"
+    key="$WORK/tls/$kind.key"
+    [ "$kind" = p256 ] && key="$WORK/tls/leaf.key"
+    if https_checks "$H2BIN" "$chain" "$key"; then
+      echo "  $kind: the iyi client over h2 and http/1.1, curl both ways, gzip, three requests on one connection, an upgrade refused 501,"
+      echo "  TLS 1.2 refused and the next request served, Python reading to close_notify, Node's 100 GETs and 20 uploads at once"
+    else
+      status=1
+    fi
+  done
 fi
 
 echo
@@ -1391,7 +1401,7 @@ https_breaks() { # https_breaks <label> <name> <old> <new>
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
-  elif https_checks "$WORK/$name.bin" >"$WORK/$name.out" 2>&1; then
+  elif https_checks "$WORK/$name.bin" "$WORK/tls/ed.pem" "$WORK/tls/ed.key" >"$WORK/$name.out" 2>&1; then
     echo "  $label: the HTTPS checks passed on a broken server"
     status=1
   else

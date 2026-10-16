@@ -1,13 +1,15 @@
 """A TLS 1.3 client that breaks the protocol one rule at a time, for the
 server section of bench/std_tls_exercise.sh.
 
-    python3 bench/std_tls_client.py PORT ROOTS_PEM [SCENARIO ...]
+    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256] [SCENARIO ...]
 
 Connects to the exercise's `serve` mode once per scenario (every one in
 SCENARIOS when none is named) and says, one line each, whether the server
-answered as it must: `<name>: ok ...`, or `FAIL <name>: ...`. A correct
-handshake is checked here, not taken on trust: the server's certificate
-against the root, its CertificateVerify with Python's own Ed25519, its
+answered as it must: `<name>: ok ...`, or `FAIL <name>: ...`. `--p256`
+says the server's key is P-256, not Ed25519: what a client that leaves
+out one scheme or the other is owed turns on that. A correct handshake is
+checked here, not taken on trust: the server's certificate against the
+root, its CertificateVerify with Python's own Ed25519 or ECDSA, its
 Finished against the transcript as this side has it, and then a request
 answered and closed with close_notify. A broken one must end in the alert
 RFC 8446 names, in the clear before the server's keys and under them
@@ -26,8 +28,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from std_tls_server import Cipher, Schedule, ext, message, plain  # noqa: E402
 
 from cryptography import x509  # noqa: E402
-from cryptography.hazmat.primitives import serialization  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric import ed25519, x25519  # noqa: E402
+from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, x25519  # noqa: E402
 
 HELLO_RETRY = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
 SUITE_NAMES = {0x1301: "TLS_AES_128_GCM_SHA256", 0x1302: "TLS_AES_256_GCM_SHA384", 0x1303: "TLS_CHACHA20_POLY1305_SHA256"}
@@ -35,6 +37,7 @@ SUITE_NAMES = {0x1301: "TLS_AES_128_GCM_SHA256", 0x1302: "TLS_AES_256_GCM_SHA384
 # name: (what the scenario sends, what the server must answer)
 #   ("held", text)  the handshake holds and the answer holds text
 #   ("alert", code) the server ends it with that alert
+# or, where the server's key decides, {"ed25519": answer, "p256": answer}.
 SCENARIOS = {
     "ok": ("a correct handshake, AES-128-GCM", ("held", "TLS_AES_128_GCM_SHA256")),
     "aes256": ("TLS_AES_256_GCM_SHA384 alone", ("held", "TLS_AES_256_GCM_SHA384")),
@@ -62,7 +65,10 @@ SCENARIOS = {
     "no-key-share": ("supported_groups without key_share", ("alert", 109)),
     "no-groups": ("key_share without supported_groups", ("alert", 109)),
     "no-sigalgs": ("no signature_algorithms", ("alert", 109)),
-    "no-ed25519": ("signature_algorithms without ed25519", ("alert", 40)),
+    "no-ed25519": ("signature_algorithms without ed25519",
+                   {"ed25519": ("alert", 40), "p256": ("held", "name=localhost")}),
+    "no-p256": ("signature_algorithms without ecdsa_secp256r1_sha256",
+                {"ed25519": ("held", "name=localhost"), "p256": ("alert", 40)}),
     "no-x25519": ("groups without X25519", ("alert", 40)),
     "tls12": ("supported_versions TLS 1.2 alone", ("alert", 70)),
     "no-versions": ("no supported_versions: TLS 1.2", ("alert", 70)),
@@ -222,6 +228,7 @@ def scenario(c, name):
     if name == "no-groups": kw["groups"] = None
     if name == "no-sigalgs": kw["sigalgs"] = None
     if name == "no-ed25519": kw["sigalgs"] = (0x0403, 0x0804)
+    if name == "no-p256": kw["sigalgs"] = (0x0807, 0x0804)
     if name == "no-x25519":
         kw["groups"] = (0x17,)
         kw["shares"] = {0x17: b"\x04" + os.urandom(64)}
@@ -305,11 +312,16 @@ def scenario(c, name):
     leaf = x509.load_der_x509_certificate(body[7:7 + first])
     leaf.verify_directly_issued_by(c.root)
     verify = c.message()
-    assert verify[0] == 15 and verify[4:6] == b"\x08\x07", "CertificateVerify not under ed25519"
     signed = b" " * 64 + b"TLS 1.3, server CertificateVerify\x00" + schedule.digest(transcript)
     public = leaf.public_key()
-    assert isinstance(public, ed25519.Ed25519PublicKey), "the leaf's key is not Ed25519"
-    public.verify(verify[8:], signed)
+    if isinstance(public, ed25519.Ed25519PublicKey):
+        assert verify[4:6] == b"\x08\x07", f"an Ed25519 key's CertificateVerify under {verify[4:6].hex()}"
+        public.verify(verify[8:], signed)
+    else:
+        assert isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp256r1", "the leaf's key is neither Ed25519 nor P-256"
+        assert verify[4:6] == b"\x04\x03", f"a P-256 key's CertificateVerify under {verify[4:6].hex()}"
+        public.verify(verify[8:], signed, ec.ECDSA(hashes.SHA256()))
+    assert verify[0] == 15, f"message {verify[0]} where CertificateVerify belongs"
     transcript += verify
     finished = c.message()
     assert finished[0] == 20 and finished[4:] == schedule.finished(s_hs, transcript), "the server's Finished"
@@ -361,10 +373,16 @@ def scenario(c, name):
 def main():
     port = int(sys.argv[1])
     root = x509.load_pem_x509_certificate(open(sys.argv[2], "rb").read())
-    names = sys.argv[3:] or list(SCENARIOS)
+    rest = sys.argv[3:]
+    key_kind = "ed25519"
+    if rest and rest[0] == "--p256":
+        key_kind = "p256"
+        rest = rest[1:]
+    names = rest or list(SCENARIOS)
     failures = 0
     for name in names:
-        what, (kind, want) = SCENARIOS[name]
+        what, answer = SCENARIOS[name]
+        kind, want = answer[key_kind] if isinstance(answer, dict) else answer
         try:
             outcome = run(name, port, root)
         except Refused as r:

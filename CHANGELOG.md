@@ -4,6 +4,23 @@
 
 ### Added
 
+- **std/tls's server signs with a P-256 key too, the kind every browser
+  takes.** `TlsServerConfig` took an Ed25519 key alone, which no browser
+  accepts in a certificate.
+  - `from_pem` reads a PRIVATE KEY block (PKCS #8, Ed25519 or P-256) or an
+    EC PRIVATE KEY block (SEC 1); `from_der(chain, P256PrivateKey)`
+    beside the Ed25519 form. `scheme` says which: CertificateVerify goes
+    under ed25519 or ecdsa_secp256r1_sha256, signed by std/p256 in
+    constant time, and a client that does not offer it is refused
+    (handshake_failure).
+  - `Server.serve(tls:)` in std/http takes either.
+
+  Held by `bench/std_tls_exercise.sh`: four more configurations judged;
+  the scripted client (now 39 scenarios, `--p256` for what turns on the
+  key) and the other clients against a P-256 server as against an Ed25519
+  one; three more broken copies. `bench/std_http_exercise.sh` runs its
+  HTTPS checks under both certificates.
+
 - **std/p256 makes ECDSA signatures on P-256 in constant time:
   `P256PrivateKey`.** std/ecdsa only checks signatures, on std/big's
   variable-time arithmetic, so nothing in std could sign with the key
@@ -60,8 +77,8 @@
     and its records passed over (§4.2.10); every malformed ClientHello is
     refused with the alert §4 and §9.2 name, sent to the client - in the
     clear before the keys, under them after.
-  - Only Ed25519 signs: std/ecdsa and std/rsa verify only, on variable-time
-    std/big. OpenSSL, Python, curl, Node and Go take it; browsers do not.
+  - Ed25519 signs here; P-256, which browsers take, came with std/p256
+    (above). RSA does not: std/rsa verifies only, on variable-time std/big.
   - The client and the server share one record layer
     (`TlsConnection`): records, alerts, KeyUpdate, close_notify. The
     client's sentences are unchanged; it now takes a plaintext alert

@@ -4,6 +4,20 @@
 
 ### Added
 
+- **std/http's server reads what a refused client goes on sending before
+  it closes.** A refusal - a malformed head's 400, a 431, a broken body's
+  400, an HTTP/2 GOAWAY for a connection error - closed with the client's
+  bytes unread, and the reset that close sends could take the refusal
+  from the client's buffer before it was read: macOS's CI read no GOAWAY
+  at all for a frame past 16384 bytes.
+  - After the refusal the server reads and drops what the client sends
+    until it closes, for at most 64 KiB and a second in all.
+
+  Held by `bench/std_http_exercise.sh`: four raw cases send the rest of a
+  refused request in two pieces after pauses and must still read the
+  answer, on Linux too, where a reset keeps what was received; four broken
+  copies, each closing on one of the refusals at once, caught by its case.
+
 - **Client certificates over HTTPS: a handler sees the one a client
   presented, and the client presents `HTTP.tls_config`'s identity.**
   `Server.serve(tls:)` could ask for a client's certificate once std/tls

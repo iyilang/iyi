@@ -1452,11 +1452,13 @@ pub struct Server
         return
       in HTTPError
         refuse(conn.transport, got)
+        linger(client)
         return
       in String
         parsed = parse_head(got)
         if parsed.is_a?(HTTPError)
           refuse(conn.transport, parsed)
+          linger(client)
           return
         end
         head = parsed
@@ -1470,7 +1472,10 @@ pub struct Server
           in HTTPError
             # A client that went is not answered; one that sent a body that
             # is not one is told why.
-            refuse(conn.transport, body) unless conn.ended?
+            unless conn.ended?
+              refuse(conn.transport, body)
+              linger(client)
+            end
             return
           in Cancelled
             return
@@ -1535,6 +1540,29 @@ pub struct Server
       break unless answered
     end
     h2.goaway
+    linger(conn.socket) if h2.failure.is_a?(HTTPError)
+  end
+
+  LINGER_BYTES = 65536
+  LINGER_MS    =  1000
+
+  # What a refused client goes on sending, read and dropped until it
+  # closes - at most `LINGER_BYTES` and `LINGER_MS` in all - before the
+  # close: a close with its bytes unread is a reset, which can take the
+  # refusal (a 4xx answer, GOAWAY) from the client's buffer before it is
+  # read, as macOS's does.
+  private def self.linger(socket : IyiSocket) : Nil
+    return if socket.closed?
+    until_ns = Time.monotonic_nanoseconds.to_i64 + LINGER_MS.to_i64 * 1000000_i64
+    left = LINGER_BYTES
+    while left > 0
+      wait = (until_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
+      break if wait <= 0
+      socket.read_timeout_ms = wait.to_i32
+      got = socket.read(left < 16384 ? left : 16384)
+      break unless got.is_a?(String) && !got.empty?
+      left = left - got.bytesize
+    end
   end
 
   # The body *head* promises, read from *conn*: under the server's limit,

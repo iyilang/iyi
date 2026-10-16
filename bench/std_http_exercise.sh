@@ -669,7 +669,7 @@ if [ "$h2_built" -ne 1 ] || [ -z "$PY" ]; then
 else
   h2_serve
   cat >"$WORK/h2frames.py" <<'PY'
-import socket, struct, sys
+import socket, struct, sys, time
 port = int(sys.argv[1])
 PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 NAMES = {0: "NO_ERROR", 1: "PROTOCOL_ERROR", 3: "FLOW_CONTROL_ERROR", 5: "STREAM_CLOSED", 6: "FRAME_SIZE_ERROR",
@@ -717,11 +717,47 @@ def run(sent, settings=True):
     return sock
 
 def goaway(sent, settings=True):
-    sock = run(sent, settings)
+    return goaway_on(run(sent, settings))
+
+def goaway_on(sock):
     for kind, flags, stream, payload in frames_of(sock):
         if kind == 7:
             return int.from_bytes(payload[4:8], "big")
     return None
+
+# What a refused client still sends, in two pieces after pauses: a server
+# that closed on the refusal resets the connection, and a send breaks -
+# or the reset takes the refusal from the buffer before it is read.
+def late(sock, rest):
+    for piece in (rest[:len(rest) // 2], rest[len(rest) // 2:]):
+        time.sleep(0.3)
+        try:
+            sock.sendall(piece)
+        except OSError as e:
+            return type(e).__name__
+    return None
+
+def goaway_late(sent, rest):
+    sock = run(sent)
+    broke = late(sock, rest)
+    return broke or goaway_on(sock)
+
+def status_late(sent, rest):
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.sendall(sent)
+    broke = late(sock, rest)
+    if broke:
+        return broke
+    data = b""
+    try:
+        while b"\r\n" not in data:
+            more = sock.recv(65536)
+            if not more:
+                break
+            data += more
+    except OSError as e:
+        return type(e).__name__
+    return data.split(b"\r\n")[0].decode()
 
 def reset_then_ping(sent):
     sock = run(sent)
@@ -775,6 +811,16 @@ else:
 expect("the first frame not SETTINGS", goaway(frame(6, 0, 0, b"12345678"), settings=False), 1)
 expect("DATA on stream 0", goaway(frame(0, 0, 0, b"x")), 1)
 expect("a frame past 16384 bytes", goaway(frame(0, 0, 1, b"x" * 16385)), 6)
+big = frame(0, 0, 1, b"x" * 16385)
+expect("a frame past 16384 bytes, its rest sent after the GOAWAY", goaway_late(big[:200], big[200:]), 6)
+expect("a malformed head, a body sent after the answer",
+       status_late(b"POST /echo HTTP/1.1\r\nHost: x\r\nno colon here\r\nContent-Length: 8000\r\n\r\n", b"y" * 8000),
+       "HTTP/1.1 400 Bad Request")
+expect("a head past 1 MiB, more sent after the answer",
+       status_late(b"GET / HTTP/1.1\r\nX-Big: " + b"a" * 1048600, b"a" * 8000), "HTTP/1.1 431 Request Header Fields Too Large")
+expect("a broken chunk, more sent after the answer",
+       status_late(b"POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n", b"y" * 8000),
+       "HTTP/1.1 400 Bad Request")
 expect("SETTINGS of 5 bytes", goaway(frame(4, 0, 0, b"\x00\x04\x00\x00\x00")), 6)
 expect("SETTINGS_INITIAL_WINDOW_SIZE past 2^31-1", goaway(frame(4, 0, 0, b"\x00\x04\x80\x00\x00\x00")), 3)
 expect("SETTINGS_MAX_FRAME_SIZE under 16384", goaway(frame(4, 0, 0, b"\x00\x05\x00\x00\x00\x64")), 1)
@@ -1455,6 +1501,22 @@ h2_frames_breaks "the first frame taken whatever it is" h2_first \
 h2_frames_breaks "a frame of any size read" h2_frame_size \
   '    return fail(FRAME_SIZE_ERROR, "a frame of #{length} bytes, past the #{FRAME} this end takes") if length > FRAME' '    nil' \
   'a frame past 16384 bytes'
+h2_frames_breaks "a GOAWAY for a connection error closed on at once" linger_h2 \
+  '    linger(conn.socket) if h2.failure.is_a?(HTTPError)
+' '' \
+  'a frame past 16384 bytes, its rest sent after the GOAWAY'
+h2_frames_breaks "a malformed head's 400 closed on at once" linger_head \
+  '          refuse(conn.transport, parsed)
+          linger(client)' '          refuse(conn.transport, parsed)' \
+  'a malformed head, a body sent after the answer'
+h2_frames_breaks "a 431 closed on at once" linger_431 \
+  '        refuse(conn.transport, got)
+        linger(client)' '        refuse(conn.transport, got)' \
+  'a head past 1 MiB, more sent after the answer'
+h2_frames_breaks "a broken body's 400 closed on at once" linger_body \
+  '              refuse(conn.transport, body)
+              linger(client)' '              refuse(conn.transport, body)' \
+  'a broken chunk, more sent after the answer'
 h2_frames_breaks "HEADERS on a closed stream passed over" h2_stale \
   '          mode = @reset_lately.includes?(id) ? IGNORED_BLOCK : STALE_BLOCK' '          mode = IGNORED_BLOCK' \
   'HEADERS on a closed stream'

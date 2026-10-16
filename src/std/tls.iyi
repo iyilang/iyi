@@ -97,12 +97,61 @@ import std/digest::{SHA256, SHA384}
 import std/random::{Random}
 import std/time::{Time}
 
-# What a connection answers when it cannot be made or kept.
+# The alerts of RFC 8446 section 6, by the code each is sent as.
+pub struct TlsAlert
+  CLOSE_NOTIFY                    =   0_u8
+  UNEXPECTED_MESSAGE              =  10_u8
+  BAD_RECORD_MAC                  =  20_u8
+  RECORD_OVERFLOW                 =  22_u8
+  HANDSHAKE_FAILURE               =  40_u8
+  BAD_CERTIFICATE                 =  42_u8
+  UNSUPPORTED_CERTIFICATE         =  43_u8
+  CERTIFICATE_REVOKED             =  44_u8
+  CERTIFICATE_EXPIRED             =  45_u8
+  CERTIFICATE_UNKNOWN             =  46_u8
+  ILLEGAL_PARAMETER               =  47_u8
+  UNKNOWN_CA                      =  48_u8
+  ACCESS_DENIED                   =  49_u8
+  DECODE_ERROR                    =  50_u8
+  DECRYPT_ERROR                   =  51_u8
+  PROTOCOL_VERSION                =  70_u8
+  INSUFFICIENT_SECURITY           =  71_u8
+  INTERNAL_ERROR                  =  80_u8
+  INAPPROPRIATE_FALLBACK          =  86_u8
+  USER_CANCELED                   =  90_u8
+  MISSING_EXTENSION               = 109_u8
+  UNSUPPORTED_EXTENSION           = 110_u8
+  UNRECOGNIZED_NAME               = 112_u8
+  BAD_CERTIFICATE_STATUS_RESPONSE = 113_u8
+  UNKNOWN_PSK_IDENTITY            = 115_u8
+  CERTIFICATE_REQUIRED            = 116_u8
+  NO_APPLICATION_PROTOCOL         = 120_u8
+end
+
+# What a connection answers when it cannot be made or kept, or a read that
+# came back with nothing yet.
 pub struct TlsError
   getter message : String
+  # The alert this refusal sends the peer (`TlsAlert`), or nil: none for a
+  # failure of the socket, or for an alert the peer sent.
+  getter alert : UInt8?
+  @timed_out : Bool
+  @cancelled : Bool
 
-  def initialize(message : String)
-    @message = "tls: #{message}"
+  # *message*, the alert's name after it when there is one: the sentence
+  # shows the alert, and the alert is the field, not the sentence.
+  def initialize(message : String, @alert : UInt8? = nil, @timed_out : Bool = false, @cancelled : Bool = false)
+    @message = (alert = @alert) ? "tls: #{message} (#{TlsBytes.alert_word(alert)})" : "tls: #{message}"
+  end
+
+  # A read that waited past its timeout, or that was cancelled: nothing was
+  # lost and the connection is open - read again. Any other error ended it.
+  def timed_out? : Bool
+    @timed_out
+  end
+
+  def cancelled? : Bool
+    @cancelled
   end
 
   def to_s : String
@@ -271,7 +320,7 @@ pub class TlsRecordCipher
              else
                AeadError.new("no cipher")
              end
-    return TlsError.new("a record that does not decrypt (bad_record_mac)") if opened.is_a?(AeadError)
+    return TlsError.new("a record that does not decrypt", TlsAlert::BAD_RECORD_MAC) if opened.is_a?(AeadError)
     @sequence = @sequence + 1
     inner = TlsBytes.of(opened)
     at = inner.size - 1
@@ -279,8 +328,8 @@ pub class TlsRecordCipher
     while at >= 0 && inner[at] == 0_u8
       at = at - 1
     end
-    return TlsError.new("a record with no content type (unexpected_message)") if at < 0
-    return TlsError.new("a record of #{at} bytes, past the 2^14 allowed (record_overflow)") if at > TlsRecords::MAX_PLAINTEXT
+    return TlsError.new("a record with no content type", TlsAlert::UNEXPECTED_MESSAGE) if at < 0
+    return TlsError.new("a record of #{at} bytes, past the 2^14 allowed", TlsAlert::RECORD_OVERFLOW) if at > TlsRecords::MAX_PLAINTEXT
     {inner[at], inner[0, at]}
   end
 end
@@ -415,7 +464,10 @@ pub abstract class TlsConnection
     return TlsError.new("the connection is closed") if @closed
     while true
       record = next_record
-      return fail(record) if record.is_a?(TlsError)
+      if record.is_a?(TlsError)
+        return record if record.timed_out? || record.cancelled?
+        return fail(record)
+      end
       type, content = record
       case type
       when TlsRecords::APPLICATION_DATA
@@ -431,12 +483,13 @@ pub abstract class TlsConnection
       when TlsRecords::ALERT
         answer = alert(content)
         return fail(answer) if answer
-        # close_notify: no more from the peer, and this side's own.
+        # close_notify: no more from the peer. This side's own goes out
+        # with `close`, never from a read - a task writing beside this one
+        # owns the socket's writes (section 6.1 lets a side keep writing).
         @eof = true
-        close
         return ""
       else
-        return fail(TlsError.new("a record of type #{type} after the handshake (unexpected_message)"))
+        return fail(TlsError.new("a record of type #{type} after the handshake", TlsAlert::UNEXPECTED_MESSAGE))
       end
     end
   end
@@ -451,12 +504,50 @@ pub abstract class TlsConnection
     while at < bytes.size
       size = bytes.size - at
       size = TlsRecords::MAX_PLAINTEXT if size > TlsRecords::MAX_PLAINTEXT
+      keyed = rekey_if_due
+      return fail(keyed) if keyed
       sent = send_protected(TlsRecords::APPLICATION_DATA, bytes[at, size])
       return fail(sent) if sent
       at = at + size
     end
     bytes.size
   end
+
+  # Records one write key carries before the next (RFC 8446 section 5.5:
+  # AES-GCM's is 2^24.5 full records; ChaCha20-Poly1305's far more): past
+  # it, the next write moves to new keys first. Settable, for a test.
+  property key_limit : UInt64 = 8388608_u64
+
+  # Moves this side's writes to new keys (section 4.6.3), asking the peer
+  # to move its own when *request*: what `write` does by itself at
+  # `key_limit`, for a program that wants it sooner.
+  def key_update(request : Bool = false) : TlsError?
+    return TlsError.new("the connection is closed") if @closed
+    problem = send_key_update(request)
+    return fail(problem) if problem
+    nil
+  end
+
+  # A KeyUpdate owed - the peer asked for one, and section 4.6.3 has it go
+  # before this side's next application data - or one due at `key_limit`.
+  private def rekey_if_due : TlsError?
+    writer = @writer
+    return nil unless writer
+    return nil unless @update_owed || writer.sequence >= @key_limit
+    send_key_update(false)
+  end
+
+  private def send_key_update(request : Bool) : TlsError?
+    sent = send_protected(TlsRecords::HANDSHAKE, TlsBytes.message(24, [request ? 1_u8 : 0_u8]))
+    return sent if sent
+    @write_secret = @schedule.next_secret(@write_secret)
+    @writer = TlsRecordCipher.new(@suite, @schedule, @write_secret)
+    @update_owed = false
+    nil
+  end
+
+  # The peer asked this side to move its keys: done before its next write.
+  @update_owed : Bool = false
 
   # close_notify, then the socket closed.
   def close : Nil
@@ -484,8 +575,8 @@ pub abstract class TlsConnection
     @socket.write_timeout_ms = ms
   end
 
-  # NewSessionTicket set aside by a client; KeyUpdate answered (section
-  # 4.6.3).
+  # NewSessionTicket set aside by a client; a KeyUpdate taken, and owed
+  # back when it asks (section 4.6.3).
   private def post_handshake(content : Array(UInt8)) : TlsError?
     add_handshake(content)
     while true
@@ -496,24 +587,21 @@ pub abstract class TlsConnection
       case message[0]
       when 4_u8
         # NewSessionTicket: resumption is not offered. Only a server sends one.
-        return TlsError.new("a NewSessionTicket from the client (unexpected_message)") if server_side?
+        return TlsError.new("a NewSessionTicket from the client", TlsAlert::UNEXPECTED_MESSAGE) if server_side?
       when 24_u8
-        return TlsError.new("a KeyUpdate of #{length} bytes (decode_error)") unless length == 1
+        return TlsError.new("a KeyUpdate of #{length} bytes", TlsAlert::DECODE_ERROR) unless length == 1
         # Section 4.6.3: a request_update of neither 0 nor 1.
-        return TlsError.new("a KeyUpdate asking #{message[4]} (illegal_parameter)") unless message[4] <= 1_u8
+        return TlsError.new("a KeyUpdate asking #{message[4]}", TlsAlert::ILLEGAL_PARAMETER) unless message[4] <= 1_u8
         @read_secret = @schedule.next_secret(@read_secret)
         @reader = TlsRecordCipher.new(@suite, @schedule, @read_secret)
-        if message[4] == 1_u8
-          sent = send_protected(TlsRecords::HANDSHAKE, TlsBytes.message(24, [0_u8]))
-          return sent if sent
-          @write_secret = @schedule.next_secret(@write_secret)
-          @writer = TlsRecordCipher.new(@suite, @schedule, @write_secret)
-        end
+        # update_requested: answered before this side's next application
+        # data (section 4.6.3), by `write` - a read writes nothing.
+        @update_owed = true if message[4] == 1_u8
         # Section 5.1: what comes after a key change comes under the new
         # keys, so no more of this record's handshake bytes may follow.
-        return TlsError.new("handshake bytes after a KeyUpdate in its record (unexpected_message)") unless handshake_left == 0
+        return TlsError.new("handshake bytes after a KeyUpdate in its record", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
       else
-        return TlsError.new("#{TlsBytes.handshake_name(message[0])} after the handshake (unexpected_message)")
+        return TlsError.new("#{TlsBytes.handshake_name(message[0])} after the handshake", TlsAlert::UNEXPECTED_MESSAGE)
       end
     end
     nil
@@ -521,7 +609,7 @@ pub abstract class TlsConnection
 
   # An alert's meaning: nil for close_notify, the error for any other.
   private def alert(content : Array(UInt8)) : TlsError?
-    return TlsError.new("an alert of #{content.size} bytes (decode_error)") unless content.size == 2
+    return TlsError.new("an alert of #{content.size} bytes", TlsAlert::DECODE_ERROR) unless content.size == 2
     return nil if content[1] == 0_u8
     TlsError.new("#{@peer} sent alert #{TlsBytes.alert_name(content[1])}")
   end
@@ -536,7 +624,7 @@ pub abstract class TlsConnection
   # from the client's buffer before it is read - a client refused for its
   # certificate would read "reset", not why.
   protected def fail(error : TlsError) : TlsError
-    code = TlsBytes.alert_code(error.message)
+    code = error.alert
     if code && !@closed && !@socket.closed?
       content = [2_u8, code]
       sent = if @writer
@@ -573,10 +661,10 @@ pub abstract class TlsConnection
     reader = TlsReader.new(message[4, message.size - 4])
     scheme = reader.u16
     signature = reader.bytes(reader.u16)
-    return TlsError.new("a CertificateVerify cut short (decode_error)") if reader.short? || !reader.done?
+    return TlsError.new("a CertificateVerify cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
     # Section 4.4.2.2: a leaf whose keyUsage is there must allow signing.
     if (usage = leaf.key_usage) && (usage >> Certificate::KEY_DIGITAL_SIGNATURE) & 1 == 0
-      return TlsError.new("#{@peer}'s certificate does not allow digitalSignature, which a CertificateVerify is (bad_certificate)")
+      return TlsError.new("#{@peer}'s certificate does not allow digitalSignature, which a CertificateVerify is", TlsAlert::BAD_CERTIFICATE)
     end
     signed = Array(UInt8).new(64, 0x20_u8) + TlsBytes.of("TLS 1.3, #{side} CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
     key = leaf.public_key
@@ -584,19 +672,19 @@ pub abstract class TlsConnection
          when 0x0403, 0x0503, 0x0603
            curve = scheme == 0x0403 ? EcdsaCurve::P256 : (scheme == 0x0503 ? EcdsaCurve::P384 : EcdsaCurve::P521)
            hash = scheme == 0x0403 ? EcdsaHash::SHA256 : (scheme == 0x0503 ? EcdsaHash::SHA384 : EcdsaHash::SHA512)
-           return TlsError.new("CertificateVerify scheme 0x#{scheme.to_s(16)} for a key that is not on its curve (illegal_parameter)") unless key.is_a?(EcdsaPublicKey) && key.curve == curve
+           return TlsError.new("CertificateVerify scheme 0x#{scheme.to_s(16)} for a key that is not on its curve", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(EcdsaPublicKey) && key.curve == curve
            key.verify(hash, signed, signature)
          when 0x0804, 0x0805, 0x0806
-           return TlsError.new("CertificateVerify scheme 0x#{scheme.to_s(16)} for a key that is not RSA (illegal_parameter)") unless key.is_a?(RsaPublicKey)
+           return TlsError.new("CertificateVerify scheme 0x#{scheme.to_s(16)} for a key that is not RSA", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(RsaPublicKey)
            hash = scheme == 0x0804 ? RsaHash::SHA256 : (scheme == 0x0805 ? RsaHash::SHA384 : RsaHash::SHA512)
            key.verify_pss(hash, signed, signature)
          when 0x0807
-           return TlsError.new("CertificateVerify scheme 0x807 for a key that is not Ed25519 (illegal_parameter)") unless key.is_a?(Ed25519PublicKey)
+           return TlsError.new("CertificateVerify scheme 0x807 for a key that is not Ed25519", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(Ed25519PublicKey)
            key.verify(signed, signature)
          else
-           return TlsError.new("CertificateVerify under scheme 0x#{scheme.to_s(16)}, which TLS 1.3 does not allow there or was not offered (illegal_parameter)")
+           return TlsError.new("CertificateVerify under scheme 0x#{scheme.to_s(16)}, which TLS 1.3 does not allow there or was not offered", TlsAlert::ILLEGAL_PARAMETER)
          end
-    return TlsError.new("#{@peer}'s CertificateVerify is not its key's signature (decrypt_error)") unless ok
+    return TlsError.new("#{@peer}'s CertificateVerify is not its key's signature", TlsAlert::DECRYPT_ERROR) unless ok
     nil
   end
 
@@ -614,7 +702,7 @@ pub abstract class TlsConnection
       type, content = record
       case type
       when TlsRecords::HANDSHAKE
-        return TlsError.new("an empty handshake record (unexpected_message)") if content.empty?
+        return TlsError.new("an empty handshake record", TlsAlert::UNEXPECTED_MESSAGE) if content.empty?
         add_handshake(content)
       when TlsRecords::ALERT
         answer = alert(content)
@@ -624,7 +712,7 @@ pub abstract class TlsConnection
         return TlsError.new("the server closed before answering, which a server without TLS 1.3 does") if plain && !server_side?
         return TlsError.new("#{@peer} closed during the handshake")
       else
-        return TlsError.new("a record of type #{type} during the handshake (unexpected_message)")
+        return TlsError.new("a record of type #{type} during the handshake", TlsAlert::UNEXPECTED_MESSAGE)
       end
     end
   end
@@ -648,7 +736,7 @@ pub abstract class TlsConnection
     left = handshake_left
     return nil if left < 4
     length = TlsBytes.u24_at(@handshake, @handshake_at + 1)
-    return TlsError.new("a handshake message of #{length} bytes (decode_error)") if length > MAX_HANDSHAKE
+    return TlsError.new("a handshake message of #{length} bytes", TlsAlert::DECODE_ERROR) if length > MAX_HANDSHAKE
     return nil if left < 4 + length
     message = @handshake[@handshake_at, 4 + length]
     @handshake_at = @handshake_at + 4 + length
@@ -663,9 +751,9 @@ pub abstract class TlsConnection
   # ClientHello, which is the first thing a client sends, and not past
   # `MAX_CCS` of them.
   private def pass_over_ccs : TlsError?
-    return TlsError.new("a ChangeCipherSpec before the ClientHello (unexpected_message)") if server_side? && @transcript.empty?
+    return TlsError.new("a ChangeCipherSpec before the ClientHello", TlsAlert::UNEXPECTED_MESSAGE) if server_side? && @transcript.empty?
     @ccs_seen = @ccs_seen + 1
-    return TlsError.new("more than #{MAX_CCS} ChangeCipherSpec records (unexpected_message)") if @ccs_seen > MAX_CCS
+    return TlsError.new("more than #{MAX_CCS} ChangeCipherSpec records", TlsAlert::UNEXPECTED_MESSAGE) if @ccs_seen > MAX_CCS
     nil
   end
 
@@ -683,9 +771,9 @@ pub abstract class TlsConnection
           @early_left = @early_left - body.size
           next
         end
-        return TlsError.new("a protected record before the #{server_side? ? "ClientHello" : "ServerHello"} (unexpected_message)")
+        return TlsError.new("a protected record before the #{server_side? ? "ClientHello" : "ServerHello"}", TlsAlert::UNEXPECTED_MESSAGE)
       end
-      return TlsError.new("a record of #{body.size} bytes, past the 2^14 allowed (record_overflow)") if body.size > TlsRecords::MAX_PLAINTEXT
+      return TlsError.new("a record of #{body.size} bytes, past the 2^14 allowed", TlsAlert::RECORD_OVERFLOW) if body.size > TlsRecords::MAX_PLAINTEXT
       if type == TlsRecords::CHANGE_CIPHER_SPEC && body == [1_u8]
         passed = pass_over_ccs
         return passed if passed
@@ -707,7 +795,7 @@ pub abstract class TlsConnection
       header, body = raw
       type = header[0]
       if type == TlsRecords::CHANGE_CIPHER_SPEC && @handshaking
-        return TlsError.new("a ChangeCipherSpec that is not 0x01 (unexpected_message)") unless body == [1_u8]
+        return TlsError.new("a ChangeCipherSpec that is not 0x01", TlsAlert::UNEXPECTED_MESSAGE) unless body == [1_u8]
         passed = pass_over_ccs
         return passed if passed
         next
@@ -715,9 +803,9 @@ pub abstract class TlsConnection
       if type == TlsRecords::ALERT && (@reader.nil? || @handshaking)
         return {type, body}
       end
-      return TlsError.new("a record of type #{type} where a protected one belongs (unexpected_message)") unless type == TlsRecords::APPLICATION_DATA
+      return TlsError.new("a record of type #{type} where a protected one belongs", TlsAlert::UNEXPECTED_MESSAGE) unless type == TlsRecords::APPLICATION_DATA
       reader = @reader
-      return TlsError.new("a protected record before any keys (unexpected_message)") unless reader
+      return TlsError.new("a protected record before any keys", TlsAlert::UNEXPECTED_MESSAGE) unless reader
       opened = reader.open(header, body)
       # Early data this server refused is under keys it does not have: a
       # record that does not open is passed over while the allowance lasts.
@@ -735,9 +823,9 @@ pub abstract class TlsConnection
     filled = fill(5)
     return filled if filled
     header = @inbox[@inbox_at, 5]
-    return TlsError.new("a record with version #{header[1]}.#{header[2]} (decode_error)") unless header[1] == 3_u8
+    return TlsError.new("a record with version #{header[1]}.#{header[2]}", TlsAlert::DECODE_ERROR) unless header[1] == 3_u8
     length = (header[3].to_i32 << 8) | header[4].to_i32
-    return TlsError.new("a record of #{length} bytes, past the 2^14 + 256 allowed (record_overflow)") if length > TlsRecords::MAX_CIPHERTEXT
+    return TlsError.new("a record of #{length} bytes, past the 2^14 + 256 allowed", TlsAlert::RECORD_OVERFLOW) if length > TlsRecords::MAX_CIPHERTEXT
     filled = fill(5 + length)
     return filled if filled
     body = @inbox[@inbox_at + 5, length]
@@ -754,8 +842,11 @@ pub abstract class TlsConnection
       end
       got = read_socket
       return got if got.is_a?(TlsError)
-      return TlsError.new("the connection to #{@place} failed: #{got.message}") if got.is_a?(SocketError)
-      return TlsError.new("the read from #{@place} was cancelled") unless got.is_a?(String)
+      # A wait past the socket's timeout, or a cancelled one, takes nothing
+      # from the stream: what came so far stays in the inbox, and a read
+      # after it goes on from there.
+      return TlsError.new("the connection to #{@place} failed: #{got.message}", timed_out: got.timed_out?) if got.is_a?(SocketError)
+      return TlsError.new("the read from #{@place} was cancelled", cancelled: true) unless got.is_a?(String)
       return TlsError.new("#{@place} closed the connection without close_notify") if got.empty?
       at = 0
       while at < got.bytesize
@@ -770,7 +861,7 @@ pub abstract class TlsConnection
   private def read_socket : String | Cancelled | SocketError | TlsError
     return @socket.read(16384 + 5) if @deadline_ns == 0_i64
     left = (@deadline_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
-    return TlsError.new("#{@place} took past the time given to #{@handshaking ? "the handshake" : "the read"}") if left <= 0
+    return TlsError.new("#{@place} took past the time given to #{@handshaking ? "the handshake" : "the read"}", timed_out: true) if left <= 0
     timeout = @socket.read_timeout_ms
     cut = timeout.nil? || timeout <= 0 || timeout > left
     @socket.read_timeout_ms = left.to_i32 if cut
@@ -778,7 +869,7 @@ pub abstract class TlsConnection
     @socket.read_timeout_ms = timeout
     # A wait the deadline cut short ends at the deadline, not the socket's.
     if cut && got.is_a?(SocketError) && got.timed_out?
-      return TlsError.new("#{@place} took past the time given to #{@handshaking ? "the handshake" : "the read"}")
+      return TlsError.new("#{@place} took past the time given to #{@handshaking ? "the handshake" : "the read"}", timed_out: true)
     end
     got
   end
@@ -875,7 +966,7 @@ pub class TlsClient < TlsConnection
       # first ClientHello (section 4.4.1), and the second carries the
       # cookie, and a secp256r1 share when that is what was asked for.
       cookie = reply[4]
-      return TlsError.new("a HelloRetryRequest asking for nothing new (illegal_parameter)") unless cookie || reply[2] != 0
+      return TlsError.new("a HelloRetryRequest asking for nothing new", TlsAlert::ILLEGAL_PARAMETER) unless cookie || reply[2] != 0
       @schedule = TlsKeySchedule.new(reply[1] == TlsSuites::AES_256_GCM)
       first = @schedule.hash(hello)
       @transcript = [254_u8, 0_u8, 0_u8, first.size.to_u8] + first + server
@@ -895,28 +986,28 @@ pub class TlsClient < TlsConnection
       return server if server.is_a?(TlsError)
       reply = server_hello(server, session)
       return reply if reply.is_a?(TlsError)
-      return TlsError.new("a second HelloRetryRequest (unexpected_message)") if reply[0]
-      return TlsError.new("a ServerHello whose suite is not the HelloRetryRequest's (illegal_parameter)") unless reply[1] == retry_suite
+      return TlsError.new("a second HelloRetryRequest", TlsAlert::UNEXPECTED_MESSAGE) if reply[0]
+      return TlsError.new("a ServerHello whose suite is not the HelloRetryRequest's", TlsAlert::ILLEGAL_PARAMETER) unless reply[1] == retry_suite
     end
     # Section 5.1: the server's keys come next, and handshake messages do
     # not cross a key change, so nothing may follow the ServerHello in its
     # record.
-    return TlsError.new("handshake bytes after the ServerHello in its record (unexpected_message)") unless handshake_left == 0
+    return TlsError.new("handshake bytes after the ServerHello in its record", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
     @suite = reply[1]
     @cipher_suite = TlsSuites.name(@suite)
     @schedule = TlsKeySchedule.new(@suite == TlsSuites::AES_256_GCM)
     peer = reply[3]
-    return TlsError.new("a ServerHello with no key share (missing_extension)") unless peer
-    return TlsError.new("a ServerHello's share in #{group_name(reply[2])}, where the share sent was #{group_name(group)}'s (illegal_parameter)") unless reply[2] == group
+    return TlsError.new("a ServerHello with no key share", TlsAlert::MISSING_EXTENSION) unless peer
+    return TlsError.new("a ServerHello's share in #{group_name(reply[2])}, where the share sent was #{group_name(group)}'s", TlsAlert::ILLEGAL_PARAMETER) unless reply[2] == group
     @transcript = @transcript + server
 
     if key = ephemeral
       got = key.shared_secret(peer)
-      return TlsError.new("the server's secp256r1 share: #{got.message} (illegal_parameter)") if got.is_a?(EcdsaError)
+      return TlsError.new("the server's secp256r1 share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
       secret = got
     else
       shared = X25519.shared(private_key, peer)
-      return TlsError.new("the server's X25519 share gives no secret (illegal_parameter)") if shared.is_a?(CurveError)
+      return TlsError.new("the server's X25519 share gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)
       secret = TlsBytes.of(shared)
     end
     handshake_secret = @schedule.handshake_secret(secret)
@@ -984,22 +1075,22 @@ pub class TlsClient < TlsConnection
     reader = TlsReader.new(message[4, message.size - 4])
     context = reader.bytes(reader.u8)
     list = TlsReader.new(reader.bytes(reader.u16))
-    return TlsError.new("a CertificateRequest cut short (decode_error)") if reader.short? || !reader.done?
+    return TlsError.new("a CertificateRequest cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
     schemes = nil
     seen = [] of Int32
     until list.done?
       type = list.u16
       data = list.bytes(list.u16)
-      return TlsError.new("a CertificateRequest cut short (decode_error)") if list.short?
-      return TlsError.new("extension #{type} twice in a CertificateRequest (illegal_parameter)") if seen.includes?(type)
+      return TlsError.new("a CertificateRequest cut short", TlsAlert::DECODE_ERROR) if list.short?
+      return TlsError.new("extension #{type} twice in a CertificateRequest", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
       seen << type
       if type == 13
         field = TlsReader.new(data)
         schemes = TlsBytes.u16_list(field.bytes(field.u16))
-        return TlsError.new("a CertificateRequest's signature_algorithms cut short (decode_error)") if field.short? || !field.done? || schemes.nil?
+        return TlsError.new("a CertificateRequest's signature_algorithms cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done? || schemes.nil?
       end
     end
-    return TlsError.new("a CertificateRequest with no signature_algorithms (missing_extension)") unless schemes
+    return TlsError.new("a CertificateRequest with no signature_algorithms", TlsAlert::MISSING_EXTENSION) unless schemes
     @certificate_request = context
     @requested_schemes = schemes
     nil
@@ -1010,7 +1101,7 @@ pub class TlsClient < TlsConnection
   private def server_flight(server_secret : Array(UInt8)) : TlsError?
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
-    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where EncryptedExtensions belongs (unexpected_message)") unless message[0] == 8_u8
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where EncryptedExtensions belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 8_u8
     problem = encrypted_extensions(message)
     return problem if problem
     @transcript = @transcript + message
@@ -1024,27 +1115,27 @@ pub class TlsClient < TlsConnection
       message = handshake_message(plain: false)
       return message if message.is_a?(TlsError)
     end
-    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where Certificate belongs (unexpected_message)") unless message[0] == 11_u8
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where Certificate belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 11_u8
     chain = certificates(message)
     return chain if chain.is_a?(TlsError)
     @transcript = @transcript + message
 
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
-    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where CertificateVerify belongs (unexpected_message)") unless message[0] == 15_u8
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where CertificateVerify belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 15_u8
     problem = certificate_verify(message, chain[0], "server")
     return problem if problem
     @transcript = @transcript + message
 
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
-    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where Finished belongs (unexpected_message)") unless message[0] == 20_u8
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where Finished belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 20_u8
     expected = @schedule.finished(server_secret, @transcript)
     unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
-      return TlsError.new("the server's Finished does not match the handshake (decrypt_error)")
+      return TlsError.new("the server's Finished does not match the handshake", TlsAlert::DECRYPT_ERROR)
     end
     @transcript = @transcript + message
-    return TlsError.new("handshake bytes left after the server's Finished (unexpected_message)") unless handshake_left == 0
+    return TlsError.new("handshake bytes left after the server's Finished", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
     nil
   end
 
@@ -1082,7 +1173,7 @@ pub class TlsClient < TlsConnection
   # cookie} (section 4.1.3) - the group a ServerHello's share is in, or the
   # one a HelloRetryRequest asks for (0 for none).
   private def server_hello(message : Array(UInt8), session : Array(UInt8)) : {Bool, Int32, Int32, Array(UInt8)?, Array(UInt8)?} | TlsError
-    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where ServerHello belongs (unexpected_message)") unless message[0] == 2_u8
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where ServerHello belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 2_u8
     body = message[4, message.size - 4]
     reader = TlsReader.new(body)
     version = reader.u16
@@ -1091,13 +1182,13 @@ pub class TlsClient < TlsConnection
     suite = reader.u16
     compression = reader.u8
     extensions = reader.bytes(reader.u16)
-    return TlsError.new("a ServerHello cut short (decode_error)") if reader.short? || !reader.done?
-    return TlsError.new("a ServerHello of legacy version #{version} (protocol_version)") unless version == 0x0303
-    return TlsError.new("a ServerHello that does not echo the session id (illegal_parameter)") unless echo == session
+    return TlsError.new("a ServerHello cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
+    return TlsError.new("a ServerHello of legacy version #{version}", TlsAlert::PROTOCOL_VERSION) unless version == 0x0303
+    return TlsError.new("a ServerHello that does not echo the session id", TlsAlert::ILLEGAL_PARAMETER) unless echo == session
     unless suite == TlsSuites::AES_128_GCM || suite == TlsSuites::AES_256_GCM || suite == TlsSuites::CHACHA20_POLY1305
-      return TlsError.new("the server chose cipher suite 0x#{suite.to_s(16)}, which was not offered (illegal_parameter)")
+      return TlsError.new("the server chose cipher suite 0x#{suite.to_s(16)}, which was not offered", TlsAlert::ILLEGAL_PARAMETER)
     end
-    return TlsError.new("a ServerHello with compression (illegal_parameter)") unless compression == 0
+    return TlsError.new("a ServerHello with compression", TlsAlert::ILLEGAL_PARAMETER) unless compression == 0
     retry = TlsBytes.hex(random) == HELLO_RETRY
     share = nil
     group = 0
@@ -1108,65 +1199,65 @@ pub class TlsClient < TlsConnection
     until list.done?
       type = list.u16
       data = list.bytes(list.u16)
-      return TlsError.new("ServerHello extensions cut short (decode_error)") if list.short?
-      return TlsError.new("extension #{type} twice in a ServerHello (illegal_parameter)") if seen.includes?(type)
+      return TlsError.new("ServerHello extensions cut short", TlsAlert::DECODE_ERROR) if list.short?
+      return TlsError.new("extension #{type} twice in a ServerHello", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
       seen << type
       field = TlsReader.new(data)
       case type
       when 43
-        return TlsError.new("the server does not speak TLS 1.3 (protocol_version)") unless field.u16 == 0x0304 && field.done?
+        return TlsError.new("the server does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION) unless field.u16 == 0x0304 && field.done?
         version_seen = true
       when 51
         group = field.u16
         if retry
           # Section 4.1.4: a group not offered, or the one whose share was
           # sent, is illegal_parameter.
-          return TlsError.new("a HelloRetryRequest for the X25519 share already sent (illegal_parameter)") if group == GROUP_X25519
-          return TlsError.new("a HelloRetryRequest for group #{group}, which was not offered (illegal_parameter)") unless group == GROUP_SECP256R1
-          return TlsError.new("a HelloRetryRequest's key_share cut short (decode_error)") unless field.done?
+          return TlsError.new("a HelloRetryRequest for the X25519 share already sent", TlsAlert::ILLEGAL_PARAMETER) if group == GROUP_X25519
+          return TlsError.new("a HelloRetryRequest for group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_SECP256R1
+          return TlsError.new("a HelloRetryRequest's key_share cut short", TlsAlert::DECODE_ERROR) unless field.done?
         else
-          return TlsError.new("a key share for group #{group}, which was not offered (illegal_parameter)") unless group == GROUP_X25519 || group == GROUP_SECP256R1
+          return TlsError.new("a key share for group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_X25519 || group == GROUP_SECP256R1
           share = field.bytes(field.u16)
-          return TlsError.new("a key share cut short (decode_error)") if field.short? || !field.done?
-          return TlsError.new("an X25519 share of the wrong size (illegal_parameter)") if group == GROUP_X25519 && share.size != 32
+          return TlsError.new("a key share cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
+          return TlsError.new("an X25519 share of the wrong size", TlsAlert::ILLEGAL_PARAMETER) if group == GROUP_X25519 && share.size != 32
         end
       when 44
-        return TlsError.new("a cookie outside a HelloRetryRequest (unsupported_extension)") unless retry
+        return TlsError.new("a cookie outside a HelloRetryRequest", TlsAlert::UNSUPPORTED_EXTENSION) unless retry
         cookie = field.bytes(field.u16)
-        return TlsError.new("an empty or cut cookie (decode_error)") if field.short? || cookie.empty?
+        return TlsError.new("an empty or cut cookie", TlsAlert::DECODE_ERROR) if field.short? || cookie.empty?
       else
-        return TlsError.new("extension #{type} in a ServerHello, which was not offered (unsupported_extension)")
+        return TlsError.new("extension #{type} in a ServerHello, which was not offered", TlsAlert::UNSUPPORTED_EXTENSION)
       end
     end
-    return TlsError.new("the server does not speak TLS 1.3 (protocol_version)") unless version_seen
+    return TlsError.new("the server does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION) unless version_seen
     {retry, suite, group, share, cookie}
   end
 
   private def encrypted_extensions(message : Array(UInt8)) : TlsError?
     reader = TlsReader.new(message[4, message.size - 4])
     list = TlsReader.new(reader.bytes(reader.u16))
-    return TlsError.new("EncryptedExtensions cut short (decode_error)") if reader.short? || !reader.done?
+    return TlsError.new("EncryptedExtensions cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
     seen = [] of Int32
     until list.done?
       type = list.u16
       data = list.bytes(list.u16)
-      return TlsError.new("EncryptedExtensions cut short (decode_error)") if list.short?
-      return TlsError.new("extension #{type} twice in EncryptedExtensions (illegal_parameter)") if seen.includes?(type)
+      return TlsError.new("EncryptedExtensions cut short", TlsAlert::DECODE_ERROR) if list.short?
+      return TlsError.new("extension #{type} twice in EncryptedExtensions", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
       seen << type
       case type
       when 0, 10
         # server_name's empty acknowledgement, and the groups the server
         # would rather, which a client may note and need not.
       when 16
-        return TlsError.new("an ALPN answer to no offer (unsupported_extension)") if @config.alpn.empty?
+        return TlsError.new("an ALPN answer to no offer", TlsAlert::UNSUPPORTED_EXTENSION) if @config.alpn.empty?
         field = TlsReader.new(data)
         names = TlsReader.new(field.bytes(field.u16))
         chosen = TlsBytes.text(names.bytes(names.u8))
-        return TlsError.new("an ALPN answer that is not one protocol (decode_error)") if field.short? || names.short? || !names.done? || !field.done?
-        return TlsError.new("the server chose #{chosen.inspect} by ALPN, which was not offered (no_application_protocol)") unless @config.alpn.includes?(chosen)
+        return TlsError.new("an ALPN answer that is not one protocol", TlsAlert::DECODE_ERROR) if field.short? || names.short? || !names.done? || !field.done?
+        return TlsError.new("the server chose #{chosen.inspect} by ALPN, which was not offered", TlsAlert::NO_APPLICATION_PROTOCOL) unless @config.alpn.includes?(chosen)
         @alpn_protocol = chosen
       else
-        return TlsError.new("extension #{type} in EncryptedExtensions, which was not offered (unsupported_extension)")
+        return TlsError.new("extension #{type} in EncryptedExtensions, which was not offered", TlsAlert::UNSUPPORTED_EXTENSION)
       end
     end
     nil
@@ -1176,27 +1267,27 @@ pub class TlsClient < TlsConnection
     reader = TlsReader.new(message[4, message.size - 4])
     context = reader.bytes(reader.u8)
     list = TlsReader.new(reader.bytes(reader.u24))
-    return TlsError.new("a Certificate message cut short (decode_error)") if reader.short? || !reader.done?
-    return TlsError.new("a Certificate with a request context nobody asked for (illegal_parameter)") unless context.empty?
+    return TlsError.new("a Certificate message cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
+    return TlsError.new("a Certificate with a request context nobody asked for", TlsAlert::ILLEGAL_PARAMETER) unless context.empty?
     chain = [] of Certificate
     until list.done?
       # More than a chain may be long is no chain to search, and each one
       # more is work for std/x509 before anything is proven.
-      return TlsError.new("a Certificate of more than #{X509::MAX_CHAIN} certificates (bad_certificate)") if chain.size == X509::MAX_CHAIN
+      return TlsError.new("a Certificate of more than #{X509::MAX_CHAIN} certificates", TlsAlert::BAD_CERTIFICATE) if chain.size == X509::MAX_CHAIN
       der = list.bytes(list.u24)
       list.bytes(list.u16)
-      return TlsError.new("a Certificate message cut short (decode_error)") if list.short?
+      return TlsError.new("a Certificate message cut short", TlsAlert::DECODE_ERROR) if list.short?
       certificate = Certificate.parse(der)
-      return TlsError.new("the server's certificate #{chain.size}: #{certificate.message} (bad_certificate)") if certificate.is_a?(X509Error)
+      return TlsError.new("the server's certificate #{chain.size}: #{certificate.message}", TlsAlert::BAD_CERTIFICATE) if certificate.is_a?(X509Error)
       chain << certificate
     end
     # RFC 8446 section 4.4.2.4: an empty Certificate from a server is a
     # decode_error.
-    return TlsError.new("the server sent no certificate (decode_error)") if chain.empty?
+    return TlsError.new("the server sent no certificate", TlsAlert::DECODE_ERROR) if chain.empty?
     roots = @config.trusted_roots
     return roots if roots.is_a?(TlsError)
     verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, @host, @config.now || Time.utc)
-    return TlsError.new("the server's certificate is not trusted: #{verified.message} (bad_certificate)") if verified.is_a?(X509Error)
+    return TlsError.new("the server's certificate is not trusted: #{verified.message}", TlsAlert::BAD_CERTIFICATE) if verified.is_a?(X509Error)
     @peer_certificates = verified
     chain
   end
@@ -1498,7 +1589,7 @@ pub class TlsServer < TlsConnection
   private def shake : TlsError?
     hello = handshake_message(plain: true)
     return hello if hello.is_a?(TlsError)
-    return TlsError.new("#{TlsBytes.handshake_name(hello[0])} where ClientHello belongs (unexpected_message)") unless hello[0] == 1_u8
+    return TlsError.new("#{TlsBytes.handshake_name(hello[0])} where ClientHello belongs", TlsAlert::UNEXPECTED_MESSAGE) unless hello[0] == 1_u8
     offer = client_hello(hello)
     return offer if offer.is_a?(TlsError)
     @early_left = EARLY_ALLOWANCE if offer.early_data
@@ -1522,37 +1613,37 @@ pub class TlsServer < TlsConnection
       @transcript = [254_u8, 0_u8, 0_u8, first.size.to_u8] + first + retry
       hello = handshake_message(plain: true)
       return hello if hello.is_a?(TlsError)
-      return TlsError.new("#{TlsBytes.handshake_name(hello[0])} where the second ClientHello belongs (unexpected_message)") unless hello[0] == 1_u8
+      return TlsError.new("#{TlsBytes.handshake_name(hello[0])} where the second ClientHello belongs", TlsAlert::UNEXPECTED_MESSAGE) unless hello[0] == 1_u8
       again = client_hello(hello)
       return again if again.is_a?(TlsError)
-      return TlsError.new("a second ClientHello with no #{group_name(group)} share (illegal_parameter)") unless again.share(group)
-      return TlsError.new("a second ClientHello with another session id (illegal_parameter)") unless again.session == offer.session
-      return TlsError.new("a second ClientHello that leaves out the suite chosen (illegal_parameter)") unless again.suites.includes?(@suite)
-      return TlsError.new("a second ClientHello offering early data (illegal_parameter)") if again.early_data
+      return TlsError.new("a second ClientHello with no #{group_name(group)} share", TlsAlert::ILLEGAL_PARAMETER) unless again.share(group)
+      return TlsError.new("a second ClientHello with another session id", TlsAlert::ILLEGAL_PARAMETER) unless again.session == offer.session
+      return TlsError.new("a second ClientHello that leaves out the suite chosen", TlsAlert::ILLEGAL_PARAMETER) unless again.suites.includes?(@suite)
+      return TlsError.new("a second ClientHello offering early data", TlsAlert::ILLEGAL_PARAMETER) if again.early_data
       @transcript = @transcript + hello
       offer = again
     end
     # Section 5.1: the client's keys come next, so nothing may follow its
     # last ClientHello in that record.
-    return TlsError.new("handshake bytes after the ClientHello in its record (unexpected_message)") unless handshake_left == 0
+    return TlsError.new("handshake bytes after the ClientHello in its record", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
     peer = offer.share(group)
-    return TlsError.new("no #{group_name(group)} share (illegal_parameter)") unless peer
+    return TlsError.new("no #{group_name(group)} share", TlsAlert::ILLEGAL_PARAMETER) unless peer
     @server_name = offer.server_name
     @alpn_protocol = choose_alpn(offer)
     if (wanted = offer.alpn) && !@config.alpn.empty? && @alpn_protocol.nil?
-      return TlsError.new("the client offers #{wanted.join(", ")} by ALPN and this server speaks #{@config.alpn.join(", ")} (no_application_protocol)")
+      return TlsError.new("the client offers #{wanted.join(", ")} by ALPN and this server speaks #{@config.alpn.join(", ")}", TlsAlert::NO_APPLICATION_PROTOCOL)
     end
 
     if group == GROUP_X25519
       private_key = Random::Secure.random_bytes(32)
       shared = X25519.shared(private_key, peer)
-      return TlsError.new("the client's X25519 share gives no secret (illegal_parameter)") if shared.is_a?(CurveError)
+      return TlsError.new("the client's X25519 share gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)
       secret = TlsBytes.of(shared)
       public = TlsBytes.of(X25519.public_key(private_key))
     else
       ephemeral = p256_ephemeral
       got = ephemeral.shared_secret(peer)
-      return TlsError.new("the client's secp256r1 share: #{got.message} (illegal_parameter)") if got.is_a?(EcdsaError)
+      return TlsError.new("the client's secp256r1 share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
       secret = got
       public = ephemeral.public_point
     end
@@ -1607,12 +1698,12 @@ pub class TlsServer < TlsConnection
       message = handshake_message(plain: false)
       return message if message.is_a?(TlsError)
     end
-    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where the client's Finished belongs (unexpected_message)") unless message[0] == 20_u8
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where the client's Finished belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 20_u8
     expected = @schedule.finished(client_secret, @transcript)
     unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
-      return TlsError.new("the client's Finished does not match the handshake (decrypt_error)")
+      return TlsError.new("the client's Finished does not match the handshake", TlsAlert::DECRYPT_ERROR)
     end
-    return TlsError.new("handshake bytes left after the client's Finished (unexpected_message)") unless handshake_left == 0
+    return TlsError.new("handshake bytes left after the client's Finished", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
     @handshaking = false
     @early_left = 0
 
@@ -1646,9 +1737,9 @@ pub class TlsServer < TlsConnection
     suite_bytes = reader.bytes(reader.u16)
     compression = reader.bytes(reader.u8)
     extensions = reader.done? ? [] of UInt8 : reader.bytes(reader.u16)
-    return TlsError.new("a ClientHello cut short (decode_error)") if reader.short? || !reader.done?
-    return TlsError.new("a ClientHello with a session id of #{session.size} bytes (illegal_parameter)") if session.size > 32
-    return TlsError.new("a ClientHello whose cipher suites are #{suite_bytes.size} bytes (decode_error)") if suite_bytes.empty? || suite_bytes.size.odd?
+    return TlsError.new("a ClientHello cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
+    return TlsError.new("a ClientHello with a session id of #{session.size} bytes", TlsAlert::ILLEGAL_PARAMETER) if session.size > 32
+    return TlsError.new("a ClientHello whose cipher suites are #{suite_bytes.size} bytes", TlsAlert::DECODE_ERROR) if suite_bytes.empty? || suite_bytes.size.odd?
     suites = [] of Int32
     i = 0
     while i < suite_bytes.size
@@ -1669,53 +1760,53 @@ pub class TlsServer < TlsConnection
     until list.done?
       type = list.u16
       data = list.bytes(list.u16)
-      return TlsError.new("ClientHello extensions cut short (decode_error)") if list.short?
-      return TlsError.new("extension #{type} twice in a ClientHello (illegal_parameter)") if seen.has_key?(type)
-      return TlsError.new("pre_shared_key not last in a ClientHello (illegal_parameter)") if seen.has_key?(41)
+      return TlsError.new("ClientHello extensions cut short", TlsAlert::DECODE_ERROR) if list.short?
+      return TlsError.new("extension #{type} twice in a ClientHello", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(type)
+      return TlsError.new("pre_shared_key not last in a ClientHello", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(41)
       seen[type] = true
       field = TlsReader.new(data)
       case type
       when 0
         names = TlsReader.new(field.bytes(field.u16))
-        return TlsError.new("a server_name cut short (decode_error)") if field.short? || !field.done?
+        return TlsError.new("a server_name cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
         until names.done?
           kind = names.u8
           name = names.bytes(names.u16)
-          return TlsError.new("a server_name cut short (decode_error)") if names.short? || name.empty?
+          return TlsError.new("a server_name cut short", TlsAlert::DECODE_ERROR) if names.short? || name.empty?
           server_name = TlsBytes.text(name) if kind == 0 && server_name.nil?
         end
       when 10
         groups = TlsBytes.u16_list(field.bytes(field.u16))
-        return TlsError.new("supported_groups cut short (decode_error)") if field.short? || !field.done? || groups.nil?
+        return TlsError.new("supported_groups cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done? || groups.nil?
       when 13
         schemes = TlsBytes.u16_list(field.bytes(field.u16))
-        return TlsError.new("signature_algorithms cut short (decode_error)") if field.short? || !field.done? || schemes.nil?
+        return TlsError.new("signature_algorithms cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done? || schemes.nil?
       when 16
         protocols = [] of String
         names = TlsReader.new(field.bytes(field.u16))
-        return TlsError.new("an ALPN offer cut short (decode_error)") if field.short? || !field.done? || names.done?
+        return TlsError.new("an ALPN offer cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done? || names.done?
         until names.done?
           protocol = names.bytes(names.u8)
-          return TlsError.new("an ALPN offer with an empty or cut protocol (decode_error)") if names.short? || protocol.empty?
+          return TlsError.new("an ALPN offer with an empty or cut protocol", TlsAlert::DECODE_ERROR) if names.short? || protocol.empty?
           protocols << TlsBytes.text(protocol)
         end
         alpn = protocols
       when 42
-        return TlsError.new("an early_data extension with a body (decode_error)") unless data.empty?
+        return TlsError.new("an early_data extension with a body", TlsAlert::DECODE_ERROR) unless data.empty?
         early = true
       when 43
         offered = field.bytes(field.u8)
-        return TlsError.new("supported_versions cut short (decode_error)") if field.short? || !field.done? || offered.empty? || offered.size.odd?
+        return TlsError.new("supported_versions cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done? || offered.empty? || offered.size.odd?
         versions = TlsBytes.u16_list(offered)
       when 51
         entries = TlsReader.new(field.bytes(field.u16))
-        return TlsError.new("key_share cut short (decode_error)") if field.short? || !field.done?
+        return TlsError.new("key_share cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
         found = {} of Int32 => Array(UInt8)
         until entries.done?
           group = entries.u16
           key = entries.bytes(entries.u16)
-          return TlsError.new("key_share cut short (decode_error)") if entries.short?
-          return TlsError.new("two key shares for group #{group} (illegal_parameter)") if found.has_key?(group)
+          return TlsError.new("key_share cut short", TlsAlert::DECODE_ERROR) if entries.short?
+          return TlsError.new("two key shares for group #{group}", TlsAlert::ILLEGAL_PARAMETER) if found.has_key?(group)
           found[group] = key
         end
         shares = found
@@ -1727,27 +1818,27 @@ pub class TlsServer < TlsConnection
       end
     end
     unless versions && versions.includes?(0x0304)
-      return TlsError.new("the client does not speak TLS 1.3 (protocol_version)")
+      return TlsError.new("the client does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION)
     end
-    return TlsError.new("a ClientHello whose compression methods are not null alone (illegal_parameter)") unless compression == [0_u8]
-    return TlsError.new("the client offers no cipher suite this server has (handshake_failure)") unless suites.any? { |s| SUITES.includes?(s) }
-    return TlsError.new("a ClientHello with no signature_algorithms (missing_extension)") unless schemes
+    return TlsError.new("a ClientHello whose compression methods are not null alone", TlsAlert::ILLEGAL_PARAMETER) unless compression == [0_u8]
+    return TlsError.new("the client offers no cipher suite this server has", TlsAlert::HANDSHAKE_FAILURE) unless suites.any? { |s| SUITES.includes?(s) }
+    return TlsError.new("a ClientHello with no signature_algorithms", TlsAlert::MISSING_EXTENSION) unless schemes
     unless schemes.includes?(@config.scheme)
-      return TlsError.new("the client does not take #{TlsIdentity.scheme_name(@config.scheme)} signatures, the only kind this server's key makes (handshake_failure)")
+      return TlsError.new("the client does not take #{TlsIdentity.scheme_name(@config.scheme)} signatures, the only kind this server's key makes", TlsAlert::HANDSHAKE_FAILURE)
     end
-    return TlsError.new("a ClientHello with no supported_groups (missing_extension)") unless groups
-    return TlsError.new("a ClientHello with no key_share (missing_extension)") unless shares
+    return TlsError.new("a ClientHello with no supported_groups", TlsAlert::MISSING_EXTENSION) unless groups
+    return TlsError.new("a ClientHello with no key_share", TlsAlert::MISSING_EXTENSION) unless shares
     unless groups.includes?(GROUP_X25519) || groups.includes?(GROUP_SECP256R1)
-      return TlsError.new("the client offers neither X25519 nor secp256r1, the groups this server has (handshake_failure)")
+      return TlsError.new("the client offers neither X25519 nor secp256r1, the groups this server has", TlsAlert::HANDSHAKE_FAILURE)
     end
     x25519 = nil
     p256 = nil
     offered = {} of Int32 => Bool
     groups.each { |g| offered[g] = true }
     shares.each do |group, key|
-      return TlsError.new("a key share for group #{group}, which the client does not support (illegal_parameter)") unless offered.has_key?(group)
+      return TlsError.new("a key share for group #{group}, which the client does not support", TlsAlert::ILLEGAL_PARAMETER) unless offered.has_key?(group)
       if group == GROUP_X25519
-        return TlsError.new("an X25519 share of #{key.size} bytes (illegal_parameter)") unless key.size == 32
+        return TlsError.new("an X25519 share of #{key.size} bytes", TlsAlert::ILLEGAL_PARAMETER) unless key.size == 32
         x25519 = key
       elsif group == GROUP_SECP256R1
         p256 = key
@@ -1782,32 +1873,32 @@ pub class TlsServer < TlsConnection
   # client's against *roots*, then its CertificateVerify; none sent is
   # refused while `client_required`.
   private def client_certificate(message : Array(UInt8), roots : Array(Certificate)) : TlsError?
-    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where the client's Certificate belongs (unexpected_message)") unless message[0] == 11_u8
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where the client's Certificate belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 11_u8
     reader = TlsReader.new(message[4, message.size - 4])
     context = reader.bytes(reader.u8)
     list = TlsReader.new(reader.bytes(reader.u24))
-    return TlsError.new("a client Certificate cut short (decode_error)") if reader.short? || !reader.done?
-    return TlsError.new("a client Certificate whose request context is not the server's (illegal_parameter)") unless context.empty?
+    return TlsError.new("a client Certificate cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
+    return TlsError.new("a client Certificate whose request context is not the server's", TlsAlert::ILLEGAL_PARAMETER) unless context.empty?
     chain = [] of Certificate
     until list.done?
-      return TlsError.new("a client Certificate of more than #{X509::MAX_CHAIN} certificates (bad_certificate)") if chain.size == X509::MAX_CHAIN
+      return TlsError.new("a client Certificate of more than #{X509::MAX_CHAIN} certificates", TlsAlert::BAD_CERTIFICATE) if chain.size == X509::MAX_CHAIN
       der = list.bytes(list.u24)
       list.bytes(list.u16)
-      return TlsError.new("a client Certificate cut short (decode_error)") if list.short?
+      return TlsError.new("a client Certificate cut short", TlsAlert::DECODE_ERROR) if list.short?
       certificate = Certificate.parse(der)
-      return TlsError.new("the client's certificate #{chain.size}: #{certificate.message} (bad_certificate)") if certificate.is_a?(X509Error)
+      return TlsError.new("the client's certificate #{chain.size}: #{certificate.message}", TlsAlert::BAD_CERTIFICATE) if certificate.is_a?(X509Error)
       chain << certificate
     end
     @transcript = @transcript + message
     if chain.empty?
-      return TlsError.new("the client sent no certificate (certificate_required)") if @config.client_required
+      return TlsError.new("the client sent no certificate", TlsAlert::CERTIFICATE_REQUIRED) if @config.client_required
       return nil
     end
     verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, nil, @config.now || Time.utc, X509Purpose::Client)
-    return TlsError.new("the client's certificate is not trusted: #{verified.message} (bad_certificate)") if verified.is_a?(X509Error)
+    return TlsError.new("the client's certificate is not trusted: #{verified.message}", TlsAlert::BAD_CERTIFICATE) if verified.is_a?(X509Error)
     verify = handshake_message(plain: false)
     return verify if verify.is_a?(TlsError)
-    return TlsError.new("#{TlsBytes.handshake_name(verify[0])} where the client's CertificateVerify belongs (unexpected_message)") unless verify[0] == 15_u8
+    return TlsError.new("#{TlsBytes.handshake_name(verify[0])} where the client's CertificateVerify belongs", TlsAlert::UNEXPECTED_MESSAGE) unless verify[0] == 15_u8
     problem = certificate_verify(verify, chain[0], "client")
     return problem if problem
     @transcript = @transcript + verify
@@ -2007,17 +2098,9 @@ struct TlsBytes
     "#{name} (#{code})"
   end
 
-  # The alert an error's sentence names in its last parentheses -
-  # "... (illegal_parameter)" - or nil when it names none.
-  def self.alert_code(message : String) : UInt8?
-    return nil unless message.ends_with?(")") && message.includes?("(")
-    last = message.split('(').last
-    name = last[0, last.size - 1]
-    code = 0
-    while code < 256
-      return code.to_u8 if alert_name(code.to_u8) == "#{name} (#{code})"
-      code = code + 1
-    end
-    nil
+  # An alert's name alone: "decode_error".
+  def self.alert_word(code : UInt8) : String
+    name = alert_name(code)
+    name[0, name.size - " (#{code})".size]
   end
 end

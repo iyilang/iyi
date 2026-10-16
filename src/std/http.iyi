@@ -446,7 +446,7 @@ pub class TlsStream
   def read(buffer : Pointer(UInt8), count : Int32) : Int32 | Cancelled | SocketError
     if @at >= @pending.bytesize
       got = @tls.read(16384)
-      return SocketError.layered("read from #{@host}", got.message) if got.is_a?(TlsError)
+      return failed_read(got) if got.is_a?(TlsError)
       return 0 if got.empty?
       @pending = got
       @at = 0
@@ -471,8 +471,17 @@ pub class TlsStream
       return piece
     end
     got = @tls.read(max_bytes)
-    return SocketError.layered("read from #{@host}", got.message) if got.is_a?(TlsError)
+    return failed_read(got) if got.is_a?(TlsError)
     got
+  end
+
+  # A read TLS refused, as a socket's would be: a wait past its timeout is
+  # `timed_out?` and a cancelled one `Cancelled` - the connection is open
+  # after either - and anything else carries TLS's sentence.
+  private def failed_read(error : TlsError) : Cancelled | SocketError
+    return Cancelled.new if error.cancelled?
+    return SocketError.timed_out("read from #{@host}") if error.timed_out?
+    SocketError.layered("read from #{@host}", error.message)
   end
 
   def write(text : String) : Int32 | Cancelled | SocketError

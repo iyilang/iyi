@@ -67,7 +67,7 @@ end
 SCENARIOS = [
   {"ok", true, ""}, {"rsa", true, ""}, {"p384", true, ""}, {"ed25519", true, ""}, {"aes256", true, "TLS_AES_256_GCM_SHA384"},
   {"chacha", true, "TLS_CHACHA20_POLY1305_SHA256"}, {"ccs", true, ""}, {"fragmented", true, ""},
-  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"hrr-p256", true, ""}, {"keyupdate", true, ""},
+  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"hrr-p256", true, ""}, {"keyupdate", true, ""}, {"slow-echo", true, ""}, {"client-rekey", true, ""},
   {"big", true, ""}, {"ticket", true, ""},
   {"bad-finished", false, "Finished does not match the handshake (decrypt_error)"},
   {"bad-cv", false, "CertificateVerify is not its key's signature (decrypt_error)"},
@@ -146,6 +146,43 @@ if args.size > 0 && args[0] == "scenarios"
     if s[1]
       check !conn.is_a?(TlsError), "#{s[0]}: refused: #{conn.is_a?(TlsError) ? conn.message : ""}"
       next unless conn.is_a?(TlsClient)
+      if s[0] == "keyupdate"
+        # The server's keys move before its echo; this side's KeyUpdate goes
+        # with its next write, never from a read.
+        conn.write("hello")
+        first = conn.read
+        check first == "echo:hello", "keyupdate: the first echo came back as #{first.is_a?(TlsError) ? first.message : first.inspect}"
+        conn.write("again")
+        got = drain(conn)
+        check got == "echo:again", "keyupdate: the second echo came back as #{got.inspect}"
+        held = held + 1
+        next
+      end
+      if s[0] == "slow-echo"
+        # A read past its timeout says so and leaves the connection open.
+        conn.write("hello")
+        conn.read_timeout_ms = 300
+        first = conn.read
+        check first.is_a?(TlsError) && first.timed_out?, "slow-echo: a read past its timeout answered #{first.is_a?(TlsError) ? first.message : first.inspect}"
+        conn.read_timeout_ms = 5000
+        got = drain(conn)
+        check got == "echo:hello", "slow-echo: after the timeout the echo came back as #{got.inspect}"
+        held = held + 1
+        next
+      end
+      if s[0] == "client-rekey"
+        # Two records a key: the third and fifth writes move to new keys
+        # first; then a KeyUpdate asking for the server's.
+        conn.key_limit = 2_u64
+        conn.write("hello")
+        ["b", "c", "d", "e"].each { |x| conn.write(x) }
+        asked = conn.key_update(true)
+        check asked.nil?, "client-rekey: key_update answered #{asked.is_a?(TlsError) ? asked.message : ""}"
+        got = drain(conn)
+        check got == "echo:hellobcde keyupdates=2 asked=1", "client-rekey: the echo came back as #{got.inspect}"
+        held = held + 1
+        next
+      end
       conn.write("hello")
       got = drain(conn)
       if s[2].starts_with?("read: ")

@@ -790,7 +790,7 @@ prove_broken "the server's Finished unchecked" "bad-finished: refused with" \
       return TlsError.new("the server'"'"'s Finished' '    if false
       return TlsError.new("the server'"'"'s Finished' scenarios
 prove_broken "CertificateVerify unchecked" "bad-cv: refused with" \
-  '    return TlsError.new("#{@peer}'"'"'s CertificateVerify is not its key'"'"'s signature (decrypt_error)") unless ok' '' scenarios
+  '    return TlsError.new("#{@peer}'"'"'s CertificateVerify is not its key'"'"'s signature", TlsAlert::DECRYPT_ERROR) unless ok' '' scenarios
 prove_broken "CertificateVerify over the client's context string" "ok: refused" \
   '    problem = certificate_verify(message, chain[0], "server")' '    problem = certificate_verify(message, chain[0], "client")' scenarios
 prove_broken "an ECDSA scheme taken for any curve" "cv-wrong-curve: refused with" \
@@ -798,23 +798,29 @@ prove_broken "an ECDSA scheme taken for any curve" "cv-wrong-curve: refused with
 prove_broken "an Ed25519 CertificateVerify unchecked" "bad-cv-ed25519: expected a refusal" \
   '           key.verify(signed, signature)' '           true' scenarios
 prove_broken "a server's Certificate of any length searched" "cert-many:" \
-  '      return TlsError.new("a Certificate of more than #{X509::MAX_CHAIN} certificates (bad_certificate)") if chain.size == X509::MAX_CHAIN' '' scenarios
+  '      return TlsError.new("a Certificate of more than #{X509::MAX_CHAIN} certificates", TlsAlert::BAD_CERTIFICATE) if chain.size == X509::MAX_CHAIN' '' scenarios
 prove_broken "a client's handshake bounded by each wait alone" "slow-server: refused with" \
   '    return @socket.read(16384 + 5) if @deadline_ns == 0_i64' '    return @socket.read(16384 + 5) if true' scenarios
 prove_broken "a KeyUpdate's request taken whatever it is" "keyupdate-bad:" \
-  '        return TlsError.new("a KeyUpdate asking #{message[4]} (illegal_parameter)") unless message[4] <= 1_u8' '' scenarios
+  '        return TlsError.new("a KeyUpdate asking #{message[4]}", TlsAlert::ILLEGAL_PARAMETER) unless message[4] <= 1_u8' '' scenarios
 prove_broken "handshake bytes after the ServerHello taken under the keys" "sh-and-more:" \
-  '    return TlsError.new("handshake bytes after the ServerHello in its record (unexpected_message)") unless handshake_left == 0' '' scenarios
+  '    return TlsError.new("handshake bytes after the ServerHello in its record", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0' '' scenarios
 prove_broken "a leaf whose keyUsage forbids signing taken" "ku-no-sign:" \
   '    if (usage = leaf.key_usage) && (usage >> Certificate::KEY_DIGITAL_SIGNATURE) & 1 == 0' '    if false' scenarios
 prove_broken "a client Certificate past 2^14 bytes sent in one record" "certreq-ed25519:" \
   '        sent = send_flight(presented)' '        sent = send_protected(TlsRecords::HANDSHAKE, presented)' scenarios
+prove_broken "a read past its timeout taken as the connection's end" "slow-echo:" \
+  '        return record if record.timed_out? || record.cancelled?' '' scenarios
+prove_broken "a KeyUpdate's request never answered" "keyupdate:" \
+  '        @update_owed = true if message[4] == 1_u8' '' scenarios
+prove_broken "no new keys at the key limit" "client-rekey:" \
+  '    return nil unless @update_owed || writer.sequence >= @key_limit' '    return nil unless @update_owed' scenarios
+prove_broken "key_update(true) sent as a KeyUpdate asking nothing" "client-rekey:" \
+  '    sent = send_protected(TlsRecords::HANDSHAKE, TlsBytes.message(24, [request ? 1_u8 : 0_u8]))' '    sent = send_protected(TlsRecords::HANDSHAKE, TlsBytes.message(24, [0_u8]))' scenarios
 prove_broken "the session id's echo unchecked" "no-echo: refused with" \
-  '    return TlsError.new("a ServerHello that does not echo the session id (illegal_parameter)") unless echo == session' '' scenarios
+  '    return TlsError.new("a ServerHello that does not echo the session id", TlsAlert::ILLEGAL_PARAMETER) unless echo == session' '' scenarios
 prove_broken "the certificate checked for no host" "wrong-host: refused with" \
   'verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, @host,' 'verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, nil,' scenarios
-prove_broken "a KeyUpdate never answered" "keyupdate: the echo came back" \
-  '        if message[4] == 1_u8' '        if false' scenarios
 prove_broken "a KeyUpdate's read keys kept" "keyupdate:" \
   '        @read_secret = @schedule.next_secret(@read_secret)' '' scenarios
 prove_broken "a HelloRetryRequest's transcript restarted as something else" "hrr-cookie: refused" \
@@ -832,22 +838,22 @@ prove_broken "the client's CertificateVerify over the server's context string" "
         signature = identity.sign(signed)' '"TLS 1.3, server CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
         signature = identity.sign(signed)' scenarios
 prove_broken "a CertificateRequest without signature_algorithms passed over" "certreq-no-sigalgs: refused with" \
-  '    return TlsError.new("a CertificateRequest with no signature_algorithms (missing_extension)") unless schemes' '    return nil unless schemes' scenarios
+  '    return TlsError.new("a CertificateRequest with no signature_algorithms", TlsAlert::MISSING_EXTENSION) unless schemes' '    return nil unless schemes' scenarios
 prove_broken "handshake bytes after Finished passed over" "trailing-after-finished: refused with" \
-  '    return TlsError.new("handshake bytes left after the server'"'"'s Finished (unexpected_message)") unless handshake_left == 0' '' scenarios
+  '    return TlsError.new("handshake bytes left after the server'"'"'s Finished", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0' '' scenarios
 prove_broken "ALPN answers taken whatever they are" "alpn-unoffered: refused with" \
-  'return TlsError.new("the server chose #{chosen.inspect} by ALPN, which was not offered (no_application_protocol)") unless @config.alpn.includes?(chosen)' '' scenarios
+  'return TlsError.new("the server chose #{chosen.inspect} by ALPN, which was not offered", TlsAlert::NO_APPLICATION_PROTOCOL) unless @config.alpn.includes?(chosen)' '' scenarios
 prove_broken "an unknown extension in EncryptedExtensions passed over" "unsolicited-ext: refused with" \
-  '        return TlsError.new("extension #{type} in EncryptedExtensions, which was not offered (unsupported_extension)")' '' scenarios
+  '        return TlsError.new("extension #{type} in EncryptedExtensions, which was not offered", TlsAlert::UNSUPPORTED_EXTENSION)' '' scenarios
 # Past the refusal, any 32 bytes stand in for the secret: the handshake
 # goes on to a server that has already hung up.
 prove_broken "a share of small order taken" "zero-share:" \
-  '      return TlsError.new("the server'"'"'s X25519 share gives no secret (illegal_parameter)") if shared.is_a?(CurveError)' \
+  '      return TlsError.new("the server'"'"'s X25519 share gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)' \
   '      shared = X25519.public_key(private_key) if shared.is_a?(CurveError)' scenarios
 prove_broken "a HelloRetryRequest for secp256r1 answered with X25519 again" "hrr-p256: refused" \
   '      if reply[2] == GROUP_SECP256R1' '      if false' scenarios
 prove_broken "a ServerHello's share taken in a group its ClientHello did not send" "sh-wrong-group: refused with" \
-  '    return TlsError.new("a ServerHello'"'"'s share in #{group_name(reply[2])}, where the share sent was #{group_name(group)}'"'"'s (illegal_parameter)") unless reply[2] == group' '' scenarios
+  '    return TlsError.new("a ServerHello'"'"'s share in #{group_name(reply[2])}, where the share sent was #{group_name(group)}'"'"'s", TlsAlert::ILLEGAL_PARAMETER) unless reply[2] == group' '' scenarios
 # The server's own checks, each before the scripted client: the scenario
 # that breaks the rule must be reported as answered wrongly.
 prove_broken "the client's Finished unchecked" "FAIL bad-finished " \
@@ -870,13 +876,13 @@ prove_broken "early data before a second ClientHello not passed over" "FAIL earl
 prove_broken "a ChangeCipherSpec during the handshake not passed over" "FAIL ccs " \
   '      if type == TlsRecords::CHANGE_CIPHER_SPEC && @handshaking' '      if type == TlsRecords::CHANGE_CIPHER_SPEC && false' server
 prove_broken "a ClientHello's duplicate extension taken" "FAIL dup-ext " \
-  '      return TlsError.new("extension #{type} twice in a ClientHello (illegal_parameter)") if seen.has_key?(type)' '' server
+  '      return TlsError.new("extension #{type} twice in a ClientHello", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(type)' '' server
 prove_broken "pre_shared_key's place unchecked" "FAIL psk-not-last " \
-  '      return TlsError.new("pre_shared_key not last in a ClientHello (illegal_parameter)") if seen.has_key?(41)' '' server
+  '      return TlsError.new("pre_shared_key not last in a ClientHello", TlsAlert::ILLEGAL_PARAMETER) if seen.has_key?(41)' '' server
 prove_broken "a compression method taken" "FAIL compression " \
-  '    return TlsError.new("a ClientHello whose compression methods are not null alone (illegal_parameter)") unless compression == [0_u8]' '' server
+  '    return TlsError.new("a ClientHello whose compression methods are not null alone", TlsAlert::ILLEGAL_PARAMETER) unless compression == [0_u8]' '' server
 prove_broken "a session id of any length echoed" "FAIL long-session " \
-  '    return TlsError.new("a ClientHello with a session id of #{session.size} bytes (illegal_parameter)") if session.size > 32' '' server
+  '    return TlsError.new("a ClientHello with a session id of #{session.size} bytes", TlsAlert::ILLEGAL_PARAMETER) if session.size > 32' '' server
 prove_broken "a client without ed25519 answered anyway" "FAIL no-ed25519 " \
   '    unless schemes.includes?(@config.scheme)' '    if false' server
 prove_broken "a client without ecdsa_secp256r1_sha256 answered anyway by a P-256 server" "FAIL no-p256 " \
@@ -886,7 +892,7 @@ prove_broken "a P-256 CertificateVerify signed over SHA-384" "FAIL ok " \
 prove_broken "a P-256 key that is not the certificate's taken" "FAIL another P-256 key" \
   '    return TlsError.new("the private key is not the certificate'"'"'s") unless public.x == key.public_key.x && public.y == key.public_key.y' '' config
 prove_broken "a second ClientHello's session id unchecked" "FAIL hrr-other-session " \
-  '      return TlsError.new("a second ClientHello with another session id (illegal_parameter)") unless again.session == offer.session' '' server
+  '      return TlsError.new("a second ClientHello with another session id", TlsAlert::ILLEGAL_PARAMETER) unless again.session == offer.session' '' server
 prove_broken "the server's suite order put before the client's" "FAIL client-order " \
   '    @suite = offer.suites.find { |s| SUITES.includes?(s) } || 0' '    @suite = SUITES.find { |s| offer.suites.includes?(s) } || 0' server
 prove_broken "the client's ALPN order put before the server's" "FAIL alpn-order " \
@@ -894,7 +900,7 @@ prove_broken "the client's ALPN order put before the server's" "FAIL alpn-order 
 prove_broken "an ALPN offer with nothing in common answered anyway" "FAIL alpn-mismatch " \
   '    if (wanted = offer.alpn) && !@config.alpn.empty? && @alpn_protocol.nil?' '    if (wanted = offer.alpn) && @config.alpn.empty? && @alpn_protocol.nil?' server
 prove_broken "no alert sent before hanging up" "FAIL dup-ext " \
-  '    code = TlsBytes.alert_code(error.message)' '    code = nil.as(UInt8?)' server
+  '    code = error.alert' '    code = nil.as(UInt8?)' server
 prove_broken "an alert in the clear after the server's keys" "FAIL bad-finished " \
   '      sent = if @writer' '      sent = if false' server
 prove_broken "a private key that is not the certificate's taken" "FAIL another key" \
@@ -912,33 +918,33 @@ prove_broken "a handshake bounded by each wait alone" "FAIL slow-hello " \
 prove_broken "a handshake message rebuilt for each record of it" "FAIL byte-records " \
   '    @handshake.concat(content)' '    @handshake = @handshake + content' server
 prove_broken "ChangeCipherSpec records passed over without end" "FAIL ccs-flood " \
-  '    return TlsError.new("more than #{MAX_CCS} ChangeCipherSpec records (unexpected_message)") if @ccs_seen > MAX_CCS' '' server
+  '    return TlsError.new("more than #{MAX_CCS} ChangeCipherSpec records", TlsAlert::UNEXPECTED_MESSAGE) if @ccs_seen > MAX_CCS' '' server
 prove_broken "a ChangeCipherSpec before the ClientHello passed over" "FAIL ccs-first " \
-  '    return TlsError.new("a ChangeCipherSpec before the ClientHello (unexpected_message)") if server_side? && @transcript.empty?' '' server
+  '    return TlsError.new("a ChangeCipherSpec before the ClientHello", TlsAlert::UNEXPECTED_MESSAGE) if server_side? && @transcript.empty?' '' server
 prove_broken "handshake bytes after the ClientHello taken under the keys" "FAIL hello-and-more " \
-  '    return TlsError.new("handshake bytes after the ClientHello in its record (unexpected_message)") unless handshake_left == 0' '' server
+  '    return TlsError.new("handshake bytes after the ClientHello in its record", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0' '' server
 prove_broken "a CertificateRequest sent to a client the server was not told to ask" "FAIL ok " \
   '    if @config.client_roots
       request = certificate_request' '    if true
       request = certificate_request' server
 prove_broken "the client's CertificateVerify unchecked" "FAIL mtls-bad-cv " \
-  '    return TlsError.new("#{@peer}'"'"'s CertificateVerify is not its key'"'"'s signature (decrypt_error)") unless ok' '' server-mtls
+  '    return TlsError.new("#{@peer}'"'"'s CertificateVerify is not its key'"'"'s signature", TlsAlert::DECRYPT_ERROR) unless ok' '' server-mtls
 prove_broken "the client's CertificateVerify checked under the server's context string" "FAIL mtls-ok " \
   '    problem = certificate_verify(verify, chain[0], "client")' '    problem = certificate_verify(verify, chain[0], "server")' server-mtls
 prove_broken "a client certificate checked for serverAuth" "FAIL mtls-ok " \
   '@config.now || Time.utc, X509Purpose::Client)' '@config.now || Time.utc, X509Purpose::Server)' server-mtls
 prove_broken "a client with no certificate let in" "FAIL mtls-none " \
-  '      return TlsError.new("the client sent no certificate (certificate_required)") if @config.client_required' '' server-mtls
+  '      return TlsError.new("the client sent no certificate", TlsAlert::CERTIFICATE_REQUIRED) if @config.client_required' '' server-mtls
 prove_broken "a client Certificate's request context unchecked" "FAIL mtls-context " \
-  '    return TlsError.new("a client Certificate whose request context is not the server'"'"'s (illegal_parameter)") unless context.empty?' '' server-mtls
+  '    return TlsError.new("a client Certificate whose request context is not the server'"'"'s", TlsAlert::ILLEGAL_PARAMETER) unless context.empty?' '' server-mtls
 prove_broken "a certificate required where it is optional" "FAIL mtls-optional-none " \
-  '      return TlsError.new("the client sent no certificate (certificate_required)") if @config.client_required' '      return TlsError.new("the client sent no certificate (certificate_required)")' server-mtls-optional
+  '      return TlsError.new("the client sent no certificate", TlsAlert::CERTIFICATE_REQUIRED) if @config.client_required' '      return TlsError.new("the client sent no certificate", TlsAlert::CERTIFICATE_REQUIRED)' server-mtls-optional
 prove_broken "a refused client's flight left unread at the close" "FAIL mtls-late " \
   '      linger if server_side? && !sent' '' server-mtls
 prove_broken "a client certificate with no CertificateVerify after it taken" "FAIL mtls-no-cv " \
-  '    return TlsError.new("#{TlsBytes.handshake_name(verify[0])} where the client'"'"'s CertificateVerify belongs (unexpected_message)") unless verify[0] == 15_u8' '' server-mtls
+  '    return TlsError.new("#{TlsBytes.handshake_name(verify[0])} where the client'"'"'s CertificateVerify belongs", TlsAlert::UNEXPECTED_MESSAGE) unless verify[0] == 15_u8' '' server-mtls
 prove_broken "a client Certificate of any length searched" "FAIL mtls-long-chain " \
-  '      return TlsError.new("a client Certificate of more than #{X509::MAX_CHAIN} certificates (bad_certificate)") if chain.size == X509::MAX_CHAIN' '' server-mtls
+  '      return TlsError.new("a client Certificate of more than #{X509::MAX_CHAIN} certificates", TlsAlert::BAD_CERTIFICATE) if chain.size == X509::MAX_CHAIN' '' server-mtls
 prove_broken "a client's chain taken as its own roots" "FAIL mtls-untrusted " \
   'X509.verify(chain[0], chain[1, chain.size - 1], roots, nil,' 'X509.verify(chain[0], chain[1, chain.size - 1], roots + chain[1, chain.size - 1], nil,' server-mtls
 prove_broken "a PKCS #8 public key unchecked" "FAIL a version 2 key carrying another public key" \

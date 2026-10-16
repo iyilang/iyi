@@ -45,7 +45,7 @@ SCENARIOS = {
     "certreq-ed25519": "a CertificateRequest naming ed25519, answered by the client's certificate and CertificateVerify",
     "alpn": "ALPN answered with http/1.1",
     "hrr-cookie": "a HelloRetryRequest with a cookie, then the handshake",
-    "keyupdate": "a KeyUpdate asking for one back, before the echo",
+    "keyupdate": "a KeyUpdate asking for one back, answered before the client's next data",
     "big": "40000 bytes back, over three records",
     "ticket": "a NewSessionTicket before the echo",
     "bad-finished": "a Finished one bit off",
@@ -80,6 +80,8 @@ SCENARIOS = {
     "sh-and-more": "EncryptedExtensions in the clear, in the ServerHello's record",
     "ku-no-sign": "a leaf whose keyUsage is keyEncipherment alone",
     "keyupdate-bad": "a KeyUpdate whose request is 2",
+    "slow-echo": "the echo a second and a half late",
+    "client-rekey": "the client's records read across its KeyUpdates, counted",
 }
 
 NOW = dt.datetime.now(dt.timezone.utc)
@@ -491,17 +493,56 @@ class Conn:
         if s == "keyupdate-bad":
             self.sock.sendall(writer.seal(22, message(24, b"\x02")))
             return
+        def next_key(secret):
+            return schedule.expand_label(secret, b"traffic upd", b"", schedule.size)
+
         if s == "keyupdate":
-            # Asked once the client has written, so its answer comes when it
-            # next reads: the KeyUpdate under its old keys, then the echo
-            # under the server's new ones.
+            # Asked once the client has written: the server's keys move at
+            # once and the echo goes under them. The client's KeyUpdate is
+            # owed before its next application data (section 4.6.3), so it
+            # comes with the client's second write, not its reads.
             self.sock.sendall(writer.seal(22, message(24, b"\x01")))
-            writer = Cipher(schedule, schedule.expand_label(s_ap, b"traffic upd", b"", schedule.size))
+            s_ap = next_key(s_ap)
+            writer = Cipher(schedule, s_ap)
+            self.sock.sendall(writer.seal(23, b"echo:" + data))
             header, body = self.record()
             type_, content = reader.open(header, body)
-            assert type_ == 22 and content == message(24, b"\x00"), "no KeyUpdate back"
-            c_ap = schedule.expand_label(c_ap, b"traffic upd", b"", schedule.size)
+            assert type_ == 22 and content == message(24, b"\x00"), "no KeyUpdate before the client's next data"
+            c_ap = next_key(c_ap)
             reader = Cipher(schedule, c_ap)
+            header, body = self.record()
+            type_, data = reader.open(header, body)
+            assert type_ == 23, "the client's second write is not application data"
+            self.sock.sendall(writer.seal(23, b"echo:" + data))
+            self.sock.sendall(writer.seal(21, b"\x01\x00"))
+            return
+        if s == "slow-echo":
+            # Past the client's read timeout: its first read times out, and
+            # the same connection reads the echo after.
+            time.sleep(1.5)
+        if s == "client-rekey":
+            # Everything the client writes, its KeyUpdates taken as they
+            # come - two at its key limit of two records, then one asking
+            # for this side's, which is answered - and counted in the echo.
+            updates = asked = 0
+            while True:
+                header, body = self.record()
+                type_, content = reader.open(header, body)
+                if type_ == 22:
+                    assert content[0] == 24 and len(content) == 5, "a handshake message that is not a KeyUpdate"
+                    c_ap = next_key(c_ap)
+                    reader = Cipher(schedule, c_ap)
+                    if content[4] == 1:
+                        asked += 1
+                        self.sock.sendall(writer.seal(22, message(24, b"\x00")))
+                        s_ap = next_key(s_ap)
+                        writer = Cipher(schedule, s_ap)
+                        break
+                    updates += 1
+                    continue
+                assert type_ == 23
+                data += content
+            data += f" keyupdates={updates} asked={asked}".encode()
         if s == "big":
             payload = b"echo:" + data + bytes(i % 251 for i in range(40000 - 5 - len(data)))
             for k in range(0, len(payload), 16384):

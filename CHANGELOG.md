@@ -4,6 +4,22 @@
 
 ### Added
 
+- **std/tls moves 2-3.5x the data it did, and arrays join and slice in one
+  step.** A TLS record cost several times its cipher's work: the prelude's
+  `Array#+`, `#concat`, `#dup`, slicing and growth stored an element at a
+  time through `<<`, and the record layer took the socket's bytes one
+  `<<` each.
+  - The prelude makes the room once and copies with `Pointer#copy_from`,
+    the same stores, so the collector's barrier sees each as before.
+  - std/tls reads the socket into a fixed two-record inbox in place, and
+    copies a record's content out once.
+
+  Over loopback against OpenSSL, ChaCha20-Poly1305 reads 105 -> 347 MB/s
+  and writes 142 -> 522; AES-128-GCM 79 -> 164 and 98 -> 188, near what
+  this AES does alone. Held by `bench/tls_speed.sh`, which fails a rate
+  under 25% of its cipher's own on the same machine: the old record layer
+  measured 11% and 15% for ChaCha20-Poly1305.
+
 - **A std/tls server can hold several certificates, chosen by
   server_name; both ends export keying material.** A server had one
   identity for every name a client asked for, and nothing could bind a
@@ -21955,7 +21971,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 21,558-line library and nothing else. Every other
+  written against iyi's own 21,560-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

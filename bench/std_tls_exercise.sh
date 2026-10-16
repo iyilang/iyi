@@ -412,22 +412,28 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
       served_check "OpenSSL, $kind, ALPN" "name=localhost alpn=h2" sclient -tls1_3 -alpn h2,http/1.1
       hrr() { sclient -tls1_3 -groups P-256:X25519 -msg | grep -c '<<< TLS 1.3, Handshake \[length [0-9a-f]*\], ServerHello'; }
       served_check "OpenSSL, $kind, a P-256 share first: a HelloRetryRequest, then a ServerHello" "2" hrr
-      served_check "OpenSSL, $kind, TLS 1.2 alone" "alert protocol version" sclient -tls1_2
-      served_check "OpenSSL, $kind, groups without X25519" "alert handshake failure" sclient -tls1_3 -groups P-256
+      # Refusals by the alert's number, which every OpenSSL prints the same;
+      # its name is worded differently from one version to the next.
+      served_check "OpenSSL, $kind, TLS 1.2 alone" "SSL alert number 70" sclient -tls1_2
+      served_check "OpenSSL, $kind, groups without X25519" "SSL alert number 40" sclient -tls1_3 -groups P-256
       if [ "$kind" = p256 ]; then
         served_check "OpenSSL, p256, ecdsa_secp256r1_sha256 alone" "name=localhost alpn=-" sclient -tls1_3 -sigalgs ECDSA+SHA256
-        served_check "OpenSSL, p256, no ecdsa_secp256r1_sha256 among its signature algorithms" "alert handshake failure" sclient -tls1_3 -sigalgs ed25519:RSA-PSS+SHA256
+        served_check "OpenSSL, p256, no ecdsa_secp256r1_sha256 among its signature algorithms" "SSL alert number 40" sclient -tls1_3 -sigalgs ed25519:RSA-PSS+SHA256
       else
         served_check "OpenSSL, ed25519, ed25519 alone" "name=localhost alpn=-" sclient -tls1_3 -sigalgs ed25519
-        served_check "OpenSSL, ed25519, no ed25519 among its signature algorithms" "alert handshake failure" sclient -tls1_3 -sigalgs ECDSA+SHA256:RSA-PSS+SHA256
+        served_check "OpenSSL, ed25519, no ed25519 among its signature algorithms" "SSL alert number 40" sclient -tls1_3 -sigalgs ECDSA+SHA256:RSA-PSS+SHA256
       fi
-      served_check "OpenSSL, $kind, ALPN this server does not speak" "no application protocol" sclient -tls1_3 -alpn spdy/3
+      served_check "OpenSSL, $kind, ALPN this server does not speak" "SSL alert number 120" sclient -tls1_3 -alpn spdy/3
     else
       echo "  no openssl here (or Windows), so s_client goes unasked"
     fi
-    if command -v curl >/dev/null 2>&1; then
+    # curl on LibreSSL (macOS's) or schannel (Windows') takes no Ed25519
+    # certificate, and is refused it, rightly; on OpenSSL it takes both.
+    if command -v curl >/dev/null 2>&1 && { [ "$kind" = p256 ] || curl --version | head -1 | grep -q 'OpenSSL/'; }; then
       served_check "curl, $kind" "name=localhost alpn=http/1.1" curl -sS --http1.1 --cacert "$SRV/roots.pem" \
         --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/"
+    elif command -v curl >/dev/null 2>&1; then
+      echo "  curl, $kind: not asked, its TLS ($(curl --version | head -1 | grep -o '[A-Za-z]*SSL/[0-9.]*\|Schannel\|SecureTransport' | head -1)) takes no Ed25519 certificate"
     fi
     if command -v node >/dev/null 2>&1; then
       served_check "Node's tls, $kind" "name=localhost alpn=h2" node -e '

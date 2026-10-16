@@ -993,10 +993,36 @@ echo "== HTTPS: the server over std/tls (Ed25519 and P-256 certificates, ALPN h2
 # close_notify - an upgrade answered 501, and a TLS 1.2 client refused
 # with the next request still served; once with an Ed25519 certificate
 # and once with a P-256 one.
-# https_checks <binary> <chain> <key>: every check against that binary's
-# serve-tls; answers the number that failed.
+# Python reading an HTTP/1.0 answer to the end, refusing an end that is
+# not close_notify. A file of its own: macOS's bash 3.2 misreads a here
+# document inside $( ) that holds a quote.
+cat >"$WORK/eof-check.py" <<'PY'
+import socket, ssl, sys
+ctx = ssl.create_default_context(cafile=sys.argv[2])
+# suppress_ragged_eofs=False: an end that is not close_notify raises
+# SSLEOFError, where the default reads it as an ordinary end.
+raw = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=20)
+with ctx.wrap_socket(raw, server_hostname="localhost", suppress_ragged_eofs=False) as s:
+    s.sendall(b"GET /echo?x=old HTTP/1.0\r\nHost: localhost\r\n\r\n")
+    data = b""
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+print(data.decode().split("\r\n")[0], data.decode().split("\r\n\r\n")[1].split(" host=")[0])
+PY
+# Whether curl is asked of a server with a <ed|p256> certificate: curl on
+# LibreSSL (macOS's) or schannel (Windows') takes no Ed25519 certificate,
+# and is refused it, rightly.
+curl_asked() {
+  command -v curl >/dev/null 2>&1 && curl --version | grep -q 'HTTP2' &&
+    { [ "$1" = p256 ] || curl --version | head -1 | grep -q 'OpenSSL/'; }
+}
+# https_checks <binary> <chain> <key> <ed|p256>: every check against that
+# binary's serve-tls; answers the number that failed.
 https_checks() {
-  local bin="$1" chain="$2" key="$3" failed=0 got want tport tpid
+  local bin="$1" chain="$2" key="$3" kind="$4" failed=0 got want tport tpid
   rm -f "$WORK/h2tls.port"
   "$bin" serve-tls "$WORK/h2tls.port" "$chain" "$key" >"$WORK/h2tls.log" 2>&1 &
   tpid=$!
@@ -1014,7 +1040,7 @@ https_checks() {
     want="echo 200 GET /echo x=1 $version host=localhost:$tport length=0 fnv=cbf29ce484222325 x=iyi|big 200 1000000 true|post 200 true|connections 1|"
     [ "$got" = "$want" ] || https_fail "the iyi client offering $alpn: $got"
   done
-  if command -v curl >/dev/null 2>&1 && curl --version | grep -q 'HTTP2'; then
+  if curl_asked "$kind"; then
     local c=(curl -sS --cacert "$WORK/tls/root.pem" --resolve "localhost:$tport:127.0.0.1")
     got="$("${c[@]}" -H 'X-Test: curl' -w ' <%{http_version}>' "$base/echo?x=1" 2>&1)"
     [ "$got" = "GET /echo x=1 HTTP/2 host=localhost:$tport length=0 fnv=cbf29ce484222325 x=curl <2>" ] || https_fail "curl over h2: $got"
@@ -1033,23 +1059,7 @@ https_checks() {
     case "$got" in "GET /echo after=refusal HTTP/2 "*) ;; *) https_fail "a request after a refused handshake: $got" ;; esac
   fi
   if [ -n "$PY" ]; then
-    got="$("$PY" - "$tport" "$WORK/tls/root.pem" <<'PY' 2>&1
-import socket, ssl, sys
-ctx = ssl.create_default_context(cafile=sys.argv[2])
-# suppress_ragged_eofs=False: an end that is not close_notify raises
-# SSLEOFError, where Python's default reads it as an ordinary end.
-raw = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=20)
-with ctx.wrap_socket(raw, server_hostname="localhost", suppress_ragged_eofs=False) as s:
-    s.sendall(b"GET /echo?x=old HTTP/1.0\r\nHost: localhost\r\n\r\n")
-    data = b""
-    while True:
-        chunk = s.recv(65536)
-        if not chunk:
-            break
-        data += chunk
-print(data.decode().split("\r\n")[0], data.decode().split("\r\n\r\n")[1].split(" host=")[0])
-PY
-)"
+    got="$("$PY" "$WORK/eof-check.py" "$tport" "$WORK/tls/root.pem" 2>&1)"
     [ "$got" = "HTTP/1.1 200 OK GET /echo x=old HTTP/1.0" ] || https_fail "Python read to the end of an HTTP/1.0 answer: $got"
   fi
   if [ -n "$NODE" ] && [ -s "$WORK/h2-client.js" ]; then
@@ -1069,9 +1079,13 @@ else
     chain="$WORK/tls/$kind.pem"
     key="$WORK/tls/$kind.key"
     [ "$kind" = p256 ] && key="$WORK/tls/leaf.key"
-    if https_checks "$H2BIN" "$chain" "$key"; then
-      echo "  $kind: the iyi client over h2 and http/1.1, curl both ways, gzip, three requests on one connection, an upgrade refused 501,"
-      echo "  TLS 1.2 refused and the next request served, Python reading to close_notify, Node's 100 GETs and 20 uploads at once"
+    if https_checks "$H2BIN" "$chain" "$key" "$kind"; then
+      echo "  $kind: the iyi client over h2 and http/1.1, Python reading to close_notify, Node's 100 GETs and 20 uploads at once"
+      if curl_asked "$kind"; then
+        echo "  $kind: curl both ways, gzip, three requests on one connection, an upgrade refused 501, TLS 1.2 refused and the next request served"
+      else
+        echo "  $kind: curl not asked: no curl with HTTP/2, or one whose TLS takes no Ed25519 certificate"
+      fi
     else
       status=1
     fi
@@ -1401,7 +1415,7 @@ https_breaks() { # https_breaks <label> <name> <old> <new>
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
-  elif https_checks "$WORK/$name.bin" "$WORK/tls/ed.pem" "$WORK/tls/ed.key" >"$WORK/$name.out" 2>&1; then
+  elif https_checks "$WORK/$name.bin" "$WORK/tls/ed.pem" "$WORK/tls/ed.key" ed >"$WORK/$name.out" 2>&1; then
     echo "  $label: the HTTPS checks passed on a broken server"
     status=1
   else

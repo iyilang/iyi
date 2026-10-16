@@ -439,7 +439,8 @@ echo "== https:// against Python's own TLS server"
 # Python's ssl module is OpenSSL's TLS, held to 1.3 here, serving under a
 # certificate for localhost from a root made for the run: gzip undone over
 # TLS, a 303 followed on the same scheme, a kept connection used twice, a
-# host the certificate does not name refused, and wss:// refused by name.
+# host the certificate does not name refused, and an upgrade over https://
+# reaching the server, whose 404 it names.
 # Then the same client against a copy of the module that sends https://
 # in the clear, which must not answer the same.
 if [ -z "$PY" ] || ! "$PY" -c 'import ssl; from cryptography import x509' >/dev/null 2>&1; then
@@ -568,9 +569,9 @@ PY
 hop 200 GET https://localhost:$tport/landed
 kept 1 made, 1 reused
 other HTTP: tls: the server's certificate is not trusted: x509: CN=localhost is not valid for 127.0.0.1: it names localhost (bad_certificate)
-upgrade HTTP: an upgrade over https:// (wss://): a connection handed over under TLS is not here yet"
+upgrade HTTP: the server answered 404 Not Found to an upgrade to websocket, not 101 Switching Protocols"
     if [ "$said" = "$expected" ]; then
-      echo "  gzip over TLS 1.3, a 303 on https://, a kept connection used twice, a host the certificate does not name, wss:// refused"
+      echo "  gzip over TLS 1.3, a 303 on https://, a kept connection used twice, a host the certificate does not name, an upgrade over https:// answered 404"
     else
       echo "  the client and Python's TLS server disagree:"
       printf '%s\n' "$said" | sed 's/^/    got:  /'
@@ -990,7 +991,7 @@ echo "== HTTPS: the server over std/tls (Ed25519 and P-256 certificates, ALPN h2
 # the iyi client over h2 and over http/1.1, curl both ways, Node's client
 # (100 GETs and 20 uploads at once under a 1000-byte window), Python
 # reading an HTTP/1.0 answer to the end - which must close with
-# close_notify - an upgrade answered 501, and a TLS 1.2 client refused
+# close_notify - an upgrade answered 101, and a TLS 1.2 client refused
 # with the next request still served; once with an Ed25519 certificate
 # and once with a P-256 one.
 # Python reading an HTTP/1.0 answer to the end, refusing an end that is
@@ -1050,8 +1051,10 @@ https_checks() {
     [ "$got" = "<1><0><0>" ] || https_fail "three requests took connections '$got'"
     got="$("${c[@]}" --compressed "$base/text" 2>&1 | head -c 54)"
     [ "$got" = "hello, compressible world. hello, compressible world. " ] || https_fail "gzip over TLS: '$got'"
-    got="$("${c[@]}" --http1.1 -o /dev/null -w '%{http_code}' "$base/upgrade" 2>&1)"
-    [ "$got" = "501" ] || https_fail "an upgrade over TLS answered '$got'"
+    # curl asked for no upgrade, so after the 101 it waits for an answer
+    # the block never sends: "Empty reply", and the code it saw.
+    got="$("${c[@]}" --http1.1 -o /dev/null -w '%{http_code}' "$base/upgrade" 2>/dev/null)"
+    [ "$got" = "101" ] || https_fail "an upgrade over TLS answered '$got'"
     if "${c[@]}" --tlsv1.2 --tls-max 1.2 -o /dev/null "$base/echo" 2>/dev/null; then
       https_fail "a TLS 1.2 client was served"
     fi
@@ -1082,7 +1085,7 @@ else
     if https_checks "$H2BIN" "$chain" "$key" "$kind"; then
       echo "  $kind: the iyi client over h2 and http/1.1, Python reading to close_notify, Node's 100 GETs and 20 uploads at once"
       if curl_asked "$kind"; then
-        echo "  $kind: curl both ways, gzip, three requests on one connection, an upgrade refused 501, TLS 1.2 refused and the next request served"
+        echo "  $kind: curl both ways, gzip, three requests on one connection, an upgrade answered 101, TLS 1.2 refused and the next request served"
       else
         echo "  $kind: curl not asked: no curl with HTTP/2, or one whose TLS takes no Ed25519 certificate"
       fi

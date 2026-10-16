@@ -7,8 +7,10 @@
 # as the panics it ends with; then the module against peers it did not
 # write - a WebSocket client and server written here in Python over raw
 # sockets, from RFC 6455 rather than from the module, and Node's
-# `WebSocket` client (undici's) where Node is installed; then the proofs
-# that the exercise fails when the module is broken.
+# `WebSocket` client (undici's) where Node is installed - in the clear,
+# then the same peers under TLS (`wss://`, a P-256 certificate) with a
+# copy that hands the bare socket over refused; then the proofs that the
+# exercise fails when the module is broken.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -182,9 +184,13 @@ if [ -z "$port" ]; then
   status=1
 elif [ -z "$PY" ]; then
   echo "  skipped: no working python3, so no Python client was run against the server"
-elif ! PORT="$port" timeout 120 "$PY" - <<'PY'
-import base64, hashlib, os, socket, struct, sys
+elif ! cat >"$WORK/ws-client.py" <<'PY'
+import base64, hashlib, os, socket, ssl, struct, sys
 port = int(os.environ["PORT"])
+# Under TLS (wss://) when TLS_ROOTS names the root to trust: the socket
+# wrapped, the name checked as localhost.
+roots = os.environ.get("TLS_ROOTS")
+host = os.environ.get("HOST", "127.0.0.1")
 GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 bad = 0
 def check(cond, what):
@@ -209,8 +215,10 @@ def encode(op, payload, fin=True, mask=True):
 class Peer:
     def __init__(self, extra=b"", version=b"13", protocols=b"superchat, chat"):
         self.s = socket.create_connection(("127.0.0.1", port), timeout=10)
+        if roots:
+            self.s = ssl.create_default_context(cafile=roots).wrap_socket(self.s, server_hostname=host)
         self.key = base64.b64encode(os.urandom(16))
-        req = (b"GET /chat HTTP/1.1\r\nHost: 127.0.0.1:" + str(port).encode() +
+        req = (b"GET /chat HTTP/1.1\r\nHost: " + host.encode() + b":" + str(port).encode() +
                b"\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\nSec-WebSocket-Key: " + self.key +
                b"\r\nSec-WebSocket-Version: " + version + b"\r\n")
         if protocols:
@@ -255,7 +263,7 @@ class Peer:
             return False
         try:
             return self.s.recv(1) == b""
-        except ConnectionResetError:
+        except (ConnectionResetError, ssl.SSLEOFError):
             return True
 
 p = Peer()
@@ -306,6 +314,9 @@ print("  the handshake, echoes, fragments around a ping, 64 and 16-bit lengths, 
 sys.exit(1 if bad else 0)
 PY
 then
+  echo "  the Python client could not be written"
+  status=1
+elif ! PORT="$port" timeout 120 "$PY" "$WORK/ws-client.py"; then
   echo "  Python's client and the server disagree"
   status=1
 fi
@@ -316,9 +327,10 @@ if [ -z "$port" ]; then
   echo "  skipped: no server"
 elif ! command -v node >/dev/null 2>&1 || [ "$(node -e 'process.stdout.write(typeof WebSocket)' 2>/dev/null)" != "function" ]; then
   echo "  skipped: no node with a WebSocket client (Node 22 and later have one)"
-elif ! PORT="$port" timeout 60 node - <<'JS'
+elif ! cat >"$WORK/ws-node.js" <<'JS'
 const port = process.env.PORT;
-const ws = new WebSocket(`ws://127.0.0.1:${port}/chat`, ["superchat", "chat"]);
+// wss://localhost under TLS, its root given by NODE_EXTRA_CA_CERTS.
+const ws = new WebSocket(process.env.WS_URL || `ws://127.0.0.1:${port}/chat`, ["superchat", "chat"]);
 ws.binaryType = "arraybuffer";
 const sent = new Uint8Array(100000).map((_, i) => (i * 7 + 3) & 255);
 const got = [];
@@ -340,16 +352,20 @@ ws.onclose = (e) => {
 setTimeout(() => { console.log("  timed out"); process.exit(1); }, 30000);
 JS
 then
+  echo "  the Node client could not be written"
+  status=1
+elif ! PORT="$port" timeout 60 node "$WORK/ws-node.js"; then
   echo "  Node's client and the server disagree"
   status=1
 fi
 
 # The server stops at the text "stop": its close is 1001, and `serve`
 # returns.
-if [ -n "$port" ] && [ -n "$PY" ]; then
-  PORT="$port" timeout 60 "$PY" - <<'PY' || { echo "  the server did not stop"; status=1; }
-import base64, os, socket, struct
+cat >"$WORK/ws-stop.py" <<'PY'
+import base64, os, socket, ssl, struct
 s = socket.create_connection(("127.0.0.1", int(os.environ["PORT"])), timeout=10)
+if os.environ.get("TLS_ROOTS"):
+    s = ssl.create_default_context(cafile=os.environ["TLS_ROOTS"]).wrap_socket(s, server_hostname="localhost")
 s.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + base64.b64encode(os.urandom(16)) + b"\r\n\r\n")
 buf = b""
 while b"\r\n\r\n" not in buf:
@@ -362,6 +378,8 @@ assert buf[0] == 0x88 and buf[2:4] == struct.pack("!H", 1001), buf
 s.sendall(bytes([0x88, 0x82, 0, 0, 0, 0]) + struct.pack("!H", 1001))
 s.close()
 PY
+if [ -n "$port" ] && [ -n "$PY" ]; then
+  PORT="$port" timeout 60 "$PY" "$WORK/ws-stop.py" || { echo "  the server did not stop"; status=1; }
 fi
 if [ -n "$port" ]; then
   waited=0
@@ -383,8 +401,11 @@ echo "== the client against a Python server"
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3 to serve the client"
 else
-  timeout 120 "$PY" - > "$WORK/pyserver.out" 2>&1 <<'PY' &
-import base64, hashlib, os, socket, struct, sys
+  cat >"$WORK/ws-server.py" <<'PY'
+import base64, hashlib, os, socket, ssl, struct, sys
+# Under TLS when TLS_CERT and TLS_KEY name its chain and key; the client
+# then names it localhost.
+host = os.environ.get("HOST", "127.0.0.1")
 GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 bad = 0
 def check(cond, what):
@@ -404,6 +425,10 @@ ls.listen(1)
 port = ls.getsockname()[1]
 print(port, flush=True)
 c, _ = ls.accept()
+if os.environ.get("TLS_CERT"):
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(os.environ["TLS_CERT"], os.environ["TLS_KEY"])
+    c = context.wrap_socket(c, server_side=True)
 c.settimeout(20)
 buf = b""
 while b"\r\n\r\n" not in buf:
@@ -415,7 +440,7 @@ for line in lines[1:]:
     k, _, v = line.partition(b":")
     fields[k.strip().lower()] = v.strip()
 check(lines[0] == b"GET /chat?x=1 HTTP/1.1", f"the request line {lines[0]!r}")
-check(fields.get(b"host") == f"127.0.0.1:{port}".encode(), "Host")
+check(fields.get(b"host") == f"{host}:{port}".encode(), "Host")
 check(fields.get(b"upgrade", b"").lower() == b"websocket", "Upgrade")
 check(b"upgrade" in [t.strip().lower() for t in fields.get(b"connection", b"").split(b",")], "Connection")
 check(fields.get(b"sec-websocket-version") == b"13", "Sec-WebSocket-Version")
@@ -467,6 +492,7 @@ if not bad:
     print("  the request, five masked frames each with its own key, a pong, the close echoed", flush=True)
 sys.exit(1 if bad else 0)
 PY
+  timeout 120 "$PY" "$WORK/ws-server.py" > "$WORK/pyserver.out" 2>&1 &
   py_pid=$!
   pyport=$(await_port "$WORK/pyserver.out" "$py_pid")
   client_said=$(timeout 60 "$WORK/ws-plain" connect "$pyport" 2>&1)
@@ -488,6 +514,141 @@ closed 1000 done'
     status=1
   else
     echo "  the client read the protocol, three messages and the close 1000 \"done\""
+  fi
+fi
+
+echo
+echo "== wss://: the same peers under TLS (a P-256 certificate)"
+# std/http's server under std/tls's, which hands upgrade's block the TLS
+# stream; std/p256 signs every handshake. Python's client and Node's
+# against it, the stop, and the client against Python's server under
+# ssl - each the program above, wrapped.
+if [ -z "$PY" ] || ! "$PY" -c 'from cryptography.hazmat.primitives.asymmetric import ec' >/dev/null 2>&1; then
+  echo "  skipped: no python cryptography to make a certificate with"
+else
+  mkdir -p "$WORK/wss"
+  "$PY" - "$WORK/wss" <<'PY'
+import datetime as dt, os, sys
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+out = sys.argv[1]
+now = dt.datetime.now(dt.timezone.utc)
+def name(cn): return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+root_key, key = ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1())
+root = (x509.CertificateBuilder().subject_name(name("wss root")).issuer_name(name("wss root"))
+        .public_key(root_key.public_key()).serial_number(1).not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=2))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.KeyUsage(False, False, False, False, False, True, True, False, False), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(root_key.public_key()), critical=False)
+        .sign(root_key, hashes.SHA256()))
+leaf = (x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(root.subject)
+        .public_key(key.public_key()).serial_number(2).not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=2))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(root_key.public_key()), critical=False)
+        .sign(root_key, hashes.SHA256()))
+pem = lambda c: c.public_bytes(serialization.Encoding.PEM)
+open(os.path.join(out, "roots.pem"), "wb").write(pem(root))
+open(os.path.join(out, "chain.pem"), "wb").write(pem(leaf) + pem(root))
+open(os.path.join(out, "key.pem"), "wb").write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+PY
+  "$WORK/ws-plain" serve "$WORK/wss/chain.pem" "$WORK/wss/key.pem" > "$WORK/wss-serve.out" 2>&1 &
+  wss_pid=$!
+  wport=$(await_port "$WORK/wss-serve.out" "$wss_pid")
+  if [ -z "$wport" ]; then
+    echo "  the server under TLS printed no port"
+    sed -n '1,5p' "$WORK/wss-serve.out" | sed 's/^/    /'
+    status=1
+  else
+    if [ ! -s "$WORK/ws-client.py" ]; then
+      echo "  no Python client was written above, so none ran over wss://"
+    elif ! PORT="$wport" TLS_ROOTS="$WORK/wss/roots.pem" HOST=localhost timeout 120 "$PY" "$WORK/ws-client.py"; then
+      echo "  Python's client and the server disagree over wss://"
+      status=1
+    fi
+    if [ -s "$WORK/ws-node.js" ]; then
+      if ! PORT="$wport" WS_URL="wss://localhost:$wport/chat" NODE_EXTRA_CA_CERTS="$WORK/wss/roots.pem" timeout 60 node "$WORK/ws-node.js"; then
+        echo "  Node's client and the server disagree over wss://"
+        status=1
+      fi
+    fi
+    PORT="$wport" TLS_ROOTS="$WORK/wss/roots.pem" timeout 60 "$PY" "$WORK/ws-stop.py" || { echo "  the server under TLS did not stop"; status=1; }
+    waited=0
+    while kill -0 "$wss_pid" 2>/dev/null && [ "$waited" -lt 300 ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if ! kill -0 "$wss_pid" 2>/dev/null && grep -q "^stopped$" "$WORK/wss-serve.out"; then
+      echo "  the server under TLS stopped at \"stop\" with a close 1001"
+    else
+      echo "  the server under TLS did not return from serve"
+      status=1
+    fi
+  fi
+  kill "$wss_pid" 2>/dev/null
+  if [ -s "$WORK/ws-server.py" ]; then
+    TLS_CERT="$WORK/wss/chain.pem" TLS_KEY="$WORK/wss/key.pem" HOST=localhost timeout 120 "$PY" "$WORK/ws-server.py" > "$WORK/wss-pyserver.out" 2>&1 &
+    py_pid=$!
+    pyport=$(await_port "$WORK/wss-pyserver.out" "$py_pid")
+    client_said=$(timeout 60 "$WORK/ws-plain" connect "$pyport" "$WORK/wss/roots.pem" 2>&1)
+    wait "$py_pid"
+    py_status=$?
+    sed -n '2,$p' "$WORK/wss-pyserver.out"
+    expected='protocol chat
+text "hello"
+text "frag"
+binary 70000 bytes
+end
+closed 1000 done'
+    if [ "$py_status" -ne 0 ]; then
+      echo "  Python's server under ssl and the client disagree"
+      status=1
+    elif [ "$client_said" != "$expected" ]; then
+      echo "  the client said, over wss://:"
+      printf '%s\n' "$client_said" | sed 's/^/    /'
+      status=1
+    else
+      echo "  the client read the protocol, three messages and the close 1000 \"done\" over wss://"
+    fi
+  fi
+  # And on a copy of std/http whose upgrade under TLS hands the block the
+  # bare socket: the WebSocket's frames then go out in the clear, and the
+  # Python client, reading TLS, must fail.
+  if [ -s "$WORK/ws-client.py" ]; then
+    rm -rf "$WORK/bare"
+    mkdir -p "$WORK/bare/std"
+    if ! "$PY" - "$REPO/src/std/http.iyi" "$WORK/bare/std/http.iyi" <<'PY'
+import sys
+src = open(sys.argv[1], encoding="utf-8").read()
+old = "      conn.held { takeover.call(socket, leftover) }"
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not one")
+open(sys.argv[2], "w", encoding="utf-8").write(src.replace(old, "      conn.held { takeover.call(conn.socket, leftover) }"))
+PY
+    then
+      echo "  the bare-socket patch did not apply"
+      status=1
+    elif ! IYI_PATH="$WORK/bare${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/ws-bare" "$REPO/bench/std_websocket_exercise.iyi" >"$WORK/bare.log" 2>&1; then
+      echo "  the bare-socket copy did not compile"
+      sed -n '1,6p' "$WORK/bare.log" | sed 's/^/    /'
+      status=1
+    else
+      "$WORK/ws-bare" serve "$WORK/wss/chain.pem" "$WORK/wss/key.pem" > "$WORK/bare-serve.out" 2>&1 &
+      bare_pid=$!
+      bport=$(await_port "$WORK/bare-serve.out" "$bare_pid")
+      if PORT="$bport" TLS_ROOTS="$WORK/wss/roots.pem" HOST=localhost timeout 60 "$PY" "$WORK/ws-client.py" >"$WORK/bare-client.out" 2>&1; then
+        echo "  the Python client PASSED against an upgrade that hands over the bare socket under TLS"
+        status=1
+      else
+        echo "  an upgrade that hands over the bare socket under TLS is caught: $(grep -m1 -E 'FAIL|Error' "$WORK/bare-client.out" | sed 's/^ *//' | cut -c1-100)"
+      fi
+      kill "$bare_pid" 2>/dev/null
+    fi
   fi
 fi
 

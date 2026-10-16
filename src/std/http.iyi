@@ -81,11 +81,10 @@
 # std/fileserver's, and a multipart boundary is made from the parts' own
 # hash.
 #
-# Not here: an upgrade over TLS, either end (a WebSocket's `wss://`: the
-# server answers one 501, as the block that takes the connection over is
-# handed a bare socket), HTTP/2's server push and its upgrade from
-# HTTP/1.1 (which RFC 9113 retired), pipelining requests on a kept
-# HTTP/1.1 connection, and proxies.
+# Not here: HTTP/2's server push, its upgrade from HTTP/1.1 (which RFC
+# 9113 retired) and RFC 8441's WebSocket over HTTP/2 - an upgrade offers
+# ALPN `http/1.1` alone - pipelining requests on a kept HTTP/1.1
+# connection, and proxies.
 
 module std/http
 
@@ -417,11 +416,12 @@ class Conn
   end
 end
 
-# A TLS connection as a `Conn` and a `BodyWriter` use a socket: read into
-# their buffer, written to, closed. What TLS refuses is a `SocketError`
-# carrying TLS's own sentence (`layer_reason`), so the client's answers
+# A TLS connection used as a socket is: read into a buffer, written to,
+# closed, its timeouts set - by a `Conn`, a `BodyWriter`, and a connection
+# handed over by an upgrade (`wss://` at either end). What TLS refuses is a
+# `SocketError` carrying TLS's own sentence (`layer_reason`), so answers
 # keep the types they have over a plain socket.
-class TlsStream
+pub class TlsStream
   @tls : TlsConnection
   @host : String
   # What TLS handed over and the buffer has not taken yet.
@@ -448,6 +448,23 @@ class TlsStream
     n
   end
 
+  # Up to *max_bytes* as a string, what is held first: "" once the peer
+  # closed with close_notify. `IyiSocket#read`'s form, for a block an
+  # upgrade hands either.
+  def read(max_bytes : Int32 = 4096) : String | Cancelled | SocketError
+    if @at < @pending.bytesize
+      n = @pending.bytesize - @at
+      n = max_bytes if n > max_bytes
+      from = @at
+      piece = String.new(n) { |buf| buf.copy_from(@pending.to_unsafe + from.to_i64, n) }
+      @at = @at + n
+      return piece
+    end
+    got = @tls.read(max_bytes)
+    return SocketError.layered("read from #{@host}", got.message) if got.is_a?(TlsError)
+    got
+  end
+
   def write(text : String) : Int32 | Cancelled | SocketError
     sent = @tls.write(text)
     return SocketError.layered("write to #{@host}", sent.message) if sent.is_a?(TlsError)
@@ -456,6 +473,19 @@ class TlsStream
 
   def close : Nil
     @tls.close
+  end
+
+  def closed? : Bool
+    @tls.closed?
+  end
+
+  # How long a read or a write of the connection under it may wait.
+  def read_timeout_ms=(ms : Int32?) : Int32?
+    @tls.read_timeout_ms = ms
+  end
+
+  def write_timeout_ms=(ms : Int32?) : Int32?
+    @tls.write_timeout_ms = ms
   end
 end
 
@@ -1048,7 +1078,7 @@ pub class Response
   @body : String
   @source : IyiIO?
   @writer : Proc(BodyWriter, Nil)?
-  @takeover : Proc(IyiSocket, String, Nil)?
+  @takeover : Proc(IyiSocket | TlsStream, String, Nil)?
   @reader : BodyReader?
   @url : String?
   @decoded : Bool
@@ -1109,9 +1139,10 @@ pub class Response
 
   # A 101 Switching Protocols with *headers* (`Upgrade` and the
   # protocol's own), after which the connection is the block's: it is
-  # handed the socket and the bytes the client sent after its request,
+  # handed the connection - the socket, or under `serve(tls:)` the
+  # `TlsStream` over it - and the bytes the client sent after its request,
   # and the connection closes when it returns.
-  def self.upgrade(headers : Hash(String, String), &takeover : (IyiSocket, String) -> Nil) : Response
+  def self.upgrade(headers : Hash(String, String), &takeover : (IyiSocket | TlsStream, String) -> Nil) : Response
     response = Response.new(101, "", headers)
     response.takeover = takeover
     response
@@ -1121,7 +1152,7 @@ pub class Response
     @writer = writer
   end
 
-  protected def takeover=(takeover : Proc(IyiSocket, String, Nil)) : Proc(IyiSocket, String, Nil)
+  protected def takeover=(takeover : Proc(IyiSocket | TlsStream, String, Nil)) : Proc(IyiSocket | TlsStream, String, Nil)
     @takeover = takeover
   end
 
@@ -1133,7 +1164,7 @@ pub class Response
     @writer
   end
 
-  def takeover : Proc(IyiSocket, String, Nil)?
+  def takeover : Proc(IyiSocket | TlsStream, String, Nil)?
     @takeover
   end
 
@@ -1309,9 +1340,8 @@ pub struct Server
   # handshake fails is closed, the client told why by an alert. Inside
   # it a connection that opens with HTTP/2's preface - as a client whose
   # ALPN chose `h2` does, when `tls.alpn` offers it - is served HTTP/2,
-  # and any other HTTP/1.1. `Response.upgrade` is not served over
-  # TLS: the answer is 501 and the connection closed, as the block that
-  # takes the connection over is handed a bare socket.
+  # and any other HTTP/1.1. A `Response.upgrade` block over TLS is handed
+  # the `TlsStream`, so a WebSocket is `wss://`.
   def self.serve(listener : IyiSocket, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, tls : TlsServerConfig? = nil, &handler : Request -> Response) : Nil
     raise "HTTP: a timeout of #{timeout_ms} ms" if timeout_ms < 0
     idle = {} of UInt64 => IyiSocket
@@ -1528,10 +1558,6 @@ pub struct Server
     socket = conn.transport
     head = HTTP.same_name?(req.method, "HEAD")
     if takeover = response.takeover
-      if socket.is_a?(TlsStream)
-        socket.write(format_response(Response.new(501, "an upgrade is not served over TLS\n"), false, true))
-        return false
-      end
       return false unless socket.write(format_head(response, false, false, nil, false, true)).is_a?(Int32)
       leftover = conn.leftover
       conn.unlimited
@@ -2024,10 +2050,11 @@ end
 # caller's now - the socket, and the bytes the server sent after its head.
 pub class Upgraded
   getter response : Response
-  getter socket : IyiSocket
+  # The connection: the socket, or for `https://` the `TlsStream` over it.
+  getter socket : IyiSocket | TlsStream
   getter leftover : String
 
-  def initialize(@response : Response, @socket : IyiSocket, @leftover : String)
+  def initialize(@response : Response, @socket : IyiSocket | TlsStream, @leftover : String)
   end
 end
 
@@ -2246,10 +2273,6 @@ pub struct HTTP
   # which is the caller's from then on: std/websocket's handshake. Any
   # other answer is an `HTTPError` naming it.
   def self.upgrade(url : String, protocol : String, headers : Hash(String, String) = {} of String => String, timeout_ms : Int32 = 0) : Upgraded | Cancelled | SocketError | HTTPError
-    target = URI.parse?(url)
-    if target && (target.scheme || "").downcase == "https"
-      return HTTPError.new("an upgrade over https:// (wss://): a connection handed over under TLS is not here yet")
-    end
     sent = headers.dup
     sent["Upgrade"] = protocol
     exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms)
@@ -2261,7 +2284,7 @@ pub struct HTTP
     end
     # The protocol after it waits as it likes.
     exchange.conn.unlimited
-    Upgraded.new(response, exchange.conn.socket, exchange.conn.leftover)
+    Upgraded.new(response, exchange.conn.transport, exchange.conn.leftover)
   end
 
   private def self.handed(exchange : Exchange, block : Proc(Response, R)) : R forall R
@@ -2369,10 +2392,19 @@ pub struct HTTP
             socket.read_timeout_ms = timeout_ms
             socket.write_timeout_ms = timeout_ms
           end
-          tls = TlsClient.over(socket, host, tls_config)
+          offered = tls_config
+          if upgrade
+            # An upgrade is HTTP/1.1's: ALPN offers that alone, as RFC
+            # 8441's way over HTTP/2 (an extended CONNECT) is not here.
+            offered = TlsConfig.new
+            offered.roots = tls_config.roots
+            offered.now = tls_config.now
+            offered.alpn = ["http/1.1"]
+          end
+          tls = TlsClient.over(socket, host, offered)
           return HTTPError.new(tls.message) if tls.is_a?(TlsError)
           conn = Conn.new(socket, stream: TlsStream.new(tls, host))
-          speaks_h2 = tls.alpn_protocol == "h2"
+          speaks_h2 = upgrade.nil? && tls.alpn_protocol == "h2"
         else
           conn = Conn.new(socket)
           speaks_h2 = upgrade.nil? && !client.nil? && client.prior_knowledge

@@ -3,16 +3,20 @@
 # Run via:
 #     ./bin/iyi run bench/std_websocket_exercise.iyi
 #
-# With the argument `serve` it is an echo server for the peers
-# bench/std_websocket_exercise.sh runs against it: it prints its port,
-# echoes every message, and stops at the text "stop". With `connect PORT`
-# it is the client the script's Python server talks to.
+# With the argument `serve [CHAIN KEY]` it is an echo server for the peers
+# bench/std_websocket_exercise.sh runs against it - under TLS (`wss://`)
+# with a chain and key: it prints its port, echoes every message, and
+# stops at the text "stop". With `connect PORT [ROOTS]` it is the client
+# the script's Python server talks to, over `wss://` with roots.
 
 module bench/std_websocket_exercise
 
 import std/websocket::{WebSocket, WebSocketError, Message}
 import std/http::{HTTP, Request, Response, Server, HTTPError}
 import std/socket::{IyiSocket, SocketError}
+import std/tls::{TlsConfig, TlsServerConfig}
+import std/x509::{Certificate}
+import std/file::{File}
 
 def assert_true(cond : Bool, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}" unless cond
@@ -440,10 +444,12 @@ def echo(ws : WebSocket, listener : IyiSocket) : Nil
   end
 end
 
-def serve : Nil
+# The server for the script's peers: under TLS when a chain and key are
+# given (`wss://`).
+def serve(tls : TlsServerConfig?) : Nil
   listener = IyiSocket.listen("127.0.0.1", 0)
   puts listener.local_port
-  Server.serve(listener) do |req|
+  Server.serve(listener, tls: tls) do |req|
     WebSocket.upgrade(req, ["chat", "superchat"]) { |ws| echo(ws, listener) }
   end
   puts "stopped"
@@ -451,8 +457,17 @@ end
 
 # --- the client the script's Python server talks to -----------------------
 
-def connect(port : String) : Nil
-  ws = WebSocket.connect("ws://127.0.0.1:#{port}/chat?x=1", {"X-Test" => "1"}, ["chat", "superchat"]).or_panic
+# The client for the script's Python server: `wss://localhost` with the
+# roots given, `ws://127.0.0.1` without.
+def connect(port : String, roots : String?) : Nil
+  url = "ws://127.0.0.1:#{port}/chat?x=1"
+  if roots
+    config = TlsConfig.new
+    config.roots = Certificate.from_pem(File.read(roots)).or_panic
+    HTTP.tls_config = config
+    url = "wss://localhost:#{port}/chat?x=1"
+  end
+  ws = WebSocket.connect(url, {"X-Test" => "1"}, ["chat", "superchat"]).or_panic
   puts "protocol #{ws.protocol || "-"}"
   3.times do
     got = ws.receive.or_panic
@@ -470,10 +485,11 @@ def connect(port : String) : Nil
 end
 
 if Program.args.size > 0
-  if Program.args[0] == "serve"
-    serve
-  elsif Program.args[0] == "connect"
-    connect(Program.args[1])
+  args = Program.args
+  if args[0] == "serve"
+    serve(args.size > 2 ? TlsServerConfig.from_pem(File.read(args[1]), File.read(args[2])).or_panic : nil)
+  elsif args[0] == "connect"
+    connect(args[1], args.size > 2 ? args[2] : nil)
   end
   exit 0
 end
@@ -887,8 +903,7 @@ group do |g|
     plain = WebSocket.connect("ws://127.0.0.1:#{port}/plain")
     assert_true plain.is_a?(HTTPError), "a 200 is not an upgrade"
     assert_str "HTTP: the server answered 200 OK to an upgrade to websocket, not 101 Switching Protocols", plain.as(HTTPError).message, "the 200's error"
-    assert_str "WebSocket: wss:// is not here yet: a connection handed over under TLS; use ws://", WebSocket.connect("wss://127.0.0.1:#{port}/").as(WebSocketError).message, "wss"
-    assert_str "WebSocket: not a ws:// URL: \"http://127.0.0.1/\"", WebSocket.connect("http://127.0.0.1/").as(WebSocketError).message, "http"
+    assert_str "WebSocket: not a ws:// or wss:// URL: \"http://127.0.0.1/\"", WebSocket.connect("http://127.0.0.1/").as(WebSocketError).message, "http"
     upper = WebSocket.connect("WS://127.0.0.1:#{port}/echo").or_panic
     upper.close
 

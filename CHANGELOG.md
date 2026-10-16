@@ -4,6 +4,23 @@
 
 ### Added
 
+- **WebSocket over TLS, both ends: `wss://`.** `WebSocket.connect`
+  refused `wss://` before sending anything, and a server under TLS had no
+  way to hand an upgraded connection over.
+  - `HTTP.upgrade` takes `https://` URLs, offering ALPN `http/1.1` alone
+    (RFC 8441's WebSocket over HTTP/2 is not here), and `WebSocket.connect`
+    takes `wss://`, the certificate checked against `HTTP.tls_config`.
+  - `Response.upgrade`'s block, `Upgraded#socket` and std/websocket's
+    connection take `IyiSocket | TlsStream`; `TlsStream` is public, with
+    `closed?` and the timeouts beside `read`, `write` and `close`. A block
+    written against `IyiSocket` alone must take the union.
+
+  Held by `bench/std_websocket_exercise.sh`: the Python client and server
+  and Node's WebSocket, each under TLS as in the clear - every echo,
+  fragment, length and fault, the stop with 1001 - with a P-256
+  certificate, and a copy of std/http that hands the bare socket over
+  under TLS refused by the Python client.
+
 - **std/tls's server signs with a P-256 key too, the kind every browser
   takes.** `TlsServerConfig` took an Ed25519 key alone, which no browser
   accepts in a certificate.
@@ -49,14 +66,13 @@
   - Each connection's handshake is std/tls's `TlsServer`, held to
     `timeout_ms` like a request's head; one that fails is closed with its
     alert and the server goes on. The connection ends with close_notify.
-  - Every answer, 100 Continue and refusal goes through TLS.
-    `Response.upgrade` over TLS is answered 501: its block is handed a bare
-    socket, which would bypass TLS.
+  - Every answer, 100 Continue and refusal goes through TLS, and an
+    upgrade's block is handed the TLS stream (`wss://`, above).
 
   Held by `bench/std_http_exercise.sh` with `bench/http2_exercise.iyi`'s
   new `serve-tls` and `tls-get` modes, under an Ed25519 certificate: the
   iyi client over h2 and over http/1.1; curl both ways, gzip, three
-  requests on one connection, an upgrade answered 501, TLS 1.2 refused
+  requests on one connection, an upgrade answered 101, TLS 1.2 refused
   and the next request served; Python reading an HTTP/1.0 answer to the
   end with ragged EOFs refused, so close_notify must come; Node's 100 GETs
   and 20 uploads at once under a 1000-byte window. Three broken copies:

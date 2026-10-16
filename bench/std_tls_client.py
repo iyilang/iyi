@@ -1,13 +1,16 @@
 """A TLS 1.3 client that breaks the protocol one rule at a time, for the
 server section of bench/std_tls_exercise.sh.
 
-    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256] [SCENARIO ...]
+    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256] [--mtls DIR] [SCENARIO ...]
 
 Connects to the exercise's `serve` mode once per scenario (every one in
 SCENARIOS when none is named) and says, one line each, whether the server
 answered as it must: `<name>: ok ...`, or `FAIL <name>: ...`. `--p256`
 says the server's key is P-256, not Ed25519: what a client that leaves
-out one scheme or the other is owed turns on that. A correct handshake is
+out one scheme or the other is owed turns on that. `--mtls DIR` says the
+server asks for a client's certificate: the MTLS scenarios run instead,
+presenting the chains and keys in DIR (client, client-ed, other,
+server-only: .pem and .key each) or breaking a rule of the answer. A correct handshake is
 checked here, not taken on trust: the server's certificate against the
 root, its CertificateVerify with Python's own Ed25519 or ECDSA, its
 Finished against the transcript as this side has it, and then a request
@@ -22,6 +25,7 @@ import os
 import socket
 import struct
 import sys
+import time
 
 sys.dont_write_bytecode = True  # the gate leaves bench/ as it found it
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -81,6 +85,26 @@ SCENARIOS = {
     "not-hello": ("a ServerHello where the ClientHello belongs", ("alert", 10)),
     "cut-hello": ("a ClientHello whose extensions run past its end", ("alert", 50)),
 }
+
+
+# The scenarios against a server that asks for a client's certificate.
+MTLS = {
+    "mtls-ok": ("a P-256 client certificate and its CertificateVerify", ("held", "peer=CN=client")),
+    "mtls-ed25519": ("an Ed25519 client certificate", ("held", "peer=CN=client ed")),
+    "mtls-none": ("no client certificate", ("alert", 116)),
+    "mtls-bad-cv": ("the client's CertificateVerify one bit off", ("alert", 51)),
+    "mtls-no-cv": ("a client Certificate with no CertificateVerify", ("alert", 10)),
+    "mtls-context": ("a client Certificate with a request context", ("alert", 47)),
+    # The rest of the flight sent after the refusal: a server that closes
+    # with it unread resets the connection, and this send breaks.
+    "mtls-late": ("a refused client Certificate, the rest of the flight after a pause", ("alert", 47)),
+    "mtls-wrong-scheme": ("a CertificateVerify under a scheme not the key's", ("alert", 47)),
+    "mtls-untrusted": ("a client certificate from another root", ("alert", 42)),
+    "mtls-server-only": ("a client certificate for serverAuth only", ("alert", 42)),
+    # Asked of a server told a certificate is not required.
+    "mtls-optional-none": ("no client certificate, where one is not required", ("held", "peer=-")),
+}
+MTLS_DIR = None
 
 
 class Refused(Exception):
@@ -294,6 +318,7 @@ def scenario(c, name):
     c.reader = Cipher(schedule, s_hs)
 
     ee = c.message()
+    mtls = name in MTLS
     assert ee[0] == 8, f"message {ee[0]} where EncryptedExtensions belongs"
     listed, i, types = ee[6:], 0, []
     while i < len(listed):
@@ -304,6 +329,23 @@ def scenario(c, name):
     assert (16 in types) == (kw.get("alpn") is not None), f"EncryptedExtensions {types} for ALPN {kw.get('alpn')}"
     transcript += ee
     cert = c.message()
+    requested = cert[0] == 13
+    if requested:
+        assert mtls, "a CertificateRequest from a server that was not told to ask"
+        body = cert[4:]
+        assert body[0] == 0, "a CertificateRequest with a context"
+        listed, i, offered = body[3:], 0, []
+        while i < len(listed):
+            t, n = struct.unpack(">HH", listed[i:i + 4])
+            if t == 13:
+                schemes = listed[i + 6:i + 4 + n]
+                offered = [int.from_bytes(schemes[k:k + 2], "big") for k in range(0, len(schemes), 2)]
+            i += 4 + n
+        assert 0x0807 in offered and 0x0403 in offered, f"a CertificateRequest offering {offered}"
+        transcript += cert
+        cert = c.message()
+    else:
+        assert not mtls, "no CertificateRequest from a server told to ask"
     assert cert[0] == 11, f"message {cert[0]} where Certificate belongs"
     transcript += cert
     body = cert[4:]
@@ -334,6 +376,37 @@ def scenario(c, name):
     c.reader = Cipher(schedule, s_ap)
 
     writer = Cipher(schedule, c_hs)
+    if requested:
+        # The client's certificate, or one rule of its answer broken.
+        who = {"mtls-ed25519": "client-ed", "mtls-untrusted": "other", "mtls-server-only": "server-only"}.get(name, "client")
+        ders = [x509c.public_bytes(serialization.Encoding.DER)
+                for x509c in x509.load_pem_x509_certificates(open(os.path.join(MTLS_DIR, who + ".pem"), "rb").read())]
+        own = serialization.load_pem_private_key(open(os.path.join(MTLS_DIR, who + ".key"), "rb").read(), None)
+        if name in ("mtls-none", "mtls-optional-none"):
+            presented = message(11, b"\x00" + bytes(3))
+        else:
+            context = b"\x01\x07" if name in ("mtls-context", "mtls-late") else b"\x00"
+            entries = b"".join(len(d).to_bytes(3, "big") + d + b"\x00\x00" for d in ders)
+            presented = message(11, context + len(entries).to_bytes(3, "big") + entries)
+        c.sock.sendall(writer.seal(22, presented))
+        transcript += presented
+        if name == "mtls-late":
+            time.sleep(0.3)
+        if name not in ("mtls-none", "mtls-optional-none", "mtls-no-cv"):
+            signed = b" " * 64 + b"TLS 1.3, client CertificateVerify\x00" + schedule.digest(transcript)
+            if isinstance(own, ed25519.Ed25519PrivateKey):
+                scheme, sig = 0x0807, own.sign(signed)
+            else:
+                scheme, sig = 0x0403, own.sign(signed, ec.ECDSA(hashes.SHA256()))
+            if name == "mtls-wrong-scheme":
+                scheme = 0x0807 if scheme == 0x0403 else 0x0403
+            if name == "mtls-bad-cv":
+                sig = sig[:-1] + bytes([sig[-1] ^ 1])
+            client_verify = message(15, struct.pack(">HH", scheme, len(sig)) + sig)
+            c.sock.sendall(writer.seal(22, client_verify))
+            transcript += client_verify
+            if name == "mtls-late":
+                time.sleep(0.2)
     if name == "ccs":
         c.sock.sendall(plain(20, b"\x01"))
     if name == "cert-instead-of-finished":
@@ -375,13 +448,20 @@ def main():
     root = x509.load_pem_x509_certificate(open(sys.argv[2], "rb").read())
     rest = sys.argv[3:]
     key_kind = "ed25519"
-    if rest and rest[0] == "--p256":
-        key_kind = "p256"
-        rest = rest[1:]
-    names = rest or list(SCENARIOS)
+    global MTLS_DIR
+    while rest and rest[0].startswith("--"):
+        if rest[0] == "--p256":
+            key_kind = "p256"
+            rest = rest[1:]
+        elif rest[0] == "--mtls":
+            MTLS_DIR = rest[1]
+            rest = rest[2:]
+        else:
+            raise SystemExit(f"no option {rest[0]}")
+    names = rest or ([n for n in MTLS if n != "mtls-optional-none"] if MTLS_DIR else list(SCENARIOS))
     failures = 0
     for name in names:
-        what, answer = SCENARIOS[name]
+        what, answer = MTLS[name] if name in MTLS else SCENARIOS[name]
         kind, want = answer[key_kind] if isinstance(answer, dict) else answer
         try:
             outcome = run(name, port, root)

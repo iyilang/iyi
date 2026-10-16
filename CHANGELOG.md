@@ -4,6 +4,46 @@
 
 ### Added
 
+- **std/tls's server waits for the rest of a refused client's flight
+  before it closes.** A refusal mid-flight - a client certificate the
+  server turns down, with CertificateVerify and Finished still on the way
+  - closed with them unread, and the reset that close sends could reach
+  the client before it read the alert: "connection reset" or a broken
+  pipe where the reason belonged, as Windows' CI saw for application data
+  sent before the client's Finished.
+  - After the alert the server reads and drops what the client sends
+    until it closes, for at most 64 KiB and a second in all.
+
+  Held by `bench/std_tls_exercise.sh`: the scripted client's `mtls-late`
+  sends the rest of its flight 300 ms after a refused Certificate and
+  must still read the alert; a copy that closes at once breaks its send.
+
+- **Client certificates in std/tls, both ends (mutual TLS).** A server
+  could not ask for one, and a client asked for one could only send an
+  empty Certificate.
+  - `TlsIdentity` is a chain and its key (Ed25519 or P-256, as a server's
+    was): `TlsServerConfig` holds one, and `TlsConfig#identity` is what a
+    client presents. A client sends it with its CertificateVerify when the
+    CertificateRequest names the key's scheme, an empty Certificate
+    otherwise; a request without signature_algorithms is refused
+    (missing_extension).
+  - `TlsServerConfig#client_roots` makes the server send a
+    CertificateRequest and check the client's chain for clientAuth
+    (`X509Purpose::Client`) and its CertificateVerify; a client that sends
+    none is refused (certificate_required) unless `client_required` is
+    false. `peer_certificates` moves to `TlsConnection`: the client's
+    chain at a server.
+
+  Held by `bench/std_tls_exercise.sh`: the scripted client's ten mTLS
+  scenarios (P-256 and Ed25519 certificates held; none, a bad signature,
+  no CertificateVerify, a request context, the wrong scheme, another
+  root, serverAuth alone refused) and four against a server that does not
+  require one; Python's `ssl`, OpenSSL's `s_client`, curl and Node
+  presenting certificates; the scripted server's `certreq-ed25519`,
+  checking the client's chain and signature, and `certreq-no-sigalgs`;
+  OpenSSL's `s_server -Verify` taking the std/tls client's P-256 and
+  Ed25519 certificates; and thirteen more broken copies.
+
 - **`X509.verify` checks a chain for a purpose: a server's certificate or
   a client's (`X509Purpose::Client`).** Every chain was held to serverAuth,
   so a client's certificate - for clientAuth alone, as a CA issues one -

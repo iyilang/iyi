@@ -10,19 +10,23 @@
 #   scenarios DIR       every scenario of bench/std_tls_server.py, whose
 #                       port and roots are in DIR, each holding or refused
 #                       for its reason;
-#   get PORT ROOTS HOST [ALPN]
+#   get PORT ROOTS HOST [ALPN|-] [CHAIN KEY]
 #                       GET / over a connection to 127.0.0.1:PORT for HOST,
 #                       its status line printed, or why it was refused;
+#                       with CHAIN and KEY, presented if the server asks;
 #   serve DIR COUNT     a TlsServer on 127.0.0.1, its port written to
 #                       DIR/port, with DIR/chain.pem and DIR/key.pem and
-#                       ALPN h2 and http/1.1: COUNT connections, one at a
-#                       time, each line "held ..." or "refused: why".
+#                       ALPN h2 and http/1.1 - asking for a client's
+#                       certificate under DIR/client-roots.pem when there
+#                       is one, not requiring it when DIR/client-optional
+#                       is there: COUNT connections, one at a time, each
+#                       line "held ..." or "refused: why".
 #                       Bytes are echoed as "echo:..."; a request ending
 #                       in a blank line is answered `HTTP/1.0 200 ok` and
 #                       what was agreed, then close_notify;
 #   config CHAIN KEY    TlsServerConfig.from_pem's answer.
 
-import std/tls::{TlsClient, TlsConfig, TlsError, TlsKeySchedule, TlsRecordCipher, TlsServer, TlsServerConfig}
+import std/tls::{TlsClient, TlsConfig, TlsError, TlsIdentity, TlsKeySchedule, TlsRecordCipher, TlsServer, TlsServerConfig}
 import std/x509::{Certificate}
 import std/socket::{IyiSocket, SocketError}
 import std/file::{File}
@@ -63,7 +67,7 @@ end
 SCENARIOS = [
   {"ok", true, ""}, {"rsa", true, ""}, {"p384", true, ""}, {"ed25519", true, ""}, {"aes256", true, "TLS_AES_256_GCM_SHA384"},
   {"chacha", true, "TLS_CHACHA20_POLY1305_SHA256"}, {"ccs", true, ""}, {"fragmented", true, ""},
-  {"certreq", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"keyupdate", true, ""},
+  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"keyupdate", true, ""},
   {"big", true, ""}, {"ticket", true, ""},
   {"bad-finished", false, "Finished does not match the handshake (decrypt_error)"},
   {"bad-cv", false, "CertificateVerify is not its key's signature (decrypt_error)"},
@@ -89,6 +93,7 @@ SCENARIOS = [
   {"zero-share", false, "X25519 share gives no secret"},
   {"compression", false, "a ServerHello with compression"},
   {"sh-extension", false, "extension 65280 in a ServerHello, which was not offered"},
+  {"certreq-no-sigalgs", false, "a CertificateRequest with no signature_algorithms (missing_extension)"},
 ]
 
 CLIENT_HELLO           = "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001"
@@ -122,6 +127,8 @@ if args.size > 0 && args[0] == "scenarios"
   config = TlsConfig.new
   config.roots = Certificate.from_pem(File.read(args[1] + "/roots.pem")).or_panic
   config.alpn = ["h2", "http/1.1"]
+  # Presented where a request names ed25519, and only there.
+  config.identity = TlsIdentity.from_pem(File.read(args[1] + "/client.pem"), File.read(args[1] + "/client.key")).or_panic
   held = 0
   refused = 0
   SCENARIOS.each do |s|
@@ -153,7 +160,8 @@ end
 if args.size > 0 && args[0] == "get"
   config = TlsConfig.new
   config.roots = Certificate.from_pem(File.read(args[2])).or_panic
-  config.alpn = [args[4]] if args.size > 4
+  config.alpn = [args[4]] if args.size > 4 && args[4] != "-"
+  config.identity = TlsIdentity.from_pem(File.read(args[5]), File.read(args[6])).or_panic if args.size > 6
   socket = IyiSocket.connect("127.0.0.1", args[1].to_i)
   unless socket.is_a?(IyiSocket)
     puts "no connection"
@@ -182,7 +190,8 @@ end
 
 # What one connection to the server mode says it agreed, for a reply.
 def agreed(conn : TlsServer) : String
-  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite}"
+  peer = conn.peer_certificates.empty? ? "-" : conn.peer_certificates[0].subject_name
+  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer}"
 end
 
 def serve_one(conn : TlsServer) : String
@@ -205,6 +214,10 @@ end
 if args.size > 0 && args[0] == "serve"
   config = TlsServerConfig.from_pem(File.read(args[1] + "/chain.pem"), File.read(args[1] + "/key.pem")).or_panic
   config.alpn = ["h2", "http/1.1"]
+  if File.file?(args[1] + "/client-roots.pem")
+    config.client_roots = Certificate.from_pem(File.read(args[1] + "/client-roots.pem")).or_panic
+    config.client_required = !File.file?(args[1] + "/client-optional")
+  end
   listener = IyiSocket.listen("127.0.0.1", 0)
   File.write(args[1] + "/port", listener.local_port.to_s)
   args[2].to_i.times do

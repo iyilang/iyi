@@ -3,8 +3,10 @@ bench/std_tls_exercise.sh.
 
     python3 bench/std_tls_server.py WORKDIR
 
-Writes WORKDIR/roots.pem (the root its certificates chain to) and
-WORKDIR/port, then answers connections one after another until killed.
+Writes WORKDIR/roots.pem (the root its certificates chain to),
+WORKDIR/client.pem and client.key (an Ed25519 certificate and key for the
+client to present when asked) and WORKDIR/port, then answers connections
+one after another until killed.
 The scenario is the first label of the name the client sends by SNI:
 `ok.tls.test` is a correct handshake followed by an echo, `bad-finished`
 sends a Finished that does not match, and so on - SCENARIOS below lists
@@ -38,7 +40,8 @@ SCENARIOS = {
     "chacha": "TLS_CHACHA20_POLY1305_SHA256",
     "ccs": "a ChangeCipherSpec before the encrypted flight",
     "fragmented": "each message in its own record, one split across two",
-    "certreq": "a CertificateRequest, answered by an empty Certificate",
+    "certreq": "a CertificateRequest naming ecdsa_secp256r1_sha256 alone, answered by an empty Certificate",
+    "certreq-ed25519": "a CertificateRequest naming ed25519, answered by the client's certificate and CertificateVerify",
     "alpn": "ALPN answered with http/1.1",
     "hrr-cookie": "a HelloRetryRequest with a cookie, then the handshake",
     "keyupdate": "a KeyUpdate asking for one back, before the echo",
@@ -68,6 +71,7 @@ SCENARIOS = {
     "zero-share": "an X25519 share of small order",
     "compression": "a ServerHello with a compression method",
     "sh-extension": "an extension in the ServerHello nobody offered",
+    "certreq-no-sigalgs": "a CertificateRequest without signature_algorithms",
 }
 
 NOW = dt.datetime.now(dt.timezone.utc)
@@ -104,6 +108,8 @@ class Pki:
         self.expired = issue("leaf", self.keys["p256"], self.inter.subject, self.inter_key, False, ["*.tls.test"],
                              start=NOW - 30 * DAY, end=NOW - DAY)
         self.untrusted = issue("leaf", self.keys["p256"], other.subject, other_key, False, ["*.tls.test"])
+        self.client_key = ed25519.Ed25519PrivateKey.generate()
+        self.client = issue("client", self.client_key, self.inter.subject, self.inter_key, False)
 
 
 def der(cert):
@@ -293,6 +299,10 @@ class Conn:
         messages = [message(8, struct.pack(">H", len(ee_ext)) + ee_ext)]
         if s == "certreq":
             messages.append(message(13, b"\x00" + struct.pack(">H", 8) + ext(13, struct.pack(">H", 2) + b"\x04\x03")))
+        if s == "certreq-ed25519":
+            messages.append(message(13, b"\x00" + struct.pack(">H", 10) + ext(13, struct.pack(">H", 4) + b"\x04\x03\x08\x07")))
+        if s == "certreq-no-sigalgs":
+            messages.append(message(13, b"\x00" + struct.pack(">H", 4) + ext(0xff02, b"")))
         kind = {"rsa": "rsa", "cv-pkcs1": "rsa", "p384": "p384", "cv-wrong-curve": "p384", "ed25519": "ed25519",
                 "bad-cv-ed25519": "ed25519"}.get(s, "p256")
         leaf = {"wrong-host": self.pki.wrong_host, "expired": self.pki.expired, "untrusted": self.pki.untrusted}.get(s, self.pki.leaves[kind])
@@ -346,7 +356,7 @@ class Conn:
         else:
             self.sock.sendall(writer.seal(22, flight, corrupt=(s == "bad-record-mac")))
         if s in ("bad-finished", "bad-cv", "cv-pkcs1", "cv-wrong-curve", "unsolicited-ext", "alpn-unoffered",
-                 "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty"):
+                 "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs"):
             return
 
         master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))
@@ -355,27 +365,55 @@ class Conn:
         # The client's flight: its ChangeCipherSpec, then under c_hs.
         expected_client = transcript
         answered = False
+        verified = False
+        # Alerts go under the server's application keys: its own Finished
+        # switched them (section 7.3), and the client reads so.
+        alert = lambda code: self.sock.sendall(Cipher(schedule, s_ap).seal(21, bytes([2, code])))
         while True:
             header, body = self.record()
             if header[0] == 20:
                 continue
             type_, content = reader.open(header, body)
             assert type_ == 22
+            if content[0] == 11 and s == "certreq-ed25519":
+                # The identity's chain, its one certificate with no
+                # extensions, under the request's empty context.
+                own = der(self.pki.client)
+                assert content == message(11, b"\x00" + (len(own) + 5).to_bytes(3, "big") + len(own).to_bytes(3, "big") + own + b"\x00\x00"), \
+                    "the client's Certificate is not its identity's"
+                expected_client += content
+                answered = True
+                continue
             if content[0] == 11:
                 assert s == "certreq" and content[4:] == b"\x00\x00\x00\x00", "unexpected client Certificate"
                 expected_client += content
                 answered = True
                 continue
+            if content[0] == 15:
+                assert s == "certreq-ed25519" and answered and not verified, "unexpected client CertificateVerify"
+                scheme, size = struct.unpack(">HH", content[4:8])
+                assert scheme == 0x0807 and size == len(content) - 8, "a client CertificateVerify not under ed25519"
+                signed = b" " * 64 + b"TLS 1.3, client CertificateVerify\x00" + schedule.digest(expected_client)
+                try:
+                    self.pki.client_key.public_key().verify(content[8:], signed)
+                except Exception:
+                    alert(51)
+                    return
+                expected_client += content
+                verified = True
+                continue
             assert content[0] == 20
             # A CertificateRequest must be answered by a Certificate, if an
-            # empty one (RFC 8446 section 4.4.2): certificate_required.
-            # Alerts go under the server's application keys: its own
-            # Finished switched them (section 7.3), and the client reads so.
-            if s == "certreq" and not answered:
-                self.sock.sendall(Cipher(schedule, s_ap).seal(21, bytes([2, 116])))
+            # empty one (RFC 8446 section 4.4.2): certificate_required; a
+            # certificate sent must be followed by its CertificateVerify.
+            if s in ("certreq", "certreq-ed25519") and not answered:
+                alert(116)
+                return
+            if s == "certreq-ed25519" and not verified:
+                alert(10)
                 return
             if content[4:] != schedule.finished(c_hs, expected_client):
-                self.sock.sendall(Cipher(schedule, s_ap).seal(21, bytes([2, 51])))
+                alert(51)
                 return
             break
         writer = Cipher(schedule, s_ap)
@@ -410,6 +448,11 @@ def main():
     pki = Pki()
     with open(os.path.join(work, "roots.pem"), "wb") as f:
         f.write(pki.root.public_bytes(serialization.Encoding.PEM))
+    with open(os.path.join(work, "client.pem"), "wb") as f:
+        f.write(pki.client.public_bytes(serialization.Encoding.PEM))
+    with open(os.path.join(work, "client.key"), "wb") as f:
+        f.write(pki.client_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                             serialization.NoEncryption()))
     server = socket.socket()
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))

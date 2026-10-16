@@ -34,29 +34,34 @@
 # std/ecdsa's, std/rsa's and std/curve25519's. PKCS #1 v1.5 is taken in a
 # certificate's own signature and never in CertificateVerify, as the RFC
 # says. The server's Finished is checked before anything is sent under the
-# application keys. There is no way to turn any of this off. Not here: a
-# client certificate (a server that asks is sent an empty Certificate,
-# which RFC 8446 section 4.4.2 allows), resumption and 0-RTT
-# (NewSessionTicket is read and set aside).
+# application keys. There is no way to turn any of this off. A server that
+# asks for a certificate is sent `TlsConfig#identity`'s chain and a
+# CertificateVerify when its request names the identity's scheme, and an
+# empty Certificate otherwise, which section 4.4.2 allows. Not here:
+# resumption and 0-RTT (NewSessionTicket is read and set aside).
 #
 # The server. `TlsServerConfig.from_pem` takes the chain, leaf first, and
 # the leaf's private key: PKCS #8 (an Ed25519 key, RFC 8410 section 7, or
-# a P-256 one) or SEC 1; the key must be the leaf's. CertificateVerify is
-# signed by the key's kind, ed25519 or ecdsa_secp256r1_sha256, with
-# std/curve25519 or std/p256, both constant-time: the key does not leak
-# through how long a handshake takes. RSA is not signed with, as std/rsa
-# only verifies, on std/big's variable-time arithmetic. A client must take
-# the key's scheme: every browser takes P-256; OpenSSL, Python, curl, Node
-# and Go take both. The client's suite order chooses the suite; the
-# server's ALPN order chooses the protocol, and a client that offers
-# protocols and none of the server's is refused
-# (no_application_protocol, RFC 7301). A ClientHello without an X25519
-# share, where X25519 is among its groups, is asked again
-# (HelloRetryRequest, no cookie). Early data is refused: its records are
-# passed over, up to sixteen of the largest, as section 4.2.10 says. No
-# NewSessionTicket is sent and no client certificate asked for. A
-# handshake that fails sends the client the alert its `TlsError` names -
-# in the clear before the server's keys, under them after.
+# a P-256 one) or SEC 1; the key must be the leaf's (a `TlsIdentity`, which
+# a client presents the same way). CertificateVerify is signed by the
+# key's kind, ed25519 or ecdsa_secp256r1_sha256, with std/curve25519 or
+# std/p256, both constant-time: the key does not leak through how long a
+# handshake takes. RSA is not signed with, as std/rsa only verifies, on
+# std/big's variable-time arithmetic. A client must take the key's scheme:
+# every browser takes P-256; OpenSSL, Python, curl, Node and Go take both.
+# The client's suite order chooses the suite; the server's ALPN order
+# chooses the protocol, and a client that offers protocols and none of the
+# server's is refused (no_application_protocol, RFC 7301). A ClientHello
+# without an X25519 share, where X25519 is among its groups, is asked
+# again (HelloRetryRequest, no cookie). Early data is refused: its records
+# are passed over, up to sixteen of the largest, as section 4.2.10 says.
+# No NewSessionTicket is sent. With `client_roots` the server asks for a
+# client's certificate, checks its chain for clientAuth and its
+# CertificateVerify, and refuses a client that sends none
+# (certificate_required) unless `client_required` is false;
+# `peer_certificates` is the chain. A handshake that fails sends the
+# client the alert its `TlsError` names - in the clear before the
+# server's keys, under them after.
 #
 # A record is at most 2^14 bytes of content, as section 5.1 holds both
 # sides to. KeyUpdate is answered. `read` answers "" once the peer's
@@ -75,7 +80,7 @@
 module std/tls
 
 import std/socket::{IyiSocket, SocketError}
-import std/x509::{Certificate, X509, X509Error}
+import std/x509::{Certificate, X509, X509Error, X509Purpose}
 import std/system_roots::{SystemRoots}
 import std/rsa::{RsaPublicKey, RsaHash}
 import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
@@ -118,6 +123,9 @@ pub class TlsConfig
   property alpn : Array(String) = [] of String
   # The time certificates are checked at; now when nil.
   property now : Time? = nil
+  # The certificate and key sent to a server that asks for one (mutual
+  # TLS), when the request names its scheme; none sent when nil.
+  property identity : TlsIdentity? = nil
 
   def initialize
   end
@@ -303,6 +311,9 @@ pub abstract class TlsConnection
   # The protocol chosen by ALPN, if one was.
   getter alpn_protocol : String? = nil
   getter cipher_suite : String = ""
+  # The chain the peer's certificate was checked through, leaf first: the
+  # server's, for a client; the client's, for a server that asked for one.
+  getter peer_certificates : Array(Certificate) = [] of Certificate
   @socket : IyiSocket
   # The other end, for a sentence: "the server" or "the client"; and where
   # a failed read or write was going: the host, or "the client".
@@ -456,6 +467,36 @@ pub abstract class TlsConnection
     error
   end
 
+  # CertificateVerify (section 4.4.3) from *side* ("server" or "client"):
+  # the leaf's key signed 64 spaces, that side's context string, a zero and
+  # the transcript's hash.
+  private def certificate_verify(message : Array(UInt8), leaf : Certificate, side : String) : TlsError?
+    reader = TlsReader.new(message[4, message.size - 4])
+    scheme = reader.u16
+    signature = reader.bytes(reader.u16)
+    return TlsError.new("a CertificateVerify cut short (decode_error)") if reader.short? || !reader.done?
+    signed = Array(UInt8).new(64, 0x20_u8) + TlsBytes.of("TLS 1.3, #{side} CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
+    key = leaf.public_key
+    ok = case scheme
+         when 0x0403, 0x0503, 0x0603
+           curve = scheme == 0x0403 ? EcdsaCurve::P256 : (scheme == 0x0503 ? EcdsaCurve::P384 : EcdsaCurve::P521)
+           hash = scheme == 0x0403 ? EcdsaHash::SHA256 : (scheme == 0x0503 ? EcdsaHash::SHA384 : EcdsaHash::SHA512)
+           return TlsError.new("CertificateVerify scheme 0x#{scheme.to_s(16)} for a key that is not on its curve (illegal_parameter)") unless key.is_a?(EcdsaPublicKey) && key.curve == curve
+           key.verify(hash, signed, signature)
+         when 0x0804, 0x0805, 0x0806
+           return TlsError.new("CertificateVerify scheme 0x#{scheme.to_s(16)} for a key that is not RSA (illegal_parameter)") unless key.is_a?(RsaPublicKey)
+           hash = scheme == 0x0804 ? RsaHash::SHA256 : (scheme == 0x0805 ? RsaHash::SHA384 : RsaHash::SHA512)
+           key.verify_pss(hash, signed, signature)
+         when 0x0807
+           return TlsError.new("CertificateVerify scheme 0x807 for a key that is not Ed25519 (illegal_parameter)") unless key.is_a?(Ed25519PublicKey)
+           key.verify(signed, signature)
+         else
+           return TlsError.new("CertificateVerify under scheme 0x#{scheme.to_s(16)}, which TLS 1.3 does not allow there or was not offered (illegal_parameter)")
+         end
+    return TlsError.new("#{@peer}'s CertificateVerify is not its key's signature (decrypt_error)") unless ok
+    nil
+  end
+
   # --- Records (section 5) ---
 
   # The next handshake message, whole: from plaintext records before the
@@ -595,8 +636,6 @@ end
 
 # A connection to a server, its handshake done.
 pub class TlsClient < TlsConnection
-  # The chain the server's certificate was checked through, leaf first.
-  getter peer_certificates : Array(Certificate) = [] of Certificate
   @host : String
   @config : TlsConfig
 
@@ -689,15 +728,33 @@ pub class TlsClient < TlsConnection
     server_application = @schedule.derive_secret(master, "s ap traffic", @transcript)
 
     # The client's flight: a ChangeCipherSpec for middleboxes (appendix
-    # D.4), an empty Certificate if one was asked for, and Finished.
+    # D.4); if a certificate was asked for, the identity's with its
+    # CertificateVerify when the request takes its scheme, an empty
+    # Certificate otherwise (section 4.4.2 allows it); and Finished.
     sent = send_plain(TlsRecords::CHANGE_CIPHER_SPEC, [1_u8], first: false)
     return sent if sent
     @writer = TlsRecordCipher.new(@suite, @schedule, client_secret)
     if (context = @certificate_request)
-      empty = TlsBytes.message(11, [context.size.to_u8] + context + [0_u8, 0_u8, 0_u8])
-      sent = send_protected(TlsRecords::HANDSHAKE, empty)
-      return sent if sent
-      @transcript = @transcript + empty
+      identity = @config.identity
+      if identity && @requested_schemes.includes?(identity.scheme)
+        entries = [] of UInt8
+        identity.chain.each { |der| entries = entries + TlsBytes.u24(der.size) + der + [0_u8, 0_u8] }
+        presented = TlsBytes.message(11, [context.size.to_u8] + context + TlsBytes.u24(entries.size) + entries)
+        sent = send_protected(TlsRecords::HANDSHAKE, presented)
+        return sent if sent
+        @transcript = @transcript + presented
+        signed = Array(UInt8).new(64, 0x20_u8) + TlsBytes.of("TLS 1.3, client CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
+        signature = identity.sign(signed)
+        verify = TlsBytes.message(15, TlsBytes.u16(identity.scheme) + TlsBytes.u16(signature.size) + signature)
+        sent = send_protected(TlsRecords::HANDSHAKE, verify)
+        return sent if sent
+        @transcript = @transcript + verify
+      else
+        empty = TlsBytes.message(11, [context.size.to_u8] + context + [0_u8, 0_u8, 0_u8])
+        sent = send_protected(TlsRecords::HANDSHAKE, empty)
+        return sent if sent
+        @transcript = @transcript + empty
+      end
     end
     finished = TlsBytes.message(20, @schedule.finished(client_secret, @transcript))
     sent = send_protected(TlsRecords::HANDSHAKE, finished)
@@ -711,6 +768,35 @@ pub class TlsClient < TlsConnection
   end
 
   @certificate_request : Array(UInt8)? = nil
+  @requested_schemes : Array(Int32) = [] of Int32
+
+  # A CertificateRequest (section 4.3.2): its context, kept for the
+  # answer, and the schemes a CertificateVerify may be made under - its
+  # signature_algorithms, which it must carry.
+  private def certificate_request(message : Array(UInt8)) : TlsError?
+    reader = TlsReader.new(message[4, message.size - 4])
+    context = reader.bytes(reader.u8)
+    list = TlsReader.new(reader.bytes(reader.u16))
+    return TlsError.new("a CertificateRequest cut short (decode_error)") if reader.short? || !reader.done?
+    schemes = nil
+    seen = [] of Int32
+    until list.done?
+      type = list.u16
+      data = list.bytes(list.u16)
+      return TlsError.new("a CertificateRequest cut short (decode_error)") if list.short?
+      return TlsError.new("extension #{type} twice in a CertificateRequest (illegal_parameter)") if seen.includes?(type)
+      seen << type
+      if type == 13
+        field = TlsReader.new(data)
+        schemes = TlsBytes.u16_list(field.bytes(field.u16))
+        return TlsError.new("a CertificateRequest's signature_algorithms cut short (decode_error)") if field.short? || !field.done? || schemes.nil?
+      end
+    end
+    return TlsError.new("a CertificateRequest with no signature_algorithms (missing_extension)") unless schemes
+    @certificate_request = context
+    @requested_schemes = schemes
+    nil
+  end
 
   # EncryptedExtensions, CertificateRequest, Certificate, CertificateVerify
   # and Finished, each into the transcript once read.
@@ -725,9 +811,8 @@ pub class TlsClient < TlsConnection
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
     if message[0] == 13_u8
-      body = message[4, message.size - 4]
-      return TlsError.new("a CertificateRequest cut short (decode_error)") if body.empty? || body.size < 1 + body[0].to_i32
-      @certificate_request = body[1, body[0].to_i32]
+      problem = certificate_request(message)
+      return problem if problem
       @transcript = @transcript + message
       message = handshake_message(plain: false)
       return message if message.is_a?(TlsError)
@@ -740,7 +825,7 @@ pub class TlsClient < TlsConnection
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
     return TlsError.new("#{TlsBytes.handshake_name(message[0])} where CertificateVerify belongs (unexpected_message)") unless message[0] == 15_u8
-    problem = certificate_verify(message, chain[0])
+    problem = certificate_verify(message, chain[0], "server")
     return problem if problem
     @transcript = @transcript + message
 
@@ -894,50 +979,18 @@ pub class TlsClient < TlsConnection
     @peer_certificates = verified
     chain
   end
-
-  # CertificateVerify (section 4.4.3): the leaf's key signed 64 spaces, the
-  # context string, a zero and the transcript's hash.
-  private def certificate_verify(message : Array(UInt8), leaf : Certificate) : TlsError?
-    reader = TlsReader.new(message[4, message.size - 4])
-    scheme = reader.u16
-    signature = reader.bytes(reader.u16)
-    return TlsError.new("a CertificateVerify cut short (decode_error)") if reader.short? || !reader.done?
-    signed = Array(UInt8).new(64, 0x20_u8) + TlsBytes.of("TLS 1.3, server CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
-    key = leaf.public_key
-    ok = case scheme
-         when 0x0403, 0x0503, 0x0603
-           curve = scheme == 0x0403 ? EcdsaCurve::P256 : (scheme == 0x0503 ? EcdsaCurve::P384 : EcdsaCurve::P521)
-           hash = scheme == 0x0403 ? EcdsaHash::SHA256 : (scheme == 0x0503 ? EcdsaHash::SHA384 : EcdsaHash::SHA512)
-           return TlsError.new("CertificateVerify scheme 0x#{scheme.to_s(16)} for a key that is not on its curve (illegal_parameter)") unless key.is_a?(EcdsaPublicKey) && key.curve == curve
-           key.verify(hash, signed, signature)
-         when 0x0804, 0x0805, 0x0806
-           return TlsError.new("CertificateVerify scheme 0x#{scheme.to_s(16)} for a key that is not RSA (illegal_parameter)") unless key.is_a?(RsaPublicKey)
-           hash = scheme == 0x0804 ? RsaHash::SHA256 : (scheme == 0x0805 ? RsaHash::SHA384 : RsaHash::SHA512)
-           key.verify_pss(hash, signed, signature)
-         when 0x0807
-           return TlsError.new("CertificateVerify scheme 0x807 for a key that is not Ed25519 (illegal_parameter)") unless key.is_a?(Ed25519PublicKey)
-           key.verify(signed, signature)
-         else
-           return TlsError.new("CertificateVerify under scheme 0x#{scheme.to_s(16)}, which TLS 1.3 does not allow there or was not offered (illegal_parameter)")
-         end
-    return TlsError.new("the server's CertificateVerify is not its key's signature (decrypt_error)") unless ok
-    nil
-  end
 end
 
-# What a server presents: its certificate chain, leaf first, and the key
-# that signs for it - Ed25519, or ECDSA on P-256 (std/p256), both in
-# constant time; and the protocols it speaks by ALPN.
-pub class TlsServerConfig
+# A certificate chain, leaf first, and the key that signs for it -
+# Ed25519, or ECDSA on P-256 (std/p256), both in constant time: what a
+# server presents, and what a client presents when a server asks.
+pub class TlsIdentity
   # The chain as sent, leaf first, each certificate's DER.
   getter chain : Array(Array(UInt8))
   getter leaf : Certificate
   # The scheme CertificateVerify is signed under, by the key's kind:
   # ed25519 (0x0807) or ecdsa_secp256r1_sha256 (0x0403).
   getter scheme : Int32
-  # Protocols this server speaks by ALPN (RFC 7301), most wanted first; a
-  # client that offers some and none of these is refused. None when empty.
-  property alpn : Array(String) = [] of String
   @seed : Array(UInt8)?
   @p256 : P256PrivateKey?
 
@@ -951,8 +1004,8 @@ pub class TlsServerConfig
   # leaf's private key in *private_key*: a PRIVATE KEY block (PKCS #8, an
   # Ed25519 key as RFC 8410 section 7 writes it or a P-256 one as RFC 5915
   # does) or an EC PRIVATE KEY block (SEC 1) - or why they are not a
-  # server's.
-  def self.from_pem(certificates : String, private_key : String) : TlsServerConfig | TlsError
+  # certificate and key.
+  def self.from_pem(certificates : String, private_key : String) : TlsIdentity | TlsError
     chain = X509.pem(certificates, "CERTIFICATE")
     return TlsError.new("the certificates: #{chain.message}") if chain.is_a?(X509Error)
     pkcs8 = X509.pem(private_key, "PRIVATE KEY")
@@ -984,19 +1037,19 @@ pub class TlsServerConfig
 
   # *chain*'s certificates, leaf first, and the 32-byte Ed25519 *seed*
   # that is the leaf's private key.
-  def self.from_der(chain : Array(Array(UInt8)), seed : Array(UInt8)) : TlsServerConfig | TlsError
+  def self.from_der(chain : Array(Array(UInt8)), seed : Array(UInt8)) : TlsIdentity | TlsError
     return TlsError.new("the private key: an Ed25519 seed is 32 bytes, not #{seed.size}") unless seed.size == 32
     leaf = leaf_of(chain)
     return leaf if leaf.is_a?(TlsError)
     key = leaf.public_key
     return TlsError.new("the certificate's key is not Ed25519, as the private key is") unless key.is_a?(Ed25519PublicKey)
     return TlsError.new("the private key is not the certificate's") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes
-    TlsServerConfig.new(chain, leaf, ED25519, seed.dup, nil)
+    TlsIdentity.new(chain, leaf, ED25519, seed.dup, nil)
   end
 
   # *chain*'s certificates, leaf first, and the P-256 *key* that is the
   # leaf's.
-  def self.from_der(chain : Array(Array(UInt8)), key : P256PrivateKey) : TlsServerConfig | TlsError
+  def self.from_der(chain : Array(Array(UInt8)), key : P256PrivateKey) : TlsIdentity | TlsError
     leaf = leaf_of(chain)
     return leaf if leaf.is_a?(TlsError)
     public = leaf.public_key
@@ -1004,7 +1057,7 @@ pub class TlsServerConfig
       return TlsError.new("the certificate's key is not P-256, as the private key is")
     end
     return TlsError.new("the private key is not the certificate's") unless public.x == key.public_key.x && public.y == key.public_key.y
-    TlsServerConfig.new(chain, leaf, P256, nil, key)
+    TlsIdentity.new(chain, leaf, P256, nil, key)
   end
 
   private def self.leaf_of(chain : Array(Array(UInt8))) : Certificate | TlsError
@@ -1034,6 +1087,63 @@ pub class TlsServerConfig
   # A scheme by the name RFC 8446 gives it.
   def self.scheme_name(scheme : Int32) : String
     scheme == P256 ? "ecdsa_secp256r1_sha256" : "ed25519"
+  end
+end
+
+# What a server presents and asks: its identity, the protocols it speaks
+# by ALPN, and - for mutual TLS - the roots a client's certificate must
+# chain to.
+pub class TlsServerConfig
+  getter identity : TlsIdentity
+  # Protocols this server speaks by ALPN (RFC 7301), most wanted first; a
+  # client that offers some and none of these is refused. None when empty.
+  property alpn : Array(String) = [] of String
+  # When set, the server asks for a client's certificate (a
+  # CertificateRequest) and checks it as std/x509 checks a client's
+  # (clientAuth) against these roots, then its CertificateVerify; a client
+  # that sends none is refused (certificate_required) while
+  # `client_required`. Not asked when nil.
+  property client_roots : Array(Certificate)? = nil
+  property client_required : Bool = true
+  # The time a client's certificate is checked at; now when nil.
+  property now : Time? = nil
+
+  def initialize(@identity : TlsIdentity)
+  end
+
+  # `TlsIdentity.from_pem`'s identity, as a server's.
+  def self.from_pem(certificates : String, private_key : String) : TlsServerConfig | TlsError
+    identity = TlsIdentity.from_pem(certificates, private_key)
+    return identity if identity.is_a?(TlsError)
+    TlsServerConfig.new(identity)
+  end
+
+  def self.from_der(chain : Array(Array(UInt8)), seed : Array(UInt8)) : TlsServerConfig | TlsError
+    identity = TlsIdentity.from_der(chain, seed)
+    return identity if identity.is_a?(TlsError)
+    TlsServerConfig.new(identity)
+  end
+
+  def self.from_der(chain : Array(Array(UInt8)), key : P256PrivateKey) : TlsServerConfig | TlsError
+    identity = TlsIdentity.from_der(chain, key)
+    return identity if identity.is_a?(TlsError)
+    TlsServerConfig.new(identity)
+  end
+
+  def chain : Array(Array(UInt8))
+    @identity.chain
+  end
+
+  def leaf : Certificate
+    @identity.leaf
+  end
+
+  def scheme : Int32
+    @identity.scheme
+  end
+
+  def sign(content : Array(UInt8)) : Array(UInt8)
+    @identity.sign(content)
   end
 end
 
@@ -1144,19 +1254,40 @@ pub class TlsServer < TlsConnection
 
   # The alert the error names (its last parenthesised word), sent before
   # the socket closes: under the keys this side writes with, or in the
-  # clear before there are any.
+  # clear before there are any. What the client goes on sending is read
+  # and dropped first, until it closes, for at most `LINGER_BYTES` and
+  # `LINGER_MS` in all: a close with its flight unread is a reset, which
+  # can take the alert from the client's buffer before it is read - a
+  # client refused for its certificate would read "reset", not why.
   protected def fail(error : TlsError) : TlsError
     code = TlsBytes.alert_code(error.message)
     if code && !@closed && !@socket.closed?
       content = [2_u8, code]
-      if @writer
-        send_protected(TlsRecords::ALERT, content)
-      else
-        send_plain(TlsRecords::ALERT, content, first: false)
-      end
+      sent = if @writer
+               send_protected(TlsRecords::ALERT, content)
+             else
+               send_plain(TlsRecords::ALERT, content, first: false)
+             end
+      linger unless sent
     end
     abort
     error
+  end
+
+  LINGER_BYTES = 65536
+  LINGER_MS    =  1000
+
+  private def linger : Nil
+    until_ns = Time.monotonic_nanoseconds.to_i64 + LINGER_MS.to_i64 * 1000000_i64
+    left = LINGER_BYTES
+    while left > 0
+      wait = (until_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
+      break if wait <= 0
+      @socket.read_timeout_ms = wait.to_i32
+      got = @socket.read(left < 16384 ? left : 16384)
+      break unless got.is_a?(String) && !got.empty?
+      left = left - got.bytesize
+    end
   end
 
   # --- The handshake (section 4), the server's half ---
@@ -1231,13 +1362,18 @@ pub class TlsServer < TlsConnection
     # as few records as hold them.
     flight = encrypted_extensions
     @transcript = @transcript + flight
+    request = [] of UInt8
+    if @config.client_roots
+      request = certificate_request
+      @transcript = @transcript + request
+    end
     certificate = certificate_message
     @transcript = @transcript + certificate
     verify = certificate_verify
     @transcript = @transcript + verify
     finished = TlsBytes.message(20, @schedule.finished(server_secret, @transcript))
     @transcript = @transcript + finished
-    sent = send_flight(flight + certificate + verify + finished)
+    sent = send_flight(flight + request + certificate + verify + finished)
     return sent if sent
 
     master = @schedule.master_secret(handshake_secret)
@@ -1249,10 +1385,17 @@ pub class TlsServer < TlsConnection
     @writer = TlsRecordCipher.new(@suite, @schedule, server_application)
     @write_secret = server_application
 
-    # The client's Finished, under its handshake keys; it was asked for no
-    # certificate, so a Certificate is out of place.
+    # The client's Certificate and CertificateVerify when one was asked for,
+    # then its Finished, under its handshake keys; asked for none, a
+    # Certificate is out of place.
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
+    if roots = @config.client_roots
+      problem = client_certificate(message, roots)
+      return problem if problem
+      message = handshake_message(plain: false)
+      return message if message.is_a?(TlsError)
+    end
     return TlsError.new("#{TlsBytes.handshake_name(message[0])} where the client's Finished belongs (unexpected_message)") unless message[0] == 20_u8
     expected = @schedule.finished(client_secret, @transcript)
     unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
@@ -1377,7 +1520,7 @@ pub class TlsServer < TlsConnection
     return TlsError.new("the client offers no cipher suite this server has (handshake_failure)") unless suites.any? { |s| SUITES.includes?(s) }
     return TlsError.new("a ClientHello with no signature_algorithms (missing_extension)") unless schemes
     unless schemes.includes?(@config.scheme)
-      return TlsError.new("the client does not take #{TlsServerConfig.scheme_name(@config.scheme)} signatures, the only kind this server's key makes (handshake_failure)")
+      return TlsError.new("the client does not take #{TlsIdentity.scheme_name(@config.scheme)} signatures, the only kind this server's key makes (handshake_failure)")
     end
     return TlsError.new("a ClientHello with no supported_groups (missing_extension)") unless groups
     return TlsError.new("a ClientHello with no key_share (missing_extension)") unless shares
@@ -1403,6 +1546,51 @@ pub class TlsServer < TlsConnection
       extensions = extensions + TlsBytes.extension(51, [0_u8, 0x1d_u8])
     end
     TlsBytes.message(2, body + TlsBytes.u16(extensions.size) + extensions)
+  end
+
+  # CertificateRequest (section 4.3.2): an empty context, and the schemes
+  # this side checks a CertificateVerify under, as signature_algorithms.
+  private def certificate_request : Array(UInt8)
+    schemes = [] of UInt8
+    TlsClient::SIGNATURE_SCHEMES.each { |scheme| schemes = schemes + TlsBytes.u16(scheme) }
+    extensions = TlsBytes.extension(13, TlsBytes.u16(schemes.size) + schemes)
+    TlsBytes.message(13, [0_u8] + TlsBytes.u16(extensions.size) + extensions)
+  end
+
+  # The client's Certificate (section 4.4.2), checked as std/x509 checks a
+  # client's against *roots*, then its CertificateVerify; none sent is
+  # refused while `client_required`.
+  private def client_certificate(message : Array(UInt8), roots : Array(Certificate)) : TlsError?
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where the client's Certificate belongs (unexpected_message)") unless message[0] == 11_u8
+    reader = TlsReader.new(message[4, message.size - 4])
+    context = reader.bytes(reader.u8)
+    list = TlsReader.new(reader.bytes(reader.u24))
+    return TlsError.new("a client Certificate cut short (decode_error)") if reader.short? || !reader.done?
+    return TlsError.new("a client Certificate whose request context is not the server's (illegal_parameter)") unless context.empty?
+    chain = [] of Certificate
+    until list.done?
+      der = list.bytes(list.u24)
+      list.bytes(list.u16)
+      return TlsError.new("a client Certificate cut short (decode_error)") if list.short?
+      certificate = Certificate.parse(der)
+      return TlsError.new("the client's certificate #{chain.size}: #{certificate.message} (bad_certificate)") if certificate.is_a?(X509Error)
+      chain << certificate
+    end
+    @transcript = @transcript + message
+    if chain.empty?
+      return TlsError.new("the client sent no certificate (certificate_required)") if @config.client_required
+      return nil
+    end
+    verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, nil, @config.now || Time.utc, X509Purpose::Client)
+    return TlsError.new("the client's certificate is not trusted: #{verified.message} (bad_certificate)") if verified.is_a?(X509Error)
+    verify = handshake_message(plain: false)
+    return verify if verify.is_a?(TlsError)
+    return TlsError.new("#{TlsBytes.handshake_name(verify[0])} where the client's CertificateVerify belongs (unexpected_message)") unless verify[0] == 15_u8
+    problem = certificate_verify(verify, chain[0], "client")
+    return problem if problem
+    @transcript = @transcript + verify
+    @peer_certificates = verified
+    nil
   end
 
   private def encrypted_extensions : Array(UInt8)

@@ -50,7 +50,12 @@ SCENARIOS = {
     "alpn": ("ALPN http/1.1", ("held", "alpn=http/1.1")),
     "alpn-order": ("ALPN http/1.1 then h2: the server's order", ("held", "alpn=h2")),
     "no-sni": ("no server_name", ("held", "name=-")),
-    "hrr": ("a P-256 share alone: a HelloRetryRequest for X25519", ("held", "TLS_AES_128_GCM_SHA256")),
+    "hrr": ("a P-384 share alone: a HelloRetryRequest for X25519", ("held", "TLS_AES_128_GCM_SHA256")),
+    "p256-share": ("secp256r1 alone, a P-256 share", ("held", "TLS_AES_128_GCM_SHA256")),
+    "both-shares": ("P-256 and X25519 shares: X25519 taken", ("held", "TLS_AES_128_GCM_SHA256")),
+    "hrr-p256": ("P-384 and secp256r1, a P-384 share: a HelloRetryRequest for secp256r1", ("held", "TLS_AES_128_GCM_SHA256")),
+    "bad-p256-share": ("a P-256 share off the curve", ("alert", 47)),
+    "short-p256-share": ("a P-256 share of 64 bytes", ("alert", 47)),
     "ccs": ("a ChangeCipherSpec before the client's Finished", ("held", "name=localhost")),
     "early-skip": ("early data the server passes over", ("held", "name=localhost")),
     "early-after-hrr": ("early data before the second ClientHello", ("held", "name=localhost")),
@@ -73,7 +78,7 @@ SCENARIOS = {
                    {"ed25519": ("alert", 40), "p256": ("held", "name=localhost")}),
     "no-p256": ("signature_algorithms without ecdsa_secp256r1_sha256",
                 {"ed25519": ("held", "name=localhost"), "p256": ("alert", 40)}),
-    "no-x25519": ("groups without X25519", ("alert", 40)),
+    "no-group": ("groups without X25519 or secp256r1", ("alert", 40)),
     "tls12": ("supported_versions TLS 1.2 alone", ("alert", 70)),
     "no-versions": ("no supported_versions: TLS 1.2", ("alert", 70)),
     "no-suite": ("TLS_AES_128_CCM_SHA256 alone", ("alert", 40)),
@@ -227,6 +232,11 @@ def run(name, port, root):
 def scenario(c, name):
     key = x25519.X25519PrivateKey.generate()
     share = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    ec_key = ec.generate_private_key(ec.SECP256R1())
+    ec_share = ec_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    p384_share = b"\x04" + os.urandom(96)
+    hrr_names = ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session", "hrr-p256")
+    p256_names = ("p256-share", "hrr-p256")
     session = os.urandom(32)
     kw = {}
     if name == "aes256": kw["suites"] = (0x1302,)
@@ -235,9 +245,18 @@ def scenario(c, name):
     if name == "alpn": kw["alpn"] = ["http/1.1"]
     if name == "alpn-order": kw["alpn"] = ["http/1.1", "h2"]
     if name == "no-sni": kw["sni"] = None
-    if name in ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session"):
+    if name in hrr_names:
+        kw["groups"] = (0x18, 0x17) if name == "hrr-p256" else (0x18, 0x1d)
+        kw["shares"] = {0x18: p384_share}
+    if name == "p256-share":
+        kw["groups"] = (0x17,)
+        kw["shares"] = {0x17: ec_share}
+    if name == "both-shares":
         kw["groups"] = (0x17, 0x1d)
-        kw["shares"] = {0x17: b"\x04" + os.urandom(64)}
+        kw["shares"] = {0x17: ec_share, 0x1d: share}
+    if name in ("bad-p256-share", "short-p256-share"):
+        kw["groups"] = (0x17,)
+        kw["shares"] = {0x17: ec_share[:-1] + bytes([ec_share[-1] ^ 1]) if name == "bad-p256-share" else ec_share[:64]}
     if name in ("early-skip", "early-after-hrr"): kw["early"] = True
     if name == "dup-ext": kw["order"] = ["sni", "groups", "sigalgs", "groups", "versions", "shares"]
     if name == "psk-not-last":
@@ -253,9 +272,9 @@ def scenario(c, name):
     if name == "no-sigalgs": kw["sigalgs"] = None
     if name == "no-ed25519": kw["sigalgs"] = (0x0403, 0x0804)
     if name == "no-p256": kw["sigalgs"] = (0x0807, 0x0804)
-    if name == "no-x25519":
-        kw["groups"] = (0x17,)
-        kw["shares"] = {0x17: b"\x04" + os.urandom(64)}
+    if name == "no-group":
+        kw["groups"] = (0x18,)
+        kw["shares"] = {0x18: p384_share}
     if name == "tls12": kw["versions"] = (0x0303,)
     if name == "no-versions": kw["versions"] = None
     if name == "no-suite": kw["suites"] = (0x1304,)
@@ -285,8 +304,9 @@ def scenario(c, name):
     assert exts.get(43) == b"\x03\x04", "no TLS 1.3 in the ServerHello"
     schedule = Schedule(suite)
     if random == HELLO_RETRY:
-        assert exts.get(51) == b"\x00\x1d", f"a HelloRetryRequest asking for {exts.get(51)!r}"
-        assert name in ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session"), "a HelloRetryRequest nobody needed"
+        wanted = b"\x00\x17" if name == "hrr-p256" else b"\x00\x1d"
+        assert exts.get(51) == wanted, f"a HelloRetryRequest asking for {exts.get(51)!r}"
+        assert name in hrr_names, "a HelloRetryRequest nobody needed"
         digest = schedule.digest(ch)
         transcript = bytes([254, 0, 0, len(digest)]) + digest + sh
         if name == "early-after-hrr":
@@ -296,7 +316,9 @@ def scenario(c, name):
         c.sock.sendall(plain(20, b"\x01"))
         again = dict(kw)
         again.pop("early", None)
-        if name != "hrr-no-share":
+        if name == "hrr-p256":
+            again["shares"] = {0x17: ec_share}
+        elif name != "hrr-no-share":
             again["shares"] = {0x1d: share}
         if name == "hrr-other-session":
             session = os.urandom(32)
@@ -308,9 +330,13 @@ def scenario(c, name):
         assert random != HELLO_RETRY, "a second HelloRetryRequest"
     assert suite in SUITE_NAMES, f"suite {suite:#x}"
     group, length = struct.unpack(">HH", exts[51][:4])
-    assert group == 0x1d and length == 32, "the server's share is not X25519"
     transcript += sh
-    shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(exts[51][4:]))
+    if name in p256_names:
+        assert group == 0x17 and length == 65, "the server's share is not secp256r1"
+        shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), exts[51][4:]))
+    else:
+        assert group == 0x1d and length == 32, "the server's share is not X25519"
+        shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(exts[51][4:]))
     early_secret = schedule.extract(bytes(schedule.size), bytes(schedule.size))
     hs = schedule.extract(schedule.derive(early_secret, b"derived", b""), shared)
     c_hs = schedule.derive(hs, b"c hs traffic", transcript)

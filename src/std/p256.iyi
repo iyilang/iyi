@@ -1,5 +1,6 @@
-# ECDSA signatures made on P-256 (FIPS 186-5, SEC 1, RFC 6979), written in
-# iyi, in constant time.
+# ECDSA signatures made on P-256 (FIPS 186-5, SEC 1, RFC 6979), and its
+# Diffie-Hellman (ECDH, SEC 1 section 3.3.1), written in iyi, in constant
+# time.
 #
 #     import std/p256::{P256PrivateKey}
 #     import std/ecdsa::{EcdsaHash, EcdsaError}
@@ -7,6 +8,8 @@
 #     key = P256PrivateKey.from_pkcs8(der).or_panic     # or from_sec1, from_bytes
 #     signature = key.sign(EcdsaHash::SHA256, message)  # DER Ecdsa-Sig-Value
 #     key.public_key.verify(EcdsaHash::SHA256, message, signature)  # true
+#     key.public_point                    # 0x04, x, y: what a key share sends
+#     key.shared_secret(peer_point).or_panic  # x of [d]Q, 32 bytes
 #
 # std/ecdsa checks signatures on std/big's arithmetic, which takes as long
 # as its numbers make it: fine for public values, and a leak for a private
@@ -32,6 +35,12 @@
 # RFC loops - a candidate k of n or more, an r or s of zero, each about
 # 2^-32 likely - the loop shows that it ran again, and nothing else.
 #
+# ECDH takes the peer's point uncompressed (0x04, x, y) and refuses one
+# that is not on the curve, or whose coordinates are not below p, before
+# any arithmetic with the private key: an invalid-curve point would draw d
+# out a residue at a time. The answer is x of [d]Q, as TLS 1.3's secp256r1
+# shares (RFC 8446 section 7.4.2) and every other user of SEC 1 take it.
+#
 # A private key is 32 bytes, d in [1, n - 1]: `from_bytes`, or read from
 # what OpenSSL and others write - PKCS #8's OneAsymmetricKey (RFC 5958,
 # RFC 5480's id-ecPublicKey with prime256v1) or SEC 1's ECPrivateKey (RFC
@@ -51,9 +60,11 @@ import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
 # A P-256 private key, and the public key that goes with it.
 pub struct P256PrivateKey
   getter public_key : EcdsaPublicKey
+  # The public key's point, uncompressed: 0x04, then x and y, 32 bytes each.
+  getter public_point : Array(UInt8)
   @d : P256Num
 
-  def initialize(@d : P256Num, @public_key : EcdsaPublicKey)
+  def initialize(@d : P256Num, @public_key : EcdsaPublicKey, @public_point : Array(UInt8))
   end
 
   # The key whose d is *bytes*, 32 big-endian, or why it is not one: not
@@ -68,7 +79,15 @@ pub struct P256PrivateKey
     point = P256Point.base_mult(d).encoded
     public = EcdsaPublicKey.from_point(EcdsaCurve::P256, point)
     return public if public.is_a?(EcdsaError)
-    P256PrivateKey.new(d, public)
+    P256PrivateKey.new(d, public, point)
+  end
+
+  # ECDH: x of [d]Q for the peer's point Q, 32 bytes big-endian - or why
+  # *peer* is not a point of P-256 (checked before d is used).
+  def shared_secret(peer : Array(UInt8)) : Array(UInt8) | EcdsaError
+    q = P256Point.decode(peer)
+    return q if q.is_a?(EcdsaError)
+    P256Point.mult(q, @d).affine_x.to_bytes
   end
 
   # A PKCS #8 OneAsymmetricKey (RFC 5958) holding a P-256 key: version 0 or
@@ -560,14 +579,18 @@ struct P256Point
     P256Point.new(x3, y3, z3)
   end
 
-  # [k]G for a secret k below n: 64 windows of four bits from the top,
-  # each four doublings and one addition of a table entry read whole.
+  # [k]G for a secret k below n.
   def self.base_mult(k : P256Num) : P256Point
+    mult(P256Point.base, k)
+  end
+
+  # [k]P for a secret k below n: 64 windows of four bits from the top,
+  # each four doublings and one addition of a table entry read whole.
+  def self.mult(point : P256Point, k : P256Num) : P256Point
     table = Array(P256Point).new(16, P256Point.identity)
-    g = P256Point.base
     i = 1
     while i < 16
-      table[i] = table[i - 1] + g
+      table[i] = table[i - 1] + point
       i = i + 1
     end
     acc = P256Point.identity
@@ -597,6 +620,26 @@ struct P256Point
       i = i + 1
     end
     P256Point.new(x, y, z)
+  end
+
+  # The point *bytes* encodes uncompressed (0x04, x, y), checked: each
+  # coordinate below p, and y^2 = x^3 - 3x + b. Public input, so the checks
+  # may branch.
+  def self.decode(bytes : Array(UInt8)) : P256Point | EcdsaError
+    unless bytes.size == 65 && bytes[0] == 4_u8
+      return EcdsaError.new("a P-256 point is 65 bytes, 0x04 and then x and y, not #{bytes.size} bytes starting #{bytes.empty? ? "-" : bytes[0].to_s}")
+    end
+    x = P256Num.from_bytes(bytes, 1)
+    y = P256Num.from_bytes(bytes, 33)
+    unless P256Num.below?(x, P256Num.p) && P256Num.below?(y, P256Num.p)
+      return EcdsaError.new("a P-256 point with a coordinate of p or more")
+    end
+    f = P256Modulus.field
+    xm = f.to_mont(x)
+    ym = f.to_mont(y)
+    right = f.add(f.sub(f.mul(f.square(xm), xm), f.add(f.add(xm, xm), xm)), P256Point.b)
+    return EcdsaError.new("a point that is not on P-256") unless f.square(ym).to_bytes == right.to_bytes
+    new(xm, ym, f.one)
   end
 
   # x / Z, out of Montgomery form.

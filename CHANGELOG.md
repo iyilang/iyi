@@ -4,6 +4,24 @@
 
 ### Added
 
+- **std/tls's server takes a secp256r1 (P-256) key share beside X25519.**
+  A client without X25519 - Windows' Schannel, as CI showed - was refused
+  (handshake_failure).
+  - std/p256 does ECDH (SEC 1 section 3.3.1): `P256PrivateKey#shared_secret`
+    answers x of [d]Q in constant time, after checking the peer's point -
+    65 bytes uncompressed, coordinates below p, on the curve - before d is
+    used; `public_point` is the key's own.
+  - The server takes an X25519 share first, then a secp256r1 one; a
+    HelloRetryRequest asks for X25519, or for secp256r1 where X25519 is not
+    among the client's groups. The client still offers X25519 alone.
+
+  Held by `bench/std_p256_exercise.sh`: RFC 5903's vector, 500 shared
+  secrets equal to Python's, the points Python refuses refused - x = p
+  with the y of (0, y) among them - and four broken copies; and by
+  `bench/std_tls_exercise.sh`: five scripted-client scenarios, OpenSSL's
+  `s_client` with P-256 alone and asked again for secp256r1, three broken
+  copies, and curl on Schannel asked again.
+
 - **std/http's server reads what a refused client goes on sending before
   it closes.** A refusal - a malformed head's 400, a 431, a broken body's
   400, an HTTP/2 GOAWAY for a connection error - closed with the client's

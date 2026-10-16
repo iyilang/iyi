@@ -468,12 +468,14 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
       served_check "OpenSSL, $kind, AES-256-GCM" "name=localhost alpn=- TLS_AES_256_GCM_SHA384" sclient -tls1_3 -ciphersuites TLS_AES_256_GCM_SHA384
       served_check "OpenSSL, $kind, ChaCha20-Poly1305" "name=localhost alpn=- TLS_CHACHA20_POLY1305_SHA256" sclient -tls1_3 -ciphersuites TLS_CHACHA20_POLY1305_SHA256
       served_check "OpenSSL, $kind, ALPN" "name=localhost alpn=h2" sclient -tls1_3 -alpn h2,http/1.1
-      hrr() { sclient -tls1_3 -groups P-256:X25519 -msg | grep -c '<<< TLS 1.3, Handshake \[length [0-9a-f]*\], ServerHello'; }
-      served_check "OpenSSL, $kind, a P-256 share first: a HelloRetryRequest, then a ServerHello" "2" hrr
+      hrr() { sclient -tls1_3 -groups "$1" -msg | grep -c '<<< TLS 1.3, Handshake \[length [0-9a-f]*\], ServerHello'; }
+      served_check "OpenSSL, $kind, a P-384 share first: a HelloRetryRequest for X25519, then a ServerHello" "2" hrr P-384:X25519
+      served_check "OpenSSL, $kind, P-384 and P-256, a P-384 share: a HelloRetryRequest for secp256r1" "2" hrr P-384:P-256
+      served_check "OpenSSL, $kind, secp256r1 alone" "name=localhost alpn=-" sclient -tls1_3 -groups P-256
       # Refusals by the alert's number, which every OpenSSL prints the same;
       # its name is worded differently from one version to the next.
       served_check "OpenSSL, $kind, TLS 1.2 alone" "SSL alert number 70" sclient -tls1_2
-      served_check "OpenSSL, $kind, groups without X25519" "SSL alert number 40" sclient -tls1_3 -groups P-256
+      served_check "OpenSSL, $kind, groups without X25519 or secp256r1" "SSL alert number 40" sclient -tls1_3 -groups P-384
       if [ "$kind" = p256 ]; then
         served_check "OpenSSL, p256, ecdsa_secp256r1_sha256 alone" "name=localhost alpn=-" sclient -tls1_3 -sigalgs ECDSA+SHA256
         served_check "OpenSSL, p256, no ecdsa_secp256r1_sha256 among its signature algorithms" "SSL alert number 40" sclient -tls1_3 -sigalgs ed25519:RSA-PSS+SHA256
@@ -487,6 +489,7 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
     fi
     # curl on LibreSSL (macOS's) or schannel (Windows') takes no Ed25519
     # certificate, and is refused it, rightly; on OpenSSL it takes both.
+    # Schannel (Windows') offers no X25519: it is answered in secp256r1.
     if command -v curl >/dev/null 2>&1 && { [ "$kind" = p256 ] || curl --version | head -1 | grep -q 'OpenSSL/'; }; then
       local before=$served_ok
       served_check "curl, $kind" "name=localhost alpn=http/1.1" curl -sS --http1.1 --cacert "$SRV/roots.pem" \
@@ -768,7 +771,9 @@ prove_broken "a HelloRetryRequest's transcript restarted as something else" "hrr
   '      @transcript = [254_u8, 0_u8, 0_u8, first.size.to_u8] + first + server' '      @transcript = first + server' scenarios
 prove_broken "a CertificateRequest not answered" "certreq: the echo came back as" \
   '    if (context = @certificate_request)' '    if (context = nil)' scenarios
-prove_broken "the identity sent whatever schemes the request names" "certreq: the echo came back as" \
+# The scripted server hangs up on the unwanted certificate while the
+# client is still writing: the echo is wrong, or (Windows) the write fails.
+prove_broken "the identity sent whatever schemes the request names" "certreq: " \
   '      if identity && @requested_schemes.includes?(identity.scheme)' '      if identity' scenarios
 prove_broken "a request naming the identity's scheme answered with no certificate" "certreq-ed25519: the echo came back as" \
   '      if identity && @requested_schemes.includes?(identity.scheme)' '      if false && identity' scenarios
@@ -840,6 +845,12 @@ prove_broken "an alert in the clear after the server's keys" "FAIL bad-finished 
   '      sent = if @writer' '      sent = if false' server
 prove_broken "a private key that is not the certificate's taken" "FAIL another key" \
   '    return TlsError.new("the private key is not the certificate'"'"'s") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes' '' config
+prove_broken "a secp256r1 share taken before an X25519 one" "FAIL both-shares " \
+  '    @x25519 ? TlsServer::GROUP_X25519 : (@p256 ? TlsServer::GROUP_SECP256R1 : 0)' '    @p256 ? TlsServer::GROUP_SECP256R1 : (@x25519 ? TlsServer::GROUP_X25519 : 0)' server
+prove_broken "a HelloRetryRequest for secp256r1 whatever the groups" "FAIL hrr " \
+  '      group = offer.groups.includes?(GROUP_X25519) ? GROUP_X25519 : GROUP_SECP256R1' '      group = GROUP_SECP256R1' server
+prove_broken "the server's secp256r1 share not its key's" "FAIL p256-share " \
+  '      public = ephemeral.public_point' '      public = p256_ephemeral.public_point' server
 prove_broken "a CertificateRequest sent to a client the server was not told to ask" "FAIL ok " \
   '    if @config.client_roots
       request = certificate_request' '    if true

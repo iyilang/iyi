@@ -89,7 +89,7 @@ fi
 echo
 echo "== every p256 section reported"
 for phrase in "== RFC 6979's P-256 key and signatures (appendix A.2.5)" "== the keys at the ends of the range" \
-  "== every hash, checked by std/ecdsa" "== what is not a private key"; do
+  "== every hash, checked by std/ecdsa" "== what is not a private key" "== Diffie-Hellman (ECDH)"; do
   if ! grep -qF "$phrase" "$WORK/p256-plain.out" 2>/dev/null; then
     echo "  missing: $phrase"
     status=1
@@ -144,6 +144,55 @@ PY
   else
     echo "  FAIL: $(grep -c '^<' "$WORK/oracle.diff") of 1500 differ from Python's:"
     head -n 6 "$WORK/oracle.diff" | sed 's/^/    /'
+    status=1
+  fi
+fi
+
+echo
+echo "== 500 shared secrets against Python's cryptography"
+# d at random and from the edges against a peer's key Python makes; then
+# peer points that are not P-256's - off the curve, an x of p and of
+# 2^256 - 1, the identity's zeros - which must be refused, as Python
+# refuses them.
+if [ "$HAVE_ORACLE" -ne 1 ]; then
+  echo "  no python cryptography here, so the shared secrets go uncompared"
+else
+  "$PY" - "$WORK/ecdh.txt" "$WORK/ecdh-want.txt" <<'PY'
+import os, random, sys
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+n = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
+p = 2**256 - 2**224 + 2**192 + 2**96 - 1
+rng = random.Random(int.from_bytes(os.urandom(8), "big"))
+edges = [1, 2, n - 1, n - 2, 2**255, 2**128]
+cases, want = [], []
+for i in range(500):
+    d = edges[i] if i < len(edges) else rng.randrange(1, n)
+    own = ec.derive_private_key(d, ec.SECP256R1())
+    peer = ec.generate_private_key(ec.SECP256R1())
+    point = peer.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    cases.append(f"{d:064x} {point.hex()}")
+    want.append(own.exchange(ec.ECDH(), peer.public_key()).hex())
+good = ec.generate_private_key(ec.SECP256R1()).public_key().public_numbers()
+bad = [(good.x, (good.y + 1) % p), (p, good.y), (2**256 - 1, good.y), (0, 0)]
+for x, y in bad:
+    point = b"\x04" + x.to_bytes(32, "big") + y.to_bytes(32, "big")
+    try:
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), point)
+        verdict = "taken"
+    except ValueError:
+        verdict = "refused"
+    cases.append(f"{rng.randrange(1, n):064x} {point.hex()}")
+    want.append(verdict)
+open(sys.argv[1], "w", newline="\n").write("\n".join(cases) + "\n")
+open(sys.argv[2], "w", newline="\n").write("\n".join(want) + "\n")
+PY
+  "$WORK/p256-release" ecdh "$WORK/ecdh.txt" >"$WORK/ecdh-got.txt" 2>&1
+  if diff "$WORK/ecdh-want.txt" "$WORK/ecdh-got.txt" >"$WORK/ecdh.diff"; then
+    echo "  500 shared secrets as Python's, 6 keys from the edges; 4 points Python refuses refused"
+  else
+    echo "  FAIL: $(grep -c '^<' "$WORK/ecdh.diff") of 504 differ from Python's:"
+    head -n 6 "$WORK/ecdh.diff" | sed 's/^/    /'
     status=1
   fi
 fi
@@ -278,6 +327,14 @@ prove_broken "a d of n or more taken" "d = 2^256 - 1: accepted" \
   '    unless P256Num.below?(d, P256Num.n) && !d.zero?' '    unless !d.zero?'
 prove_broken "SEC 1's public key unchecked" "an ECPrivateKey carrying another public key: accepted" \
   '        return EcdsaError.new("the private key: its public key is not the private key'"'"'s") unless carried.is_a?(EcdsaPublicKey) && carried.x == key.public_key.x && carried.y == key.public_key.y' ''
+prove_broken "a peer point off the curve taken" "a point off the curve: accepted" \
+  '    return EcdsaError.new("a point that is not on P-256") unless f.square(ym).to_bytes == right.to_bytes' ''
+prove_broken "a peer coordinate of p or more taken" "a point whose x is p: accepted" \
+  '    unless P256Num.below?(x, P256Num.p) && P256Num.below?(y, P256Num.p)' '    if false'
+prove_broken "[d]G answered for [d]Q" "RFC 5903's girx, from the initiator" \
+  '    P256Point.mult(q, @d).affine_x.to_bytes' '    P256Point.base_mult(@d).affine_x.to_bytes'
+prove_broken "the table built from G whatever the point" "RFC 5903's girx, from the initiator" \
+  '      table[i] = table[i - 1] + point' '      table[i] = table[i - 1] + P256Point.base'
 prove_broken "SEC 1's curve unchecked" "an ECPrivateKey naming P-384: accepted" \
   '        return EcdsaError.new("the private key names a curve that is not prime256v1") unless oid == P256Point::CURVE_OID' ''
 

@@ -225,6 +225,10 @@ lib LibLLVM
   fun get_next_use = LLVMGetNextUse(u : UseRef) : UseRef
   fun get_user = LLVMGetUser(u : UseRef) : ValueRef
   fun position_builder_before = LLVMPositionBuilderBefore(builder : BuilderRef, instr : ValueRef)
+  fun get_basic_block_terminator = LLVMGetBasicBlockTerminator(bb : BasicBlockRef) : ValueRef
+  fun get_normal_dest = LLVMGetNormalDest(invoke_inst : ValueRef) : BasicBlockRef
+  fun get_num_successors = LLVMGetNumSuccessors(term : ValueRef) : UInt
+  fun get_successor = LLVMGetSuccessor(term : ValueRef, i : UInt) : BasicBlockRef
   fun get_operand = LLVMGetOperand(val : ValueRef, index : UInt) : ValueRef
   fun set_instr_param_alignment = LLVMSetInstrParamAlignment(instr : ValueRef, idx : AttributeIndex, align : UInt)
   fun add_call_site_attribute = LLVMAddCallSiteAttribute(c : ValueRef, idx : AttributeIndex, a : AttributeRef)

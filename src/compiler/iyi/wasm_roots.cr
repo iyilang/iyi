@@ -65,6 +65,15 @@ module Iyi::WasmRoots
     end
     return unless any_call
 
+    predecessors = Hash(LibLLVM::BasicBlockRef, Int32).new(0)
+    blocks.each do |b|
+      terminator = LibLLVM.get_basic_block_terminator(b)
+      next if terminator.null?
+      LibLLVM.get_num_successors(terminator).times do |i|
+        predecessors[LibLLVM.get_successor(terminator, i)] += 1
+      end
+    end
+
     spilled = [] of LibLLVM::ValueRef
     LibLLVM.get_count_params(fn).times do |i|
       param = LibLLVM.get_param(fn, i)
@@ -74,11 +83,12 @@ module Iyi::WasmRoots
       inst = LibLLVM.get_first_instruction(b)
       until inst.null?
         if carries_address?(inst) && LibLLVM.is_a_alloca_inst(inst).null? && live_across_call?(inst, index, place[inst][1], place, calls)
-          # An invoke ends its block, so its result has no "right after";
-          # iyi raises no exceptions and emits none, and one that came would
-          # be a root this pass cannot keep: said, not passed over.
-          raise "BUG: wasm32 roots: an invoke's result outlives a call, and no store can follow an invoke" unless LibLLVM.is_a_invoke_inst(inst).null?
-          spilled << inst
+          # An invoke (the other library's code raises; iyi's does not)
+          # ends its block: its result is stored where its normal edge
+          # lands, when that block has no other way in. With another, the
+          # result dominates no block, so only that block's phis read it,
+          # and no call comes between: the phis are this pass's to keep.
+          spilled << inst if LibLLVM.is_a_invoke_inst(inst).null? || predecessors[LibLLVM.get_normal_dest(inst)]? == 1
         end
         inst = LibLLVM.get_next_instruction(inst)
       end
@@ -102,14 +112,19 @@ module Iyi::WasmRoots
   end
 
   # Where *value*'s store goes: after the entry's allocas for a parameter,
-  # after the block's phis (and landing pad) for a phi, right after the
-  # instruction for any other.
+  # after the block's phis (and landing pad) for a phi, at the start of the
+  # normal edge's block for an invoke, right after the instruction for any
+  # other.
   private def self.store_point(value : LibLLVM::ValueRef, after_allocas : LibLLVM::ValueRef) : LibLLVM::ValueRef
     return after_allocas unless LibLLVM.is_a_argument(value).null?
-    if LibLLVM.is_a_phi_node(value).null?
+    if !LibLLVM.is_a_invoke_inst(value).null?
+      block = LibLLVM.get_normal_dest(value)
+    elsif LibLLVM.is_a_phi_node(value).null?
       return LibLLVM.get_next_instruction(value)
+    else
+      block = LibLLVM.get_instruction_parent(value)
     end
-    inst = LibLLVM.get_first_instruction(LibLLVM.get_instruction_parent(value))
+    inst = LibLLVM.get_first_instruction(block)
     while !LibLLVM.is_a_phi_node(inst).null? || !LibLLVM.is_a_landing_pad_inst(inst).null?
       inst = LibLLVM.get_next_instruction(inst)
     end

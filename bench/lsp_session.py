@@ -890,16 +890,20 @@ def kill_workers(c):
                 found.append(pid)
         except OSError:
             continue
+    # Killed a generation at a time, and the killed listed again: a worker
+    # that started a process after the list was taken and before its kill
+    # left that one running with its pipes (Windows CI: the proxy waited
+    # 180 s with no worker, a `ping` orphaned to the end of the job).
     doomed, pending = [], list(found)
     while pending:
-        pid = pending.pop()
-        doomed.append(pid)
-        pending.extend(children(pid))
-    for pid in reversed(doomed):
-        try:
-            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
-        except OSError:
-            pass
+        for pid in pending:
+            try:
+                os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+            except OSError:
+                pass
+        doomed.extend(pending)
+        time.sleep(0.2)
+        pending = [k for pid in doomed for k in children(pid) if k not in doomed]
     deadline = time.monotonic() + 10
     while any(pid in children(c.proc.pid) for pid in found) and time.monotonic() < deadline:
         time.sleep(0.1)

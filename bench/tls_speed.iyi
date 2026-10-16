@@ -1,7 +1,8 @@
 module tls_speed
 
 # std/tls's throughput against its own cipher's, for bench/tls_speed.sh:
-#   tls_speed cipher                      the AEADs' rates, one way each
+#   tls_speed [cipher]                    the AEADs' rates, one way each:
+#                                         what a run with nothing asked does
 #   tls_speed pull <port> <roots> <path>  GET <path>, read to the end
 #   tls_speed push <port> <chain> <key> <ready> <MiB>
 #                                         serve one client <MiB> of writes
@@ -23,7 +24,7 @@ def rate(bytes : Int64, since : Float64) : String
 end
 
 args = Program.args
-mode = args[0]? || ""
+mode = args[0]? || "cipher"
 if mode == "cipher"
   record = "x" * 16385
   nonce = Array(UInt8).new(12, 2_u8)

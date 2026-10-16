@@ -901,6 +901,12 @@ jobs:
           python3 -m pip install -q --break-system-packages cryptography
       - name: The module exercises of this shard
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
+      # std/tls's reads and writes against OpenSSL, each set against its
+      # cipher's own rate on the same machine (bench/tls_speed.sh): a share
+      # needs no shard but one.
+      - name: std/tls's throughput, against its cipher's
+        if: matrix.shard == 4
+        run: bash bench/tls_speed.sh
 
   targets:
     needs: build

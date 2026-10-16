@@ -4,6 +4,27 @@
 
 ### Added
 
+- **std/p256 makes ECDSA signatures on P-256 in constant time:
+  `P256PrivateKey`.** std/ecdsa only checks signatures, on std/big's
+  variable-time arithmetic, so nothing in std could sign with the key
+  browsers want a server's certificate on without leaking it through
+  timing.
+  - Four-limb Montgomery arithmetic modulo p and n with masked final
+    subtractions; the complete projective formulas of Renes, Costello and
+    Batina; [k]G in 64 four-bit windows, each table entry read whole and
+    kept by masks; inversion by Fermat over the public exponent.
+  - Nonces by RFC 6979 under SHA-256, -384 or -512, so one key and
+    message sign alike; the signature is DER's Ecdsa-Sig-Value.
+  - Keys from 32 bytes, PKCS #8 or SEC 1, with a carried curve or public
+    key checked; d outside [1, n - 1] refused. About 100 µs a signature
+    against OpenSSL's 19 (`--release`, one x86_64 machine).
+
+  Held by `bench/std_p256_exercise.sh`: RFC 6979's own key and
+  signatures; 1,500 keys and signatures equal to Python's cryptography
+  (OpenSSL's deterministic ECDSA) byte for byte, edge keys among them;
+  60 keys as OpenSSL writes them and six refused; 14 broken copies, the
+  arithmetic ones caught by std/ecdsa's own check of the curve.
+
 - **std/http serves HTTPS: `Server.serve(listener, tls: config)`, HTTP/2
   where the client's ALPN chose `h2` and HTTP/1.1 otherwise.** The server
   spoke only in the clear, so an iyi web server needed a proxy in front of

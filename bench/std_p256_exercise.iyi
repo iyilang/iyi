@@ -1,0 +1,128 @@
+# Exercises std/p256: ECDSA signatures made on P-256 in constant time.
+#
+# With no argument: RFC 6979's own P-256 key and its two SHA-256
+# signatures, byte for byte; the keys 1 and n - 1, whose public keys are G
+# and -G; every hash signed and checked by std/ecdsa, and a signature of
+# another message or under another key refused; the private keys that are
+# not one refused. The modes the gate script drives:
+#   oracle FILE   each line `hash d message`, d and the message in hex:
+#                 the public key's x and y and the DER signature, in hex,
+#                 for Python's cryptography to make again;
+#   keys DIR      each file named in DIR/list read as PKCS #8 (`.p8`) or
+#                 SEC 1 (`.sec1`): its public key's x and y, or why not.
+
+import std/p256::{P256PrivateKey}
+import std/ecdsa::{EcdsaHash, EcdsaError, EcdsaPublicKey}
+import std/file::{File}
+
+def check(cond : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless cond
+end
+
+def b(hex : String) : Array(UInt8)
+  p = hex.downcase.to_unsafe
+  Array(UInt8).new(hex.bytesize // 2) do |i|
+    hi = p[i * 2].to_i32
+    lo = p[i * 2 + 1].to_i32
+    hi = hi >= 97 ? hi - 87 : hi - 48
+    lo = lo >= 97 ? lo - 87 : lo - 48
+    (hi * 16 + lo).to_u8
+  end
+end
+
+def hex(bytes : Array(UInt8)) : String
+  String.build { |io| bytes.each { |x| io << "0123456789abcdef"[x.to_i32 >> 4] << "0123456789abcdef"[x.to_i32 & 15] } }
+end
+
+def hash_named(name : String) : EcdsaHash
+  case name
+  when "sha256" then EcdsaHash::SHA256
+  when "sha384" then EcdsaHash::SHA384
+  else               EcdsaHash::SHA512
+  end
+end
+
+def refused(answer : P256PrivateKey | EcdsaError, phrase : String, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}: accepted" unless answer.is_a?(EcdsaError)
+  check answer.message.includes?(phrase), "#{label}: refused with #{answer.message.inspect}, not #{phrase.inspect}"
+end
+
+args = Program.args
+
+if args.size > 0 && args[0] == "oracle"
+  File.read(args[1]).lines.each do |line|
+    parts = line.split(' ')
+    key = P256PrivateKey.from_bytes(b(parts[1])).or_panic
+    message = parts.size > 2 ? b(parts[2]) : [] of UInt8
+    signature = key.sign(hash_named(parts[0]), message)
+    puts "#{key.public_key.x.to_s(16)} #{key.public_key.y.to_s(16)} #{hex(signature)}"
+  end
+  exit 0
+end
+
+if args.size > 0 && args[0] == "keys"
+  File.read(args[1] + "/list").lines.each do |name|
+    text = File.read(args[1] + "/" + name)
+    der = Array(UInt8).new(text.bytesize) { |i| text.to_unsafe[i] }
+    key = name.ends_with?(".p8") ? P256PrivateKey.from_pkcs8(der) : P256PrivateKey.from_sec1(der)
+    if key.is_a?(EcdsaError)
+      puts "#{name} refused: #{key.message}"
+    else
+      puts "#{name} #{key.public_key.x.to_s(16)} #{key.public_key.y.to_s(16)}"
+    end
+  end
+  exit 0
+end
+
+puts "== RFC 6979's P-256 key and signatures (appendix A.2.5)"
+key = P256PrivateKey.from_bytes(b("C9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721")).or_panic
+check key.public_key.x.to_s(16) == "60fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6", "the key's x: #{key.public_key.x.to_s(16)}"
+check key.public_key.y.to_s(16) == "7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299", "the key's y: #{key.public_key.y.to_s(16)}"
+sample = key.sign(EcdsaHash::SHA256, "sample")
+check hex(sample) == "3046022100efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716022100f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8", "the signature of \"sample\" under SHA-256: #{hex(sample)}"
+test = key.sign(EcdsaHash::SHA256, "test")
+check hex(test) == "3045022100f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d383670220019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083", "the signature of \"test\" under SHA-256: #{hex(test)}"
+check key.sign(EcdsaHash::SHA256, "sample") == sample, "one key and one message sign alike"
+puts "  the public key and both signatures, as the RFC has them"
+
+puts "== the keys at the ends of the range"
+one = P256PrivateKey.from_bytes(b("0000000000000000000000000000000000000000000000000000000000000001")).or_panic
+check one.public_key.x.to_s(16) == "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296", "d = 1: G's x"
+check one.public_key.y.to_s(16) == "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5", "d = 1: G's y"
+last = P256PrivateKey.from_bytes(b("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550")).or_panic
+check last.public_key.x.to_s(16) == "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296", "d = n - 1: -G's x"
+check last.public_key.y.to_s(16) == "b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a", "d = n - 1: -G's y, p - G's"
+[one, last].each_with_index do |k, i|
+  signature = k.sign(EcdsaHash::SHA256, "edge #{i}")
+  check k.public_key.verify(EcdsaHash::SHA256, "edge #{i}", signature), "the edge key #{i} signs what std/ecdsa takes"
+end
+puts "  d = 1 is G, d = n - 1 is -G, and both sign"
+
+puts "== every hash, checked by std/ecdsa"
+[EcdsaHash::SHA256, EcdsaHash::SHA384, EcdsaHash::SHA512].each do |hash|
+  20.times do |i|
+    message = "message #{i} " * i
+    signature = key.sign(hash, message)
+    check key.public_key.verify(hash, message, signature), "#{hash}: message #{i} verifies"
+    check !key.public_key.verify(hash, message + ".", signature), "#{hash}: another message refused"
+    check !last.public_key.verify(hash, message, signature), "#{hash}: another key refused"
+  end
+end
+puts "  SHA-256, SHA-384 and SHA-512, 20 messages each: held, and refused for another message or key"
+
+puts "== what is not a private key"
+refused P256PrivateKey.from_bytes(Array(UInt8).new(31, 1_u8)), "is 32 bytes, not 31", "31 bytes"
+# 2^256 - 1 first: past n, d G is still a point (d mod n of them), and
+# only the range check refuses it; n itself is the identity.
+refused P256PrivateKey.from_bytes(Array(UInt8).new(32, 0xff_u8)), "from 1 to n - 1", "d = 2^256 - 1"
+refused P256PrivateKey.from_bytes(Array(UInt8).new(32, 0_u8)), "from 1 to n - 1", "d = 0"
+refused P256PrivateKey.from_bytes(b("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")), "from 1 to n - 1", "d = n"
+refused P256PrivateKey.from_pkcs8([2_u8, 1_u8, 0_u8]), "the private key", "an INTEGER as PKCS #8"
+# RFC 6979's d with G for its public key, and with P-384's curve named.
+SEC1_WRONG_PUBLIC = "306b0201010420c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721a144034200046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"
+SEC1_OTHER_CURVE  = "302e0201010420c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721a00706052b81040022"
+refused P256PrivateKey.from_sec1(b(SEC1_WRONG_PUBLIC)), "its public key is not the private key's", "an ECPrivateKey carrying another public key"
+refused P256PrivateKey.from_sec1(b(SEC1_OTHER_CURVE)), "names a curve that is not prime256v1", "an ECPrivateKey naming P-384"
+puts "  31 bytes, 0, n, 2^256 - 1, an INTEGER for a OneAsymmetricKey, another public key and another curve refused"
+
+puts "\nALL CHECKS PASSED"

@@ -2,7 +2,9 @@
 #
 #   ./bin/iyi run bench/http2_exercise.iyi                  # iyi to iyi
 #   ./bin/iyi run bench/http2_exercise.iyi serve PORTFILE   # a server for others
+#   ./bin/iyi run bench/http2_exercise.iyi serve-tls PORTFILE CHAIN.pem KEY.pem
 #   ./bin/iyi run bench/http2_exercise.iyi fetch BASE [ROOTS.pem]
+#   ./bin/iyi run bench/http2_exercise.iyi tls-get BASE ROOTS.pem [ALPN,...]
 #
 # The first runs an h2c server and a client with prior knowledge in one
 # program: requests and answers of every shape - string, stream and pipe
@@ -10,15 +12,18 @@
 # fields of their own, a redirect, 200 requests on one connection - and
 # what HTTP/2 refuses: an upgrade (HTTP_1_1_REQUIRED), and a body past the
 # server's limit (413). `serve` is the same server for curl, Node and raw
-# frames from bench/std_http_exercise.sh; `fetch` is the client against
-# Node's server, and prints what it read for the gate to compare.
+# frames from bench/std_http_exercise.sh, and `serve-tls` the same over
+# std/tls's server, ALPN offering h2 and http/1.1; `fetch` is the client
+# against Node's server, and prints what it read for the gate to compare;
+# `tls-get` is the client against `serve-tls`, offering *ALPN* (h2 and
+# http/1.1 unless named).
 
 module bench/http2_exercise
 
 import std/http::{HTTP, HTTPClient, Response, Request, Server, HTTPError}
 import std/socket::{IyiSocket, SocketError}
 import std/io
-import std/tls::{TlsConfig}
+import std/tls::{TlsConfig, TlsServerConfig}
 import std/x509::{Certificate}
 import std/file::{File}
 
@@ -115,8 +120,8 @@ def answer(req : Request) : Response
   end
 end
 
-def serve_on(listener : IyiSocket, compress : Bool) : Nil
-  Server.serve(listener, compress: compress) do |req|
+def serve_on(listener : IyiSocket, compress : Bool, tls : TlsServerConfig? = nil) : Nil
+  Server.serve(listener, compress: compress, tls: tls) do |req|
     if req.path == "/quit"
       listener.close
       Response.new(200, "bye")
@@ -133,6 +138,34 @@ if mode == "serve"
   listener = IyiSocket.listen("127.0.0.1", 0)
   File.write(args[1], listener.local_port.to_s)
   serve_on(listener, true)
+  exit 0
+end
+
+if mode == "serve-tls"
+  config = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic
+  config.alpn = ["h2", "http/1.1"]
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1], listener.local_port.to_s)
+  serve_on(listener, true, config)
+  exit 0
+end
+
+if mode == "tls-get"
+  base = args[1]
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  config.alpn = args.size > 3 ? args[3].split(',') : ["h2", "http/1.1"]
+  HTTP.tls_config = config
+  client = HTTPClient.new
+  echo = fetched(client.get(base + "/echo?x=1", {"X-Test" => "iyi"}), "GET over TLS")
+  puts "echo #{echo.status} #{echo.body}"
+  big = fetched(client.get(base + "/big?n=1000000"), "a megabyte over TLS")
+  puts "big #{big.status} #{big.body.bytesize} #{big.body == pattern(1000000)}"
+  sent = pattern(500000)
+  posted = fetched(client.post(base + "/echo", sent), "half a megabyte up over TLS")
+  puts "post #{posted.status} #{posted.body.includes?("length=500000 fnv=#{fnv(sent)}")}"
+  puts "connections #{client.connections_made}"
+  client.close
   exit 0
 end
 

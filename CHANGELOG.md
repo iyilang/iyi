@@ -4,6 +4,27 @@
 
 ### Added
 
+- **std/http serves HTTPS: `Server.serve(listener, tls: config)`, HTTP/2
+  where the client's ALPN chose `h2` and HTTP/1.1 otherwise.** The server
+  spoke only in the clear, so an iyi web server needed a proxy in front of
+  it for TLS.
+  - Each connection's handshake is std/tls's `TlsServer`, held to
+    `timeout_ms` like a request's head; one that fails is closed with its
+    alert and the server goes on. The connection ends with close_notify.
+  - Every answer, 100 Continue and refusal goes through TLS.
+    `Response.upgrade` over TLS is answered 501: its block is handed a bare
+    socket, which would bypass TLS.
+
+  Held by `bench/std_http_exercise.sh` with `bench/http2_exercise.iyi`'s
+  new `serve-tls` and `tls-get` modes, under an Ed25519 certificate: the
+  iyi client over h2 and over http/1.1; curl both ways, gzip, three
+  requests on one connection, an upgrade answered 501, TLS 1.2 refused
+  and the next request served; Python reading an HTTP/1.0 answer to the
+  end with ragged EOFs refused, so close_notify must come; Node's 100 GETs
+  and 20 uploads at once under a 1000-byte window. Three broken copies:
+  the answer written past TLS, the handshake skipped, close_notify left
+  out.
+
 - **std/tls has a server: `TlsServer` and `TlsServerConfig`, TLS 1.3 with
   an Ed25519 certificate.** std/tls was a client only, so an iyi program
   could not take a TLS connection at all.

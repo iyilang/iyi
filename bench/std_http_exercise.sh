@@ -458,6 +458,8 @@ ca_key = ec.generate_private_key(ec.SECP256R1())
 ca = (x509.CertificateBuilder().subject_name(name("http gate root")).issuer_name(name("http gate root"))
       .public_key(ca_key.public_key()).serial_number(1).not_valid_before(now - dt.timedelta(days=1))
       .not_valid_after(now + dt.timedelta(days=2)).add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+      .add_extension(x509.KeyUsage(False, False, False, False, False, True, True, False, False), critical=True)
+      .add_extension(x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False)
       .sign(ca_key, hashes.SHA256()))
 key = ec.generate_private_key(ec.SECP256R1())
 leaf = (x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(ca.subject)
@@ -468,6 +470,19 @@ leaf = (x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(ca
 open(f"{out}/root.pem", "wb").write(ca.public_bytes(serialization.Encoding.PEM))
 open(f"{out}/leaf.pem", "wb").write(leaf.public_bytes(serialization.Encoding.PEM))
 open(f"{out}/leaf.key", "wb").write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+# An Ed25519 leaf for the same name, the one std/tls's server signs with.
+from cryptography.hazmat.primitives.asymmetric import ed25519
+ed_key = ed25519.Ed25519PrivateKey.generate()
+ed = (x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(ca.subject)
+      .public_key(ed_key.public_key()).serial_number(3).not_valid_before(now - dt.timedelta(days=1))
+      .not_valid_after(now + dt.timedelta(days=2))
+      .add_extension(x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False)
+      # Python's ssl verifies strictly: a leaf names its issuer's key.
+      .add_extension(x509.SubjectKeyIdentifier.from_public_key(ed_key.public_key()), critical=False)
+      .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
+      .sign(ca_key, hashes.SHA256()))
+open(f"{out}/ed.pem", "wb").write(ed.public_bytes(serialization.Encoding.PEM) + ca.public_bytes(serialization.Encoding.PEM))
+open(f"{out}/ed.key", "wb").write(ed_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
 PY
   cat > "$WORK/tls_client.iyi" <<'IYI'
 module main
@@ -833,11 +848,13 @@ if [ "$h2_built" -ne 1 ] || [ -z "$NODE" ]; then
   echo "  skipped: no node to be the client"
 else
   cat >"$WORK/h2-client.js" <<'JS'
-const http2 = require("http2"), zlib = require("zlib");
-const port = process.argv[2];
+const http2 = require("http2"), zlib = require("zlib"), fs = require("fs");
+// The port, and the root to trust when the server is std/tls's (https).
+const [port, ca] = process.argv.slice(2);
 const pattern = (n) => { const b = Buffer.alloc(n); for (let i = 0; i < n; i++) b[i] = (i * 31 + 7) & 255; return b; };
 const fnv = (buf) => { let h = 0xcbf29ce484222325n; for (const x of buf) { h ^= BigInt(x); h = (h * 0x100000001b3n) & 0xffffffffffffffffn; } return h.toString(16); };
-const session = http2.connect(`http://127.0.0.1:${port}`, { settings: { initialWindowSize: 1000, headerTableSize: 256 } });
+const session = http2.connect(ca ? `https://localhost:${port}` : `http://127.0.0.1:${port}`,
+  { settings: { initialWindowSize: 1000, headerTableSize: 256 }, ...(ca ? { ca: fs.readFileSync(ca) } : {}) });
 session.on("error", (e) => { console.log("  FAIL: session error " + e.message); process.exit(1); });
 const ask = (headers, body, cancelAfter) => new Promise((resolve, reject) => {
   const req = session.request(headers);
@@ -964,6 +981,94 @@ JS
 fi
 
 echo
+echo "== HTTPS: the server over std/tls (an Ed25519 certificate, ALPN h2 and http/1.1)"
+# `Server.serve(tls:)`: the exercise's server behind TlsServer, asked by
+# the iyi client over h2 and over http/1.1, curl both ways, Node's client
+# (100 GETs and 20 uploads at once under a 1000-byte window), Python
+# reading an HTTP/1.0 answer to the end - which must close with
+# close_notify - an upgrade answered 501, and a TLS 1.2 client refused
+# with the next request still served.
+# https_checks <binary>: every check against that binary's serve-tls;
+# answers the number that failed.
+https_checks() {
+  local bin="$1" failed=0 got want tport tpid
+  rm -f "$WORK/h2tls.port"
+  "$bin" serve-tls "$WORK/h2tls.port" "$WORK/tls/ed.pem" "$WORK/tls/ed.key" >"$WORK/h2tls.log" 2>&1 &
+  tpid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$WORK/h2tls.port" ] && break
+    sleep 0.1
+  done
+  tport="$(cat "$WORK/h2tls.port" 2>/dev/null)"
+  local base="https://localhost:$tport"
+  https_fail() { echo "  FAIL: $1"; failed=$((failed + 1)); }
+  for alpn in h2,http/1.1 http/1.1; do
+    local version="HTTP/2"
+    [ "$alpn" = http/1.1 ] && version="HTTP/1.1"
+    got="$(timeout -k 5 60 "$H2BIN" tls-get "$base" "$WORK/tls/root.pem" "$alpn" 2>&1 | tr '\n' '|')"
+    want="echo 200 GET /echo x=1 $version host=localhost:$tport length=0 fnv=cbf29ce484222325 x=iyi|big 200 1000000 true|post 200 true|connections 1|"
+    [ "$got" = "$want" ] || https_fail "the iyi client offering $alpn: $got"
+  done
+  if command -v curl >/dev/null 2>&1 && curl --version | grep -q 'HTTP2'; then
+    local c=(curl -sS --cacert "$WORK/tls/root.pem" --resolve "localhost:$tport:127.0.0.1")
+    got="$("${c[@]}" -H 'X-Test: curl' -w ' <%{http_version}>' "$base/echo?x=1" 2>&1)"
+    [ "$got" = "GET /echo x=1 HTTP/2 host=localhost:$tport length=0 fnv=cbf29ce484222325 x=curl <2>" ] || https_fail "curl over h2: $got"
+    got="$("${c[@]}" --http1.1 -w ' <%{http_version}>' "$base/echo?x=1" 2>&1)"
+    [ "$got" = "GET /echo x=1 HTTP/1.1 host=localhost:$tport length=0 fnv=cbf29ce484222325 x= <1.1>" ] || https_fail "curl over http/1.1: $got"
+    got="$("${c[@]}" -w '<%{num_connects}>' "$base/echo?a" "$base/echo?b" "$base/echo?c" 2>&1 | grep -o '<[0-9]*>' | tr -d '\n')"
+    [ "$got" = "<1><0><0>" ] || https_fail "three requests took connections '$got'"
+    got="$("${c[@]}" --compressed "$base/text" 2>&1 | head -c 54)"
+    [ "$got" = "hello, compressible world. hello, compressible world. " ] || https_fail "gzip over TLS: '$got'"
+    got="$("${c[@]}" --http1.1 -o /dev/null -w '%{http_code}' "$base/upgrade" 2>&1)"
+    [ "$got" = "501" ] || https_fail "an upgrade over TLS answered '$got'"
+    if "${c[@]}" --tlsv1.2 --tls-max 1.2 -o /dev/null "$base/echo" 2>/dev/null; then
+      https_fail "a TLS 1.2 client was served"
+    fi
+    got="$("${c[@]}" "$base/echo?after=refusal" 2>&1)"
+    case "$got" in "GET /echo after=refusal HTTP/2 "*) ;; *) https_fail "a request after a refused handshake: $got" ;; esac
+  fi
+  if [ -n "$PY" ]; then
+    got="$("$PY" - "$tport" "$WORK/tls/root.pem" <<'PY' 2>&1
+import socket, ssl, sys
+ctx = ssl.create_default_context(cafile=sys.argv[2])
+# suppress_ragged_eofs=False: an end that is not close_notify raises
+# SSLEOFError, where Python's default reads it as an ordinary end.
+raw = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=20)
+with ctx.wrap_socket(raw, server_hostname="localhost", suppress_ragged_eofs=False) as s:
+    s.sendall(b"GET /echo?x=old HTTP/1.0\r\nHost: localhost\r\n\r\n")
+    data = b""
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+print(data.decode().split("\r\n")[0], data.decode().split("\r\n\r\n")[1].split(" host=")[0])
+PY
+)"
+    [ "$got" = "HTTP/1.1 200 OK GET /echo x=old HTTP/1.0" ] || https_fail "Python read to the end of an HTTP/1.0 answer: $got"
+  fi
+  if [ -n "$NODE" ] && [ -s "$WORK/h2-client.js" ]; then
+    got="$(timeout -k 5 120 "$NODE" "$WORK/h2-client.js" "$tport" "$WORK/tls/root.pem" 2>&1)"
+    case "$got" in *FAIL*|"") https_fail "Node's client: $got" ;; esac
+  fi
+  kill "$tpid" 2>/dev/null
+  wait "$tpid" 2>/dev/null
+  return $failed
+}
+if [ "$h2_built" -ne 1 ] || [ ! -s "$WORK/tls/ed.key" ]; then
+  echo "  skipped: no HTTP/2 exercise or no Ed25519 certificate from the https:// section above"
+  https_ready=0
+else
+  https_ready=1
+  if https_checks "$H2BIN"; then
+    echo "  the iyi client over h2 and http/1.1, curl both ways, gzip, three requests on one connection, an upgrade refused 501,"
+    echo "  TLS 1.2 refused and the next request served, Python reading to close_notify, Node's 100 GETs and 20 uploads at once"
+  else
+    status=1
+  fi
+fi
+
+echo
 echo "== the server under load"
 if command -v wrk >/dev/null 2>&1; then
   "$IYI" build --release -o "$WORK/server-release" "$REPO/bench/std_http_server.iyi" >"$WORK/server-release.build.log" 2>&1
@@ -1063,7 +1168,7 @@ mutate "a server that copies the head so far at every read" '      @searched = @
         nil
       end
       return HTTPError.new("#{what} headers past #{limit} bytes", 431) if available > limit'
-mutate "a server that waits on a client partway through a request" 'conn = Conn.new(client, listener, idle)' 'conn = Conn.new(client, listener, nil)'
+mutate "a server that waits on a client partway through a request" 'conn = Conn.new(client, listener, idle, stream)' 'conn = Conn.new(client, listener, nil, stream)'
 mutate "a server that moves the rest of the read to a buffer of its own per request" '  def consume(count : Int32) : Nil
     @start = @start + count' '  def consume(count : Int32) : Nil
     rest = Pointer(UInt8).malloc(@capacity.to_u64)
@@ -1075,9 +1180,9 @@ mutate "a server that moves the rest of the read to a buffer of its own per requ
     @start = @start + count'
 mutate "a client that reads a head for as long as it comes" 'conn.read_head(Server::MAX_HEAD, "response")' 'conn.read_head(2147483647, "response")'
 mutate "a server that never says 100 Continue" '    if head.expects
-      socket = conn.socket' '    if false
-      socket = conn.socket'
-mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms)' '          accepted = client
+      socket = conn.transport' '    if false
+      socket = conn.transport'
+mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls)' '          accepted = client
           g.spawn do
             handle(accepted, handler)
             0
@@ -1276,6 +1381,32 @@ h2_frames_breaks "a frame of any size read" h2_frame_size \
 h2_frames_breaks "HEADERS on a closed stream passed over" h2_stale \
   '          mode = @reset_lately.includes?(id) ? IGNORED_BLOCK : STALE_BLOCK' '          mode = IGNORED_BLOCK' \
   'HEADERS on a closed stream'
+# The HTTPS server broken, the checks above run against it with the good
+# client: each must fail somewhere.
+https_breaks() { # https_breaks <label> <name> <old> <new>
+  local label="$1" name="$2" old="$3" new="$4"
+  if [ "$https_ready" -ne 1 ] || [ -z "$PY" ]; then
+    echo "  $label: skipped, no HTTPS server to break"
+  elif ! h2_patched "$name" "$old" "$new"; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
+    status=1
+  elif https_checks "$WORK/$name.bin" >"$WORK/$name.out" 2>&1; then
+    echo "  $label: the HTTPS checks passed on a broken server"
+    status=1
+  else
+    echo "  $label: caught: $(grep -m1 'FAIL' "$WORK/$name.out" | sed 's/^ *FAIL: //' | cut -c1-120)"
+  fi
+}
+https_breaks "an answer written past TLS" https_clear \
+  '    socket = conn.transport
+    head = HTTP.same_name?(req.method, "HEAD")' '    socket = conn.socket
+    head = HTTP.same_name?(req.method, "HEAD")'
+https_breaks "the TLS handshake skipped" https_plain \
+  '    unless config = tls' '    unless config = nil.as(TlsServerConfig?)'
+https_breaks "no close_notify at the end" https_notify \
+  '    secured.close
+  end' '  end'
 
 echo
 if [ "$status" -eq 0 ]; then

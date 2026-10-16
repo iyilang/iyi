@@ -12,8 +12,9 @@
 # cannot (§4.1.1): a space, a comma, a semicolon, a backslash, a quote.
 #
 # The jar matches a request as §5.4 does - domain, path at a slash, not
-# lapsed - sends the longer paths first, and never sends a `Secure`
-# cookie, since every connection std/http makes is plain http. There is
+# lapsed - sends the longer paths first, and sends a `Secure` cookie over
+# `https://` alone, taking one only from an answer that came over it
+# (RFC 6265bis: an http page cannot overwrite a secure cookie). There is
 # no public-suffix list: a `Domain` of one label is refused, and one like
 # `co.uk` is taken, which a browser would refuse. This module is apart
 # from std/http because it reads the clock: std/time is what knows what
@@ -183,9 +184,10 @@ end
 # own host alone; one with a `Domain` the host is not within is refused,
 # and so is a `Domain` of one label, `com` - there is no public-suffix
 # list here, so a cookie for `co.uk` would be taken, which a browser would
-# refuse. A cookie that has lapsed, or is set lapsed, is gone. `Secure`
-# cookies are kept and never sent, since every connection here is plain
-# http. A jar may be shared by tasks on one thread, not across threads.
+# refuse. A cookie that has lapsed, or is set lapsed, is gone. A `Secure`
+# cookie is taken from an `https://` answer only, and goes back over
+# `https://` only (§5.4 step 1). A jar may be shared by tasks on one
+# thread, not across threads.
 pub class CookieJar
   # Each cookie, the host it was set by (what one without a `Domain` goes
   # back to), and the order it was made in.
@@ -217,6 +219,7 @@ pub class CookieJar
     return unless uri
     host = (uri.hostname || "").downcase
     return if host.bytesize == 0
+    return if cookie.secure && !CookieJar.secure?(uri)
     if domain = cookie.domain
       return unless domain.includes?(".") && CookieJar.domain_match?(host, domain)
     end
@@ -233,10 +236,12 @@ pub class CookieJar
   end
 
   # The cookies a request to *url* carries: domain and path matching,
-  # unexpired, not `Secure`; longer paths first, then older (§5.4, step 2).
+  # unexpired, `Secure` only over `https://`; longer paths first, then
+  # older (§5.4, step 2).
   def cookies_for(url : String) : Array(Cookie)
     uri = URI.parse?(url)
     return [] of Cookie unless uri
+    secure = CookieJar.secure?(uri)
     host = (uri.hostname || "").downcase
     path = uri.path
     path = "/" if path.bytesize == 0
@@ -245,7 +250,7 @@ pub class CookieJar
     found = [] of {Cookie, Int64}
     @kept.each do |entry|
       cookie = entry[0]
-      next if cookie.secure
+      next if cookie.secure && !secure
       if domain = cookie.domain
         next unless CookieJar.domain_match?(host, domain)
       else
@@ -267,6 +272,12 @@ pub class CookieJar
     cookies = cookies_for(url)
     return nil if cookies.empty?
     cookies.map { |cookie| cookie.name + "=" + cookie.value }.join("; ")
+  end
+
+  # Whether *uri* is over a secure protocol: `https://` (and `wss://`).
+  protected def self.secure?(uri : URI) : Bool
+    scheme = (uri.scheme || "").downcase
+    scheme == "https" || scheme == "wss"
   end
 
   # §5.1.3: the host is the domain, or ends with it after a dot, and is

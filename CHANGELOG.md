@@ -4,6 +4,14 @@
 
 ### Added
 
+- **std/cookie sends `Secure` cookies over `https://`.** It never sent
+  one, since std/http had been plain http: a session cookie set over
+  HTTPS did not come back.
+  - A `Secure` cookie is taken from an `https://` answer only and sent
+    over `https://` only (RFC 6265 section 5.4; 6265bis on setting).
+
+  Held by `bench/std_cookie_exercise.sh`, with three broken copies.
+
 - **wasm32: an object held only by a local is a root, plain and
   `--release`.** The collector reads linear memory and a WebAssembly local
   is not in it, so an object held by a value the backend kept in a local

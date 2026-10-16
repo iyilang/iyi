@@ -105,12 +105,19 @@ set.add_header("Set-Cookie", "public=5; Domain=com")
 set.add_header("Set-Cookie", "elsewhere=6; Domain=other.org")
 set.add_header("Set-Cookie", "old=7; Expires=Wed, 21 Oct 2015 07:28:00 GMT")
 jar.update("http://www.example.com/c", set)
-assert_true jar.size == 4, "a jar keeps four of seven: not a one-label domain, another site's, or one set lapsed (#{jar.size})"
-assert_str "deep=3; host=1; wide=2", jar.header_for("http://www.example.com/a/b/x") || "", "the longer path first, then the older; Secure not over http"
+assert_true jar.size == 3, "a jar keeps three of seven: not a one-label domain, another site's, one set lapsed, or a Secure one over http (#{jar.size})"
+assert_str "deep=3; host=1; wide=2", jar.header_for("http://www.example.com/a/b/x") || "", "the longer path first, then the older"
 assert_str "host=1; wide=2", jar.header_for("http://www.example.com/a/") || "", "a path that does not match"
 assert_str "host=1; wide=2", jar.header_for("http://www.example.com/a/bc") || "", "a path matches at a slash, not inside a name"
 assert_str "wide=2", jar.header_for("http://shop.example.com/") || "", "a Domain cookie goes to a subdomain, a host cookie does not"
 assert_true jar.header_for("http://example.org/").nil?, "nothing to another site"
+secure_jar = CookieJar.new
+secure_set = Response.new(200, "")
+secure_set.add_header("Set-Cookie", "safe=4; Secure")
+secure_set.add_header("Set-Cookie", "plain=5")
+secure_jar.update("https://www.example.com/", secure_set)
+assert_str "safe=4; plain=5", secure_jar.header_for("https://www.example.com/") || "", "a Secure cookie from https:// goes back over https://"
+assert_str "plain=5", secure_jar.header_for("http://www.example.com/") || "", "a Secure cookie not over http"
 gone = Response.new(200, "")
 gone.add_header("Set-Cookie", "host=; Max-Age=0")
 jar.update("http://www.example.com/c", gone)

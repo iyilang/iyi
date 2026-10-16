@@ -223,19 +223,23 @@ PY
     status=1
   fi
 }
-prove_broken "a cookie sent to any host under its domain's name" "a jar keeps four of seven" \
+prove_broken "a cookie sent to any host under its domain's name" "a jar keeps three of seven" \
   'return false unless host.ends_with?("." + domain)' ''
 prove_broken "a cookie path matched inside a name" "a path matches at a slash" \
   'cookie.ends_with?("/") || request.to_unsafe[cookie.bytesize] == 47_u8' 'true'
-prove_broken "a Secure cookie sent over http" "Secure not over http" \
-  'next if cookie.secure' ''
-prove_broken "a one-label Domain kept" "a jar keeps four of seven" \
+prove_broken "a Secure cookie sent over http" "a Secure cookie not over http" \
+  'next if cookie.secure && !secure' ''
+prove_broken "a Secure cookie taken from an http answer" "a jar keeps three of seven" \
+  'return if cookie.secure && !CookieJar.secure?(uri)' ''
+prove_broken "a Secure cookie kept from https:// as well" "a Secure cookie from https:// goes back over https://" \
+  'next if cookie.secure && !secure' 'next if cookie.secure'
+prove_broken "a one-label Domain kept" "a jar keeps three of seven" \
   'return unless domain.includes?(".") && CookieJar.domain_match?(host, domain)' 'return unless CookieJar.domain_match?(host, domain)'
 prove_broken "Expires read before Max-Age" "Max-Age wins over Expires" \
   "    if age = max_age
       expires" "    if (age = max_age) && expires.nil?
       expires"
-prove_broken "a lapsed cookie kept" "a jar keeps four of seven" \
+prove_broken "a lapsed cookie kept" "a jar keeps three of seven" \
   '    return if stored.expired?(Time.utc)
 ' ''
 prove_broken "paths sent in the order they were set" "the longer path first" \

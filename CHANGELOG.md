@@ -4,6 +4,20 @@
 
 ### Added
 
+- **A std/tls server can hold several certificates, chosen by
+  server_name; both ends export keying material.** A server had one
+  identity for every name a client asked for, and nothing could bind a
+  protocol above TLS to the connection.
+  - `TlsServerConfig#add_identity` adds one shown to a client asking for a
+    host its certificate names, and whose scheme it takes; `identity` is
+    shown to any other. `TlsServer#identity` says which was shown.
+  - `export_keying_material(label, context, length)` on either end is RFC
+    8446 section 7.5's exporter.
+
+  Held by the scripted client's `sni-other` and `sni-unknown`, by what both
+  ends export matched against OpenSSL's `s_client` and `s_server`, and by
+  three broken copies.
+
 - **A TLS read that times out leaves the connection open, and says it
   timed out.** Every failed read ended the connection: a read timeout set
   to poll a TLS socket closed it, and std/http's `timed_out?` was false

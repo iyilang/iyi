@@ -26,14 +26,15 @@
 # matches before giving up, ten certificates at most. A certificate
 # checked as an issuer must be valid at the time given, a CA by its
 # basicConstraints, allowed keyCertSign if it carries keyUsage, within its
-# pathLenConstraint, allowed serverAuth if it carries extKeyUsage, and the
-# leaf's names must fall inside its nameConstraints; it must have signed
-# the certificate below it. Name constraints are checked for DNS names and
-# IP addresses; a constraint of any other kind refuses the chain rather
-# than being passed over. The leaf must be valid at that time, not a CA
-# (a CA's certificate is not a server's, as the Web PKI's verifiers hold),
-# allowed serverAuth if it carries extKeyUsage, and, when a host is given,
-# name it.
+# pathLenConstraint, allowed the chain's purpose if it carries extKeyUsage
+# (serverAuth for a server's certificate, the default; clientAuth for a
+# client's, `X509Purpose::Client`), and the leaf's names must fall inside
+# its nameConstraints; it must have signed the certificate below it. Name
+# constraints are checked for DNS names and IP addresses; a constraint of
+# any other kind refuses the chain rather than being passed over. The
+# leaf must be valid at that time, not a CA (a CA's certificate is not a
+# server's, as the Web PKI's verifiers hold, nor a client's), allowed the
+# purpose if it carries extKeyUsage, and, when a host is given, name it.
 #
 # A host is matched against subjectAltName only, never the subject's
 # common name, as browsers and RFC 6125 have it: a DNS name exactly,
@@ -297,43 +298,46 @@ pub struct X509
 
   # The chain from *leaf* to one of *roots*, through *intermediates*, for
   # *host* (nil: any) at *now* - leaf first, root last - or why there is
-  # none. See the module's header for what is checked.
+  # none. *purpose* is what the leaf is for: a server's certificate
+  # (serverAuth, the default) or a client's (clientAuth), each certificate
+  # that carries extKeyUsage allowing it. See the module's header for what
+  # else is checked.
   def self.verify(leaf : Certificate, intermediates : Array(Certificate), roots : Array(Certificate),
-                  host : String? = nil, now : Time = Time.utc) : Array(Certificate) | X509Error
-    problem = leaf_error(leaf, host, now)
+                  host : String? = nil, now : Time = Time.utc, purpose : X509Purpose = X509Purpose::Server) : Array(Certificate) | X509Error
+    problem = leaf_error(leaf, host, now, purpose)
     return X509Error.new(problem) if problem
     failures = [] of String
-    chain = grow([leaf], intermediates, roots, now, failures)
+    chain = grow([leaf], intermediates, roots, now, failures, purpose)
     return chain if chain
     return X509Error.new(failures[0]) unless failures.empty?
     X509Error.new("no certificate here issued #{leaf.issuer_name}, the issuer of #{leaf.subject_name}")
   end
 
-  private def self.leaf_error(leaf : Certificate, host : String?, now : Time) : String?
+  private def self.leaf_error(leaf : Certificate, host : String?, now : Time, purpose : X509Purpose) : String?
     return "#{leaf.subject_name} is not valid at #{now}: from #{leaf.not_before} to #{leaf.not_after}" unless leaf.valid_at?(now)
     return "#{leaf.subject_name} carries critical extension #{leaf.unhandled_critical[0]}, which this does not understand" unless leaf.unhandled_critical.empty?
-    return "#{leaf.subject_name} is not allowed serverAuth" unless server_auth?(leaf)
-    return "#{leaf.subject_name} is a CA certificate, not a server's" if leaf.ca
+    return "#{leaf.subject_name} is not allowed #{purpose.usage}" unless allowed?(leaf, purpose)
+    return "#{leaf.subject_name} is a CA certificate, not a #{purpose.holder}'s" if leaf.ca
     if host && !leaf.matches_host?(host)
       return "#{leaf.subject_name} is not valid for #{host}: it names #{(leaf.dns_names + leaf.ip_addresses.map { |a| X509Names.ip_text(a) }).join(", ")}"
     end
     nil
   end
 
-  private def self.server_auth?(certificate : Certificate) : Bool
+  private def self.allowed?(certificate : Certificate, purpose : X509Purpose) : Bool
     usages = certificate.extended_key_usage
     return true unless usages
-    usages.includes?(X509Oids::SERVER_AUTH) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)
+    usages.includes?(purpose.oid) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)
   end
 
   # The chain grown from *chain* to a root, trying every issuer that
   # matches, or nil; why each candidate failed goes to *failures*.
   private def self.grow(chain : Array(Certificate), intermediates : Array(Certificate), roots : Array(Certificate),
-                        now : Time, failures : Array(String)) : Array(Certificate)?
+                        now : Time, failures : Array(String), purpose : X509Purpose) : Array(Certificate)?
     child = chain[chain.size - 1]
     roots.each do |root|
       next unless root.subject == child.issuer
-      problem = issuer_error(child, root, chain, now)
+      problem = issuer_error(child, root, chain, now, purpose)
       if problem
         failures << problem
       else
@@ -344,12 +348,12 @@ pub struct X509
     intermediates.each do |candidate|
       next unless candidate.subject == child.issuer
       next if chain.any? { |c| c.raw == candidate.raw }
-      problem = issuer_error(child, candidate, chain, now)
+      problem = issuer_error(child, candidate, chain, now, purpose)
       if problem
         failures << problem
         next
       end
-      found = grow(chain + [candidate], intermediates, roots, now, failures)
+      found = grow(chain + [candidate], intermediates, roots, now, failures, purpose)
       return found if found
     end
     nil
@@ -357,7 +361,7 @@ pub struct X509
 
   # Why *issuer* cannot be the next certificate above *child*, the last of
   # *chain*, or nil.
-  private def self.issuer_error(child : Certificate, issuer : Certificate, chain : Array(Certificate), now : Time) : String?
+  private def self.issuer_error(child : Certificate, issuer : Certificate, chain : Array(Certificate), now : Time, purpose : X509Purpose) : String?
     name = issuer.subject_name
     return "#{name} is not valid at #{now}: from #{issuer.not_before} to #{issuer.not_after}" unless issuer.valid_at?(now)
     return "#{name} carries critical extension #{issuer.unhandled_critical[0]}, which this does not understand" unless issuer.unhandled_critical.empty?
@@ -370,7 +374,7 @@ pub struct X509
     if length && chain.size - 1 > length
       return "#{name} allows #{length} CA certificates under it, and the chain has #{chain.size - 1}"
     end
-    return "#{name} is not allowed serverAuth" unless server_auth?(issuer)
+    return "#{name} is not allowed #{purpose.usage}" unless allowed?(issuer, purpose)
     problem = constraint_error(chain[0], issuer)
     return problem if problem
     child.signature_error(issuer)
@@ -426,7 +430,28 @@ struct X509Oids
   AUTHORITY_KEY_ID       = "2.5.29.35"
   EXT_KEY_USAGE          = "2.5.29.37"
   SERVER_AUTH            = "1.3.6.1.5.5.7.3.1"
+  CLIENT_AUTH            = "1.3.6.1.5.5.7.3.2"
   ANY_EXTENDED_KEY_USAGE = "2.5.29.37.0"
+end
+
+# What a chain is checked for: a TLS server's certificate or a client's
+# (RFC 5280 section 4.2.1.12's id-kp-serverAuth and id-kp-clientAuth).
+pub enum X509Purpose
+  Server
+  Client
+
+  def oid : String
+    self == X509Purpose::Server ? X509Oids::SERVER_AUTH : X509Oids::CLIENT_AUTH
+  end
+
+  # The usage's name, as a sentence says it.
+  def usage : String
+    self == X509Purpose::Server ? "serverAuth" : "clientAuth"
+  end
+
+  def holder : String
+    self == X509Purpose::Server ? "server" : "client"
+  end
 end
 
 # The extensions of one certificate, read (RFC 5280 section 4.2).

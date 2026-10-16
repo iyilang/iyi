@@ -4,6 +4,19 @@
 
 ### Added
 
+- **`X509.verify` checks a chain for a purpose: a server's certificate or
+  a client's (`X509Purpose::Client`).** Every chain was held to serverAuth,
+  so a client's certificate - for clientAuth alone, as a CA issues one -
+  could not be checked at all.
+  - `purpose:` (serverAuth by default) is asked of the leaf and of every
+    issuer that carries extKeyUsage, anyExtendedKeyUsage taking either; a
+    CA's certificate is no client's either.
+
+  Held by `bench/std_x509_exercise.sh`: the exercise's own chains checked
+  for clientAuth - a clientAuth leaf, a clientAuth intermediate and a chain
+  with no extKeyUsage held, a serverAuth-only leaf and a CA leaf refused -
+  and one more broken copy.
+
 - **WebSocket over TLS, both ends: `wss://`.** `WebSocket.connect`
   refused `wss://` before sending anything, and a server under TLS had no
   way to hand an upgraded connection over.

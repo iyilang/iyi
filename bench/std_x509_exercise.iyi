@@ -18,7 +18,7 @@
 #   roots FILE    a PEM bundle, each certificate read and written out:
 #                 `index version ca pathlen keyusage eku dns self`.
 
-import std/x509::{Certificate, X509, X509Error}
+import std/x509::{Certificate, X509, X509Error, X509Purpose}
 import std/time::{Time}
 import std/file::{File}
 import std/curve25519::{Ed25519, Ed25519PublicKey, CurveError}
@@ -291,5 +291,24 @@ seed = Array(UInt8).new(32) { |i| (i * 7 + 1).to_u8 }
 own = Ed25519PublicKey.from_bytes(Ed25519.public_key(seed))
 check own.is_a?(Ed25519PublicKey) && own.verify("signed", Ed25519.sign(seed, "signed")) && !own.verify("signed!", Ed25519.sign(seed, "signed")), "a key read from its bytes verifies what its seed signed, and nothing else"
 puts "  Ed25519 keys and signatures in certificates: three chains held, three refused, three keys refused"
+
+puts "== a client's certificate (X509Purpose::Client)"
+
+# The same chains as above, checked for clientAuth: what is for clientAuth
+# alone holds, and a leaf for serverAuth alone does not.
+def for_client(leaf : Int32, intermediates : Array(Int32)) : Array(Certificate) | X509Error
+  X509.verify(cert(CERTS[leaf]), intermediates.map { |i| cert(CERTS[i]) }, [cert(CERTS[2])], nil, NOW, X509Purpose::Client)
+end
+
+[{27, [1], "a leaf for clientAuth only"}, {0, [28], "an intermediate for clientAuth only"}, {0, [1], "a chain with no extKeyUsage"}].each do |c|
+  answer = for_client(c[0], c[1])
+  check answer.is_a?(Array(Certificate)), "#{c[2]}, as a client's: #{answer.is_a?(X509Error) ? answer.message : ""}"
+end
+[{26, [1], "CN=leaf is not allowed clientAuth", "a leaf for serverAuth only"}, {29, [1], "is a CA certificate, not a client's", "a CA leaf"}].each do |c|
+  answer = for_client(c[0], c[1])
+  raise "ASSERTION FAILED: #{c[3]}, as a client's: expected a refusal, got a chain" unless answer.is_a?(X509Error)
+  check answer.message.includes?(c[2]), "#{c[3]}, as a client's: refused with #{answer.message.inspect}, not #{c[2].inspect}"
+end
+puts "  clientAuth leaves and issuers held, a serverAuth-only leaf and a CA leaf refused"
 
 puts "\nALL CHECKS PASSED"

@@ -83,7 +83,7 @@ fi
 
 echo
 echo "== every x509 section reported"
-for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)"; do
+for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== a client's certificate (X509Purpose::Client)"; do
   if ! grep -q "$phrase" "$WORK/x509-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -399,7 +399,7 @@ prove_broken "pathLenConstraint off by one" "a pathLenConstraint of 0 over anoth
 prove_broken "extKeyUsage unchecked" "a leaf for clientAuth only: expected a refusal" \
   '    return true unless usages' '    return true'
 prove_broken "a CA taken as the leaf" "a leaf that is a CA: expected a refusal" \
-  '    return "#{leaf.subject_name} is a CA certificate, not a server'"'"'s" if leaf.ca' ''
+  '    return "#{leaf.subject_name} is a CA certificate, not a #{purpose.holder}'"'"'s" if leaf.ca' ''
 prove_broken "unknown critical extensions passed over" "a leaf with an unknown critical extension: expected a refusal" \
   '        @unhandled_critical << oid if critical' ''
 prove_broken "the issuer's signature unchecked" "a leaf signed by another key under the same name: expected a refusal" \
@@ -436,6 +436,8 @@ prove_broken "a duplicate extension taken" "an extension written twice refused" 
 # the check expects never comes.
 prove_broken "PEM's base64 unchecked" "base64: invalid byte" \
   '      return X509Error.new("a #{label} block with byte #{b} in its base64, at #{i}") unless ok' ''
+prove_broken "the purpose passed over: serverAuth asked of every chain" "a leaf for clientAuth only, as a client's" \
+  '    usages.includes?(purpose.oid) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)' '    usages.includes?(X509Oids::SERVER_AUTH) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)'
 prove_broken "an Ed25519 key's parameters taken" "an Ed25519 key whose algorithm carries parameters refused" \
   '      return X509Error.new("an Ed25519 key with parameters, which RFC 8410 says are absent") unless algorithm.size == 1' ''
 prove_broken "an Ed25519 signature unchecked" "an Ed25519 leaf signed by another key under the root's name: expected a refusal" \

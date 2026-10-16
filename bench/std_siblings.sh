@@ -28,6 +28,14 @@ if [ "$shards" -lt 1 ] || [ "$shard" -lt 1 ] || [ "$shard" -gt "$shards" ]; then
   exit 2
 fi
 
+# Each sibling has SIBLING_MINUTES (35: std/http's, the slowest, takes 21
+# on Linux) and is stopped past them, failing by name. A hang left to the
+# job's own limit cancelled the job, and a cancelled job keeps no log: a
+# Windows shard ran 65 minutes and said nothing of where it stopped.
+limit=$(( ${SIBLING_MINUTES:-35} * 60 ))
+bounded=""
+command -v timeout >/dev/null 2>&1 && bounded="timeout -k 30 $limit"
+
 status=0
 place=0
 ran=""
@@ -38,7 +46,12 @@ for sibling in "$REPO"/bench/std_*_exercise.sh; do
   [ $(((place - 1) % shards + 1)) -eq "$shard" ] || continue
   ran="$ran $(basename "$sibling" .sh)"
   echo "-- running sibling: $(basename "$sibling")"
-  if ! bash "$sibling"; then
+  $bounded bash "$sibling"
+  code=$?
+  if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
+    echo "FAIL: sibling $(basename "$sibling") had not finished in $((limit / 60)) minutes, and was stopped"
+    status=1
+  elif [ "$code" -ne 0 ]; then
     echo "FAIL: sibling $(basename "$sibling") failed"
     status=1
   fi

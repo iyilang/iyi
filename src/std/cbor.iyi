@@ -1,0 +1,1899 @@
+# CBOR, the Concise Binary Object Representation (RFC 8949), read and
+# written in iyi alone: a decoder that answers a data item as an `Any` or a
+# `CBORError` naming the byte where the trouble is, an encoder that writes
+# the core deterministic encoding of section 4.2.1, the diagnostic notation
+# of section 8 for whoever has to read a value, and `derive
+# cbor_serializable`.
+#
+#     import std/cbor::{CBOR, Any, CBORError}
+#
+#     value = CBOR.decode(bytes)                 # Any | CBORError
+#     CBOR.encode(value.or_panic)                # Array(UInt8), deterministic
+#     CBOR.deterministic?(bytes)                 # already in that encoding?
+#     value.or_panic.to_s                        # "{\"a\": [1, 2.5, h'00']}"
+#
+# What it reads, which is all of CBOR's generic data model:
+#   * Unsigned and negative integers to 64 bits of argument, so from -2^64
+#     to 2^64 - 1, and bignums (tags 2 and 3) of any size.
+#   * Byte strings and text strings, definite and indefinite (chunked);
+#     arrays and maps, definite and indefinite; a map's keys may be any
+#     data item, a map or an array among them.
+#   * Tags, kept with the item they enclose; the simple values false, true,
+#     null and undefined, and the unassigned ones (0 to 19, 32 to 255);
+#     half-, single- and double-precision floats, infinities and NaNs with
+#     their payloads.
+#
+# Integers are one kind, as section 3.4.3 makes them: a bignum and an
+# integer of the same value are the same data item in the extended data
+# model that tags 2 and 3 define, so `c24101` reads as the 1 that `01`
+# is. An integer in the `Int64` range is held as an `Int64`, any other as a
+# `CBORBignum` (sign and magnitude, the magnitude being what tag 2 or 3
+# would carry), and the encoder writes each in its preferred form: major
+# type 0 or 1 when the argument fits 64 bits, a bignum without leading
+# zeros otherwise. Bignums are kept as their bytes rather than a std/big
+# `BigInt`: decimal text (for the diagnostic notation) is the only
+# arithmetic this module needs of them, and a caller who wants to compute
+# makes a `BigInt` of `magnitude` - a program reading a CBOR file should
+# not compile std/big for it. Tag 2 or 3 around anything but a byte string
+# is refused: section 3.4.3 calls it invalid, and there is no integer to
+# make of it.
+#
+# Text strings must be UTF-8 - shortest forms, no surrogates, nothing past
+# U+10FFFF - each chunk of an indefinite-length one by itself, as section
+# 3.2.3 asks. A map key written twice is refused: section 5.6 leaves what
+# to do with one to the decoder, and keeping the first or the last is how
+# two readers of one message come to read two messages.
+#
+# What it refuses, each a `CBORError` whose `offset` is the byte (from 0)
+# where the item at fault starts: every well-formedness error of Appendix
+# F - data that ends early, in a head, a string or a container; reserved
+# additional information (28 to 30); a simple value under 32 written in
+# two bytes; an indefinite-length string's chunk of another major type or
+# itself indefinite; a break code where a data item was due; an indefinite
+# length on an integer or a tag - and bytes after the item. Two bounds of
+# this decoder's own: nesting past DEPTH_LIMIT arrays, maps and tags, and
+# a declared length past the bytes that are left. That second one is
+# checked before anything is allocated, which bounds what a decoder of n
+# bytes allocates by n: a string's length is its bytes, an array's count
+# its items of at least a byte each, a map's of at least two, so a head
+# claiming four billion items costs nothing but its refusal.
+#
+# The encoder writes section 4.2.1's core deterministic encoding, which is
+# preferred serialization and two more rules: every argument (integer,
+# length, tag number) in its shortest form; every float in the shortest
+# of half, single and double that gives back the same 64 bits, so a NaN is
+# shortened only when the bits it would drop are zero, as section 4.1
+# says (`NaN` is `f97e00`); definite lengths only; and each map's keys in
+# the bytewise order of their encodings. A value's encoding is a function
+# of the value: re-encoding what a decode of it answers gives the same
+# bytes back. `CBOR.deterministic?(bytes)` answers whether bytes are
+# exactly that encoding of the item they hold, and `CBOR.decode(bytes,
+# deterministic: true)` refuses the first thing that is not, by name and
+# offset: a longer argument than needed, an indefinite length, a float a
+# shorter width holds, keys out of order, a bignum with a leading zero
+# byte or one that fits major type 0 or 1. A text string that is not
+# UTF-8, and nesting past DEPTH_LIMIT, cannot be encoded: those are the
+# program's mistakes, panics.
+#
+# The diagnostic notation is section 8's, as Appendix A writes it: an
+# integer in decimal, bignums too; a float as ECMAScript's
+# `Number::toString` writes its shortest digits - positional from 1e-6 to
+# below 1e21, an exponent outside - with a fraction always (`1.0`,
+# `1.0e+300`), `Infinity`, `-Infinity` and `NaN`; `h'...'` for bytes; a text
+# string as a JSON string with every character past ASCII as `\u` escapes
+# (Appendix A's `"\u00fc"`, `"\ud800\udd51"`); `[_ ...]`, `{_ ...}` and
+# `(_ h'01', h'02')` for what was written with an indefinite length, `''_`
+# and `""_` for an indefinite string of no chunks (section 8.1); `N(...)`
+# for a tag, `simple(N)`, `undefined`. Arguments written longer than needed
+# are not marked: `Any` does not keep them.
+#
+# `derive cbor_serializable` makes a type read and write itself as a map
+# of text keys, a key per field, as std/yaml's `derive yaml_serializable`
+# does, beside std/json's, std/yaml's and std/toml's derives on one type.
+#
+# `Any` holds a value: `raw` is the union, `as_x`/`as_x?` are the pairs,
+# `[]`/`[]?` walk it, `==` is structural and `hash` agrees with it. Floats
+# are equal when their bits are: `0.0` and `-0.0` are two values (two
+# encodings, two keys of a map), and a NaN equals the NaN with its bits.
+# Indefinite lengths and chunks are kept for the diagnostic notation
+# (`indefinite?`, `chunks`) and are no part of the value: `==`, `hash` and
+# `CBOR.encode` pass over them.
+#
+# Pure computation over the bytes given: no platform, and nothing imported.
+
+module std/cbor
+
+# What is wrong with some bytes, and where: `offset` counts bytes from 0.
+# `message` is "<reason> at byte <offset>".
+pub struct CBORError
+  getter reason : String
+  getter offset : Int32
+
+  def initialize(@reason : String, @offset : Int32)
+  end
+
+  def to_s : String
+    message
+  end
+end
+
+impl Error for CBORError
+  def message : String
+    "#{@reason} at byte #{@offset}"
+  end
+end
+
+# A simple value (major type 7) that is none of false, true and null:
+# an unassigned one, 0 to 19 or 32 to 255, or 23, undefined. 20 to 22 are
+# `Bool` and nil in an `Any`, and 24 to 31 are not simple values at all.
+pub struct CBORSimple
+  getter value : UInt8
+
+  def initialize(value : Int32)
+    raise "CBORSimple: #{value} is outside 0 to 255" if value < 0 || value > 255
+    raise "CBORSimple: #{value} is false, true or null, which are Bool and nil" if value >= 20 && value <= 22
+    raise "CBORSimple: #{value} is not a simple value; 24 to 31 are reserved" if value >= 24 && value <= 31
+    @value = value.to_u8
+  end
+
+  def ==(other : CBORSimple) : Bool
+    @value == other.value
+  end
+
+  def hash : Int32
+    @value.to_i32 &+ 7919
+  end
+end
+
+# An integer outside the `Int64` range, as tags 2 and 3 carry one: the
+# magnitude is the unsigned big-endian `n` of section 3.4.3, without
+# leading zeros, and the value is `n`, or `-1 - n` when `negative?`. An
+# `Any` holds one only for a value an `Int64` cannot: `Any.new` makes an
+# `Int64` of any other.
+pub struct CBORBignum
+  getter magnitude : Array(UInt8)
+
+  def initialize(@negative : Bool, magnitude : Array(UInt8))
+    i = 0
+    while i < magnitude.size && magnitude[i] == 0_u8
+      i = i + 1
+    end
+    @magnitude = magnitude[i, magnitude.size - i]
+  end
+
+  def negative? : Bool
+    @negative
+  end
+
+  # `n` as a `UInt64`, or nil past 64 bits.
+  def magnitude_u64? : UInt64?
+    return nil if @magnitude.size > 8
+    v = 0_u64
+    @magnitude.each { |b| v = v.unsafe_shl(8) | b.to_u64 }
+    v
+  end
+
+  def ==(other : CBORBignum) : Bool
+    @negative == other.negative? && @magnitude == other.magnitude
+  end
+
+  def hash : Int32
+    {@negative, @magnitude}.hash
+  end
+
+  # The value in decimal: `n`'s base-256 digits divided by 10^9 a word at
+  # a time, `-1 - n` written as `-(n + 1)`.
+  def to_s : String
+    digits = @magnitude.dup
+    if @negative
+      i = digits.size - 1
+      carry = true
+      while carry && i >= 0
+        if digits[i] == 255_u8
+          digits[i] = 0_u8
+        else
+          digits[i] = digits[i] + 1_u8
+          carry = false
+        end
+        i = i - 1
+      end
+      digits.unshift(1_u8) if carry
+    end
+    groups = [] of UInt64
+    while digits.size > 0
+      rest = 0_u64
+      quotient = [] of UInt8
+      digits.each do |b|
+        acc = rest.unsafe_shl(8) | b.to_u64
+        q = acc // 1000000000_u64
+        rest = acc % 1000000000_u64
+        quotient << q.to_u8 unless quotient.empty? && q == 0_u64
+      end
+      groups << rest
+      digits = quotient
+    end
+    out = String::Builder.new
+    out << "-" if @negative
+    if groups.empty?
+      out << "0"
+    else
+      out << groups[groups.size - 1].to_s
+      i = groups.size - 2
+      while i >= 0
+        out << groups[i].to_s.rjust(9, '0')
+        i = i - 1
+      end
+    end
+    out.to_s
+  end
+
+  def inspect : String
+    to_s
+  end
+end
+
+# A tag and the item it encloses. Tags 2 and 3 are not kept as tags: they
+# are bignums, an integer's encoding, and `Any.new(CBORBignum)` makes one.
+pub class CBORTag
+  getter number : UInt64
+  getter value : Any
+
+  def initialize(@number : UInt64, @value : Any)
+    raise "CBORTag: tag #{@number} is a bignum, an integer's encoding: make the integer, with CBORBignum past Int64" if @number == 2_u64 || @number == 3_u64
+  end
+
+  # The decoder's, which has turned tags 2 and 3 into integers already.
+  protected def self.unchecked(number : UInt64, value : Any) : CBORTag
+    tag = CBORTag.allocate
+    tag.set(number, value)
+    tag
+  end
+
+  protected def set(number : UInt64, value : Any) : Nil
+    @number = number
+    @value = value
+  end
+
+  def ==(other : CBORTag) : Bool
+    @number == other.number && @value == other.value
+  end
+
+  def hash : Int32
+    {@number, @value}.hash
+  end
+end
+
+# A CBOR data item. `raw` is the value itself; `chunks` is how it was
+# written when it was written with an indefinite length - nil for a
+# definite length, the byte size of each chunk of a string, empty for an
+# array or a map - and is no part of the value.
+pub struct Any
+  KIND_NULL      =  0
+  KIND_UNDEFINED =  1
+  KIND_BOOL      =  2
+  KIND_INT       =  3
+  KIND_FLOAT     =  4
+  KIND_BYTES     =  5
+  KIND_TEXT      =  6
+  KIND_ARRAY     =  7
+  KIND_MAP       =  8
+  KIND_TAG       =  9
+  KIND_SIMPLE    = 10
+
+  # Written out rather than an `alias`, for the reason std/toml's `Any`
+  # gives: an artifact declares a module's types in the order of their
+  # names, and an alias naming `CBORTag` would be read before it.
+  getter raw : Nil | Bool | Int64 | CBORBignum | Float64 | String | Array(UInt8) | Array(Any) | Hash(Any, Any) | CBORTag | CBORSimple
+  getter chunks : Array(Int32)?
+
+  def initialize(raw : Nil | Bool | Int64 | Float64 | String | Array(UInt8) | Array(Any) | Hash(Any, Any) | CBORTag | CBORSimple)
+    @raw = raw
+    @chunks = nil
+  end
+
+  def initialize(value : Int32)
+    @raw = value.to_i64
+    @chunks = nil
+  end
+
+  # An integer to 2^64 - 1: an `Int64` where it fits.
+  def initialize(value : UInt64)
+    if value <= 9223372036854775807_u64
+      @raw = value.to_i64
+    else
+      @raw = CBORBignum.new(false, Any.be_bytes(value))
+    end
+    @chunks = nil
+  end
+
+  # A bignum, held as an `Int64` when it fits one, so one value has one
+  # form whichever way it was made.
+  def initialize(value : CBORBignum)
+    n = value.magnitude_u64?
+    if !n.nil? && n <= 9223372036854775807_u64
+      @raw = value.negative? ? -1_i64 - n.to_i64 : n.to_i64
+    else
+      @raw = value
+    end
+    @chunks = nil
+  end
+
+  protected def initialize(@raw : Nil | Bool | Int64 | CBORBignum | Float64 | String | Array(UInt8) | Array(Any) | Hash(Any, Any) | CBORTag | CBORSimple, @chunks : Array(Int32)?)
+  end
+
+  # Simple value 23.
+  def self.undefined : Any
+    Any.new(CBORSimple.new(23))
+  end
+
+  # The integer `n` (major type 0) or `-1 - n` (major type 1).
+  protected def self.integer(negative : Bool, n : UInt64) : Any
+    if n <= 9223372036854775807_u64
+      Any.new(negative ? -1_i64 - n.to_i64 : n.to_i64)
+    else
+      Any.new(CBORBignum.new(negative, be_bytes(n)), nil)
+    end
+  end
+
+  protected def self.be_bytes(n : UInt64) : Array(UInt8)
+    bytes = Array(UInt8).new(8)
+    shift = 56
+    while shift >= 0
+      bytes << (n.unsafe_shr(shift) & 0xFF_u64).to_u8
+      shift = shift - 8
+    end
+    bytes
+  end
+
+  # Which member of the union `raw` is, as one of the KIND_ constants.
+  # Reference types are tested first, for the reason std/yaml's header
+  # gives.
+  def kind : Int32
+    r = @raw
+    if r.is_a?(Array(Any))
+      KIND_ARRAY
+    elsif r.is_a?(Hash(Any, Any))
+      KIND_MAP
+    elsif r.is_a?(String)
+      KIND_TEXT
+    elsif r.is_a?(Array(UInt8))
+      KIND_BYTES
+    elsif r.is_a?(CBORTag)
+      KIND_TAG
+    elsif r.is_a?(Int64)
+      KIND_INT
+    elsif r.is_a?(CBORBignum)
+      KIND_INT
+    elsif r.is_a?(Float64)
+      KIND_FLOAT
+    elsif r.is_a?(Bool)
+      KIND_BOOL
+    elsif r.is_a?(CBORSimple)
+      r.value == 23_u8 ? KIND_UNDEFINED : KIND_SIMPLE
+    else
+      KIND_NULL
+    end
+  end
+
+  # The name of the kind, for the sentences below.
+  def kind_name : String
+    k = kind
+    if k == KIND_ARRAY
+      "an array"
+    elsif k == KIND_MAP
+      "a map"
+    elsif k == KIND_TEXT
+      "a text string"
+    elsif k == KIND_BYTES
+      "a byte string"
+    elsif k == KIND_TAG
+      "a tag"
+    elsif k == KIND_INT
+      "an integer"
+    elsif k == KIND_FLOAT
+      "a float"
+    elsif k == KIND_BOOL
+      "a boolean"
+    elsif k == KIND_SIMPLE
+      "a simple value"
+    elsif k == KIND_UNDEFINED
+      "undefined"
+    else
+      "null"
+    end
+  end
+
+  # Whether it was written with an indefinite length.
+  def indefinite? : Bool
+    !@chunks.nil?
+  end
+
+  def null? : Bool
+    kind == KIND_NULL
+  end
+
+  def undefined? : Bool
+    kind == KIND_UNDEFINED
+  end
+
+  def as_bool : Bool
+    raise "expected a boolean, not #{kind_name}" unless kind == KIND_BOOL
+    @raw.as(Bool)
+  end
+
+  def as_bool? : Bool?
+    kind == KIND_BOOL ? @raw.as(Bool) : nil
+  end
+
+  # An integer in the `Int64` range.
+  def as_i : Int64
+    r = @raw
+    return r if r.is_a?(Int64)
+    raise "the integer #{r} does not fit an Int64" if r.is_a?(CBORBignum)
+    raise "expected an integer, not #{kind_name}"
+  end
+
+  def as_i? : Int64?
+    r = @raw
+    r.is_a?(Int64) ? r : nil
+  end
+
+  # An integer from 0 to 2^64 - 1.
+  def as_u64 : UInt64
+    found = as_u64?
+    return found unless found.nil?
+    raise "expected an integer, not #{kind_name}" unless kind == KIND_INT
+    raise "the integer #{to_s} does not fit a UInt64"
+  end
+
+  def as_u64? : UInt64?
+    r = @raw
+    if r.is_a?(Int64)
+      r >= 0_i64 ? r.to_u64 : nil
+    elsif r.is_a?(CBORBignum)
+      r.negative? ? nil : r.magnitude_u64?
+    else
+      nil
+    end
+  end
+
+  # Any integer, as the sign and magnitude tags 2 and 3 would carry.
+  def as_big : CBORBignum
+    r = @raw
+    return r if r.is_a?(CBORBignum)
+    raise "expected an integer, not #{kind_name}" unless r.is_a?(Int64)
+    r >= 0_i64 ? CBORBignum.new(false, Any.be_bytes(r.to_u64)) : CBORBignum.new(true, Any.be_bytes((-1_i64 - r).to_u64))
+  end
+
+  # A float, or an integer in the `Int64` range widened to one.
+  def as_f : Float64
+    found = as_f?
+    return found unless found.nil?
+    raise "expected a float, not #{kind_name}"
+  end
+
+  def as_f? : Float64?
+    r = @raw
+    return r if r.is_a?(Float64)
+    return r.to_f64 if r.is_a?(Int64)
+    nil
+  end
+
+  def as_s : String
+    raise "expected a text string, not #{kind_name}" unless kind == KIND_TEXT
+    @raw.as(String)
+  end
+
+  def as_s? : String?
+    kind == KIND_TEXT ? @raw.as(String) : nil
+  end
+
+  def as_bytes : Array(UInt8)
+    raise "expected a byte string, not #{kind_name}" unless kind == KIND_BYTES
+    @raw.as(Array(UInt8))
+  end
+
+  def as_bytes? : Array(UInt8)?
+    kind == KIND_BYTES ? @raw.as(Array(UInt8)) : nil
+  end
+
+  def as_a : Array(Any)
+    raise "expected an array, not #{kind_name}" unless kind == KIND_ARRAY
+    @raw.as(Array(Any))
+  end
+
+  def as_a? : Array(Any)?
+    kind == KIND_ARRAY ? @raw.as(Array(Any)) : nil
+  end
+
+  def as_h : Hash(Any, Any)
+    raise "expected a map, not #{kind_name}" unless kind == KIND_MAP
+    @raw.as(Hash(Any, Any))
+  end
+
+  def as_h? : Hash(Any, Any)?
+    kind == KIND_MAP ? @raw.as(Hash(Any, Any)) : nil
+  end
+
+  def as_tag : CBORTag
+    raise "expected a tag, not #{kind_name}" unless kind == KIND_TAG
+    @raw.as(CBORTag)
+  end
+
+  def as_tag? : CBORTag?
+    kind == KIND_TAG ? @raw.as(CBORTag) : nil
+  end
+
+  def as_simple : CBORSimple
+    raise "expected a simple value, not #{kind_name}" unless kind == KIND_SIMPLE
+    @raw.as(CBORSimple)
+  end
+
+  def as_simple? : CBORSimple?
+    kind == KIND_SIMPLE ? @raw.as(CBORSimple) : nil
+  end
+
+  # Items of an array, pairs of a map, bytes of a byte or text string.
+  def size : Int32
+    r = @raw
+    return r.size if r.is_a?(Array(Any))
+    return r.size if r.is_a?(Hash(Any, Any))
+    return r.bytesize if r.is_a?(String)
+    return r.size if r.is_a?(Array(UInt8))
+    raise "#{kind_name} has no size"
+  end
+
+  # The value of a map under a text key.
+  def [](key : String) : Any
+    found = as_h[Any.new(key)]?
+    raise "no such key #{key.inspect}" if found.nil?
+    found
+  end
+
+  def []?(key : String) : Any?
+    h = as_h?
+    return nil if h.nil?
+    h[Any.new(key)]?
+  end
+
+  # The value of a map under any key.
+  def [](key : Any) : Any
+    found = as_h[key]?
+    raise "no such key #{key}" if found.nil?
+    found
+  end
+
+  def []?(key : Any) : Any?
+    h = as_h?
+    return nil if h.nil?
+    h[key]?
+  end
+
+  # An item of an array.
+  def [](index : Int32) : Any
+    as_a[index]
+  end
+
+  def []?(index : Int32) : Any?
+    a = as_a?
+    return nil if a.nil?
+    a[index]?
+  end
+
+  # Structural, as the header says: same kind, same value, a map equal to
+  # a map with the same pairs in any order, floats by their bits. Arrays
+  # and maps are compared in methods of their own, so the frames a deep
+  # value recurses through stay small, as in std/toml.
+  def ==(other : Any) : Bool
+    k = kind
+    return false unless k == other.kind
+    return same_items?(other) if k == KIND_ARRAY
+    return same_pairs?(other) if k == KIND_MAP
+    same_scalar?(other, k)
+  end
+
+  private def same_items?(other : Any) : Bool
+    a = @raw.as(Array(Any))
+    b = other.raw.as(Array(Any))
+    return false unless a.size == b.size
+    i = 0
+    while i < a.size
+      return false unless a[i] == b[i]
+      i = i + 1
+    end
+    true
+  end
+
+  private def same_pairs?(other : Any) : Bool
+    a = @raw.as(Hash(Any, Any))
+    b = other.raw.as(Hash(Any, Any))
+    return false unless a.size == b.size
+    a.each do |key, value|
+      found = b[key]?
+      return false if found.nil?
+      return false unless found == value
+    end
+    true
+  end
+
+  private def same_scalar?(other : Any, k : Int32) : Bool
+    r = @raw
+    o = other.raw
+    if r.is_a?(String) && o.is_a?(String)
+      r == o
+    elsif r.is_a?(Array(UInt8)) && o.is_a?(Array(UInt8))
+      r == o
+    elsif r.is_a?(CBORTag) && o.is_a?(CBORTag)
+      r == o
+    elsif r.is_a?(Int64) && o.is_a?(Int64)
+      r == o
+    elsif r.is_a?(CBORBignum) && o.is_a?(CBORBignum)
+      r == o
+    elsif r.is_a?(Float64) && o.is_a?(Float64)
+      IyiFloatText.bits_of(r) == IyiFloatText.bits_of(o)
+    elsif r.is_a?(Bool) && o.is_a?(Bool)
+      r == o
+    elsif r.is_a?(CBORSimple) && o.is_a?(CBORSimple)
+      r == o
+    else
+      k == KIND_NULL
+    end
+  end
+
+  def !=(other : Any) : Bool
+    !(self == other)
+  end
+
+  # Agrees with `==`: a map's hash does not depend on its order, a float's
+  # is its bits'.
+  def hash : Int32
+    r = @raw
+    if r.is_a?(Array(Any))
+      r.hash
+    elsif r.is_a?(Hash(Any, Any))
+      value = 0
+      r.each { |key, item| value = value &+ {key, item}.hash }
+      {value, r.size}.hash
+    elsif r.is_a?(String)
+      r.hash
+    elsif r.is_a?(Array(UInt8))
+      {r, 1}.hash
+    elsif r.is_a?(CBORTag)
+      r.hash
+    elsif r.is_a?(Int64)
+      r.hash
+    elsif r.is_a?(CBORBignum)
+      r.hash
+    elsif r.is_a?(Float64)
+      bits = IyiFloatText.bits_of(r)
+      ((bits ^ bits.unsafe_shr(32)) & 0x7FFFFFFF_u64).to_i32 &+ 11
+    elsif r.is_a?(Bool)
+      r ? 1 : 2
+    elsif r.is_a?(CBORSimple)
+      r.hash
+    else
+      3
+    end
+  end
+
+  # The diagnostic notation, as `CBOR.diagnostic` writes it.
+  def to_s : String
+    CBOR.diagnostic(self)
+  end
+
+  def inspect : String
+    CBOR.diagnostic(self)
+  end
+end
+
+# Half and single precision, to and from the double's bits, by hand: the
+# prelude has no `Float32`, and a conversion through one would round where
+# the encoder must know whether anything was lost.
+struct CBORFloat
+  # The double a half's bits are.
+  def self.from_half(h : UInt64) : UInt64
+    sign = (h & 0x8000_u64).unsafe_shl(48)
+    e = (h.unsafe_shr(10) & 0x1F_u64).to_i32
+    m = h & 0x3FF_u64
+    if e == 31
+      sign | 0x7FF0000000000000_u64 | m.unsafe_shl(42)
+    elsif e != 0
+      sign | (e - 15 + 1023).to_u64.unsafe_shl(52) | m.unsafe_shl(42)
+    elsif m == 0_u64
+      sign
+    else
+      top = top_bit(m)
+      sign | (top - 24 + 1023).to_u64.unsafe_shl(52) | (m ^ 1_u64.unsafe_shl(top)).unsafe_shl(52 - top)
+    end
+  end
+
+  # The double a single's bits are.
+  def self.from_single(s : UInt64) : UInt64
+    sign = (s & 0x80000000_u64).unsafe_shl(32)
+    e = (s.unsafe_shr(23) & 0xFF_u64).to_i32
+    m = s & 0x7FFFFF_u64
+    if e == 255
+      sign | 0x7FF0000000000000_u64 | m.unsafe_shl(29)
+    elsif e != 0
+      sign | (e - 127 + 1023).to_u64.unsafe_shl(52) | m.unsafe_shl(29)
+    elsif m == 0_u64
+      sign
+    else
+      top = top_bit(m)
+      sign | (top - 149 + 1023).to_u64.unsafe_shl(52) | (m ^ 1_u64.unsafe_shl(top)).unsafe_shl(52 - top)
+    end
+  end
+
+  # The half whose value is the double's, bit for bit, or nil when there
+  # is none: a NaN's payload must lose only zeros.
+  def self.to_half?(d : UInt64) : UInt64?
+    narrow?(d, 10, 15, 24)
+  end
+
+  def self.to_single?(d : UInt64) : UInt64?
+    narrow?(d, 23, 127, 149)
+  end
+
+  # A format of `mbits` fraction bits, exponent bias `bias`, its least
+  # subnormal 2^-`tiny`.
+  private def self.narrow?(d : UInt64, mbits : Int32, bias : Int32, tiny : Int32) : UInt64?
+    ebits_max = (bias * 2 + 1).to_u64
+    sign = d.unsafe_shr(63).unsafe_shl(mbits + (bias == 15 ? 5 : 8))
+    e = (d.unsafe_shr(52) & 0x7FF_u64).to_i32
+    m = d & 0xFFFFFFFFFFFFF_u64
+    drop = 52 - mbits
+    lost = 1_u64.unsafe_shl(drop) - 1_u64
+    if e == 0x7FF
+      return nil unless (m & lost) == 0_u64
+      return sign | ebits_max.unsafe_shl(mbits) | m.unsafe_shr(drop)
+    end
+    if e == 0
+      return m == 0_u64 ? sign : nil
+    end
+    exp = e - 1023
+    if exp >= 1 - bias && exp <= bias
+      return nil unless (m & lost) == 0_u64
+      return sign | (exp + bias).to_u64.unsafe_shl(mbits) | m.unsafe_shr(drop)
+    end
+    if exp >= -tiny && exp < 1 - bias
+      full = m | 0x10000000000000_u64
+      shift = 52 - (exp + tiny)
+      return nil unless (full & (1_u64.unsafe_shl(shift) - 1_u64)) == 0_u64
+      return sign | full.unsafe_shr(shift)
+    end
+    nil
+  end
+
+  private def self.top_bit(v : UInt64) : Int32
+    top = 0
+    while v.unsafe_shr(top + 1) != 0_u64
+      top = top + 1
+    end
+    top
+  end
+end
+
+# UTF-8 as RFC 3629 has it: shortest forms, no surrogates, nothing past
+# U+10FFFF.
+struct CBORUtf8
+  # Where the first ill-formed sequence of `count` bytes at `p` starts, or
+  # -1 when there is none.
+  def self.bad_at(p : Pointer(UInt8), count : Int32) : Int32
+    i = 0
+    while i < count
+      b = p[i]
+      if b < 0x80_u8
+        i = i + 1
+        next
+      end
+      need = 0
+      low = 0x80_u8
+      high = 0xBF_u8
+      if b >= 0xC2_u8 && b <= 0xDF_u8
+        need = 1
+      elsif b >= 0xE0_u8 && b <= 0xEF_u8
+        need = 2
+        low = 0xA0_u8 if b == 0xE0_u8
+        high = 0x9F_u8 if b == 0xED_u8
+      elsif b >= 0xF0_u8 && b <= 0xF4_u8
+        need = 3
+        low = 0x90_u8 if b == 0xF0_u8
+        high = 0x8F_u8 if b == 0xF4_u8
+      else
+        return i
+      end
+      return i if i + need >= count
+      c = p[i + 1]
+      return i if c < low || c > high
+      j = 2
+      while j <= need
+        c = p[i + j]
+        return i if c < 0x80_u8 || c > 0xBF_u8
+        j = j + 1
+      end
+      i = i + need + 1
+    end
+    -1
+  end
+end
+
+# Reads one data item from `size` bytes at `data`.
+#
+# Two kinds of trouble, kept apart. An item that is not well-formed
+# (Appendix F) stops the read: each step answers nil once it has recorded
+# it. An item that is well-formed but not valid - text that is not UTF-8,
+# a map key written twice, a bignum tag around something else - or, when
+# asked, not deterministic, is recorded and the read goes on to the end,
+# so the error answered is the first well-formedness error when there is
+# one and the first other error only when the bytes are well-formed:
+# `bf01020102` is an indefinite-length map that never closes, as Appendix
+# F files it, before it is a map with the key 1 twice.
+class Decoder
+  # Deep enough for any message a program writes (a COSE structure is a
+  # handful of levels), and shallow enough that decoding the deepest value
+  # this answers, and `==`, `hash`, `CBOR.encode` and `CBOR.diagnostic`
+  # over it, run in a task's 256 KB stack with room left for whatever
+  # called them. Measured in a plain build with the limit lifted, in a
+  # task, in steps of five levels: decoding held to 165 arrays nested in
+  # arrays, 170 tags and 155 maps nested as keys or as values, and ran out
+  # of stack five further; encoding held to 165, 170 and 120 (a map's keys
+  # are encoded apart, so a map nested in a map costs more); `==`, `hash`
+  # and the notation held over everything that decoded at 150. At 64 the
+  # deepest value uses about half of the least of these.
+  # bench/std_cbor_exercise.iyi does all of it to values DEPTH_LIMIT deep
+  # of each kind, in a task.
+  DEPTH_LIMIT = 64
+
+  @pos : Int32
+  @error : CBORError?
+  @invalid : CBORError?
+  @start : Int32
+  @major : Int32
+  @info : Int32
+  @arg : UInt64
+
+  def initialize(@data : Pointer(UInt8), @size : Int32, @deterministic : Bool)
+    @pos = 0
+    @error = nil
+    @invalid = nil
+    @start = 0
+    @major = 0
+    @info = 0
+    @arg = 0_u64
+  end
+
+  def document : Any | CBORError
+    value = item(0)
+    failed = @error
+    return failed unless failed.nil?
+    return CBORError.new("the data ends where a data item was due", @pos) if value.nil?
+    if @pos < @size
+      return CBORError.new("#{Decoder.count(@size - @pos, "byte")} after the data item", @pos)
+    end
+    wrong = @invalid
+    return wrong unless wrong.nil?
+    value
+  end
+
+  private def fail(reason : String, at : Int32) : Nil
+    @error = CBORError.new(reason, at) if @error.nil?
+    nil
+  end
+
+  private def invalid(reason : String, at : Int32) : Nil
+    @invalid = CBORError.new(reason, at) if @invalid.nil?
+    nil
+  end
+
+  protected def self.count(n : Int32 | UInt64, noun : String) : String
+    n == 1 ? "1 #{noun}" : "#{n} #{noun}s"
+  end
+
+  protected def self.type_name(major : Int32) : String
+    if major == 0
+      "an unsigned integer"
+    elsif major == 1
+      "a negative integer"
+    elsif major == 2
+      "a byte string"
+    elsif major == 3
+      "a text string"
+    elsif major == 4
+      "an array"
+    elsif major == 5
+      "a map"
+    elsif major == 6
+      "a tag"
+    else
+      "a simple value or float"
+    end
+  end
+
+  # The head at @pos: @start, @major, @info and @arg, @pos past it. An
+  # indefinite length leaves @info 31 and @arg 0.
+  private def head : Bool
+    @start = @pos
+    if @pos >= @size
+      fail("the data ends where a data item was due", @pos)
+      return false
+    end
+    b = @data[@pos].to_i32
+    @pos = @pos + 1
+    @major = b >> 5
+    @info = b & 31
+    if @info < 24
+      @arg = @info.to_u64
+    elsif @info < 28
+      n = 1 << (@info - 24)
+      if @size - @pos < n
+        fail("the data ends inside the head of #{Decoder.type_name(@major)}", @start)
+        return false
+      end
+      v = 0_u64
+      i = 0
+      while i < n
+        v = v.unsafe_shl(8) | @data[@pos + i].to_u64
+        i = i + 1
+      end
+      @pos = @pos + n
+      @arg = v
+      if @deterministic && @major != 7 && v < Decoder.least_for(@info)
+        invalid("the argument #{v} in a head of #{n + 1} bytes, where deterministic encoding takes #{Decoder.head_size(v)}", @start)
+      end
+    elsif @info < 31
+      fail("additional information #{@info} is reserved", @start)
+      return false
+    else
+      @arg = 0_u64
+    end
+    true
+  end
+
+  # The least argument that needs additional information `info`.
+  protected def self.least_for(info : Int32) : UInt64
+    if info == 24
+      24_u64
+    elsif info == 25
+      256_u64
+    elsif info == 26
+      65536_u64
+    else
+      4294967296_u64
+    end
+  end
+
+  # The bytes of the shortest head for an argument.
+  protected def self.head_size(v : UInt64) : Int32
+    if v < 24_u64
+      1
+    elsif v < 256_u64
+      2
+    elsif v < 65536_u64
+      3
+    elsif v < 4294967296_u64
+      5
+    else
+      9
+    end
+  end
+
+  private def item(depth : Int32) : Any?
+    return nil unless head
+    major = @major
+    start = @start
+    if @info == 31 && (major == 0 || major == 1 || major == 6)
+      return fail("additional information 31 (indefinite length) on #{Decoder.type_name(major)}", start)
+    end
+    if major == 0
+      Any.integer(false, @arg)
+    elsif major == 1
+      Any.integer(true, @arg)
+    elsif major == 2 || major == 3
+      string(major, start)
+    elsif major == 4
+      array(depth, start)
+    elsif major == 5
+      map(depth, start)
+    elsif major == 6
+      tag(depth, start)
+    else
+      simple(start)
+    end
+  end
+
+  private def too_deep(depth : Int32, start : Int32) : Nil
+    fail("a value nested #{depth + 1} levels deep, past the #{DEPTH_LIMIT} this decoder reads", start)
+  end
+
+  private def note_indefinite(what : String, start : Int32) : Nil
+    invalid("#{what} of indefinite length, which deterministic encoding does not use", start) if @deterministic
+  end
+
+  private def string(major : Int32, start : Int32) : Any?
+    if @info != 31
+      return nil unless room?(major, start)
+      count = @arg.to_i32
+      at = @pos
+      utf8(at, count) if major == 3
+      @pos = @pos + count
+      return Any.new(major == 2 ? bytes_of(at, count) : text_of(@data + at.to_i64, count))
+    end
+    kind = major == 2 ? "byte" : "text"
+    note_indefinite(Decoder.type_name(major), start)
+    sizes = [] of Int32
+    pieces = [] of Int32
+    total = 0
+    while true
+      if @pos >= @size
+        return fail("the data ends before the break that closes an indefinite-length #{kind} string", @pos)
+      end
+      b = @data[@pos].to_i32
+      if b == 0xFF
+        @pos = @pos + 1
+        break
+      end
+      if b >> 5 != major
+        return fail("an indefinite-length #{kind} string holding a chunk that is #{Decoder.type_name(b >> 5)}, not a definite-length #{kind} string", @pos)
+      end
+      if b & 31 == 31
+        return fail("an indefinite-length #{kind} string holding a chunk of indefinite length", @pos)
+      end
+      return nil unless head
+      return nil unless room?(major, @start)
+      count = @arg.to_i32
+      utf8(@pos, count) if major == 3
+      pieces << @pos
+      sizes << count
+      total = total + count
+      @pos = @pos + count
+    end
+    joined = Array(UInt8).unsafe_build(total)
+    filled = 0
+    i = 0
+    while i < sizes.size
+      (joined.to_unsafe + filled.to_i64).copy_from(@data + pieces[i].to_i64, sizes[i])
+      filled = filled + sizes[i]
+      i = i + 1
+    end
+    if major == 2
+      Any.new(joined, sizes)
+    else
+      Any.new(text_of(joined.to_unsafe, total), sizes)
+    end
+  end
+
+  # Text, each chunk by itself, must be UTF-8.
+  private def utf8(at : Int32, count : Int32) : Nil
+    bad = CBORUtf8.bad_at(@data + at.to_i64, count)
+    invalid("text that is not UTF-8", at + bad) if bad >= 0
+  end
+
+  # A string's length is checked against the bytes left before anything
+  # is copied.
+  private def room?(major : Int32, start : Int32) : Bool
+    left = @size - @pos
+    if @arg > left.to_u64
+      fail("#{Decoder.type_name(major)} of #{Decoder.count(@arg, "byte")}, where #{left} #{left == 1 ? "is" : "are"} left", start)
+      return false
+    end
+    true
+  end
+
+  private def bytes_of(at : Int32, count : Int32) : Array(UInt8)
+    bytes = Array(UInt8).unsafe_build(count)
+    bytes.to_unsafe.copy_from(@data + at.to_i64, count)
+    bytes
+  end
+
+  private def text_of(source : Pointer(UInt8), count : Int32) : String
+    String.new(count) { |p| p.copy_from(source, count) }
+  end
+
+  # A count is checked against the bytes left before an array of it is
+  # made: every item takes at least one. A map's pairs are not allocated
+  # ahead, but its count is held to the same bound, which keeps it within
+  # an `Int32`.
+  private def counted?(what : String, noun : String, start : Int32) : Bool
+    left = @size - @pos
+    if @arg > left.to_u64
+      fail("#{what} of #{Decoder.count(@arg, noun)}, where #{Decoder.count(left, "byte")} #{left == 1 ? "is" : "are"} left", start)
+      return false
+    end
+    true
+  end
+
+  private def array(depth : Int32, start : Int32) : Any?
+    return too_deep(depth, start) if depth >= DEPTH_LIMIT
+    if @info != 31
+      return nil unless counted?("an array", "item", start)
+      count = @arg.to_i32
+      items = Array(Any).new(count)
+      i = 0
+      while i < count
+        v = item(depth + 1)
+        return nil if v.nil?
+        items << v
+        i = i + 1
+      end
+      return Any.new(items)
+    end
+    note_indefinite("an array", start)
+    items = [] of Any
+    while true
+      if @pos >= @size
+        return fail("the data ends before the break that closes an indefinite-length array", @pos)
+      end
+      if @data[@pos] == 0xFF_u8
+        @pos = @pos + 1
+        break
+      end
+      v = item(depth + 1)
+      return nil if v.nil?
+      items << v
+    end
+    Any.new(items, [] of Int32)
+  end
+
+  private def map(depth : Int32, start : Int32) : Any?
+    return too_deep(depth, start) if depth >= DEPTH_LIMIT
+    indefinite = @info == 31
+    count = 0
+    if indefinite
+      note_indefinite("a map", start)
+    else
+      return nil unless counted?("a map", "pair", start)
+      count = @arg.to_i32
+    end
+    pairs = Hash(Any, Any).new
+    last_from = -1
+    last_to = -1
+    i = 0
+    while indefinite || i < count
+      if indefinite
+        if @pos >= @size
+          return fail("the data ends before the break that closes an indefinite-length map", @pos)
+        end
+        if @data[@pos] == 0xFF_u8
+          @pos = @pos + 1
+          break
+        end
+      end
+      from = @pos
+      key = item(depth + 1)
+      return nil if key.nil?
+      twice = pairs.has_key?(key)
+      invalid("the map key #{CBOR.short_diagnostic(key)} written twice", from) if twice
+      if @deterministic && last_from >= 0 && !after?(last_from, last_to, from, @pos)
+        invalid("the map key #{CBOR.short_diagnostic(key)} sorts before the key ahead of it", from)
+      end
+      last_from = from
+      last_to = @pos
+      value = item(depth + 1)
+      return nil if value.nil?
+      pairs[key] = value unless twice
+      i = i + 1
+    end
+    indefinite ? Any.new(pairs, [] of Int32) : Any.new(pairs)
+  end
+
+  # Whether the bytes from `b` to `b_end` sort after those from `a` to
+  # `a_end`, bytewise.
+  private def after?(a : Int32, a_end : Int32, b : Int32, b_end : Int32) : Bool
+    i = 0
+    while a + i < a_end && b + i < b_end
+      x = @data[a + i]
+      y = @data[b + i]
+      return y > x if x != y
+      i = i + 1
+    end
+    b_end - b > a_end - a
+  end
+
+  private def tag(depth : Int32, start : Int32) : Any?
+    return too_deep(depth, start) if depth >= DEPTH_LIMIT
+    number = @arg
+    from = @pos
+    content = item(depth + 1)
+    return nil if content.nil?
+    return Any.new(CBORTag.unchecked(number, content)) unless number == 2_u64 || number == 3_u64
+    bytes = content.as_bytes?
+    if bytes.nil?
+      invalid("tag #{number} (a bignum) around #{content.kind_name}, not a byte string", from)
+      return Any.new(CBORTag.unchecked(number, content))
+    end
+    big = CBORBignum.new(number == 3_u64, bytes)
+    if @deterministic
+      if bytes.size > 0 && bytes[0] == 0_u8
+        invalid("a bignum with a leading zero byte, which deterministic encoding leaves out", from)
+      elsif big.magnitude.size <= 8
+        invalid("the integer #{big} as tag #{number}, where deterministic encoding writes one that fits 64 bits as major type #{number - 2}", start)
+      end
+    end
+    Any.new(big)
+  end
+
+  private def simple(start : Int32) : Any?
+    info = @info
+    if info < 20
+      Any.new(CBORSimple.new(info))
+    elsif info == 20
+      Any.new(false)
+    elsif info == 21
+      Any.new(true)
+    elsif info == 22
+      Any.new(nil)
+    elsif info == 23
+      Any.undefined
+    elsif info == 24
+      v = @arg.to_i32
+      return fail("simple value #{v} in the two-byte form, which only 32 to 255 take", start) if v < 32
+      Any.new(CBORSimple.new(v))
+    elsif info == 31
+      fail("a break code where a data item was due", start)
+    else
+      bits = info == 25 ? CBORFloat.from_half(@arg) : (info == 26 ? CBORFloat.from_single(@arg) : @arg)
+      if @deterministic
+        size = CBOR.float_size(bits)
+        written = 1 << (info - 24)
+        if size < written
+          invalid("the float #{CBOR.float_text(IyiFloatText.from_bits(bits))} in #{written + 1} bytes, where #{size + 1} hold it", start)
+        end
+      end
+      Any.new(IyiFloatText.from_bits(bits))
+    end
+  end
+end
+
+# Writes the core deterministic encoding of a value.
+class Encoder
+  def written : Array(UInt8)
+    @out
+  end
+
+  @out : Array(UInt8)
+
+  def initialize
+    @out = Array(UInt8).new
+  end
+
+  def head(major : Int32, arg : UInt64) : Nil
+    m = major << 5
+    if arg < 24_u64
+      @out << (m | arg.to_i32).to_u8
+    elsif arg < 256_u64
+      @out << (m | 24).to_u8
+      @out << arg.to_u8
+    elsif arg < 65536_u64
+      @out << (m | 25).to_u8
+      put_be(arg, 2)
+    elsif arg < 4294967296_u64
+      @out << (m | 26).to_u8
+      put_be(arg, 4)
+    else
+      @out << (m | 27).to_u8
+      put_be(arg, 8)
+    end
+  end
+
+  private def put_be(v : UInt64, n : Int32) : Nil
+    shift = (n - 1) * 8
+    while shift >= 0
+      @out << (v.unsafe_shr(shift) & 0xFF_u64).to_u8
+      shift = shift - 8
+    end
+  end
+
+  private def put_bytes(p : Pointer(UInt8), n : Int32) : Nil
+    i = 0
+    while i < n
+      @out << p[i]
+      i = i + 1
+    end
+  end
+
+  def value(v : Any, depth : Int32) : Nil
+    r = v.raw
+    if r.is_a?(Array(Any))
+      raise "CBOR.encode: a value nested past the #{Decoder::DEPTH_LIMIT} levels a decoder reads back" if depth >= Decoder::DEPTH_LIMIT
+      head(4, r.size.to_u64)
+      r.each { |item| value(item, depth + 1) }
+    elsif r.is_a?(Hash(Any, Any))
+      raise "CBOR.encode: a value nested past the #{Decoder::DEPTH_LIMIT} levels a decoder reads back" if depth >= Decoder::DEPTH_LIMIT
+      pairs(r, depth)
+    elsif r.is_a?(String)
+      bad = CBORUtf8.bad_at(r.to_unsafe, r.bytesize)
+      raise "CBOR.encode: a text string must be UTF-8, and this one is not at its byte #{bad}" if bad >= 0
+      head(3, r.bytesize.to_u64)
+      put_bytes(r.to_unsafe, r.bytesize)
+    elsif r.is_a?(Array(UInt8))
+      head(2, r.size.to_u64)
+      put_bytes(r.to_unsafe, r.size)
+    elsif r.is_a?(CBORTag)
+      raise "CBOR.encode: a value nested past the #{Decoder::DEPTH_LIMIT} levels a decoder reads back" if depth >= Decoder::DEPTH_LIMIT
+      head(6, r.number)
+      value(r.value, depth + 1)
+    elsif r.is_a?(Int64)
+      if r >= 0_i64
+        head(0, r.to_u64)
+      else
+        head(1, (-1_i64 - r).to_u64)
+      end
+    elsif r.is_a?(CBORBignum)
+      major = r.negative? ? 1 : 0
+      n = r.magnitude_u64?
+      if n.nil?
+        head(6, (major + 2).to_u64)
+        head(2, r.magnitude.size.to_u64)
+        put_bytes(r.magnitude.to_unsafe, r.magnitude.size)
+      else
+        head(major, n)
+      end
+    elsif r.is_a?(Float64)
+      float(r)
+    elsif r.is_a?(Bool)
+      @out << (r ? 0xF5_u8 : 0xF4_u8)
+    elsif r.is_a?(CBORSimple)
+      if r.value < 24_u8
+        @out << (0xE0_u8 | r.value)
+      else
+        @out << 0xF8_u8
+        @out << r.value
+      end
+    else
+      @out << 0xF6_u8
+    end
+  end
+
+  # The shortest of half, single and double that holds the same 64 bits.
+  private def float(f : Float64) : Nil
+    bits = IyiFloatText.bits_of(f)
+    half = CBORFloat.to_half?(bits)
+    unless half.nil?
+      @out << 0xF9_u8
+      put_be(half, 2)
+      return
+    end
+    single = CBORFloat.to_single?(bits)
+    unless single.nil?
+      @out << 0xFA_u8
+      put_be(single, 4)
+      return
+    end
+    @out << 0xFB_u8
+    put_be(bits, 8)
+  end
+
+  # Each key encoded on its own, the pairs sorted by those bytes, then
+  # written: section 4.2.1's order.
+  private def pairs(h : Hash(Any, Any), depth : Int32) : Nil
+    keyed = [] of Tuple(Array(UInt8), Any)
+    h.each do |key, item|
+      e = Encoder.new
+      e.value(key, depth + 1)
+      keyed << {e.written, item}
+    end
+    keyed.sort_in_place { |a, b| Encoder.compare(a[0], b[0]) }
+    head(5, h.size.to_u64)
+    keyed.each do |pair|
+      @out.concat(pair[0])
+      value(pair[1], depth + 1)
+    end
+  end
+
+  # Bytewise: the first byte that differs decides, and a prefix sorts
+  # first.
+  protected def self.compare(a : Array(UInt8), b : Array(UInt8)) : Int32
+    i = 0
+    while i < a.size && i < b.size
+      return a[i] < b[i] ? -1 : 1 if a[i] != b[i]
+      i = i + 1
+    end
+    a.size - b.size
+  end
+end
+
+# Writes section 8's diagnostic notation.
+class Diagnostic
+  HEX = "0123456789abcdef"
+
+  def initialize
+    @out = String::Builder.new
+  end
+
+  def text : String
+    @out.to_s
+  end
+
+  def value(v : Any, depth : Int32) : Nil
+    r = v.raw
+    chunks = v.chunks
+    if r.is_a?(Array(Any))
+      raise "CBOR.diagnostic: a value nested past the #{Decoder::DEPTH_LIMIT} levels a decoder reads back" if depth >= Decoder::DEPTH_LIMIT
+      @out << (chunks.nil? ? "[" : (r.empty? ? "[_ " : "[_ "))
+      first = true
+      r.each do |item|
+        @out << ", " unless first
+        first = false
+        value(item, depth + 1)
+      end
+      @out << "]"
+    elsif r.is_a?(Hash(Any, Any))
+      raise "CBOR.diagnostic: a value nested past the #{Decoder::DEPTH_LIMIT} levels a decoder reads back" if depth >= Decoder::DEPTH_LIMIT
+      @out << (chunks.nil? ? "{" : "{_ ")
+      first = true
+      r.each do |key, item|
+        @out << ", " unless first
+        first = false
+        value(key, depth + 1)
+        @out << ": "
+        value(item, depth + 1)
+      end
+      @out << "}"
+    elsif r.is_a?(String)
+      if chunks.nil?
+        text(r.to_unsafe, r.bytesize)
+      elsif chunks.empty?
+        @out << "\"\"_"
+      else
+        @out << "(_ "
+        at = 0
+        chunks.each_with_index do |size, i|
+          @out << ", " if i > 0
+          text(r.to_unsafe + at.to_i64, size)
+          at = at + size
+        end
+        @out << ")"
+      end
+    elsif r.is_a?(Array(UInt8))
+      if chunks.nil?
+        bytes(r.to_unsafe, r.size)
+      elsif chunks.empty?
+        @out << "''_"
+      else
+        @out << "(_ "
+        at = 0
+        chunks.each_with_index do |size, i|
+          @out << ", " if i > 0
+          bytes(r.to_unsafe + at.to_i64, size)
+          at = at + size
+        end
+        @out << ")"
+      end
+    elsif r.is_a?(CBORTag)
+      raise "CBOR.diagnostic: a value nested past the #{Decoder::DEPTH_LIMIT} levels a decoder reads back" if depth >= Decoder::DEPTH_LIMIT
+      @out << r.number.to_s << "("
+      value(r.value, depth + 1)
+      @out << ")"
+    elsif r.is_a?(Int64)
+      @out << r.to_s
+    elsif r.is_a?(CBORBignum)
+      @out << r.to_s
+    elsif r.is_a?(Float64)
+      @out << CBOR.float_text(r)
+    elsif r.is_a?(Bool)
+      @out << (r ? "true" : "false")
+    elsif r.is_a?(CBORSimple)
+      @out << (r.value == 23_u8 ? "undefined" : "simple(#{r.value})")
+    else
+      @out << "null"
+    end
+  end
+
+  private def bytes(p : Pointer(UInt8), n : Int32) : Nil
+    @out << "h'"
+    i = 0
+    while i < n
+      b = p[i].to_i32
+      @out << HEX[b >> 4] << HEX[b & 15]
+      i = i + 1
+    end
+    @out << "'"
+  end
+
+  # A JSON string as Python's `json.dumps` writes one: `"` and `\`
+  # escaped, `\b`, `\f`, `\n`, `\r` and `\t`, every other control and DEL
+  # as `\u00XX`, everything past ASCII as `\u` escapes (an astral
+  # character as a surrogate pair), so the notation is printable ASCII. A
+  # string that is not UTF-8 (an `Any` a program made; the decoder refuses
+  # one) has each bad byte written as U+FFFD.
+  private def text(p : Pointer(UInt8), n : Int32) : Nil
+    @out << "\""
+    i = 0
+    while i < n
+      b = p[i].to_i32
+      if b < 0x80
+        if b == 34
+          @out << "\\\""
+        elsif b == 92
+          @out << "\\\\"
+        elsif b == 8
+          @out << "\\b"
+        elsif b == 12
+          @out << "\\f"
+        elsif b == 10
+          @out << "\\n"
+        elsif b == 13
+          @out << "\\r"
+        elsif b == 9
+          @out << "\\t"
+        elsif b < 32 || b == 127
+          escape(b)
+        else
+          @out << b.chr
+        end
+        i = i + 1
+        next
+      end
+      size = b >= 0xF0 ? 4 : (b >= 0xE0 ? 3 : 2)
+      if i + size > n || CBORUtf8.bad_at(p + i.to_i64, size) >= 0
+        escape(0xFFFD)
+        i = i + 1
+        next
+      end
+      point = size == 2 ? (b & 0x1F) : (size == 3 ? (b & 0x0F) : (b & 0x07))
+      j = 1
+      while j < size
+        point = (point << 6) | (p[i + j].to_i32 & 0x3F)
+        j = j + 1
+      end
+      if point >= 0x10000
+        point = point - 0x10000
+        escape(0xD800 + (point >> 10))
+        escape(0xDC00 + (point & 0x3FF))
+      else
+        escape(point)
+      end
+      i = i + size
+    end
+    @out << "\""
+  end
+
+  private def escape(unit : Int32) : Nil
+    @out << "\\u" << HEX[(unit >> 12) & 15] << HEX[(unit >> 8) & 15] << HEX[(unit >> 4) & 15] << HEX[unit & 15]
+  end
+end
+
+# What `CBOR.write_value` and `CBOR.to_any` take besides the built-in
+# types: a value whose type implements it, as a `derive
+# cbor_serializable` type does.
+pub trait ToCBOR
+  abstract def to_cbor_any : Any
+end
+
+# `derive cbor_serializable`, in a struct or class whose fields are written
+# with their types: the type reads and writes itself as a CBOR map, a text
+# key per field, named as the field is.
+#
+#     pub struct Coord
+#       getter x : Float64
+#       getter name : String
+#       derive cbor_serializable
+#     end
+#
+#     Coord.from_cbor(bytes).x   # => 1.5
+#     coord.to_cbor              # => Array(UInt8), {"x": 1.5, "name": "a"}
+#
+# It is std/yaml's `derive yaml_serializable` over CBOR, field for field:
+# a value is read and written as `CBOR.read_value` and `CBOR.to_any` take
+# its type (Nil, Bool, Int32, Int64, UInt8, UInt64, Float64, String,
+# `Array(UInt8)` as a byte string, `Any`, an `Array` or a `Hash` of them,
+# another derived type, each of them or nil), and `to_cbor` writes the
+# deterministic encoding. A nil field is written as null; a key the type
+# has no field for is passed over; a field with no key, or a null one
+# where its type does not admit nil, keeps its default if it has one, a
+# nilable field holds nil, and any other is refused by name. A type that
+# is several writes `derive serializable, yaml_serializable,
+# toml_serializable, cbor_serializable`: what this one generates shares
+# no method with theirs (`to_cbor`, `from_cbor`, `to_cbor_any` and
+# `initialize(cbor : Any)` of this module's `Any`).
+pub macro cbor_serializable(declaration)
+  impl ::Std::Cbor::ToCBOR for {{ declaration[:name].id }}
+    def to_cbor_any : ::Std::Cbor::Any
+      cbor_pairs = Hash(::Std::Cbor::Any, ::Std::Cbor::Any).new
+      {% for field in declaration[:fields] %}
+        cbor_pairs[::Std::Cbor::Any.new({{ field[:name][1..] }})] = ::Std::Cbor::CBOR.to_any({{ field[:name].id }})
+      {% end %}
+      ::Std::Cbor::Any.new(cbor_pairs)
+    end
+  end
+
+  def to_cbor : Array(UInt8)
+    ::Std::Cbor::CBOR.encode(to_cbor_any)
+  end
+
+  def self.from_cbor(bytes : Array(UInt8)) : self
+    ::Std::Cbor::CBOR.from_cbor(bytes, self)
+  end
+
+  def initialize(cbor : ::Std::Cbor::Any)
+    cbor_pairs = cbor.as_h? || raise "expected a map for #{ {{ declaration[:name] }} }, not #{cbor.kind_name}"
+    # As std/yaml's derive: each field's type is asked of the field
+    # (`typeof`), and whether it has a default is asked of the type when
+    # this method is compiled.
+    {% for field in declaration[:fields] %}
+      cbor_found_{{ field[:name][1..].id }} = cbor_pairs[::Std::Cbor::Any.new({{ field[:name][1..] }})]?
+      \{% if @type.instance_vars.any? { |ivar| ivar.name.stringify == {{ field[:name][1..] }} && ivar.has_default_value? } %}
+        {% if field[:type].nilable? %}
+          unless cbor_found_{{ field[:name][1..].id }}.nil?
+            {{ field[:name].id }} = cbor_found_{{ field[:name][1..].id }}.null? ? nil : ::Std::Cbor::CBOR.read_value(cbor_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }} || raise("")))
+          end
+        {% else %}
+          if !cbor_found_{{ field[:name][1..].id }}.nil? && !cbor_found_{{ field[:name][1..].id }}.null?
+            {{ field[:name].id }} = ::Std::Cbor::CBOR.read_value(cbor_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }}))
+          end
+        {% end %}
+      \{% elsif {{ field[:type].nilable? }} %}
+        {{ field[:name].id }} = cbor_found_{{ field[:name][1..].id }}.nil? || cbor_found_{{ field[:name][1..].id }}.null? ? nil : ::Std::Cbor::CBOR.read_value(cbor_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }} || raise("")))
+      \{% else %}
+        raise "CBOR for #{ {{ declaration[:name] }} } has no key #{ {{ field[:name][1..] }}.inspect }" if cbor_found_{{ field[:name][1..].id }}.nil?
+        {{ field[:name].id }} = ::Std::Cbor::CBOR.read_value(cbor_found_{{ field[:name][1..].id }}, typeof({{ field[:name].id }}))
+      \{% end %}
+    {% end %}
+  end
+end
+
+pub struct CBOR
+  # How many arrays, maps and tags deep a value may nest, read or written;
+  # the decoder's comment says why 64.
+  DEPTH_LIMIT = Decoder::DEPTH_LIMIT
+
+  # The one data item `bytes` holds, with nothing after it, or what is
+  # wrong with them. With `deterministic: true`, bytes that are not the
+  # core deterministic encoding of their item are refused too, at the
+  # first thing that is not.
+  def self.decode(bytes : Array(UInt8), deterministic : Bool = false) : Any | CBORError
+    Decoder.new(bytes.to_unsafe, bytes.size, deterministic).document
+  end
+
+  # The same over a `String`'s bytes, as a file or a socket hands them
+  # over.
+  def self.decode(bytes : String, deterministic : Bool = false) : Any | CBORError
+    Decoder.new(bytes.to_unsafe, bytes.bytesize, deterministic).document
+  end
+
+  # The item, or nil where `decode` answers a `CBORError`.
+  def self.decode?(bytes : Array(UInt8)) : Any?
+    answer = decode(bytes)
+    answer.is_a?(CBORError) ? nil : answer
+  end
+
+  def self.decode?(bytes : String) : Any?
+    answer = decode(bytes)
+    answer.is_a?(CBORError) ? nil : answer
+  end
+
+  # Whether `bytes` are one data item in core deterministic encoding:
+  # exactly what `encode` writes for the value they hold.
+  def self.deterministic?(bytes : Array(UInt8)) : Bool
+    !decode(bytes, deterministic: true).is_a?(CBORError)
+  end
+
+  def self.deterministic?(bytes : String) : Bool
+    !decode(bytes, deterministic: true).is_a?(CBORError)
+  end
+
+  # The core deterministic encoding of `value`.
+  def self.encode(value : Any) : Array(UInt8)
+    e = Encoder.new
+    e.value(value, 0)
+    e.written
+  end
+
+  # Section 8's diagnostic notation for `value`, on one line.
+  def self.diagnostic(value : Any) : String
+    d = Diagnostic.new
+    d.value(value, 0)
+    d.text
+  end
+
+  # The diagnostic notation cut to 40 characters, for an error's sentence.
+  protected def self.short_diagnostic(value : Any) : String
+    text = diagnostic(value)
+    text.size > 40 ? text[0, 37] + "..." : text
+  end
+
+  # How many bytes past the initial byte the shortest float holding these
+  # 64 bits takes: 2, 4 or 8.
+  protected def self.float_size(bits : UInt64) : Int32
+    return 2 unless CBORFloat.to_half?(bits).nil?
+    return 4 unless CBORFloat.to_single?(bits).nil?
+    8
+  end
+
+  # A float as Appendix A writes one: ECMAScript's `Number::toString` of
+  # the shortest digits that read back, positional for a decimal exponent
+  # from -6 to 21, with a fraction always.
+  def self.float_text(f : Float64) : String
+    return "NaN" if f != f
+    return "Infinity" if f > 1.7976931348623157e308
+    return "-Infinity" if f < -1.7976931348623157e308
+    negative = IyiFloatText.bits_of(f).unsafe_shr(63) == 1_u64
+    return negative ? "-0.0" : "0.0" if f == 0.0
+    plain = (negative ? 0.0 - f : f).to_s
+    mark = plain.index('e')
+    mantissa = mark.nil? ? plain : plain[0, mark]
+    exponent = mark.nil? ? 0 : plain[mark + 1, plain.size - mark - 1].lchop('+').to_i
+    point = mantissa.index('.')
+    whole = point.nil? ? mantissa.size : point
+    digits = point.nil? ? mantissa : mantissa[0, point] + mantissa[point + 1, mantissa.size - point - 1]
+    n = whole + exponent
+    while digits.size > 1 && digits[0] == '0'
+      digits = digits[1, digits.size - 1]
+      n = n - 1
+    end
+    while digits.size > 1 && digits[digits.size - 1] == '0'
+      digits = digits[0, digits.size - 1]
+    end
+    k = digits.size
+    text = if k <= n && n <= 21
+             digits + "0" * (n - k) + ".0"
+           elsif 0 < n && n <= 21
+             digits[0, n] + "." + digits[n, k - n]
+           elsif -6 < n && n <= 0
+             "0." + "0" * (-n) + digits
+           else
+             e = n - 1
+             digits[0, 1] + "." + (k > 1 ? digits[1, k - 1] : "0") + "e" + (e > 0 ? "+" : "-") + (e < 0 ? -e : e).to_s
+           end
+    negative ? "-" + text : text
+  end
+
+  # The deterministic encoding of any value `to_any` takes.
+  def self.to_cbor(obj : T) : Array(UInt8) forall T
+    encode(to_any(obj))
+  end
+
+  # The item `bytes` hold, read into `type`: `Nil`, `Bool`, `Int32`,
+  # `Int64`, `UInt8`, `UInt64`, `Float64`, `String`, `Array(UInt8)`, `Any`,
+  # a type with `derive cbor_serializable`, one of those or nil, or an
+  # `Array` or a `Hash` of those. Bytes that are not CBOR panic with the
+  # `CBORError`'s sentence; a value of another kind, or an integer outside
+  # the type, is refused.
+  def self.from_cbor(bytes : Array(UInt8), type : T.class) : T forall T
+    # Not `or_panic`, for the reason std/toml's `from_toml` gives.
+    answer = decode(bytes)
+    raise answer.message if answer.is_a?(CBORError)
+    read_value(answer, type)
+  end
+
+  # The `Any` a value is written as: the value or null. A nil is taken out
+  # here, before the rest dispatches, for the reason std/json's
+  # `write_or_null` gives.
+  def self.to_any(val : T) : Any forall T
+    if val.nil?
+      Any.new(nil)
+    else
+      write_value(val)
+    end
+  end
+
+  def self.write_value(val : Nil) : Any
+    Any.new(nil)
+  end
+
+  def self.write_value(val : Bool) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : Int32) : Any
+    Any.new(val.to_i64)
+  end
+
+  def self.write_value(val : Int64) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : UInt8) : Any
+    Any.new(val.to_i64)
+  end
+
+  # Every `UInt64`: CBOR's unsigned integers go to 2^64 - 1.
+  def self.write_value(val : UInt64) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : Float64) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : String) : Any
+    Any.new(val)
+  end
+
+  def self.write_value(val : Any) : Any
+    val
+  end
+
+  # An `Array(UInt8)` is a byte string, not an array of small integers.
+  # Asked of `T` here rather than in an overload of its own: with an
+  # `Int32` overload declared, a call with an `Array(UInt8)` picked
+  # `Array(T)` over `Array(UInt8)`, in this compiler and in Crystal's, and
+  # the bytes went out as an array of integers.
+  def self.write_value(val : Array(T)) : Any forall T
+    {% if T == UInt8 %}
+      Any.new(val)
+    {% else %}
+      Any.new(val.map { |item| to_any(item) })
+    {% end %}
+  end
+
+  # Keys of any type `to_any` writes: CBOR keys are data items, so
+  # `Hash(Int32, String)` has integer keys and reads back as itself.
+  def self.write_value(val : Hash(K, V)) : Any forall K, V
+    pairs = Hash(Any, Any).new
+    val.each { |key, item| pairs[to_any(key)] = to_any(item) }
+    Any.new(pairs)
+  end
+
+  def self.write_value(val : T) : Any forall T : ToCBOR
+    val.to_cbor_any
+  end
+
+  def self.read_value(value : Any, type : Nil.class) : Nil
+    raise "expected null, not #{value.kind_name}" unless value.null?
+    nil
+  end
+
+  def self.read_value(value : Any, type : Bool.class) : Bool
+    value.as_bool
+  end
+
+  def self.read_value(value : Any, type : Int32.class) : Int32
+    v = value.as_i
+    raise "integer #{v} out of Int32 range" if v < -2147483648_i64 || v > 2147483647_i64
+    v.to_i32
+  end
+
+  def self.read_value(value : Any, type : Int64.class) : Int64
+    value.as_i
+  end
+
+  def self.read_value(value : Any, type : UInt8.class) : UInt8
+    v = value.as_i
+    raise "integer #{v} out of UInt8 range" if v < 0_i64 || v > 255_i64
+    v.to_u8
+  end
+
+  def self.read_value(value : Any, type : UInt64.class) : UInt64
+    value.as_u64
+  end
+
+  # A float, or an integer widened to one.
+  def self.read_value(value : Any, type : Float64.class) : Float64
+    value.as_f
+  end
+
+  def self.read_value(value : Any, type : String.class) : String
+    value.as_s
+  end
+
+  def self.read_value(value : Any, type : Any.class) : Any
+    value
+  end
+
+  # A byte string for `Array(UInt8)`, as `write_value` writes one.
+  def self.read_value(value : Any, type : Array(T).class) : Array(T) forall T
+    {% if T == UInt8 %}
+      value.as_bytes
+    {% else %}
+      value.as_a.map { |item| read_value(item, T) }
+    {% end %}
+  end
+
+  def self.read_value(value : Any, type : Hash(K, V).class) : Hash(K, V) forall K, V
+    h = Hash(K, V).new
+    value.as_h.each { |key, item| h[read_value(key, K)] = read_value(item, V) }
+    h
+  end
+
+  # A type that reads itself, the `initialize(cbor)` a `derive
+  # cbor_serializable` wrote; a type that admits nil reads null as the nil
+  # and anything else as the other type.
+  def self.read_value(value : Any, type : T.class) : T forall T
+    {% if T.nilable? %}
+      value.null? ? nil : read_value(value, typeof(nil.as(T) || raise("")))
+    {% else %}
+      T.new(value)
+    {% end %}
+  end
+end

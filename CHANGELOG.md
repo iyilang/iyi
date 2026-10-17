@@ -4,6 +4,36 @@
 
 ### Added
 
+- **std/cbor: CBOR (RFC 8949) decoded, encoded in core deterministic
+  encoding and written as diagnostic notation, in iyi, importing
+  nothing.** `CBOR.decode(bytes) : Any | CBORError` reads one data item
+  from an `Array(UInt8)` or a `String`'s bytes: integers to 64 bits of
+  argument and bignums (tags 2 and 3) of any size, held as one kind with
+  the value as its only form - an `Int64` where it fits, a `CBORBignum`
+  of sign and magnitude otherwise, so `c24101` is the 1 that `01` is, as
+  section 3.4.3's extended data model says - byte and text strings
+  definite and chunked, arrays, maps with keys of any kind, tags,
+  simple values, undefined, and half, single and double floats with
+  their NaN payloads. Text must be UTF-8, each chunk by itself; a map key
+  written twice and a bignum tag around anything but bytes are refused.
+  Every `CBORError` names the byte where the item at fault starts, and a
+  well-formedness error is answered before a validity one, so each of
+  Appendix F's 94 examples is refused for the error the RFC files it
+  under. Nesting stops at `CBOR::DEPTH_LIMIT` (64: decoding ran out of a
+  task's stack at 160 to 175 levels and encoding maps nested in maps at
+  125, measured in a plain build), and a length or count past the bytes
+  left is refused before anything is allocated for it. `CBOR.encode`
+  writes section 4.2.1's deterministic encoding: shortest arguments, the
+  shortest float that gives back the same 64 bits (a NaN shortened only
+  when what it drops is zero), definite lengths, keys in the bytewise
+  order of their encodings. `CBOR.deterministic?(bytes)` and
+  `CBOR.decode(bytes, deterministic: true)` refuse whatever is not that
+  encoding, by name and offset. `Any#to_s` is section 8's notation as
+  Appendix A prints it - floats as ECMAScript writes their shortest
+  digits, `\u` escapes past ASCII, `[_ ...]` and `(_ h'01', h'02')` for
+  what was written indefinite - and `derive cbor_serializable` sits
+  beside std/json's, std/yaml's and std/toml's derives on one type, an
+  `Array(UInt8)` field written as a byte string.
 - **std/smtp: an SMTP client (RFC 5321) over std/socket and std/tls.**
   `SmtpClient.connect(host, port, security, config, helo, timeout_ms) :
   SmtpClient | SmtpError` greets and says EHLO (HELO after a 500, 502 or

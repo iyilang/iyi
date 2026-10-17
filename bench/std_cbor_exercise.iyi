@@ -1,0 +1,953 @@
+# Exercises `std/cbor`: RFC 8949's CBOR decoded, encoded in core
+# deterministic encoding and written as diagnostic notation - every
+# example of the RFC's Appendix A both ways, every not-well-formed example
+# of Appendix F refused with its sentence, integers, bignums and floats at
+# the edges of their widths, the deterministic rules and their refusals,
+# UTF-8, a generated corpus round-tripped and re-serialized every other
+# way the format allows, random and mutated bytes decoded in a task that
+# must not panic, nesting to DEPTH_LIMIT, and `derive cbor_serializable`
+# beside std/json's, std/yaml's and std/toml's derives.
+#
+# Lines starting RFC, CORPUS, VARIANT, INVALID, FUZZ and DERIVE are records
+# for bench/std_cbor_exercise.sh, whose Python decodes the same bytes with
+# a decoder of its own over the standard library (`struct` for the
+# floats, the UTF-8 codec, `json` for the strings of the notation) and
+# compares: an item's bytes in hex and what this module made of them.
+#
+# Run via:
+#     ./bin/iyi run bench/std_cbor_exercise.iyi
+
+module bench/std_cbor_exercise
+
+import std/cbor::{CBOR, Any, CBORError, CBORTag, CBORSimple, CBORBignum, cbor_serializable}
+import std/toml::{TOML, toml_serializable}
+import std/yaml::{YAML, yaml_serializable}
+import std/json::{JSON, serializable}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+HEX_DIGITS = "0123456789abcdef"
+
+def hex(bytes : Array(UInt8)) : String
+  out = String::Builder.new(bytes.size * 2 + 1)
+  bytes.each do |b|
+    v = b.to_i32
+    out << HEX_DIGITS[v >> 4] << HEX_DIGITS[v & 15]
+  end
+  out.to_s
+end
+
+def unhex(text : String) : Array(UInt8)
+  bytes = [] of UInt8
+  i = 0
+  while i + 1 < text.size
+    hi = HEX_DIGITS.index(text[i]) || raise "not hex: #{text}"
+    lo = HEX_DIGITS.index(text[i + 1]) || raise "not hex: #{text}"
+    bytes << (hi * 16 + lo).to_u8
+    i = i + 2
+  end
+  bytes
+end
+
+def text_bytes(text : String) : Array(UInt8)
+  p = text.to_unsafe
+  Array(UInt8).new(text.bytesize) { |i| p[i] }
+end
+
+# The item `bytes` hold, or a failed assertion naming `msg`.
+def decoded(bytes : Array(UInt8), msg : String) : Any
+  answer = CBOR.decode(bytes)
+  raise "ASSERTION FAILED: #{msg}: refused with #{answer.message}" if answer.is_a?(CBORError)
+  answer
+end
+
+# Refused with exactly `sentence`; recorded for Python, whose decoder must
+# refuse the bytes too.
+def refused(hexed : String, sentence : String, deterministic : Bool = false) : Nil
+  answer = CBOR.decode(unhex(hexed), deterministic: deterministic)
+  raise "ASSERTION FAILED: accepted #{hexed}" unless answer.is_a?(CBORError)
+  assert_str(sentence, answer.message, "the refusal of #{hexed}")
+  puts "INVALID #{hexed}\t#{deterministic ? 1 : 0}"
+end
+
+# The sentence `action` panicked with, or what it answered when it did not.
+def panic_of(action : Proc(String)) : String
+  said = "unread"
+  group do |g|
+    task = g.spawn { action.call }
+    answer = task.value
+    said = answer.is_a?(Panicked) ? answer.message : answer
+  end
+  said
+end
+
+def f64(bits : UInt64) : Float64
+  IyiFloatText.from_bits(bits)
+end
+
+def ints(values : Array(Int32)) : Any
+  Any.new(values.map { |v| Any.new(v) })
+end
+
+def map_of(pairs : Array(Tuple(Any, Any))) : Any
+  h = Hash(Any, Any).new
+  pairs.each { |pair| h[pair[0]] = pair[1] }
+  Any.new(h)
+end
+
+# A small generator of its own (xorshift64*), so the corpus and the fuzz
+# are the same on every run and every target.
+class Rng
+  @state : UInt64
+
+  def initialize(@state : UInt64)
+  end
+
+  def draw : UInt64
+    x = @state
+    x = x ^ x.unsafe_shr(12)
+    x = x ^ x.unsafe_shl(25)
+    x = x ^ x.unsafe_shr(27)
+    @state = x
+    x &* 0x2545F4914F6CDD1D_u64
+  end
+
+  def below(n : Int32) : Int32
+    (draw % n.to_u64).to_i32
+  end
+
+  def chance(n : Int32) : Bool
+    below(n) == 0
+  end
+
+  def byte : UInt8
+    (draw & 0xFF_u64).to_u8
+  end
+end
+
+# RFC 8949 Appendix A, as the RFC prints it: the diagnostic notation, the
+# encoding, and - for the examples that are not preferred serialization -
+# the bytes the deterministic encoding of the same value is, which the RFC
+# leaves to the reader (the definite form, or the half that holds the same
+# Infinity or NaN). Empty means the example is deterministic already.
+APPENDIX_A = [
+  {"0", "00", ""},
+  {"1", "01", ""},
+  {"10", "0a", ""},
+  {"23", "17", ""},
+  {"24", "1818", ""},
+  {"25", "1819", ""},
+  {"100", "1864", ""},
+  {"1000", "1903e8", ""},
+  {"1000000", "1a000f4240", ""},
+  {"1000000000000", "1b000000e8d4a51000", ""},
+  {"18446744073709551615", "1bffffffffffffffff", ""},
+  {"18446744073709551616", "c249010000000000000000", ""},
+  {"-18446744073709551616", "3bffffffffffffffff", ""},
+  {"-18446744073709551617", "c349010000000000000000", ""},
+  {"-1", "20", ""},
+  {"-10", "29", ""},
+  {"-100", "3863", ""},
+  {"-1000", "3903e7", ""},
+  {"0.0", "f90000", ""},
+  {"-0.0", "f98000", ""},
+  {"1.0", "f93c00", ""},
+  {"1.1", "fb3ff199999999999a", ""},
+  {"1.5", "f93e00", ""},
+  {"65504.0", "f97bff", ""},
+  {"100000.0", "fa47c35000", ""},
+  {"3.4028234663852886e+38", "fa7f7fffff", ""},
+  {"1.0e+300", "fb7e37e43c8800759c", ""},
+  {"5.960464477539063e-8", "f90001", ""},
+  {"0.00006103515625", "f90400", ""},
+  {"-4.0", "f9c400", ""},
+  {"-4.1", "fbc010666666666666", ""},
+  {"Infinity", "f97c00", ""},
+  {"NaN", "f97e00", ""},
+  {"-Infinity", "f9fc00", ""},
+  {"Infinity", "fa7f800000", "f97c00"},
+  {"NaN", "fa7fc00000", "f97e00"},
+  {"-Infinity", "faff800000", "f9fc00"},
+  {"Infinity", "fb7ff0000000000000", "f97c00"},
+  {"NaN", "fb7ff8000000000000", "f97e00"},
+  {"-Infinity", "fbfff0000000000000", "f9fc00"},
+  {"false", "f4", ""},
+  {"true", "f5", ""},
+  {"null", "f6", ""},
+  {"undefined", "f7", ""},
+  {"simple(16)", "f0", ""},
+  {"simple(255)", "f8ff", ""},
+  {"0(\"2013-03-21T20:04:00Z\")", "c074323031332d30332d32315432303a30343a30305a", ""},
+  {"1(1363896240)", "c11a514b67b0", ""},
+  {"1(1363896240.5)", "c1fb41d452d9ec200000", ""},
+  {"23(h'01020304')", "d74401020304", ""},
+  {"24(h'6449455446')", "d818456449455446", ""},
+  {"32(\"http://www.example.com\")", "d82076687474703a2f2f7777772e6578616d706c652e636f6d", ""},
+  {"h''", "40", ""},
+  {"h'01020304'", "4401020304", ""},
+  {"\"\"", "60", ""},
+  {"\"a\"", "6161", ""},
+  {"\"IETF\"", "6449455446", ""},
+  {"\"\\\"\\\\\"", "62225c", ""},
+  {"\"\\u00fc\"", "62c3bc", ""},
+  {"\"\\u6c34\"", "63e6b0b4", ""},
+  {"\"\\ud800\\udd51\"", "64f0908591", ""},
+  {"[]", "80", ""},
+  {"[1, 2, 3]", "83010203", ""},
+  {"[1, [2, 3], [4, 5]]", "8301820203820405", ""},
+  {"[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]", "98190102030405060708090a0b0c0d0e0f101112131415161718181819", ""},
+  {"{}", "a0", ""},
+  {"{1: 2, 3: 4}", "a201020304", ""},
+  {"{\"a\": 1, \"b\": [2, 3]}", "a26161016162820203", ""},
+  {"[\"a\", {\"b\": \"c\"}]", "826161a161626163", ""},
+  {"{\"a\": \"A\", \"b\": \"B\", \"c\": \"C\", \"d\": \"D\", \"e\": \"E\"}", "a56161614161626142616361436164614461656145", ""},
+  {"(_ h'0102', h'030405')", "5f42010243030405ff", "450102030405"},
+  {"(_ \"strea\", \"ming\")", "7f657374726561646d696e67ff", "6973747265616d696e67"},
+  {"[_ ]", "9fff", "80"},
+  {"[_ 1, [2, 3], [_ 4, 5]]", "9f018202039f0405ffff", "8301820203820405"},
+  {"[_ 1, [2, 3], [4, 5]]", "9f01820203820405ff", "8301820203820405"},
+  {"[1, [2, 3], [_ 4, 5]]", "83018202039f0405ff", "8301820203820405"},
+  {"[1, [_ 2, 3], [4, 5]]", "83019f0203ff820405", "8301820203820405"},
+  {"[_ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]", "9f0102030405060708090a0b0c0d0e0f101112131415161718181819ff", "98190102030405060708090a0b0c0d0e0f101112131415161718181819"},
+  {"{_ \"a\": 1, \"b\": [_ 2, 3]}", "bf61610161629f0203ffff", "a26161016162820203"},
+  {"[\"a\", {_ \"b\": \"c\"}]", "826161bf61626163ff", "826161a161626163"},
+  {"{_ \"Fun\": true, \"Amt\": -2}", "bf6346756ef563416d7421ff", "a263416d74216346756ef5"},
+]
+
+# RFC 8949 Appendix F.1, every example, each with the sentence this
+# decoder refuses it with. The offset is where the item at fault starts,
+# or where the data ran out.
+APPENDIX_F = [
+  # End of input in a head.
+  {"18", "the data ends inside the head of an unsigned integer at byte 0"},
+  {"19", "the data ends inside the head of an unsigned integer at byte 0"},
+  {"1a", "the data ends inside the head of an unsigned integer at byte 0"},
+  {"1b", "the data ends inside the head of an unsigned integer at byte 0"},
+  {"1901", "the data ends inside the head of an unsigned integer at byte 0"},
+  {"1a0102", "the data ends inside the head of an unsigned integer at byte 0"},
+  {"1b01020304050607", "the data ends inside the head of an unsigned integer at byte 0"},
+  {"38", "the data ends inside the head of a negative integer at byte 0"},
+  {"58", "the data ends inside the head of a byte string at byte 0"},
+  {"78", "the data ends inside the head of a text string at byte 0"},
+  {"98", "the data ends inside the head of an array at byte 0"},
+  {"9a01ff00", "the data ends inside the head of an array at byte 0"},
+  {"b8", "the data ends inside the head of a map at byte 0"},
+  {"d8", "the data ends inside the head of a tag at byte 0"},
+  {"f8", "the data ends inside the head of a simple value or float at byte 0"},
+  {"f900", "the data ends inside the head of a simple value or float at byte 0"},
+  {"fa0000", "the data ends inside the head of a simple value or float at byte 0"},
+  {"fb000000", "the data ends inside the head of a simple value or float at byte 0"},
+  # Definite-length strings with short data.
+  {"41", "a byte string of 1 byte, where 0 are left at byte 0"},
+  {"61", "a text string of 1 byte, where 0 are left at byte 0"},
+  {"5affffffff00", "a byte string of 4294967295 bytes, where 1 is left at byte 0"},
+  {"5bffffffffffffffff010203", "a byte string of 18446744073709551615 bytes, where 3 are left at byte 0"},
+  {"7affffffff00", "a text string of 4294967295 bytes, where 1 is left at byte 0"},
+  {"7b7fffffffffffffff010203", "a text string of 9223372036854775807 bytes, where 3 are left at byte 0"},
+  # Definite-length maps and arrays not closed with enough items.
+  {"81", "an array of 1 item, where 0 bytes are left at byte 0"},
+  {"818181818181818181", "an array of 1 item, where 0 bytes are left at byte 8"},
+  {"8200", "an array of 2 items, where 1 byte is left at byte 0"},
+  {"a1", "a map of 1 pair, where 0 bytes are left at byte 0"},
+  {"a20102", "the data ends where a data item was due at byte 3"},
+  {"a100", "the data ends where a data item was due at byte 2"},
+  {"a2000000", "the data ends where a data item was due at byte 4"},
+  # Tag number not followed by tag content.
+  {"c0", "the data ends where a data item was due at byte 1"},
+  # Indefinite-length strings not closed by a break.
+  {"5f4100", "the data ends before the break that closes an indefinite-length byte string at byte 3"},
+  {"7f6100", "the data ends before the break that closes an indefinite-length text string at byte 3"},
+  # Indefinite-length maps and arrays not closed by a break.
+  {"9f", "the data ends before the break that closes an indefinite-length array at byte 1"},
+  {"9f0102", "the data ends before the break that closes an indefinite-length array at byte 3"},
+  {"bf", "the data ends before the break that closes an indefinite-length map at byte 1"},
+  {"bf01020102", "the data ends before the break that closes an indefinite-length map at byte 5"},
+  {"819f", "the data ends before the break that closes an indefinite-length array at byte 2"},
+  {"9f8000", "the data ends before the break that closes an indefinite-length array at byte 3"},
+  {"9f9f9f9f9fffffffff", "the data ends before the break that closes an indefinite-length array at byte 9"},
+  {"9f819f819f9fffffff", "the data ends before the break that closes an indefinite-length array at byte 9"},
+  # Subkind 1: reserved additional information.
+  {"1c", "additional information 28 is reserved at byte 0"},
+  {"1d", "additional information 29 is reserved at byte 0"},
+  {"1e", "additional information 30 is reserved at byte 0"},
+  {"3c", "additional information 28 is reserved at byte 0"},
+  {"3d", "additional information 29 is reserved at byte 0"},
+  {"3e", "additional information 30 is reserved at byte 0"},
+  {"5c", "additional information 28 is reserved at byte 0"},
+  {"5d", "additional information 29 is reserved at byte 0"},
+  {"5e", "additional information 30 is reserved at byte 0"},
+  {"7c", "additional information 28 is reserved at byte 0"},
+  {"7d", "additional information 29 is reserved at byte 0"},
+  {"7e", "additional information 30 is reserved at byte 0"},
+  {"9c", "additional information 28 is reserved at byte 0"},
+  {"9d", "additional information 29 is reserved at byte 0"},
+  {"9e", "additional information 30 is reserved at byte 0"},
+  {"bc", "additional information 28 is reserved at byte 0"},
+  {"bd", "additional information 29 is reserved at byte 0"},
+  {"be", "additional information 30 is reserved at byte 0"},
+  {"dc", "additional information 28 is reserved at byte 0"},
+  {"dd", "additional information 29 is reserved at byte 0"},
+  {"de", "additional information 30 is reserved at byte 0"},
+  {"fc", "additional information 28 is reserved at byte 0"},
+  {"fd", "additional information 29 is reserved at byte 0"},
+  {"fe", "additional information 30 is reserved at byte 0"},
+  # Subkind 2: reserved two-byte encodings of simple values.
+  {"f800", "simple value 0 in the two-byte form, which only 32 to 255 take at byte 0"},
+  {"f801", "simple value 1 in the two-byte form, which only 32 to 255 take at byte 0"},
+  {"f818", "simple value 24 in the two-byte form, which only 32 to 255 take at byte 0"},
+  {"f81f", "simple value 31 in the two-byte form, which only 32 to 255 take at byte 0"},
+  # Subkind 3: indefinite-length string chunks of the wrong type, or not
+  # of definite length.
+  {"5f00ff", "an indefinite-length byte string holding a chunk that is an unsigned integer, not a definite-length byte string at byte 1"},
+  {"5f21ff", "an indefinite-length byte string holding a chunk that is a negative integer, not a definite-length byte string at byte 1"},
+  {"5f6100ff", "an indefinite-length byte string holding a chunk that is a text string, not a definite-length byte string at byte 1"},
+  {"5f80ff", "an indefinite-length byte string holding a chunk that is an array, not a definite-length byte string at byte 1"},
+  {"5fa0ff", "an indefinite-length byte string holding a chunk that is a map, not a definite-length byte string at byte 1"},
+  {"5fc000ff", "an indefinite-length byte string holding a chunk that is a tag, not a definite-length byte string at byte 1"},
+  {"5fe0ff", "an indefinite-length byte string holding a chunk that is a simple value or float, not a definite-length byte string at byte 1"},
+  {"7f4100ff", "an indefinite-length text string holding a chunk that is a byte string, not a definite-length text string at byte 1"},
+  {"5f5f4100ffff", "an indefinite-length byte string holding a chunk of indefinite length at byte 1"},
+  {"7f7f6100ffff", "an indefinite-length text string holding a chunk of indefinite length at byte 1"},
+  # Subkind 4: a break on its own, in a definite-length array, map or
+  # tag, or in a map's value position.
+  {"ff", "a break code where a data item was due at byte 0"},
+  {"81ff", "a break code where a data item was due at byte 1"},
+  {"8200ff", "a break code where a data item was due at byte 2"},
+  {"a1ff", "a break code where a data item was due at byte 1"},
+  {"a1ff00", "a break code where a data item was due at byte 1"},
+  {"a100ff", "a break code where a data item was due at byte 2"},
+  {"a20000ff", "a break code where a data item was due at byte 3"},
+  {"9f81ff", "a break code where a data item was due at byte 2"},
+  {"9f829f819f9fffffffff", "a break code where a data item was due at byte 9"},
+  {"bf00ff", "a break code where a data item was due at byte 2"},
+  {"bf000000ff", "a break code where a data item was due at byte 4"},
+  # Subkind 5: additional information 31 on major types 0, 1 and 6.
+  {"1f", "additional information 31 (indefinite length) on an unsigned integer at byte 0"},
+  {"3f", "additional information 31 (indefinite length) on a negative integer at byte 0"},
+  {"df", "additional information 31 (indefinite length) on a tag at byte 0"},
+]
+
+# Text a writer gets wrong: quotes, backslashes, every control JSON names
+# and the ones it does not, DEL, two- three- and four-byte characters, the
+# last scalar value, a byte order mark, a line separator.
+TRICKY = ["", "a", "key", "\"", "\\", "\n", "\r", "\t", "\b", "\f", "\u0000", "\u0001", "\u001F", "\u007F",
+          "é", "ü", "水", "😀", "𐅑", "\uFEFF", "\u2028", "\uFFFD", "\u{10FFFF}", "'", "/", " ", "_", "Z"]
+
+EDGES = [0_u64, 1_u64, 23_u64, 24_u64, 255_u64, 256_u64, 65535_u64, 65536_u64, 4294967295_u64, 4294967296_u64,
+         9223372036854775807_u64, 9223372036854775808_u64, 18446744073709551615_u64]
+
+TAGS = [0_u64, 1_u64, 4_u64, 5_u64, 21_u64, 23_u64, 24_u64, 32_u64, 255_u64, 256_u64, 1000_u64, 55799_u64,
+        65535_u64, 65536_u64, 4294967296_u64, 18446744073709551615_u64]
+
+# A value of every kind the data model has, nested to `depth` 4 at most.
+def generate(rng : Rng, depth : Int32) : Any
+  k = depth >= 4 ? rng.below(10) : rng.below(15)
+  if k == 0
+    edge = EDGES[rng.below(EDGES.size)]
+    edge = edge &+ rng.below(3).to_u64 if rng.chance(3) && edge < 18446744073709551613_u64
+    v = Any.new(edge)
+    rng.chance(2) ? v : Any.new(CBORBignum.new(true, v.as_big.magnitude))
+  elsif k == 1
+    v = rng.draw.unsafe_shr(rng.below(64))
+    rng.chance(2) ? Any.new(v) : Any.new(CBORBignum.new(true, Any.new(v).as_big.magnitude))
+  elsif k == 2
+    size = 1 + rng.below(20)
+    magnitude = Array(UInt8).new(size) { |i| i == 0 ? (1_u8 | rng.byte) : rng.byte }
+    Any.new(CBORBignum.new(rng.chance(2), magnitude))
+  elsif k == 3 || k == 4
+    float(rng)
+  elsif k == 5
+    Any.new(Array(UInt8).new(rng.below(17)) { rng.byte })
+  elsif k == 6
+    text = String::Builder.new
+    rng.below(5).times { text << TRICKY[rng.below(TRICKY.size)] }
+    Any.new(text.to_s)
+  elsif k == 7
+    pick = rng.below(4)
+    pick == 0 ? Any.new(true) : (pick == 1 ? Any.new(false) : (pick == 2 ? Any.new(nil) : Any.undefined))
+  elsif k == 8
+    s = rng.below(20 + 224)
+    Any.new(CBORSimple.new(s < 20 ? s : s + 12))
+  elsif k == 9
+    Any.new(rng.below(1000) - 500)
+  elsif k == 10 || k == 11
+    Any.new(Array(Any).new(rng.below(6)) { generate(rng, depth + 1) })
+  elsif k == 12 || k == 13
+    h = Hash(Any, Any).new
+    rng.below(5).times { h[generate(rng, depth + 1)] = generate(rng, depth + 1) }
+    Any.new(h)
+  else
+    Any.new(CBORTag.new(TAGS[rng.below(TAGS.size)], generate(rng, depth + 1)))
+  end
+end
+
+# A float from bits of each width, so that every width is the shortest for
+# some: a half's, a single's, a double's, or one of the values at an edge.
+def float(rng : Rng) : Any
+  pick = rng.below(5)
+  if pick == 0
+    decoded([0xF9_u8, rng.byte, rng.byte], "a random half")
+  elsif pick == 1
+    decoded([0xFA_u8, rng.byte, rng.byte, rng.byte, rng.byte], "a random single")
+  elsif pick == 2
+    Any.new(f64(rng.draw))
+  elsif pick == 3
+    Any.new((rng.below(2000000) - 1000000).to_f64 / 64.0)
+  else
+    specials = [0x0_u64, 0x8000000000000000_u64, 0x7FF0000000000000_u64, 0xFFF0000000000000_u64, 0x7FF8000000000000_u64,
+                0x7FF0000000000001_u64, 0x7FF4000000000000_u64, 0xFFF8000000000000_u64, 0x7FF8000020000000_u64,
+                0x0000000000000001_u64, 0x3E70000000000000_u64, 0x3E60000000000000_u64, 0x36A0000000000000_u64,
+                0x36A0000000000001_u64, 0x47EFFFFFE0000000_u64, 0x40EFFE0000000000_u64, 0x40EFFE1000000000_u64]
+    Any.new(f64(specials[rng.below(specials.size)]))
+  end
+end
+
+# The variant encoder: the same value written every other way the format
+# allows - an argument longer than it needs, an indefinite length, chunked
+# strings (text cut only between characters), a map's pairs in a random
+# order, a float wider than it needs, an integer as a bignum with leading
+# zeros - so the decoder reads what other encoders write and `CBOR.encode`
+# brings each back to the one deterministic form.
+def variant_head(sink : Array(UInt8), major : Int32, arg : UInt64, rng : Rng) : Nil
+  least = arg < 24_u64 ? 0 : (arg < 256_u64 ? 1 : (arg < 65536_u64 ? 2 : (arg < 4294967296_u64 ? 3 : 4)))
+  width = least
+  width = least + rng.below(5 - least) if rng.chance(4)
+  if width == 0
+    sink << ((major << 5) | arg.to_i32).to_u8
+    return
+  end
+  size = 1 << (width - 1)
+  sink << ((major << 5) | (23 + width)).to_u8
+  shift = (size - 1) * 8
+  while shift >= 0
+    sink << (arg.unsafe_shr(shift) & 0xFF_u64).to_u8
+    shift = shift - 8
+  end
+end
+
+def variant_string(sink : Array(UInt8), major : Int32, bytes : Array(UInt8), rng : Rng) : Nil
+  unless rng.chance(3)
+    variant_head(sink, major, bytes.size.to_u64, rng)
+    sink.concat(bytes)
+    return
+  end
+  sink << ((major << 5) | 31).to_u8
+  at = 0
+  while at < bytes.size || rng.chance(4)
+    cut = at + rng.below(bytes.size - at + 1)
+    if major == 3
+      while cut < bytes.size && (bytes[cut] & 0xC0_u8) == 0x80_u8
+        cut = cut + 1
+      end
+    end
+    variant_head(sink, major, (cut - at).to_u64, rng)
+    sink.concat(bytes[at, cut - at])
+    at = cut
+    break if at >= bytes.size && !rng.chance(4)
+  end
+  sink << 0xFF_u8
+end
+
+def variant(sink : Array(UInt8), v : Any, rng : Rng) : Nil
+  r = v.raw
+  if r.is_a?(Array(Any))
+    if rng.chance(3)
+      sink << 0x9F_u8
+      r.each { |item| variant(sink, item, rng) }
+      sink << 0xFF_u8
+    else
+      variant_head(sink, 4, r.size.to_u64, rng)
+      r.each { |item| variant(sink, item, rng) }
+    end
+  elsif r.is_a?(Hash(Any, Any))
+    pairs = r.to_a
+    i = pairs.size - 1
+    while i > 0
+      j = rng.below(i + 1)
+      swap = pairs[i]
+      pairs[i] = pairs[j]
+      pairs[j] = swap
+      i = i - 1
+    end
+    indefinite = rng.chance(3)
+    indefinite ? (sink << 0xBF_u8) : variant_head(sink, 5, pairs.size.to_u64, rng)
+    pairs.each do |pair|
+      variant(sink, pair[0], rng)
+      variant(sink, pair[1], rng)
+    end
+    sink << 0xFF_u8 if indefinite
+  elsif r.is_a?(String)
+    variant_string(sink, 3, text_bytes(r), rng)
+  elsif r.is_a?(Array(UInt8))
+    variant_string(sink, 2, r, rng)
+  elsif r.is_a?(CBORTag)
+    variant_head(sink, 6, r.number, rng)
+    variant(sink, r.value, rng)
+  elsif r.is_a?(Int64) || r.is_a?(CBORBignum)
+    big = v.as_big
+    n = big.magnitude_u64?
+    if n.nil? || rng.chance(6)
+      variant_head(sink, 6, big.negative? ? 3_u64 : 2_u64, rng)
+      padded = Array(UInt8).new(rng.below(3), 0_u8) + big.magnitude
+      variant_string(sink, 2, padded, rng)
+    else
+      variant_head(sink, big.negative? ? 1 : 0, n, rng)
+    end
+  elsif r.is_a?(Float64) && rng.chance(2)
+    sink << 0xFB_u8
+    bits = IyiFloatText.bits_of(r)
+    shift = 56
+    while shift >= 0
+      sink << (bits.unsafe_shr(shift) & 0xFF_u64).to_u8
+      shift = shift - 8
+    end
+  else
+    sink.concat(CBOR.encode(v))
+  end
+end
+
+# Derived types. `Inner` and `Record` derive std/json's, std/yaml's and
+# std/toml's too, which is how a type that is all four spells it, and
+# what lets Python compare the CBOR with the JSON of the same value.
+struct Inner
+  getter x : Int32
+  getter label : String?
+
+  def initialize(@x : Int32, @label : String?)
+  end
+
+  derive serializable, yaml_serializable, toml_serializable, cbor_serializable
+end
+
+struct Record
+  getter name : String
+  getter blob : Array(UInt8)
+  getter tags : Array(String)
+  getter weights : Hash(String, Float64)
+  getter count : Int64
+  getter small : UInt8
+  getter big : UInt64
+  getter ratio : Float64
+  getter flag : Bool
+  getter note : String?
+  getter inner : Inner
+  getter inners : Array(Inner)
+  getter maybe : Inner?
+  getter matrix : Array(Array(Int32))
+
+  def initialize(@name : String, @blob : Array(UInt8), @tags : Array(String), @weights : Hash(String, Float64), @count : Int64, @small : UInt8, @big : UInt64, @ratio : Float64, @flag : Bool, @note : String?, @inner : Inner, @inners : Array(Inner), @maybe : Inner?, @matrix : Array(Array(Int32)))
+  end
+
+  derive serializable, yaml_serializable, toml_serializable, cbor_serializable
+end
+
+# What only CBOR holds of these: a UInt64 past Int64, integer keys, any
+# item as a key, an `Any`.
+struct Wide
+  getter top : UInt64
+  getter by_id : Hash(Int32, String)
+  getter keyed : Hash(Any, Int64)
+  getter extra : Any
+
+  def initialize(@top : UInt64, @by_id : Hash(Int32, String), @keyed : Hash(Any, Int64), @extra : Any)
+  end
+
+  derive cbor_serializable
+end
+
+struct Spot
+  getter x : Float64
+  getter name : String
+  getter note : String?
+
+  derive cbor_serializable
+end
+
+struct Listener
+  @port : Int32 = 8080
+  @host : String? = "localhost"
+  getter port
+  getter host
+  getter name : String
+
+  derive cbor_serializable
+end
+
+puts "== RFC 8949 appendix A, decoded to its notation"
+APPENDIX_A.each do |example|
+  puts "RFC #{example[1]}\t#{example[0]}"
+end
+APPENDIX_A.each do |example|
+  v = decoded(unhex(example[1]), "appendix A decodes #{example[1]}")
+  assert_str(example[0], v.to_s, "appendix A decodes #{example[1]} to #{example[0]}")
+  want = example[2].empty?
+  assert_true(CBOR.deterministic?(unhex(example[1])) == want, "appendix A: #{example[1]} is #{want ? "" : "not "}deterministic")
+end
+puts "  #{APPENDIX_A.size} examples, each read to the notation the RFC prints beside it"
+
+puts "== RFC 8949 appendix A, encoded"
+APPENDIX_A.each do |example|
+  v = decoded(unhex(example[1]), "appendix A decodes #{example[1]}")
+  want = example[2].empty? ? example[1] : example[2]
+  assert_str(want, hex(CBOR.encode(v)), "appendix A encodes #{example[0]}")
+  assert_true(decoded(CBOR.encode(v), "appendix A's encoding decodes") == v, "appendix A's #{example[0]} reads back equal")
+end
+made = [
+  {Any.new(0), "00"},
+  {Any.new(1000000000000_i64), "1b000000e8d4a51000"},
+  {Any.new(18446744073709551615_u64), "1bffffffffffffffff"},
+  {Any.new(CBORBignum.new(false, [1_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])), "c249010000000000000000"},
+  {Any.new(CBORBignum.new(true, [255_u8, 255_u8, 255_u8, 255_u8, 255_u8, 255_u8, 255_u8, 255_u8])), "3bffffffffffffffff"},
+  {Any.new(CBORBignum.new(true, [0_u8, 1_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8, 0_u8])), "c349010000000000000000"},
+  {Any.new(-1000), "3903e7"},
+  {Any.new(-0.0), "f98000"},
+  {Any.new(1.1), "fb3ff199999999999a"},
+  {Any.new(100000.0), "fa47c35000"},
+  {Any.new(5.960464477539063e-8), "f90001"},
+  {Any.new(-4.1), "fbc010666666666666"},
+  {Any.new(1.0 / 0.0), "f97c00"},
+  {Any.new(0.0 / 0.0), "f97e00"},
+  {Any.new(-1.0 / 0.0), "f9fc00"},
+  {Any.undefined, "f7"},
+  {Any.new(CBORSimple.new(16)), "f0"},
+  {Any.new(CBORSimple.new(255)), "f8ff"},
+  {Any.new(CBORTag.new(1_u64, Any.new(1363896240.5))), "c1fb41d452d9ec200000"},
+  {Any.new(CBORTag.new(24_u64, Any.new(text_bytes("dIETF")))), "d818456449455446"},
+  {Any.new("\u{10151}"), "64f0908591"},
+  {Any.new("\"\\"), "62225c"},
+  {Any.new([Any.new(1), ints([2, 3]), ints([4, 5])]), "8301820203820405"},
+  {ints(Array(Int32).new(25) { |i| i + 1 }), "98190102030405060708090a0b0c0d0e0f101112131415161718181819"},
+  {map_of([{Any.new("e"), Any.new("E")}, {Any.new("d"), Any.new("D")}, {Any.new("c"), Any.new("C")}, {Any.new("b"), Any.new("B")}, {Any.new("a"), Any.new("A")}]), "a56161614161626142616361436164614461656145"},
+  {map_of([{Any.new("Fun"), Any.new(true)}, {Any.new("Amt"), Any.new(-2)}]), "a263416d74216346756ef5"},
+]
+made.each do |pair|
+  assert_str(pair[1], hex(CBOR.encode(pair[0])), "a value made in the program encodes as appendix A writes #{pair[0]}")
+end
+puts "  every example written back as deterministic encoding: the #{APPENDIX_A.count { |e| e[2].empty? }} that are already, byte for byte; the rest in definite lengths and half floats"
+puts "  and #{made.size} of the values made in the program, not read, encoded to the appendix's bytes"
+
+puts "== RFC 8949 appendix F, not well-formed"
+APPENDIX_F.each do |example|
+  answer = CBOR.decode(unhex(example[0]))
+  raise "ASSERTION FAILED: appendix F refuses #{example[0]}: accepted as #{answer}" unless answer.is_a?(CBORError)
+  assert_str(example[1], answer.message, "appendix F refuses #{example[0]}")
+  assert_true(CBOR.decode?(unhex(example[0])).nil? && !CBOR.deterministic?(unhex(example[0])), "appendix F: decode? answers nil for #{example[0]}")
+  puts "INVALID #{example[0]}\t0"
+end
+puts "  #{APPENDIX_F.size} examples refused, each for the error Appendix F files it under"
+refused("0000", "1 byte after the data item at byte 1")
+refused("", "the data ends where a data item was due at byte 0")
+refused("830102030405", "2 bytes after the data item at byte 4")
+puts "  and data after an item, or none at all"
+
+puts "== integers and bignums"
+[{"17", 23_i64}, {"1818", 24_i64}, {"18ff", 255_i64}, {"190100", 256_i64}, {"19ffff", 65535_i64}, {"1a00010000", 65536_i64},
+ {"1affffffff", 4294967295_i64}, {"1b0000000100000000", 4294967296_i64}, {"1b7fffffffffffffff", 9223372036854775807_i64},
+ {"37", -24_i64}, {"3818", -25_i64}, {"38ff", -256_i64}, {"390100", -257_i64}, {"39ffff", -65536_i64}, {"3a00010000", -65537_i64},
+ {"3affffffff", -4294967296_i64}, {"3b0000000100000000", -4294967297_i64}, {"3b7fffffffffffffff", -9223372036854775807_i64 - 1_i64}].each do |pair|
+  assert_str(pair[0], hex(CBOR.encode(Any.new(pair[1]))), "the integer #{pair[1]} encodes in its shortest head")
+  assert_true(decoded(unhex(pair[0]), "an integer at an edge").as_i == pair[1], "#{pair[0]} decodes to #{pair[1]}")
+end
+assert_true(Any.new(CBORBignum.new(true, [] of UInt8)) == decoded(unhex("20"), "-1"), "a negative bignum of magnitude 0 is -1")
+[{"c240", "0", "00"}, {"c24101", "1", "01"}, {"c243000001", "1", "01"}, {"c340", "-1", "20"}, {"c34100", "-1", "20"},
+ {"c248ffffffffffffffff", "18446744073709551615", "1bffffffffffffffff"}, {"c348ffffffffffffffff", "-18446744073709551616", "3bffffffffffffffff"},
+ {"c2487fffffffffffffff", "9223372036854775807", "1b7fffffffffffffff"}, {"c3487fffffffffffffff", "-9223372036854775808", "3b7fffffffffffffff"},
+ {"c24a00010000000000000000", "18446744073709551616", "c249010000000000000000"}, {"c25f4101420000ff", "65536", "1a00010000"},
+ {"c3581e" + "ff" * 30, "-1766847064778384329583297500742918515827483896875618958121606201292619776", "c3581e" + "ff" * 30}].each do |example|
+  v = decoded(unhex(example[0]), "a bignum")
+  assert_str(example[1], v.to_s, "the bignum #{example[0]} is the integer #{example[1]}")
+  assert_str(example[2], hex(CBOR.encode(v)), "the integer #{example[1]} encodes in its preferred form")
+  assert_true(v == decoded(unhex(example[2]), "the preferred form") && v.hash == decoded(unhex(example[2]), "the preferred form").hash, "a bignum equals the integer of its value: #{example[0]}")
+  puts "VARIANT #{example[0]}\t#{example[2]}\t#{example[1]}"
+end
+big = decoded(unhex("c249010000000000000000"), "2^64")
+assert_true(big.as_i?.nil? && big.as_u64?.nil? && big.as_big.magnitude.size == 9 && !big.as_big.negative?, "2^64 is past Int64 and UInt64")
+assert_true(decoded(unhex("1bffffffffffffffff"), "2^64 - 1").as_u64 == 18446744073709551615_u64, "2^64 - 1 is a UInt64")
+assert_true(decoded(unhex("3bffffffffffffffff"), "-2^64").as_big.negative? && decoded(unhex("20"), "-1").as_u64?.nil?, "a negative integer is no UInt64")
+assert_str("the integer 18446744073709551616 does not fit an Int64", panic_of(-> { big.as_i.to_s }), "as_i of a bignum is refused by name")
+assert_true(Any.new(CBORBignum.new(false, [0_u8, 0_u8, 5_u8])).raw.is_a?(Int64), "a bignum in the Int64 range is held as an Int64")
+puts "  every width's edge in its shortest head, both signs; bignums with leading zeros, chunked or fitting 64 bits read as the integers they are"
+
+puts "== floats, every width"
+[{1.0, "f93c00"}, {5.5, "f94580"}, {5555.5, "fa45ad9c00"}, {1000000.5, "fa49742408"}, {65504.0, "f97bff"}, {65505.0, "fa477fe100"},
+ {65520.0, "fa477ff000"}, {f64(0x3E70000000000000_u64), "f90001"}, {f64(0x3E60000000000000_u64), "fa33000000"},
+ {f64(0x3F10000000000000_u64), "f90400"}, {f64(0x36A0000000000000_u64), "fa00000001"}, {f64(0x3690000000000000_u64), "fb3690000000000000"},
+ {f64(0x3810000000000000_u64), "fa00800000"}, {f64(0x380FFFFFC0000000_u64), "fa007fffff"}, {f64(0x380FFFFFE0000000_u64), "fb380fffffe0000000"}, {f64(0x47EFFFFFE0000000_u64), "fa7f7fffff"},
+ {f64(0x47EFFFFFF0000000_u64), "fb47effffff0000000"}, {f64(0x0000000000000001_u64), "fb0000000000000001"}, {-2.0, "f9c000"},
+ {f64(0x7FF4000000000000_u64), "f97d00"}, {f64(0x7FF0000000000001_u64), "fb7ff0000000000001"}, {f64(0x7FF8000020000000_u64), "fa7fc00001"},
+ {f64(0xFFF8000000000000_u64), "f9fe00"}, {f64(0x7FF8000000000001_u64), "fb7ff8000000000001"}, {f64(0x7FF0040000000000_u64), "f97c01"},
+ {f64(0x7FF0000020000000_u64), "fa7f800001"}].each do |pair|
+  bits = IyiFloatText.bits_of(pair[0])
+  assert_str(pair[1], hex(CBOR.encode(Any.new(pair[0]))), "the float with bits #{bits.to_s(16)} encodes in the shortest width that holds it")
+  back = decoded(unhex(pair[1]), "a float")
+  assert_true(IyiFloatText.bits_of(back.as_f) == bits, "#{pair[1]} decodes to the same 64 bits, payload and sign")
+  puts "CORPUS #{pair[1]}\t#{back}"
+end
+assert_true(Any.new(0.0) != Any.new(-0.0) && Any.new(0.0 / 0.0) == decoded(unhex("fb7ff8000000000000"), "NaN"), "0.0 and -0.0 are two values; NaN is the NaN with its bits")
+assert_true(Any.new(f64(0x7FF4000000000000_u64)) != Any.new(0.0 / 0.0), "NaNs with other payloads are other values")
+assert_true(Any.new(1) != Any.new(1.0) && Any.new(1).as_f == 1.0, "1 and 1.0 are two values; as_f widens the integer")
+puts "  section 4.1's examples, every width's edges and subnormals, NaN payloads kept and shortened only when what they drop is zero"
+
+puts "== deterministic encoding"
+keys = map_of([{Any.new(false), Any.new(8)}, {ints([-1]), Any.new(7)}, {ints([100]), Any.new(6)}, {Any.new("aa"), Any.new(5)},
+               {Any.new("z"), Any.new(4)}, {Any.new(-1), Any.new(3)}, {Any.new(100), Any.new(2)}, {Any.new(10), Any.new(1)}])
+assert_str("a8" + "0a01" + "186402" + "2003" + "617a04" + "62616105" + "81186406" + "812007" + "f408", hex(CBOR.encode(keys)), "the keys of section 4.2.1 sort as it lists them")
+assert_true(CBOR.deterministic?(CBOR.encode(keys)), "and that encoding is deterministic")
+refused("1817", "the argument 23 in a head of 2 bytes, where deterministic encoding takes 1 at byte 0", true)
+refused("3900ff", "the argument 255 in a head of 3 bytes, where deterministic encoding takes 2 at byte 0", true)
+refused("5a0000000100", "the argument 1 in a head of 5 bytes, where deterministic encoding takes 1 at byte 0", true)
+refused("821b000000000000000101", "the argument 1 in a head of 9 bytes, where deterministic encoding takes 1 at byte 1", true)
+refused("d8010a", "the argument 1 in a head of 2 bytes, where deterministic encoding takes 1 at byte 0", true)
+refused("fa3fc00000", "the float 1.5 in 5 bytes, where 3 hold it at byte 0", true)
+refused("fb3ff8000000000000", "the float 1.5 in 9 bytes, where 3 hold it at byte 0", true)
+refused("fb3ff0000020000000", "the float 1.0000001192092896 in 9 bytes, where 5 hold it at byte 0", true)
+refused("fb7ff8000000000000", "the float NaN in 9 bytes, where 3 hold it at byte 0", true)
+refused("9f01ff", "an array of indefinite length, which deterministic encoding does not use at byte 0", true)
+refused("bf6161f5ff", "a map of indefinite length, which deterministic encoding does not use at byte 0", true)
+refused("5f4101ff", "a byte string of indefinite length, which deterministic encoding does not use at byte 0", true)
+refused("7f6161ff", "a text string of indefinite length, which deterministic encoding does not use at byte 0", true)
+refused("a2616201616102", "the map key \"a\" sorts before the key ahead of it at byte 4", true)
+refused("a2200a186401", "the map key 100 sorts before the key ahead of it at byte 3", true)
+refused("a281200281186401", "the map key [100] sorts before the key ahead of it at byte 4", true)
+refused("c24101", "the integer 1 as tag 2, where deterministic encoding writes one that fits 64 bits as major type 0 at byte 0", true)
+refused("c348ffffffffffffffff", "the integer -18446744073709551616 as tag 3, where deterministic encoding writes one that fits 64 bits as major type 1 at byte 0", true)
+refused("c24a00010000000000000000", "a bignum with a leading zero byte, which deterministic encoding leaves out at byte 1", true)
+refused("a201010102", "the map key 1 written twice at byte 3", true)
+refused("a201010102", "the map key 1 written twice at byte 3")
+refused("a2820102f4820102f5", "the map key [1, 2] written twice at byte 5")
+refused("a2f97e00f4fb7ff8000000000000f5", "the map key NaN written twice at byte 5")
+assert_true(decoded(unhex("a2f90000f4f98000f5"), "0.0 and -0.0 as keys").size == 2, "0.0 and -0.0 are two keys")
+refused("c26161", "tag 2 (a bignum) around a text string, not a byte string at byte 1")
+refused("c380", "tag 3 (a bignum) around an array, not a byte string at byte 1")
+refused("9f1817ff", "an array of indefinite length, which deterministic encoding does not use at byte 0", true)
+deterministic_read = CBOR.decode(unhex("a26161016162820203"), deterministic: true)
+assert_true(deterministic_read.is_a?(Any) && deterministic_read.to_s == "{\"a\": 1, \"b\": [2, 3]}", "deterministic bytes read as they always do")
+assert_true(!CBOR.deterministic?(unhex("9f01ff")) && CBOR.decode?(unhex("9f01ff")).to_s == "[_ 1]", "what is not deterministic still decodes when not asked")
+assert_str("the data ends before the break that closes an indefinite-length map at byte 5", (CBOR.decode(unhex("bf01020102")).as(CBORError)).message, "a well-formedness error is answered before a key written twice")
+puts "  section 4.2.1's key order; a longer head, a wider float, an indefinite length, keys out of order and a bignum not preferred, each refused where it is"
+
+puts "== text strings are UTF-8"
+refused("61ff", "text that is not UTF-8 at byte 1")
+refused("62c0af", "text that is not UTF-8 at byte 1")
+refused("62c1bf", "text that is not UTF-8 at byte 1")
+refused("63e08080", "text that is not UTF-8 at byte 1")
+refused("63eda080", "text that is not UTF-8 at byte 1")
+refused("63edbfbf", "text that is not UTF-8 at byte 1")
+refused("64f4908080", "text that is not UTF-8 at byte 1")
+refused("64f0808080", "text that is not UTF-8 at byte 1")
+refused("62e282", "text that is not UTF-8 at byte 1")
+refused("6361e282", "text that is not UTF-8 at byte 2")
+refused("6180", "text that is not UTF-8 at byte 1")
+refused("7f61e26282acff", "text that is not UTF-8 at byte 2")
+refused("8261616180", "text that is not UTF-8 at byte 4")
+assert_str("\"\\udbff\\udfff\"", decoded(unhex("64f48fbfbf"), "U+10FFFF").to_s, "U+10FFFF is text")
+assert_str("\"\\ud7ff\\ue000\\ufffd\"", decoded(unhex("69ed9fbfee8080efbfbd"), "the edges of the surrogates").to_s, "the scalar values beside the surrogates are text")
+assert_str("(_ \"\\u20ac\", \"a\")", decoded(unhex("7f63e282ac6161ff"), "a chunked euro sign").to_s, "chunks cut between characters")
+assert_true(decoded(unhex("7f63e282ac6161ff"), "a chunked euro sign").as_s == "€a", "the chunks join into one string")
+puts "  overlong forms, surrogates, past U+10FFFF, truncated sequences and a character cut by a chunk refused at the byte where they start"
+
+puts "== a generated corpus round-tripped"
+rng = Rng.new(0x9E3779B97F4A7C15_u64)
+encodings = [] of Array(UInt8)
+corpus = 0
+variants = 0
+1500.times do |n|
+  v = generate(rng, 0)
+  bytes = CBOR.encode(v)
+  back = CBOR.decode(bytes)
+  # The notation of what the bytes decode to, keys in the encoding's
+  # order, which is what Python's decoder sees.
+  puts "CORPUS #{hex(bytes)}\t#{back.is_a?(CBORError) ? v : back}"
+  raise "ASSERTION FAILED: the corpus round-trips value #{n}: refused with #{back.message}\n  #{v}" if back.is_a?(CBORError)
+  assert_true(back == v && back.hash == v.hash, "the corpus round-trips value #{n}: #{v}")
+  assert_str(hex(bytes), hex(CBOR.encode(back)), "re-encoding value #{n} is stable")
+  assert_true(CBOR.deterministic?(bytes), "the encoding of value #{n} is deterministic: #{hex(bytes)}")
+  encodings << bytes
+  corpus = corpus + 1
+  3.times do
+    w = [] of UInt8
+    variant(w, v, rng)
+    read = CBOR.decode(w)
+    raise "ASSERTION FAILED: variant of value #{n} decodes: #{read.message}\n  #{hex(w)}" if read.is_a?(CBORError)
+    puts "VARIANT #{hex(w)}\t#{hex(bytes)}\t#{read}"
+    assert_true(read == v, "a variant of value #{n} reads to the same value: #{hex(w)}")
+    assert_str(hex(bytes), hex(CBOR.encode(read)), "a variant of value #{n} encodes to the deterministic bytes")
+    assert_true(CBOR.deterministic?(w) == (w == bytes), "deterministic? answers whether a variant of value #{n} is the deterministic bytes: #{hex(w)}")
+    encodings << w
+    variants = variants + 1
+  end
+end
+puts "  #{corpus} values encoded, decoded equal and encoded again to the same bytes; #{variants} other serializations of them read to the same values and encoded to the deterministic bytes"
+
+puts "== random and mutated bytes, decoded in a task"
+fuzz = panic_of(-> {
+  frng = Rng.new(0xD1B54A32D192ED03_u64)
+  taken = 0
+  refused_count = 0
+  20000.times do |n|
+    input = [] of UInt8
+    pick = frng.below(4)
+    if pick == 0
+      input = Array(UInt8).new(frng.below(12)) { frng.byte }
+    else
+      input = encodings[frng.below(encodings.size)].dup
+      edits = 1 + frng.below(3)
+      edits.times do
+        what = frng.below(4)
+        at = input.empty? ? 0 : frng.below(input.size)
+        if what == 0 && !input.empty?
+          input[at] = frng.byte
+        elsif what == 1
+          input = input[0, at] + [frng.byte] + input[at, input.size - at]
+        elsif what == 2 && !input.empty?
+          input = input[0, at] + input[at + 1, input.size - at - 1]
+        else
+          input = input[0, at]
+        end
+      end
+    end
+    answer = CBOR.decode(input)
+    if answer.is_a?(CBORError)
+      refused_count = refused_count + 1
+      raise "ASSERTION FAILED: deterministic? of refused bytes" if CBOR.deterministic?(input)
+      puts "FUZZ #{hex(input)}\t0"
+    else
+      taken = taken + 1
+      again = CBOR.encode(answer)
+      raise "ASSERTION FAILED: fuzzed input #{n} re-encodes to an item that decodes equal: #{hex(input)}" unless decoded(again, "a fuzzed re-encoding") == answer
+      det = CBOR.deterministic?(input)
+      raise "ASSERTION FAILED: deterministic? of fuzzed input #{n} is whether it is its own encoding: #{hex(input)}" unless det == (again == input)
+      puts "FUZZ #{hex(input)}\t1\t#{answer}\t#{det ? 1 : 0}"
+    end
+  end
+  "#{taken} decoded, #{refused_count} refused"
+})
+assert_true(fuzz.ends_with?("refused") && !fuzz.includes?("ASSERTION"), "fuzzed bytes are decoded or refused, never a panic: #{fuzz}")
+puts "  20000 inputs, three in four of them corpus encodings with bytes changed, cut or added: #{fuzz}, none a panic"
+
+puts "== nesting, DEPTH_LIMIT and declared lengths"
+assert_true(CBOR::DEPTH_LIMIT == 64, "the items below are DEPTH_LIMIT deep")
+deep_array = unhex("81" * 64 + "00")
+deep_tag = unhex("c1" * 64 + "00")
+deep_value = unhex("a100" * 64 + "00")
+deep_key = unhex("a1" * 64 + "00" + "00" * 64)
+deep_mixed = unhex("81a1c1" * 21 + "81" + "00" + "00" * 21)
+said = panic_of(-> {
+  checked = 0
+  [deep_array, deep_tag, deep_value, deep_key, deep_mixed].each do |bytes|
+    v = decoded(bytes, "an item DEPTH_LIMIT deep")
+    raise "ASSERTION FAILED: a deep item encodes to its bytes" unless CBOR.encode(v) == bytes
+    w = decoded(CBOR.encode(v), "a deep item's encoding")
+    raise "ASSERTION FAILED: a deep item reads back equal" unless v == w && v.hash == w.hash
+    raise "ASSERTION FAILED: a deep item has a notation" if v.to_s.empty?
+    checked = checked + 1
+  end
+  "#{checked} read"
+})
+assert_str("5 read", said, "five items DEPTH_LIMIT deep decoded, encoded, compared, hashed and written as notation in a task")
+refused("81" * 65 + "00", "a value nested 65 levels deep, past the 64 this decoder reads at byte 64")
+refused("c1" * 65 + "00", "a value nested 65 levels deep, past the 64 this decoder reads at byte 64")
+refused("a1" * 65 + "00" + "00" * 65, "a value nested 65 levels deep, past the 64 this decoder reads at byte 64")
+refused("9f" * 65 + "ff" * 65, "a value nested 65 levels deep, past the 64 this decoder reads at byte 64")
+said = panic_of(-> {
+  answer = CBOR.decode(Array(UInt8).new(100000, 0x81_u8))
+  answer.is_a?(CBORError) ? answer.message : "accepted"
+})
+assert_str("a value nested 65 levels deep, past the 64 this decoder reads at byte 64", said, "100,000 nested arrays refused in a task, not a stack overflow")
+too_deep = Any.new(0)
+65.times { too_deep = Any.new([too_deep]) }
+assert_str("CBOR.encode: a value nested past the 64 levels a decoder reads back", panic_of(-> { CBOR.encode(too_deep).size.to_s }), "a value too deep to read back is not encoded")
+refused("9b00000000ffffffff", "an array of 4294967295 items, where 0 bytes are left at byte 0")
+refused("9bffffffffffffffff00", "an array of 18446744073709551615 items, where 1 byte is left at byte 0")
+refused("bbffffffffffffffff0000", "a map of 18446744073709551615 pairs, where 2 bytes are left at byte 0")
+refused("9a0001000001", "an array of 65536 items, where 1 byte is left at byte 0")
+refused("82815bffffffffffffffff", "a byte string of 18446744073709551615 bytes, where 0 are left at byte 2")
+assert_str("[[1, 2], 3]", decoded(unhex("8282010203"), "counts that use every byte").to_s, "a count equal to the bytes left is read")
+puts "  64 levels of arrays, tags, maps in values and in keys and all three mixed, in a task; 65 refused, and 100,000; counts and lengths past the bytes left refused before anything is made of them"
+
+puts "== diagnostic notation"
+[{"5fff", "''_"}, {"7fff", "\"\"_"}, {"5f40ff", "(_ h'')"}, {"7f60ff", "(_ \"\")"}, {"bfff", "{_ }"}, {"9f80ff", "[_ []]"},
+ {"781e00011f7f225c080c0a0d092fc280e280a8efbbbff09f9880616263646566", "\"\\u0000\\u0001\\u001f\\u007f\\\"\\\\\\b\\f\\n\\r\\t/\\u0080\\u2028\\ufeff\\ud83d\\ude00abcdef\""},
+ {"d9d9f7c074323031332d30332d32315432303a30343a30305a", "55799(0(\"2013-03-21T20:04:00Z\"))"}, {"e0", "simple(0)"}, {"f3", "simple(19)"}, {"f820", "simple(32)"},
+ {"a1810102", "{[1]: 2}"}, {"a1a1010202", "{{1: 2}: 2}"}, {"fb4415af1d78b58c40", "100000000000000000000.0"}, {"fb444b1ae4d6e2ef50", "1.0e+21"},
+ {"fa358637bd", "9.999999974752427e-7"}, {"fb3eb0c6f7a0b5ed8d", "0.000001"}, {"fb3e7ad7f29abcaf48", "1.0e-7"}, {"fb405edd2f1a9fbe77", "123.456"},
+ {"fb0000000000000001", "5.0e-324"}, {"fb7fefffffffffffff", "1.7976931348623157e+308"}, {"fb3fb999999999999a", "0.1"}, {"fbc3e0000000000001", "-9223372036854778000.0"},
+ {"f97d00", "NaN"}, {"fbfff8000000000001", "NaN"}, {"1b7fffffffffffffff", "9223372036854775807"}, {"c1c1c100", "1(1(1(0)))"}].each do |example|
+  next if example[1].empty?
+  v = decoded(unhex(example[0]), "a notation example")
+  assert_str(example[1], v.to_s, "the notation of #{example[0]}")
+  assert_str(example[1], v.inspect, "inspect is the notation of #{example[0]}")
+  puts "VARIANT #{example[0]}\t#{hex(CBOR.encode(v))}\t#{example[1]}"
+end
+assert_str("[\"a\", h'00ff', -1.5, null, undefined, true]", Any.new([Any.new("a"), Any.new([0_u8, 255_u8]), Any.new(-1.5), Any.new(nil), Any.undefined, Any.new(true)]).to_s, "the notation of a value made in the program")
+assert_str("\"\\ufffd\\ufffd\"", Any.new(String.new(2) { |p| p[0] = 0xC0_u8; p[1] = 0xFF_u8 }).to_s, "a string that is not UTF-8, which only a program makes, has U+FFFD for each bad byte")
+puts "  empty and chunked indefinite strings, every escape, tags, simple values, keys of any kind, and floats on each side of ECMAScript's switch to an exponent"
+
+puts "== Any"
+doc = decoded(unhex("a46161830102036162a1616301626964d82040f5f4"), "a document")
+assert_true(doc["a"][1].as_i == 2_i64 && doc["b"]["c"].as_i == 1_i64 && doc[Any.new(true)].as_bool == false, "[] walks maps by text or any key and arrays by index")
+assert_true(doc["id"].as_tag.number == 32_u64 && doc["id"].as_tag.value.as_bytes.empty?, "a tag and what it encloses")
+assert_true(doc["zz"]?.nil? && doc["a"][7]?.nil? && doc["a"]["x"]?.nil?, "[]? answers nil for what is not there")
+assert_true(doc.size == 4 && doc["a"].size == 3 && decoded(unhex("62c3bc"), "ü").size == 2, "size counts pairs, items and bytes")
+assert_str("expected a text string, not an array", panic_of(-> { doc["a"].as_s }), "as_s of an array is refused by name")
+assert_str("no such key \"q\"", panic_of(-> { doc["q"].to_s }), "a missing key is refused by name")
+assert_true(decoded(unhex("9f01ff"), "indefinite").indefinite? && !decoded(unhex("8101"), "definite").indefinite?, "indefinite? says how an item was written")
+assert_true(decoded(unhex("9f01ff"), "indefinite") == decoded(unhex("8101"), "definite"), "and is no part of the value")
+assert_true(decoded(unhex("5f41014102ff"), "chunks").chunks == [1, 1], "chunks are the chunk sizes")
+assert_true(decoded(unhex("f7"), "undefined").undefined? && decoded(unhex("f6"), "null").null? && decoded(unhex("f0"), "simple").as_simple.value == 16_u8, "undefined, null and simple values")
+map_hash = decoded(unhex("a2010203f4"), "a map").hash
+assert_true(map_hash == decoded(unhex("a203f40102"), "the same map").hash && decoded(unhex("a2010203f4"), "a map") == decoded(unhex("a203f40102"), "the same map"), "a map equals and hashes as the same pairs in another order")
+assert_true(CBOR.decode(text_bytes("\x83\x01\x02\x03")).as(Any).as_a.size == 3 && CBOR.decode?(text_bytes("\xff")).nil?, "decode and decode? read a String's bytes too")
+assert_true(CBOR.decode("\x83\x01\x02\x03").as(Any).as_a.size == 3 && CBOR.deterministic?("\x83\x01\x02\x03"), "a String of bytes is decoded as they are")
+puts "  walking, kinds, refusals by name, equality and hashing"
+
+puts "== derive cbor_serializable"
+rec = Record.new("rec \"one\"", [0_u8, 1_u8, 255_u8], ["a", "b c", ""], {"w" => 1.5, "x y" => -0.0}, -9223372036854775807_i64, 255_u8, 9223372036854775807_u64, 0.1, true, nil,
+  Inner.new(1, "in"), [Inner.new(2, nil), Inner.new(3, "three")], Inner.new(4, "maybe"), [[1, 2], [] of Int32, [3]])
+bytes = rec.to_cbor
+back = Record.from_cbor(bytes)
+assert_str(rec.to_json, back.to_json, "a record reads back from its CBOR")
+assert_str(rec.to_yaml, back.to_yaml, "and the same record's YAML is unchanged by the trip")
+assert_str(rec.to_toml, back.to_toml, "and its TOML")
+assert_true(CBOR.deterministic?(bytes), "a record's CBOR is deterministic")
+assert_true(decoded(bytes, "a record")["blob"].as_bytes == [0_u8, 1_u8, 255_u8] && decoded(bytes, "a record")["note"].null?, "bytes are a byte string, a nil field null")
+puts "DERIVE #{rec.to_json}\t#{hex(bytes)}"
+rec2 = Record.new("two", [] of UInt8, [] of String, {} of String => Float64, 0_i64, 0_u8, 0_u64, -1.0e300, false, "a\nnote",
+  Inner.new(-1, nil), [] of Inner, nil, [] of Array(Int32))
+bytes2 = rec2.to_cbor
+assert_str(rec2.to_json, Record.from_cbor(bytes2).to_json, "a record of empties reads back")
+puts "DERIVE #{rec2.to_json}\t#{hex(bytes2)}"
+keyed = {Any.new([Any.new(1)]) => 1_i64, Any.new(2.5) => 2_i64, Any.new(nil) => 3_i64}
+wide = Wide.new(18446744073709551615_u64, {7 => "seven", -1 => "minus"}, keyed, decoded(unhex("c11a514b67b0"), "a tag"))
+wide_back = Wide.from_cbor(wide.to_cbor)
+assert_true(wide_back.top == 18446744073709551615_u64 && wide_back.by_id[-1] == "minus" && wide_back.keyed == keyed && wide_back.extra.as_tag.number == 1_u64, "a UInt64 past Int64, integer and item keys and an Any read back")
+assert_str("{\"top\": 18446744073709551615, \"by_id\": {7: \"seven\", -1: \"minus\"}, \"extra\": 1(1363896240), \"keyed\": {[1]: 1, null: 3, 2.5: 2}}", decoded(wide.to_cbor, "wide").to_s, "map keys in deterministic order: the bytes of their encodings")
+spot = Spot.from_cbor(CBOR.encode(map_of([{Any.new("x"), Any.new(2)}, {Any.new("name"), Any.new("s")}, {Any.new("unknown"), ints([1])}])))
+assert_true(spot.x == 2.0 && spot.name == "s" && spot.note.nil?, "an integer widens to a Float64 field, a missing nilable key is nil, an unknown key is passed over")
+spot2 = Spot.from_cbor(unhex("a36178f93c00646e616d656173646e6f7465f6"))
+assert_true(spot2.note.nil? && spot2.x == 1.0, "null in a nilable field is nil")
+assert_true(decoded(spot.to_cbor, "spot")["note"].null?, "a nil field is written as null")
+defaults = panic_of(-> {
+  missing = Listener.from_cbor(CBOR.to_cbor({"name" => "web"}))
+  "#{missing.port} #{missing.host}"
+})
+assert_str("8080 localhost", defaults, "missing keys keep their defaults")
+listener = Listener.from_cbor(CBOR.encode(map_of([{Any.new("name"), Any.new("web")}, {Any.new("port"), Any.new(9090)}, {Any.new("host"), Any.new("example.com")}])))
+assert_true(listener.port == 9090 && listener.host == "example.com", "present keys win over defaults")
+assert_str("{\"x\":5,\"label\":\"five\"}", Inner.new(5, "five").to_json, "std/json's derive beside it")
+assert_str("x: 5\nlabel: five\n", Inner.new(5, "five").to_yaml, "std/yaml's derive beside it")
+assert_str("x = 5\nlabel = \"five\"\n", Inner.new(5, "five").to_toml, "std/toml's derive beside it")
+assert_str("a2617805656c6162656c6466697665", hex(Inner.new(5, "five").to_cbor), "this derive")
+assert_true(CBOR.from_cbor(CBOR.to_cbor({"a" => [1, 2]}), Hash(String, Array(Int32)))["a"] == [1, 2], "from_cbor into a hash of arrays")
+assert_true(CBOR.from_cbor(CBOR.to_cbor({1 => [0_u8, 7_u8]}), Hash(Int32, Array(UInt8)))[1] == [0_u8, 7_u8], "from_cbor into a hash of byte strings under integer keys")
+assert_str("integer 4294967296 out of Int32 range", panic_of(-> { CBOR.from_cbor(CBOR.to_cbor({"a" => 4294967296_i64}), Hash(String, Int32)).to_s }), "an integer past Int32 is refused")
+assert_str("the integer -1 does not fit a UInt64", panic_of(-> { CBOR.from_cbor(CBOR.to_cbor(-1), UInt64).to_s }), "a negative integer is no UInt64")
+puts "  records written and read back, beside std/json's, std/yaml's and std/toml's derives"
+
+puts "ALL CHECKS PASSED"

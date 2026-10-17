@@ -1,0 +1,1192 @@
+# PNG images (ISO/IEC 15948:2004, and the W3C's Portable Network Graphics
+# Specification, Third Edition, 2025, which is the same format with APNG
+# and cICP written down), read and written in iyi over the zlib of
+# `std/compress` and the CRC-32 of `std/digest`.
+#
+# `Png.decode(bytes)` reads a whole file held in a `String` and answers a
+# `PngFile`: its `image`, and what else the file said. Every color type is
+# read at every bit depth the format allows for it - grayscale at 1, 2, 4,
+# 8 and 16 bits, RGB at 8 and 16, palette at 1, 2, 4 and 8, gray with
+# alpha and RGBA at 8 and 16 - interlaced (Adam7) or not, through all five
+# filters. The `Image` has 8-bit samples, or 16-bit ones where the file
+# had 16: a grayscale sample of 1, 2 or 4 bits is scaled to 8 by
+# replicating its bits (2 bits `10` is `10101010`, 170), which is the
+# scaling the specification recommends (section 12.5, "Sample depth
+# scaling") and what libpng and Pillow do; a palette image is expanded to
+# RGB, or to RGBA when a tRNS chunk gives its entries alpha. A tRNS chunk
+# on a grayscale or RGB image names one color as transparent; the `Image`
+# keeps it as `transparent` (scaled with the samples) and `to_rgba8` gives
+# that color alpha 0. `to_rgba8` reduces a 16-bit sample to its high
+# byte, as libpng's `png_set_strip_16` and Pillow do, so the two agree
+# with it byte for byte.
+#
+# A chunk's CRC-32 is checked before the chunk is read. The critical
+# chunks are held to their order (IHDR first, PLTE before IDAT, IDAT
+# chunks one after another, IEND), and a critical chunk this module does
+# not know is refused, as the specification requires (section 5.4);
+# an ancillary one is skipped and its name kept in `PngFile#skipped`.
+# gAMA, sRGB, iCCP (its profile inflated), tEXt, zTXt and iTXt are read
+# and kept; a tEXt or zTXt's Latin-1 is answered as UTF-8. A tRNS that
+# comes after IDAT, or whose length does not fit its color type, is
+# refused rather than guessed at.
+#
+# The image data's size is what IHDR says it is, so the pixel count is
+# checked against *max_pixels* (Pillow's own warning threshold,
+# 89,478,485, unless the caller says otherwise) before anything is
+# allocated for it, and the zlib stream is inflated into exactly that
+# many bytes: a stream that inflates further is refused after at most
+# 64 KiB more, so a decompression bomb costs what its header admitted to
+# and no more. A compressed iCCP, zTXt or iTXt inflates to at most 8 MiB.
+#
+# What is wrong with a file is a `PngError`, a value: a signature that is
+# not PNG's, a chunk cut short or failing its CRC-32, a chunk name that is
+# not four letters, the chunks out of order, an IHDR whose depth and color
+# type are not a pair the format has, a zlib stream that is corrupt or
+# ends before the image does, a row whose filter type is past 4, a pixel
+# whose palette index is past the palette. Asking for an image this
+# module cannot build - a sample count that does not match the size, a
+# palette index past the palette - is the caller's mistake, a panic.
+#
+# `Png.encode(image)` writes an `Image` - gray, gray with alpha, RGB or
+# RGBA, at 8 or 16 bits, with its transparent color as tRNS - and
+# `Png.encode_indexed` writes a palette image at the smallest bit depth
+# its palette fits, with tRNS where an entry is not opaque. Each row of a
+# non-palette image is filtered by the heuristic the specification
+# recommends (section 12.8): every filter is tried and the one whose
+# output bytes, read as signed, have the least sum of absolute values is
+# kept, the first of equals; a palette image is not filtered, as section
+# 12.8 advises for one. `interlace: true` writes Adam7, and *texts* are
+# written as tEXt, or as iTXt where the text is not Latin-1. The zlib
+# stream is `Deflater`'s, one fixed-Huffman block, split into 64 KiB IDAT
+# chunks.
+#
+# Left out: APNG's animation chunks (skipped as ancillary: the default
+# image is what is read), colour management (gAMA, cHRM, sRGB, iCCP and
+# cICP are answered, not applied), sBIT, bKGD, pHYs, tIME and the rest of
+# the ancillary chunks (skipped, named), and writing a 1-, 2- or 4-bit
+# grayscale file.
+
+module std/png
+
+import std/compress::{Inflater, Deflater, Envelope, CompressError}
+import std/digest::{CRC32}
+
+# What is wrong with a PNG file: `message` names the chunk, and its offset
+# in the file where that helps.
+pub struct PngError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for PngError
+  def message : String
+    @message
+  end
+end
+
+# Which samples a pixel has, in the order they are stored.
+pub enum Layout
+  Gray
+  GrayAlpha
+  RGB
+  RGBA
+end
+
+# Pixels, row after row from the top, each pixel's samples in `layout`
+# order; a sample is one byte at depth 8, two (big-endian, as PNG stores
+# them) at depth 16. `transparent`, for a Gray or RGB image, is the one
+# color that is to be read as transparent (a gray value, or red, green and
+# blue), in the image's own depth.
+pub class Image
+  getter width : Int32
+  getter height : Int32
+  getter layout : Layout
+  getter depth : Int32
+  getter samples : String
+  getter transparent : Array(Int32)?
+
+  def initialize(@width : Int32, @height : Int32, @layout : Layout, @depth : Int32, @samples : String, @transparent : Array(Int32)? = nil)
+    raise "Image: a width and height are at least 1, not #{width}x#{height}" if width < 1 || height < 1
+    raise "Image: a sample is 8 or 16 bits, not #{depth}" unless depth == 8 || depth == 16
+    want = width.to_i64 * height.to_i64 * Image.channels_of(layout).to_i64 * (depth // 8).to_i64
+    if want != samples.bytesize.to_i64
+      raise "Image: #{width}x#{height} #{Image.layout_name(layout)} at #{depth} bits is #{want} bytes of samples, not #{samples.bytesize}"
+    end
+    if key = transparent
+      unless layout == Layout::Gray || layout == Layout::RGB
+        raise "Image: a transparent color is for a Gray or RGB image, which has no alpha; this one is #{Image.layout_name(layout)}"
+      end
+      if key.size != Image.channels_of(layout)
+        raise "Image: a transparent color for #{Image.layout_name(layout)} has #{Image.channels_of(layout)} samples, not #{key.size}"
+      end
+      top = depth == 8 ? 255 : 65535
+      key.each do |v|
+        raise "Image: a transparent sample is 0 to #{top}, not #{v}" if v < 0 || v > top
+      end
+    end
+  end
+
+  def self.channels_of(layout : Layout) : Int32
+    case layout
+    when Layout::Gray      then 1
+    when Layout::GrayAlpha then 2
+    when Layout::RGB       then 3
+    else                        4
+    end
+  end
+
+  def self.layout_name(layout : Layout) : String
+    case layout
+    when Layout::Gray      then "Gray"
+    when Layout::GrayAlpha then "GrayAlpha"
+    when Layout::RGB       then "RGB"
+    else                        "RGBA"
+    end
+  end
+
+  def channels : Int32
+    Image.channels_of(@layout)
+  end
+
+  # Sample *c* of the pixel at column *x*, row *y*: 0 to 255, or to 65535
+  # at depth 16. Outside the image, a panic.
+  def sample(x : Int32, y : Int32, c : Int32) : Int32
+    if x < 0 || x >= @width || y < 0 || y >= @height || c < 0 || c >= channels
+      raise "Image: no sample #{c} at (#{x}, #{y}) in a #{@width}x#{@height} #{Image.layout_name(@layout)} image"
+    end
+    p = @samples.to_unsafe
+    if @depth == 8
+      p[(y * @width + x) * channels + c].to_i32
+    else
+      at = ((y * @width + x) * channels + c) * 2
+      (p[at].to_i32 << 8) | p[at + 1].to_i32
+    end
+  end
+
+  # Four bytes a pixel, red, green, blue and alpha. A gray sample is all
+  # three colors; a pixel of the transparent color has alpha 0, any other
+  # without an alpha sample 255; a 16-bit sample is its high byte.
+  def to_rgba8 : String
+    n = @width * @height
+    ch = channels
+    wide = @depth == 16
+    step = wide ? 2 : 1
+    src = @samples.to_unsafe
+    layout = @layout
+    key = @transparent
+    k0 = -1
+    k1 = -1
+    k2 = -1
+    if key
+      k0 = key[0]
+      if key.size == 3
+        k1 = key[1]
+        k2 = key[2]
+      end
+    end
+    String.new(n * 4) do |dst|
+      i = 0
+      at = 0
+      while i < n
+        v0 = wide ? (src[at].to_i32 << 8) | src[at + 1].to_i32 : src[at].to_i32
+        o = i * 4
+        case layout
+        when Layout::Gray
+          g = (wide ? v0 >> 8 : v0).to_u8
+          dst[o] = g
+          dst[o + 1] = g
+          dst[o + 2] = g
+          dst[o + 3] = v0 == k0 ? 0_u8 : 255_u8
+        when Layout::GrayAlpha
+          g = src[at]
+          dst[o] = g
+          dst[o + 1] = g
+          dst[o + 2] = g
+          dst[o + 3] = src[at + step]
+        when Layout::RGB
+          v1 = wide ? (src[at + 2].to_i32 << 8) | src[at + 3].to_i32 : src[at + 1].to_i32
+          v2 = wide ? (src[at + 4].to_i32 << 8) | src[at + 5].to_i32 : src[at + 2].to_i32
+          dst[o] = src[at]
+          dst[o + 1] = src[at + step]
+          dst[o + 2] = src[at + 2 * step]
+          dst[o + 3] = v0 == k0 && v1 == k1 && v2 == k2 ? 0_u8 : 255_u8
+        else
+          dst[o] = src[at]
+          dst[o + 1] = src[at + step]
+          dst[o + 2] = src[at + 2 * step]
+          dst[o + 3] = src[at + 3 * step]
+        end
+        at = at + ch * step
+        i = i + 1
+      end
+    end
+  end
+end
+
+# A tEXt, zTXt or iTXt chunk: `chunk` says which. `language` and
+# `translated_keyword` are iTXt's, "" for the other two.
+pub class PngText
+  getter chunk : String
+  getter keyword : String
+  getter text : String
+  getter language : String
+  getter translated_keyword : String
+
+  def initialize(@chunk : String, @keyword : String, @text : String, @language : String = "", @translated_keyword : String = "")
+  end
+end
+
+# A decoded file: the image and what the file said about it.
+pub class PngFile
+  getter image : Image
+  # IHDR's color type (0, 2, 3, 4 or 6) and bit depth, as written.
+  getter color_type : Int32
+  getter bit_depth : Int32
+  getter interlaced : Bool
+  # PLTE's entries, red, green and blue a byte each; "" without one.
+  getter palette : String
+  # tRNS as written: an alpha byte per palette entry, or the transparent
+  # gray or RGB sample(s) as two bytes each; "" without one.
+  getter transparency : String
+  # gAMA's value, the gamma times 100,000; nil without one.
+  getter gamma : Int32?
+  # sRGB's rendering intent, 0 to 3; nil without one.
+  getter srgb_intent : Int32?
+  # iCCP's profile name and the profile inflated; nil without one.
+  getter icc_name : String?
+  getter icc_profile : String?
+  getter texts : Array(PngText)
+  # The ancillary chunks skipped, by name, in file order.
+  getter skipped : Array(String)
+
+  def initialize(@image : Image, @color_type : Int32, @bit_depth : Int32, @interlaced : Bool, @palette : String,
+                 @transparency : String, @gamma : Int32?, @srgb_intent : Int32?, @icc_name : String?,
+                 @icc_profile : String?, @texts : Array(PngText), @skipped : Array(String))
+  end
+end
+
+# The seven Adam7 passes (section 8.2): the first column and row of each,
+# and the step between columns and between rows.
+struct Adam7
+  X0 = [0, 4, 0, 2, 0, 1, 0]
+  Y0 = [0, 0, 4, 0, 2, 0, 1]
+  DX = [8, 8, 4, 4, 2, 2, 1]
+  DY = [8, 8, 8, 4, 4, 2, 2]
+
+  # The columns (or rows) a pass has of *size*: none where the image is
+  # smaller than the pass's first one.
+  def self.span(size : Int32, start : Int32, step : Int32) : Int32
+    size > start ? (size - start + step - 1) // step : 0
+  end
+end
+
+struct PngBytes
+  def self.be32(p : Pointer(UInt8), at : Int32) : UInt32
+    (p[at].to_u32 << 24) | (p[at + 1].to_u32 << 16) | (p[at + 2].to_u32 << 8) | p[at + 3].to_u32
+  end
+
+  def self.put32(io : String::Builder, v : UInt32) : Nil
+    io.write_byte((v >> 24).to_u8)
+    io.write_byte(((v >> 16) & 255_u32).to_u8)
+    io.write_byte(((v >> 8) & 255_u32).to_u8)
+    io.write_byte((v & 255_u32).to_u8)
+  end
+
+  def self.slice(p : Pointer(UInt8), at : Int32, count : Int32) : String
+    src = p + at.to_i64
+    String.new(count) { |dst| dst.copy_from(src, count) }
+  end
+
+  def self.hex(v : UInt32) : String
+    "0x" + v.to_s(16).rjust(8, '0')
+  end
+
+  # Latin-1, which tEXt and zTXt hold, as UTF-8.
+  def self.latin1(s : String) : String
+    p = s.to_unsafe
+    io = String::Builder.new(s.bytesize + 8)
+    i = 0
+    while i < s.bytesize
+      b = p[i]
+      if b < 0x80_u8
+        io.write_byte(b)
+      else
+        io.write_byte(0xc0_u8 | (b >> 6))
+        io.write_byte(0x80_u8 | (b & 0x3f_u8))
+      end
+      i = i + 1
+    end
+    io.to_s
+  end
+
+  # A UTF-8 string as Latin-1, or nil when a character is past U+00FF.
+  def self.to_latin1(s : String) : String?
+    io = String::Builder.new(s.bytesize)
+    fits = true
+    s.each_char do |c|
+      if c.ord > 255
+        fits = false
+      else
+        io.write_byte(c.ord.to_u8)
+      end
+    end
+    fits ? io.to_s : nil
+  end
+
+  # Where the first NUL at or after *from* is, before *limit*; -1 if none.
+  def self.nul(p : Pointer(UInt8), from : Int32, limit : Int32) : Int32
+    i = from
+    while i < limit
+      return i if p[i] == 0_u8
+      i = i + 1
+    end
+    -1
+  end
+end
+
+# The five filters (section 9.2): the predictor each one subtracts.
+struct PngFilter
+  # Paeth's predictor: whichever of the left, upper and upper-left bytes
+  # is nearest to left + upper - upper-left, the left first of equals, then
+  # the upper.
+  def self.paeth(a : Int32, b : Int32, c : Int32) : Int32
+    pp = a + b - c
+    pa = (pp - a).abs
+    pb = (pp - b).abs
+    pc = (pp - c).abs
+    if pa <= pb && pa <= pc
+      a
+    elsif pb <= pc
+      b
+    else
+      c
+    end
+  end
+
+  # The prediction filter *f* makes for byte *i* of a row, given the row
+  # itself (unfiltered), the row above (zeros for the first) and the
+  # bytes per pixel.
+  def self.predict(f : Int32, cur : Pointer(UInt8), prev : Pointer(UInt8), i : Int32, bpp : Int32) : Int32
+    a = i >= bpp ? cur[i - bpp].to_i32 : 0
+    b = prev[i].to_i32
+    case f
+    when 1 then a
+    when 2 then b
+    when 3 then (a + b) >> 1
+    when 4 then paeth(a, b, i >= bpp ? prev[i - bpp].to_i32 : 0)
+    else        0
+    end
+  end
+end
+
+# The decoding of one file, once its chunks are read.
+class PngDecode
+  @width : Int32
+  @height : Int32
+  @depth : Int32
+  @ctype : Int32
+  @interlace : Bool
+  @plte : String
+  @trns : String
+
+  def initialize(@width : Int32, @height : Int32, @depth : Int32, @ctype : Int32, @interlace : Bool, @plte : String, @trns : String)
+  end
+
+  def width : Int32
+    @width
+  end
+
+  def height : Int32
+    @height
+  end
+
+  def palette_entries : Int32
+    @plte.bytesize // 3
+  end
+
+  # The image as a refusal names it: "64x64 RGB image at 8 bits".
+  def layout_desc : String
+    "#{@width}x#{@height}#{@interlace ? " interlaced" : ""} image of color type #{@ctype} at #{@depth} bits"
+  end
+
+  # Samples a pixel has in the file: a palette index is one.
+  def file_channels : Int32
+    case @ctype
+    when 0 then 1
+    when 2 then 3
+    when 3 then 1
+    when 4 then 2
+    else        4
+    end
+  end
+
+  def bits_per_pixel : Int32
+    file_channels * @depth
+  end
+
+  def row_bytes(cols : Int32) : Int64
+    (cols.to_i64 * bits_per_pixel.to_i64 + 7_i64) // 8_i64
+  end
+
+  def passes : Int32
+    @interlace ? 7 : 1
+  end
+
+  def pass_cols(pass : Int32) : Int32
+    @interlace ? Adam7.span(@width, Adam7::X0[pass], Adam7::DX[pass]) : @width
+  end
+
+  def pass_rows(pass : Int32) : Int32
+    @interlace ? Adam7.span(@height, Adam7::Y0[pass], Adam7::DY[pass]) : @height
+  end
+
+  # The bytes the zlib stream inflates to: per pass with pixels, each row
+  # its filter byte and its bytes.
+  def raw_size : Int64
+    total = 0_i64
+    pass = 0
+    while pass < passes
+      cols = pass_cols(pass)
+      rows = pass_rows(pass)
+      total = total + rows.to_i64 * (1_i64 + row_bytes(cols)) if cols > 0 && rows > 0
+      pass = pass + 1
+    end
+    total
+  end
+
+  def layout : Layout
+    case @ctype
+    when 0 then Layout::Gray
+    when 2 then Layout::RGB
+    when 3 then @trns.empty? ? Layout::RGB : Layout::RGBA
+    when 4 then Layout::GrayAlpha
+    else        Layout::RGBA
+    end
+  end
+
+  def out_depth : Int32
+    @depth == 16 ? 16 : 8
+  end
+
+  def out_size : Int64
+    @width.to_i64 * @height.to_i64 * Image.channels_of(layout).to_i64 * (out_depth // 8).to_i64
+  end
+
+  # The filters undone in place, pass by pass: nil, or the error for a row
+  # whose filter type is not one of the five.
+  def unfilter(raw : Pointer(UInt8)) : PngError?
+    bpp = bits_per_pixel // 8
+    bpp = 1 if bpp < 1
+    at = 0
+    pass = 0
+    zeros = Pointer(UInt8).malloc(row_bytes(@width).to_u64 + 1_u64)
+    while pass < passes
+      cols = pass_cols(pass)
+      rows = pass_rows(pass)
+      if cols > 0 && rows > 0
+        n = row_bytes(cols).to_i32
+        prev = zeros
+        y = 0
+        while y < rows
+          f = raw[at].to_i32
+          if f > 4
+            where = @interlace ? "row #{y} of Adam7 pass #{pass + 1}" : "row #{y}"
+            return PngError.new("png: #{where} has filter type #{f}; there are five, 0 to 4")
+          end
+          cur = raw + (at + 1).to_i64
+          PngDecode.unfilter_row(f, cur, prev, n, bpp)
+          prev = cur
+          at = at + 1 + n
+          y = y + 1
+        end
+      end
+      pass = pass + 1
+    end
+    nil
+  end
+
+  def self.unfilter_row(f : Int32, cur : Pointer(UInt8), prev : Pointer(UInt8), n : Int32, bpp : Int32) : Nil
+    i = 0
+    case f
+    when 0
+      return
+    when 1
+      i = bpp
+      while i < n
+        cur[i] = cur[i] &+ cur[i - bpp]
+        i = i + 1
+      end
+    when 2
+      while i < n
+        cur[i] = cur[i] &+ prev[i]
+        i = i + 1
+      end
+    when 3
+      while i < n
+        a = i >= bpp ? cur[i - bpp].to_i32 : 0
+        cur[i] = cur[i] &+ ((a + prev[i].to_i32) >> 1).to_u8
+        i = i + 1
+      end
+    else
+      while i < n
+        a = i >= bpp ? cur[i - bpp].to_i32 : 0
+        c = i >= bpp ? prev[i - bpp].to_i32 : 0
+        cur[i] = cur[i] &+ PngFilter.paeth(a, prev[i].to_i32, c).to_u8
+        i = i + 1
+      end
+    end
+  end
+
+  # The unfiltered rows written into the image's samples at *dst*: -1, or
+  # the first palette index past the palette.
+  def unpack(raw : Pointer(UInt8), dst : Pointer(UInt8)) : Int32
+    bad = -1
+    fch = file_channels
+    och = Image.channels_of(layout)
+    wide = @depth == 16
+    obytes = och * (wide ? 2 : 1)
+    bits = @depth
+    mask = (1 << bits) - 1
+    scale = bits < 8 ? 255 // mask : 1
+    entries = @plte.bytesize // 3
+    pal = @plte.to_unsafe
+    alpha = @trns.to_unsafe
+    alphas = @ctype == 3 ? @trns.bytesize : 0
+    at = 0
+    pass = 0
+    while pass < passes
+      cols = pass_cols(pass)
+      rows = pass_rows(pass)
+      if cols > 0 && rows > 0
+        n = row_bytes(cols).to_i32
+        x0 = @interlace ? Adam7::X0[pass] : 0
+        y0 = @interlace ? Adam7::Y0[pass] : 0
+        dx = @interlace ? Adam7::DX[pass] : 1
+        dy = @interlace ? Adam7::DY[pass] : 1
+        y = 0
+        while y < rows
+          row = raw + (at + 1).to_i64
+          base = (y0 + y * dy) * @width
+          if bits >= 8 && @ctype != 3
+            # Whole bytes: each pixel's are copied as they are.
+            px = fch * (bits // 8)
+            x = 0
+            while x < cols
+              (dst + ((base + x0 + x * dx) * obytes).to_i64).copy_from(row + (x * px).to_i64, px)
+              x = x + 1
+            end
+          else
+            x = 0
+            while x < cols
+              v = 0
+              if bits == 8
+                v = row[x].to_i32
+              else
+                # Packed pixels, the leftmost in the high bits (section 7.2).
+                bit = x * bits
+                v = (row[bit >> 3].to_i32 >> (8 - bits - (bit & 7))) & mask
+              end
+              o = (base + x0 + x * dx) * obytes
+              if @ctype == 3
+                if v >= entries
+                  bad = v if bad < 0
+                  v = 0
+                  dst[o] = 0_u8
+                  dst[o + 1] = 0_u8
+                  dst[o + 2] = 0_u8
+                else
+                  dst[o] = pal[v * 3]
+                  dst[o + 1] = pal[v * 3 + 1]
+                  dst[o + 2] = pal[v * 3 + 2]
+                end
+                dst[o + 3] = v < alphas ? alpha[v] : 255_u8 if och == 4
+              else
+                dst[o] = (v * scale).to_u8
+              end
+              x = x + 1
+            end
+          end
+          at = at + 1 + n
+          y = y + 1
+        end
+      end
+      pass = pass + 1
+    end
+    bad
+  end
+
+  # tRNS for a gray or RGB image as the `Image`'s transparent color, in
+  # its depth: nil without one, or where a sample is past what the bit
+  # depth holds, which no pixel can match.
+  def key : Array(Int32)?
+    return nil if @trns.empty? || @ctype == 3
+    p = @trns.to_unsafe
+    mask = (1 << @depth) - 1
+    scale = @depth < 8 ? 255 // mask : 1
+    key = [] of Int32
+    i = 0
+    while i < @trns.bytesize
+      v = (p[i].to_i32 << 8) | p[i + 1].to_i32
+      return nil if v > mask
+      key << v * scale
+      i = i + 2
+    end
+    key
+  end
+end
+
+# The encoding of one image: the rows of each pass, packed, filtered and
+# deflated.
+class PngEncode
+  @width : Int32
+  @height : Int32
+  @depth : Int32
+  @ctype : Int32
+  @interlace : Bool
+  @src : Pointer(UInt8)
+  # Bytes per pixel in *src*: whole bytes, or one palette index a byte.
+  @px : Int32
+
+  def initialize(@width : Int32, @height : Int32, @depth : Int32, @ctype : Int32, @interlace : Bool, @src : Pointer(UInt8), @px : Int32)
+  end
+
+  def channels : Int32
+    case @ctype
+    when 0 then 1
+    when 2 then 3
+    when 3 then 1
+    when 4 then 2
+    else        4
+    end
+  end
+
+  def row_bytes(cols : Int32) : Int32
+    ((cols.to_i64 * (channels * @depth).to_i64 + 7_i64) // 8_i64).to_i32
+  end
+
+  # The filtered image data: the bytes the zlib stream holds.
+  def filtered : String
+    passes = @interlace ? 7 : 1
+    total = 0_i64
+    pass = 0
+    while pass < passes
+      cols = @interlace ? Adam7.span(@width, Adam7::X0[pass], Adam7::DX[pass]) : @width
+      rows = @interlace ? Adam7.span(@height, Adam7::Y0[pass], Adam7::DY[pass]) : @height
+      total = total + rows.to_i64 * (1 + row_bytes(cols)).to_i64 if cols > 0 && rows > 0
+      pass = pass + 1
+    end
+    raise "Png: #{@width}x#{@height} is #{total} bytes of image data, past what one string holds" if total > 0x7fffffff_i64
+    full = row_bytes(@width)
+    cur = Pointer(UInt8).malloc(full.to_u64 + 1_u64)
+    prev = Pointer(UInt8).malloc(full.to_u64 + 1_u64)
+    trial = Pointer(UInt8).malloc(full.to_u64 + 1_u64)
+    bpp = channels * @depth // 8
+    bpp = 1 if bpp < 1
+    adaptive = @ctype != 3 && @depth >= 8
+    String.new(total.to_i32) do |dst|
+      at = 0
+      pass = 0
+      while pass < passes
+        x0 = @interlace ? Adam7::X0[pass] : 0
+        y0 = @interlace ? Adam7::Y0[pass] : 0
+        dx = @interlace ? Adam7::DX[pass] : 1
+        dy = @interlace ? Adam7::DY[pass] : 1
+        cols = @interlace ? Adam7.span(@width, x0, dx) : @width
+        rows = @interlace ? Adam7.span(@height, y0, dy) : @height
+        if cols > 0 && rows > 0
+          n = row_bytes(cols)
+          i = 0
+          while i < n
+            prev[i] = 0_u8
+            i = i + 1
+          end
+          y = 0
+          while y < rows
+            pack(cur, y0 + y * dy, x0, dx, cols, n)
+            f = adaptive ? PngEncode.choose(cur, prev, n, bpp, trial) : 0
+            dst[at] = f.to_u8
+            PngEncode.apply(f, cur, prev, n, bpp, dst + (at + 1).to_i64)
+            tmp = prev
+            prev = cur
+            cur = tmp
+            at = at + 1 + n
+            y = y + 1
+          end
+        end
+        pass = pass + 1
+      end
+    end
+  end
+
+  # One row of a pass, as the file holds it before filtering.
+  def pack(row : Pointer(UInt8), y : Int32, x0 : Int32, dx : Int32, cols : Int32, n : Int32) : Nil
+    base = y * @width
+    if @ctype != 3 || @depth == 8
+      x = 0
+      while x < cols
+        (row + (x * @px).to_i64).copy_from(@src + ((base + x0 + x * dx) * @px).to_i64, @px)
+        x = x + 1
+      end
+      return
+    end
+    i = 0
+    while i < n
+      row[i] = 0_u8
+      i = i + 1
+    end
+    x = 0
+    while x < cols
+      v = @src[base + x0 + x * dx]
+      bit = x * @depth
+      row[bit >> 3] = row[bit >> 3] | (v << (8 - @depth - (bit & 7)))
+      x = x + 1
+    end
+  end
+
+  # The filter whose output has the least sum of absolute values, its
+  # bytes read as signed (section 12.8); the first of equals.
+  def self.choose(cur : Pointer(UInt8), prev : Pointer(UInt8), n : Int32, bpp : Int32, trial : Pointer(UInt8)) : Int32
+    best = 0
+    best_sum = 9223372036854775807_i64
+    f = 0
+    while f < 5
+      apply(f, cur, prev, n, bpp, trial)
+      sum = 0_i64
+      i = 0
+      while i < n
+        b = trial[i].to_i32
+        sum = sum + (b < 128 ? b : 256 - b).to_i64
+        i = i + 1
+      end
+      if sum < best_sum
+        best = f
+        best_sum = sum
+      end
+      f = f + 1
+    end
+    best
+  end
+
+  def self.apply(f : Int32, cur : Pointer(UInt8), prev : Pointer(UInt8), n : Int32, bpp : Int32, dst : Pointer(UInt8)) : Nil
+    i = 0
+    while i < n
+      dst[i] = cur[i] &- (PngFilter.predict(f, cur, prev, i, bpp) & 255).to_u8
+      i = i + 1
+    end
+  end
+end
+
+pub struct Png
+  # Pillow's `Image.MAX_IMAGE_PIXELS`, past which it warns of a
+  # decompression bomb: the default bound on the pixels a file may claim.
+  MAX_PIXELS = 89_478_485_i64
+  # The most an iCCP profile or a compressed text inflates to.
+  MAX_METADATA = 8 * 1024 * 1024
+  # How much image data one IDAT chunk carries, written.
+  IDAT_SIZE = 65536
+
+  SIGNATURE = [137_u8, 80_u8, 78_u8, 71_u8, 13_u8, 10_u8, 26_u8, 10_u8]
+
+  # The file in *data*, decoded; or what is wrong with it. A file whose
+  # IHDR claims more than *max_pixels* pixels is refused before anything
+  # is allocated for them.
+  def self.decode(data : String, max_pixels : Int64 = MAX_PIXELS) : PngFile | PngError
+    p = data.to_unsafe
+    n = data.bytesize
+    i = 0
+    while i < 8
+      return PngError.new("png: not a PNG file: the 8-byte signature is not there") if i >= n || p[i] != SIGNATURE[i]
+      i = i + 1
+    end
+    width = 0
+    height = 0
+    depth = 0
+    ctype = 0
+    interlace = false
+    seen_ihdr = false
+    plte = ""
+    seen_plte = false
+    trns = ""
+    seen_trns = false
+    gamma : Int32? = nil
+    srgb : Int32? = nil
+    icc_name : String? = nil
+    icc : String? = nil
+    texts = [] of PngText
+    skipped = [] of String
+    idats = [] of {Int32, Int32}
+    # 0: no IDAT yet; 1: in the IDAT run; 2: past it.
+    idat_state = 0
+    ended = false
+    at = 8
+    while !ended
+      if at == n
+        return PngError.new("png: the file ends after #{n} bytes, without an IEND chunk")
+      end
+      if n - at < 12
+        return PngError.new("png: the chunk at offset #{at} is cut short: #{n - at} bytes are left of the 12 a chunk's frame takes")
+      end
+      len32 = PngBytes.be32(p, at)
+      if len32 > 0x7fffffff_u32
+        return PngError.new("png: the chunk at offset #{at} claims #{len32} bytes; a chunk holds at most 2^31 - 1")
+      end
+      len = len32.to_i32
+      k = 0
+      while k < 4
+        c = p[at + 4 + k]
+        unless (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8)
+          return PngError.new("png: the chunk at offset #{at} is named #{PngBytes.slice(p, at + 4, 4).inspect}, which is not four ASCII letters")
+        end
+        k = k + 1
+      end
+      name = PngBytes.slice(p, at + 4, 4)
+      if n - at - 12 < len
+        return PngError.new("png: the #{name} chunk at offset #{at} is cut short: it holds #{len} bytes and the file has #{n - at - 12} after its header")
+      end
+      body = at + 8
+      stored = PngBytes.be32(p, body + len)
+      sum = CRC32.update(0_u32, p + (at + 4).to_i64, len + 4)
+      if stored != sum
+        return PngError.new("png: the #{name} chunk at offset #{at} fails its CRC-32: it says #{PngBytes.hex(stored)}, its bytes make #{PngBytes.hex(sum)}")
+      end
+      if !seen_ihdr && name != "IHDR"
+        return PngError.new("png: the first chunk is #{name}; IHDR comes first")
+      end
+      if idat_state == 1 && name != "IDAT"
+        idat_state = 2
+      end
+      case name
+      when "IHDR"
+        return PngError.new("png: a second IHDR chunk at offset #{at}") if seen_ihdr
+        return PngError.new("png: IHDR holds #{len} bytes, not 13") if len != 13
+        seen_ihdr = true
+        w32 = PngBytes.be32(p, body)
+        h32 = PngBytes.be32(p, body + 4)
+        if w32 == 0_u32 || h32 == 0_u32 || w32 > 0x7fffffff_u32 || h32 > 0x7fffffff_u32
+          return PngError.new("png: IHDR says #{w32}x#{h32}; a width and height are 1 to 2^31 - 1")
+        end
+        width = w32.to_i32
+        height = h32.to_i32
+        depth = p[body + 8].to_i32
+        ctype = p[body + 9].to_i32
+        legal = case ctype
+                when 0       then depth == 1 || depth == 2 || depth == 4 || depth == 8 || depth == 16
+                when 3       then depth == 1 || depth == 2 || depth == 4 || depth == 8
+                when 2, 4, 6 then depth == 8 || depth == 16
+                else              false
+                end
+        unless legal
+          return PngError.new("png: IHDR's color type #{ctype} at bit depth #{depth} is not a pair the format has")
+        end
+        return PngError.new("png: IHDR's compression method is #{p[body + 10]}; only 0, zlib, is defined") if p[body + 10] != 0_u8
+        return PngError.new("png: IHDR's filter method is #{p[body + 11]}; only 0 is defined") if p[body + 11] != 0_u8
+        return PngError.new("png: IHDR's interlace method is #{p[body + 12]}; 0 and 1 are defined") if p[body + 12] > 1_u8
+        interlace = p[body + 12] == 1_u8
+        if width.to_i64 * height.to_i64 > max_pixels
+          return PngError.new("png: the image is #{width}x#{height}, #{width.to_i64 * height.to_i64} pixels, past the limit of #{max_pixels}")
+        end
+      when "PLTE"
+        return PngError.new("png: a second PLTE chunk at offset #{at}") if seen_plte
+        return PngError.new("png: PLTE comes after IDAT") if idat_state != 0
+        return PngError.new("png: a PLTE chunk in a grayscale image (color type #{ctype})") if ctype == 0 || ctype == 4
+        if len == 0 || len % 3 != 0 || len > 768
+          return PngError.new("png: PLTE holds #{len} bytes; it is 1 to 256 entries of three")
+        end
+        if ctype == 3 && len // 3 > (1 << depth)
+          return PngError.new("png: PLTE has #{len // 3} entries, past the #{1 << depth} a #{depth}-bit index reaches")
+        end
+        seen_plte = true
+        plte = PngBytes.slice(p, body, len)
+      when "tRNS"
+        return PngError.new("png: a second tRNS chunk at offset #{at}") if seen_trns
+        return PngError.new("png: tRNS comes after IDAT") if idat_state != 0
+        case ctype
+        when 0
+          return PngError.new("png: tRNS for a grayscale image holds 2 bytes, not #{len}") if len != 2
+        when 2
+          return PngError.new("png: tRNS for an RGB image holds 6 bytes, not #{len}") if len != 6
+        when 3
+          return PngError.new("png: tRNS comes before PLTE") unless seen_plte
+          if len > plte.bytesize // 3
+            return PngError.new("png: tRNS has #{len} alpha values for a palette of #{plte.bytesize // 3}")
+          end
+        else
+          return PngError.new("png: a tRNS chunk in an image with an alpha channel (color type #{ctype})")
+        end
+        seen_trns = true
+        trns = PngBytes.slice(p, body, len)
+      when "IDAT"
+        return PngError.new("png: the IDAT chunk at offset #{at} comes after another chunk ended the IDAT run; IDAT chunks are consecutive") if idat_state == 2
+        if ctype == 3 && !seen_plte
+          return PngError.new("png: IDAT comes before PLTE in a palette image")
+        end
+        idat_state = 1
+        idats << {body, len}
+      when "IEND"
+        ended = true
+      when "gAMA"
+        return PngError.new("png: gAMA holds #{len} bytes, not 4") if len != 4
+        gamma = PngBytes.be32(p, body).to_i32
+      when "sRGB"
+        return PngError.new("png: sRGB holds #{len} bytes, not 1") if len != 1
+        return PngError.new("png: sRGB's rendering intent is #{p[body]}; it is 0 to 3") if p[body] > 3_u8
+        srgb = p[body].to_i32
+      when "iCCP"
+        z = PngBytes.nul(p, body, body + len)
+        return PngError.new("png: iCCP's profile name is not ended by a NUL") if z < 0
+        return PngError.new("png: iCCP's profile name is #{z - body} bytes; it is 1 to 79") if z == body || z - body > 79
+        return PngError.new("png: iCCP holds no compression method") if z + 1 >= body + len
+        return PngError.new("png: iCCP's compression method is #{p[z + 1]}; only 0, zlib, is defined") if p[z + 1] != 0_u8
+        prof = Png.inflate_metadata(PngBytes.slice(p, z + 2, body + len - z - 2), "iCCP")
+        return prof if prof.is_a?(PngError)
+        icc_name = PngBytes.latin1(PngBytes.slice(p, body, z - body))
+        icc = prof
+      when "tEXt", "zTXt", "iTXt"
+        t = Png.read_text(name, p, body, len)
+        return t if t.is_a?(PngError)
+        texts << t
+      else
+        if p[at + 4] & 0x20_u8 == 0_u8
+          return PngError.new("png: the chunk #{name} at offset #{at} is critical and not one this decoder knows")
+        end
+        skipped << name
+      end
+      at = body + len + 4
+    end
+    return PngError.new("png: the file has no IDAT chunk") if idats.empty?
+    return PngError.new("png: a palette image (color type 3) without a PLTE chunk") if ctype == 3 && !seen_plte
+    img = Png.pixels(PngDecode.new(width, height, depth, ctype, interlace, plte, trns), data, idats)
+    return img if img.is_a?(PngError)
+    PngFile.new(img, ctype, depth, interlace, plte, trns, gamma, srgb, icc_name, icc, texts, skipped)
+  end
+
+  # tEXt, zTXt or iTXt (sections 11.3.3.2-4).
+  def self.read_text(name : String, p : Pointer(UInt8), body : Int32, len : Int32) : PngText | PngError
+    limit = body + len
+    z = PngBytes.nul(p, body, limit)
+    return PngError.new("png: a #{name} keyword is not ended by a NUL") if z < 0
+    return PngError.new("png: a #{name} keyword is #{z - body} bytes; it is 1 to 79") if z == body || z - body > 79
+    keyword = PngBytes.latin1(PngBytes.slice(p, body, z - body))
+    case name
+    when "tEXt"
+      PngText.new(name, keyword, PngBytes.latin1(PngBytes.slice(p, z + 1, limit - z - 1)))
+    when "zTXt"
+      return PngError.new("png: zTXt #{keyword.inspect} holds no compression method") if z + 1 >= limit
+      return PngError.new("png: zTXt #{keyword.inspect}'s compression method is #{p[z + 1]}; only 0 is defined") if p[z + 1] != 0_u8
+      text = Png.inflate_metadata(PngBytes.slice(p, z + 2, limit - z - 2), "zTXt")
+      return text if text.is_a?(PngError)
+      PngText.new(name, keyword, PngBytes.latin1(text))
+    else
+      return PngError.new("png: iTXt #{keyword.inspect} is cut short before its text") if z + 3 > limit
+      flag = p[z + 1]
+      method = p[z + 2]
+      return PngError.new("png: iTXt #{keyword.inspect}'s compression flag is #{flag}; it is 0 or 1") if flag > 1_u8
+      return PngError.new("png: iTXt #{keyword.inspect}'s compression method is #{method}; only 0 is defined") if flag == 1_u8 && method != 0_u8
+      lz = PngBytes.nul(p, z + 3, limit)
+      return PngError.new("png: iTXt #{keyword.inspect}'s language tag is not ended by a NUL") if lz < 0
+      tz = PngBytes.nul(p, lz + 1, limit)
+      return PngError.new("png: iTXt #{keyword.inspect}'s translated keyword is not ended by a NUL") if tz < 0
+      raw = PngBytes.slice(p, tz + 1, limit - tz - 1)
+      if flag == 1_u8
+        inflated = Png.inflate_metadata(raw, "iTXt")
+        return inflated if inflated.is_a?(PngError)
+        raw = inflated
+      end
+      PngText.new(name, keyword, raw, PngBytes.slice(p, z + 3, lz - z - 3), PngBytes.slice(p, lz + 1, tz - lz - 1))
+    end
+  end
+
+  # A zlib stream in a metadata chunk, inflated to at most MAX_METADATA.
+  def self.inflate_metadata(stream : String, name : String) : String | PngError
+    given = false
+    inf = Inflater.new(Envelope::Zlib) do
+      if given
+        nil
+      else
+        given = true
+        stream
+      end
+    end
+    io = String::Builder.new
+    while true
+      piece = inf.read(65536)
+      return PngError.new("png: #{name}'s zlib stream: #{piece.message}") if piece.is_a?(CompressError)
+      break if piece.empty?
+      return PngError.new("png: #{name} inflates past #{MAX_METADATA} bytes") if io.bytesize + piece.bytesize > MAX_METADATA
+      io << piece
+    end
+    io.to_s
+  end
+
+  # The image data inflated into exactly the bytes IHDR promised, the
+  # filters undone, and the pixels laid out.
+  def self.pixels(d : PngDecode, data : String, idats : Array({Int32, Int32})) : Image | PngError
+    expected = d.raw_size
+    size = d.out_size
+    if expected > 0x7fffffff_i64 || size > 0x7fffffff_i64
+      return PngError.new("png: the image's data is #{expected > size ? expected : size} bytes, past what one string holds")
+    end
+    want = expected.to_i32
+    raw = Pointer(UInt8).malloc(want.to_u64)
+    next_chunk = 0
+    inf = Inflater.new(Envelope::Zlib) do
+      if next_chunk < idats.size
+        piece = idats[next_chunk]
+        next_chunk = next_chunk + 1
+        PngBytes.slice(data.to_unsafe, piece[0], piece[1])
+      else
+        nil
+      end
+    end
+    got = 0
+    while true
+      piece = inf.read(65536)
+      return PngError.new("png: the image data's zlib stream: #{piece.message}") if piece.is_a?(CompressError)
+      break if piece.empty?
+      if got + piece.bytesize > want
+        return PngError.new("png: the image data inflates past the #{want} bytes a #{d.layout_desc} needs")
+      end
+      (raw + got.to_i64).copy_from(piece.to_unsafe, piece.bytesize)
+      got = got + piece.bytesize
+    end
+    if got < want
+      return PngError.new("png: the image data ends after #{got} of the #{want} bytes a #{d.layout_desc} needs")
+    end
+    fault = d.unfilter(raw)
+    return fault if fault
+    bad = -1
+    samples = String.new(size.to_i32) { |dst| bad = d.unpack(raw, dst) }
+    if bad >= 0
+      return PngError.new("png: a pixel's palette index is #{bad}, past the palette's #{d.palette_entries} entries")
+    end
+    Image.new(d.width, d.height, d.layout, d.out_depth, samples, d.key)
+  end
+
+  # *image* as a PNG file. *texts* are written as tEXt chunks, keyword
+  # and text, or as iTXt where the text is not Latin-1.
+  def self.encode(image : Image, interlace : Bool = false, texts : Array({String, String}) = [] of {String, String}) : String
+    ctype = case image.layout
+            when Layout::Gray      then 0
+            when Layout::GrayAlpha then 4
+            when Layout::RGB       then 2
+            else                        6
+            end
+    trns = ""
+    if key = image.transparent
+      io = String::Builder.new
+      key.each do |v|
+        io.write_byte((v >> 8).to_u8)
+        io.write_byte((v & 255).to_u8)
+      end
+      trns = io.to_s
+    end
+    px = image.channels * image.depth // 8
+    enc = PngEncode.new(image.width, image.height, image.depth, ctype, interlace, image.samples.to_unsafe, px)
+    Png.assemble(image.width, image.height, image.depth, ctype, interlace, "", trns, texts, enc.filtered)
+  end
+
+  # A palette image: *indices* one byte a pixel, row after row, each an
+  # entry of *palette*, whose entries are red, green, blue and alpha. The
+  # bit depth is the smallest of 1, 2, 4 and 8 the palette fits; tRNS is
+  # written up to the last entry that is not opaque.
+  def self.encode_indexed(width : Int32, height : Int32, indices : String, palette : Array({Int32, Int32, Int32, Int32}),
+                          interlace : Bool = false, texts : Array({String, String}) = [] of {String, String}) : String
+    raise "Png: a width and height are at least 1, not #{width}x#{height}" if width < 1 || height < 1
+    raise "Png: a palette has 1 to 256 entries, not #{palette.size}" if palette.empty? || palette.size > 256
+    if indices.bytesize.to_i64 != width.to_i64 * height.to_i64
+      raise "Png: #{width}x#{height} is #{width.to_i64 * height.to_i64} indices, not #{indices.bytesize}"
+    end
+    p = indices.to_unsafe
+    i = 0
+    while i < indices.bytesize
+      raise "Png: index #{p[i]} at pixel #{i} is past the palette's #{palette.size} entries" if p[i].to_i32 >= palette.size
+      i = i + 1
+    end
+    plte = String::Builder.new
+    alpha = String::Builder.new
+    last = -1
+    palette.each_with_index do |e, j|
+      [e[0], e[1], e[2], e[3]].each do |v|
+        raise "Png: palette entry #{j} holds #{v}; a sample is 0 to 255" if v < 0 || v > 255
+      end
+      plte.write_byte(e[0].to_u8)
+      plte.write_byte(e[1].to_u8)
+      plte.write_byte(e[2].to_u8)
+      last = j if e[3] != 255
+    end
+    j = 0
+    while j <= last
+      alpha.write_byte(palette[j][3].to_u8)
+      j = j + 1
+    end
+    depth = palette.size <= 2 ? 1 : palette.size <= 4 ? 2 : palette.size <= 16 ? 4 : 8
+    enc = PngEncode.new(width, height, depth, 3, interlace, p, 1)
+    Png.assemble(width, height, depth, 3, interlace, plte.to_s, alpha.to_s, texts, enc.filtered)
+  end
+
+  def self.assemble(width : Int32, height : Int32, depth : Int32, ctype : Int32, interlace : Bool, plte : String,
+                    trns : String, texts : Array({String, String}), filtered : String) : String
+    chunks = texts.map { |t| Png.text_chunk(t[0], t[1]) }
+    d = Deflater.new(Envelope::Zlib)
+    stream = d.compress(filtered) + d.finish
+    io = String::Builder.new(stream.bytesize + 1024)
+    SIGNATURE.each { |b| io.write_byte(b) }
+    head = String::Builder.new(13)
+    PngBytes.put32(head, width.to_u32)
+    PngBytes.put32(head, height.to_u32)
+    head.write_byte(depth.to_u8)
+    head.write_byte(ctype.to_u8)
+    head.write_byte(0_u8)
+    head.write_byte(0_u8)
+    head.write_byte(interlace ? 1_u8 : 0_u8)
+    Png.chunk(io, "IHDR", head.to_s)
+    Png.chunk(io, "PLTE", plte) unless plte.empty?
+    Png.chunk(io, "tRNS", trns) unless trns.empty?
+    chunks.each { |c| Png.chunk(io, c[0], c[1]) }
+    at = 0
+    while at < stream.bytesize
+      count = stream.bytesize - at < IDAT_SIZE ? stream.bytesize - at : IDAT_SIZE
+      Png.chunk(io, "IDAT", PngBytes.slice(stream.to_unsafe, at, count))
+      at = at + count
+    end
+    Png.chunk(io, "IEND", "")
+    io.to_s
+  end
+
+  # A keyword is 1 to 79 Latin-1 printable bytes, no space at either end
+  # and no two together (section 11.3.3.2): anything else is a panic.
+  def self.text_chunk(keyword : String, text : String) : {String, String}
+    kw = PngBytes.to_latin1(keyword)
+    ok = keyword.bytesize > 0 && !keyword.starts_with?(" ") && !keyword.ends_with?(" ") && !keyword.includes?("  ")
+    if kw
+      ok = false if kw.bytesize > 79
+      kp = kw.to_unsafe
+      i = 0
+      while i < kw.bytesize
+        b = kp[i]
+        ok = false unless (b >= 32_u8 && b <= 126_u8) || b >= 161_u8
+        i = i + 1
+      end
+    end
+    raise "Png: #{keyword.inspect} is not a keyword: 1 to 79 printable Latin-1 characters, no space at either end or two together" unless ok && kw
+    raise "Png: the text for #{keyword.inspect} holds a NUL" if text.includes?("\u0000")
+    if lat = PngBytes.to_latin1(text)
+      {"tEXt", kw + "\u0000" + lat}
+    else
+      {"iTXt", kw + "\u0000\u0000\u0000\u0000\u0000" + text}
+    end
+  end
+
+  def self.chunk(io : String::Builder, name : String, data : String) : Nil
+    PngBytes.put32(io, data.bytesize.to_u32)
+    io << name
+    io << data
+    PngBytes.put32(io, CRC32.update(CRC32.update(0_u32, name.to_unsafe, 4), data.to_unsafe, data.bytesize))
+  end
+end

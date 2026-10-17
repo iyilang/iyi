@@ -4,6 +4,33 @@
 
 ### Added
 
+- **std/png: PNG images decoded and encoded in iyi, over std/compress's
+  zlib and std/digest's CRC-32.** `Png.decode(bytes)` answers a `PngFile`:
+  an `Image` (width, height, a `Layout` of Gray, GrayAlpha, RGB or RGBA,
+  8- or 16-bit samples, `sample(x, y, c)` and `to_rgba8`) and what the
+  file said - gAMA, sRGB, the iCCP profile inflated, tEXt, zTXt and iTXt
+  (Latin-1 answered as UTF-8), tRNS and PLTE as written, and the
+  ancillary chunks skipped, by name. Every color type at every legal bit
+  depth, Adam7, all five filters and IDAT across any number of chunks are
+  read; a 1-, 2- or 4-bit gray sample is scaled by replication, a palette
+  expanded to RGB or RGBA, a gray or RGB tRNS kept as the image's
+  transparent color and compared at the file's depth. `Png.encode` writes
+  an `Image` (tRNS for its transparent color), `Png.encode_indexed` a
+  palette image at the smallest depth its palette fits; rows are filtered
+  by section 12.8's minimum-sum-of-absolute-differences heuristic (a
+  palette image's not at all), `interlace: true` writes Adam7, and texts
+  go as tEXt, or iTXt past Latin-1. Refused as a `PngError`: a bad
+  signature, a chunk cut short or failing its CRC-32, a name that is not
+  four letters, an unknown critical chunk, IHDR not first, an impossible
+  depth and color type, IDAT before PLTE in a palette image, IDAT chunks
+  apart, no IEND, a corrupt or short zlib stream, a filter type past 4, a
+  palette index past the palette, a malformed tRNS, PLTE or text chunk.
+  A header claiming more than 89,478,485 pixels (Pillow's bomb threshold,
+  or the caller's `max_pixels`) is refused before anything is allocated,
+  image data is inflated into exactly the bytes IHDR promises, and a
+  compressed text or profile stops at 8 MiB. Misuse panics: samples that
+  do not fill the image, a depth other than 8 or 16, an index past the
+  palette, a keyword that is not one.
 - **std/netip: IP addresses and prefixes as values, read and classified
   as Python's `ipaddress` reads them.** `IP` holds either family, an
   IPv6 zone kept; it reads text by Python 3.14's strict rules (no leading

@@ -845,8 +845,9 @@ PY
   elif grep -qF -e "$phrase" "$WORK/mut.out"; then
     echo "  $label is caught"
   else
+    # The panic's sentence, not the last frames of its backtrace.
     echo "  $label failed, but not where it should have:"
-    tail -2 "$WORK/mut.out" | sed 's/^/    /'
+    { grep -m1 -F 'panic' "$WORK/mut.out" || tail -2 "$WORK/mut.out"; } | sed 's/^/    /'
     status=1
   fi
 }
@@ -873,7 +874,11 @@ prove_broken "CertificateVerify unchecked" "bad-cv: refused with" \
   '    return TlsError.new("#{@peer}'"'"'s CertificateVerify is not its key'"'"'s signature", TlsAlert::DECRYPT_ERROR) unless ok' '' scenarios
 prove_broken "CertificateVerify over the client's context string" "ok: refused" \
   '    problem = certificate_verify(message, chain[0], "server")' '    problem = certificate_verify(message, chain[0], "client")' scenarios
-prove_broken "an ECDSA scheme taken for any curve" "cv-wrong-curve: refused with" \
+# Taken, the signature verifies (SHA-256 on P-384 is sound ECDSA) and the
+# client writes its flight to a server already gone: refused at that write
+# on Linux, held on darwin, where the write was buffered - either fails
+# the scenario by name.
+prove_broken "an ECDSA scheme taken for any curve" "cv-wrong-curve:" \
   'unless key.is_a?(EcdsaPublicKey) && key.curve == curve' 'unless key.is_a?(EcdsaPublicKey)' scenarios
 prove_broken "an Ed25519 CertificateVerify unchecked" "bad-cv-ed25519: expected a refusal" \
   '           key.verify(signed, signature)' '           true' scenarios

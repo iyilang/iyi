@@ -346,7 +346,38 @@ describe "ASTNode#to_s" do
   expect_to_s StringInterpolation.new([2.int32, " ".string, "#".string, "{".string] of ASTNode), %q("#{2} \#{")
   expect_to_s StringInterpolation.new(["a".string, "b".string] of ASTNode), %q("ab")
   expect_to_s "macro foo\n{% verbatim do %}1{% end %}\nend"
-  expect_to_s Assign.new("x".var, Expressions.new([1.int32, 2.int32] of ASTNode)), "x = (1\n2\n)"
+  expect_to_s Assign.new("x".var, Expressions.new([1.int32, 2.int32] of ASTNode)), "x = (1\n2)"
+
+  # iyi: a node where an expression is read prints in a form that parses
+  # there. A travelling body crosses an `.iyimod` as this text after the
+  # normalizer expanded it, and `.or_panic` as an argument printed as
+  # `twice(__temp = parse(text)` with its `if` on the next line.
+  expect_to_s Call.new("foo", Expressions.new([Assign.new("x".var, 1.int32), "x".var] of ASTNode), 2.int32), "foo((x = 1\nx), 2)"
+  expect_to_s Call.new("foo", Expressions.new([Assign.new("x".var, 1.int32), If.new("x".var, 1.int32, 2.int32)] of ASTNode)), "foo((x = 1\nif x\n  1\nelse\n  2\nend))"
+  expect_to_s Call.new("foo", If.new("c".var, 1.int32, 2.int32)), "foo(if c\n  1\nelse\n  2\nend)"
+  expect_to_s Call.new("foo", Assign.new("x".var, 1.int32)), "foo(x = 1)"
+  expect_to_s Call.new("foo", MultiAssign.new(["a".var, "b".var] of ASTNode, [1.int32, 2.int32] of ASTNode)), "foo(begin\n  a, b = 1, 2\nend)"
+  expect_to_s Call.new("foo", Expressions.new([Assign.new("x".var, 1.int32), MultiAssign.new(["a".var, "b".var] of ASTNode, ["x".var, 2.int32] of ASTNode)] of ASTNode)), "foo(begin\n  x = 1\n  a, b = x, 2\nend)"
+  expect_to_s Call.new("foo", Return.new(1.int32)), "foo((return 1))"
+  expect_to_s Call.new(nil, "foo", named_args: [NamedArgument.new("a", Expressions.new([1.int32, 2.int32] of ASTNode))]), "foo(a: (1\n2))"
+  expect_to_s ArrayLiteral.new([Expressions.new([1.int32, 2.int32] of ASTNode)] of ASTNode), "[(1\n2)]"
+  expect_to_s Yield.new([Expressions.new([1.int32, 2.int32] of ASTNode)] of ASTNode), "yield (1\n2)"
+  expect_to_s If.new(Expressions.new([Assign.new("x".var, 1.int32), "x".var] of ASTNode), 2.int32), "if (x = 1\nx)\n  2\nend"
+  expect_to_s Return.new(Expressions.new([1.int32, 2.int32] of ASTNode)), "return (1\n2)"
+
+  it "prints statements in an expression's place as text that parses back" do
+    ([
+      Call.new("foo", Expressions.new([Assign.new("x".var, 1.int32), If.new("x".var, 1.int32, 2.int32)] of ASTNode), 2.int32),
+      Call.new(nil, "foo", named_args: [NamedArgument.new("a", Expressions.new([Assign.new("x".var, 1.int32), Case.new("x".var, [When.new([1.int32] of ASTNode, 2.int32)], 3.int32, exhaustive: false)] of ASTNode))]),
+      Call.new("foo", MultiAssign.new(["a".var, "b".var] of ASTNode, [1.int32, 2.int32] of ASTNode), Next.new),
+      TupleLiteral.new([Expressions.new([Assign.new("x".var, 1.int32), While.new("x".var, Nop.new)] of ASTNode)] of ASTNode),
+      Call.new("foo", Unless.new("c".var, 1.int32, 2.int32), Expressions.new([1.int32, 2.int32] of ASTNode).tap { |exps| exps.keyword = :begin }),
+    ] of ASTNode).each do |node|
+      printed = node.to_s
+      Parser.parse(printed).to_s.should eq(printed)
+    end
+  end
+
   expect_to_s "foo.*"
   expect_to_s "foo.%"
   expect_to_s "&+1"

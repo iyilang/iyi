@@ -2114,10 +2114,22 @@ module Iyi::IyiMod
   # declined to carry and left empty. Stable, so two identical builds write the
   # same file (IV.3).
   #
-  # Recursive, because a nested list has the same question. A cycle in these
-  # edges cannot happen — a type cannot inherit from or include something
-  # written in terms of itself — and `placed` would stop one anyway; a name
+  # Recursive, because a nested list has the same question. A cycle in the
+  # inheritance edges cannot happen — a type cannot inherit from or include
+  # something written in terms of itself — and one through an alias's names
+  # is stopped by `placed`, leaving that pair in its arriving order; a name
   # that matches nothing here simply keeps its place.
+  #
+  # And the types an alias names, the alias's own and those of every alias
+  # written inside the declaration, because overloads resolve one at the
+  # top level. `std/toml`'s `Any` declared `alias Type = ... | TOMLDateTime
+  # | ...` beside `def initialize(raw : Type)` and `def initialize(value :
+  # Int32)`. Adding the second `initialize` orders it against the first,
+  # and the comparison resolves `Type` there and then
+  # (`AliasType#process_value`, from `Type#restriction_of?`). In the source
+  # `TOMLDateTime` was written above `Any` and existed by then; in the
+  # artifact `Any` sorts first, and the consumer stopped at "undefined
+  # constant TOMLDateTime", qualified or not. See `aliased_in`.
   # The names in a piece of declaration text, `Foo::Bar` counted whole.
   private def self.iyi_names_in(text : String) : Array(String)
     names = [] of String
@@ -2137,7 +2149,7 @@ module Iyi::IyiMod
   end
 
   private def self.inheritance_order(types : Array(TypeDecl)) : Array(TypeDecl)
-    return types if types.all? { |declaration| declaration.superclass.empty? && declaration.includes.empty? && declaration.annotations.empty? }
+    return types if types.all? { |declaration| declaration.superclass.empty? && declaration.includes.empty? && declaration.annotations.empty? && aliased_in(declaration).empty? }
 
     by_name = types.to_h { |declaration| {declaration.name, declaration} }
     ordered = [] of TypeDecl
@@ -2170,12 +2182,37 @@ module Iyi::IyiMod
         end
       end
 
+      # Every segment of an alias's names, not only a sibling's whole name:
+      # an alias is written as its author wrote it, so `TOMLDateTime` may as
+      # well be `::Std::Toml::TOMLDateTime`, whose sibling is its last
+      # segment, or `Outer::Inner`, whose sibling is its first. A segment
+      # that merely shares a sibling's name moves that sibling up, which is
+      # harmless: it is declared earlier than it had to be.
+      aliased_in(declaration).each do |written|
+        iyi_names_in(written).each do |name|
+          name.lchop("::").split("::").each do |segment|
+            first = by_name[segment]?
+            place.call(first) if first && first.name != declaration.name
+          end
+        end
+      end
+
       ordered << declaration
       nil
     end
 
     types.each { |declaration| place.call declaration }
     ordered
+  end
+
+  # What every alias in *declaration* is equal to, as written: its own if it
+  # is one, and those of the aliases declared inside it. See
+  # `inheritance_order`.
+  private def self.aliased_in(declaration : TypeDecl) : Array(String)
+    values = [] of String
+    values << declaration.value if declaration.kind == "alias" || declaration.kind == "type"
+    declaration.types.each { |nested| values.concat aliased_in(nested) }
+    values
   end
 
   # One `def`'s header, as the artifact carries it.

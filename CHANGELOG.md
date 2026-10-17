@@ -433,6 +433,28 @@
 
 ### Fixed
 
+- **A travelling body whose argument expanded to statements crosses an
+  `.iyimod` as source that parses.** A body travels printed after the
+  normalizer has expanded it, and `.or_panic` and `!` expand to an
+  assignment and an `if`. As an argument -
+  `twice(parse(text).or_panic, type)` in a generic method - the two were
+  printed bare inside the parentheses and the consumer stopped at
+  "expecting token ')', not 'if'". Wherever the printer writes an
+  expression (an argument, a named argument, a literal's element, a
+  condition, an assigned or returned value), a sequence of statements,
+  `return`/`break`/`next` and `a, b = 1, 2` are now written in a form the
+  parser reads there: in parentheses, or in `begin ... end` when a
+  multiple assignment is among them. Held by `spec/compiler/iyimod_spec.cr`
+  and `spec/compiler/parser/to_s_spec.cr`.
+- **An alias may name any type of its module through an artifact.** An
+  artifact declares a module's types in the order of their names, and an
+  overload restricted to an alias resolves the alias when the next
+  overload is added. `std/toml`'s `Any` (`alias Type = ... | TOMLDateTime
+  | ...` beside two `initialize`s) came before `TOMLDateTime`, and the
+  consumer said "undefined constant TOMLDateTime", qualified or not. The
+  types an alias names - its own or one declared inside a type - are now
+  declared before the type that holds it. Held by
+  `spec/compiler/iyimod_spec.cr`.
 - **The stricter overload wins whatever the declaration order and
   whatever unrelated overloads stand beside it.** With `pick(Int32)`,
   `pick(Array(UInt8))` and `pick(Array(T)) forall T` declared in that

@@ -6130,4 +6130,130 @@ describe "a module compiled against Crystal's library" do
       end
     end
   end
+
+  # A generic method's body travels as source printed after the normalizer
+  # has expanded it, and `.or_panic` expands to an assignment and an `if` in
+  # one `Expressions`. Printed bare inside `twice(...)` the consumer read
+  # `twice(__temp = parse(text)` and stopped at "expecting token ')', not
+  # 'if'". The `!` beside it expands the same way, inside an array literal.
+  it "carries a body whose argument expanded to statements" do
+    with_tempdir("iyimod_expanded_argument") do
+      modules = {
+        "orp.iyi" => <<-IYI,
+          module orp
+
+          pub struct OrpError
+            getter text : String
+
+            def initialize(@text : String)
+            end
+          end
+
+          impl Error for OrpError
+            def message : String
+              @text
+            end
+          end
+
+          pub struct Orp
+            def self.parse(text : String) : Int32 | OrpError
+              text.empty? ? OrpError.new("empty") : text.size
+            end
+
+            def self.twice(value : Int32, type : T.class) : Int32 forall T
+              value * 2
+            end
+
+            def self.read(text : String, type : T.class) : Int32 forall T
+              twice(parse(text).or_panic, type)
+            end
+
+            def self.both(text : String, type : T.class) : Array(Int32) | OrpError forall T
+              [parse(text)!, twice(value: parse(text).or_panic, type: type)]
+            end
+          end
+          IYI
+      }
+      main = <<-IYI
+        module main
+
+        import orp::{Orp}
+
+        puts Orp.read("abc", Int32)
+        puts Orp.both("ab", Int32)
+        IYI
+
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "6\n[2, 4]\n"
+      from_artifact.should eq from_source
+    end
+  end
+
+  # Adding an overload orders it against the ones already there, and that
+  # resolves an alias one of them is restricted to on the spot. `std/toml`'s
+  # `Any` held `alias Type = ... | TOMLDateTime | ...` beside two
+  # `initialize`s, below `TOMLDateTime` in the source; the artifact declares
+  # types by name, so `Any` came first and the consumer said "undefined
+  # constant TOMLDateTime". The types an alias names are now declared before
+  # the type holding it, whether the alias names them bare or qualified.
+  it "declares the types an alias names before the alias" do
+    with_tempdir("iyimod_alias_order") do
+      modules = {
+        "al.iyi" => <<-IYI,
+          module al
+
+          pub struct Zed
+            getter n : Int32
+
+            def initialize(@n : Int32)
+            end
+          end
+
+          pub struct Any
+            alias Type = Int32 | Zed | Array(Any)
+
+            getter raw : Type
+
+            def initialize(@raw : Type)
+            end
+
+            def initialize(value : String)
+              @raw = value.size
+            end
+
+            def zed? : Bool
+              @raw.is_a?(Zed)
+            end
+          end
+
+          pub struct Box
+            alias Held = String | ::Al::Zed
+
+            getter held : Held
+
+            def initialize(@held : Held)
+            end
+
+            def initialize(value : Int32)
+              @held = value.to_s
+            end
+          end
+          IYI
+      }
+      main = <<-IYI
+        module main
+
+        import al::{Any, Box, Zed}
+
+        puts Any.new(Zed.new(3)).zed?
+        puts Any.new("abc").raw
+        puts Box.new(4).held
+        puts Box.new(Zed.new(5)).held.is_a?(Zed)
+        IYI
+
+      from_source, from_artifact = iyimod_round_trip(modules, main)
+      from_source.should eq "true\n3\n4\ntrue\n"
+      from_artifact.should eq from_source
+    end
+  end
 end

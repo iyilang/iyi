@@ -212,6 +212,35 @@ jobs:
         env:
           CRYSTAL_WORKERS: 1
 
+  # And the question from a position nobody chose. The samples job's
+  # soak asks one hover after each abuse; this asks every cursor question
+  # at thousands of positions across `src/std`, including the two shapes
+  # the answers were wrong on — a macro directive line and a local
+  # assignment, where a variable an arm this target does not take has no
+  # type and a visitor read it anyway. Eighteen internal errors were found
+  # that way and nothing had asked. A job of its own: it grows with the
+  # library, and took 22 to 41 of the samples job's 90 minutes.
+  lsp-positions:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    container:
+      image: crystallang/crystal:1.21.0-build
+    name: "Every cursor question, everywhere in the library"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: crystal
+          path: .build
+      - run: chmod +x .build/crystal
+      - name: Build `iyi` and its daemon
+        run: make -o .build/crystal iyi iyi-daemon
+      - name: Every cursor question, everywhere in the library
+        run: python3 bench/lsp_positions.py
+
   samples:
     needs: build
     runs-on: ubuntu-24.04
@@ -223,6 +252,9 @@ jobs:
     # and 51. `lsp_positions.py`, which asks a cursor question every 200
     # lines of every module in `src/std` and grows with it, took 15, 16 and
     # 23 minutes in those that finished and 28 to 31 in those cancelled.
+    # At 90 the job took 87 on most runs and was cancelled at 90 on
+    # 2026-10-16, `lsp_positions.py` 22 to 41 minutes of it: that step is
+    # now the `lsp-positions` job's, run beside this one.
     timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
@@ -607,15 +639,8 @@ jobs:
       - name: The language server does not flinch
         run: python3 bench/lsp_soak.py
 
-      # And the question from a position nobody chose. The soak above asks
-      # one hover after each abuse; this asks every cursor question at
-      # thousands of positions across `src/std`, including the two shapes
-      # the answers were wrong on — a macro directive line and a local
-      # assignment, where a variable an arm this target does not take has
-      # no type and a visitor read it anyway. Eighteen internal errors
-      # were found that way and nothing here had asked.
-      - name: Every cursor question, everywhere in the library
-        run: python3 bench/lsp_positions.py
+      # Every cursor question at every 200th line of the library is the
+      # `lsp-positions` job's, beside this one.
 
       # The server is two processes because `iyi` carries no collector: a
       # proxy that keeps the protocol and the buffers, and a worker that
@@ -2902,7 +2927,7 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [binary, darwin, darwin-std-siblings, clean-room, iyi, compiler-specs, stdlib-specs,
-            samples, std, std-siblings, targets, cross-objects, cross-run, wasi-run,
+            samples, lsp-positions, std, std-siblings, targets, cross-objects, cross-run, wasi-run,
             windows-probe, windows-collector, windows-runtime, windows-native, windows-std,
             windows-std-siblings, windows-gates, windows-compiler-specs,
             wasm32-collector]

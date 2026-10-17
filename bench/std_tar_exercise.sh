@@ -122,7 +122,7 @@ index = []
 
 def expect(name):
     path = os.path.join(d, name)
-    stem = name[:-7] if name.endswith(".tar.gz") else name[:-4]
+    stem = name[:-7] if name.endswith((".tar.gz", ".tar.xz")) else (name[:-8] if name.endswith(".tar.bz2") else name[:-4])
     # `newline=""`: Windows' text mode writes `\r\n`, which the exercise
     # then reads as part of each entry's last field.
     with open(os.path.join(d, stem + ".expect"), "w", encoding="utf-8", newline="") as f:
@@ -157,7 +157,7 @@ def common(t):
 
 # ustar, as Python writes USTAR_FORMAT: a long name split by prefix,
 # a UTF-8 name in the name field as it is.
-for name, mode in (("py-ustar.tar", "w"), ("py-ustar.tar.gz", "w:gz")):
+for name, mode in (("py-ustar.tar", "w"), ("py-ustar.tar.gz", "w:gz"), ("py-ustar.tar.bz2", "w:bz2"), ("py-ustar.tar.xz", "w:xz")):
     with tarfile.open(os.path.join(d, name), mode, format=tarfile.USTAR_FORMAT, encoding="utf-8") as t:
         common(t)
         add(t, info("dir/çay ğ.txt"), "türkçe içerik\n".encode())
@@ -179,7 +179,7 @@ expect("py-gnu.tar")
 # PAX_FORMAT, with a global header: long and non-ASCII names, a time
 # with nine digits of fraction, a negative one, ids and names past what
 # ustar holds.
-for name, mode in (("py-pax.tar", "w"), ("py-pax.tar.gz", "w:gz")):
+for name, mode in (("py-pax.tar", "w"), ("py-pax.tar.gz", "w:gz"), ("py-pax.tar.bz2", "w:bz2"), ("py-pax.tar.xz", "w:xz")):
     with tarfile.open(os.path.join(d, name), mode, format=tarfile.PAX_FORMAT, pax_headers={"comment": "written by python"}) as t:
         common(t)
         add(t, info("p/" + "N" * 200), b"a long name")
@@ -236,11 +236,18 @@ if gnutar:
     os.utime(tree, (T, T))
     everything = ["hello.txt", "binary.bin", "dir", "emptydir", "long-link", "again.txt"]
     short = ["hello.txt", "binary.bin", "emptydir", "again.txt"]
-    for name, fmt, flags, members in (("gnu-gnu.tar", "gnu", [], everything),
-                                      ("gnu-posix.tar", "posix", [], everything),
-                                      ("gnu-posix.tar.gz", "posix", ["-z"], everything),
-                                      ("gnu-ustar.tar", "ustar", [], short),
-                                      ("gnu-v7.tar", "v7", [], short)):
+    made = [("gnu-gnu.tar", "gnu", [], everything),
+            ("gnu-posix.tar", "posix", [], everything),
+            ("gnu-posix.tar.gz", "posix", ["-z"], everything),
+            ("gnu-ustar.tar", "ustar", [], short),
+            ("gnu-v7.tar", "v7", [], short)]
+    # `-j` runs bzip2(1), which GNU tar does not carry.
+    if shutil.which("bzip2"):
+        made.append(("gnu-posix.tar.bz2", "posix", ["-j"], everything))
+    # and `-J` runs xz(1).
+    if shutil.which("xz"):
+        made.append(("gnu-posix.tar.xz", "posix", ["-J"], everything))
+    for name, fmt, flags, members in made:
         subprocess.run([gnutar, "--format=" + fmt] + flags + ["-C", tree, "-cf", os.path.join(d, name)] + members, check=True)
         expect(name)
 
@@ -282,7 +289,7 @@ fi
 
 echo
 echo "== every tar section reported"
-for phrase in "== round trips" "== streaming reads" "== headers" "== past 8 GiB" "== gzip" \
+for phrase in "== round trips" "== streaming reads" "== headers" "== past 8 GiB" "== gzip" "== bzip2" "== xz" \
               "== refused as a value" "== extract" "== what python wrote" "== written for python"; do
   if ! grep -qF "$phrase" "$WORK/tar-plain.out"; then
     echo "  missing section: $phrase"
@@ -525,7 +532,15 @@ prove_broken "an entry cut short handed out" "an entry cut short" \
 prove_broken "no bound on an extended header" "an extended header past 1 MiB" \
   'if size > TarBytes::MAX_SPECIAL' 'if false'
 prove_broken "gzip not recognised" "gzip read: every entry as it was written" \
-  'first.to_unsafe[0] == 0x1f_u8' 'first.to_unsafe[0] == 0x1e_u8'
+  'p[0] == 0x1f_u8' 'p[0] == 0x1e_u8'
+prove_broken "bzip2 not recognised" "bzip2 read: every entry as it was written" \
+  'p[0] == 0x42_u8' 'p[0] == 0x41_u8'
+prove_broken "a bzip2 error taken for the stream's end" "a bzip2 block CRC that disagrees" \
+  'return TarError.new("tar: the bzip2 stream is corrupt: #{piece.message}") if piece.is_a?(Bzip2Error)' 'return "" if piece.is_a?(Bzip2Error)'
+prove_broken "xz not recognised" "xz read: the archive Python wrote" \
+  'p[0] == 0xfd_u8' 'p[0] == 0xfc_u8'
+prove_broken "an xz error taken for the stream's end" "an xz CRC64 that disagrees is refused at the end" \
+  'return TarError.new("tar: the xz stream is corrupt: #{piece.message}") if piece.is_a?(XzError)' 'return "" if piece.is_a?(XzError)'
 prove_broken "the gzip trailer never read" "a gzip CRC-32 that disagrees is refused at the end" \
   '        drain!
 ' ''

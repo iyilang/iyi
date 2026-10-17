@@ -16,6 +16,7 @@
 module bench/std_tar_exercise
 
 import std/tar::{TarReader, TarWriter, TarEntry, TarError, TarType, TarFormat}
+import std/bzip2::{Bzip2}
 import std/digest::{CRC32}
 import std/io::{Memory}
 import std/time::{Time}
@@ -562,6 +563,67 @@ refused(gz[0, gz.bytesize // 2], "tar: the gzip stream is corrupt", "a gzip stre
 refused(patched(gz, gz.bytesize // 2, bytes([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])), "tar: ", "a gzip stream with bytes overwritten")
 puts "  #{gz.bytesize} bytes gzip for #{round.bytesize}"
 
+puts "== bzip2"
+# The archive through `Bzip2.compress`, read back through the magic; a
+# block CRC, the stream's combined CRC and a cut are each refused, the
+# CRCs at the end, where the rest of the stream is read.
+bz = Bzip2.compress(round, 1)
+assert_str want, expect_lines(bz, "bzip2 read: every entry as it was written"), "bzip2 read: every entry as it was written"
+r = TarReader.new(Memory.new(bz))
+r.next_entry
+assert_true r.bzip2? && !r.gzip?, "bzip2 read through the magic"
+r = TarReader.new(Memory.new(round))
+r.next_entry
+assert_true !r.bzip2?, "a plain archive is not bzip2"
+refused(patched(bz, 10, bytes([bz.to_unsafe[10].to_i32 ^ 1])), "tar: the bzip2 stream is corrupt: bzip2: block 1's CRC does not match", "a bzip2 block CRC that disagrees")
+# The second-last byte is inside the combined CRC whatever the padding:
+# the CRC's 32 bits end at most seven bits before the stream does.
+refused(patched(bz, bz.bytesize - 2, bytes([bz.to_unsafe[bz.bytesize - 2].to_i32 ^ 1])), "tar: the bzip2 stream is corrupt: bzip2: the stream's combined CRC does not match", "a bzip2 combined CRC that disagrees is refused at the end")
+refused(bz[0, bz.bytesize // 2], "tar: the bzip2 stream is corrupt", "a bzip2 stream cut short")
+puts "  #{bz.bytesize} bytes bzip2 for #{round.bytesize}"
+
+puts "== xz"
+# std/xz has no compressor, so the archive is one Python's `tarfile` wrote
+# and `lzma.compress` packed (CRC64, an 8 MiB dictionary): a directory, a
+# line of text and 3,000 bytes of a pattern. Read through the magic; the
+# block's CRC64 is compared after the last byte of the block, which the
+# zero blocks and the record's padding are, so a CRC64 that disagrees is
+# refused at the end, as gzip's is.
+txz = String.new(468) do |dst|
+  hex = "fd377a585a000004e6d6b4460200210116000000742fe5a3e027ff01945d003c1e81de95e17055e33d4232697ad8bb5ba2712e6eb58dace9eb8a39ef03b7fc2c5a9078c036305b87a55575557e186c18559f887f6cc4399a043ffc434b66c66ce17e816c3aff0b98ad607afebe97f6f1dffb03012b7c7d985a062c6d5102ad93d33bbb0a65ac727aed792cb486a02a8e0207481619e1d1301f21d30a07d0a446380371961e9ff6df62e55269485e09a22b2a5f6a7484d23eaf225620597cef5fb6a0cfc5ca11bc16a0bf150f24e51d576fcba08bf0f0f666bce6e657998b2595b24713df02f1fdb864b9fcc80c0b07d0f371e0514d0e5acf21ffc2d74a9e73ef15add012a7e546e05319ab932d38a7d63aa07f16abc315b55c1af49928af6e62593657384f575a1e66d23e59f1cd00c5711c949b22202c0fa1ee75f218ab57cfa2f5c9e329117972688138308c4137200e0a20c482695fc5383248c1271b924bcc319979662484bfa1d4db3a6bd47a63778d3d1ad7bb6807c5bd575ca932c0726bf9335e8fae96e814db69afbeedbfc4936e4994a76e574c5f3e718fd7c52e242d7e9eb738791789a0e00b31d2600f3bb861000007188ca3d6777eee0001b00380500000f325da1fb1c467fb020000000004595a"
+  i = 0
+  while i < 468
+    hi = hex.to_unsafe[2 * i].to_i32
+    lo = hex.to_unsafe[2 * i + 1].to_i32
+    dst[i] = ((hi <= 57 ? hi - 48 : hi - 87) * 16 + (lo <= 57 ? lo - 48 : lo - 87)).to_u8
+    i = i + 1
+  end
+end
+xz_entries = listed(txz, "xz read: the archive Python wrote")
+assert_true xz_entries.size == 3 && xz_entries[0][0].directory? && xz_entries[0][0].name == "xz/", "xz read: the directory first"
+assert_str "hello from a .tar.xz\n", xz_entries[1][1], "xz read: the text"
+pattern = String.new(3000) do |dst|
+  i = 0
+  while i < 3000
+    dst[i] = ((i * 7) & 255).to_u8
+    i = i + 1
+  end
+end
+assert_true xz_entries[2][0].name == "xz/pattern.bin" && xz_entries[2][1] == pattern, "xz read: the pattern"
+r = TarReader.new(Memory.new(txz))
+r.next_entry
+assert_true r.xz? && !r.gzip? && !r.bzip2?, "xz read through the magic"
+r = TarReader.new(Memory.new(round))
+r.next_entry
+assert_true !r.xz?, "a plain archive is not xz"
+# The CRC64 is the eight bytes before the index, whose size the footer's
+# backward size gives: the index of one record here is 12 bytes.
+check_at = txz.bytesize - 12 - 12 - 8
+refused(patched(txz, check_at, bytes([txz.to_unsafe[check_at].to_i32 ^ 1])), "tar: the xz stream is corrupt: xz: a block's CRC64 does not match", "an xz CRC64 that disagrees is refused at the end")
+refused(txz[0, txz.bytesize // 2], "tar: the xz stream is corrupt", "an xz stream cut short")
+refused(txz + "\u0000", "tar: the xz stream is corrupt: xz: the stream padding is not a multiple of four bytes", "an xz stream with a stray byte after it")
+puts "  #{txz.bytesize} bytes xz for 10240"
+
 puts "== refused as a value"
 refused("x" * 600, "is not a tar header", "not an archive")
 flipped = patched(round, 0, "j")
@@ -687,7 +749,7 @@ if !scratch && File.exists?(work + "/index.txt")
   File.read(work + "/index.txt").lines.each do |name|
     next if name.empty?
     data = File.read(work + "/" + name)
-    stem = name.ends_with?(".gz") ? name[0, name.bytesize - 7] : name[0, name.bytesize - 4]
+    stem = name.ends_with?(".gz") ? name[0, name.bytesize - 7] : (name.ends_with?(".bz2") ? name[0, name.bytesize - 8] : (name.ends_with?(".xz") ? name[0, name.bytesize - 7] : name[0, name.bytesize - 4]))
     expected = File.read(work + "/" + stem + ".expect")
     assert_str expected, expect_lines(data, name), "#{name}: entries as Python read them"
     io = File.open(work + "/" + name)

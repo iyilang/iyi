@@ -1,7 +1,9 @@
 # Tar archives - POSIX.1-2001 pax and ustar (IEEE Std 1003.1, the `pax`
 # utility's "ustar Interchange Format" and "pax Interchange Format"),
 # read and written in iyi, with GNU's long names and the old v7 header
-# read as well, and `.tar.gz` through the DEFLATE of `std/compress`.
+# read as well, `.tar.gz` through the DEFLATE of `std/compress`,
+# `.tar.bz2` read through `std/bzip2`, and `.tar.xz` read through
+# `std/xz`.
 #
 # `TarReader` reads an archive as the format means it to be read: from
 # the front, a 512-byte header and then the entry's data padded to a
@@ -10,9 +12,11 @@
 # entry's `read` and `read_all` give its data; data an entry's caller did
 # not read is read past by the next `next_entry`, so a listing reads
 # every byte once and keeps none. The first bytes say whether the stream
-# is gzip (RFC 1952's 1f 8b): if they do, everything after is read
-# through `Inflater`, as Python's `tarfile.open(mode="r:*")` and GNU
-# `tar -x` without `-z` take one.
+# is gzip (RFC 1952's 1f 8b), bzip2 ("BZh" and a block-size digit 1 to
+# 9) or xz (FD 37 7A 58 5A 00): if they do, everything after is read
+# through `Inflater`, `Bzip2Reader` or `XzReader`, as Python's
+# `tarfile.open(mode="r:*")` and GNU `tar -x` without `-z`, `-j` or `-J`
+# take one.
 #
 # A header is believed only once its checksum is: the sum of its bytes
 # with the checksum field counted as spaces, unsigned as POSIX sums it,
@@ -46,10 +50,13 @@
 # not one, or a pax `size`, `mtime`, `uid` or `gid` that is not a
 # number; an extended header (pax or GNU) past 1 MiB, which is held in
 # memory whole and so is bounded, as Go bounds it; an extended header
-# with no entry after it; and a gzip stream that `Inflater` refuses. In a
-# gzip archive the rest of the stream after the zero block is read, so
-# the gzip trailer's CRC-32 and length vouch for every byte handed out:
-# content that changed is refused by the `next_entry` that finds the end.
+# with no entry after it; and a gzip, bzip2 or xz stream that
+# `Inflater`, `Bzip2Reader` or `XzReader` refuses. In a compressed
+# archive the rest of the stream after the zero block is read, so the
+# gzip trailer's CRC-32 and length, bzip2's block and stream CRCs, or
+# xz's block checks and index, vouch for every byte handed out: content
+# that changed is refused by the `next_entry` that finds the end. An xz
+# stream's dictionary is held to `XzReader`'s 64 MiB default.
 #
 # `TarWriter` writes ustar headers to an `IyiIO`, POSIX's magic, as
 # Python's default PAX_FORMAT and GNU `tar --format=posix` do, and puts a
@@ -88,12 +95,16 @@
 # Left out: writing GNU or v7 headers, sparse files (GNU `S` and pax's
 # `GNU.sparse` records are read as an entry whose data is what was
 # stored), access and change times (kept in `pax`, not read), ACLs and
-# extended attributes (likewise), multi-volume archives, appending, and
+# extended attributes (likewise), multi-volume archives, appending,
+# writing `.tar.bz2` (`Bzip2.compress` takes a whole string, and a
+# writer streams), writing `.tar.xz` (std/xz decompresses only), and
 # devices made on extraction.
 
 module std/tar
 
 import std/compress::{Deflater, Inflater, Envelope, CompressError}
+import std/bzip2::{Bzip2Reader, Bzip2Error}
+import std/xz::{XzReader, XzError}
 import std/time::{Time}
 import std/file::{File}
 import std/dir::{Dir}
@@ -467,6 +478,8 @@ end
 pub class TarReader
   @io : IyiIO
   @inflater : Inflater | Nil
+  @bzip2 : Bzip2Reader | Nil
+  @xz : XzReader | Nil
   @pending : String
   @started : Bool
   @gzip : Bool
@@ -482,6 +495,8 @@ pub class TarReader
   # The archive *io* holds from where it is, plain or gzip.
   def initialize(@io : IyiIO)
     @inflater = nil
+    @bzip2 = nil
+    @xz = nil
     @pending = ""
     @started = false
     @gzip = false
@@ -498,6 +513,16 @@ pub class TarReader
   # Whether the stream is gzip; known once the first entry is asked for.
   def gzip? : Bool
     @gzip
+  end
+
+  # Whether the stream is bzip2; known once the first entry is asked for.
+  def bzip2? : Bool
+    !@bzip2.nil?
+  end
+
+  # Whether the stream is xz; known once the first entry is asked for.
+  def xz? : Bool
+    !@xz.nil?
   end
 
   # The next entry, its header read and checked; nil at the end. The
@@ -725,14 +750,13 @@ pub class TarReader
   # Up to *n* bytes of the archive, fewer only where it ends.
   private def take(n : Int32) : String | TarError
     start unless @started
-    got = if inflater = @inflater
+    got = if @inflater || @bzip2 || @xz
             first = ""
             out = nil.as(String::Builder | Nil)
             while true
               have = (out ? out.bytesize : first.bytesize)
               break if have >= n
-              piece = inflater.read(n - have)
-              return TarError.new("tar: the gzip stream is corrupt: #{piece.message}") if piece.is_a?(CompressError)
+              piece = decoded(n - have)!
               break if piece.empty?
               if b = out
                 b << piece
@@ -760,14 +784,42 @@ pub class TarReader
     got
   end
 
-  # The first block, which says whether the stream is gzip.
+  # Up to *n* bytes from the decompressor the stream is read through; ""
+  # where it has ended.
+  private def decoded(n : Int32) : String | TarError
+    if inflater = @inflater
+      piece = inflater.read(n)
+      return TarError.new("tar: the gzip stream is corrupt: #{piece.message}") if piece.is_a?(CompressError)
+      piece
+    elsif bzip2 = @bzip2
+      piece = bzip2.read(n)
+      return TarError.new("tar: the bzip2 stream is corrupt: #{piece.message}") if piece.is_a?(Bzip2Error)
+      piece
+    elsif xz = @xz
+      piece = xz.read(n)
+      return TarError.new("tar: the xz stream is corrupt: #{piece.message}") if piece.is_a?(XzError)
+      piece
+    else
+      ""
+    end
+  end
+
+  # The first block, which says whether the stream is gzip (1f 8b),
+  # bzip2 ("BZh" and a block-size digit) or xz (FD 37 7A 58 5A 00).
   private def start : Nil
     @started = true
     first = @io.read_bytes(TarBytes::BLOCK)
-    if first.bytesize >= 2 && first.to_unsafe[0] == 0x1f_u8 && first.to_unsafe[1] == 0x8b_u8
+    p = first.to_unsafe
+    if first.bytesize >= 2 && p[0] == 0x1f_u8 && p[1] == 0x8b_u8
       @gzip = true
       feed = TarFeed.new(@io, first)
       @inflater = Inflater.new(Envelope::Gzip) { feed.next }
+    elsif first.bytesize >= 4 && p[0] == 0x42_u8 && p[1] == 0x5a_u8 && p[2] == 0x68_u8 && p[3] >= 0x31_u8 && p[3] <= 0x39_u8
+      feed = TarFeed.new(@io, first)
+      @bzip2 = Bzip2Reader.new { feed.next }
+    elsif first.bytesize >= 6 && p[0] == 0xfd_u8 && p[1] == 0x37_u8 && p[2] == 0x7a_u8 && p[3] == 0x58_u8 && p[4] == 0x5a_u8 && p[5] == 0_u8
+      feed = TarFeed.new(@io, first)
+      @xz = XzReader.new { feed.next }
     else
       @pending = first
     end
@@ -785,16 +837,14 @@ pub class TarReader
     nil
   end
 
-  # At the end of a gzip archive, the rest of the gzip stream read - the
-  # record's padding, as GNU tar writes it - so its CRC-32 and length
-  # are checked: the data handed out before them is vouched for at last.
+  # At the end of a compressed archive, the rest of the stream read - the
+  # record's padding, as GNU tar writes it - so its checks (gzip's CRC-32
+  # and length, bzip2's block and stream CRCs, xz's block checks, index
+  # and footer) are made: the data handed out before them is vouched for
+  # at last.
   private def drain : Nil | TarError
-    if inflater = @inflater
-      while true
-        piece = inflater.read(65536)
-        return TarError.new("tar: the gzip stream is corrupt: #{piece.message}") if piece.is_a?(CompressError)
-        break if piece.empty?
-      end
+    while true
+      break if decoded(65536)!.empty?
     end
     nil
   end

@@ -444,6 +444,71 @@ def echo(ws : WebSocket, listener : IyiSocket) : Nil
   end
 end
 
+# A CONNECT proxy on raw sockets, for the client's `proxy:`, until
+# *listener* is closed: what each request asked goes to *seen*, a request
+# without the credential (`gate:s3cret`) is answered 407, and a CONNECT
+# with it opens a tunnel to an IPv4 origin and copies both ways.
+def tunnel_proxy(listener : IyiSocket, seen : Array(String)) : Nil
+  group do |g|
+    while !listener.closed?
+      got = listener.accept
+      break unless got.is_a?(IyiSocket)
+      client = got
+      g.spawn do
+        tunnel(client, seen)
+        0
+      end
+    end
+    0
+  end
+  nil
+end
+
+def tunnel(client : IyiSocket, seen : Array(String)) : Nil
+  head = ""
+  while !head.includes?("\r\n\r\n")
+    piece = client.read(4096)
+    unless piece.is_a?(String) && piece.bytesize > 0
+      client.close
+      return
+    end
+    head = head + piece
+  end
+  line = head[0, head.index('\r') || 0]
+  authorized = head.includes?("\r\nProxy-Authorization: Basic Z2F0ZTpzM2NyZXQ=\r\n")
+  seen << line + (authorized ? " auth=ok" : " auth=missing")
+  words = line.split(' ')
+  colon = words.size == 3 ? words[1].index(':') : nil
+  unless authorized && words[0] == "CONNECT" && colon
+    client.write("HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    client.close
+    return
+  end
+  upstream = IyiSocket.connect(words[1][0, colon], words[1][colon + 1, words[1].bytesize - colon - 1].to_i).or_panic
+  client.write("HTTP/1.1 200 Connection Established\r\n\r\n")
+  group do |pipes|
+    pipes.spawn do
+      pipe(client, upstream)
+      0
+    end
+    pipe(upstream, client)
+    0
+  end
+  nil
+end
+
+# *from*'s bytes to *to* until either ends; then both are closed, which
+# ends the copy the other way too.
+def pipe(from : IyiSocket, to : IyiSocket) : Nil
+  while !from.closed? && !to.closed?
+    piece = from.read(65536)
+    break unless piece.is_a?(String) && piece.bytesize > 0
+    break if to.closed? || !to.write(piece).is_a?(Int32)
+  end
+  from.close
+  to.close
+end
+
 # The server for the script's peers: under TLS when a chain and key are
 # given (`wss://`).
 def serve(tls : TlsServerConfig?) : Nil
@@ -928,5 +993,50 @@ group do |g|
   0
 end
 puts "  protocol, echo, a megabyte, 100 in order, the server's limit and close, a frame with the handshake, refusals"
+
+puts "\n== through a proxy"
+# `proxy:` to a CONNECT proxy written here on raw sockets: it wants a
+# credential, answers 407 without one, and otherwise opens the tunnel and
+# copies both ways, keeping what each CONNECT asked. The handshake goes
+# inside the tunnel, the credential at the proxy and not at the server.
+# std/http's gate does the same through a proxy in Python, `wss://` too.
+proxy_l = IyiSocket.listen("127.0.0.1", 0)
+proxy_seen = [] of String
+echo_l = IyiSocket.listen("127.0.0.1", 0)
+echo_port = echo_l.local_port
+server_seen = [] of String
+group do |g|
+  g.spawn do
+    Server.serve(echo_l) do |req|
+      WebSocket.upgrade(req) do |ws|
+        server_seen << "#{req.path} proxy-auth=#{req.header("Proxy-Authorization") || "-"}"
+        echo(ws, echo_l)
+      end
+    end
+    0
+  end
+  g.spawn do
+    tunnel_proxy(proxy_l, proxy_seen)
+    0
+  end
+  g.spawn do
+    proxy = "http://gate:s3cret@127.0.0.1:#{proxy_l.local_port}"
+    ws = WebSocket.connect("ws://127.0.0.1:#{echo_port}/through", proxy: proxy).or_panic
+    ws.send("through the tunnel").or_panic
+    assert_str "text \"through the tunnel\"", said(ws.receive), "an echo through the proxy"
+    assert_str "CONNECT 127.0.0.1:#{echo_port} HTTP/1.1 auth=ok", proxy_seen.join("|"), "the handshake through the proxy's tunnel"
+    assert_str "/through proxy-auth=-", server_seen.join("|"), "the credential at the proxy, and not at the server"
+    ws.close
+    refused = WebSocket.connect("ws://127.0.0.1:#{echo_port}/again", proxy: "127.0.0.1:#{proxy_l.local_port}")
+    assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_l.local_port} answered 407 Proxy Authentication Required to CONNECT 127.0.0.1:#{echo_port}", refused.is_a?(HTTPError) ? refused.message : "answered", "a proxy that wants a credential, named"
+    stop = WebSocket.connect("ws://127.0.0.1:#{echo_port}/stop", proxy: proxy).or_panic
+    stop.send("stop").or_panic
+    assert_str "end", said(stop.receive), "the server's close on stop, through the proxy"
+    proxy_l.close
+    0
+  end
+  0
+end
+puts "  an echo through a CONNECT tunnel, the credential at the proxy alone, a 407 named"
 
 puts "\nALL CHECKS PASSED"

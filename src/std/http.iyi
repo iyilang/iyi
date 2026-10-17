@@ -15,8 +15,9 @@
 # read. Redirects (301, 302, 303, 307, 308) are followed, ten at most by
 # default, the method becoming GET where a browser's does; credentials and
 # cookies a caller wrote are not carried to another host. A body coded
-# `gzip` or `deflate` is decoded as it arrives, unless the caller asked
-# for a coding itself; a `jar:` (std/cookie's `CookieJar`) keeps what
+# `gzip`, `deflate` or `zstd` (RFC 8878, its window held to the 8 MB RFC
+# 9659 sets) is decoded as it arrives, unless the caller asked for a
+# coding itself; a `jar:` (std/cookie's `CookieJar`) keeps what
 # `Set-Cookie` sets and sends it back. Each `HTTP` request is a
 # connection of its own; an `HTTPClient` keeps the connections its
 # answers leave open and sends the next request to that server over one.
@@ -40,10 +41,13 @@
 # `Content-Length`, chunked otherwise); a `Response.stream { |w| ... }`
 # whose block writes as it goes; or a `Response.upgrade`, after whose 101
 # the connection belongs to the block (std/websocket's). With `compress:
-# true` an answer whose type is worth compressing goes `gzip` to a client
-# that accepts it. Beside it: std/router routes requests by pattern as
-# Go's ServeMux does, std/fileserver answers them from a directory,
-# std/sse streams events, and std/websocket takes a connection over.
+# true` an answer whose type is worth compressing goes `zstd` or `gzip`
+# to a client that accepts one: zstd for a whole body when the client's
+# `q` for it is at least its `q` for gzip, gzip for a stream
+# (`Server.coding_for`). Beside it: std/router routes requests by
+# pattern as Go's ServeMux does, std/fileserver answers them from a
+# directory, std/sse streams events, and std/websocket takes a
+# connection over.
 # The socket parks under the runtime, so a slow client costs one fiber;
 # the listener's `close` ends `serve`. With `tls:` a `TlsServerConfig`
 # (std/tls's server: TLS 1.3, an Ed25519 or P-256 certificate) every
@@ -83,14 +87,18 @@
 # request (RFC 9112 §3.2.2), `https://` through a `CONNECT` tunnel (RFC
 # 9110 §9.3.6) with TLS to the server inside, and the URL's user and
 # password go as `Proxy-Authorization: Basic` to the proxy alone, never
-# inside a tunnel. A CONNECT the proxy refuses (407, 403, 502) is an
-# `HTTPError` naming its status; kept connections are kept by proxy, and
-# a tunnel by proxy and server. `HTTP.proxy_for(url, http_proxy,
-# https_proxy, no_proxy)` says which proxy a URL takes under those
-# variables' values, `NO_PROXY` read as Go's `httpproxy` reads it, and
-# std/http_proxy's `HTTPProxy.from_env` reads them from the environment.
-# bench/std_http_exercise.sh holds it against a proxy written in Python,
-# curl through the same proxy, and Go's net/http for `NO_PROXY`.
+# inside a tunnel. `HTTP.upgrade(proxy:)` - std/websocket's
+# `WebSocket.connect` - goes through a tunnel for `http://` too, its
+# handshake inside (`upgrade` says why). A CONNECT the proxy refuses
+# (407, 403, 502) is an `HTTPError` naming its status; kept connections
+# are kept by proxy, and a tunnel by proxy and server.
+# `HTTP.proxy_for(url, http_proxy, https_proxy, no_proxy)` says which
+# proxy a URL takes under those variables' values, `NO_PROXY` read as
+# Go's `httpproxy` reads it, and std/http_proxy's `HTTPProxy.from_env`
+# reads them from the environment. bench/std_http_exercise.sh holds it
+# against a proxy written in Python - a WebSocket through it, `ws://`
+# and `wss://`, among the rest - curl through the same proxy, and Go's
+# net/http for `NO_PROXY`.
 #
 # **What it reaches.** What std/socket reaches, and for `https://` what
 # std/tls does - the operating system's trusted roots and its entropy -
@@ -103,7 +111,8 @@
 # 9113 retired) and RFC 8441's WebSocket over HTTP/2 - an upgrade offers
 # ALPN `http/1.1` alone - pipelining requests on a kept HTTP/1.1
 # connection; a proxy reached over TLS (`https://`) or SOCKS, which are
-# refused by name, and `HTTP.upgrade` through a proxy, which goes direct.
+# refused by name; and a streamed answer in zstd, std/zstd's compressor
+# taking its input whole.
 
 module std/http
 
@@ -113,6 +122,9 @@ import std/x509::{Certificate}
 import std/uri::{URI, Params}
 import std/mime::{MIME}
 import std/compress::{Inflater, Deflater, Envelope, Gzip, CompressError}
+# HTTP's third content coding (RFC 9659), read as it arrives and written
+# for a whole answer.
+import std/zstd::{ZstdReader, ZstdError, Zstd}
 import std/digest::{SHA1}
 # A proxy's `Proxy-Authorization: Basic`.
 import std/base64::{Base64}
@@ -534,8 +546,8 @@ end
 # answers the next piece, "" once the body is done; what the other end
 # does wrong is an `HTTPError`, and a connection that fails or is
 # cancelled answers that. The first failure is kept: every read after it
-# answers the same. A body coded `gzip` or `deflate` is decoded as it is
-# read when the client asked for that.
+# answers the same. A body coded `gzip`, `deflate` or `zstd` is decoded
+# as it is read when the client asked for that.
 #
 # A body has a limit: past it a read answers an `HTTPError` with status
 # 413. The server's is `Server::MAX_BODY`; a client's is none.
@@ -566,12 +578,13 @@ pub class BodyReader
   # server answers `Expect: 100-continue` there, and not before the body
   # is wanted.
   @hello : Proc(Bool)?
-  # The coding undone as the body is read (`decode`): the stream, and
-  # until it starts, the envelope it was asked for and the bytes read to
-  # tell deflate's two forms apart.
+  # The coding undone as the body is read (`decode`, `decode_zstd`): the
+  # stream, and until it starts, the envelope it was asked for and the
+  # bytes read to tell deflate's two forms apart.
   @inflater : Inflater?
   @coding : Envelope?
   @first : String?
+  @zstd : ZstdReader? = nil
 
   def initialize(@conn : Conn?, @kind : Int32, length : Int64, @limit : Int64, @text : String = "", hello : Proc(Bool)? = nil)
     @left = @kind == CHUNKED ? -1_i64 : length
@@ -615,6 +628,9 @@ pub class BodyReader
     if inflater = @inflater
       return inflater.finished?
     end
+    if zstd = @zstd
+      return zstd.finished?
+    end
     true
   end
 
@@ -629,6 +645,15 @@ pub class BodyReader
     @coding = envelope
   end
 
+  # The body's `zstd` coding (RFC 8878) undone from here on, by std/zstd's
+  # `ZstdReader` as the pieces arrive, frames one after another. A frame
+  # that asks for a window past *max_window* bytes is refused rather than
+  # given the memory (a window outside 1 KiB to 512 MiB is a panic), and a
+  # body that does not decode is an `HTTPError` naming the coding and why.
+  def decode_zstd(max_window : Int32 = Zstd::WINDOW_LIMIT) : Nil
+    @zstd = ZstdReader.new(max_window) { feed }
+  end
+
   # The next piece of the body, at most *max* bytes; "" when it is done.
   def read(max : Int32 = 65536) : String | Cancelled | SocketError | HTTPError
     if fault = @fault
@@ -641,26 +666,34 @@ pub class BodyReader
       return started unless started.nil?
     end
     if inflater = @inflater
-      got = inflater.read(max)
-      if got.is_a?(String)
-        return got if got.bytesize > 0
-        # The coded stream has ended; the framing has not until its last
-        # chunk or byte is read, and a kept connection's next answer
-        # starts after it. What follows the stream inside the body is
-        # passed over, as zlib's own reader does with what follows a
-        # gzip member it cannot read.
-        until @finished
-          rest = raw(65536)
-          return rest unless rest.is_a?(String)
-        end
-        return ""
-      end
-      if fault = @fault
-        return fault
-      end
-      return remember(HTTPError.new("the body's coding: " + got.message))
+      return decoded(inflater.read(max))
+    end
+    if zstd = @zstd
+      return decoded(zstd.read(max))
     end
     raw(max)
+  end
+
+  # A decoder's answer: its piece, or once its stream has ended the
+  # framing's end read for, or its refusal as the body's.
+  private def decoded(got : String | CompressError | ZstdError) : String | Cancelled | SocketError | HTTPError
+    if got.is_a?(String)
+      return got if got.bytesize > 0
+      # The coded stream has ended; the framing has not until its last
+      # chunk or byte is read, and a kept connection's next answer
+      # starts after it. What follows the stream inside the body is
+      # passed over, as zlib's own reader does with what follows a
+      # gzip member it cannot read.
+      until @finished
+        rest = raw(65536)
+        return rest unless rest.is_a?(String)
+      end
+      return ""
+    end
+    if fault = @fault
+      return fault
+    end
+    remember(HTTPError.new("the body's coding: " + got.message))
   end
 
   private def start_inflater(coding : Envelope) : Cancelled | SocketError | HTTPError | Nil
@@ -1218,9 +1251,9 @@ pub class Response
     @url
   end
 
-  # Whether the client undid the body's `gzip` or `deflate` coding; the
-  # `Content-Encoding` and `Content-Length` that described it are gone
-  # from the headers then.
+  # Whether the client undid the body's `gzip`, `deflate` or `zstd`
+  # coding; the `Content-Encoding` and `Content-Length` that described it
+  # are gone from the headers then.
   def decoded? : Bool
     @decoded
   end
@@ -1367,7 +1400,8 @@ pub struct Server
   #
   # *stream_bodies*: the block reads each request's body from `body_io`
   # rather than being handed it whole. *compress*: an answer whose type
-  # std/mime calls compressible goes gzip to a client that accepts it.
+  # std/mime calls compressible goes zstd or gzip to a client that
+  # accepts one (`coding_for`).
   #
   # *timeout_ms*: a request's head must have arrived within it, counted
   # from when the server starts waiting for one - a kept-alive connection's
@@ -1639,15 +1673,15 @@ pub struct Server
       conn.held { takeover.call(socket, leftover) }
       return false
     end
-    gzip = compress && Server.gzip_for?(req, response)
+    coding = compress ? Server.coding_for(req, response) : nil
     if source = response.source
       defer source.close
-      return send_source(socket, response, source, head, closing, req.version == "HTTP/1.0", gzip)
+      return send_source(socket, response, source, head, closing, req.version == "HTTP/1.0", !coding.nil?)
     end
     if writer = response.writer
-      return send_stream(socket, response, writer, head, closing, req.version == "HTTP/1.0", gzip)
+      return send_stream(socket, response, writer, head, closing, req.version == "HTTP/1.0", !coding.nil?)
     end
-    response = Server.gzipped(response) if gzip && response.body.bytesize >= COMPRESS_FROM
+    response = Server.compressed(response, coding) if coding && response.body.bytesize >= COMPRESS_FROM
     socket.write(format_response(response, head, closing)).is_a?(Int32) && !closing
   end
 
@@ -1666,7 +1700,7 @@ pub struct Server
     bodiless = HTTP.bodiless?(response.status)
     chunked = length.nil? && !old && !head && !bodiless
     closing = close || (length.nil? && !chunked && !head && !bodiless)
-    response = Server.coded(response) if gzip
+    response = Server.coded(response, "gzip") if gzip
     return false unless socket.write(format_head(response, head, closing, length, chunked)).is_a?(Int32)
     return !closing if head || bodiless
     if want = length
@@ -1694,7 +1728,7 @@ pub struct Server
     bodiless = HTTP.bodiless?(response.status)
     chunked = !old && !head && !bodiless
     closing = close || (!chunked && !head && !bodiless)
-    response = Server.coded(response) if gzip
+    response = Server.coded(response, "gzip") if gzip
     return false unless socket.write(format_head(response, head, closing, nil, chunked)).is_a?(Int32)
     return !closing if head || bodiless
     writer = Server.writer_for(socket, chunked, gzip)
@@ -1702,29 +1736,44 @@ pub struct Server
     writer.finish.nil? && !closing
   end
 
-  # Whether *response* goes gzip to the client of *req*: the client said
-  # it takes gzip (RFC 9110 §12.5.3, a `q` of 0 refusing it), the answer
-  # has a body and a type worth compressing, and no coding of its own.
-  def self.gzip_for?(req : Request, response : Response) : Bool
-    return false if response.header("Content-Encoding")
+  # The coding *response* goes in to the client of *req*, or nil: one the
+  # client takes (RFC 9110 §12.5.3, a `q` of 0 refusing it), for an
+  # answer with a body and a type worth compressing, and no coding of its
+  # own. A whole body goes `zstd` when the client's `q` for it is at least
+  # its `q` for gzip, and `gzip` otherwise. The tie goes to zstd for the
+  # server's time: measured on this machine, release builds, on
+  # src/std/http.iyi (199,134 bytes) `Gzip.compress` wrote 54,484 bytes in
+  # 5 ms and `Zstd.compress` 61,753 in 1 ms, and on CHANGELOG.md (1.5 MB)
+  # 552,446 in 58 ms against 589,785 in 13 ms - a quarter of the time, for
+  # an eighth more bytes at most. A stream - an `IyiIO` or a
+  # `Response.stream` - goes gzip or as it is: std/compress's `Deflater`
+  # writes each piece as it comes, where std/zstd's compressor takes its
+  # input whole, and a frame a write would code each piece alone.
+  def self.coding_for(req : Request, response : Response) : String?
+    return nil if response.header("Content-Encoding")
     status = response.status
-    return false if status < 200 || HTTP.bodiless?(status) || status == 206
+    return nil if status < 200 || HTTP.bodiless?(status) || status == 206
     type = response.header("Content-Type")
-    return false unless type && MIME.compressible?(type)
+    return nil unless type && MIME.compressible?(type)
     accepted = req.header("Accept-Encoding")
-    return false unless accepted
-    HTTP.accepts?(accepted, "gzip")
+    return nil unless accepted
+    gzip = HTTP.coding_weight(accepted, "gzip")
+    if response.source.nil? && response.writer.nil?
+      zstd = HTTP.coding_weight(accepted, "zstd")
+      return "zstd" if zstd > 0 && zstd >= gzip
+    end
+    gzip > 0 ? "gzip" : nil
   end
 
-  # The headers a gzip body goes with: the coding, and `Vary` so that a
-  # cache keeps the two answers apart. A `Content-Length` the block gave
-  # is the plain body's, and goes.
-  protected def self.coded(response : Response) : Response
+  # The headers a coded body goes with: the coding, and `Vary` so that a
+  # cache keeps the answers apart. A `Content-Length` the block gave is
+  # the plain body's, and goes.
+  protected def self.coded(response : Response, coding : String) : Response
     headers = {} of String => String
     response.headers.each do |name, value|
       headers[name] = value unless HTTP.same_name?(name, "Content-Length")
     end
-    headers["Content-Encoding"] = "gzip"
+    headers["Content-Encoding"] = coding
     vary = response.header("Vary")
     if vary.nil?
       headers["Vary"] = "Accept-Encoding"
@@ -1737,10 +1786,13 @@ pub struct Server
     coded
   end
 
-  # A string body compressed whole, with the headers that say so.
-  protected def self.gzipped(response : Response) : Response
-    coded = Server.coded(response)
-    Response.new(coded.status, coded.reason, coded.headers, HTTP.gzip(response.body), coded.apart)
+  # A string body compressed whole in *coding*, `zstd` or `gzip`, with
+  # the headers that say so. `Zstd.compress`'s frame needs a window of
+  # 1 MiB at most, inside the 8 MB RFC 9659 §3 holds an encoder to.
+  protected def self.compressed(response : Response, coding : String) : Response
+    coded = Server.coded(response, coding)
+    body = coding == "zstd" ? Zstd.compress(response.body) : HTTP.gzip(response.body)
+    Response.new(coded.status, coded.reason, coded.headers, body, coded.apart)
   end
 
   protected def self.writer_for(socket : IyiSocket | TlsStream, chunked : Bool, gzip : Bool) : BodyWriter
@@ -2176,6 +2228,12 @@ struct ProxyRoute
     end
     ProxyRoute.new(host, uri.port || 80, credential, "proxy " + written)
   end
+
+  # The route *proxy* names, nil for none.
+  def self.of(proxy : String?) : ProxyRoute | HTTPError | Nil
+    return nil unless proxy
+    parse(proxy)
+  end
 end
 
 pub struct HTTP
@@ -2325,11 +2383,11 @@ pub struct HTTP
 
   # One request and its whole answer: the answer as `open` hands it, its
   # body read. Redirects are followed, *redirects* at most; *jar* keeps
-  # the cookies the answers set and sends them back; *decompress* asks for
-  # gzip and undoes it. A refused or reset connection answers
-  # `SocketError`; a task cancelled answers `Cancelled`; what the server
-  # does wrong answers `HTTPError`. `!` passes any of them up, `.or_panic`
-  # refuses it.
+  # the cookies the answers set and sends them back; *decompress* asks
+  # for gzip, deflate and zstd and undoes them. A refused or reset
+  # connection answers `SocketError`; a task cancelled answers
+  # `Cancelled`; what the server does wrong answers `HTTPError`. `!`
+  # passes any of them up, `.or_panic` refuses it.
   def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, timeout_ms : Int32 = 0, proxy : String? = nil) : Response | Cancelled | SocketError | HTTPError
     open(method, url, headers, body, redirects, jar, decompress, nil, timeout_ms, proxy) { |response| response.load }
   end
@@ -2372,12 +2430,8 @@ pub struct HTTP
   # names is `proxy_for`'s, and std/http_proxy's `HTTPProxy.from_env`.
   def self.open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, client : HTTPClient? = nil, timeout_ms : Int32 = 0, proxy : String? = nil, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
     raise "HTTP: a timeout of #{timeout_ms} ms" if timeout_ms < 0
-    route = nil.as(ProxyRoute?)
-    if written = proxy
-      read = ProxyRoute.parse(written)
-      return read if read.is_a?(HTTPError)
-      route = read
-    end
+    route = ProxyRoute.of(proxy)
+    return route if route.is_a?(HTTPError)
     current = url
     verb = method
     sent = headers
@@ -2413,10 +2467,21 @@ pub struct HTTP
   # The 101 an upgrade to *protocol* is answered with, and the connection,
   # which is the caller's from then on: std/websocket's handshake. Any
   # other answer is an `HTTPError` naming it.
-  def self.upgrade(url : String, protocol : String, headers : Hash(String, String) = {} of String => String, timeout_ms : Int32 = 0) : Upgraded | Cancelled | SocketError | HTTPError
+  #
+  # *proxy* is `open`'s, and so is its credential, on the CONNECT alone;
+  # but an upgrade goes through a tunnel for `http://` as for `https://`,
+  # the handshake inside it in origin form. `Upgrade` belongs to the
+  # connection it is sent on (RFC 9110 §7.8), and a proxy forwarding a
+  # request removes `Connection` and every field it names (§7.6.1), so a
+  # handshake handed to a forward proxy in absolute form reaches the
+  # server, at best, as a plain GET: the gate's proxy, which drops
+  # `Connection`, leaves std/websocket's server a request it answers 400.
+  def self.upgrade(url : String, protocol : String, headers : Hash(String, String) = {} of String => String, timeout_ms : Int32 = 0, proxy : String? = nil) : Upgraded | Cancelled | SocketError | HTTPError
+    route = ProxyRoute.of(proxy)
+    return route if route.is_a?(HTTPError)
     sent = headers.dup
     sent["Upgrade"] = protocol
-    exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms, nil)
+    exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms, route)
     return exchange unless exchange.is_a?(Exchange)
     response = exchange.response
     if response.status != 101
@@ -2505,7 +2570,7 @@ pub struct HTTP
     end
     if asked || cookies
       sent = headers.dup
-      sent["Accept-Encoding"] = "gzip, deflate" if asked
+      sent["Accept-Encoding"] = "gzip, deflate, zstd" if asked
       if cookies
         own = header_in(headers, "Cookie")
         sent = without(sent, ["Cookie"]) if own
@@ -2518,10 +2583,13 @@ pub struct HTTP
     dial_port = port
     target = path
     tunnel_credential = nil.as(String?)
+    # `https://` goes through a tunnel, and so does an upgrade, which a
+    # proxy does not forward (`upgrade`).
+    tunneled = !route.nil? && (secure || !upgrade.nil?)
     if via = route
       dial_host = via.host
       dial_port = via.port
-      if secure
+      if tunneled
         # A tunnel is one origin's, kept under the proxy and that origin.
         # `Proxy-Authorization` is the CONNECT's: the URL's, or else the
         # caller's, and never written inside the tunnel, where the origin
@@ -2554,8 +2622,8 @@ pub struct HTTP
       unless conn
         socket = IyiSocket.connect(dial_host, dial_port, timeout_ms > 0 ? timeout_ms : -1)!
         client.made if client
-        if secure && (via = route)
-          unopened = tunnel(socket, via, named + ":" + port.to_s, tunnel_credential, timeout_ms)
+        if tunneled && (via = route)
+          unopened = tunnel(socket, via, named + ":" + port.to_s, tunnel_credential, timeout_ms, secure)
           if unopened
             socket.close
             return unopened
@@ -2647,9 +2715,9 @@ pub struct HTTP
   # `Proxy-Authorization`, and the proxy's answer read. Any 2xx opens the
   # tunnel and has no body (the RFC has a client ignore the framing such
   # an answer gives); anything else is refused with the proxy's status,
-  # and so are bytes sent after a 2xx, before this end's TLS has begun.
-  # Nil once the tunnel is open.
-  private def self.tunnel(socket : IyiSocket, via : ProxyRoute, authority : String, credential : String?, timeout_ms : Int32) : Cancelled | SocketError | HTTPError | Nil
+  # and so are bytes sent after a 2xx, before this end's TLS (*secure*)
+  # or request has begun. Nil once the tunnel is open.
+  private def self.tunnel(socket : IyiSocket, via : ProxyRoute, authority : String, credential : String?, timeout_ms : Int32, secure : Bool) : Cancelled | SocketError | HTTPError | Nil
     ask = String::Builder.new
     ask << "CONNECT " << authority << " HTTP/1.1\r\nHost: " << authority << "\r\n"
     if credential
@@ -2679,7 +2747,7 @@ pub struct HTTP
         return HTTPError.new("the proxy at #{via.label} answered #{status} #{reason} to CONNECT #{authority}", 502)
       end
       if conn.available > 0
-        return HTTPError.new("the proxy at #{via.label} sent #{conn.available} bytes after its #{status} to CONNECT #{authority}, before TLS began", 502)
+        return HTTPError.new("the proxy at #{via.label} sent #{conn.available} bytes after its #{status} to CONNECT #{authority}, before #{secure ? "TLS" : "the request"} began", 502)
       end
     end
     nil
@@ -3007,23 +3075,30 @@ pub struct HTTP
   end
 
   # The answer's `Content-Encoding` undone as the body is read, when it is
-  # one coding this client asked for: gzip (and its old name x-gzip), or
+  # one coding this client asked for: gzip (and its old name x-gzip),
   # deflate - zlib's envelope, as RFC 9110 §8.4.1.2 says, or the bare
   # stream some servers send under the name, told apart by zlib's header
-  # check. The fields that described the coded body go. Another coding is
-  # left as it came, for the caller, with the headers that say so.
+  # check - or zstd, with a window of 8 MiB at most: RFC 9659 §3 holds
+  # HTTP's zstd to that, and a frame that asks for more is refused rather
+  # than given the memory. The fields that described the coded body go.
+  # Another coding is left as it came, for the caller, with the headers
+  # that say so.
   private def self.undo_coding(reader : BodyReader, fields : Hash(String, String)) : Bool | HTTPError
     coding = header_in(fields, "Content-Encoding")
     return false unless coding
     name = trim(coding).downcase
-    envelope = if name == "gzip" || name == "x-gzip"
-                 Envelope::Gzip
-               elsif name == "deflate"
-                 Envelope::Zlib
-               else
-                 return false
-               end
-    reader.decode(envelope)
+    if name == "zstd"
+      reader.decode_zstd(Zstd::WINDOW_LIMIT)
+    else
+      envelope = if name == "gzip" || name == "x-gzip"
+                   Envelope::Gzip
+                 elsif name == "deflate"
+                   Envelope::Zlib
+                 else
+                   return false
+                 end
+      reader.decode(envelope)
+    end
     fields.reject_in_place { |key, _| same_name?(key, "Content-Encoding") || same_name?(key, "Content-Length") }
     true
   end
@@ -3061,26 +3136,53 @@ pub struct HTTP
   # Whether a list of codings a client accepts (`Accept-Encoding`, RFC
   # 9110 §12.5.3) takes *coding*: named, or `*`, with a `q` above 0.
   def self.accepts?(list : String, coding : String) : Bool
-    starred = false
+    coding_weight(list, coding) > 0
+  end
+
+  # How much a list of codings a client accepts wants *coding*, as its
+  # `q` in thousandths: the weight it is named with, else `*`'s, else 0 -
+  # and 0 refuses it.
+  def self.coding_weight(list : String, coding : String) : Int32
+    starred = 0
     list.split(',').each do |part|
       item = trim(part)
       next if item.bytesize == 0
       name = item
-      weight = 1.0
+      weight = 1000
       if semi = item.index(';')
         name = trim(item[0, semi])
         params = item[semi + 1, item.bytesize - semi - 1]
         params.split(';').each do |param|
           kv = trim(param)
           if kv.bytesize > 2 && (kv.starts_with?("q=") || kv.starts_with?("Q="))
-            weight = zero_weight?(kv[2, kv.bytesize - 2]) ? 0.0 : 1.0
+            weight = weight_of(kv[2, kv.bytesize - 2])
           end
         end
       end
-      return weight > 0.0 if same_name?(name, coding)
-      starred = weight > 0.0 if name == "*"
+      return weight if same_name?(name, coding)
+      starred = weight if name == "*"
     end
     starred
+  end
+
+  # A `q` in thousandths (RFC 9110 §12.4.2: 0 to 1, three decimals at
+  # most), `0.5` 500. A `q` that is not one of these is not a refusal,
+  # and is read as 1, unless it is all zeros.
+  private def self.weight_of(text : String) : Int32
+    return 0 if zero_weight?(text)
+    p = text.to_unsafe
+    n = text.bytesize
+    return 1000 unless p[0] == 48_u8 && n > 2 && n <= 5 && p[1] == 46_u8
+    value = 0
+    scale = 100
+    i = 2
+    while i < n
+      return 1000 unless p[i] >= 48_u8 && p[i] <= 57_u8
+      value = value + (p[i] - 48_u8).to_i32 * scale
+      scale = scale // 10
+      i = i + 1
+    end
+    value
   end
 
   # A `q` of 0, `0.`, `0.000`: the one weight that refuses (RFC 9110
@@ -4750,7 +4852,9 @@ class H2Connection
     end
     head = HTTP.same_name?(req.method, "HEAD")
     bodiless = HTTP.bodiless?(response.status)
-    gzip = compress && Server.gzip_for?(req, response)
+    coding = compress ? Server.coding_for(req, response) : nil
+    # A stream's coding is gzip's, or none (`coding_for`).
+    gzip = !coding.nil?
     if source = response.source
       defer source.close
       length = nil.as(Int64?)
@@ -4760,7 +4864,7 @@ class H2Connection
         length = n
       end
       gzip = false if length
-      shown = gzip ? Server.coded(response) : response
+      shown = gzip ? Server.coded(response, "gzip") : response
       return false unless send_headers(id, H2Connection.answer_fields(shown, length, head), head || bodiless)
       return @failure.nil? if head || bodiless
       sink = H2Out.new(self, id)
@@ -4774,7 +4878,7 @@ class H2Connection
       return finish_answer(s)
     end
     if block = response.writer
-      shown = gzip ? Server.coded(response) : response
+      shown = gzip ? Server.coded(response, "gzip") : response
       return false unless send_headers(id, H2Connection.answer_fields(shown, nil, head), head || bodiless)
       return @failure.nil? if head || bodiless
       sink = H2Out.new(self, id)
@@ -4783,7 +4887,7 @@ class H2Connection
       writer.finish
       return finish_answer(s)
     end
-    response = Server.gzipped(response) if gzip && response.body.bytesize >= Server::COMPRESS_FROM
+    response = Server.compressed(response, coding) if coding && response.body.bytesize >= Server::COMPRESS_FROM
     body = response.body
     empty = head || bodiless || body.bytesize == 0
     return false unless send_headers(id, H2Connection.answer_fields(response, bodiless ? nil : body.bytesize.to_i64, head), empty)

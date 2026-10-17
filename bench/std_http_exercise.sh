@@ -101,13 +101,13 @@ echo "== what the module reaches"
 # is std/random's, which reads the clock), so it adds nothing to what the
 # module reaches. These are the modules it may import, and none but
 # std/socket, std/time and std/tls reaches anything: HTTP/2's std/hpack
-# and the byte slices it reads are iyi over the prelude, and std/x509 -
-# the certificate a request carries - is std/tls's own already, as
-# std/unicode is std/uri's. No std/env: a proxy the environment names is
-# std/http_proxy's to read.
+# and the byte slices it reads are iyi over the prelude, as std/zstd is
+# over std/digest's XXH64, and std/x509 - the certificate a request
+# carries - is std/tls's own already, as std/unicode is std/uri's. No
+# std/env: a proxy the environment names is std/http_proxy's to read.
 imports=$(grep -oE '^import std/[a-z_0-9]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
-if [ "$imports" = "std/base64 std/compress std/digest std/hpack std/mime std/slice std/socket std/time std/tls std/unicode std/uri std/x509 " ]; then
-  echo "  std/socket, std/time and std/tls (std/x509 its own), and std/base64, std/compress, std/digest, std/hpack, std/mime, std/slice, std/unicode and std/uri, which reach nothing"
+if [ "$imports" = "std/base64 std/compress std/digest std/hpack std/mime std/slice std/socket std/time std/tls std/unicode std/uri std/x509 std/zstd " ]; then
+  echo "  std/socket, std/time and std/tls (std/x509 its own), and std/base64, std/compress, std/digest, std/hpack, std/mime, std/slice, std/unicode, std/uri and std/zstd, which reach nothing"
 else
   echo "  std/http imports $imports"
   status=1
@@ -198,7 +198,11 @@ if "$IYI" build -o "$WORK/server" "$REPO/bench/std_http_server.iyi" >"$WORK/serv
     echo "  skipped: no working python3, so its http.client was not run against the server"
     kill "$server_pid" 2>/dev/null
   elif PORT="$port" "$PY" - <<'PY'
-import http.client, os, sys, gzip, zlib
+import http.client, os, shutil, subprocess, sys, gzip, zlib
+try:
+    from compression import zstd  # Python 3.14
+except ImportError:
+    zstd = None
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
@@ -230,6 +234,30 @@ c.request("GET", "/stream", headers={"Accept-Encoding": "gzip"}); r = c.getrespo
 d = zlib.decompressobj(31)
 plain = d.decompress(body) + d.flush()
 check(r.getheader("Content-Encoding") == "gzip" and d.eof and plain == b"".join((("piece %d " % i) * 100 + "\n").encode() for i in range(10)), f"a gzip stream: {len(plain)} bytes, eof {d.eof}")
+# zstd, which Python's compression.zstd undoes: a whole body at gzip's
+# weight or above, gzip where the client wants it more, and a stream
+# gzip or as it is, never zstd
+text = b"all work and no play makes jack a dull boy\n" * 2500
+streamed = b"".join((("piece %d " % i) * 100 + "\n").encode() for i in range(10))
+said = "zstd unchecked: no compression.zstd in this Python"
+if zstd:
+    c.request("GET", "/text", headers={"Accept-Encoding": "gzip, deflate, zstd"}); r = c.getresponse(); body = r.read()
+    check(r.getheader("Content-Encoding") == "zstd" and r.getheader("Vary") == "Accept-Encoding" and zstd.decompress(body) == text, f"zstd: {r.getheader('Content-Encoding')} {len(body)} bytes")
+    c.request("GET", "/text", headers={"Accept-Encoding": "zstd;q=0.5, gzip;q=0.8"}); r = c.getresponse(); body = r.read()
+    check(r.getheader("Content-Encoding") == "gzip" and gzip.decompress(body) == text, f"gzip preferred: {r.getheader('Content-Encoding')}")
+    c.request("GET", "/stream", headers={"Accept-Encoding": "zstd"}); r = c.getresponse(); body = r.read()
+    check(r.getheader("Content-Encoding") is None and body == streamed, f"a stream to a client of zstd alone: {r.getheader('Content-Encoding')}")
+    said = "zstd whole as Python's compression.zstd reads it"
+# curl --compressed asks for every coding its build decodes; with zstd
+# among them, the server's choice is zstd, and curl undoes it.
+curl = shutil.which("curl")
+if curl and "zstd" in subprocess.run([curl, "--version"], capture_output=True, text=True).stdout.split("Features:")[-1].lower().split():
+    out = subprocess.run([curl, "-sS", "--compressed", "-D", "-", f"http://127.0.0.1:{port}/text"], capture_output=True)
+    head, _, got = out.stdout.partition(b"\r\n\r\n")
+    check(out.returncode == 0 and b"\r\ncontent-encoding: zstd" in head.lower() and got == text, f"curl --compressed: {head!r}, {len(got)} bytes")
+    said += ", and by curl --compressed"
+else:
+    said += "; curl --compressed unchecked: its build lists no zstd"
 # multipart as Python's email package writes it
 m = MIMEMultipart("form-data", boundary="py-boundary-1")
 f = MIMEText("hello", "plain"); del f["Content-Type"]; del f["MIME-Version"]; del f["Content-Transfer-Encoding"]
@@ -243,7 +271,7 @@ check(got == b'greeting|-|-|hello;doc|d.json|application/json|{"k": [1, 2]};', f
 c.request("GET", "/stop"); r = c.getresponse(); body = r.read()
 check(r.status == 200 and body == b"stopping", "stop")
 c.close()
-print("  requests on one connection, a chunked one, a megabyte, gzip whole and streamed, multipart, and stop")
+print("  requests on one connection, a chunked one, a megabyte, gzip whole and streamed, multipart, and stop; " + said)
 sys.exit(1 if bad else 0)
 PY
   then
@@ -324,9 +352,11 @@ fi
 echo
 echo "== the client against Python's server"
 # What Python's zlib writes - gzip, deflate in zlib's envelope and bare -
-# undone by the client as it arrives; a redirect chain; a multipart body
-# the client built, read back by Python's email parser; and a chunked
-# upload from a stream, read by Python's server.
+# and its compression.zstd (Python 3.14) - one frame, two, a window of
+# 8 MiB taken and one of 16 MiB refused - undone by the client as it
+# arrives; a redirect chain; a multipart body the client built, read back
+# by Python's email parser; and a chunked upload from a stream, read by
+# Python's server.
 if [ -z "$PY" ]; then
   echo "  skipped: no working python3 to serve with"
 else
@@ -334,13 +364,19 @@ else
   cat > "$WORK/py_client.iyi" <<'IYI'
 module main
 
-import std/http::{HTTP, MultipartBuilder}
+import std/http::{HTTP, HTTPError, MultipartBuilder}
 import std/file::{File}
 
 base = "http://127.0.0.1:#{Program.args[0]}"
-["/gzip", "/deflate", "/raw-deflate"].each do |path|
+paths = ["/gzip", "/deflate", "/raw-deflate"]
+paths = paths + ["/zstd", "/zstd-frames", "/zstd-8mib"] if Program.args.size > 2
+paths.each do |path|
   r = HTTP.get(base + path).or_panic
   puts "#{path} #{r.decoded?} #{r.body.bytesize} #{r.body == "python's own words " * 1000}"
+end
+if Program.args.size > 2
+  wide = HTTP.get(base + "/zstd-16mib")
+  puts "/zstd-16mib #{wide.is_a?(HTTPError) ? wide.message : "answered"}"
 end
 hop = HTTP.post(base + "/hop", "dropped").or_panic
 puts "hop #{hop.status} #{hop.body} #{hop.url}"
@@ -361,8 +397,19 @@ IYI
     "$PY" - > "$WORK/py_server.out" 2>&1 <<'PY' &
 import gzip, zlib, sys, email.parser, email.policy
 from http.server import HTTPServer, BaseHTTPRequestHandler
+try:
+    from compression import zstd
+    from compression.zstd import ZstdCompressor, CompressionParameter
+except ImportError:
+    zstd = None
 
 text = b"python's own words " * 1000
+
+# A frame with no content size, asking for a window of 2^log bytes.
+def windowed(log):
+    c = ZstdCompressor(options={CompressionParameter.window_log: log})
+    return c.compress(text) + c.flush()
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def log_message(self, *a): pass
@@ -381,6 +428,14 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/raw-deflate":
             c = zlib.compressobj(9, zlib.DEFLATED, -15)
             self.answer(200, c.compress(text) + c.flush(), [("Content-Encoding", "deflate")])
+        elif self.path == "/zstd" and zstd:
+            self.answer(200, zstd.compress(text), [("Content-Encoding", "zstd")])
+        elif self.path == "/zstd-frames" and zstd:
+            self.answer(200, zstd.compress(text[:7000]) + zstd.compress(text[7000:]), [("Content-Encoding", "zstd")])
+        elif self.path == "/zstd-8mib" and zstd:
+            self.answer(200, windowed(23), [("Content-Encoding", "zstd")])
+        elif self.path == "/zstd-16mib" and zstd:
+            self.answer(200, windowed(24), [("Content-Encoding", "zstd")])
         elif self.path == "/landed":
             self.answer(200, f"{self.command} accepts={accepts}".encode())
         elif self.path == "/stop":
@@ -418,16 +473,25 @@ while not s.done:
 PY
     py_pid=$!
     pport=$(await_port "$WORK/py_server.out" "$py_pid")
-    said=$(timeout 60 "$WORK/py_client" "$pport" "$WORK/upload.txt" 2>&1)
+    zstd_args="" zstd_lines=""
+    if "$PY" -c 'import compression.zstd' 2>/dev/null; then
+      zstd_args="zstd"
+      zstd_lines="
+/zstd true 19000 true
+/zstd-frames true 19000 true
+/zstd-8mib true 19000 true
+/zstd-16mib HTTP: the body's coding: zstd: the frame needs a window of 16777216 bytes, past the limit of 8388608"
+    fi
+    said=$(timeout 60 "$WORK/py_client" "$pport" "$WORK/upload.txt" $zstd_args 2>&1)
     wait "$py_pid" 2>/dev/null
     expected="/gzip true 19000 true
 /deflate true 19000 true
-/raw-deflate true 19000 true
-hop 200 GET accepts=gzip, deflate http://127.0.0.1:$pport/landed
+/raw-deflate true 19000 true$zstd_lines
+hop 200 GET accepts=gzip, deflate, zstd http://127.0.0.1:$pport/landed
 parts name|None|text/plain|b'value';upload|notes.txt|text/plain|b'a\\r\\nb--c\\r\\n'
 upload 92000 bytes in 2 chunks"
     if [ "$said" = "$expected" ]; then
-      echo "  gzip, deflate both ways, a 303 to a GET, multipart read by Python's email parser, a chunked upload"
+      echo "  gzip, deflate both ways, ${zstd_args:+zstd one frame and two, its window refused past 8 MiB, }a 303 to a GET, multipart read by Python's email parser, a chunked upload"
     else
       echo "  the client and Python's server disagree:"
       printf '%s\n' "$said" | sed 's/^/    got:  /'
@@ -1200,9 +1264,11 @@ echo "== through a proxy: a proxy written here in Python, curl beside the client
 # credentials required, and each request logged as it saw it - between
 # the iyi client and an iyi server that answers both http:// and https://
 # (std/tls, the P-256 leaf from the https:// section above, ALPN h2 and
-# http/1.1). The server names the Proxy-Authorization it was sent, which
-# must be none; the proxy's log must show the credential on every request
-# and CONNECT that carried one, and a 407 for those that did not. curl
+# http/1.1), and a WebSocket at /ws on both. The server names the
+# Proxy-Authorization it was sent, which must be none; the proxy's log
+# must show the credential on every request and CONNECT that carried
+# one - a WebSocket's CONNECT, ws:// and wss:// alike, among them - and a
+# 407 for those that did not. curl
 # through the same proxy must leave the same lines in its log and get the
 # same answers. Then NO_PROXY, against Go's own net/http where a Go
 # toolchain is installed.
@@ -1297,12 +1363,26 @@ cat > "$WORK/proxy_origin.iyi" <<'IYI'
 module main
 
 import std/http::{HTTP, Server, Response, Request}
+import std/websocket::{WebSocket, Message}
 import std/socket::{IyiSocket}
 import std/tls::{TlsServerConfig}
 import std/file::{File}
 
 def told(req : Request) : Response
+  return talked(req) if req.path == "/ws"
   Response.new(200, "#{req.method} #{req.path} #{req.query || "-"} #{req.version} host=#{req.header("Host")} proxy-auth=#{req.header("Proxy-Authorization") || "-"} length=#{req.body.bytesize}")
+end
+
+# A WebSocket that says what its handshake carried, echoes one message,
+# and waits for the client's close.
+def talked(req : Request) : Response
+  WebSocket.upgrade(req) do |ws|
+    ws.send("#{req.version} host=#{req.header("Host")} proxy-auth=#{req.header("Proxy-Authorization") || "-"}")
+    got = ws.receive
+    ws.send("echo " + got.data) if got.is_a?(Message)
+    ws.receive
+    nil
+  end
 end
 
 config = TlsServerConfig.from_pem(File.read(Program.args[1]), File.read(Program.args[2])).or_panic
@@ -1320,6 +1400,7 @@ cat > "$WORK/proxy_client.iyi" <<'IYI'
 module main
 
 import std/http::{HTTP, HTTPClient, HTTPError, Response}
+import std/websocket::{WebSocket, WebSocketError, Message}
 import std/socket::{SocketError}
 import std/tls::{TlsConfig}
 import std/x509::{Certificate}
@@ -1329,6 +1410,22 @@ def said(got : Response | HTTPError | SocketError | Cancelled) : String
   return "#{got.status} #{got.body}" if got.is_a?(Response)
   return got.message if got.is_a?(HTTPError) || got.is_a?(SocketError)
   "cancelled"
+end
+
+def heard(got : Message | Nil | Cancelled | SocketError | WebSocketError) : String
+  got.is_a?(Message) ? got.data : got.inspect
+end
+
+# A WebSocket's first message, and the echo of one sent: or why there is
+# no WebSocket.
+def talked(got : WebSocket | Cancelled | SocketError | HTTPError | WebSocketError) : String
+  return "cancelled" if got.is_a?(Cancelled)
+  return got.message unless got.is_a?(WebSocket)
+  first = heard(got.receive)
+  got.send("hello").or_panic
+  second = heard(got.receive)
+  got.close
+  first + " | " + second
 end
 
 args = Program.args
@@ -1355,6 +1452,10 @@ client.close
 puts "https, no credential: " + said(HTTP.request("GET", secure + "/echo?x=4", proxy: bare, timeout_ms: 20000))
 puts "http, no credential: " + said(HTTP.request("GET", plain + "/echo?x=5", proxy: bare, timeout_ms: 20000))
 puts "https, a wrong credential: " + said(HTTP.request("GET", secure + "/echo?x=6", proxy: "http://gate:wrong@127.0.0.1:#{args[0]}", timeout_ms: 20000))
+# WebSockets through the proxy: a CONNECT tunnel for ws:// as for wss://.
+puts "ws: " + talked(WebSocket.connect("ws://127.0.0.1:#{args[1]}/ws", proxy: proxy))
+puts "wss: " + talked(WebSocket.connect("wss://localhost:#{args[2]}/ws", proxy: proxy))
+puts "ws, no credential: " + talked(WebSocket.connect("ws://127.0.0.1:#{args[1]}/ws", proxy: bare))
 IYI
 # proxy_up / proxy_down: the proxy and the origin started and stopped,
 # their ports in PPORT, HPORT and SPORT, the proxy's log emptied.
@@ -1391,6 +1492,9 @@ client: 2 made, 1 reused
 https, no credential: HTTP: the proxy at 127.0.0.1:$PPORT answered 407 Proxy Authentication Required to CONNECT localhost:$SPORT
 http, no credential: 407 
 https, a wrong credential: HTTP: the proxy at 127.0.0.1:$PPORT answered 407 Proxy Authentication Required to CONNECT localhost:$SPORT
+ws: HTTP/1.1 $echo | echo hello
+wss: HTTP/1.1 $tls | echo hello
+ws, no credential: HTTP: the proxy at 127.0.0.1:$PPORT answered 407 Proxy Authentication Required to CONNECT 127.0.0.1:$HPORT
 --
 GET http://127.0.0.1:$HPORT/echo?x=1 host=127.0.0.1:$HPORT auth=ok forwarded
 POST http://127.0.0.1:$HPORT/echo host=127.0.0.1:$HPORT auth=ok forwarded
@@ -1401,6 +1505,9 @@ GET http://127.0.0.1:$HPORT/echo?k=1 host=127.0.0.1:$HPORT auth=ok forwarded
 CONNECT localhost:$SPORT host=localhost:$SPORT auth=missing 407
 GET http://127.0.0.1:$HPORT/echo?x=5 host=127.0.0.1:$HPORT auth=missing 407
 CONNECT localhost:$SPORT host=localhost:$SPORT auth=wrong 407
+CONNECT 127.0.0.1:$HPORT host=127.0.0.1:$HPORT auth=ok tunnel
+CONNECT localhost:$SPORT host=localhost:$SPORT auth=ok tunnel
+CONNECT 127.0.0.1:$HPORT host=127.0.0.1:$HPORT auth=missing 407
 EOF
 }
 # proxy_round <client binary> <alpn> <HTTP/version>: the client through a
@@ -1431,7 +1538,7 @@ else
   for round in "http/1.1 HTTP/1.1" "h2,http/1.1 HTTP/2"; do
     set -- $round
     if proxy_round "$WORK/proxy_client" "$1" "$2"; then
-      echo "  ALPN $1: http:// forwarded and https:// tunnelled ($2 inside), the credential at the proxy and never at the server, a kept tunnel, 407 named"
+      echo "  ALPN $1: http:// forwarded and https:// tunnelled ($2 inside), a WebSocket tunnelled ws:// and wss://, the credential at the proxy and never at the server, a kept tunnel, 407 named"
     else
       echo "  ALPN $1: the client through the proxy did not answer as expected"
       status=1
@@ -1697,12 +1804,25 @@ mutate "a caller's chunked framing written beside a length" 'raise "HTTP: #{name
 mutate "a line's search kept as a place in a buffer that moves" 'searched = at - @start' 'searched = at'
 mutate "a connection handed over and left open past the listener's close" 'conn.held { takeover.call(socket, leftover) }' 'takeover.call(socket, leftover)'
 mutate "a block's unread body read for as long as it comes" 'reader.drain(MAX_DRAIN.to_i64)' 'reader.drain(9223372036854775807_i64)'
-mutate "a q of 0 taken for gzip" 'weight = zero_weight?(kv[2, kv.bytesize - 2]) ? 0.0 : 1.0' 'weight = 1.0'
+mutate "a q of 0 taken for gzip" 'return 0 if zero_weight?(text)' 'return 1000 if zero_weight?(text)'
+mutate "a q read as 0 or 1" 'value = value + (p[i] - 48_u8).to_i32 * scale' 'value = 1000'
 mutate "a short body compressed" 'response.body.bytesize >= COMPRESS_FROM' 'response.body.bytesize >= 0'
-mutate "an image compressed" 'return false unless type && MIME.compressible?(type)' 'return false unless type'
+mutate "an image compressed" 'return nil unless type && MIME.compressible?(type)' 'return nil unless type'
 mutate "a gzip answer that does not vary" 'headers["Vary"] = "Accept-Encoding"' ''
 mutate "a bare deflate stream read as zlib's" 'envelope = Envelope::Raw unless zlib' ''
 mutate "a decoded body that keeps the coded body's fields" 'fields.reject_in_place { |key, _| same_name?(key, "Content-Encoding") || same_name?(key, "Content-Length") }' ''
+mutate "zstd not asked for" 'sent["Accept-Encoding"] = "gzip, deflate, zstd" if asked' 'sent["Accept-Encoding"] = "gzip, deflate" if asked'
+mutate "a zstd answer left as it came" '    if name == "zstd"
+      reader.decode_zstd(Zstd::WINDOW_LIMIT)' '    if name == "zstd"
+      return false'
+mutate "a zstd window past 8 MiB taken" 'reader.decode_zstd(Zstd::WINDOW_LIMIT)' 'reader.decode_zstd(536870912)'
+mutate "zstd sent where the client prefers gzip" 'return "zstd" if zstd > 0 && zstd >= gzip' 'return "zstd" if zstd > 0'
+mutate "a tie given to gzip" 'return "zstd" if zstd > 0 && zstd >= gzip' 'return "zstd" if zstd > 0 && zstd > gzip'
+mutate "zstd sent to a client that refuses it" 'return "zstd" if zstd > 0 && zstd >= gzip' 'return "zstd" if zstd >= gzip'
+mutate "a stream sent gzip to a client that takes zstd alone" 'if response.source.nil? && response.writer.nil?' 'if true'
+mutate "HTTP/2 answers in gzip where zstd was chosen" 'response = Server.compressed(response, coding) if coding && response.body.bytesize >= Server::COMPRESS_FROM' 'response = Server.compressed(response, "gzip") if coding && response.body.bytesize >= Server::COMPRESS_FROM'
+mutate "an upgrade sent past its proxy" 'exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms, route)' 'exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms, nil)'
+mutate "an upgrade to http:// sent to a proxy in absolute form" 'tunneled = !route.nil? && (secure || !upgrade.nil?)' 'tunneled = !route.nil? && secure'
 mutate "a redirect that never changes the method" 'unless keeps || (status != 303 && !same_name?(verb, "POST")) || same_name?(verb, "HEAD")' 'unless true'
 mutate "credentials carried to another host" 'sent = without(sent, ["Authorization", "Proxy-Authorization", "Cookie"]) unless same_authority?(current, target)' ''
 mutate "a part that does not end at its boundary" '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]
@@ -1979,9 +2099,14 @@ proxy_breaks "the caller's Proxy-Authorization written inside the tunnel" proxy_
 proxy_breaks "a CONNECT without its credential" proxy_connect_bare \
   '      ask << "Proxy-Authorization: " << credential << "\r\n"' '      nil'
 proxy_breaks "https:// through a proxy without a tunnel" proxy_no_tunnel \
-  'if secure && (via = route)' 'if false && (via = route)'
+  'if tunneled && (via = route)' 'if false && (via = route)'
 proxy_breaks "a tunnel kept under the proxy alone" proxy_tunnel_key \
   'key = via.key + " " + key' 'key = via.key'
+proxy_breaks "an upgrade sent past its proxy" proxy_upgrade_direct \
+  'exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms, route)' \
+  'exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms, nil)'
+proxy_breaks "a ws:// handshake sent to the proxy in absolute form" proxy_upgrade_absolute \
+  'tunneled = !route.nil? && (secure || !upgrade.nil?)' 'tunneled = !route.nil? && secure'
 
 echo
 if [ "$status" -eq 0 ]; then

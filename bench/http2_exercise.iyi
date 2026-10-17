@@ -9,13 +9,14 @@
 #
 # The first runs an h2c server and a client with prior knowledge in one
 # program: requests and answers of every shape - string, stream and pipe
-# bodies, a megabyte each way through the windows, HEAD, gzip, cookies on
-# fields of their own, a redirect, 200 requests on one connection - and
-# what HTTP/2 refuses: an upgrade (HTTP_1_1_REQUIRED), and a body past the
-# server's limit (413). `serve` is the same server for curl, Node and raw
-# frames from bench/std_http_exercise.sh, and `serve-tls` the same over
-# std/tls's server, ALPN offering h2 and http/1.1; `fetch` is the client
-# against Node's server, and prints what it read for the gate to compare;
+# bodies, a megabyte each way through the windows, HEAD, gzip and zstd,
+# cookies on fields of their own, a redirect, 200 requests on one
+# connection - and what HTTP/2 refuses: an upgrade (HTTP_1_1_REQUIRED),
+# and a body past the server's limit (413). `serve` is the same server
+# for curl, Node and raw frames from bench/std_http_exercise.sh, and
+# `serve-tls` the same over std/tls's server, ALPN offering h2 and
+# http/1.1; `fetch` is the client against Node's server, and prints what
+# it read for the gate to compare;
 # `tls-get` is the client against `serve-tls`, offering *ALPN* (h2 and
 # http/1.1 unless named). With CLIENT_ROOTS `serve-tls` asks each client
 # for its certificate, and `/whoami` answers the one it presented;
@@ -30,6 +31,8 @@ import std/io
 import std/tls::{TlsConfig, TlsIdentity, TlsServerConfig}
 import std/x509::{Certificate}
 import std/file::{File}
+import std/compress::{Gzip}
+import std/zstd::{Zstd}
 
 def check(condition : Bool, what : String) : Nil
   raise "ASSERTION FAILED: #{what}" unless condition
@@ -105,6 +108,13 @@ def answer(req : Request) : Response
   when "/text"
     r = Response.new(200, "hello, compressible world. " * 400)
     r.headers["Content-Type"] = "text/plain"
+    r
+  when "/text-gzip"
+    # The block's own gzip, which the server leaves as it is: a gzip
+    # answer whatever the client takes.
+    r = Response.new(200, Gzip.compress("hello, compressible world. " * 400))
+    r.headers["Content-Type"] = "text/plain"
+    r.headers["Content-Encoding"] = "gzip"
     r
   when "/cookie"
     r = Response.new(200, "two cookies")
@@ -285,14 +295,24 @@ check(r.status == 404 && r.body == "no /nothing\n", "404")
 puts "  GET, POST of 1 MiB, 5 MB down, a stream, a pipe, HEAD, 204, 404"
 
 puts "== what HTTP/1.1 did, done over HTTP/2"
-r = fetched(client.get("#{base}/text"), "a gzip answer")
-check(r.body == "hello, compressible world. " * 400, "a gzip answer decoded as it is read")
+text = "hello, compressible world. " * 400
+r = fetched(client.get("#{base}/text-gzip"), "a gzip answer")
+check(r.decoded? && r.body == text, "a gzip answer decoded as it is read")
 check(r.header("Content-Encoding").nil?, "the coding is gone once undone")
+# The server's own choice: zstd for the client's `gzip, deflate, zstd`,
+# gzip for a client that takes gzip alone - whose own Accept-Encoding
+# leaves the body as it came.
+r = fetched(client.get("#{base}/text"), "a zstd answer")
+check(r.decoded? && r.body == text, "a zstd answer decoded as it is read")
+r = fetched(client.request("GET", "#{base}/text", {"Accept-Encoding" => "zstd"}), "zstd asked for alone")
+check(r.header("Content-Encoding") == "zstd" && Zstd.decompress(r.body) == text, "the server's zstd over HTTP/2 (#{r.header("Content-Encoding").inspect})")
+r = fetched(client.request("GET", "#{base}/text", {"Accept-Encoding" => "gzip"}), "gzip asked for alone")
+check(r.header("Content-Encoding") == "gzip" && Gzip.decompress(r.body) == text, "the server's gzip over HTTP/2 (#{r.header("Content-Encoding").inspect})")
 r = fetched(client.get("#{base}/cookie"), "Set-Cookie on fields of their own")
 check(r.header_values("Set-Cookie") == ["a=1", "b=2; Path=/"], "Set-Cookie on fields of their own (#{r.header_values("Set-Cookie")})")
 r = fetched(client.get("#{base}/redirect"), "a redirect followed")
 check(r.status == 200 && r.body.starts_with?("GET /echo from=redirect HTTP/2"), "a redirect followed over the same connection (#{r.body})")
-puts "  gzip, cookies, a redirect"
+puts "  gzip and zstd, each decoded and each the server's, cookies, a redirect"
 
 puts "== one connection"
 made = client.connections_made

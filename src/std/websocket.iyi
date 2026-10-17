@@ -29,7 +29,9 @@
 # is the same over std/tls, its certificate checked against
 # `HTTP.tls_config` and ALPN offering `http/1.1`; a server under
 # `Server.serve(tls:)` hands `upgrade`'s block the TLS stream in the same
-# way.
+# way. With `proxy:` the handshake goes through an `http://` proxy's
+# CONNECT tunnel, for `ws://` as for `wss://`, the proxy's credential on
+# the CONNECT alone (std/http's `HTTP.upgrade`).
 #
 # **The connection.** `send(text)`, `send_binary(bytes)` and `ping` write
 # one frame each: no message is split into fragments on the way out.
@@ -280,7 +282,11 @@ pub class WebSocket
   # The client's half: the handshake to a `ws://` URL, and the connection
   # it opens. *headers* go with the request (an `Origin`, a cookie); the
   # handshake's own are refused. *protocols* are offered in their order.
-  def self.connect(url : String, headers : Hash(String, String) = {} of String => String, protocols : Array(String) = [] of String, max_message : Int32 = MAX_MESSAGE) : WebSocket | Cancelled | SocketError | HTTPError | WebSocketError
+  # *proxy* is `HTTP.upgrade`'s: an `http://` proxy's URL, through whose
+  # CONNECT tunnel the handshake goes, `ws://` and `wss://` alike; the
+  # environment's is `HTTPProxy.from_env` of the URL with `http` for `ws`
+  # and `https` for `wss`, the schemes whose variables it reads.
+  def self.connect(url : String, headers : Hash(String, String) = {} of String => String, protocols : Array(String) = [] of String, max_message : Int32 = MAX_MESSAGE, proxy : String? = nil) : WebSocket | Cancelled | SocketError | HTTPError | WebSocketError
     headers.each do |name, _|
       ["Upgrade", "Connection", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions"].each do |own|
         raise "WebSocket: #{name} is the handshake's own header" if HTTP.same_name?(name, own)
@@ -300,7 +306,7 @@ pub class WebSocket
     sent["Sec-WebSocket-Key"] = key
     sent["Sec-WebSocket-Version"] = "13"
     sent["Sec-WebSocket-Protocol"] = protocols.join(", ") unless protocols.empty?
-    up = HTTP.upgrade(target, "websocket", sent)!
+    up = HTTP.upgrade(target, "websocket", sent, proxy: proxy)!
     agreed = WebSocket.agreed(up, key, protocols)
     if agreed.is_a?(WebSocketError)
       up.socket.close

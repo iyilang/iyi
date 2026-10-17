@@ -88,7 +88,7 @@ echo "== every websocket section reported"
 for phrase in "== handshake" "== frames a server reads" "== frames a server writes" \
               "== frames a client writes" "== what a server refuses" "== what a client refuses" \
               "== what a client's handshake refuses" "== close handshake" \
-              "== what a program is refused" "== client and server over std/http"; do
+              "== what a program is refused" "== client and server over std/http" "== through a proxy"; do
   if ! grep -q "$phrase" "$WORK/ws-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -750,6 +750,8 @@ prove_broken "two tasks writing at once" "two fibers writing one fd" \
       sleep(1)!
     end
 ' '' "16 MiB written whole while another task sends"
+prove_broken "a client that goes direct past its proxy" "the handshake through the proxy's tunnel" \
+  'HTTP.upgrade(target, "websocket", sent, proxy: proxy)' 'HTTP.upgrade(target, "websocket", sent)'
 
 echo
 if [ "$status" -eq 0 ]; then

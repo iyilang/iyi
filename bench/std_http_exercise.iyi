@@ -17,6 +17,7 @@ import std/http::{HTTP, HTTPClient, Response, Request, Server, HTTPError, Multip
 import std/socket::{IyiSocket, SocketError}
 import std/gc::{GC}
 import std/compress::{Gzip, Zlib, Deflate}
+import std/zstd::{Zstd}
 import std/file::{File}
 import std/dir::{Dir}
 import std/random::{Random}
@@ -1077,9 +1078,23 @@ end
 puts "  an upload from a stream, a body read while it is sent, one left unread, a block that writes as it goes, a file, HTTP/1.0, a body cut short"
 
 puts "\n== content codings"
-# The client asks for gzip and deflate and undoes them as they arrive; the
-# server under `compress` sends gzip to a client that takes it, for types
-# worth compressing, past a kilobyte.
+
+# The client asks for gzip, deflate and zstd and undoes them as they
+# arrive; the server under `compress` sends zstd or gzip to a client that
+# takes one - zstd for a whole body at a q at least gzip's, gzip for a
+# stream - for types worth compressing, past a kilobyte.
+
+# A zstd frame by hand (RFC 8878 §3.1.1): no checksum, no content size,
+# the window *descriptor* asks for, and "hello" in one raw block.
+def zstd_hello(descriptor : Int32) : String
+  head = [0x28, 0xb5, 0x2f, 0xfd, 0x00, descriptor, 0x29, 0x00, 0x00]
+  framed = String.new(head.size) do |dst|
+    head.each_with_index { |b, i| dst[i] = b.to_u8 }
+    nil
+  end
+  framed + "hello"
+end
+
 coding_l = IyiSocket.listen("127.0.0.1", 0)
 coding_port = coding_l.local_port
 coding_base = "http://127.0.0.1:#{coding_port}"
@@ -1098,6 +1113,30 @@ group do |g|
         Response.new(200, long_text, {"Content-Type" => "image/png"})
       elsif req.path == "/own"
         Response.new(200, Gzip.compress("mine"), {"Content-Type" => "text/plain", "Content-Encoding" => "gzip"})
+      elsif req.path == "/zstd-own"
+        Response.new(200, Zstd.compress("mine"), {"Content-Type" => "text/plain", "Content-Encoding" => "zstd"})
+      elsif req.path == "/accept"
+        Response.new(200, req.header("Accept-Encoding") || "-")
+      elsif req.path == "/zstd-corrupt"
+        bad = Zstd.compress(long_text)
+        Response.new(200, bad[0, 40] + "garbage" + bad[47, bad.bytesize - 47], {"Content-Encoding" => "zstd"})
+      elsif req.path == "/zstd-16mib"
+        Response.new(200, zstd_hello(0x70), {"Content-Encoding" => "zstd"})
+      elsif req.path == "/zstd-8mib"
+        Response.new(200, zstd_hello(0x68), {"Content-Encoding" => "zstd"})
+      elsif req.path == "/zstd-frames"
+        # Two frames, a hundred bytes a chunk: the frames' ends and the
+        # chunks' fall where they fall.
+        zframes = Zstd.compress(long_text[0, 9000]) + Zstd.compress(long_text[9000, long_text.bytesize - 9000])
+        Response.stream(200, {"Content-Type" => "text/plain", "Content-Encoding" => "zstd"}) do |w|
+          at = 0
+          while at < zframes.bytesize
+            n = zframes.bytesize - at < 100 ? zframes.bytesize - at : 100
+            w.write(zframes[at, n])
+            at = at + n
+          end
+          nil
+        end
       elsif req.path == "/vary"
         Response.new(200, long_text, {"Content-Type" => "text/html", "Vary" => "Cookie"})
       elsif req.path == "/stream"
@@ -1121,10 +1160,16 @@ group do |g|
     0
   end
   g.spawn do
+    said = HTTP.get(coding_base + "/accept").or_panic
+    assert_str "gzip, deflate, zstd", said.body, "the client asks for gzip, deflate and zstd"
     plain = HTTP.get(coding_base + "/text").or_panic
-    assert_true plain.decoded? && plain.body == long_text, "a gzip answer is undone"
+    assert_true plain.decoded? && plain.body == long_text, "a zstd answer is undone"
     assert_true plain.header("Content-Encoding").nil? && plain.header("Content-Length").nil?, "and the fields that described the coded body go"
     asked = IyiSocket.connect("127.0.0.1", coding_port).or_panic
+    asked.write("GET /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip, deflate, zstd\r\n\r\n").or_panic
+    zcoded = HTTP.parse_response(read_response(asked))
+    assert_true zcoded.header("Content-Encoding") == "zstd" && zcoded.header("Vary") == "Accept-Encoding", "the server's zstd says so, and varies"
+    assert_true zcoded.body.bytesize < long_text.bytesize // 4 && Zstd.decompress(zcoded.body) == long_text, "and is zstd: #{zcoded.body.bytesize} bytes for #{long_text.bytesize}"
     asked.write("GET /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n").or_panic
     coded = HTTP.parse_response(read_response(asked))
     assert_true coded.header("Content-Encoding") == "gzip" && coded.header("Vary") == "Accept-Encoding", "the server's gzip says so, and varies"
@@ -1132,7 +1177,21 @@ group do |g|
     asked.write("GET /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip;q=0, deflate\r\n\r\n").or_panic
     assert_true HTTP.parse_response(read_response(asked)).header("Content-Encoding").nil?, "a q of 0 refuses gzip"
     asked.write("GET /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: *\r\n\r\n").or_panic
-    assert_true HTTP.parse_response(read_response(asked)).header("Content-Encoding") == "gzip", "* takes gzip"
+    assert_true HTTP.parse_response(read_response(asked)).header("Content-Encoding") == "zstd", "* takes zstd, at gzip's weight"
+    # Which coding, by the client's weights (RFC 9110 §12.5.3).
+    {
+      "gzip;q=0.5, zstd;q=0.4"   => "gzip",
+      "gzip;q=0.4, zstd;q=0.5"   => "zstd",
+      "zstd;q=0.5, gzip;q=0.500" => "zstd",
+      "gzip, zstd;q=0.999"       => "gzip",
+      "gzip;q=0, zstd;q=0"       => "-",
+      "zstd, gzip;q=0"           => "zstd",
+      "deflate, *;q=0.1, gzip"   => "gzip",
+      "zstd;q=0.001"             => "zstd",
+    }.each do |list, want|
+      asked.write("GET /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: #{list}\r\n\r\n").or_panic
+      assert_str want, HTTP.parse_response(read_response(asked)).header("Content-Encoding") || "-", "the coding for Accept-Encoding: #{list}"
+    end
     asked.write("GET /short HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n").or_panic
     assert_true HTTP.parse_response(read_response(asked)).header("Content-Encoding").nil?, "a body under a kilobyte goes as it is"
     asked.write("GET /png HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n").or_panic
@@ -1142,11 +1201,19 @@ group do |g|
     asked.write("HEAD /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: gzip\r\n\r\n").or_panic
     head_coded = asked.read(4096).or_panic
     assert_true head_coded.includes?("Content-Encoding: gzip") && head_coded.ends_with?("\r\n\r\n"), "a HEAD names the coding its GET would have, and writes no body"
+    asked.write("HEAD /text HTTP/1.1\r\nHost: x\r\nAccept-Encoding: zstd\r\n\r\n").or_panic
+    head_zstd = asked.read(4096).or_panic
+    assert_true head_zstd.includes?("Content-Encoding: zstd") && head_zstd.ends_with?("\r\n\r\n"), "a HEAD names zstd when its GET would have it"
     asked.close
     own = HTTP.get(coding_base + "/own").or_panic
     assert_true own.decoded? && own.body == "mine", "a block's own gzip is left alone by the server and undone by the client"
     streamed = HTTP.get(coding_base + "/stream").or_panic
     assert_true streamed.decoded? && streamed.body == "{\"n\":0}\n{\"n\":1}\n{\"n\":2}\n{\"n\":3}\n{\"n\":4}\n", "a stream goes gzip a write at a time: #{streamed.body.inspect}"
+    # A stream is gzip's or as it is: std/zstd compresses whole inputs.
+    zstd_only = HTTP.request("GET", coding_base + "/stream", {"Accept-Encoding" => "zstd"}).or_panic
+    assert_true zstd_only.header("Content-Encoding").nil? && zstd_only.body == streamed.body, "a stream to a client that takes zstd alone goes as it is: #{zstd_only.header("Content-Encoding").inspect}"
+    both = HTTP.request("GET", coding_base + "/stream", {"Accept-Encoding" => "zstd, gzip"}).or_panic
+    assert_true both.header("Content-Encoding") == "gzip" && Gzip.decompress(both.body) == streamed.body, "a stream to a client that takes zstd and gzip goes gzip: #{both.header("Content-Encoding").inspect}"
     assert_true HTTP.get(coding_base + "/zlib").or_panic.body == long_text, "deflate in zlib's envelope"
     assert_true HTTP.get(coding_base + "/raw-deflate").or_panic.body == long_text, "deflate as the bare stream"
     corrupt = HTTP.get(coding_base + "/corrupt")
@@ -1155,11 +1222,29 @@ group do |g|
     assert_true !br.decoded? && br.header("Content-Encoding") == "br" && br.body == "pretend", "a coding the client did not ask for is left as it came"
     kept = HTTP.request("GET", coding_base + "/text", decompress: false).or_panic
     assert_true kept.body == long_text && !kept.decoded?, "decompress: false asks for none"
+    zown = HTTP.get(coding_base + "/zstd-own").or_panic
+    assert_true zown.decoded? && zown.body == "mine", "a block's own zstd is left alone by the server and undone by the client"
+    frames = HTTP.get(coding_base + "/zstd-frames").or_panic
+    assert_true frames.decoded? && frames.body == long_text, "two zstd frames, a hundred bytes a chunk, undone as they arrive: #{frames.body.bytesize} bytes"
+    zcorrupt = HTTP.get(coding_base + "/zstd-corrupt")
+    assert_true zcorrupt.is_a?(HTTPError) && zcorrupt.message.starts_with?("HTTP: the body's coding: zstd: "), "a corrupt zstd body is an HTTPError: #{zcorrupt.is_a?(HTTPError) ? zcorrupt.message : "answered"}"
+    # RFC 9659 §3: a window of 8 MB at most, and one past it refused.
+    wide = HTTP.get(coding_base + "/zstd-16mib")
+    assert_str "HTTP: the body's coding: zstd: the frame needs a window of 16777216 bytes, past the limit of 8388608", wide.is_a?(HTTPError) ? wide.message : "answered", "a zstd window of 16 MiB is refused"
+    assert_str "hello", HTTP.get(coding_base + "/zstd-8mib").or_panic.body, "a zstd window of 8 MiB is taken"
+    # HTTP/2 (h2c with prior knowledge on the same listener): the answer
+    # in zstd, and undone.
+    h2 = HTTPClient.new(prior_knowledge: true)
+    over_h2 = h2.get(coding_base + "/text").or_panic
+    assert_true over_h2.decoded? && over_h2.body == long_text, "a zstd answer undone over HTTP/2"
+    h2_coded = h2.request("GET", coding_base + "/text", {"Accept-Encoding" => "zstd"}).or_panic
+    assert_true h2_coded.header("Content-Encoding") == "zstd" && Zstd.decompress(h2_coded.body) == long_text, "the server's HTTP/2 answer in zstd: #{h2_coded.header("Content-Encoding").inspect}"
+    h2.close
     HTTP.get(coding_base + "/stop").or_panic
     0
   end
 end
-puts "  gzip both ways, q=0 and *, short and image bodies, Vary, HEAD, a block's own coding, a stream, deflate both forms, a corrupt body, br, decompress: false"
+puts "  zstd, gzip and deflate both ways, q weights, q=0 and *, short and image bodies, Vary, HEAD, a block's own coding, a stream, zstd's frames and windows, corrupt bodies, br, decompress: false, HTTP/2"
 
 puts "\n== redirects"
 # RFC 9110 §15.4: 301 and 302 make a POST a GET, 303 makes anything but a
@@ -1672,19 +1757,21 @@ end
 
 # A proxy on a raw socket that answers what it read: an http:// request in
 # absolute form with the URL's credential (the caller's own replaced),
-# two origins over one kept connection to the proxy, and CONNECTs refused
-# 407 and 403, and one answered 200 with bytes after it. The whole tunnel,
-# TLS inside it, is bench/std_http_exercise.sh's, against a proxy in
-# Python and curl.
+# two origins over one kept connection to the proxy, CONNECTs refused
+# 407 and 403, and one answered 200 with bytes after it; then an upgrade
+# to a ws:// origin, which goes through a CONNECT too, and one whose 200
+# has bytes after it. The whole tunnel, TLS inside it and a WebSocket
+# through it, is bench/std_http_exercise.sh's, against a proxy in Python
+# and curl.
 proxy_l = IyiSocket.listen("127.0.0.1", 0)
 proxy_port = proxy_l.local_port
 proxy_fd = proxy_l.to_unsafe
 proxy_server = IyiThread.start do
   l = IyiSocket.new(proxy_fd)
-  5.times do |i|
+  7.times do |i|
     conn = l.accept.or_panic
-    rounds = i == 1 ? 2 : 1
-    rounds.times do
+    rounds = i == 1 || i == 5 ? 2 : 1
+    rounds.times do |round|
       saw = read_request(conn).or_panic
       # A CONNECT not as the check below expects it is answered with what
       # the proxy saw, for the client's error to name.
@@ -1696,6 +1783,12 @@ proxy_server = IyiThread.start do
               elsif i == 3
                 fine = saw == "CONNECT [::1]:8443 HTTP/1.1\r\nHost: [::1]:8443\r\nProxy-Authorization: Basic Z2F0ZTpzM2NyZXQ=\r\n\r\n"
                 "HTTP/1.1 403 #{fine ? "Forbidden" : saw.inspect}\r\nContent-Length: 0\r\n\r\n"
+              elsif i == 5 && round == 0
+                fine = saw == "CONNECT up.test:80 HTTP/1.1\r\nHost: up.test:80\r\nProxy-Authorization: Basic dXNlcjpwQHNz\r\n\r\n"
+                fine ? "HTTP/1.1 200 Connection established\r\n\r\n" : "HTTP/1.1 407 #{saw.inspect}\r\nContent-Length: 0\r\n\r\n"
+              elsif i == 5
+                # Inside the tunnel, the origin's 101 and what it was sent.
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n" + saw
               else
                 "HTTP/1.1 200 Connection established\r\n\r\njunk"
               end
@@ -1727,9 +1820,24 @@ refused = HTTP.request("GET", "https://[::1]:8443/x", {"Proxy-Authorization" => 
 assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_port} answered 403 Forbidden to CONNECT [::1]:8443", refused.is_a?(HTTPError) ? refused.message : refused.inspect, "a CONNECT to an IPv6 origin with the caller's credential, refused 403"
 refused = HTTP.request("GET", "https://secure.test/x", proxy: "127.0.0.1:#{proxy_port}")
 assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_port} sent 4 bytes after its 200 to CONNECT secure.test:443, before TLS began", refused.is_a?(HTTPError) ? refused.message : refused.inspect, "bytes after a CONNECT's 200 are refused"
+# An upgrade to a ws:// origin through the proxy: a CONNECT with the URL's
+# credential, then the handshake in origin form inside, with no
+# credential in it.
+inside = HTTP.upgrade("http://up.test/chat", "echo", {"Proxy-Authorization" => "Basic other"}, timeout_ms: 10000, proxy: proxy_url).or_panic
+heard = inside.leftover
+while !heard.ends_with?("\r\n\r\n")
+  got = inside.socket.read(4096).or_panic
+  break if got.bytesize == 0
+  heard = heard + got
+end
+inside.socket.close
+assert_true heard.starts_with?("GET /chat HTTP/1.1\r\nHost: up.test\r\n") && heard.includes?("\r\nUpgrade: echo\r\n") && heard.includes?("\r\nConnection: Upgrade\r\n"), "an upgrade to http:// through a proxy goes in origin form inside its CONNECT tunnel: #{heard.inspect}"
+assert_true !heard.includes?("Proxy-Authorization"), "and no credential inside the tunnel: #{heard.inspect}"
+refused = HTTP.upgrade("http://up.test/chat", "echo", timeout_ms: 10000, proxy: "127.0.0.1:#{proxy_port}")
+assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_port} sent 4 bytes after its 200 to CONNECT up.test:80, before the request began", refused.is_a?(HTTPError) ? refused.message : refused.inspect, "bytes after an upgrade's CONNECT 200 are refused"
 proxy_server.join
 proxy_l.close
-puts "  an absolute-form request with the URL's credential, two origins on one kept proxy connection, CONNECT refused 407 and 403, bytes after a 200 refused"
+puts "  an absolute-form request with the URL's credential, two origins on one kept proxy connection, CONNECT refused 407 and 403, bytes after a 200 refused, an upgrade to http:// through a tunnel"
 
 # The files the sections above wrote.
 File.delete(stream_dir + "/up.bin")

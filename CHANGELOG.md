@@ -4,6 +4,42 @@
 
 ### Added
 
+- **std/http: the `zstd` content coding both ways.** The client's
+  default `Accept-Encoding` is `gzip, deflate, zstd`, and a body coded
+  `zstd` (RFC 8878) is decoded as it arrives through std/zstd's
+  `ZstdReader`, frames one after another, with the 8 MB window RFC 9659
+  §3 holds HTTP to: a frame that asks for more is an `HTTPError`
+  (`the body's coding: zstd: the frame needs a window of 16777216 bytes,
+  past the limit of 8388608`). `BodyReader#decode_zstd` is the reader's
+  half. Under `Server.serve(compress: true)` a whole body goes `zstd`
+  (`Zstd.compress`) when the client's `q` for zstd is at least its `q`
+  for gzip, and gzip otherwise; the tie goes to zstd because, measured
+  here, `Zstd.compress` took a quarter of `Gzip.compress`'s time for at
+  most an eighth more bytes (src/std/http.iyi: 61,753 bytes in 1 ms
+  against 54,484 in 5 ms). A streamed answer - an `IyiIO` or
+  `Response.stream` - stays gzip, or goes as it is to a client that
+  takes zstd alone: std/zstd's compressor takes its input whole, and no
+  streaming zstd writer was added. `Vary: Accept-Encoding` goes with
+  either coding, over HTTP/1.1 and HTTP/2. `q` values are now read to
+  their thousandths (`Server.coding_for`, `HTTP.coding_weight`), where
+  they were read as refused or not. Held by Python 3.14's
+  `compression.zstd` both ways (one frame, two, an 8 MiB window taken
+  and a 16 MiB one refused), curl `--compressed` against the server, and
+  nine new mutations.
+- **std/http and std/websocket: `HTTP.upgrade` and `WebSocket.connect`
+  through a proxy.** Both take `proxy:` as `HTTP.open` does, and the
+  handshake goes through the proxy's `CONNECT` tunnel for `ws://`
+  (`http://`) as for `wss://`, the credential on the CONNECT alone: an
+  upgrade in absolute form through a forward proxy is unreliable, since
+  `Upgrade` belongs to its connection (RFC 9110 §7.8) and a proxy drops
+  `Connection` and the fields it names (§7.6.1) - the gate's own proxy
+  leaves std/websocket's server a request it answers 400. Bytes a proxy
+  sends after its 200 to an upgrade's CONNECT are refused as for
+  `https://` ("before the request began"). The http gate's Python proxy
+  round carries a WebSocket echo through it, `ws://` and `wss://`, with
+  a 407 named, and the websocket gate one through a CONNECT proxy
+  written in iyi; a mutation each that sends the handshake past the
+  proxy or in absolute form is caught.
 - **std/tls: a client that speaks TLS 1.2 to a server that speaks nothing
   newer (RFC 5246, RFC 7627's extended master secret, RFC 5746's
   renegotiation_info).** One ClientHello offers both: supported_versions

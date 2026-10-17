@@ -4,6 +4,32 @@
 
 ### Added
 
+- **std/xz: .xz and .lzma decompressed in iyi, read a piece at a time,
+  `.tar.xz` read by std/tar, and CRC-64 in std/digest.** `XzReader.new {
+  next_bytes }` reads the .xz container (file format 1.0.4) the way
+  std/compress's `Inflater` reads gzip - `read(max) : String | XzError`,
+  `finished?` - and `XzReader.new(XzFormat::Lzma) { ... }` the legacy
+  .lzma file; `Xz.decompress(data)` is the same reader over one string,
+  answering `String | XzError`. LZMA and LZMA2 as XZ Embedded decodes them
+  (every chunk kind, state, property and dictionary resets), the delta and
+  x86 BCJ filters before LZMA2, every check xz writes (none, CRC32, CRC64,
+  SHA-256) compared, block header CRCs, flags, padding and sizes, the
+  index (record count, unpadded and uncompressed sizes, padding, CRC32)
+  and the stream footer against the header and the index; streams joined
+  with stream padding; a .lzma ended by its size, its end marker or both.
+  Memory is the dictionary - a ring that starts at 64 KiB and doubles up
+  to the stream's dictionary size - plus a 128 KiB input buffer; a
+  dictionary past `dict_limit` (64 MiB unless the caller says) is an
+  `XzError` before it is allocated. Refused as values, each by its own
+  sentence: a check, CRC, index or size that does not match, a stream that
+  ends early, LZMA data that reaches before its output or past its chunk,
+  the reserved check types, the other BCJ filters (ARM64, PowerPC, ...),
+  and bytes after the last stream that are neither padding nor a stream.
+  `TarReader` now sniffs xz's magic beside gzip's and bzip2's and reads
+  the rest of the stream at the archive's end, so xz's checks vouch for
+  what was handed out (`xz?` says it was xz). `CRC64` (CRC-64/XZ) joins
+  `CRC32` and `Adler32` in std/digest with the same `checksum`/`update`
+  convention.
 - **std/zstd: Zstandard (RFC 8878) read and written in iyi, read a piece
   at a time, and XXH64 in std/digest.** `ZstdReader.new { next_bytes }`
   reads a stream the way std/compress's `Inflater` does - `read(max) :

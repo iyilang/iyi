@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- **std/netip: IP addresses and prefixes as values, read and classified
+  as Python's `ipaddress` reads them.** `IP` holds either family, an
+  IPv6 zone kept; it reads text by Python 3.14's strict rules (no leading
+  zero in an IPv4 octet, CVE-2021-29921; RFC 4291's forms with a dotted
+  tail; 45 characters at most) and writes RFC 5952's canonical form,
+  `exploded` and `reverse_pointer`; it orders IPv4 first, steps with
+  `next`/`prev`, and answers `global?`, `loopback?`, `link_local?`,
+  `multicast?`, `unspecified?`, `reserved?` and `site_local?` from the
+  IANA special-purpose registries as Python encodes them, an IPv4-mapped
+  address as its IPv4 one, with `private?` being Go's RFC 1918/4193.
+  `Prefix` parses CIDR (lengths, IPv4 netmasks and hostmasks), refuses
+  host bits unless `mask: true`, and answers `contains?`, `overlaps?`,
+  `first`/`last`, masks, subnets and supernets; `PrefixSet` is a binary
+  trie answering the longest match and Python's `collapse_addresses`.
+  Pure, reaching no platform module. Malformed text is a `NetipError`;
+  a zone in a prefix is refused (Python keeps it), and so are a length
+  out of range, a zone on IPv4 and more than 65,536 subnets at once.
+
 ## 0.18.0 — 2026-10-17
 
 **iyi's own library reaches the network by itself: TLS 1.3 at both ends,

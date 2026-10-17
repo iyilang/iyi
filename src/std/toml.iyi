@@ -335,14 +335,11 @@ pub struct Any
   KIND_ARRAY    = 5
   KIND_TABLE    = 6
 
-  # The union is written out where it is used, not as an `alias Type` as
-  # std/yaml's is: an artifact declares a module's types in the order of
-  # their names, so an alias in `Any` naming `TOMLDateTime` was resolved
-  # before that type existed and a consumer's `--use-iyimod` build
-  # stopped at "undefined constant TOMLDateTime", qualified or not.
-  getter raw : Bool | Int64 | Float64 | String | TOMLDateTime | Array(Any) | Hash(String, Any)
+  alias Type = Bool | Int64 | Float64 | String | TOMLDateTime | Array(Any) | Hash(String, Any)
 
-  def initialize(@raw : Bool | Int64 | Float64 | String | TOMLDateTime | Array(Any) | Hash(String, Any))
+  getter raw : Type
+
+  def initialize(@raw : Type)
   end
 
   def initialize(value : Int32)
@@ -1985,13 +1982,7 @@ pub struct TOML
   # `TOMLError`'s sentence; a value of another kind, or an integer outside
   # the type, is refused.
   def self.from_toml(text : String, type : T.class) : T forall T
-    # Not `read_value(parse(text).or_panic, type)`: in a generic method's
-    # body an artifact keeps `or_panic` as the `if` it expands to, inside
-    # the call's parentheses, and a consumer's `--use-iyimod` build could
-    # not parse it back ("expecting token ')', not 'if'").
-    answer = parse(text)
-    raise answer.message if answer.is_a?(TOMLError)
-    read_value(answer, type)
+    read_value(parse(text).or_panic, type)
   end
 
   # The `Any` a value is written as. TOML has no null: a nil is refused

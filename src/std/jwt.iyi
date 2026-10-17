@@ -1,0 +1,1538 @@
+# JSON Web Tokens (RFC 7519) in JWS compact serialization (RFC 7515),
+# signed and checked with the algorithms of JWA (RFC 7518) on std's own
+# cryptography, and the keys they use as JSON Web Keys (RFC 7517).
+#
+#     import std/jwt::{JWT, JWK, JWTAlgorithm, JWTError}
+#     import std/json::{Any}
+#
+#     key = JWK.from_pem(File.read("signer.pem")).or_panic   # or JWK.parse(jwk_json)
+#     token = JWT.encode({"sub" => Any.new("alice"), "exp" => Any.new(now + 600)},
+#       key, JWTAlgorithm::ES256)
+#     jwt = JWT.decode(token, key.public, [JWTAlgorithm::ES256], now: now,
+#       audience: "api", issuer: "https://issuer.example")   # JWT | JWTError
+#     jwt.claims["sub"].as_s                                    # "alice"
+#
+# The algorithms: HS256, HS384 and HS512 (HMAC, std/crypto); RS256, RS384
+# and RS512 (RSASSA-PKCS1-v1_5) and PS256, PS384 and PS512 (RSASSA-PSS,
+# MGF1 over the same hash, a salt as long as the digest), checked by
+# std/rsa and signed here; ES256 (P-256, std/p256 signing in constant time
+# and std/ecdsa checking); ES384 and ES512, checked only, as std has no
+# P-384 or P-521 signer - a token from an issuer on those curves verifies,
+# and asking to sign one is a panic that says so; EdDSA with Ed25519 (RFC
+# 8037, std/curve25519). `none` is not one of them: an unsecured token
+# (RFC 7519 section 6) is refused by every `decode`, whatever it is asked.
+#
+# `decode` takes the algorithms it accepts, and an empty list is a panic:
+# a token names its own algorithm, and a verifier that believes it is the
+# attack of McLean (2015) - `alg: none`, or `alg: HS256` over an RSA public
+# key that the server then uses as an HMAC secret. Here the header's alg
+# must be in the list, and the key must be the kind the alg is: an HS
+# token needs a shared secret, never an RSA, EC or OKP key, and a secret
+# that is a PEM or SSH public key is refused as a panic before any token
+# is read, as PyJWT refuses one. A JWK whose `alg` names another algorithm,
+# whose `use` is not `sig` or whose `key_ops` leave the operation out is
+# not used (RFC 7517 section 4). A `jwk`, `jku`, `x5c` or `x5u` header is
+# never taken as the key: the caller names the keys.
+#
+# The token's text is held strictly. Three parts, each base64url with no
+# padding (RFC 7515 section 2): a `=`, a byte outside the URL alphabet, a
+# length one more than a multiple of four and a last character whose
+# unused bits are not zero - a second spelling of the same bytes - are
+# each refused, so a token has one text. Header and claims must be JSON
+# objects; std/json refuses a name written twice, which RFC 7515 section
+# 5.2 and RFC 7519 section 4 let a parser do, so `{"sub":"a","sub":"b"}`
+# is refused rather than read as either (PyJWT keeps the last). A header
+# with `crit` is refused: it names extensions that must be understood,
+# and none is. The MAC is compared in constant time (std/crypto's Subtle).
+#
+# The claims are checked after the signature, in PyJWT's order, with
+# *leeway* seconds of grace: `exp` refuses the token from that second on
+# (`now >= exp + leeway`), `nbf` and `iat` refuse one before them (`now +
+# leeway < nbf`); each must be a JSON number, which may have a fraction,
+# and is compared as it is (PyJWT cuts it to an integer first, and takes a
+# `"123"` string, which this does not). `aud`, when the token has one,
+# must name the *audience* the caller gives, and a token with an `aud`
+# whose caller expects none is refused (RFC 7519 section 4.1.3). `iss` and
+# `sub` are held to *issuer* and *subject* when given; `sub` and `jti`
+# must be strings. *required* names claims that must be there and not
+# null.
+#
+# The clock is the caller's: `decode` takes *now*, the Unix time in
+# seconds, so the module reads no clock and asks nothing of the platform
+# that its cryptography does not (`Time.utc.to_unix` where a program
+# wants the present). The randomness is no one's: ES256 and EdDSA sign
+# deterministically (RFC 6979, RFC 8032), RS signatures are deterministic
+# by definition, and a PS signature's salt is HMAC, keyed by a hash of the
+# private exponent, over the message's digest. RFC 8017 section 8.1 says
+# the salt's randomness is not critical to PSS's security - a fixed salt
+# keeps the provable security of full-domain hashing - and this one is
+# unpredictable to anyone without the key besides. PyJWT checks these
+# signatures as it checks its own.
+#
+# RSA signing is the CRT (RFC 8017 section 5.2.1) on std/big, which takes
+# as long as its numbers make it: a 2048-bit signature took about 11 ms
+# in a --release build here, std/big's `pow_mod` being square-and-multiply
+# with a division a step. The message is blinded - multiplied by r^e for
+# an r drawn by HMAC from the private exponent and the message - so its
+# value, which a caller may choose, does not shape the time, and the
+# signature is checked against the public key before it is given out, so
+# a fault in one half of the CRT does not hand out the factor it reveals
+# (Boneh, DeMillo and Lipton, 1997). The exponentiation's own timing
+# follows the exponent's bits; a signer whose timing is watched closely
+# should know that.
+#
+# `JWS.sign` and `JWS.verify` are the layer under JWT: a payload of any
+# bytes and a header written as the caller writes it, which is what
+# reproduces RFC 7515's, RFC 7520's and RFC 8037's examples byte for byte.
+# `JWT.encode` writes `alg`, `typ: "JWT"` and the key's `kid`, then the
+# caller's header members; `JWT.unverified` reads a token's header (its
+# `kid`, say) before any key is chosen, and is never to be trusted.
+#
+# Keys: a shared secret as bytes or a `String`, of at least the hash's
+# size (RFC 7518 section 3.2: 32 bytes for HS256, 48 and 64), held to it
+# as a panic; PEM (RFC 7468) holding a SubjectPublicKeyInfo, a PKCS #8
+# private key, PKCS #1's RSA keys, SEC 1's EC key or a certificate (whose
+# key is taken, its chain not checked); or a JWK. RSA keys are 2048 bits
+# or more (RFC 7518 section 3.3), private ones with the CRT parameters,
+# which are checked to agree with n and e. A JWK's numbers are base64url
+# as RFC 7518 section 6 writes them: RSA's with no leading zero byte, EC
+# coordinates and private keys at the curve's width. `JWK#to_json` writes
+# a key back, `JWK#public` drops its private half, and `JWK#thumbprint`
+# is RFC 7638's.
+
+module std/jwt
+
+import std/json::{JSON, Any, Parser}
+import std/digest::{SHA256, SHA384, SHA512}
+import std/crypto::{HMAC, Subtle}
+import std/base64::{Base64}
+import std/big::{BigInt}
+import std/asn1::{Der, DerValue, DerTag, Asn1Error}
+import std/rsa::{RsaPublicKey, RsaHash, RsaError}
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
+import std/p256::{P256PrivateKey}
+import std/curve25519::{Ed25519, Ed25519PublicKey, CurveError}
+import std/x509::{X509, X509Error, Certificate}
+
+# What a token or a key read from outside answers when it is not one.
+pub struct JWTError
+  getter message : String
+
+  def initialize(message : String)
+    @message = "jwt: #{message}"
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for JWTError
+  def message : String
+    @message
+  end
+end
+
+# The JWS algorithms of RFC 7518 section 3 that std signs or checks, and
+# EdDSA of RFC 8037. Each is written in a header as its name here.
+pub enum JWTAlgorithm
+  HS256
+  HS384
+  HS512
+  RS256
+  RS384
+  RS512
+  PS256
+  PS384
+  PS512
+  ES256
+  ES384
+  ES512
+  EdDSA
+
+  # The algorithm a header's `alg` names, matched exactly: `hs256` and
+  # `None` are no algorithm.
+  def self.named(name : String) : JWTAlgorithm?
+    JWTAlgorithm.values.each do |algorithm|
+      return algorithm if algorithm.to_s == name
+    end
+    nil
+  end
+
+  # `HS`, `RS`, `PS`, `ES` or `Ed`: the family the key must be of.
+  def family : String
+    to_s[0, 2]
+  end
+
+  # The name with its article, as a sentence says it: `an RS256`, `a PS256`.
+  def spoken : String
+    family == "PS" ? "a #{self}" : "an #{self}"
+  end
+
+  # The hash's length in bits; EdDSA's is its own.
+  def bits : Int32
+    case self
+    when JWTAlgorithm::HS256, JWTAlgorithm::RS256, JWTAlgorithm::PS256, JWTAlgorithm::ES256 then 256
+    when JWTAlgorithm::HS384, JWTAlgorithm::RS384, JWTAlgorithm::PS384, JWTAlgorithm::ES384 then 384
+    when JWTAlgorithm::EdDSA                                                                then 0
+    else                                                                                         512
+    end
+  end
+
+  # The curve an ES algorithm's key must be on (RFC 7518 section 3.4).
+  def curve : EcdsaCurve
+    case bits
+    when 256 then EcdsaCurve::P256
+    when 384 then EcdsaCurve::P384
+    else          EcdsaCurve::P521
+    end
+  end
+
+  def rsa_hash : RsaHash
+    case bits
+    when 256 then RsaHash::SHA256
+    when 384 then RsaHash::SHA384
+    else          RsaHash::SHA512
+    end
+  end
+
+  def ecdsa_hash : EcdsaHash
+    case bits
+    when 256 then EcdsaHash::SHA256
+    when 384 then EcdsaHash::SHA384
+    else          EcdsaHash::SHA512
+    end
+  end
+end
+
+# A JSON Web Key (RFC 7517): a shared secret (`oct`), an RSA key, an EC
+# key on P-256, P-384 or P-521, or an Ed25519 key (`OKP`, RFC 8037), with
+# or without its private half, and the members that say what it is for.
+pub struct JWK
+  # `oct`, `RSA`, `EC` or `OKP`.
+  getter kty : String
+  getter kid : String?
+  # The algorithm the key is for, when it names one.
+  getter alg : String?
+  # The `use` member: `sig` or `enc`.
+  getter usage : String?
+  getter key_ops : Array(String)?
+  @material : JWTOct | JWTRsa | JWTEc | JWTOkp
+
+  def initialize(@kty : String, @material : JWTOct | JWTRsa | JWTEc | JWTOkp, @kid : String?, @alg : String?, @usage : String?, @key_ops : Array(String)?)
+  end
+
+  # A shared secret for the HS algorithms.
+  def self.secret(bytes : String | Array(UInt8), kid : String? = nil) : JWK
+    JWK.new("oct", JWTOct.new(JWTBytes.of(bytes)), kid, nil, nil, nil)
+  end
+
+  # The Ed25519 key whose private seed is *seed*, 32 bytes the caller drew.
+  def self.ed25519(seed : Array(UInt8), kid : String? = nil) : JWK
+    raise "jwt: an Ed25519 seed is 32 bytes, not #{seed.size}" unless seed.size == 32
+    public = Ed25519PublicKey.new(JWTBytes.of(Ed25519.public_key(seed)))
+    JWK.new("OKP", JWTOkp.new(public, seed.dup), kid, nil, nil, nil)
+  end
+
+  # The P-256 key whose private scalar is *d*, 32 bytes big-endian, or why
+  # *d* is none: a number of 0, or of n or more.
+  def self.p256(d : Array(UInt8), kid : String? = nil) : JWK | JWTError
+    signer = P256PrivateKey.from_bytes(d)
+    return JWTError.new(signer.message) if signer.is_a?(EcdsaError)
+    JWK.new("EC", JWTEc.new(signer.public_key, d.dup, signer), kid, nil, nil, nil)
+  end
+
+  # The public key a certificate or std/x509 holds.
+  def self.from_key(key : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey, kid : String? = nil) : JWK | JWTError
+    case key
+    when RsaPublicKey
+      JWTKeys.strong(key)!
+      JWK.new("RSA", JWTRsa.new(key, nil), kid, nil, nil, nil)
+    when EcdsaPublicKey
+      JWK.new("EC", JWTEc.new(key, nil, nil), kid, nil, nil, nil)
+    else
+      JWK.new("OKP", JWTOkp.new(key, nil), kid, nil, nil, nil)
+    end
+  end
+
+  # The key a JWK's JSON text is, or why it is none.
+  def self.parse(text : String) : JWK | JWTError
+    fields = JWTJson.object(JWTBytes.of(text), "JWK")!
+    JWTKeys.jwk(fields)
+  end
+
+  # The keys of a JWK Set (RFC 7517 section 5), `{"keys": [...]}`. A key
+  # whose `kty` or curve this does not know is passed over, as section 5
+  # asks; a key of a known kind that is not well formed is refused.
+  def self.parse_set(text : String) : Array(JWK) | JWTError
+    top = JWTJson.object(JWTBytes.of(text), "JWK Set")!
+    entries = top["keys"]?
+    return JWTError.new("a JWK Set with no keys member") if entries.nil?
+    list = entries.as_a?
+    return JWTError.new("a JWK Set whose keys member is a JSON #{entries.kind}, not an array") if list.nil?
+    keys = [] of JWK
+    list.each_with_index do |entry, i|
+      fields = entry.as_h?
+      return JWTError.new("key #{i} of the JWK Set is a JSON #{entry.kind}, not an object") if fields.nil?
+      next unless JWTKeys.known?(fields)
+      key = JWTKeys.jwk(fields)
+      return JWTError.new("key #{i} of the JWK Set: #{JWTBytes.unprefixed(key.message, "jwt: ")}") if key.is_a?(JWTError)
+      keys << key
+    end
+    keys
+  end
+
+  # The key in a PEM text: `PUBLIC KEY` (SubjectPublicKeyInfo), `PRIVATE
+  # KEY` (PKCS #8), `RSA PUBLIC KEY` and `RSA PRIVATE KEY` (PKCS #1), `EC
+  # PRIVATE KEY` (SEC 1) or `CERTIFICATE`. One key to a text.
+  def self.from_pem(text : String, kid : String? = nil) : JWK | JWTError
+    JWTKeys.pem(text, kid)
+  end
+
+  # Whether the key holds its private half, or is a shared secret.
+  def private? : Bool
+    case m = @material
+    when JWTOct then true
+    when JWTRsa then !m.signer.nil?
+    when JWTEc  then !m.d.nil?
+    else             !m.seed.nil?
+    end
+  end
+
+  # The key without its private half. A shared secret has none to keep.
+  # What the private key may `sign` the public one may `verify`, as
+  # `key_ops` says it (RFC 7517 section 4.3): a private JWK that PyJWT
+  # writes carries `["sign"]`, and its public half `["verify"]`.
+  def public : JWK
+    ops = @key_ops
+    public_ops = ops.nil? ? nil : ops.map { |op| op == "sign" ? "verify" : op }.uniq
+    case m = @material
+    when JWTOct
+      raise "jwt: an oct key is a shared secret and has no public half"
+    when JWTRsa
+      JWK.new(@kty, JWTRsa.new(m.verifier, nil), @kid, @alg, @usage, public_ops)
+    when JWTEc
+      JWK.new(@kty, JWTEc.new(m.verifier, nil, nil), @kid, @alg, @usage, public_ops)
+    else
+      JWK.new(@kty, JWTOkp.new(m.verifier, nil), @kid, @alg, @usage, public_ops)
+    end
+  end
+
+  # The curve of an EC or OKP key, as a JWK names it: `P-256`, `P-384`,
+  # `P-521` or `Ed25519`; nil for the others.
+  def crv : String?
+    case m = @material
+    when JWTEc  then JWTKeys.curve_name(m.verifier.curve)
+    when JWTOkp then "Ed25519"
+    else             nil
+    end
+  end
+
+  # The key as JWK JSON, its private members included when it has them.
+  def to_json : String
+    members = JWTKeys.members(@material, true)
+    JSON.build do |b|
+      b.object do
+        members.each { |name, value| b.field(name, value) }
+        kid = @kid
+        b.field("kid", kid) if kid
+        alg = @alg
+        b.field("alg", alg) if alg
+        usage = @usage
+        b.field("use", usage) if usage
+        ops = @key_ops
+        if ops
+          b.field("key_ops") do
+            b.array { ops.each { |op| b.string(op) } }
+          end
+        end
+      end
+    end
+  end
+
+  # RFC 7638's thumbprint: the base64url SHA-256 of the required public
+  # members, in the order of their names, with no space.
+  def thumbprint : String
+    members = JWTKeys.members(@material, false).to_a.sorted_by { |pair| pair[0] }
+    text = JSON.build do |b|
+      b.object do
+        members.each { |pair| b.field(pair[0], pair[1]) }
+      end
+    end
+    JWTBase64.encode(SHA256.hash_bytes(text))
+  end
+
+  protected def material : JWTOct | JWTRsa | JWTEc | JWTOkp
+    @material
+  end
+
+  # How a refusal names this key: `an RSA key`, `an EC key on P-384`.
+  def describe : String
+    case m = @material
+    when JWTOct then "a shared secret (oct)"
+    when JWTRsa then "an RSA key"
+    when JWTEc  then "an EC key on #{JWTKeys.curve_name(m.verifier.curve)}"
+    else             "an Ed25519 key (OKP)"
+    end
+  end
+
+  # Why this key cannot *op* (`sign` or `verify`) under *algorithm*, or nil.
+  def unfit(algorithm : JWTAlgorithm, op : String) : String?
+    m = @material
+    fits = case algorithm.family
+           when "HS"       then m.is_a?(JWTOct)
+           when "RS", "PS" then m.is_a?(JWTRsa)
+           when "ES"       then m.is_a?(JWTEc) && m.verifier.curve == algorithm.curve
+           else                 m.is_a?(JWTOkp)
+           end
+    return "#{algorithm.spoken} token, and the key is #{describe}" unless fits
+    alg = @alg
+    return "#{algorithm.spoken} token, and the key is for #{alg}" if alg && alg != algorithm.to_s
+    usage = @usage
+    return "the key's use is #{usage}, not sig" if usage && usage != "sig"
+    ops = @key_ops
+    return "the key's key_ops do not include #{op}" if ops && !ops.includes?(op)
+    if m.is_a?(JWTOct) && m.bytes.size * 8 < algorithm.bits
+      return "an #{algorithm} key must be at least #{algorithm.bits // 8} bytes (RFC 7518 section 3.2), and this one is #{m.bytes.size}"
+    end
+    nil
+  end
+end
+
+# A token, read: its header and its claims.
+pub struct JWT
+  getter header : Hash(String, Any)
+  getter claims : Hash(String, Any)
+
+  def initialize(@header : Hash(String, Any), @claims : Hash(String, Any))
+  end
+
+  def [](claim : String) : Any
+    @claims[claim]
+  end
+
+  def []?(claim : String) : Any?
+    @claims[claim]?
+  end
+
+  # The header's alg.
+  def algorithm : String
+    @header["alg"].as_s
+  end
+
+  # A token of *claims* signed by *key* under *algorithm*. The header is
+  # `alg`, then `typ: "JWT"` unless *header* gives a `typ` (`null` leaves
+  # it out), then the key's `kid` unless *header* gives one, then *header*.
+  # A key that cannot sign under the algorithm is a panic, as is a header
+  # that names an alg of its own.
+  def self.encode(claims : Hash(String, V), key : JWK | String | Array(UInt8), algorithm : JWTAlgorithm, header : Hash(String, Any) = {} of String => Any) : String forall V
+    JWTSign.token(JSON.to_json(claims), key, algorithm, header)
+  end
+
+  def self.encode(claims : Any, key : JWK | String | Array(UInt8), algorithm : JWTAlgorithm, header : Hash(String, Any) = {} of String => Any) : String
+    raise "jwt: the claims are a JSON #{claims.kind}, and a JWT's claims are an object" if claims.as_h?.nil?
+    JWTSign.token(claims.to_json, key, algorithm, header)
+  end
+
+  # The token checked: its form, its algorithm (one of *algorithms*), its
+  # signature under *key* - one key, a secret, or a set chosen from by the
+  # header's `kid` - and then its claims at *now*, Unix seconds, with
+  # *leeway* seconds of grace. See the module's header for each check.
+  def self.decode(token : String, key : JWK | Array(JWK) | String | Array(UInt8), algorithms : Array(JWTAlgorithm), now : Int64,
+                  leeway : Int64 = 0_i64, audience : String | Array(String) | Nil = nil, issuer : String | Array(String) | Nil = nil,
+                  subject : String? = nil, required : Array(String) = [] of String) : JWT | JWTError
+    raise "jwt: the leeway must not be negative, not #{leeway}" if leeway < 0
+    opened = JWTSign.open(token, key, algorithms)!
+    claims = JWTJson.object(opened.payload, "payload")!
+    JWTClaims.check(claims, now, leeway, audience, issuer, subject, required)!
+    JWT.new(opened.header, claims)
+  end
+
+  # The header and claims of *token*, its form checked and its signature
+  # not: for reading the `kid` that says which key to decode it with, never
+  # for trusting what it says.
+  def self.unverified(token : String) : JWT | JWTError
+    parts = JWTToken.parts(token)!
+    header = JWTJson.object(parts[0], "header")!
+    claims = JWTJson.object(parts[1], "payload")!
+    JWT.new(header, claims)
+  end
+end
+
+# JWS (RFC 7515) under JWT: a payload of any bytes, a header written as
+# the caller writes it. What reproduces RFC 7515's and RFC 8037's examples
+# byte for byte, and what carries a payload that is not a claims set.
+pub struct JWS
+  # The compact serialization of *payload* under the protected header
+  # *header*, a JSON object whose alg is *algorithm*'s name, written as
+  # given. A header that is not one, or names another alg, is a panic, as
+  # is a key that cannot sign under the algorithm.
+  def self.sign(header : String, payload : String | Array(UInt8), key : JWK | String | Array(UInt8), algorithm : JWTAlgorithm) : String
+    fields = JWTJson.object(JWTBytes.of(header), "header")
+    raise fields.message if fields.is_a?(JWTError)
+    alg = fields["alg"]?
+    raise "jwt: the header's alg is not #{algorithm}" unless alg && alg.as_s? == algorithm.to_s
+    JWTSign.signed(header, JWTBytes.of(payload), key, algorithm)
+  end
+
+  # The payload of *token*, its form, its algorithm (one of *algorithms*)
+  # and its signature under *key* checked as `JWT.decode` checks them.
+  def self.verify(token : String, key : JWK | Array(JWK) | String | Array(UInt8), algorithms : Array(JWTAlgorithm)) : Array(UInt8) | JWTError
+    opened = JWTSign.open(token, key, algorithms)!
+    opened.payload
+  end
+end
+
+# A token whose signature has been checked: its header, and its payload
+# still bytes.
+struct JWTOpened
+  getter header : Hash(String, Any)
+  getter payload : Array(UInt8)
+
+  def initialize(@header : Hash(String, Any), @payload : Array(UInt8))
+  end
+end
+
+# A shared secret.
+struct JWTOct
+  getter bytes : Array(UInt8)
+
+  def initialize(@bytes : Array(UInt8))
+  end
+end
+
+struct JWTRsa
+  getter verifier : RsaPublicKey
+  getter signer : JWTRsaPrivate?
+
+  def initialize(@verifier : RsaPublicKey, @signer : JWTRsaPrivate?)
+  end
+end
+
+# An EC key; *d* and *signer* only for a P-256 private key, the one curve
+# std signs on.
+struct JWTEc
+  getter verifier : EcdsaPublicKey
+  getter d : Array(UInt8)?
+  getter signer : P256PrivateKey?
+
+  def initialize(@verifier : EcdsaPublicKey, @d : Array(UInt8)?, @signer : P256PrivateKey?)
+  end
+end
+
+struct JWTOkp
+  getter verifier : Ed25519PublicKey
+  getter seed : Array(UInt8)?
+
+  def initialize(@verifier : Ed25519PublicKey, @seed : Array(UInt8)?)
+  end
+end
+
+# An RSA private key with its CRT parameters (RFC 8017 section 3.2, the
+# first representation and the second together), and the two signatures.
+struct JWTRsaPrivate
+  # The parameters as they were read, big-endian with no leading zero,
+  # for writing the key back.
+  getter d_bytes : Array(UInt8)
+  getter p_bytes : Array(UInt8)
+  getter q_bytes : Array(UInt8)
+  getter dp_bytes : Array(UInt8)
+  getter dq_bytes : Array(UInt8)
+  getter qi_bytes : Array(UInt8)
+  @n : BigInt
+  @e : BigInt
+  @p : BigInt
+  @q : BigInt
+  @dp : BigInt
+  @dq : BigInt
+  @qi : BigInt
+  @bits : Int32
+  @size : Int32
+  # The HMAC key the blinding factors and PSS salts are drawn with.
+  @prf : Array(UInt8)
+
+  def initialize(public : RsaPublicKey, @d_bytes : Array(UInt8), @p_bytes : Array(UInt8), @q_bytes : Array(UInt8),
+                 @dp_bytes : Array(UInt8), @dq_bytes : Array(UInt8), @qi_bytes : Array(UInt8))
+    @n = public.modulus
+    @e = public.exponent
+    @bits = public.bits
+    @size = public.size
+    @p = BigInt.from_bytes(@p_bytes)
+    @q = BigInt.from_bytes(@q_bytes)
+    @dp = BigInt.from_bytes(@dp_bytes)
+    @dq = BigInt.from_bytes(@dq_bytes)
+    @qi = BigInt.from_bytes(@qi_bytes)
+    @prf = SHA256.hash_bytes(JWTBytes.of("std/jwt RSA") + @d_bytes)
+  end
+
+  # The key, or why its parameters do not make one: p·q must be n, dp and
+  # dq must be d's residues and inverses of e modulo p - 1 and q - 1, and
+  # qi must be q's inverse modulo p.
+  def self.build(public : RsaPublicKey, d : Array(UInt8), p : Array(UInt8), q : Array(UInt8), dp : Array(UInt8), dq : Array(UInt8), qi : Array(UInt8)) : JWTRsaPrivate | JWTError
+    bd = BigInt.from_bytes(d)
+    bp = BigInt.from_bytes(p)
+    bq = BigInt.from_bytes(q)
+    one = BigInt.new(1)
+    return JWTError.new("an RSA private key whose p or q is not over 1") unless bp > one && bq > one
+    return JWTError.new("an RSA private key whose p times q is not its modulus") unless bp * bq == public.modulus
+    p1 = bp - one
+    q1 = bq - one
+    bdp = BigInt.from_bytes(dp)
+    bdq = BigInt.from_bytes(dq)
+    return JWTError.new("an RSA private key whose dp is not d mod (p - 1)") unless bd % p1 == bdp
+    return JWTError.new("an RSA private key whose dq is not d mod (q - 1)") unless bd % q1 == bdq
+    e = public.exponent
+    return JWTError.new("an RSA private key whose d is not an inverse of e") unless (e * bdp) % p1 == one && (e * bdq) % q1 == one
+    bqi = BigInt.from_bytes(qi)
+    return JWTError.new("an RSA private key whose qi is not the inverse of q mod p") unless bqi < bp && (bqi * bq) % bp == one
+    JWTRsaPrivate.new(public, d, p, q, dp, dq, qi)
+  end
+
+  # RSASSA-PKCS1-v1_5 (section 8.2.1): 0x00 0x01, 0xFF padding, 0x00, the
+  # hash's DigestInfo.
+  def sign_pkcs1v15(hash : RsaHash, message : Array(UInt8)) : Array(UInt8)
+    t = hash.digest_info_prefix + hash.digest(message)
+    em = Array(UInt8).new(@size, 0xFF_u8)
+    em[0] = 0_u8
+    em[1] = 1_u8
+    em[@size - t.size - 1] = 0_u8
+    t.each_with_index { |b, i| em[@size - t.size + i] = b }
+    rsasp1(em)
+  end
+
+  # RSASSA-PSS (section 8.1.1), EMSA-PSS-ENCODE of section 9.1.1 with a
+  # salt as long as the digest, drawn as the module's header says.
+  def sign_pss(hash : RsaHash, message : Array(UInt8)) : Array(UInt8)
+    m_hash = hash.digest(message)
+    h_len = hash.size
+    salt = JWTRsaPrivate.mac(hash, @prf, [2_u8] + m_hash)
+    em_bits = @bits - 1
+    em_len = (em_bits + 7) // 8
+    h = hash.digest(Array(UInt8).new(8, 0_u8) + m_hash + salt)
+    db_len = em_len - h_len - 1
+    db = Array(UInt8).new(db_len - h_len - 1, 0_u8) + [1_u8] + salt
+    mask = JWTRsaPrivate.mgf1(hash, h, db_len)
+    masked = Array(UInt8).new(db_len) { |i| db[i] ^ mask[i] }
+    top = 8 * em_len - em_bits
+    masked[0] = masked[0] & (0xFF_u8 >> top) if top > 0
+    rsasp1(masked + h + [0xBC_u8])
+  end
+
+  # RSASP1 (section 5.2.1) by the CRT, blinded, and checked before it is
+  # given out.
+  private def rsasp1(em : Array(UInt8)) : Array(UInt8)
+    m = BigInt.from_bytes(em)
+    r, r_inverse = blinding(em)
+    c = (m * r.pow_mod(@e, @n)) % @n
+    s1 = (c % @p).pow_mod(@dp, @p)
+    s2 = (c % @q).pow_mod(@dq, @q)
+    h = (@qi * (s1 - s2)) % @p
+    h = h + @p if h.negative?
+    s = ((s2 + h * @q) * r_inverse) % @n
+    raise "jwt: an RSA signature that does not check against its own public key" unless s.pow_mod(@e, @n) == m
+    s.to_bytes(@size) || raise "jwt: an RSA signature wider than its modulus"
+  end
+
+  # r, an HMAC of the encoded message under the key's own secret reduced
+  # mod n, and r^-1 mod n; the next counter's r in the 2^-1000 case of one
+  # with no inverse.
+  private def blinding(em : Array(UInt8)) : {BigInt, BigInt}
+    counter = 0_u8
+    while true
+      wide = [] of UInt8
+      block = 0_u8
+      while wide.size < @size + 16
+        wide.concat(HMAC.digest(SHA256, @prf, [1_u8, counter, block] + em))
+        block = block + 1_u8
+      end
+      r = BigInt.from_bytes(wide) % @n
+      if r > BigInt.new(1)
+        inverse = JWTRsaPrivate.inverse(r, @n)
+        return {r, inverse} if inverse
+      end
+      counter = counter + 1_u8
+    end
+    {BigInt.new(1), BigInt.new(1)}
+  end
+
+  # a^-1 mod m by the extended Euclidean algorithm, or nil when they
+  # share a factor.
+  def self.inverse(a : BigInt, m : BigInt) : BigInt?
+    t0 = BigInt.new(0)
+    t1 = BigInt.new(1)
+    r0 = m
+    r1 = a % m
+    until_zero = !r1.zero?
+    while until_zero
+      q, rest = r0.divmod(r1)
+      r0 = r1
+      r1 = rest
+      t0, t1 = t1, t0 - q * t1
+      until_zero = !r1.zero?
+    end
+    return nil unless r0 == BigInt.new(1)
+    t0.negative? ? t0 + m : t0
+  end
+
+  def self.mac(hash : RsaHash, key : Array(UInt8), data : Array(UInt8)) : Array(UInt8)
+    case hash
+    when RsaHash::SHA256 then HMAC.digest(SHA256, key, data)
+    when RsaHash::SHA384 then HMAC.digest(SHA384, key, data)
+    else                      HMAC.digest(SHA512, key, data)
+    end
+  end
+
+  # MGF1 (RFC 8017 appendix B.2.1).
+  def self.mgf1(hash : RsaHash, seed : Array(UInt8), size : Int32) : Array(UInt8)
+    mask = [] of UInt8
+    counter = 0_u32
+    while mask.size < size
+      mask.concat(hash.digest(seed + [(counter >> 24).to_u8, ((counter >> 16) & 0xFF_u32).to_u8,
+                                      ((counter >> 8) & 0xFF_u32).to_u8, (counter & 0xFF_u32).to_u8]))
+      counter = counter + 1
+    end
+    mask[0, size]
+  end
+end
+
+# Signing a token and checking a signature.
+struct JWTSign
+  # The header `JWT.encode` writes, then the token.
+  def self.token(payload : String, key : JWK | String | Array(UInt8), algorithm : JWTAlgorithm, header : Hash(String, Any)) : String
+    raise "jwt: the header's alg is the algorithm's to write, and the header gives one" if header.has_key?("alg")
+    kid = key.is_a?(JWK) ? key.kid : nil
+    head = JSON.build do |b|
+      b.object do
+        b.field("alg", algorithm.to_s)
+        b.field("typ", "JWT") unless header.has_key?("typ")
+        b.field("kid", kid) if kid && !header.has_key?("kid")
+        header.each do |name, value|
+          b.field(name, value) unless name == "typ" && value.raw.nil?
+        end
+      end
+    end
+    signed(head, JWTBytes.of(payload), key, algorithm)
+  end
+
+  def self.signed(head : String, payload : Array(UInt8), key : JWK | String | Array(UInt8), algorithm : JWTAlgorithm) : String
+    jwk = key.is_a?(JWK) ? key : JWK.secret(key)
+    JWTKeys.refuse_asymmetric_secret(jwk)
+    unfit = jwk.unfit(algorithm, "sign")
+    raise "jwt: #{unfit}" if unfit
+    if algorithm.family == "ES" && algorithm != JWTAlgorithm::ES256
+      raise "jwt: #{algorithm} tokens can be checked here and not signed: std has no #{JWTKeys.curve_name(algorithm.curve)} signer"
+    end
+    raise "jwt: #{algorithm.spoken} token is signed with a private key, and this key holds only the public half" unless jwk.private?
+    input = "#{JWTBase64.encode(head)}.#{JWTBase64.encode(payload)}"
+    "#{input}.#{JWTBase64.encode(sign(algorithm, jwk.material, JWTBytes.of(input)))}"
+  end
+
+  # The token's header and payload once its form, its algorithm and its
+  # signature under one of *key*'s keys hold.
+  def self.open(token : String, key : JWK | Array(JWK) | String | Array(UInt8), algorithms : Array(JWTAlgorithm)) : JWTOpened | JWTError
+    raise "jwt: decode needs the algorithms it accepts named, and the list is empty" if algorithms.empty?
+    keys = JWTKeys.candidates(key, algorithms)
+    parts = JWTToken.parts(token)!
+    header = JWTJson.object(parts[0], "header")!
+    algorithm = JWTToken.algorithm(header, algorithms)!
+    kid = header["kid"]?
+    kid_text = nil
+    unless kid.nil?
+      kid_text = kid.as_s?
+      return JWTError.new("the header's kid is a JSON #{kid.kind}, not a string") if kid_text.nil?
+    end
+    if key.is_a?(Array(JWK)) && kid_text
+      keys = keys.select { |k| k.kid == kid_text }
+      return JWTError.new("no key has the kid #{kid_text.inspect} the header names") if keys.empty?
+    end
+    fitting = keys.select { |k| k.unfit(algorithm, "verify").nil? }
+    if fitting.empty?
+      reason = keys.empty? ? "no key was given" : (keys[0].unfit(algorithm, "verify") || "")
+      return JWTError.new(reason)
+    end
+    input = JWTBytes.of(JWTToken.signing_input(token))
+    unless fitting.any? { |k| verify(algorithm, k.material, input, parts[2]) }
+      return JWTError.new("the signature does not verify")
+    end
+    JWTOpened.new(header, parts[1])
+  end
+
+  def self.sign(algorithm : JWTAlgorithm, material : JWTOct | JWTRsa | JWTEc | JWTOkp, input : Array(UInt8)) : Array(UInt8)
+    case material
+    when JWTOct
+      hmac(algorithm, material.bytes, input)
+    when JWTRsa
+      signer = material.signer || raise "jwt: an RSA key with no private half"
+      algorithm.family == "PS" ? signer.sign_pss(algorithm.rsa_hash, input) : signer.sign_pkcs1v15(algorithm.rsa_hash, input)
+    when JWTEc
+      signer = material.signer || raise "jwt: an EC key with no private half"
+      JWTEcdsa.raw(signer.sign(algorithm.ecdsa_hash, input), 32)
+    else
+      seed = material.seed || raise "jwt: an Ed25519 key with no private half"
+      JWTBytes.of(Ed25519.sign(seed, input))
+    end
+  end
+
+  # Whether *signature* is the key's over *input*; false for every way it
+  # is not, a signature of the wrong length among them.
+  def self.verify(algorithm : JWTAlgorithm, material : JWTOct | JWTRsa | JWTEc | JWTOkp, input : Array(UInt8), signature : Array(UInt8)) : Bool
+    case material
+    when JWTOct
+      Subtle.constant_time_compare(hmac(algorithm, material.bytes, input), signature)
+    when JWTRsa
+      if algorithm.family == "PS"
+        material.verifier.verify_pss(algorithm.rsa_hash, input, signature)
+      else
+        material.verifier.verify_pkcs1v15(algorithm.rsa_hash, input, signature)
+      end
+    when JWTEc
+      size = material.verifier.curve.size
+      return false unless signature.size == 2 * size
+      material.verifier.verify(algorithm.ecdsa_hash, input, JWTEcdsa.der(signature, size))
+    else
+      material.verifier.verify(input, signature)
+    end
+  end
+
+  def self.hmac(algorithm : JWTAlgorithm, key : Array(UInt8), data : Array(UInt8)) : Array(UInt8)
+    case algorithm.bits
+    when 256 then HMAC.digest(SHA256, key, data)
+    when 384 then HMAC.digest(SHA384, key, data)
+    else          HMAC.digest(SHA512, key, data)
+    end
+  end
+end
+
+# JWS writes an ECDSA signature as r and s side by side, each at the
+# curve's width (RFC 7518 section 3.4); std/ecdsa and std/p256 speak DER.
+struct JWTEcdsa
+  def self.raw(der : Array(UInt8), size : Int32) : Array(UInt8)
+    top = Der.parse(der)
+    raise "jwt: an ECDSA signature that is not DER" if top.is_a?(Asn1Error)
+    fields = top.sequence
+    raise "jwt: an ECDSA signature that is not a SEQUENCE" if fields.is_a?(Asn1Error)
+    answer = [] of UInt8
+    fields.each do |field|
+      value = field.unsigned_integer
+      raise "jwt: an ECDSA signature whose r or s is not an INTEGER" if value.is_a?(Asn1Error)
+      answer.concat(Array(UInt8).new(size - value.size, 0_u8))
+      answer.concat(value)
+    end
+    answer
+  end
+
+  def self.der(raw : Array(UInt8), size : Int32) : Array(UInt8)
+    body = integer(raw[0, size]) + integer(raw[size, size])
+    [0x30_u8] + length(body.size) + body
+  end
+
+  private def self.integer(bytes : Array(UInt8)) : Array(UInt8)
+    at = 0
+    while at < bytes.size - 1 && bytes[at] == 0_u8
+      at = at + 1
+    end
+    value = bytes[at, bytes.size - at]
+    value = [0_u8] + value if value[0] >= 0x80_u8
+    [0x02_u8] + length(value.size) + value
+  end
+
+  private def self.length(size : Int32) : Array(UInt8)
+    size < 128 ? [size.to_u8] : [0x81_u8, size.to_u8]
+  end
+end
+
+# The compact serialization: three parts, the header's alg.
+struct JWTToken
+  # The header's, payload's and signature's bytes.
+  def self.parts(token : String) : Array(Array(UInt8)) | JWTError
+    pieces = token.split('.')
+    if pieces.size == 5
+      return JWTError.new("a token of five parts is a JWE, an encrypted token, which this does not open")
+    end
+    unless pieces.size == 3
+      return JWTError.new("a JWS is three base64url parts joined by dots, and this token has #{pieces.size}")
+    end
+    header = JWTBase64.decode(pieces[0], "header")!
+    payload = JWTBase64.decode(pieces[1], "payload")!
+    signature = JWTBase64.decode(pieces[2], "signature")!
+    [header, payload, signature]
+  end
+
+  # The text the signature is over: up to the second dot.
+  def self.signing_input(token : String) : String
+    p = token.to_unsafe
+    dots = 0
+    i = 0
+    while i < token.bytesize
+      if p[i] == 46_u8
+        dots = dots + 1
+        break if dots == 2
+      end
+      i = i + 1
+    end
+    String.new(i) { |buf| buf.copy_from(p, i) }
+  end
+
+  # The algorithm the header names, if it is one *accepted* holds.
+  def self.algorithm(header : Hash(String, Any), accepted : Array(JWTAlgorithm)) : JWTAlgorithm | JWTError
+    value = header["alg"]?
+    return JWTError.new("the header names no alg") if value.nil?
+    name = value.as_s?
+    return JWTError.new("the header's alg is a JSON #{value.kind}, not a string") if name.nil?
+    if name == "none"
+      return JWTError.new("the token is unsecured (alg none), which is never accepted")
+    end
+    list = accepted.map(&.to_s).join(", ")
+    algorithm = JWTAlgorithm.named(name)
+    return JWTError.new("alg #{name.inspect}, which is not among the algorithms accepted (#{list})") if algorithm.nil?
+    return JWTError.new("alg #{name}, which is not among the algorithms accepted (#{list})") unless accepted.includes?(algorithm)
+    if header.has_key?("crit")
+      return JWTError.new("the header lists critical extensions (crit), and none is understood here")
+    end
+    algorithm
+  end
+end
+
+# The registered claims, checked (RFC 7519 section 4.1).
+struct JWTClaims
+  def self.check(claims : Hash(String, Any), now : Int64, leeway : Int64, audience : String | Array(String) | Nil,
+                 issuer : String | Array(String) | Nil, subject : String?, required : Array(String)) : Nil | JWTError
+    required.each do |name|
+      value = claims[name]?
+      return JWTError.new("the token carries no #{name} claim, which is required") if value.nil? || value.raw.nil?
+    end
+    if iat = claims["iat"]?
+      number = date(iat, "iat")!
+      return JWTError.new("the token was issued in the future (iat #{iat.to_json}, now #{now})") if after?(number, now + leeway)
+    end
+    if nbf = claims["nbf"]?
+      number = date(nbf, "nbf")!
+      return JWTError.new("the token is not valid yet (nbf #{nbf.to_json}, now #{now})") if after?(number, now + leeway)
+    end
+    if exp = claims["exp"]?
+      number = date(exp, "exp")!
+      return JWTError.new("the token has expired (exp #{exp.to_json}, now #{now})") unless after?(number, now - leeway)
+    end
+    check_issuer(claims["iss"]?, issuer)!
+    check_audience(claims["aud"]?, audience)!
+    if sub = claims["sub"]?
+      text = sub.as_s?
+      return JWTError.new("the sub claim is a JSON #{sub.kind}, not a string") if text.nil?
+      return JWTError.new("the token's subject is #{text.inspect}, not the one expected") if subject && text != subject
+    end
+    if jti = claims["jti"]?
+      return JWTError.new("the jti claim is a JSON #{jti.kind}, not a string") if jti.as_s?.nil?
+    end
+    nil
+  end
+
+  # A NumericDate (RFC 7519 section 2): a JSON number, of seconds.
+  private def self.date(value : Any, name : String) : Int64 | Float64 | JWTError
+    raw = value.raw
+    return raw if raw.is_a?(Int64)
+    return raw if raw.is_a?(Float64)
+    JWTError.new("the #{name} claim is a JSON #{value.kind}, not a NumericDate")
+  end
+
+  # Whether *date* is later than the second *time*.
+  private def self.after?(date : Int64 | Float64, time : Int64) : Bool
+    date.is_a?(Int64) ? date > time : date > time.to_f
+  end
+
+  private def self.check_issuer(value : Any?, issuer : String | Array(String) | Nil) : Nil | JWTError
+    return nil if issuer.nil?
+    return JWTError.new("the token carries no iss claim, and an issuer is expected") if value.nil?
+    text = value.as_s?
+    return JWTError.new("the iss claim is a JSON #{value.kind}, not a string") if text.nil?
+    ok = issuer.is_a?(String) ? text == issuer : issuer.includes?(text)
+    return JWTError.new("the token's issuer is #{text.inspect}, not one expected") unless ok
+    nil
+  end
+
+  private def self.check_audience(value : Any?, audience : String | Array(String) | Nil) : Nil | JWTError
+    if audience.nil?
+      return nil if value.nil?
+      return JWTError.new("the token names an audience (aud), and none is expected")
+    end
+    return JWTError.new("the token carries no aud claim, and an audience is expected") if value.nil?
+    named = [] of String
+    if text = value.as_s?
+      named << text
+    elsif list = value.as_a?
+      list.each do |entry|
+        entry_text = entry.as_s?
+        return JWTError.new("the aud claim is neither a string nor an array of strings") if entry_text.nil?
+        named << entry_text
+      end
+    else
+      return JWTError.new("the aud claim is neither a string nor an array of strings")
+    end
+    wanted = audience.is_a?(String) ? [audience] : audience
+    return JWTError.new("the token is not for this audience") unless wanted.any? { |a| named.includes?(a) }
+    nil
+  end
+end
+
+# Reading keys: JWK members, PEM, DER. Each `!` in this module is a
+# statement of its own, never an argument: a method whose body an iyimod
+# artifact keeps as text wrote `f(g(x)!)` back as text the build from
+# artifacts could not read ("the call that began at line N is still open").
+struct JWTKeys
+  RSA_ENCRYPTION = "1.2.840.113549.1.1.1"
+  EC_PUBLIC_KEY  = "1.2.840.10045.2.1"
+  ED25519        = "1.3.101.112"
+  MIN_RSA_BITS   = 2048
+
+  # The keys *key* stands for, its secrets held to what the HS
+  # algorithms in *algorithms* ask before any token is read: a secret that
+  # could sign an HS token is the caller's, and one too short for every HS
+  # algorithm accepted is the caller's mistake. A key a JWK Set marks for
+  # another algorithm or for encryption is not one of them.
+  def self.candidates(key : JWK | Array(JWK) | String | Array(UInt8), algorithms : Array(JWTAlgorithm)) : Array(JWK)
+    keys = case key
+           when JWK        then [key]
+           when Array(JWK) then key
+           else                 [JWK.secret(key)]
+           end
+    hs = algorithms.select { |a| a.family == "HS" }
+    unless hs.empty?
+      least = hs.min_by(&.bits)
+      keys.each do |k|
+        m = k.material
+        next unless m.is_a?(JWTOct)
+        alg = k.alg
+        next if (alg && !alg.starts_with?("HS")) || (k.usage && k.usage != "sig")
+        refuse_asymmetric_secret(k)
+        if m.bytes.size * 8 < least.bits
+          raise "jwt: an #{least} key must be at least #{least.bits // 8} bytes (RFC 7518 section 3.2), and this one is #{m.bytes.size}"
+        end
+      end
+    end
+    keys
+  end
+
+  # A secret that is a PEM or SSH public key is the RS256/HS256 confusion
+  # being set up: refused, as PyJWT refuses it.
+  def self.refuse_asymmetric_secret(key : JWK) : Nil
+    m = key.material
+    return unless m.is_a?(JWTOct)
+    text = JWTBytes.text(m.bytes)
+    asymmetric = text.includes?("-----BEGIN ") || text.starts_with?("ssh-rsa ") || text.starts_with?("ssh-ed25519 ") ||
+                 text.starts_with?("ecdsa-sha2-") || text.starts_with?("ssh-dss ")
+    raise "jwt: an HMAC secret that is a PEM or SSH key: an asymmetric key used as a shared secret is how the RS256/HS256 confusion forges tokens" if asymmetric
+  end
+
+  def self.curve_name(curve : EcdsaCurve) : String
+    case curve
+    when EcdsaCurve::P256 then "P-256"
+    when EcdsaCurve::P384 then "P-384"
+    else                       "P-521"
+    end
+  end
+
+  def self.curve_named(name : String) : EcdsaCurve?
+    case name
+    when "P-256" then EcdsaCurve::P256
+    when "P-384" then EcdsaCurve::P384
+    when "P-521" then EcdsaCurve::P521
+    else              nil
+    end
+  end
+
+  # An RSA key of the size RFC 7518 section 3.3 asks.
+  def self.strong(key : RsaPublicKey) : Nil | JWTError
+    return JWTError.new("an RSA key of #{key.bits} bits, under the #{MIN_RSA_BITS} RFC 7518 section 3.3 asks") if key.bits < MIN_RSA_BITS
+    nil
+  end
+
+  # Whether a JWK Set's entry is of a kind this reads.
+  def self.known?(fields : Hash(String, Any)) : Bool
+    kty = fields["kty"]?
+    crv_value = fields["crv"]?
+    crv = crv_value.nil? ? nil : crv_value.as_s?
+    case kty.nil? ? nil : kty.as_s?
+    when "oct", "RSA" then true
+    when "EC"         then !crv.nil? && !curve_named(crv).nil?
+    when "OKP"        then crv == "Ed25519"
+    else                   false
+    end
+  end
+
+  # The members a JWK writes for *material*, in the order it writes them;
+  # the private ones only when *secret*.
+  def self.members(material : JWTOct | JWTRsa | JWTEc | JWTOkp, secret : Bool) : Hash(String, String)
+    h = {} of String => String
+    case material
+    when JWTOct
+      h["kty"] = "oct"
+      h["k"] = JWTBase64.encode(material.bytes)
+    when JWTRsa
+      key = material.verifier
+      h["kty"] = "RSA"
+      h["n"] = JWTBase64.encode(JWTBytes.fixed(key.modulus, key.size))
+      h["e"] = JWTBase64.encode(JWTBytes.minimal(key.exponent))
+      signer = material.signer
+      if secret && signer
+        h["d"] = JWTBase64.encode(signer.d_bytes)
+        h["p"] = JWTBase64.encode(signer.p_bytes)
+        h["q"] = JWTBase64.encode(signer.q_bytes)
+        h["dp"] = JWTBase64.encode(signer.dp_bytes)
+        h["dq"] = JWTBase64.encode(signer.dq_bytes)
+        h["qi"] = JWTBase64.encode(signer.qi_bytes)
+      end
+    when JWTEc
+      key = material.verifier
+      size = key.curve.size
+      h["kty"] = "EC"
+      h["crv"] = curve_name(key.curve)
+      h["x"] = JWTBase64.encode(JWTBytes.fixed(key.x, size))
+      h["y"] = JWTBase64.encode(JWTBytes.fixed(key.y, size))
+      d = material.d
+      h["d"] = JWTBase64.encode(d) if secret && d
+    else
+      h["kty"] = "OKP"
+      h["crv"] = "Ed25519"
+      h["x"] = JWTBase64.encode(material.verifier.bytes)
+      seed = material.seed
+      h["d"] = JWTBase64.encode(seed) if secret && seed
+    end
+    h
+  end
+
+  # A JWK's members read (RFC 7517 section 4, RFC 7518 section 6, RFC 8037
+  # section 2).
+  def self.jwk(fields : Hash(String, Any)) : JWK | JWTError
+    kty = JWTField.string(fields, "kty")!
+    return JWTError.new("a JWK with no kty") if kty.nil?
+    kid = JWTField.string(fields, "kid")!
+    alg = JWTField.string(fields, "alg")!
+    usage = JWTField.string(fields, "use")!
+    ops = JWTField.strings(fields, "key_ops")!
+    material = case kty
+               when "oct" then oct(fields)!
+               when "RSA" then rsa(fields)!
+               when "EC"  then ec(fields)!
+               when "OKP" then okp(fields)!
+               else            return JWTError.new("a JWK of kty #{kty.inspect}, which is not oct, RSA, EC or OKP")
+               end
+    JWK.new(kty, material, kid, alg, usage, ops)
+  end
+
+  private def self.oct(fields : Hash(String, Any)) : JWTOct | JWTError
+    k = JWTField.bytes(fields, "k")!
+    return JWTError.new("an oct JWK with no k") if k.nil?
+    JWTOct.new(k)
+  end
+
+  private def self.rsa(fields : Hash(String, Any)) : JWTRsa | JWTError
+    n = JWTField.uint(fields, "n")!
+    e = JWTField.uint(fields, "e")!
+    return JWTError.new("an RSA JWK with no n") if n.nil?
+    return JWTError.new("an RSA JWK with no e") if e.nil?
+    public = rsa_key(RsaPublicKey.new(n, e))!
+    strong(public)!
+    d = JWTField.uint(fields, "d")!
+    others = [] of Array(UInt8)?
+    ["p", "q", "dp", "dq", "qi"].each do |name|
+      value = JWTField.uint(fields, name)!
+      others << value
+    end
+    return JWTError.new("an RSA JWK with oth, the primes past two, which this does not take") if fields.has_key?("oth")
+    if d.nil?
+      return JWTError.new("an RSA JWK with CRT parameters and no d") if others.any? { |x| !x.nil? }
+      return JWTRsa.new(public, nil)
+    end
+    p = others[0]
+    q = others[1]
+    dp = others[2]
+    dq = others[3]
+    qi = others[4]
+    if p.nil? || q.nil? || dp.nil? || dq.nil? || qi.nil?
+      return JWTError.new("an RSA private JWK without all of p, q, dp, dq and qi, which this signs with")
+    end
+    signer = JWTRsaPrivate.build(public, d, p, q, dp, dq, qi)!
+    JWTRsa.new(public, signer)
+  end
+
+  private def self.ec(fields : Hash(String, Any)) : JWTEc | JWTError
+    crv = JWTField.string(fields, "crv")!
+    return JWTError.new("an EC JWK with no crv") if crv.nil?
+    curve = curve_named(crv)
+    return JWTError.new("an EC JWK on #{crv.inspect}, not P-256, P-384 or P-521") if curve.nil?
+    size = curve.size
+    x = JWTField.coordinate(fields, "x", size)!
+    y = JWTField.coordinate(fields, "y", size)!
+    return JWTError.new("an EC JWK with no x") if x.nil?
+    return JWTError.new("an EC JWK with no y") if y.nil?
+    public = ec_key(EcdsaPublicKey.from_point(curve, [4_u8] + x + y))!
+    d = JWTField.coordinate(fields, "d", size)!
+    return JWTEc.new(public, nil, nil) if d.nil?
+    return JWTError.new("a #{crv} private key, and std signs on P-256 alone") unless curve == EcdsaCurve::P256
+    signer = p256_key(P256PrivateKey.from_bytes(d))!
+    unless signer.public_key.x == public.x && signer.public_key.y == public.y
+      return JWTError.new("an EC JWK whose d is not the private key of its x and y")
+    end
+    JWTEc.new(public, d, signer)
+  end
+
+  private def self.okp(fields : Hash(String, Any)) : JWTOkp | JWTError
+    crv = JWTField.string(fields, "crv")!
+    return JWTError.new("an OKP JWK with no crv") if crv.nil?
+    return JWTError.new("an OKP JWK on #{crv.inspect}, not Ed25519") unless crv == "Ed25519"
+    x = JWTField.coordinate(fields, "x", 32)!
+    return JWTError.new("an OKP JWK with no x") if x.nil?
+    public = curve_key(Ed25519PublicKey.from_bytes(x))!
+    d = JWTField.coordinate(fields, "d", 32)!
+    return JWTOkp.new(public, nil) if d.nil?
+    return JWTError.new("an OKP JWK whose d is not the private key of its x") unless JWTBytes.of(Ed25519.public_key(d)) == x
+    JWTOkp.new(public, d)
+  end
+
+  PEM_LABELS = ["PUBLIC KEY", "PRIVATE KEY", "RSA PUBLIC KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "CERTIFICATE"]
+
+  def self.pem(text : String, kid : String?) : JWK | JWTError
+    if text.includes?("-----BEGIN ENCRYPTED PRIVATE KEY-----")
+      return JWTError.new("an encrypted private key, which this cannot open")
+    end
+    label = nil
+    der = [] of UInt8
+    PEM_LABELS.each do |name|
+      blocks = X509.pem(text, name)
+      return JWTError.new(JWTBytes.unprefixed(blocks.message, "x509: ")) if blocks.is_a?(X509Error)
+      next if blocks.empty?
+      return JWTError.new("a PEM text with more than one key in it") if blocks.size > 1 || !label.nil?
+      label = name
+      der = blocks[0]
+    end
+    return JWTError.new("a PEM text with no key in it (#{PEM_LABELS.join(", ")})") if label.nil?
+    material = case label
+               when "PUBLIC KEY"      then spki(der)!
+               when "PRIVATE KEY"     then pkcs8(der)!
+               when "RSA PUBLIC KEY"  then rsa_pkcs1(der)!
+               when "RSA PRIVATE KEY" then pkcs1_private(der)!
+               when "EC PRIVATE KEY"  then sec1(der)!
+               else                        certificate(der)!
+               end
+    JWK.new(kty_of(material), material, kid, nil, nil, nil)
+  end
+
+  # PKCS #1's RSAPublicKey (RFC 8017 appendix A.1.1).
+  private def self.rsa_pkcs1(der : Array(UInt8)) : JWTRsa | JWTError
+    key = rsa_key(RsaPublicKey.from_pkcs1(der))!
+    rsa_public(key)
+  end
+
+  private def self.kty_of(material : JWTOct | JWTRsa | JWTEc | JWTOkp) : String
+    case material
+    when JWTOct then "oct"
+    when JWTRsa then "RSA"
+    when JWTEc  then "EC"
+    else             "OKP"
+    end
+  end
+
+  private def self.rsa_public(key : RsaPublicKey) : JWTRsa | JWTError
+    strong(key)!
+    JWTRsa.new(key, nil)
+  end
+
+  private def self.certificate(der : Array(UInt8)) : JWTRsa | JWTEc | JWTOkp | JWTError
+    cert = Certificate.parse(der)
+    return JWTError.new(JWTBytes.unprefixed(cert.message, "x509: ")) if cert.is_a?(X509Error)
+    key = cert.public_key
+    case key
+    when RsaPublicKey   then rsa_public(key)
+    when EcdsaPublicKey then JWTEc.new(key, nil, nil)
+    else                     JWTOkp.new(key, nil)
+    end
+  end
+
+  # A SubjectPublicKeyInfo (RFC 5280 section 4.1.2.7): RSA, EC (RFC 5480)
+  # or Ed25519 (RFC 8410).
+  private def self.spki(der : Array(UInt8)) : JWTRsa | JWTEc | JWTOkp | JWTError
+    top = asn1_value(Der.parse(der))!
+    fields = asn1_values(top.sequence)!
+    return JWTError.new("a SubjectPublicKeyInfo of #{fields.size} values, not 2") unless fields.size == 2
+    algorithm = asn1_values(fields[0].sequence)!
+    return JWTError.new("an AlgorithmIdentifier with no algorithm") if algorithm.empty?
+    oid = asn1_text(algorithm[0].oid)!
+    case oid
+    when RSA_ENCRYPTION
+      key = rsa_key(RsaPublicKey.from_spki(top))!
+      rsa_public(key)
+    when EC_PUBLIC_KEY
+      key = ec_key(EcdsaPublicKey.from_spki(top))!
+      JWTEc.new(key, nil, nil)
+    when ED25519
+      return JWTError.new("an Ed25519 key whose algorithm carries parameters, which RFC 8410 says are absent") unless algorithm.size == 1
+      point = asn1_bytes(fields[1].bit_string)!
+      key = curve_key(Ed25519PublicKey.from_bytes(point))!
+      JWTOkp.new(key, nil)
+    else
+      JWTError.new("a public key for #{oid}, which no algorithm here signs with")
+    end
+  end
+
+  # A PKCS #8 OneAsymmetricKey (RFC 5958) holding an RSA, P-256 or Ed25519
+  # private key.
+  private def self.pkcs8(der : Array(UInt8)) : JWTRsa | JWTEc | JWTOkp | JWTError
+    top = asn1_value(Der.parse(der))!
+    fields = asn1_values(top.sequence)!
+    return JWTError.new("a OneAsymmetricKey of #{fields.size} values") if fields.size < 3
+    version = asn1_int(fields[0].integer)!
+    return JWTError.new("a OneAsymmetricKey of version #{version}, not 0 or 1") unless version == 0_i64 || version == 1_i64
+    algorithm = asn1_values(fields[1].sequence)!
+    return JWTError.new("an AlgorithmIdentifier with no algorithm") if algorithm.empty?
+    oid = asn1_text(algorithm[0].oid)!
+    inner = asn1_bytes(fields[2].octet_string)!
+    case oid
+    when RSA_ENCRYPTION
+      pkcs1_private(inner)
+    when EC_PUBLIC_KEY
+      curve = algorithm.size == 2 ? algorithm[1].oid : nil
+      named = curve.is_a?(String) ? EcdsaCurve.from_oid(curve) : nil
+      if named && named != EcdsaCurve::P256
+        return JWTError.new("a #{curve_name(named)} private key, and std signs on P-256 alone")
+      end
+      p256_key(P256PrivateKey.from_pkcs8(der))!
+      sec1(inner)
+    when ED25519
+      return JWTError.new("an Ed25519 key whose algorithm carries parameters, which RFC 8410 says are absent") unless algorithm.size == 1
+      wrapped = asn1_value(Der.parse(inner))!
+      seed = asn1_bytes(wrapped.octet_string)!
+      return JWTError.new("an Ed25519 private key of #{seed.size} bytes, not 32") unless seed.size == 32
+      public = curve_key(Ed25519PublicKey.from_bytes(Ed25519.public_key(seed)))!
+      i = 3
+      while i < fields.size
+        if fields[i].context?(1)
+          carried = asn1_bytes(fields[i].bit_string)!
+          return JWTError.new("an Ed25519 private key whose public key is not its own") unless carried == public.bytes
+        end
+        i = i + 1
+      end
+      JWTOkp.new(public, seed)
+    else
+      JWTError.new("a private key for #{oid}, which no algorithm here signs with")
+    end
+  end
+
+  # PKCS #1's RSAPrivateKey (RFC 8017 appendix A.1.2), two primes.
+  private def self.pkcs1_private(der : Array(UInt8)) : JWTRsa | JWTError
+    top = asn1_value(Der.parse(der))!
+    fields = asn1_values(top.sequence)!
+    return JWTError.new("an RSAPrivateKey of #{fields.size} values, not 9") unless fields.size == 9
+    version = asn1_int(fields[0].integer)!
+    return JWTError.new("an RSAPrivateKey of version #{version}: more than two primes, which this does not take") unless version == 0_i64
+    numbers = [] of Array(UInt8)
+    fields[1, 8].each do |field|
+      number = asn1_bytes(field.unsigned_integer)!
+      numbers << number
+    end
+    public = rsa_key(RsaPublicKey.new(numbers[0], numbers[1]))!
+    strong(public)!
+    signer = JWTRsaPrivate.build(public, numbers[2], numbers[3], numbers[4], numbers[5], numbers[6], numbers[7])!
+    JWTRsa.new(public, signer)
+  end
+
+  # SEC 1's ECPrivateKey (RFC 5915) on P-256, std/p256 checking it.
+  private def self.sec1(der : Array(UInt8)) : JWTEc | JWTError
+    signer = p256_key(P256PrivateKey.from_sec1(der))!
+    top = asn1_value(Der.parse(der))!
+    fields = asn1_values(top.sequence)!
+    d = asn1_bytes(fields[1].octet_string)!
+    JWTEc.new(signer.public_key, d, signer)
+  end
+
+  def self.asn1_value(answer : DerValue | Asn1Error) : DerValue | JWTError
+    answer.is_a?(Asn1Error) ? JWTError.new(answer.message) : answer
+  end
+
+  def self.asn1_values(answer : Array(DerValue) | Asn1Error) : Array(DerValue) | JWTError
+    answer.is_a?(Asn1Error) ? JWTError.new(answer.message) : answer
+  end
+
+  def self.asn1_bytes(answer : Array(UInt8) | Asn1Error) : Array(UInt8) | JWTError
+    answer.is_a?(Asn1Error) ? JWTError.new(answer.message) : answer
+  end
+
+  def self.asn1_text(answer : String | Asn1Error) : String | JWTError
+    answer.is_a?(Asn1Error) ? JWTError.new(answer.message) : answer
+  end
+
+  def self.asn1_int(answer : Int64 | Asn1Error) : Int64 | JWTError
+    answer.is_a?(Asn1Error) ? JWTError.new(answer.message) : answer
+  end
+
+  def self.rsa_key(answer : RsaPublicKey | RsaError) : RsaPublicKey | JWTError
+    answer.is_a?(RsaError) ? JWTError.new(answer.message) : answer
+  end
+
+  def self.ec_key(answer : EcdsaPublicKey | EcdsaError) : EcdsaPublicKey | JWTError
+    answer.is_a?(EcdsaError) ? JWTError.new(answer.message) : answer
+  end
+
+  def self.p256_key(answer : P256PrivateKey | EcdsaError) : P256PrivateKey | JWTError
+    answer.is_a?(EcdsaError) ? JWTError.new(answer.message) : answer
+  end
+
+  def self.curve_key(answer : Ed25519PublicKey | CurveError) : Ed25519PublicKey | JWTError
+    answer.is_a?(CurveError) ? JWTError.new(answer.message) : answer
+  end
+end
+
+# A JWK's members, each read as RFC 7518 writes it.
+struct JWTField
+  # A string member; nil when absent.
+  def self.string(fields : Hash(String, Any), name : String) : String | Nil | JWTError
+    value = fields[name]?
+    return nil if value.nil?
+    text = value.as_s?
+    return JWTError.new("the JWK member #{name} is a JSON #{value.kind}, not a string") if text.nil?
+    text
+  end
+
+  def self.strings(fields : Hash(String, Any), name : String) : Array(String) | Nil | JWTError
+    value = fields[name]?
+    return nil if value.nil?
+    list = value.as_a?
+    return JWTError.new("the JWK member #{name} is a JSON #{value.kind}, not an array") if list.nil?
+    texts = [] of String
+    list.each do |entry|
+      text = entry.as_s?
+      return JWTError.new("the JWK member #{name} holds a JSON #{entry.kind}, not a string") if text.nil?
+      texts << text
+    end
+    texts
+  end
+
+  # A base64url member's bytes.
+  def self.bytes(fields : Hash(String, Any), name : String) : Array(UInt8) | Nil | JWTError
+    text = string(fields, name)!
+    return nil if text.nil?
+    JWTBase64.decode(JWTBytes.of(text), "JWK member #{name}")
+  end
+
+  # A Base64urlUInt (RFC 7518 section 2): the fewest bytes the number takes.
+  def self.uint(fields : Hash(String, Any), name : String) : Array(UInt8) | Nil | JWTError
+    value = bytes(fields, name)!
+    return nil if value.nil?
+    return JWTError.new("the JWK member #{name} is empty, which no number is") if value.empty?
+    if value.size > 1 && value[0] == 0_u8
+      return JWTError.new("the JWK member #{name} has a leading zero byte, which RFC 7518 section 6.3 rules out")
+    end
+    value
+  end
+
+  # A coordinate or a private key at the curve's width (RFC 7518 section
+  # 6.2.1.2, RFC 8037 section 2).
+  def self.coordinate(fields : Hash(String, Any), name : String, size : Int32) : Array(UInt8) | Nil | JWTError
+    value = bytes(fields, name)!
+    return nil if value.nil?
+    return JWTError.new("the JWK member #{name} is #{value.size} bytes, not the curve's #{size}") unless value.size == size
+    value
+  end
+end
+
+# JSON text read as the object a header, claims or a key must be.
+struct JWTJson
+  def self.object(bytes : Array(UInt8), what : String) : Hash(String, Any) | JWTError
+    parser = Parser.new(JWTBytes.text(bytes))
+    value = parser.parse
+    failure = parser.error
+    return JWTError.new("the #{what} is not JSON: #{failure}") unless failure.nil?
+    fields = value.as_h?
+    return JWTError.new("the #{what} is a JSON #{value.kind}, not an object") if fields.nil?
+    fields
+  end
+end
+
+# base64url with no padding (RFC 7515 section 2, RFC 4648 section 5).
+struct JWTBase64
+  def self.encode(data : String | Array(UInt8)) : String
+    text = Base64.urlsafe_encode(data.is_a?(String) ? data : JWTBytes.text(data))
+    n = text.bytesize
+    n = n - 1 if n > 0 && text.to_unsafe[n - 1] == 61_u8
+    n = n - 1 if n > 0 && text.to_unsafe[n - 1] == 61_u8
+    p = text.to_unsafe
+    String.new(n) { |buf| buf.copy_from(p, n) }
+  end
+
+  # The bytes *text* is the one base64url spelling of, or why it is not.
+  def self.decode(text : Array(UInt8), what : String) : Array(UInt8) | JWTError
+    n = text.size
+    last = 0
+    i = 0
+    while i < n
+      b = text[i]
+      if b == 61_u8
+        return JWTError.new("the #{what} is padded with =, which base64url in a JWS leaves out (RFC 7515 section 2)")
+      end
+      last = value(b)
+      return JWTError.new("the #{what} holds byte #{b} at #{i}, which is not base64url") if last < 0
+      i = i + 1
+    end
+    if n % 4 == 1
+      return JWTError.new("the #{what} is #{n} base64url characters, one more than a multiple of four, which no bytes are")
+    end
+    spare = n % 4 == 2 ? 15 : (n % 4 == 3 ? 3 : 0)
+    if last & spare != 0
+      return JWTError.new("the #{what}'s last base64url character carries bits past its bytes, so it is not the one spelling of them")
+    end
+    JWTBytes.of(Base64.decode(JWTBytes.text(text)))
+  end
+
+  def self.decode(text : String, what : String) : Array(UInt8) | JWTError
+    decode(JWTBytes.of(text), what)
+  end
+
+  private def self.value(b : UInt8) : Int32
+    if b >= 65_u8 && b <= 90_u8
+      (b - 65_u8).to_i32
+    elsif b >= 97_u8 && b <= 122_u8
+      (b - 97_u8).to_i32 + 26
+    elsif b >= 48_u8 && b <= 57_u8
+      (b - 48_u8).to_i32 + 52
+    elsif b == 45_u8
+      62
+    elsif b == 95_u8
+      63
+    else
+      -1
+    end
+  end
+end
+
+struct JWTBytes
+  def self.of(data : String | Array(UInt8)) : Array(UInt8)
+    return data.dup if data.is_a?(Array(UInt8))
+    Array(UInt8).new(data.bytesize) { |i| data.to_unsafe[i] }
+  end
+
+  def self.text(bytes : Array(UInt8)) : String
+    String.new(bytes.size) { |buf| buf.copy_from(bytes.to_unsafe, bytes.size) }
+  end
+
+  # *value* big-endian in *size* bytes.
+  def self.fixed(value : BigInt, size : Int32) : Array(UInt8)
+    value.to_bytes(size) || raise "jwt: a number wider than its #{size} bytes"
+  end
+
+  # *value* big-endian in the fewest bytes, one for zero.
+  def self.minimal(value : BigInt) : Array(UInt8)
+    size = 1
+    while true
+      bytes = value.to_bytes(size)
+      return bytes if bytes
+      size = size + 1
+    end
+    [] of UInt8
+  end
+
+  # *message* without *prefix*, the module name another error starts with.
+  def self.unprefixed(message : String, prefix : String) : String
+    return message unless message.starts_with?(prefix)
+    n = message.bytesize - prefix.bytesize
+    p = message.to_unsafe + prefix.bytesize
+    String.new(n) { |buf| buf.copy_from(p, n) }
+  end
+end

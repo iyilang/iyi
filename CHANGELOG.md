@@ -4,6 +4,34 @@
 
 ### Added
 
+- **std/jwt: JSON Web Tokens (RFC 7519) signed and checked in iyi, over
+  JWS (RFC 7515) with JWA's algorithms (RFC 7518), and JSON Web Keys
+  (RFC 7517).** `JWT.encode(claims, key, JWTAlgorithm::ES256)` and
+  `JWT.decode(token, key, algorithms, now:, leeway:, audience:, issuer:,
+  subject:, required:) : JWT | JWTError` for HS256/384/512, RS256/384/512,
+  PS256/384/512, ES256 and EdDSA (Ed25519, RFC 8037), and ES384/ES512
+  checked only, std having no P-384 or P-521 signer; `JWS.sign` and
+  `JWS.verify` beneath them for any payload and a header written as
+  given. RSA signing is new here (std/rsa only checks): the CRT,
+  blinded, its signature checked against the public key before it is
+  given out; PS salts and the blinding factor are HMACs of the message
+  under the private key, so nothing asks for entropy. `decode` must be
+  told the algorithms it accepts - an empty list is a panic - and refuses
+  `alg: none` whatever the list, an alg not in it, and a key of another
+  kind than the alg (the RS256/HS256 confusion), a PEM or SSH key handed
+  over as an HMAC secret and a secret shorter than its hash being panics.
+  The text is held to one spelling: padding, a byte outside base64url, a
+  last character with spare bits set, a name written twice in header or
+  claims (std/json refuses it; PyJWT keeps the last) and a `crit` header
+  are refused. `exp`, `nbf` and `iat` are checked at the caller's `now`
+  with leeway, `aud`, `iss`, `sub` and `jti` as PyJWT checks them; the
+  module reads no clock. Keys from PEM (SubjectPublicKeyInfo, PKCS #8,
+  PKCS #1, SEC 1, a certificate's) or JWK, with `JWK.parse_set` choosing
+  by `kid`, `to_json`, `public` and RFC 7638's `thumbprint`; RSA keys
+  under 2048 bits, CRT parameters that disagree with n and e, RSA numbers
+  with a leading zero and EC coordinates short of the curve's width are
+  refused. A 2048-bit RSA signature took about 11 ms in a --release
+  build, std/big's `pow_mod` being square-and-multiply.
 - **std/xz: .xz and .lzma decompressed in iyi, read a piece at a time,
   `.tar.xz` read by std/tar, and CRC-64 in std/digest.** `XzReader.new {
   next_bytes }` reads the .xz container (file format 1.0.4) the way

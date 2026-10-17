@@ -57,8 +57,8 @@
 # kept, the first of equals; a palette image is not filtered, as section
 # 12.8 advises for one. `interlace: true` writes Adam7, and *texts* are
 # written as tEXt, or as iTXt where the text is not Latin-1. The zlib
-# stream is `Deflater`'s, one fixed-Huffman block, split into 64 KiB IDAT
-# chunks.
+# stream is `Deflater`'s at its default level, whose blocks are dynamic,
+# fixed or stored by what each costs, split into 64 KiB IDAT chunks.
 #
 # Left out: APNG's animation chunks (skipped as ancillary: the default
 # image is what is read), colour management (gAMA, cHRM, sRGB, iCCP and

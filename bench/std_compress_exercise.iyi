@@ -146,6 +146,154 @@ def every_byte(times : Int32) : String
   end
 end
 
+# Records the shape of an API's answers: keys repeated in every record,
+# numbers and tags that vary.
+def json_records(n : Int32, seed : UInt64) : String
+  rng = Random.new(seed)
+  tags = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+  b = String::Builder.new
+  b << "[\n"
+  i = 0
+  while i < n
+    score = (rng.next_u % 1000_u32).to_i32
+    b << "  {\"id\": #{i}, \"name\": \"user#{i}\", \"email\": \"user#{i}@example.com\", \"score\": #{score}, "
+    b << "\"tags\": [\"#{tags[score % 6]}\", \"#{tags[(score // 6) % 6]}\"], \"active\": #{score % 3 == 0}}"
+    b << (i + 1 < n ? ",\n" : "\n")
+    i = i + 1
+  end
+  b << "]\n"
+  b.to_s
+end
+
+# A stream's bits, least significant first, read the way RFC 1951 writes
+# them and nothing else: the exercise's own reader of block headers, so
+# what it says about a header does not come from the module it checks.
+class Bits
+  def initialize(@s : String)
+    @pos = 0
+  end
+
+  def take(n : Int32) : Int32
+    v = 0
+    i = 0
+    while i < n
+      byte = @s.to_unsafe[@pos >> 3].to_i32
+      v = v | (((byte >> (@pos & 7)) & 1) << i)
+      @pos = @pos + 1
+      i = i + 1
+    end
+    v
+  end
+
+  # One symbol of the canonical code with lengths *lens*, a bit at a time.
+  def decode(lens : Array(Int32)) : Int32
+    code = 0
+    first = 0
+    len = 1
+    while len <= 15
+      code = code | take(1)
+      count = 0
+      lens.each { |l| count = count + 1 if l == len }
+      if code - first < count
+        k = code - first
+        sym = 0
+        while sym < lens.size
+          if lens[sym] == len
+            return sym if k == 0
+            k = k - 1
+          end
+          sym = sym + 1
+        end
+      end
+      first = (first + count) << 1
+      code = code << 1
+      len = len + 1
+    end
+    raise "ASSERTION FAILED: a code not in its table"
+  end
+end
+
+# The literal/length and the distance code lengths a dynamic block at the
+# start of *stream* declares (RFC 1951 §3.2.7); nil if it is not one.
+def declared_lengths(stream : String) : {Array(Int32), Array(Int32)}?
+  b = Bits.new(stream)
+  b.take(1)
+  return nil unless b.take(2) == 2
+  hlit = b.take(5) + 257
+  hdist = b.take(5) + 1
+  hclen = b.take(4) + 4
+  order = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+  cl = Array.new(19, 0)
+  i = 0
+  while i < hclen
+    cl[order[i]] = b.take(3)
+    i = i + 1
+  end
+  lengths = [] of Int32
+  while lengths.size < hlit + hdist
+    sym = b.decode(cl)
+    if sym < 16
+      lengths << sym
+    else
+      value = sym == 16 ? lengths[lengths.size - 1] : 0
+      times = sym == 16 ? 3 + b.take(2) : (sym == 17 ? 3 + b.take(3) : 11 + b.take(7))
+      times.times { lengths << value }
+    end
+  end
+  {lengths[0, hlit], lengths[hlit, hdist]}
+end
+
+# Whether lengths make a complete prefix code: their 2^-length sum to one.
+def complete?(lens : Array(Int32)) : Bool
+  sum = 0
+  lens.each { |l| sum = sum + (1 << (15 - l)) if l > 0 }
+  sum == 1 << 15
+end
+
+# Two pieces for a `Deflater`: 24,000 bytes of noise, then copies of
+# pieces of it whose lengths are one per length code, 3 to 31, as many of
+# each as the Fibonacci numbers 1 to 1,597, the most of the shortest. The
+# second piece is a block of matches alone, so its literal/length counts
+# are those numbers and the end-of-block's 1: an optimal Huffman code for
+# them is 16 bits deep, one past what DEFLATE allows. Each copy starts
+# one byte or more past where the last one's source ended, and never on a
+# byte that equals the one after that source, so no match runs on into
+# the next copy and the counts come out exact.
+def fibonacci_pieces : {String, String}
+  rng = Random.new(77_u64)
+  noise = random_bytes(24000, 77_u64)
+  fibs = [1, 1]
+  while fibs.size < 17
+    fibs << fibs[fibs.size - 1] + fibs[fibs.size - 2]
+  end
+  lengths = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31]
+  lens = [] of Int32
+  k = 0
+  while k < 16
+    fibs[16 - k].times { lens << lengths[k] }
+    k = k + 1
+  end
+  i = lens.size - 1
+  while i > 0
+    j = (rng.next_u % (i + 1).to_u32).to_i32
+    t = lens[i]
+    lens[i] = lens[j]
+    lens[j] = t
+    i = i - 1
+  end
+  copies = String::Builder.new
+  at = 0
+  lens.each do |l|
+    copies << piece_of(noise, at, l)
+    stop = at + l
+    at = stop + 1
+    while noise.to_unsafe[at] == noise.to_unsafe[stop]
+      at = at + 1
+    end
+  end
+  {noise, copies.to_s}
+end
+
 def round_trip(label : String, data : String) : Nil
   raw = Deflate.compress(data)
   assert_true Deflate.decompress(raw) == data, "#{label}: raw round trip"
@@ -178,7 +326,7 @@ round_trip "a repeat from 20 KiB back", far + random_bytes(20000, 11_u64) + far
 
 puts "\n== what the match finder finds"
 run = Deflate.compress(run_of(97, 100000))
-assert_true run.bytesize < 700, "a 100,000-byte run is 388 matches of 258 at 13 bits each, under 700 bytes (#{run.bytesize})"
+assert_true run.bytesize < 400, "a 100,000-byte run is 388 matches of 258, under 400 bytes (#{run.bytesize})"
 rep = Deflate.compress(text)
 assert_true rep.bytesize * 4 < text.bytesize, "repetitive text compresses at least 4x (#{text.bytesize} -> #{rep.bytesize})"
 middle = random_bytes(20000, 11_u64)
@@ -187,10 +335,89 @@ near = Deflate.compress(far + middle + far).bytesize
 assert_true near < alone + 100, "a 3,000-byte repeat from 20 KiB back is twelve back-references, under 100 bytes (#{near - alone})"
 beyond = Deflate.compress(far + random_bytes(40000, 9_u64) + far).bytesize
 alone = Deflate.compress(far + random_bytes(40000, 9_u64)).bytesize
-assert_true beyond > alone + 3000, "the same repeat from 40 KiB back is outside the window and costs its bytes (#{beyond - alone})"
+assert_true beyond >= alone + 3000, "the same repeat from 40 KiB back is outside the window and costs its bytes, stored (#{beyond - alone})"
 noise = Deflate.compress(random)
-assert_true noise.bytesize < 70000 + 70000 // 8 + 16, "random bytes cost at most the fixed code's overhead (#{noise.bytesize})"
+assert_true noise.bytesize <= 70000 + 5 * 5, "random bytes are stored, five bytes of header for each of five blocks at most (#{noise.bytesize})"
 puts "  a run, repetition, a 20 KiB back-reference, a 40 KiB one, and noise each cost what they should"
+
+puts "\n== levels"
+# Every level, 0 to 9, in every envelope, read back; the envelope's
+# header says the level as zlib says it (FLEVEL in zlib's FLG, XFL in
+# gzip's header); level 0 is stored blocks and nothing else.
+json = json_records(800, 31_u64)
+level_corpora = [{"nothing", ""}, {"one byte", "x"}, {"a sentence", "the quick brown fox jumps over the lazy dog"},
+                 {"repetitive text", text}, {"a run of one byte", run_of(97, 100000)}, {"every byte value", every_byte(40)},
+                 {"random bytes", random}, {"json", json}, {"a repeat from 20 KiB back", far + random_bytes(20000, 11_u64) + far}]
+flg = [0x01, 0x01, 0x5e, 0x5e, 0x5e, 0x5e, 0x9c, 0xda, 0xda, 0xda]
+xfl = [4, 4, 0, 0, 0, 0, 0, 0, 0, 2]
+level_corpora.each do |pair|
+  data = pair[1]
+  sizes = [] of Int32
+  10.times do |level|
+    raw = Deflate.compress(data, level)
+    assert_true Deflate.decompress(raw) == data, "#{pair[0]} at level #{level}, raw"
+    z = Zlib.compress(data, level)
+    assert_true Zlib.decompress(z) == data && z.bytesize == raw.bytesize + 6, "#{pair[0]} at level #{level}, zlib"
+    assert_true z.to_unsafe[1] == flg[level].to_u8, "zlib's FLG at level #{level} is #{flg[level]}"
+    g = Gzip.compress(data, level)
+    assert_true Gzip.decompress(g) == data && g.bytesize == raw.bytesize + 18, "#{pair[0]} at level #{level}, gzip"
+    assert_true g.to_unsafe[8] == xfl[level].to_u8, "gzip's XFL at level #{level} is #{xfl[level]}"
+    sizes << raw.bytesize
+  end
+  blocks = data.bytesize == 0 ? 1 : (data.bytesize + 65534) // 65535
+  assert_true sizes[0] == data.bytesize + 5 * blocks, "#{pair[0]} at level 0 is #{blocks} stored blocks (#{sizes[0]} bytes)"
+  puts "  #{pair[0]}: #{data.bytesize} bytes, levels 0 to 9: #{sizes.join(" ")}"
+end
+# The sizes are the parse's fingerprint: a change to the match finder or
+# to the block choice moves them, and a deliberate one re-pins them here
+# after the zlib ratios in the .sh have been held.
+pins = [{"repetitive text", text}, {"json", json}]
+pinned = [[22295, 1543, 1547, 1579, 1539, 1548, 1547, 1547, 1178, 1181], [99332, 13506, 12632, 11564, 11591, 10736, 10518, 10232, 9934, 9930]]
+pins.each_with_index do |pair, k|
+  got = (0..9).map { |level| Deflate.compress(pair[1], level).bytesize }
+  assert_true got == pinned[k], "#{pair[0]} at levels 0 to 9 is #{got.join(", ")} bytes, pinned at #{pinned[k].join(", ")}"
+end
+puts "  repetitive text and json, the same size at every level as when pinned"
+
+puts "\n== block types"
+# Each block is written as whichever of stored, fixed and dynamic costs
+# the fewest bits: the first block's BTYPE says which was chosen.
+btype = ->(s : String) { (s.to_unsafe[0].to_i32 >> 1) & 3 }
+assert_true btype.call(Deflate.compress("abc")) == 1, "three letters are a fixed block: a dynamic one's header alone costs more"
+assert_true btype.call(Deflate.compress(text)) == 2, "text is a dynamic block"
+assert_true btype.call(Deflate.compress(random)) == 0, "noise is a stored block"
+assert_true btype.call(Deflate.compress("")) == 1 && btype.call(Deflate.compress("", 0)) == 0, "nothing is an empty fixed block, or at level 0 an empty stored one"
+lit = declared_lengths(Deflate.compress(text))
+if lit
+  assert_true complete?(lit[0]) && complete?(lit[1]), "a dynamic block's two codes are complete"
+else
+  raise "ASSERTION FAILED: text's first block declares no lengths"
+end
+puts "  three letters fixed, text dynamic with complete codes, noise stored, nothing an empty fixed block"
+
+puts "\n== a code held to 15 bits"
+# A block of matches whose length codes are counted out by the Fibonacci
+# numbers wants a code 16 bits deep; DEFLATE allows 15, so the code is
+# held to 15 and stays complete, and the stream reads back.
+fib_noise, fib_copies = fibonacci_pieces
+fd = Deflater.new(Envelope::Raw, 3)
+fib_first = fd.compress(fib_noise)
+fib_block = fd.compress(fib_copies)
+fib_stream = fib_first + fib_block + fd.finish
+assert_true streamed(Envelope::Raw, fib_stream, fib_stream.bytesize, 65536, "the Fibonacci block") == fib_noise + fib_copies, "the Fibonacci block reads back"
+declared = declared_lengths(fib_block)
+if declared
+  most = 0
+  declared[0].each { |l| most = l if l > most }
+  counted = 0
+  declared[0].each { |l| counted = counted + 1 if l > 0 }
+  assert_true counted == 17, "the block's literal/length code is the end of block and 16 length codes (#{counted} codes)"
+  assert_true most == 15, "its longest code is 15 bits (#{most})"
+  assert_true complete?(declared[0]), "and the code held to 15 bits is complete"
+else
+  raise "ASSERTION FAILED: the Fibonacci block is not a dynamic block"
+end
+puts "  #{fib_copies.bytesize} bytes of copies in a #{fib_block.bytesize}-byte block whose longest code is 15 bits, complete, read back"
 
 puts "\n== the format's own words"
 assert_true Deflate.decompress(bytes([0x03, 0x00])) == "", "an empty fixed block"
@@ -507,6 +734,82 @@ head_first = Deflater.new(Envelope::Gzip)
 assert_true head_first.compress("").bytesize == 10 && head_first.compress("") == "", "the header comes with the first call, empty or not, and once"
 puts "  #{pieces.size} pieces in three envelopes, each decodable as it was written, and the whole read back every way"
 
+# The window is kept from piece to piece: the same 3,000 bytes of noise
+# given twice are, the second time, a dozen back-references into the
+# piece before, where a Deflater that forgot it would store them again.
+kept = Deflater.new(Envelope::Raw)
+kept_first = kept.compress(far)
+kept_again = kept.compress(far)
+assert_true kept_first.bytesize > 3000 && kept_again.bytesize < 60, "the same 3,000 bytes again cost #{kept_again.bytesize} bytes, the first time #{kept_first.bytesize}"
+assert_true Deflate.decompress(kept_first + kept_again + kept.finish) == far + far, "and read back"
+puts "  3,000 bytes of noise given twice: #{kept_first.bytesize} bytes, then #{kept_again.bytesize}"
+
+# A source of the pieces written so far, for one Inflater that reads the
+# stream as it is written; asked for more than there is, it says so.
+class Pending
+  getter starved : Int32
+
+  def initialize
+    @pieces = [] of String
+    @starved = 0
+  end
+
+  def push(s : String) : Nil
+    @pieces << s if s.bytesize > 0
+  end
+
+  def next : String?
+    if @pieces.empty?
+      @starved = @starved + 1
+      return nil
+    end
+    @pieces.shift
+  end
+end
+
+# Pieces of random sizes, some empty, at levels 0, 1, 6 and 9 in every
+# envelope: one Inflater reads each piece's bytes from what has been
+# written as soon as it is written, and never waits on the next. The
+# streams and where each piece ended go to zlib too (the .sh).
+mixed = piece_of(text, 0, 9000) + json + random_bytes(30000, 41_u64) + run_of(120, 20000) + every_byte(20)
+in_pieces = [] of {String, String, String}
+[0, 1, 6, 9].each do |level|
+  [Envelope::Raw, Envelope::Zlib, Envelope::Gzip].each do |envelope|
+    rng = Random.new((level * 3 + envelope.value + 1).to_u64)
+    d = Deflater.new(envelope, level)
+    pending = Pending.new
+    z = Inflater.new(envelope) { pending.next }
+    written = String::Builder.new
+    index = String::Builder.new
+    at = 0
+    out_at = 0
+    count = 0
+    while at < mixed.bytesize
+      n = (rng.next_u % 12001_u32).to_i32
+      n = mixed.bytesize - at if n > mixed.bytesize - at
+      piece = piece_of(mixed, at, n)
+      bytes_out = d.compress(piece)
+      written << bytes_out
+      pending.push(bytes_out)
+      at = at + n
+      out_at = out_at + bytes_out.bytesize
+      count = count + 1
+      index << "#{at} #{out_at}\n"
+      label = "level #{level} #{envelope}, piece #{count}"
+      assert_true read_exactly(z, n, label) == piece, "#{label}: #{n} bytes read back as soon as they were written"
+      assert_true pending.starved == 0, "#{label}: the reader waited on the next piece"
+    end
+    last = d.finish
+    written << last
+    pending.push(last)
+    index << "#{at} #{out_at + last.bytesize}\n"
+    ended = z.read
+    assert_true ended == "" && z.finished?, "level #{level} #{envelope}: the stream ends, its trailer checked, after the last piece"
+    in_pieces << {"#{level}.#{envelope.to_s.downcase}", written.to_s, index.to_s}
+  end
+end
+puts "  #{mixed.bytesize} bytes in pieces of 0 to 12,000 at levels 0, 1, 6 and 9 in three envelopes, each read back as it was written"
+
 args = Program.args
 if args.size > 0
   dir = args[0]
@@ -555,6 +858,45 @@ if args.size > 0
     end
     puts "  #{name}: #{plain.bytesize} bytes, read back byte for byte"
   end
+
+  puts "\n== every level, for zlib to read"
+  # The .sh's corpora - prose, source code, JSON, noise, repetition,
+  # nothing, one byte, and 10 MB of the repository's text - at every
+  # level, raw, zlib and gzip (the 10 MB in zlib's and gzip's envelopes at
+  # level 6 only), for zlib to read and to size against its own; and
+  # each level's time over the 10 MB.
+  ["l_text", "l_source", "l_json", "l_random", "l_repeat", "l_empty", "l_one", "l_big"].each do |name|
+    plain = File.read("#{dir}/#{name}.bin")
+    sizes = [] of Int32
+    speeds = [] of String
+    10.times do |level|
+      t0 = IyiMark.now_ns
+      raw = Deflate.compress(plain, level)
+      t1 = IyiMark.now_ns
+      assert_true Deflate.decompress(raw) == plain, "#{name} at level #{level} reads back"
+      File.write("#{dir}/#{name}.#{level}.iyi.raw", raw)
+      if name != "l_big" || level == 6
+        File.write("#{dir}/#{name}.#{level}.iyi.zlib", Zlib.compress(plain, level))
+        File.write("#{dir}/#{name}.#{level}.iyi.gzip", Gzip.compress(plain, level))
+      end
+      sizes << raw.bytesize
+      ns = (t1 - t0).to_i64
+      ns = 1_i64 if ns < 1_i64
+      speeds << "#{level}: #{ns // 1000000} ms, #{plain.bytesize.to_i64 * 1000_i64 // ns} MB/s"
+    end
+    puts "  #{name}: #{plain.bytesize} bytes, levels 0 to 9: #{sizes.join(" ")}"
+    puts "  speed of iyi over #{name}'s #{plain.bytesize} bytes, level #{speeds.join("; ")}" if name == "l_big"
+  end
+
+  # What the Deflater wrote in random pieces, with where each ended, and
+  # the block held to 15 bits, for zlib to read (the .sh).
+  File.write("#{dir}/pieces.bin", mixed)
+  in_pieces.each do |t|
+    File.write("#{dir}/pieces.#{t[0]}", t[1])
+    File.write("#{dir}/pieces.#{t[0]}.idx", t[2])
+  end
+  File.write("#{dir}/fibonacci.bin", fib_noise + fib_copies)
+  File.write("#{dir}/fibonacci.raw", fib_stream)
 
   # What the Deflater wrote, for zlib to read (the .sh).
   File.write("#{dir}/deflater.bin", given)

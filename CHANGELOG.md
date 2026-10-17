@@ -4,6 +4,33 @@
 
 ### Added
 
+- **std/compress: a DEFLATE compressor with zlib's levels, its lazy
+  matching and dynamic Huffman blocks, writing within 0.3% of zlib's
+  size.** `Deflate.compress(data, level = 6)`, `Zlib.compress`,
+  `Gzip.compress` and `Deflater.new(envelope, level = 6)` take zlib's
+  levels and its configuration table: 0 stores, 1 to 3 take the longest
+  match greedily (deflate_fast), 4 to 9 hold a match while the next
+  position is searched (deflate_slow), over zlib's three-byte hash into
+  2^15 chains and its blocks of 16,383 symbols, a match reaching the
+  whole 32 KiB back. Each block is written stored, fixed or dynamic by
+  its exact bit cost; the dynamic codes are optimal, held to 15 bits (7
+  for the code-length code, which ordinary text reaches) and run-length
+  coded with 16/17/18 across the literal/distance boundary. zlib's FLEVEL
+  and gzip's XFL say the level as zlib writes them. `Deflater` keeps its
+  window from piece to piece, each `compress` still ending in a sync
+  flush. Before, every stream was one fixed-Huffman block over greedy
+  matching: on the gate's corpora - SPEC.md, two std modules, 600 KB of
+  JSON, 10 MB of the repository - it wrote 25%, 20%, 27% and 22% more
+  than zlib's level 6 (313,110 bytes for SPEC.md against 250,229), and
+  200,000 bytes of noise came to 210,859; level 6 now writes 0.05%,
+  0.11%, 0.01% and 0.05% less (250,113), noise is stored (200,065), and
+  every level of every corpus is within 0.26% of zlib's at the same
+  level, smaller at most. With --release over the 10 MB: level 1 in 62
+  ms (Python's zlib 1.3.1, 54), 6 in 242 (205), 9 in 709 (528). A
+  Deflater fed 2 MB 100 bytes at a time writes 788,483 bytes in 88 ms,
+  zlib with a sync flush per piece 788,766 in 82; before, 1,659,598 in
+  321. std/png's 2048x2048 RGBA picture is 3.5% past Pillow's file,
+  from 30%. A level outside 0 to 9 panics.
 - **std/http: requests through a proxy, and std/http_proxy to find one in
   the environment.** `proxy:` on `HTTP.request`, `HTTP.open` and
   `HTTPClient.new` takes an `http://` proxy's URL (`host:port` alone is

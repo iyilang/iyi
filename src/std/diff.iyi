@@ -1,0 +1,990 @@
+# Line and sequence diffs: the shortest edit script between two arrays
+# or two texts, the unified diff GNU diff writes for it, and a unified
+# diff read and applied as GNU patch applies one with no fuzz.
+#
+# `Diff.edits(a, b)` compares two arrays with `==` and answers runs of
+# `Keep`, `Delete` and `Insert` (`Edit`), a change's deletions before its
+# insertions, as GNU diff lists them. The search is Myers' (E. W. Myers,
+# "An O(ND) Difference Algorithm and Its Variations", Algorithmica 1(2),
+# 1986) in its linear-space form (section 4b): the middle snake found
+# from both corners at once, and each half searched the same way, so the
+# memory is the two lengths' sum whatever the distance, and the time
+# grows as the lengths times the distance. That product is quadratic
+# for two inputs with little in common, so the search has GNU diff's
+# bound: past 4096 rounds (or about the square root of the two lengths'
+# sum, if more) one search takes the diagonal that got furthest as its
+# split, and only the halves an exact split or the far side of a bounded
+# one leaves are searched to the minimum. Below the bound the script is
+# the shortest; above it, a script, as GNU diff without `--minimal`
+# gives one. `minimal: true` lifts the bound, as `--minimal` does.
+# Measured here (`--release`, a machine shared with other builds),
+# 100,000 integers against 100,000 others took 0.83 s bounded, where the
+# minimal search took 0.18, 0.70 and 2.85 s for 10,000, 20,000 and
+# 40,000 - half an hour, by that curve, for a million. 100,000
+# lines of three letters at random took 2.8 s to GNU diff's 1.4 s, both
+# answering 56,702 changed lines.
+#
+# `Diff.lines(a, b)` splits two texts into lines (`split_lines`: each
+# with its `\n`, so a last line without one, and a line ending in `\r\n`,
+# are lines of their own) and diffs them as numbers: each distinct line
+# interned once, and the lines with no equal on the other side set aside
+# before the search - a line in no common subsequence is a change
+# whatever the search finds, so the answer is as short as before, and two
+# texts with nothing in common are no search at all (100,000 lines
+# against 100,000 others: 30 ms). No patience or histogram heuristic:
+# the shortest script is the one GNU diff's `--minimal` agrees with, and
+# what this module is held to.
+#
+# `Diff.unified(a, b, from_name, to_name, context = 3)` writes GNU's
+# unified format exactly - `diff -U<context> --label FROM --label TO` -
+# for the script it found: GNU's hunk ranges (a count of 1 left out, an
+# empty range named by the line before it, `0,0` for an empty file),
+# changes fewer than 2 * context + 1 unchanged lines apart in one hunk,
+# and `\ No newline at end of file` after a line without its newline.
+# The names are written as given: a date is the caller's to add, after a
+# tab, as GNU writes the file's. Where two texts have one shortest
+# script the output is GNU's byte for byte; where they have many, GNU's
+# heuristics (its discarding of frequent lines, its sliding of a change
+# along equal lines) may choose another of the same length.
+#
+# `Patch.parse(text)` reads a unified diff of one file - GNU's, difflib's,
+# this module's, a mail around it read past - and `Patch.parse_all`
+# every file's. A header that is not `@@ -A[,B] +C[,D] @@`, a hunk with
+# fewer or more lines than its header counts, a `\` marker that follows
+# no line or a line after one marked as the file's last, and hunks out of
+# order are each a `PatchError`, a value, naming the line. An empty line
+# in a hunk is an empty context line whose space a mailer stripped, as
+# GNU patch takes it. `patch.apply(text)` answers the new text or the
+# first hunk that does not match: each hunk is looked for where its
+# header says, moved by the offset the hunk before was found at, then a
+# line down, a line up, two down and so on, never inside the hunk before
+# it, every line of context matched (GNU patch's `-F0`); and like GNU
+# patch, a hunk whose context the file's edge cut short - fewer lines
+# leading than trailing at the top, fewer trailing than leading anywhere
+# - matches only at that edge. Where GNU patch puts a newline after a
+# last line that had none to insert lines after it, this refuses: the
+# patch did not say the line changed.
+#
+# Pure computation: no import, no platform, no clock; texts in, texts
+# out.
+
+module std/diff
+
+# What a run of an edit script does: lines both sides share, lines only
+# the first has, lines only the second has.
+pub enum EditKind
+  Keep
+  Delete
+  Insert
+end
+
+# One run of an edit script: *count* elements of the kind, starting at
+# *a_start* in the first sequence and *b_start* in the second. A `Delete`
+# takes `a[a_start, count]` out at *b_start*; an `Insert` puts
+# `b[b_start, count]` in at *a_start*; a `Keep` pairs `a[a_start + i]`
+# with `b[b_start + i]`.
+pub struct Edit
+  getter kind : EditKind
+  getter a_start : Int32
+  getter b_start : Int32
+  getter count : Int32
+
+  def initialize(@kind : EditKind, @a_start : Int32, @b_start : Int32, @count : Int32)
+  end
+
+  def keep? : Bool
+    @kind == EditKind::Keep
+  end
+
+  def delete? : Bool
+    @kind == EditKind::Delete
+  end
+
+  def insert? : Bool
+    @kind == EditKind::Insert
+  end
+
+  # One past the last element of the first sequence the run covers.
+  def a_end : Int32
+    @kind == EditKind::Insert ? @a_start : @a_start + @count
+  end
+
+  # One past the last element of the second sequence the run covers.
+  def b_end : Int32
+    @kind == EditKind::Delete ? @b_start : @b_start + @count
+  end
+
+  def ==(other : Edit) : Bool
+    @kind == other.kind && @a_start == other.a_start && @b_start == other.b_start && @count == other.count
+  end
+
+  def to_s : String
+    case @kind
+    when EditKind::Keep   then "keep #{@count} a#{@a_start} b#{@b_start}"
+    when EditKind::Delete then "delete #{@count} a#{@a_start} b#{@b_start}"
+    else                       "insert #{@count} a#{@a_start} b#{@b_start}"
+    end
+  end
+end
+
+pub struct Diff
+  # The shortest edit script from *a* to *b*, elements compared with `==`:
+  # runs of `Keep`, `Delete` and `Insert` in order, a change's deletions
+  # before its insertions. With *minimal* false a search past the cost
+  # bound settles for a script that may not be the shortest; with it true
+  # the answer is always the shortest, in time that can grow as the
+  # product of the lengths.
+  def self.edits(a : Array(T), b : Array(T), minimal : Bool = false) : Array(Edit) forall T
+    search = DiffSearch(T).new(a, b, minimal)
+    search.run
+    script(search.a_gone, search.b_gone)
+  end
+
+  # The edit script between two texts, line by line, as `split_lines`
+  # cuts them: a line is its bytes with its `\n`, so `"x"` at the end of
+  # one text and `"x\n"` in the other are different lines, as GNU diff
+  # holds them.
+  def self.lines(a_text : String, b_text : String, minimal : Bool = false) : Array(Edit)
+    line_edits(split_lines(a_text), split_lines(b_text), minimal)
+  end
+
+  # The edit script between two arrays of lines, the lines interned and
+  # those with no equal on the other side set aside before the search.
+  def self.line_edits(a : Array(String), b : Array(String), minimal : Bool = false) : Array(Edit)
+    ids = {} of String => Int32
+    a_ids = Array(Int32).new(a.size, 0)
+    b_ids = Array(Int32).new(b.size, 0)
+    i = 0
+    while i < a.size
+      a_ids[i] = intern(ids, a[i])
+      i = i + 1
+    end
+    i = 0
+    while i < b.size
+      b_ids[i] = intern(ids, b[i])
+      i = i + 1
+    end
+    in_a = Array(Int32).new(ids.size, 0)
+    in_b = Array(Int32).new(ids.size, 0)
+    a_ids.each { |id| in_a[id] = in_a[id] + 1 }
+    b_ids.each { |id| in_b[id] = in_b[id] + 1 }
+
+    # A line with no equal on the other side is in no common subsequence,
+    # so it is a change whatever the search finds, and the longest common
+    # subsequence of what is left is the one of the whole: the search runs
+    # over the lines that can pair, and a pair of texts with nothing in
+    # common costs no search at all.
+    a_gone = Array(Bool).new(a.size, false)
+    b_gone = Array(Bool).new(b.size, false)
+    a_left = [] of Int32
+    a_at = [] of Int32
+    i = 0
+    while i < a_ids.size
+      if in_b[a_ids[i]] == 0
+        a_gone[i] = true
+      else
+        a_left << a_ids[i]
+        a_at << i
+      end
+      i = i + 1
+    end
+    b_left = [] of Int32
+    b_at = [] of Int32
+    i = 0
+    while i < b_ids.size
+      if in_a[b_ids[i]] == 0
+        b_gone[i] = true
+      else
+        b_left << b_ids[i]
+        b_at << i
+      end
+      i = i + 1
+    end
+
+    search = DiffSearch(Int32).new(a_left, b_left, minimal)
+    search.run
+    gone = search.a_gone
+    i = 0
+    while i < gone.size
+      a_gone[a_at[i]] = true if gone[i]
+      i = i + 1
+    end
+    gone = search.b_gone
+    i = 0
+    while i < gone.size
+      b_gone[b_at[i]] = true if gone[i]
+      i = i + 1
+    end
+    script(a_gone, b_gone)
+  end
+
+  private def self.intern(ids : Hash(String, Int32), line : String) : Int32
+    if id = ids[line]?
+      id
+    else
+      id = ids.size
+      ids[line] = id
+      id
+    end
+  end
+
+  # A text's lines, each with the `\n` that ends it; the last has none
+  # when the text does not end in one. A `\r` before the `\n` is the
+  # line's own byte. The empty text has no lines.
+  def self.split_lines(text : String) : Array(String)
+    lines = [] of String
+    p = text.to_unsafe
+    size = text.bytesize
+    at = 0
+    i = 0
+    while i < size
+      if p[i] == 10_u8
+        lines << text[at, i + 1 - at]
+        at = i + 1
+      end
+      i = i + 1
+    end
+    lines << text[at, size - at] if at < size
+    lines
+  end
+
+  # The script from which elements of each side are changes: the rest
+  # pair off in order, and between two pairs the deletions come first.
+  private def self.script(a_gone : Array(Bool), b_gone : Array(Bool)) : Array(Edit)
+    n = a_gone.size
+    m = b_gone.size
+    edits = [] of Edit
+    i = 0
+    j = 0
+    while i < n || j < m
+      if i < n && a_gone[i]
+        s = i
+        while i < n && a_gone[i]
+          i = i + 1
+        end
+        edits << Edit.new(EditKind::Delete, s, j, i - s)
+      elsif j < m && b_gone[j]
+        t = j
+        while j < m && b_gone[j]
+          j = j + 1
+        end
+        edits << Edit.new(EditKind::Insert, i, t, j - t)
+      else
+        s = i
+        t = j
+        while i < n && j < m && !a_gone[i] && !b_gone[j]
+          i = i + 1
+          j = j + 1
+        end
+        raise "Diff: the search left #{n - s} and #{m - t} elements unpaired" if i == s
+        edits << Edit.new(EditKind::Keep, s, t, i - s)
+      end
+    end
+    edits
+  end
+
+  # The unified diff from *a* to *b*, byte for byte as GNU `diff -u
+  # --label FROM --label TO` writes it for the same edit script: the
+  # `---` and `+++` lines name *from_name* and *to_name* as given (a
+  # date is the caller's to add, after a tab, as GNU writes one), each
+  # hunk holds *context* unchanged lines around its changes, two changes
+  # at most twice that apart share a hunk, and a line with no `\n` is
+  # followed by `\ No newline at end of file`. Equal texts answer "".
+  def self.unified(a : String, b : String, from_name : String, to_name : String, context : Int32 = 3, minimal : Bool = false) : String
+    raise "Diff.unified: context is #{context}; it is 0 or more" if context < 0
+    raise "Diff.unified: the name #{from_name.inspect} holds a line end, which would end the header line" if from_name.includes?("\n") || from_name.includes?("\r")
+    raise "Diff.unified: the name #{to_name.inspect} holds a line end, which would end the header line" if to_name.includes?("\n") || to_name.includes?("\r")
+    al = split_lines(a)
+    bl = split_lines(b)
+    format_unified(al, bl, line_edits(al, bl, minimal), from_name, to_name, context)
+  end
+
+  # The unified diff of an edit script over two arrays of lines, as
+  # `unified` writes it.
+  def self.format_unified(al : Array(String), bl : Array(String), edits : Array(Edit), from_name : String, to_name : String, context : Int32 = 3) : String
+    raise "Diff.format_unified: context is #{context}; it is 0 or more" if context < 0
+    changes = [] of Int32
+    k = 0
+    while k < edits.size
+      changes << k unless edits[k].keep?
+      k = k + 1
+    end
+    return "" if changes.empty?
+    String.build do |io|
+      io << "--- " << from_name << "\n"
+      io << "+++ " << to_name << "\n"
+      first = 0
+      while first < changes.size
+        last = first
+        # GNU's find_hunk: the next change joins the hunk when fewer than
+        # 2 * context + 1 unchanged lines lie between them, so their
+        # contexts would touch or overlap.
+        while last + 1 < changes.size && edits[changes[last + 1]].a_start - edits[changes[last]].a_end <= 2 * context
+          last = last + 1
+        end
+        fe = edits[changes[first]]
+        le = edits[changes[last]]
+        pre = context
+        pre = fe.a_start if fe.a_start < pre
+        pre = fe.b_start if fe.b_start < pre
+        post = context
+        post = al.size - le.a_end if al.size - le.a_end < post
+        post = bl.size - le.b_end if bl.size - le.b_end < post
+        a_lo = fe.a_start - pre
+        b_lo = fe.b_start - pre
+        io << "@@ -" << range(a_lo, le.a_end + post) << " +" << range(b_lo, le.b_end + post) << " @@\n"
+        i = a_lo
+        while i < fe.a_start
+          line(io, ' ', al[i])
+          i = i + 1
+        end
+        k = changes[first]
+        while k <= changes[last]
+          e = edits[k]
+          i = 0
+          while i < e.count
+            case e.kind
+            when EditKind::Keep   then line(io, ' ', al[e.a_start + i])
+            when EditKind::Delete then line(io, '-', al[e.a_start + i])
+            else                       line(io, '+', bl[e.b_start + i])
+            end
+            i = i + 1
+          end
+          k = k + 1
+        end
+        i = le.a_end
+        while i < le.a_end + post
+          line(io, ' ', al[i])
+          i = i + 1
+        end
+        first = last + 1
+      end
+    end
+  end
+
+  # A hunk's range as GNU's print_unidiff_number_range writes it: the
+  # first line and the count, the count left out when it is 1, and an
+  # empty range named by the line before it, so a patch at the top of a
+  # file reads `0,0`.
+  private def self.range(lo : Int32, hi : Int32) : String
+    count = hi - lo
+    return "#{lo + 1}" if count == 1
+    return "#{lo},0" if count == 0
+    "#{lo + 1},#{count}"
+  end
+
+  private def self.line(io : String::Builder, mark : Char, text : String) : Nil
+    io << mark << text
+    io << "\n\\ No newline at end of file\n" unless text.ends_with?("\n")
+  end
+end
+
+# What is wrong with a patch, or with the text it was applied to:
+# `message` is the sentence, which names the patch's line or the hunk.
+pub struct PatchError
+  getter message : String
+
+  def initialize(@message : String)
+  end
+
+  def to_s : String
+    @message
+  end
+end
+
+impl Error for PatchError
+  def message : String
+    @message
+  end
+end
+
+# One hunk of a unified diff: its header's numbers, the lines it expects
+# in the old text (context and deletions, in order) and the lines it
+# leaves there (context and insertions), each with its `\n` unless
+# `\ No newline at end of file` said otherwise, and how many unchanged
+# lines lead and trail its changes.
+pub class PatchHunk
+  getter header : String
+  getter old_start : Int32
+  getter old_count : Int32
+  getter new_start : Int32
+  getter new_count : Int32
+  getter old_lines : Array(String)
+  getter new_lines : Array(String)
+  getter leading : Int32
+  getter trailing : Int32
+
+  def initialize(@header : String, @old_start : Int32, @old_count : Int32, @new_start : Int32, @new_count : Int32, @old_lines : Array(String), @new_lines : Array(String), @leading : Int32, @trailing : Int32)
+  end
+
+  # Where in the old text the hunk's lines begin, counted from 0. A hunk
+  # with no old lines names the line it goes after, so `-5,0` is 5.
+  def old_index : Int32
+    @old_count == 0 ? @old_start : @old_start - 1
+  end
+end
+
+# A unified diff of one file, as `Patch.parse` reads it.
+pub class Patch
+  getter old_name : String
+  getter new_name : String
+  getter hunks : Array(PatchHunk)
+
+  def initialize(@old_name : String, @new_name : String, @hunks : Array(PatchHunk))
+  end
+
+  # The patch of one file: the text must hold exactly one `---`/`+++`
+  # pair with its hunks. What comes before it, or between two hunks'
+  # files, is read past, as `patch` reads past a mail's text.
+  def self.parse(text : String) : Patch | PatchError
+    got = parse_all(text)
+    return got if got.is_a?(PatchError)
+    if got.size != 1
+      return PatchError.new("patch: the text patches #{got.size} files; Patch.parse reads one, Patch.parse_all each")
+    end
+    got[0]
+  end
+
+  # The patches of every file in the text, in order.
+  def self.parse_all(text : String) : Array(Patch) | PatchError
+    lines = Diff.split_lines(text)
+    patches = [] of Patch
+    i = 0
+    while i < lines.size
+      unless lines[i].starts_with?("--- ") && i + 1 < lines.size && lines[i + 1].starts_with?("+++ ")
+        i = i + 1
+        next
+      end
+      at = i + 1
+      old_name = name_of(lines[i])
+      new_name = name_of(lines[i + 1])
+      i = i + 2
+      hunks = [] of PatchHunk
+      while i < lines.size && lines[i].starts_with?("@@ ")
+        got = hunk(lines, i, hunks.size + 1)
+        return got if got.is_a?(PatchError)
+        h = got[0]
+        if last = hunks.last?
+          ends = last.old_index + last.old_count
+          if h.old_index < ends
+            return PatchError.new("patch: line #{i + 1}: hunk ##{hunks.size + 1} starts at old line #{h.old_index + 1}, before hunk ##{hunks.size} ends at line #{ends}")
+          end
+        end
+        hunks << h
+        i = got[1]
+      end
+      return PatchError.new("patch: line #{at}: the patch of #{old_name.inspect} has no hunk") if hunks.empty?
+      patches << Patch.new(old_name, new_name, hunks)
+    end
+    return PatchError.new("patch: no unified diff in the text: no \"--- \" line followed by a \"+++ \" line") if patches.empty?
+    patches
+  end
+
+  # The name in a `---` or `+++` line: what follows the marker, up to a
+  # tab (after which GNU diff writes the date) or the line's end.
+  private def self.name_of(line : String) : String
+    s = chomp(line)
+    s = s[4, s.bytesize - 4]
+    tab = s.byte_index("\t")
+    tab ? s[0, tab] : s
+  end
+
+  private def self.chomp(line : String) : String
+    n = line.bytesize
+    n = n - 1 if n > 0 && line.to_unsafe[n - 1] == 10_u8
+    n = n - 1 if n > 0 && line.to_unsafe[n - 1] == 13_u8
+    line[0, n]
+  end
+
+  # The hunk whose header is `lines[i]`, and the index of the line after
+  # it.
+  private def self.hunk(lines : Array(String), i : Int32, number : Int32) : {PatchHunk, Int32} | PatchError
+    header = chomp(lines[i])
+    numbers = header_numbers(header)
+    return PatchError.new("patch: line #{i + 1}: #{header.inspect} is not a unified diff's hunk header") unless numbers
+    old_start = numbers[0]
+    old_count = numbers[1]
+    new_start = numbers[2]
+    new_count = numbers[3]
+    if (old_start == 0 && old_count > 0) || (new_start == 0 && new_count > 0)
+      return PatchError.new("patch: line #{i + 1}: #{header.inspect} counts a range from line 0, and lines count from 1")
+    end
+    old_lines = [] of String
+    new_lines = [] of String
+    leading = -1
+    trailing = 0
+    last = ' '
+    old_ended = false
+    new_ended = false
+    i = i + 1
+    while true
+      done = old_lines.size == old_count && new_lines.size == new_count
+      # The marker after a hunk's last line belongs to the hunk.
+      break if done && !(i < lines.size && lines[i].starts_with?("\\"))
+      if i >= lines.size
+        return PatchError.new("patch: line #{i}: hunk ##{number} ends after #{old_lines.size} of its #{old_count} old lines and #{new_lines.size} of its #{new_count} new lines")
+      end
+      line = lines[i]
+      first = line.to_unsafe[0]
+      # A line the patch's last that lost its newline still had one: only
+      # the marker says a line has none.
+      body = line.ends_with?("\n") ? line[1, line.bytesize - 1] : line[1, line.bytesize - 1] + "\n"
+      if first == 92_u8 # '\\'
+        if old_lines.empty? && new_lines.empty?
+          return PatchError.new("patch: line #{i + 1}: #{chomp(line).inspect} follows no line of hunk ##{number}")
+        end
+        if last != '+'
+          return PatchError.new("patch: line #{i + 1}: two markers for one line in hunk ##{number}") if old_ended
+          old_lines[old_lines.size - 1] = chomp_nl(old_lines.last)
+          old_ended = true
+        end
+        if last != '-'
+          return PatchError.new("patch: line #{i + 1}: two markers for one line in hunk ##{number}") if new_ended
+          new_lines[new_lines.size - 1] = chomp_nl(new_lines.last)
+          new_ended = true
+        end
+        i = i + 1
+        next
+      end
+      if done
+        break
+      end
+      # An empty line is an empty context line whose leading space a
+      # mailer or an editor stripped, as `patch` takes it.
+      if line == "\n"
+        first = 32_u8
+        body = "\n"
+      end
+      case first
+      when 32_u8 # ' '
+        side_old = true
+        side_new = true
+        last = ' '
+        trailing = trailing + 1
+      when 45_u8 # '-'
+        side_old = true
+        side_new = false
+        last = '-'
+      when 43_u8 # '+'
+        side_old = false
+        side_new = true
+        last = '+'
+      else
+        return PatchError.new("patch: line #{i + 1}: hunk ##{number} ends after #{old_lines.size} of its #{old_count} old lines and #{new_lines.size} of its #{new_count} new lines")
+      end
+      if first != 32_u8
+        leading = old_lines.size if leading < 0 && first == 45_u8
+        leading = new_lines.size if leading < 0 && first == 43_u8
+        trailing = 0
+      end
+      if (side_old && old_ended) || (side_new && new_ended)
+        return PatchError.new("patch: line #{i + 1}: hunk ##{number} has a line after the one marked as the end of the file")
+      end
+      if (side_old && old_lines.size == old_count) || (side_new && new_lines.size == new_count)
+        return PatchError.new("patch: line #{i + 1}: hunk ##{number} holds more lines than its header #{header.inspect} counts")
+      end
+      old_lines << body if side_old
+      new_lines << body if side_new
+      i = i + 1
+    end
+    leading = old_lines.size if leading < 0
+    {PatchHunk.new(header, old_start, old_count, new_start, new_count, old_lines, new_lines, leading, trailing), i}
+  end
+
+  private def self.chomp_nl(line : String) : String
+    line.ends_with?("\n") ? line[0, line.bytesize - 1] : line
+  end
+
+  # `@@ -A[,B] +C[,D] @@`, anything after it being a section name: the
+  # four numbers, a count left out being 1.
+  private def self.header_numbers(h : String) : {Int32, Int32, Int32, Int32}?
+    return nil unless h.starts_with?("@@ -")
+    p = h.to_unsafe
+    n = h.bytesize
+    got = number(h, 4)
+    old_start = got[0]
+    at = got[1]
+    return nil if old_start < 0
+    old_count = 1
+    if at < n && p[at] == 44_u8
+      got = number(h, at + 1)
+      old_count = got[0]
+      at = got[1]
+      return nil if old_count < 0
+    end
+    return nil unless at + 1 < n && p[at] == 32_u8 && p[at + 1] == 43_u8
+    got = number(h, at + 2)
+    new_start = got[0]
+    at = got[1]
+    return nil if new_start < 0
+    new_count = 1
+    if at < n && p[at] == 44_u8
+      got = number(h, at + 1)
+      new_count = got[0]
+      at = got[1]
+      return nil if new_count < 0
+    end
+    return nil unless at + 2 < n && p[at] == 32_u8 && p[at + 1] == 64_u8 && p[at + 2] == 64_u8
+    return nil if at + 3 < n && p[at + 3] != 32_u8
+    {old_start, old_count, new_start, new_count}
+  end
+
+  # The decimal number at *at* and the index after it; -1 where there is
+  # none, or one of more than nine digits, past any text's line count.
+  private def self.number(h : String, at : Int32) : {Int32, Int32}
+    p = h.to_unsafe
+    n = h.bytesize
+    value = 0
+    i = at
+    while i < n && p[i] >= 48_u8 && p[i] <= 57_u8
+      return {-1, i} if i - at == 9
+      value = value * 10 + (p[i] - 48_u8).to_i32
+      i = i + 1
+    end
+    return {-1, i} if i == at
+    {value, i}
+  end
+
+  # The text with every hunk applied, or the first hunk that does not
+  # match it. A hunk is looked for where its header puts it, moved by the
+  # offset the hunk before it was found at, then one line further down,
+  # one up, two down, and so on, never before the end of the hunk before
+  # it: GNU patch's search with no fuzz, every line of context matched.
+  # Like GNU patch, a hunk with fewer unchanged lines leading than
+  # trailing at the top of its file matches only the text's first lines,
+  # and one with fewer trailing than leading only its last lines: its
+  # context was cut short by the file's edge, and the edge is part of
+  # what it says.
+  def apply(text : String) : String | PatchError
+    lines = Diff.split_lines(text)
+    io = String::Builder.new(text.bytesize + 64)
+    at = 0
+    offset = 0
+    dangling = false
+    k = 0
+    while k < @hunks.size
+      h = @hunks[k]
+      guess = h.old_index + offset
+      where = Patch.locate(lines, h, guess, at)
+      if where < 0
+        return PatchError.new(Patch.refusal(lines, h, k + 1, guess, at))
+      end
+      while at < where
+        return dangle(k) if dangling
+        io << lines[at]
+        dangling = !lines[at].ends_with?("\n")
+        at = at + 1
+      end
+      h.new_lines.each do |l|
+        return dangle(k) if dangling
+        io << l
+        dangling = !l.ends_with?("\n")
+      end
+      at = where + h.old_lines.size
+      offset = where - h.old_index
+      k = k + 1
+    end
+    while at < lines.size
+      return dangle(k - 1) if dangling
+      io << lines[at]
+      dangling = !lines[at].ends_with?("\n")
+      at = at + 1
+    end
+    io.to_s
+  end
+
+  private def dangle(k : Int32) : PatchError
+    PatchError.new("patch: hunk ##{k + 1} (#{@hunks[k].header}) puts a line after one with no newline, which would join the two")
+  end
+
+  # Where the hunk's old lines begin, at or after *floor*, or -1.
+  protected def self.locate(lines : Array(String), h : PatchHunk, guess : Int32, floor : Int32) : Int32
+    pat = h.old_lines
+    if pat.empty?
+      return guess >= floor && guess <= lines.size ? guess : -1
+    end
+    max_where = lines.size - pat.size
+    return -1 if max_where < floor
+    if h.leading < h.trailing && h.old_index == 0
+      return floor == 0 && matches?(lines, pat, 0) ? 0 : -1
+    end
+    if h.trailing < h.leading
+      return matches?(lines, pat, max_where) ? max_where : -1
+    end
+    offset = 0
+    while guess + offset <= max_where || guess - offset >= floor
+      w = guess + offset
+      return w if w >= floor && w <= max_where && matches?(lines, pat, w)
+      if offset > 0
+        w = guess - offset
+        return w if w >= floor && w <= max_where && matches?(lines, pat, w)
+      end
+      offset = offset + 1
+    end
+    -1
+  end
+
+  private def self.matches?(lines : Array(String), pat : Array(String), at : Int32) : Bool
+    i = 0
+    while i < pat.size
+      return false unless lines[at + i] == pat[i]
+      i = i + 1
+    end
+    true
+  end
+
+  # Why the hunk found no place: the edge its context holds it to, or
+  # the search; and whether its new lines stand where it was looked for,
+  # as a patch applied already, or one given the wrong way round, leaves
+  # them.
+  protected def self.refusal(lines : Array(String), h : PatchHunk, number : Int32, guess : Int32, floor : Int32) : String
+    head = "patch: hunk ##{number} (#{h.header})"
+    if h.old_lines.empty?
+      return "#{head} inserts after line #{guess}, and the text has #{lines.size} lines"
+    end
+    where = if h.leading < h.trailing && h.old_index == 0
+              "the start of the text, where its context holds it"
+            elsif h.trailing < h.leading
+              "the end of the text, where its context holds it"
+            else
+              "the text at line #{guess + 1} or at any offset from it"
+            end
+    applied = !h.new_lines.empty? && guess >= 0 && guess + h.new_lines.size <= lines.size && matches?(lines, h.new_lines, guess)
+    applied ? "#{head} does not match #{where}; its new lines are there already, so it may be applied or reversed" : "#{head} does not match #{where}"
+  end
+end
+
+# Myers' search for a shortest edit script in linear space (E. W. Myers,
+# "An O(ND) Difference Algorithm and Its Variations", Algorithmica 1(2),
+# 1986, section 4b): from both corners at once, one more edit a round,
+# until the two frontiers overlap on a diagonal; the snake there splits
+# the problem in two, and each half is searched the same way. The
+# frontiers are two arrays indexed by diagonal, so the memory is the two
+# lengths' sum, whatever the distance.
+class DiffSearch(T)
+  getter a_gone : Array(Bool)
+  getter b_gone : Array(Bool)
+  @fd : Array(Int32)
+  @bd : Array(Int32)
+  @base : Int32
+  @too_expensive : Int32
+  @xmid : Int32
+  @ymid : Int32
+  @lo_minimal : Bool
+  @hi_minimal : Bool
+
+  def initialize(@a : Array(T), @b : Array(T), @minimal : Bool)
+    n = @a.size
+    m = @b.size
+    @a_gone = Array(Bool).new(n, false)
+    @b_gone = Array(Bool).new(m, false)
+    @fd = Array(Int32).new(n + m + 3, 0)
+    @bd = Array(Int32).new(n + m + 3, 0)
+    @base = m + 1
+    # GNU diff's bound on the rounds of one search: 2 to the half of the
+    # bit length of the diagonal count, and never under 4096.
+    diags = n + m + 3
+    bound = 1
+    while diags != 0
+      diags = diags >> 2
+      bound = bound << 1
+    end
+    @too_expensive = bound < 4096 ? 4096 : bound
+    @xmid = 0
+    @ymid = 0
+    @lo_minimal = false
+    @hi_minimal = false
+  end
+
+  def run : Nil
+    compare(0, @a.size, 0, @b.size, @minimal)
+  end
+
+  # Marks the changes between `a[xoff...xlim]` and `b[yoff...ylim]`: the
+  # common ends are walked off, an empty side makes the other all
+  # changes, and otherwise the split's lower half is searched by a call
+  # and its upper half by the next turn of the loop.
+  private def compare(xoff : Int32, xlim : Int32, yoff : Int32, ylim : Int32, minimal : Bool) : Nil
+    a = @a
+    b = @b
+    while true
+      while xoff < xlim && yoff < ylim && a[xoff] == b[yoff]
+        xoff = xoff + 1
+        yoff = yoff + 1
+      end
+      while xoff < xlim && yoff < ylim && a[xlim - 1] == b[ylim - 1]
+        xlim = xlim - 1
+        ylim = ylim - 1
+      end
+      if xoff == xlim
+        while yoff < ylim
+          @b_gone[yoff] = true
+          yoff = yoff + 1
+        end
+        return
+      end
+      if yoff == ylim
+        while xoff < xlim
+          @a_gone[xoff] = true
+          xoff = xoff + 1
+        end
+        return
+      end
+      split(xoff, xlim, yoff, ylim, minimal)
+      xmid = @xmid
+      ymid = @ymid
+      hi_minimal = @hi_minimal
+      compare(xoff, xmid, yoff, ymid, @lo_minimal)
+      xoff = xmid
+      yoff = ymid
+      minimal = hi_minimal
+    end
+  end
+
+  # Finds the middle snake of `a[xoff...xlim]` against `b[yoff...ylim]`
+  # (both non-empty, their ends differing) and leaves it in @xmid and
+  # @ymid, with whether each half is to be searched to the minimum.
+  private def split(xoff : Int32, xlim : Int32, yoff : Int32, ylim : Int32, minimal : Bool) : Nil
+    a = @a
+    b = @b
+    fd = @fd
+    bd = @bd
+    base = @base
+    dmin = xoff - ylim
+    dmax = xlim - yoff
+    fmid = xoff - yoff
+    bmid = xlim - ylim
+    fmin = fmid
+    fmax = fmid
+    bmin = bmid
+    bmax = bmid
+    odd = (fmid - bmid) & 1 != 0
+    fd[base + fmid] = xoff
+    bd[base + bmid] = xlim
+    c = 1
+    while true
+      # One more edit forward, on every diagonal of the right parity.
+      if fmin > dmin
+        fmin = fmin - 1
+        fd[base + fmin - 1] = -1
+      else
+        fmin = fmin + 1
+      end
+      if fmax < dmax
+        fmax = fmax + 1
+        fd[base + fmax + 1] = -1
+      else
+        fmax = fmax - 1
+      end
+      d = fmax
+      while d >= fmin
+        tlo = fd[base + d - 1]
+        thi = fd[base + d + 1]
+        x = tlo < thi ? thi : tlo + 1
+        y = x - d
+        while x < xlim && y < ylim && a[x] == b[y]
+          x = x + 1
+          y = y + 1
+        end
+        fd[base + d] = x
+        if odd && bmin <= d && d <= bmax && bd[base + d] <= x
+          @xmid = x
+          @ymid = y
+          @lo_minimal = true
+          @hi_minimal = true
+          return
+        end
+        d = d - 2
+      end
+
+      # And one more backward.
+      if bmin > dmin
+        bmin = bmin - 1
+        bd[base + bmin - 1] = 2147483647
+      else
+        bmin = bmin + 1
+      end
+      if bmax < dmax
+        bmax = bmax + 1
+        bd[base + bmax + 1] = 2147483647
+      else
+        bmax = bmax - 1
+      end
+      d = bmax
+      while d >= bmin
+        tlo = bd[base + d - 1]
+        thi = bd[base + d + 1]
+        x = tlo < thi ? tlo : thi - 1
+        y = x - d
+        while xoff < x && yoff < y && a[x - 1] == b[y - 1]
+          x = x - 1
+          y = y - 1
+        end
+        bd[base + d] = x
+        if !odd && fmin <= d && d <= fmax && x <= fd[base + d]
+          @xmid = x
+          @ymid = y
+          @lo_minimal = true
+          @hi_minimal = true
+          return
+        end
+        d = d - 2
+      end
+
+      # Past the bound, GNU diff's way out: the forward diagonal that got
+      # furthest (x + y largest) or the backward one that did, whichever
+      # covered more, is taken as the split. The half that frontier
+      # reached is searched to the minimum, being at most c edits; the
+      # other half searches on, bounded the same way.
+      if !minimal && c >= @too_expensive
+        fxybest = -1
+        fxbest = 0
+        d = fmax
+        while d >= fmin
+          x = fd[base + d]
+          x = xlim if x > xlim
+          y = x - d
+          if y > ylim
+            x = ylim + d
+            y = ylim
+          end
+          if fxybest < x + y
+            fxybest = x + y
+            fxbest = x
+          end
+          d = d - 2
+        end
+        bxybest = 2147483647
+        bxbest = 0
+        d = bmax
+        while d >= bmin
+          x = bd[base + d]
+          x = xoff if x < xoff
+          y = x - d
+          if y < yoff
+            x = yoff + d
+            y = yoff
+          end
+          if x + y < bxybest
+            bxybest = x + y
+            bxbest = x
+          end
+          d = d - 2
+        end
+        if (xlim + ylim) - bxybest < fxybest - (xoff + yoff)
+          @xmid = fxbest
+          @ymid = fxybest - fxbest
+          @lo_minimal = true
+          @hi_minimal = false
+        else
+          @xmid = bxbest
+          @ymid = bxybest - bxbest
+          @lo_minimal = false
+          @hi_minimal = true
+        end
+        return
+      end
+      c = c + 1
+    end
+  end
+end

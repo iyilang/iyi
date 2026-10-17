@@ -4,6 +4,34 @@
 
 ### Added
 
+- **std/diff: line and sequence diffs, unified diffs as GNU diff writes
+  them, and patches applied as GNU patch applies them with no fuzz.**
+  `Diff.edits(a, b)` answers the shortest edit script between two arrays
+  compared with `==` (`Edit` runs of keep, delete and insert) by Myers'
+  O(ND) search in its linear-space form, bounded as GNU diff bounds it:
+  past 4096 rounds a search settles for its furthest diagonal, so
+  200,000 integers against 200,000 others take about 1.5 s where the
+  unbounded search does not finish in 15 s (`minimal: true` lifts the bound,
+  as `--minimal` does). `Diff.lines` interns lines and sets aside those
+  with no equal on the other side, so two 100,000-line texts with nothing
+  in common take tens of milliseconds. `Diff.unified(a, b, from, to,
+  context = 3)` writes GNU's format exactly, `\ No newline at end of file`
+  included; `Patch.parse`/`Patch.parse_all` read GNU's, difflib's and its
+  own, a mail around them read past, and `patch.apply(text)` finds each
+  hunk at its line or the nearest offset, never inside the hunk before
+  it, and holds a hunk cut short by the file's edge to that edge, as GNU
+  `patch -F0` does. Refused as a `PatchError`: a header that is not a
+  hunk header, a hunk with more or fewer lines than it counts, a
+  misplaced `\` marker, hunks out of order, and a hunk that does not
+  match, said to be applied already when its new lines stand there; a
+  negative context or a name with a line end panics. Held by
+  bench/std_diff_exercise.sh: 1,500 random pairs against the longest
+  common subsequence, a corpus of 152 pairs as long as `diff --minimal`'s
+  and byte for byte GNU diff 3.12's wherever the shortest script is
+  unique, every diff applied by GNU patch 2.8, GNU's and Python 3.14
+  difflib's applied by `Patch`, 298 moved or spoilt texts taken or
+  refused as GNU patch -F0 took them, large inputs timed beside GNU diff,
+  and fifteen broken copies of the module each caught.
 - **std/png: PNG images decoded and encoded in iyi, over std/compress's
   zlib and std/digest's CRC-32.** `Png.decode(bytes)` answers a `PngFile`:
   an `Image` (width, height, a `Layout` of Gray, GrayAlpha, RGB or RGBA,

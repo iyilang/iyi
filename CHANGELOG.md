@@ -4,6 +4,17 @@
 
 ### Added
 
+- **`UdpSocket.bind?` answers a refused bind instead of raising it.** A
+  port held, or one Windows reserves (its excluded ranges answer "access
+  denied"), ended the program: iyi has no `rescue`, so nothing could go
+  on to another port. `bind?` answers the `SocketError`, whose message is
+  the sentence `bind` raises; std/dns's exercise now tries another port
+  when its UDP bind is refused, where a Windows runner failed it.
+
+  Held by `bench/std_udp_exercise.sh`: a held port's `bind?` answers the
+  refusal by name and a free port the socket, and two broken copies (one
+  raising, one ignoring the refusal) are caught.
+
 - **std/tls moves 2-3.5x the data it did, and arrays join and slice in one
   step.** A TLS record cost several times its cipher's work: the prelude's
   `Array#+`, `#concat`, `#dup`, slicing and growth stored an element at a

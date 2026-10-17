@@ -146,7 +146,7 @@ build_and_run "default, release" exercise-gc-release "$REPO/bench/arena_exercise
 echo
 echo "== every arena check reported"
 # The huge-page check reads /proc, so it reports on Linux only.
-for check in "size classes:" "addressability:" "clearing:" "reuse:" "traversal:" "large:" $( [ "$(uname -s)" = Linux ] && echo "huge:" ); do
+for check in "alignment: small and large" "size classes:" "addressability:" "clearing:" "reuse:" "traversal:" "large:" $( [ "$(uname -s)" = Linux ] && echo "huge:" ); do
   if ! grep -q "$check" "$WORK/exercise-gc.out" 2>/dev/null; then
     echo "  MISSING: $check"
     status=1
@@ -231,6 +231,26 @@ if [ "$(uname -s)" = Linux ]; then
         '{ if ($0 ~ /^          __iyi_madvise_nohuge\(base, HUGE_AT\)$/) { print "          __iyi_madvise_nohuge(base, MAP)"; next } print }'
       ;;
   esac
+fi
+
+# Large objects 16-aligned: the padding word taken back out, so a large
+# object begins 8 past a boundary again. Every platform.
+echo
+echo "== a large object 8 bytes off a 16-byte boundary fails by name"
+mkdir -p "$WORK/align8/iyi"
+cp -R "$REPO/src/iyi/." "$WORK/align8/iyi/"
+awk '{ if ($0 ~ /^      LARGE_USER = 32_u64$/) { print "      LARGE_USER = 24_u64"; next } if ($0 ~ /^      LARGE_HEAD = 24_u64$/) { print "      LARGE_HEAD = 16_u64"; next } print }' "$REPO/src/iyi/prelude.iyi" > "$WORK/align8/iyi/prelude.iyi"
+if cmp -s "$WORK/align8/iyi/prelude.iyi" "$REPO/src/iyi/prelude.iyi"; then
+  echo "  the awk found nothing to change"; status=1
+elif ! IYI_PATH="$WORK/align8${PSEP}$REPO/src" "$IYI" build -o "$WORK/align8/program" "$REPO/bench/arena_exercise.iyi" >"$WORK/align8/build.log" 2>&1; then
+  echo "  the patched prelude did not build"; sed -n '1,12p' "$WORK/align8/build.log"; status=1
+else
+  "$WORK/align8/program" >"$WORK/align8/out" 2>&1
+  if grep -q "panic: alignment: [0-9]* bytes\( grown\)\? at 8 past 16" "$WORK/align8/out"; then
+    echo "  caught at \"$(grep -m1 'panic: alignment' "$WORK/align8/out" | sed 's/^iyi: panic: //')\""
+  else
+    echo "  the exercise did not fail at the alignment check:"; sed -n '$p' "$WORK/align8/out"; status=1
+  fi
 fi
 
 echo

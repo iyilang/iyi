@@ -1747,8 +1747,13 @@ require "./file"
       # A free chunk's link and its batch's chain ride in the chunk, which
       # is nobody's while it is free. `LARGE_USER` is the distance from a
       # large object's node to its user pointer: the node's next and
-      # mapped words, then a header, always - a large object has no arena
-      # and no byte, and keeps the collector's bits in its word.
+      # mapped words, a word of padding, then a header, always - a large
+      # object has no arena and no byte, and keeps the collector's bits in
+      # its word. The padding puts the object on 16 bytes, as every small
+      # chunk is: at 24 a large buffer began 8 bytes past a 16-byte
+      # boundary, and `--release` read a `UInt128` in an array of 65,536
+      # structs with an aligned load (`movaps`) and faulted.
+      # `LARGE_HEAD` is the header's own distance from the node.
       HEADER = 8_u64
       OFF_MARK = 0_u64
       OFF_LINK = 0_u64
@@ -1798,7 +1803,8 @@ require "./file"
       # reads anyway, rather than by the frontier and the idle bitmap,
       # two words the carve writes beside (`shade_word`).
       CARVED_FLAG = 128_u64
-      LARGE_USER = 24_u64
+      LARGE_USER = 32_u64
+      LARGE_HEAD = 24_u64
       # The tables at the arena's head, after its header page: three
       # bytes per chunk the mapping could hold (`META`, `META_ENTRY`) -
       # the allocator's flags, then the sixteen-bit type id of a headless
@@ -3244,13 +3250,13 @@ require "./file"
         mapped = size + LARGE_USER
         base = __iyi_mmap(mapped).address
         write64(base + OFF_MAP, mapped)
-        write64(base + 16 + OFF_MARK, (clear ? 0_u64 : ATOMIC_FLAG) | IyiMark.epoch_flag)
+        write64(base + LARGE_HEAD + OFF_MARK, (clear ? 0_u64 : ATOMIC_FLAG) | IyiMark.epoch_flag)
         lock
         count_large(base, mapped, true)
         write64(base + OFF_NEXT, @@large)
         @@large = base
         unlock
-        base + 16
+        base + LARGE_HEAD
       end
 
       # One chunk back, to the calling thread's own cache and no lock:
@@ -3362,7 +3368,7 @@ require "./file"
       # Under the lock, whoever holds it: `free` takes it for a mutator's
       # large chunk, the sweep already has it.
       def self.free_large(head : UInt64) : Nil
-        base = head - 16
+        base = head - LARGE_HEAD
         previous = 0_u64
         node = @@large
         while node != 0
@@ -6634,7 +6640,7 @@ require "./file"
           if word & COLOUR == WHITE && word & IyiHeap::EPOCH_FLAG != @@epoch_flag
             @@bytes_freed = @@bytes_freed + IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER
             @@swept = @@swept + 1_u64
-            IyiHeap.free_large(node + 16_u64)
+            IyiHeap.free_large(node + IyiHeap::LARGE_HEAD)
           elsif word & COLOUR != WHITE
             @@bytes_kept = @@bytes_kept + IyiHeap.read64(node + IyiHeap::OFF_MAP) - IyiHeap::LARGE_USER
             IyiHeap.write64(base - 8_u64, (word - (word & COLOUR) - (word & IyiHeap::EPOCH_FLAG)) | @@epoch_flag)

@@ -49,6 +49,20 @@
   a zone in a prefix is refused (Python keeps it), and so are a length
   out of range, a zone on IPv4 and more than 65,536 subnets at once.
 
+### Fixed
+
+- **A large allocation begins on 16 bytes, so `--release` can read a
+  `UInt128` in it.** The collector's small chunks were 16-aligned and its
+  large objects - past the top size class, a mapping each - began 8
+  bytes past a boundary: the node's two words and the header word put
+  the object at 24. A struct holding a `UInt128` is 16-aligned to LLVM,
+  and an optimised build read one out of an `Array` of 65,536 such
+  structs with an aligned load (`movaps`) and died of SIGSEGV; the plain
+  build, which loads unaligned, ran. A word of padding puts every large
+  object at 32. Held by `bench/arena_exercise.sh`: allocations of 24
+  bytes to 8 MiB, and each grown, are 16-aligned, and the padding taken
+  out is caught at that check.
+
 ## 0.18.0 — 2026-10-17
 
 **iyi's own library reaches the network by itself: TLS 1.3 at both ends,

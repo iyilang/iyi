@@ -141,6 +141,24 @@ while index < blocks.size
 end
 puts "alignment: every pointer 8-aligned"
 
+{% if !flag?(:gc_none) && !flag?(:gc_boehm) && ((flag?(:linux) && (flag?(:x86_64) || flag?(:aarch64))) || flag?(:darwin) || (flag?(:win32) && flag?(:x86_64))) %}
+  # The collector's allocations are 16-aligned, large ones too: a struct
+  # with a `UInt128` in it is 16-aligned to LLVM, and `--release` reads
+  # one in an array with an aligned load. A large object began 8 bytes
+  # past a 16-byte boundary, and an `Array` of 65,536 such structs
+  # faulted on its first read.
+  wide = [24_u64, 100_u64, 4096_u64, 70000_u64, 1048577_u64, 2097152_u64, 8388608_u64]
+  wide.each do |bytes|
+    held = Pointer(UInt8).malloc(bytes)
+    raise "alignment: #{bytes} bytes at #{held.address & 15} past 16" unless held.address & 15 == 0
+    grown = held.realloc(bytes * 2_u64)
+    raise "alignment: #{bytes} bytes grown at #{grown.address & 15} past 16" unless grown.address & 15 == 0
+    # Given back, so the traversal below counts its own large object alone.
+    IyiHeap.free(grown.as(Void*))
+  end
+  puts "alignment: small and large allocations 16-aligned, and grown"
+{% end %}
+
 # --- realloc: same-class growth, cross-class growth, and null, both allocators ---
 grown = Pointer(UInt8).malloc(24_u64)
 fill(grown, 24, 3)

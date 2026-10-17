@@ -4,6 +4,45 @@
 
 ### Added
 
+- **`std/toml`: TOML 1.0.0 read and written in iyi, with `derive
+  toml_serializable`.** `TOML.parse(text)` answers an `Any` (a table) or a
+  `TOMLError` naming the line and column; `TOML.parse?` answers nil
+  instead, and `.or_panic` panics with the sentence. Every construct of
+  the spec is read: bare, quoted and dotted keys; basic, literal and both
+  multi-line strings with all nine escapes, the line-ending backslash and
+  CRLF read as LF; integers decimal, hex, octal and binary with
+  underscores, to the `Int64` limits; floats correctly rounded, `inf` and
+  `nan`; booleans; offset date-times, local date-times, local dates and
+  local times as a `TOMLDateTime` that keeps its kind and its offset (a
+  type of the module's own: three of the four kinds are not instants, and
+  std/time would reach the clock - `unix_seconds` gives an offset
+  date-time's instant); arrays of mixed kinds; inline tables; `[tables]`
+  and `[[arrays of tables]]`. Refused, each with where: text that is not
+  UTF-8 and a byte order mark; controls in comments and strings, a lone
+  CR, TOML 1.1's `\e`, `\x` and seconds-less times, escapes naming
+  surrogates; leading zeros, stray underscores, signed hex, integers past
+  `Int64` (which Python's tomllib reads); `.7`, `7.`, `3.e+20`; impossible
+  dates and leap seconds; trailing commas and line breaks in inline
+  tables; a key or table given twice, a header naming a table dotted keys
+  made, dotted keys adding to a declared table, anything added to an
+  inline table or a static array, `[x]`/`[[x]]` crossed; nesting past 64
+  levels, which keeps reading, `==`, `hash` and `dump` within a task's
+  stack (a plain build ran out at 120 nested inline tables). `TOML.dump`
+  writes a table back - plain keys, then `[sub-tables]` and
+  `[[arrays of tables]]`, strings escaped onto one line, floats in their
+  shortest round-tripping text - and `derive toml_serializable` gives
+  `to_toml`, `from_toml` and `initialize(toml)` beside std/json's and
+  std/yaml's derives on one type, a nil field left out since TOML has no
+  null. Held by `bench/std_toml_exercise.sh` against Python 3.14's
+  `tomllib`: the spec's 48 examples, 99 corpus documents, 256 random
+  documents in random syntax and 404 dumps read to the same typed values;
+  209 refused documents refused by both; 20,000 fuzzed documents of
+  headers, arrays of tables, dotted keys and inline values accepted and
+  refused alike (11,394 read); derived records read to what their JSON
+  says; plain and `--release` printing the same, five targets
+  typechecked, the artifact build printing what the source build prints;
+  thirty broken copies of the module, and one of the comparison, each
+  caught at the check that names it.
 - **std/bzip2: bzip2 read and written in iyi, read a piece at a time,
   and `.tar.bz2` read by std/tar.** `Bzip2Reader.new { next_bytes }`
   reads a stream the way std/compress's `Inflater` does - `read(max) :

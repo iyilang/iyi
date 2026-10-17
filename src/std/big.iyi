@@ -15,11 +15,15 @@
 # limbs) makes equality a limb-by-limb comparison.
 #
 # Algorithms: schoolbook add/sub; schoolbook multiply below 64 limbs and
-# Karatsuba above; single-limb short division or Knuth's Algorithm D (TAOCP
-# 4.3.1); binary square-and-multiply for `**` and `pow_mod`; two's complement
-# over infinite sign extension for `& | ^ ~ << >>`. `//` truncates toward zero
-# and `%` takes the dividend's sign, the prelude's Int32 rule. `hash` mixes
-# every limb with wrapping arithmetic, so any size hashes.
+# Karatsuba above; single-limb short division, one pass for a quotient of
+# one limb, or Knuth's Algorithm D (TAOCP 4.3.1); binary square-and-multiply
+# for `**`; Montgomery multiplication on 64-bit words with a sliding window
+# for `pow_mod` modulo an odd number, a fixed window that reads its whole
+# table for `pow_mod_secret`, square-and-multiply modulo an even one; two's
+# complement over infinite sign extension for `& | ^ ~ << >>`. `//`
+# truncates toward zero and `%` takes the dividend's sign, the prelude's
+# Int32 rule. `hash` mixes every limb with wrapping arithmetic, so any size
+# hashes.
 #
 # BigDecimal is `value * 10^-scale` with an exact BigInt value. `+ - *` are
 # exact. `/` is the one operation that can be inexact: `div(other, precision)`
@@ -38,6 +42,7 @@
 
 module std/big
 
+import std/int
 import std/traits::{Comparable, Num, Hashable}
 
 pub struct BigInt
@@ -777,6 +782,16 @@ pub struct BigInt
       return {q, r}
     end
 
+    # A quotient under 2^32, which is what each step of Euclid's algorithm
+    # divides by: `divmod_one_limb`, one pass and one array where Algorithm
+    # D below copies both operands to normalise them and the remainder
+    # twice more to give it back. A 2048-bit value over a 2046-bit one took
+    # 0.60 us and takes 0.15 in a --release build, and the extended Euclid
+    # std/jwt inverts its 2048-bit RSA blinding factor with 592 us and 281,
+    # where the two CRT halves of the signature take 620.
+    shift = BigInt.bit_length(other) - 32
+    return divmod_one_limb(other, shift, q_sign, r_sign) if BigInt.bit_length(self) - shift <= 63
+
     # Knuth Algorithm D for n >= 2 limbs
     n = other.limbs.size
     m = @limbs.size - n
@@ -885,6 +900,85 @@ pub struct BigInt
     q = BigInt.new(q_sign, q_limbs)
     r = BigInt.new(r_sign, unnorm_rem)
     {q, r}
+  end
+
+  # |self| divided by |other|, two limbs or more, for a quotient under
+  # 2^32: *shift* is the divisor's bit length less 32, and |self| over
+  # 2^shift, A, fits 63 bits. With B the divisor's top 32 bits, the
+  # quotient is estimated as A / (B + 1), which is never more than the
+  # quotient and short of it by less than A / B^2 + 1, at most three; a - q
+  # b is taken in one pass and the divisor taken off what is left while it
+  # is not below it.
+  protected def divmod_one_limb(other : BigInt, shift : Int32, q_sign : Int32, r_sign : Int32) : Tuple(BigInt, BigInt)
+    q = BigInt.window(@limbs, shift) // (BigInt.window(other.limbs, shift) + 1_u64)
+    n = @limbs.size
+    m = other.limbs.size
+    res = Array(UInt64).unsafe_build(n)
+    r = res.to_unsafe
+    u = @limbs.to_unsafe
+    v = other.limbs.to_unsafe
+    carry = 0_u64
+    borrow = 0_u64
+    i = 0
+    while i < n
+      # At most (2^32 - 1)^2 + 2^32 - 1: q is under 2^32.
+      p = (i < m ? q &* v[i] : 0_u64) &+ carry
+      carry = p.unsafe_shr(32_u64)
+      sub = (p & 0xFFFFFFFF_u64) &+ borrow
+      if u[i] >= sub
+        r[i] = u[i] &- sub
+        borrow = 0_u64
+      else
+        r[i] = u[i] &+ 0x100000000_u64 &- sub
+        borrow = 1_u64
+      end
+      i = i + 1
+    end
+    res.unsafe_set_size(n)
+    while BigInt.limbs_at_least(r, n, v, m)
+      borrow = 0_u64
+      i = 0
+      while i < n
+        sub = (i < m ? v[i] : 0_u64) &+ borrow
+        if r[i] >= sub
+          r[i] = r[i] &- sub
+          borrow = 0_u64
+        else
+          r[i] = r[i] &+ 0x100000000_u64 &- sub
+          borrow = 1_u64
+        end
+        i = i + 1
+      end
+      q = q + 1_u64
+    end
+    q_limbs = Array(UInt64).new(2, 0_u64)
+    q_limbs[0] = q & 0xFFFFFFFF_u64
+    q_limbs[1] = q.unsafe_shr(32_u64)
+    {BigInt.new(q_sign, q_limbs), BigInt.new(r_sign, res)}
+  end
+
+  # |value| over 2^shift, for one under 2^64: the limbs from bit *shift*.
+  protected def self.window(limbs : Array(UInt64), shift : Int32) : UInt64
+    i = shift >> 5
+    s = (shift & 31).to_u64
+    w = limbs[i].unsafe_shr(s)
+    w = w | limbs[i + 1].unsafe_shl(32_u64 - s) if i + 1 < limbs.size
+    w = w | limbs[i + 2].unsafe_shl(64_u64 - s) if s > 0_u64 && i + 2 < limbs.size
+    w
+  end
+
+  # Whether the *n* limbs at *r* are at least the *m* at *v*.
+  protected def self.limbs_at_least(r : Pointer(UInt64), n : Int32, v : Pointer(UInt64), m : Int32) : Bool
+    i = n - 1
+    while i >= m
+      return true if r[i] != 0_u64
+      i = i - 1
+    end
+    while i >= 0
+      return r[i] > v[i] if r[i] != v[i]
+      i = i - 1
+    end
+    true
   end
 
   def //(other : BigInt) : BigInt
@@ -1039,8 +1133,17 @@ pub struct BigInt
     self
   end
 
-  # Modular exponentiation: (self ** exp) % mod
-  # Essential for RSA/DH and cryptography.
+  # Modular exponentiation: (self ** exp) % mod, in 0...mod whatever the
+  # base's sign. An odd modulus, which is every modulus RSA, Diffie-Hellman
+  # and DSA work in, goes to `Montgomery` with a sliding window; an even one
+  # keeps square-and-multiply with a division per step.
+  #
+  # Each step here was a product and a long division of twice the
+  # modulus' length, and a 2048-bit modulus with a 2048-bit exponent took
+  # 19.0 ms in a --release build where Python 3.14's `pow` took 13.3 (3072
+  # bits: 63.2 and 42.3, 4096: 168.7 and 100.3). Montgomery's takes 2.5 ms,
+  # 8.5 and 20.6 in the run of bench/std_big_exercise.sh that measured
+  # Python at 13.7, 45.4 and 102.1, which prints these each run.
   def pow_mod(exp : BigInt, mod : BigInt) : BigInt
     raise "modulo by zero" if mod.zero?
     raise "modulus must be positive" if mod.negative?
@@ -1050,17 +1153,45 @@ pub struct BigInt
     # Ensure base is non-negative modulo mod
     base = self % mod
     base = base + mod if base.negative?
+    return Montgomery.new(mod, false).pow(base, exp) if mod.odd?
 
-    result = BigInt.one % mod
-    e = exp
-    while !e.zero?
-      if e.odd?
+    # The exponent's bits read where they lie: shifting it right a bit at
+    # a time made a copy of it per bit.
+    result = BigInt.one
+    bits = BigInt.bit_length(exp)
+    i = 0
+    while i < bits
+      if (exp.limbs[i >> 5].unsafe_shr((i & 31).to_u64) & 1_u64) == 1_u64
         result = (result * base) % mod
       end
-      e = e >> 1
-      base = (base * base) % mod if !e.zero?
+      i = i + 1
+      base = (base * base) % mod if i < bits
     end
     result
+  end
+
+  # `pow_mod` for an exponent that is a secret, a private key's: a fixed
+  # window, every entry of its table read for each window and the one
+  # wanted kept by a mask, so neither a branch nor a memory address depends
+  # on the exponent's bits, and as many windows as the longer of the
+  # exponent and the modulus takes, so the exponent's length does not show
+  # either. The modulus has to be odd (a Montgomery modulus): an even one
+  # is a misuse, refused.
+  #
+  # What it does not hide: the base is reduced by `%`, whose time depends
+  # on the base and the modulus, so a caller with a secret base (RSA's
+  # CRT halves of a message) blinds it first, as std/jwt's signing does.
+  def pow_mod_secret(exp : BigInt, mod : BigInt) : BigInt
+    raise "modulo by zero" if mod.zero?
+    raise "modulus must be positive" if mod.negative?
+    raise "negative exponent in pow_mod_secret: #{exp}" if exp.negative?
+    raise "pow_mod_secret needs an odd modulus, not #{mod}" if mod.even?
+    return BigInt.zero if mod == 1_i64
+    base = self % mod
+    base = base + mod if base.negative?
+    exp_bits = BigInt.bit_length(exp)
+    mod_bits = BigInt.bit_length(mod)
+    Montgomery.new(mod, true).pow_fixed(base, exp, exp_bits > mod_bits ? exp_bits : mod_bits)
   end
 
   def pow_mod(exp : Int64, mod : Int64) : BigInt
@@ -1666,6 +1797,451 @@ end
 impl Hashable for BigInt
   def hash_key : Int32
     hash
+  end
+end
+
+# Arithmetic modulo an odd *m* in Montgomery form, for `pow_mod` and
+# `pow_mod_secret`: a value x is held as x R mod m, R = 2^(64 n) for the n
+# 64-bit words m takes, and a product's division by m becomes a division by
+# R, which is a shift, after adding the multiple of m that clears the low
+# words (q = t n' mod 2^64 a word, n' = -1/m mod 2^64). Words here are 64
+# bits, not BigInt's 32-bit limbs: products are taken in `UInt128`, and a
+# quarter as many of them make a product as 32-bit limbs would.
+#
+# Every value held is reduced, below m, and every operation answers one
+# that is: what a product leaves is under 2m, and m is taken off by a mask,
+# not a branch, so nothing here branches or indexes on a value. For
+# `pow_mod_secret` the conversion constants are made the same way, by
+# doubling and squaring; `pow_mod`, whose numbers are public, takes its
+# base into Montgomery form by one division instead, (base << 64n) mod m,
+# 4 us for a 2048-bit modulus. Making R^2 by squaring was over a third of
+# checking an RSA signature: e = 65537 modulo 2048 bits took 36 us with it
+# and takes 22 without, in a --release build.
+#
+# A mask is not enough on its own: LLVM saw that `0 - keep` is 0 or all
+# ones, made the selection a branch and took it out of the loop, so the
+# release build of the first version here copied t only when it kept t,
+# and the table scan read only the entry it wanted. Every mask is xored
+# with `@zero`, a zero read through an atomic load, which the optimiser
+# cannot see the value of; the assembly of a --release build shows the and
+# and the or in both loops, every time.
+struct Montgomery
+  @m : Array(UInt64)
+  @n : Int32
+  @inv : UInt64
+  # n + 2 words, the product while it is reduced
+  @t : Array(UInt64)
+  # 2n words, a square before it is reduced
+  @p : Array(UInt64)
+  # R mod m, which is 1 in Montgomery form, and R^2 mod m, which takes a
+  # value into it (made only for a secret exponent)
+  @one : Array(UInt64)
+  @r2 : Array(UInt64)
+  # 0, read where it is needed by an atomic load (see above)
+  @zero : Atomic(UInt64)
+  @mod : BigInt
+  @secret : Bool
+
+  def initialize(@mod : BigInt, @secret : Bool)
+    mod = @mod
+    @m = Montgomery.words(mod.limbs, (mod.limbs.size + 1) >> 1)
+    @n = @m.size
+    @inv = Montgomery.negated_inverse(@m[0])
+    @t = Array(UInt64).new(@n + 2, 0_u64)
+    @p = Array(UInt64).new(2 * @n, 0_u64)
+    @one = Array(UInt64).new(@n, 0_u64)
+    @r2 = Array(UInt64).new(@n, 0_u64)
+    @zero = Atomic(UInt64).new(0_u64)
+    constants(Montgomery.bit_length(mod.limbs))
+  end
+
+  # BigInt's 32-bit limbs two to a word, *n* words.
+  def self.words(limbs : Array(UInt64), n : Int32) : Array(UInt64)
+    res = Array(UInt64).new(n, 0_u64)
+    i = 0
+    while i < limbs.size
+      res[i >> 1] = res[i >> 1] | limbs[i].unsafe_shl(((i & 1) * 32).to_u64)
+      i = i + 1
+    end
+    res
+  end
+
+  # The bits a BigInt's limbs take to write.
+  def self.bit_length(limbs : Array(UInt64)) : Int32
+    return 0 if limbs.empty?
+    top = limbs.last
+    bits = (limbs.size - 1) * 32
+    while top > 0_u64
+      top = top.unsafe_shr(1_u64)
+      bits = bits + 1
+    end
+    bits
+  end
+
+  # Bit *i* of a BigInt's limbs, 0 past the top.
+  def self.bit(limbs : Array(UInt64), i : Int32) : Int32
+    return 0 if (i >> 5) >= limbs.size
+    (limbs[i >> 5].unsafe_shr((i & 31).to_u64) & 1_u64).to_i32
+  end
+
+  # -1/m0 mod 2^64 by Newton's iteration: an odd m0 is its own inverse to
+  # three bits, and each step doubles the bits that are right, so five
+  # steps make 96.
+  def self.negated_inverse(m0 : UInt64) : UInt64
+    x = m0
+    5.times { x = x &* (2_u64 &- m0 &* x) }
+    0_u64 &- x
+  end
+
+  # The window for an exponent of *bits* bits: the sizes OpenSSL takes,
+  # where one more bit of window costs more products to fill the table
+  # than it saves in the exponent.
+  def self.window(bits : Int32) : Int32
+    return 6 if bits > 671
+    return 5 if bits > 239
+    return 4 if bits > 79
+    return 3 if bits > 23
+    1
+  end
+
+  # R mod m, and for a secret exponent R^2 mod m, for an m of *bits* bits.
+  # 2^(bits - 1) is under m (an odd m is not a power of two), and doubling
+  # it with a reduction each time reaches R = 2^(64 n). That is 2^0 in
+  # Montgomery form; doubling on to 2^h R and squaring s times makes
+  # 2^(h 2^s) R, which is R^2 when h 2^s = 64 n: s the trailing zero bits
+  # of 64 n, h its odd part.
+  private def constants(bits : Int32) : Nil
+    n = @n
+    x = @one.to_unsafe
+    x[(bits - 1) >> 6] = 1_u64.unsafe_shl(((bits - 1) & 63).to_u64)
+    (64 * n - bits + 1).times { double(x) }
+    return unless @secret
+    s = 6
+    h = n
+    while (h & 1) == 0
+      h = h >> 1
+      s = s + 1
+    end
+    r = @r2.to_unsafe
+    i = 0
+    while i < n
+      r[i] = x[i]
+      i = i + 1
+    end
+    h.times { double(r) }
+    s.times { sqr(r, r) }
+  end
+
+  # x = 2x mod m, in place.
+  private def double(x : Pointer(UInt64)) : Nil
+    n = @n
+    t = @t.to_unsafe
+    carry = 0_u64
+    i = 0
+    while i < n
+      t[i] = x[i].unsafe_shl(1_u64) | carry
+      carry = x[i].unsafe_shr(63_u64)
+      i = i + 1
+    end
+    reduce(t, carry, x)
+  end
+
+  # r = t - m if t, with *top* the word over its n, is at least m, else t:
+  # the difference is always taken and one of the two kept by a mask. t is
+  # under 2m, so top - borrow is 0 (keep the difference) or -1 (keep t),
+  # and its high word is the mask. r is not t.
+  private def reduce(t : Pointer(UInt64), top : UInt64, r : Pointer(UInt64)) : Nil
+    n = @n
+    m = @m.to_unsafe
+    borrow = 0_u64
+    j = 0
+    while j < n
+      w = t[j].to_u128 &- m[j].to_u128 &- borrow.to_u128
+      r[j] = w.unsafe_to_u64
+      borrow = w.unsafe_shr(127).unsafe_to_u64
+      j = j + 1
+    end
+    below = (top.to_u128 &- borrow.to_u128).unsafe_shr(64).unsafe_to_u64 ^ @zero.get
+    j = 0
+    while j < n
+      r[j] = (t[j] & below) | (r[j] & ~below)
+      j = j + 1
+    end
+  end
+
+  # r = a b / R mod m by coarsely integrated operand scanning (CIOS): n
+  # rounds of a times one word of b, each followed by one word's
+  # reduction. r may be a or b: it is written once both have been read.
+  def mul(a : Pointer(UInt64), b : Pointer(UInt64), r : Pointer(UInt64)) : Nil
+    n = @n
+    m = @m.to_unsafe
+    t = @t.to_unsafe
+    inv = @inv
+    k = 0
+    while k < n + 2
+      t[k] = 0_u64
+      k = k + 1
+    end
+    i = 0
+    while i < n
+      bi = b[i].to_u128
+      c = 0_u128
+      j = 0
+      while j < n
+        w = a[j].to_u128 &* bi &+ t[j].to_u128 &+ c
+        t[j] = w.unsafe_to_u64
+        c = w.unsafe_shr(64)
+        j = j + 1
+      end
+      w = t[n].to_u128 &+ c
+      t[n] = w.unsafe_to_u64
+      t[n + 1] = w.unsafe_shr(64).unsafe_to_u64
+      q = (t[0] &* inv).to_u128
+      c = (q &* m[0].to_u128 &+ t[0].to_u128).unsafe_shr(64)
+      j = 1
+      while j < n
+        w = q &* m[j].to_u128 &+ t[j].to_u128 &+ c
+        t[j - 1] = w.unsafe_to_u64
+        c = w.unsafe_shr(64)
+        j = j + 1
+      end
+      w = t[n].to_u128 &+ c
+      t[n - 1] = w.unsafe_to_u64
+      t[n] = t[n + 1] &+ w.unsafe_shr(64).unsafe_to_u64
+      i = i + 1
+    end
+    reduce(t, t[n], r)
+  end
+
+  # r = a^2 / R mod m: the square first, each product off the diagonal
+  # taken once and doubled, then reduced a word at a time (separated
+  # operand scanning). A square is most of what an exponentiation does,
+  # and this one takes n(n - 1)/2 + n products where `mul` takes n^2,
+  # before the n^2 of its reduction. r may be a.
+  def sqr(a : Pointer(UInt64), r : Pointer(UInt64)) : Nil
+    n = @n
+    m = @m.to_unsafe
+    p = @p.to_unsafe
+    inv = @inv
+    k = 0
+    while k < 2 * n
+      p[k] = 0_u64
+      k = k + 1
+    end
+    i = 0
+    while i < n - 1
+      ai = a[i].to_u128
+      row = p + i.to_i64
+      c = 0_u128
+      j = i + 1
+      while j < n
+        w = ai &* a[j].to_u128 &+ row[j].to_u128 &+ c
+        row[j] = w.unsafe_to_u64
+        c = w.unsafe_shr(64)
+        j = j + 1
+      end
+      row[n] = c.unsafe_to_u64
+      i = i + 1
+    end
+    # Doubled, and the diagonal added: a^2 < 2^(128 n), so nothing carries
+    # out of the top word.
+    shifted = 0_u64
+    c = 0_u128
+    i = 0
+    while i < n
+      low = p[2 * i]
+      high = p[2 * i + 1]
+      square = a[i].to_u128 &* a[i].to_u128
+      w = (low.unsafe_shl(1_u64) | shifted).to_u128 &+ square.unsafe_to_u64.to_u128 &+ c
+      p[2 * i] = w.unsafe_to_u64
+      c = w.unsafe_shr(64)
+      w = (high.unsafe_shl(1_u64) | low.unsafe_shr(63_u64)).to_u128 &+ square.unsafe_shr(64) &+ c
+      p[2 * i + 1] = w.unsafe_to_u64
+      c = w.unsafe_shr(64)
+      shifted = high.unsafe_shr(63_u64)
+      i = i + 1
+    end
+    # Word i cleared by q m 2^(64 i); what carries out past word i + n is
+    # held over and added where the next round's carry lands.
+    extra = 0_u64
+    i = 0
+    while i < n
+      row = p + i.to_i64
+      q = (row[0] &* inv).to_u128
+      c = 0_u128
+      j = 0
+      while j < n
+        w = q &* m[j].to_u128 &+ row[j].to_u128 &+ c
+        row[j] = w.unsafe_to_u64
+        c = w.unsafe_shr(64)
+        j = j + 1
+      end
+      w = row[n].to_u128 &+ c &+ extra.to_u128
+      row[n] = w.unsafe_to_u64
+      extra = w.unsafe_shr(64).unsafe_to_u64
+      i = i + 1
+    end
+    reduce(p + n.to_i64, extra, r)
+  end
+
+  # *base*, below m, into Montgomery form at *r*.
+  private def enter(base : BigInt, r : Pointer(UInt64)) : Nil
+    if @secret
+      x = Montgomery.words(base.limbs, @n)
+      mul(x.to_unsafe, @r2.to_unsafe, r)
+    else
+      x = Montgomery.words(((base << (64 * @n)) % @mod).limbs, @n)
+      i = 0
+      while i < @n
+        r[i] = x[i]
+        i = i + 1
+      end
+    end
+  end
+
+  # The value at *a* out of Montgomery form, as a BigInt: a times 1 / R.
+  private def leave(a : Pointer(UInt64)) : BigInt
+    n = @n
+    one = Array(UInt64).new(n, 0_u64)
+    one[0] = 1_u64
+    out = Array(UInt64).new(n, 0_u64)
+    o = out.to_unsafe
+    mul(a, one.to_unsafe, o)
+    limbs = Array(UInt64).new(2 * n, 0_u64)
+    i = 0
+    while i < n
+      limbs[2 * i] = o[i] & 0xFFFFFFFF_u64
+      limbs[2 * i + 1] = o[i].unsafe_shr(32_u64)
+      i = i + 1
+    end
+    BigInt.new(1, limbs)
+  end
+
+  # base^exp mod m, base below m, by a sliding window, left to right: the
+  # table holds the odd powers g, g^3, ... g^(2^k - 1), a run of zero bits
+  # costs a square each, and a window of up to k bits that starts and ends
+  # on a one costs its squares and one product.
+  def pow(base : BigInt, exp : BigInt) : BigInt
+    n = @n
+    bits = Montgomery.bit_length(exp.limbs)
+    return leave(@one.to_unsafe) if bits == 0
+    k = Montgomery.window(bits)
+    size = 1 << (k - 1)
+    table = Array(UInt64).new(size * n, 0_u64)
+    tp = table.to_unsafe
+    enter(base, tp)
+    if size > 1
+      g2 = Array(UInt64).new(n, 0_u64)
+      sqr(tp, g2.to_unsafe)
+      i = 1
+      while i < size
+        mul(tp + ((i - 1) * n).to_i64, g2.to_unsafe, tp + (i * n).to_i64)
+        i = i + 1
+      end
+    end
+    acc = Array(UInt64).new(n, 0_u64)
+    ap = acc.to_unsafe
+    limbs = exp.limbs
+    started = false
+    i = bits - 1
+    while i >= 0
+      if Montgomery.bit(limbs, i) == 0
+        sqr(ap, ap)
+        i = i - 1
+      else
+        low = i - k + 1
+        low = 0 if low < 0
+        while Montgomery.bit(limbs, low) == 0
+          low = low + 1
+        end
+        value = 0
+        j = i
+        while j >= low
+          value = value * 2 + Montgomery.bit(limbs, j)
+          j = j - 1
+        end
+        entry = tp + ((value >> 1) * n).to_i64
+        if started
+          (i - low + 1).times { sqr(ap, ap) }
+          mul(ap, entry, ap)
+        else
+          j = 0
+          while j < n
+            ap[j] = entry[j]
+            j = j + 1
+          end
+          started = true
+        end
+        i = low - 1
+      end
+    end
+    leave(ap)
+  end
+
+  # base^exp mod m, base below m, by a fixed window of k bits over *width*
+  # bits of exponent, with nothing taken from the exponent's bits but a
+  # mask: the table holds g^0 (R mod m) through g^(2^k - 1), every window
+  # costs k squares and one product, the product with g^0 included, and
+  # every entry of the table is read for every window.
+  def pow_fixed(base : BigInt, exp : BigInt, width : Int32) : BigInt
+    n = @n
+    k = Montgomery.window(width)
+    size = 1 << k
+    table = Array(UInt64).new(size * n, 0_u64)
+    tp = table.to_unsafe
+    one = @one.to_unsafe
+    j = 0
+    while j < n
+      tp[j] = one[j]
+      j = j + 1
+    end
+    enter(base, tp + n.to_i64)
+    i = 2
+    while i < size
+      mul(tp + ((i - 1) * n).to_i64, tp + n.to_i64, tp + (i * n).to_i64)
+      i = i + 1
+    end
+    acc = Array(UInt64).new(n, 0_u64)
+    ap = acc.to_unsafe
+    j = 0
+    while j < n
+      ap[j] = one[j]
+      j = j + 1
+    end
+    chosen = Array(UInt64).new(n, 0_u64)
+    cp = chosen.to_unsafe
+    limbs = exp.limbs
+    zero = @zero.get
+    w = (width + k - 1) // k - 1
+    while w >= 0
+      k.times { sqr(ap, ap) }
+      value = 0_u64
+      b = k - 1
+      while b >= 0
+        value = value.unsafe_shl(1_u64) | Montgomery.bit(limbs, w * k + b).to_u64
+        b = b - 1
+      end
+      j = 0
+      while j < n
+        cp[j] = 0_u64
+        j = j + 1
+      end
+      e = 0
+      while e < size
+        d = e.to_u64 ^ value
+        mask = ((d | (0_u64 &- d)).unsafe_shr(63_u64) &- 1_u64) ^ zero
+        entry = tp + (e * n).to_i64
+        j = 0
+        while j < n
+          cp[j] = cp[j] | (entry[j] & mask)
+          j = j + 1
+        end
+        e = e + 1
+      end
+      mul(ap, cp, ap)
+      w = w - 1
+    end
+    leave(ap)
   end
 end
 

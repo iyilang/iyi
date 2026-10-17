@@ -801,9 +801,11 @@ prove_broken "PSS's M' given seven zero bytes" "PS256 round trip" \
   'h = hash.digest(Array(UInt8).new(8, 0_u8) + m_hash + salt)' 'h = hash.digest(Array(UInt8).new(7, 0_u8) + m_hash + salt)'
 # One half of the CRT taken under the other half's exponent, and the
 # blinding left in: the check before a signature is given out is what
-# stops both.
+# stops both. The halves going through `pow_mod_secret` rather than
+# `pow_mod` answers the same numbers, so that choice has no proof here;
+# std/big's gate holds `pow_mod_secret` to `pow_mod`.
 prove_broken "q's half taken under dp" "an RSA signature that does not check against its own public key" \
-  's2 = (c % @q).pow_mod(@dq, @q)' 's2 = (c % @q).pow_mod(@dp, @q)'
+  's2 = (c % @q).pow_mod_secret(@dq, @q)' 's2 = (c % @q).pow_mod_secret(@dp, @q)'
 prove_broken "the blinding not taken off" "an RSA signature that does not check against its own public key" \
   's = ((s2 + h * @q) * r_inverse) % @n' 's = (s2 + h * @q) % @n'
 prove_broken "an ECDSA integer's sign byte left off" "the signature does not verify" \

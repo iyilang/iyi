@@ -69,17 +69,19 @@
 # unpredictable to anyone without the key besides. PyJWT checks these
 # signatures as it checks its own.
 #
-# RSA signing is the CRT (RFC 8017 section 5.2.1) on std/big, which takes
-# as long as its numbers make it: a 2048-bit signature took about 11 ms
-# in a --release build here, std/big's `pow_mod` being square-and-multiply
-# with a division a step. The message is blinded - multiplied by r^e for
-# an r drawn by HMAC from the private exponent and the message - so its
-# value, which a caller may choose, does not shape the time, and the
-# signature is checked against the public key before it is given out, so
-# a fault in one half of the CRT does not hand out the factor it reveals
-# (Boneh, DeMillo and Lipton, 1997). The exponentiation's own timing
-# follows the exponent's bits; a signer whose timing is watched closely
-# should know that.
+# RSA signing is the CRT (RFC 8017 section 5.2.1) on std/big. The message
+# is blinded - multiplied by r^e for an r drawn by HMAC from the private
+# exponent and the message - so its value, which a caller may choose, does
+# not shape the time, and the signature is checked against the public key
+# before it is given out, so a fault in one half of the CRT does not hand
+# out the factor it reveals (Boneh, DeMillo and Lipton, 1997). The two
+# halves exponentiate by dp and dq through std/big's `pow_mod_secret`, a
+# fixed window that reads its whole table and masks its subtractions, so
+# no branch and no memory address follows the private exponents' bits.
+# That costs about a tenth: a 2048-bit signature takes 1.25 to 1.32 ms in
+# a --release build here where `pow_mod` for the halves took 1.12 to 1.16
+# (4096 bits: 7.3 to 7.5 and 6.6 to 7.3), and took about 11 ms when
+# `pow_mod` was square-and-multiply with a division a step.
 #
 # `JWS.sign` and `JWS.verify` are the layer under JWT: a payload of any
 # bytes and a header written as the caller writes it, which is what
@@ -619,13 +621,15 @@ struct JWTRsaPrivate
   end
 
   # RSASP1 (section 5.2.1) by the CRT, blinded, and checked before it is
-  # given out.
+  # given out. The two halves are the private exponents', so they go
+  # through `pow_mod_secret`; p and q are odd, their product being n,
+  # which std/rsa takes odd only.
   private def rsasp1(em : Array(UInt8)) : Array(UInt8)
     m = BigInt.from_bytes(em)
     r, r_inverse = blinding(em)
     c = (m * r.pow_mod(@e, @n)) % @n
-    s1 = (c % @p).pow_mod(@dp, @p)
-    s2 = (c % @q).pow_mod(@dq, @q)
+    s1 = (c % @p).pow_mod_secret(@dp, @p)
+    s2 = (c % @q).pow_mod_secret(@dq, @q)
     h = (@qi * (s1 - s2)) % @p
     h = h + @p if h.negative?
     s = ((s2 + h * @q) * r_inverse) % @n

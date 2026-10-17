@@ -6,10 +6,14 @@
 # Runs bench/std_big_exercise.iyi plain and with --release, requires every
 # section to report, checks the arithmetic the program printed against
 # python3 (`decimal` for BigDecimal, `fractions.Fraction` for BigRational,
-# `int(digits, base)` for every base 2..36), proves that what the module
-# refuses is refused with the prelude's sentence (`division by zero`,
-# `modulo by zero`, `not a decimal: "12x"`), and proves the checks can fail by
-# patching copies of std/big.iyi through IYI_PATH.
+# `int(digits, base)` for every base 2..36, `pow(b, e, m)` for 3000 modular
+# exponentiations), sets the release build's 2048-, 3072- and 4096-bit
+# `pow_mod` times beside python's and the square-and-multiply it replaced,
+# proves that what the module refuses is refused with the prelude's sentence
+# (`division by zero`, `modulo by zero`, `not a decimal: "12x"`), reads the
+# module with `iyi doc`, checks the formatting, typechecks the exercise for
+# five targets, builds it again from `--emit-iyimod` artifacts, and proves
+# the checks can fail by patching copies of std/big.iyi through IYI_PATH.
 #
 # A check that cannot fail is not a check. This script breaks addition,
 # multiplication, negation, the modulo sign rule, bitwise and, exponentiation,
@@ -17,7 +21,9 @@
 # division rounding, exact-division detection, zero printing, rational
 # reduction, the unbalanced Karatsuba split, the split that prints and
 # parses long values and the recursive division a long print splits by,
-# and requires each break to be caught at a named check.
+# Montgomery's n', its final subtraction, both window tables, the even
+# modulus' exponent bits and the correction of a one-limb quotient, and
+# requires each break to be caught at a named check.
 #
 # Exits non-zero if any check fails.
 
@@ -73,7 +79,7 @@ run_case() {
   fi
   "$WORK/$name" >"$WORK/$name.out" 2>&1
   local exit_code=$?
-  grep -v '^oracle ' "$WORK/$name.out" | sed 's/^/  /'
+  grep -v '^oracle \|^powmod: \|^powtime: ' "$WORK/$name.out" | sed 's/^/  /'
   if [ "$exit_code" -ne 0 ]; then
     echo "$label: exited $exit_code"
     status=1
@@ -106,7 +112,7 @@ if ! grep -q "all std/big checks passed" "$WORK/big-release.out" 2>/dev/null; th
   echo "release: missing pass sentinel"
   status=1
 fi
-if ! diff <(grep '^oracle ' "$WORK/big-plain.out") <(grep '^oracle ' "$WORK/big-release.out") >/dev/null 2>&1; then
+if ! diff <(grep '^oracle \|^powmod: ' "$WORK/big-plain.out") <(grep '^oracle \|^powmod: ' "$WORK/big-release.out") >/dev/null 2>&1; then
   echo "  release build printed different oracle lines than the plain build"
   status=1
 fi
@@ -380,6 +386,100 @@ PY
   fi
 fi
 
+echo
+echo "== modular exponentiation against python's pow"
+# Every `powmod: b e m = r` line (hex) recomputed with pow(b, e, m), with a
+# floor on how many of each kind of case there were; then the release
+# build's `powtime: bits b e m = r pow_mod pow_mod_secret before` lines
+# (microseconds) checked the same way and timed against python's own pow
+# on the same operands, best of three.
+cat > "$WORK/pow.py" << 'EOF'
+import sys, time
+if hasattr(sys, "set_int_max_str_digits"):
+    sys.set_int_max_str_digits(0)
+bad = 0
+seen = {"cases": 0, "odd moduli": 0, "even moduli": 0, "over 2048 bits": 0, "exponent 0": 0,
+        "exponent 1": 0, "exponents over 2048 bits": 0, "base 0": 0, "base past the modulus": 0,
+        "negative base": 0, "modulus 1": 0}
+timed = []
+for line in open(sys.argv[1]):
+    kind, _, rest = line.rstrip("\n").partition(": ")
+    if kind not in ("powmod", "powtime"):
+        continue
+    lhs, got = rest.split(" = ")
+    words = lhs.split(" ")
+    if kind == "powtime":
+        bits, words = int(words[0]), words[1:]
+        got, *micros = got.split(" ")
+    b, e, m = (int(w, 16) for w in words)
+    want = format(pow(b, e, m), "x")
+    if got != want:
+        bad += 1
+        print(f"  python disagrees: pow({lhs[:60]}...) is {want[:40]}, std/big said {got[:40]}")
+    if kind == "powtime":
+        runs = []
+        for _ in range(3):
+            started = time.perf_counter()
+            pow(b, e, m)
+            runs.append(time.perf_counter() - started)
+        timed.append((bits, [int(x) for x in micros], min(runs) * 1e6))
+        continue
+    seen["cases"] += 1
+    seen["odd moduli" if m % 2 else "even moduli"] += 1
+    seen["over 2048 bits"] += m.bit_length() > 2048
+    seen["exponent 0"] += e == 0
+    seen["exponent 1"] += e == 1
+    seen["exponents over 2048 bits"] += e.bit_length() > 2048
+    seen["base 0"] += b == 0
+    seen["base past the modulus"] += b >= m
+    seen["negative base"] += b < 0
+    seen["modulus 1"] += m == 1
+floor = {"cases": 3000, "odd moduli": 2000, "even moduli": 600, "over 2048 bits": 60, "exponent 0": 40,
+         "exponent 1": 40, "exponents over 2048 bits": 60, "base 0": 50, "base past the modulus": 50,
+         "negative base": 200, "modulus 1": 1}
+print("  " + ", ".join(f"{v} {k}" for k, v in seen.items()))
+for k, need in floor.items():
+    if seen[k] < need:
+        bad += 1
+        print(f"  too few cases of {k}: {seen[k]} < {need}")
+for bits, (fast, secret, before), python in timed:
+    print(f"  {bits} bits: pow_mod {fast / 1000:.1f} ms, pow_mod_secret {secret / 1000:.1f} ms,"
+          f" square-and-multiply {before / 1000:.1f} ms, python's pow {python / 1000:.1f} ms")
+    if len(sys.argv) > 2 and fast >= python:
+        bad += 1
+        print(f"  pow_mod at {bits} bits is not faster than python's pow")
+sys.exit(1 if bad else 0)
+EOF
+if [ -z "$PY" ]; then
+  echo "  no python3 on this machine, so pow_mod's oracle is unmeasured"
+else
+  if [ -f "$WORK/big-plain.out" ] && "$PY" "$WORK/pow.py" "$WORK/big-plain.out" >"$WORK/pow-plain.verdict" 2>&1; then
+    sed -n '1p' "$WORK/pow-plain.verdict"
+    echo "  python's pow agrees with every case of the plain build"
+  else
+    sed -n '1,6p' "$WORK/pow-plain.verdict" 2>/dev/null
+    echo "  python's pow disagrees with the plain build"
+    status=1
+  fi
+  if [ -f "$WORK/big-release.out" ] && "$PY" "$WORK/pow.py" "$WORK/big-release.out" timed >"$WORK/pow-release.verdict" 2>&1; then
+    sed -n '2,$p' "$WORK/pow-release.verdict"
+    echo "  and with the release build's, which is faster than python's pow at every size"
+  else
+    sed -n '1,8p' "$WORK/pow-release.verdict" 2>/dev/null
+    echo "  python's pow disagrees with the release build, or is faster than it"
+    status=1
+  fi
+  # The pow oracle has to be able to disagree too: one result one hex digit
+  # longer.
+  awk '!done && /^powmod: / { $0 = $0 "1"; done = 1 } { print }' "$WORK/big-plain.out" >"$WORK/pow-broken.out"
+  if "$PY" "$WORK/pow.py" "$WORK/pow-broken.out" >"$WORK/pow-broken.verdict" 2>&1; then
+    echo "  the pow oracle accepted a wrong result, so it checks nothing"
+    status=1
+  else
+    echo "  the pow oracle rejects one result off by a digit"
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # What the module refuses, and the sentence it refuses with
 # ---------------------------------------------------------------------------
@@ -428,6 +528,11 @@ big_panics_with "a value too wide for Int64" i64_overflow "does not fit in Int64
 big_panics_with "a string of underscores" no_digits 'invalid BigInt: no digits in "_"' 'BigInt.new("_")'
 big_panics_with "a sign and underscores" sign_no_digits 'invalid BigInt: no digits in "-_"' 'BigInt.new("-_")'
 big_panics_with "a decimal exponent past Int32" dec_exp_range 'decimal exponent out of range: "1e99999999999"' 'BigDecimal.new("1e99999999999")'
+big_panics_with "pow_mod modulo zero" pow_zero "modulo by zero" '3.to_big.pow_mod(5.to_big, 0.to_big)'
+big_panics_with "pow_mod modulo a negative" pow_neg_mod "modulus must be positive" '3.to_big.pow_mod(5.to_big, -(7.to_big))'
+big_panics_with "pow_mod with a negative exponent" pow_neg_exp "negative exponent in pow_mod: -1" '3.to_big.pow_mod(-(1.to_big), 7.to_big)'
+big_panics_with "pow_mod_secret modulo an even number" pow_secret_even "pow_mod_secret needs an odd modulus, not 10" '3.to_big.pow_mod_secret(5.to_big, 10.to_big)'
+big_panics_with "pow_mod_secret with a negative exponent" pow_secret_neg "negative exponent in pow_mod_secret: -2" '3.to_big.pow_mod_secret(-(2.to_big), 7.to_big)'
 
 # ---------------------------------------------------------------------------
 # Negative proofs: each check is proven to fail when its mechanism is broken
@@ -633,14 +738,85 @@ oracle_fails "a square root without its sticky bit" no_flt_sticky sqrt \
 prove_fails "a decimal longer than it needs" no_flt_shortest "flt: the square root of two to 256 bits" \
   's/^        high = middle$/        low = middle + 1/'
 
+# Montgomery: n' right to 48 bits of 64 (four Newton steps, not five);
+# a product's final subtraction dropped, its t copied out whatever it is;
+# the sliding window's table one power of g apart where it should be two
+# (g^(i+1) where g^(2i+1) belongs); the fixed window's lookup one entry
+# low; and an even modulus reading its exponent's bits sixteen to a limb.
+prove_fails "montgomery n' right to 48 bits" no_mont_inverse "pow_mod: short exponents modulo a modulus with room in its top word" \
+  's/^    5.times { x = x \&\* (2_u64 \&- m0 \&\* x) }$/    4.times { x = x \&* (2_u64 \&- m0 \&* x) }/'
+prove_fails "a product's final subtraction dropped" no_mont_subtract "pow_mod: short exponents modulo a modulus that fills its top word" \
+  's/^    reduce(t, t\[n\], r)$/    n.times { |j| r[j] = t[j] }/'
+prove_fails "the sliding window's table one power apart" no_mont_table "exponent through the window table" \
+  's/mul(tp + ((i - 1) \* n).to_i64, g2.to_unsafe, tp + (i \* n).to_i64)/mul(tp + ((i - 1) * n).to_i64, tp, tp + (i * n).to_i64)/'
+prove_fails "the fixed window's lookup one entry low" no_fixed_lookup "pow_mod_secret: agrees with pow_mod" \
+  's/^        d = e.to_u64 ^ value$/        d = (e + 1).to_u64 ^ value/'
+prove_fails "an even modulus' exponent read sixteen bits a limb" no_even_bits "pow_mod: an even modulus" \
+  's/exp.limbs\[i >> 5\].unsafe_shr((i \& 31).to_u64)/exp.limbs[i >> 5].unsafe_shr((i \& 15).to_u64)/'
+
+# A one-limb quotient left at its estimate, which can be up to three
+# short: the divisor no longer taken off what is left.
+prove_fails "a one-limb quotient left at its estimate" no_one_limb_fix "div: a one-limb quotient" \
+  's/^    while BigInt.limbs_at_least(r, n, v, m)$/    while false \&\& BigInt.limbs_at_least(r, n, v, m)/'
+
+echo
+echo "== documentation, formatting and the five targets"
+if "$IYI" doc "$REPO/src/std/big.iyi" >"$WORK/doc.out" 2>&1 && grep -q "pow_mod_secret" "$WORK/doc.out"; then
+  echo "  iyi doc reads std/big, pow_mod_secret included"
+else
+  echo "  FAIL: iyi doc: $(tail -2 "$WORK/doc.out")"
+  status=1
+fi
+if [ -x "$REPO/bin/crystal" ]; then
+  if "$REPO/bin/crystal" tool format --check "$REPO/src/std/big.iyi" "$REPO/bench/std_big_exercise.iyi" >"$WORK/format.out" 2>&1; then
+    echo "  the module and the exercise are formatted"
+  else
+    echo "  FAIL: not formatted: $(head -3 "$WORK/format.out")"
+    status=1
+  fi
+fi
+crossed=0
+for target in x86_64-linux-gnu aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do
+  if ! "$IYI" build --no-codegen --target "$target" "$REPO/bench/std_big_exercise.iyi" -o "$WORK/cross" >"$WORK/cross.log" 2>&1; then
+    echo "  FAIL: the exercise does not typecheck for $target: $(grep -m1 Error "$WORK/cross.log")"
+    status=1
+    crossed=1
+  fi
+done
+[ "$crossed" -eq 0 ] && echo "  the exercise typechecks for x86_64-linux-gnu, aarch64-darwin, x86_64-windows-msvc, aarch64-linux-gnu and x86_64-linux-musl"
+
+echo
+echo "== the same answers from artifacts"
+# Built once with --emit-iyimod and again from those artifacts: a method
+# whose body the artifact keeps as text must read back as it was written.
+# The timing lines are left out of the comparison, being times.
+mkdir -p "$WORK/art"
+if ! (cd "$WORK/art" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_big_exercise.iyi") >"$WORK/art.log" 2>&1; then
+  echo "  FAIL: the build that writes the artifacts: $(tail -2 "$WORK/art.log")"
+  status=1
+elif ! (cd "$WORK/art" && "$IYI" build --use-iyimod mods -o from-artifact "$REPO/bench/std_big_exercise.iyi") >"$WORK/art.log" 2>&1; then
+  echo "  FAIL: the build from the artifacts: $(grep -m1 -A2 'In mods' "$WORK/art.log" | tr '\n' ' ')"
+  status=1
+else
+  "$WORK/art/from-source" 2>&1 | grep -v '^powtime: ' >"$WORK/art/source.out"
+  "$WORK/art/from-artifact" 2>&1 | grep -v '^powtime: ' >"$WORK/art/artifact.out"
+  if cmp -s "$WORK/art/source.out" "$WORK/art/artifact.out" && grep -q "ALL CHECKS PASSED" "$WORK/art/artifact.out"; then
+    echo "  built from artifacts, the exercise prints what it prints from source"
+  else
+    echo "  FAIL: from artifacts the exercise printed otherwise: $(diff "$WORK/art/source.out" "$WORK/art/artifact.out" | sed -n '1,3p' | tr '\n' ' ')"
+    status=1
+  fi
+fi
+
 echo
 if [ "$status" -eq 0 ]; then
   echo "Big number standard library: BigInt construction, predicates, arithmetic, division,"
-  echo "bitwise logic, known large values, round trips, pow_mod, random identities and"
-  echo "Karatsuba, BigDecimal and BigRational arithmetic checked against python3, hashes"
-  echo "that agree with ==, every base 2..36, all pass plain and optimised; what the"
-  echo "module refuses is refused with a sentence, and each check is proven to fail"
-  echo "when its mechanism is broken."
+  echo "bitwise logic, known large values, round trips, pow_mod and pow_mod_secret against"
+  echo "python's pow, random identities and Karatsuba, BigDecimal and BigRational arithmetic"
+  echo "checked against python3, hashes that agree with ==, every base 2..36, all pass plain"
+  echo "and optimised; what the module refuses is refused with a sentence, and each check is"
+  echo "proven to fail when its mechanism is broken."
+  echo "ALL CHECKS PASSED"
 else
   echo "std/big exercise driver: failures encountered"
 fi

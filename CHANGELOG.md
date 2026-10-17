@@ -326,6 +326,34 @@
 
 ### Changed
 
+- **std/big: `pow_mod` by Montgomery multiplication for an odd modulus,
+  `pow_mod_secret` for a private exponent, and a division of one pass
+  for a one-limb quotient.** An odd modulus - RSA's, Diffie-Hellman's,
+  a prime field's - goes to Montgomery multiplication on 64-bit words
+  (products in `UInt128`, CIOS for a product, a squaring that takes each
+  product off the diagonal once) with a sliding window of up to six bits; an
+  even one keeps square-and-multiply, reading the exponent's bits in
+  place instead of copying it a bit at a time. A 2048-bit modulus and
+  exponent took 19.0 ms in a --release build and take 2.5, where
+  Python 3.14's `pow` takes 13.7 (3072 bits: 63.2, 8.5 and 45.4; 4096:
+  168.7, 20.6 and 102.1). The base enters Montgomery form by one
+  division, which took a 2048-bit RSA check (e = 65537) from 36 us with
+  R^2 squared out to 22. `BigInt#pow_mod_secret(exp, mod)` is a fixed
+  window over as many bits as the longer of exponent and modulus, every
+  table entry read for every window and the one wanted kept by a mask,
+  the final subtraction masked too; LLVM turned the first masks into
+  branches, so each is xored with a zero read by an atomic load, and the
+  release assembly shows the and and the or in both loops. It refuses an
+  even modulus by sentence. `divmod` takes a quotient under 2^32 - each
+  step of Euclid's algorithm - from the operands' top bits in one pass
+  where Algorithm D copied both and the remainder twice: 2048 bits over
+  2046 took 0.60 us and take 0.15. Together a 2048-bit RS256 signature
+  from std/jwt, whose blinding inverse is Euclid's, took 9.4 ms and
+  takes 1.3 (3072 bits: 24.1 and 3.4; 4096: 69.1 and 7.4), its check
+  150 us and 45. std/jwt's two CRT halves now go through
+  `pow_mod_secret`, so no branch or table read of their exponentiation follows
+  dp's or dq's bits, for about a tenth more than `pow_mod` (2048 bits:
+  1.25 to 1.32 ms against 1.12 to 1.16).
 - **std/zip reads bzip2, LZMA, Zstandard and xz entries, and writes
   bzip2 and Zstandard.** `ZipEntryReader` reads methods 12, 14, 93 and
   95 through `Bzip2Reader`, std/xz's .lzma decoder, `ZstdReader` and

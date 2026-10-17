@@ -4,6 +4,42 @@
 
 ### Added
 
+- **std/zstd: Zstandard (RFC 8878) read and written in iyi, read a piece
+  at a time, and XXH64 in std/digest.** `ZstdReader.new { next_bytes }`
+  reads a stream the way std/compress's `Inflater` does - `read(max) :
+  String | ZstdError`, `finished?`, `leftover` - decoding a block at a
+  time into one buffer of at most two windows and a block, slid once that
+  frees a window; `Zstd.decompress(data) : String | ZstdError` is the same
+  decoder over one piece. Both read every frame of a stream and skip
+  skippable ones; every header form; raw, RLE and compressed blocks;
+  literals raw, RLE or Huffman-coded in one stream or four, the table
+  described (weights direct or FSE-compressed) or reused; sequence codes
+  through the predefined tables, one symbol, a described table or the
+  last block's; the repeat offsets as RFC 8878 §3.1.1.5 moves them. They
+  hold a frame to its content size, its checksum (the low 32 bits of
+  XXH64), its block maximum and its window. Refused as a `ZstdError`, by
+  name: a frame that needs a dictionary (by its ID), a window past the
+  caller's limit - `max_window`, 8 MiB unless asked, RFC 9659's limit for
+  HTTP - a reserved header bit or block type, a block past the maximum,
+  an FSE description whose accuracy or probabilities do not hold, a
+  symbol past its alphabet, Huffman weights that leave the code
+  incomplete, a stream that does not end where its symbols do, a treeless
+  block or repeated table with nothing before it, an offset past the
+  window or before the frame, a sequence past the block's literals or
+  maximum, either size or the checksum not matching, a stream that ends
+  early, and - whole - bytes after the last frame that begin none, which
+  the reader leaves as `leftover`. Misuse panics: a read of no bytes, a
+  window limit outside 1 KiB to 512 MiB. `Zstd.compress(data)` writes
+  one frame with its size and checksum that any decoder reads with a
+  1 MiB window: RLE blocks, a greedy hash matcher, literals Huffman-coded,
+  sequence codes through tables made for each block, raw blocks where
+  that is no larger; 4.2 MB of `src/std` comes to 1,275,717 bytes,
+  where Python's zstd at level 1 writes 1,285,541 and zlib at levels 1
+  and 6 1,408,756 and 1,175,988. With --release the gate's 64 MiB stream
+  read through `ZstdReader` in 41 ms (`zstd.decompress` 35). std/zstd
+  imports std/int and std/digest and reaches no platform. `XXH64`
+  joins std/digest: `checksum(data, seed)`, and `update` in pieces with a
+  `digest` that can be asked midway.
 - **`std/toml`: TOML 1.0.0 read and written in iyi, with `derive
   toml_serializable`.** `TOML.parse(text)` answers an `Any` (a table) or a
   `TOMLError` naming the line and column; `TOML.parse?` answers nil

@@ -1,0 +1,508 @@
+# Exercises `std/zstd`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_zstd_exercise.iyi
+#     ./bin/iyi run bench/std_zstd_exercise.iyi <fixtures>
+#
+# Without a directory: frames Python's zstd wrote (kept here as hex), frames
+# made by hand for what an encoder never writes, and this module's own
+# frames, read whole and a piece at a time. With one, the streams
+# `bench/std_zstd_exercise.sh` had Python write there - every level, both
+# flags, long-distance matching, many frames, 64 MiB - are read back and
+# compared, the corrupt ones refused, and this module's frames written
+# beside them for Python to read.
+
+module bench/std_zstd_exercise
+
+import std/zstd::{Zstd, ZstdReader, ZstdError}
+import std/digest::{XXH64, CRC32}
+import std/file::{File}
+import std/gc::{GC}
+import std/random::{Random}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def unhex(s : String) : String
+  p = s.to_unsafe
+  String.new(s.bytesize // 2) do |dst|
+    i = 0
+    while i < s.bytesize // 2
+      dst[i] = ((nibble(p[i * 2]) << 4) | nibble(p[i * 2 + 1])).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def nibble(c : UInt8) : Int32
+  c <= 57_u8 ? c.to_i32 - 48 : c.to_i32 - 87
+end
+
+def hex32(v : UInt32) : String
+  digits = "0123456789abcdef"
+  String.new(8) do |buf|
+    i = 0
+    while i < 8
+      buf[i] = digits.to_unsafe[((v >> ((7 - i) * 4)) & 15_u32).to_i32]
+      i = i + 1
+    end
+  end
+end
+
+def bytes(values : Array(Int32)) : String
+  String.new(values.size) do |dst|
+    i = 0
+    while i < values.size
+      dst[i] = values[i].to_u8
+      i = i + 1
+    end
+  end
+end
+
+# *s* with byte *at* set to *value*.
+def patched(s : String, at : Int32, value : Int32) : String
+  src = s.to_unsafe
+  String.new(s.bytesize) do |dst|
+    dst.copy_from(src, s.bytesize)
+    dst[at] = value.to_u8
+  end
+end
+
+def piece_of(s : String, from : Int32, n : Int32) : String
+  src = s.to_unsafe + from.to_i64
+  String.new(n) { |dst| dst.copy_from(src, n) }
+end
+
+def run_of(byte : Int32, n : Int32) : String
+  String.new(n) do |dst|
+    i = 0
+    while i < n
+      dst[i] = byte.to_u8
+      i = i + 1
+    end
+  end
+end
+
+def random_bytes(n : Int32, seed : UInt64) : String
+  rng = Random.new(seed)
+  String.new(n) do |dst|
+    i = 0
+    while i < n
+      dst[i] = (rng.next_u & 0xff_u32).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def every_byte(times : Int32) : String
+  String.new(256 * times) do |dst|
+    i = 0
+    while i < 256 * times
+      dst[i] = (i & 0xff).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def lines(n : Int32) : String
+  b = String::Builder.new
+  i = 0
+  while i < n
+    b << "line " << i << ": the quick brown fox jumps over the lazy dog " << i % 7 << "\n"
+    i = i + 1
+  end
+  b.to_s
+end
+
+# A source that gives *stream* in pieces whose sizes cycle through
+# *pieces*, and counts the calls.
+class Feed
+  getter calls : Int32
+
+  def initialize(@stream : String, @pieces : Array(Int32))
+    @at = 0
+    @calls = 0
+  end
+
+  # What the source has not been asked for.
+  def rest : String
+    piece_of(@stream, @at, @stream.bytesize - @at)
+  end
+
+  def next : String?
+    n = @pieces[@calls % @pieces.size]
+    @calls = @calls + 1
+    return nil if @at >= @stream.bytesize
+    n = @stream.bytesize - @at if n > @stream.bytesize - @at
+    piece = piece_of(@stream, @at, n)
+    @at = @at + n
+    piece
+  end
+end
+
+# Every byte a reader gives, the reads' sizes cycling through *reads*, or
+# the error it answers instead.
+def drain(z : ZstdReader, reads : Array(Int32)) : String | ZstdError
+  all = String::Builder.new
+  k = 0
+  while true
+    max = reads[k % reads.size]
+    k = k + 1
+    piece = z.read(max)
+    case piece
+    when ZstdError
+      again = z.read(max)
+      assert_true again.is_a?(ZstdError) && again.message == piece.message, "a failed reader answers the same error again"
+      return piece
+    else
+      assert_true piece.bytesize <= max, "a read of #{max} answered #{piece.bytesize} bytes"
+      assert_true piece.bytesize <= 131072, "a read answers no more than a block"
+      break if piece.bytesize == 0
+      all << piece
+    end
+  end
+  assert_true z.finished?, "a reader that answered \"\" is finished"
+  assert_true z.read(5) == "", "a finished reader answers \"\" again"
+  all.to_s
+end
+
+def through(stream : String, pieces : Array(Int32), reads : Array(Int32), window : Int32 = Zstd::WINDOW_LIMIT) : String | ZstdError
+  feed = Feed.new(stream, pieces)
+  drain(ZstdReader.new(window) { feed.next }, reads)
+end
+
+# The stream read whole, and through pieces of every size from one byte
+# to seven with reads of every size from one byte to a block; and a byte
+# at a time where it is short enough.
+def reads_as(stream : String, plain : String, label : String, window : Int32 = Zstd::WINDOW_LIMIT) : Nil
+  whole = Zstd.decompress(stream, window)
+  case whole
+  when ZstdError
+    raise "ASSERTION FAILED: #{label}: refused with #{whole.message.inspect}"
+  else
+    assert_true whole == plain, "#{label}: whole, #{whole.bytesize} bytes where #{plain.bytesize} were written"
+  end
+  shapes = [{[1, 2, 3, 4, 5, 6, 7], [1, 7, 64, 4096, 65536, 131072]}, {[stream.bytesize + 1], [65536]}]
+  shapes << {[1], [3, 1000]} if stream.bytesize <= 65536
+  shapes.each do |shape|
+    got = through(stream, shape[0], shape[1], window)
+    case got
+    when ZstdError
+      raise "ASSERTION FAILED: #{label}, pieces of #{shape[0]} and reads of #{shape[1]}: refused with #{got.message.inspect}"
+    else
+      assert_true got == plain, "#{label}, pieces of #{shape[0]} and reads of #{shape[1]}"
+    end
+  end
+end
+
+# The stream refused whole and streamed, each error saying *phrase*.
+def refused(stream : String, phrase : String, label : String, window : Int32 = Zstd::WINDOW_LIMIT) : Nil
+  whole = Zstd.decompress(stream, window)
+  case whole
+  when ZstdError
+    assert_true whole.message.includes?(phrase), "#{label}: refused with #{whole.message.inspect}, which does not say #{phrase.inspect}"
+  else
+    raise "ASSERTION FAILED: #{label}: read #{whole.bytesize} bytes instead of refusing"
+  end
+  got = through(stream, [1, 2, 3, 4, 5, 6, 7], [1, 100, 65536], window)
+  case got
+  when ZstdError
+    assert_true got.message.includes?(phrase), "#{label}, streamed: refused with #{got.message.inspect}, which does not say #{phrase.inspect}"
+  else
+    raise "ASSERTION FAILED: #{label}, streamed: read #{got.bytesize} bytes instead of refusing"
+  end
+end
+
+def round_trip(label : String, data : String) : String
+  stream = Zstd.compress(data)
+  reads_as(stream, data, label)
+  puts "  #{label}: #{data.bytesize} -> #{stream.bytesize} bytes, read back whole and in pieces"
+  stream
+end
+
+# Frames Python 3.14's zstd wrote (`compression.zstd.compress`): the
+# first 20 and 150 lines of `lines` at level 19 with a checksum - Huffman
+# literals in one stream and in four, FSE-compressed weights and sequence
+# tables - and 400 skewed bytes at level 19, whose four Huffman weights
+# are written directly.
+lines20_19 = unhex(
+  "28b52ffd6442031d040052851318706f0e20d5df71c7559f5caaaaf17777f7cacd3faafe9a2fd3c98e0df25b07fb3137" +
+  "b7c9722384ef39d7dd1a33b03f6a712c13988856f5d2d350caaf6adcb16a347c21120a3a45a6077bea244c26a811d0f7" +
+  "ae9f01b0332c071144402efcff3f5d0711e67e6dd7fd529b23427efdd51820fa7edfebdeef75ea2213a885d5aae7a930" +
+  "fc")
+lines150_19 = unhex(
+  "28b52ffd64621f350c0056d93a1a5035480e0f253d94f45012a8aa4ad7add1a6a48479763389aa0645002e002d00e3d7" +
+  "eca88df8c4480b6797a7a7578dc9109599df6ec90d40070244c1a1b121d03061700171504438582c1c191007c70306c4" +
+  "c4c0c140a06021711824541c013a0c1e141a02764b6e5299e4884b879fd5e1674d13222b9af9ed96dc742583bc787a7a" +
+  "1567979d1461d9e8e3d7eca82e1132e501eb476f9db8d9ae395111b168235d63bd32d589d2960899f2f16b76d446c913" +
+  "232d9c5d9e9e5e853019a232f3071e6215cff8b7edd6a4374b9ea447ead24ef9ce553bec57ab4d48842bd470ce9b2e4b" +
+  "729ca86483ec659e812ba81120b73df633f16bec06124880c005ffff8f7ffebcdfa7c3e3f0f0f03a9d2e5e8fd3e1ebe0" +
+  "75b8383c4e87afc3ebe4e2f0381dbe0eafc3c5e1e374f83abc0e17c724bcf3bb9eb7e79ffffc78e7f86dde76f0f9f1ae" +
+  "7577f9f4cc387edfeb7bfaf638bbfef39d1def8edfe6ed0e3e3fde5a77974f9f19c7efbdbea76f1f67d73fdf75cd4e7d" +
+  "bd7d18be7f1c9eebdc5905a81600b50a2a136bbe")
+direct_19 = unhex(
+  "28b52ffd609000fd030006d91e8343211e001b001d0035625c7714311b3918703045c00444a26ec523822291e2322932" +
+  "41315c1b5f20238a88a31a0e8101769121781a4e735f232753d35a712aaa04251081851851d3525a10faf4e585f8a90e" +
+  "0508080dc145e52c22126101b9489002a862be0765e49e8a1ca92453b42d1d3a3225141008c7730300")
+direct_plain = unhex(
+  "000100010100000300000401030102000204010202000201000004010204020401030104040000000401010001000001" +
+  "010402040304020003040401020003010000030400030100000204000100020004040104000001000001010000040004" +
+  "040001010201010104010102000004010100010100010200010102000202000002040001010000000001000002000102" +
+  "000003000001020000000301030000020401000001000303000003020300000003000001010104000004040401040400" +
+  "020302010000000001000300040204040401000200000201010401000003010300000103000304030300010300000001" +
+  "010102000000000004030001000000020100000000010200000000010300030101000102010201000102000101040400" +
+  "040300010003020403020201000100000200000004000003000302030401030002010200020400000103000000010201" +
+  "000100010001040102000202020101020400000204010102000000010000020400020103010000000100000000020004" +
+  "01010103030101020301020401000002")
+
+puts "== the format's own words"
+hello_raw = unhex("28b52ffd200529000068656c6c6f")
+hello_sum = unhex("28b52ffd240529000068656c6c6fa36d9f88")
+reads_as hello_raw, "hello", "a single segment with one raw block (python's \"hello\")"
+reads_as hello_sum, "hello", "the same with its checksum"
+assert_true (XXH64.checksum("hello") & 0xffffffff_u64) == 0x889f6da3_u64, "the checksum is the low 32 bits of XXH64(\"hello\"), little-endian"
+reads_as unhex("28b52ffd2000010000"), "", "python's empty frame: one empty raw block"
+reads_as unhex("28b52ffd20052b00007a"), "zzzzz", "an RLE block"
+reads_as unhex("28b52ffd60e8024d00001061610100e32b8005"), "a" * 1000, "python's 1,000 a's: a two-byte content size, one literal and one sequence of the predefined tables"
+reads_as unhex("28b52ffda0050000002900006c6f676963"), "logic", "a four-byte content size"
+reads_as unhex("28b52ffde00500000000000000290000776f726c64"), "world", "an eight-byte content size"
+reads_as unhex("28b52ffd210006310000" + "6f7468657273"), "others", "a dictionary ID of 0, which is none"
+reads_as unhex("502a4d180300000078797a") + hello_raw, "hello", "a skippable frame before a frame"
+reads_as hello_raw + hello_sum + unhex("5f2a4d1800000000"), "hellohello", "two frames and an empty skippable one"
+reads_as lines20_19, lines(20), "python's 20 lines at level 19: one Huffman stream, FSE tables"
+reads_as lines150_19, lines(150), "python's 150 lines at level 19: four Huffman streams"
+reads_as direct_19, direct_plain, "python's skewed bytes at level 19: Huffman weights written directly"
+# A window of 8 KiB and five eighths of one more, and of 16 MiB: the
+# descriptor's exponent and mantissa, each held to the caller's limit.
+odd_window = unhex("28b52ffd001d1100006869")
+reads_as odd_window, "hi", "a 13,312-byte window"
+refused odd_window, "needs a window of 13312 bytes, past the limit of 13311", "a 13,312-byte window over a limit one byte less", 13311
+big_window = unhex("28b52ffd00701100006869")
+reads_as big_window, "hi", "a 16 MiB window under a 16 MiB limit", 16777216
+puts "  every header form, raw, RLE and compressed blocks, skippable frames, Huffman and FSE as Python writes them"
+
+puts "\n== round trips"
+text = lines(400)
+round_trip "nothing", ""
+round_trip "one byte", "x"
+round_trip "a sentence", "the quick brown fox jumps over the lazy dog"
+round_trip "repetitive text", text
+round_trip "a run of one byte", run_of(97, 300000)
+round_trip "every byte value", every_byte(40)
+random = random_bytes(70000, 7_u64)
+round_trip "random bytes", random
+far = random_bytes(3000, 3_u64)
+round_trip "a repeat from 600 KB back", far + random_bytes(600000, 9_u64) + far
+long_text = lines(60000)
+round_trip "#{long_text.bytesize // 1048576} MiB of lines, past one window", long_text
+# Literals counted as the first 22 Fibonacci numbers, shuffled: Huffman's
+# code for them is 21 bits deep, and what is written has to fold to 11.
+fib = [] of Int32
+a = 1
+b = 1
+22.times do
+  fib << a
+  a, b = b, a + b
+end
+skewed = String::Builder.new
+fib.each_with_index { |count, sym| skewed << run_of(65 + sym, count) }
+shuffled = skewed.to_s
+rng = Random.new(5_u64)
+deck = String.new(shuffled.bytesize) do |dst|
+  dst.copy_from(shuffled.to_unsafe, shuffled.bytesize)
+  i = shuffled.bytesize - 1
+  while i > 0
+    j = (rng.next_u % (i + 1).to_u32).to_i32
+    t = dst[i]
+    dst[i] = dst[j]
+    dst[j] = t
+    i = i - 1
+  end
+end
+round_trip "literals whose code needs folding to 11 bits", deck
+
+puts "\n== what the matcher finds"
+run = Zstd.compress(run_of(97, 300000))
+assert_true run.bytesize < 40, "300,000 bytes of one value are three RLE blocks, under 40 bytes with the header and checksum (#{run.bytesize})"
+rep = Zstd.compress(text)
+assert_true rep.bytesize * 4 < text.bytesize, "repetitive text compresses at least 4x (#{text.bytesize} -> #{rep.bytesize})"
+noise = Zstd.compress(random)
+assert_true noise.bytesize <= random.bytesize + 3 + 22, "random bytes are one raw block and the frame (#{noise.bytesize})"
+middle = random_bytes(600000, 9_u64)
+alone = Zstd.compress(far + middle).bytesize
+near = Zstd.compress(far + middle + far).bytesize
+assert_true near < alone + 100, "a 3,000-byte repeat from 600 KB back costs under 100 bytes (#{near - alone})"
+past = random_bytes(1100000, 9_u64)
+beyond = Zstd.compress(far + past + far).bytesize - Zstd.compress(far + past).bytesize
+assert_true beyond > 2900, "the same repeat from past the 1 MiB window costs its bytes (#{beyond})"
+small = Zstd.compress(text).to_unsafe
+assert_true (small[4] & 0x20_u8) != 0_u8, "content within the window is a single segment"
+wide = Zstd.compress(long_text).to_unsafe
+assert_true wide[4] == 0x84_u8 && wide[5] == 0x50_u8, "content past it names a 1 MiB window, a four-byte size and a checksum"
+# A block the sequences do not shrink goes out raw, and a raw block moves
+# no offsets in the decoder; nor may it in the encoder. Noise with one
+# six-byte repeat 100 bytes back - found, then thrown away with its
+# block - between text and a block of period 100, whose first match is
+# 100 back: a repeat code there would name an offset the decoder never
+# saw.
+noisy = random_bytes(131072, 21_u64)
+planted = String.new(131072) do |dst|
+  dst.copy_from(noisy.to_unsafe, 131072)
+  i = 0
+  while i < 6
+    dst[150 + i] = dst[50 + i]
+    i = i + 1
+  end
+end
+period = random_bytes(100, 23_u64)
+periodic = "Q" + period * 1310
+between = lines(2400)[0, 131072] + planted + periodic
+reads_as Zstd.compress(between), between, "a raw block between two compressed ones"
+puts "  runs, repetition, noise, a 600 KB back-reference, one past the window, and a raw block between two others each cost what they should"
+
+puts "\n== streaming"
+feed = Feed.new(hello_sum + "trailing", [3])
+z = ZstdReader.new { feed.next }
+assert_true z.leftover == "", "nothing is left over before the end"
+got = drain(z, [2])
+assert_true got == "hello", "a frame read two bytes at a time"
+# The source gave what the reader looked at to see no frame follows; the
+# rest it was never asked for.
+assert_true z.leftover == "traili" && z.leftover + feed.rest == "trailing", "what follows the last frame is left over (#{z.leftover.inspect})"
+# Whole, the bytes are all there is, and what does not begin a frame is
+# refused, as Python's zstd refuses it.
+junk = Zstd.decompress(hello_raw + "junk")
+assert_true junk.is_a?(ZstdError) && junk.as(ZstdError).message == "zstd: 4 bytes after the last frame are not a frame", "bytes after the last frame, whole: #{junk.inspect}"
+two = Zstd.compress(long_text)
+feed = Feed.new(two, [65536])
+z = ZstdReader.new { feed.next }
+first = z.read(1048576)
+assert_true first.is_a?(String) && first.as(String).bytesize == 131072, "a read of 1 MiB answers one block"
+assert_true feed.calls <= 3, "and asks the source only for what that block needs (#{feed.calls} calls)"
+puts "  leftover, reads of a block at most, and a source asked only for what a block needs"
+
+puts "\n== refused as a value"
+refused "", "ends before its first frame", "nothing"
+refused "abcd", "not a zstd frame (magic 64636261)", "four bytes that are not a frame"
+refused unhex("28b52ffd280529000068656c6c6f"), "frame header's reserved bit is set", "a reserved header bit"
+refused unhex("28b52ffd210706310000" + "6f7468657273"), "needs dictionary 7, and this decoder has none", "a dictionary"
+refused big_window, "needs a window of 16777216 bytes, past the limit of 8388608", "a 16 MiB window under the default limit"
+refused unhex("28b52ffd20052f000068656c6c6f"), "block type 3 is reserved", "a reserved block type"
+refused unhex("28b52ffd200429000068656c6c6f"), "a block of 5 bytes is past the frame's block maximum of 4", "a block past the content size of a single segment"
+refused unhex("28b52ffd200629000068656c6c6f"), "holds 5 bytes where its header says 6", "a content size the frame does not fill"
+refused unhex("28b52ffd2005290000686563"), "ends inside a block", "a raw block cut short"
+refused unhex("28b52ffd200418000068656c1100006c6f"), "holds more than the 4 bytes its header says", "blocks past the content size"
+refused unhex("28b52ffd20082d00004340008000"), "treeless literals block with no Huffman table before it", "treeless literals first"
+refused unhex("28b52ffd20041d00000001fc"), "repeated sequence table with no table before it", "a repeated table first"
+refused unhex("28b52ffd20041d0000000101"), "sequences section's reserved bits are set", "a reserved mode bit"
+refused unhex("28b52ffd20101d0000a17800"), "literals are past its maximum of 16 bytes", "literals past the block maximum"
+refused unhex("502a4d180a000000616263"), "ends inside a skippable frame", "a skippable frame cut short"
+refused patched(lines20_19, 93, 0x1f), "accuracy log of 20 is past 9", "an FSE table description with too fine an accuracy"
+refused patched(direct_19, 14, 0x44), "Huffman weights that do not complete a code", "Huffman weights that leave the code incomplete"
+refused patched(lines150_19, lines150_19.bytesize - 1, lines150_19.to_unsafe[lines150_19.bytesize - 1].to_i32 ^ 1), "content checksum does not match", "a checksum one bit off"
+refused patched(hello_sum, 10, 0x78), "content checksum does not match (", "content one byte off"
+cut = 0
+while cut < lines150_19.bytesize
+  refused piece_of(lines150_19, 0, cut), "ends", "python's 150 lines cut to #{cut} bytes"
+  cut = cut + 1
+end
+puts "  headers, blocks, tables and checksums that do not hold, and every cut of a frame, refused by name"
+
+args = Program.args
+if args.size > 0
+  dir = args[0]
+  entries = File.read(dir + "/index.txt").lines.map { |l| l.split('\t') }
+
+  puts "\n== against python's zstd"
+  count = 0
+  entries.each do |e|
+    next unless e[0] == "ok"
+    reads_as File.read(dir + "/" + e[1]), File.read(dir + "/" + e[2]), e[1], e[3].to_i
+    count = count + 1
+  end
+  puts "  #{count} streams python wrote, read whole, through pieces of 1 to 7 bytes, and by small reads"
+
+  puts "\n== python's refusals"
+  count = 0
+  entries.each do |e|
+    next unless e[0] == "refuse"
+    refused File.read(dir + "/" + e[1]), e[2], e[1], e[3].to_i
+    count = count + 1
+  end
+  puts "  #{count} streams refused, each by name"
+
+  puts "\n== a 64 MiB stream in bounded memory"
+  entries.each do |e|
+    next unless e[0] == "huge"
+    path = dir + "/" + e[1]
+    window = e[4].to_i
+    # Read once with a collection every 4 MiB, measuring what stays
+    # alive; then again without, timed.
+    GC.collect
+    base = GC.stats.bytes_kept_by_last_sweep
+    most = 0_u64
+    io = File.open(path)
+    z = ZstdReader.new do
+      piece = io.read_bytes(65536)
+      piece.bytesize == 0 ? nil : piece
+    end
+    crc = 0_u32
+    total = 0_i64
+    reads = 0
+    while true
+      piece = z.read(65536)
+      raise "ASSERTION FAILED: #{e[1]}: refused with #{piece.message.inspect}" if piece.is_a?(ZstdError)
+      break if piece.bytesize == 0
+      crc = CRC32.update(crc, piece.to_unsafe, piece.bytesize)
+      total = total + piece.bytesize.to_i64
+      reads = reads + 1
+      if reads % 64 == 0
+        GC.collect
+        kept = GC.stats.bytes_kept_by_last_sweep
+        most = kept - base if kept > base && kept - base > most
+      end
+    end
+    io.close
+    assert_true total == e[3].to_i.to_i64 && hex32(crc) == e[2], "#{e[1]}: #{total} bytes whose CRC-32 is #{hex32(crc)}, where python wrote #{e[3]} bytes of #{e[2]}"
+    bound = (window * 2 + 1048576).to_u64
+    assert_true most < bound, "#{e[1]}: #{most} bytes kept alive reading #{total}, past two #{window}-byte windows and 1 MiB"
+    puts "  #{total >> 20} MiB read keeping #{most >> 10} KiB alive, under two #{window >> 20} MiB windows and 1 MiB"
+    data = File.read(path)
+    best = 0_i64
+    3.times do |k|
+      t0 = IyiMark.now_ns
+      feed = Feed.new(data, [65536])
+      z = ZstdReader.new { feed.next }
+      n = 0_i64
+      while true
+        piece = z.read(131072)
+        raise "ASSERTION FAILED: #{e[1]} refused" if piece.is_a?(ZstdError)
+        break if piece.bytesize == 0
+        n = n + piece.bytesize.to_i64
+      end
+      t1 = IyiMark.now_ns
+      best = (t1 - t0).to_i64 if k == 0 || (t1 - t0).to_i64 < best
+    end
+    puts "  #{total >> 20} MiB through ZstdReader took #{best // 1000000} ms"
+  end
+
+  puts "\n== written for python"
+  count = 0
+  best = 0_i64
+  entries.each do |e|
+    next unless e[0] == "write"
+    plain = File.read(dir + "/" + e[1])
+    t0 = IyiMark.now_ns
+    stream = Zstd.compress(plain)
+    t1 = IyiMark.now_ns
+    best = (t1 - t0).to_i64 if e[1] == "text.bin"
+    back = Zstd.decompress(stream)
+    assert_true back.is_a?(String) && back.as(String) == plain, "#{e[1]}: what iyi wrote reads back"
+    File.write(dir + "/" + e[1] + ".iyi.zst", stream)
+    count = count + 1
+  end
+  puts "  #{count} corpora compressed for python to read; the 2.3 MB of text took #{best // 1000000} ms"
+end
+
+puts "\nALL CHECKS PASSED"

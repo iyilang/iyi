@@ -294,6 +294,29 @@
   a zone in a prefix is refused (Python keeps it), and so are a length
   out of range, a zone on IPv4 and more than 65,536 subnets at once.
 
+### Changed
+
+- **std/zip reads bzip2, LZMA, Zstandard and xz entries, and writes
+  bzip2 and Zstandard.** `ZipEntryReader` reads methods 12, 14, 93 and
+  95 through `Bzip2Reader`, std/xz's .lzma decoder, `ZstdReader` and
+  `XzReader`, streamed as deflate is, with the CRC-32 and size checked
+  as before. An LZMA entry's own header (APPNOTE 5.8.8) is turned into
+  the 13 bytes of a .lzma header, so std/xz is unchanged: the size is
+  the directory's, or "unknown" when bit 1 says an end marker ends the
+  data, and that marker must then be there. A Zstandard frame may name a
+  window up to 512 MiB and an LZMA or xz stream a dictionary up to
+  1.5 GiB, past the readers' defaults: both grow their buffers with the
+  output, which is held to the entry's declared size, and Python's
+  level-22 entries name 128 MiB. `ZipMethod::Bzip2` and
+  `ZipMethod::Zstandard` on `ZipWriter#add(name, String)` write
+  `Bzip2.compress` and `Zstd.compress` of the whole entry, with version
+  4.6 and 6.3 needed to extract; asked of a streamed entry they are a
+  panic, as those compressors take a whole input. Deflate64, PPMd and the
+  other methods are still refused by name, the sentence now listing six.
+  In a --release build, 50 MB of text Python 3.14 wrote reads in 300 ms
+  from bzip2 (Python 297), 85 ms from LZMA (57), 64 ms from Zstandard
+  (32).
+
 ### Fixed
 
 - **A large allocation begins on 16 bytes, so `--release` can read a

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Exercises `std/zip`: ZIP archives read and written in iyi, against
 # Python's `zipfile` as the oracle in both directions, and Info-ZIP's
-# `zip` and `unzip` where the machine has them.
+# `zip` and `unzip` where the machine has them - stored and deflate, and
+# the other methods: bzip2, LZMA, Zstandard and xz read from what
+# Python 3.14 writes (xz through a hook, as zipfile does not write it),
+# bzip2 and Zstandard written for Python to read, bzip2 both ways with
+# `zip -Z bzip2` and `unzip`.
 #
 #     bash bench/std_zip_exercise.sh
 set -u
@@ -59,7 +63,7 @@ if [ -z "$PY" ]; then
   exit 1
 fi
 if ! "$PY" - "$WORK/fixtures" <<'PY'
-import os, random, shutil, struct, subprocess, sys, zipfile, zlib
+import lzma, os, random, shutil, struct, subprocess, sys, zipfile, zlib
 
 d = sys.argv[1]
 T = (2023, 7, 14, 9, 30, 12)
@@ -214,6 +218,77 @@ with open(path[:-4] + ".expect", "w", encoding="utf-8", newline="") as f:
     f.write(listed)
 index.append("py-fakesig.zip")
 
+# The other methods, as Python 3.14's zipfile writes them: bzip2 (12),
+# LZMA (14, with its end marker and bit 1) and Zstandard (93) are its
+# own; xz (95, in APPNOTE 4.4.5's list) it does not write, and is given
+# it here through the three functions zipfile picks a method's
+# compressor with, the entry's data an .xz stream. The content is
+# written beside them for the exercise to compare whole:
+# `method-big.bin`, past bzip2's 900,000-byte block so a bzip2 entry is
+# more than one block, and the binary above.
+big = b"".join(b"%06d: a line for the other methods, %d\n" % (i, i % 977) for i in range(28000))
+assert len(big) > 900000
+open(os.path.join(d, "method-big.bin"), "wb").write(big)
+open(os.path.join(d, "method-binary.bin"), "wb").write(binary)
+ZIP_XZ = 95
+check_compression, get_compressor, get_decompressor = zipfile._check_compression, zipfile._get_compressor, zipfile._get_decompressor
+def xz_check(method):
+    if method != ZIP_XZ:
+        check_compression(method)
+def xz_compressor(method, level=None):
+    if method == ZIP_XZ:
+        return lzma.LZMACompressor(lzma.FORMAT_XZ, preset=6 if level is None else level)
+    return get_compressor(method, level)
+def xz_decompressor(method):
+    if method == ZIP_XZ:
+        return lzma.LZMADecompressor(lzma.FORMAT_XZ)
+    return get_decompressor(method)
+zipfile._check_compression, zipfile._get_compressor, zipfile._get_decompressor = xz_check, xz_compressor, xz_decompressor
+
+def method_entry(name, method):
+    zi = info(name, method)
+    if method == ZIP_XZ:
+        zi.extract_version = zi.create_version = 63
+    return zi
+def common(z, method):
+    z.writestr(method_entry("big.txt", method), big)
+    z.writestr(method_entry("binary.bin", method), binary)
+    z.writestr(method_entry("empty", method), b"")
+    z.writestr(method_entry("small.txt", method), b"hello, world\n")
+with zipfile.ZipFile(os.path.join(d, "py-bzip2.zip"), "w") as z:
+    common(z, zipfile.ZIP_BZIP2)
+    # Blocks of 100,000 bytes: ten blocks.
+    z.writestr(method_entry("big-1.txt", zipfile.ZIP_BZIP2), big, compresslevel=1)
+expect("py-bzip2.zip")
+with zipfile.ZipFile(os.path.join(d, "py-lzma.zip"), "w") as z:
+    common(z, zipfile.ZIP_LZMA)
+expect("py-lzma.zip")
+with zipfile.ZipFile(os.path.join(d, "py-zstd.zip"), "w") as z:
+    common(z, zipfile.ZIP_ZSTANDARD)
+    z.writestr(method_entry("big-19.txt", zipfile.ZIP_ZSTANDARD), big, compresslevel=19)
+    # Level 22 streamed names a window of 128 MiB, past the 8 MiB
+    # ZstdReader takes unless asked; 200,000 bytes, as it is slow.
+    z.writestr(method_entry("wide-22.txt", zipfile.ZIP_ZSTANDARD), big[:200000], compresslevel=22)
+expect("py-zstd.zip")
+with zipfile.ZipFile(os.path.join(d, "py-zstd.zip")) as z:
+    at = z.getinfo("wide-22.txt").header_offset
+raw = open(os.path.join(d, "py-zstd.zip"), "rb").read()
+at += 30 + sum(struct.unpack_from("<HH", raw, at + 26))
+assert raw[at:at + 4] == b"\x28\xb5\x2f\xfd" and raw[at + 4] & 0x20 == 0 and raw[at + 5] >> 3 >= 14, "wide-22.txt names no window past 8 MiB"
+with zipfile.ZipFile(os.path.join(d, "py-xz.zip"), "w") as z:
+    common(z, ZIP_XZ)
+    z.writestr(method_entry("big-0.txt", ZIP_XZ), big, compresslevel=0)
+expect("py-xz.zip")
+# Every method to a stream Python cannot seek: data descriptors.
+with open(os.path.join(d, "py-methods-stream.zip"), "wb") as raw_f:
+    with zipfile.ZipFile(Unseekable(raw_f), "w") as z:
+        for name, method in (("bzip2.txt", zipfile.ZIP_BZIP2), ("lzma.txt", zipfile.ZIP_LZMA),
+                             ("zstd.txt", zipfile.ZIP_ZSTANDARD), ("xz.txt", ZIP_XZ)):
+            z.writestr(method_entry(name, method), big)
+expect("py-methods-stream.zip")
+with zipfile.ZipFile(os.path.join(d, "py-methods-stream.zip")) as z:
+    assert all(i.flag_bits & 8 for i in z.infolist()), "py-methods-stream has no data descriptors"
+
 # Info-ZIP's zip, where it is installed: a tree, written to a file and
 # to a pipe (which it cannot seek, so it writes data descriptors). Its
 # names are not flagged UTF-8; the Unicode Path field carries them.
@@ -222,7 +297,7 @@ if shutil.which("zip"):
     os.makedirs(os.path.join(tree, "sub", "deeper"))
     os.makedirs(os.path.join(tree, "empty"))
     files = {"a.txt": text[:5000], "sub/b.bin": binary, "sub/deeper/c.txt": b"deep\n",
-             "zero": b"", "ünï.txt": "ünï\n".encode()}
+             "zero": b"", "ünï.txt": "ünï\n".encode(), "sub/big.txt": big}
     for name, body in files.items():
         with open(os.path.join(tree, name), "wb") as f:
             f.write(body)
@@ -239,6 +314,21 @@ if shutil.which("zip"):
     expect("zip-stream.zip")
     with zipfile.ZipFile(os.path.join(d, "zip-stream.zip")) as z:
         assert any(i.flag_bits & 8 for i in z.infolist()), "zip to a pipe wrote no data descriptors"
+    # bzip2 (-Z bzip2) where this zip was built with it, to a file and to
+    # a pipe; what does not shrink it stores, as it does with deflate.
+    if b"BZIP2_SUPPORT" in subprocess.run(["zip", "-v"], check=True, stdout=subprocess.PIPE).stdout:
+        subprocess.run(["zip", "-q", "-r", "-Z", "bzip2", "zip-bzip2.zip", "tree"], cwd=d, check=True)
+        expect("zip-bzip2.zip")
+        piped = subprocess.run(["zip", "-q", "-r", "-Z", "bzip2", "-", "tree"], cwd=d, check=True, stdout=subprocess.PIPE).stdout
+        with open(os.path.join(d, "zip-bzip2-stream.zip"), "wb") as out:
+            out.write(piped)
+        expect("zip-bzip2-stream.zip")
+        for name in ("zip-bzip2.zip", "zip-bzip2-stream.zip"):
+            with zipfile.ZipFile(os.path.join(d, name)) as z:
+                bz = [i.filename for i in z.infolist() if i.compress_type == zipfile.ZIP_BZIP2]
+                assert "tree/sub/big.txt" in bz and "tree/a.txt" in bz, (name, bz)
+    else:
+        print("  zip(1) here has no bzip2: the zip -Z bzip2 archives are not compared")
     shutil.rmtree(tree)
 else:
     print("  no zip(1) on this machine: the zip -r archives are not compared")
@@ -282,7 +372,8 @@ fi
 echo
 echo "== every zip section reported"
 for phrase in "== round trips" "== streaming reads" "== times" "== zip64" "== reading a file" \
-              "== refused as a value" "== names" "== extract" "== what python wrote" "== written for python"; do
+              "== refused as a value" "== names" "== extract" "== other methods" "== what python wrote" \
+              "== other methods, as python wrote them" "== written for python"; do
   if ! grep -qF "$phrase" "$WORK/zip-plain.out"; then
     echo "  missing section: $phrase"
     status=1
@@ -306,7 +397,7 @@ def lines_of(z):
         out.append("\t".join(["entry", i.filename, str(i.file_size), str(i.CRC), str(i.compress_type),
                               "%04d-%02d-%02d %02d:%02d:%02d" % i.date_time, str(i.flag_bits)]))
     return "\n".join(out) + "\n"
-for name in ("out-round", "out-zip64", "out-many", "out-empty"):
+for name in ("out-round", "out-zip64", "out-many", "out-empty", "out-bzip2", "out-zstd"):
     path = os.path.join(d, name + ".zip")
     with zipfile.ZipFile(path) as z:
         bad = z.testzip()
@@ -349,6 +440,15 @@ for name in ("out-round", "out-zip64", "out-many", "out-empty"):
             print("  out-many: %d entries" % len(infos)); failed = True
         else:
             print("  out-many: 70000 entries through the ZIP64 end record")
+    elif name in ("out-bzip2", "out-zstd"):
+        method, version = (zipfile.ZIP_BZIP2, 46) if name == "out-bzip2" else (zipfile.ZIP_ZSTANDARD, 63)
+        with zipfile.ZipFile(path) as z:
+            small = z.read("small.txt")
+        off = [(i.filename, i.compress_type, i.extract_version) for i in infos if i.compress_type != method or i.extract_version != version]
+        if off or small != b"hello, world\n":
+            print("  %s: entries in another method or version: %r" % (name, off)); failed = True
+        else:
+            print("  %s: %d entries, method %d, version needed %d.%d, each read to its CRC-32" % (name, len(infos), method, version // 10, version % 10))
     else:
         if infos or len(raw) != 22:
             print("  out-empty: %d entries in %d bytes" % (len(infos), len(raw))); failed = True
@@ -361,8 +461,15 @@ if command -v unzip >/dev/null 2>&1; then
   echo
   echo "== what iyi wrote, tested by Info-ZIP's unzip"
   # Not out-empty: unzip answers any empty archive with "zipfile is
-  # empty" and exit 1, Python's included.
-  for name in out-round out-zip64 out-many out-file; do
+  # empty" and exit 1, Python's included. out-bzip2 where this unzip was
+  # built with bzip2; out-zstd never, as UnZip 6.0 has no Zstandard.
+  names="out-round out-zip64 out-many out-file"
+  if unzip -v 2>/dev/null | grep -q USE_BZIP2; then
+    names="$names out-bzip2"
+  else
+    echo "  this unzip has no bzip2: out-bzip2 is not tested by it"
+  fi
+  for name in $names; do
     if unzip -tqq "$WORK/fixtures/$name.zip" >"$WORK/unzip.out" 2>&1; then
       echo "  $name: unzip -t finds no errors"
     else
@@ -456,6 +563,10 @@ other = ZipReader.open(m.to_s).or_panic
 z.open(other.entries[1]).or_panic'
 refuses "not an archive, or_panic" not_zip "zip: there is no end of central directory record: not a zip archive, or one cut short" \
   'ZipReader.open("not a zip").or_panic'
+refuses "bzip2 asked of a streamed entry" streamed_bzip2 'ZipWriter: "s.bz2" is streamed, and bzip2 is written from a String, whole' \
+  'ZipWriter.new(Memory.new).add("s.bz2", Memory.new("x"), ZipMethod::Bzip2)'
+refuses "Zstandard asked of a streamed entry" streamed_zstd 'ZipWriter: "s.zst" is streamed, and Zstandard is written from a String, whole' \
+  'ZipWriter.new(Memory.new).add("s.zst", Memory.new("x"), ZipMethod::Zstandard)'
 
 echo
 echo "== proving the checks can fail when the module is broken"
@@ -530,10 +641,83 @@ prove_broken "a streamed entry written without its descriptor flag" "streamed en
   'flags = name_flags(name) | 8' 'flags = name_flags(name)'
 prove_broken "seconds written whole, not in two-second steps" "modification time" \
   '(t.second // 2)}' 't.second}'
+# The other methods.
+prove_broken "xz not among the methods read" "py-xz.zip" \
+  '|| m == 93 || m == 95' '|| m == 93'
+prove_broken "an LZMA entry's own header handed to the decoder" "py-lzma.zip" \
+  'skip = method == 14 ? 9_i64 : 0_i64' 'skip = method == 14 ? 4_i64 : 0_i64'
+prove_broken "LZMA properties of any size taken" "LZMA properties that are not five bytes" \
+  'unless props == 5' 'if false'
+prove_broken "bit 1 ignored, an LZMA entry always ended by its size" "an LZMA entry with bit 1 is read to its marker" \
+  'size = entry.flags & 2 != 0 ? 0xffffffffffffffff_u64 : entry.size.to_u64' 'size = entry.size.to_u64'
+prove_broken "bit 1 ignored, an LZMA entry always ended by a marker" "an LZMA entry without bit 1 ends at its size" \
+  'size = entry.flags & 2 != 0 ? 0xffffffffffffffff_u64 : entry.size.to_u64' 'size = 0xffffffffffffffff_u64'
+prove_broken "Zstandard held to ZstdReader's 8 MiB window" "wide-22.txt" \
+  'ZSTD_WINDOW = 536870912' 'ZSTD_WINDOW = 8388608'
+prove_broken "LZMA held to XzReader's 64 MiB dictionary" "a 256 MiB LZMA dictionary" \
+  'XzReader::DICT_MAX) do' 'XzReader::DICT_LIMIT) do'
+prove_broken "bzip2 written needing 4.5 or less" "bzip2 needs version 4.6" \
+  'return 46 if method == 12' 'return 46 if false'
+prove_broken "Zstandard written needing 2.0" "zstd needs version 6.3" \
+  'return 63 if method == 93' 'return 63 if false'
+prove_broken "bzip2 asked for and the entry stored" "bzip2 written" \
+  'when ZipMethod::Bzip2     then Bzip2.compress(data)' 'when ZipMethod::Bzip2     then data'
+prove_broken "Zstandard asked for and the entry bzip2" "zstd written" \
+  'when ZipMethod::Zstandard then Zstd.compress(data)' 'when ZipMethod::Zstandard then Bzip2.compress(data)'
+prove_broken "a decoder's sentence dropped from its refusal" "a stored entry said to be bzip2" \
+  'ZipError.new("zip: #{@entry.name.inspect}: #{got.message}")' 'ZipError.new("zip: #{@entry.name.inspect}")'
+
+echo
+echo "== doc, format, other platforms and artifacts"
+if "$IYI" doc "$REPO/src/std/zip.iyi" >"$WORK/doc.txt" 2>&1 && grep -q "Zstandard = 93" "$WORK/doc.txt"; then
+  echo "  iyi doc reads std/zip ($(grep -c '^ *def ' "$WORK/doc.txt") methods), ZipMethod with bzip2 and Zstandard"
+else
+  echo "  iyi doc fails: $(grep -m1 -E 'Error|BUG' "$WORK/doc.txt")"
+  status=1
+fi
+if [ -x "$REPO/bin/crystal" ]; then
+  if "$REPO/bin/crystal" tool format --check "$REPO/src/std/zip.iyi" "$REPO/bench/std_zip_exercise.iyi" >"$WORK/format.log" 2>&1; then
+    echo "  the module and its exercise are formatted"
+  else
+    echo "  not formatted: $(grep -m1 produced "$WORK/format.log")"
+    status=1
+  fi
+fi
+apart=""
+for target in x86_64-linux-gnu aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do
+  if ! "$IYI" build --no-codegen --target "$target" -o "$WORK/cross" "$REPO/bench/std_zip_exercise.iyi" >"$WORK/cross.log" 2>&1; then
+    echo "  $target: $(grep -m1 -E 'Error|BUG' "$WORK/cross.log")"
+    apart="$apart $target"
+  fi
+done
+if [ -n "$apart" ]; then
+  echo "  FAIL: the exercise does not typecheck for:$apart"
+  status=1
+else
+  echo "  the exercise typechecks for x86_64-linux-gnu, aarch64-darwin, x86_64-windows-msvc, aarch64-linux-gnu, x86_64-linux-musl"
+fi
+# With the fixtures, so the other methods' readers are among what the
+# artifacts carry and run.
+mkdir -p "$WORK/r1/mods"
+if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_zip_exercise.iyi" \
+  && "$IYI" build --use-iyimod mods -o from-artifact "$REPO/bench/std_zip_exercise.iyi") >"$WORK/r1/build.log" 2>&1; then
+  "$WORK/r1/from-source" "$WORK/fixtures" >"$WORK/r1/source.out" 2>&1
+  "$WORK/r1/from-artifact" "$WORK/fixtures" >"$WORK/r1/artifact.out" 2>&1
+  if cmp -s "$WORK/r1/source.out" "$WORK/r1/artifact.out" && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
+    echo "  built from its artifacts, the exercise prints what it prints from source ($(wc -l <"$WORK/r1/source.out" | tr -d ' ') lines)"
+  else
+    echo "  from its artifacts the exercise prints otherwise:"
+    diff "$WORK/r1/source.out" "$WORK/r1/artifact.out" | sed -n '1,6p' | sed 's/^/    /'
+    status=1
+  fi
+else
+  echo "  the artifacts did not build: $(grep -m1 -E 'Error|BUG' "$WORK/r1/build.log")"
+  status=1
+fi
 
 echo
 if [ "$status" -eq 0 ]; then
-  echo "the std/zip exercise holds"
+  echo "the std/zip exercise holds ($mutations broken copies caught)"
 else
   echo "the std/zip exercise did not hold"
 fi

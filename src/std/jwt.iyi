@@ -259,8 +259,7 @@ pub struct JWK
 
   # The key a JWK's JSON text is, or why it is none.
   def self.parse(text : String) : JWK | JWTError
-    fields = JWTJson.object(JWTBytes.of(text), "JWK")!
-    JWTKeys.jwk(fields)
+    JWTKeys.jwk(JWTJson.object(JWTBytes.of(text), "JWK")!)
   end
 
   # The keys of a JWK Set (RFC 7517 section 5), `{"keys": [...]}`. A key
@@ -480,8 +479,7 @@ pub struct JWS
   # The payload of *token*, its form, its algorithm (one of *algorithms*)
   # and its signature under *key* checked as `JWT.decode` checks them.
   def self.verify(token : String, key : JWK | Array(JWK) | String | Array(UInt8), algorithms : Array(JWTAlgorithm)) : Array(UInt8) | JWTError
-    opened = JWTSign.open(token, key, algorithms)!
-    opened.payload
+    JWTSign.open(token, key, algorithms)!.payload
   end
 end
 
@@ -856,10 +854,7 @@ struct JWTToken
     unless pieces.size == 3
       return JWTError.new("a JWS is three base64url parts joined by dots, and this token has #{pieces.size}")
     end
-    header = JWTBase64.decode(pieces[0], "header")!
-    payload = JWTBase64.decode(pieces[1], "payload")!
-    signature = JWTBase64.decode(pieces[2], "signature")!
-    [header, payload, signature]
+    [JWTBase64.decode(pieces[0], "header")!, JWTBase64.decode(pieces[1], "payload")!, JWTBase64.decode(pieces[2], "signature")!]
   end
 
   # The text the signature is over: up to the second dot.
@@ -977,10 +972,7 @@ struct JWTClaims
   end
 end
 
-# Reading keys: JWK members, PEM, DER. Each `!` in this module is a
-# statement of its own, never an argument: a method whose body an iyimod
-# artifact keeps as text wrote `f(g(x)!)` back as text the build from
-# artifacts could not read ("the call that began at line N is still open").
+# Reading keys: JWK members, PEM, DER.
 struct JWTKeys
   RSA_ENCRYPTION = "1.2.840.113549.1.1.1"
   EC_PUBLIC_KEY  = "1.2.840.10045.2.1"
@@ -1136,11 +1128,7 @@ struct JWTKeys
     public = rsa_key(RsaPublicKey.new(n, e))!
     strong(public)!
     d = JWTField.uint(fields, "d")!
-    others = [] of Array(UInt8)?
-    ["p", "q", "dp", "dq", "qi"].each do |name|
-      value = JWTField.uint(fields, name)!
-      others << value
-    end
+    others = ["p", "q", "dp", "dq", "qi"].map { |name| JWTField.uint(fields, name)! }
     return JWTError.new("an RSA JWK with oth, the primes past two, which this does not take") if fields.has_key?("oth")
     if d.nil?
       return JWTError.new("an RSA JWK with CRT parameters and no d") if others.any? { |x| !x.nil? }
@@ -1154,8 +1142,7 @@ struct JWTKeys
     if p.nil? || q.nil? || dp.nil? || dq.nil? || qi.nil?
       return JWTError.new("an RSA private JWK without all of p, q, dp, dq and qi, which this signs with")
     end
-    signer = JWTRsaPrivate.build(public, d, p, q, dp, dq, qi)!
-    JWTRsa.new(public, signer)
+    JWTRsa.new(public, JWTRsaPrivate.build(public, d, p, q, dp, dq, qi)!)
   end
 
   private def self.ec(fields : Hash(String, Any)) : JWTEc | JWTError
@@ -1212,18 +1199,12 @@ struct JWTKeys
     material = case label
                when "PUBLIC KEY"      then spki(der)!
                when "PRIVATE KEY"     then pkcs8(der)!
-               when "RSA PUBLIC KEY"  then rsa_pkcs1(der)!
+               when "RSA PUBLIC KEY"  then rsa_public(rsa_key(RsaPublicKey.from_pkcs1(der))!)!
                when "RSA PRIVATE KEY" then pkcs1_private(der)!
                when "EC PRIVATE KEY"  then sec1(der)!
                else                        certificate(der)!
                end
     JWK.new(kty_of(material), material, kid, nil, nil, nil)
-  end
-
-  # PKCS #1's RSAPublicKey (RFC 8017 appendix A.1.1).
-  private def self.rsa_pkcs1(der : Array(UInt8)) : JWTRsa | JWTError
-    key = rsa_key(RsaPublicKey.from_pkcs1(der))!
-    rsa_public(key)
   end
 
   private def self.kty_of(material : JWTOct | JWTRsa | JWTEc | JWTOkp) : String
@@ -1261,17 +1242,11 @@ struct JWTKeys
     return JWTError.new("an AlgorithmIdentifier with no algorithm") if algorithm.empty?
     oid = asn1_text(algorithm[0].oid)!
     case oid
-    when RSA_ENCRYPTION
-      key = rsa_key(RsaPublicKey.from_spki(top))!
-      rsa_public(key)
-    when EC_PUBLIC_KEY
-      key = ec_key(EcdsaPublicKey.from_spki(top))!
-      JWTEc.new(key, nil, nil)
+    when RSA_ENCRYPTION then rsa_public(rsa_key(RsaPublicKey.from_spki(top))!)
+    when EC_PUBLIC_KEY  then JWTEc.new(ec_key(EcdsaPublicKey.from_spki(top))!, nil, nil)
     when ED25519
       return JWTError.new("an Ed25519 key whose algorithm carries parameters, which RFC 8410 says are absent") unless algorithm.size == 1
-      point = asn1_bytes(fields[1].bit_string)!
-      key = curve_key(Ed25519PublicKey.from_bytes(point))!
-      JWTOkp.new(key, nil)
+      JWTOkp.new(curve_key(Ed25519PublicKey.from_bytes(asn1_bytes(fields[1].bit_string)!))!, nil)
     else
       JWTError.new("a public key for #{oid}, which no algorithm here signs with")
     end
@@ -1302,8 +1277,7 @@ struct JWTKeys
       sec1(inner)
     when ED25519
       return JWTError.new("an Ed25519 key whose algorithm carries parameters, which RFC 8410 says are absent") unless algorithm.size == 1
-      wrapped = asn1_value(Der.parse(inner))!
-      seed = asn1_bytes(wrapped.octet_string)!
+      seed = asn1_bytes(asn1_value(Der.parse(inner))!.octet_string)!
       return JWTError.new("an Ed25519 private key of #{seed.size} bytes, not 32") unless seed.size == 32
       public = curve_key(Ed25519PublicKey.from_bytes(Ed25519.public_key(seed)))!
       i = 3
@@ -1327,15 +1301,10 @@ struct JWTKeys
     return JWTError.new("an RSAPrivateKey of #{fields.size} values, not 9") unless fields.size == 9
     version = asn1_int(fields[0].integer)!
     return JWTError.new("an RSAPrivateKey of version #{version}: more than two primes, which this does not take") unless version == 0_i64
-    numbers = [] of Array(UInt8)
-    fields[1, 8].each do |field|
-      number = asn1_bytes(field.unsigned_integer)!
-      numbers << number
-    end
+    numbers = fields[1, 8].map { |field| asn1_bytes(field.unsigned_integer)! }
     public = rsa_key(RsaPublicKey.new(numbers[0], numbers[1]))!
     strong(public)!
-    signer = JWTRsaPrivate.build(public, numbers[2], numbers[3], numbers[4], numbers[5], numbers[6], numbers[7])!
-    JWTRsa.new(public, signer)
+    JWTRsa.new(public, JWTRsaPrivate.build(public, numbers[2], numbers[3], numbers[4], numbers[5], numbers[6], numbers[7])!)
   end
 
   # SEC 1's ECPrivateKey (RFC 5915) on P-256, std/p256 checking it.

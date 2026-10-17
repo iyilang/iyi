@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+## 0.18.0 — 2026-10-17
+
+**iyi's own library reaches the network by itself: TLS 1.3 at both ends,
+HTTPS, HTTP/2, WebSocket over TLS and the certificates beneath them,
+written in iyi from the RFCs, with no C library under any of it.**
+std/tls is a client and a server - X25519 and secp256r1, AES-GCM and
+ChaCha20-Poly1305, ECDSA, RSA-PSS and Ed25519 checked, Ed25519 and P-256
+signed in constant time, client certificates in both directions,
+certificates chosen by server_name and keying material exported - over
+std/x509, std/ecdsa, std/rsa, std/curve25519, std/p256 and std/aead, each
+held to OpenSSL's verdicts, and bounded against hostile peers: a chain
+search stops at 100 signature checks, input is read in time that grows
+with it, a handshake has a deadline, keys move before their record limit,
+and a read that times out leaves the connection open. Records move at two
+to three and a half times their earlier rate, now that the prelude's
+arrays join and slice in one copy. std/http fetches and serves
+HTTP/1.1 and HTTP/2 over it, std/websocket speaks `wss://`, and a program
+resolves names through iyi's own resolver. Around them came ninety-three
+additions - XPath 1.0, `BigFloat`, grapheme clusters,
+`WeakRef`, processes a program talks to, file locks, signals, regular
+expressions with groups and Unicode, time zones, zip and tar, password
+hashing among them - each exercised beside the other library's or the
+platform's own answers, with broken copies of the module proving every
+check can fail. A wasm32 program keeps what its locals hold through a
+collection, plain and optimised, where an optimised build freed it.
+
+**Some answers change:** `Hash#==` compares contents, regular
+expressions consume whole UTF-8 characters, `String#gsub` reads `\0`-`\9`
+in its replacement, `IyiSocket.connect` resolves a host name, `File.open`
+in `"a"` appends, a `Secure` cookie is sent over `https://` alone, and a
+wasm32 `--release` binary is about 5% larger, allocation-heavy code about
+a third slower, for keeping its locals where the collector reads. **Some
+programs that compiled are refused:** a script without a `module` line
+that defines `assert_eq` or another of the prelude's new test names.
+
+**Not here, and said so:** std/tls has not been audited and is not to be
+called secure until it is; TLS 1.2, resumption and 0-RTT are not there.
+The language server twice left a `shutdown` unanswered on darwin and
+Windows CI, not on Linux's, cause not found. The scheduler that spreads
+tasks across cores comes after this release; a REPL is not planned.
+
 ### Added
 
 - **`UdpSocket.bind?` answers a refused bind instead of raising it.** A

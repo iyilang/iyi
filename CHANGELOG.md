@@ -4,6 +4,29 @@
 
 ### Added
 
+- **std/smtp: an SMTP client (RFC 5321) over std/socket and std/tls.**
+  `SmtpClient.connect(host, port, security, config, helo, timeout_ms) :
+  SmtpClient | SmtpError` greets and says EHLO (HELO after a 500, 502 or
+  504), under `SmtpSecurity::StartTls` (the default, which the server
+  must offer), `Tls` from the first byte (port 465) or `Cleartext`;
+  after STARTTLS it says EHLO again and forgets what it was told, and a
+  server that sends anything after its 220 to STARTTLS is refused. The
+  EHLO name is the caller's or the connection's address literal. `auth`
+  sends AUTH PLAIN, LOGIN or CRAM-MD5, the first offered unless named,
+  and refuses to send a password without TLS unless `cleartext_auth` is
+  set. `send(message)` takes a `Mail::Message`'s From, To, Cc and Bcc,
+  or `send(sender, recipients, data)`; MAIL FROM carries SIZE, and a
+  message past the server's is refused before it goes, BODY=8BITMIME for
+  8-bit data (refused where neither 8BITMIME nor SMTPUTF8 is offered) and
+  SMTPUTF8 for RFC 6532 addresses (refused where it is not offered); a
+  refused recipient ends the transaction with RSET, so a message goes to
+  all its recipients or none; DATA's lines are made CRLF and its leading
+  dots doubled. Replies are read whole, their lines' codes held to agree,
+  a line past 4096 bytes or a reply past 100 lines refused. Errors are
+  `SmtpError` values whose `code` is the reply's (0 below SMTP, and then
+  the connection is closed) and `reply` its text; every read and write
+  waits at most `timeout_ms`, five minutes unless asked, and one that
+  runs out says `timed_out?`.
 - **std/mail: Internet mail messages (RFC 5322, MIME) built and read in
   iyi.** `Mail::Message` takes From, To, Cc, Bcc, Reply-To, the Subject,
   a Date (`Mail.date(unix, offset)` writes one) and a Message-ID from the

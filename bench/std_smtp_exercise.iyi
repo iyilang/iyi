@@ -1,0 +1,416 @@
+# Exercises `std/smtp` against servers scripted here, over loopback:
+# replies of many lines, EHLO's extensions and HELO after a refused EHLO,
+# dot-stuffing as the server reads it, the reply codes errors carry, a
+# recipient refused and the RSET after it, replies that are not replies,
+# a server that hangs up or says nothing, STARTTLS refused and the bytes
+# after its 220, AUTH PLAIN, LOGIN and RFC 2195's CRAM-MD5 example, SIZE,
+# 8BITMIME and SMTPUTF8.
+#
+#     IYI_PATH=src:samples/iyi ./bin/iyi run bench/std_smtp_exercise.iyi
+#
+# `client PORT SCENARIO [ROOTS]` is the other end of
+# bench/std_smtp_exercise.sh's Python server.
+
+module std_smtp_exercise
+
+import std/smtp::{SmtpClient, SmtpError, SmtpSecurity, SmtpAuth, SmtpReply}
+import std/mail::{Mail, MailError}
+import std/socket::{IyiSocket, SocketError}
+import std/tls::{TlsConfig}
+import std/x509::{Certificate}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def hex(text : String) : String
+  digits = "0123456789abcdef"
+  io = String::Builder.new(text.bytesize * 2 + 1)
+  p = text.to_unsafe
+  i = 0
+  while i < text.bytesize
+    io << digits[p[i].to_i32 >> 4]
+    io << digits[p[i].to_i32 & 15]
+    i = i + 1
+  end
+  io.to_s
+end
+
+# What a session's step answered, as one line.
+def said(got : SmtpError | Nil) : String
+  return "ok" unless got
+  "#{got.code} #{got.message}#{got.timed_out? ? " (timed out)" : ""}"
+end
+
+def said(got : SmtpClient | SmtpError) : String
+  got.is_a?(SmtpError) ? said(got.as(SmtpError)) : "connected"
+end
+
+# The server's end of one connection: it reads lines and, for each, sends
+# what the script says. A step is the command it waits for (a prefix;
+# "" for nothing, before the greeting) and the reply; a reply of "HANGUP"
+# closes the connection, "SILENT" sends nothing, and after DATA's 354
+# the message is read to its lone dot and kept as it came.
+class Scripted
+  getter heard : Array(String) = [] of String
+  getter data : String = ""
+  @held : String = ""
+  @socket : IyiSocket
+
+  def initialize(@socket : IyiSocket)
+  end
+
+  def line : String?
+    while true
+      nl = @held.index('\n')
+      if nl
+        got = @held[0, nl + 1]
+        @held = @held[nl + 1, @held.bytesize - nl - 1]
+        return got
+      end
+      more = @socket.read(4096)
+      return nil unless more.is_a?(String)
+      return nil if more.empty?
+      @held = @held + more
+    end
+    nil
+  end
+
+  def run(script : Array({String, String})) : Nil
+    script.each do |step|
+      unless step[0].empty?
+        got = line
+        return unless got
+        @heard << got.chomp('\n').chomp('\r')
+        raise "ASSERTION FAILED: the server waited for #{step[0].inspect}, and heard #{got.inspect}" unless got.upcase.starts_with?(step[0])
+      end
+      case step[1]
+      when "HANGUP"
+        @socket.close
+        return
+      when "SILENT"
+        sleep(3000)
+        @socket.close
+        return
+      else
+        @socket.write(step[1])
+      end
+      if step[0] == "DATA" && step[1].starts_with?("354")
+        io = String::Builder.new(256)
+        while true
+          got = line
+          return unless got
+          break if got == ".\r\n"
+          io << got
+        end
+        @data = io.to_s
+      end
+    end
+    # Whatever the client sends after the script is heard, to its close.
+    while got = line
+      @heard << got.chomp('\n').chomp('\r')
+    end
+    @socket.close
+  end
+end
+
+EHLO_REPLY = "250-test.example greets you\r\n250-SIZE 1000\r\n250-8BITMIME\r\n250-AUTH PLAIN LOGIN CRAM-MD5\r\n250 HELP\r\n"
+
+# *script* served on a port of its own while *work* runs as a client of
+# it; what the server heard, and the DATA it read.
+def serve(script : Array({String, String}), &work : Int32 -> Nil) : Scripted
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  port = listener.local_port
+  server = nil.as(Scripted?)
+  group do |g|
+    g.spawn do
+      conn = listener.accept
+      listener.close
+      if conn.is_a?(IyiSocket)
+        conn.read_timeout_ms = 10000
+        s = Scripted.new(conn)
+        server = s
+        s.run(script)
+      end
+      0
+    end
+    work.call(port)
+    0
+  end
+  found = server
+  return found if found
+  raise "ASSERTION FAILED: no connection was served"
+end
+
+def open(port : Int32, timeout_ms : Int32 = 5000) : SmtpClient | SmtpError
+  SmtpClient.connect("127.0.0.1", port, SmtpSecurity::Cleartext, TlsConfig.new, "client.example", timeout_ms)
+end
+
+def session(port : Int32) : SmtpClient
+  got = open(port)
+  raise "ASSERTION FAILED: the session did not open: #{got.message}" if got.is_a?(SmtpError)
+  got
+end
+
+def letter(text : String) : Mail::Message
+  msg = Mail::Message.new
+  msg.from = Mail::Address.new("ann@example.com", "Ann")
+  msg.to << Mail::Address.new("bob@example.org", "Bob")
+  msg.bcc << Mail::Address.new("eve@example.net")
+  msg.subject = "Dots"
+  msg.date = Mail.date(0_i64)
+  msg.text = text
+  msg
+end
+
+# --- The other end of bench/std_smtp_exercise.sh ---
+
+def client(port : Int32, scenario : String, roots : String) : Nil
+  config = TlsConfig.new
+  unless roots.empty?
+    config.roots = Certificate.from_pem(File.read(roots)).or_panic
+  end
+  security = case scenario
+             when "starttls", "no-starttls", "wrong-cert" then SmtpSecurity::StartTls
+             when "tls"                                   then SmtpSecurity::Tls
+             else                                              SmtpSecurity::Cleartext
+             end
+  timeout = scenario == "silent" ? 1000 : 10000
+  host = security == SmtpSecurity::Cleartext ? "127.0.0.1" : "localhost"
+  got = SmtpClient.connect(host, port, security, config, "client.example", timeout)
+  if got.is_a?(SmtpError)
+    puts "connect: #{said(got)}"
+    return
+  end
+  smtp = got
+  puts "tls #{smtp.tls?}"
+  smtp.cleartext_auth = true
+  mechanism = scenario == "starttls" ? SmtpAuth::Login : (scenario == "cram" ? SmtpAuth::CramMd5 : nil)
+  password = scenario == "bad-password" ? "wrong" : "s3cret pass"
+  unless scenario == "utf8"
+    problem = smtp.auth("ann@example.com", password, mechanism)
+    puts "auth: #{said(problem)}"
+    return if problem
+  end
+  msg = letter(".\n..two\n.three\nplain\n. space\n\nend\n.")
+  msg.to << Mail::Address.new("nobody@example.org") if scenario == "reject"
+  if scenario == "utf8"
+    msg.to << Mail::Address.new("jörg@bücher.example", "Jörg")
+  end
+  puts "message #{hex(msg.to_s)}"
+  problem = smtp.send(msg)
+  puts "send: #{said(problem)}"
+  return if problem
+  puts "quit: #{said(smtp.quit)}"
+end
+
+if Program.args.size > 0
+  client(Program.args[1].to_i, Program.args[2], Program.args.size > 3 ? Program.args[3] : "") if Program.args[0] == "client"
+  exit 0
+end
+
+puts "== dot-stuffing"
+assert_str "..\r\n.\r\n", SmtpClient.stuffed("."), "a lone dot"
+assert_str "a\r\n.\r\n", SmtpClient.stuffed("a"), "a CRLF is added before the end"
+assert_str "a\r\nb\r\nc\r\n.\r\n", SmtpClient.stuffed("a\nb\rc\r\n"), "LF and CR become CRLF, and no CRLF is doubled"
+assert_str "a.b\r\n..c\r\n.\r\n", SmtpClient.stuffed("a.b\n.c"), "only a dot at a line's start is doubled"
+assert_str ".\r\n", SmtpClient.stuffed(""), "nothing is the lone dot"
+puts "  RFC 5321 section 4.5.2, line breaks made CRLF"
+
+puts "== a whole session"
+msg = letter(".\n..two\n.three\nplain\n. space\n\nend\n.")
+sent = "x"
+server = serve([{"", "220-test.example ESMTP\r\n220 second line\r\n"}, {"EHLO CLIENT.EXAMPLE", EHLO_REPLY},
+                {"MAIL FROM:<ANN@EXAMPLE.COM> SIZE=", "250 ok\r\n"}, {"RCPT TO:<BOB@EXAMPLE.ORG>", "250 ok\r\n"},
+                {"RCPT TO:<EVE@EXAMPLE.NET>", "251 will forward\r\n"}, {"DATA", "354 go ahead\r\n"},
+                {"", "250 2.0.0 queued\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  assert_true smtp.greeting.code == 220 && smtp.greeting.lines == ["test.example ESMTP", "second line"], "a greeting of two lines"
+  assert_str "1000", smtp.extensions["SIZE"]? || "-", "SIZE's parameter"
+  assert_str "PLAIN LOGIN CRAM-MD5", smtp.extensions["AUTH"]? || "-", "AUTH's parameters"
+  assert_true smtp.extensions.has_key?("8BITMIME") && smtp.extensions.has_key?("HELP"), "extensions without parameters"
+  assert_true !smtp.extensions.has_key?("TEST.EXAMPLE"), "the greeting line of EHLO is not an extension"
+  assert_true !smtp.tls?, "a cleartext session is not under TLS"
+  sent = SmtpClient.stuffed(msg.to_s)
+  assert_str "ok", said(smtp.send(msg)), "the message is sent"
+  assert_str "ok", said(smtp.quit), "QUIT is answered 221"
+  assert_true smtp.closed?, "QUIT closes the connection"
+end
+assert_true server.heard[1].starts_with?("MAIL FROM:<ann@example.com> SIZE=#{sent.bytesize}"), "MAIL FROM names the size: #{server.heard[1]}"
+assert_true !server.heard[1].includes?("BODY=8BITMIME"), "an ASCII message does not ask for 8BITMIME"
+assert_str "RCPT TO:<eve@example.net>", server.heard[3], "Bcc's address is a recipient"
+assert_true server.data.ends_with?("\r\n..\r\n...two\r\n..three\r\nplain\r\n.. space\r\n\r\nend\r\n..\r\n"), "dots are doubled at a line's start"
+assert_true !server.data.includes?("eve@example.net"), "the Bcc address is not in the message"
+unstuffed = server.data.split("\r\n").map { |l| l.starts_with?(".") ? l[1, l.bytesize - 1] : l }.join("\r\n")
+assert_str msg.to_s + "\r\n", unstuffed, "the server reads back the message after undoing the dots"
+assert_str "QUIT", server.heard.last, "QUIT is the last command"
+puts "  multi-line greeting and EHLO, SIZE, Bcc as a recipient, dot-stuffing, QUIT"
+
+puts "== reply codes"
+server = serve([{"", "220 hi\r\n"}, {"EHLO", "250 hi\r\n"}, {"MAIL FROM", "250 ok\r\n"}, {"RCPT TO:<BOB", "250 ok\r\n"},
+                {"RCPT TO:<EVE", "550-5.1.1 no such\r\n550 5.1.1 user here\r\n"}, {"RSET", "250 reset\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  got = smtp.send(letter("hi"))
+  assert_true !got.nil? && got.code == 550, "a refused recipient is its 550: #{said(got)}"
+  assert_str "5.1.1 no such\n5.1.1 user here", got ? got.reply : "", "the reply's text, both lines"
+  assert_str "SMTP: RCPT TO:<eve@example.net> was refused: 550 5.1.1 no such / 5.1.1 user here", got ? got.message : "", "the error's sentence"
+  assert_true !smtp.closed?, "a refusal leaves the session open"
+  smtp.quit
+end
+assert_str "RSET", server.heard[4], "a refused recipient ends the transaction with RSET"
+server = serve([{"", "220 hi\r\n"}, {"EHLO", "250 hi\r\n"}, {"MAIL FROM", "250 ok\r\n"}, {"RCPT", "250 ok\r\n"}, {"RCPT", "250 ok\r\n"},
+                {"DATA", "554 5.7.1 no thanks\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  got = smtp.send(letter("hi"))
+  assert_true !got.nil? && got.code == 554 && got.message.includes?("DATA was refused"), "a refused DATA: #{said(got)}"
+  smtp.quit
+end
+server = serve([{"", "220 hi\r\n"}, {"EHLO", "250 hi\r\n"}, {"MAIL FROM", "250 ok\r\n"}, {"RCPT", "250 ok\r\n"}, {"RCPT", "250 ok\r\n"},
+                {"DATA", "354 go\r\n"}, {"", "452 4.3.1 full\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  got = smtp.send(letter("hi"))
+  assert_true !got.nil? && got.code == 452, "a message refused after its dot: #{said(got)}"
+  smtp.quit
+end
+greeted = ""
+serve([{"", "554 5.3.2 not now\r\n"}]) { |port| greeted = said(open(port)) }
+assert_str "554 SMTP: the server did not greet with 220: 554 5.3.2 not now", greeted, "a greeting of 554"
+puts "  550 with its lines and RSET, 554 to DATA, 452 after the dot, 554 greeting"
+
+puts "== EHLO and HELO"
+server = serve([{"", "220 hi\r\n"}, {"EHLO", "502 5.5.2 what\r\n"}, {"HELO CLIENT.EXAMPLE", "250 old friend\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  assert_true smtp.extensions.empty?, "after HELO no extension is taken to be offered"
+  assert_true SmtpClient.ascii?(letter("caf\u00e9 \u2603").to_s), "std/mail writes non-ASCII text in 7 bits"
+  got = smtp.send("a@x.test", ["b@x.test"], "Subject: x\r\n\r\ncaf\u00e9\r\n")
+  assert_true !got.nil? && got.message.includes?("8BITMIME"), "8-bit data is not sent to a server without 8BITMIME: #{said(got)}"
+  smtp.quit
+end
+assert_str "HELO client.example", server.heard[1], "HELO after a refused EHLO"
+server = serve([{"", "220 hi\r\n"}, {"EHLO", "250 hi\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  got = SmtpClient.connect("127.0.0.1", port, SmtpSecurity::Cleartext, TlsConfig.new, nil, 5000)
+  got.as(SmtpClient).quit if got.is_a?(SmtpClient)
+end
+assert_str "EHLO [127.0.0.1]", server.heard[0], "the connection's address as a literal when no name is given"
+puts "  HELO after 502, the address literal, 8BITMIME needed for 8-bit"
+
+puts "== extensions in MAIL FROM"
+eight = "250-hi\r\n250-8BITMIME\r\n250 SIZE 100000\r\n"
+server = serve([{"", "220 hi\r\n"}, {"EHLO", eight}, {"MAIL FROM", "250 ok\r\n"}, {"RCPT", "250 ok\r\n"}, {"DATA", "354 go\r\n"},
+                {"", "250 ok\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  assert_str "ok", said(smtp.send("a@x.test", ["b@x.test"], "Subject: hi\r\n\r\ncaf\u00e9\r\n")), "8-bit data to a server with 8BITMIME"
+  smtp.quit
+end
+assert_true server.heard[1].ends_with?(" BODY=8BITMIME"), "BODY=8BITMIME for 8-bit data: #{server.heard[1]}"
+assert_true server.data.includes?("caf\u00e9"), "the 8-bit bytes are sent as they are"
+server = serve([{"", "220 hi\r\n"}, {"EHLO", "250-hi\r\n250 SIZE 100\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  got = smtp.send(letter("x" * 200))
+  assert_true !got.nil? && got.message.includes?("more than the server's SIZE of 100"), "a message past SIZE is refused before it is sent: #{said(got)}"
+  smtp.quit
+end
+assert_true server.heard.size == 2, "nothing is sent for a message past SIZE"
+utf = letter("hi")
+utf.to << Mail::Address.new("jörg@bücher.example")
+server = serve([{"", "220 hi\r\n"}, {"EHLO", "250 hi\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  got = smtp.send(utf)
+  assert_true !got.nil? && got.message.includes?("SMTPUTF8"), "a UTF-8 address needs SMTPUTF8: #{said(got)}"
+  smtp.quit
+end
+server = serve([{"", "220 hi\r\n"}, {"EHLO", "250-hi\r\n250 SMTPUTF8\r\n"}, {"MAIL FROM", "250 ok\r\n"}, {"RCPT", "250 ok\r\n"}, {"RCPT", "250 ok\r\n"},
+                {"RCPT", "250 ok\r\n"}, {"DATA", "354 go\r\n"}, {"", "250 ok\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  assert_str "ok", said(smtp.send(utf)), "a UTF-8 address to a server with SMTPUTF8"
+  smtp.quit
+end
+assert_true server.heard[1].ends_with?(" SMTPUTF8"), "MAIL FROM asks for SMTPUTF8: #{server.heard[1]}"
+assert_str "RCPT TO:<jörg@bücher.example>", server.heard[3], "the UTF-8 address as it is"
+puts "  BODY=8BITMIME, SIZE refused before sending, SMTPUTF8 asked for and needed"
+
+puts "== AUTH"
+plain = "AUTH PLAIN " + "AGFubkBleGFtcGxlLmNvbQBzM2NyZXQ="
+server = serve([{"", "220 hi\r\n"}, {"EHLO", EHLO_REPLY}, {"AUTH PLAIN", "235 2.7.0 ok\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  got = smtp.auth("ann@example.com", "s3cret")
+  assert_true !got.nil? && got.message.includes?("without TLS is refused"), "AUTH over cleartext is refused: #{said(got)}"
+  smtp.cleartext_auth = true
+  assert_str "ok", said(smtp.auth("ann@example.com", "s3cret")), "AUTH PLAIN, the first offered"
+  smtp.quit
+end
+assert_str plain, server.heard[1], "PLAIN's message is NUL, user, NUL, password in base64 (RFC 4616)"
+server = serve([{"", "220 hi\r\n"}, {"EHLO", EHLO_REPLY}, {"AUTH LOGIN", "334 VXNlcm5hbWU6\r\n"}, {"YW5U", "334 UGFzc3dvcmQ6\r\n"},
+                {"CZNJ", "535 5.7.8 bad credentials\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  smtp.cleartext_auth = true
+  got = smtp.auth("ann", "s3cret", SmtpAuth::Login)
+  assert_true !got.nil? && got.code == 535, "LOGIN refused is its 535: #{said(got)}"
+  smtp.quit
+end
+assert_str "YW5u", server.heard[2], "LOGIN's user in base64"
+assert_str "czNjcmV0", server.heard[3], "LOGIN's password in base64"
+# RFC 2195 section 2's example.
+server = serve([{"", "220 hi\r\n"}, {"EHLO", EHLO_REPLY}, {"AUTH CRAM-MD5", "334 PDE4OTYuNjk3MTcwOTUyQHBvc3RvZmZpY2UucmVzdG9uLm1jaS5uZXQ+\r\n"},
+                {"DGLT", "235 ok\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  smtp.cleartext_auth = true
+  assert_str "ok", said(smtp.auth("tim", "tanstaaftanstaaf", SmtpAuth::CramMd5)), "CRAM-MD5"
+  smtp.quit
+end
+assert_str "dGltIGI5MTNhNjAyYzdlZGE3YTQ5NWI0ZTZlNzMzNGQzODkw", server.heard[2], "RFC 2195's response to its challenge"
+server = serve([{"", "220 hi\r\n"}, {"EHLO", "250-hi\r\n250 AUTH XOAUTH2\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  smtp = session(port)
+  smtp.cleartext_auth = true
+  got = smtp.auth("a", "b")
+  assert_true !got.nil? && got.message.includes?("only XOAUTH2"), "no mechanism in common: #{said(got)}"
+  got = smtp.auth("a", "b", SmtpAuth::Plain)
+  assert_true !got.nil? && got.message.includes?("does not offer AUTH PLAIN"), "a mechanism not offered: #{said(got)}"
+  smtp.quit
+end
+puts "  refused in the clear, PLAIN, LOGIN, RFC 2195's CRAM-MD5, 535, none in common"
+
+puts "== servers that misbehave"
+said_here = ""
+serve([{"", "220 hi\r\n"}, {"EHLO", "HANGUP"}]) { |port| said_here = said(open(port)) }
+assert_str "0 SMTP: the server closed the connection", said_here, "a server that hangs up after EHLO"
+serve([{"", "220 hi\r\n"}, {"EHLO", "250 hi\r\n"}, {"MAIL", "250 ok\r\n"}, {"RCPT", "250 ok\r\n"}, {"RCPT", "250 ok\r\n"}, {"DATA", "354 go\r\n"}, {"", "HANGUP"}]) do |port|
+  smtp = session(port)
+  got = smtp.send(letter("hi"))
+  said_here = said(got)
+  assert_true smtp.closed?, "a connection that failed below SMTP is closed"
+  assert_str "0 SMTP: the connection is closed", said(smtp.send(letter("again"))), "and stays closed"
+end
+assert_str "0 SMTP: the server closed the connection", said_here, "a server that hangs up after the message"
+serve([{"", "SILENT"}]) { |port| said_here = said(open(port, 500)) }
+assert_true said_here.ends_with?("(timed out)"), "a server that says nothing times out: #{said_here}"
+serve([{"", "220-hi\r\n250 there\r\n"}]) { |port| said_here = said(open(port)) }
+assert_str "0 SMTP: a reply's lines have the codes 220 and 250", said_here, "a reply whose codes disagree"
+serve([{"", "hello\r\n"}]) { |port| said_here = said(open(port)) }
+assert_str "0 SMTP: the server's reply line \"hello\" is not a reply", said_here, "a line that is not a reply"
+serve([{"", "220 " + "x" * 5000 + "\r\n"}]) { |port| said_here = said(open(port)) }
+assert_str "0 SMTP: a reply line longer than 4096 bytes", said_here, "a line too long"
+serve([{"", "220-x\r\n" * 101}]) { |port| said_here = said(open(port)) }
+assert_str "0 SMTP: a reply of more than 100 lines", said_here, "a reply too long"
+serve([{"", "220 hi\r\n"}, {"EHLO", "250 hi\r\n"}, {"QUIT", "221 bye\r\n"}]) do |port|
+  got = SmtpClient.connect("127.0.0.1", port, SmtpSecurity::StartTls, TlsConfig.new, "client.example", 5000)
+  said_here = said(got)
+end
+assert_str "0 SMTP: the server does not offer STARTTLS", said_here, "STARTTLS required and not offered"
+server = serve([{"", "220 hi\r\n"}, {"EHLO", "250-hi\r\n250 STARTTLS\r\n"}, {"STARTTLS", "220 go ahead\r\n250 injected\r\n"}]) do |port|
+  got = SmtpClient.connect("127.0.0.1", port, SmtpSecurity::StartTls, TlsConfig.new, "client.example", 5000)
+  said_here = said(got)
+end
+assert_str "0 SMTP: the server sent more after its 220 to STARTTLS, which would be read as though it came under TLS", said_here, "bytes after STARTTLS's 220"
+serve([{"", "220 hi\r\n"}, {"EHLO", "250-hi\r\n250 STARTTLS\r\n"}, {"STARTTLS", "454 4.7.0 TLS not available\r\n"}]) do |port|
+  got = SmtpClient.connect("127.0.0.1", port, SmtpSecurity::StartTls, TlsConfig.new, "client.example", 5000)
+  said_here = said(got)
+end
+assert_str "454 SMTP: STARTTLS was refused: 454 4.7.0 TLS not available", said_here, "STARTTLS refused"
+puts "  hung up, silent, codes that disagree, lines that are no replies, STARTTLS missing, refused, injected"
+
+puts "ALL CHECKS PASSED"

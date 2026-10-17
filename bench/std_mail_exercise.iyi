@@ -1,0 +1,564 @@
+# Exercises `std/mail`: quoted-printable and base64 with their line
+# limits, RFC 2047's encoded-words and RFC 2047 section 8's examples,
+# header folding, RFC 5322 appendix A's addresses, messages and dates,
+# messages built and read back, charsets, and what a reader refuses.
+#
+#     IYI_PATH=src:samples/iyi ./bin/iyi run bench/std_mail_exercise.iyi
+#
+# With arguments it is the other end of bench/std_mail_exercise.sh's
+# comparisons with Python: `build SPEC DIR` writes the messages a spec
+# file describes, `parse DIR COUNT` describes the messages in DIR, and
+# `codec FILE` answers the encodings a case file asks for.
+
+module std_mail_exercise
+
+import std/mail::{Mail, MailError}
+import std/digest::{SHA256}
+
+def assert_true(cond : Bool, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}" unless cond
+end
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+def hex(text : String) : String
+  digits = "0123456789abcdef"
+  io = String::Builder.new(text.bytesize * 2 + 1)
+  io << "x"
+  p = text.to_unsafe
+  i = 0
+  while i < text.bytesize
+    io << digits[p[i].to_i32 >> 4]
+    io << digits[p[i].to_i32 & 15]
+    i = i + 1
+  end
+  io.to_s
+end
+
+# The bytes `x` and hex digits stand for.
+def unhex(text : String) : String
+  p = text.to_unsafe
+  n = (text.bytesize - 1) // 2
+  String.new(n) do |dst|
+    i = 0
+    while i < n
+      hi = p[1 + i * 2].to_i32
+      lo = p[2 + i * 2].to_i32
+      hi = hi >= 97 ? hi - 87 : hi - 48
+      lo = lo >= 97 ? lo - 87 : lo - 48
+      dst[i] = (hi * 16 + lo).to_u8
+      i = i + 1
+    end
+  end
+end
+
+def bytes(list : Array(Int32)) : String
+  String.new(list.size) do |p|
+    list.each_with_index { |b, i| p[i] = b.to_u8 }
+  end
+end
+
+def parsed(text : String) : Mail::Part
+  got = Mail.parse(text)
+  raise "ASSERTION FAILED: #{text[0, text.bytesize > 60 ? 60 : text.bytesize].inspect} did not parse: #{got.message}" if got.is_a?(MailError)
+  got
+end
+
+def refused(text : String) : String
+  got = Mail.parse(text)
+  return got.message if got.is_a?(MailError)
+  "parsed"
+end
+
+def text_of(part : Mail::Part?) : String
+  raise "ASSERTION FAILED: no such part" unless part
+  got = part.text
+  raise "ASSERTION FAILED: #{got.message}" if got.is_a?(MailError)
+  got
+end
+
+def body_of(part : Mail::Part) : String
+  got = part.body
+  raise "ASSERTION FAILED: #{got.message}" if got.is_a?(MailError)
+  got
+end
+
+def addrs(list : Array(Mail::Address) | MailError) : String
+  return "error: " + list.message if list.is_a?(MailError)
+  list.map { |a| "#{a.name}|#{a.address}" }.join(", ")
+end
+
+# The longest line of *text*, CRLF not counted.
+def widest(text : String) : Int32
+  most = 0
+  text.split("\r\n").each { |line| most = line.bytesize if line.bytesize > most }
+  most
+end
+
+def lone_breaks?(text : String) : Bool
+  p = text.to_unsafe
+  i = 0
+  while i < text.bytesize
+    if p[i] == 10_u8
+      return true unless i > 0 && p[i - 1] == 13_u8
+    elsif p[i] == 13_u8
+      return true unless i + 1 < text.bytesize && p[i + 1] == 10_u8
+    end
+    i = i + 1
+  end
+  false
+end
+
+def ascii?(text : String) : Bool
+  p = text.to_unsafe
+  i = 0
+  while i < text.bytesize
+    return false if p[i] >= 128_u8
+    i = i + 1
+  end
+  true
+end
+
+# Whether a quoted-printable line, its soft break set aside, ends inside
+# an escape.
+def cut_escape?(line : String) : Bool
+  body = line.ends_with?("=") ? line[0, line.bytesize - 1] : line
+  n = body.bytesize
+  (n >= 1 && body[n - 1] == '=') || (n >= 2 && body[n - 2] == '=')
+end
+
+# --- What bench/std_mail_exercise.sh asks of it ---
+
+def build(spec : String, dir : String) : Nil
+  count = 0
+  msg = Mail::Message.new
+  File.read(spec).split('\n').each do |line|
+    f = line.split(' ')
+    case f[0]
+    when "from"
+      msg.from = Mail::Address.new(unhex(f[2]), unhex(f[1]))
+    when "to"
+      msg.to << Mail::Address.new(unhex(f[2]), unhex(f[1]))
+    when "cc"
+      msg.cc << Mail::Address.new(unhex(f[2]), unhex(f[1]))
+    when "bcc"
+      msg.bcc << Mail::Address.new(unhex(f[2]), unhex(f[1]))
+    when "reply"
+      msg.reply_to << Mail::Address.new(unhex(f[2]), unhex(f[1]))
+    when "subject"
+      msg.subject = unhex(f[1])
+    when "date"
+      msg.date = Mail.date(f[1].to_i64, f[2].to_i)
+    when "id"
+      msg.message_id = unhex(f[1])
+    when "text"
+      msg.text = unhex(f[1])
+    when "html"
+      msg.html = unhex(f[1])
+    when "attach"
+      msg.attach(unhex(f[1]), unhex(f[2]), f[3] == "-" ? nil : unhex(f[3]))
+    when "header"
+      msg.header(unhex(f[1]), unhex(f[2]))
+    when "end"
+      File.write("#{dir}/#{count}.eml", msg.to_s)
+      puts "#{count} #{msg.recipients.map { |r| hex(r) }.join(",")} #{msg.utf8?}"
+      count = count + 1
+      msg = Mail::Message.new
+    end
+  end
+end
+
+def describe(dir : String, count : Int32) : Nil
+  i = 0
+  while i < count
+    puts "message #{i}"
+    got = Mail.parse(File.read("#{dir}/#{i}.eml"))
+    if got.is_a?(MailError)
+      puts "error #{got.message}"
+    else
+      puts "subject #{hex(got.subject || "")}"
+      ["From", "To", "Cc", "Reply-To"].each do |field|
+        list = got.addresses(field)
+        if list.is_a?(MailError)
+          puts "#{field} error #{list.message}"
+        else
+          list.each { |a| puts "#{field} #{hex(a.name)} #{hex(a.address)}" }
+        end
+      end
+      got.walk do |part|
+        name = part.filename
+        payload = "-"
+        unless part.multipart? || part.media_type == "message/rfc822"
+          data = part.media_type.starts_with?("text/") ? part.text : part.body
+          payload = data.is_a?(MailError) ? "error" : SHA256.hexdigest(data)
+        end
+        puts "part #{part.media_type} #{part.attachment? ? 1 : 0} #{name ? hex(name) : "-"} #{payload}"
+      end
+    end
+    i = i + 1
+  end
+end
+
+def codec(cases : String) : Nil
+  File.read(cases).split('\n').each do |line|
+    f = line.split(' ')
+    next if f.size < 2
+    data = unhex(f[1])
+    case f[0]
+    when "qp"
+      puts hex(Mail.encode_quoted_printable(data))
+    when "qpbin"
+      puts hex(Mail.encode_quoted_printable(data, binary: true))
+    when "unqp"
+      puts hex(Mail.decode_quoted_printable(data))
+    when "b64"
+      puts hex(Mail.encode_base64(data))
+    when "unb64"
+      puts hex(Mail.decode_base64(data))
+    when "fold"
+      puts hex(Mail.fold(unhex(f[2]), data))
+    when "words"
+      puts hex(Mail.decode_words(data))
+    when "date"
+      puts Mail.date(f[1].to_i64, f[2].to_i)
+    when "undate"
+      got = Mail.parse_date(data)
+      puts got.is_a?(MailError) ? "error" : "#{got[0]} #{got[1]}"
+    when "addresses"
+      got = Mail::Address.parse_list(data)
+      if got.is_a?(MailError)
+        puts "error"
+      else
+        puts got.map { |a| hex(a.name) + "/" + hex(a.address) }.join(",")
+      end
+    end
+  end
+end
+
+if Program.args.size > 0
+  case Program.args[0]
+  when "build"
+    build(Program.args[1], Program.args[2])
+  when "parse"
+    describe(Program.args[1], Program.args[2].to_i)
+  when "codec"
+    codec(Program.args[1])
+  end
+  exit 0
+end
+
+puts "== quoted-printable, RFC 2045 section 6.7"
+# Rule 5's example of soft breaks, read back.
+assert_str "Now's the time for all folk to come to the aid of their country.",
+  Mail.decode_quoted_printable("Now's the time =\r\nfor all folk to come=\r\n to the aid of their country."), "RFC 2045's soft break example"
+assert_str "=3D a=09b", Mail.encode_quoted_printable("= a\tb").gsub("\t", "=09"), "= is escaped, tab and space kept"
+assert_str "a=20\r\nb=09\r\n", Mail.encode_quoted_printable("a \nb\t\n"), "space and tab at a line's end are escaped"
+assert_str "caf=C3=A9", Mail.encode_quoted_printable("café"), "bytes past ASCII are escaped in upper case"
+assert_str "a\r\nb\r\nc\r\n", Mail.encode_quoted_printable("a\r\nb\rc\n"), "CRLF, CR and LF are each a hard break"
+assert_str "a=0D=0Ab=0Dc", Mail.encode_quoted_printable("a\r\nb\rc", binary: true), "binary escapes CR and LF"
+long = "x" * 200
+encoded = Mail.encode_quoted_printable(long)
+assert_true widest(encoded) <= 76, "quoted-printable lines are 76 or fewer: #{widest(encoded)}"
+assert_str long, Mail.decode_quoted_printable(encoded), "a long line comes back through its soft breaks"
+escapes = "é" * 60
+encoded = Mail.encode_quoted_printable(escapes)
+assert_true widest(encoded) <= 76, "escaped lines are 76 or fewer: #{widest(encoded)}"
+encoded.split("\r\n").each do |line|
+  assert_true line.ends_with?("=") || line == encoded.split("\r\n").last, "every wrapped line ends in its soft break: #{line.inspect}"
+  assert_true !cut_escape?(line), "no escape is cut by a soft break: #{line.inspect}"
+end
+assert_str escapes, Mail.decode_quoted_printable(encoded), "an escape is never cut by a soft break"
+all = String.new(256) { |p| 256.times { |i| p[i] = i.to_u8 } }
+assert_str all, Mail.decode_quoted_printable(Mail.encode_quoted_printable(all, binary: true)), "every byte comes back in binary"
+assert_str "a=zz =4 b", Mail.decode_quoted_printable("a=zz =4 b"), "an = that starts no escape is itself"
+assert_str "Jj", Mail.decode_quoted_printable("=4a=6A"), "escapes are read in either case"
+assert_str "a\r\nb", Mail.decode_quoted_printable("a  \t\r\nb"), "whitespace a gateway added at a line's end is dropped"
+assert_str "ab\nc", Mail.decode_quoted_printable("a=\nb\nc").gsub("\r\n", "\n"), "LF line ends are read too"
+puts "  RFC 2045's soft breaks, 76 columns, escapes never cut, every byte"
+
+puts "== base64, RFC 2045 section 6.8"
+assert_str "", Mail.encode_base64(""), "nothing is no lines"
+assert_str "Zm9vYmFy\r\n", Mail.encode_base64("foobar"), "RFC 4648's foobar, one line"
+wide = Mail.encode_base64(all)
+assert_true wide.split("\r\n").all? { |line| line.bytesize <= 76 }, "base64 lines are 76 or fewer"
+assert_str "", wide.split("\r\n").last, "every base64 line ends in CRLF"
+assert_true wide.split("\r\n")[0].bytesize == 76, "base64 lines are filled to 76"
+assert_str all, Mail.decode_base64(wide), "every byte comes back"
+assert_str "foobar", Mail.decode_base64("Zm9v\r\n Ym!!Fy"), "characters outside the alphabet are passed over"
+assert_str "f", Mail.decode_base64("Zg==Zm9v"), "the padding ends the data"
+assert_str "fo", Mail.decode_base64("Zm9"), "missing padding is taken"
+puts "  76 columns, RFC 4648's foobar, the alphabet alone counted"
+
+puts "== encoded-words, RFC 2047 section 8"
+assert_str "a", Mail.decode_words("=?ISO-8859-1?Q?a?="), "one word"
+assert_str "a b", Mail.decode_words("=?ISO-8859-1?Q?a?= b"), "a word and text"
+assert_str "ab", Mail.decode_words("=?ISO-8859-1?Q?a?= =?ISO-8859-1?Q?b?="), "the space between two words is dropped"
+assert_str "ab", Mail.decode_words("=?ISO-8859-1?Q?a?=  =?ISO-8859-1?Q?b?="), "two spaces between two words are dropped"
+assert_str "ab", Mail.decode_words("=?ISO-8859-1?Q?a?=\r\n    =?ISO-8859-1?Q?b?="), "a fold between two words is dropped"
+assert_str "a b", Mail.decode_words("=?ISO-8859-1?Q?a_b?="), "_ is a space"
+assert_str "a b", Mail.decode_words("=?ISO-8859-1?Q?a?= =?ISO-8859-1?Q?_b?="), "an encoded space survives between words"
+assert_str "Keld Jørn Simonsen", Mail.decode_words("=?ISO-8859-1?Q?Keld_J=F8rn_Simonsen?="), "ISO-8859-1 in Q"
+assert_str "If you can read this you understand the example.",
+  Mail.decode_words("=?ISO-8859-1?B?SWYgeW91IGNhbiByZWFkIHRoaXMgeW8=?= =?ISO-8859-1?B?dSB1bmRlcnN0YW5kIHRoZSBleGFtcGxlLg==?="), "B words, joined"
+assert_str "If you can read this yo =?ISO-8859-2?B?dSB1bmRlcnN0YW5kIHRoZSBleGFtcGxlLg==?=",
+  Mail.decode_words("=?ISO-8859-1?B?SWYgeW91IGNhbiByZWFkIHRoaXMgeW8=?= =?ISO-8859-2?B?dSB1bmRlcnN0YW5kIHRoZSBleGFtcGxlLg==?="), "a word in a charset not read is left as written"
+assert_str "Keith Moore", Mail.decode_words("=?US-ASCII*EN?Q?Keith_Moore?="), "RFC 2231's language is set aside"
+assert_str "ab", Mail.decode_words("=?utf-8?q?a?==?utf-8?q?b?="), "words written together"
+assert_str "x=?utf-8?q?a?=", Mail.decode_words("x=?utf-8?q?a?="), "a word inside a word is text"
+assert_str "=?utf-8?q?a=4?=", Mail.decode_words("=?utf-8?q?a=4?="), "a broken escape leaves the word as written"
+assert_str "=?utf-8?b?Zm9v!?=", Mail.decode_words("=?utf-8?b?Zm9v!?="), "a B word outside the alphabet is left as written"
+assert_str "€", Mail.decode_words("=?utf-8?b?4oKs?="), "UTF-8 in B"
+assert_str "€", Mail.decode_words("=?iso-8859-15?q?=A4?="), "ISO-8859-15's euro"
+assert_str "€", Mail.decode_words("=?windows-1252?q?=80?="), "windows-1252's euro"
+puts "  RFC 2047 section 8's examples, words together and apart, broken words kept"
+
+puts "== header folding"
+assert_str "Subject: Hello world\r\n", Mail.fold("Subject", "Hello world"), "a short ASCII value as it is"
+words = (1..40).to_a.map { |i| "word#{i}" }.join(" ")
+folded = Mail.fold("Subject", words)
+assert_true widest(folded) <= 78, "a long ASCII subject is folded to 78: #{widest(folded)}"
+assert_true folded.split("\r\n").size > 3, "a long ASCII subject is folded"
+assert_str "Subject: " + words, folded.gsub("\r\n", "").rstrip, "unfolding gives the value back"
+unicode = "Grüße aus Köln, und ein langer Satz mit Umlauten: äöü ÄÖÜ ß, 東京 und 😀 dazu, " * 4
+folded = Mail.fold("Subject", unicode)
+assert_true widest(folded) <= 78, "encoded-words fold to 78: #{widest(folded)}"
+folded.split(' ').each do |token|
+  token = token.strip
+  assert_true token.bytesize <= 75, "every encoded-word is 75 or fewer: #{token.bytesize}" if token.starts_with?("=?")
+end
+# Mostly CJK is B: its words come in fours, and fill to 75 exactly.
+cjk = "日本語のテキストと東京の写真、" * 12
+Mail.fold("Subject", cjk).split(' ').each do |token|
+  token = token.strip
+  assert_true token.bytesize <= 75, "every encoded-word is 75 or fewer: #{token.bytesize}" if token.starts_with?("=?")
+end
+assert_str cjk, parsed(Mail.fold("Subject", cjk) + "\r\n").subject || "", "B words decode to the value"
+part = parsed(folded + "\r\n")
+assert_str unicode.strip, (part.subject || "").strip, "encoded-words decode to the value"
+assert_str unicode, part.subject || "", "the value comes back whole, spaces and all"
+["  two leading", "trailing ", "tab\there", "two  spaces", "looks =?like?= a word", "x" * 120, "ascii only"].each do |v|
+  back = parsed(Mail.fold("Subject", v) + "\r\n").subject || ""
+  assert_str v, back, "the value #{v.inspect} comes back"
+  assert_true widest(Mail.fold("Subject", v)) <= 78, "the value #{v.inspect} folds to 78"
+end
+assert_true Mail.fold("Subject", "  two leading").includes?("=?utf-8?"), "leading space is encoded"
+assert_true Mail.fold("Subject", "x" * 120).includes?("=?utf-8?"), "a word too long for a line is encoded"
+assert_str "Subject: ascii only\r\n", Mail.fold("Subject", "ascii only"), "ASCII is not encoded"
+puts "  78 columns, 75 an encoded-word, values back whole"
+
+puts "== addresses, RFC 5322 appendix A"
+assert_str "John Doe|jdoe@machine.example", addrs(Mail::Address.parse_list("John Doe <jdoe@machine.example>")), "A.1.1"
+assert_str "Joe Q. Public|john.q.public@example.com", addrs(Mail::Address.parse_list("\"Joe Q. Public\" <john.q.public@example.com>")), "A.1.2 From"
+assert_str "Mary Smith|mary@x.test, |jdoe@example.org, Who?|one@y.test",
+  addrs(Mail::Address.parse_list("Mary Smith <mary@x.test>, jdoe@example.org, Who? <one@y.test>")), "A.1.2 To"
+assert_str "|boss@nil.test, Giant; \"Big\" Box|sysservices@example.net",
+  addrs(Mail::Address.parse_list("<boss@nil.test>, \"Giant; \\\"Big\\\" Box\" <sysservices@example.net>")), "A.1.2 Cc"
+assert_str "Ed Jones|c@a.test, |joe@where.test, John|jdoe@one.test",
+  addrs(Mail::Address.parse_list("A Group:Ed Jones <c@a.test>,joe@where.test,John <jdoe@one.test>;")), "A.1.3 a group's members"
+assert_str "", addrs(Mail::Address.parse_list("Undisclosed recipients:;")), "A.1.3 an empty group"
+assert_str "Pete|pete@silly.test", addrs(Mail::Address.parse_list("Pete(A nice \\) chap) <pete(his account)@silly.test(his host)>")), "A.5 comments are passed over"
+assert_str "Chris Jones|c@public.example, |joe@example.org, John|jdoe@one.test",
+  addrs(Mail::Address.parse_list("A Group(Some people)\r\n     :Chris Jones <c@(Chris's host.)public.example>,\r\n         joe@example.org,\r\n  John <jdoe@one.test> (my dear friend); (the end of the group)")), "A.5 a group with comments"
+assert_str "", addrs(Mail::Address.parse_list("(Empty list)(start)Hidden recipients  :(nobody(that I know))  ;")), "A.5 nested comments"
+assert_str "Joe Q. Public|john.q.public@example.com", addrs(Mail::Address.parse_list("Joe Q. Public <john.q.public@example.com>")), "A.6.1 obs-phrase"
+assert_str "Mary Smith|mary@example.net, |jdoe@test.example",
+  addrs(Mail::Address.parse_list("Mary Smith <@node.test:mary@example.net>, , jdoe@test  . example")), "A.6.1 a route, an empty member, obs-domain"
+assert_str "|\"john doe\"@example.com", addrs(Mail::Address.parse_list("\"john doe\"@example.com")), "a quoted local part stays quoted"
+assert_str "john doe", Mail::Address.parse("\"john doe\"@example.com").as(Mail::Address).local, "a quoted local part's text"
+assert_str "|\"a\\\"b\"@x.test", addrs(Mail::Address.parse_list("\"a\\\"b\"@x.test")), "a quoted-pair is quoted again"
+assert_str "|john.doe@example.com", addrs(Mail::Address.parse_list("\"john.doe\"@example.com")), "a dot-atom in quotes needs none"
+assert_str "|user@[192.0.2.1]", addrs(Mail::Address.parse_list("user@[192.0.2.1]")), "a domain literal"
+assert_str "|jdoe@one.test", addrs(Mail::Address.parse_list("jdoe@one.test (John Doe)")), "a comment after an address is not its name"
+assert_str "André Pirard|PIRARD@vm1.ulg.ac.be", addrs(Mail::Address.parse_list("=?ISO-8859-1?Q?Andr=E9?= Pirard <PIRARD@vm1.ulg.ac.be>")), "RFC 2047's encoded name"
+assert_str "Jörg Müller|j@x.test", addrs(Mail::Address.parse_list("=?utf-8?q?J=C3=B6rg?= =?utf-8?q?_M=C3=BCller?= <j@x.test>")), "two encoded-words in a name"
+assert_str "Jörg|jörg@bücher.example", addrs(Mail::Address.parse_list("Jörg <jörg@bücher.example>")), "RFC 6532's UTF-8"
+assert_true Mail::Address.new("jörg@bücher.example").utf8?, "a UTF-8 address says so"
+assert_true !Mail::Address.new("j@x.test", "Jörg").utf8?, "a UTF-8 name alone does not"
+["a@", "@b", "a b@c", "<a@b", "\"a@b", "a@b c", "Name", "a@b..c", "A:b@c", "(x"].each do |bad|
+  got = Mail::Address.parse_list(bad)
+  assert_true got.is_a?(MailError), "#{bad.inspect} is refused, not #{addrs(got)}"
+end
+assert_str "error: mail: an angle address is not closed with > in \"<a@b\"", addrs(Mail::Address.parse_list("<a@b")), "the refusal names why"
+assert_str "Jörg Müller <j@x.test>", Mail::Address.new("j@x.test", "Jörg Müller").to_s, "to_s shows the name"
+assert_str "\"Doe, John\" <j@x.test>", Mail::Address.new("j@x.test", "Doe, John").to_s, "to_s quotes a name with specials"
+puts "  appendix A's mailboxes, groups, comments and obsolete forms, quoting, UTF-8"
+
+puts "== dates, RFC 5322 section 3.3"
+assert_str "Thu, 01 Jan 1970 00:00:00 +0000", Mail.date(0_i64), "the epoch"
+assert_str "Sat, 17 Oct 2026 10:00:00 +0200", Mail.date(1792224000_i64, 120), "an offset east"
+assert_str "Fri, 21 Nov 1997 09:55:06 -0600", Mail.date(880127706_i64, -360), "A.1.1's date, west"
+assert_str "Mon, 01 Jan 1900 00:00:00 +0000", Mail.date(-2208988800_i64), "the first year written"
+assert_str "Thu, 13 Feb 1969 23:32:00 -0330", Mail.date(-27723480_i64, -210), "a time of day before 1970, A.5's"
+assert_str "Tue, 29 Feb 2000 23:59:59 +1400", Mail.date(951818399_i64, 840), "a leap day"
+[{"Fri, 21 Nov 1997 09:55:06 -0600", 880127706_i64, -360},
+ {"Thu,\r\n      13\r\n        Feb\r\n          1969\r\n      23:32\r\n               -0330 (Newfoundland Time)", -27723480_i64, -210},
+ {"21 Nov 97 09:55:06 GMT", 880106106_i64, 0},
+ {"Sat, 29 Feb 2000 23:59:59 +1400", 951818399_i64, 840},
+ {"Tue, 1 Jul 2003 10:52:37 +0200", 1057049557_i64, 120},
+ {"1 Jul 2003 10:52 EDT", 1057071120_i64, -240},
+ {"1 Jul 103 10:52:00 Z", 1057056720_i64, 0}].each do |c|
+  got = Mail.parse_date(c[0])
+  raise "ASSERTION FAILED: #{c[0].inspect} did not parse: #{got.message}" if got.is_a?(MailError)
+  assert_true got[0] == c[1] && got[1] == c[2], "#{c[0].inspect} is #{c[1]} at #{c[2]}, not #{got[0]} at #{got[1]}"
+end
+["Fri, 31 Nov 1997 09:55:06 -0600", "Mon, 29 Feb 1900 00:00:00 +0000", "Fri, 21 Nov 1997 24:00:00 +0000",
+ "Fri, 21 Nov 1997 09:55:06", "Fri, 21 Foo 1997 09:55:06 +0000", "Fri 21 Nov 1997 09:55:06 +0000",
+ "Fri, 21 Nov 1997 09:55:06 +0000 x", "21 Nov 1997 9:5 +0000"].each do |bad|
+  assert_true Mail.parse_date(bad).is_a?(MailError), "#{bad.inspect} is refused"
+end
+assert_true Mail.parse_date("Sat, 29 Feb 2000 00:00:00 +0000").is_a?(Tuple(Int64, Int32)), "2000 is a leap year"
+puts "  appendix A's dates, obsolete years and zones, folded with comments, days of months"
+
+puts "== building"
+msg = Mail::Message.new
+msg.from = Mail::Address.new("jdoe@machine.example", "John Doe")
+msg.to << Mail::Address.new("mary@example.net", "Mary Smith")
+msg.bcc << Mail::Address.new("hidden@example.org")
+msg.subject = "Saying Hello"
+msg.date = "Fri, 21 Nov 1997 09:55:06 -0600"
+msg.message_id = "<1234@local.machine.example>"
+msg.text = "This is a message just to say hello.\nSo, \"Hello\"."
+wire = msg.to_s
+assert_str "Date: Fri, 21 Nov 1997 09:55:06 -0600\r\nFrom: John Doe <jdoe@machine.example>\r\nTo: Mary Smith <mary@example.net>\r\n" +
+           "Subject: Saying Hello\r\nMessage-ID: <1234@local.machine.example>\r\nMIME-Version: 1.0\r\n" +
+           "Content-Type: text/plain; charset=\"utf-8\"\r\nContent-Transfer-Encoding: 7bit\r\n\r\n" +
+           "This is a message just to say hello.\r\nSo, \"Hello\".", wire, "A.1.1 written"
+assert_true !wire.includes?("hidden"), "Bcc is not written"
+assert_str "mary@example.net,hidden@example.org", msg.recipients.join(","), "Bcc is among the recipients"
+msg.cc << Mail::Address.new("mary@example.net")
+assert_str "mary@example.net,hidden@example.org", msg.recipients.join(","), "a recipient is named once"
+msg.html = "<p>This is a message just to say hello.</p>"
+msg.attach("hello.txt", "hello\n")
+msg.attach("Grüße und ein sehr langer Dateiname, der nicht in eine Zeile passt.pdf", all)
+wire = msg.to_s
+assert_str wire, msg.to_s, "the same message builds to the same bytes"
+assert_true widest(wire) <= 78, "every line is 78 or fewer: #{widest(wire)}"
+assert_true !lone_breaks?(wire), "every line ends in CRLF"
+assert_true ascii?(wire), "the message is ASCII"
+assert_true wire.includes?("filename*0*=utf-8''Gr%C3%BC%C3%9Fe"), "a long UTF-8 file name is RFC 2231's continuations"
+top = parsed(wire)
+assert_str "multipart/mixed", top.media_type, "attachments make the message mixed"
+assert_str "multipart/alternative", top.parts[0].media_type, "text and HTML are alternatives"
+assert_str "text/plain", top.parts[0].parts[0].media_type, "plain text first"
+assert_str "text/html", top.parts[0].parts[1].media_type, "HTML second"
+assert_str "This is a message just to say hello.\nSo, \"Hello\".", text_of(top.find("text/plain")), "the text comes back"
+assert_str "<p>This is a message just to say hello.</p>", text_of(top.find("text/html")), "the HTML comes back"
+assert_true top.attachments.size == 2, "two attachments"
+assert_str "hello.txt", top.attachments[0].filename || "", "the first file name"
+assert_str "text/plain", top.attachments[0].media_type, "a type from the extension"
+assert_str "hello\n", body_of(top.attachments[0]), "the first attachment's bytes"
+assert_str "Grüße und ein sehr langer Dateiname, der nicht in eine Zeile passt.pdf", top.attachments[1].filename || "", "a long UTF-8 file name"
+assert_str all, body_of(top.attachments[1]), "every byte of the second attachment"
+assert_str "application/pdf", top.attachments[1].media_type, "pdf from the extension"
+outer = top.param("boundary") || ""
+inner = top.parts[0].param("boundary") || ""
+assert_true outer.starts_with?("iyi-") && outer.bytesize == 36, "a boundary is iyi- and 32 hex digits: #{outer}"
+assert_true outer != inner, "nested multiparts have their own boundaries"
+msg.subject = "Saying Hello again"
+assert_true parsed(msg.to_s).param("boundary") == outer, "the subject is not in the boundary's hash"
+msg.attach("third.bin", "\x01")
+assert_true parsed(msg.to_s).param("boundary") != outer, "a part is in the boundary's hash"
+plain = Mail::Message.new
+plain.from = Mail::Address.new("a@x.test")
+plain.date = Mail.date(0_i64)
+plain.text = "line one\r\n.leading dot\rlone CR\n" + "long " * 30 + "\nend"
+written = plain.to_s
+assert_true written.includes?("Content-Transfer-Encoding: quoted-printable"), "a line past 78 makes text quoted-printable"
+assert_str "line one\n.leading dot\nlone CR\n" + "long " * 30 + "\nend", text_of(parsed(written)), "CRLF, CR and LF come back as LF"
+plain.text = "日本語のテキスト。" * 20
+written = plain.to_s
+assert_true written.includes?("Content-Transfer-Encoding: base64"), "mostly non-ASCII text is base64, the shorter"
+assert_str "日本語のテキスト。" * 20, text_of(parsed(written)), "base64 text comes back"
+plain.text = "Grüße aus Köln, wie geht es dir heute?"
+assert_true plain.to_s.includes?("Content-Transfer-Encoding: quoted-printable"), "mostly ASCII text is quoted-printable, the shorter"
+empty = Mail::Message.new
+empty.from = Mail::Address.new("a@x.test")
+empty.date = Mail.date(0_i64)
+assert_str "", text_of(parsed(empty.to_s)), "a message with no text is an empty text/plain"
+utf = Mail::Message.new
+utf.from = Mail::Address.new("jörg@bücher.example", "Jörg")
+utf.date = Mail.date(0_i64)
+assert_true utf.utf8?, "a UTF-8 address makes the message UTF-8"
+assert_true !msg.utf8?, "ASCII addresses do not"
+named = Mail::Message.new
+named.from = Mail::Address.new("a@x.test", "Doe, John \"JD\"")
+named.to << Mail::Address.new("b@x.test", "Ann Lee")
+named.to << Mail::Address.new("c@x.test", "Zoë")
+named.date = Mail.date(0_i64)
+named.header("X-Mailer", "std/mail")
+written = named.to_s
+assert_true written.includes?("From: \"Doe, John \\\"JD\\\"\" <a@x.test>\r\n"), "a name with specials is a quoted string"
+assert_true written.includes?("To: Ann Lee <b@x.test>, =?utf-8?q?Zo=C3=AB?= <c@x.test>\r\n"), "atoms as they are, UTF-8 as encoded-words"
+assert_true written.includes?("X-Mailer: std/mail\r\n"), "a header of the caller's"
+assert_str "Doe, John \"JD\"|a@x.test", addrs(parsed(written).addresses("From")), "the quoted name comes back"
+assert_str "Ann Lee|b@x.test, Zoë|c@x.test", addrs(parsed(written).addresses("To")), "both names come back"
+puts "  A.1.1 written byte for byte, Bcc unwritten, alternatives, attachments, boundaries from the hash"
+
+puts "== reading"
+a11 = "From: John Doe <jdoe@machine.example>\r\nTo: Mary Smith <mary@example.net>\r\nSubject: Saying Hello\r\n" +
+      "Date: Fri, 21 Nov 1997 09:55:06 -0600\r\nMessage-ID: <1234@local.machine.example>\r\n\r\n" +
+      "This is a message just to say hello.\r\nSo, \"Hello\".\r\n"
+part = parsed(a11)
+assert_true part.headers.size == 5, "A.1.1 has five fields"
+assert_str "Saying Hello", part.subject || "", "A.1.1's subject"
+assert_str "This is a message just to say hello.\nSo, \"Hello\".\n", text_of(part), "A.1.1's body"
+assert_str "text/plain", part.media_type, "no Content-Type is text/plain"
+assert_str "us-ascii", part.charset, "no charset is US-ASCII"
+part = parsed(a11.gsub("\r\n", "\n"))
+assert_str "Saying Hello", part.subject || "", "LF line ends are read"
+folded_header = parsed("Subject: This\r\n is a test\r\n\tof folding\r\n\r\n")
+assert_str "This is a test\tof folding", folded_header.subject || "", "a folded field is unfolded"
+assert_str "x", parsed("Subject : x\r\n\r\n").subject || "", "space before the colon (obs-optional)"
+nested = "Content-Type: multipart/mixed; boundary=outer\r\n\r\npreamble\r\n--outer\r\nContent-Type: multipart/alternative; boundary=\"in ner\"\r\n\r\n" +
+         "--in ner\r\n\r\nplain\r\n--in ner\r\nContent-Type: text/html\r\n\r\n<b>html</b>\r\n--in ner--\r\n" +
+         "--outer\r\nContent-Type: message/rfc822\r\n\r\nSubject: inner\r\n\r\ninner body\r\n" +
+         "--outer\r\nContent-Type: text/plain; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\nContent-Disposition: attachment; filename*=iso-8859-1''caf%E9.txt\r\n\r\ncaf=E9\r\n" +
+         "--outer--\r\nepilogue\r\n"
+top = parsed(nested)
+assert_true top.parts.size == 3, "three parts under the outer boundary"
+assert_str "plain", text_of(top.parts[0].parts[0]), "a part with no head is text/plain, its line break the boundary's"
+assert_str "<b>html</b>", text_of(top.find("text/html")), "the HTML alternative"
+assert_str "inner", top.parts[1].parts[0].subject || "", "a message/rfc822 holds a message"
+assert_str "inner body", body_of(top.parts[1].parts[0]), "the inner message's body"
+assert_str "café", text_of(top.parts[2]), "quoted-printable ISO-8859-1 as UTF-8"
+assert_str "café.txt", top.parts[2].filename || "", "RFC 2231's file name in ISO-8859-1"
+kinds = [] of String
+top.walk { |p| kinds << p.media_type }
+assert_str "multipart/mixed multipart/alternative text/plain text/html message/rfc822 text/plain text/plain", kinds.join(" "), "walk goes depth first"
+digest = parsed("Content-Type: multipart/digest; boundary=d\r\n\r\n--d\r\n\r\nSubject: one\r\n\r\n1\r\n--d--\r\n")
+assert_str "message/rfc822", digest.parts[0].media_type, "a digest's part is a message by default"
+assert_str "one", digest.parts[0].parts[0].subject || "", "the digest's message"
+cont = parsed("Content-Type: application/octet-stream;\r\n name*0=\"long\"; name*1*=%20name; name*2=\".bin\"\r\nContent-Transfer-Encoding: base64\r\n\r\nAAEC\r\n")
+assert_str "long name.bin", cont.filename || "", "RFC 2231 continuations, plain and encoded"
+assert_str bytes([0, 1, 2]), body_of(cont), "a base64 body"
+assert_str "a; b.txt", parsed("Content-Disposition: attachment; filename=\"a; b.txt\" (comment)\r\n\r\n").filename || "", "a quoted file name and a comment"
+assert_str "x.txt", parsed("Content-Disposition: attachment; filename==?utf-8?q?x=2Etxt?=\r\n\r\n").filename || "", "an encoded-word file name"
+assert_str "text/plain", parsed("Content-Type: garbage\r\n\r\n").media_type, "a Content-Type that cannot be read is text/plain"
+assert_str "multipart/mixed", parsed("Content-Type: Multipart/Mixed; Boundary=----=_Part_1\r\n\r\n------=_Part_1\r\n\r\nx\r\n------=_Part_1--\r\n").media_type, "case and an unquoted boundary with = in it"
+latin = parsed("Content-Type: text/plain; charset=\"windows-1252\"\r\n\r\n" + bytes([0x93, 0x80, 0x94]))
+assert_str "“€”", text_of(latin), "windows-1252"
+koi = parsed("Content-Type: text/plain; charset=koi8-r\r\n\r\nx").text
+assert_true koi.is_a?(MailError) && koi.message.includes?("\"koi8-r\""), "an unread charset is named"
+bad8 = parsed("Content-Type: text/plain; charset=utf-8\r\n\r\n" + bytes([0xC3, 0x28])).text
+assert_true bad8.is_a?(MailError), "text that is not its charset is an error"
+ascii8 = parsed("\r\n" + bytes([0xE9])).text
+assert_true ascii8.is_a?(MailError), "a byte past ASCII in US-ASCII is an error"
+x7 = parsed("Content-Transfer-Encoding: x-uuencode\r\n\r\nbegin").body
+assert_true x7.is_a?(MailError) && x7.message.includes?("x-uuencode"), "an unknown transfer encoding is named"
+assert_str "mail: line 1 of a header section is not a field: \"not a header\"", refused("not a header\r\n\r\n"), "a line that is not a field"
+assert_str "mail: the header section begins with a folded line", refused(" folded\r\n\r\n"), "a header section that begins folded"
+assert_str "mail: a multipart/mixed part names no boundary", refused("Content-Type: multipart/mixed\r\n\r\n"), "a multipart with no boundary"
+assert_str "mail: a multipart/mixed body holds no line --b", refused("Content-Type: multipart/mixed; boundary=b\r\n\r\nnone\r\n"), "a multipart with no boundary line"
+assert_str "mail: a multipart/mixed body ends before its closing line --b--", refused("Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\ncut short"), "a multipart cut short"
+prefixed = parsed("Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\none\r\n--bx\r\n\r\ntwo\r\n--b--\r\n")
+assert_true prefixed.parts.size == 1 && body_of(prefixed.parts[0]) == "one\r\n--bx\r\n\r\ntwo", "a boundary is a whole line, not a prefix"
+deep = "\r\nx"
+40.times { |i| deep = "Content-Type: multipart/mixed; boundary=b#{i}\r\n\r\n--b#{i}\r\n" + deep + "\r\n--b#{i}--\r\n" }
+assert_str "mail: parts are nested deeper than 32", refused(deep), "nesting is bounded"
+assert_str "", body_of(parsed("Subject: no body")), "a message may have no body"
+assert_str "", body_of(parsed("Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\r\n--b--\r\n").parts[0]), "an empty part"
+puts "  A.1.1 read, nesting, digests, RFC 2231, charsets, and what is refused"
+
+puts "ALL CHECKS PASSED"

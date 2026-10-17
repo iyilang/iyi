@@ -4,6 +4,42 @@
 
 ### Added
 
+- **std/mail: Internet mail messages (RFC 5322, MIME) built and read in
+  iyi.** `Mail::Message` takes From, To, Cc, Bcc, Reply-To, the Subject,
+  a Date (`Mail.date(unix, offset)` writes one) and a Message-ID from the
+  caller - the module reads no clock and draws no randomness - a text
+  and an HTML body, attachments and headers of the caller's own, and
+  `to_s` writes it: one `text/plain` part, `multipart/alternative` for
+  text and HTML, `multipart/mixed` with attachments; text as 7bit, or as
+  whichever of quoted-printable and base64 is shorter, attachments as
+  base64; CRLF throughout; Bcc left out of the text and kept in
+  `recipients`; boundaries `iyi-` and the SHA-1 of the parts they
+  separate, made again while a part holds one, as std/http's
+  `MultipartBuilder` makes them. Headers are folded to 78 columns, a
+  value that is not single-spaced printable ASCII goes as RFC 2047
+  encoded-words of 75 or fewer, whole characters each, and a file name
+  that is not short ASCII as RFC 2231 `filename*`, in continuations when
+  long. `Mail.parse(text) : Mail::Part | MailError` reads CRLF or LF
+  messages: fields unfolded, `header` with encoded-words decoded, the
+  MIME tree with `message/rfc822` and digests, `body` with its transfer
+  encoding undone, `text` in UTF-8 from UTF-8, US-ASCII, ISO-8859-1,
+  ISO-8859-15 or windows-1252 and an error naming any other charset,
+  `addresses` reading RFC 5322's mailboxes and groups, quoted local
+  parts, domain literals, obsolete forms and RFC 6532's UTF-8, comments
+  passed over and never taken for a name. `Mail.parse_date` reads dates
+  with section 4.3's obsolete years and zones. Refused as a `MailError`:
+  a header line that is not a field, a header section that begins
+  folded, a multipart with no boundary, no boundary line or no closing
+  one, parts nested deeper than 32, an address list that is not one; a
+  body in an unknown transfer encoding and text not in its charset when
+  asked for. Panics: a message without From or Date, a Date or
+  Message-ID that is not one, a line break in a header, a name or a file
+  name, a header the message writes itself, an address that is not one,
+  a Date outside 1900 to 9999 or a day from UTC. A display name that
+  fits one encoded-word is written as one, since Python's `email` reads a
+  space into the gap between two encoded-words of a phrase where RFC 2047
+  drops it - its own long names come back so. std/mail imports
+  std/digest, std/base64, std/mime and std/text, and reaches no platform.
 - **std/jwt: JSON Web Tokens (RFC 7519) signed and checked in iyi, over
   JWS (RFC 7515) with JWA's algorithms (RFC 7518), and JSON Web Keys
   (RFC 7517).** `JWT.encode(claims, key, JWTAlgorithm::ES256)` and

@@ -1610,6 +1610,127 @@ up_ms = (up_returned - up_stopped) // 1000000_i64
 assert_true up_ms < 2000, "serve returns when its listener closes beside a connection it handed over, not #{up_ms} ms later"
 puts "  a 101 from a raw socket, HTTP.upgrade, a refusal, a handed-over connection closed with the listener"
 
+puts "\n== proxies"
+# Which requests go through a proxy: Go's own tables, from
+# golang.org/x/net/http/httpproxy's proxy_test.go - `TestUseProxy`'s
+# NO_PROXY and hosts, and `proxyForURLTests`' choices of variable. The
+# gate runs Go's net/http over the same and more, where Go is installed.
+go_no_proxy = "foobar.com, .barbaz.net, *.wildcard.io, 192.168.1.1, 192.168.1.2:81, 192.168.1.3:80, 10.0.0.0/30, 2001:db8::52:0:1, [2001:db8::52:0:2]:443, [2001:db8::52:0:3]:80, 2002:db8:a::45/64"
+go_use_proxy = {
+  "localhost" => false, "127.0.0.1" => false, "127.0.0.2" => false, "[::1]" => false, "[::2]" => true,
+  "192.168.1.1" => false, "192.168.1.2" => true, "192.168.1.3" => false, "10.0.0.2" => false,
+  "[2001:db8::52:0:1]" => false, "[2001:db8::52:0:2]" => true, "[2001:db8::52:0:3]" => false,
+  "[2002:db8:a::123]" => false, "[fe80::424b:c8be:1643:a1b6]" => true,
+  "barbaz.net" => true, "www.barbaz.net" => false, "foobar.com" => false, "www.foobar.com" => false,
+  "foofoobar.com" => true, "baz.com" => true, "localhost.net" => true, "local.localhost" => true,
+  "barbarbaz.net" => true, "wildcard.io" => true, "nested.wildcard.io" => false, "awildcard.io" => true,
+}
+go_use_proxy.each do |host, proxied|
+  got = HTTP.proxy_for("http://" + host, "proxy", nil, go_no_proxy) || "direct"
+  assert_str proxied ? "http://proxy" : "direct", got, "NO_PROXY as Go reads it, for #{host}"
+end
+# {HTTP_PROXY, HTTPS_PROXY, NO_PROXY, the URL, the proxy}, "" for none.
+go_choices = [
+  {"127.0.0.1:8080", "", "", "http://example.com/", "http://127.0.0.1:8080"},
+  {"cache.corp.example.com:1234", "", "", "http://example.com/", "http://cache.corp.example.com:1234"},
+  {"cache.corp.example.com", "", "", "http://example.com/", "http://cache.corp.example.com"},
+  {"https://cache.corp.example.com", "", "", "http://example.com/", "https://cache.corp.example.com"},
+  {"socks5://127.0.0.1", "", "", "http://example.com/", "socks5://127.0.0.1"},
+  {"http.proxy.tld", "secure.proxy.tld", "", "http://insecure.tld/", "http://http.proxy.tld"},
+  {"http.proxy.tld", "secure.proxy.tld", "", "https://secure.tld/", "http://secure.proxy.tld"},
+  {"http.proxy.tld", "https://secure.proxy.tld", "", "https://secure.tld/", "https://secure.proxy.tld"},
+  {"http.proxy.tld", "", "", "https://secure.tld/", ""},
+  {"", "", "", "http://example.com/", ""},
+  {"proxy", "", "example.com", "http://example.com/", ""},
+  {"proxy", "", ".example.com", "http://example.com/", "http://proxy"},
+  {"proxy", "", "ample.com", "http://example.com/", "http://proxy"},
+  {"proxy", "", "example.com", "http://foo.example.com/", ""},
+  {"proxy", "", ".foo.com", "http://example.com/", "http://proxy"},
+  {"proxy", "", "*", "http://example.com/", ""},
+  {"proxy", "", "example.com:8080", "http://example.com:8080/", ""},
+  {"proxy", "", "example.com:8080", "http://example.com/", "http://proxy"},
+  {"proxy", "proxy", "example.com:443", "https://example.com/", ""},
+  {"proxy", "", "::ffff:10.0.0.0/104", "http://10.1.2.3/", ""},
+  {"proxy", "", "10.0.0.0/8", "http://[::ffff:10.1.2.3]/", ""},
+  {"proxy", "", "::/0", "http://10.1.2.3/", "http://proxy"},
+  {"proxy", "", ":80, [::1, ::1]:80", "http://example.com/", "http://proxy"},
+  {"proxy", "", "", "ftp://example.com/", ""},
+]
+go_choices.each do |c|
+  got = HTTP.proxy_for(c[3], c[0].empty? ? nil : c[0], c[1].empty? ? nil : c[1], c[2])
+  assert_str c[4], got || "", "the proxy for #{c[3]} under HTTP_PROXY=#{c[0]} HTTPS_PROXY=#{c[1]} NO_PROXY=#{c[2]}"
+end
+puts "  NO_PROXY and the choice of variable as Go's httpproxy has them: #{go_use_proxy.size} hosts, #{go_choices.size} configurations"
+
+# A proxy refused by name before anything is sent: TLS to the proxy and
+# SOCKS are not spoken here, and must not be spoken in the clear.
+["https://p.test:3128", "socks5://127.0.0.1:1080"].each do |written|
+  refused = HTTP.request("GET", "http://example.com/", proxy: written)
+  scheme = written[0, written.index(':') || 0]
+  assert_true refused.is_a?(HTTPError) && refused.message == "HTTP: a proxy over #{scheme}://, which this client does not speak; only http:// proxies", "a proxy over #{scheme}:// is refused: #{refused.inspect}"
+end
+
+# A proxy on a raw socket that answers what it read: an http:// request in
+# absolute form with the URL's credential (the caller's own replaced),
+# two origins over one kept connection to the proxy, and CONNECTs refused
+# 407 and 403, and one answered 200 with bytes after it. The whole tunnel,
+# TLS inside it, is bench/std_http_exercise.sh's, against a proxy in
+# Python and curl.
+proxy_l = IyiSocket.listen("127.0.0.1", 0)
+proxy_port = proxy_l.local_port
+proxy_fd = proxy_l.to_unsafe
+proxy_server = IyiThread.start do
+  l = IyiSocket.new(proxy_fd)
+  5.times do |i|
+    conn = l.accept.or_panic
+    rounds = i == 1 ? 2 : 1
+    rounds.times do
+      saw = read_request(conn).or_panic
+      # A CONNECT not as the check below expects it is answered with what
+      # the proxy saw, for the client's error to name.
+      reply = if i == 0 || i == 1
+                "HTTP/1.1 200 OK\r\nContent-Length: #{saw.bytesize}\r\n\r\n" + saw
+              elsif i == 2
+                fine = saw == "CONNECT secure.test:443 HTTP/1.1\r\nHost: secure.test:443\r\nProxy-Authorization: Basic dXNlcjpwQHNz\r\n\r\n"
+                "HTTP/1.1 407 #{fine ? "Proxy Authentication Required" : saw.inspect}\r\nProxy-Authenticate: Basic realm=\"gate\"\r\nContent-Length: 0\r\n\r\n"
+              elsif i == 3
+                fine = saw == "CONNECT [::1]:8443 HTTP/1.1\r\nHost: [::1]:8443\r\nProxy-Authorization: Basic Z2F0ZTpzM2NyZXQ=\r\n\r\n"
+                "HTTP/1.1 403 #{fine ? "Forbidden" : saw.inspect}\r\nContent-Length: 0\r\n\r\n"
+              else
+                "HTTP/1.1 200 Connection established\r\n\r\njunk"
+              end
+      conn.write(reply).or_panic
+    end
+    conn.close
+  end
+  nil
+end
+proxy_url = "http://user:p%40ss@127.0.0.1:#{proxy_port}"
+through = HTTP.request("GET", "http://origin.test:8080/a?b=1", {"Proxy-Authorization" => "Basic other"}, proxy: proxy_url).or_panic
+assert_true through.body.starts_with?("GET http://origin.test:8080/a?b=1 HTTP/1.1\r\nHost: origin.test:8080\r\n"), "an http:// request through a proxy names the whole URL: #{first_line(through.body).inspect}"
+assert_true through.body.includes?("\r\nProxy-Authorization: Basic dXNlcjpwQHNz\r\n") && !through.body.includes?("Basic other"), "an http:// request through a proxy carries the URL's credential, and the caller's no more: #{through.body.inspect}"
+# With prior knowledge, which a proxy's absolute form does not take: the
+# requests go as HTTP/1.1. A second origin that waits for a connection of
+# its own is a timeout, named below, not a hang.
+kept = HTTPClient.new(proxy: "127.0.0.1:#{proxy_port}", prior_knowledge: true, timeout_ms: 10000)
+one = kept.get("http://a.test/one").or_panic
+second = kept.get("http://b.test:81/two")
+assert_true second.is_a?(Response), "two origins over one kept connection to the proxy: the second answered #{second.inspect}"
+two = second.or_panic
+assert_str "GET http://a.test/one HTTP/1.1|GET http://b.test:81/two HTTP/1.1", first_line(one.body) + "|" + first_line(two.body), "two origins through a proxy URL written without a scheme"
+assert_true one.body.includes?("\r\nHost: a.test\r\n") && two.body.includes?("\r\nHost: b.test:81\r\n") && !two.body.includes?("Proxy-Authorization"), "each request through a proxy keeps its own Host, and no credential the proxy URL did not give: #{two.body.inspect}"
+assert_true kept.connections_made == 1 && kept.connections_reused == 1, "two origins over one kept connection to the proxy: #{kept.connections_made} made, #{kept.connections_reused} reused"
+kept.close
+refused = HTTP.request("GET", "https://secure.test/x", proxy: proxy_url)
+assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_port} answered 407 Proxy Authentication Required to CONNECT secure.test:443", refused.is_a?(HTTPError) ? refused.message : refused.inspect, "a CONNECT with the URL's credential, refused 407"
+refused = HTTP.request("GET", "https://[::1]:8443/x", {"Proxy-Authorization" => "Basic Z2F0ZTpzM2NyZXQ="}, proxy: "http://127.0.0.1:#{proxy_port}")
+assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_port} answered 403 Forbidden to CONNECT [::1]:8443", refused.is_a?(HTTPError) ? refused.message : refused.inspect, "a CONNECT to an IPv6 origin with the caller's credential, refused 403"
+refused = HTTP.request("GET", "https://secure.test/x", proxy: "127.0.0.1:#{proxy_port}")
+assert_str "HTTP: the proxy at 127.0.0.1:#{proxy_port} sent 4 bytes after its 200 to CONNECT secure.test:443, before TLS began", refused.is_a?(HTTPError) ? refused.message : refused.inspect, "bytes after a CONNECT's 200 are refused"
+proxy_server.join
+proxy_l.close
+puts "  an absolute-form request with the URL's credential, two origins on one kept proxy connection, CONNECT refused 407 and 403, bytes after a 200 refused"
+
 # The files the sections above wrote.
 File.delete(stream_dir + "/up.bin")
 Dir.delete(stream_dir)

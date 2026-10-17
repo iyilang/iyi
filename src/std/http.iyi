@@ -77,17 +77,33 @@
 # Node's own HTTP/2 both ways (TLS with ALPN included, the server's own
 # TLS too) and RFC 9113's error rules frame by frame.
 #
+# **Through a proxy.** `proxy:` on `HTTP.request`, `HTTP.open` and
+# `HTTPClient.new` is an `http://` proxy's URL (`host:port` alone will
+# do), credentials and all: `http://` goes to it as an absolute-form
+# request (RFC 9112 §3.2.2), `https://` through a `CONNECT` tunnel (RFC
+# 9110 §9.3.6) with TLS to the server inside, and the URL's user and
+# password go as `Proxy-Authorization: Basic` to the proxy alone, never
+# inside a tunnel. A CONNECT the proxy refuses (407, 403, 502) is an
+# `HTTPError` naming its status; kept connections are kept by proxy, and
+# a tunnel by proxy and server. `HTTP.proxy_for(url, http_proxy,
+# https_proxy, no_proxy)` says which proxy a URL takes under those
+# variables' values, `NO_PROXY` read as Go's `httpproxy` reads it, and
+# std/http_proxy's `HTTPProxy.from_env` reads them from the environment.
+# bench/std_http_exercise.sh holds it against a proxy written in Python,
+# curl through the same proxy, and Go's net/http for `NO_PROXY`.
+#
 # **What it reaches.** What std/socket reaches, and for `https://` what
 # std/tls does - the operating system's trusted roots and its entropy -
 # and nothing of its own: no file, and no clock or environment beyond
 # those. Cookies with their expiry are std/cookie's, a directory served is
-# std/fileserver's, and a multipart boundary is made from the parts' own
-# hash.
+# std/fileserver's, a multipart boundary is made from the parts' own
+# hash, and a proxy named by the environment is std/http_proxy's to read.
 #
 # Not here: HTTP/2's server push, its upgrade from HTTP/1.1 (which RFC
 # 9113 retired) and RFC 8441's WebSocket over HTTP/2 - an upgrade offers
 # ALPN `http/1.1` alone - pipelining requests on a kept HTTP/1.1
-# connection, and proxies.
+# connection; a proxy reached over TLS (`https://`) or SOCKS, which are
+# refused by name, and `HTTP.upgrade` through a proxy, which goes direct.
 
 module std/http
 
@@ -98,6 +114,11 @@ import std/uri::{URI, Params}
 import std/mime::{MIME}
 import std/compress::{Inflater, Deflater, Envelope, Gzip, CompressError}
 import std/digest::{SHA1}
+# A proxy's `Proxy-Authorization: Basic`.
+import std/base64::{Base64}
+# A host beyond ASCII lowered for NO_PROXY's comparison; std/uri's IDNA
+# brings it already.
+import std/unicode::{Unicode}
 # HTTP/2's header compression (RFC 7541), named in full where it is used,
 # and the byte slices it reads and writes.
 import std/hpack
@@ -2010,9 +2031,13 @@ pub class HTTPClient
   # `http://` spoken as HTTP/2 from the first byte, without asking: for a
   # server known to take it.
   getter prior_knowledge : Bool
+  # The proxy every request goes through, `HTTP.open`'s *proxy*; its
+  # connections are kept under it.
+  getter proxy : String?
 
-  # *timeout_ms* is `HTTP.open`'s, for every request the client sends.
-  def initialize(idle : Int32 = 4, @timeout_ms : Int32 = 0, @prior_knowledge : Bool = false)
+  # *timeout_ms* and *proxy* are `HTTP.open`'s, for every request the
+  # client sends.
+  def initialize(idle : Int32 = 4, @timeout_ms : Int32 = 0, @prior_knowledge : Bool = false, @proxy : String? = nil)
     raise "HTTP: a client keeps 0 or more idle connections, not #{idle}" if idle < 0
     raise "HTTP: a timeout of #{@timeout_ms} ms" if @timeout_ms < 0
     @idle = {} of String => Array(Conn)
@@ -2032,11 +2057,11 @@ pub class HTTPClient
   end
 
   def request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true) : Response | Cancelled | SocketError | HTTPError
-    HTTP.open(method, url, headers, body, redirects, jar, decompress, self, @timeout_ms) { |response| response.load }
+    HTTP.open(method, url, headers, body, redirects, jar, decompress, self, @timeout_ms, @proxy) { |response| response.load }
   end
 
   def open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
-    HTTP.open(method, url, headers, body, redirects, jar, decompress, self, @timeout_ms) { |response| block.call(response) }
+    HTTP.open(method, url, headers, body, redirects, jar, decompress, self, @timeout_ms, @proxy) { |response| block.call(response) }
   end
 
   def get(url : String, headers : Hash(String, String) = {} of String => String) : Response | Cancelled | SocketError | HTTPError
@@ -2109,6 +2134,47 @@ pub class Upgraded
   getter leftover : String
 
   def initialize(@response : Response, @socket : IyiSocket | TlsStream, @leftover : String)
+  end
+end
+
+# A proxy a request goes through, read from its URL once per `open`: its
+# host and port, the `Proxy-Authorization` its user and password make
+# (Basic, RFC 7617, the user and password decoded first, as curl and Go
+# send them), and the text a kept connection is filed under - the URL
+# whole, credentials included, so two users of one proxy do not share a
+# connection that the proxy may have tied to the first. A URL with no
+# scheme is `http://`'s, as Go and curl read `HTTP_PROXY=host:3128`; the
+# port is 80 when none is written, as Go's (curl's is 1080). Only an
+# `http://` proxy is spoken: TLS to the proxy itself (`https://`) and
+# SOCKS are refused by name rather than spoken in the clear.
+struct ProxyRoute
+  getter host : String
+  getter port : Int32
+  getter authorization : String?
+  getter key : String
+
+  def initialize(@host : String, @port : Int32, @authorization : String?, @key : String)
+  end
+
+  # The proxy as a message names it: host and port, never the password.
+  def label : String
+    (@host.includes?(":") ? "[#{@host}]" : @host) + ":" + @port.to_s
+  end
+
+  def self.parse(text : String) : ProxyRoute | HTTPError
+    written = text.includes?("://") ? text : "http://" + text
+    # The URL is not repeated in the sentence: it may hold a password.
+    uri = URI.parse?(written)
+    return HTTPError.new("the proxy is not a URL") unless uri
+    scheme = (uri.scheme || "").downcase
+    return HTTPError.new("a proxy over #{scheme}://, which this client does not speak; only http:// proxies") unless scheme == "http"
+    host = uri.hostname
+    return HTTPError.new("the proxy's URL names no host") unless host && host.bytesize > 0
+    credential = nil.as(String?)
+    if user = uri.user
+      credential = "Basic " + Base64.encode(user + ":" + (uri.password || ""))
+    end
+    ProxyRoute.new(host, uri.port || 80, credential, "proxy " + written)
   end
 end
 
@@ -2264,8 +2330,8 @@ pub struct HTTP
   # `SocketError`; a task cancelled answers `Cancelled`; what the server
   # does wrong answers `HTTPError`. `!` passes any of them up, `.or_panic`
   # refuses it.
-  def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, timeout_ms : Int32 = 0) : Response | Cancelled | SocketError | HTTPError
-    open(method, url, headers, body, redirects, jar, decompress, nil, timeout_ms) { |response| response.load }
+  def self.request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, timeout_ms : Int32 = 0, proxy : String? = nil) : Response | Cancelled | SocketError | HTTPError
+    open(method, url, headers, body, redirects, jar, decompress, nil, timeout_ms, proxy) { |response| response.load }
   end
 
   # One request, and the block's answer to the response, its body still
@@ -2289,15 +2355,36 @@ pub struct HTTP
   # `SocketError` whose `timed_out?` is true. 0, the default, waits as
   # long as the server does, as Go's and Python's clients do; a client
   # that talks to servers it does not control should give one.
-  def self.open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, client : HTTPClient? = nil, timeout_ms : Int32 = 0, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
+  #
+  # *proxy* is a proxy's URL - `http://user:password@host:port`, or
+  # `host:port` alone - and every request goes through it, every redirect
+  # too: `http://` as an absolute-form request to the proxy (RFC 9112
+  # §3.2.2), which carries `Proxy-Authorization: Basic` when the URL has
+  # a user; `https://` through a tunnel the proxy opens with `CONNECT
+  # host:port` (RFC 9110 §9.3.6), the credential on the CONNECT alone and
+  # TLS to the server inside it, its certificate checked as without a
+  # proxy. A caller's own `Proxy-Authorization` is the proxy's too: sent
+  # on the CONNECT when the URL has no user, and never inside the tunnel.
+  # A CONNECT answered with anything but a 2xx - 407 when the proxy wants
+  # credentials, 403, 502 - is an `HTTPError` naming the proxy and its
+  # answer. `http://` through a proxy is HTTP/1.1 whatever
+  # *prior_knowledge* says. Which proxy, if any, a URL's environment
+  # names is `proxy_for`'s, and std/http_proxy's `HTTPProxy.from_env`.
+  def self.open(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true, client : HTTPClient? = nil, timeout_ms : Int32 = 0, proxy : String? = nil, &block : Response -> R) : R | Cancelled | SocketError | HTTPError forall R
     raise "HTTP: a timeout of #{timeout_ms} ms" if timeout_ms < 0
+    route = nil.as(ProxyRoute?)
+    if written = proxy
+      read = ProxyRoute.parse(written)
+      return read if read.is_a?(HTTPError)
+      route = read
+    end
     current = url
     verb = method
     sent = headers
     payload = body
     hops = 0
     while true
-      exchange = exchange(verb, current, sent, payload, jar, decompress, nil, client, timeout_ms)
+      exchange = exchange(verb, current, sent, payload, jar, decompress, nil, client, timeout_ms, route)
       return exchange unless exchange.is_a?(Exchange)
       response = exchange.response
       location = response.header("Location")
@@ -2329,7 +2416,7 @@ pub struct HTTP
   def self.upgrade(url : String, protocol : String, headers : Hash(String, String) = {} of String => String, timeout_ms : Int32 = 0) : Upgraded | Cancelled | SocketError | HTTPError
     sent = headers.dup
     sent["Upgrade"] = protocol
-    exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms)
+    exchange = exchange("GET", url, sent, "", nil, false, "Upgrade", nil, timeout_ms, nil)
     return exchange unless exchange.is_a?(Exchange)
     response = exchange.response
     if response.status != 101
@@ -2386,8 +2473,9 @@ pub struct HTTP
   # Connect - or take a connection *client* kept - write the request, read
   # the answer's head past any 1xx, and frame its body; the body itself is
   # still to come. *upgrade* is `Upgrade` for `HTTP.upgrade`; otherwise
-  # the request says `close`, or `keep-alive` for a client.
-  private def self.exchange(method : String, url : String, headers : Hash(String, String), body : String | IyiIO, jar : CookieStore?, decompress : Bool, upgrade : String?, client : HTTPClient?, timeout_ms : Int32) : Exchange | Cancelled | SocketError | HTTPError
+  # the request says `close`, or `keep-alive` for a client. With *route*
+  # the connection is the proxy's, and for `https://` a tunnel through it.
+  private def self.exchange(method : String, url : String, headers : Hash(String, String), body : String | IyiIO, jar : CookieStore?, decompress : Bool, upgrade : String?, client : HTTPClient?, timeout_ms : Int32, route : ProxyRoute?) : Exchange | Cancelled | SocketError | HTTPError
     uri = URI.parse?(url)
     return HTTPError.new("not a URL: #{url.inspect}") unless uri
     scheme = uri.scheme
@@ -2426,6 +2514,32 @@ pub struct HTTP
     end
     head = same_name?(method, "HEAD")
     key = (secure ? "https://" : "http://") + host.downcase + ":" + port.to_s
+    dial_host = host
+    dial_port = port
+    target = path
+    tunnel_credential = nil.as(String?)
+    if via = route
+      dial_host = via.host
+      dial_port = via.port
+      if secure
+        # A tunnel is one origin's, kept under the proxy and that origin.
+        # `Proxy-Authorization` is the CONNECT's: the URL's, or else the
+        # caller's, and never written inside the tunnel, where the origin
+        # would read it.
+        key = via.key + " " + key
+        tunnel_credential = via.authorization || header_in(headers, "Proxy-Authorization")
+        sent = without(sent, ["Proxy-Authorization"])
+      else
+        # A connection to the proxy carries a request for any origin, as
+        # Go's and curl's do: kept under the proxy alone.
+        key = via.key
+        target = "http://" + host_line + path
+        if credential = via.authorization
+          sent = without(sent, ["Proxy-Authorization"])
+          sent["Proxy-Authorization"] = credential
+        end
+      end
+    end
     connection = upgrade || (client ? "keep-alive" : "close")
     # Sent again once, on a new connection, when a kept one turns out to
     # have been closed by the server before it answered.
@@ -2438,8 +2552,15 @@ pub struct HTTP
       end
       reused = !conn.nil?
       unless conn
-        socket = IyiSocket.connect(host, port, timeout_ms > 0 ? timeout_ms : -1)!
+        socket = IyiSocket.connect(dial_host, dial_port, timeout_ms > 0 ? timeout_ms : -1)!
         client.made if client
+        if secure && (via = route)
+          unopened = tunnel(socket, via, named + ":" + port.to_s, tunnel_credential, timeout_ms)
+          if unopened
+            socket.close
+            return unopened
+          end
+        end
         if secure
           # The handshake waits as long as a read does.
           if timeout_ms > 0
@@ -2462,7 +2583,8 @@ pub struct HTTP
           speaks_h2 = upgrade.nil? && tls.alpn_protocol == "h2"
         else
           conn = Conn.new(socket)
-          speaks_h2 = upgrade.nil? && !client.nil? && client.prior_knowledge
+          # Through a proxy the request is HTTP/1.1's absolute form.
+          speaks_h2 = upgrade.nil? && !client.nil? && client.prior_knowledge && route.nil?
         end
         conn.gap = timeout_ms if timeout_ms > 0
         if speaks_h2
@@ -2499,7 +2621,7 @@ pub struct HTTP
         end
         return answer
       end
-      failed = send_request(conn.transport, method, path, host_line, sent, body, connection)
+      failed = send_request(conn.transport, method, target, host_line, sent, body, connection)
       if failed
         conn.close
         next if reused && retry
@@ -2517,6 +2639,226 @@ pub struct HTTP
       conn.close unless answer.is_a?(Exchange)
       return answer
     end
+  end
+
+  # The tunnel to *authority* (`host:port`, an IPv6 host in brackets) on
+  # *socket*, a connection to the proxy: `CONNECT` with the authority as
+  # its target and its `Host` (RFC 9110 §9.3.6), *credential* as
+  # `Proxy-Authorization`, and the proxy's answer read. Any 2xx opens the
+  # tunnel and has no body (the RFC has a client ignore the framing such
+  # an answer gives); anything else is refused with the proxy's status,
+  # and so are bytes sent after a 2xx, before this end's TLS has begun.
+  # Nil once the tunnel is open.
+  private def self.tunnel(socket : IyiSocket, via : ProxyRoute, authority : String, credential : String?, timeout_ms : Int32) : Cancelled | SocketError | HTTPError | Nil
+    ask = String::Builder.new
+    ask << "CONNECT " << authority << " HTTP/1.1\r\nHost: " << authority << "\r\n"
+    if credential
+      raise "HTTP: header Proxy-Authorization contains a line break" if has_break?(credential)
+      raise "HTTP: header Proxy-Authorization contains a control character" if control?(credential)
+      ask << "Proxy-Authorization: " << credential << "\r\n"
+    end
+    ask << "\r\n"
+    wrote = socket.write(ask.to_s)
+    return wrote unless wrote.is_a?(Int32)
+    conn = Conn.new(socket)
+    conn.gap = timeout_ms if timeout_ms > 0
+    got = conn.read_head(Server::MAX_HEAD, "the proxy's response")
+    case got
+    in Nil
+      if fault = conn.failure
+        return fault
+      end
+      return HTTPError.new("the proxy at #{via.label} closed the connection before it answered CONNECT #{authority}", 502)
+    in HTTPError
+      return got
+    in String
+      parsed = parse_response_head(got)
+      return parsed if parsed.is_a?(HTTPError)
+      status, reason, _, _ = parsed
+      unless status >= 200 && status < 300
+        return HTTPError.new("the proxy at #{via.label} answered #{status} #{reason} to CONNECT #{authority}", 502)
+      end
+      if conn.available > 0
+        return HTTPError.new("the proxy at #{via.label} sent #{conn.available} bytes after its #{status} to CONNECT #{authority}, before TLS began", 502)
+      end
+    end
+    nil
+  end
+
+  # The proxy a request for *url* goes through, given the values of
+  # `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` - nil when it goes
+  # direct. Go's `golang.org/x/net/http/httpproxy` is the rule, line for
+  # line, as its documentation and tests state it:
+  #
+  # * `https://` takes *https_proxy*, `http://` *http_proxy*, any other
+  #   scheme none. A proxy written without a scheme is `http://`'s, and is
+  #   answered with it, ready for `open`'s *proxy*.
+  # * `localhost` (in lower case: Go's comparison) and a loopback address
+  #   (127.0.0.0/8, ::1, the first as IPv4-mapped too) never go through a
+  #   proxy.
+  # * *no_proxy* is a comma-separated list, each entry trimmed and read
+  #   without regard to case: `*` alone sends everything direct; an IP
+  #   address or a CIDR range (`10.0.0.0/8`, `2001:db8::/32`) matches the
+  #   addresses in it, IPv4 and its IPv4-mapped form alike, and a CIDR
+  #   range of one family never the other's; a domain matches itself and
+  #   every name under it (`foo.com`: `foo.com`, `bar.foo.com`, not
+  #   `barfoo.com`); with a leading dot, or `*.`, only the names under it
+  #   (`.y.com`: `x.y.com`, not `y.com`). An address or domain may carry
+  #   a port (`1.2.3.4:80`, `[::1]:443`, `foo.com:8080`), and matches
+  #   then on that port alone, the URL's own or its scheme's default.
+  #   An entry that is none of these (`:80`) is passed over.
+  # * A host is compared as IDNA's ASCII form, as Go compares it.
+  #
+  # Pure: the values are the caller's, so std/http reaches no environment;
+  # std/http_proxy reads them from it.
+  def self.proxy_for(url : String, http_proxy : String?, https_proxy : String?, no_proxy : String? = nil) : String?
+    uri = URI.parse?(url)
+    return nil unless uri
+    scheme = (uri.scheme || "").downcase
+    chosen = if scheme == "https"
+               https_proxy
+             elsif scheme == "http"
+               http_proxy
+             else
+               nil
+             end
+    return nil unless chosen && chosen.bytesize > 0
+    host = uri.hostname || ""
+    port = uri.port || (scheme == "https" ? 443 : 80)
+    return nil unless proxied?(host, port.to_s, no_proxy || "")
+    chosen.includes?("://") ? chosen : "http://" + chosen
+  end
+
+  # Whether *host* on *port* goes through a proxy under *no_proxy*: Go's
+  # `useProxy`, `proxy_for`'s rules.
+  private def self.proxied?(host : String, port : String, no_proxy : String) : Bool
+    ascii = ascii_name(host)
+    # `localhost` exactly as written, before the name is lowered: Go's
+    # rule, which sends `LOCALHOST` through the proxy (its NO_PROXY
+    # entries and names are compared lowered).
+    return false if ascii == "localhost"
+    name = ascii.downcase
+    ip = address_of(name)
+    return false if ip && loopback?(ip)
+    no_proxy.split(',').each do |entry|
+      written = trim(entry).downcase
+      next if written.bytesize == 0
+      return false if written == "*"
+      if slash = written.index('/')
+        net = address_of(written[0, slash])
+        bits = prefix_bits(written[slash + 1, written.bytesize - slash - 1])
+        # A dotted address's length counts IPv4's 32 bits, the last of
+        # the 128 its mapped form holds. A length past the family's is no
+        # range, and the entry is read on as Go reads it on.
+        dotted = !written[0, slash].includes?(":")
+        if net && bits && bits <= (dotted ? 32 : 128)
+          return false if ip && in_range?(ip, net, dotted ? bits + 96 : bits)
+          next
+        end
+      end
+      phost = written
+      pport = ""
+      if split = split_host_port(written)
+        phost, pport = split
+        next if phost.bytesize == 0
+      end
+      if pip = address_of(phost)
+        return false if ip && ip == pip && (pport.bytesize == 0 || pport == port)
+        next
+      end
+      next if phost.bytesize == 0
+      phost = phost[1, phost.bytesize - 1] if phost.starts_with?("*.")
+      itself = !phost.starts_with?(".")
+      phost = phost[1, phost.bytesize - 1] unless itself
+      suffix = "." + ascii_name(phost)
+      if name.ends_with?(suffix) || (itself && name == suffix[1, suffix.bytesize - 1])
+        return false if pport.bytesize == 0 || pport == port
+      end
+    end
+    true
+  end
+
+  # *host* as IDNA's ASCII form, as Go's `idna.Lookup` makes it: a name
+  # in ASCII as it is, capitals and all (Go lowers it after, and compares
+  # `localhost` before); one beyond ASCII lowered first - UTS #46 maps
+  # capitals, which std/idna's IDNA2008 refuses - and carried by
+  # `IDNA.to_ascii`; as it is when it has no such form.
+  private def self.ascii_name(host : String) : String
+    raw = host.to_unsafe
+    at = 0
+    while at < host.bytesize && raw[at] < 128_u8
+      at = at + 1
+    end
+    return host if at == host.bytesize || !Unicode.valid?(host)
+    ascii = URI.ascii_host(Unicode.downcase(host))
+    ascii.is_a?(String) ? ascii : host
+  end
+
+  # An IP address as its sixteen bytes, IPv4 as its IPv4-mapped form
+  # (`::ffff:1.2.3.4`), as Go's `net.IP` holds one; nil for a name.
+  private def self.address_of(text : String) : {UInt64, UInt64}?
+    if text.includes?(":")
+      six = IyiSocket.read_ipv6(text)
+      return six.is_a?(String) ? nil : {six.high, six.low}
+    end
+    four = IyiSocket.read_ipv4(text)
+    return nil if four.is_a?(String)
+    {0_u64, 0xffff00000000_u64 | four.b0.to_u64.unsafe_shl(24_u64) | four.b1.to_u64.unsafe_shl(16_u64) | four.b2.to_u64.unsafe_shl(8_u64) | four.b3.to_u64}
+  end
+
+  private def self.mapped?(ip : {UInt64, UInt64}) : Bool
+    ip[0] == 0_u64 && ip[1].unsafe_shr(32_u64) == 0xffff_u64
+  end
+
+  private def self.loopback?(ip : {UInt64, UInt64}) : Bool
+    return ip[1].unsafe_shr(24_u64) & 0xff_u64 == 127_u64 if mapped?(ip)
+    ip[0] == 0_u64 && ip[1] == 1_u64
+  end
+
+  # Whether *ip* is in the range of *net*'s first *bits* bits (of 128).
+  # The range is IPv4's when its address, cut to those bits, is still
+  # IPv4-mapped, and then holds IPv4 addresses alone; an IPv6 range holds
+  # IPv6 addresses alone - Go's `ParseCIDR` and `IPNet.Contains`, which
+  # compare a four-byte form with a sixteen-byte one as different.
+  private def self.in_range?(ip : {UInt64, UInt64}, net : {UInt64, UInt64}, bits : Int32) : Bool
+    high_mask = bits >= 64 ? ~0_u64 : (bits == 0 ? 0_u64 : (~0_u64).unsafe_shl((64 - bits).to_u64))
+    low_mask = bits <= 64 ? 0_u64 : (bits == 128 ? ~0_u64 : (~0_u64).unsafe_shl((128 - bits).to_u64))
+    cut = {net[0] & high_mask, net[1] & low_mask}
+    return false unless mapped?(ip) == mapped?(cut)
+    (ip[0] & high_mask) == cut[0] && (ip[1] & low_mask) == cut[1]
+  end
+
+  # A CIDR prefix length: decimal digits, nil otherwise.
+  private def self.prefix_bits(text : String) : Int32?
+    return nil if text.bytesize == 0 || text.bytesize > 3
+    return nil unless digits?(text)
+    text.to_i
+  end
+
+  # Go's `net.SplitHostPort`: `host:port` or `[host]:port`, the port
+  # possibly empty; nil where it has no port, or too many colons.
+  private def self.split_host_port(text : String) : {String, String}?
+    raw = text.to_unsafe
+    n = text.bytesize
+    colon = -1
+    i = 0
+    while i < n
+      colon = i if raw[i] == 58_u8
+      i = i + 1
+    end
+    return nil if colon < 0
+    if n > 0 && raw[0] == 91_u8
+      close = text.index(']')
+      return nil unless close && close + 1 == colon
+      host = text[1, close - 1]
+      return nil if host.includes?("[") || text[close + 1, n - close - 1].includes?("]")
+      return {host, text[colon + 1, n - colon - 1]}
+    end
+    host = text[0, colon]
+    return nil if host.includes?(":") || host.includes?("[") || host.includes?("]")
+    port = text[colon + 1, n - colon - 1]
+    return nil if port.includes?("[") || port.includes?("]")
+    {host, port}
   end
 
   # A request over HTTP/2: a stream of its own on *h2*, the answer's final

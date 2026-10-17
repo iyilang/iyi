@@ -1,0 +1,85 @@
+# Exercises `std/http_proxy`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_http_proxy_exercise.iyi
+#
+# Each case sets the proxy variables it names, unsets the rest, and prints
+# itself and what `HTTPProxy.from_env` answered as one line
+# (`case: NAME=VALUE ... -> http=... https=...`), which
+# bench/std_http_proxy_exercise.sh hands to Python's
+# `urllib.request.getproxies_environment` to answer the same.
+
+module bench/std_http_proxy_exercise
+
+import std/env::{ENV}
+import std/http_proxy::{HTTPProxy}
+
+def assert_str(expected : String, actual : String, msg : String) : Nil
+  raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
+end
+
+NAMES = ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "REQUEST_METHOD"]
+
+# Where the environment's names are one whatever their case (Windows),
+# a case that sets a name in both cases cannot be set up; it is skipped,
+# and the gate's Python skips it alike.
+def folded? : Bool
+  ENV["iyi_proxy_probe"] = "1"
+  folded = !ENV["IYI_PROXY_PROBE"]?.nil?
+  ENV.delete("iyi_proxy_probe")
+  folded
+end
+
+# The case *set* ("NAME=VALUE", an empty value set and empty), and what
+# `from_env` must answer for `http://example.com/` and
+# `https://example.com/`, checked under *what*.
+def env_case(set : Array(String), want : String, what : String) : Nil
+  if folded?
+    lowered = set.map { |pair| pair[0, pair.index('=') || 0].downcase }
+    return if lowered.uniq.size != lowered.size
+  end
+  NAMES.each { |name| ENV.delete(name) }
+  set.each do |pair|
+    at = pair.index('=') || 0
+    ENV[pair[0, at]] = pair[at + 1, pair.bytesize - at - 1]
+  end
+  got = "http=#{HTTPProxy.from_env("http://example.com/") || "direct"} https=#{HTTPProxy.from_env("https://example.com/") || "direct"}"
+  puts "case: #{set.join(" ")} -> #{got}"
+  assert_str want, got, what
+end
+
+puts "== which name wins"
+env_case([] of String, "http=direct https=direct", "no variable, no proxy")
+env_case(["HTTP_PROXY=http://upper:1"], "http=http://upper:1 https=direct", "HTTP_PROXY alone")
+env_case(["http_proxy=http://lower:1", "HTTP_PROXY=http://upper:1"], "http=http://lower:1 https=direct", "the lower-case name wins")
+env_case(["http_proxy=", "HTTP_PROXY=http://upper:1"], "http=direct https=direct", "a lower-case name set to nothing wins too")
+env_case(["HTTP_PROXY="], "http=direct https=direct", "a name set to nothing is no proxy")
+env_case(["https_proxy=http://lower:2", "HTTPS_PROXY=http://upper:2"], "http=direct https=http://lower:2", "https_proxy over HTTPS_PROXY")
+env_case(["HTTPS_PROXY=http://upper:2"], "http=direct https=http://upper:2", "HTTPS_PROXY alone, for https:// alone")
+env_case(["http_proxy=lower:3128"], "http=http://lower:3128 https=direct", "a proxy without a scheme is http://'s")
+
+puts "\n== HTTP_PROXY under CGI (httpoxy)"
+env_case(["REQUEST_METHOD=GET", "HTTP_PROXY=http://upper:1"], "http=direct https=direct", "HTTP_PROXY is not read under CGI")
+env_case(["REQUEST_METHOD=", "HTTP_PROXY=http://upper:1"], "http=direct https=direct", "REQUEST_METHOD set to nothing is CGI too")
+env_case(["REQUEST_METHOD=GET", "http_proxy=http://lower:1"], "http=http://lower:1 https=direct", "http_proxy still is under CGI")
+env_case(["REQUEST_METHOD=GET", "HTTPS_PROXY=http://upper:2"], "http=direct https=http://upper:2", "HTTPS_PROXY still is under CGI")
+
+puts "\n== NO_PROXY from the environment"
+env_case(["HTTP_PROXY=http://upper:1", "HTTPS_PROXY=http://upper:2", "NO_PROXY=example.com"], "http=direct https=direct", "NO_PROXY names the host")
+env_case(["HTTP_PROXY=http://upper:1", "HTTPS_PROXY=http://upper:2", "NO_PROXY=other.org"], "http=http://upper:1 https=http://upper:2", "NO_PROXY names another host")
+env_case(["HTTP_PROXY=http://upper:1", "HTTPS_PROXY=http://upper:2", "no_proxy=other.org", "NO_PROXY=example.com"], "http=http://upper:1 https=http://upper:2", "no_proxy over NO_PROXY")
+env_case(["HTTP_PROXY=http://upper:1", "HTTPS_PROXY=http://upper:2", "no_proxy=", "NO_PROXY=example.com"], "http=http://upper:1 https=http://upper:2", "a no_proxy set to nothing wins too")
+env_case(["http_proxy=http://lower:1", "https_proxy=http://lower:2", "no_proxy=*"], "http=direct https=direct", "no_proxy=* sends everything direct")
+env_case(["http_proxy=http://lower:1", "no_proxy=example.com:8080"], "http=http://lower:1 https=direct", "a NO_PROXY port that is not the URL's")
+
+# A loopback address never goes through a proxy, whatever the variables
+# say: Go's rule, `HTTP.proxy_for`'s.
+NAMES.each { |name| ENV.delete(name) }
+ENV["HTTP_PROXY"] = "http://upper:1"
+assert_str "direct", HTTPProxy.from_env("http://127.0.0.1:8080/") || "direct", "a loopback address goes direct"
+assert_str "direct", HTTPProxy.from_env("http://localhost/") || "direct", "localhost goes direct"
+assert_str "http://upper:1", HTTPProxy.from_env("http://192.0.2.1/") || "direct", "another address goes through the proxy"
+ENV.delete("HTTP_PROXY")
+puts "  127.0.0.1 and localhost direct under HTTP_PROXY; 192.0.2.1 through it"
+
+puts "\nALL CHECKS PASSED"

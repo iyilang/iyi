@@ -4,6 +4,35 @@
 
 ### Added
 
+- **std/http: requests through a proxy, and std/http_proxy to find one in
+  the environment.** `proxy:` on `HTTP.request`, `HTTP.open` and
+  `HTTPClient.new` takes an `http://` proxy's URL (`host:port` alone is
+  read as `http://`, the port 80 when none is written): `http://` goes to
+  the proxy as an absolute-form request (RFC 9112 §3.2.2), `https://`
+  through `CONNECT host:port` (RFC 9110 §9.3.6) with TLS to the server
+  inside the tunnel, its certificate checked as without a proxy, and ALPN
+  `h2` spoken inside as outside. The URL's user and password go as
+  `Proxy-Authorization: Basic` to the proxy alone - on the CONNECT, never
+  inside the tunnel; a caller's own `Proxy-Authorization` is moved to the
+  CONNECT too, and replaced on a forwarded request by the URL's. A
+  CONNECT answered with anything but a 2xx is an `HTTPError` naming the
+  proxy and its status (`the proxy at 127.0.0.1:3128 answered 407 Proxy
+  Authentication Required to CONNECT localhost:8443`), and so are bytes
+  sent after the 2xx before TLS began; a proxy over `https://` or SOCKS
+  is refused by name, never spoken in the clear. An `HTTPClient` keeps a
+  proxy's connections under the proxy URL, credentials included, and a
+  tunnel under the proxy and the server; `http://` through a proxy is
+  HTTP/1.1 whatever `prior_knowledge` says. `HTTP.proxy_for(url,
+  http_proxy, https_proxy, no_proxy)` answers which proxy a URL takes
+  under those values, as Go's `httpproxy` does: `localhost` and loopback
+  addresses never, and NO_PROXY's domains (and their subdomains), `.` and
+  `*.` suffixes, `*`, IPv4 and IPv6 addresses, CIDR ranges and ports,
+  hosts compared in IDNA's ASCII form. It is pure, and std/http still
+  imports no std/env: the new `std/http_proxy`'s `HTTPProxy.from_env(url)`
+  reads `http_proxy`, `https_proxy`, `no_proxy` and their names in
+  capitals, the lower-case name winning when set even to nothing, and
+  `HTTP_PROXY` not read under CGI (httpoxy), as Python's `urllib` reads
+  them. `HTTP.upgrade` still goes direct.
 - **std/cbor: CBOR (RFC 8949) decoded, encoded in core deterministic
   encoding and written as diagnostic notation, in iyi, importing
   nothing.** `CBOR.decode(bytes) : Any | CBORError` reads one data item

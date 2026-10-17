@@ -74,7 +74,7 @@ fi
 
 echo
 echo "== every http section reported"
-for phrase in "== request" "== response" "== messages at the edges" "== over a socket" "== the server, from a raw socket" "== a burst of connections" "== bodies as streams" "== content codings" "== redirects" "== forms" "== kept connections" "== timeouts" "== upgrades"; do
+for phrase in "== request" "== response" "== messages at the edges" "== over a socket" "== the server, from a raw socket" "== a burst of connections" "== bodies as streams" "== content codings" "== redirects" "== forms" "== kept connections" "== timeouts" "== upgrades" "== proxies"; do
   if ! grep -q "$phrase" "$WORK/http-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -102,10 +102,12 @@ echo "== what the module reaches"
 # module reaches. These are the modules it may import, and none but
 # std/socket, std/time and std/tls reaches anything: HTTP/2's std/hpack
 # and the byte slices it reads are iyi over the prelude, and std/x509 -
-# the certificate a request carries - is std/tls's own already.
+# the certificate a request carries - is std/tls's own already, as
+# std/unicode is std/uri's. No std/env: a proxy the environment names is
+# std/http_proxy's to read.
 imports=$(grep -oE '^import std/[a-z_0-9]+' "$REPO/src/std/http.iyi" | sed 's/^import //' | sort | tr '\n' ' ')
-if [ "$imports" = "std/compress std/digest std/hpack std/mime std/slice std/socket std/time std/tls std/uri std/x509 " ]; then
-  echo "  std/socket, std/time and std/tls (std/x509 its own), and std/compress, std/digest, std/hpack, std/mime, std/slice and std/uri, which reach nothing"
+if [ "$imports" = "std/base64 std/compress std/digest std/hpack std/mime std/slice std/socket std/time std/tls std/unicode std/uri std/x509 " ]; then
+  echo "  std/socket, std/time and std/tls (std/x509 its own), and std/base64, std/compress, std/digest, std/hpack, std/mime, std/slice, std/unicode and std/uri, which reach nothing"
 else
   echo "  std/http imports $imports"
   status=1
@@ -1192,6 +1194,354 @@ else
 fi
 
 echo
+echo "== through a proxy: a proxy written here in Python, curl beside the client"
+# `proxy:` end to end: a forwarding proxy written by hand below - absolute
+# form forwarded in origin form, CONNECT tunnelled byte for byte, Basic
+# credentials required, and each request logged as it saw it - between
+# the iyi client and an iyi server that answers both http:// and https://
+# (std/tls, the P-256 leaf from the https:// section above, ALPN h2 and
+# http/1.1). The server names the Proxy-Authorization it was sent, which
+# must be none; the proxy's log must show the credential on every request
+# and CONNECT that carried one, and a 407 for those that did not. curl
+# through the same proxy must leave the same lines in its log and get the
+# same answers. Then NO_PROXY, against Go's own net/http where a Go
+# toolchain is installed.
+cat > "$WORK/proxy.py" <<'PY'
+import base64, socket, sys, threading
+from urllib.parse import urlsplit
+want = "Basic " + base64.b64encode(b"gate:s3cret").decode()
+log = open(sys.argv[1], "a", buffering=1)
+
+def read_head(sock):
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = sock.recv(65536)
+        if not chunk:
+            return None, b""
+        data += chunk
+    head, rest = data.split(b"\r\n\r\n", 1)
+    return head.decode("latin-1"), rest
+
+def pipe(a, b):
+    try:
+        while True:
+            chunk = a.recv(65536)
+            if not chunk:
+                break
+            b.sendall(chunk)
+    except OSError:
+        pass
+    try:
+        b.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+def refuse(client, status):
+    client.sendall(f"HTTP/1.1 {status}\r\nProxy-Authenticate: Basic realm=\"gate\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode())
+
+def handle(client):
+    with client:
+        head, rest = read_head(client)
+        if head is None:
+            return
+        lines = head.split("\r\n")
+        method, target, version = lines[0].split(" ")
+        fields = [line.split(":", 1) for line in lines[1:]]
+        fields = [(k, v.strip()) for k, v in fields]
+        auth = [v for k, v in fields if k.lower() == "proxy-authorization"]
+        host = [v for k, v in fields if k.lower() == "host"]
+        verdict = "ok" if auth == [want] else ("missing" if not auth else "wrong")
+        seen = f"{method} {target} host={','.join(host)} auth={verdict}"
+        if verdict != "ok":
+            log.write(seen + " 407\n")
+            refuse(client, "407 Proxy Authentication Required")
+            return
+        if method == "CONNECT":
+            name, port = target.rsplit(":", 1)
+            upstream = socket.create_connection((name.strip("[]"), int(port)))
+            log.write(seen + " tunnel\n")
+            client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            if rest:
+                upstream.sendall(rest)
+            back = threading.Thread(target=pipe, args=(upstream, client))
+            back.start()
+            pipe(client, upstream)
+            back.join()
+            upstream.close()
+            return
+        url = urlsplit(target)
+        if url.scheme != "http" or not url.hostname:
+            log.write(seen + " 400 not absolute-form\n")
+            refuse(client, "400 Bad Request")
+            return
+        length = int(next((v for k, v in fields if k.lower() == "content-length"), "0"))
+        while len(rest) < length:
+            rest += client.recv(65536)
+        # Hop by hop (RFC 9110 §7.6.1): the credential and the connection
+        # are the proxy's, not passed on.
+        kept = [f"{k}: {v}" for k, v in fields if k.lower() not in ("proxy-authorization", "connection")]
+        path = (url.path or "/") + ("?" + url.query if url.query else "")
+        upstream = socket.create_connection((url.hostname, url.port or 80))
+        upstream.sendall((f"{method} {path} {version}\r\n" + "".join(f + "\r\n" for f in kept) + "Connection: close\r\n\r\n").encode("latin-1") + rest)
+        log.write(seen + " forwarded\n")
+        pipe(upstream, client)
+        upstream.close()
+
+server = socket.create_server(("127.0.0.1", 0))
+print(server.getsockname()[1], flush=True)
+while True:
+    peer, _ = server.accept()
+    threading.Thread(target=handle, args=(peer,), daemon=True).start()
+PY
+cat > "$WORK/proxy_origin.iyi" <<'IYI'
+module main
+
+import std/http::{HTTP, Server, Response, Request}
+import std/socket::{IyiSocket}
+import std/tls::{TlsServerConfig}
+import std/file::{File}
+
+def told(req : Request) : Response
+  Response.new(200, "#{req.method} #{req.path} #{req.query || "-"} #{req.version} host=#{req.header("Host")} proxy-auth=#{req.header("Proxy-Authorization") || "-"} length=#{req.body.bytesize}")
+end
+
+config = TlsServerConfig.from_pem(File.read(Program.args[1]), File.read(Program.args[2])).or_panic
+config.alpn = ["h2", "http/1.1"]
+plain = IyiSocket.listen("127.0.0.1", 0)
+secure = IyiSocket.listen("127.0.0.1", 0)
+File.write(Program.args[0], "#{plain.local_port} #{secure.local_port}")
+group do |g|
+  g.spawn { Server.serve(plain) { |req| told(req) }; 0 }
+  g.spawn { Server.serve(secure, tls: config) { |req| told(req) }; 0 }
+  0
+end
+IYI
+cat > "$WORK/proxy_client.iyi" <<'IYI'
+module main
+
+import std/http::{HTTP, HTTPClient, HTTPError, Response}
+import std/socket::{SocketError}
+import std/tls::{TlsConfig}
+import std/x509::{Certificate}
+import std/file::{File}
+
+def said(got : Response | HTTPError | SocketError | Cancelled) : String
+  return "#{got.status} #{got.body}" if got.is_a?(Response)
+  return got.message if got.is_a?(HTTPError) || got.is_a?(SocketError)
+  "cancelled"
+end
+
+args = Program.args
+proxy = "http://gate:s3cret@127.0.0.1:#{args[0]}"
+bare = "127.0.0.1:#{args[0]}"
+plain = "http://127.0.0.1:#{args[1]}"
+secure = "https://localhost:#{args[2]}"
+config = TlsConfig.new
+config.roots = Certificate.from_pem(File.read(args[3])).or_panic
+config.alpn = args[4].split(',')
+HTTP.tls_config = config
+puts "http: " + said(HTTP.request("GET", plain + "/echo?x=1", proxy: proxy, timeout_ms: 20000))
+puts "post: " + said(HTTP.request("POST", plain + "/echo", body: "hello", proxy: proxy, timeout_ms: 20000))
+puts "https: " + said(HTTP.request("GET", secure + "/echo?x=2", proxy: proxy, timeout_ms: 20000))
+puts "https, the caller's credential: " + said(HTTP.request("GET", secure + "/echo?x=3", {"Proxy-Authorization" => "Basic Z2F0ZTpzM2NyZXQ="}, proxy: bare, timeout_ms: 20000))
+# The tunnel first, kept, then http:// through the same proxy: which must
+# not be written into the tunnel, to the https:// server.
+client = HTTPClient.new(proxy: proxy, timeout_ms: 20000)
+puts "client https: " + said(client.get(secure + "/echo?k=2"))
+puts "client https again: " + said(client.get(secure + "/echo?k=3"))
+puts "client http: " + said(client.get(plain + "/echo?k=1"))
+puts "client: #{client.connections_made} made, #{client.connections_reused} reused"
+client.close
+puts "https, no credential: " + said(HTTP.request("GET", secure + "/echo?x=4", proxy: bare, timeout_ms: 20000))
+puts "http, no credential: " + said(HTTP.request("GET", plain + "/echo?x=5", proxy: bare, timeout_ms: 20000))
+puts "https, a wrong credential: " + said(HTTP.request("GET", secure + "/echo?x=6", proxy: "http://gate:wrong@127.0.0.1:#{args[0]}", timeout_ms: 20000))
+IYI
+# proxy_up / proxy_down: the proxy and the origin started and stopped,
+# their ports in PPORT, HPORT and SPORT, the proxy's log emptied.
+proxy_up() {
+  : > "$WORK/proxy.log"
+  "$PY" "$WORK/proxy.py" "$WORK/proxy.log" > "$WORK/proxy.out" 2>&1 &
+  proxy_pid=$!
+  rm -f "$WORK/origin.ports"
+  "$WORK/proxy_origin" "$WORK/origin.ports" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" > "$WORK/origin.out" 2>&1 &
+  origin_pid=$!
+  PPORT=$(await_port "$WORK/proxy.out" "$proxy_pid")
+  for _ in $(seq 1 100); do
+    [ -s "$WORK/origin.ports" ] && break
+    sleep 0.1
+  done
+  read -r HPORT SPORT < "$WORK/origin.ports"
+}
+proxy_down() {
+  kill "$proxy_pid" "$origin_pid" 2>/dev/null
+  wait "$proxy_pid" "$origin_pid" 2>/dev/null
+}
+# What the client must print, and the proxy log, for ALPN's HTTP/<version>.
+proxy_expected() {
+  local v="$1" echo="host=127.0.0.1:$HPORT proxy-auth=-" tls="host=localhost:$SPORT proxy-auth=-"
+  cat <<EOF
+http: 200 GET /echo x=1 HTTP/1.1 $echo length=0
+post: 200 POST /echo - HTTP/1.1 $echo length=5
+https: 200 GET /echo x=2 $v $tls length=0
+https, the caller's credential: 200 GET /echo x=3 $v $tls length=0
+client https: 200 GET /echo k=2 $v $tls length=0
+client https again: 200 GET /echo k=3 $v $tls length=0
+client http: 200 GET /echo k=1 HTTP/1.1 $echo length=0
+client: 2 made, 1 reused
+https, no credential: HTTP: the proxy at 127.0.0.1:$PPORT answered 407 Proxy Authentication Required to CONNECT localhost:$SPORT
+http, no credential: 407 
+https, a wrong credential: HTTP: the proxy at 127.0.0.1:$PPORT answered 407 Proxy Authentication Required to CONNECT localhost:$SPORT
+--
+GET http://127.0.0.1:$HPORT/echo?x=1 host=127.0.0.1:$HPORT auth=ok forwarded
+POST http://127.0.0.1:$HPORT/echo host=127.0.0.1:$HPORT auth=ok forwarded
+CONNECT localhost:$SPORT host=localhost:$SPORT auth=ok tunnel
+CONNECT localhost:$SPORT host=localhost:$SPORT auth=ok tunnel
+CONNECT localhost:$SPORT host=localhost:$SPORT auth=ok tunnel
+GET http://127.0.0.1:$HPORT/echo?k=1 host=127.0.0.1:$HPORT auth=ok forwarded
+CONNECT localhost:$SPORT host=localhost:$SPORT auth=missing 407
+GET http://127.0.0.1:$HPORT/echo?x=5 host=127.0.0.1:$HPORT auth=missing 407
+CONNECT localhost:$SPORT host=localhost:$SPORT auth=wrong 407
+EOF
+}
+# proxy_round <client binary> <alpn> <HTTP/version>: the client through a
+# fresh proxy and origin; 0 when its output and the proxy's log are the
+# expected ones, and otherwise the first line that differs, printed.
+proxy_round() {
+  local bin="$1" alpn="$2" v="$3" got want
+  proxy_up
+  got="$(timeout -k 5 120 "$bin" "$PPORT" "$HPORT" "$SPORT" "$WORK/tls/root.pem" "$alpn" 2>&1; echo --; cat "$WORK/proxy.log")"
+  want="$(proxy_expected "$v")"
+  proxy_down
+  if [ "$got" = "$want" ]; then
+    return 0
+  fi
+  diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") | grep -m2 '^[<>]' | sed 's/^/    /'
+  return 1
+}
+proxy_ready=0
+if [ -z "$PY" ] || [ ! -s "$WORK/tls/p256.pem" ]; then
+  echo "  skipped: no python3, or no certificate from the https:// section above"
+elif ! "$IYI" build -o "$WORK/proxy_origin" "$WORK/proxy_origin.iyi" > "$WORK/proxy_origin.build" 2>&1 ||
+     ! "$IYI" build -o "$WORK/proxy_client" "$WORK/proxy_client.iyi" > "$WORK/proxy_client.build" 2>&1; then
+  echo "  the proxy's origin or client did not build"
+  sed -n '1,8p' "$WORK/proxy_origin.build" "$WORK/proxy_client.build"
+  status=1
+else
+  proxy_ready=1
+  for round in "http/1.1 HTTP/1.1" "h2,http/1.1 HTTP/2"; do
+    set -- $round
+    if proxy_round "$WORK/proxy_client" "$1" "$2"; then
+      echo "  ALPN $1: http:// forwarded and https:// tunnelled ($2 inside), the credential at the proxy and never at the server, a kept tunnel, 407 named"
+    else
+      echo "  ALPN $1: the client through the proxy did not answer as expected"
+      status=1
+    fi
+  done
+  if command -v curl >/dev/null 2>&1; then
+    proxy_up
+    c=(curl -sS --noproxy '' -x "http://gate:s3cret@127.0.0.1:$PPORT" --cacert "$WORK/tls/root.pem" --http1.1)
+    got="$("${c[@]}" "http://127.0.0.1:$HPORT/echo?x=1"; echo; "${c[@]}" "https://localhost:$SPORT/echo?x=2"; echo; curl -sS --noproxy '' -x "http://127.0.0.1:$PPORT" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HPORT/echo?x=5"; echo; cat "$WORK/proxy.log")"
+    proxy_down
+    want="GET /echo x=1 HTTP/1.1 host=127.0.0.1:$HPORT proxy-auth=- length=0
+GET /echo x=2 HTTP/1.1 host=localhost:$SPORT proxy-auth=- length=0
+407
+GET http://127.0.0.1:$HPORT/echo?x=1 host=127.0.0.1:$HPORT auth=ok forwarded
+CONNECT localhost:$SPORT host=localhost:$SPORT auth=ok tunnel
+GET http://127.0.0.1:$HPORT/echo?x=5 host=127.0.0.1:$HPORT auth=missing 407"
+    if [ "$got" = "$want" ]; then
+      echo "  curl through the same proxy: the same answers, and the same lines in its log as the iyi client's"
+    else
+      echo "  curl through the proxy disagrees:"
+      diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") | sed 's/^/    /'
+      status=1
+    fi
+  else
+    echo "  curl is not installed; its cross-check skipped"
+  fi
+fi
+
+# NO_PROXY against Go's net/http, which reads it with
+# golang.org/x/net/http/httpproxy: one process per environment (Go reads
+# its environment once), each URL's proxy printed beside `proxy_for`'s.
+GO="${GO:-go}"
+cat > "$WORK/proxy_table.iyi" <<'IYI'
+module main
+
+import std/http::{HTTP}
+
+args = Program.args
+args[3, args.size - 3].each do |url|
+  puts "#{url} #{HTTP.proxy_for(url, args[0].empty? ? nil : args[0], args[1].empty? ? nil : args[1], args[2]) || "direct"}"
+end
+IYI
+mkdir -p "$WORK/goproxy"
+cat > "$WORK/goproxy/main.go" <<'GO'
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+)
+
+func main() {
+	for _, u := range os.Args[1:] {
+		req, err := http.NewRequest("GET", u, nil)
+		if err != nil {
+			fmt.Println(u, "unparsed")
+			continue
+		}
+		p, err := http.ProxyFromEnvironment(req)
+		switch {
+		case err != nil:
+			fmt.Println(u, "error")
+		case p == nil:
+			fmt.Println(u, "direct")
+		default:
+			fmt.Println(u, p.String())
+		}
+	}
+}
+GO
+# HTTP_PROXY|HTTPS_PROXY|NO_PROXY|URL ...
+no_proxy_table='proxy|sproxy|foobar.com, .barbaz.net, *.wildcard.io, 192.168.1.1, 192.168.1.2:81, 192.168.1.3:80, 10.0.0.0/30, 2001:db8::52:0:1, [2001:db8::52:0:2]:443, [2001:db8::52:0:3]:80, 2002:db8:a::45/64|http://localhost http://LOCALHOST:8080 http://127.0.0.1 http://127.0.0.2 http://[::1] http://[::2] http://[::ffff:127.0.0.1] http://192.168.1.1 http://192.168.1.2 http://192.168.1.2:81 http://192.168.1.3 https://192.168.1.3 http://10.0.0.2 http://10.0.0.4 http://[2001:db8::52:0:1] http://[2001:db8::52:0:2] https://[2001:db8::52:0:2] http://[2001:db8::52:0:3] http://[2002:db8:a::123] http://[2002:db8:b::1] http://[fe80::424b:c8be:1643:a1b6] http://barbaz.net http://www.barbaz.net https://www.barbaz.net http://foobar.com http://www.foobar.com http://WWW.FooBar.com http://foofoobar.com http://baz.com http://localhost.net http://local.localhost http://barbarbaz.net http://wildcard.io http://nested.wildcard.io http://awildcard.io
+proxy|https://sproxy:8443|example.com:8080, ::ffff:10.0.0.0/104, [::ffff:9.9.9.9], 172.16.0.0/12|http://example.com/ http://example.com:8080/ https://example.com:8080/ http://10.1.2.3/ http://[::ffff:10.1.2.3]/ http://9.9.9.9/ http://172.20.0.1/ https://172.32.0.1/ ftp://example.com/
+cache.corp:3128||*|http://example.com/ https://example.com/ http://10.1.1.1/
+http://u:p@cache.corp:3128||  .Example.COM ,, :80, [::1, ::1]:80|http://example.com/ http://a.example.com/ http://a.example.com.evil/
+socks5://127.0.0.1:1080|||http://example.com/ https://example.com/
+proxy||bücher.example, .xn--caf-dma.example|http://xn--bcher-kva.example/ http://bücher.example/ http://www.BÜCHER.example/ http://a.café.example/ http://café.example/'
+if ! { command -v "$GO" >/dev/null 2>&1 && "$GO" version >/dev/null 2>&1; }; then
+  echo "  NO_PROXY against Go: skipped, no Go toolchain (GO=$GO)"
+elif ! (cd "$WORK/goproxy" && GO111MODULE=off GOFLAGS= "$GO" build -o "$WORK/goproxy/px" main.go) > "$WORK/goproxy.build" 2>&1 ||
+     ! "$IYI" build -o "$WORK/proxy_table" "$WORK/proxy_table.iyi" > "$WORK/proxy_table.build" 2>&1; then
+  echo "  NO_PROXY against Go: a program did not build"
+  sed -n '1,8p' "$WORK/goproxy.build" "$WORK/proxy_table.build"
+  status=1
+else
+  compared=0
+  environments=0
+  differed=0
+  while IFS='|' read -r hp hsp np urls; do
+    # shellcheck disable=SC2086
+    go_said="$(env -i HTTP_PROXY="$hp" HTTPS_PROXY="$hsp" NO_PROXY="$np" "$WORK/goproxy/px" $urls)"
+    # shellcheck disable=SC2086
+    iyi_said="$("$WORK/proxy_table" "$hp" "$hsp" "$np" $urls)"
+    compared=$((compared + $(printf '%s\n' "$go_said" | wc -l)))
+    environments=$((environments + 1))
+    if [ "$go_said" != "$iyi_said" ]; then
+      differed=1
+      echo "  NO_PROXY=$np: Go and proxy_for disagree:"
+      diff <(printf '%s\n' "$go_said") <(printf '%s\n' "$iyi_said") | sed 's/^/    /'
+    fi
+  done <<< "$no_proxy_table"
+  if [ "$differed" -eq 0 ]; then
+    echo "  $compared URLs under $environments environments: proxy_for answers what Go's net/http does ($("$GO" version | cut -d' ' -f3))"
+  else
+    status=1
+  fi
+fi
+
+echo
 echo "== the server under load"
 if command -v wrk >/dev/null 2>&1; then
   "$IYI" build --release -o "$WORK/server-release" "$REPO/bench/std_http_server.iyi" >"$WORK/server-release.build.log" 2>&1
@@ -1370,6 +1720,27 @@ mutate "a client that waits for an answer as long as it takes" '        conn.gap
         if speaks_h2' '        if speaks_h2'
 mutate "a request that does not name its client" '    remote = client.remote_address' '    remote = nil.as(String?)'
 mutate "a boundary that falls across reads missed" 'safe = @held.bytesize - (@delimiter.bytesize - 1)' 'safe = @held.bytesize'
+mutate "an http:// request to a proxy in origin form" 'target = "http://" + host_line + path' 'target = path'
+mutate "a proxy URL's credential not sent with an http:// request" '          sent["Proxy-Authorization"] = credential' '          nil'
+mutate "kept proxy connections filed by origin, not by proxy" 'key = via.key
+        target = ' 'target = '
+mutate "a CONNECT without the caller's own credential" 'tunnel_credential = via.authorization || header_in(headers, "Proxy-Authorization")' 'tunnel_credential = via.authorization'
+mutate "HTTP/2 with prior knowledge spoken to a proxy" '&& client.prior_knowledge && route.nil?' '&& client.prior_knowledge'
+mutate "a CONNECT refused taken for a tunnel" 'unless status >= 200 && status < 300' 'if false'
+mutate "bytes after a CONNECT's 200 handed to TLS" 'if conn.available > 0
+        return HTTPError.new("the proxy at' 'if false
+        return HTTPError.new("the proxy at'
+mutate "an https:// proxy spoken in the clear" 'only http:// proxies") unless scheme == "http"' 'only http:// proxies") if false'
+mutate "https:// taking HTTP_PROXY" 'chosen = if scheme == "https"
+               https_proxy' 'chosen = if scheme == "https"
+               http_proxy'
+mutate "localhost sent through a proxy" 'return false if ascii == "localhost"' ''
+mutate "a loopback address sent through a proxy" 'return false if ip && loopback?(ip)' ''
+mutate "a NO_PROXY domain matching names that merely end in it" 'suffix = "." + ascii_name(phost)' 'suffix = ascii_name(phost)'
+mutate "NO_PROXY's CIDR ranges passed over" 'return false if ip && in_range?(ip, net, dotted ? bits + 96 : bits)' 'nil'
+mutate "an IPv6 range holding IPv4 addresses" '    return false unless mapped?(ip) == mapped?(cut)' ''
+mutate "a NO_PROXY address's port passed over" 'return false if ip && ip == pip && (pport.bytesize == 0 || pport == port)' 'return false if ip && ip == pip'
+mutate "a NO_PROXY domain's port passed over" 'return false if pport.bytesize == 0 || pport == port' 'return false'
 
 # HTTP/2, each mechanism taken out of a copy that compiles: the iyi-to-iyi
 # exercise stops at the check that names it, or the raw frames find the
@@ -1572,6 +1943,45 @@ mtls_breaks "an HTTP/2 request without the client's certificate" mtls_h2 \
 mtls_breaks "an upgrade's handshake presenting no certificate" mtls_upgrade \
   '            offered.identity = tls_config.identity
 ' ''
+# The client through a proxy, broken in a copy: the round against the
+# Python proxy and the iyi server above must fail.
+proxy_breaks() { # proxy_breaks <label> <name> <old> <new>
+  local label="$1" name="$2" old="$3" new="$4"
+  if [ "$proxy_ready" -ne 1 ]; then
+    echo "  $label: skipped, no proxy round to break"
+    return
+  fi
+  rm -rf "$WORK/$name"
+  mkdir -p "$WORK/$name/std"
+  OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/http.iyi" "$WORK/$name/std/http.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+old = os.environ["OLD"]
+if src.count(old) != 1:
+    raise SystemExit("patch site missing or not unique: " + old)
+open(sys.argv[2], "w", encoding="utf-8").write(src.replace(old, os.environ["NEW"], 1))
+PY
+  if [ $? -ne 0 ] || ! IYI_PATH="$WORK/$name${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/$name.bin" "$WORK/proxy_client.iyi" >"$WORK/$name.log" 2>&1; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
+    status=1
+  elif proxy_round "$WORK/$name.bin" http/1.1 HTTP/1.1 >"$WORK/$name.out" 2>&1; then
+    echo "  $label: the proxy round passed on a broken client"
+    status=1
+  else
+    echo "  $label: caught: $(sed -n '1p' "$WORK/$name.out" | sed 's/^ *//' | cut -c1-120)"
+  fi
+}
+proxy_breaks "the caller's Proxy-Authorization written inside the tunnel" proxy_inside \
+  'tunnel_credential = via.authorization || header_in(headers, "Proxy-Authorization")
+        sent = without(sent, ["Proxy-Authorization"])' \
+  'tunnel_credential = via.authorization || header_in(headers, "Proxy-Authorization")'
+proxy_breaks "a CONNECT without its credential" proxy_connect_bare \
+  '      ask << "Proxy-Authorization: " << credential << "\r\n"' '      nil'
+proxy_breaks "https:// through a proxy without a tunnel" proxy_no_tunnel \
+  'if secure && (via = route)' 'if false && (via = route)'
+proxy_breaks "a tunnel kept under the proxy alone" proxy_tunnel_key \
+  'key = via.key + " " + key' 'key = via.key'
 
 echo
 if [ "$status" -eq 0 ]; then

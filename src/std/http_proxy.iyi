@@ -1,0 +1,55 @@
+# The proxy the environment names for a URL: `HTTPProxy.from_env(url)`,
+# for `HTTP.open`'s and `HTTPClient.new`'s *proxy*.
+#
+# ```
+# proxy = HTTPProxy.from_env(url)
+# HTTP.request("GET", url, proxy: proxy)
+# ```
+#
+# It reads `http_proxy`, `https_proxy` and `no_proxy`, and their names in
+# capitals, and hands them to `HTTP.proxy_for`, which holds the rules -
+# which variable a scheme takes, `NO_PROXY`'s domains, suffixes, `*`,
+# addresses, CIDR ranges and ports, and that `localhost` and a loopback
+# address never go through a proxy - as Go's `httpproxy` has them. The
+# rules are std/http's and pure; reading the environment is this module's
+# alone, so std/http itself reaches no environment, and a program that
+# wants none of it never imports this.
+#
+# **Which name wins.** The name in lower case, when it is set, even to
+# nothing: `http_proxy=` beside `HTTP_PROXY=http://p:3128` means no
+# proxy. This is Python's `urllib.request.getproxies_environment`; curl
+# too reads the lower-case name first (and `http_proxy` in no other case
+# at all), while Go reads the capitals first, and an empty value as
+# unset. The gate holds the reading to Python's, case by case.
+#
+# **`HTTP_PROXY` under CGI** (httpoxy, CVE-2016-1000110): a CGI server
+# hands a request's `Proxy:` header to its script as `HTTP_PROXY`, so
+# where `REQUEST_METHOD` is set - a CGI script's environment - the name in
+# capitals is not read for `http://`, and the lower-case name still is, as
+# Python does. (Go refuses either name there, with an error.)
+#
+# What it reaches: std/http's reach, and the process environment.
+
+module std/http_proxy
+
+import std/env::{ENV}
+import std/http::{HTTP}
+
+pub struct HTTPProxy
+  # The proxy *url* goes through under the environment, ready for `open`'s
+  # *proxy*; nil when it goes direct.
+  def self.from_env(url : String) : String?
+    HTTP.proxy_for(url, variable("http_proxy", ENV["REQUEST_METHOD"]?.nil?), variable("https_proxy", true), variable("no_proxy", true))
+  end
+
+  # *lower*'s value, or the name in capitals' when *lower* is not set and
+  # *capitals* allows it; an empty value is none.
+  private def self.variable(lower : String, capitals : Bool) : String?
+    if value = ENV[lower]?
+      return value.empty? ? nil : value
+    end
+    return nil unless capitals
+    value = ENV[lower.upcase]?
+    value && !value.empty? ? value : nil
+  end
+end

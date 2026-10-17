@@ -130,16 +130,27 @@ pub class UdpSocket
   # second bind of a held port failed on Windows, measured, and went
   # through on Linux [INFERENCE: not run here].
   def self.bind(host : String, port : Int32) : UdpSocket
+    bound = bind?(host, port)
+    raise bound.message if bound.is_a?(SocketError)
+    bound
+  end
+
+  # `bind`, with a refused bind answered rather than raised: the port
+  # held, reserved (Windows' excluded ranges answer "access denied"), or
+  # the address not this machine's - so a program can pick another. An
+  # error's `message` is the sentence `bind` raises.
+  def self.bind?(host : String, port : Int32) : UdpSocket | SocketError
     addr, addrlen, family = make_sockaddr(host, port)
     fd = __sys_socket(family)
-    raise "cannot create UDP socket" if fd < 0
+    return SocketError.new("create UDP socket", IyiSocket.__sys_code(fd.to_i64)) if fd < 0
 
     bound = __sys_bind(fd, addr, addrlen)
     if bound < 0
       # Read before the close, which may leave its own errno.
+      code = IyiSocket.__sys_code(bound.to_i64)
       why = refusal(bound.to_i64, false)
       IyiSocket.__sys_close(fd)
-      raise "cannot bind UDP socket to #{IyiSocket.endpoint(host, port)}: #{why}"
+      return SocketError.new("bind UDP socket to #{IyiSocket.endpoint(host, port)}", code, nil, why)
     end
 
     UdpSocket.new(fd, family)

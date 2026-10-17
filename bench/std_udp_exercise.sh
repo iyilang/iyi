@@ -539,6 +539,14 @@ elif [ "$(uname -s)" = Linux ]; then
     "next if count < 0_i64 && UdpSocket.__is_eintr(count)
       return count.to_i32 if count >= 0_i64
       # A datagram"
+  breaks_udp "a bind? that raises its refusal" bind_raises "panic: cannot bind UDP socket to 127.0.0.1" \
+    '      return SocketError.new("bind UDP socket to #{IyiSocket.endpoint(host, port)}", code, nil, why)' \
+    '      raise "cannot bind UDP socket to #{IyiSocket.endpoint(host, port)}: #{why}"'
+  breaks_udp "a bind? that answers a socket for a refused bind" bind_ignores "a held port's bind? answers a SocketError" \
+    "    bound = __sys_bind(fd, addr, addrlen)
+    if bound < 0" \
+    "    bound = __sys_bind(fd, addr, addrlen)
+    if false"
 fi
 
 echo

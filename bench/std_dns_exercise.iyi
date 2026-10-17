@@ -184,14 +184,23 @@ puts "codec: ok"
 
 # --- A name server in this process ---
 
-# TCP's port first, and UDP on the same number: Windows holds TCP port
-# ranges back (its excluded ranges), and an ephemeral UDP port taken first
-# fell in one - "cannot bind ... access denied" on a CI runner - while an
-# ephemeral TCP port is never one of them. UDP's own exclusions are rarer;
-# this narrows the window rather than closing it.
+# TCP's port first, and UDP on the same number, tried again on a refusal:
+# Windows holds port ranges back (its excluded ranges) and answers a bind
+# in one "access denied". An ephemeral UDP port fell in one on a CI runner,
+# and then a UDP bind on the port an ephemeral TCP listener had taken.
 tcp = IyiSocket.listen("127.0.0.1", 0)
 port = tcp.local_port
-server = UdpSocket.bind("127.0.0.1", port)
+bound = UdpSocket.bind?("127.0.0.1", port)
+tries = 1
+while bound.is_a?(SocketError) && tries < 20
+  tcp.close
+  tcp = IyiSocket.listen("127.0.0.1", 0)
+  port = tcp.local_port
+  bound = UdpSocket.bind?("127.0.0.1", port)
+  tries += 1
+end
+raise bound.message if bound.is_a?(SocketError)
+server = bound
 forger = UdpSocket.bind("127.0.0.1", 0)
 log = [] of String
 slow_seen = 0

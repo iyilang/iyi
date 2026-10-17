@@ -4,6 +4,46 @@
 
 ### Added
 
+- **std/tls: a client that speaks TLS 1.2 to a server that speaks nothing
+  newer (RFC 5246, RFC 7627's extended master secret, RFC 5746's
+  renegotiation_info).** One ClientHello offers both: supported_versions
+  names 1.3 then 1.2, and six 1.2 suites follow the three of 1.3 - ECDHE
+  signed by ECDSA (or Ed25519, RFC 8422) or RSA, with AES-128-GCM,
+  AES-256-GCM or ChaCha20-Poly1305; ECDHE and AEADs alone. A 1.2
+  ServerHello carrying RFC 8446's downgrade sentinel is refused, as is
+  one that echoes the ClientHello's session id (resumption is not
+  offered), chooses a suite not offered for 1.2, or does not do the
+  extended master secret, which is required and named in the refusal.
+  The ServerKeyExchange's signature is checked over both randoms and the
+  parameters (PKCS #1 v1.5, RSA-PSS, ECDSA with the scheme's hash on any
+  curve, Ed25519), the chain as for 1.3, the server's Finished under its
+  keys; the PRF is P_SHA256 or P_SHA384; AES-GCM's explicit nonce is the
+  sequence number going out and the record's coming in. A HelloRequest
+  is answered with a no_renegotiation warning before the next write; a
+  CertificateRequest with the identity when its type and a scheme fit;
+  the exporter is RFC 5705's. `TlsConnection#version` says "TLSv1.3" or
+  "TLSv1.2"; a 1.2 connection has no KeyUpdate, so `key_update` answers
+  a `TlsError` there and writes end at `key_limit`. A 1.2 server whose
+  ECDSA certificate is on P-384 refuses this ClientHello, whose groups
+  name X25519 and secp256r1 alone.
+- **std/rsa signs: `RsaPrivateKey`, and a std/tls server or client
+  identity on an RSA key.** `RsaPrivateKey.from_pem` reads PKCS #1 (`RSA
+  PRIVATE KEY`) and PKCS #8 (`PRIVATE KEY`), `from_pkcs1`/`from_pkcs8` the
+  DER, `RsaPrivateKey.new` eight numbers; the key is read only if p·q =
+  n, e·d = 1 mod lcm(p - 1, q - 1), dp and dq are d's residues and qi is
+  q's inverse mod p, and a modulus under 2048 bits, more than two
+  primes, an RSASSA-PSS key and an encrypted one are refused by name.
+  `sign_pss` (salt as long as the hash) and `sign_pkcs1v15` over SHA-256,
+  -384 and -512 run the CRT through std/big's `pow_mod_secret` on a
+  blinded message and check the signature against the public key before
+  it goes out (a fault is a panic, not a signature); signing over SHA-1
+  is a panic. 1.16 to 1.33 ms a 2048-bit signature, 6.5 to 6.9 a 4096-bit
+  one, --release, here. `TlsServerConfig.from_pem` takes an RSA leaf key
+  and signs CertificateVerify under rsa_pss_rsae_sha256, -384 or -512,
+  the first of them the client lists, never PKCS #1 v1.5;
+  `TlsIdentity#schemes` and `#scheme_for` replace `#scheme`, and a client
+  certificate may be RSA. A full handshake measured with Python's ssl:
+  0.64 ms on Ed25519, 0.65 on P-256, 1.58 on RSA-2048, 6.66 on RSA-4096.
 - **std/compress: a DEFLATE compressor with zlib's levels, its lazy
   matching and dynamic Huffman blocks, writing within 0.3% of zlib's
   size.** `Deflate.compress(data, level = 6)`, `Zlib.compress`,

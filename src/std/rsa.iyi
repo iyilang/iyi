@@ -1,16 +1,17 @@
-# RSA signatures checked (RFC 8017), written in iyi: PKCS #1 v1.5 and
-# PSS, over SHA-1, SHA-256, SHA-384 and SHA-512.
+# RSA signatures (RFC 8017), written in iyi: PKCS #1 v1.5 and PSS,
+# checked over SHA-1, SHA-256, SHA-384 and SHA-512, and made over the last
+# three.
 #
-#     import std/rsa::{RsaPublicKey, RsaHash, RsaError}
+#     import std/rsa::{RsaPublicKey, RsaPrivateKey, RsaHash, RsaError}
 #
 #     key = RsaPublicKey.from_spki(spki_der).or_panic   # what X.509 carries
 #     key.verify_pkcs1v15(RsaHash::SHA256, message, signature)   # Bool
 #     key.verify_pss(RsaHash::SHA256, message, signature)        # salt as long as the hash
 #     key.verify_pss(RsaHash::SHA384, message, signature, salt_length: 0)
 #
-# Checking only. A TLS client verifies a server's signatures and signs
-# nothing, so there is no private key here, no padding to make and no
-# timing to guard: every value checked is public.
+#     signer = RsaPrivateKey.from_pem(File.read("key.pem")).or_panic
+#     signer.sign_pss(RsaHash::SHA256, message)       # Array(UInt8)
+#     signer.sign_pkcs1v15(RsaHash::SHA384, message)
 #
 # A key is read from DER through std/asn1: a SubjectPublicKeyInfo naming
 # rsaEncryption with NULL parameters (RFC 3279 section 2.3.1), or a bare
@@ -34,15 +35,51 @@
 # caller acts on the answer alone, and a reason given for a failed check
 # is what the padding-oracle attacks were made of.
 #
-# Pure computation: std/big's arithmetic, std/digest's hashes.
+# A private key is PKCS #1's RSAPrivateKey (`RSA PRIVATE KEY`, two primes)
+# or a PKCS #8 PrivateKeyInfo around one (`PRIVATE KEY`, rsaEncryption
+# with NULL parameters), in PEM or DER, with its CRT parameters, and it is
+# read only if they agree: p and q over 1 with p·q = n, e·d = 1 modulo
+# lcm(p - 1, q - 1), dp and dq d's residues modulo p - 1 and q - 1, and qi
+# q's inverse modulo p. A modulus under 2048 bits is refused for signing
+# (NIST SP 800-131A has disallowed less since 2013), where 1024 is still
+# checked; an RSASSA-PSS key (id-RSASSA-PSS, whose parameters restrict
+# it) and an encrypted one are refused by name, as is a key of more than
+# two primes. Those checks run once, reading the key, on std/big's
+# variable-time arithmetic; what runs per signature does not.
+#
+# Signing is RSASP1 by the CRT (section 5.2.1). The message is blinded -
+# multiplied by r^e for an r drawn by HMAC from the private exponent and
+# the encoded message - so its value, which a caller may choose, does not
+# shape the time; the two halves exponentiate by dp and dq through
+# std/big's `pow_mod_secret`, a fixed window that reads its whole table
+# and masks its subtractions, so no branch and no memory address follows
+# the private exponents' bits; and the signature is checked against the
+# public key before it is given out, so a fault in one half of the CRT
+# does not hand out the factor it reveals (Boneh, DeMillo and Lipton,
+# 1997) - such a signature is a panic, not an answer. This is std/jwt's
+# signing, which came first. A PSS salt is as long as the digest, RFC
+# 8446's rule, and is HMAC, keyed by a hash of the private exponent, over
+# the message's digest: section 8.1 says its randomness is not critical
+# to PSS's security, and this one is unpredictable to anyone without the
+# key besides, so the module asks the platform for no entropy. Signing
+# over SHA-1 is a misuse, refused with a panic.
+#
+# Measured here in --release builds (PSS over SHA-256, the check and the
+# blinding included; `bench/std_rsa_exercise.sh` prints it each run): a
+# 2048-bit signature in 1.16 to 1.33 ms, a 4096-bit one in 6.5 to 6.9.
+#
+# Pure computation: std/big's arithmetic, std/digest's hashes, std/crypto's
+# HMAC, std/base64 for PEM.
 
 module std/rsa
 
 import std/asn1::{Der, DerValue, DerTag, Asn1Error}
 import std/big::{BigInt}
 import std/digest::{SHA1, SHA256, SHA384, SHA512}
+import std/crypto::{HMAC}
+import std/base64::{Base64}
 
-# What reading a key answers for bytes that are not an RSA public key.
+# What reading a key answers for bytes that are not an RSA key.
 pub struct RsaError
   getter message : String
 
@@ -228,8 +265,278 @@ pub struct RsaPublicKey
   end
 end
 
-# The lengths and the mask PSS needs, and std/asn1's errors as this one's.
+# An RSA private key with its CRT parameters (RFC 8017 section 3.2, the
+# first representation and the second together), which signs.
+pub struct RsaPrivateKey
+  getter public_key : RsaPublicKey
+  @n : BigInt
+  @e : BigInt
+  @p : BigInt
+  @q : BigInt
+  @dp : BigInt
+  @dq : BigInt
+  @qi : BigInt
+  # The HMAC key the blinding factors and PSS salts are drawn with: a hash
+  # of the private exponent.
+  @prf : Array(UInt8)
+
+  # Under this a modulus is refused for signing.
+  MIN_BITS        = 2048
+  RSASSA_PSS      = "1.2.840.113549.1.1.10"
+  ENCRYPTED_PKCS1 = "Proc-Type: 4,ENCRYPTED"
+
+  # The key from its eight numbers, each big-endian - n, e, d, p, q, dp,
+  # dq, qi - or why they are not one.
+  def self.new(modulus : Array(UInt8), exponent : Array(UInt8), d : Array(UInt8), p : Array(UInt8), q : Array(UInt8),
+               dp : Array(UInt8), dq : Array(UInt8), qi : Array(UInt8)) : RsaPrivateKey | RsaError
+    public = RsaPublicKey.new(modulus, exponent)!
+    return RsaError.new("a private key of #{public.bits} bits, under the #{MIN_BITS} this signs with") if public.bits < MIN_BITS
+    n = public.modulus
+    e = public.exponent
+    bd = BigInt.from_bytes(d)
+    bp = BigInt.from_bytes(p)
+    bq = BigInt.from_bytes(q)
+    bdp = BigInt.from_bytes(dp)
+    bdq = BigInt.from_bytes(dq)
+    bqi = BigInt.from_bytes(qi)
+    one = BigInt.new(1)
+    return RsaError.new("a private key whose p or q is not over 1") unless bp > one && bq > one
+    return RsaError.new("a private key whose p times q is not its modulus") unless bp * bq == n
+    p1 = bp - one
+    q1 = bq - one
+    return RsaError.new("a private key whose d is not e's inverse modulo lcm(p - 1, q - 1)") unless (e * bd) % p1.lcm(q1) == one
+    return RsaError.new("a private key whose dp is not d mod (p - 1)") unless bd % p1 == bdp
+    return RsaError.new("a private key whose dq is not d mod (q - 1)") unless bd % q1 == bdq
+    return RsaError.new("a private key whose qi is not the inverse of q mod p") unless bqi < bp && (bqi * bq) % bp == one
+    RsaPrivateKey.new(public, bp, bq, bdp, bdq, bqi, SHA256.hash_bytes(RsaBytes.of("std/rsa signing") + d))
+  end
+
+  def initialize(@public_key : RsaPublicKey, @p : BigInt, @q : BigInt, @dp : BigInt, @dq : BigInt, @qi : BigInt, @prf : Array(UInt8))
+    @n = @public_key.modulus
+    @e = @public_key.exponent
+  end
+
+  # The one key in a PEM text: an `RSA PRIVATE KEY` block (PKCS #1) or a
+  # `PRIVATE KEY` block (PKCS #8).
+  def self.from_pem(text : String) : RsaPrivateKey | RsaError
+    if text.includes?("-----BEGIN ENCRYPTED PRIVATE KEY-----") || text.includes?(ENCRYPTED_PKCS1)
+      return RsaError.new("an encrypted private key, which this cannot open")
+    end
+    pkcs1 = RsaPem.blocks(text, "RSA PRIVATE KEY")!
+    pkcs8 = RsaPem.blocks(text, "PRIVATE KEY")!
+    count = pkcs1.size + pkcs8.size
+    return RsaError.new("#{count} blocks of RSA PRIVATE KEY or PRIVATE KEY, not one") unless count == 1
+    pkcs1.size == 1 ? from_pkcs1(pkcs1[0]) : from_pkcs8(pkcs8[0])
+  end
+
+  # An RSAPrivateKey (appendix A.1.2) of two primes: version 0 and the
+  # eight numbers.
+  def self.from_pkcs1(der : Array(UInt8)) : RsaPrivateKey | RsaError
+    fields = RsaBytes.asn1_values(RsaBytes.asn1_value(Der.parse(der))!.sequence)!
+    version = fields.empty? ? nil : fields[0].integer
+    if version.is_a?(Int64) && version == 1_i64
+      return RsaError.new("an RSAPrivateKey of more than two primes, which this does not take")
+    end
+    return RsaError.new("an RSAPrivateKey of #{fields.size} values, not 9") unless fields.size == 9
+    return RsaError.new("an RSAPrivateKey of version #{version.is_a?(Int64) ? version : "?"}, not 0") unless version == 0_i64
+    numbers = fields[1, 8].map { |field| RsaBytes.asn1_bytes(field.unsigned_integer)! }
+    RsaPrivateKey.new(numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5], numbers[6], numbers[7])
+  end
+
+  # A PKCS #8 PrivateKeyInfo or OneAsymmetricKey (RFC 5958) naming
+  # rsaEncryption, its privateKey an RSAPrivateKey. Attributes are passed
+  # over; a public key, which version 1 may carry, must be the key's own.
+  def self.from_pkcs8(der : Array(UInt8)) : RsaPrivateKey | RsaError
+    fields = RsaBytes.asn1_values(RsaBytes.asn1_value(Der.parse(der))!.sequence)!
+    return RsaError.new("a PrivateKeyInfo of #{fields.size} values") if fields.size < 3
+    version = fields[0].integer
+    return RsaError.new("a PrivateKeyInfo of version #{version.is_a?(Int64) ? version : "?"}, not 0 or 1") unless version == 0_i64 || version == 1_i64
+    algorithm = RsaBytes.asn1_values(fields[1].sequence)!
+    return RsaError.new("an AlgorithmIdentifier with no algorithm") if algorithm.empty?
+    oid = RsaBytes.asn1_text(algorithm[0].oid)!
+    return RsaError.new("an RSASSA-PSS key (#{RSASSA_PSS}), held to PSS by its parameters; this reads rsaEncryption keys") if oid == RSASSA_PSS
+    return RsaError.new("a private key for #{oid}, not rsaEncryption (#{RsaPublicKey::RSA_ENCRYPTION})") unless oid == RsaPublicKey::RSA_ENCRYPTION
+    unless algorithm.size == 2 && algorithm[1].universal?(DerTag::NULL) && !algorithm[1].null.is_a?(Asn1Error)
+      return RsaError.new("rsaEncryption's parameters are not the NULL RFC 3279 gives it")
+    end
+    key = from_pkcs1(RsaBytes.asn1_bytes(fields[2].octet_string)!)!
+    i = 3
+    while i < fields.size
+      field = fields[i]
+      if field.context?(1)
+        return RsaError.new("a public key in a PrivateKeyInfo of version 0") unless version == 1_i64
+        bits = field.content
+        return RsaError.new("a PrivateKeyInfo's public key with unused bits") if bits.empty? || bits[0] != 0_u8
+        carried = RsaPublicKey.from_pkcs1(bits[1, bits.size - 1])!
+        unless carried.modulus == key.public_key.modulus && carried.exponent == key.public_key.exponent
+          return RsaError.new("a PrivateKeyInfo whose public key is not its private key's")
+        end
+      elsif !field.context?(0)
+        return RsaError.new("#{field.describe} where attributes or a public key belong")
+      end
+      i = i + 1
+    end
+    key
+  end
+
+  # The modulus's length in bits, and in bytes: a signature's length.
+  def bits : Int32
+    @public_key.bits
+  end
+
+  def size : Int32
+    @public_key.size
+  end
+
+  # RSASSA-PKCS1-v1_5 (section 8.2.1) of *message* under *hash*: 0x00
+  # 0x01, the 0xFF padding, 0x00, the hash's DigestInfo and the digest.
+  def sign_pkcs1v15(hash : RsaHash, message : Array(UInt8) | String) : Array(UInt8)
+    signable(hash)
+    t = hash.digest_info_prefix + hash.digest(RsaBytes.of(message))
+    em = Array(UInt8).new(size, 0xFF_u8)
+    em[0] = 0_u8
+    em[1] = 1_u8
+    em[size - t.size - 1] = 0_u8
+    t.each_with_index { |b, i| em[size - t.size + i] = b }
+    rsasp1(em)
+  end
+
+  # RSASSA-PSS (section 8.1.1) of *message* under *hash*, MGF1 over the
+  # same hash: EMSA-PSS-ENCODE (section 9.1.1) with a salt as long as the
+  # digest, drawn as the module's header says.
+  def sign_pss(hash : RsaHash, message : Array(UInt8) | String) : Array(UInt8)
+    signable(hash)
+    m_hash = hash.digest(RsaBytes.of(message))
+    h_len = hash.size
+    salt = RsaBytes.mac(hash, @prf, [2_u8] + m_hash)
+    em_bits = bits - 1
+    em_len = (em_bits + 7) // 8
+    h = hash.digest(Array(UInt8).new(8, 0_u8) + m_hash + salt)
+    db_len = em_len - h_len - 1
+    db = Array(UInt8).new(db_len - h_len - 1, 0_u8) + [1_u8] + salt
+    mask = RsaBytes.mgf1(hash, h, db_len)
+    masked = Array(UInt8).new(db_len) { |i| db[i] ^ mask[i] }
+    top = 8 * em_len - em_bits
+    masked[0] = masked[0] & (0xFF_u8 >> top) if top > 0
+    rsasp1(masked + h + [0xBC_u8])
+  end
+
+  private def signable(hash : RsaHash) : Nil
+    raise "rsa: a signature over SHA-1, which this checks and does not make" if hash == RsaHash::SHA1
+  end
+
+  # RSASP1 (section 5.2.1) by the CRT, blinded, and checked before it is
+  # given out. The two halves are the private exponents', so they go
+  # through `pow_mod_secret`; p and q are odd, their product being n,
+  # which is odd.
+  private def rsasp1(em : Array(UInt8)) : Array(UInt8)
+    m = BigInt.from_bytes(em)
+    r, r_inverse = blinding(em)
+    c = (m * r.pow_mod(@e, @n)) % @n
+    s1 = (c % @p).pow_mod_secret(@dp, @p)
+    s2 = (c % @q).pow_mod_secret(@dq, @q)
+    h = (@qi * (s1 - s2)) % @p
+    h = h + @p if h.negative?
+    s = ((s2 + h * @q) * r_inverse) % @n
+    raise "rsa: a signature that does not check against its own public key, which a fault makes" unless s.pow_mod(@e, @n) == m
+    s.to_bytes(size) || raise "rsa: a signature wider than its modulus"
+  end
+
+  # r, an HMAC of the encoded message under the key's own secret reduced
+  # mod n, and r^-1 mod n; the next counter's r in the 2^-1000 case of one
+  # with no inverse.
+  private def blinding(em : Array(UInt8)) : {BigInt, BigInt}
+    counter = 0_u8
+    while true
+      wide = [] of UInt8
+      block = 0_u8
+      while wide.size < size + 16
+        wide.concat(HMAC.digest(SHA256, @prf, [1_u8, counter, block] + em))
+        block = block + 1_u8
+      end
+      r = BigInt.from_bytes(wide) % @n
+      if r > BigInt.new(1)
+        inverse = RsaBytes.inverse(r, @n)
+        return {r, inverse} if inverse
+      end
+      counter = counter + 1_u8
+    end
+    {BigInt.new(1), BigInt.new(1)}
+  end
+end
+
+# PEM blocks (RFC 7468) of one label, as DER.
+struct RsaPem
+  def self.blocks(text : String, label : String) : Array(Array(UInt8)) | RsaError
+    opening = "-----BEGIN #{label}-----"
+    closing = "-----END #{label}-----"
+    found = [] of Array(UInt8)
+    body = nil
+    text.lines.each do |raw_line|
+      line = raw_line.strip
+      current = body
+      if current.nil?
+        body = String::Builder.new if line == opening
+      elsif line == closing
+        found << decode(current.to_s, label)!
+        body = nil
+      else
+        current << line
+      end
+    end
+    return RsaError.new("a #{label} block with no END line") unless body.nil?
+    found
+  end
+
+  private def self.decode(text : String, label : String) : Array(UInt8) | RsaError
+    return RsaError.new("a #{label} block whose base64 is #{text.bytesize} bytes, not a multiple of 4") unless text.bytesize % 4 == 0 && text.bytesize > 0
+    padding = 0
+    padding = 1 if text.ends_with?("=")
+    padding = 2 if text.ends_with?("==")
+    p = text.to_unsafe
+    i = 0
+    while i < text.bytesize
+      b = p[i]
+      letter = (b >= 65_u8 && b <= 90_u8) || (b >= 97_u8 && b <= 122_u8) || (b >= 48_u8 && b <= 57_u8)
+      ok = letter || b == 43_u8 || b == 47_u8 || (b == 61_u8 && i >= text.bytesize - padding)
+      return RsaError.new("a #{label} block with byte #{b} in its base64, at #{i}") unless ok
+      i = i + 1
+    end
+    decoded = Base64.decode(text)
+    Array(UInt8).new(decoded.bytesize) { |k| decoded.to_unsafe[k] }
+  end
+end
+
+# The lengths and the mask PSS needs, the arithmetic and HMAC signing
+# draws on, and std/asn1's errors as this one's.
 struct RsaBytes
+  # a^-1 mod m by the extended Euclidean algorithm, or nil when they
+  # share a factor.
+  def self.inverse(a : BigInt, m : BigInt) : BigInt?
+    t0 = BigInt.new(0)
+    t1 = BigInt.new(1)
+    r0 = m
+    r1 = a % m
+    going = !r1.zero?
+    while going
+      q, rest = r0.divmod(r1)
+      r0 = r1
+      r1 = rest
+      t0, t1 = t1, t0 - q * t1
+      going = !r1.zero?
+    end
+    return nil unless r0 == BigInt.new(1)
+    t0.negative? ? t0 + m : t0
+  end
+
+  def self.mac(hash : RsaHash, key : Array(UInt8), data : Array(UInt8)) : Array(UInt8)
+    case hash
+    when RsaHash::SHA256 then HMAC.digest(SHA256, key, data)
+    when RsaHash::SHA384 then HMAC.digest(SHA384, key, data)
+    else                      HMAC.digest(SHA512, key, data)
+    end
+  end
+
   # The length in bits of the big-endian *bytes*, leading zeros not counted.
   def self.bit_length(bytes : Array(UInt8)) : Int32
     i = 0

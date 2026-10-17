@@ -4,13 +4,20 @@
 #     bash bench/std_rsa_exercise.sh
 #
 # The exercise holds signatures Python's cryptography made, encodings made
-# by hand that break one rule each with the digest still matching, and keys
-# that are not keys; this gate runs it plain and --release, holds 600
-# signatures over six key sizes, both schemes, four hashes and the salt
-# lengths PSS allows, half of them broken some way, to Python's verdicts,
-# checks every RSA root certificate's signature with its own key as Python
-# does, shows an error value's sentence through `.or_panic`, and proves on
-# broken copies of the module that the checks fail where they say.
+# by hand that break one rule each with the digest still matching, keys
+# that are not keys, and a private key cryptography drew - read every way,
+# its PKCS #1 v1.5 signatures byte for byte cryptography's, and its
+# numbers broken one at a time and refused; this gate runs it plain and
+# --release, holds 600 signatures over six key sizes, both schemes, four
+# hashes and the salt lengths PSS allows, half of them broken some way, to
+# Python's verdicts, has cryptography check 240 signatures this makes over
+# five keys it drew, refuse its keys with a parameter broken, and time a
+# 2048- and a 4096-bit signature; checks every RSA root certificate's
+# signature with its own key as Python does, shows an error value's
+# sentence through `.or_panic` and a signature over SHA-1 refused, reads
+# the module with `iyi doc`, checks the formatting, typechecks the
+# exercise for five targets and builds it from its artifacts, and proves
+# on broken copies of the module that the checks fail where they say.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -82,7 +89,7 @@ fi
 
 echo
 echo "== every rsa section reported"
-for phrase in "== signatures Python's cryptography made" "== keys that are not keys"; do
+for phrase in "== signatures Python's cryptography made" "== keys that are not keys" "== private keys: read, signing, and refused"; do
   if ! grep -q "$phrase" "$WORK/rsa-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -189,6 +196,133 @@ PY
 fi
 
 echo
+echo "== 240 signatures this makes, checked by Python's cryptography"
+# Five keys cryptography draws - 2048 bits, 2050 (the top seven bits of
+# PSS's encoding masked off; OpenSSL rounds an odd size down, so none whose
+# encoding is a byte short), 3072, 4096 and 2048 with e = 3 - written as PKCS
+# #1 and as PKCS #8; each signs random messages under both schemes and the
+# three hashes. A PSS signature must verify with a salt as long as the
+# hash, a PKCS #1 v1.5 one must be cryptography's own, byte for byte. Then
+# the 3072-bit key with each CRT parameter broken, and a 1024-bit key:
+# each refused, for its reason.
+if [ -z "$PY" ] || ! "$PY" -c 'from cryptography.hazmat.primitives.asymmetric import rsa' >/dev/null 2>&1; then
+  echo "  no python cryptography here, so the signatures go unchecked"
+else
+  mkdir -p "$WORK/keys"
+  "$PY" - "$WORK/keys" "$WORK/sign.txt" "$WORK/sign_cases.txt" <<'PY'
+import os, random, sys
+from cryptography.hazmat.primitives import serialization as s
+from cryptography.hazmat.primitives.asymmetric import rsa
+out = sys.argv[1]
+rng = random.Random(3447)
+def pem(key, fmt):
+    return key.private_bytes(s.Encoding.PEM, fmt, s.NoEncryption())
+keys = []
+for i, (bits, e) in enumerate(((2048, 65537), (2050, 65537), (3072, 65537), (4096, 65537), (2048, 3))):
+    k = rsa.generate_private_key(public_exponent=e, key_size=bits)
+    path = os.path.join(out, f"k{i}.pem")
+    open(path, "wb").write(pem(k, s.PrivateFormat.PKCS8 if i % 2 else s.PrivateFormat.TraditionalOpenSSL))
+    open(path + ".der", "wb").write(k.private_bytes(s.Encoding.DER, s.PrivateFormat.TraditionalOpenSSL, s.NoEncryption()))
+    keys.append(path)
+lines, cases = [], []
+for _ in range(240):
+    path = rng.choice(keys)
+    scheme = rng.choice(["v15", "pss"])
+    h = rng.choice(["SHA256", "SHA384", "SHA512"])
+    msg = os.urandom(rng.randint(0, 300))
+    lines.append(f"{path} {scheme} {h} {msg.hex()}")
+open(sys.argv[2], "w").write("\n".join(lines) + "\n")
+# The 3072-bit key's numbers, one at a time broken; a 1024-bit key.
+def tlv(tag, content):
+    n = len(content)
+    head = bytes([n]) if n < 128 else (n.to_bytes((n.bit_length() + 7) // 8, "big"))
+    return bytes([tag]) + (head if n < 128 else bytes([0x80 | len(head)]) + head) + content
+def integer(v):
+    raw = v.to_bytes(v.bit_length() // 8 + 1, "big")
+    return tlv(0x02, raw)
+k = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+n = k.private_numbers()
+fields = [n.public_numbers.n, n.public_numbers.e, n.d, n.p, n.q, n.dmp1, n.dmq1, n.iqmp]
+broken = {"n": (0, 2, "p times q is not its modulus"), "d": (2, 2, "d is not e's inverse"), "dp": (5, 2, "dp is not d mod (p - 1)"),
+          "dq": (6, 2, "dq is not d mod (q - 1)"), "qi": (7, 1, "qi is not the inverse of q mod p")}
+for name, (at, plus, why) in broken.items():
+    numbers = list(fields)
+    numbers[at] += plus
+    der = tlv(0x30, integer(0) + b"".join(integer(x) for x in numbers))
+    import base64
+    body = base64.encodebytes(der).decode().replace("\n", "")
+    text = "-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join(body[i:i + 64] for i in range(0, len(body), 64)) + "\n-----END RSA PRIVATE KEY-----\n"
+    path = os.path.join(out, f"broken-{name}.pem")
+    open(path, "w").write(text)
+    cases.append(f"{path}|{why}")
+small = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+path = os.path.join(out, "small.pem")
+open(path, "wb").write(pem(small, s.PrivateFormat.PKCS8))
+cases.append(f"{path}|1024 bits, under the 2048 this signs with")
+open(sys.argv[3], "w").write("\n".join(cases) + "\n")
+PY
+  "$WORK/rsa-release" sign "$WORK/sign.txt" >"$WORK/signed.txt" 2>&1
+  if ! "$PY" - "$WORK/sign.txt" "$WORK/signed.txt" <<'PY'
+import sys
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+H = {"SHA256": hashes.SHA256, "SHA384": hashes.SHA384, "SHA512": hashes.SHA512}
+cases = open(sys.argv[1]).read().splitlines()
+got = open(sys.argv[2]).read().splitlines()
+keys, bad, sizes = {}, [], set()
+if len(cases) != len(got):
+    bad.append((-1, f"{len(cases)} cases, {len(got)} answers"))
+for i, (case, sig) in enumerate(zip(cases, got)):
+    path, scheme, h, msg = case.split(" ")
+    key = keys.setdefault(path, serialization.load_pem_private_key(open(path, "rb").read(), None))
+    sizes.add(key.key_size)
+    msg = bytes.fromhex(msg)
+    try:
+        signature = bytes.fromhex(sig)
+    except ValueError:
+        bad.append((i, f"answered {sig[:80]!r}")); continue
+    if scheme == "v15":
+        if signature != key.sign(msg, padding.PKCS1v15(), H[h]()):
+            bad.append((i, f"v15 {h} over {key.key_size} bits is not cryptography's signature"))
+        continue
+    try:
+        key.public_key().verify(signature, msg, padding.PSS(mgf=padding.MGF1(H[h]()), salt_length=padding.PSS.DIGEST_LENGTH), H[h]())
+    except InvalidSignature:
+        bad.append((i, f"pss {h} over {key.key_size} bits does not verify"))
+if bad:
+    print(f"  {len(bad)} of {len(cases)} signatures wrong:")
+    for i, why in bad[:6]:
+        print(f"    case {i}: {why}")
+    sys.exit(1)
+v15 = sum(1 for c in cases if c.split()[1] == "v15")
+print(f"  {len(cases)} signatures over {', '.join(str(b) for b in sorted(sizes))}-bit keys: {v15} PKCS #1 v1.5 byte for byte cryptography's, {len(cases) - v15} PSS verified by it")
+PY
+  then
+    status=1
+  fi
+  refusals=0
+  while IFS='|' read -r path why; do
+    [ -n "$path" ] || continue
+    printf '%s pss SHA256 00\n' "$path" >"$WORK/one.txt"
+    got="$("$WORK/rsa-release" sign "$WORK/one.txt" 2>&1)"
+    if printf '%s' "$got" | grep -qF -e "$why"; then
+      refusals=$((refusals + 1))
+    else
+      echo "  $(basename "$path"): expected \"$why\", got: $got"
+      status=1
+    fi
+  done <"$WORK/sign_cases.txt"
+  echo "  $refusals keys cryptography wrote refused, each for its reason: a 3072-bit key with n, d, dp, dq or qi broken, a 1024-bit key"
+
+  echo
+  echo "== signing time, --release"
+  # Not a check: what a signature costs on this machine, PSS over SHA-256.
+  "$WORK/rsa-release" time "$WORK/keys/k0.pem" 200 | sed 's/^/  /'
+  "$WORK/rsa-release" time "$WORK/keys/k3.pem" 40 | sed 's/^/  /'
+fi
+
+echo
 echo "== every RSA root certificate's own signature"
 BUNDLE=""
 for candidate in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
@@ -254,6 +388,73 @@ elif ! grep -qF "rsa: asn1: expected a SEQUENCE, found INTEGER at offset 0" "$WO
 else
   echo "  rsa: asn1: expected a SEQUENCE, found INTEGER at offset 0"
 fi
+# Signing over SHA-1 is the program's mistake, not the key's: a panic
+# that names it.
+cat >"$WORK/sha1.iyi" <<'IYI'
+module sha1
+
+import std/rsa::{RsaPrivateKey, RsaHash}
+import std/file::{File}
+import std/env::{ENV}
+
+RsaPrivateKey.from_pem(File.read(ENV["RSA_KEY"])).or_panic.sign_pss(RsaHash::SHA1, "abc")
+puts "signed"
+IYI
+if [ ! -s "$WORK/keys/k0.pem" ]; then
+  echo "  no key drawn here, so a signature over SHA-1 goes unasked"
+elif RSA_KEY="$WORK/keys/k0.pem" "$IYI" run "$WORK/sha1.iyi" >"$WORK/sha1.out" 2>&1; then
+  echo "  a signature over SHA-1 was made"
+  status=1
+elif ! grep -qF "rsa: a signature over SHA-1, which this checks and does not make" "$WORK/sha1.out"; then
+  echo "  a signature over SHA-1 was refused without saying why: $(tr -d '\r' <"$WORK/sha1.out" | tail -1)"
+  status=1
+else
+  echo "  rsa: a signature over SHA-1, which this checks and does not make"
+fi
+
+echo
+echo "== doc, format, other platforms and artifacts"
+if "$IYI" doc "$REPO/src/std/rsa.iyi" >"$WORK/doc.txt" 2>&1 && grep -q "sign_pss" "$WORK/doc.txt"; then
+  echo "  iyi doc reads std/rsa, RsaPrivateKey's signing included"
+else
+  echo "  FAIL: iyi doc: $(grep -m1 -E 'Error|BUG' "$WORK/doc.txt")"
+  status=1
+fi
+if "$IYI" fmt --check "$REPO/src/std/rsa.iyi" "$REPO/bench/std_rsa_exercise.iyi" >"$WORK/format.log" 2>&1; then
+  echo "  the module and its exercise are formatted"
+else
+  echo "  FAIL: not formatted: $(grep -m1 produced "$WORK/format.log")"
+  status=1
+fi
+apart=""
+for target in x86_64-linux-gnu aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do
+  if ! "$IYI" build --no-codegen --target "$target" -o "$WORK/cross" "$REPO/bench/std_rsa_exercise.iyi" >"$WORK/cross.log" 2>&1; then
+    echo "  $target: $(grep -m1 -E 'Error|BUG' "$WORK/cross.log")"
+    apart="$apart $target"
+  fi
+done
+if [ -n "$apart" ]; then
+  echo "  FAIL: does not typecheck for$apart"
+  status=1
+else
+  echo "  the exercise typechecks for x86_64-linux-gnu, aarch64-darwin, x86_64-windows-msvc, aarch64-linux-gnu, x86_64-linux-musl"
+fi
+mkdir -p "$WORK/r1"
+if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_rsa_exercise.iyi" &&
+  "$IYI" build --use-iyimod mods -o from-artifact "$REPO/bench/std_rsa_exercise.iyi") >"$WORK/r1/build.log" 2>&1; then
+  "$WORK/r1/from-source" >"$WORK/r1/source.out" 2>&1
+  "$WORK/r1/from-artifact" >"$WORK/r1/artifact.out" 2>&1
+  if cmp -s "$WORK/r1/source.out" "$WORK/r1/artifact.out" && grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out"; then
+    echo "  built from its artifacts, the exercise prints what it prints from source"
+  else
+    echo "  FAIL: from its artifacts the exercise prints otherwise:"
+    diff "$WORK/r1/source.out" "$WORK/r1/artifact.out" | sed -n '1,6p' | sed 's/^/    /'
+    status=1
+  fi
+else
+  echo "  FAIL: the artifacts did not build: $(grep -m1 -E 'Error|BUG' "$WORK/r1/build.log")"
+  status=1
+fi
 
 echo
 echo "== proving the checks can fail when the module is broken"
@@ -318,7 +519,57 @@ prove_broken "an even modulus taken" "an even modulus refused" \
 prove_broken "an exponent of any size taken" "an exponent past 31 bits refused" \
   'if ebits > 31' 'if ebits > 64'
 prove_broken "rsaEncryption's parameters unchecked" "rsaEncryption without its NULL refused" \
-  'unless algorithm.size == 2 && algorithm[1].universal?(DerTag::NULL) && !algorithm[1].null.is_a?(Asn1Error)' 'if false'
+  'unless oid == RSA_ENCRYPTION
+    unless algorithm.size == 2 && algorithm[1].universal?(DerTag::NULL) && !algorithm[1].null.is_a?(Asn1Error)' 'unless oid == RSA_ENCRYPTION
+    if false'
+# The private key's own checks, each against the key the exercise breaks
+# for it, and the signing.
+prove_broken "a private key's p times q unchecked" "a modulus that is not p times q refused" \
+  '    return RsaError.new("a private key whose p times q is not its modulus") unless bp * bq == n' ''
+prove_broken "a private key's d unchecked" "a d that is not e's inverse refused" \
+  "unless (e * bd) % p1.lcm(q1) == one" "if false"
+prove_broken "a private key's dp unchecked" "a dp that is not d's residue refused" \
+  '    return RsaError.new("a private key whose dp is not d mod (p - 1)") unless bd % p1 == bdp' ''
+prove_broken "a private key's dq unchecked" "a dq that is not d's residue refused" \
+  '    return RsaError.new("a private key whose dq is not d mod (q - 1)") unless bd % q1 == bdq' ''
+prove_broken "a private key's qi unchecked" "a qi that is not q's inverse refused" \
+  'unless bqi < bp && (bqi * bq) % bp == one' 'if false'
+# Without the check a p of 1 is no error value: lcm(0, q - 1) is 0, and
+# the d check divides by it.
+prove_broken "p and q unchecked: a p of 1 panics" "modulo by zero" \
+  'unless bp > one && bq > one' 'if false'
+prove_broken "a 1024-bit key taken for signing" "a 1024-bit key refused for signing" \
+  '  MIN_BITS        = 2048' '  MIN_BITS        = 1024'
+prove_broken "a key of three primes read as two" "a key of more than two primes refused" \
+  '    if version.is_a?(Int64) && version == 1_i64' '    if false'
+prove_broken "an RSASSA-PSS key read as rsaEncryption" "an RSASSA-PSS key refused by name" \
+  ' if oid == RSASSA_PSS' ' if false'
+prove_broken "a PKCS #8 key's parameters unchecked" "a PKCS #8 key without rsaEncryption's NULL refused" \
+  'unless oid == RsaPublicKey::RSA_ENCRYPTION
+    unless algorithm.size == 2 && algorithm[1].universal?(DerTag::NULL) && !algorithm[1].null.is_a?(Asn1Error)' 'unless oid == RsaPublicKey::RSA_ENCRYPTION
+    if false'
+prove_broken "an encrypted key read as base64" "an encrypted key refused by name" \
+  '    if text.includes?("-----BEGIN ENCRYPTED PRIVATE KEY-----") || text.includes?(ENCRYPTED_PKCS1)' '    if false'
+# A fault in one half of the CRT: the check before the signature goes out
+# must be what stops it, by its own sentence.
+prove_broken "a fault in the CRT's first half" "does not check against its own public key, which a fault makes" \
+  '    s1 = (c % @p).pow_mod_secret(@dp, @p)' '    s1 = (c % @p).pow_mod_secret(@dp, @p) + BigInt.new(1)'
+prove_broken "the blinding left on the signature" "does not check against its own public key, which a fault makes" \
+  '    s = ((s2 + h * @q) * r_inverse) % @n' '    s = (s2 + h * @q) % @n'
+prove_broken "the CRT's recombination by p's inverse" "does not check against its own public key, which a fault makes" \
+  '    h = (@qi * (s1 - s2)) % @p' '    h = (s1 - s2) % @p'
+prove_broken "PKCS #1 v1.5 signed with a block type of 2" "PKCS #1 v1.5 over SHA256 as cryptography signs it" \
+  '    em[1] = 1_u8
+    em[size - t.size - 1] = 0_u8' '    em[1] = 2_u8
+    em[size - t.size - 1] = 0_u8'
+prove_broken "a PSS salt a byte short of the hash" "a PSS signature over SHA256 checks with a salt as long as the hash" \
+  '    db = Array(UInt8).new(db_len - h_len - 1, 0_u8) + [1_u8] + salt' '    db = Array(UInt8).new(db_len - h_len, 0_u8) + [1_u8] + salt[1, h_len - 1]'
+prove_broken "PSS signed without the eight zero bytes" "a PSS signature over SHA256 checks with a salt as long as the hash" \
+  '    h = hash.digest(Array(UInt8).new(8, 0_u8) + m_hash + salt)' '    h = hash.digest(m_hash + salt)'
+prove_broken "PSS's mask over the salt, not H" "a PSS signature over SHA256 checks with a salt as long as the hash" \
+  '    mask = RsaBytes.mgf1(hash, h, db_len)
+    masked = ' '    mask = RsaBytes.mgf1(hash, salt, db_len)
+    masked = '
 
 echo
 if [ "$status" -eq 0 ]; then

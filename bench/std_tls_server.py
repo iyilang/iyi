@@ -55,7 +55,16 @@ SCENARIOS = {
     "cv-pkcs1": "CertificateVerify under rsa_pkcs1_sha256",
     "cv-wrong-curve": "a P-384 key named ecdsa_secp256r1_sha256",
     "suite-unoffered": "TLS_AES_128_CCM_SHA256, which was not offered",
-    "tls12": "a ServerHello with no supported_versions: TLS 1.2",
+    "tls12": "a ServerHello with no supported_versions: TLS 1.2, resuming the client's session id",
+    "tls12-hello": "a TLS 1.2 ServerHello as it should be, after the ClientHello's TLS 1.2 offer is checked, then a hang-up",
+    "tls12-downgrade": "a TLS 1.2 ServerHello whose random ends with DOWNGRD 01",
+    "tls12-downgrade11": "a TLS 1.2 ServerHello whose random ends with DOWNGRD 00",
+    "tls12-no-ems": "a TLS 1.2 ServerHello without extended_master_secret",
+    "tls12-reneg": "a TLS 1.2 ServerHello whose renegotiation_info is not empty",
+    "tls12-suite13": "a TLS 1.2 ServerHello choosing TLS_AES_128_GCM_SHA256",
+    "tls12-version11": "a ServerHello choosing TLS 1.1",
+    "tls12-versions": "a ServerHello whose supported_versions names TLS 1.2",
+    "tls12-key-share": "a TLS 1.2 ServerHello carrying a key_share",
     "no-echo": "a ServerHello that does not echo the session id",
     "hrr-group": "a HelloRetryRequest for secp384r1, which the client does not offer",
     "hrr-p256": "a HelloRetryRequest for secp256r1, then the handshake in it",
@@ -267,6 +276,33 @@ class Conn:
         transcript = ch
         if s == "alert":
             self.sock.sendall(plain(21, bytes([2, 40])))
+            return
+        if s.startswith("tls12-"):
+            # A TLS 1.2 ServerHello, one rule broken, then a hang-up: the
+            # client must refuse it before reading on. tls12-hello checks the
+            # ClientHello's offer of 1.2 first and breaks nothing.
+            if s == "tls12-hello":
+                assert exts.get(43) == b"\x04\x03\x04\x03\x03", f"supported_versions {exts.get(43)!r}, not TLS 1.3 then 1.2"
+                assert exts.get(23) == b"", "no extended_master_secret offered"
+                assert exts.get(0xff01) == b"\x00", "no empty renegotiation_info offered"
+                assert exts.get(11) == b"\x01\x00", "ec_point_formats not uncompressed alone"
+                offered12 = [x for x in suites if x in (0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8)]
+                assert offered12 == [0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8], f"TLS 1.2 suites offered: {offered12}"
+            tail = {"tls12-downgrade": b"DOWNGRD\x01", "tls12-downgrade11": b"DOWNGRD\x00"}.get(s, os.urandom(8))
+            # tls12-hello's ServerHello is followed by access_denied, which the
+            # client reads only if it took the ServerHello.
+            e = b"" if s == "tls12-no-ems" else ext(23, b"")
+            e += ext(0xff01, b"\x01\x00" if s == "tls12-reneg" else b"\x00")
+            if s == "tls12-key-share":
+                e += ext(51, b"\x00\x1d" + struct.pack(">H", 32) + os.urandom(32))
+            if s == "tls12-versions":
+                e = ext(43, b"\x03\x03")
+            # tls12-versions is read as TLS 1.3 (it carries supported_versions),
+            # so it echoes the session id and names a TLS 1.3 suite.
+            own = sid if s == "tls12-versions" else os.urandom(32)
+            sh = message(2, (b"\x03\x02" if s == "tls12-version11" else b"\x03\x03") + os.urandom(24) + tail + bytes([len(own)]) + own
+                         + struct.pack(">HB", 0x1301 if s in ("tls12-suite13", "tls12-versions") else 0xc02b, 0) + struct.pack(">H", len(e)) + e)
+            self.sock.sendall(plain(22, sh) + (plain(21, bytes([2, 49])) if s == "tls12-hello" else b""))
             return
         suite = {"aes256": 0x1302, "chacha": 0x1303, "suite-unoffered": 0x1304}.get(s, 0x1301)
         schedule = Schedule(0x1301 if suite == 0x1304 else suite)

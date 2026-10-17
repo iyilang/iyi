@@ -1,5 +1,5 @@
-# Exercises std/rsa: PKCS #1 v1.5 and PSS signatures checked, and keys
-# read and refused.
+# Exercises std/rsa: PKCS #1 v1.5 and PSS signatures checked and made,
+# and keys read and refused.
 #
 # With no argument: signatures Python's cryptography made, under a
 # 2048-bit key and under a 1025-bit one (whose PSS encoding is a byte
@@ -9,17 +9,28 @@
 # the encoding below the modulus); and each way a
 # signature can be wrong refused - the message, the hash, the scheme, the
 # salt's length, a byte, the length, and a signature past the modulus that
-# opens to a valid one. Then keys that are not keys. The modes the gate
-# script drives:
+# opens to a valid one. Then keys that are not keys. Then a private key
+# cryptography drew, read as PKCS #1 and as PKCS #8, DER and PEM: its PKCS
+# #1 v1.5 signatures byte for byte cryptography's, its PSS signatures
+# checked; and private keys refused - each CRT parameter that disagrees,
+# 1024 bits, more than two primes, an RSASSA-PSS key, an EC one, missing
+# parameters, an encrypted key, two keys. The modes the gate script drives:
 #   verify FILE   each line `spki scheme hash salt message signature`, in
 #                 hex, answered `true`, `false` or `key: <why>`;
 #   roots DIR     each certificate's own signature checked with its own
-#                 key, where both are RSA: `name true|false|skip`.
+#                 key, where both are RSA: `name true|false|skip`;
+#   sign FILE     each line `pem-file scheme hash message`, the message in
+#                 hex, answered with the signature in hex or `key: <why>`;
+#   time PEM N    N PSS signatures over SHA-256 with the key in PEM: the
+#                 milliseconds one took.
 
-import std/rsa::{RsaPublicKey, RsaHash, RsaError}
+import std/rsa::{RsaPublicKey, RsaPrivateKey, RsaHash, RsaError}
 import std/asn1::{Der, DerValue, Asn1Error}
+import std/big::{BigInt}
+import std/base64::{Base64}
 import std/dir::{Dir}
 import std/file::{File}
+import std/time::{Time}
 
 def check(cond : Bool, label : String) : Nil
   raise "ASSERTION FAILED: #{label}" unless cond
@@ -57,6 +68,42 @@ def refused(der : String, phrase : String, label : String) : Nil
   answer = RsaPublicKey.from_spki(b(der))
   raise "ASSERTION FAILED: #{label}: accepted" unless answer.is_a?(RsaError)
   check answer.message.includes?(phrase), "#{label}: refused with #{answer.message.inspect}, not #{phrase.inspect}"
+end
+
+def hex(bytes : Array(UInt8)) : String
+  bytes.map { |x| (x < 16_u8 ? "0" : "") + x.to_s(16) }.join("")
+end
+
+def text(bytes : Array(UInt8)) : String
+  String.new(bytes.size) { |buf| buf.copy_from(bytes.to_unsafe, bytes.size) }
+end
+
+def pem(label : String, der : Array(UInt8)) : String
+  body = Base64.encode(text(der))
+  lines = [] of String
+  at = 0
+  while at < body.bytesize
+    lines << body[at, 64]
+    at = at + 64
+  end
+  "-----BEGIN #{label}-----\n#{lines.join("\n")}\n-----END #{label}-----\n"
+end
+
+def private_refused(answer : RsaPrivateKey | RsaError, phrase : String, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}: accepted" unless answer.is_a?(RsaError)
+  check answer.message.includes?(phrase), "#{label}: refused with #{answer.message.inspect}, not #{phrase.inspect}"
+end
+
+# The eight numbers of an RSAPrivateKey, n first, as BigInts.
+def numbers(der : Array(UInt8)) : Array(BigInt)
+  fields = Der.parse(der).or_panic.sequence.or_panic
+  fields[1, 8].map { |f| BigInt.from_bytes(f.unsigned_integer.or_panic) }
+end
+
+# RsaPrivateKey.new from eight numbers.
+def from_numbers(v : Array(BigInt)) : RsaPrivateKey | RsaError
+  bytes = v.map { |x| x.to_bytes((x.to_s(16).bytesize + 1) // 2) || [] of UInt8 }
+  RsaPrivateKey.new(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7])
 end
 
 def read_file(path : String) : Array(UInt8)
@@ -135,6 +182,21 @@ EXPONENT_PAST_31_BITS = "30820124300d06092a864886f70d010101050003820111003082010
 SHORT_MODULUS         = "30819e300d06092a864886f70d010101050003818c0030818802818040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010203010001"
 NO_PARAMETERS         = "30820120300b06092a864886f70d0101010382010f003082010a0282010100bd06a7248b70443a94280e57e600140ec1cad4fedc037fcdff1d9baf4d77a177677a0eb21ebce81bc458d784dc45ab56825c1f52ae57480d7a33403ea59c79814e0284ddc71a54101b7282ad8d4f2d03192c2b761b4370186a3105d0ab519e564cbd6f84245dc767f5a58026f045d88a622b4e404b06c00b47f73a6296f37d3c43a325d83cbf479243c7a9973ded84b4360d8da6b8bb93cc29bfba41e77819a63385d629042af05accf963cb1ba31f1dc2a6f7c1ba615ff561a88531714d34d69f1b33fc3697f90a45c03ee6d9636e514767ba43b5a235f7f4f444e9e9180e7a2ebdb4095e18f79a6bf4391ebf041c31ee6571342251b122759aa2cf991d0bb90203010001"
 EC_KEY                = "30820120300b06072a8648ce3d020105000382010f003082010a0282010100bd06a7248b70443a94280e57e600140ec1cad4fedc037fcdff1d9baf4d77a177677a0eb21ebce81bc458d784dc45ab56825c1f52ae57480d7a33403ea59c79814e0284ddc71a54101b7282ad8d4f2d03192c2b761b4370186a3105d0ab519e564cbd6f84245dc767f5a58026f045d88a622b4e404b06c00b47f73a6296f37d3c43a325d83cbf479243c7a9973ded84b4360d8da6b8bb93cc29bfba41e77819a63385d629042af05accf963cb1ba31f1dc2a6f7c1ba615ff561a88531714d34d69f1b33fc3697f90a45c03ee6d9636e514767ba43b5a235f7f4f444e9e9180e7a2ebdb4095e18f79a6bf4391ebf041c31ee6571342251b122759aa2cf991d0bb90203010001"
+# A 2048-bit key cryptography drew (PKCS #1 DER); a 1024-bit one; its PKCS
+# #1 v1.5 signatures over "abc" as cryptography made them.
+PRIVATE_PKCS1  = "308204a30201000282010100bae7c685f603fddda5b4620f5c6ec173494884337dead80f63a9c80402dde88bba551bbf43ce937fe8963c4ed615195d04a666b60770be3ce563e0da3febe8cea67452ed04897fbf01241d244e8bcea1d74d72c8fe0e93755ed2592138d27c6c118b7ced3cf196505c08a5b8e8340a75b86c3b8c2b6e527fc1dfa95d866037d1a48884615f2df5230987d18fb75536f59b82ec1f8849704bdd5f9c3c2e0db46277b5322a60de51651032ecd6a4997b1ff0e4210b29e7f80fa61b38ef82a9f43de39d734a1b0c34d8bfe797e2bacf2636ebf50fc4effbe6419af8f9b7933eaf1ce257eb34d0c227155ab13dd7d6b36be024f82e172361a6149d43c942f954e587020301000102820100538901be9fccfaead483c18c1208e2674f6a9cc392d4a28a8645bcc2a6315e1d0d43baaa0a794a8d517bcc2a841e5bfea9f461559c0fb4c6ecd36e0cbda307a34cdc12b02265fdf5756219b03f76d6fc9888e1f399311490d1b77be4904beb1635e53d099f426ea72deb237e7831c237091d3ea410493790282b79bbf6320cdfde50d2512f285e269dafdc6fdc8e8f644d4589f8261ce6074381a3f4a5a191350aff9c67ed22b34a972c9a6b823b9328a0478ae58b7bc09db569b043766acc233430f91515f6318a82d4b702544cc806036083e26d98da76d4202ae5540d72790ab02d02bef93ccf9bdec4d259a6020de9f01af5d09dae0ba3a01ba4a7e1c02902818100f4094f4553e09c5ff4958f89b63e84fca73a84becd8243797a81fdbde4d47fd226e48650c1671daa8ae7d9dc0a511caad549a92deff9c4ed385d7227473c2d06630c41ca863c7c4faddef49e7e576cb2f58a3e22695da148b5bc5be92dcc4210df6274aafea3d8e94fd032f588d499a39c5133bf0b77c457435d5da5efb28ef302818100c41176c37614cc061789b399c73e9127c9153d092c366c820926cfc667064c01ec7541dd93cd180bfd6523d88e1b78009c2ca42a77511bb0a94cd7af0becde6759a7d8413f7fbaa078fcd4e1eb245e9ae003271ec492a5142d1d176adbb0dbef2f9e253d99b19e369825b4ac37b86bb7e13f9187010bb546edb850aba0ef7c1d02818100d1002823f7f225fb083e0ef0a2646900f937e4f884894bc07e6b56258c157263496bee9cbb06d5217a5597001cd5daf77433e1f0b5d5f4123673d1905231f75dc0f67e623515186225470db9affaafdd94ed10c9e7f3886dfd37947fdff94f9ba3b56eb603dfcfa601f50dafbbc058d506cb84c5d9cc791b4356731dea6bc2810281807f94f197ecbd49a969259475ab3dde4c6a3f64b11450f1b887e5f66b9edc6d170f5b99996a3499c22b87e594639c22311b6ebd005915b113fa86630ea78ee18594c47026bd000b5ba27ebab3ab43c63fb726b60d02527e12abec73317875141806ff3c3262513ea73dc7c352110bf323faf1576be6d54c8733e6acaf9190644d02818074e1b5293345feb9fe02643ac9523ba47e73579207334bce5d00bad9b01591514fdeffd97019acda8217f937bbae77b90bf716a5662f6729b91d3e60291cbf2822c98676bc72ad801319b84d9bfcc57a54fa485a30e012c4b881b9baf28043adf4864e5a5b07592733623bdff90264f48ff7c0587a43740e9045b1e2e298791a"
+PRIVATE_1024   = "3082025d02010002818100b9fec05a267c8345bcd3b4adbffc9b1fff37ccbbba15f2b16f3574481efc62b6c4c0c958f2b1ec1f961e828d236797bc14eee6c4e97bb98f0a43de22609cd993155e20c2f3bbb41876f5b7dde160646e4979d3272215fa8b70369f599f845f634fdd3138b9349d576a13d30349eb97ad0cee636afbe6afa477323c1fef2ad5430203010001028181009a02bb4e2ace3178fe89a2f3b8a4b7e2bfd7799cfcd28dbaa4e6735a00e665eb0772c786f2b7a758e45a7129e366353b956dd902b67f2fc0a4f45bacc5a93b72e8d00dc8cab035bcbe98d4505f5d028d043f669d94af2c55e457d42b2751e18429b475e622749f491156d99217245670967f238e30ef3d245b18b7ec446d2cb9024100e157a9b841c55a44d19efdc97445c949d5d9a39fbfd0168aa99fa02e1c5eed5f565110a16a61f25fd154e4636679043fb3b5a89fac11d2aaeb84aff7defd7d0d024100d34cae5103f4a8f8961bb66160d166cd73064f156eebeb847f377642dee1878e171a8fe67f5b59f9aefbeef6e9783d1f53d5e9e90173195e7a7316d46859278f0241009828d68c79b4e65043ef84d4ec3357490922cdaec8199daf01fcac6f966eaf004a4bb0dc1df6877015eca9cf48d97c79fb4235dba397e155d274a551cd7c035d0240391f30bcbc1a0717f4d497106a3111de96aaecf4396153f124c724945d5690e3cbc12587c58437a5b5356c5b99b024adf4670eee2bb326f79098ce622bb77667024014dd90863e08abdd88e8058999543217846b3ada7dec7a40c2929b9488034b168c471fe7ce3c2eed7de35157a0b95aa48f9dc4f9e278cf9aff5147d8f39c2f07"
+V15_SIGNATURES = {
+  RsaHash::SHA256 => "6f8f58af69ce2011a8d78b11100052e7fc369784df2a6b7be000fa2a09fff49f91c7db0d28efa2423292a4f946911e9127939564352d32cf98d97a42659d05415eb4ea7d9dee1255716f80a1f7584ade192b5cd7863bd62aa63fa4c9507ebe4cf2c85fafdfed6729b641a1f1d9125a2951efb521a61f5e2ec935b43d74173a4d5a6c3e8fc8fb37154fef6aeae3e110b515bd7a6d36c475ecd0e73453ef41df39c5b6d1433f5576df96473f3e1296a34711751cde96a9dfdb39d9d6054aa2034fdc6562a93774cfcf0b2a7d29b18bdd7193ca51be75d318d7f76cb853b69dcf1117b73819378f759dc34692d7dc1cb2cb4d4b068e77aaf8d2becfaa328cf3b669",
+  RsaHash::SHA384 => "880a94c4c65f89eee16d21a18e0b1a7c2dd9694ba61fe08da2c8ad03d7564fd1cbc167f62bf3a19e6a1be06c667010e2af9e4e6d155032d859f2bff8459b1a36a9bac6f83b5461addc0336caeedfc28c4e0eab3fab072f70ec27834710bab0cb6951eded85b14f998203f1ac87aa8ed7cec768775211fed3c2b13dcd3ad0ecb3a9c64481373807c186f4fdad6bd6fae12416137f48041dc85c398b2b0b525baf9142074db1bbd41a3a045e673b18d8432bab588a7b0fd02cf7c50dd5c78cbbe24a4df5bc1c154246998311a5e0bda7cb04cdde8038c2e525a3457311b76bffc1d2e16e5b2d9a05ad73063187fd749e150ca1721131fbddf21c1c4064de406df8",
+  RsaHash::SHA512 => "b0214ef6c140a947b077b487a71808e25770013ab4372fbc102ccffd3c2d30328ddfc03ca666703bf70369733b59898dcfcdf8bcd2c1e3d65c39d1b388fbd1bba288ff7852a144f513a8b1a5741459bafd73e7d2fb1cebd2b861401ebe9cfb64659340ec74746be40737a8b2f8f5eca294c0fa71dee31a411c0aa37d15f0850cb6856fd5219c99e2a68a8720b49733505761e93dd7c3e7196cfe318468bc336e6bad88f42bf57d9c51eb28ab10dbac894bbc77cb5be8a82d08e71f9eb8f0626e27b1e20ecd63f680ec256a7733c4df9c6bf7c78eec15b625b10471203035a2ec35b5abba6c1229611dd3ab06885b94c1b596c9d4e41680bb623b5f072e5e0361",
+}
+# The PrivateKeyInfo headers around PRIVATE_PKCS1: rsaEncryption with its
+# NULL, without it, id-RSASSA-PSS, and an EC key's algorithm.
+PKCS8_HEADER        = "308204bd020100300d06092a864886f70d0101010500048204a7"
+PKCS8_NO_PARAMETERS = "308204bb020100300b06092a864886f70d010101048204a7"
+PKCS8_RSASSA_PSS    = "308204bd020100300d06092a864886f70d01010a0500048204a7"
+PKCS8_EC            = "308204c3020100301306072a8648ce3d020106082a8648ce3d030107048204a7"
 
 args = Program.args
 
@@ -168,6 +230,34 @@ if args.size > 0 && args[0] == "roots"
   exit 0
 end
 
+if args.size > 0 && args[0] == "sign"
+  keys = {} of String => RsaPrivateKey | RsaError
+  File.read(args[1]).lines.each do |line|
+    next if line.empty?
+    f = line.split(' ')
+    key = keys[f[0]]? || RsaPrivateKey.from_pem(File.read(f[0]))
+    keys[f[0]] = key
+    if key.is_a?(RsaError)
+      puts "key: #{key.message}"
+    else
+      message = b(f[3])
+      puts hex(f[1] == "v15" ? key.sign_pkcs1v15(hash_named(f[2]), message) : key.sign_pss(hash_named(f[2]), message))
+    end
+  end
+  exit 0
+end
+
+if args.size > 0 && args[0] == "time"
+  key = RsaPrivateKey.from_pem(File.read(args[1])).or_panic
+  count = args[2].to_i
+  key.sign_pss(RsaHash::SHA256, "warm")
+  started = Time.monotonic_nanoseconds
+  count.times { |i| key.sign_pss(RsaHash::SHA256, "message #{i}") }
+  took = (Time.monotonic_nanoseconds - started).to_f64 / count / 1000000.0
+  puts "#{key.bits}-bit: #{(took * 100).round / 100} ms a signature"
+  exit 0
+end
+
 puts "== signatures Python's cryptography made"
 k2048 = RsaPublicKey.from_spki(b(K2048)).or_panic
 k1025 = RsaPublicKey.from_spki(b(K1025)).or_panic
@@ -193,5 +283,46 @@ refused SHORT_MODULUS, "under the 1024", "a 1023-bit modulus refused"
 refused NO_PARAMETERS, "not the NULL", "rsaEncryption without its NULL refused"
 refused EC_KEY, "not rsaEncryption", "an EC key refused"
 refused "020101", "expected a SEQUENCE", "an INTEGER where a key goes refused"
+
+puts "== private keys: read, signing, and refused"
+der = b(PRIVATE_PKCS1)
+signer = RsaPrivateKey.from_pkcs1(der).or_panic
+check signer.bits == 2048 && signer.size == 256, "a 2048-bit private key: #{signer.bits} bits"
+as_pkcs8 = RsaPrivateKey.from_pkcs8(b(PKCS8_HEADER + PRIVATE_PKCS1)).or_panic
+check as_pkcs8.public_key.modulus == signer.public_key.modulus, "the key read from PKCS #8 DER"
+from_pem1 = RsaPrivateKey.from_pem(pem("RSA PRIVATE KEY", der)).or_panic
+from_pem8 = RsaPrivateKey.from_pem(pem("PRIVATE KEY", b(PKCS8_HEADER + PRIVATE_PKCS1))).or_panic
+check from_pem1.public_key.modulus == signer.public_key.modulus && from_pem8.public_key.exponent == signer.public_key.exponent, "the key read from both PEM blocks"
+[RsaHash::SHA256, RsaHash::SHA384, RsaHash::SHA512].each do |hash|
+  got = signer.sign_pkcs1v15(hash, "abc")
+  check hex(got) == V15_SIGNATURES[hash], "PKCS #1 v1.5 over #{hash} as cryptography signs it"
+  check as_pkcs8.sign_pkcs1v15(hash, b("616263")) == got, "PKCS #1 v1.5 over #{hash} the same from PKCS #8 and over bytes"
+  pss = signer.sign_pss(hash, "abc")
+  check signer.public_key.verify_pss(hash, "abc", pss), "a PSS signature over #{hash} checks with a salt as long as the hash"
+  check !signer.public_key.verify_pss(hash, "abd", pss), "a PSS signature over #{hash} does not check for another message"
+  check pss != signer.sign_pss(hash, "abd"), "PSS over #{hash}: another message, another signature"
+end
+puts "  PKCS #1 and PKCS #8, DER and PEM; PKCS #1 v1.5 over SHA-256, -384 and -512 byte for byte cryptography's; PSS checked"
+v = numbers(der)
+one = BigInt.new(1)
+two = BigInt.new(2)
+check !from_numbers(v).is_a?(RsaError), "the eight numbers read back as the key"
+private_refused from_numbers([v[0] + two] + v[1, 7]), "p times q is not its modulus", "a modulus that is not p times q refused"
+private_refused from_numbers([v[0], v[1], v[2], one, v[0]] + v[5, 3]), "p or q is not over 1", "a p of 1 refused"
+private_refused from_numbers(v[0, 2] + [v[2] + two] + v[3, 5]), "d is not e's inverse modulo lcm(p - 1, q - 1)", "a d that is not e's inverse refused"
+private_refused from_numbers(v[0, 5] + [v[5] + two] + v[6, 2]), "dp is not d mod (p - 1)", "a dp that is not d's residue refused"
+private_refused from_numbers(v[0, 6] + [v[6] + two, v[7]]), "dq is not d mod (q - 1)", "a dq that is not d's residue refused"
+private_refused from_numbers(v[0, 7] + [v[7] + one]), "qi is not the inverse of q mod p", "a qi that is not q's inverse refused"
+private_refused from_numbers(v[0, 3] + [v[4], v[3], v[6], v[5], v[7]]), "qi is not the inverse of q mod p", "p and q swapped under the same qi refused"
+private_refused RsaPrivateKey.from_pkcs1(b(PRIVATE_1024)), "1024 bits, under the 2048 this signs with", "a 1024-bit key refused for signing"
+private_refused RsaPrivateKey.from_pkcs1(b("308204a3020101" + PRIVATE_PKCS1[14, PRIVATE_PKCS1.bytesize - 14])), "more than two primes", "a key of more than two primes refused"
+private_refused RsaPrivateKey.from_pkcs8(b(PKCS8_RSASSA_PSS + PRIVATE_PKCS1)), "an RSASSA-PSS key (1.2.840.113549.1.1.10)", "an RSASSA-PSS key refused by name"
+private_refused RsaPrivateKey.from_pkcs8(b(PKCS8_EC + PRIVATE_PKCS1)), "not rsaEncryption", "a key under the EC algorithm refused"
+private_refused RsaPrivateKey.from_pkcs8(b(PKCS8_NO_PARAMETERS + PRIVATE_PKCS1)), "not the NULL", "a PKCS #8 key without rsaEncryption's NULL refused"
+private_refused RsaPrivateKey.from_pkcs8(der), "expected a SEQUENCE", "PKCS #1 read as PKCS #8 refused"
+private_refused RsaPrivateKey.from_pem("-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIB\n-----END ENCRYPTED PRIVATE KEY-----\n"), "an encrypted private key", "an encrypted key refused by name"
+private_refused RsaPrivateKey.from_pem(pem("RSA PRIVATE KEY", der) + pem("PRIVATE KEY", b(PKCS8_HEADER + PRIVATE_PKCS1))), "2 blocks of RSA PRIVATE KEY or PRIVATE KEY, not one", "two keys refused"
+private_refused RsaPrivateKey.from_pem(pem("PUBLIC KEY", b(K2048))), "0 blocks of RSA PRIVATE KEY or PRIVATE KEY, not one", "a public key refused"
+puts "  each CRT parameter that disagrees, 1024 bits, three primes, RSASSA-PSS, EC, no NULL, encrypted, two keys and none refused"
 
 puts "\nALL CHECKS PASSED"

@@ -1,18 +1,20 @@
 """A TLS 1.3 client that breaks the protocol one rule at a time, for the
 server section of bench/std_tls_exercise.sh.
 
-    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256] [--mtls DIR] [SCENARIO ...]
+    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256 | --rsa] [--mtls DIR] [SCENARIO ...]
 
 Connects to the exercise's `serve` mode once per scenario (every one in
 SCENARIOS when none is named) and says, one line each, whether the server
 answered as it must: `<name>: ok ...`, or `FAIL <name>: ...`. `--p256`
-says the server's key is P-256, not Ed25519: what a client that leaves
-out one scheme or the other is owed turns on that. `--mtls DIR` says the
-server asks for a client's certificate: the MTLS scenarios run instead,
-presenting the chains and keys in DIR (client, client-ed, other,
-server-only: .pem and .key each) or breaking a rule of the answer. A correct handshake is
+says the server's key is P-256, `--rsa` that it is RSA, not Ed25519: what
+a client that leaves out one scheme or another is owed turns on that.
+`--mtls DIR` says the server asks for a client's certificate: the MTLS
+scenarios run instead, presenting the chains and keys in DIR (client,
+client-ed, client-rsa, other, server-only: .pem and .key each) or
+breaking a rule of the answer. A correct handshake is
 checked here, not taken on trust: the server's certificate against the
-root, its CertificateVerify with Python's own Ed25519 or ECDSA, its
+root, its CertificateVerify with Python's own Ed25519, ECDSA or RSA-PSS
+(under the first RSA-PSS scheme this side offered), its
 Finished against the transcript as this side has it, and then a request
 answered and closed with close_notify. A broken one must end in the alert
 RFC 8446 names, in the clear before the server's keys and under them
@@ -33,10 +35,13 @@ from std_tls_server import Cipher, Schedule, ext, message, plain  # noqa: E402
 
 from cryptography import x509  # noqa: E402
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, x25519  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa, x25519  # noqa: E402
 
 HELLO_RETRY = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
 SUITE_NAMES = {0x1301: "TLS_AES_128_GCM_SHA256", 0x1302: "TLS_AES_256_GCM_SHA384", 0x1303: "TLS_CHACHA20_POLY1305_SHA256"}
+# rsa_pss_rsae_sha256, -384 and -512, by the hash each names.
+PSS = {0x0804: hashes.SHA256, 0x0805: hashes.SHA384, 0x0806: hashes.SHA512}
+SIGALGS = (0x0807, 0x0403, 0x0804)
 
 # name: (what the scenario sends, what the server must answer)
 #   ("held", text)  the handshake holds and the answer holds text
@@ -75,9 +80,15 @@ SCENARIOS = {
     "no-groups": ("key_share without supported_groups", ("alert", 109)),
     "no-sigalgs": ("no signature_algorithms", ("alert", 109)),
     "no-ed25519": ("signature_algorithms without ed25519",
-                   {"ed25519": ("alert", 40), "p256": ("held", "name=localhost")}),
+                   {"ed25519": ("alert", 40), "p256": ("held", "name=localhost"), "rsa": ("held", "name=localhost")}),
     "no-p256": ("signature_algorithms without ecdsa_secp256r1_sha256",
-                {"ed25519": ("held", "name=localhost"), "p256": ("alert", 40)}),
+                {"ed25519": ("held", "name=localhost"), "p256": ("alert", 40), "rsa": ("held", "name=localhost")}),
+    # An RSA key signs under the first RSA-PSS scheme the client lists, and
+    # never under PKCS #1 v1.5 (RFC 8446 section 4.2.3).
+    "pss-sha384": ("rsa_pss_rsae_sha384 listed before rsa_pss_rsae_sha256", ("held", "name=localhost")),
+    "pss-sha512": ("rsa_pss_rsae_sha512 listed first", ("held", "name=localhost")),
+    "no-rsa-pss": ("PKCS #1 v1.5, ed25519 and ecdsa_secp256r1_sha256, no RSA-PSS",
+                   {"ed25519": ("held", "name=localhost"), "p256": ("held", "name=localhost"), "rsa": ("alert", 40)}),
     "no-group": ("groups without X25519 or secp256r1", ("alert", 40)),
     # A ClientHello of 60 KB, a byte to a record: what the server does with
     # it must grow with what was sent, not with its square.
@@ -120,6 +131,7 @@ SCENARIOS = {
 MTLS = {
     "mtls-ok": ("a P-256 client certificate and its CertificateVerify", ("held", "peer=CN=client")),
     "mtls-ed25519": ("an Ed25519 client certificate", ("held", "peer=CN=client ed")),
+    "mtls-rsa": ("an RSA client certificate, its CertificateVerify under rsa_pss_rsae_sha256", ("held", "peer=CN=client rsa")),
     "mtls-none": ("no client certificate", ("alert", 116)),
     "mtls-bad-cv": ("the client's CertificateVerify one bit off", ("alert", 51)),
     "mtls-no-cv": ("a client Certificate with no CertificateVerify", ("alert", 10)),
@@ -195,7 +207,7 @@ class Client:
         return out
 
 
-def client_hello(session, share, suites=(0x1301, 0x1302, 0x1303), groups=(0x1d,), shares=None, sigalgs=(0x0807, 0x0403),
+def client_hello(session, share, suites=(0x1301, 0x1302, 0x1303), groups=(0x1d,), shares=None, sigalgs=SIGALGS,
                  versions=(0x0304,), alpn=None, sni="localhost", compression=b"\x00", order=None, early=False):
     shares = {0x1d: share} if shares is None else shares
     body = b"\x03\x03" + os.urandom(32) + bytes([len(session)]) + session
@@ -306,6 +318,9 @@ def scenario(c, name):
     if name == "no-sigalgs": kw["sigalgs"] = None
     if name == "no-ed25519": kw["sigalgs"] = (0x0403, 0x0804)
     if name == "no-p256": kw["sigalgs"] = (0x0807, 0x0804)
+    if name == "pss-sha384": kw["sigalgs"] = (0x0805, 0x0804, 0x0807, 0x0403)
+    if name == "pss-sha512": kw["sigalgs"] = (0x0806, 0x0807, 0x0403, 0x0804)
+    if name == "no-rsa-pss": kw["sigalgs"] = (0x0401, 0x0501, 0x0601, 0x0807, 0x0403)
     if name == "no-group":
         kw["groups"] = (0x18,)
         kw["shares"] = {0x18: p384_share}
@@ -455,8 +470,14 @@ def scenario(c, name):
     if isinstance(public, ed25519.Ed25519PublicKey):
         assert verify[4:6] == b"\x08\x07", f"an Ed25519 key's CertificateVerify under {verify[4:6].hex()}"
         public.verify(verify[8:], signed)
+    elif isinstance(public, rsa.RSAPublicKey):
+        wanted = next(s for s in kw.get("sigalgs", SIGALGS) if s in PSS)
+        scheme = int.from_bytes(verify[4:6], "big")
+        assert scheme == wanted, f"an RSA key's CertificateVerify under {scheme:#06x}, the first RSA-PSS scheme offered being {wanted:#06x}"
+        h = PSS[scheme]()
+        public.verify(verify[8:], signed, padding.PSS(mgf=padding.MGF1(h), salt_length=h.digest_size), h)
     else:
-        assert isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp256r1", "the leaf's key is neither Ed25519 nor P-256"
+        assert isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp256r1", "the leaf's key is neither Ed25519, P-256 nor RSA"
         assert verify[4:6] == b"\x04\x03", f"a P-256 key's CertificateVerify under {verify[4:6].hex()}"
         public.verify(verify[8:], signed, ec.ECDSA(hashes.SHA256()))
     assert verify[0] == 15, f"message {verify[0]} where CertificateVerify belongs"
@@ -474,7 +495,7 @@ def scenario(c, name):
     writer = Cipher(schedule, c_hs)
     if requested:
         # The client's certificate, or one rule of its answer broken.
-        who = {"mtls-ed25519": "client-ed", "mtls-untrusted": "other", "mtls-server-only": "server-only"}.get(name, "client")
+        who = {"mtls-ed25519": "client-ed", "mtls-rsa": "client-rsa", "mtls-untrusted": "other", "mtls-server-only": "server-only"}.get(name, "client")
         ders = [x509c.public_bytes(serialization.Encoding.DER)
                 for x509c in x509.load_pem_x509_certificates(open(os.path.join(MTLS_DIR, who + ".pem"), "rb").read())]
         own = serialization.load_pem_private_key(open(os.path.join(MTLS_DIR, who + ".key"), "rb").read(), None)
@@ -493,6 +514,8 @@ def scenario(c, name):
             signed = b" " * 64 + b"TLS 1.3, client CertificateVerify\x00" + schedule.digest(transcript)
             if isinstance(own, ed25519.Ed25519PrivateKey):
                 scheme, sig = 0x0807, own.sign(signed)
+            elif isinstance(own, rsa.RSAPrivateKey):
+                scheme, sig = 0x0804, own.sign(signed, padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32), hashes.SHA256())
             else:
                 scheme, sig = 0x0403, own.sign(signed, ec.ECDSA(hashes.SHA256()))
             if name == "mtls-wrong-scheme":
@@ -554,8 +577,8 @@ def main():
     key_kind = "ed25519"
     global MTLS_DIR
     while rest and rest[0].startswith("--"):
-        if rest[0] == "--p256":
-            key_kind = "p256"
+        if rest[0] in ("--p256", "--rsa"):
+            key_kind = rest[0][2:]
             rest = rest[1:]
         elif rest[0] == "--mtls":
             MTLS_DIR = rest[1]

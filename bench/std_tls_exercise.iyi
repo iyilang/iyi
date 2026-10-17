@@ -1,19 +1,25 @@
-# Exercises std/tls: a TLS 1.3 client and server.
+# Exercises std/tls: a TLS 1.3 client and server, and the client's TLS 1.2.
 #
 # With no argument: RFC 8448's "Simple 1-RTT Handshake" trace, held byte for
 # byte through the key schedule and the record protection - every secret
 # from the early one to the exporter's, the server's handshake flight
 # decrypted from the trace's record to the trace's plaintext, both
 # Finished values, the client's Finished sealed into exactly the trace's
-# record, and the application data both ways after a NewSessionTicket.
-# The modes the gate script drives:
+# record, and the application data both ways after a NewSessionTicket -
+# and TLS 1.2's PRF over SHA-256 and SHA-384 against the vectors that
+# circulate for it. The modes the gate script drives:
 #   scenarios DIR       every scenario of bench/std_tls_server.py, whose
 #                       port and roots are in DIR, each holding or refused
 #                       for its reason;
 #   get PORT ROOTS HOST [ALPN|-] [CHAIN KEY]
 #                       GET / over a connection to 127.0.0.1:PORT for HOST,
-#                       its status line printed, or why it was refused;
-#                       with CHAIN and KEY, presented if the server asks;
+#                       its status line, suite, protocol and version
+#                       printed, or why it was refused; with CHAIN and KEY,
+#                       presented if the server asks;
+#   renegotiate PORT ROOTS HOST
+#                       "first", a read that times out, "second", a read:
+#                       what a TLS 1.2 server that sends a HelloRequest
+#                       between is answered;
 #   serve DIR COUNT     a TlsServer on 127.0.0.1, its port written to
 #                       DIR/port, with DIR/chain.pem and DIR/key.pem and
 #                       ALPN h2 and http/1.1 - asking for a client's
@@ -77,7 +83,16 @@ SCENARIOS = [
   {"cv-pkcs1", false, "CertificateVerify under scheme 0x401"},
   {"cv-wrong-curve", false, "scheme 0x403 for a key that is not on its curve"},
   {"suite-unoffered", false, "cipher suite 0x1304, which was not offered"},
-  {"tls12", false, "does not speak TLS 1.3 (protocol_version)"},
+  {"tls12", false, "resuming this ClientHello's session id, which was never a session (illegal_parameter)"},
+  {"tls12-hello", false, "the server sent alert access_denied (49)"},
+  {"tls12-downgrade", false, "carrying RFC 8446's downgrade sentinel, where TLS 1.3 was offered: a downgrade (illegal_parameter)"},
+  {"tls12-downgrade11", false, "carrying RFC 8446's downgrade sentinel, where TLS 1.3 was offered: a downgrade (illegal_parameter)"},
+  {"tls12-no-ems", false, "does not do the extended master secret (RFC 7627), which a TLS 1.2 handshake here requires (handshake_failure)"},
+  {"tls12-reneg", false, "a renegotiation_info that is not empty, on a first handshake (handshake_failure)"},
+  {"tls12-suite13", false, "cipher suite TLS_AES_128_GCM_SHA256 for TLS 1.2, which was not offered for it (illegal_parameter)"},
+  {"tls12-version11", false, "the server chose version 0x302, before TLS 1.2, which this does not speak (protocol_version)"},
+  {"tls12-versions", false, "supported_versions names 0x303, not TLS 1.3 (illegal_parameter)"},
+  {"tls12-key-share", false, "extension 51 in a TLS 1.2 ServerHello, which was not offered for it (unsupported_extension)"},
   {"no-echo", false, "does not echo the session id"},
   {"hrr-group", false, "a HelloRetryRequest for group 24, which was not offered (illegal_parameter)"},
   {"unsolicited-ext", false, "extension 65281 in EncryptedExtensions, which was not offered"},
@@ -130,6 +145,8 @@ CLIENT_DATA            = "000102030405060708090a0b0c0d0e0f101112131415161718191a
 CLIENT_DATA_RECORD     = "1703030043a23f7054b62c94d0affafe8228ba55cbefacea42f914aa66bcab3f2b9819a8a5b46b395bd54a9a20441e2b62974e1f5a6292a2977014bd1e3deae63aeebb21694915e4"
 SERVER_DATA            = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f3031"
 SERVER_DATA_RECORD     = "17030300432e937e11ef4ac740e538ad36005fc4a46932fc3225d05f82aa1b36e30efaf97d90e6dffc602dcb501a59a8fcc49c4bf2e5f0a21c0047c2abf332540dd032e167c2955d"
+PRF_SHA256             = "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff70187347b66"
+PRF_SHA384             = "7b0c18e9ced410ed1804f2cfa34a336a1c14dffb4900bb5fd7942107e81c83cde9ca0faa60be9fe34f82b1233c9146a0e534cb400fed2700884f9dc236f80edd8bfa961144c9e8d792eca722a7b32fc3d416d473ebc2c5fd4abfdad05d9184259b5bf8cd4d90fa0d31e2dec479e4f1a26066f2eea9a69236a3e52655c9e9aee691c8f3a26854308d5eaa3be85e0990703d73e56f"
 
 args = Program.args
 
@@ -231,7 +248,32 @@ if args.size > 0 && args[0] == "get"
   label = ENV["TLS_EXPORT"]?
   exported = label ? " exported=#{hex_of(conn.export_keying_material(label, [] of UInt8, 16))}" : ""
   got = drain(conn)
-  puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}#{exported}"
+  puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}#{exported} #{conn.version}"
+  conn.close
+  exit 0
+end
+
+# renegotiate PORT ROOTS HOST: TLS 1.2 to a server that sends a
+# HelloRequest after "first" reaches it; the read that takes it times out,
+# and the next write carries the no_renegotiation warning before "second".
+if args.size > 0 && args[0] == "renegotiate"
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  socket = IyiSocket.connect("127.0.0.1", args[1].to_i)
+  unless socket.is_a?(IyiSocket)
+    puts "no connection"
+    exit 0
+  end
+  conn = TlsClient.over(socket, args[3], config).or_panic
+  conn.write("first\n")
+  conn.read_timeout_ms = 3000
+  first = conn.read
+  puts "#{conn.version}: the read after first: #{first.is_a?(TlsError) ? first.message : first.inspect}"
+  conn.read_timeout_ms = 3000
+  sent = conn.write("second\n")
+  puts "the write after it: #{sent.is_a?(TlsError) ? sent.message : sent}"
+  after = conn.read
+  puts "then: #{after.is_a?(TlsError) ? after.message : after.inspect}"
   exit 0
 end
 
@@ -366,5 +408,14 @@ end
 client_app = TlsRecordCipher.new(0x1301, schedule, b(C_AP))
 check client_app.seal(23_u8, b(CLIENT_DATA)) == b(CLIENT_DATA_RECORD), "the client's data sealed as the trace's record"
 puts "  the server's flight and data opened, the client's Finished and data sealed byte for byte"
+
+puts "== TLS 1.2's PRF, through the key schedule"
+# The P_SHA256 and P_SHA384 vectors that circulate for TLS 1.2 (Python's
+# hmac computes the same): secret, seed and "test label", 100 and 148 bytes.
+prf256 = TlsKeySchedule.new(false).prf(b("9bbe436ba940f017b17652849a71db35"), "test label", b("a0ba9f936cda311827a6f796ffd5198c"), 100)
+check prf256 == b(PRF_SHA256), "P_SHA256's 100 bytes"
+prf384 = TlsKeySchedule.new(true).prf(b("b80b733d6ceefcdc71566ea48e5567df"), "test label", b("cd665cf6a8447dd6ff8b27555edb7465"), 148)
+check prf384 == b(PRF_SHA384), "P_SHA384's 148 bytes"
+puts "  P_SHA256 and P_SHA384, 100 and 148 bytes"
 
 puts "\nALL CHECKS PASSED"

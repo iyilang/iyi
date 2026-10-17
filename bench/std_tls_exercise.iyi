@@ -15,7 +15,8 @@
 #                       GET / over a connection to 127.0.0.1:PORT for HOST,
 #                       its status line, suite, protocol and version
 #                       printed, or why it was refused; with CHAIN and KEY,
-#                       presented if the server asks;
+#                       presented if the server asks; TLS 1.2 offered too
+#                       when TLS_MIN_VERSION is 1.2;
 #   renegotiate PORT ROOTS HOST
 #                       "first", a read that times out, "second", a read:
 #                       what a TLS 1.2 server that sends a HelloRequest
@@ -32,7 +33,7 @@
 #                       what was agreed, then close_notify;
 #   config CHAIN KEY    TlsServerConfig.from_pem's answer.
 
-import std/tls::{TlsClient, TlsConfig, TlsError, TlsIdentity, TlsKeySchedule, TlsRecordCipher, TlsServer, TlsServerConfig}
+import std/tls::{TlsClient, TlsConfig, TlsError, TlsIdentity, TlsKeySchedule, TlsRecordCipher, TlsServer, TlsServerConfig, TlsVersion}
 import std/x509::{Certificate}
 import std/socket::{IyiSocket, SocketError}
 import std/file::{File}
@@ -83,7 +84,8 @@ SCENARIOS = [
   {"cv-pkcs1", false, "CertificateVerify under scheme 0x401"},
   {"cv-wrong-curve", false, "scheme 0x403 for a key that is not on its curve"},
   {"suite-unoffered", false, "cipher suite 0x1304, which was not offered"},
-  {"tls12", false, "resuming this ClientHello's session id, which was never a session (illegal_parameter)"},
+  {"tls12", false, "the server does not speak TLS 1.3 (protocol_version)"},
+  {"tls12-resume", false, "resuming this ClientHello's session id, which was never a session (illegal_parameter)"},
   {"tls12-hello", false, "the server sent alert access_denied (49)"},
   {"tls12-downgrade", false, "carrying RFC 8446's downgrade sentinel, where TLS 1.3 was offered: a downgrade (illegal_parameter)"},
   {"tls12-downgrade11", false, "carrying RFC 8446's downgrade sentinel, where TLS 1.3 was offered: a downgrade (illegal_parameter)"},
@@ -91,7 +93,7 @@ SCENARIOS = [
   {"tls12-reneg", false, "a renegotiation_info that is not empty, on a first handshake (handshake_failure)"},
   {"tls12-suite13", false, "cipher suite TLS_AES_128_GCM_SHA256 for TLS 1.2, which was not offered for it (illegal_parameter)"},
   {"tls12-version11", false, "the server chose version 0x302, before TLS 1.2, which this does not speak (protocol_version)"},
-  {"tls12-versions", false, "supported_versions names 0x303, not TLS 1.3 (illegal_parameter)"},
+  {"tls12-versions", false, "the server does not speak TLS 1.3 (protocol_version)"},
   {"tls12-key-share", false, "extension 51 in a TLS 1.2 ServerHello, which was not offered for it (unsupported_extension)"},
   {"no-echo", false, "does not echo the session id"},
   {"hrr-group", false, "a HelloRetryRequest for group 24, which was not offered (illegal_parameter)"},
@@ -157,6 +159,13 @@ if args.size > 0 && args[0] == "scenarios"
   config.alpn = ["h2", "http/1.1"]
   # Presented where a request names ed25519, and only there.
   config.identity = TlsIdentity.from_pem(File.read(args[1] + "/client.pem"), File.read(args[1] + "/client.key")).or_panic
+  # The same, told to speak TLS 1.2: for the tls12-* scenarios alone, so
+  # every other one meets the default.
+  config12 = TlsConfig.new
+  config12.roots = config.roots
+  config12.alpn = config.alpn
+  config12.identity = config.identity
+  config12.min_version = TlsVersion::TLS12
   held = 0
   refused = 0
   SCENARIOS.each do |s|
@@ -164,7 +173,7 @@ if args.size > 0 && args[0] == "scenarios"
     check socket.is_a?(IyiSocket), "#{s[0]}: no connection to the scripted server"
     next unless socket.is_a?(IyiSocket)
     # Three seconds for a handshake: the slow server is cut off within it.
-    conn = TlsClient.over(socket, s[0] + ".tls.test", config, 3000)
+    conn = TlsClient.over(socket, s[0] + ".tls.test", s[0].starts_with?("tls12-") ? config12 : config, 3000)
     if s[1]
       check !conn.is_a?(TlsError), "#{s[0]}: refused: #{conn.is_a?(TlsError) ? conn.message : ""}"
       next unless conn.is_a?(TlsClient)
@@ -233,6 +242,7 @@ if args.size > 0 && args[0] == "get"
   config.roots = Certificate.from_pem(File.read(args[2])).or_panic
   config.alpn = [args[4]] if args.size > 4 && args[4] != "-"
   config.identity = TlsIdentity.from_pem(File.read(args[5]), File.read(args[6])).or_panic if args.size > 6
+  config.min_version = TlsVersion::TLS12 if ENV["TLS_MIN_VERSION"]? == "1.2"
   socket = IyiSocket.connect("127.0.0.1", args[1].to_i)
   unless socket.is_a?(IyiSocket)
     puts "no connection"
@@ -259,6 +269,7 @@ end
 if args.size > 0 && args[0] == "renegotiate"
   config = TlsConfig.new
   config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  config.min_version = TlsVersion::TLS12
   socket = IyiSocket.connect("127.0.0.1", args[1].to_i)
   unless socket.is_a?(IyiSocket)
     puts "no connection"

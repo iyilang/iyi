@@ -1,7 +1,7 @@
 # TLS 1.3 (RFC 8446), both ends, written in iyi from the RFCs: a client
-# whose server's certificate std/x509 checked - which speaks TLS 1.2 too,
-# to a server that speaks nothing newer - and a server whose Ed25519,
-# P-256 or RSA key signs for it, over std/socket.
+# whose server's certificate std/x509 checked - which speaks TLS 1.2 too
+# when asked to - and a server whose Ed25519, P-256 or RSA key signs for
+# it, over std/socket.
 #
 #     import std/tls::{TlsClient, TlsConfig, TlsError}
 #
@@ -19,13 +19,14 @@
 #     conn = TlsServer.over(listener.accept.as(IyiSocket), config).or_panic
 #     conn.read                                  # what the client sent
 #
-# TLS 1.3 at a server: a client that speaks TLS 1.2 or earlier is refused,
-# as it is by every implementation that has dropped the older versions'
-# modes. The three cipher suites RFC 8446 section 9.1 names (AES-128-GCM
-# with SHA-256, AES-256-GCM with SHA-384, ChaCha20-Poly1305 with SHA-256),
-# std/aead's; the key exchange is X25519, std/curve25519's - and at a
-# server secp256r1 too, std/p256's - both constant-time. `version` says
-# which version a connection speaks.
+# TLS 1.3 only, by default: a peer that speaks TLS 1.2 or earlier is
+# refused, as it is by every implementation that has dropped the older
+# versions' modes - a server always, a client unless its `TlsConfig` says
+# otherwise (below). The three cipher suites RFC 8446 section 9.1 names
+# (AES-128-GCM with SHA-256, AES-256-GCM with SHA-384, ChaCha20-Poly1305
+# with SHA-256), std/aead's; the key exchange is X25519, std/curve25519's
+# - and at a server secp256r1 too, std/p256's - both constant-time.
+# `version` says which version a connection speaks.
 #
 # The client. A server that asks again (HelloRetryRequest) for a cookie is
 # answered; one that asks for another group is refused, as X25519 is all
@@ -43,17 +44,23 @@
 # empty Certificate otherwise, which section 4.4.2 allows. Not here:
 # resumption and 0-RTT (NewSessionTicket is read and set aside).
 #
-# TLS 1.2 at the client, for servers that speak nothing newer (RFC 5246,
-# with RFC 7627's extended master secret and RFC 5746's
-# renegotiation_info). One ClientHello offers both: supported_versions
-# names 1.3 then 1.2, and after the three 1.3 suites come six of 1.2's -
-# ECDHE signed by ECDSA (or Ed25519, RFC 8422) or by RSA, each with
-# AES-128-GCM, AES-256-GCM (RFC 5289) or ChaCha20-Poly1305 (RFC 7905):
-# ECDHE alone, for forward secrecy, and AEADs alone, with neither CBC's
-# padding oracles nor RC4. A ServerHello with no supported_versions is
-# 1.2's. It is refused when its random ends with RFC 8446 section 4.1.3's
-# downgrade sentinel (a server that speaks 1.3 writes it when the
-# ClientHello it read did not offer 1.3: something between took it out),
+# TLS 1.2 at the client, and only when asked: `config.min_version =
+# TlsVersion::TLS12`. It is here for the servers that never moved past
+# 1.2 - appliances, old intranets, mail and payment endpoints - which a
+# program has to reach; nothing else asks for it, and without it the
+# ClientHello is 1.3's alone and a 1.2 ServerHello is refused as a server
+# that does not speak 1.3. Asked for, it is held to what keeps 1.2 sound
+# (RFC 5246, with RFC 7627's extended master secret and RFC 5746's
+# renegotiation_info): one ClientHello offers both versions -
+# supported_versions names 1.3 then 1.2, and after the three 1.3 suites
+# come six of 1.2's - ECDHE signed by ECDSA (or Ed25519, RFC 8422) or by
+# RSA, each with AES-128-GCM, AES-256-GCM (RFC 5289) or ChaCha20-Poly1305
+# (RFC 7905): ECDHE alone, for forward secrecy, and AEADs alone, with
+# neither CBC's padding oracles nor RC4. A ServerHello with no
+# supported_versions is 1.2's. It is refused when its random ends with
+# RFC 8446 section 4.1.3's downgrade sentinel (a server that speaks 1.3
+# writes it when the ClientHello it read did not offer 1.3: something
+# between took it out),
 # when it echoes this ClientHello's session id (a resumption, which is not
 # offered), when it chooses a suite not offered for 1.2, and when it does
 # not do the extended master secret - which ties the master secret to the
@@ -216,6 +223,13 @@ impl Error for TlsError
   end
 end
 
+# The versions a client may speak: TLS 1.3, or TLS 1.2 as well (RFC 5246),
+# for a server that never moved past it.
+pub enum TlsVersion
+  TLS12
+  TLS13
+end
+
 # What a connection is checked against and offers.
 pub class TlsConfig
   # The roots a server's chain must reach; the system's when nil, read
@@ -230,6 +244,10 @@ pub class TlsConfig
   # The certificate and key sent to a server that asks for one (mutual
   # TLS), when the request names its scheme; none sent when nil.
   property identity : TlsIdentity? = nil
+  # The oldest version spoken. TLS 1.3 by default, and then a server that
+  # answers in 1.2 is refused as one that does not speak 1.3; `TLS12`
+  # offers 1.2 beside it (see the module's header for what it requires).
+  property min_version : TlsVersion = TlsVersion::TLS13
 
   def initialize
   end
@@ -1426,10 +1444,11 @@ pub class TlsClient < TlsConnection
   end
 
   private def client_hello(random : Array(UInt8), session : Array(UInt8), group : Int32, share : Array(UInt8), cookie : Array(UInt8)?) : Array(UInt8)
+    tls12 = @config.min_version == TlsVersion::TLS12
     body = [3_u8, 3_u8] + random + [32_u8] + session
-    # TLS 1.3's suites, then TLS 1.2's.
+    # TLS 1.3's suites, then TLS 1.2's when it is asked for.
     suites = [0x13_u8, 0x01_u8, 0x13_u8, 0x02_u8, 0x13_u8, 0x03_u8]
-    TlsSuites::TLS12.each { |suite| suites = suites + TlsBytes.u16(suite) }
+    TlsSuites::TLS12.each { |suite| suites = suites + TlsBytes.u16(suite) } if tls12
     body = body + TlsBytes.u16(suites.size) + suites + [1_u8, 0_u8]
     extensions = [] of UInt8
     unless TlsBytes.ip_literal?(@host)
@@ -1443,8 +1462,8 @@ pub class TlsClient < TlsConnection
     schemes = [] of UInt8
     SIGNATURE_SCHEMES.each { |s| schemes = schemes + TlsBytes.u16(s) }
     extensions = extensions + TlsBytes.extension(13, TlsBytes.u16(schemes.size) + schemes)
-    # TLS 1.3, then 1.2.
-    extensions = extensions + TlsBytes.extension(43, [4_u8, 3_u8, 4_u8, 3_u8, 3_u8])
+    # TLS 1.3, then 1.2 when it is asked for.
+    extensions = extensions + TlsBytes.extension(43, tls12 ? [4_u8, 3_u8, 4_u8, 3_u8, 3_u8] : [2_u8, 3_u8, 4_u8])
     entry = TlsBytes.u16(group) + TlsBytes.u16(share.size) + share
     extensions = extensions + TlsBytes.extension(51, TlsBytes.u16(entry.size) + entry)
     unless @config.alpn.empty?
@@ -1458,9 +1477,11 @@ pub class TlsClient < TlsConnection
     # For a TLS 1.2 server: the extended master secret (RFC 7627), secure
     # renegotiation's empty renegotiated_connection (RFC 5746 section 3.4),
     # and uncompressed points alone (RFC 8422 section 5.1.2).
-    extensions = extensions + TlsBytes.extension(23, [] of UInt8)
-    extensions = extensions + TlsBytes.extension(0xff01, [0_u8])
-    extensions = extensions + TlsBytes.extension(11, [1_u8, 0_u8])
+    if tls12
+      extensions = extensions + TlsBytes.extension(23, [] of UInt8)
+      extensions = extensions + TlsBytes.extension(0xff01, [0_u8])
+      extensions = extensions + TlsBytes.extension(11, [1_u8, 0_u8])
+    end
     extensions = extensions + TlsBytes.extension(44, TlsBytes.u16(cookie.size) + cookie) if cookie
     TlsBytes.message(1, body + TlsBytes.u16(extensions.size) + extensions)
   end
@@ -1490,7 +1511,11 @@ pub class TlsClient < TlsConnection
       seen << type
       found << {type, data}
     end
-    return server_hello12(version, random, echo, suite, compression, found, session) unless seen.includes?(43)
+    # With TLS 1.2 asked for, a ServerHello with no supported_versions is
+    # 1.2's; without, it is a server that does not speak 1.3, refused below.
+    if !seen.includes?(43) && @config.min_version == TlsVersion::TLS12
+      return server_hello12(version, random, echo, suite, compression, found, session)
+    end
     return TlsError.new("a ServerHello of legacy version #{version}", TlsAlert::PROTOCOL_VERSION) unless version == 0x0303
     return TlsError.new("a ServerHello that does not echo the session id", TlsAlert::ILLEGAL_PARAMETER) unless echo == session
     unless suite == TlsSuites::AES_128_GCM || suite == TlsSuites::AES_256_GCM || suite == TlsSuites::CHACHA20_POLY1305
@@ -1506,10 +1531,10 @@ pub class TlsClient < TlsConnection
       field = TlsReader.new(data)
       case type
       when 43
-        # Section 4.2.1: a version not offered, or one before TLS 1.3, is
-        # illegal_parameter - a server choosing 1.2 sends no supported_versions.
+        # Section 4.2.1: supported_versions names the version chosen, and
+        # here that can only be 1.3.
         chosen = field.u16
-        return TlsError.new("a ServerHello whose supported_versions names 0x#{chosen.to_s(16)}, not TLS 1.3", TlsAlert::ILLEGAL_PARAMETER) unless chosen == 0x0304 && field.done?
+        return TlsError.new("the server does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION) unless chosen == 0x0304 && field.done?
       when 51
         group = field.u16
         if retry
@@ -1532,6 +1557,7 @@ pub class TlsClient < TlsConnection
         return TlsError.new("extension #{type} in a ServerHello, which was not offered", TlsAlert::UNSUPPORTED_EXTENSION)
       end
     end
+    return TlsError.new("the server does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION) unless seen.includes?(43)
     TlsServerHello.new(retry, suite, group, share, cookie, false, random)
   end
 

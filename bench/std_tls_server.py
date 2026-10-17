@@ -55,7 +55,8 @@ SCENARIOS = {
     "cv-pkcs1": "CertificateVerify under rsa_pkcs1_sha256",
     "cv-wrong-curve": "a P-384 key named ecdsa_secp256r1_sha256",
     "suite-unoffered": "TLS_AES_128_CCM_SHA256, which was not offered",
-    "tls12": "a ServerHello with no supported_versions: TLS 1.2, resuming the client's session id",
+    "tls12": "a ServerHello with no supported_versions: TLS 1.2, to a client that did not ask for it",
+    "tls12-resume": "a TLS 1.2 ServerHello echoing the client's session id: a resumption",
     "tls12-hello": "a TLS 1.2 ServerHello as it should be, after the ClientHello's TLS 1.2 offer is checked, then a hang-up",
     "tls12-downgrade": "a TLS 1.2 ServerHello whose random ends with DOWNGRD 01",
     "tls12-downgrade11": "a TLS 1.2 ServerHello whose random ends with DOWNGRD 00",
@@ -277,6 +278,12 @@ class Conn:
         if s == "alert":
             self.sock.sendall(plain(21, bytes([2, 40])))
             return
+        if s == "tls12":
+            # The client was not asked for TLS 1.2: its ClientHello offers 1.3
+            # alone, and nothing of 1.2's.
+            assert exts.get(43) == b"\x02\x03\x04", f"supported_versions {exts.get(43)!r}, not TLS 1.3 alone"
+            assert not [x for x in suites if x >> 8 != 0x13], f"TLS 1.2 suites offered: {suites}"
+            assert 23 not in exts and 0xff01 not in exts, "TLS 1.2's extensions offered"
         if s.startswith("tls12-"):
             # A TLS 1.2 ServerHello, one rule broken, then a hang-up: the
             # client must refuse it before reading on. tls12-hello checks the
@@ -299,7 +306,7 @@ class Conn:
                 e = ext(43, b"\x03\x03")
             # tls12-versions is read as TLS 1.3 (it carries supported_versions),
             # so it echoes the session id and names a TLS 1.3 suite.
-            own = sid if s == "tls12-versions" else os.urandom(32)
+            own = sid if s in ("tls12-versions", "tls12-resume") else os.urandom(32)
             sh = message(2, (b"\x03\x02" if s == "tls12-version11" else b"\x03\x03") + os.urandom(24) + tail + bytes([len(own)]) + own
                          + struct.pack(">HB", 0x1301 if s in ("tls12-suite13", "tls12-versions") else 0xc02b, 0) + struct.pack(">H", len(e)) + e)
             self.sock.sendall(plain(22, sh) + (plain(21, bytes([2, 49])) if s == "tls12-hello" else b""))

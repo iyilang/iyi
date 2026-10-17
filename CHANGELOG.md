@@ -40,12 +40,17 @@
   a 407 named, and the websocket gate one through a CONNECT proxy
   written in iyi; a mutation each that sends the handshake past the
   proxy or in absolute form is caught.
-- **std/tls: a client that speaks TLS 1.2 to a server that speaks nothing
-  newer (RFC 5246, RFC 7627's extended master secret, RFC 5746's
-  renegotiation_info).** One ClientHello offers both: supported_versions
-  names 1.3 then 1.2, and six 1.2 suites follow the three of 1.3 - ECDHE
-  signed by ECDSA (or Ed25519, RFC 8422) or RSA, with AES-128-GCM,
-  AES-256-GCM or ChaCha20-Poly1305; ECDHE and AEADs alone. A 1.2
+- **std/tls: a client that speaks TLS 1.2, when asked, to a server that
+  speaks nothing newer (RFC 5246, RFC 7627's extended master secret, RFC
+  5746's renegotiation_info).** Opt-in: `TlsConfig#min_version` is
+  `TlsVersion::TLS13` by default, and then the ClientHello is 1.3's alone
+  and a 1.2 ServerHello is refused as before ("the server does not speak
+  TLS 1.3", protocol_version) - SPEC.md's decision #18, 1.3 only, stands
+  as the default and is restated there as done. With `TLS12`, one
+  ClientHello offers both: supported_versions names 1.3 then 1.2, and six
+  1.2 suites follow the three of 1.3 - ECDHE signed by ECDSA (or
+  Ed25519, RFC 8422) or RSA, with AES-128-GCM, AES-256-GCM or
+  ChaCha20-Poly1305; ECDHE and AEADs alone. A 1.2
   ServerHello carrying RFC 8446's downgrade sentinel is refused, as is
   one that echoes the ClientHello's session id (resumption is not
   offered), chooses a suite not offered for 1.2, or does not do the
@@ -61,7 +66,12 @@
   "TLSv1.2"; a 1.2 connection has no KeyUpdate, so `key_update` answers
   a `TlsError` there and writes end at `key_limit`. A 1.2 server whose
   ECDSA certificate is on P-384 refuses this ClientHello, whose groups
-  name X25519 and secp256r1 alone.
+  name X25519 and secp256r1 alone. `bench/std_tls_exercise.sh` holds the
+  default to 1.3 alone (the scripted server checks the ClientHello and
+  refuses nothing else; OpenSSL's and Python's 1.2-only servers answer
+  protocol_version) and runs the 1.2 interop with the option set; copies
+  that offer 1.2 by default, take a 1.2 ServerHello unasked, or list 1.2's
+  suites unasked are each caught.
 - **std/rsa signs: `RsaPrivateKey`, and a std/tls server or client
   identity on an RSA key.** `RsaPrivateKey.from_pem` reads PKCS #1 (`RSA
   PRIVATE KEY`) and PKCS #8 (`PRIVATE KEY`), `from_pkcs1`/`from_pkcs8` the

@@ -302,9 +302,9 @@ else
   else
     status=1
   fi
-  # A server of TLS 1.2 alone is answered in 1.2; one that speaks 1.3 too
-  # chooses 1.3, as every check above shows (the version is the last word).
-  interop "TLS 1.2 alone" "HTTP/1.0 200 ok TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 alpn=- TLSv1.2" localhost - -tls1_2 -cert p256.pem -key p256.key
+  # TLS 1.2 is not offered unless asked for (the next section asks): a
+  # server of 1.2 alone refuses the ClientHello, which offers it nothing.
+  interop "TLS 1.2 alone, not asked for" "alert protocol_version (70)" localhost - -tls1_2 -cert p256.pem -key p256.key
   interop "secp256r1 alone, asked for by a HelloRetryRequest" "HTTP/1.0 200 ok" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-256
   interop "groups the client offers none of" "alert handshake_failure (40)" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-384
   # A client certificate required and checked: -verify_return_error ends
@@ -331,7 +331,10 @@ fi
 
 echo
 echo "== TLS 1.2: the client against servers that speak nothing newer"
-# OpenSSL's s_server pinned to TLS 1.2 (-tls1_2), each of the six suites on
+# The client told to speak TLS 1.2 (`min_version = TlsVersion::TLS12`, the
+# exercise's TLS_MIN_VERSION=1.2), which it does only when told: the
+# scripted server's "tls12" scenario and the section above hold the default
+# to 1.3 alone. OpenSSL's s_server pinned to TLS 1.2 (-tls1_2), each of the six suites on
 # its certificate's kind; a ServerKeyExchange signed under PKCS #1 v1.5
 # and RSA-PSS, ECDSA under SHA-384, Ed25519; secp256r1; ALPN; a server
 # without the extended master secret (-no_ems) refused by name, a P-384
@@ -367,13 +370,13 @@ else
       pid=$!
       wait_port "$port"
       if [ "$mode" = direct ]; then
-        got="$("$bin" get "$port" ca.pem localhost "${ALPN12:--}" ${CLIENT12[@]+"${CLIENT12[@]}"} 2>&1)"
+        got="$(TLS_MIN_VERSION=1.2 "$bin" get "$port" ca.pem localhost "${ALPN12:--}" ${CLIENT12[@]+"${CLIENT12[@]}"} 2>&1)"
       else
         rm -f "$WORK/proxyport"
         "$PY" "$REPO/bench/std_tls12_proxy.py" "$WORK/proxyport" "$port" "$mode" >"$WORK/proxy.log" 2>&1 &
         proxy=$!
         for _ in $(seq 1 50); do [ -s "$WORK/proxyport" ] && break; sleep 0.1; done
-        got="$("$bin" get "$(cat "$WORK/proxyport")" ca.pem localhost 2>&1)"
+        got="$(TLS_MIN_VERSION=1.2 "$bin" get "$(cat "$WORK/proxyport")" ca.pem localhost 2>&1)"
         kill "$proxy" 2>/dev/null
         wait "$proxy" 2>/dev/null
       fi
@@ -426,7 +429,7 @@ else
       -keymatexport "EXPERIMENTAL iyi" -keymatexportlen 16 >"$WORK/s12-export.log" 2>&1; } &
     pid=$!
     for _ in $(seq 1 50); do grep -q ACCEPT "$WORK/s12-export.log" && break; sleep 0.1; done
-    got="$(TLS_EXPORT="EXPERIMENTAL iyi" "$bin" get "$port" ca.pem localhost 2>&1 | grep -o 'exported=[0-9a-f]*' | cut -d= -f2)"
+    got="$(TLS_MIN_VERSION=1.2 TLS_EXPORT="EXPERIMENTAL iyi" "$bin" get "$port" ca.pem localhost 2>&1 | grep -o 'exported=[0-9a-f]*' | cut -d= -f2)"
     wait "$pid" 2>/dev/null
     local theirs
     theirs="$(grep -o 'Keying material: [0-9A-Fa-f]*' "$WORK/s12-export.log" | head -1 | cut -d' ' -f3 | tr 'A-F' 'a-f')"
@@ -503,7 +506,7 @@ PY
     "$PY" "$WORK/py12.py" "$WORK/py12port" "$PKI/$kind.pem" "$PKI/$kind.key" "$suite" >"$WORK/py12.log" 2>&1 &
     pid=$!
     for _ in $(seq 1 50); do [ -s "$WORK/py12port" ] && break; sleep 0.1; done
-    got="$("$WORK/tls-release" get "$(cat "$WORK/py12port")" "$PKI/ca.pem" localhost http/1.1 2>&1)"
+    got="$(TLS_MIN_VERSION=1.2 "$WORK/tls-release" get "$(cat "$WORK/py12port")" "$PKI/ca.pem" localhost http/1.1 2>&1)"
     wait "$pid" 2>/dev/null
     if printf '%s' "$got" | grep -qE "^HTTP/1.0 200 ok TLS_ECDHE_.* alpn=http/1.1 TLSv1.2$" && ! [ -s "$WORK/py12.log" ]; then
       tls12=$((tls12 + 1))
@@ -513,6 +516,21 @@ PY
       status=1
     fi
   done
+  # Not told to speak TLS 1.2, the client offers Python's 1.2-only server
+  # nothing it takes: refused, as before 1.2 was here.
+  rm -f "$WORK/py12port"
+  "$PY" "$WORK/py12.py" "$WORK/py12port" "$PKI/p256.pem" "$PKI/p256.key" ECDHE-ECDSA-AES128-GCM-SHA256 >"$WORK/py12.log" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 50); do [ -s "$WORK/py12port" ] && break; sleep 0.1; done
+  got="$("$WORK/tls-release" get "$(cat "$WORK/py12port")" "$PKI/ca.pem" localhost http/1.1 2>&1)"
+  wait "$pid" 2>/dev/null
+  if printf '%s' "$got" | grep -qF "alert protocol_version (70)"; then
+    tls12=$((tls12 + 1))
+    echo "  Python's ssl, TLS 1.2 alone, the client not told to speak it: $got"
+  else
+    echo "  FAIL Python's ssl, TLS 1.2 alone, the client not told to speak it: $got"
+    status=1
+  fi
   # The downgrade sentinel from a real server: a copy whose ClientHello
   # offers TLS 1.2 alone, as one a man in the middle rewrote would, meets
   # OpenSSL speaking 1.3 too, which writes the sentinel - refused; and a
@@ -522,7 +540,7 @@ PY
     local name="$1"
     shift
     rm -rf "$WORK/$name" && mkdir -p "$WORK/$name/std"
-    OLD="TlsBytes.extension(43, [4_u8, 3_u8, 4_u8, 3_u8, 3_u8])" NEW="TlsBytes.extension(43, [2_u8, 3_u8, 3_u8])" \
+    OLD="tls12 ? [4_u8, 3_u8, 4_u8, 3_u8, 3_u8]" NEW="tls12 ? [2_u8, 3_u8, 3_u8]" \
       CHECK="${1:-}" "$PY" - "$REPO/src/std/tls.iyi" "$WORK/$name/std/tls.iyi" <<'PY'
 import os, sys
 src = open(sys.argv[1], encoding="utf-8").read()
@@ -539,7 +557,7 @@ PY
     "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -cert "$PKI/p256.pem" -key "$PKI/p256.key" >/dev/null 2>&1 </dev/null &
     pid=$!
     wait_port "$port"
-    "$WORK/$name/tlsx" get "$port" "$PKI/ca.pem" localhost 2>&1
+    TLS_MIN_VERSION=1.2 "$WORK/$name/tlsx" get "$port" "$PKI/ca.pem" localhost 2>&1
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
   }
@@ -1363,8 +1381,15 @@ prove_broken "a HelloRetryRequest for secp256r1 answered with X25519 again" "hrr
   '      if reply.named_group == GROUP_SECP256R1' '      if false' scenarios
 prove_broken "a ServerHello's share taken in a group its ClientHello did not send" "sh-wrong-group: refused with" \
   '    return TlsError.new("a ServerHello'"'"'s share in #{group_name(reply.named_group)}, where the share sent was #{group_name(group)}'"'"'s", TlsAlert::ILLEGAL_PARAMETER) unless reply.named_group == group' '' scenarios
-# TLS 1.2: the ServerHello's rules against the scripted server's 1.2
-# ServerHellos, the rest against OpenSSL, Python and the man in the middle.
+# TLS 1.2: opt-in, so the default must be 1.3 alone; then the ServerHello's
+# rules against the scripted server's 1.2 ServerHellos, the rest against
+# OpenSSL, Python and the man in the middle.
+prove_broken "TLS 1.2 offered by default" "tls12: refused with" \
+  '  property min_version : TlsVersion = TlsVersion::TLS13' '  property min_version : TlsVersion = TlsVersion::TLS12' scenarios
+prove_broken "a TLS 1.2 ServerHello taken from a client not asked for 1.2" "tls12: refused with" \
+  '    if !seen.includes?(43) && @config.min_version == TlsVersion::TLS12' '    if !seen.includes?(43)' scenarios
+prove_broken "a ClientHello offering TLS 1.2's suites unasked" "tls12: refused with" \
+  '    TlsSuites::TLS12.each { |suite| suites = suites + TlsBytes.u16(suite) } if tls12' '    TlsSuites::TLS12.each { |suite| suites = suites + TlsBytes.u16(suite) }' scenarios
 prove_broken "the downgrade sentinel unchecked" "tls12-downgrade: refused with" \
   '    if tail == DOWNGRADE_TLS12 || tail == DOWNGRADE_TLS11' '    if false' scenarios
 prove_broken "the TLS 1.1 sentinel unchecked" "tls12-downgrade11: refused with" \
@@ -1375,7 +1400,7 @@ prove_broken "a server without the extended master secret taken" "tls12-no-ems: 
   '    unless extended
       return' '    if false
       return' scenarios
-prove_broken "a TLS 1.2 ServerHello's echo of the session id taken" "tls12: refused with" \
+prove_broken "a TLS 1.2 ServerHello's echo of the session id taken" "tls12-resume: refused with" \
   ' if echo == session
 ' ' if false
 ' scenarios

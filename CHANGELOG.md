@@ -4,6 +4,35 @@
 
 ### Added
 
+- **std/bzip2: bzip2 read and written in iyi, read a piece at a time,
+  and `.tar.bz2` read by std/tar.** `Bzip2Reader.new { next_bytes }`
+  reads a stream the way std/compress's `Inflater` does - `read(max) :
+  String | Bzip2Error`, `finished?`, `leftover` - holding one block's
+  inverse-BWT links (3.6 MB at -9) and a 64 KiB buffer, the BWT and the
+  run-length code undone as `read` asks; `Bzip2.decompress(data)` answers
+  `String | Bzip2Error`. Both read every block - Huffman tables picked by
+  selectors, move-to-front and RUNA/RUNB runs, the inverse BWT, the first
+  run-length code - check each block's CRC and the stream's combined CRC,
+  and read concatenated streams (`cat a.bz2 b.bz2`, pbzip2) as one;
+  bytes after the last stream that start no other are `leftover`,
+  ignored as bzip2(1) ignores them. `Bzip2.compress(data, level = 9)`
+  writes streams libbzip2 reads: the run-length code, a BWT sorted by
+  prefix doubling, O(n log n) on any input where a quicksort of
+  rotations goes quadratic on repetition (1 MiB of "ab" in 43 ms with
+  --release, libbzip2 76), and bzip2's own choice of two to six tables
+  refined four times: on the gate's corpora within 0.2% of libbzip2's
+  size, smaller on most (the gate allows 2%). Refused as a `Bzip2Error`,
+  by name: a magic or block-size digit that is not bzip2's, a block that
+  starts with neither magic, a randomised block, a block that uses no
+  bytes, a table count outside 2 to 6, no selectors or one past the
+  tables, a code length outside 1 to 20, an over-subscribed table, a bit
+  pattern no code has, more groups than selectors, a block past its
+  declared size, an origin pointer outside the block, either CRC, and a
+  stream that ends early. Misuse panics: a level outside 1 to 9, a read
+  of no bytes. The module imports only std/int and reaches no platform.
+  `TarReader` sniffs "BZh" and a digit as it sniffs gzip's 1f 8b, reads
+  through `Bzip2Reader` (`bzip2?`), and reads the stream to its end
+  after the zero block so the CRCs vouch for every entry handed out.
 - **std/diff: line and sequence diffs, unified diffs as GNU diff writes
   them, and patches applied as GNU patch applies them with no fuzz.**
   `Diff.edits(a, b)` answers the shortest edit script between two arrays

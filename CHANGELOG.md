@@ -377,6 +377,20 @@
 
 ### Fixed
 
+- **The stricter overload wins whatever the declaration order and
+  whatever unrelated overloads stand beside it.** With `pick(Int32)`,
+  `pick(Array(UInt8))` and `pick(Array(T)) forall T` declared in that
+  order, `pick([1_u8])` chose `Array(T)`; without the `Int32` overload, or
+  in the reverse order, it chose `Array(UInt8)`. A restriction holding a
+  free variable (`Array(T)`) counted as stricter than any type it could
+  not relate to, `Int32` included, so `Array(T)` was put in front of
+  `Int32` - and so in front of the `Array(UInt8)` that came after it. A
+  generic restriction is now stricter than a type exactly when its generic
+  type is (`Object`, `Indexable`: yes; `Int32`, `Bytes`: no), with or
+  without `-Dpreview_overload_order`. Crystal 1.21 makes the same choice.
+  Held by `spec/compiler/semantic/restrictions_spec.cr`: three overloads in
+  all six orders, flat and nested deeper (`Array(Array(T))`,
+  `Foo(Array(T))`).
 - **A large allocation begins on 16 bytes, so `--release` can read a
   `UInt128` in it.** The collector's small chunks were 16-aligned and its
   large objects - past the top size class, a mapping each - began 8

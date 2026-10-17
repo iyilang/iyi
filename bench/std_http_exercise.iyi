@@ -1428,7 +1428,7 @@ slow_l = IyiSocket.listen("127.0.0.1", 0)
 slow_port = slow_l.local_port
 group do |g|
   g.spawn do
-    Server.serve(slow_l, timeout_ms: 400) do |req|
+    Server.serve(slow_l, timeout_ms: 1000) do |req|
       if req.path == "/stop"
         slow_l.close
         Response.new(200, "bye")
@@ -1450,15 +1450,17 @@ group do |g|
     assert_true closed_on?(silent), "a client that sends nothing is closed"
     silent_ms = (__iyi_monotonic_ns - started) // 1000000_i64
     silent.close
-    assert_true silent_ms >= 300 && silent_ms < 2000, "after the timeout: #{silent_ms} ms"
-    # A byte every 100 ms: every pause inside the limit, the head never
-    # done within it.
+    assert_true silent_ms >= 900 && silent_ms < 2800, "after the timeout: #{silent_ms} ms"
+    # A byte every 100 ms: every pause a tenth of the limit, the head never
+    # done within it. At a limit of 400 a runner that stalled one pause
+    # past it closed the connection by the gap alone, and a server with no
+    # deadline on the head passed.
     loris = IyiSocket.connect("127.0.0.1", slow_port).or_panic
     "GET / HTTP/1.1\r\nHost: x\r\nX-Slow: abcdefghijklmn".each_char do |ch|
       loris.write(ch.to_s)
       sleep(100)
     end
-    # Its end, a second and a half after its start: answered only by a
+    # Its end, nearly five seconds after its start: answered only by a
     # server that waited for it.
     loris.write("\r\n\r\n")
     loris.read_timeout_ms = 3000
@@ -1479,12 +1481,12 @@ group do |g|
     quick.write("\r\n").or_panic
     assert_true HTTP.parse_response(read_response(quick)).body == "ok", "a head in pieces inside the limit is answered"
     # And the kept connection, idle past the limit, is closed.
-    sleep(700)
+    sleep(1300)
     assert_true closed_on?(quick), "a kept connection idle past the limit is closed"
     quick.close
     # A connection handed over waits as its protocol likes.
     up = HTTP.upgrade("http://127.0.0.1:#{slow_port}/chat", "echo").or_panic
-    sleep(700)
+    sleep(1300)
     up.socket.write("late").or_panic
     heard = up.leftover
     while heard.bytesize < 9

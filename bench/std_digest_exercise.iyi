@@ -13,7 +13,7 @@ def assert_str(expected : String, actual : String, msg : String) : Nil
   raise "ASSERTION FAILED: #{msg}\n  expected #{expected.inspect}\n  got      #{actual.inspect}" unless expected == actual
 end
 
-import std/digest::{Digest, MD5, SHA1, SHA224, SHA256, SHA384, SHA512, SHA3_224, SHA3_256, SHA3_384, SHA3_512, SHAKE128, SHAKE256, CRC32, Adler32}
+import std/digest::{Digest, MD5, SHA1, SHA224, SHA256, SHA384, SHA512, SHA3_224, SHA3_256, SHA3_384, SHA3_512, SHAKE128, SHAKE256, CRC32, CRC64, Adler32, XXH64}
 
 puts "== md5"
 assert_str "d41d8cd98f00b204e9800998ecf8427e", MD5.hexdigest(""), "empty"
@@ -228,6 +228,30 @@ end
 assert_true CRC32.update(0_u32, mixed.to_unsafe, 0) == 0_u32 && Adler32.update(1_u32, mixed.to_unsafe, 0) == 1_u32, "nothing taken is the start"
 puts "  CRC-32 and Adler-32 in pieces, cut anywhere"
 
+# CRC-64/XZ: reveng's catalogue gives 995dc9bbdf1939fa as its check
+# value, the CRC of "123456789"; the others are what liblzma stores as a
+# block's CRC64 (Python's `lzma.compress(data, check=CHECK_CRC64)`), and
+# the .sh compares three thousand more with it.
+puts "\n== crc-64"
+assert_str "995dc9bbdf1939fa", CRC64.hexdigest("123456789"), "crc64 check value"
+assert_str "0000000000000000", CRC64.hexdigest(""), "crc64 empty"
+assert_str "1f641a570685fc3f", CRC64.hexdigest("abcdefghijklmnopqrstuvwxyz0123456789" * 3), "crc64 of 108 bytes, as liblzma has it"
+
+def crc64_in_pieces(s : String, cut : Int32) : UInt64
+  CRC64.update(CRC64.update(0_u64, s.to_unsafe, cut), s.to_unsafe + cut.to_i64, s.bytesize - cut)
+end
+
+cut = 0
+while cut <= 300
+  assert_true crc64_in_pieces(mixed, cut) == CRC64.checksum(mixed), "crc64 in pieces, cut at #{cut}"
+  cut = cut + 1
+end
+[1, 7, 8, 9, 5552, 11103].each do |at|
+  assert_true crc64_in_pieces(ones, at) == CRC64.checksum(ones), "crc64 in pieces of the long one, cut at #{at}"
+end
+assert_true CRC64.update(0_u64, mixed.to_unsafe, 0) == 0_u64, "crc64: nothing taken is the start"
+puts "  CRC-64 of the check value, of nothing, and in pieces, cut anywhere"
+
 # What a checksum costs against a pass that only adds the bytes up: CRC-32
 # went a bit at a time and Adler-32 reduced twice a byte, 36 and 7 times
 # the pass in a plain build. A release build turns the pass into vector
@@ -268,5 +292,36 @@ puts "  CRC-32 and Adler-32 in pieces, cut anywhere"
   # source and from artifacts and compares what it prints.
   puts "  CRC-32 and Adler-32 within a few passes that add the bytes up"
 {% end %}
+
+puts "\n== xxh64"
+# xxhash's own values for nothing, "a" and "abc"; the rest checked by a
+# reference in Python that Python's zstd agrees with in the low 32 bits,
+# which is what a frame's checksum carries. A stripe is 32 bytes, so 31,
+# 32 and 100 bytes are a tail alone, one stripe, and stripes and a tail.
+assert_str "ef46db3751d8e999", XXH64.hexdigest(""), "xxh64 empty"
+assert_str "d24ec4f1a98c6e5b", XXH64.hexdigest("a"), "xxh64 of 'a'"
+assert_str "44bc2cf5ad770999", XXH64.hexdigest("abc"), "xxh64 of 'abc'"
+assert_str "d5afba1336a3be4b", XXH64.hexdigest("", 1_u64), "xxh64 empty, seed 1"
+assert_str "26c7827d889f6da3", XXH64.hexdigest("hello"), "xxh64 of 'hello'"
+assert_str "60dd0d01083b99f0", XXH64.hexdigest("x" * 31), "xxh64 of 31 bytes"
+assert_str "64da1f1d3495ce66", XXH64.hexdigest("y" * 32), "xxh64 of one stripe"
+assert_str "d30e21c99c2a766d", XXH64.hexdigest("z" * 100), "xxh64 of 100 bytes"
+assert_str "51a7c25008bf8063", XXH64.hexdigest("z" * 100, 1_u64), "xxh64 of 100 bytes, seed 1"
+cut = 0
+while cut <= 300
+  h = XXH64.new
+  h.update(mixed.to_unsafe, cut)
+  h.update(mixed.to_unsafe + cut.to_i64, 300 - cut)
+  assert_true h.digest == XXH64.checksum(mixed), "xxh64 in pieces, cut at #{cut}"
+  cut = cut + 1
+end
+h = XXH64.new
+h.update(mixed.to_unsafe, 50)
+midway = h.digest
+h.update(mixed.to_unsafe + 50_i64, 250)
+assert_true midway == XXH64.checksum(mixed[0, 50]) && h.digest == XXH64.checksum(mixed), "xxh64 asked midway goes on as if it had not been"
+h.reset
+assert_true h.digest == XXH64.checksum(""), "xxh64 reset is the hash of nothing"
+puts "  XXH64 of xxhash's values and the reference's, in pieces cut anywhere, asked midway, reset"
 
 puts "\nALL CHECKS PASSED"

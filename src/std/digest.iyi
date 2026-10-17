@@ -1,7 +1,7 @@
 # Digests, written in iyi: MD5, SHA-1, the SHA-2 family (SHA-224, SHA-256,
 # SHA-384, SHA-512), the SHA-3 family (SHA3-224, SHA3-256, SHA3-384,
 # SHA3-512) with its extendable-output functions SHAKE128 and SHAKE256,
-# CRC-32 and Adler-32.
+# CRC-32, CRC-64 and Adler-32, and the non-cryptographic XXH64.
 #
 # Nothing here reaches OpenSSL, zlib or compiler-rt. The words are the
 # RFCs' and FIPS 180-4's and FIPS 202's (1321, 3174, 6234, 1950, ISO 3309); the
@@ -17,11 +17,14 @@
 # and a second `final` until `reset`. `copy_from` takes another digest's
 # state without allocating, which is how std/crypto's HMAC starts each
 # message from its keyed state, and `dup` is a copy that shares nothing.
-# CRC-32 and Adler-32 are checksums: a `checksum` of one piece, and an
-# `update` that goes on from a checksum already taken, as std/compress's
-# streams take theirs. SHAKE128 and SHAKE256 are not a `Digest`, having
-# no one size: `update` as the data arrives, then `read(n)` as often as
-# more output is wanted, each read going on where the last one stopped.
+# CRC-32, CRC-64 and Adler-32 are checksums: a `checksum` of one piece,
+# and an `update` that goes on from a checksum already taken, as
+# std/compress's and std/xz's streams take theirs. SHAKE128 and SHAKE256
+# are not a `Digest`, having no one size: `update` as the data arrives,
+# then `read(n)` as often as more output is wanted, each read going on
+# where the last one stopped. XXH64 is the hash std/zstd's frames carry
+# the low half of: `checksum(data, seed)`, or `update` in pieces and a
+# `digest` that can be asked midway.
 
 module std/digest
 
@@ -1140,6 +1143,245 @@ pub struct Adler32
 
   def self.hexdigest(data : String) : String
     DigestUtil.hex_u32(checksum(data))
+  end
+end
+
+# CRC-64 with ECMA-182's polynomial, reflected (0xc96c5795d7870f42), and
+# inverted before and after: the CRC-64 the .xz format checks a block
+# with (xz file format 1.0.4 §3.4, check ID 0x04), which reveng's
+# catalogue names CRC-64/XZ. The same convention as `CRC32`: `update(crc,
+# data, count)` goes on from a finished checksum, 0 is the start (the
+# CRC-64 of nothing), and `hexdigest` writes the number most significant
+# digit first, as `xz --robot --list` does; the stream stores it
+# little-endian.
+pub struct CRC64
+  def self.checksum(data : String) : UInt64
+    update(0_u64, data.to_unsafe, data.bytesize)
+  end
+
+  # Eight bytes a step through eight tables, as `CRC32` goes: the bytes
+  # loaded as one little-endian word, xored into the checksum, and each
+  # of the eight looked up in the table for how many bytes of zeros
+  # follow it in the step.
+  def self.update(crc : UInt64, data : Pointer(UInt8), count : Int32) : UInt64
+    raise "CRC64: a negative count of bytes: #{count}" if count < 0
+    t = tables
+    crc = crc ^ 0xffffffffffffffff_u64
+    p = data
+    n = count
+    i = 0
+    while i + 8 <= n
+      x = crc ^ (p[i].to_u64 | p[i + 1].to_u64.unsafe_shl(8) | p[i + 2].to_u64.unsafe_shl(16) | p[i + 3].to_u64.unsafe_shl(24) |
+                 p[i + 4].to_u64.unsafe_shl(32) | p[i + 5].to_u64.unsafe_shl(40) | p[i + 6].to_u64.unsafe_shl(48) | p[i + 7].to_u64.unsafe_shl(56))
+      crc = t[1792 + (x & 255_u64).to_i32] ^ t[1536 + (x.unsafe_shr(8) & 255_u64).to_i32] ^
+            t[1280 + (x.unsafe_shr(16) & 255_u64).to_i32] ^ t[1024 + (x.unsafe_shr(24) & 255_u64).to_i32] ^
+            t[768 + (x.unsafe_shr(32) & 255_u64).to_i32] ^ t[512 + (x.unsafe_shr(40) & 255_u64).to_i32] ^
+            t[256 + (x.unsafe_shr(48) & 255_u64).to_i32] ^ t[x.unsafe_shr(56).to_i32]
+      i = i + 8
+    end
+    while i < n
+      crc = t[((crc ^ p[i].to_u64) & 255_u64).to_i32] ^ crc.unsafe_shr(8)
+      i = i + 1
+    end
+    crc ^ 0xffffffffffffffff_u64
+  end
+
+  @@tables = Pointer(UInt64).new(0_u64)
+
+  # The eight tables, made once, as `CRC32` makes its own.
+  private def self.tables : Pointer(UInt64)
+    return @@tables if @@tables.address != 0_u64
+    t = Pointer(UInt64).malloc(2048_u64)
+    n = 0
+    while n < 256
+      c = n.to_u64
+      k = 0
+      while k < 8
+        c = (c & 1_u64) == 1_u64 ? c.unsafe_shr(1) ^ 0xc96c5795d7870f42_u64 : c.unsafe_shr(1)
+        k = k + 1
+      end
+      t[n] = c
+      n = n + 1
+    end
+    slice = 1
+    while slice < 8
+      n = 0
+      while n < 256
+        before = t[(slice - 1) * 256 + n]
+        t[slice * 256 + n] = before.unsafe_shr(8) ^ t[(before & 255_u64).to_i32]
+        n = n + 1
+      end
+      slice = slice + 1
+    end
+    @@tables = t
+    t
+  end
+
+  def self.hexdigest(data : String) : String
+    sum = checksum(data)
+    DigestUtil.hex_u32(sum.unsafe_shr(32).to_u32) + DigestUtil.hex_u32((sum & 0xffffffff_u64).to_u32)
+  end
+end
+
+# XXH64, the 64-bit xxHash (Yann Collet; the algorithm as xxhash's
+# `doc/xxhash_spec.md` gives it): the hash whose low 32 bits are a
+# Zstandard frame's content checksum (RFC 8878 §3.1.1), which is what
+# std/zstd takes it for. Not a cryptographic hash - a fast check that
+# bytes arrived as they left, with nothing to keep anyone from making two
+# messages that collide.
+#
+# `checksum(data, seed)` hashes one piece. `new(seed)`, then `update` as
+# the data arrives, then `digest`, hashes it in pieces; `digest` leaves
+# the state as it was, as xxhash's `XXH64_digest` does, so it can be
+# asked midway and the hash go on. `hexdigest` is xxhash's canonical form,
+# most significant byte first. A word of the message is loaded as one
+# little-endian load, which is what every target iyi builds for is.
+pub class XXH64
+  P1 = 0x9E3779B185EBCA87_u64
+  P2 = 0xC2B2AE3D27D4EB4F_u64
+  P3 = 0x165667B19E3779F9_u64
+  P4 = 0x85EBCA77C2B2AE63_u64
+  P5 = 0x27D4EB2F165667C5_u64
+
+  @seed : UInt64
+  @v1 : UInt64
+  @v2 : UInt64
+  @v3 : UInt64
+  @v4 : UInt64
+  @total : UInt64
+  # The stripe in progress: up to 31 bytes a 32-byte stripe has not had.
+  @stripe : Pointer(UInt8)
+  @fill : Int32
+
+  def initialize(seed : UInt64 = 0_u64)
+    @seed = seed
+    @v1 = 0_u64
+    @v2 = 0_u64
+    @v3 = 0_u64
+    @v4 = 0_u64
+    @total = 0_u64
+    @stripe = Pointer(UInt8).malloc(32_u64)
+    @fill = 0
+    reset
+  end
+
+  def self.checksum(data : String, seed : UInt64 = 0_u64) : UInt64
+    h = new(seed)
+    h.update(data.to_unsafe, data.bytesize)
+    h.digest
+  end
+
+  def self.hexdigest(data : String, seed : UInt64 = 0_u64) : String
+    sum = checksum(data, seed)
+    DigestUtil.hex_u32(sum.unsafe_shr(32).to_u32) + DigestUtil.hex_u32((sum & 0xffffffff_u64).to_u32)
+  end
+
+  # Back to the hash of nothing, under the same seed.
+  def reset : Nil
+    @v1 = @seed &+ P1 &+ P2
+    @v2 = @seed &+ P2
+    @v3 = @seed
+    @v4 = @seed &- P1
+    @total = 0_u64
+    @fill = 0
+  end
+
+  def update(data : String) : Nil
+    update(data.to_unsafe, data.bytesize)
+  end
+
+  def update(data : Pointer(UInt8), count : Int32) : Nil
+    raise "XXH64: a negative count of bytes: #{count}" if count < 0
+    @total = @total &+ count.to_u64
+    i = 0
+    if @fill > 0
+      take = 32 - @fill
+      take = count if count < take
+      (@stripe + @fill.to_i64).copy_from(data, take)
+      @fill = @fill + take
+      i = take
+      return if @fill < 32
+      stripe(@stripe)
+      @fill = 0
+    end
+    v1 = @v1
+    v2 = @v2
+    v3 = @v3
+    v4 = @v4
+    while i + 32 <= count
+      p = data + i.to_i64
+      v1 = XXH64.round(v1, p.as(Pointer(UInt64)).value)
+      v2 = XXH64.round(v2, (p + 8_i64).as(Pointer(UInt64)).value)
+      v3 = XXH64.round(v3, (p + 16_i64).as(Pointer(UInt64)).value)
+      v4 = XXH64.round(v4, (p + 24_i64).as(Pointer(UInt64)).value)
+      i = i + 32
+    end
+    @v1 = v1
+    @v2 = v2
+    @v3 = v3
+    @v4 = v4
+    if i < count
+      @stripe.copy_from(data + i.to_i64, count - i)
+      @fill = count - i
+    end
+  end
+
+  # The hash of everything given since the start or `reset`; the state is
+  # left as it was.
+  def digest : UInt64
+    h = 0_u64
+    if @total >= 32_u64
+      h = XXH64.rotl(@v1, 1) &+ XXH64.rotl(@v2, 7) &+ XXH64.rotl(@v3, 12) &+ XXH64.rotl(@v4, 18)
+      h = XXH64.merge(h, @v1)
+      h = XXH64.merge(h, @v2)
+      h = XXH64.merge(h, @v3)
+      h = XXH64.merge(h, @v4)
+    else
+      h = @seed &+ P5
+    end
+    h = h &+ @total
+    p = @stripe
+    n = @fill
+    i = 0
+    while i + 8 <= n
+      h = h ^ XXH64.round(0_u64, (p + i.to_i64).as(Pointer(UInt64)).value)
+      h = XXH64.rotl(h, 27) &* P1 &+ P4
+      i = i + 8
+    end
+    if i + 4 <= n
+      h = h ^ ((p + i.to_i64).as(Pointer(UInt32)).value.to_u64 &* P1)
+      h = XXH64.rotl(h, 23) &* P2 &+ P3
+      i = i + 4
+    end
+    while i < n
+      h = h ^ (p[i].to_u64 &* P5)
+      h = XXH64.rotl(h, 11) &* P1
+      i = i + 1
+    end
+    h = h ^ h.unsafe_shr(33)
+    h = h &* P2
+    h = h ^ h.unsafe_shr(29)
+    h = h &* P3
+    h ^ h.unsafe_shr(32)
+  end
+
+  private def stripe(p : Pointer(UInt8)) : Nil
+    @v1 = XXH64.round(@v1, p.as(Pointer(UInt64)).value)
+    @v2 = XXH64.round(@v2, (p + 8_i64).as(Pointer(UInt64)).value)
+    @v3 = XXH64.round(@v3, (p + 16_i64).as(Pointer(UInt64)).value)
+    @v4 = XXH64.round(@v4, (p + 24_i64).as(Pointer(UInt64)).value)
+  end
+
+  def self.round(acc : UInt64, input : UInt64) : UInt64
+    rotl(acc &+ input &* P2, 31) &* P1
+  end
+
+  def self.merge(acc : UInt64, v : UInt64) : UInt64
+    (acc ^ round(0_u64, v)) &* P1 &+ P4
+  end
+
+  def self.rotl(x : UInt64, n : Int32) : UInt64
+    x.unsafe_shl(n) | x.unsafe_shr(64 - n)
   end
 end
 

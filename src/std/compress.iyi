@@ -30,7 +30,11 @@
 # run over one piece with an output that only grows; there is one decoder.
 # `Deflater` is the other direction a piece at a time: each piece is
 # blocks the reader can decode at once (zlib's sync flush), the window
-# kept from piece to piece, and `finish` ends the stream.
+# kept from piece to piece, and `finish` ends the stream; it can be held
+# to a window smaller than 32 KiB. `Inflater.flushed` is the reader for
+# such pieces taken one at a time, each decoded whole and the window kept
+# between them, a decoded size past a limit refused as it is reached:
+# what RFC 7692's permessage-deflate (std/websocket) sends.
 #
 # Left out: zlib's strategies (filtered, Huffman-only, RLE) and a preset
 # dictionary in either direction (zlib's FDICT is refused by name).
@@ -392,6 +396,10 @@ class Inflate
   @summed : Int32
   @origin : Int32
   @grow : Bool
+  # A raw stream decoded a piece at a time, each piece ending at a block
+  # boundary (`Inflater.flushed`): the final bit ends no stream, and the
+  # end of a piece is where decoding waits for the next.
+  @pieces : Bool
   @state : Int32
   @final : Bool
   @stored : Int32
@@ -419,6 +427,7 @@ class Inflate
     @count = 0
     @exhausted = false
     @grow = @source.nil?
+    @pieces = false
     @cap = capacity < MATCH + 64 ? MATCH + 64 : capacity
     @buf = Pointer(UInt8).malloc(@cap.to_u64)
     @pos = 0
@@ -524,12 +533,14 @@ class Inflate
   # Steps until *want* bytes wait to be read, the stream has ended, or it
   # has failed. Streaming, it also stops when there is something to read
   # and going on might call the source: the caller has bytes to work on,
-  # and a source that is a socket would hold them back.
+  # and a source that is a socket would hold them back. By pieces, it
+  # stops where the piece ends between blocks.
   def run(want : Int32) : Nil
     while !@failed && @state != DONE
       pending = @pos - @given
       break if pending >= want
       break if !@grow && pending > 0 && starving?
+      break if @pieces && @state == BLOCK && @count == 0 && @in_pos >= @in_end
       case @state
       when HEAD    then head
       when BLOCK   then block
@@ -539,6 +550,50 @@ class Inflate
       else              next_member
       end
     end
+  end
+
+  # The decoder `Inflater.flushed` makes: no source, the buffer sliding
+  # as a stream's does, and each piece all the input there is.
+  def by_pieces : Nil
+    @pieces = true
+    @grow = false
+    @exhausted = true
+  end
+
+  def pieces? : Bool
+    @pieces
+  end
+
+  # *data*, the next piece, decoded to its end, which must fall between
+  # blocks; nil once more than *limit* bytes have come out of it, which
+  # fails the stream.
+  def piece(data : String, limit : Int32) : String | CompressError | Nil
+    return @error if @failed
+    # The last piece ended between blocks with nothing loaded ahead, so
+    # there is nothing of it to keep.
+    @input = data
+    @in = data.to_unsafe
+    @in_pos = 0
+    @in_end = data.bytesize
+    # Room for four times the piece to begin with, a megabyte at most:
+    # what it decodes to is not known until it has.
+    hint = data.bytesize < 262144 ? data.bytesize * 4 : 1048576
+    out = ByteBuffer.new(hint < limit ? hint : limit)
+    total = 0
+    while true
+      run(STREAM - WINDOW - MATCH)
+      return @error if @failed
+      n = @pos - @given
+      break if n == 0
+      if n > limit - total
+        fail("DEFLATE: the piece decodes to more than #{limit} bytes")
+        return nil
+      end
+      out.append(@buf + @given.to_i64, n)
+      @given = @given + n
+      total = total + n
+    end
+    out.to_s
   end
 
   private def starving? : Bool
@@ -1007,7 +1062,9 @@ class Inflate
     align
     sum_up
     if @envelope == Envelope::Raw
-      @state = DONE
+      # By pieces a final block ends no stream (RFC 7692 §7.2.1): the next
+      # block follows it, on the byte boundary it was padded to.
+      @state = @pieces ? BLOCK : DONE
     elsif @envelope == Envelope::Zlib
       want = 0_u32
       i = 0
@@ -1062,6 +1119,12 @@ end
 #   ...
 # end
 # ```
+#
+# `Inflater.flushed` is the same decoder for a raw stream that comes as
+# pieces each ending between blocks - zlib's sync flush, what each
+# `Deflater#compress` ends with - and is decoded a piece at a time, the
+# window kept from one to the next: RFC 7692's permessage-deflate, whose
+# messages are such pieces with the flush's last four bytes left off.
 pub class Inflater
   @core : Inflate
 
@@ -1075,6 +1138,16 @@ pub class Inflater
     @core = Inflate.new(envelope, source, "", 0, Inflate::STREAM)
   end
 
+  # A raw stream decoded by `inflate`, a piece at a time.
+  def self.flushed : Inflater
+    core = Inflate.new(Envelope::Raw, nil, "", 0, Inflate::STREAM)
+    core.by_pieces
+    new(core)
+  end
+
+  protected def initialize(@core : Inflate)
+  end
+
   # Up to *max* decompressed bytes; "" once the stream and its trailer
   # (CRC-32 and length, or Adler-32) have ended and been checked. A read
   # answers as soon as it has bytes and going on would call the source,
@@ -1086,7 +1159,21 @@ pub class Inflater
   # the same read decoded before the error is not handed out. A *max*
   # below 1 is a panic.
   def read(max : Int32 = 65536) : String | CompressError
+    raise "Inflater: read on a flushed stream; inflate decodes its pieces" if @core.pieces?
     @core.read(max)
+  end
+
+  # The next piece of a `flushed` stream, decoded whole: the blocks it
+  # holds, which may refer back to the 32 KiB before it, and may be final
+  # (RFC 7692 §7.2.1 lets a final block be followed by more). A piece
+  # that does not end between blocks, or is not DEFLATE, is a
+  # `CompressError`, and so is every piece after it. More than *limit*
+  # bytes out is nil, found as they come - a piece that would decode to
+  # gigabytes stops 64 KiB past *limit* - and fails the stream the same
+  # way. On another `Inflater`, a panic.
+  def inflate(piece : String, limit : Int32 = 2147483647) : String | CompressError | Nil
+    raise "Inflater: inflate is for a stream from Inflater.flushed; read reads the others" unless @core.pieces?
+    @core.piece(piece, limit)
   end
 
   # Bytes the source gave beyond the end of the stream (gzip: after the
@@ -1122,9 +1209,13 @@ pub class Deflater
   @core : Encoder
 
   # *level* is `Deflate.compress`'s: 0 stores, 1 is fastest, 9 smallest,
-  # 6 the default; anything else is a panic.
-  def initialize(@envelope : Envelope, @level : Int32 = 6)
-    @core = Encoder.new(@level, -1)
+  # 6 the default. *window_bits* is the base-2 logarithm of how far back a
+  # match may reach, 8 to 15: 15 is DEFLATE's whole 32 KiB, and a smaller
+  # one is what a decoder that keeps less can read - RFC 7692's
+  # `max_window_bits`. Anything else for either is a panic.
+  def initialize(@envelope : Envelope, @level : Int32 = 6, window_bits : Int32 = 15)
+    raise "Deflater: window_bits #{window_bits} is not 8 to 15" if window_bits < 8 || window_bits > 15
+    @core = Encoder.new(@level, -1, 1 << window_bits)
     @started = false
     @finished = false
     @check = @envelope == Envelope::Zlib ? 1_u32 : 0_u32
@@ -1420,7 +1511,11 @@ end
 # default memory level. What differs is the window - a match may reach
 # the whole 32,768 bytes back, where zlib's sliding window stops it 262
 # short - and the codes, which are built and chosen as `Tree` and
-# `flush_block` say. Level 0 is zlib's too: stored blocks only.
+# `flush_block` say. Level 0 is zlib's too: stored blocks only. A
+# `Deflater` asked for a smaller window (`window_bits`) holds every match
+# to that many bytes back, the farthest a decoder with that window can
+# reach, which zlib's deflate with a window of 2^8 does not (it writes
+# with 2^9 instead).
 #
 # Positions are counted over the whole stream from `WSIZE`, so 0 is an
 # empty chain, and `@p` is the base they index: the caller's string for
@@ -1459,6 +1554,9 @@ class Encoder
   CHAIN = [0, 4, 8, 32, 16, 32, 128, 256, 1024, 4096]
 
   @level : Int32
+  # How far back a match may start: the window, or less for a `Deflater`
+  # with a smaller one.
+  @reach : Int32
   @good : Int32
   @lazy : Int32
   @nice : Int32
@@ -1505,9 +1603,11 @@ class Encoder
 
   # *hint* is the whole string's length, or -1 for a stream: a string
   # shorter than the window needs a `prev` table only as long as itself.
-  def initialize(level : Int32, hint : Int32)
+  # *reach* is the farthest back a match may start.
+  def initialize(level : Int32, hint : Int32, reach : Int32 = WSIZE)
     raise "Deflate: level #{level} is not 0 to 9" if level < 0 || level > 9
     @level = level
+    @reach = reach
     @good = GOOD[level]
     @lazy = LAZY[level]
     @nice = NICE[level]
@@ -1741,6 +1841,14 @@ class Encoder
     old
   end
 
+  # `insert`, and the head it answers when a match may start there: 0 for
+  # one farther back than `@reach`, since the chain behind it is farther
+  # still.
+  private def near_head(s : Int32) : Int32
+    old = insert(s)
+    s - old > @reach ? 0 : old
+  end
+
   # Level 0: the input as stored blocks, each as long as one may be.
   private def store : Nil
     @strstart = @end
@@ -1757,7 +1865,7 @@ class Encoder
     while true
       lookahead = e - s
       break if lookahead == 0 || (flush == NONE && lookahead < MIN_LOOKAHEAD)
-      hash_head = lookahead >= MIN_MATCH ? insert(s) : 0
+      hash_head = lookahead >= MIN_MATCH ? near_head(s) : 0
       ml = 0
       ml = longest(hash_head, s, MIN_MATCH - 1, lookahead) if hash_head != 0 && s - hash_head <= WSIZE
       full = false
@@ -1792,7 +1900,7 @@ class Encoder
     while true
       lookahead = e - s
       break if lookahead == 0 || (flush == NONE && lookahead < MIN_LOOKAHEAD)
-      hash_head = lookahead >= MIN_MATCH ? insert(s) : 0
+      hash_head = lookahead >= MIN_MATCH ? near_head(s) : 0
       prev_length = @match_length
       prev_match = @match_start
       ml = MIN_MATCH - 1
@@ -1841,9 +1949,9 @@ class Encoder
     maxlen = lookahead < MAX_MATCH ? lookahead : MAX_MATCH
     best = prev_length
     return best if best >= maxlen
-    # The farthest a match may start; its `prev` slot is *s*'s own by now,
-    # so a chain that reaches it ends there.
-    limit = s - WSIZE
+    # The farthest a match may start; at the window, its `prev` slot is
+    # *s*'s own by now, so a chain that reaches it ends there.
+    limit = s - @reach
     scan = p + s.to_i64
     end1 = scan[best - 1]
     end0 = scan[best]

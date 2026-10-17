@@ -4,6 +4,51 @@
 
 ### Added
 
+- **std/websocket: permessage-deflate (RFC 7692) at both ends, on by
+  default.** `WebSocket.connect` offers `permessage-deflate;
+  client_max_window_bits`, as browsers do, and `WebSocket.upgrade`
+  accepts the first offer it can keep, naming back
+  `server_no_context_takeover`, `client_no_context_takeover` and
+  `server_max_window_bits` as the offer did; an offer with a parameter
+  §7.1 does not define, one named twice, or a value it may not have is
+  declined (§7), and a `Sec-WebSocket-Extensions` that is not a list of
+  extensions is a 400 that says so. The client refuses an answer with
+  another extension, permessage-deflate twice, or a parameter wrong in
+  any of those ways, as a `WebSocketError` that names it. `deflate:
+  false` on either turns it off, and `deflate_level:` (0 to 9, 1 by
+  default as gorilla/websocket's is; anything else a panic) sets this
+  end's level; `WebSocket#deflate` is the `PerMessageDeflate` agreed,
+  its `level` included, and `WebSocket.new` takes one. Text and binary
+  messages go with RSV1 set, through std/compress's `Deflater`, 256 KiB
+  at a time, ending in a sync flush whose 00 00 ff ff is left off; an
+  empty message is the byte 00; pings, pongs and closes
+  never. The window carries over unless that end's
+  `no_context_takeover` was agreed, and matches reach no farther back
+  than its `max_window_bits`, which the compressor keeps to exactly, so
+  no window is declined. A compressed message is inflated with the four
+  bytes put back, in a 32 KiB window that reads any `max_window_bits`,
+  and `max_message` holds as it inflates: a deflate bomb is refused 1009
+  at most 64 KiB past the limit, never inflated whole. RSV1 on a control
+  frame or a continuation is 1002, bytes that do not inflate 1007.
+  std/compress gains `Inflater.flushed` and `Inflater#inflate(piece,
+  limit)` - a raw stream decoded a sync-flushed piece at a time, the
+  window kept, a final block followed by more as RFC 7692 §7.2.1 allows -
+  and `Deflater.new(window_bits:)`, 8 to 15. Measured here (`--release`):
+  eight 16 MiB messages of CHANGELOG.md text from a client to a server in
+  1.5 s at level 1 and 5.2 s at level 6, against 74 ms uncompressed -
+  nearly all of it the compressor, which takes one such message to 7.2
+  MB in 121 ms at level 1 and to 6.1 MB in 589 ms at level 6, where
+  inflating takes 60 to 67 ms; 64 MiB of zeros in 292,849 bytes refused
+  at a 1 MiB limit in 0.13 ms. Held by Node 24's `WebSocket` against the
+  server (permessage-deflate agreed, 54 messages and a megabyte echoed
+  compressed), a Python client and server written in the gate over
+  zlib's raw DEFLATE (the window carried over and not, windows of 2^15
+  and 2^9, a message ending in a final block, fragments, 256 MiB of
+  zeros in 260,917 bytes refused 1009), in the clear and under TLS;
+  RFC 7692 §7.2.3's examples read and the Hello written byte for byte;
+  and seventeen new mutations, the module's 22 still caught. The gate now
+  also builds the exercise from artifacts, typechecks it for five
+  targets, and checks `iyi doc` and `iyi fmt`.
 - **std/http: the `zstd` content coding both ways.** The client's
   default `Accept-Encoding` is `gzip, deflate, zstd`, and a body coded
   `zstd` (RFC 8878) is decoded as it arrives through std/zstd's

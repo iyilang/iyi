@@ -449,7 +449,7 @@ else
   status=1
 fi
 if [ -x "$REPO/bin/crystal" ]; then
-  if "$REPO/bin/crystal" tool format --check "$REPO/src/std/toml.iyi" "$EXERCISE" >"$WORK/format.log" 2>&1; then
+  if "$IYI" fmt --check "$REPO/src/std/toml.iyi" "$EXERCISE" >"$WORK/format.log" 2>&1; then
     echo "  the module and its exercise are formatted"
   else
     echo "  not formatted: $(grep -m1 produced "$WORK/format.log")"

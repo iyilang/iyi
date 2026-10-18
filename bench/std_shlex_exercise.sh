@@ -320,15 +320,13 @@ else
   echo "  iyi doc fails: $(grep -m1 -E 'Error|BUG' "$WORK/doc.txt")"
   status=1
 fi
-# The formatter is the compiler's own, beside the iyi the gate runs.
-CRYSTAL="$(dirname "$IYI")/crystal"
-if [ -x "$CRYSTAL" ]; then
-  if "$CRYSTAL" tool format --check "$REPO/src/std/shlex.iyi" "$REPO/bench/std_shlex_exercise.iyi" >"$WORK/format.log" 2>&1; then
-    echo "  the module and its exercise are formatted"
-  else
-    echo "  not formatted: $(grep -m1 produced "$WORK/format.log")"
-    status=1
-  fi
+# `iyi fmt`, the formatter of the iyi the gate runs: `bin/crystal` is the
+# bootstrap compiler on darwin's runner, which reads no iyi.
+if "$IYI" fmt --check "$REPO/src/std/shlex.iyi" "$REPO/bench/std_shlex_exercise.iyi" >"$WORK/format.log" 2>&1; then
+  echo "  the module and its exercise are formatted"
+else
+  echo "  not formatted: $(head -3 "$WORK/format.log")"
+  status=1
 fi
 apart=""
 for target in x86_64-linux-gnu aarch64-darwin x86_64-windows-msvc aarch64-linux-gnu x86_64-linux-musl; do

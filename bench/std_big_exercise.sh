@@ -768,7 +768,7 @@ else
   status=1
 fi
 if [ -x "$REPO/bin/crystal" ]; then
-  if "$REPO/bin/crystal" tool format --check "$REPO/src/std/big.iyi" "$REPO/bench/std_big_exercise.iyi" >"$WORK/format.out" 2>&1; then
+  if "$IYI" fmt --check "$REPO/src/std/big.iyi" "$REPO/bench/std_big_exercise.iyi" >"$WORK/format.out" 2>&1; then
     echo "  the module and the exercise are formatted"
   else
     echo "  FAIL: not formatted: $(head -3 "$WORK/format.out")"

@@ -61,7 +61,9 @@ env_case(["http_proxy=lower:3128"], "http=http://lower:3128 https=direct", "a pr
 puts "\n== HTTP_PROXY under CGI (httpoxy)"
 env_case(["REQUEST_METHOD=GET", "HTTP_PROXY=http://upper:1"], "http=direct https=direct", "HTTP_PROXY is not read under CGI")
 env_case(["REQUEST_METHOD=", "HTTP_PROXY=http://upper:1"], "http=direct https=direct", "REQUEST_METHOD set to nothing is CGI too")
-env_case(["REQUEST_METHOD=GET", "http_proxy=http://lower:1"], "http=http://lower:1 https=direct", "http_proxy still is under CGI")
+# Where names have no case, `http_proxy` is `HTTP_PROXY`, and neither is
+# read under CGI.
+env_case(["REQUEST_METHOD=GET", "http_proxy=http://lower:1"], folded? ? "http=direct https=direct" : "http=http://lower:1 https=direct", "http_proxy still is under CGI, where it is its own name")
 env_case(["REQUEST_METHOD=GET", "HTTPS_PROXY=http://upper:2"], "http=direct https=http://upper:2", "HTTPS_PROXY still is under CGI")
 
 puts "\n== NO_PROXY from the environment"

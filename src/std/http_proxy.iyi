@@ -26,7 +26,11 @@
 # hands a request's `Proxy:` header to its script as `HTTP_PROXY`, so
 # where `REQUEST_METHOD` is set - a CGI script's environment - the name in
 # capitals is not read for `http://`, and the lower-case name still is, as
-# Python does. (Go refuses either name there, with an error.)
+# Python does. (Go refuses either name there, with an error.) On Windows a
+# variable's name has no case - `http_proxy` is `HTTP_PROXY` - so under CGI
+# neither is read there: the lower-case name answered the request's own
+# `Proxy:` header, which is the hole the rule closes. Python's reading on
+# Windows comes to the same.
 #
 # What it reaches: std/http's reach, and the process environment.
 
@@ -39,7 +43,22 @@ pub struct HTTPProxy
   # The proxy *url* goes through under the environment, ready for `open`'s
   # *proxy*; nil when it goes direct.
   def self.from_env(url : String) : String?
-    HTTP.proxy_for(url, variable("http_proxy", ENV["REQUEST_METHOD"]?.nil?), variable("https_proxy", true), variable("no_proxy", true))
+    cgi = !ENV["REQUEST_METHOD"]?.nil?
+    http = if cgi && HTTPProxy.folded?
+             nil
+           else
+             variable("http_proxy", !cgi)
+           end
+    HTTP.proxy_for(url, http, variable("https_proxy", true), variable("no_proxy", true))
+  end
+
+  # Whether a variable's name has no case here: Windows'.
+  protected def self.folded? : Bool
+    {% if flag?(:win32) %}
+      true
+    {% else %}
+      false
+    {% end %}
   end
 
   # *lower*'s value, or the name in capitals' when *lower* is not set and

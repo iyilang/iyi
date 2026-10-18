@@ -534,16 +534,16 @@
   all six orders, flat and nested deeper (`Array(Array(T))`,
   `Foo(Array(T))`).
 - **A large allocation begins on 16 bytes, so `--release` can read a
-  `UInt128` in it.** The collector's small chunks were 16-aligned and its
-  large objects - past the top size class, a mapping each - began 8
+  `UInt128` in it.** A small chunk of a size that is a multiple of 16 was
+  16-aligned, and the collector's large objects - past the top size class, a mapping each - began 8
   bytes past a boundary: the node's two words and the header word put
   the object at 24. A struct holding a `UInt128` is 16-aligned to LLVM,
   and an optimised build read one out of an `Array` of 65,536 such
   structs with an aligned load (`movaps`) and died of SIGSEGV; the plain
   build, which loads unaligned, ran. A word of padding puts every large
-  object at 32. Held by `bench/arena_exercise.sh`: allocations of 24
-  bytes to 8 MiB, and each grown, are 16-aligned, and the padding taken
-  out is caught at that check.
+  object at 32. Held by `bench/arena_exercise.sh`: allocations of 32
+  bytes to 8 MiB, each a multiple of 16, and each grown, are 16-aligned,
+  and the padding taken out is caught at that check.
 
 ## 0.18.0 — 2026-10-17
 

@@ -1749,10 +1749,11 @@ require "./file"
       # large object's node to its user pointer: the node's next and
       # mapped words, a word of padding, then a header, always - a large
       # object has no arena and no byte, and keeps the collector's bits in
-      # its word. The padding puts the object on 16 bytes, as every small
-      # chunk is: at 24 a large buffer began 8 bytes past a 16-byte
-      # boundary, and `--release` read a `UInt128` in an array of 65,536
-      # structs with an aligned load (`movaps`) and faulted.
+      # its word. The padding puts the object on 16 bytes, as a small chunk
+      # of a size that is a multiple of 16 is: at 24 a large buffer began 8
+      # bytes past a 16-byte boundary, and `--release` read a `UInt128` in
+      # an array of 65,536 structs with an aligned load (`movaps`) and
+      # faulted.
       # `LARGE_HEAD` is the header's own distance from the node.
       HEADER = 8_u64
       OFF_MARK = 0_u64

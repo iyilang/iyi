@@ -97,9 +97,9 @@ SCENARIOS = {
     "ccs-flood": ("seventeen ChangeCipherSpec records after the ClientHello", ("alert", 10)),
     "ccs-first": ("a ChangeCipherSpec before the ClientHello", ("alert", 10)),
     "hello-and-more": ("a Finished in the ClientHello's record", ("alert", 10)),
-    # A byte every half second: the server, given 3 s for a handshake,
-    # hangs up within 6, where a bound on each wait alone held on.
-    "slow-hello": ("a ClientHello a byte every half second", ("ended", 6)),
+    # A byte every half second: the server, given 5 s for a handshake,
+    # hangs up within 8, where a bound on each wait alone held on.
+    "slow-hello": ("a ClientHello a byte every half second", ("ended", 8)),
     "tls12": ("supported_versions TLS 1.2 alone", ("alert", 70)),
     "no-versions": ("no supported_versions: TLS 1.2", ("alert", 70)),
     "no-suite": ("TLS_AES_128_CCM_SHA256 alone", ("alert", 40)),

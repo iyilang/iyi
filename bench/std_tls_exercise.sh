@@ -870,10 +870,20 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
           served_check "OpenSSL, p256, no ecdsa_secp256r1_sha256 among its signature algorithms" "SSL alert number 40" sclient -tls1_3 -sigalgs ed25519:RSA-PSS+SHA256
           ;;
         rsa*)
-          # The scheme the client lists first, and never PKCS #1 v1.5.
-          served_check "OpenSSL, $kind, rsa_pss_rsae_sha256 alone" "Peer signature type: rsa_pss_rsae_sha256" sclient -tls1_3 -sigalgs RSA-PSS+SHA256
-          served_check "OpenSSL, $kind, rsa_pss_rsae_sha384 alone" "Peer signature type: rsa_pss_rsae_sha384" sclient -tls1_3 -sigalgs RSA-PSS+SHA384
-          served_check "OpenSSL, $kind, rsa_pss_rsae_sha512 before -256" "Peer signature type: rsa_pss_rsae_sha512" sclient -tls1_3 -sigalgs RSA-PSS+SHA512:RSA-PSS+SHA256
+          # The scheme the client lists first, and never PKCS #1 v1.5. OpenSSL
+          # 3.2 on names the scheme (`Peer signature type: rsa_pss_rsae_sha256`);
+          # 3.0, the Linux container's, names the type and the digest apart
+          # (`RSA-PSS`, then `Peer signing digest: SHA256`), which say the same
+          # of a certificate whose key is rsaEncryption.
+          pss() {
+            sclient -tls1_3 -sigalgs "$1" | tr -d '\r' | awk '
+              /^Peer signing digest:/ { d = tolower($4) }
+              /^Peer signature type:/ { t = $4 }
+              END { if (t == "RSA-PSS") t = "rsa_pss_rsae_" d; print "scheme " t }'
+          }
+          served_check "OpenSSL, $kind, rsa_pss_rsae_sha256 alone" "scheme rsa_pss_rsae_sha256" pss RSA-PSS+SHA256
+          served_check "OpenSSL, $kind, rsa_pss_rsae_sha384 alone" "scheme rsa_pss_rsae_sha384" pss RSA-PSS+SHA384
+          served_check "OpenSSL, $kind, rsa_pss_rsae_sha512 before -256" "scheme rsa_pss_rsae_sha512" pss RSA-PSS+SHA512:RSA-PSS+SHA256
           served_check "OpenSSL, $kind, PKCS #1 v1.5 and no RSA-PSS among its signature algorithms" "SSL alert number 40" sclient -tls1_3 -sigalgs RSA+SHA256:RSA+SHA384:ECDSA+SHA256
           ;;
         *)
@@ -1371,7 +1381,11 @@ prove_broken "the client's CertificateVerify over the server's context string" "
   '"TLS 1.3, client CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
         signature = identity.sign(scheme, signed)' '"TLS 1.3, server CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
         signature = identity.sign(scheme, signed)' scenarios
-prove_broken "a CertificateRequest without signature_algorithms passed over" "certreq-no-sigalgs: refused with" \
+# Passed over, the request is answered with no certificate, and the client
+# either holds a connection (it is done at its Finished) or reads the
+# server's refusal first, by the race; on darwin it held. Either is the
+# scenario failing.
+prove_broken "a CertificateRequest without signature_algorithms passed over" "FAILED: certreq-no-sigalgs: " \
   '    return TlsError.new("a CertificateRequest with no signature_algorithms", TlsAlert::MISSING_EXTENSION) unless schemes' '    return nil unless schemes' scenarios
 prove_broken "handshake bytes after Finished passed over" "trailing-after-finished: refused with" \
   '    return TlsError.new("handshake bytes left after the server'"'"'s Finished", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0' '' scenarios

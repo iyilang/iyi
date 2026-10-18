@@ -349,9 +349,11 @@ if args.size > 0 && args[0] == "serve"
       next
     end
     socket.read_timeout_ms = 15000
-    # Three seconds to finish a handshake, so a peer that drips one in is
-    # cut off while the gate waits.
-    conn = TlsServer.over(socket, config, 3000)
+    # Five seconds to finish a handshake, so a peer that drips one in is
+    # cut off while the gate waits. Three were too few for the first
+    # handshake of Python 3.14's ssl on a fresh Windows runner, once: the
+    # same client's next three, against the other keys, were in time.
+    conn = TlsServer.over(socket, config, 5000)
     if conn.is_a?(TlsError)
       puts "refused: #{conn.message}"
     else

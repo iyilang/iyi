@@ -404,8 +404,15 @@ else
     one "an Ed25519 certificate (RFC 8422)" "HTTP/1.0 200 ok TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" direct -tls1_2 -cert ed25519.pem -key ed25519.key
     one "secp256r1 alone" "HTTP/1.0 200 ok TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" direct -tls1_2 -cert p256.pem -key p256.key -groups P-256
     ALPN12=http/1.1 one "ALPN" "alpn=http/1.1 TLSv1.2" direct -tls1_2 -cert p256.pem -key p256.key -alpn http/1.1
-    one "a server without the extended master secret" "does not do the extended master secret (RFC 7627), which a TLS 1.2 handshake here requires (handshake_failure)" \
-      direct -tls1_2 -cert p256.pem -key p256.key -no_ems
+    # `-no_ems` is not in every s_server: the OpenSSL 3.0 of the Linux CI
+    # container has none, its s_server did not start, and the client found
+    # no connection.
+    if "$OPENSSL" s_server -help 2>&1 | grep -q -- '-no_ems'; then
+      one "a server without the extended master secret" "does not do the extended master secret (RFC 7627), which a TLS 1.2 handshake here requires (handshake_failure)" \
+        direct -tls1_2 -cert p256.pem -key p256.key -no_ems
+    else
+      echo "  a server without the extended master secret: this OpenSSL ($("$OPENSSL" version | cut -d' ' -f2)) cannot serve one, so it goes unasked"
+    fi
     one "a P-384 certificate, which this ClientHello's groups rule out" "the server sent alert handshake_failure (40)" direct -tls1_2 -cert p384.pem -key p384.key
     local kind
     for kind in p256 ed25519 rsa; do

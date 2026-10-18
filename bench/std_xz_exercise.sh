@@ -109,11 +109,20 @@ for name, data in corpora.items():
     # lc, lp and pb other than the presets' 3, 0 and 2.
     stream(f"{name}.props.xz", lzma.compress(data, filters=[{"id": lzma.FILTER_LZMA2, "lc": 1, "lp": 2, "pb": 0}]), name + ".bin", pieces=small)
     stream(f"{name}.props.lzma", lzma.compress(data, format=lzma.FORMAT_ALONE, filters=[{"id": lzma.FILTER_LZMA1, "lc": 0, "lp": 4, "pb": 4}]), name + ".bin", "lzma", pieces=small)
-# A program's own bytes, where the x86 filter has CALLs and JMPs to undo,
-# with a start offset and without.
-with open(sys.executable, "rb") as f:
-    f.seek(1 << 20)
-    code = f.read(1 << 20)
+# A megabyte shaped like x86 code, where the x86 filter has CALLs and JMPs
+# to undo, with a start offset and without: runs of other bytes, each
+# followed by an E8 or E9 and a 32-bit displacement within a megabyte
+# either way, the forms the filter converts. Made rather than read from
+# the interpreter's own file, which on darwin's runner is a launcher of
+# under a megabyte, and arm64 code besides: the stream was empty there,
+# and the filter's breaks went uncaught.
+shape = random.Random(86)
+made = bytearray()
+while len(made) < (1 << 20):
+    made += bytes(shape.randrange(256) for _ in range(shape.randrange(12)))
+    made.append(shape.choice((0xE8, 0xE9)))
+    made += (shape.randrange(-(1 << 20), 1 << 20) & 0xFFFFFFFF).to_bytes(4, "little")
+code = bytes(made[: 1 << 20])
 put("code.bin", code)
 stream("code.x86.xz", lzma.compress(code, filters=X86), "code.bin", pieces=False)
 stream("code.x86-offset.xz", lzma.compress(code, filters=[{"id": lzma.FILTER_X86, "start_offset": 4096}, {"id": lzma.FILTER_LZMA2}]), "code.bin", pieces=False)

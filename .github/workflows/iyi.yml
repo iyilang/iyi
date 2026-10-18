@@ -894,11 +894,14 @@ jobs:
   # sixty minutes, std/http's proofs alone thirteen of them, on top of the
   # foundation's twenty-five. Interleaved, each shard carries a quarter:
   # in three, the shard with std/http - 21 minutes of HTTPS under two
-  # certificates and its proofs - ran past 45.
+  # certificates and its proofs - ran past 45. And at 45 a shard was cut
+  # off with three runs of this workflow at once (a tag's, master's and the
+  # branch's): the same shard took 29 to 45 minutes in four runs, so it
+  # has the hour Windows' shards have.
   std-siblings:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     container:
       image: crystallang/crystal:1.21.0-build
     strategy:

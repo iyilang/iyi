@@ -169,6 +169,12 @@ out = sys.argv[1]
 lists = [[bytes.fromhex(w[1:]) for w in l.rstrip("\n").split("\t")[1:]] for l in open(os.path.join(out, "join.txt"))]
 mine = [bytes.fromhex(l.strip()) for l in open(os.path.join(out, "mine.txt"))]
 assert len(lists) == len(mine), (len(lists), len(mine))
+# Windows has no /bin/sh for Python to start, and its command line, which
+# Git's sh would parse back into arguments, is quoting of its own: the
+# shell's reading is asked on Linux and darwin.
+if os.name == "nt":
+    print("  not asked on Windows, which has no /bin/sh")
+    sys.exit(0)
 shells = ["/bin/sh"] + ([shutil.which("bash")] if shutil.which("bash") else [])
 bad = 0
 for sh in shells:

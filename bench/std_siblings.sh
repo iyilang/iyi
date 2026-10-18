@@ -28,7 +28,7 @@ if [ "$shards" -lt 1 ] || [ "$shard" -lt 1 ] || [ "$shard" -gt "$shards" ]; then
   exit 2
 fi
 
-# Each sibling has SIBLING_MINUTES (35: std/http's, the slowest, takes 21
+# Each sibling has SIBLING_MINUTES (35: std/http's, the slowest, takes 25
 # on Linux) and is stopped past them, failing by name. A hang left to the
 # job's own limit cancelled the job, and a cancelled job keeps no log: a
 # Windows shard ran 65 minutes and said nothing of where it stopped.

@@ -1678,14 +1678,28 @@ fi
 echo
 echo "== proving the checks can fail when the module is broken"
 mutations=0
+# The broken copies are built one after another and run beside each other,
+# MUT_JOBS at a time: a run of the exercise is 21 seconds of mostly waiting
+# on its own sockets and clocks, and ninety-seven of them one at a time
+# took the gate past the 35 minutes `bench/std_siblings.sh` gives a
+# sibling. Each answer goes to a file of its own and they are printed in
+# order once all have ended.
+MUT_JOBS="${MUT_JOBS:-4}"
+mutation_pids=""
+mkdir -p "$WORK/mutres"
+mutation_said() { # mutation_said <n> <line>...: the n-th mutation's answer
+  local n="$1"
+  shift
+  printf '%s\n' "$@" > "$WORK/mutres/$n"
+}
 mutate() { # mutate <label> <old> <new> [module, http.iyi by default]
   # A binary of its own each: on Windows the last one's file can still be
   # held a moment after it ended, and the next link over it failed with
   # LNK1104 - three of thirty mutations here, whichever came after.
   mutations=$((mutations + 1))
-  local label="$1" old="$2" new="$3" module="${4:-http.iyi}"
+  local label="$1" old="$2" new="$3" module="${4:-http.iyi}" n="$mutations"
   if [ -z "$PY" ]; then
-    echo "  $label: skipped, no working python3 to make the broken copy with"
+    mutation_said "$n" "  $label: skipped, no working python3 to make the broken copy with"
     return 0
   fi
   rm -rf "$WORK/patched"
@@ -1700,20 +1714,40 @@ if old not in src:
 Path("$WORK/patched/std/$module").write_text(src.replace(old, os.environ["NEW"], 1))
 PY
   if [ $? -ne 0 ]; then
-    echo "  $label: the patch did not apply"
-    status=1
+    mutation_said "$n" "  $label: the patch did not apply"
+    touch "$WORK/mutres/failed"
   # Build first, then run: a patch that does not compile would also "fail",
   # and that proves nothing about whether the exercise catches the break.
-  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut-$mutations.bin" "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
-    echo "  $label: the broken copy did not compile"
-    sed -n '1,6p' "$WORK/mut.out"
-    status=1
-  elif timeout -k 5 120 "$WORK/mut-$mutations.bin" >"$WORK/mut.out" 2>&1; then
-    echo "  $label: the exercise PASSED on a broken module"
-    status=1
+  elif ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/mut-$n.bin" "$REPO/bench/std_http_exercise.iyi" >"$WORK/mut.out" 2>&1; then
+    mutation_said "$n" "  $label: the broken copy did not compile" "$(sed -n '1,6p' "$WORK/mut.out")"
+    touch "$WORK/mutres/failed"
   else
-    echo "  $label: caught"
+    (
+      if timeout -k 5 120 "$WORK/mut-$n.bin" >"$WORK/mut-$n.out" 2>&1; then
+        mutation_said "$n" "  $label: the exercise PASSED on a broken module"
+        touch "$WORK/mutres/failed"
+      else
+        mutation_said "$n" "  $label: caught"
+      fi
+    ) &
+    mutation_pids="$mutation_pids $!"
+    # `wait -n` where the shell has it (bash 4.3); darwin's 3.2 polls.
+    while [ "$(jobs -rp | wc -l)" -ge "$MUT_JOBS" ]; do
+      wait -n 2>/dev/null || sleep 0.2
+    done
   fi
+}
+mutations_report() { # every answer, in the order the mutations were made
+  local pid n=1
+  for pid in $mutation_pids; do
+    wait "$pid"
+  done
+  while [ "$n" -le "$mutations" ]; do
+    cat "$WORK/mutres/$n"
+    n=$((n + 1))
+  done
+  [ -e "$WORK/mutres/failed" ] && status=1
+  return 0
 }
 mutate "a status parsed as zero" '{code, reason}' '{0, reason}'
 mutate "header names compared by case" 'ca = ca + 32_u8 if ca >= 65_u8 && ca <= 90_u8' 'ca = ca + 0_u8 if ca >= 65_u8 && ca <= 90_u8'
@@ -1861,6 +1895,7 @@ mutate "NO_PROXY's CIDR ranges passed over" 'return false if ip && in_range?(ip,
 mutate "an IPv6 range holding IPv4 addresses" '    return false unless mapped?(ip) == mapped?(cut)' ''
 mutate "a NO_PROXY address's port passed over" 'return false if ip && ip == pip && (pport.bytesize == 0 || pport == port)' 'return false if ip && ip == pip'
 mutate "a NO_PROXY domain's port passed over" 'return false if pport.bytesize == 0 || pport == port' 'return false'
+mutations_report
 
 # HTTP/2, each mechanism taken out of a copy that compiles: the iyi-to-iyi
 # exercise stops at the check that names it, or the raw frames find the

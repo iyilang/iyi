@@ -90,13 +90,15 @@ for t in texts:
         except ValueError as e:
             answer = {"No closing quotation": "!quote", "No escaped character": "!escape"}[str(e)]
         lines.append(("c" if comments else "p") + "\t" + h(t) + ("\t" + answer if answer else ""))
-with open(os.path.join(out, "split.txt"), "w") as f:
+# LF on every platform: Python writes CRLF on Windows otherwise, and the
+# exercise read "!quote\r" for "!quote".
+with open(os.path.join(out, "split.txt"), "w", encoding="utf-8", newline="\n") as f:
     f.write("\n".join(lines) + "\n")
 refused = sum(1 for l in lines if "\t!" in l)
 
 args = ["".join(r.choice(alphabet) for _ in range(r.randrange(10))) for _ in range(3000)]
 args += [chr(c) for c in range(1, 128)] + ["", "-", "a:b", "x=y", "it's", "''"]
-with open(os.path.join(out, "quote.txt"), "w") as f:
+with open(os.path.join(out, "quote.txt"), "w", encoding="utf-8", newline="\n") as f:
     f.write("".join(h(a) + "\t" + h(shlex.quote(a)) + "\n" for a in args))
 
 # No NUL in a list /bin/sh is to read: an argument cannot hold one.
@@ -105,7 +107,7 @@ lists = []
 for _ in range(800):
     lists.append(["".join(r.choice(shell) for _ in range(r.randrange(10))) for _ in range(1 + r.randrange(5))])
 lists += [[""], ["", ""], ["a b", "c"], ["'"], ['"'], ["\\"], ["-n", "-e"], ["#", "x#"]]
-with open(os.path.join(out, "join.txt"), "w") as f:
+with open(os.path.join(out, "join.txt"), "w", encoding="utf-8", newline="\n") as f:
     f.write("".join(h(shlex.join(a)) + "".join("\tw" + h(x) for x in a) + "\n" for a in lists))
 print(f"  {len(lines)} splits ({refused} refused), {len(args)} quotes, {len(lists)} joins written")
 PY
@@ -256,10 +258,10 @@ prove_broken() {
   mkdir -p "$WORK/patched/std"
   if ! OLD="$3" NEW="$4" "$PY" - "$REPO/src/std/shlex.iyi" "$WORK/patched/std/shlex.iyi" <<'PY'
 import os, sys
-src = open(sys.argv[1]).read()
+src = open(sys.argv[1], encoding="utf-8").read()
 if os.environ["OLD"] not in src:
     raise SystemExit("patch site missing: " + os.environ["OLD"])
-open(sys.argv[2], "w").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
 PY
   then
     echo "  the $1 patch did not apply"

@@ -202,11 +202,13 @@ PY
   fi
 }
 # Where a name has no case (Windows) the cases that set a name both ways
-# cannot be set up, so the two breaks only they see go unasked there, and
-# the CGI rule is the one that drops both names.
+# cannot be set up, and the lower-case name reads the capitals, so the
+# three breaks only those cases see go unasked there, and the CGI rule is
+# the one that drops both names.
 if [ "$windows" -eq 1 ]; then
   echo "  the name in capitals read first: unasked on Windows, where the names are one"
   echo "  a lower-case name set to nothing passed over: unasked on Windows, where the names are one"
+  echo "  HTTPS_PROXY dropped under CGI too: unasked on Windows, where https_proxy reads it"
   broken "HTTP_PROXY read under CGI" 'if cgi && HTTPProxy.folded?' 'if false' "ASSERTION FAILED: HTTP_PROXY is not read under CGI"
 else
   broken "the name in capitals read first" 'if value = ENV[lower]?
@@ -220,8 +222,8 @@ else
     value = ENV[lower]?' "ASSERTION FAILED: the lower-case name wins"
   broken "a lower-case name set to nothing passed over" '      return value.empty? ? nil : value' '      return value unless value.empty?' "ASSERTION FAILED: a lower-case name set to nothing wins too"
   broken "HTTP_PROXY read under CGI" 'variable("http_proxy", !cgi)' 'variable("http_proxy", true)' "ASSERTION FAILED: HTTP_PROXY is not read under CGI"
+  broken "HTTPS_PROXY dropped under CGI too" 'variable("https_proxy", true)' 'variable("https_proxy", !cgi)' "ASSERTION FAILED: HTTPS_PROXY still is under CGI"
 fi
-broken "HTTPS_PROXY dropped under CGI too" 'variable("https_proxy", true)' 'variable("https_proxy", !cgi)' "ASSERTION FAILED: HTTPS_PROXY still is under CGI"
 broken "NO_PROXY not read" 'variable("no_proxy", true))' 'nil)' "ASSERTION FAILED: NO_PROXY names the host"
 
 echo

@@ -238,7 +238,9 @@ for i, c in enumerate(cases):
         if str(m["Subject"]) != c["subject"]: problems.append(f"Subject: python read {str(m['Subject'])!r}, given {c['subject']!r}")
     elif m["Subject"] is not None: problems.append("a Subject nobody gave")
     t, off = c["date"]
-    want_date = dt.datetime.fromtimestamp(t, dt.timezone(dt.timedelta(minutes=off)))
+    # Not fromtimestamp: Windows' C library has no time before 1970, and
+    # Python's raised OSError for one there.
+    want_date = (dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(seconds=t)).astimezone(dt.timezone(dt.timedelta(minutes=off)))
     got_date = m["Date"].datetime
     if got_date != want_date or got_date.utcoffset() != want_date.utcoffset() or str(m["Date"]) != format_datetime(want_date):
         problems.append(f"Date: {str(m['Date'])!r} is not {format_datetime(want_date)!r}")
@@ -415,7 +417,7 @@ for i in range(300):
 for i in range(300):
     t = rng.randint(-2208988800, 253402214400)
     off = rng.randint(-1439, 1439)
-    d = dt.datetime.fromtimestamp(t, dt.timezone(dt.timedelta(minutes=off)))
+    d = (dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(seconds=t)).astimezone(dt.timezone(dt.timedelta(minutes=off)))  # as above
     cases.append(f"date {t} {off}"); want.append(f"{eu.format_datetime(d)}\tformat_datetime of {t} at {off}")
     text = eu.format_datetime(d)
     r = rng.random()

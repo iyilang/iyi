@@ -1516,7 +1516,8 @@ EOF
 proxy_round() {
   local bin="$1" alpn="$2" v="$3" got want
   proxy_up
-  got="$(timeout -k 5 120 "$bin" "$PPORT" "$HPORT" "$SPORT" "$WORK/tls/root.pem" "$alpn" 2>&1; echo --; cat "$WORK/proxy.log")"
+  # Without CRs: Python writes the proxy's log with CRLF on Windows.
+  got="$(timeout -k 5 120 "$bin" "$PPORT" "$HPORT" "$SPORT" "$WORK/tls/root.pem" "$alpn" 2>&1; echo --; tr -d '\r' <"$WORK/proxy.log")"
   want="$(proxy_expected "$v")"
   proxy_down
   if [ "$got" = "$want" ]; then
@@ -1546,8 +1547,12 @@ else
   done
   if command -v curl >/dev/null 2>&1; then
     proxy_up
-    c=(curl -sS --noproxy '' -x "http://gate:s3cret@127.0.0.1:$PPORT" --cacert "$WORK/tls/root.pem" --http1.1)
-    got="$("${c[@]}" "http://127.0.0.1:$HPORT/echo?x=1"; echo; "${c[@]}" "https://localhost:$SPORT/echo?x=2"; echo; curl -sS --noproxy '' -x "http://127.0.0.1:$PPORT" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HPORT/echo?x=5"; echo; cat "$WORK/proxy.log")"
+    # Schannel (Windows' curl) asks a revocation list the gate's own root
+    # has none of, and refuses the server for it.
+    norevoke=()
+    curl --version 2>/dev/null | head -1 | grep -q 'Schannel' && norevoke=(--ssl-no-revoke)
+    c=(curl -sS --noproxy '' -x "http://gate:s3cret@127.0.0.1:$PPORT" --cacert "$WORK/tls/root.pem" --http1.1 ${norevoke[@]+"${norevoke[@]}"})
+    got="$("${c[@]}" "http://127.0.0.1:$HPORT/echo?x=1"; echo; "${c[@]}" "https://localhost:$SPORT/echo?x=2"; echo; curl -sS --noproxy '' -x "http://127.0.0.1:$PPORT" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$HPORT/echo?x=5"; echo; tr -d '\r' <"$WORK/proxy.log")"
     proxy_down
     want="GET /echo x=1 HTTP/1.1 host=127.0.0.1:$HPORT proxy-auth=- length=0
 GET /echo x=2 HTTP/1.1 host=localhost:$SPORT proxy-auth=- length=0

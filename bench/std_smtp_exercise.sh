@@ -123,7 +123,12 @@ if scenario == "tls":
 reader = conn.makefile("rb")
 def say(text): conn.sendall(text.encode())
 def line():
-    got = reader.readline(4096)
+    # A client that ends its session on an error closes without QUIT, and
+    # Windows reports that close as a reset rather than an end of file.
+    try:
+        got = reader.readline(4096)
+    except ConnectionResetError:
+        got = b""
     if got: record["heard"].append(got.decode("utf-8", "replace").rstrip("\r\n"))
     return got
 if scenario == "silent":

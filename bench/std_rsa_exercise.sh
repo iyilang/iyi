@@ -303,6 +303,9 @@ PY
   fi
   refusals=0
   while IFS='|' read -r path why; do
+    # Python on Windows writes the cases file with CRLF, and the CR stayed
+    # on the reason, which no refusal then contained.
+    why="${why%$'\r'}"
     [ -n "$path" ] || continue
     printf '%s pss SHA256 00\n' "$path" >"$WORK/one.txt"
     got="$("$WORK/rsa-release" sign "$WORK/one.txt" 2>&1)"

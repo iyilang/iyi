@@ -174,7 +174,7 @@ for i in range(200):
         lines.append(f"header {h('X-Note')} {h(v)}"); c["xnote"] = v
     lines.append("end")
     spec.extend(lines); cases.append(c)
-open(os.path.join(work, "spec.txt"), "w").write("\n".join(spec) + "\n")
+open(os.path.join(work, "spec.txt"), "w", encoding="utf-8", newline="\n").write("\n".join(spec) + "\n")
 json.dump(cases, open(os.path.join(work, "cases.json"), "w"))
 PY
 cat >"$WORK/check_build.py" <<'PY'
@@ -360,7 +360,7 @@ for i in range(200):
     expected.append(f"message {count}")
     expected.extend(describe(back))
     count += 1
-open(os.path.join(work, "py_expected.txt"), "w").write("\n".join(expected) + "\n")
+open(os.path.join(work, "py_expected.txt"), "w", encoding="utf-8", newline="\n").write("\n".join(expected) + "\n")
 print(count)
 PY
 cat >"$WORK/cmp_parse.py" <<'PY'
@@ -465,8 +465,8 @@ for i in range(300):
     want.append(f"{hx(str(reg('Subject', unfolded)))}\tPython's fold of {v!r}")
     cases.append(f"fold {hx(v)} {hx('Subject')}")
     want.append(f"FOLD {hx(v)}\tthe fold of {v!r}")
-open(os.path.join(work, "codec_cases.txt"), "w").write("\n".join(cases) + "\n")
-open(os.path.join(work, "codec_want.txt"), "w").write("\n".join(want) + "\n")
+open(os.path.join(work, "codec_cases.txt"), "w", encoding="utf-8", newline="\n").write("\n".join(cases) + "\n")
+open(os.path.join(work, "codec_want.txt"), "w", encoding="utf-8", newline="\n").write("\n".join(want) + "\n")
 PY
 cat >"$WORK/check_codec.py" <<'PY'
 import email, email.policy, os, sys
@@ -716,6 +716,8 @@ prove_broken "base64 in lines of 64" "base64 lines are filled to 76" \
   'take = n - i < 76 ? n - i : 76' 'take = n - i < 64 ? n - i : 64'
 prove_broken "the space between two encoded-words kept" "the space between two words is dropped" \
   'io.write(p + i, j - i) unless after_word' 'io.write(p + i, j - i)'
+prove_broken "a short name split between encoded-words" "a short name is one encoded-word" \
+  'MailText.word_end(p, 0, n, 63, q) == n' 'false'
 prove_broken "encoded-words of 77" "every encoded-word is 75 or fewer" \
   'left > 75 ? 75 : left' 'left > 77 ? 77 : left'
 prove_broken "an encoded-word cut inside a character" "encoded-words decode to the value" \
@@ -814,8 +816,6 @@ prove_oracle() {
   fi
 }
 if [ -n "$PY" ]; then
-  prove_oracle "a short name split between encoded-words" "python read" \
-    'MailText.word_end(p, 0, n, 63, q) == n' 'false' build
   prove_oracle "a dot escaped in quoted-printable" "quoprimime.body_encode of" \
     'if (b >= 32_u8 && b <= 126_u8 && b != 61_u8) || b == 9_u8' 'if (b >= 32_u8 && b <= 126_u8 && b != 61_u8 && b != 46_u8) || b == 9_u8' codec
   prove_oracle "a zone's sign ignored" "parsedate_to_datetime of" \

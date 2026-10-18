@@ -486,11 +486,17 @@ named = Mail::Message.new
 named.from = Mail::Address.new("a@x.test", "Doe, John \"JD\"")
 named.to << Mail::Address.new("b@x.test", "Ann Lee")
 named.to << Mail::Address.new("c@x.test", "Zoë")
+named.cc << Mail::Address.new("d@x.test", "Ana María")
 named.date = Mail.date(0_i64)
 named.header("X-Mailer", "std/mail")
 written = named.to_s
 assert_true written.includes?("From: \"Doe, John \\\"JD\\\"\" <a@x.test>\r\n"), "a name with specials is a quoted string"
 assert_true written.includes?("To: Ann Lee <b@x.test>, =?utf-8?q?Zo=C3=AB?= <c@x.test>\r\n"), "atoms as they are, UTF-8 as encoded-words"
+# A short name is one encoded-word, its space inside it: written in pieces
+# - `Ana` bare, then `María` encoded - it reads back the same only to a
+# reader that takes the space between them as RFC 2047 section 6.2 says,
+# and Python before 3.14.7 did not.
+assert_true written.includes?("Cc: =?utf-8?q?Ana_Mar=C3=ADa?= <d@x.test>\r\n"), "a short name is one encoded-word"
 assert_true written.includes?("X-Mailer: std/mail\r\n"), "a header of the caller's"
 assert_str "Doe, John \"JD\"|a@x.test", addrs(parsed(written).addresses("From")), "the quoted name comes back"
 assert_str "Ann Lee|b@x.test, Zoë|c@x.test", addrs(parsed(written).addresses("To")), "both names come back"

@@ -919,11 +919,20 @@ jobs:
         run: make -o .build/crystal iyi
       # The crypto modules' gates hold them to OpenSSL through Python's
       # cryptography - signatures, chains, a TLS server - and skip that
-      # half, saying so, where it is missing. It was missing here.
-      - name: Python's cryptography, for the oracles
+      # half, saying so, where it is missing. It was missing here. And the
+      # gates hold their modules to Python 3.14: `compression.zstd` and
+      # zipfile's Zstandard are 3.14's, `ipaddress`'s registries and
+      # `shlex`, `email` and liblzma answer otherwise in 3.12, which is the
+      # container's, and std/png's oracle is Pillow. uv brings 3.14 into a
+      # container that has no setup-python.
+      - name: Python 3.14 with cryptography and Pillow, for the oracles
         run: |
           apt-get update -qq && apt-get install -y -qq python3 python3-pip > /dev/null
-          python3 -m pip install -q --break-system-packages cryptography
+          python3 -m pip install -q --break-system-packages uv
+          uv python install 3.14
+          uv venv --python 3.14 /opt/oracle
+          uv pip install --python /opt/oracle/bin/python -q cryptography pillow
+          echo /opt/oracle/bin >> "$GITHUB_PATH"
       - name: The module exercises of this shard
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
       # std/tls's reads and writes against OpenSSL, each set against its
@@ -1578,8 +1587,12 @@ jobs:
         run: bash scripts/build-static-llvm.sh "$HOME/llvm-static"
       - name: Build `iyi`
         run: make iyi LLVM_CONFIG="$HOME/llvm-static/bin/llvm-config"
-      - name: Python's cryptography, for the oracles
-        run: python3 -m pip install -q --break-system-packages cryptography
+      # Python 3.14, as on Linux: the oracles' modules answer as 3.14's do.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Python's cryptography and Pillow, for the oracles
+        run: python3 -m pip install -q cryptography pillow
       - name: The module exercises of this shard, on darwin
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 
@@ -2312,9 +2325,16 @@ jobs:
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
 
-      - name: Python's cryptography, for the oracles
+      # Python 3.14, as on Linux, under `python3` too: a gate asks for
+      # `python3` first, and setup-python names only `python` on Windows.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Python's cryptography and Pillow, for the oracles
         shell: bash
-        run: python -m pip install -q cryptography
+        run: |
+          python -m pip install -q cryptography pillow
+          cp "$pythonLocation/python.exe" "$pythonLocation/python3.exe"
       - name: The module exercises of this shard, on Windows
         shell: bash
         env:

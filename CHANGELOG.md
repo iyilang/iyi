@@ -4,6 +4,25 @@
 
 ### Added
 
+- **std/shlex: shell words split, quoted and joined as Python's `shlex`
+  does in POSIX mode.** `Shlex.split(text, comments = false)` answers
+  `Array(String) | ShlexError`: words separated by space, tab, CR and
+  LF, single quotes literal, a backslash keeping the byte after it
+  outside quotes and taking only `"` and `\` inside double quotes
+  (Python's rule; POSIX also lets it take `$`, `` ` `` and a line feed),
+  `''` an empty word, and with `comments` a `#` ending the word and the
+  line. An unclosed quote or a final backslash is a `ShlexError` naming
+  the byte it stands at. `Shlex.quote(arg)` leaves an argument of
+  letters, digits and `%+,-./:=@_` as it is and single-quotes any other
+  (`'` written `'"'"'`), `''` for empty; `Shlex.join(args)` joins the
+  quoted arguments with spaces. Pure iyi, no imports.
+  `bench/std_shlex_exercise.sh` holds it to Python 3.14's
+  `shlex.split`/`quote`/`join` on a generated corpus (10,026 splits,
+  1,537 of them refused, 3,133 quotes, 808 joins), checks
+  `split(join(args)) == args` on 3,000 generated lists and the corpus,
+  has `/bin/sh` (dash) and bash read every join as `printf` arguments
+  and print the arguments back, checks the `or_panic` sentences, and
+  catches 14 broken copies of the module.
 - **std/websocket: permessage-deflate (RFC 7692) at both ends, on by
   default.** `WebSocket.connect` offers `permessage-deflate;
   client_max_window_bits`, as browsers do, and `WebSocket.upgrade`

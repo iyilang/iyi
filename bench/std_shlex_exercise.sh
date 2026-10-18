@@ -24,8 +24,8 @@ IYI="${IYI:-$REPO/bin/iyi}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# A native compiler cannot resolve this shell's own path mapping (see
-# bench/std_diff_exercise.sh): the paths it is given are mixed ones.
+# A native compiler cannot resolve this shell's own path mapping: the
+# paths it is given are mixed ones.
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     REPO="$(cygpath -m "$REPO")"

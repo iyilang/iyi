@@ -210,36 +210,6 @@
   capitals, the lower-case name winning when set even to nothing, and
   `HTTP_PROXY` not read under CGI (httpoxy), as Python's `urllib` reads
   them. `HTTP.upgrade` still goes direct.
-- **std/cbor: CBOR (RFC 8949) decoded, encoded in core deterministic
-  encoding and written as diagnostic notation, in iyi, importing
-  nothing.** `CBOR.decode(bytes) : Any | CBORError` reads one data item
-  from an `Array(UInt8)` or a `String`'s bytes: integers to 64 bits of
-  argument and bignums (tags 2 and 3) of any size, held as one kind with
-  the value as its only form - an `Int64` where it fits, a `CBORBignum`
-  of sign and magnitude otherwise, so `c24101` is the 1 that `01` is, as
-  section 3.4.3's extended data model says - byte and text strings
-  definite and chunked, arrays, maps with keys of any kind, tags,
-  simple values, undefined, and half, single and double floats with
-  their NaN payloads. Text must be UTF-8, each chunk by itself; a map key
-  written twice and a bignum tag around anything but bytes are refused.
-  Every `CBORError` names the byte where the item at fault starts, and a
-  well-formedness error is answered before a validity one, so each of
-  Appendix F's 94 examples is refused for the error the RFC files it
-  under. Nesting stops at `CBOR::DEPTH_LIMIT` (64: decoding ran out of a
-  task's stack at 160 to 175 levels and encoding maps nested in maps at
-  125, measured in a plain build), and a length or count past the bytes
-  left is refused before anything is allocated for it. `CBOR.encode`
-  writes section 4.2.1's deterministic encoding: shortest arguments, the
-  shortest float that gives back the same 64 bits (a NaN shortened only
-  when what it drops is zero), definite lengths, keys in the bytewise
-  order of their encodings. `CBOR.deterministic?(bytes)` and
-  `CBOR.decode(bytes, deterministic: true)` refuse whatever is not that
-  encoding, by name and offset. `Any#to_s` is section 8's notation as
-  Appendix A prints it - floats as ECMAScript writes their shortest
-  digits, `\u` escapes past ASCII, `[_ ...]` and `(_ h'01', h'02')` for
-  what was written indefinite - and `derive cbor_serializable` sits
-  beside std/json's, std/yaml's and std/toml's derives on one type, an
-  `Array(UInt8)` field written as a byte string.
 - **std/smtp: an SMTP client (RFC 5321) over std/socket and std/tls.**
   `SmtpClient.connect(host, port, security, config, helo, timeout_ms) :
   SmtpClient | SmtpError` greets and says EHLO (HELO after a 500, 502 or
@@ -299,34 +269,6 @@
   space into the gap between two encoded-words of a phrase where RFC 2047
   drops it - its own long names come back so. std/mail imports
   std/digest, std/base64, std/mime and std/text, and reaches no platform.
-- **std/jwt: JSON Web Tokens (RFC 7519) signed and checked in iyi, over
-  JWS (RFC 7515) with JWA's algorithms (RFC 7518), and JSON Web Keys
-  (RFC 7517).** `JWT.encode(claims, key, JWTAlgorithm::ES256)` and
-  `JWT.decode(token, key, algorithms, now:, leeway:, audience:, issuer:,
-  subject:, required:) : JWT | JWTError` for HS256/384/512, RS256/384/512,
-  PS256/384/512, ES256 and EdDSA (Ed25519, RFC 8037), and ES384/ES512
-  checked only, std having no P-384 or P-521 signer; `JWS.sign` and
-  `JWS.verify` beneath them for any payload and a header written as
-  given. RSA signing is new here (std/rsa only checks): the CRT,
-  blinded, its signature checked against the public key before it is
-  given out; PS salts and the blinding factor are HMACs of the message
-  under the private key, so nothing asks for entropy. `decode` must be
-  told the algorithms it accepts - an empty list is a panic - and refuses
-  `alg: none` whatever the list, an alg not in it, and a key of another
-  kind than the alg (the RS256/HS256 confusion), a PEM or SSH key handed
-  over as an HMAC secret and a secret shorter than its hash being panics.
-  The text is held to one spelling: padding, a byte outside base64url, a
-  last character with spare bits set, a name written twice in header or
-  claims (std/json refuses it; PyJWT keeps the last) and a `crit` header
-  are refused. `exp`, `nbf` and `iat` are checked at the caller's `now`
-  with leeway, `aud`, `iss`, `sub` and `jti` as PyJWT checks them; the
-  module reads no clock. Keys from PEM (SubjectPublicKeyInfo, PKCS #8,
-  PKCS #1, SEC 1, a certificate's) or JWK, with `JWK.parse_set` choosing
-  by `kid`, `to_json`, `public` and RFC 7638's `thumbprint`; RSA keys
-  under 2048 bits, CRT parameters that disagree with n and e, RSA numbers
-  with a leading zero and EC coordinates short of the curve's width are
-  refused. A 2048-bit RSA signature took about 11 ms in a --release
-  build, std/big's `pow_mod` being square-and-multiply.
 - **std/xz: .xz and .lzma decompressed in iyi, read a piece at a time,
   `.tar.xz` read by std/tar, and CRC-64 in std/digest.** `XzReader.new {
   next_bytes }` reads the .xz container (file format 1.0.4) the way
@@ -457,34 +399,6 @@
   `TarReader` sniffs "BZh" and a digit as it sniffs gzip's 1f 8b, reads
   through `Bzip2Reader` (`bzip2?`), and reads the stream to its end
   after the zero block so the CRCs vouch for every entry handed out.
-- **std/diff: line and sequence diffs, unified diffs as GNU diff writes
-  them, and patches applied as GNU patch applies them with no fuzz.**
-  `Diff.edits(a, b)` answers the shortest edit script between two arrays
-  compared with `==` (`Edit` runs of keep, delete and insert) by Myers'
-  O(ND) search in its linear-space form, bounded as GNU diff bounds it:
-  past 4096 rounds a search settles for its furthest diagonal, so
-  200,000 integers against 200,000 others take about 1.5 s where the
-  unbounded search does not finish in 15 s (`minimal: true` lifts the bound,
-  as `--minimal` does). `Diff.lines` interns lines and sets aside those
-  with no equal on the other side, so two 100,000-line texts with nothing
-  in common take tens of milliseconds. `Diff.unified(a, b, from, to,
-  context = 3)` writes GNU's format exactly, `\ No newline at end of file`
-  included; `Patch.parse`/`Patch.parse_all` read GNU's, difflib's and its
-  own, a mail around them read past, and `patch.apply(text)` finds each
-  hunk at its line or the nearest offset, never inside the hunk before
-  it, and holds a hunk cut short by the file's edge to that edge, as GNU
-  `patch -F0` does. Refused as a `PatchError`: a header that is not a
-  hunk header, a hunk with more or fewer lines than it counts, a
-  misplaced `\` marker, hunks out of order, and a hunk that does not
-  match, said to be applied already when its new lines stand there; a
-  negative context or a name with a line end panics. Held by
-  bench/std_diff_exercise.sh: 1,500 random pairs against the longest
-  common subsequence, a corpus of 152 pairs as long as `diff --minimal`'s
-  and byte for byte GNU diff 3.12's wherever the shortest script is
-  unique, every diff applied by GNU patch 2.8, GNU's and Python 3.14
-  difflib's applied by `Patch`, 298 moved or spoilt texts taken or
-  refused as GNU patch -F0 took them, large inputs timed beside GNU diff,
-  and fifteen broken copies of the module each caught.
 - **std/png: PNG images decoded and encoded in iyi, over std/compress's
   zlib and std/digest's CRC-32.** `Png.decode(bytes)` answers a `PngFile`:
   an `Image` (width, height, a `Layout` of Gray, GrayAlpha, RGB or RGBA,
@@ -553,13 +467,13 @@
   even modulus by sentence. `divmod` takes a quotient under 2^32 - each
   step of Euclid's algorithm - from the operands' top bits in one pass
   where Algorithm D copied both and the remainder twice: 2048 bits over
-  2046 took 0.60 us and take 0.15. Together a 2048-bit RS256 signature
-  from std/jwt, whose blinding inverse is Euclid's, took 9.4 ms and
-  takes 1.3 (3072 bits: 24.1 and 3.4; 4096: 69.1 and 7.4), its check
-  150 us and 45. std/jwt's two CRT halves now go through
-  `pow_mod_secret`, so no branch or table read of their exponentiation follows
-  dp's or dq's bits, for about a tenth more than `pow_mod` (2048 bits:
-  1.25 to 1.32 ms against 1.12 to 1.16).
+  2046 took 0.60 us and take 0.15. Together a 2048-bit RSA signature by
+  CRT, blinded and its blinding inverse Euclid's, took 9.4 ms and takes
+  1.3 (3072 bits: 24.1 and 3.4; 4096: 69.1 and 7.4), its check 150 us
+  and 45. std/rsa's `RsaPrivateKey` signs its two CRT halves through
+  `pow_mod_secret`, so no branch or table read of their exponentiation
+  follows dp's or dq's bits, for about a tenth more than `pow_mod`
+  (2048 bits: 1.25 to 1.32 ms against 1.12 to 1.16).
 - **std/zip reads bzip2, LZMA, Zstandard and xz entries, and writes
   bzip2 and Zstandard.** `ZipEntryReader` reads methods 12, 14, 93 and
   95 through `Bzip2Reader`, std/xz's .lzma decoder, `ZstdReader` and

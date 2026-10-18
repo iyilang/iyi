@@ -56,8 +56,7 @@
 # the private exponents' bits; and the signature is checked against the
 # public key before it is given out, so a fault in one half of the CRT
 # does not hand out the factor it reveals (Boneh, DeMillo and Lipton,
-# 1997) - such a signature is a panic, not an answer. This is std/jwt's
-# signing, which came first. A PSS salt is as long as the digest, RFC
+# 1997) - such a signature is a panic, not an answer. A PSS salt is as long as the digest, RFC
 # 8446's rule, and is HMAC, keyed by a hash of the private exponent, over
 # the message's digest: section 8.1 says its randomness is not critical
 # to PSS's security, and this one is unpredictable to anyone without the

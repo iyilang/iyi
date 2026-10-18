@@ -787,8 +787,8 @@ pub struct BigInt
     # D below copies both operands to normalise them and the remainder
     # twice more to give it back. A 2048-bit value over a 2046-bit one took
     # 0.60 us and takes 0.15 in a --release build, and the extended Euclid
-    # std/jwt inverts its 2048-bit RSA blinding factor with 592 us and 281,
-    # where the two CRT halves of the signature take 620.
+    # that inverts a 2048-bit RSA signature's blinding factor took 592 us
+    # and takes 281, where the two CRT halves of the signature take 620.
     shift = BigInt.bit_length(other) - 32
     return divmod_one_limb(other, shift, q_sign, r_sign) if BigInt.bit_length(self) - shift <= 63
 
@@ -1180,7 +1180,7 @@ pub struct BigInt
   #
   # What it does not hide: the base is reduced by `%`, whose time depends
   # on the base and the modulus, so a caller with a secret base (RSA's
-  # CRT halves of a message) blinds it first, as std/jwt's signing does.
+  # CRT halves of a message) blinds it first, as std/rsa's signing does.
   def pow_mod_secret(exp : BigInt, mod : BigInt) : BigInt
     raise "modulo by zero" if mod.zero?
     raise "modulus must be positive" if mod.negative?

@@ -638,10 +638,19 @@ def raises(f):
         return False
     except ValueError:
         return True
+# Python before 3.14.8 raised on a zoned address's `exploded` and
+# `reverse_pointer`; 3.14.8 answers as this module does. Either is held.
+def raises_or(f, mine):
+    try:
+        return "agrees" if f() == mine else False
+    except ValueError:
+        return True
+exploded = "fe80:0000:0000:0000:0000:0000:0000:0001%eth0"
+pointer = I.ip_address("fe80::1").reverse_pointer
 cases = [
     ("a zone in a prefix", "refused", str(I.ip_network("fe80::%eth0/64")) == "fe80::%eth0/64"),
-    ("exploded of a zoned address", "fe80:0000:0000:0000:0000:0000:0000:0001%eth0", raises(lambda: I.ip_address("fe80::1%eth0").exploded)),
-    ("reverse_pointer of a zoned address", I.ip_address("fe80::1").reverse_pointer, raises(lambda: I.ip_address("fe80::1%eth0").reverse_pointer)),
+    ("exploded of a zoned address", exploded, raises_or(lambda: I.ip_address("fe80::1%eth0").exploded, exploded)),
+    ("reverse_pointer of a zoned address", pointer, raises_or(lambda: I.ip_address("fe80::1%eth0").reverse_pointer, pointer)),
     ("next past the last address", "nil", raises(lambda: I.ip_address("255.255.255.255") + 1)),
     ("next of a zoned address", "fe80::2%eth0", str(I.ip_address("fe80::1%eth0") + 1) == "fe80::2"),
 ]
@@ -650,6 +659,8 @@ for (what, mine, python_differs), line in zip(cases, got + [""] * len(cases)):
     if line != mine or not python_differs:
         print(f"  {what}: iyi {line!r} (expected {mine!r}); python still differs: {python_differs}")
         bad += 1
+    elif python_differs == "agrees":
+        print(f"  {what}: iyi {mine!r}, and this python too")
     else:
         print(f"  {what}: iyi {mine!r}, python otherwise")
 sys.exit(1 if bad else 0)

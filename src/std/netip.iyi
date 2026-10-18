@@ -30,9 +30,10 @@
 # runs), a single zero group written `0`, and an IPv4-mapped address with
 # its dotted tail - what Python 3.14's `str` writes. `exploded` is every
 # group in four digits, and `reverse_pointer` the `in-addr.arpa` or
-# `ip6.arpa` name (RFC 1035 section 3.5, RFC 3596 section 2.5). Python
-# raises on both for a zoned address; here `exploded` keeps the zone and
-# `reverse_pointer` leaves it out, a PTR name having no place for one.
+# `ip6.arpa` name (RFC 1035 section 3.5, RFC 3596 section 2.5). For a
+# zoned address `exploded` keeps the zone and `reverse_pointer` leaves it
+# out, a PTR name having no place for one: Python 3.14.8 answers both so,
+# and Python before it raised.
 #
 # Order is Go's `Addr.Compare`: IPv4 before IPv6, then by value, then by
 # zone; what Python's `get_mixed_type_key` sorts by, the zone added.

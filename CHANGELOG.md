@@ -209,7 +209,8 @@
   reads `http_proxy`, `https_proxy`, `no_proxy` and their names in
   capitals, the lower-case name winning when set even to nothing, and
   `HTTP_PROXY` not read under CGI (httpoxy), as Python's `urllib` reads
-  them. `HTTP.upgrade` still goes direct.
+  them; on Windows, where `http_proxy` is `HTTP_PROXY`, neither is read
+  under CGI.
 - **std/smtp: an SMTP client (RFC 5321) over std/socket and std/tls.**
   `SmtpClient.connect(host, port, security, config, helo, timeout_ms) :
   SmtpClient | SmtpError` greets and says EHLO (HELO after a 500, 502 or
@@ -22566,7 +22567,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 21,560-line library and nothing else. Every other
+  written against iyi's own 21,567-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

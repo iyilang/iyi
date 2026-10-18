@@ -247,6 +247,11 @@ import lzma, os, subprocess, sys
 d = sys.argv[1]
 xz = os.environ.get("XZ")
 listed = set()
+# A file python's liblzma refuses is read by xz where there is one: the
+# liblzma of python.org's 3.14 builds for macOS and Windows, which CI's
+# setup-python installs, said "Corrupt input data" of a file of the suite
+# that 3.14's elsewhere, and xz, read.
+refused = []
 for line in open(os.path.join(d, "suite.txt"), encoding="utf-8"):
     name = line.rstrip("\n").split("\t")[0]
     listed.add(name)
@@ -256,20 +261,28 @@ for line in open(os.path.join(d, "suite.txt"), encoding="utf-8"):
     data = open(path, "rb").read()
     fmt = lzma.FORMAT_ALONE if name.endswith(".lzma") else lzma.FORMAT_XZ
     plain = b""
-    while True:
-        dec = lzma.LZMADecompressor(fmt)
-        plain += dec.decompress(data)
-        if not dec.eof:
-            raise SystemExit(f"python's liblzma did not reach the end of {name}")
-        data = dec.unused_data
-        while data[:4] == b"\0\0\0\0":
-            data = data[4:]
-        if not data or fmt == lzma.FORMAT_ALONE:
-            break
+    try:
+        while True:
+            dec = lzma.LZMADecompressor(fmt)
+            plain += dec.decompress(data)
+            if not dec.eof:
+                raise SystemExit(f"python's liblzma did not reach the end of {name}")
+            data = dec.unused_data
+            while data[:4] == b"\0\0\0\0":
+                data = data[4:]
+            if not data or fmt == lzma.FORMAT_ALONE:
+                break
+    except lzma.LZMAError as e:
+        if not xz:
+            raise SystemExit(f"python's liblzma refuses {name} ({e}), and there is no xz to read it")
+        plain = None
+        refused.append(name)
     if xz:
         flags = ["--format=lzma"] if name.endswith(".lzma") else []
         theirs = subprocess.run([xz, "-dc"] + flags + [path], capture_output=True, check=True).stdout
-        if theirs != plain:
+        if plain is None:
+            plain = theirs
+        elif theirs != plain:
             raise SystemExit(f"xz and python's liblzma disagree about {name}")
     with open(path + ".out", "wb") as f:
         f.write(plain)
@@ -277,6 +290,8 @@ present = {n for n in os.listdir(os.path.join(d, "suite")) if not n.endswith(".o
 if present != listed:
     raise SystemExit(f"bench/std_xz_fixture and the table disagree: {sorted(present ^ listed)}")
 print(f"  {len(listed)} files of XZ Utils' suite, the good ones' bytes from python's liblzma" + (" and xz, agreeing" if xz else ""))
+if refused:
+    print(f"  python's liblzma refuses {', '.join(refused)}: xz's bytes are the answer there")
 PY
 then
   echo "XZ Utils' suite could not be read by the oracle" >&2

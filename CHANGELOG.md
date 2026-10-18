@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+## 0.18.0 — 2026-10-18
+
+**iyi's own library reaches the network by itself: TLS 1.3 at both ends,
+HTTPS, HTTP/2, WebSocket over TLS and the certificates beneath them,
+written in iyi from the RFCs, with no C library under any of it.** std/tls
+is a client and a server - X25519 and secp256r1, AES-GCM and
+ChaCha20-Poly1305, ECDSA, RSA-PSS and Ed25519 checked, Ed25519 and P-256
+signed in constant time and RSA on a blinded message, client certificates
+in both directions, certificates chosen by server_name and keying material
+exported - over std/x509, std/ecdsa, std/rsa, std/curve25519, std/p256 and
+std/aead, each held to OpenSSL's verdicts, and bounded against hostile
+peers: a chain search stops at 100 signature checks, input is read in time
+that grows with it, a handshake has a deadline, keys move before their
+record limit, and a read that times out leaves the connection open.
+Records move at two to three and a half times their earlier rate, now that
+the prelude's arrays join and slice in one copy. std/http fetches and
+serves HTTP/1.1 and HTTP/2 over it, through a proxy when asked,
+std/websocket speaks `wss://` with permessage-deflate, std/smtp sends what
+std/mail builds, and a program resolves names through iyi's own resolver.
+Around them came a hundred and nine additions - XPath 1.0, `BigFloat`,
+grapheme clusters, `WeakRef`, processes a program talks to, file locks,
+signals, regular expressions with groups and Unicode, time zones, zip and
+tar, a DEFLATE compressor at zlib's sizes, xz, Zstandard, bzip2, PNG,
+TOML, IP addresses and prefixes, shell words, password hashing among
+them - each exercised beside the other library's or the platform's own
+answers, with broken copies of the module proving every check can fail.
+A wasm32 program keeps what its locals hold through a collection, plain
+and optimised, where an optimised build freed it, and an optimised build
+reads a `UInt128` out of a large array, where it died of SIGSEGV.
+
+**Some answers change:** `Hash#==` compares contents, regular expressions
+consume whole UTF-8 characters, `String#gsub` reads `\0`-`\9` in its
+replacement, `IyiSocket.connect` resolves a host name, `File.open` in
+`"a"` appends, a `Secure` cookie is sent over `https://` alone, the
+stricter of two overloads is chosen whatever order they were declared in,
+a WebSocket offers and accepts permessage-deflate and an HTTP client asks
+for `zstd` too, and a wasm32 `--release` binary is about 5% larger,
+allocation-heavy code about a third slower, for keeping its locals where
+the collector reads. **Some programs that compiled are refused:** a script
+without a `module` line that defines `assert_eq` or another of the
+prelude's new test names.
+
+**Not here, and said so:** std/tls has not been audited and is not to be
+called secure until it is; TLS 1.2 is a client's alone, and only when
+asked; resumption and 0-RTT are not there. The language server twice left
+a `shutdown` unanswered on darwin and Windows CI, not on Linux's, cause
+not found. The scheduler that spreads tasks across cores comes after this
+release; a REPL is not planned.
+
 ### Added
 
 - **std/shlex: shell words split, quoted and joined as Python's `shlex`
@@ -444,150 +493,6 @@
   Pure, reaching no platform module. Malformed text is a `NetipError`;
   a zone in a prefix is refused (Python keeps it), and so are a length
   out of range, a zone on IPv4 and more than 65,536 subnets at once.
-
-### Changed
-
-- **std/big: `pow_mod` by Montgomery multiplication for an odd modulus,
-  `pow_mod_secret` for a private exponent, and a division of one pass
-  for a one-limb quotient.** An odd modulus - RSA's, Diffie-Hellman's,
-  a prime field's - goes to Montgomery multiplication on 64-bit words
-  (products in `UInt128`, CIOS for a product, a squaring that takes each
-  product off the diagonal once) with a sliding window of up to six bits; an
-  even one keeps square-and-multiply, reading the exponent's bits in
-  place instead of copying it a bit at a time. A 2048-bit modulus and
-  exponent took 19.0 ms in a --release build and take 2.5, where
-  Python 3.14's `pow` takes 13.7 (3072 bits: 63.2, 8.5 and 45.4; 4096:
-  168.7, 20.6 and 102.1). The base enters Montgomery form by one
-  division, which took a 2048-bit RSA check (e = 65537) from 36 us with
-  R^2 squared out to 22. `BigInt#pow_mod_secret(exp, mod)` is a fixed
-  window over as many bits as the longer of exponent and modulus, every
-  table entry read for every window and the one wanted kept by a mask,
-  the final subtraction masked too; LLVM turned the first masks into
-  branches, so each is xored with a zero read by an atomic load, and the
-  release assembly shows the and and the or in both loops. It refuses an
-  even modulus by sentence. `divmod` takes a quotient under 2^32 - each
-  step of Euclid's algorithm - from the operands' top bits in one pass
-  where Algorithm D copied both and the remainder twice: 2048 bits over
-  2046 took 0.60 us and take 0.15. Together a 2048-bit RSA signature by
-  CRT, blinded and its blinding inverse Euclid's, took 9.4 ms and takes
-  1.3 (3072 bits: 24.1 and 3.4; 4096: 69.1 and 7.4), its check 150 us
-  and 45. std/rsa's `RsaPrivateKey` signs its two CRT halves through
-  `pow_mod_secret`, so no branch or table read of their exponentiation
-  follows dp's or dq's bits, for about a tenth more than `pow_mod`
-  (2048 bits: 1.25 to 1.32 ms against 1.12 to 1.16).
-- **std/zip reads bzip2, LZMA, Zstandard and xz entries, and writes
-  bzip2 and Zstandard.** `ZipEntryReader` reads methods 12, 14, 93 and
-  95 through `Bzip2Reader`, std/xz's .lzma decoder, `ZstdReader` and
-  `XzReader`, streamed as deflate is, with the CRC-32 and size checked
-  as before. An LZMA entry's own header (APPNOTE 5.8.8) is turned into
-  the 13 bytes of a .lzma header, so std/xz is unchanged: the size is
-  the directory's, or "unknown" when bit 1 says an end marker ends the
-  data, and that marker must then be there. A Zstandard frame may name a
-  window up to 512 MiB and an LZMA or xz stream a dictionary up to
-  1.5 GiB, past the readers' defaults: both grow their buffers with the
-  output, which is held to the entry's declared size, and Python's
-  level-22 entries name 128 MiB. `ZipMethod::Bzip2` and
-  `ZipMethod::Zstandard` on `ZipWriter#add(name, String)` write
-  `Bzip2.compress` and `Zstd.compress` of the whole entry, with version
-  4.6 and 6.3 needed to extract; asked of a streamed entry they are a
-  panic, as those compressors take a whole input. Deflate64, PPMd and the
-  other methods are still refused by name, the sentence now listing six.
-  In a --release build, 50 MB of text Python 3.14 wrote reads in 300 ms
-  from bzip2 (Python 297), 85 ms from LZMA (57), 64 ms from Zstandard
-  (32).
-
-### Fixed
-
-- **A travelling body whose argument expanded to statements crosses an
-  `.iyimod` as source that parses.** A body travels printed after the
-  normalizer has expanded it, and `.or_panic` and `!` expand to an
-  assignment and an `if`. As an argument -
-  `twice(parse(text).or_panic, type)` in a generic method - the two were
-  printed bare inside the parentheses and the consumer stopped at
-  "expecting token ')', not 'if'". Wherever the printer writes an
-  expression (an argument, a named argument, a literal's element, a
-  condition, an assigned or returned value), a sequence of statements,
-  `return`/`break`/`next` and `a, b = 1, 2` are now written in a form the
-  parser reads there: in parentheses, or in `begin ... end` when a
-  multiple assignment is among them. Held by `spec/compiler/iyimod_spec.cr`
-  and `spec/compiler/parser/to_s_spec.cr`.
-- **An alias may name any type of its module through an artifact.** An
-  artifact declares a module's types in the order of their names, and an
-  overload restricted to an alias resolves the alias when the next
-  overload is added. `std/toml`'s `Any` (`alias Type = ... | TOMLDateTime
-  | ...` beside two `initialize`s) came before `TOMLDateTime`, and the
-  consumer said "undefined constant TOMLDateTime", qualified or not. The
-  types an alias names - its own or one declared inside a type - are now
-  declared before the type that holds it. Held by
-  `spec/compiler/iyimod_spec.cr`.
-- **The stricter overload wins whatever the declaration order and
-  whatever unrelated overloads stand beside it.** With `pick(Int32)`,
-  `pick(Array(UInt8))` and `pick(Array(T)) forall T` declared in that
-  order, `pick([1_u8])` chose `Array(T)`; without the `Int32` overload, or
-  in the reverse order, it chose `Array(UInt8)`. A restriction holding a
-  free variable (`Array(T)`) counted as stricter than any type it could
-  not relate to, `Int32` included, so `Array(T)` was put in front of
-  `Int32` - and so in front of the `Array(UInt8)` that came after it. A
-  generic restriction is now stricter than a type exactly when its generic
-  type is (`Object`, `Indexable`: yes; `Int32`, `Bytes`: no), with or
-  without `-Dpreview_overload_order`. Crystal 1.21 makes the same choice.
-  Held by `spec/compiler/semantic/restrictions_spec.cr`: three overloads in
-  all six orders, flat and nested deeper (`Array(Array(T))`,
-  `Foo(Array(T))`).
-- **A large allocation begins on 16 bytes, so `--release` can read a
-  `UInt128` in it.** A small chunk of a size that is a multiple of 16 was
-  16-aligned, and the collector's large objects - past the top size class, a mapping each - began 8
-  bytes past a boundary: the node's two words and the header word put
-  the object at 24. A struct holding a `UInt128` is 16-aligned to LLVM,
-  and an optimised build read one out of an `Array` of 65,536 such
-  structs with an aligned load (`movaps`) and died of SIGSEGV; the plain
-  build, which loads unaligned, ran. A word of padding puts every large
-  object at 32. Held by `bench/arena_exercise.sh`: allocations of 32
-  bytes to 8 MiB, each a multiple of 16, and each grown, are 16-aligned,
-  and the padding taken out is caught at that check.
-
-## 0.18.0 — 2026-10-17
-
-**iyi's own library reaches the network by itself: TLS 1.3 at both ends,
-HTTPS, HTTP/2, WebSocket over TLS and the certificates beneath them,
-written in iyi from the RFCs, with no C library under any of it.**
-std/tls is a client and a server - X25519 and secp256r1, AES-GCM and
-ChaCha20-Poly1305, ECDSA, RSA-PSS and Ed25519 checked, Ed25519 and P-256
-signed in constant time, client certificates in both directions,
-certificates chosen by server_name and keying material exported - over
-std/x509, std/ecdsa, std/rsa, std/curve25519, std/p256 and std/aead, each
-held to OpenSSL's verdicts, and bounded against hostile peers: a chain
-search stops at 100 signature checks, input is read in time that grows
-with it, a handshake has a deadline, keys move before their record limit,
-and a read that times out leaves the connection open. Records move at two
-to three and a half times their earlier rate, now that the prelude's
-arrays join and slice in one copy. std/http fetches and serves
-HTTP/1.1 and HTTP/2 over it, std/websocket speaks `wss://`, and a program
-resolves names through iyi's own resolver. Around them came ninety-three
-additions - XPath 1.0, `BigFloat`, grapheme clusters,
-`WeakRef`, processes a program talks to, file locks, signals, regular
-expressions with groups and Unicode, time zones, zip and tar, password
-hashing among them - each exercised beside the other library's or the
-platform's own answers, with broken copies of the module proving every
-check can fail. A wasm32 program keeps what its locals hold through a
-collection, plain and optimised, where an optimised build freed it.
-
-**Some answers change:** `Hash#==` compares contents, regular
-expressions consume whole UTF-8 characters, `String#gsub` reads `\0`-`\9`
-in its replacement, `IyiSocket.connect` resolves a host name, `File.open`
-in `"a"` appends, a `Secure` cookie is sent over `https://` alone, and a
-wasm32 `--release` binary is about 5% larger, allocation-heavy code about
-a third slower, for keeping its locals where the collector reads. **Some
-programs that compiled are refused:** a script without a `module` line
-that defines `assert_eq` or another of the prelude's new test names.
-
-**Not here, and said so:** std/tls has not been audited and is not to be
-called secure until it is; TLS 1.2, resumption and 0-RTT are not there.
-The language server twice left a `shutdown` unanswered on darwin and
-Windows CI, not on Linux's, cause not found. The scheduler that spreads
-tasks across cores comes after this release; a REPL is not planned.
-
-### Added
 
 - **`UdpSocket.bind?` answers a refused bind instead of raising it.** A
   port held, or one Windows reserves (its excluded ranges answer "access
@@ -2515,6 +2420,54 @@ tasks across cores comes after this release; a REPL is not planned.
 
 ### Fixed
 
+- **A travelling body whose argument expanded to statements crosses an
+  `.iyimod` as source that parses.** A body travels printed after the
+  normalizer has expanded it, and `.or_panic` and `!` expand to an
+  assignment and an `if`. As an argument -
+  `twice(parse(text).or_panic, type)` in a generic method - the two were
+  printed bare inside the parentheses and the consumer stopped at
+  "expecting token ')', not 'if'". Wherever the printer writes an
+  expression (an argument, a named argument, a literal's element, a
+  condition, an assigned or returned value), a sequence of statements,
+  `return`/`break`/`next` and `a, b = 1, 2` are now written in a form the
+  parser reads there: in parentheses, or in `begin ... end` when a
+  multiple assignment is among them. Held by `spec/compiler/iyimod_spec.cr`
+  and `spec/compiler/parser/to_s_spec.cr`.
+- **An alias may name any type of its module through an artifact.** An
+  artifact declares a module's types in the order of their names, and an
+  overload restricted to an alias resolves the alias when the next
+  overload is added. `std/toml`'s `Any` (`alias Type = ... | TOMLDateTime
+  | ...` beside two `initialize`s) came before `TOMLDateTime`, and the
+  consumer said "undefined constant TOMLDateTime", qualified or not. The
+  types an alias names - its own or one declared inside a type - are now
+  declared before the type that holds it. Held by
+  `spec/compiler/iyimod_spec.cr`.
+- **The stricter overload wins whatever the declaration order and
+  whatever unrelated overloads stand beside it.** With `pick(Int32)`,
+  `pick(Array(UInt8))` and `pick(Array(T)) forall T` declared in that
+  order, `pick([1_u8])` chose `Array(T)`; without the `Int32` overload, or
+  in the reverse order, it chose `Array(UInt8)`. A restriction holding a
+  free variable (`Array(T)`) counted as stricter than any type it could
+  not relate to, `Int32` included, so `Array(T)` was put in front of
+  `Int32` - and so in front of the `Array(UInt8)` that came after it. A
+  generic restriction is now stricter than a type exactly when its generic
+  type is (`Object`, `Indexable`: yes; `Int32`, `Bytes`: no), with or
+  without `-Dpreview_overload_order`. Crystal 1.21 makes the same choice.
+  Held by `spec/compiler/semantic/restrictions_spec.cr`: three overloads in
+  all six orders, flat and nested deeper (`Array(Array(T))`,
+  `Foo(Array(T))`).
+- **A large allocation begins on 16 bytes, so `--release` can read a
+  `UInt128` in it.** A small chunk of a size that is a multiple of 16 was
+  16-aligned, and the collector's large objects - past the top size class,
+  a mapping each - began 8 bytes past a boundary: the node's two words and
+  the header word put the object at 24. A struct holding a `UInt128` is
+  16-aligned to LLVM, and an optimised build read one out of an `Array` of
+  65,536 such structs with an aligned load (`movaps`) and died of SIGSEGV;
+  the plain build, which loads unaligned, ran. A word of padding puts
+  every large object at 32. Held by `bench/arena_exercise.sh`: allocations
+  of 32 bytes to 8 MiB, each a multiple of 16, and each grown, are
+  16-aligned, and the padding taken out is caught at that check.
+
 - **A program on darwin reads standard input redirected from a file to its
   end, and stops.** The runtime waits for a stream before it reads it, and
   darwin's wait is kqueue's. kqueue takes a regular file where Linux's
@@ -2687,6 +2640,55 @@ tasks across cores comes after this release; a REPL is not planned.
   `spec/compiler/iyimod_spec.cr`. (#124)
 
 ### Changed
+
+- **std/big: `pow_mod` by Montgomery multiplication for an odd modulus,
+  `pow_mod_secret` for a private exponent, and a division of one pass
+  for a one-limb quotient.** An odd modulus - RSA's, Diffie-Hellman's,
+  a prime field's - goes to Montgomery multiplication on 64-bit words
+  (products in `UInt128`, CIOS for a product, a squaring that takes each
+  product off the diagonal once) with a sliding window of up to six bits; an
+  even one keeps square-and-multiply, reading the exponent's bits in
+  place instead of copying it a bit at a time. A 2048-bit modulus and
+  exponent took 19.0 ms in a --release build and take 2.5, where
+  Python 3.14's `pow` takes 13.7 (3072 bits: 63.2, 8.5 and 45.4; 4096:
+  168.7, 20.6 and 102.1). The base enters Montgomery form by one
+  division, which took a 2048-bit RSA check (e = 65537) from 36 us with
+  R^2 squared out to 22. `BigInt#pow_mod_secret(exp, mod)` is a fixed
+  window over as many bits as the longer of exponent and modulus, every
+  table entry read for every window and the one wanted kept by a mask,
+  the final subtraction masked too; LLVM turned the first masks into
+  branches, so each is xored with a zero read by an atomic load, and the
+  release assembly shows the and and the or in both loops. It refuses an
+  even modulus by sentence. `divmod` takes a quotient under 2^32 - each
+  step of Euclid's algorithm - from the operands' top bits in one pass
+  where Algorithm D copied both and the remainder twice: 2048 bits over
+  2046 took 0.60 us and take 0.15. Together a 2048-bit RSA signature by
+  CRT, blinded and its blinding inverse Euclid's, took 9.4 ms and takes
+  1.3 (3072 bits: 24.1 and 3.4; 4096: 69.1 and 7.4), its check 150 us
+  and 45. std/rsa's `RsaPrivateKey` signs its two CRT halves through
+  `pow_mod_secret`, so no branch or table read of their exponentiation
+  follows dp's or dq's bits, for about a tenth more than `pow_mod`
+  (2048 bits: 1.25 to 1.32 ms against 1.12 to 1.16).
+- **std/zip reads bzip2, LZMA, Zstandard and xz entries, and writes
+  bzip2 and Zstandard.** `ZipEntryReader` reads methods 12, 14, 93 and
+  95 through `Bzip2Reader`, std/xz's .lzma decoder, `ZstdReader` and
+  `XzReader`, streamed as deflate is, with the CRC-32 and size checked
+  as before. An LZMA entry's own header (APPNOTE 5.8.8) is turned into
+  the 13 bytes of a .lzma header, so std/xz is unchanged: the size is
+  the directory's, or "unknown" when bit 1 says an end marker ends the
+  data, and that marker must then be there. A Zstandard frame may name a
+  window up to 512 MiB and an LZMA or xz stream a dictionary up to
+  1.5 GiB, past the readers' defaults: both grow their buffers with the
+  output, which is held to the entry's declared size, and Python's
+  level-22 entries name 128 MiB. `ZipMethod::Bzip2` and
+  `ZipMethod::Zstandard` on `ZipWriter#add(name, String)` write
+  `Bzip2.compress` and `Zstd.compress` of the whole entry, with version
+  4.6 and 6.3 needed to extract; asked of a streamed entry they are a
+  panic, as those compressors take a whole input. Deflate64, PPMd and the
+  other methods are still refused by name, the sentence now listing six.
+  In a --release build, 50 MB of text Python 3.14 wrote reads in 300 ms
+  from bzip2 (Python 297), 85 ms from LZMA (57), 64 ms from Zstandard
+  (32).
 
 - **A package that speaks HTTP reaches what std/tls does.** std/http
   imports std/tls for `https://`, so `iyi mod reach` counts what reading

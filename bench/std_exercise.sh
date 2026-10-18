@@ -513,10 +513,13 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
     tail -n 6 "$failed_out" | sed 's/^/    /'
     continue
   fi
-  # Three exercises print something no two builds can agree on, and for them
+  # Four exercises print something no two builds can agree on, and for them
   # the exit status is the whole of the promise: each raises on its own
   # assertions, so a wrong answer is a non-zero exit either way.
   #
+  #   * `std_big_exercise` prints how long three exponentiations took, for
+  #     its driver to set beside Python's, and raises if the fast one is
+  #     not three times the old.
   #   * `std_gc_exercise` prints how many bytes a collection freed, which
   #     is a property of what the build allocated and not of the program.
   #   * `std_time_exercise` prints the clock.
@@ -529,7 +532,7 @@ for source in "$REPO"/bench/std_*_exercise.iyi; do
   # binary twice would pass the clock and still fail the collector, whose
   # two runs agree with each other and not across builds.
   case "$name" in
-    std_gc_exercise | std_time_exercise | std_weak_ref_exercise)
+    std_big_exercise | std_gc_exercise | std_time_exercise | std_weak_ref_exercise)
       continue
       ;;
   esac

@@ -2325,8 +2325,8 @@ jobs:
           make -f Makefile.win crystal || exit /b 1
           make -f Makefile.win iyi
 
-      # Python 3.14, as on Linux, under `python3` too: a gate asks for
-      # `python3` first, and setup-python names only `python` on Windows.
+      # Python 3.14, as on Linux: a gate asks for `python3` first, which
+      # setup-python's Windows build has beside `python`.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -2334,7 +2334,7 @@ jobs:
         shell: bash
         run: |
           python -m pip install -q cryptography pillow
-          cp "$pythonLocation/python.exe" "$pythonLocation/python3.exe"
+          python3 --version
       - name: The module exercises of this shard, on Windows
         shell: bash
         env:

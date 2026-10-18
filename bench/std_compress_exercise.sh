@@ -199,6 +199,12 @@ echo "== what iyi wrote, read by zlib"
 import os, sys, zlib
 d = sys.argv[1]
 bad = 0
+# The bound is against zlib's own levels, which this deflater follows:
+# lazy matching and chain lengths per level are zlib's. zlib-ng - which
+# python.org's 3.14 for Windows is built with - chooses its matches
+# otherwise at the low levels (1.04 to 1.25 of its size there), so beside
+# it the sizes are printed and not held.
+NG = "zlib-ng" in zlib.ZLIB_RUNTIME_VERSION
 for name in ("text", "zeros", "bytes", "random", "far", "source"):
     plain = open(os.path.join(d, name + ".bin"), "rb").read()
     for env, wbits in (("raw", -15), ("zlib", 15), ("gzip", 31)):
@@ -215,8 +221,10 @@ for name in ("text", "zeros", "bytes", "random", "far", "source"):
     raw = os.path.getsize(os.path.join(d, name + ".iyi.raw"))
     ref = os.path.getsize(os.path.join(d, name + ".6.raw"))
     print(f"  {name}: {len(plain)} bytes, iyi {raw} against zlib level 6's {ref}")
-    if raw > ref * 1.02 + 8:
+    if raw > ref * 1.02 + 8 and not NG:
         print(f"  {name}: iyi's stream is more than 2% past zlib level 6's"); bad += 1
+if NG:
+    print(f"  the sizes are zlib-ng's ({zlib.ZLIB_RUNTIME_VERSION}), and not held: it is not zlib's levels this deflater follows")
 sys.exit(1 if bad else 0)
 PY
 
@@ -258,6 +266,7 @@ echo "== every level, read by zlib and sized against it"
 import gzip, os, sys, time, zlib
 d = sys.argv[1]
 bad = 0
+NG = "zlib-ng" in zlib.ZLIB_RUNTIME_VERSION  # as above: zlib-ng's sizes are not held
 for name in ("l_text", "l_source", "l_json", "l_random", "l_repeat", "l_empty", "l_one", "l_big"):
     plain = open(os.path.join(d, name + ".bin"), "rb").read()
     ratios = []
@@ -284,11 +293,13 @@ for name in ("l_text", "l_source", "l_json", "l_random", "l_repeat", "l_empty", 
         took = time.perf_counter() - t0
         ratios.append(f"{raw / ref:.4f}")
         speeds.append(f"{level}: {took * 1000:.0f} ms, {len(plain) / took / 1e6:.0f} MB/s")
-        if raw > ref * 1.02 + 8:
+        if raw > ref * 1.02 + 8 and not NG:
             print(f"  {name} at level {level}: iyi wrote {raw} bytes, more than 2% past zlib's {ref}"); bad += 1
     print(f"  {name}: {len(plain)} bytes, iyi's size over zlib's at levels 0 to 9: {' '.join(ratios)}")
     if name == "l_big":
         print(f"  speed of zlib {zlib.ZLIB_RUNTIME_VERSION} over {name}'s {len(plain)} bytes, level {'; '.join(speeds)}")
+if NG:
+    print(f"  the sizes are zlib-ng's, and not held")
 sys.exit(1 if bad else 0)
 PY
 

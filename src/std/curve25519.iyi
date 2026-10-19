@@ -60,13 +60,15 @@
 # y = p + 1, or with x = 0 and the sign bit set, as a key, and §5.1.3 says
 # decoding fails for both.
 #
-# Measured on one x86_64 Linux machine, --release, the best of five runs
-# of 200: a shared secret took 21 microseconds against `cryptography`'s
-# (OpenSSL's) 19, a verification 43 against 47, and a signature 68
-# against 17; a signature works the public key out from the seed again
-# and multiplies the base point twice, by a table it builds each time,
-# where OpenSSL keeps both. A plain build took 116, 228 and 522, the
-# average of 100 or 200.
+# Measured on one x86_64 Linux machine other jobs shared, --release, the
+# best of five runs of 200: a shared secret took 20 microseconds against
+# `cryptography`'s (OpenSSL's) 19, a verification 40 against 47, a
+# signature 20 against 17, and an X25519 public key 8. A signature works
+# the public key out from the seed again and multiplies the base point
+# twice, both from the fixed-base table (`CurveBaseTable`); before that
+# table and the bytewise reduction mod L, the same run gave a signature
+# 67, a verification 41 and a public key 20 (the ladder). A plain build
+# took 116, 228 and 522 then, the average of 100 or 200.
 #
 # Refused with a sentence, as the caller's own misuse: a private key or a
 # seed that is not 32 bytes. Data from outside is answered as a value: a
@@ -102,10 +104,19 @@ end
 # (bits 0 to 2 and 255 cleared, bit 254 set), so the caller need not.
 pub struct X25519
   # The public key of *private_key*: its multiple of the base point, u = 9.
+  # That point is edwards25519's B under RFC 7748 §4.1's map, which keeps
+  # multiples, so the clamped scalar times B on the Edwards curve, by the
+  # fixed-base table, gives the same u as the ladder from 9 does: 8
+  # microseconds where the ladder took 20.
   def self.public_key(private_key : String | Array(UInt8)) : String
     k, n = CurveBytes.of(private_key)
     raise "X25519: a private key is 32 bytes, not #{n}" unless n == 32
-    result = CurveLadder.x25519(k, CurveField.new(9_u64, 0_u64, 0_u64, 0_u64, 0_u64))
+    clamped = uninitialized UInt8[32]
+    c = pointerof(clamped).as(Pointer(UInt8))
+    c.copy_from(k, 32)
+    c[0] = c[0] & 248_u8
+    c[31] = (c[31] & 127_u8) | 64_u8
+    result = CurvePoint.base_mult(c).montgomery_u
     String.new(32) { |buf| result.to_bytes(buf) }
   end
 
@@ -658,22 +669,72 @@ struct CurvePoint
     CurvePoint.new(x, y, one, x * y)
   end
 
-  # [k]B for a secret 32-byte little-endian *k*, in constant time: 64
-  # windows of 4 bits from the top, each four doublings and one addition
-  # of the window's multiple, read from the table by masks. Adding the
-  # identity for a zero window is an addition like any other.
+  # [k]B for a secret 32-byte little-endian *k* below 2^255 (a clamped
+  # secret scalar, or one reduced mod L), in constant time, from the
+  # precomputed table of `CurveBaseTable`: k is recoded into 64 signed
+  # digits in [-8, 8], k = sum of e_i 16^i, and since entry (j, m) of the
+  # table is (m + 1) 256^j B, the odd digits' sum is gathered first, taken
+  # times 16 by four doublings, and the even digits' sum added: 64 mixed
+  # additions and four doublings, where a window over B itself is 252
+  # doublings. Each digit's entry is read from its row by masks, all
+  # eight entries touched, and its sign applied by a mask; a zero digit
+  # adds the identity like any other. This is ref10's
+  # `ge_scalarmult_base` (Bernstein, Duif, Lange, Schwabe and Yang).
   def self.base_mult(k : Pointer(UInt8)) : CurvePoint
-    table = uninitialized CurveCached[16]
-    tp = pointerof(table).as(Pointer(CurveCached))
-    fill(base, tp)
+    table = CurveBaseTable.get
+    digits = uninitialized UInt64[64]
+    e = pointerof(digits).as(Pointer(UInt64))
+    i = 0
+    while i < 32
+      e[2 * i] = (k[i] & 15_u8).to_u64
+      e[2 * i + 1] = k[i].unsafe_shr(4).to_u64
+      i = i + 1
+    end
+    # Each digit is 0 to 15 and the carry in 0 or 1, so digit + 8 is never
+    # negative and its fourth bit is the carry out; a digit taken down by
+    # 16 wraps to its two's complement, which `CurveBaseTable.pick` reads.
+    carry = 0_u64
+    i = 0
+    while i < 63
+      d = e[i] &+ carry
+      carry = (d &+ 8_u64).unsafe_shr(4)
+      e[i] = d &- carry.unsafe_shl(4)
+      i = i + 1
+    end
+    e[63] = e[63] &+ carry
     q = identity
-    i = 63
-    while i >= 0
-      q = q.double.double.double.double if i < 63
-      q = q.add(CurveCached.lookup(tp, nibble(k, i)))
-      i = i - 1
+    i = 1
+    while i < 64
+      q = q.madd(CurveBaseTable.pick(table, i >> 1, e[i]))
+      i = i + 2
+    end
+    q = q.double.double.double.double
+    i = 0
+    while i < 64
+      q = q.madd(CurveBaseTable.pick(table, i >> 1, e[i]))
+      i = i + 2
     end
     q
+  end
+
+  # The addition of an affine point made ready (`CurvePrecomp`): `add`
+  # with Z2 = 1, so 2Z is an addition and not a product.
+  def madd(q : CurvePrecomp) : CurvePoint
+    a = (@y - @x) * q.ymx
+    b = (@y + @x) * q.ypx
+    c = @t * q.xy2d
+    d = @z + @z
+    e = b - a
+    f = d - c
+    g = d + c
+    h = b + a
+    CurvePoint.new(e * f, g * h, f * g, e * h)
+  end
+
+  # The Montgomery u of this point, (1 + y) / (1 - y) = (Z + Y) / (Z - Y),
+  # RFC 7748 §4.1's map between edwards25519 and Curve25519.
+  def montgomery_u : CurveField
+    (@z + @y) * (@z - @y).invert
   end
 
   # [s]B - [k]A for public *s*, *k* and *a*, both in one pass of doublings
@@ -731,34 +792,113 @@ struct CurveCached
   def self.identity : CurveCached
     new(CurveField.one, CurveField.one, CurveField.one + CurveField.one, CurveField.zero)
   end
+end
 
-  # table[index], every entry read and all but one masked away, so which
-  # one was wanted leaves no trace in what memory was touched.
-  def self.lookup(table : Pointer(CurveCached), index : UInt64) : CurveCached
-    r = table[0]
+# An affine point made ready to be added to an extended one: y + x, y - x
+# and 2dxy. The identity is (1, 1, 0), and the negative trades the first
+# two and negates the third.
+struct CurvePrecomp
+  getter ypx : CurveField
+  getter ymx : CurveField
+  getter xy2d : CurveField
+
+  def initialize(@ypx : CurveField, @ymx : CurveField, @xy2d : CurveField)
+  end
+end
+
+# The fixed-base table `CurvePoint.base_mult` reads: 32 rows of eight,
+# entry (j, m) the point (m + 1) 256^j B made ready. It holds multiples
+# of B, which is public, so nothing in it is secret; only which entry is
+# read is, and that is chosen by masks. The table is worked out once, the
+# first time it is wanted, and kept: 248 doublings and 224 additions,
+# their 256 Z inverted together by Montgomery's trick (one inversion and
+# three products a point), which is about what one multiplication by the
+# old 4-bit window cost. Two threads that reach it first both work it
+# out and store the same table.
+struct CurveBaseTable
+  @@table = Pointer(CurvePrecomp).new(0_u64)
+
+  def self.get : Pointer(CurvePrecomp)
+    return @@table if @@table.address != 0_u64
+    points = Pointer(CurvePoint).malloc(256_u64)
+    p = CurvePoint.base
+    row = 0
+    while row < 32
+      c = p.cached
+      acc = p
+      points[row * 8] = p
+      m = 1
+      while m < 8
+        acc = acc.add(c)
+        points[row * 8 + m] = acc
+        m = m + 1
+      end
+      p = p.double.double.double.double.double.double.double.double
+      row = row + 1
+    end
+    # Montgomery's trick: the running products of the Z, one inversion of
+    # the last, and each inverse unwound from it. No Z is zero: none of
+    # these points is the identity, and the extended formulas keep Z
+    # nonzero for the others.
+    before = Pointer(CurveField).malloc(256_u64)
+    run = CurveField.one
+    i = 0
+    while i < 256
+      before[i] = run
+      run = run * points[i].z
+      i = i + 1
+    end
+    inverse = run.invert
+    table = Pointer(CurvePrecomp).malloc(256_u64)
+    i = 255
+    while i >= 0
+      point = points[i]
+      zi = inverse * before[i]
+      inverse = inverse * point.z
+      x = point.x * zi
+      y = point.y * zi
+      table[i] = CurvePrecomp.new(y + x, y - x, x * y * CurveField.d2)
+      i = i - 1
+    end
+    @@table = table
+    table
+  end
+
+  # Row *row*'s entry for the signed digit *digit* (-8 to 8, in two's
+  # complement): every entry of the row read, and all but |digit|'s
+  # masked away; the identity for zero; then negated by a mask when the
+  # digit is.
+  def self.pick(table : Pointer(CurvePrecomp), row : Int32, digit : UInt64) : CurvePrecomp
+    negative = digit.unsafe_shr(63)
+    index = (digit ^ (0_u64 &- negative)) &+ negative
+    ypx = CurveField.one
+    ymx = CurveField.one
+    xy2d = CurveField.zero
+    base = table + (row * 8).to_i64
     j = 1
-    while j < 16
+    while j <= 8
       diff = j.to_u64 ^ index
       # All ones when diff is zero: (diff | -diff) has its top bit set for
       # every other value.
       mask = (diff | (0_u64 &- diff)).unsafe_shr(63) &- 1_u64
-      e = table[j]
-      r = CurveCached.new(CurveField.select(mask, e.ypx, r.ypx),
-        CurveField.select(mask, e.ymx, r.ymx),
-        CurveField.select(mask, e.z2, r.z2),
-        CurveField.select(mask, e.t2d, r.t2d))
+      e = base[j - 1]
+      ypx = CurveField.select(mask, e.ypx, ypx)
+      ymx = CurveField.select(mask, e.ymx, ymx)
+      xy2d = CurveField.select(mask, e.xy2d, xy2d)
       j = j + 1
     end
-    r
+    flip = 0_u64 &- negative
+    CurvePrecomp.new(CurveField.select(flip, ymx, ypx), CurveField.select(flip, ypx, ymx),
+      CurveField.select(flip, xy2d.negate, xy2d))
   end
 end
 
 # Scalars modulo the group order L = 2^252 + 27742317777372353535851937790883648493,
-# as four 64-bit limbs. Reduction is a bit at a time from the top, r = 2r +
-# bit and then L taken off r unless that borrows, the choice by mask: 512
-# steps for a SHA-512 output, the same steps whatever the bits. Slower
-# than Barrett's reduction and plainly constant in time; it is a few
-# microseconds next to the scalar multiplications around it.
+# as four 64-bit limbs. Reduction is a byte at a time from the top (see
+# `reduce_words`), each step's quotient taken from r's top bits and its
+# overshoot put right by a mask: 64 steps for a SHA-512 output, the same
+# steps whatever the bytes. It replaced a bit at a time, 512 steps of a
+# subtraction each.
 struct CurveScalar
   L0 = 0x5812631a5cf5d3ed_u64
   L1 = 0x14def9dea2f79cd6_u64
@@ -826,27 +966,52 @@ struct CurveScalar
     borrow == 1_u64
   end
 
+  # *count* little-endian 64-bit words mod L, into 32 bytes at *dst*, a
+  # byte at a time from the top: r = 256 r + byte, which is below 256 L,
+  # less q L for q = r >> 252. Since L is a little over 2^252, that q is
+  # the quotient or one more, so r - q L is in (-L, L), and L is added
+  # back by a mask when it went below zero. The same steps whatever the
+  # bytes, eight to a word where a bit at a time took 64.
   private def self.reduce_words(w : Pointer(UInt64), count : Int32, dst : Pointer(UInt8)) : Nil
     r0 = 0_u64
     r1 = 0_u64
     r2 = 0_u64
     r3 = 0_u64
-    i = count * 64 - 1
+    i = count * 8 - 1
     while i >= 0
-      bit = w[i >> 6].unsafe_shr(i & 63) & 1_u64
-      # r is below L < 2^253, so 2r + 1 fits the four limbs.
-      r3 = r3.unsafe_shl(1) | r2.unsafe_shr(63)
-      r2 = r2.unsafe_shl(1) | r1.unsafe_shr(63)
-      r1 = r1.unsafe_shl(1) | r0.unsafe_shr(63)
-      r0 = r0.unsafe_shl(1) | bit
-      t0, t1, t2, t3, borrow = minus_l(r0, r1, r2, r3)
-      # Keep r where r - L borrowed, take r - L where it did not.
-      keep = 0_u64 &- borrow
-      take = keep ^ 0xffffffffffffffff_u64
-      r0 = (r0 & keep) | (t0 & take)
-      r1 = (r1 & keep) | (t1 & take)
-      r2 = (r2 & keep) | (t2 & take)
-      r3 = (r3 & keep) | (t3 & take)
+      byte = w[i >> 3].unsafe_shr((i & 7) * 8) & 0xff_u64
+      # r is below L < 2^253, so 256 r + byte fits five limbs.
+      r4 = r3.unsafe_shr(56)
+      r3 = r3.unsafe_shl(8) | r2.unsafe_shr(56)
+      r2 = r2.unsafe_shl(8) | r1.unsafe_shr(56)
+      r1 = r1.unsafe_shl(8) | r0.unsafe_shr(56)
+      r0 = r0.unsafe_shl(8) | byte
+      q = r3.unsafe_shr(60) | r4.unsafe_shl(4)
+      # q L in five limbs: q L0, q L1 2^64, and q 2^252 (L2 is zero).
+      m = q.to_u128 &* L0.to_u128
+      n = q.to_u128 &* L1.to_u128 &+ m.unsafe_shr(64)
+      d = r0.to_u128 &- m.unsafe_to_u64.to_u128
+      r0 = d.unsafe_to_u64
+      b = d.unsafe_shr(127)
+      d = r1.to_u128 &- n.unsafe_to_u64.to_u128 &- b
+      r1 = d.unsafe_to_u64
+      b = d.unsafe_shr(127)
+      d = r2.to_u128 &- n.unsafe_shr(64) &- b
+      r2 = d.unsafe_to_u64
+      b = d.unsafe_shr(127)
+      d = r3.to_u128 &- q.unsafe_shl(60).to_u128 &- b
+      r3 = d.unsafe_to_u64
+      b = d.unsafe_shr(127)
+      d = r4.to_u128 &- q.unsafe_shr(4).to_u128 &- b
+      # All ones when r - q L went below zero.
+      back = 0_u64 &- d.unsafe_shr(127).unsafe_to_u64
+      s = r0.to_u128 &+ (L0 & back).to_u128
+      r0 = s.unsafe_to_u64
+      s = r1.to_u128 &+ (L1 & back).to_u128 &+ s.unsafe_shr(64)
+      r1 = s.unsafe_to_u64
+      s = r2.to_u128 &+ (L2 & back).to_u128 &+ s.unsafe_shr(64)
+      r2 = s.unsafe_to_u64
+      r3 = r3 &+ (L3 & back) &+ s.unsafe_shr(64).unsafe_to_u64
       i = i - 1
     end
     CurveBytes.store64(dst, r0)

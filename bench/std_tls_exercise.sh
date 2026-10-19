@@ -1416,7 +1416,11 @@ prove_broken "the sequence number XORed into the nonce's front" "the server's da
   '    8.times { |i| nonce[i] = nonce[i] ^ ((@sequence >> (8 * i)) & 0xFF_u64).to_u8 }'
 prove_broken "a record's length in its additional data left out" "the client's Finished sealed as the trace's record" \
   '    length = inner.size + 16' '    length = inner.size'
-prove_broken "the server's Finished unchecked" "bad-finished: refused with" \
+# Taken, a Finished one bit off lets the client finish its handshake, and
+# the scripted server, which hangs up after it, races the client's echo:
+# the client holds a connection or reads the refusal first; on darwin it
+# held. Either is the scenario failing, as for certreq-no-sigalgs below.
+prove_broken "the server's Finished unchecked" "FAILED: bad-finished: " \
   '    unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
       return TlsError.new("the server'"'"'s Finished' '    if false
       return TlsError.new("the server'"'"'s Finished' scenarios

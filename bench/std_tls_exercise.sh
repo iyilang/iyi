@@ -1206,8 +1206,29 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
       if command -v curl >/dev/null 2>&1 && { [ "$kind" != ed25519 ] || curl --version | head -1 | grep -q 'OpenSSL/'; }; then
         local norevoke=()
         curl --version 2>/dev/null | head -1 | grep -q 'Schannel' && norevoke=(--ssl-no-revoke)
-        ask12 "curl, TLS 1.2 at most, $kind" "alpn=http/1.1 TLS_ECDHE_" curl -sS --http1.1 --tls-max 1.2 ${norevoke[@]+"${norevoke[@]}"} \
-          --cacert "$SRV/roots.pem" --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/"
+        # curl12: curl's answer, then what the server said of that
+        # connection, once it has said it.
+        curl12() {
+          local before
+          before="$(wc -l <"$WORK/serve12.log")"
+          curl -sS --http1.1 --tls-max 1.2 ${norevoke[@]+"${norevoke[@]}"} \
+            --cacert "$SRV/roots.pem" --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/" 2>&1
+          for _ in $(seq 1 30); do
+            [ "$(wc -l <"$WORK/serve12.log")" -gt "$before" ] && break
+            sleep 0.1
+          done
+          tail -n +"$((before + 1))" "$WORK/serve12.log"
+        }
+        if curl --version | head -1 | grep -q 'LibreSSL/'; then
+          # LibreSSL - macOS's curl's, 3.3.6 on the darwin runner - has
+          # never implemented RFC 7627 and sends no extended_master_secret,
+          # so its 1.2 is refused, by name, as this server refuses every
+          # client without it: the refusal is what is expected of it.
+          ask12 "curl on LibreSSL, TLS 1.2 at most, $kind: no extended master secret, refused" \
+            "refused: tls: the client does not do the extended master secret (RFC 7627)" curl12
+        else
+          ask12 "curl, TLS 1.2 at most, $kind" "alpn=http/1.1 TLS_ECDHE_" curl12
+        fi
       fi
       if command -v node >/dev/null 2>&1; then
         ask12 "Node's tls, TLS 1.2 at most, $kind" "TLSv1.2 name=localhost alpn=h2 TLS_ECDHE_" node -e '
@@ -1553,7 +1574,11 @@ prove_broken "the sequence number XORed into the nonce's front" "the server's da
   '    8.times { |i| nonce[i] = nonce[i] ^ ((@sequence >> (8 * i)) & 0xFF_u64).to_u8 }'
 prove_broken "a record's length in its additional data left out" "the client's Finished sealed as the trace's record" \
   '    length = inner.size + 16' '    length = inner.size'
-prove_broken "the server's Finished unchecked" "bad-finished: refused with" \
+# Taken, a Finished one bit off lets the client finish its handshake, and
+# the scripted server, which hangs up after it, races the client's echo:
+# the client holds a connection or reads the refusal first; on darwin it
+# held. Either is the scenario failing, as for certreq-no-sigalgs below.
+prove_broken "the server's Finished unchecked" "FAILED: bad-finished: " \
   '    unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
       return TlsError.new("the server'"'"'s Finished' '    if false
       return TlsError.new("the server'"'"'s Finished' scenarios

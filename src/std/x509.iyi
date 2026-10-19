@@ -48,7 +48,9 @@
 # Signatures: RSA PKCS #1 v1.5 and PSS, and ECDSA, under SHA-256, SHA-384
 # and SHA-512, and Ed25519 (RFC 8410: the key's and the signature's
 # AlgorithmIdentifier carry no parameters at all). A certificate signed
-# under SHA-1 is refused, as every browser refuses one. A root's own
+# under SHA-1 is refused, as every browser refuses one, and so is a chain
+# with an RSA key under 2048 bits anywhere in it, root included (see
+# `X509::MIN_RSA_BITS` for how OpenSSL's level 2 compares). A root's own
 # signature is not checked: a root is trusted for being in the store, not
 # for what it says about itself.
 #
@@ -300,6 +302,15 @@ pub struct X509
   # Certificate message holds far more than seven. The other library's
   # path builder in Go stops at the same 100.
   MAX_SIGNATURE_CHECKS = 100
+  # An RSA key under this many bits is refused anywhere in a chain, leaf
+  # to root: the floor std/rsa signs at and the CA/Browser Forum's for a
+  # certificate's key. OpenSSL at its security level 2 (`openssl verify
+  # -auth_level 2`, where Debian's and Ubuntu's builds start) refuses a
+  # 1024- or 1536-bit key at any depth as this does; it judges by NIST SP
+  # 800-56B's strength estimate, which took 1990 bits and up when measured
+  # (OpenSSL 3.5.5), so the two part only between 1990 and 2047 bits.
+  # std/rsa itself reads keys down to 1024 bits.
+  MIN_RSA_BITS = 2048
 
   # The DER of every block labelled *label* in a PEM text - `"CERTIFICATE"`
   # or `"PRIVATE KEY"` - each checked to be base64 before it is decoded.
@@ -330,6 +341,8 @@ pub struct X509
 
   private def self.leaf_error(leaf : Certificate, host : String?, now : Time, purpose : X509Purpose) : String?
     return "#{leaf.subject_name} is not valid at #{now}: from #{leaf.not_before} to #{leaf.not_after}" unless leaf.valid_at?(now)
+    weak = weak_key(leaf)
+    return weak if weak
     return "#{leaf.subject_name} carries critical extension #{leaf.unhandled_critical[0]}, which this does not understand" unless leaf.unhandled_critical.empty?
     return "#{leaf.subject_name} is not allowed #{purpose.usage}" unless allowed?(leaf, purpose)
     return "#{leaf.subject_name} is a CA certificate, not a #{purpose.holder}'s" if leaf.ca
@@ -343,6 +356,13 @@ pub struct X509
     usages = certificate.extended_key_usage
     return true unless usages
     usages.includes?(purpose.oid) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)
+  end
+
+  # Why *certificate*'s key is too weak to be in a chain, or nil.
+  private def self.weak_key(certificate : Certificate) : String?
+    key = certificate.public_key
+    return nil unless key.is_a?(RsaPublicKey) && key.bits < MIN_RSA_BITS
+    "#{certificate.subject_name}'s RSA key is #{key.bits} bits, under the #{MIN_RSA_BITS} a chain is held to"
   end
 
   # The chain grown from *chain* to a root, trying every issuer that
@@ -386,6 +406,8 @@ pub struct X509
   private def self.issuer_error(child : Certificate, issuer : Certificate, chain : Array(Certificate), now : Time, purpose : X509Purpose) : String?
     name = issuer.subject_name
     return "#{name} is not valid at #{now}: from #{issuer.not_before} to #{issuer.not_after}" unless issuer.valid_at?(now)
+    weak = weak_key(issuer)
+    return weak if weak
     return "#{name} carries critical extension #{issuer.unhandled_critical[0]}, which this does not understand" unless issuer.unhandled_critical.empty?
     return "#{name} is not a CA" unless issuer.basic_constraints && issuer.ca
     usage = issuer.key_usage

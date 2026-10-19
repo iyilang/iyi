@@ -8,10 +8,11 @@
 # matched, certificates that are not certificates, and Ed25519 keys and
 # signatures (RFC 8410); this gate runs it plain and --release, holds 200
 # fresh chains - random keys (P-256, P-384, RSA, Ed25519), depths and
-# defects - to Python's verifier, reads every certificate in the machine's
-# CA bundle as Python reads it, shows an error value's sentence through
-# `.or_panic`, and proves on broken copies of the module that the checks
-# fail where they say.
+# defects - to Python's verifier, holds chains with an RSA key at or under
+# the 2048-bit floor to OpenSSL's verify at security level 2, reads every
+# certificate in the machine's CA bundle as Python reads it, shows an
+# error value's sentence through `.or_panic`, and proves on broken copies
+# of the module that the checks fail where they say.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -83,7 +84,7 @@ fi
 
 echo
 echo "== every x509 section reported"
-for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded"; do
+for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded"; do
   if ! grep -q "$phrase" "$WORK/x509-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -283,6 +284,87 @@ PY
 fi
 
 echo
+echo "== RSA keys under the 2048-bit floor, held to OpenSSL's security level 2"
+# Chains of RSA keys, one of them 1024 or 1536 bits at the leaf, the
+# intermediate or the root, or none: each verdict OpenSSL's `verify
+# -auth_level 2` gives, which refuses such a key at any depth. OpenSSL
+# takes 1990 bits and up (NIST SP 800-56B's estimate), so 1990 to 2047,
+# where std/x509's floor is the stricter, are left out. Python's verifier
+# is no oracle here: it takes a 1024-bit leaf.
+if [ -z "$PY" ] || ! command -v openssl >/dev/null 2>&1 || ! openssl verify -help 2>&1 | grep -q auth_level; then
+  echo "  no python or no OpenSSL with -auth_level here, so the RSA floor goes uncompared"
+else
+  mkdir -p "$WORK/weak"
+  if ! "$PY" - "$WORK/weak" <<'PY'
+import datetime as dt, subprocess, sys
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+work = sys.argv[1]
+NOW = dt.datetime(2026, 6, 1, tzinfo=dt.timezone.utc)
+DAY = dt.timedelta(days=1)
+def name(cn): return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+def cert(cn, key, issuer, issuer_key, ca, sans=None):
+    b = (x509.CertificateBuilder().subject_name(name(cn)).issuer_name(issuer).public_key(key.public_key())
+         .serial_number(x509.random_serial_number()).not_valid_before(NOW - 30 * DAY).not_valid_after(NOW + 300 * DAY)
+         .add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True))
+    if sans: b = b.add_extension(x509.SubjectAlternativeName([x509.DNSName(s) for s in sans]), critical=False)
+    return b.sign(issuer_key, hashes.SHA256())
+keys = {bits: rsa.generate_private_key(public_exponent=65537, key_size=bits) for bits in (1024, 1536)}
+strong = [rsa.generate_private_key(public_exponent=65537, key_size=2048) for _ in range(3)]
+cases, want = [], []
+for where in ("none", "leaf", "intermediate", "root"):
+    for bits in ((2048,) if where == "none" else (1024, 1536)):
+        r, i, l = strong
+        if where == "root": r = keys[bits]
+        if where == "intermediate": i = keys[bits]
+        if where == "leaf": l = keys[bits]
+        root = cert(f"Root {where} {bits}", r, name(f"Root {where} {bits}"), r, True)
+        inter = cert(f"Inter {where} {bits}", i, root.subject, r, True)
+        leaf = cert(f"leaf {where} {bits}", l, inter.subject, i, False, ["www.example.com"])
+        stem = f"{work}/{where}-{bits}"
+        for part, c in (("root", root), ("inter", inter), ("leaf", leaf)):
+            open(f"{stem}-{part}.pem", "wb").write(c.public_bytes(serialization.Encoding.PEM))
+        run = subprocess.run(["openssl", "verify", "-auth_level", "2", "-attime", str(int(NOW.timestamp())),
+                              "-CAfile", f"{stem}-root.pem", "-untrusted", f"{stem}-inter.pem", f"{stem}-leaf.pem"],
+                             capture_output=True, text=True)
+        want.append("true" if run.returncode == 0 else "false")
+        h = lambda c: c.public_bytes(serialization.Encoding.DER).hex()
+        cases.append(f"www.example.com {h(leaf)} {h(inter)} {h(root)} {where}-{bits}")
+open(f"{work}/cases.txt", "w").write("\n".join(cases) + "\n")
+open(f"{work}/want.txt", "w").write("\n".join(want) + "\n")
+PY
+  then
+    echo "  the chains for OpenSSL could not be made"
+    status=1
+  else
+    "$WORK/x509-release" verify "$WORK/weak/cases.txt" >"$WORK/weak/got.txt" 2>&1
+    if ! "$PY" - "$WORK/weak" <<'PY'
+import sys
+work = sys.argv[1]
+want = open(f"{work}/want.txt").read().split()
+full = open(f"{work}/got.txt").read().splitlines()
+cases = [c.split()[-1] for c in open(f"{work}/cases.txt").read().splitlines()]
+got = [g.split(":")[0] for g in full]
+bad = [(c, w, g) for c, w, g in zip(cases, want, full) if w != g.split(":")[0]]
+if len(got) != len(want) or bad:
+    print(f"  verdicts that differ from OpenSSL's ({len(got)} of {len(want)} answered):")
+    for c, w, g in bad[:7]:
+        print(f"    {c}: openssl {w}, iyi {g}")
+    sys.exit(1)
+if want != ["true"] + ["false"] * 6:
+    print(f"  OpenSSL at level 2 answered {want}, not one chain held and six refused")
+    sys.exit(1)
+print(f"  {len(want)} verdicts as OpenSSL's at level 2: 2048-bit keys held; 1024 and 1536 bits refused at the leaf, the intermediate and the root")
+PY
+    then
+      status=1
+    fi
+  fi
+fi
+
+echo
 echo "== every certificate in the CA bundle, read as Python reads it"
 BUNDLE=""
 for candidate in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
@@ -476,6 +558,12 @@ prove_broken "a constraint with an empty label taken" "an excluded constraint wi
   '        return "#{name} constrains names by #{c.inspect}, which is no name" unless c.empty? || X509Names.labels?(c, leading_dot: true)' ''
 prove_broken "a wildcard judged as one name by an excluded constraint" "a wildcard over a name in the excluded subtree: expected a refusal" \
   ' || X509Names.dns_matches?(dns, c) }' ' }'
+prove_broken "a leaf's RSA key of any size taken" "a leaf whose key is 1024-bit RSA: expected a refusal" \
+  '    weak = weak_key(leaf)
+    return weak if weak' ''
+prove_broken "an issuer's RSA key of any size taken" "an intermediate whose key is 1024-bit RSA: expected a refusal" \
+  '    weak = weak_key(issuer)
+    return weak if weak' ''
 
 echo
 if [ "$status" -eq 0 ]; then

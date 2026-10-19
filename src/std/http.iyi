@@ -50,7 +50,7 @@
 # connection over.
 # The socket parks under the runtime, so a slow client costs one fiber;
 # the listener's `close` ends `serve`. With `tls:` a `TlsServerConfig`
-# (std/tls's server: TLS 1.3, an Ed25519 or P-256 certificate) every
+# (std/tls's server: TLS 1.3, and 1.2 when its `min_version` asks) every
 # connection is TLS, its handshake first and close_notify last; inside
 # it, as in the clear, a connection that opens with HTTP/2's preface - as
 # one whose ALPN chose `h2` does - is served HTTP/2, any other HTTP/1.1.
@@ -1413,7 +1413,7 @@ pub struct Server
   # `client_header_timeout`; 0 for none. A connection handed over by
   # `Response.upgrade` waits as its protocol likes.
   #
-  # *tls*: each connection is TLS 1.3 (std/tls's `TlsServer`) under this
+  # *tls*: each connection is TLS (std/tls's `TlsServer`, 1.3 or 1.2) under this
   # configuration, its handshake held to *timeout_ms* too; one whose
   # handshake fails is closed, the client told why by an alert. Inside
   # it a connection that opens with HTTP/2's preface - as a client whose

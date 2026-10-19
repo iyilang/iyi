@@ -57,6 +57,11 @@
 # A config with `client_roots` asks each client for its certificate, and
 # a request carries the chain it presented in `peer_certificates`; an
 # `https://` request presents `HTTP.tls_config`'s `identity` when asked.
+# No early data (0-RTT), either way: a server here takes none whatever its
+# config allows - its clients send the request again after the handshake -
+# and the client keeps no session, so it sends none. A request that runs
+# twice when replayed (a POST) must never go early, and HTTP cannot tell
+# a GET with side effects from one without.
 #
 # **Errors are values.** What the other end does wrong - a malformed head,
 # a body cut short, a broken chunk, a corrupt gzip - is an `HTTPError`
@@ -1489,7 +1494,8 @@ pub struct Server
       client.read_timeout_ms = timeout_ms
       client.write_timeout_ms = timeout_ms
     end
-    secured = TlsServer.over(client, config, timeout_ms > 0 ? timeout_ms : TlsServer::HANDSHAKE_TIMEOUT_MS)
+    # Early data is never taken (the header says why).
+    secured = TlsServer.over(client, config, timeout_ms > 0 ? timeout_ms : TlsServer::HANDSHAKE_TIMEOUT_MS, early_data: false)
     return if secured.is_a?(TlsError)
     serve_connection(client, TlsStream.new(secured, "the client"), handler, listener, idle, stream_bodies, compress, timeout_ms)
     secured.close

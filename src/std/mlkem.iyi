@@ -61,13 +61,13 @@
 # real one or the implicit rejection's, as FIPS 203 requires.
 #
 # Measured on one x86_64 Linux machine, --release, the best of five runs
-# of 200 (bench/std_mlkem_exercise.sh): a key pair took 40 microseconds
-# against OpenSSL 3.5.5's 25 (its own `speed`), an encapsulation 46
-# against 16, a decapsulation 35 against 24. Decapsulation is the cheaper
+# of 200 (bench/std_mlkem_exercise.sh): a key pair took 41 microseconds
+# against OpenSSL 3.5.5's 25 (its own `speed`), an encapsulation 48
+# against 16, a decapsulation 36 against 24. Decapsulation is the cheaper
 # of the two here because a key keeps its matrix A and vector t, so its
 # encryption again samples nothing from rho; an encapsulation expands A
 # from the key it is given. Decapsulating a good ciphertext and a tampered
-# one, 2,000 of each interleaved, took a median of 33,611 and 33,600 ns.
+# one, 2,000 of each interleaved, took a median of 34,590 and 34,591 ns.
 #
 # Held by bench/std_mlkem_exercise.sh to NIST's ACVP vectors for
 # ML-KEM-768 (key generation, encapsulation, decapsulation with implicit

@@ -5,8 +5,9 @@ bench/std_tls_exercise.sh.
 
 Writes WORKDIR/roots.pem (the root its certificates chain to),
 WORKDIR/client.pem and client.key (an Ed25519 certificate and key for the
-client to present when asked) and WORKDIR/port, then answers connections
-one after another until killed.
+client to present when asked), WORKDIR/mlkem when its cryptography has
+ML-KEM-768 and WORKDIR/port, then answers connections one after another
+until killed.
 The scenario is the first label of the name the client sends by SNI:
 `ok.tls.test` is a correct handshake followed by an echo, `bad-finished`
 sends a Finished that does not match, and so on - SCENARIOS below lists
@@ -96,7 +97,24 @@ SCENARIOS = {
     "cert-entry-ext": "a certificate entry with a status_request extension nobody asked for",
     "sni-ack-data": "a server_name acknowledgement that is not empty",
     "user-canceled": "a user_canceled warning before the echo",
+    "hybrid-offer": "the ClientHello's X25519MLKEM768 share checked, then X25519's, one X25519 key in both; answered in X25519",
+    "hybrid": "a handshake in X25519MLKEM768, ML-KEM's secret before X25519's (when this cryptography has ML-KEM)",
+    "hybrid-short-ct": "an X25519MLKEM768 share of 1119 bytes",
+    "hybrid-long-ct": "an X25519MLKEM768 share of 1121 bytes",
+    "hybrid-bad-ct": "an X25519MLKEM768 ciphertext of random bytes: the client's secret is its implicit rejection's",
+    "hybrid-zero-x25519": "an X25519MLKEM768 share whose X25519 key is of small order",
+    "hrr-hybrid": "a HelloRetryRequest for X25519MLKEM768, whose share was sent",
 }
+
+# X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem): cryptography has ML-KEM
+# from 48 on, over an OpenSSL that has it. Without it the scenario that
+# completes a hybrid handshake is not served (main writes WORKDIR/mlkem
+# when it is), and the refusals, which need no ML-KEM, still are.
+try:
+    from cryptography.hazmat.primitives.asymmetric import mlkem
+    mlkem.MLKEM768PrivateKey.generate()
+except Exception:
+    mlkem = None
 
 NOW = dt.datetime.now(dt.timezone.utc)
 DAY = dt.timedelta(days=1)
@@ -214,6 +232,17 @@ def ext(type_, data):
     return struct.pack(">HH", type_, len(data)) + data
 
 
+def key_shares(exts):
+    """The ClientHello's key_share entries, in order: [(group, key)]."""
+    ks = exts.get(51, b"")
+    out, j = [], 2
+    while j < len(ks):
+        g, n = struct.unpack(">HH", ks[j:j + 4])
+        out.append((g, ks[j + 4:j + 4 + n]))
+        j += 4 + n
+    return out
+
+
 def plain(type_, content):
     return bytes([type_, 3, 3]) + struct.pack(">H", len(content)) + content
 
@@ -314,16 +343,22 @@ class Conn:
         suite = {"aes256": 0x1302, "chacha": 0x1303, "suite-unoffered": 0x1304}.get(s, 0x1301)
         schedule = Schedule(0x1301 if suite == 0x1304 else suite)
         groups = exts.get(10, b"")
-        if s in ("hrr-cookie", "hrr-group", "hrr-p256"):
+        if s == "hybrid-offer":
+            offered = [int.from_bytes(groups[k:k + 2], "big") for k in range(2, len(groups), 2)]
+            assert offered == [0x11ec, 0x1d, 0x17], f"supported_groups {offered}, not X25519MLKEM768, X25519, secp256r1"
+            entries = key_shares(exts)
+            assert [(g, len(k)) for g, k in entries] == [(0x11ec, 1216), (0x1d, 32)], f"key shares {[(g, len(k)) for g, k in entries]}"
+            assert entries[0][1][1184:] == entries[1][1], "the hybrid share's X25519 key is not the X25519 share"
+        if s in ("hrr-cookie", "hrr-group", "hrr-p256", "hrr-hybrid"):
             offered = [int.from_bytes(groups[k:k + 2], "big") for k in range(2, len(groups), 2)]
             assert 0x17 in offered, f"secp256r1 not among the client's groups {offered}"
             retry_random = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
             asked = {"hrr-cookie": ext(44, struct.pack(">H", 8) + b"cookie!!"), "hrr-group": ext(51, b"\x00\x18"),
-                     "hrr-p256": ext(51, b"\x00\x17")}[s]
+                     "hrr-p256": ext(51, b"\x00\x17"), "hrr-hybrid": ext(51, b"\x11\xec")}[s]
             e = ext(43, b"\x03\x04") + asked
             hrr = message(2, b"\x03\x03" + retry_random + bytes([len(sid)]) + sid + struct.pack(">HB", suite, 0) + struct.pack(">H", len(e)) + e)
             self.sock.sendall(plain(22, hrr))
-            if s == "hrr-group":
+            if s in ("hrr-group", "hrr-hybrid"):
                 return
             first = schedule.digest(ch)
             ch2, sid, suites, sni, share, alpn, exts = self.client_hello()
@@ -348,6 +383,19 @@ class Conn:
             other = ec_key if s == "hrr-p256" else ec.generate_private_key(ec.SECP256R1())
             mine = other.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
             e += ext(51, b"\x00\x17" + struct.pack(">H", 65) + mine)
+        elif s.startswith("hybrid") and s != "hybrid-offer":
+            # The client's hybrid share is its ML-KEM-768 encapsulation key,
+            # then its X25519 key; this side answers the ciphertext, then
+            # its own X25519 key.
+            hybrid = dict(key_shares(exts)).get(0x11ec)
+            assert hybrid is not None and len(hybrid) == 1216, "no X25519MLKEM768 share of 1216 bytes"
+            if s == "hybrid":
+                kem_secret, ciphertext = mlkem.MLKEM768PublicKey.from_public_bytes(hybrid[:1184]).encapsulate()
+            else:
+                ciphertext = os.urandom(1088)
+            mine = ciphertext + (bytes(32) if s == "hybrid-zero-x25519" else mine)
+            mine = {"hybrid-short-ct": mine[:1119], "hybrid-long-ct": mine + b"\x00"}.get(s, mine)
+            e += ext(51, b"\x11\xec" + struct.pack(">H", len(mine)) + mine)
         else:
             e += ext(51, b"\x00\x1d" + struct.pack(">H", 32) + mine)
         if s == "sh-extension":
@@ -371,11 +419,18 @@ class Conn:
             return
         self.sock.sendall(record)
         if s in ("tls12", "no-echo", "suite-unoffered", "zero-share", "compression", "sh-extension", "oversize", "sh-wrong-group",
-                 "sh-and-more"):
+                 "sh-and-more", "hybrid-short-ct", "hybrid-long-ct", "hybrid-zero-x25519"):
             return
         transcript += sh
         if s == "hrr-p256":
             shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), peer_point))
+        elif s == "hybrid":
+            # The draft's section 4.3: ML-KEM's secret, then X25519's.
+            shared = kem_secret + key.exchange(x25519.X25519PublicKey.from_public_bytes(hybrid[1184:]))
+        elif s == "hybrid-bad-ct":
+            # The client decapsulates a random ciphertext to J(z || c), which
+            # this side cannot know: its keys are not the client's.
+            shared = os.urandom(64)
         else:
             shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(share))
         early = schedule.extract(bytes(schedule.size), bytes(schedule.size))
@@ -621,6 +676,9 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
     server.listen(16)
+    if mlkem:
+        with open(os.path.join(work, "mlkem"), "w") as f:
+            f.write("cryptography has ML-KEM-768\n")
     with open(os.path.join(work, "port"), "w") as f:
         f.write(str(server.getsockname()[1]))
     while True:

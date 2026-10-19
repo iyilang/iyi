@@ -31,7 +31,7 @@ import time
 
 sys.dont_write_bytecode = True  # the gate leaves bench/ as it found it
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from std_tls_server import Cipher, Schedule, ext, message, plain  # noqa: E402
+from std_tls_server import Cipher, Schedule, ext, message, mlkem, plain  # noqa: E402
 
 from cryptography import x509  # noqa: E402
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
@@ -124,7 +124,30 @@ SCENARIOS = {
     "oversize": ("a plaintext record past 2^14 bytes", ("alert", 22)),
     "not-hello": ("a ServerHello where the ClientHello belongs", ("alert", 10)),
     "cut-hello": ("a ClientHello whose extensions run past its end", ("alert", 50)),
+    # X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem): the two that finish a
+    # handshake need ML-KEM here, which cryptography has from 48 on, over
+    # an OpenSSL that has it; the refusals need none.
+    "hybrid": ("X25519MLKEM768 and X25519 shares: X25519MLKEM768 taken, ML-KEM's secret first", ("held", "group=X25519MLKEM768")),
+    "hybrid-hrr": ("X25519MLKEM768 listed, an X25519 share alone: a HelloRetryRequest for X25519MLKEM768",
+                   ("held", "group=X25519MLKEM768")),
+    "hybrid-short-share": ("an X25519MLKEM768 share of 1215 bytes", ("alert", 47)),
+    "hybrid-long-share": ("an X25519MLKEM768 share of 1217 bytes", ("alert", 47)),
+    "hybrid-modulus": ("an X25519MLKEM768 share whose ML-KEM key fails FIPS 203's modulus check", ("alert", 47)),
+    "hybrid-zero-x25519": ("an X25519MLKEM768 share whose X25519 key is of small order", ("alert", 47)),
 }
+NEEDS_MLKEM = ("hybrid", "hybrid-hrr")
+
+
+def fake_ek(first=None):
+    """An ML-KEM-768 encapsulation key's shape without ML-KEM: 768 random
+    12-bit coefficients below q (or the first one given), then 32 bytes of
+    rho. Nobody can decapsulate to it; it is for the refusals."""
+    q = 3329
+    values = [int.from_bytes(os.urandom(2), "big") % q for _ in range(768)]
+    if first is not None:
+        values[0] = first
+    packed = b"".join(bytes([a & 255, (a >> 8) | ((b & 15) << 4), b >> 4]) for a, b in zip(values[0::2], values[1::2]))
+    return packed + os.urandom(32)
 
 
 # The scenarios against a server that asks for a client's certificate.
@@ -274,7 +297,9 @@ def scenario(c, name):
     ec_share = ec_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
     p384_share = b"\x04" + os.urandom(96)
     hrr_names = ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session", "hrr-p256", "hrr-other-suite", "hrr-early-again",
-                 "junk-after-hrr")
+                 "junk-after-hrr", "hybrid-hrr")
+    kem_key = mlkem.MLKEM768PrivateKey.generate() if mlkem and name in NEEDS_MLKEM else None
+    kem_share = (kem_key.public_key().public_bytes_raw() if kem_key else fake_ek()) + share
     p256_names = ("p256-share", "hrr-p256")
     session = os.urandom(32)
     kw = {}
@@ -287,6 +312,14 @@ def scenario(c, name):
     if name in hrr_names:
         kw["groups"] = (0x18, 0x17) if name == "hrr-p256" else (0x18, 0x1d)
         kw["shares"] = {0x18: p384_share}
+    if name.startswith("hybrid"):
+        kw["groups"] = (0x11ec, 0x1d)
+        kw["shares"] = {0x11ec: kem_share, 0x1d: share}
+    if name == "hybrid-hrr": kw["shares"] = {0x1d: share}
+    if name == "hybrid-short-share": kw["shares"] = {0x11ec: kem_share[:1215], 0x1d: share}
+    if name == "hybrid-long-share": kw["shares"] = {0x11ec: kem_share + b"\x00", 0x1d: share}
+    if name == "hybrid-modulus": kw["shares"] = {0x11ec: fake_ek(3329) + share, 0x1d: share}
+    if name == "hybrid-zero-x25519": kw["shares"] = {0x11ec: fake_ek() + bytes(32), 0x1d: share}
     if name == "p256-share":
         kw["groups"] = (0x17,)
         kw["shares"] = {0x17: ec_share}
@@ -384,7 +417,7 @@ def scenario(c, name):
     assert exts.get(43) == b"\x03\x04", "no TLS 1.3 in the ServerHello"
     schedule = Schedule(suite)
     if random == HELLO_RETRY:
-        wanted = b"\x00\x17" if name == "hrr-p256" else b"\x00\x1d"
+        wanted = {"hrr-p256": b"\x00\x17", "hybrid-hrr": b"\x11\xec"}.get(name, b"\x00\x1d")
         assert exts.get(51) == wanted, f"a HelloRetryRequest asking for {exts.get(51)!r}"
         assert name in hrr_names, "a HelloRetryRequest nobody needed"
         digest = schedule.digest(ch)
@@ -403,6 +436,8 @@ def scenario(c, name):
             again["suites"] = tuple(x for x in (0x1301, 0x1302, 0x1303) if x != suite)
         if name == "hrr-p256":
             again["shares"] = {0x17: ec_share}
+        elif name == "hybrid-hrr":
+            again["shares"] = {0x11ec: kem_share}
         elif name != "hrr-no-share":
             again["shares"] = {0x1d: share}
         if name == "hrr-other-session":
@@ -419,6 +454,12 @@ def scenario(c, name):
     if name in p256_names:
         assert group == 0x17 and length == 65, "the server's share is not secp256r1"
         shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), exts[51][4:]))
+    elif name in NEEDS_MLKEM:
+        # The draft's sections 4.2 and 4.3: the ciphertext, then the
+        # server's X25519 key; ML-KEM's secret, then X25519's.
+        assert group == 0x11ec and length == 1120, f"the server's share is group {group:#x}, {length} bytes, not X25519MLKEM768's 1120"
+        theirs = exts[51][4:]
+        shared = kem_key.decapsulate(theirs[:1088]) + key.exchange(x25519.X25519PublicKey.from_public_bytes(theirs[1088:]))
     else:
         assert group == 0x1d and length == 32, "the server's share is not X25519"
         shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(exts[51][4:]))
@@ -587,7 +628,11 @@ def main():
             raise SystemExit(f"no option {rest[0]}")
     names = rest or ([n for n in MTLS if n != "mtls-optional-none"] if MTLS_DIR else list(SCENARIOS))
     failures = 0
+    skipped = 0
     for name in names:
+        if name in NEEDS_MLKEM and mlkem is None:
+            skipped += 1
+            continue
         what, answer = MTLS[name] if name in MTLS else SCENARIOS[name]
         kind, want = answer[key_kind] if isinstance(answer, dict) else answer
         try:
@@ -605,7 +650,9 @@ def main():
         else:
             failures += 1
             print(f"FAIL {name} ({what}): expected {kind} {want!r}, got {outcome!r}")
-    print(f"{len(names) - failures} of {len(names)} scenarios answered as they must")
+    asked = len(names) - skipped
+    unasked = f", {skipped} not asked: this cryptography has no ML-KEM (it has from 48, on an OpenSSL with it)" if skipped else ""
+    print(f"{asked - failures} of {asked} scenarios answered as they must{unasked}")
     sys.exit(1 if failures else 0)
 
 

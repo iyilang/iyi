@@ -13,10 +13,11 @@
 #                       for its reason;
 #   get PORT ROOTS HOST [ALPN|-] [CHAIN KEY]
 #                       GET / over a connection to 127.0.0.1:PORT for HOST,
-#                       its status line, suite, protocol and version
+#                       its status line, suite, protocol, version and group
 #                       printed, or why it was refused; with CHAIN and KEY,
 #                       presented if the server asks; TLS 1.2 offered too
-#                       when TLS_MIN_VERSION is 1.2;
+#                       when TLS_MIN_VERSION is 1.2, X25519MLKEM768 not
+#                       offered when TLS_POST_QUANTUM is 0;
 #   renegotiate PORT ROOTS HOST
 #                       "first", a read that times out, "second", a read:
 #                       what a TLS 1.2 server that sends a HelloRequest
@@ -114,7 +115,7 @@ SCENARIOS = [
   {"certreq-no-sigalgs", false, "a CertificateRequest with no signature_algorithms (missing_extension)"},
   {"cert-many", false, "a Certificate of more than 10 certificates (bad_certificate)"},
   {"slow-server", false, "took past the time given to the handshake"},
-  {"sh-wrong-group", false, "a ServerHello's share in secp256r1, where the share sent was X25519's (illegal_parameter)"},
+  {"sh-wrong-group", false, "a ServerHello's share in secp256r1, where the shares sent were X25519MLKEM768's and X25519's (illegal_parameter)"},
   {"sh-and-more", false, "handshake bytes after the ServerHello in its record (unexpected_message)"},
   {"ku-no-sign", false, "does not allow digitalSignature, which a CertificateVerify is (bad_certificate)"},
   {"keyupdate-bad", true, "read: a KeyUpdate asking 2 (illegal_parameter)"},
@@ -122,7 +123,16 @@ SCENARIOS = [
   {"cert-entry-ext", false, "a certificate entry with extensions nobody asked for (unsupported_extension)"},
   {"sni-ack-data", false, "a server_name acknowledgement that is not empty (decode_error)"},
   {"user-canceled", true, ""},
+  {"hybrid-offer", true, ""}, {"hybrid", true, ""},
+  {"hybrid-short-ct", false, "an X25519MLKEM768 share of 1119 bytes, not 1120 (illegal_parameter)"},
+  {"hybrid-long-ct", false, "an X25519MLKEM768 share of 1121 bytes, not 1120 (illegal_parameter)"},
+  {"hybrid-bad-ct", false, "a record that does not decrypt (bad_record_mac)"},
+  {"hybrid-zero-x25519", false, "the server's X25519MLKEM768 share: its X25519 key gives no secret (illegal_parameter)"},
+  {"hrr-hybrid", false, "a HelloRetryRequest for the X25519MLKEM768 share already sent (illegal_parameter)"},
 ]
+# The key exchange group a scenario that holds must have agreed on, where
+# it is not X25519.
+GROUPS = {"hrr-p256" => "secp256r1", "hybrid" => "X25519MLKEM768"}
 
 CLIENT_HELLO           = "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001"
 SERVER_HELLO           = "020000560303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304"
@@ -168,7 +178,13 @@ if args.size > 0 && args[0] == "scenarios"
   config12.min_version = TlsVersion::TLS12
   held = 0
   refused = 0
+  skipped = 0
   SCENARIOS.each do |s|
+    # A hybrid handshake needs ML-KEM at the scripted server too.
+    if s[0] == "hybrid" && !File.file?(args[1] + "/mlkem")
+      skipped = skipped + 1
+      next
+    end
     socket = IyiSocket.connect("127.0.0.1", port)
     check socket.is_a?(IyiSocket), "#{s[0]}: no connection to the scripted server"
     next unless socket.is_a?(IyiSocket)
@@ -214,6 +230,8 @@ if args.size > 0 && args[0] == "scenarios"
         held = held + 1
         next
       end
+      want = GROUPS[s[0]]? || "X25519"
+      check conn.named_group == want, "#{s[0]}: the group agreed is #{conn.named_group.inspect}, not #{want}"
       conn.write("hello")
       got = drain(conn)
       if s[2].starts_with?("read: ")
@@ -234,6 +252,7 @@ if args.size > 0 && args[0] == "scenarios"
     end
   end
   puts "  #{held} handshakes held and echoed, #{refused} refused, each for its reason"
+  puts "  the hybrid handshake not asked: the scripted server's cryptography has no ML-KEM (it has from 48, on an OpenSSL with it)" if skipped > 0
   exit 0
 end
 
@@ -243,6 +262,7 @@ if args.size > 0 && args[0] == "get"
   config.alpn = [args[4]] if args.size > 4 && args[4] != "-"
   config.identity = TlsIdentity.from_pem(File.read(args[5]), File.read(args[6])).or_panic if args.size > 6
   config.min_version = TlsVersion::TLS12 if ENV["TLS_MIN_VERSION"]? == "1.2"
+  config.post_quantum = false if ENV["TLS_POST_QUANTUM"]? == "0"
   socket = IyiSocket.connect("127.0.0.1", args[1].to_i)
   unless socket.is_a?(IyiSocket)
     puts "no connection"
@@ -258,7 +278,7 @@ if args.size > 0 && args[0] == "get"
   label = ENV["TLS_EXPORT"]?
   exported = label ? " exported=#{hex_of(conn.export_keying_material(label, [] of UInt8, 16))}" : ""
   got = drain(conn)
-  puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}#{exported} #{conn.version}"
+  puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}#{exported} #{conn.version} group=#{conn.named_group}"
   conn.close
   exit 0
 end
@@ -305,11 +325,12 @@ end
 
 # What the server says of a connection: the name asked for, the protocol,
 # the suite, the client's certificate, the certificate it was shown under,
-# and 16 bytes exported for "EXPERIMENTAL iyi" (RFC 8446 section 7.5).
+# 16 bytes exported for "EXPERIMENTAL iyi" (RFC 8446 section 7.5), and the
+# key exchange group.
 def agreed(conn : TlsServer) : String
   peer = conn.peer_certificates.empty? ? "-" : conn.peer_certificates[0].subject_name
   exported = hex_of(conn.export_keying_material("EXPERIMENTAL iyi", [] of UInt8, 16))
-  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer} shown=#{conn.identity.leaf.subject_name} exported=#{exported}"
+  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer} shown=#{conn.identity.leaf.subject_name} exported=#{exported} group=#{conn.named_group}"
 end
 
 def serve_one(conn : TlsServer) : String

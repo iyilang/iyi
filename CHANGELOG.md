@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **std/p384: ECDSA signatures and ECDH on P-384, in constant time.**
+  P-384 was checked (std/ecdsa, variable-time and public values alone)
+  and never signed with or agreed on: a P-384 key could not be a server's.
+  - `P384PrivateKey` is std/p256's design at six limbs - Montgomery
+    arithmetic with masked final subtractions, complete projective
+    formulas, 96 windows of four bits with every table entry read - in a
+    module of its own, as a limb count chosen at run time would put each
+    number on the heap.
+  - `sign` is RFC 6979's, the nonce two HMAC blocks wide under SHA-256;
+    `sign_digest` signs a digest already taken; `shared_secret` refuses a
+    point off the curve, a coordinate of p or more, and an answer at
+    infinity; `from_pkcs8` and `from_sec1` read OpenSSL's keys.
+  - Measured `--release`: a key in 0.348 ms, ECDH in 0.341 ms, a
+    signature in 0.377 ms; OpenSSL 3.5.5 here 0.091, 0.212 and 0.124 ms.
+
+  Held by `bench/std_p384_exercise.sh`: RFC 6979's A.2.6 byte for byte,
+  NIST's 25 CDH, 10 KeyPair and 12 PKV vectors, 1,500 signatures and 300
+  digests equal to Python's deterministic ECDSA, 500 shared secrets both
+  ways, Wycheproof's 790 ECDH cases, and 22 broken copies - the infinity
+  check among them, shown holding (0, 0) off once the curve check is
+  taken out.
+
 ## 0.18.0 — 2026-10-18
 
 **iyi's own library reaches the network by itself: TLS 1.3 at both ends,

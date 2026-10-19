@@ -3517,6 +3517,154 @@ WASI 0.2/0.3 component-model async execution supporting stackful fibers directly
 Neither a sequential imitation nor a post-link bytecode transformation is
 acceptable.
 
+#### III.4.13 Tasks across cores: **DECIDED — `spawn_parallel`, a pool of workers, a task placed when it starts and never moved; `Share` gates its block**
+
+0.18.0 ended with "the scheduler that spreads tasks across cores comes after
+this release". Until this section every task ran on the thread that spawned
+it: one scheduler per thread (III.4.8, III.4.11), and a program's tasks all on
+its main thread's, interleaving at parks. The pieces a parallel scheduler
+stands on were already there and measured — a kernel thread of the
+runtime's own that the collector stops and scans (III.4.11, GC_DESIGN.md
+Stage 4), a scheduler whose every field is one thread's (`IyiSchedulerState`),
+an allocator cache per thread, `Share` gating what a thread's block reaches
+(III.4.4) — and what was missing was a way for a *task* to stand on one of
+those threads. This is the decision, written before the code, in eight parts.
+
+**1. The shape: M:N over a pool of workers, a task placed when it starts.**
+A program that asks for parallelism gets a pool of worker threads, each an
+`IyiThread` the runtime starts with a scheduler of its own: its own run
+queue, sleep heap, poller and stack pool, exactly the state III.4.11 gave
+every thread. A parallel task waits in a queue until a worker is free to
+start it — the queue of the worker whose task spawned it, the pool's
+injection queue when a thread outside the pool spawned it, or, for a worker
+with nothing of its own, another worker's queue, stolen from — and **once it
+has run its first instruction it stays on that worker until it ends**. It
+parks and resumes on the thread that started it. That is the decision this
+section is most likely to be asked about, so here is why it is not Go's,
+which moves a parked goroutine to whichever thread is free. Go's compiler
+knows a goroutine can change threads under it; iyi's frames are LLVM's, and
+LLVM takes a thread-local's address as fixed for the life of a function: a
+frame that parked holding the address of its thread's allocator cache would
+resume on another thread still holding it, and two threads would allocate
+from one cache. iyi's codegen already builds on the fact, reading a
+thread-local off the thread pointer with no accessor on Linux because "an
+iyi fiber belongs to its scheduler thread and never moves"
+(`codegen.cr#get_global`); and a scheduler thread with nothing to run waits
+in its poller *on the stack of the fiber that parked last*, which another
+thread could not resume. Placement at the start is where the balance comes
+from instead: a worker that finishes a task takes the next unstarted one,
+so a fan-out of CPU-bound tasks — the program parallelism is for — spreads
+over every worker as fast as the workers free up. What it gives up is the
+rebalancing of tasks that are already running: a task that parks often stays
+where it began.
+
+**2. The door is its own verb, and `Share` gates it as it gates a thread.**
+`g.spawn_parallel { }` is a task of the group like any other — joined at the
+scope's end, cancelled with it, its answer through `value`, typed by `end!`
+(III.4.9) — whose block may run on another core. `g.spawn` does not change:
+a task on the spawner's thread, interleaving at parks only, with no `Share`
+gate, so III.4.5's "a task appending to a module-level `Array` compiles and
+runs" stays true of it. The parallel block is checked by the compiler
+exactly as `IyiThread.start`'s is (III.4.4): every value it captures must be
+`Share`, a captured local must be assigned once — not by the block, not
+after the spawn, not in a loop or block that spawns again — `self` when the
+block reaches it, and every constant and class variable it names. Two
+alternatives lost. Every spawn parallel: the tasks that share their group's
+mutable state legally today would be refused, or raced. And a spawn made
+parallel by the compiler whenever its captures happen to be `Share`: the
+check has a known edge — a method the block calls that touches module
+state is not seen (III.4.4's own words) — and a spawn that moved onto two
+cores because its captures happened to qualify would race that state with
+no line of the program saying so. Rust's tokio arrived at the same pair:
+`spawn` demands `Send` and work-steals, `spawn_local` demands nothing and
+stays.
+
+A task `g.spawn` starts *inside* a parallel task is on that task's worker,
+because a spawn's thread is its spawner's and a started task never moves;
+so the parent and the child may share the parent's non-`Share` locals, as
+any task and its spawner may, and neither can move away from the other.
+
+**3. What crosses, and what does not need to.** Across a parallel boundary:
+`Atomic(T)`, `Mutex(T)`, `List(T)`, immutable values, and now `Channel(T)`:
+a channel is a synchronised type, `@[Share]` and trusted whenever `T` is
+`Share` — III.4.6's "`Channel(T)` carries over, with `T : Share`", which was
+waiting for a channel that crosses threads. A task's *answer* need not be
+`Share`: it is handed over once, after the task has ended, and the join is
+what orders the handover — the task's last write happens before the reader's
+`value` returns, through the scheduler's lock — so a parallel task may build
+an `Array` and answer it. `IyiGroup` and `IyiTask` are not `Share`, so a
+parallel block cannot spawn on its parent's group or read a sibling's
+handle: it opens a group of its own.
+
+**4. How many workers, and how a program says.** By default as many as
+the cores the process may run on — the affinity mask's count on Linux and
+Windows, `hw.ncpu` on darwin, the number the parallel marker already sizes
+its helpers by — which is GC_DESIGN.md's rule from the thread floor: the
+mutator side is M:N with M bounded by the cores, or a resume after a stop is
+milliseconds by construction. The main thread is not one of them: it is
+usually the one waiting in the join. A program sets the count with
+`IYI_WORKERS=n` in its environment, Go's `GOMAXPROCS`, or with
+`IyiWorkers.count = n` before its first parallel task; a count asked for
+after the pool has started, and different from it, is refused by panic,
+since the pool does not shrink. The workers start at the first
+`spawn_parallel`, so a program without one has no pool and no new thread.
+
+**5. A poller per worker, not a shared one.** An IO wait is the waiting
+task's thread's — the fd is registered with that thread's epoll, kqueue or
+completion port, as it always was — because the task resumes there. A
+shared poller would hand every readiness event from the thread that polled
+it to the thread the task is on, a cross-thread wake per event, to save a
+file descriptor per worker. The worker owns its poller, its sleep heap and
+its stacks, and nothing of them is locked.
+
+**6. Waking across threads, and the one lock.** What does cross threads is
+a wake: a sender on one worker hands a value to a receiver parked on
+another, a task's end wakes the owner joining its group, a cancel reaches a
+task on another thread. Each scheduler thread gets an inbox, the fibers
+other threads have woken, and a doorbell its poller waits on beside its
+fds — an eventfd on Linux, an `EVFILT_USER` event on darwin's kqueue, a
+posted completion on Windows' port. A thread with nothing to run marks
+itself idle, *after* finding its inbox empty and under the lock its wakers
+take, and a waker rings only an idle thread: so no wake is lost between
+the look and the wait, and a busy thread is never rung. A cancel of a task
+parked on another thread sets its flag and is delivered to the task's own
+thread, which takes it out of its own sleep heap or poller; nothing touches
+another thread's private lists. Channels, groups, the joiner chains, the
+inboxes and the pool's queues are behind **one runtime-wide scheduler
+lock**, taken only once a second scheduler thread exists — a program with
+one pays a load and a branch. One lock rather than one per channel because
+`select` parks on several channels and a cancel walks groups whose tasks
+are on several threads: one lock has no order to get wrong, and the work it
+serialises is a few pointer moves. Its price is contention in a program
+that sends on channels from many cores at once; that is measured, not
+assumed away.
+
+**7. The collector stops and scans a worker as any thread.** A worker is an
+`IyiThread`: a registered line, stopped by the stop signal (a suspend on
+Windows) wherever it is — running a task, or waiting in its poller, whose
+`EINTR` is already a wakeup with no news — its spill and its stack scanned
+from the stopped sp to the top of whichever mapping holds it, a fiber's or
+its own, and every parked fiber on every worker scanned through the fiber
+registry, as III.4.11 has it. An unstarted parallel task has no stack yet,
+and its block is rooted through the registry by its fiber's proc. Nothing
+in the collector changes; the stop already took every thread a program had.
+
+**8. Deadlock, across threads.** One thread used to know it was
+deadlocked when it had nothing to run and nothing to wait on. With wakes
+across threads that is no longer enough — another thread may wake it — so
+a deadlock is named when every scheduler thread is idle with no sleeper and
+no IO wait, no inbox holds a fiber and no parallel task is waiting to
+start. A worker that finds that rings a thread outside the pool, whose root
+fiber reports it as before (`deadlock: every fiber is blocked`).
+
+**Not built, and said so.** No task moves once started (part 1); no task is
+preempted, so a CPU-bound task holds its worker until it parks or ends, as
+a task always held its thread; a worker sleeping in the kernel on a
+contended `Mutex` holds its own tasks while it sleeps. wasm32 has no
+runtime (III.4.12) and no pool, and a build under `-Dgc_none` or
+`-Dgc_boehm`, which has no `IyiThread`, refuses `spawn_parallel` at compile
+time rather than run it on one thread.
+
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 
 II.9 left this open with a concrete case: Kemal registers routes as a side

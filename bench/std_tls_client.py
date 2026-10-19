@@ -147,6 +147,24 @@ SCENARIOS = {
     "resume-no-modes": ("a ticket and no psk_key_exchange_modes", ("alert", 109)),
     "resume-binders": ("two identities and one binder", ("alert", 47)),
     "resume-not-last": ("a ticket whose pre_shared_key is not the last extension", ("alert", 47)),
+    # Early data (0-RTT) under a ticket of the first connection, which
+    # allows 16 KiB. Taken: EncryptedExtensions says so, EndOfEarlyData goes
+    # under the early keys, and the server's answer names what came early;
+    # refused: the handshake goes on, nothing early named.
+    "early-ok": ("early data under the ticket", ("held", ('early="early:ping"', "resumed=yes scripted-resumed=yes"))),
+    "early-request": ("a request as early data, answered before this side's Finished (0.5-RTT)",
+                      ("held", ('early="GET / HTTP/1.0\\r\\n\\r\\n"', "resumed=yes"))),
+    "early-replay": ("the ClientHello and early data of a connection whose early data was taken, sent again: refused",
+                     ("held", ('early=""', "resumed=yes scripted-resumed=yes"))),
+    "early-too-much": ("16,385 bytes early, past the 16,384 the ticket allows", ("alert", 10)),
+    "early-bad-record": ("an early record one bit off, after the server took early data", ("alert", 20)),
+    "early-finished-early": ("Finished under the early keys where EndOfEarlyData belongs", ("alert", 10)),
+    "early-stale": ("early data with a ticket age 20 s off the server's count: refused", ("held", ('early=""', "resumed=yes"))),
+    "early-alpn": ("early data under an http/1.1 ticket, h2 chosen now: refused", ("held", ('early=""', "alpn=h2", "resumed=yes"))),
+    "early-suite": ("early data under an AES-128-GCM ticket, ChaCha20-Poly1305 chosen now: refused",
+                    ("held", ('early=""', "TLS_CHACHA20_POLY1305_SHA256", "resumed=yes"))),
+    "early-second": ("early data with the ticket second among the identities: resumed, early data refused", ("held", ('early=""', "resumed=yes"))),
+    "early-hrr": ("early data, then a HelloRetryRequest: refused", ("held", ('early=""', "resumed=yes"))),
 }
 
 
@@ -172,6 +190,8 @@ MTLS = {
     # The client's certificate goes with the session: resumed, the server
     # names it as the first handshake checked it.
     "mtls-resume": ("a ticket of a connection that presented a P-256 certificate", ("held", ("peer=CN=client", "resumed=yes scripted-resumed=yes"))),
+    # Asked of a server that takes no early data: its tickets allow none.
+    "mtls-early-unallowed": ("early data under a ticket that allows none: refused", ("held", ('early=""', "peer=CN=client", "resumed=yes"))),
 }
 MTLS_DIR = None
 
@@ -218,7 +238,9 @@ class Client:
                 ticket = body[at + 2:at + 2 + length]
                 rest = body[at + 2 + length:]
                 assert 0 < lifetime <= 604800, f"a ticket lifetime of {lifetime} s"
-                assert ticket and len(ticket) == length and rest == b"\x00\x00", f"a NewSessionTicket laid out wrong: {body.hex()}"
+                # No extension, or early_data alone with its max_early_data_size.
+                assert ticket and len(ticket) == length and (rest == b"\x00\x00" or (len(rest) == 10 and rest[:6] == b"\x00\x08\x00\x2a\x00\x04")), \
+                    f"a NewSessionTicket laid out wrong: {body.hex()}"
                 self.tickets.append((lifetime, age_add, nonce, ticket))
                 self.received = time.monotonic()
 
@@ -352,7 +374,8 @@ def parse_server_hello(sh):
 
 
 def run(name, port, root):
-    if name.startswith("resume") or name == "mtls-resume":
+    if name.startswith("resume") or name in ("mtls-resume", "mtls-early-unallowed") or \
+            (name.startswith("early-") and name not in ("early-skip", "early-after-hrr", "early-malformed")):
         return resume(name, port, root)
     c = Client(port, root)
     try:
@@ -363,13 +386,14 @@ def run(name, port, root):
 
 def resume(name, port, root):
     """A first connection, its tickets kept, then a second of `name` that
-    offers one; the second's outcome, and whether this side resumed."""
+    offers one; the second's outcome, and whether this side resumed. For
+    early-replay, a third sends the second's first flight again."""
     first = Client(port, root)
-    extra = {"suites": (0x1301,)} if name == "resume-other-hash" else {}
-    if name == "resume-alpn":
+    extra = {"suites": (0x1301,)} if name in ("resume-other-hash", "early-suite") else {}
+    if name in ("resume-alpn", "early-alpn"):
         extra["alpn"] = ["http/1.1"]
     try:
-        outcome = scenario(first, "mtls-ok" if name == "mtls-resume" else "first", extra=extra)
+        outcome = scenario(first, "mtls-ok" if name.startswith("mtls-") else "first", extra=extra)
     finally:
         first.sock.close()
     assert outcome[0] == "held" and len(first.tickets) == 2, f"the first connection: {outcome!r}, {len(first.tickets)} tickets"
@@ -379,12 +403,19 @@ def resume(name, port, root):
         outcome = scenario(second, name, offer=offer)
     finally:
         second.sock.close()
+    if name == "early-replay" and outcome[0] == "held":
+        third = Client(port, root)
+        try:
+            outcome = scenario(third, name, offer=offer, replay=second.first_flight)
+        finally:
+            third.sock.close()
+        second = third
     if outcome[0] != "held":
         return outcome
     return "held", outcome[1].rstrip() + f" scripted-resumed={'yes' if second.resumed else 'no'}", outcome[2]
 
 
-def scenario(c, name, offer=None, extra=None):
+def scenario(c, name, offer=None, extra=None, replay=None):
     """One connection of `name`. With `offer`, what a first connection of
     the same scenario kept (its tickets, resumption master secret, suite
     and when the tickets came), a ticket of it is offered as `name` says;
@@ -395,7 +426,7 @@ def scenario(c, name, offer=None, extra=None):
     ec_share = ec_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
     p384_share = b"\x04" + os.urandom(96)
     hrr_names = ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session", "hrr-p256", "hrr-other-suite", "hrr-early-again",
-                 "junk-after-hrr", "resume-hrr")
+                 "junk-after-hrr", "resume-hrr", "early-hrr")
     p256_names = ("p256-share", "hrr-p256")
     session = os.urandom(32)
     kw = {}
@@ -411,6 +442,7 @@ def scenario(c, name, offer=None, extra=None):
     if name == "p256-share":
         kw["groups"] = (0x17,)
         kw["shares"] = {0x17: ec_share}
+    early_data = None
     if name == "both-shares":
         kw["groups"] = (0x17, 0x1d)
         kw["shares"] = {0x17: ec_share, 0x1d: share}
@@ -466,6 +498,8 @@ def scenario(c, name, offer=None, extra=None):
         if name == "resume-tampered":
             ticket = ticket[:-1] + bytes([ticket[-1] ^ 1])
         entries = [(ticket, (age + age_add) & 0xFFFFFFFF, secret)]
+        if name == "early-stale":
+            entries = [(ticket, (age + 20000 + age_add) & 0xFFFFFFFF, secret)]
         if name == "resume-second":
             entries = [(os.urandom(len(ticket)), 0, None)] + entries
         if name == "resume-binders":
@@ -482,7 +516,18 @@ def scenario(c, name, offer=None, extra=None):
         if name == "resume-other-sni": kw["sni"] = "other.test"
         if name == "resume-alpn": kw["alpn"] = ["h2"]
         if name in ("resume-no-sigalgs", "resume-expired-no-sigalgs"): kw["sigalgs"] = None
-    ch = client_hello(session, share, **kw)
+        if name.startswith("early") or name == "mtls-early-unallowed":
+            kw["early"] = True
+            if name == "early-alpn": kw["alpn"] = ["h2"]
+            if name == "early-suite": kw["suites"] = (0x1303, 0x1301)
+            if name == "early-second": kw["psk"] = [(os.urandom(len(ticket)), 0, None)] + kw["psk"]
+            early_data = {"early-request": b"GET / HTTP/1.0\r\n\r\n", "early-too-much": bytes(16385)}.get(name, b"early:ping")
+    if replay is not None:
+        # The same ClientHello, and its key share's key, for the replay.
+        ch, key, sent = replay
+        session = ch[39:39 + ch[38]]
+    else:
+        ch = client_hello(session, share, **kw)
     if name == "slow-hello":
         record = bytes([22, 3, 1]) + struct.pack(">H", len(ch)) + ch
         started = time.monotonic()
@@ -514,11 +559,30 @@ def scenario(c, name, offer=None, extra=None):
     elif name == "hello-and-more":
         more = ch + message(20, bytes(32))
         c.sock.sendall(bytes([22, 3, 1]) + struct.pack(">H", len(more)) + more)
+    elif replay is not None:
+        c.sock.sendall(sent)
     else:
-        c.sock.sendall(bytes([22, 3, 1]) + struct.pack(">H", len(ch)) + ch)
+        sent = bytes([22, 3, 1]) + struct.pack(">H", len(ch)) + ch
+        c.sock.sendall(sent)
+    early_writer = None
+    if early_data is not None:
+        # The early data (RFC 8446 section 4.2.10): a ChangeCipherSpec, then
+        # records under the client's early traffic keys - the ticket's suite,
+        # from its PSK, over this ClientHello alone.
+        held = Schedule(offer["suite"])
+        early_writer = Cipher(held, held.derive(held.extract(bytes(held.size), kw["psk"][0][2] or bytes(held.size)), b"c e traffic", ch))
+        if replay is None:
+            early = plain(20, b"\x01")
+            for k in range(0, len(early_data), 16384):
+                early += early_writer.seal(23, early_data[k:k + 16384], corrupt=(name == "early-bad-record"))
+            c.sock.sendall(early)
+            c.first_flight = (ch, key, sent + early)
+        else:
+            for _ in range(len(early_data) // 16384 + 1):
+                early_writer.seq += 1
     if name == "ccs-flood":
         c.sock.sendall(plain(20, b"\x01") * 17)
-    if kw.get("early"):
+    if kw.get("early") and early_data is None:
         # Early data under keys the server does not have: it must pass over
         # these records.
         for _ in range(3):
@@ -599,7 +663,10 @@ def scenario(c, name, offer=None, extra=None):
         t, n = struct.unpack(">HH", listed[i:i + 4])
         types.append(t)
         i += 4 + n
-    assert 42 not in types, "early data accepted, which this server does not take"
+    taken = 42 in types
+    wanted = early_data is not None and replay is None and name in ("early-ok", "early-request", "early-too-much", "early-bad-record",
+                                                                    "early-finished-early", "early-replay")
+    assert taken == wanted, f"early data {'taken' if taken else 'refused'} where it should {'' if wanted else 'not '}be"
     assert (16 in types) == (kw.get("alpn") is not None), f"EncryptedExtensions {types} for ALPN {kw.get('alpn')}"
     transcript += ee
     cert = c.message()
@@ -696,6 +763,19 @@ def scenario(c, name, offer=None, extra=None):
             transcript += client_verify
             if name == "mtls-late":
                 time.sleep(0.2)
+    if taken and name == "early-request":
+        # The answer comes before this side's Finished (0.5-RTT): read it,
+        # under the server's application keys, first.
+        c.reader = Cipher(schedule, s_ap)
+        type_, data = c.after()
+        assert type_ == 23 and b"HTTP/1.0 200 ok" in data, f"no answer before the client's Finished: {type_} {data[:40]!r}"
+        early_answer = data
+    if taken and name == "early-finished-early":
+        c.sock.sendall(early_writer.seal(22, message(20, schedule.finished(c_hs, transcript))))
+    elif taken:
+        ended = message(5, b"")
+        c.sock.sendall(early_writer.seal(22, ended))
+        transcript += ended
     if name == "ccs":
         c.sock.sendall(plain(20, b"\x01"))
     if name == "cert-instead-of-finished":
@@ -730,7 +810,10 @@ def scenario(c, name, offer=None, extra=None):
         type_, data = c.after()
         assert type_ == 23, f"a record of type {type_} where the echo belongs"
         got += data
-    c.sock.sendall(writer.seal(23, b"GET / HTTP/1.0\r\n\r\n"))
+    if taken and name == "early-request":
+        got = early_answer
+    else:
+        c.sock.sendall(writer.seal(23, b"GET / HTTP/1.0\r\n\r\n"))
     while True:
         try:
             type_, data = c.after()

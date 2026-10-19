@@ -337,6 +337,48 @@ else
     done
     return $failed
   }
+  # client_early <binary>: its std/tls client giving each of two
+  # connections through one session "iyi-early-data" to send early, to
+  # OpenSSL's s_server: with -early_data the first sends it after the
+  # handshake (no ticket yet) and the second with its ClientHello, which
+  # s_server reads as early data ("Early data received:"); without it the
+  # ticket allows none and both send it late; with secp256r1 alone, the
+  # HelloRetryRequest refuses it and it is sent again after the handshake.
+  client_early() {
+    local failed=0 port pid got label extra want log="$WORK/s_server-early.log"
+    for case in "taken:Accepted:-early_data" "a server that takes none:Late:" "through a HelloRetryRequest:Resent:-early_data -groups P-256"; do
+      label="${case%%:*}"
+      want="${case#*:}"
+      extra="${want#*:}"
+      want="${want%%:*}"
+      port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+      : >"$log"
+      # shellcheck disable=SC2086
+      { sleep 5 | "$OPENSSL" s_server -accept "127.0.0.1:$port" -naccept 2 -tls1_3 -cert "$PKI/p256.pem" -key "$PKI/p256.key" $extra >"$log" 2>&1; } &
+      pid=$!
+      for _ in $(seq 1 50); do grep -q ACCEPT "$log" && break; sleep 0.1; done
+      got="$("$1" resume "$port" "$PKI/ca.pem" localhost - 2 iyi-early-data 2>&1)"
+      wait "$pid" 2>/dev/null
+      if printf '%s\n' "$got" | sed -n 1p | grep -q 'early=Late resumed=no' &&
+         printf '%s\n' "$got" | sed -n 2p | grep -q "early=$want " &&
+         # After a HelloRetryRequest s_server sees the ticket a second time,
+         # which its own anti-replay answers with a full handshake.
+         { [ "$want" = Resent ] || printf '%s\n' "$got" | sed -n 2p | grep -q 'resumed=yes'; } &&
+         [ "$(grep -o iyi-early-data "$log" | wc -l | tr -d ' ')" = 2 ] &&
+         { [ "$want" != Accepted ] || grep -q 'Early data received:' "$log"; }; then
+        echo "  early data to OpenSSL's s_server, $label: $(printf '%s\n' "$got" | sed -n 2p)$([ "$want" = Accepted ] && echo ', and s_server: Early data received')"
+      else
+        echo "  FAIL early data to OpenSSL's s_server, $label: $(printf '%s' "$got" | tr '\n' ' '); s_server: $(grep -i 'early' "$log" | tr '\n' ' ')"
+        failed=1
+      fi
+    done
+    return $failed
+  }
+  if client_early "$WORK/tls-release"; then
+    interop=$((interop + 3))
+  else
+    status=1
+  fi
   if client_resume "$WORK/tls-release"; then
     interop=$((interop + 3))
   else
@@ -768,6 +810,8 @@ def client_leaf(cn, k, issuer, issuer_key, usage):
 client_ca, client_ca_key = client_root("Client CA")
 other_ca, other_ca_key = client_root("Other CA")
 write("mtls/client-roots.pem", pem(client_ca))
+# The server that asks for a client's certificate takes no early data.
+write("mtls/no-early", b"")
 for who, cn, k, issuer, issuer_key, usage in [
         ("client", "client", ec.generate_private_key(ec.SECP256R1()), client_ca, client_ca_key, ExtendedKeyUsageOID.CLIENT_AUTH),
         ("client-ed", "client ed", ed25519.Ed25519PrivateKey.generate(), client_ca, client_ca_key, ExtendedKeyUsageOID.CLIENT_AUTH),
@@ -932,6 +976,13 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
     }
     served_check "the std/tls client, $kind, its session resumed" "client resumed=yes peer=CN=localhost, server resumed=yes" iyi_resume
     served_check "Python's ssl, $kind, its session reused" "session_reused=True peer=- resumed=yes" "$PY" -c "$PY_RESUME" "$port" "$SRV/roots.pem"
+    # Early data: the std/tls client's second connection sends GET / with
+    # its ClientHello, and the server answers what came early.
+    iyi_early() {
+      "$WORK/tls-release" resume "$port" "$SRV/roots.pem" localhost h2 2 get 2>&1 | sed -n 2p |
+        sed -E 's/^2: .* resumed=([a-z]+) early=([A-Za-z]+) .* said=.* (early=".*") resumed=([a-z]+) held=.*$/client early=\2, server \3 resumed=\4/'
+    }
+    served_check "the std/tls client, $kind, GET / as early data" 'client early=Accepted, server early="GET / HTTP/1.0\r\n\r\n" resumed=yes' iyi_early
     if [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1; then
       # -ign_eof: the request's end on stdin is not the end of the answer.
       sclient() {
@@ -990,6 +1041,18 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
       served_check "OpenSSL, $kind, exported keying material" "the same at both ends" export_both
       served_check "OpenSSL, $kind, -sess_out then -sess_in" "Reused, TLSv1.3 peer=- resumed=yes" \
         sess_twice "$WORK/sess-$kind.pem" -connect "127.0.0.1:$port" -servername localhost -CAfile "$SRV/roots.pem" -verify_return_error -ign_eof -tls1_3
+      # Early data: s_client's session kept, then GET / as its early data
+      # (-early_data), which OpenSSL says was accepted and the server
+      # answers before the client's Finished.
+      early_twice() {
+        local out
+        printf 'GET / HTTP/1.0\r\n\r\n' >"$WORK/early-request"
+        sclient -tls1_3 -sess_out "$WORK/early-$kind.pem" >/dev/null
+        out="$("$OPENSSL" s_client -connect "127.0.0.1:$port" -servername localhost -CAfile "$SRV/roots.pem" -verify_return_error -ign_eof -tls1_3 \
+          -sess_in "$WORK/early-$kind.pem" -early_data "$WORK/early-request" </dev/null 2>&1 | tr -d '\r')"
+        printf '%s %s\n' "$(printf '%s\n' "$out" | grep -o '^Early data was [a-z]*' | head -1)" "$(printf '%s\n' "$out" | grep -o 'early=.*resumed=[a-z]*' | head -1)"
+      }
+      served_check "OpenSSL, $kind, GET / as -early_data" 'Early data was accepted early="GET / HTTP/1.0\r\n\r\n" resumed=yes' early_twice
     else
       echo "  no openssl here (or Windows), so s_client goes unasked"
     fi
@@ -1306,7 +1369,7 @@ prove_broken() {
   local mode="${5:-trace}"
   if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; } ||
      { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ]; } && [ "$served" = no ]; } ||
-     { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client12 ] || [ "$mode" = client-resume ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
+     { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client12 ] || [ "$mode" = client-resume ] || [ "$mode" = client-early ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
     echo "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
   fi
@@ -1323,7 +1386,7 @@ PY
     status=1
     return
   fi
-  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client12 ] || [ "$mode" = client-resume ]; then
+  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client12 ] || [ "$mode" = client-resume ] || [ "$mode" = client-early ]; then
     if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched/tlsx" \
          "$REPO/bench/std_tls_exercise.iyi" >"$WORK/patched/build.log" 2>&1; then
       echo "  the $1 copy did not build:"
@@ -1347,6 +1410,9 @@ PY
     elif [ "$mode" = client-resume ]; then
       client_resume "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
       rc=$?
+    elif [ "$mode" = client-early ]; then
+      client_early "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
+      rc=$?
     else
       mkdir -p "$WORK/patched/srv"
       local keys="$SRV" flag=()
@@ -1357,7 +1423,7 @@ PY
       cp "$keys/chain.pem" "$keys/key.pem" "$WORK/patched/srv/"
       # The second identity too, for other.test, where there is one.
       cp "$keys"/other-chain.pem "$keys"/other-key.pem "$WORK/patched/srv/" 2>/dev/null
-      case "$mode" in server-mtls*) cp "$keys/client-roots.pem" "$WORK/patched/srv/" ;; esac
+      case "$mode" in server-mtls*) cp "$keys/client-roots.pem" "$keys/no-early" "$WORK/patched/srv/" ;; esac
       [ "$mode" = server-mtls-optional ] && : >"$WORK/patched/srv/client-optional"
       "$WORK/patched/tlsx" serve "$WORK/patched/srv" 1000 >"$WORK/patched/serve.log" 2>&1 &
       local pid=$!
@@ -1759,6 +1825,45 @@ prove_broken "a client with no signature_algorithms refused though its ticket is
   '    return unshown if unshown && identities.empty?' '    return unshown if unshown' server
 prove_broken "a client's certificate not carried by its ticket" "FAIL mtls-resume " \
   '      @peer_certificates = chain' '' server-mtls
+# Early data (0-RTT). Its keys and records against RFC 8448's trace and the
+# replay guard on a clock of the exercise's own; the server against the
+# scripted client - a replay, too much, stale, another protocol or suite,
+# the ticket second, EndOfEarlyData missing, a record that does not open -
+# and the client against the scripted server and OpenSSL's.
+prove_broken "early data under the handshake label" "client_early_traffic_secret" \
+  '"c e traffic"' '"c hs traffic"'
+prove_broken "a replay guard that forgets nothing" "a binder is dropped two windows after it came" \
+  '    while @head < @binders.size && now_ms - @times[@head] > 2_i64 * WINDOW_MS' '    while false'
+prove_broken "a replay of early data taken" "FAIL early-replay " \
+  '    return false if @held.has_key?(key)' '' server
+prove_broken "early data delivered as 1-RTT data" "FAIL early-ok " \
+  '        return content unless content.empty?' '        @pending = content unless content.empty?' server
+prove_broken "early data past the ticket's max_early_data_size taken" "FAIL early-too-much " \
+  '        if @early_read > @early_limit' '        if false' server
+prove_broken "early data taken outside the freshness window" "FAIL early-stale " \
+  '    return false unless TlsReplayGuard.fresh?((offer.identities[index][1] - ticket.age_add) & 0xFFFFFFFF_i64, now - ticket.issued_ms)' '' server
+prove_broken "early data taken under another ALPN protocol" "FAIL early-alpn " \
+  '    return false unless ticket.alpn == @alpn_protocol' '' server
+prove_broken "early data taken under another suite" "FAIL early-suite " \
+  '    return false unless ticket.suite == @suite' '' server
+prove_broken "early data taken for an identity not the first" "FAIL early-second " \
+  '    return false unless index == 0' '' server
+prove_broken "early data taken where the server allows none" "FAIL mtls-early-unallowed " \
+  '    return false unless @takes_early && @config.early_limit > 0 && ticket.max_early_data > 0' '    return false unless @takes_early' server-mtls
+prove_broken "a client's Finished taken for EndOfEarlyData" "FAIL early-finished-early " \
+  '        unless message[0] == 5_u8 && message.size == 4' '        if false' server
+prove_broken "taken early records that do not open passed over" "FAIL early-bad-record " \
+  '        @early_left = 0' '        @early_left = EARLY_ALLOWANCE' server
+prove_broken "the client's early data sent again under another protocol" "early-alpn:" \
+  '      if @early_alpn != @alpn_protocol' '      if false' scenarios
+prove_broken "the client's early data past the ticket's allowance" "early-small:" \
+  'data.size <= offered.max_early_data' 'true' scenarios
+prove_broken "an early_data acceptance of nothing sent taken" "early-unoffered:" \
+  '        return TlsError.new("an early_data acceptance where none was sent", TlsAlert::UNSUPPORTED_EXTENSION) unless @early_sent && !@retried' '' scenarios
+prove_broken "the client's EndOfEarlyData left out" "early: " \
+  '    if @early_taken && (early = @early_writer)' '    if false && (early = @early_writer)' scenarios
+prove_broken "the client's early data under keys of another transcript" "FAIL early data to OpenSSL's s_server, taken" \
+  'schedule.early_traffic(offered.psk, hello))' 'schedule.early_traffic(offered.psk, hello + hello))' client-early
 
 echo
 if [ "$status" -eq 0 ]; then

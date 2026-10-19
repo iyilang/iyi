@@ -36,6 +36,21 @@
   certificate it keeps for that name alone, which the client checks; the
   name sent as given, Unicode left as it is and the final dot kept are
   each caught there.
+- **A kept `https://` connection is handed out only under the TLS
+  configuration it was made with.** `HTTPClient` kept connections by
+  scheme, host and port, so after `HTTP.tls_config=` named roots that do
+  not reach a server's certificate, the next request to that server still
+  went over the connection checked against the old ones and was answered
+  (finding 11 of the std/tls review). A connection now records the
+  configuration and the roots, identity, `now` and `min_version` it was
+  made under, and one made under anything else is closed rather than
+  reused. Against Python's TLS server in `bench/std_http_exercise.sh`, a
+  request after `HTTP.tls_config=` names an unrelated root makes a new
+  connection and is refused ("no certificate here issued CN=http gate
+  root"), where the module before answered it on the kept one; a new
+  configuration over the same roots makes one new connection and reuses
+  it (3 made, 2 reused, against 1 made, 4 reused before). A copy without
+  the check is caught there.
 
 ## 0.18.0 — 2026-10-18
 

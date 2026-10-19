@@ -508,8 +508,14 @@ echo "== https:// against Python's own TLS server"
 # TLS, a 303 followed on the same scheme, a kept connection used twice, a
 # host the certificate does not name refused, and an upgrade over https://
 # reaching the server, whose 404 it names.
+# A kept connection is not handed to a request made after `HTTP.tls_config=`
+# names roots that do not reach the server's (a root made beside the
+# first): that request makes a connection of its own and is refused; a new
+# configuration over the same roots makes a new connection too, which the
+# next request under it reuses.
 # Then the same client against a copy of the module that sends https://
-# in the clear, which must not answer the same.
+# in the clear, which must not answer the same; and a copy with the pool's
+# configuration check taken out, caught.
 if [ -z "$PY" ] || ! "$PY" -c 'import ssl; from cryptography import x509' >/dev/null 2>&1; then
   echo "  skipped: no python3 with ssl and cryptography to serve TLS with"
 else
@@ -555,6 +561,15 @@ ed = (x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(ca.s
       .sign(ca_key, hashes.SHA256()))
 open(f"{out}/ed.pem", "wb").write(ed.public_bytes(serialization.Encoding.PEM) + ca.public_bytes(serialization.Encoding.PEM))
 open(f"{out}/ed.key", "wb").write(ed_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+# Another root, which signs nothing the server sends.
+other_key = ec.generate_private_key(ec.SECP256R1())
+other = (x509.CertificateBuilder().subject_name(name("http gate other root")).issuer_name(name("http gate other root"))
+         .public_key(other_key.public_key()).serial_number(4).not_valid_before(now - dt.timedelta(days=1))
+         .not_valid_after(now + dt.timedelta(days=2)).add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+         .add_extension(x509.KeyUsage(False, False, False, False, False, True, True, False, False), critical=True)
+         .add_extension(x509.SubjectKeyIdentifier.from_public_key(other_key.public_key()), critical=False)
+         .sign(other_key, hashes.SHA256()))
+open(f"{out}/other.pem", "wb").write(other.public_bytes(serialization.Encoding.PEM))
 PY
   cat > "$WORK/tls_client.iyi" <<'IYI'
 module main
@@ -575,6 +590,16 @@ puts "hop #{hop.status} #{hop.body} #{hop.url}"
 client = HTTPClient.new
 2.times { client.get(base + "/landed").or_panic }
 puts "kept #{client.connections_made} made, #{client.connections_reused} reused"
+elsewhere = TlsConfig.new
+elsewhere.roots = Certificate.from_pem(File.read(Program.args[2])).or_panic
+HTTP.tls_config = elsewhere
+moved = client.get(base + "/landed")
+puts "other roots #{moved.is_a?(HTTPError) ? moved.message : "answered #{moved.inspect}"}"
+again = TlsConfig.new
+again.roots = config.roots
+HTTP.tls_config = again
+2.times { client.get(base + "/landed").or_panic }
+puts "a new configuration, the same roots: #{client.connections_made} made, #{client.connections_reused} reused"
 client.close
 other = HTTP.get("https://127.0.0.1:#{Program.args[0]}/landed")
 puts "other #{other.is_a?(HTTPError) ? other.message : other.inspect}"
@@ -629,22 +654,64 @@ PY
   else
     serve_tls
     tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
-    said=$(timeout 60 "$WORK/tls_client" "$tport" "$WORK/tls/root.pem" 2>&1)
+    said=$(timeout 60 "$WORK/tls_client" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
     kill "$tls_pid" 2>/dev/null
     wait "$tls_pid" 2>/dev/null
     expected="gzip true true
 hop 200 GET https://localhost:$tport/landed
 kept 1 made, 1 reused
+other roots HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=http gate root, the issuer of CN=localhost (bad_certificate)
+a new configuration, the same roots: 3 made, 2 reused
 other HTTP: tls: the server's certificate is not trusted: x509: CN=localhost is not valid for 127.0.0.1: it names localhost (bad_certificate)
 upgrade HTTP: the server answered 404 Not Found to an upgrade to websocket, not 101 Switching Protocols"
     if [ "$said" = "$expected" ]; then
       echo "  gzip over TLS 1.3, a 303 on https://, a kept connection used twice, a host the certificate does not name, an upgrade over https:// answered 404"
+      echo "  a kept connection not reused under other roots, nor under a new configuration of the same roots"
     else
       echo "  the client and Python's TLS server disagree:"
       printf '%s\n' "$said" | sed 's/^/    got:  /'
       printf '%s\n' "$expected" | sed 's/^/    want: /'
       status=1
     fi
+    # tls_breaks <label> <module> <old> <new> <line>: the client over a copy
+    # of std/<module> with <old> replaced must answer the line starting
+    # with <line> otherwise than the module does.
+    tls_breaks() {
+      local label="$1" module="$2" old="$3" new="$4" line="$5" broken want got
+      rm -rf "$WORK/tlsbreak" && mkdir -p "$WORK/tlsbreak/std"
+      if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module" "$WORK/tlsbreak/std/$module" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not unique")
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+      then
+        echo "  $label: the patch did not apply"
+        status=1
+        return
+      fi
+      if ! IYI_PATH="$WORK/tlsbreak${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/tls_broken" "$WORK/tls_client.iyi" > "$WORK/tls_broken.build" 2>&1; then
+        echo "  $label: the broken copy did not build"
+        status=1
+        return
+      fi
+      serve_tls
+      tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
+      broken=$(timeout 60 "$WORK/tls_broken" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
+      kill "$tls_pid" 2>/dev/null
+      wait "$tls_pid" 2>/dev/null
+      want="$(printf '%s\n' "$expected" | sed "s/$tport/PORT/g" | grep -m1 "^$line")"
+      got="$(printf '%s\n' "$broken" | sed "s/$tport/PORT/g" | grep -m1 "^$line")"
+      if [ -n "$got" ] && [ "$got" != "$want" ]; then
+        echo "  $label: caught at \"$line\": $(printf '%s' "$got" | cut -c1-100)"
+      else
+        echo "  $label: not caught at \"$line\" (it answered \"$got\")"
+        status=1
+      fi
+    }
+    tls_breaks "a kept connection handed out under another configuration" http.iyi \
+      '        if tls && !(under && under.same?(tls))' '        if false' "other roots"
     # And the proof: https:// written in the clear does not answer so.
     mkdir -p "$WORK/clear/std"
     sed 's/^        if secure$/        if false/' "$REPO/src/std/http.iyi" > "$WORK/clear/std/http.iyi"
@@ -657,7 +724,7 @@ upgrade HTTP: the server answered 404 Not Found to an upgrade to websocket, not 
     else
       serve_tls
       tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
-      clear=$(timeout 60 "$WORK/tls_clear" "$tport" "$WORK/tls/root.pem" 2>&1)
+      clear=$(timeout 60 "$WORK/tls_clear" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
       kill "$tls_pid" 2>/dev/null
       wait "$tls_pid" 2>/dev/null
       if [ "$clear" = "$expected" ]; then
@@ -1866,7 +1933,7 @@ mutate "a redirect that never changes the method" 'unless keeps || (status != 30
 mutate "credentials carried to another host" 'sent = without(sent, ["Authorization", "Proxy-Authorization", "Cookie"]) unless same_authority?(current, target)' ''
 mutate "a part that does not end at its boundary" '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]
           @part_done = true' '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]'
-mutate "a client that never keeps a connection" 'conn = keeping.take(key) unless upgrade' ''
+mutate "a client that never keeps a connection" 'conn = keeping.take(key, secure ? tls_config : nil) unless upgrade' ''
 mutate "a client that keeps a connection the answer closed" 'keep = got.starts_with?("HTTP/1.1 ") && !reader.to_close? && status != 101 && (said.nil? || !has_token?(said, "close"))' 'keep = true'
 mutate "a client that holds a connection for whatever was left unread" 'client && @keep && !@conn.ended? && @reader.drain(65536_i64)' 'client && @keep && !@conn.ended? && @reader.drain(9223372036854775807_i64)'
 mutate "a GET not sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head ||' 'retry = false && (head ||'

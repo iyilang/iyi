@@ -117,7 +117,7 @@
 module std/http
 
 import std/socket::{IyiSocket, SocketError}
-import std/tls::{TlsClient, TlsConfig, TlsConnection, TlsError, TlsServer, TlsServerConfig}
+import std/tls::{TlsClient, TlsConfig, TlsConnection, TlsError, TlsIdentity, TlsServer, TlsServerConfig, TlsVersion}
 import std/x509::{Certificate}
 import std/uri::{URI, Params}
 import std/mime::{MIME}
@@ -194,6 +194,9 @@ class Conn
   @stream : TlsStream? = nil
   # The HTTP/2 connection over it, when the two ends speak that.
   property h2 : H2Connection? = nil
+  # What an `https://` connection's handshake was made under, for a
+  # client to tell whether it may carry a request made under another.
+  property made_under : TlsMadeUnder? = nil
 
   ROOM = 16384
 
@@ -450,6 +453,44 @@ class Conn
     else
       @socket.close
     end
+  end
+end
+
+# The `TlsConfig` an `https://` connection was made under, and the parts of
+# it that decide whom the connection trusts and what it presented: the
+# roots, the identity, the time certificates were checked at and the
+# oldest version spoken. A kept connection is handed out only for a
+# request whose `HTTP.tls_config` is the same object holding the same
+# ones, so a connection checked against one trust store never carries a
+# request made under another - set by `HTTP.tls_config=`, or by assigning
+# `roots` or `identity` on the configuration in place. Objects are told
+# apart by `object_id`, and the references are held, so an address freed
+# and handed to a new configuration is never taken for the old one.
+# Certificates added to the same roots array in place are not seen: such
+# an array is still the same object.
+class TlsMadeUnder
+  @config : TlsConfig
+  @roots : Array(Certificate)?
+  @identity : TlsIdentity?
+  @now : Time?
+  @min_version : TlsVersion
+
+  def initialize(@config : TlsConfig)
+    @roots = @config.roots
+    @identity = @config.identity
+    @now = @config.now
+    @min_version = @config.min_version
+  end
+
+  def same?(config : TlsConfig) : Bool
+    return false unless @config.object_id == config.object_id
+    roots = config.roots
+    held = @roots
+    return false unless held.nil? ? roots.nil? : (!roots.nil? && held.object_id == roots.object_id)
+    identity = config.identity
+    mine = @identity
+    return false unless mine.nil? ? identity.nil? : (!identity.nil? && mine.object_id == identity.object_id)
+    @now == config.now && @min_version == config.min_version
   end
 end
 
@@ -2069,7 +2110,10 @@ end
 # its method is idempotent (RFC 9110 §9.2.2) and its body a string;
 # anything else answers the failure. One task at a time per request: two
 # tasks sending at once take two connections, and a client is not for
-# sharing across threads.
+# sharing across threads. An `https://` connection is kept under the
+# `HTTP.tls_config` it was made with, and handed only to a request made
+# under the same one (`TlsMadeUnder`): after `HTTP.tls_config=` the next
+# request makes a connection of its own, checked against the new roots.
 #
 # Over HTTP/2 - `https://` where ALPN chose `h2`, or `http://` with
 # *prior_knowledge* (h2c, RFC 9113 §3.3) - a kept connection carries the
@@ -2146,12 +2190,22 @@ pub class HTTPClient
   end
 
   # A kept connection to *key*, nil when none waits. An HTTP/2 connection
-  # that can take no more requests is closed rather than handed out.
-  protected def take(key : String) : Conn?
+  # that can take no more requests is closed rather than handed out, and
+  # so is an `https://` one made under another TLS configuration than
+  # *tls*, the one the request is made under (`TlsMadeUnder`): keyed by
+  # scheme, host and port alone, a connection whose server was checked
+  # against one set of roots carried requests after `HTTP.tls_config=`
+  # named others that would have refused it.
+  protected def take(key : String, tls : TlsConfig? = nil) : Conn?
     if waiting = @idle[key]?
       while conn = waiting.pop?
         h2 = conn.h2
         if h2 && !h2.usable?
+          conn.close
+          next
+        end
+        under = conn.made_under
+        if tls && !(under && under.same?(tls))
           conn.close
           next
         end
@@ -2616,7 +2670,7 @@ pub struct HTTP
     while true
       conn = nil.as(Conn?)
       if keeping = client
-        conn = keeping.take(key) unless upgrade
+        conn = keeping.take(key, secure ? tls_config : nil) unless upgrade
       end
       reused = !conn.nil?
       unless conn
@@ -2648,6 +2702,7 @@ pub struct HTTP
           tls = TlsClient.over(socket, host, offered, timeout_ms > 0 ? timeout_ms : TlsClient::HANDSHAKE_TIMEOUT_MS)
           return HTTPError.new(tls.message) if tls.is_a?(TlsError)
           conn = Conn.new(socket, stream: TlsStream.new(tls, host))
+          conn.made_under = TlsMadeUnder.new(tls_config)
           speaks_h2 = upgrade.nil? && tls.alpn_protocol == "h2"
         else
           conn = Conn.new(socket)

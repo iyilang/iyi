@@ -1986,6 +1986,10 @@ h2_frames_breaks() { # h2_frames_breaks <label> <name> <old> <new> <case>
       echo "  $label: caught by the frames for \"$case_name\""
     else
       echo "  $label: the frames for \"$case_name\" did not fail on a broken server"
+      # What the frames said instead: once on Windows (tls/resumption, job
+      # 118118781204) this missed where every other run caught it, and
+      # nothing was left to say why.
+      tail -4 "$WORK/$name.out" | sed 's/^/    /'
       status=1
     fi
   fi

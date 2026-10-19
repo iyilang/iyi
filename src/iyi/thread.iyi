@@ -15,14 +15,16 @@
 #   t.join                          # Nil; the thread has exited
 #
 # What a thread is not, said here rather than found: it is not a task. No
-# group owns it, nothing cancels it, no channel crosses it — `Channel` is
-# one thread's, and `Share` (SPEC.md III.4.4) is what will say so at
-# compile time. What crosses threads today is `Atomic(T)`, state behind a
-# `Mutex(T)` (std/mutex), and memory the program keeps straight itself. A
-# thread gets a scheduler state and a heap
-# cache of its own on first touch, so it may spawn fibers and it allocates
-# without a lock; the world it shares is the centre behind the runtime's
-# one lock, and the collector, which stops it.
+# group owns it and nothing cancels it. What crosses threads is what
+# `Share` (SPEC.md III.4.4) lets the block capture: `Atomic(T)`, state
+# behind a `Mutex(T)` (std/mutex), immutable values, a `Channel(T)` of
+# `Share` values (III.4.13), and memory the program keeps straight
+# itself. A thread gets a scheduler state when it starts and a heap cache
+# on first touch, so it may spawn fibers and it allocates without a lock;
+# the world it shares is the centre behind the runtime's one lock, the
+# scheduler's lock its wakes cross threads under, and the collector,
+# which stops it. The pool parallel tasks run on (III.4.13) is threads of
+# this kind, started by the runtime.
 #
 # **The stop, and what is not stopped.** A collection takes the runtime
 # lock, signals every other registered thread, and waits for each to count
@@ -544,6 +546,11 @@
     def self.start(proc : Proc(Nil)) : IyiThread
       register_current
       install_handler
+      # A second scheduler thread is coming: from here fibers on two
+      # threads may wake each other, and the scheduler's lock is taken
+      # (SPEC.md III.4.13). Said before the thread exists, so it never
+      # runs a fiber the lock does not cover.
+      IyiScheduler.expect_thread
       line = new_line
       thread = IyiThread.new(line, proc)
       IyiHeap.write64(line + IYI_TL_OBJECT, thread.object_id)
@@ -665,6 +672,10 @@
         # reads a cache and not a zero (see `suspend_others`).
         IyiHeap.write64(line + IYI_TL_CACHE, IyiHeap.cache_page)
       {% end %}
+      # Its scheduler state, made before the body runs: a deadlock's walk
+      # of the states counts this thread as coming until it has one, and
+      # as busy from then until it waits in its own poller (III.4.13).
+      IyiScheduler.adopt_thread
       # Found and taken off the list under the lock, which every writer of
       # the list holds; from here this frame roots the body. Left on it,
       # every thread ever started kept its block's captures: 2,000 threads

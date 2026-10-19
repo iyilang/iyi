@@ -332,10 +332,11 @@ pub class Mutex(T)
     end
 
     # Whether this thread has anything to run besides the waiting task:
-    # tasks ready to run, tasks asleep, tasks waiting on I/O.
+    # tasks ready to run, tasks asleep, tasks waiting on I/O, and tasks
+    # another thread has woken into its inbox (SPEC.md III.4.13).
     protected def self.thread_busy? : Bool
       st = IyiScheduler.state
-      busy = !st.run_head.nil? || !st.sleep_head.nil? || !st.io_head.nil?
+      busy = !st.run_head.nil? || !st.sleep_head.nil? || !st.io_head.nil? || st.mail?
       {% if flag?(:win32) %}
         busy = busy || !st.stdin_waiter.nil?
       {% end %}

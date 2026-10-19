@@ -19,10 +19,11 @@
 # what a consumer sees of it is fields and method headers, and a header
 # cannot say whether the body assigns.
 #
-# What it gates today: the block `IyiThread.start` captures (III.4.11), and
-# the block an owning type's method runs (`Mutex#lock` and the rest), in
-# `CleanupTransformer`. A channel's element type is next, with the channel
-# that crosses threads.
+# What it gates today: the block `IyiThread.start` captures (III.4.11), the
+# block `IyiGroup#spawn_parallel` captures (III.4.13), and the block an
+# owning type's method runs (`Mutex#lock` and the rest), in
+# `CleanupTransformer`. A channel crosses threads as a trusted type,
+# `@[Share]` on `Channel(T)`: shareable whenever its element type is.
 module Iyi::Share
   # Shareable, or a sentence saying why not: the first field that fails and
   # the reason, one level at a time.

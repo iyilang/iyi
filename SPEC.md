@@ -63,8 +63,8 @@ own reference accepts.
 | warm full build, `hello` / 6,900-line pair | 0.07 s / 0.24 s, against `go build`'s 0.08 s / 0.09 s |
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
-| iyi's own prelude | 21,567 lines, of which 4,634 are the library held to the 4,650 ceiling (6,647 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 127,312 lines, none of it written in iyi |
+| iyi's own prelude | 22,428 lines, of which 4,634 are the library held to the 4,650 ceiling (6,647 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
+| compiler | 127,340 lines, none of it written in iyi |
 | artifact format | `.iyimod` v56, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -88,7 +88,7 @@ shape.
 > is a library and the rules are the language, so a program can keep one and
 > change the other: `--crystal` builds against Crystal's standard library, and
 > there `require` reaches the ecosystem while every rule stays where it was.
-> "No standard library worth the name" is still true of iyi's own 21,567 lines
+> "No standard library worth the name" is still true of iyi's own 22,428 lines
 > and no longer true of what a program can have. Part V item 12a is the
 > measurement, nine shards wide.
 
@@ -270,7 +270,7 @@ of binary. It is not made the default on that trade, and the middle needs the
 initialisers to run *later* rather than not at all, which is the `dlsym` table
 above, and a larger piece of work than the number it wins.
 
-**3. A deliberately tiny prelude, written in iyi. Done: 21,567 lines,
+**3. A deliberately tiny prelude, written in iyi. Done: 22,428 lines,
 primitives included, of which the library is 4,634.** Not a standard library:
 integers, booleans, a string, one sequence, one dictionary, one range, `puts`,
 and an `enum`'s surface — the member's name, an order, the members, and the
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 127,312 lines, Crystal, forked |
-| Library | 8,161 lines (3,551 of it core) | 21,567-line own prelude + 111,428 in std |
-| Specs | 21,146 lines | 14,792 for iyi |
+| Compiler | 24,984 lines, **written in Crystal** | 127,340 lines, Crystal, forked |
+| Library | 8,161 lines (3,551 of it core) | 22,428-line own prelude + 111,429 in std |
+| Specs | 21,146 lines | 14,895 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -2606,7 +2606,7 @@ hook, and the prelude's own definition of it is untouched. Compile-time
 `responds_to?` works unchanged, which the error message is entitled to claim
 because it is tested.
 
-### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4)**
+### III.4 Concurrency: **BUILT on Linux, darwin arm64 and Windows x86-64 in III.4.8's order — scheduler, cancellable primitives, `group`, `Channel` (rendezvous), `select`, the typed group (III.4.9), `Atomic(T)` (III.4.10), a kernel thread the collector stops (III.4.11), `Share` gating its block (III.4.4), tasks across cores (III.4.13)**
 
 This is the section where the design either beats Go or does not, so it is worth
 being blunt about where Go actually loses. Not goroutines: they are cheap, the
@@ -2741,16 +2741,21 @@ variable or calls one of its methods without a receiver, must be `Share`,
 and the error names the variable, its type and the field that failed, one
 level at a time — ``captures `items :
 Array(Int32)`, which is not Share: Array(Int32)'s field @size is assigned
-in `unsafe_set_size` ``. The channel's `T : Share` (III.4.6) waits for the
-channel that crosses threads. Held by `spec/compiler/semantic/iyi_spec.cr`
+in `unsafe_set_size` ``. The channel's `T : Share` (III.4.6) is the
+trust `@[Share]` on `Channel(T)` gives since a channel crosses threads
+(III.4.13), and the block `spawn_parallel` runs is gated as a thread's
+is. Held by `spec/compiler/semantic/iyi_spec.cr`
 (thirteen shapes: immutable captures pass, a setter, an assignment outside
 `initialize`, a field one and two levels down, a field `pointerof` gives
 out, `@[Share]` trusted, a trusted generic refused by its argument, `self`,
 `self` reached by a call, a constant the block names, a class variable
-written after its initializer, a local a kept block assigns), by
+written after its initializer, a local a kept block assigns; and five for
+the parallel block: shareable captures pass, a captured value with a
+setter, a local assigned after the spawn, a loop's local, a constant), by
 `spec/compiler/iyimod_spec.cr` (the marker written, read and refused
-across an artifact) and by `bench/thread_exercise.sh`'s last step, a
-program that must not compile. A `Share` type makes a value safe to read
+across an artifact), by `bench/thread_exercise.sh`'s last step, a
+program that must not compile, and by `bench/parallel_exercise.sh`'s
+fifth, four more. A `Share` type makes a value safe to read
 from two threads, not a variable safe to write, and a captured local is
 one cell both threads reach: a local the block assigns, or that its
 starter assigns after the start, or in a loop or block that starts the
@@ -2844,9 +2849,11 @@ behind a synchronised type. The Kemal port did by hand what this makes checked,
 and Part V.5's question about the interaction between concurrency and
 module-level mutable state is answered: there is no interaction, because the
 combination does not compile. A *task* is not a thread, and that half is
-settled the other way: tasks share their group's thread and interleave only
-at parks (III.4.8), so `Share` does not gate them, and a task appending to a
-module-level `Array` compiles and runs.
+settled the other way: tasks `g.spawn` starts share their group's thread
+and interleave only at parks (III.4.8), so `Share` does not gate them, and
+a task appending to a module-level `Array` compiles and runs. A task
+`g.spawn_parallel` starts may run on another core, and its block is
+gated as a thread's is (III.4.13).
 
 #### III.4.6 What carries over from Crystal, and what does not
 
@@ -3030,7 +3037,7 @@ hang.
 
 **darwin arm64 runs the same runtime, through libSystem — III.9's darwin
 rule applied to the poller.** The port changes who is called and nothing
-about what the calls mean: one kernel thread still runs every fiber, the
+about what the calls mean: one kernel thread runs every fiber it starts, the
 context is still one word, the aarch64 switch is the same twenty-slot frame
 Linux swaps, cancellation is still a `Cancelled` value a woken primitive
 answers, and the defer registry and the panic path are the
@@ -3318,17 +3325,19 @@ the collector's allocator were cut over to per-thread state in the two
 entries before this one — so it spawns fibers of its own and allocates
 without a lock.
 
-**It is not a task, and saying so is the design.** No group owns it,
-nothing cancels it, no channel crosses it: `Channel` is one thread's,
-the scheduler's queues are one thread's, and a value handed from one
-thread to another is a data race — which the type system now refuses at
+**It is not a task, and saying so is the design.** No group owns it and
+nothing cancels it. A value handed from one thread to another is a data
+race unless its type says otherwise — which the type system refuses at
 the door it has: the block `IyiThread.start` runs may capture only
 `Share` values (III.4.4, built below), so what crosses threads is
-`Atomic(T)`, immutable values, state kept behind a `Mutex(T)`, and memory
+`Atomic(T)`, immutable values, state kept behind a `Mutex(T)`, a
+`Channel(T)` of `Share` values since III.4.13 made channels cross
+threads, and memory
 a program reaches through `Pointer` and keeps straight itself, `Pointer` being what the marker
 refuses by name. A thread is not offered as a spelling for
 concurrency; `group` is. It is offered because the collector's parallel
-stages (GC_DESIGN.md 7 and 8) and a scheduler with M threads need one,
+stages (GC_DESIGN.md 7 and 8) and a scheduler with M threads need one -
+III.4.13's pool is threads of exactly this kind -
 and because a program that wants a core for itself has never had a way
 to ask.
 
@@ -3392,7 +3401,8 @@ instruction — and leaves the registry and its group's child list on the
 way out (a panicked child stays, because the boundary still owes a
 re-raise for one nobody read). Two hundred sequential connections run
 on one stack. The pool is per scheduler, which is per thread, so it
-needs no lock: a fiber never leaves the scheduler that spawned it.
+needs no lock: a started fiber never leaves the scheduler that started
+it (III.4.13 keeps that true of parallel tasks too, on purpose).
 
 **The other half of that lesson: an address is not a reference.** The
 poller's event buffer was held as `Pointer(...).malloc(...).address` in
@@ -3517,7 +3527,7 @@ WASI 0.2/0.3 component-model async execution supporting stackful fibers directly
 Neither a sequential imitation nor a post-link bytecode transformation is
 acceptable.
 
-#### III.4.13 Tasks across cores: **DECIDED — `spawn_parallel`, a pool of workers, a task placed when it starts and never moved; `Share` gates its block**
+#### III.4.13 Tasks across cores: **BUILT — `spawn_parallel`, a pool of workers, a task placed when it starts and never moved; `Share` gates its block**
 
 0.18.0 ended with "the scheduler that spreads tasks across cores comes after
 this release". Until this section every task ran on the thread that spawned
@@ -3664,6 +3674,29 @@ contended `Mutex` holds its own tasks while it sleeps. wasm32 has no
 runtime (III.4.12) and no pool, and a build under `-Dgc_none` or
 `-Dgc_boehm`, which has no `IyiThread`, refuses `spawn_parallel` at compile
 time rather than run it on one thread.
+
+**Built as decided, and measured.** `src/iyi/concurrency.iyi` has the
+pool (`IyiWorkers`), the inbox, the doorbell and the scheduler's lock;
+`CleanupTransformer#check_share_boundary` gates the parallel block with
+the thread's sentences. `bench/parallel_exercise.sh` is the gate: 16
+CPU-bound tasks, release, best of three, on a 12-core Linux machine
+other jobs were sharing, took 715 ms on one worker, 360 on two (1.99x),
+185 on four (3.86x) and 103 on eight (6.94x), and four workers are held
+to 0.6 x 4 wherever the gate runs on at least four cores. The race step
+is the other proof the tasks run at the same instant: eight tasks adding
+2,000,000 times each to one count lose nothing through an atomic, and
+with the add made a load and a store they lost 8,403,659 of 16,000,000,
+which no schedule of one thread can do. The gate also holds placement on
+more than one worker with no task moving across a sleep or a channel,
+channel values across threads once each and in each sender's order, a
+cancel reaching a sleeper, a channel waiter, a task on the spawning
+thread and tasks still in the pool in about 100 ms, steals, lists on
+eight workers' fiber stacks through the collections, a deadlock across
+threads named, and broken copies of the runtime caught by name - a wake
+that does not ring, a steal that leaves the task queued, a cancel never
+delivered, a cancel that skips the pool, and a pool held to one worker.
+The one name the pool adds to the floor is `environ`, the C runtime's
+table `IYI_WORKERS` is read from on Linux and darwin.
 
 ### III.5 Module initialisation: **PROPOSED; rules 1, 2 and 4 BUILT**
 
@@ -10070,7 +10103,7 @@ Named honestly, so nobody mistakes this draft for complete.
     shards exist and none of them is written to iyi's rules, so "run them
     directly" is not a compatibility problem, it is the four rules: `require`
     against R-1, inference against R-2, monkey patching against R-3, and
-    Crystal's 8,161-line standard library against iyi's own 21,567-line prelude.
+    Crystal's 8,161-line standard library against iyi's own 22,428-line prelude.
 
     What is measurable is narrower and better than that framing suggests, and
     it was measured on **Kemal 1.12.0**, which compiles under this compiler

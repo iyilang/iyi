@@ -90,7 +90,27 @@ for build in plain release; do
 done
 
 # ── 2. The floor ──────────────────────────────────────────────────────────
-step "dependency floor: the pool adds only the environment it reads IYI_WORKERS from"
+# What the pool costs each platform, by name. Its workers are the
+# runtime's own threads, so it pays what a thread pays and nothing else:
+#
+#   Linux    nothing of the pool's own: threads by raw `clone`, the stop by
+#            `tgkill`, the doorbell by `eventfd2`, all syscalls. `environ`
+#            is the one name, the C runtime's table `IYI_WORKERS` is read
+#            from through `Program.env`.
+#   darwin   the runtime's list (bench/thread_exercise.sh spells it out),
+#            the thread floor's names a started thread costs -
+#            `pthread_create`, `pthread_kill` and `sigaction` for the
+#            thread and the stop, `pipe`/`read`/`write` for the stop's
+#            park, and `close` for a retiring thread's kqueue
+#            (`IyiScheduler.retire_thread`, linked with every thread
+#            body) - and `_environ` for `IYI_WORKERS`. The doorbell is an
+#            `EVFILT_USER` change through `kevent`, already on the list,
+#            and the core count is `sysctlbyname("hw.ncpu")`, also already
+#            there for the marker. No `pthread_join`: nothing joins a
+#            worker.
+#   Windows  kernel32 and the C runtime's DLLs; the doorbell is
+#            `PostQueuedCompletionStatus`, kernel32's.
+step "dependency floor: the pool costs what a thread costs, and the environment it reads IYI_WORKERS from"
 NM=""
 command -v nm >/dev/null 2>&1 && NM=nm
 case "$(uname -s)" in
@@ -109,29 +129,34 @@ case "$(uname -s)" in
     fi
     ;;
   Darwin)
-    # The concurrency gate's list, plus `_environ`: the pool reads
-    # `IYI_WORKERS` when it starts, through `Program.env`, which is the
-    # C runtime's environment table on both POSIX targets - the one name
-    # the pool adds, and the one every program that reads its environment
-    # carries (bench/dependency_floor.sh).
     [ -n "$NM" ] || { echo "no nm here, so the symbol floor is not measured"; exit 1; }
-    allowed='___error|__tlv_bootstrap|_backtrace|_backtrace_symbols_fd|_pipe|_pthread_create|_pthread_kill|_sigaction|_sigaltstack|_sysctlbyname|__dyld_get_image_header|__dyld_get_image_vmaddr_slide|_clock_gettime_nsec_np|_exit|_fstat64|_kevent|_kqueue|_malloc|_memset|_mmap|_mprotect|_munmap|_pipe|_pthread_get_stackaddr_np|_pthread_self|_read|_realloc|_write|_environ'
-    added="$("$NM" -u exercise-plain | sed -e 's/^ *//' | awk '{ print $NF }' | grep -E -cv "^($allowed)\$")"
-    if [ "$added" -ne 0 ]; then
-      echo "the pool moved the darwin floor:"; "$NM" -u exercise-plain; exit 1
-    fi
-    echo "  libSystem's runtime names and _environ, which IYI_WORKERS is read through"
+    runtime='___error __dyld_get_image_header __dyld_get_image_vmaddr_slide __tlv_bootstrap _backtrace _backtrace_symbols_fd _clock_gettime_nsec_np _exit _kevent _kqueue _mmap _mprotect _munmap _pthread_create _pthread_get_stackaddr_np _pthread_self _sigaction _sigaltstack _sysctlbyname _write'
+    thread='_close _pipe _pthread_kill _read'
+    pool='_environ'
+    allowed="$(printf '%s\n' $runtime $thread $pool | sort -u)"
+    for bin in exercise-plain exercise-release; do
+      found="$("$NM" -u "$bin" | sed -e 's/^ *//' | awk '{ print $NF }' | sort -u)"
+      extra="$(comm -13 <(echo "$allowed") <(echo "$found"))"
+      if [ -n "$extra" ]; then
+        echo "$bin asks libSystem for more than the list:"
+        echo "$extra" | sed 's/^/  /'
+        exit 1
+      fi
+    done
+    echo "  the runtime's names, a thread's ($(echo $thread)) and $pool, and nothing else, plain and release"
     ;;
   *)
     [ -n "$NM" ] || { echo "no nm here, so the symbol floor is not measured"; exit 1; }
-    added="$("$NM" -u exercise-plain |
-      sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
-      grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main|environ|__environ)$' |
-      grep -cv '^\s*$')"
-    if [ "$added" -ne 0 ]; then
-      echo "the pool put $added undefined symbols on the link line:"; "$NM" -u exercise-plain; exit 1
-    fi
-    echo "  the C runtime template's names and environ, which IYI_WORKERS is read through: the pool itself is raw syscalls"
+    for bin in exercise-plain exercise-release; do
+      added="$("$NM" -u "$bin" |
+        sed -e 's/^ *[wU] *//' -e 's/@.*$//' |
+        grep -v -E '^(_ITM_deregisterTMCloneTable|_ITM_registerTMCloneTable|__cxa_finalize|__gmon_start__|__libc_start_main|environ|__environ)$' |
+        grep -cv '^\s*$')"
+      if [ "$added" -ne 0 ]; then
+        echo "the pool put $added undefined symbols on $bin's link line:"; "$NM" -u "$bin"; exit 1
+      fi
+    done
+    echo "  the C runtime template's names and environ, which IYI_WORKERS is read through, plain and release: the pool itself is raw syscalls"
     ;;
 esac
 

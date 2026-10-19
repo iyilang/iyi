@@ -9,8 +9,10 @@
 #
 # Checking only, as std/rsa is. A TLS client checks a server's signatures
 # and a certificate's, and makes none: there is no private key here and no
-# secret, so the arithmetic is std/big's, plain and variable-time. The key
-# a client agrees on is X25519's (std/curve25519), which is constant-time.
+# secret, so the arithmetic is plain and variable-time: the scalars on
+# std/big's numbers, the points on the field's own words in Montgomery
+# form (`EcdsaPlane`). The key a client agrees on is X25519's
+# (std/curve25519), which is constant-time.
 #
 # All three curves, not only P-256: of the roots a system trusts, most
 # that are not RSA are P-384 (35 of the 39 on the machine this was written
@@ -35,6 +37,10 @@
 # the bits of both (Shamir's trick) in Jacobian coordinates, with the
 # cases a general addition misses handled by name: a point added to
 # itself, a point added to its negative, the identity on either side.
+# Measured on one x86_64 Linux machine other jobs shared, --release, the
+# best of five runs of 100: a P-256 signature checked in 183
+# microseconds, where BigInt's points took 1,477 and OpenSSL, through
+# Python's `cryptography`, takes 38.
 #
 # A signature that is not one is `false`, whatever the reason.
 #
@@ -194,24 +200,394 @@ pub struct EcdsaPublicKey
     w = s.pow_mod(n - BigInt.new(2), n)
     u1 = (e * w) % n
     u2 = (r * w) % n
-    sum = @group.combine(u1, u2, @x, @y)
-    return false if sum.z.zero?
-    @group.affine_x(sum) % n == r
+    EcdsaPlane.new(@group).check(u1, u2, @x, @y, r)
   end
 end
 
-# A point in Jacobian coordinates: (X / Z^2, Y / Z^3), the identity where
-# Z is zero.
-struct EcdsaPoint
-  getter x : BigInt
-  getter y : BigInt
-  getter z : BigInt
+# u1·G + u2·Q and its comparison with r, on the field's numbers as 64-bit
+# words (4, 6 or 9 of them) in Montgomery form, R = 2^(64 k): products in
+# `UInt128` by coarsely integrated operand scanning, nothing allocated
+# past the scratch made with the plane. The values are public - a
+# signature, a key, a message - so the arithmetic branches as it likes.
+# On BigInt's numbers, with an allocation and a division in every
+# reduction, a P-256 signature took 1.5 ms to check; see the header for
+# what it takes here.
+#
+# Points are Jacobian, (X / Z^2, Y / Z^3), the identity where Z is zero:
+# 3k words each. Scratch slots 0 to 5 are the doubling's and 6 to 15 the
+# addition's, so an addition that turns out to be a doubling can call it.
+class EcdsaPlane
+  @k : Int32
+  @size : Int32
+  @m : Pointer(UInt64)
+  @inv : UInt64
+  @r2 : Pointer(UInt64)
+  @t : Pointer(UInt64)
+  @s : Pointer(UInt64)
+  @group : EcdsaGroup
 
-  def initialize(@x : BigInt, @y : BigInt, @z : BigInt)
+  def initialize(@group : EcdsaGroup)
+    @size = @group.size
+    @k = (@size + 7) // 8
+    k = @k
+    @t = Pointer(UInt64).malloc((k + 2).to_u64)
+    @s = Pointer(UInt64).malloc((16 * k).to_u64)
+    @m = Pointer(UInt64).malloc(k.to_u64)
+    @r2 = Pointer(UInt64).malloc(k.to_u64)
+    words(@group.p, @m)
+    words((BigInt.one << (128 * k)) % @group.p, @r2)
+    # -1/m mod 2^64 by Newton's iteration: an odd m is its own inverse to
+    # three bits, and each step doubles the bits that are right.
+    x = @m[0]
+    5.times { x = x &* (2_u64 &- @m[0] &* x) }
+    @inv = 0_u64 &- x
   end
 
-  def self.identity : EcdsaPoint
-    EcdsaPoint.new(BigInt.one, BigInt.one, BigInt.zero)
+  # SEC 1 section 4.1.4's steps 5 to 7 for the public key (*qx*, *qy*):
+  # whether u1·G + u2·Q is a point whose x is r modulo n. Its x is X / Z^2,
+  # below p, and n is below p for all three curves, so x mod n is r when
+  # X = r Z^2 or, when r + n is still below p, X = (r + n) Z^2: two
+  # products where an inversion would take a few hundred.
+  def check(u1 : BigInt, u2 : BigInt, qx : BigInt, qy : BigInt, r : BigInt) : Bool
+    k = @k
+    point = Pointer(UInt64).malloc((3 * k).to_u64)
+    return false unless combine(u1, u2, qx, qy, point)
+    return false if zero?(point + (2 * k).to_i64)
+    zz = Pointer(UInt64).malloc((2 * k).to_u64)
+    want = zz + k.to_i64
+    mul(point + (2 * k).to_i64, point + (2 * k).to_i64, zz)
+    enter(r, want)
+    mul(want, zz, want)
+    return true if same?(want, point)
+    other = r + @group.n
+    return false unless other < @group.p
+    enter(other, want)
+    mul(want, zz, want)
+    same?(want, point)
+  end
+
+  # u1·G + u2·Q into *acc*, both scalars' bits read together from the
+  # top: one doubling a bit, and one addition of G, Q or G + Q where
+  # either is set. False for a scalar too wide to read.
+  private def combine(u1 : BigInt, u2 : BigInt, qx : BigInt, qy : BigInt, acc : Pointer(UInt64)) : Bool
+    k = @k
+    a = u1.to_bytes(@size)
+    c = u2.to_bytes(@size)
+    return false unless a && c
+    points = Pointer(UInt64).malloc((9 * k).to_u64)
+    g = points
+    q = points + (3 * k).to_i64
+    both = points + (6 * k).to_i64
+    affine(@group.gx, @group.gy, g)
+    affine(qx, qy, q)
+    add_points(g, q, both)
+    clear(acc + (2 * k).to_i64)
+    i = 0
+    while i < @size
+      bit = 7
+      while bit >= 0
+        double(acc, acc)
+        x = (a[i] >> bit) & 1_u8
+        y = (c[i] >> bit) & 1_u8
+        if x == 1_u8 && y == 1_u8
+          add_points(acc, both, acc)
+        elsif x == 1_u8
+          add_points(acc, g, acc)
+        elsif y == 1_u8
+          add_points(acc, q, acc)
+        end
+        bit = bit - 1
+      end
+      i = i + 1
+    end
+    true
+  end
+
+  # dbl-2001-b, for a = -3, from *p* into *r*, which may be *p*.
+  private def double(p : Pointer(UInt64), r : Pointer(UInt64)) : Nil
+    k = @k
+    x = p
+    y = p + k.to_i64
+    z = p + (2 * k).to_i64
+    if zero?(z)
+      copy(p, r, 3 * k)
+      return
+    end
+    if zero?(y)
+      clear(r + (2 * k).to_i64)
+      return
+    end
+    delta = slot(0)
+    gamma = slot(1)
+    beta = slot(2)
+    t = slot(3)
+    u = slot(4)
+    v = slot(5)
+    mul(z, z, delta)
+    mul(y, y, gamma)
+    mul(x, gamma, beta)
+    # alpha = 3 (x - delta)(x + delta), in t.
+    sub(x, delta, t)
+    add(x, delta, u)
+    mul(t, u, t)
+    add(t, t, u)
+    add(u, t, t)
+    # z3 = (y + z)^2 - gamma - delta, in u.
+    add(y, z, u)
+    mul(u, u, u)
+    sub(u, gamma, u)
+    sub(u, delta, u)
+    # x3 = alpha^2 - 8 beta, in v.
+    mul(t, t, v)
+    add(beta, beta, delta)
+    add(delta, delta, delta)
+    add(delta, delta, delta)
+    sub(v, delta, v)
+    # y3 = alpha (4 beta - x3) - 8 gamma^2, in delta.
+    add(beta, beta, delta)
+    add(delta, delta, delta)
+    sub(delta, v, delta)
+    mul(t, delta, delta)
+    mul(gamma, gamma, gamma)
+    add(gamma, gamma, gamma)
+    add(gamma, gamma, gamma)
+    add(gamma, gamma, gamma)
+    sub(delta, gamma, delta)
+    copy(v, r, k)
+    copy(delta, r + k.to_i64, k)
+    copy(u, r + (2 * k).to_i64, k)
+  end
+
+  # add-1998-cmo-2 from *p* and *q* into *r*, which may be *p*, with the
+  # cases it cannot take by name: the identity on either side, and equal
+  # x, which is the same point (a doubling) or its negative (the identity).
+  private def add_points(p : Pointer(UInt64), q : Pointer(UInt64), r : Pointer(UInt64)) : Nil
+    k = @k
+    x1 = p
+    y1 = p + k.to_i64
+    z1 = p + (2 * k).to_i64
+    x2 = q
+    y2 = q + k.to_i64
+    z2 = q + (2 * k).to_i64
+    if zero?(z1)
+      copy(q, r, 3 * k)
+      return
+    end
+    if zero?(z2)
+      copy(p, r, 3 * k)
+      return
+    end
+    z1z1 = slot(6)
+    z2z2 = slot(7)
+    u1 = slot(8)
+    u2 = slot(9)
+    s1 = slot(10)
+    s2 = slot(11)
+    h = slot(12)
+    rr = slot(13)
+    z3 = slot(14)
+    x3 = slot(15)
+    mul(z1, z1, z1z1)
+    mul(z2, z2, z2z2)
+    mul(x1, z2z2, u1)
+    mul(x2, z1z1, u2)
+    mul(y1, z2, s1)
+    mul(s1, z2z2, s1)
+    mul(y2, z1, s2)
+    mul(s2, z1z1, s2)
+    sub(u2, u1, h)
+    sub(s2, s1, rr)
+    if zero?(h)
+      zero?(rr) ? double(p, r) : clear(r + (2 * k).to_i64)
+      return
+    end
+    hh = z1z1
+    hhh = z2z2
+    v = u2
+    mul(h, h, hh)
+    mul(h, hh, hhh)
+    mul(u1, hh, v)
+    mul(z1, z2, z3)
+    mul(z3, h, z3)
+    # x3 = rr^2 - hhh - 2 v.
+    mul(rr, rr, x3)
+    sub(x3, hhh, x3)
+    sub(x3, v, x3)
+    sub(x3, v, x3)
+    # y3 = rr (v - x3) - s1 hhh, in u1.
+    sub(v, x3, u1)
+    mul(rr, u1, u1)
+    mul(s1, hhh, hh)
+    sub(u1, hh, u1)
+    copy(x3, r, k)
+    copy(u1, r + k.to_i64, k)
+    copy(z3, r + (2 * k).to_i64, k)
+  end
+
+  # The affine point (*x*, *y*) at *dst*, Z = 1.
+  private def affine(x : BigInt, y : BigInt, dst : Pointer(UInt64)) : Nil
+    k = @k
+    enter(x, dst)
+    enter(y, dst + k.to_i64)
+    enter(BigInt.one, dst + (2 * k).to_i64)
+  end
+
+  # *x*, below p, into Montgomery form at *dst*: its words times R^2 / R.
+  private def enter(x : BigInt, dst : Pointer(UInt64)) : Nil
+    words(x, dst)
+    mul(dst, @r2, dst)
+  end
+
+  # *x*, below 2^(64 k), as k little-endian words at *dst*.
+  private def words(x : BigInt, dst : Pointer(UInt64)) : Nil
+    k = @k
+    bytes = x.to_bytes(8 * k)
+    raise "ecdsa: #{x} does not fit #{k} words" unless bytes
+    i = 0
+    while i < k
+      w = 0_u64
+      j = 0
+      while j < 8
+        w = w.unsafe_shl(8) | bytes[8 * (k - 1 - i) + j].to_u64
+        j = j + 1
+      end
+      dst[i] = w
+      i = i + 1
+    end
+  end
+
+  private def slot(i : Int32) : Pointer(UInt64)
+    @s + (i * @k).to_i64
+  end
+
+  # r = a b / R mod p, by CIOS: k rounds of a times one word of b, each
+  # followed by one word's reduction; r may be a or b, being written once
+  # both have been read.
+  private def mul(a : Pointer(UInt64), b : Pointer(UInt64), r : Pointer(UInt64)) : Nil
+    k = @k
+    m = @m
+    t = @t
+    inv = @inv
+    j = 0
+    while j < k + 2
+      t[j] = 0_u64
+      j = j + 1
+    end
+    i = 0
+    while i < k
+      bi = b[i].to_u128
+      c = 0_u128
+      j = 0
+      while j < k
+        w = a[j].to_u128 &* bi &+ t[j].to_u128 &+ c
+        t[j] = w.unsafe_to_u64
+        c = w.unsafe_shr(64)
+        j = j + 1
+      end
+      w = t[k].to_u128 &+ c
+      t[k] = w.unsafe_to_u64
+      t[k + 1] = w.unsafe_shr(64).unsafe_to_u64
+      q = (t[0] &* inv).to_u128
+      c = (q &* m[0].to_u128 &+ t[0].to_u128).unsafe_shr(64)
+      j = 1
+      while j < k
+        w = q &* m[j].to_u128 &+ t[j].to_u128 &+ c
+        t[j - 1] = w.unsafe_to_u64
+        c = w.unsafe_shr(64)
+        j = j + 1
+      end
+      w = t[k].to_u128 &+ c
+      t[k - 1] = w.unsafe_to_u64
+      t[k] = t[k + 1] &+ w.unsafe_shr(64).unsafe_to_u64
+      i = i + 1
+    end
+    # t is below 2p: p taken off when t[k] carried or t is not below p.
+    if t[k] != 0_u64 || !below?(t, m)
+      sub_words(t, m, r)
+    else
+      copy(t, r, k)
+    end
+  end
+
+  # (a + b) mod p.
+  private def add(a : Pointer(UInt64), b : Pointer(UInt64), r : Pointer(UInt64)) : Nil
+    k = @k
+    c = 0_u128
+    i = 0
+    while i < k
+      w = a[i].to_u128 &+ b[i].to_u128 &+ c
+      r[i] = w.unsafe_to_u64
+      c = w.unsafe_shr(64)
+      i = i + 1
+    end
+    sub_words(r, @m, r) if c != 0_u128 || !below?(r, @m)
+  end
+
+  # (a - b) mod p.
+  private def sub(a : Pointer(UInt64), b : Pointer(UInt64), r : Pointer(UInt64)) : Nil
+    return unless sub_words(a, b, r)
+    k = @k
+    c = 0_u128
+    i = 0
+    while i < k
+      w = r[i].to_u128 &+ @m[i].to_u128 &+ c
+      r[i] = w.unsafe_to_u64
+      c = w.unsafe_shr(64)
+      i = i + 1
+    end
+  end
+
+  # r = a - b over k words; whether it borrowed.
+  private def sub_words(a : Pointer(UInt64), b : Pointer(UInt64), r : Pointer(UInt64)) : Bool
+    borrow = 0_u128
+    i = 0
+    while i < @k
+      w = a[i].to_u128 &- b[i].to_u128 &- borrow
+      r[i] = w.unsafe_to_u64
+      borrow = w.unsafe_shr(127)
+      i = i + 1
+    end
+    borrow != 0_u128
+  end
+
+  # Whether a < b, from the top word down.
+  private def below?(a : Pointer(UInt64), b : Pointer(UInt64)) : Bool
+    i = @k - 1
+    while i >= 0
+      return a[i] < b[i] if a[i] != b[i]
+      i = i - 1
+    end
+    false
+  end
+
+  private def same?(a : Pointer(UInt64), b : Pointer(UInt64)) : Bool
+    i = 0
+    while i < @k
+      return false unless a[i] == b[i]
+      i = i + 1
+    end
+    true
+  end
+
+  private def zero?(a : Pointer(UInt64)) : Bool
+    i = 0
+    while i < @k
+      return false unless a[i] == 0_u64
+      i = i + 1
+    end
+    true
+  end
+
+  private def clear(a : Pointer(UInt64)) : Nil
+    i = 0
+    while i < @k
+      a[i] = 0_u64
+      i = i + 1
+    end
+  end
+
+  private def copy(src : Pointer(UInt64), dst : Pointer(UInt64), count : Int32) : Nil
+    dst.copy_from(src, count) unless src == dst
   end
 end
 
@@ -260,83 +636,6 @@ struct EcdsaGroup
 
   def on_curve?(x : BigInt, y : BigInt) : Bool
     reduce(y * y) == reduce(x * x * x - x * BigInt.new(3) + @b)
-  end
-
-  # u1·G + u2·Q, both scalars' bits read together from the top: one
-  # doubling a bit, and one addition of G, Q or G + Q where either is set.
-  def combine(u1 : BigInt, u2 : BigInt, qx : BigInt, qy : BigInt) : EcdsaPoint
-    g = EcdsaPoint.new(@gx, @gy, BigInt.one)
-    q = EcdsaPoint.new(qx, qy, BigInt.one)
-    both = add(g, q)
-    a = u1.to_bytes(@size)
-    c = u2.to_bytes(@size)
-    return EcdsaPoint.identity unless a && c
-    acc = EcdsaPoint.identity
-    i = 0
-    while i < @size
-      bit = 7
-      while bit >= 0
-        acc = double(acc)
-        x = (a[i] >> bit) & 1_u8
-        y = (c[i] >> bit) & 1_u8
-        if x == 1_u8 && y == 1_u8
-          acc = add(acc, both)
-        elsif x == 1_u8
-          acc = add(acc, g)
-        elsif y == 1_u8
-          acc = add(acc, q)
-        end
-        bit = bit - 1
-      end
-      i = i + 1
-    end
-    acc
-  end
-
-  # The affine x of a point that is not the identity.
-  def affine_x(point : EcdsaPoint) : BigInt
-    z_inverse = point.z.pow_mod(@p - BigInt.new(2), @p)
-    reduce(point.x * z_inverse * z_inverse)
-  end
-
-  # dbl-2001-b, for a = -3.
-  def double(point : EcdsaPoint) : EcdsaPoint
-    return point if point.z.zero?
-    return EcdsaPoint.identity if point.y.zero?
-    delta = reduce(point.z * point.z)
-    gamma = reduce(point.y * point.y)
-    beta = reduce(point.x * gamma)
-    alpha = reduce((point.x - delta) * (point.x + delta) * BigInt.new(3))
-    x3 = reduce(alpha * alpha - beta * BigInt.new(8))
-    sum = point.y + point.z
-    z3 = reduce(sum * sum - gamma - delta)
-    y3 = reduce(alpha * (beta * BigInt.new(4) - x3) - gamma * gamma * BigInt.new(8))
-    EcdsaPoint.new(x3, y3, z3)
-  end
-
-  # add-1998-cmo-2, with the two cases it cannot take: equal x, which is
-  # the same point (a doubling) or its negative (the identity).
-  def add(one : EcdsaPoint, other : EcdsaPoint) : EcdsaPoint
-    return other if one.z.zero?
-    return one if other.z.zero?
-    z1z1 = reduce(one.z * one.z)
-    z2z2 = reduce(other.z * other.z)
-    u1 = reduce(one.x * z2z2)
-    u2 = reduce(other.x * z1z1)
-    s1 = reduce(one.y * other.z * z2z2)
-    s2 = reduce(other.y * one.z * z1z1)
-    h = reduce(u2 - u1)
-    r = reduce(s2 - s1)
-    if h.zero?
-      return r.zero? ? double(one) : EcdsaPoint.identity
-    end
-    hh = reduce(h * h)
-    hhh = reduce(hh * h)
-    v = reduce(u1 * hh)
-    x3 = reduce(r * r - hhh - v * BigInt.new(2))
-    y3 = reduce(r * (v - x3) - s1 * hhh)
-    z3 = reduce(one.z * other.z * h)
-    EcdsaPoint.new(x3, y3, z3)
   end
 
   # *value* modulo p, in [0, p).

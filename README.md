@@ -120,7 +120,10 @@ current compiler reports `0.18.0`. iyi's own prelude carries the small-tool
 floor — `puts`, stdin, whole-file `File` read/write, `Program.args`/`.env` —
 and no more: no TLS, no serialisation, and no sockets or format strings -
 `import std/socket` and `import std/format` are where the last two live,
-outside the prelude every program carries. Its concurrency — a
+outside the prelude every program carries. TLS is `import std/tls`, and
+it has not been audited and is not to be called secure until it is;
+[SECURITY_REVIEW_TLS.md](SECURITY_REVIEW_TLS.md) is an automated review
+of it, not that audit. Its concurrency — a
 cooperative scheduler, `group`/`spawn`,
 `Channel`, cancellable `sleep` and reads (SPEC.md III.4) — runs on Linux
 (x86_64, aarch64), macOS arm64 and Windows x86-64;
@@ -434,7 +437,7 @@ tar -xzf iyi-0.18.0-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 899 KB prelude, the 4,312 KB of `src/std` that `import std/...`
+iyi's own 899 KB prelude, the 4,317 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. 0.11.0 shipped
 the first and the third — `import std/enumerable` answered "can't find module"
 out of the thing people downloaded, and every gate passed it because they all

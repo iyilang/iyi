@@ -28,9 +28,9 @@
 # - and at a server secp256r1 too, std/p256's - both constant-time.
 # `version` says which version a connection speaks.
 #
-# The client. A server that asks again (HelloRetryRequest) for a cookie is
-# answered; one that asks for another group is refused, as X25519 is all
-# this offers. The server's certificates are checked as std/x509 checks a
+# The client. A server that asks again (HelloRetryRequest) for a cookie, or
+# for secp256r1, is answered; one that asks for any other group is refused.
+# The server's certificates are checked as std/x509 checks a
 # chain - to the roots in `TlsConfig#roots`, or the system's
 # (std/system_roots), for the host connected to - and then its
 # CertificateVerify: ECDSA on P-256, P-384 or P-521 with the hash the
@@ -139,7 +139,9 @@
 # Not audited. Its tests are RFC 8448's traces, a scripted server and a
 # scripted client that each break the protocol one rule at a time, and
 # OpenSSL, Python, curl and Node at the other end; that is evidence, not an
-# audit.
+# audit. SECURITY_REVIEW_TLS.md is an automated review of this module and
+# what it stands on, with what it found and fixed; it is not that audit
+# either.
 
 module std/tls
 

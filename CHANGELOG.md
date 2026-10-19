@@ -2,6 +2,55 @@
 
 ## Unreleased
 
+### Added
+
+- **`SECURITY_REVIEW_TLS.md`: an automated security review of std/tls and
+  what it stands on - which is not an audit, and changes nothing about
+  std/tls being unaudited and not to be called secure until it is.** An
+  AI agent read `src/std/tls.iyi` and `x509.iyi` against RFC 8446, 5246,
+  7627, 5746, 5280 and 6125, and std/rsa with std/big, the curves, the
+  AEADs, the digests, `Random::Secure`, std/asn1 and std/http's TLS paths
+  in four further read-only passes; every flaw it suspected was
+  reproduced on 0.18.0 with a chain Python's cryptography 46.0.5 built or
+  a record the scripted TLS server sends, beside the verdict of Python's
+  verifier or OpenSSL 3.5.5 where one exists. The file lists six findings
+  fixed below (two Medium, four Low), eight left open with the reason, and
+  what was checked and found sound, each with where in the code it holds.
+
+### Fixed
+
+- **std/x509: an excluded name constraint holds out a name written with a
+  final dot.** The host matcher drops a dNSName's final dot and the
+  constraint check did not, so a leaf naming `www.evil.example.` under an
+  intermediate excluding `evil.example` held for the host
+  `www.evil.example`; a constraint written with a final dot excluded
+  nothing. A name is now judged as the matcher reads it, and a name under
+  a DNS constraint, or the constraint, with an empty label refuses the
+  chain, as Python's verifier refuses each of these chains.
+- **std/x509: an excluded name constraint holds out a wildcard standing
+  for an excluded name.** `*.example.com` under an intermediate excluding
+  `bad.example.com` held for `bad.example.com` - the gap Go closed as
+  CVE-2025-61727. Refused for any host now, as Python refuses it.
+- **std/x509: an RSA key under 2048 bits refuses the chain it is in**, at
+  the leaf, an intermediate or the root, where 1024 bits was taken.
+  `openssl verify -auth_level 2` refuses the same 1024- and 1536-bit keys
+  at every depth, and the gate holds seven fresh chains to it; OpenSSL
+  takes 1990 bits and up, measured, so this floor is the stricter between
+  1990 and 2047.
+- **std/x509: a TBSCertificate's unique identifiers and extensions come
+  once each, in order.** A second extensions block was read on top of the
+  first, so a certificate with basicConstraints cA in its second block
+  alone was a CA here and a leaf to every reader that stops at the first;
+  Python's cryptography and `openssl x509` refuse to read one.
+- **std/tls: a TLS 1.3 record's inner plaintext, padding in it, is at
+  most 2^14 + 1 bytes** (RFC 8446 section 5.4), where the content alone
+  was checked and a record could be padded 239 bytes past the limit;
+  `record_overflow` now.
+- **std/tls: no record of another type between the pieces of a handshake
+  message** (section 5.1). After the handshake, application data or a
+  close_notify was taken while half a KeyUpdate or NewSessionTicket was
+  held, at both ends; `unexpected_message` now.
+
 ## 0.18.0 — 2026-10-18
 
 **iyi's own library reaches the network by itself: TLS 1.3 at both ends,

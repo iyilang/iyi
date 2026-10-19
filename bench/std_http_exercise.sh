@@ -1361,6 +1361,185 @@ else
 fi
 
 echo
+echo "== HTTPS: the server's connection cap and request deadline"
+# `Server.serve(tls:, max_connections: 2, timeout_ms: 3000,
+# request_timeout_ms: 5000)` (http2_exercise's serve-guarded, the P-256
+# leaf) against slow clients written here over Python's ssl. Two
+# connections hold both places and a third is queued, not refused: its
+# handshake goes unanswered until one of the two closes, and then it is
+# served. A head sent a byte every half second is cut off at 3 s, as it was
+# before; a body sent so - over HTTP/1.1, and over HTTP/2 a DATA frame of
+# one byte at a time - at 5 s, where before each read's own 3 s limit was
+# all it met and the body went on for as long as it dripped. Each close
+# must come within 90% of its deadline and 1.5 s past it for the head (so
+# a head held to the request's 5 s is caught), 2.5 s for a body, unanswered.
+cat >"$WORK/guard.py" <<'PY'
+import select, socket, ssl, struct, sys, threading, time
+
+port, root = int(sys.argv[1]), sys.argv[2]
+head_ms, request_ms = int(sys.argv[3]), int(sys.argv[4])
+cases = sys.argv[5:] or ["cap", "head", "body", "h2"]
+failed = 0
+
+
+def connect(alpn, timeout=20):
+    ctx = ssl.create_default_context(cafile=root)
+    ctx.set_alpn_protocols([alpn])
+    raw = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    return ctx.wrap_socket(raw, server_hostname="localhost")
+
+
+def drip(s, first, unit, every=0.5, limit=30):
+    """Sends *first*, then *unit* every *every* seconds, reading what comes:
+    the seconds until the server closed (None if it had not in *limit*),
+    and what it sent."""
+    start = time.monotonic()
+    got = b""
+    s.sendall(first)
+    last = start
+    while time.monotonic() - start < limit:
+        wait = max(0.0, every - (time.monotonic() - last))
+        if s.pending() or select.select([s], [], [], wait)[0]:
+            try:
+                chunk = s.recv(65536)
+            except (ssl.SSLError, OSError):
+                return time.monotonic() - start, got
+            if not chunk:
+                return time.monotonic() - start, got
+            got += chunk
+            continue
+        try:
+            s.sendall(unit)
+        except (ssl.SSLError, OSError):
+            return time.monotonic() - start, got
+        last = time.monotonic()
+    return None, got
+
+
+def judge(name, closed, low_ms, high_ms, extra=None):
+    global failed
+    if closed is None:
+        print(f"FAIL {name}: still open after 30 s")
+        failed += 1
+    elif not (low_ms <= closed * 1000 <= high_ms):
+        print(f"FAIL {name}: closed after {closed:.1f} s, outside {low_ms / 1000:.1f}-{high_ms / 1000:.1f} s")
+        failed += 1
+    elif extra:
+        print(f"FAIL {name}: {extra}")
+        failed += 1
+    else:
+        print(f"ok {name}: closed after {closed:.1f} s")
+
+
+def hpack(fields):
+    # Literal header fields without indexing, new names (RFC 7541 6.2.2).
+    out = b""
+    for name, value in fields:
+        out += b"\x00" + bytes([len(name)]) + name + bytes([len(value)]) + value
+    return out
+
+
+def frame(kind, flags, stream, payload):
+    return struct.pack(">I", len(payload))[1:] + bytes([kind, flags]) + struct.pack(">I", stream) + payload
+
+
+for case in cases:
+    if case == "cap":
+        # Two connections hold both places; a third waits in the listen
+        # queue - its handshake unanswered - until one of them closes.
+        a, b = connect("http/1.1"), connect("http/1.1")
+        seen = {}
+
+        def third():
+            try:
+                c = connect("http/1.1", timeout=15)
+                seen["at"] = time.monotonic()
+                c.sendall(b"GET /echo?x=third HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                data = b""
+                while True:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                seen["answer"] = data.split(b"\r\n")[0].decode()
+            except Exception as e:
+                seen["error"] = repr(e)
+
+        t = threading.Thread(target=third)
+        t.start()
+        time.sleep(1.0)
+        closed_at = time.monotonic()
+        a.close()
+        t.join(20)
+        b.close()
+        if "error" in seen or "at" not in seen:
+            print(f"FAIL cap: the third connection was not served: {seen.get('error', 'no answer in 20 s')}")
+            failed += 1
+        elif seen["at"] < closed_at:
+            print(f"FAIL cap: the third connection was served {closed_at - seen['at']:.1f} s before a place was free")
+            failed += 1
+        elif seen.get("answer") != "HTTP/1.1 200 OK":
+            print(f"FAIL cap: the third connection was answered {seen.get('answer')!r}")
+            failed += 1
+        else:
+            print(f"ok cap: the third connection waited, then was served {seen['at'] - closed_at:.2f} s after a place was free: {seen['answer']}")
+    elif case == "head":
+        s = connect("http/1.1")
+        closed, got = drip(s, b"GET /echo HTTP/1.1\r\nHost: localhost\r\nX-Drip: ", b"a")
+        judge("a head a byte at a time", closed, head_ms * 0.9, head_ms + 1500, f"answered {got[:40]!r}" if got else None)
+    elif case == "body":
+        s = connect("http/1.1")
+        closed, got = drip(s, b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n", b"b")
+        judge("a body a byte at a time", closed, request_ms * 0.9, request_ms + 2500, f"answered {got[:40]!r}" if got else None)
+    elif case == "h2":
+        s = connect("h2")
+        if s.selected_alpn_protocol() != "h2":
+            print(f"FAIL an HTTP/2 body a frame of a byte at a time: ALPN chose {s.selected_alpn_protocol()!r}")
+            failed += 1
+            continue
+        head = hpack([(b":method", b"POST"), (b":scheme", b"https"), (b":path", b"/echo"),
+                      (b":authority", b"localhost"), (b"content-length", b"100")])
+        first = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + frame(4, 0, 0, b"") + frame(1, 4, 1, head)
+        closed, got = drip(s, first, frame(0, 0, 1, b"c"))
+        # Anything but SETTINGS, GOAWAY and WINDOW_UPDATE is an answer.
+        kinds, at = set(), 0
+        while at + 9 <= len(got):
+            kinds.add(got[at + 3])
+            at += 9 + int.from_bytes(got[at:at + 3], "big")
+        judge("an HTTP/2 body a frame of a byte at a time", closed, request_ms * 0.9, request_ms + 2500,
+              f"answered frames of types {sorted(kinds)}" if kinds - {4, 7, 8} else None)
+sys.exit(1 if failed else 0)
+PY
+# guarded <binary> <output> [case...]: the slow clients against that
+# binary's serve-guarded; answers whether every case held.
+guarded() {
+  local bin="$1" out="$2" gpid
+  shift 2
+  rm -f "$WORK/guarded.port"
+  "$bin" serve-guarded "$WORK/guarded.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" 2 3000 5000 >"$WORK/guarded.log" 2>&1 &
+  gpid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$WORK/guarded.port" ] && break
+    sleep 0.1
+  done
+  timeout -k 5 180 "$PY" "$WORK/guard.py" "$(cat "$WORK/guarded.port" 2>/dev/null || echo 1)" "$WORK/tls/root.pem" 3000 5000 "$@" >"$out" 2>&1
+  local code=$?
+  kill "$gpid" 2>/dev/null
+  wait "$gpid" 2>/dev/null
+  return $code
+}
+guard_ready=0
+if [ "$https_ready" -ne 1 ] || [ -z "$PY" ]; then
+  echo "  skipped: no HTTPS server from the section above, or no python3 to be the slow clients"
+else
+  guard_ready=1
+  guarded "$H2BIN" "$WORK/guarded.out"
+  code=$?
+  sed 's/^ok /  /; s/^FAIL /  FAIL: /' "$WORK/guarded.out"
+  [ "$code" -eq 0 ] || status=1
+fi
+
+echo
 echo "== through a proxy: a proxy written here in Python, curl beside the client"
 # `proxy:` end to end: a forwarding proxy written by hand below - absolute
 # form forwarded in origin form, CONNECT tunnelled byte for byte, Basic
@@ -1904,9 +2083,10 @@ mutate "a client that reads a head for as long as it comes" 'conn.read_head(Serv
 mutate "a server that never says 100 Continue" '    if head.expects
       socket = conn.transport' '    if false
       socket = conn.transport'
-mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls)' '          accepted = client
+mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, slots)' '          accepted = client
           g.spawn do
             handle(accepted, handler)
+            slots.take_now if slots
             0
           end'
 mutate "a coding this client cannot undo read as chunked" 'return "transfer coding #{coding.inspect} is not one this client decodes" unless same_name?(coding, "chunked")' 'next unless same_name?(coding, "chunked")'
@@ -1974,8 +2154,8 @@ mutate "a client that keeps a connection the answer closed" 'keep = got.starts_w
 mutate "a client that holds a connection for whatever was left unread" 'client && @keep && !@conn.ended? && @reader.drain(65536_i64)' 'client && @keep && !@conn.ended? && @reader.drain(9223372036854775807_i64)'
 mutate "a GET not sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head ||' 'retry = false && (head ||'
 mutate "a POST sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head || same_name?(method, "GET") || same_name?(method, "PUT") || same_name?(method, "DELETE") || same_name?(method, "OPTIONS") || same_name?(method, "TRACE"))' 'retry = body.is_a?(String)'
-mutate "a head given as long as each read is short" '      conn.deadline_in(timeout_ms)
-' ''
+mutate "a head given as long as each read is short" '      conn.deadline_at(until_head(started, timeout_ms, whole))
+      got = conn.read_head(' '      got = conn.read_head('
 mutate "an upgraded connection held to the server's timeout" '      conn.unlimited
 ' ''
 mutate "a client that waits for an answer as long as it takes" '        conn.gap = timeout_ms if timeout_ms > 0
@@ -2190,6 +2370,45 @@ https_breaks "the TLS handshake skipped" https_plain \
 https_breaks "no close_notify at the end" https_notify \
   '    secured.close
   end' '  end'
+# The cap and the request deadline broken, the slow clients run against
+# the copy: each must fail at the case that names it.
+guard_breaks() { # guard_breaks <label> <name> <old> <new> <case> <phrase>
+  local label="$1" name="$2" old="$3" new="$4" case_name="$5" phrase="$6"
+  if [ "${guard_ready:-0}" -ne 1 ]; then
+    echo "  $label: skipped with the slow clients' section"
+  elif ! h2_patched "$name" "$old" "$new"; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
+    status=1
+  elif guarded "$WORK/$name.bin" "$WORK/$name.out" "$case_name"; then
+    echo "  $label: the slow clients were cut off by a broken server"
+    status=1
+  elif grep -qF "FAIL $phrase:" "$WORK/$name.out"; then
+    echo "  $label: caught: $(grep -m1 'FAIL' "$WORK/$name.out" | sed 's/^FAIL //' | cut -c1-120)"
+  else
+    echo "  $label: failed, but not at \"$phrase\": $(sed -n '1p' "$WORK/$name.out")"
+    status=1
+  fi
+}
+guard_breaks "a request's body bounded per read alone" guard_body \
+  '        conn.deadline_at(whole, "read a request") if whole > 0_i64
+        reader = body_reader(conn, head)' '        reader = body_reader(conn, head)' \
+  body "a body a byte at a time"
+guard_breaks "an HTTP/2 body bounded per read alone" guard_h2 \
+  '      conn.deadline_at(whole, "read a request") if whole > 0_i64
+      unless stream_bodies' '      unless stream_bodies' \
+  h2 "an HTTP/2 body a frame of a byte at a time"
+guard_breaks "connections served without a cap" guard_cap \
+  'slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil' 'slots = nil.as(Channel(Int32)?)' \
+  cap "cap"
+guard_breaks "a connection's place never given back" guard_leak \
+  "      # The connection's place, given back however it ended.
+      slots.take_now if slots
+" "" \
+  cap "cap"
+guard_breaks "a head held to the whole request's deadline alone" guard_head \
+  '    head = timeout_ms > 0 ? started + timeout_ms.to_i64 * 1000000_i64 : 0_i64' '    head = 0_i64' \
+  head "a head a byte at a time"
 # The client's certificate, lost on the way to the handler or the server:
 # the mTLS checks must fail.
 mtls_breaks() { # mtls_breaks <label> <name> <old> <new>
@@ -2209,10 +2428,10 @@ mtls_breaks() { # mtls_breaks <label> <name> <old> <new>
 }
 mtls_breaks "an HTTP/1.1 request without the client's certificate" mtls_h1 \
   '        req.peer_certificates = peer
-        return unless answered?' '        return unless answered?'
+        response = handler.call(req)' '        response = handler.call(req)'
 mtls_breaks "an HTTP/2 request without the client's certificate" mtls_h2 \
   '      req.peer_certificates = peer
-      answered = h2.answer' '      answered = h2.answer'
+      response = handler.call(req)' '      response = handler.call(req)'
 mtls_breaks "an upgrade's handshake presenting no certificate" mtls_upgrade \
   '            offered.identity = tls_config.identity
 ' ''

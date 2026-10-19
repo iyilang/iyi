@@ -185,9 +185,10 @@ class Conn
   @failure : Cancelled | SocketError | Nil
   @listener : IyiSocket?
   @idle : Hash(UInt64, IyiSocket)?
-  # When the head being read must have arrived by (monotonic ns, 0 for no
-  # such time), and how long one read may wait otherwise.
+  # When what is being read must have arrived by (monotonic ns, 0 for no
+  # such time) and what it is, and how long one read may wait otherwise.
   @deadline : Int64 = 0_i64
+  @deadline_what : String = "read a request's head"
   @gap : Int32? = nil
   # A client's `https://` connection: TLS over the socket, which every
   # read and write then goes through. The socket's timeouts are TLS's too.
@@ -270,8 +271,12 @@ class Conn
     if @deadline > 0_i64
       left = (@deadline - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
       if left <= 0_i64
-        @failure = SocketError.timed_out("read a request's head")
+        @failure = SocketError.timed_out(@deadline_what)
         return false
+      end
+      # The pause a read may take still holds inside the deadline.
+      if gap = @gap
+        left = gap.to_i64 if gap > 0 && gap.to_i64 < left
       end
       @socket.read_timeout_ms = left.to_i32
     end
@@ -313,7 +318,14 @@ class Conn
   # client that sends a byte a little inside it holds a connection for as
   # long as it likes.
   def deadline_in(ms : Int32) : Nil
-    @deadline = ms > 0 ? Time.monotonic_nanoseconds.to_i64 + ms.to_i64 * 1000000_i64 : 0_i64
+    deadline_at(ms > 0 ? Time.monotonic_nanoseconds.to_i64 + ms.to_i64 * 1000000_i64 : 0_i64)
+  end
+
+  # The same, by the monotonic clock's nanoseconds (0: no limit); *what*
+  # is what the timed-out read says it was doing.
+  def deadline_at(ns : Int64, what : String = "read a request's head") : Nil
+    @deadline = ns
+    @deadline_what = what
   end
 
   def no_deadline : Nil
@@ -1430,6 +1442,12 @@ pub struct Server
   # A string body shorter than this goes uncompressed: the gzip envelope
   # and the fixed code cost more than they save under it.
   COMPRESS_FROM = 1024
+  # The defaults of `serve`'s *max_connections* and *request_timeout_ms*.
+  MAX_CONNECTIONS =   1024
+  REQUEST_TIMEOUT = 300000
+  # How often an accept loop held at *max_connections* looks whether its
+  # listener has been closed meanwhile.
+  CAP_CHECK_MS = 250
 
   # Serve `listener` until it is closed. The block runs on the
   # connection's fiber, once per request; what it answers is written back.
@@ -1454,6 +1472,29 @@ pub struct Server
   # `client_header_timeout`; 0 for none. A connection handed over by
   # `Response.upgrade` waits as its protocol likes.
   #
+  # *request_timeout_ms*: the whole request - head and body - must have
+  # arrived within it, counted from the same moment as *timeout_ms*, as
+  # Go's `ReadTimeout` beside its `ReadHeaderTimeout`; the head is held to
+  # the sooner of the two. Without it a body sent a byte every few seconds
+  # was bounded per read alone, and held its connection for as long as it
+  # dripped. A block that reads the body itself (*stream_bodies*) reads
+  # under it until the block returns, and what it leaves unread is read
+  # past under it too. Over HTTP/2 the wait for each request and its body
+  # is held to it on the connection the same way, the head to the sooner
+  # of the two. Five minutes by default, which a 64 MiB body (`MAX_BODY`)
+  # meets at 224 KB/s; a server taking large uploads over slow links
+  # raises it. 0 for none. A connection past it is closed, unanswered, as
+  # one past *timeout_ms* is.
+  #
+  # *max_connections*: at most this many connections are served at once;
+  # 1024 by default, 0 for no limit. Past it the server stops accepting
+  # until one ends, so the next connection waits in the kernel's listen
+  # queue - queued, not refused, as Go's `netutil.LimitListener` does - and
+  # is served in its turn; a client that gives up waiting goes unserved.
+  # Each served connection holds its place until it closes, a kept-alive
+  # one between requests too, which *timeout_ms* bounds. The process's
+  # own limit on descriptors may come first.
+  #
   # *tls*: each connection is TLS 1.3 (std/tls's `TlsServer`) under this
   # configuration, its handshake held to *timeout_ms* too; one whose
   # handshake fails is closed, the client told why by an alert. Inside
@@ -1461,16 +1502,25 @@ pub struct Server
   # ALPN chose `h2` does, when `tls.alpn` offers it - is served HTTP/2,
   # and any other HTTP/1.1. A `Response.upgrade` block over TLS is handed
   # the `TlsStream`, so a WebSocket is `wss://`.
-  def self.serve(listener : IyiSocket, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, tls : TlsServerConfig? = nil, &handler : Request -> Response) : Nil
+  def self.serve(listener : IyiSocket, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 60000, tls : TlsServerConfig? = nil, request_timeout_ms : Int32 = REQUEST_TIMEOUT, max_connections : Int32 = MAX_CONNECTIONS, &handler : Request -> Response) : Nil
     raise "HTTP: a timeout of #{timeout_ms} ms" if timeout_ms < 0
+    raise "HTTP: a request timeout of #{request_timeout_ms} ms" if request_timeout_ms < 0
+    raise "HTTP: at most #{max_connections} connections" if max_connections < 0
     idle = {} of UInt64 => IyiSocket
+    # A place per connection served: a send waits while every one is held.
+    slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil
     group do |g|
       pause = 5
       while !listener.closed?
+        if room = slots
+          break unless claim(room, listener)
+        end
         case client = listener.accept
         in Cancelled
+          slots.take_now if slots
           break
         in SocketError
+          slots.take_now if slots
           # The listener's own trouble - descriptors run out, most often -
           # is waited out rather than spun on: 5 ms doubling to a second,
           # as Go's server does, and the next accept that works resets it.
@@ -1478,12 +1528,29 @@ pub struct Server
           pause = pause * 2 if pause < 1000
         in IyiSocket
           pause = 5
-          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls)
+          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, slots)
         end
       end
       idle.each { |_, waiting| waiting.close }
       0
     end
+  end
+
+  # A place among *slots* for the next connection, waited for while all
+  # are held: false when *listener* closes first, which is looked at every
+  # `CAP_CHECK_MS` while waiting, since a close does not wake this wait.
+  private def self.claim(slots : Channel(Int32), listener : IyiSocket) : Bool
+    while !listener.closed?
+      claimed = false
+      select
+      when slots.send(0)
+        claimed = true
+      when timeout(CAP_CHECK_MS)
+        nil
+      end
+      return true if claimed
+    end
+    false
   end
 
   # The connection's task, spawned from a method so its block holds this
@@ -1499,16 +1566,18 @@ pub struct Server
   # Go's server does. Unread, the panic reached `serve`'s group, which
   # cancelled every other connection and the accept loop and panicked "a
   # task panicked": one request whose block failed took the server down.
-  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, IyiSocket), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, tls : TlsServerConfig?) : Nil
+  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, IyiSocket), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, tls : TlsServerConfig?, request_timeout_ms : Int32, slots : Channel(Int32)?) : Nil
     g.spawn do
       group do |own|
         served = own.spawn do
-          handle(client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls)
+          handle(client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms)
           0
         end
         served.value
         0
       end
+      # The connection's place, given back however it ended.
+      slots.take_now if slots
       0
     end
   end
@@ -1520,10 +1589,10 @@ pub struct Server
   # connection that opens with HTTP/2's preface is served as HTTP/2. Under
   # *tls* the handshake comes first, and the connection ends with
   # close_notify.
-  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, IyiSocket)? = nil, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 0, tls : TlsServerConfig? = nil) : Nil
+  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, IyiSocket)? = nil, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 0, tls : TlsServerConfig? = nil, request_timeout_ms : Int32 = 0) : Nil
     defer client.close
     unless config = tls
-      serve_connection(client, nil, handler, listener, idle, stream_bodies, compress, timeout_ms)
+      serve_connection(client, nil, handler, listener, idle, stream_bodies, compress, timeout_ms, request_timeout_ms)
       return
     end
     if timeout_ms > 0
@@ -1532,24 +1601,40 @@ pub struct Server
     end
     secured = TlsServer.over(client, config, timeout_ms > 0 ? timeout_ms : TlsServer::HANDSHAKE_TIMEOUT_MS)
     return if secured.is_a?(TlsError)
-    serve_connection(client, TlsStream.new(secured, "the client"), handler, listener, idle, stream_bodies, compress, timeout_ms)
+    serve_connection(client, TlsStream.new(secured, "the client"), handler, listener, idle, stream_bodies, compress, timeout_ms, request_timeout_ms)
     secured.close
   end
 
-  private def self.serve_connection(client : IyiSocket, stream : TlsStream?, handler : Proc(Request, Response), listener : IyiSocket?, idle : Hash(UInt64, IyiSocket)?, stream_bodies : Bool, compress : Bool, timeout_ms : Int32) : Nil
+  # When a request whose wait began at *started* (monotonic ns) must have
+  # arrived whole, 0 for no such time.
+  private def self.until_whole(started : Int64, request_timeout_ms : Int32) : Int64
+    request_timeout_ms > 0 ? started + request_timeout_ms.to_i64 * 1000000_i64 : 0_i64
+  end
+
+  # And its head: *timeout_ms* after *started*, or *whole* if sooner.
+  private def self.until_head(started : Int64, timeout_ms : Int32, whole : Int64) : Int64
+    head = timeout_ms > 0 ? started + timeout_ms.to_i64 * 1000000_i64 : 0_i64
+    head = whole if whole > 0_i64 && (head == 0_i64 || whole < head)
+    head
+  end
+
+  private def self.serve_connection(client : IyiSocket, stream : TlsStream?, handler : Proc(Request, Response), listener : IyiSocket?, idle : Hash(UInt64, IyiSocket)?, stream_bodies : Bool, compress : Bool, timeout_ms : Int32, request_timeout_ms : Int32) : Nil
     conn = Conn.new(client, listener, idle, stream)
     conn.gap = timeout_ms if timeout_ms > 0
     remote = client.remote_address
     peer = stream ? stream.peer_certificates : [] of Certificate
-    conn.deadline_in(timeout_ms)
+    started = Time.monotonic_nanoseconds.to_i64
+    conn.deadline_at(until_head(started, timeout_ms, until_whole(started, request_timeout_ms)))
     preface = h2_preface?(conn)
     conn.no_deadline
     if preface
-      serve_h2(conn, handler, stream_bodies, compress, remote, peer)
+      serve_h2(conn, handler, stream_bodies, compress, remote, peer, timeout_ms, request_timeout_ms)
       return
     end
     while true
-      conn.deadline_in(timeout_ms)
+      started = Time.monotonic_nanoseconds.to_i64
+      whole = until_whole(started, request_timeout_ms)
+      conn.deadline_at(until_head(started, timeout_ms, whole))
       got = conn.read_head(MAX_HEAD, "request", true)
       conn.no_deadline
       case got
@@ -1567,10 +1652,13 @@ pub struct Server
           return
         end
         head = parsed
+        # The body, read here or by the block, is the request's too.
+        conn.deadline_at(whole, "read a request") if whole > 0_i64
         reader = body_reader(conn, head)
         req = Request.new(head.method, head.path, head.query, head.headers, head.version, reader, remote)
         unless stream_bodies
           body = reader.read_all(MAX_BODY.to_i64)
+          conn.no_deadline
           case body
           in String
             req = Request.new(head.method, head.path, head.query, head.headers, body, head.version, remote)
@@ -1589,8 +1677,15 @@ pub struct Server
           end
         end
         req.peer_certificates = peer
-        return unless answered?(conn, handler.call(req), req, head.close, compress)
-        return unless reader.finished? || reader.drain(MAX_DRAIN.to_i64)
+        response = handler.call(req)
+        # Writing the answer waits as the client reads it, a pause at a time.
+        conn.no_deadline
+        return unless answered?(conn, response, req, head.close, compress)
+        next if reader.finished?
+        conn.deadline_at(whole, "read a request") if whole > 0_i64
+        drained = reader.drain(MAX_DRAIN.to_i64)
+        conn.no_deadline
+        return unless drained
       end
     end
   end
@@ -1615,17 +1710,30 @@ pub struct Server
   # An HTTP/2 connection (RFC 9113): its requests, one stream at a time.
   # A body is read whole before the block runs unless *stream_bodies*,
   # as over HTTP/1.1; one past `MAX_BODY` is answered 413 on its stream.
-  private def self.serve_h2(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?, peer : Array(Certificate)) : Nil
+  # The wait for the next request's head, and then for its body, are held
+  # to *timeout_ms* and *request_timeout_ms* as over HTTP/1.1, counted
+  # from when the wait began; the connection's every frame is read under
+  # them meanwhile, so a peer that drips any stream's frames, or PINGs to
+  # look alive, is cut off with the rest.
+  private def self.serve_h2(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?, peer : Array(Certificate), timeout_ms : Int32, request_timeout_ms : Int32) : Nil
     h2 = H2Connection.new(conn, true, MAX_BODY.to_i64)
     return unless h2.start
-    while id = h2.next_request
+    while true
+      started = Time.monotonic_nanoseconds.to_i64
+      whole = until_whole(started, request_timeout_ms)
+      conn.deadline_at(until_head(started, timeout_ms, whole))
+      id = h2.next_request
+      conn.no_deadline
+      break unless id
       req = h2.request(id, remote)
       if req.nil?
         h2.done(id)
         next
       end
+      conn.deadline_at(whole, "read a request") if whole > 0_i64
       unless stream_bodies
         body = req.body_io.read_all(MAX_BODY.to_i64)
+        conn.no_deadline
         case body
         in String
           req = Request.new(req.method, req.path, req.query, req.headers, body, "HTTP/2", remote)
@@ -1640,7 +1748,9 @@ pub struct Server
         end
       end
       req.peer_certificates = peer
-      answered = h2.answer(id, handler.call(req), req, compress)
+      response = handler.call(req)
+      conn.no_deadline
+      answered = h2.answer(id, response, req, compress)
       h2.done(id)
       break unless answered
     end

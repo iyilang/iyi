@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Changed
+
+- **`Server.serve` serves at most 1,024 connections at once and wants a
+  whole request within five minutes.** It accepted every connection, and
+  past the head's `timeout_ms` a body was bounded per read alone, so one
+  sent a byte every few seconds held its connection and fiber for as long
+  as it dripped (finding 12 of the std/tls review). `max_connections`
+  (default 1,024, 0 for none) stops the accept loop while every place is
+  held: the next connection is queued in the kernel's listen queue, not
+  refused, as Go's `netutil.LimitListener` does, and served when one
+  closes. `request_timeout_ms` (default 300,000, 0 for none) holds head
+  and body together, counted from when the wait for the request began, as
+  Go's `ReadTimeout` beside `ReadHeaderTimeout`; the head is held to the
+  sooner of it and `timeout_ms`, a block reading its own body reads under
+  it, and over HTTP/2 the wait for each request and its body is held the
+  same way. A connection past it is closed unanswered. In
+  `bench/std_http_exercise.sh`, Python's ssl drives a server with
+  `max_connections: 2, timeout_ms: 3000, request_timeout_ms: 5000`: a
+  third connection's handshake waits until one of two held connections
+  closes and is then served; a head dripped a byte per half second is cut
+  at 3.0 s, and a body dripped so over HTTP/1.1 and in one-byte DATA
+  frames over HTTP/2 at 5.0 s, where before both ran on. The body's
+  deadline left out at either protocol, the cap ignored, a place never
+  given back, and the head held to the whole request's deadline are each
+  caught at the case that names it. `wrk -t2 -c50 -d3s` against release
+  builds of `bench/std_http_server.iyi`, five rounds alternating on this
+  machine: 82,028 to 94,691 requests/s (mean 88,530) before, 86,144 to
+  93,154 (mean 88,219) after.
+
 ### Fixed
 
 - **`Random::Secure` reads `/dev/urandom` only when it is a character

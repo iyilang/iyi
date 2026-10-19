@@ -888,21 +888,15 @@ def fuzz_steps(c, work):
          len(got) == 2 and got[0][0] == 2 and got[0][1] <= 6 and got[1] == (3, 0), str(got))
 
 
-def kill_workers(c):
-    """Kill the proxy's workers - its children started from its own
-    binary, not a console host Windows may have given it - and whatever
-    each of them started, and wait for them to be gone. A process a
-    compile started (a macro's `system`) holds the worker's pipes on
-    Windows, where handles are inherited, and the proxy reads no death
-    until it ends too. Returns how many workers there were; none where
-    children cannot be listed, and the step that asked reports itself
-    unmeasured."""
-    import signal
+def workers_of(c):
+    """The proxy's workers: its children started from its own binary, not
+    a console host Windows may have given it. None where a binary cannot
+    be read from a pid (darwin has no /proc), and the step that asked
+    reports itself unmeasured."""
     try:
         own = os.path.normcase(process_binary(c.proc.pid))
     except OSError:
-        # darwin has no /proc to read a binary from: unmeasured there.
-        return 0
+        return None
     found = []
     for pid in children(c.proc.pid):
         try:
@@ -910,6 +904,22 @@ def kill_workers(c):
                 found.append(pid)
         except OSError:
             continue
+    return found
+
+
+def kill_workers(c):
+    """Kill the proxy's workers and whatever each of them started, and
+    wait for them to be gone. A process a compile started (a macro's
+    `system`) holds the worker's pipes on Windows, where handles are
+    inherited; the proxy asks the process whether its worker is alive
+    (steps 73j and 73k), and these are killed so that none outlives the
+    step that started it. Returns how many workers there were; none where
+    children cannot be listed, and the step that asked reports itself
+    unmeasured."""
+    import signal
+    found = workers_of(c)
+    if found is None:
+        return 0
     # Killed a generation at a time, and the killed listed again: a worker
     # that started a process after the list was taken and before its kill
     # left that one running with its pipes (Windows CI: the proxy waited
@@ -1018,6 +1028,162 @@ def buffer_steps(c):
         shutil.rmtree(own, ignore_errors=True)
         print("step 73c a successor is not warmed on the buffer its predecessor died in: "
               "unmeasured here, the workers are killed on Windows only", flush=True)
+
+
+def descendants(pid):
+    """Every process *pid* started, and every one they started."""
+    found, pending = [], children(pid)
+    while pending:
+        kid = pending.pop()
+        found.append(kid)
+        pending.extend(children(kid))
+    return found
+
+
+def holders(worker):
+    """The processes *worker* started that hold its stdout: on Windows
+    every child of a worker, which inherits each handle the worker could
+    hand on (its own stdin and stdout among them) - the `cmd.exe` a
+    macro's `system` runs, and what that runs; on Linux the ones whose
+    stdout is the worker's pipe, read back through /proc."""
+    found = descendants(worker)
+    if os.name == "nt":
+        named = []
+        for pid in found:
+            try:
+                if os.path.basename(process_binary(pid)).lower() in ("cmd.exe", "ping.exe"):
+                    named.append(pid)
+            except OSError:
+                continue
+        return named
+    try:
+        pipe = os.readlink(f"/proc/{worker}/fd/1")
+    except OSError:
+        return []
+    held = []
+    for pid in found:
+        try:
+            if os.readlink(f"/proc/{pid}/fd/1") == pipe:
+                held.append(pid)
+        except OSError:
+            continue
+    return held
+
+
+def answer_within(client, request_id, seconds):
+    """The answer to *request_id*, or None where none came in *seconds*.
+    A wait that is the claim: a server that never answers fails the step
+    here, by name, instead of holding the session until the watchdog."""
+    got = {}
+
+    def read():
+        got["message"] = client.wait_for(lambda m: m.get("id") == request_id)
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(seconds)
+    return got.get("message")
+
+
+def orphan_steps():
+    """73j and 73k. A worker that dies while a process it started holds its
+    pipes. The proxy learned of a worker's death only from its stdout
+    closing, and a process the worker started keeps it open: on Windows
+    every child inherits the worker's stdin and stdout, so a worker killed
+    during a macro's `ping` left the proxy with no worker and a request
+    written into the dead one's stdin, unanswered for the 180 s the
+    watchdog waited (Windows CI, the step after 73b). The hold here is a
+    `system` that lasts a minute: a `ping` on Windows, and on Linux a
+    `sleep` that opens the worker's two pipes through /proc. The worker
+    alone is killed, and its holders are left running until the step is
+    over."""
+    if os.name == "nt":
+        hold = "ping -n 61 127.0.0.1"
+    elif sys.platform.startswith("linux"):
+        hold = "sleep 60 </proc/$PPID/fd/0 >/proc/$PPID/fd/1 2>/dev/null"
+    else:
+        for label, name in (("73j", "a request after a worker died with its pipes held is answered"),
+                            ("73k", "a request the worker died holding, its pipes held, is refused")):
+            print(f"step {label} {name}: unmeasured here, no process a worker starts holds its "
+                  "stdout but on Windows (inherited) and Linux (through /proc)", flush=True)
+        return
+    import signal
+    own = tempfile.mkdtemp(prefix="iyi-lsp-orphan")
+    o = Client()
+    o.send("initialize", {"rootUri": file_uri(own), "capabilities": {}})
+    o.send("initialized", {}, wait=False)
+    other_uri = opened(o, own, "other.iyi", "def other\nend\n")
+    left = []
+
+    def held_compile(name):
+        """Open *name*, whose compile runs `hold`, and wait until a process
+        it started holds the worker's stdout. The worker and its holders."""
+        uri = file_uri(os.path.join(own, name))
+        o.send("textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "iyi", "version": 1,
+            "text": f'module {name[:-4]}\n\n{{% system("{hold}") %}}\nputs 1\n'}}, wait=False)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            workers = workers_of(o) or []
+            held = [pid for worker in workers for pid in holders(worker)]
+            if len(workers) == 1 and held:
+                left.extend(descendants(workers[0]))
+                return uri, workers[0], held
+            time.sleep(0.1)
+        return uri, None, []
+
+    def kill_alone(worker):
+        os.kill(worker, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        deadline = time.monotonic() + 10
+        while worker in children(o.proc.pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+    # 73j. The worker dies with nothing in flight, and the next request
+    #      is about another file: written into the dead worker's stdin,
+    #      it was never read. It goes to a successor now.
+    _, worker, held = held_compile("slow.iyi")
+    if worker:
+        kill_alone(worker)
+        started = time.monotonic()
+        after = answer_within(o, o.request_nowait("textDocument/documentSymbol",
+                                                  {"textDocument": {"uri": other_uri}}), 10)
+        after_took = time.monotonic() - started
+    # 73k. The worker dies holding a request queued behind the compile:
+    #      the request is refused (-32603) as one a worker died holding
+    #      is, where it waited for the holder to end. Not asked after a
+    #      73j left unanswered: that wait's reader still holds the pipe.
+    second, second_held, refused = None, [], None
+    if not worker or after is not None:
+        slow_uri, second, second_held = held_compile("slower.iyi")
+    if second:
+        queued = o.request_nowait("textDocument/documentSymbol", {"textDocument": {"uri": slow_uri}})
+        kill_alone(second)
+        started = time.monotonic()
+        refused = answer_within(o, queued, 10)
+        refused_took = time.monotonic() - started
+    for pid in left:
+        try:
+            os.kill(pid, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
+        except OSError:
+            pass
+    stuck = (worker and after is None) or (second and refused is None)
+    if not stuck and answer_within(o, o.request_nowait("shutdown", {}), 10):
+        o.send("exit", {}, wait=False)
+        o.proc.wait(timeout=10)
+    else:
+        o.proc.kill()
+    shutil.rmtree(own, ignore_errors=True)
+    step("73j", "a request after a worker died with its pipes held is answered",
+         bool(worker) and after is not None and "result" in after,
+         "no process held the worker's stdout within 30 s" if not worker else
+         f"{len(held)} holder(s); "
+         f"{'no answer' if after is None else 'an outline' if 'result' in after else json.dumps(after.get('error'))[:70]} "
+         f"in {after_took:.1f} s")
+    step("73k", "a request the worker died holding, its pipes held, is refused",
+         bool(second) and refused is not None and refused.get("error", {}).get("code") == -32603,
+         "no process held the worker's stdout within 30 s" if not second else
+         f"{len(second_held)} holder(s); "
+         f"{'no answer' if refused is None else json.dumps(refused.get('error') or refused.get('result'))[:70]} "
+         f"in {refused_took:.1f} s")
 
 
 def restore_binary(backup, binary):
@@ -3607,6 +3773,7 @@ def main():
          [d["range"]["start"]["line"] for d in items if "nope" in d["message"]] == [2],
          f"{len(items)} item(s): {items and items[0]['message'][:50]}")
     buffer_steps(c)
+    orphan_steps()
     traits_disk_and_completion()
     held_verdict_step()
     # 53. shutdown/exit: the server leaves when told, not before — and

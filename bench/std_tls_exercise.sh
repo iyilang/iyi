@@ -1205,6 +1205,12 @@ echo "== proving the checks can fail when the module is broken"
 # judging the server's configurations (`config`); or the TLS 1.2 client
 # against OpenSSL, Python's ssl and the man in the middle (`client12`).
 mutations=0
+# A scenario's break is caught by the scenario failing, by name - "FAILED:
+# <scenario>: " - whether the broken client then holds a connection or
+# reads a refusal: once a break lets the client reach its Finished, which
+# it sees first is a race with the scripted server's hang-up, and darwin's
+# runners held connections where Linux read refusals (bad-finished,
+# certreq-no-sigalgs, unsolicited-ext).
 prove_broken() {
   mutations=$((mutations + 1))
   rm -rf "$WORK/patched"
@@ -1317,11 +1323,11 @@ prove_broken "the sequence number XORed into the nonce's front" "the server's da
   '    8.times { |i| nonce[i] = nonce[i] ^ ((@sequence >> (8 * i)) & 0xFF_u64).to_u8 }'
 prove_broken "a record's length in its additional data left out" "the client's Finished sealed as the trace's record" \
   '    length = inner.size + 16' '    length = inner.size'
-prove_broken "the server's Finished unchecked" "bad-finished: refused with" \
+prove_broken "the server's Finished unchecked" "FAILED: bad-finished: " \
   '    unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
       return TlsError.new("the server'"'"'s Finished' '    if false
       return TlsError.new("the server'"'"'s Finished' scenarios
-prove_broken "CertificateVerify unchecked" "bad-cv: refused with" \
+prove_broken "CertificateVerify unchecked" "FAILED: bad-cv: " \
   '    return TlsError.new("#{@peer}'"'"'s CertificateVerify is not its key'"'"'s signature", TlsAlert::DECRYPT_ERROR) unless ok' '' scenarios
 prove_broken "CertificateVerify over the client's context string" "ok: refused" \
   '    problem = certificate_verify(message, chain[0], "server")' '    problem = certificate_verify(message, chain[0], "client")' scenarios
@@ -1335,7 +1341,7 @@ prove_broken "an Ed25519 CertificateVerify unchecked" "bad-cv-ed25519: expected 
   '           key.verify(signed, signature)' '           true' scenarios
 prove_broken "a server's Certificate of any length searched" "cert-many:" \
   '      return TlsError.new("a Certificate of more than #{X509::MAX_CHAIN} certificates", TlsAlert::BAD_CERTIFICATE) if chain.size == X509::MAX_CHAIN' '' scenarios
-prove_broken "a client's handshake bounded by each wait alone" "slow-server: refused with" \
+prove_broken "a client's handshake bounded by each wait alone" "FAILED: slow-server: " \
   '    return @socket.read(buffer, count) if @deadline_ns == 0_i64' '    return @socket.read(buffer, count) if true' scenarios
 prove_broken "a KeyUpdate's request taken whatever it is" "keyupdate-bad:" \
   '        return TlsError.new("a KeyUpdate asking #{message[4]}", TlsAlert::ILLEGAL_PARAMETER) unless message[4] <= 1_u8' '' scenarios
@@ -1361,9 +1367,9 @@ prove_broken "a server_name acknowledgement with something in it taken" "sni-ack
   '    return TlsError.new("a server_name acknowledgement that is not empty", TlsAlert::DECODE_ERROR) unless data.empty?' '' scenarios
 prove_broken "user_canceled after the handshake taken as an end" "user-canceled:" \
   '        next if content.size == 2 && content[1] == TlsAlert::USER_CANCELED' '' scenarios
-prove_broken "the session id's echo unchecked" "no-echo: refused with" \
+prove_broken "the session id's echo unchecked" "FAILED: no-echo: " \
   '    return TlsError.new("a ServerHello that does not echo the session id", TlsAlert::ILLEGAL_PARAMETER) unless echo == session' '' scenarios
-prove_broken "the certificate checked for no host" "wrong-host: refused with" \
+prove_broken "the certificate checked for no host" "FAILED: wrong-host: " \
   'verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, @host,' 'verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, nil,' scenarios
 prove_broken "a KeyUpdate's read keys kept" "keyupdate:" \
   '        @read_secret = @schedule.next_secret(@read_secret)' '' scenarios
@@ -1387,11 +1393,11 @@ prove_broken "the client's CertificateVerify over the server's context string" "
 # scenario failing.
 prove_broken "a CertificateRequest without signature_algorithms passed over" "FAILED: certreq-no-sigalgs: " \
   '    return TlsError.new("a CertificateRequest with no signature_algorithms", TlsAlert::MISSING_EXTENSION) unless schemes' '    return nil unless schemes' scenarios
-prove_broken "handshake bytes after Finished passed over" "trailing-after-finished: refused with" \
+prove_broken "handshake bytes after Finished passed over" "FAILED: trailing-after-finished: " \
   '    return TlsError.new("handshake bytes left after the server'"'"'s Finished", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0' '' scenarios
-prove_broken "ALPN answers taken whatever they are" "alpn-unoffered: refused with" \
+prove_broken "ALPN answers taken whatever they are" "FAILED: alpn-unoffered: " \
   'return TlsError.new("the server chose #{chosen.inspect} by ALPN, which was not offered", TlsAlert::NO_APPLICATION_PROTOCOL) unless @config.alpn.includes?(chosen)' '' scenarios
-prove_broken "an unknown extension in EncryptedExtensions passed over" "unsolicited-ext: refused with" \
+prove_broken "an unknown extension in EncryptedExtensions passed over" "FAILED: unsolicited-ext: " \
   '        return TlsError.new("extension #{type} in EncryptedExtensions, which was not offered", TlsAlert::UNSUPPORTED_EXTENSION)' '' scenarios
 # Past the refusal, any 32 bytes stand in for the secret: the handshake
 # goes on to a server that has already hung up.
@@ -1400,36 +1406,36 @@ prove_broken "a share of small order taken" "zero-share:" \
   '      shared = X25519.public_key(private_key) if shared.is_a?(CurveError)' scenarios
 prove_broken "a HelloRetryRequest for secp256r1 answered with X25519 again" "hrr-p256: refused" \
   '      if reply.named_group == GROUP_SECP256R1' '      if false' scenarios
-prove_broken "a ServerHello's share taken in a group its ClientHello did not send" "sh-wrong-group: refused with" \
+prove_broken "a ServerHello's share taken in a group its ClientHello did not send" "FAILED: sh-wrong-group: " \
   '    return TlsError.new("a ServerHello'"'"'s share in #{group_name(reply.named_group)}, where the share sent was #{group_name(group)}'"'"'s", TlsAlert::ILLEGAL_PARAMETER) unless reply.named_group == group' '' scenarios
 # TLS 1.2: opt-in, so the default must be 1.3 alone; then the ServerHello's
 # rules against the scripted server's 1.2 ServerHellos, the rest against
 # OpenSSL, Python and the man in the middle.
-prove_broken "TLS 1.2 offered by default" "tls12: refused with" \
+prove_broken "TLS 1.2 offered by default" "FAILED: tls12: " \
   '  property min_version : TlsVersion = TlsVersion::TLS13' '  property min_version : TlsVersion = TlsVersion::TLS12' scenarios
-prove_broken "a TLS 1.2 ServerHello taken from a client not asked for 1.2" "tls12: refused with" \
+prove_broken "a TLS 1.2 ServerHello taken from a client not asked for 1.2" "FAILED: tls12: " \
   '    if !seen.includes?(43) && @config.min_version == TlsVersion::TLS12' '    if !seen.includes?(43)' scenarios
-prove_broken "a ClientHello offering TLS 1.2's suites unasked" "tls12: refused with" \
+prove_broken "a ClientHello offering TLS 1.2's suites unasked" "FAILED: tls12: " \
   '    TlsSuites::TLS12.each { |suite| suites = suites + TlsBytes.u16(suite) } if tls12' '    TlsSuites::TLS12.each { |suite| suites = suites + TlsBytes.u16(suite) }' scenarios
-prove_broken "the downgrade sentinel unchecked" "tls12-downgrade: refused with" \
+prove_broken "the downgrade sentinel unchecked" "FAILED: tls12-downgrade: " \
   '    if tail == DOWNGRADE_TLS12 || tail == DOWNGRADE_TLS11' '    if false' scenarios
-prove_broken "the TLS 1.1 sentinel unchecked" "tls12-downgrade11: refused with" \
+prove_broken "the TLS 1.1 sentinel unchecked" "FAILED: tls12-downgrade11: " \
   'if tail == DOWNGRADE_TLS12 || tail == DOWNGRADE_TLS11' 'if tail == DOWNGRADE_TLS12' scenarios
 prove_broken "the downgrade sentinel unchecked, before a real server" "FAIL the downgrade sentinel written into a TLS 1.2 ServerHello" \
   '    if tail == DOWNGRADE_TLS12 || tail == DOWNGRADE_TLS11' '    if false' client12
-prove_broken "a server without the extended master secret taken" "tls12-no-ems: refused with" \
+prove_broken "a server without the extended master secret taken" "FAILED: tls12-no-ems: " \
   '    unless extended
       return' '    if false
       return' scenarios
-prove_broken "a TLS 1.2 ServerHello's echo of the session id taken" "tls12-resume: refused with" \
+prove_broken "a TLS 1.2 ServerHello's echo of the session id taken" "FAILED: tls12-resume: " \
   ' if echo == session
 ' ' if false
 ' scenarios
-prove_broken "a renegotiation_info with something in it taken" "tls12-reneg: refused with" \
+prove_broken "a renegotiation_info with something in it taken" "FAILED: tls12-reneg: " \
   'TlsAlert::HANDSHAKE_FAILURE) unless data == [0_u8]' 'TlsAlert::HANDSHAKE_FAILURE) if false' scenarios
-prove_broken "a TLS 1.3 suite taken for TLS 1.2" "tls12-suite13: refused with" \
+prove_broken "a TLS 1.3 suite taken for TLS 1.2" "FAILED: tls12-suite13: " \
   'unless TlsSuites::TLS12.includes?(suite)' 'if false' scenarios
-prove_broken "the ClientHello's TLS 1.2 offer without the extended master secret" "tls12-hello: refused with" \
+prove_broken "the ClientHello's TLS 1.2 offer without the extended master secret" "FAILED: tls12-hello: " \
   '    extensions = extensions + TlsBytes.extension(23, [] of UInt8)' '' scenarios
 prove_broken "the PRF's key expansion under another label" "FAIL s_server -tls1_2, P-256, ECDHE-ECDSA-AES128-GCM-SHA256" \
   '"key expansion"' '"key expansions"' client12

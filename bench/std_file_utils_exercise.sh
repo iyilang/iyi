@@ -446,11 +446,17 @@ PY
     status=1
   fi
 }
+# Which the broken removal meets first is the directory's order: the link,
+# and it empties the directory outside; or a real subdirectory it then
+# cannot remove, and it stops with the target whole but the tree not
+# removed - the order of the Linux CI container's overlay filesystem
+# (tls/audit, job 118133490145). Either is the removal broken.
 prove_broken "a removal that follows a link" "a link's target survives rm_r: the directory outside the tree" \
   '        child_info = File.info?(child, follow_symlinks: false)
         remove_entry(child, child_info) if child_info' \
   '        child_info = File.info?(child)
-        remove_entry(child, child_info) if child_info'
+        remove_entry(child, child_info) if child_info' \
+  "ASSERTION FAILED: rm_r of a tree with links in it"
 # Windows' lstat of `link\` is the link, separator or none, and the bits
 # a file keeps there are one: the exercise asks both only elsewhere.
 if [ "$PSEP" = ';' ]; then

@@ -370,6 +370,16 @@ jobs:
       - name: The runtime exercise holds III.4's properties
         run: bash bench/runtime_exercise.sh
 
+      # III.4.13: tasks across cores. Parallel tasks on the pool, each kept
+      # by the worker that started it, values through channels across
+      # threads, cancels delivered to the thread a task is on, the
+      # speedup held to a floor of 0.6 per worker, `Share` refusing what a
+      # parallel block may not capture, and broken copies of the runtime -
+      # a lost wakeup, a task handed out twice, a cancel never delivered -
+      # each caught by name.
+      - name: Tasks across cores (III.4.13)
+        run: bash bench/parallel_exercise.sh
+
       # The shape those primitives are actually used in: a fiber per
       # connection, both halves parked on the poller, and a collection
       # in the middle. Two crashes lived here — the poller's event
@@ -1099,6 +1109,11 @@ jobs:
           # arm64 kernel under emulation in cross-run.
           ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
             -o cross/threads-aarch64 bench/thread_exercise.iyi
+          # Tasks across cores, the aarch64 arm: the doorbell's eventfd2 by
+          # aarch64's number, the scheduler's lock and its atomics in
+          # ldaxr/stlxr, workers by the runtime's own `clone`.
+          ./bin/iyi build --cross-compile --target aarch64-linux-gnu \
+            -o cross/parallel-aarch64 bench/parallel_exercise.iyi
           # std/process's Linux arm on the other instruction set and the
           # other libc: `clone`, `execve`, `pipe2`, `pidfd_open` and `wait4`
           # by syscall, with aarch64's numbers, which the native Linux job
@@ -1228,12 +1243,14 @@ jobs:
               timeout 120 ./floor-aarch64 2 20 > floor.txt 2>&1 &&
               gcc threads-aarch64.o -o threads-aarch64 &&
               timeout 300 ./threads-aarch64 4 > threads.txt 2>&1 &&
+              gcc parallel-aarch64.o -o parallel-aarch64 &&
+              timeout 900 ./parallel-aarch64 --watch=300000 > parallel.txt 2>&1 &&
               gcc process-aarch64.o -o process-aarch64 &&
               timeout 300 ./process-aarch64 > process.txt 2>&1 &&
               gcc debug-aarch64.o -o debug-aarch64 &&
               { timeout 120 ./debug-aarch64 > debug-aarch64.txt 2>&1; true; }
             ' || status=$?
-          for out in got conc floor threads process debug-aarch64; do
+          for out in got conc floor threads parallel process debug-aarch64; do
             echo "== $out.txt"; cat "cross/$out.txt" 2>/dev/null || echo "(not written)"
           done
           [ "${status:-0}" -eq 0 ]
@@ -1243,6 +1260,7 @@ jobs:
           # kernel's ABI and the asm, which is what this arm is for.
           grep -q "every property held" cross/floor.txt && echo "aarch64: the thread floor held"
           grep -q "every property held" cross/threads.txt && echo "aarch64: threads under the collector held"
+          grep -q "every property held" cross/parallel.txt && echo "aarch64: tasks across cores held"
           grep -q "ALL CHECKS PASSED" cross/process.txt && echo "aarch64: std/process held" || exit 1
           { grep -qE "^0 +[^ ]*gamma[^ ]* at .*std_debug_cross\.iyi:15:" cross/debug-aarch64.txt &&
             grep -qE "^1 +[^ ]*beta[^ ]* at .*std_debug_cross\.iyi:20:" cross/debug-aarch64.txt &&
@@ -1333,6 +1351,11 @@ jobs:
 
       - name: The concurrency gate (III.4)
         run: bash bench/concurrency_exercise.sh
+
+      # III.4.13 on kqueue: the doorbell a worker rings another with is an
+      # EVFILT_USER event there, and the workers are libSystem's pthreads.
+      - name: Tasks across cores (III.4.13)
+        run: bash bench/parallel_exercise.sh
 
       # The same shape on kqueue, where the event entry is 32 bytes
       # rather than 12 and the buffer the collector could not see is
@@ -2043,6 +2066,7 @@ jobs:
           bash bench/migrate_gate.sh
           bash bench/reuse_integrity.sh
           bash bench/concurrency_exercise.sh
+          bash bench/parallel_exercise.sh
           bash bench/library_boundaries.sh
 
       # And the rest of what an editor and an agent are handed. Every

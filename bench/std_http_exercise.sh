@@ -513,9 +513,15 @@ echo "== https:// against Python's own TLS server"
 # first): that request makes a connection of its own and is refused; a new
 # configuration over the same roots makes a new connection too, which the
 # next request under it reuses.
+# A redirect from https:// to http:// at the same host and port - the
+# server reads TLS or plain HTTP on one port, by the first byte - carries
+# no Authorization, Proxy-Authorization or Cookie the caller wrote, and
+# the jar's cookie set with `Secure` over https:// stays behind while the
+# one set without goes on (Go's client and curl strip the same).
 # Then the same client against a copy of the module that sends https://
-# in the clear, which must not answer the same; and a copy with the pool's
-# configuration check taken out, caught.
+# in the clear, which must not answer the same; and copies with the pool's
+# configuration check, the scheme's part in the redirect's credential
+# check, and the jar's `Secure` check taken out, each caught.
 if [ -z "$PY" ] || ! "$PY" -c 'import ssl; from cryptography import x509' >/dev/null 2>&1; then
   echo "  skipped: no python3 with ssl and cryptography to serve TLS with"
 else
@@ -575,6 +581,7 @@ PY
 module main
 
 import std/http::{HTTP, HTTPClient, HTTPError}
+import std/cookie::{CookieJar}
 import std/tls::{TlsConfig}
 import std/x509::{Certificate}
 import std/file::{File}
@@ -601,6 +608,9 @@ HTTP.tls_config = again
 2.times { client.get(base + "/landed").or_panic }
 puts "a new configuration, the same roots: #{client.connections_made} made, #{client.connections_reused} reused"
 client.close
+jar = CookieJar.new
+down = HTTP.request("GET", base + "/down", {"Authorization" => "Bearer t", "Proxy-Authorization" => "Basic cDpx", "Cookie" => "c=1"}, jar: jar).or_panic
+puts "downgrade #{down.url} #{down.body}"
 other = HTTP.get("https://127.0.0.1:#{Program.args[0]}/landed")
 puts "other #{other.is_a?(HTTPError) ? other.message : other.inspect}"
 up = HTTP.upgrade(base + "/", "websocket")
@@ -609,7 +619,7 @@ HTTP.get(base + "/stop")
 IYI
   serve_tls() {
     "$PY" - "$WORK/tls" > "$WORK/tls_server.out" 2>&1 <<'PY' &
-import gzip, ssl, sys
+import gzip, socket, ssl, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 text = b"python's own words " * 1000
 class Handler(BaseHTTPRequestHandler):
@@ -622,10 +632,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     def do_GET(self):
-        if self.path == "/gzip":
+        secure = isinstance(self.connection, ssl.SSLSocket)
+        if self.path == "/heard":
+            # What the redirect's target was sent, and over what.
+            said = lambda name: self.headers.get(name, "-")
+            self.answer(200, f"{'tls' if secure else 'plain'} auth={said('Authorization')} proxy-auth={said('Proxy-Authorization')} cookie={said('Cookie')}".encode())
+        elif not secure:
+            self.answer(400, b"only /heard is served in the clear")
+        elif self.path == "/gzip":
             self.answer(200, gzip.compress(text), [("Content-Encoding", "gzip")])
         elif self.path == "/landed":
             self.answer(200, self.command.encode())
+        elif self.path == "/down":
+            # To http:// at this host and port, with a Secure cookie and
+            # one without.
+            self.answer(302, b"", [("Location", f"http://localhost:{self.server.server_address[1]}/heard"),
+                                   ("Set-Cookie", "s=1; Secure"), ("Set-Cookie", "p=1")])
         elif self.path == "/stop":
             self.answer(200, b"bye")
             self.server.done = True
@@ -637,8 +659,16 @@ class Handler(BaseHTTPRequestHandler):
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.minimum_version = ssl.TLSVersion.TLSv1_3
 context.load_cert_chain(f"{sys.argv[1]}/leaf.pem", f"{sys.argv[1]}/leaf.key")
-s = HTTPServer(("127.0.0.1", 0), Handler)
-s.socket = context.wrap_socket(s.socket, server_side=True)
+class Server(HTTPServer):
+    # TLS or HTTP in the clear on one port, told apart by the first byte:
+    # 0x16 opens a TLS handshake record.
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        sock.settimeout(30)
+        if sock.recv(1, socket.MSG_PEEK) == b"\x16":
+            sock = context.wrap_socket(sock, server_side=True)
+        return sock, addr
+s = Server(("127.0.0.1", 0), Handler)
 s.done = False
 s.timeout = 30
 print(s.server_address[1], flush=True)
@@ -662,11 +692,13 @@ hop 200 GET https://localhost:$tport/landed
 kept 1 made, 1 reused
 other roots HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=http gate root, the issuer of CN=localhost (bad_certificate)
 a new configuration, the same roots: 3 made, 2 reused
+downgrade http://localhost:$tport/heard plain auth=- proxy-auth=- cookie=p=1
 other HTTP: tls: the server's certificate is not trusted: x509: CN=localhost is not valid for 127.0.0.1: it names localhost (bad_certificate)
 upgrade HTTP: the server answered 404 Not Found to an upgrade to websocket, not 101 Switching Protocols"
     if [ "$said" = "$expected" ]; then
       echo "  gzip over TLS 1.3, a 303 on https://, a kept connection used twice, a host the certificate does not name, an upgrade over https:// answered 404"
       echo "  a kept connection not reused under other roots, nor under a new configuration of the same roots"
+      echo "  https:// to http:// at the same host and port: no Authorization, Proxy-Authorization or Cookie of the caller's, the Secure cookie kept back"
     else
       echo "  the client and Python's TLS server disagree:"
       printf '%s\n' "$said" | sed 's/^/    got:  /'
@@ -712,6 +744,10 @@ PY
     }
     tls_breaks "a kept connection handed out under another configuration" http.iyi \
       '        if tls && !(under && under.same?(tls))' '        if false' "other roots"
+    tls_breaks "a credential carried from https:// to http:// at one host and port" http.iyi \
+      '    return false unless sa == sb' '    nil' "downgrade"
+    tls_breaks "a Secure cookie sent over http://" cookie.iyi \
+      '      next if cookie.secure && !secure' '      nil' "downgrade"
     # And the proof: https:// written in the clear does not answer so.
     mkdir -p "$WORK/clear/std"
     sed 's/^        if secure$/        if false/' "$REPO/src/std/http.iyi" > "$WORK/clear/std/http.iyi"

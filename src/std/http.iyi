@@ -2457,9 +2457,13 @@ pub struct HTTP
   # The redirects followed are RFC 9110 §15.4's: 301 and 302 make a POST a
   # GET, 303 makes anything but a HEAD a GET, and 307 and 308 keep the
   # method and the body. `Authorization`, `Proxy-Authorization` and
-  # `Cookie` written by the caller are not sent to another host. One more
-  # than *redirects* is an `HTTPError`; with 0 the first answer is the
-  # block's.
+  # `Cookie` written by the caller are not sent to another scheme, host or
+  # port - `https://` to `http://` at one host included, as curl does (Go
+  # strips them for another host) - and a jar's `Secure` cookies go over
+  # `https://` alone. The downgrade itself is followed, as Go's client and
+  # `curl -L` follow it; any other header the caller wrote, and a 307 or
+  # 308's body, go on in the clear. One more than *redirects* is an
+  # `HTTPError`; with 0 the first answer is the block's.
   #
   # *timeout_ms* bounds the connect, and each read and write after it -
   # a pause, not the whole exchange, as Python's `timeout` is: a body that

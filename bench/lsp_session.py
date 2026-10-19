@@ -291,11 +291,14 @@ class Client:
 
     def request_nowait(self, method, params):
         """A request whose answer is read later — how a cancel gets to
-        overtake it."""
+        overtake it. Named to the watchdog like any request: unnamed, a
+        darwin hang on step 74a's hover was reported as its `didChange`,
+        the frame before it."""
         self.next_id += 1
         message = {"jsonrpc": "2.0", "method": method, "params": params,
                    "id": self.next_id}
         body = json.dumps(message).encode()
+        LAST["sent"] = f"{method} #{self.next_id}"
         self.proc.stdin.write(
             b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
         self.proc.stdin.flush()

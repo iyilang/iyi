@@ -1360,7 +1360,7 @@ prove_broken "a certificate entry's extensions passed over" "cert-entry-ext:" \
 prove_broken "a server_name acknowledgement with something in it taken" "sni-ack-data:" \
   '    return TlsError.new("a server_name acknowledgement that is not empty", TlsAlert::DECODE_ERROR) unless data.empty?' '' scenarios
 prove_broken "user_canceled after the handshake taken as an end" "user-canceled:" \
-  '        next if content.size == 2 && content[1] == TlsAlert::USER_CANCELED' '' scenarios
+  '        next if warning' '' scenarios
 # Section 5.4's limit on the whole inner plaintext, padding in it, as it
 # was before SECURITY_REVIEW_TLS.md's finding, and one byte short of it -
 # which "big", 2^14 bytes of content a record, meets before "padded-max".
@@ -1368,6 +1368,16 @@ prove_broken "padding past 2^14 + 1 bytes of inner plaintext taken" "padded-over
   '    if opened.bytesize > TlsRecords::MAX_PLAINTEXT + 1' '    if opened.bytesize > TlsRecords::MAX_PLAINTEXT + 256' scenarios
 prove_broken "the inner plaintext's limit one byte short" "a record of 16385 bytes of inner plaintext" \
   '    if opened.bytesize > TlsRecords::MAX_PLAINTEXT + 1' '    if opened.bytesize > TlsRecords::MAX_PLAINTEXT' scenarios
+# Section 5.1's rule that nothing comes between a handshake message's
+# pieces, as it was before SECURITY_REVIEW_TLS.md's finding.
+prove_broken "application data taken inside a split handshake message" "split-by-data:" \
+  '        cut = cut_message(type)
+        return fail(cut) if cut
+        next if content.empty?' '        next if content.empty?' scenarios
+prove_broken "close_notify taken inside a split handshake message" "split-by-close:" \
+  '        cut = cut_message(type)
+        return fail(cut) if cut
+        next if warning' '        next if warning' scenarios
 prove_broken "the session id's echo unchecked" "no-echo: refused with" \
   '    return TlsError.new("a ServerHello that does not echo the session id", TlsAlert::ILLEGAL_PARAMETER) unless echo == session' '' scenarios
 prove_broken "the certificate checked for no host" "wrong-host: refused with" \

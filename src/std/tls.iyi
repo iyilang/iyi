@@ -126,10 +126,11 @@
 #
 # A record is at most 2^14 bytes of content, as section 5.1 holds both
 # sides to, and a TLS 1.3 record's inner plaintext - content type and
-# padding in it - at most 2^14 + 1 (section 5.4). KeyUpdate is answered.
-# `read` answers "" once the peer's close_notify arrives; any other alert,
-# or anything the protocol does not allow, is a `TlsError` saying what,
-# and the connection is closed.
+# padding in it - at most 2^14 + 1 (section 5.4); a handshake message
+# split across records has no record of another type between its pieces.
+# KeyUpdate is answered. `read` answers "" once the peer's close_notify
+# arrives; any other alert, or anything the protocol does not allow, is a
+# `TlsError` saying what, and the connection is closed.
 #
 # `TlsKeySchedule` and `TlsRecordCipher` are the key schedule (section 7.1)
 # and the record protection (section 5.2) on their own, for what checks
@@ -685,6 +686,8 @@ pub abstract class TlsConnection
       type, content = record
       case type
       when TlsRecords::APPLICATION_DATA
+        cut = cut_message(type)
+        return fail(cut) if cut
         next if content.empty?
         if content.size > max
           @pending = content[max, content.size - max]
@@ -697,9 +700,12 @@ pub abstract class TlsConnection
       when TlsRecords::ALERT
         # user_canceled after the handshake is a warning (section 6.1): the
         # close_notify meant to follow it is what ends the reading.
-        next if content.size == 2 && content[1] == TlsAlert::USER_CANCELED
-        answer = alert(content)
+        warning = content.size == 2 && content[1] == TlsAlert::USER_CANCELED
+        answer = warning ? nil : alert(content)
         return fail(answer) if answer
+        cut = cut_message(type)
+        return fail(cut) if cut
+        next if warning
         # close_notify: no more from the peer. This side's own goes out
         # with `close`, never from a read - a task writing beside this one
         # owns the socket's writes (section 6.1 lets a side keep writing).
@@ -709,6 +715,15 @@ pub abstract class TlsConnection
         return fail(TlsError.new("a record of type #{type} after the handshake", TlsAlert::UNEXPECTED_MESSAGE))
       end
     end
+  end
+
+  # Section 5.1: a handshake message split across records has no record of
+  # another type between its pieces. Without this, the half of a KeyUpdate
+  # or NewSessionTicket held while application data or a close_notify went
+  # by.
+  private def cut_message(type : UInt8) : TlsError?
+    return nil if handshake_left == 0
+    TlsError.new("a record of type #{type} inside a handshake message split across records", TlsAlert::UNEXPECTED_MESSAGE)
   end
 
   @pending : Array(UInt8)? = nil

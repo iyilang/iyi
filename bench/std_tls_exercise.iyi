@@ -124,6 +124,8 @@ SCENARIOS = [
   {"user-canceled", true, ""},
   {"padded-max", true, ""},
   {"padded-over", true, "read: a record of 16386 bytes of inner plaintext, past the 2^14 + 1 allowed (record_overflow)"},
+  {"split-by-data", true, "read: a record of type 23 inside a handshake message split across records (unexpected_message)"},
+  {"split-by-close", true, "read: a record of type 21 inside a handshake message split across records (unexpected_message)"},
 ]
 
 CLIENT_HELLO           = "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001"

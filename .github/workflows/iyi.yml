@@ -2292,9 +2292,12 @@ jobs:
   # Every module's own exercise on Windows, in four shards
   # (bench/std_siblings.sh): one after another, with the collector's gates
   # and the foundation before them, they ran past this job's ninety minutes.
+  # A shard has ninety too: shard 3 took 49 to 58 minutes in green runs and
+  # was cut off at sixty on master, and a branch whose std/tls gate grew
+  # took shard 2 past sixty-five.
   windows-std-siblings:
     runs-on: windows-2025
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

@@ -424,7 +424,12 @@ pub struct X509
       unless issuer.permitted_dns.empty? || issuer.permitted_dns.any? { |c| X509Names.within?(dns, c) }
         return "#{written} is outside the names #{name} permits"
       end
-      if issuer.excluded_dns.any? { |c| X509Names.within?(dns, c) }
+      # A wildcard names every host one label over its rest, so one of
+      # those excluded holds the whole name out, whatever host it is
+      # matched to - as Python's verifier does, and Go's since it fixed
+      # the same gap (CVE-2025-61727). "*.example.com" under an exclusion
+      # of bad.example.com held for bad.example.com before.
+      if issuer.excluded_dns.any? { |c| X509Names.within?(dns, c) || X509Names.dns_matches?(dns, c) }
         return "#{written} is among the names #{name} excludes"
       end
     end

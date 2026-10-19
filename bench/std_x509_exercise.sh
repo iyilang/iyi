@@ -107,7 +107,8 @@ echo "== 200 fresh chains held to Python's verifier"
 # not sign or allows no CA under it, extKeyUsage without serverAuth, a
 # leaf that is a CA, an unknown critical extension, a signature by another
 # key under the issuer's name, an intermediate left out, a wildcard, an IP,
-# a name with a final dot under a constraint excluding the name.
+# a name with a final dot under a constraint excluding the name, a
+# wildcard over a name a constraint excludes.
 # Python's verifier refuses an Ed25519 issuer outright (the Web PKI's
 # rule; std/x509 takes one, as OpenSSL and Go do), so a chain with one is
 # judged as its twin - the same chain, each Ed25519 key swapped for an EC
@@ -159,12 +160,14 @@ def cert(cn, key, issuer, issuer_key, ca, path_len=None, cert_sign=True, eku=Non
         return b.sign(issuer_key, None)
     sha384 = not isinstance(issuer_key, rsa.RSAPrivateKey) and zlib.crc32(cn.encode()) % 10 < 3
     return b.sign(issuer_key, hashes.SHA384() if sha384 else hashes.SHA256())
-# excluded_dot: the top intermediate excludes the host, and the leaf names
-# it with a final dot, which Python matches to no host and std/x509 to the
-# host itself - so its constraint must hold the name out.
+# excluded_dot: the top intermediate excludes example.com, and the leaf
+# names the host with a final dot, which Python matches to no host and
+# std/x509 to the host itself - so the constraint must hold it out.
+# excluded_wildcard: it excludes a name the leaf's *.example.com stands
+# for, not the host.
 DEFECTS = ["none", "none", "none", "host", "leaf_expired", "leaf_early", "issuer_expired", "not_ca", "no_bc", "no_cert_sign",
            "path_len", "leaf_client", "issuer_client", "leaf_ca", "unknown_leaf", "unknown_issuer", "wrong_signer",
-           "missing", "wildcard", "wildcard_deep", "ip", "ip_other", "excluded_dot"]
+           "missing", "wildcard", "wildcard_deep", "ip", "ip_other", "excluded_dot", "excluded_wildcard"]
 # One case built from its drawn keys, each passed through *swap*: the
 # leaf, the intermediates as handed over, the root, and the chain in order
 # from the root down.
@@ -207,7 +210,8 @@ for i in range(200):
     defect = rng.choice(DEFECTS)
     depth = rng.randrange(3)
     if defect in ("path_len", "missing"): depth = 2
-    if defect in ("issuer_expired", "not_ca", "no_bc", "no_cert_sign", "issuer_client", "unknown_issuer", "excluded_dot"): depth = max(depth, 1)
+    if defect in ("issuer_expired", "not_ca", "no_bc", "no_cert_sign", "issuer_client", "unknown_issuer", "excluded_dot",
+                  "excluded_wildcard"): depth = max(depth, 1)
     keys = rng.sample(pool, depth + 2)
     wrong = rng.choice([k for k in pool if k is not keys[-2]]) if defect == "wrong_signer" else None
     order = list(range(depth - 1 if defect == "missing" else depth))
@@ -218,7 +222,8 @@ for i in range(200):
     if defect == "wildcard": sans = [x509.DNSName("*.example.com")]
     if defect == "wildcard_deep": sans = [x509.DNSName("*.example.com")]; host = f"a.www{i}.example.com"
     excluded = None
-    if defect == "excluded_dot": sans = [x509.DNSName(host + ".")]; excluded = [host]
+    if defect == "excluded_dot": sans = [x509.DNSName(host + ".")]; excluded = ["example.com"]
+    if defect == "excluded_wildcard": sans = [x509.DNSName("*.example.com")]; excluded = [f"bad{i}.example.com"]
     if defect in ("ip", "ip_other"):
         sans = [x509.IPAddress(ipaddress.ip_address(f"192.0.2.{i % 250 + 1}"))]
         host = f"192.0.2.{i % 250 + 1}" if defect == "ip" else f"198.51.100.{i % 250 + 1}"
@@ -433,7 +438,7 @@ prove_broken "a host matched as a suffix" "another host: expected a refusal" \
 prove_broken "a name constraint matched as a bare suffix" "a name that only ends like the permitted one: expected a refusal" \
   '    name == constraint || name.ends_with?("." + constraint)' '    name.ends_with?(constraint)'
 prove_broken "excluded names unchecked" "a name in the excluded subtree: expected a refusal" \
-  '      if issuer.excluded_dns.any? { |c| X509Names.within?(dns, c) }' '      if false'
+  '      if issuer.excluded_dns.any? { |c| X509Names.within?(dns, c) || X509Names.dns_matches?(dns, c) }' '      if false'
 prove_broken "an IP range compared unmasked" "an address inside the permitted range: refused" \
   '      return false unless byte & mask == range[i] & mask' '      return false unless byte == range[i]'
 prove_broken "IPv6 :: unexpanded" "an IPv6 address: refused" \
@@ -462,13 +467,15 @@ prove_broken "an Ed25519 key off the curve taken" "an Ed25519 key off the curve 
 # A name under constraints, judged as the host matcher reads it: each
 # break below is the module as it was before SECURITY_REVIEW_TLS.md's
 # finding, one rule at a time.
-prove_broken "a name's final dot kept from its constraints" "a name with a final dot in the excluded subtree: expected a refusal" \
+prove_broken "a name's final dot kept from its constraints" "a name under the excluded subtree with a final dot: expected a refusal" \
   '      dns = X509Names.unrooted(written)
       return "#{written} is no host name for #{name}'"'"'s constraints to judge" unless X509Names.labels?(dns)' '      dns = written'
-prove_broken "a name with an empty label judged by its constraints" "a name with two final dots in the excluded subtree: expected a refusal" \
+prove_broken "a name with an empty label judged by its constraints" "a name with two final dots under the excluded subtree: expected a refusal" \
   '      return "#{written} is no host name for #{name}'"'"'s constraints to judge" unless X509Names.labels?(dns)' ''
 prove_broken "a constraint with an empty label taken" "an excluded constraint with a final dot: expected a refusal" \
   '        return "#{name} constrains names by #{c.inspect}, which is no name" unless c.empty? || X509Names.labels?(c, leading_dot: true)' ''
+prove_broken "a wildcard judged as one name by an excluded constraint" "a wildcard over a name in the excluded subtree: expected a refusal" \
+  ' || X509Names.dns_matches?(dns, c) }' ' }'
 
 echo
 if [ "$status" -eq 0 ]; then

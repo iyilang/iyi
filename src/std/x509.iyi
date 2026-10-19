@@ -192,15 +192,24 @@ pub struct Certificate
     key = X509Keys.read(tbs[at + 5])!
     extensions = X509Extensions.new
     rest = at + 6
+    # RFC 5280 section 4.1: issuerUniqueID [1], subjectUniqueID [2] and
+    # extensions [3], each at most once and in that order. A second
+    # extensions block was read on top of the first, so a certificate
+    # whose second block said cA where its first did not was a CA here and
+    # not to a reader that stopped at the first; Python's cryptography and
+    # OpenSSL refuse to read one at all.
+    last = 0
     while rest < tbs.size
       field = tbs[rest]
-      if field.context?(1) || field.context?(2)
+      tag = field.context?(1) ? 1 : (field.context?(2) ? 2 : (field.context?(3) ? 3 : 0))
+      return X509Error.new("#{field.describe} where the TBSCertificate ends") if tag == 0
+      return X509Error.new("#{field.describe} after [#{last}], where RFC 5280 has each of [1], [2] and [3] once and in order") unless tag > last
+      last = tag
+      if tag < 3
         return X509Error.new("a unique identifier in a version 1 certificate") if version < 2
-      elsif field.context?(3)
+      else
         return X509Error.new("extensions in a version #{version} certificate") unless version == 3
         extensions.read(X509Asn1.value(field.explicit(3))!)!
-      else
-        return X509Error.new("#{field.describe} where the TBSCertificate ends")
       end
       rest = rest + 1
     end

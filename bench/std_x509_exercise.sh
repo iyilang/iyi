@@ -564,6 +564,8 @@ prove_broken "a leaf's RSA key of any size taken" "a leaf whose key is 1024-bit 
 prove_broken "an issuer's RSA key of any size taken" "an intermediate whose key is 1024-bit RSA: expected a refusal" \
   '    weak = weak_key(issuer)
     return weak if weak' ''
+prove_broken "a second extensions block read over the first" "a TBSCertificate with two extensions blocks refused" \
+  '      return X509Error.new("#{field.describe} after [#{last}], where RFC 5280 has each of [1], [2] and [3] once and in order") unless tag > last' ''
 
 echo
 if [ "$status" -eq 0 ]; then

@@ -125,9 +125,11 @@
 # server's keys, under them after.
 #
 # A record is at most 2^14 bytes of content, as section 5.1 holds both
-# sides to. KeyUpdate is answered. `read` answers "" once the peer's
-# close_notify arrives; any other alert, or anything the protocol does not
-# allow, is a `TlsError` saying what, and the connection is closed.
+# sides to, and a TLS 1.3 record's inner plaintext - content type and
+# padding in it - at most 2^14 + 1 (section 5.4). KeyUpdate is answered.
+# `read` answers "" once the peer's close_notify arrives; any other alert,
+# or anything the protocol does not allow, is a `TlsError` saying what,
+# and the connection is closed.
 #
 # `TlsKeySchedule` and `TlsRecordCipher` are the key schedule (section 7.1)
 # and the record protection (section 5.2) on their own, for what checks
@@ -429,6 +431,13 @@ pub class TlsRecordCipher
              end
     return TlsError.new("a record that does not decrypt", TlsAlert::BAD_RECORD_MAC) if opened.is_a?(AeadError)
     @sequence = @sequence + 1
+    # Section 5.4: padding does not widen a record - the whole inner
+    # plaintext, content type and padding in it, is at most 2^14 + 1
+    # bytes. Checked on the content alone, a peer could pad a full record
+    # past that by up to the 239 bytes the ciphertext's limit leaves.
+    if opened.bytesize > TlsRecords::MAX_PLAINTEXT + 1
+      return TlsError.new("a record of #{opened.bytesize} bytes of inner plaintext, past the 2^14 + 1 allowed", TlsAlert::RECORD_OVERFLOW)
+    end
     inner = opened.to_unsafe
     at = opened.bytesize - 1
     # The content type is the last byte that is not padding.
@@ -436,7 +445,6 @@ pub class TlsRecordCipher
       at = at - 1
     end
     return TlsError.new("a record with no content type", TlsAlert::UNEXPECTED_MESSAGE) if at < 0
-    return TlsError.new("a record of #{at} bytes, past the 2^14 allowed", TlsAlert::RECORD_OVERFLOW) if at > TlsRecords::MAX_PLAINTEXT
     {inner[at], TlsBytes.bytes(inner, at)}
   end
 

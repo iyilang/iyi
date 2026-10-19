@@ -1091,16 +1091,21 @@ def orphan_steps():
     every child inherits the worker's stdin and stdout, so a worker killed
     during a macro's `ping` left the proxy with no worker and a request
     written into the dead one's stdin, unanswered for the 180 s the
-    watchdog waited (Windows CI, the step after 73b). The hold here is a
-    `system` that lasts a minute: a `ping` on Windows, and on Linux a
-    `sleep` that opens the worker's two pipes through /proc. The worker
-    alone is killed, and its holders are left running until the step is
-    over."""
-    if os.name == "nt":
-        hold = "ping -n 61 127.0.0.1"
-    elif sys.platform.startswith("linux"):
-        hold = "sleep 60 </proc/$PPID/fd/0 >/proc/$PPID/fd/1 2>/dev/null"
-    else:
+    watchdog waited (Windows CI, the step after 73b).
+
+    The hold is a macro's `system` that writes a file the gate names and
+    then waits a minute: `cmd` and a `ping` on Windows, which hold the
+    pipes by inheritance from the start, and on Linux a shell that opens
+    the worker's two pipes through /proc before it writes the file. The
+    file is the gate's proof that the worker is inside that compile, and
+    nothing else compiles that text. The step used to take a `ping` or
+    `sleep` found under the worker as that proof, and hold an outline
+    queued behind a buffer's compile: a Windows run (39222552559) found
+    one, killed the worker, and had the outline answered before the kill,
+    so whatever was found, the worker was not inside the compile then.
+    The held request is now the compile itself, a pull. The worker alone
+    is killed, and the holders are left running until the step is over."""
+    if os.name != "nt" and not sys.platform.startswith("linux"):
         for label, name in (("73j", "a request after a worker died with its pipes held is answered"),
                             ("73k", "a request the worker died holding, its pipes held, is refused")):
             print(f"step {label} {name}: unmeasured here, no process a worker starts holds its "
@@ -1114,22 +1119,30 @@ def orphan_steps():
     other_uri = opened(o, own, "other.iyi", "def other\nend\n")
     left = []
 
-    def held_compile(name):
-        """Open *name*, whose compile runs `hold`, and wait until a process
-        it started holds the worker's stdout. The worker and its holders."""
-        uri = file_uri(os.path.join(own, name))
-        o.send("textDocument/didOpen", {"textDocument": {
-            "uri": uri, "languageId": "iyi", "version": 1,
-            "text": f'module {name[:-4]}\n\n{{% system("{hold}") %}}\nputs 1\n'}}, wait=False)
+    def held_text(name):
+        """A module whose compile writes *name*.started under the gate's
+        directory, holding the worker's pipes by then, and waits a minute."""
+        mark = os.path.join(own, f"{name}.started")
+        if os.name == "nt":
+            hold = f'cmd /c type nul > "{mark}" & ping -n 61 127.0.0.1'
+        else:
+            hold = (f"exec </proc/$PPID/fd/0 >/proc/$PPID/fd/1 2>/dev/null; "
+                    f"touch '{mark}'; sleep 60")
+        return mark, f"module {name}\n\n{{% system({json.dumps(hold)}) %}}\nputs 1\n"
+
+    def inside(mark):
+        """Wait for *mark*: the worker is then inside the compile that
+        writes it. The worker and the processes holding its stdout, or
+        None where the compile did not get there in 30 s."""
         deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            workers = workers_of(o) or []
-            held = [pid for worker in workers for pid in holders(worker)]
-            if len(workers) == 1 and held:
-                left.extend(descendants(workers[0]))
-                return uri, workers[0], held
-            time.sleep(0.1)
-        return uri, None, []
+        while time.monotonic() < deadline and not os.path.exists(mark):
+            time.sleep(0.05)
+        workers = workers_of(o) or []
+        if not os.path.exists(mark) or len(workers) != 1:
+            return None, []
+        held = holders(workers[0])
+        left.extend(descendants(workers[0]))
+        return workers[0], held
 
     def kill_alone(worker):
         os.kill(worker, signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
@@ -1137,25 +1150,37 @@ def orphan_steps():
         while worker in children(o.proc.pid) and time.monotonic() < deadline:
             time.sleep(0.1)
 
-    # 73j. The worker dies with nothing in flight, and the next request
-    #      is about another file: written into the dead worker's stdin,
-    #      it was never read. It goes to a successor now.
-    _, worker, held = held_compile("slow.iyi")
+    # 73j. The worker dies inside a buffer's compile, with no request in
+    #      flight, and the next request is about another file: written
+    #      into the dead worker's stdin, it was never read. It goes to a
+    #      successor now.
+    mark, text = held_text("slow")
+    slow_uri = file_uri(os.path.join(own, "slow.iyi"))
+    o.send("textDocument/didOpen", {"textDocument": {
+        "uri": slow_uri, "languageId": "iyi", "version": 1, "text": text}}, wait=False)
+    worker, held = inside(mark)
+    after = None
     if worker:
         kill_alone(worker)
         started = time.monotonic()
         after = answer_within(o, o.request_nowait("textDocument/documentSymbol",
                                                   {"textDocument": {"uri": other_uri}}), 10)
         after_took = time.monotonic() - started
-    # 73k. The worker dies holding a request queued behind the compile:
-    #      the request is refused (-32603) as one a worker died holding
-    #      is, where it waited for the holder to end. Not asked after a
-    #      73j left unanswered: that wait's reader still holds the pipe.
+        o.send("textDocument/didClose", {"textDocument": {"uri": slow_uri}}, wait=False)
+    # 73k. The worker dies inside the request itself: a pull of a file no
+    #      buffer holds, whose compile is the hold. The request is refused
+    #      (-32603) as one a worker died holding is, where it waited for
+    #      the holder to end. Not asked after a 73j left unanswered: that
+    #      wait's reader still holds the pipe.
     second, second_held, refused = None, [], None
     if not worker or after is not None:
-        slow_uri, second, second_held = held_compile("slower.iyi")
+        mark, text = held_text("slower")
+        slower = os.path.join(own, "slower.iyi")
+        with open(slower, "w", encoding="utf-8") as f:
+            f.write(text)
+        queued = o.request_nowait("textDocument/diagnostic", {"textDocument": {"uri": file_uri(slower)}})
+        second, second_held = inside(mark)
     if second:
-        queued = o.request_nowait("textDocument/documentSymbol", {"textDocument": {"uri": slow_uri}})
         kill_alone(second)
         started = time.monotonic()
         refused = answer_within(o, queued, 10)
@@ -1173,14 +1198,15 @@ def orphan_steps():
         o.proc.kill()
     shutil.rmtree(own, ignore_errors=True)
     step("73j", "a request after a worker died with its pipes held is answered",
-         bool(worker) and after is not None and "result" in after,
-         "no process held the worker's stdout within 30 s" if not worker else
+         bool(worker) and bool(held) and after is not None and "result" in after,
+         "the held compile did not start within 30 s" if not worker else
          f"{len(held)} holder(s); "
          f"{'no answer' if after is None else 'an outline' if 'result' in after else json.dumps(after.get('error'))[:70]} "
          f"in {after_took:.1f} s")
     step("73k", "a request the worker died holding, its pipes held, is refused",
-         bool(second) and refused is not None and refused.get("error", {}).get("code") == -32603,
-         "no process held the worker's stdout within 30 s" if not second else
+         bool(second) and bool(second_held) and refused is not None
+         and refused.get("error", {}).get("code") == -32603,
+         "the held request's compile did not start within 30 s" if not second else
          f"{len(second_held)} holder(s); "
          f"{'no answer' if refused is None else json.dumps(refused.get('error') or refused.get('result'))[:70]} "
          f"in {refused_took:.1f} s")

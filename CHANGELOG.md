@@ -17,16 +17,18 @@
   to its successor, and a worker that has exited owing an answer is
   buried after two quiet seconds, its requests refused -32603 as a dead
   worker's are. Steps 73j and 73k of `bench/lsp_session.py` hold a
-  worker's two pipes in a `system` that lasts a minute - a `ping` on
-  Windows, a `sleep` that opens them through `/proc` on Linux,
-  unmeasured on darwin - and kill the worker alone: the outline asked
-  after it is answered at once, where the old server left it unanswered
-  for the step's 10 s, and a request the worker died holding is refused
-  in 2.0 s. The 0.18.0 notes called this and a darwin hang a `shutdown`
-  left unanswered; neither was one. The darwin hang (runs 37204417494
-  and 38889613653) is step 74a's hover, still unexplained, and the
-  session gate's watchdog now names a request sent without waiting,
-  which it reported as the `didChange` before it.
+  worker's two pipes in a macro's `system` that writes a file the gate
+  waits for and then lasts a minute - `cmd` and a `ping` on Windows, a
+  shell that opens them through `/proc` on Linux, unmeasured on darwin -
+  and kill the worker alone once the file says it is inside that
+  compile: the outline asked after a buffer's held compile is answered
+  at once, where the old server left it unanswered for the step's 10 s,
+  and a pull whose own compile is the hold is refused in 1.8 s. The
+  0.18.0 notes called this and a darwin hang a `shutdown` left
+  unanswered; neither was one. The darwin hang (runs 37204417494 and
+  38889613653) is step 74a's hover, still unexplained, and the session
+  gate's watchdog now names a request sent without waiting, which it
+  reported as the `didChange` before it.
 
 ## 0.18.0 — 2026-10-18
 

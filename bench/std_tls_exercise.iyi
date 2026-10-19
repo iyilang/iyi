@@ -75,7 +75,7 @@ end
 SCENARIOS = [
   {"ok", true, ""}, {"rsa", true, ""}, {"p384", true, ""}, {"ed25519", true, ""}, {"aes256", true, "TLS_AES_256_GCM_SHA384"},
   {"chacha", true, "TLS_CHACHA20_POLY1305_SHA256"}, {"ccs", true, ""}, {"fragmented", true, ""},
-  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"hrr-p256", true, ""}, {"keyupdate", true, ""}, {"slow-echo", true, ""}, {"client-rekey", true, ""},
+  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"hrr-p256", true, ""}, {"hrr-p384", true, ""}, {"keyupdate", true, ""}, {"slow-echo", true, ""}, {"client-rekey", true, ""},
   {"big", true, ""}, {"ticket", true, ""},
   {"bad-finished", false, "Finished does not match the handshake (decrypt_error)"},
   {"bad-cv", false, "CertificateVerify is not its key's signature (decrypt_error)"},
@@ -96,7 +96,8 @@ SCENARIOS = [
   {"tls12-versions", false, "the server does not speak TLS 1.3 (protocol_version)"},
   {"tls12-key-share", false, "extension 51 in a TLS 1.2 ServerHello, which was not offered for it (unsupported_extension)"},
   {"no-echo", false, "does not echo the session id"},
-  {"hrr-group", false, "a HelloRetryRequest for group 24, which was not offered (illegal_parameter)"},
+  {"hrr-group", false, "a HelloRetryRequest for group 25, which was not offered (illegal_parameter)"},
+  {"hrr-p384-bad", false, "the server's secp384r1 share: ecdsa: a point that is not on P-384 (illegal_parameter)"},
   {"unsolicited-ext", false, "extension 65281 in EncryptedExtensions, which was not offered"},
   {"alpn-unoffered", false, "chose \"spdy/3\" by ALPN, which was not offered"},
   {"wrong-host", false, "is not valid for wrong-host.tls.test"},
@@ -177,6 +178,8 @@ if args.size > 0 && args[0] == "scenarios"
     if s[1]
       check !conn.is_a?(TlsError), "#{s[0]}: refused: #{conn.is_a?(TlsError) ? conn.message : ""}"
       next unless conn.is_a?(TlsClient)
+      group = s[0] == "hrr-p256" ? "secp256r1" : (s[0] == "hrr-p384" ? "secp384r1" : "X25519")
+      check conn.key_exchange == group, "#{s[0]}: keys agreed in #{conn.key_exchange}, not #{group}"
       if s[0] == "keyupdate"
         # The server's keys move before its echo; this side's KeyUpdate goes
         # with its next write, never from a read.
@@ -258,7 +261,7 @@ if args.size > 0 && args[0] == "get"
   label = ENV["TLS_EXPORT"]?
   exported = label ? " exported=#{hex_of(conn.export_keying_material(label, [] of UInt8, 16))}" : ""
   got = drain(conn)
-  puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}#{exported} #{conn.version}"
+  puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}#{exported} #{conn.version} group=#{conn.key_exchange}"
   conn.close
   exit 0
 end
@@ -305,11 +308,12 @@ end
 
 # What the server says of a connection: the name asked for, the protocol,
 # the suite, the client's certificate, the certificate it was shown under,
-# and 16 bytes exported for "EXPERIMENTAL iyi" (RFC 8446 section 7.5).
+# 16 bytes exported for "EXPERIMENTAL iyi" (RFC 8446 section 7.5), and the
+# group the keys were agreed in.
 def agreed(conn : TlsServer) : String
   peer = conn.peer_certificates.empty? ? "-" : conn.peer_certificates[0].subject_name
   exported = hex_of(conn.export_keying_material("EXPERIMENTAL iyi", [] of UInt8, 16))
-  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer} shown=#{conn.identity.leaf.subject_name} exported=#{exported}"
+  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer} shown=#{conn.identity.leaf.subject_name} exported=#{exported} group=#{conn.key_exchange}"
 end
 
 def serve_one(conn : TlsServer) : String

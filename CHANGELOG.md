@@ -24,6 +24,30 @@
   check among them, shown holding (0, 0) off once the curve check is
   taken out.
 
+- **std/tls agrees keys in secp384r1 and signs with P-384 keys, at both
+  ends.** A server that takes P-384 alone could not be reached, a client
+  that offers it alone was refused, and a P-384 certificate could not be
+  served.
+  - The client lists secp384r1 after X25519 and secp256r1 and still sends
+    an X25519 share alone, answering a HelloRetryRequest for either
+    curve; TLS 1.2's ServerKeyExchange may name it too.
+  - The server takes a share in X25519, secp256r1 or secp384r1, in that
+    order, and asks again for the first of them a client lists when it
+    sent none; a client with none of them is refused (handshake_failure).
+  - `TlsServerConfig.from_pem` and `TlsIdentity` take a P-384 key, PKCS #8
+    or SEC 1 (naming its curve or not), and sign CertificateVerify with
+    ecdsa_secp384r1_sha384, refusing a client that does not list it.
+  - `key_exchange` names the group a connection agreed in.
+  - A handshake with a P-384 server took 1.24 ms (Python's ssl, median of
+    200), 1.94 with the key exchange in secp384r1 too; P-256's 0.70.
+
+  Held by `bench/std_tls_exercise.sh`: OpenSSL's `s_server -groups P-384`
+  and a P-384 certificate, TLS 1.2 in secp384r1, a P-384 client
+  certificate in both versions; against the server, `s_client -groups
+  P-384` and `-sigalgs ECDSA+SHA384`, Python's ssl in secp384r1, curl and
+  Node; eight new scripted scenarios, a P-521 group or certificate still
+  refused, and twelve new broken copies.
+
 ## 0.18.0 — 2026-10-18
 
 **iyi's own library reaches the network by itself: TLS 1.3 at both ends,

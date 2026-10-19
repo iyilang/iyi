@@ -1,13 +1,14 @@
 """A TLS 1.3 client that breaks the protocol one rule at a time, for the
 server section of bench/std_tls_exercise.sh.
 
-    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256 | --rsa] [--mtls DIR] [SCENARIO ...]
+    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256 | --p384 | --rsa] [--mtls DIR] [SCENARIO ...]
 
 Connects to the exercise's `serve` mode once per scenario (every one in
 SCENARIOS when none is named) and says, one line each, whether the server
 answered as it must: `<name>: ok ...`, or `FAIL <name>: ...`. `--p256`
-says the server's key is P-256, `--rsa` that it is RSA, not Ed25519: what
-a client that leaves out one scheme or another is owed turns on that.
+says the server's key is P-256, `--p384` P-384, `--rsa` that it is RSA,
+not Ed25519: what a client that leaves out one scheme or another is owed
+turns on that.
 `--mtls DIR` says the server asks for a client's certificate: the MTLS
 scenarios run instead, presenting the chains and keys in DIR (client,
 client-ed, client-rsa, other, server-only: .pem and .key each) or
@@ -41,12 +42,12 @@ HELLO_RETRY = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079
 SUITE_NAMES = {0x1301: "TLS_AES_128_GCM_SHA256", 0x1302: "TLS_AES_256_GCM_SHA384", 0x1303: "TLS_CHACHA20_POLY1305_SHA256"}
 # rsa_pss_rsae_sha256, -384 and -512, by the hash each names.
 PSS = {0x0804: hashes.SHA256, 0x0805: hashes.SHA384, 0x0806: hashes.SHA512}
-SIGALGS = (0x0807, 0x0403, 0x0804)
+SIGALGS = (0x0807, 0x0403, 0x0503, 0x0804)
 
 # name: (what the scenario sends, what the server must answer)
 #   ("held", text)  the handshake holds and the answer holds text
 #   ("alert", code) the server ends it with that alert
-# or, where the server's key decides, {"ed25519": answer, "p256": answer}.
+# or, where the server's key decides, {"ed25519": answer, "p256": answer, ...}.
 SCENARIOS = {
     "ok": ("a correct handshake, AES-128-GCM", ("held", "TLS_AES_128_GCM_SHA256")),
     "aes256": ("TLS_AES_256_GCM_SHA384 alone", ("held", "TLS_AES_256_GCM_SHA384")),
@@ -55,12 +56,19 @@ SCENARIOS = {
     "alpn": ("ALPN http/1.1", ("held", "alpn=http/1.1")),
     "alpn-order": ("ALPN http/1.1 then h2: the server's order", ("held", "alpn=h2")),
     "no-sni": ("no server_name", ("held", "name=-")),
-    "hrr": ("a P-384 share alone: a HelloRetryRequest for X25519", ("held", "TLS_AES_128_GCM_SHA256")),
+    # secp521r1 is a group the server does not have: a share in it alone
+    # is a share in nothing the server takes.
+    "hrr": ("a P-521 share alone: a HelloRetryRequest for X25519", ("held", "TLS_AES_128_GCM_SHA256")),
     "p256-share": ("secp256r1 alone, a P-256 share", ("held", "TLS_AES_128_GCM_SHA256")),
     "both-shares": ("P-256 and X25519 shares: X25519 taken", ("held", "TLS_AES_128_GCM_SHA256")),
-    "hrr-p256": ("P-384 and secp256r1, a P-384 share: a HelloRetryRequest for secp256r1", ("held", "TLS_AES_128_GCM_SHA256")),
+    "hrr-p256": ("P-521 and secp256r1, a P-521 share: a HelloRetryRequest for secp256r1", ("held", "TLS_AES_128_GCM_SHA256")),
     "bad-p256-share": ("a P-256 share off the curve", ("alert", 47)),
     "short-p256-share": ("a P-256 share of 64 bytes", ("alert", 47)),
+    "p384-share": ("secp384r1 alone, a P-384 share", ("held", "TLS_AES_128_GCM_SHA256")),
+    "ec-shares": ("P-384 and P-256 shares: secp256r1 taken", ("held", "TLS_AES_128_GCM_SHA256")),
+    "hrr-p384": ("P-521 and secp384r1, a P-521 share: a HelloRetryRequest for secp384r1", ("held", "TLS_AES_128_GCM_SHA256")),
+    "bad-p384-share": ("a P-384 share off the curve", ("alert", 47)),
+    "short-p384-share": ("a P-384 share of 96 bytes", ("alert", 47)),
     "ccs": ("a ChangeCipherSpec before the client's Finished", ("held", "name=localhost")),
     "early-skip": ("early data the server passes over", ("held", "name=localhost")),
     "early-after-hrr": ("early data before the second ClientHello", ("held", "name=localhost")),
@@ -80,16 +88,18 @@ SCENARIOS = {
     "no-groups": ("key_share without supported_groups", ("alert", 109)),
     "no-sigalgs": ("no signature_algorithms", ("alert", 109)),
     "no-ed25519": ("signature_algorithms without ed25519",
-                   {"ed25519": ("alert", 40), "p256": ("held", "name=localhost"), "rsa": ("held", "name=localhost")}),
+                   {"ed25519": ("alert", 40), "p256": ("held", "name=localhost"), "p384": ("held", "name=localhost"), "rsa": ("held", "name=localhost")}),
     "no-p256": ("signature_algorithms without ecdsa_secp256r1_sha256",
-                {"ed25519": ("held", "name=localhost"), "p256": ("alert", 40), "rsa": ("held", "name=localhost")}),
+                {"ed25519": ("held", "name=localhost"), "p256": ("alert", 40), "p384": ("held", "name=localhost"), "rsa": ("held", "name=localhost")}),
+    "no-p384": ("signature_algorithms without ecdsa_secp384r1_sha384",
+                {"ed25519": ("held", "name=localhost"), "p256": ("held", "name=localhost"), "p384": ("alert", 40), "rsa": ("held", "name=localhost")}),
     # An RSA key signs under the first RSA-PSS scheme the client lists, and
     # never under PKCS #1 v1.5 (RFC 8446 section 4.2.3).
     "pss-sha384": ("rsa_pss_rsae_sha384 listed before rsa_pss_rsae_sha256", ("held", "name=localhost")),
     "pss-sha512": ("rsa_pss_rsae_sha512 listed first", ("held", "name=localhost")),
-    "no-rsa-pss": ("PKCS #1 v1.5, ed25519 and ecdsa_secp256r1_sha256, no RSA-PSS",
-                   {"ed25519": ("held", "name=localhost"), "p256": ("held", "name=localhost"), "rsa": ("alert", 40)}),
-    "no-group": ("groups without X25519 or secp256r1", ("alert", 40)),
+    "no-rsa-pss": ("PKCS #1 v1.5, ed25519 and the ECDSA schemes, no RSA-PSS",
+                   {"ed25519": ("held", "name=localhost"), "p256": ("held", "name=localhost"), "p384": ("held", "name=localhost"), "rsa": ("alert", 40)}),
+    "no-group": ("groups without X25519, secp256r1 or secp384r1: secp521r1 alone", ("alert", 40)),
     # A ClientHello of 60 KB, a byte to a record: what the server does with
     # it must grow with what was sent, not with its square.
     # 0.05 s here; 3.2 s when each record copied the message so far.
@@ -272,10 +282,13 @@ def scenario(c, name):
     share = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     ec_key = ec.generate_private_key(ec.SECP256R1())
     ec_share = ec_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
-    p384_share = b"\x04" + os.urandom(96)
-    hrr_names = ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session", "hrr-p256", "hrr-other-suite", "hrr-early-again",
+    p384_key = ec.generate_private_key(ec.SECP384R1())
+    p384_share = p384_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    p521_share = b"\x04" + os.urandom(132)
+    hrr_names = ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session", "hrr-p256", "hrr-p384", "hrr-other-suite", "hrr-early-again",
                  "junk-after-hrr")
-    p256_names = ("p256-share", "hrr-p256")
+    p256_names = ("p256-share", "hrr-p256", "ec-shares")
+    p384_names = ("p384-share", "hrr-p384")
     session = os.urandom(32)
     kw = {}
     if name == "aes256": kw["suites"] = (0x1302,)
@@ -285,8 +298,8 @@ def scenario(c, name):
     if name == "alpn-order": kw["alpn"] = ["http/1.1", "h2"]
     if name == "no-sni": kw["sni"] = None
     if name in hrr_names:
-        kw["groups"] = (0x18, 0x17) if name == "hrr-p256" else (0x18, 0x1d)
-        kw["shares"] = {0x18: p384_share}
+        kw["groups"] = {"hrr-p256": (0x19, 0x17), "hrr-p384": (0x19, 0x18)}.get(name, (0x19, 0x1d))
+        kw["shares"] = {0x19: p521_share}
     if name == "p256-share":
         kw["groups"] = (0x17,)
         kw["shares"] = {0x17: ec_share}
@@ -296,6 +309,15 @@ def scenario(c, name):
     if name in ("bad-p256-share", "short-p256-share"):
         kw["groups"] = (0x17,)
         kw["shares"] = {0x17: ec_share[:-1] + bytes([ec_share[-1] ^ 1]) if name == "bad-p256-share" else ec_share[:64]}
+    if name == "p384-share":
+        kw["groups"] = (0x18,)
+        kw["shares"] = {0x18: p384_share}
+    if name == "ec-shares":
+        kw["groups"] = (0x18, 0x17)
+        kw["shares"] = {0x18: p384_share, 0x17: ec_share}
+    if name in ("bad-p384-share", "short-p384-share"):
+        kw["groups"] = (0x18,)
+        kw["shares"] = {0x18: p384_share[:-1] + bytes([p384_share[-1] ^ 1]) if name == "bad-p384-share" else p384_share[:96]}
     if name in ("early-skip", "early-after-hrr", "junk-after-hrr", "early-malformed"): kw["early"] = True
     if name == "sni-two":
         names = b"".join(b"\x00" + struct.pack(">H", len(n)) + n for n in (b"localhost", b"other.test"))
@@ -316,14 +338,15 @@ def scenario(c, name):
     if name == "no-key-share": kw["shares"] = False
     if name == "no-groups": kw["groups"] = None
     if name == "no-sigalgs": kw["sigalgs"] = None
-    if name == "no-ed25519": kw["sigalgs"] = (0x0403, 0x0804)
-    if name == "no-p256": kw["sigalgs"] = (0x0807, 0x0804)
-    if name == "pss-sha384": kw["sigalgs"] = (0x0805, 0x0804, 0x0807, 0x0403)
-    if name == "pss-sha512": kw["sigalgs"] = (0x0806, 0x0807, 0x0403, 0x0804)
-    if name == "no-rsa-pss": kw["sigalgs"] = (0x0401, 0x0501, 0x0601, 0x0807, 0x0403)
+    if name == "no-ed25519": kw["sigalgs"] = (0x0403, 0x0503, 0x0804)
+    if name == "no-p256": kw["sigalgs"] = (0x0807, 0x0503, 0x0804)
+    if name == "no-p384": kw["sigalgs"] = (0x0807, 0x0403, 0x0804)
+    if name == "pss-sha384": kw["sigalgs"] = (0x0805, 0x0804, 0x0807, 0x0403, 0x0503)
+    if name == "pss-sha512": kw["sigalgs"] = (0x0806, 0x0807, 0x0403, 0x0503, 0x0804)
+    if name == "no-rsa-pss": kw["sigalgs"] = (0x0401, 0x0501, 0x0601, 0x0807, 0x0403, 0x0503)
     if name == "no-group":
-        kw["groups"] = (0x18,)
-        kw["shares"] = {0x18: p384_share}
+        kw["groups"] = (0x19,)
+        kw["shares"] = {0x19: p521_share}
     if name == "byte-records":
         kw["order"] = ["sni", "groups", "sigalgs", "versions", "shares", ext(21, bytes(60000))]
     if name == "tls12": kw["versions"] = (0x0303,)
@@ -384,7 +407,7 @@ def scenario(c, name):
     assert exts.get(43) == b"\x03\x04", "no TLS 1.3 in the ServerHello"
     schedule = Schedule(suite)
     if random == HELLO_RETRY:
-        wanted = b"\x00\x17" if name == "hrr-p256" else b"\x00\x1d"
+        wanted = {"hrr-p256": b"\x00\x17", "hrr-p384": b"\x00\x18"}.get(name, b"\x00\x1d")
         assert exts.get(51) == wanted, f"a HelloRetryRequest asking for {exts.get(51)!r}"
         assert name in hrr_names, "a HelloRetryRequest nobody needed"
         digest = schedule.digest(ch)
@@ -403,6 +426,8 @@ def scenario(c, name):
             again["suites"] = tuple(x for x in (0x1301, 0x1302, 0x1303) if x != suite)
         if name == "hrr-p256":
             again["shares"] = {0x17: ec_share}
+        elif name == "hrr-p384":
+            again["shares"] = {0x18: p384_share}
         elif name != "hrr-no-share":
             again["shares"] = {0x1d: share}
         if name == "hrr-other-session":
@@ -419,6 +444,9 @@ def scenario(c, name):
     if name in p256_names:
         assert group == 0x17 and length == 65, "the server's share is not secp256r1"
         shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), exts[51][4:]))
+    elif name in p384_names:
+        assert group == 0x18 and length == 97, "the server's share is not secp384r1"
+        shared = p384_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP384R1(), exts[51][4:]))
     else:
         assert group == 0x1d and length == 32, "the server's share is not X25519"
         shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(exts[51][4:]))
@@ -476,8 +504,11 @@ def scenario(c, name):
         assert scheme == wanted, f"an RSA key's CertificateVerify under {scheme:#06x}, the first RSA-PSS scheme offered being {wanted:#06x}"
         h = PSS[scheme]()
         public.verify(verify[8:], signed, padding.PSS(mgf=padding.MGF1(h), salt_length=h.digest_size), h)
+    elif isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp384r1":
+        assert verify[4:6] == b"\x05\x03", f"a P-384 key's CertificateVerify under {verify[4:6].hex()}"
+        public.verify(verify[8:], signed, ec.ECDSA(hashes.SHA384()))
     else:
-        assert isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp256r1", "the leaf's key is neither Ed25519, P-256 nor RSA"
+        assert isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp256r1", "the leaf's key is neither Ed25519, P-256, P-384 nor RSA"
         assert verify[4:6] == b"\x04\x03", f"a P-256 key's CertificateVerify under {verify[4:6].hex()}"
         public.verify(verify[8:], signed, ec.ECDSA(hashes.SHA256()))
     assert verify[0] == 15, f"message {verify[0]} where CertificateVerify belongs"
@@ -577,7 +608,7 @@ def main():
     key_kind = "ed25519"
     global MTLS_DIR
     while rest and rest[0].startswith("--"):
-        if rest[0] in ("--p256", "--rsa"):
+        if rest[0] in ("--p256", "--p384", "--rsa"):
             key_kind = rest[0][2:]
             rest = rest[1:]
         elif rest[0] == "--mtls":

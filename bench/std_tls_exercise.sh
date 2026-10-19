@@ -17,8 +17,8 @@
 # changing an honest server's ServerKeyExchange or random; and a copy whose
 # ClientHello offers 1.2 alone meets a real server's downgrade sentinel.
 # Then the server: its configurations judged, and the exercise
-# serving - on an Ed25519 key, a P-256 one, a 2048-bit RSA one (PKCS #8)
-# and a 4096-bit RSA one (PKCS #1) - bench/std_tls_client.py, the scripted
+# serving - on an Ed25519 key, a P-256 one, a P-384 one, a 2048-bit RSA
+# one (PKCS #8) and a 4096-bit RSA one (PKCS #1) - bench/std_tls_client.py, the scripted
 # client's every scenario, a handshake checked step by step or one rule
 # broken and the alert named; the std/tls client, Python's ssl, OpenSSL's
 # s_client (an RSA server held to the RSA-PSS scheme the client lists
@@ -180,10 +180,11 @@ else
     "$OPENSSL" req -x509 -config ca.cnf -extensions ca -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
       -keyout ca.key -out ca.pem -days 30
     printf 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' >leaf.ext
-    for kind in p256 p384 rsa ed25519; do
+    for kind in p256 p384 p521 rsa ed25519; do
       case $kind in
         p256) opt="-newkey ec -pkeyopt ec_paramgen_curve:P-256" ;;
         p384) opt="-newkey ec -pkeyopt ec_paramgen_curve:P-384" ;;
+        p521) opt="-newkey ec -pkeyopt ec_paramgen_curve:P-521" ;;
         rsa) opt="-newkey rsa:2048" ;;
         ed25519) opt="-newkey ed25519" ;;
       esac
@@ -193,9 +194,10 @@ else
     done
     # Client certificates, for clientAuth, as std/tls presents them.
     printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' >client.ext
-    for kind in p256 ed25519 rsa; do
+    for kind in p256 p384 ed25519 rsa; do
       case $kind in
         p256) opt="-newkey ec -pkeyopt ec_paramgen_curve:P-256" ;;
+        p384) opt="-newkey ec -pkeyopt ec_paramgen_curve:P-384" ;;
         ed25519) opt="-newkey ed25519" ;;
         rsa) opt="-newkey rsa:2048" ;;
       esac
@@ -306,7 +308,9 @@ else
   # server of 1.2 alone refuses the ClientHello, which offers it nothing.
   interop "TLS 1.2 alone, not asked for" "alert protocol_version (70)" localhost - -tls1_2 -cert p256.pem -key p256.key
   interop "secp256r1 alone, asked for by a HelloRetryRequest" "HTTP/1.0 200 ok" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-256
-  interop "groups the client offers none of" "alert handshake_failure (40)" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-384
+  interop "secp384r1 alone, asked for by a HelloRetryRequest, a P-384 certificate" "HTTP/1.0 200 ok TLS_AES_128_GCM_SHA256 alpn=- TLSv1.3 group=secp384r1" localhost - -tls1_3 -cert p384.pem -key p384.key -groups P-384
+  interop "secp384r1 alone and ecdsa_secp384r1_sha384 alone" "TLSv1.3 group=secp384r1" localhost - -tls1_3 -cert p384.pem -key p384.key -groups P-384 -sigalgs ECDSA+SHA384
+  interop "groups the client offers none of" "alert handshake_failure (40)" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-521
   # A client certificate required and checked: -verify_return_error ends
   # the handshake on any fault OpenSSL finds in the chain or its signature.
   mtls=(-tls1_3 -cert p256.pem -key p256.key -Verify 1 -verify_return_error -CAfile ca.pem)
@@ -315,6 +319,12 @@ else
   interop "a client certificate required, a P-256 one presented" "HTTP/1.0 200 ok" localhost - "${mtls[@]}"
   identity=(client-ed25519.pem client-ed25519.key)
   interop "a client certificate required, an Ed25519 one presented" "HTTP/1.0 200 ok" localhost - "${mtls[@]}"
+  identity=(client-p384.pem client-p384.key)
+  interop "a client certificate required, a P-384 one presented" "HTTP/1.0 200 ok" localhost - "${mtls[@]}"
+  interop "a request naming ecdsa_secp384r1_sha384 alone, a P-384 one presented" "HTTP/1.0 200 ok" localhost - "${mtls[@]}" -client_sigalgs ECDSA+SHA384
+  interop "a request naming ecdsa_secp256r1_sha256 alone, a P-384 one held back" "alert certificate_required (116)" \
+    localhost - "${mtls[@]}" -client_sigalgs ECDSA+SHA256
+  identity=(client-ed25519.pem client-ed25519.key)
   interop "a request naming ecdsa_secp256r1_sha256 alone, an Ed25519 one held back" "alert certificate_required (116)" \
     localhost - "${mtls[@]}" -client_sigalgs ECDSA+SHA256
   identity=(client-rsa.pem client-rsa.key)
@@ -336,10 +346,11 @@ echo "== TLS 1.2: the client against servers that speak nothing newer"
 # scripted server's "tls12" scenario and the section above hold the default
 # to 1.3 alone. OpenSSL's s_server pinned to TLS 1.2 (-tls1_2), each of the six suites on
 # its certificate's kind; a ServerKeyExchange signed under PKCS #1 v1.5
-# and RSA-PSS, ECDSA under SHA-384, Ed25519; secp256r1; ALPN; a server
-# without the extended master secret (-no_ems) refused by name, a P-384
-# certificate refused by the server (the ClientHello names no P-384),
-# client certificates of each kind; the exporter against OpenSSL's; a
+# and RSA-PSS, ECDSA under SHA-384, Ed25519; secp256r1 and secp384r1; a
+# P-384 certificate; ALPN; a server without the extended master secret
+# (-no_ems) refused by name, a P-521 certificate refused by the server
+# (the ClientHello names no P-521, RFC 8422 section 5.1.1), client
+# certificates of each kind; the exporter against OpenSSL's; a
 # HelloRequest answered with no_renegotiation; and through
 # bench/std_tls12_proxy.py, a man in the middle, a ServerKeyExchange's
 # signature or point one bit off and the downgrade sentinel written into
@@ -403,6 +414,8 @@ else
     one "a ServerKeyExchange under ECDSA with SHA-384, on P-256" "HTTP/1.0 200 ok TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" direct -tls1_2 -cert p256.pem -key p256.key -sigalgs ECDSA+SHA384
     one "an Ed25519 certificate (RFC 8422)" "HTTP/1.0 200 ok TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" direct -tls1_2 -cert ed25519.pem -key ed25519.key
     one "secp256r1 alone" "HTTP/1.0 200 ok TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" direct -tls1_2 -cert p256.pem -key p256.key -groups P-256
+    one "secp384r1 alone" "HTTP/1.0 200 ok TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 alpn=- TLSv1.2 group=secp384r1" direct -tls1_2 -cert p256.pem -key p256.key -groups P-384
+    one "a P-384 certificate, its ServerKeyExchange under ECDSA with SHA-384" "HTTP/1.0 200 ok TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256" direct -tls1_2 -cert p384.pem -key p384.key -sigalgs ECDSA+SHA384
     ALPN12=http/1.1 one "ALPN" "alpn=http/1.1 TLSv1.2" direct -tls1_2 -cert p256.pem -key p256.key -alpn http/1.1
     # `-no_ems` is not in every s_server: the OpenSSL 3.0 of the Linux CI
     # container has none, its s_server did not start, and the client found
@@ -413,9 +426,9 @@ else
     else
       echo "  a server without the extended master secret: this OpenSSL ($("$OPENSSL" version | cut -d' ' -f2)) cannot serve one, so it goes unasked"
     fi
-    one "a P-384 certificate, which this ClientHello's groups rule out" "the server sent alert handshake_failure (40)" direct -tls1_2 -cert p384.pem -key p384.key
+    one "a P-521 certificate, which this ClientHello's groups rule out" "the server sent alert handshake_failure (40)" direct -tls1_2 -cert p521.pem -key p521.key
     local kind
-    for kind in p256 ed25519 rsa; do
+    for kind in p256 p384 ed25519 rsa; do
       CLIENT12=(client-$kind.pem client-$kind.key)
       one "a client certificate required, a $kind one presented" "HTTP/1.0 200 ok" direct -tls1_2 -cert p256.pem -key p256.key -Verify 1 -verify_return_error -CAfile ca.pem
     done
@@ -515,7 +528,7 @@ PY
     for _ in $(seq 1 50); do [ -s "$WORK/py12port" ] && break; sleep 0.1; done
     got="$(TLS_MIN_VERSION=1.2 "$WORK/tls-release" get "$(cat "$WORK/py12port")" "$PKI/ca.pem" localhost http/1.1 2>&1)"
     wait "$pid" 2>/dev/null
-    if printf '%s' "$got" | grep -qE "^HTTP/1.0 200 ok TLS_ECDHE_.* alpn=http/1.1 TLSv1.2$" && ! [ -s "$WORK/py12.log" ]; then
+    if printf '%s' "$got" | grep -qE "^HTTP/1.0 200 ok TLS_ECDHE_.* alpn=http/1.1 TLSv1.2 group=[A-Za-z0-9]+$" && ! [ -s "$WORK/py12.log" ]; then
       tls12=$((tls12 + 1))
       echo "  Python's ssl, TLS 1.2, $kind, $suite: $got"
     else
@@ -667,10 +680,26 @@ write("p256/key.pem", pkcs8(ec_key))
 write("ec-sec1.key", ec_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
 write("p384.key", pkcs8(ec.generate_private_key(ec.SECP384R1())))
 write("other-ec.key", pkcs8(ec.generate_private_key(ec.SECP256R1())))
+# The same server on P-384: its chain and PKCS #8 key; its key as SEC 1,
+# and as SEC 1 naming no curve (RFC 5915 makes the parameters optional:
+# the private key's 48 bytes say P-384); a P-384 key that is not the
+# leaf's, and a P-521 key, a curve no server here signs on.
+p384_key = ec.generate_private_key(ec.SECP384R1())
+os.makedirs(os.path.join(out, "p384"), exist_ok=True)
+write("p384/chain.pem", pem(leaf_for(p384_key)) + pem(root))
+write("p384/key.pem", pkcs8(p384_key))
+write("p384-sec1.key", p384_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))
+point = p384_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+bare = tlv(0x30, bytes.fromhex("020101") + tlv(0x04, p384_key.private_numbers().private_value.to_bytes(48, "big")) + tlv(0xa1, tlv(0x03, b"\x00" + point)))
+import base64 as b64
+text = b64.b64encode(bare).decode()
+write("p384-bare.key", ("-----BEGIN EC PRIVATE KEY-----\n" + "\n".join(text[i:i + 64] for i in range(0, len(text), 64)) + "\n-----END EC PRIVATE KEY-----\n").encode())
+write("other-p384.key", pkcs8(ec.generate_private_key(ec.SECP384R1())))
+write("p521.key", pkcs8(ec.generate_private_key(ec.SECP521R1())))
 # A second identity, for other.test, beside each server's own: shown to a
 # client that asks for that host by server_name.
 other_host = ec.generate_private_key(ec.SECP256R1())
-for where in ("", "p256/"):
+for where in ("", "p256/", "p384/"):
     write(where + "other-chain.pem", pem(leaf_for(other_host, "other.test")) + pem(root))
     write(where + "other-key.pem", pkcs8(other_host))
 # RSA servers: a 2048-bit key as PKCS #8 and a 4096-bit one as PKCS #1,
@@ -765,7 +794,13 @@ check "an Ed25519 algorithm with parameters" chain.pem params.key "an Ed25519 al
 check "a P-256 chain and its PKCS #8 key" p256.pem ec.key "config: 2 certificates, leaf CN=localhost"
 check "a P-256 chain and its SEC 1 key" p256.pem ec-sec1.key "config: 2 certificates, leaf CN=localhost"
 check "another P-256 key" p256.pem other-ec.key "the private key is not the certificate's"
-check "a P-384 key" p256.pem p384.key "the private key is on 1.3.132.0.34, not prime256v1"
+check "a P-384 key for a P-256 certificate" p256.pem p384.key "the certificate's key is not P-384, as the private key is"
+check "a P-384 chain and its PKCS #8 key" p384/chain.pem p384/key.pem "config: 2 certificates, leaf CN=localhost"
+check "a P-384 chain and its SEC 1 key" p384/chain.pem p384-sec1.key "config: 2 certificates, leaf CN=localhost"
+check "a P-384 chain and its SEC 1 key naming no curve" p384/chain.pem p384-bare.key "config: 2 certificates, leaf CN=localhost"
+check "another P-384 key" p384/chain.pem other-p384.key "the private key is not the certificate's"
+check "a P-256 key for a P-384 certificate" p384/chain.pem ec.key "the certificate's key is not P-256, as the private key is"
+check "a P-521 key" p256.pem p521.key "the private key is on 1.3.132.0.35, not prime256v1 (1.2.840.10045.3.1.7) or secp384r1 (1.3.132.0.34)"
 check "an RSA chain and its PKCS #8 key" rsa2048/chain.pem rsa2048/key.pem "config: 2 certificates, leaf CN=localhost"
 check "a 4096-bit RSA chain and its PKCS #1 key" rsa4096/chain.pem rsa4096/key.pem "config: 2 certificates, leaf CN=localhost"
 check "another RSA key" rsa2048/chain.pem rsa-other.key "the private key is not the certificate's"
@@ -819,6 +854,7 @@ SH
     local flag=()
     case "$kind" in
       p256) flag=(--p256) ;;
+      p384) flag=(--p384) ;;
       rsa*) flag=(--rsa) ;;
     esac
     if "$PY" "$REPO/bench/std_tls_client.py" "$port" "$SRV/roots.pem" ${flag[@]+"${flag[@]}"} >"$WORK/client-$kind.out" 2>&1; then
@@ -846,6 +882,22 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
         data += chunk
     print(s.version(), s.selected_alpn_protocol(), data.decode().split("\r\n\r\n")[1].strip())
 ' "$port" "$SRV/roots.pem"
+    # set_ecdh_curve names the one group Python's OpenSSL offers, TLS 1.3's
+    # included: the server must answer in it.
+    served_check "Python's ssl, $kind, secp384r1 alone" "group=secp384r1" "$PY" -c '
+import socket, ssl, sys
+ctx = ssl.create_default_context(cafile=sys.argv[2])
+ctx.set_ecdh_curve("secp384r1")
+with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10), server_hostname="localhost") as s:
+    s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+    data = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    print(s.version(), data.decode().split("\r\n\r\n")[1].strip())
+' "$port" "$SRV/roots.pem"
     if [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1; then
       # -ign_eof: the request's end on stdin is not the end of the answer.
       sclient() {
@@ -857,17 +909,30 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
       served_check "OpenSSL, $kind, ChaCha20-Poly1305" "name=localhost alpn=- TLS_CHACHA20_POLY1305_SHA256" sclient -tls1_3 -ciphersuites TLS_CHACHA20_POLY1305_SHA256
       served_check "OpenSSL, $kind, ALPN" "name=localhost alpn=h2" sclient -tls1_3 -alpn h2,http/1.1
       hrr() { sclient -tls1_3 -groups "$1" -msg | grep -c '<<< TLS 1.3, Handshake \[length [0-9a-f]*\], ServerHello'; }
-      served_check "OpenSSL, $kind, a P-384 share first: a HelloRetryRequest for X25519, then a ServerHello" "2" hrr P-384:X25519
-      served_check "OpenSSL, $kind, P-384 and P-256, a P-384 share: a HelloRetryRequest for secp256r1" "2" hrr P-384:P-256
+      # A share in a group the server has is taken, the one round trip
+      # kept; a share in one it does not have (P-521) is asked again for
+      # the first group of the client's this server has, X25519 before
+      # secp256r1 before secp384r1.
+      served_check "OpenSSL, $kind, a P-384 share first: taken, one ServerHello" "1" hrr P-384:X25519
+      served_check "OpenSSL, $kind, a P-384 share first: answered in secp384r1" "group=secp384r1" sclient -tls1_3 -groups P-384:X25519
+      served_check "OpenSSL, $kind, a P-521 share first: a HelloRetryRequest for X25519, then a ServerHello" "2" hrr P-521:X25519
+      served_check "OpenSSL, $kind, P-521 and P-256, a P-521 share: a HelloRetryRequest for secp256r1" "2" hrr P-521:P-256
+      served_check "OpenSSL, $kind, P-521 and P-384, a P-521 share: a HelloRetryRequest for secp384r1" "2" hrr P-521:P-384
       served_check "OpenSSL, $kind, secp256r1 alone" "name=localhost alpn=-" sclient -tls1_3 -groups P-256
+      served_check "OpenSSL, $kind, secp384r1 alone" "group=secp384r1" sclient -tls1_3 -groups P-384
       # Refusals by the alert's number, which every OpenSSL prints the same;
       # its name is worded differently from one version to the next.
       served_check "OpenSSL, $kind, TLS 1.2 alone" "SSL alert number 70" sclient -tls1_2
-      served_check "OpenSSL, $kind, groups without X25519 or secp256r1" "SSL alert number 40" sclient -tls1_3 -groups P-384
+      served_check "OpenSSL, $kind, groups without X25519, secp256r1 or secp384r1" "SSL alert number 40" sclient -tls1_3 -groups P-521
       case "$kind" in
         p256)
           served_check "OpenSSL, p256, ecdsa_secp256r1_sha256 alone" "name=localhost alpn=-" sclient -tls1_3 -sigalgs ECDSA+SHA256
           served_check "OpenSSL, p256, no ecdsa_secp256r1_sha256 among its signature algorithms" "SSL alert number 40" sclient -tls1_3 -sigalgs ed25519:RSA-PSS+SHA256
+          ;;
+        p384)
+          served_check "OpenSSL, p384, ecdsa_secp384r1_sha384 alone" "name=localhost alpn=-" sclient -tls1_3 -sigalgs ECDSA+SHA384
+          served_check "OpenSSL, p384, secp384r1 alone and ecdsa_secp384r1_sha384 alone" "group=secp384r1" sclient -tls1_3 -groups P-384 -sigalgs ECDSA+SHA384
+          served_check "OpenSSL, p384, no ecdsa_secp384r1_sha384 among its signature algorithms" "SSL alert number 40" sclient -tls1_3 -sigalgs ECDSA+SHA256:ed25519:RSA-PSS+SHA256
           ;;
         rsa*)
           # The scheme the client lists first, and never PKCS #1 v1.5. OpenSSL
@@ -912,7 +977,7 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
     # cannot say: "the revocation status is unknown" unless told not to.
     local norevoke=()
     curl --version 2>/dev/null | head -1 | grep -q 'Schannel' && norevoke=(--ssl-no-revoke)
-    if command -v curl >/dev/null 2>&1 && { [ "$kind" = p256 ] || curl --version | head -1 | grep -q 'OpenSSL/'; }; then
+    if command -v curl >/dev/null 2>&1 && { [ "$kind" = p256 ] || [ "$kind" = p384 ] || curl --version | head -1 | grep -q 'OpenSSL/'; }; then
       local before=$served_ok
       served_check "curl, $kind" "name=localhost alpn=http/1.1" curl -sS --http1.1 ${norevoke[@]+"${norevoke[@]}"} --cacert "$SRV/roots.pem" \
         --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/"
@@ -938,6 +1003,7 @@ s.on("error", e => console.log("error", e.message));
   }
   serve_and_ask "$SRV" ed25519
   serve_and_ask "$SRV/p256" p256
+  serve_and_ask "$SRV/p384" p384
   serve_and_ask "$SRV/rsa2048" rsa2048
   serve_and_ask "$SRV/rsa4096" rsa4096
   # The server asking for a client's certificate: the scripted client's
@@ -1044,21 +1110,27 @@ echo "== a handshake's time, by the server's key (--release; measured, not check
 # Python's ssl makes 200 full TLS 1.3 handshakes with the exercise's
 # server, one after another over loopback, and closes each: the median
 # wall time of one, its own side's work included. What changes from key to
-# key is the CertificateVerify the server signs.
+# key is the CertificateVerify the server signs; one line puts the key
+# exchange in secp384r1 too (Python's `set_ecdh_curve`).
 if [ "$served" = yes ]; then
-  for pair in "ed25519:$SRV" "p256:$SRV/p256" "rsa2048:$SRV/rsa2048" "rsa4096:$SRV/rsa4096"; do
-    kind="${pair%%:*}"
-    dir="${pair#*:}"
+  for spec in "ed25519|$SRV|" "p256|$SRV/p256|" "p384|$SRV/p384|" "p384, secp384r1|$SRV/p384|secp384r1" \
+    "rsa2048|$SRV/rsa2048|" "rsa4096|$SRV/rsa4096|"; do
+    kind="${spec%%|*}"
+    rest="${spec#*|}"
+    dir="${rest%%|*}"
+    curve="${rest#*|}"
     rm -f "$dir/port"
-    "$WORK/tls-release" serve "$dir" 200 >"$WORK/time-$kind.log" 2>&1 &
+    "$WORK/tls-release" serve "$dir" 200 >"$WORK/time-${kind%%,*}.log" 2>&1 &
     pid=$!
     for _ in $(seq 1 100); do
       [ -s "$dir/port" ] && break
       sleep 0.1
     done
-    "$PY" - "$(cat "$dir/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" "$kind" <<'PY'
+    "$PY" - "$(cat "$dir/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" "$kind" "$curve" <<'PY'
 import socket, ssl, statistics, sys, time
 ctx = ssl.create_default_context(cafile=sys.argv[2])
+if sys.argv[4]:
+    ctx.set_ecdh_curve(sys.argv[4])
 took = []
 for _ in range(200):
     started = time.perf_counter()
@@ -1199,7 +1271,7 @@ echo "== proving the checks can fail when the module is broken"
 # on a copy of the module with <old> replaced, at the check that names
 # <phrase> - over the trace; against the scripted server (`scenarios`);
 # as a server, before the scripted client (`server`, on the Ed25519 key,
-# `server-p256`, `server-rsa` on the 2048-bit RSA key, `server-mtls`,
+# `server-p256`, `server-p384`, `server-rsa` on the 2048-bit RSA key, `server-mtls`,
 # asking for a client's certificate, or `server-mtls-optional`, asking
 # without requiring one; the client's report must name the scenario);
 # judging the server's configurations (`config`); or the TLS 1.2 client
@@ -1217,7 +1289,7 @@ prove_broken() {
   mkdir -p "$WORK/patched/std"
   local mode="${5:-trace}"
   if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; } ||
-     { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ]; } && [ "$served" = no ]; } ||
+     { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-p384 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ]; } && [ "$served" = no ]; } ||
      { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client12 ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
     echo "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
@@ -1235,7 +1307,7 @@ PY
     status=1
     return
   fi
-  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client12 ]; then
+  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-p384 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client12 ]; then
     if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched/tlsx" \
          "$REPO/bench/std_tls_exercise.iyi" >"$WORK/patched/build.log" 2>&1; then
       echo "  the $1 copy did not build:"
@@ -1260,6 +1332,7 @@ PY
       mkdir -p "$WORK/patched/srv"
       local keys="$SRV" flag=()
       [ "$mode" = server-p256 ] && keys="$SRV/p256" && flag=(--p256)
+      [ "$mode" = server-p384 ] && keys="$SRV/p384" && flag=(--p384)
       [ "$mode" = server-rsa ] && keys="$SRV/rsa2048" && flag=(--rsa ok pss-sha384 pss-sha512 no-rsa-pss no-ed25519 no-p256)
       [ "$mode" = server-mtls ] && keys="$SRV/mtls" && flag=(--mtls "$SRV/mtls")
       [ "$mode" = server-mtls-optional ] && keys="$SRV/mtls" && flag=(--mtls "$SRV/mtls" mtls-optional-none mtls-ok mtls-bad-cv)
@@ -1405,7 +1478,16 @@ prove_broken "a share of small order taken" "zero-share:" \
   '      return TlsError.new("the server'"'"'s X25519 share gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)' \
   '      shared = X25519.public_key(private_key) if shared.is_a?(CurveError)' scenarios
 prove_broken "a HelloRetryRequest for secp256r1 answered with X25519 again" "hrr-p256: refused" \
-  '      if reply.named_group == GROUP_SECP256R1' '      if false' scenarios
+  '      if reply.named_group == GROUP_SECP256R1 || reply.named_group == GROUP_SECP384R1' '      if reply.named_group == GROUP_SECP384R1' scenarios
+prove_broken "a HelloRetryRequest for secp384r1 answered with X25519 again" "hrr-p384: refused" \
+  '      if reply.named_group == GROUP_SECP256R1 || reply.named_group == GROUP_SECP384R1' '      if reply.named_group == GROUP_SECP256R1' scenarios
+prove_broken "a HelloRetryRequest for secp384r1 refused as a group not offered" "hrr-p384: refused" \
+  'unless group == GROUP_SECP256R1 || group == GROUP_SECP384R1' 'unless group == GROUP_SECP256R1' scenarios
+prove_broken "the server's secp384r1 share taken off the curve" "FAILED: hrr-p384-bad: " \
+  '      return TlsError.new("the server'"'"'s #{group_name(group)} share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
+      secret = got
+    else' '      secret = got.is_a?(EcdsaError) ? Array(UInt8).new(48, 0_u8) : got
+    else' scenarios
 prove_broken "a ServerHello's share taken in a group its ClientHello did not send" "FAILED: sh-wrong-group: " \
   '    return TlsError.new("a ServerHello'"'"'s share in #{group_name(reply.named_group)}, where the share sent was #{group_name(group)}'"'"'s", TlsAlert::ILLEGAL_PARAMETER) unless reply.named_group == group' '' scenarios
 # TLS 1.2: opt-in, so the default must be 1.3 alone; then the ServerHello's
@@ -1500,7 +1582,22 @@ prove_broken "a client without ecdsa_secp256r1_sha256 answered anyway by a P-256
 prove_broken "a P-256 CertificateVerify signed over SHA-384" "FAIL ok " \
   '      key.sign(EcdsaHash::SHA256, content)' '      key.sign(EcdsaHash::SHA384, content)' server-p256
 prove_broken "a P-256 key that is not the certificate's taken" "FAIL another P-256 key" \
-  '    return TlsError.new("the private key is not the certificate'"'"'s") unless public.x == key.public_key.x && public.y == key.public_key.y' '' config
+  '    return TlsError.new("the private key is not the certificate'"'"'s") unless public.x == key.public_key.x && public.y == key.public_key.y
+    TlsIdentity.new(chain, leaf, [P256]' '    TlsIdentity.new(chain, leaf, [P256]' config
+# A P-384 server: ecdsa_secp384r1_sha384 alone, SHA-384 under it, the key
+# the certificate's, and its key read on the curve it names.
+prove_broken "a client without ecdsa_secp384r1_sha384 answered anyway by a P-384 server" "FAIL no-p384 " \
+  '    return @identity if @identity.scheme_for(schemes)' '    return @identity' server-p384
+prove_broken "a P-384 CertificateVerify signed over SHA-256" "FAIL ok " \
+  '      wide.sign(EcdsaHash::SHA384, content)' '      wide.sign(EcdsaHash::SHA256, content)' server-p384
+prove_broken "a P-384 key that is not the certificate's taken" "FAIL another P-384 key" \
+  '    return TlsError.new("the private key is not the certificate'"'"'s") unless public.x == key.public_key.x && public.y == key.public_key.y
+    TlsIdentity.new(chain, leaf, [P384]' '    TlsIdentity.new(chain, leaf, [P384]' config
+prove_broken "a SEC 1 key naming no curve read as P-256's" "FAIL a P-384 chain and its SEC 1 key naming no curve" \
+  '    secret.is_a?(Array(UInt8)) && secret.size == 48 ? EcdsaCurve::P384.oid : p256' '    p256' config
+prove_broken "a P-384 PKCS #8 key read as P-256's" "FAIL a P-384 chain and its PKCS #8 key" \
+  '      named = algorithm[1].oid
+      return named.is_a?(String) ? named : p256' '      return p256' config
 # An RSA server: the client's order of RSA-PSS schemes, each scheme's
 # hash, PKCS #1 v1.5 never, and the key the certificate's.
 prove_broken "a client without RSA-PSS answered anyway by an RSA server" "FAIL no-rsa-pss " \
@@ -1512,7 +1609,7 @@ prove_broken "rsa_pss_rsae_sha384 signed over SHA-256" "FAIL pss-sha384 " \
 prove_broken "rsa_pss_rsae_sha512 signed over SHA-384" "FAIL pss-sha512 " \
   ' : RsaHash::SHA512), content)' ' : RsaHash::SHA384), content)' server-rsa
 prove_broken "PKCS #1 v1.5 among an RSA key's schemes" "FAIL no-rsa-pss " \
-  '[RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512], nil, nil, key)' '[0x0401, RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512], nil, nil, key)' server-rsa
+  '[RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512], nil, nil, nil, key)' '[0x0401, RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512], nil, nil, nil, key)' server-rsa
 prove_broken "an RSA key that is not the certificate's taken" "FAIL another RSA key" \
   '    unless public.modulus == key.public_key.modulus && public.exponent == key.public_key.exponent' '    if false' config
 prove_broken "an RSA PRIVATE KEY block passed over" "FAIL a 4096-bit RSA chain and its PKCS #1 key" \
@@ -1532,11 +1629,24 @@ prove_broken "an alert in the clear after the server's keys" "FAIL bad-finished 
 prove_broken "a private key that is not the certificate's taken" "FAIL another key" \
   '    return TlsError.new("the private key is not the certificate'"'"'s") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes' '' config
 prove_broken "a secp256r1 share taken before an X25519 one" "FAIL both-shares " \
-  '    @x25519 ? TlsConnection::GROUP_X25519 : (@p256 ? TlsConnection::GROUP_SECP256R1 : 0)' '    @p256 ? TlsConnection::GROUP_SECP256R1 : (@x25519 ? TlsConnection::GROUP_X25519 : 0)' server
+  '    TlsConnection::GROUPS.find { |group| !share(group).nil? } || 0' '    @p256 ? TlsConnection::GROUP_SECP256R1 : (@x25519 ? TlsConnection::GROUP_X25519 : 0)' server
 prove_broken "a HelloRetryRequest for secp256r1 whatever the groups" "FAIL hrr " \
-  '      group = offer.groups.includes?(GROUP_X25519) ? GROUP_X25519 : GROUP_SECP256R1' '      group = GROUP_SECP256R1' server
+  '    TlsConnection::GROUPS.find { |group| @groups.includes?(group) } || 0' '    TlsConnection::GROUP_SECP256R1' server
 prove_broken "the server's secp256r1 share not its key's" "FAIL p256-share " \
-  '      public = ephemeral.public_point' '      public = p256_ephemeral.public_point' server
+  '      public = ephemeral.public_point' '      public = ec_ephemeral(group).public_point' server
+prove_broken "a secp384r1 share passed over" "FAIL p384-share " \
+  '      elsif group == GROUP_SECP384R1
+        p384 = key' '' server
+prove_broken "secp384r1 not among the server's groups" "FAIL p384-share " \
+  '  GROUPS = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS = [GROUP_X25519, GROUP_SECP256R1]' server
+prove_broken "a secp384r1 share taken before a secp256r1 one" "FAIL ec-shares " \
+  '  GROUPS = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS = [GROUP_X25519, GROUP_SECP384R1, GROUP_SECP256R1]' server
+prove_broken "the server's secp384r1 share made in secp256r1" "FAIL p384-share " \
+  '      ephemeral = ec_ephemeral(group)
+      got = ephemeral.shared_secret(peer)
+      return TlsError.new("the client'"'"'s' '      ephemeral = ec_ephemeral(GROUP_SECP256R1)
+      got = ephemeral.shared_secret(peer)
+      return TlsError.new("the client'"'"'s' server
 prove_broken "an exporter under another label" "FAIL the client exported" \
   '    @schedule.expand_label(secret, "exporter", @schedule.hash(context), length)' '    @schedule.expand_label(secret, "exported", @schedule.hash(context), length)' client-export
 prove_broken "the exporter's secret over the transcript to the client's flight" "FAIL the client exported" \

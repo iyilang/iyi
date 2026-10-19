@@ -1,7 +1,7 @@
 # TLS 1.3 (RFC 8446), both ends, written in iyi from the RFCs: a client
 # whose server's certificate std/x509 checked - which speaks TLS 1.2 too
-# when asked to - and a server whose Ed25519, P-256 or RSA key signs for
-# it, over std/socket.
+# when asked to - and a server whose Ed25519, P-256, P-384 or RSA key
+# signs for it, over std/socket.
 #
 #     import std/tls::{TlsClient, TlsConfig, TlsError}
 #
@@ -24,14 +24,18 @@
 # versions' modes - a server always, a client unless its `TlsConfig` says
 # otherwise (below). The three cipher suites RFC 8446 section 9.1 names
 # (AES-128-GCM with SHA-256, AES-256-GCM with SHA-384, ChaCha20-Poly1305
-# with SHA-256), std/aead's; the key exchange is X25519, std/curve25519's
-# - and at a server secp256r1 too, std/p256's - both constant-time.
-# `version` says which version a connection speaks.
+# with SHA-256), std/aead's; the key exchange is X25519, std/curve25519's,
+# or secp256r1 or secp384r1, std/p256's and std/p384's - all constant-time.
+# `version` says which version a connection speaks, `key_exchange` which
+# group its keys were agreed in.
 #
-# The client. A server that asks again (HelloRetryRequest) for a cookie is
-# answered; one that asks for another group is refused, as X25519 is all
-# this offers. The server's certificates are checked as std/x509 checks a
-# chain - to the roots in `TlsConfig#roots`, or the system's
+# The client. Its ClientHello lists X25519, secp256r1 and secp384r1 and
+# sends a share in X25519 alone: a server that takes only one of the
+# others asks again (HelloRetryRequest) and is answered in it - a round
+# trip for that server, where a share sent up front in each would cost
+# every handshake keys made and dropped. A HelloRetryRequest for a cookie
+# is answered too. The server's certificates are checked as std/x509
+# checks a chain - to the roots in `TlsConfig#roots`, or the system's
 # (std/system_roots), for the host connected to - and then its
 # CertificateVerify: ECDSA on P-256, P-384 or P-521 with the hash the
 # scheme names, RSASSA-PSS (rsae) with SHA-256, -384 or -512, or Ed25519 -
@@ -65,14 +69,14 @@
 # offered), when it chooses a suite not offered for 1.2, and when it does
 # not do the extended master secret - which ties the master secret to the
 # whole handshake (the triple handshake attack, 2014) and is required
-# here, the refusal naming it. The key exchange is X25519 or secp256r1, as
-# 1.3's; the ServerKeyExchange's signature is checked over both randoms
-# and the parameters under the scheme it names, which must be one offered
-# and the certificate key's - PKCS #1 v1.5 included, which 1.2 permits
-# there, and ECDSA with the hash the scheme names on any of P-256, P-384
-# and P-521 (a 1.2 server's ECDSA certificate is on a curve the
-# ClientHello names, RFC 8422 section 5.1.1, so one on P-384 refuses this
-# ClientHello). The certificate is checked as for 1.3, and must be RSA
+# here, the refusal naming it. The key exchange is X25519, secp256r1 or
+# secp384r1, as 1.3's; the ServerKeyExchange's signature is checked over
+# both randoms and the parameters under the scheme it names, which must
+# be one offered and the certificate key's - PKCS #1 v1.5 included, which
+# 1.2 permits there, and ECDSA with the hash the scheme names on any of
+# P-256, P-384 and P-521 (a 1.2 server's ECDSA certificate is on a curve
+# the ClientHello names, RFC 8422 section 5.1.1, so one on P-521 refuses
+# this ClientHello). The certificate is checked as for 1.3, and must be RSA
 # for an ECDHE_RSA suite and ECDSA or Ed25519 for ECDHE_ECDSA. The PRF is
 # P_SHA256, or P_SHA384 for the AES-256 suites. A CertificateRequest is
 # answered with the identity's chain and a CertificateVerify over the
@@ -91,10 +95,11 @@
 #
 # The server. `TlsServerConfig.from_pem` takes the chain, leaf first, and
 # the leaf's private key: PKCS #8 (an Ed25519 key, RFC 8410 section 7, a
-# P-256 one or an RSA one), SEC 1 or PKCS #1; the key must be the leaf's
-# (a `TlsIdentity`, which a client presents the same way). CertificateVerify
-# is signed by the key's kind: ed25519 or ecdsa_secp256r1_sha256 with
-# std/curve25519 or std/p256, and for an RSA key rsa_pss_rsae_sha256, -384
+# P-256 or P-384 one, or an RSA one), SEC 1 or PKCS #1; the key must be
+# the leaf's (a `TlsIdentity`, which a client presents the same way).
+# CertificateVerify is signed by the key's kind: ed25519,
+# ecdsa_secp256r1_sha256 or ecdsa_secp384r1_sha384 with std/curve25519,
+# std/p256 or std/p384, and for an RSA key rsa_pss_rsae_sha256, -384
 # or -512 - the first of those the client's signature_algorithms lists -
 # with std/rsa, whose CRT runs through std/big's `pow_mod_secret` on a
 # blinded message and is checked before it goes out. Each is constant-time:
@@ -103,17 +108,20 @@
 # under 2048 bits is refused (std/rsa's floor). A full handshake with this
 # server, measured here (--release; Python's ssl over loopback, the median
 # of 200, its own side's work included): 0.64 ms with an Ed25519 key, 0.65
-# with P-256, 1.58 with RSA-2048 and 6.66 with RSA-4096. A client must take
-# the key's schemes: RFC 8446 section 9.1 makes ecdsa_secp256r1_sha256 and
+# with P-256, 1.58 with RSA-2048 and 6.66 with RSA-4096; in the run that
+# added P-384, 1.24 ms with a P-384 key (0.70 with P-256 in that run), and
+# 1.94 with the key exchange in secp384r1 too. A client must take the
+# key's schemes: RFC 8446 section 9.1 makes ecdsa_secp256r1_sha256 and
 # rsa_pss_rsae_sha256 mandatory for every client; OpenSSL, Python, curl
-# and Node take all three.
+# and Node take those, ed25519 and ecdsa_secp384r1_sha384.
 # The client's suite order chooses the suite; the server's ALPN order
 # chooses the protocol, and a client that offers protocols and none of the
 # server's is refused (no_application_protocol, RFC 7301). A share in
-# X25519 or secp256r1 is taken, X25519's first - secp256r1's by std/p256's
-# constant-time ECDH, its point checked to be on the curve. A ClientHello
-# with a share in neither is asked again (HelloRetryRequest, no cookie)
-# for X25519, or for secp256r1 where X25519 is not among its groups.
+# X25519, secp256r1 or secp384r1 is taken, in that order of preference -
+# the elliptic curves' by std/p256's and std/p384's constant-time ECDH,
+# the point checked to be on the curve. A ClientHello with a share in
+# none of them is asked again (HelloRetryRequest, no cookie) for the
+# first of the three among its groups, in the same order.
 # Early data is refused: its records are passed over, up to sixteen of the
 # largest, as section 4.2.10 says.
 # No NewSessionTicket is sent. With `client_roots` the server asks for a
@@ -146,6 +154,7 @@ import std/system_roots::{SystemRoots}
 import std/rsa::{RsaPublicKey, RsaPrivateKey, RsaHash, RsaError}
 import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
 import std/p256::{P256PrivateKey}
+import std/p384::{P384PrivateKey}
 import std/curve25519::{X25519, Ed25519, Ed25519PublicKey, CurveError}
 import std/asn1::{Der, Asn1Error}
 import std/aead::{AesGcm, ChaCha20Poly1305, AeadError}
@@ -556,6 +565,9 @@ pub abstract class TlsConnection
   # The version negotiated: "TLSv1.3", or "TLSv1.2" for a client whose
   # server chose it.
   getter version : String = "TLSv1.3"
+  # The group the keys were agreed in: "X25519", "secp256r1" or
+  # "secp384r1".
+  getter key_exchange : String = ""
   # The chain the peer's certificate was checked through, leaf first: the
   # server's, for a client; the client's, for a server that asked for one.
   getter peer_certificates : Array(Certificate) = [] of Certificate
@@ -620,25 +632,40 @@ pub abstract class TlsConnection
   # byte now and then holds a connection no longer than this.
   HANDSHAKE_TIMEOUT_MS = 30000
 
-  # The key exchange groups (RFC 8446 section 4.2.7), both constant-time:
-  # X25519 (std/curve25519) and secp256r1 (std/p256).
+  # The key exchange groups (RFC 8446 section 4.2.7), all constant-time:
+  # X25519 (std/curve25519), secp256r1 (std/p256) and secp384r1
+  # (std/p384).
   GROUP_X25519    = 0x1d
   GROUP_SECP256R1 = 0x17
+  GROUP_SECP384R1 = 0x18
+  # A server's order of preference: the fastest first.
+  GROUPS = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]
 
   def self.group_name(group : Int32) : String
-    group == GROUP_X25519 ? "X25519" : "secp256r1"
+    case group
+    when GROUP_X25519    then "X25519"
+    when GROUP_SECP256R1 then "secp256r1"
+    when GROUP_SECP384R1 then "secp384r1"
+    else                      "group #{group}"
+    end
   end
 
   private def group_name(group : Int32) : String
     TlsConnection.group_name(group)
   end
 
-  # An ephemeral P-256 key: d drawn until it is in [1, n - 1], which all
-  # but about one draw in 2^32 is.
-  private def p256_ephemeral : P256PrivateKey
+  # An ephemeral key in *group*, secp256r1 or secp384r1: d drawn until it
+  # is in [1, n - 1], which all but about one draw in 2^32 (P-256) or
+  # 2^194 (P-384) is.
+  private def ec_ephemeral(group : Int32) : P256PrivateKey | P384PrivateKey
     while true
-      key = P256PrivateKey.from_bytes(Random::Secure.random_bytes(32))
-      return key if key.is_a?(P256PrivateKey)
+      if group == GROUP_SECP384R1
+        wide = P384PrivateKey.from_bytes(Random::Secure.random_bytes(48))
+        return wide if wide.is_a?(P384PrivateKey)
+      else
+        key = P256PrivateKey.from_bytes(Random::Secure.random_bytes(32))
+        return key if key.is_a?(P256PrivateKey)
+      end
     end
   end
 
@@ -1247,7 +1274,7 @@ pub class TlsClient < TlsConnection
     random = Random::Secure.random_bytes(32)
     session = Random::Secure.random_bytes(32)
     group = GROUP_X25519
-    ephemeral = nil.as(P256PrivateKey?)
+    ephemeral = nil.as(P256PrivateKey | P384PrivateKey | Nil)
     hello = client_hello(random, session, group, public_key, nil)
     sent = send_plain(TlsRecords::HANDSHAKE, hello, first: true)
     return sent if sent
@@ -1262,17 +1289,18 @@ pub class TlsClient < TlsConnection
     if reply.retry
       # HelloRetryRequest: the transcript restarts from the hash of the
       # first ClientHello (section 4.4.1), and the second carries the
-      # cookie, and a secp256r1 share when that is what was asked for.
+      # cookie, and a secp256r1 or secp384r1 share when that is what was
+      # asked for.
       cookie = reply.cookie
       return TlsError.new("a HelloRetryRequest asking for nothing new", TlsAlert::ILLEGAL_PARAMETER) unless cookie || reply.named_group != 0
       @schedule = TlsKeySchedule.new(reply.suite == TlsSuites::AES_256_GCM)
       first = @schedule.hash(hello)
       @transcript = [254_u8, 0_u8, 0_u8, first.size.to_u8] + first + server
       share = public_key
-      if reply.named_group == GROUP_SECP256R1
-        key = p256_ephemeral
+      if reply.named_group == GROUP_SECP256R1 || reply.named_group == GROUP_SECP384R1
+        key = ec_ephemeral(reply.named_group)
         ephemeral = key
-        group = GROUP_SECP256R1
+        group = reply.named_group
         share = key.public_point
       end
       hello = client_hello(random, session, group, share, cookie)
@@ -1299,10 +1327,11 @@ pub class TlsClient < TlsConnection
     return TlsError.new("a ServerHello with no key share", TlsAlert::MISSING_EXTENSION) unless peer
     return TlsError.new("a ServerHello's share in #{group_name(reply.named_group)}, where the share sent was #{group_name(group)}'s", TlsAlert::ILLEGAL_PARAMETER) unless reply.named_group == group
     @transcript = @transcript + server
+    @key_exchange = group_name(group)
 
     if key = ephemeral
       got = key.shared_secret(peer)
-      return TlsError.new("the server's secp256r1 share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
+      return TlsError.new("the server's #{group_name(group)} share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
       secret = got
     else
       shared = X25519.shared(private_key, peer)
@@ -1456,9 +1485,12 @@ pub class TlsClient < TlsConnection
       entry = [0_u8] + TlsBytes.u16(name.size) + name
       extensions = extensions + TlsBytes.extension(0, TlsBytes.u16(entry.size) + entry)
     end
-    # X25519 first, the share sent; secp256r1 too, for a server that takes
-    # nothing else, which asks for it by HelloRetryRequest.
-    extensions = extensions + TlsBytes.extension(10, [0_u8, 4_u8, 0_u8, 0x1d_u8, 0_u8, 0x17_u8])
+    # X25519 first, the one share sent; secp256r1 and secp384r1 too, for a
+    # server that takes nothing else, which asks for one by
+    # HelloRetryRequest. That costs such a server's handshakes a round
+    # trip; a P-384 share sent up front would cost every handshake a P-384
+    # key made and dropped (0.35 ms, std/p384's header measures).
+    extensions = extensions + TlsBytes.extension(10, [0_u8, 6_u8, 0_u8, 0x1d_u8, 0_u8, 0x17_u8, 0_u8, 0x18_u8])
     schemes = [] of UInt8
     SIGNATURE_SCHEMES.each { |s| schemes = schemes + TlsBytes.u16(s) }
     extensions = extensions + TlsBytes.extension(13, TlsBytes.u16(schemes.size) + schemes)
@@ -1541,10 +1573,10 @@ pub class TlsClient < TlsConnection
           # Section 4.1.4: a group not offered, or the one whose share was
           # sent, is illegal_parameter.
           return TlsError.new("a HelloRetryRequest for the X25519 share already sent", TlsAlert::ILLEGAL_PARAMETER) if group == GROUP_X25519
-          return TlsError.new("a HelloRetryRequest for group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_SECP256R1
+          return TlsError.new("a HelloRetryRequest for group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_SECP256R1 || group == GROUP_SECP384R1
           return TlsError.new("a HelloRetryRequest's key_share cut short", TlsAlert::DECODE_ERROR) unless field.done?
         else
-          return TlsError.new("a key share for group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_X25519 || group == GROUP_SECP256R1
+          return TlsError.new("a key share for group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_X25519 || group == GROUP_SECP256R1 || group == GROUP_SECP384R1
           share = field.bytes(field.u16)
           return TlsError.new("a key share cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
           return TlsError.new("an X25519 share of the wrong size", TlsAlert::ILLEGAL_PARAMETER) if group == GROUP_X25519 && share.size != 32
@@ -1762,6 +1794,7 @@ pub class TlsClient < TlsConnection
     return TlsError.new("handshake bytes after the ServerHelloDone", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
 
     group, point = exchange
+    @key_exchange = group_name(group)
     if group == GROUP_X25519
       private_key = Random::Secure.random_bytes(32)
       shared = X25519.shared(private_key, point)
@@ -1769,9 +1802,9 @@ pub class TlsClient < TlsConnection
       secret = TlsBytes.of(shared)
       public = TlsBytes.of(X25519.public_key(private_key))
     else
-      ephemeral = p256_ephemeral
+      ephemeral = ec_ephemeral(group)
       got = ephemeral.shared_secret(point)
-      return TlsError.new("the server's secp256r1 share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
+      return TlsError.new("the server's #{group_name(group)} share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
       secret = got
       public = [] of UInt8 + ephemeral.public_point
     end
@@ -1861,7 +1894,7 @@ pub class TlsClient < TlsConnection
     signature = reader.bytes(reader.u16)
     return TlsError.new("a ServerKeyExchange cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
     return TlsError.new("a ServerKeyExchange whose curve is not a named one (type #{curve_type})", TlsAlert::ILLEGAL_PARAMETER) unless curve_type == 3
-    return TlsError.new("a ServerKeyExchange in group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_X25519 || group == GROUP_SECP256R1
+    return TlsError.new("a ServerKeyExchange in group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_X25519 || group == GROUP_SECP256R1 || group == GROUP_SECP384R1
     return TlsError.new("an X25519 share of #{point.size} bytes", TlsAlert::ILLEGAL_PARAMETER) if group == GROUP_X25519 && point.size != 32
     signed = randoms + body[0, 4 + point.size]
     key = leaf.public_key
@@ -1942,37 +1975,40 @@ class TlsServerHello
 end
 
 # A certificate chain, leaf first, and the key that signs for it -
-# Ed25519, ECDSA on P-256 (std/p256) or RSA (std/rsa), each in constant
-# time: what a server presents, and what a client presents when a server
-# asks.
+# Ed25519, ECDSA on P-256 or P-384 (std/p256, std/p384) or RSA (std/rsa),
+# each in constant time: what a server presents, and what a client
+# presents when a server asks.
 pub class TlsIdentity
   # The chain as sent, leaf first, each certificate's DER.
   getter chain : Array(Array(UInt8))
   getter leaf : Certificate
   # The schemes CertificateVerify can be signed under, by the key's kind:
-  # ed25519 (0x0807), ecdsa_secp256r1_sha256 (0x0403), or for an RSA key
-  # rsa_pss_rsae_sha256, -384 and -512 (0x0804 to 0x0806). PKCS #1 v1.5
-  # is never one: RFC 8446 section 4.2.3 keeps it out of CertificateVerify.
+  # ed25519 (0x0807), ecdsa_secp256r1_sha256 (0x0403),
+  # ecdsa_secp384r1_sha384 (0x0503), or for an RSA key rsa_pss_rsae_sha256,
+  # -384 and -512 (0x0804 to 0x0806). PKCS #1 v1.5 is never one: RFC 8446
+  # section 4.2.3 keeps it out of CertificateVerify.
   getter schemes : Array(Int32)
   @seed : Array(UInt8)?
   @p256 : P256PrivateKey?
+  @p384 : P384PrivateKey?
   @rsa : RsaPrivateKey?
 
   ED25519        = 0x0807
   P256           = 0x0403
+  P384           = 0x0503
   RSA_PSS_SHA256 = 0x0804
   RSA_PSS_SHA384 = 0x0805
   RSA_PSS_SHA512 = 0x0806
 
-  def initialize(@chain : Array(Array(UInt8)), @leaf : Certificate, @schemes : Array(Int32), @seed : Array(UInt8)?, @p256 : P256PrivateKey?, @rsa : RsaPrivateKey?)
+  def initialize(@chain : Array(Array(UInt8)), @leaf : Certificate, @schemes : Array(Int32), @seed : Array(UInt8)?, @p256 : P256PrivateKey?, @p384 : P384PrivateKey?, @rsa : RsaPrivateKey?)
   end
 
   # The chain in *certificates*' CERTIFICATE blocks, leaf first, and the
   # leaf's private key in *private_key*: a PRIVATE KEY block (PKCS #8, an
-  # Ed25519 key as RFC 8410 section 7 writes it, a P-256 one as RFC 5915
-  # does, or an RSA one), an EC PRIVATE KEY block (SEC 1) or an RSA
-  # PRIVATE KEY block (PKCS #1) - or why they are not a certificate and
-  # key.
+  # Ed25519 key as RFC 8410 section 7 writes it, a P-256 or P-384 one as
+  # RFC 5915 does, or an RSA one), an EC PRIVATE KEY block (SEC 1) or an
+  # RSA PRIVATE KEY block (PKCS #1) - or why they are not a certificate
+  # and key.
   def self.from_pem(certificates : String, private_key : String) : TlsIdentity | TlsError
     chain = X509.pem(certificates, "CERTIFICATE")
     return TlsError.new("the certificates: #{chain.message}") if chain.is_a?(X509Error)
@@ -1984,11 +2020,7 @@ pub class TlsIdentity
     return TlsError.new("the private key: #{pkcs1.message}") if pkcs1.is_a?(X509Error)
     count = pkcs8.size + sec1.size + pkcs1.size
     return TlsError.new("the private key: #{count} blocks of PRIVATE KEY, EC PRIVATE KEY or RSA PRIVATE KEY, not one") unless count == 1
-    if sec1.size == 1
-      key = P256PrivateKey.from_sec1(sec1[0])
-      return TlsError.new(key.message) if key.is_a?(EcdsaError)
-      return from_der(chain, key)
-    end
+    return from_ec(chain, sec1[0], false) if sec1.size == 1
     if pkcs1.size == 1
       rsa = RsaPrivateKey.from_pkcs1(pkcs1[0])
       return TlsError.new("the private key: #{rsa.message}") if rsa.is_a?(RsaError)
@@ -2002,9 +2034,7 @@ pub class TlsIdentity
       return seed if seed.is_a?(TlsError)
       from_der(chain, seed)
     when "1.2.840.10045.2.1"
-      key = P256PrivateKey.from_pkcs8(pkcs8[0])
-      return TlsError.new(key.message) if key.is_a?(EcdsaError)
-      from_der(chain, key)
+      from_ec(chain, pkcs8[0], true)
     when RsaPublicKey::RSA_ENCRYPTION
       rsa = RsaPrivateKey.from_pkcs8(pkcs8[0])
       return TlsError.new("the private key: #{rsa.message}") if rsa.is_a?(RsaError)
@@ -2012,6 +2042,24 @@ pub class TlsIdentity
     else
       TlsError.new("the private key is for #{algorithm}, not Ed25519 (1.3.101.112), an EC key (1.2.840.10045.2.1) or RSA (#{RsaPublicKey::RSA_ENCRYPTION})")
     end
+  end
+
+  # The identity for an EC private key, PKCS #8 (*pkcs8*) or SEC 1, read
+  # on the curve it names: P-256 or P-384.
+  private def self.from_ec(chain : Array(Array(UInt8)), der : Array(UInt8), pkcs8 : Bool) : TlsIdentity | TlsError
+    curve = TlsKeys.ec_curve(der, pkcs8)
+    return curve if curve.is_a?(TlsError)
+    if curve == EcdsaCurve::P384.oid
+      wide = pkcs8 ? P384PrivateKey.from_pkcs8(der) : P384PrivateKey.from_sec1(der)
+      return TlsError.new(wide.message) if wide.is_a?(EcdsaError)
+      return from_der(chain, wide)
+    end
+    unless curve == EcdsaCurve::P256.oid
+      return TlsError.new("the private key is on #{curve}, not prime256v1 (#{EcdsaCurve::P256.oid}) or secp384r1 (#{EcdsaCurve::P384.oid})")
+    end
+    key = pkcs8 ? P256PrivateKey.from_pkcs8(der) : P256PrivateKey.from_sec1(der)
+    return TlsError.new(key.message) if key.is_a?(EcdsaError)
+    from_der(chain, key)
   end
 
   # *chain*'s certificates, leaf first, and the 32-byte Ed25519 *seed*
@@ -2023,7 +2071,7 @@ pub class TlsIdentity
     key = leaf.public_key
     return TlsError.new("the certificate's key is not Ed25519, as the private key is") unless key.is_a?(Ed25519PublicKey)
     return TlsError.new("the private key is not the certificate's") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes
-    TlsIdentity.new(chain, leaf, [ED25519], seed.dup, nil, nil)
+    TlsIdentity.new(chain, leaf, [ED25519], seed.dup, nil, nil, nil)
   end
 
   # *chain*'s certificates, leaf first, and the P-256 *key* that is the
@@ -2036,7 +2084,20 @@ pub class TlsIdentity
       return TlsError.new("the certificate's key is not P-256, as the private key is")
     end
     return TlsError.new("the private key is not the certificate's") unless public.x == key.public_key.x && public.y == key.public_key.y
-    TlsIdentity.new(chain, leaf, [P256], nil, key, nil)
+    TlsIdentity.new(chain, leaf, [P256], nil, key, nil, nil)
+  end
+
+  # *chain*'s certificates, leaf first, and the P-384 *key* that is the
+  # leaf's.
+  def self.from_der(chain : Array(Array(UInt8)), key : P384PrivateKey) : TlsIdentity | TlsError
+    leaf = leaf_of(chain)
+    return leaf if leaf.is_a?(TlsError)
+    public = leaf.public_key
+    unless public.is_a?(EcdsaPublicKey) && public.curve == EcdsaCurve::P384
+      return TlsError.new("the certificate's key is not P-384, as the private key is")
+    end
+    return TlsError.new("the private key is not the certificate's") unless public.x == key.public_key.x && public.y == key.public_key.y
+    TlsIdentity.new(chain, leaf, [P384], nil, nil, key, nil)
   end
 
   # *chain*'s certificates, leaf first, and the RSA *key* that is the
@@ -2049,7 +2110,7 @@ pub class TlsIdentity
     unless public.modulus == key.public_key.modulus && public.exponent == key.public_key.exponent
       return TlsError.new("the private key is not the certificate's")
     end
-    TlsIdentity.new(chain, leaf, [RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512], nil, nil, key)
+    TlsIdentity.new(chain, leaf, [RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512], nil, nil, nil, key)
   end
 
   private def self.leaf_of(chain : Array(Array(UInt8))) : Certificate | TlsError
@@ -2072,8 +2133,8 @@ pub class TlsIdentity
   end
 
   # The ClientCertificateType a TLS 1.2 CertificateRequest must list for
-  # this key: rsa_sign (1), or ecdsa_sign (64) for P-256 and, by RFC 8422
-  # section 5.5, Ed25519.
+  # this key: rsa_sign (1), or ecdsa_sign (64) for P-256, P-384 and, by RFC
+  # 8422 section 5.5, Ed25519.
   def certificate_type : UInt8
     @rsa ? 1_u8 : 64_u8
   end
@@ -2084,6 +2145,8 @@ pub class TlsIdentity
     raise "tls: a signature under scheme 0x#{scheme.to_s(16)}, which this identity's key does not make" unless @schemes.includes?(scheme)
     if key = @p256
       key.sign(EcdsaHash::SHA256, content)
+    elsif wide = @p384
+      wide.sign(EcdsaHash::SHA384, content)
     elsif seed = @seed
       TlsBytes.of(Ed25519.sign(seed, content))
     elsif rsa = @rsa
@@ -2097,6 +2160,7 @@ pub class TlsIdentity
   def self.scheme_name(scheme : Int32) : String
     case scheme
     when P256           then "ecdsa_secp256r1_sha256"
+    when P384           then "ecdsa_secp384r1_sha384"
     when ED25519        then "ed25519"
     when RSA_PSS_SHA256 then "rsa_pss_rsae_sha256"
     when RSA_PSS_SHA384 then "rsa_pss_rsae_sha384"
@@ -2174,6 +2238,12 @@ pub class TlsServerConfig
     TlsServerConfig.new(identity)
   end
 
+  def self.from_der(chain : Array(Array(UInt8)), key : P384PrivateKey) : TlsServerConfig | TlsError
+    identity = TlsIdentity.from_der(chain, key)
+    return identity if identity.is_a?(TlsError)
+    TlsServerConfig.new(identity)
+  end
+
   def self.from_der(chain : Array(Array(UInt8)), key : RsaPrivateKey) : TlsServerConfig | TlsError
     identity = TlsIdentity.from_der(chain, key)
     return identity if identity.is_a?(TlsError)
@@ -2207,6 +2277,34 @@ struct TlsKeys
     oid = algorithm[0].oid
     return TlsError.new("the private key: not an AlgorithmIdentifier") if oid.is_a?(Asn1Error)
     oid
+  end
+
+  # The curve an EC private key is on, by its OID: what PKCS #8's
+  # AlgorithmIdentifier (*pkcs8*) or SEC 1's [0] names, or for a SEC 1 key
+  # that names none the curve its private key's width is (48 bytes,
+  # P-384's; else P-256's). A key too malformed to say is P-256's, whose
+  # reader says what is wrong with it.
+  def self.ec_curve(der : Array(UInt8), pkcs8 : Bool) : String | TlsError
+    p256 = EcdsaCurve::P256.oid
+    top = Der.parse(der)
+    return TlsError.new("the private key: #{top.message}") if top.is_a?(Asn1Error)
+    fields = top.sequence
+    return TlsError.new("the private key: #{fields.message}") if fields.is_a?(Asn1Error)
+    if pkcs8
+      return p256 if fields.size < 2
+      algorithm = fields[1].sequence
+      return p256 if algorithm.is_a?(Asn1Error) || algorithm.size != 2
+      named = algorithm[1].oid
+      return named.is_a?(String) ? named : p256
+    end
+    fields.each_with_index do |field, i|
+      next unless i >= 2 && field.context?(0)
+      inner = field.explicit(0)
+      named = inner.is_a?(Asn1Error) ? inner : inner.oid
+      return named.is_a?(String) ? named : p256
+    end
+    secret = fields.size < 2 ? nil : fields[1].octet_string
+    secret.is_a?(Array(UInt8)) && secret.size == 48 ? EcdsaCurve::P384.oid : p256
   end
 
   # The seed of an Ed25519 OneAsymmetricKey: version 0 or 1, the algorithm
@@ -2257,31 +2355,44 @@ class TlsOffer
   getter session : Array(UInt8)
   getter suites : Array(Int32)
   # The client's shares for the groups this server has: X25519's (32
-  # bytes) and secp256r1's (65, uncompressed), when it sent them.
+  # bytes), secp256r1's (65, uncompressed) and secp384r1's (97), when it
+  # sent them.
   getter x25519 : Array(UInt8)?
   getter p256 : Array(UInt8)?
+  getter p384 : Array(UInt8)?
   getter groups : Array(Int32)
   getter alpn : Array(String)?
   getter server_name : String?
   getter early_data : Bool
 
-  def initialize(@session : Array(UInt8), @suites : Array(Int32), @x25519 : Array(UInt8)?, @p256 : Array(UInt8)?,
+  def initialize(@session : Array(UInt8), @suites : Array(Int32), @x25519 : Array(UInt8)?, @p256 : Array(UInt8)?, @p384 : Array(UInt8)?,
                  @groups : Array(Int32), @alpn : Array(String)?, @server_name : String?, @early_data : Bool)
   end
 
-  # The group the server takes a share in: X25519 first, then secp256r1;
-  # 0 when the client sent a share for neither.
+  # The group the server takes a share in: X25519 first, then secp256r1,
+  # then secp384r1; 0 when the client sent a share for none of them.
   def chosen_group : Int32
-    @x25519 ? TlsConnection::GROUP_X25519 : (@p256 ? TlsConnection::GROUP_SECP256R1 : 0)
+    TlsConnection::GROUPS.find { |group| !share(group).nil? } || 0
+  end
+
+  # The group a HelloRetryRequest asks for, when no share is taken: the
+  # first of the same three the client supports.
+  def retry_group : Int32
+    TlsConnection::GROUPS.find { |group| @groups.includes?(group) } || 0
   end
 
   def share(group : Int32) : Array(UInt8)?
-    group == TlsConnection::GROUP_X25519 ? @x25519 : @p256
+    case group
+    when TlsConnection::GROUP_X25519    then @x25519
+    when TlsConnection::GROUP_SECP256R1 then @p256
+    when TlsConnection::GROUP_SECP384R1 then @p384
+    else                                     nil
+    end
   end
 end
 
 # A connection from a client, its handshake done: TLS 1.3 as a server,
-# its certificate's key (Ed25519 or P-256) signing for it.
+# its certificate's key (Ed25519, P-256, P-384 or RSA) signing for it.
 pub class TlsServer < TlsConnection
   # The host the client named (server_name, RFC 6066), if it named one.
   getter server_name : String? = nil
@@ -2342,9 +2453,9 @@ pub class TlsServer < TlsConnection
     group = offer.chosen_group
     if group == 0
       # HelloRetryRequest (section 4.1.4) for a group the client supports
-      # and sent no share for, X25519 before secp256r1. The transcript
-      # restarts from the first ClientHello's hash.
-      group = offer.groups.includes?(GROUP_X25519) ? GROUP_X25519 : GROUP_SECP256R1
+      # and sent no share for, X25519 before secp256r1 before secp384r1.
+      # The transcript restarts from the first ClientHello's hash.
+      group = offer.retry_group
       retry = server_hello(TlsBytes.from_hex(HELLO_RETRY), offer.session, group, nil)
       sent = send_plain(TlsRecords::HANDSHAKE, retry, first: false)
       return sent if sent
@@ -2372,6 +2483,7 @@ pub class TlsServer < TlsConnection
     return TlsError.new("handshake bytes after the ClientHello in its record", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
     peer = offer.share(group)
     return TlsError.new("no #{group_name(group)} share", TlsAlert::ILLEGAL_PARAMETER) unless peer
+    @key_exchange = group_name(group)
     @server_name = offer.server_name
     @alpn_protocol = choose_alpn(offer)
     if (wanted = offer.alpn) && !@config.alpn.empty? && @alpn_protocol.nil?
@@ -2385,9 +2497,9 @@ pub class TlsServer < TlsConnection
       secret = TlsBytes.of(shared)
       public = TlsBytes.of(X25519.public_key(private_key))
     else
-      ephemeral = p256_ephemeral
+      ephemeral = ec_ephemeral(group)
       got = ephemeral.shared_secret(peer)
-      return TlsError.new("the client's secp256r1 share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
+      return TlsError.new("the client's #{group_name(group)} share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
       secret = got
       public = ephemeral.public_point
     end
@@ -2583,11 +2695,12 @@ pub class TlsServer < TlsConnection
     @scheme = chosen.scheme_for(schemes) || 0
     return TlsError.new("a ClientHello with no supported_groups", TlsAlert::MISSING_EXTENSION) unless groups
     return TlsError.new("a ClientHello with no key_share", TlsAlert::MISSING_EXTENSION) unless shares
-    unless groups.includes?(GROUP_X25519) || groups.includes?(GROUP_SECP256R1)
-      return TlsError.new("the client offers neither X25519 nor secp256r1, the groups this server has", TlsAlert::HANDSHAKE_FAILURE)
+    unless GROUPS.any? { |group| groups.includes?(group) }
+      return TlsError.new("the client offers none of X25519, secp256r1 and secp384r1, the groups this server has", TlsAlert::HANDSHAKE_FAILURE)
     end
     x25519 = nil
     p256 = nil
+    p384 = nil
     offered = {} of Int32 => Bool
     groups.each { |g| offered[g] = true }
     shares.each do |group, key|
@@ -2597,9 +2710,11 @@ pub class TlsServer < TlsConnection
         x25519 = key
       elsif group == GROUP_SECP256R1
         p256 = key
+      elsif group == GROUP_SECP384R1
+        p384 = key
       end
     end
-    TlsOffer.new(session, suites, x25519, p256, groups, alpn, server_name, early)
+    TlsOffer.new(session, suites, x25519, p256, p384, groups, alpn, server_name, early)
   end
 
   # A ServerHello with the server's share in *group*, or with no share a

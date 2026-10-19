@@ -87,7 +87,7 @@ echo
 echo "== every mlkem section reported"
 for phrase in "== acvp keyGen (ml-kem-768)" "== acvp encapsulation (ml-kem-768)" "== acvp decapsulation (ml-kem-768)" \
   "== acvp decapsulation key check (ml-kem-768)" "== acvp encapsulation key check (ml-kem-768)" \
-  "== round trips and the implicit rejection" "== refusals"; do
+  "== embedded acvp cases (ml-kem-768)" "== round trips and the implicit rejection" "== refusals"; do
   if ! grep -qF "$phrase" "$WORK/mlkem-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -100,6 +100,18 @@ echo "== the same program with optimisation on (--release)"
 build_and_run "release" mlkem-release --release >/dev/null
 if ! grep -q "ALL CHECKS PASSED" "$WORK/mlkem-release.out" 2>/dev/null; then
   echo "release: missing pass sentinel"
+  status=1
+fi
+
+echo
+echo "== the same program with no argument: the cases it embeds alone"
+# What CI's run of every exercise with no argument sees: no file, no
+# network, no Python.
+if "$WORK/mlkem-release" >"$WORK/mlkem-noarg.out" 2>&1 && grep -q "ALL CHECKS PASSED" "$WORK/mlkem-noarg.out" &&
+  grep -qF "== embedded acvp cases (ml-kem-768)" "$WORK/mlkem-noarg.out" && ! grep -qF "== acvp keyGen" "$WORK/mlkem-noarg.out"; then
+  grep '^  [a-z0-9]' "$WORK/mlkem-noarg.out" | sed 's/^/  /'
+else
+  echo "  FAIL with no argument: $(tail -2 "$WORK/mlkem-noarg.out" | tr '\n' ' ')"
   status=1
 fi
 

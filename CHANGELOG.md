@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Fixed
+
+- **std/asn1: a UniversalString whose character has its top bit set is
+  refused, not a panic.** `DerValue#string` read each four-byte code
+  into an Int32, where a first byte of 0x80 or more made it negative:
+  under the U+10FFFF bound, it reached `chr`, which panicked ("-1 is
+  out of char range" for `1c04ffffffff`). The code is read in Int64 and
+  answered as an `Asn1Error` naming it. Found by the new fuzz gate
+  (`bench/std_fuzz_exercise.sh`, 22 of the first 60,000 DER inputs);
+  held by a check in `bench/std_asn1_exercise.iyi` and a broken copy of
+  the module its gate catches.
+
 ## 0.18.0 — 2026-10-18
 
 **iyi's own library reaches the network by itself: TLS 1.3 at both ends,

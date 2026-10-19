@@ -167,12 +167,16 @@ prove_fails "empty arenas never spared" nospare "spare:" \
 prove_fails "sweep never lazy" nolazy "lazy:" \
   '{ sub(/answer = IyiMark\.sweep_one\(chunk\)/, "answer = 0_u64"); sub(/return if @@helpers == 0_u64 \|\| @@sweep_left == 0_u64/, "return"); print }'
 
-# The scheduler's state left off the global list: the thread-local still
-# names it, nothing the walk scans does, the churn's own size class takes
-# the chunk back, and the check names what came back in its place. The
-# link alone, not the unlink a retiring thread does (`state.next_state`).
+# The scheduler's state left off every root: the thread-local still names
+# it, nothing the walk scans does, the churn's own size class takes the
+# chunk back, and the check names what came back in its place. It has two
+# roots since tasks crossed cores (SPEC.md III.4.13): the global list of
+# states, and the main fiber's `home` - the thread a fiber is woken into -
+# which the fiber registry reaches. Cut only the list, the state lived
+# through the home and the check passed, on every platform. The link
+# alone, not the unlink a retiring thread does (`state.next_state`).
 prove_fails "scheduler state unrooted" unrooted "scheduler state:" \
-  '{ sub(/@@states_head = state$/, "@@states_head = nil"); print }' concurrency.iyi
+  '{ sub(/@@states_head = state$/, "@@states_head = nil"); sub(/^    main\.home = state$/, "    main.home = nil"); print }' concurrency.iyi
 
 # A thread's unreported slice dropped with its cache again: five hundred
 # threads under a slice each count for nothing, and the threads check

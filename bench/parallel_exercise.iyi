@@ -408,30 +408,48 @@
   end
 
   # The steal: one parallel task spawns 64 more, which go into its own
-  # worker's queue; the other workers, with nothing of their own, steal
-  # them. Every child runs once.
+  # worker's queue, and then keeps its worker busy - spinning, never
+  # parking - until a child has run on another worker. A worker takes from
+  # the pool only when it has nothing to run, so while the spawner spins
+  # its own worker takes none of them, and a child that runs anywhere else
+  # got there by a steal: nothing here depends on how fast a build drains
+  # its own queue. Waited for 10 s at most, and named if it never comes.
+  # Every child runs once.
   def steal(watch : Int32) : Nil
     watched("steal", watch) do
       before = IyiWorkers.steals
       tally = Tally.new
+      elsewhere = Tally.new
+      waited_ms = 0_i64
       group do |g|
-        g.spawn_parallel do
+        spawner = g.spawn_parallel do
+          home = thread_here
           group do |inner|
             64.times do |i|
               inner.spawn_parallel do
                 spin(1_000_000_i64, (i + 7).to_u64)
-                tally.add(thread_here.to_i64 & 0xFFFF_i64)
+                elsewhere.add(1_i64) unless thread_here == home
+                tally.add(1_i64)
                 0
               end
             end
+            started = __iyi_monotonic_ns
+            while elsewhere.count == 0_i64 && elapsed_ms(started) < 10000_i64
+              IyiThread.spin_pause
+            end
+            elapsed_ms(started)
           end
-          0
         end
+        answer = spawner.value
+        waited_ms = answer.is_a?(Int64) ? answer : -1_i64
       end
       stolen = IyiWorkers.steals - before
       fail("steal: #{tally.count} of 64 children ran") unless tally.count == 64_i64
-      fail("steal: no worker took a task another worker's task had spawned") if stolen == 0_u64 && IyiWorkers.count > 1
-      puts "steal: 64 tasks one parallel task spawned ran once each, #{stolen} of them stolen"
+      if IyiWorkers.count > 1
+        fail("steal: no child ran on a worker other than its spawner's within 10000 ms, while the spawner kept its own worker busy") if elsewhere.count == 0_i64
+        fail("steal: no worker took a task another worker's task had spawned") if stolen == 0_u64
+      end
+      puts "steal: 64 tasks one parallel task spawned ran once each, #{elsewhere.count} on other workers, #{stolen} stolen, the first within #{waited_ms} ms"
     end
   end
 

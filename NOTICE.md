@@ -61,6 +61,12 @@ port of:
   `src/std/math.iyi`, and `bench/libm_oracle/core_math/`) - [MIT][]
 - [crystal-metric][] (`bench/metric/`) - [MIT][]
 
+Its benches vendor test vectors:
+
+- [NIST's ACVP-Server][] (`bench/std_mlkem_fixture/`, ML-KEM-768 vectors,
+  a subset) - NIST's notice for NIST-developed software, kept whole with
+  the source and what was changed in `bench/std_mlkem_fixture/NOTICE`
+
 <!-- licenses -->
 [Apache-2.0]: https://www.openssl.org/source/apache-license-2.0.txt
 [Apache-2.0 with LLVM exceptions]: https://raw.githubusercontent.com/llvm/llvm-project/main/llvm/LICENSE.TXT
@@ -72,6 +78,7 @@ port of:
 <!-- libraries -->
 [Arm optimized-routines]: https://github.com/ARM-software/optimized-routines
 [crystal-metric]: https://github.com/kostya/crystal-metric
+[NIST's ACVP-Server]: https://github.com/usnistgov/ACVP-Server
 [musl]: https://musl.libc.org/
 [CORE-MATH]: https://core-math.gitlabpages.inria.fr/
 [bdwgc]: http://www.hboehm.info/gc/

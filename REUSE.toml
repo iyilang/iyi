@@ -60,3 +60,12 @@ path = ["bench/libm_oracle/e_log10.c", "bench/libm_oracle/s_expm1.c", "bench/lib
 precedence = "aggregate"
 SPDX-FileCopyrightText = "Copyright (C) 1993 by Sun Microsystems, Inc."
 SPDX-License-Identifier = "LicenseRef-SunPro"
+
+# iyi: a subset of NIST's ACVP vectors for ML-KEM-768, which
+# `bench/std_mlkem_exercise.sh` checks std/mlkem against; NIST's notice,
+# the source and what was changed are in the NOTICE beside them.
+[[annotations]]
+path = ["bench/std_mlkem_fixture/**"]
+precedence = "override"
+SPDX-FileCopyrightText = "National Institute of Standards and Technology"
+SPDX-License-Identifier = "LicenseRef-NIST-Software"

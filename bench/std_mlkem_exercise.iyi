@@ -1,0 +1,315 @@
+# Exercises `std/mlkem`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_mlkem_exercise.iyi -- VECTORS.json
+#
+# VECTORS.json is NIST's ACVP vectors for ML-KEM-768 in the shape
+# bench/std_mlkem_exercise.sh writes them (bench/std_mlkem_fixture has the
+# vendored subset): every case of each kind checked, then round trips, the
+# implicit rejection's key and the refusals. The other modes the gate
+# drives:
+#   oracle   reads lines from standard input, answers a line each:
+#              g SEED     -> EK DK          (the key pair of d || z)
+#              e EK M     -> C K | refused: why
+#              d DK C     -> K | refused: why
+#            everything hex;
+#   cost     what a key pair, an encapsulation and a decapsulation take,
+#            and decapsulation of good ciphertexts beside tampered ones.
+
+module bench/std_mlkem_exercise
+
+import std/mlkem::{MlKem768, MlKem768PrivateKey, MlKemError}
+import std/digest::{SHAKE256}
+import std/json::{JSON, Any}
+import std/file::{File}
+
+def check(cond : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless cond
+end
+
+def b(hex : String) : Array(UInt8)
+  p = hex.to_unsafe
+  Array(UInt8).new(hex.bytesize // 2) do |i|
+    hi = p[i * 2].to_i32 | 32
+    lo = p[i * 2 + 1].to_i32 | 32
+    hi = hi >= 97 ? hi - 87 : hi - 48
+    lo = lo >= 97 ? lo - 87 : lo - 48
+    (hi * 16 + lo).to_u8
+  end
+end
+
+def hex(bytes : Array(UInt8)) : String
+  digits = "0123456789abcdef".to_unsafe
+  String.new(bytes.size * 2) do |buf|
+    i = 0
+    while i < bytes.size
+      buf[i * 2] = digits[bytes[i] >> 4]
+      buf[i * 2 + 1] = digits[bytes[i] & 15_u8]
+      i = i + 1
+    end
+  end
+end
+
+# A deterministic stream of test bytes: SHAKE256 of a label.
+def drawn(label : String, count : Int32) : Array(UInt8)
+  SHAKE256.new.update(label).read(count)
+end
+
+# The best of five runs of 200, in microseconds.
+def best_of(& : -> _) : Int64
+  fastest = 0_i64
+  5.times do |k|
+    t0 = IyiMark.now_ns
+    200.times { yield }
+    took = (IyiMark.now_ns - t0).to_i64
+    fastest = took if k == 0 || took < fastest
+  end
+  fastest // 200_000
+end
+
+args = Program.args
+
+if args.size > 0 && args[0] == "oracle"
+  while line = STDIN.gets
+    words = line.strip.split(' ')
+    next if words.empty? || words[0].empty?
+    case words[0]
+    when "g"
+      key = MlKem768PrivateKey.from_seed(b(words[1]))
+      puts "#{hex(key.encapsulation_key)} #{hex(key.decapsulation_key)}"
+    when "e"
+      got = MlKem768.encapsulate(b(words[1]), b(words[2]))
+      if got.is_a?(MlKemError)
+        puts "refused: #{got.message}"
+      else
+        puts "#{hex(got[0])} #{hex(got[1])}"
+      end
+    when "d"
+      key = MlKem768PrivateKey.from_bytes(b(words[1]))
+      if key.is_a?(MlKemError)
+        puts "refused: #{key.message}"
+      else
+        got = key.decapsulate(b(words[2]))
+        puts got.is_a?(MlKemError) ? "refused: #{got.message}" : hex(got)
+      end
+    else
+      puts "refused: no such request #{words[0]}"
+    end
+    STDOUT.flush
+  end
+  exit 0
+end
+
+if args.size > 0 && args[0] == "cost"
+  seed = drawn("cost seed", 64)
+  m = drawn("cost m", 32)
+  key = MlKem768PrivateKey.from_seed(seed)
+  ek = key.encapsulation_key
+  sent = MlKem768.encapsulate(ek, m).or_panic
+  ok = true
+  keygen = best_of { MlKem768PrivateKey.from_seed(seed) }
+  encaps = best_of { MlKem768.encapsulate(ek, m).or_panic }
+  decaps = best_of { ok = ok && key.decapsulate(sent[0]).or_panic == sent[1] }
+  raise "the timed decapsulation did not agree" unless ok
+  puts "iyi: ML-KEM-768 key pair #{keygen} us, encapsulation #{encaps} us, decapsulation #{decaps} us"
+  # Decapsulation of a good ciphertext and of one with a byte changed (the
+  # implicit rejection's path), interleaved, 2,000 of each: the median of
+  # each, in nanoseconds.
+  bad = sent[0].dup
+  bad[500] = bad[500] ^ 1_u8
+  good_times = [] of Int64
+  bad_times = [] of Int64
+  2000.times do
+    t0 = IyiMark.now_ns
+    key.decapsulate(sent[0])
+    t1 = IyiMark.now_ns
+    key.decapsulate(bad)
+    t2 = IyiMark.now_ns
+    good_times << (t1 - t0).to_i64
+    bad_times << (t2 - t1).to_i64
+  end
+  good_times.sort_in_place
+  bad_times.sort_in_place
+  puts "iyi: decapsulation, median of 2000: #{good_times[1000]} ns for a good ciphertext, #{bad_times[1000]} ns for one implicitly rejected"
+  exit 0
+end
+
+raise "usage: std_mlkem_exercise VECTORS.json | oracle | cost" if args.empty?
+vectors = JSON.parse(File.read(args[0]))
+
+# FIPS 203 section 8's sizes for ML-KEM-768.
+puts "== sizes (fips 203 section 8)"
+check MlKem768::ENCAPSULATION_KEY_SIZE == 1184 && MlKem768::DECAPSULATION_KEY_SIZE == 2400, "the key sizes"
+check MlKem768::CIPHERTEXT_SIZE == 1088 && MlKem768::SHARED_SECRET_SIZE == 32, "the ciphertext and secret sizes"
+puts "  1184, 2400, 1088 and 32 bytes"
+
+# ML-KEM.KeyGen_internal from ACVP's d and z: both keys, byte for byte.
+puts "\n== acvp keyGen (ml-kem-768)"
+count = 0
+vectors["keyGen"].as_a.each do |t|
+  id = t["tcId"].as_i
+  key = MlKem768PrivateKey.from_seed(b(t["d"].as_s) + b(t["z"].as_s))
+  check hex(key.encapsulation_key) == t["ek"].as_s.downcase, "acvp keyGen #{id}: the encapsulation key"
+  check hex(key.decapsulation_key) == t["dk"].as_s.downcase, "acvp keyGen #{id}: the decapsulation key"
+  count = count + 1
+end
+puts "  #{count} key pairs, both keys of each"
+
+# ML-KEM.Encaps_internal from ACVP's ek and m.
+puts "\n== acvp encapsulation (ml-kem-768)"
+count = 0
+vectors["encapsulation"].as_a.each do |t|
+  id = t["tcId"].as_i
+  got = MlKem768.encapsulate(b(t["ek"].as_s), b(t["m"].as_s))
+  check !got.is_a?(MlKemError), "acvp encapsulation #{id}: refused: #{got.is_a?(MlKemError) ? got.message : ""}"
+  next if got.is_a?(MlKemError)
+  check hex(got[0]) == t["c"].as_s.downcase, "acvp encapsulation #{id}: the ciphertext"
+  check hex(got[1]) == t["k"].as_s.downcase, "acvp encapsulation #{id}: the shared secret"
+  count = count + 1
+end
+puts "  #{count} encapsulations, the ciphertext and secret of each"
+
+# ML-KEM.Decaps_internal: a valid ciphertext gives the encapsulated key, a
+# modified one the implicit rejection's J(z || c).
+puts "\n== acvp decapsulation (ml-kem-768)"
+valid = 0
+modified = 0
+vectors["decapsulation"].as_a.each do |t|
+  id = t["tcId"].as_i
+  reason = t["reason"].as_s
+  key = MlKem768PrivateKey.from_bytes(b(t["dk"].as_s))
+  check !key.is_a?(MlKemError), "acvp decapsulation #{id}: the key refused"
+  next if key.is_a?(MlKemError)
+  got = key.decapsulate(b(t["c"].as_s))
+  check !got.is_a?(MlKemError) && hex(got) == t["k"].as_s.downcase, "acvp decapsulation #{id} (#{reason}): the shared secret"
+  if reason == "modified ciphertext"
+    modified = modified + 1
+  else
+    valid = valid + 1
+  end
+end
+check modified > 0 && valid > 0, "acvp decapsulation: both kinds of case"
+puts "  #{valid} valid ciphertexts and #{modified} modified ones, implicitly rejected"
+
+# FIPS 203 section 7.3's hash check, through `from_bytes`.
+puts "\n== acvp decapsulation key check (ml-kem-768)"
+taken = 0
+refused = 0
+vectors["decapsulationKeyCheck"].as_a.each do |t|
+  id = t["tcId"].as_i
+  key = MlKem768PrivateKey.from_bytes(b(t["dk"].as_s))
+  if t["testPassed"].as_bool
+    check !key.is_a?(MlKemError), "acvp decapsulationKeyCheck #{id} (#{t["reason"].as_s}): taken"
+    taken = taken + 1
+  else
+    check key.is_a?(MlKemError) && key.message.includes?("hash check"), "acvp decapsulationKeyCheck #{id} (#{t["reason"].as_s}): refused"
+    refused = refused + 1
+  end
+end
+puts "  #{taken} keys taken, #{refused} refused by the hash check"
+
+# FIPS 203 section 7.2's modulus check, through `encapsulate`.
+puts "\n== acvp encapsulation key check (ml-kem-768)"
+taken = 0
+refused = 0
+vectors["encapsulationKeyCheck"].as_a.each do |t|
+  id = t["tcId"].as_i
+  got = MlKem768.encapsulate(b(t["ek"].as_s), drawn("m", 32))
+  if t["testPassed"].as_bool
+    check !got.is_a?(MlKemError), "acvp encapsulationKeyCheck #{id} (#{t["reason"].as_s}): taken"
+    taken = taken + 1
+  else
+    check got.is_a?(MlKemError) && got.message.includes?("modulus check"), "acvp encapsulationKeyCheck #{id} (#{t["reason"].as_s}): refused"
+    refused = refused + 1
+  end
+end
+puts "  #{taken} keys taken, #{refused} refused by the modulus check"
+
+# Key pairs from drawn seeds: what one side encapsulates the other
+# decapsulates, the decapsulation key read back is the same key, and a
+# ciphertext with any byte changed - the first, the last, one between -
+# is answered with J(z || c), computed here from its definition.
+puts "\n== round trips and the implicit rejection"
+50.times do |n|
+  seed = drawn("seed #{n}", 64)
+  key = MlKem768PrivateKey.from_seed(seed)
+  sent = MlKem768.encapsulate(key.encapsulation_key, drawn("m #{n}", 32)).or_panic
+  check key.decapsulate(sent[0]).or_panic == sent[1], "round trip #{n}: the secret decapsulated"
+  again = MlKem768PrivateKey.from_bytes(key.decapsulation_key).or_panic
+  check again.encapsulation_key == key.encapsulation_key && again.decapsulation_key == key.decapsulation_key, "round trip #{n}: the decapsulation key read back"
+  check again.decapsulate(sent[0]).or_panic == sent[1], "round trip #{n}: the key read back decapsulates"
+  [0, 1087, 7 * n + 3].each do |at|
+    bad = sent[0].dup
+    bad[at] = bad[at] ^ (1_u8 << (n % 8))
+    rejection = SHAKE256.new.update(seed[32, 32]).update(bad).read(32)
+    check key.decapsulate(bad).or_panic == rejection, "a ciphertext changed at byte #{at} is answered with J(z || c)"
+  end
+end
+puts "  50 key pairs: encapsulated, decapsulated, read back; 150 changed ciphertexts rejected"
+
+# ByteDecode12 reduces mod q (FIPS 203 Algorithm 6), and section 7.3
+# checks no coefficient of s: a decapsulation key whose first coefficient
+# below 767 is spelled with q added is the same key.
+skey = MlKem768PrivateKey.from_seed(drawn("spelled", 64))
+sdk = skey.decapsulation_key
+ssent = MlKem768.encapsulate(skey.encapsulation_key, drawn("m", 32)).or_panic
+at = 0
+value = 0
+while at < 768
+  lo = sdk[at // 2 * 3]
+  mid = sdk[at // 2 * 3 + 1]
+  hi = sdk[at // 2 * 3 + 2]
+  value = at.even? ? lo.to_i32 | (mid.to_i32 & 15) << 8 : mid.to_i32 >> 4 | hi.to_i32 << 4
+  break if value < 767
+  at = at + 1
+end
+spelled = sdk.dup
+mid = sdk[at // 2 * 3 + 1]
+value = value + 3329
+if at.even?
+  spelled[at // 2 * 3] = (value & 255).to_u8
+  spelled[at // 2 * 3 + 1] = (mid & 0xf0_u8) | (value >> 8).to_u8
+else
+  spelled[at // 2 * 3 + 1] = (mid & 0x0f_u8) | ((value & 15) << 4).to_u8
+  spelled[at // 2 * 3 + 2] = (value >> 4).to_u8
+end
+check spelled != sdk, "the spelled key differs from the canonical one"
+sread = MlKem768PrivateKey.from_bytes(spelled).or_panic
+check sread.decapsulation_key == sdk, "a decapsulation key whose s is spelled with a coefficient past q is read as the canonical one"
+check sread.decapsulate(ssent[0]).or_panic == ssent[1], "a decapsulation key whose s is spelled with a coefficient past q decapsulates as the canonical one"
+puts "  a coefficient of s spelled past q, read as the one below it"
+
+# The refusals: data from outside as values, the caller's misuse as panics
+# (the gate asks those).
+puts "\n== refusals"
+key = MlKem768PrivateKey.from_seed(drawn("refusals", 64))
+ek = key.encapsulation_key
+short = MlKem768.encapsulate(ek[0, 1183], drawn("m", 32))
+check short.is_a?(MlKemError) && short.message == "ML-KEM-768: an encapsulation key is 1184 bytes, not 1183", "an encapsulation key a byte short"
+long = MlKem768.encapsulate(ek + [0_u8], drawn("m", 32))
+check long.is_a?(MlKemError) && long.message == "ML-KEM-768: an encapsulation key is 1184 bytes, not 1185", "an encapsulation key a byte long"
+# The first coefficient set to q, 3329 = 0xd01: below 2^12, so only the
+# modulus check sees it.
+over = ek.dup
+over[0] = 0x01_u8
+over[1] = (over[1] & 0xf0_u8) | 0x0d_u8
+refused_q = MlKem768.encapsulate(over, drawn("m", 32))
+check refused_q.is_a?(MlKemError) && refused_q.message.includes?("modulus check"), "a coefficient of q refused by the modulus check"
+over[0] = 0x00_u8
+taken_q = MlKem768.encapsulate(over, drawn("m", 32))
+check !taken_q.is_a?(MlKemError), "a coefficient of q - 1 taken"
+dk = key.decapsulation_key
+check MlKem768PrivateKey.from_bytes(dk[0, 2399]).is_a?(MlKemError), "a decapsulation key a byte short"
+broken = dk.dup
+broken[2340] = broken[2340] ^ 1_u8
+check MlKem768PrivateKey.from_bytes(broken).is_a?(MlKemError), "a decapsulation key whose H(ek) is one bit off"
+inner = dk.dup
+inner[1200] = inner[1200] ^ 1_u8
+check MlKem768PrivateKey.from_bytes(inner).is_a?(MlKemError), "a decapsulation key whose encapsulation key is one bit off"
+sent = MlKem768.encapsulate(ek, drawn("m", 32)).or_panic
+cut = key.decapsulate(sent[0][0, 1087])
+check cut.is_a?(MlKemError) && cut.message == "ML-KEM-768: a ciphertext is 1088 bytes, not 1087", "a ciphertext a byte short"
+check key.decapsulate(sent[0] + [0_u8]).is_a?(MlKemError), "a ciphertext a byte long"
+puts "  wrong sizes, a coefficient of q, a broken hash: each an MlKemError"
+
+puts "\nALL CHECKS PASSED"

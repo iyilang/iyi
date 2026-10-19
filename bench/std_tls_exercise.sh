@@ -101,7 +101,7 @@ fi
 
 echo
 echo "== every tls section reported"
-for phrase in "== RFC 8448's simple 1-RTT handshake, through the key schedule" "== the trace's records, sealed and opened" "== TLS 1.2's PRF, through the key schedule"; do
+for phrase in "== RFC 8448's simple 1-RTT handshake, through the key schedule" "== the trace's records, sealed and opened" "== TLS 1.2's PRF, through the key schedule" "== server_name's form (RFC 6066 section 3)"; do
   if ! grep -q "$phrase" "$WORK/tls-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -191,6 +191,11 @@ else
       "$OPENSSL" req -new -config leaf.cnf $opt -nodes -keyout $kind.key -out $kind.csr &&
         "$OPENSSL" x509 -req -in $kind.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out $kind.pem -days 20 -extfile leaf.ext
     done
+    # A leaf for an internationalised name, by its A-label (bücher.example),
+    # which s_server sends for that server_name alone.
+    printf 'subjectAltName=DNS:xn--bcher-kva.example\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' >idn.ext
+    "$OPENSSL" req -new -config leaf.cnf -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout idn.key -out idn.csr &&
+      "$OPENSSL" x509 -req -in idn.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out idn.pem -days 20 -extfile idn.ext
     # Client certificates, for clientAuth, as std/tls presents them.
     printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' >client.ext
     for kind in p256 ed25519 rsa; do
@@ -299,6 +304,51 @@ else
   }
   if client_export "$WORK/tls-release"; then
     interop=$((interop + 1))
+  else
+    status=1
+  fi
+  # client_sni <binary>: the server_name its std/tls client sends for a
+  # host written in Unicode with a final dot, and for an ASCII one with a
+  # final dot, as OpenSSL's server reads it. `-servername` with
+  # `-servername_fatal` makes s_server refuse any other name with alert
+  # unrecognized_name, and send `-cert2` - the leaf for that name, where
+  # `-cert` names another - only for that one, so a handshake that checks
+  # proves the name matched; `-msg` makes it print the name it read
+  # ("Hostname in TLS extension"). RFC 6066 section 3: ASCII, A-labels,
+  # no trailing dot. Before, both went out as written and were refused.
+  client_sni() {
+    local bin="$1" failed=0 host name first second port pid got
+    for case_line in "bücher.example.|xn--bcher-kva.example|p256|idn" "localhost.|localhost|idn|p256"; do
+      IFS='|' read -r host name first second <<<"$case_line"
+      port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+      # The name's own leaf is the second: sent only when the name matches.
+      "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -msg -tls1_3 -cert "$PKI/$first.pem" -key "$PKI/$first.key" \
+        -cert2 "$PKI/$second.pem" -key2 "$PKI/$second.key" -servername "$name" -servername_fatal >"$WORK/s_server-sni.log" 2>&1 </dev/null &
+      pid=$!
+      for _ in $(seq 1 50); do
+        "$PY" -c "import socket; socket.create_connection(('127.0.0.1', $port), 1).close()" 2>/dev/null && break
+        sleep 0.1
+      done
+      got="$("$bin" get "$port" "$PKI/ca.pem" "$host" 2>&1)"
+      sleep 0.2
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      if ! printf '%s' "$got" | grep -qF "HTTP/1.0 200 ok"; then
+        echo "  FAIL server_name for \"$host\": $got"
+        failed=1
+      elif ! grep -q "Hostname in TLS extension" "$WORK/s_server-sni.log"; then
+        echo "  server_name for \"$host\": s_server took it under -servername_fatal; this s_server does not print the name it read"
+      elif ! grep -qF "Hostname in TLS extension: \"$name\"" "$WORK/s_server-sni.log"; then
+        echo "  FAIL server_name for \"$host\": s_server read $(grep -m1 'Hostname in TLS extension' "$WORK/s_server-sni.log")"
+        failed=1
+      else
+        echo "  server_name for \"$host\", as OpenSSL read it: \"$name\", and its certificate checked: $got"
+      fi
+    done
+    return $failed
+  }
+  if client_sni "$WORK/tls-release"; then
+    interop=$((interop + 2))
   else
     status=1
   fi
@@ -1218,7 +1268,7 @@ prove_broken() {
   local mode="${5:-trace}"
   if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; } ||
      { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ]; } && [ "$served" = no ]; } ||
-     { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client12 ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
+     { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
     echo "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
   fi
@@ -1235,7 +1285,7 @@ PY
     status=1
     return
   fi
-  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client12 ]; then
+  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ]; then
     if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched/tlsx" \
          "$REPO/bench/std_tls_exercise.iyi" >"$WORK/patched/build.log" 2>&1; then
       echo "  the $1 copy did not build:"
@@ -1252,6 +1302,9 @@ PY
       rc=$?
     elif [ "$mode" = client-export ]; then
       client_export "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
+      rc=$?
+    elif [ "$mode" = client-sni ]; then
+      client_sni "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
       rc=$?
     elif [ "$mode" = client12 ]; then
       tls12_round "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
@@ -1370,7 +1423,7 @@ prove_broken "user_canceled after the handshake taken as an end" "user-canceled:
 prove_broken "the session id's echo unchecked" "FAILED: no-echo: " \
   '    return TlsError.new("a ServerHello that does not echo the session id", TlsAlert::ILLEGAL_PARAMETER) unless echo == session' '' scenarios
 prove_broken "the certificate checked for no host" "FAILED: wrong-host: " \
-  'verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, @host,' 'verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, nil,' scenarios
+  'verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, @name,' 'verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, nil,' scenarios
 prove_broken "a KeyUpdate's read keys kept" "keyupdate:" \
   '        @read_secret = @schedule.next_secret(@read_secret)' '' scenarios
 prove_broken "a HelloRetryRequest's transcript restarted as something else" "hrr-cookie: refused" \
@@ -1545,6 +1598,12 @@ prove_broken "the exporter's secret over the transcript to the client's flight" 
     # The client'"'"'s flight:' '    @exporter_secret = @schedule.derive_secret(master, "exp master", @transcript + @transcript)
 
     # The client'"'"'s flight:' client-export
+prove_broken "server_name written as the host was given" "FAIL server_name for \"bücher.example.\"" \
+  '      name = TlsBytes.of(@name)' '      name = TlsBytes.of(@host)' client-sni
+prove_broken "a Unicode host's server_name not in A-labels" "FAIL server_name for \"bücher.example.\"" \
+  '    return name if name.bytesize == name.size' '    return name' client-sni
+prove_broken "a host's final dot kept in server_name" "FAIL server_name for \"localhost.\"" \
+  '    name = host.ends_with?(".") ? host[0, host.bytesize - 1] : host' '    name = host' client-sni
 prove_broken "a server_name's own certificate passed over" "FAIL sni-other " \
   '      @others.each { |other| return other if other.leaf.matches_host?(name) && other.scheme_for(schemes) }' '' server
 prove_broken "a client that hangs up without an alert" "FAIL no alert read by OpenSSL" \

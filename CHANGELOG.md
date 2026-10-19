@@ -20,6 +20,22 @@
   architecture's offset are each caught. The program has no argument or
   variable that names another source. Skipped, with a sentence, off Linux
   or where seccomp is refused.
+- **`TlsClient` sends server_name as A-labels without a final dot.** A
+  host given in Unicode went out as its UTF-8 bytes and one with a final
+  dot kept it, where RFC 6066 section 3 has ASCII and no trailing dot;
+  OpenSSL's `s_server -servername xn--bcher-kva.example
+  -servername_fatal` refused `bücher.example.` with alert
+  unrecognized_name (112), having read `"b\xc3\xbccher.example."`
+  (finding 14 of the std/tls review). `TlsClient.server_name_for(host)`
+  drops one final dot and writes a non-ASCII name through `IDNA.to_ascii`;
+  that form is sent and the certificate is checked for it, and a name IDNA
+  refuses is a `TlsError` before anything is sent. An ASCII name goes as
+  written. `bench/std_tls_exercise.sh` has s_server, under `-servername`
+  and `-servername_fatal`, read `"xn--bcher-kva.example"` for
+  `bücher.example.` and `"localhost"` for `localhost.` and send the
+  certificate it keeps for that name alone, which the client checks; the
+  name sent as given, Unicode left as it is and the final dot kept are
+  each caught there.
 
 ## 0.18.0 — 2026-10-18
 

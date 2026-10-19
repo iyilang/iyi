@@ -151,6 +151,7 @@ import std/asn1::{Der, Asn1Error}
 import std/aead::{AesGcm, ChaCha20Poly1305, AeadError}
 import std/crypto::{HMAC, HKDF, Subtle}
 import std/digest::{SHA256, SHA384}
+import std/idna::{IDNA, IdnaError}
 import std/random::{Random}
 import std/time::{Time}
 
@@ -1210,11 +1211,34 @@ end
 pub class TlsClient < TlsConnection
   @host : String
   @config : TlsConfig
+  # *host* as server_name carries it and the certificate is checked for
+  # (`server_name_for`), set when the handshake starts.
+  @name : String = ""
 
   SIGNATURE_SCHEMES = [0x0403, 0x0503, 0x0603, 0x0807, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601]
 
   def initialize(socket : IyiSocket, @host : String, @config : TlsConfig)
     super(socket, "the server", @host)
+  end
+
+  # *host* in the form RFC 6066 section 3 gives server_name: "the
+  # fully qualified DNS hostname", ASCII, "without a trailing dot" - a
+  # final dot dropped and a name in Unicode written as its A-labels by
+  # IDNA, which is also the form `X509` matches a certificate's names in.
+  # Before, `bücher.example.` went out as its UTF-8 bytes and its dot, and
+  # a server that holds names to the RFC refused it (OpenSSL's s_server
+  # with `-servername_fatal`: alert unrecognized_name). An ASCII name keeps
+  # its case, as DNS ignores it. A name IDNA refuses, or nothing but a dot,
+  # is an error before anything is sent.
+  def self.server_name_for(host : String) : String | TlsError
+    # By bytes: `[]` counts them and `size` counts characters, so
+    # `host[0, host.size - 1]` cut the last letter of a Unicode name.
+    name = host.ends_with?(".") ? host[0, host.bytesize - 1] : host
+    return TlsError.new("#{host.inspect} names no host") if name.empty?
+    return name if name.bytesize == name.size
+    ascii = IDNA.to_ascii(name)
+    return TlsError.new("#{host.inspect} is not a host name: #{ascii.message}") if ascii.is_a?(IdnaError)
+    ascii
   end
 
   def server_side? : Bool
@@ -1242,6 +1266,9 @@ pub class TlsClient < TlsConnection
   # --- The handshake (section 4) ---
 
   def handshake : TlsError?
+    name = TlsClient.server_name_for(@host)
+    return name if name.is_a?(TlsError)
+    @name = name
     private_key = Random::Secure.random_bytes(32)
     public_key = TlsBytes.of(X25519.public_key(private_key))
     random = Random::Secure.random_bytes(32)
@@ -1451,8 +1478,8 @@ pub class TlsClient < TlsConnection
     TlsSuites::TLS12.each { |suite| suites = suites + TlsBytes.u16(suite) } if tls12
     body = body + TlsBytes.u16(suites.size) + suites + [1_u8, 0_u8]
     extensions = [] of UInt8
-    unless TlsBytes.ip_literal?(@host)
-      name = TlsBytes.of(@host)
+    unless TlsBytes.ip_literal?(@name)
+      name = TlsBytes.of(@name)
       entry = [0_u8] + TlsBytes.u16(name.size) + name
       extensions = extensions + TlsBytes.extension(0, TlsBytes.u16(entry.size) + entry)
     end
@@ -1652,7 +1679,7 @@ pub class TlsClient < TlsConnection
   # server_name's acknowledgement (RFC 6066 section 3): empty, and only of
   # a name this client sent - none goes for an address.
   private def server_name_ack(data : Array(UInt8)) : TlsError?
-    return TlsError.new("a server_name acknowledgement of a name not sent", TlsAlert::UNSUPPORTED_EXTENSION) if TlsBytes.ip_literal?(@host)
+    return TlsError.new("a server_name acknowledgement of a name not sent", TlsAlert::UNSUPPORTED_EXTENSION) if TlsBytes.ip_literal?(@name)
     return TlsError.new("a server_name acknowledgement that is not empty", TlsAlert::DECODE_ERROR) unless data.empty?
     nil
   end
@@ -1697,7 +1724,7 @@ pub class TlsClient < TlsConnection
     return TlsError.new("the server sent no certificate", TlsAlert::DECODE_ERROR) if chain.empty?
     roots = @config.trusted_roots
     return roots if roots.is_a?(TlsError)
-    verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, @host, @config.now || Time.utc)
+    verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, @name, @config.now || Time.utc)
     return TlsError.new("the server's certificate is not trusted: #{verified.message}", TlsAlert::BAD_CERTIFICATE) if verified.is_a?(X509Error)
     @peer_certificates = verified
     chain

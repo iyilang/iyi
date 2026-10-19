@@ -188,17 +188,24 @@ puts "codec: ok"
 # Windows holds port ranges back (its excluded ranges) and answers a bind
 # in one "access denied". An ephemeral UDP port fell in one on a CI runner,
 # and then a UDP bind on the port an ephemeral TCP listener had taken.
+#
+# A refused port's listener is kept open until one is found: Windows hands
+# out ephemeral TCP ports one after another, and an excluded UDP range is
+# wider than twenty of them - twenty tries closed and reopened, a CI run
+# panicked at 127.0.0.1:51853 and its artifact run at 51873, twenty on. Held,
+# each try is a port the last did not cover, and two hundred step past a
+# range.
 tcp = IyiSocket.listen("127.0.0.1", 0)
 port = tcp.local_port
 bound = UdpSocket.bind?("127.0.0.1", port)
-tries = 1
-while bound.is_a?(SocketError) && tries < 20
-  tcp.close
+refused = [] of IyiSocket
+while bound.is_a?(SocketError) && refused.size < 200
+  refused << tcp
   tcp = IyiSocket.listen("127.0.0.1", 0)
   port = tcp.local_port
   bound = UdpSocket.bind?("127.0.0.1", port)
-  tries += 1
 end
+refused.each(&.close)
 raise bound.message if bound.is_a?(SocketError)
 server = bound
 forger = UdpSocket.bind("127.0.0.1", 0)

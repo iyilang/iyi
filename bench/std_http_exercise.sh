@@ -1979,16 +1979,22 @@ h2_frames_breaks() { # h2_frames_breaks <label> <name> <old> <new> <case>
     local good="$H2BIN"
     H2BIN="$WORK/$name.bin"
     h2_serve
-    timeout -k 5 300 "$PY" "$WORK/h2frames.py" "$H2PORT" >"$WORK/$name.out" 2>&1
+    local code=0
+    timeout -k 5 300 "$PY" "$WORK/h2frames.py" "$H2PORT" >"$WORK/$name.out" 2>&1 || code=$?
     h2_stop
     H2BIN="$good"
     if grep -qF -- "FAIL: $case_name:" "$WORK/$name.out"; then
       echo "  $label: caught by the frames for \"$case_name\""
     else
-      echo "  $label: the frames for \"$case_name\" did not fail on a broken server"
-      # What the frames said instead: once on Windows (tls/resumption, job
-      # 118118781204) this missed where every other run caught it, and
-      # nothing was left to say why.
+      # A miss and a run that never reached the case read apart: once on
+      # Windows (tls/resumption, job 118118781204) this missed where every
+      # other run caught it, and nothing was left to say which. 124 is the
+      # timeout's; the frames exit 1 for a failure, 0 for none.
+      if [ "$code" -eq 0 ]; then
+        echo "  $label: the frames for \"$case_name\" did not fail on a broken server"
+      else
+        echo "  $label: the frames stopped (exit $code) without a verdict on \"$case_name\""
+      fi
       tail -4 "$WORK/$name.out" | sed 's/^/    /'
       status=1
     fi

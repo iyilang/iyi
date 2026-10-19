@@ -96,8 +96,23 @@ SCENARIOS = {
     "cert-entry-ext": "a certificate entry with a status_request extension nobody asked for",
     "sni-ack-data": "a server_name acknowledgement that is not empty",
     "user-canceled": "a user_canceled warning before the echo",
+    # Resumption: the first connection to each is an ok handshake that ends
+    # with a real NewSessionTicket; the second, offering it, is checked -
+    # its binder over the ClientHello, its obfuscated age against the time
+    # since the ticket went, psk_dhe_ke its one mode - and then answered.
+    "resume": "the ticket taken: pre_shared_key in the ServerHello, then EncryptedExtensions and Finished",
+    "resume-declined": "the ticket passed over: a full handshake",
+    "resume-identity": "a ServerHello taking identity 1, of the one offered",
+    "resume-hash": "a SHA-256 ticket taken under TLS_AES_256_GCM_SHA384",
+    "resume-no-share": "the ticket taken with no key_share, which psk_dhe_ke requires",
+    "resume-cert": "the ticket taken, then a Certificate",
+    "ticket-many": "twenty NewSessionTickets before the echo",
+    "ticket-huge": "a NewSessionTicket whose ticket is 16,385 bytes, over two records",
+    "ticket-bad": "a NewSessionTicket cut short",
 }
 
+# The tickets issued, by their bytes: (PSK, suite, age_add, when).
+TICKETS = {}
 NOW = dt.datetime.now(dt.timezone.utc)
 DAY = dt.timedelta(days=1)
 
@@ -312,6 +327,15 @@ class Conn:
             self.sock.sendall(plain(22, sh) + (plain(21, bytes([2, 49])) if s == "tls12-hello" else b""))
             return
         suite = {"aes256": 0x1302, "chacha": 0x1303, "suite-unoffered": 0x1304}.get(s, 0x1301)
+        psk = None
+        if s.startswith("resume") and 41 in exts:
+            judged = self.judge_psk(ch, exts)
+            if isinstance(judged, int):
+                self.sock.sendall(plain(21, bytes([2, judged])))
+                return
+            psk = None if s == "resume-declined" else judged
+            if s == "resume-hash":
+                suite = 0x1302
         schedule = Schedule(0x1301 if suite == 0x1304 else suite)
         groups = exts.get(10, b"")
         if s in ("hrr-cookie", "hrr-group", "hrr-p256"):
@@ -348,8 +372,10 @@ class Conn:
             other = ec_key if s == "hrr-p256" else ec.generate_private_key(ec.SECP256R1())
             mine = other.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
             e += ext(51, b"\x00\x17" + struct.pack(">H", 65) + mine)
-        else:
+        elif s != "resume-no-share" or psk is None:
             e += ext(51, b"\x00\x1d" + struct.pack(">H", 32) + mine)
+        if psk is not None:
+            e += ext(41, struct.pack(">H", 1 if s == "resume-identity" else 0))
         if s == "sh-extension":
             e += ext(0xff00, b"")
         echo = b"\x00" * len(sid) if s == "no-echo" else sid
@@ -371,14 +397,14 @@ class Conn:
             return
         self.sock.sendall(record)
         if s in ("tls12", "no-echo", "suite-unoffered", "zero-share", "compression", "sh-extension", "oversize", "sh-wrong-group",
-                 "sh-and-more"):
+                 "sh-and-more") or (psk is not None and s in ("resume-identity", "resume-hash", "resume-no-share")):
             return
         transcript += sh
         if s == "hrr-p256":
             shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), peer_point))
         else:
             shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(share))
-        early = schedule.extract(bytes(schedule.size), bytes(schedule.size))
+        early = schedule.extract(bytes(schedule.size), psk if psk is not None else bytes(schedule.size))
         hs = schedule.extract(schedule.derive(early, b"derived", b""), shared)
         c_hs = schedule.derive(hs, b"c hs traffic", transcript)
         s_hs = schedule.derive(hs, b"s hs traffic", transcript)
@@ -436,6 +462,9 @@ class Conn:
             if s in ("bad-cv", "bad-cv-ed25519"):
                 sig = sig[:-1] + bytes([sig[-1] ^ 1])
             messages.append(message(15, struct.pack(">HH", scheme, len(sig)) + sig))
+        if psk is not None and s != "resume-cert":
+            # Resumed: EncryptedExtensions alone before Finished.
+            messages = messages[:1]
         transcript += b"".join(messages)
         verify = schedule.finished(s_hs, transcript)
         if s == "bad-finished":
@@ -462,7 +491,7 @@ class Conn:
             self.sock.sendall(writer.seal(22, flight, corrupt=(s == "bad-record-mac")))
         if s in ("bad-finished", "bad-cv", "cv-pkcs1", "cv-wrong-curve", "unsolicited-ext", "alpn-unoffered",
                  "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs", "cert-many", "ku-no-sign",
-                 "certreq-context", "cert-entry-ext", "sni-ack-data"):
+                 "certreq-context", "cert-entry-ext", "sni-ack-data") or (psk is not None and s == "resume-cert"):
             return
 
         master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))
@@ -540,6 +569,22 @@ class Conn:
         reader = Cipher(schedule, c_ap)
         if s == "ticket":
             self.sock.sendall(writer.seal(22, message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04abcd\x00\x00")))
+        if s == "ticket-bad":
+            self.sock.sendall(writer.seal(22, message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04ab")))
+        if (s.startswith("resume") and psk is None) or s in ("ticket-many", "ticket-huge"):
+            # Real tickets: each PSK from the resumption master secret, over
+            # the handshake to the client's Finished, and its nonce.
+            res_master = schedule.derive(master, b"res master", expected_client + content)
+            out = b""
+            for i in range(20 if s == "ticket-many" else 1):
+                nonce = struct.pack(">Q", i)
+                ticket = os.urandom(16385 if s == "ticket-huge" else 32)
+                age_add = int.from_bytes(os.urandom(4), "big")
+                TICKETS[ticket] = (schedule.expand_label(res_master, b"resumption", nonce, schedule.size), suite, age_add, time.monotonic())
+                nst = message(4, struct.pack(">IIB", 3600, age_add, len(nonce)) + nonce + struct.pack(">H", len(ticket)) + ticket + b"\x00\x00")
+                for k in range(0, len(nst), 16384):
+                    out += writer.seal(22, nst[k:k + 16384])
+            self.sock.sendall(out)
         header, body = self.record()
         type_, data = reader.open(header, body)
         assert type_ == 23
@@ -605,6 +650,32 @@ class Conn:
         else:
             self.sock.sendall(writer.seal(23, b"echo:" + data))
         self.sock.sendall(writer.seal(21, b"\x01\x00"))
+
+    def judge_psk(self, ch, exts):
+        """A resumption's ClientHello, judged: its pre_shared_key last and
+        offering one ticket this server issued, psk_dhe_ke its one mode, the
+        ticket's age as the client gives it within a second of the time
+        since it went, and its binder over the ClientHello to the binders.
+        The PSK, or the alert a failure sends."""
+        data = exts[41]
+        if not ch.endswith(ext(41, data)) or exts.get(45) != b"\x01\x01":
+            return 47
+        size = int.from_bytes(data[:2], "big")
+        identities, binders = data[2:2 + size], data[2 + size:]
+        length = int.from_bytes(identities[:2], "big")
+        ticket, obfuscated = identities[2:2 + length], int.from_bytes(identities[2 + length:6 + length], "big")
+        if len(identities) != 6 + length or ticket not in TICKETS:
+            return 47
+        secret, suite, age_add, when = TICKETS[ticket]
+        age = (obfuscated - age_add) % (1 << 32)
+        elapsed = (time.monotonic() - when) * 1000
+        if not elapsed - 1000 <= age <= elapsed + 1000:
+            return 47
+        schedule = Schedule(suite)
+        binder_key = schedule.derive(schedule.extract(bytes(schedule.size), secret), b"res binder", b"")
+        if binders != struct.pack(">HB", 1 + schedule.size, schedule.size) + schedule.finished(binder_key, ch[:len(ch) - len(binders)]):
+            return 51
+        return secret
 
 
 def main():

@@ -16,7 +16,8 @@
   | X25519 shared secret | 21 us | 20 us | 19 us |
   | Ed25519 sign / verify | 67 / 41 us | 20 / 40 us | 17 / 47 us |
   | P-256 sign / ECDH | 102 / 89 us | 31 / 69 us | 14 / 28 us |
-  | P-256 verify | 1,477 us | 183 us | 38 us |
+  | P-256 verify | 1,477 us | 166 us | 38 us |
+| RSA-2048 PSS sign (best of 8) | 1,077 us | 1,013 us | 418 us |
   | SHA-256 / SHA-384, 16 MiB | 435 / 637 MB/s | 549 / 790 MB/s | 787 / 1167 MB/s |
 
   std/aead fixslices AES encryption (ShiftRows folded into MixColumns'
@@ -28,11 +29,12 @@
   point, scalars mod L are reduced a byte at a time, P-256's field inverse
   is an addition chain and its reduction is written for p. std/ecdsa
   checks signatures on the field's own words in Montgomery form rather
-  than on BigInt. std/digest runs SHA-2 eight rounds a pass with the
+  than on BigInt, adding G and Q as affine points and inverting s mod n
+  on the same words. std/big's Montgomery product reduces in the same pass
+  as it multiplies, and its secret-exponent window is at most 5 bits (every
+  entry still read, masked); blinding is unchanged. std/digest runs SHA-2 eight rounds a pass with the
   names turned. Tried and dropped, slower here: Poly1305 in 44-bit limbs,
-  ChaCha20 four blocks at a time, and (unmeasured for lack of time) RSA
-  Montgomery changes; RSA-2048 signing is as it was, about 1.1 ms against
-  OpenSSL's 0.42.
+  and ChaCha20 four blocks at a time.
 
 ## 0.18.0 — 2026-10-18
 

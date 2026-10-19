@@ -31,10 +31,13 @@
 # client's, `X509Purpose::Client`), and the leaf's names must fall inside
 # its nameConstraints; it must have signed the certificate below it. Name
 # constraints are checked for DNS names and IP addresses; a constraint of
-# any other kind refuses the chain rather than being passed over. The
-# leaf must be valid at that time, not a CA (a CA's certificate is not a
-# server's, as the Web PKI's verifiers hold, nor a client's), allowed the
-# purpose if it carries extKeyUsage, and, when a host is given, name it.
+# any other kind refuses the chain rather than being passed over. A DNS
+# name is judged by a constraint as a host is matched to it, without its
+# final dot, and a constraint or a name under one with an empty label
+# refuses the chain. The leaf must be valid at that time, not a CA (a
+# CA's certificate is not a server's, as the Web PKI's verifiers hold, nor
+# a client's), allowed the purpose if it carries extKeyUsage, and, when a
+# host is given, name it.
 #
 # A host is matched against subjectAltName only, never the subject's
 # common name, as browsers and RFC 6125 have it: a DNS name exactly,
@@ -402,12 +405,27 @@ pub struct X509
   private def self.constraint_error(leaf : Certificate, issuer : Certificate) : String?
     name = issuer.subject_name
     return "#{name} constrains names of a kind this does not check" if issuer.other_constraints
-    leaf.dns_names.each do |dns|
+    unless issuer.permitted_dns.empty? && issuer.excluded_dns.empty?
+      # A constraint with an empty label ("evil.example.") names no
+      # subtree; read as a suffix it holds nothing, and an excluded one
+      # held nothing out. Refused, as Python's verifier refuses it.
+      (issuer.permitted_dns + issuer.excluded_dns).each do |c|
+        return "#{name} constrains names by #{c.inspect}, which is no name" unless c.empty? || X509Names.labels?(c, leading_dot: true)
+      end
+    end
+    leaf.dns_names.each do |written|
+      next if issuer.permitted_dns.empty? && issuer.excluded_dns.empty?
+      # Judged as `matches_host?` reads it, without its final dot: the
+      # name "evil.example." is the host evil.example to the matcher, and
+      # was outside a constraint excluding evil.example while the two
+      # read it differently.
+      dns = X509Names.unrooted(written)
+      return "#{written} is no host name for #{name}'s constraints to judge" unless X509Names.labels?(dns)
       unless issuer.permitted_dns.empty? || issuer.permitted_dns.any? { |c| X509Names.within?(dns, c) }
-        return "#{dns} is outside the names #{name} permits"
+        return "#{written} is outside the names #{name} permits"
       end
       if issuer.excluded_dns.any? { |c| X509Names.within?(dns, c) }
-        return "#{dns} is among the names #{name} excludes"
+        return "#{written} is among the names #{name} excludes"
       end
     end
     leaf.ip_addresses.each do |ip|
@@ -728,7 +746,7 @@ struct X509Names
 
   # *host*, lowercase and in ASCII, against one dNSName.
   def self.dns_matches?(pattern : String, host : String) : Bool
-    pattern = pattern[0, pattern.size - 1] if pattern.ends_with?(".")
+    pattern = unrooted(pattern)
     if pattern.starts_with?("*.")
       rest = pattern[2, pattern.size - 2]
       return false if rest.includes?("*") || !rest.includes?(".")
@@ -738,6 +756,19 @@ struct X509Names
     end
     return false if pattern.includes?("*")
     pattern == host
+  end
+
+  # A dNSName as `dns_matches?` reads it: its one final dot dropped.
+  def self.unrooted(name : String) : String
+    name.ends_with?(".") ? name[0, name.size - 1] : name
+  end
+
+  # Whether *name* is labels joined by dots, none of them empty - after a
+  # leading dot, where *leading_dot* allows one (a constraint's way of
+  # naming what is under a domain and not the domain).
+  def self.labels?(name : String, leading_dot : Bool = false) : Bool
+    name = name[1, name.size - 1] if leading_dot && name.starts_with?(".")
+    !name.empty? && !name.starts_with?(".") && !name.ends_with?(".") && !name.includes?("..")
   end
 
   # Whether a DNS name falls under a dNSName constraint: the name itself

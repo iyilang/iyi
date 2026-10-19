@@ -106,7 +106,8 @@ echo "== 200 fresh chains held to Python's verifier"
 # name, a certificate out of its time, an issuer that is not a CA or may
 # not sign or allows no CA under it, extKeyUsage without serverAuth, a
 # leaf that is a CA, an unknown critical extension, a signature by another
-# key under the issuer's name, an intermediate left out, a wildcard, an IP.
+# key under the issuer's name, an intermediate left out, a wildcard, an IP,
+# a name with a final dot under a constraint excluding the name.
 # Python's verifier refuses an Ed25519 issuer outright (the Web PKI's
 # rule; std/x509 takes one, as OpenSSL and Go do), so a chain with one is
 # judged as its twin - the same chain, each Ed25519 key swapped for an EC
@@ -135,7 +136,7 @@ TWIN = {id(k): ec.generate_private_key(ec.SECP256R1()) for k in pool if is_ed(k)
 def name(cn): return x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
 # The hash by the name, not a draw, so a chain and its twin are signed alike.
 def cert(cn, key, issuer, issuer_key, ca, path_len=None, cert_sign=True, eku=None, sans=None,
-         start=NOW - 30 * DAY, end=NOW + 300 * DAY, unknown=False, bc=True):
+         start=NOW - 30 * DAY, end=NOW + 300 * DAY, unknown=False, bc=True, excluded=None):
     b = (x509.CertificateBuilder().subject_name(name(cn)).issuer_name(issuer)
          .public_key(key.public_key()).serial_number(x509.random_serial_number())
          .not_valid_before(start).not_valid_after(end))
@@ -151,17 +152,23 @@ def cert(cn, key, issuer, issuer_key, ca, path_len=None, cert_sign=True, eku=Non
         b = b.add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_key.public_key()), critical=False)
     if unknown:
         b = b.add_extension(x509.UnrecognizedExtension(x509.ObjectIdentifier("1.3.6.1.4.1.55555.7"), b"\x05\x00"), critical=True)
+    if excluded:
+        b = b.add_extension(x509.NameConstraints(permitted_subtrees=None,
+                                                 excluded_subtrees=[x509.DNSName(e) for e in excluded]), critical=True)
     if is_ed(issuer_key):
         return b.sign(issuer_key, None)
     sha384 = not isinstance(issuer_key, rsa.RSAPrivateKey) and zlib.crc32(cn.encode()) % 10 < 3
     return b.sign(issuer_key, hashes.SHA384() if sha384 else hashes.SHA256())
+# excluded_dot: the top intermediate excludes the host, and the leaf names
+# it with a final dot, which Python matches to no host and std/x509 to the
+# host itself - so its constraint must hold the name out.
 DEFECTS = ["none", "none", "none", "host", "leaf_expired", "leaf_early", "issuer_expired", "not_ca", "no_bc", "no_cert_sign",
            "path_len", "leaf_client", "issuer_client", "leaf_ca", "unknown_leaf", "unknown_issuer", "wrong_signer",
-           "missing", "wildcard", "wildcard_deep", "ip", "ip_other"]
+           "missing", "wildcard", "wildcard_deep", "ip", "ip_other", "excluded_dot"]
 # One case built from its drawn keys, each passed through *swap*: the
 # leaf, the intermediates as handed over, the root, and the chain in order
 # from the root down.
-def build(i, defect, depth, keys, wrong, order, sans, swap):
+def build(i, defect, depth, keys, wrong, order, sans, swap, excluded=None):
     def k_(k): return swap(k)
     root_key = k_(keys[0])
     root = cert(f"Root {i}", root_key, name(f"Root {i}"), root_key, True)
@@ -177,6 +184,7 @@ def build(i, defect, depth, keys, wrong, order, sans, swap):
             if defect == "no_cert_sign": kw["cert_sign"] = False
             if defect == "issuer_client": kw["eku"] = [ExtendedKeyUsageOID.CLIENT_AUTH]
             if defect == "unknown_issuer": kw["unknown"] = True
+            if excluded: kw["excluded"] = excluded
         if defect == "path_len" and d == 0: kw["path_len"] = 0
         ca_flag = kw.pop("ca_flag", True)
         inter = cert(f"Inter {i}.{d}", k, issuer.subject, issuer_key, ca_flag, **kw)
@@ -199,7 +207,7 @@ for i in range(200):
     defect = rng.choice(DEFECTS)
     depth = rng.randrange(3)
     if defect in ("path_len", "missing"): depth = 2
-    if defect in ("issuer_expired", "not_ca", "no_bc", "no_cert_sign", "issuer_client", "unknown_issuer"): depth = max(depth, 1)
+    if defect in ("issuer_expired", "not_ca", "no_bc", "no_cert_sign", "issuer_client", "unknown_issuer", "excluded_dot"): depth = max(depth, 1)
     keys = rng.sample(pool, depth + 2)
     wrong = rng.choice([k for k in pool if k is not keys[-2]]) if defect == "wrong_signer" else None
     order = list(range(depth - 1 if defect == "missing" else depth))
@@ -209,10 +217,12 @@ for i in range(200):
     if defect == "host": host = f"mail{i}.example.com"
     if defect == "wildcard": sans = [x509.DNSName("*.example.com")]
     if defect == "wildcard_deep": sans = [x509.DNSName("*.example.com")]; host = f"a.www{i}.example.com"
+    excluded = None
+    if defect == "excluded_dot": sans = [x509.DNSName(host + ".")]; excluded = [host]
     if defect in ("ip", "ip_other"):
         sans = [x509.IPAddress(ipaddress.ip_address(f"192.0.2.{i % 250 + 1}"))]
         host = f"192.0.2.{i % 250 + 1}" if defect == "ip" else f"198.51.100.{i % 250 + 1}"
-    leaf, inters, root, ordered = build(i, defect, depth, keys, wrong, order, sans, lambda k: k)
+    leaf, inters, root, ordered = build(i, defect, depth, keys, wrong, order, sans, lambda k: k, excluded)
     ed_keys += sum(1 for k in keys if is_ed(k))
     if any(is_ed(k) for k in keys[:-1]) or (wrong is not None and is_ed(wrong)):
         twinned += 1
@@ -228,7 +238,7 @@ for i in range(200):
                 good = False
             if good != (lower is not leaf or defect != "wrong_signer"):
                 raise SystemExit(f"case {i} ({defect}): Python's check of {lower.subject.rfc4514_string()} says {good}")
-        judged = build(i, defect, depth, keys, wrong, order, sans, lambda k: TWIN.get(id(k), k))
+        judged = build(i, defect, depth, keys, wrong, order, sans, lambda k: TWIN.get(id(k), k), excluded)
     else:
         judged = (leaf, inters, root, ordered)
     subject = v.IPAddress(ipaddress.ip_address(host)) if defect in ("ip", "ip_other") else v.DNSName(host)
@@ -449,6 +459,16 @@ prove_broken "a search for a chain without a bound" "seven intermediates signing
   '  MAX_SIGNATURE_CHECKS = 100' '  MAX_SIGNATURE_CHECKS = 1_000_000'
 prove_broken "an Ed25519 key off the curve taken" "an Ed25519 key off the curve refused" \
   '    return CurveError.new("Ed25519: the public key is not a point on the curve, or not its canonical encoding") unless CurvePoint.decode(p)' '' curve25519
+# A name under constraints, judged as the host matcher reads it: each
+# break below is the module as it was before SECURITY_REVIEW_TLS.md's
+# finding, one rule at a time.
+prove_broken "a name's final dot kept from its constraints" "a name with a final dot in the excluded subtree: expected a refusal" \
+  '      dns = X509Names.unrooted(written)
+      return "#{written} is no host name for #{name}'"'"'s constraints to judge" unless X509Names.labels?(dns)' '      dns = written'
+prove_broken "a name with an empty label judged by its constraints" "a name with two final dots in the excluded subtree: expected a refusal" \
+  '      return "#{written} is no host name for #{name}'"'"'s constraints to judge" unless X509Names.labels?(dns)' ''
+prove_broken "a constraint with an empty label taken" "an excluded constraint with a final dot: expected a refusal" \
+  '        return "#{name} constrains names by #{c.inspect}, which is no name" unless c.empty? || X509Names.labels?(c, leading_dot: true)' ''
 
 echo
 if [ "$status" -eq 0 ]; then

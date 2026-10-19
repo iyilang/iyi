@@ -493,11 +493,27 @@ class Random::Secure < Random
       result
     end
 
+    # The device the fallback reads. A constant, and the only place the
+    # path is written, so `bench/std_random_exercise.sh` can build a copy
+    # that differs from this module in this one line and point the
+    # fallback at a regular file; the program itself has no way to name
+    # another source, by argument or by environment, since a way to name
+    # one is a way for whoever sets it to choose a program's keys.
+    URANDOM = "/dev/urandom"
+
     # `/dev/urandom`, for a kernel without `getrandom`: read until every
-    # byte is in, a read a signal interrupted asked again.
+    # byte is in, a read a signal interrupted asked again. What was opened
+    # must be a character device, as the other library's `urandom.cr`
+    # checks: in a chroot or a container where `getrandom` is hidden and
+    # someone else wrote `/dev`, a regular file or a pipe there would
+    # otherwise be every key's source.
     private def self.from_device(buffer : Pointer(UInt8), count : Int32) : Nil
-      fd = __iyi_open_read("/dev/urandom".to_unsafe)
-      raise "Random::Secure: /dev/urandom could not be opened (#{fd})" if fd < 0_i64
+      fd = __iyi_open_read(URANDOM.to_unsafe)
+      raise "Random::Secure: #{URANDOM} could not be opened (#{fd})" if fd < 0_i64
+      unless character_device?(fd)
+        __iyi_close(fd)
+        raise "Random::Secure: #{URANDOM} is not a character device, and bytes from it are not the kernel's"
+      end
       done = 0
       while done < count
         got = __iyi_file_read(fd, (buffer + done.to_i64).as(Void*), (count - done).to_u64)
@@ -505,10 +521,38 @@ class Random::Secure < Random
           done = done + got.to_i32
         elsif got != -4_i64
           __iyi_close(fd)
-          raise "Random::Secure: /dev/urandom answered #{got}"
+          raise "Random::Secure: #{URANDOM} answered #{got}"
         end
       end
       __iyi_close(fd)
+    end
+
+    # Whether *fd* is a character device: `fstat` (5 on x86_64, 80 on
+    # aarch64) and S_IFCHR in st_mode's type bits (S_IFMT, 0o170000).
+    # st_mode is 24 bytes into x86_64's `struct stat`, after st_dev, st_ino
+    # and a 64-bit st_nlink, and 16 into aarch64's, whose st_nlink comes
+    # after it; the struct is 144 bytes on the one and 128 on the other.
+    # A failed `fstat` answers no.
+    private def self.character_device?(fd : Int64) : Bool
+      stat = uninitialized UInt8[144]
+      result = uninitialized Int64
+      {% if flag?(:x86_64) %}
+        asm("syscall" : "={rax}"(result)
+                      : "{rax}"(5_i64), "{rdi}"(fd), "{rsi}"(pointerof(stat).as(Void*))
+                      : "rcx", "r11", "memory"
+                      : "volatile")
+        at = 24
+      {% else %}
+        asm("svc #0" : "={x0}"(result)
+                     : "{x8}"(80_i64), "{x0}"(fd), "{x1}"(pointerof(stat).as(Void*))
+                     : "memory"
+                     : "volatile")
+        at = 16
+      {% end %}
+      return false if result != 0_i64
+      bytes = pointerof(stat).as(UInt8*)
+      mode = bytes[at].to_u32 | (bytes[at + 1].to_u32 << 8) | (bytes[at + 2].to_u32 << 16) | (bytes[at + 3].to_u32 << 24)
+      mode & 0o170000_u32 == 0o020000_u32
     end
   {% end %}
 end

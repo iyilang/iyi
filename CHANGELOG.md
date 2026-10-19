@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`Random::Secure` reads `/dev/urandom` only when it is a character
+  device.** On Linux the fallback for a kernel or sandbox where `getrandom`
+  answers ENOSYS opened the path and read whatever was there, so in a
+  chroot or container whose `/dev` someone else wrote, a regular file
+  could have been every key's source (finding 7 of the std/tls review).
+  The descriptor is now `fstat`ed and anything but S_IFCHR is a panic
+  naming the path. `bench/std_random_exercise.sh` reaches the fallback
+  for real: a seccomp filter installed by Python makes `getrandom` answer
+  ENOSYS before the probe is executed, the device is read (two different
+  draws of 32 bytes), and a copy of the module differing in its one
+  `URANDOM` line, naming a regular file of `A`s, panics with "is not a
+  character device" where the module before this read `4141...` and
+  handed it out; the check left out and `st_mode` read at the other
+  architecture's offset are each caught. The program has no argument or
+  variable that names another source. Skipped, with a sentence, off Linux
+  or where seccomp is refused.
+
 ## 0.18.0 — 2026-10-18
 
 **iyi's own library reaches the network by itself: TLS 1.3 at both ends,

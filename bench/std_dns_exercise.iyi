@@ -7,13 +7,16 @@
 # responder on 127.0.0.1 answer packets built here byte by byte - A, AAAA,
 # CNAME chains, NXDOMAIN, SERVFAIL, an answer with the wrong ID, one from
 # the wrong address, a truncated one, a compression loop, silence - and a
-# `Resolver` pointed at them is held to what each should come to. Nothing
-# leaves the machine. Each section prints "<name>: ok".
+# `Resolver` pointed at them is held to what each should come to. The
+# race `connect` runs over a name's addresses (Happy Eyeballs, RFC 8305)
+# is held against a resolver that reads only a hosts file, and listeners
+# on the loopback. Nothing leaves the machine. Each section prints
+# "<name>: ok", or "<name>: skipped" and why.
 
 module bench/std_dns_exercise
 
 import std/dns::{DnsError, DnsMessage, DnsName, DnsRecord, HostsFile, ResolvConf}
-import std/socket::{IPAddress, IyiSocket, Resolver, SocketError}
+import std/socket::{IPAddress, IPv4Address, IPv6Address, IyiSocket, Resolver, SocketError}
 import std/udp::{UdpSocket}
 import std/slice::{Bytes}
 import std/dir::{Dir}
@@ -247,7 +250,8 @@ def respond(server : UdpSocket, forger : UdpSocket, query : Bytes, host : String
     buf = answer_head(query, 0, 1)
     add_record(buf, QUESTION, DnsRecord::A, a_data(127, 0, 0, 1))
   when "multi.test"
-    # 127.0.0.1 holds nothing on the port asked; ::1 does.
+    # Raced, ::1 goes first and holds nothing on the port asked; 127.0.0.1
+    # does.
     buf = answer_head(query, 0, 1)
     add_record(buf, QUESTION, DnsRecord::A, a_data(127, 0, 0, 1))
   when "alias.test"
@@ -343,6 +347,205 @@ def respond_tcp(conn : IyiSocket) : Nil
   push16(framed, buf.size)
   buf.each { |byte| framed << byte }
   conn.write(bytes_of(framed).to_unsafe, framed.size)
+end
+
+# --- Happy Eyeballs (RFC 8305): a name's addresses raced ---
+
+# The descriptors this process holds: /proc/self/fd's entries, on Linux;
+# -1 elsewhere, where they are not counted.
+def open_descriptors : Int32
+  {% if flag?(:linux) %}
+    Dir.children("/proc/self/fd").size
+  {% else %}
+    -1
+  {% end %}
+end
+
+def connected_to(got : IyiSocket | Cancelled | SocketError) : String
+  case got
+  in IyiSocket
+    got.remote_address || "?"
+  in SocketError
+    "error: #{got.message}"
+  in Cancelled
+    "cancelled"
+  end
+end
+
+# The race, against a resolver that reads only a hosts file, so each name
+# stands for exactly the addresses written for it, in that order. The
+# first address of most of them is `hole`: a listener whose backlog is
+# full and never accepted from, on the port 127.0.0.1 listens on too.
+# Linux and darwin drop the SYNs past a full backlog, so a connect there
+# waits until it is given up on; Windows refuses it after about 2 s.
+# `hole` is ::1 where this machine has IPv6, 127.0.0.2 on a Linux machine
+# without (all of 127/8 is the loopback there), and nothing elsewhere,
+# where the sections that need it say they were skipped.
+def happy_eyeballs : Nil
+  probe = UdpSocket.bind?("::1", 0)
+  has_six = probe.is_a?(UdpSocket)
+  probe.close if probe.is_a?(UdpSocket)
+
+  one = IPv4Address.new(127_u8, 0_u8, 0_u8, 1_u8).as(IPAddress)
+  two = IPv4Address.new(127_u8, 0_u8, 0_u8, 2_u8).as(IPAddress)
+  three = IPv4Address.new(127_u8, 0_u8, 0_u8, 3_u8).as(IPAddress)
+  loop_six = IPv6Address.new(0_u64, 1_u64).as(IPAddress)
+  two_six = IPv6Address.new(0_u64, 2_u64).as(IPAddress)
+  ordered = IyiSocket.attempt_order([one, two, three, loop_six, two_six]).map(&.to_s).join(" ")
+  if has_six
+    same "::1 127.0.0.1 ::2 127.0.0.2 127.0.0.3", ordered, "IPv6 first when this machine has a route to it, then the families in turn"
+  else
+    same "127.0.0.1 ::1 127.0.0.2 ::2 127.0.0.3", ordered, "IPv4 first when this machine has no route to IPv6, then the families in turn"
+  end
+  same "127.0.0.2 127.0.0.1", IyiSocket.attempt_order([two, one]).map(&.to_s).join(" "), "one family keeps the resolver's order"
+  puts has_six ? "he_order: ok (IPv6 first: this machine has a route to ::1)" : "he_order: ok (IPv4 first: no route to ::1 on this machine)"
+
+  hole = has_six ? "::1" : ""
+  {% if flag?(:linux) %}
+    hole = "127.0.0.2" unless has_six
+  {% end %}
+  if hole.empty?
+    ["he_refused", "he_blackhole", "he_family", "he_fds", "he_deadline", "he_cancel"].each do |section|
+      puts "#{section}: skipped, no IPv6 loopback on this machine and no second loopback address to stand in for it"
+    end
+    return
+  end
+  he = Resolver.new([] of String, hosts: "#{hole} slow.he.test\n127.0.0.1 slow.he.test\n" \
+                                         "127.0.0.1 both.he.test\n::1 both.he.test\n" \
+                                         "127.0.0.1 gone.he.test\n#{hole} gone.he.test\n" \
+                                         "#{hole} hang.he.test\n#{hole} hang.he.test\n#{hole} hang.he.test\n")
+
+  # Every address refused: one error, naming each in the order tried.
+  nobody = IyiSocket.listen("127.0.0.1", 0)
+  gone_port = nobody.local_port
+  nobody.close
+  refusal = IyiSocket.connect("gone.he.test", gone_port, he, 10000)
+  check refusal.is_a?(SocketError), "a name whose every address refuses is a SocketError: #{connected_to(refusal)}"
+  refused = refusal.as(SocketError)
+  first, second = has_six ? {IyiSocket.endpoint("::1", gone_port), "127.0.0.1:#{gone_port}"} : {"127.0.0.1:#{gone_port}", IyiSocket.endpoint(hole, gone_port)}
+  tried = "#{first} connection refused; #{second} connection refused"
+  same "cannot connect to gone.he.test:#{gone_port}: #{tried}", refused.message, "one error naming every address, in the order tried"
+  check refused.tried == tried, "tried names them: #{refused.tried.inspect}"
+  check refused.refused? && !refused.timed_out?, "every address refused is refused?: #{refused.message}"
+  puts "he_refused: ok (#{refused.message})"
+
+  live = IyiSocket.listen("127.0.0.1", 0)
+  he_port = live.local_port
+  full = IyiSocket.listen(hole, he_port, 1)
+  stuffed = [] of IyiSocket
+  while stuffed.size < 300
+    filler = IyiSocket.connect(hole, he_port, timeout_ms: 300)
+    break unless filler.is_a?(IyiSocket)
+    stuffed << filler
+  end
+  if stuffed.size == 300
+    ["he_blackhole", "he_family", "he_fds", "he_deadline", "he_cancel"].each do |section|
+      puts "#{section}: skipped, #{hole}'s listener took 300 connections with a backlog of one and never stopped taking them"
+    end
+  else
+    he_races(he, has_six, hole, live, he_port)
+  end
+  stuffed.each(&.close)
+  full.close
+  live.close
+end
+
+def he_races(he : Resolver, has_six : Bool, hole : String, live : IyiSocket, he_port : Int32) : Nil
+  at_hole = IyiSocket.endpoint(hole, he_port)
+
+  # The first address drops SYNs: the second starts after the attempt
+  # delay, without waiting for the first to fail, and wins.
+  began = Resolver.now_ms
+  raced = IyiSocket.connect("slow.he.test", he_port, he, 5000)
+  took = Resolver.now_ms - began
+  check took < 1500, "the second address does not wait for the first to fail: #{took} ms, #{connected_to(raced)}"
+  check took >= 240, "the second address waits the attempt delay: #{took} ms"
+  same "127.0.0.1", connected_to(raced), "the connection is the second address's"
+  accepted = live.accept
+  check accepted.is_a?(IyiSocket), "127.0.0.1 accepts the raced connection"
+  accepted.as(IyiSocket).close
+  raced.as(IyiSocket).close
+  puts "he_blackhole: ok (connected through 127.0.0.1 in #{took} ms, #{at_hole} dropping SYNs)"
+
+  # Both families listening: the one `attempt_order` puts first answers.
+  if has_six
+    four_end = IyiSocket.listen("127.0.0.1", 0)
+    both_port = four_end.local_port
+    six_end = IyiSocket.listen("::1", both_port)
+    picked = IyiSocket.connect("both.he.test", both_port, he, 5000)
+    same "::1", connected_to(picked), "IPv6 first: both.he.test is 127.0.0.1 and then ::1, and ::1 has a route"
+    taken = six_end.accept
+    taken.as(IyiSocket).close if taken.is_a?(IyiSocket)
+    picked.as(IyiSocket).close
+    six_end.close
+    four_end.close
+    puts "he_family: ok (::1 taken before 127.0.0.1)"
+  else
+    puts "he_family: skipped, no IPv6 loopback on this machine to put first"
+  end
+
+  # Twenty races at once, each with a losing attempt still under way when
+  # it is won: every loser's socket is closed.
+  before = open_descriptors
+  began = Resolver.now_ms
+  won = [] of IyiSocket
+  group do |r|
+    20.times do
+      r.spawn do
+        got = IyiSocket.connect("slow.he.test", he_port, he, 5000)
+        won << got if got.is_a?(IyiSocket)
+        0
+      end
+    end
+  end
+  took = Resolver.now_ms - began
+  check won.size == 20, "twenty connects raced at once all connect: #{won.size} did"
+  won.each(&.close)
+  index = 0
+  while index < 20
+    peer = live.accept
+    peer.as(IyiSocket).close if peer.is_a?(IyiSocket)
+    index = index + 1
+  end
+  after = open_descriptors
+  check after == before, "every losing attempt's socket is closed: #{before} descriptors before twenty raced connects, #{after} after"
+  {% if flag?(:linux) %}
+    puts "he_fds: ok (twenty raced connects in #{took} ms, #{before} descriptors before and after)"
+  {% else %}
+    puts "he_fds: ok (twenty raced connects in #{took} ms; descriptors are counted on Linux alone, in /proc/self/fd)"
+  {% end %}
+
+  # The bound is the whole connect's: attempts at 0 and 250 ms are cut at
+  # 400, and the third address's turn never comes.
+  began = Resolver.now_ms
+  late = IyiSocket.connect("hang.he.test", he_port, he, 400)
+  took = Resolver.now_ms - began
+  check late.is_a?(SocketError) && late.timed_out?, "a connect past its bound is timed_out?: #{connected_to(late)}"
+  check took >= 380 && took < 1500, "the bound is the whole connect's: 400 ms took #{took}"
+  same "cannot connect to hang.he.test:#{he_port}: timed out after 400 ms: #{at_hole} timed out; #{at_hole} timed out; #{at_hole} not tried",
+    late.as(SocketError).message, "the addresses tried, how each ended, and the one never tried"
+  puts "he_deadline: ok (#{took} ms)"
+
+  # The caller's task cancelled 600 ms in, three attempts under way.
+  before = open_descriptors
+  answer = ""
+  spent = 0_i64
+  group do |c|
+    c.spawn do
+      started = Resolver.now_ms
+      got = IyiSocket.connect("hang.he.test", he_port, he, 10000)
+      spent = Resolver.now_ms - started
+      answer = connected_to(got)
+      0
+    end
+    sleep(600)
+    c.cancel_children
+  end
+  same "cancelled", answer, "a connect whose task is cancelled answers Cancelled"
+  check spent < 1500, "cancelling the caller cancels every attempt: the connect took #{spent} ms of its 10000"
+  after = open_descriptors
+  check after == before, "every attempt's socket is closed when the caller is cancelled: #{before} descriptors before, #{after} after"
+  puts "he_cancel: ok (cancelled at 600 ms, answered in #{spent} ms)"
 end
 
 hosts_file = "192.0.2.50 pinned.test\n2001:db8::50 pinned.test\n"
@@ -471,11 +674,21 @@ group do |g|
     listener.close
     puts "connect_by_name: ok"
 
-    six = IyiSocket.listen("::1", 0)
-    fallback = IyiSocket.connect("multi.test", six.local_port, resolver)
-    check fallback.is_a?(IyiSocket), "a refused IPv4 address falls back to IPv6: #{fallback.is_a?(SocketError) ? fallback.message : "cancelled"}"
+    # A failure starts the next attempt at once (RFC 8305 section 5), not
+    # when the attempt delay would have: multi.test is 127.0.0.1 and ::1,
+    # raced ::1 first, and only 127.0.0.1 listens. Windows takes 2 s to
+    # refuse a connect, so there the delay starts 127.0.0.1 first and the
+    # time says nothing.
+    four = IyiSocket.listen("127.0.0.1", 0)
+    began = Resolver.now_ms
+    fallback = IyiSocket.connect("multi.test", four.local_port, resolver)
+    took = Resolver.now_ms - began
+    check fallback.is_a?(IyiSocket), "a refused address falls back to the next: #{fallback.is_a?(SocketError) ? fallback.message : "cancelled"}"
+    {% if !flag?(:win32) %}
+      check took < 200, "a refused first address starts the next at once: #{took} ms"
+    {% end %}
     fallback.as(IyiSocket).close
-    six.close
+    four.close
     puts "connect_fallback: ok"
 
     unresolved = IyiSocket.connect("nx.test.", 80, resolver)
@@ -484,6 +697,8 @@ group do |g|
     check failure.unresolved? && failure.dns_error.as(DnsError).not_found?, "unresolved? and not_found?"
     check failure.message.starts_with?("cannot resolve nx.test.: the name does not exist"), "the sentence names the host: #{failure.message}"
     puts "unresolved_connect: ok"
+
+    happy_eyeballs
 
     server.close
     forger.close

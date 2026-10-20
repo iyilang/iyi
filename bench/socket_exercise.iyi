@@ -360,10 +360,16 @@ puts "localhost: ok"
 
 # 8c. A connect to `localhost` reaches a listener on ::1 alone: Windows
 #     names both addresses and dev servers often bind ::1, where the
-#     connect went to 127.0.0.1 only and was "connection refused".
+#     connect went to 127.0.0.1 only and was "connection refused". The
+#     two are raced (RFC 8305), ::1 started 250 ms after 127.0.0.1 or at
+#     its refusal, so Windows' 2 s refusal of 127.0.0.1 is not waited
+#     for: ::1 was reached in 2017 ms there when it was tried only after.
 v6_only = IyiSocket.listen("::1", 0)
+v6_began = __iyi_monotonic_ns
 v6_client = IyiSocket.connect("localhost", v6_only.local_port)
+v6_took = (__iyi_monotonic_ns - v6_began) // 1000000_i64
 raise "localhost_v6: the connect answered #{v6_client.inspect}" unless v6_client.is_a?(IyiSocket)
+raise "localhost_v6: ::1 waited for 127.0.0.1's refusal, #{v6_took} ms" unless v6_took < 1500
 v6_conn = v6_only.accept.or_panic
 v6_client.write("over ::1")
 heard_v6 = v6_conn.read(64).or_panic
@@ -371,7 +377,20 @@ raise "localhost_v6: the server read #{heard_v6.inspect}" unless heard_v6 == "ov
 v6_client.close
 v6_conn.close
 v6_only.close
-puts "localhost_v6: ok"
+puts "localhost_v6: ok (#{v6_took} ms)"
+
+# 8d. `localhost` refused at both addresses: one error naming both, in
+#     the order they were raced - 127.0.0.1 first, since a listener here
+#     binds `localhost` there. It answered 127.0.0.1's refusal alone.
+nobody = IyiSocket.listen("127.0.0.1", 0)
+nobody_port = nobody.local_port
+nobody.close
+both_refused = IyiSocket.connect("localhost", nobody_port)
+raise "localhost_race: the connect answered #{both_refused.inspect}" unless both_refused.is_a?(SocketError)
+expected_refusal = "cannot connect to localhost:#{nobody_port}: 127.0.0.1:#{nobody_port} connection refused; [::1]:#{nobody_port} connection refused"
+raise "localhost_race: #{both_refused.message}, not #{expected_refusal}" unless both_refused.message == expected_refusal
+raise "localhost_race: both refused is not refused?" unless both_refused.refused?
+puts "localhost_race: ok (#{both_refused.message})"
 
 # 9. A unix socket: a listener at a path, a connection to it, bytes each
 #    way, the path as the listener's address and no port. Closing the

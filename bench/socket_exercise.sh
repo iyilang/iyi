@@ -80,7 +80,7 @@ fi
 
 echo
 echo "== every socket check reported"
-phrases="connect_accept message_exchange short_read closed_peer close_write ipv6 localhost unix timeout closed_under_read stream"
+phrases="connect_accept message_exchange short_read closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
   Linux) phrases="$phrases reset_after_chunk" ;;
@@ -91,7 +91,7 @@ for phrase in $phrases; do
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, close_write, ipv6, localhost, unix, timeout and stream all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout and stream all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -214,6 +214,22 @@ prove_fails "the peer's address read from this end" peername "remote_port:" \
 # 5. A write to a gone peer panicking, as it did
 prove_fails "a gone peer is a panic" panicwrite "cannot write to socket" \
   '{ sub(/return SocketError.new\("write to socket", n < 0_i64 \? IyiSocket.__sys_code\(n\) : 0\) if n <= 0_i64/, "raise \"cannot write to socket\" if n <= 0_i64"); print }'
+
+# 5b. `localhost` raced ::1 first, as a name with a route to ::1 is: the
+#     refusal names the two the other way round.
+prove_fails "localhost raced ::1 first" localhostorder "localhost_race:" \
+  '{ sub(/return race\(host, port, loopback, timeout_ms\) if localhost\?\(host\)/, "return race(host, port, loopback.reversed, timeout_ms) if localhost?(host)"); print }'
+# 5c. The attempt delay an hour: ::1 starts only once 127.0.0.1 has been
+#     refused, which Windows takes 2 s to do. Elsewhere the refusal is at
+#     once and the delay is never waited; std_dns_exercise.sh proves it
+#     with a listener that drops SYNs.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails "localhost's ::1 waiting for 127.0.0.1's refusal" localhostserial "localhost_v6:" \
+      '{ sub(/ATTEMPT_DELAY_MS = 250/, "ATTEMPT_DELAY_MS = 3600000"); print }' ;;
+  *)
+    echo "  localhost's ::1 waiting for 127.0.0.1's refusal: Windows' 2 s refusal shows it, proved there" ;;
+esac
 
 # 6. The write without MSG_NOSIGNAL: on Linux the kernel's SIGPIPE ends the
 #    process at the first write to the gone peer, with nothing printed.

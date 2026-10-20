@@ -374,6 +374,49 @@
   entry still read, masked); blinding is unchanged. std/digest runs SHA-2 eight rounds a pass with the
   names turned. Tried and dropped, slower here: Poly1305 in 44-bit limbs,
   and ChaCha20 four blocks at a time.
+- **RSA-2048 signatures a quarter faster and P-256 signature checks
+  nearly four times faster, constant time kept on every secret; and
+  `BigInt#inverse_mod_secret(mod)`, a modular inverse in constant
+  time.** Measured with `--release` on the x86_64 QEMU machine above,
+  shared with other jobs (load 6 to 8), the best of several runs,
+  before and after in the same run beside Python's `cryptography`:
+
+  | | before | after | OpenSSL |
+  |---|---|---|---|
+  | RSA-2048 PSS sign (best of 8 runs of 50) | 1,062 us | 784 us | 479 us |
+  | P-256 verify (best of 5 runs of 200) | 196 us | 53 us | 42 us |
+  | `pow_mod_secret`, 1024-bit exponent and modulus | 338 us | 312 us | - |
+  | 1024-bit Montgomery product / square (quieter run) | 237 / 241 ns | 220 / 222 ns | - |
+  | 2048-bit inverse (Euclid / binary GCD) | 234 us | 64 us | - |
+
+  std/big's Montgomery product sums by columns into three words held in
+  registers (FIPS) where it loaded and stored a word of t for every
+  product, and its square takes the off-diagonal products by columns,
+  doubles them, and adds q_(k-1) m_1 last in each reduction column.
+  `inverse_mod_secret` is Pornin's optimised binary GCD (ePrint
+  2020/972, 31 steps on 64-bit stand-ins a round, every choice a mask);
+  std/rsa takes off its blinding with it, where the extended Euclid's
+  algorithm took about a fifth of a signature and followed r's
+  quotients, and std/ecdsa inverts s with it (2.5 us at 256 bits, where
+  Fermat took 10). P-256 verification has its own path in std/ecdsa:
+  four limbs in registers reduced in p's shape (std/p256's field, which
+  std/ecdsa cannot import), and u2·Q + u1·G in width-5 and width-7
+  non-adjacent form, the odd multiples of G made once and kept affine.
+  A full handshake with Python's ssl, the median of 100 (the gate's
+  run): RSA-2048 1.47 ms in TLS 1.3 (X25519) and 1.41 in 1.2, against
+  1.88 and 1.79 in the run quoted above; RSA-4096 5.78 and 5.85 (7.76,
+  7.85); P-256 0.57 and 0.62. Tried and dropped, slower here: the 16-word
+  product fully unrolled by a macro (622 ns), a P-256 square of its own
+  (67 us a check against 52), the column sums split in two (no faster).
+  Left as they were: P-384 and P-521 still read their scalars' bits one
+  at a time, and Karatsuba was not tried at 1024 bits, where the product
+  is already at this machine's cost per multiply. Held by the gates:
+  1,010 inverses against Python's `pow(x, -1, m)`, 2^(len - 1) at every
+  length to 700 bits, the rounds that leave a negative, and ten new
+  broken copies in `bench/std_big_exercise.sh`; P-256 signatures from
+  keys 1 and n - 1 that meet the doubling and the identity in the new
+  path, P-384's for the old, and ten new broken copies in
+  `bench/std_ecdsa_exercise.sh`; one more in `bench/std_rsa_exercise.sh`.
 - **`Server.serve` serves at most 1,024 connections at once and wants a
   whole request within five minutes.** It accepted every connection, and
   past the head's `timeout_ms` a body was bounded per read alone, so one

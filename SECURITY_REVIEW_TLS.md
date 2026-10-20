@@ -366,6 +366,13 @@ Each with where it holds.
   connection without close_notify"). std/http keeps that distinction: a
   body delimited by the connection's close is complete only on a clean
   end, and Content-Length and chunked bodies cut short are errors.
+- **Closing.** `close` sends close_notify, shuts the socket's sending
+  half, and reads past what the peer still sends - to its close_notify or
+  the socket's end, for at most a second and 64 MiB, so a peer cannot
+  hold a close longer - before the socket closes; `abort` closes at once.
+  Nothing is sent after this side's close_notify, an alert included, and
+  in TLS 1.2 nothing is written after the peer's (RFC 5246 section
+  7.2.1).
 
 ### TLS 1.2 client
 

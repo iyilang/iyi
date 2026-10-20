@@ -446,6 +446,28 @@
 
 ### Fixed
 
+- **std/tls closes gracefully (RFC 8446 section 6.1).**
+  `TlsConnection#close_write` sends close_notify and shuts the socket's
+  sending half (`IyiSocket#close_write`), and reading goes on until the
+  peer's own close_notify; `write` and `key_update` are refused after
+  it. `close` is `close_write`, then what the peer still sends read and
+  dropped until its close_notify or the socket's end - `DRAIN_MS`, a
+  second, and `DRAIN_BYTES`, 64 MiB, at most - and then the socket
+  closed, where it closed at once after its close_notify and a peer
+  still sending was reset. Nothing is waited for once the peer's
+  close_notify has come. `abort` still closes at once. TLS 1.2 has no
+  half-close: RFC 5246 section 7.2.1 has a close_notify answered by one's
+  own and the connection closed, pending writes discarded, so once a 1.2
+  peer's close_notify has been read `write` is refused; in 1.3 it goes
+  on. `bench/std_tls_client.py` holds the server to it: close-half (the
+  socket's end within half a second of the server's close_notify, and
+  records sent after it read past, not reset), peer-close (1.3: written
+  to after this side's close_notify), 12-peer-close (1.2: nothing but
+  the server's close_notify after this side's) and 12-close-half.
+  Broken copies of the drain, the half-close, the close_notify and each
+  version's write rule are caught at those scenarios. The drain decrypts
+  what it reads, to see the close_notify: 8 MiB took 0.04 s in a release
+  build and 0.21 s in a plain one.
 - **std/bzip2's Huffman tables stay inside their memory whatever the
   code lengths.** The fast table was filled from the lengths after one
   check - that they do not over-subscribe the code space - and without

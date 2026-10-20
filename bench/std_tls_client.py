@@ -232,6 +232,15 @@ SCENARIOS = {
     "hybrid-long-share": ("an X25519MLKEM768 share of 1217 bytes", ("alert", 47)),
     "hybrid-modulus": ("an X25519MLKEM768 share whose ML-KEM key fails FIPS 203's modulus check", ("alert", 47)),
     "hybrid-zero-x25519": ("an X25519MLKEM768 share whose X25519 key is of small order", ("alert", 47)),
+    # The server's close (RFC 8446 section 6.1): its close_notify, then
+    # its sending half shut at once - the socket's end within half a
+    # second, where the drain it then waits in lasts a second - and what
+    # this side sends after it read past, not reset, until this side's
+    # own close_notify.
+    "close-half": ("the server's close: close_notify, its half shut, this side's records read past", ("held", "half shut, then read past")),
+    # This side's close_notify ends its writing alone: the server still
+    # writes after it.
+    "peer-close": ("close_notify from this side mid-request: the server writes on", ("held", "written after the client's close_notify")),
 }
 NEEDS_MLKEM = ("hybrid", "hybrid-hrr")
 
@@ -301,6 +310,11 @@ TLS12 = {
     "12-pss-first": ("TLS 1.2, rsa_pkcs1_sha256 listed before rsa_pss_rsae_sha384", ("held", "TLSv1.2")),
     "12-pkcs1": ("TLS 1.2, PKCS #1 v1.5 alone among RSA's schemes", ("held", "TLSv1.2")),
     "12-renegotiate": ("a ClientHello after the TLS 1.2 handshake", ("warning", 100)),
+    # RFC 5246 section 7.2.1: a close_notify ends a TLS 1.2 connection both
+    # ways - the server answers this side's with its own and writes no
+    # more; and its own close shuts its sending half at once, as in 1.3.
+    "12-peer-close": ("TLS 1.2, close_notify from this side mid-request: the server writes no more", ("closed", "echo:ping")),
+    "12-close-half": ("TLS 1.2, the server's close: close_notify, its half shut at once", ("held", ("TLSv1.2", "half shut"))),
     "12-no-ems": ("TLS 1.2 without extended_master_secret", ("alert", 40)),
     "12-reneg-data": ("a renegotiation_info that is not empty, on a first handshake", ("alert", 40)),
     "12-fallback": ("TLS_FALLBACK_SCSV, TLS 1.2 alone", ("alert", 86)),
@@ -1005,6 +1019,8 @@ def scenario(c, name, offer=None, extra=None, replay=None):
         got += data
     if taken and name == "early-request":
         got = early_answer
+    elif name == "peer-close":
+        c.sock.sendall(writer.seal(23, b"ping") + writer.seal(21, b"\x01\x00"))
     else:
         c.sock.sendall(writer.seal(23, b"GET / HTTP/1.0\r\n\r\n"))
     while True:
@@ -1016,7 +1032,29 @@ def scenario(c, name, offer=None, extra=None, replay=None):
             raise
         assert type_ == 23, f"a record of type {type_} after the handshake"
         got += data
+    if name == "close-half":
+        half_shut(c)
+        # A server that closed rather than reading on resets the
+        # connection at the first of these, and the second send breaks.
+        for piece in (b"after the server's close_notify", b"and more after that"):
+            time.sleep(0.2)
+            c.sock.sendall(writer.seal(23, piece))
+        c.sock.sendall(writer.seal(21, b"\x01\x00"))
+        got += b"half shut, then read past"
     return "held", got.decode(errors="replace"), SUITE_NAMES[suite]
+
+
+def half_shut(c):
+    """After the server's close_notify, the end of the socket itself: its
+    sending half shut with the alert, not when its drain gives up."""
+    assert not c.buf, f"bytes after the server's close_notify: {c.buf[:20]!r}"
+    began = time.monotonic()
+    c.sock.settimeout(3)
+    rest = c.sock.recv(1)
+    waited = time.monotonic() - began
+    c.sock.settimeout(10)
+    assert rest == b"", f"bytes after the server's close_notify: {rest!r}"
+    assert waited < 0.5, f"the server's sending half shut {waited:.2f} s after its close_notify"
 
 
 def prf(hash_name, secret, label, seed, size):
@@ -1334,7 +1372,12 @@ def scenario12(c, name):
         # message's pieces, as SECURITY_REVIEW_TLS.md's finding 6 asked.
         hello = client_hello12(b"")
         out += writer.seal(22, hello[:len(hello) // 2])
-    c.sock.sendall(out + writer.seal(23, request))
+    if name == "12-peer-close":
+        # This side's close_notify, which the server must answer with its
+        # own and nothing else: what it would write after is discarded.
+        c.sock.sendall(writer.seal(23, b"ping") + writer.seal(21, b"\x01\x00"))
+    else:
+        c.sock.sendall(out + writer.seal(23, request))
     got = b""
     while True:
         type_, data = reader.open(*c.record())
@@ -1345,10 +1388,17 @@ def scenario12(c, name):
         assert type_ == 23, f"a record of type {type_} after the handshake"
         got += data
     text = got.decode(errors="replace")
+    if name == "12-peer-close":
+        return "closed", text
     assert "TLSv1.2" in text and SUITES12[suite][0] in text, f"the server says it agreed {text.splitlines()[-1]!r}"
     # The group the server says it agreed is the one its ServerKeyExchange
     # named (`named_group`, in TLS 1.2 as in 1.3).
     assert f"group={GROUPS12[group]} " in text, f"the server names its group {text.split('group=')[-1].split()[0]!r}, not {GROUPS12[group]}"
+    if name == "12-close-half":
+        half_shut(c)
+        # RFC 5246 section 7.2.1: answered with this side's close_notify.
+        c.sock.sendall(writer.seal(21, b"\x01\x00"))
+        text += "half shut"
     return "held", text, SUITES12[suite][0]
 
 
@@ -1401,6 +1451,8 @@ def main():
             print(f"{name}: ok, {outcome[1].splitlines()[-1]}")
         elif kind in ("alert", "warning") and outcome == (kind, want):
             print(f"{name}: ok, {kind} {want}")
+        elif kind == "closed" and outcome == (kind, want):
+            print(f"{name}: ok, {want!r} and then the server's close_notify alone")
         elif kind == "ended" and outcome[0] == "ended" and outcome[1] < want:
             print(f"{name}: ok, hung up after {outcome[1]:.1f} s")
         else:

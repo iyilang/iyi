@@ -543,7 +543,14 @@ def serve_one(conn : TlsServer) : String
     end
     chunk = conn.read
     return "held #{agreed(conn, early)}, then #{chunk.message}" if chunk.is_a?(TlsError)
-    return "held #{agreed(conn, early)}, closed by the client after #{received.bytesize} bytes" if chunk.empty?
+    if chunk.empty?
+      # The client's close_notify ends its writing alone in TLS 1.3, and
+      # this side writes on (RFC 8446 section 6.1); in TLS 1.2 it ends
+      # the connection, and the write is refused (RFC 5246 section 7.2.1).
+      after = conn.write("HTTP/1.0 200 ok\r\n\r\nwritten after the client's close_notify\n")
+      conn.close
+      return "held #{agreed(conn, early)}, closed by the client after #{received.bytesize} bytes, then #{after.is_a?(TlsError) ? "a write refused: #{after.message}" : "written to"}"
+    end
     received = received + chunk
     conn.write("echo:" + chunk) unless received.includes?("\r\n\r\n") || received.includes?("\n\n")
   end

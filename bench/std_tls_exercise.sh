@@ -2744,6 +2744,23 @@ if [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1; then
 else
   echo "  no openssl here (or Windows), so the server's TLS 1.2 exporter proof is unmeasured"
 fi
+# The close (RFC 8446 section 6.1, RFC 5246 section 7.2.1), against the
+# scripted client's close-half, peer-close and 12-peer-close.
+prove_broken "the server's close without its drain: closed at its close_notify" "FAIL close-half " \
+  '    drain unless @eof
+' '' server
+prove_broken "close_write's half-close skipped: the socket's sending half left open" "FAIL close-half " \
+  '    shut = @socket.close_write
+' '    shut = nil.as(SocketError?)
+' server
+prove_broken "close_write without its close_notify" "FAIL close-half " \
+  '    sent = send_protected(TlsRecords::ALERT, [1_u8, 0_u8])
+    return sent if sent
+    return TlsError.new("the socket under' '    return TlsError.new("the socket under' server
+prove_broken "TLS 1.3's writing refused after the peer's close_notify" "FAIL peer-close " \
+  ') if @tls12 && @eof' ') if @eof' server
+prove_broken "TLS 1.2's writing let on after the peer's close_notify" "FAIL 12-peer-close " \
+  ') if @tls12 && @eof' ') if false' server12
 mutations_report
 echo
 if [ "$status" -eq 0 ]; then

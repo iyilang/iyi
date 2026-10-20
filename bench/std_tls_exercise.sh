@@ -134,8 +134,10 @@ else
     sleep 0.5
   done
   if [ ! -s "$SERVER_DIR/port" ]; then
+    # The end of the log, where Python names the exception: its first five
+    # lines are the traceback's frames and never say what failed.
     echo "  the scripted server did not start:"
-    sed 's/^/    /' "$WORK/server.log" | head -5
+    tail -5 "$WORK/server.log" | sed 's/^/    /'
     status=1
   else
     scripted=yes

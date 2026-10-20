@@ -1336,11 +1336,11 @@ SCRIPT_X25519_PUBLIC = bytes_of(X25519.public_key(SCRIPT_X25519))
 SCRIPT_P256          = P256PrivateKey.from_pkcs8(unhex(FUZZ_P256_KEY)).or_panic
 # The script's ML-KEM-768 key, for X25519MLKEM768: its encapsulation key
 # and SCRIPT_X25519_PUBLIC are the hybrid share it sends.
-SCRIPT_MLKEM         = MlKem768PrivateKey.from_seed(Array(UInt8).new(64) { |i| ((i * 7 + 3) & 0xFF).to_u8 })
-LEAF_SEED            = unhex(FUZZ_LEAF_SEED)
-CLIENT_SEED          = unhex(FUZZ_CLIENT_SEED)
-HRR_RANDOM           = unhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
-SUITES13             = [0x1301, 0x1302, 0x1303]
+SCRIPT_MLKEM = MlKem768PrivateKey.from_seed(Array(UInt8).new(64) { |i| ((i * 7 + 3) & 0xFF).to_u8 })
+LEAF_SEED    = unhex(FUZZ_LEAF_SEED)
+CLIENT_SEED  = unhex(FUZZ_CLIENT_SEED)
+HRR_RANDOM   = unhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
+SUITES13     = [0x1301, 0x1302, 0x1303]
 
 # Bytes of a template the peer makes live as it sends it: the session id
 # a ServerHello echoes, a signature, a Finished. A mutation that hits one

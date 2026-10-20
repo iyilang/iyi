@@ -1,0 +1,360 @@
+# Exercises `std/mlkem`.
+#
+# Run via:
+#     ./bin/iyi run bench/std_mlkem_exercise.iyi [-- VECTORS.json]
+#
+# With no argument: a few of NIST's ACVP cases for ML-KEM-768, embedded
+# below, then round trips from fixed seeds, the implicit rejection's key
+# for tampered ciphertexts, and the refusals of FIPS 203 section 7 - no
+# file, network or Python. With VECTORS.json, NIST's ACVP vectors in the
+# shape bench/std_mlkem_exercise.sh writes them (bench/std_mlkem_fixture
+# has the vendored subset), every case of each kind is checked first. The
+# other modes the gate drives:
+#   oracle   reads lines from standard input, answers a line each:
+#              g SEED     -> EK DK          (the key pair of d || z)
+#              e EK M     -> C K | refused: why
+#              d DK C     -> K | refused: why
+#            everything hex;
+#   cost     what a key pair, an encapsulation and a decapsulation take,
+#            and decapsulation of good ciphertexts beside tampered ones.
+
+module bench/std_mlkem_exercise
+
+import std/mlkem::{MlKem768, MlKem768PrivateKey, MlKemError}
+import std/digest::{SHA3_256, SHAKE256}
+import std/json::{JSON, Any}
+import std/file::{File}
+
+def check(cond : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless cond
+end
+
+def b(hex : String) : Array(UInt8)
+  p = hex.to_unsafe
+  Array(UInt8).new(hex.bytesize // 2) do |i|
+    hi = p[i * 2].to_i32 | 32
+    lo = p[i * 2 + 1].to_i32 | 32
+    hi = hi >= 97 ? hi - 87 : hi - 48
+    lo = lo >= 97 ? lo - 87 : lo - 48
+    (hi * 16 + lo).to_u8
+  end
+end
+
+def hex(bytes : Array(UInt8)) : String
+  digits = "0123456789abcdef".to_unsafe
+  String.new(bytes.size * 2) do |buf|
+    i = 0
+    while i < bytes.size
+      buf[i * 2] = digits[bytes[i] >> 4]
+      buf[i * 2 + 1] = digits[bytes[i] & 15_u8]
+      i = i + 1
+    end
+  end
+end
+
+# A deterministic stream of test bytes: SHAKE256 of a label.
+def drawn(label : String, count : Int32) : Array(UInt8)
+  SHAKE256.new.update(label).read(count)
+end
+
+# NIST's ACVP vectors for ML-KEM-768, a few cases of
+# bench/std_mlkem_fixture/acvp_ml_kem_768.json embedded, so the exercise
+# checks known answers with no file: a key pair and an encapsulation, whose
+# long outputs are held by their SHA3-256 (computed by Python's hashlib
+# from the vectors), a decapsulation of a modified ciphertext, and an
+# encapsulation key the modulus check refuses.
+KAT_KEYGEN_D       = "e582b7d75e6c80b05ae392a1fc9f7153b12390fd99930368cc67a768baebc8a0"
+KAT_KEYGEN_Z       = "1cdacb8740c0b87c4a379575f187b367cbfa3b300bf591b109f79816e9cbe8f0"
+KAT_KEYGEN_EK_SHA3 = "81e66ef5a7a221619f6a64039cc369843e10df5c859f6959cc3fd8e5272330fd"
+KAT_KEYGEN_DK_SHA3 = "be81068c104cd6cf8efd800b294f4a15bb8a8050993fd54a2cc428841ef6ca44"
+KAT_ENCAPS_EK      = "9c6839354086919bc7b8a547ff18b523075fd1706856400952489e4cd13ed8b17a817a3076e0947b860ec9558bd9d3c94df5418a7a7301763999c09996715ce32aacfef767a44969925949cc9b8120cb78953bcf6fb8282427cb3f4cbbc50ab23274493a8ba7e5c09088160fda731b55980867912bac53125b27073bb502afac5e74973e0f3601dc50ce08cc7f3fa44ce331a43f9673be745295e693077264a8e238f0a912c0a59c44d561e2a8bd831541fe869b3110b051100db3517f87510ecad8651ce4998bb648002ba41a5351fa2a4ed94a58cb707214a59f8876176cf82fceb99364971c7c0896e8b62c0544463ff101983c2045981ccd9173eb33ba18483ed915bd11ea950db3a8787c105263242e3a64c748b8b1a5947880c5bf3896e08b4b9916a39fd70c2ff8bd041a2b18e251d16a276e38100a613ea96a86cb3652dcc83f2d31cd9f8b79e42541a66752d191436cf5b5d8350ee7835cdb122855392c1da5c33fda12ad1028f2806861a2ab9c63785fd11e220346322c250936ab819254734a8dc9241971ac90cda6696adb90d1e327dc977841aba38324c8fb2092784942003a0808e5546d034592f03bacc19e3138c9070ccea80a933d536c49e4771091af8a70207d474574c64b9f1c8e47224174061117e98c18897a7b1b3c4478c6558c321a89a84b6c508947cb61c89204fbca43bcaa1d688f768b02e50babebf0c5fb8962b2355973c4193fa92e0ce4b9f8473e154828c986bf63e1cd985c6f0462c9b4374594d226c5e99b8a844978db8dd2839e27138aacf75e917635cec4b407a54f184c22f62981b9f4552fb334ff2b7ff68b470fd61b993c32581cc0f39881a5a6a769a60297f4b0579acbf52a8abb143885886245ca2636e20498959e4f2857ab96706e6409c4164ba88c7193e568e4446120215a6d8499c6b4bc559628a9f481c7db51e2e10df1f4339a647b4ccc0405b79f70a90ca9a8ad07789222ba6e66c3aff42b61baa637af15126c88b2e210a7cad9cb08cbb5123a7f9bb4ad63daaea6b43f9aaba561212823cb898a676c967b2d64f4b6333439f8993bd7b19687248926e077a9700431a59157b9668ee022b6d31343f15c08f14488877dfb30a552c06f96a16f354b9a3f19090b32a043b43256ba5b1088b56a4125588c8746d4099ea21c4f33ad8c5c7c32286dee2ca76fc2651d57aee9d847824ac609b5bfd5c87316c2afe0e153d6326af89987ecb70cf0a0a77fa000e0e0acc2685e2317429c3a7513f42873cb98f669703ae9146919226db58d6c2b93b6f50c7cdab677b505945a0f2523886c1b82a6a7cc7eba9251096d88360d7ef6473acbcd359a0d20414b95c209b2413b1483a3a061386377b28e3896bcd8c5e2692681cc803e1694efb6ce353082ffca4079ea9bb7b2025bcb68990466ed2803ab11516d80325dc4cde3da9e020653e084c45f837c88711df3aa6075741c1283121c8b1c691013969a62b2563e556206cf0810848691c7c408d018617a7300ad943e189a9b44512ef13b669831392f1329e2ac7c623aa044223079139b7f1c213e93682ed86165468377d40884310163a5539f27745e667adf506896ba933b002e4d50b2497ecff09d0bbca4f7e6f9db9e10c643d23701bd6385e163cf71c1e919a6e20a"
+KAT_ENCAPS_M       = "4e77596168711e913965d8175ac3bd76aab08b7f9385a02ae883cf6c6e17dd81"
+KAT_ENCAPS_C_SHA3  = "684da17d93e27520cb78ae6169c020d73ef770e6fa89589cc7d653a76a8b1751"
+KAT_ENCAPS_K       = "79d74f6c6c2d916bec47bd828fd9b67295a37f54927fab1263c0d122f1c6f1ed"
+KAT_DECAPS_DK      = "5de17b5a596d15390d5695541cb03fae4073e601c7557894ab341fc31982bba0c92e04badd2a826fdc166e72af2838703fe94f87bab64cd971879b6bb8c84a52c318834c46ae1028cb839fd912773714c651dbadd69a7323e1193059bd4799b14f5cc2ca92219780b3befab65c91b637023b4baa4a63a37d83240393442bb9386b625a977a5388abb435fb3453e34633a0b803ec28be691c258fe610364b89557c7809357a4c691925ac7d4bd2621f76a07a4b26b3b45a109957d6e236e8359271f8b4fc054af05158ed6026140543f2d905cc144c3436c966e92e89aa24885c044eca3610921cb1a508e71b2a3f979e0a33c1edb61c2303057842c937453904c80f4542bf5db886636c8bc392cba8b74afd210b3d3400b7257ea2c2ab03d577c95170d5c7771c54b63f9c6030cb6f02f9516502c478002af1bac2e11b58ec2009fb085aa8b48c51d4b13375679e7742cb97548b1b8861216e3b739146487405466ccbe1a3ebeb9c6553013cc86ea0fb2cdfe8bb93e38e66b762af97a98ad17b6f6b1afa935a50bc3e7154229904578fb90d07030ea8716a1af9c787f789d4b2174673131021092a84145d183421ecca36142f4316614c2001bb33ce044c257eb592b3c57fa7cb7a3e1ac24da08c15a5a0af31900fb2147bd83da4d58b6aa5a109608d53b0a86aa13147435a6fdbad926bb65b83b0df6c432af258f2ac57abb63dd5e6c272c50e5d6ac34fba51573245d3a06a1d593fae29240883883a5c5b25058b99f49ca6894e9ac225bf44213537204e824c46f9704b89c3c16a52bb133781583317968010c86758c5bf7c190c34b8b7331b8242c84cc96278ae586f8472225e795663b379a93c4696407c00504c810c5fc499a98ba67c0ad6718ba32d4049713b65147ab1192fb46a2ea7023423aeb6526a80585f551610abd45726864e0af9482f498822778471cb895d1cb1aaa144409873b1eccaecf65a5f5298cab685caa0a193584943dcbaa84c255df35ce752630a110a988536c8e02ff0554b5725221ef98614e1bdab923bf222567882869bc819ad470145589d3d749372333ba5977e2664c56c729e7005b4500544184652d2e1653f813c4829c8787a6e63aab5ee171c18ba4b0c5b3994da4af6c5399c71c910811bdbf48d0267737cf6a7917b80d6c76aea1c091c943d1dfb1b6f280414d93898e759717509770b215aeb819dd4b1c425cde0259791129f090ab15d81488adc92bd8707edf3c1ebe228cc01c8d2dbc7c7024b96b2125b965af626aaabfcb7ec2c1a33487c8bd3745fe49c7869172e1b6a8d92632d712b56886732e480d4100a36d8b8b56107a26c8cf6f5a07d51b9ba54a52c9a40ad4c31eb687acd445d580107b6948119e555c0c357a8e0bbb8c62404c46d3b232c8f0a40af3b7a05b8bb71f04ed5eabec380b75bbb4d262ba1da07c11a958f04cb6483b4737462c2a9a346761c22888a99233511c31a0fb1cb7c97d6a3fbe78addb6c8df1575d7293e98d3cba1dab3d393a55f3c73a38b8ccd6bcc42b31274cbb7c46acc8c56a85e58bd5f49b736423bf9a050f4e5cb6d395f499624046011c3b02e7b98a02e9b6fb561298da8883ec2b2de4a2db0aa938c6a9c67a137342bba5a1a7191c17411a649e9b9b47f0c3522264c38f66437438c7b75588787bb03b1c073d668b355239e7502840a7183e9c9e49270a1339941e17733792d4beabe4dc50a2351a3f1aa11323490511bb00371ad9ae72f4589bd5da732ea52892d8a6f98386e67d3b8cc97af61ca9c15c23a97725ba5c820452786cccc34751ccf13f72d2af1a0b7f81f698b5b8ff9a2cd5b076d23a6219ca9457338236c743360cf9e8a19dc83cea7f5be17d084835b8ed700cb0a1c9d7cdcc4f5526b63c34d623749c9992a19957aa5c0894a623821acc3cca0b9410c0f8cd59757c53899c1a0d327733c0b7f1961b0c74b9ddbac662c166c5f787141f81d19b907e8a042fd2b01794b8968486e69fa02fd136ded53c6a633899a368442acca49f66eb4766a16247128c38b7e0287d3bbb1594324d6b1c9c80a368c5903a0080ebdf6c72a27aa10286859382349d39f9c91acb06800152b9edc9cb965a5ac9e7c8a6f1439b18b2fe1942c9b9943ee830a7adb5eec6501f593361e0c95625b7497a02a30173faf47c74dcc4e99a436864a5110130b2b6c8007015d1ebb15c232bf91ab19dca7711ed97d98637e051a1e686b21f9eaac8652129b69102eb4a4ca0906ec9489daea054dbb7afbcca5c4c8c511b753e8847224f95a3fc8b12a65614c8c04ef58a56ebc1170a48886f04e24976411e88e44220f1ce13bba414775e463e9826572b6a879625b348aabc7a6445e95052c77b13db39f1c719ff597b688a73a23d7912c3ac06b6b8324153e3b2b4c63b361be77267573c5f2a88477a25971778151a96b1c8c3033d0a43c7378736a2caf73143e3cc348fa239f74a3ddd51cf10acfd78735f1136576c97718d7822635b2bdb159ca2701493489f4fc8ba27a5c891abf9d73316c7583248956bffcbb790c3519b010018887fc891d98b33aa62582f0d9cd790626afe183269834c742589497155c5545706c0e397b25909b18ec3c734b824a6095c2b0843a0a165a88729dfc1bc0319797946ba4e3d85e3d20b1e0cb1eab0547ea30c41056835d3c78a7487f6cb774b9d68f7e613f5668717bf81498617fcbc730f93377656c9a6033347a4ac0749374ba8807e2440758788cf7056f9480936524608704281499a7b04a46fb595c7bd274568b2c7007442059bff1851795739568334b2dd3517092632d839961f7a2b23b33cc3831217ab6ded0a413118f369b859507ad1eea019d0c82b1341146b58da521535e55904ac7145bdc7174c82e5bc877dafa993049ceb9d3ac2a81955c5508cedc1331a28bce2827d127a0109a8512fb78bbac2cfeb31a997a091af60414e637597a3824684213588386055e64a515da5a5c670a81ac972b2f6cc6e82abff1150bf5901fb0f0186f4ab76ee22a3638a0018c8dfa04777357cdc5c667f0f81e1b6a833e67529c71854bb32d206b39ab3247db61ac2874344d82a8b818178c8589e5419d558414f3fc53b72823357b0b50138d4c80864db3685944732793467f5989f283589178994aa63b01a68d2ac8cad2f3b3b62c6f5aa7ad4bc2cabaf306dc37cf46428855f23e6988bd2b21349bc1223a819b54473f397c60f6d4777dd1775e3685ead34b9a162c0625e876dd243debe6b4d6e1a2829abdf70d120c02c34ce876bec17a724317826d17b0b62b5fd188ab789f3e51172428146a05978d22a98642c3ae4003571a76168392f72fdfb415510f1125c8bf5f5474a27277b71147c9eba71cab9a"
+KAT_DECAPS_C       = "c4ff0334ee9e01b04014ca57fd3c1f02f6b4fa91490864fe7be3f3601a0ba87791c73ac5a54097fbf4c21a8c5051a5ea8a32150ac7f4dda59280afcf938b6b5e7a023235c2aa330cdc0a976c5387bf1e92ae9c9d195436904cc9a4f9d7f2fc90317957b9744a6f4278bc48094bfe26c9aa09cafe0d7d8e1fc04416ad27c37e950dbcfb696a6f9bb96325f99d7143770e9f45c1e011bf6b9e550f28e8dc151d561a0b3048b1fcc07b2ebe0790a589a16c7bc75fff4cdc90dfb571bcd0dce00dcae5495b54f66881548a0fdbd1b90e529ad7fa2921874088c96af8fb99c7f621560ecc6691c69a8d02322d671f67d67c663bba9b0ba451798eefb2c148324961c145737325731fd6b8383137400409478737e792f072a0ed2e7f43768cd132eccdbbb393ac435934d1fb8adc17551d3c2a1d9db4c205888f58b630c80f2c98eda00b7e6f2e3e0c6d4124866964c98bd086daa126215a98293957c6ad68724b2bd0e4cf55a45fec8c03622b3b358d3fb45b619d3286e5d7bc429d9e06342b38485767bca1898691208b4786a3258be2e9a6bb5ab2ec7b8cf3752bdc0e4e6767f5e46d7221bc8e8bd69f36f1b14c6f4b15272b780c18fa118aac52a390a28e8862773789113371cdcefdc4b45547be5f26a9bc3151fcb87fd9c50a99cf4338562023a15b13860aff9daac05a2409834c0b68ee3a635261053546407e8cfa75046f55978ad9b2afecc8a79d35b8349e0a33f90f23ad6648761f400228d83fa22366f0d2613814b505c29069fa8f3cb0b6143de9baf4e9dfdaf2b606cc577d06d2b32794c41199f06517a475313fc9f9d433099fc7b310c99fbaa132082b05c332b00cb3871d2dcc60fa33f8956074b87a2c1e4ea6609670f0e81dfd75ad8b68ddc91217127930659c6a29e07a9e5102908e218f101d5feec11f9c3e759e381e74379f648c29f7033bb58afca6590f0f84fee54510a78ed12528c960a93a691ff1667e319d641f97c16cf1d45399daa03bd5ea15c806f19d4e759d641fe1071449cf4e13c70d1c58d2265d53eb07a5cbe012cf9fd6768221d27e69d727af657e2151593207909d1ca11a8c96e2ccca095c3bb811c87ebe14e995ffb7f763b47ed0eeb604a0cccd74ab0c29dfcfe3b4620f5e8eb3ffd74ae9bc7a6b48ae4651d430871d4651e64c2b2fbe5701e2c64e20f5279157b55e3e9d166caf03fbaef2472e960d1a0160a92f42d1834b5d493e52e9d0897dbfaa373208eadc16fcff3ce8ae40226a469abc60b9a1b67244c5aeebf1abaecfe9dd9f9c1183f125d3b6172afb2c6cc29125a9f8c3a8b31fa880fc447719c5e58c50c4199e17ef9a061eab483bbfe370f277b9ca09b3e3e6ff39e97ae392c0ef0b623f9be056db4d21e7704b5127d42f7fea27fea8f9186044e49d2c2d51758329c8cab35b00df58c91a5e2f6fc6faafcd2037ba982052f02f204508c9b2c7d6ef53955372010fb3505c8c8e27677ef37ef07bd619342aa3fa6de31eb7e6089ef5f0bf9c4aeb024f9161897906c643"
+KAT_DECAPS_K       = "2cfb695710a6c4377f46c20c13480aef7ac56030d47a0ab5af07ddd6062c28f4"
+KAT_EK_TOO_LARGE   = "026dbca9319a20dcbd8aa0ae721344710493091c20de43273a821043b0ca062a37af3a4dbe33b503d01375ba11f06a4f10c7a961746f68456b013449f3e416d0e63a40740a1123c5c1051ffdc8ac8bf9c5ea1246ca16a9f7fc1c8e750cd0c40f18584a473a0719591f1040c2d7db72add962ac278a96b4836c1b6f2c33b6acc30e4865487b1cb2ea609cef60cd7715715ecc1d0a541a7286962c26adbad87f216c5c6073c579153371a767172784f5eabae70773102b0728d422b1a8b51e09ac56f8a11f4b40f70b9d7e7380130c977563c6f50ba07641c3633363d102a11d3956cb363ecdfac9e82467715319de73bd82931803b09b9e52315f3b9e90d634e7b43a097b020f20613fe42ad941a88e7461d831cce093cdb88331e8283cc0e18be0c40f89523ebf09ad35c5c4c44708d4e028e6269bbd7721c8f5c2dfc5570f6cb9721b6d9bc303d7c525646539a809200bf3cc30f902eac04471fb79744cb82beacc31d97eec934caa13bd607717c811241e4379762464713630d4fcadc9e890a6a96450a786b5849108602951960ac9da84f10a97b04b66e7304cf234804edaab8c9355bf05af2c6346a694c87a90013779904e183d8cf7bda6950b58fa4a78195bcc7659bb040e6a642741b90e4e27292340a7224b2cd6d53f21311a497516030606eb206ee9625fb0db621ba10efc604f2f696d11e667efb24319193e16c45e317ba0e7120a0012cdd33a62356135f3e18af837ca868294e7a92f2670492c0996538360b375294e47313af78418aa262c96cc2986332f7107afd50c53443c97161858363bb821625ba209dd40aac3bc48f4c8069a2535040436f799421da205f5b729f31a7e1469883d07bac1b62a6cbc7811646b51134cf27b307fa3a61cf9cc0b6393c0859f91abc734ec9aa573375674134de65bfedb39f5e546cbf0cd98fc5c16b36408ec058a5142035abae46594bb2a5fb1bacfb648515b6672ad04a88239bcfe4c4dcab768ab9294cda37716e62fc08c4e0c1aba58565919e19b17b795f3a37a3475a499131fee57b7aaf8b7fae64207d4b2e32632e4632920278edb864d61d4b1e8c62a2bd42dc980475e1ccf9061c64b573bad7ba2f799c5a37054ef3586be94056a49712ce94743c3236937053974c9b8e274f6d7a0b0d427f565a37c9aacb0242e7c2c86d01630c8627373ea951325476c1a617a845749582e93c724b4c032b8106fe4f101d99baa5e4b9f3dfa8205279c2927834b6412b73c84e9f3a5e398aa5f0456de89a10f381d840c19ef92b4ffd96da90566c51ab5e8eb7adc5444a76b59a61cbfde1b889e744d1e389b90eb5bf1888e7c42accf28c5c34a63e0e36e64e99636b07ae6255f1bf980a887cd65f2467eab30071533f4d0b1f454811c3303176a9e8d4140f57b538d89b794d7c069050637f9a7ed6badb2a910064b21cdda813fd4cf2cdccdf58cbad33c3777a930eb9aa4a2bb1cd22c7b3ba17b6905a8fe96875de00c34757202581823250133915acc659559215e5490263975225f29ac8aca24cc6888a4d77927687a69344a57ac819e7780a7aba782ba0af0886826d20040b537719c87d99aa4b4601acfa7cfa61bba07ecc9c3a75ce3b01e0a163f1b8ed4d9ad2ae714111a25290cdd167d42f6f56b767583f78cac"
+
+# The best of five runs of 200, in microseconds.
+def best_of(& : -> _) : Int64
+  fastest = 0_i64
+  5.times do |k|
+    t0 = IyiMark.now_ns
+    200.times { yield }
+    took = (IyiMark.now_ns - t0).to_i64
+    fastest = took if k == 0 || took < fastest
+  end
+  fastest // 200_000
+end
+
+args = Program.args
+
+if args.size > 0 && args[0] == "oracle"
+  while line = STDIN.gets
+    words = line.strip.split(' ')
+    next if words.empty? || words[0].empty?
+    case words[0]
+    when "g"
+      key = MlKem768PrivateKey.from_seed(b(words[1]))
+      puts "#{hex(key.encapsulation_key)} #{hex(key.decapsulation_key)}"
+    when "e"
+      got = MlKem768.encapsulate(b(words[1]), b(words[2]))
+      if got.is_a?(MlKemError)
+        puts "refused: #{got.message}"
+      else
+        puts "#{hex(got[0])} #{hex(got[1])}"
+      end
+    when "d"
+      key = MlKem768PrivateKey.from_bytes(b(words[1]))
+      if key.is_a?(MlKemError)
+        puts "refused: #{key.message}"
+      else
+        got = key.decapsulate(b(words[2]))
+        puts got.is_a?(MlKemError) ? "refused: #{got.message}" : hex(got)
+      end
+    else
+      puts "refused: no such request #{words[0]}"
+    end
+    STDOUT.flush
+  end
+  exit 0
+end
+
+if args.size > 0 && args[0] == "cost"
+  seed = drawn("cost seed", 64)
+  m = drawn("cost m", 32)
+  key = MlKem768PrivateKey.from_seed(seed)
+  ek = key.encapsulation_key
+  sent = MlKem768.encapsulate(ek, m).or_panic
+  ok = true
+  keygen = best_of { MlKem768PrivateKey.from_seed(seed) }
+  encaps = best_of { MlKem768.encapsulate(ek, m).or_panic }
+  decaps = best_of { ok = ok && key.decapsulate(sent[0]).or_panic == sent[1] }
+  raise "the timed decapsulation did not agree" unless ok
+  puts "iyi: ML-KEM-768 key pair #{keygen} us, encapsulation #{encaps} us, decapsulation #{decaps} us"
+  # Decapsulation of a good ciphertext and of one with a byte changed (the
+  # implicit rejection's path), interleaved, 2,000 of each: the median of
+  # each, in nanoseconds.
+  bad = sent[0].dup
+  bad[500] = bad[500] ^ 1_u8
+  good_times = [] of Int64
+  bad_times = [] of Int64
+  2000.times do
+    t0 = IyiMark.now_ns
+    key.decapsulate(sent[0])
+    t1 = IyiMark.now_ns
+    key.decapsulate(bad)
+    t2 = IyiMark.now_ns
+    good_times << (t1 - t0).to_i64
+    bad_times << (t2 - t1).to_i64
+  end
+  good_times.sort_in_place
+  bad_times.sort_in_place
+  puts "iyi: decapsulation, median of 2000: #{good_times[1000]} ns for a good ciphertext, #{bad_times[1000]} ns for one implicitly rejected"
+  exit 0
+end
+
+# Every ML-KEM-768 case of an ACVP file, in the shape
+# bench/std_mlkem_exercise.sh writes them.
+def acvp(vectors : Any) : Nil
+  # ML-KEM.KeyGen_internal from ACVP's d and z: both keys, byte for byte.
+  puts "\n== acvp keyGen (ml-kem-768)"
+  count = 0
+  vectors["keyGen"].as_a.each do |t|
+    id = t["tcId"].as_i
+    key = MlKem768PrivateKey.from_seed(b(t["d"].as_s) + b(t["z"].as_s))
+    check hex(key.encapsulation_key) == t["ek"].as_s.downcase, "acvp keyGen #{id}: the encapsulation key"
+    check hex(key.decapsulation_key) == t["dk"].as_s.downcase, "acvp keyGen #{id}: the decapsulation key"
+    count = count + 1
+  end
+  puts "  #{count} key pairs, both keys of each"
+
+  # ML-KEM.Encaps_internal from ACVP's ek and m.
+  puts "\n== acvp encapsulation (ml-kem-768)"
+  count = 0
+  vectors["encapsulation"].as_a.each do |t|
+    id = t["tcId"].as_i
+    got = MlKem768.encapsulate(b(t["ek"].as_s), b(t["m"].as_s))
+    check !got.is_a?(MlKemError), "acvp encapsulation #{id}: refused: #{got.is_a?(MlKemError) ? got.message : ""}"
+    next if got.is_a?(MlKemError)
+    check hex(got[0]) == t["c"].as_s.downcase, "acvp encapsulation #{id}: the ciphertext"
+    check hex(got[1]) == t["k"].as_s.downcase, "acvp encapsulation #{id}: the shared secret"
+    count = count + 1
+  end
+  puts "  #{count} encapsulations, the ciphertext and secret of each"
+
+  # ML-KEM.Decaps_internal: a valid ciphertext gives the encapsulated key, a
+  # modified one the implicit rejection's J(z || c).
+  puts "\n== acvp decapsulation (ml-kem-768)"
+  valid = 0
+  modified = 0
+  vectors["decapsulation"].as_a.each do |t|
+    id = t["tcId"].as_i
+    reason = t["reason"].as_s
+    key = MlKem768PrivateKey.from_bytes(b(t["dk"].as_s))
+    check !key.is_a?(MlKemError), "acvp decapsulation #{id}: the key refused"
+    next if key.is_a?(MlKemError)
+    got = key.decapsulate(b(t["c"].as_s))
+    check !got.is_a?(MlKemError) && hex(got) == t["k"].as_s.downcase, "acvp decapsulation #{id} (#{reason}): the shared secret"
+    if reason == "modified ciphertext"
+      modified = modified + 1
+    else
+      valid = valid + 1
+    end
+  end
+  check modified > 0 && valid > 0, "acvp decapsulation: both kinds of case"
+  puts "  #{valid} valid ciphertexts and #{modified} modified ones, implicitly rejected"
+
+  # FIPS 203 section 7.3's hash check, through `from_bytes`.
+  puts "\n== acvp decapsulation key check (ml-kem-768)"
+  taken = 0
+  refused = 0
+  vectors["decapsulationKeyCheck"].as_a.each do |t|
+    id = t["tcId"].as_i
+    key = MlKem768PrivateKey.from_bytes(b(t["dk"].as_s))
+    if t["testPassed"].as_bool
+      check !key.is_a?(MlKemError), "acvp decapsulationKeyCheck #{id} (#{t["reason"].as_s}): taken"
+      taken = taken + 1
+    else
+      check key.is_a?(MlKemError) && key.message.includes?("hash check"), "acvp decapsulationKeyCheck #{id} (#{t["reason"].as_s}): refused"
+      refused = refused + 1
+    end
+  end
+  puts "  #{taken} keys taken, #{refused} refused by the hash check"
+
+  # FIPS 203 section 7.2's modulus check, through `encapsulate`.
+  puts "\n== acvp encapsulation key check (ml-kem-768)"
+  taken = 0
+  refused = 0
+  vectors["encapsulationKeyCheck"].as_a.each do |t|
+    id = t["tcId"].as_i
+    got = MlKem768.encapsulate(b(t["ek"].as_s), drawn("m", 32))
+    if t["testPassed"].as_bool
+      check !got.is_a?(MlKemError), "acvp encapsulationKeyCheck #{id} (#{t["reason"].as_s}): taken"
+      taken = taken + 1
+    else
+      check got.is_a?(MlKemError) && got.message.includes?("modulus check"), "acvp encapsulationKeyCheck #{id} (#{t["reason"].as_s}): refused"
+      refused = refused + 1
+    end
+  end
+  puts "  #{taken} keys taken, #{refused} refused by the modulus check"
+end
+
+# FIPS 203 section 8's sizes for ML-KEM-768.
+puts "== sizes (fips 203 section 8)"
+check MlKem768::ENCAPSULATION_KEY_SIZE == 1184 && MlKem768::DECAPSULATION_KEY_SIZE == 2400, "the key sizes"
+check MlKem768::CIPHERTEXT_SIZE == 1088 && MlKem768::SHARED_SECRET_SIZE == 32, "the ciphertext and secret sizes"
+puts "  1184, 2400, 1088 and 32 bytes"
+
+# With a file, every case of it; with none, the cases embedded above.
+acvp(JSON.parse(File.read(args[0]))) unless args.empty?
+
+# ML-KEM.KeyGen_internal, ML-KEM.Encaps_internal and Decaps_internal
+# against the embedded ACVP cases, then FIPS 203 section 7.2's modulus
+# check against ACVP's key of values too large, and section 7.3's hash
+# check against the embedded decapsulation key with its H(ek) changed.
+puts "\n== embedded acvp cases (ml-kem-768)"
+kat_key = MlKem768PrivateKey.from_seed(b(KAT_KEYGEN_D) + b(KAT_KEYGEN_Z))
+check hex(SHA3_256.new.update(kat_key.encapsulation_key).final) == KAT_KEYGEN_EK_SHA3, "embedded acvp keyGen 26: the encapsulation key"
+check hex(SHA3_256.new.update(kat_key.decapsulation_key).final) == KAT_KEYGEN_DK_SHA3, "embedded acvp keyGen 26: the decapsulation key"
+kat_sent = MlKem768.encapsulate(b(KAT_ENCAPS_EK), b(KAT_ENCAPS_M)).or_panic
+check hex(SHA3_256.new.update(kat_sent[0]).final) == KAT_ENCAPS_C_SHA3, "embedded acvp encapsulation 26: the ciphertext"
+check hex(kat_sent[1]) == KAT_ENCAPS_K, "embedded acvp encapsulation 26: the shared secret"
+kat_dk = b(KAT_DECAPS_DK)
+check hex(MlKem768PrivateKey.from_bytes(kat_dk).or_panic.decapsulate(b(KAT_DECAPS_C)).or_panic) == KAT_DECAPS_K, "embedded acvp decapsulation 88 (modified ciphertext): the shared secret"
+too_large = MlKem768.encapsulate(b(KAT_EK_TOO_LARGE), drawn("m", 32))
+check too_large.is_a?(MlKemError) && too_large.message.includes?("modulus check"), "embedded acvp encapsulationKeyCheck 137 (noisy linear system values too large): refused"
+kat_dk[2336] = kat_dk[2336] ^ 1_u8
+hashed = MlKem768PrivateKey.from_bytes(kat_dk)
+check hashed.is_a?(MlKemError) && hashed.message.includes?("hash check"), "embedded acvp decapsulation 88's key with H(ek) one bit off: refused"
+puts "  a key pair, an encapsulation, a modified ciphertext implicitly rejected, a key of values too large and one whose hash is off refused"
+
+# Key pairs from drawn seeds: what one side encapsulates the other
+# decapsulates, the decapsulation key read back is the same key, and a
+# ciphertext with any byte changed - the first, the last, one between -
+# is answered with J(z || c), computed here from its definition.
+puts "\n== round trips and the implicit rejection"
+50.times do |n|
+  seed = drawn("seed #{n}", 64)
+  key = MlKem768PrivateKey.from_seed(seed)
+  sent = MlKem768.encapsulate(key.encapsulation_key, drawn("m #{n}", 32)).or_panic
+  check key.decapsulate(sent[0]).or_panic == sent[1], "round trip #{n}: the secret decapsulated"
+  again = MlKem768PrivateKey.from_bytes(key.decapsulation_key).or_panic
+  check again.encapsulation_key == key.encapsulation_key && again.decapsulation_key == key.decapsulation_key, "round trip #{n}: the decapsulation key read back"
+  check again.decapsulate(sent[0]).or_panic == sent[1], "round trip #{n}: the key read back decapsulates"
+  [0, 1087, 7 * n + 3].each do |at|
+    bad = sent[0].dup
+    bad[at] = bad[at] ^ (1_u8 << (n % 8))
+    rejection = SHAKE256.new.update(seed[32, 32]).update(bad).read(32)
+    check key.decapsulate(bad).or_panic == rejection, "a ciphertext changed at byte #{at} is answered with J(z || c)"
+  end
+end
+puts "  50 key pairs: encapsulated, decapsulated, read back; 150 changed ciphertexts rejected"
+
+# ByteDecode12 reduces mod q (FIPS 203 Algorithm 6), and section 7.3
+# checks no coefficient of s: a decapsulation key whose first coefficient
+# below 767 is spelled with q added is the same key.
+skey = MlKem768PrivateKey.from_seed(drawn("spelled", 64))
+sdk = skey.decapsulation_key
+ssent = MlKem768.encapsulate(skey.encapsulation_key, drawn("m", 32)).or_panic
+at = 0
+value = 0
+while at < 768
+  lo = sdk[at // 2 * 3]
+  mid = sdk[at // 2 * 3 + 1]
+  hi = sdk[at // 2 * 3 + 2]
+  value = at.even? ? lo.to_i32 | (mid.to_i32 & 15) << 8 : mid.to_i32 >> 4 | hi.to_i32 << 4
+  break if value < 767
+  at = at + 1
+end
+spelled = sdk.dup
+mid = sdk[at // 2 * 3 + 1]
+value = value + 3329
+if at.even?
+  spelled[at // 2 * 3] = (value & 255).to_u8
+  spelled[at // 2 * 3 + 1] = (mid & 0xf0_u8) | (value >> 8).to_u8
+else
+  spelled[at // 2 * 3 + 1] = (mid & 0x0f_u8) | ((value & 15) << 4).to_u8
+  spelled[at // 2 * 3 + 2] = (value >> 4).to_u8
+end
+check spelled != sdk, "the spelled key differs from the canonical one"
+sread = MlKem768PrivateKey.from_bytes(spelled).or_panic
+check sread.decapsulation_key == sdk, "a decapsulation key whose s is spelled with a coefficient past q is read as the canonical one"
+check sread.decapsulate(ssent[0]).or_panic == ssent[1], "a decapsulation key whose s is spelled with a coefficient past q decapsulates as the canonical one"
+puts "  a coefficient of s spelled past q, read as the one below it"
+
+# The refusals: data from outside as values, the caller's misuse as panics
+# (the gate asks those).
+puts "\n== refusals"
+key = MlKem768PrivateKey.from_seed(drawn("refusals", 64))
+ek = key.encapsulation_key
+short = MlKem768.encapsulate(ek[0, 1183], drawn("m", 32))
+check short.is_a?(MlKemError) && short.message == "ML-KEM-768: an encapsulation key is 1184 bytes, not 1183", "an encapsulation key a byte short"
+long = MlKem768.encapsulate(ek + [0_u8], drawn("m", 32))
+check long.is_a?(MlKemError) && long.message == "ML-KEM-768: an encapsulation key is 1184 bytes, not 1185", "an encapsulation key a byte long"
+# The first coefficient set to q, 3329 = 0xd01: below 2^12, so only the
+# modulus check sees it.
+over = ek.dup
+over[0] = 0x01_u8
+over[1] = (over[1] & 0xf0_u8) | 0x0d_u8
+refused_q = MlKem768.encapsulate(over, drawn("m", 32))
+check refused_q.is_a?(MlKemError) && refused_q.message.includes?("modulus check"), "a coefficient of q refused by the modulus check"
+over[0] = 0x00_u8
+taken_q = MlKem768.encapsulate(over, drawn("m", 32))
+check !taken_q.is_a?(MlKemError), "a coefficient of q - 1 taken"
+dk = key.decapsulation_key
+check MlKem768PrivateKey.from_bytes(dk[0, 2399]).is_a?(MlKemError), "a decapsulation key a byte short"
+broken = dk.dup
+broken[2340] = broken[2340] ^ 1_u8
+check MlKem768PrivateKey.from_bytes(broken).is_a?(MlKemError), "a decapsulation key whose H(ek) is one bit off"
+inner = dk.dup
+inner[1200] = inner[1200] ^ 1_u8
+check MlKem768PrivateKey.from_bytes(inner).is_a?(MlKemError), "a decapsulation key whose encapsulation key is one bit off"
+sent = MlKem768.encapsulate(ek, drawn("m", 32)).or_panic
+cut = key.decapsulate(sent[0][0, 1087])
+check cut.is_a?(MlKemError) && cut.message == "ML-KEM-768: a ciphertext is 1088 bytes, not 1087", "a ciphertext a byte short"
+check key.decapsulate(sent[0] + [0_u8]).is_a?(MlKemError), "a ciphertext a byte long"
+puts "  wrong sizes, a coefficient of q, a broken hash: each an MlKemError"
+
+puts "\nALL CHECKS PASSED"

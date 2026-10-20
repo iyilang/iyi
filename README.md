@@ -120,10 +120,14 @@ current compiler reports `0.18.0`. iyi's own prelude carries the small-tool
 floor — `puts`, stdin, whole-file `File` read/write, `Program.args`/`.env` —
 and no more: no TLS, no serialisation, and no sockets or format strings -
 `import std/socket` and `import std/format` are where the last two live,
-outside the prelude every program carries. Its concurrency — a
-cooperative scheduler, `group`/`spawn`,
-`Channel`, cancellable `sleep` and reads (SPEC.md III.4) — runs on Linux
-(x86_64, aarch64), macOS arm64 and Windows x86-64;
+outside the prelude every program carries. TLS is `import std/tls`, and
+it has not been audited and is not to be called secure until it is;
+[SECURITY_REVIEW_TLS.md](SECURITY_REVIEW_TLS.md) is an automated review
+of it, not that audit. Its concurrency — a
+scheduler per thread, `group`/`spawn`, `spawn_parallel` onto a pool of
+worker threads (SPEC.md III.4.13), `Channel`, cancellable `sleep` and
+reads (SPEC.md III.4) — runs on Linux (x86_64, aarch64), macOS arm64 and
+Windows x86-64;
 `--crystal` supplies Crystal's standard library, IO, `require` and the
 ecosystem. Dependencies exist but are young: an `iyi.mod` beside the entry
 file names requirements, `iyi get` adds or moves one, resolution is
@@ -400,8 +404,8 @@ line so it cannot move unread.
 **Efficiency — built, and it is mostly subtraction.** `puts "hello"` is a 36 KB
 binary that starts in 1.6 ms; the same program compiled with Crystal's standard
 library is 1,553 KB and 3.2 ms. Nothing clever is happening: a program links what
-it uses, and iyi's own library is 21,567 lines rather than 8,161. The whole
-library is 899 KB on disk beside the binary.
+it uses, and iyi's own library is 22,456 lines rather than 8,161. The whole
+library is 932 KB on disk beside the binary.
 
 <sup>Sizes and start times are a plain `iyi build`, no flags, on macOS arm64
 with LLVM 22. They move with the platform and the LLVM, which is why they are
@@ -434,7 +438,7 @@ tar -xzf iyi-0.18.0-linux-x86_64.tar.gz -C ~/.local
 ```
 
 The tarball is relocatable and carries every library a program can ask for:
-iyi's own 899 KB prelude, the 4,313 KB of `src/std` that `import std/...`
+iyi's own 932 KB prelude, the 4,501 KB of `src/std` that `import std/...`
 resolves to, and Crystal's standard library for `--crystal`. 0.11.0 shipped
 the first and the third — `import std/enumerable` answered "can't find module"
 out of the thing people downloaded, and every gate passed it because they all
@@ -719,7 +723,7 @@ $ curl localhost:3000/json
 `pub`, traits with defaults, `impl … forall`, error unions and `!`, `.or`,
 `or_panic`, `defer` — all of them, on a program that requires a shard. R-2
 still refuses an export that does not write its types. What changes is what the
-program *has*: 8,161 lines of Crystal's standard library instead of 21,567
+program *has*: 8,161 lines of Crystal's standard library instead of 22,456
 lines of iyi's own prelude.
 
 **One name is unreachable, and it is a class of names.** `!` in iyi propagates
@@ -1107,7 +1111,7 @@ marked PROPOSED are the parts that will move under you.
 
 ## What is not here
 
-- **iyi's own library is 21,567 lines, and its IO is `puts`, `print`, the
+- **iyi's own library is 22,456 lines, and its IO is `puts`, `print`, the
   three standard streams and `File`**: integers, booleans, a string, one
   sequence, one dictionary, one range, and what an `enum` needs — its
   name, its order, its members and, for a `@[Flags]` one, its bits.
@@ -1130,17 +1134,20 @@ marked PROPOSED are the parts that will move under you.
   Crystal's does; out of range after that wrap still raises.
   `samples/iyi/formatting.iyi` is the rest of the small set: `to_s(base)`,
   `rjust` / `ljust`, and `*`.
-- **`Share` gates a thread, not a task, and one platform has no runtime.** SPEC.md
+- **`Share` gates a thread and a parallel task, not a `spawn`, and one platform has no runtime.** SPEC.md
   III.4's structured concurrency — `group`/`spawn`, `Channel`, `select`,
   cancellation delivered as values, panics dying at task boundaries — is
   built in iyi's own prelude and runs on Linux (x86_64, aarch64), macOS
   arm64 and Windows x86-64 (epoll, kqueue, and an I/O completion port;
   SPEC.md III.4.8). A kernel thread is
   here too — `IyiThread.start { }`, III.4.11, not a task and stopped by
-  the collector — and its block may capture only `Share` values: III.4.4's
-  marker, decided per type from whether any method assigns a field, and
-  the compiler names the variable, the type and the field when it refuses
-  one. What is *not* here: wasm32
+  the collector — and `g.spawn_parallel { }` runs a task on a pool of
+  worker threads (III.4.13: four workers ran 16 CPU-bound tasks 3.86x as fast as one, measured by
+  `bench/parallel_exercise.sh`); both blocks may capture only `Share`
+  values: III.4.4's marker, decided per type from whether any method
+  assigns a field, and the compiler names the variable, the type and the
+  field when it refuses one. A started parallel task never changes
+  workers, and a task is never preempted. What is *not* here: wasm32
   gets no runtime rather than a sequential imitation — a `group` there fails
   to compile, which III.4.8 chose by name over shipping a spelling without
   the feature. A program built `--crystal` has Crystal's fibers, which are
@@ -1270,7 +1277,7 @@ marked PROPOSED are the parts that will move under you.
 | [SPEC.md](SPEC.md) | the design, and the record of what measurement settled |
 | [`samples/iyi`](samples/iyi) | twenty-seven programs: nineteen documenting a part of it, seven being a first hour, and `calc`, a language |
 | [`samples/crystal/kemal`](samples/crystal/kemal) | a kemal application, from `shard.yml`: built from source and across four `.iyimod` boundaries |
-| [`src/iyi`](src/iyi) | iyi's own library, 21,567 lines. `--crystal` swaps it for Crystal's |
+| [`src/iyi`](src/iyi) | iyi's own library, 22,456 lines. `--crystal` swaps it for Crystal's |
 | [`src/std`](src/std) | the standard library, in iyi. Opt-in with `import std/...`, outside the prelude's ceiling |
 | [`src/compiler/iyi/iyimod.cr`](src/compiler/iyi/iyimod.cr) | the artifact format |
 | [`bench/incremental.py`](bench/incremental.py) | the edit loop, against Go, generated in both languages |

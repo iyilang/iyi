@@ -782,6 +782,19 @@ pub class IyiSocket
 
   # --- Lifecycle and Metadata ---
 
+  # The sending half ended, the receiving half kept: the peer reads the
+  # end of the stream after what was written, and this end goes on reading
+  # what the peer still sends until its own end. `shutdown(SHUT_WR)` on
+  # POSIX, `shutdown(SD_SEND)` on Windows. A socket that is not connected
+  # answers the platform's refusal as a `SocketError`; `close` is still
+  # what gives the socket back.
+  def close_write : SocketError?
+    raise "socket is closed" if @fd < 0
+    got = IyiSocket.__sys_shutdown_write(@fd)
+    return SocketError.new("shut down sending", IyiSocket.__sys_code(got)) if got < 0_i64
+    nil
+  end
+
   def close : Nil
     if @fd >= 0
       fd = @fd
@@ -1210,6 +1223,7 @@ pub class IyiSocket
       fun getsockopt(fd : Int32, level : Int32, optname : Int32, optval : Void*, optlen : UInt32*) : Int32
       fun fcntl(fd : Int32, cmd : Int32, ...) : Int32
       fun poll(fds : Void*, nfds : UInt32, timeout : Int32) : Int32
+      fun shutdown(fd : Int32, how : Int32) : Int32
       fun error_location = __error : Int32*
     end
 
@@ -1243,6 +1257,10 @@ pub class IyiSocket
 
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
       LibC.listen(fd, backlog)
+    end
+
+    def self.__sys_shutdown_write(fd : Int32) : Int64
+      LibC.shutdown(fd, 1).to_i64
     end
 
     def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
@@ -1364,6 +1382,7 @@ pub class IyiSocket
       SYS_ACCEPT      =  43_i64
       SYS_SENDTO      =  44_i64
       SYS_RECVFROM    =  45_i64
+      SYS_SHUTDOWN    =  48_i64
       SYS_BIND        =  49_i64
       SYS_LISTEN      =  50_i64
       SYS_GETSOCKNAME =  51_i64
@@ -1384,6 +1403,7 @@ pub class IyiSocket
       SYS_RECVFROM    = 207_i64
       SYS_SETSOCKOPT  = 208_i64
       SYS_GETSOCKOPT  = 209_i64
+      SYS_SHUTDOWN    = 210_i64
       SYS_FCNTL       =  25_i64
       SYS_PPOLL       =  73_i64
     {% end %}
@@ -1462,6 +1482,10 @@ pub class IyiSocket
 
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
       __sys3(SYS_LISTEN, fd.to_i64, backlog.to_i64, 0_i64).to_i32
+    end
+
+    def self.__sys_shutdown_write(fd : Int32) : Int64
+      __sys3(SYS_SHUTDOWN, fd.to_i64, 1_i64, 0_i64)
     end
 
     def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32
@@ -1792,6 +1816,11 @@ pub class IyiSocket
       hinted = backlog > 200 ? -backlog : backlog
       return __sys_error.to_i32 if LibWs2_32.listen(__sys_handle(fd), hinted) != 0
       0
+    end
+
+    def self.__sys_shutdown_write(fd : Int32) : Int64
+      return 0_i64 if LibWs2_32.shutdown(__sys_handle(fd), 1) == 0
+      __sys_error
     end
 
     # Winsock's address length is an `int*` where POSIX has a `socklen_t*`:
@@ -2327,6 +2356,10 @@ pub class IyiSocket
 
     def self.__sys_listen(fd : Int32, backlog : Int32) : Int32
       -1
+    end
+
+    def self.__sys_shutdown_write(fd : Int32) : Int64
+      -1_i64
     end
 
     def self.__sys_accept(fd : Int32, addr : Pointer(UInt8), addrlen : Pointer(UInt32), family : Int32) : Int32

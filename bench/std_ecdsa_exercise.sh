@@ -290,15 +290,19 @@ prove_broken "a third INTEGER read past" "a third INTEGER (P256 SHA256): expecte
 prove_broken "the digest never cut" "P256 SHA384 (P256 SHA384): expected true, got false" \
   '    e = e >> excess if excess > 0' ''
 prove_broken "G + Q precomputed as G + G" "expected true, got false" \
-  '    both = add(g, q)' '    both = add(g, g)'
+  '    add_points(g, q, both)' '    add_points(g, g, both)'
 prove_broken "the scalars' bits read low first" "expected true, got false" \
   '        x = (a[i] >> bit) & 1_u8' '        x = (a[i] >> (7 - bit)) & 1_u8'
 prove_broken "a point added to itself as the identity" "D1 over abc (P256 SHA256): expected true, got false" \
-  'return r.zero? ? double(one) : EcdsaPoint.identity' 'return EcdsaPoint.identity'
+  '      zero?(rr) ? double(p, r) : clear(r + (2 * k).to_i64)' '      clear(r + (2 * k).to_i64)'
 prove_broken "a point added to its negative as a doubling" "DNEG over abc (P256 SHA256): expected true, got false" \
-  'return r.zero? ? double(one) : EcdsaPoint.identity' 'return double(one)'
+  '      zero?(rr) ? double(p, r) : clear(r + (2 * k).to_i64)' '      double(p, r)'
 prove_broken "doubling without a = -3's factor" "expected true, got false" \
-  'alpha = reduce((point.x - delta) * (point.x + delta) * BigInt.new(3))' 'alpha = reduce((point.x - delta) * (point.x + delta) * BigInt.new(2))'
+  '    add(u, t, t)' '    copy(u, t, k)'
+# The Montgomery product is below 2p before its last subtraction; one
+# that never subtracts leaves values the comparisons do not match.
+prove_broken "a product that never takes p off" "expected true, got false" \
+  '    if t[k] != 0_u64 || !below?(t, m)' '    if false'
 prove_broken "SHA-384 as SHA-512" "SHA384 (P256 SHA384): expected true, got false" \
   'when EcdsaHash::SHA384 then Std::Digest::SHA384.hash_bytes(data)' 'when EcdsaHash::SHA384 then Std::Digest::SHA512.hash_bytes(data)'
 prove_broken "a point off the curve taken" "a point off the curve refused" \

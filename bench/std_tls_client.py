@@ -1,13 +1,14 @@
-"""A TLS 1.3 client that breaks the protocol one rule at a time, for the
-server section of bench/std_tls_exercise.sh.
+"""A TLS 1.3 client - and a TLS 1.2 one - that breaks the protocol one rule
+at a time, for the server section of bench/std_tls_exercise.sh.
 
-    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256 | --rsa] [--mtls DIR] [SCENARIO ...]
+    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256 | --p384 | --rsa] [--mtls DIR] [--tls12] [SCENARIO ...]
 
 Connects to the exercise's `serve` mode once per scenario (every one in
 SCENARIOS when none is named) and says, one line each, whether the server
 answered as it must: `<name>: ok ...`, or `FAIL <name>: ...`. `--p256`
-says the server's key is P-256, `--rsa` that it is RSA, not Ed25519: what
-a client that leaves out one scheme or another is owed turns on that.
+says the server's key is P-256, `--p384` P-384, `--rsa` that it is RSA,
+not Ed25519: what a client that leaves out one scheme or another is owed
+turns on that.
 `--mtls DIR` says the server asks for a client's certificate: the MTLS
 scenarios run instead, presenting the chains and keys in DIR (client,
 client-ed, client-rsa, other, server-only: .pem and .key each) or
@@ -20,9 +21,24 @@ answered and closed with close_notify. A broken one must end in the alert
 RFC 8446 names, in the clear before the server's keys and under them
 after.
 
-The key schedule, records and messages are bench/std_tls_server.py's.
-Written for this one purpose; not a TLS client for anything else.
+`--tls12` says the server was told to speak TLS 1.2 too: the TLS12
+scenarios (the MTLS12 ones with `--mtls`) run, each a ClientHello that
+offers 1.2 and not 1.3, and three of TLS 1.3's, which must still be
+answered in 1.3. A correct 1.2 handshake is checked as a 1.3 one is: the
+ServerHello's version, its random's downgrade sentinel (RFC 8446 section
+4.1.3), no session id and no ticket, the extended master secret and
+renegotiation_info answered; the suite the client's first of the key's
+kind; the ServerKeyExchange's signature, under the scheme the key's kind
+and the client's list call for; the master secret over the session hash
+(RFC 7627), the server's Finished, and every AES-GCM explicit nonce
+unrepeated under its key.
+
+The TLS 1.3 key schedule, records and messages are
+bench/std_tls_server.py's; TLS 1.2's PRF and records are below. Written
+for this one purpose; not a TLS client for anything else.
 """
+import hashlib
+import hmac
 import os
 import socket
 import struct
@@ -31,36 +47,69 @@ import time
 
 sys.dont_write_bytecode = True  # the gate leaves bench/ as it found it
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from std_tls_server import Cipher, Schedule, ext, message, plain  # noqa: E402
+from std_tls_server import Cipher, Schedule, ext, message, mlkem, plain  # noqa: E402
 
 from cryptography import x509  # noqa: E402
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa, x25519  # noqa: E402
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305  # noqa: E402
 
 HELLO_RETRY = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
 SUITE_NAMES = {0x1301: "TLS_AES_128_GCM_SHA256", 0x1302: "TLS_AES_256_GCM_SHA384", 0x1303: "TLS_CHACHA20_POLY1305_SHA256"}
 # rsa_pss_rsae_sha256, -384 and -512, by the hash each names.
 PSS = {0x0804: hashes.SHA256, 0x0805: hashes.SHA384, 0x0806: hashes.SHA512}
-SIGALGS = (0x0807, 0x0403, 0x0804)
+SIGALGS = (0x0807, 0x0403, 0x0503, 0x0804)
+# rsa_pkcs1_sha256, -384 and -512, and ECDSA's three, by the hash each
+# names: in TLS 1.2 a scheme names a hash, not a curve.
+PKCS1 = {0x0401: hashes.SHA256, 0x0501: hashes.SHA384, 0x0601: hashes.SHA512}
+ECDSA = {0x0403: hashes.SHA256, 0x0503: hashes.SHA384, 0x0603: hashes.SHA512}
+# TLS 1.2's six suites: name, signed by RSA, key bytes, ChaCha20, the PRF's hash.
+SUITES12 = {
+    0xc02b: ("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", False, 16, False, "sha256"),
+    0xc02f: ("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", True, 16, False, "sha256"),
+    0xc02c: ("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", False, 32, False, "sha384"),
+    0xc030: ("TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", True, 32, False, "sha384"),
+    0xcca9: ("TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256", False, 32, True, "sha256"),
+    0xcca8: ("TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256", True, 32, True, "sha256"),
+}
+OFFER12 = (0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8)
+SIGALGS12 = (0x0807, 0x0403, 0x0503, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601)
+# TLS 1.2's groups, as the server names the one it agreed ("group=..."),
+# and the curves of the two that are ECDH's.
+GROUPS12 = {0x1d: "X25519", 0x17: "secp256r1", 0x18: "secp384r1"}
+CURVES12 = {0x17: ec.SECP256R1, 0x18: ec.SECP384R1}
+SENTINEL12 = b"DOWNGRD\x01"
+KEY_KIND = "ed25519"
 
 # name: (what the scenario sends, what the server must answer)
-#   ("held", text)  the handshake holds and the answer holds text
-#   ("alert", code) the server ends it with that alert
-# or, where the server's key decides, {"ed25519": answer, "p256": answer}.
+#   ("held", text)     the handshake holds and the answer holds text
+#   ("alert", code)    the server ends it with that alert
+#   ("warning", code)  the server answers with that warning, and ends it
+# or, where the server's key decides, {"ed25519": answer, "p256": answer, ...}.
 SCENARIOS = {
     "ok": ("a correct handshake, AES-128-GCM", ("held", "TLS_AES_128_GCM_SHA256")),
     "aes256": ("TLS_AES_256_GCM_SHA384 alone", ("held", "TLS_AES_256_GCM_SHA384")),
     "chacha": ("TLS_CHACHA20_POLY1305_SHA256 alone", ("held", "TLS_CHACHA20_POLY1305_SHA256")),
     "client-order": ("ChaCha20 offered before AES-128: the client's order", ("held", "TLS_CHACHA20_POLY1305_SHA256")),
+    # TLS 1.3 offered with 1.2: 1.3 is answered, by a server told to speak
+    # 1.2 too as by one that is not.
+    "both-versions": ("supported_versions TLS 1.3 then 1.2", ("held", "TLSv1.3")),
     "alpn": ("ALPN http/1.1", ("held", "alpn=http/1.1")),
     "alpn-order": ("ALPN http/1.1 then h2: the server's order", ("held", "alpn=h2")),
     "no-sni": ("no server_name", ("held", "name=-")),
-    "hrr": ("a P-384 share alone: a HelloRetryRequest for X25519", ("held", "TLS_AES_128_GCM_SHA256")),
+    # secp521r1 is a group the server does not have: a share in it alone
+    # is a share in nothing the server takes.
+    "hrr": ("a P-521 share alone: a HelloRetryRequest for X25519", ("held", "TLS_AES_128_GCM_SHA256")),
     "p256-share": ("secp256r1 alone, a P-256 share", ("held", "TLS_AES_128_GCM_SHA256")),
     "both-shares": ("P-256 and X25519 shares: X25519 taken", ("held", "TLS_AES_128_GCM_SHA256")),
-    "hrr-p256": ("P-384 and secp256r1, a P-384 share: a HelloRetryRequest for secp256r1", ("held", "TLS_AES_128_GCM_SHA256")),
+    "hrr-p256": ("P-521 and secp256r1, a P-521 share: a HelloRetryRequest for secp256r1", ("held", "TLS_AES_128_GCM_SHA256")),
     "bad-p256-share": ("a P-256 share off the curve", ("alert", 47)),
     "short-p256-share": ("a P-256 share of 64 bytes", ("alert", 47)),
+    "p384-share": ("secp384r1 alone, a P-384 share", ("held", "TLS_AES_128_GCM_SHA256")),
+    "ec-shares": ("P-384 and P-256 shares: secp256r1 taken", ("held", "TLS_AES_128_GCM_SHA256")),
+    "hrr-p384": ("P-521 and secp384r1, a P-521 share: a HelloRetryRequest for secp384r1", ("held", "TLS_AES_128_GCM_SHA256")),
+    "bad-p384-share": ("a P-384 share off the curve", ("alert", 47)),
+    "short-p384-share": ("a P-384 share of 96 bytes", ("alert", 47)),
     "ccs": ("a ChangeCipherSpec before the client's Finished", ("held", "name=localhost")),
     "early-skip": ("early data the server passes over", ("held", "name=localhost")),
     "early-after-hrr": ("early data before the second ClientHello", ("held", "name=localhost")),
@@ -80,16 +129,18 @@ SCENARIOS = {
     "no-groups": ("key_share without supported_groups", ("alert", 109)),
     "no-sigalgs": ("no signature_algorithms", ("alert", 109)),
     "no-ed25519": ("signature_algorithms without ed25519",
-                   {"ed25519": ("alert", 40), "p256": ("held", "name=localhost"), "rsa": ("held", "name=localhost")}),
+                   {"ed25519": ("alert", 40), "p256": ("held", "name=localhost"), "p384": ("held", "name=localhost"), "rsa": ("held", "name=localhost")}),
     "no-p256": ("signature_algorithms without ecdsa_secp256r1_sha256",
-                {"ed25519": ("held", "name=localhost"), "p256": ("alert", 40), "rsa": ("held", "name=localhost")}),
+                {"ed25519": ("held", "name=localhost"), "p256": ("alert", 40), "p384": ("held", "name=localhost"), "rsa": ("held", "name=localhost")}),
+    "no-p384": ("signature_algorithms without ecdsa_secp384r1_sha384",
+                {"ed25519": ("held", "name=localhost"), "p256": ("held", "name=localhost"), "p384": ("alert", 40), "rsa": ("held", "name=localhost")}),
     # An RSA key signs under the first RSA-PSS scheme the client lists, and
     # never under PKCS #1 v1.5 (RFC 8446 section 4.2.3).
     "pss-sha384": ("rsa_pss_rsae_sha384 listed before rsa_pss_rsae_sha256", ("held", "name=localhost")),
     "pss-sha512": ("rsa_pss_rsae_sha512 listed first", ("held", "name=localhost")),
-    "no-rsa-pss": ("PKCS #1 v1.5, ed25519 and ecdsa_secp256r1_sha256, no RSA-PSS",
-                   {"ed25519": ("held", "name=localhost"), "p256": ("held", "name=localhost"), "rsa": ("alert", 40)}),
-    "no-group": ("groups without X25519 or secp256r1", ("alert", 40)),
+    "no-rsa-pss": ("PKCS #1 v1.5, ed25519 and the ECDSA schemes, no RSA-PSS",
+                   {"ed25519": ("held", "name=localhost"), "p256": ("held", "name=localhost"), "p384": ("held", "name=localhost"), "rsa": ("alert", 40)}),
+    "no-group": ("groups without X25519, secp256r1 or secp384r1: secp521r1 alone", ("alert", 40)),
     # A ClientHello of 60 KB, a byte to a record: what the server does with
     # it must grow with what was sent, not with its square.
     # 0.05 s here; 3.2 s when each record copied the message so far.
@@ -124,7 +175,77 @@ SCENARIOS = {
     "oversize": ("a plaintext record past 2^14 bytes", ("alert", 22)),
     "not-hello": ("a ServerHello where the ClientHello belongs", ("alert", 10)),
     "cut-hello": ("a ClientHello whose extensions run past its end", ("alert", 50)),
+    # Resumption (RFC 8446 section 2.2): a first connection keeps the two
+    # tickets it is sent; a second offers one as the scenario says. The
+    # server's answer says whether it resumed, and so does this side, which
+    # resumes only on a ServerHello taking an identity it offered and then
+    # checks the server's Finished under that PSK's keys.
+    "resume": ("a ticket of the first connection, its binder right", ("held", ("resumed=yes scripted-resumed=yes", "shown=CN=localhost"))),
+    "resume-hrr": ("a ticket offered again after a HelloRetryRequest, the binder over it", ("held", "resumed=yes scripted-resumed=yes")),
+    "resume-second": ("a ticket no server issued, then the first connection's: the second taken", ("held", "resumed=yes scripted-resumed=yes")),
+    "resume-alpn": ("a ticket of a connection on http/1.1, offering h2 now: taken, h2 chosen afresh",
+                    ("held", ("alpn=h2", "resumed=yes scripted-resumed=yes"))),
+    "resume-no-sigalgs": ("a ticket and no signature_algorithms, which a PSK lets a client leave out", ("held", "resumed=yes scripted-resumed=yes")),
+    "resume-bad-binder": ("a ticket whose binder is one bit off", ("alert", 51)),
+    "resume-expired": ("a ticket whose age the client gives past its lifetime: a full handshake", ("held", "resumed=no scripted-resumed=no")),
+    "resume-expired-no-sigalgs": ("that, and no signature_algorithms: nothing left to authenticate by", ("alert", 109)),
+    "resume-other-hash": ("a TLS_AES_128_GCM_SHA256 ticket with TLS_AES_256_GCM_SHA384 alone: a full handshake",
+                          ("held", ("TLS_AES_256_GCM_SHA384", "resumed=no scripted-resumed=no"))),
+    "resume-psk-ke": ("a ticket offered for psk_ke alone: a full handshake", ("held", "resumed=no scripted-resumed=no")),
+    "resume-other-sni": ("localhost's ticket offered for other.test: a full handshake, other.test's certificate",
+                         ("held", ("shown=CN=other.test", "resumed=no scripted-resumed=no"))),
+    "resume-tampered": ("a ticket one bit off: a full handshake", ("held", "resumed=no scripted-resumed=no")),
+    "resume-no-modes": ("a ticket and no psk_key_exchange_modes", ("alert", 109)),
+    "resume-binders": ("two identities and one binder", ("alert", 47)),
+    "resume-not-last": ("a ticket whose pre_shared_key is not the last extension", ("alert", 47)),
+    # Early data (0-RTT) under a ticket of the first connection, which
+    # allows 16 KiB. Taken: EncryptedExtensions says so, EndOfEarlyData goes
+    # under the early keys, and the server's answer names what came early;
+    # refused: the handshake goes on, nothing early named.
+    "early-ok": ("early data under the ticket", ("held", ('early="early:ping"', "resumed=yes scripted-resumed=yes"))),
+    "early-request": ("a request as early data, answered before this side's Finished (0.5-RTT)",
+                      ("held", ('early="GET / HTTP/1.0\\r\\n\\r\\n"', "resumed=yes"))),
+    "early-replay": ("the ClientHello and early data of a connection whose early data was taken, sent again: refused",
+                     ("held", ('early=""', "resumed=yes scripted-resumed=yes"))),
+    "early-too-much": ("16,385 bytes early, past the 16,384 the ticket allows", ("alert", 10)),
+    "early-bad-record": ("an early record one bit off, after the server took early data", ("alert", 20)),
+    "early-finished-early": ("Finished under the early keys where EndOfEarlyData belongs", ("alert", 10)),
+    "early-stale": ("early data with a ticket age 20 s off the server's count: refused", ("held", ('early=""', "resumed=yes"))),
+    "early-alpn": ("early data under an http/1.1 ticket, h2 chosen now: refused", ("held", ('early=""', "alpn=h2", "resumed=yes"))),
+    "early-suite": ("early data under an AES-128-GCM ticket, ChaCha20-Poly1305 chosen now: refused",
+                    ("held", ('early=""', "TLS_CHACHA20_POLY1305_SHA256", "resumed=yes"))),
+    "early-second": ("early data with the ticket second among the identities: resumed, early data refused", ("held", ('early=""', "resumed=yes"))),
+    "early-hrr": ("early data, then a HelloRetryRequest: refused", ("held", ('early=""', "resumed=yes"))),
+    # Section 5.1's rule that nothing comes between a handshake message's
+    # pieces, for EndOfEarlyData among the early records; and section 5.4's
+    # limit on an early record's whole inner plaintext, padding in it.
+    "early-split-eoed": ("half an EndOfEarlyData, then an early data record", ("alert", 10)),
+    "early-split-close": ("half an EndOfEarlyData, then close_notify", ("alert", 10)),
+    "early-padded-over": ("an early record of 2^14 + 2 bytes of inner plaintext, padding in it", ("alert", 22)),
+    # X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem): the two that finish a
+    # handshake need ML-KEM here, which cryptography has from 48 on, over
+    # an OpenSSL that has it; the refusals need none.
+    "hybrid": ("X25519MLKEM768 and X25519 shares: X25519MLKEM768 taken, ML-KEM's secret first", ("held", "group=X25519MLKEM768")),
+    "hybrid-hrr": ("X25519MLKEM768 listed, an X25519 share alone: a HelloRetryRequest for X25519MLKEM768",
+                   ("held", "group=X25519MLKEM768")),
+    "hybrid-short-share": ("an X25519MLKEM768 share of 1215 bytes", ("alert", 47)),
+    "hybrid-long-share": ("an X25519MLKEM768 share of 1217 bytes", ("alert", 47)),
+    "hybrid-modulus": ("an X25519MLKEM768 share whose ML-KEM key fails FIPS 203's modulus check", ("alert", 47)),
+    "hybrid-zero-x25519": ("an X25519MLKEM768 share whose X25519 key is of small order", ("alert", 47)),
 }
+NEEDS_MLKEM = ("hybrid", "hybrid-hrr")
+
+
+def fake_ek(first=None):
+    """An ML-KEM-768 encapsulation key's shape without ML-KEM: 768 random
+    12-bit coefficients below q (or the first one given), then 32 bytes of
+    rho. Nobody can decapsulate to it; it is for the refusals."""
+    q = 3329
+    values = [int.from_bytes(os.urandom(2), "big") % q for _ in range(768)]
+    if first is not None:
+        values[0] = first
+    packed = b"".join(bytes([a & 255, (a >> 8) | ((b & 15) << 4), b >> 4]) for a, b in zip(values[0::2], values[1::2]))
+    return packed + os.urandom(32)
 
 
 # The scenarios against a server that asks for a client's certificate.
@@ -146,8 +267,78 @@ MTLS = {
     "mtls-entry-ext": ("a client certificate entry with an extension", ("alert", 110)),
     # Asked of a server told a certificate is not required.
     "mtls-optional-none": ("no client certificate, where one is not required", ("held", "peer=-")),
+    # The client's certificate goes with the session: resumed, the server
+    # names it as the first handshake checked it.
+    "mtls-resume": ("a ticket of a connection that presented a P-256 certificate", ("held", ("peer=CN=client", "resumed=yes scripted-resumed=yes"))),
+    # Asked of a server that takes no early data: its tickets allow none.
+    "mtls-early-unallowed": ("early data under a ticket that allows none: refused", ("held", ('early=""', "peer=CN=client", "resumed=yes"))),
 }
 MTLS_DIR = None
+
+# The scenarios against a server told to speak TLS 1.2 too (`--tls12`):
+# each ClientHello offers 1.2 and not 1.3, and the extended master secret
+# and renegotiation_info unless the scenario leaves them out.
+TLS12 = {
+    "12-ok": ("TLS 1.2: ECDHE in X25519, AES-128-GCM, every rule kept", ("held", "TLSv1.2")),
+    "12-aes256": ("TLS 1.2, AES-256-GCM alone: the PRF over SHA-384", ("held", "_AES_256_GCM_SHA384")),
+    "12-chacha": ("TLS 1.2, ChaCha20-Poly1305 alone", ("held", "_CHACHA20_POLY1305_SHA256")),
+    "12-client-order": ("TLS 1.2, ChaCha20 offered before AES-128: the client's order", ("held", "_CHACHA20_POLY1305_SHA256")),
+    # A client's groups must hold an ECDSA key's curve (RFC 8422 section
+    # 5.1.1): secp256r1 alone shuts out a P-384 key, secp384r1 alone a P-256
+    # one.
+    "12-p256": ("TLS 1.2, secp256r1 alone among the groups",
+                {"ed25519": ("held", "TLSv1.2"), "p256": ("held", "TLSv1.2"), "p384": ("alert", 40), "rsa": ("held", "TLSv1.2")}),
+    "12-p384": ("TLS 1.2, secp384r1 alone among the groups",
+                {"ed25519": ("held", "TLSv1.2"), "p256": ("alert", 40), "p384": ("held", "TLSv1.2"), "rsa": ("held", "TLSv1.2")}),
+    "12-no-groups": ("TLS 1.2 with no supported_groups: secp256r1", ("held", "TLSv1.2")),
+    "12-legacy": ("no supported_versions, legacy_version TLS 1.2", ("held", "TLSv1.2")),
+    "12-alpn": ("TLS 1.2, ALPN http/1.1 then h2: the server's order", ("held", "alpn=h2")),
+    "12-sni-other": ("TLS 1.2, a server_name of other.test: its own certificate", ("held", "shown=CN=other.test")),
+    "12-scsv": ("TLS 1.2, TLS_EMPTY_RENEGOTIATION_INFO_SCSV and no renegotiation_info: answered", ("held", "TLSv1.2")),
+    "12-no-reneg": ("TLS 1.2, neither renegotiation_info nor its SCSV: nothing answered", ("held", "TLSv1.2")),
+    # An RSA key signs under RSA-PSS when the client takes it, whatever it
+    # lists first, and under PKCS #1 v1.5 for a client that takes no PSS.
+    "12-pss-first": ("TLS 1.2, rsa_pkcs1_sha256 listed before rsa_pss_rsae_sha384", ("held", "TLSv1.2")),
+    "12-pkcs1": ("TLS 1.2, PKCS #1 v1.5 alone among RSA's schemes", ("held", "TLSv1.2")),
+    "12-renegotiate": ("a ClientHello after the TLS 1.2 handshake", ("warning", 100)),
+    "12-no-ems": ("TLS 1.2 without extended_master_secret", ("alert", 40)),
+    "12-reneg-data": ("a renegotiation_info that is not empty, on a first handshake", ("alert", 40)),
+    "12-fallback": ("TLS_FALLBACK_SCSV, TLS 1.2 alone", ("alert", 86)),
+    "12-no-suite": ("TLS 1.2 with CBC suites alone", ("alert", 40)),
+    "12-other-kind": ("TLS 1.2 with the suites of the other kind of key alone", ("alert", 40)),
+    "12-no-sigalgs": ("TLS 1.2 without signature_algorithms", ("alert", 40)),
+    "12-p256-no-curve": ("TLS 1.2, X25519 alone among the groups",
+                         {"ed25519": ("held", "TLSv1.2"), "p256": ("alert", 40), "p384": ("alert", 40), "rsa": ("held", "TLSv1.2")}),
+    "12-formats": ("ec_point_formats without uncompressed points", ("alert", 47)),
+    "12-tls11": ("TLS 1.1 alone", ("alert", 70)),
+    "12-bad-point": ("a ClientKeyExchange point of small order", ("alert", 47)),
+    "12-bad-finished": ("the client's TLS 1.2 Finished one bit off", ("alert", 51)),
+    "12-bad-record-mac": ("the client's Finished record one bit off", ("alert", 20)),
+    "12-finished-in-clear": ("a Finished in the clear where the ChangeCipherSpec belongs", ("alert", 10)),
+    "12-ccs-split": ("a ChangeCipherSpec after half a handshake message", ("alert", 10)),
+    "12-split-by-data": ("half a renegotiating ClientHello, then application data", ("alert", 10)),
+    "12-oversize": ("a protected record of 2^14 + 1 bytes of plaintext", ("alert", 22)),
+    "12-second-ccs": ("a second ChangeCipherSpec", ("alert", 10)),
+    "12-data-before-finished": ("application data before the client's Finished", ("alert", 10)),
+    "12-hello-request": ("a HelloRequest from the client", ("alert", 10)),
+}
+# TLS 1.3's, asked of the same server.
+TLS12_ALSO = ("ok", "both-versions", "hrr")
+
+# The TLS 1.2 scenarios against a server that asks for a client's
+# certificate (`--mtls DIR --tls12`).
+MTLS12 = {
+    "12-mtls-ok": ("TLS 1.2, a P-256 client certificate and its CertificateVerify", ("held", "peer=CN=client")),
+    "12-mtls-ed25519": ("TLS 1.2, an Ed25519 client certificate", ("held", "peer=CN=client ed")),
+    "12-mtls-rsa": ("TLS 1.2, an RSA client certificate, its CertificateVerify under rsa_pkcs1_sha256", ("held", "peer=CN=client rsa")),
+    "12-mtls-none": ("TLS 1.2, no client certificate", ("alert", 40)),
+    "12-mtls-bad-cv": ("TLS 1.2, the client's CertificateVerify one bit off", ("alert", 51)),
+    "12-mtls-no-cv": ("TLS 1.2, a client Certificate with no CertificateVerify", ("alert", 10)),
+    "12-mtls-untrusted": ("TLS 1.2, a client certificate from another root", ("alert", 42)),
+    "12-mtls-wrong-scheme": ("TLS 1.2, a CertificateVerify under a scheme not the key's", ("alert", 47)),
+    # Asked of a server told a certificate is not required.
+    "12-mtls-optional-none": ("TLS 1.2, no client certificate, where one is not required", ("held", "peer=-")),
+}
 
 
 class Refused(Exception):
@@ -163,6 +354,40 @@ class Client:
         self.root = root
         self.reader = None
         self.handshake = b""
+        # What a resumption takes from this connection: the tickets it was
+        # sent - (lifetime, age_add, nonce, ticket) each - when they came,
+        # the resumption master secret and the suite.
+        self.tickets = []
+        self.received = None
+        self.res_master = None
+        self.suite = None
+        self.resumed = False
+
+    # The next record after the handshake, NewSessionTickets kept and
+    # passed over: each judged as RFC 8446 section 4.6.1 lays it out, a
+    # lifetime of at most seven days, no extension the server was not asked
+    # for.
+    def after(self):
+        while True:
+            type_, data = self.content()
+            if type_ != 22 or data[:1] != b"\x04":
+                return type_, data
+            while data:
+                assert data[0] == 4 and len(data) >= 4, f"handshake message {data[0]} among the NewSessionTickets"
+                size = int.from_bytes(data[1:4], "big")
+                body, data = data[4:4 + size], data[4 + size:]
+                lifetime, age_add = struct.unpack(">II", body[:8])
+                nonce = body[9:9 + body[8]]
+                at = 9 + body[8]
+                length = int.from_bytes(body[at:at + 2], "big")
+                ticket = body[at + 2:at + 2 + length]
+                rest = body[at + 2 + length:]
+                assert 0 < lifetime <= 604800, f"a ticket lifetime of {lifetime} s"
+                # No extension, or early_data alone with its max_early_data_size.
+                assert ticket and len(ticket) == length and (rest == b"\x00\x00" or (len(rest) == 10 and rest[:6] == b"\x00\x08\x00\x2a\x00\x04")), \
+                    f"a NewSessionTicket laid out wrong: {body.hex()}"
+                self.tickets.append((lifetime, age_add, nonce, ticket))
+                self.received = time.monotonic()
 
     def read_exact(self, n):
         while len(self.buf) < n:
@@ -208,7 +433,14 @@ class Client:
 
 
 def client_hello(session, share, suites=(0x1301, 0x1302, 0x1303), groups=(0x1d,), shares=None, sigalgs=SIGALGS,
-                 versions=(0x0304,), alpn=None, sni="localhost", compression=b"\x00", order=None, early=False):
+                 versions=(0x0304,), alpn=None, sni="localhost", compression=b"\x00", order=None, early=False,
+                 psk=None, modes=b"\x01", prefix=b"", schedule=None, binders=None, corrupt_binder=False):
+    """The ClientHello. With `psk`, a list of (ticket, obfuscated age, PSK
+    or None), it offers them in a pre_shared_key whose binders - over
+    `prefix` and the message to its binders, under `schedule`'s hash - are
+    right for each PSK given and random for None; `binders` sets how many
+    go, `corrupt_binder` puts the first one bit off, and `modes` (None for
+    none) is psk_key_exchange_modes."""
     shares = {0x1d: share} if shares is None else shares
     body = b"\x03\x03" + os.urandom(32) + bytes([len(session)]) + session
     body += struct.pack(">H", 2 * len(suites)) + b"".join(struct.pack(">H", s) for s in suites)
@@ -230,15 +462,42 @@ def client_hello(session, share, suites=(0x1301, 0x1302, 0x1303), groups=(0x1d,)
     if alpn is not None:
         names = b"".join(bytes([len(a)]) + a.encode() for a in alpn)
         exts["alpn"] = ext(16, struct.pack(">H", len(names)) + names)
+    size = schedule.size if schedule else 32
     if early:
         exts["early"] = ext(42, b"")
-        exts["modes"] = ext(45, b"\x01\x01")
-        identity = b"\x00\x05ticket" + b"\x00\x00\x00\x00"
-        binder = b"\x20" + os.urandom(32)
-        exts["psk"] = ext(41, struct.pack(">H", len(identity)) + identity + struct.pack(">H", len(binder)) + binder)
+        if psk is None:
+            # A ticket no server issued: early data offered that cannot be
+            # taken, with a well-formed pre_shared_key around it.
+            psk = [(b"ticket", 0, None)]
+    if psk is not None:
+        if modes is not None:
+            exts["modes"] = ext(45, bytes([len(modes)]) + modes)
+        identities = b"".join(struct.pack(">H", len(t)) + t + struct.pack(">I", age) for t, age, _ in psk)
+        count = len(psk) if binders is None else binders
+        listed = b"".join(bytes([size]) + bytes(size) for _ in range(count))
+        exts["psk"] = ext(41, struct.pack(">H", len(identities)) + identities + struct.pack(">H", len(listed)) + listed)
     names = order or [k for k in ("sni", "groups", "sigalgs", "versions", "shares", "alpn", "early", "modes", "psk") if k in exts]
     extensions = b"".join(exts[k] if k in exts else k for k in names)
-    return message(1, body + struct.pack(">H", len(extensions)) + extensions)
+    hello = message(1, body + struct.pack(">H", len(extensions)) + extensions)
+    if psk is None:
+        return hello
+    # The binders: in place, over the transcript to them - the ClientHello
+    # without its binders list, the list's length gone too (RFC 8446
+    # section 4.2.11.2) - wherever the pre_shared_key falls.
+    at = hello.index(exts["psk"]) + len(exts["psk"]) - len(listed)
+    truncated = hello[:at - 2]
+    out = b""
+    for i in range(count):
+        key = psk[i][2] if i < len(psk) else None
+        if key is None or schedule is None:
+            binder = os.urandom(size)
+        else:
+            early_secret = schedule.extract(bytes(schedule.size), key)
+            binder = schedule.finished(schedule.derive(early_secret, b"res binder", b""), prefix + truncated)
+        if i == 0 and corrupt_binder:
+            binder = bytes([binder[0] ^ 1]) + binder[1:]
+        out += bytes([size]) + binder
+    return hello[:at] + out + hello[at + len(out):]
 
 
 def parse_server_hello(sh):
@@ -260,42 +519,104 @@ def parse_server_hello(sh):
 
 
 def run(name, port, root):
+    if name.startswith("resume") or name in ("mtls-resume", "mtls-early-unallowed") or \
+            (name.startswith("early-") and name not in ("early-skip", "early-after-hrr", "early-malformed")):
+        return resume(name, port, root)
     c = Client(port, root)
     try:
-        return scenario(c, name)
+        return scenario12(c, name) if name.startswith("12-") else scenario(c, name)
     finally:
         c.sock.close()
 
 
-def scenario(c, name):
+def resume(name, port, root):
+    """A first connection, its tickets kept, then a second of `name` that
+    offers one; the second's outcome, and whether this side resumed. For
+    early-replay, a third sends the second's first flight again."""
+    first = Client(port, root)
+    extra = {"suites": (0x1301,)} if name in ("resume-other-hash", "early-suite") else {}
+    if name in ("resume-alpn", "early-alpn"):
+        extra["alpn"] = ["http/1.1"]
+    try:
+        outcome = scenario(first, "mtls-ok" if name.startswith("mtls-") else "first", extra=extra)
+    finally:
+        first.sock.close()
+    assert outcome[0] == "held" and len(first.tickets) == 2, f"the first connection: {outcome!r}, {len(first.tickets)} tickets"
+    offer = {"tickets": first.tickets, "res_master": first.res_master, "suite": first.suite, "received": first.received}
+    second = Client(port, root)
+    try:
+        outcome = scenario(second, name, offer=offer)
+    finally:
+        second.sock.close()
+    if name == "early-replay" and outcome[0] == "held":
+        third = Client(port, root)
+        try:
+            outcome = scenario(third, name, offer=offer, replay=second.first_flight)
+        finally:
+            third.sock.close()
+        second = third
+    if outcome[0] != "held":
+        return outcome
+    return "held", outcome[1].rstrip() + f" scripted-resumed={'yes' if second.resumed else 'no'}", outcome[2]
+
+
+def scenario(c, name, offer=None, extra=None, replay=None):
+    """One connection of `name`. With `offer`, what a first connection of
+    the same scenario kept (its tickets, resumption master secret, suite
+    and when the tickets came), a ticket of it is offered as `name` says;
+    `extra` adds ClientHello arguments."""
     key = x25519.X25519PrivateKey.generate()
     share = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     ec_key = ec.generate_private_key(ec.SECP256R1())
     ec_share = ec_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
-    p384_share = b"\x04" + os.urandom(96)
-    hrr_names = ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session", "hrr-p256", "hrr-other-suite", "hrr-early-again",
-                 "junk-after-hrr")
-    p256_names = ("p256-share", "hrr-p256")
+    p384_key = ec.generate_private_key(ec.SECP384R1())
+    p384_share = p384_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    p521_share = b"\x04" + os.urandom(132)
+    hrr_names = ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session", "hrr-p256", "hrr-p384", "hrr-other-suite", "hrr-early-again",
+                 "junk-after-hrr", "resume-hrr", "early-hrr", "hybrid-hrr")
+    kem_key = mlkem.MLKEM768PrivateKey.generate() if mlkem and name in NEEDS_MLKEM else None
+    kem_share = (kem_key.public_key().public_bytes_raw() if kem_key else fake_ek()) + share
+    p256_names = ("p256-share", "hrr-p256", "ec-shares")
+    p384_names = ("p384-share", "hrr-p384")
     session = os.urandom(32)
     kw = {}
     if name == "aes256": kw["suites"] = (0x1302,)
     if name == "chacha": kw["suites"] = (0x1303,)
     if name == "client-order": kw["suites"] = (0x1303, 0x1301)
+    if name == "both-versions": kw["versions"] = (0x0304, 0x0303)
     if name == "alpn": kw["alpn"] = ["http/1.1"]
     if name == "alpn-order": kw["alpn"] = ["http/1.1", "h2"]
     if name == "no-sni": kw["sni"] = None
     if name in hrr_names:
-        kw["groups"] = (0x18, 0x17) if name == "hrr-p256" else (0x18, 0x1d)
-        kw["shares"] = {0x18: p384_share}
+        kw["groups"] = {"hrr-p256": (0x19, 0x17), "hrr-p384": (0x19, 0x18)}.get(name, (0x19, 0x1d))
+        kw["shares"] = {0x19: p521_share}
+    if name.startswith("hybrid"):
+        kw["groups"] = (0x11ec, 0x1d)
+        kw["shares"] = {0x11ec: kem_share, 0x1d: share}
+    if name == "hybrid-hrr": kw["shares"] = {0x1d: share}
+    if name == "hybrid-short-share": kw["shares"] = {0x11ec: kem_share[:1215], 0x1d: share}
+    if name == "hybrid-long-share": kw["shares"] = {0x11ec: kem_share + b"\x00", 0x1d: share}
+    if name == "hybrid-modulus": kw["shares"] = {0x11ec: fake_ek(3329) + share, 0x1d: share}
+    if name == "hybrid-zero-x25519": kw["shares"] = {0x11ec: fake_ek() + bytes(32), 0x1d: share}
     if name == "p256-share":
         kw["groups"] = (0x17,)
         kw["shares"] = {0x17: ec_share}
+    early_data = None
     if name == "both-shares":
         kw["groups"] = (0x17, 0x1d)
         kw["shares"] = {0x17: ec_share, 0x1d: share}
     if name in ("bad-p256-share", "short-p256-share"):
         kw["groups"] = (0x17,)
         kw["shares"] = {0x17: ec_share[:-1] + bytes([ec_share[-1] ^ 1]) if name == "bad-p256-share" else ec_share[:64]}
+    if name == "p384-share":
+        kw["groups"] = (0x18,)
+        kw["shares"] = {0x18: p384_share}
+    if name == "ec-shares":
+        kw["groups"] = (0x18, 0x17)
+        kw["shares"] = {0x18: p384_share, 0x17: ec_share}
+    if name in ("bad-p384-share", "short-p384-share"):
+        kw["groups"] = (0x18,)
+        kw["shares"] = {0x18: p384_share[:-1] + bytes([p384_share[-1] ^ 1]) if name == "bad-p384-share" else p384_share[:96]}
     if name in ("early-skip", "early-after-hrr", "junk-after-hrr", "early-malformed"): kw["early"] = True
     if name == "sni-two":
         names = b"".join(b"\x00" + struct.pack(">H", len(n)) + n for n in (b"localhost", b"other.test"))
@@ -316,14 +637,15 @@ def scenario(c, name):
     if name == "no-key-share": kw["shares"] = False
     if name == "no-groups": kw["groups"] = None
     if name == "no-sigalgs": kw["sigalgs"] = None
-    if name == "no-ed25519": kw["sigalgs"] = (0x0403, 0x0804)
-    if name == "no-p256": kw["sigalgs"] = (0x0807, 0x0804)
-    if name == "pss-sha384": kw["sigalgs"] = (0x0805, 0x0804, 0x0807, 0x0403)
-    if name == "pss-sha512": kw["sigalgs"] = (0x0806, 0x0807, 0x0403, 0x0804)
-    if name == "no-rsa-pss": kw["sigalgs"] = (0x0401, 0x0501, 0x0601, 0x0807, 0x0403)
+    if name == "no-ed25519": kw["sigalgs"] = (0x0403, 0x0503, 0x0804)
+    if name == "no-p256": kw["sigalgs"] = (0x0807, 0x0503, 0x0804)
+    if name == "no-p384": kw["sigalgs"] = (0x0807, 0x0403, 0x0804)
+    if name == "pss-sha384": kw["sigalgs"] = (0x0805, 0x0804, 0x0807, 0x0403, 0x0503)
+    if name == "pss-sha512": kw["sigalgs"] = (0x0806, 0x0807, 0x0403, 0x0503, 0x0804)
+    if name == "no-rsa-pss": kw["sigalgs"] = (0x0401, 0x0501, 0x0601, 0x0807, 0x0403, 0x0503)
     if name == "no-group":
-        kw["groups"] = (0x18,)
-        kw["shares"] = {0x18: p384_share}
+        kw["groups"] = (0x19,)
+        kw["shares"] = {0x19: p521_share}
     if name == "byte-records":
         kw["order"] = ["sni", "groups", "sigalgs", "versions", "shares", ext(21, bytes(60000))]
     if name == "tls12": kw["versions"] = (0x0303,)
@@ -331,7 +653,50 @@ def scenario(c, name):
     if name == "no-suite": kw["suites"] = (0x1304,)
     if name == "alpn-mismatch": kw["alpn"] = ["spdy/3"]
     if name == "alpn-empty-name": kw["alpn"] = ["h2", ""]
-    ch = client_hello(session, share, **kw)
+    if extra:
+        kw.update(extra)
+    if offer is not None:
+        # The first ticket the first connection was sent: its PSK from its
+        # nonce (RFC 8446 section 4.6.1), its age as this side counts it.
+        lifetime, age_add, nonce, ticket = offer["tickets"][0]
+        held = Schedule(offer["suite"])
+        secret = held.expand_label(offer["res_master"], b"resumption", nonce, held.size)
+        age = int((time.monotonic() - offer["received"]) * 1000)
+        if name in ("resume-expired", "resume-expired-no-sigalgs"):
+            age = lifetime * 1000 + 1000
+        if name == "resume-tampered":
+            ticket = ticket[:-1] + bytes([ticket[-1] ^ 1])
+        entries = [(ticket, (age + age_add) & 0xFFFFFFFF, secret)]
+        if name == "early-stale":
+            entries = [(ticket, (age + 20000 + age_add) & 0xFFFFFFFF, secret)]
+        if name == "resume-second":
+            entries = [(os.urandom(len(ticket)), 0, None)] + entries
+        if name == "resume-binders":
+            entries = entries + [(os.urandom(len(ticket)), 0, None)]
+            kw["binders"] = 1
+        kw["psk"] = entries
+        kw["schedule"] = held
+        if name == "resume-bad-binder": kw["corrupt_binder"] = True
+        if name == "resume-psk-ke": kw["modes"] = b"\x00"
+        if name == "resume-no-modes": kw["modes"] = None
+        if name == "resume-not-last":
+            kw["order"] = ["sni", "groups", "sigalgs", "versions", "shares", "modes", "psk", ext(0xff01, b"\x00")]
+        if name == "resume-other-hash": kw["suites"] = (0x1302,)
+        if name == "resume-other-sni": kw["sni"] = "other.test"
+        if name == "resume-alpn": kw["alpn"] = ["h2"]
+        if name in ("resume-no-sigalgs", "resume-expired-no-sigalgs"): kw["sigalgs"] = None
+        if name.startswith("early") or name == "mtls-early-unallowed":
+            kw["early"] = True
+            if name == "early-alpn": kw["alpn"] = ["h2"]
+            if name == "early-suite": kw["suites"] = (0x1303, 0x1301)
+            if name == "early-second": kw["psk"] = [(os.urandom(len(ticket)), 0, None)] + kw["psk"]
+            early_data = {"early-request": b"GET / HTTP/1.0\r\n\r\n", "early-too-much": bytes(16385)}.get(name, b"early:ping")
+    if replay is not None:
+        # The same ClientHello, and its key share's key, for the replay.
+        ch, key, sent = replay
+        session = ch[39:39 + ch[38]]
+    else:
+        ch = client_hello(session, share, **kw)
     if name == "slow-hello":
         record = bytes([22, 3, 1]) + struct.pack(">H", len(ch)) + ch
         started = time.monotonic()
@@ -363,11 +728,32 @@ def scenario(c, name):
     elif name == "hello-and-more":
         more = ch + message(20, bytes(32))
         c.sock.sendall(bytes([22, 3, 1]) + struct.pack(">H", len(more)) + more)
+    elif replay is not None:
+        c.sock.sendall(sent)
     else:
-        c.sock.sendall(bytes([22, 3, 1]) + struct.pack(">H", len(ch)) + ch)
+        sent = bytes([22, 3, 1]) + struct.pack(">H", len(ch)) + ch
+        c.sock.sendall(sent)
+    early_writer = None
+    if early_data is not None:
+        # The early data (RFC 8446 section 4.2.10): a ChangeCipherSpec, then
+        # records under the client's early traffic keys - the ticket's suite,
+        # from its PSK, over this ClientHello alone.
+        held = Schedule(offer["suite"])
+        early_writer = Cipher(held, held.derive(held.extract(bytes(held.size), kw["psk"][0][2] or bytes(held.size)), b"c e traffic", ch))
+        if replay is None:
+            early = plain(20, b"\x01")
+            for k in range(0, len(early_data), 16384):
+                chunk = early_data[k:k + 16384]
+                pad = 16384 + 2 - len(chunk) - 1 if name == "early-padded-over" else 0
+                early += early_writer.seal(23, chunk, corrupt=(name == "early-bad-record"), pad=pad)
+            c.sock.sendall(early)
+            c.first_flight = (ch, key, sent + early)
+        else:
+            for _ in range(len(early_data) // 16384 + 1):
+                early_writer.seq += 1
     if name == "ccs-flood":
         c.sock.sendall(plain(20, b"\x01") * 17)
-    if kw.get("early"):
+    if kw.get("early") and early_data is None:
         # Early data under keys the server does not have: it must pass over
         # these records.
         for _ in range(3):
@@ -384,7 +770,7 @@ def scenario(c, name):
     assert exts.get(43) == b"\x03\x04", "no TLS 1.3 in the ServerHello"
     schedule = Schedule(suite)
     if random == HELLO_RETRY:
-        wanted = b"\x00\x17" if name == "hrr-p256" else b"\x00\x1d"
+        wanted = {"hrr-p256": b"\x00\x17", "hrr-p384": b"\x00\x18", "hybrid-hrr": b"\x11\xec"}.get(name, b"\x00\x1d")
         assert exts.get(51) == wanted, f"a HelloRetryRequest asking for {exts.get(51)!r}"
         assert name in hrr_names, "a HelloRetryRequest nobody needed"
         digest = schedule.digest(ch)
@@ -403,10 +789,16 @@ def scenario(c, name):
             again["suites"] = tuple(x for x in (0x1301, 0x1302, 0x1303) if x != suite)
         if name == "hrr-p256":
             again["shares"] = {0x17: ec_share}
+        elif name == "hybrid-hrr":
+            again["shares"] = {0x11ec: kem_share}
+        elif name == "hrr-p384":
+            again["shares"] = {0x18: p384_share}
         elif name != "hrr-no-share":
             again["shares"] = {0x1d: share}
         if name == "hrr-other-session":
             session = os.urandom(32)
+        if "psk" in again:
+            again["prefix"] = transcript
         ch = client_hello(session, share, **again)
         c.sock.sendall(plain(22, ch))
         transcript += ch
@@ -419,10 +811,29 @@ def scenario(c, name):
     if name in p256_names:
         assert group == 0x17 and length == 65, "the server's share is not secp256r1"
         shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), exts[51][4:]))
+    elif name in NEEDS_MLKEM:
+        # The draft's sections 4.2 and 4.3: the ciphertext, then the
+        # server's X25519 key; ML-KEM's secret, then X25519's.
+        assert group == 0x11ec and length == 1120, f"the server's share is group {group:#x}, {length} bytes, not X25519MLKEM768's 1120"
+        theirs = exts[51][4:]
+        shared = kem_key.decapsulate(theirs[:1088]) + key.exchange(x25519.X25519PublicKey.from_public_bytes(theirs[1088:]))
+    elif name in p384_names:
+        assert group == 0x18 and length == 97, "the server's share is not secp384r1"
+        shared = p384_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP384R1(), exts[51][4:]))
     else:
         assert group == 0x1d and length == 32, "the server's share is not X25519"
         shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(exts[51][4:]))
-    early_secret = schedule.extract(bytes(schedule.size), bytes(schedule.size))
+    # A resumption (RFC 8446 section 2.2): the ServerHello names the
+    # identity taken, whose PSK the early secret is made of.
+    resumed = 41 in exts
+    psk_secret = bytes(schedule.size)
+    if resumed:
+        assert "psk" in kw, "a pre_shared_key in a ServerHello to a ClientHello offering none"
+        chosen = int.from_bytes(exts[41], "big")
+        assert len(exts[41]) == 2 and chosen < len(kw["psk"]) and kw["psk"][chosen][2] is not None, f"a ServerHello taking identity {exts[41].hex()}"
+        psk_secret = kw["psk"][chosen][2]
+    c.resumed = resumed
+    early_secret = schedule.extract(bytes(schedule.size), psk_secret)
     hs = schedule.extract(schedule.derive(early_secret, b"derived", b""), shared)
     c_hs = schedule.derive(hs, b"c hs traffic", transcript)
     s_hs = schedule.derive(hs, b"s hs traffic", transcript)
@@ -436,53 +847,66 @@ def scenario(c, name):
         t, n = struct.unpack(">HH", listed[i:i + 4])
         types.append(t)
         i += 4 + n
-    assert 42 not in types, "early data accepted, which this server does not take"
+    taken = 42 in types
+    wanted = early_data is not None and replay is None and name in ("early-ok", "early-request", "early-too-much", "early-bad-record",
+                                                                    "early-finished-early", "early-replay", "early-split-eoed",
+                                                                    "early-split-close", "early-padded-over")
+    assert taken == wanted, f"early data {'taken' if taken else 'refused'} where it should {'' if wanted else 'not '}be"
     assert (16 in types) == (kw.get("alpn") is not None), f"EncryptedExtensions {types} for ALPN {kw.get('alpn')}"
     transcript += ee
     cert = c.message()
-    requested = cert[0] == 13
-    if requested:
-        assert mtls, "a CertificateRequest from a server that was not told to ask"
-        body = cert[4:]
-        assert body[0] == 0, "a CertificateRequest with a context"
-        listed, i, offered = body[3:], 0, []
-        while i < len(listed):
-            t, n = struct.unpack(">HH", listed[i:i + 4])
-            if t == 13:
-                schemes = listed[i + 6:i + 4 + n]
-                offered = [int.from_bytes(schemes[k:k + 2], "big") for k in range(0, len(schemes), 2)]
-            i += 4 + n
-        assert 0x0807 in offered and 0x0403 in offered, f"a CertificateRequest offering {offered}"
+    requested = cert[0] == 13 and not resumed
+    if resumed:
+        # The PSK is the authentication: no CertificateRequest, Certificate
+        # or CertificateVerify (RFC 8446 sections 2.2 and 4.3.2).
+        assert cert[0] == 20, f"message {cert[0]} where a resumption's Finished belongs"
+        finished = cert
+    else:
+        if requested:
+            assert mtls, "a CertificateRequest from a server that was not told to ask"
+            body = cert[4:]
+            assert body[0] == 0, "a CertificateRequest with a context"
+            listed, i, offered = body[3:], 0, []
+            while i < len(listed):
+                t, n = struct.unpack(">HH", listed[i:i + 4])
+                if t == 13:
+                    schemes = listed[i + 6:i + 4 + n]
+                    offered = [int.from_bytes(schemes[k:k + 2], "big") for k in range(0, len(schemes), 2)]
+                i += 4 + n
+            assert 0x0807 in offered and 0x0403 in offered, f"a CertificateRequest offering {offered}"
+            transcript += cert
+            cert = c.message()
+        else:
+            assert not mtls, "no CertificateRequest from a server told to ask"
+        assert cert[0] == 11, f"message {cert[0]} where Certificate belongs"
         transcript += cert
-        cert = c.message()
-    else:
-        assert not mtls, "no CertificateRequest from a server told to ask"
-    assert cert[0] == 11, f"message {cert[0]} where Certificate belongs"
-    transcript += cert
-    body = cert[4:]
-    assert body[0] == 0, "a request context"
-    first = int.from_bytes(body[4:7], "big")
-    leaf = x509.load_der_x509_certificate(body[7:7 + first])
-    leaf.verify_directly_issued_by(c.root)
-    verify = c.message()
-    signed = b" " * 64 + b"TLS 1.3, server CertificateVerify\x00" + schedule.digest(transcript)
-    public = leaf.public_key()
-    if isinstance(public, ed25519.Ed25519PublicKey):
-        assert verify[4:6] == b"\x08\x07", f"an Ed25519 key's CertificateVerify under {verify[4:6].hex()}"
-        public.verify(verify[8:], signed)
-    elif isinstance(public, rsa.RSAPublicKey):
-        wanted = next(s for s in kw.get("sigalgs", SIGALGS) if s in PSS)
-        scheme = int.from_bytes(verify[4:6], "big")
-        assert scheme == wanted, f"an RSA key's CertificateVerify under {scheme:#06x}, the first RSA-PSS scheme offered being {wanted:#06x}"
-        h = PSS[scheme]()
-        public.verify(verify[8:], signed, padding.PSS(mgf=padding.MGF1(h), salt_length=h.digest_size), h)
-    else:
-        assert isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp256r1", "the leaf's key is neither Ed25519, P-256 nor RSA"
-        assert verify[4:6] == b"\x04\x03", f"a P-256 key's CertificateVerify under {verify[4:6].hex()}"
-        public.verify(verify[8:], signed, ec.ECDSA(hashes.SHA256()))
-    assert verify[0] == 15, f"message {verify[0]} where CertificateVerify belongs"
-    transcript += verify
-    finished = c.message()
+        body = cert[4:]
+        assert body[0] == 0, "a request context"
+        first = int.from_bytes(body[4:7], "big")
+        leaf = x509.load_der_x509_certificate(body[7:7 + first])
+        leaf.verify_directly_issued_by(c.root)
+        verify = c.message()
+        signed = b" " * 64 + b"TLS 1.3, server CertificateVerify\x00" + schedule.digest(transcript)
+        public = leaf.public_key()
+        if isinstance(public, ed25519.Ed25519PublicKey):
+            assert verify[4:6] == b"\x08\x07", f"an Ed25519 key's CertificateVerify under {verify[4:6].hex()}"
+            public.verify(verify[8:], signed)
+        elif isinstance(public, rsa.RSAPublicKey):
+            wanted = next(s for s in kw.get("sigalgs", SIGALGS) if s in PSS)
+            scheme = int.from_bytes(verify[4:6], "big")
+            assert scheme == wanted, f"an RSA key's CertificateVerify under {scheme:#06x}, the first RSA-PSS scheme offered being {wanted:#06x}"
+            h = PSS[scheme]()
+            public.verify(verify[8:], signed, padding.PSS(mgf=padding.MGF1(h), salt_length=h.digest_size), h)
+        elif isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp384r1":
+            assert verify[4:6] == b"\x05\x03", f"a P-384 key's CertificateVerify under {verify[4:6].hex()}"
+            public.verify(verify[8:], signed, ec.ECDSA(hashes.SHA384()))
+        else:
+            assert isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp256r1", "the leaf's key is neither Ed25519, P-256, P-384 nor RSA"
+            assert verify[4:6] == b"\x04\x03", f"a P-256 key's CertificateVerify under {verify[4:6].hex()}"
+            public.verify(verify[8:], signed, ec.ECDSA(hashes.SHA256()))
+        assert verify[0] == 15, f"message {verify[0]} where CertificateVerify belongs"
+        transcript += verify
+        finished = c.message()
     assert finished[0] == 20 and finished[4:] == schedule.finished(s_hs, transcript), "the server's Finished"
     transcript += finished
     assert not c.handshake, "handshake bytes after the server's Finished"
@@ -527,6 +951,24 @@ def scenario(c, name):
             transcript += client_verify
             if name == "mtls-late":
                 time.sleep(0.2)
+    if taken and name == "early-request":
+        # The answer comes before this side's Finished (0.5-RTT): read it,
+        # under the server's application keys, first.
+        c.reader = Cipher(schedule, s_ap)
+        type_, data = c.after()
+        assert type_ == 23 and b"HTTP/1.0 200 ok" in data, f"no answer before the client's Finished: {type_} {data[:40]!r}"
+        early_answer = data
+    if taken and name == "early-finished-early":
+        c.sock.sendall(early_writer.seal(22, message(20, schedule.finished(c_hs, transcript))))
+    elif taken:
+        ended = message(5, b"")
+        if name == "early-split-eoed":
+            c.sock.sendall(early_writer.seal(22, ended[:2]) + early_writer.seal(23, b"early:more"))
+        elif name == "early-split-close":
+            c.sock.sendall(early_writer.seal(22, ended[:2]) + early_writer.seal(21, b"\x01\x00"))
+        else:
+            c.sock.sendall(early_writer.seal(22, ended))
+        transcript += ended
     if name == "ccs":
         c.sock.sendall(plain(20, b"\x01"))
     if name == "cert-instead-of-finished":
@@ -546,21 +988,28 @@ def scenario(c, name):
             verify_data = bytes([verify_data[0] ^ 1]) + verify_data[1:]
         c.sock.sendall(writer.seal(22, message(20, verify_data), corrupt=(name == "bad-record-mac")))
     writer = Cipher(schedule, c_ap)
+    # The resumption master secret, over the handshake to this side's
+    # Finished: the tickets' PSKs are made of it.
+    c.res_master = schedule.derive(master, b"res master", transcript + message(20, schedule.finished(c_hs, transcript)))
+    c.suite = suite
     got = b""
     if name == "keyupdate":
         c.sock.sendall(writer.seal(22, message(24, b"\x01")))
         writer = Cipher(schedule, schedule.expand_label(c_ap, b"traffic upd", b"", schedule.size))
         c.sock.sendall(writer.seal(23, b"ping"))
-        type_, data = c.content()
+        type_, data = c.after()
         assert type_ == 22 and data == message(24, b"\x00"), "no KeyUpdate back"
         c.reader = Cipher(schedule, schedule.expand_label(s_ap, b"traffic upd", b"", schedule.size))
-        type_, data = c.content()
+        type_, data = c.after()
         assert type_ == 23, f"a record of type {type_} where the echo belongs"
         got += data
-    c.sock.sendall(writer.seal(23, b"GET / HTTP/1.0\r\n\r\n"))
+    if taken and name == "early-request":
+        got = early_answer
+    else:
+        c.sock.sendall(writer.seal(23, b"GET / HTTP/1.0\r\n\r\n"))
     while True:
         try:
-            type_, data = c.content()
+            type_, data = c.after()
         except Refused as r:
             if r.code == 0:
                 break
@@ -570,25 +1019,376 @@ def scenario(c, name):
     return "held", got.decode(errors="replace"), SUITE_NAMES[suite]
 
 
+def prf(hash_name, secret, label, seed, size):
+    """TLS 1.2's PRF (RFC 5246 section 5): P_hash over *hash_name*."""
+    seed = label + seed
+    out, a = b"", seed
+    while len(out) < size:
+        a = hmac.new(secret, a, hash_name).digest()
+        out += hmac.new(secret, a + seed, hash_name).digest()
+    return out[:size]
+
+
+class Cipher12:
+    """One direction's TLS 1.2 records: AES-GCM with an explicit nonce (RFC
+    5288), or ChaCha20-Poly1305 with 1.3's nonce (RFC 7905)."""
+
+    def __init__(self, suite, key, iv):
+        self.chacha = SUITES12[suite][3]
+        self.aead = ChaCha20Poly1305(key) if self.chacha else AESGCM(key)
+        self.iv, self.seq, self.explicit = iv, 0, set()
+
+    def nonce(self):
+        n = bytearray(self.iv)
+        for i in range(8):
+            n[11 - i] ^= (self.seq >> (8 * i)) & 0xFF
+        return bytes(n)
+
+    def aad(self, type_, length):
+        return self.seq.to_bytes(8, "big") + bytes([type_, 3, 3]) + length.to_bytes(2, "big")
+
+    def seal(self, type_, content, corrupt=False):
+        if self.chacha:
+            body = self.aead.encrypt(self.nonce(), content, self.aad(type_, len(content)))
+        else:
+            explicit = self.seq.to_bytes(8, "big")
+            body = explicit + self.aead.encrypt(self.iv + explicit, content, self.aad(type_, len(content)))
+        if corrupt:
+            body = body[:-1] + bytes([body[-1] ^ 1])
+        self.seq += 1
+        return bytes([type_, 3, 3]) + struct.pack(">H", len(body)) + body
+
+    def open(self, header, body):
+        type_ = header[0]
+        if self.chacha:
+            data = self.aead.decrypt(self.nonce(), body, self.aad(type_, len(body) - 16))
+        else:
+            # RFC 5288 section 3: an explicit nonce is never used twice under
+            # one key - the record would decrypt, and the key be lost.
+            assert body[:8] not in self.explicit, f"the server's explicit nonce {body[:8].hex()} again, under the same key"
+            self.explicit.add(body[:8])
+            data = self.aead.decrypt(self.iv + body[:8], body[8:], self.aad(type_, len(body) - 24))
+        self.seq += 1
+        return type_, data
+
+
+def client_hello12(session, suites=OFFER12, groups=(0x1d, 0x17, 0x18), sigalgs=SIGALGS12, versions=(0x0303,), alpn=None, sni="localhost",
+                   ems=True, reneg=b"\x00", formats=b"\x01\x00", legacy=b"\x03\x03"):
+    """A ClientHello offering TLS 1.2: a session ticket asked for, which no
+    resumption answers."""
+    body = legacy + os.urandom(32) + bytes([len(session)]) + session
+    body += struct.pack(">H", 2 * len(suites)) + b"".join(struct.pack(">H", s) for s in suites) + b"\x01\x00"
+    exts = b""
+    if sni is not None:
+        name = sni.encode()
+        entry = b"\x00" + struct.pack(">H", len(name)) + name
+        exts += ext(0, struct.pack(">H", len(entry)) + entry)
+    if groups is not None:
+        exts += ext(10, struct.pack(">H", 2 * len(groups)) + b"".join(struct.pack(">H", g) for g in groups))
+    if formats is not None:
+        exts += ext(11, bytes([len(formats)]) + formats)
+    if sigalgs is not None:
+        exts += ext(13, struct.pack(">H", 2 * len(sigalgs)) + b"".join(struct.pack(">H", s) for s in sigalgs))
+    if alpn is not None:
+        names = b"".join(bytes([len(a)]) + a.encode() for a in alpn)
+        exts += ext(16, struct.pack(">H", len(names)) + names)
+    if versions is not None:
+        exts += ext(43, bytes([2 * len(versions)]) + b"".join(struct.pack(">H", v) for v in versions))
+    if ems:
+        exts += ext(23, b"")
+    exts += ext(35, b"")
+    if reneg is not None:
+        exts += ext(0xff01, reneg)
+    return message(1, body + struct.pack(">H", len(exts)) + exts)
+
+
+def verify12(public, scheme, signed, signature):
+    """A TLS 1.2 signature checked under *scheme*, by the key's kind."""
+    if isinstance(public, ed25519.Ed25519PublicKey):
+        assert scheme == 0x0807, f"an Ed25519 key's signature under {scheme:#06x}"
+        public.verify(signature, signed)
+    elif isinstance(public, rsa.RSAPublicKey):
+        if scheme in PSS:
+            h = PSS[scheme]()
+            public.verify(signature, signed, padding.PSS(mgf=padding.MGF1(h), salt_length=h.digest_size), h)
+        else:
+            assert scheme in PKCS1, f"an RSA key's signature under {scheme:#06x}"
+            public.verify(signature, signed, padding.PKCS1v15(), PKCS1[scheme]())
+    else:
+        assert scheme in ECDSA, f"an ECDSA key's signature under {scheme:#06x}"
+        public.verify(signature, signed, ec.ECDSA(ECDSA[scheme]()))
+
+
+def scenario12(c, name):
+    """One TLS 1.2 handshake with the server, as *name* has it."""
+    rsa_key = KEY_KIND == "rsa"
+    session = os.urandom(32)
+    kw = {}
+    if name == "12-aes256": kw["suites"] = (0xc02c, 0xc030)
+    if name == "12-chacha": kw["suites"] = (0xcca9, 0xcca8)
+    if name == "12-client-order": kw["suites"] = (0xcca9, 0xcca8, 0xc02b, 0xc02f)
+    if name == "12-p256": kw["groups"] = (0x17,)
+    if name == "12-p384": kw["groups"] = (0x18,)
+    if name == "12-no-groups": kw["groups"] = None
+    if name == "12-legacy": kw["versions"] = None
+    if name == "12-alpn": kw["alpn"] = ["http/1.1", "h2"]
+    if name == "12-scsv":
+        kw["reneg"] = None
+        kw["suites"] = OFFER12 + (0x00ff,)
+    if name == "12-no-reneg": kw["reneg"] = None
+    if name == "12-pss-first": kw["sigalgs"] = (0x0401, 0x0805, 0x0804, 0x0807, 0x0403, 0x0503)
+    if name == "12-pkcs1": kw["sigalgs"] = (0x0601, 0x0401, 0x0807, 0x0403, 0x0503)
+    if name == "12-no-ems": kw["ems"] = False
+    if name == "12-reneg-data": kw["reneg"] = b"\x0c" + os.urandom(12)
+    if name == "12-fallback": kw["suites"] = OFFER12 + (0x5600,)
+    if name == "12-no-suite": kw["suites"] = (0xc013, 0xc014, 0x002f)
+    if name == "12-other-kind": kw["suites"] = tuple(s for s in OFFER12 if SUITES12[s][1] != rsa_key)
+    if name == "12-no-sigalgs": kw["sigalgs"] = None
+    if name == "12-p256-no-curve": kw["groups"] = (0x1d,)
+    if name == "12-formats": kw["formats"] = b"\x01"
+    if name == "12-tls11":
+        kw["versions"] = (0x0302,)
+        kw["legacy"] = b"\x03\x02"
+    if name == "12-sni-other": kw["sni"] = "other.test"
+    ch = client_hello12(session, **kw)
+    client_random = ch[6:38]
+    c.sock.sendall(plain(22, ch))
+    transcript = ch
+
+    sh = c.message()
+    assert sh[0] == 2, f"message {sh[0]} where the ServerHello belongs"
+    server_random, sid, suite, exts = parse_server_hello(sh)
+    assert sh[4:6] == b"\x03\x03", f"a ServerHello of version {sh[4:6].hex()}"
+    assert 43 not in exts, "supported_versions in a TLS 1.2 ServerHello"
+    # RFC 8446 section 4.1.3: a server that speaks 1.3 writes this when it
+    # answers in 1.2.
+    assert server_random[24:] == SENTINEL12, f"a TLS 1.2 ServerHello whose random ends {server_random[24:].hex()}, not the downgrade sentinel"
+    assert sid == b"", f"a session id of {len(sid)} bytes: a session kept, which nothing resumes"
+    assert 35 not in exts, "a session ticket promised"
+    offered = kw.get("suites", OFFER12)
+    # other.test's certificate is P-256's, whatever the server's own key.
+    want_rsa = False if name == "12-sni-other" else rsa_key
+    expected = next(s for s in offered if s in SUITES12 and SUITES12[s][1] == want_rsa)
+    assert suite == expected, f"suite {suite:#06x}, the client's first of the key's kind being {expected:#06x}"
+    assert exts.get(23) == b"", "no extended_master_secret answered"
+    if kw.get("reneg", b"\x00") is not None or 0x00ff in offered:
+        assert exts.get(0xff01) == b"\x00", f"renegotiation_info answered {exts.get(0xff01)!r}, not its empty one"
+    else:
+        assert 0xff01 not in exts, "a renegotiation_info nobody signalled"
+    assert exts.get(11) == b"\x01\x00", f"ec_point_formats answered {exts.get(11)!r}"
+    assert (16 in exts) == (kw.get("alpn") is not None), f"ALPN answered {exts.get(16)!r} to {kw.get('alpn')}"
+    assert set(exts) <= {23, 0xff01, 11, 16}, f"extensions {sorted(exts)} in the ServerHello"
+    transcript += sh
+
+    cert = c.message()
+    assert cert[0] == 11, f"message {cert[0]} where Certificate belongs"
+    first = int.from_bytes(cert[7:10], "big")
+    leaf = x509.load_der_x509_certificate(cert[10:10 + first])
+    leaf.verify_directly_issued_by(c.root)
+    public = leaf.public_key()
+    assert isinstance(public, rsa.RSAPublicKey) == SUITES12[suite][1], "a certificate not of the suite's kind"
+    transcript += cert
+
+    ske = c.message()
+    assert ske[0] == 12, f"message {ske[0]} where ServerKeyExchange belongs"
+    body = ske[4:]
+    assert body[0] == 3, "a ServerKeyExchange whose curve is not a named one"
+    group = int.from_bytes(body[1:3], "big")
+    point = body[4:4 + body[3]]
+    params = body[:4 + body[3]]
+    scheme = int.from_bytes(body[4 + body[3]:6 + body[3]], "big")
+    signature = body[8 + body[3]:]
+    wanted_group = {"12-p256": 0x17, "12-no-groups": 0x17, "12-p384": 0x18}.get(name, 0x1d)
+    assert group == wanted_group, f"ECDHE in group {group:#x}, where {wanted_group:#x} belongs"
+    sigalgs = kw.get("sigalgs", SIGALGS12)
+    if isinstance(public, rsa.RSAPublicKey):
+        wanted = next((s for s in sigalgs if s in PSS), None) or next(s for s in sigalgs if s in PKCS1)
+    elif isinstance(public, ed25519.Ed25519PublicKey):
+        wanted = 0x0807
+    else:
+        # A P-384 key signs under ecdsa_secp384r1_sha384, the one scheme of
+        # its own, though TLS 1.2's ECDSA schemes name a hash and no curve.
+        wanted = 0x0503 if isinstance(public.curve, ec.SECP384R1) else 0x0403
+    assert scheme == wanted, f"a ServerKeyExchange under {scheme:#06x}, where {wanted:#06x} belongs"
+    verify12(public, scheme, client_random + server_random + params, signature)
+    transcript += ske
+
+    done = c.message()
+    requested = done[0] == 13
+    if requested:
+        assert MTLS_DIR, "a CertificateRequest from a server that was not told to ask"
+        body = done[4:]
+        types = body[1:1 + body[0]]
+        listed = body[3 + body[0]:3 + body[0] + int.from_bytes(body[1 + body[0]:3 + body[0]], "big")]
+        offered_schemes = [int.from_bytes(listed[k:k + 2], "big") for k in range(0, len(listed), 2)]
+        assert 64 in types and 1 in types, f"a CertificateRequest for types {list(types)}"
+        assert {0x0807, 0x0403, 0x0804, 0x0401} <= set(offered_schemes), f"a CertificateRequest for schemes {offered_schemes}"
+        transcript += done
+        done = c.message()
+    else:
+        assert not MTLS_DIR, "no CertificateRequest from a server told to ask"
+    assert done == message(14, b""), f"message {done[0]} where ServerHelloDone belongs"
+    transcript += done
+    assert not c.handshake, "handshake bytes after the ServerHelloDone"
+
+    # The client's flight.
+    flight = b""
+    own = None
+    if requested:
+        who = {"12-mtls-ed25519": "client-ed", "12-mtls-rsa": "client-rsa", "12-mtls-untrusted": "other"}.get(name, "client")
+        ders = [x509c.public_bytes(serialization.Encoding.DER)
+                for x509c in x509.load_pem_x509_certificates(open(os.path.join(MTLS_DIR, who + ".pem"), "rb").read())]
+        own = serialization.load_pem_private_key(open(os.path.join(MTLS_DIR, who + ".key"), "rb").read(), None)
+        if name in ("12-mtls-none", "12-mtls-optional-none"):
+            ders, own = [], None
+        entries = b"".join(len(d).to_bytes(3, "big") + d for d in ders)
+        presented = message(11, len(entries).to_bytes(3, "big") + entries)
+        flight += presented
+        transcript += presented
+    if group in CURVES12:
+        curve = CURVES12[group]()
+        mine = ec.generate_private_key(curve)
+        shared = mine.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(curve, point))
+        public_point = mine.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    else:
+        mine = x25519.X25519PrivateKey.generate()
+        shared = mine.exchange(x25519.X25519PublicKey.from_public_bytes(point))
+        public_point = mine.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    if name == "12-bad-point":
+        public_point = bytes(32) if group == 0x1d else public_point[:-1] + bytes([public_point[-1] ^ 1])
+    key_exchange = message(16, bytes([len(public_point)]) + public_point)
+    flight += key_exchange
+    transcript += key_exchange
+    _, _, key_size, chacha, hash_name = SUITES12[suite]
+    # RFC 7627 section 4: the master secret over the session hash, the
+    # transcript to the ClientKeyExchange.
+    master = prf(hash_name, shared, b"extended master secret", digest12(hash_name, transcript), 48)
+    if own is not None and name != "12-mtls-no-cv":
+        if isinstance(own, ed25519.Ed25519PrivateKey):
+            scheme, sig = 0x0807, own.sign(transcript)
+        elif isinstance(own, rsa.RSAPrivateKey):
+            scheme, sig = 0x0401, own.sign(transcript, padding.PKCS1v15(), hashes.SHA256())
+        else:
+            scheme, sig = 0x0403, own.sign(transcript, ec.ECDSA(hashes.SHA256()))
+        if name == "12-mtls-wrong-scheme":
+            scheme = 0x0807
+        if name == "12-mtls-bad-cv":
+            sig = sig[:-1] + bytes([sig[-1] ^ 1])
+        client_verify = message(15, struct.pack(">HH", scheme, len(sig)) + sig)
+        flight += client_verify
+        transcript += client_verify
+    iv_size = 12 if chacha else 4
+    block = prf(hash_name, master, b"key expansion", server_random + client_random, 2 * key_size + 2 * iv_size)
+    writer = Cipher12(suite, block[:key_size], block[2 * key_size:2 * key_size + iv_size])
+    reader = Cipher12(suite, block[key_size:2 * key_size], block[2 * key_size + iv_size:2 * key_size + 2 * iv_size])
+    verify_data = prf(hash_name, master, b"client finished", digest12(hash_name, transcript), 12)
+    if name == "12-bad-finished":
+        verify_data = bytes([verify_data[0] ^ 1]) + verify_data[1:]
+    finished = message(20, verify_data)
+    if name == "12-hello-request":
+        flight = message(0, b"")
+    if name == "12-ccs-split":
+        # A whole ClientKeyExchange and the first bytes of another message,
+        # then the key change.
+        flight += message(20, b"")[:2]
+    out = plain(22, flight) if flight else b""
+    if name == "12-finished-in-clear":
+        out += plain(22, finished)
+    else:
+        out += plain(20, b"\x01")
+        if name == "12-second-ccs":
+            out += plain(20, b"\x01")
+        if name == "12-data-before-finished":
+            out += writer.seal(23, b"too soon")
+        out += writer.seal(22, finished, corrupt=(name == "12-bad-record-mac"))
+    c.sock.sendall(out)
+    transcript += finished
+
+    # The server's ChangeCipherSpec, then its Finished under its keys.
+    header, body = c.record()
+    if header[0] == 21:
+        raise Refused(body[1])
+    assert header[0] == 20 and body == b"\x01", f"a record of type {header[0]} where the server's ChangeCipherSpec belongs"
+    type_, data = reader.open(*c.record())
+    expected_finished = message(20, prf(hash_name, master, b"server finished", digest12(hash_name, transcript), 12))
+    assert type_ == 22 and data == expected_finished, "the server's TLS 1.2 Finished"
+
+    if name == "12-renegotiate":
+        # The server refuses: no_renegotiation, a warning, under its keys.
+        c.sock.sendall(writer.seal(22, client_hello12(b"")))
+        type_, data = reader.open(*c.record())
+        assert type_ == 21, f"a record of type {type_} where the refusal belongs"
+        return ("warning", data[1]) if data[0] == 1 else ("alert", data[1])
+    request = b"GET / HTTP/1.0\r\n\r\n"
+    if name == "12-oversize":
+        # RFC 5246 section 6.2.1: a TLSPlaintext of 2^14 bytes at most. The
+        # request padded by a header to 2^14 + 1, so that a server that
+        # takes it answers it.
+        head, tail = b"GET / HTTP/1.0\r\nX-Pad: ", b"\r\n\r\n"
+        request = head + b"p" * (16385 - len(head) - len(tail)) + tail
+    out = b""
+    if name == "12-split-by-data":
+        # Half a renegotiating ClientHello, then the request. RFC 5246
+        # section 6.2.1 lets record types interleave; std/tls holds TLS 1.2
+        # to RFC 8446 section 5.1's rule, nothing between a handshake
+        # message's pieces, as SECURITY_REVIEW_TLS.md's finding 6 asked.
+        hello = client_hello12(b"")
+        out += writer.seal(22, hello[:len(hello) // 2])
+    c.sock.sendall(out + writer.seal(23, request))
+    got = b""
+    while True:
+        type_, data = reader.open(*c.record())
+        if type_ == 21:
+            if data[1] == 0:
+                break
+            raise Refused(data[1])
+        assert type_ == 23, f"a record of type {type_} after the handshake"
+        got += data
+    text = got.decode(errors="replace")
+    assert "TLSv1.2" in text and SUITES12[suite][0] in text, f"the server says it agreed {text.splitlines()[-1]!r}"
+    # The group the server says it agreed is the one its ServerKeyExchange
+    # named (`named_group`, in TLS 1.2 as in 1.3).
+    assert f"group={GROUPS12[group]} " in text, f"the server names its group {text.split('group=')[-1].split()[0]!r}, not {GROUPS12[group]}"
+    return "held", text, SUITES12[suite][0]
+
+
+def digest12(hash_name, data):
+    return hashlib.new(hash_name, data).digest()
+
+
 def main():
     port = int(sys.argv[1])
     root = x509.load_pem_x509_certificate(open(sys.argv[2], "rb").read())
     rest = sys.argv[3:]
     key_kind = "ed25519"
-    global MTLS_DIR
+    tls12 = False
+    global MTLS_DIR, KEY_KIND
     while rest and rest[0].startswith("--"):
-        if rest[0] in ("--p256", "--rsa"):
+        if rest[0] in ("--p256", "--p384", "--rsa"):
             key_kind = rest[0][2:]
             rest = rest[1:]
         elif rest[0] == "--mtls":
             MTLS_DIR = rest[1]
             rest = rest[2:]
+        elif rest[0] == "--tls12":
+            tls12 = True
+            rest = rest[1:]
         else:
             raise SystemExit(f"no option {rest[0]}")
-    names = rest or ([n for n in MTLS if n != "mtls-optional-none"] if MTLS_DIR else list(SCENARIOS))
+    KEY_KIND = key_kind
+    if tls12:
+        default = [n for n in MTLS12 if n != "12-mtls-optional-none"] if MTLS_DIR else list(TLS12) + list(TLS12_ALSO)
+    else:
+        default = [n for n in MTLS if n != "mtls-optional-none"] if MTLS_DIR else list(SCENARIOS)
+    names = rest or default
     failures = 0
+    table = {**SCENARIOS, **MTLS, **TLS12, **MTLS12}
+    skipped = 0
     for name in names:
-        what, answer = MTLS[name] if name in MTLS else SCENARIOS[name]
+        if name in NEEDS_MLKEM and mlkem is None:
+            skipped += 1
+            continue
+        what, answer = table[name]
         kind, want = answer[key_kind] if isinstance(answer, dict) else answer
         try:
             outcome = run(name, port, root)
@@ -596,16 +1396,19 @@ def main():
             outcome = ("alert", r.code)
         except Exception as e:
             outcome = ("broke", f"{type(e).__name__}: {e}")
-        if kind == "held" and outcome[0] == "held" and want in outcome[1] and "HTTP/1.0 200 ok" in outcome[1]:
+        wants = want if isinstance(want, tuple) else (want,)
+        if kind == "held" and outcome[0] == "held" and all(w in outcome[1] for w in wants) and "HTTP/1.0 200 ok" in outcome[1]:
             print(f"{name}: ok, {outcome[1].splitlines()[-1]}")
-        elif kind == "alert" and outcome == ("alert", want):
-            print(f"{name}: ok, alert {want}")
+        elif kind in ("alert", "warning") and outcome == (kind, want):
+            print(f"{name}: ok, {kind} {want}")
         elif kind == "ended" and outcome[0] == "ended" and outcome[1] < want:
             print(f"{name}: ok, hung up after {outcome[1]:.1f} s")
         else:
             failures += 1
             print(f"FAIL {name} ({what}): expected {kind} {want!r}, got {outcome!r}")
-    print(f"{len(names) - failures} of {len(names)} scenarios answered as they must")
+    asked = len(names) - skipped
+    unasked = f", {skipped} not asked: this cryptography has no ML-KEM (it has from 48, on an OpenSSL with it)" if skipped else ""
+    print(f"{asked - failures} of {asked} scenarios answered as they must{unasked}")
     sys.exit(1 if failures else 0)
 
 

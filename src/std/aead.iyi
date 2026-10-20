@@ -55,11 +55,17 @@
 #
 # The price of no tables is speed. Measured on one x86_64 Linux machine (a
 # QEMU virtual CPU with AES-NI and without carry-less multiply), --release,
-# sealing 16 MiB: AES-128-GCM 221 MB/s, AES-256-GCM 179 MB/s and
-# ChaCha20-Poly1305 790 MB/s, against 875, 880 and 1581 MB/s from Python's
-# `cryptography` (OpenSSL, using AES-NI); a plain build sealed 42, 34 and
-# 93 MB/s. Bitsliced AES does the work of four blocks for any count from
-# one to four, so one block alone costs what four do.
+# sealing 16 MiB, the best of five on a machine other jobs shared:
+# AES-128-GCM 274 MB/s, AES-256-GCM 224 MB/s and ChaCha20-Poly1305 849
+# MB/s, against 926, 916 and 1516 MB/s from Python's `cryptography`
+# (OpenSSL, using AES-NI). Before fixslicing, four-block GHASH and the
+# inlined rounds, the same run gave 233 and 190 MB/s for AES-GCM; a plain
+# build sealed 42, 34 and 93 MB/s then. Bitsliced AES does the work of
+# four blocks for any count from one to four, so one block alone costs
+# what four do. Two things were tried and dropped, each slower measured
+# here: Poly1305 in 44-bit limbs with `UInt128` products (3,400 MB/s
+# against the 26-bit limbs' 3,800) and ChaCha20 four blocks at a time in
+# lanes the compiler was to vectorise (it did not; 720 MB/s sealed).
 #
 # What this is not: a key exchange, a signature or TLS; nor a way to keep
 # a key out of memory - keys, round keys and key streams live in the
@@ -124,14 +130,10 @@ end
 pub class AesGcm
   @rounds : Int32
   @keys : Pointer(UInt64)
-  # H, the hash key, AES of the zero block, kept as BearSSL keeps it:
-  # its low and high halves, their XOR, and the three bit-reversed.
-  @h0 : UInt64
-  @h1 : UInt64
-  @h2 : UInt64
-  @h0r : UInt64
-  @h1r : UInt64
-  @h2r : UInt64
+  # H, the hash key, AES of the zero block, and H^2, H^3 and H^4, each
+  # kept as BearSSL keeps H: its low and high halves, their XOR, and the
+  # three bit-reversed, six words a power from H up (`Ghash.prepare`).
+  @powers : Pointer(UInt64)
 
   def initialize(key : String | Array(UInt8))
     bytes, size = AeadBytes.of(key)
@@ -146,14 +148,20 @@ pub class AesGcm
     AesCore.encrypt(keys, rounds, h, h, 1)
     h1 = AeadBytes.be64(h)
     h0 = AeadBytes.be64(h + 8_i64)
+    powers = Pointer(UInt64).malloc(24_u64)
+    Ghash.prepare(powers, h1, h0)
+    p1 = h1
+    p0 = h0
+    k = 1
+    while k < 4
+      z0, z1, z2, z0h, z1h, z2h = Ghash.parts(p1, p0, powers)
+      p1, p0 = Ghash.reduce(z0, z1, z2, z0h, z1h, z2h)
+      Ghash.prepare(powers + (k * 6).to_i64, p1, p0)
+      k = k + 1
+    end
     @keys = keys
     @rounds = rounds
-    @h0 = h0
-    @h1 = h1
-    @h2 = h0 ^ h1
-    @h0r = Ghash.rev64(h0)
-    @h1r = Ghash.rev64(h1)
-    @h2r = @h0r ^ @h1r
+    @powers = powers
   end
 
   # The ciphertext of *plaintext*, as long as it, and the 16-byte tag.
@@ -240,22 +248,31 @@ pub class AesGcm
   end
 
   # GHASH (§6.4) of *count* bytes into the running value *y* (its high
-  # word first), the last block padded with zeros. Each block is one
+  # word first), the last block padded with zeros. Each block is a
   # multiplication by H in GF(2^128), BearSSL's `br_ghash_ctmul64`: the
   # 128-bit product by Karatsuba from three 64-bit carry-less products,
   # each of those from its low half and, through bit reversal, its high
   # half, and the 256 bits reduced by the field's polynomial,
-  # x^128 + x^7 + x^2 + x + 1, in GCM's reflected bit order.
+  # x^128 + x^7 + x^2 + x + 1, in GCM's reflected bit order. Four whole
+  # blocks at a time are one step, Y' = (Y + X1) H^4 + X2 H^3 + X3 H^2 +
+  # X4 H: everything after the six carry-less products is linear, so the
+  # four products' pieces are summed first and the bit reversals, the
+  # shift and the reduction done once for the four.
   private def ghash(y : Pointer(UInt64), data : Pointer(UInt8), count : Int32) : Nil
-    h0 = @h0
-    h1 = @h1
-    h2 = @h2
-    h0r = @h0r
-    h1r = @h1r
-    h2r = @h2r
+    hp = @powers
     y1 = y[0]
     y0 = y[1]
     done = 0
+    while count - done >= 64
+      at = data + done.to_i64
+      z0, z1, z2, z0h, z1h, z2h = Ghash.parts(y1 ^ AeadBytes.be64(at), y0 ^ AeadBytes.be64(at + 8_i64), hp + 18_i64)
+      a0, a1, a2, a0h, a1h, a2h = Ghash.parts(AeadBytes.be64(at + 16_i64), AeadBytes.be64(at + 24_i64), hp + 12_i64)
+      b0, b1, b2, b0h, b1h, b2h = Ghash.parts(AeadBytes.be64(at + 32_i64), AeadBytes.be64(at + 40_i64), hp + 6_i64)
+      c0, c1, c2, c0h, c1h, c2h = Ghash.parts(AeadBytes.be64(at + 48_i64), AeadBytes.be64(at + 56_i64), hp)
+      y1, y0 = Ghash.reduce(z0 ^ a0 ^ b0 ^ c0, z1 ^ a1 ^ b1 ^ c1, z2 ^ a2 ^ b2 ^ c2,
+        z0h ^ a0h ^ b0h ^ c0h, z1h ^ a1h ^ b1h ^ c1h, z2h ^ a2h ^ b2h ^ c2h)
+      done = done + 64
+    end
     while done < count
       at = data + done.to_i64
       left = count - done
@@ -266,37 +283,8 @@ pub class AesGcm
         y1 = y1 ^ AeadBytes.be64_upto(at, left)
         y0 = y0 ^ AeadBytes.be64_upto(at + 8_i64, left - 8) if left > 8
       end
-      y0r = Ghash.rev64(y0)
-      y1r = Ghash.rev64(y1)
-      y2 = y0 ^ y1
-      y2r = y0r ^ y1r
-      z0 = Ghash.bmul64(y0, h0)
-      z1 = Ghash.bmul64(y1, h1)
-      z2 = Ghash.bmul64(y2, h2)
-      z0h = Ghash.bmul64(y0r, h0r)
-      z1h = Ghash.bmul64(y1r, h1r)
-      z2h = Ghash.bmul64(y2r, h2r)
-      z2 = z2 ^ z0 ^ z1
-      z2h = z2h ^ z0h ^ z1h
-      z0h = Ghash.rev64(z0h).unsafe_shr(1)
-      z1h = Ghash.rev64(z1h).unsafe_shr(1)
-      z2h = Ghash.rev64(z2h).unsafe_shr(1)
-      v0 = z0
-      v1 = z0h ^ z2
-      v2 = z1 ^ z2h
-      v3 = z1h
-      # The bit order is reflected, so the 255-bit product is one bit
-      # short at the top; a shift left makes it 256.
-      v3 = v3.unsafe_shl(1) | v2.unsafe_shr(63)
-      v2 = v2.unsafe_shl(1) | v1.unsafe_shr(63)
-      v1 = v1.unsafe_shl(1) | v0.unsafe_shr(63)
-      v0 = v0.unsafe_shl(1)
-      v2 = v2 ^ v0 ^ v0.unsafe_shr(1) ^ v0.unsafe_shr(2) ^ v0.unsafe_shr(7)
-      v1 = v1 ^ v0.unsafe_shl(63) ^ v0.unsafe_shl(62) ^ v0.unsafe_shl(57)
-      v3 = v3 ^ v1 ^ v1.unsafe_shr(1) ^ v1.unsafe_shr(2) ^ v1.unsafe_shr(7)
-      v2 = v2 ^ v1.unsafe_shl(63) ^ v1.unsafe_shl(62) ^ v1.unsafe_shl(57)
-      y0 = v2
-      y1 = v3
+      z0, z1, z2, z0h, z1h, z2h = Ghash.parts(y1, y0, hp)
+      y1, y0 = Ghash.reduce(z0, z1, z2, z0h, z1h, z2h)
       done = done + 16
     end
     y[0] = y1
@@ -504,9 +492,25 @@ end
 # shuffle of bit groups, and MixColumns rotations of whole words. The
 # round keys are bitsliced the same way, eight words a round, a key
 # repeated in all four lanes.
+#
+# Encryption is fixsliced (Adomnicai and Peyrin, "Fixslicing AES-like
+# ciphers", TCHES 2021/1, as RustCrypto's `fixslice64` writes it on this
+# same layout): ShiftRows is not done round by round. After j rounds
+# without it the state is SR^-j of the true one, which SubBytes does not
+# mind, MixColumns is met as SR^-j MC SR^j - the same sums with each
+# column's row i taken from i j columns along, one more rotation in the
+# words - and each round key is given SR^-j once, when it is expanded.
+# ShiftRows' four powers come round again every four rounds, so the
+# state is put right with one SR^2 before the last round for AES-128 and
+# AES-256 and needs nothing for AES-192. ShiftRows was some 20
+# instructions a word, eight words a round; the column rotations cost a
+# few, and in one round of four none. Decryption keeps the plain round
+# order and its own copy of the keys.
 struct AesCore
-  # Round keys for the longest key: 15 rounds' worth of eight words.
-  KEY_WORDS = 120_u64
+  # Round keys for the longest key: 15 rounds' worth of eight words, then
+  # the same again with SR^-j applied, for encryption.
+  KEY_WORDS = 240_u64
+  FIXSLICED =     120
 
   # *size* bytes of *key* expanded into *keys* (FIPS 197 §5.2); answers
   # the number of rounds.
@@ -552,29 +556,60 @@ struct AesCore
       q[7] = q[4]
       ortho(q)
       (keys + (r * 8).to_i64).copy_from(q, 8)
+      # Round r of the fixsliced cipher meets the state SR^-(r mod 4) of
+      # the true one; the last round's key is met after the SR^2 that
+      # puts it right, so it is the plain key.
+      if r < rounds
+        turn = 0
+        while turn < (r & 3)
+          inv_shift_rows(q)
+          turn = turn + 1
+        end
+      end
+      (keys + (FIXSLICED + r * 8).to_i64).copy_from(q, 8)
       r = r + 1
     end
     rounds
   end
 
   # *count* blocks, one to four, from *src* to *dst*, which may be the
-  # same bytes (FIPS 197 §5.1).
+  # same bytes (FIPS 197 §5.1), fixsliced: round r's MixColumns is the
+  # variant for SR^(r mod 4), and the round keys are the ones `expand` set
+  # aside for it.
   def self.encrypt(keys : Pointer(UInt64), rounds : Int32, src : Pointer(UInt8), dst : Pointer(UInt8), count : Int32) : Nil
     slices = uninitialized StaticArray(UInt64, 8)
     q = pointerof(slices).as(Pointer(UInt64))
+    k = keys + FIXSLICED.to_i64
     load(q, src, count)
-    add_round_key(q, keys)
+    add_round_key(q, k)
     round = 1
-    while round < rounds
+    while true
       sbox(q)
-      shift_rows(q)
-      mix_columns(q)
-      add_round_key(q, keys + (round * 8).to_i64)
+      mix_columns(q, 1)
+      add_round_key(q, k + (round * 8).to_i64)
       round = round + 1
+      break if round == rounds
+      sbox(q)
+      mix_columns(q, 2)
+      add_round_key(q, k + (round * 8).to_i64)
+      round = round + 1
+      break if round == rounds
+      sbox(q)
+      mix_columns(q, 3)
+      add_round_key(q, k + (round * 8).to_i64)
+      round = round + 1
+      break if round == rounds
+      sbox(q)
+      mix_columns(q, 0)
+      add_round_key(q, k + (round * 8).to_i64)
+      round = round + 1
+      break if round == rounds
     end
+    # rounds - 1 rounds left SR^-((rounds - 1) mod 4), and the last round
+    # adds its own ShiftRows: 10 and 14 rounds need SR^2, 12 none.
+    shift_rows_twice(q) if rounds & 3 == 2
     sbox(q)
-    shift_rows(q)
-    add_round_key(q, keys + (rounds * 8).to_i64)
+    add_round_key(q, k + (rounds * 8).to_i64)
     store(q, dst, count)
   end
 
@@ -866,19 +901,16 @@ struct AesCore
     q[0] = q2 ^ q5 ^ q7
   end
 
-  # A row is 16 bits of a word (four columns of four blocks); row r moves
-  # left by r columns.
-  private def self.shift_rows(q : Pointer(UInt64)) : Nil
+  # SR^2: a row is 16 bits of a word (four columns of four blocks), and
+  # row r moves by 2r columns, so rows 0 and 2 stay and rows 1 and 3 trade
+  # their two bytes.
+  private def self.shift_rows_twice(q : Pointer(UInt64)) : Nil
     i = 0
     while i < 8
       x = q[i]
-      q[i] = (x & 0x000000000000ffff_u64) |
-             (x & 0x00000000fff00000_u64).unsafe_shr(4) |
-             (x & 0x00000000000f0000_u64).unsafe_shl(12) |
-             (x & 0x0000ff0000000000_u64).unsafe_shr(8) |
-             (x & 0x000000ff00000000_u64).unsafe_shl(8) |
-             (x & 0xf000000000000000_u64).unsafe_shr(12) |
-             (x & 0x0fff000000000000_u64).unsafe_shl(4)
+      q[i] = (x & 0x0000ffff0000ffff_u64) |
+             (x & 0x00ff000000ff0000_u64).unsafe_shl(8) |
+             (x & 0xff000000ff000000_u64).unsafe_shr(8)
       i = i + 1
     end
   end
@@ -898,10 +930,15 @@ struct AesCore
     end
   end
 
-  # Each column times {03}x^3 + {01}x^2 + {01}x + {02}: r is every row
-  # moved up one, a rotation by 32 two, and multiplying by {02} feeds
+  # Each column times {03}x^3 + {01}x^2 + {01}x + {02} on a state that is
+  # SR^-turn of the true one. For turn 0 that is BearSSL's: b is every
+  # row moved up one (a rotation by 16), c = q + b, and the column is b +
+  # 2c + c moved up two (a rotation by 32), multiplying by {02} feeding
   # the top bit slice into slices 0, 1, 3 and 4 (x^8 = x^4 + x^3 + x + 1).
-  private def self.mix_columns(q : Pointer(UInt64)) : Nil
+  # For another turn, row i + 1 of a column is read turn columns along
+  # and row i + 2 two turns along (`rows_up`, `rows_up_two`).
+  @[AlwaysInline]
+  private def self.mix_columns(q : Pointer(UInt64), turn : Int32) : Nil
     q0 = q[0]
     q1 = q[1]
     q2 = q[2]
@@ -910,22 +947,63 @@ struct AesCore
     q5 = q[5]
     q6 = q[6]
     q7 = q[7]
-    r0 = q0.unsafe_shr(16) | q0.unsafe_shl(48)
-    r1 = q1.unsafe_shr(16) | q1.unsafe_shl(48)
-    r2 = q2.unsafe_shr(16) | q2.unsafe_shl(48)
-    r3 = q3.unsafe_shr(16) | q3.unsafe_shl(48)
-    r4 = q4.unsafe_shr(16) | q4.unsafe_shl(48)
-    r5 = q5.unsafe_shr(16) | q5.unsafe_shl(48)
-    r6 = q6.unsafe_shr(16) | q6.unsafe_shl(48)
-    r7 = q7.unsafe_shr(16) | q7.unsafe_shl(48)
-    q[0] = q7 ^ r7 ^ r0 ^ rotr32(q0 ^ r0)
-    q[1] = q0 ^ r0 ^ q7 ^ r7 ^ r1 ^ rotr32(q1 ^ r1)
-    q[2] = q1 ^ r1 ^ r2 ^ rotr32(q2 ^ r2)
-    q[3] = q2 ^ r2 ^ q7 ^ r7 ^ r3 ^ rotr32(q3 ^ r3)
-    q[4] = q3 ^ r3 ^ q7 ^ r7 ^ r4 ^ rotr32(q4 ^ r4)
-    q[5] = q4 ^ r4 ^ r5 ^ rotr32(q5 ^ r5)
-    q[6] = q5 ^ r5 ^ r6 ^ rotr32(q6 ^ r6)
-    q[7] = q6 ^ r6 ^ r7 ^ rotr32(q7 ^ r7)
+    b0 = rows_up(q0, turn)
+    b1 = rows_up(q1, turn)
+    b2 = rows_up(q2, turn)
+    b3 = rows_up(q3, turn)
+    b4 = rows_up(q4, turn)
+    b5 = rows_up(q5, turn)
+    b6 = rows_up(q6, turn)
+    b7 = rows_up(q7, turn)
+    c0 = q0 ^ b0
+    c1 = q1 ^ b1
+    c2 = q2 ^ b2
+    c3 = q3 ^ b3
+    c4 = q4 ^ b4
+    c5 = q5 ^ b5
+    c6 = q6 ^ b6
+    c7 = q7 ^ b7
+    q[0] = b0 ^ c7 ^ rows_up_two(c0, turn)
+    q[1] = b1 ^ c0 ^ c7 ^ rows_up_two(c1, turn)
+    q[2] = b2 ^ c1 ^ rows_up_two(c2, turn)
+    q[3] = b3 ^ c2 ^ c7 ^ rows_up_two(c3, turn)
+    q[4] = b4 ^ c3 ^ c7 ^ rows_up_two(c4, turn)
+    q[5] = b5 ^ c4 ^ rows_up_two(c5, turn)
+    q[6] = b6 ^ c5 ^ rows_up_two(c6, turn)
+    q[7] = b7 ^ c6 ^ rows_up_two(c7, turn)
+  end
+
+  # Row i + 1 of each column, turn columns along: a rotation by 16 + 4 turn
+  # for the columns that do not wrap within their row, by 4 turn for the
+  # ones that do. *turn* is a constant at every call.
+  @[AlwaysInline]
+  private def self.rows_up(x : UInt64, turn : Int32) : UInt64
+    case turn
+    when 1
+      (rotr(x, 20) & 0x0fff0fff0fff0fff_u64) | (rotr(x, 4) & 0xf000f000f000f000_u64)
+    when 2
+      (rotr(x, 24) & 0x00ff00ff00ff00ff_u64) | (rotr(x, 8) & 0xff00ff00ff00ff00_u64)
+    when 3
+      (rotr(x, 28) & 0x000f000f000f000f_u64) | (rotr(x, 12) & 0xfff0fff0fff0fff0_u64)
+    else
+      rotr(x, 16)
+    end
+  end
+
+  # Row i + 2 of each column, 2 turn columns along: for an odd turn two
+  # columns, a rotation by 40 or 24; for an even one none, a rotation by 32.
+  @[AlwaysInline]
+  private def self.rows_up_two(x : UInt64, turn : Int32) : UInt64
+    if turn & 1 == 1
+      (rotr(x, 40) & 0x00ff00ff00ff00ff_u64) | (rotr(x, 24) & 0xff00ff00ff00ff00_u64)
+    else
+      rotr32(x)
+    end
+  end
+
+  @[AlwaysInline]
+  private def self.rotr(x : UInt64, n : Int32) : UInt64
+    x.unsafe_shr(n) | x.unsafe_shl(64 - n)
   end
 
   # Each column times {0b}x^3 + {0d}x^2 + {09}x + {0e}, the same way.
@@ -995,6 +1073,56 @@ struct Ghash
     x = (x & 0x00ff00ff00ff00ff_u64).unsafe_shl(8) | (x.unsafe_shr(8) & 0x00ff00ff00ff00ff_u64)
     x = (x & 0x0000ffff0000ffff_u64).unsafe_shl(16) | (x.unsafe_shr(16) & 0x0000ffff0000ffff_u64)
     x.unsafe_shl(32) | x.unsafe_shr(32)
+  end
+
+  # A power of H laid out for `parts` at *dst*: its low half, high half,
+  # their XOR, and the three bit-reversed.
+  def self.prepare(dst : Pointer(UInt64), hi : UInt64, lo : UInt64) : Nil
+    dst[0] = lo
+    dst[1] = hi
+    dst[2] = lo ^ hi
+    dst[3] = rev64(lo)
+    dst[4] = rev64(hi)
+    dst[5] = dst[3] ^ dst[4]
+  end
+
+  # The six carry-less products of (*y1*, *y0*), high word first, and the
+  # power of H at *h*: the low halves', the high halves' and their sums'
+  # (Karatsuba), each once as it is and once bit-reversed, which gives
+  # the product's upper 64 bits. Nothing past them depends on H, and it
+  # is all linear, so sums of these can be taken before `reduce`.
+  @[AlwaysInline]
+  def self.parts(y1 : UInt64, y0 : UInt64, h : Pointer(UInt64)) : {UInt64, UInt64, UInt64, UInt64, UInt64, UInt64}
+    y0r = rev64(y0)
+    y1r = rev64(y1)
+    {bmul64(y0, h[0]), bmul64(y1, h[1]), bmul64(y0 ^ y1, h[2]),
+     bmul64(y0r, h[3]), bmul64(y1r, h[4]), bmul64(y0r ^ y1r, h[5])}
+  end
+
+  # The 256-bit product from `parts`' pieces, reduced to the 128-bit
+  # value, high word first.
+  @[AlwaysInline]
+  def self.reduce(z0 : UInt64, z1 : UInt64, z2 : UInt64, z0h : UInt64, z1h : UInt64, z2h : UInt64) : {UInt64, UInt64}
+    z2 = z2 ^ z0 ^ z1
+    z2h = z2h ^ z0h ^ z1h
+    z0h = rev64(z0h).unsafe_shr(1)
+    z1h = rev64(z1h).unsafe_shr(1)
+    z2h = rev64(z2h).unsafe_shr(1)
+    v0 = z0
+    v1 = z0h ^ z2
+    v2 = z1 ^ z2h
+    v3 = z1h
+    # The bit order is reflected, so the 255-bit product is one bit
+    # short at the top; a shift left makes it 256.
+    v3 = v3.unsafe_shl(1) | v2.unsafe_shr(63)
+    v2 = v2.unsafe_shl(1) | v1.unsafe_shr(63)
+    v1 = v1.unsafe_shl(1) | v0.unsafe_shr(63)
+    v0 = v0.unsafe_shl(1)
+    v2 = v2 ^ v0 ^ v0.unsafe_shr(1) ^ v0.unsafe_shr(2) ^ v0.unsafe_shr(7)
+    v1 = v1 ^ v0.unsafe_shl(63) ^ v0.unsafe_shl(62) ^ v0.unsafe_shl(57)
+    v3 = v3 ^ v1 ^ v1.unsafe_shr(1) ^ v1.unsafe_shr(2) ^ v1.unsafe_shr(7)
+    v2 = v2 ^ v1.unsafe_shl(63) ^ v1.unsafe_shl(62) ^ v1.unsafe_shl(57)
+    {v3, v2}
   end
 end
 

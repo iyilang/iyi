@@ -7,16 +7,18 @@
 # Finished values, the client's Finished sealed into exactly the trace's
 # record, and the application data both ways after a NewSessionTicket -
 # and TLS 1.2's PRF over SHA-256 and SHA-384 against the vectors that
-# circulate for it. The modes the gate script drives:
+# circulate for it, and the form a host takes in server_name. The modes
+# the gate script drives:
 #   scenarios DIR       every scenario of bench/std_tls_server.py, whose
 #                       port and roots are in DIR, each holding or refused
 #                       for its reason;
 #   get PORT ROOTS HOST [ALPN|-] [CHAIN KEY]
 #                       GET / over a connection to 127.0.0.1:PORT for HOST,
-#                       its status line, suite, protocol and version
+#                       its status line, suite, protocol, version and group
 #                       printed, or why it was refused; with CHAIN and KEY,
 #                       presented if the server asks; TLS 1.2 offered too
-#                       when TLS_MIN_VERSION is 1.2;
+#                       when TLS_MIN_VERSION is 1.2, X25519MLKEM768 not
+#                       offered when TLS_POST_QUANTUM is 0;
 #   renegotiate PORT ROOTS HOST
 #                       "first", a read that times out, "second", a read:
 #                       what a TLS 1.2 server that sends a HelloRequest
@@ -26,14 +28,15 @@
 #                       ALPN h2 and http/1.1 - asking for a client's
 #                       certificate under DIR/client-roots.pem when there
 #                       is one, not requiring it when DIR/client-optional
-#                       is there: COUNT connections, one at a time, each
-#                       line "held ..." or "refused: why".
+#                       is there, and speaking TLS 1.2 too when
+#                       TLS_MIN_VERSION is 1.2: COUNT connections, one at
+#                       a time, each line "held ..." or "refused: why".
 #                       Bytes are echoed as "echo:..."; a request ending
 #                       in a blank line is answered `HTTP/1.0 200 ok` and
 #                       what was agreed, then close_notify;
 #   config CHAIN KEY    TlsServerConfig.from_pem's answer.
 
-import std/tls::{TlsClient, TlsConfig, TlsError, TlsIdentity, TlsKeySchedule, TlsRecordCipher, TlsServer, TlsServerConfig, TlsVersion}
+import std/tls::{TlsClient, TlsConfig, TlsEarlyData, TlsError, TlsHeldTicket, TlsIdentity, TlsKeySchedule, TlsRecordCipher, TlsReplayGuard, TlsServer, TlsServerConfig, TlsSession, TlsTicket, TlsTicketKeys, TlsVersion}
 import std/x509::{Certificate}
 import std/socket::{IyiSocket, SocketError}
 import std/file::{File}
@@ -75,7 +78,7 @@ end
 SCENARIOS = [
   {"ok", true, ""}, {"rsa", true, ""}, {"p384", true, ""}, {"ed25519", true, ""}, {"aes256", true, "TLS_AES_256_GCM_SHA384"},
   {"chacha", true, "TLS_CHACHA20_POLY1305_SHA256"}, {"ccs", true, ""}, {"fragmented", true, ""},
-  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"hrr-p256", true, ""}, {"keyupdate", true, ""}, {"slow-echo", true, ""}, {"client-rekey", true, ""},
+  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"hrr-p256", true, ""}, {"hrr-p384", true, ""}, {"keyupdate", true, ""}, {"slow-echo", true, ""}, {"client-rekey", true, ""},
   {"big", true, ""}, {"ticket", true, ""},
   {"bad-finished", false, "Finished does not match the handshake (decrypt_error)"},
   {"bad-cv", false, "CertificateVerify is not its key's signature (decrypt_error)"},
@@ -96,7 +99,8 @@ SCENARIOS = [
   {"tls12-versions", false, "the server does not speak TLS 1.3 (protocol_version)"},
   {"tls12-key-share", false, "extension 51 in a TLS 1.2 ServerHello, which was not offered for it (unsupported_extension)"},
   {"no-echo", false, "does not echo the session id"},
-  {"hrr-group", false, "a HelloRetryRequest for group 24, which was not offered (illegal_parameter)"},
+  {"hrr-group", false, "a HelloRetryRequest for group 25, which was not offered (illegal_parameter)"},
+  {"hrr-p384-bad", false, "the server's secp384r1 share: ecdsa: a point that is not on P-384 (illegal_parameter)"},
   {"unsolicited-ext", false, "extension 65281 in EncryptedExtensions, which was not offered"},
   {"alpn-unoffered", false, "chose \"spdy/3\" by ALPN, which was not offered"},
   {"wrong-host", false, "is not valid for wrong-host.tls.test"},
@@ -114,7 +118,7 @@ SCENARIOS = [
   {"certreq-no-sigalgs", false, "a CertificateRequest with no signature_algorithms (missing_extension)"},
   {"cert-many", false, "a Certificate of more than 10 certificates (bad_certificate)"},
   {"slow-server", false, "took past the time given to the handshake"},
-  {"sh-wrong-group", false, "a ServerHello's share in secp256r1, where the share sent was X25519's (illegal_parameter)"},
+  {"sh-wrong-group", false, "a ServerHello's share in secp256r1, where the shares sent were X25519MLKEM768's and X25519's (illegal_parameter)"},
   {"sh-and-more", false, "handshake bytes after the ServerHello in its record (unexpected_message)"},
   {"ku-no-sign", false, "does not allow digitalSignature, which a CertificateVerify is (bad_certificate)"},
   {"keyupdate-bad", true, "read: a KeyUpdate asking 2 (illegal_parameter)"},
@@ -122,7 +126,64 @@ SCENARIOS = [
   {"cert-entry-ext", false, "a certificate entry with extensions nobody asked for (unsupported_extension)"},
   {"sni-ack-data", false, "a server_name acknowledgement that is not empty (decode_error)"},
   {"user-canceled", true, ""},
+  {"padded-max", true, ""},
+  {"padded-over", true, "read: a record of 16386 bytes of inner plaintext, past the 2^14 + 1 allowed (record_overflow)"},
+  {"split-by-data", true, "read: a record of type 23 inside a handshake message split across records (unexpected_message)"},
+  {"split-by-close", true, "read: a record of type 21 inside a handshake message split across records (unexpected_message)"},
+  {"tls12-split-by-data", true, "read: a record of type 23 inside a handshake message split across records (unexpected_message)"},
+  {"tls12-oversize", true, "read: a record of 16385 bytes, past the 2^14 allowed (record_overflow)"},
+  {"hybrid-offer", true, ""}, {"hybrid", true, ""},
+  {"hybrid-short-ct", false, "an X25519MLKEM768 share of 1119 bytes, not 1120 (illegal_parameter)"},
+  {"hybrid-long-ct", false, "an X25519MLKEM768 share of 1121 bytes, not 1120 (illegal_parameter)"},
+  {"hybrid-bad-ct", false, "a record that does not decrypt (bad_record_mac)"},
+  {"hybrid-zero-x25519", false, "the server's X25519MLKEM768 share: its X25519 key gives no secret (illegal_parameter)"},
+  {"hrr-hybrid", false, "a HelloRetryRequest for the X25519MLKEM768 share already sent (illegal_parameter)"},
 ]
+
+# Resumption scenarios: a first connection through a TlsSession, which
+# must hold one ticket after it; then a second, which comes to "resumed",
+# "full" (a full handshake, the ticket declined), or the refusal named.
+RESUMPTIONS = [
+  {"resume", "resumed"},
+  {"resume-declined", "full"},
+  {"resume-identity", "a ServerHello choosing PSK identity 1, of one offered (illegal_parameter)"},
+  {"resume-hash", "a ServerHello resuming under TLS_AES_256_GCM_SHA384, whose hash is not the ticket's (illegal_parameter)"},
+  {"resume-no-share", "a ServerHello with no key share (missing_extension)"},
+  {"resume-cert", "Certificate where Finished belongs, in a resumed handshake (unexpected_message)"},
+]
+
+# One connection, its echo read through a session: the scenario, the
+# tickets the session must then hold, and what the read must end with
+# ("" for the echo).
+TICKET_SCENARIOS = [
+  {"ticket-many", 8, ""},
+  {"ticket-huge", 0, ""},
+  {"ticket-bad", 0, "a NewSessionTicket cut short (decode_error)"},
+]
+
+# A connection to the scripted server for *name*, through *session*, or
+# why there is none.
+def scripted(dir : String, name : String, config : TlsConfig, session : TlsSession, early : String? = nil) : TlsClient | TlsError
+  socket = IyiSocket.connect("127.0.0.1", File.read(dir + "/port").to_i)
+  return TlsError.new("no connection to the scripted server") unless socket.is_a?(IyiSocket)
+  TlsClient.over(socket, name + ".tls.test", config, 3000, session, early)
+end
+
+# Early data to the scripted server: the scenario, what the second
+# connection's "hello" comes to (`TlsEarlyData`) or "refused: " and why,
+# and what is read after "again" is written: the server echoes what came
+# early as "early:..." and the first record after the handshake as
+# "echo:...".
+EARLY_SCENARIOS = [
+  {"early", "Accepted", "early:helloecho:again"},
+  {"early-refused", "Resent", "echo:hello"},
+  {"early-small", "Late", "echo:hello"},
+  {"early-alpn", "Withheld", "echo:again"},
+  {"early-unoffered", "refused: an early_data acceptance where none was sent (unsupported_extension)", ""},
+]
+# The key exchange group a scenario that holds must have agreed on, where
+# it is not X25519.
+GROUPS = {"hrr-p256" => "secp256r1", "hrr-p384" => "secp384r1", "hybrid" => "X25519MLKEM768"}
 
 CLIENT_HELLO           = "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001"
 SERVER_HELLO           = "020000560303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304"
@@ -150,6 +211,34 @@ SERVER_DATA_RECORD     = "17030300432e937e11ef4ac740e538ad36005fc4a46932fc3225d0
 PRF_SHA256             = "e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff70187347b66"
 PRF_SHA384             = "7b0c18e9ced410ed1804f2cfa34a336a1c14dffb4900bb5fd7942107e81c83cde9ca0faa60be9fe34f82b1233c9146a0e534cb400fed2700884f9dc236f80edd8bfa961144c9e8d792eca722a7b32fc3d416d473ebc2c5fd4abfdad05d9184259b5bf8cd4d90fa0d31e2dec479e4f1a26066f2eea9a69236a3e52655c9e9aee691c8f3a26854308d5eaa3be85e0990703d73e56f"
 
+# RFC 8448 section 4, "Resumed 0-RTT Handshake", which resumes section 3's
+# by the ticket at its end; and section 3's resumption master secret.
+RESUMED_HELLO         = "010001fc03031bc3ceb6bbe39cff938355b5a50adb6db21b7a6af649d7b4bc419d7876487d95000006130113031302010001cd0000000b0009000006736572766572ff01000100000a00140012001d00170018001901000101010201030104003300260024001d0020e4ffb68ac05f8d96c99da26698346c6be16482badddafe051a66b4f18d668f0b002a0000002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c0002400100150057000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002900dd00b800b22c035d829359ee5ff7af4ec900000000262a6494dc486d2c8a34cb33fa90bf1b0070ad3c498883c9367c09a2be785abc55cd226097a3a982117283f82a03a143efd3ff5dd36d64e861be7fd61d2827db279cce145077d454a3664d4e6da4d29ee03725a6a4dafcd0fc67d2aea70529513e3da2677fa5906c5b3f7d8f92f228bda40dda721470f9fbf297b5aea617646fac5c03272e970727c621a79141ef5f7de6505e5bfbc388e93343694093934ae4d357fad6aacb0021203add4fb2d8fdf822a0ca3cf7678ef5e88dae990141c5924d57bb6fa31b9e5f9d"
+RESUMED_SERVER_HELLO  = "0200005c03033ccfd2dec890222763472ae8136777c9d7358777bb66e91ea5122495f559ea2d00130100003400290002000000330024001d0020121761ee42c333e1b9e77b60dd57c2053cd94512ab47f115e86eff50942cea31002b00020304"
+RESUMED_FLIGHT        = "080000280026000a00140012001d00170018001901000101010201030104001c0002400100000000002a00001400002048d3e0e1b3d907c6acff145e16090388c77b05c050b634ab1a88bbd0dd1a34b2"
+RESUMED_FLIGHT_RECORD = "1703030061dc48237b4b879f50d0d4d262ea8b4716eb40ddc1eb957e11126e8a7149c2d012d37a7115957e64ce30008b9e0323f2c05a9c1c77b4f37849a695ab255060a33fee770ca95cb8486bfd0843b87024865ca35cc41c4e515c64dcb1369f98635bc7a5"
+RESUMED_SHARED        = "f44194756ff9ec9d25180635d66ea6824c6ab3bf179977be37f723570e7ccb2e"
+RES_MASTER            = "7df235f2031d2a051287d02b0241b0bfdaf86cc856231f2d5aba46c434ec196c"
+RESUMPTION_PSK        = "4ecd0eb6ec3b4d87f5d6028f922ca4c5851a277fd41311c9e62d2c9492e1c4f3"
+PSK_EARLY_SECRET      = "9b2188e9b2fc6d64d71dc329900e20bb41915000f678aa839cbb797cb7d8332c"
+BINDER                = "3add4fb2d8fdf822a0ca3cf7678ef5e88dae990141c5924d57bb6fa31b9e5f9d"
+PSK_HANDSHAKE_SECRET  = "005cb112fd8eb4ccc623bb88a07c64b3ede1605363fc7d0df8c7ce4ff0fb4ae6"
+PSK_C_HS              = "2faac08f851d35fea3604fcb4de82dc62c9b164a70974d0462e27f1ab278700f"
+PSK_S_HS              = "fe927ae271312e8bf0275b581c54eef020450dc4ecffaa05a1a35d27518e7803"
+PSK_MASTER            = "e2d32d4ed66dd37897a0e80c84107503ce58bf8aad4cb55a5002d77ecb890ece"
+PSK_SERVER_FINISHED   = "48d3e0e1b3d907c6acff145e16090388c77b05c050b634ab1a88bbd0dd1a34b2"
+PSK_C_AP              = "2abbf2b8e381d23dbebe1dd2a7d16a8bf484cb4950d23fb7fb7fa8547062d9a1"
+PSK_S_AP              = "cc21f1bf8feb7dd5fa505bd9c4b468a9984d554a993dc49e6d285598fb672691"
+# Its early data: the client's early traffic secret, "ABCDEF" and
+# EndOfEarlyData under it, then the client's Finished over the transcript
+# with EndOfEarlyData in it, and the resumption master secret after.
+EARLY_TRAFFIC              = "3fbbe6a60deb66c30a32795aba0eff7eaa10105586e7be5c09678d63b6caab62"
+EARLY_DATA_RECORD          = "1703030017ab1df420e75c457a7cc5d2844f76d5aee4b4edbf049be0"
+EOED_RECORD                = "1703030015aca6fc944841298df99593725f9bf9754429b12f09"
+PSK_CLIENT_FINISHED        = "7230a9c952c25cd6138fc5e6628308c41c5335dd81b9f96bcea50fd32bda416d"
+PSK_CLIENT_FINISHED_RECORD = "170303003500f8b467d14cf22a4b3f0b6ae0d8e6cc8d08e0db3515ef5c2bdf1922eafbb70009964716d834fb70c3d2a56c5b1f5f6bdba6c333cf"
+PSK_RES_MASTER             = "5e95bdf1f89005ea2e9aa0ba85e728e3c19c5fe0c699e3f5bee59faebd0b5406"
+
 args = Program.args
 
 if args.size > 0 && args[0] == "scenarios"
@@ -168,7 +257,13 @@ if args.size > 0 && args[0] == "scenarios"
   config12.min_version = TlsVersion::TLS12
   held = 0
   refused = 0
+  skipped = 0
   SCENARIOS.each do |s|
+    # A hybrid handshake needs ML-KEM at the scripted server too.
+    if s[0] == "hybrid" && !File.file?(args[1] + "/mlkem")
+      skipped = skipped + 1
+      next
+    end
     socket = IyiSocket.connect("127.0.0.1", port)
     check socket.is_a?(IyiSocket), "#{s[0]}: no connection to the scripted server"
     next unless socket.is_a?(IyiSocket)
@@ -177,6 +272,8 @@ if args.size > 0 && args[0] == "scenarios"
     if s[1]
       check !conn.is_a?(TlsError), "#{s[0]}: refused: #{conn.is_a?(TlsError) ? conn.message : ""}"
       next unless conn.is_a?(TlsClient)
+      want = GROUPS[s[0]]? || "X25519"
+      check conn.named_group == want, "#{s[0]}: the group agreed is #{conn.named_group.inspect}, not #{want}"
       if s[0] == "keyupdate"
         # The server's keys move before its echo; this side's KeyUpdate goes
         # with its next write, never from a read.
@@ -234,6 +331,70 @@ if args.size > 0 && args[0] == "scenarios"
     end
   end
   puts "  #{held} handshakes held and echoed, #{refused} refused, each for its reason"
+  puts "  the hybrid handshake not asked: the scripted server's cryptography has no ML-KEM (it has from 48, on an OpenSSL with it)" if skipped > 0
+  resumed = 0
+  RESUMPTIONS.each do |r|
+    session = TlsSession.new
+    first = scripted(args[1], r[0], config, session)
+    check first.is_a?(TlsClient), "#{r[0]}: the first connection: #{first.is_a?(TlsError) ? first.message : ""}"
+    next unless first.is_a?(TlsClient)
+    first.write("hello")
+    got = drain(first)
+    check got == "echo:hello" && session.size == 1 && !first.resumed?, "#{r[0]}: the first connection read #{got.inspect}, #{session.size} tickets held"
+    second = scripted(args[1], r[0], config, session)
+    if r[1] == "resumed" || r[1] == "full"
+      check second.is_a?(TlsClient), "#{r[0]}: refused: #{second.is_a?(TlsError) ? second.message : ""}"
+      next unless second.is_a?(TlsClient)
+      check second.resumed? == (r[1] == "resumed"), "#{r[0]}: resumed? is #{second.resumed?}"
+      # The server's certificate goes with the session, checked as the first
+      # connection checked it.
+      check !second.peer_certificates.empty? && second.peer_certificates[0].subject_name == first.peer_certificates[0].subject_name, "#{r[0]}: no peer certificate"
+      second.write("again")
+      got = drain(second)
+      check got == "echo:again", "#{r[0]}: the second echo came back as #{got.inspect}"
+    else
+      check second.is_a?(TlsError) && second.message.includes?(r[1]), "#{r[0]}: #{second.is_a?(TlsError) ? "refused with " + second.message.inspect : "held"}, not #{r[1].inspect}"
+    end
+    resumed = resumed + 1
+  end
+  TICKET_SCENARIOS.each do |t|
+    session = TlsSession.new
+    conn = scripted(args[1], t[0], config, session)
+    check conn.is_a?(TlsClient), "#{t[0]}: refused: #{conn.is_a?(TlsError) ? conn.message : ""}"
+    next unless conn.is_a?(TlsClient)
+    conn.write("hello")
+    got = drain(conn)
+    check (t[2].empty? ? got == "echo:hello" : got.includes?(t[2])), "#{t[0]}: read #{got[0, 120].inspect}"
+    check session.size == t[1], "#{t[0]}: #{session.size} tickets held, not #{t[1]}"
+    resumed = resumed + 1
+  end
+  puts "  #{resumed} resumptions and ticket scenarios, each as it should be"
+  # Early data through a session: the first connection keeps a ticket; the
+  # second is given the data to send early, and comes to the state named,
+  # the scripted server's echo after it, or the refusal named.
+  early_held = 0
+  EARLY_SCENARIOS.each do |e|
+    session = TlsSession.new
+    first = scripted(args[1], e[0], config, session)
+    check first.is_a?(TlsClient), "#{e[0]}: the first connection: #{first.is_a?(TlsError) ? first.message : ""}"
+    next unless first.is_a?(TlsClient)
+    first.write("hello")
+    got = drain(first)
+    check got == "echo:hello" && session.size == 1, "#{e[0]}: the first connection read #{got.inspect}, #{session.size} tickets held"
+    second = scripted(args[1], e[0], config, session, "hello")
+    if e[1].starts_with?("refused: ")
+      check second.is_a?(TlsError) && second.message.includes?(e[1][9, e[1].size - 9]), "#{e[0]}: #{second.is_a?(TlsError) ? "refused with " + second.message.inspect : "held"}, not #{e[1].inspect}"
+    else
+      check second.is_a?(TlsClient), "#{e[0]}: refused: #{second.is_a?(TlsError) ? second.message : ""}"
+      next unless second.is_a?(TlsClient)
+      check second.early_data.to_s == e[1], "#{e[0]}: the early data came to #{second.early_data}, not #{e[1]}"
+      second.write("again")
+      got = drain(second)
+      check got == e[2], "#{e[0]}: read #{got.inspect}, not #{e[2].inspect}"
+    end
+    early_held = early_held + 1
+  end
+  puts "  #{early_held} early-data scenarios, each as it should be"
   exit 0
 end
 
@@ -243,6 +404,7 @@ if args.size > 0 && args[0] == "get"
   config.alpn = [args[4]] if args.size > 4 && args[4] != "-"
   config.identity = TlsIdentity.from_pem(File.read(args[5]), File.read(args[6])).or_panic if args.size > 6
   config.min_version = TlsVersion::TLS12 if ENV["TLS_MIN_VERSION"]? == "1.2"
+  config.post_quantum = false if ENV["TLS_POST_QUANTUM"]? == "0"
   socket = IyiSocket.connect("127.0.0.1", args[1].to_i)
   unless socket.is_a?(IyiSocket)
     puts "no connection"
@@ -258,7 +420,7 @@ if args.size > 0 && args[0] == "get"
   label = ENV["TLS_EXPORT"]?
   exported = label ? " exported=#{hex_of(conn.export_keying_material(label, [] of UInt8, 16))}" : ""
   got = drain(conn)
-  puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}#{exported} #{conn.version}"
+  puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}#{exported} #{conn.version} group=#{conn.named_group}"
   conn.close
   exit 0
 end
@@ -288,6 +450,49 @@ if args.size > 0 && args[0] == "renegotiate"
   exit 0
 end
 
+# resume PORT ROOTS HOST [ALPN|-] [COUNT]: COUNT connections (two unless
+# given) through one TlsSession, each GET / with its answer read to the
+# end; a line each: the answer's first line, whether it resumed, the
+# suite, the protocol, the server's certificate, what OpenSSL's s_server
+# -www says of the session ("Reused, TLSv1.3, ..." or "New, ..."), or the
+# exercise's server ("resumed=..."), and the tickets the session holds.
+if args.size > 0 && args[0] == "resume"
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  config.alpn = [args[4]] if args.size > 4 && args[4] != "-"
+  count = args.size > 5 ? args[5].to_i : 2
+  # EARLY: given to each connection to send early; "get" is GET / itself.
+  early = args.size > 6 ? (args[6] == "get" ? "GET / HTTP/1.0\r\n\r\n" : args[6]) : nil
+  session = TlsSession.new
+  count.times do |i|
+    socket = IyiSocket.connect("127.0.0.1", args[1].to_i)
+    unless socket.is_a?(IyiSocket)
+      puts "#{i + 1}: no connection"
+      next
+    end
+    conn = TlsClient.over(socket, args[3], config, session: session, early_data: early)
+    if conn.is_a?(TlsError)
+      puts "#{i + 1}: refused: #{conn.message}"
+      next
+    end
+    if early && !early.starts_with?("GET")
+      # Early data that is no request: the tickets read, and no more.
+      conn.read_timeout_ms = 1000
+      conn.read
+      puts "#{i + 1}: early=#{conn.early_data} resumed=#{conn.resumed? ? "yes" : "no"} held=#{session.size}"
+      conn.close
+      next
+    end
+    conn.write("GET / HTTP/1.0\r\n\r\n") unless early
+    got = drain(conn)
+    said = got.lines.find { |line| line.starts_with?("Reused, ") || line.starts_with?("New, ") || line.includes?(" resumed=") } || "-"
+    peer = conn.peer_certificates.empty? ? "-" : conn.peer_certificates[0].subject_name
+    puts "#{i + 1}: #{got.lines.first? || got} resumed=#{conn.resumed? ? "yes" : "no"} early=#{conn.early_data} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"} peer=#{peer} said=#{said.strip} held=#{session.size}"
+    conn.close
+  end
+  exit 0
+end
+
 if args.size > 0 && args[0] == "config"
   answer = TlsServerConfig.from_pem(File.read(args[1]), File.read(args[2]))
   if answer.is_a?(TlsError)
@@ -305,26 +510,42 @@ end
 
 # What the server says of a connection: the name asked for, the protocol,
 # the suite, the client's certificate, the certificate it was shown under,
-# and 16 bytes exported for "EXPERIMENTAL iyi" (RFC 8446 section 7.5).
-def agreed(conn : TlsServer) : String
+# 16 bytes exported for "EXPERIMENTAL iyi" (RFC 8446 section 7.5; RFC 5705
+# in TLS 1.2), the version, the key exchange group, whether it resumed a
+# session, and what came early.
+def agreed(conn : TlsServer, early : String = "") : String
   peer = conn.peer_certificates.empty? ? "-" : conn.peer_certificates[0].subject_name
   exported = hex_of(conn.export_keying_material("EXPERIMENTAL iyi", [] of UInt8, 16))
-  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer} shown=#{conn.identity.leaf.subject_name} exported=#{exported}"
+  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer} shown=#{conn.identity.leaf.subject_name} exported=#{exported} #{conn.version} group=#{conn.named_group} early=#{early.inspect} resumed=#{conn.resumed? ? "yes" : "no"}"
 end
 
+# Early data, read apart from the rest as far as a whole request, which is
+# answered at once - before the client's Finished (0.5-RTT) - and the
+# handshake finished before the close; any other bytes echoed.
 def serve_one(conn : TlsServer) : String
-  received = ""
-  while true
-    chunk = conn.read
-    return "held #{agreed(conn)}, then #{chunk.message}" if chunk.is_a?(TlsError)
-    return "held #{agreed(conn)}, closed by the client after #{received.bytesize} bytes" if chunk.empty?
-    received = received + chunk
-    if received.includes?("\r\n\r\n") || received.includes?("\n\n")
-      conn.write("HTTP/1.0 200 ok\r\n\r\n#{agreed(conn)}\n")
-      conn.close
-      return "held #{agreed(conn)}, answered"
+  early = ""
+  if conn.early_data?
+    until early.includes?("\r\n\r\n")
+      chunk = conn.read_early
+      return "held #{agreed(conn)}, then #{chunk.message}" if chunk.is_a?(TlsError)
+      break if chunk.empty?
+      early = early + chunk
     end
-    conn.write("echo:" + chunk)
+  end
+  received = early
+  while true
+    if received.includes?("\r\n\r\n") || received.includes?("\n\n")
+      conn.write("HTTP/1.0 200 ok\r\n\r\n#{agreed(conn, early)}\n")
+      finished = conn.finish
+      return "held #{agreed(conn, early)}, then #{finished.message}" if finished
+      conn.close
+      return "held #{agreed(conn, early)}, answered"
+    end
+    chunk = conn.read
+    return "held #{agreed(conn, early)}, then #{chunk.message}" if chunk.is_a?(TlsError)
+    return "held #{agreed(conn, early)}, closed by the client after #{received.bytesize} bytes" if chunk.empty?
+    received = received + chunk
+    conn.write("echo:" + chunk) unless received.includes?("\r\n\r\n") || received.includes?("\n\n")
   end
   ""
 end
@@ -332,6 +553,9 @@ end
 if args.size > 0 && args[0] == "serve"
   config = TlsServerConfig.from_pem(File.read(args[1] + "/chain.pem"), File.read(args[1] + "/key.pem")).or_panic
   config.alpn = ["h2", "http/1.1"]
+  config.min_version = TlsVersion::TLS12 if ENV["TLS_MIN_VERSION"]? == "1.2"
+  # Early data taken, up to 16 KiB, unless DIR/no-early says not.
+  config.max_early_data = 16384 unless File.file?(args[1] + "/no-early")
   # A second identity, for other.test, shown to a client that asks for it.
   if File.file?(args[1] + "/other-chain.pem")
     config.add_identity(TlsIdentity.from_pem(File.read(args[1] + "/other-chain.pem"), File.read(args[1] + "/other-key.pem")).or_panic)
@@ -422,6 +646,116 @@ client_app = TlsRecordCipher.new(0x1301, schedule, b(C_AP))
 check client_app.seal(23_u8, b(CLIENT_DATA)) == b(CLIENT_DATA_RECORD), "the client's data sealed as the trace's record"
 puts "  the server's flight and data opened, the client's Finished and data sealed byte for byte"
 
+puts "== RFC 8448's resumed handshake, through the key schedule"
+# Section 3's handshake ends with a ticket whose nonce is 00 00; section 4
+# resumes by it, PSK and X25519 both.
+res_master = schedule.derive_secret(master, "res master", whole + [20_u8, 0_u8, 0_u8, 32_u8] + b(CLIENT_FINISHED))
+check res_master == b(RES_MASTER), "resumption_master_secret, over the handshake to the client's Finished"
+psk = schedule.resumption_psk(res_master, b("0000"))
+check psk == b(RESUMPTION_PSK), "the ticket's PSK, from its nonce"
+check schedule.early_secret(psk) == b(PSK_EARLY_SECRET), "the early secret, from the PSK"
+resumed_hello = b(RESUMED_HELLO)
+# The binder is over the ClientHello short of its binders list: two bytes
+# of length, one of the binder's, and the binder.
+check schedule.binder(psk, resumed_hello[0, resumed_hello.size - 35]) == b(BINDER), "the PSK binder, over the ClientHello to its binders"
+check resumed_hello[resumed_hello.size - 32, 32] == b(BINDER), "the trace's binder is the one computed"
+psk_handshake = schedule.handshake_secret(b(RESUMED_SHARED), psk)
+check psk_handshake == b(PSK_HANDSHAKE_SECRET), "the handshake secret, over the PSK's early secret and the share"
+hellos = resumed_hello + b(RESUMED_SERVER_HELLO)
+psk_s_hs = schedule.derive_secret(psk_handshake, "s hs traffic", hellos)
+check schedule.derive_secret(psk_handshake, "c hs traffic", hellos) == b(PSK_C_HS), "a resumption's client_handshake_traffic_secret"
+check psk_s_hs == b(PSK_S_HS), "a resumption's server_handshake_traffic_secret"
+psk_master = schedule.master_secret(psk_handshake)
+check psk_master == b(PSK_MASTER), "a resumption's master secret"
+resumed_flight = b(RESUMED_FLIGHT)
+check schedule.finished(psk_s_hs, hellos + resumed_flight[0, resumed_flight.size - 36]) == b(PSK_SERVER_FINISHED), "the resumed server's Finished, after EncryptedExtensions alone"
+check resumed_flight[resumed_flight.size - 32, 32] == b(PSK_SERVER_FINISHED), "the trace's resumed Finished is the one computed"
+check schedule.derive_secret(psk_master, "c ap traffic", hellos + resumed_flight) == b(PSK_C_AP), "a resumption's client_application_traffic_secret_0"
+check schedule.derive_secret(psk_master, "s ap traffic", hellos + resumed_flight) == b(PSK_S_AP), "a resumption's server_application_traffic_secret_0"
+record = b(RESUMED_FLIGHT_RECORD)
+opened = TlsRecordCipher.new(0x1301, schedule, psk_s_hs).open(record[0, 5], record[5, record.size - 5])
+if opened.is_a?(Tuple(UInt8, Array(UInt8)))
+  check opened[0] == 22_u8 && opened[1] == resumed_flight, "the resumed server's flight opened"
+else
+  check false, "the resumed server's flight opened: #{opened.message}"
+end
+puts "  the resumption master secret, the ticket's PSK, its early secret and binder, the resumed handshake's secrets and Finished"
+
+puts "== RFC 8448's early data, through the key schedule and the records"
+early_traffic = schedule.early_traffic(psk, resumed_hello)
+check early_traffic == b(EARLY_TRAFFIC), "client_early_traffic_secret, over the ClientHello alone"
+early_writer = TlsRecordCipher.new(0x1301, schedule, early_traffic)
+check early_writer.seal(23_u8, b("414243444546")) == b(EARLY_DATA_RECORD), "the early data sealed as the trace's record"
+check early_writer.seal(22_u8, [5_u8, 0_u8, 0_u8, 0_u8]) == b(EOED_RECORD), "EndOfEarlyData sealed as the trace's record, second under the early keys"
+early_reader = TlsRecordCipher.new(0x1301, schedule, early_traffic)
+record = b(EARLY_DATA_RECORD)
+opened = early_reader.open(record[0, 5], record[5, record.size - 5])
+if opened.is_a?(Tuple(UInt8, Array(UInt8)))
+  check opened[0] == 23_u8 && opened[1] == b("414243444546"), "the early data opened"
+else
+  check false, "the early data opened: #{opened.message}"
+end
+with_ended = hellos + resumed_flight + [5_u8, 0_u8, 0_u8, 0_u8]
+psk_c_hs = schedule.derive_secret(psk_handshake, "c hs traffic", hellos)
+client_finished = schedule.finished(psk_c_hs, with_ended)
+check client_finished == b(PSK_CLIENT_FINISHED), "the client's Finished, over EndOfEarlyData too"
+finished_message = [20_u8, 0_u8, 0_u8, 32_u8] + client_finished
+check TlsRecordCipher.new(0x1301, schedule, psk_c_hs).seal(22_u8, finished_message) == b(PSK_CLIENT_FINISHED_RECORD), "the client's Finished sealed as the trace's record"
+check schedule.derive_secret(psk_master, "res master", with_ended + finished_message) == b(PSK_RES_MASTER), "the resumed handshake's resumption master secret"
+puts "  the client's early traffic secret, its data and EndOfEarlyData sealed and opened, the Finished after them"
+
+puts "== the replay guard"
+guard = TlsReplayGuard.new(2)
+check guard.admit([1_u8], 0_i64), "a binder first seen is taken"
+check !guard.admit([1_u8], 5000_i64), "the same binder again is refused"
+check guard.admit([2_u8], 5000_i64) && !guard.admit([3_u8], 5000_i64), "past its capacity the guard refuses"
+check guard.admit([1_u8], 20001_i64), "a binder is dropped two windows after it came"
+check TlsReplayGuard.fresh?(1000_i64, 11000_i64) && !TlsReplayGuard.fresh?(1000_i64, 11001_i64), "fresh within 10 s and not past"
+puts "  a binder taken once, a full guard refusing, a binder dropped after two windows, the freshness window"
+
+puts "== tickets: their keys, their lifetimes, and the session that holds them"
+# By a clock given, not the machine's: a period of 10 s for each key.
+period = 10000_i64
+state = TlsTicket.new(0x1301, 0_i64, 30_i64, 7_i64, Array(UInt8).new(32, 1_u8), "localhost", "h2", 1, [[2_u8, 3_u8]], 0_i64)
+keys = TlsTicketKeys.new(0_i64)
+sealed = keys.seal(state.encode, 0_i64, period)
+back = TlsTicket.open(keys, sealed, 9000_i64, period)
+check !back.nil? && back.psk == state.psk && back.server_name == "localhost" && back.alpn == "h2" && back.age_add == 7_i64 &&
+      back.identity == 1 && back.chain == [[2_u8, 3_u8]] && back.lifetime == 30_i64, "a ticket opens to the session it sealed"
+tampered = sealed.dup
+tampered[tampered.size - 1] = tampered[tampered.size - 1] ^ 1_u8
+check TlsTicket.open(keys, tampered, 9000_i64, period).nil?, "a ticket one bit off does not open"
+# The key moves on at 10 s and still opens what it sealed; at 20 s it moves
+# again and the first key is gone, though the ticket's 30 s are not over.
+check !TlsTicket.open(keys, sealed, 15000_i64, period).nil?, "a ticket opens under the key before the current one"
+check TlsTicket.open(keys, sealed, 26000_i64, period).nil?, "a ticket under the key two before does not open"
+short = TlsTicket.new(0x1301, 0_i64, 5_i64, 7_i64, Array(UInt8).new(32, 1_u8), nil, nil, 0, [] of Array(UInt8), 0_i64)
+keys = TlsTicketKeys.new(0_i64)
+sealed = keys.seal(short.encode, 0_i64, period)
+check !TlsTicket.open(keys, sealed, 5000_i64, period).nil?, "a ticket opens at the end of its lifetime"
+check TlsTicket.open(keys, sealed, 5001_i64, period).nil?, "a ticket past its lifetime by this server's count does not open"
+keys = TlsTicketKeys.new(0_i64)
+sealed = keys.seal(state.encode, 0_i64, period)
+check TlsTicket.open(keys, sealed, 21000_i64, period).nil?, "a key idle past two periods opens nothing"
+keys = TlsTicketKeys.new(0_i64)
+sealed = keys.seal(state.encode, 0_i64, period)
+keys.rotate(1_i64)
+check !TlsTicket.open(keys, sealed, 2_i64, period).nil?, "rotated once by hand, a ticket still opens"
+keys.rotate(3_i64)
+check TlsTicket.open(keys, sealed, 4_i64, period).nil?, "rotated twice by hand, it does not"
+session = TlsSession.new
+# Tickets 0 to 9, the sixth for other.test: the first two go past the
+# limit, and other.test's is not the newest left.
+10.times { |i| session.keep(TlsHeldTicket.new([i.to_u8], [] of UInt8, 0x1301, i.to_i64, 1000_i64, 0_i64, i == 5 ? "other.test" : "localhost", nil, [] of Certificate)) }
+check session.size == TlsSession::MAX_TICKETS, "a session holds #{TlsSession::MAX_TICKETS} tickets, not #{session.size}"
+newest = session.take("localhost", 500_i64)
+check !newest.nil? && newest.ticket == [9_u8] && session.size == 7, "the newest ticket for the host is taken out"
+other = session.take("other.test", 500_i64)
+check !other.nil? && other.ticket == [5_u8], "a ticket is for the host it came from"
+check session.take("other.test", 500_i64).nil?, "a ticket goes out once"
+check session.take("localhost", 1010_i64).nil? && session.size == 0, "a ticket past its lifetime is not offered, and goes"
+puts "  a ticket sealed and opened, one bit off, past its lifetime, its key rotated out; a session's limit, hosts and single use"
+
 puts "== TLS 1.2's PRF, through the key schedule"
 # The P_SHA256 and P_SHA384 vectors that circulate for TLS 1.2 (Python's
 # hmac computes the same): secret, seed and "test label", 100 and 148 bytes.
@@ -430,5 +764,16 @@ check prf256 == b(PRF_SHA256), "P_SHA256's 100 bytes"
 prf384 = TlsKeySchedule.new(true).prf(b("b80b733d6ceefcdc71566ea48e5567df"), "test label", b("cd665cf6a8447dd6ff8b27555edb7465"), 148)
 check prf384 == b(PRF_SHA384), "P_SHA384's 148 bytes"
 puts "  P_SHA256 and P_SHA384, 100 and 148 bytes"
+
+puts "== server_name's form (RFC 6066 section 3)"
+# What the client sends and checks the certificate for; the gate's OpenSSL
+# section reads the name off the wire as s_server's `-servername` sees it.
+check TlsClient.server_name_for("bücher.example.") == "xn--bcher-kva.example", "a Unicode host with a final dot goes as its A-labels without it"
+check TlsClient.server_name_for("Bücher.Example") == "xn--bcher-kva.example", "a Unicode host's ASCII labels go in lower case, as IDNA writes them"
+check TlsClient.server_name_for("localhost.") == "localhost", "an ASCII host's final dot is dropped"
+check TlsClient.server_name_for("Example.COM") == "Example.COM", "an ASCII host goes as written"
+check TlsClient.server_name_for(".").is_a?(TlsError), "a dot alone names no host"
+check TlsClient.server_name_for("bücher..example").is_a?(TlsError), "a Unicode host IDNA refuses is an error before anything is sent"
+puts "  A-labels, no final dot, ASCII as written, and what names no host refused"
 
 puts "\nALL CHECKS PASSED"

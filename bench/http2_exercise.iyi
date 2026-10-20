@@ -3,6 +3,7 @@
 #   ./bin/iyi run bench/http2_exercise.iyi                  # iyi to iyi
 #   ./bin/iyi run bench/http2_exercise.iyi serve PORTFILE   # a server for others
 #   ./bin/iyi run bench/http2_exercise.iyi serve-tls PORTFILE CHAIN.pem KEY.pem [CLIENT_ROOTS.pem]
+#   ./bin/iyi run bench/http2_exercise.iyi serve-guarded PORTFILE CHAIN.pem KEY.pem MAX HEAD_MS REQUEST_MS
 #   ./bin/iyi run bench/http2_exercise.iyi fetch BASE [ROOTS.pem]
 #   ./bin/iyi run bench/http2_exercise.iyi tls-get BASE ROOTS.pem [ALPN,...]
 #   ./bin/iyi run bench/http2_exercise.iyi whoami BASE ROOTS.pem [CHAIN.pem KEY.pem]
@@ -21,7 +22,9 @@
 # http/1.1 unless named). With CLIENT_ROOTS `serve-tls` asks each client
 # for its certificate, and `/whoami` answers the one it presented;
 # `whoami` asks that over h2, over http/1.1 and through an upgrade,
-# presenting CHAIN and KEY when given.
+# presenting CHAIN and KEY when given. `serve-guarded` is `serve-tls`
+# with `Server.serve`'s *max_connections*, *timeout_ms* and
+# *request_timeout_ms* given, for slow clients to be cut off by.
 
 module bench/http2_exercise
 
@@ -167,6 +170,24 @@ if mode == "serve-tls"
   listener = IyiSocket.listen("127.0.0.1", 0)
   File.write(args[1], listener.local_port.to_s)
   serve_on(listener, true, config)
+  exit 0
+end
+
+# The same server over TLS, its limits named: at most MAX connections at
+# once, a head within HEAD_MS and a whole request within REQUEST_MS.
+if mode == "serve-guarded"
+  config = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic
+  config.alpn = ["h2", "http/1.1"]
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1], listener.local_port.to_s)
+  Server.serve(listener, tls: config, max_connections: args[4].to_i, timeout_ms: args[5].to_i, request_timeout_ms: args[6].to_i) do |req|
+    if req.path == "/quit"
+      listener.close
+      Response.new(200, "bye")
+    else
+      answer(req)
+    end
+  end
   exit 0
 end
 

@@ -647,14 +647,16 @@ module Iyi
     end
 
     # iyi: a block that crosses a `Share` boundary may capture only `Share`
-    # values (SPEC.md III.4.4). Two blocks cross one. `IyiThread.start { }`'s
-    # runs on another thread (III.4.11). And the block a method of an owning
-    # type runs (`@[Share(owns: true)]`, `Mutex#lock` and the rest) reaches
-    # the value the type keeps behind its lock: what the block captures
-    # would come within reach of that value, so it must be Share, and what
-    # the call answers leaves the lock, so it must be Share too. That is
-    # what lets `Mutex(Array(Int32))` be Share although `Array(Int32)` is
-    # not: nothing but these blocks reaches the array.
+    # values (SPEC.md III.4.4). Three blocks cross one. `IyiThread.start { }`'s
+    # runs on another thread (III.4.11), and `IyiGroup#spawn_parallel { }`'s
+    # may (III.4.13): a parallel task is started by whichever pool worker is
+    # free, so it is held to exactly what a thread's block is. And the block
+    # a method of an owning type runs (`@[Share(owns: true)]`, `Mutex#lock`
+    # and the rest) reaches the value the type keeps behind its lock: what
+    # the block captures would come within reach of that value, so it must
+    # be Share, and what the call answers leaves the lock, so it must be
+    # Share too. That is what lets `Mutex(Array(Int32))` be Share although
+    # `Array(Int32)` is not: nothing but these blocks reaches the array.
     #
     # The block became a proc when the call was typed, and the proc's def
     # knows which of the enclosing variables it closed over; each one's type
@@ -662,7 +664,11 @@ module Iyi
     # or called one of self's methods receiverless.
     def check_share_boundary(node : Call, target_def : Def)
       owner = target_def.owner
-      thread = target_def.name == "start" && owner.metaclass? && owner.instance_type.to_s == "IyiThread"
+      thread = if target_def.name == "start" && owner.metaclass? && owner.instance_type.to_s == "IyiThread"
+                 THREAD_BOUNDARY
+               elsif target_def.name == "spawn_parallel" && !owner.metaclass? && owner.to_s == "IyiGroup"
+                 PARALLEL_BOUNDARY
+               end
       owning = thread ? nil : share_owning_type(owner)
       return unless thread || owning
       block = node.block
@@ -689,11 +695,11 @@ module Iyi
         end
         check_share_constants(a_def, subject, consequence)
         check_share_class_var_types(a_def, subject, consequence)
-      else
-        subject = "the block IyiThread.start runs on another thread"
+      elsif thread
+        subject = thread.subject
         consequence = "(SPEC.md III.4.4)"
-        check_thread_constants_share(a_def)
-        check_thread_class_vars_share(a_def)
+        check_thread_constants_share(a_def, thread)
+        check_thread_class_vars_share(a_def, thread)
       end
       return unless a_def.closure?
 
@@ -721,8 +727,8 @@ module Iyi
           end
           # A block behind a lock runs in the task that called it, so a
           # local it assigns is that task's alone; only a thread's block
-          # shares the cell.
-          check_thread_capture_assigned_once(node, captured, meta, a_def) if thread
+          # and a parallel task's share the cell.
+          check_thread_capture_assigned_once(node, captured, meta, a_def, thread) if thread
         end
       end
 
@@ -777,6 +783,24 @@ module Iyi
       end
     end
 
+    # iyi: who the two parties to a shared cell are, in the sentences the
+    # thread check and the parallel task's check refuse one with.
+    record ShareBoundary, subject : String, local_owner : String, pair : String, again : String, after : String
+
+    THREAD_BOUNDARY = ShareBoundary.new(
+      subject: "the block IyiThread.start runs on another thread",
+      local_owner: "a local of the code that started the thread, so the two threads",
+      pair: "the thread and the code that started it",
+      again: "starts the thread again",
+      after: "the thread has started")
+
+    PARALLEL_BOUNDARY = ShareBoundary.new(
+      subject: "the block spawn_parallel runs on another thread",
+      local_owner: "a local of the code that spawned the task, so the task and its spawner",
+      pair: "the task and the code that spawned it",
+      again: "spawns the task again",
+      after: "the task was spawned")
+
     # iyi: a captured local is one cell on the heap, and the thread and the
     # code that started it both reach that cell. A Share type makes the
     # value safe to read from two threads, not the cell safe to write: `count
@@ -787,15 +811,16 @@ module Iyi
     # in a loop or a block that starts the thread again, and no block or
     # proc that may run later. A variable the typer never saw assigned
     # after a closure took it, in a `while`, or from a block or a proc is
-    # not `mutably_closured`, and needs no walk.
-    def check_thread_capture_assigned_once(start : Call, captured : Var, meta : MetaVar, a_def : Def)
+    # not `mutably_closured`, and needs no walk. A parallel task's block is
+    # the same cell on two threads, and asked the same.
+    def check_thread_capture_assigned_once(start : Call, captured : Var, meta : MetaVar, a_def : Def, boundary : ShareBoundary)
       return unless meta.mutably_closured?
 
       name = captured.name
       inside = CaptureAssignments.new(@program, meta, nil, a_def.vars)
       a_def.body.accept inside
       if first = inside.assigns.first?
-        first[0].raise "the block IyiThread.start runs on another thread assigns `#{name}`, a local of the code that started the thread, so the two threads share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)"
+        first[0].raise "#{boundary.subject} assigns `#{name}`, #{boundary.local_owner} share one mutable cell: a data race (SPEC.md III.4.4). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)"
       end
 
       scope = meta.context
@@ -806,26 +831,26 @@ module Iyi
       outside = CaptureAssignments.new(@program, meta, start, vars)
       body.try &.accept(outside)
       line = start.location.try(&.line_number)
-      advice = "so the thread and the code that started it share one mutable cell: a data race (SPEC.md III.4.4). " \
+      advice = "so #{boundary.pair} share one mutable cell: a data race (SPEC.md III.4.4). " \
                "Capture a local that is assigned once (a block's own locals are new on every call), " \
                "or keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)"
       # Not found, or found assigned nowhere: the walk does not know this
       # scope, and the typer's answer stands.
       unless outside.found_start? && !outside.assigns.empty?
-        captured.raise "the block IyiThread.start runs on another thread captures `#{name}`, which is assigned again after the capture, or inside a loop or a block, #{advice}"
+        captured.raise "#{boundary.subject} captures `#{name}`, which is assigned again after the capture, or inside a loop or a block, #{advice}"
       end
 
       outside.assigns.each do |assign, regions, after|
         why =
           if regions.any? { |region| outside.start_regions.any?(&.same?(region)) }
-            "in a loop or a block that starts the thread again"
+            "in a loop or a block that #{boundary.again}"
           elsif regions.any? { |region| region.is_a?(ProcLiteral) || (region.is_a?(Block) && region.fun_literal) }
-            "in a block or a proc that may run after the thread has started"
+            "in a block or a proc that may run after #{boundary.after}"
           elsif after
-            "after the thread has started"
+            "after #{boundary.after}"
           end
         next unless why
-        assign.raise "`#{name}` is assigned here, #{why}, and the block IyiThread.start runs on another thread (line #{line}) captures it, #{advice}"
+        assign.raise "`#{name}` is assigned here, #{why}, and #{boundary.subject} (line #{line}) captures it, #{advice}"
       end
     end
 
@@ -837,12 +862,12 @@ module Iyi
     # block, its inlined blocks and its procs name is asked what a captured
     # variable is. One that a method the block calls reads is reached
     # through the call, and is not seen here.
-    def check_thread_constants_share(a_def : Def) : Nil
+    def check_thread_constants_share(a_def : Def, boundary : ShareBoundary) : Nil
       named = NamedConstants.new
       a_def.body.accept named
       named.paths.each do |path, type|
         if why = Iyi::Share.reason(type)
-          path.raise "the block IyiThread.start runs on another thread names the constant `#{path} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+          path.raise "#{boundary.subject} names the constant `#{path} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
         end
       end
     end
@@ -873,14 +898,14 @@ module Iyi
     # the typer reached - is one cell every thread that names it shares,
     # refused as a captured local assigned after the start is. A
     # thread-local one is every thread's own, and neither.
-    def check_thread_class_vars_share(a_def : Def) : Nil
+    def check_thread_class_vars_share(a_def : Def, boundary : ShareBoundary) : Nil
       named = NamedClassVars.new
       a_def.body.accept named
       advice = "so every thread that reaches it shares one mutable cell: a data race (SPEC.md III.4.5). Keep the value in an `Atomic`, or behind a `Mutex` (std/mutex)"
       named.vars.each do |class_var, var|
         next if var.thread_local?
         if assign = named.assigns[var]?
-          assign.raise "the block IyiThread.start runs on another thread assigns `#{class_var.name}`, a class variable, #{advice}"
+          assign.raise "#{boundary.subject} assigns `#{class_var.name}`, a class variable, #{advice}"
         end
         if written = var.iyi_written
           write, in_def = written
@@ -891,12 +916,12 @@ module Iyi
                   else
                     "outside it"
                   end
-          class_var.raise "the block IyiThread.start runs on another thread names the class variable `#{class_var.name}`, which is written after its initializer (#{where}), #{advice}"
+          class_var.raise "#{boundary.subject} names the class variable `#{class_var.name}`, which is written after its initializer (#{where}), #{advice}"
         end
         type = var.type?
         next unless type
         if why = Iyi::Share.reason(type)
-          class_var.raise "the block IyiThread.start runs on another thread names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
+          class_var.raise "#{boundary.subject} names the class variable `#{class_var.name} : #{type}`, which is not Share: #{why} (SPEC.md III.4.5)"
         end
       end
     end

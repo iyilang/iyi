@@ -80,7 +80,7 @@ fi
 
 echo
 echo "== every socket check reported"
-phrases="connect_accept message_exchange short_read closed_peer ipv6 localhost unix timeout closed_under_read stream"
+phrases="connect_accept message_exchange short_read closed_peer close_write ipv6 localhost unix timeout closed_under_read stream"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
   Linux) phrases="$phrases reset_after_chunk" ;;
@@ -91,7 +91,7 @@ for phrase in $phrases; do
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, ipv6, localhost, unix, timeout and stream all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, close_write, ipv6, localhost, unix, timeout and stream all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -349,6 +349,14 @@ case "$(uname -s)" in
   Linux)
     prove_fails "a reset dropped after a full chunk" reset_dropped "reset_after_chunk:" \
       '{ sub(/^    @pending_error = SocketError.new\("read from socket".*$/, ""); print }'
+    # 13. A half-close that ends nothing: the peer waits for an end that
+    #     never comes. And one that ends both halves: the answer sent
+    #     after it is lost. Each patches the Linux arm, so it is measured
+    #     there.
+    prove_fails "a half-close that ends nothing" shutdown_none "close_write: the peer's read waited" \
+      '{ sub(/__sys3\(SYS_SHUTDOWN, fd.to_i64, 1_i64, 0_i64\)/, "0_i64"); print }'
+    prove_fails "a half-close that ends both halves" shutdown_both "close_write: the answer after the end" \
+      '{ sub(/__sys3\(SYS_SHUTDOWN, fd.to_i64, 1_i64, 0_i64\)/, "__sys3(SYS_SHUTDOWN, fd.to_i64, 2_i64, 0_i64)"); print }'
     ;;
 esac
 

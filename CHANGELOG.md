@@ -2,6 +2,448 @@
 
 ## Unreleased
 
+### Added
+
+- **Tasks run across cores: `g.spawn_parallel { }` starts a task on a
+  pool of worker threads (SPEC.md III.4.13).** The pool starts at the
+  first parallel spawn with as many workers as the cores the process may
+  run on, or `IYI_WORKERS=n`, or `IyiWorkers.count = n` before the first
+  parallel task. A parallel task waits until a worker is free - in the
+  queue of the worker whose task spawned it, in an injection queue when a
+  thread outside the pool did, or stolen by an idle worker - and the
+  worker that starts it keeps it to its end: LLVM fixes a thread-local's
+  address for a function's life, and iyi's codegen already relies on a
+  fiber never moving. Each worker is an `IyiThread` with its own run
+  queue, sleep heap, poller and stack pool, so the collector stops and
+  scans it as any thread. Wakes cross threads through an inbox per thread
+  and a doorbell its poller waits on (an eventfd on Linux, `EVFILT_USER`
+  on darwin, a posted completion on Windows), rung only for a thread
+  marked idle under the lock its wakers take; a cancel of a task on
+  another thread is delivered to that thread, and a task still waiting in
+  the pool starts cancelled. Channels, groups and joins are behind one
+  scheduler lock once a second scheduler thread exists, and a program
+  with one pays a load and a branch. The block `spawn_parallel` runs is
+  gated by `Share` exactly as `IyiThread.start`'s is, and `Channel(T)` is
+  `@[Share]` whenever `T` is; `g.spawn` is unchanged. A deadlock is
+  named when every scheduler thread is idle with nothing to wait for.
+  `bench/parallel_exercise.sh` holds it, plain and release: 16 CPU-bound
+  tasks took 715 ms on one worker, 360 on two (1.99x), 185 on four
+  (3.86x) and 103 on eight (6.94x), release, best of three, on a 12-core
+  machine other jobs shared, and four workers are held to 0.6 x 4; it
+  checks placement on several workers with no task moving across a park,
+  a thousand tasks run once each, 16,000,000 atomic adds from eight tasks
+  losing none, 120,000 values from six parallel senders received in each
+  sender's order, a cancel reaching a sleeper, a channel waiter and queued
+  tasks on other threads in about 100 ms, steals, lists of 150,000 nodes
+  on eight workers' stacks surviving the collections, the typed group,
+  and four programs `Share` refuses. Broken copies are caught by name: a
+  wake that does not ring (the join still waiting after 5,000 ms), a steal
+  that leaves the task queued (handed out twice), a cancel never
+  delivered, a cancel that skips queued tasks, the race step's add made a
+  load and a store (8,403,659 of 16,000,000 adds lost), and a pool held
+  to one worker (0.99x, refused by the floor).
+- **`SECURITY_REVIEW_TLS.md`: an automated security review of std/tls and
+  what it stands on - which is not an audit, and changes nothing about
+  std/tls being unaudited and not to be called secure until it is.** An
+  AI agent read `src/std/tls.iyi` and `x509.iyi` against RFC 8446, 5246,
+  7627, 5746, 5280 and 6125, and std/rsa with std/big, the curves, the
+  AEADs, the digests, `Random::Secure`, std/asn1 and std/http's TLS paths
+  in four further read-only passes; every flaw it suspected was
+  reproduced on 0.18.0 with a chain Python's cryptography 46.0.5 built or
+  a record the scripted TLS server sends, beside the verdict of Python's
+  verifier or OpenSSL 3.5.5 where one exists. The file lists six findings
+  fixed below (two Medium, four Low), eight left open with the reason, and
+  what was checked and found sound, each with where in the code it holds.
+- **bench/std_fuzz_exercise.sh: the readers of std/asn1, std/x509,
+  std/tls, std/http and std/hpack fuzzed.** Seeds - certificates, PEM,
+  recorded and built TLS 1.3 and 1.2 handshakes, records, HTTP/1.1
+  heads, HTTP/2 frames, HPACK blocks - are mutated by a seeded `Random`
+  (bit flips, bytes in and out, truncation, lengths set to their bounds,
+  splices of two seeds, DER trees and TLS messages and HTTP/2 frames
+  changed a unit at a time) and fed to each module's public entry in
+  process, the handshakes and HTTP over a loopback connection with a
+  scripted peer that signs and seals what the template says. Every input
+  must answer a value or an error value, within a time bound and an
+  allocation bound. Long runs read 2,060,000 inputs; the two module
+  defects they found are fixed below and kept as regression inputs whose
+  fixes, undone in a copy, the gate catches. x509 is set beside Python's
+  cryptography (4,000 certificates: 3,853 alike; the rest judged against
+  RFC 5280 in the exercise's header; two leniencies found there are
+  refused below) and HPACK beside Python's hpack (4,000 alike). 4,000
+  inputs of each pure target by default, `FUZZ_ITERATIONS` for more.
+- **std/tls: a server that speaks TLS 1.2, when asked, to a client that
+  speaks nothing newer (RFC 5246, RFC 7627's extended master secret, RFC
+  5746's renegotiation_info, RFC 8422's ECDHE).** Opt-in, as the
+  client's is: `TlsServerConfig#min_version` is `TlsVersion::TLS13` by
+  default, and then a ClientHello without 1.3 is refused as before
+  (protocol_version); SPEC.md's decision #18 now records the server half.
+  With `TLS12`, a client that offers 1.3 is still answered in 1.3, and
+  one that offers 1.2 and not 1.3 - in supported_versions, or by
+  legacy_version with none - is answered in 1.2: ECDHE in X25519, or
+  secp256r1 for a client without it or without supported_groups; the six
+  AEAD suites the client offers, by the client's order among those of the
+  key's kind (ECDHE_ECDSA for Ed25519, RFC 8422, and P-256; ECDHE_RSA for
+  RSA); the ServerKeyExchange signed under ed25519,
+  ecdsa_secp256r1_sha256, or for RSA under RSA-PSS by the client's order
+  whenever it takes any and PKCS #1 v1.5 only for a client that takes
+  none. ServerHello.random ends with RFC 8446's DOWNGRD 01 sentinel. A
+  client without the extended master secret is refused by name
+  (handshake_failure), as are one whose renegotiation_info is not empty,
+  one that sends TLS_FALLBACK_SCSV (inappropriate_fallback, RFC 7507), one
+  whose ec_point_formats leave out uncompressed points, one without
+  signature_algorithms, and a P-256 server's client whose groups leave out
+  secp256r1 (RFC 8422 section 5.1.1). renegotiation_info is answered to a
+  client that signals it by the extension or the SCSV; a ClientHello after
+  the handshake is answered with the no_renegotiation warning and the
+  connection ends, as Go's does. No session id and no ticket: there is no
+  resumption. ALPN, the identity chosen by server_name, and client
+  certificates work as in 1.3 - a 1.2 CertificateRequest for ecdsa_sign
+  and rsa_sign, the client's CertificateVerify checked over the handshake
+  with PKCS #1 v1.5 taken, as 1.2 allows, and a client without a
+  certificate refused with handshake_failure; the exporter is RFC 5705's
+  and `version` says "TLSv1.2". Left out: DHE, CBC and anything before
+  1.2, a P-384 server key (an identity is Ed25519, P-256 or RSA, as in
+  1.3), and resumption. The 1.2 signature check, master secret, key block
+  and Finished are one path for both ends now. A full 1.2 handshake with
+  Python's ssl, measured in one run here beside 1.3's under other load
+  (--release, the median of 200): 0.67 ms with an Ed25519 key against
+  1.3's 0.74, 0.71 with P-256 (0.81), 1.79 with RSA-2048 (1.88), 7.85 with
+  RSA-4096 (7.76). `bench/std_tls_exercise.sh` has a new section: the
+  scripted client (`bench/std_tls_client.py --tls12`) checks every 1.2
+  handshake step by step - the sentinel, the session hash, the
+  ServerKeyExchange's scheme, every AES-GCM explicit nonce unrepeated -
+  in 31 scenarios and three of 1.3's on each of the three keys, and 9
+  asking for a client's certificate, refusals among them; OpenSSL's
+  `s_client -tls1_2` across each suite, ALPN, the group, RSA's schemes,
+  `-no_ems`, `-fallback_scsv`, a renegotiation and the exporter; Python's
+  ssl with `maximum_version` TLSv1_2 on each suite; curl and Node held to
+  1.2; the std/tls client answered in 1.3, and a copy of it offering 1.2
+  alone refusing the sentinel - and with the check removed, connecting in
+  1.2. 34 new broken copies are each caught, 157 in all.
+- **std/tls resumes TLS 1.3 sessions by tickets, client and server (RFC
+  8446 sections 2.2, 4.2.11 and 4.6.1).** A `TlsServer` sends `tickets`
+  NewSessionTickets (two unless set, eight at most) once the client's
+  Finished is in, each its own state - suite, PSK, lifetime and age_add,
+  the name asked for, the protocol, the identity shown, the client's
+  certificates - sealed by ChaCha20-Poly1305 under `TlsTicketKeys`, a key
+  made at random in the process that seals for one `ticket_lifetime`
+  (7200 s unless set, seven days at most) and opens for one more; a
+  ticket past 8 KiB is not sent. A pre_shared_key is taken for the first
+  identity that opens, within its lifetime by the server's clock and by
+  the age the client gives, under a suite of the chosen one's hash, for
+  the server_name asked for now, offered for psk_dhe_ke; its binder is
+  checked (decrypt_error when it does not match), and any other ticket
+  is passed over for a full handshake. psk_ke is never taken, so a
+  resumed session's keys always include a fresh key exchange (SPEC.md
+  decision #18). A resumption sends no certificate and asks for none:
+  `peer_certificates` are the ticket's, a client's included; ALPN
+  chooses afresh; and the tickets it is sent end when the first
+  handshake's lifetime does. A client keeps tickets in a `TlsSession` its
+  caller holds and hands to `TlsClient.connect`/`over` (`session:`), at
+  most eight of at most 16 KiB: the newest for the host goes out once,
+  its age obfuscated and its binder over the ClientHello and any
+  HelloRetryRequest before it; `resumed?` says whether it was taken. A
+  server that takes an identity not offered, takes it under another
+  hash's suite, or sends a Certificate after, is refused. A ClientHello
+  that offers a PSK may leave signature_algorithms out (section 9.2). 0-RTT
+  is not here. Held by `bench/std_tls_exercise.sh`: RFC 8448's resumed
+  trace through the key schedule (the resumption master secret, the
+  ticket's PSK, its binder over the trace's ClientHello, the PSK's
+  handshake secrets and Finished, the resumed flight opened); the ticket
+  keys' rotation, a ticket's lifetime and a session's limits on a clock
+  the exercise sets; the client resumed by OpenSSL 3.5's s_server three
+  times through one session ("Reused, TLSv1.3" by s_server's own page)
+  under the default suites, AES-256-GCM alone and through a
+  HelloRetryRequest; the server resumed by `openssl s_client -sess_out` /
+  `-sess_in` ("Reused, TLSv1.3"), by Python's ssl `session=`
+  (`session_reused` True) and by the std/tls client, on each of its four
+  keys, and a client certificate carried through a resumption by
+  OpenSSL's and Python's; six scripted-server resumptions and three
+  ticket scenarios against the client, and eighteen scripted-client
+  resumptions against the server (a bad binder, an age past the
+  lifetime, another hash's suite, psk_ke alone, another server_name, a
+  ticket one bit off, no modes, binders short of identities,
+  pre_shared_key not last, through a HelloRetryRequest, a second
+  identity, no signature_algorithms, a client certificate carried); and
+  thirty broken copies of the module, each caught where it should be.
+  The scripted client's early-data scenarios now send a well-formed
+  pre_shared_key: its identity's length said 5 for a 6-byte name, which
+  the server passed over until it read pre_shared_key.
+- **std/tls sends and takes early data (0-RTT, RFC 8446 sections 2.3,
+  4.2.10 and 8), opt-in at both ends, behind a replay guard.** A server
+  whose `TlsServerConfig#max_early_data` is set (0 unless set, 256 KiB at
+  most) announces it in its tickets' early_data extension and takes a
+  resumed ClientHello's early data only for its first identity, under the
+  ticket's own suite and ALPN protocol, without a HelloRetryRequest, while
+  the ticket age the client gives is within 10 s of the server's own
+  count, and once: `TlsReplayGuard` keeps each taken ClientHello's binder
+  for two windows (the most a fresh replay can trail its original by) and
+  refuses one it holds, or any while it holds `capacity` (65,536 unless
+  set) - it fails closed. Its header says what it does not prevent: a
+  client that sends a request again after a broken connection runs it
+  twice, so only what is safe twice may come early; tickets and the guard
+  live in one process, so no other server takes them. `TlsServer.over`
+  answers once the server's Finished is out; `read_early` reads the early
+  data apart from `read`, which never returns it; a write goes at once
+  (0.5-RTT); `finish` - which `read` calls - reads EndOfEarlyData and the
+  client's Finished. Early data past the ticket's allowance is refused
+  with unexpected_message, a record that does not open with
+  bad_record_mac, a Finished where EndOfEarlyData belongs with
+  unexpected_message. A client given `early_data:` sends it with the
+  ClientHello when its ticket allows that much, then EndOfEarlyData when
+  it was taken; otherwise it sends it after the handshake, except when
+  the server chose another ALPN protocol than the ticket's, which section
+  4.2.10 forbids - `TlsClient#early_data` (`TlsEarlyData`) says Accepted,
+  Resent, Late or Withheld. It fails a TLS 1.2 ServerHello after early
+  data (appendix D.3). std/http takes none - its server passes
+  `early_data: false` whatever the config allows - and sends none, as its
+  client keeps no session: HTTP cannot tell a request safe to replay.
+  Held by `bench/std_tls_exercise.sh`: RFC 8448's early traffic secret,
+  its "ABCDEF" and EndOfEarlyData records sealed byte for byte, the
+  Finished and resumption secret after them; the guard's single use,
+  capacity, two windows and freshness on a clock the exercise sets;
+  OpenSSL 3.5's `s_client -early_data` sending GET / to the server on
+  each of its four keys ("Early data was accepted", answered from the
+  early data before the client's Finished); the client's early data to
+  `s_server -early_data` ("Early data received"), to one that takes none
+  (sent late) and through a HelloRetryRequest (sent again); the std/tls
+  client's GET / taken early by the std/tls server; twelve scripted-client
+  scenarios against the server (taken, a request answered at 0.5-RTT, a
+  replay of the same bytes refused, 16,385 bytes past 16,384, a stale
+  age, another ALPN, another suite, the ticket second, a HelloRetryRequest,
+  a bad record, a Finished early, a ticket that allows none) and five
+  scripted-server ones against the client (taken, refused, too small for
+  it, another ALPN, an acceptance of nothing sent); and seventeen broken
+  copies, among them a replay taken, early data delivered as 1-RTT, the
+  size limit, freshness window, ALPN and suite checks ignored.
+- **std/mlkem: ML-KEM-768 (FIPS 203), the post-quantum key-encapsulation
+  mechanism, written in iyi and constant-time on its secrets.**
+  `MlKem768PrivateKey.from_seed(d || z)` is Algorithm 16's key
+  generation, `MlKem768.encapsulate(ek, m)` Algorithm 17, and
+  `decapsulate(c)` Algorithm 18 with its implicit rejection: a ciphertext
+  that does not re-encrypt to itself is answered with J(z || c), chosen
+  by masks after a comparison of every byte. The caller brings the random
+  bytes, as std/curve25519's does, and the module imports std/digest's
+  SHA-3 and SHAKE alone.
+  - Section 7.2's modulus check refuses an encapsulation key with a
+    coefficient of q or more, and section 7.3's hash check a
+    decapsulation key whose H(ek) is not its key's; both, and the wrong
+    sizes, are an `MlKemError` naming the check.
+  - Barrett reduction and a mask for the last subtraction, Compress by the
+    same division with no division instruction; every branch and index in
+    decapsulation and key generation was listed by hand and each is on a
+    size, a counter or public data.
+  - Measured (--release, best of five runs of 200): a key pair 41 us, an
+    encapsulation 48, a decapsulation 36, against OpenSSL 3.5.5's 25, 16
+    and 24; a good and a tampered ciphertext decapsulate in a median of
+    34,590 and 34,591 ns.
+
+  Held by `bench/std_mlkem_exercise.sh`: NIST's ACVP vectors for
+  ML-KEM-768 (a subset vendored in `bench/std_mlkem_fixture` with NIST's
+  notice, and all 80 of the files' ML-KEM-768 cases fetched when the
+  network answers); OpenSSL 3.5 over 25 seeds, both keys equal, each side
+  decapsulating the other's ciphertexts and a tampered one answered
+  alike; `cryptography` 48 and up over 200 seeds the same way, where it
+  is installed; and 17 broken copies - an NTT twiddle, a gamma, the
+  inverse NTT's scale, eta 3, FIPS 203's ipd key generation, A's index
+  order, A not transposed, compression and decompression that truncate,
+  Barrett without its subtraction, the implicit rejection returning the
+  real key or keyed without c, a comparison short of the last byte, the
+  modulus check skipped or taking q, the hash check skipped, s read
+  unreduced - each caught where it is named.
+- **std/p384: ECDSA signatures and ECDH on P-384, in constant time.**
+  P-384 was checked (std/ecdsa, variable-time and public values alone)
+  and never signed with or agreed on: a P-384 key could not be a server's.
+  - `P384PrivateKey` is std/p256's design at six limbs - Montgomery
+    arithmetic with masked final subtractions, complete projective
+    formulas, 96 windows of four bits with every table entry read - in a
+    module of its own, as a limb count chosen at run time would put each
+    number on the heap.
+  - `sign` is RFC 6979's, the nonce two HMAC blocks wide under SHA-256;
+    `sign_digest` signs a digest already taken; `shared_secret` refuses a
+    point off the curve, a coordinate of p or more, and an answer at
+    infinity; `from_pkcs8` and `from_sec1` read OpenSSL's keys.
+  - Measured `--release`: a key in 0.348 ms, ECDH in 0.341 ms, a
+    signature in 0.377 ms; OpenSSL 3.5.5 here 0.091, 0.212 and 0.124 ms.
+
+  Held by `bench/std_p384_exercise.sh`: RFC 6979's A.2.6 byte for byte,
+  NIST's 25 CDH, 10 KeyPair and 12 PKV vectors, 1,500 signatures and 300
+  digests equal to Python's deterministic ECDSA, 500 shared secrets both
+  ways, Wycheproof's 790 ECDH cases, and 22 broken copies - the infinity
+  check among them, shown holding (0, 0) off once the curve check is
+  taken out.
+- **std/tls agrees keys in secp384r1 and signs with P-384 keys, at both
+  ends.** A server that takes P-384 alone could not be reached, a client
+  that offers it alone was refused, and a P-384 certificate could not be
+  served.
+  - The client lists secp384r1 after X25519 and secp256r1 and still sends
+    an X25519 share alone, answering a HelloRetryRequest for either
+    curve; TLS 1.2's ServerKeyExchange may name it too.
+  - The server takes a share in X25519MLKEM768 whenever it is listed, else
+    in X25519, secp256r1 or secp384r1, in that order, and asks again for
+    the first of them a client lists when it sent none; a client with none
+    of them is refused (handshake_failure). A TLS 1.2 server agrees in
+    secp384r1 too, and holds an ECDSA key to its own curve.
+  - `TlsServerConfig.from_pem` and `TlsIdentity` take a P-384 key, PKCS #8
+    or SEC 1 (naming its curve or not), and sign CertificateVerify with
+    ecdsa_secp384r1_sha384, refusing a client that does not list it.
+  - `named_group` names the group a connection agreed in, at either end
+    and in either version - one getter, the name RFC 8446 gives the field;
+    the P-384 work's `key_exchange` was its first name for it.
+  - A handshake with a P-384 server took 1.24 ms (Python's ssl, median of
+    200), 1.94 with the key exchange in secp384r1 too; P-256's 0.70.
+
+  Held by `bench/std_tls_exercise.sh`: OpenSSL's `s_server -groups P-384`
+  and a P-384 certificate, TLS 1.2 in secp384r1, a P-384 client
+  certificate in both versions; against the server, `s_client -groups
+  P-384` and `-sigalgs ECDSA+SHA384`, Python's ssl in secp384r1, curl and
+  Node; eight new scripted scenarios, a P-521 group or certificate still
+  refused, and twelve new broken copies.
+- **std/socket: `IyiSocket#close_write`, a half-close.** The sending
+  half ends - the peer reads the end of the stream after what was
+  written - and the socket goes on reading what the peer still sends
+  until its end; `close` gives the socket back. `shutdown(SHUT_WR)` on
+  Linux (a system call) and darwin (libSystem's, a new name on darwin's
+  dependency floor), `shutdown(SD_SEND)` on Windows, which `close` already
+  called. Answers `SocketError?`: Linux refuses a connection both ends
+  have closed. `bench/socket_exercise.sh` holds a write, a half-close,
+  the peer's end and an answer read after it, and catches a copy that
+  ends nothing and one that ends both halves. The fuzz gate's scripted
+  peers end their half with it on every platform, where Windows closed
+  the socket and panicked on the read after.
+- **`bench/std_tls_exercise.sh` holds TLS 1.2's records to two rules at
+  both ends: nothing between a handshake message's pieces, and 2^14 bytes
+  of plaintext a record.** std/tls already kept both in 1.2 (the split
+  rule as SECURITY_REVIEW_TLS.md's finding 6 asked, though RFC 5246 lets
+  record types interleave); nothing asked them. The scripted client's
+  `12-split-by-data` sends half a renegotiating ClientHello then the
+  request (alert 10), and `12-oversize` a request of 2^14 + 1 bytes (alert
+  22). The scripted server makes its first whole TLS 1.2 handshakes, over
+  the scripted client's PRF and records, for `tls12-split-by-data` (half a
+  HelloRequest, the echo, the rest) and `tls12-oversize`, which the std/tls
+  client refuses by name. Four broken copies - the split rule waived for
+  1.2 alone, and `open12`'s limit dropped, at each end - are caught.
+- **`bench/std_tls_exercise.sh` asks the TLS 1.2 server in secp384r1 and
+  on a P-384 key.** The scripted client offers secp384r1 and
+  ecdsa_secp384r1_sha384 in 1.2 and agrees ECDH in secp384r1; its new
+  `12-p384` lists secp384r1 alone, held on the Ed25519, P-384 and RSA keys
+  and refused by the P-256 one (alert 40), as `12-p256` is now by the
+  P-384 key and `12-p256-no-curve` by both ECDSA keys; a P-384 key's
+  ServerKeyExchange must be under 0x0503. The gate's TLS 1.2 server round
+  adds the P-384 key - the scripted client, OpenSSL, Python's ssl, curl,
+  Node and the std/tls client - and asks OpenSSL for secp384r1 alone on
+  every key ("Temp Key: ECDH, secp384r1"), refused by the P-256 key as
+  secp256r1 alone and X25519 are by the P-384 one. Three broken copies:
+  secp384r1 dropped from `GROUPS12` (`12-p384`), and the check of the
+  client's groups against the key's curve removed, caught now by `12-p384`
+  on the P-256 key and `12-p256` on the P-384 key as well as by
+  `12-p256-no-curve`.
+
+### Changed
+
+- **Faster pure-iyi cryptography, constant time kept.** Measured with
+  `--release` on one x86_64 QEMU machine (AES-NI, no carry-less multiply)
+  that other jobs shared, the best of five, set beside Python's
+  `cryptography` (OpenSSL) on the same machine:
+
+  | | before | after | OpenSSL |
+  |---|---|---|---|
+  | AES-128-GCM, sealing 16 MiB | 233 MB/s | 274 MB/s | 926 MB/s |
+  | AES-256-GCM | 190 MB/s | 224 MB/s | 916 MB/s |
+  | ChaCha20-Poly1305 | 859 MB/s | 849 MB/s (unchanged) | 1516 MB/s |
+  | X25519 public key | 20 us | 8 us | - |
+  | X25519 shared secret | 21 us | 20 us | 19 us |
+  | Ed25519 sign / verify | 67 / 41 us | 20 / 40 us | 17 / 47 us |
+  | P-256 sign / ECDH | 102 / 89 us | 31 / 69 us | 14 / 28 us |
+  | P-256 verify | 1,477 us | 166 us | 38 us |
+  | RSA-2048 PSS sign (best of 8) | 1,077 us | 1,013 us | 418 us |
+  | SHA-256 / SHA-384, 16 MiB | 435 / 637 MB/s | 549 / 790 MB/s | 787 / 1167 MB/s |
+
+  std/aead fixslices AES encryption (ShiftRows folded into MixColumns'
+  rotations and the round keys, Adomnicai and Peyrin) and hashes GHASH
+  four blocks a step with H to H^4, reducing once a step; still bitsliced
+  and ctmul, nothing indexed by a secret. std/curve25519 and std/p256
+  multiply the base point from a fixed-base table read by masks (ref10's
+  signed 4-bit digits), X25519's public key comes from Ed25519's base
+  point, scalars mod L are reduced a byte at a time, P-256's field inverse
+  is an addition chain and its reduction is written for p. std/ecdsa
+  checks signatures on the field's own words in Montgomery form rather
+  than on BigInt, adding G and Q as affine points and inverting s mod n
+  on the same words. std/big's Montgomery product reduces in the same pass
+  as it multiplies, and its secret-exponent window is at most 5 bits (every
+  entry still read, masked); blinding is unchanged. std/digest runs SHA-2 eight rounds a pass with the
+  names turned. Tried and dropped, slower here: Poly1305 in 44-bit limbs,
+  and ChaCha20 four blocks at a time.
+- **`Server.serve` serves at most 1,024 connections at once and wants a
+  whole request within five minutes.** It accepted every connection, and
+  past the head's `timeout_ms` a body was bounded per read alone, so one
+  sent a byte every few seconds held its connection and fiber for as long
+  as it dripped (finding 12 of the std/tls review). `max_connections`
+  (default 1,024, 0 for none) stops the accept loop while every place is
+  held: the next connection is queued in the kernel's listen queue, not
+  refused, as Go's `netutil.LimitListener` does, and served when one
+  closes. `request_timeout_ms` (default 300,000, 0 for none) holds head
+  and body together, counted from when the wait for the request began, as
+  Go's `ReadTimeout` beside `ReadHeaderTimeout`; the head is held to the
+  sooner of it and `timeout_ms`, a block reading its own body reads under
+  it, and over HTTP/2 the wait for each request and its body is held the
+  same way. A connection past it is closed unanswered. In
+  `bench/std_http_exercise.sh`, Python's ssl drives a server with
+  `max_connections: 2, timeout_ms: 3000, request_timeout_ms: 5000`: a
+  third connection's handshake waits until one of two held connections
+  closes and is then served; a head dripped a byte per half second is cut
+  at 3.0 s, and a body dripped so over HTTP/1.1 and in one-byte DATA
+  frames over HTTP/2 at 5.0 s, where before both ran on. The body's
+  deadline left out at either protocol, the cap ignored, a place never
+  given back, and the head held to the whole request's deadline are each
+  caught at the case that names it. `wrk -t2 -c50 -d3s` against release
+  builds of `bench/std_http_server.iyi`, five rounds alternating on this
+  machine: 82,028 to 94,691 requests/s (mean 88,530) before, 86,144 to
+  93,154 (mean 88,219) after.
+- **std/tls offers and takes X25519MLKEM768, the post-quantum hybrid
+  OpenSSL 3.5, Chrome and Firefox send first (draft-ietf-tls-ecdhe-mlkem,
+  group 0x11EC).** A recorded handshake could be decrypted by whoever one
+  day breaks X25519; now it also takes breaking ML-KEM-768.
+  - The client's share is its ML-KEM-768 encapsulation key then its
+    X25519 key (1,216 bytes), sent by default beside an X25519 share with
+    the same key; the server answers the ciphertext then its X25519 key
+    (1,120 bytes); the secret is ML-KEM's then X25519's, the order the
+    draft gives this group. The ClientHello grows by 1,222 bytes, 186 to
+    1,408. `TlsConfig#post_quantum = false` offers X25519 and secp256r1
+    alone.
+  - The server takes X25519MLKEM768 whenever the client lists it, by
+    HelloRetryRequest when its share was not sent, as OpenSSL 3.5's server
+    does; a client asked for secp256r1 sends that share alone.
+  - A share of the wrong size is refused by name at either end
+    ("an X25519MLKEM768 share of 1119 bytes, not 1120", illegal_parameter),
+    as are an encapsulation key failing the modulus check, an X25519 half
+    of small order, and a HelloRetryRequest for the hybrid whose share was
+    sent. `TlsConnection#named_group` says which group was agreed.
+  - A handshake with the server, Python's ssl on OpenSSL 3.5.5 over
+    loopback, the median of 100: 0.76 ms with an Ed25519 key in the hybrid
+    against 0.61 in X25519; 6.57 against 6.40 with RSA-4096.
+
+  Held by `bench/std_tls_exercise.sh`: OpenSSL 3.5's `s_server` offering
+  the hybrid alone, by default and behind a stateless cookie, and refusing
+  a client told not to offer it; its `s_client` alone ("Negotiated TLS1.3
+  group: X25519MLKEM768"), with both shares, and with an X25519 share
+  asked again for the hybrid; Python's ssl by default; the std/tls client
+  and server together; the scripted server's seven hybrid scenarios and
+  the scripted client's six (the two that finish a handshake where
+  `cryptography` has ML-KEM); and 12 broken copies. Where OpenSSL is
+  older than 3.5, as in the Linux container, the gate says so and skips
+  it.
+- **`bench/std_tls_exercise.sh` builds and runs its broken copies four
+  at a time (`MUT_JOBS`, as std_http's gate does).** Each copy has a
+  directory of its own - source, binary, compiler cache, servers, logs -
+  and the helpers it runs (`client_alert` to `client_hybrid`,
+  `tls12_round`, `server12_round`) write there rather than into the gate's
+  own; the answers are printed in order once all have ended. The scripted
+  TLS server (`bench/std_tls_server.py`) serves each connection in a
+  thread of its own, so copies against it no longer wait on each other's
+  slow scenarios. On Linux x86-64 with 12 threads the gate took 511
+  seconds, from 1537, with all 236 copies caught.
+
 ### Fixed
 
 - **std/bzip2's Huffman tables stay inside their memory whatever the
@@ -12,6 +454,159 @@
   check is no longer what keeps memory safe. Found by the gate's copy of
   the module with the check taken out, which on Windows died of a
   memory fault instead of failing at the check that names it.
+- **A fiber stack back from the pool keeps its frames on Windows.** A
+  stack a finished task handed back was settled for the next task with
+  the StackLimit a fresh one has, above the pages the first task had
+  grown into. MSVC's `__chkstk` opens a frame past a page by writing a
+  zero to each page from that limit down, so a frame of that size cleared
+  the first byte of every page between the stale limit and itself, in the
+  live frames of the task running there: `bench/std_fuzz_exercise.iyi`
+  died of a memory fault, or of an illegal instruction, at tls-client
+  seed 8 on every Windows run, where a debugger saw `__chkstk` turn a
+  return address's last byte from 0x66 to 0x00 (CI job 118465323370). A
+  stack now carries the limit its last task died with, and
+  `bench/windows_exercise.iyi` holds a reused stack's frames to every
+  byte, with a copy of the runtime that settles the old way refused.
+- **std/tls's server refuses early data or a close_notify that comes
+  between the pieces of a split EndOfEarlyData (RFC 8446 section 5.1).**
+  The reader of the client's early records took them, where the reader
+  after the handshake already refused the same inside any split message
+  (SECURITY_REVIEW_TLS.md's rule); now both end the connection with
+  unexpected_message. Held by `bench/std_tls_exercise.sh`: the scripted
+  client's `early-split-eoed` and `early-split-close` (alert 10) and
+  `early-padded-over`, an early record of 2^14 + 2 bytes of inner
+  plaintext (alert 22), with three broken copies of the server caught by
+  them.
+- **`iyi lsp` notices a dead worker whose pipes another process still
+  holds, and the request after it is answered.** The proxy learned of a
+  worker's death only from its stdout closing, and a process the worker
+  started keeps that pipe open: on Windows every child inherits the
+  worker's stdin and stdout, so a worker killed during a macro's `ping`
+  left the proxy with no worker and the next request written into the
+  dead one's stdin, read by nobody. Windows CI waited 180 s on that
+  request (step 73c's outline, run 38866280923) with the proxy alive and
+  childless, and the runner killed the `ping` at the end of the job. The
+  proxy now asks the process: a frame for a worker that has exited goes
+  to its successor, and a worker that has exited owing an answer is
+  buried after two quiet seconds, its requests refused -32603 as a dead
+  worker's are. Steps 73j and 73k of `bench/lsp_session.py` hold a
+  worker's two pipes in a macro's `system` that writes a file the gate
+  waits for and then lasts a minute - `cmd` and a `ping` on Windows, a
+  shell that opens them through `/proc` on Linux, unmeasured on darwin -
+  and kill the worker alone once the file says it is inside that
+  compile: the outline asked after a buffer's held compile is answered
+  at once, where the old server left it unanswered for the step's 10 s,
+  and a pull whose own compile is the hold is refused in 1.8 s. The
+  0.18.0 notes called this and a darwin hang a `shutdown` left
+  unanswered; neither was one. The darwin hang (runs 37204417494 and
+  38889613653) is step 74a's hover, still unexplained, and the session
+  gate's watchdog now names a request sent without waiting, which it
+  reported as the `didChange` before it.
+- **std/x509: an excluded name constraint holds out a name written with a
+  final dot.** The host matcher drops a dNSName's final dot and the
+  constraint check did not, so a leaf naming `www.evil.example.` under an
+  intermediate excluding `evil.example` held for the host
+  `www.evil.example`; a constraint written with a final dot excluded
+  nothing. A name is now judged as the matcher reads it, and a name under
+  a DNS constraint, or the constraint, with an empty label refuses the
+  chain, as Python's verifier refuses each of these chains.
+- **std/x509: an excluded name constraint holds out a wildcard standing
+  for an excluded name.** `*.example.com` under an intermediate excluding
+  `bad.example.com` held for `bad.example.com` - the gap Go closed as
+  CVE-2025-61727. Refused for any host now, as Python refuses it.
+- **std/x509: an RSA key under 2048 bits refuses the chain it is in**, at
+  the leaf, an intermediate or the root, where 1024 bits was taken.
+  `openssl verify -auth_level 2` refuses the same 1024- and 1536-bit keys
+  at every depth, and the gate holds seven fresh chains to it; OpenSSL
+  takes 1990 bits and up, measured, so this floor is the stricter between
+  1990 and 2047.
+- **std/x509: a TBSCertificate's unique identifiers and extensions come
+  once each, in order.** A second extensions block was read on top of the
+  first, so a certificate with basicConstraints cA in its second block
+  alone was a CA here and a leaf to every reader that stops at the first;
+  Python's cryptography and `openssl x509` refuse to read one.
+- **std/tls: a TLS 1.3 record's inner plaintext, padding in it, is at
+  most 2^14 + 1 bytes** (RFC 8446 section 5.4), where the content alone
+  was checked and a record could be padded 239 bytes past the limit;
+  `record_overflow` now.
+- **std/tls: no record of another type between the pieces of a handshake
+  message** (section 5.1). After the handshake, application data or a
+  close_notify was taken while half a KeyUpdate or NewSessionTicket was
+  held, at both ends; `unexpected_message` now.
+- **std/asn1: a UniversalString whose character has its top bit set is
+  refused, not a panic.** `DerValue#string` read each four-byte code
+  into an Int32, where a first byte of 0x80 or more made it negative:
+  under the U+10FFFF bound, it reached `chr`, which panicked ("-1 is
+  out of char range" for `1c04ffffffff`). The code is read in Int64 and
+  answered as an `Asn1Error` naming it. Found by the new fuzz gate
+  (`bench/std_fuzz_exercise.sh`, 22 of the first 60,000 DER inputs);
+  held by a check in `bench/std_asn1_exercise.iyi` and a broken copy of
+  the module its gate catches.
+- **std/http: a request's multipart boundary past 70 characters is no
+  boundary, not a panic.** `Request#multipart` handed the boundary a
+  client's `Content-Type` named to `Multipart.new`, which panics on one
+  outside RFC 2046's 1 to 70 characters: a server whose block read
+  `req.multipart` panicked on a 90-character one. `Multipart.boundary`
+  answers nil for it, so `multipart` answers nil as for no boundary.
+  Found by the fuzz gate (1 of the first 60,000 HTTP/1.1 inputs); held
+  by a check in `bench/std_http_exercise.iyi`.
+- **`Random::Secure` reads `/dev/urandom` only when it is a character
+  device.** On Linux the fallback for a kernel or sandbox where `getrandom`
+  answers ENOSYS opened the path and read whatever was there, so in a
+  chroot or container whose `/dev` someone else wrote, a regular file
+  could have been every key's source (finding 7 of the std/tls review).
+  The descriptor is now `fstat`ed and anything but S_IFCHR is a panic
+  naming the path. `bench/std_random_exercise.sh` reaches the fallback
+  for real: a seccomp filter installed by Python makes `getrandom` answer
+  ENOSYS before the probe is executed, the device is read (two different
+  draws of 32 bytes), and a copy of the module differing in its one
+  `URANDOM` line, naming a regular file of `A`s, panics with "is not a
+  character device" where the module before this read `4141...` and
+  handed it out; the check left out and `st_mode` read at the other
+  architecture's offset are each caught. The program has no argument or
+  variable that names another source. Skipped, with a sentence, off Linux
+  or where seccomp is refused.
+- **`TlsClient` sends server_name as A-labels without a final dot.** A
+  host given in Unicode went out as its UTF-8 bytes and one with a final
+  dot kept it, where RFC 6066 section 3 has ASCII and no trailing dot;
+  OpenSSL's `s_server -servername xn--bcher-kva.example
+  -servername_fatal` refused `bücher.example.` with alert
+  unrecognized_name (112), having read `"b\xc3\xbccher.example."`
+  (finding 14 of the std/tls review). `TlsClient.server_name_for(host)`
+  drops one final dot and writes a non-ASCII name through `IDNA.to_ascii`;
+  that form is sent and the certificate is checked for it, and a name IDNA
+  refuses is a `TlsError` before anything is sent. An ASCII name goes as
+  written. `bench/std_tls_exercise.sh` has s_server, under `-servername`
+  and `-servername_fatal`, read `"xn--bcher-kva.example"` for
+  `bücher.example.` and `"localhost"` for `localhost.` and send the
+  certificate it keeps for that name alone, which the client checks; the
+  name sent as given, Unicode left as it is and the final dot kept are
+  each caught there.
+- **A kept `https://` connection is handed out only under the TLS
+  configuration it was made with.** `HTTPClient` kept connections by
+  scheme, host and port, so after `HTTP.tls_config=` named roots that do
+  not reach a server's certificate, the next request to that server still
+  went over the connection checked against the old ones and was answered
+  (finding 11 of the std/tls review). A connection now records the
+  configuration and the roots, identity, `now` and `min_version` it was
+  made under, and one made under anything else is closed rather than
+  reused. Against Python's TLS server in `bench/std_http_exercise.sh`, a
+  request after `HTTP.tls_config=` names an unrelated root makes a new
+  connection and is refused ("no certificate here issued CN=http gate
+  root"), where the module before answered it on the kept one; a new
+  configuration over the same roots makes one new connection and reuses
+  it (3 made, 2 reused, against 1 made, 4 reused before). A copy without
+  the check is caught there.
+- **std/x509: an empty RelativeDistinguishedName, and a name constraint's
+  IP mask that is not a CIDR prefix, are refused.** A name's RDN is a
+  SET SIZE (1..MAX) (RFC 5280 appendix A.1), and an empty one was read as
+  no attribute; a nameConstraints iPAddress is written as CIDR (section
+  4.2.1.10), and a mask with a hole in it, 255.0.255.0, was taken and
+  matched bit by bit, a range no CIDR reader sees - Go and Python's
+  cryptography refuse both. Found where the fuzz gate's mutated
+  certificates were read by iyi and refused by cryptography; held by
+  checks in `bench/std_x509_exercise.iyi`, broken copies its gate
+  catches, and regression inputs in the fuzz gate.
 
 ## 0.18.0 — 2026-10-18
 
@@ -22580,7 +23175,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 21,567-line library and nothing else. Every other
+  written against iyi's own 22,456-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

@@ -31,10 +31,13 @@
 # client's, `X509Purpose::Client`), and the leaf's names must fall inside
 # its nameConstraints; it must have signed the certificate below it. Name
 # constraints are checked for DNS names and IP addresses; a constraint of
-# any other kind refuses the chain rather than being passed over. The
-# leaf must be valid at that time, not a CA (a CA's certificate is not a
-# server's, as the Web PKI's verifiers hold, nor a client's), allowed the
-# purpose if it carries extKeyUsage, and, when a host is given, name it.
+# any other kind refuses the chain rather than being passed over. A DNS
+# name is judged by a constraint as a host is matched to it, without its
+# final dot, and a constraint or a name under one with an empty label
+# refuses the chain. The leaf must be valid at that time, not a CA (a
+# CA's certificate is not a server's, as the Web PKI's verifiers hold, nor
+# a client's), allowed the purpose if it carries extKeyUsage, and, when a
+# host is given, name it.
 #
 # A host is matched against subjectAltName only, never the subject's
 # common name, as browsers and RFC 6125 have it: a DNS name exactly,
@@ -45,7 +48,9 @@
 # Signatures: RSA PKCS #1 v1.5 and PSS, and ECDSA, under SHA-256, SHA-384
 # and SHA-512, and Ed25519 (RFC 8410: the key's and the signature's
 # AlgorithmIdentifier carry no parameters at all). A certificate signed
-# under SHA-1 is refused, as every browser refuses one. A root's own
+# under SHA-1 is refused, as every browser refuses one, and so is a chain
+# with an RSA key under 2048 bits anywhere in it, root included (see
+# `X509::MIN_RSA_BITS` for how OpenSSL's level 2 compares). A root's own
 # signature is not checked: a root is trusted for being in the store, not
 # for what it says about itself.
 #
@@ -187,15 +192,24 @@ pub struct Certificate
     key = X509Keys.read(tbs[at + 5])!
     extensions = X509Extensions.new
     rest = at + 6
+    # RFC 5280 section 4.1: issuerUniqueID [1], subjectUniqueID [2] and
+    # extensions [3], each at most once and in that order. A second
+    # extensions block was read on top of the first, so a certificate
+    # whose second block said cA where its first did not was a CA here and
+    # not to a reader that stopped at the first; Python's cryptography and
+    # OpenSSL refuse to read one at all.
+    last = 0
     while rest < tbs.size
       field = tbs[rest]
-      if field.context?(1) || field.context?(2)
+      tag = field.context?(1) ? 1 : (field.context?(2) ? 2 : (field.context?(3) ? 3 : 0))
+      return X509Error.new("#{field.describe} where the TBSCertificate ends") if tag == 0
+      return X509Error.new("#{field.describe} after [#{last}], where RFC 5280 has each of [1], [2] and [3] once and in order") unless tag > last
+      last = tag
+      if tag < 3
         return X509Error.new("a unique identifier in a version 1 certificate") if version < 2
-      elsif field.context?(3)
+      else
         return X509Error.new("extensions in a version #{version} certificate") unless version == 3
         extensions.read(X509Asn1.value(field.explicit(3))!)!
-      else
-        return X509Error.new("#{field.describe} where the TBSCertificate ends")
       end
       rest = rest + 1
     end
@@ -297,6 +311,15 @@ pub struct X509
   # Certificate message holds far more than seven. The other library's
   # path builder in Go stops at the same 100.
   MAX_SIGNATURE_CHECKS = 100
+  # An RSA key under this many bits is refused anywhere in a chain, leaf
+  # to root: the floor std/rsa signs at and the CA/Browser Forum's for a
+  # certificate's key. OpenSSL at its security level 2 (`openssl verify
+  # -auth_level 2`, where Debian's and Ubuntu's builds start) refuses a
+  # 1024- or 1536-bit key at any depth as this does; it judges by NIST SP
+  # 800-56B's strength estimate, which took 1990 bits and up when measured
+  # (OpenSSL 3.5.5), so the two part only between 1990 and 2047 bits.
+  # std/rsa itself reads keys down to 1024 bits.
+  MIN_RSA_BITS = 2048
 
   # The DER of every block labelled *label* in a PEM text - `"CERTIFICATE"`
   # or `"PRIVATE KEY"` - each checked to be base64 before it is decoded.
@@ -327,6 +350,8 @@ pub struct X509
 
   private def self.leaf_error(leaf : Certificate, host : String?, now : Time, purpose : X509Purpose) : String?
     return "#{leaf.subject_name} is not valid at #{now}: from #{leaf.not_before} to #{leaf.not_after}" unless leaf.valid_at?(now)
+    weak = weak_key(leaf)
+    return weak if weak
     return "#{leaf.subject_name} carries critical extension #{leaf.unhandled_critical[0]}, which this does not understand" unless leaf.unhandled_critical.empty?
     return "#{leaf.subject_name} is not allowed #{purpose.usage}" unless allowed?(leaf, purpose)
     return "#{leaf.subject_name} is a CA certificate, not a #{purpose.holder}'s" if leaf.ca
@@ -340,6 +365,13 @@ pub struct X509
     usages = certificate.extended_key_usage
     return true unless usages
     usages.includes?(purpose.oid) || usages.includes?(X509Oids::ANY_EXTENDED_KEY_USAGE)
+  end
+
+  # Why *certificate*'s key is too weak to be in a chain, or nil.
+  private def self.weak_key(certificate : Certificate) : String?
+    key = certificate.public_key
+    return nil unless key.is_a?(RsaPublicKey) && key.bits < MIN_RSA_BITS
+    "#{certificate.subject_name}'s RSA key is #{key.bits} bits, under the #{MIN_RSA_BITS} a chain is held to"
   end
 
   # The chain grown from *chain* to a root, trying every issuer that
@@ -383,6 +415,8 @@ pub struct X509
   private def self.issuer_error(child : Certificate, issuer : Certificate, chain : Array(Certificate), now : Time, purpose : X509Purpose) : String?
     name = issuer.subject_name
     return "#{name} is not valid at #{now}: from #{issuer.not_before} to #{issuer.not_after}" unless issuer.valid_at?(now)
+    weak = weak_key(issuer)
+    return weak if weak
     return "#{name} carries critical extension #{issuer.unhandled_critical[0]}, which this does not understand" unless issuer.unhandled_critical.empty?
     return "#{name} is not a CA" unless issuer.basic_constraints && issuer.ca
     usage = issuer.key_usage
@@ -402,12 +436,32 @@ pub struct X509
   private def self.constraint_error(leaf : Certificate, issuer : Certificate) : String?
     name = issuer.subject_name
     return "#{name} constrains names of a kind this does not check" if issuer.other_constraints
-    leaf.dns_names.each do |dns|
-      unless issuer.permitted_dns.empty? || issuer.permitted_dns.any? { |c| X509Names.within?(dns, c) }
-        return "#{dns} is outside the names #{name} permits"
+    unless issuer.permitted_dns.empty? && issuer.excluded_dns.empty?
+      # A constraint with an empty label ("evil.example.") names no
+      # subtree; read as a suffix it holds nothing, and an excluded one
+      # held nothing out. Refused, as Python's verifier refuses it.
+      (issuer.permitted_dns + issuer.excluded_dns).each do |c|
+        return "#{name} constrains names by #{c.inspect}, which is no name" unless c.empty? || X509Names.labels?(c, leading_dot: true)
       end
-      if issuer.excluded_dns.any? { |c| X509Names.within?(dns, c) }
-        return "#{dns} is among the names #{name} excludes"
+    end
+    leaf.dns_names.each do |written|
+      next if issuer.permitted_dns.empty? && issuer.excluded_dns.empty?
+      # Judged as `matches_host?` reads it, without its final dot: the
+      # name "evil.example." is the host evil.example to the matcher, and
+      # was outside a constraint excluding evil.example while the two
+      # read it differently.
+      dns = X509Names.unrooted(written)
+      return "#{written} is no host name for #{name}'s constraints to judge" unless X509Names.labels?(dns)
+      unless issuer.permitted_dns.empty? || issuer.permitted_dns.any? { |c| X509Names.within?(dns, c) }
+        return "#{written} is outside the names #{name} permits"
+      end
+      # A wildcard names every host one label over its rest, so one of
+      # those excluded holds the whole name out, whatever host it is
+      # matched to - as Python's verifier does, and Go's since it fixed
+      # the same gap (CVE-2025-61727). "*.example.com" under an exclusion
+      # of bad.example.com held for bad.example.com before.
+      if issuer.excluded_dns.any? { |c| X509Names.within?(dns, c) || X509Names.dns_matches?(dns, c) }
+        return "#{written} is among the names #{name} excludes"
       end
     end
     leaf.ip_addresses.each do |ip|
@@ -590,6 +644,13 @@ class X509Extensions
         elsif base.context?(7) && !base.constructed?
           range = base.content
           return X509Error.new("an iPAddress constraint of #{range.size} bytes") unless range.size == 8 || range.size == 32
+          # RFC 5280 section 4.2.1.10 writes the range as CIDR (RFC 4632):
+          # its mask is ones, then zeros. One with a hole in it was taken
+          # and matched bit by bit, a range no CIDR reader sees; Go
+          # refuses it, as Python's cryptography does.
+          unless X509Names.prefix_mask?(range[range.size // 2, range.size // 2])
+            return X509Error.new("an iPAddress constraint whose mask is not a CIDR prefix")
+          end
           permitted ? @permitted_ips << range : @excluded_ips << range
         else
           @other_constraints = true
@@ -695,7 +756,11 @@ struct X509Names
   def self.describe(name : DerValue) : String | X509Error
     parts = [] of String
     X509Asn1.values(name.sequence)!.each do |rdn|
-      X509Asn1.values(rdn.set)!.each do |attribute|
+      attributes = X509Asn1.values(rdn.set)!
+      # RelativeDistinguishedName ::= SET SIZE (1..MAX) (RFC 5280
+      # appendix A.1): an empty one was read as no attribute at all.
+      return X509Error.new("an empty RelativeDistinguishedName") if attributes.empty?
+      attributes.each do |attribute|
         fields = X509Asn1.values(attribute.sequence)!
         return X509Error.new("an AttributeTypeAndValue of #{fields.size} values") unless fields.size == 2
         oid = X509Asn1.text(fields[0].oid)!
@@ -719,6 +784,19 @@ struct X509Names
     end
   end
 
+  # Whether *mask* is ones, then zeros, as a CIDR prefix is.
+  def self.prefix_mask?(mask : Array(UInt8)) : Bool
+    zeros = false
+    mask.each do |b|
+      8.times do |k|
+        one = (b >> (7 - k)) & 1_u8 == 1_u8
+        return false if one && zeros
+        zeros = true unless one
+      end
+    end
+    true
+  end
+
   # The bytes as text where every one is ASCII, else a text that matches
   # no host: a dNSName is IA5String.
   def self.ascii(bytes : Array(UInt8)) : String
@@ -728,7 +806,7 @@ struct X509Names
 
   # *host*, lowercase and in ASCII, against one dNSName.
   def self.dns_matches?(pattern : String, host : String) : Bool
-    pattern = pattern[0, pattern.size - 1] if pattern.ends_with?(".")
+    pattern = unrooted(pattern)
     if pattern.starts_with?("*.")
       rest = pattern[2, pattern.size - 2]
       return false if rest.includes?("*") || !rest.includes?(".")
@@ -738,6 +816,19 @@ struct X509Names
     end
     return false if pattern.includes?("*")
     pattern == host
+  end
+
+  # A dNSName as `dns_matches?` reads it: its one final dot dropped.
+  def self.unrooted(name : String) : String
+    name.ends_with?(".") ? name[0, name.size - 1] : name
+  end
+
+  # Whether *name* is labels joined by dots, none of them empty - after a
+  # leading dot, where *leading_dot* allows one (a constraint's way of
+  # naming what is under a domain and not the domain).
+  def self.labels?(name : String, leading_dot : Bool = false) : Bool
+    name = name[1, name.size - 1] if leading_dot && name.starts_with?(".")
+    !name.empty? && !name.starts_with?(".") && !name.ends_with?(".") && !name.includes?("..")
   end
 
   # Whether a DNS name falls under a dNSName constraint: the name itself

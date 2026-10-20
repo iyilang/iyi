@@ -5,8 +5,9 @@ bench/std_tls_exercise.sh.
 
 Writes WORKDIR/roots.pem (the root its certificates chain to),
 WORKDIR/client.pem and client.key (an Ed25519 certificate and key for the
-client to present when asked) and WORKDIR/port, then answers connections
-one after another until killed.
+client to present when asked), WORKDIR/mlkem when its cryptography has
+ML-KEM-768 and WORKDIR/port, then answers connections, each in a thread of
+its own, until killed.
 The scenario is the first label of the name the client sends by SNI:
 `ok.tls.test` is a correct handshake followed by an echo, `bad-finished`
 sends a Finished that does not match, and so on - SCENARIOS below lists
@@ -16,14 +17,17 @@ client whose Finished is wrong is answered with an alert and no echo.
 
 Written for this one purpose over Python's cryptography: the key schedule,
 the record layer and the messages of RFC 8446, no more than the scenarios
-use. Not a TLS server for anything else.
+use, and for two scenarios a whole TLS 1.2 handshake over the scripted
+client's PRF and records. Not a TLS server for anything else.
 """
 import datetime as dt
+import hashlib
 import os
 import socket
 import struct
 import time
 import sys
+import threading
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, hmac, serialization
@@ -66,9 +70,13 @@ SCENARIOS = {
     "tls12-version11": "a ServerHello choosing TLS 1.1",
     "tls12-versions": "a ServerHello whose supported_versions names TLS 1.2",
     "tls12-key-share": "a TLS 1.2 ServerHello carrying a key_share",
+    "tls12-split-by-data": "a whole TLS 1.2 handshake, then half a HelloRequest, the echo and the rest",
+    "tls12-oversize": "a whole TLS 1.2 handshake, then the echo in a record of 2^14 + 1 bytes of plaintext",
     "no-echo": "a ServerHello that does not echo the session id",
-    "hrr-group": "a HelloRetryRequest for secp384r1, which the client does not offer",
+    "hrr-group": "a HelloRetryRequest for secp521r1, which the client does not offer",
     "hrr-p256": "a HelloRetryRequest for secp256r1, then the handshake in it",
+    "hrr-p384": "a HelloRetryRequest for secp384r1, then the handshake in it",
+    "hrr-p384-bad": "a HelloRetryRequest for secp384r1, then a ServerHello whose share is off the curve",
     "sh-wrong-group": "a ServerHello's share in secp256r1, the client's having been X25519's",
     "unsolicited-ext": "an extension in EncryptedExtensions nobody offered",
     "alpn-unoffered": "ALPN answered with a protocol not offered",
@@ -96,8 +104,55 @@ SCENARIOS = {
     "cert-entry-ext": "a certificate entry with a status_request extension nobody asked for",
     "sni-ack-data": "a server_name acknowledgement that is not empty",
     "user-canceled": "a user_canceled warning before the echo",
+    "padded-max": "the echo padded to 2^14 + 1 bytes of inner plaintext, the most section 5.4 allows",
+    "padded-over": "the echo padded to 2^14 + 2 bytes of inner plaintext, one past section 5.4's limit",
+    "split-by-data": "half a NewSessionTicket, then the echo inside it, then the rest",
+    "split-by-close": "half a NewSessionTicket, then close_notify",
+    # Resumption: the first connection to each is an ok handshake that ends
+    # with a real NewSessionTicket; the second, offering it, is checked -
+    # its binder over the ClientHello, its obfuscated age against the time
+    # since the ticket went, psk_dhe_ke its one mode - and then answered.
+    "resume": "the ticket taken: pre_shared_key in the ServerHello, then EncryptedExtensions and Finished",
+    "resume-declined": "the ticket passed over: a full handshake",
+    "resume-identity": "a ServerHello taking identity 1, of the one offered",
+    "resume-hash": "a SHA-256 ticket taken under TLS_AES_256_GCM_SHA384",
+    "resume-no-share": "the ticket taken with no key_share, which psk_dhe_ke requires",
+    "resume-cert": "the ticket taken, then a Certificate",
+    "ticket-many": "twenty NewSessionTickets before the echo",
+    "ticket-huge": "a NewSessionTicket whose ticket is 16,385 bytes, over two records",
+    "ticket-bad": "a NewSessionTicket cut short",
+    # Early data: the first connection's ticket allows 1024 bytes (4 for
+    # early-small, none for early-unoffered); the second's early data is
+    # taken (early: read to EndOfEarlyData under the early keys, echoed as
+    # "early:..."), refused and passed over (early-refused, and early-alpn,
+    # which chooses h2 where the ticket's protocol was http/1.1), must not
+    # come (early-small), or is "taken" though none came (early-unoffered).
+    "early": "early data taken",
+    "early-refused": "early data refused and passed over",
+    "early-small": "a ticket allowing 4 bytes, for 5 of early data",
+    "early-alpn": "early data under an http/1.1 ticket, h2 chosen and the early data refused",
+    "early-unoffered": "early_data in EncryptedExtensions with no early data sent",
+    "hybrid-offer": "the ClientHello's X25519MLKEM768 share checked, then X25519's, one X25519 key in both; answered in X25519",
+    "hybrid": "a handshake in X25519MLKEM768, ML-KEM's secret before X25519's (when this cryptography has ML-KEM)",
+    "hybrid-short-ct": "an X25519MLKEM768 share of 1119 bytes",
+    "hybrid-long-ct": "an X25519MLKEM768 share of 1121 bytes",
+    "hybrid-bad-ct": "an X25519MLKEM768 ciphertext of random bytes: the client's secret is its implicit rejection's",
+    "hybrid-zero-x25519": "an X25519MLKEM768 share whose X25519 key is of small order",
+    "hrr-hybrid": "a HelloRetryRequest for X25519MLKEM768, whose share was sent",
 }
 
+# X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem): cryptography has ML-KEM
+# from 48 on, over an OpenSSL that has it. Without it the scenario that
+# completes a hybrid handshake is not served (main writes WORKDIR/mlkem
+# when it is), and the refusals, which need no ML-KEM, still are.
+try:
+    from cryptography.hazmat.primitives.asymmetric import mlkem
+    mlkem.MLKEM768PrivateKey.generate()
+except Exception:
+    mlkem = None
+
+# The tickets issued, by their bytes: (PSK, suite, age_add, when).
+TICKETS = {}
 NOW = dt.datetime.now(dt.timezone.utc)
 DAY = dt.timedelta(days=1)
 
@@ -190,8 +245,8 @@ class Cipher:
             n[11 - i] ^= (self.seq >> (8 * i)) & 0xFF
         return bytes(n)
 
-    def seal(self, type_, content, corrupt=False):
-        inner = content + bytes([type_])
+    def seal(self, type_, content, corrupt=False, pad=0):
+        inner = content + bytes([type_]) + bytes(pad)
         header = bytes([23, 3, 3]) + struct.pack(">H", len(inner) + 16)
         sealed = bytearray(self.aead.encrypt(self.nonce(), inner, header))
         if corrupt:
@@ -212,6 +267,17 @@ def message(type_, body):
 
 def ext(type_, data):
     return struct.pack(">HH", type_, len(data)) + data
+
+
+def key_shares(exts):
+    """The ClientHello's key_share entries, in order: [(group, key)]."""
+    ks = exts.get(51, b"")
+    out, j = [], 2
+    while j < len(ks):
+        g, n = struct.unpack(">HH", ks[j:j + 4])
+        out.append((g, ks[j + 4:j + 4 + n]))
+        j += 4 + n
+    return out
 
 
 def plain(type_, content):
@@ -271,6 +337,63 @@ class Conn:
                 alpn.append(a[1:1 + a[0]].decode()); a = a[1 + a[0]:]
         return ch, sid, suites, sni, share, alpn, exts
 
+    def serve12(self, s, ch):
+        """A whole TLS 1.2 handshake, as a server of 1.2 alone - so no
+        downgrade sentinel: ECDHE in X25519, the P-256 leaf signing under
+        ecdsa_secp256r1_sha256, AES-128-GCM, the extended master secret -
+        the client's request read, and then the scenario's one rule broken:
+        tls12-split-by-data sends half a HelloRequest, the echo, then the
+        rest; tls12-oversize the echo in a record of 2^14 + 1 bytes of
+        plaintext, one past RFC 5246 section 6.2.1's limit."""
+        # TLS 1.2's PRF and records are the scripted client's; bench/ is
+        # left as it was found.
+        sys.dont_write_bytecode = True
+        from std_tls_client import Cipher12, prf
+        client_random = ch[6:38]
+        server_random = os.urandom(32)
+        e = ext(23, b"") + ext(0xff01, b"\x00")
+        sh = message(2, b"\x03\x03" + server_random + b"\x20" + os.urandom(32) + struct.pack(">HB", 0xc02b, 0) + struct.pack(">H", len(e)) + e)
+        entries = b"".join(len(d).to_bytes(3, "big") + d for d in (der(self.pki.leaves["p256"]), der(self.pki.inter)))
+        cert = message(11, len(entries).to_bytes(3, "big") + entries)
+        key = x25519.X25519PrivateKey.generate()
+        params = b"\x03\x00\x1d\x20" + key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        signature = self.pki.keys["p256"].sign(client_random + server_random + params, ec.ECDSA(hashes.SHA256()))
+        ske = message(12, params + struct.pack(">HH", 0x0403, len(signature)) + signature)
+        done = message(14, b"")
+        self.sock.sendall(plain(22, sh + cert + ske + done))
+        transcript = ch + sh + cert + ske + done
+        # The client's ClientKeyExchange, its ChangeCipherSpec, then its
+        # Finished under its keys.
+        flight = b""
+        while True:
+            header, body = self.record()
+            if header[0] == 20:
+                break
+            assert header[0] == 22, f"a record of type {header[0]} in the client's TLS 1.2 flight"
+            flight += body
+        assert flight[0] == 16 and len(flight) == 4 + int.from_bytes(flight[1:4], "big"), "the client's flight is not one ClientKeyExchange"
+        shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(flight[5:5 + flight[4]]))
+        transcript += flight
+        master = prf("sha256", shared, b"extended master secret", hashlib.sha256(transcript).digest(), 48)
+        block = prf("sha256", master, b"key expansion", server_random + client_random, 40)
+        reader = Cipher12(0xc02b, block[:16], block[32:36])
+        writer = Cipher12(0xc02b, block[16:32], block[36:40])
+        type_, finished = reader.open(*self.record())
+        assert type_ == 22 and finished == message(20, prf("sha256", master, b"client finished", hashlib.sha256(transcript).digest(), 12)), \
+            "the client's TLS 1.2 Finished"
+        transcript += finished
+        ours = message(20, prf("sha256", master, b"server finished", hashlib.sha256(transcript).digest(), 12))
+        self.sock.sendall(plain(20, b"\x01") + writer.seal(22, ours))
+        type_, data = reader.open(*self.record())
+        assert type_ == 23, f"a record of type {type_} where the client's request belongs"
+        echo = b"echo:" + data
+        if s == "tls12-split-by-data":
+            hello_request = message(0, b"")
+            out = writer.seal(22, hello_request[:2]) + writer.seal(23, echo) + writer.seal(22, hello_request[2:])
+        else:
+            out = writer.seal(23, echo + bytes(16385 - len(echo)))
+        self.sock.sendall(out + writer.seal(21, b"\x01\x00"))
+
     def serve(self):
         ch, sid, suites, sni, share, alpn, exts = self.client_hello()
         s = sni.split(".")[0]
@@ -284,6 +407,9 @@ class Conn:
             assert exts.get(43) == b"\x02\x03\x04", f"supported_versions {exts.get(43)!r}, not TLS 1.3 alone"
             assert not [x for x in suites if x >> 8 != 0x13], f"TLS 1.2 suites offered: {suites}"
             assert 23 not in exts and 0xff01 not in exts, "TLS 1.2's extensions offered"
+        if s in ("tls12-split-by-data", "tls12-oversize"):
+            self.serve12(s, ch)
+            return
         if s.startswith("tls12-"):
             # A TLS 1.2 ServerHello, one rule broken, then a hang-up: the
             # client must refuse it before reading on. tls12-hello checks the
@@ -312,31 +438,51 @@ class Conn:
             self.sock.sendall(plain(22, sh) + (plain(21, bytes([2, 49])) if s == "tls12-hello" else b""))
             return
         suite = {"aes256": 0x1302, "chacha": 0x1303, "suite-unoffered": 0x1304}.get(s, 0x1301)
+        psk = None
+        if s.startswith(("resume", "early")) and 41 in exts:
+            judged = self.judge_psk(ch, exts)
+            if isinstance(judged, int):
+                self.sock.sendall(plain(21, bytes([2, judged])))
+                return
+            psk = None if s == "resume-declined" else judged
+            if s == "resume-hash":
+                suite = 0x1302
         schedule = Schedule(0x1301 if suite == 0x1304 else suite)
         groups = exts.get(10, b"")
-        if s in ("hrr-cookie", "hrr-group", "hrr-p256"):
+        if s == "hybrid-offer":
             offered = [int.from_bytes(groups[k:k + 2], "big") for k in range(2, len(groups), 2)]
-            assert 0x17 in offered, f"secp256r1 not among the client's groups {offered}"
+            assert offered == [0x11ec, 0x1d, 0x17, 0x18], f"supported_groups {offered}, not X25519MLKEM768, X25519, secp256r1, secp384r1"
+            entries = key_shares(exts)
+            assert [(g, len(k)) for g, k in entries] == [(0x11ec, 1216), (0x1d, 32)], f"key shares {[(g, len(k)) for g, k in entries]}"
+            assert entries[0][1][1184:] == entries[1][1], "the hybrid share's X25519 key is not the X25519 share"
+        if s in ("hrr-cookie", "hrr-group", "hrr-p256", "hrr-p384", "hrr-p384-bad", "hrr-hybrid"):
+            offered = [int.from_bytes(groups[k:k + 2], "big") for k in range(2, len(groups), 2)]
+            assert 0x17 in offered and 0x18 in offered, f"secp256r1 and secp384r1 not among the client's groups {offered}"
             retry_random = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
-            asked = {"hrr-cookie": ext(44, struct.pack(">H", 8) + b"cookie!!"), "hrr-group": ext(51, b"\x00\x18"),
-                     "hrr-p256": ext(51, b"\x00\x17")}[s]
+            asked = {"hrr-cookie": ext(44, struct.pack(">H", 8) + b"cookie!!"), "hrr-group": ext(51, b"\x00\x19"),
+                     "hrr-p256": ext(51, b"\x00\x17"), "hrr-p384": ext(51, b"\x00\x18"), "hrr-p384-bad": ext(51, b"\x00\x18"),
+                     "hrr-hybrid": ext(51, b"\x11\xec")}[s]
             e = ext(43, b"\x03\x04") + asked
             hrr = message(2, b"\x03\x03" + retry_random + bytes([len(sid)]) + sid + struct.pack(">HB", suite, 0) + struct.pack(">H", len(e)) + e)
             self.sock.sendall(plain(22, hrr))
-            if s == "hrr-group":
+            if s in ("hrr-group", "hrr-hybrid"):
                 return
             first = schedule.digest(ch)
             ch2, sid, suites, sni, share, alpn, exts = self.client_hello()
             if s == "hrr-cookie":
                 assert exts.get(44) == struct.pack(">H", 8) + b"cookie!!", "no cookie echoed"
             transcript = bytes([254, 0, 0, len(first)]) + first + hrr + ch2
-        if s == "hrr-p256":
-            # The second ClientHello's one share, in secp256r1.
+        # The curve a HelloRetryRequest asked for, and its group and point size.
+        asked_curve = {"hrr-p256": (ec.SECP256R1(), 0x17, 65), "hrr-p384": (ec.SECP384R1(), 0x18, 97),
+                       "hrr-p384-bad": (ec.SECP384R1(), 0x18, 97)}.get(s)
+        if asked_curve:
+            # The second ClientHello's one share, in that group.
+            curve, wanted_group, size = asked_curve
             ks = exts.get(51, b"")
             g, l = struct.unpack(">HH", ks[2:6])
-            assert g == 0x17 and l == 65 and len(ks) == 6 + l, "the second ClientHello's share is not one secp256r1 point"
+            assert g == wanted_group and l == size and len(ks) == 6 + l, f"the second ClientHello's share is not one point in group {wanted_group:#x}"
             peer_point = ks[6:6 + l]
-            ec_key = ec.generate_private_key(ec.SECP256R1())
+            ec_key = ec.generate_private_key(curve)
         key = x25519.X25519PrivateKey.generate()
         mine = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         if s == "zero-share":
@@ -344,12 +490,32 @@ class Conn:
         e = b""
         if s != "tls12":
             e += ext(43, b"\x03\x04")
-        if s in ("hrr-p256", "sh-wrong-group"):
-            other = ec_key if s == "hrr-p256" else ec.generate_private_key(ec.SECP256R1())
-            mine = other.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        if asked_curve:
+            curve, wanted_group, size = asked_curve
+            mine = ec_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+            if s == "hrr-p384-bad":
+                mine = mine[:-1] + bytes([mine[-1] ^ 1])
+            e += ext(51, struct.pack(">HH", wanted_group, size) + mine)
+        elif s == "sh-wrong-group":
+            mine = ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
             e += ext(51, b"\x00\x17" + struct.pack(">H", 65) + mine)
-        else:
+        elif s.startswith("hybrid") and s != "hybrid-offer":
+            # The client's hybrid share is its ML-KEM-768 encapsulation key,
+            # then its X25519 key; this side answers the ciphertext, then
+            # its own X25519 key.
+            hybrid = dict(key_shares(exts)).get(0x11ec)
+            assert hybrid is not None and len(hybrid) == 1216, "no X25519MLKEM768 share of 1216 bytes"
+            if s == "hybrid":
+                kem_secret, ciphertext = mlkem.MLKEM768PublicKey.from_public_bytes(hybrid[:1184]).encapsulate()
+            else:
+                ciphertext = os.urandom(1088)
+            mine = ciphertext + (bytes(32) if s == "hybrid-zero-x25519" else mine)
+            mine = {"hybrid-short-ct": mine[:1119], "hybrid-long-ct": mine + b"\x00"}.get(s, mine)
+            e += ext(51, b"\x11\xec" + struct.pack(">H", len(mine)) + mine)
+        elif s != "resume-no-share" or psk is None:
             e += ext(51, b"\x00\x1d" + struct.pack(">H", 32) + mine)
+        if psk is not None:
+            e += ext(41, struct.pack(">H", 1 if s == "resume-identity" else 0))
         if s == "sh-extension":
             e += ext(0xff00, b"")
         echo = b"\x00" * len(sid) if s == "no-echo" else sid
@@ -371,14 +537,21 @@ class Conn:
             return
         self.sock.sendall(record)
         if s in ("tls12", "no-echo", "suite-unoffered", "zero-share", "compression", "sh-extension", "oversize", "sh-wrong-group",
-                 "sh-and-more"):
+                 "sh-and-more", "hybrid-short-ct", "hybrid-long-ct", "hybrid-zero-x25519", "hrr-p384-bad") or (psk is not None and s in ("resume-identity", "resume-hash", "resume-no-share")):
             return
         transcript += sh
-        if s == "hrr-p256":
-            shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), peer_point))
+        if asked_curve:
+            shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(asked_curve[0], peer_point))
+        elif s == "hybrid":
+            # The draft's section 4.3: ML-KEM's secret, then X25519's.
+            shared = kem_secret + key.exchange(x25519.X25519PublicKey.from_public_bytes(hybrid[1184:]))
+        elif s == "hybrid-bad-ct":
+            # The client decapsulates a random ciphertext to J(z || c), which
+            # this side cannot know: its keys are not the client's.
+            shared = os.urandom(64)
         else:
             shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(share))
-        early = schedule.extract(bytes(schedule.size), bytes(schedule.size))
+        early = schedule.extract(bytes(schedule.size), psk if psk is not None else bytes(schedule.size))
         hs = schedule.extract(schedule.derive(early, b"derived", b""), shared)
         c_hs = schedule.derive(hs, b"c hs traffic", transcript)
         s_hs = schedule.derive(hs, b"s hs traffic", transcript)
@@ -394,6 +567,14 @@ class Conn:
             ee_ext += ext(16, struct.pack(">H", 7) + b"\x06spdy/3")
         if s == "unsolicited-ext":
             ee_ext += ext(0xff01, b"")
+        if s == "early-alpn" and alpn:
+            # http/1.1 for the ticket, h2 for the connection that resumes.
+            ee_ext += ext(16, struct.pack(">H", 9) + b"\x08http/1.1") if psk is None else ext(16, struct.pack(">H", 3) + b"\x02h2")
+        if psk is not None and s == "early-small" and 42 in exts:
+            self.sock.sendall(plain(21, bytes([2, 47])))
+            return
+        if psk is not None and s in ("early", "early-unoffered"):
+            ee_ext += ext(42, b"")
         if s == "sni-ack-data":
             ee_ext += ext(0, b"\x00")
         messages = [message(8, struct.pack(">H", len(ee_ext)) + ee_ext)]
@@ -436,6 +617,9 @@ class Conn:
             if s in ("bad-cv", "bad-cv-ed25519"):
                 sig = sig[:-1] + bytes([sig[-1] ^ 1])
             messages.append(message(15, struct.pack(">HH", scheme, len(sig)) + sig))
+        if psk is not None and s != "resume-cert":
+            # Resumed: EncryptedExtensions alone before Finished.
+            messages = messages[:1]
         transcript += b"".join(messages)
         verify = schedule.finished(s_hs, transcript)
         if s == "bad-finished":
@@ -462,7 +646,7 @@ class Conn:
             self.sock.sendall(writer.seal(22, flight, corrupt=(s == "bad-record-mac")))
         if s in ("bad-finished", "bad-cv", "cv-pkcs1", "cv-wrong-curve", "unsolicited-ext", "alpn-unoffered",
                  "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs", "cert-many", "ku-no-sign",
-                 "certreq-context", "cert-entry-ext", "sni-ack-data"):
+                 "certreq-context", "cert-entry-ext", "sni-ack-data") or (psk is not None and s in ("resume-cert", "early-unoffered")):
             return
 
         master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))
@@ -470,6 +654,25 @@ class Conn:
         s_ap = schedule.derive(master, b"s ap traffic", transcript)
         # The client's flight: its ChangeCipherSpec, then under c_hs.
         expected_client = transcript
+        early_data = b""
+        if psk is not None and s == "early":
+            # The early data, under the client's early traffic keys over the
+            # ClientHello, to EndOfEarlyData, which joins the transcript.
+            early_reader = Cipher(schedule, schedule.derive(schedule.extract(bytes(schedule.size), psk), b"c e traffic", ch))
+            while True:
+                header, body = self.record()
+                if header[0] == 20:
+                    continue
+                type_, data = early_reader.open(header, body)
+                if type_ == 23:
+                    early_data += data
+                    continue
+                assert type_ == 22 and data == message(5, b""), "no EndOfEarlyData after the early data"
+                break
+            expected_client += message(5, b"")
+        # Early data refused: what does not open under the handshake keys
+        # is passed over (section 4.2.10).
+        skipping = psk is not None and 42 in exts and s != "early"
         answered = False
         verified = False
         # Alerts go under the server's application keys: its own Finished
@@ -485,7 +688,12 @@ class Conn:
                 header, body = self.record()
                 if header[0] == 20:
                     continue
-                type_, data = reader.open(header, body)
+                try:
+                    type_, data = reader.open(header, body)
+                except Exception:
+                    if skipping:
+                        continue
+                    raise
                 assert type_ == 22, f"a record of type {type_} in the client's flight"
                 assert len(data) <= 16384, f"a record of {len(data)} bytes of content, past 2^14"
                 pending += data
@@ -540,6 +748,27 @@ class Conn:
         reader = Cipher(schedule, c_ap)
         if s == "ticket":
             self.sock.sendall(writer.seal(22, message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04abcd\x00\x00")))
+        if s == "ticket-bad":
+            self.sock.sendall(writer.seal(22, message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04ab")))
+        if early_data:
+            self.sock.sendall(writer.seal(23, b"early:" + early_data))
+        if (s.startswith(("resume", "early")) and psk is None) or s in ("ticket-many", "ticket-huge"):
+            # Real tickets: each PSK from the resumption master secret, over
+            # the handshake to the client's Finished, and its nonce.
+            res_master = schedule.derive(master, b"res master", expected_client + content)
+            out = b""
+            for i in range(20 if s == "ticket-many" else 1):
+                nonce = struct.pack(">Q", i)
+                ticket = os.urandom(16385 if s == "ticket-huge" else 32)
+                age_add = int.from_bytes(os.urandom(4), "big")
+                TICKETS[ticket] = (schedule.expand_label(res_master, b"resumption", nonce, schedule.size), suite, age_add, time.monotonic())
+                allows = {"early-small": 4, "early-unoffered": 0}.get(s, 1024 if s.startswith("early") else 0)
+                extensions = ext(42, struct.pack(">I", allows)) if allows else b""
+                nst = message(4, struct.pack(">IIB", 3600, age_add, len(nonce)) + nonce + struct.pack(">H", len(ticket)) + ticket +
+                              struct.pack(">H", len(extensions)) + extensions)
+                for k in range(0, len(nst), 16384):
+                    out += writer.seal(22, nst[k:k + 16384])
+            self.sock.sendall(out)
         header, body = self.record()
         type_, data = reader.open(header, body)
         assert type_ == 23
@@ -598,6 +827,24 @@ class Conn:
                 assert type_ == 23
                 data += content
             data += f" keyupdates={updates} asked={asked}".encode()
+        if s in ("padded-max", "padded-over"):
+            echo = b"echo:" + data
+            pad = 16384 + 1 - len(echo) - 1 + (1 if s == "padded-over" else 0)
+            self.sock.sendall(writer.seal(23, echo, pad=pad))
+            self.sock.sendall(writer.seal(21, b"\x01\x00"))
+            return
+        if s in ("split-by-data", "split-by-close"):
+            # Section 5.1: no record of another type between a handshake
+            # message's pieces.
+            ticket = message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04abcd\x00\x00")
+            self.sock.sendall(writer.seal(22, ticket[:6]))
+            if s == "split-by-close":
+                self.sock.sendall(writer.seal(21, b"\x01\x00"))
+                return
+            self.sock.sendall(writer.seal(23, b"echo:" + data))
+            self.sock.sendall(writer.seal(22, ticket[6:]))
+            self.sock.sendall(writer.seal(21, b"\x01\x00"))
+            return
         if s == "big":
             payload = b"echo:" + data + bytes(i % 251 for i in range(40000 - 5 - len(data)))
             for k in range(0, len(payload), 16384):
@@ -605,6 +852,32 @@ class Conn:
         else:
             self.sock.sendall(writer.seal(23, b"echo:" + data))
         self.sock.sendall(writer.seal(21, b"\x01\x00"))
+
+    def judge_psk(self, ch, exts):
+        """A resumption's ClientHello, judged: its pre_shared_key last and
+        offering one ticket this server issued, psk_dhe_ke its one mode, the
+        ticket's age as the client gives it within a second of the time
+        since it went, and its binder over the ClientHello to the binders.
+        The PSK, or the alert a failure sends."""
+        data = exts[41]
+        if not ch.endswith(ext(41, data)) or exts.get(45) != b"\x01\x01":
+            return 47
+        size = int.from_bytes(data[:2], "big")
+        identities, binders = data[2:2 + size], data[2 + size:]
+        length = int.from_bytes(identities[:2], "big")
+        ticket, obfuscated = identities[2:2 + length], int.from_bytes(identities[2 + length:6 + length], "big")
+        if len(identities) != 6 + length or ticket not in TICKETS:
+            return 47
+        secret, suite, age_add, when = TICKETS[ticket]
+        age = (obfuscated - age_add) % (1 << 32)
+        elapsed = (time.monotonic() - when) * 1000
+        if not elapsed - 1000 <= age <= elapsed + 1000:
+            return 47
+        schedule = Schedule(suite)
+        binder_key = schedule.derive(schedule.extract(bytes(schedule.size), secret), b"res binder", b"")
+        if binders != struct.pack(">HB", 1 + schedule.size, schedule.size) + schedule.finished(binder_key, ch[:len(ch) - len(binders)]):
+            return 51
+        return secret
 
 
 def main():
@@ -621,21 +894,33 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("127.0.0.1", 0))
     server.listen(16)
+    if mlkem:
+        with open(os.path.join(work, "mlkem"), "w") as f:
+            f.write("cryptography has ML-KEM-768\n")
     with open(os.path.join(work, "port"), "w") as f:
         f.write(str(server.getsockname()[1]))
+    # A thread a connection: the std/tls gate runs its broken copies side
+    # by side, and those against this server would otherwise wait on each
+    # other's slow scenarios, past their own clients' deadlines. A
+    # connection shares nothing with another but TICKETS, whose keys are
+    # random.
     while True:
         sock, _ = server.accept()
-        sock.settimeout(10)
+        threading.Thread(target=serve_one, args=(sock, pki), daemon=True).start()
+
+
+def serve_one(sock, pki):
+    sock.settimeout(10)
+    try:
+        Conn(sock, pki).serve()
+    except Exception as e:
+        print(f"server: {type(e).__name__}: {e}", file=sys.stderr)
+    finally:
         try:
-            Conn(sock, pki).serve()
-        except Exception as e:
-            print(f"server: {type(e).__name__}: {e}", file=sys.stderr)
-        finally:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            sock.close()
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
 
 
 if __name__ == "__main__":

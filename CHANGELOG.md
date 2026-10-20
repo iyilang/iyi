@@ -439,7 +439,12 @@
   assembly of P-384's table selection, ML-KEM's re-encryption compare
   and key selection, curve25519's swaps and table reads and the tag
   compares has no branch on a secret: nothing there needed the P-256 fix.
-  X25519 reran at 2.0 to 5.0.
+  X25519 reran at 2.0 to 5.0. Not settled: later runs put P-256 signing
+  back at |t| = 10 to 19 with `pick` branch-free and every jump left in
+  `sign` on a public outcome (std/p256's header has the numbers).
+  `bench/ct_timing.iyi` run with no argument, as CI runs every bench
+  program, checks itself instead: Welch's t against Python's `statistics`
+  on six fixed samples and every target run 40 times with no bound.
 - **`Server.serve` serves at most 1,024 connections at once and wants a
   whole request within five minutes.** It accepted every connection, and
   past the head's `timeout_ms` a body was bounded per read alone, so one

@@ -30,7 +30,7 @@
 # the right one in its first byte against one that differs in its last:
 # an early-exit compare is faster on the first; equal against differing
 # would time the decryption a right tag lets happen, which is public).
-# It prints the
+# With no argument it checks itself instead (see the end). It prints the
 # samples and the largest |t|. The time is `Time.monotonic_nanoseconds`:
 # std has no cycle counter, and a nanosecond clock read around operations
 # of microseconds is fine enough. `bench/ct_timing.sh` drives it.
@@ -110,124 +110,170 @@ def welch(times : Array(Int64), classes : Array(Int32), limit : Int64) : Float64
   (mean[0] - mean[1]) / spread
 end
 
+# One run of *target*: *samples* measurements, the largest |t| over the
+# percentile crops, and a value made of every answer so none is unused.
+def measure(target : String, samples : Int32, pem : String?) : {Float64, Int32}
+  draw = Draw.new(0x9E3779B97F4A7C15_u64)
+
+  modulus = (BigInt.one << 2047) + BigInt.from_bytes(draw.bytes(255))
+  modulus = modulus + BigInt.one if modulus.even?
+  # (m - 1) / 2: as long as a random x, and its Euclid ends in two steps.
+  fixed_x = (modulus - BigInt.one) >> 1
+  rsa_key = target == "rsa" ? RsaPrivateKey.from_pem(File.read(pem || raise("rsa needs a PEM"))).or_panic : nil
+  p256_key = P256PrivateKey.from_bytes(draw.bytes(32)).or_panic
+  peer = X25519.public_key(draw.bytes(32))
+  fixed_secret = draw.bytes(32)
+  fixed_message = draw.bytes(64)
+  # For p256-length: random messages whose r and s are as long in DER as the
+  # fixed one's, a DER INTEGER being as long as its value's top bytes make it:
+  # the signature's encoding, which is public, then takes one course.
+  same_length = [] of Array(UInt8)
+  if target == "p256-length"
+    fixed_signature = p256_key.sign(EcdsaHash::SHA256, fixed_message)
+    # SEQUENCE { INTEGER r, INTEGER s }: r's length at 3, s's after r.
+    want = {fixed_signature[3], fixed_signature[5 + fixed_signature[3].to_i32]}
+    while same_length.size < 256
+      candidate = draw.bytes(64)
+      signature = p256_key.sign(EcdsaHash::SHA256, candidate)
+      same_length << candidate if {signature[3], signature[5 + signature[3].to_i32]} == want
+    end
+  end
+
+  # The random inputs are drawn before the clock starts, 1,024 of each, so
+  # that neither class allocates more than the other between measurements.
+  xs = Array(BigInt).new(1024) { |_| BigInt.from_bytes(draw.bytes(256)) % modulus }
+  messages = Array(Array(UInt8)).new(1024) { |_| draw.bytes(64) }
+  secrets = Array(Array(UInt8)).new(1024) { |_| draw.bytes(32) }
+  p384_key = P384PrivateKey.from_bytes(draw.bytes(48)).or_panic
+  seed = draw.bytes(32)
+  kem_keys = Array(MlKem768PrivateKey).new(target == "mlkem-key" ? 65 : 1) { |_| MlKem768PrivateKey.from_seed(draw.bytes(64)) }
+  kem_cts = kem_keys.map do |k|
+    sealed = MlKem768.encapsulate(k.encapsulation_key, draw.bytes(32))
+    raise "encapsulate refused" unless sealed.is_a?(Tuple)
+    sealed[0]
+  end
+  tampered = Array(Array(UInt8)).new(1024) do |_|
+    t = kem_cts[0].dup
+    at = (draw.next % 1088_u64).to_i32
+    t[at] = t[at] ^ 1_u8
+    t
+  end
+  aead_key = draw.bytes(32)
+  nonce = draw.bytes(12)
+  gcm = AesGcm.new(aead_key)
+  chacha = ChaCha20Poly1305.new(aead_key)
+  sealed_text = target == "chacha" ? chacha.seal(nonce, draw.bytes(64)) : gcm.seal(nonce, draw.bytes(64))
+  # The tag is the last 16 bytes: one copy wrong in its first, one in its last.
+  wrong_first = Array(UInt8).new(sealed_text.bytesize) { |i| sealed_text.to_unsafe[i] }
+  wrong_first[wrong_first.size - 16] = wrong_first[wrong_first.size - 16] ^ 0x80_u8
+  wrong_last = Array(UInt8).new(sealed_text.bytesize) { |i| sealed_text.to_unsafe[i] }
+  wrong_last[wrong_last.size - 1] = wrong_last[wrong_last.size - 1] ^ 0x80_u8
+  times = Array(Int64).new(samples, 0_i64)
+  classes = Array(Int32).new(samples, 0)
+  sink = 0
+  i = 0
+  while i < samples + samples // 10
+    c = (draw.next & 1_u64).to_i32
+    pick = (draw.next & 1023_u64).to_i32
+    x = c == 0 ? fixed_x : xs[pick]
+    message = c == 0 ? fixed_message : (target == "p256-length" ? same_length[pick & 255] : (target == "p256-two" ? messages[0] : messages[pick]))
+    secret = c == 0 ? fixed_secret : secrets[pick]
+    started = Time.monotonic_nanoseconds
+    case target
+    when "inverse"
+      sink = sink ^ (x.inverse_mod_secret(modulus) || BigInt.zero).limbs.size
+    when "euclid"
+      sink = sink ^ (euclid(x, modulus) || BigInt.zero).limbs.size
+    when "rsa"
+      key = rsa_key
+      raise "rsa needs a PEM" unless key
+      sink = sink ^ key.sign_pss(RsaHash::SHA256, message).size
+    when "p256", "p256-length", "p256-two"
+      sink = sink ^ p256_key.sign(EcdsaHash::SHA256, message).size
+    when "p384"
+      sink = sink ^ p384_key.sign(EcdsaHash::SHA384, message).size
+    when "ed25519"
+      sink = sink ^ Ed25519.sign(seed, message).bytesize
+    when "mlkem-ct"
+      got = kem_keys[0].decapsulate(c == 0 ? kem_cts[0] : tampered[pick])
+      sink = sink ^ (got.is_a?(Array) ? got.size : 0)
+    when "mlkem-key"
+      which = c == 0 ? 0 : 1 + (pick & 63)
+      got = kem_keys[which].decapsulate(kem_cts[which])
+      sink = sink ^ (got.is_a?(Array) ? got.size : 0)
+    when "aes-gcm"
+      got = gcm.open(nonce, c == 0 ? wrong_first : wrong_last)
+      sink = sink ^ (got.is_a?(String) ? 1 : 0)
+    when "chacha"
+      got = chacha.open(nonce, c == 0 ? wrong_first : wrong_last)
+      sink = sink ^ (got.is_a?(String) ? 1 : 0)
+    when "x25519"
+      shared = X25519.shared(secret, peer)
+      sink = sink ^ (shared.is_a?(String) ? shared.bytesize : 0)
+    else
+      raise "no target #{target}: inverse, euclid, rsa, p256, p384, ed25519, mlkem-ct, mlkem-key, aes-gcm, chacha or x25519"
+    end
+    took = Time.monotonic_nanoseconds - started
+    # The first tenth warms caches and the clock and is not kept.
+    if i >= samples // 10
+      at = i - samples // 10
+      times[at] = took.to_i64
+      classes[at] = c
+    end
+    i = i + 1
+  end
+
+  sorted = times.sorted
+  largest = 0.0
+  [sorted[sorted.size - 1], sorted[sorted.size * 9 // 10], sorted[sorted.size * 3 // 4], sorted[sorted.size // 2]].each do |limit|
+    t = welch(times, classes, limit).abs
+    largest = t if t > largest
+  end
+  {largest, sink}
+end
+
+TARGETS = ["inverse", "euclid", "rsa", "p256", "p256-length", "p256-two", "p384", "ed25519",
+           "mlkem-ct", "mlkem-key", "aes-gcm", "chacha", "x25519"]
+
+def near(got : Float64, want : Float64) : Bool
+  (got - want).abs <= 1.0e-9 * (want.abs + 1.0)
+end
+
 args = Program.args
-raise "usage: ct_timing TARGET SAMPLES [PEM]" if args.size < 2
-target = args[0]
-samples = args[1].to_i
-draw = Draw.new(0x9E3779B97F4A7C15_u64)
-
-modulus = (BigInt.one << 2047) + BigInt.from_bytes(draw.bytes(255))
-modulus = modulus + BigInt.one if modulus.even?
-# (m - 1) / 2: as long as a random x, and its Euclid ends in two steps.
-fixed_x = (modulus - BigInt.one) >> 1
-rsa_key = target == "rsa" ? RsaPrivateKey.from_pem(File.read(args[2])).or_panic : nil
-p256_key = P256PrivateKey.from_bytes(draw.bytes(32)).or_panic
-peer = X25519.public_key(draw.bytes(32))
-fixed_secret = draw.bytes(32)
-fixed_message = draw.bytes(64)
-# For p256-length: random messages whose r and s are as long in DER as the
-# fixed one's, a DER INTEGER being as long as its value's top bytes make it:
-# the signature's encoding, which is public, then takes one course.
-same_length = [] of Array(UInt8)
-if target == "p256-length"
-  fixed_signature = p256_key.sign(EcdsaHash::SHA256, fixed_message)
-  # SEQUENCE { INTEGER r, INTEGER s }: r's length at 3, s's after r.
-  want = {fixed_signature[3], fixed_signature[5 + fixed_signature[3].to_i32]}
-  while same_length.size < 256
-    candidate = draw.bytes(64)
-    signature = p256_key.sign(EcdsaHash::SHA256, candidate)
-    same_length << candidate if {signature[3], signature[5 + signature[3].to_i32]} == want
+if args.empty?
+  # With no argument, a self-check and not a measurement, for the runs
+  # that start every bench program bare (CI's among them, whose shared
+  # machines are too noisy for a threshold): Welch's t against Python's
+  # `statistics` on fixed samples, then every target run once over 40
+  # measurements with no bound on its |t|. The RSA target signs with the
+  # 2048-bit key under spec/std/data/openssl.
+  times = [1_i64, 2_i64, 3_i64, 4_i64, 5_i64, 2_i64, 4_i64, 6_i64, 8_i64, 10_i64]
+  classes = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+  t = welch(times, classes, 10_i64)
+  raise "welch: [1..5] against [2, 4 .. 10] is #{t}, where Python's statistics make -1.8973665961010275" unless near(t, -1.8973665961010275)
+  t = welch(times, classes, 5_i64)
+  raise "welch: cropped at 5, the classes' means are both 3, but t is #{t}" unless t == 0.0
+  t = welch([7_i64, 7_i64, 7_i64, 7_i64], [0, 1, 0, 1], 10_i64)
+  raise "welch: two classes of one value have no spread to divide by, but t is #{t}" unless t == 0.0
+  t = welch([7_i64, 7_i64, 7_i64, 9_i64], [0, 1, 0, 1], 10_i64)
+  raise "welch: [7, 7] against [7, 9] is #{t}, where Python's statistics make -1.0" unless near(t, -1.0)
+  t = welch([5_i64, 6_i64, 7_i64], [0, 0, 1], 10_i64)
+  raise "welch: a class of one sample answers 0, not #{t}" unless t == 0.0
+  times = Array(Int64).new(1000) { |i| i < 500 ? 100_i64 + (i * 37) % 11 : 101_i64 + ((i - 500) * 53) % 13 }
+  classes = Array(Int32).new(1000) { |i| i < 500 ? 0 : 1 }
+  t = welch(times, classes, 200_i64)
+  raise "welch: two shifted sequences of 500 give #{t}, where Python's statistics make -8.989272971434428" unless near(t, -8.989272971434428)
+  puts "  Welch's t as Python's statistics computes it on six fixed samples"
+  pem = __DIR__ + "/../spec/std/data/openssl/openssl.key"
+  TARGETS.each do |target|
+    t, sink = measure(target, 40, pem)
+    raise "#{target}: |t| is #{t}" unless t >= 0.0 && t < 1.0e300
+    puts "  #{target}: ran 40 times, |t| = #{(t * 100).round / 100} (not bounded here) #{sink & 0}"
   end
+  puts "ALL CHECKS PASSED"
+  exit 0
 end
-
-# The random inputs are drawn before the clock starts, 1,024 of each, so
-# that neither class allocates more than the other between measurements.
-xs = Array(BigInt).new(1024) { |_| BigInt.from_bytes(draw.bytes(256)) % modulus }
-messages = Array(Array(UInt8)).new(1024) { |_| draw.bytes(64) }
-secrets = Array(Array(UInt8)).new(1024) { |_| draw.bytes(32) }
-p384_key = P384PrivateKey.from_bytes(draw.bytes(48)).or_panic
-seed = draw.bytes(32)
-kem_keys = Array(MlKem768PrivateKey).new(target == "mlkem-key" ? 65 : 1) { |_| MlKem768PrivateKey.from_seed(draw.bytes(64)) }
-kem_cts = kem_keys.map do |k|
-  sealed = MlKem768.encapsulate(k.encapsulation_key, draw.bytes(32))
-  raise "encapsulate refused" unless sealed.is_a?(Tuple)
-  sealed[0]
-end
-tampered = Array(Array(UInt8)).new(1024) do |_|
-  t = kem_cts[0].dup
-  at = (draw.next % 1088_u64).to_i32
-  t[at] = t[at] ^ 1_u8
-  t
-end
-aead_key = draw.bytes(32)
-nonce = draw.bytes(12)
-gcm = AesGcm.new(aead_key)
-chacha = ChaCha20Poly1305.new(aead_key)
-sealed_text = target == "chacha" ? chacha.seal(nonce, draw.bytes(64)) : gcm.seal(nonce, draw.bytes(64))
-# The tag is the last 16 bytes: one copy wrong in its first, one in its last.
-wrong_first = Array(UInt8).new(sealed_text.bytesize) { |i| sealed_text.to_unsafe[i] }
-wrong_first[wrong_first.size - 16] = wrong_first[wrong_first.size - 16] ^ 0x80_u8
-wrong_last = Array(UInt8).new(sealed_text.bytesize) { |i| sealed_text.to_unsafe[i] }
-wrong_last[wrong_last.size - 1] = wrong_last[wrong_last.size - 1] ^ 0x80_u8
-times = Array(Int64).new(samples, 0_i64)
-classes = Array(Int32).new(samples, 0)
-sink = 0
-i = 0
-while i < samples + samples // 10
-  c = (draw.next & 1_u64).to_i32
-  pick = (draw.next & 1023_u64).to_i32
-  x = c == 0 ? fixed_x : xs[pick]
-  message = c == 0 ? fixed_message : (target == "p256-length" ? same_length[pick & 255] : (target == "p256-two" ? messages[0] : messages[pick]))
-  secret = c == 0 ? fixed_secret : secrets[pick]
-  started = Time.monotonic_nanoseconds
-  case target
-  when "inverse"
-    sink = sink ^ (x.inverse_mod_secret(modulus) || BigInt.zero).limbs.size
-  when "euclid"
-    sink = sink ^ (euclid(x, modulus) || BigInt.zero).limbs.size
-  when "rsa"
-    key = rsa_key
-    raise "rsa needs a PEM" unless key
-    sink = sink ^ key.sign_pss(RsaHash::SHA256, message).size
-  when "p256", "p256-length", "p256-two"
-    sink = sink ^ p256_key.sign(EcdsaHash::SHA256, message).size
-  when "p384"
-    sink = sink ^ p384_key.sign(EcdsaHash::SHA384, message).size
-  when "ed25519"
-    sink = sink ^ Ed25519.sign(seed, message).bytesize
-  when "mlkem-ct"
-    got = kem_keys[0].decapsulate(c == 0 ? kem_cts[0] : tampered[pick])
-    sink = sink ^ (got.is_a?(Array) ? got.size : 0)
-  when "mlkem-key"
-    which = c == 0 ? 0 : 1 + (pick & 63)
-    got = kem_keys[which].decapsulate(kem_cts[which])
-    sink = sink ^ (got.is_a?(Array) ? got.size : 0)
-  when "aes-gcm"
-    got = gcm.open(nonce, c == 0 ? wrong_first : wrong_last)
-    sink = sink ^ (got.is_a?(String) ? 1 : 0)
-  when "chacha"
-    got = chacha.open(nonce, c == 0 ? wrong_first : wrong_last)
-    sink = sink ^ (got.is_a?(String) ? 1 : 0)
-  when "x25519"
-    shared = X25519.shared(secret, peer)
-    sink = sink ^ (shared.is_a?(String) ? shared.bytesize : 0)
-  else
-    raise "no target #{target}: inverse, euclid, rsa, p256, p384, ed25519, mlkem-ct, mlkem-key, aes-gcm, chacha or x25519"
-  end
-  took = Time.monotonic_nanoseconds - started
-  # The first tenth warms caches and the clock and is not kept.
-  if i >= samples // 10
-    at = i - samples // 10
-    times[at] = took.to_i64
-    classes[at] = c
-  end
-  i = i + 1
-end
-
-sorted = times.sorted
-largest = 0.0
-[sorted[sorted.size - 1], sorted[sorted.size * 9 // 10], sorted[sorted.size * 3 // 4], sorted[sorted.size // 2]].each do |limit|
-  t = welch(times, classes, limit).abs
-  largest = t if t > largest
-end
-puts "#{target}: #{samples} samples, max |t| = #{(largest * 100).round / 100} (#{sink & 0})"
+raise "usage: ct_timing TARGET SAMPLES [PEM], or no argument for the self-check" if args.size < 2
+raise "no target #{args[0]}: #{TARGETS.join(", ")}" unless TARGETS.includes?(args[0])
+largest, sink = measure(args[0], args[1].to_i, args.size > 2 ? args[2] : nil)
+puts "#{args[0]}: #{args[1].to_i} samples, max |t| = #{(largest * 100).round / 100} (#{sink & 0})"

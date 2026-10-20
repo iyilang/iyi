@@ -40,7 +40,14 @@
 # bench/ct_timing.sh, `sign` with one key, a fixed message against random
 # ones: |t| = 3.8 to 6.0 over 100,000 signatures. It put this at 16 to 24
 # before `P256BaseTable.pick`'s selectors were hidden from LLVM, which had
-# made them a branch on each nonce digit (see there).
+# made them a branch on each nonce digit (see there). Later runs on the
+# same code, at load 6 to 7, put it at 10 to 19, with two fixed messages
+# at 1.2 to 1.9 and messages whose r and s match the fixed one's DER
+# lengths at 8 to 11; every conditional jump left in the --release
+# `sign` (the candidate below n and nonzero, r and s nonzero, the Fermat
+# inverse over n - 2's public bits, the DER lengths) has a public
+# outcome, and `pick` has none on the digit. What still tells the classes
+# apart is not found.
 #
 # The nonce is RFC 6979's: HMAC over the hash the signature names, from
 # the private key and the message's hash, so one key and one message give

@@ -1092,20 +1092,27 @@ HPACK_WORDS = [[0x3F_u8, 0xE1_u8, 0x1F_u8], [0x20_u8], [0xFF_u8, 0xFF_u8, 0xFF_u
 # its half of the stream and reads what comes back until the module
 # closes.
 
-{% unless flag?(:win32) %}
+# `shutdown(SHUT_WR)`, and on Windows Winsock's `shutdown(SD_SEND)` on the
+# SOCKET the class's Int32 carries (std/socket's `__sys_handle` is the
+# same widening; ws2_32 is linked by std/socket). Both are 1.
+{% if flag?(:win32) %}
+  lib LibFuzzSocket
+    fun shutdown(s : UInt64, how : Int32) : Int32
+  end
+{% else %}
   lib LibFuzzSocket
     fun shutdown(fd : Int32, how : Int32) : Int32
   end
 {% end %}
 
 # The peer is done writing: what the module reads next is the end of the
-# stream, at once, rather than a wait for its own timeout. Windows' is
-# `shutdown` on a SOCKET, which is std/socket's to reach; there the peer
-# closes instead, and what the module still writes meets a reset - an
-# error value either way.
+# stream, at once, rather than a wait for its own timeout; the peer then
+# reads what the module still sends until it closes. Windows once closed
+# the socket here instead, and the read after it panicked "socket is
+# closed" in every scripted peer (CI job 118392900512).
 def half_close(socket : IyiSocket) : Nil
   {% if flag?(:win32) %}
-    socket.close
+    LibFuzzSocket.shutdown(socket.to_unsafe.to_i64.unsafe_to_u64, 1)
   {% else %}
     LibFuzzSocket.shutdown(socket.to_unsafe, 1)
   {% end %}

@@ -24,13 +24,35 @@
 # versions' modes - by either end unless its config says otherwise
 # (below). The three cipher suites RFC 8446 section 9.1 names
 # (AES-128-GCM with SHA-256, AES-256-GCM with SHA-384, ChaCha20-Poly1305
-# with SHA-256), std/aead's; the key exchange is X25519, std/curve25519's
-# - and at a server secp256r1 too, std/p256's - both constant-time.
-# `version` says which version a connection speaks.
+# with SHA-256), std/aead's; the key exchange is X25519MLKEM768 - the
+# post-quantum hybrid of std/mlkem's ML-KEM-768 and X25519 - X25519
+# (std/curve25519) or secp256r1 (std/p256), each constant-time.
+# `version` says which version a connection speaks, `named_group` which
+# group it agreed on.
 #
-# The client. A server that asks again (HelloRetryRequest) for a cookie, or
-# for secp256r1, is answered; one that asks for any other group is refused.
-# The server's certificates are checked as std/x509 checks a
+# X25519MLKEM768 (group 0x11EC, draft-ietf-tls-ecdhe-mlkem-05): the
+# client's share is its ML-KEM-768 encapsulation key, then its X25519 key,
+# 1,216 bytes; the server's is the ML-KEM ciphertext, then its X25519 key,
+# 1,120 bytes; the secret is ML-KEM's 32 bytes, then X25519's 32, the
+# order the draft's section 4.3 gives this group (the reverse of its
+# other hybrids'). A share of any other size is refused by name
+# (illegal_parameter) at either end, as is an X25519 half of small order;
+# the server refuses an encapsulation key that fails FIPS 203's modulus
+# check. The client sends the hybrid's share by default, beside X25519's,
+# one X25519 key in both, as OpenSSL 3.5, Chrome and Firefox do (SPEC.md's
+# decision #18 says why): the ClientHello grows by 1,222 bytes, from 186
+# to 1,408 as OpenSSL's s_server read it, and the client spends an ML-KEM
+# key pair and a decapsulation (std/mlkem's header has their times).
+# `TlsConfig#post_quantum = false` offers X25519 and secp256r1 alone. The
+# server takes X25519MLKEM768 whenever the client lists it, asking for its
+# share by HelloRetryRequest when it was not sent, as OpenSSL 3.5's server
+# does.
+#
+# The client. Its ClientHello lists X25519MLKEM768, X25519 and secp256r1,
+# and sends the first two's shares. A server that asks again
+# (HelloRetryRequest) for a cookie, or for secp256r1, is answered; one
+# that asks for a group whose share was sent, or for one not offered, is
+# refused. The server's certificates are checked as std/x509 checks a
 # chain - to the roots in `TlsConfig#roots`, or the system's
 # (std/system_roots), for the host connected to - and then its
 # CertificateVerify: ECDSA on P-256, P-384 or P-521 with the hash the
@@ -66,14 +88,16 @@
 # not do the extended master secret - which ties the master secret to the
 # whole handshake (the triple handshake attack, 2014) and is required
 # here, the refusal naming it. The key exchange is X25519 or secp256r1, as
-# 1.3's; the ServerKeyExchange's signature is checked over both randoms
-# and the parameters under the scheme it names, which must be one offered
-# and the certificate key's - PKCS #1 v1.5 included, which 1.2 permits
-# there, and ECDSA with the hash the scheme names on any of P-256, P-384
-# and P-521 (a 1.2 server's ECDSA certificate is on a curve the
-# ClientHello names, RFC 8422 section 5.1.1, so one on P-384 refuses this
-# ClientHello). The certificate is checked as for 1.3, and must be RSA
-# for an ECDHE_RSA suite and ECDSA or Ed25519 for ECDHE_ECDSA. The PRF is
+# 1.3's (X25519MLKEM768 is 1.3's alone: the draft defines no
+# ServerKeyExchange for it); the ServerKeyExchange's signature is checked
+# over both randoms and the parameters under the scheme it names, which
+# must be one offered and the certificate key's - PKCS #1 v1.5 included,
+# which 1.2 permits there, and ECDSA with the hash the scheme names on any
+# of P-256, P-384 and P-521 (a 1.2 server's ECDSA certificate is on a
+# curve the ClientHello names, RFC 8422 section 5.1.1, so one on P-384
+# refuses this ClientHello). The certificate is checked as for 1.3, and
+# must be RSA for an ECDHE_RSA suite and ECDSA or Ed25519 for
+# ECDHE_ECDSA. The PRF is
 # P_SHA256, or P_SHA384 for the AES-256 suites. A CertificateRequest is
 # answered with the identity's chain and a CertificateVerify over the
 # handshake when the request takes the key's type and one of its schemes,
@@ -102,18 +126,22 @@
 # is never signed with, as RFC 8446 section 4.2.3 says, and an RSA key
 # under 2048 bits is refused (std/rsa's floor). A full handshake with this
 # server, measured here (--release; Python's ssl over loopback, the median
-# of 200, its own side's work included): 0.64 ms with an Ed25519 key, 0.65
-# with P-256, 1.58 with RSA-2048 and 6.66 with RSA-4096. A client must take
+# of 100, its own side's work included), in X25519MLKEM768, which Python's
+# OpenSSL 3.5.5 offers first: 0.76 ms with an Ed25519 key, 0.72 with
+# P-256, 1.62 with RSA-2048 and 6.57 with RSA-4096; pinned to X25519,
+# 0.61, 0.60, 1.48 and 6.40. A client must take
 # the key's schemes: RFC 8446 section 9.1 makes ecdsa_secp256r1_sha256 and
 # rsa_pss_rsae_sha256 mandatory for every client; OpenSSL, Python, curl
 # and Node take all three.
 # The client's suite order chooses the suite; the server's ALPN order
 # chooses the protocol, and a client that offers protocols and none of the
-# server's is refused (no_application_protocol, RFC 7301). A share in
-# X25519 or secp256r1 is taken, X25519's first - secp256r1's by std/p256's
+# server's is refused (no_application_protocol, RFC 7301). X25519MLKEM768
+# is taken whenever the client lists it (above); otherwise a share in
+# X25519 or secp256r1, X25519's first - secp256r1's by std/p256's
 # constant-time ECDH, its point checked to be on the curve. A ClientHello
-# with a share in neither is asked again (HelloRetryRequest, no cookie)
-# for X25519, or for secp256r1 where X25519 is not among its groups.
+# with a share in none of them is asked again (HelloRetryRequest, no
+# cookie) for X25519, or for secp256r1 where X25519 is not among its
+# groups.
 # Early data a server does not take - none unless asked for, below - is
 # passed over, up to sixteen of the largest records, as section 4.2.10
 # says.
@@ -240,6 +268,7 @@ import std/rsa::{RsaPublicKey, RsaPrivateKey, RsaHash, RsaError}
 import std/ecdsa::{EcdsaPublicKey, EcdsaCurve, EcdsaHash, EcdsaError}
 import std/p256::{P256PrivateKey}
 import std/curve25519::{X25519, Ed25519, Ed25519PublicKey, CurveError}
+import std/mlkem::{MlKem768, MlKem768PrivateKey, MlKemError}
 import std/asn1::{Der, Asn1Error}
 import std/aead::{AesGcm, ChaCha20Poly1305, AeadError}
 import std/crypto::{HMAC, HKDF, Subtle}
@@ -363,6 +392,11 @@ pub class TlsConfig
   # answers in 1.2 is refused as one that does not speak 1.3; `TLS12`
   # offers 1.2 beside it (see the module's header for what it requires).
   property min_version : TlsVersion = TlsVersion::TLS13
+  # Whether X25519MLKEM768 is offered, its share sent beside X25519's (the
+  # module's header has what it costs). On by default, as OpenSSL 3.5,
+  # Chrome and Firefox have it; off, the ClientHello offers X25519 and
+  # secp256r1 alone.
+  property post_quantum : Bool = true
 
   def initialize
   end
@@ -705,6 +739,9 @@ pub abstract class TlsConnection
   # The version negotiated: "TLSv1.3", or "TLSv1.2" where one end asked
   # for it and the other spoke nothing newer.
   getter version : String = "TLSv1.3"
+  # The key exchange group the handshake agreed on: "X25519MLKEM768",
+  # "X25519" or "secp256r1".
+  getter named_group : String = ""
   # The chain the peer's certificate was checked through, leaf first: the
   # server's, for a client; the client's, for a server that asked for one.
   getter peer_certificates : Array(Certificate) = [] of Certificate
@@ -782,13 +819,24 @@ pub abstract class TlsConnection
   # byte now and then holds a connection no longer than this.
   HANDSHAKE_TIMEOUT_MS = 30000
 
-  # The key exchange groups (RFC 8446 section 4.2.7), both constant-time:
-  # X25519 (std/curve25519) and secp256r1 (std/p256).
-  GROUP_X25519    = 0x1d
-  GROUP_SECP256R1 = 0x17
+  # The key exchange groups (RFC 8446 section 4.2.7), all constant-time:
+  # X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem, std/mlkem's ML-KEM-768
+  # beside X25519), X25519 (std/curve25519) and secp256r1 (std/p256).
+  GROUP_X25519MLKEM768 = 0x11ec
+  GROUP_X25519         =   0x1d
+  GROUP_SECP256R1      =   0x17
+  # X25519MLKEM768's shares (the draft's section 4): the client's is its
+  # ML-KEM-768 encapsulation key, then its X25519 key; the server's is the
+  # ML-KEM ciphertext, then its X25519 key.
+  HYBRID_CLIENT_SHARE = 1216
+  HYBRID_SERVER_SHARE = 1120
 
   def self.group_name(group : Int32) : String
-    group == GROUP_X25519 ? "X25519" : "secp256r1"
+    case group
+    when GROUP_X25519MLKEM768 then "X25519MLKEM768"
+    when GROUP_X25519         then "X25519"
+    else                           "secp256r1"
+    end
   end
 
   private def group_name(group : Int32) : String
@@ -1613,7 +1661,6 @@ pub class TlsClient < TlsConnection
     public_key = TlsBytes.of(X25519.public_key(private_key))
     random = Random::Secure.random_bytes(32)
     session = Random::Secure.random_bytes(32)
-    group = GROUP_X25519
     ephemeral = nil.as(P256PrivateKey?)
     if held = @session
       @offered = held.take(@host, TlsTime.now_ms)
@@ -1624,7 +1671,18 @@ pub class TlsClient < TlsConnection
       @early_sent = true
       @early_alpn = offered.alpn
     end
-    hello = client_hello(random, session, group, public_key, nil, [] of UInt8)
+    # X25519MLKEM768's share first, when it is offered, then X25519's: one
+    # X25519 key in both, as OpenSSL and Chrome send them, so its ladder
+    # runs once.
+    kem = nil.as(MlKem768PrivateKey?)
+    shares = [] of {Int32, Array(UInt8)}
+    if @config.post_quantum
+      pq = MlKem768PrivateKey.from_seed(Random::Secure.random_bytes(64))
+      kem = pq
+      shares << {GROUP_X25519MLKEM768, pq.encapsulation_key + public_key}
+    end
+    shares << {GROUP_X25519, public_key}
+    hello = client_hello(random, session, shares, nil, [] of UInt8)
     sent = send_plain(TlsRecords::HANDSHAKE, hello, first: true)
     return sent if sent
     @transcript = hello.dup
@@ -1657,14 +1715,12 @@ pub class TlsClient < TlsConnection
       if (offered = @offered) && TlsSuites.sha384?(offered.suite) != TlsSuites.sha384?(reply.suite)
         @offered = nil
       end
-      share = public_key
       if reply.named_group == GROUP_SECP256R1
         key = p256_ephemeral
         ephemeral = key
-        group = GROUP_SECP256R1
-        share = key.public_point
+        shares = [{GROUP_SECP256R1, key.public_point}]
       end
-      hello = client_hello(random, session, group, share, cookie, @transcript)
+      hello = client_hello(random, session, shares, cookie, @transcript)
       sent = send_plain(TlsRecords::HANDSHAKE, hello, first: false)
       return sent if sent
       @transcript = @transcript + hello
@@ -1686,8 +1742,12 @@ pub class TlsClient < TlsConnection
     @schedule = TlsKeySchedule.new(@suite == TlsSuites::AES_256_GCM)
     peer = reply.share
     return TlsError.new("a ServerHello with no key share", TlsAlert::MISSING_EXTENSION) unless peer
-    return TlsError.new("a ServerHello's share in #{group_name(reply.named_group)}, where the share sent was #{group_name(group)}'s", TlsAlert::ILLEGAL_PARAMETER) unless reply.named_group == group
+    unless shares.any? { |s| s[0] == reply.named_group }
+      sent_names = shares.map { |s| group_name(s[0]) + "'s" }.join(" and ")
+      return TlsError.new("a ServerHello's share in #{group_name(reply.named_group)}, where the #{shares.size == 1 ? "share sent was" : "shares sent were"} #{sent_names}", TlsAlert::ILLEGAL_PARAMETER)
+    end
     @transcript = @transcript + server
+    @named_group = group_name(reply.named_group)
     psk = nil.as(Array(UInt8)?)
     if reply.psk_identity >= 0
       # Section 4.2.11: the identity chosen one of those offered, and the
@@ -1707,6 +1767,15 @@ pub class TlsClient < TlsConnection
       got = key.shared_secret(peer)
       return TlsError.new("the server's secp256r1 share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
       secret = got
+    elsif (mine = kem) && reply.named_group == GROUP_X25519MLKEM768
+      # The draft's section 4.3: ML-KEM's secret, then X25519's. The
+      # ciphertext's size was checked with the ServerHello; any other
+      # failure to decapsulate is internal_error, as section 4.2 says.
+      opened = mine.decapsulate(peer[0, 1088])
+      return TlsError.new("the server's X25519MLKEM768 ciphertext: #{opened.message}", TlsAlert::INTERNAL_ERROR) if opened.is_a?(MlKemError)
+      shared = X25519.shared(private_key, peer[1088, 32])
+      return TlsError.new("the server's X25519MLKEM768 share: its X25519 key gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)
+      secret = opened + TlsBytes.of(shared)
     else
       shared = X25519.shared(private_key, peer)
       return TlsError.new("the server's X25519 share gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)
@@ -1931,7 +2000,7 @@ pub class TlsClient < TlsConnection
   # (psk_dhe_ke alone) and its pre_shared_key last, whose binder is over
   # *prefix* - the messages before it, after a HelloRetryRequest - and the
   # ClientHello to its binders (section 4.2.11.2).
-  private def client_hello(random : Array(UInt8), session : Array(UInt8), group : Int32, share : Array(UInt8), cookie : Array(UInt8)?, prefix : Array(UInt8)) : Array(UInt8)
+  private def client_hello(random : Array(UInt8), session : Array(UInt8), shares : Array({Int32, Array(UInt8)}), cookie : Array(UInt8)?, prefix : Array(UInt8)) : Array(UInt8)
     tls12 = @config.min_version == TlsVersion::TLS12
     body = [3_u8, 3_u8] + random + [32_u8] + session
     # TLS 1.3's suites, then TLS 1.2's when it is asked for.
@@ -1944,16 +2013,19 @@ pub class TlsClient < TlsConnection
       entry = [0_u8] + TlsBytes.u16(name.size) + name
       extensions = extensions + TlsBytes.extension(0, TlsBytes.u16(entry.size) + entry)
     end
-    # X25519 first, the share sent; secp256r1 too, for a server that takes
-    # nothing else, which asks for it by HelloRetryRequest.
-    extensions = extensions + TlsBytes.extension(10, [0_u8, 4_u8, 0_u8, 0x1d_u8, 0_u8, 0x17_u8])
+    # X25519MLKEM768 first when it is offered, then X25519, the shares sent;
+    # secp256r1 too, for a server that takes nothing else, which asks for
+    # it by HelloRetryRequest.
+    groups = @config.post_quantum ? [0_u8, 6_u8, 0x11_u8, 0xec_u8] : [0_u8, 4_u8]
+    extensions = extensions + TlsBytes.extension(10, groups + [0_u8, 0x1d_u8, 0_u8, 0x17_u8])
     schemes = [] of UInt8
     SIGNATURE_SCHEMES.each { |s| schemes = schemes + TlsBytes.u16(s) }
     extensions = extensions + TlsBytes.extension(13, TlsBytes.u16(schemes.size) + schemes)
     # TLS 1.3, then 1.2 when it is asked for.
     extensions = extensions + TlsBytes.extension(43, tls12 ? [4_u8, 3_u8, 4_u8, 3_u8, 3_u8] : [2_u8, 3_u8, 4_u8])
-    entry = TlsBytes.u16(group) + TlsBytes.u16(share.size) + share
-    extensions = extensions + TlsBytes.extension(51, TlsBytes.u16(entry.size) + entry)
+    entries = [] of UInt8
+    shares.each { |s| entries = entries + TlsBytes.u16(s[0]) + TlsBytes.u16(s[1].size) + s[1] }
+    extensions = extensions + TlsBytes.extension(51, TlsBytes.u16(entries.size) + entries)
     unless @config.alpn.empty?
       names = [] of UInt8
       @config.alpn.each do |protocol|
@@ -2045,14 +2117,22 @@ pub class TlsClient < TlsConnection
         if retry
           # Section 4.1.4: a group not offered, or the one whose share was
           # sent, is illegal_parameter.
-          return TlsError.new("a HelloRetryRequest for the X25519 share already sent", TlsAlert::ILLEGAL_PARAMETER) if group == GROUP_X25519
+          if group == GROUP_X25519 || (group == GROUP_X25519MLKEM768 && @config.post_quantum)
+            return TlsError.new("a HelloRetryRequest for the #{group_name(group)} share already sent", TlsAlert::ILLEGAL_PARAMETER)
+          end
           return TlsError.new("a HelloRetryRequest for group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_SECP256R1
           return TlsError.new("a HelloRetryRequest's key_share cut short", TlsAlert::DECODE_ERROR) unless field.done?
         else
-          return TlsError.new("a key share for group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_X25519 || group == GROUP_SECP256R1
+          offered = group == GROUP_X25519 || group == GROUP_SECP256R1 || (group == GROUP_X25519MLKEM768 && @config.post_quantum)
+          return TlsError.new("a key share for group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless offered
           share = field.bytes(field.u16)
           return TlsError.new("a key share cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
           return TlsError.new("an X25519 share of the wrong size", TlsAlert::ILLEGAL_PARAMETER) if group == GROUP_X25519 && share.size != 32
+          # The draft's section 4.2: a ciphertext of the wrong size is
+          # illegal_parameter.
+          if group == GROUP_X25519MLKEM768 && share.size != HYBRID_SERVER_SHARE
+            return TlsError.new("an X25519MLKEM768 share of #{share.size} bytes, not #{HYBRID_SERVER_SHARE}", TlsAlert::ILLEGAL_PARAMETER)
+          end
         end
       when 44
         return TlsError.new("a cookie outside a HelloRetryRequest", TlsAlert::UNSUPPORTED_EXTENSION) unless retry
@@ -2278,6 +2358,7 @@ pub class TlsClient < TlsConnection
     return TlsError.new("handshake bytes after the ServerHelloDone", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
 
     group, point = exchange
+    @named_group = group_name(group)
     if group == GROUP_X25519
       private_key = Random::Secure.random_bytes(32)
       shared = X25519.shared(private_key, point)
@@ -2368,7 +2449,9 @@ pub class TlsClient < TlsConnection
     signature = reader.bytes(reader.u16)
     return TlsError.new("a ServerKeyExchange cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
     return TlsError.new("a ServerKeyExchange whose curve is not a named one (type #{curve_type})", TlsAlert::ILLEGAL_PARAMETER) unless curve_type == 3
-    return TlsError.new("a ServerKeyExchange in group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_X25519 || group == GROUP_SECP256R1
+    # X25519MLKEM768 is offered for TLS 1.3's key_share alone: the draft
+    # defines no ServerKeyExchange for it.
+    return TlsError.new("a ServerKeyExchange in group #{group}, which was not offered for TLS 1.2", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_X25519 || group == GROUP_SECP256R1
     return TlsError.new("an X25519 share of #{point.size} bytes", TlsAlert::ILLEGAL_PARAMETER) if group == GROUP_X25519 && point.size != 32
     signed = randoms + body[0, 4 + point.size]
     ok = signed12?("a ServerKeyExchange", leaf, scheme, signed, signature)
@@ -3117,8 +3200,10 @@ end
 class TlsOffer
   getter session : Array(UInt8)
   getter suites : Array(Int32)
-  # The client's shares for the groups this server has: X25519's (32
-  # bytes) and secp256r1's (65, uncompressed), when it sent them.
+  # The client's shares for the groups this server has: X25519MLKEM768's
+  # (1,216 bytes), X25519's (32) and secp256r1's (65, uncompressed), when
+  # it sent them.
+  getter hybrid : Array(UInt8)?
   getter x25519 : Array(UInt8)?
   getter p256 : Array(UInt8)?
   getter groups : Array(Int32)
@@ -3135,18 +3220,25 @@ class TlsOffer
   property psk_modes : Array(UInt8) = [] of UInt8
   property unshown : TlsError? = nil
 
-  def initialize(@session : Array(UInt8), @suites : Array(Int32), @x25519 : Array(UInt8)?, @p256 : Array(UInt8)?,
+  def initialize(@session : Array(UInt8), @suites : Array(Int32), @hybrid : Array(UInt8)?, @x25519 : Array(UInt8)?, @p256 : Array(UInt8)?,
                  @groups : Array(Int32), @alpn : Array(String)?, @server_name : String?, @early_data : Bool)
   end
 
-  # The group the server takes a share in: X25519 first, then secp256r1;
-  # 0 when the client sent a share for neither.
+  # The group the server takes a share in: X25519MLKEM768 whenever the
+  # client lists it - asked for by HelloRetryRequest when its share was not
+  # sent, as OpenSSL 3.5's server does - then X25519, then secp256r1; 0
+  # when the client sent a share for none of them.
   def chosen_group : Int32
+    return TlsConnection::GROUP_X25519MLKEM768 if @groups.includes?(TlsConnection::GROUP_X25519MLKEM768)
     @x25519 ? TlsConnection::GROUP_X25519 : (@p256 ? TlsConnection::GROUP_SECP256R1 : 0)
   end
 
   def share(group : Int32) : Array(UInt8)?
-    group == TlsConnection::GROUP_X25519 ? @x25519 : @p256
+    case group
+    when TlsConnection::GROUP_X25519MLKEM768 then @hybrid
+    when TlsConnection::GROUP_X25519         then @x25519
+    else                                          @p256
+    end
   end
 end
 
@@ -3370,13 +3462,15 @@ pub class TlsServer < TlsConnection
     @transcript = hello
 
     group = offer.chosen_group
-    # A HelloRetryRequest refuses any early data (section 4.2.10).
-    retried = group == 0
-    if group == 0
+    # A HelloRetryRequest - for a group the client lists and sent no share
+    # for - refuses any early data (section 4.2.10).
+    retried = group == 0 || offer.share(group).nil?
+    if retried
       # HelloRetryRequest (section 4.1.4) for a group the client supports
-      # and sent no share for, X25519 before secp256r1. The transcript
-      # restarts from the first ClientHello's hash.
-      group = offer.groups.includes?(GROUP_X25519) ? GROUP_X25519 : GROUP_SECP256R1
+      # and sent no share for: X25519MLKEM768 when it is listed, else
+      # X25519 before secp256r1. The transcript restarts from the first
+      # ClientHello's hash.
+      group = offer.groups.includes?(GROUP_X25519) ? GROUP_X25519 : GROUP_SECP256R1 if group == 0
       retry = server_hello(TlsBytes.from_hex(HELLO_RETRY), offer.session, group, nil)
       sent = send_plain(TlsRecords::HANDSHAKE, retry, first: false)
       return sent if sent
@@ -3432,7 +3526,18 @@ pub class TlsServer < TlsConnection
       return unshown
     end
 
-    if group == GROUP_X25519
+    if group == GROUP_X25519MLKEM768
+      # The draft's section 4: ML-KEM-768 encapsulated to the client's
+      # key - FIPS 203's modulus check first, its failure illegal_parameter
+      # - and X25519 beside it; the secret is ML-KEM's, then X25519's.
+      sent_kem = MlKem768.encapsulate(peer[0, 1184], Random::Secure.random_bytes(32))
+      return TlsError.new("the client's X25519MLKEM768 share: #{sent_kem.message}", TlsAlert::ILLEGAL_PARAMETER) if sent_kem.is_a?(MlKemError)
+      private_key = Random::Secure.random_bytes(32)
+      shared = X25519.shared(private_key, peer[1184, 32])
+      return TlsError.new("the client's X25519MLKEM768 share: its X25519 key gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)
+      secret = sent_kem[1] + TlsBytes.of(shared)
+      public = sent_kem[0] + TlsBytes.of(X25519.public_key(private_key))
+    elsif group == GROUP_X25519
       private_key = Random::Secure.random_bytes(32)
       shared = X25519.shared(private_key, peer)
       return TlsError.new("the client's X25519 share gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)
@@ -3445,6 +3550,7 @@ pub class TlsServer < TlsConnection
       secret = got
       public = ephemeral.public_point
     end
+    @named_group = group_name(group)
     reply = server_hello(Random::Secure.random_bytes(32), offer.session, group, public, psk_identity)
     sent = send_plain(TlsRecords::HANDSHAKE, reply, first: false)
     return sent if sent
@@ -3826,23 +3932,27 @@ pub class TlsServer < TlsConnection
     return unshown if unshown && identities.empty?
     return TlsError.new("a ClientHello with no supported_groups", TlsAlert::MISSING_EXTENSION) unless groups
     return TlsError.new("a ClientHello with no key_share", TlsAlert::MISSING_EXTENSION) unless shares
-    unless groups.includes?(GROUP_X25519) || groups.includes?(GROUP_SECP256R1)
-      return TlsError.new("the client offers neither X25519 nor secp256r1, the groups this server has", TlsAlert::HANDSHAKE_FAILURE)
+    unless groups.includes?(GROUP_X25519MLKEM768) || groups.includes?(GROUP_X25519) || groups.includes?(GROUP_SECP256R1)
+      return TlsError.new("the client offers none of X25519MLKEM768, X25519 and secp256r1, the groups this server has", TlsAlert::HANDSHAKE_FAILURE)
     end
+    hybrid = nil
     x25519 = nil
     p256 = nil
     offered = {} of Int32 => Bool
     groups.each { |g| offered[g] = true }
     shares.each do |group, key|
       return TlsError.new("a key share for group #{group}, which the client does not support", TlsAlert::ILLEGAL_PARAMETER) unless offered.has_key?(group)
-      if group == GROUP_X25519
+      if group == GROUP_X25519MLKEM768
+        return TlsError.new("an X25519MLKEM768 share of #{key.size} bytes, not #{HYBRID_CLIENT_SHARE}", TlsAlert::ILLEGAL_PARAMETER) unless key.size == HYBRID_CLIENT_SHARE
+        hybrid = key
+      elsif group == GROUP_X25519
         return TlsError.new("an X25519 share of #{key.size} bytes", TlsAlert::ILLEGAL_PARAMETER) unless key.size == 32
         x25519 = key
       elsif group == GROUP_SECP256R1
         p256 = key
       end
     end
-    offer = TlsOffer.new(session, suites, x25519, p256, groups, alpn, server_name, early)
+    offer = TlsOffer.new(session, suites, hybrid, x25519, p256, groups, alpn, server_name, early)
     offer.identities = identities
     offer.binders = binders
     offer.binders_size = binders_size

@@ -216,6 +216,41 @@
   it, another ALPN, an acceptance of nothing sent); and seventeen broken
   copies, among them a replay taken, early data delivered as 1-RTT, the
   size limit, freshness window, ALPN and suite checks ignored.
+- **std/mlkem: ML-KEM-768 (FIPS 203), the post-quantum key-encapsulation
+  mechanism, written in iyi and constant-time on its secrets.**
+  `MlKem768PrivateKey.from_seed(d || z)` is Algorithm 16's key
+  generation, `MlKem768.encapsulate(ek, m)` Algorithm 17, and
+  `decapsulate(c)` Algorithm 18 with its implicit rejection: a ciphertext
+  that does not re-encrypt to itself is answered with J(z || c), chosen
+  by masks after a comparison of every byte. The caller brings the random
+  bytes, as std/curve25519's does, and the module imports std/digest's
+  SHA-3 and SHAKE alone.
+  - Section 7.2's modulus check refuses an encapsulation key with a
+    coefficient of q or more, and section 7.3's hash check a
+    decapsulation key whose H(ek) is not its key's; both, and the wrong
+    sizes, are an `MlKemError` naming the check.
+  - Barrett reduction and a mask for the last subtraction, Compress by the
+    same division with no division instruction; every branch and index in
+    decapsulation and key generation was listed by hand and each is on a
+    size, a counter or public data.
+  - Measured (--release, best of five runs of 200): a key pair 41 us, an
+    encapsulation 48, a decapsulation 36, against OpenSSL 3.5.5's 25, 16
+    and 24; a good and a tampered ciphertext decapsulate in a median of
+    34,590 and 34,591 ns.
+
+  Held by `bench/std_mlkem_exercise.sh`: NIST's ACVP vectors for
+  ML-KEM-768 (a subset vendored in `bench/std_mlkem_fixture` with NIST's
+  notice, and all 80 of the files' ML-KEM-768 cases fetched when the
+  network answers); OpenSSL 3.5 over 25 seeds, both keys equal, each side
+  decapsulating the other's ciphertexts and a tampered one answered
+  alike; `cryptography` 48 and up over 200 seeds the same way, where it
+  is installed; and 17 broken copies - an NTT twiddle, a gamma, the
+  inverse NTT's scale, eta 3, FIPS 203's ipd key generation, A's index
+  order, A not transposed, compression and decompression that truncate,
+  Barrett without its subtraction, the implicit rejection returning the
+  real key or keyed without c, a comparison short of the last byte, the
+  modulus check skipped or taking q, the hash check skipped, s read
+  unreduced - each caught where it is named.
 
 ### Changed
 
@@ -278,6 +313,39 @@
   builds of `bench/std_http_server.iyi`, five rounds alternating on this
   machine: 82,028 to 94,691 requests/s (mean 88,530) before, 86,144 to
   93,154 (mean 88,219) after.
+- **std/tls offers and takes X25519MLKEM768, the post-quantum hybrid
+  OpenSSL 3.5, Chrome and Firefox send first (draft-ietf-tls-ecdhe-mlkem,
+  group 0x11EC).** A recorded handshake could be decrypted by whoever one
+  day breaks X25519; now it also takes breaking ML-KEM-768.
+  - The client's share is its ML-KEM-768 encapsulation key then its
+    X25519 key (1,216 bytes), sent by default beside an X25519 share with
+    the same key; the server answers the ciphertext then its X25519 key
+    (1,120 bytes); the secret is ML-KEM's then X25519's, the order the
+    draft gives this group. The ClientHello grows by 1,222 bytes, 186 to
+    1,408. `TlsConfig#post_quantum = false` offers X25519 and secp256r1
+    alone.
+  - The server takes X25519MLKEM768 whenever the client lists it, by
+    HelloRetryRequest when its share was not sent, as OpenSSL 3.5's server
+    does; a client asked for secp256r1 sends that share alone.
+  - A share of the wrong size is refused by name at either end
+    ("an X25519MLKEM768 share of 1119 bytes, not 1120", illegal_parameter),
+    as are an encapsulation key failing the modulus check, an X25519 half
+    of small order, and a HelloRetryRequest for the hybrid whose share was
+    sent. `TlsConnection#named_group` says which group was agreed.
+  - A handshake with the server, Python's ssl on OpenSSL 3.5.5 over
+    loopback, the median of 100: 0.76 ms with an Ed25519 key in the hybrid
+    against 0.61 in X25519; 6.57 against 6.40 with RSA-4096.
+
+  Held by `bench/std_tls_exercise.sh`: OpenSSL 3.5's `s_server` offering
+  the hybrid alone, by default and behind a stateless cookie, and refusing
+  a client told not to offer it; its `s_client` alone ("Negotiated TLS1.3
+  group: X25519MLKEM768"), with both shares, and with an X25519 share
+  asked again for the hybrid; Python's ssl by default; the std/tls client
+  and server together; the scripted server's seven hybrid scenarios and
+  the scripted client's six (the two that finish a handshake where
+  `cryptography` has ML-KEM); and 12 broken copies. Where OpenSSL is
+  older than 3.5, as in the Linux container, the gate says so and skips
+  it.
 
 ### Fixed
 

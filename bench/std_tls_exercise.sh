@@ -23,13 +23,18 @@
 # broken and the alert named; the std/tls client, Python's ssl, OpenSSL's
 # s_client (an RSA server held to the RSA-PSS scheme the client lists
 # first, and refusing a client that offers PKCS #1 v1.5 alone), curl and
-# Node; client certificates of each kind, RSA among them. Then the server
-# told to speak TLS 1.2 too, on each key: the scripted client's 1.2
-# handshakes and refusals, s_client -tls1_2 across suites, schemes,
-# groups, -no_ems, -fallback_scsv, a renegotiation and the exporter,
-# Python's ssl, curl and Node held to 1.2, the std/tls client answered in
-# 1.3 and its 1.2-alone copy meeting the downgrade sentinel; client
-# certificates in 1.2. It shows an
+# Node; client certificates of each kind, RSA among them. X25519MLKEM768 is
+# held at both ends to OpenSSL's s_server and s_client (s_client naming the
+# group it negotiated) and Python's ssl, where their OpenSSL is 3.5 or
+# later, to the std/tls client and server between them, and to the
+# scripted peers' hybrid scenarios - shares and ciphertexts of the wrong
+# size, a ciphertext of random bytes, a HelloRetryRequest for a share
+# already sent. Then the server told to speak TLS 1.2 too, on each key:
+# the scripted client's 1.2 handshakes and refusals, s_client -tls1_2
+# across suites, schemes, groups, -no_ems, -fallback_scsv, a renegotiation
+# and the exporter, Python's ssl, curl and Node held to 1.2, the std/tls
+# client answered in 1.3 and its 1.2-alone copy meeting the downgrade
+# sentinel; client certificates in 1.2. It shows an
 # error value's sentence through `.or_panic`, reads the module with `iyi
 # doc`, checks the formatting, typechecks the exercise for five targets and
 # builds it from its artifacts, and proves on broken copies of the module
@@ -158,6 +163,7 @@ fi
 
 echo
 echo "== OpenSSL's own server"
+hybrid_openssl=no
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) windows=yes ;;
   *) windows=no ;;
@@ -447,6 +453,48 @@ else
   interop "TLS 1.2 alone, not asked for" "alert protocol_version (70)" localhost - -tls1_2 -cert p256.pem -key p256.key
   interop "secp256r1 alone, asked for by a HelloRetryRequest" "HTTP/1.0 200 ok" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-256
   interop "groups the client offers none of" "alert handshake_failure (40)" localhost - -tls1_3 -cert p256.pem -key p256.key -groups P-384
+  # X25519MLKEM768, where this OpenSSL has it (3.5 on; the Linux
+  # container's 3.0 has not): alone, by OpenSSL's own default groups (which
+  # put it first), behind a stateless server's cookie, and refused by a
+  # client told not to offer it.
+  # client_hybrid <binary>: its std/tls client against s_server offering
+  # X25519MLKEM768 alone, which must hold in that group.
+  client_hybrid() {
+    local port pid got
+    port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+    "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -tls1_3 -cert "$PKI/p256.pem" -key "$PKI/p256.key" -groups X25519MLKEM768 \
+      >"$WORK/s_server-hybrid.log" 2>&1 </dev/null &
+    pid=$!
+    for _ in $(seq 1 50); do
+      "$PY" -c "import socket; socket.create_connection(('127.0.0.1', $port), 1).close()" 2>/dev/null && break
+      sleep 0.1
+    done
+    got="$("$1" get "$port" "$PKI/ca.pem" localhost 2>&1)"
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    if printf '%s' "$got" | grep -qF "HTTP/1.0 200 ok" && printf '%s' "$got" | grep -qF "group=X25519MLKEM768"; then
+      echo "  X25519MLKEM768 alone: $got"
+      return 0
+    fi
+    echo "  FAIL s_server -groups X25519MLKEM768: $got"
+    return 1
+  }
+  hybrid_openssl=no
+  if "$OPENSSL" list -kem-algorithms 2>/dev/null | grep -q 'X25519MLKEM768'; then
+    hybrid_openssl=yes
+    if client_hybrid "$WORK/tls-release"; then
+      interop=$((interop + 1))
+    else
+      status=1
+    fi
+    interop "OpenSSL's default groups, X25519MLKEM768 first" "group=X25519MLKEM768" localhost - -tls1_3 -cert p256.pem -key p256.key
+    interop "X25519MLKEM768 alone, stateless: a HelloRetryRequest with a cookie" "group=X25519MLKEM768" localhost - -tls1_3 -cert p256.pem -key p256.key \
+      -groups X25519MLKEM768 -stateless
+    TLS_POST_QUANTUM=0 interop "X25519MLKEM768 alone, to a client told not to offer it" "alert handshake_failure (40)" localhost - -tls1_3 \
+      -cert p256.pem -key p256.key -groups X25519MLKEM768
+  else
+    echo "  $("$OPENSSL" version) has no X25519MLKEM768 (OpenSSL has it from 3.5), so the client's hybrid goes unasked by it"
+  fi
   # A client certificate required and checked: -verify_return_error ends
   # the handshake on any fault OpenSSL finds in the chain or its signature.
   mtls=(-tls1_3 -cert p256.pem -key p256.key -Verify 1 -verify_return_error -CAfile ca.pem)
@@ -655,7 +703,7 @@ PY
     for _ in $(seq 1 50); do [ -s "$WORK/py12port" ] && break; sleep 0.1; done
     got="$(TLS_MIN_VERSION=1.2 "$WORK/tls-release" get "$(cat "$WORK/py12port")" "$PKI/ca.pem" localhost http/1.1 2>&1)"
     wait "$pid" 2>/dev/null
-    if printf '%s' "$got" | grep -qE "^HTTP/1.0 200 ok TLS_ECDHE_.* alpn=http/1.1 TLSv1.2$" && ! [ -s "$WORK/py12.log" ]; then
+    if printf '%s' "$got" | grep -qE "^HTTP/1.0 200 ok TLS_ECDHE_.* alpn=http/1.1 TLSv1.2 group=(X25519|secp256r1)$" && ! [ -s "$WORK/py12.log" ]; then
       tls12=$((tls12 + 1))
       echo "  Python's ssl, TLS 1.2, $kind, $suite: $got"
     else
@@ -975,6 +1023,43 @@ print("session_reused=%s peer=%s %s" % (reused, peer, said[said.index("resumed="
       status=1
     fi
   }
+  # hybrid_served <port> <kind>: OpenSSL's s_client and X25519MLKEM768
+  # against the server on <port> - offering it alone, where OpenSSL must
+  # say it negotiated it; its default groups, whose two shares are
+  # X25519MLKEM768's and X25519's, where the server must take the hybrid;
+  # and an X25519 share alone with X25519MLKEM768 listed after it, where
+  # the server, preferring the hybrid, asks for it by HelloRetryRequest -
+  # a line each, "FAIL" on a miss.
+  hybrid_served() {
+    local port="$1" kind="$2" out failed=0
+    hybrid_client() {
+      printf 'GET / HTTP/1.0\r\n\r\n' | "$OPENSSL" s_client -connect "127.0.0.1:$port" -servername localhost \
+        -CAfile "$SRV/roots.pem" -verify_return_error -ign_eof -tls1_3 "$@" 2>&1 | tr -d '\r'
+    }
+    out="$(hybrid_client -groups X25519MLKEM768)"
+    if printf '%s' "$out" | grep -qF "Negotiated TLS1.3 group: X25519MLKEM768" && printf '%s' "$out" | grep -qF "group=X25519MLKEM768"; then
+      echo "  OpenSSL, $kind, X25519MLKEM768 alone: $(printf '%s' "$out" | grep -m1 -F "Negotiated TLS1.3 group")"
+    else
+      echo "  FAIL OpenSSL, $kind, X25519MLKEM768 alone: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+      failed=1
+    fi
+    out="$(hybrid_client)"
+    if printf '%s' "$out" | grep -qF "name=localhost" && printf '%s' "$out" | grep -qF "group=X25519MLKEM768"; then
+      echo "  OpenSSL, $kind, its default groups, X25519MLKEM768 and X25519 shares: the hybrid taken"
+    else
+      echo "  FAIL OpenSSL, $kind, its default groups: $(printf '%s' "$out" | grep -o 'group=[A-Za-z0-9]*' | head -1) $(printf '%s' "$out" | tail -1)"
+      failed=1
+    fi
+    out="$(hybrid_client -groups X25519:X25519MLKEM768 -msg)"
+    if [ "$(printf '%s' "$out" | grep -c '<<< TLS 1.3, Handshake \[length [0-9a-f]*\], ServerHello')" = 2 ] &&
+      printf '%s' "$out" | grep -qF "group=X25519MLKEM768"; then
+      echo "  OpenSSL, $kind, an X25519 share, X25519MLKEM768 listed: a HelloRetryRequest for the hybrid, then a ServerHello in it"
+    else
+      echo "  FAIL OpenSSL, $kind, an X25519 share, X25519MLKEM768 listed: $(printf '%s' "$out" | grep -c 'ServerHello') ServerHellos, $(printf '%s' "$out" | grep -o 'group=[A-Za-z0-9]*' | head -1)"
+      failed=1
+    fi
+    return $failed
+  }
   # serve_and_ask <dir> <ed25519|p256|rsa2048|rsa4096>: the exercise serving
   # the chain and key in <dir>, the scripted client and the others against
   # it.
@@ -1007,8 +1092,13 @@ print("session_reused=%s peer=%s %s" % (reused, peer, said[said.index("resumed="
       tail -1 "$WORK/client-$kind.out" | sed 's/^/  /'
       status=1
     fi
-    served_check "the std/tls client, $kind, ALPN h2" "HTTP/1.0 200 ok TLS_AES_128_GCM_SHA256 alpn=h2" \
+    served_check "the std/tls client, $kind, ALPN h2" "HTTP/1.0 200 ok TLS_AES_128_GCM_SHA256 alpn=h2 TLSv1.3 group=X25519MLKEM768" \
       "$WORK/tls-release" get "$port" "$SRV/roots.pem" localhost h2
+    # X25519 is a prefix of X25519MLKEM768's name, so the group is cut out
+    # and ended with a full stop.
+    served_check "the std/tls client, $kind, told not to offer X25519MLKEM768" "agreed in X25519." sh -c \
+      'TLS_POST_QUANTUM=0 "$1" get "$2" "$3" localhost | sed -n "s/.*group=\([A-Za-z0-9]*\).*/agreed in \1./p"' \
+      sh "$WORK/tls-release" "$port" "$SRV/roots.pem"
     served_check "the std/tls client, $kind, for a name the certificate does not hold" "is not valid for example.com" \
       "$WORK/tls-release" get "$port" "$SRV/roots.pem" example.com
     served_check "Python's ssl, $kind" "TLSv1.3 http/1.1 name=localhost alpn=http/1.1" "$PY" -c '
@@ -1041,6 +1131,25 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
         sed -E 's/^2: .* resumed=([a-z]+) early=([A-Za-z]+) .* said=.* (early=".*") resumed=([a-z]+) held=.*$/client early=\2, server \3 resumed=\4/'
     }
     served_check "the std/tls client, $kind, GET / as early data" 'client early=Accepted, server early="GET / HTTP/1.0\r\n\r\n" resumed=yes' iyi_early
+    # Python's ssl offers what its OpenSSL offers by default, which from
+    # 3.5 on is X25519MLKEM768 first, both shares sent; older, X25519.
+    if "$PY" -c 'import ssl, sys; sys.exit(0 if ssl.OPENSSL_VERSION_INFO >= (3, 5) else 1)' 2>/dev/null; then
+      served_check "Python's ssl, $kind, its OpenSSL's default groups" "group=X25519MLKEM768" "$PY" -c '
+import socket, ssl, sys
+ctx = ssl.create_default_context(cafile=sys.argv[2])
+with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10), server_hostname="localhost") as s:
+    s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+    data = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    print(ssl.OPENSSL_VERSION, data.decode().split("\r\n\r\n")[1].strip())
+' "$port" "$SRV/roots.pem"
+    else
+      echo "  Python's ssl, $kind: $("$PY" -c 'import ssl; print(ssl.OPENSSL_VERSION)') offers no X25519MLKEM768 by default (OpenSSL does from 3.5), so it is not asked for the hybrid"
+    fi
     if [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1; then
       # -ign_eof: the request's end on stdin is not the end of the answer.
       sclient() {
@@ -1055,6 +1164,15 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
       served_check "OpenSSL, $kind, a P-384 share first: a HelloRetryRequest for X25519, then a ServerHello" "2" hrr P-384:X25519
       served_check "OpenSSL, $kind, P-384 and P-256, a P-384 share: a HelloRetryRequest for secp256r1" "2" hrr P-384:P-256
       served_check "OpenSSL, $kind, secp256r1 alone" "name=localhost alpn=-" sclient -tls1_3 -groups P-256
+      if [ "$hybrid_openssl" = yes ]; then
+        if hybrid_served "$port" "$kind"; then
+          served_ok=$((served_ok + 3))
+        else
+          status=1
+        fi
+      else
+        echo "  OpenSSL, $kind: no X25519MLKEM768 in this OpenSSL (it has it from 3.5), so the server's hybrid goes unasked by s_client"
+      fi
       # Refusals by the alert's number, which every OpenSSL prints the same;
       # its name is worded differently from one version to the next.
       served_check "OpenSSL, $kind, TLS 1.2 alone" "SSL alert number 70" sclient -tls1_2
@@ -1494,19 +1612,24 @@ fi
 
 echo
 echo "== a handshake's time, by the server's key (--release; measured, not checked)"
-# Python's ssl makes 200 full TLS 1.3 handshakes with the exercise's
-# server, one after another over loopback, and closes each: the median
-# wall time of one, its own side's work included. What changes from key to
-# key is the CertificateVerify the server signs. Then 200 in TLS 1.2, to
-# the server told to speak it and Python held to it: what changes there is
-# the ServerKeyExchange's signature.
+# Python's ssl makes full TLS 1.3 handshakes with the exercise's server,
+# one after another over loopback, and closes each: the median wall time
+# of one, its own side's work included. What changes from key to key is
+# the CertificateVerify the server signs. Each is timed twice, 100
+# handshakes a time: in the group Python's OpenSSL offers first by default
+# (X25519MLKEM768 from OpenSSL 3.5 on), and pinned to X25519 by
+# `set_ecdh_curve`. Then 100 in TLS 1.2, to the server told to speak it
+# and Python held to it, in the group it offers first there - never
+# X25519MLKEM768, which is 1.3's alone: what changes there is the
+# ServerKeyExchange's signature. One connection before them asks the
+# server which group it agreed.
 if [ "$served" = yes ]; then
   for version in 1.3 1.2; do
     for pair in "ed25519:$SRV" "p256:$SRV/p256" "rsa2048:$SRV/rsa2048" "rsa4096:$SRV/rsa4096"; do
       kind="${pair%%:*}"
       dir="${pair#*:}"
       rm -f "$dir/port"
-      TLS_MIN_VERSION="$version" "$WORK/tls-release" serve "$dir" 200 >"$WORK/time-$kind.log" 2>&1 &
+      TLS_MIN_VERSION="$version" "$WORK/tls-release" serve "$dir" "$([ "$version" = 1.3 ] && echo 201 || echo 101)" >"$WORK/time-$kind.log" 2>&1 &
       pid=$!
       for _ in $(seq 1 100); do
         [ -s "$dir/port" ] && break
@@ -1514,16 +1637,38 @@ if [ "$served" = yes ]; then
       done
       "$PY" - "$(cat "$dir/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" "$kind" "$version" <<'PY'
 import socket, ssl, statistics, sys, time
-ctx = ssl.create_default_context(cafile=sys.argv[2])
-if sys.argv[4] == "1.2":
-    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
-took = []
-for _ in range(200):
-    started = time.perf_counter()
-    with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10), server_hostname="localhost") as s:
-        took.append(time.perf_counter() - started)
-        version = s.version()
-print(f"  {sys.argv[3]}, {version}: {statistics.median(took) * 1000:.2f} ms a handshake (median of 200)")
+
+
+def context(curve=None):
+    ctx = ssl.create_default_context(cafile=sys.argv[2])
+    if sys.argv[4] == "1.2":
+        ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    if curve:
+        ctx.set_ecdh_curve(curve)
+    return ctx
+
+
+# The group Python's OpenSSL takes by default, as the server names it.
+with context().wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10), server_hostname="localhost") as s:
+    version = s.version()
+    s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+    data = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+default = data.decode().split("group=")[-1].split()[0]
+said = []
+for curve in (None, "X25519") if sys.argv[4] == "1.3" else (None,):
+    ctx = context(curve)
+    took = []
+    for _ in range(100):
+        started = time.perf_counter()
+        with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10), server_hostname="localhost"):
+            took.append(time.perf_counter() - started)
+    said.append(f"{statistics.median(took) * 1000:.2f} ms in " + (default if curve is None else "X25519"))
+print(f"  {sys.argv[3]}, {version}: " + ", ".join(said) + " (the median of 100 each)")
 PY
       kill "$pid" 2>/dev/null
       wait "$pid" 2>/dev/null
@@ -1666,8 +1811,10 @@ echo "== proving the checks can fail when the module is broken"
 # against OpenSSL, Python's ssl and the man in the middle (`client12`);
 # the server told to speak TLS 1.2 too, before the scripted client
 # (`server12`) or every client of its section (`server12-interop`); the
-# client resuming by OpenSSL's tickets (`client-resume`); or the client
-# sending early data to OpenSSL's server (`client-early`).
+# client resuming by OpenSSL's tickets (`client-resume`); the client
+# sending early data to OpenSSL's server (`client-early`); or
+# X25519MLKEM768 against OpenSSL, the client before s_server
+# (`client-hybrid`) or the server before s_client (`server-hybrid`).
 mutations=0
 # A scenario's break is caught by the scenario failing, by name - "FAILED:
 # <scenario>: " - whether the broken client then holds a connection or
@@ -1682,7 +1829,9 @@ prove_broken() {
   local mode="${5:-trace}"
   if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; } ||
      { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ]; } && [ "$served" = no ]; } ||
-     { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = client-resume ] || [ "$mode" = client-early ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
+     { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = client-resume ] || [ "$mode" = client-early ] || [ "$mode" = client-hybrid ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; } ||
+     { { [ "$mode" = client-hybrid ] || [ "$mode" = server-hybrid ]; } && [ "$hybrid_openssl" != yes ]; } ||
+     { [ "$mode" = server-hybrid ] && [ "$served" = no ]; }; then
     echo "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
   fi
@@ -1699,7 +1848,7 @@ PY
     status=1
     return
   fi
-  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ] || [ "$mode" = client-resume ] || [ "$mode" = client-early ]; then
+  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ] || [ "$mode" = client-resume ] || [ "$mode" = client-early ] || [ "$mode" = client-hybrid ] || [ "$mode" = server-hybrid ]; then
     if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched/tlsx" \
          "$REPO/bench/std_tls_exercise.iyi" >"$WORK/patched/build.log" 2>&1; then
       echo "  the $1 copy did not build:"
@@ -1732,6 +1881,9 @@ PY
     elif [ "$mode" = client-early ]; then
       client_early "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
       rc=$?
+    elif [ "$mode" = client-hybrid ]; then
+      client_hybrid "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
+      rc=$?
     else
       mkdir -p "$WORK/patched/srv"
       local keys="$SRV" flag=()
@@ -1750,7 +1902,11 @@ PY
         [ -s "$WORK/patched/srv/port" ] && break
         sleep 0.1
       done
-      "$PY" "$REPO/bench/std_tls_client.py" "$(cat "$WORK/patched/srv/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" ${flag[@]+"${flag[@]}"} >"$WORK/mut.out" 2>&1
+      if [ "$mode" = server-hybrid ]; then
+        hybrid_served "$(cat "$WORK/patched/srv/port" 2>/dev/null || echo 1)" ed25519 >"$WORK/mut.out" 2>&1
+      else
+        "$PY" "$REPO/bench/std_tls_client.py" "$(cat "$WORK/patched/srv/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" ${flag[@]+"${flag[@]}"} >"$WORK/mut.out" 2>&1
+      fi
       rc=$?
       kill "$pid" 2>/dev/null
       wait "$pid" 2>/dev/null
@@ -1906,7 +2062,26 @@ prove_broken "a share of small order taken" "zero-share:" \
 prove_broken "a HelloRetryRequest for secp256r1 answered with X25519 again" "hrr-p256: refused" \
   '      if reply.named_group == GROUP_SECP256R1' '      if false' scenarios
 prove_broken "a ServerHello's share taken in a group its ClientHello did not send" "FAILED: sh-wrong-group: " \
-  '    return TlsError.new("a ServerHello'"'"'s share in #{group_name(reply.named_group)}, where the share sent was #{group_name(group)}'"'"'s", TlsAlert::ILLEGAL_PARAMETER) unless reply.named_group == group' '' scenarios
+  '    unless shares.any? { |s| s[0] == reply.named_group }' '    unless true' scenarios
+# X25519MLKEM768 at the client: its ClientHello, the ServerHello's share,
+# a HelloRetryRequest for it, and the secret's order against OpenSSL.
+# Without the hybrid's share the first scenario to tell is sh-wrong-group,
+# whose refusal names the shares sent: X25519's alone.
+prove_broken "no X25519MLKEM768 share sent by default" "sh-wrong-group: refused with" \
+  '    if @config.post_quantum
+      pq' '    if false
+      pq' scenarios
+prove_broken "a ServerHello's X25519MLKEM768 share of any size taken" "hybrid-short-ct: refused with" \
+  '          if group == GROUP_X25519MLKEM768 && share.size != HYBRID_SERVER_SHARE' '          if false' scenarios
+prove_broken "a HelloRetryRequest for the X25519MLKEM768 share already sent taken as a group not offered" "hrr-hybrid: refused with" \
+  '          if group == GROUP_X25519 || (group == GROUP_X25519MLKEM768 && @config.post_quantum)' '          if group == GROUP_X25519' scenarios
+prove_broken "a hybrid secret whose X25519 half is taken however small its key" "hybrid-zero-x25519: refused with" \
+  '      return TlsError.new("the server'"'"'s X25519MLKEM768 share: its X25519 key gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)' \
+  '      shared = X25519.public_key(private_key) if shared.is_a?(CurveError)' scenarios
+prove_broken "the client's hybrid secret in the wrong order, X25519's first" "FAIL s_server -groups X25519MLKEM768" \
+  '      secret = opened + TlsBytes.of(shared)' '      secret = TlsBytes.of(shared) + opened' client-hybrid
+prove_broken "the client's hybrid share with its X25519 key first" "FAIL s_server -groups X25519MLKEM768" \
+  '      shares << {GROUP_X25519MLKEM768, pq.encapsulation_key + public_key}' '      shares << {GROUP_X25519MLKEM768, public_key + pq.encapsulation_key}' client-hybrid
 # TLS 1.2: opt-in, so the default must be 1.3 alone; then the ServerHello's
 # rules against the scripted server's 1.2 ServerHellos, the rest against
 # OpenSSL, Python and the man in the middle.
@@ -2034,6 +2209,23 @@ prove_broken "a private key that is not the certificate's taken" "FAIL another k
   '    return TlsError.new("the private key is not the certificate'"'"'s") unless TlsBytes.of(Ed25519.public_key(seed)) == key.bytes' '' config
 prove_broken "a secp256r1 share taken before an X25519 one" "FAIL both-shares " \
   '    @x25519 ? TlsConnection::GROUP_X25519 : (@p256 ? TlsConnection::GROUP_SECP256R1 : 0)' '    @p256 ? TlsConnection::GROUP_SECP256R1 : (@x25519 ? TlsConnection::GROUP_X25519 : 0)' server
+# X25519MLKEM768 at the server: preferred, its share's size, the modulus
+# check's alert, and the secret's and the share's order against OpenSSL.
+prove_broken "an X25519 share taken before X25519MLKEM768 is asked for" "FAIL OpenSSL, ed25519, an X25519 share, X25519MLKEM768 listed" \
+  '    return TlsConnection::GROUP_X25519MLKEM768 if @groups.includes?(TlsConnection::GROUP_X25519MLKEM768)' \
+  '    return TlsConnection::GROUP_X25519MLKEM768 if @hybrid' server-hybrid
+prove_broken "X25519 taken before X25519MLKEM768 when both shares come" "FAIL OpenSSL, ed25519, its default groups" \
+  '    return TlsConnection::GROUP_X25519MLKEM768 if @groups.includes?(TlsConnection::GROUP_X25519MLKEM768)
+' '' server-hybrid
+prove_broken "the server's hybrid secret in the wrong order, X25519's first" "FAIL OpenSSL, ed25519, X25519MLKEM768 alone" \
+  '      secret = sent_kem[1] + TlsBytes.of(shared)' '      secret = TlsBytes.of(shared) + sent_kem[1]' server-hybrid
+prove_broken "the server's hybrid share with its X25519 key first" "FAIL OpenSSL, ed25519, X25519MLKEM768 alone" \
+  '      public = sent_kem[0] + TlsBytes.of(X25519.public_key(private_key))' '      public = TlsBytes.of(X25519.public_key(private_key)) + sent_kem[0]' server-hybrid
+prove_broken "a client's X25519MLKEM768 share of any size taken" "FAIL hybrid-long-share " \
+  '        return TlsError.new("an X25519MLKEM768 share of #{key.size} bytes, not #{HYBRID_CLIENT_SHARE}", TlsAlert::ILLEGAL_PARAMETER) unless key.size == HYBRID_CLIENT_SHARE' '' server
+prove_broken "an encapsulation key that fails the modulus check answered with internal_error" "FAIL hybrid-modulus " \
+  '      return TlsError.new("the client'"'"'s X25519MLKEM768 share: #{sent_kem.message}", TlsAlert::ILLEGAL_PARAMETER) if sent_kem.is_a?(MlKemError)' \
+  '      return TlsError.new("the client'"'"'s X25519MLKEM768 share: #{sent_kem.message}", TlsAlert::INTERNAL_ERROR) if sent_kem.is_a?(MlKemError)' server
 prove_broken "a HelloRetryRequest for secp256r1 whatever the groups" "FAIL hrr " \
   '      group = offer.groups.includes?(GROUP_X25519) ? GROUP_X25519 : GROUP_SECP256R1' '      group = GROUP_SECP256R1' server
 prove_broken "the server's secp256r1 share not its key's" "FAIL p256-share " \

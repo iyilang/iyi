@@ -106,6 +106,7 @@ SCENARIOS = {
     "staple-type": "a CertificateStatus of status_type 2, where ocsp (1) was asked for",
     "staple-empty": "a CertificateStatus whose OCSPResponse is empty",
     "staple-twice": "the leaf's entry with status_request twice",
+    "staple-other-cert": "a staple the issuer signed, for another certificate of its own",
     "sni-ack-data": "a server_name acknowledgement that is not empty",
     "user-canceled": "a user_canceled warning before the echo",
     "padded-max": "the echo padded to 2^14 + 1 bytes of inner plaintext, the most section 5.4 allows",
@@ -201,6 +202,15 @@ class Pki:
         # A leaf whose keyUsage is keyEncipherment alone: it may not sign.
         no_sign = x509.KeyUsage(False, False, True, False, False, False, False, False, False)
         self.no_sign = issue("leaf", self.keys["p256"], self.inter.subject, self.inter_key, False, ["*.tls.test"], extra=[(no_sign, True)])
+
+    def staple_for(self, cert):
+        """A good OCSP response for *cert*, signed by the intermediate that
+        issued it: valid in every way, and for *cert* alone."""
+        from cryptography.x509 import ocsp
+        b = (ocsp.OCSPResponseBuilder().add_response(cert=cert, issuer=self.inter, algorithm=hashes.SHA1(),
+             cert_status=ocsp.OCSPCertStatus.GOOD, this_update=NOW - DAY, next_update=NOW + DAY,
+             revocation_time=None, revocation_reason=None).responder_id(ocsp.OCSPResponderEncoding.NAME, self.inter))
+        return b.sign(self.inter_key, hashes.SHA256()).public_bytes(serialization.Encoding.DER)
 
 
 def der(cert):
@@ -603,6 +613,9 @@ class Conn:
                     "staple-type": ext(5, b"\x02" + (3).to_bytes(3, "big") + b"abc"),
                     "staple-empty": ext(5, b"\x01\x00\x00\x00"),
                     "staple-twice": ext(5, b"\x01\x00\x00\x01\x00") * 2}.get(s, b"")
+        if s == "staple-other-cert":
+            staple = self.pki.staple_for(self.pki.wrong_host)
+            leaf_ext = ext(5, b"\x01" + len(staple).to_bytes(3, "big") + staple)
         entry_ext = [leaf_ext if i == 0 or s == "cert-entry-ext" else b"" for i in range(len(sent))]
         entries = b"" if s == "cert-empty" else b"".join(len(der(c)).to_bytes(3, "big") + der(c) + len(e).to_bytes(2, "big") + e
                                                          for c, e in zip(sent, entry_ext))
@@ -660,7 +673,7 @@ class Conn:
         if s in ("bad-finished", "bad-cv", "cv-pkcs1", "cv-wrong-curve", "unsolicited-ext", "alpn-unoffered",
                  "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs", "cert-many", "ku-no-sign",
                  "certreq-context", "cert-entry-ext", "sni-ack-data", "staple-garbage", "staple-type", "staple-empty",
-                 "staple-twice") or (psk is not None and s in ("resume-cert", "early-unoffered")):
+                 "staple-twice", "staple-other-cert") or (psk is not None and s in ("resume-cert", "early-unoffered")):
             return
 
         master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))

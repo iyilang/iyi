@@ -128,6 +128,7 @@ SCENARIOS = [
   {"staple-type", false, "a CertificateStatus of type 2, where ocsp (1) was asked for (illegal_parameter)"},
   {"staple-empty", false, "a CertificateStatus cut short (decode_error)"},
   {"staple-twice", false, "extension 5 twice in a certificate entry (illegal_parameter)"},
+  {"staple-other-cert", false, "the stapled OCSP response: ocsp: no response here is for CN=leaf, serial"},
   {"sni-ack-data", false, "a server_name acknowledgement that is not empty (decode_error)"},
   {"user-canceled", true, ""},
   {"padded-max", true, ""},

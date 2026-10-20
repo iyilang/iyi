@@ -78,7 +78,7 @@ end
 SCENARIOS = [
   {"ok", true, ""}, {"rsa", true, ""}, {"p384", true, ""}, {"ed25519", true, ""}, {"aes256", true, "TLS_AES_256_GCM_SHA384"},
   {"chacha", true, "TLS_CHACHA20_POLY1305_SHA256"}, {"ccs", true, ""}, {"fragmented", true, ""},
-  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"hrr-p256", true, ""}, {"keyupdate", true, ""}, {"slow-echo", true, ""}, {"client-rekey", true, ""},
+  {"certreq", true, ""}, {"certreq-ed25519", true, ""}, {"alpn", true, "http/1.1"}, {"hrr-cookie", true, ""}, {"hrr-p256", true, ""}, {"hrr-p384", true, ""}, {"keyupdate", true, ""}, {"slow-echo", true, ""}, {"client-rekey", true, ""},
   {"big", true, ""}, {"ticket", true, ""},
   {"bad-finished", false, "Finished does not match the handshake (decrypt_error)"},
   {"bad-cv", false, "CertificateVerify is not its key's signature (decrypt_error)"},
@@ -99,7 +99,8 @@ SCENARIOS = [
   {"tls12-versions", false, "the server does not speak TLS 1.3 (protocol_version)"},
   {"tls12-key-share", false, "extension 51 in a TLS 1.2 ServerHello, which was not offered for it (unsupported_extension)"},
   {"no-echo", false, "does not echo the session id"},
-  {"hrr-group", false, "a HelloRetryRequest for group 24, which was not offered (illegal_parameter)"},
+  {"hrr-group", false, "a HelloRetryRequest for group 25, which was not offered (illegal_parameter)"},
+  {"hrr-p384-bad", false, "the server's secp384r1 share: ecdsa: a point that is not on P-384 (illegal_parameter)"},
   {"unsolicited-ext", false, "extension 65281 in EncryptedExtensions, which was not offered"},
   {"alpn-unoffered", false, "chose \"spdy/3\" by ALPN, which was not offered"},
   {"wrong-host", false, "is not valid for wrong-host.tls.test"},
@@ -180,7 +181,7 @@ EARLY_SCENARIOS = [
 ]
 # The key exchange group a scenario that holds must have agreed on, where
 # it is not X25519.
-GROUPS = {"hrr-p256" => "secp256r1", "hybrid" => "X25519MLKEM768"}
+GROUPS = {"hrr-p256" => "secp256r1", "hrr-p384" => "secp384r1", "hybrid" => "X25519MLKEM768"}
 
 CLIENT_HELLO           = "010000c00303cb34ecb1e78163ba1c38c6dacb196a6dffa21a8d9912ec18a2ef6283024dece7000006130113031302010000910000000b0009000006736572766572ff01000100000a00140012001d0017001800190100010101020103010400230000003300260024001d002099381de560e4bd43d23d8e435a7dbafeb3c06e51c13cae4d5413691e529aaf2c002b0003020304000d0020001e040305030603020308040805080604010501060102010402050206020202002d00020101001c00024001"
 SERVER_HELLO           = "020000560303a6af06a4121860dc5e6e60249cd34c95930c8ac5cb1434dac155772ed3e2692800130100002e00330024001d0020c9828876112095fe66762bdbf7c672e156d6cc253b833df1dd69b1b04e751f0f002b00020304"
@@ -269,6 +270,8 @@ if args.size > 0 && args[0] == "scenarios"
     if s[1]
       check !conn.is_a?(TlsError), "#{s[0]}: refused: #{conn.is_a?(TlsError) ? conn.message : ""}"
       next unless conn.is_a?(TlsClient)
+      want = GROUPS[s[0]]? || "X25519"
+      check conn.named_group == want, "#{s[0]}: the group agreed is #{conn.named_group.inspect}, not #{want}"
       if s[0] == "keyupdate"
         # The server's keys move before its echo; this side's KeyUpdate goes
         # with its next write, never from a read.
@@ -306,8 +309,6 @@ if args.size > 0 && args[0] == "scenarios"
         held = held + 1
         next
       end
-      want = GROUPS[s[0]]? || "X25519"
-      check conn.named_group == want, "#{s[0]}: the group agreed is #{conn.named_group.inspect}, not #{want}"
       conn.write("hello")
       got = drain(conn)
       if s[2].starts_with?("read: ")

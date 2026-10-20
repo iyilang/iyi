@@ -68,8 +68,10 @@ SCENARIOS = {
     "tls12-versions": "a ServerHello whose supported_versions names TLS 1.2",
     "tls12-key-share": "a TLS 1.2 ServerHello carrying a key_share",
     "no-echo": "a ServerHello that does not echo the session id",
-    "hrr-group": "a HelloRetryRequest for secp384r1, which the client does not offer",
+    "hrr-group": "a HelloRetryRequest for secp521r1, which the client does not offer",
     "hrr-p256": "a HelloRetryRequest for secp256r1, then the handshake in it",
+    "hrr-p384": "a HelloRetryRequest for secp384r1, then the handshake in it",
+    "hrr-p384-bad": "a HelloRetryRequest for secp384r1, then a ServerHello whose share is off the curve",
     "sh-wrong-group": "a ServerHello's share in secp256r1, the client's having been X25519's",
     "unsolicited-ext": "an extension in EncryptedExtensions nobody offered",
     "alpn-unoffered": "ALPN answered with a protocol not offered",
@@ -384,16 +386,17 @@ class Conn:
         groups = exts.get(10, b"")
         if s == "hybrid-offer":
             offered = [int.from_bytes(groups[k:k + 2], "big") for k in range(2, len(groups), 2)]
-            assert offered == [0x11ec, 0x1d, 0x17], f"supported_groups {offered}, not X25519MLKEM768, X25519, secp256r1"
+            assert offered == [0x11ec, 0x1d, 0x17, 0x18], f"supported_groups {offered}, not X25519MLKEM768, X25519, secp256r1, secp384r1"
             entries = key_shares(exts)
             assert [(g, len(k)) for g, k in entries] == [(0x11ec, 1216), (0x1d, 32)], f"key shares {[(g, len(k)) for g, k in entries]}"
             assert entries[0][1][1184:] == entries[1][1], "the hybrid share's X25519 key is not the X25519 share"
-        if s in ("hrr-cookie", "hrr-group", "hrr-p256", "hrr-hybrid"):
+        if s in ("hrr-cookie", "hrr-group", "hrr-p256", "hrr-p384", "hrr-p384-bad", "hrr-hybrid"):
             offered = [int.from_bytes(groups[k:k + 2], "big") for k in range(2, len(groups), 2)]
-            assert 0x17 in offered, f"secp256r1 not among the client's groups {offered}"
+            assert 0x17 in offered and 0x18 in offered, f"secp256r1 and secp384r1 not among the client's groups {offered}"
             retry_random = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
-            asked = {"hrr-cookie": ext(44, struct.pack(">H", 8) + b"cookie!!"), "hrr-group": ext(51, b"\x00\x18"),
-                     "hrr-p256": ext(51, b"\x00\x17"), "hrr-hybrid": ext(51, b"\x11\xec")}[s]
+            asked = {"hrr-cookie": ext(44, struct.pack(">H", 8) + b"cookie!!"), "hrr-group": ext(51, b"\x00\x19"),
+                     "hrr-p256": ext(51, b"\x00\x17"), "hrr-p384": ext(51, b"\x00\x18"), "hrr-p384-bad": ext(51, b"\x00\x18"),
+                     "hrr-hybrid": ext(51, b"\x11\xec")}[s]
             e = ext(43, b"\x03\x04") + asked
             hrr = message(2, b"\x03\x03" + retry_random + bytes([len(sid)]) + sid + struct.pack(">HB", suite, 0) + struct.pack(">H", len(e)) + e)
             self.sock.sendall(plain(22, hrr))
@@ -404,13 +407,17 @@ class Conn:
             if s == "hrr-cookie":
                 assert exts.get(44) == struct.pack(">H", 8) + b"cookie!!", "no cookie echoed"
             transcript = bytes([254, 0, 0, len(first)]) + first + hrr + ch2
-        if s == "hrr-p256":
-            # The second ClientHello's one share, in secp256r1.
+        # The curve a HelloRetryRequest asked for, and its group and point size.
+        asked_curve = {"hrr-p256": (ec.SECP256R1(), 0x17, 65), "hrr-p384": (ec.SECP384R1(), 0x18, 97),
+                       "hrr-p384-bad": (ec.SECP384R1(), 0x18, 97)}.get(s)
+        if asked_curve:
+            # The second ClientHello's one share, in that group.
+            curve, wanted_group, size = asked_curve
             ks = exts.get(51, b"")
             g, l = struct.unpack(">HH", ks[2:6])
-            assert g == 0x17 and l == 65 and len(ks) == 6 + l, "the second ClientHello's share is not one secp256r1 point"
+            assert g == wanted_group and l == size and len(ks) == 6 + l, f"the second ClientHello's share is not one point in group {wanted_group:#x}"
             peer_point = ks[6:6 + l]
-            ec_key = ec.generate_private_key(ec.SECP256R1())
+            ec_key = ec.generate_private_key(curve)
         key = x25519.X25519PrivateKey.generate()
         mine = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
         if s == "zero-share":
@@ -418,9 +425,14 @@ class Conn:
         e = b""
         if s != "tls12":
             e += ext(43, b"\x03\x04")
-        if s in ("hrr-p256", "sh-wrong-group"):
-            other = ec_key if s == "hrr-p256" else ec.generate_private_key(ec.SECP256R1())
-            mine = other.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+        if asked_curve:
+            curve, wanted_group, size = asked_curve
+            mine = ec_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+            if s == "hrr-p384-bad":
+                mine = mine[:-1] + bytes([mine[-1] ^ 1])
+            e += ext(51, struct.pack(">HH", wanted_group, size) + mine)
+        elif s == "sh-wrong-group":
+            mine = ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
             e += ext(51, b"\x00\x17" + struct.pack(">H", 65) + mine)
         elif s.startswith("hybrid") and s != "hybrid-offer":
             # The client's hybrid share is its ML-KEM-768 encapsulation key,
@@ -460,11 +472,11 @@ class Conn:
             return
         self.sock.sendall(record)
         if s in ("tls12", "no-echo", "suite-unoffered", "zero-share", "compression", "sh-extension", "oversize", "sh-wrong-group",
-                 "sh-and-more", "hybrid-short-ct", "hybrid-long-ct", "hybrid-zero-x25519") or (psk is not None and s in ("resume-identity", "resume-hash", "resume-no-share")):
+                 "sh-and-more", "hybrid-short-ct", "hybrid-long-ct", "hybrid-zero-x25519", "hrr-p384-bad") or (psk is not None and s in ("resume-identity", "resume-hash", "resume-no-share")):
             return
         transcript += sh
-        if s == "hrr-p256":
-            shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), peer_point))
+        if asked_curve:
+            shared = ec_key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(asked_curve[0], peer_point))
         elif s == "hybrid":
             # The draft's section 4.3: ML-KEM's secret, then X25519's.
             shared = kem_secret + key.exchange(x25519.X25519PublicKey.from_public_bytes(hybrid[1184:]))

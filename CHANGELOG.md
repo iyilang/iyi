@@ -346,6 +346,50 @@
   `cryptography` has ML-KEM); and 12 broken copies. Where OpenSSL is
   older than 3.5, as in the Linux container, the gate says so and skips
   it.
+- **std/p384: ECDSA signatures and ECDH on P-384, in constant time.**
+  P-384 was checked (std/ecdsa, variable-time and public values alone)
+  and never signed with or agreed on: a P-384 key could not be a server's.
+  - `P384PrivateKey` is std/p256's design at six limbs - Montgomery
+    arithmetic with masked final subtractions, complete projective
+    formulas, 96 windows of four bits with every table entry read - in a
+    module of its own, as a limb count chosen at run time would put each
+    number on the heap.
+  - `sign` is RFC 6979's, the nonce two HMAC blocks wide under SHA-256;
+    `sign_digest` signs a digest already taken; `shared_secret` refuses a
+    point off the curve, a coordinate of p or more, and an answer at
+    infinity; `from_pkcs8` and `from_sec1` read OpenSSL's keys.
+  - Measured `--release`: a key in 0.348 ms, ECDH in 0.341 ms, a
+    signature in 0.377 ms; OpenSSL 3.5.5 here 0.091, 0.212 and 0.124 ms.
+
+  Held by `bench/std_p384_exercise.sh`: RFC 6979's A.2.6 byte for byte,
+  NIST's 25 CDH, 10 KeyPair and 12 PKV vectors, 1,500 signatures and 300
+  digests equal to Python's deterministic ECDSA, 500 shared secrets both
+  ways, Wycheproof's 790 ECDH cases, and 22 broken copies - the infinity
+  check among them, shown holding (0, 0) off once the curve check is
+  taken out.
+- **std/tls agrees keys in secp384r1 and signs with P-384 keys, at both
+  ends.** A server that takes P-384 alone could not be reached, a client
+  that offers it alone was refused, and a P-384 certificate could not be
+  served.
+  - The client lists secp384r1 after X25519 and secp256r1 and still sends
+    an X25519 share alone, answering a HelloRetryRequest for either
+    curve; TLS 1.2's ServerKeyExchange may name it too.
+  - The server takes a share in X25519, secp256r1 or secp384r1, in that
+    order, and asks again for the first of them a client lists when it
+    sent none; a client with none of them is refused (handshake_failure).
+  - `TlsServerConfig.from_pem` and `TlsIdentity` take a P-384 key, PKCS #8
+    or SEC 1 (naming its curve or not), and sign CertificateVerify with
+    ecdsa_secp384r1_sha384, refusing a client that does not list it.
+  - `key_exchange` names the group a connection agreed in.
+  - A handshake with a P-384 server took 1.24 ms (Python's ssl, median of
+    200), 1.94 with the key exchange in secp384r1 too; P-256's 0.70.
+
+  Held by `bench/std_tls_exercise.sh`: OpenSSL's `s_server -groups P-384`
+  and a P-384 certificate, TLS 1.2 in secp384r1, a P-384 client
+  certificate in both versions; against the server, `s_client -groups
+  P-384` and `-sigalgs ECDSA+SHA384`, Python's ssl in secp384r1, curl and
+  Node; eight new scripted scenarios, a P-521 group or certificate still
+  refused, and twelve new broken copies.
 
 ### Fixed
 

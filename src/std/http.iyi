@@ -50,10 +50,11 @@
 # connection over.
 # The socket parks under the runtime, so a slow client costs one fiber;
 # the listener's `close` ends `serve`. With `tls:` a `TlsServerConfig`
-# (std/tls's server: TLS 1.3, and 1.2 when its `min_version` asks) every
-# connection is TLS, its handshake first and close_notify last; inside
-# it, as in the clear, a connection that opens with HTTP/2's preface - as
-# one whose ALPN chose `h2` does - is served HTTP/2, any other HTTP/1.1.
+# (std/tls's server: TLS 1.3, and 1.2 when its `min_version` asks; an
+# Ed25519, P-256, P-384 or RSA certificate) every connection is TLS, its
+# handshake first and close_notify last; inside it, as in the clear, a
+# connection that opens with HTTP/2's preface - as one whose ALPN chose
+# `h2` does - is served HTTP/2, any other HTTP/1.1.
 # A config with `client_roots` asks each client for its certificate, and
 # a request carries the chain it presented in `peer_certificates`; an
 # `https://` request presents `HTTP.tls_config`'s `identity` when asked.

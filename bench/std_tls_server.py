@@ -6,8 +6,8 @@ bench/std_tls_exercise.sh.
 Writes WORKDIR/roots.pem (the root its certificates chain to),
 WORKDIR/client.pem and client.key (an Ed25519 certificate and key for the
 client to present when asked), WORKDIR/mlkem when its cryptography has
-ML-KEM-768 and WORKDIR/port, then answers connections one after another
-until killed.
+ML-KEM-768 and WORKDIR/port, then answers connections, each in a thread of
+its own, until killed.
 The scenario is the first label of the name the client sends by SNI:
 `ok.tls.test` is a correct handshake followed by an echo, `bad-finished`
 sends a Finished that does not match, and so on - SCENARIOS below lists
@@ -25,6 +25,7 @@ import socket
 import struct
 import time
 import sys
+import threading
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, hmac, serialization
@@ -834,19 +835,28 @@ def main():
             f.write("cryptography has ML-KEM-768\n")
     with open(os.path.join(work, "port"), "w") as f:
         f.write(str(server.getsockname()[1]))
+    # A thread a connection: the std/tls gate runs its broken copies side
+    # by side, and those against this server would otherwise wait on each
+    # other's slow scenarios, past their own clients' deadlines. A
+    # connection shares nothing with another but TICKETS, whose keys are
+    # random.
     while True:
         sock, _ = server.accept()
-        sock.settimeout(10)
+        threading.Thread(target=serve_one, args=(sock, pki), daemon=True).start()
+
+
+def serve_one(sock, pki):
+    sock.settimeout(10)
+    try:
+        Conn(sock, pki).serve()
+    except Exception as e:
+        print(f"server: {type(e).__name__}: {e}", file=sys.stderr)
+    finally:
         try:
-            Conn(sock, pki).serve()
-        except Exception as e:
-            print(f"server: {type(e).__name__}: {e}", file=sys.stderr)
-        finally:
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            sock.close()
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
 
 
 if __name__ == "__main__":

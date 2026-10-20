@@ -406,6 +406,16 @@
   `cryptography` has ML-KEM); and 12 broken copies. Where OpenSSL is
   older than 3.5, as in the Linux container, the gate says so and skips
   it.
+- **`bench/std_tls_exercise.sh` builds and runs its broken copies four
+  at a time (`MUT_JOBS`, as std_http's gate does).** Each copy has a
+  directory of its own - source, binary, compiler cache, servers, logs -
+  and the helpers it runs (`client_alert` to `client_hybrid`,
+  `tls12_round`, `server12_round`) write there rather than into the gate's
+  own; the answers are printed in order once all have ended. The scripted
+  TLS server (`bench/std_tls_server.py`) serves each connection in a
+  thread of its own, so copies against it no longer wait on each other's
+  slow scenarios. On Linux x86-64 with 12 threads the gate took 511
+  seconds, from 1537, with all 236 copies caught.
 
 ### Fixed
 

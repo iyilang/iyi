@@ -75,6 +75,11 @@ case "$(uname -s)" in
     WORK="$(cygpath -m "$WORK")"
     ;;
 esac
+# The scratch directory of the helpers that a broken copy also runs
+# (client_alert to client_hybrid, tls12_round, server12_round): the gate's
+# own here, and each copy's own in its subshell, so that copies run side
+# by side keep their servers' ports, logs and directories apart.
+CW="$WORK"
 
 SERVER_PID=""
 trap '[ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
@@ -268,7 +273,7 @@ else
     local port pid
     port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
     "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -tls1_3 -cert "$PKI/p256.pem" -key "$PKI/p256.key" \
-      >"$WORK/s_server-alert.log" 2>&1 </dev/null &
+      >"$CW/s_server-alert.log" 2>&1 </dev/null &
     pid=$!
     for _ in $(seq 1 50); do
       "$PY" -c "import socket; socket.create_connection(('127.0.0.1', $port), 1).close()" 2>/dev/null && break
@@ -278,11 +283,11 @@ else
     sleep 0.3
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
-    if grep -q "SSL alert number 42" "$WORK/s_server-alert.log"; then
+    if grep -q "SSL alert number 42" "$CW/s_server-alert.log"; then
       echo "  the std/tls client's refusal, as OpenSSL read it: alert bad_certificate (42)"
       return 0
     fi
-    echo "  FAIL no alert read by OpenSSL: $(tail -2 "$WORK/s_server-alert.log" | tr '\n' ' ')"
+    echo "  FAIL no alert read by OpenSSL: $(tail -2 "$CW/s_server-alert.log" | tr '\n' ' ')"
     return 1
   }
   if client_alert "$WORK/tls-release"; then
@@ -299,18 +304,18 @@ else
     # exported. Its stdin stays open, as at EOF it would shut down; and a
     # probe of the port would be that one connection, so its ACCEPT is
     # waited for instead.
-    : >"$WORK/s_server-export.log"
+    : >"$CW/s_server-export.log"
     { sleep 6 | "$OPENSSL" s_server -accept "127.0.0.1:$port" -naccept 1 -tls1_3 -cert "$PKI/p256.pem" -key "$PKI/p256.key" \
-      -keymatexport "EXPERIMENTAL iyi" -keymatexportlen 16 >"$WORK/s_server-export.log" 2>&1; } &
+      -keymatexport "EXPERIMENTAL iyi" -keymatexportlen 16 >"$CW/s_server-export.log" 2>&1; } &
     pid=$!
     for _ in $(seq 1 50); do
-      grep -q ACCEPT "$WORK/s_server-export.log" && break
+      grep -q ACCEPT "$CW/s_server-export.log" && break
       sleep 0.1
     done
     got="$(TLS_EXPORT="EXPERIMENTAL iyi" "$1" get "$port" "$PKI/ca.pem" localhost 2>&1 | grep -o 'exported=[0-9a-f]*' | cut -d= -f2)"
     # The server goes when its stdin ends, after the connection.
     wait "$pid" 2>/dev/null
-    theirs="$(grep -o 'Keying material: [0-9A-Fa-f]*' "$WORK/s_server-export.log" | head -1 | cut -d' ' -f3 | tr 'A-F' 'a-f')"
+    theirs="$(grep -o 'Keying material: [0-9A-Fa-f]*' "$CW/s_server-export.log" | head -1 | cut -d' ' -f3 | tr 'A-F' 'a-f')"
     if [ -n "$got" ] && [ "$got" = "$theirs" ]; then
       echo "  exported for \"EXPERIMENTAL iyi\", the same at both ends: $got"
       return 0
@@ -339,7 +344,7 @@ else
       port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
       # The name's own leaf is the second: sent only when the name matches.
       "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -msg -tls1_3 -cert "$PKI/$first.pem" -key "$PKI/$first.key" \
-        -cert2 "$PKI/$second.pem" -key2 "$PKI/$second.key" -servername "$name" -servername_fatal >"$WORK/s_server-sni.log" 2>&1 </dev/null &
+        -cert2 "$PKI/$second.pem" -key2 "$PKI/$second.key" -servername "$name" -servername_fatal >"$CW/s_server-sni.log" 2>&1 </dev/null &
       pid=$!
       for _ in $(seq 1 50); do
         "$PY" -c "import socket; socket.create_connection(('127.0.0.1', $port), 1).close()" 2>/dev/null && break
@@ -352,10 +357,10 @@ else
       if ! printf '%s' "$got" | grep -qF "HTTP/1.0 200 ok"; then
         echo "  FAIL server_name for \"$host\": $got"
         failed=1
-      elif ! grep -q "Hostname in TLS extension" "$WORK/s_server-sni.log"; then
+      elif ! grep -q "Hostname in TLS extension" "$CW/s_server-sni.log"; then
         echo "  server_name for \"$host\": s_server took it under -servername_fatal; this s_server does not print the name it read"
-      elif ! grep -qF "Hostname in TLS extension: \"$name\"" "$WORK/s_server-sni.log"; then
-        echo "  FAIL server_name for \"$host\": s_server read $(grep -m1 'Hostname in TLS extension' "$WORK/s_server-sni.log")"
+      elif ! grep -qF "Hostname in TLS extension: \"$name\"" "$CW/s_server-sni.log"; then
+        echo "  FAIL server_name for \"$host\": s_server read $(grep -m1 'Hostname in TLS extension' "$CW/s_server-sni.log")"
         failed=1
       else
         echo "  server_name for \"$host\", as OpenSSL read it: \"$name\", and its certificate checked: $got"
@@ -384,7 +389,7 @@ else
       port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
       # shellcheck disable=SC2086
       "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -tls1_3 -cert "$PKI/p256.pem" -key "$PKI/p256.key" $extra \
-        >"$WORK/s_server-resume.log" 2>&1 </dev/null &
+        >"$CW/s_server-resume.log" 2>&1 </dev/null &
       pid=$!
       for _ in $(seq 1 50); do
         "$PY" -c "import socket; socket.create_connection(('127.0.0.1', $port), 1).close()" 2>/dev/null && break
@@ -411,7 +416,7 @@ else
   # ticket allows none and both send it late; with secp256r1 alone, the
   # HelloRetryRequest refuses it and it is sent again after the handshake.
   client_early() {
-    local failed=0 port pid got label extra want log="$WORK/s_server-early.log"
+    local failed=0 port pid got label extra want log="$CW/s_server-early.log"
     for case in "taken:Accepted:-early_data" "a server that takes none:Late:" "through a HelloRetryRequest:Resent:-early_data -groups P-256"; do
       label="${case%%:*}"
       want="${case#*:}"
@@ -467,7 +472,7 @@ else
     local port pid got
     port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
     "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -tls1_3 -cert "$PKI/p256.pem" -key "$PKI/p256.key" -groups X25519MLKEM768 \
-      >"$WORK/s_server-hybrid.log" 2>&1 </dev/null &
+      >"$CW/s_server-hybrid.log" 2>&1 </dev/null &
     pid=$!
     for _ in $(seq 1 50); do
       "$PY" -c "import socket; socket.create_connection(('127.0.0.1', $port), 1).close()" 2>/dev/null && break
@@ -565,17 +570,17 @@ else
       local label="$1" want="$2" mode="$3"
       shift 3
       port="$(free_port)"
-      "$OPENSSL" s_server -accept "127.0.0.1:$port" -www "$@" >"$WORK/s12.log" 2>&1 </dev/null &
+      "$OPENSSL" s_server -accept "127.0.0.1:$port" -www "$@" >"$CW/s12.log" 2>&1 </dev/null &
       pid=$!
       wait_port "$port"
       if [ "$mode" = direct ]; then
         got="$(TLS_MIN_VERSION=1.2 "$bin" get "$port" ca.pem localhost "${ALPN12:--}" ${CLIENT12[@]+"${CLIENT12[@]}"} 2>&1)"
       else
-        rm -f "$WORK/proxyport"
-        "$PY" "$REPO/bench/std_tls12_proxy.py" "$WORK/proxyport" "$port" "$mode" >"$WORK/proxy.log" 2>&1 &
+        rm -f "$CW/proxyport"
+        "$PY" "$REPO/bench/std_tls12_proxy.py" "$CW/proxyport" "$port" "$mode" >"$CW/proxy.log" 2>&1 &
         proxy=$!
-        for _ in $(seq 1 50); do [ -s "$WORK/proxyport" ] && break; sleep 0.1; done
-        got="$(TLS_MIN_VERSION=1.2 "$bin" get "$(cat "$WORK/proxyport")" ca.pem localhost 2>&1)"
+        for _ in $(seq 1 50); do [ -s "$CW/proxyport" ] && break; sleep 0.1; done
+        got="$(TLS_MIN_VERSION=1.2 "$bin" get "$(cat "$CW/proxyport")" ca.pem localhost 2>&1)"
         kill "$proxy" 2>/dev/null
         wait "$proxy" 2>/dev/null
       fi
@@ -632,15 +637,15 @@ else
       sentinel -tls1_2 -cert p256.pem -key p256.key
     # The exporter (RFC 5705) against OpenSSL's, one connection.
     port="$(free_port)"
-    : >"$WORK/s12-export.log"
+    : >"$CW/s12-export.log"
     { sleep 6 | "$OPENSSL" s_server -accept "127.0.0.1:$port" -naccept 1 -tls1_2 -cert p256.pem -key p256.key \
-      -keymatexport "EXPERIMENTAL iyi" -keymatexportlen 16 >"$WORK/s12-export.log" 2>&1; } &
+      -keymatexport "EXPERIMENTAL iyi" -keymatexportlen 16 >"$CW/s12-export.log" 2>&1; } &
     pid=$!
-    for _ in $(seq 1 50); do grep -q ACCEPT "$WORK/s12-export.log" && break; sleep 0.1; done
+    for _ in $(seq 1 50); do grep -q ACCEPT "$CW/s12-export.log" && break; sleep 0.1; done
     got="$(TLS_MIN_VERSION=1.2 TLS_EXPORT="EXPERIMENTAL iyi" "$bin" get "$port" ca.pem localhost 2>&1 | grep -o 'exported=[0-9a-f]*' | cut -d= -f2)"
     wait "$pid" 2>/dev/null
     local theirs
-    theirs="$(grep -o 'Keying material: [0-9A-Fa-f]*' "$WORK/s12-export.log" | head -1 | cut -d' ' -f3 | tr 'A-F' 'a-f')"
+    theirs="$(grep -o 'Keying material: [0-9A-Fa-f]*' "$CW/s12-export.log" | head -1 | cut -d' ' -f3 | tr 'A-F' 'a-f')"
     if [ -n "$got" ] && [ "$got" = "$theirs" ]; then
       echo "  exported for \"EXPERIMENTAL iyi\" over TLS 1.2, the same at both ends: $got"
     else
@@ -650,15 +655,15 @@ else
     # A HelloRequest: s_server renegotiates ("r" on its stdin) once "first"
     # has reached it; its -msg log must show the no_renegotiation warning.
     port="$(free_port)"
-    rm -f "$WORK/fifo12" && mkfifo "$WORK/fifo12"
-    : >"$WORK/s12-reneg.log"
-    "$OPENSSL" s_server -accept "127.0.0.1:$port" -naccept 1 -tls1_2 -msg -cert p256.pem -key p256.key <"$WORK/fifo12" >"$WORK/s12-reneg.log" 2>&1 &
+    rm -f "$CW/fifo12" && mkfifo "$CW/fifo12"
+    : >"$CW/s12-reneg.log"
+    "$OPENSSL" s_server -accept "127.0.0.1:$port" -naccept 1 -tls1_2 -msg -cert p256.pem -key p256.key <"$CW/fifo12" >"$CW/s12-reneg.log" 2>&1 &
     pid=$!
-    exec 7>"$WORK/fifo12"
-    for _ in $(seq 1 50); do grep -q ACCEPT "$WORK/s12-reneg.log" && break; sleep 0.1; done
-    "$bin" renegotiate "$port" ca.pem localhost >"$WORK/reneg.out" 2>&1 &
+    exec 7>"$CW/fifo12"
+    for _ in $(seq 1 50); do grep -q ACCEPT "$CW/s12-reneg.log" && break; sleep 0.1; done
+    "$bin" renegotiate "$port" ca.pem localhost >"$CW/reneg.out" 2>&1 &
     local client=$!
-    for _ in $(seq 1 50); do grep -q '^first' "$WORK/s12-reneg.log" && break; sleep 0.1; done
+    for _ in $(seq 1 50); do grep -q '^first' "$CW/s12-reneg.log" && break; sleep 0.1; done
     # In a subshell: a server already gone would SIGPIPE the gate itself.
     (echo r >&7) 2>/dev/null
     wait "$client"
@@ -666,10 +671,10 @@ else
     sleep 0.3
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
-    if grep -q 'HelloRequest' "$WORK/s12-reneg.log" && grep -q 'warning no_renegotiation' "$WORK/s12-reneg.log"; then
-      echo "  a HelloRequest answered: OpenSSL read \"warning no_renegotiation\"; the client: $(head -1 "$WORK/reneg.out")"
+    if grep -q 'HelloRequest' "$CW/s12-reneg.log" && grep -q 'warning no_renegotiation' "$CW/s12-reneg.log"; then
+      echo "  a HelloRequest answered: OpenSSL read \"warning no_renegotiation\"; the client: $(head -1 "$CW/reneg.out")"
     else
-      echo "  FAIL a HelloRequest: OpenSSL read no no_renegotiation: $(tr '\n' ' ' <"$WORK/reneg.out")"
+      echo "  FAIL a HelloRequest: OpenSSL read no no_renegotiation: $(tr '\n' ' ' <"$CW/reneg.out")"
       failed=1
     fi
     cd "$REPO" || return 1
@@ -1472,22 +1477,22 @@ server12_round() {
       echo "  $label: $(printf '%s' "$got" | grep -F -e "$want" | head -1)"
     else
       echo "  FAIL $label: expected \"$want\", got: $(printf '%s' "$got" | tail -3)"
-      echo "    the server said: $(tail -1 "$WORK/serve12.log")"
+      echo "    the server said: $(tail -1 "$CW/serve12.log")"
       failed=1
     fi
   }
   # start12 <dir> [optional]: the binary serving the chain, key and client
   # roots in <dir>, a certificate not required when asked to be optional.
   start12() {
-    rm -rf "$WORK/srv12" && mkdir -p "$WORK/srv12" && cp "$1"/*.pem "$WORK/srv12/"
-    [ -n "${2:-}" ] && : >"$WORK/srv12/client-optional"
-    TLS_MIN_VERSION=1.2 "$bin" serve "$WORK/srv12" 1000 >"$WORK/serve12.log" 2>&1 &
+    rm -rf "$CW/srv12" && mkdir -p "$CW/srv12" && cp "$1"/*.pem "$CW/srv12/"
+    [ -n "${2:-}" ] && : >"$CW/srv12/client-optional"
+    TLS_MIN_VERSION=1.2 "$bin" serve "$CW/srv12" 1000 >"$CW/serve12.log" 2>&1 &
     pid=$!
     for _ in $(seq 1 100); do
-      [ -s "$WORK/srv12/port" ] && break
+      [ -s "$CW/srv12/port" ] && break
       sleep 0.1
     done
-    port="$(cat "$WORK/srv12/port" 2>/dev/null || echo 1)"
+    port="$(cat "$CW/srv12/port" 2>/dev/null || echo 1)"
   }
   stop12() {
     kill "$pid" 2>/dev/null
@@ -1496,11 +1501,11 @@ server12_round() {
   scripted12() {
     local label="$1"
     shift
-    if "$PY" "$REPO/bench/std_tls_client.py" "$port" "$SRV/roots.pem" --tls12 "$@" >"$WORK/client12.out" 2>&1; then
-      echo "  the scripted client, $label: $(tail -1 "$WORK/client12.out")"
+    if "$PY" "$REPO/bench/std_tls_client.py" "$port" "$SRV/roots.pem" --tls12 "$@" >"$CW/client12.out" 2>&1; then
+      echo "  the scripted client, $label: $(tail -1 "$CW/client12.out")"
     else
-      grep -F "FAIL" "$WORK/client12.out" | sed 's/^/  /'
-      tail -1 "$WORK/client12.out" | sed 's/^/  /'
+      grep -F "FAIL" "$CW/client12.out" | sed 's/^/  /'
+      tail -1 "$CW/client12.out" | sed 's/^/  /'
       failed=1
     fi
   }
@@ -1602,14 +1607,14 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
         # connection, once it has said it.
         curl12() {
           local before
-          before="$(wc -l <"$WORK/serve12.log")"
+          before="$(wc -l <"$CW/serve12.log")"
           curl -sS --http1.1 --tls-max 1.2 ${norevoke[@]+"${norevoke[@]}"} \
             --cacert "$SRV/roots.pem" --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/" 2>&1
           for _ in $(seq 1 30); do
-            [ "$(wc -l <"$WORK/serve12.log")" -gt "$before" ] && break
+            [ "$(wc -l <"$CW/serve12.log")" -gt "$before" ] && break
             sleep 0.1
           done
-          tail -n +"$((before + 1))" "$WORK/serve12.log"
+          tail -n +"$((before + 1))" "$CW/serve12.log"
         }
         if curl --version | head -1 | grep -q 'LibreSSL/'; then
           # LibreSSL - macOS's curl's, 3.3.6 on the darwin runner - has
@@ -1893,126 +1898,185 @@ mutations=0
 # it sees first is a race with the scripted server's hang-up, and darwin's
 # runners held connections where Linux read refusals (bad-finished,
 # certreq-no-sigalgs, unsolicited-ext).
+#
+# The copies are patched one after another and each is built and run in a
+# subshell of its own, MUT_JOBS at a time, as std_http's are. With its 236
+# copies made one at a time this gate took 1537 seconds; four at a time,
+# 511 (Linux, x86-64, 12 threads), every copy still caught. A copy's
+# build took about 2 seconds and 0.7 GB. A copy keeps everything in
+# $WORK/mut-<n> - its source, binary, servers and logs (CW, above) - and
+# its own compiler cache: the cache is named by the exercise's path, which
+# every copy shares, and two builds of different modules writing one cache
+# at once would race; a build into a cache of its own took 1.95 seconds.
+# Each answer goes to $WORK/mutres/<n>, and they are printed in order once
+# all have ended. The running copies are counted by their own pids, not
+# `jobs -rp`: the scripted server is a job of this shell too.
+MUT_JOBS="${MUT_JOBS:-4}"
+mutation_pids=""
+mkdir -p "$WORK/mutres"
+mutation_said() { # mutation_said <n> <line>...: the n-th proof's answer
+  local n="$1"
+  shift
+  printf '%s\n' "$@" >"$WORK/mutres/$n"
+}
+mutation_failed() { # the same, and the gate does not hold
+  mutation_said "$@"
+  touch "$WORK/mutres/failed"
+}
+# prove_copy <n> <dir> <label> <phrase> <old> <new> [mode]: the n-th copy,
+# patched into <dir>/patched, built and run; in a subshell of its own.
+prove_copy() {
+  local n="$1" W="$2" label="$3" phrase="$4" mode="${7:-trace}" rc
+  CW="$W"
+  export IYI_CACHE_DIR="$W/cache"
+  if ! IYI_PATH="$W/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$W/tlsx" \
+       "$REPO/bench/std_tls_exercise.iyi" >"$W/build.log" 2>&1; then
+    mutation_failed "$n" "  the $label copy did not build:" "$(tail -3 "$W/build.log" | sed 's/^/    /')"
+    return
+  fi
+  case "$mode" in
+    trace)
+      "$W/tlsx" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    scenarios)
+      "$W/tlsx" scenarios "$SERVER_DIR" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    config)
+      bash "$WORK/server-configs.sh" "$W/tlsx" "$SRV" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    client-alert)
+      client_alert "$W/tlsx" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    client-export)
+      client_export "$W/tlsx" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    client-sni)
+      client_sni "$W/tlsx" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    client12)
+      tls12_round "$W/tlsx" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    server12 | server12-interop)
+      server12_round "$W/tlsx" "$([ "$mode" = server12 ] && echo scripted || echo all)" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    client-resume)
+      client_resume "$W/tlsx" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    client-early)
+      client_early "$W/tlsx" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    client-hybrid)
+      client_hybrid "$W/tlsx" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
+    *)
+      mkdir -p "$W/srv"
+      local keys="$SRV" flag=() pid
+      [ "$mode" = server-p256 ] && keys="$SRV/p256" && flag=(--p256)
+      [ "$mode" = server-p384 ] && keys="$SRV/p384" && flag=(--p384)
+      [ "$mode" = server-rsa ] && keys="$SRV/rsa2048" && flag=(--rsa ok pss-sha384 pss-sha512 no-rsa-pss no-ed25519 no-p256)
+      [ "$mode" = server-mtls ] && keys="$SRV/mtls" && flag=(--mtls "$SRV/mtls")
+      [ "$mode" = server-mtls-optional ] && keys="$SRV/mtls" && flag=(--mtls "$SRV/mtls" mtls-optional-none mtls-ok mtls-bad-cv)
+      cp "$keys/chain.pem" "$keys/key.pem" "$W/srv/"
+      # The second identity too, for other.test, where there is one.
+      cp "$keys"/other-chain.pem "$keys"/other-key.pem "$W/srv/" 2>/dev/null
+      case "$mode" in server-mtls*) cp "$keys/client-roots.pem" "$keys/no-early" "$W/srv/" ;; esac
+      [ "$mode" = server-mtls-optional ] && : >"$W/srv/client-optional"
+      "$W/tlsx" serve "$W/srv" 1000 >"$W/serve.log" 2>&1 &
+      pid=$!
+      for _ in $(seq 1 100); do
+        [ -s "$W/srv/port" ] && break
+        sleep 0.1
+      done
+      if [ "$mode" = server-hybrid ]; then
+        hybrid_served "$(cat "$W/srv/port" 2>/dev/null || echo 1)" ed25519 >"$W/mut.out" 2>&1
+      else
+        "$PY" "$REPO/bench/std_tls_client.py" "$(cat "$W/srv/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" ${flag[@]+"${flag[@]}"} >"$W/mut.out" 2>&1
+      fi
+      rc=$?
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      ;;
+  esac
+  if [ "$rc" -eq 0 ]; then
+    case "$mode" in
+      trace | scenarios) mutation_failed "$n" "  the exercise PASSED on $label" ;;
+      *) mutation_failed "$n" "  the server held on $label" ;;
+    esac
+    return
+  elif ! grep -qF -e "$phrase" "$W/mut.out"; then
+    # The panic's sentence, not the last frames of its backtrace.
+    case "$mode" in
+      trace | scenarios) mutation_failed "$n" "  $label failed, but not where it should have:" \
+        "$({ grep -m1 -F 'panic' "$W/mut.out" || tail -2 "$W/mut.out"; } | sed 's/^/    /')" ;;
+      *) mutation_failed "$n" "  $label failed, but not where it should have:" "$(grep -F "FAIL" "$W/mut.out" | head -2 | sed 's/^/    /')" ;;
+    esac
+    return
+  fi
+  mutation_said "$n" "  $label is caught"
+  # A caught copy's directory goes: 236 binaries and caches would otherwise
+  # pile up until the gate ends. One that was not caught is kept, to read.
+  rm -rf "$W"
+}
 prove_broken() {
   mutations=$((mutations + 1))
-  rm -rf "$WORK/patched"
-  mkdir -p "$WORK/patched/std"
-  local mode="${5:-trace}"
+  local n="$mutations" mode="${5:-trace}" W="$WORK/mut-$mutations"
   if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; } ||
      { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-p384 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ]; } && [ "$served" = no ]; } ||
      { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = client-resume ] || [ "$mode" = client-early ] || [ "$mode" = client-hybrid ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; } ||
      { { [ "$mode" = client-hybrid ] || [ "$mode" = server-hybrid ]; } && [ "$hybrid_openssl" != yes ]; } ||
      { [ "$mode" = server-hybrid ] && [ "$served" = no ]; }; then
-    echo "  no scripted peer or python3 here, so the $1 proof is unmeasured"
+    mutation_said "$n" "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
   fi
+  mkdir -p "$W/patched/std"
   if ! OLD="$3" NEW="$4" "$PY" - <<PY
 import os
 from pathlib import Path
 src = Path("$REPO/src/std/tls.iyi").read_text(encoding="utf-8")
 if src.count(os.environ["OLD"]) != 1:
     raise SystemExit("patch site missing or not one")
-Path("$WORK/patched/std/tls.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1), encoding="utf-8")
+Path("$W/patched/std/tls.iyi").write_text(src.replace(os.environ["OLD"], os.environ["NEW"], 1), encoding="utf-8")
 PY
   then
-    echo "  the $1 patch did not apply"
-    status=1
+    mutation_failed "$n" "  the $1 patch did not apply"
     return
   fi
-  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-p384 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ] || [ "$mode" = client-resume ] || [ "$mode" = client-early ] || [ "$mode" = client-hybrid ] || [ "$mode" = server-hybrid ]; then
-    if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched/tlsx" \
-         "$REPO/bench/std_tls_exercise.iyi" >"$WORK/patched/build.log" 2>&1; then
-      echo "  the $1 copy did not build:"
-      tail -3 "$WORK/patched/build.log" | sed 's/^/    /'
-      status=1
-      return
-    fi
-    local rc
-    if [ "$mode" = config ]; then
-      bash "$WORK/server-configs.sh" "$WORK/patched/tlsx" "$SRV" >"$WORK/mut.out" 2>&1
-      rc=$?
-    elif [ "$mode" = client-alert ]; then
-      client_alert "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
-      rc=$?
-    elif [ "$mode" = client-export ]; then
-      client_export "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
-      rc=$?
-    elif [ "$mode" = client-sni ]; then
-      client_sni "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
-      rc=$?
-    elif [ "$mode" = client12 ]; then
-      tls12_round "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
-      rc=$?
-    elif [ "$mode" = server12 ] || [ "$mode" = server12-interop ]; then
-      server12_round "$WORK/patched/tlsx" "$([ "$mode" = server12 ] && echo scripted || echo all)" >"$WORK/mut.out" 2>&1
-      rc=$?
-    elif [ "$mode" = client-resume ]; then
-      client_resume "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
-      rc=$?
-    elif [ "$mode" = client-early ]; then
-      client_early "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
-      rc=$?
-    elif [ "$mode" = client-hybrid ]; then
-      client_hybrid "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
-      rc=$?
-    else
-      mkdir -p "$WORK/patched/srv"
-      local keys="$SRV" flag=()
-      [ "$mode" = server-p256 ] && keys="$SRV/p256" && flag=(--p256)
-      [ "$mode" = server-p384 ] && keys="$SRV/p384" && flag=(--p384)
-      [ "$mode" = server-rsa ] && keys="$SRV/rsa2048" && flag=(--rsa ok pss-sha384 pss-sha512 no-rsa-pss no-ed25519 no-p256)
-      [ "$mode" = server-mtls ] && keys="$SRV/mtls" && flag=(--mtls "$SRV/mtls")
-      [ "$mode" = server-mtls-optional ] && keys="$SRV/mtls" && flag=(--mtls "$SRV/mtls" mtls-optional-none mtls-ok mtls-bad-cv)
-      cp "$keys/chain.pem" "$keys/key.pem" "$WORK/patched/srv/"
-      # The second identity too, for other.test, where there is one.
-      cp "$keys"/other-chain.pem "$keys"/other-key.pem "$WORK/patched/srv/" 2>/dev/null
-      case "$mode" in server-mtls*) cp "$keys/client-roots.pem" "$keys/no-early" "$WORK/patched/srv/" ;; esac
-      [ "$mode" = server-mtls-optional ] && : >"$WORK/patched/srv/client-optional"
-      "$WORK/patched/tlsx" serve "$WORK/patched/srv" 1000 >"$WORK/patched/serve.log" 2>&1 &
-      local pid=$!
-      for _ in $(seq 1 100); do
-        [ -s "$WORK/patched/srv/port" ] && break
-        sleep 0.1
-      done
-      if [ "$mode" = server-hybrid ]; then
-        hybrid_served "$(cat "$WORK/patched/srv/port" 2>/dev/null || echo 1)" ed25519 >"$WORK/mut.out" 2>&1
-      else
-        "$PY" "$REPO/bench/std_tls_client.py" "$(cat "$WORK/patched/srv/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" ${flag[@]+"${flag[@]}"} >"$WORK/mut.out" 2>&1
-      fi
-      rc=$?
-      kill "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
-    fi
-    if [ "$rc" -eq 0 ]; then
-      echo "  the server held on $1"
-      status=1
-    elif grep -qF -e "$2" "$WORK/mut.out"; then
-      echo "  $1 is caught"
-    else
-      echo "  $1 failed, but not where it should have:"
-      grep -F "FAIL" "$WORK/mut.out" | head -2 | sed 's/^/    /'
-      status=1
-    fi
-    return
-  fi
-  if [ "$mode" = scenarios ]; then
-    set -- "$1" "$2" scenarios "$SERVER_DIR"
-  else
-    set -- "$1" "$2"
-  fi
-  local label="$1" phrase="$2"
-  shift 2
-  if IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" run "$REPO/bench/std_tls_exercise.iyi" -- "$@" >"$WORK/mut.out" 2>&1; then
-    echo "  the exercise PASSED on $label"
-    status=1
-  elif grep -qF -e "$phrase" "$WORK/mut.out"; then
-    echo "  $label is caught"
-  else
-    # The panic's sentence, not the last frames of its backtrace.
-    echo "  $label failed, but not where it should have:"
-    { grep -m1 -F 'panic' "$WORK/mut.out" || tail -2 "$WORK/mut.out"; } | sed 's/^/    /'
-    status=1
-  fi
+  prove_copy "$n" "$W" "$@" &
+  mutation_pids="$mutation_pids $!"
+  # `wait -n` where the shell has it (bash 4.3); darwin's 3.2 polls.
+  local pid running
+  while :; do
+    running=""
+    for pid in $mutation_pids; do
+      kill -0 "$pid" 2>/dev/null && running="$running $pid"
+    done
+    mutation_pids="$running"
+    [ "$(echo $mutation_pids | wc -w)" -lt "$MUT_JOBS" ] && break
+    wait -n 2>/dev/null || sleep 0.2
+  done
+}
+mutations_report() { # every answer, in the order the proofs were made
+  local pid n=1
+  for pid in $mutation_pids; do
+    wait "$pid"
+  done
+  while [ "$n" -le "$mutations" ]; do
+    cat "$WORK/mutres/$n"
+    n=$((n + 1))
+  done
+  [ -e "$WORK/mutres/failed" ] && status=1
+  return 0
 }
 # Against the scripted server a broken check shows as a refusal for another
 # reason: the server hangs up after the one rule it breaks, so the client
@@ -2616,6 +2680,7 @@ if [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1; then
 else
   echo "  no openssl here (or Windows), so the server's TLS 1.2 exporter proof is unmeasured"
 fi
+mutations_report
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/tls exercise holds ($mutations breaks caught)"

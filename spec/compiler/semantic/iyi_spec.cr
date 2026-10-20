@@ -4833,5 +4833,108 @@ describe "Semantic: iyi" do
         end
         CODE
     end
+
+    # SPEC.md III.4.13: a parallel task's block may run on another core,
+    # and is held to what a thread's block is. The stub stands in for the
+    # prelude's group, known by its owner's name as the thread is.
+    describe "the block spawn_parallel runs" do
+      group_stub = <<-STUB
+        class IyiGroup
+          def spawn_parallel(&block : -> T) : Nil forall T
+            keep = block
+            nil
+          end
+        end
+
+        G = IyiGroup.new
+
+        STUB
+
+      it "lets it capture integers, strings and a value whose fields nothing assigns" do
+        assert_type(group_stub + <<-CODE, filename: "x.iyi") { nil_type }
+          class Totals
+            def initialize(@limit : Int32)
+            end
+
+            def limit : Int32
+              @limit
+            end
+          end
+
+          n = 3
+          name = "seven"
+          totals = Totals.new(4)
+          g = G
+          g.spawn_parallel do
+            totals.limit
+            n
+            name
+          end
+          CODE
+      end
+
+      it "refuses a captured value that is not shareable, by name" do
+        assert_error(group_stub + <<-CODE, "the block spawn_parallel runs on another thread captures `counter : Counter`, which is not Share: Counter's field @count is given a setter `count=` (SPEC.md III.4.4)", filename: "x.iyi")
+          class Counter
+            def initialize
+              @count = 0
+            end
+
+            def count=(value : Int32)
+              @count = value
+            end
+          end
+
+          counter = Counter.new
+          g = G
+          g.spawn_parallel do
+            counter.count = 1
+            nil
+          end
+          CODE
+      end
+
+      it "refuses a captured local assigned after the spawn" do
+        assert_error(group_stub + <<-CODE, "`count` is assigned here, after the task was spawned, and the block spawn_parallel runs on another thread", filename: "x.iyi")
+          count = 1
+          g = G
+          g.spawn_parallel { count }
+          count = 2
+          CODE
+      end
+
+      it "refuses a local of a loop that spawns again" do
+        assert_error(group_stub + <<-CODE, "in a loop or a block that spawns the task again", filename: "x.iyi")
+          g = G
+          going = true
+          while going
+            seed = 10
+            g.spawn_parallel { seed }
+            going = false
+          end
+          CODE
+      end
+
+      it "refuses a constant the block names whose type is not shareable" do
+        assert_error(group_stub + <<-CODE, "the block spawn_parallel runs on another thread names the constant `TALLY : Tally`, which is not Share: Tally's field @total is assigned in `bump` (SPEC.md III.4.5)", filename: "x.iyi")
+          class Tally
+            def initialize
+              @total = 0
+            end
+
+            def bump : Nil
+              @total = 1
+            end
+          end
+
+          TALLY = Tally.new
+          g = G
+          g.spawn_parallel do
+            TALLY.bump
+            nil
+          end
+          CODE
+      end
+    end
   end
 end

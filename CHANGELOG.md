@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Added
+
+- **Tasks run across cores: `g.spawn_parallel { }` starts a task on a
+  pool of worker threads (SPEC.md III.4.13).** The pool starts at the
+  first parallel spawn with as many workers as the cores the process may
+  run on, or `IYI_WORKERS=n`, or `IyiWorkers.count = n` before the first
+  parallel task. A parallel task waits until a worker is free - in the
+  queue of the worker whose task spawned it, in an injection queue when a
+  thread outside the pool did, or stolen by an idle worker - and the
+  worker that starts it keeps it to its end: LLVM fixes a thread-local's
+  address for a function's life, and iyi's codegen already relies on a
+  fiber never moving. Each worker is an `IyiThread` with its own run
+  queue, sleep heap, poller and stack pool, so the collector stops and
+  scans it as any thread. Wakes cross threads through an inbox per thread
+  and a doorbell its poller waits on (an eventfd on Linux, `EVFILT_USER`
+  on darwin, a posted completion on Windows), rung only for a thread
+  marked idle under the lock its wakers take; a cancel of a task on
+  another thread is delivered to that thread, and a task still waiting in
+  the pool starts cancelled. Channels, groups and joins are behind one
+  scheduler lock once a second scheduler thread exists, and a program
+  with one pays a load and a branch. The block `spawn_parallel` runs is
+  gated by `Share` exactly as `IyiThread.start`'s is, and `Channel(T)` is
+  `@[Share]` whenever `T` is; `g.spawn` is unchanged. A deadlock is
+  named when every scheduler thread is idle with nothing to wait for.
+  `bench/parallel_exercise.sh` holds it, plain and release: 16 CPU-bound
+  tasks took 715 ms on one worker, 360 on two (1.99x), 185 on four
+  (3.86x) and 103 on eight (6.94x), release, best of three, on a 12-core
+  machine other jobs shared, and four workers are held to 0.6 x 4; it
+  checks placement on several workers with no task moving across a park,
+  a thousand tasks run once each, 16,000,000 atomic adds from eight tasks
+  losing none, 120,000 values from six parallel senders received in each
+  sender's order, a cancel reaching a sleeper, a channel waiter and queued
+  tasks on other threads in about 100 ms, steals, lists of 150,000 nodes
+  on eight workers' stacks surviving the collections, the typed group,
+  and four programs `Share` refuses. Broken copies are caught by name: a
+  wake that does not ring (the join still waiting after 5,000 ms), a steal
+  that leaves the task queued (handed out twice), a cancel never
+  delivered, a cancel that skips queued tasks, the race step's add made a
+  load and a store (8,403,659 of 16,000,000 adds lost), and a pool held
+  to one worker (0.99x, refused by the floor).
+
 ### Fixed
 
 - **`iyi lsp` notices a dead worker whose pipes another process still
@@ -22597,7 +22638,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 21,567-line library and nothing else. Every other
+  written against iyi's own 22,428-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

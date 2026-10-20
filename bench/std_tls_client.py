@@ -308,6 +308,8 @@ TLS12 = {
     "12-bad-record-mac": ("the client's Finished record one bit off", ("alert", 20)),
     "12-finished-in-clear": ("a Finished in the clear where the ChangeCipherSpec belongs", ("alert", 10)),
     "12-ccs-split": ("a ChangeCipherSpec after half a handshake message", ("alert", 10)),
+    "12-split-by-data": ("half a renegotiating ClientHello, then application data", ("alert", 10)),
+    "12-oversize": ("a protected record of 2^14 + 1 bytes of plaintext", ("alert", 22)),
     "12-second-ccs": ("a second ChangeCipherSpec", ("alert", 10)),
     "12-data-before-finished": ("application data before the client's Finished", ("alert", 10)),
     "12-hello-request": ("a HelloRequest from the client", ("alert", 10)),
@@ -1303,7 +1305,22 @@ def scenario12(c, name):
         type_, data = reader.open(*c.record())
         assert type_ == 21, f"a record of type {type_} where the refusal belongs"
         return ("warning", data[1]) if data[0] == 1 else ("alert", data[1])
-    c.sock.sendall(writer.seal(23, b"GET / HTTP/1.0\r\n\r\n"))
+    request = b"GET / HTTP/1.0\r\n\r\n"
+    if name == "12-oversize":
+        # RFC 5246 section 6.2.1: a TLSPlaintext of 2^14 bytes at most. The
+        # request padded by a header to 2^14 + 1, so that a server that
+        # takes it answers it.
+        head, tail = b"GET / HTTP/1.0\r\nX-Pad: ", b"\r\n\r\n"
+        request = head + b"p" * (16385 - len(head) - len(tail)) + tail
+    out = b""
+    if name == "12-split-by-data":
+        # Half a renegotiating ClientHello, then the request. RFC 5246
+        # section 6.2.1 lets record types interleave; std/tls holds TLS 1.2
+        # to RFC 8446 section 5.1's rule, nothing between a handshake
+        # message's pieces, as SECURITY_REVIEW_TLS.md's finding 6 asked.
+        hello = client_hello12(b"")
+        out += writer.seal(22, hello[:len(hello) // 2])
+    c.sock.sendall(out + writer.seal(23, request))
     got = b""
     while True:
         type_, data = reader.open(*c.record())

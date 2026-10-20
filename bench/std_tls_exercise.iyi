@@ -130,6 +130,8 @@ SCENARIOS = [
   {"padded-over", true, "read: a record of 16386 bytes of inner plaintext, past the 2^14 + 1 allowed (record_overflow)"},
   {"split-by-data", true, "read: a record of type 23 inside a handshake message split across records (unexpected_message)"},
   {"split-by-close", true, "read: a record of type 21 inside a handshake message split across records (unexpected_message)"},
+  {"tls12-split-by-data", true, "read: a record of type 23 inside a handshake message split across records (unexpected_message)"},
+  {"tls12-oversize", true, "read: a record of 16385 bytes, past the 2^14 allowed (record_overflow)"},
   {"hybrid-offer", true, ""}, {"hybrid", true, ""},
   {"hybrid-short-ct", false, "an X25519MLKEM768 share of 1119 bytes, not 1120 (illegal_parameter)"},
   {"hybrid-long-ct", false, "an X25519MLKEM768 share of 1121 bytes, not 1120 (illegal_parameter)"},

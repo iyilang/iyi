@@ -17,9 +17,11 @@ client whose Finished is wrong is answered with an alert and no echo.
 
 Written for this one purpose over Python's cryptography: the key schedule,
 the record layer and the messages of RFC 8446, no more than the scenarios
-use. Not a TLS server for anything else.
+use, and for two scenarios a whole TLS 1.2 handshake over the scripted
+client's PRF and records. Not a TLS server for anything else.
 """
 import datetime as dt
+import hashlib
 import os
 import socket
 import struct
@@ -68,6 +70,8 @@ SCENARIOS = {
     "tls12-version11": "a ServerHello choosing TLS 1.1",
     "tls12-versions": "a ServerHello whose supported_versions names TLS 1.2",
     "tls12-key-share": "a TLS 1.2 ServerHello carrying a key_share",
+    "tls12-split-by-data": "a whole TLS 1.2 handshake, then half a HelloRequest, the echo and the rest",
+    "tls12-oversize": "a whole TLS 1.2 handshake, then the echo in a record of 2^14 + 1 bytes of plaintext",
     "no-echo": "a ServerHello that does not echo the session id",
     "hrr-group": "a HelloRetryRequest for secp521r1, which the client does not offer",
     "hrr-p256": "a HelloRetryRequest for secp256r1, then the handshake in it",
@@ -333,6 +337,63 @@ class Conn:
                 alpn.append(a[1:1 + a[0]].decode()); a = a[1 + a[0]:]
         return ch, sid, suites, sni, share, alpn, exts
 
+    def serve12(self, s, ch):
+        """A whole TLS 1.2 handshake, as a server of 1.2 alone - so no
+        downgrade sentinel: ECDHE in X25519, the P-256 leaf signing under
+        ecdsa_secp256r1_sha256, AES-128-GCM, the extended master secret -
+        the client's request read, and then the scenario's one rule broken:
+        tls12-split-by-data sends half a HelloRequest, the echo, then the
+        rest; tls12-oversize the echo in a record of 2^14 + 1 bytes of
+        plaintext, one past RFC 5246 section 6.2.1's limit."""
+        # TLS 1.2's PRF and records are the scripted client's; bench/ is
+        # left as it was found.
+        sys.dont_write_bytecode = True
+        from std_tls_client import Cipher12, prf
+        client_random = ch[6:38]
+        server_random = os.urandom(32)
+        e = ext(23, b"") + ext(0xff01, b"\x00")
+        sh = message(2, b"\x03\x03" + server_random + b"\x20" + os.urandom(32) + struct.pack(">HB", 0xc02b, 0) + struct.pack(">H", len(e)) + e)
+        entries = b"".join(len(d).to_bytes(3, "big") + d for d in (der(self.pki.leaves["p256"]), der(self.pki.inter)))
+        cert = message(11, len(entries).to_bytes(3, "big") + entries)
+        key = x25519.X25519PrivateKey.generate()
+        params = b"\x03\x00\x1d\x20" + key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+        signature = self.pki.keys["p256"].sign(client_random + server_random + params, ec.ECDSA(hashes.SHA256()))
+        ske = message(12, params + struct.pack(">HH", 0x0403, len(signature)) + signature)
+        done = message(14, b"")
+        self.sock.sendall(plain(22, sh + cert + ske + done))
+        transcript = ch + sh + cert + ske + done
+        # The client's ClientKeyExchange, its ChangeCipherSpec, then its
+        # Finished under its keys.
+        flight = b""
+        while True:
+            header, body = self.record()
+            if header[0] == 20:
+                break
+            assert header[0] == 22, f"a record of type {header[0]} in the client's TLS 1.2 flight"
+            flight += body
+        assert flight[0] == 16 and len(flight) == 4 + int.from_bytes(flight[1:4], "big"), "the client's flight is not one ClientKeyExchange"
+        shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(flight[5:5 + flight[4]]))
+        transcript += flight
+        master = prf("sha256", shared, b"extended master secret", hashlib.sha256(transcript).digest(), 48)
+        block = prf("sha256", master, b"key expansion", server_random + client_random, 40)
+        reader = Cipher12(0xc02b, block[:16], block[32:36])
+        writer = Cipher12(0xc02b, block[16:32], block[36:40])
+        type_, finished = reader.open(*self.record())
+        assert type_ == 22 and finished == message(20, prf("sha256", master, b"client finished", hashlib.sha256(transcript).digest(), 12)), \
+            "the client's TLS 1.2 Finished"
+        transcript += finished
+        ours = message(20, prf("sha256", master, b"server finished", hashlib.sha256(transcript).digest(), 12))
+        self.sock.sendall(plain(20, b"\x01") + writer.seal(22, ours))
+        type_, data = reader.open(*self.record())
+        assert type_ == 23, f"a record of type {type_} where the client's request belongs"
+        echo = b"echo:" + data
+        if s == "tls12-split-by-data":
+            hello_request = message(0, b"")
+            out = writer.seal(22, hello_request[:2]) + writer.seal(23, echo) + writer.seal(22, hello_request[2:])
+        else:
+            out = writer.seal(23, echo + bytes(16385 - len(echo)))
+        self.sock.sendall(out + writer.seal(21, b"\x01\x00"))
+
     def serve(self):
         ch, sid, suites, sni, share, alpn, exts = self.client_hello()
         s = sni.split(".")[0]
@@ -346,6 +407,9 @@ class Conn:
             assert exts.get(43) == b"\x02\x03\x04", f"supported_versions {exts.get(43)!r}, not TLS 1.3 alone"
             assert not [x for x in suites if x >> 8 != 0x13], f"TLS 1.2 suites offered: {suites}"
             assert 23 not in exts and 0xff01 not in exts, "TLS 1.2's extensions offered"
+        if s in ("tls12-split-by-data", "tls12-oversize"):
+            self.serve12(s, ch)
+            return
         if s.startswith("tls12-"):
             # A TLS 1.2 ServerHello, one rule broken, then a hang-up: the
             # client must refuse it before reading on. tls12-hello checks the

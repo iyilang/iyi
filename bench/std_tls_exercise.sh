@@ -2158,6 +2158,17 @@ prove_broken "close_notify taken inside a split handshake message" "split-by-clo
   '        cut = cut_message(type)
         return fail(cut) if cut
         next if warning' '        next if warning' scenarios
+# The same two rules in TLS 1.2, against the scripted server's whole 1.2
+# handshakes: the split-message rule waived for 1.2 alone, and the limit
+# on a 1.2 record's plaintext (RFC 5246 section 6.2.1) dropped.
+prove_broken "TLS 1.2 application data taken inside a split handshake message" "tls12-split-by-data: read" \
+  '    return nil if handshake_left == 0
+' '    return nil if handshake_left == 0 || @tls12
+' scenarios
+prove_broken "a TLS 1.2 record past 2^14 bytes of plaintext taken" "tls12-oversize: read" \
+  ' if length > TlsRecords::MAX_PLAINTEXT
+    {type, TlsBytes.of(opened)}' ' if false
+    {type, TlsBytes.of(opened)}' scenarios
 prove_broken "the session id's echo unchecked" "FAILED: no-echo: " \
   '    return TlsError.new("a ServerHello that does not echo the session id", TlsAlert::ILLEGAL_PARAMETER) unless echo == session' '' scenarios
 prove_broken "the certificate checked for no host" "FAILED: wrong-host: " \
@@ -2685,6 +2696,16 @@ prove_broken "PKCS #1 v1.5 signed as RSA-PSS" "FAIL 12-pkcs1 " \
   '      return rsa.sign_pkcs1v15([RsaHash::SHA256, RsaHash::SHA384, RsaHash::SHA512][pkcs1], content) if pkcs1' '' server12
 prove_broken "handshake bytes across the client's ChangeCipherSpec" "FAIL 12-ccs-split " \
   '    return TlsError.new("handshake bytes before #{@peer}'"'"'s ChangeCipherSpec", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0' '' server12
+# And at the server, the scripted client's: half a renegotiating
+# ClientHello then application data, and a record of 2^14 + 1 bytes.
+prove_broken "the server's TLS 1.2 application data taken inside a split handshake message" "FAIL 12-split-by-data " \
+  '    return nil if handshake_left == 0
+' '    return nil if handshake_left == 0 || @tls12
+' server12
+prove_broken "a TLS 1.2 record past 2^14 bytes of plaintext taken by the server" "FAIL 12-oversize " \
+  ' if length > TlsRecords::MAX_PLAINTEXT
+    {type, TlsBytes.of(opened)}' ' if false
+    {type, TlsBytes.of(opened)}' server12
 prove_broken "no CertificateRequest in TLS 1.2" "FAIL 12-mtls-ok " \
   '    request = @config.client_roots ? request12 : [] of UInt8' '    request = [] of UInt8' server12
 prove_broken "a TLS 1.2 client with no certificate let in" "FAIL 12-mtls-none " \

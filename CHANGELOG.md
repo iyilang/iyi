@@ -311,6 +311,18 @@
   ends nothing and one that ends both halves. The fuzz gate's scripted
   peers end their half with it on every platform, where Windows closed
   the socket and panicked on the read after.
+- **`bench/std_tls_exercise.sh` holds TLS 1.2's records to two rules at
+  both ends: nothing between a handshake message's pieces, and 2^14 bytes
+  of plaintext a record.** std/tls already kept both in 1.2 (the split
+  rule as SECURITY_REVIEW_TLS.md's finding 6 asked, though RFC 5246 lets
+  record types interleave); nothing asked them. The scripted client's
+  `12-split-by-data` sends half a renegotiating ClientHello then the
+  request (alert 10), and `12-oversize` a request of 2^14 + 1 bytes (alert
+  22). The scripted server makes its first whole TLS 1.2 handshakes, over
+  the scripted client's PRF and records, for `tls12-split-by-data` (half a
+  HelloRequest, the echo, the rest) and `tls12-oversize`, which the std/tls
+  client refuses by name. Four broken copies - the split rule waived for
+  1.2 alone, and `open12`'s limit dropped, at each end - are caught.
 
 ### Changed
 

@@ -4,6 +4,18 @@
 
 ### Added
 
+- **std/x509 writes and signs: `X509.request` (PKCS #10) and
+  `X509.self_signed`.** A `SigningKey` - P-256 or P-384 (`SigningKey.p256`
+  and `.p384` draw one), RSA, or Ed25519, or any of them `from_pem` -
+  signs under ecdsa-with-SHA256 or -SHA384, sha256WithRSAEncryption or
+  Ed25519, in constant time. A request carries CN=<the first name> (an
+  empty subject past 64 bytes) and the names as subjectAltName in an
+  extensionRequest; a self-signed certificate carries subjectAltName and
+  the caller's `X509Extension`s, critical or not. Names are refused
+  unless they are ASCII host names. The DER is written in its one
+  shortest form, which std/asn1 reads back; std/acme's gate holds both to
+  OpenSSL and Python's cryptography, and std/x509's own gate still holds
+  its 35 broken copies.
 - **Tasks run across cores: `g.spawn_parallel { }` starts a task on a
   pool of worker threads (SPEC.md III.4.13).** The pool starts at the
   first parallel spawn with as many workers as the cores the process may

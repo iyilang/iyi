@@ -43,6 +43,42 @@
   load and a store (8,403,659 of 16,000,000 adds lost), and a pool held
   to one worker (0.99x, refused by the floor).
 
+### Changed
+
+- **Faster pure-iyi cryptography, constant time kept.** Measured with
+  `--release` on one x86_64 QEMU machine (AES-NI, no carry-less multiply)
+  that other jobs shared, the best of five, set beside Python's
+  `cryptography` (OpenSSL) on the same machine:
+
+  | | before | after | OpenSSL |
+  |---|---|---|---|
+  | AES-128-GCM, sealing 16 MiB | 233 MB/s | 274 MB/s | 926 MB/s |
+  | AES-256-GCM | 190 MB/s | 224 MB/s | 916 MB/s |
+  | ChaCha20-Poly1305 | 859 MB/s | 849 MB/s (unchanged) | 1516 MB/s |
+  | X25519 public key | 20 us | 8 us | - |
+  | X25519 shared secret | 21 us | 20 us | 19 us |
+  | Ed25519 sign / verify | 67 / 41 us | 20 / 40 us | 17 / 47 us |
+  | P-256 sign / ECDH | 102 / 89 us | 31 / 69 us | 14 / 28 us |
+  | P-256 verify | 1,477 us | 166 us | 38 us |
+  | RSA-2048 PSS sign (best of 8) | 1,077 us | 1,013 us | 418 us |
+  | SHA-256 / SHA-384, 16 MiB | 435 / 637 MB/s | 549 / 790 MB/s | 787 / 1167 MB/s |
+
+  std/aead fixslices AES encryption (ShiftRows folded into MixColumns'
+  rotations and the round keys, Adomnicai and Peyrin) and hashes GHASH
+  four blocks a step with H to H^4, reducing once a step; still bitsliced
+  and ctmul, nothing indexed by a secret. std/curve25519 and std/p256
+  multiply the base point from a fixed-base table read by masks (ref10's
+  signed 4-bit digits), X25519's public key comes from Ed25519's base
+  point, scalars mod L are reduced a byte at a time, P-256's field inverse
+  is an addition chain and its reduction is written for p. std/ecdsa
+  checks signatures on the field's own words in Montgomery form rather
+  than on BigInt, adding G and Q as affine points and inverting s mod n
+  on the same words. std/big's Montgomery product reduces in the same pass
+  as it multiplies, and its secret-exponent window is at most 5 bits (every
+  entry still read, masked); blinding is unchanged. std/digest runs SHA-2 eight rounds a pass with the
+  names turned. Tried and dropped, slower here: Poly1305 in 44-bit limbs,
+  and ChaCha20 four blocks at a time.
+
 ### Fixed
 
 - **`iyi lsp` notices a dead worker whose pipes another process still

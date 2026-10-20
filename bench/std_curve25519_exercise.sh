@@ -535,8 +535,20 @@ prove_broken "a u whose top bit is not masked" "the top bit of u is masked" \
 # is not refused.
 prove_broken "a reduction that leaves values from p up unreduced" "the small-order u 00000000... is refused" \
   '    r0 = v.l0 &+ c &* 19_u64' '    r0 = v.l0'
-prove_broken "a constant-time lookup that answers the next entry" "rfc 8032 test 1: the public key" \
+# The fixed-base table is read for an X25519 public key as well as for
+# Ed25519's, and the first public key the exercise asks for is the one
+# set beside the ladder's answer for a u of p + 9.
+prove_broken "a constant-time lookup that answers the next entry" "a u of p + 9 is read as 9" \
   '      diff = j.to_u64 ^ index' '      diff = j.to_u64 ^ (index &+ 1_u64)'
+# The fixed-base table's digits are signed: one whose sign is dropped adds
+# P where it should subtract it.
+prove_broken "a fixed-base digit whose sign is dropped" "a u of p + 9 is read as 9" \
+  '    flip = 0_u64 &- negative' '    flip = 0_u64'
+# An X25519 public key is the Edwards point's u, (Z + Y) / (Z - Y); the
+# inverse map's u is another curve's. The first check to ask for a public
+# key is the non-canonical u's.
+prove_broken "an X25519 public key mapped the wrong way" "a u of p + 9 is read as 9" \
+  '    (@z + @y) * (@z - @y).invert' '    (@z - @y) * (@z + @y).invert'
 prove_broken "a group order one off" "rfc 8032 test 1: the signature" \
   'L0 = 0x5812631a5cf5d3ed_u64' 'L0 = 0x5812631a5cf5d3ec_u64'
 prove_broken "a challenge hashed without the public key" "rfc 8032 test 1: the signature" \

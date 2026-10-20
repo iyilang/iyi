@@ -604,6 +604,13 @@ prove_broken "a CRC-64 step with two of its tables swapped" "crc64 check value" 
   't[768 + (x.unsafe_shr(32) & 255_u64).to_i32] ^ t[512 + (x.unsafe_shr(40) & 255_u64).to_i32]' 't[512 + (x.unsafe_shr(32) & 255_u64).to_i32] ^ t[768 + (x.unsafe_shr(40) & 255_u64).to_i32]'
 prove_broken "an Adler-32 update that forgets the sum of sums" "adler in pieces" \
   '    b = sum.unsafe_shr(16) % 65521_u32' '    b = 0_u32'
+# SHA-2's rounds go eight to a pass with their names turned: a round short
+# of one of Σ1's rotations, and a pass whose fifth round takes the first
+# round's names, each break every digest of their hash.
+prove_broken "a SHA-256 round with Σ1 short a rotation" "ASSERTION FAILED: sha256 empty" \
+  '    s1 = ror32(e, 6) ^ ror32(e, 11) ^ ror32(e, 25)' '    s1 = ror32(e, 6) ^ ror32(e, 11)'
+prove_broken "a SHA-512 pass whose fifth round is named as its first" "ASSERTION FAILED: sha384 abc" \
+  '      hh, d = DigestUtil.round512(e, f, g, hh, a, b, c, d, k[t + 4] &+ w[t + 4])' '      d, hh = DigestUtil.round512(a, b, c, d, e, f, g, hh, k[t + 4] &+ w[t + 4])'
 # SHA-3's four: each breaks every Keccak output, so the first SHA-3
 # check sees it, except a wrong rate, which only its own hash uses.
 prove_broken "a wrong Keccak round constant" "ASSERTION FAILED: sha3-224 empty" \

@@ -480,23 +480,24 @@ pub class SHA256 < Digest
     f = @h[5]
     g = @h[6]
     hh = @h[7]
+    # Eight rounds a pass, the names turned instead of the values: a round
+    # changes only d and h (`DigestUtil.round256`), and after eight the
+    # letters are back where they started. The loop that passed the eight
+    # values along spent a dozen register moves a round in a --release
+    # build. Hashing 16 MiB, best of five on a machine other jobs shared:
+    # SHA-256 549 MB/s where that loop gave 435, SHA-384 790 where it gave
+    # 637; Python's hashlib (OpenSSL) 787 and 1167.
     t = 0
     while t < 64
-      s1 = DigestUtil.ror32(e, 6) ^ DigestUtil.ror32(e, 11) ^ DigestUtil.ror32(e, 25)
-      ch = (e & f) ^ ((~e) & g)
-      temp1 = hh &+ s1 &+ ch &+ k[t] &+ w[t]
-      s0 = DigestUtil.ror32(a, 2) ^ DigestUtil.ror32(a, 13) ^ DigestUtil.ror32(a, 22)
-      maj = (a & b) ^ (a & c) ^ (b & c)
-      temp2 = s0 &+ maj
-      hh = g
-      g = f
-      f = e
-      e = d &+ temp1
-      d = c
-      c = b
-      b = a
-      a = temp1 &+ temp2
-      t = t + 1
+      d, hh = DigestUtil.round256(a, b, c, d, e, f, g, hh, k[t] &+ w[t])
+      c, g = DigestUtil.round256(hh, a, b, c, d, e, f, g, k[t + 1] &+ w[t + 1])
+      b, f = DigestUtil.round256(g, hh, a, b, c, d, e, f, k[t + 2] &+ w[t + 2])
+      a, e = DigestUtil.round256(f, g, hh, a, b, c, d, e, k[t + 3] &+ w[t + 3])
+      hh, d = DigestUtil.round256(e, f, g, hh, a, b, c, d, k[t + 4] &+ w[t + 4])
+      g, c = DigestUtil.round256(d, e, f, g, hh, a, b, c, k[t + 5] &+ w[t + 5])
+      f, b = DigestUtil.round256(c, d, e, f, g, hh, a, b, k[t + 6] &+ w[t + 6])
+      e, a = DigestUtil.round256(b, c, d, e, f, g, hh, a, k[t + 7] &+ w[t + 7])
+      t = t + 8
     end
     @h[0] = @h[0] &+ a
     @h[1] = @h[1] &+ b
@@ -622,23 +623,18 @@ pub class SHA512 < Digest
     f = @h[5]
     g = @h[6]
     hh = @h[7]
+    # Eight rounds a pass, the names turned, as SHA-256 does.
     t = 0
     while t < 80
-      s1 = DigestUtil.ror64(e, 14) ^ DigestUtil.ror64(e, 18) ^ DigestUtil.ror64(e, 41)
-      ch = (e & f) ^ ((~e) & g)
-      temp1 = hh &+ s1 &+ ch &+ k[t] &+ w[t]
-      s0 = DigestUtil.ror64(a, 28) ^ DigestUtil.ror64(a, 34) ^ DigestUtil.ror64(a, 39)
-      maj = (a & b) ^ (a & c) ^ (b & c)
-      temp2 = s0 &+ maj
-      hh = g
-      g = f
-      f = e
-      e = d &+ temp1
-      d = c
-      c = b
-      b = a
-      a = temp1 &+ temp2
-      t = t + 1
+      d, hh = DigestUtil.round512(a, b, c, d, e, f, g, hh, k[t] &+ w[t])
+      c, g = DigestUtil.round512(hh, a, b, c, d, e, f, g, k[t + 1] &+ w[t + 1])
+      b, f = DigestUtil.round512(g, hh, a, b, c, d, e, f, k[t + 2] &+ w[t + 2])
+      a, e = DigestUtil.round512(f, g, hh, a, b, c, d, e, k[t + 3] &+ w[t + 3])
+      hh, d = DigestUtil.round512(e, f, g, hh, a, b, c, d, k[t + 4] &+ w[t + 4])
+      g, c = DigestUtil.round512(d, e, f, g, hh, a, b, c, k[t + 5] &+ w[t + 5])
+      f, b = DigestUtil.round512(c, d, e, f, g, hh, a, b, k[t + 6] &+ w[t + 6])
+      e, a = DigestUtil.round512(b, c, d, e, f, g, hh, a, k[t + 7] &+ w[t + 7])
+      t = t + 8
     end
     @h[0] = @h[0] &+ a
     @h[1] = @h[1] &+ b
@@ -1400,6 +1396,30 @@ struct DigestUtil
 
   def self.ror64(x : UInt64, n : Int32) : UInt64
     x.unsafe_shr(n) | x.unsafe_shl(64 - n)
+  end
+
+  # One SHA-256 round (FIPS 180-4 §6.2.2 step 3) on the working variables,
+  # *kw* its constant and schedule word summed: the new e (d + T1) and the
+  # new a (T1 + T2), which take d's and h's places.
+  @[AlwaysInline]
+  def self.round256(a : UInt32, b : UInt32, c : UInt32, d : UInt32, e : UInt32, f : UInt32, g : UInt32, h : UInt32, kw : UInt32) : {UInt32, UInt32}
+    s1 = ror32(e, 6) ^ ror32(e, 11) ^ ror32(e, 25)
+    ch = (e & f) ^ ((~e) & g)
+    temp1 = h &+ s1 &+ ch &+ kw
+    s0 = ror32(a, 2) ^ ror32(a, 13) ^ ror32(a, 22)
+    maj = (a & b) ^ (a & c) ^ (b & c)
+    {d &+ temp1, temp1 &+ s0 &+ maj}
+  end
+
+  # One SHA-512 round (§6.4.2 step 3), the same way.
+  @[AlwaysInline]
+  def self.round512(a : UInt64, b : UInt64, c : UInt64, d : UInt64, e : UInt64, f : UInt64, g : UInt64, h : UInt64, kw : UInt64) : {UInt64, UInt64}
+    s1 = ror64(e, 14) ^ ror64(e, 18) ^ ror64(e, 41)
+    ch = (e & f) ^ ((~e) & g)
+    temp1 = h &+ s1 &+ ch &+ kw
+    s0 = ror64(a, 28) ^ ror64(a, 34) ^ ror64(a, 39)
+    maj = (a & b) ^ (a & c) ^ (b & c)
+    {d &+ temp1, temp1 &+ s0 &+ maj}
   end
 
   def self.load_u32s_be(words : Pointer(UInt32), bytes : Pointer(UInt8), count : Int32) : Nil

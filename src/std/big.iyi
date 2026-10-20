@@ -1970,44 +1970,40 @@ struct Montgomery
   end
 
   # r = a b / R mod m by coarsely integrated operand scanning (CIOS): n
-  # rounds of a times one word of b, each followed by one word's
-  # reduction. r may be a or b: it is written once both have been read.
+  # rounds of a times one word of b and one word's reduction, the two in
+  # one pass over t (q comes from t's low word and a's first product, so
+  # it is known before the pass), where two passes read and wrote t twice.
+  # r may be a or b: it is written once both have been read.
   def mul(a : Pointer(UInt64), b : Pointer(UInt64), r : Pointer(UInt64)) : Nil
     n = @n
     m = @m.to_unsafe
     t = @t.to_unsafe
     inv = @inv
     k = 0
-    while k < n + 2
+    while k < n + 1
       t[k] = 0_u64
       k = k + 1
     end
     i = 0
     while i < n
       bi = b[i].to_u128
-      c = 0_u128
-      j = 0
-      while j < n
-        w = a[j].to_u128 &* bi &+ t[j].to_u128 &+ c
-        t[j] = w.unsafe_to_u64
-        c = w.unsafe_shr(64)
-        j = j + 1
-      end
-      w = t[n].to_u128 &+ c
-      t[n] = w.unsafe_to_u64
-      t[n + 1] = w.unsafe_shr(64).unsafe_to_u64
-      q = (t[0] &* inv).to_u128
-      c = (q &* m[0].to_u128 &+ t[0].to_u128).unsafe_shr(64)
+      w = a[0].to_u128 &* bi &+ t[0].to_u128
+      c = w.unsafe_shr(64)
+      low = w.unsafe_to_u64
+      q = (low &* inv).to_u128
+      d = (q &* m[0].to_u128 &+ low.to_u128).unsafe_shr(64)
       j = 1
       while j < n
-        w = q &* m[j].to_u128 &+ t[j].to_u128 &+ c
-        t[j - 1] = w.unsafe_to_u64
+        w = a[j].to_u128 &* bi &+ t[j].to_u128 &+ c
         c = w.unsafe_shr(64)
+        v = q &* m[j].to_u128 &+ w.unsafe_to_u64.to_u128 &+ d
+        d = v.unsafe_shr(64)
+        t[j - 1] = v.unsafe_to_u64
         j = j + 1
       end
-      w = t[n].to_u128 &+ c
+      w = t[n].to_u128 &+ c &+ d
       t[n - 1] = w.unsafe_to_u64
-      t[n] = t[n + 1] &+ w.unsafe_shr(64).unsafe_to_u64
+      t[n] = w.unsafe_shr(64).unsafe_to_u64
       i = i + 1
     end
     reduce(t, t[n], r)
@@ -2182,10 +2178,15 @@ struct Montgomery
   # bits of exponent, with nothing taken from the exponent's bits but a
   # mask: the table holds g^0 (R mod m) through g^(2^k - 1), every window
   # costs k squares and one product, the product with g^0 included, and
-  # every entry of the table is read for every window.
+  # every entry of the table is read for every window. The window is at
+  # most 5 bits, not `window`'s 6: every entry is read for every window,
+  # so a 64-entry table costs more scanning than the products it saves.
+  # With the one-pass product, a 2048-bit PSS signature went from 1,077 to
+  # 1,013 us (best of eight, --release, a machine other jobs shared).
   def pow_fixed(base : BigInt, exp : BigInt, width : Int32) : BigInt
     n = @n
     k = Montgomery.window(width)
+    k = 5 if k > 5
     size = 1 << k
     table = Array(UInt64).new(size * n, 0_u64)
     tp = table.to_unsafe

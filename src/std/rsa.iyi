@@ -65,7 +65,9 @@
 #
 # Measured here in --release builds (PSS over SHA-256, the check and the
 # blinding included; `bench/std_rsa_exercise.sh` prints it each run): a
-# 2048-bit signature in 1.16 to 1.33 ms, a 4096-bit one in 6.5 to 6.9.
+# 2048-bit signature in 1.03 ms, a 4096-bit one in 5.87, on a machine
+# other jobs shared (1.16 to 1.33 and 6.5 to 6.9 before std/big's
+# one-pass Montgomery product and 5-bit window).
 #
 # Pure computation: std/big's arithmetic, std/digest's hashes, std/crypto's
 # HMAC, std/base64 for PEM.

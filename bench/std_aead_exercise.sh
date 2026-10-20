@@ -591,6 +591,15 @@ prove_broken "AES-256's middle SubWord left out" "fips 197 c.3 cipher" \
 prove_broken "a wrong coefficient in InvMixColumns" "fips 197 appendix b, inverse" \
   'q[7] = q4 ^ q5 ^ q6 ^ r4 ^ r6 ^ r7 ^ rotr32(q4 ^ q5 ^ q7 ^ r4 ^ r7)' \
   'q[7] = q4 ^ q5 ^ q6 ^ r4 ^ r6 ^ r7 ^ rotr32(q4 ^ q5 ^ q7 ^ r4)'
+# Fixslicing: a round that meets its state SR^-1 or SR^-3 of the true one
+# reads each column's row i + 2 two columns along; read in place, it is
+# wrong from the first round of every key size.
+prove_broken "a fixsliced MixColumns whose second rotation ignores the turn" "fips 197 appendix b" \
+  '    if turn & 1 == 1' '    if false'
+# And round keys given SR^-(r mod 2) where SR^-(r mod 4) belongs: rounds
+# 2, 3, 6 and 7 get the wrong turn.
+prove_broken "fixsliced round keys turned by r mod 2" "fips 197 appendix b" \
+  '        while turn < (r & 3)' '        while turn < (r & 1)'
 # Case 1 has no plaintext and no additional data, and its GHASH input is
 # the zero lengths block, so it is case 2 where a counter off by one shows.
 prove_broken "GCM's counter starting at the tag's own block" "gcm test case 2" \
@@ -598,6 +607,10 @@ prove_broken "GCM's counter starting at the tag's own block" "gcm test case 2" \
 prove_broken "GHASH's reduction missing its x^7 term" "gcm test case 2" \
   'v2 = v2 ^ v0 ^ v0.unsafe_shr(1) ^ v0.unsafe_shr(2) ^ v0.unsafe_shr(7)' \
   'v2 = v2 ^ v0 ^ v0.unsafe_shr(1) ^ v0.unsafe_shr(2)'
+# Case 3's 64 bytes are one four-block step, the first block's product
+# with H^4 and the second's with H^3.
+prove_broken "the four-block GHASH step with H^4 and H^3 traded" "gcm test case 3" \
+  'hp + 18_i64)' 'hp + 12_i64)'
 # Case 4 is the first with additional data.
 prove_broken "the additional data's length in bytes, not bits" "gcm test case 4" \
   'AeadBytes.put_be64(lengths, aad_size.to_u64 &* 8_u64)' 'AeadBytes.put_be64(lengths, aad_size.to_u64)'

@@ -310,10 +310,29 @@ prove_broken "a doubling short of its last step" "a point that is not on P256" \
     z3 = f.add(z3, z3)
     P256Point.new(x3, y3, z3)' '    z3 = f.add(z3, z3)
     P256Point.new(x3, y3, z3)'
-prove_broken "a constant-time lookup that answers the next entry" "a point that is not on P256" \
+# [d]Q's window over a peer's point; [d]G has a table of its own now, so
+# it is the first shared secret that sees this one wrong.
+prove_broken "a constant-time lookup that answers the next entry" "RFC 5903's girx, from the initiator" \
   '      bit = ((i.to_u64 ^ digit) &- 1_u64).unsafe_shr(63)' '      bit = ((i.to_u64 ^ (digit &+ 1_u64)) &- 1_u64).unsafe_shr(63)'
-prove_broken "an inverse to the power m - 3" "a point that is not on P256" \
+# The fixed-base table's three ways to go wrong. Its rows read one entry
+# along answer nothing for a digit of 8, (0, 0), which is off the curve,
+# and so is what it is added into. A digit's sign dropped, or the
+# recoding's last carry left out (RFC 6979's d starts 0xc9, so its top
+# digit carries), still lands on the curve, so it is the key's x that
+# shows it.
+prove_broken "a fixed-base lookup that answers the next entry" "a point that is not on P256" \
+  '      bit = ((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63)' '      bit = ((j.to_u64 ^ (index &+ 1_u64)) &- 1_u64).unsafe_shr(63)'
+prove_broken "a fixed-base digit whose sign is dropped" "the key's x" \
+  '    y = P256Num.choose(negative, f.sub(P256Num.zero, y), y)' '    y = P256Num.choose(0_u64, f.sub(P256Num.zero, y), y)'
+prove_broken "the fixed-base recoding's last carry left out" "the key's x" \
+  '    acc + P256BaseTable.top(table, carry)' '    acc'
+# The order's inverse is the generic one, used for s alone.
+prove_broken "an inverse to the power m - 3" "the signature of \"sample\" under SHA-256" \
   '    e = P256Num.sub_raw(@m, P256Num.new(2_u64, 0_u64, 0_u64, 0_u64))[0]' '    e = P256Num.sub_raw(@m, P256Num.new(3_u64, 0_u64, 0_u64, 0_u64))[0]'
+# The field's inverse is the addition chain; short of its last product
+# it is z^(p - 3), and the public key it encodes is off the curve.
+prove_broken "a field inverse short of its last product" "a point that is not on P256" \
+  '    f.mul(f.square_times(r, 2), a)' '    f.square_times(r, 2)'
 prove_broken "a borrow that ignores the one coming in" "a P-256 private key is a number from 1 to n - 1" \
   '    ((~x & y) | (~(x ^ y) & d)).unsafe_shr(63)' '    (~x & y).unsafe_shr(63)'
 prove_broken "RFC 6979's second round of K and V left out" "the signature of \"sample\" under SHA-256" \

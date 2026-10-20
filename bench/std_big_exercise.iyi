@@ -816,15 +816,26 @@ puts "    base round trips: every base 2..36 parses what it printed, digits orac
 # the length. The recursive division keeps a print within a small
 # multiple of the parse, which multiplies its way up through the same
 # powers: about two in a plain build, under one and a half in a release.
+#
+# Each the best of three: one of each, timed once, failed on a loaded
+# Windows runner where print and parse share it with whatever else runs -
+# a collection or another job in either measurement moved the ratio, not
+# the algorithm (integration/0.19, job 118456861467).
 huge = BigInt.new(3_i64) ** 600000
-huge_started = __iyi_monotonic_ns
-huge_text = huge.to_s
-huge_printed = __iyi_monotonic_ns
-raise "base: a long value parses back" unless BigInt.new(huge_text) == huge
-huge_parsed = __iyi_monotonic_ns
-print_ms = (huge_printed - huge_started) // 1000000
-parse_ms = (huge_parsed - huge_printed) // 1000000
-raise "base: printing a long value costs what parsing it does" unless print_ms < parse_ms * 4
+print_ms = 9223372036854775807_i64
+parse_ms = 9223372036854775807_i64
+3.times do
+  huge_started = __iyi_monotonic_ns
+  huge_text = huge.to_s
+  huge_printed = __iyi_monotonic_ns
+  raise "base: a long value parses back" unless BigInt.new(huge_text) == huge
+  huge_parsed = __iyi_monotonic_ns
+  took = (huge_printed - huge_started) // 1000000
+  print_ms = took if took < print_ms
+  took = (huge_parsed - huge_printed) // 1000000
+  parse_ms = took if took < parse_ms
+end
+raise "base: printing a long value costs what parsing it does (#{print_ms} ms against #{parse_ms})" unless print_ms < parse_ms * 4
 puts "    long print: 3 ** 600000 prints in under four times its parse"
 
 # A long divisor and a long quotient divide by the recursion `to_s` splits

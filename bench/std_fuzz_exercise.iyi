@@ -36,10 +36,13 @@
 # connection seed reaches the end it was made for (SEED_GOALS).
 #
 # The long runs, 2026-10-19 and 20, seed 0x1F22, each 20,000-input chunk
-# through heavy.sh: der 120,000 inputs, x509 60,000 and 60,000 more
-# with the machine's 121 roots among the seeds, pem, keys, record, http1
-# and hpack 60,000 each, and each connection target 100,000 - 1,140,000
-# in all. Defects in the modules, each fixed and in REGRESSIONS:
+# through heavy.sh: der, x509, pem, keys, record, http1 and hpack 200,000
+# inputs each (record's sealed records alone; its sealed inner
+# plaintexts came after, in the gate's own runs), x509 60,000 more with
+# the machine's 121 roots among the seeds, and each connection target
+# 100,000 - 2,060,000 in all, the last 1,500,000 of them, after the
+# fixes, finding nothing. Defects in the modules, each fixed and in
+# REGRESSIONS:
 # std/asn1 panicked on a UniversalString code with its top bit set
 # (`1c04ffffffff`, 22 of the first 60,000 DER inputs); std/http's
 # `Request#multipart` panicked on a client's boundary past 70
@@ -64,10 +67,11 @@
 # as `#...` and names are compared as bytes, unknown non-critical
 # extensions are not read, an explicit `critical FALSE` and unsorted RDN
 # sets are taken as Go and OpenSSL take them - and three are refusals
-# RFC 5280 asks for, not yet made: a TBSCertificate's [1], [2] and [3]
-# out of order or repeated (two extension blocks, read both), an empty
-# RelativeDistinguishedName (SET SIZE (1..MAX)), and a nameConstraints
-# iPAddress mask that is not a CIDR prefix (4.2.1.10).
+# RFC 5280 asks for. Two are made now, each in REGRESSIONS: an empty
+# RelativeDistinguishedName (SET SIZE (1..MAX)) and a nameConstraints
+# iPAddress mask that is not a CIDR prefix (4.2.1.10). The third, a
+# TBSCertificate's [1], [2] and [3] out of order or repeated (two
+# extension blocks, both read), is fixed on branch tls/audit.
 
 import std/random::{Random}
 import std/gc::{GC}

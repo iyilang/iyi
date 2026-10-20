@@ -2138,10 +2138,10 @@ prove_broken "a HelloRetryRequest for secp384r1 answered with X25519 again" "hrr
 prove_broken "a HelloRetryRequest for secp384r1 refused as a group not offered" "hrr-p384: refused" \
   'unless group == GROUP_SECP256R1 || group == GROUP_SECP384R1' 'unless group == GROUP_SECP256R1' scenarios
 prove_broken "the server's secp384r1 share taken off the curve" "FAILED: hrr-p384-bad: " \
-  '      return TlsError.new("the server'"'"'s #{group_name(group)} share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
+  '      return TlsError.new("the server'"'"'s #{group_name(reply.named_group)} share: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
       secret = got
-    else' '      secret = got.is_a?(EcdsaError) ? Array(UInt8).new(48, 0_u8) : got
-    else' scenarios
+    elsif' '      secret = got.is_a?(EcdsaError) ? Array(UInt8).new(48, 0_u8) : got
+    elsif' scenarios
 prove_broken "a ServerHello's share taken in a group its ClientHello did not send" "FAILED: sh-wrong-group: " \
   '    unless shares.any? { |s| s[0] == reply.named_group }' '    unless true' scenarios
 # X25519MLKEM768 at the client: its ClientHello, the ServerHello's share,
@@ -2330,9 +2330,9 @@ prove_broken "a secp384r1 share passed over" "FAIL p384-share " \
   '      elsif group == GROUP_SECP384R1
         p384 = key' '' server
 prove_broken "secp384r1 not among the server's groups" "FAIL p384-share " \
-  '  GROUPS = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS = [GROUP_X25519, GROUP_SECP256R1]' server
+  '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1]' server
 prove_broken "a secp384r1 share taken before a secp256r1 one" "FAIL ec-shares " \
-  '  GROUPS = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS = [GROUP_X25519, GROUP_SECP384R1, GROUP_SECP256R1]' server
+  '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS12 = [GROUP_X25519, GROUP_SECP384R1, GROUP_SECP256R1]' server
 prove_broken "the server's secp384r1 share made in secp256r1" "FAIL p384-share " \
   '      ephemeral = ec_ephemeral(group)
       got = ephemeral.shared_secret(peer)

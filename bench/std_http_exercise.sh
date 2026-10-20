@@ -1396,18 +1396,26 @@ def drip(s, first, unit, every=0.5, limit=30):
     start = time.monotonic()
     got = b""
     s.sendall(first)
+    # A record with no data in it - a TLS 1.3 NewSessionTicket, which the
+    # server sends after the handshake - makes the socket readable while
+    # recv has nothing to give: waited for unbounded, the drip stopped and
+    # the server's pause between reads (3 s) closed it, not the deadline.
+    s.settimeout(every)
     last = start
     while time.monotonic() - start < limit:
         wait = max(0.0, every - (time.monotonic() - last))
         if s.pending() or select.select([s], [], [], wait)[0]:
             try:
                 chunk = s.recv(65536)
+            except TimeoutError:
+                chunk = None
             except (ssl.SSLError, OSError):
                 return time.monotonic() - start, got
-            if not chunk:
-                return time.monotonic() - start, got
-            got += chunk
-            continue
+            if chunk is not None:
+                if not chunk:
+                    return time.monotonic() - start, got
+                got += chunk
+                continue
         try:
             s.sendall(unit)
         except (ssl.SSLError, OSError):

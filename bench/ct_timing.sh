@@ -61,7 +61,7 @@ t_of() {
 over() { awk -v t="$1" 'BEGIN { exit !(t > 10) }'; }
 
 echo "== secret paths: |t| must stay at or under 10"
-for pair in "inverse:$((100000 * SCALE))" "p256:$((100000 * SCALE))" "p384:$((50000 * SCALE))" "ed25519:$((100000 * SCALE))" \
+for pair in "inverse:$((100000 * SCALE))" "p256-length:$((100000 * SCALE))" "p384:$((50000 * SCALE))" "ed25519:$((100000 * SCALE))" \
   "x25519:$((100000 * SCALE))" "mlkem-ct:$((50000 * SCALE))" "mlkem-key:$((50000 * SCALE))" "aes-gcm:$((100000 * SCALE))" \
   "chacha:$((100000 * SCALE))" "rsa:$((20000 * SCALE))"; do
   target="${pair%%:*}"

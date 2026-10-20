@@ -439,9 +439,13 @@
   assembly of P-384's table selection, ML-KEM's re-encryption compare
   and key selection, curve25519's swaps and table reads and the tag
   compares has no branch on a secret: nothing there needed the P-256 fix.
-  X25519 reran at 2.0 to 5.0. Not settled: later runs put P-256 signing
-  back at |t| = 10 to 19 with `pick` branch-free and every jump left in
-  `sign` on a public outcome (std/p256's header has the numbers).
+  X25519 reran at 2.0 to 5.0. Later runs put P-256 signing back at |t| =
+  10 to 19 with `pick` branch-free; timed a step at a time, every secret
+  step is flat (r and s together 3.0 to 5.3 over 100,000) and the DER
+  encoding of the public r and s is the signal (100 to 212 alone), with
+  where an input lives adding more (std/p256's header has the numbers).
+  The driver now times P-256 against messages whose r and s match the
+  fixed one's DER lengths.
   `bench/ct_timing.iyi` run with no argument, as CI runs every bench
   program, checks itself instead: Welch's t against Python's `statistics`
   on six fixed samples and every target run 40 times with no bound.

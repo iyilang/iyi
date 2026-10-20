@@ -43,11 +43,19 @@
 # made them a branch on each nonce digit (see there). Later runs on the
 # same code, at load 6 to 7, put it at 10 to 19, with two fixed messages
 # at 1.2 to 1.9 and messages whose r and s match the fixed one's DER
-# lengths at 8 to 11; every conditional jump left in the --release
-# `sign` (the candidate below n and nonzero, r and s nonzero, the Fermat
-# inverse over n - 2's public bits, the DER lengths) has a public
-# outcome, and `pick` has none on the digit. What still tells the classes
-# apart is not found.
+# lengths at 8 to 11. Timed a step at a time (100,000 samples, fixed
+# message against random, inputs read before the clock), the secret
+# steps are flat: [k]G with its affine x 2.8 to 6.1, k^-1 mod n 1.6 to
+# 5.0 (one cold run 17, not seen again in nine), s 6.8 to 10.3 and 1.7 to
+# 7.8 with only the message or only the nonce varying, and r and s
+# together, nonce derivation included, 3.0 to 5.3. The DER encoding
+# alone is at 100 to 212: `P256Der.integer` branches on r's and s's
+# leading bytes, which the signature shows, so a fixed message, whose
+# signature is always the same length, times apart from random ones. The
+# rest is where the inputs live: the same digest copied to 1,024 other
+# addresses puts an array concatenation at 8 to 59 and `from_bytes` at 37
+# to 63 with no value differing. bench/ct_timing.sh times `sign` against
+# messages whose r and s are as long in DER as the fixed one's.
 #
 # The nonce is RFC 6979's: HMAC over the hash the signature names, from
 # the private key and the message's hash, so one key and one message give

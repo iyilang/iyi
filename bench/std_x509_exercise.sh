@@ -449,6 +449,10 @@ prove_broken "a search for a chain without a bound" "seven intermediates signing
   '  MAX_SIGNATURE_CHECKS = 100' '  MAX_SIGNATURE_CHECKS = 1_000_000'
 prove_broken "an Ed25519 key off the curve taken" "an Ed25519 key off the curve refused" \
   '    return CurveError.new("Ed25519: the public key is not a point on the curve, or not its canonical encoding") unless CurvePoint.decode(p)' '' curve25519
+prove_broken "an empty RelativeDistinguishedName taken" "an empty RDN refused: accepted" \
+  '      return X509Error.new("an empty RelativeDistinguishedName") if attributes.empty?' ''
+prove_broken "a name constraint's mask with a hole taken" "a name constraint's mask with a hole refused: accepted" \
+  '          unless X509Names.prefix_mask?(range[range.size // 2, range.size // 2])' '          if false'
 
 echo
 if [ "$status" -eq 0 ]; then

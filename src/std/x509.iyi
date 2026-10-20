@@ -590,6 +590,13 @@ class X509Extensions
         elsif base.context?(7) && !base.constructed?
           range = base.content
           return X509Error.new("an iPAddress constraint of #{range.size} bytes") unless range.size == 8 || range.size == 32
+          # RFC 5280 section 4.2.1.10 writes the range as CIDR (RFC 4632):
+          # its mask is ones, then zeros. One with a hole in it was taken
+          # and matched bit by bit, a range no CIDR reader sees; Go
+          # refuses it, as Python's cryptography does.
+          unless X509Names.prefix_mask?(range[range.size // 2, range.size // 2])
+            return X509Error.new("an iPAddress constraint whose mask is not a CIDR prefix")
+          end
           permitted ? @permitted_ips << range : @excluded_ips << range
         else
           @other_constraints = true
@@ -695,7 +702,11 @@ struct X509Names
   def self.describe(name : DerValue) : String | X509Error
     parts = [] of String
     X509Asn1.values(name.sequence)!.each do |rdn|
-      X509Asn1.values(rdn.set)!.each do |attribute|
+      attributes = X509Asn1.values(rdn.set)!
+      # RelativeDistinguishedName ::= SET SIZE (1..MAX) (RFC 5280
+      # appendix A.1): an empty one was read as no attribute at all.
+      return X509Error.new("an empty RelativeDistinguishedName") if attributes.empty?
+      attributes.each do |attribute|
         fields = X509Asn1.values(attribute.sequence)!
         return X509Error.new("an AttributeTypeAndValue of #{fields.size} values") unless fields.size == 2
         oid = X509Asn1.text(fields[0].oid)!
@@ -717,6 +728,19 @@ struct X509Names
     when "2.5.4.11" then "OU"
     else                 oid
     end
+  end
+
+  # Whether *mask* is ones, then zeros, as a CIDR prefix is.
+  def self.prefix_mask?(mask : Array(UInt8)) : Bool
+    zeros = false
+    mask.each do |b|
+      8.times do |k|
+        one = (b >> (7 - k)) & 1_u8 == 1_u8
+        return false if one && zeros
+        zeros = true unless one
+      end
+    end
+    true
   end
 
   # The bytes as text where every one is ASCII, else a text that matches

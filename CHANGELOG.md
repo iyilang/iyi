@@ -41,6 +41,16 @@
   answers nil for it, so `multipart` answers nil as for no boundary.
   Found by the fuzz gate (1 of the first 60,000 HTTP/1.1 inputs); held
   by a check in `bench/std_http_exercise.iyi`.
+- **std/x509: an empty RelativeDistinguishedName, and a name constraint's
+  IP mask that is not a CIDR prefix, are refused.** A name's RDN is a
+  SET SIZE (1..MAX) (RFC 5280 appendix A.1), and an empty one was read as
+  no attribute; a nameConstraints iPAddress is written as CIDR (section
+  4.2.1.10), and a mask with a hole in it, 255.0.255.0, was taken and
+  matched bit by bit, a range no CIDR reader sees - Go and Python's
+  cryptography refuse both. Found where the fuzz gate's mutated
+  certificates were read by iyi and refused by cryptography; held by
+  checks in `bench/std_x509_exercise.iyi`, broken copies its gate
+  catches, and regression inputs in the fuzz gate.
 
 ## 0.18.0 — 2026-10-18
 

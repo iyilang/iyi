@@ -13,6 +13,14 @@
   (`bench/std_fuzz_exercise.sh`, 22 of the first 60,000 DER inputs);
   held by a check in `bench/std_asn1_exercise.iyi` and a broken copy of
   the module its gate catches.
+- **std/http: a request's multipart boundary past 70 characters is no
+  boundary, not a panic.** `Request#multipart` handed the boundary a
+  client's `Content-Type` named to `Multipart.new`, which panics on one
+  outside RFC 2046's 1 to 70 characters: a server whose block read
+  `req.multipart` panicked on a 90-character one. `Multipart.boundary`
+  answers nil for it, so `multipart` answers nil as for no boundary.
+  Found by the fuzz gate (1 of the first 60,000 HTTP/1.1 inputs); held
+  by a check in `bench/std_http_exercise.iyi`.
 
 ## 0.18.0 — 2026-10-18
 

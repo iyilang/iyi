@@ -1114,7 +1114,8 @@ pub class Request
   end
 
   # The body as `multipart/form-data` parts, read as they arrive; nil when
-  # the `Content-Type` is not multipart or names no boundary.
+  # the `Content-Type` is not multipart or names no boundary
+  # (`Multipart.boundary`).
   def multipart : Multipart?
     type = header("Content-Type")
     return nil unless type
@@ -3781,13 +3782,18 @@ pub class Multipart
   end
 
   # The boundary a `Content-Type` of `multipart/...` names, nil when it
-  # names none.
+  # names none - or one of a length RFC 2046 §5.1.1 does not allow, 1 to
+  # 70 characters, which `new` refuses with a panic. The type is the
+  # peer's: `Request#multipart` handed a client's 90-character boundary
+  # through to that panic (found by bench/std_fuzz_exercise.sh).
   def self.boundary(content_type : String) : String?
     parsed = MIME.parse?(content_type)
     return nil unless parsed
     media, params = parsed
     return nil unless media.starts_with?("multipart/")
-    params["boundary"]?
+    found = params["boundary"]?
+    return nil unless found && found.bytesize >= 1 && found.bytesize <= 70
+    found
   end
 
   # The next part, nil after the last.

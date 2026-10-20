@@ -1333,6 +1333,86 @@ s.on("error", e => console.log("error", e.message));
     kill "$SERVE_PID" 2>/dev/null
     wait "$SERVE_PID" 2>/dev/null
   }
+  # Python's TLS client is these checks' oracle, and its first certificate
+  # check on a runner is not the server's to time. On Windows CI the first
+  # Python ssl handshake against the Ed25519 server failed twice (jobs
+  # 117686264720 and 118404949498): the server's 3 and 5 s handshake
+  # deadline ran out while it waited for the client's Finished, closed, and
+  # Python's sendall then met the reset (10053). Python held the time, not
+  # the server: replaying those shards' last seven siblings and then this
+  # gate (debug run 39478397131), the server's whole flight reached Python
+  # in one record within a millisecond, and Python's own step from its
+  # Certificate to its CertificateVerify took 12, 32, 33, 975 and 1,598 ms
+  # on five runners, the machine's CPU low. It is the first read of library
+  # pages no process on the runner has read: pip checks certificates
+  # through Windows' store, so OpenSSL's X.509 code first runs here. That
+  # step takes 11 to 49 ms on an idle runner the first time, 0.4 to 1.1 ms
+  # in every later process, and 5 to 76 ms with the page cache purged (runs
+  # 39490370881 and 39494266485). Read in beforehand, as below, the same
+  # library took 6,301 and 2,354 ms on two loaded runners and the timed
+  # check 0.6 ms on both, where two runners without it took 24 and 14 ms
+  # (run 39498721736). So the oracle reads its library in, and runs one
+  # handshake with a server of its own over memory, before any server here
+  # times it; the deadline still bounds every handshake that follows.
+  "$PY" - "$SRV" <<'PY'
+import os, ssl, sys, time
+started = time.perf_counter()
+read = []
+if sys.platform == "win32":
+    # Every page of the _ssl, libssl and libcrypto images this interpreter
+    # maps, read once; a page that cannot be read is passed over.
+    import ctypes
+    import ctypes.wintypes as w
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.GetCurrentProcess.restype = w.HANDLE
+    k32.K32EnumProcessModules.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD)]
+    k32.K32GetModuleBaseNameW.argtypes = [w.HANDLE, w.HMODULE, w.LPWSTR, w.DWORD]
+    k32.ReadProcessMemory.argtypes = [w.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+    me = k32.GetCurrentProcess()
+    modules = (w.HMODULE * 1024)()
+    needed = w.DWORD()
+    k32.K32EnumProcessModules(me, modules, ctypes.sizeof(modules), ctypes.byref(needed))
+    page = ctypes.create_string_buffer(1)
+    for module in modules[: needed.value // ctypes.sizeof(w.HMODULE)]:
+        name = ctypes.create_unicode_buffer(260)
+        k32.K32GetModuleBaseNameW(me, module, name, 260)
+        if not name.value.lower().startswith(("_ssl", "libssl", "libcrypto")):
+            continue
+        # SizeOfImage: e_lfanew at 0x3C, then 0x50 into the NT headers.
+        size = ctypes.c_uint32.from_address(module + ctypes.c_uint32.from_address(module + 0x3C).value + 0x50).value
+        for offset in range(0, size, 4096):
+            k32.ReadProcessMemory(me, module + offset, page, 1, None)
+        read.append(f"{name.value} ({size // 1024} KiB)")
+paged = time.perf_counter()
+# One handshake between a client set up as the checks' are and a server
+# on this Ed25519 chain, over memory, so that OpenSSL's X.509 path has run.
+srv = sys.argv[1]
+server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+server.load_cert_chain(os.path.join(srv, "chain.pem"), os.path.join(srv, "key.pem"))
+client = ssl.create_default_context(cafile=os.path.join(srv, "roots.pem"))
+ends = [ssl.MemoryBIO() for _ in range(4)]
+pair = [(client.wrap_bio(ends[0], ends[1], server_hostname="localhost"), ends[1], ends[2]),
+        (server.wrap_bio(ends[2], ends[3], server_side=True), ends[3], ends[0])]
+done = [False, False]
+problem = ""
+for _ in range(20):
+    for i, (end, out, peer) in enumerate(pair):
+        if not done[i]:
+            try:
+                end.do_handshake()
+                done[i] = True
+            except ssl.SSLWantReadError:
+                pass
+            except ssl.SSLError as e:
+                problem = f", and its handshake failed: {e}"
+                done[i] = True
+        peer.write(out.read())
+    if all(done):
+        break
+held = f"a {pair[0][0].version()} handshake with itself" if not problem and all(done) else "a handshake with itself"
+library = f"{', '.join(read)} read in ({(paged - started) * 1000:.0f} ms), then " if read else ""
+print(f"  Python's TLS client before it is timed: {library}{held} in {(time.perf_counter() - paged) * 1000:.0f} ms{problem}")
+PY
   serve_and_ask "$SRV" ed25519
   serve_and_ask "$SRV/p256" p256
   serve_and_ask "$SRV/p384" p384

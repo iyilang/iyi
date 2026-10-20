@@ -4,6 +4,16 @@
 
 ### Added
 
+- **std/tls: `TlsServerConfig#identity_source`, the identity chosen per
+  ClientHello by the program.** A proc given the client's server_name and
+  ALPN offer, asked first in TLS 1.3 and 1.2, that answers the identity to
+  show, nil for the config's own choice (`others` by name, then
+  `identity`), or a `TlsError` that refuses the handshake with its alert.
+  An identity it answers is held to the client's schemes, and in 1.2 to
+  its suites and curves, as `others` are; a resumption shows none, its
+  ticket counting the session as `identity`'s. It is how std/autocert
+  shows tls-alpn-01's certificate beside the certificates it serves on
+  one listener, which std/acme's header said std/tls could not do.
 - **std/acme: an ACME client (RFC 8555), so an iyi server gets its own
   certificate.** `AcmeClient.new(directory, key)` reads the directory;
   every request after it is a JWS in the flattened JSON serialization,

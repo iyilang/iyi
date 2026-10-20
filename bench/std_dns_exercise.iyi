@@ -427,7 +427,13 @@ def happy_eyeballs : Nil
   same "cannot connect to gone.he.test:#{gone_port}: #{tried}", refused.message, "one error naming every address, in the order tried"
   check refused.tried == tried, "tried names them: #{refused.tried.inspect}"
   check refused.refused? && !refused.timed_out?, "every address refused is refused?: #{refused.message}"
-  puts "he_refused: ok (#{refused.message})"
+  # Printed with the port as PORT and no measured time on any line below:
+  # std_exercise.sh compares this program's output built from source with
+  # its output built from artifacts, and an ephemeral port or a
+  # millisecond count differs between two runs. The values are asserted
+  # above each line instead.
+  shown = has_six ? "[::1]:PORT connection refused; 127.0.0.1:PORT connection refused" : "127.0.0.1:PORT connection refused; #{hole}:PORT connection refused"
+  puts "he_refused: ok (cannot connect to gone.he.test:PORT: #{shown})"
 
   live = IyiSocket.listen("127.0.0.1", 0)
   he_port = live.local_port
@@ -465,7 +471,7 @@ def he_races(he : Resolver, has_six : Bool, hole : String, live : IyiSocket, he_
   check accepted.is_a?(IyiSocket), "127.0.0.1 accepts the raced connection"
   accepted.as(IyiSocket).close
   raced.as(IyiSocket).close
-  puts "he_blackhole: ok (connected through 127.0.0.1 in #{took} ms, #{at_hole} dropping SYNs)"
+  puts "he_blackhole: ok (connected through 127.0.0.1 after the 250 ms attempt delay and within 1500 ms, #{hole} dropping SYNs)"
 
   # Both families listening: the one `attempt_order` puts first answers.
   if has_six
@@ -487,7 +493,6 @@ def he_races(he : Resolver, has_six : Bool, hole : String, live : IyiSocket, he_
   # Twenty races at once, each with a losing attempt still under way when
   # it is won: every loser's socket is closed.
   before = open_descriptors
-  began = Resolver.now_ms
   won = [] of IyiSocket
   group do |r|
     20.times do
@@ -498,7 +503,6 @@ def he_races(he : Resolver, has_six : Bool, hole : String, live : IyiSocket, he_
       end
     end
   end
-  took = Resolver.now_ms - began
   check won.size == 20, "twenty connects raced at once all connect: #{won.size} did"
   won.each(&.close)
   index = 0
@@ -510,9 +514,9 @@ def he_races(he : Resolver, has_six : Bool, hole : String, live : IyiSocket, he_
   after = open_descriptors
   check after == before, "every losing attempt's socket is closed: #{before} descriptors before twenty raced connects, #{after} after"
   {% if flag?(:linux) %}
-    puts "he_fds: ok (twenty raced connects in #{took} ms, #{before} descriptors before and after)"
+    puts "he_fds: ok (twenty raced connects, the same count of descriptors before and after)"
   {% else %}
-    puts "he_fds: ok (twenty raced connects in #{took} ms; descriptors are counted on Linux alone, in /proc/self/fd)"
+    puts "he_fds: ok (twenty raced connects; descriptors are counted on Linux alone, in /proc/self/fd)"
   {% end %}
 
   # The bound is the whole connect's: attempts at 0 and 250 ms are cut at
@@ -524,7 +528,7 @@ def he_races(he : Resolver, has_six : Bool, hole : String, live : IyiSocket, he_
   check took >= 380 && took < 1500, "the bound is the whole connect's: 400 ms took #{took}"
   same "cannot connect to hang.he.test:#{he_port}: timed out after 400 ms: #{at_hole} timed out; #{at_hole} timed out; #{at_hole} not tried",
     late.as(SocketError).message, "the addresses tried, how each ended, and the one never tried"
-  puts "he_deadline: ok (#{took} ms)"
+  puts "he_deadline: ok (a 400 ms bound ended within 380 to 1500 ms: two attempts timed out, the third address never tried)"
 
   # The caller's task cancelled 600 ms in, three attempts under way.
   before = open_descriptors
@@ -545,7 +549,7 @@ def he_races(he : Resolver, has_six : Bool, hole : String, live : IyiSocket, he_
   check spent < 1500, "cancelling the caller cancels every attempt: the connect took #{spent} ms of its 10000"
   after = open_descriptors
   check after == before, "every attempt's socket is closed when the caller is cancelled: #{before} descriptors before, #{after} after"
-  puts "he_cancel: ok (cancelled at 600 ms, answered in #{spent} ms)"
+  puts "he_cancel: ok (cancelled at 600 ms, answered Cancelled within 1500 ms, every attempt's socket closed)"
 end
 
 hosts_file = "192.0.2.50 pinned.test\n2001:db8::50 pinned.test\n"

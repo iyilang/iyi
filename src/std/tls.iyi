@@ -3521,6 +3521,10 @@ pub class TlsServer < TlsConnection
       type, content = record
       case type
       when TlsRecords::APPLICATION_DATA
+        # Section 5.1: nothing comes between a handshake message's pieces,
+        # here an EndOfEarlyData's, as after the handshake (`cut_message`).
+        cut = cut_message(type)
+        return cut if cut
         @early_read = @early_read + content.size
         # Section 4.6.1: more than max_early_data_size is unexpected_message.
         if @early_read > @early_limit
@@ -3545,7 +3549,10 @@ pub class TlsServer < TlsConnection
         return nil
       when TlsRecords::ALERT
         answer = alert(content)
-        return answer || TlsError.new("the client closed during the handshake")
+        return answer if answer
+        cut = cut_message(type)
+        return cut if cut
+        return TlsError.new("the client closed during the handshake")
       else
         return TlsError.new("a record of type #{type} among the early data", TlsAlert::UNEXPECTED_MESSAGE)
       end

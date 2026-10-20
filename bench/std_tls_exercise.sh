@@ -2569,6 +2569,23 @@ prove_broken "a client's Finished taken for EndOfEarlyData" "FAIL early-finished
   '        unless message[0] == 5_u8 && message.size == 4' '        if false' server
 prove_broken "taken early records that do not open passed over" "FAIL early-bad-record " \
   '        @early_left = 0' '        @early_left = EARLY_ALLOWANCE' server
+# Section 5.1 among the early records: half an EndOfEarlyData, then early
+# data or a close_notify, which the early reader took before it was held
+# to the rule (`cut_message`) as the reader after the handshake is.
+prove_broken "early data taken inside a split EndOfEarlyData" "FAIL early-split-eoed " \
+  '        cut = cut_message(type)
+        return cut if cut
+        @early_read = @early_read + content.size' '        @early_read = @early_read + content.size' server
+prove_broken "close_notify taken inside a split EndOfEarlyData" "FAIL early-split-close " \
+  '        return answer if answer
+        cut = cut_message(type)
+        return cut if cut' '        return answer if answer' server
+# Section 5.4's limit at the server, by an early record: the early keys
+# open records through the same TlsRecordCipher#open as every other, so
+# the break is the client's "padding past 2^14 + 1 bytes" one above, made
+# here where the scripted client's early record is what pads past it.
+prove_broken "an early record padded past 2^14 + 1 bytes of inner plaintext taken" "FAIL early-padded-over " \
+  '    if opened.bytesize > TlsRecords::MAX_PLAINTEXT + 1' '    if opened.bytesize > TlsRecords::MAX_PLAINTEXT + 256' server
 prove_broken "the client's early data sent again under another protocol" "early-alpn:" \
   '      if @early_alpn != @alpn_protocol' '      if false' scenarios
 prove_broken "the client's early data past the ticket's allowance" "early-small:" \

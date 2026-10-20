@@ -419,6 +419,16 @@
 
 ### Fixed
 
+- **std/tls's server refuses early data or a close_notify that comes
+  between the pieces of a split EndOfEarlyData (RFC 8446 section 5.1).**
+  The reader of the client's early records took them, where the reader
+  after the handshake already refused the same inside any split message
+  (SECURITY_REVIEW_TLS.md's rule); now both end the connection with
+  unexpected_message. Held by `bench/std_tls_exercise.sh`: the scripted
+  client's `early-split-eoed` and `early-split-close` (alert 10) and
+  `early-padded-over`, an early record of 2^14 + 2 bytes of inner
+  plaintext (alert 22), with three broken copies of the server caught by
+  them.
 - **`iyi lsp` notices a dead worker whose pipes another process still
   holds, and the request after it is answered.** The proxy learned of a
   worker's death only from its stdout closing, and a process the worker

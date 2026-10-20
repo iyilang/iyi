@@ -214,6 +214,12 @@ SCENARIOS = {
                     ("held", ('early=""', "TLS_CHACHA20_POLY1305_SHA256", "resumed=yes"))),
     "early-second": ("early data with the ticket second among the identities: resumed, early data refused", ("held", ('early=""', "resumed=yes"))),
     "early-hrr": ("early data, then a HelloRetryRequest: refused", ("held", ('early=""', "resumed=yes"))),
+    # Section 5.1's rule that nothing comes between a handshake message's
+    # pieces, for EndOfEarlyData among the early records; and section 5.4's
+    # limit on an early record's whole inner plaintext, padding in it.
+    "early-split-eoed": ("half an EndOfEarlyData, then an early data record", ("alert", 10)),
+    "early-split-close": ("half an EndOfEarlyData, then close_notify", ("alert", 10)),
+    "early-padded-over": ("an early record of 2^14 + 2 bytes of inner plaintext, padding in it", ("alert", 22)),
     # X25519MLKEM768 (draft-ietf-tls-ecdhe-mlkem): the two that finish a
     # handshake need ML-KEM here, which cryptography has from 48 on, over
     # an OpenSSL that has it; the refusals need none.
@@ -727,7 +733,9 @@ def scenario(c, name, offer=None, extra=None, replay=None):
         if replay is None:
             early = plain(20, b"\x01")
             for k in range(0, len(early_data), 16384):
-                early += early_writer.seal(23, early_data[k:k + 16384], corrupt=(name == "early-bad-record"))
+                chunk = early_data[k:k + 16384]
+                pad = 16384 + 2 - len(chunk) - 1 if name == "early-padded-over" else 0
+                early += early_writer.seal(23, chunk, corrupt=(name == "early-bad-record"), pad=pad)
             c.sock.sendall(early)
             c.first_flight = (ch, key, sent + early)
         else:
@@ -831,7 +839,8 @@ def scenario(c, name, offer=None, extra=None, replay=None):
         i += 4 + n
     taken = 42 in types
     wanted = early_data is not None and replay is None and name in ("early-ok", "early-request", "early-too-much", "early-bad-record",
-                                                                    "early-finished-early", "early-replay")
+                                                                    "early-finished-early", "early-replay", "early-split-eoed",
+                                                                    "early-split-close", "early-padded-over")
     assert taken == wanted, f"early data {'taken' if taken else 'refused'} where it should {'' if wanted else 'not '}be"
     assert (16 in types) == (kw.get("alpn") is not None), f"EncryptedExtensions {types} for ALPN {kw.get('alpn')}"
     transcript += ee
@@ -943,7 +952,12 @@ def scenario(c, name, offer=None, extra=None, replay=None):
         c.sock.sendall(early_writer.seal(22, message(20, schedule.finished(c_hs, transcript))))
     elif taken:
         ended = message(5, b"")
-        c.sock.sendall(early_writer.seal(22, ended))
+        if name == "early-split-eoed":
+            c.sock.sendall(early_writer.seal(22, ended[:2]) + early_writer.seal(23, b"early:more"))
+        elif name == "early-split-close":
+            c.sock.sendall(early_writer.seal(22, ended[:2]) + early_writer.seal(21, b"\x01\x00"))
+        else:
+            c.sock.sendall(early_writer.seal(22, ended))
         transcript += ended
     if name == "ccs":
         c.sock.sendall(plain(20, b"\x01"))

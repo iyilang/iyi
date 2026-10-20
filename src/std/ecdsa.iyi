@@ -10,9 +10,10 @@
 # Checking only, as std/rsa is. A TLS client checks a server's signatures
 # and a certificate's, and makes none: there is no private key here and no
 # secret, so the arithmetic is plain and variable-time: the scalars on
-# std/big's numbers, the points on the field's own words in Montgomery
-# form (`EcdsaPlane`). The key a client agrees on is X25519's
-# (std/curve25519), which is constant-time.
+# std/big's numbers, s inverted by std/big's `inverse_mod_secret`, the
+# points on the field's own words in Montgomery form (`EcdsaP256` for
+# P-256, `EcdsaPlane` for the other two). The key a client agrees on is
+# X25519's (std/curve25519), which is constant-time.
 #
 # All three curves, not only P-256: of the roots a system trusts, most
 # that are not RSA are P-384 (35 of the 39 on the machine this was written
@@ -33,16 +34,20 @@
 # 1.3 carry it, read through std/asn1's strict DER: no trailing bytes, no
 # integer written longer than it is, no negative r or s. Each of r and s
 # must be in [1, n - 1]. The digest is cut to n's length in bits when it
-# is longer (P-256 under SHA-384). u1·G + u2·Q is taken in one pass over
-# the bits of both (Shamir's trick) in Jacobian coordinates, with the
-# cases a general addition misses handled by name: a point added to
-# itself, a point added to its negative, the identity on either side.
-# Measured on one x86_64 Linux machine other jobs shared, --release, the
-# best of five runs of 100: a P-256 signature checked in 166
-# microseconds, where BigInt's points took 1,477 and OpenSSL, through
-# Python's `cryptography`, takes 38. G and Q are added as affine points
-# (five products fewer an addition) and s is inverted mod n on the same
-# words, which together took 183 down to 166.
+# is longer (P-256 under SHA-384). u1·G + u2·Q is taken in one pass from
+# the top in Jacobian coordinates, with the cases a general addition
+# misses handled by name: a point added to itself, a point added to its
+# negative, the identity on either side. On P-256 the two scalars are in
+# width-w non-adjacent form (5 for Q, 7 for G, whose odd multiples are
+# made once and kept affine) and the field is four limbs in registers
+# reduced in p's own shape; on P-384 and P-521 their bits are read one at
+# a time, adding G, Q or G + Q. Measured on one x86_64 Linux machine
+# other jobs shared, --release, the best of five runs of 200: a P-256
+# signature checked in 53 microseconds, where the same run took 196
+# before the P-256 path and OpenSSL, through Python's `cryptography`,
+# took 42. Earlier: BigInt's points took 1,477, and G and Q added as
+# affine points with s inverted by Fermat on the plane's words took 183
+# down to 166.
 #
 # A signature that is not one is `false`, whatever the reason.
 #
@@ -199,21 +204,23 @@ pub struct EcdsaPublicKey
     e = BigInt.from_bytes(digest)
     excess = digest.size * 8 - @curve.bits
     e = e >> excess if excess > 0
-    w = EcdsaPlane.new(@group, n).inverse(s)
+    w = s.inverse_mod_secret(n)
+    return false unless w
     u1 = (e * w) % n
     u2 = (r * w) % n
-    EcdsaPlane.new(@group, @group.p).check(u1, u2, @x, @y, r)
+    return EcdsaP256.check(@group, u1, u2, @x, @y, r) if @curve == EcdsaCurve::P256
+    EcdsaPlane.new(@group).check(u1, u2, @x, @y, r)
   end
 end
 
-# u1·G + u2·Q and its comparison with r, on the field's numbers as 64-bit
-# words (4, 6 or 9 of them) in Montgomery form, R = 2^(64 k): products in
-# `UInt128` by coarsely integrated operand scanning, nothing allocated
-# past the scratch made with the plane. The values are public - a
-# signature, a key, a message - so the arithmetic branches as it likes.
-# On BigInt's numbers, with an allocation and a division in every
-# reduction, a P-256 signature took 1.5 ms to check; see the header for
-# what it takes here.
+# u1·G + u2·Q and its comparison with r for P-384 and P-521, on the
+# field's numbers as 64-bit words (6 or 9 of them) in Montgomery form,
+# R = 2^(64 k): products in `UInt128` by coarsely integrated operand
+# scanning, nothing allocated past the scratch made with the plane. The
+# values are public - a signature, a key, a message - so the arithmetic
+# branches as it likes. On BigInt's numbers, with an allocation and a
+# division in every reduction, a P-256 signature took 1.5 ms to check;
+# P-256 takes `EcdsaP256` instead.
 #
 # Points are Jacobian, (X / Z^2, Y / Z^3), the identity where Z is zero:
 # 3k words each. Scratch slots 0 to 5 are the doubling's and 6 to 15 the
@@ -227,9 +234,8 @@ class EcdsaPlane
   @t : Pointer(UInt64)
   @s : Pointer(UInt64)
   @group : EcdsaGroup
-  @modulus : BigInt
 
-  def initialize(@group : EcdsaGroup, modulus : BigInt)
+  def initialize(@group : EcdsaGroup)
     @size = @group.size
     @k = (@size + 7) // 8
     k = @k
@@ -237,9 +243,9 @@ class EcdsaPlane
     @s = Pointer(UInt64).malloc((16 * k).to_u64)
     @m = Pointer(UInt64).malloc(k.to_u64)
     @r2 = Pointer(UInt64).malloc(k.to_u64)
-    @modulus = modulus
-    words(modulus, @m)
-    words((BigInt.one << (128 * k)) % modulus, @r2)
+    p = @group.p
+    words(p, @m)
+    words((BigInt.one << (128 * k)) % p, @r2)
     # -1/m mod 2^64 by Newton's iteration: an odd m is its own inverse to
     # three bits, and each step doubles the bits that are right.
     x = @m[0]
@@ -268,48 +274,6 @@ class EcdsaPlane
     enter(other, want)
     mul(want, zz, want)
     same?(want, point)
-  end
-
-  # 1 / *x* mod the plane's modulus, x not a multiple of it, as x^(m - 2)
-  # by a 4-bit window over the exponent, which is public: the signature's
-  # s, inverted mod n, where BigInt's `pow_mod` took its own division to
-  # enter Montgomery form. *x* is reduced first, so a value past the
-  # modulus is its residue's inverse, as `pow_mod` answered, not a panic.
-  def inverse(x : BigInt) : BigInt
-    k = @k
-    table = Pointer(UInt64).malloc((16 * k).to_u64)
-    enter(BigInt.one, table)
-    enter(x % @modulus, table + k.to_i64)
-    i = 2
-    while i < 16
-      mul(table + ((i - 1) * k).to_i64, table + k.to_i64, table + (i * k).to_i64)
-      i = i + 1
-    end
-    e = (@modulus - BigInt.new(2)).to_bytes(8 * k)
-    raise "ecdsa: an exponent wider than its modulus" unless e
-    acc = Pointer(UInt64).malloc(k.to_u64)
-    copy(table, acc, k)
-    i = 0
-    while i < 16 * k
-      nibble = (e[i >> 1] >> (i & 1 == 0 ? 4 : 0)) & 15_u8
-      4.times { mul(acc, acc, acc) }
-      mul(acc, table + (nibble.to_i32 * k).to_i64, acc) unless nibble == 0_u8
-      i = i + 1
-    end
-    one = Pointer(UInt64).malloc(k.to_u64)
-    one[0] = 1_u64
-    mul(acc, one, acc)
-    bytes = Array(UInt8).new(8 * k, 0_u8)
-    i = 0
-    while i < k
-      j = 0
-      while j < 8
-        bytes[8 * (k - 1 - i) + 7 - j] = acc[i].unsafe_shr(8 * j).unsafe_to_u8
-        j = j + 1
-      end
-      i = i + 1
-    end
-    BigInt.from_bytes(bytes)
   end
 
   # u1·G + u2·Q into *acc*, both scalars' bits read together from the
@@ -646,6 +610,424 @@ class EcdsaPlane
 
   private def copy(src : Pointer(UInt64), dst : Pointer(UInt64), count : Int32) : Nil
     dst.copy_from(src, count) unless src == dst
+  end
+end
+
+# P-256's u1·G + u2·Q on four 64-bit limbs held in registers, the field's
+# own reduction (q = t0, p's words being what they are) in place of the
+# general one: the arithmetic std/p256 signs with, written again here
+# because std/p256 imports this module and an import cycle is refused
+# (SPEC.md R-1). The values are public, so the point formulas branch as
+# they like. Both scalars are written in width-w non-adjacent form, odd
+# digits under 2^(w - 1) in size with at least w - 1 zeros after each:
+# u2 at width 5 against Q, 3Q ... 15Q, made for each signature in
+# Jacobian coordinates, and u1 at width 7 against G, 3G ... 63G, made
+# once and kept affine (`g_table`). A signature then takes 256 doublings
+# and about 43 and 32 additions, where the bits read one at a time took
+# an addition for three bits in four. Measured with the rest of the
+# check in the header.
+struct EcdsaP256
+  Q_WIDTH = 5
+  G_WIDTH = 7
+
+  @@g_table = Pointer(EcdsaP256Num).new(0_u64)
+
+  # Whether u1·G + u2·Q is a point whose x is r modulo n, as
+  # `EcdsaPlane#check` answers it.
+  def self.check(group : EcdsaGroup, u1 : BigInt, u2 : BigInt, qx : BigInt, qy : BigInt, r : BigInt) : Bool
+    g_digits = EcdsaWnaf.digits(u1, 32, G_WIDTH)
+    q_digits = EcdsaWnaf.digits(u2, 32, Q_WIDTH)
+    return false unless g_digits && q_digits
+    q = EcdsaP256Point.new(EcdsaP256Num.enter(qx), EcdsaP256Num.enter(qy), EcdsaP256Num.one)
+    twice = q.double
+    odd = Pointer(EcdsaP256Point).malloc(8_u64)
+    odd[0] = q
+    i = 1
+    while i < 8
+      odd[i] = odd[i - 1].add(twice)
+      i = i + 1
+    end
+    table = g_table(group)
+    acc = EcdsaP256Point.identity
+    i = g_digits.size - 1
+    while i > 0 && g_digits[i] == 0 && q_digits[i] == 0
+      i = i - 1
+    end
+    while i >= 0
+      acc = acc.double
+      d = q_digits[i]
+      if d > 0
+        acc = acc.add(odd[d >> 1])
+      elsif d < 0
+        acc = acc.add(odd[(-d) >> 1].negate)
+      end
+      d = g_digits[i]
+      if d > 0
+        acc = acc.add_affine(table[d &- 1], table[d])
+      elsif d < 0
+        acc = acc.add_affine(table[(-d) &- 1], EcdsaP256Num.sub(EcdsaP256Num.zero, table[-d]))
+      end
+      i = i - 1
+    end
+    return false if acc.z.zero?
+    zz = EcdsaP256Num.square(acc.z)
+    return true if EcdsaP256Num.mul(EcdsaP256Num.enter(r), zz) == acc.x
+    other = r + group.n
+    return false unless other < group.p
+    EcdsaP256Num.mul(EcdsaP256Num.enter(other), zz) == acc.x
+  end
+
+  # G, 3G, ... 63G as affine x and y, entry j's x at 2j and y at 2j + 1
+  # (so digit d's point is at d - 1 and d), worked out the first time it
+  # is wanted: a doubling, 31 additions and their Z inverted together by
+  # Montgomery's trick. Two threads that reach it first both work it out
+  # and store the same table.
+  def self.g_table(group : EcdsaGroup) : Pointer(EcdsaP256Num)
+    return @@g_table if @@g_table.address != 0_u64
+    count = 1 << (G_WIDTH - 2)
+    g = EcdsaP256Point.new(EcdsaP256Num.enter(group.gx), EcdsaP256Num.enter(group.gy), EcdsaP256Num.one)
+    twice = g.double
+    points = Pointer(EcdsaP256Point).malloc(count.to_u64)
+    points[0] = g
+    i = 1
+    while i < count
+      points[i] = points[i - 1].add(twice)
+      i = i + 1
+    end
+    # The running products of the Z, one inversion, and each Z's inverse
+    # unwound from it. None is zero: no odd multiple of G under 64 is the
+    # identity.
+    before = Pointer(EcdsaP256Num).malloc(count.to_u64)
+    run = EcdsaP256Num.one
+    i = 0
+    while i < count
+      before[i] = run
+      run = EcdsaP256Num.mul(run, points[i].z)
+      i = i + 1
+    end
+    inverse = EcdsaP256Num.invert(run)
+    table = Pointer(EcdsaP256Num).malloc((2 * count).to_u64)
+    i = count - 1
+    while i >= 0
+      zi = EcdsaP256Num.mul(inverse, before[i])
+      inverse = EcdsaP256Num.mul(inverse, points[i].z)
+      zz = EcdsaP256Num.square(zi)
+      table[2 * i] = EcdsaP256Num.mul(points[i].x, zz)
+      table[2 * i + 1] = EcdsaP256Num.mul(points[i].y, EcdsaP256Num.mul(zz, zi))
+      i = i - 1
+    end
+    @@g_table = table
+    table
+  end
+end
+
+# A point of P-256 in Jacobian coordinates, (X / Z^2, Y / Z^3), each in
+# the field's Montgomery form; the identity where Z is zero. The
+# formulas are the generic plane's: dbl-2001-b (a = -3), add-2007-bl and
+# madd-2007-bl, with the cases they cannot take by name.
+struct EcdsaP256Point
+  getter x : EcdsaP256Num
+  getter y : EcdsaP256Num
+  getter z : EcdsaP256Num
+
+  def initialize(@x : EcdsaP256Num, @y : EcdsaP256Num, @z : EcdsaP256Num)
+  end
+
+  def self.identity : EcdsaP256Point
+    new(EcdsaP256Num.one, EcdsaP256Num.one, EcdsaP256Num.zero)
+  end
+
+  def negate : EcdsaP256Point
+    EcdsaP256Point.new(@x, EcdsaP256Num.sub(EcdsaP256Num.zero, @y), @z)
+  end
+
+  def double : EcdsaP256Point
+    return self if @z.zero?
+    return EcdsaP256Point.identity if @y.zero?
+    delta = EcdsaP256Num.square(@z)
+    gamma = EcdsaP256Num.square(@y)
+    beta = EcdsaP256Num.mul(@x, gamma)
+    alpha = EcdsaP256Num.mul(EcdsaP256Num.sub(@x, delta), EcdsaP256Num.add(@x, delta))
+    alpha = EcdsaP256Num.add(alpha, EcdsaP256Num.add(alpha, alpha))
+    beta4 = EcdsaP256Num.add(beta, beta)
+    beta4 = EcdsaP256Num.add(beta4, beta4)
+    x3 = EcdsaP256Num.sub(EcdsaP256Num.square(alpha), EcdsaP256Num.add(beta4, beta4))
+    z3 = EcdsaP256Num.sub(EcdsaP256Num.sub(EcdsaP256Num.square(EcdsaP256Num.add(@y, @z)), gamma), delta)
+    gamma8 = EcdsaP256Num.square(gamma)
+    gamma8 = EcdsaP256Num.add(gamma8, gamma8)
+    gamma8 = EcdsaP256Num.add(gamma8, gamma8)
+    gamma8 = EcdsaP256Num.add(gamma8, gamma8)
+    y3 = EcdsaP256Num.sub(EcdsaP256Num.mul(alpha, EcdsaP256Num.sub(beta4, x3)), gamma8)
+    EcdsaP256Point.new(x3, y3, z3)
+  end
+
+  # What an addition answers when both points have one x: self again
+  # (*rr*, the difference of their y, is zero), a doubling; or self's
+  # negative, the identity.
+  private def coincident(rr : EcdsaP256Num) : EcdsaP256Point
+    rr.zero? ? double : EcdsaP256Point.identity
+  end
+
+  # self + *other*, both Jacobian.
+  def add(other : EcdsaP256Point) : EcdsaP256Point
+    return other if @z.zero?
+    return self if other.z.zero?
+    z1z1 = EcdsaP256Num.square(@z)
+    z2z2 = EcdsaP256Num.square(other.z)
+    u1 = EcdsaP256Num.mul(@x, z2z2)
+    u2 = EcdsaP256Num.mul(other.x, z1z1)
+    s1 = EcdsaP256Num.mul(EcdsaP256Num.mul(@y, other.z), z2z2)
+    s2 = EcdsaP256Num.mul(EcdsaP256Num.mul(other.y, @z), z1z1)
+    h = EcdsaP256Num.sub(u2, u1)
+    rr = EcdsaP256Num.sub(s2, s1)
+    return coincident(rr) if h.zero?
+    i = EcdsaP256Num.add(h, h)
+    i = EcdsaP256Num.square(i)
+    j = EcdsaP256Num.mul(h, i)
+    rr = EcdsaP256Num.add(rr, rr)
+    v = EcdsaP256Num.mul(u1, i)
+    x3 = EcdsaP256Num.sub(EcdsaP256Num.sub(EcdsaP256Num.sub(EcdsaP256Num.square(rr), j), v), v)
+    s1j = EcdsaP256Num.mul(s1, j)
+    y3 = EcdsaP256Num.sub(EcdsaP256Num.mul(rr, EcdsaP256Num.sub(v, x3)), EcdsaP256Num.add(s1j, s1j))
+    zs = EcdsaP256Num.square(EcdsaP256Num.add(@z, other.z))
+    z3 = EcdsaP256Num.mul(EcdsaP256Num.sub(EcdsaP256Num.sub(zs, z1z1), z2z2), h)
+    EcdsaP256Point.new(x3, y3, z3)
+  end
+
+  # self + the affine point (*x2*, *y2*).
+  def add_affine(x2 : EcdsaP256Num, y2 : EcdsaP256Num) : EcdsaP256Point
+    return EcdsaP256Point.new(x2, y2, EcdsaP256Num.one) if @z.zero?
+    z1z1 = EcdsaP256Num.square(@z)
+    u2 = EcdsaP256Num.mul(x2, z1z1)
+    s2 = EcdsaP256Num.mul(EcdsaP256Num.mul(y2, @z), z1z1)
+    h = EcdsaP256Num.sub(u2, @x)
+    rr = EcdsaP256Num.sub(s2, @y)
+    return coincident(rr) if h.zero?
+    hh = EcdsaP256Num.square(h)
+    i = EcdsaP256Num.add(hh, hh)
+    i = EcdsaP256Num.add(i, i)
+    j = EcdsaP256Num.mul(h, i)
+    rr = EcdsaP256Num.add(rr, rr)
+    v = EcdsaP256Num.mul(@x, i)
+    x3 = EcdsaP256Num.sub(EcdsaP256Num.sub(EcdsaP256Num.sub(EcdsaP256Num.square(rr), j), v), v)
+    yj = EcdsaP256Num.mul(@y, j)
+    y3 = EcdsaP256Num.sub(EcdsaP256Num.mul(rr, EcdsaP256Num.sub(v, x3)), EcdsaP256Num.add(yj, yj))
+    z3 = EcdsaP256Num.sub(EcdsaP256Num.sub(EcdsaP256Num.square(EcdsaP256Num.add(@z, h)), z1z1), hh)
+    EcdsaP256Point.new(x3, y3, z3)
+  end
+end
+
+# A number modulo P-256's p in Montgomery form (R = 2^256), four 64-bit
+# limbs, least significant first, and the field's arithmetic on it:
+# std/p256's `P256Modulus.field`, every result below p.
+struct EcdsaP256Num
+  getter l0 : UInt64
+  getter l1 : UInt64
+  getter l2 : UInt64
+  getter l3 : UInt64
+
+  P3 = 0xffffffff00000001_u64
+
+  def initialize(@l0 : UInt64, @l1 : UInt64, @l2 : UInt64, @l3 : UInt64)
+  end
+
+  def self.zero : EcdsaP256Num
+    new(0_u64, 0_u64, 0_u64, 0_u64)
+  end
+
+  # R mod p, 1 in Montgomery form.
+  def self.one : EcdsaP256Num
+    new(0x0000000000000001_u64, 0xffffffff00000000_u64, 0xffffffffffffffff_u64, 0x00000000fffffffe_u64)
+  end
+
+  def self.p : EcdsaP256Num
+    new(0xffffffffffffffff_u64, 0x00000000ffffffff_u64, 0x0000000000000000_u64, P3)
+  end
+
+  # *x*, below p, into Montgomery form: its limbs times R^2 mod p.
+  def self.enter(x : BigInt) : EcdsaP256Num
+    bytes = x.to_bytes(32) || raise "ecdsa: #{x} is past P-256's field"
+    mul(new(word(bytes, 24), word(bytes, 16), word(bytes, 8), word(bytes, 0)),
+      new(0x0000000000000003_u64, 0xfffffffbffffffff_u64, 0xfffffffffffffffe_u64, 0x00000004fffffffd_u64))
+  end
+
+  private def self.word(bytes : Array(UInt8), at : Int32) : UInt64
+    w = 0_u64
+    i = 0
+    while i < 8
+      w = w.unsafe_shl(8) | bytes[at + i].to_u64
+      i = i + 1
+    end
+    w
+  end
+
+  def zero? : Bool
+    (@l0 | @l1 | @l2 | @l3) == 0_u64
+  end
+
+  def ==(other : EcdsaP256Num) : Bool
+    ((@l0 ^ other.l0) | (@l1 ^ other.l1) | (@l2 ^ other.l2) | (@l3 ^ other.l3)) == 0_u64
+  end
+
+  # a b / R mod p by four rounds of a times a limb of b, each followed by
+  # one limb's reduction in p's shape.
+  @[AlwaysInline]
+  def self.mul(a : EcdsaP256Num, b : EcdsaP256Num) : EcdsaP256Num
+    t0, t1, t2, t3, t4 = round(a, b.l0, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64)
+    t0, t1, t2, t3, t4 = round(a, b.l1, t0, t1, t2, t3, t4)
+    t0, t1, t2, t3, t4 = round(a, b.l2, t0, t1, t2, t3, t4)
+    t0, t1, t2, t3, t4 = round(a, b.l3, t0, t1, t2, t3, t4)
+    below_p(new(t0, t1, t2, t3), t4)
+  end
+
+  # a^2 / R mod p, as a product. Tried and dropped: a square of its own,
+  # the six products off the diagonal once and doubled and four rounds of
+  # p's reduction over eight words, ten products where this takes
+  # sixteen; a P-256 signature took 67 us to check with it and 52
+  # without (best of five runs of 200, --release, on a shared machine).
+  @[AlwaysInline]
+  def self.square(a : EcdsaP256Num) : EcdsaP256Num
+    mul(a, a)
+  end
+
+  # One limb of a product and its reduction: q = t0, since -1/p mod 2^64
+  # is 1, and q p + t has a zero low word, t1 + q 2^32 next, t2, then
+  # t3 + q (2^64 - 2^32 + 1).
+  @[AlwaysInline]
+  private def self.round(a : EcdsaP256Num, bi : UInt64, t0 : UInt64, t1 : UInt64, t2 : UInt64, t3 : UInt64, t4 : UInt64) : {UInt64, UInt64, UInt64, UInt64, UInt64}
+    w = a.l0.to_u128 &* bi.to_u128 &+ t0.to_u128
+    t0 = w.unsafe_to_u64
+    w = a.l1.to_u128 &* bi.to_u128 &+ t1.to_u128 &+ w.unsafe_shr(64)
+    t1 = w.unsafe_to_u64
+    w = a.l2.to_u128 &* bi.to_u128 &+ t2.to_u128 &+ w.unsafe_shr(64)
+    t2 = w.unsafe_to_u64
+    w = a.l3.to_u128 &* bi.to_u128 &+ t3.to_u128 &+ w.unsafe_shr(64)
+    t3 = w.unsafe_to_u64
+    w = t4.to_u128 &+ w.unsafe_shr(64)
+    t4 = w.unsafe_to_u64
+    t5 = w.unsafe_shr(64).unsafe_to_u64
+    w = t1.to_u128 &+ t0.to_u128.unsafe_shl(32)
+    r0 = w.unsafe_to_u64
+    w = t2.to_u128 &+ w.unsafe_shr(64)
+    r1 = w.unsafe_to_u64
+    w = t0.to_u128 &* P3.to_u128 &+ t3.to_u128 &+ w.unsafe_shr(64)
+    r2 = w.unsafe_to_u64
+    w = t4.to_u128 &+ w.unsafe_shr(64)
+    r3 = w.unsafe_to_u64
+    {r0, r1, r2, r3, t5 &+ w.unsafe_shr(64).unsafe_to_u64}
+  end
+
+  # (a + b) mod p.
+  @[AlwaysInline]
+  def self.add(a : EcdsaP256Num, b : EcdsaP256Num) : EcdsaP256Num
+    w = a.l0.to_u128 &+ b.l0.to_u128
+    s0 = w.unsafe_to_u64
+    w = a.l1.to_u128 &+ b.l1.to_u128 &+ w.unsafe_shr(64)
+    s1 = w.unsafe_to_u64
+    w = a.l2.to_u128 &+ b.l2.to_u128 &+ w.unsafe_shr(64)
+    s2 = w.unsafe_to_u64
+    w = a.l3.to_u128 &+ b.l3.to_u128 &+ w.unsafe_shr(64)
+    below_p(new(s0, s1, s2, w.unsafe_to_u64), w.unsafe_shr(64).unsafe_to_u64)
+  end
+
+  # (a - b) mod p: p added back by a mask when a - b borrows.
+  @[AlwaysInline]
+  def self.sub(a : EcdsaP256Num, b : EcdsaP256Num) : EcdsaP256Num
+    w = a.l0.to_u128 &- b.l0.to_u128
+    d0 = w.unsafe_to_u64
+    w = a.l1.to_u128 &- b.l1.to_u128 &- w.unsafe_shr(127)
+    d1 = w.unsafe_to_u64
+    w = a.l2.to_u128 &- b.l2.to_u128 &- w.unsafe_shr(127)
+    d2 = w.unsafe_to_u64
+    w = a.l3.to_u128 &- b.l3.to_u128 &- w.unsafe_shr(127)
+    d3 = w.unsafe_to_u64
+    mask = 0_u64 &- w.unsafe_shr(127).unsafe_to_u64
+    w = d0.to_u128 &+ mask.to_u128
+    r0 = w.unsafe_to_u64
+    w = d1.to_u128 &+ (mask & 0x00000000ffffffff_u64).to_u128 &+ w.unsafe_shr(64)
+    r1 = w.unsafe_to_u64
+    w = d2.to_u128 &+ w.unsafe_shr(64)
+    r2 = w.unsafe_to_u64
+    w = d3.to_u128 &+ (mask & P3).to_u128 &+ w.unsafe_shr(64)
+    new(r0, r1, r2, w.unsafe_to_u64)
+  end
+
+  # *t*, with *top* the bit over its four limbs, a number below 2p, taken
+  # below p: p off when top is set or t - p does not borrow.
+  @[AlwaysInline]
+  private def self.below_p(t : EcdsaP256Num, top : UInt64) : EcdsaP256Num
+    w = t.l0.to_u128 &- 0xffffffffffffffff_u64.to_u128
+    d0 = w.unsafe_to_u64
+    w = t.l1.to_u128 &- 0x00000000ffffffff_u64.to_u128 &- w.unsafe_shr(127)
+    d1 = w.unsafe_to_u64
+    w = t.l2.to_u128 &- w.unsafe_shr(127)
+    d2 = w.unsafe_to_u64
+    w = t.l3.to_u128 &- P3.to_u128 &- w.unsafe_shr(127)
+    d3 = w.unsafe_to_u64
+    keep = 0_u64 &- ((top | (w.unsafe_shr(127).unsafe_to_u64 ^ 1_u64)) & 1_u64)
+    new((d0 & keep) | (t.l0 & ~keep), (d1 & keep) | (t.l1 & ~keep), (d2 & keep) | (t.l2 & ~keep), (d3 & keep) | (t.l3 & ~keep))
+  end
+
+  # 1 / a for *a* in Montgomery form, a^(p - 2), its exponent's bits read
+  # from the top; for the table, once.
+  def self.invert(a : EcdsaP256Num) : EcdsaP256Num
+    e = {0xfffffffffffffffd_u64, 0x00000000ffffffff_u64, 0x0000000000000000_u64, P3}
+    result = one
+    i = 255
+    while i >= 0
+      result = square(result)
+      word = i >= 192 ? e[3] : (i >= 128 ? e[2] : (i >= 64 ? e[1] : e[0]))
+      result = mul(result, a) if word.unsafe_shr(i & 63) & 1_u64 == 1_u64
+      i = i - 1
+    end
+    result
+  end
+end
+
+# Width-w non-adjacent form: digits of a scalar, least significant first,
+# each 0 or odd and under 2^(w - 1) in size, any two nonzero digits at
+# least w places apart, so that sum(d_i 2^i) is the scalar.
+struct EcdsaWnaf
+  # The digits of *scalar*, below 2^(8 size), or nil for one wider.
+  def self.digits(scalar : BigInt, size : Int32, width : Int32) : Array(Int32)?
+    bytes = scalar.to_bytes(size)
+    return nil unless bytes
+    count = (size + 7) // 8 + 1
+    k = Array(UInt64).new(count, 0_u64)
+    i = 0
+    while i < size
+      k[i >> 3] = k[i >> 3] | bytes[size - 1 - i].to_u64.unsafe_shl((i & 7) * 8)
+      i = i + 1
+    end
+    full = 1_u64.unsafe_shl(width)
+    digits = Array(Int32).new(8 * size + 2, 0)
+    at = 0
+    while k.any? { |w| w != 0_u64 }
+      if k[0] & 1_u64 == 1_u64
+        low = k[0] & (full &- 1_u64)
+        if low < full.unsafe_shr(1)
+          digits[at] = low.to_i32
+          k[0] = k[0] &- low
+        else
+          digits[at] = low.to_i32 - full.to_i32
+          carry = full &- low
+          j = 0
+          while carry != 0_u64 && j < count
+            w = k[j].to_u128 &+ carry.to_u128
+            k[j] = w.unsafe_to_u64
+            carry = w.unsafe_shr(64).unsafe_to_u64
+            j = j + 1
+          end
+        end
+      end
+      j = 0
+      while j < count
+        k[j] = k[j].unsafe_shr(1) | (j + 1 < count ? k[j + 1].unsafe_shl(63) : 0_u64)
+        j = j + 1
+      end
+      at = at + 1
+    end
+    digits
   end
 end
 

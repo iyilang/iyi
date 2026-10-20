@@ -897,11 +897,13 @@ jobs:
   # certificates and its proofs - ran past 45. And at 45 a shard was cut
   # off with three runs of this workflow at once (a tag's, master's and the
   # branch's): the same shard took 29 to 45 minutes in four runs, so it
-  # has the hour Windows' shards have.
+  # has the hour Windows' shards have. And ninety, as Windows' now do: on
+  # tls/mlkem shard 3 reached std/tls after forty minutes, and std/tls's
+  # broken copies, grown with the hybrid's, ran it past sixty.
   std-siblings:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
     strategy:

@@ -120,6 +120,55 @@
   1.2; the std/tls client answered in 1.3, and a copy of it offering 1.2
   alone refusing the sentinel - and with the check removed, connecting in
   1.2. 34 new broken copies are each caught, 157 in all.
+- **std/tls resumes TLS 1.3 sessions by tickets, client and server (RFC
+  8446 sections 2.2, 4.2.11 and 4.6.1).** A `TlsServer` sends `tickets`
+  NewSessionTickets (two unless set, eight at most) once the client's
+  Finished is in, each its own state - suite, PSK, lifetime and age_add,
+  the name asked for, the protocol, the identity shown, the client's
+  certificates - sealed by ChaCha20-Poly1305 under `TlsTicketKeys`, a key
+  made at random in the process that seals for one `ticket_lifetime`
+  (7200 s unless set, seven days at most) and opens for one more; a
+  ticket past 8 KiB is not sent. A pre_shared_key is taken for the first
+  identity that opens, within its lifetime by the server's clock and by
+  the age the client gives, under a suite of the chosen one's hash, for
+  the server_name asked for now, offered for psk_dhe_ke; its binder is
+  checked (decrypt_error when it does not match), and any other ticket
+  is passed over for a full handshake. psk_ke is never taken, so a
+  resumed session's keys always include a fresh key exchange (SPEC.md
+  decision #18). A resumption sends no certificate and asks for none:
+  `peer_certificates` are the ticket's, a client's included; ALPN
+  chooses afresh; and the tickets it is sent end when the first
+  handshake's lifetime does. A client keeps tickets in a `TlsSession` its
+  caller holds and hands to `TlsClient.connect`/`over` (`session:`), at
+  most eight of at most 16 KiB: the newest for the host goes out once,
+  its age obfuscated and its binder over the ClientHello and any
+  HelloRetryRequest before it; `resumed?` says whether it was taken. A
+  server that takes an identity not offered, takes it under another
+  hash's suite, or sends a Certificate after, is refused. A ClientHello
+  that offers a PSK may leave signature_algorithms out (section 9.2). 0-RTT
+  is not here. Held by `bench/std_tls_exercise.sh`: RFC 8448's resumed
+  trace through the key schedule (the resumption master secret, the
+  ticket's PSK, its binder over the trace's ClientHello, the PSK's
+  handshake secrets and Finished, the resumed flight opened); the ticket
+  keys' rotation, a ticket's lifetime and a session's limits on a clock
+  the exercise sets; the client resumed by OpenSSL 3.5's s_server three
+  times through one session ("Reused, TLSv1.3" by s_server's own page)
+  under the default suites, AES-256-GCM alone and through a
+  HelloRetryRequest; the server resumed by `openssl s_client -sess_out` /
+  `-sess_in` ("Reused, TLSv1.3"), by Python's ssl `session=`
+  (`session_reused` True) and by the std/tls client, on each of its four
+  keys, and a client certificate carried through a resumption by
+  OpenSSL's and Python's; six scripted-server resumptions and three
+  ticket scenarios against the client, and eighteen scripted-client
+  resumptions against the server (a bad binder, an age past the
+  lifetime, another hash's suite, psk_ke alone, another server_name, a
+  ticket one bit off, no modes, binders short of identities,
+  pre_shared_key not last, through a HelloRetryRequest, a second
+  identity, no signature_algorithms, a client certificate carried); and
+  thirty broken copies of the module, each caught where it should be.
+  The scripted client's early-data scenarios now send a well-formed
+  pre_shared_key: its identity's length said 5 for a 6-byte name, which
+  the server passed over until it read pre_shared_key.
 
 ### Changed
 

@@ -41,8 +41,8 @@
 # application keys. There is no way to turn any of this off. A server that
 # asks for a certificate is sent `TlsConfig#identity`'s chain and a
 # CertificateVerify when its request names the identity's scheme, and an
-# empty Certificate otherwise, which section 4.4.2 allows. Not here:
-# resumption and 0-RTT (NewSessionTicket is read and set aside).
+# empty Certificate otherwise, which section 4.4.2 allows. Resumption is
+# below; 0-RTT is not here: no early data is sent.
 #
 # TLS 1.2 at the client, and only when asked: `config.min_version =
 # TlsVersion::TLS12`. It is here for the servers that never moved past
@@ -116,13 +116,42 @@
 # for X25519, or for secp256r1 where X25519 is not among its groups.
 # Early data is refused: its records are passed over, up to sixteen of the
 # largest, as section 4.2.10 says.
-# No NewSessionTicket is sent. With `client_roots` the server asks for a
-# client's certificate, checks its chain for clientAuth and its
-# CertificateVerify, and refuses a client that sends none
-# (certificate_required) unless `client_required` is false;
-# `peer_certificates` is the chain. A handshake that fails sends the
-# client the alert its `TlsError` names - in the clear before the
-# server's keys, under them after.
+# With `client_roots` the server asks for a client's certificate, checks
+# its chain for clientAuth and its CertificateVerify, and refuses a client
+# that sends none (certificate_required) unless `client_required` is
+# false; `peer_certificates` is the chain. A handshake that fails sends the
+# client the alert its `TlsError` names - in the clear before the server's
+# keys, under them after.
+#
+# Resumption (RFC 8446 section 2.2), both ends, by tickets. The server
+# sends `tickets` NewSessionTickets (two by default, eight at most) once
+# the client's Finished is in. A ticket is the server's own state sealed
+# by ChaCha20-Poly1305 under a key it made (`TlsTicketKeys`): the suite,
+# the PSK the ticket's nonce makes of the resumption master secret, its
+# lifetime (`ticket_lifetime`: two hours unless set, seven days at most)
+# and age_add, the name asked for, the protocol, the identity shown and
+# the client's certificates; a ticket past 8 KiB is not sent. The key
+# seals for one lifetime and opens for one more, and lives in this process
+# alone. A pre_shared_key is taken for the first identity that is such a
+# ticket, within its lifetime by the server's clock and by the age the
+# client gives, issued under a suite of the chosen one's hash, for the
+# server_name asked for now (another name may be another identity's), and
+# offered for psk_dhe_ke - psk_ke, whose keys are the PSK's alone, is
+# never taken, so that whoever later learns a ticket key cannot read the
+# sessions it resumed. Its binder is then checked, and one that does not
+# match refuses the handshake (decrypt_error); a ticket that is not taken
+# is passed over for a full handshake. A resumption sends no certificate
+# and asks for none: `peer_certificates` are the ticket's, while ALPN
+# chooses afresh. The tickets a resumption is sent end when the first
+# handshake's lifetime does, counted from when its certificates were
+# checked. The client keeps tickets in a `TlsSession` the caller holds and
+# hands to `TlsClient.connect`: the newest for the host goes out, and only
+# once, under psk_dhe_ke alone, its age obfuscated and its binder over the
+# ClientHello - and over the HelloRetryRequest before it, which drops a
+# ticket of another hash's suite. A server that passes it over is answered
+# by a full handshake; one that takes an identity not offered, or takes it
+# under another hash's suite, or sends a certificate after, is refused. A
+# session holds eight tickets at most, each of 16 KiB at most.
 #
 # TLS 1.2 at the server, and only when asked: `config.min_version =
 # TlsVersion::TLS12` on a `TlsServerConfig`, for the clients that never
@@ -352,12 +381,33 @@ pub class TlsKeySchedule
     extract(zeros, zeros)
   end
 
-  def handshake_secret(shared : Array(UInt8)) : Array(UInt8)
-    extract(derive_secret(early_secret, "derived", [] of UInt8), shared)
+  # The early secret of a resumption, from its PSK.
+  def early_secret(psk : Array(UInt8)) : Array(UInt8)
+    extract(zeros, psk)
+  end
+
+  # The handshake secret over the key exchange's *shared* secret, and over
+  # *psk* in a resumption.
+  def handshake_secret(shared : Array(UInt8), psk : Array(UInt8)? = nil) : Array(UInt8)
+    early = psk ? early_secret(psk) : early_secret
+    extract(derive_secret(early, "derived", [] of UInt8), shared)
   end
 
   def master_secret(handshake_secret : Array(UInt8)) : Array(UInt8)
     extract(derive_secret(handshake_secret, "derived", [] of UInt8), zeros)
+  end
+
+  # A PSK binder (section 4.2.11.2): a Finished keyed by the resumption's
+  # binder key, over *transcript* - the messages before the ClientHello and
+  # the ClientHello up to its binders.
+  def binder(psk : Array(UInt8), transcript : Array(UInt8)) : Array(UInt8)
+    finished(derive_secret(early_secret(psk), "res binder", [] of UInt8), transcript)
+  end
+
+  # The PSK a NewSessionTicket's *nonce* makes of the resumption master
+  # secret (section 4.6.1): one ticket's, and no other's.
+  def resumption_psk(secret : Array(UInt8), nonce : Array(UInt8)) : Array(UInt8)
+    expand_label(secret, "resumption", nonce, @hash_size)
   end
 
   # A Finished message's verify_data under *secret* (section 4.4.4).
@@ -574,9 +624,10 @@ struct TlsSuites
     suite == ECDHE_ECDSA_CHACHA20 || suite == ECDHE_RSA_CHACHA20
   end
 
-  # Whether a TLS 1.2 suite's PRF and transcript hash are SHA-384.
+  # Whether a suite's transcript hash is SHA-384 - and in TLS 1.2 its PRF's:
+  # TLS_AES_256_GCM_SHA384, and TLS 1.2's AES-256-GCM suites.
   def self.sha384?(suite : Int32) : Bool
-    suite == ECDHE_ECDSA_AES_256_GCM || suite == ECDHE_RSA_AES_256_GCM
+    suite == AES_256_GCM || suite == ECDHE_ECDSA_AES_256_GCM || suite == ECDHE_RSA_AES_256_GCM
   end
 
   # A TLS 1.2 suite's key, in bytes.
@@ -607,6 +658,13 @@ pub abstract class TlsConnection
   # The chain the peer's certificate was checked through, leaf first: the
   # server's, for a client; the client's, for a server that asked for one.
   getter peer_certificates : Array(Certificate) = [] of Certificate
+  # Whether the handshake resumed a session by a ticket's PSK (RFC 8446
+  # section 2.2), with no certificate sent: `peer_certificates` are then the
+  # ones the first handshake checked.
+  @resumed : Bool = false
+  # The resumption master secret (section 7.1), each ticket's PSK made of
+  # it: over the handshake to the client's Finished.
+  @resumption_secret : Array(UInt8) = [] of UInt8
   @socket : IyiSocket
   # The other end, for a sentence: "the server" or "the client"; and where
   # a failed read or write was going: the host, or "the client".
@@ -890,10 +948,16 @@ pub abstract class TlsConnection
     @socket.write_timeout_ms = ms
   end
 
-  # NewSessionTicket set aside by a client; a KeyUpdate taken, and owed
-  # back when it asks (section 4.6.3). In TLS 1.2 a HelloRequest, the only
-  # handshake message a server sends after a handshake, is owed its
-  # refusal; a ClientHello, the only one a client sends, is refused.
+  # Whether the handshake resumed a session (see `TlsSession`).
+  def resumed? : Bool
+    @resumed
+  end
+
+  # A NewSessionTicket kept by a client that holds a `TlsSession`; a
+  # KeyUpdate taken, and owed back when it asks (section 4.6.3). In TLS 1.2
+  # a HelloRequest, the only handshake message a server sends after a
+  # handshake, is owed its refusal; a ClientHello, the only one a client
+  # sends, is refused.
   private def post_handshake(content : Array(UInt8)) : TlsError?
     add_handshake(content)
     while true
@@ -921,8 +985,10 @@ pub abstract class TlsConnection
       end
       case message[0]
       when 4_u8
-        # NewSessionTicket: resumption is not offered. Only a server sends one.
+        # Only a server sends one.
         return TlsError.new("a NewSessionTicket from the client", TlsAlert::UNEXPECTED_MESSAGE) if server_side?
+        problem = ticket_received(message)
+        return problem if problem
       when 24_u8
         return TlsError.new("a KeyUpdate of #{length} bytes", TlsAlert::DECODE_ERROR) unless length == 1
         # Section 4.6.3: a request_update of neither 0 nor 1.
@@ -939,6 +1005,11 @@ pub abstract class TlsConnection
         return TlsError.new("#{TlsBytes.handshake_name(message[0])} after the handshake", TlsAlert::UNEXPECTED_MESSAGE)
       end
     end
+    nil
+  end
+
+  # A NewSessionTicket read: the client's to judge and keep.
+  private def ticket_received(message : Array(UInt8)) : TlsError?
     nil
   end
 
@@ -1368,10 +1439,15 @@ pub class TlsClient < TlsConnection
   # *host* as server_name carries it and the certificate is checked for
   # (`server_name_for`), set when the handshake starts.
   @name : String = ""
+  # Where this connection's tickets are kept and a resumption's was taken
+  # from: the caller's, none when nil.
+  @session : TlsSession?
+  # The ticket this ClientHello offers, if it offers one.
+  @offered : TlsHeldTicket? = nil
 
   SIGNATURE_SCHEMES = [0x0403, 0x0503, 0x0603, 0x0807, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601]
 
-  def initialize(socket : IyiSocket, @host : String, @config : TlsConfig)
+  def initialize(socket : IyiSocket, @host : String, @config : TlsConfig, @session : TlsSession? = nil)
     super(socket, "the server", @host)
   end
 
@@ -1400,18 +1476,19 @@ pub class TlsClient < TlsConnection
   end
 
   # A connection to *host* on *port*, its handshake done and the server's
-  # certificate checked for *host*.
-  def self.connect(host : String, port : Int32, config : TlsConfig = TlsConfig.new, timeout_ms : Int32 = -1) : TlsClient | TlsError
+  # certificate checked for *host* - or, with a *session* that holds a
+  # ticket for *host*, resumed, and the tickets the server sends kept there.
+  def self.connect(host : String, port : Int32, config : TlsConfig = TlsConfig.new, timeout_ms : Int32 = -1, session : TlsSession? = nil) : TlsClient | TlsError
     socket = IyiSocket.connect(host, port, timeout_ms)
     return TlsError.new("could not connect to #{host}:#{port}: #{socket.message}") if socket.is_a?(SocketError)
     return TlsError.new("the connection to #{host}:#{port} was cancelled") unless socket.is_a?(IyiSocket)
-    over(socket, host, config, timeout_ms > 0 ? timeout_ms : HANDSHAKE_TIMEOUT_MS)
+    over(socket, host, config, timeout_ms > 0 ? timeout_ms : HANDSHAKE_TIMEOUT_MS, session)
   end
 
   # The handshake over a connected *socket*, for *host*, done within
-  # *timeout_ms* (none when 0).
-  def self.over(socket : IyiSocket, host : String, config : TlsConfig = TlsConfig.new, timeout_ms : Int32 = HANDSHAKE_TIMEOUT_MS) : TlsClient | TlsError
-    client = TlsClient.new(socket, host, config)
+  # *timeout_ms* (none when 0); a *session* as for `connect`.
+  def self.over(socket : IyiSocket, host : String, config : TlsConfig = TlsConfig.new, timeout_ms : Int32 = HANDSHAKE_TIMEOUT_MS, session : TlsSession? = nil) : TlsClient | TlsError
+    client = TlsClient.new(socket, host, config, session)
     problem = client.within(timeout_ms) { client.handshake }
     return client.fail(problem) if problem
     client
@@ -1429,7 +1506,10 @@ pub class TlsClient < TlsConnection
     session = Random::Secure.random_bytes(32)
     group = GROUP_X25519
     ephemeral = nil.as(P256PrivateKey?)
-    hello = client_hello(random, session, group, public_key, nil)
+    if held = @session
+      @offered = held.take(@host, TlsTime.now_ms)
+    end
+    hello = client_hello(random, session, group, public_key, nil, [] of UInt8)
     sent = send_plain(TlsRecords::HANDSHAKE, hello, first: true)
     return sent if sent
     @transcript = hello.dup
@@ -1449,6 +1529,11 @@ pub class TlsClient < TlsConnection
       @schedule = TlsKeySchedule.new(reply.suite == TlsSuites::AES_256_GCM)
       first = @schedule.hash(hello)
       @transcript = [254_u8, 0_u8, 0_u8, first.size.to_u8] + first + server
+      # Section 4.1.2: a ticket whose hash is not the suite's goes; one
+      # kept is offered again, its age and binder made anew.
+      if (offered = @offered) && TlsSuites.sha384?(offered.suite) != TlsSuites.sha384?(reply.suite)
+        @offered = nil
+      end
       share = public_key
       if reply.named_group == GROUP_SECP256R1
         key = p256_ephemeral
@@ -1456,7 +1541,7 @@ pub class TlsClient < TlsConnection
         group = GROUP_SECP256R1
         share = key.public_point
       end
-      hello = client_hello(random, session, group, share, cookie)
+      hello = client_hello(random, session, group, share, cookie, @transcript)
       sent = send_plain(TlsRecords::HANDSHAKE, hello, first: false)
       return sent if sent
       @transcript = @transcript + hello
@@ -1480,6 +1565,20 @@ pub class TlsClient < TlsConnection
     return TlsError.new("a ServerHello with no key share", TlsAlert::MISSING_EXTENSION) unless peer
     return TlsError.new("a ServerHello's share in #{group_name(reply.named_group)}, where the share sent was #{group_name(group)}'s", TlsAlert::ILLEGAL_PARAMETER) unless reply.named_group == group
     @transcript = @transcript + server
+    psk = nil.as(Array(UInt8)?)
+    if reply.psk_identity >= 0
+      # Section 4.2.11: the identity chosen one of those offered, and the
+      # suite's hash the ticket's.
+      offered = @offered
+      return TlsError.new("a ServerHello choosing PSK identity #{reply.psk_identity}, of none offered", TlsAlert::ILLEGAL_PARAMETER) unless offered
+      return TlsError.new("a ServerHello choosing PSK identity #{reply.psk_identity}, of one offered", TlsAlert::ILLEGAL_PARAMETER) unless reply.psk_identity == 0
+      unless TlsSuites.sha384?(offered.suite) == TlsSuites.sha384?(@suite)
+        return TlsError.new("a ServerHello resuming under #{@cipher_suite}, whose hash is not the ticket's", TlsAlert::ILLEGAL_PARAMETER)
+      end
+      psk = offered.psk
+      @resumed = true
+      @peer_certificates = offered.peer_certificates
+    end
 
     if key = ephemeral
       got = key.shared_secret(peer)
@@ -1490,7 +1589,7 @@ pub class TlsClient < TlsConnection
       return TlsError.new("the server's X25519 share gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)
       secret = TlsBytes.of(shared)
     end
-    handshake_secret = @schedule.handshake_secret(secret)
+    handshake_secret = @schedule.handshake_secret(secret, psk)
     client_secret = @schedule.derive_secret(handshake_secret, "c hs traffic", @transcript)
     server_secret = @schedule.derive_secret(handshake_secret, "s hs traffic", @transcript)
     @reader = TlsRecordCipher.new(@suite, @schedule, server_secret)
@@ -1539,11 +1638,44 @@ pub class TlsClient < TlsConnection
     finished = TlsBytes.message(20, @schedule.finished(client_secret, @transcript))
     sent = send_protected(TlsRecords::HANDSHAKE, finished)
     return sent if sent
+    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript + finished)
 
     @reader = TlsRecordCipher.new(@suite, @schedule, server_application)
     @writer = TlsRecordCipher.new(@suite, @schedule, client_application)
     @read_secret = server_application
     @write_secret = client_application
+    nil
+  end
+
+  # A NewSessionTicket (section 4.6.1), judged whole, and kept in the
+  # session when there is one: its PSK from its nonce, with the host, the
+  # suite, the protocol and the certificates of this connection. A ticket
+  # whose lifetime is zero, or past `TlsSession::MAX_TICKET` bytes, is
+  # passed over; a lifetime past seven days, which section 4.6.1 forbids a
+  # server, is held to seven.
+  private def ticket_received(message : Array(UInt8)) : TlsError?
+    reader = TlsReader.new(message[4, message.size - 4])
+    lifetime = reader.u32
+    age_add = reader.u32
+    nonce = reader.bytes(reader.u8)
+    ticket = reader.bytes(reader.u16)
+    list = TlsReader.new(reader.bytes(reader.u16))
+    return TlsError.new("a NewSessionTicket cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done? || ticket.empty?
+    seen = [] of Int32
+    until list.done?
+      type = list.u16
+      list.bytes(list.u16)
+      return TlsError.new("NewSessionTicket extensions cut short", TlsAlert::DECODE_ERROR) if list.short?
+      return TlsError.new("extension #{type} twice in a NewSessionTicket", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
+      # Section 4.6.1: an extension a client does not know is passed over.
+      seen << type
+    end
+    session = @session
+    return nil unless session
+    return nil if lifetime == 0_i64 || ticket.size > TlsSession::MAX_TICKET
+    lifetime = TlsSession::MAX_LIFETIME if lifetime > TlsSession::MAX_LIFETIME
+    psk = @schedule.resumption_psk(@resumption_secret, nonce)
+    session.keep(TlsHeldTicket.new(ticket, psk, @suite, TlsTime.now_ms, lifetime * 1000_i64, age_add, @host, @alpn_protocol, @peer_certificates))
     nil
   end
 
@@ -1582,7 +1714,9 @@ pub class TlsClient < TlsConnection
   end
 
   # EncryptedExtensions, CertificateRequest, Certificate, CertificateVerify
-  # and Finished, each into the transcript once read.
+  # and Finished, each into the transcript once read; in a resumption,
+  # EncryptedExtensions and Finished alone (section 2.2: the PSK is the
+  # authentication, and section 4.3.2 keeps a CertificateRequest out).
   private def server_flight(server_secret : Array(UInt8)) : TlsError?
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
@@ -1593,6 +1727,7 @@ pub class TlsClient < TlsConnection
 
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
+    return server_finished(message, server_secret) if @resumed
     if message[0] == 13_u8
       problem = certificate_request(message)
       return problem if problem
@@ -1614,7 +1749,13 @@ pub class TlsClient < TlsConnection
 
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
-    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where Finished belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 20_u8
+    server_finished(message, server_secret)
+  end
+
+  private def server_finished(message : Array(UInt8), server_secret : Array(UInt8)) : TlsError?
+    unless message[0] == 20_u8
+      return TlsError.new("#{TlsBytes.handshake_name(message[0])} where Finished belongs#{@resumed ? ", in a resumed handshake" : ""}", TlsAlert::UNEXPECTED_MESSAGE)
+    end
     expected = @schedule.finished(server_secret, @transcript)
     unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
       return TlsError.new("the server's Finished does not match the handshake", TlsAlert::DECRYPT_ERROR)
@@ -1624,7 +1765,11 @@ pub class TlsClient < TlsConnection
     nil
   end
 
-  private def client_hello(random : Array(UInt8), session : Array(UInt8), group : Int32, share : Array(UInt8), cookie : Array(UInt8)?) : Array(UInt8)
+  # The ClientHello; with a ticket offered, its psk_key_exchange_modes
+  # (psk_dhe_ke alone) and its pre_shared_key last, whose binder is over
+  # *prefix* - the messages before it, after a HelloRetryRequest - and the
+  # ClientHello to its binders (section 4.2.11.2).
+  private def client_hello(random : Array(UInt8), session : Array(UInt8), group : Int32, share : Array(UInt8), cookie : Array(UInt8)?, prefix : Array(UInt8)) : Array(UInt8)
     tls12 = @config.min_version == TlsVersion::TLS12
     body = [3_u8, 3_u8] + random + [32_u8] + session
     # TLS 1.3's suites, then TLS 1.2's when it is asked for.
@@ -1664,7 +1809,20 @@ pub class TlsClient < TlsConnection
       extensions = extensions + TlsBytes.extension(11, [1_u8, 0_u8])
     end
     extensions = extensions + TlsBytes.extension(44, TlsBytes.u16(cookie.size) + cookie) if cookie
-    TlsBytes.message(1, body + TlsBytes.u16(extensions.size) + extensions)
+    offered = @offered
+    return TlsBytes.message(1, body + TlsBytes.u16(extensions.size) + extensions) unless offered
+    extensions = extensions + TlsBytes.extension(45, [1_u8, TlsSession::PSK_DHE_KE])
+    # The ticket's age as this side counts it, from its arrival, added to
+    # its age_add modulo 2^32 (section 4.2.11.1).
+    age = (TlsTime.now_ms - offered.received_ms + offered.age_add) & 0xFFFFFFFF_i64
+    identities = TlsBytes.u16(offered.ticket.size) + offered.ticket + TlsBytes.u32(age)
+    schedule = TlsKeySchedule.new(TlsSuites.sha384?(offered.suite))
+    size = schedule.hash_size
+    binders = TlsBytes.u16(1 + size) + [size.to_u8] + Array(UInt8).new(size, 0_u8)
+    extensions = extensions + TlsBytes.extension(41, TlsBytes.u16(identities.size) + identities + binders)
+    hello = TlsBytes.message(1, body + TlsBytes.u16(extensions.size) + extensions)
+    binder = schedule.binder(offered.psk, prefix + hello[0, hello.size - binders.size])
+    hello[0, hello.size - size] + binder
   end
 
   # A ServerHello or HelloRetryRequest read (section 4.1.3) - or a TLS 1.2
@@ -1707,6 +1865,7 @@ pub class TlsClient < TlsConnection
     share = nil
     group = 0
     cookie = nil
+    psk_identity = -1
     found.each do |entry|
       type, data = entry
       field = TlsReader.new(data)
@@ -1734,12 +1893,22 @@ pub class TlsClient < TlsConnection
         return TlsError.new("a cookie outside a HelloRetryRequest", TlsAlert::UNSUPPORTED_EXTENSION) unless retry
         cookie = field.bytes(field.u16)
         return TlsError.new("an empty or cut cookie", TlsAlert::DECODE_ERROR) if field.short? || cookie.empty?
+      when 41
+        # The identity a server resumes by, only of a ticket offered and not
+        # in a HelloRetryRequest, which chooses none.
+        if retry || @offered.nil?
+          return TlsError.new("extension 41 in a #{retry ? "HelloRetryRequest" : "ServerHello"}, which was not offered", TlsAlert::UNSUPPORTED_EXTENSION)
+        end
+        psk_identity = field.u16
+        return TlsError.new("a ServerHello's pre_shared_key cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
       else
         return TlsError.new("extension #{type} in a ServerHello, which was not offered", TlsAlert::UNSUPPORTED_EXTENSION)
       end
     end
     return TlsError.new("the server does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION) unless seen.includes?(43)
-    TlsServerHello.new(retry, suite, group, share, cookie, false, random)
+    hello = TlsServerHello.new(retry, suite, group, share, cookie, false, random)
+    hello.psk_identity = psk_identity
+    hello
   end
 
   # A TLS 1.2 ServerHello judged: version 1.2, no downgrade sentinel, a
@@ -2062,8 +2231,93 @@ class TlsServerHello
   getter cookie : Array(UInt8)?
   getter tls12 : Bool
   getter random : Array(UInt8)
+  # The PSK identity a ServerHello resumes by, -1 when none.
+  property psk_identity : Int32 = -1
 
   def initialize(@retry : Bool, @suite : Int32, @named_group : Int32, @share : Array(UInt8)?, @cookie : Array(UInt8)?, @tls12 : Bool, @random : Array(UInt8))
+  end
+end
+
+# What a client keeps to resume a server's sessions (RFC 8446 section
+# 2.2): the tickets its NewSessionTickets carry, each with the PSK its
+# nonce makes. The caller holds it and hands it to `TlsClient.connect` or
+# `over`; there is no store of the process's own. A connection offers the
+# newest ticket for its host still within its lifetime and takes it out,
+# for a ticket goes out once (appendix C.4): two resumptions are not tied
+# together by it. A ticket is offered only to the host it came from -
+# section 4.6.1 has a client resume only for a name the first handshake's
+# certificate was checked for - and its chain is the resumed connection's
+# `peer_certificates`.
+pub class TlsSession
+  # The most tickets held: past it, the oldest goes.
+  MAX_TICKETS = 8
+  # The most bytes a ticket held may be; a larger one is passed over.
+  MAX_TICKET = 16384
+  # Seven days, the longest section 4.6.1 lets a ticket live, in seconds.
+  MAX_LIFETIME = 604800_i64
+  # psk_dhe_ke (section 4.2.9): a resumption's keys come from the PSK and
+  # a fresh key exchange both.
+  PSK_DHE_KE = 1_u8
+
+  @tickets : Array(TlsHeldTicket) = [] of TlsHeldTicket
+
+  def initialize
+  end
+
+  # How many tickets are held.
+  def size : Int32
+    @tickets.size
+  end
+
+  # The newest ticket for *host* not past its lifetime at *now_ms* (by the
+  # monotonic clock), taken out; those past their lifetimes go too.
+  def take(host : String, now_ms : Int64) : TlsHeldTicket?
+    @tickets = @tickets.select { |held| now_ms - held.received_ms < held.lifetime_ms }
+    at = @tickets.size - 1
+    while at >= 0
+      held = @tickets[at]
+      if held.host == host
+        kept = [] of TlsHeldTicket
+        @tickets.each_with_index { |other, i| kept << other unless i == at }
+        @tickets = kept
+        return held
+      end
+      at = at - 1
+    end
+    nil
+  end
+
+  # *ticket* held, the oldest gone past `MAX_TICKETS`.
+  def keep(ticket : TlsHeldTicket) : Nil
+    @tickets << ticket
+    @tickets.shift if @tickets.size > MAX_TICKETS
+  end
+end
+
+# One ticket a client holds: the server's bytes, and the PSK, suite,
+# arrival (monotonic ms), lifetime, age_add, host, protocol and
+# certificates of the connection it came on.
+pub class TlsHeldTicket
+  getter ticket : Array(UInt8)
+  getter psk : Array(UInt8)
+  getter suite : Int32
+  getter received_ms : Int64
+  getter lifetime_ms : Int64
+  getter age_add : Int64
+  getter host : String
+  getter alpn : String?
+  getter peer_certificates : Array(Certificate)
+
+  def initialize(@ticket : Array(UInt8), @psk : Array(UInt8), @suite : Int32, @received_ms : Int64, @lifetime_ms : Int64,
+                 @age_add : Int64, @host : String, @alpn : String?, @peer_certificates : Array(Certificate))
+  end
+end
+
+struct TlsTime
+  # Now by the monotonic clock, in milliseconds: what a ticket's age is
+  # counted on, which a change to the wall clock does not move.
+  def self.now_ms : Int64
+    Time.monotonic_nanoseconds.to_i64 // 1000000_i64
   end
 end
 
@@ -2292,6 +2546,21 @@ pub class TlsServerConfig
   # module's header says. A client that offers 1.3 is answered in it
   # either way.
   property min_version : TlsVersion = TlsVersion::TLS13
+  # NewSessionTickets sent after each handshake, for a client to resume
+  # by (RFC 8446 section 4.6.1); none when 0, and at most `MAX_TICKETS`.
+  property tickets : Int32 = 2
+  # How long a ticket may be resumed by, in seconds, from 1 to seven days
+  # (604800, section 4.6.1's most); the period the ticket key turns over
+  # in, too (`TlsTicketKeys`).
+  property ticket_lifetime : Int32 = 7200
+  # The keys this server's tickets are sealed under.
+  getter ticket_keys : TlsTicketKeys = TlsTicketKeys.new
+
+  # The most NewSessionTickets one handshake sends; the most bytes one may
+  # carry, the client's certificates in it (a server that would seal more
+  # sends no ticket for that connection).
+  MAX_TICKETS =    8
+  MAX_TICKET  = 8192
 
   def initialize(@identity : TlsIdentity)
   end
@@ -2312,6 +2581,28 @@ pub class TlsServerConfig
     end
     return @identity if @identity.scheme_for(schemes)
     nil
+  end
+
+  # The place of *identity* among this server's, which a ticket carries:
+  # 0 for `identity`, then `others` in order.
+  def identity_index(identity : TlsIdentity) : Int32
+    @others.each_with_index { |other, i| return i + 1 if other == identity }
+    0
+  end
+
+  # The identity at *index*, as `identity_index` counts; nil past them.
+  def identity_at(index : Int32) : TlsIdentity?
+    return @identity if index == 0
+    return nil if index < 0 || index > @others.size
+    @others[index - 1]
+  end
+
+  # The ticket lifetime in milliseconds, held to 1 s .. seven days.
+  def lifetime_ms : Int64
+    seconds = @ticket_lifetime.to_i64
+    seconds = 1_i64 if seconds < 1
+    seconds = TlsSession::MAX_LIFETIME if seconds > TlsSession::MAX_LIFETIME
+    seconds * 1000_i64
   end
 
   # `TlsIdentity.from_pem`'s identity, as a server's.
@@ -2349,6 +2640,145 @@ pub class TlsServerConfig
 
   def schemes : Array(Int32)
     @identity.schemes
+  end
+end
+
+# The keys a server seals its tickets under. RFC 8446 section 4.6.1 leaves
+# a ticket's form to the server; this one is RFC 5077 section 4's shape:
+# the key's 8-byte name, a 12-byte nonce drawn at random, and the state
+# sealed by ChaCha20-Poly1305 (std/aead, constant-time) with the name as
+# its additional data. A key made at random in this process seals for one
+# period - the ticket lifetime - and then only opens, for one more: a
+# ticket opens for all its lifetime, and no key opens anything past two
+# periods. A key idle past both goes with the one before it. The keys live
+# in this process: a ticket outlives neither a restart nor a move to
+# another server, which would need the keys shared and is not offered.
+pub class TlsTicketKeys
+  @name : Array(UInt8)
+  @key : ChaCha20Poly1305
+  @made_ms : Int64
+  @previous_name : Array(UInt8)? = nil
+  @previous : ChaCha20Poly1305? = nil
+
+  def initialize(now_ms : Int64 = TlsTime.now_ms)
+    @name = Random::Secure.random_bytes(8)
+    @key = ChaCha20Poly1305.new(Random::Secure.random_bytes(32))
+    @made_ms = now_ms
+  end
+
+  # *state* sealed at *now_ms* (monotonic) under the current key - a new
+  # one first, when *period_ms* has passed since it was made.
+  def seal(state : Array(UInt8), now_ms : Int64, period_ms : Int64) : Array(UInt8)
+    rotate_if_due(now_ms, period_ms)
+    nonce = Random::Secure.random_bytes(12)
+    @name + nonce + TlsBytes.of(@key.seal(nonce, state, @name))
+  end
+
+  # The state *ticket* seals, when a key still held at *now_ms* opens it;
+  # nil for any other bytes.
+  def open(ticket : Array(UInt8), now_ms : Int64, period_ms : Int64) : Array(UInt8)?
+    rotate_if_due(now_ms, period_ms)
+    return nil if ticket.size < 8 + 12 + 16
+    name = ticket[0, 8]
+    key = nil.as(ChaCha20Poly1305?)
+    if name == @name
+      key = @key
+    elsif name == @previous_name
+      key = @previous
+    end
+    return nil unless key
+    opened = key.open(ticket[8, 12], ticket[20, ticket.size - 20], name)
+    return nil if opened.is_a?(AeadError)
+    TlsBytes.of(opened)
+  end
+
+  # A new key from *now_ms*: what the one before sealed still opens, and
+  # what the one before that sealed no longer does.
+  def rotate(now_ms : Int64 = TlsTime.now_ms) : Nil
+    @previous_name = @name
+    @previous = @key
+    @name = Random::Secure.random_bytes(8)
+    @key = ChaCha20Poly1305.new(Random::Secure.random_bytes(32))
+    @made_ms = now_ms
+  end
+
+  private def rotate_if_due(now_ms : Int64, period_ms : Int64) : Nil
+    age = now_ms - @made_ms
+    return if age < period_ms
+    rotate(now_ms)
+    # Idle past two periods: what the old key sealed is past its lifetime.
+    if age >= 2_i64 * period_ms
+      @previous_name = nil
+      @previous = nil
+    end
+  end
+end
+
+# The session a server's ticket seals, for a resumption to take up: the
+# suite, when it was issued (monotonic ms) and for how long (seconds),
+# its age_add, the PSK, the name the client asked for, the protocol
+# chosen, the identity shown (`TlsServerConfig#identity_index`), the
+# client's certificates (DER, leaf first), and when the first handshake
+# checked the certificates the session rests on (monotonic ms).
+pub class TlsTicket
+  getter suite : Int32
+  getter issued_ms : Int64
+  getter lifetime : Int64
+  getter age_add : Int64
+  getter psk : Array(UInt8)
+  getter server_name : String?
+  getter alpn : String?
+  getter identity : Int32
+  getter chain : Array(Array(UInt8))
+  getter authenticated_ms : Int64
+
+  VERSION = 1_u8
+
+  def initialize(@suite : Int32, @issued_ms : Int64, @lifetime : Int64, @age_add : Int64, @psk : Array(UInt8),
+                 @server_name : String?, @alpn : String?, @identity : Int32, @chain : Array(Array(UInt8)), @authenticated_ms : Int64)
+  end
+
+  def encode : Array(UInt8)
+    name = TlsBytes.of(@server_name || "")
+    protocol = TlsBytes.of(@alpn || "")
+    out = [VERSION] + TlsBytes.u16(@suite) + TlsBytes.u64(@issued_ms) + TlsBytes.u64(@authenticated_ms) + TlsBytes.u32(@lifetime) +
+          TlsBytes.u32(@age_add) + [@psk.size.to_u8] + @psk + [name.size.to_u8] + name + [protocol.size.to_u8] + protocol +
+          [@identity.to_u8, @chain.size.to_u8]
+    @chain.each { |der| out = out + TlsBytes.u24(der.size) + der }
+    out
+  end
+
+  # The state *bytes* hold, or nil when they are not one this encodes.
+  def self.decode(bytes : Array(UInt8)) : TlsTicket?
+    reader = TlsReader.new(bytes)
+    version = reader.u8
+    suite = reader.u16
+    issued = reader.u64
+    authenticated = reader.u64
+    lifetime = reader.u32
+    age_add = reader.u32
+    psk = reader.bytes(reader.u8)
+    name = reader.bytes(reader.u8)
+    protocol = reader.bytes(reader.u8)
+    identity = reader.u8
+    chain = [] of Array(UInt8)
+    reader.u8.times { chain << reader.bytes(reader.u24) }
+    return nil if reader.short? || !reader.done? || version != VERSION.to_i32
+    TlsTicket.new(suite, issued, lifetime, age_add, psk, name.empty? ? nil : TlsBytes.text(name),
+      protocol.empty? ? nil : TlsBytes.text(protocol), identity, chain, authenticated)
+  end
+
+  # The session *ticket* seals, opened by *keys* at *now_ms*: nil when no
+  # key held opens it, or when its lifetime is over by this server's own
+  # count from its issue.
+  def self.open(keys : TlsTicketKeys, ticket : Array(UInt8), now_ms : Int64, period_ms : Int64) : TlsTicket?
+    state = keys.open(ticket, now_ms, period_ms)
+    return nil unless state
+    opened = decode(state)
+    return nil unless opened
+    age = now_ms - opened.issued_ms
+    return nil if age < 0 || age > opened.lifetime * 1000_i64
+    opened
   end
 end
 
@@ -2423,6 +2853,15 @@ class TlsOffer
   getter alpn : Array(String)?
   getter server_name : String?
   getter early_data : Bool
+  # pre_shared_key's identities - each a ticket and its obfuscated age -
+  # and their binders, and the bytes the binders take at the ClientHello's
+  # end; psk_key_exchange_modes; and why no identity of this server's can
+  # be shown, when a ticket may still be taken instead.
+  property identities : Array({Array(UInt8), Int64}) = [] of {Array(UInt8), Int64}
+  property binders : Array(Array(UInt8)) = [] of Array(UInt8)
+  property binders_size : Int32 = 0
+  property psk_modes : Array(UInt8) = [] of UInt8
+  property unshown : TlsError? = nil
 
   def initialize(@session : Array(UInt8), @suites : Array(Int32), @x25519 : Array(UInt8)?, @p256 : Array(UInt8)?,
                  @groups : Array(Int32), @alpn : Array(String)?, @server_name : String?, @early_data : Bool)
@@ -2560,6 +2999,20 @@ pub class TlsServer < TlsConnection
     @server_name = offer.server_name
     problem = agree_alpn(offer.alpn)
     return problem if problem
+    taken = accept_psk(offer, hello)
+    return taken if taken.is_a?(TlsError)
+    psk = nil.as(Array(UInt8)?)
+    psk_identity = -1
+    if taken
+      ticket, psk_identity, chain = taken
+      psk = ticket.psk
+      @resumed = true
+      @authenticated_ms = ticket.authenticated_ms
+      @identity = @config.identity_at(ticket.identity) || @identity
+      @peer_certificates = chain
+    elsif (unshown = offer.unshown)
+      return unshown
+    end
 
     if group == GROUP_X25519
       private_key = Random::Secure.random_bytes(32)
@@ -2574,35 +3027,28 @@ pub class TlsServer < TlsConnection
       secret = got
       public = ephemeral.public_point
     end
-    reply = server_hello(Random::Secure.random_bytes(32), offer.session, group, public)
+    reply = server_hello(Random::Secure.random_bytes(32), offer.session, group, public, psk_identity)
     sent = send_plain(TlsRecords::HANDSHAKE, reply, first: false)
     return sent if sent
     sent = middlebox_ccs(offer)
     return sent if sent
     @transcript = @transcript + reply
 
-    handshake_secret = @schedule.handshake_secret(secret)
+    handshake_secret = @schedule.handshake_secret(secret, psk)
     client_secret = @schedule.derive_secret(handshake_secret, "c hs traffic", @transcript)
     server_secret = @schedule.derive_secret(handshake_secret, "s hs traffic", @transcript)
     @writer = TlsRecordCipher.new(@suite, @schedule, server_secret)
     @reader = TlsRecordCipher.new(@suite, @schedule, client_secret)
 
     # EncryptedExtensions, Certificate, CertificateVerify and Finished, in
-    # as few records as hold them.
+    # as few records as hold them; in a resumption, EncryptedExtensions
+    # and Finished, the PSK the authentication (section 2.2).
     flight = encrypted_extensions
     @transcript = @transcript + flight
-    request = [] of UInt8
-    if @config.client_roots
-      request = certificate_request
-      @transcript = @transcript + request
-    end
-    certificate = certificate_message
-    @transcript = @transcript + certificate
-    verify = certificate_verify
-    @transcript = @transcript + verify
+    flight = flight + certificate_flight unless @resumed
     finished = TlsBytes.message(20, @schedule.finished(server_secret, @transcript))
     @transcript = @transcript + finished
-    sent = send_flight(flight + request + certificate + verify + finished)
+    sent = send_flight(flight + finished)
     return sent if sent
 
     master = @schedule.master_secret(handshake_secret)
@@ -2617,10 +3063,11 @@ pub class TlsServer < TlsConnection
 
     # The client's Certificate and CertificateVerify when one was asked for,
     # then its Finished, under its handshake keys; asked for none, a
-    # Certificate is out of place.
+    # Certificate is out of place. A resumption asks for none (section
+    # 4.3.2): the ticket carries the certificates the first handshake took.
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
-    if roots = @config.client_roots
+    if (roots = @config.client_roots) && !@resumed
       problem = client_certificate(message, roots)
       return problem if problem
       message = handshake_message(plain: false)
@@ -2634,10 +3081,104 @@ pub class TlsServer < TlsConnection
     return TlsError.new("handshake bytes left after the client's Finished", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
     @handshaking = false
     @early_left = 0
+    @transcript = @transcript + message
+    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript)
 
     @reader = TlsRecordCipher.new(@suite, @schedule, client_application)
     @read_secret = client_application
+    send_tickets
+  end
+
+  # CertificateRequest when a client's certificate is asked for, then
+  # Certificate and CertificateVerify: what a full handshake authenticates
+  # by, each into the transcript.
+  private def certificate_flight : Array(UInt8)
+    request = [] of UInt8
+    if @config.client_roots
+      request = certificate_request
+      @transcript = @transcript + request
+    end
+    certificate = certificate_message
+    @transcript = @transcript + certificate
+    verify = certificate_verify
+    @transcript = @transcript + verify
+    request + certificate + verify
+  end
+
+  # When the certificates a session rests on were last checked (monotonic
+  # ms): this handshake's, or the first one's that a resumption carries on.
+  @authenticated_ms : Int64 = TlsTime.now_ms
+
+  # The ticket a resumption takes up (section 4.2.11), its place among the
+  # client's identities, and the client's certificates it carries: the
+  # first identity that is a ticket of this server's still open - its key
+  # held, its lifetime not over by this server's count nor by the age the
+  # client says - issued under a suite of the chosen one's hash, for the
+  # name the client asks for now, and offered for psk_dhe_ke. Its binder
+  # is checked: one that does not match refuses the handshake. Nil when
+  # none is taken, for a full handshake.
+  private def accept_psk(offer : TlsOffer, hello : Array(UInt8)) : {TlsTicket, Int32, Array(Certificate)} | TlsError | Nil
+    return nil if offer.identities.empty?
+    # psk_ke alone - every key from the PSK, none from a key exchange, so
+    # whoever learns the ticket key reads the session - is declined.
+    return nil unless offer.psk_modes.includes?(TlsSession::PSK_DHE_KE)
+    now = TlsTime.now_ms
+    offer.identities.each_with_index do |entry, index|
+      ticket = TlsTicket.open(@config.ticket_keys, entry[0], now, @config.lifetime_ms)
+      next unless ticket
+      next unless TlsSuites.sha384?(ticket.suite) == TlsSuites.sha384?(@suite)
+      # Another name may be another identity's, whose certificate the
+      # ticket's session was never shown under.
+      next unless ticket.server_name == offer.server_name
+      next if ((entry[1] - ticket.age_add) & 0xFFFFFFFF_i64) > ticket.lifetime * 1000_i64
+      next unless @config.identity_at(ticket.identity)
+      chain = [] of Certificate
+      ticket.chain.each do |der|
+        certificate = Certificate.parse(der)
+        chain << certificate if certificate.is_a?(Certificate)
+      end
+      next unless chain.size == ticket.chain.size
+      # The binder is over the messages before this ClientHello and the
+      # ClientHello up to its binders.
+      transcript = @transcript[0, @transcript.size - hello.size] + hello[0, hello.size - offer.binders_size]
+      unless Subtle.constant_time_compare(offer.binders[index], @schedule.binder(ticket.psk, transcript))
+        return TlsError.new("the client's PSK binder does not match its ClientHello", TlsAlert::DECRYPT_ERROR)
+      end
+      return {ticket, index, chain}
+    end
     nil
+  end
+
+  # The NewSessionTickets this handshake owes (section 4.6.1), after the
+  # client's Finished and under the application keys: `tickets` of them,
+  # each with a nonce of its own and the PSK that makes, its age_add drawn
+  # at random, sealed with this connection's suite, name, protocol,
+  # identity and client certificates. A resumption does not stretch the
+  # first handshake's checks past a lifetime (as section 4.6.1 recommends
+  # a limit on): its tickets live what is left of that, and none goes once
+  # it is over.
+  private def send_tickets : TlsError?
+    count = @config.tickets
+    count = TlsServerConfig::MAX_TICKETS if count > TlsServerConfig::MAX_TICKETS
+    now = TlsTime.now_ms
+    left = @authenticated_ms + @config.lifetime_ms - now
+    return nil if count <= 0 || left < 1000_i64
+    lifetime = left // 1000_i64
+    lifetime = @config.lifetime_ms // 1000_i64 if lifetime > @config.lifetime_ms // 1000_i64
+    chain = @peer_certificates.map { |certificate| certificate.raw }
+    identity = @config.identity_index(@identity)
+    flight = [] of UInt8
+    count.times do |i|
+      nonce = TlsBytes.u32(0_i64) + TlsBytes.u32(i.to_i64)
+      age_add = TlsReader.new(Random::Secure.random_bytes(4)).u32
+      psk = @schedule.resumption_psk(@resumption_secret, nonce)
+      state = TlsTicket.new(@suite, now, lifetime, age_add, psk, @server_name, @alpn_protocol, identity, chain, @authenticated_ms)
+      sealed = @config.ticket_keys.seal(state.encode, now, @config.lifetime_ms)
+      return nil if sealed.size > TlsServerConfig::MAX_TICKET
+      flight.concat(TlsBytes.message(4, TlsBytes.u32(lifetime) + TlsBytes.u32(age_add) + [nonce.size.to_u8] + nonce +
+                                        TlsBytes.u16(sealed.size) + sealed + TlsBytes.u16(0)))
+    end
+    send_flight(flight)
   end
 
   # A ChangeCipherSpec after the first hello this side sends, once, when
@@ -2696,6 +3237,10 @@ pub class TlsServer < TlsConnection
     formats = nil
     extended = nil
     renegotiation = nil
+    identities = [] of {Array(UInt8), Int64}
+    binders = [] of Array(UInt8)
+    binders_size = 0
+    psk_modes = nil
     # Sets, not lists: a ClientHello of 64 KiB holds 16,384 empty
     # extensions, and a list asked of each would be their square.
     seen = {} of Int32 => Bool
@@ -2741,9 +3286,37 @@ pub class TlsServer < TlsConnection
           protocols << TlsBytes.text(protocol)
         end
         alpn = protocols
+      when 41
+        # pre_shared_key (section 4.2.11): each identity a ticket and its
+        # obfuscated age, then a binder for each; last, so its binders are
+        # the ClientHello's last bytes.
+        named = TlsReader.new(field.bytes(field.u16))
+        bound = field.bytes(field.u16)
+        return TlsError.new("a pre_shared_key cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
+        until named.done?
+          ticket = named.bytes(named.u16)
+          age = named.u32
+          return TlsError.new("a pre_shared_key's identities cut short", TlsAlert::DECODE_ERROR) if named.short? || ticket.empty?
+          identities << {ticket, age}
+        end
+        each = TlsReader.new(bound)
+        until each.done?
+          binder = each.bytes(each.u8)
+          return TlsError.new("a pre_shared_key's binders cut short", TlsAlert::DECODE_ERROR) if each.short? || binder.size < 32
+          binders << binder
+        end
+        return TlsError.new("a pre_shared_key with no identity", TlsAlert::DECODE_ERROR) if identities.empty? || binders.empty?
+        unless identities.size == binders.size
+          return TlsError.new("a pre_shared_key of #{identities.size} identities and #{binders.size} binders", TlsAlert::ILLEGAL_PARAMETER)
+        end
+        binders_size = 2 + bound.size
       when 42
         return TlsError.new("an early_data extension with a body", TlsAlert::DECODE_ERROR) unless data.empty?
         early = true
+      when 45
+        modes = field.bytes(field.u8)
+        return TlsError.new("psk_key_exchange_modes cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done? || modes.empty?
+        psk_modes = modes
       when 43
         offered = field.bytes(field.u8)
         return TlsError.new("supported_versions cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done? || offered.empty? || offered.size.odd?
@@ -2767,10 +3340,9 @@ pub class TlsServer < TlsConnection
       when 0xff01
         renegotiation = data
       else
-        # Every other extension - psk_key_exchange_modes, pre_shared_key,
-        # padding, status_request and whatever a client adds - is passed
-        # over, as section 4.2 says a server does with what it does not
-        # use.
+        # Every other extension - padding, status_request and whatever a
+        # client adds - is passed over, as section 4.2 says a server does
+        # with what it does not use.
       end
     end
     tls13 = (named = versions) ? named.includes?(0x0304) : false
@@ -2784,13 +3356,24 @@ pub class TlsServer < TlsConnection
     return TlsError.new("a ClientHello whose compression methods are not null alone", TlsAlert::ILLEGAL_PARAMETER) unless compression == [0_u8]
     return TlsOffer12.new(random, suites, schemes, groups, alpn, server_name, extended, renegotiation, formats) if tls12
     return TlsError.new("the client offers no cipher suite this server has", TlsAlert::HANDSHAKE_FAILURE) unless suites.any? { |s| SUITES.includes?(s) }
-    return TlsError.new("a ClientHello with no signature_algorithms", TlsAlert::MISSING_EXTENSION) unless schemes
-    chosen = @config.identity_for(server_name, schemes)
-    unless chosen
-      return TlsError.new("the client does not take #{TlsIdentity.scheme_names(@config.schemes)} signatures, which this server's key for it makes", TlsAlert::HANDSHAKE_FAILURE)
+    # Section 4.2.9: a PSK offered with no modes to use it in is refused.
+    return TlsError.new("a pre_shared_key without psk_key_exchange_modes", TlsAlert::MISSING_EXTENSION) if psk_modes.nil? && !identities.empty?
+    # A client that offers a PSK may leave signature_algorithms out, or
+    # take none of this server's schemes (section 9.2): it is refused for
+    # that only when no ticket of its is taken.
+    unshown = nil.as(TlsError?)
+    if schemes
+      chosen = @config.identity_for(server_name, schemes)
+      if chosen
+        @identity = chosen
+        @scheme = chosen.scheme_for(schemes) || 0
+      else
+        unshown = TlsError.new("the client does not take #{TlsIdentity.scheme_names(@config.schemes)} signatures, which this server's key for it makes", TlsAlert::HANDSHAKE_FAILURE)
+      end
+    else
+      unshown = TlsError.new("a ClientHello with no signature_algorithms", TlsAlert::MISSING_EXTENSION)
     end
-    @identity = chosen
-    @scheme = chosen.scheme_for(schemes) || 0
+    return unshown if unshown && identities.empty?
     return TlsError.new("a ClientHello with no supported_groups", TlsAlert::MISSING_EXTENSION) unless groups
     return TlsError.new("a ClientHello with no key_share", TlsAlert::MISSING_EXTENSION) unless shares
     unless groups.includes?(GROUP_X25519) || groups.includes?(GROUP_SECP256R1)
@@ -2809,12 +3392,19 @@ pub class TlsServer < TlsConnection
         p256 = key
       end
     end
-    TlsOffer.new(session, suites, x25519, p256, groups, alpn, server_name, early)
+    offer = TlsOffer.new(session, suites, x25519, p256, groups, alpn, server_name, early)
+    offer.identities = identities
+    offer.binders = binders
+    offer.binders_size = binders_size
+    offer.psk_modes = psk_modes || [] of UInt8
+    offer.unshown = unshown
+    offer
   end
 
-  # A ServerHello with the server's share in *group*, or with no share a
+  # A ServerHello with the server's share in *group*, and the identity it
+  # resumes by when *psk_identity* is one; or with no share a
   # HelloRetryRequest asking for that group.
-  private def server_hello(random : Array(UInt8), session : Array(UInt8), group : Int32, share : Array(UInt8)?) : Array(UInt8)
+  private def server_hello(random : Array(UInt8), session : Array(UInt8), group : Int32, share : Array(UInt8)?, psk_identity : Int32 = -1) : Array(UInt8)
     body = [3_u8, 3_u8] + random + [session.size.to_u8] + session + TlsBytes.u16(@suite) + [0_u8]
     extensions = TlsBytes.extension(43, [3_u8, 4_u8])
     if share
@@ -2822,6 +3412,7 @@ pub class TlsServer < TlsConnection
     else
       extensions = extensions + TlsBytes.extension(51, TlsBytes.u16(group))
     end
+    extensions = extensions + TlsBytes.extension(41, TlsBytes.u16(psk_identity)) if psk_identity >= 0
     TlsBytes.message(2, body + TlsBytes.u16(extensions.size) + extensions)
   end
 
@@ -3168,6 +3759,16 @@ class TlsReader
     (@data[@at - 3].to_i32 << 16) | (@data[@at - 2].to_i32 << 8) | @data[@at - 1].to_i32
   end
 
+  # A 32-bit value, in an Int64 so that it is never negative.
+  def u32 : Int64
+    return 0_i64 if take(4).nil?
+    (@data[@at - 4].to_i64 << 24) | (@data[@at - 3].to_i64 << 16) | (@data[@at - 2].to_i64 << 8) | @data[@at - 1].to_i64
+  end
+
+  def u64 : Int64
+    (u32 << 32) | u32
+  end
+
   def bytes(count : Int32) : Array(UInt8)
     start = take(count)
     return [] of UInt8 if start.nil?
@@ -3209,6 +3810,15 @@ struct TlsBytes
 
   def self.u24(value : Int32) : Array(UInt8)
     [((value >> 16) & 0xFF).to_u8, ((value >> 8) & 0xFF).to_u8, (value & 0xFF).to_u8]
+  end
+
+  # The low 32 bits of *value*, big-endian.
+  def self.u32(value : Int64) : Array(UInt8)
+    [((value >> 24) & 0xFF).to_u8, ((value >> 16) & 0xFF).to_u8, ((value >> 8) & 0xFF).to_u8, (value & 0xFF).to_u8]
+  end
+
+  def self.u64(value : Int64) : Array(UInt8)
+    u32(value >> 32) + u32(value & 0xFFFFFFFF_i64)
   end
 
   # A list of 16-bit values, or nil when the bytes are not whole pairs.

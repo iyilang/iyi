@@ -360,6 +360,46 @@ else
   else
     status=1
   fi
+  # client_resume <binary>: its std/tls client through one TlsSession to
+  # OpenSSL's s_server, which issues tickets: three connections, the first
+  # new and the next two resumed by them, as s_server's own -www page says
+  # ("Reused, TLSv1.3") and the client too, the server's certificate still
+  # its peer's; under the default suites, under AES-256-GCM alone (a
+  # SHA-384 ticket), and with secp256r1 alone, so that the ClientHello that
+  # resumes follows a HelloRetryRequest its binder covers.
+  client_resume() {
+    local failed=0 port pid got label extra
+    for case in "the default suites:" "AES-256-GCM alone:-ciphersuites TLS_AES_256_GCM_SHA384" \
+      "secp256r1 alone, through a HelloRetryRequest:-groups P-256"; do
+      label="${case%%:*}"
+      extra="${case#*:}"
+      port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+      # shellcheck disable=SC2086
+      "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -tls1_3 -cert "$PKI/p256.pem" -key "$PKI/p256.key" $extra \
+        >"$WORK/s_server-resume.log" 2>&1 </dev/null &
+      pid=$!
+      for _ in $(seq 1 50); do
+        "$PY" -c "import socket; socket.create_connection(('127.0.0.1', $port), 1).close()" 2>/dev/null && break
+        sleep 0.1
+      done
+      got="$("$1" resume "$port" "$PKI/ca.pem" localhost - 3 2>&1)"
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      if printf '%s\n' "$got" | sed -n 1p | grep -q 'resumed=no .*peer=CN=localhost said=New, TLSv1.3' &&
+         [ "$(printf '%s\n' "$got" | grep -c 'resumed=yes .*peer=CN=localhost said=Reused, TLSv1.3')" = 2 ]; then
+        echo "  resumed by OpenSSL's tickets, $label: $(printf '%s\n' "$got" | sed -n 2p)"
+      else
+        echo "  FAIL resumed by OpenSSL's tickets, $label: $(printf '%s' "$got" | tr '\n' ' ')"
+        failed=1
+      fi
+    done
+    return $failed
+  }
+  if client_resume "$WORK/tls-release"; then
+    interop=$((interop + 3))
+  else
+    status=1
+  fi
   # TLS 1.2 is not offered unless asked for (the next section asks): a
   # server of 1.2 alone refuses the ClientHello, which offers it nothing.
   interop "TLS 1.2 alone, not asked for" "alert protocol_version (70)" localhost - -tls1_2 -cert p256.pem -key p256.key
@@ -840,6 +880,43 @@ SH
   # must hold the phrase; when it does not, the server's own last word
   # (SERVE_LOG) says whether it refused, and why.
   served_ok=0
+  # sess_twice <file> <s_client args...>: s_client's session kept by
+  # -sess_out and offered again by -sess_in; what OpenSSL says of the
+  # second connection ("Reused, TLSv1.3" or "New, TLSv1.3"), the client's
+  # certificate as the server names it, and whether it says it resumed.
+  sess_twice() {
+    local file="$1" out
+    shift
+    printf 'GET / HTTP/1.0\r\n\r\n' | "$OPENSSL" s_client "$@" -sess_out "$file" >/dev/null 2>&1
+    out="$(printf 'GET / HTTP/1.0\r\n\r\n' | "$OPENSSL" s_client "$@" -sess_in "$file" 2>&1 | tr -d '\r')"
+    printf '%s %s %s\n' "$(printf '%s\n' "$out" | grep -o '^Reused, TLSv1.3\|^New, TLSv1.3' | head -1)" \
+      "$(printf '%s\n' "$out" | grep -o 'peer=.* shown=' | head -1 | sed 's/ shown=$//')" "$(printf '%s\n' "$out" | grep -o 'resumed=[a-z]*' | head -1)"
+  }
+  # Python's ssl, twice to the server: the second connection offers the
+  # session the first was sent; whether it was reused, and the client's
+  # certificate and the resumption as the server names them. With a chain
+  # and key, presented.
+  PY_RESUME='
+import socket, ssl, sys
+ctx = ssl.create_default_context(cafile=sys.argv[2])
+if len(sys.argv) > 3:
+    ctx.load_cert_chain(sys.argv[3], sys.argv[4])
+session = None
+for _ in range(2):
+    with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10), server_hostname="localhost", session=session) as s:
+        s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+        data = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        session = s.session
+        said = data.decode().split("\r\n\r\n")[1].strip()
+        reused = s.session_reused
+peer = said.split(" peer=")[1].split(" shown=")[0]
+print("session_reused=%s peer=%s %s" % (reused, peer, said[said.index("resumed="):]))
+'
   SERVE_LOG=
   served_check() {
     local label="$1" want="$2" got
@@ -904,6 +981,15 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
         data += chunk
     print(s.version(), s.selected_alpn_protocol(), data.decode().split("\r\n\r\n")[1].strip())
 ' "$port" "$SRV/roots.pem"
+    # Resumption: the std/tls client through one TlsSession, then Python's
+    # ssl offering the session its first connection was sent; each side's
+    # word on whether the second resumed.
+    iyi_resume() {
+      "$WORK/tls-release" resume "$port" "$SRV/roots.pem" localhost h2 2 2>&1 | sed -n 2p |
+        sed -E 's/^2: .* resumed=([a-z]+) .* peer=([^ ]+) said=.* resumed=([a-z]+) held=.*$/client resumed=\1 peer=\2, server resumed=\3/'
+    }
+    served_check "the std/tls client, $kind, its session resumed" "client resumed=yes peer=CN=localhost, server resumed=yes" iyi_resume
+    served_check "Python's ssl, $kind, its session reused" "session_reused=True peer=- resumed=yes" "$PY" -c "$PY_RESUME" "$port" "$SRV/roots.pem"
     if [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1; then
       # -ign_eof: the request's end on stdin is not the end of the answer.
       sclient() {
@@ -960,6 +1046,8 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
         [ -n "$ours" ] && [ "$ours" = "$theirs" ] && echo "the same at both ends: $ours" || echo "server $ours, OpenSSL $theirs"
       }
       served_check "OpenSSL, $kind, exported keying material" "the same at both ends" export_both
+      served_check "OpenSSL, $kind, -sess_out then -sess_in" "Reused, TLSv1.3 peer=- resumed=yes" \
+        sess_twice "$WORK/sess-$kind.pem" -connect "127.0.0.1:$port" -servername localhost -CAfile "$SRV/roots.pem" -verify_return_error -ign_eof -tls1_3
     else
       echo "  no openssl here (or Windows), so s_client goes unasked"
     fi
@@ -1043,6 +1131,8 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
         data += chunk
     print(s.version(), data.decode().split("\r\n\r\n")[1].strip())
 ' "$port" "$SRV/roots.pem" "$M/client.pem" "$M/client.key"
+    served_check "Python's ssl presenting a P-256 certificate, its session reused: the certificate carried" "session_reused=True peer=CN=client resumed=yes" \
+      "$PY" -c "$PY_RESUME" "$port" "$SRV/roots.pem" "$M/client.pem" "$M/client.key"
     if [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1; then
       served_check "OpenSSL presenting an Ed25519 certificate" "peer=CN=client ed" sh -c \
         'printf "GET / HTTP/1.0\r\n\r\n" | "$1" s_client -connect "127.0.0.1:$2" -servername localhost -CAfile "$3" -verify_return_error -ign_eof -cert "$4" -key "$5" 2>&1' \
@@ -1050,6 +1140,9 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
       served_check "OpenSSL presenting an RSA certificate" "peer=CN=client rsa" sh -c \
         'printf "GET / HTTP/1.0\r\n\r\n" | "$1" s_client -connect "127.0.0.1:$2" -servername localhost -CAfile "$3" -verify_return_error -ign_eof -cert "$4" -key "$5" 2>&1' \
         sh "$OPENSSL" "$port" "$SRV/roots.pem" "$M/client-rsa.pem" "$M/client-rsa.key"
+      served_check "OpenSSL presenting an Ed25519 certificate, -sess_out then -sess_in: the certificate carried" "Reused, TLSv1.3 peer=CN=client ed resumed=yes" \
+        sess_twice "$WORK/sess-mtls.pem" -connect "127.0.0.1:$port" -servername localhost -CAfile "$SRV/roots.pem" -verify_return_error -ign_eof \
+        -cert "$M/client-ed.pem" -key "$M/client-ed.key"
     fi
     if command -v curl >/dev/null 2>&1 && curl --version | head -1 | grep -q 'OpenSSL/'; then
       served_check "curl presenting a P-256 certificate" "peer=CN=client" curl -sS --http1.1 --cacert "$SRV/roots.pem" \
@@ -1507,9 +1600,10 @@ echo "== proving the checks can fail when the module is broken"
 # asking for a client's certificate, or `server-mtls-optional`, asking
 # without requiring one; the client's report must name the scenario);
 # judging the server's configurations (`config`); the TLS 1.2 client
-# against OpenSSL, Python's ssl and the man in the middle (`client12`); or
+# against OpenSSL, Python's ssl and the man in the middle (`client12`);
 # the server told to speak TLS 1.2 too, before the scripted client
-# (`server12`) or every client of its section (`server12-interop`).
+# (`server12`) or every client of its section (`server12-interop`); or
+# the client resuming by OpenSSL's tickets (`client-resume`).
 mutations=0
 # A scenario's break is caught by the scenario failing, by name - "FAILED:
 # <scenario>: " - whether the broken client then holds a connection or
@@ -1524,7 +1618,7 @@ prove_broken() {
   local mode="${5:-trace}"
   if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; } ||
      { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ]; } && [ "$served" = no ]; } ||
-     { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
+     { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = client-resume ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
     echo "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
   fi
@@ -1541,7 +1635,7 @@ PY
     status=1
     return
   fi
-  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ]; then
+  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ] || [ "$mode" = client-resume ]; then
     if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched/tlsx" \
          "$REPO/bench/std_tls_exercise.iyi" >"$WORK/patched/build.log" 2>&1; then
       echo "  the $1 copy did not build:"
@@ -1568,6 +1662,9 @@ PY
     elif [ "$mode" = server12 ] || [ "$mode" = server12-interop ]; then
       server12_round "$WORK/patched/tlsx" "$([ "$mode" = server12 ] && echo scripted || echo all)" >"$WORK/mut.out" 2>&1
       rc=$?
+    elif [ "$mode" = client-resume ]; then
+      client_resume "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
+      rc=$?
     else
       mkdir -p "$WORK/patched/srv"
       local keys="$SRV" flag=()
@@ -1576,6 +1673,8 @@ PY
       [ "$mode" = server-mtls ] && keys="$SRV/mtls" && flag=(--mtls "$SRV/mtls")
       [ "$mode" = server-mtls-optional ] && keys="$SRV/mtls" && flag=(--mtls "$SRV/mtls" mtls-optional-none mtls-ok mtls-bad-cv)
       cp "$keys/chain.pem" "$keys/key.pem" "$WORK/patched/srv/"
+      # The second identity too, for other.test, where there is one.
+      cp "$keys"/other-chain.pem "$keys"/other-key.pem "$WORK/patched/srv/" 2>/dev/null
       case "$mode" in server-mtls*) cp "$keys/client-roots.pem" "$WORK/patched/srv/" ;; esac
       [ "$mode" = server-mtls-optional ] && : >"$WORK/patched/srv/client-optional"
       "$WORK/patched/tlsx" serve "$WORK/patched/srv" 1000 >"$WORK/patched/serve.log" 2>&1 &
@@ -1943,6 +2042,72 @@ prove_broken "a client's chain taken as its own roots" "FAIL mtls-untrusted " \
   'X509.verify(chain[0], chain[1, chain.size - 1], roots, nil,' 'X509.verify(chain[0], chain[1, chain.size - 1], roots + chain[1, chain.size - 1], nil,' server-mtls
 prove_broken "a PKCS #8 public key unchecked" "FAIL a version 2 key carrying another public key" \
   '        return TlsError.new("the private key: its public key is not the seed'"'"'s") unless bits.size == 33 && bits[0] == 0_u8 && bits[1, 32] == TlsBytes.of(Ed25519.public_key(seed))' '' config
+# Resumption. The key schedule's PSK half against RFC 8448's resumed
+# trace, the ticket keys and the session against a clock of the
+# exercise's own; the client against the scripted server, which checks a
+# ticket's binder and age, and OpenSSL's tickets; the server against the
+# scripted client, each rule of section 4.2.11 broken once.
+prove_broken "a ticket's PSK made without its nonce" "the ticket's PSK, from its nonce" \
+  '    expand_label(secret, "resumption", nonce, @hash_size)' '    expand_label(secret, "resumption", [] of UInt8, @hash_size)'
+prove_broken "a binder keyed as an external PSK's" "the PSK binder, over the ClientHello to its binders" \
+  '"res binder"' '"ext binder"'
+prove_broken "the handshake secret without the PSK" "the handshake secret, over the PSK's early secret and the share" \
+  '    early = psk ? early_secret(psk) : early_secret' '    early = early_secret'
+prove_broken "a ticket past its lifetime opened" "a ticket past its lifetime by this server's count does not open" \
+  '    return nil if age < 0 || age > opened.lifetime * 1000_i64' ''
+prove_broken "a ticket key never rotated" "a ticket under the key two before does not open" \
+  '    return if age < period_ms' '    return if true'
+prove_broken "a ticket offered to any host" "a ticket is for the host it came from" \
+  '      if held.host == host' '      if true'
+prove_broken "a ticket offered and kept" "the newest ticket for the host is taken out" \
+  '        @tickets = kept' ''
+prove_broken "a ticket past its lifetime offered" "a ticket past its lifetime is not offered" \
+  '    @tickets = @tickets.select { |held| now_ms - held.received_ms < held.lifetime_ms }' ''
+prove_broken "a binder over the whole ClientHello" "resume: refused" \
+  '    binder = schedule.binder(offered.psk, prefix + hello[0, hello.size - binders.size])' '    binder = schedule.binder(offered.psk, prefix + hello)' scenarios
+prove_broken "a ticket's age sent without its age_add" "resume: refused" \
+  '    age = (TlsTime.now_ms - offered.received_ms + offered.age_add) & 0xFFFFFFFF_i64' '    age = (TlsTime.now_ms - offered.received_ms) & 0xFFFFFFFF_i64' scenarios
+prove_broken "the PSK identity a ServerHello takes unchecked" "resume-identity:" \
+  '      return TlsError.new("a ServerHello choosing PSK identity #{reply.psk_identity}, of one offered", TlsAlert::ILLEGAL_PARAMETER) unless reply.psk_identity == 0' '' scenarios
+prove_broken "a resumption under another hash's suite taken" "resume-hash:" \
+  '      unless TlsSuites.sha384?(offered.suite) == TlsSuites.sha384?(@suite)' '      if false' scenarios
+prove_broken "a Certificate taken in a resumed handshake" "resume-cert:" \
+  '    return server_finished(message, server_secret) if @resumed' '    return server_finished(message, server_secret) if @resumed && message[0] != 11_u8' scenarios
+prove_broken "tickets kept past the session's limit" "ticket-many:" \
+  '    @tickets.shift if @tickets.size > MAX_TICKETS' '' scenarios
+prove_broken "a ticket past 16 KiB kept" "ticket-huge:" \
+  '    return nil if lifetime == 0_i64 || ticket.size > TlsSession::MAX_TICKET' '    return nil if lifetime == 0_i64' scenarios
+prove_broken "a NewSessionTicket cut short taken" "ticket-bad:" \
+  '    return TlsError.new("a NewSessionTicket cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done? || ticket.empty?' '' scenarios
+prove_broken "the client's resumption master secret short of its Finished" "FAIL resumed by OpenSSL's tickets, the default suites" \
+  '    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript + finished)' '    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript)' client-resume
+prove_broken "a second ClientHello's binder without the HelloRetryRequest" "FAIL resumed by OpenSSL's tickets, secp256r1 alone" \
+  '      hello = client_hello(random, session, group, share, cookie, @transcript)' '      hello = client_hello(random, session, group, share, cookie, [] of UInt8)' client-resume
+prove_broken "a binder that does not match taken" "FAIL resume-bad-binder " \
+  '      unless Subtle.constant_time_compare(offer.binders[index], @schedule.binder(ticket.psk, transcript))' '      if false' server
+prove_broken "a ticket under another hash's suite taken" "FAIL resume-other-hash " \
+  '      next unless TlsSuites.sha384?(ticket.suite) == TlsSuites.sha384?(@suite)' '' server
+prove_broken "a ticket taken for another server_name" "FAIL resume-other-sni " \
+  '      next unless ticket.server_name == offer.server_name' '' server
+prove_broken "a ticket the client says is past its lifetime taken" "FAIL resume-expired " \
+  '      next if ((entry[1] - ticket.age_add) & 0xFFFFFFFF_i64) > ticket.lifetime * 1000_i64' '' server
+prove_broken "a ticket offered for psk_ke alone taken" "FAIL resume-psk-ke " \
+  '    return nil unless offer.psk_modes.includes?(TlsSession::PSK_DHE_KE)' '' server
+prove_broken "a pre_shared_key without psk_key_exchange_modes taken" "FAIL resume-no-modes " \
+  '    return TlsError.new("a pre_shared_key without psk_key_exchange_modes", TlsAlert::MISSING_EXTENSION) if psk_modes.nil? && !identities.empty?' '' server
+prove_broken "identities and binders of other counts taken" "FAIL resume-binders " \
+  '        unless identities.size == binders.size' '        if false' server
+prove_broken "a resumption's flight with the certificate in it" "FAIL resume " \
+  '    flight = flight + certificate_flight unless @resumed' '    flight = flight + certificate_flight' server
+prove_broken "the server's resumption master secret short of the client's Finished" "FAIL resume " \
+  '    @transcript = @transcript + message
+    @resumption_secret' '    @resumption_secret' server
+prove_broken "a second ClientHello's binder checked without the HelloRetryRequest" "FAIL resume-hrr " \
+  '      transcript = @transcript[0, @transcript.size - hello.size] + hello[0, hello.size - offer.binders_size]' '      transcript = hello[0, hello.size - offer.binders_size]' server
+prove_broken "a client with no signature_algorithms refused though its ticket is taken" "FAIL resume-no-sigalgs " \
+  '    return unshown if unshown && identities.empty?' '    return unshown if unshown' server
+prove_broken "a client's certificate not carried by its ticket" "FAIL mtls-resume " \
+  '      @peer_certificates = chain' '' server-mtls
 
 # TLS 1.2 at the server: opt-in, so a server not told answers 1.3 alone;
 # then each rule of its 1.2 handshake before the scripted client, the

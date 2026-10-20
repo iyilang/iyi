@@ -161,6 +161,29 @@ SCENARIOS = {
     "oversize": ("a plaintext record past 2^14 bytes", ("alert", 22)),
     "not-hello": ("a ServerHello where the ClientHello belongs", ("alert", 10)),
     "cut-hello": ("a ClientHello whose extensions run past its end", ("alert", 50)),
+    # Resumption (RFC 8446 section 2.2): a first connection keeps the two
+    # tickets it is sent; a second offers one as the scenario says. The
+    # server's answer says whether it resumed, and so does this side, which
+    # resumes only on a ServerHello taking an identity it offered and then
+    # checks the server's Finished under that PSK's keys.
+    "resume": ("a ticket of the first connection, its binder right", ("held", ("resumed=yes scripted-resumed=yes", "shown=CN=localhost"))),
+    "resume-hrr": ("a ticket offered again after a HelloRetryRequest, the binder over it", ("held", "resumed=yes scripted-resumed=yes")),
+    "resume-second": ("a ticket no server issued, then the first connection's: the second taken", ("held", "resumed=yes scripted-resumed=yes")),
+    "resume-alpn": ("a ticket of a connection on http/1.1, offering h2 now: taken, h2 chosen afresh",
+                    ("held", ("alpn=h2", "resumed=yes scripted-resumed=yes"))),
+    "resume-no-sigalgs": ("a ticket and no signature_algorithms, which a PSK lets a client leave out", ("held", "resumed=yes scripted-resumed=yes")),
+    "resume-bad-binder": ("a ticket whose binder is one bit off", ("alert", 51)),
+    "resume-expired": ("a ticket whose age the client gives past its lifetime: a full handshake", ("held", "resumed=no scripted-resumed=no")),
+    "resume-expired-no-sigalgs": ("that, and no signature_algorithms: nothing left to authenticate by", ("alert", 109)),
+    "resume-other-hash": ("a TLS_AES_128_GCM_SHA256 ticket with TLS_AES_256_GCM_SHA384 alone: a full handshake",
+                          ("held", ("TLS_AES_256_GCM_SHA384", "resumed=no scripted-resumed=no"))),
+    "resume-psk-ke": ("a ticket offered for psk_ke alone: a full handshake", ("held", "resumed=no scripted-resumed=no")),
+    "resume-other-sni": ("localhost's ticket offered for other.test: a full handshake, other.test's certificate",
+                         ("held", ("shown=CN=other.test", "resumed=no scripted-resumed=no"))),
+    "resume-tampered": ("a ticket one bit off: a full handshake", ("held", "resumed=no scripted-resumed=no")),
+    "resume-no-modes": ("a ticket and no psk_key_exchange_modes", ("alert", 109)),
+    "resume-binders": ("two identities and one binder", ("alert", 47)),
+    "resume-not-last": ("a ticket whose pre_shared_key is not the last extension", ("alert", 47)),
 }
 
 
@@ -183,6 +206,9 @@ MTLS = {
     "mtls-entry-ext": ("a client certificate entry with an extension", ("alert", 110)),
     # Asked of a server told a certificate is not required.
     "mtls-optional-none": ("no client certificate, where one is not required", ("held", "peer=-")),
+    # The client's certificate goes with the session: resumed, the server
+    # names it as the first handshake checked it.
+    "mtls-resume": ("a ticket of a connection that presented a P-256 certificate", ("held", ("peer=CN=client", "resumed=yes scripted-resumed=yes"))),
 }
 MTLS_DIR = None
 
@@ -257,6 +283,38 @@ class Client:
         self.root = root
         self.reader = None
         self.handshake = b""
+        # What a resumption takes from this connection: the tickets it was
+        # sent - (lifetime, age_add, nonce, ticket) each - when they came,
+        # the resumption master secret and the suite.
+        self.tickets = []
+        self.received = None
+        self.res_master = None
+        self.suite = None
+        self.resumed = False
+
+    # The next record after the handshake, NewSessionTickets kept and
+    # passed over: each judged as RFC 8446 section 4.6.1 lays it out, a
+    # lifetime of at most seven days, no extension the server was not asked
+    # for.
+    def after(self):
+        while True:
+            type_, data = self.content()
+            if type_ != 22 or data[:1] != b"\x04":
+                return type_, data
+            while data:
+                assert data[0] == 4 and len(data) >= 4, f"handshake message {data[0]} among the NewSessionTickets"
+                size = int.from_bytes(data[1:4], "big")
+                body, data = data[4:4 + size], data[4 + size:]
+                lifetime, age_add = struct.unpack(">II", body[:8])
+                nonce = body[9:9 + body[8]]
+                at = 9 + body[8]
+                length = int.from_bytes(body[at:at + 2], "big")
+                ticket = body[at + 2:at + 2 + length]
+                rest = body[at + 2 + length:]
+                assert 0 < lifetime <= 604800, f"a ticket lifetime of {lifetime} s"
+                assert ticket and len(ticket) == length and rest == b"\x00\x00", f"a NewSessionTicket laid out wrong: {body.hex()}"
+                self.tickets.append((lifetime, age_add, nonce, ticket))
+                self.received = time.monotonic()
 
     def read_exact(self, n):
         while len(self.buf) < n:
@@ -302,7 +360,14 @@ class Client:
 
 
 def client_hello(session, share, suites=(0x1301, 0x1302, 0x1303), groups=(0x1d,), shares=None, sigalgs=SIGALGS,
-                 versions=(0x0304,), alpn=None, sni="localhost", compression=b"\x00", order=None, early=False):
+                 versions=(0x0304,), alpn=None, sni="localhost", compression=b"\x00", order=None, early=False,
+                 psk=None, modes=b"\x01", prefix=b"", schedule=None, binders=None, corrupt_binder=False):
+    """The ClientHello. With `psk`, a list of (ticket, obfuscated age, PSK
+    or None), it offers them in a pre_shared_key whose binders - over
+    `prefix` and the message to its binders, under `schedule`'s hash - are
+    right for each PSK given and random for None; `binders` sets how many
+    go, `corrupt_binder` puts the first one bit off, and `modes` (None for
+    none) is psk_key_exchange_modes."""
     shares = {0x1d: share} if shares is None else shares
     body = b"\x03\x03" + os.urandom(32) + bytes([len(session)]) + session
     body += struct.pack(">H", 2 * len(suites)) + b"".join(struct.pack(">H", s) for s in suites)
@@ -324,15 +389,42 @@ def client_hello(session, share, suites=(0x1301, 0x1302, 0x1303), groups=(0x1d,)
     if alpn is not None:
         names = b"".join(bytes([len(a)]) + a.encode() for a in alpn)
         exts["alpn"] = ext(16, struct.pack(">H", len(names)) + names)
+    size = schedule.size if schedule else 32
     if early:
         exts["early"] = ext(42, b"")
-        exts["modes"] = ext(45, b"\x01\x01")
-        identity = b"\x00\x05ticket" + b"\x00\x00\x00\x00"
-        binder = b"\x20" + os.urandom(32)
-        exts["psk"] = ext(41, struct.pack(">H", len(identity)) + identity + struct.pack(">H", len(binder)) + binder)
+        if psk is None:
+            # A ticket no server issued: early data offered that cannot be
+            # taken, with a well-formed pre_shared_key around it.
+            psk = [(b"ticket", 0, None)]
+    if psk is not None:
+        if modes is not None:
+            exts["modes"] = ext(45, bytes([len(modes)]) + modes)
+        identities = b"".join(struct.pack(">H", len(t)) + t + struct.pack(">I", age) for t, age, _ in psk)
+        count = len(psk) if binders is None else binders
+        listed = b"".join(bytes([size]) + bytes(size) for _ in range(count))
+        exts["psk"] = ext(41, struct.pack(">H", len(identities)) + identities + struct.pack(">H", len(listed)) + listed)
     names = order or [k for k in ("sni", "groups", "sigalgs", "versions", "shares", "alpn", "early", "modes", "psk") if k in exts]
     extensions = b"".join(exts[k] if k in exts else k for k in names)
-    return message(1, body + struct.pack(">H", len(extensions)) + extensions)
+    hello = message(1, body + struct.pack(">H", len(extensions)) + extensions)
+    if psk is None:
+        return hello
+    # The binders: in place, over the transcript to them - the ClientHello
+    # without its binders list, the list's length gone too (RFC 8446
+    # section 4.2.11.2) - wherever the pre_shared_key falls.
+    at = hello.index(exts["psk"]) + len(exts["psk"]) - len(listed)
+    truncated = hello[:at - 2]
+    out = b""
+    for i in range(count):
+        key = psk[i][2] if i < len(psk) else None
+        if key is None or schedule is None:
+            binder = os.urandom(size)
+        else:
+            early_secret = schedule.extract(bytes(schedule.size), key)
+            binder = schedule.finished(schedule.derive(early_secret, b"res binder", b""), prefix + truncated)
+        if i == 0 and corrupt_binder:
+            binder = bytes([binder[0] ^ 1]) + binder[1:]
+        out += bytes([size]) + binder
+    return hello[:at] + out + hello[at + len(out):]
 
 
 def parse_server_hello(sh):
@@ -354,6 +446,8 @@ def parse_server_hello(sh):
 
 
 def run(name, port, root):
+    if name.startswith("resume") or name == "mtls-resume":
+        return resume(name, port, root)
     c = Client(port, root)
     try:
         return scenario12(c, name) if name.startswith("12-") else scenario(c, name)
@@ -361,14 +455,41 @@ def run(name, port, root):
         c.sock.close()
 
 
-def scenario(c, name):
+def resume(name, port, root):
+    """A first connection, its tickets kept, then a second of `name` that
+    offers one; the second's outcome, and whether this side resumed."""
+    first = Client(port, root)
+    extra = {"suites": (0x1301,)} if name == "resume-other-hash" else {}
+    if name == "resume-alpn":
+        extra["alpn"] = ["http/1.1"]
+    try:
+        outcome = scenario(first, "mtls-ok" if name == "mtls-resume" else "first", extra=extra)
+    finally:
+        first.sock.close()
+    assert outcome[0] == "held" and len(first.tickets) == 2, f"the first connection: {outcome!r}, {len(first.tickets)} tickets"
+    offer = {"tickets": first.tickets, "res_master": first.res_master, "suite": first.suite, "received": first.received}
+    second = Client(port, root)
+    try:
+        outcome = scenario(second, name, offer=offer)
+    finally:
+        second.sock.close()
+    if outcome[0] != "held":
+        return outcome
+    return "held", outcome[1].rstrip() + f" scripted-resumed={'yes' if second.resumed else 'no'}", outcome[2]
+
+
+def scenario(c, name, offer=None, extra=None):
+    """One connection of `name`. With `offer`, what a first connection of
+    the same scenario kept (its tickets, resumption master secret, suite
+    and when the tickets came), a ticket of it is offered as `name` says;
+    `extra` adds ClientHello arguments."""
     key = x25519.X25519PrivateKey.generate()
     share = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
     ec_key = ec.generate_private_key(ec.SECP256R1())
     ec_share = ec_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
     p384_share = b"\x04" + os.urandom(96)
     hrr_names = ("hrr", "early-after-hrr", "hrr-no-share", "hrr-other-session", "hrr-p256", "hrr-other-suite", "hrr-early-again",
-                 "junk-after-hrr")
+                 "junk-after-hrr", "resume-hrr")
     p256_names = ("p256-share", "hrr-p256")
     session = os.urandom(32)
     kw = {}
@@ -426,6 +547,36 @@ def scenario(c, name):
     if name == "no-suite": kw["suites"] = (0x1304,)
     if name == "alpn-mismatch": kw["alpn"] = ["spdy/3"]
     if name == "alpn-empty-name": kw["alpn"] = ["h2", ""]
+    if extra:
+        kw.update(extra)
+    if offer is not None:
+        # The first ticket the first connection was sent: its PSK from its
+        # nonce (RFC 8446 section 4.6.1), its age as this side counts it.
+        lifetime, age_add, nonce, ticket = offer["tickets"][0]
+        held = Schedule(offer["suite"])
+        secret = held.expand_label(offer["res_master"], b"resumption", nonce, held.size)
+        age = int((time.monotonic() - offer["received"]) * 1000)
+        if name in ("resume-expired", "resume-expired-no-sigalgs"):
+            age = lifetime * 1000 + 1000
+        if name == "resume-tampered":
+            ticket = ticket[:-1] + bytes([ticket[-1] ^ 1])
+        entries = [(ticket, (age + age_add) & 0xFFFFFFFF, secret)]
+        if name == "resume-second":
+            entries = [(os.urandom(len(ticket)), 0, None)] + entries
+        if name == "resume-binders":
+            entries = entries + [(os.urandom(len(ticket)), 0, None)]
+            kw["binders"] = 1
+        kw["psk"] = entries
+        kw["schedule"] = held
+        if name == "resume-bad-binder": kw["corrupt_binder"] = True
+        if name == "resume-psk-ke": kw["modes"] = b"\x00"
+        if name == "resume-no-modes": kw["modes"] = None
+        if name == "resume-not-last":
+            kw["order"] = ["sni", "groups", "sigalgs", "versions", "shares", "modes", "psk", ext(0xff01, b"\x00")]
+        if name == "resume-other-hash": kw["suites"] = (0x1302,)
+        if name == "resume-other-sni": kw["sni"] = "other.test"
+        if name == "resume-alpn": kw["alpn"] = ["h2"]
+        if name in ("resume-no-sigalgs", "resume-expired-no-sigalgs"): kw["sigalgs"] = None
     ch = client_hello(session, share, **kw)
     if name == "slow-hello":
         record = bytes([22, 3, 1]) + struct.pack(">H", len(ch)) + ch
@@ -502,6 +653,8 @@ def scenario(c, name):
             again["shares"] = {0x1d: share}
         if name == "hrr-other-session":
             session = os.urandom(32)
+        if "psk" in again:
+            again["prefix"] = transcript
         ch = client_hello(session, share, **again)
         c.sock.sendall(plain(22, ch))
         transcript += ch
@@ -517,7 +670,17 @@ def scenario(c, name):
     else:
         assert group == 0x1d and length == 32, "the server's share is not X25519"
         shared = key.exchange(x25519.X25519PublicKey.from_public_bytes(exts[51][4:]))
-    early_secret = schedule.extract(bytes(schedule.size), bytes(schedule.size))
+    # A resumption (RFC 8446 section 2.2): the ServerHello names the
+    # identity taken, whose PSK the early secret is made of.
+    resumed = 41 in exts
+    psk_secret = bytes(schedule.size)
+    if resumed:
+        assert "psk" in kw, "a pre_shared_key in a ServerHello to a ClientHello offering none"
+        chosen = int.from_bytes(exts[41], "big")
+        assert len(exts[41]) == 2 and chosen < len(kw["psk"]) and kw["psk"][chosen][2] is not None, f"a ServerHello taking identity {exts[41].hex()}"
+        psk_secret = kw["psk"][chosen][2]
+    c.resumed = resumed
+    early_secret = schedule.extract(bytes(schedule.size), psk_secret)
     hs = schedule.extract(schedule.derive(early_secret, b"derived", b""), shared)
     c_hs = schedule.derive(hs, b"c hs traffic", transcript)
     s_hs = schedule.derive(hs, b"s hs traffic", transcript)
@@ -535,49 +698,55 @@ def scenario(c, name):
     assert (16 in types) == (kw.get("alpn") is not None), f"EncryptedExtensions {types} for ALPN {kw.get('alpn')}"
     transcript += ee
     cert = c.message()
-    requested = cert[0] == 13
-    if requested:
-        assert mtls, "a CertificateRequest from a server that was not told to ask"
-        body = cert[4:]
-        assert body[0] == 0, "a CertificateRequest with a context"
-        listed, i, offered = body[3:], 0, []
-        while i < len(listed):
-            t, n = struct.unpack(">HH", listed[i:i + 4])
-            if t == 13:
-                schemes = listed[i + 6:i + 4 + n]
-                offered = [int.from_bytes(schemes[k:k + 2], "big") for k in range(0, len(schemes), 2)]
-            i += 4 + n
-        assert 0x0807 in offered and 0x0403 in offered, f"a CertificateRequest offering {offered}"
+    requested = cert[0] == 13 and not resumed
+    if resumed:
+        # The PSK is the authentication: no CertificateRequest, Certificate
+        # or CertificateVerify (RFC 8446 sections 2.2 and 4.3.2).
+        assert cert[0] == 20, f"message {cert[0]} where a resumption's Finished belongs"
+        finished = cert
+    else:
+        if requested:
+            assert mtls, "a CertificateRequest from a server that was not told to ask"
+            body = cert[4:]
+            assert body[0] == 0, "a CertificateRequest with a context"
+            listed, i, offered = body[3:], 0, []
+            while i < len(listed):
+                t, n = struct.unpack(">HH", listed[i:i + 4])
+                if t == 13:
+                    schemes = listed[i + 6:i + 4 + n]
+                    offered = [int.from_bytes(schemes[k:k + 2], "big") for k in range(0, len(schemes), 2)]
+                i += 4 + n
+            assert 0x0807 in offered and 0x0403 in offered, f"a CertificateRequest offering {offered}"
+            transcript += cert
+            cert = c.message()
+        else:
+            assert not mtls, "no CertificateRequest from a server told to ask"
+        assert cert[0] == 11, f"message {cert[0]} where Certificate belongs"
         transcript += cert
-        cert = c.message()
-    else:
-        assert not mtls, "no CertificateRequest from a server told to ask"
-    assert cert[0] == 11, f"message {cert[0]} where Certificate belongs"
-    transcript += cert
-    body = cert[4:]
-    assert body[0] == 0, "a request context"
-    first = int.from_bytes(body[4:7], "big")
-    leaf = x509.load_der_x509_certificate(body[7:7 + first])
-    leaf.verify_directly_issued_by(c.root)
-    verify = c.message()
-    signed = b" " * 64 + b"TLS 1.3, server CertificateVerify\x00" + schedule.digest(transcript)
-    public = leaf.public_key()
-    if isinstance(public, ed25519.Ed25519PublicKey):
-        assert verify[4:6] == b"\x08\x07", f"an Ed25519 key's CertificateVerify under {verify[4:6].hex()}"
-        public.verify(verify[8:], signed)
-    elif isinstance(public, rsa.RSAPublicKey):
-        wanted = next(s for s in kw.get("sigalgs", SIGALGS) if s in PSS)
-        scheme = int.from_bytes(verify[4:6], "big")
-        assert scheme == wanted, f"an RSA key's CertificateVerify under {scheme:#06x}, the first RSA-PSS scheme offered being {wanted:#06x}"
-        h = PSS[scheme]()
-        public.verify(verify[8:], signed, padding.PSS(mgf=padding.MGF1(h), salt_length=h.digest_size), h)
-    else:
-        assert isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp256r1", "the leaf's key is neither Ed25519, P-256 nor RSA"
-        assert verify[4:6] == b"\x04\x03", f"a P-256 key's CertificateVerify under {verify[4:6].hex()}"
-        public.verify(verify[8:], signed, ec.ECDSA(hashes.SHA256()))
-    assert verify[0] == 15, f"message {verify[0]} where CertificateVerify belongs"
-    transcript += verify
-    finished = c.message()
+        body = cert[4:]
+        assert body[0] == 0, "a request context"
+        first = int.from_bytes(body[4:7], "big")
+        leaf = x509.load_der_x509_certificate(body[7:7 + first])
+        leaf.verify_directly_issued_by(c.root)
+        verify = c.message()
+        signed = b" " * 64 + b"TLS 1.3, server CertificateVerify\x00" + schedule.digest(transcript)
+        public = leaf.public_key()
+        if isinstance(public, ed25519.Ed25519PublicKey):
+            assert verify[4:6] == b"\x08\x07", f"an Ed25519 key's CertificateVerify under {verify[4:6].hex()}"
+            public.verify(verify[8:], signed)
+        elif isinstance(public, rsa.RSAPublicKey):
+            wanted = next(s for s in kw.get("sigalgs", SIGALGS) if s in PSS)
+            scheme = int.from_bytes(verify[4:6], "big")
+            assert scheme == wanted, f"an RSA key's CertificateVerify under {scheme:#06x}, the first RSA-PSS scheme offered being {wanted:#06x}"
+            h = PSS[scheme]()
+            public.verify(verify[8:], signed, padding.PSS(mgf=padding.MGF1(h), salt_length=h.digest_size), h)
+        else:
+            assert isinstance(public, ec.EllipticCurvePublicKey) and public.curve.name == "secp256r1", "the leaf's key is neither Ed25519, P-256 nor RSA"
+            assert verify[4:6] == b"\x04\x03", f"a P-256 key's CertificateVerify under {verify[4:6].hex()}"
+            public.verify(verify[8:], signed, ec.ECDSA(hashes.SHA256()))
+        assert verify[0] == 15, f"message {verify[0]} where CertificateVerify belongs"
+        transcript += verify
+        finished = c.message()
     assert finished[0] == 20 and finished[4:] == schedule.finished(s_hs, transcript), "the server's Finished"
     transcript += finished
     assert not c.handshake, "handshake bytes after the server's Finished"
@@ -641,21 +810,25 @@ def scenario(c, name):
             verify_data = bytes([verify_data[0] ^ 1]) + verify_data[1:]
         c.sock.sendall(writer.seal(22, message(20, verify_data), corrupt=(name == "bad-record-mac")))
     writer = Cipher(schedule, c_ap)
+    # The resumption master secret, over the handshake to this side's
+    # Finished: the tickets' PSKs are made of it.
+    c.res_master = schedule.derive(master, b"res master", transcript + message(20, schedule.finished(c_hs, transcript)))
+    c.suite = suite
     got = b""
     if name == "keyupdate":
         c.sock.sendall(writer.seal(22, message(24, b"\x01")))
         writer = Cipher(schedule, schedule.expand_label(c_ap, b"traffic upd", b"", schedule.size))
         c.sock.sendall(writer.seal(23, b"ping"))
-        type_, data = c.content()
+        type_, data = c.after()
         assert type_ == 22 and data == message(24, b"\x00"), "no KeyUpdate back"
         c.reader = Cipher(schedule, schedule.expand_label(s_ap, b"traffic upd", b"", schedule.size))
-        type_, data = c.content()
+        type_, data = c.after()
         assert type_ == 23, f"a record of type {type_} where the echo belongs"
         got += data
     c.sock.sendall(writer.seal(23, b"GET / HTTP/1.0\r\n\r\n"))
     while True:
         try:
-            type_, data = c.content()
+            type_, data = c.after()
         except Refused as r:
             if r.code == 0:
                 break
@@ -1014,7 +1187,8 @@ def main():
             outcome = ("alert", r.code)
         except Exception as e:
             outcome = ("broke", f"{type(e).__name__}: {e}")
-        if kind == "held" and outcome[0] == "held" and want in outcome[1] and "HTTP/1.0 200 ok" in outcome[1]:
+        wants = want if isinstance(want, tuple) else (want,)
+        if kind == "held" and outcome[0] == "held" and all(w in outcome[1] for w in wants) and "HTTP/1.0 200 ok" in outcome[1]:
             print(f"{name}: ok, {outcome[1].splitlines()[-1]}")
         elif kind in ("alert", "warning") and outcome == (kind, want):
             print(f"{name}: ok, {kind} {want}")

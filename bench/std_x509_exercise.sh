@@ -566,6 +566,10 @@ prove_broken "an issuer's RSA key of any size taken" "an intermediate whose key 
     return weak if weak' ''
 prove_broken "a second extensions block read over the first" "a TBSCertificate with two extensions blocks refused" \
   '      return X509Error.new("#{field.describe} after [#{last}], where RFC 5280 has each of [1], [2] and [3] once and in order") unless tag > last' ''
+prove_broken "an empty RelativeDistinguishedName taken" "an empty RDN refused: accepted" \
+  '      return X509Error.new("an empty RelativeDistinguishedName") if attributes.empty?' ''
+prove_broken "a name constraint's mask with a hole taken" "a name constraint's mask with a hole refused: accepted" \
+  '          unless X509Names.prefix_mask?(range[range.size // 2, range.size // 2])' '          if false'
 
 echo
 if [ "$status" -eq 0 ]; then

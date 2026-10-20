@@ -275,6 +275,19 @@ puts "== certificates that are not certificates"
 refused ALG_MISMATCH, "the signature algorithm signed differs", "an outer algorithm that is not the inner one refused"
 refused DUP_EXT, "extension 2.5.29.17 appears twice", "an extension written twice refused"
 refused DUP_TBS_EXT, "after [3], where RFC 5280 has each of [1], [2] and [3] once and in order", "a TBSCertificate with two extensions blocks refused"
+# RelativeDistinguishedName ::= SET SIZE (1..MAX): the fuzz gate's root
+# with an issuer of one empty RDN. And a nameConstraints iPAddress whose
+# mask is not a CIDR prefix (RFC 5280 section 4.2.1.10): a constrained
+# CA's 255.255.255.0 made 255.0.255.0.
+refused "308201063081b9a003020102020101300506032b657030023100301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0946757a7a20526f6f74302a300506032b65700321001494a1cac4481d11b3723830767cce21261aaca39cbd624c5b4d51b3163e8382a3423040301d0603551d0e0416041497ae92205c7302b9b25c2c7219607c7f767904fc300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300506032b657003410081f88cec5b495303ce00ae5a18679fc9d43fc5c2d3a86fd3ff7dd265fd1f1a20f053fe81ae0db33be74fff0cb487b516fc7e489253e914000ec818988635e607",
+  "an empty RelativeDistinguishedName", "an empty RDN refused"
+constrained = CERTS.find { |c| c.includes?("8708c0000200ffffff00") } || ""
+mask_at = 0
+while mask_at + 20 <= constrained.bytesize && constrained[mask_at, 20] != "8708c0000200ffffff00"
+  mask_at = mask_at + 2
+end
+refused constrained[0, mask_at] + "8708c0000200ff00ff00" + constrained[mask_at + 20, constrained.bytesize - mask_at - 20],
+  "an iPAddress constraint whose mask is not a CIDR prefix", "a name constraint's mask with a hole refused"
 refused "020101", "expected a SEQUENCE", "an INTEGER where a certificate goes refused"
 refused "3003020101", "a Certificate of 1 values", "a SEQUENCE of one value refused"
 read = Certificate.from_pem("comment\n" + ROOT_PEM + "more\n" + ROOT_PEM).or_panic

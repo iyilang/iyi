@@ -4,6 +4,18 @@
 
 ### Added
 
+- **std/socket: `IyiSocket#close_write`, a half-close.** The sending
+  half ends - the peer reads the end of the stream after what was
+  written - and the socket goes on reading what the peer still sends
+  until its end; `close` gives the socket back. `shutdown(SHUT_WR)` on
+  Linux (a system call) and darwin (libSystem's, a new name on darwin's
+  dependency floor), `shutdown(SD_SEND)` on Windows, which `close` already
+  called. Answers `SocketError?`: Linux refuses a connection both ends
+  have closed. `bench/socket_exercise.sh` holds a write, a half-close,
+  the peer's end and an answer read after it, and catches a copy that
+  ends nothing and one that ends both halves. The fuzz gate's scripted
+  peers end their half with it on every platform, where Windows closed
+  the socket and panicked on the read after.
 - **bench/std_fuzz_exercise.sh: the readers of std/asn1, std/x509,
   std/tls, std/http and std/hpack fuzzed.** Seeds - certificates, PEM,
   recorded and built TLS 1.3 and 1.2 handshakes, records, HTTP/1.1

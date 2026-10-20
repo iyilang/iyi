@@ -29,9 +29,11 @@
   gate `bench/std_ocsp_exercise.sh`: 59 responses Python's cryptography
   built or written by hand in DER, each verdict held to the one written,
   every truncation and flipped byte of two refused; the same vectors judged
-  by OpenSSL, 44 alike and 14 parting where written down (std/ocsp holding
-  to DER, to RFC 5280's critical extensions and keyUsage, and refusing
-  SHA-1); 20 judgments of `openssl ocsp -index` responses - from the CA,
+  by OpenSSL, 44 alike, 4 refused by both for reasons that differ, and 10
+  parting where written down (std/ocsp holding to DER, to RFC 5280's
+  critical extensions and keyUsage, and refusing SHA-1) - whether a
+  response is taken is held exactly, the reason for a refusal not, since
+  OpenSSL builds differ in which check refuses first; 20 judgments of `openssl ocsp -index` responses - from the CA,
   delegated, by key id, without the responder's certificate, two at once,
   SHA-256 CertIDs, RSA, RSA-PSS and P-384 - each OpenSSL's own; 29
   responses Python builds at run time each judged as OpenSSL judges them

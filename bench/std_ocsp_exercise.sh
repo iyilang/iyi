@@ -128,8 +128,31 @@ openssl_verdict() {
   esac
 }
 
-# OpenSSL's own: LibreSSL's ocsp (darwin's) words and judges otherwise,
-# and is not the oracle here.
+# How a verdict of std/ocsp's and one of OpenSSL's compare: `same`;
+# `refused`, both refusing for reasons that differ; or `parted`, one taking
+# the response and the other not (or OpenSSL's answer unread). The
+# decision to take a response or not is held exactly; the reason for a
+# refusal is not, because OpenSSL builds differ in which check refuses
+# first: a response for another issuer's CertID, signed by the CA, was "No
+# Status found" (certid) to OpenSSL 3.5.5, 3.0.15 and 1.1.1w built on
+# Linux, and a verify failure (signer) to the OpenSSL on darwin's CI
+# runner, which also refused a CertID cut short and a response with no
+# SingleResponse at verify. The sections print the version they asked.
+compare() { # compare <ours> <theirs>
+  if [ "$1" = "$2" ]; then
+    echo same
+    return
+  fi
+  case "$1:$2" in
+    malformed:malformed | malformed:signer | malformed:certid | malformed:time | signer:malformed | signer:certid | signer:time | \
+      certid:malformed | certid:signer | certid:time | time:malformed | time:signer | time:certid) echo refused ;;
+    *) echo parted ;;
+  esac
+}
+
+# OpenSSL's own: LibreSSL's ocsp (macOS's /usr/bin/openssl) words and
+# judges otherwise, and is not the oracle here. Each section that asks it
+# names the version it asked.
 HAVE_OPENSSL=no
 if command -v "$OPENSSL" >/dev/null 2>&1 && [ -n "$PY" ] && "$OPENSSL" version 2>/dev/null | grep -q '^OpenSSL'; then
   help="$("$OPENSSL" ocsp -help 2>&1)"
@@ -149,10 +172,12 @@ echo "== the exercise's vectors, judged by OpenSSL"
 # against std/ocsp's, a time refusal of std/ocsp's against whatever status
 # OpenSSL reads. Where the two part, the line below names it and why:
 # std/ocsp holds to the DER and to RFC 5280's keyUsage where OpenSSL lets
-# a response through.
+# a response through. Both refusing, for reasons that differ, is agreement
+# (`compare`, above), and shown.
 if [ "$HAVE_OPENSSL" = no ]; then
   echo "  no OpenSSL with ocsp's -index, -rsigner, -attime and -validity_period here (or no python), so the vectors go unjudged by OpenSSL"
 else
+  echo "  $("$OPENSSL" version) ($OPENSSL)"
   V="$WORK/vectors"
   mkdir -p "$V"
   "$X" vectors "$V"
@@ -175,10 +200,6 @@ rows = [
     ("a revocation reason of 7", "malformed", "revoked", "CRLReason has no 7"),
     ("an extension twice", "malformed", "good", "RFC 5280 section 4.2: an extension appears once"),
     ("a nonce that is not an OCTET STRING", "malformed", "good", "RFC 8954: the nonce is an OCTET STRING; OpenSSL reads it only against a request"),
-    ("a CertID under MD5", "malformed", "certid", "std/ocsp reads SHA-1 and SHA-2 CertIDs; OpenSSL finds no status for its SHA-1 CertID"),
-    ("a CertID with a hash cut short", "malformed", "certid", "a hash that is not its algorithm's size is no CertID; OpenSSL finds no status"),
-    ("a responder key hash of 19 bytes", "malformed", "signer", "byKey is SHA-1's 20 bytes; OpenSSL finds no signer"),
-    ("a ResponseData with no SingleResponse", "malformed", "certid", "a response answers something; OpenSSL finds no status"),
     ("a byte after the response", "malformed", "good", "DER is one value with nothing after it"),
 ]
 with open(sys.argv[1], "w", newline="\n") as f:
@@ -186,18 +207,21 @@ with open(sys.argv[1], "w", newline="\n") as f:
         f.write(f"{name}|{ours}|{theirs}|{why}\n")
 PY
   agreed=0
+  refused=0
   parted=0
   while IFS='|' read -r name resp leaf issuer ours hash; do
     [ -n "$name" ] || continue
     # OpenSSL's CertID is under the hash the response's is, which it is
     # told: SHA-1 unless another.
     theirs="$(openssl_verdict "$V/$resp" "$V/$leaf.pem" "$V/$issuer.pem" "$V/$issuer.pem" "$hash" -attime "$NOW_2026_11_01" -validity_period 1000000000)"
-    same=no
-    [ "$ours" = "$theirs" ] && same=yes
+    same="$(compare "$ours" "$theirs")"
     # A time std/ocsp refuses is one OpenSSL, with its skew opened, reads
     # past to the status.
-    [ "$ours" = time ] && case "$theirs" in good | revoked | unknown | time) same=yes ;; esac
-    if [ "$same" = yes ]; then
+    [ "$ours" = time ] && case "$theirs" in good | revoked | unknown) same=same ;; esac
+    if [ "$same" = refused ] && ! grep -qF "$name|" "$V/divergences"; then
+      echo "  $name: refused by both, std/ocsp for $ours, OpenSSL for $theirs"
+      refused=$((refused + 1))
+    elif [ "$same" != parted ]; then
       # Another OpenSSL may hold to what this one lets through.
       grep -qF "$name|" "$V/divergences" && echo "  $name: written down as parting, and this OpenSSL agrees ($theirs)"
       agreed=$((agreed + 1))
@@ -209,7 +233,7 @@ PY
       status=1
     fi
   done <"$V/list"
-  echo "  $agreed vectors judged alike, $parted parting where written down"
+  echo "  $agreed vectors judged alike, $refused refused by both for reasons that differ, $parted parting where written down"
 fi
 
 echo
@@ -230,6 +254,7 @@ L="$WORK/live"
 if [ "$HAVE_OPENSSL" = no ]; then
   echo "  no OpenSSL with ocsp's -index, -rsigner, -attime and -validity_period here (or no python), so its responder goes unasked"
 else
+  echo "  $("$OPENSSL" version)"
   mkdir -p "$L"
   (
     cd "$L" || exit 1
@@ -323,12 +348,15 @@ else
       if [ -n "$ours" ] && [ "$ours" = "$theirs" ]; then
         agreed=$((agreed + 1))
         echo "  $name: $ours"
+      elif [ -n "$ours" ] && [ "$(compare "$ours" "$theirs")" = refused ]; then
+        agreed=$((agreed + 1))
+        echo "  $name: refused by both, std/ocsp for $ours, OpenSSL for $theirs"
       else
         echo "  FAIL $name: std/ocsp ${ours:-nothing}, OpenSSL $theirs"
         status=1
       fi
     done <"$L/judge.txt"
-    echo "  $agreed judgments of OpenSSL's responses, each as OpenSSL's own"
+    echo "  $agreed judgments of OpenSSL's responses, each taken or refused as OpenSSL's own"
   fi
   # The requests.
   (
@@ -459,6 +487,9 @@ PY
       theirs="$(openssl_verdict "$resp" "$leaf" "$issuer" "$issuer" "$hash")"
       if [ -n "$ours" ] && [ "$ours" = "$theirs" ]; then
         agreed=$((agreed + 1))
+      elif [ -n "$ours" ] && [ "$(compare "$ours" "$theirs")" = refused ]; then
+        agreed=$((agreed + 1))
+        echo "  $name: refused by both, std/ocsp for $ours, OpenSSL for $theirs"
       elif [ "$name" = no-next-update-old ] && [ "$ours" = time ] && [ "$theirs" = good ]; then
         echo "  $name: std/ocsp time, OpenSSL good - a response without nextUpdate is taken for a day after its thisUpdate here"
       else
@@ -466,7 +497,7 @@ PY
         status=1
       fi
     done <"$F/list"
-    echo "  $agreed of Python's responses judged as OpenSSL judges them: $(cut -d'|' -f2 "$F/ours.out" | sort | uniq -c | awk '{printf "%s%s %s", sep, $1, $2; sep=", "}')"
+    echo "  $agreed of Python's responses taken or refused as OpenSSL does: $(cut -d'|' -f2 "$F/ours.out" | sort | uniq -c | awk '{printf "%s%s %s", sep, $1, $2; sep=", "}')"
   else
     echo "  FAIL Python did not build its responses"
     status=1

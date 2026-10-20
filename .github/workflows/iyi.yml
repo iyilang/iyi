@@ -948,6 +948,14 @@ jobs:
           uv venv --python 3.14 /opt/oracle
           uv pip install --python /opt/oracle/bin/python -q cryptography pillow
           echo /opt/oracle/bin >> "$GITHUB_PATH"
+      # std/acme's gate places whole orders with Let's Encrypt's test CA,
+      # Pebble, which it builds with `go install` - and skips, saying so,
+      # where there is no Go, as there was none in this container. No
+      # `go.sum` here to key a cache on, so none is asked for.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
       - name: The module exercises of this shard
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
       # std/tls's reads and writes against OpenSSL, each set against its

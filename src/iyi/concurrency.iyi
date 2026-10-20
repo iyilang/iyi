@@ -666,6 +666,9 @@ class IyiFiber
       old = uninitialized Int32
       armed = LibC.VirtualProtect(Pointer(Void).new(top - INITIAL_COMMIT - PAGE), PAGE, 0x104_i32, pointerof(old))
       raise "VirtualProtect for the fiber stack's guard page failed" if armed == 0
+      # The limit `settle_stack` installs, kept where `release_stack`
+      # keeps a used stack's.
+      Pointer(UInt64).new(top - 16_u64).value = top - INITIAL_COMMIT
       # And the handler's room, committed at the bottom where the kernel
       # will not grow: DeallocationStack names the byte above it (see
       # `settle_stack`), so the kernel answers STATUS_STACK_OVERFLOW there
@@ -707,11 +710,29 @@ class IyiFiber
       # DeallocationStack: the lowest byte the kernel may grow the stack
       # into, above the handler's committed room (`map_stack`).
       Pointer(UInt64).new(saved + 0_u64).value = base + PAGE + GUARD_SLACK + PAGE
-      # StackLimit: the committed low end the stack starts with, above the
-      # guard page. A stack back from the pool may have grown lower, and a
-      # limit above what is committed only makes a large frame's probes
-      # touch pages that are already there.
-      Pointer(UInt64).new(saved + 8_u64).value = top - INITIAL_COMMIT
+      # StackLimit: the lowest committed byte, which is where the guard
+      # page's top is. A fresh stack keeps `top - INITIAL_COMMIT` in its
+      # word at `top - 16` (`map_stack`); a stack back from the pool keeps
+      # the limit its last fiber died with (`release_stack`), because the
+      # pages that fiber grew into are still committed and the guard page
+      # is still under them, so the kernel never lowers this word again
+      # until a frame goes deeper than that fiber did.
+      #
+      # It used to be `top - INITIAL_COMMIT` for every stack, on the
+      # belief that a limit above what is committed only made a large
+      # frame's probes touch pages already there. They write: MSVC's
+      # `__chkstk` probes each page from StackLimit down to the new frame
+      # with `mov byte ptr [r11], 0`. On a pooled stack the fiber's live
+      # frames sit below that stale limit, so every frame over a page
+      # cleared the first byte of each page between them - in CI job
+      # 118465323370 a debugger watching the guard page's first word saw
+      # `__chkstk` turn a return address ending 0x66 into one ending
+      # 0x00 while StackLimit read 0x...cc000 and rsp 0x...caff0, and the
+      # `ret` that read it jumped into the middle of `UInt8#%`. That is
+      # the memory fault `bench/std_fuzz_exercise.iyi` died of at
+      # tls-client seed 8 on every Windows run, after earlier seeds had
+      # grown the stack the TLS 1.2 handshake's certificate parse reused.
+      Pointer(UInt64).new(saved + 8_u64).value = Pointer(UInt64).new(top - 16_u64).value
       Pointer(UInt64).new(saved + 16_u64).value = top
       index = 0_i64
       while index < 28_i64
@@ -755,6 +776,13 @@ class IyiFiber
   def release_stack : Nil
     top = @stack_top
     return if top == 0
+    {% if flag?(:win32) && flag?(:x86_64) %}
+      # The StackLimit this fiber died with, from the TEB words its last
+      # switch saved (`__iyi_ctx_swap`), for the next fiber the stack is
+      # settled for: see `settle_stack`. Under the pool's link at the top
+      # word, where nothing of a dead fiber's is read any more.
+      Pointer(UInt64).new(top - 16_u64).value = Pointer(UInt64).new(@sp + 8_u64).value if @sp != 0_u64
+    {% end %}
     @stack_top = 0_u64
     @sp = 0_u64
     IyiScheduler.give_stack(top - STACK_BYTES)

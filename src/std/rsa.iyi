@@ -50,7 +50,10 @@
 # Signing is RSASP1 by the CRT (section 5.2.1). The message is blinded -
 # multiplied by r^e for an r drawn by HMAC from the private exponent and
 # the encoded message - so its value, which a caller may choose, does not
-# shape the time; the two halves exponentiate by dp and dq through
+# shape the time; r's inverse, which takes the blinding off, is std/big's
+# `inverse_mod_secret`, a binary GCD whose steps follow the modulus'
+# length alone (the extended Euclid's algorithm it replaced followed r's
+# quotients); the two halves exponentiate by dp and dq through
 # std/big's `pow_mod_secret`, a fixed window that reads its whole table
 # and masks its subtractions, so no branch and no memory address follows
 # the private exponents' bits; and the signature is checked against the
@@ -64,10 +67,15 @@
 # over SHA-1 is a misuse, refused with a panic.
 #
 # Measured here in --release builds (PSS over SHA-256, the check and the
-# blinding included; `bench/std_rsa_exercise.sh` prints it each run): a
-# 2048-bit signature in 1.03 ms, a 4096-bit one in 5.87, on a machine
-# other jobs shared (1.16 to 1.33 and 6.5 to 6.9 before std/big's
-# one-pass Montgomery product and 5-bit window).
+# blinding included), on a machine other jobs shared: a 2048-bit
+# signature in 0.78 ms, the best of eight runs of 50, where the same run
+# took 1.06 before std/big's column-scanned Montgomery products and the
+# binary GCD inverse of the blinding factor (whose Euclid took about a
+# fifth of a signature), and OpenSSL through Python's `cryptography`
+# took 0.48. `bench/std_rsa_exercise.sh` prints the mean each run: 0.89
+# ms at 2048 bits and 5.31 at 4096 in its last (1.03 and 5.87 before;
+# 1.16 to 1.33 and 6.5 to 6.9 before std/big's one-pass Montgomery
+# product and 5-bit window).
 #
 # Pure computation: std/big's arithmetic, std/digest's hashes, std/crypto's
 # HMAC, std/base64 for PEM.
@@ -457,7 +465,7 @@ pub struct RsaPrivateKey
       end
       r = BigInt.from_bytes(wide) % @n
       if r > BigInt.new(1)
-        inverse = RsaBytes.inverse(r, @n)
+        inverse = r.inverse_mod_secret(@n)
         return {r, inverse} if inverse
       end
       counter = counter + 1_u8
@@ -508,28 +516,9 @@ struct RsaPem
   end
 end
 
-# The lengths and the mask PSS needs, the arithmetic and HMAC signing
-# draws on, and std/asn1's errors as this one's.
+# The lengths and the mask PSS needs, the HMAC signing draws on, and
+# std/asn1's errors as this one's.
 struct RsaBytes
-  # a^-1 mod m by the extended Euclidean algorithm, or nil when they
-  # share a factor.
-  def self.inverse(a : BigInt, m : BigInt) : BigInt?
-    t0 = BigInt.new(0)
-    t1 = BigInt.new(1)
-    r0 = m
-    r1 = a % m
-    going = !r1.zero?
-    while going
-      q, rest = r0.divmod(r1)
-      r0 = r1
-      r1 = rest
-      t0, t1 = t1, t0 - q * t1
-      going = !r1.zero?
-    end
-    return nil unless r0 == BigInt.new(1)
-    t0.negative? ? t0 + m : t0
-  end
-
   def self.mac(hash : RsaHash, key : Array(UInt8), data : Array(UInt8)) : Array(UInt8)
     case hash
     when RsaHash::SHA256 then HMAC.digest(SHA256, key, data)

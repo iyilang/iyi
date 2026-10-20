@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`iyi lsp` notices a dead worker whose pipes another process still
+  holds, and the request after it is answered.** The proxy learned of a
+  worker's death only from its stdout closing, and a process the worker
+  started keeps that pipe open: on Windows every child inherits the
+  worker's stdin and stdout, so a worker killed during a macro's `ping`
+  left the proxy with no worker and the next request written into the
+  dead one's stdin, read by nobody. Windows CI waited 180 s on that
+  request (step 73c's outline, run 38866280923) with the proxy alive and
+  childless, and the runner killed the `ping` at the end of the job. The
+  proxy now asks the process: a frame for a worker that has exited goes
+  to its successor, and a worker that has exited owing an answer is
+  buried after two quiet seconds, its requests refused -32603 as a dead
+  worker's are. Steps 73j and 73k of `bench/lsp_session.py` hold a
+  worker's two pipes in a macro's `system` that writes a file the gate
+  waits for and then lasts a minute - `cmd` and a `ping` on Windows, a
+  shell that opens them through `/proc` on Linux, unmeasured on darwin -
+  and kill the worker alone once the file says it is inside that
+  compile: the outline asked after a buffer's held compile is answered
+  at once, where the old server left it unanswered for the step's 10 s,
+  and a pull whose own compile is the hold is refused in 1.8 s. The
+  0.18.0 notes called this and a darwin hang a `shutdown` left
+  unanswered; neither was one. The darwin hang (runs 37204417494 and
+  38889613653) is step 74a's hover, still unexplained, and the session
+  gate's watchdog now names a request sent without waiting, which it
+  reported as the `didChange` before it.
+
 ## 0.18.0 — 2026-10-18
 
 **iyi's own library reaches the network by itself: TLS 1.3 at both ends,

@@ -1,7 +1,7 @@
-"""A TLS 1.3 client that breaks the protocol one rule at a time, for the
-server section of bench/std_tls_exercise.sh.
+"""A TLS 1.3 client - and a TLS 1.2 one - that breaks the protocol one rule
+at a time, for the server section of bench/std_tls_exercise.sh.
 
-    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256 | --rsa] [--mtls DIR] [SCENARIO ...]
+    python3 bench/std_tls_client.py PORT ROOTS_PEM [--p256 | --rsa] [--mtls DIR] [--tls12] [SCENARIO ...]
 
 Connects to the exercise's `serve` mode once per scenario (every one in
 SCENARIOS when none is named) and says, one line each, whether the server
@@ -20,9 +20,24 @@ answered and closed with close_notify. A broken one must end in the alert
 RFC 8446 names, in the clear before the server's keys and under them
 after.
 
-The key schedule, records and messages are bench/std_tls_server.py's.
-Written for this one purpose; not a TLS client for anything else.
+`--tls12` says the server was told to speak TLS 1.2 too: the TLS12
+scenarios (the MTLS12 ones with `--mtls`) run, each a ClientHello that
+offers 1.2 and not 1.3, and three of TLS 1.3's, which must still be
+answered in 1.3. A correct 1.2 handshake is checked as a 1.3 one is: the
+ServerHello's version, its random's downgrade sentinel (RFC 8446 section
+4.1.3), no session id and no ticket, the extended master secret and
+renegotiation_info answered; the suite the client's first of the key's
+kind; the ServerKeyExchange's signature, under the scheme the key's kind
+and the client's list call for; the master secret over the session hash
+(RFC 7627), the server's Finished, and every AES-GCM explicit nonce
+unrepeated under its key.
+
+The TLS 1.3 key schedule, records and messages are
+bench/std_tls_server.py's; TLS 1.2's PRF and records are below. Written
+for this one purpose; not a TLS client for anything else.
 """
+import hashlib
+import hmac
 import os
 import socket
 import struct
@@ -36,22 +51,44 @@ from std_tls_server import Cipher, Schedule, ext, message, plain  # noqa: E402
 from cryptography import x509  # noqa: E402
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa, x25519  # noqa: E402
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305  # noqa: E402
 
 HELLO_RETRY = bytes.fromhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
 SUITE_NAMES = {0x1301: "TLS_AES_128_GCM_SHA256", 0x1302: "TLS_AES_256_GCM_SHA384", 0x1303: "TLS_CHACHA20_POLY1305_SHA256"}
 # rsa_pss_rsae_sha256, -384 and -512, by the hash each names.
 PSS = {0x0804: hashes.SHA256, 0x0805: hashes.SHA384, 0x0806: hashes.SHA512}
 SIGALGS = (0x0807, 0x0403, 0x0804)
+# rsa_pkcs1_sha256, -384 and -512, and ECDSA's three, by the hash each
+# names: in TLS 1.2 a scheme names a hash, not a curve.
+PKCS1 = {0x0401: hashes.SHA256, 0x0501: hashes.SHA384, 0x0601: hashes.SHA512}
+ECDSA = {0x0403: hashes.SHA256, 0x0503: hashes.SHA384, 0x0603: hashes.SHA512}
+# TLS 1.2's six suites: name, signed by RSA, key bytes, ChaCha20, the PRF's hash.
+SUITES12 = {
+    0xc02b: ("TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", False, 16, False, "sha256"),
+    0xc02f: ("TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", True, 16, False, "sha256"),
+    0xc02c: ("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", False, 32, False, "sha384"),
+    0xc030: ("TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", True, 32, False, "sha384"),
+    0xcca9: ("TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256", False, 32, True, "sha256"),
+    0xcca8: ("TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256", True, 32, True, "sha256"),
+}
+OFFER12 = (0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8)
+SIGALGS12 = (0x0807, 0x0403, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601)
+SENTINEL12 = b"DOWNGRD\x01"
+KEY_KIND = "ed25519"
 
 # name: (what the scenario sends, what the server must answer)
-#   ("held", text)  the handshake holds and the answer holds text
-#   ("alert", code) the server ends it with that alert
+#   ("held", text)     the handshake holds and the answer holds text
+#   ("alert", code)    the server ends it with that alert
+#   ("warning", code)  the server answers with that warning, and ends it
 # or, where the server's key decides, {"ed25519": answer, "p256": answer}.
 SCENARIOS = {
     "ok": ("a correct handshake, AES-128-GCM", ("held", "TLS_AES_128_GCM_SHA256")),
     "aes256": ("TLS_AES_256_GCM_SHA384 alone", ("held", "TLS_AES_256_GCM_SHA384")),
     "chacha": ("TLS_CHACHA20_POLY1305_SHA256 alone", ("held", "TLS_CHACHA20_POLY1305_SHA256")),
     "client-order": ("ChaCha20 offered before AES-128: the client's order", ("held", "TLS_CHACHA20_POLY1305_SHA256")),
+    # TLS 1.3 offered with 1.2: 1.3 is answered, by a server told to speak
+    # 1.2 too as by one that is not.
+    "both-versions": ("supported_versions TLS 1.3 then 1.2", ("held", "TLSv1.3")),
     "alpn": ("ALPN http/1.1", ("held", "alpn=http/1.1")),
     "alpn-order": ("ALPN http/1.1 then h2: the server's order", ("held", "alpn=h2")),
     "no-sni": ("no server_name", ("held", "name=-")),
@@ -148,6 +185,63 @@ MTLS = {
     "mtls-optional-none": ("no client certificate, where one is not required", ("held", "peer=-")),
 }
 MTLS_DIR = None
+
+# The scenarios against a server told to speak TLS 1.2 too (`--tls12`):
+# each ClientHello offers 1.2 and not 1.3, and the extended master secret
+# and renegotiation_info unless the scenario leaves them out.
+TLS12 = {
+    "12-ok": ("TLS 1.2: ECDHE in X25519, AES-128-GCM, every rule kept", ("held", "TLSv1.2")),
+    "12-aes256": ("TLS 1.2, AES-256-GCM alone: the PRF over SHA-384", ("held", "_AES_256_GCM_SHA384")),
+    "12-chacha": ("TLS 1.2, ChaCha20-Poly1305 alone", ("held", "_CHACHA20_POLY1305_SHA256")),
+    "12-client-order": ("TLS 1.2, ChaCha20 offered before AES-128: the client's order", ("held", "_CHACHA20_POLY1305_SHA256")),
+    "12-p256": ("TLS 1.2, secp256r1 alone among the groups", ("held", "TLSv1.2")),
+    "12-no-groups": ("TLS 1.2 with no supported_groups: secp256r1", ("held", "TLSv1.2")),
+    "12-legacy": ("no supported_versions, legacy_version TLS 1.2", ("held", "TLSv1.2")),
+    "12-alpn": ("TLS 1.2, ALPN http/1.1 then h2: the server's order", ("held", "alpn=h2")),
+    "12-sni-other": ("TLS 1.2, a server_name of other.test: its own certificate", ("held", "shown=CN=other.test")),
+    "12-scsv": ("TLS 1.2, TLS_EMPTY_RENEGOTIATION_INFO_SCSV and no renegotiation_info: answered", ("held", "TLSv1.2")),
+    "12-no-reneg": ("TLS 1.2, neither renegotiation_info nor its SCSV: nothing answered", ("held", "TLSv1.2")),
+    # An RSA key signs under RSA-PSS when the client takes it, whatever it
+    # lists first, and under PKCS #1 v1.5 for a client that takes no PSS.
+    "12-pss-first": ("TLS 1.2, rsa_pkcs1_sha256 listed before rsa_pss_rsae_sha384", ("held", "TLSv1.2")),
+    "12-pkcs1": ("TLS 1.2, PKCS #1 v1.5 alone among RSA's schemes", ("held", "TLSv1.2")),
+    "12-renegotiate": ("a ClientHello after the TLS 1.2 handshake", ("warning", 100)),
+    "12-no-ems": ("TLS 1.2 without extended_master_secret", ("alert", 40)),
+    "12-reneg-data": ("a renegotiation_info that is not empty, on a first handshake", ("alert", 40)),
+    "12-fallback": ("TLS_FALLBACK_SCSV, TLS 1.2 alone", ("alert", 86)),
+    "12-no-suite": ("TLS 1.2 with CBC suites alone", ("alert", 40)),
+    "12-other-kind": ("TLS 1.2 with the suites of the other kind of key alone", ("alert", 40)),
+    "12-no-sigalgs": ("TLS 1.2 without signature_algorithms", ("alert", 40)),
+    "12-p256-no-curve": ("TLS 1.2, X25519 alone among the groups",
+                         {"ed25519": ("held", "TLSv1.2"), "p256": ("alert", 40), "rsa": ("held", "TLSv1.2")}),
+    "12-formats": ("ec_point_formats without uncompressed points", ("alert", 47)),
+    "12-tls11": ("TLS 1.1 alone", ("alert", 70)),
+    "12-bad-point": ("a ClientKeyExchange point of small order", ("alert", 47)),
+    "12-bad-finished": ("the client's TLS 1.2 Finished one bit off", ("alert", 51)),
+    "12-bad-record-mac": ("the client's Finished record one bit off", ("alert", 20)),
+    "12-finished-in-clear": ("a Finished in the clear where the ChangeCipherSpec belongs", ("alert", 10)),
+    "12-ccs-split": ("a ChangeCipherSpec after half a handshake message", ("alert", 10)),
+    "12-second-ccs": ("a second ChangeCipherSpec", ("alert", 10)),
+    "12-data-before-finished": ("application data before the client's Finished", ("alert", 10)),
+    "12-hello-request": ("a HelloRequest from the client", ("alert", 10)),
+}
+# TLS 1.3's, asked of the same server.
+TLS12_ALSO = ("ok", "both-versions", "hrr")
+
+# The TLS 1.2 scenarios against a server that asks for a client's
+# certificate (`--mtls DIR --tls12`).
+MTLS12 = {
+    "12-mtls-ok": ("TLS 1.2, a P-256 client certificate and its CertificateVerify", ("held", "peer=CN=client")),
+    "12-mtls-ed25519": ("TLS 1.2, an Ed25519 client certificate", ("held", "peer=CN=client ed")),
+    "12-mtls-rsa": ("TLS 1.2, an RSA client certificate, its CertificateVerify under rsa_pkcs1_sha256", ("held", "peer=CN=client rsa")),
+    "12-mtls-none": ("TLS 1.2, no client certificate", ("alert", 40)),
+    "12-mtls-bad-cv": ("TLS 1.2, the client's CertificateVerify one bit off", ("alert", 51)),
+    "12-mtls-no-cv": ("TLS 1.2, a client Certificate with no CertificateVerify", ("alert", 10)),
+    "12-mtls-untrusted": ("TLS 1.2, a client certificate from another root", ("alert", 42)),
+    "12-mtls-wrong-scheme": ("TLS 1.2, a CertificateVerify under a scheme not the key's", ("alert", 47)),
+    # Asked of a server told a certificate is not required.
+    "12-mtls-optional-none": ("TLS 1.2, no client certificate, where one is not required", ("held", "peer=-")),
+}
 
 
 class Refused(Exception):
@@ -262,7 +356,7 @@ def parse_server_hello(sh):
 def run(name, port, root):
     c = Client(port, root)
     try:
-        return scenario(c, name)
+        return scenario12(c, name) if name.startswith("12-") else scenario(c, name)
     finally:
         c.sock.close()
 
@@ -281,6 +375,7 @@ def scenario(c, name):
     if name == "aes256": kw["suites"] = (0x1302,)
     if name == "chacha": kw["suites"] = (0x1303,)
     if name == "client-order": kw["suites"] = (0x1303, 0x1301)
+    if name == "both-versions": kw["versions"] = (0x0304, 0x0303)
     if name == "alpn": kw["alpn"] = ["http/1.1"]
     if name == "alpn-order": kw["alpn"] = ["http/1.1", "h2"]
     if name == "no-sni": kw["sni"] = None
@@ -570,12 +665,326 @@ def scenario(c, name):
     return "held", got.decode(errors="replace"), SUITE_NAMES[suite]
 
 
+def prf(hash_name, secret, label, seed, size):
+    """TLS 1.2's PRF (RFC 5246 section 5): P_hash over *hash_name*."""
+    seed = label + seed
+    out, a = b"", seed
+    while len(out) < size:
+        a = hmac.new(secret, a, hash_name).digest()
+        out += hmac.new(secret, a + seed, hash_name).digest()
+    return out[:size]
+
+
+class Cipher12:
+    """One direction's TLS 1.2 records: AES-GCM with an explicit nonce (RFC
+    5288), or ChaCha20-Poly1305 with 1.3's nonce (RFC 7905)."""
+
+    def __init__(self, suite, key, iv):
+        self.chacha = SUITES12[suite][3]
+        self.aead = ChaCha20Poly1305(key) if self.chacha else AESGCM(key)
+        self.iv, self.seq, self.explicit = iv, 0, set()
+
+    def nonce(self):
+        n = bytearray(self.iv)
+        for i in range(8):
+            n[11 - i] ^= (self.seq >> (8 * i)) & 0xFF
+        return bytes(n)
+
+    def aad(self, type_, length):
+        return self.seq.to_bytes(8, "big") + bytes([type_, 3, 3]) + length.to_bytes(2, "big")
+
+    def seal(self, type_, content, corrupt=False):
+        if self.chacha:
+            body = self.aead.encrypt(self.nonce(), content, self.aad(type_, len(content)))
+        else:
+            explicit = self.seq.to_bytes(8, "big")
+            body = explicit + self.aead.encrypt(self.iv + explicit, content, self.aad(type_, len(content)))
+        if corrupt:
+            body = body[:-1] + bytes([body[-1] ^ 1])
+        self.seq += 1
+        return bytes([type_, 3, 3]) + struct.pack(">H", len(body)) + body
+
+    def open(self, header, body):
+        type_ = header[0]
+        if self.chacha:
+            data = self.aead.decrypt(self.nonce(), body, self.aad(type_, len(body) - 16))
+        else:
+            # RFC 5288 section 3: an explicit nonce is never used twice under
+            # one key - the record would decrypt, and the key be lost.
+            assert body[:8] not in self.explicit, f"the server's explicit nonce {body[:8].hex()} again, under the same key"
+            self.explicit.add(body[:8])
+            data = self.aead.decrypt(self.iv + body[:8], body[8:], self.aad(type_, len(body) - 24))
+        self.seq += 1
+        return type_, data
+
+
+def client_hello12(session, suites=OFFER12, groups=(0x1d, 0x17), sigalgs=SIGALGS12, versions=(0x0303,), alpn=None, sni="localhost",
+                   ems=True, reneg=b"\x00", formats=b"\x01\x00", legacy=b"\x03\x03"):
+    """A ClientHello offering TLS 1.2: a session ticket asked for, which no
+    resumption answers."""
+    body = legacy + os.urandom(32) + bytes([len(session)]) + session
+    body += struct.pack(">H", 2 * len(suites)) + b"".join(struct.pack(">H", s) for s in suites) + b"\x01\x00"
+    exts = b""
+    if sni is not None:
+        name = sni.encode()
+        entry = b"\x00" + struct.pack(">H", len(name)) + name
+        exts += ext(0, struct.pack(">H", len(entry)) + entry)
+    if groups is not None:
+        exts += ext(10, struct.pack(">H", 2 * len(groups)) + b"".join(struct.pack(">H", g) for g in groups))
+    if formats is not None:
+        exts += ext(11, bytes([len(formats)]) + formats)
+    if sigalgs is not None:
+        exts += ext(13, struct.pack(">H", 2 * len(sigalgs)) + b"".join(struct.pack(">H", s) for s in sigalgs))
+    if alpn is not None:
+        names = b"".join(bytes([len(a)]) + a.encode() for a in alpn)
+        exts += ext(16, struct.pack(">H", len(names)) + names)
+    if versions is not None:
+        exts += ext(43, bytes([2 * len(versions)]) + b"".join(struct.pack(">H", v) for v in versions))
+    if ems:
+        exts += ext(23, b"")
+    exts += ext(35, b"")
+    if reneg is not None:
+        exts += ext(0xff01, reneg)
+    return message(1, body + struct.pack(">H", len(exts)) + exts)
+
+
+def verify12(public, scheme, signed, signature):
+    """A TLS 1.2 signature checked under *scheme*, by the key's kind."""
+    if isinstance(public, ed25519.Ed25519PublicKey):
+        assert scheme == 0x0807, f"an Ed25519 key's signature under {scheme:#06x}"
+        public.verify(signature, signed)
+    elif isinstance(public, rsa.RSAPublicKey):
+        if scheme in PSS:
+            h = PSS[scheme]()
+            public.verify(signature, signed, padding.PSS(mgf=padding.MGF1(h), salt_length=h.digest_size), h)
+        else:
+            assert scheme in PKCS1, f"an RSA key's signature under {scheme:#06x}"
+            public.verify(signature, signed, padding.PKCS1v15(), PKCS1[scheme]())
+    else:
+        assert scheme in ECDSA, f"an ECDSA key's signature under {scheme:#06x}"
+        public.verify(signature, signed, ec.ECDSA(ECDSA[scheme]()))
+
+
+def scenario12(c, name):
+    """One TLS 1.2 handshake with the server, as *name* has it."""
+    rsa_key = KEY_KIND == "rsa"
+    session = os.urandom(32)
+    kw = {}
+    if name == "12-aes256": kw["suites"] = (0xc02c, 0xc030)
+    if name == "12-chacha": kw["suites"] = (0xcca9, 0xcca8)
+    if name == "12-client-order": kw["suites"] = (0xcca9, 0xcca8, 0xc02b, 0xc02f)
+    if name == "12-p256": kw["groups"] = (0x17,)
+    if name == "12-no-groups": kw["groups"] = None
+    if name == "12-legacy": kw["versions"] = None
+    if name == "12-alpn": kw["alpn"] = ["http/1.1", "h2"]
+    if name == "12-scsv":
+        kw["reneg"] = None
+        kw["suites"] = OFFER12 + (0x00ff,)
+    if name == "12-no-reneg": kw["reneg"] = None
+    if name == "12-pss-first": kw["sigalgs"] = (0x0401, 0x0805, 0x0804, 0x0807, 0x0403)
+    if name == "12-pkcs1": kw["sigalgs"] = (0x0601, 0x0401, 0x0807, 0x0403)
+    if name == "12-no-ems": kw["ems"] = False
+    if name == "12-reneg-data": kw["reneg"] = b"\x0c" + os.urandom(12)
+    if name == "12-fallback": kw["suites"] = OFFER12 + (0x5600,)
+    if name == "12-no-suite": kw["suites"] = (0xc013, 0xc014, 0x002f)
+    if name == "12-other-kind": kw["suites"] = tuple(s for s in OFFER12 if SUITES12[s][1] != rsa_key)
+    if name == "12-no-sigalgs": kw["sigalgs"] = None
+    if name == "12-p256-no-curve": kw["groups"] = (0x1d,)
+    if name == "12-formats": kw["formats"] = b"\x01"
+    if name == "12-tls11":
+        kw["versions"] = (0x0302,)
+        kw["legacy"] = b"\x03\x02"
+    if name == "12-sni-other": kw["sni"] = "other.test"
+    ch = client_hello12(session, **kw)
+    client_random = ch[6:38]
+    c.sock.sendall(plain(22, ch))
+    transcript = ch
+
+    sh = c.message()
+    assert sh[0] == 2, f"message {sh[0]} where the ServerHello belongs"
+    server_random, sid, suite, exts = parse_server_hello(sh)
+    assert sh[4:6] == b"\x03\x03", f"a ServerHello of version {sh[4:6].hex()}"
+    assert 43 not in exts, "supported_versions in a TLS 1.2 ServerHello"
+    # RFC 8446 section 4.1.3: a server that speaks 1.3 writes this when it
+    # answers in 1.2.
+    assert server_random[24:] == SENTINEL12, f"a TLS 1.2 ServerHello whose random ends {server_random[24:].hex()}, not the downgrade sentinel"
+    assert sid == b"", f"a session id of {len(sid)} bytes: a session kept, which nothing resumes"
+    assert 35 not in exts, "a session ticket promised"
+    offered = kw.get("suites", OFFER12)
+    # other.test's certificate is P-256's, whatever the server's own key.
+    want_rsa = False if name == "12-sni-other" else rsa_key
+    expected = next(s for s in offered if s in SUITES12 and SUITES12[s][1] == want_rsa)
+    assert suite == expected, f"suite {suite:#06x}, the client's first of the key's kind being {expected:#06x}"
+    assert exts.get(23) == b"", "no extended_master_secret answered"
+    if kw.get("reneg", b"\x00") is not None or 0x00ff in offered:
+        assert exts.get(0xff01) == b"\x00", f"renegotiation_info answered {exts.get(0xff01)!r}, not its empty one"
+    else:
+        assert 0xff01 not in exts, "a renegotiation_info nobody signalled"
+    assert exts.get(11) == b"\x01\x00", f"ec_point_formats answered {exts.get(11)!r}"
+    assert (16 in exts) == (kw.get("alpn") is not None), f"ALPN answered {exts.get(16)!r} to {kw.get('alpn')}"
+    assert set(exts) <= {23, 0xff01, 11, 16}, f"extensions {sorted(exts)} in the ServerHello"
+    transcript += sh
+
+    cert = c.message()
+    assert cert[0] == 11, f"message {cert[0]} where Certificate belongs"
+    first = int.from_bytes(cert[7:10], "big")
+    leaf = x509.load_der_x509_certificate(cert[10:10 + first])
+    leaf.verify_directly_issued_by(c.root)
+    public = leaf.public_key()
+    assert isinstance(public, rsa.RSAPublicKey) == SUITES12[suite][1], "a certificate not of the suite's kind"
+    transcript += cert
+
+    ske = c.message()
+    assert ske[0] == 12, f"message {ske[0]} where ServerKeyExchange belongs"
+    body = ske[4:]
+    assert body[0] == 3, "a ServerKeyExchange whose curve is not a named one"
+    group = int.from_bytes(body[1:3], "big")
+    point = body[4:4 + body[3]]
+    params = body[:4 + body[3]]
+    scheme = int.from_bytes(body[4 + body[3]:6 + body[3]], "big")
+    signature = body[8 + body[3]:]
+    wanted_group = 0x17 if name in ("12-p256", "12-no-groups") else 0x1d
+    assert group == wanted_group, f"ECDHE in group {group:#x}, where {wanted_group:#x} belongs"
+    sigalgs = kw.get("sigalgs", SIGALGS12)
+    if isinstance(public, rsa.RSAPublicKey):
+        wanted = next((s for s in sigalgs if s in PSS), None) or next(s for s in sigalgs if s in PKCS1)
+    else:
+        wanted = 0x0807 if isinstance(public, ed25519.Ed25519PublicKey) else 0x0403
+    assert scheme == wanted, f"a ServerKeyExchange under {scheme:#06x}, where {wanted:#06x} belongs"
+    verify12(public, scheme, client_random + server_random + params, signature)
+    transcript += ske
+
+    done = c.message()
+    requested = done[0] == 13
+    if requested:
+        assert MTLS_DIR, "a CertificateRequest from a server that was not told to ask"
+        body = done[4:]
+        types = body[1:1 + body[0]]
+        listed = body[3 + body[0]:3 + body[0] + int.from_bytes(body[1 + body[0]:3 + body[0]], "big")]
+        offered_schemes = [int.from_bytes(listed[k:k + 2], "big") for k in range(0, len(listed), 2)]
+        assert 64 in types and 1 in types, f"a CertificateRequest for types {list(types)}"
+        assert {0x0807, 0x0403, 0x0804, 0x0401} <= set(offered_schemes), f"a CertificateRequest for schemes {offered_schemes}"
+        transcript += done
+        done = c.message()
+    else:
+        assert not MTLS_DIR, "no CertificateRequest from a server told to ask"
+    assert done == message(14, b""), f"message {done[0]} where ServerHelloDone belongs"
+    transcript += done
+    assert not c.handshake, "handshake bytes after the ServerHelloDone"
+
+    # The client's flight.
+    flight = b""
+    own = None
+    if requested:
+        who = {"12-mtls-ed25519": "client-ed", "12-mtls-rsa": "client-rsa", "12-mtls-untrusted": "other"}.get(name, "client")
+        ders = [x509c.public_bytes(serialization.Encoding.DER)
+                for x509c in x509.load_pem_x509_certificates(open(os.path.join(MTLS_DIR, who + ".pem"), "rb").read())]
+        own = serialization.load_pem_private_key(open(os.path.join(MTLS_DIR, who + ".key"), "rb").read(), None)
+        if name in ("12-mtls-none", "12-mtls-optional-none"):
+            ders, own = [], None
+        entries = b"".join(len(d).to_bytes(3, "big") + d for d in ders)
+        presented = message(11, len(entries).to_bytes(3, "big") + entries)
+        flight += presented
+        transcript += presented
+    if group == 0x17:
+        mine = ec.generate_private_key(ec.SECP256R1())
+        shared = mine.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), point))
+        public_point = mine.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    else:
+        mine = x25519.X25519PrivateKey.generate()
+        shared = mine.exchange(x25519.X25519PublicKey.from_public_bytes(point))
+        public_point = mine.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    if name == "12-bad-point":
+        public_point = bytes(32) if group == 0x1d else public_point[:-1] + bytes([public_point[-1] ^ 1])
+    key_exchange = message(16, bytes([len(public_point)]) + public_point)
+    flight += key_exchange
+    transcript += key_exchange
+    _, _, key_size, chacha, hash_name = SUITES12[suite]
+    # RFC 7627 section 4: the master secret over the session hash, the
+    # transcript to the ClientKeyExchange.
+    master = prf(hash_name, shared, b"extended master secret", digest12(hash_name, transcript), 48)
+    if own is not None and name != "12-mtls-no-cv":
+        if isinstance(own, ed25519.Ed25519PrivateKey):
+            scheme, sig = 0x0807, own.sign(transcript)
+        elif isinstance(own, rsa.RSAPrivateKey):
+            scheme, sig = 0x0401, own.sign(transcript, padding.PKCS1v15(), hashes.SHA256())
+        else:
+            scheme, sig = 0x0403, own.sign(transcript, ec.ECDSA(hashes.SHA256()))
+        if name == "12-mtls-wrong-scheme":
+            scheme = 0x0807
+        if name == "12-mtls-bad-cv":
+            sig = sig[:-1] + bytes([sig[-1] ^ 1])
+        client_verify = message(15, struct.pack(">HH", scheme, len(sig)) + sig)
+        flight += client_verify
+        transcript += client_verify
+    iv_size = 12 if chacha else 4
+    block = prf(hash_name, master, b"key expansion", server_random + client_random, 2 * key_size + 2 * iv_size)
+    writer = Cipher12(suite, block[:key_size], block[2 * key_size:2 * key_size + iv_size])
+    reader = Cipher12(suite, block[key_size:2 * key_size], block[2 * key_size + iv_size:2 * key_size + 2 * iv_size])
+    verify_data = prf(hash_name, master, b"client finished", digest12(hash_name, transcript), 12)
+    if name == "12-bad-finished":
+        verify_data = bytes([verify_data[0] ^ 1]) + verify_data[1:]
+    finished = message(20, verify_data)
+    if name == "12-hello-request":
+        flight = message(0, b"")
+    if name == "12-ccs-split":
+        # A whole ClientKeyExchange and the first bytes of another message,
+        # then the key change.
+        flight += message(20, b"")[:2]
+    out = plain(22, flight) if flight else b""
+    if name == "12-finished-in-clear":
+        out += plain(22, finished)
+    else:
+        out += plain(20, b"\x01")
+        if name == "12-second-ccs":
+            out += plain(20, b"\x01")
+        if name == "12-data-before-finished":
+            out += writer.seal(23, b"too soon")
+        out += writer.seal(22, finished, corrupt=(name == "12-bad-record-mac"))
+    c.sock.sendall(out)
+    transcript += finished
+
+    # The server's ChangeCipherSpec, then its Finished under its keys.
+    header, body = c.record()
+    if header[0] == 21:
+        raise Refused(body[1])
+    assert header[0] == 20 and body == b"\x01", f"a record of type {header[0]} where the server's ChangeCipherSpec belongs"
+    type_, data = reader.open(*c.record())
+    expected_finished = message(20, prf(hash_name, master, b"server finished", digest12(hash_name, transcript), 12))
+    assert type_ == 22 and data == expected_finished, "the server's TLS 1.2 Finished"
+
+    if name == "12-renegotiate":
+        # The server refuses: no_renegotiation, a warning, under its keys.
+        c.sock.sendall(writer.seal(22, client_hello12(b"")))
+        type_, data = reader.open(*c.record())
+        assert type_ == 21, f"a record of type {type_} where the refusal belongs"
+        return ("warning", data[1]) if data[0] == 1 else ("alert", data[1])
+    c.sock.sendall(writer.seal(23, b"GET / HTTP/1.0\r\n\r\n"))
+    got = b""
+    while True:
+        type_, data = reader.open(*c.record())
+        if type_ == 21:
+            if data[1] == 0:
+                break
+            raise Refused(data[1])
+        assert type_ == 23, f"a record of type {type_} after the handshake"
+        got += data
+    text = got.decode(errors="replace")
+    assert "TLSv1.2" in text and SUITES12[suite][0] in text, f"the server says it agreed {text.splitlines()[-1]!r}"
+    return "held", text, SUITES12[suite][0]
+
+
+def digest12(hash_name, data):
+    return hashlib.new(hash_name, data).digest()
+
+
 def main():
     port = int(sys.argv[1])
     root = x509.load_pem_x509_certificate(open(sys.argv[2], "rb").read())
     rest = sys.argv[3:]
     key_kind = "ed25519"
-    global MTLS_DIR
+    tls12 = False
+    global MTLS_DIR, KEY_KIND
     while rest and rest[0].startswith("--"):
         if rest[0] in ("--p256", "--rsa"):
             key_kind = rest[0][2:]
@@ -583,12 +992,21 @@ def main():
         elif rest[0] == "--mtls":
             MTLS_DIR = rest[1]
             rest = rest[2:]
+        elif rest[0] == "--tls12":
+            tls12 = True
+            rest = rest[1:]
         else:
             raise SystemExit(f"no option {rest[0]}")
-    names = rest or ([n for n in MTLS if n != "mtls-optional-none"] if MTLS_DIR else list(SCENARIOS))
+    KEY_KIND = key_kind
+    if tls12:
+        default = [n for n in MTLS12 if n != "12-mtls-optional-none"] if MTLS_DIR else list(TLS12) + list(TLS12_ALSO)
+    else:
+        default = [n for n in MTLS if n != "mtls-optional-none"] if MTLS_DIR else list(SCENARIOS)
+    names = rest or default
     failures = 0
+    table = {**SCENARIOS, **MTLS, **TLS12, **MTLS12}
     for name in names:
-        what, answer = MTLS[name] if name in MTLS else SCENARIOS[name]
+        what, answer = table[name]
         kind, want = answer[key_kind] if isinstance(answer, dict) else answer
         try:
             outcome = run(name, port, root)
@@ -598,8 +1016,8 @@ def main():
             outcome = ("broke", f"{type(e).__name__}: {e}")
         if kind == "held" and outcome[0] == "held" and want in outcome[1] and "HTTP/1.0 200 ok" in outcome[1]:
             print(f"{name}: ok, {outcome[1].splitlines()[-1]}")
-        elif kind == "alert" and outcome == ("alert", want):
-            print(f"{name}: ok, alert {want}")
+        elif kind in ("alert", "warning") and outcome == (kind, want):
+            print(f"{name}: ok, {kind} {want}")
         elif kind == "ended" and outcome[0] == "ended" and outcome[1] < want:
             print(f"{name}: ok, hung up after {outcome[1]:.1f} s")
         else:

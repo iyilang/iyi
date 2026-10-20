@@ -23,7 +23,13 @@
 # broken and the alert named; the std/tls client, Python's ssl, OpenSSL's
 # s_client (an RSA server held to the RSA-PSS scheme the client lists
 # first, and refusing a client that offers PKCS #1 v1.5 alone), curl and
-# Node; client certificates of each kind, RSA among them. It shows an
+# Node; client certificates of each kind, RSA among them. Then the server
+# told to speak TLS 1.2 too, on each key: the scripted client's 1.2
+# handshakes and refusals, s_client -tls1_2 across suites, schemes,
+# groups, -no_ems, -fallback_scsv, a renegotiation and the exporter,
+# Python's ssl, curl and Node held to 1.2, the std/tls client answered in
+# 1.3 and its 1.2-alone copy meeting the downgrade sentinel; client
+# certificates in 1.2. It shows an
 # error value's sentence through `.or_panic`, reads the module with `iyi
 # doc`, checks the formatting, typechecks the exercise for five targets and
 # builds it from its artifacts, and proves on broken copies of the module
@@ -1092,34 +1098,280 @@ s.on("error", e => console.log("error", e.message));
 fi
 
 echo
+echo "== TLS 1.2 at the server, when asked"
+# The server told to speak TLS 1.2 too (`TlsServerConfig#min_version =
+# TlsVersion::TLS12`, the exercise's serve mode under TLS_MIN_VERSION=1.2;
+# the section above holds the default to 1.3 alone), on the Ed25519, P-256
+# and 2048-bit RSA keys made above: bench/std_tls_client.py's TLS12
+# scenarios - every 1.2 handshake checked step by step, or one rule broken
+# and the alert named - and three of TLS 1.3's, still answered in 1.3.
+# Then OpenSSL's s_client pinned to 1.2 (-tls1_2): each suite of the key's
+# kind, ALPN, the group, RSA's schemes, a client without the extended
+# master secret (-no_ems, where this OpenSSL has it) and one falling back
+# (-fallback_scsv) refused, the exporter against OpenSSL's, a renegotiation
+# ("R") refused with no_renegotiation; Python's ssl with maximum_version
+# TLSv1_2, each suite of the key's kind; curl and Node held to 1.2; the
+# std/tls client, which offers 1.3 and is answered in it, and the copies
+# built above that offer 1.2 alone - the downgrade sentinel refused, and
+# with the check removed, a 1.2 connection. Then client certificates in
+# 1.2: the scripted client's MTLS12 scenarios, s_client presenting each
+# kind, Python's ssl and the std/tls client's copy presenting one, and
+# none refused.
+# server12_round <binary> [scripted|all]: the binary serving, a line each,
+# "FAIL" before what did not hold; `scripted` asks the scripted client
+# alone.
+server12_round() {
+  local bin="$1" scope="${2:-all}" failed=0 kind dir port pid suite suites
+  local flag=()
+  ask12() {
+    local label="$1" want="$2" got
+    shift 2
+    got="$("$@" 2>&1 | tr -d '\r')"
+    if printf '%s' "$got" | grep -qF -e "$want"; then
+      answered12=$((answered12 + 1))
+      echo "  $label: $(printf '%s' "$got" | grep -F -e "$want" | head -1)"
+    else
+      echo "  FAIL $label: expected \"$want\", got: $(printf '%s' "$got" | tail -3)"
+      echo "    the server said: $(tail -1 "$WORK/serve12.log")"
+      failed=1
+    fi
+  }
+  # start12 <dir> [optional]: the binary serving the chain, key and client
+  # roots in <dir>, a certificate not required when asked to be optional.
+  start12() {
+    rm -rf "$WORK/srv12" && mkdir -p "$WORK/srv12" && cp "$1"/*.pem "$WORK/srv12/"
+    [ -n "${2:-}" ] && : >"$WORK/srv12/client-optional"
+    TLS_MIN_VERSION=1.2 "$bin" serve "$WORK/srv12" 1000 >"$WORK/serve12.log" 2>&1 &
+    pid=$!
+    for _ in $(seq 1 100); do
+      [ -s "$WORK/srv12/port" ] && break
+      sleep 0.1
+    done
+    port="$(cat "$WORK/srv12/port" 2>/dev/null || echo 1)"
+  }
+  stop12() {
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  }
+  scripted12() {
+    local label="$1"
+    shift
+    if "$PY" "$REPO/bench/std_tls_client.py" "$port" "$SRV/roots.pem" --tls12 "$@" >"$WORK/client12.out" 2>&1; then
+      echo "  the scripted client, $label: $(tail -1 "$WORK/client12.out")"
+    else
+      grep -F "FAIL" "$WORK/client12.out" | sed 's/^/  /'
+      tail -1 "$WORK/client12.out" | sed 's/^/  /'
+      failed=1
+    fi
+  }
+  local openssl=no
+  [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1 && openssl=yes
+  sclient12() {
+    printf 'GET / HTTP/1.0\r\n\r\n' | "$OPENSSL" s_client -connect "127.0.0.1:$port" -servername localhost \
+      -CAfile "$SRV/roots.pem" -verify_return_error -ign_eof "$@" 2>&1
+  }
+  # The scheme a ServerKeyExchange was signed under, as OpenSSL names it:
+  # 3.2 on name it whole, 3.0 the type and the digest apart.
+  scheme12() {
+    sclient12 -tls1_2 -sigalgs "$1" | tr -d '\r' | awk '
+      /^Peer signing digest:/ { d = tolower($4) }
+      /^Peer signature type:/ { t = $4 }
+      END { if (t == "RSA-PSS") t = "rsa_pss_rsae_" d; if (t == "RSA") t = "rsa_pkcs1_" d; print "scheme " t }'
+  }
+  export12() {
+    local out ours theirs
+    out="$(sclient12 -tls1_2 -keymatexport "EXPERIMENTAL iyi" -keymatexportlen 16)"
+    ours="$(printf '%s' "$out" | grep -o 'exported=[0-9a-f]*' | head -1 | cut -d= -f2)"
+    theirs="$(printf '%s' "$out" | grep -o 'Keying material: [0-9A-Fa-f]*' | head -1 | cut -d' ' -f3 | tr 'A-F' 'a-f')"
+    [ -n "$ours" ] && [ "$ours" = "$theirs" ] && echo "the same at both ends: $ours" || echo "server $ours, OpenSSL $theirs"
+  }
+  # "R" on s_client's stdin renegotiates, once the handshake is done.
+  renegotiate12() {
+    { printf 'R\n'; sleep 1; } | "$OPENSSL" s_client -connect "127.0.0.1:$port" -servername localhost \
+      -CAfile "$SRV/roots.pem" -tls1_2 -msg 2>&1
+  }
+  py12() {
+    "$PY" -c '
+import socket, ssl, sys
+ctx = ssl.create_default_context(cafile=sys.argv[2])
+ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+ctx.set_ciphers(sys.argv[3])
+ctx.set_alpn_protocols(["http/1.1"])
+if len(sys.argv) > 4:
+    ctx.load_cert_chain(sys.argv[4], sys.argv[5])
+with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10), server_hostname="localhost") as s:
+    s.sendall(b"GET / HTTP/1.0\r\n\r\n")
+    data = b""
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        data += chunk
+    print(s.version(), s.cipher()[0], data.decode().split("\r\n\r\n")[1].strip())
+' "$port" "$SRV/roots.pem" "$@"
+  }
+  for kind in ed25519 p256 rsa2048; do
+    case "$kind" in
+      ed25519) dir="$SRV" flag=() ;;
+      p256) dir="$SRV/p256" flag=(--p256) ;;
+      *) dir="$SRV/rsa2048" flag=(--rsa) ;;
+    esac
+    start12 "$dir"
+    scripted12 "$kind" ${flag[@]+"${flag[@]}"}
+    if [ "$scope" = all ]; then
+      case "$kind" in
+        rsa*) suites="ECDHE-RSA-AES128-GCM-SHA256:TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 ECDHE-RSA-AES256-GCM-SHA384:TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 ECDHE-RSA-CHACHA20-POLY1305:TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256" ;;
+        *) suites="ECDHE-ECDSA-AES128-GCM-SHA256:TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 ECDHE-ECDSA-AES256-GCM-SHA384:TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 ECDHE-ECDSA-CHACHA20-POLY1305:TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256" ;;
+      esac
+      if [ "$openssl" = yes ]; then
+        for suite in $suites; do
+          ask12 "OpenSSL, TLS 1.2, $kind, ${suite%%:*}" "name=localhost alpn=- ${suite#*:} peer=- shown=CN=localhost" sclient12 -tls1_2 -cipher "${suite%%:*}"
+        done
+        ask12 "OpenSSL, TLS 1.2, $kind, ALPN" "name=localhost alpn=h2 TLS_ECDHE_" sclient12 -tls1_2 -alpn h2,http/1.1
+        ask12 "OpenSSL, TLS 1.2, $kind, X25519 first" "Temp Key: X25519" sclient12 -tls1_2
+        ask12 "OpenSSL, TLS 1.2, $kind, secp256r1 alone" "Temp Key: ECDH, prime256v1" sclient12 -tls1_2 -groups P-256
+        if [ "$kind" = p256 ]; then
+          ask12 "OpenSSL, TLS 1.2, p256, groups without secp256r1, the certificate's curve" "SSL alert number 40" sclient12 -tls1_2 -groups X25519
+        else
+          ask12 "OpenSSL, TLS 1.2, $kind, X25519 alone" "Temp Key: X25519" sclient12 -tls1_2 -groups X25519
+        fi
+        case "$kind" in
+          rsa*)
+            ask12 "OpenSSL, TLS 1.2, RSA, RSA-PSS and PKCS #1 v1.5: RSA-PSS" "scheme rsa_pss_rsae_sha256" scheme12 RSA-PSS+SHA256:RSA+SHA256
+            ask12 "OpenSSL, TLS 1.2, RSA, rsa_pkcs1_sha512 listed before rsa_pss_rsae_sha384" "scheme rsa_pss_rsae_sha384" scheme12 RSA+SHA512:RSA-PSS+SHA384
+            ask12 "OpenSSL, TLS 1.2, RSA, PKCS #1 v1.5 alone" "scheme rsa_pkcs1_sha384" scheme12 RSA+SHA384:RSA+SHA256
+            ;;
+        esac
+        if "$OPENSSL" s_client -help 2>&1 | grep -q -- '-no_ems'; then
+          ask12 "OpenSSL, TLS 1.2, $kind, no extended master secret" "SSL alert number 40" sclient12 -tls1_2 -no_ems
+        else
+          echo "  OpenSSL, TLS 1.2, $kind, no extended master secret: this OpenSSL ($("$OPENSSL" version | cut -d' ' -f2)) cannot leave it out, so it goes unasked"
+        fi
+        ask12 "OpenSSL, TLS 1.2, $kind, falling back (TLS_FALLBACK_SCSV)" "SSL alert number 86" sclient12 -tls1_2 -fallback_scsv
+        ask12 "OpenSSL, TLS 1.2, $kind, exported keying material" "the same at both ends" export12
+        ask12 "OpenSSL, TLS 1.2, $kind, a renegotiation" "warning no_renegotiation" renegotiate12
+        ask12 "OpenSSL, $kind, TLS 1.3 offered too: answered in 1.3" "name=localhost alpn=- TLS_AES_" sclient12
+      fi
+      for suite in $suites; do
+        ask12 "Python's ssl, TLS 1.2, $kind, ${suite%%:*}" "TLSv1.2 ${suite%%:*} name=localhost alpn=http/1.1 ${suite#*:}" py12 "${suite%%:*}"
+      done
+      if command -v curl >/dev/null 2>&1 && { [ "$kind" != ed25519 ] || curl --version | head -1 | grep -q 'OpenSSL/'; }; then
+        local norevoke=()
+        curl --version 2>/dev/null | head -1 | grep -q 'Schannel' && norevoke=(--ssl-no-revoke)
+        # curl12: curl's answer, then what the server said of that
+        # connection, once it has said it.
+        curl12() {
+          local before
+          before="$(wc -l <"$WORK/serve12.log")"
+          curl -sS --http1.1 --tls-max 1.2 ${norevoke[@]+"${norevoke[@]}"} \
+            --cacert "$SRV/roots.pem" --resolve "localhost:$port:127.0.0.1" "https://localhost:$port/" 2>&1
+          for _ in $(seq 1 30); do
+            [ "$(wc -l <"$WORK/serve12.log")" -gt "$before" ] && break
+            sleep 0.1
+          done
+          tail -n +"$((before + 1))" "$WORK/serve12.log"
+        }
+        if curl --version | head -1 | grep -q 'LibreSSL/'; then
+          # LibreSSL - macOS's curl's, 3.3.6 on the darwin runner - has
+          # never implemented RFC 7627 and sends no extended_master_secret,
+          # so its 1.2 is refused, by name, as this server refuses every
+          # client without it: the refusal is what is expected of it.
+          ask12 "curl on LibreSSL, TLS 1.2 at most, $kind: no extended master secret, refused" \
+            "refused: tls: the client does not do the extended master secret (RFC 7627)" curl12
+        else
+          ask12 "curl, TLS 1.2 at most, $kind" "alpn=http/1.1 TLS_ECDHE_" curl12
+        fi
+      fi
+      if command -v node >/dev/null 2>&1; then
+        ask12 "Node's tls, TLS 1.2 at most, $kind" "TLSv1.2 name=localhost alpn=h2 TLS_ECDHE_" node -e '
+const tls = require("tls"), fs = require("fs");
+const s = tls.connect({host: "127.0.0.1", port: +process.argv[1], servername: "localhost", maxVersion: "TLSv1.2",
+  ca: fs.readFileSync(process.argv[2]), ALPNProtocols: ["h2"]}, () => s.write("GET / HTTP/1.0\r\n\r\n"));
+let got = ""; s.on("data", d => got += d); s.on("end", () => console.log(s.getProtocol(), got.split("\r\n\r\n")[1].trim()));
+s.on("error", e => console.log("error", e.message));
+' "$port" "$SRV/roots.pem"
+      fi
+      ask12 "the std/tls client, $kind: TLS 1.3, offered" "HTTP/1.0 200 ok TLS_AES_128_GCM_SHA256 alpn=h2 TLSv1.3" "$bin" get "$port" "$SRV/roots.pem" localhost h2
+      ask12 "the std/tls client told to speak 1.2 too, $kind: TLS 1.3, offered" "HTTP/1.0 200 ok TLS_AES_128_GCM_SHA256 alpn=- TLSv1.3" \
+        env TLS_MIN_VERSION=1.2 "$bin" get "$port" "$SRV/roots.pem" localhost
+      if [ -x "$WORK/downgrade/tlsx" ] && [ -x "$WORK/downgrade-unchecked/tlsx" ]; then
+        ask12 "the std/tls client offering TLS 1.2 alone, $kind: the sentinel" "carrying RFC 8446's downgrade sentinel, where TLS 1.3 was offered: a downgrade (illegal_parameter)" \
+          env TLS_MIN_VERSION=1.2 "$WORK/downgrade/tlsx" get "$port" "$SRV/roots.pem" localhost
+        ask12 "the same, its sentinel check removed, $kind: TLS 1.2" "HTTP/1.0 200 ok TLS_ECDHE_" \
+          env TLS_MIN_VERSION=1.2 "$WORK/downgrade-unchecked/tlsx" get "$port" "$SRV/roots.pem" localhost
+      fi
+    fi
+    stop12
+  done
+  start12 "$SRV/mtls"
+  scripted12 "a client certificate asked for" --mtls "$SRV/mtls"
+  if [ "$scope" = all ]; then
+    if [ "$openssl" = yes ]; then
+      ask12 "OpenSSL, TLS 1.2, presenting a P-256 certificate" "peer=CN=client shown" sclient12 -tls1_2 -cert "$SRV/mtls/client.pem" -key "$SRV/mtls/client.key"
+      ask12 "OpenSSL, TLS 1.2, presenting an Ed25519 certificate" "peer=CN=client ed" sclient12 -tls1_2 -cert "$SRV/mtls/client-ed.pem" -key "$SRV/mtls/client-ed.key"
+      ask12 "OpenSSL, TLS 1.2, presenting an RSA certificate" "peer=CN=client rsa" sclient12 -tls1_2 -cert "$SRV/mtls/client-rsa.pem" -key "$SRV/mtls/client-rsa.key"
+      ask12 "OpenSSL, TLS 1.2, presenting none" "SSL alert number 40" sclient12 -tls1_2
+    fi
+    ask12 "Python's ssl, TLS 1.2, presenting a P-256 certificate" "TLSv1.2 ECDHE-ECDSA-AES128-GCM-SHA256 name=localhost alpn=http/1.1 TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 peer=CN=client" \
+      py12 ECDHE-ECDSA-AES128-GCM-SHA256 "$SRV/mtls/client.pem" "$SRV/mtls/client.key"
+    if [ -x "$WORK/downgrade-unchecked/tlsx" ]; then
+      ask12 "the std/tls client's TLS 1.2, presenting an RSA certificate" "HTTP/1.0 200 ok TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 alpn=- TLSv1.2" \
+        env TLS_MIN_VERSION=1.2 "$WORK/downgrade-unchecked/tlsx" get "$port" "$SRV/roots.pem" localhost - "$SRV/mtls/client-rsa.pem" "$SRV/mtls/client-rsa.key"
+    fi
+  fi
+  stop12
+  start12 "$SRV/mtls" optional
+  scripted12 "a client certificate asked for and not required" --mtls "$SRV/mtls" 12-mtls-optional-none 12-mtls-ok 12-mtls-bad-cv
+  stop12
+  return $failed
+}
+if [ "$served" = no ]; then
+  echo "  no python cryptography here, so the TLS 1.2 server goes unasked"
+else
+  answered12=0
+  if ! server12_round "$WORK/tls-release" >"$WORK/server12.out" 2>&1; then
+    status=1
+  fi
+  cat "$WORK/server12.out"
+  echo "  $answered12 answers from other clients as they should be"
+fi
+
+echo
 echo "== a handshake's time, by the server's key (--release; measured, not checked)"
 # Python's ssl makes 200 full TLS 1.3 handshakes with the exercise's
 # server, one after another over loopback, and closes each: the median
 # wall time of one, its own side's work included. What changes from key to
-# key is the CertificateVerify the server signs.
+# key is the CertificateVerify the server signs. Then 200 in TLS 1.2, to
+# the server told to speak it and Python held to it: what changes there is
+# the ServerKeyExchange's signature.
 if [ "$served" = yes ]; then
-  for pair in "ed25519:$SRV" "p256:$SRV/p256" "rsa2048:$SRV/rsa2048" "rsa4096:$SRV/rsa4096"; do
-    kind="${pair%%:*}"
-    dir="${pair#*:}"
-    rm -f "$dir/port"
-    "$WORK/tls-release" serve "$dir" 200 >"$WORK/time-$kind.log" 2>&1 &
-    pid=$!
-    for _ in $(seq 1 100); do
-      [ -s "$dir/port" ] && break
-      sleep 0.1
-    done
-    "$PY" - "$(cat "$dir/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" "$kind" <<'PY'
+  for version in 1.3 1.2; do
+    for pair in "ed25519:$SRV" "p256:$SRV/p256" "rsa2048:$SRV/rsa2048" "rsa4096:$SRV/rsa4096"; do
+      kind="${pair%%:*}"
+      dir="${pair#*:}"
+      rm -f "$dir/port"
+      TLS_MIN_VERSION="$version" "$WORK/tls-release" serve "$dir" 200 >"$WORK/time-$kind.log" 2>&1 &
+      pid=$!
+      for _ in $(seq 1 100); do
+        [ -s "$dir/port" ] && break
+        sleep 0.1
+      done
+      "$PY" - "$(cat "$dir/port" 2>/dev/null || echo 1)" "$SRV/roots.pem" "$kind" "$version" <<'PY'
 import socket, ssl, statistics, sys, time
 ctx = ssl.create_default_context(cafile=sys.argv[2])
+if sys.argv[4] == "1.2":
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
 took = []
 for _ in range(200):
     started = time.perf_counter()
-    with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10), server_hostname="localhost"):
+    with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10), server_hostname="localhost") as s:
         took.append(time.perf_counter() - started)
-print(f"  {sys.argv[3]}: {statistics.median(took) * 1000:.2f} ms a handshake (median of 200)")
+        version = s.version()
+print(f"  {sys.argv[3]}, {version}: {statistics.median(took) * 1000:.2f} ms a handshake (median of 200)")
 PY
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+    done
   done
 else
   echo "  no server here, so nothing is timed"
@@ -1254,8 +1506,10 @@ echo "== proving the checks can fail when the module is broken"
 # `server-p256`, `server-rsa` on the 2048-bit RSA key, `server-mtls`,
 # asking for a client's certificate, or `server-mtls-optional`, asking
 # without requiring one; the client's report must name the scenario);
-# judging the server's configurations (`config`); or the TLS 1.2 client
-# against OpenSSL, Python's ssl and the man in the middle (`client12`).
+# judging the server's configurations (`config`); the TLS 1.2 client
+# against OpenSSL, Python's ssl and the man in the middle (`client12`); or
+# the server told to speak TLS 1.2 too, before the scripted client
+# (`server12`) or every client of its section (`server12-interop`).
 mutations=0
 # A scenario's break is caught by the scenario failing, by name - "FAILED:
 # <scenario>: " - whether the broken client then holds a connection or
@@ -1269,7 +1523,7 @@ prove_broken() {
   mkdir -p "$WORK/patched/std"
   local mode="${5:-trace}"
   if [ -z "$PY" ] || { [ "$mode" = scenarios ] && [ "$scripted" = no ]; } ||
-     { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ]; } && [ "$served" = no ]; } ||
+     { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ]; } && [ "$served" = no ]; } ||
      { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; }; then
     echo "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
@@ -1287,7 +1541,7 @@ PY
     status=1
     return
   fi
-  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ]; then
+  if [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ]; then
     if ! IYI_PATH="$WORK/patched${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" "$IYI" build -o "$WORK/patched/tlsx" \
          "$REPO/bench/std_tls_exercise.iyi" >"$WORK/patched/build.log" 2>&1; then
       echo "  the $1 copy did not build:"
@@ -1310,6 +1564,9 @@ PY
       rc=$?
     elif [ "$mode" = client12 ]; then
       tls12_round "$WORK/patched/tlsx" >"$WORK/mut.out" 2>&1
+      rc=$?
+    elif [ "$mode" = server12 ] || [ "$mode" = server12-interop ]; then
+      server12_round "$WORK/patched/tlsx" "$([ "$mode" = server12 ] && echo scripted || echo all)" >"$WORK/mut.out" 2>&1
       rc=$?
     else
       mkdir -p "$WORK/patched/srv"
@@ -1488,7 +1745,9 @@ prove_broken "a ServerHello's share taken in a group its ClientHello did not sen
 # rules against the scripted server's 1.2 ServerHellos, the rest against
 # OpenSSL, Python and the man in the middle.
 prove_broken "TLS 1.2 offered by default" "FAILED: tls12: " \
-  '  property min_version : TlsVersion = TlsVersion::TLS13' '  property min_version : TlsVersion = TlsVersion::TLS12' scenarios
+  'requires).
+  property min_version : TlsVersion = TlsVersion::TLS13' 'requires).
+  property min_version : TlsVersion = TlsVersion::TLS12' scenarios
 prove_broken "a TLS 1.2 ServerHello taken from a client not asked for 1.2" "FAILED: tls12: " \
   '    if !seen.includes?(43) && @config.min_version == TlsVersion::TLS12' '    if !seen.includes?(43)' scenarios
 prove_broken "a ClientHello offering TLS 1.2's suites unasked" "FAILED: tls12: " \
@@ -1600,7 +1859,7 @@ prove_broken "the server's suite order put before the client's" "FAIL client-ord
 prove_broken "the client's ALPN order put before the server's" "FAIL alpn-order " \
   '    @config.alpn.find { |protocol| wanted.includes?(protocol) }' '    wanted.find { |protocol| @config.alpn.includes?(protocol) }' server
 prove_broken "an ALPN offer with nothing in common answered anyway" "FAIL alpn-mismatch " \
-  '    if (wanted = offer.alpn) && !@config.alpn.empty? && @alpn_protocol.nil?' '    if (wanted = offer.alpn) && @config.alpn.empty? && @alpn_protocol.nil?' server
+  '    if (wanted = offered) && !@config.alpn.empty? && @alpn_protocol.nil?' '    if (wanted = offered) && @config.alpn.empty? && @alpn_protocol.nil?' server
 prove_broken "no alert sent before hanging up" "FAIL dup-ext " \
   '    code = error.alert' '    code = nil.as(UInt8?)' server
 prove_broken "an alert in the clear after the server's keys" "FAIL bad-finished " \
@@ -1667,11 +1926,13 @@ prove_broken "the client's CertificateVerify checked under the server's context 
 prove_broken "a client certificate checked for serverAuth" "FAIL mtls-ok " \
   '@config.now || Time.utc, X509Purpose::Client)' '@config.now || Time.utc, X509Purpose::Server)' server-mtls
 prove_broken "a client with no certificate let in" "FAIL mtls-none " \
-  '      return TlsError.new("the client sent no certificate", TlsAlert::CERTIFICATE_REQUIRED) if @config.client_required' '' server-mtls
+  '      return TlsError.new("the client sent no certificate", @tls12 ? TlsAlert::HANDSHAKE_FAILURE : TlsAlert::CERTIFICATE_REQUIRED) if @config.client_required' '' server-mtls
 prove_broken "a client Certificate's request context unchecked" "FAIL mtls-context " \
   '    return TlsError.new("a client Certificate whose request context is not the server'"'"'s", TlsAlert::ILLEGAL_PARAMETER) unless context.empty?' '' server-mtls
 prove_broken "a certificate required where it is optional" "FAIL mtls-optional-none " \
-  '      return TlsError.new("the client sent no certificate", TlsAlert::CERTIFICATE_REQUIRED) if @config.client_required' '      return TlsError.new("the client sent no certificate", TlsAlert::CERTIFICATE_REQUIRED)' server-mtls-optional
+  ' if @config.client_required
+      return nil' '
+      return nil' server-mtls-optional
 prove_broken "a refused client's flight left unread at the close" "FAIL mtls-late " \
   '      linger if server_side? && !sent' '' server-mtls
 prove_broken "a client certificate with no CertificateVerify after it taken" "FAIL mtls-no-cv " \
@@ -1683,6 +1944,100 @@ prove_broken "a client's chain taken as its own roots" "FAIL mtls-untrusted " \
 prove_broken "a PKCS #8 public key unchecked" "FAIL a version 2 key carrying another public key" \
   '        return TlsError.new("the private key: its public key is not the seed'"'"'s") unless bits.size == 33 && bits[0] == 0_u8 && bits[1, 32] == TlsBytes.of(Ed25519.public_key(seed))' '' config
 
+# TLS 1.2 at the server: opt-in, so a server not told answers 1.3 alone;
+# then each rule of its 1.2 handshake before the scripted client, the
+# client's report naming the scenario that breaks it - and the exporter,
+# and the sentinel as the std/tls client's 1.2 copy reads it, before the
+# other clients of the section.
+prove_broken "TLS 1.2 answered by a server not told to" "FAIL tls12 " \
+  '  # either way.
+  property min_version : TlsVersion = TlsVersion::TLS13' '  # either way.
+  property min_version : TlsVersion = TlsVersion::TLS12' server
+prove_broken "TLS 1.2 chosen though the client offers 1.3" "FAIL both-versions " \
+  '    tls12 = !tls13 && @config.min_version' '    tls12 = @config.min_version' server12
+prove_broken "a client offering TLS 1.1 alone answered in 1.2" "FAIL 12-tls11 " \
+  '((named = versions) ? named.includes?(0x0303) : legacy >= 0x0303)' 'true' server12
+prove_broken "a client without the extended master secret answered" "FAIL 12-no-ems " \
+  '    return TlsError.new("the client does not do the extended master secret (RFC 7627), which a TLS 1.2 handshake here requires", TlsAlert::HANDSHAKE_FAILURE) unless ems
+    return TlsError.new("an extended_master_secret offer with a body", TlsAlert::DECODE_ERROR) unless ems.empty?' '' server12
+prove_broken "the master secret over the randoms, not the session hash, at the server" "FAIL 12-ok " \
+  '@schedule.prf(secret, "extended master secret", @schedule.hash(@transcript), 48)' '@schedule.prf(secret, "master secret", client_random + server_random, 48)' server12
+prove_broken "the session hash short of the client's ClientKeyExchange" "FAIL 12-ok " \
+  '    @transcript = @transcript + message
+    master, client_keys, server_keys = keys12(secret, offer.random, random)' '    master, client_keys, server_keys = keys12(secret, offer.random, random)
+    @transcript = @transcript + message' server12
+prove_broken "the downgrade sentinel left out of a TLS 1.2 ServerHello" "FAIL 12-ok " \
+  'random = Random::Secure.random_bytes(24) + TlsBytes.from_hex(DOWNGRADE_TLS12)' 'random = Random::Secure.random_bytes(32)' server12
+if [ -x "$WORK/downgrade/tlsx" ]; then
+  prove_broken "the downgrade sentinel left out, before the std/tls client's 1.2" "FAIL the std/tls client offering TLS 1.2 alone, ed25519: the sentinel" \
+    'random = Random::Secure.random_bytes(24) + TlsBytes.from_hex(DOWNGRADE_TLS12)' 'random = Random::Secure.random_bytes(32)' server12-interop
+else
+  echo "  no copy of the client offering TLS 1.2 alone here, so the sentinel's proof before it is unmeasured"
+fi
+prove_broken "a session id given, for a resumption nothing offers" "FAIL 12-ok " \
+  'random + [0_u8] + TlsBytes.u16(@suite)' 'random + [32_u8] + random + TlsBytes.u16(@suite)' server12
+prove_broken "TLS 1.2's PRF over SHA-256 for an AES-256 suite" "FAIL 12-aes256 " \
+  '    @schedule = TlsKeySchedule.new(TlsSuites.sha384?(@suite))
+    @server_name = offer.server_name' '    @schedule = TlsKeySchedule.new(false)
+    @server_name = offer.server_name' server12
+prove_broken "the server's TLS 1.2 suite order put before the client's" "FAIL 12-client-order " \
+  '    @suite = offer.suites.find { |s| TlsSuites::TLS12.includes?(s) && TlsSuites.rsa?(s) == chosen.rsa? } || 0' \
+  '    @suite = TlsSuites::TLS12.find { |s| offer.suites.includes?(s) && TlsSuites.rsa?(s) == chosen.rsa? } || 0' server12
+prove_broken "a TLS 1.2 record's read sequence number not advanced" "FAIL 12-ok " \
+  '    @sequence = @sequence + 1
+    return TlsError.new("a record of #{length} bytes, past the 2^14 allowed"' '    return TlsError.new("a record of #{length} bytes, past the 2^14 allowed"' server12
+prove_broken "AES-GCM's explicit nonce the same for every record" "FAIL 12-ok " \
+  '    explicit = sequence_bytes
+    aad = explicit + [type, 3_u8, 3_u8] + TlsBytes.u16(content.size)' '    explicit = Array(UInt8).new(8, 0_u8)
+    aad = sequence_bytes + [type, 3_u8, 3_u8] + TlsBytes.u16(content.size)' server12
+prove_broken "the server's TLS 1.2 reads under its own write keys" "FAIL 12-ok " \
+  '    @reader = client_keys' '    @reader = server_keys' server12
+prove_broken "the server's TLS 1.2 Finished under the client's label" "FAIL 12-ok " \
+  '"server finished"' '"client finished"' server12
+prove_broken "the client's TLS 1.2 Finished unchecked" "FAIL 12-bad-finished " \
+  '    unless Subtle.constant_time_compare(message[4, message.size - 4], finished12(master, true))' '    if false' server12
+prove_broken "the ServerKeyExchange signed without the client's random" "FAIL 12-ok " \
+  'signature = @identity.sign(scheme, offer.random + random + params)' 'signature = @identity.sign(scheme, random + params)' server12
+prove_broken "a ClientKeyExchange point of small order taken" "FAIL 12-bad-point " \
+  '      return TlsError.new("the client'"'"'s X25519 point gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)' \
+  '      shared = X25519.public_key(x25519_key) if shared.is_a?(CurveError)' server12
+prove_broken "renegotiation_info left unanswered" "FAIL 12-ok " \
+  '    answers = answers + TlsBytes.extension(0xff01, [0_u8]) if offer.renegotiation_info || offer.suites.includes?(0x00FF)' '' server12
+prove_broken "TLS_EMPTY_RENEGOTIATION_INFO_SCSV not taken as the signal" "FAIL 12-scsv " \
+  ' if offer.renegotiation_info || offer.suites.includes?(0x00FF)' ' if offer.renegotiation_info' server12
+prove_broken "a client's renegotiation_info with something in it taken" "FAIL 12-reneg-data " \
+  '      return TlsError.new("a renegotiation_info that is not empty, on a first handshake", TlsAlert::HANDSHAKE_FAILURE) unless connection.empty?' '' server12
+prove_broken "a renegotiating ClientHello passed over" "FAIL 12-renegotiate " \
+  '        return TlsError.new("a ClientHello after the TLS 1.2 handshake: a renegotiation, which this server refuses", TlsAlert::NO_RENEGOTIATION) if message[0] == 1_u8' \
+  '        next if message[0] == 1_u8' server12
+prove_broken "no_renegotiation sent as a fatal alert" "FAIL 12-renegotiate " \
+  '      content = [code == TlsAlert::NO_RENEGOTIATION ? 1_u8 : 2_u8, code]' '      content = [2_u8, code]' server12
+prove_broken "TLS_FALLBACK_SCSV unchecked" "FAIL 12-fallback " \
+  '    if offer.suites.includes?(0x5600)' '    if false' server12
+prove_broken "ec_point_formats without uncompressed points taken" "FAIL 12-formats " \
+  '      return TlsError.new("ec_point_formats without uncompressed points", TlsAlert::ILLEGAL_PARAMETER) unless listed.includes?(0_u8)' '' server12
+prove_broken "a P-256 certificate shown to a client whose groups leave its curve out" "FAIL 12-p256-no-curve " \
+  '    if (groups = offer.groups) && identity.leaf.public_key.is_a?(EcdsaPublicKey) && !groups.includes?(GROUP_SECP256R1)' '    if false' server12
+prove_broken "PKCS #1 v1.5 put before RSA-PSS" "FAIL 12-ok " \
+  '    pss = scheme_for(offered)' '    pss = @rsa ? nil : scheme_for(offered)' server12
+prove_broken "an RSA key that never signs under PKCS #1 v1.5" "FAIL 12-pkcs1 " \
+  '    return pss if pss || @rsa.nil?' '    return pss' server12
+prove_broken "PKCS #1 v1.5 signed as RSA-PSS" "FAIL 12-pkcs1 " \
+  '      return rsa.sign_pkcs1v15([RsaHash::SHA256, RsaHash::SHA384, RsaHash::SHA512][pkcs1], content) if pkcs1' '' server12
+prove_broken "handshake bytes across the client's ChangeCipherSpec" "FAIL 12-ccs-split " \
+  '    return TlsError.new("handshake bytes before #{@peer}'"'"'s ChangeCipherSpec", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0' '' server12
+prove_broken "no CertificateRequest in TLS 1.2" "FAIL 12-mtls-ok " \
+  '    request = @config.client_roots ? request12 : [] of UInt8' '    request = [] of UInt8' server12
+prove_broken "a TLS 1.2 client with no certificate let in" "FAIL 12-mtls-none " \
+  '      return TlsError.new("the client sent no certificate", @tls12 ? TlsAlert::HANDSHAKE_FAILURE : TlsAlert::CERTIFICATE_REQUIRED) if @config.client_required' '' server12
+prove_broken "a client's TLS 1.2 CertificateVerify unchecked" "FAIL 12-mtls-bad-cv " \
+  '    return TlsError.new("the client'"'"'s TLS 1.2 CertificateVerify is not its key'"'"'s signature", TlsAlert::DECRYPT_ERROR) unless ok' '' server12
+if [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1; then
+  prove_broken "TLS 1.2's exporter over the randoms in the server's order, at the server" "FAIL OpenSSL, TLS 1.2, ed25519, exported keying material" \
+    '    @randoms12 = client_random + server_random' '    @randoms12 = server_random + client_random' server12-interop
+else
+  echo "  no openssl here (or Windows), so the server's TLS 1.2 exporter proof is unmeasured"
+fi
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/tls exercise holds ($mutations breaks caught)"

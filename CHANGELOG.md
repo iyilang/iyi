@@ -71,6 +71,55 @@
   RFC 5280 in the exercise's header, three leniencies there left to
   refuse) and HPACK beside Python's hpack (4,000 alike). 4,000 inputs
   of each pure target by default, `FUZZ_ITERATIONS` for more.
+- **std/tls: a server that speaks TLS 1.2, when asked, to a client that
+  speaks nothing newer (RFC 5246, RFC 7627's extended master secret, RFC
+  5746's renegotiation_info, RFC 8422's ECDHE).** Opt-in, as the
+  client's is: `TlsServerConfig#min_version` is `TlsVersion::TLS13` by
+  default, and then a ClientHello without 1.3 is refused as before
+  (protocol_version); SPEC.md's decision #18 now records the server half.
+  With `TLS12`, a client that offers 1.3 is still answered in 1.3, and
+  one that offers 1.2 and not 1.3 - in supported_versions, or by
+  legacy_version with none - is answered in 1.2: ECDHE in X25519, or
+  secp256r1 for a client without it or without supported_groups; the six
+  AEAD suites the client offers, by the client's order among those of the
+  key's kind (ECDHE_ECDSA for Ed25519, RFC 8422, and P-256; ECDHE_RSA for
+  RSA); the ServerKeyExchange signed under ed25519,
+  ecdsa_secp256r1_sha256, or for RSA under RSA-PSS by the client's order
+  whenever it takes any and PKCS #1 v1.5 only for a client that takes
+  none. ServerHello.random ends with RFC 8446's DOWNGRD 01 sentinel. A
+  client without the extended master secret is refused by name
+  (handshake_failure), as are one whose renegotiation_info is not empty,
+  one that sends TLS_FALLBACK_SCSV (inappropriate_fallback, RFC 7507), one
+  whose ec_point_formats leave out uncompressed points, one without
+  signature_algorithms, and a P-256 server's client whose groups leave out
+  secp256r1 (RFC 8422 section 5.1.1). renegotiation_info is answered to a
+  client that signals it by the extension or the SCSV; a ClientHello after
+  the handshake is answered with the no_renegotiation warning and the
+  connection ends, as Go's does. No session id and no ticket: there is no
+  resumption. ALPN, the identity chosen by server_name, and client
+  certificates work as in 1.3 - a 1.2 CertificateRequest for ecdsa_sign
+  and rsa_sign, the client's CertificateVerify checked over the handshake
+  with PKCS #1 v1.5 taken, as 1.2 allows, and a client without a
+  certificate refused with handshake_failure; the exporter is RFC 5705's
+  and `version` says "TLSv1.2". Left out: DHE, CBC and anything before
+  1.2, a P-384 server key (an identity is Ed25519, P-256 or RSA, as in
+  1.3), and resumption. The 1.2 signature check, master secret, key block
+  and Finished are one path for both ends now. A full 1.2 handshake with
+  Python's ssl, measured in one run here beside 1.3's under other load
+  (--release, the median of 200): 0.67 ms with an Ed25519 key against
+  1.3's 0.74, 0.71 with P-256 (0.81), 1.79 with RSA-2048 (1.88), 7.85 with
+  RSA-4096 (7.76). `bench/std_tls_exercise.sh` has a new section: the
+  scripted client (`bench/std_tls_client.py --tls12`) checks every 1.2
+  handshake step by step - the sentinel, the session hash, the
+  ServerKeyExchange's scheme, every AES-GCM explicit nonce unrepeated -
+  in 31 scenarios and three of 1.3's on each of the three keys, and 9
+  asking for a client's certificate, refusals among them; OpenSSL's
+  `s_client -tls1_2` across each suite, ALPN, the group, RSA's schemes,
+  `-no_ems`, `-fallback_scsv`, a renegotiation and the exporter; Python's
+  ssl with `maximum_version` TLSv1_2 on each suite; curl and Node held to
+  1.2; the std/tls client answered in 1.3, and a copy of it offering 1.2
+  alone refusing the sentinel - and with the check removed, connecting in
+  1.2. 34 new broken copies are each caught, 157 in all.
 
 ### Changed
 

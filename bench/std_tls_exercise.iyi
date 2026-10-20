@@ -27,8 +27,9 @@
 #                       ALPN h2 and http/1.1 - asking for a client's
 #                       certificate under DIR/client-roots.pem when there
 #                       is one, not requiring it when DIR/client-optional
-#                       is there: COUNT connections, one at a time, each
-#                       line "held ..." or "refused: why".
+#                       is there, and speaking TLS 1.2 too when
+#                       TLS_MIN_VERSION is 1.2: COUNT connections, one at
+#                       a time, each line "held ..." or "refused: why".
 #                       Bytes are echoed as "echo:..."; a request ending
 #                       in a blank line is answered `HTTP/1.0 200 ok` and
 #                       what was agreed, then close_notify;
@@ -310,11 +311,12 @@ end
 
 # What the server says of a connection: the name asked for, the protocol,
 # the suite, the client's certificate, the certificate it was shown under,
-# and 16 bytes exported for "EXPERIMENTAL iyi" (RFC 8446 section 7.5).
+# 16 bytes exported for "EXPERIMENTAL iyi" (RFC 8446 section 7.5; RFC 5705
+# in TLS 1.2) and the version.
 def agreed(conn : TlsServer) : String
   peer = conn.peer_certificates.empty? ? "-" : conn.peer_certificates[0].subject_name
   exported = hex_of(conn.export_keying_material("EXPERIMENTAL iyi", [] of UInt8, 16))
-  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer} shown=#{conn.identity.leaf.subject_name} exported=#{exported}"
+  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer} shown=#{conn.identity.leaf.subject_name} exported=#{exported} #{conn.version}"
 end
 
 def serve_one(conn : TlsServer) : String
@@ -337,6 +339,7 @@ end
 if args.size > 0 && args[0] == "serve"
   config = TlsServerConfig.from_pem(File.read(args[1] + "/chain.pem"), File.read(args[1] + "/key.pem")).or_panic
   config.alpn = ["h2", "http/1.1"]
+  config.min_version = TlsVersion::TLS12 if ENV["TLS_MIN_VERSION"]? == "1.2"
   # A second identity, for other.test, shown to a client that asks for it.
   if File.file?(args[1] + "/other-chain.pem")
     config.add_identity(TlsIdentity.from_pem(File.read(args[1] + "/other-chain.pem"), File.read(args[1] + "/other-key.pem")).or_panic)

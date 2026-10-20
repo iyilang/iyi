@@ -1,7 +1,7 @@
 # TLS 1.3 (RFC 8446), both ends, written in iyi from the RFCs: a client
-# whose server's certificate std/x509 checked - which speaks TLS 1.2 too
-# when asked to - and a server whose Ed25519, P-256 or RSA key signs for
-# it, over std/socket.
+# whose server's certificate std/x509 checked and a server whose Ed25519,
+# P-256 or RSA key signs for it, over std/socket - each of which speaks
+# TLS 1.2 too when asked to.
 #
 #     import std/tls::{TlsClient, TlsConfig, TlsError}
 #
@@ -21,8 +21,8 @@
 #
 # TLS 1.3 only, by default: a peer that speaks TLS 1.2 or earlier is
 # refused, as it is by every implementation that has dropped the older
-# versions' modes - a server always, a client unless its `TlsConfig` says
-# otherwise (below). The three cipher suites RFC 8446 section 9.1 names
+# versions' modes - by either end unless its config says otherwise
+# (below). The three cipher suites RFC 8446 section 9.1 names
 # (AES-128-GCM with SHA-256, AES-256-GCM with SHA-384, ChaCha20-Poly1305
 # with SHA-256), std/aead's; the key exchange is X25519, std/curve25519's
 # - and at a server secp256r1 too, std/p256's - both constant-time.
@@ -123,6 +123,42 @@
 # `peer_certificates` is the chain. A handshake that fails sends the
 # client the alert its `TlsError` names - in the clear before the
 # server's keys, under them after.
+#
+# TLS 1.2 at the server, and only when asked: `config.min_version =
+# TlsVersion::TLS12` on a `TlsServerConfig`, for the clients that never
+# moved past 1.2. A client that offers 1.3 is answered in it either way;
+# one whose ClientHello offers 1.2 and not 1.3 - in supported_versions,
+# or by legacy_version with none - is answered in 1.2, held to what the
+# client's 1.2 is held to. The extended master secret is required, the
+# refusal naming it. The key exchange is ECDHE alone: X25519, or
+# secp256r1 for a client without it or without supported_groups (RFC 8422
+# section 4 leaves the curve to the server then). The suites are the six
+# above, by the client's order among those of the key's kind: ECDHE_ECDSA
+# for an Ed25519 key (RFC 8422) or a P-256 one, ECDHE_RSA for RSA. The
+# ServerKeyExchange is signed over both randoms and the parameters, under
+# ed25519, ecdsa_secp256r1_sha256, or for an RSA key RSA-PSS by the
+# client's order whenever it takes any and PKCS #1 v1.5 by its order only
+# when it takes none - which 1.2 permits there, and which the oldest
+# clients need. A P-256 key needs secp256r1 among the client's groups when
+# it names any (section 5.1.1). The random ends with RFC 8446's downgrade
+# sentinel, so a client that offered 1.3 and had it taken out on the way
+# refuses it; a client that says it is falling back (TLS_FALLBACK_SCSV,
+# RFC 7507) is refused, inappropriate_fallback, since this server speaks
+# 1.3. renegotiation_info (RFC 5746) is answered to a client that signals
+# it by the extension or the SCSV, and refused when not empty; a
+# ClientHello after the handshake - a renegotiation - is answered with the
+# no_renegotiation warning, and the connection ends with it. No session
+# id and no ticket: no resumption. ALPN is answered in the ServerHello,
+# server_name chooses the identity as in 1.3, and with `client_roots` a
+# 1.2 CertificateRequest asks for ecdsa_sign or rsa_sign, the client's
+# CertificateVerify is checked over the handshake to its
+# ClientKeyExchange, PKCS #1 v1.5 taken there as 1.2 allows, and a client
+# that sends no certificate is refused with handshake_failure, 1.2's word
+# for it. The client's ChangeCipherSpec and Finished are read before this
+# side's go; the exporter is RFC 5705's, and there is no KeyUpdate. A full
+# 1.2 handshake measured as the 1.3 ones above, in one run here beside
+# 1.3's under other load: 0.67 ms with an Ed25519 key (1.3: 0.74), 0.71
+# with P-256 (0.81), 1.79 with RSA-2048 (1.88), 7.85 with RSA-4096 (7.76).
 #
 # A record is at most 2^14 bytes of content, as section 5.1 holds both
 # sides to, and a TLS 1.3 record's inner plaintext - content type and
@@ -229,8 +265,8 @@ impl Error for TlsError
   end
 end
 
-# The versions a client may speak: TLS 1.3, or TLS 1.2 as well (RFC 5246),
-# for a server that never moved past it.
+# The versions a connection may speak: TLS 1.3, or TLS 1.2 as well (RFC
+# 5246), for a peer that never moved past it.
 pub enum TlsVersion
   TLS12
   TLS13
@@ -565,8 +601,8 @@ pub abstract class TlsConnection
   # The protocol chosen by ALPN, if one was.
   getter alpn_protocol : String? = nil
   getter cipher_suite : String = ""
-  # The version negotiated: "TLSv1.3", or "TLSv1.2" for a client whose
-  # server chose it.
+  # The version negotiated: "TLSv1.3", or "TLSv1.2" where one end asked
+  # for it and the other spoke nothing newer.
   getter version : String = "TLSv1.3"
   # The chain the peer's certificate was checked through, leaf first: the
   # server's, for a client; the client's, for a server that asked for one.
@@ -611,19 +647,25 @@ pub abstract class TlsConnection
   # 0-RTT skips the client's early records (section 4.2.10). Zero for a
   # client.
   @early_left : Int32 = 0
-  # TLS 1.2 (a client's only): records keep their content type in the
-  # header, ChangeCipherSpec is the key change, and there is no KeyUpdate.
+  # TLS 1.2: records keep their content type in the header,
+  # ChangeCipherSpec is the key change, and there is no KeyUpdate.
   @tls12 : Bool = false
   # TLS 1.2's master secret and the two hellos' randoms, client's first,
   # for the exporter (RFC 5705).
   @master12 : Array(UInt8) = [] of UInt8
   @randoms12 : Array(UInt8) = [] of UInt8
   # A HelloRequest read and not yet answered: TLS 1.2's renegotiation, which
-  # this refuses with a no_renegotiation warning before its next write.
+  # a client refuses with a no_renegotiation warning before its next write.
   @renegotiation_refused : Bool = false
 
-  HELLO_RETRY   = "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c"
-  MAX_HANDSHAKE = 65536
+  HELLO_RETRY = "cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c"
+  # The downgrade sentinels (RFC 8446 section 4.1.3) a server that speaks
+  # TLS 1.3 writes into the end of its random when it chooses 1.2, or 1.1
+  # and before: "DOWNGRD" and 01 or 00. This server writes the first; a
+  # client refuses either.
+  DOWNGRADE_TLS12 = "444f574e47524401"
+  DOWNGRADE_TLS11 = "444f574e47524400"
+  MAX_HANDSHAKE   = 65536
   # More than a peer has any reason to send: past it, the records are
   # refused rather than passed over without end.
   MAX_CCS = 16
@@ -850,7 +892,8 @@ pub abstract class TlsConnection
 
   # NewSessionTicket set aside by a client; a KeyUpdate taken, and owed
   # back when it asks (section 4.6.3). In TLS 1.2 a HelloRequest, the only
-  # handshake message after a handshake, is owed its refusal.
+  # handshake message a server sends after a handshake, is owed its
+  # refusal; a ClientHello, the only one a client sends, is refused.
   private def post_handshake(content : Array(UInt8)) : TlsError?
     add_handshake(content)
     while true
@@ -858,6 +901,16 @@ pub abstract class TlsConnection
       return message if message.is_a?(TlsError)
       break unless message
       length = message.size - 4
+      if @tls12 && server_side?
+        # RFC 5246 section 7.4.1.2: a ClientHello after the handshake asks
+        # to renegotiate, which this server never does. It is answered with
+        # the no_renegotiation warning that RFC 5746 section 4.4 names, and
+        # the connection ends with it, as Go's server ends it: a client that
+        # asked waits for a ServerHello, and one that does not come would
+        # hold it until a timeout.
+        return TlsError.new("a ClientHello after the TLS 1.2 handshake: a renegotiation, which this server refuses", TlsAlert::NO_RENEGOTIATION) if message[0] == 1_u8
+        return TlsError.new("#{TlsBytes.handshake_name(message[0])} after a TLS 1.2 handshake", TlsAlert::UNEXPECTED_MESSAGE)
+      end
       if @tls12
         return TlsError.new("#{TlsBytes.handshake_name(message[0])} after a TLS 1.2 handshake", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 0_u8
         return TlsError.new("a HelloRequest of #{length} bytes", TlsAlert::DECODE_ERROR) unless length == 0
@@ -900,6 +953,8 @@ pub abstract class TlsConnection
   # the socket closes, by either end (RFC 8446 section 6.2): under the keys
   # this side writes with, or in the clear before there are any. None for
   # an alert the peer sent, whose sentence names no alert of this side's.
+  # no_renegotiation goes as the warning it always is (RFC 5246 section
+  # 7.2.2); every other, fatal.
   # A server then reads and drops what the client goes on sending, until
   # it closes, for at most `LINGER_BYTES` and `LINGER_MS` in all: a close
   # with the client's flight unread is a reset, which can take the alert
@@ -908,7 +963,7 @@ pub abstract class TlsConnection
   protected def fail(error : TlsError) : TlsError
     code = error.alert
     if code && !@closed && !@socket.closed?
-      content = [2_u8, code]
+      content = [code == TlsAlert::NO_RENEGOTIATION ? 1_u8 : 2_u8, code]
       sent = if @writer
                send_protected(TlsRecords::ALERT, content)
              else
@@ -968,6 +1023,80 @@ pub abstract class TlsConnection
          end
     return TlsError.new("#{@peer}'s CertificateVerify is not its key's signature", TlsAlert::DECRYPT_ERROR) unless ok
     nil
+  end
+
+  # --- TLS 1.2, what both ends share (RFC 5246, RFC 7627) ---
+
+  # The peer's ChangeCipherSpec, after its last handshake message in the
+  # clear: nothing else, and no handshake bytes left before it, as a key
+  # change is not crossed by a message.
+  private def change_cipher_spec12 : TlsError?
+    return TlsError.new("handshake bytes before #{@peer}'s ChangeCipherSpec", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
+    record = next_plain_record
+    return record if record.is_a?(TlsError)
+    type, content = record
+    case type
+    when TlsRecords::CHANGE_CIPHER_SPEC
+      return TlsError.new("a ChangeCipherSpec that is not 0x01", TlsAlert::UNEXPECTED_MESSAGE) unless content == [1_u8]
+      nil
+    when TlsRecords::ALERT
+      answer = alert(content)
+      return answer if answer
+      TlsError.new("#{@peer} closed during the handshake")
+    when TlsRecords::HANDSHAKE
+      TlsError.new("handshake message #{content.empty? ? "?" : TlsBytes.handshake_name(content[0])} where #{@peer}'s ChangeCipherSpec belongs", TlsAlert::UNEXPECTED_MESSAGE)
+    else
+      TlsError.new("a record of type #{type} where #{@peer}'s ChangeCipherSpec belongs", TlsAlert::UNEXPECTED_MESSAGE)
+    end
+  end
+
+  # Whether *signature* is *leaf*'s key's signature of *signed* under
+  # *scheme* in TLS 1.2 (RFC 5246 section 4.7), where a ServerKeyExchange
+  # and a client's CertificateVerify sign; or why the scheme is not one to
+  # take, *what* naming the message. PKCS #1 v1.5 is taken, as 1.2 permits
+  # it there, and ECDSA with the hash the scheme names on the key's own
+  # curve: in 1.2 a scheme names a hash and not a curve.
+  private def signed12?(what : String, leaf : Certificate, scheme : Int32, signed : Array(UInt8), signature : Array(UInt8)) : Bool | TlsError
+    key = leaf.public_key
+    ok = case scheme
+         when 0x0401, 0x0501, 0x0601
+           return TlsError.new("#{what} under scheme 0x#{scheme.to_s(16)} for a key that is not RSA", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(RsaPublicKey)
+           key.verify_pkcs1v15(scheme == 0x0401 ? RsaHash::SHA256 : (scheme == 0x0501 ? RsaHash::SHA384 : RsaHash::SHA512), signed, signature)
+         when 0x0804, 0x0805, 0x0806
+           return TlsError.new("#{what} under scheme 0x#{scheme.to_s(16)} for a key that is not RSA", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(RsaPublicKey)
+           key.verify_pss(scheme == 0x0804 ? RsaHash::SHA256 : (scheme == 0x0805 ? RsaHash::SHA384 : RsaHash::SHA512), signed, signature)
+         when 0x0403, 0x0503, 0x0603
+           return TlsError.new("#{what} under scheme 0x#{scheme.to_s(16)} for a key that is not ECDSA", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(EcdsaPublicKey)
+           key.verify(scheme == 0x0403 ? EcdsaHash::SHA256 : (scheme == 0x0503 ? EcdsaHash::SHA384 : EcdsaHash::SHA512), signed, signature)
+         when 0x0807
+           return TlsError.new("#{what} under scheme 0x807 for a key that is not Ed25519", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(Ed25519PublicKey)
+           key.verify(signed, signature: signature)
+         else
+           return TlsError.new("#{what} under scheme 0x#{scheme.to_s(16)}, which was not offered", TlsAlert::ILLEGAL_PARAMETER)
+         end
+    ok
+  end
+
+  # The keys of a TLS 1.2 connection, once the transcript reaches the
+  # ClientKeyExchange: the master secret over the session hash - that
+  # transcript, not the two randoms alone (RFC 7627 section 4), which ties
+  # it to the whole handshake against the triple handshake attack - kept
+  # with both randoms for the exporter (RFC 5705); and from its key block
+  # (RFC 5246 section 6.3) the client's write cipher, then the server's.
+  private def keys12(secret : Array(UInt8), client_random : Array(UInt8), server_random : Array(UInt8)) : {Array(UInt8), TlsRecordCipher, TlsRecordCipher}
+    master = @schedule.prf(secret, "extended master secret", @schedule.hash(@transcript), 48)
+    size = TlsSuites.key_size(@suite)
+    iv = TlsSuites.chacha?(@suite) ? 12 : 4
+    block = @schedule.prf(master, "key expansion", server_random + client_random, 2 * size + 2 * iv)
+    @master12 = master
+    @randoms12 = client_random + server_random
+    {master, TlsRecordCipher.new(@suite, block[0, size], block[2 * size, iv]), TlsRecordCipher.new(@suite, block[size, size], block[2 * size + iv, iv])}
+  end
+
+  # A TLS 1.2 Finished's verify_data (RFC 5246 section 7.4.9) over the
+  # transcript so far: the client's, or the server's.
+  private def finished12(master : Array(UInt8), client : Bool) : Array(UInt8)
+    @schedule.prf(master, client ? "client finished" : "server finished", @schedule.hash(@transcript), 12)
   end
 
   # --- Records (section 5) ---
@@ -1054,7 +1183,7 @@ pub abstract class TlsConnection
           @early_left = @early_left - body.size
           next
         end
-        return TlsError.new("a protected record before the #{server_side? ? "ClientHello" : (@tls12 ? "server's ChangeCipherSpec" : "ServerHello")}", TlsAlert::UNEXPECTED_MESSAGE)
+        return TlsError.new("a protected record before #{@tls12 ? "#{@peer}'s ChangeCipherSpec" : (server_side? ? "the ClientHello" : "the ServerHello")}", TlsAlert::UNEXPECTED_MESSAGE)
       end
       return TlsError.new("a record of #{body.size} bytes, past the 2^14 allowed", TlsAlert::RECORD_OVERFLOW) if body.size > TlsRecords::MAX_PLAINTEXT
       if type == TlsRecords::CHANGE_CIPHER_SPEC && body == [1_u8] && !@tls12
@@ -1613,12 +1742,6 @@ pub class TlsClient < TlsConnection
     TlsServerHello.new(retry, suite, group, share, cookie, false, random)
   end
 
-  # The downgrade sentinels (RFC 8446 section 4.1.3) a server that speaks
-  # TLS 1.3 writes into the end of its random when it chooses 1.2, or 1.1
-  # and before: "DOWNGRD" and 01 or 00.
-  DOWNGRADE_TLS12 = "444f574e47524401"
-  DOWNGRADE_TLS11 = "444f574e47524400"
-
   # A TLS 1.2 ServerHello judged: version 1.2, no downgrade sentinel, a
   # session id of the server's own, an offered TLS 1.2 suite, and the
   # extended master secret among its extensions, which may answer what was
@@ -1850,41 +1973,32 @@ pub class TlsClient < TlsConnection
     key_exchange = TlsBytes.message(16, [public.size.to_u8] + public)
     flight = flight + key_exchange
     @transcript = @transcript + key_exchange
-    # RFC 7627 section 4: the master secret over the session hash, the
-    # transcript to the ClientKeyExchange, not the two randoms alone.
-    master = @schedule.prf(secret, "extended master secret", @schedule.hash(@transcript), 48)
+    master, writer, reader = keys12(secret, client_random, server_random)
     if identity && scheme
       signature = identity.sign(scheme, @transcript)
       verify = TlsBytes.message(15, TlsBytes.u16(scheme) + TlsBytes.u16(signature.size) + signature)
       flight = flight + verify
       @transcript = @transcript + verify
     end
-    size = TlsSuites.key_size(@suite)
-    iv = TlsSuites.chacha?(@suite) ? 12 : 4
-    block = @schedule.prf(master, "key expansion", server_random + client_random, 2 * size + 2 * iv)
-    writer = TlsRecordCipher.new(@suite, block[0, size], block[2 * size, iv])
-    reader = TlsRecordCipher.new(@suite, block[size, size], block[2 * size + iv, iv])
-    finished = TlsBytes.message(20, @schedule.prf(master, "client finished", @schedule.hash(@transcript), 12))
+    finished = TlsBytes.message(20, finished12(master, true))
     @writer = writer
     sent = put(plain_records(TlsRecords::HANDSHAKE, flight) + [TlsRecords::CHANGE_CIPHER_SPEC, 3_u8, 3_u8, 0_u8, 1_u8, 1_u8] +
                writer.seal(TlsRecords::HANDSHAKE, finished))
     return sent if sent
     @transcript = @transcript + finished
 
-    changed = server_change_cipher_spec
+    changed = change_cipher_spec12
     return changed if changed
     @reader = reader
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
     return TlsError.new("#{TlsBytes.handshake_name(message[0])} where Finished belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 20_u8
-    expected = @schedule.prf(master, "server finished", @schedule.hash(@transcript), 12)
+    expected = finished12(master, false)
     unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
       return TlsError.new("the server's TLS 1.2 Finished does not match the handshake", TlsAlert::DECRYPT_ERROR)
     end
     return TlsError.new("handshake bytes left after the server's TLS 1.2 Finished", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
     @handshaking = false
-    @master12 = master
-    @randoms12 = client_random + server_random
     nil
   end
 
@@ -1916,25 +2030,8 @@ pub class TlsClient < TlsConnection
     return TlsError.new("a ServerKeyExchange in group #{group}, which was not offered", TlsAlert::ILLEGAL_PARAMETER) unless group == GROUP_X25519 || group == GROUP_SECP256R1
     return TlsError.new("an X25519 share of #{point.size} bytes", TlsAlert::ILLEGAL_PARAMETER) if group == GROUP_X25519 && point.size != 32
     signed = randoms + body[0, 4 + point.size]
-    key = leaf.public_key
-    ok = case scheme
-         when 0x0401, 0x0501, 0x0601
-           # PKCS #1 v1.5: TLS 1.2 takes it here, as 1.3 does not.
-           return TlsError.new("a ServerKeyExchange under scheme 0x#{scheme.to_s(16)} for a key that is not RSA", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(RsaPublicKey)
-           key.verify_pkcs1v15(scheme == 0x0401 ? RsaHash::SHA256 : (scheme == 0x0501 ? RsaHash::SHA384 : RsaHash::SHA512), signed, signature)
-         when 0x0804, 0x0805, 0x0806
-           return TlsError.new("a ServerKeyExchange under scheme 0x#{scheme.to_s(16)} for a key that is not RSA", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(RsaPublicKey)
-           key.verify_pss(scheme == 0x0804 ? RsaHash::SHA256 : (scheme == 0x0805 ? RsaHash::SHA384 : RsaHash::SHA512), signed, signature)
-         when 0x0403, 0x0503, 0x0603
-           # In TLS 1.2 the scheme names the hash and not the curve.
-           return TlsError.new("a ServerKeyExchange under scheme 0x#{scheme.to_s(16)} for a key that is not ECDSA", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(EcdsaPublicKey)
-           key.verify(scheme == 0x0403 ? EcdsaHash::SHA256 : (scheme == 0x0503 ? EcdsaHash::SHA384 : EcdsaHash::SHA512), signed, signature)
-         when 0x0807
-           return TlsError.new("a ServerKeyExchange under scheme 0x807 for a key that is not Ed25519", TlsAlert::ILLEGAL_PARAMETER) unless key.is_a?(Ed25519PublicKey)
-           key.verify(signed, signature: signature)
-         else
-           return TlsError.new("a ServerKeyExchange under scheme 0x#{scheme.to_s(16)}, which was not offered", TlsAlert::ILLEGAL_PARAMETER)
-         end
+    ok = signed12?("a ServerKeyExchange", leaf, scheme, signed, signature)
+    return ok if ok.is_a?(TlsError)
     return TlsError.new("the server's ServerKeyExchange is not its key's signature", TlsAlert::DECRYPT_ERROR) unless ok
     {group, point}
   end
@@ -1951,29 +2048,6 @@ pub class TlsClient < TlsConnection
     @certificate_types = types
     @requested_schemes = schemes
     nil
-  end
-
-  # The server's ChangeCipherSpec, after this side's Finished and before
-  # its own: nothing else, and no handshake bytes left before it, as a key
-  # change is not crossed by a message.
-  private def server_change_cipher_spec : TlsError?
-    return TlsError.new("handshake bytes before the server's ChangeCipherSpec", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
-    record = next_plain_record
-    return record if record.is_a?(TlsError)
-    type, content = record
-    case type
-    when TlsRecords::CHANGE_CIPHER_SPEC
-      return TlsError.new("a ChangeCipherSpec that is not 0x01", TlsAlert::UNEXPECTED_MESSAGE) unless content == [1_u8]
-      nil
-    when TlsRecords::ALERT
-      answer = alert(content)
-      return answer if answer
-      TlsError.new("the server closed during the handshake")
-    when TlsRecords::HANDSHAKE
-      TlsError.new("handshake message #{content.empty? ? "?" : TlsBytes.handshake_name(content[0])} where the server's ChangeCipherSpec belongs", TlsAlert::UNEXPECTED_MESSAGE)
-    else
-      TlsError.new("a record of type #{type} where the server's ChangeCipherSpec belongs", TlsAlert::UNEXPECTED_MESSAGE)
-    end
   end
 end
 
@@ -2015,6 +2089,10 @@ pub class TlsIdentity
   RSA_PSS_SHA256 = 0x0804
   RSA_PSS_SHA384 = 0x0805
   RSA_PSS_SHA512 = 0x0806
+  # rsa_pkcs1_sha256, -384 and -512: never in `schemes`, and signed only in
+  # a TLS 1.2 ServerKeyExchange, which RFC 5246 section 7.4.1.4.1 lets them
+  # sign, for a client that takes no RSA-PSS (`scheme12_for`).
+  RSA_PKCS1 = [0x0401, 0x0501, 0x0601]
 
   def initialize(@chain : Array(Array(UInt8)), @leaf : Certificate, @schemes : Array(Int32), @seed : Array(UInt8)?, @p256 : P256PrivateKey?, @rsa : RsaPrivateKey?)
   end
@@ -2123,6 +2201,23 @@ pub class TlsIdentity
     offered.find { |scheme| @schemes.includes?(scheme) }
   end
 
+  # The scheme a TLS 1.2 ServerKeyExchange is signed under for a client
+  # that takes *offered*: `scheme_for`'s - for an RSA key, RSA-PSS by the
+  # client's order - and for an RSA key whose client takes no RSA-PSS,
+  # PKCS #1 v1.5 by its order, which 1.2 permits and which the clients that
+  # never moved past it may take alone; nil when the key makes none.
+  def scheme12_for(offered : Array(Int32)) : Int32?
+    pss = scheme_for(offered)
+    return pss if pss || @rsa.nil?
+    offered.find { |scheme| RSA_PKCS1.includes?(scheme) }
+  end
+
+  # Whether the key is RSA's: a TLS 1.2 server's ECDHE_RSA suites, and not
+  # ECDHE_ECDSA's.
+  def rsa? : Bool
+    !@rsa.nil?
+  end
+
   # The ClientCertificateType a TLS 1.2 CertificateRequest must list for
   # this key: rsa_sign (1), or ecdsa_sign (64) for P-256 and, by RFC 8422
   # section 5.5, Ed25519.
@@ -2131,14 +2226,17 @@ pub class TlsIdentity
   end
 
   # The leaf key's signature of *content* under *scheme*, one of
-  # `schemes`: what CertificateVerify carries.
+  # `schemes` - or for an RSA key in TLS 1.2, PKCS #1 v1.5's: what
+  # CertificateVerify and a ServerKeyExchange carry.
   def sign(scheme : Int32, content : Array(UInt8)) : Array(UInt8)
-    raise "tls: a signature under scheme 0x#{scheme.to_s(16)}, which this identity's key does not make" unless @schemes.includes?(scheme)
+    pkcs1 = @rsa ? RSA_PKCS1.index(scheme) : nil
+    raise "tls: a signature under scheme 0x#{scheme.to_s(16)}, which this identity's key does not make" unless @schemes.includes?(scheme) || pkcs1
     if key = @p256
       key.sign(EcdsaHash::SHA256, content)
     elsif seed = @seed
       TlsBytes.of(Ed25519.sign(seed, content))
     elsif rsa = @rsa
+      return rsa.sign_pkcs1v15([RsaHash::SHA256, RsaHash::SHA384, RsaHash::SHA512][pkcs1], content) if pkcs1
       rsa.sign_pss(scheme == RSA_PSS_SHA256 ? RsaHash::SHA256 : (scheme == RSA_PSS_SHA384 ? RsaHash::SHA384 : RsaHash::SHA512), content)
     else
       [] of UInt8
@@ -2153,6 +2251,9 @@ pub class TlsIdentity
     when RSA_PSS_SHA256 then "rsa_pss_rsae_sha256"
     when RSA_PSS_SHA384 then "rsa_pss_rsae_sha384"
     when RSA_PSS_SHA512 then "rsa_pss_rsae_sha512"
+    when 0x0401         then "rsa_pkcs1_sha256"
+    when 0x0501         then "rsa_pkcs1_sha384"
+    when 0x0601         then "rsa_pkcs1_sha512"
     else                     "0x#{scheme.to_s(16)}"
     end
   end
@@ -2166,8 +2267,8 @@ pub class TlsIdentity
 end
 
 # What a server presents and asks: its identity, the protocols it speaks
-# by ALPN, and - for mutual TLS - the roots a client's certificate must
-# chain to.
+# by ALPN, the oldest version it speaks, and - for mutual TLS - the roots
+# a client's certificate must chain to.
 pub class TlsServerConfig
   getter identity : TlsIdentity
   # Protocols this server speaks by ALPN (RFC 7301), most wanted first; a
@@ -2176,8 +2277,8 @@ pub class TlsServerConfig
   # When set, the server asks for a client's certificate (a
   # CertificateRequest) and checks it as std/x509 checks a client's
   # (clientAuth) against these roots, then its CertificateVerify; a client
-  # that sends none is refused (certificate_required) while
-  # `client_required`. Not asked when nil.
+  # that sends none is refused (certificate_required; in TLS 1.2,
+  # handshake_failure) while `client_required`. Not asked when nil.
   property client_roots : Array(Certificate)? = nil
   property client_required : Bool = true
   # The time a client's certificate is checked at; now when nil.
@@ -2185,6 +2286,12 @@ pub class TlsServerConfig
   # More identities, each shown to a client that asks by server_name (RFC
   # 6066) for a host its certificate names; `identity` to any other.
   getter others : Array(TlsIdentity) = [] of TlsIdentity
+  # The oldest version this server speaks: TLS 1.3 by default, and then a
+  # client that does not offer it is refused (protocol_version); `TLS12`
+  # answers a client that offers 1.2 and not 1.3 in 1.2, held to what the
+  # module's header says. A client that offers 1.3 is answered in it
+  # either way.
+  property min_version : TlsVersion = TlsVersion::TLS13
 
   def initialize(@identity : TlsIdentity)
   end
@@ -2332,8 +2439,30 @@ class TlsOffer
   end
 end
 
-# A connection from a client, its handshake done: TLS 1.3 as a server,
-# its certificate's key (Ed25519 or P-256) signing for it.
+# What a client that offers TLS 1.2 and not 1.3 offered, read from its
+# ClientHello: the parts a TLS 1.2 server chooses by, and the bodies of
+# the extensions it judges (extended_master_secret, renegotiation_info,
+# ec_point_formats) as sent, nil when absent.
+class TlsOffer12
+  getter random : Array(UInt8)
+  getter suites : Array(Int32)
+  getter schemes : Array(Int32)?
+  getter groups : Array(Int32)?
+  getter alpn : Array(String)?
+  getter server_name : String?
+  getter extended_master_secret : Array(UInt8)?
+  getter renegotiation_info : Array(UInt8)?
+  getter point_formats : Array(UInt8)?
+
+  def initialize(@random : Array(UInt8), @suites : Array(Int32), @schemes : Array(Int32)?, @groups : Array(Int32)?, @alpn : Array(String)?,
+                 @server_name : String?, @extended_master_secret : Array(UInt8)?, @renegotiation_info : Array(UInt8)?, @point_formats : Array(UInt8)?)
+  end
+end
+
+# A connection from a client, its handshake done: TLS 1.3 as a server -
+# or 1.2, when its config's `min_version` asks and the client speaks
+# nothing newer - its certificate's key (Ed25519, P-256 or RSA) signing
+# for it.
 pub class TlsServer < TlsConnection
   # The host the client named (server_name, RFC 6066), if it named one.
   getter server_name : String? = nil
@@ -2385,6 +2514,9 @@ pub class TlsServer < TlsConnection
     return TlsError.new("#{TlsBytes.handshake_name(hello[0])} where ClientHello belongs", TlsAlert::UNEXPECTED_MESSAGE) unless hello[0] == 1_u8
     offer = client_hello(hello)
     return offer if offer.is_a?(TlsError)
+    # A client that offers TLS 1.2 and not 1.3, to a server told to speak
+    # 1.2: that handshake from here.
+    return handshake12(hello, offer) if offer.is_a?(TlsOffer12)
     @early_left = EARLY_ALLOWANCE if offer.early_data
     @suite = offer.suites.find { |s| SUITES.includes?(s) } || 0
     @cipher_suite = TlsSuites.name(@suite)
@@ -2412,6 +2544,7 @@ pub class TlsServer < TlsConnection
       # (section 4.2.10): nothing after it is passed over.
       @early_left = 0
       return again if again.is_a?(TlsError)
+      return TlsError.new("a second ClientHello that leaves TLS 1.3 out", TlsAlert::ILLEGAL_PARAMETER) if again.is_a?(TlsOffer12)
       return TlsError.new("a second ClientHello with no #{group_name(group)} share", TlsAlert::ILLEGAL_PARAMETER) unless again.share(group)
       return TlsError.new("a second ClientHello with another session id", TlsAlert::ILLEGAL_PARAMETER) unless again.session == offer.session
       return TlsError.new("a second ClientHello that leaves out the suite chosen", TlsAlert::ILLEGAL_PARAMETER) unless again.suites.includes?(@suite)
@@ -2425,10 +2558,8 @@ pub class TlsServer < TlsConnection
     peer = offer.share(group)
     return TlsError.new("no #{group_name(group)} share", TlsAlert::ILLEGAL_PARAMETER) unless peer
     @server_name = offer.server_name
-    @alpn_protocol = choose_alpn(offer)
-    if (wanted = offer.alpn) && !@config.alpn.empty? && @alpn_protocol.nil?
-      return TlsError.new("the client offers #{wanted.join(", ")} by ALPN and this server speaks #{@config.alpn.join(", ")}", TlsAlert::NO_APPLICATION_PROTOCOL)
-    end
+    problem = agree_alpn(offer.alpn)
+    return problem if problem
 
     if group == GROUP_X25519
       private_key = Random::Secure.random_bytes(32)
@@ -2518,18 +2649,29 @@ pub class TlsServer < TlsConnection
   end
 
   # The first of this server's protocols the client offers, by ALPN.
-  private def choose_alpn(offer : TlsOffer) : String?
-    wanted = offer.alpn
+  private def choose_alpn(wanted : Array(String)?) : String?
     return nil unless wanted
     @config.alpn.find { |protocol| wanted.includes?(protocol) }
   end
 
+  # The protocol agreed by ALPN, or the refusal of a client that offers
+  # protocols and none of this server's (RFC 7301 section 3.2).
+  private def agree_alpn(offered : Array(String)?) : TlsError?
+    @alpn_protocol = choose_alpn(offered)
+    if (wanted = offered) && !@config.alpn.empty? && @alpn_protocol.nil?
+      return TlsError.new("the client offers #{wanted.join(", ")} by ALPN and this server speaks #{@config.alpn.join(", ")}", TlsAlert::NO_APPLICATION_PROTOCOL)
+    end
+    nil
+  end
+
   # The ClientHello read (section 4.1.2) and judged: TLS 1.3, a suite, the
-  # key's scheme and a group this server has, or why not.
-  private def client_hello(message : Array(UInt8)) : TlsOffer | TlsError
+  # key's scheme and a group this server has, or why not - or, from a
+  # client that offers TLS 1.2 and not 1.3 to a server told to speak 1.2,
+  # that offer as read, which `judge12` judges.
+  private def client_hello(message : Array(UInt8)) : TlsOffer | TlsOffer12 | TlsError
     reader = TlsReader.new(message[4, message.size - 4])
-    reader.u16
-    reader.bytes(32)
+    legacy = reader.u16
+    random = reader.bytes(32)
     session = reader.bytes(reader.u8)
     suite_bytes = reader.bytes(reader.u16)
     compression = reader.bytes(reader.u8)
@@ -2550,6 +2692,10 @@ pub class TlsServer < TlsConnection
     alpn = nil
     server_name = nil
     early = false
+    # TLS 1.2's own, their bodies as sent: judged only if 1.2 is spoken.
+    formats = nil
+    extended = nil
+    renegotiation = nil
     # Sets, not lists: a ClientHello of 64 KiB holds 16,384 empty
     # extensions, and a list asked of each would be their square.
     seen = {} of Int32 => Bool
@@ -2614,6 +2760,12 @@ pub class TlsServer < TlsConnection
           found[group] = key
         end
         shares = found
+      when 11
+        formats = data
+      when 23
+        extended = data
+      when 0xff01
+        renegotiation = data
       else
         # Every other extension - psk_key_exchange_modes, pre_shared_key,
         # padding, status_request and whatever a client adds - is passed
@@ -2621,10 +2773,16 @@ pub class TlsServer < TlsConnection
         # use.
       end
     end
-    unless versions && versions.includes?(0x0304)
-      return TlsError.new("the client does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION)
+    tls13 = (named = versions) ? named.includes?(0x0304) : false
+    # Section 4.2.1: without supported_versions, the version offered is
+    # legacy_version's, and 1.2 is among it at 0x0303 and above. A client
+    # that offers 1.3 is answered in it.
+    tls12 = !tls13 && @config.min_version == TlsVersion::TLS12 && ((named = versions) ? named.includes?(0x0303) : legacy >= 0x0303)
+    unless tls13 || tls12
+      return TlsError.new(@config.min_version == TlsVersion::TLS12 ? "the client speaks neither TLS 1.3 nor 1.2" : "the client does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION)
     end
     return TlsError.new("a ClientHello whose compression methods are not null alone", TlsAlert::ILLEGAL_PARAMETER) unless compression == [0_u8]
+    return TlsOffer12.new(random, suites, schemes, groups, alpn, server_name, extended, renegotiation, formats) if tls12
     return TlsError.new("the client offers no cipher suite this server has", TlsAlert::HANDSHAKE_FAILURE) unless suites.any? { |s| SUITES.includes?(s) }
     return TlsError.new("a ClientHello with no signature_algorithms", TlsAlert::MISSING_EXTENSION) unless schemes
     chosen = @config.identity_for(server_name, schemes)
@@ -2676,13 +2834,15 @@ pub class TlsServer < TlsConnection
     TlsBytes.message(13, [0_u8] + TlsBytes.u16(extensions.size) + extensions)
   end
 
-  # The client's Certificate (section 4.4.2), checked as std/x509 checks a
-  # client's against *roots*, then its CertificateVerify; none sent is
-  # refused while `client_required`.
+  # The client's Certificate (section 4.4.2; in TLS 1.2, RFC 5246 section
+  # 7.4.6, a bare list), checked as std/x509 checks a client's against
+  # *roots*, then its CertificateVerify - which in TLS 1.2 comes after the
+  # ClientKeyExchange, so the chain is kept for it; none sent is refused
+  # while `client_required`.
   private def client_certificate(message : Array(UInt8), roots : Array(Certificate)) : TlsError?
     return TlsError.new("#{TlsBytes.handshake_name(message[0])} where the client's Certificate belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 11_u8
     reader = TlsReader.new(message[4, message.size - 4])
-    context = reader.bytes(reader.u8)
+    context = @tls12 ? [] of UInt8 : reader.bytes(reader.u8)
     list = TlsReader.new(reader.bytes(reader.u24))
     return TlsError.new("a client Certificate cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
     return TlsError.new("a client Certificate whose request context is not the server's", TlsAlert::ILLEGAL_PARAMETER) unless context.empty?
@@ -2690,7 +2850,7 @@ pub class TlsServer < TlsConnection
     until list.done?
       return TlsError.new("a client Certificate of more than #{X509::MAX_CHAIN} certificates", TlsAlert::BAD_CERTIFICATE) if chain.size == X509::MAX_CHAIN
       der = list.bytes(list.u24)
-      entry_extensions = list.bytes(list.u16)
+      entry_extensions = @tls12 ? [] of UInt8 : list.bytes(list.u16)
       return TlsError.new("a client Certificate cut short", TlsAlert::DECODE_ERROR) if list.short?
       # Section 4.4.2: the CertificateRequest asked for no entry extensions.
       return TlsError.new("a client certificate entry with extensions nobody asked for", TlsAlert::UNSUPPORTED_EXTENSION) unless entry_extensions.empty?
@@ -2700,11 +2860,17 @@ pub class TlsServer < TlsConnection
     end
     @transcript = @transcript + message
     if chain.empty?
-      return TlsError.new("the client sent no certificate", TlsAlert::CERTIFICATE_REQUIRED) if @config.client_required
+      # TLS 1.2 has no certificate_required: RFC 5246 section 7.4.6 names
+      # handshake_failure.
+      return TlsError.new("the client sent no certificate", @tls12 ? TlsAlert::HANDSHAKE_FAILURE : TlsAlert::CERTIFICATE_REQUIRED) if @config.client_required
       return nil
     end
     verified = X509.verify(chain[0], chain[1, chain.size - 1], roots, nil, @config.now || Time.utc, X509Purpose::Client)
     return TlsError.new("the client's certificate is not trusted: #{verified.message}", TlsAlert::BAD_CERTIFICATE) if verified.is_a?(X509Error)
+    if @tls12
+      @chain12 = verified
+      return nil
+    end
     verify = handshake_message(plain: false)
     return verify if verify.is_a?(TlsError)
     return TlsError.new("#{TlsBytes.handshake_name(verify[0])} where the client's CertificateVerify belongs", TlsAlert::UNEXPECTED_MESSAGE) unless verify[0] == 15_u8
@@ -2716,13 +2882,18 @@ pub class TlsServer < TlsConnection
   end
 
   private def encrypted_extensions : Array(UInt8)
-    extensions = [] of UInt8
-    if (chosen = @alpn_protocol)
-      name = TlsBytes.of(chosen)
-      names = [name.size.to_u8] + name
-      extensions = extensions + TlsBytes.extension(16, TlsBytes.u16(names.size) + names)
-    end
+    extensions = alpn_answer
     TlsBytes.message(8, TlsBytes.u16(extensions.size) + extensions)
+  end
+
+  # ALPN's answer (RFC 7301 section 3.1): the protocol chosen, in
+  # EncryptedExtensions or a TLS 1.2 ServerHello; nothing when none was.
+  private def alpn_answer : Array(UInt8)
+    chosen = @alpn_protocol
+    return [] of UInt8 unless chosen
+    name = TlsBytes.of(chosen)
+    names = [name.size.to_u8] + name
+    TlsBytes.extension(16, TlsBytes.u16(names.size) + names)
   end
 
   private def certificate_message : Array(UInt8)
@@ -2737,6 +2908,231 @@ pub class TlsServer < TlsConnection
     signed = Array(UInt8).new(64, 0x20_u8) + TlsBytes.of("TLS 1.3, server CertificateVerify") + [0_u8] + @schedule.hash(@transcript)
     signature = @identity.sign(@scheme, signed)
     TlsBytes.message(15, TlsBytes.u16(@scheme) + TlsBytes.u16(signature.size) + signature)
+  end
+
+  # --- TLS 1.2, the server's half (RFC 5246, RFC 7627, RFC 5746, RFC 8422) ---
+
+  # The client's chain, checked, kept from its Certificate for its
+  # CertificateVerify, which comes after the ClientKeyExchange.
+  @chain12 : Array(Certificate) = [] of Certificate
+
+  # A full TLS 1.2 handshake with a client that offered 1.2 and not 1.3,
+  # from its ClientHello (*hello*, read as *offer*): ServerHello, the
+  # identity's Certificate, an ECDHE ServerKeyExchange signed over both
+  # randoms and the parameters, a CertificateRequest when told to ask, and
+  # ServerHelloDone, in the clear; then the client's Certificate,
+  # ClientKeyExchange and CertificateVerify, the extended master secret,
+  # the client's ChangeCipherSpec and Finished checked under its keys, and
+  # this side's ChangeCipherSpec and Finished. No session id is given and
+  # no ticket: there is no resumption.
+  private def handshake12(hello : Array(UInt8), offer : TlsOffer12) : TlsError?
+    @tls12 = true
+    @version = "TLSv1.2"
+    judged = judge12(offer)
+    return judged if judged.is_a?(TlsError)
+    group, scheme = judged
+    @cipher_suite = TlsSuites.name(@suite)
+    @schedule = TlsKeySchedule.new(TlsSuites.sha384?(@suite))
+    @server_name = offer.server_name
+    problem = agree_alpn(offer.alpn)
+    return problem if problem
+
+    # RFC 8446 section 4.1.3: a server that speaks 1.3 and answers in 1.2
+    # ends its random with the sentinel, which a client that offered 1.3 -
+    # and had it taken out on the way - refuses.
+    random = Random::Secure.random_bytes(24) + TlsBytes.from_hex(DOWNGRADE_TLS12)
+    x25519_key = Random::Secure.random_bytes(32)
+    p256_key = group == GROUP_SECP256R1 ? p256_ephemeral : nil
+    point = p256_key ? [] of UInt8 + p256_key.public_point : TlsBytes.of(X25519.public_key(x25519_key))
+    # The extended master secret's answer; secure renegotiation's empty
+    # renegotiated_connection (RFC 5746 section 3.6) to a client that
+    # signalled it, by the extension or by TLS_EMPTY_RENEGOTIATION_INFO_SCSV;
+    # uncompressed points (RFC 8422 section 5.2) to one that listed
+    # formats; and ALPN's.
+    answers = TlsBytes.extension(23, [] of UInt8)
+    answers = answers + TlsBytes.extension(0xff01, [0_u8]) if offer.renegotiation_info || offer.suites.includes?(0x00FF)
+    answers = answers + TlsBytes.extension(11, [1_u8, 0_u8]) if offer.point_formats
+    answers = answers + alpn_answer
+    server_hello = TlsBytes.message(2, [3_u8, 3_u8] + random + [0_u8] + TlsBytes.u16(@suite) + [0_u8] + TlsBytes.u16(answers.size) + answers)
+    entries = [] of UInt8
+    @identity.chain.each { |der| entries = entries + TlsBytes.u24(der.size) + der }
+    certificate = TlsBytes.message(11, TlsBytes.u24(entries.size) + entries)
+    # RFC 8422 section 5.4: a named curve, the point, and the identity's
+    # signature over the client's random, this side's and the two.
+    params = [3_u8] + TlsBytes.u16(group) + [point.size.to_u8] + point
+    signature = @identity.sign(scheme, offer.random + random + params)
+    exchange = TlsBytes.message(12, params + TlsBytes.u16(scheme) + TlsBytes.u16(signature.size) + signature)
+    request = @config.client_roots ? request12 : [] of UInt8
+    flight = server_hello + certificate + exchange + request + TlsBytes.message(14, [] of UInt8)
+    @transcript = hello + flight
+    sent = put(plain_records(TlsRecords::HANDSHAKE, flight))
+    return sent if sent
+
+    # The client's Certificate when one was asked for, its
+    # ClientKeyExchange, and its CertificateVerify after a certificate.
+    message = handshake_message(plain: true)
+    return message if message.is_a?(TlsError)
+    if roots = @config.client_roots
+      problem = client_certificate(message, roots)
+      return problem if problem
+      message = handshake_message(plain: true)
+      return message if message.is_a?(TlsError)
+    end
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where the ClientKeyExchange belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 16_u8
+    reader = TlsReader.new(message[4, message.size - 4])
+    peer = reader.bytes(reader.u8)
+    return TlsError.new("a ClientKeyExchange cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
+    if p256_key
+      got = p256_key.shared_secret(peer)
+      return TlsError.new("the client's secp256r1 point: #{got.message}", TlsAlert::ILLEGAL_PARAMETER) if got.is_a?(EcdsaError)
+      secret = got
+    else
+      return TlsError.new("an X25519 point of #{peer.size} bytes", TlsAlert::ILLEGAL_PARAMETER) unless peer.size == 32
+      shared = X25519.shared(x25519_key, peer)
+      return TlsError.new("the client's X25519 point gives no secret", TlsAlert::ILLEGAL_PARAMETER) if shared.is_a?(CurveError)
+      secret = TlsBytes.of(shared)
+    end
+    @transcript = @transcript + message
+    master, client_keys, server_keys = keys12(secret, offer.random, random)
+    unless @chain12.empty?
+      verify = handshake_message(plain: true)
+      return verify if verify.is_a?(TlsError)
+      return TlsError.new("#{TlsBytes.handshake_name(verify[0])} where the client's TLS 1.2 CertificateVerify belongs", TlsAlert::UNEXPECTED_MESSAGE) unless verify[0] == 15_u8
+      problem = certificate_verify12(verify, @chain12[0])
+      return problem if problem
+      @transcript = @transcript + verify
+      @peer_certificates = @chain12
+    end
+
+    # The client's ChangeCipherSpec and Finished; then this side's.
+    changed = change_cipher_spec12
+    return changed if changed
+    @reader = client_keys
+    message = handshake_message(plain: false)
+    return message if message.is_a?(TlsError)
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where the client's Finished belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 20_u8
+    unless Subtle.constant_time_compare(message[4, message.size - 4], finished12(master, true))
+      return TlsError.new("the client's TLS 1.2 Finished does not match the handshake", TlsAlert::DECRYPT_ERROR)
+    end
+    return TlsError.new("handshake bytes left after the client's TLS 1.2 Finished", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
+    @transcript = @transcript + message
+    finished = TlsBytes.message(20, finished12(master, false))
+    @writer = server_keys
+    sent = put([TlsRecords::CHANGE_CIPHER_SPEC, 3_u8, 3_u8, 0_u8, 1_u8, 1_u8] + server_keys.seal(TlsRecords::HANDSHAKE, finished))
+    return sent if sent
+    @transcript = @transcript + finished
+    @handshaking = false
+    nil
+  end
+
+  # The TLS 1.2 offer judged: the identity, the suite, the group and the
+  # scheme the ServerKeyExchange is signed under ({group, scheme}), or why
+  # the client is refused.
+  private def judge12(offer : TlsOffer12) : {Int32, Int32} | TlsError
+    # RFC 7507: TLS_FALLBACK_SCSV is a client trying an older version after
+    # a newer one failed; this server speaks 1.3, so something between
+    # made that one fail.
+    if offer.suites.includes?(0x5600)
+      return TlsError.new("a ClientHello falling back to TLS 1.2 (TLS_FALLBACK_SCSV), to a server that speaks 1.3", TlsAlert::INAPPROPRIATE_FALLBACK)
+    end
+    ems = offer.extended_master_secret
+    return TlsError.new("the client does not do the extended master secret (RFC 7627), which a TLS 1.2 handshake here requires", TlsAlert::HANDSHAKE_FAILURE) unless ems
+    return TlsError.new("an extended_master_secret offer with a body", TlsAlert::DECODE_ERROR) unless ems.empty?
+    if (info = offer.renegotiation_info)
+      field = TlsReader.new(info)
+      connection = field.bytes(field.u8)
+      return TlsError.new("a renegotiation_info cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
+      # RFC 5746 section 3.6: on a first handshake renegotiated_connection
+      # is empty.
+      return TlsError.new("a renegotiation_info that is not empty, on a first handshake", TlsAlert::HANDSHAKE_FAILURE) unless connection.empty?
+    end
+    if (formats = offer.point_formats)
+      field = TlsReader.new(formats)
+      listed = field.bytes(field.u8)
+      return TlsError.new("ec_point_formats cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done? || listed.empty?
+      # RFC 8422 section 5.1.2: uncompressed points are the one format
+      # left, and a list without them is refused.
+      return TlsError.new("ec_point_formats without uncompressed points", TlsAlert::ILLEGAL_PARAMETER) unless listed.includes?(0_u8)
+    end
+    # RFC 5246 section 7.4.1.4.1: a client without signature_algorithms
+    # takes SHA-1 alone, which nothing here signs under.
+    schemes = offer.schemes
+    return TlsError.new("a TLS 1.2 ClientHello with no signature_algorithms, which leaves SHA-1 alone", TlsAlert::HANDSHAKE_FAILURE) unless schemes
+    chosen = identity12(offer, schemes)
+    return chosen if chosen.is_a?(TlsError)
+    @identity = chosen
+    # The client's order chooses, as in 1.3, among the suites of the key's
+    # kind.
+    @suite = offer.suites.find { |s| TlsSuites::TLS12.includes?(s) && TlsSuites.rsa?(s) == chosen.rsa? } || 0
+    # X25519 before secp256r1, as for a 1.3 share. A client with no
+    # supported_groups leaves the curve to the server (RFC 8422 section
+    # 4), and secp256r1 is the one every ECDHE client has.
+    group = GROUP_SECP256R1
+    if (groups = offer.groups)
+      if groups.includes?(GROUP_X25519)
+        group = GROUP_X25519
+      elsif !groups.includes?(GROUP_SECP256R1)
+        return TlsError.new("the client offers neither X25519 nor secp256r1 for TLS 1.2's ECDHE", TlsAlert::HANDSHAKE_FAILURE)
+      end
+    end
+    {group, chosen.scheme12_for(schemes) || 0}
+  end
+
+  # The identity a TLS 1.2 offer is answered under: the first of the
+  # config's `others` that names the host asked for and can answer it, else
+  # `identity` if it can; or why the client is refused.
+  private def identity12(offer : TlsOffer12, schemes : Array(Int32)) : TlsIdentity | TlsError
+    if (name = offer.server_name)
+      @config.others.each { |other| return other if other.leaf.matches_host?(name) && refusal12(other, offer, schemes).nil? }
+    end
+    why = refusal12(@config.identity, offer, schemes)
+    return TlsError.new(why, TlsAlert::HANDSHAKE_FAILURE) if why
+    @config.identity
+  end
+
+  # Why *identity* cannot answer a TLS 1.2 offer, or nil when it can: it
+  # needs an offered suite of its key's kind, a scheme it signs under, and
+  # for an ECDSA key secp256r1 among the client's groups when it names
+  # any (RFC 8422 section 5.1.1: the certificate's curve is one the client
+  # names). Ed25519's is no curve of supported_groups (section 5.5).
+  private def refusal12(identity : TlsIdentity, offer : TlsOffer12, schemes : Array(Int32)) : String?
+    unless offer.suites.any? { |s| TlsSuites::TLS12.includes?(s) && TlsSuites.rsa?(s) == identity.rsa? }
+      return "the client offers no #{identity.rsa? ? "ECDHE_RSA" : "ECDHE_ECDSA"} suite with AES-GCM or ChaCha20-Poly1305, which this server's key for it needs in TLS 1.2"
+    end
+    unless identity.scheme12_for(schemes)
+      return "the client does not take #{TlsIdentity.scheme_names(identity.rsa? ? identity.schemes + TlsIdentity::RSA_PKCS1 : identity.schemes)} signatures, which this server's key for it makes"
+    end
+    if (groups = offer.groups) && identity.leaf.public_key.is_a?(EcdsaPublicKey) && !groups.includes?(GROUP_SECP256R1)
+      return "the client's supported_groups leave out secp256r1, the curve of this server's ECDSA key for it (RFC 8422 section 5.1.1)"
+    end
+    nil
+  end
+
+  # A TLS 1.2 CertificateRequest (RFC 5246 section 7.4.4): ecdsa_sign -
+  # under which an Ed25519 key is asked for too (RFC 8422 section 5.5) -
+  # and rsa_sign, the schemes a CertificateVerify is checked under, and no
+  # authorities named.
+  private def request12 : Array(UInt8)
+    schemes = [] of UInt8
+    TlsClient::SIGNATURE_SCHEMES.each { |scheme| schemes = schemes + TlsBytes.u16(scheme) }
+    TlsBytes.message(13, [2_u8, 64_u8, 1_u8] + TlsBytes.u16(schemes.size) + schemes + [0_u8, 0_u8])
+  end
+
+  # A client's TLS 1.2 CertificateVerify (RFC 5246 section 7.4.8): its
+  # leaf's signature of the handshake so far, under a scheme the
+  # CertificateRequest named.
+  private def certificate_verify12(message : Array(UInt8), leaf : Certificate) : TlsError?
+    reader = TlsReader.new(message[4, message.size - 4])
+    scheme = reader.u16
+    signature = reader.bytes(reader.u16)
+    return TlsError.new("a CertificateVerify cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done?
+    if (usage = leaf.key_usage) && ((usage >> Certificate::KEY_DIGITAL_SIGNATURE) & 1) == 0
+      return TlsError.new("the client's certificate does not allow digitalSignature, which a CertificateVerify is", TlsAlert::BAD_CERTIFICATE)
+    end
+    ok = signed12?("a client's CertificateVerify", leaf, scheme, @transcript, signature)
+    return ok if ok.is_a?(TlsError)
+    return TlsError.new("the client's TLS 1.2 CertificateVerify is not its key's signature", TlsAlert::DECRYPT_ERROR) unless ok
+    nil
   end
 end
 

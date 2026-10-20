@@ -1092,32 +1092,6 @@ HPACK_WORDS = [[0x3F_u8, 0xE1_u8, 0x1F_u8], [0x20_u8], [0xFF_u8, 0xFF_u8, 0xFF_u
 # its half of the stream and reads what comes back until the module
 # closes.
 
-# `shutdown(SHUT_WR)`, and on Windows Winsock's `shutdown(SD_SEND)` on the
-# SOCKET the class's Int32 carries (std/socket's `__sys_handle` is the
-# same widening; ws2_32 is linked by std/socket). Both are 1.
-{% if flag?(:win32) %}
-  lib LibFuzzSocket
-    fun shutdown(s : UInt64, how : Int32) : Int32
-  end
-{% else %}
-  lib LibFuzzSocket
-    fun shutdown(fd : Int32, how : Int32) : Int32
-  end
-{% end %}
-
-# The peer is done writing: what the module reads next is the end of the
-# stream, at once, rather than a wait for its own timeout; the peer then
-# reads what the module still sends until it closes. Windows once closed
-# the socket here instead, and the read after it panicked "socket is
-# closed" in every scripted peer (CI job 118392900512).
-def half_close(socket : IyiSocket) : Nil
-  {% if flag?(:win32) %}
-    LibFuzzSocket.shutdown(socket.to_unsafe.to_i64.unsafe_to_u64, 1)
-  {% else %}
-    LibFuzzSocket.shutdown(socket.to_unsafe, 1)
-  {% end %}
-end
-
 # How long a peer waits on a module that has stopped talking, and the
 # bound the module's side runs under. The peer always ends its half, so
 # neither is waited out by a module that reads the end as one.
@@ -1205,7 +1179,13 @@ class Wire
   # phrase: an HTTP/1 status line; or the HTTP/2 frames it began with,
   # by type, a RST_STREAM's and a GOAWAY's with their error code.
   def finish : String
-    half_close(@socket)
+    # The peer's half ended with `close_write`: what the module reads next
+    # is the end of the stream, at once, rather than a wait for its own
+    # timeout; the peer then reads what it still sends until it closes. A
+    # module that has already closed makes it a refusal, which changes
+    # nothing here. Windows once closed the socket instead, and the read
+    # after it panicked "socket is closed" (CI job 118392900512).
+    @socket.close_write
     total = 0
     until @ended || total > 16_000_000
       got = @socket.read(65536)

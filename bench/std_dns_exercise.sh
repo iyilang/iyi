@@ -192,8 +192,8 @@ else
     'next unless DnsMessage.id_of(packet) == id.to_i32' \
     ''
   breaks "NXDOMAIN read as a server's failure" nxservfail "NXDOMAIN is not_found?" socket.iyi \
-    'return DnsError.new(DnsError::NOT_FOUND, name, server.label)' \
-    'return DnsError.new(DnsError::SERVER_FAILURE, name, server.label)'
+    'DnsError.new(DnsError::NOT_FOUND, name, label)' \
+    'DnsError.new(DnsError::SERVER_FAILURE, name, label)'
   breaks "a CNAME not followed" nocname "a CNAME chain in one answer" dns.iyi \
     'next_name = record.target if record.type == DnsRecord::CNAME && next_name.empty?' \
     'next_name = "" if record.type == DnsRecord::CNAME'

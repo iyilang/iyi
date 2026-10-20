@@ -18,12 +18,14 @@
 # already makes, so Linux programs retain raw syscall purity (zero
 # undefined symbols) and Darwin programs only link standard socket
 # symbols provided by libSystem. The wire format and the configuration
-# files are `std/dns`'s. `listen` and `std/udp` still take addresses
-# only: a listener names its own interface, and a datagram's peer is
-# whoever the program already heard from. A socket listening on `::`
-# takes IPv6 alone on every platform (IPV6_V6ONLY): Linux's default is
-# both families and Windows' is IPv6 alone, and a program should not
-# change meaning with the machine it runs on.
+# files are `std/dns`'s; a resolver can ask DNS over TLS or over HTTPS
+# instead (`Resolver#encrypted`, std/secure_dns's upstreams), which
+# `connect` with that resolver then uses. `listen` and `std/udp` still
+# take addresses only: a listener names its own interface, and a
+# datagram's peer is whoever the program already heard from. A socket
+# listening on `::` takes IPv6 alone on every platform (IPV6_V6ONLY):
+# Linux's default is both families and Windows' is IPv6 alone, and a
+# program should not change meaning with the machine it runs on.
 #
 # Concurrency:
 # On the targets that have the runtime (SPEC.md III.4), every socket is
@@ -2443,6 +2445,29 @@ pub class IyiSocket
   {% end %}
 end
 
+# An encrypted way to a name server, asked by a resolver `Resolver#encrypted`
+# made instead of its plaintext servers: std/secure_dns's `DnsOverTls`
+# (RFC 7858) and `DnsOverHttps` (RFC 8484). The trait is here and they are
+# there because they speak std/tls and std/http, which import this module,
+# and R-1 refuses the cycle - as std/http's `CookieStore` is std/cookie's
+# to implement.
+pub trait DnsUpstream
+  # How a message names it: `dns.test (127.0.0.1:853) over TLS`.
+  abstract def label : String
+  # Whether its queries carry the ID 0: DNS over HTTPS's, which RFC 8484
+  # 4.1 asks for so that an HTTP cache sees one request for one question.
+  # The answer must carry the ID the query did all the same.
+  abstract def zero_id? : Bool
+  # The answer to each of *queries*, in their order, each one whole
+  # message as it came; or why there are none. *timeout_ms* bounds each
+  # wait on the server. An answer is matched to its query by the
+  # transport - by ID over one connection, by request over HTTP - and the
+  # resolver then reads it as it reads a datagram.
+  abstract def exchange(queries : Array(Bytes), timeout_ms : Int32) : Array(Bytes) | DnsError | Cancelled
+  # Its connections closed; the next exchange opens new ones.
+  abstract def close : Nil
+end
+
 # One name server: the address a call takes, its family, and how a
 # message names it (`192.0.2.1:53`).
 struct NameServer
@@ -2490,6 +2515,26 @@ end
 # the next server; NXDOMAIN is the answer. An answer that cannot be read
 # is ignored like a forgery, and is the failure reported if nothing
 # better arrives before the timeout.
+#
+# Encrypted:
+# `encrypted(upstreams)` is the same resolver - hosts file, search list,
+# `ndots`, timeout and attempts - asking `DnsUpstream`s instead of its
+# plaintext servers: DNS over TLS or over HTTPS, std/secure_dns's
+# `DnsOverTls` and `DnsOverHttps`. Each upstream is asked in turn, the
+# round repeated `attempts` times, as the servers are; A and AAAA go in
+# one exchange. An answer over one is held to more than a datagram is:
+# the ID and the question as ever, and no TC and no byte past the message,
+# since a stream has room for any answer and its frame is the message.
+# The plaintext servers are not asked at all, not even when every
+# upstream is down, unless the caller passes *plaintext_fallback*: RFC
+# 8310 5's strict profile, where a lookup that cannot be private fails,
+# is the default, because falling back hands the very question the
+# program meant to keep private to anyone on the path, and a program
+# that would rather have an answer says so. With *plaintext_fallback*
+# (the opportunistic profile) the plaintext servers are asked only when
+# no upstream could be: one that answered, SERVFAIL included, has spoken.
+# One task at a time per resolver with upstreams: an upstream holds its
+# connection, as an `HTTPClient` does.
 pub class Resolver
   RESOLV_CONF = "/etc/resolv.conf"
   HOSTS       = "/etc/hosts"
@@ -2501,6 +2546,12 @@ pub class Resolver
   getter attempts : Int32
   # The hosts file's text, read before any server is asked.
   getter hosts : String
+  # The encrypted upstreams asked instead of `nameservers`; none for a
+  # plaintext resolver.
+  getter upstreams : Array(DnsUpstream) = [] of DnsUpstream
+  # Whether `nameservers` are asked when no upstream could be (RFC 8310's
+  # opportunistic profile); false, the strict one, by default.
+  getter plaintext_fallback : Bool = false
 
   @servers : Array(NameServer)
 
@@ -2521,6 +2572,40 @@ pub class Resolver
       raise server if server.is_a?(String)
       @servers << server
     end
+  end
+
+  # This resolver asking *upstreams* instead of its plaintext servers,
+  # which are asked only with *plaintext_fallback*, and then only when no
+  # upstream could be (see the class).
+  def encrypted(upstreams : Array(DnsUpstream), plaintext_fallback : Bool = false) : Resolver
+    raise "an encrypted resolver asks at least one upstream" if upstreams.empty?
+    made = Resolver.new(@nameservers, @search, @ndots, @timeout_ms, @attempts, @hosts)
+    made.ask_upstreams_instead(upstreams.dup, plaintext_fallback)
+    made
+  end
+
+  def encrypted(upstream : DnsUpstream, plaintext_fallback : Bool = false) : Resolver
+    encrypted([upstream] of DnsUpstream, plaintext_fallback)
+  end
+
+  # The machine's resolver - its hosts file and search list - asking
+  # *upstreams*; its name servers only with *plaintext_fallback*.
+  def self.encrypted(upstreams : Array(DnsUpstream), plaintext_fallback : Bool = false) : Resolver
+    system.encrypted(upstreams, plaintext_fallback)
+  end
+
+  def self.encrypted(upstream : DnsUpstream, plaintext_fallback : Bool = false) : Resolver
+    system.encrypted(upstream, plaintext_fallback)
+  end
+
+  protected def ask_upstreams_instead(upstreams : Array(DnsUpstream), plaintext_fallback : Bool) : Nil
+    @upstreams = upstreams
+    @plaintext_fallback = plaintext_fallback
+  end
+
+  # Every upstream's connections closed.
+  def close : Nil
+    @upstreams.each { |upstream| upstream.close }
   end
 
   # A resolver from a parsed resolv.conf and a hosts file's text. A
@@ -2680,14 +2765,22 @@ pub class Resolver
 
   # One fully qualified name's A and then AAAA records. NXDOMAIN for A
   # is NXDOMAIN for the name, and AAAA is not asked; an AAAA lookup that
-  # fails after A answered leaves the A records the answer.
+  # fails after A answered leaves the A records the answer. Over
+  # upstreams both questions go in one exchange - pipelined, over TLS -
+  # and the AAAA answer is read as if it had been asked second.
   private def lookup(name : String) : Array(IPAddress) | DnsError | Cancelled
-    four = records(name, DnsRecord::A)
+    early = nil.as(Array(Tuple(DnsMessage, String) | DnsError)?)
+    unless @upstreams.empty?
+      asked = ask_upstreams(name, [DnsRecord::A, DnsRecord::AAAA])
+      return asked if asked.is_a?(Cancelled)
+      early = asked
+    end
+    four = addresses(name, DnsRecord::A, early ? early[0] : nil)
     return four if four.is_a?(Cancelled)
     if four.is_a?(DnsError)
       return four unless four.no_address?
     end
-    six = records(name, DnsRecord::AAAA)
+    six = addresses(name, DnsRecord::AAAA, early ? early[1] : nil)
     return six if six.is_a?(Cancelled)
     found = four.is_a?(Array(IPAddress)) ? four : [] of IPAddress
     if six.is_a?(DnsError)
@@ -2699,41 +2792,78 @@ pub class Resolver
     four.is_a?(DnsError) ? four : DnsError.new(DnsError::NO_ADDRESS, name)
   end
 
+  private def addresses(name : String, type : Int32, first : Tuple(DnsMessage, String) | DnsError | Nil) : Array(IPAddress) | DnsError | Cancelled
+    got = records(name, type, first)
+    return got unless got.is_a?(Tuple(Array(Bytes), String))
+    addresses = [] of IPAddress
+    got[0].each do |data|
+      if data.size == 4
+        addresses << IPv4Address.new(data[0], data[1], data[2], data[3])
+      else
+        addresses << IPv6Address.new(data.to_unsafe)
+      end
+    end
+    addresses
+  end
+
+  # The TXT records of *name*, each one's character-strings joined
+  # (`DnsRecord.character_strings`), in the order the answer gave them,
+  # CNAMEs followed as `resolve` follows them. The name is asked as
+  # written - no hosts file, no search list - since a TXT name
+  # (`_acme-challenge.example.com`, a domain's SPF) is written in full.
+  def txt(name : String) : Array(String) | DnsError | Cancelled
+    why = DnsName.why(name)
+    return DnsError.new(DnsError::INVALID_NAME, name, "", why) if why.is_a?(String)
+    got = records(DnsName.relative(name), DnsRecord::TXT, nil)
+    return got unless got.is_a?(Tuple(Array(Bytes), String))
+    found, label = got
+    texts = [] of String
+    found.each do |data|
+      strings = DnsRecord.character_strings(data)
+      return DnsMessage.malformed("a TXT record's strings run past its data").about(name, label) if strings.nil?
+      texts << strings.join
+    end
+    texts
+  end
+
   # *name*'s records of *type*, following CNAMEs - within an answer, and
   # by asking again when a chain leaves one - at most
-  # `DnsMessage::MAX_CNAMES` links in all.
-  private def records(name : String, type : Int32) : Array(IPAddress) | DnsError | Cancelled
+  # `DnsMessage::MAX_CNAMES` links in all; with the label of the server
+  # that answered. *first* is the answer to the first question when it
+  # has been asked already.
+  private def records(name : String, type : Int32, first : Tuple(DnsMessage, String) | DnsError | Nil) : Tuple(Array(Bytes), String) | DnsError | Cancelled
     target = name
     budget = DnsMessage::MAX_CNAMES
+    answered = first
     while true
-      answered = exchange(target, type)
-      return answered unless answered.is_a?(Tuple(DnsMessage, NameServer))
-      message, server = answered
+      answered = exchange(target, type) if answered.nil?
+      return answered unless answered.is_a?(Tuple(DnsMessage, String))
+      message, label = answered
+      answered = nil
       read = message.addresses(target, type, budget)
-      return read.about(name, server.label) if read.is_a?(DnsError)
+      return read.about(name, label) if read.is_a?(DnsError)
       found, ends, links = read
-      unless found.empty?
-        addresses = [] of IPAddress
-        found.each do |data|
-          if data.size == 4
-            addresses << IPv4Address.new(data[0], data[1], data[2], data[3])
-          else
-            addresses << IPv6Address.new(data.to_unsafe)
-          end
-        end
-        return addresses
-      end
-      return DnsError.new(DnsError::NO_ADDRESS, name, server.label) if links == 0
+      return {found, label} unless found.empty?
+      return DnsError.new(DnsError::NO_ADDRESS, name, label, type == DnsRecord::TXT ? "no TXT record" : "") if links == 0
       budget = budget - links
-      return DnsMessage.malformed("a chain of more than #{DnsMessage::MAX_CNAMES} CNAMEs").about(name, server.label) if budget <= 0
+      return DnsMessage.malformed("a chain of more than #{DnsMessage::MAX_CNAMES} CNAMEs").about(name, label) if budget <= 0
       target = ends
     end
   end
 
-  # The answer to one question: each server in turn, the round repeated
-  # `attempts` times, until one answers NOERROR or NXDOMAIN. The failure
-  # answered otherwise is the last server's.
-  private def exchange(name : String, type : Int32) : Tuple(DnsMessage, NameServer) | DnsError | Cancelled
+  # The answer to one question, from the upstreams when there are any and
+  # from the plaintext servers otherwise.
+  private def exchange(name : String, type : Int32) : Tuple(DnsMessage, String) | DnsError | Cancelled
+    return plaintext(name, type) if @upstreams.empty?
+    asked = ask_upstreams(name, [type])
+    return asked if asked.is_a?(Cancelled)
+    asked[0]
+  end
+
+  # The answer to one question over plaintext: each server in turn, the
+  # round repeated `attempts` times, until one answers NOERROR or
+  # NXDOMAIN. The failure answered otherwise is the last server's.
+  protected def plaintext(name : String, type : Int32) : Tuple(DnsMessage, String) | DnsError | Cancelled
     return DnsError.new(DnsError::UNREACHABLE, name, "", "no name server is configured") if @servers.empty?
     failure = nil.as(DnsError?)
     attempt = 0
@@ -2748,20 +2878,118 @@ pub class Resolver
           failure = got
           next
         end
-        case got.rcode
-        when DnsMessage::RCODE_NOERROR
-          return {got, server}
-        when DnsMessage::RCODE_NXDOMAIN
-          return DnsError.new(DnsError::NOT_FOUND, name, server.label)
-        when DnsMessage::RCODE_SERVFAIL
-          failure = DnsError.new(DnsError::SERVER_FAILURE, name, server.label)
-        else
-          failure = DnsError.new(DnsError::REFUSED, name, server.label, Resolver.rcode_name(got.rcode))
-        end
+        read = Resolver.read_rcode(got, name, server.label)
+        return read if read.is_a?(Tuple(DnsMessage, String)) || read.not_found?
+        failure = read
       end
       attempt = attempt + 1
     end
     failure || DnsError.new(DnsError::TIMED_OUT, name)
+  end
+
+  # What an answer's RCODE makes of it: the message for NOERROR, and the
+  # failure it says otherwise.
+  def self.read_rcode(message : DnsMessage, name : String, label : String) : Tuple(DnsMessage, String) | DnsError
+    case message.rcode
+    when DnsMessage::RCODE_NOERROR
+      {message, label}
+    when DnsMessage::RCODE_NXDOMAIN
+      DnsError.new(DnsError::NOT_FOUND, name, label)
+    when DnsMessage::RCODE_SERVFAIL
+      DnsError.new(DnsError::SERVER_FAILURE, name, label)
+    else
+      DnsError.new(DnsError::REFUSED, name, label, Resolver.rcode_name(message.rcode))
+    end
+  end
+
+  # The answers to *types* of questions about *name*, from the upstreams:
+  # each in turn, the round repeated `attempts` times, until one answers
+  # every question NOERROR or NXDOMAIN. An upstream that answered at all
+  # - SERVFAIL included - is the last one's word when none does better.
+  # When no upstream could be asked, the plaintext servers are asked
+  # instead only when `plaintext_fallback` says so (see the class).
+  private def ask_upstreams(name : String, types : Array(Int32)) : Array(Tuple(DnsMessage, String) | DnsError) | Cancelled
+    failure = nil.as(DnsError?)
+    spoken = nil.as(Array(Tuple(DnsMessage, String) | DnsError)?)
+    attempt = 0
+    while attempt < @attempts
+      index = 0
+      while index < @upstreams.size
+        upstream = @upstreams[index]
+        index = index + 1
+        got = ask_upstream(upstream, name, types)
+        return got if got.is_a?(Cancelled)
+        if got.is_a?(DnsError)
+          failure = got
+          next
+        end
+        return got if got.all? { |one| one.is_a?(Tuple(DnsMessage, String)) || one.not_found? }
+        spoken = got
+      end
+      attempt = attempt + 1
+    end
+    if said = spoken
+      return said
+    end
+    lost = failure || DnsError.new(DnsError::TIMED_OUT, name)
+    answers = [] of Tuple(DnsMessage, String) | DnsError
+    types.each do |type|
+      if @plaintext_fallback && !@servers.empty?
+        asked = plaintext(name, type)
+        return asked if asked.is_a?(Cancelled)
+        answers << asked
+      else
+        answers << lost
+      end
+    end
+    answers
+  end
+
+  # One exchange with one upstream: a query per type, each with its own
+  # ID from `Random::Secure` (or 0, `zero_id?`), and each answer held to
+  # what a stream's answer must be - the ID and the question, no TC (a
+  # stream has room for any answer), and no byte past the message (the
+  # frame is the message: RFC 7858 3.3, RFC 8484 6).
+  private def ask_upstream(upstream : DnsUpstream, name : String, types : Array(Int32)) : Array(Tuple(DnsMessage, String) | DnsError) | DnsError | Cancelled
+    label = upstream.label
+    ids = [] of UInt16
+    queries = [] of Bytes
+    types.each do |type|
+      id = 0_u16
+      unless upstream.zero_id?
+        # Distinct within the exchange: over one connection the ID is what
+        # an answer is matched to its query by.
+        id = (Random::Secure.next_u & 0xFFFF_u32).to_u16
+        while ids.includes?(id)
+          id = (Random::Secure.next_u & 0xFFFF_u32).to_u16
+        end
+      end
+      ids << id
+      queries << DnsMessage.query(id, name, type)
+    end
+    got = upstream.exchange(queries, @timeout_ms)
+    return got if got.is_a?(Cancelled)
+    return got.about(name, label) if got.is_a?(DnsError)
+    return DnsMessage.malformed("#{got.size} answers to #{queries.size} queries").about(name, label) unless got.size == queries.size
+    answers = [] of Tuple(DnsMessage, String) | DnsError
+    index = 0
+    while index < got.size
+      answers << Resolver.read_streamed(got[index], ids[index], name, types[index], label)
+      index = index + 1
+    end
+    answers
+  end
+
+  # An answer that came over a stream, read: see `ask_upstream`.
+  def self.read_streamed(bytes : Bytes, id : UInt16, name : String, type : Int32, label : String) : Tuple(DnsMessage, String) | DnsError
+    message = DnsMessage.parse(bytes)
+    return message.about(name, label) if message.is_a?(DnsError)
+    return DnsMessage.malformed("the answer is not to the question asked").about(name, label) unless message.answers?(id, name, type)
+    return DnsMessage.malformed("the answer is truncated (TC), which an answer over a stream never is").about(name, label) if message.truncated?
+    ends = DnsMessage.ends_at(bytes)
+    return DnsMessage.malformed("its records run past the message").about(name, label) if ends < 0
+    return DnsMessage.malformed("oversized: #{bytes.size - ends} bytes past the end of the message").about(name, label) if ends < bytes.size
+    read_rcode(message, name, label)
   end
 
   def self.rcode_name(rcode : Int32) : String

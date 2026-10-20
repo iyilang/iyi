@@ -417,6 +417,20 @@
   keys 1 and n - 1 that meet the doubling and the identity in the new
   path, P-384's for the old, and ten new broken copies in
   `bench/std_ecdsa_exercise.sh`; one more in `bench/std_rsa_exercise.sh`.
+- **P-256 signing no longer branches on its nonce's digits, and
+  `bench/ct_timing.sh` times std's secret paths.** The tool is a
+  dudect-style check (Welch's t between a fixed input and random ones,
+  interleaved, with percentile crops): it found P-256 signing at |t| = 16
+  to 24 over 100,000 signatures, and the --release assembly of
+  `P256BaseTable.pick` showed why - LLVM had made its masked table read
+  a conditional jump per entry on the digit. The selectors are xored with
+  a zero read by an atomic load now, as std/big's are; |t| = 3.8 to 6.0.
+  On one shared machine (load 6 to 8): `inverse_mod_secret` 3.3 over
+  100,000, `sign_pss` 0.8 over 20,000, P-256 signing 3.8 over 100,000,
+  X25519 7.3 over 100,000; the extended Euclid inverse std/rsa had, run
+  as the leak the tool must see, 403 over 5,000. It fails past 10 and is
+  not run by CI, whose shared runners are too noisy for that line.
+  std/big's header records the assembly audit of `inverse_mod_secret`.
 - **`Server.serve` serves at most 1,024 connections at once and wants a
   whole request within five minutes.** It accepted every connection, and
   past the head's `timeout_ms` a body was bounded per read alone, so one

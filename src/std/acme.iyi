@@ -54,9 +54,9 @@
 # SHA-256 - and a std/tls `TlsServerConfig` that shows it, under a P-256
 # key made for it, to a client whose ALPN offers `acme-tls/1` (and refuses
 # one that offers only other protocols). That config is for a listener
-# of its own on port 443 while the CA validates: std/tls chooses a
-# certificate by server_name and not by ALPN, so a server already on 443
-# cannot show this beside its own.
+# of its own on port 443 while the CA validates; a server already on 443
+# shows the certificate beside its own through its config's
+# `identity_source`, which sees the client's ALPN, as std/autocert does.
 #
 # **Waiting.** An authorization or an order is polled until it leaves
 # `pending` (or `processing`, or `ready`), waiting what each answer's
@@ -80,10 +80,11 @@
 #
 # Not here: external account binding (section 7.3.4) - a directory that
 # requires it is refused by name at `register`; renewal - when to order
-# again is the caller's, and ACME Renewal Information (RFC 9773) is not
-# read; revocation (section 7.6), account deactivation and updates past
-# `register`, pre-authorization (newAuthz), IP identifiers (RFC 8738),
-# alternate chains (the `Link: rel="alternate"` answers), and the
+# again is the caller's (std/autocert's manager is one such caller), and
+# ACME Renewal Information (RFC 9773) is not read; revocation (section
+# 7.6), account deactivation and updates past `register`,
+# pre-authorization (newAuthz), IP identifiers (RFC 8738), alternate
+# chains (the `Link: rel="alternate"` answers), and the
 # `profiles` extension. Keys are not written out: a `SigningKey` is made
 # from a PEM or its bytes and keeping it is the caller's.
 #

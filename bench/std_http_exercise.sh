@@ -1025,6 +1025,328 @@ PY
 fi
 
 echo
+echo "== a close while the client still sends (RFC 9112 section 9.6)"
+# http2_exercise's serve-close: `/ignore?n=1000000` answers a megabyte
+# without reading the request's 8 MiB body, and closes - on its
+# `Connection: close`, or past the 1 MiB a kept connection reads past
+# (`Server::MAX_DRAIN`). A close with the body's bytes unread is a reset,
+# which on Linux throws away what the server had yet to send and on
+# Windows what the client had yet to read. Closed at once, 50 runs of
+# each case on Linux: Python's http.client lost the answer in every run,
+# plain and over TLS (its send was reset before it read); under
+# `Connection: close`, a client reading as it sent lost the end of the
+# answer in every run, and so did curl and the first of 200 pipelined
+# requests; past MAX_DRAIN, every curl run ended in a reset (exit 55 or
+# 56), and a client reading as it sent was cut short or reset in 45 runs
+# plain and 4 over TLS. Lingering, the server shuts its sending half,
+# reads past the rest, and closes once the client has.
+# Each case RUNS times, plain and over std/tls: the whole answer read by
+# Python - as it sends (one thread, select), after it sent all
+# (http.client), with 200 requests pipelined behind one that says
+# `Connection: close` - and by curl, with no reset anywhere, and the end
+# of the stream (a FIN; over TLS a close_notify first, which Python is
+# told to insist on) within half a second of the answer's last byte, not
+# the second a server that never shuts its half lingers for.
+cat >"$WORK/close.py" <<'PY'
+import http.client, os, select, shutil, socket, ssl, subprocess, sys, time
+
+# close.py PORT RUNS ROOT|- [CASE...]
+port, runs = int(sys.argv[1]), int(sys.argv[2])
+root = None if sys.argv[3] == "-" else sys.argv[3]
+N, UP = 1000000, 8 * 1024 * 1024
+want = bytes((i * 31 + 7) & 255 for i in range(N))
+ctx = ssl.create_default_context(cafile=root) if root else None
+host = "localhost" if root else "127.0.0.1"
+here = os.path.dirname(os.path.abspath(__file__))
+
+
+def connect():
+    raw = socket.create_connection(("127.0.0.1", port), timeout=20)
+    # An end with no close_notify raises SSLEOFError rather than reading
+    # as an end.
+    return ctx.wrap_socket(raw, server_hostname="localhost", suppress_ragged_eofs=False) if ctx else raw
+
+
+def judged(data):
+    head, sep, body = data.partition(b"\r\n\r\n")
+    if not sep:
+        return "no head in %d bytes" % len(data)
+    lines = head.split(b"\r\n")
+    if not lines[0].startswith(b"HTTP/1.1 200"):
+        return "answered %r" % lines[0]
+    length = [int(v) for k, _, v in (line.partition(b":") for line in lines[1:]) if k.strip().lower() == b"content-length"]
+    if not length or len(body) < length[0]:
+        return "%d bytes of the answer's %s" % (len(body), length[0] if length else "unknown length")
+    return None if body[:length[0]] == want else "the answer's bytes differ"
+
+
+# Reads to the end while *out* is sent, in one thread: an SSL object is
+# not to be used from two at once. Whether the answer came whole, and how
+# long after its last byte the end came.
+def exchange(s, out, pause=None):
+    out = memoryview(out)
+    s.setblocking(False)
+    data, at, broke, last, ended = b"", 0, None, None, None
+    started = time.monotonic()
+    while time.monotonic() < started + 20:
+        if pause and at >= pause[0] and time.monotonic() < started + pause[1]:
+            sending = False
+        else:
+            sending = at < len(out) and broke is None
+        r, w, _ = select.select([s], [s] if sending else [], [], 0.05)
+        if r or (ctx and s.pending()):
+            try:
+                more = s.recv(65536)
+                if not more:
+                    ended = time.monotonic()
+                    break
+                data += more
+                last = time.monotonic()
+            except (ssl.SSLWantReadError, ssl.SSLWantWriteError, BlockingIOError):
+                pass
+            except OSError as e:
+                s.close()
+                return "%s reading (%s)" % (type(e).__name__, judged(data) or "the answer whole")
+        if w and sending:
+            try:
+                at += s.send(out[at:at + 65536])
+            except (ssl.SSLWantReadError, ssl.SSLWantWriteError, BlockingIOError):
+                pass
+            except OSError as e:
+                broke = type(e).__name__
+    s.close()
+    bad = judged(data)
+    if bad:
+        return bad + (", no end in 20 s" if ended is None else "")
+    if broke:
+        return "the answer whole, but the send was refused: " + broke
+    if ended is None:
+        return "the answer whole, and no end in 20 s"
+    if last is not None and ended - last > 0.5:
+        return "the end %.2f s after the answer" % (ended - last)
+    return None
+
+
+def as_sent(close):
+    head = "POST /ignore?n=%d%s HTTP/1.1\r\nHost: %s\r\nContent-Length: %d\r\n\r\n" % (N, "&close=1" if close else "", host, UP)
+    return exchange(connect(), head.encode() + b"u" * UP)
+
+
+def pipelined():
+    first = ("GET /ignore?n=%d&close=1 HTTP/1.1\r\nHost: %s\r\n\r\n" % (N, host)).encode()
+    rest = ("GET /echo HTTP/1.1\r\nHost: %s\r\n\r\n" % host).encode() * 200
+    # The rest held back 20 ms, so it arrives after the server has read
+    # the first and is answering it.
+    return exchange(connect(), first + rest, pause=(len(first), 0.02))
+
+
+def sent_first(close):
+    if ctx:
+        c = http.client.HTTPSConnection("localhost", port, context=ctx, timeout=20)
+    else:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    try:
+        c.request("POST", "/ignore?n=%d%s" % (N, "&close=1" if close else ""), body=b"u" * UP)
+        r = c.getresponse()
+        body = r.read()
+    except OSError as e:
+        return "%s from http.client" % type(e).__name__
+    finally:
+        c.close()
+    return None if r.status == 200 and body == want else "answered %d, %d bytes" % (r.status, len(body))
+
+
+CURL = shutil.which("curl")
+upload = os.path.join(here, "close-up.bin")
+
+
+def by_curl(close):
+    args = [CURL, "-sS", "--http1.1", "-H", "Expect:", "--data-binary", "@" + upload, "-o", "-"]
+    url = "/ignore?n=%d%s" % (N, "&close=1" if close else "")
+    if root:
+        # Schannel (Windows' curl) asks a revocation list the gate's own
+        # root has none of, and refuses the server for it.
+        if "Schannel" in subprocess.run([CURL, "--version"], capture_output=True, text=True).stdout:
+            args.append("--ssl-no-revoke")
+        args += ["--cacert", root, "--resolve", "localhost:%d:127.0.0.1" % port, "https://localhost:%d%s" % (port, url)]
+    else:
+        args.append("http://127.0.0.1:%d%s" % (port, url))
+    out = subprocess.run(args, capture_output=True, timeout=60)
+    if out.returncode != 0 or out.stdout != want:
+        return "curl exited %d with %d bytes: %s" % (out.returncode, len(out.stdout), out.stderr.decode(errors="replace").strip()[:80])
+    return None
+
+
+cases = {
+    "Python reading as it sends, Connection: close": lambda: as_sent(True),
+    "Python reading as it sends, a body past MAX_DRAIN": lambda: as_sent(False),
+    "http.client, Connection: close": lambda: sent_first(True),
+    "http.client, a body past MAX_DRAIN": lambda: sent_first(False),
+    "200 requests pipelined behind Connection: close": pipelined,
+}
+if CURL:
+    with open(upload, "wb") as f:
+        f.write(b"u" * UP)
+    cases["curl, Connection: close"] = lambda: by_curl(True)
+    cases["curl, a body past MAX_DRAIN"] = lambda: by_curl(False)
+failures = 0
+for name, case in cases.items():
+    first = None
+    lost = 0
+    for _ in range(runs):
+        got = case()
+        if got:
+            lost += 1
+            first = first or got
+    if lost:
+        failures += 1
+        print("  FAIL: %s: %d of %d runs: %s" % (name, lost, runs, first))
+    else:
+        print("  %s: %d of %d whole, no reset, the end at once" % (name, runs, runs))
+if not CURL:
+    print("  curl is not installed; its cases skipped")
+sys.exit(1 if failures else 0)
+PY
+# close_round <binary> <runs> [chain key root]: the cases against that
+# binary's serve-close, plain or over TLS; fails when any case does.
+close_round() {
+  local bin="$1" runs="$2" chain="${3:-}" key="${4:-}" root="${5:--}" cpid cport code=0
+  rm -f "$WORK/close.port"
+  if [ -n "$chain" ]; then
+    "$bin" serve-close "$WORK/close.port" "$chain" "$key" >"$WORK/close-serve.log" 2>&1 &
+  else
+    "$bin" serve-close "$WORK/close.port" >"$WORK/close-serve.log" 2>&1 &
+  fi
+  cpid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$WORK/close.port" ] && break
+    sleep 0.1
+  done
+  cport="$(cat "$WORK/close.port" 2>/dev/null || echo 1)"
+  timeout -k 5 600 "$PY" "$WORK/close.py" "$cport" "$runs" "$root" || code=1
+  kill "$cpid" 2>/dev/null
+  wait "$cpid" 2>/dev/null
+  return "$code"
+}
+CLOSE_RUNS="${CLOSE_RUNS:-20}"
+# The --release build serves: a lingering close reads past what the
+# client still sends for a second at most, and the plain build's TLS
+# drains 8 MiB in 0.21 s on Linux (x86-64), the release build's in 0.04
+# s - a Windows runner's plain build nearer the second than a check that
+# must hold every run should stand. The broken copies below are plain
+# builds: each need only fail.
+CLOSE_BIN="$WORK/h2-release"
+[ -x "$CLOSE_BIN" ] || [ -x "$CLOSE_BIN.exe" ] || CLOSE_BIN="$H2BIN"
+close_ready=0
+if [ "$h2_built" -ne 1 ] || [ -z "$PY" ]; then
+  echo "  skipped: no server built, or no python3 to be the client"
+else
+  close_ready=1
+  echo "  plain, $CLOSE_RUNS runs a case:"
+  close_round "$CLOSE_BIN" "$CLOSE_RUNS" || status=1
+  if [ -s "$WORK/tls/p256.pem" ]; then
+    echo "  over std/tls (TLS 1.3, the P-256 leaf), $CLOSE_RUNS runs a case:"
+    close_round "$CLOSE_BIN" "$CLOSE_RUNS" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" "$WORK/tls/root.pem" || status=1
+  else
+    echo "  over TLS: skipped, no certificates (no python3 with cryptography to make them)"
+  fi
+fi
+# The client's close, against a Python server that answers one request on
+# a kept connection and then waits for the client's end - over TLS its
+# close_notify, which Python is told to insist on - holds its own end back
+# 300 ms, and closes: close_notify first over TLS, and Python reads
+# whether the client's socket took it or answered with a reset. A client
+# that lingers waits for that end before its close returns; one that
+# closes at once is gone, and is reset by what comes after.
+cat >"$WORK/close_server.py" <<'PY'
+import os, socket, ssl, sys, time
+
+# close_server.py PORTFILE [CHAIN KEY]
+listener = socket.create_server(("127.0.0.1", 0))
+with open(sys.argv[1] + ".tmp", "w", newline="\n") as f:
+    f.write(str(listener.getsockname()[1]))
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+listener.settimeout(60)
+raw, _ = listener.accept()
+raw.settimeout(10)
+s = raw
+if len(sys.argv) > 3:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(sys.argv[2], sys.argv[3])
+    s = ctx.wrap_socket(raw, server_side=True, suppress_ragged_eofs=False)
+said = []
+try:
+    head = b""
+    while b"\r\n\r\n" not in head:
+        more = s.recv(65536)
+        if not more:
+            raise SystemExit("FAIL: the client went before its request")
+        head += more
+    s.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+    if s.recv(1) != b"":
+        raise SystemExit("FAIL: the client sent more after its request")
+    said.append("the client's close_notify, then" if s is not raw else "the client's end, then")
+    time.sleep(0.3)
+    if s is not raw:
+        raw = s.unwrap()
+    else:
+        raw.shutdown(socket.SHUT_WR)
+    if raw.recv(1) != b"":
+        raise SystemExit("FAIL: bytes after the client's end")
+    time.sleep(0.2)
+    err = raw.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+    said.append("this side's end 300 ms later taken with no reset" if err == 0 else "this side's end answered with a reset (%d)" % err)
+except OSError as e:
+    said.append("%s: %s" % (type(e).__name__, e))
+raw.close()
+print(" ".join(said))
+PY
+# client_close_round <binary> [tls]: the iyi client's close against the
+# Python server above; prints what each end saw.
+client_close_round() {
+  local bin="$1" over="${2:-}" spid sport base
+  rm -f "$WORK/cserve.port"
+  if [ -n "$over" ]; then
+    "$PY" "$WORK/close_server.py" "$WORK/cserve.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" >"$WORK/cserve.out" 2>&1 &
+  else
+    "$PY" "$WORK/close_server.py" "$WORK/cserve.port" >"$WORK/cserve.out" 2>&1 &
+  fi
+  spid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$WORK/cserve.port" ] && break
+    sleep 0.1
+  done
+  sport="$(cat "$WORK/cserve.port" 2>/dev/null || echo 1)"
+  if [ -n "$over" ]; then
+    timeout -k 5 60 "$bin" close-client "https://localhost:$sport" "$WORK/tls/root.pem" 2>&1
+  else
+    timeout -k 5 60 "$bin" close-client "http://127.0.0.1:$sport" 2>&1
+  fi
+  wait "$spid"
+  cat "$WORK/cserve.out"
+}
+# client_close_holds <output>: the client waited for the server's end, a
+# second at most, and the server saw a clean close.
+client_close_holds() {
+  local ms
+  ms="$(printf '%s\n' "$1" | sed -n 's/^200 ok closed in \([0-9]*\) ms$/\1/p')"
+  [ -n "$ms" ] && [ "$ms" -ge 250 ] && [ "$ms" -lt 1000 ] &&
+    printf '%s\n' "$1" | grep -q "taken with no reset"
+}
+if [ "$close_ready" -eq 1 ]; then
+  for over in "" tls; do
+    [ -n "$over" ] && [ ! -s "$WORK/tls/p256.pem" ] && continue
+    got="$(client_close_round "$H2BIN" "$over")"
+    if client_close_holds "$got"; then
+      echo "  the client's close${over:+ over TLS}: $(printf '%s' "$got" | tr '\n' ';' | sed 's/;/; /g')"
+    else
+      echo "  FAIL: the client's close${over:+ over TLS}: $(printf '%s' "$got" | tr '\n' ';' | sed 's/;/; /g')"
+      status=1
+    fi
+  done
+fi
+
+echo
 echo "== HTTP/2: curl against the server"
 if [ "$h2_built" -ne 1 ] || ! command -v curl >/dev/null 2>&1 || ! curl --version | grep -q 'HTTP2'; then
   echo "  skipped: no curl that speaks HTTP/2"
@@ -2196,16 +2518,17 @@ mutations_report
 # HTTP/2, each mechanism taken out of a copy that compiles: the iyi-to-iyi
 # exercise stops at the check that names it, or the raw frames find the
 # answer RFC 9113 asks for missing.
-h2_patched() { # h2_patched <name> <old> <new>: a broken http2_exercise in $WORK/<name>.bin
+h2_patched() { # h2_patched <name> <old> <new> [module, http.iyi by default]: a broken http2_exercise in $WORK/<name>.bin
+  local module="${4:-http.iyi}"
   rm -rf "$WORK/$1"
   mkdir -p "$WORK/$1/std"
-  OLD="$2" NEW="$3" "$PY" - "$REPO/src/std/http.iyi" "$WORK/$1/std/http.iyi" <<'PY'
+  OLD="$2" NEW="$3" "$PY" - "$REPO/src/std/$module" "$WORK/$1/std/$module" <<'PY'
 import os, sys
 src = open(sys.argv[1], encoding="utf-8").read()
 old = os.environ["OLD"]
 if src.count(old) != 1:
     raise SystemExit("patch site missing or not unique: " + old)
-open(sys.argv[2], "w", encoding="utf-8").write(src.replace(old, os.environ["NEW"], 1))
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(old, os.environ["NEW"], 1))
 PY
   [ $? -eq 0 ] || return 1
   IYI_PATH="$WORK/$1${PSEP}$REPO/src${PSEP}$REPO/samples/iyi" timeout 300 "$IYI" build -o "$WORK/$1.bin" "$REPO/bench/http2_exercise.iyi" >"$WORK/$1.log" 2>&1
@@ -2334,21 +2657,90 @@ h2_frames_breaks "a frame of any size read" h2_frame_size \
   '    return fail(FRAME_SIZE_ERROR, "a frame of #{length} bytes, past the #{FRAME} this end takes") if length > FRAME' '    nil' \
   'a frame past 16384 bytes'
 h2_frames_breaks "a GOAWAY for a connection error closed on at once" linger_h2 \
-  '    linger(conn.socket) if h2.failure.is_a?(HTTPError)
-' '' \
+  '    h2.goaway
+    true
+  end' '    h2.goaway
+    false
+  end' \
   'a frame past 16384 bytes, its rest sent after the GOAWAY'
 h2_frames_breaks "a malformed head's 400 closed on at once" linger_head \
   '          refuse(conn.transport, parsed)
-          linger(client)' '          refuse(conn.transport, parsed)' \
+          return true' '          refuse(conn.transport, parsed)
+          return false' \
   'a malformed head, a body sent after the answer'
 h2_frames_breaks "a 431 closed on at once" linger_431 \
   '        refuse(conn.transport, got)
-        linger(client)' '        refuse(conn.transport, got)' \
+        return true' '        refuse(conn.transport, got)
+        return false' \
   'a head past 1 MiB, more sent after the answer'
 h2_frames_breaks "a broken body's 400 closed on at once" linger_body \
-  '              refuse(conn.transport, body)
-              linger(client)' '              refuse(conn.transport, body)' \
+  '            refuse(conn.transport, body)
+            return true' '            refuse(conn.transport, body)
+            return false' \
   'a broken chunk, more sent after the answer'
+# The lingering close broken, in std/http or under it in std/tls: the
+# close cases, three runs each, must fail at the one named - and the
+# client's own close where that is what is named.
+close_breaks() { # close_breaks <label> <name> <module> <old> <new> <plain|tls|client|client-tls> <case>
+  local label="$1" name="$2" module="$3" old="$4" new="$5" over="$6" case_name="$7" got
+  if [ "$close_ready" -ne 1 ] || { case "$over" in *tls) true ;; *) false ;; esac && [ ! -s "$WORK/tls/p256.pem" ]; }; then
+    echo "  $label: skipped with the close cases"
+    return
+  elif ! h2_patched "$name" "$old" "$new" "$module"; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
+    status=1
+    return
+  fi
+  case "$over" in
+    plain) close_round "$WORK/$name.bin" 3 >"$WORK/$name.out" 2>&1 ;;
+    tls) close_round "$WORK/$name.bin" 3 "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" "$WORK/tls/root.pem" >"$WORK/$name.out" 2>&1 ;;
+    client | client-tls)
+      got="$(client_close_round "$WORK/$name.bin" "${over#client}")"
+      if client_close_holds "$got"; then
+        echo "  $label: the client's close held on a broken copy: $(printf '%s' "$got" | tr '\n' ' ')"
+        status=1
+      else
+        echo "  $label: caught at the client's close: $(printf '%s' "$got" | tr '\n' ' ' | cut -c1-140)"
+      fi
+      return
+      ;;
+  esac
+  if grep -qF -- "FAIL: $case_name:" "$WORK/$name.out"; then
+    echo "  $label: caught: $(grep -m1 -F -- "FAIL: $case_name:" "$WORK/$name.out" | sed 's/^ *FAIL: //' | cut -c1-150)"
+  else
+    echo "  $label: the close cases did not fail at \"$case_name\""
+    tail -4 "$WORK/$name.out" | sed 's/^/    /'
+    status=1
+  fi
+}
+close_breaks "the linger removed: a close at once" close_nolinger http.iyi \
+  '    else
+      linger
+    end' '    else
+      @socket.close
+    end' plain 'http.client, Connection: close'
+close_breaks "the linger removed, at the client" close_nolinger_client http.iyi \
+  '    else
+      linger
+    end' '    else
+      @socket.close
+    end' client ''
+close_breaks "close_write skipped: the sending half never shut" close_nohalf http.iyi \
+  '    socket.close_write
+' '' plain 'Python reading as it sends, Connection: close'
+close_breaks "TLS: the drain removed" close_nodrain tls.iyi \
+  '    drain unless @eof
+' '' tls 'http.client, Connection: close'
+close_breaks "TLS: close_write skipped by close, so no close_notify" close_notify tls.iyi \
+  '    close_write
+    drain unless @eof' '    drain unless @eof' tls 'Python reading as it sends, Connection: close'
+close_breaks "TLS: the client closing at once" close_client_tls http.iyi \
+  '    elsif stream = @stream
+      stream.close
+    else' '    elsif stream = @stream
+      close_now
+    else' client-tls ''
 h2_frames_breaks "HEADERS on a closed stream passed over" h2_stale \
   '          mode = @reset_lately.includes?(id) ? IGNORED_BLOCK : STALE_BLOCK' '          mode = IGNORED_BLOCK' \
   'HEADERS on a closed stream'
@@ -2376,8 +2768,8 @@ https_breaks "an answer written past TLS" https_clear \
 https_breaks "the TLS handshake skipped" https_plain \
   '    unless config = tls' '    unless config = nil.as(TlsServerConfig?)'
 https_breaks "no close_notify at the end" https_notify \
-  '    secured.close
-  end' '  end'
+  '      stream.close_write
+      stream.abort' '      stream.abort'
 # The cap and the request deadline broken, the slow clients run against
 # the copy: each must fail at the case that names it.
 guard_breaks() { # guard_breaks <label> <name> <old> <new> <case> <phrase>

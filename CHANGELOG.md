@@ -446,6 +446,48 @@
 
 ### Fixed
 
+- **std/http closes a connection by lingering, so an answer is no
+  longer lost to a client still sending (RFC 9112 section 9.6).** A
+  server that closed with the client's bytes unread - a body the block
+  never read, pipelined requests behind an answer that says `close`, the
+  rest of a refused request - made the kernel reset the connection, and
+  the reset threw away what the server had yet to send (Linux) or what
+  the client had yet to read (Windows). Closed at once, in 50 runs of
+  each case on Linux (`bench/http2_exercise.iyi serve-close`, a 1 MB
+  answer to an 8 MiB body it does not read), Python's http.client lost
+  the answer in every run, plain and over TLS, its send reset before it
+  read; under `Connection: close` a client reading as it sent lost the
+  end of the answer in every run, as did curl and the first of 200
+  pipelined requests; past the megabyte a kept connection reads past,
+  every curl run ended in a reset. Now a connection the server wrote last
+  on shuts its sending half (close_notify first over TLS), reads and
+  drops what the client still sends until it closes - a second and 64
+  MiB (`Server::MAX_BODY`) at most, `Conn::LINGER_MS` and
+  `LINGER_BYTES`, so a closing connection holds its task and its place
+  among `max_connections` no longer - and then closes: nginx's
+  lingering_close; Go's server half-closes the same way and then sleeps
+  500 ms without reading. HTTP/2 does the same after its GOAWAY. A
+  connection that timed out, or whose client said `close` and sent
+  nothing past its request, closes at once, as nothing of the client's
+  is left to come. The client closes the same way: an idle connection
+  half-closed and its server's end awaited, an answer abandoned partway
+  closed at once. After the fix every case answered whole in 50 runs of
+  50, plain and over TLS. `bench/std_http_exercise.sh`'s "a close while
+  the client still sends" holds it: Python reading as it sends, Python's
+  http.client, 200 pipelined requests and curl, 20 runs of each, plain
+  and over std/tls, every answer whole, no reset, and the end within half
+  a second of the answer; and the client's close against a Python server
+  that holds its end back 300 ms. Broken copies are caught by name: the
+  linger removed (http.client reset, and the client's close returning at
+  once), the sending half never shut (the end a second late), TLS's
+  drain removed, TLS's close without close_notify, and the client
+  closing TLS at once; the three refusals' and the GOAWAY's own copies
+  now break the new sites. Measured with `wrk -t2 -c50 -d5s`, release,
+  median of three beside the old code: keep-alive requests 76,230 req/s
+  (77,515 before), clients that say `close` 59,096 (57,685), and a
+  server that says `close` to clients that did not 46,714 (62,328) - the
+  price of each such close's half-close and its wait, parked, for the
+  client's end.
 - **std/tls closes gracefully (RFC 8446 section 6.1).**
   `TlsConnection#close_write` sends close_notify and shuts the socket's
   sending half (`IyiSocket#close_write`), and reading goes on until the

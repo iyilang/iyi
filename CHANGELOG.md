@@ -64,13 +64,13 @@
   process, the handshakes and HTTP over a loopback connection with a
   scripted peer that signs and seals what the template says. Every input
   must answer a value or an error value, within a time bound and an
-  allocation bound. Long runs read 1,140,000 inputs; the two module
+  allocation bound. Long runs read 2,060,000 inputs; the two module
   defects they found are fixed below and kept as regression inputs whose
   fixes, undone in a copy, the gate catches. x509 is set beside Python's
   cryptography (4,000 certificates: 3,853 alike; the rest judged against
-  RFC 5280 in the exercise's header, three leniencies there left to
-  refuse) and HPACK beside Python's hpack (4,000 alike). 4,000 inputs
-  of each pure target by default, `FUZZ_ITERATIONS` for more.
+  RFC 5280 in the exercise's header; two leniencies found there are
+  refused below) and HPACK beside Python's hpack (4,000 alike). 4,000
+  inputs of each pure target by default, `FUZZ_ITERATIONS` for more.
 - **std/tls: a server that speaks TLS 1.2, when asked, to a client that
   speaks nothing newer (RFC 5246, RFC 7627's extended master secret, RFC
   5746's renegotiation_info, RFC 8422's ECDHE).** Opt-in, as the

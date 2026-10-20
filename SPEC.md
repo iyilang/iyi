@@ -3440,7 +3440,12 @@ what is not HTTP — and `bench/std_http_exercise.sh` runs the module's
 own client against it, Python's `http.client` against it, and `wrk -c50`
 against a release build: **76,226 requests/s, 236,296 requests, every
 one answered**, against the 23,705/s the kemal port under Crystal's
-library did in 0.12.0 on the same shape of program.
+library did in 0.12.0 on the same shape of program. A server facing
+clients it does not control is bounded by default since: a request's
+head within `timeout_ms` (60 s), the whole request within
+`request_timeout_ms` (5 minutes), each counted from when the wait began,
+and at most `max_connections` (1,024) served at once, the next one
+queued in the listen queue rather than refused.
 
 #### III.4.12 Concurrency on wasm32-wasi: **MEASURED and REFUSED: why this target has no runtime**
 

@@ -7,7 +7,8 @@
 # Finished values, the client's Finished sealed into exactly the trace's
 # record, and the application data both ways after a NewSessionTicket -
 # and TLS 1.2's PRF over SHA-256 and SHA-384 against the vectors that
-# circulate for it. The modes the gate script drives:
+# circulate for it, and the form a host takes in server_name. The modes
+# the gate script drives:
 #   scenarios DIR       every scenario of bench/std_tls_server.py, whose
 #                       port and roots are in DIR, each holding or refused
 #                       for its reason;
@@ -434,5 +435,16 @@ check prf256 == b(PRF_SHA256), "P_SHA256's 100 bytes"
 prf384 = TlsKeySchedule.new(true).prf(b("b80b733d6ceefcdc71566ea48e5567df"), "test label", b("cd665cf6a8447dd6ff8b27555edb7465"), 148)
 check prf384 == b(PRF_SHA384), "P_SHA384's 148 bytes"
 puts "  P_SHA256 and P_SHA384, 100 and 148 bytes"
+
+puts "== server_name's form (RFC 6066 section 3)"
+# What the client sends and checks the certificate for; the gate's OpenSSL
+# section reads the name off the wire as s_server's `-servername` sees it.
+check TlsClient.server_name_for("bücher.example.") == "xn--bcher-kva.example", "a Unicode host with a final dot goes as its A-labels without it"
+check TlsClient.server_name_for("Bücher.Example") == "xn--bcher-kva.example", "a Unicode host's ASCII labels go in lower case, as IDNA writes them"
+check TlsClient.server_name_for("localhost.") == "localhost", "an ASCII host's final dot is dropped"
+check TlsClient.server_name_for("Example.COM") == "Example.COM", "an ASCII host goes as written"
+check TlsClient.server_name_for(".").is_a?(TlsError), "a dot alone names no host"
+check TlsClient.server_name_for("bücher..example").is_a?(TlsError), "a Unicode host IDNA refuses is an error before anything is sent"
+puts "  A-labels, no final dot, ASCII as written, and what names no host refused"
 
 puts "\nALL CHECKS PASSED"

@@ -508,8 +508,20 @@ echo "== https:// against Python's own TLS server"
 # TLS, a 303 followed on the same scheme, a kept connection used twice, a
 # host the certificate does not name refused, and an upgrade over https://
 # reaching the server, whose 404 it names.
+# A kept connection is not handed to a request made after `HTTP.tls_config=`
+# names roots that do not reach the server's (a root made beside the
+# first): that request makes a connection of its own and is refused; a new
+# configuration over the same roots makes a new connection too, which the
+# next request under it reuses.
+# A redirect from https:// to http:// at the same host and port - the
+# server reads TLS or plain HTTP on one port, by the first byte - carries
+# no Authorization, Proxy-Authorization or Cookie the caller wrote, and
+# the jar's cookie set with `Secure` over https:// stays behind while the
+# one set without goes on (Go's client and curl strip the same).
 # Then the same client against a copy of the module that sends https://
-# in the clear, which must not answer the same.
+# in the clear, which must not answer the same; and copies with the pool's
+# configuration check, the scheme's part in the redirect's credential
+# check, and the jar's `Secure` check taken out, each caught.
 if [ -z "$PY" ] || ! "$PY" -c 'import ssl; from cryptography import x509' >/dev/null 2>&1; then
   echo "  skipped: no python3 with ssl and cryptography to serve TLS with"
 else
@@ -555,11 +567,21 @@ ed = (x509.CertificateBuilder().subject_name(name("localhost")).issuer_name(ca.s
       .sign(ca_key, hashes.SHA256()))
 open(f"{out}/ed.pem", "wb").write(ed.public_bytes(serialization.Encoding.PEM) + ca.public_bytes(serialization.Encoding.PEM))
 open(f"{out}/ed.key", "wb").write(ed_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+# Another root, which signs nothing the server sends.
+other_key = ec.generate_private_key(ec.SECP256R1())
+other = (x509.CertificateBuilder().subject_name(name("http gate other root")).issuer_name(name("http gate other root"))
+         .public_key(other_key.public_key()).serial_number(4).not_valid_before(now - dt.timedelta(days=1))
+         .not_valid_after(now + dt.timedelta(days=2)).add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+         .add_extension(x509.KeyUsage(False, False, False, False, False, True, True, False, False), critical=True)
+         .add_extension(x509.SubjectKeyIdentifier.from_public_key(other_key.public_key()), critical=False)
+         .sign(other_key, hashes.SHA256()))
+open(f"{out}/other.pem", "wb").write(other.public_bytes(serialization.Encoding.PEM))
 PY
   cat > "$WORK/tls_client.iyi" <<'IYI'
 module main
 
 import std/http::{HTTP, HTTPClient, HTTPError}
+import std/cookie::{CookieJar}
 import std/tls::{TlsConfig}
 import std/x509::{Certificate}
 import std/file::{File}
@@ -575,7 +597,20 @@ puts "hop #{hop.status} #{hop.body} #{hop.url}"
 client = HTTPClient.new
 2.times { client.get(base + "/landed").or_panic }
 puts "kept #{client.connections_made} made, #{client.connections_reused} reused"
+elsewhere = TlsConfig.new
+elsewhere.roots = Certificate.from_pem(File.read(Program.args[2])).or_panic
+HTTP.tls_config = elsewhere
+moved = client.get(base + "/landed")
+puts "other roots #{moved.is_a?(HTTPError) ? moved.message : "answered #{moved.inspect}"}"
+again = TlsConfig.new
+again.roots = config.roots
+HTTP.tls_config = again
+2.times { client.get(base + "/landed").or_panic }
+puts "a new configuration, the same roots: #{client.connections_made} made, #{client.connections_reused} reused"
 client.close
+jar = CookieJar.new
+down = HTTP.request("GET", base + "/down", {"Authorization" => "Bearer t", "Proxy-Authorization" => "Basic cDpx", "Cookie" => "c=1"}, jar: jar).or_panic
+puts "downgrade #{down.url} #{down.body}"
 other = HTTP.get("https://127.0.0.1:#{Program.args[0]}/landed")
 puts "other #{other.is_a?(HTTPError) ? other.message : other.inspect}"
 up = HTTP.upgrade(base + "/", "websocket")
@@ -584,7 +619,7 @@ HTTP.get(base + "/stop")
 IYI
   serve_tls() {
     "$PY" - "$WORK/tls" > "$WORK/tls_server.out" 2>&1 <<'PY' &
-import gzip, ssl, sys
+import gzip, socket, ssl, sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 text = b"python's own words " * 1000
 class Handler(BaseHTTPRequestHandler):
@@ -597,10 +632,22 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     def do_GET(self):
-        if self.path == "/gzip":
+        secure = isinstance(self.connection, ssl.SSLSocket)
+        if self.path == "/heard":
+            # What the redirect's target was sent, and over what.
+            said = lambda name: self.headers.get(name, "-")
+            self.answer(200, f"{'tls' if secure else 'plain'} auth={said('Authorization')} proxy-auth={said('Proxy-Authorization')} cookie={said('Cookie')}".encode())
+        elif not secure:
+            self.answer(400, b"only /heard is served in the clear")
+        elif self.path == "/gzip":
             self.answer(200, gzip.compress(text), [("Content-Encoding", "gzip")])
         elif self.path == "/landed":
             self.answer(200, self.command.encode())
+        elif self.path == "/down":
+            # To http:// at this host and port, with a Secure cookie and
+            # one without.
+            self.answer(302, b"", [("Location", f"http://localhost:{self.server.server_address[1]}/heard"),
+                                   ("Set-Cookie", "s=1; Secure"), ("Set-Cookie", "p=1")])
         elif self.path == "/stop":
             self.answer(200, b"bye")
             self.server.done = True
@@ -612,8 +659,16 @@ class Handler(BaseHTTPRequestHandler):
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.minimum_version = ssl.TLSVersion.TLSv1_3
 context.load_cert_chain(f"{sys.argv[1]}/leaf.pem", f"{sys.argv[1]}/leaf.key")
-s = HTTPServer(("127.0.0.1", 0), Handler)
-s.socket = context.wrap_socket(s.socket, server_side=True)
+class Server(HTTPServer):
+    # TLS or HTTP in the clear on one port, told apart by the first byte:
+    # 0x16 opens a TLS handshake record.
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        sock.settimeout(30)
+        if sock.recv(1, socket.MSG_PEEK) == b"\x16":
+            sock = context.wrap_socket(sock, server_side=True)
+        return sock, addr
+s = Server(("127.0.0.1", 0), Handler)
 s.done = False
 s.timeout = 30
 print(s.server_address[1], flush=True)
@@ -629,22 +684,70 @@ PY
   else
     serve_tls
     tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
-    said=$(timeout 60 "$WORK/tls_client" "$tport" "$WORK/tls/root.pem" 2>&1)
+    said=$(timeout 60 "$WORK/tls_client" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
     kill "$tls_pid" 2>/dev/null
     wait "$tls_pid" 2>/dev/null
     expected="gzip true true
 hop 200 GET https://localhost:$tport/landed
 kept 1 made, 1 reused
+other roots HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=http gate root, the issuer of CN=localhost (bad_certificate)
+a new configuration, the same roots: 3 made, 2 reused
+downgrade http://localhost:$tport/heard plain auth=- proxy-auth=- cookie=p=1
 other HTTP: tls: the server's certificate is not trusted: x509: CN=localhost is not valid for 127.0.0.1: it names localhost (bad_certificate)
 upgrade HTTP: the server answered 404 Not Found to an upgrade to websocket, not 101 Switching Protocols"
     if [ "$said" = "$expected" ]; then
       echo "  gzip over TLS 1.3, a 303 on https://, a kept connection used twice, a host the certificate does not name, an upgrade over https:// answered 404"
+      echo "  a kept connection not reused under other roots, nor under a new configuration of the same roots"
+      echo "  https:// to http:// at the same host and port: no Authorization, Proxy-Authorization or Cookie of the caller's, the Secure cookie kept back"
     else
       echo "  the client and Python's TLS server disagree:"
       printf '%s\n' "$said" | sed 's/^/    got:  /'
       printf '%s\n' "$expected" | sed 's/^/    want: /'
       status=1
     fi
+    # tls_breaks <label> <module> <old> <new> <line>: the client over a copy
+    # of std/<module> with <old> replaced must answer the line starting
+    # with <line> otherwise than the module does.
+    tls_breaks() {
+      local label="$1" module="$2" old="$3" new="$4" line="$5" broken want got
+      rm -rf "$WORK/tlsbreak" && mkdir -p "$WORK/tlsbreak/std"
+      if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module" "$WORK/tlsbreak/std/$module" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not unique")
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+      then
+        echo "  $label: the patch did not apply"
+        status=1
+        return
+      fi
+      if ! IYI_PATH="$WORK/tlsbreak${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/tls_broken" "$WORK/tls_client.iyi" > "$WORK/tls_broken.build" 2>&1; then
+        echo "  $label: the broken copy did not build"
+        status=1
+        return
+      fi
+      serve_tls
+      tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
+      broken=$(timeout 60 "$WORK/tls_broken" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
+      kill "$tls_pid" 2>/dev/null
+      wait "$tls_pid" 2>/dev/null
+      want="$(printf '%s\n' "$expected" | sed "s/$tport/PORT/g" | grep -m1 "^$line")"
+      got="$(printf '%s\n' "$broken" | sed "s/$tport/PORT/g" | grep -m1 "^$line")"
+      if [ -n "$got" ] && [ "$got" != "$want" ]; then
+        echo "  $label: caught at \"$line\": $(printf '%s' "$got" | cut -c1-100)"
+      else
+        echo "  $label: not caught at \"$line\" (it answered \"$got\")"
+        status=1
+      fi
+    }
+    tls_breaks "a kept connection handed out under another configuration" http.iyi \
+      '        if tls && !(under && under.same?(tls))' '        if false' "other roots"
+    tls_breaks "a credential carried from https:// to http:// at one host and port" http.iyi \
+      '    return false unless sa == sb' '    nil' "downgrade"
+    tls_breaks "a Secure cookie sent over http://" cookie.iyi \
+      '      next if cookie.secure && !secure' '      nil' "downgrade"
     # And the proof: https:// written in the clear does not answer so.
     mkdir -p "$WORK/clear/std"
     sed 's/^        if secure$/        if false/' "$REPO/src/std/http.iyi" > "$WORK/clear/std/http.iyi"
@@ -657,7 +760,7 @@ upgrade HTTP: the server answered 404 Not Found to an upgrade to websocket, not 
     else
       serve_tls
       tport=$(await_port "$WORK/tls_server.out" "$tls_pid")
-      clear=$(timeout 60 "$WORK/tls_clear" "$tport" "$WORK/tls/root.pem" 2>&1)
+      clear=$(timeout 60 "$WORK/tls_clear" "$tport" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1)
       kill "$tls_pid" 2>/dev/null
       wait "$tls_pid" 2>/dev/null
       if [ "$clear" = "$expected" ]; then
@@ -1258,6 +1361,185 @@ else
 fi
 
 echo
+echo "== HTTPS: the server's connection cap and request deadline"
+# `Server.serve(tls:, max_connections: 2, timeout_ms: 3000,
+# request_timeout_ms: 5000)` (http2_exercise's serve-guarded, the P-256
+# leaf) against slow clients written here over Python's ssl. Two
+# connections hold both places and a third is queued, not refused: its
+# handshake goes unanswered until one of the two closes, and then it is
+# served. A head sent a byte every half second is cut off at 3 s, as it was
+# before; a body sent so - over HTTP/1.1, and over HTTP/2 a DATA frame of
+# one byte at a time - at 5 s, where before each read's own 3 s limit was
+# all it met and the body went on for as long as it dripped. Each close
+# must come within 90% of its deadline and 1.5 s past it for the head (so
+# a head held to the request's 5 s is caught), 2.5 s for a body, unanswered.
+cat >"$WORK/guard.py" <<'PY'
+import select, socket, ssl, struct, sys, threading, time
+
+port, root = int(sys.argv[1]), sys.argv[2]
+head_ms, request_ms = int(sys.argv[3]), int(sys.argv[4])
+cases = sys.argv[5:] or ["cap", "head", "body", "h2"]
+failed = 0
+
+
+def connect(alpn, timeout=20):
+    ctx = ssl.create_default_context(cafile=root)
+    ctx.set_alpn_protocols([alpn])
+    raw = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    return ctx.wrap_socket(raw, server_hostname="localhost")
+
+
+def drip(s, first, unit, every=0.5, limit=30):
+    """Sends *first*, then *unit* every *every* seconds, reading what comes:
+    the seconds until the server closed (None if it had not in *limit*),
+    and what it sent."""
+    start = time.monotonic()
+    got = b""
+    s.sendall(first)
+    last = start
+    while time.monotonic() - start < limit:
+        wait = max(0.0, every - (time.monotonic() - last))
+        if s.pending() or select.select([s], [], [], wait)[0]:
+            try:
+                chunk = s.recv(65536)
+            except (ssl.SSLError, OSError):
+                return time.monotonic() - start, got
+            if not chunk:
+                return time.monotonic() - start, got
+            got += chunk
+            continue
+        try:
+            s.sendall(unit)
+        except (ssl.SSLError, OSError):
+            return time.monotonic() - start, got
+        last = time.monotonic()
+    return None, got
+
+
+def judge(name, closed, low_ms, high_ms, extra=None):
+    global failed
+    if closed is None:
+        print(f"FAIL {name}: still open after 30 s")
+        failed += 1
+    elif not (low_ms <= closed * 1000 <= high_ms):
+        print(f"FAIL {name}: closed after {closed:.1f} s, outside {low_ms / 1000:.1f}-{high_ms / 1000:.1f} s")
+        failed += 1
+    elif extra:
+        print(f"FAIL {name}: {extra}")
+        failed += 1
+    else:
+        print(f"ok {name}: closed after {closed:.1f} s")
+
+
+def hpack(fields):
+    # Literal header fields without indexing, new names (RFC 7541 6.2.2).
+    out = b""
+    for name, value in fields:
+        out += b"\x00" + bytes([len(name)]) + name + bytes([len(value)]) + value
+    return out
+
+
+def frame(kind, flags, stream, payload):
+    return struct.pack(">I", len(payload))[1:] + bytes([kind, flags]) + struct.pack(">I", stream) + payload
+
+
+for case in cases:
+    if case == "cap":
+        # Two connections hold both places; a third waits in the listen
+        # queue - its handshake unanswered - until one of them closes.
+        a, b = connect("http/1.1"), connect("http/1.1")
+        seen = {}
+
+        def third():
+            try:
+                c = connect("http/1.1", timeout=15)
+                seen["at"] = time.monotonic()
+                c.sendall(b"GET /echo?x=third HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                data = b""
+                while True:
+                    chunk = c.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                seen["answer"] = data.split(b"\r\n")[0].decode()
+            except Exception as e:
+                seen["error"] = repr(e)
+
+        t = threading.Thread(target=third)
+        t.start()
+        time.sleep(1.0)
+        closed_at = time.monotonic()
+        a.close()
+        t.join(20)
+        b.close()
+        if "error" in seen or "at" not in seen:
+            print(f"FAIL cap: the third connection was not served: {seen.get('error', 'no answer in 20 s')}")
+            failed += 1
+        elif seen["at"] < closed_at:
+            print(f"FAIL cap: the third connection was served {closed_at - seen['at']:.1f} s before a place was free")
+            failed += 1
+        elif seen.get("answer") != "HTTP/1.1 200 OK":
+            print(f"FAIL cap: the third connection was answered {seen.get('answer')!r}")
+            failed += 1
+        else:
+            print(f"ok cap: the third connection waited, then was served {seen['at'] - closed_at:.2f} s after a place was free: {seen['answer']}")
+    elif case == "head":
+        s = connect("http/1.1")
+        closed, got = drip(s, b"GET /echo HTTP/1.1\r\nHost: localhost\r\nX-Drip: ", b"a")
+        judge("a head a byte at a time", closed, head_ms * 0.9, head_ms + 1500, f"answered {got[:40]!r}" if got else None)
+    elif case == "body":
+        s = connect("http/1.1")
+        closed, got = drip(s, b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n", b"b")
+        judge("a body a byte at a time", closed, request_ms * 0.9, request_ms + 2500, f"answered {got[:40]!r}" if got else None)
+    elif case == "h2":
+        s = connect("h2")
+        if s.selected_alpn_protocol() != "h2":
+            print(f"FAIL an HTTP/2 body a frame of a byte at a time: ALPN chose {s.selected_alpn_protocol()!r}")
+            failed += 1
+            continue
+        head = hpack([(b":method", b"POST"), (b":scheme", b"https"), (b":path", b"/echo"),
+                      (b":authority", b"localhost"), (b"content-length", b"100")])
+        first = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + frame(4, 0, 0, b"") + frame(1, 4, 1, head)
+        closed, got = drip(s, first, frame(0, 0, 1, b"c"))
+        # Anything but SETTINGS, GOAWAY and WINDOW_UPDATE is an answer.
+        kinds, at = set(), 0
+        while at + 9 <= len(got):
+            kinds.add(got[at + 3])
+            at += 9 + int.from_bytes(got[at:at + 3], "big")
+        judge("an HTTP/2 body a frame of a byte at a time", closed, request_ms * 0.9, request_ms + 2500,
+              f"answered frames of types {sorted(kinds)}" if kinds - {4, 7, 8} else None)
+sys.exit(1 if failed else 0)
+PY
+# guarded <binary> <output> [case...]: the slow clients against that
+# binary's serve-guarded; answers whether every case held.
+guarded() {
+  local bin="$1" out="$2" gpid
+  shift 2
+  rm -f "$WORK/guarded.port"
+  "$bin" serve-guarded "$WORK/guarded.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" 2 3000 5000 >"$WORK/guarded.log" 2>&1 &
+  gpid=$!
+  for _ in $(seq 1 100); do
+    [ -s "$WORK/guarded.port" ] && break
+    sleep 0.1
+  done
+  timeout -k 5 180 "$PY" "$WORK/guard.py" "$(cat "$WORK/guarded.port" 2>/dev/null || echo 1)" "$WORK/tls/root.pem" 3000 5000 "$@" >"$out" 2>&1
+  local code=$?
+  kill "$gpid" 2>/dev/null
+  wait "$gpid" 2>/dev/null
+  return $code
+}
+guard_ready=0
+if [ "$https_ready" -ne 1 ] || [ -z "$PY" ]; then
+  echo "  skipped: no HTTPS server from the section above, or no python3 to be the slow clients"
+else
+  guard_ready=1
+  guarded "$H2BIN" "$WORK/guarded.out"
+  code=$?
+  sed 's/^ok /  /; s/^FAIL /  FAIL: /' "$WORK/guarded.out"
+  [ "$code" -eq 0 ] || status=1
+fi
+
+echo
 echo "== through a proxy: a proxy written here in Python, curl beside the client"
 # `proxy:` end to end: a forwarding proxy written by hand below - absolute
 # form forwarded in origin form, CONNECT tunnelled byte for byte, Basic
@@ -1801,9 +2083,10 @@ mutate "a client that reads a head for as long as it comes" 'conn.read_head(Serv
 mutate "a server that never says 100 Continue" '    if head.expects
       socket = conn.transport' '    if false
       socket = conn.transport'
-mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls)' '          accepted = client
+mutate "a server whose tasks share the accept loop's variable" '          spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, slots)' '          accepted = client
           g.spawn do
             handle(accepted, handler)
+            slots.take_now if slots
             0
           end'
 mutate "a coding this client cannot undo read as chunked" 'return "transfer coding #{coding.inspect} is not one this client decodes" unless same_name?(coding, "chunked")' 'next unless same_name?(coding, "chunked")'
@@ -1866,13 +2149,13 @@ mutate "a redirect that never changes the method" 'unless keeps || (status != 30
 mutate "credentials carried to another host" 'sent = without(sent, ["Authorization", "Proxy-Authorization", "Cookie"]) unless same_authority?(current, target)' ''
 mutate "a part that does not end at its boundary" '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]
           @part_done = true' '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]'
-mutate "a client that never keeps a connection" 'conn = keeping.take(key) unless upgrade' ''
+mutate "a client that never keeps a connection" 'conn = keeping.take(key, secure ? tls_config : nil) unless upgrade' ''
 mutate "a client that keeps a connection the answer closed" 'keep = got.starts_with?("HTTP/1.1 ") && !reader.to_close? && status != 101 && (said.nil? || !has_token?(said, "close"))' 'keep = true'
 mutate "a client that holds a connection for whatever was left unread" 'client && @keep && !@conn.ended? && @reader.drain(65536_i64)' 'client && @keep && !@conn.ended? && @reader.drain(9223372036854775807_i64)'
 mutate "a GET not sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head ||' 'retry = false && (head ||'
 mutate "a POST sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head || same_name?(method, "GET") || same_name?(method, "PUT") || same_name?(method, "DELETE") || same_name?(method, "OPTIONS") || same_name?(method, "TRACE"))' 'retry = body.is_a?(String)'
-mutate "a head given as long as each read is short" '      conn.deadline_in(timeout_ms)
-' ''
+mutate "a head given as long as each read is short" '      conn.deadline_at(until_head(started, timeout_ms, whole))
+      got = conn.read_head(' '      got = conn.read_head('
 mutate "an upgraded connection held to the server's timeout" '      conn.unlimited
 ' ''
 mutate "a client that waits for an answer as long as it takes" '        conn.gap = timeout_ms if timeout_ms > 0
@@ -2087,6 +2370,45 @@ https_breaks "the TLS handshake skipped" https_plain \
 https_breaks "no close_notify at the end" https_notify \
   '    secured.close
   end' '  end'
+# The cap and the request deadline broken, the slow clients run against
+# the copy: each must fail at the case that names it.
+guard_breaks() { # guard_breaks <label> <name> <old> <new> <case> <phrase>
+  local label="$1" name="$2" old="$3" new="$4" case_name="$5" phrase="$6"
+  if [ "${guard_ready:-0}" -ne 1 ]; then
+    echo "  $label: skipped with the slow clients' section"
+  elif ! h2_patched "$name" "$old" "$new"; then
+    echo "  $label: the broken copy did not build"
+    sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
+    status=1
+  elif guarded "$WORK/$name.bin" "$WORK/$name.out" "$case_name"; then
+    echo "  $label: the slow clients were cut off by a broken server"
+    status=1
+  elif grep -qF "FAIL $phrase:" "$WORK/$name.out"; then
+    echo "  $label: caught: $(grep -m1 'FAIL' "$WORK/$name.out" | sed 's/^FAIL //' | cut -c1-120)"
+  else
+    echo "  $label: failed, but not at \"$phrase\": $(sed -n '1p' "$WORK/$name.out")"
+    status=1
+  fi
+}
+guard_breaks "a request's body bounded per read alone" guard_body \
+  '        conn.deadline_at(whole, "read a request") if whole > 0_i64
+        reader = body_reader(conn, head)' '        reader = body_reader(conn, head)' \
+  body "a body a byte at a time"
+guard_breaks "an HTTP/2 body bounded per read alone" guard_h2 \
+  '      conn.deadline_at(whole, "read a request") if whole > 0_i64
+      unless stream_bodies' '      unless stream_bodies' \
+  h2 "an HTTP/2 body a frame of a byte at a time"
+guard_breaks "connections served without a cap" guard_cap \
+  'slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil' 'slots = nil.as(Channel(Int32)?)' \
+  cap "cap"
+guard_breaks "a connection's place never given back" guard_leak \
+  "      # The connection's place, given back however it ended.
+      slots.take_now if slots
+" "" \
+  cap "cap"
+guard_breaks "a head held to the whole request's deadline alone" guard_head \
+  '    head = timeout_ms > 0 ? started + timeout_ms.to_i64 * 1000000_i64 : 0_i64' '    head = 0_i64' \
+  head "a head a byte at a time"
 # The client's certificate, lost on the way to the handler or the server:
 # the mTLS checks must fail.
 mtls_breaks() { # mtls_breaks <label> <name> <old> <new>
@@ -2106,10 +2428,10 @@ mtls_breaks() { # mtls_breaks <label> <name> <old> <new>
 }
 mtls_breaks "an HTTP/1.1 request without the client's certificate" mtls_h1 \
   '        req.peer_certificates = peer
-        return unless answered?' '        return unless answered?'
+        response = handler.call(req)' '        response = handler.call(req)'
 mtls_breaks "an HTTP/2 request without the client's certificate" mtls_h2 \
   '      req.peer_certificates = peer
-      answered = h2.answer' '      answered = h2.answer'
+      response = handler.call(req)' '      response = handler.call(req)'
 mtls_breaks "an upgrade's handshake presenting no certificate" mtls_upgrade \
   '            offered.identity = tls_config.identity
 ' ''

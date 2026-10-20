@@ -107,6 +107,32 @@
   entry still read, masked); blinding is unchanged. std/digest runs SHA-2 eight rounds a pass with the
   names turned. Tried and dropped, slower here: Poly1305 in 44-bit limbs,
   and ChaCha20 four blocks at a time.
+- **`Server.serve` serves at most 1,024 connections at once and wants a
+  whole request within five minutes.** It accepted every connection, and
+  past the head's `timeout_ms` a body was bounded per read alone, so one
+  sent a byte every few seconds held its connection and fiber for as long
+  as it dripped (finding 12 of the std/tls review). `max_connections`
+  (default 1,024, 0 for none) stops the accept loop while every place is
+  held: the next connection is queued in the kernel's listen queue, not
+  refused, as Go's `netutil.LimitListener` does, and served when one
+  closes. `request_timeout_ms` (default 300,000, 0 for none) holds head
+  and body together, counted from when the wait for the request began, as
+  Go's `ReadTimeout` beside `ReadHeaderTimeout`; the head is held to the
+  sooner of it and `timeout_ms`, a block reading its own body reads under
+  it, and over HTTP/2 the wait for each request and its body is held the
+  same way. A connection past it is closed unanswered. In
+  `bench/std_http_exercise.sh`, Python's ssl drives a server with
+  `max_connections: 2, timeout_ms: 3000, request_timeout_ms: 5000`: a
+  third connection's handshake waits until one of two held connections
+  closes and is then served; a head dripped a byte per half second is cut
+  at 3.0 s, and a body dripped so over HTTP/1.1 and in one-byte DATA
+  frames over HTTP/2 at 5.0 s, where before both ran on. The body's
+  deadline left out at either protocol, the cap ignored, a place never
+  given back, and the head held to the whole request's deadline are each
+  caught at the case that names it. `wrk -t2 -c50 -d3s` against release
+  builds of `bench/std_http_server.iyi`, five rounds alternating on this
+  machine: 82,028 to 94,691 requests/s (mean 88,530) before, 86,144 to
+  93,154 (mean 88,219) after.
 
 ### Fixed
 
@@ -183,6 +209,53 @@
   answers nil for it, so `multipart` answers nil as for no boundary.
   Found by the fuzz gate (1 of the first 60,000 HTTP/1.1 inputs); held
   by a check in `bench/std_http_exercise.iyi`.
+- **`Random::Secure` reads `/dev/urandom` only when it is a character
+  device.** On Linux the fallback for a kernel or sandbox where `getrandom`
+  answers ENOSYS opened the path and read whatever was there, so in a
+  chroot or container whose `/dev` someone else wrote, a regular file
+  could have been every key's source (finding 7 of the std/tls review).
+  The descriptor is now `fstat`ed and anything but S_IFCHR is a panic
+  naming the path. `bench/std_random_exercise.sh` reaches the fallback
+  for real: a seccomp filter installed by Python makes `getrandom` answer
+  ENOSYS before the probe is executed, the device is read (two different
+  draws of 32 bytes), and a copy of the module differing in its one
+  `URANDOM` line, naming a regular file of `A`s, panics with "is not a
+  character device" where the module before this read `4141...` and
+  handed it out; the check left out and `st_mode` read at the other
+  architecture's offset are each caught. The program has no argument or
+  variable that names another source. Skipped, with a sentence, off Linux
+  or where seccomp is refused.
+- **`TlsClient` sends server_name as A-labels without a final dot.** A
+  host given in Unicode went out as its UTF-8 bytes and one with a final
+  dot kept it, where RFC 6066 section 3 has ASCII and no trailing dot;
+  OpenSSL's `s_server -servername xn--bcher-kva.example
+  -servername_fatal` refused `bücher.example.` with alert
+  unrecognized_name (112), having read `"b\xc3\xbccher.example."`
+  (finding 14 of the std/tls review). `TlsClient.server_name_for(host)`
+  drops one final dot and writes a non-ASCII name through `IDNA.to_ascii`;
+  that form is sent and the certificate is checked for it, and a name IDNA
+  refuses is a `TlsError` before anything is sent. An ASCII name goes as
+  written. `bench/std_tls_exercise.sh` has s_server, under `-servername`
+  and `-servername_fatal`, read `"xn--bcher-kva.example"` for
+  `bücher.example.` and `"localhost"` for `localhost.` and send the
+  certificate it keeps for that name alone, which the client checks; the
+  name sent as given, Unicode left as it is and the final dot kept are
+  each caught there.
+- **A kept `https://` connection is handed out only under the TLS
+  configuration it was made with.** `HTTPClient` kept connections by
+  scheme, host and port, so after `HTTP.tls_config=` named roots that do
+  not reach a server's certificate, the next request to that server still
+  went over the connection checked against the old ones and was answered
+  (finding 11 of the std/tls review). A connection now records the
+  configuration and the roots, identity, `now` and `min_version` it was
+  made under, and one made under anything else is closed rather than
+  reused. Against Python's TLS server in `bench/std_http_exercise.sh`, a
+  request after `HTTP.tls_config=` names an unrelated root makes a new
+  connection and is refused ("no certificate here issued CN=http gate
+  root"), where the module before answered it on the kept one; a new
+  configuration over the same roots makes one new connection and reuses
+  it (3 made, 2 reused, against 1 made, 4 reused before). A copy without
+  the check is caught there.
 
 ## 0.18.0 — 2026-10-18
 

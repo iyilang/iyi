@@ -2165,7 +2165,7 @@ mutate "a redirect that never changes the method" 'unless keeps || (status != 30
 mutate "credentials carried to another host" 'sent = without(sent, ["Authorization", "Proxy-Authorization", "Cookie"]) unless same_authority?(current, target)' ''
 mutate "a part that does not end at its boundary" '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]
           @part_done = true' '          @held = @held[@delimiter.bytesize, @held.bytesize - @delimiter.bytesize]'
-mutate "a client that never keeps a connection" 'conn = keeping.take(key, secure ? tls_config : nil) unless upgrade' ''
+mutate "a client that never keeps a connection" 'conn = keeping.take(key, secure ? under : nil) unless upgrade' ''
 mutate "a client that keeps a connection the answer closed" 'keep = got.starts_with?("HTTP/1.1 ") && !reader.to_close? && status != 101 && (said.nil? || !has_token?(said, "close"))' 'keep = true'
 mutate "a client that holds a connection for whatever was left unread" 'client && @keep && !@conn.ended? && @reader.drain(65536_i64)' 'client && @keep && !@conn.ended? && @reader.drain(9223372036854775807_i64)'
 mutate "a GET not sent again when its kept connection was closed" 'retry = body.is_a?(String) && (head ||' 'retry = false && (head ||'
@@ -2449,7 +2449,7 @@ mtls_breaks "an HTTP/2 request without the client's certificate" mtls_h2 \
   '      req.peer_certificates = peer
       response = handler.call(req)' '      response = handler.call(req)'
 mtls_breaks "an upgrade's handshake presenting no certificate" mtls_upgrade \
-  '            offered.identity = tls_config.identity
+  '            offered.identity = under.identity
 ' ''
 # The client through a proxy, broken in a copy: the round against the
 # Python proxy and the iyi server above must fail.

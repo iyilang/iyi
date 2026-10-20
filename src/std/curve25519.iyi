@@ -30,8 +30,14 @@
 # ladder's swap (`cswap`) and the window lookup in a scalar multiplication,
 # which reads all sixteen entries and keeps one with `&` and `|`.
 # bench/ct_timing.sh, `X25519.shared` with one peer key, a fixed private
-# key against random ones: |t| = 1.6 to 7.3 over 100,000 (under 10 is no
-# leak seen; the machine was shared).
+# key against random ones: |t| = 1.6 to 7.3 over 100,000 and 2.5 to 5.0
+# over 50,000 in three reruns (under 10 is no leak seen; the machine was
+# shared). `Ed25519.sign`, one seed, a fixed message against random ones:
+# |t| = 4.2 to 6.3 over 50,000 to 100,000. In the --release assembly the
+# ladder and its swaps (inlined into `X25519.shared`) and
+# `CurvePoint.base_mult`'s table reads have no cmov and no conditional
+# jump but on counters, the allocator, and the all-zero secret's
+# documented check.
 #
 # X25519 is the RFC 7748 §5 ladder over the clamped scalar, 255 steps. The
 # peer's u-coordinate has its top bit masked and is otherwise taken as it

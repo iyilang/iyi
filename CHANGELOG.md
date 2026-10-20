@@ -431,6 +431,15 @@
   as the leak the tool must see, 403 over 5,000. It fails past 10 and is
   not run by CI, whose shared runners are too noisy for that line.
   std/big's header records the assembly audit of `inverse_mod_secret`.
+  The tool also times P-384 signing (|t| 1.7 over 50,000), Ed25519
+  signing (4.2 over 100,000), ML-KEM-768 decapsulation (valid against
+  tampered ciphertexts 2.1, one key against others 6.3, over 50,000) and
+  the AEADs' tag checks (a tag wrong in its first byte against its last:
+  AES-GCM 2.0, ChaCha20-Poly1305 4.9, over 100,000), and the --release
+  assembly of P-384's table selection, ML-KEM's re-encryption compare
+  and key selection, curve25519's swaps and table reads and the tag
+  compares has no branch on a secret: nothing there needed the P-256 fix.
+  X25519 reran at 2.0 to 5.0.
 - **`Server.serve` serves at most 1,024 connections at once and wants a
   whole request within five minutes.** It accepted every connection, and
   past the head's `timeout_ms` a body was bounded per read alone, so one

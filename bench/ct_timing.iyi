@@ -21,7 +21,16 @@
 # fixed message against random ones, one key), p256-length (the same,
 # the random messages drawn from 256 whose r and s are as long in DER as
 # the fixed one's) or x25519 (`X25519.shared`,
-# a fixed private key against random ones, one peer). It prints the
+# a fixed private key against random ones, one peer), p384 (as p256),
+# ed25519 (`Ed25519.sign`, one seed, a fixed message against random
+# ones), mlkem-ct (`decapsulate` with one key, its valid ciphertext
+# against tampered ones, which take the implicit rejection), mlkem-key
+# (a fixed key and its ciphertext against 64 other keys and theirs),
+# aes-gcm and chacha (`open` of a sealed message whose tag differs from
+# the right one in its first byte against one that differs in its last:
+# an early-exit compare is faster on the first; equal against differing
+# would time the decryption a right tag lets happen, which is public).
+# It prints the
 # samples and the largest |t|. The time is `Time.monotonic_nanoseconds`:
 # std has no cycle counter, and a nanosecond clock read around operations
 # of microseconds is fine enough. `bench/ct_timing.sh` drives it.
@@ -30,7 +39,10 @@ import std/big::{BigInt}
 import std/rsa::{RsaPrivateKey, RsaHash}
 import std/p256::{P256PrivateKey}
 import std/ecdsa::{EcdsaHash}
-import std/curve25519::{X25519}
+import std/curve25519::{X25519, Ed25519}
+import std/p384::{P384PrivateKey}
+import std/mlkem::{MlKem768, MlKem768PrivateKey}
+import std/aead::{AesGcm, ChaCha20Poly1305}
 import std/file::{File}
 import std/time::{Time}
 import std/math::{Math}
@@ -133,6 +145,30 @@ end
 xs = Array(BigInt).new(1024) { |_| BigInt.from_bytes(draw.bytes(256)) % modulus }
 messages = Array(Array(UInt8)).new(1024) { |_| draw.bytes(64) }
 secrets = Array(Array(UInt8)).new(1024) { |_| draw.bytes(32) }
+p384_key = P384PrivateKey.from_bytes(draw.bytes(48)).or_panic
+seed = draw.bytes(32)
+kem_keys = Array(MlKem768PrivateKey).new(target == "mlkem-key" ? 65 : 1) { |_| MlKem768PrivateKey.from_seed(draw.bytes(64)) }
+kem_cts = kem_keys.map do |k|
+  sealed = MlKem768.encapsulate(k.encapsulation_key, draw.bytes(32))
+  raise "encapsulate refused" unless sealed.is_a?(Tuple)
+  sealed[0]
+end
+tampered = Array(Array(UInt8)).new(1024) do |_|
+  t = kem_cts[0].dup
+  at = (draw.next % 1088_u64).to_i32
+  t[at] = t[at] ^ 1_u8
+  t
+end
+aead_key = draw.bytes(32)
+nonce = draw.bytes(12)
+gcm = AesGcm.new(aead_key)
+chacha = ChaCha20Poly1305.new(aead_key)
+sealed_text = target == "chacha" ? chacha.seal(nonce, draw.bytes(64)) : gcm.seal(nonce, draw.bytes(64))
+# The tag is the last 16 bytes: one copy wrong in its first, one in its last.
+wrong_first = Array(UInt8).new(sealed_text.bytesize) { |i| sealed_text.to_unsafe[i] }
+wrong_first[wrong_first.size - 16] = wrong_first[wrong_first.size - 16] ^ 0x80_u8
+wrong_last = Array(UInt8).new(sealed_text.bytesize) { |i| sealed_text.to_unsafe[i] }
+wrong_last[wrong_last.size - 1] = wrong_last[wrong_last.size - 1] ^ 0x80_u8
 times = Array(Int64).new(samples, 0_i64)
 classes = Array(Int32).new(samples, 0)
 sink = 0
@@ -155,11 +191,28 @@ while i < samples + samples // 10
     sink = sink ^ key.sign_pss(RsaHash::SHA256, message).size
   when "p256", "p256-length", "p256-two"
     sink = sink ^ p256_key.sign(EcdsaHash::SHA256, message).size
+  when "p384"
+    sink = sink ^ p384_key.sign(EcdsaHash::SHA384, message).size
+  when "ed25519"
+    sink = sink ^ Ed25519.sign(seed, message).bytesize
+  when "mlkem-ct"
+    got = kem_keys[0].decapsulate(c == 0 ? kem_cts[0] : tampered[pick])
+    sink = sink ^ (got.is_a?(Array) ? got.size : 0)
+  when "mlkem-key"
+    which = c == 0 ? 0 : 1 + (pick & 63)
+    got = kem_keys[which].decapsulate(kem_cts[which])
+    sink = sink ^ (got.is_a?(Array) ? got.size : 0)
+  when "aes-gcm"
+    got = gcm.open(nonce, c == 0 ? wrong_first : wrong_last)
+    sink = sink ^ (got.is_a?(String) ? 1 : 0)
+  when "chacha"
+    got = chacha.open(nonce, c == 0 ? wrong_first : wrong_last)
+    sink = sink ^ (got.is_a?(String) ? 1 : 0)
   when "x25519"
     shared = X25519.shared(secret, peer)
     sink = sink ^ (shared.is_a?(String) ? shared.bytesize : 0)
   else
-    raise "no target #{target}: inverse, euclid, rsa, p256 or x25519"
+    raise "no target #{target}: inverse, euclid, rsa, p256, p384, ed25519, mlkem-ct, mlkem-key, aes-gcm, chacha or x25519"
   end
   took = Time.monotonic_nanoseconds - started
   # The first tenth warms caches and the clock and is not kept.

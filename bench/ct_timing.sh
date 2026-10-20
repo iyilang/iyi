@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # A dudect-style timing check of std's secret paths (bench/ct_timing.iyi
-# says how): std/big's `inverse_mod_secret`, std/rsa's `sign_pss`, std/p256's
-# signing and std/curve25519's X25519, each a fixed input against random
-# ones, interleaved, Welch's t between the two. Then the extended Euclid's
+# says how): std/big's `inverse_mod_secret`, std/rsa's `sign_pss`, P-256
+# and P-384 signing, Ed25519 signing, X25519, ML-KEM-768 decapsulation
+# (valid against tampered ciphertexts, one key against others) and the
+# AEADs' tag checks, one class against another, interleaved, Welch's t
+# between the two. Then the extended Euclid's
 # algorithm std/rsa used to invert its blinding factor, which leaks, so that
 # a run that cannot see a leak says so instead of passing.
 #
@@ -59,7 +61,9 @@ t_of() {
 over() { awk -v t="$1" 'BEGIN { exit !(t > 10) }'; }
 
 echo "== secret paths: |t| must stay at or under 10"
-for pair in "inverse:$((100000 * SCALE))" "p256:$((100000 * SCALE))" "x25519:$((100000 * SCALE))" "rsa:$((20000 * SCALE))"; do
+for pair in "inverse:$((100000 * SCALE))" "p256:$((100000 * SCALE))" "p384:$((50000 * SCALE))" "ed25519:$((100000 * SCALE))" \
+  "x25519:$((100000 * SCALE))" "mlkem-ct:$((50000 * SCALE))" "mlkem-key:$((50000 * SCALE))" "aes-gcm:$((100000 * SCALE))" \
+  "chacha:$((100000 * SCALE))" "rsa:$((20000 * SCALE))"; do
   target="${pair%%:*}"
   samples="${pair#*:}"
   if [ "$target" = rsa ] && [ -z "$key" ]; then

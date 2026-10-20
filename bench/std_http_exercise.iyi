@@ -1384,6 +1384,7 @@ group do |g|
     cut = "--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nno end"
     assert_str "a|-|-|HTTP: multipart body ends inside a part;error: HTTP: multipart body ends inside a part", HTTP.post(form_base + "/parts", cut, {"Content-Type" => "multipart/form-data; boundary=b"}).or_panic.body, "a body cut inside a part is an HTTPError"
     assert_str "not multipart", HTTP.post(form_base + "/parts", "x", {"Content-Type" => "multipart/form-data"}).or_panic.body, "multipart with no boundary is none"
+    assert_str "not multipart", HTTP.post(form_base + "/parts", "x", {"Content-Type" => "multipart/form-data; boundary=" + "b" * 71}).or_panic.body, "a boundary past RFC 2046's 70 characters is none, not a panic"
     HTTP.get(form_base + "/stop").or_panic
     0
   end

@@ -578,16 +578,20 @@ pub struct DerValue
   end
 
   # BMPString (*width* 2) or UniversalString (4), big-endian, to UTF-8.
+  # The code is read in Int64: in Int32 a first byte of 0x80 or more
+  # shifted into the sign bit, U+FFFFFFFF came out as -1, under the bound
+  # below, and `chr` panicked on it (`1c04ffffffff`, found by
+  # bench/std_fuzz_exercise.sh).
   private def wide(width : Int32) : String | Asn1Error
     built = String.build do |io|
       i = content_offset
       while i < end_offset
-        code = 0
-        width.times { |k| code = (code << 8) | @data[i + k].to_i32 }
+        code = 0_i64
+        width.times { |k| code = (code << 8) | @data[i + k].to_i64 }
         if (code >= 0xD800 && code <= 0xDFFF) || code > 0x10FFFF
           return Asn1Error.new("a #{width == 2 ? "BMPString" : "UniversalString"} holding U+#{code.to_s(16)}, which is no character", i)
         end
-        io << code.chr
+        io << code.to_i32.chr
         i = i + width
       end
     end

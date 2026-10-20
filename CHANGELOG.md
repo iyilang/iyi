@@ -54,6 +54,23 @@
   verifier or OpenSSL 3.5.5 where one exists. The file lists six findings
   fixed below (two Medium, four Low), eight left open with the reason, and
   what was checked and found sound, each with where in the code it holds.
+- **bench/std_fuzz_exercise.sh: the readers of std/asn1, std/x509,
+  std/tls, std/http and std/hpack fuzzed.** Seeds - certificates, PEM,
+  recorded and built TLS 1.3 and 1.2 handshakes, records, HTTP/1.1
+  heads, HTTP/2 frames, HPACK blocks - are mutated by a seeded `Random`
+  (bit flips, bytes in and out, truncation, lengths set to their bounds,
+  splices of two seeds, DER trees and TLS messages and HTTP/2 frames
+  changed a unit at a time) and fed to each module's public entry in
+  process, the handshakes and HTTP over a loopback connection with a
+  scripted peer that signs and seals what the template says. Every input
+  must answer a value or an error value, within a time bound and an
+  allocation bound. Long runs read 1,140,000 inputs; the two module
+  defects they found are fixed below and kept as regression inputs whose
+  fixes, undone in a copy, the gate catches. x509 is set beside Python's
+  cryptography (4,000 certificates: 3,853 alike; the rest judged against
+  RFC 5280 in the exercise's header, three leniencies there left to
+  refuse) and HPACK beside Python's hpack (4,000 alike). 4,000 inputs
+  of each pure target by default, `FUZZ_ITERATIONS` for more.
 
 ### Changed
 
@@ -149,6 +166,23 @@
   message** (section 5.1). After the handshake, application data or a
   close_notify was taken while half a KeyUpdate or NewSessionTicket was
   held, at both ends; `unexpected_message` now.
+- **std/asn1: a UniversalString whose character has its top bit set is
+  refused, not a panic.** `DerValue#string` read each four-byte code
+  into an Int32, where a first byte of 0x80 or more made it negative:
+  under the U+10FFFF bound, it reached `chr`, which panicked ("-1 is
+  out of char range" for `1c04ffffffff`). The code is read in Int64 and
+  answered as an `Asn1Error` naming it. Found by the new fuzz gate
+  (`bench/std_fuzz_exercise.sh`, 22 of the first 60,000 DER inputs);
+  held by a check in `bench/std_asn1_exercise.iyi` and a broken copy of
+  the module its gate catches.
+- **std/http: a request's multipart boundary past 70 characters is no
+  boundary, not a panic.** `Request#multipart` handed the boundary a
+  client's `Content-Type` named to `Multipart.new`, which panics on one
+  outside RFC 2046's 1 to 70 characters: a server whose block read
+  `req.multipart` panicked on a 90-character one. `Multipart.boundary`
+  answers nil for it, so `multipart` answers nil as for no boundary.
+  Found by the fuzz gate (1 of the first 60,000 HTTP/1.1 inputs); held
+  by a check in `bench/std_http_exercise.iyi`.
 
 ## 0.18.0 — 2026-10-18
 

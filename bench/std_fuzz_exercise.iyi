@@ -1,0 +1,2720 @@
+# Fuzzes what std/asn1, std/x509, std/tls, std/http and std/hpack read
+# from a peer: inputs made from seeds by a seeded `Random`, each fed to
+# the module's public entry in this process, and held to three things -
+# an answer or an error value and never a panic, a time bound, and an
+# allocation bound (`time_limit_ms`, `alloc_limit`).
+#
+#     iyi run bench/std_fuzz_exercise.iyi all N       # the gate's run
+#     iyi run bench/std_fuzz_exercise.iyi fuzz TARGET FROM COUNT [SEED]
+#     iyi run bench/std_fuzz_exercise.iyi replay TARGET HEX
+#     iyi run bench/std_fuzz_exercise.iyi show TARGET INDEX
+#     iyi run bench/std_fuzz_exercise.iyi corpus TARGET FROM COUNT
+#     iyi run bench/std_fuzz_exercise.iyi roots FILE FROM COUNT
+#
+# Input N of a target is the same on every run and machine: its own
+# generator is keyed by the target and N, so a long run is cut into
+# chunks and any input is made again alone.
+#
+# The targets. Pure ones, bytes in and an answer out: `der` (Der.parse,
+# the walk and every typed reader on every value), `x509`
+# (Certificate.parse, host matching - with the property that a final dot
+# and upper case change nothing - signatures and X509.verify as leaf,
+# intermediate and root), `pem` (the PEM readers and TlsIdentity),
+# `keys` (private keys TlsIdentity takes, each signing what its
+# certificate's key must verify), `record` (TlsRecordCipher#open, sealed
+# records and inner plaintexts sealed after mutation), `http1` (request
+# and response heads, fields, chunked bodies, cookies, codings, multipart
+# and forms) and `hpack` (Decoder, Huffman, Integer). Connection ones,
+# over a loopback connection with a scripted peer that makes the
+# template live - the session echoed, CertificateVerify, Finished and a
+# TLS 1.2 ServerKeyExchange signed, records sealed under keys from its
+# own shares: `tls-server` and `tls-client` (TLS 1.3 both ends, HRR,
+# client certificates, KeyUpdate and tickets after; a TLS 1.2 client to
+# its server's Finished), `h1-server`, `h2-server` (Server.handle with
+# HTTP/1.1 and prior-knowledge HTTP/2 frames), `h1-client`, `h2-client`
+# (HTTPClient, gzip, zstd and deflate bodies included). Every
+# connection seed reaches the end it was made for (SEED_GOALS).
+#
+# The long runs, 2026-10-19 and 20, seed 0x1F22, each 20,000-input chunk
+# through heavy.sh: der 120,000 inputs, x509 60,000 and 60,000 more
+# with the machine's 121 roots among the seeds, pem, keys, record, http1
+# and hpack 60,000 each, and each connection target 100,000 - 1,140,000
+# in all. Defects in the modules, each fixed and in REGRESSIONS:
+# std/asn1 panicked on a UniversalString code with its top bit set
+# (`1c04ffffffff`, 22 of the first 60,000 DER inputs); std/http's
+# `Request#multipart` panicked on a client's boundary past 70
+# characters (1 of the first 60,000 http1 inputs). The other bounds held:
+# the slowest pure input took 966 ms (der, 114 KB nested 56,270 values
+# deep in breadth) and allocated 324 MB with the collector held off,
+# 2.8 KB a byte of input, inside the 4 KB a byte the bound allows; the
+# slowest connection 230 ms. What the runs found in this harness, fixed
+# here: an HPACK verdict built by `+`, quadratic (1.6 GB for 26 KB); DER
+# trees whose repeated values shared, millions of bytes written out for
+# one input; loopback ports used up by TIME_WAIT; a client's retry of a
+# refused stream met by no peer.
+#
+# The oracles (bench/std_fuzz_exercise.sh). HPACK: 4,000 mutated streams
+# decoded alike by Python's hpack 4.2.0. x509 against Python's
+# cryptography 46.0.5 on 4,000 mutated certificates: 3,853 judged alike,
+# 115 read by iyi alone, 32 by cryptography alone. Checked against RFC
+# 5280: where iyi refuses alone it is right (two signature algorithms
+# that differ, 4.1.1.2; extensions in a v1 certificate, 4.1.2.9; Ed25519
+# keys off the curve; unused bits in a signature). Where it reads alone,
+# most is leniency by design - name strings that do not decode are shown
+# as `#...` and names are compared as bytes, unknown non-critical
+# extensions are not read, an explicit `critical FALSE` and unsorted RDN
+# sets are taken as Go and OpenSSL take them - and three are refusals
+# RFC 5280 asks for, not yet made: a TBSCertificate's [1], [2] and [3]
+# out of order or repeated (two extension blocks, read both), an empty
+# RelativeDistinguishedName (SET SIZE (1..MAX)), and a nameConstraints
+# iPAddress mask that is not a CIDR prefix (4.2.1.10).
+
+import std/random::{Random}
+import std/gc::{GC}
+import std/asn1::{Der, DerValue, DerClass, Asn1Error}
+import std/x509::{Certificate, X509, X509Error, X509Purpose}
+import std/tls::{TlsClient, TlsConfig, TlsError, TlsIdentity, TlsKeySchedule, TlsRecordCipher, TlsServer, TlsServerConfig, TlsVersion}
+import std/http::{HTTP, HTTPError, HTTPClient, Server, Request, Response, Multipart, BodyReader}
+import std/slice::{Bytes}
+import std/hpack::{Decoder, Encoder, HpackError, Huffman, Integer, HeaderField}
+import std/socket::{IyiSocket, SocketError}
+import std/curve25519::{X25519, CurveError}
+import std/p256::{P256PrivateKey}
+import std/ecdsa::{EcdsaError, EcdsaPublicKey, EcdsaHash}
+import std/rsa::{RsaPublicKey, RsaHash}
+import std/curve25519::{Ed25519, Ed25519PublicKey}
+import std/base64::{Base64}
+import std/compress::{Gzip, Zlib}
+import std/zstd::{Zstd}
+import std/time::{Time}
+import std/file::{File}
+
+def check(cond : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless cond
+end
+
+def unhex(hex : String) : Array(UInt8)
+  p = hex.to_unsafe
+  Array(UInt8).new(hex.bytesize // 2) do |i|
+    hi = p[i * 2].to_i32
+    lo = p[i * 2 + 1].to_i32
+    hi = hi >= 97 ? hi - 87 : hi - 48
+    lo = lo >= 97 ? lo - 87 : lo - 48
+    (hi * 16 + lo).to_u8
+  end
+end
+
+HEX_DIGITS = "0123456789abcdef"
+
+def hex(bytes : Array(UInt8)) : String
+  digits = HEX_DIGITS.to_unsafe
+  String.new(bytes.size * 2) do |buf|
+    i = 0
+    while i < bytes.size
+      buf[i * 2] = digits[bytes[i].to_i32 >> 4]
+      buf[i * 2 + 1] = digits[bytes[i].to_i32 & 15]
+      i = i + 1
+    end
+    nil
+  end
+end
+
+def text(bytes : Array(UInt8)) : String
+  String.new(bytes.size) { |buf| buf.copy_from(bytes.to_unsafe, bytes.size) }
+end
+
+def bytes_of(s : String) : Array(UInt8)
+  p = s.to_unsafe
+  Array(UInt8).new(s.bytesize) { |i| p[i] }
+end
+
+def u16(v : Int32) : Array(UInt8)
+  [((v >> 8) & 0xFF).to_u8, (v & 0xFF).to_u8]
+end
+
+def u24(v : Int32) : Array(UInt8)
+  [((v >> 16) & 0xFF).to_u8, ((v >> 8) & 0xFF).to_u8, (v & 0xFF).to_u8]
+end
+
+def u32(v : Int32) : Array(UInt8)
+  [((v >> 24) & 0xFF).to_u8, ((v >> 16) & 0xFF).to_u8, ((v >> 8) & 0xFF).to_u8, (v & 0xFF).to_u8]
+end
+
+def at16(data : Array(UInt8), at : Int32) : Int32
+  (data[at].to_i32 << 8) | data[at + 1].to_i32
+end
+
+def at24(data : Array(UInt8), at : Int32) : Int32
+  (data[at].to_i32 << 16) | (data[at + 1].to_i32 << 8) | data[at + 2].to_i32
+end
+
+# Where *needle* first is in *hay*, or -1.
+def find_bytes(hay : Array(UInt8), needle : Array(UInt8)) : Int32
+  return -1 if needle.empty? || needle.size > hay.size
+  i = 0
+  last = hay.size - needle.size
+  first = needle[0]
+  while i <= last
+    if hay[i] == first
+      k = 1
+      while k < needle.size && hay[i + k] == needle[k]
+        k = k + 1
+      end
+      return i if k == needle.size
+    end
+    i = i + 1
+  end
+  -1
+end
+
+# *hay* with the first *mark* in it, if there is one, made *live*.
+def substitute(hay : Array(UInt8), mark : Array(UInt8), live : Array(UInt8)) : Array(UInt8)
+  at = find_bytes(hay, mark)
+  return hay if at < 0
+  hay[0, at] + live + hay[at + mark.size, hay.size - at - mark.size]
+end
+
+# A refusal's sentence with its numbers taken out: two refusals that say
+# the same thing about different offsets are one kind, which is what the
+# count of kinds reached counts.
+def kind_of(message : String) : String
+  line = message
+  cut = line.index('\n')
+  line = line[0, cut] if cut
+  line = line[0, 160] if line.bytesize > 160
+  String.build do |io|
+    line.each_char { |c| io << (c >= '0' && c <= '9' ? '#' : c) }
+  end
+end
+
+NOW = Time.utc(2026, 6, 1)
+
+# ---------------------------------------------------------------------
+# Mutations
+# ---------------------------------------------------------------------
+
+# A seeded generator's choices over bytes: what every input here is made
+# of. One `Random` per input, keyed by the target and the input's number,
+# so iteration N of a target is the same input on every run and every
+# machine, however the run is cut into chunks.
+class Mutator
+  getter rng : Random
+
+  INTERESTING = [0x00_u8, 0x01_u8, 0x02_u8, 0x03_u8, 0x7F_u8, 0x80_u8, 0x81_u8, 0x82_u8, 0x84_u8, 0xFE_u8, 0xFF_u8, 0x20_u8, 0x0A_u8, 0x0D_u8, 0x30_u8, 0x3A_u8, 0x2E_u8]
+  # What an input may grow to: past a TLS record, an HTTP/2 frame and a
+  # DER value's long lengths, and short of what makes a run slow.
+  LIMIT = 1 << 17
+
+  def initialize(@rng : Random)
+  end
+
+  def below(n : Int32) : Int32
+    return 0 if n <= 0
+    @rng.rand(n)
+  end
+
+  def chance(n : Int32) : Bool
+    below(n) == 0
+  end
+
+  def byte : UInt8
+    below(256).to_u8
+  end
+
+  def pick(list : Array(Array(UInt8))) : Array(UInt8)
+    list[below(list.size)]
+  end
+
+  # *data* changed one to a few times, rarely more.
+  def mutate(data : Array(UInt8), corpus : Array(Array(UInt8)), words : Array(Array(UInt8))) : Array(UInt8)
+    res = data
+    count = 1 + below(3)
+    count = count + below(8) if chance(6)
+    count.times { res = once(res, corpus, words) }
+    res.size > LIMIT ? res[0, LIMIT] : res
+  end
+
+  def once(data : Array(UInt8), corpus : Array(Array(UInt8)), words : Array(Array(UInt8))) : Array(UInt8)
+    n = data.size
+    if n == 0
+      return words.empty? ? [byte] : pick(words).dup
+    end
+    case below(14)
+    when 0
+      res = data.dup
+      at = below(n)
+      res[at] = res[at] ^ (1_u8 << below(8))
+      res
+    when 1
+      res = data.dup
+      res[below(n)] = INTERESTING[below(INTERESTING.size)]
+      res
+    when 2
+      res = data.dup
+      res[below(n)] = byte
+      res
+    when 3
+      # random bytes put in
+      at = below(n + 1)
+      size = 1 + below(chance(4) ? 64 : 8)
+      data[0, at] + Array(UInt8).new(size) { byte } + data[at, n - at]
+    when 4
+      # bytes taken out
+      at = below(n)
+      room = n - at
+      size = 1 + below(chance(4) ? room : (room < 16 ? room : 16))
+      data[0, at] + data[at + size, n - at - size]
+    when 5
+      # a piece copied in somewhere else
+      from = below(n)
+      room = n - from
+      size = 1 + below(room < 64 ? room : 64)
+      to = below(n + 1)
+      data[0, to] + data[from, size] + data[to, n - to]
+    when 6, 7
+      length_edit(data)
+    when 8
+      # a piece of another seed in place of a piece of this one
+      other = pick(corpus)
+      return data if other.empty?
+      from = below(other.size)
+      size = 1 + below(other.size - from)
+      at = below(n + 1)
+      cut = below(n - at + 1)
+      data[0, at] + other[from, size] + data[at + cut, n - at - cut]
+    when 9
+      data[0, below(n)]
+    when 10
+      # a word the format is made of, put in or written over
+      return length_edit(data) if words.empty?
+      w = pick(words)
+      at = below(n + 1)
+      if chance(2)
+        data[0, at] + w + data[at, n - at]
+      else
+        cut = w.size < n - at ? w.size : n - at
+        data[0, at] + w + data[at + cut, n - at - cut]
+      end
+    when 11
+      # two pieces swapped
+      a = below(n)
+      b = below(n)
+      if b < a
+        t = a
+        a = b
+        b = t
+      end
+      size = 1 + below(32)
+      # Pieces that would overlap, or run off the end, are no swap.
+      return data if a + size > b || b + size > n
+      data[0, a] + data[b, size] + data[a + size, b - a - size] + data[a, size] + data[b + size, n - b - size]
+    when 12
+      # a piece repeated, a few times or thousands: what finds a path
+      # whose cost is the square of what it reads
+      from = below(n)
+      room = n - from
+      size = 1 + below(room < 16 ? room : 16)
+      times = 2 + below(chance(3) ? 3000 : 40)
+      piece = data[from, size]
+      res = data[0, from + size]
+      times.times do
+        break if res.size > LIMIT
+        res.concat(piece)
+      end
+      res.concat(data[from + size, n - from - size])
+      res
+    else
+      res = data.dup
+      at = below(n)
+      res[at] = ((res[at].to_i32 + below(33) - 16) & 0xFF).to_u8
+      res
+    end
+  end
+
+  # A big-endian field of one to four bytes, anywhere, made a length a
+  # reader can trip on: one more or less, nothing, everything, or what is
+  # left after it.
+  def length_edit(data : Array(UInt8)) : Array(UInt8)
+    n = data.size
+    width = 1 + below(n < 4 ? n : 4)
+    at = below(n - width + 1)
+    value = 0_i64
+    width.times { |k| value = (value << 8) | data[at + k].to_i64 }
+    max = (1_i64 << (8 * width)) - 1
+    rest = (n - at - width).to_i64
+    choice = case below(10)
+             when 0 then value + 1
+             when 1 then value - 1
+             when 2 then value + below(64) - 32
+             when 3 then 0_i64
+             when 4 then max
+             when 5 then rest
+             when 6 then rest + 1
+             when 7 then rest - 1
+             when 8 then value * 2
+             else        max // 2 + 1
+             end
+    choice = choice & max
+    res = data.dup
+    width.times { |k| res[at + k] = ((choice >> (8 * (width - 1 - k))) & 0xFF).to_u8 }
+    res
+  end
+end
+
+# One DER value as a tree a mutation can edit and write back with its
+# lengths right - or, by `style`, wrong in one of the ways DER forbids. A
+# lenient reader, the harness's own: what it cannot read is mutated as
+# bytes instead.
+class Tlv
+  property ident : Array(UInt8)
+  property content : Array(UInt8)
+  property children : Array(Tlv)?
+  # 0: the shortest length; 1: long form a byte longer than it needs; 2:
+  # indefinite (0x80); 3: one more than the content; 4: one less; 5: four
+  # bytes of long form.
+  property style : Int32 = 0
+
+  def initialize(@ident : Array(UInt8), @content : Array(UInt8), @children : Array(Tlv)?)
+  end
+
+  def self.read(data : Array(UInt8), at : Int32, stop : Int32, depth : Int32) : {Tlv, Int32}?
+    return nil if at >= stop
+    i = at
+    first = data[i]
+    i = i + 1
+    if first & 0x1F_u8 == 0x1F_u8
+      while i < stop && data[i] & 0x80_u8 != 0
+        i = i + 1
+      end
+      return nil if i >= stop
+      i = i + 1
+    end
+    ident = data[at, i - at]
+    return nil if i >= stop
+    lead = data[i]
+    i = i + 1
+    length = 0
+    if lead < 0x80_u8
+      length = lead.to_i32
+    else
+      count = (lead & 0x7F_u8).to_i32
+      return nil if count == 0 || count > 3 || i + count > stop
+      count.times do
+        length = (length << 8) | data[i].to_i32
+        i = i + 1
+      end
+    end
+    return nil if length > stop - i
+    content = data[i, length]
+    children = nil
+    if first & 0x20_u8 != 0 && depth < 40
+      list = [] of Tlv
+      inner = i
+      whole = true
+      while inner < i + length
+        got = read(data, inner, i + length, depth + 1)
+        unless got
+          whole = false
+          break
+        end
+        list << got[0]
+        inner = got[1]
+      end
+      children = list if whole
+    end
+    {Tlv.new(ident, content, children), i + length}
+  end
+
+  def body : Array(UInt8)
+    kids = @children
+    return @content unless kids
+    res = [] of UInt8
+    kids.each { |k| res.concat(k.encode) }
+    res
+  end
+
+  def encode : Array(UInt8)
+    inner = body
+    @ident + Tlv.length_bytes(inner.size, @style) + inner
+  end
+
+  def self.minimal(n : Int32) : Array(UInt8)
+    return [n.to_u8] if n < 0x80
+    return [0x81_u8, n.to_u8] if n < 0x100
+    return [0x82_u8] + u16(n) if n < 0x10000
+    [0x83_u8] + u24(n)
+  end
+
+  def self.length_bytes(n : Int32, style : Int32) : Array(UInt8)
+    case style
+    when 1
+      shortest = minimal(n)
+      shortest.size == 1 ? [0x81_u8, n.to_u8] : [(shortest[0] + 1_u8), 0_u8] + shortest[1, shortest.size - 1]
+    when 2 then [0x80_u8]
+    when 3 then minimal(n + 1)
+    when 4 then minimal(n > 0 ? n - 1 : 0)
+    when 5 then [0x84_u8] + u32(n)
+    else        minimal(n)
+    end
+  end
+
+  # The bytes this value encodes to, counted without writing them, and no
+  # further than past *cap*. Values are shared when one is repeated, so a
+  # value repeated thousands of times inside one repeated thousands of
+  # times is millions of bytes written out: the generator of x509 input
+  # 2245 ran for an hour on one before this count was asked first.
+  def size(cap : Int32) : Int32
+    inner = @content.size
+    if kids = @children
+      inner = 0
+      kids.each do |k|
+        inner = inner + k.size(cap - inner)
+        return cap + 1 if inner > cap
+      end
+    end
+    @ident.size + Tlv.length_bytes(inner, @style).size + inner
+  end
+
+  # Every value under this one, the first NODES of them: what a mutation
+  # picks from.
+  NODES = 100_000
+
+  def collect(into : Array({Tlv, Tlv?}), parent : Tlv?) : Nil
+    return if into.size >= NODES
+    into << {self, parent}
+    if kids = @children
+      kids.each { |k| k.collect(into, self) }
+    end
+  end
+end
+
+DER_WORDS = [
+  [0x30_u8, 0x00_u8], [0x31_u8, 0x00_u8], [0x05_u8, 0x00_u8], [0x02_u8, 0x01_u8, 0x00_u8], [0x02_u8, 0x00_u8],
+  [0x01_u8, 0x01_u8, 0xFF_u8], [0x03_u8, 0x01_u8, 0x00_u8], [0x03_u8, 0x02_u8, 0x07_u8, 0x80_u8], [0x04_u8, 0x00_u8],
+  [0x06_u8, 0x03_u8, 0x55_u8, 0x1D_u8, 0x13_u8], [0x06_u8, 0x03_u8, 0x55_u8, 0x1D_u8, 0x11_u8], [0x06_u8, 0x03_u8, 0x55_u8, 0x1D_u8, 0x1E_u8],
+  [0x06_u8, 0x03_u8, 0x2B_u8, 0x65_u8, 0x70_u8], [0x06_u8, 0x01_u8, 0x80_u8], [0x06_u8, 0x00_u8],
+  [0x80_u8], [0x81_u8, 0x80_u8], [0x82_u8, 0xFF_u8, 0xFF_u8], [0x84_u8, 0x7F_u8, 0xFF_u8, 0xFF_u8, 0xFF_u8], [0x1F_u8, 0x81_u8, 0x00_u8],
+  [0xA0_u8, 0x03_u8, 0x02_u8, 0x01_u8, 0x02_u8], [0xA3_u8, 0x00_u8], [0x17_u8, 0x0D_u8] + bytes_of("491231235959Z"),
+  [0x18_u8, 0x0F_u8] + bytes_of("20501231235959Z"), [0x0C_u8, 0x02_u8, 0xC3_u8, 0x28_u8], [0x1E_u8, 0x02_u8, 0xD8_u8, 0x00_u8],
+  [0x82_u8, 0x01_u8, 0x2A_u8], [0x87_u8, 0x04_u8, 0x7F_u8, 0x00_u8, 0x00_u8, 0x01_u8], [0x87_u8, 0x08_u8, 0xC0_u8, 0x00_u8, 0x02_u8, 0x00_u8, 0xFF_u8, 0xFF_u8, 0xFF_u8, 0x00_u8],
+]
+
+# The tree's values changed one to three times: contents, values taken
+# out, copied, swapped, values of other seeds put in, tags changed, values
+# wrapped and nested deep, a length written in a form DER forbids.
+def mutate_der(data : Array(UInt8), corpus : Array(Array(UInt8)), m : Mutator) : Array(UInt8)
+  got = Tlv.read(data, 0, data.size, 0)
+  return m.mutate(data, corpus, DER_WORDS) unless got
+  root = got[0]
+  (1 + m.below(3)).times do
+    # A tree grown past an input's limit is mutated no further, and not
+    # written out whole, below.
+    break if root.size(Mutator::LIMIT) > Mutator::LIMIT
+    nodes = [] of {Tlv, Tlv?}
+    root.collect(nodes, nil)
+    pick = nodes[m.below(nodes.size)]
+    node = pick[0]
+    parent = pick[1]
+    siblings = parent ? parent.children : nil
+    case m.below(12)
+    when 0, 1
+      node.content = m.mutate(node.body, corpus, DER_WORDS)
+      node.children = nil
+    when 2
+      node.content = case m.below(5)
+                     when 0 then [] of UInt8
+                     when 1 then [0_u8]
+                     when 2 then [0x80_u8, 0_u8]
+                     when 3 then [0xFF_u8] * (1 + m.below(40))
+                     else        Array(UInt8).new(1 + m.below(300)) { m.byte }
+                     end
+      node.children = nil
+    when 3
+      siblings.delete(node) if siblings
+    when 4
+      siblings << node if siblings
+    when 5
+      if siblings && siblings.size > 1
+        a = m.below(siblings.size)
+        b = m.below(siblings.size)
+        t = siblings[a]
+        siblings[a] = siblings[b]
+        siblings[b] = t
+      end
+    when 6
+      # a value of another seed in this one's place
+      other = m.pick(corpus)
+      if other_tree = Tlv.read(other, 0, other.size, 0)
+        theirs = [] of {Tlv, Tlv?}
+        other_tree[0].collect(theirs, nil)
+        graft = theirs[m.below(theirs.size)][0]
+        node.ident = graft.ident
+        node.content = graft.body
+        node.children = graft.children
+      end
+    when 7
+      node.ident = case m.below(5)
+                   when 0 then [node.ident[0] ^ 0x20_u8]
+                   when 1 then [(m.below(31)).to_u8 | (node.ident[0] & 0x20_u8)]
+                   when 2 then [(0x80 + m.below(4)).to_u8 | (node.ident[0] & 0x20_u8)]
+                   when 3 then [(0xA0 + m.below(4)).to_u8]
+                   else        [0x1F_u8, 0x80_u8 | m.byte, m.byte & 0x7F_u8]
+                   end
+    when 8
+      inner = Tlv.new(node.ident, node.body, node.children)
+      node.ident = [0x30_u8]
+      node.children = [inner]
+    when 9
+      # nested past any depth a schema has: what a reader recursing on
+      # its input would run out of stack on
+      depth = 10 + m.below(m.chance(4) ? 3000 : 100)
+      inner = Tlv.new(node.ident, node.body, node.children)
+      depth.times { inner = Tlv.new([0x30_u8], ([] of UInt8), [inner]) }
+      node.ident = inner.ident
+      node.children = inner.children
+    when 10
+      node.style = 1 + m.below(5)
+    else
+      if kids = node.children
+        unless kids.empty?
+          one = kids[m.below(kids.size)]
+          (1 + m.below(m.chance(3) ? 3000 : 30)).times { kids << one }
+        end
+      end
+    end
+  end
+  return m.mutate(data, corpus, DER_WORDS) if root.size(Mutator::LIMIT) > Mutator::LIMIT
+  root.encode
+end
+
+# A PEM text whose blocks may be decoded, changed as DER and written back,
+# so the base64 stays base64 and what is under it is what a mutation hit.
+def mutate_pem(data : Array(UInt8), corpus : Array(Array(UInt8)), words : Array(Array(UInt8)), m : Mutator) : Array(UInt8)
+  return m.mutate(data, corpus, words) if m.chance(2)
+  t = text(data)
+  begin_at = t.index("-----BEGIN ")
+  return m.mutate(data, corpus, words) unless begin_at
+  label_end = t.index("-----\n", begin_at + 11)
+  return m.mutate(data, corpus, words) unless label_end
+  body_at = label_end + 6
+  end_at = t.index("-----END ", body_at)
+  return m.mutate(data, corpus, words) unless end_at
+  b64 = t[body_at, end_at - body_at].gsub("\n", "")
+  der = bytes_of(Base64.decode(b64))
+  changed = m.chance(3) ? m.mutate(der, corpus, DER_WORDS) : mutate_der(der, corpus, m)
+  encoded = Base64.encode(text(changed))
+  lines = String.build do |io|
+    i = 0
+    while i < encoded.bytesize
+      io << encoded[i, 64] << "\n"
+      i = i + 64
+    end
+  end
+  bytes_of(t[0, body_at] + lines + t[end_at, t.bytesize - end_at])
+end
+
+def pem_of(label : String, der : Array(UInt8)) : String
+  encoded = Base64.encode(text(der))
+  String.build do |io|
+    io << "-----BEGIN " << label << "-----\n"
+    i = 0
+    while i < encoded.bytesize
+      io << encoded[i, 64] << "\n"
+      i = i + 64
+    end
+    io << "-----END " << label << "-----\n"
+  end
+end
+
+# ---------------------------------------------------------------------
+# The seeds, decoded
+# ---------------------------------------------------------------------
+
+def keys_der : Array(Array(UInt8))
+  KEY_SEEDS.map do |pair|
+    pem = text(unhex(pair[1]))
+    first = pem.index("\n") || 0
+    last = pem.index("-----END") || pem.bytesize
+    bytes_of(Base64.decode(pem[first + 1, last - first - 1].gsub("\n", "")))
+  end
+end
+
+# Small values of every universal type std/asn1 reads, each well formed.
+SMALL_DER = [
+  "020100", "02020080", "0209008000000000000000", "0101ff", "0500", "0603551d11", "06092a864886f70d01010b",
+  "0a0101", "03020780", "030100", "0403616263", "0c03616263", "130b46757a7a20536565642e", "1403e9e9e9",
+  "16076140622e6363", "1a0141", "1c0400000041", "1e0400e900e9", "120331203a", "170d3236303630313030303030305a",
+  "180f32303530313233313233353935395a", "181332303236303630313030303030302e3132355a", "3006020101020102",
+  "310602010102010230", "a003020102", "3045022100c8db1643e4e4a593ce73f3af5eeeed6fe486a751a30416c02633a7e2b2bb37c5022060a1d6b4f1d1f5c7ef2b7e4a4a8f4e6d7c3b2a1908f7e6d5c4b3a291807f6e5d4",
+]
+
+CERT_SEEDS  = X509_SEEDS.map { |h| unhex(h) }
+DER_SEEDS   = CERT_SEEDS + keys_der + SMALL_DER.map { |h| unhex(h) }
+ROOT_CERTS  = [Certificate.parse(unhex(FUZZ_ROOT)).or_panic, Certificate.parse(CERT_SEEDS[0]).or_panic]
+INTER_CERTS = [Certificate.parse(CERT_SEEDS[3]).or_panic]
+LEAF_CERT   = Certificate.parse(unhex(FUZZ_LEAF)).or_panic
+
+# The hosts every certificate read is asked about: names, a wildcard's,
+# addresses, a name in Unicode, and each with what a caller adds to it.
+HOSTS = ["fuzz.test", "FUZZ.TEST", "fuzz.test.", "a.pss.fuzz.test", "pss.fuzz.test", "x.y.pss.fuzz.test", "192.0.2.7",
+         "[2001:db8::7]", "2001:db8::7", "bücher.fuzz.test", "bücher.fuzz.test.", "xn--bcher-kva.fuzz.test", "", ".", "*.fuzz.test", "[]"]
+
+def pem_seeds : Array(Array(UInt8))
+  bundle = String.build do |io|
+    io << "Some prose a bundle carries.\n"
+    CERT_SEEDS.each_with_index do |der, i|
+      io << "# certificate " << i << "\n"
+      io << pem_of("CERTIFICATE", der)
+    end
+  end
+  one = pem_of("CERTIFICATE", unhex(FUZZ_LEAF))
+  keyed = one + text(unhex(KEY_SEEDS[0][1]))
+  crlf = pem_of("CERTIFICATE", CERT_SEEDS[0]).gsub("\n", "\r\n")
+  [bytes_of(bundle), bytes_of(one), bytes_of(keyed), bytes_of(crlf), bytes_of(pem_of("CERTIFICATE", unhex(FUZZ_P256)) + pem_of("CERTIFICATE", unhex(FUZZ_ROOT)))]
+end
+
+PEM_WORDS = ["-----BEGIN CERTIFICATE-----\n", "-----END CERTIFICATE-----\n", "-----BEGIN PRIVATE KEY-----\n", "-----END PRIVATE KEY-----\n",
+             "-----BEGIN EC PRIVATE KEY-----\n", "-----BEGIN RSA PRIVATE KEY-----\n", "=", "==", "\r\n", "\n", " ", "\t", "-----", "MII", "A", "/+"].map { |w| bytes_of(w) }
+
+# Which chain a key seed goes with: its certificate, by the seed's name.
+def chain_pem(name : String) : String
+  case name
+  when "leaf" then pem_of("CERTIFICATE", unhex(FUZZ_LEAF)) + pem_of("CERTIFICATE", unhex(FUZZ_ROOT))
+  when "p256" then pem_of("CERTIFICATE", unhex(FUZZ_P256))
+  else             pem_of("CERTIFICATE", CERT_SEEDS[1])
+  end
+end
+
+KEY_NAMES = ["leaf", "p256", "pss"]
+
+def key_seeds : Array(Array(UInt8))
+  KEY_SEEDS.map { |pair| [(KEY_NAMES.index(pair[0]) || 0).to_u8] + unhex(pair[1]) }
+end
+
+# ---------------------------------------------------------------------
+# The pure targets: bytes in, an answer out, nothing else touched
+# ---------------------------------------------------------------------
+
+def refused(error : Error) : String
+  "refused: " + error.message
+end
+
+# Every typed reader asked of one value: each checks the tag itself, so
+# most answer a refusal, and none may panic.
+def read_every(v : DerValue) : Int32
+  n = 0
+  n = n + 1 if v.describe.bytesize > 0
+  n = n + v.content.size + v.raw.size
+  n = n + 1 unless v.boolean.is_a?(Asn1Error)
+  n = n + 1 unless v.null.is_a?(Asn1Error)
+  n = n + 1 unless v.integer.is_a?(Asn1Error)
+  n = n + 1 unless v.integer_bytes.is_a?(Asn1Error)
+  n = n + 1 unless v.unsigned_integer.is_a?(Asn1Error)
+  n = n + 1 unless v.enumerated.is_a?(Asn1Error)
+  n = n + 1 unless v.enumerated_bytes.is_a?(Asn1Error)
+  n = n + 1 unless v.bit_string.is_a?(Asn1Error)
+  n = n + 1 unless v.bit_string_bits.is_a?(Asn1Error)
+  n = n + 1 unless v.octet_string.is_a?(Asn1Error)
+  n = n + 1 unless v.oid.is_a?(Asn1Error)
+  n = n + 1 unless v.string.is_a?(Asn1Error)
+  n = n + 1 unless v.time.is_a?(Asn1Error)
+  if v.constructed?
+    n = n + 1 unless v.children.is_a?(Asn1Error)
+    n = n + 1 unless v.sequence.is_a?(Asn1Error)
+    n = n + 1 unless v.set.is_a?(Asn1Error)
+    n = n + 1 unless v.explicit(v.tag).is_a?(Asn1Error)
+  end
+  n
+end
+
+# The top value asked as what its universal tag says it is - what a
+# schema asks of it - and the refusal, if that is the answer.
+def typed(v : DerValue) : String
+  return "" unless v.tag_class == DerClass::Universal
+  got = case v.tag
+        when 1                              then v.boolean
+        when 2                              then v.integer_bytes
+        when 3                              then v.bit_string
+        when 4                              then v.octet_string
+        when 5                              then v.null
+        when 6                              then v.oid
+        when 10                             then v.enumerated_bytes
+        when 23, 24                         then v.time
+        when 12, 18, 19, 20, 22, 26, 28, 30 then v.string
+        else                                     nil
+        end
+  got.is_a?(Asn1Error) ? "; as #{v.describe}, refused: #{got.message}" : ""
+end
+
+def run_der(input : Array(UInt8)) : String
+  value = Der.parse(input)
+  return refused(value) if value.is_a?(Asn1Error)
+  count = 0
+  walked = Der.walk(value) do |v, depth|
+    count = count + 1
+    read_every(v)
+    nil
+  end
+  return refused(walked) if walked.is_a?(Asn1Error)
+  # A value read from inside the bytes, as a caller reading a part does.
+  if input.size > 2
+    inner = DerValue.read(input, 1, input.size)
+    read_every(inner) unless inner.is_a?(Asn1Error)
+  end
+  "read #{count} values#{typed(value)}"
+end
+
+# The answer a certificate's host checks give, and a property of them: a
+# host means the same with a final dot, as RFC 6125 and every verifier
+# have it, and in upper case.
+def hosts_of(cert : Certificate) : String?
+  asked = HOSTS + cert.dns_names.map { |d| d.starts_with?("*.") ? "a" + d[1, d.bytesize - 1] : d }
+  asked.each do |host|
+    plain = cert.matches_host?(host)
+    # An address is not a name: "192.0.2.7." is neither.
+    next if host.empty? || host.ends_with?(".") || host.starts_with?("[") || host.includes?(":") || host.includes?("*")
+    next if bytes_of(host).all? { |c| c == 0x2E_u8 || (c >= 0x30_u8 && c <= 0x39_u8) }
+    dotted = cert.matches_host?(host + ".")
+    return "PROPERTY: matches_host?(#{host.inspect}) is #{plain} and with a final dot #{dotted}" unless plain == dotted
+    upper = cert.matches_host?(host.upcase)
+    return "PROPERTY: matches_host?(#{host.inspect}) is #{plain} and in upper case #{upper}" unless plain == upper
+  end
+  nil
+end
+
+def run_x509(input : Array(UInt8)) : String
+  cert = Certificate.parse(input)
+  return refused(cert) if cert.is_a?(X509Error)
+  broken = hosts_of(cert)
+  return broken if broken
+  cert.valid_at?(NOW)
+  cert.signature_error(cert)
+  ROOT_CERTS.each { |r| cert.signature_error(r) }
+  # As a leaf, as an intermediate under the roots and as a root itself.
+  X509.verify(cert, ([] of Certificate), ROOT_CERTS, "fuzz.test", NOW)
+  X509.verify(cert, INTER_CERTS, ROOT_CERTS, nil, NOW, X509Purpose::Client)
+  X509.verify(LEAF_CERT, [cert], ROOT_CERTS, "fuzz.test", NOW)
+  X509.verify(cert, ([] of Certificate), [cert], nil, NOW)
+  "read"
+end
+
+def run_pem(input : Array(UInt8)) : String
+  t = text(input)
+  X509.pem(t, "CERTIFICATE")
+  X509.pem(t, "PRIVATE KEY")
+  Certificate.pem_blocks(t)
+  TlsIdentity.from_pem(t, t)
+  read = Certificate.from_pem(t)
+  return refused(read) if read.is_a?(X509Error)
+  "read #{read.size}"
+end
+
+SIGNED = bytes_of("what a CertificateVerify signs, near enough")
+
+# A private key as TlsIdentity.from_pem reads it, beside the chain its
+# seed goes with (the input's first byte); every scheme it signs under is
+# then signed with and checked against the certificate's key - a key that
+# reads but signs wrong is RSA's fault attack, a factor in every signature.
+def run_keys(input : Array(UInt8)) : String
+  return "empty" if input.empty?
+  chain = chain_pem(KEY_NAMES[input[0] % 3])
+  identity = TlsIdentity.from_pem(chain, text(input[1, input.size - 1]))
+  return refused(identity) if identity.is_a?(TlsError)
+  key = identity.leaf.public_key
+  identity.schemes.each do |scheme|
+    signature = identity.sign(scheme, SIGNED)
+    good = case key
+           in RsaPublicKey
+             hash = scheme == 0x0804 ? RsaHash::SHA256 : (scheme == 0x0805 ? RsaHash::SHA384 : RsaHash::SHA512)
+             key.verify_pss(hash, SIGNED, signature)
+           in EcdsaPublicKey
+             key.verify(EcdsaHash::SHA256, SIGNED, signature)
+           in Ed25519PublicKey
+             key.verify(SIGNED, signature)
+           end
+    return "PROPERTY: a key from_pem took signs under #{TlsIdentity.scheme_name(scheme)} what its certificate's key does not verify" unless good
+  end
+  "read #{identity.schemes.size} schemes"
+end
+
+# A record cipher keyed from fixed secrets: TLS 1.3's three suites, and
+# TLS 1.2's AES-GCM and ChaCha20-Poly1305, by the input's first byte.
+def record_cipher(pick : Int32) : TlsRecordCipher
+  secret = Array(UInt8).new(48) { |i| ((i * 7 + 1) & 0xFF).to_u8 }
+  case pick
+  when 0 then TlsRecordCipher.new(0x1301, TlsKeySchedule.new(false), secret[0, 32])
+  when 1 then TlsRecordCipher.new(0x1302, TlsKeySchedule.new(true), secret)
+  when 2 then TlsRecordCipher.new(0x1303, TlsKeySchedule.new(false), secret[0, 32])
+  when 3 then TlsRecordCipher.new(0xC02B, secret[0, 16], secret[16, 4])
+  when 4 then TlsRecordCipher.new(0xC02C, secret[0, 32], secret[32, 4])
+  else        TlsRecordCipher.new(0xCCA9, secret[0, 32], secret[32, 12])
+  end
+end
+
+# Records as a peer sends them, the option byte first: sealed whole, so a
+# mutation meets the header and the AEAD; and, with 8 in the option
+# byte, an inner plaintext - content, type, zero padding (RFC 8446
+# section 5.2) - sealed after it is mutated, so the mutation meets what
+# a record holds once it decrypts.
+def record_seeds : Array(Array(UInt8))
+  seeds = [] of Array(UInt8)
+  6.times do |pick|
+    [{23_u8, bytes_of("hello")}, {22_u8, [24_u8, 0_u8, 0_u8, 1_u8, 1_u8]}, {21_u8, [1_u8, 0_u8]}, {23_u8, [] of UInt8}, {23_u8, Array(UInt8).new(300) { |i| (i & 0xFF).to_u8 }}].each do |pair|
+      cipher = record_cipher(pick)
+      seeds << [pick.to_u8] + cipher.seal(pair[0], pair[1])
+    end
+  end
+  [bytes_of("hello") + [23_u8], bytes_of("hello") + [23_u8] + Array(UInt8).new(7, 0_u8), Array(UInt8).new(12, 0_u8),
+   [24_u8, 0_u8, 0_u8, 1_u8, 1_u8, 22_u8, 0_u8], [1_u8, 0_u8, 21_u8], Array(UInt8).new(16384, 0x41_u8) + [23_u8]].each_with_index do |inner, k|
+    seeds << [(8 + k % 3).to_u8] + inner
+  end
+  seeds
+end
+
+def run_record(input : Array(UInt8)) : String
+  return "empty" if input.size < 2
+  pick = (input[0] & 7_u8).to_i32 % 6
+  if input[0] & 8_u8 != 0
+    # Up to a record's 2^14 bytes and 256 of padding.
+    inner = input[1, input.size - 1 < 16640 ? input.size - 1 : 16640]
+    sealed = record_cipher(pick).seal(inner[inner.size - 1], inner[0, inner.size - 1])
+    opened = record_cipher(pick).open(sealed[0, 5], sealed[5, sealed.size - 5])
+  else
+    return "empty" if input.size < 6
+    opened = record_cipher(pick).open(input[1, 5], input[6, input.size - 6])
+  end
+  return refused(opened) if opened.is_a?(TlsError)
+  "read type #{opened[0]}, #{opened[1].size} bytes"
+end
+
+# *work* run as a task: what it answers, or its panic - which for the
+# readers that panic by design (`HTTP.parse_response`, `decode_chunked`:
+# "this is the text a program has in hand") is a refusal when it is one
+# of their own sentences, and a finding when it is anything else.
+def documented(&work : -> String) : String
+  said = ""
+  group do |g|
+    task = g.spawn { work.call }
+    case got = task.value
+    in Panicked
+      said = got.message.starts_with?("HTTP: ") ? "refused: #{got.message}" : "PANIC: #{got.message}"
+    in String
+      said = got
+    end
+    0
+  end
+  said
+end
+
+HTTP_WORDS = ["\r\n", "\r\n\r\n", ": ", ":", " ", "\t", "\n", "\r", "chunked", "Transfer-Encoding: chunked\r\n", "Content-Length: ", "Content-Length: 99999999999999999999\r\n",
+              "Content-Length: -1\r\n", "Content-Length: 5, 5\r\n", "Connection: close\r\n", "Expect: 100-continue\r\n", "Host: \r\n", " HTTP/1.1\r\n", "HTTP/1.0", "HTTP/2.0",
+              "0\r\n\r\n", "ffffffff\r\n", "7fffffff\r\n", ";ext=\"x\"", "gzip", "deflate", "zstd", "identity", ";q=0.5", ",", "%", "%00", "%zz", "?", "#", "&", "=",
+              "Cookie: a=1; b=2\r\n", "Content-Type: multipart/form-data; boundary=XyZ\r\n", "--XyZ\r\n", "--XyZ--\r\n", "Content-Disposition: form-data; name=\"f\"; filename=\"a\"\r\n",
+              "Content-Type: application/x-www-form-urlencoded\r\n", "Upgrade: h2c\r\n", "Upgrade: websocket\r\n", "HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA\r\n", "\u0000", "\u00ff", "é"].map { |w| bytes_of(w) }
+
+def http1_seeds : Array(Array(UInt8))
+  [
+    "GET /a/b?x=1&y=%41 HTTP/1.1\r\nHost: fuzz.test\r\nUser-Agent: fuzz\r\nAccept-Encoding: gzip;q=0.5, zstd\r\nCookie: a=1; b=\"two\"\r\n\r\n",
+    "POST /form HTTP/1.1\r\nHost: x\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 11\r\n\r\na=1&b=%20+c",
+    "POST /up HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3;ext=1\r\nabc\r\n2\r\nde\r\n0\r\nTrailer: t\r\n\r\n",
+    "POST /m HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=XyZ\r\nContent-Length: 132\r\n\r\n--XyZ\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\none\r\n--XyZ\r\nContent-Disposition: form-data; name=\"f\"; filename=\"b.txt\"\r\nContent-Type: text/plain\r\n\r\ntwo\r\n--XyZ--\r\n",
+    "GET / HTTP/1.0\r\n\r\nGET /second HTTP/1.1\r\nHost: y\r\nConnection: close\r\n\r\n",
+    "PUT /x HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 3\r\n\r\nabc",
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\n\r\nhello",
+    "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\nX-Folded: a\r\n  b\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+    "HTTP/1.0 304 Not Modified\r\nETag: \"x\"\r\n\r\n",
+    "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n\u0081\u0005hello",
+  ].map { |s| bytes_of(s) }
+end
+
+# Everything std/http reads a peer's text with, asked of the same text:
+# a request, a request's head, a response and its head, chunks, fields,
+# cookies, codings, a multipart body and a form.
+def run_http1(input : Array(UInt8)) : String
+  t = text(input)
+  verdict = ""
+  parsed = Server.parse_request(t)
+  if req = parsed.request
+    req.headers.size
+    req.cookies
+    req.form
+    if parts = req.multipart
+      while true
+        part = parts.next_part
+        break unless part.is_a?(Std::Http::Part)
+        part.name
+        part.filename
+        part.content_type
+        break unless part.read_all(1_000_000_i64).is_a?(String)
+      end
+    end
+    verdict = "read #{req.method} #{req.path.bytesize}"
+  elsif why = parsed.error
+    verdict = "refused: #{parsed.status} #{why}"
+  else
+    verdict = "more"
+  end
+  Server.parse_head(t)
+  HTTP.parse_response_head(t)
+  lines = HTTP.split_crlf(t)
+  HTTP.status_line(lines[0]) unless lines.empty?
+  HTTP.parse_fields(lines, unfold: true, apart: {} of String => Array(String))
+  lines.each do |line|
+    HTTP.content_length(line)
+    HTTP.hex(line)
+  end
+  HTTP.chunked_end(t)
+  HTTP.cookie_pairs(t)
+  HTTP.has_token?(t, "chunked")
+  HTTP.coding_weight(t, "gzip")
+  HTTP.accepts?(t, "zstd")
+  HTTP.absolute_form(t)
+  if boundary = Multipart.boundary(t)
+    parts = Multipart.new(BodyReader.text(t), boundary)
+    while true
+      part = parts.next_part
+      break unless part.is_a?(Std::Http::Part)
+      break unless part.read_all(1_000_000_i64).is_a?(String)
+    end
+  end
+  for_response = documented { HTTP.parse_response(t).body.bytesize.to_s }
+  return for_response if for_response.starts_with?("PANIC: ")
+  for_head = documented { HTTP.parse_response(t, true).status.to_s }
+  return for_head if for_head.starts_with?("PANIC: ")
+  chunks = documented { HTTP.decode_chunked(t).bytesize.to_s }
+  return chunks if chunks.starts_with?("PANIC: ")
+  verdict
+end
+
+# HPACK blocks, each a 16-bit length and its bytes, decoded by one
+# decoder, so a block may name what an earlier one put in the table; what
+# is left after the last whole one is one block more.
+def hpack_blocks(input : Array(UInt8)) : Array(Array(UInt8))
+  blocks = [] of Array(UInt8)
+  at = 0
+  while at + 2 <= input.size
+    n = at16(input, at)
+    break if at + 2 + n > input.size
+    blocks << input[at + 2, n]
+    at = at + 2 + n
+  end
+  blocks << input[at, input.size - at] if at < input.size
+  blocks
+end
+
+def slice_of(bytes : Array(UInt8)) : Bytes
+  Bytes.new(bytes.size) { |i| bytes[i] }
+end
+
+# What one decoder makes of the blocks: each field as name and value, or
+# the refusal - the same line the differential check below writes. One
+# builder: a string grown by `+` a block at a time was this harness's own
+# square, 1.6 GB and three seconds for 26 KB of small blocks.
+def hpack_decoded(input : Array(UInt8)) : String
+  decoder = Decoder.new
+  String.build do |io|
+    hpack_blocks(input).each do |block|
+      got = decoder.decode(slice_of(block))
+      if got.is_a?(HpackError)
+        io << "refused: " << got.message
+        break
+      end
+      io << "["
+      got.each_with_index do |f, k|
+        io << ";" if k > 0
+        io << hex(bytes_of(f.name)) << ":" << hex(bytes_of(f.value))
+        io << "!" if f.never_indexed
+      end
+      io << "]"
+    end
+  end
+end
+
+def run_hpack(input : Array(UInt8)) : String
+  answer = hpack_decoded(input)
+  whole = slice_of(input)
+  Huffman.decode(whole)
+  Integer.decode(whole, 0, 1 + input[0].to_i32 % 8) unless input.empty?
+  small = Decoder.new(max_table_size: 256, protocol_max_table_size: 256, max_header_list_size: 512, max_header_count: 8)
+  hpack_blocks(input).each { |block| break if small.decode(slice_of(block)).is_a?(HpackError) }
+  cut = answer.index("refused: ")
+  cut ? answer[cut, answer.bytesize - cut] : "read #{answer.bytesize}"
+end
+
+def hpack_seeds : Array(Array(UInt8))
+  sets = [
+    [{":method", "GET"}, {":scheme", "https"}, {":path", "/"}, {":authority", "fuzz.test"}],
+    [{":method", "POST"}, {":scheme", "http"}, {":path", "/upload?x=1"}, {":authority", "fuzz.test"}, {"content-type", "application/json"}, {"content-length", "12"}],
+    [{":status", "200"}, {"content-type", "text/html; charset=utf-8"}, {"set-cookie", "a=1; Path=/; HttpOnly"}, {"cache-control", "private"}],
+    [{":status", "302"}, {"location", "https://fuzz.test/elsewhere"}, {"x-custom-header", "a value with spaces and ünïcödé"}],
+    [{"cookie", "a=1"}, {"cookie", "b=2"}, {"authorization", "Bearer secret"}, {"user-agent", "fuzz/1.0"}],
+  ]
+  seeds = [] of Array(UInt8)
+  [true, false].each do |huffman|
+    encoder = Encoder.new(use_huffman: huffman)
+    stream = [] of UInt8
+    sets.each do |set|
+      fields = set.map { |pair| HeaderField.new(pair[0], pair[1], pair[0] == "authorization") }
+      block = encoder.encode(fields)
+      one = Array(UInt8).new(block.size) { |i| block[i] }
+      seeds << u16(one.size) + one
+      stream.concat(u16(one.size) + one)
+    end
+    seeds << stream
+  end
+  # RFC 7541 C.3 and C.4: three requests, without Huffman and with it,
+  # each block naming the one before's entries.
+  seeds << unhex("0014828684410f7777772e6578616d706c652e636f6d000e828684be58086e6f2d6361636865001d828785bf400a637573746f6d2d6b65790c637573746f6d2d76616c7565")
+  seeds << unhex("0011828684418cf1e3c2e5f23a6ba0ab90f4ff000c828684be5886a8eb10649cbf0018828785bf408825a849e95ba97d7f8925a849e95bb8e8b4bf")
+  # A table size update, a literal under a static name, a never-indexed one.
+  seeds << unhex("3fe11f0f00036261721003" + "7a6f6f" + "03627567")
+  seeds
+end
+
+HPACK_WORDS = [[0x3F_u8, 0xE1_u8, 0x1F_u8], [0x20_u8], [0xFF_u8, 0xFF_u8, 0xFF_u8, 0xFF_u8, 0x0F_u8], [0x7F_u8, 0x80_u8, 0x80_u8, 0x80_u8, 0x80_u8, 0x80_u8, 0x80_u8, 0x01_u8],
+               [0x80_u8], [0xBE_u8], [0xFF_u8, 0x80_u8, 0x01_u8], [0x40_u8, 0x00_u8, 0x00_u8], [0x00_u8, 0x81_u8, 0xFF_u8], [0x10_u8, 0x01_u8, 0x41_u8, 0x84_u8, 0xFF_u8, 0xFF_u8, 0xFF_u8, 0xFC_u8],
+               [0x88_u8], [0x0F_u8, 0x2F_u8, 0x00_u8], [0x9F_u8, 0xFF_u8, 0x7F_u8]]
+
+# ---------------------------------------------------------------------
+# The connection targets: the module's end of a connection, and on the
+# other a scripted peer that sends what the input says
+# ---------------------------------------------------------------------
+
+# The handshake parsers of std/tls and the frame reader of std/http are
+# private: what reaches them is a socket. So each input is one loopback
+# connection inside this process, a task at each end - the module's
+# public entry (`TlsServer.over`, `TlsClient.over`, `Server.handle`,
+# `HTTPClient`) on one, on the other a peer that writes the input, ends
+# its half of the stream and reads what comes back until the module
+# closes.
+
+{% unless flag?(:win32) %}
+  lib LibFuzzSocket
+    fun shutdown(fd : Int32, how : Int32) : Int32
+  end
+{% end %}
+
+# The peer is done writing: what the module reads next is the end of the
+# stream, at once, rather than a wait for its own timeout. Windows' is
+# `shutdown` on a SOCKET, which is std/socket's to reach; there the peer
+# closes instead, and what the module still writes meets a reset - an
+# error value either way.
+def half_close(socket : IyiSocket) : Nil
+  {% if flag?(:win32) %}
+    socket.close
+  {% else %}
+    LibFuzzSocket.shutdown(socket.to_unsafe, 1)
+  {% end %}
+end
+
+# How long a peer waits on a module that has stopped talking, and the
+# bound the module's side runs under. The peer always ends its half, so
+# neither is waited out by a module that reads the end as one.
+PEER_WAIT_MS   = 2000
+MODULE_WAIT_MS = 3000
+
+# The scripted peer's view of the stream: bytes as they came, records,
+# and an end.
+class Wire
+  getter socket : IyiSocket
+  @buffer : Array(UInt8) = [] of UInt8
+  @at : Int32 = 0
+  @ended : Bool = false
+  # The first bytes the module wrote, HEARD of them, for the verdict.
+  getter heard : Array(UInt8) = [] of UInt8
+
+  def initialize(@socket : IyiSocket)
+    @socket.read_timeout_ms = PEER_WAIT_MS
+  end
+
+  def available : Int32
+    @buffer.size - @at
+  end
+
+  private def hear(bytes : Array(UInt8)) : Nil
+    return if @heard.size >= HEARD
+    room = HEARD - @heard.size
+    @heard.concat(bytes.size > room ? bytes[0, room] : bytes)
+  end
+
+  private def more : Bool
+    return false if @ended
+    got = @socket.read(16384)
+    unless got.is_a?(String) && got.bytesize > 0
+      @ended = true
+      return false
+    end
+    if @at > 0
+      @buffer = @buffer[@at, @buffer.size - @at]
+      @at = 0
+    end
+    bytes = bytes_of(got)
+    hear(bytes)
+    @buffer.concat(bytes)
+    true
+  end
+
+  def need(n : Int32) : Bool
+    while available < n
+      return false unless more
+    end
+    true
+  end
+
+  # Read until *mark* has come, or the module stops.
+  def wait_for(mark : Array(UInt8)) : Bool
+    while find_bytes(@buffer[@at, available], mark) < 0
+      return false unless more
+    end
+    true
+  end
+
+  def take(n : Int32) : Array(UInt8)
+    res = @buffer[@at, n]
+    @at = @at + n
+    res
+  end
+
+  # A TLS record: its header and its body.
+  def record : {Array(UInt8), Array(UInt8)}?
+    return nil unless need(5)
+    n = at16(@buffer, @at + 3)
+    return nil unless need(5 + n)
+    {take(5), take(n)}
+  end
+
+  def write(bytes : Array(UInt8)) : Bool
+    return true if bytes.empty?
+    !@socket.write(text(bytes)).is_a?(SocketError | Cancelled)
+  end
+
+  # The peer's half done: the end of its stream, then what the module
+  # still sends read and dropped until it closes - 16 MB at most, past
+  # which the peer stops listening. What the module said first, in a
+  # phrase: an HTTP/1 status line; or the HTTP/2 frames it began with,
+  # by type, a RST_STREAM's and a GOAWAY's with their error code.
+  def finish : String
+    half_close(@socket)
+    total = 0
+    until @ended || total > 16_000_000
+      got = @socket.read(65536)
+      if got.is_a?(String) && got.bytesize > 0
+        total = total + got.bytesize
+        hear(bytes_of(got))
+      else
+        @ended = true
+      end
+    end
+    return "nothing" if @heard.empty?
+    t = text(@heard)
+    if t.starts_with?("HTTP/")
+      cut = t.index('\r') || t.bytesize
+      return t[0, cut]
+    end
+    types = [] of String
+    at = 0
+    while at + 9 <= @heard.size && types.size < 12
+      n = at24(@heard, at)
+      type = @heard[at + 3].to_i32
+      if (type == 3 || type == 7) && at + 9 + n <= @heard.size && n >= (type == 3 ? 4 : 8)
+        code = type == 3 ? at + 9 : at + 13
+        types << "#{type}:#{(@heard[code].to_i64 << 24) | (@heard[code + 1].to_i64 << 16) | (@heard[code + 2].to_i64 << 8) | @heard[code + 3].to_i64}"
+      else
+        types << type.to_s
+      end
+      at = at + 9 + n
+    end
+    "frames " + types.join(",")
+  end
+end
+
+HEARD = 4096
+
+# A panic in a task is an answer of the task's: the module's is a finding
+# by its sentence; the scripted peer's is the harness's own, and a finding
+# all the same, so that it is fixed rather than left to hide one.
+def said(got : String | Panicked) : String
+  got.is_a?(Panicked) ? "PANIC: " + got.message : got
+end
+
+def peer_panic(peer : String) : String?
+  peer.starts_with?("PANIC: ") ? "PANIC: the scripted peer: " + peer[7, peer.bytesize - 7] : nil
+end
+
+# The address an input's listener is on. The peer ends its half first,
+# so the listener's port waits out TIME_WAIT, a minute on Linux: past
+# 1,700 inputs of a client target the ports ran out and `listen` panicked
+# "the address is in use". Linux routes all of 127.0.0.0/8 to the
+# loopback, and a port waiting on one of those addresses is free on the
+# others, so there the inputs take 127.0.0.1 to 127.0.0.250 in turn;
+# elsewhere 127.0.0.1 alone is certain to be there, which the gate's
+# default count stays well inside.
+class Loopback
+  @@last = 0
+
+  def self.next : String
+    {% if flag?(:linux) %}
+      @@last = @@last % 250 + 1
+      "127.0.0.#{@@last}"
+    {% else %}
+      "127.0.0.1"
+    {% end %}
+  end
+end
+
+# One connection the module accepts and serves, the peer dialling it:
+# what the module's side answered, and what the peer heard first.
+def module_serves(serve : IyiSocket -> String, peer : IyiSocket -> String) : {String, String}
+  host = Loopback.next
+  listener = IyiSocket.listen(host, 0)
+  port = listener.local_port
+  verdict = "no connection"
+  heard = ""
+  group do |g|
+    side = g.spawn do
+      accepted = listener.accept
+      if accepted.is_a?(IyiSocket)
+        answer = serve.call(accepted)
+        accepted.close
+        answer
+      else
+        "no connection: #{accepted.message}"
+      end
+    end
+    script = g.spawn do
+      dialled = IyiSocket.connect(host, port)
+      if dialled.is_a?(IyiSocket)
+        phrase = peer.call(dialled)
+        dialled.close
+        phrase
+      else
+        "no connection"
+      end
+    end
+    heard = said(script.value)
+    # An accept still waiting - the peer never dialled - hears the close.
+    listener.close
+    verdict = said(side.value)
+    0
+  end
+  {peer_panic(heard) || verdict, heard}
+end
+
+# The connections the module dials, the peer answering each on
+# *listener* the same way: a client sends a request the server refused
+# unprocessed again on a new connection (RFC 9113 §8.7), and a peer that
+# answered only the first left the second waiting out its timeout.
+def module_dials(listener : IyiSocket, dial : -> String, peer : IyiSocket -> String) : String
+  verdict = ""
+  heard = ""
+  group do |g|
+    script = g.spawn do
+      phrase = "no connection"
+      4.times do
+        # Closed once the module is done: an accept on a closed socket
+        # is a panic, where one parked when it closes is woken.
+        break if listener.closed?
+        accepted = listener.accept
+        break unless accepted.is_a?(IyiSocket)
+        phrase = peer.call(accepted)
+        accepted.close
+        break if phrase.starts_with?("PANIC: ")
+      end
+      phrase
+    end
+    side = g.spawn { dial.call }
+    verdict = said(side.value)
+    # A peer still waiting to be dialled - the module never dialled -
+    # hears the close.
+    listener.close
+    heard = said(script.value)
+    0
+  end
+  peer_panic(heard) || verdict
+end
+
+# --- TLS ---------------------------------------------------------------
+
+# The keys the scripted peer exchanges and signs with: an X25519 key of
+# its own, the P-256 key the fuzz.test P-256 certificate is for (a share
+# in secp256r1 and an ECDSA signature), and the Ed25519 seeds of the leaf
+# and of the client certificate.
+SCRIPT_X25519        = Array(UInt8).new(32) { |i| ((i * 11 + 5) & 0xFF).to_u8 }
+SCRIPT_X25519_PUBLIC = bytes_of(X25519.public_key(SCRIPT_X25519))
+SCRIPT_P256          = P256PrivateKey.from_pkcs8(unhex(FUZZ_P256_KEY)).or_panic
+LEAF_SEED            = unhex(FUZZ_LEAF_SEED)
+CLIENT_SEED          = unhex(FUZZ_CLIENT_SEED)
+HRR_RANDOM           = unhex("cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c")
+SUITES13             = [0x1301, 0x1302, 0x1303]
+
+# Bytes of a template the peer makes live as it sends it: the session id
+# a ServerHello echoes, a signature, a Finished. A mutation that hits one
+# leaves it as it is, which the module refuses as it should.
+SESSION_MARK = Array(UInt8).new(32) { |i| (0xA0 + i).to_u8 }
+SIG_MARK     = bytes_of("<a live signature here>")
+FIN_MARK     = bytes_of("<a live Finished here>")
+
+# How the peer cuts a flight into records, by two bits of the input's
+# option byte: whole, in pieces a little smaller than a message, and a
+# byte a record.
+CHUNKS = [16384, 16384, 37, 1]
+
+def message(type : Int32, body : Array(UInt8)) : Array(UInt8)
+  [type.to_u8] + u24(body.size) + body
+end
+
+def extension(type : Int32, data : Array(UInt8)) : Array(UInt8)
+  u16(type) + u16(data.size) + data
+end
+
+# *data* as records of *type*, at most *chunk* bytes of it each, sealed
+# under *cipher* when there is one.
+def records(type : UInt8, data : Array(UInt8), chunk : Int32, cipher : TlsRecordCipher?) : Array(UInt8)
+  res = [] of UInt8
+  at = 0
+  while at < data.size
+    n = data.size - at < chunk ? data.size - at : chunk
+    piece = data[at, n]
+    if c = cipher
+      res.concat(c.seal(type, piece))
+    else
+      res.concat([type, 3_u8, 3_u8] + u16(n) + piece)
+    end
+    at = at + n
+  end
+  res
+end
+
+# A template cut where its own lengths cut it - TLS's handshake messages,
+# HTTP/2's frames after the preface - and the bytes after the last whole
+# unit.
+def cut_units(data : Array(UInt8), h2 : Bool) : {Array(Array(UInt8)), Int32, Array(UInt8)}
+  lead = h2 && data.size >= 24 && data[0, 24] == H2_PREFACE ? 24 : 0
+  head = h2 ? 9 : 4
+  units = [] of Array(UInt8)
+  at = lead
+  while at + head <= data.size
+    n = h2 ? at24(data, at) : at24(data, at + 1)
+    break if at + head + n > data.size
+    units << data[at, head + n]
+    at = at + head + n
+  end
+  {units, lead, data[at, data.size - at]}
+end
+
+H2_STREAMS = [0, 1, 2, 3, 5, 0x7FFFFFFF]
+
+# A template changed a unit at a time, each unit's length kept true: a
+# body mutated, a type or flags or stream changed, a unit taken out,
+# repeated, or one of another seed's put in. This is what gets past the
+# framing to the parser of one message or frame.
+def mutate_units(data : Array(UInt8), corpus : Array(Array(UInt8)), words : Array(Array(UInt8)), m : Mutator, h2 : Bool) : Array(UInt8)
+  units, lead, rest = cut_units(data, h2)
+  return m.mutate(data, corpus, words) if units.empty?
+  head = h2 ? 9 : 4
+  k = m.below(units.size)
+  u = units[k]
+  case m.below(8)
+  when 0, 1, 2, 3
+    body = m.mutate(u[head, u.size - head], corpus, words)
+    top = u[0, head]
+    len = u24(body.size)
+    at = h2 ? 0 : 1
+    3.times { |j| top[at + j] = len[j] }
+    units[k] = top + body
+  when 4
+    top = u.dup
+    if h2 && m.chance(2)
+      id = u32(H2_STREAMS[m.below(H2_STREAMS.size)])
+      4.times { |j| top[5 + j] = id[j] }
+    else
+      at = h2 ? 3 + m.below(2) : 0
+      top[at] = m.chance(2) ? m.byte : top[at] ^ (1_u8 << m.below(8))
+    end
+    units[k] = top
+  when 5
+    units = units[0, k] + units[k + 1, units.size - k - 1]
+  when 6
+    to = m.below(units.size + 1)
+    units = units[0, to] + [u] + units[to, units.size - to]
+  else
+    theirs = cut_units(m.pick(corpus), h2)[0]
+    unless theirs.empty?
+      to = m.below(units.size + 1)
+      units = units[0, to] + [theirs[m.below(theirs.size)]] + units[to, units.size - to]
+    end
+  end
+  res = data[0, lead]
+  units.each { |x| res.concat(x) }
+  res.concat(rest)
+  res.size > Mutator::LIMIT ? res[0, Mutator::LIMIT] : res
+end
+
+def split_messages(data : Array(UInt8)) : {Array(Array(UInt8)), Array(UInt8)}
+  units, lead, rest = cut_units(data, false)
+  {units, rest}
+end
+
+# What a peer reads out of a hello the module sent - which the module
+# made, so it is well formed, and is read with care all the same.
+class HelloFields
+  getter random : Array(UInt8)
+  getter session : Array(UInt8)
+  getter suite : Int32
+  getter shares : Hash(Int32, Array(UInt8))
+  getter tls13 : Bool
+  getter types : Array(Int32)
+
+  def initialize(@random : Array(UInt8), @session : Array(UInt8), @suite : Int32, @shares : Hash(Int32, Array(UInt8)), @tls13 : Bool, @types : Array(Int32))
+  end
+end
+
+def hello_fields(msg : Array(UInt8), server : Bool) : HelloFields?
+  return nil if msg.size < 4 + 35
+  b = msg[4, msg.size - 4]
+  at = 34
+  sid = b[at].to_i32
+  at = at + 1
+  return nil if at + sid > b.size
+  session = b[at, sid]
+  at = at + sid
+  suite = 0
+  if server
+    return nil if at + 3 > b.size
+    suite = at16(b, at)
+    at = at + 3
+  else
+    return nil if at + 2 > b.size
+    at = at + 2 + at16(b, at)
+    return nil if at + 1 > b.size
+    at = at + 1 + b[at].to_i32
+  end
+  shares = {} of Int32 => Array(UInt8)
+  tls13 = false
+  types = [] of Int32
+  at = at + 2
+  while at + 4 <= b.size
+    type = at16(b, at)
+    len = at16(b, at + 2)
+    break if at + 4 + len > b.size
+    data = b[at + 4, len]
+    at = at + 4 + len
+    types << type
+    if type == 0x2B
+      tls13 = server ? data == [3_u8, 4_u8] : find_bytes(data, [3_u8, 4_u8]) >= 0
+    elsif type == 0x33
+      if server && data.size == 2
+        # A HelloRetryRequest's: the group it asks for, and no share.
+        shares[at16(data, 0)] = [] of UInt8
+      else
+        k = server ? 0 : 2
+        while k + 4 <= data.size
+          l = at16(data, k + 2)
+          break if k + 4 + l > data.size
+          shares[at16(data, k)] = data[k + 4, l]
+          k = k + 4 + l
+        end
+      end
+    end
+  end
+  HelloFields.new(b[2, 32], session, suite, shares, tls13, types)
+end
+
+# The secret the peer's key and the module's share give, in their group.
+def shared_with(group : Int32, peer : Array(UInt8)) : Array(UInt8)?
+  if group == 0x1D
+    got = X25519.shared(SCRIPT_X25519, peer)
+    return got.is_a?(CurveError) ? nil : bytes_of(got)
+  end
+  if group == 0x17
+    got = SCRIPT_P256.shared_secret(peer)
+    return got.is_a?(EcdsaError) ? nil : got
+  end
+  nil
+end
+
+def signature(scheme : Int32, seed : Array(UInt8), content : Array(UInt8)) : Array(UInt8)?
+  return bytes_of(Ed25519.sign(seed, content)) if scheme == 0x0807
+  return SCRIPT_P256.sign(EcdsaHash::SHA256, content) if scheme == 0x0403
+  nil
+end
+
+# A TLS 1.3 CertificateVerify or Finished of the template as the peer
+# would send it at this point of the handshake.
+def live13(m : Array(UInt8), schedule : TlsKeySchedule, transcript : Array(UInt8), secret : Array(UInt8), server : Bool) : Array(UInt8)
+  if m[0] == 15_u8 && m.size >= 8 && find_bytes(m, SIG_MARK) >= 0
+    scheme = at16(m, 4)
+    content = Array(UInt8).new(64, 0x20_u8) + bytes_of(server ? "TLS 1.3, server CertificateVerify" : "TLS 1.3, client CertificateVerify") + [0_u8] + schedule.hash(transcript)
+    sig = signature(scheme, server ? LEAF_SEED : CLIENT_SEED, content)
+    return sig ? message(15, u16(scheme) + u16(sig.size) + sig) : m
+  end
+  return message(20, schedule.finished(secret, transcript)) if m[0] == 20_u8 && find_bytes(m, FIN_MARK) >= 0
+  m
+end
+
+# A TLS 1.2 ServerKeyExchange of the template signed over the two hellos'
+# randoms and its own parameters.
+def live12(m : Array(UInt8), client_random : Array(UInt8), server_random : Array(UInt8)) : Array(UInt8)
+  return m unless m[0] == 12_u8 && m.size > 8 && find_bytes(m, SIG_MARK) >= 0
+  body = m[4, m.size - 4]
+  params = 4 + body[3].to_i32
+  return m if params + 2 > body.size
+  scheme = at16(body, params)
+  sig = signature(scheme, LEAF_SEED, client_random + server_random + body[0, params])
+  sig ? message(12, body[0, params] + u16(scheme) + u16(sig.size) + sig) : m
+end
+
+# The module's handshake messages as the peer reads them: from plaintext
+# records, then from records under *cipher* once it is set - or, for TLS
+# 1.2, under *after_ccs* from the ChangeCipherSpec on.
+class HandshakeIn
+  property cipher : TlsRecordCipher? = nil
+  property after_ccs : TlsRecordCipher? = nil
+  @tls12 : Bool = false
+  @pending : Array(UInt8) = [] of UInt8
+
+  def message(wire : Wire) : Array(UInt8)?
+    while true
+      if @pending.size >= 4
+        n = at24(@pending, 1)
+        if @pending.size >= 4 + n
+          msg = @pending[0, 4 + n]
+          @pending = @pending[4 + n, @pending.size - 4 - n]
+          return msg
+        end
+      end
+      got = wire.record
+      return nil unless got
+      header = got[0]
+      body = got[1]
+      if header[0] == 20_u8
+        if keys = @after_ccs
+          @cipher = keys
+          @after_ccs = nil
+          @tls12 = true
+        end
+        next
+      end
+      c = @cipher
+      if c && (header[0] == 23_u8 || @tls12)
+        opened = c.open(header, body)
+        return nil if opened.is_a?(TlsError)
+        return nil unless opened[0] == 22_u8
+        @pending.concat(opened[1])
+      elsif header[0] == 22_u8
+        @pending.concat(body)
+      else
+        return nil
+      end
+    end
+  end
+end
+
+# The rest of a TLS 1.3 handshake as one end sends it: under its handshake
+# keys to its Finished, under its application keys after, a KeyUpdate
+# stepping them; then a record of application data. *hello* is the
+# transcript to the ServerHello, which the handshake keys hang on;
+# *transcript* is where the handshake is now.
+def send13(wire : Wire, chunk : Int32, suite : Int32, secret : Array(UInt8), hello : Array(UInt8), transcript : Array(UInt8), msgs : Array(Array(UInt8)), rest : Array(UInt8), server : Bool) : Nil
+  schedule = TlsKeySchedule.new(suite == 0x1302)
+  hs = schedule.handshake_secret(secret)
+  mine = schedule.derive_secret(hs, server ? "s hs traffic" : "c hs traffic", hello)
+  master = schedule.master_secret(hs)
+  # A client's application keys hang on the handshake to the server's
+  # Finished, which is where it is now; a server's, on its own Finished.
+  app = server ? mine : schedule.derive_secret(master, "c ap traffic", transcript)
+  cipher = TlsRecordCipher.new(suite, schedule, mine)
+  flight = [] of UInt8
+  finished = false
+  msgs.each do |raw|
+    if finished
+      wire.write(records(22_u8, raw, chunk, cipher))
+      if raw.size == 5 && raw[0] == 24_u8
+        app = schedule.next_secret(app)
+        cipher = TlsRecordCipher.new(suite, schedule, app)
+      end
+      next
+    end
+    m = live13(raw, schedule, transcript, mine, server)
+    transcript = transcript + m
+    flight.concat(m)
+    if m[0] == 20_u8
+      wire.write(records(22_u8, flight, chunk, cipher))
+      flight = [] of UInt8
+      app = schedule.derive_secret(master, "s ap traffic", transcript) if server
+      cipher = TlsRecordCipher.new(suite, schedule, app)
+      finished = true
+    end
+  end
+  flight.concat(rest)
+  wire.write(records(22_u8, flight, chunk, cipher))
+  if finished
+    wire.write(cipher.seal(23_u8, bytes_of("application data")))
+    wire.write(cipher.seal(21_u8, [1_u8, 0_u8]))
+  end
+end
+
+# The server a `TlsClient` meets: it reads the client's hello and answers
+# with the template - its ServerHello echoing the client's session, a
+# HelloRetryRequest answered by the second hello, the rest sealed under
+# keys made with the client's share; or, for TLS 1.2, in the clear with
+# the ServerKeyExchange signed for the two randoms.
+def script_tls_server(socket : IyiSocket, opt : UInt8, template : Array(UInt8)) : String
+  wire = Wire.new(socket)
+  chunk = CHUNKS[(opt >> 2) & 3_u8]
+  incoming = HandshakeIn.new
+  msgs, rest = split_messages(template)
+  hello = incoming.message(wire)
+  return wire.finish unless hello && hello[0] == 1_u8
+  fields = hello_fields(hello, false)
+  return wire.finish unless fields
+  transcript = hello
+  i = 0
+  sent = nil.as(HelloFields?)
+  while i < msgs.size && msgs[i][0] == 2_u8
+    sh = substitute(msgs[i], SESSION_MARK, fields.session)
+    i = i + 1
+    wire.write(records(22_u8, sh, chunk, nil))
+    reply = hello_fields(sh, true)
+    if reply && reply.random == HRR_RANDOM
+      first = TlsKeySchedule.new(reply.suite == 0x1302).hash(transcript)
+      again = incoming.message(wire)
+      break unless again
+      again_fields = hello_fields(again, false)
+      break unless again_fields
+      transcript = [254_u8, 0_u8, 0_u8, first.size.to_u8] + first + sh + again
+      fields = again_fields
+      next
+    end
+    transcript = transcript + sh
+    sent = reply
+    break
+  end
+  tail = msgs[i, msgs.size - i]
+  if sent && sent.tls13 && SUITES13.includes?(sent.suite) && sent.shares.size == 1
+    group = sent.shares.keys[0]
+    share = fields.shares[group]?
+    secret = share ? shared_with(group, share) : nil
+    if secret
+      wire.write([20_u8, 3_u8, 3_u8, 0_u8, 1_u8, 1_u8]) if opt & 2_u8 != 0
+      send13(wire, chunk, sent.suite, secret, transcript, transcript, tail, rest, true)
+      return wire.finish
+    end
+  end
+  # TLS 1.2, or a hello with no keys to go on: the flight to its
+  # ServerHelloDone in the clear, the ServerKeyExchange signed for the two
+  # randoms; then the rest of the handshake, when the client's key
+  # exchange gives a secret.
+  done = 0
+  while done < tail.size && tail[done][0] != 14_u8
+    done = done + 1
+  end
+  flight = [] of UInt8
+  group = 0
+  tail[0, done < tail.size ? done + 1 : done].each do |m|
+    live = sent ? live12(m, fields.random, sent.random) : m
+    group = at16(live, 5) if live[0] == 12_u8 && live.size >= 7
+    transcript = transcript + live
+    flight.concat(live)
+  end
+  if sent && done < tail.size
+    wire.write(records(22_u8, flight, chunk, nil))
+    after = tail[done + 1, tail.size - done - 1]
+    finish12(wire, incoming, chunk, sent.suite, group, transcript, fields.random, sent.random, sent.types.includes?(23), after, rest)
+    return wire.finish
+  end
+  flight.concat(rest)
+  wire.write(records(22_u8, flight, chunk, nil))
+  wire.finish
+end
+
+SUITES12 = [0xC02B, 0xC02C, 0xCCA9]
+
+# TLS 1.2's end of the handshake as its server sends it: the client's key
+# exchange read and its secret made, the client's Finished read under
+# the client's keys, then the server's ChangeCipherSpec and Finished, and
+# *after* and *rest* under its own keys, application data, close_notify.
+def finish12(wire : Wire, incoming : HandshakeIn, chunk : Int32, suite : Int32, group : Int32, transcript : Array(UInt8),
+             client_random : Array(UInt8), server_random : Array(UInt8), ems : Bool, after : Array(Array(UInt8)), rest : Array(UInt8)) : Nil
+  return unless SUITES12.includes?(suite)
+  exchange = nil.as(Array(UInt8)?)
+  while m = incoming.message(wire)
+    transcript = transcript + m
+    if m[0] == 16_u8
+      exchange = m
+      break
+    end
+  end
+  return unless exchange && exchange.size > 5 && exchange[4].to_i32 + 5 <= exchange.size
+  premaster = shared_with(group, exchange[5, exchange[4].to_i32])
+  return unless premaster
+  keys = TlsKeySchedule.new(suite == 0xC02C)
+  master = ems ? keys.prf(premaster, "extended master secret", keys.hash(transcript), 48) : keys.prf(premaster, "master secret", client_random + server_random, 48)
+  size = suite == 0xC02B ? 16 : 32
+  iv = suite == 0xCCA9 ? 12 : 4
+  block = keys.prf(master, "key expansion", server_random + client_random, 2 * (size + iv))
+  incoming.after_ccs = TlsRecordCipher.new(suite, block[0, size], block[2 * size, iv])
+  finished = false
+  while m = incoming.message(wire)
+    transcript = transcript + m
+    if m[0] == 20_u8
+      finished = true
+      break
+    end
+  end
+  return unless finished
+  wire.write([20_u8, 3_u8, 3_u8, 0_u8, 1_u8, 1_u8])
+  cipher = TlsRecordCipher.new(suite, block[size, size], block[2 * size + iv, iv])
+  wire.write(cipher.seal(22_u8, message(20, keys.prf(master, "server finished", keys.hash(transcript), 12))))
+  more = [] of UInt8
+  after.each { |m| more.concat(m) }
+  more.concat(rest)
+  wire.write(records(22_u8, more, chunk, cipher))
+  wire.write(cipher.seal(23_u8, bytes_of("application data")))
+  wire.write(cipher.seal(21_u8, [1_u8, 0_u8]))
+end
+
+# The client a `TlsServer` meets: it sends the template's ClientHello (a
+# second one after a HelloRetryRequest), reads the server's flight under
+# the keys its share gives, then sends the rest of the template - its
+# Certificate, CertificateVerify and Finished made live - and what comes
+# after under its application keys.
+def script_tls_client(socket : IyiSocket, opt : UInt8, template : Array(UInt8)) : String
+  wire = Wire.new(socket)
+  chunk = CHUNKS[(opt >> 2) & 3_u8]
+  incoming = HandshakeIn.new
+  msgs, rest = split_messages(template)
+  if msgs.empty?
+    wire.write(records(22_u8, rest, chunk, nil))
+    return wire.finish
+  end
+  transcript = msgs[0]
+  wire.write(records(22_u8, msgs[0], chunk, nil))
+  i = 1
+  reply = incoming.message(wire)
+  fields = reply && reply[0] == 2_u8 ? hello_fields(reply, true) : nil
+  if reply && fields && fields.random == HRR_RANDOM && i < msgs.size
+    first = TlsKeySchedule.new(fields.suite == 0x1302).hash(transcript)
+    wire.write(records(22_u8, msgs[i], chunk, nil))
+    transcript = [254_u8, 0_u8, 0_u8, first.size.to_u8] + first + reply + msgs[i]
+    i = i + 1
+    reply = incoming.message(wire)
+    fields = reply && reply[0] == 2_u8 ? hello_fields(reply, true) : nil
+  end
+  if reply && fields && fields.tls13 && SUITES13.includes?(fields.suite) && fields.shares.size == 1
+    group = fields.shares.keys[0]
+    secret = shared_with(group, fields.shares[group])
+    if secret
+      transcript = transcript + reply
+      hello = transcript
+      schedule = TlsKeySchedule.new(fields.suite == 0x1302)
+      hs = schedule.handshake_secret(secret)
+      incoming.cipher = TlsRecordCipher.new(fields.suite, schedule, schedule.derive_secret(hs, "s hs traffic", hello))
+      complete = false
+      while m = incoming.message(wire)
+        transcript = transcript + m
+        if m[0] == 20_u8
+          complete = true
+          break
+        end
+      end
+      if complete
+        wire.write([20_u8, 3_u8, 3_u8, 0_u8, 1_u8, 1_u8]) if opt & 2_u8 != 0
+        send13(wire, chunk, fields.suite, secret, hello, transcript, msgs[i, msgs.size - i], rest, false)
+        return wire.finish
+      end
+    end
+  end
+  flight = [] of UInt8
+  msgs[i, msgs.size - i].each { |m| flight.concat(m) }
+  flight.concat(rest)
+  wire.write(records(22_u8, flight, chunk, nil))
+  wire.finish
+end
+
+FUZZ_ROOT_CERT = Certificate.parse(unhex(FUZZ_ROOT)).or_panic
+
+# The servers a scripted client meets, by a bit of the option byte: one
+# that asks for no certificate, and one that asks for the client's under
+# the fuzz root.
+SERVER_CONFIGS = [false, true].map do |asks|
+  config = TlsServerConfig.from_der([unhex(FUZZ_LEAF), unhex(FUZZ_ROOT)], LEAF_SEED).or_panic
+  config.alpn = ["h2", "http/1.1"]
+  config.now = NOW
+  config.client_roots = [FUZZ_ROOT_CERT] if asks
+  config
+end
+
+# The clients a scripted server meets, by two bits: TLS 1.3 only, or TLS
+# 1.2 too; with a certificate of their own to answer a request with, or
+# none.
+CLIENT_CONFIGS = [0, 1, 2, 3].map do |pick|
+  config = TlsConfig.new
+  config.roots = [FUZZ_ROOT_CERT]
+  config.now = NOW
+  config.alpn = ["h2", "http/1.1"]
+  config.min_version = TlsVersion::TLS12 if pick & 1 != 0
+  config.identity = TlsIdentity.from_der([unhex(FUZZ_CLIENT), unhex(FUZZ_ROOT)], CLIENT_SEED).or_panic if pick & 2 != 0
+  config
+end
+
+# What a connection the handshake made reads: records to the peer's end.
+def read_all(conn : TlsServer | TlsClient) : String
+  conn.read_timeout_ms = MODULE_WAIT_MS
+  total = 0
+  64.times do
+    got = conn.read
+    if got.is_a?(TlsError)
+      conn.close
+      return "refused: after the handshake, #{got.message}"
+    end
+    break if got.empty?
+    total = total + got.bytesize
+  end
+  conn.close
+  "handshake, then #{total} bytes"
+end
+
+def run_tls_server(input : Array(UInt8)) : String
+  return "empty" if input.empty?
+  opt = input[0]
+  template = input[1, input.size - 1]
+  config = SERVER_CONFIGS[opt & 1_u8]
+  module_serves(->(socket : IyiSocket) {
+    conn = TlsServer.over(socket, config, MODULE_WAIT_MS)
+    conn.is_a?(TlsError) ? refused(conn) : read_all(conn)
+  }, ->(socket : IyiSocket) { script_tls_client(socket, opt, template) })[0]
+end
+
+def run_tls_client(input : Array(UInt8)) : String
+  return "empty" if input.empty?
+  opt = input[0]
+  template = input[1, input.size - 1]
+  config = CLIENT_CONFIGS[opt & 3_u8]
+  host = Loopback.next
+  listener = IyiSocket.listen(host, 0)
+  port = listener.local_port
+  module_dials(listener, -> {
+    socket = IyiSocket.connect(host, port)
+    if socket.is_a?(IyiSocket)
+      conn = TlsClient.over(socket, "fuzz.test", config, MODULE_WAIT_MS)
+      if conn.is_a?(TlsError)
+        socket.close
+        refused(conn)
+      else
+        read_all(conn)
+      end
+    else
+      "no connection"
+    end
+  }, ->(socket : IyiSocket) { script_tls_server(socket, opt, template) })
+end
+
+# A ClientHello of the peer's own: its shares are the peer's keys.
+def client_hello(session : Array(UInt8), groups : Array(Int32), shares : Array(Int32)) : Array(UInt8)
+  share_list = [] of UInt8
+  shares.each do |g|
+    key = g == 0x1D ? SCRIPT_X25519_PUBLIC : SCRIPT_P256.public_point
+    share_list.concat(u16(g) + u16(key.size) + key)
+  end
+  group_list = [] of UInt8
+  groups.each { |g| group_list.concat(u16(g)) }
+  exts = extension(0, u16(12) + [0_u8] + u16(9) + bytes_of("fuzz.test")) +
+         extension(10, u16(group_list.size) + group_list) +
+         extension(13, u16(8) + u16(0x0807) + u16(0x0403) + u16(0x0804) + u16(0x0503)) +
+         extension(16, u16(12) + [2_u8] + bytes_of("h2") + [8_u8] + bytes_of("http/1.1")) +
+         extension(43, [2_u8, 3_u8, 4_u8]) +
+         extension(45, [1_u8, 1_u8]) +
+         extension(51, u16(share_list.size) + share_list)
+  body = [3_u8, 3_u8] + Array(UInt8).new(32) { |i| (i * 3).to_u8 } + [session.size.to_u8] + session +
+         u16(6) + u16(0x1301) + u16(0x1302) + u16(0x1303) + [1_u8, 0_u8] + u16(exts.size) + exts
+  message(1, body)
+end
+
+# A client's flight after the server's: a Certificate and CertificateVerify
+# when it has one, and Finished.
+def client_flight(cert : Bool) : Array(UInt8)
+  res = [] of UInt8
+  if cert
+    entries = [] of UInt8
+    [unhex(FUZZ_CLIENT), unhex(FUZZ_ROOT)].each { |der| entries.concat(u24(der.size) + der + [0_u8, 0_u8]) }
+    res.concat(message(11, [0_u8] + u24(entries.size) + entries))
+    res.concat(message(15, u16(0x0807) + u16(SIG_MARK.size) + SIG_MARK))
+  end
+  res + message(20, FIN_MARK)
+end
+
+# What a scripted client sends a `TlsServer`, the option byte first: the
+# recorded ClientHellos, their X25519 and secp256r1 shares made the
+# peer's so that the handshake goes on; hellos of its own, with a
+# certificate and without, with only a secp256r1 share, and one with no
+# share, which a HelloRetryRequest answers, with the second hello after
+# it.
+def tls_server_seeds : Array(Array(UInt8))
+  seeds = [] of Array(UInt8)
+  CLIENT_HELLOS.each do |record|
+    hello = unhex(record)
+    hello = hello[5, hello.size - 5]
+    at = find_bytes(hello, [0x00_u8, 0x1D_u8, 0x00_u8, 0x20_u8])
+    hello = hello[0, at + 4] + SCRIPT_X25519_PUBLIC + hello[at + 36, hello.size - at - 36] if at >= 0
+    at = find_bytes(hello, [0x00_u8, 0x17_u8, 0x00_u8, 0x41_u8])
+    hello = hello[0, at + 4] + SCRIPT_P256.public_point + hello[at + 69, hello.size - at - 69] if at >= 0
+    seeds << [0_u8] + hello + client_flight(false)
+  end
+  session = Array(UInt8).new(32) { |i| (i + 1).to_u8 }
+  both = [0x1D, 0x17]
+  update = message(24, [1_u8])
+  seeds << [0_u8] + client_hello(session, both, [0x1D]) + client_flight(false) + update
+  seeds << [1_u8] + client_hello(session, both, [0x1D]) + client_flight(true) + update
+  seeds << [3_u8] + client_hello([] of UInt8, both, [0x17]) + client_flight(true)
+  seeds << [8_u8] + client_hello(session, both, [] of Int32) + client_hello(session, both, [0x1D]) + client_flight(false)
+  seeds << [12_u8] + client_hello(session, both, [0x1D]) + client_flight(false)
+  seeds
+end
+
+def server_hello13(suite : Int32, group : Int32) : Array(UInt8)
+  key = group == 0x1D ? SCRIPT_X25519_PUBLIC : SCRIPT_P256.public_point
+  exts = extension(43, [3_u8, 4_u8]) + extension(51, u16(group) + u16(key.size) + key)
+  message(2, [3_u8, 3_u8] + Array(UInt8).new(32) { |i| (i * 5 + 1).to_u8 } + [32_u8] + SESSION_MARK + u16(suite) + [0_u8] + u16(exts.size) + exts)
+end
+
+def certificate13(ders : Array(Array(UInt8))) : Array(UInt8)
+  entries = [] of UInt8
+  ders.each { |der| entries.concat(u24(der.size) + der + [0_u8, 0_u8]) }
+  message(11, [0_u8] + u24(entries.size) + entries)
+end
+
+# A TLS 1.3 server's flight: a ServerHello with the peer's share in the
+# suite and group named, EncryptedExtensions, perhaps a
+# CertificateRequest, the chain, a CertificateVerify and Finished; then a
+# NewSessionTicket and a KeyUpdate under the application keys.
+def server_flight13(suite : Int32, group : Int32, request : Bool, p256 : Bool) : Array(UInt8)
+  ee = extension(16, u16(3) + [2_u8] + bytes_of("h2")) + extension(0, [] of UInt8)
+  res = server_hello13(suite, group) + message(8, u16(ee.size) + ee)
+  if request
+    algs = extension(13, u16(4) + u16(0x0807) + u16(0x0403))
+    res.concat(message(13, [0_u8] + u16(algs.size) + algs))
+  end
+  res.concat(certificate13(p256 ? [unhex(FUZZ_P256)] : [unhex(FUZZ_LEAF), unhex(FUZZ_ROOT)]))
+  res.concat(message(15, u16(p256 ? 0x0403 : 0x0807) + u16(SIG_MARK.size) + SIG_MARK))
+  res.concat(message(20, FIN_MARK))
+  ticket = u32(7200) + u32(0x01020304) + [1_u8, 0_u8] + u16(16) + Array(UInt8).new(16) { |i| i.to_u8 } + u16(0)
+  res + message(4, ticket) + message(24, [0_u8])
+end
+
+# What a scripted server answers a `TlsClient` with, the option byte
+# first: TLS 1.3 flights in each suite, with a CertificateRequest and
+# without, under the Ed25519 chain and the P-256 certificate; a
+# HelloRetryRequest for secp256r1 and the flight in it; the recorded
+# ServerHellos as they came; and the recorded TLS 1.2 flights, their
+# signatures made the peer's.
+def tls_client_seeds : Array(Array(UInt8))
+  seeds = [] of Array(UInt8)
+  seeds << [0_u8] + server_flight13(0x1301, 0x1D, false, false)
+  seeds << [2_u8] + server_flight13(0x1302, 0x1D, true, false)
+  seeds << [4_u8] + server_flight13(0x1303, 0x1D, false, true)
+  seeds << [10_u8] + server_flight13(0x1301, 0x1D, true, true)
+  hrr_exts = extension(43, [3_u8, 4_u8]) + extension(51, u16(0x17))
+  hrr = message(2, [3_u8, 3_u8] + HRR_RANDOM + [32_u8] + SESSION_MARK + u16(0x1301) + [0_u8] + u16(hrr_exts.size) + hrr_exts)
+  seeds << [0_u8] + hrr + server_flight13(0x1301, 0x17, false, false)
+  # The recorded TLS 1.3 hellos, the session they echo the client's.
+  SERVER_MESSAGES[0, 3].each do |h|
+    m = unhex(h)
+    seeds << [0_u8] + m[0, 39] + SESSION_MARK + m[71, m.size - 71]
+  end
+  # The recorded TLS 1.2 flights: the ServerHello without the ticket the
+  # client did not offer, the ServerKeyExchange with the peer's X25519
+  # key, signed live; after the second, a HelloRequest once the
+  # handshake is done.
+  [SERVER_MESSAGES[3, 4], SERVER_MESSAGES[7, 5]].each_with_index do |flight, k|
+    bytes = [] of UInt8
+    flight.each do |h|
+      m = unhex(h)
+      m = without_extension(m, 0x23) if m[0] == 2_u8
+      if m[0] == 12_u8
+        scheme = at16(m, 4 + 4 + m[7].to_i32)
+        m = message(12, [3_u8] + u16(0x1D) + [32_u8] + SCRIPT_X25519_PUBLIC + u16(scheme) + u16(SIG_MARK.size) + SIG_MARK)
+      end
+      bytes.concat(m)
+    end
+    bytes.concat(message(0, [] of UInt8)) if k == 1
+    seeds << [(1 + 2 * k).to_u8] + bytes
+  end
+  seeds
+end
+
+# A ServerHello with one extension taken out.
+def without_extension(m : Array(UInt8), type : Int32) : Array(UInt8)
+  at = 4 + 34
+  at = at + 1 + m[at].to_i32 + 3
+  others = [] of UInt8
+  k = at + 2
+  while k + 4 <= m.size
+    n = at16(m, k + 2)
+    others.concat(m[k, 4 + n]) unless at16(m, k) == type
+    k = k + 4 + n
+  end
+  message(2, m[4, at - 4] + u16(others.size) + others)
+end
+
+TLS_WORDS = [[0x00_u8, 0x00_u8], [0xFF_u8, 0xFF_u8], [0x13_u8, 0x01_u8], [0x00_u8, 0x2B_u8, 0x00_u8, 0x02_u8, 0x03_u8, 0x04_u8], [0x00_u8, 0x33_u8],
+             [0x00_u8, 0x1D_u8, 0x00_u8, 0x20_u8], [0x08_u8, 0x07_u8], [0x04_u8, 0x03_u8], [0x18_u8, 0x00_u8, 0x00_u8, 0x01_u8, 0x01_u8], [0x14_u8, 0x00_u8, 0x00_u8, 0x00_u8],
+             [0x0B_u8, 0x00_u8, 0x00_u8, 0x04_u8, 0x00_u8, 0x00_u8, 0x00_u8, 0x00_u8], [0x08_u8, 0x00_u8, 0x00_u8, 0x02_u8, 0x00_u8, 0x00_u8], [0x00_u8, 0x10_u8], [0x00_u8, 0x29_u8],
+             [0x00_u8, 0x2A_u8, 0x00_u8, 0x00_u8], [0xFE_u8, 0x00_u8, 0x00_u8, 0x20_u8], [0x01_u8, 0x00_u8, 0x00_u8, 0x00_u8], SIG_MARK, FIN_MARK, SESSION_MARK]
+
+# --- HTTP over a connection ---------------------------------------------
+
+# A handler that reads the body by `body_io`, whose failures are values:
+# `Request#body` raises them by design, a panic `serve` contains to the
+# connection, which `handle` alone does not.
+HANDLER = ->(req : Request) {
+  got = req.body_io.read_all(Server::MAX_BODY.to_i64)
+  got.is_a?(String) ? Response.new(200, "read #{got.bytesize}") : Response.new(400, got.message)
+}
+
+# The server's answer as the peer heard it: a 4xx or 5xx, or HTTP/2's
+# GOAWAY with an error, is a refusal; anything else is a read.
+def run_h_server(input : Array(UInt8)) : String
+  return "empty" if input.empty?
+  opt = input[0]
+  bytes = input[1, input.size - 1]
+  verdict, heard = module_serves(->(socket : IyiSocket) {
+    Server.handle(socket, HANDLER, stream_bodies: opt & 1_u8 != 0, compress: opt & 2_u8 != 0, timeout_ms: MODULE_WAIT_MS)
+    "served"
+  }, ->(socket : IyiSocket) {
+    wire = Wire.new(socket)
+    wire.write(bytes)
+    wire.finish
+  })
+  return verdict unless verdict == "served"
+  error = heard.starts_with?("HTTP/1.1 4") || heard.starts_with?("HTTP/1.1 5")
+  if heard.starts_with?("frames ")
+    error = heard[7, heard.bytesize - 7].split(',').any? { |f| (f.starts_with?("3:") || f.starts_with?("7:")) && f != "3:0" && f != "7:0" }
+  end
+  error ? "refused: #{heard}" : "read: #{heard}"
+end
+
+CRLF2 = bytes_of("\r\n\r\n")
+
+def run_h_client(input : Array(UInt8), h2 : Bool) : String
+  return "empty" if input.empty?
+  opt = input[0]
+  bytes = input[1, input.size - 1]
+  host = Loopback.next
+  listener = IyiSocket.listen(host, 0)
+  port = listener.local_port
+  module_dials(listener, -> {
+    client = HTTPClient.new(timeout_ms: MODULE_WAIT_MS, prior_knowledge: h2)
+    got = client.request(opt & 1_u8 != 0 ? "HEAD" : "GET", "http://#{host}:#{port}/fuzz", redirects: 0, decompress: opt & 2_u8 == 0)
+    client.close
+    got.is_a?(Response) ? "read #{got.status}, #{got.body.bytesize} bytes" : "refused: #{got.message}"
+  }, ->(socket : IyiSocket) {
+    wire = Wire.new(socket)
+    h2 ? wire.need(24) : wire.wait_for(CRLF2)
+    wire.write(bytes)
+    wire.finish
+  })
+end
+
+def frame(type : Int32, flags : Int32, id : Int32, payload : Array(UInt8)) : Array(UInt8)
+  u24(payload.size) + [type.to_u8, flags.to_u8] + u32(id) + payload
+end
+
+def hpack_block(fields : Array({String, String}), huffman : Bool) : Array(UInt8)
+  block = Encoder.new(use_huffman: huffman).encode(fields.map { |f| HeaderField.new(f[0], f[1], false) })
+  Array(UInt8).new(block.size) { |i| block[i] }
+end
+
+H2_PREFACE = bytes_of("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+
+# What a client sends `Server.handle` over HTTP/2 with prior knowledge,
+# the option byte first: requests with and without bodies, a head cut
+# into CONTINUATION, padding, priority, a reset stream, trailers, two
+# streams, and the frames a connection carries besides.
+def h2_server_seeds : Array(Array(UInt8))
+  get = hpack_block([{":method", "GET"}, {":scheme", "http"}, {":path", "/"}, {":authority", "fuzz.test"}], false)
+  post = hpack_block([{":method", "POST"}, {":scheme", "http"}, {":path", "/up?x=1"}, {":authority", "fuzz.test"}, {"content-length", "5"}, {"content-type", "text/plain"}], true)
+  trailers = hpack_block([{"x-checksum", "abc"}], false)
+  zipped = hpack_block([{":method", "GET"}, {":scheme", "http"}, {":path", "/"}, {":authority", "fuzz.test"}, {"accept-encoding", "gzip"}], true)
+  settings = frame(4, 0, 0, u16(3) + u32(100) + u16(4) + u32(65535) + u16(5) + u32(16384))
+  empty = frame(4, 0, 0, [] of UInt8)
+  half = get.size // 2
+  [
+    [0_u8] + H2_PREFACE + empty + frame(1, 5, 1, get),
+    [0_u8] + H2_PREFACE + settings + frame(1, 4, 1, post) + frame(0, 1, 1, bytes_of("hello")) + frame(8, 0, 0, u32(1000)) + frame(6, 0, 0, Array(UInt8).new(8, 7_u8)) + frame(4, 1, 0, [] of UInt8),
+    [1_u8] + H2_PREFACE + empty + frame(1, 0, 1, get[0, half]) + frame(9, 4, 1, get[half, get.size - half]) + frame(0, 9, 1, [3_u8] + bytes_of("ab") + [0_u8, 0_u8, 0_u8]),
+    [0_u8] + H2_PREFACE + empty + frame(1, 0x2D, 1, [2_u8] + u32(0) + [15_u8] + get + [0_u8, 0_u8]) + frame(1, 5, 3, get) + frame(3, 0, 3, u32(8)) + frame(2, 0, 5, u32(1) + [16_u8]) + frame(7, 0, 0, u32(3) + u32(0)),
+    [1_u8] + H2_PREFACE + empty + frame(1, 4, 1, post) + frame(0, 0, 1, bytes_of("hel")) + frame(0, 0, 1, bytes_of("lo")) + frame(1, 5, 1, trailers),
+    [2_u8] + H2_PREFACE + empty + frame(1, 5, 1, zipped) + frame(1, 5, 3, get),
+  ]
+end
+
+# What a server answers an `HTTPClient` with over HTTP/2, the option byte
+# first: a 200 with its body, an interim 103 before it and trailers after,
+# a head in CONTINUATION, padded DATA, a PUSH_PROMISE the client turned
+# off, a reset and a GOAWAY, a gzip body, and an answer to a HEAD.
+def h2_client_seeds : Array(Array(UInt8))
+  ok = hpack_block([{":status", "200"}, {"content-type", "text/plain"}, {"content-length", "5"}], false)
+  early = hpack_block([{":status", "103"}, {"link", "</a.css>; rel=preload"}], true)
+  plain = hpack_block([{":status", "200"}, {"server", "fuzz"}], true)
+  zipped = hpack_block([{":status", "200"}, {"content-encoding", "gzip"}], false)
+  trailers = hpack_block([{"x-checksum", "abc"}], false)
+  push = hpack_block([{":method", "GET"}, {":scheme", "http"}, {":path", "/pushed"}, {":authority", "fuzz.test"}], false)
+  gz = bytes_of(Gzip.compress("hello, hello, hello"))
+  settings = frame(4, 0, 0, u16(3) + u32(100) + u16(4) + u32(65535) + u16(5) + u32(16384))
+  empty = frame(4, 0, 0, [] of UInt8)
+  half = ok.size // 2
+  [
+    [0_u8] + empty + frame(4, 1, 0, [] of UInt8) + frame(1, 4, 1, ok) + frame(0, 1, 1, bytes_of("hello")),
+    [0_u8] + settings + frame(1, 4, 1, early) + frame(1, 4, 1, plain) + frame(0, 0, 1, bytes_of("body")) + frame(1, 5, 1, trailers),
+    [0_u8] + empty + frame(1, 0, 1, ok[0, half]) + frame(9, 4, 1, ok[half, ok.size - half]) + frame(8, 0, 1, u32(100)) + frame(6, 0, 0, Array(UInt8).new(8, 1_u8)) + frame(0, 9, 1, [2_u8] + bytes_of("hello") + [0_u8, 0_u8]),
+    [0_u8] + empty + frame(5, 4, 1, u32(2) + push) + frame(3, 0, 1, u32(7)) + frame(7, 0, 0, u32(0) + u32(0) + bytes_of("bye")),
+    [0_u8] + empty + frame(1, 4, 1, zipped) + frame(0, 1, 1, gz),
+    [1_u8] + empty + frame(1, 5, 1, ok),
+  ]
+end
+
+# What a server answers an `HTTPClient` with over HTTP/1.1: bodies by
+# length, by chunks and by the close, an interim answer, a 304, bodies
+# in gzip, zstd and deflate, and a redirect not followed.
+def h1_client_seeds : Array(Array(UInt8))
+  gz = Gzip.compress("hello, hello, hello, a body that compresses")
+  zs = Zstd.compress("hello, hello, hello, a body that compresses")
+  df = Zlib.compress("hello, hello, hello, a body that compresses")
+  chunked = String.build do |io|
+    io << gz.bytesize.to_s(16) << "\r\n" << gz << "\r\n0\r\nX-Trailer: t\r\n\r\n"
+  end
+  [
+    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\n\r\nhello",
+    "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nTransfer-Encoding: chunked\r\nX-Folded: a\r\n  b\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+    "HTTP/1.0 304 Not Modified\r\nETag: \"x\"\r\n\r\n",
+    "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: #{gz.bytesize}\r\n\r\n#{gz}",
+    "HTTP/1.1 200 OK\r\nContent-Encoding: zstd\r\nContent-Length: #{zs.bytesize}\r\n\r\n#{zs}",
+    "HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\nConnection: close\r\n\r\n#{df}",
+    "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n#{chunked}",
+    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/elsewhere\r\nContent-Length: 0\r\n\r\n",
+  ].map { |s| [0_u8] + bytes_of(s) }
+end
+
+H2_WORDS = [[0_u8, 0_u8, 0_u8], [0_u8, 0x40_u8, 0_u8], [0xFF_u8, 0xFF_u8, 0xFF_u8], [0x7F_u8, 0xFF_u8, 0xFF_u8, 0xFF_u8], [0x80_u8, 0_u8, 0_u8, 1_u8],
+            [0_u8, 0_u8, 0_u8, 0_u8], [0_u8, 0_u8, 0_u8, 1_u8], [0_u8, 0_u8, 0_u8, 3_u8], [4_u8], [1_u8], [9_u8], [0x2D_u8], [0x08_u8],
+            frame(4, 0, 0, [] of UInt8), frame(4, 1, 0, [] of UInt8), frame(8, 0, 0, u32(0x7FFFFFFF)), frame(8, 0, 1, u32(0)), frame(3, 0, 1, u32(0)),
+            frame(0, 1, 1, [] of UInt8), frame(9, 4, 1, [0x82_u8]), frame(4, 0, 0, u16(4) + u32(0x7FFFFFFF)), frame(4, 0, 0, u16(5) + u32(0xFFFFFF)), frame(4, 0, 0, u16(1) + u32(0)),
+            frame(6, 0, 0, [] of UInt8), frame(2, 0, 1, u32(1) + [0_u8]), H2_PREFACE]
+
+# ---------------------------------------------------------------------
+# Inputs, by target
+# ---------------------------------------------------------------------
+
+PEM_SEEDS        = pem_seeds
+KEY_INPUTS       = key_seeds
+RECORD_SEEDS     = record_seeds
+HTTP1_SEEDS      = http1_seeds
+HPACK_SEEDS      = hpack_seeds
+TLS_SERVER_SEEDS = tls_server_seeds
+TLS_CLIENT_SEEDS = tls_client_seeds
+# The requests of the http1 seeds, each behind its option byte: bodies
+# read whole, or as a stream; and answers compressed.
+H1_SERVER_SEEDS = HTTP1_SEEDS[0, 6].map { |s| [0_u8] + s } + [[1_u8] + HTTP1_SEEDS[2], [3_u8] + HTTP1_SEEDS[3]]
+H2_SERVER_SEEDS = h2_server_seeds
+H1_CLIENT_SEEDS = h1_client_seeds
+H2_CLIENT_SEEDS = h2_client_seeds
+
+# Certificates the x509 target starts from: the seeds, and the machine's
+# roots when `roots FILE` hands them in.
+class Pool
+  @@certs : Array(Array(UInt8)) = [] of Array(UInt8)
+
+  def self.certs : Array(Array(UInt8))
+    @@certs = CERT_SEEDS.dup if @@certs.empty?
+    @@certs
+  end
+
+  def self.add(der : Array(UInt8)) : Nil
+    certs << der
+  end
+end
+
+PURE      = ["der", "x509", "pem", "keys", "record", "http1", "hpack"]
+CONNECTED = ["tls-server", "tls-client", "h1-server", "h2-server", "h1-client", "h2-client"]
+TARGETS   = PURE + CONNECTED
+
+# Bytes of an input a minimisation keeps: the option byte a target reads
+# from its front.
+def kept(target : String) : Int32
+  target == "keys" || target == "record" || CONNECTED.includes?(target) ? 1 : 0
+end
+
+# A connection target's input: a seed's option byte, or now and then any
+# byte, and its template mutated - a unit at a time when *units* says how
+# the template is cut (1, TLS messages; 2, HTTP/2 frames), as bytes
+# otherwise.
+def connected_input(seeds : Array(Array(UInt8)), words : Array(Array(UInt8)), m : Mutator, units : Int32) : Array(UInt8)
+  seed = m.pick(seeds)
+  opt = m.chance(8) ? m.byte : seed[0]
+  corpus = seeds.map { |s| s[1, s.size - 1] }
+  body = seed[1, seed.size - 1]
+  changed = units > 0 && !m.chance(3) ? mutate_units(body, corpus, words, m, units == 2) : m.mutate(body, corpus, words)
+  [opt] + changed
+end
+
+def make_input(target : String, m : Mutator) : Array(UInt8)
+  case target
+  when "der"
+    seed = m.pick(DER_SEEDS)
+    m.chance(3) ? m.mutate(seed, DER_SEEDS, DER_WORDS) : mutate_der(seed, DER_SEEDS, m)
+  when "x509"
+    pool = Pool.certs
+    seed = m.pick(pool)
+    m.chance(4) ? m.mutate(seed, pool, DER_WORDS) : mutate_der(seed, pool, m)
+  when "pem"
+    mutate_pem(m.pick(PEM_SEEDS), PEM_SEEDS, PEM_WORDS, m)
+  when "keys"
+    seed = m.pick(KEY_INPUTS)
+    chosen = m.chance(8) ? m.byte : seed[0]
+    [chosen] + mutate_pem(seed[1, seed.size - 1], KEY_INPUTS, PEM_WORDS, m)
+  when "record"
+    m.mutate(m.pick(RECORD_SEEDS), RECORD_SEEDS, [] of Array(UInt8))
+  when "http1"
+    m.mutate(m.pick(HTTP1_SEEDS), HTTP1_SEEDS, HTTP_WORDS)
+  when "hpack"
+    m.mutate(m.pick(HPACK_SEEDS), HPACK_SEEDS, HPACK_WORDS)
+  when "tls-server" then connected_input(TLS_SERVER_SEEDS, TLS_WORDS, m, 1)
+  when "tls-client" then connected_input(TLS_CLIENT_SEEDS, TLS_WORDS, m, 1)
+  when "h1-server"  then connected_input(H1_SERVER_SEEDS, HTTP_WORDS, m, 0)
+  when "h2-server"  then connected_input(H2_SERVER_SEEDS, H2_WORDS + HPACK_WORDS, m, 2)
+  when "h1-client"  then connected_input(H1_CLIENT_SEEDS, HTTP_WORDS, m, 0)
+  when "h2-client"  then connected_input(H2_CLIENT_SEEDS, H2_WORDS + HPACK_WORDS, m, 2)
+  else
+    raise "no target #{target}"
+  end
+end
+
+def run_target(target : String, input : Array(UInt8)) : String
+  case target
+  when "der"        then run_der(input)
+  when "x509"       then run_x509(input)
+  when "pem"        then run_pem(input)
+  when "keys"       then run_keys(input)
+  when "record"     then run_record(input)
+  when "http1"      then run_http1(input)
+  when "hpack"      then run_hpack(input)
+  when "tls-server" then run_tls_server(input)
+  when "tls-client" then run_tls_client(input)
+  when "h1-server"  then run_h_server(input)
+  when "h2-server"  then run_h_server(input)
+  when "h1-client"  then run_h_client(input, false)
+  when "h2-client"  then run_h_client(input, true)
+  else                   raise "no target #{target}"
+  end
+end
+
+# Iteration *index* of *target* under *seed*: its own generator, so any
+# input can be made again alone.
+def input_for(target : String, seed : UInt64, index : Int32) : Array(UInt8)
+  stream = ((TARGETS.index(target) || 0) + 1).to_u64 &* 0x9E3779B97F4A7C15_u64
+  make_input(target, Mutator.new(Random.new(seed ^ stream, index.to_u64)))
+end
+
+# ---------------------------------------------------------------------
+# One input, watched
+# ---------------------------------------------------------------------
+
+# What one input did: its answer, whether that answer is a finding (a
+# panic, or a property broken), how long it took and what it allocated.
+class Outcome
+  getter verdict : String
+  getter finding : Bool
+  getter ms : Int64
+  getter allocated : UInt64
+
+  def initialize(@verdict : String, @finding : Bool, @ms : Int64, @allocated : UInt64)
+  end
+end
+
+# The bounds every input is held to, per target: a pure reader's input is
+# at most 128 KiB, so a second and a half is far past linear. A
+# connection's carries a handshake or an exchange, and stays under
+# MODULE_WAIT_MS: the peer always ends its half, so a module that waits
+# out its own timeout has not heard the end.
+def time_limit_ms(target : String) : Int64
+  CONNECTED.includes?(target) ? 2500_i64 : 1500_i64
+end
+
+# Allocation: 64 MB, and 4 KB for every byte of input on top.
+def alloc_limit(target : String, size : Int32) : UInt64
+  64_000_000_u64 + 4096_u64 * size.to_u64
+end
+
+# *input* run in a task of its own: a panic is caught there and is an
+# answer here, and the collector is held off so what the input allocated
+# is what the count moved by.
+def attempt(target : String, input : Array(UInt8)) : Outcome
+  verdict = ""
+  finding = false
+  GC.disable
+  before = GC.stats.bytes_since_collection
+  started = __iyi_monotonic_ns
+  group do |g|
+    task = g.spawn { run_target(target, input) }
+    case got = task.value
+    in Panicked
+      verdict = "PANIC: " + got.message
+    in String
+      verdict = got
+    end
+    0
+  end
+  ms = (__iyi_monotonic_ns - started) // 1000000_i64
+  after = GC.stats.bytes_since_collection
+  GC.enable
+  finding = verdict.starts_with?("PANIC: ") || verdict.starts_with?("PROPERTY: ")
+  Outcome.new(verdict, finding, ms, after >= before ? after - before : 0_u64)
+end
+
+# Which way an outcome breaks the bounds, if it does: a panic or property
+# by its sentence, a slow or large input by its kind. A slow or large one
+# is run again and counts only if it is slow or large again, so a pause
+# of the machine's is not a finding.
+def fault_of(target : String, input : Array(UInt8), outcome : Outcome, confirm : Bool) : String?
+  return kind_of(outcome.verdict) if outcome.finding
+  if outcome.ms > time_limit_ms(target)
+    return "slow: past #{time_limit_ms(target)} ms" unless confirm
+    again = attempt(target, input)
+    return "slow: past #{time_limit_ms(target)} ms" if again.ms > time_limit_ms(target)
+  end
+  if outcome.allocated > alloc_limit(target, input.size)
+    return "large: past the allocation bound" unless confirm
+    again = attempt(target, input)
+    return "large: past the allocation bound" if again.allocated > alloc_limit(target, input.size)
+  end
+  nil
+end
+
+# *input* made as small as it goes while it still fails the same way:
+# pieces taken out, halves first, then smaller, then single bytes - a
+# target's leading option bytes kept - for MINIMISE_SECONDS at most: a
+# slow input costs its bound each try, and 3000 of them held one chunk of
+# the long run for 40 minutes.
+MINIMISE_SECONDS = 60_i64
+
+def minimise(target : String, input : Array(UInt8), fault : String) : Array(UInt8)
+  best = input
+  keep = kept(target)
+  tries = 0
+  size = (best.size - keep) // 2
+  limit = CONNECTED.includes?(target) ? 400 : 3000
+  stop = __iyi_monotonic_ns + MINIMISE_SECONDS * 1_000_000_000_i64
+  while size >= 1 && tries < limit && __iyi_monotonic_ns < stop
+    at = keep
+    shrunk = false
+    while at < best.size && tries < limit && __iyi_monotonic_ns < stop
+      cut = at + size > best.size ? best.size - at : size
+      candidate = best[0, at] + best[at + cut, best.size - at - cut]
+      tries = tries + 1
+      if fault_of(target, candidate, attempt(target, candidate), false) == fault
+        best = candidate
+        shrunk = true
+      else
+        at = at + size
+      end
+    end
+    size = shrunk ? size : size // 2
+    size = (best.size - keep) // 2 if size > (best.size - keep) // 2
+  end
+  best
+end
+
+class Tally
+  getter inputs : Int32 = 0
+  getter refused : Int32 = 0
+  getter kinds : Hash(String, Int32) = {} of String => Int32
+  getter slowest : Int64 = -1_i64
+  getter slowest_at : Int32 = 0
+  getter largest : UInt64 = 0_u64
+  getter largest_at : Int32 = 0
+  getter findings : Hash(String, Int32) = {} of String => Int32
+
+  def add(index : Int32, outcome : Outcome) : Nil
+    @inputs = @inputs + 1
+    if outcome.verdict.starts_with?("refused: ")
+      @refused = @refused + 1
+      kind = kind_of(outcome.verdict)
+      @kinds[kind] = (@kinds[kind]? || 0) + 1
+    end
+    if outcome.ms > @slowest
+      @slowest = outcome.ms
+      @slowest_at = index
+    end
+    if outcome.allocated > @largest
+      @largest = outcome.allocated
+      @largest_at = index
+    end
+  end
+end
+
+def megabytes(n : UInt64) : String
+  tenths = (n * 10_u64 + 500_000_u64) // 1_000_000_u64
+  "#{tenths // 10}.#{tenths % 10} MB"
+end
+
+# Inputs *from* to *from* + *count* of *target*: each run, held to the
+# bounds, and every new way of failing them minimised and printed with
+# the iteration that made it. With *timings* the slowest and largest are
+# said too, which no two runs agree on.
+def fuzz(target : String, seed : UInt64, from : Int32, count : Int32, timings : Bool) : Bool
+  tally = Tally.new
+  clean = true
+  index = from
+  while index < from + count
+    input = input_for(target, seed, index)
+    outcome = attempt(target, input)
+    tally.add(index, outcome)
+    if fault = fault_of(target, input, outcome, true)
+      seen = tally.findings[fault]?
+      tally.findings[fault] = (seen || 0) + 1
+      unless seen
+        clean = false
+        puts "  FINDING #{target} ##{index} (seed #{seed}): #{fault}"
+        puts "    said: #{outcome.verdict[0, outcome.verdict.bytesize < 300 ? outcome.verdict.bytesize : 300]}"
+        puts "    input (#{input.size} bytes): #{hex(input.size > 4096 ? input[0, 4096] : input)}#{input.size > 4096 ? "..." : ""}"
+        small = minimise(target, input, fault)
+        puts "    minimised (#{small.size} bytes): #{hex(small.size > 4096 ? small[0, 4096] : small)}"
+      end
+    end
+    index = index + 1
+  end
+  line = "  #{target}: #{tally.inputs} inputs, #{tally.refused} refused in #{tally.kinds.size} ways, #{tally.inputs - tally.refused} read"
+  if timings
+    line = line + "; slowest #{tally.slowest} ms (##{tally.slowest_at}), most allocated #{megabytes(tally.largest)} (##{tally.largest_at})"
+  end
+  puts line
+  tally.findings.each { |fault, n| puts "    #{n} inputs: #{fault}" } unless clean
+  clean
+end
+
+# The findings this gate's long runs made, each fixed: the input that
+# showed it, minimised, and a phrase of the refusal it is answered with
+# now. Each is run through the same guard as a fuzzed input.
+REGRESSIONS = [
+  # std/asn1: a UniversalString whose code has its top bit set read as a
+  # negative Int32, passed the U+10FFFF bound and panicked in `chr`.
+  {"der", "1c04ffffffff", "a UniversalString holding U+ffffffff, which is no character"},
+  # std/http: a request whose Content-Type names a 90-character boundary;
+  # `Request#multipart` handed it to `Multipart.new`, which panicked.
+  {"http1", "54206d20485454502f312e310d0a486f73743a0d0a436f6e74656e742d547970653a6d756c7469706172742f6d3b626f756e646172793d585a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a58795a0d0a0d0a", "read T"},
+]
+
+def regressions : Bool
+  clean = true
+  REGRESSIONS.each do |entry|
+    target, input, phrase = entry
+    outcome = attempt(target, unhex(input))
+    fault = fault_of(target, unhex(input), outcome, true)
+    if fault || !outcome.verdict.includes?(phrase)
+      puts "  FAILED: #{target} regression #{input[0, input.bytesize < 40 ? input.bytesize : 40]}...: #{fault || outcome.verdict}"
+      clean = false
+    end
+  end
+  clean
+end
+
+def seeds_of(target : String) : Array(Array(UInt8))
+  case target
+  when "tls-server" then TLS_SERVER_SEEDS
+  when "tls-client" then TLS_CLIENT_SEEDS
+  when "h1-server"  then H1_SERVER_SEEDS
+  when "h2-server"  then H2_SERVER_SEEDS
+  when "h1-client"  then H1_CLIENT_SEEDS
+  when "h2-client"  then H2_CLIENT_SEEDS
+  else                   [] of Array(UInt8)
+  end
+end
+
+# What each connection seed must come to, unmutated, by a phrase of its
+# verdict: a seed that stops short of where it was made to reach leaves
+# its mutations testing its first refusal and nothing past it.
+SEED_GOALS = {
+  "tls-server" => ["handshake, then 16 bytes"] * 10,
+  "tls-client" => ["handshake, then 16 bytes"] * 5 + ["a key share for group 4588, which was not offered", "closed the connection without close_notify",
+                                                      "a HelloRetryRequest for the X25519 share already sent", "handshake, then 16 bytes", "handshake, then 16 bytes"],
+  "h1-server" => ["read: HTTP/1.1 200 OK"] * 8,
+  "h2-server" => ["read: frames 4,4,1,0,7:0", "read: frames 4,4,8,1,0,6,7:0", "read: frames 4,4,8,1,0,7:0", "read: frames 4,4,1,0,1,0,7:0",
+                  "read: frames 4,4,8,8,8,8,1,0,7:0", "read: frames 4,4,1,0,1,0,7:0"],
+  "h1-client" => ["read 200, 5 bytes", "read 201, 5 bytes", "read 304, 0 bytes", "read 200, 43 bytes", "read 200, 43 bytes", "read 200, 43 bytes", "read 200, 43 bytes", "read 302, 0 bytes"],
+  "h2-client" => ["read 200, 5 bytes", "read 200, 4 bytes", "read 200, 5 bytes", "a PUSH_PROMISE, where push was not offered", "read 200, 19 bytes", "read 200, 0 bytes"],
+}
+
+def seeds_hold : Bool
+  ok = true
+  CONNECTED.each do |t|
+    goals = SEED_GOALS[t]? || [] of String
+    seeds = seeds_of(t)
+    reached = 0
+    seeds.each_with_index do |s, k|
+      verdict = attempt(t, s).verdict
+      goal = k < goals.size ? goals[k] : ""
+      if verdict.includes?(goal)
+        reached = reached + 1
+      else
+        puts "  FAILED: #{t} seed #{k} came to #{verdict.inspect}, not #{goal.inspect}"
+        ok = false
+      end
+    end
+    puts "  #{t}: #{reached} of #{seeds.size} seeds where they were made to reach"
+  end
+  ok
+end
+
+# A connection's input costs a loopback connection and, for TLS, a
+# handshake: a quarter of a pure target's count.
+def connected_share(n : Int32) : Int32
+  (n + 3) // 4
+end
+
+DEFAULT_SEED = 0x1F22_u64
+
+args = Program.args
+mode = args.size > 0 ? args[0] : "smoke"
+
+case mode
+when "fuzz"
+  # fuzz TARGET FROM COUNT [SEED]
+  seed = args.size > 4 ? args[4].to_u64 : DEFAULT_SEED
+  exit(fuzz(args[1], seed, args[2].to_i, args[3].to_i, true) ? 0 : 1)
+when "replay"
+  # replay TARGET HEX: one input, what it answers and how it went
+  outcome = attempt(args[1], unhex(args[2]))
+  puts "#{outcome.verdict} (#{outcome.ms} ms, #{megabytes(outcome.allocated)})"
+  exit((fault_of(args[1], unhex(args[2]), outcome, true) ? 1 : 0))
+when "corpus"
+  # corpus TARGET FROM COUNT [SEED]: each input and its answer, a line
+  # each, for an oracle to read the same input and judge
+  seed = args.size > 4 ? args[4].to_u64 : DEFAULT_SEED
+  target = args[1]
+  from = args[2].to_i
+  count = args[3].to_i
+  (from...(from + count)).each do |i|
+    input = input_for(target, seed, i)
+    answer = target == "hpack" ? hpack_decoded(input) : attempt(target, input).verdict
+    puts "#{i}\t#{hex(input)}\t#{answer}"
+  end
+when "roots"
+  # roots FILE FROM COUNT: x509 over the machine's CA bundle as seeds
+  text = File.read(args[1])
+  blocks = Certificate.pem_blocks(text)
+  if blocks.is_a?(X509Error)
+    puts "  the bundle is not PEM: #{blocks.message}"
+    exit 1
+  end
+  blocks.each { |der| Pool.add(der) }
+  puts "  #{blocks.size} certificates of the machine's bundle among the seeds"
+  exit(fuzz("x509", DEFAULT_SEED, args[2].to_i, args[3].to_i, true) ? 0 : 1)
+when "show"
+  # show TARGET INDEX [SEED]: an input's bytes, not run
+  seed = args.size > 3 ? args[3].to_u64 : DEFAULT_SEED
+  puts hex(input_for(args[1], seed, args[2].to_i))
+when "regressions"
+  # regressions: the fixed inputs alone, what a broken copy of a module
+  # is held to
+  ok = regressions
+  puts "  #{REGRESSIONS.size} held" if ok
+  exit(ok ? 0 : 1)
+when "seeds"
+  # seeds: what each connection target's seeds come to, unmutated
+  CONNECTED.each do |t|
+    seeds_of(t).each_with_index do |s, k|
+      outcome = attempt(t, s)
+      puts "  #{t} seed #{k}: #{outcome.verdict} (#{outcome.ms} ms, #{megabytes(outcome.allocated)})"
+    end
+  end
+else
+  # all [N]: the regressions, the seeds, and N inputs of every pure
+  # target and a share of N of every connection target
+  n = args.size > 1 ? args[1].to_i : 200
+  puts "== the regression inputs"
+  ok = regressions
+  puts "  #{REGRESSIONS.size} held" if ok
+  puts "\n== the connection targets' seeds, unmutated"
+  ok = seeds_hold && ok
+  puts "\n== every target: #{n} inputs of each pure one, #{connected_share(n)} of each connection"
+  TARGETS.each do |t|
+    ok = fuzz(t, DEFAULT_SEED, 0, CONNECTED.includes?(t) ? connected_share(n) : n, false) && ok
+  end
+  if ok
+    puts "\nALL CHECKS PASSED"
+  else
+    exit 1
+  end
+end
+
+# ---------------------------------------------------------------------
+# The seeds
+# ---------------------------------------------------------------------
+
+FUZZ_ROOT        = "308201183081cba003020102020101300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0946757a7a20526f6f74302a300506032b65700321001494a1cac4481d11b3723830767cce21261aaca39cbd624c5b4d51b3163e8382a3423040301d0603551d0e0416041497ae92205c7302b9b25c2c7219607c7f767904fc300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300506032b657003410081f88cec5b495303ce00ae5a18679fc9d43fc5c2d3a86fd3ff7dd265fd1f1a20f053fe81ae0db33be74fff0cb487b516fc7e489253e914000ec818988635e607"
+FUZZ_LEAF        = "3082016e30820120a003020102020102300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0966757a7a2e74657374302a300506032b65700321007fc71c44df1a089f4322e5a7dd03ef64fed0164490819aa2236ea7d4b552c8fba38196308193301d0603551d0e04160414d2780a2e2b99d3a1c8d027b498befbae72ebcdf2301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b6570034100b6c428830f0b30218d3fe05a43c4b2110f9797356a58d361c0ebc499910287ea3dc5ebc7260c117d8258db51ee3ed2a7c125a0f1f6cf3fb42032f4543ae65b08"
+FUZZ_LEAF_SEED   = "3c9cb8fdef08086c92abb13f615fcbd54466dac12a3a363db6fb289ef88bc7a2"
+FUZZ_P256        = "308201ad3082015fa003020102020103300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30243112301006035504030c0966757a7a2e74657374310e300c060355040a0c05502d3235363059301306072a8648ce3d020106082a8648ce3d030107034200044acd003bc97c606b76f4109e082cfc361209122f942e9558bcc8970e1e3aa632e46750f7fc89cdf174912813c6d997e89aa0b721ae3c3cbd0a1e5652a9703312a38196308193301d0603551d0e04160414ff575bfa1f580f0ecbff2fed4dbe4407f3c150e5301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b65700341001ee12e2f4554effc2d658e694878303f7fe92928bf63e7db04da8260c577aae0e5c5d114cc8ef0fdaab3fdea3694f70cd1f7276c7b1836c5ef08d7cf58a3c108"
+FUZZ_P256_KEY    = "308187020100301306072a8648ce3d020106082a8648ce3d030107046d306b02010104200aa72a888339c40d9b432b46bc56f66d0dd7327e062c4264f6baa5ef685c7e00a144034200044acd003bc97c606b76f4109e082cfc361209122f942e9558bcc8970e1e3aa632e46750f7fc89cdf174912813c6d997e89aa0b721ae3c3cbd0a1e5652a9703312"
+FUZZ_CLIENT      = "3082016d3082011fa003020102020104300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30163114301206035504030c0b66757a7a20636c69656e74302a300506032b6570032100a0e4d75fd1481fbecff8d112c5efdd698d5606d362f234c44e2135add4769839a38193308190301d0603551d0e04160414face7b395fa54f9b9be5da50ebabc3ce41e93322301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff04040302078030130603551d25040c300a06082b06010505070302301b0603551d11041430128210636c69656e742e66757a7a2e74657374300506032b6570034100fcfd380c2abf509b80995e3d05741ba2f631ca610e20ab9fff0a3986ebd46394765684f7294258a5c5db0e6f755509221f302a1ec8c200728afd442f2cc48d0d"
+FUZZ_CLIENT_SEED = "048e3abd1715dee3c09bfcb3f07773bcca2982c3235bf2872cb71a00fd2af07a"
+X509_SEEDS       = [
+  "3082031e30820206a00302010202010a300d06092a864886f70d01010b0500302f3111300f06035504030c0852534120526f6f74310d300b060355040a0c0446757a7a310b3009060355040613024e5a301e170d3235303130313030303030305a170d3435303130313030303030305a302f3111300f06035504030c0852534120526f6f74310d300b060355040a0c0446757a7a310b3009060355040613024e5a30820122300d06092a864886f70d01010105000382010f003082010a0282010100c2daeca65585bc059b1f111955937acc094711a89a7ed46a80df932229f41ed2202053ac0ab8e6f424671c0a99790130ee32b820683c0c080fd8b82c0a854c5e8cd981801e905d322b7f984d283776e48db0e98b166a71fa9e923db7cdf1911475c4ff08f01330fde099d9910250bbac4f0d10cdb9e71527e6b2c015f53412617a468e94383195206d71fa2aea5273e7d33a2c5f935d5b80a99ff6271a8d50d7548832c38a42840b6d6bf9dd3d7d3cfd0f6536e8f40810e6ce823c86589facf071f34fac0b5450edc83c9c57997235945b2d48564d259097c476aaadf0d377a7c52d44392fdf21f00041451be940b51fcdb5e090eb268043a02eb0fdf36afcb30203010001a3453043301d0603551d0e04160414d4d4f3b2b708c49e70ed2feddda90c14119eb13530120603551d130101ff040830060101ff020101300e0603551d0f0101ff040403020106300d06092a864886f70d01010b050003820101001e165b2d890085bd2a3466dafae6c9ffb809107ab272907238c788f441f27c057f95ac1ac41ddaa4c5ed73bd7186ac2c40fda75105eef495d96916740023fff79696078634e2d8a449589a93690d675abf492c46dd7ef5f29eb7eeddeb9e6cb11266b32c0376ad837116f75fdc922d9c2ea239a7449ec20a34648f2cd895987116f9663f2882bc597b0ab5cddca52c95325c40fdda2949e0a9dbc19ef806eb621c7c5b03baf84618aa1144f57442adbe3930c6966bb24f8be2e32585a3749544b5bffa689aaebb536524e2e85390489d243dce6b69c4fd9c941ffcd616a57e62fc20b791d49049570eb3def4622062261fe4f4cabe983d76392d31cef7d8c62f",
+  "308203d63082028aa00302010202010b304106092a864886f70d01010a3034a00f300d06096086480165030402010500a11c301a06092a864886f70d010108300d06096086480165030402010500a203020120302f3111300f06035504030c0852534120526f6f74310d300b060355040a0c0446757a7a310b3009060355040613024e5a301e170d3235303130313030303030305a170d3435303130313030303030305a30183116301406035504030c0d7073732e66757a7a2e7465737430820122300d06092a864886f70d01010105000382010f003082010a02820101008f718deed120616e09946f5853313972f21a9e1e677501adf2b5527c902ef5e2d9bee1ca02e65e6246a51ceb8f52b8499713807bee1451876e632b9f1a51ef9278a20bea4d63e60b1fa9470cab2a98a944a2d162b097104ac613255f9543f859cc5d9a4359763cff327e681d5e87eaf8fb0410a59a2252af7b90992d002a28c52b82548f322b3d7c8403ae5c58e2a868de9e6dff31e81b837825cb35695177fbb244162e196022ec506cbde94d7c479d3d9a433b1e304a714d09f7cc23af153e008a2e13fbafc62a3efb6c7a906d97868749ff18ae6a133448c30a6978286fd003c493d537897264d530c9e24b4894b5e8fecb63de0ee31da9339883b52005bf0203010001a381ab3081a8301d0603551d0e04160414c81ba8650325497805bf5dfecc88b8f35651eb78301f0603551d23041830168014d4d4f3b2b708c49e70ed2feddda90c14119eb135300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230290603551d1104223020820d7073732e66757a7a2e74657374820f2a2e7073732e66757a7a2e74657374304106092a864886f70d01010a3034a00f300d06096086480165030402010500a11c301a06092a864886f70d010108300d06096086480165030402010500a2030201200382010100420061884378e1b4573d7805ca02de5acf85edaa34d0a5317a7519d50c3f2f6fd36b40afaf3b12e60893753bb39158f0f3dc3fe597b80455bdd2d78bc34b8647db0f7cc17b507656cd2632172b03f31bc27210429d75873ab3a899bdee90712b4898ff703621bd55fa4dcc8d993203262f5e38492480e9d15c1b7dec52e00c0f226fa22e929f341d05e097725253f64ed0239edc5a72cbbe16e1636830e1c8737f2e498ff1b0c803a4851093fde4cfcf55c74d2d2380abb868c0ff20f8d70c8c97d14e22cce4097f44ad66bb7de0f48eb3821e75e2525b672809747523f2a860c96c951f0714af95840760e1436df245a16ca8583c64dec08663397cb090fd3c",
+  "308202ec308201d4a00302010202010c300d06092a864886f70d01010c0500302f3111300f06035504030c0852534120526f6f74310d300b060355040a0c0446757a7a310b3009060355040613024e5a3020170d3235303130313030303030305a180f32303531303630313030303030305a30193117301506035504030c0e703338342e66757a7a2e746573743076301006072a8648ce3d020106052b81040022036200049d692de4bdb13d98ef82879b379d14d6503eb4aa7f064f26899c5040a642a1ba13c9ed72b1d5908cbcb72dcd0ff64c02725c16888e0f15d1f6d9e6eafbcd2f07223913ad5cf29333dc0f6acaff94805ad4246bda2d26c9d6f11b16d0a8ad72bda381d43081d1301d0603551d0e0416041400ff4f3ea3e1128bd37b1cfe01f99400624570e2301f0603551d23041830168014d4d4f3b2b708c49e70ed2feddda90c14119eb135300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230520603551d11044b3049820e703338342e66757a7a2e746573748704c0000207871020010db8000000000000000000000007810b614066757a7a2e74657374861268747470733a2f2f66757a7a2e746573742f300d06092a864886f70d01010c050003820101003575f89f8efb372507e0c00296c537a03e2cb523c738ceeb60fb9d41cd32b7a9a2c9211a6d84ec642f4d7987360b3bec68fa1a1680822a7b6f023f141136e1d010fa3efe9d7f8b74c3d008775cdd24e064f0e5f250639895b1716e0cbd5f19cd234f131bbcc4502d7d1f7a6996899784a577ca66a7831e900f54e1c51cf958f0817a3446d386e5bf67f5f7e5b37b1967370ab15de25997a4069a496f2b1464692add8aea63f7978190d871da46a88b209fdf9ea107b8c1e1a189b6df1b464ccc345999c865aee4a3349c0803883185d3cc493bf044f54faa35ea01cf1bbea55f810ea85e782afdd4f98996bad7fdecc4054e701ff84e9a3dda95be1601b3933a",
+  "308202cd308201b5a00302010202010d300d06092a864886f70d01010b0500302f3111300f06035504030c0852534120526f6f74310d300b060355040a0c0446757a7a310b3009060355040613024e5a301e170d3235303130313030303030305a170d3435303130313030303030305a30193117301506035504030c0e436f6e73747261696e65642043413059301306072a8648ce3d020106082a8648ce3d030107034200046f258133009caafc1276c2eba3b28c85c9eaf88168ca22d845c927955ee6ba81d4f3f584ac9c6f1c19fa3158d2936f76d568fba38444520994769ea4366bd2f5a381d43081d1301d0603551d0e0416041459a3e3953d3c9b9fe0980e3904289864089eb2f1301f0603551d23041830168014d4d4f3b2b708c49e70ed2feddda90c14119eb13530120603551d130101ff040830060101ff020100300e0603551d0f0101ff040403020106306b0603551d1e0101ff0461305fa026300b820966757a7a2e74657374300a8708c0000200ffffff00300b810966757a7a2e74657374a135300f820d6261642e66757a7a2e746573743022872020010db8000000000000000000000000ffffffff000000000000000000000000300d06092a864886f70d01010b0500038201010045b9d4c19f4457df0726ee578961f95676d90389cbb4570b172e9d3a5a5ceb693821d1c934bb8d4b5e5256877645f0404ede0efc74eb1f65bd56529da4f91afe36a625ce780a22cdf8c6f4d98335d8402701b2e685dacc9d661fc451549fc589d59f7054a1607c70f2c159dcc497822197bd7101dbf88abe11740ce4f76ef0f3dfa020f6e14fab29aa9128bdfca0731973b214549fa92162ec402004b6cbc819038c0e17227a26b59c1a3647d02824ccc83935710c11e96dcfbdb33cfcd50f0c56cb2ec038c272c46d9fbc4ff173e592b376cf7b0abdc387212abe605d97efafc4d563fbdbef5258fb13554258290811470348a3b4960f65f7171da1bd128873",
+  "3082029130820237a00302010202010e300a06082a8648ce3d04030230193117301506035504030c0e436f6e73747261696e6564204341301e170d3235303130313030303030305a170d3435303130313030303030305a3062312e301506035504030c0e6d616e792e66757a7a2e746573743015060355040b0c0e74776f20696e206f6e652052444e31143012060355040a0c0bc39c6ec3af63c3b664c3a9311a301806092a864886f70d010901160b784066757a7a2e746573743059301306072a8648ce3d020106082a8648ce3d03010703420004582b5cfc03e1b60e8dc94fbdd11aacf02e73cba24d508534ab6c23fa07e72f8545dc61ee33e1bf2fc650bcd39f8b01504dc3d2c497161f8cb2270f3df6a80990a382012530820121301d0603551d0e0416041484de423d3ab1fc0fa98ab1e77fcf737d4898d7c1301f0603551d2304183016801459a3e3953d3c9b9fe0980e3904289864089eb2f1300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230190603551d1104123010820e6d616e792e66757a7a2e74657374302b0603551d1f042430223020a01ea01c861a687474703a2f2f63726c2e66757a7a2e746573742f612e63726c303106082b0601050507010104253023302106082b060105050730018615687474703a2f2f6f6373702e66757a7a2e7465737430130603551d20040c300a3008060667810c010201301206092b06010401868d1f0104050403616263300a06082a8648ce3d0403020348003045022047f1fc660e5d973738c7299515cca6c176adcdbd197447d4002a7966c384c8e9022100a6538940f86b7fd0eea1a58fa02b5124cd28e8ce23dbd312eca1fac575f7fb5d",
+  "3082015230820104a00302010202010f300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a301d311b301906035504030c12637269746963616c2e66757a7a2e74657374302a300506032b657003210074a9c1d150106c58b99cb90bd8ec5074886c65e2f27ddd5af726e14e37a5d9daa3723070300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b06010505070302301d0603551d11041630148212637269746963616c2e66757a7a2e74657374301206092b06010401868d1f020101ff04020500300506032b657003410007fda50509b1d934edc43316e90c04130ea21aa2aab015b29859eebd879cba722a456f02c1a27873d83a08787e3527fb7b3b78c7c5ec49ef32d3c4709e54bc0f",
+  "308201403081e8a003020102020110300a06082a8648ce3d040302301a3118301606035504030c0f706c61696e2e66757a7a2e74657374301e170d3235303130313030303030305a170d3435303130313030303030305a303b3118301606035504030c0f706c61696e2e66757a7a2e74657374310b30090603550406130255533112301006035504080c09536f6d6577686572653059301306072a8648ce3d020106082a8648ce3d03010703420004eebd40f72bfee00ea634e53437d1d8595147d7982c0b7aa2c510923019a3a8d256025818dacbef2cccdd97815055a2308aee169cede7e33e9be7d257a4c9b42f300a06082a8648ce3d0403020347003044022056160feee860b4e3378a421491b053a5ccc3bf980713105c75a11096dd3576cd02203eb5247d3347cbcf69a11c9d5730a5011b6211498c61d08aa3dfc3396911ca43",
+  "308201183081cba003020102020101300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0946757a7a20526f6f74302a300506032b65700321001494a1cac4481d11b3723830767cce21261aaca39cbd624c5b4d51b3163e8382a3423040301d0603551d0e0416041497ae92205c7302b9b25c2c7219607c7f767904fc300f0603551d130101ff040530030101ff300e0603551d0f0101ff040403020106300506032b657003410081f88cec5b495303ce00ae5a18679fc9d43fc5c2d3a86fd3ff7dd265fd1f1a20f053fe81ae0db33be74fff0cb487b516fc7e489253e914000ec818988635e607",
+  "3082016e30820120a003020102020102300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0966757a7a2e74657374302a300506032b65700321007fc71c44df1a089f4322e5a7dd03ef64fed0164490819aa2236ea7d4b552c8fba38196308193301d0603551d0e04160414d2780a2e2b99d3a1c8d027b498befbae72ebcdf2301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b6570034100b6c428830f0b30218d3fe05a43c4b2110f9797356a58d361c0ebc499910287ea3dc5ebc7260c117d8258db51ee3ed2a7c125a0f1f6cf3fb42032f4543ae65b08",
+  "308201ad3082015fa003020102020103300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30243112301006035504030c0966757a7a2e74657374310e300c060355040a0c05502d3235363059301306072a8648ce3d020106082a8648ce3d030107034200044acd003bc97c606b76f4109e082cfc361209122f942e9558bcc8970e1e3aa632e46750f7fc89cdf174912813c6d997e89aa0b721ae3c3cbd0a1e5652a9703312a38196308193301d0603551d0e04160414ff575bfa1f580f0ecbff2fed4dbe4407f3c150e5301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b65700341001ee12e2f4554effc2d658e694878303f7fe92928bf63e7db04da8260c577aae0e5c5d114cc8ef0fdaab3fdea3694f70cd1f7276c7b1836c5ef08d7cf58a3c108",
+  "3082016d3082011fa003020102020104300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30163114301206035504030c0b66757a7a20636c69656e74302a300506032b6570032100a0e4d75fd1481fbecff8d112c5efdd698d5606d362f234c44e2135add4769839a38193308190301d0603551d0e04160414face7b395fa54f9b9be5da50ebabc3ce41e93322301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff04040302078030130603551d25040c300a06082b06010505070302301b0603551d11041430128210636c69656e742e66757a7a2e74657374300506032b6570034100fcfd380c2abf509b80995e3d05741ba2f631ca610e20ab9fff0a3986ebd46394765684f7294258a5c5db0e6f755509221f302a1ec8c200728afd442f2cc48d0d",
+]
+KEY_SEEDS = [
+  {"leaf", "2d2d2d2d2d424547494e2050524956415445204b45592d2d2d2d2d0a4d43344341514177425159444b325677424349454944796375503376434168736b71757850324666793956455a7472424b6a6f32506262374b4a3734693865690a2d2d2d2d2d454e442050524956415445204b45592d2d2d2d2d0a"},
+  {"p256", "2d2d2d2d2d424547494e2050524956415445204b45592d2d2d2d2d0a4d494748416745414d424d4742797147534d34394167454743437147534d3439417745484247307761774942415151674371637169494d3578413262517974470a76466232625133584d6e34474c454a6b3972716c373268636667436852414e434141524b7a5141377958786761336230454a34494c50773245676b534c3551750a6c566938794a634f486a716d4d75526e5550663869633378644a456f4538625a6c2b69616f4c6368726a773876516f65566c4b7063444d530a2d2d2d2d2d454e442050524956415445204b45592d2d2d2d2d0a"},
+  {"p256", "2d2d2d2d2d424547494e2045432050524956415445204b45592d2d2d2d2d0a4d486343415145454941716e4b6f69444f63514e6d304d7252727857396d304e317a4a2b426978435a5061367065396f584834416f416f4743437147534d34390a417745486f55514451674145537330414f386c38594774323942436543437a384e68494a45692b554c705659764d695844683436706a4c6b5a3144332f496e4e0a385853524b425047325a666f6d71433349613438504c304b486c5a537158417a45673d3d0a2d2d2d2d2d454e442045432050524956415445204b45592d2d2d2d2d0a"},
+  {"pss", "2d2d2d2d2d424547494e2050524956415445204b45592d2d2d2d2d0a4d494945765149424144414e42676b71686b6947397730424151454641415343424b63776767536a41674541416f494241514350635933753053426862676d550a623168544d546c7938687165486d64314161337974564a386b43373134746d2b34636f43356c3569527155633634395375456d5845344237376852526832356a0a4b35386155652b53654b494c366b316a356773667155634d717971597155536930574b776c78424b78684d6c583556442b466e4d585a7044575859382f7a4a2b0a61423165682b72342b775151705a6f69557139376b4a6b7441436f6f78537543564938794b7a313868414f7558466a6971476a656e6d332f4d6567626733676c0a797a567055586637736b51574c686c6749757851624c3370545878486e543261517a73654d45707854516e337a434f7646543441696934542b362f474b6a37370a62487151625a654768306e2f474b3571457a52497777707065436876304150456b39553369584a6b3154444a346b74496c4c586f2f73746a3367376a48616b7a0a6d494f314941572f41674d42414145436767454150427a5a33716d73474c6838386b51684c79667a53397a79303632704c4973714977726979516e42624645480a634774393957346d5171675a584c2f493365455745655a643031484947517959385a3166765339324a78732f795a2b456c4364644a515554486465446239754c0a78484863476d594d4d56484678305642722b7a6463507750414564322b675032584b763046742f393142365a71774a44554476336832426e474d6b3359634c790a6e686e6c587a3176723576684b4941614159784a37546535413552544b4d587830785165624456757476496c4f43563130504e6c7975447075467a684b3778310a726a685a75484f52786b386f522f2f55316a4b3146376b5854775a423472654b386a6b486d302f44466e497a2b57384a4574736e30644f4c4166324a33702b700a46372b485837646d56732b7945316c307a46564a6859524d46796f37316b79784f4236735458723178514b426751444466493969366b326e67784d54553141490a53545679797135346779494e6c4f714c444d33413364544d574975302b53634b696930525465455335546a41373358346e4e6b69727367533853616c57514f790a77507455695953456c4b74613155784e3646423563486c6e6f6965304771686256576a312b726d65424f4e7665467179674d57504e444b73477a3463416b36370a4f6e335550556667684b6372526c7a6d307553767336763530774b4267514337324e476e656777784d4861512f4e6e666e772f797063777352397357302b384c0a4357384368446f704352656e4c464f573468454861766b4f487361587233435a652f55744c6d4b496b556d5a48465a6a727a7257444c653339417659667174390a5669446c47514756484f594d55684c674932643733636e5964324c4a4d5856734d4a5766693369764c61312f345036737a746c7a743069694d7a79566c496b2f0a52664a3535477a4535514b4267466170322b39674c446a39465048575633363035657355433745466759302f335a4c7a684376697244704462767732454b624e0a68786c4b79324e5446347742484f32777131714333645033384d675135474455795263374e2f4b47376b69416b796c65756e35373748615448734c72706f4f480a49396359356a3031735a5a7a5a744948344932522b487a7750754b76367a4e35784e72597141725442454664476b6143624475776a616464416f4742414b63310a744549524b514d734d593655464e69797654357743564f745472392b5062326b5578563559464167304e59315a6437634d753559635950354c7976637469315a0a6f762f70317a6e626f686a526d6243345458593138642b6b4e467374506a656555442b2b52364e56437734536a4d7a4a6c786379634c626f5a703354456351520a5a3036536c7758516369317675534e594b5561513875323345416e53493232594e4f5039796a686c416f47414d57494d38753964336d527533524f7267476b6b0a496b33704c7a343033674257564237684b344d5363657639614c4f6a65536e78527535565a72674b5177574d6c466269365a3238733554624b634f38476b4d720a5152583070785951707a78367a52387a50376c656c5a6e44714f2f6a327653797159556272766148746d53314e54577034384534552f6e724642676e664d4f4f0a70492f4459676b32307243772b56684d765250465776453d0a2d2d2d2d2d454e442050524956415445204b45592d2d2d2d2d0a"},
+  {"pss", "2d2d2d2d2d424547494e205253412050524956415445204b45592d2d2d2d2d0a4d4949456f77494241414b43415145416a33474e377445675957344a6c473959557a4535637649616e68356e6451477438725653664a417539654c5a7675484b0a41755a65596b616c484f75505572684a6c784f41652b34555559647559797566476c48766b6e6969432b704e592b594c48366c48444b73716d4b6c456f7446690a734a6351537359544a562b56512f685a7a46326151316c3250503879666d6764586f66712b507345454b5761496c4b766535435a4c5141714b4d5572676c53500a4d69733966495144726c78593471686f337035742f7a486f47344e344a637331615646332b374a454669345a59434c735547793936553138523530396d6b4d370a486a424b6355304a3938776a7278552b41496f75452f757678696f2b2b3278366b473258686f644a2f78697561684d30534d4d4b6158676f62394144784a50560a4e346c795a4e557779654a4c534a53313650374c5939344f347832704d356944745341467677494441514142416f494241447763326436707242693466504a450a4953386e3830766338744f747153794c4b694d4b34736b4a7757785242334272666656754a6b4b6f4756792f794e33684668486d58644e5279426b4d6d5047640a583730766469636250386d66684a516e585355464578335867322f62693852783342706d444446527863644651612f73335844384477424864766f44396c79720a394262662f6451656d61734351314137393464675a786a4a4e3248433870345a3556383962362b62345369414767474d5365303375514f5555796a4638644d550a486d7731627262794a54676c6464447a5a6372673662686334537538646134345762687a6b635a504b45662f314e5979745265354630384751654b33697649350a4235745077785a794d2f6c7643524c624a39485469774839696436667152652f68312b335a6c625073684e5a644d785653595745544263714f395a4d735467650a724531363963554367594541773379505975704e70344d5445314e5143456b316373717565494d69445a547169777a4e774e33557a46694c74506b6e436f6f740a4555336845755534774f39312b4a7a5a497137494576456d70566b447373443756496d45684a53725774564d54656851655842355a36496e7442716f5731566f0a396671356e67546a62336861736f44466a7a51797242732b48414a4f757a7039314431483449536e4b305a6335744c6b72374f722b644d436759454175396a520a70336f4d4d5442326b507a5a333538503871584d4c4566624674507643776c76416f51364b516b58707978546c75495242327235446837476c3639776d5876310a4c533569694a464a6d5278575936383631677933742f514c324836726656596735526b426c527a6d4446495334434e6e6539334a3248646979544631624443560a6e34743472793274662b442b724d375a633764496f6a4d386c5a534a5030587965655273784f55436759425771647676594377342f525478316c642b744f58720a464175784259474e503932533834517234717736513237384e68436d7a59635a5373746a5578654d41527a74734b746167743354392f4449454f5267314d6b580a4f7a667968753549674a4d705872702b652b78326b7837433636614468795058474f59394e62475763326253422b434e6b66683838443769722b737a656354610a324b674b3077524258527047676d77377349326e58514b426751436e4e62524345536b444c44474f6c4254597372302b63416c547255362f666a323970464d560a65574251494e44574e57586533444c75574847442b533872334c597457614c2f3664633532364959305a6d77754531324e664866704452624c5434336e6c412f0a766b656a5651734f456f7a4d795a63584d6e433236476164307848454557644f6b7063463048497462376b6a57436c476b504c747478414a30694e746d44546a0a2f636f345a514b426744466944504c765864356b62743054713442704a434a4e3653382b4e4e3441566c516534537544456e48722f57697a6f336b70385562750a56576134436b4d466a4a525734756d64764c4f5532796e44764270444b304556394b6357454b6338657330664d7a2b355870575a77366a763439723073716d460a4736373268375a6b74545531716550424f465035367851594a337a446a7153507732494a4e744b7773506c59544c3054785672780a2d2d2d2d2d454e44205253412050524956415445204b45592d2d2d2d2d0a"},
+]
+
+CLIENT_HELLOS = [
+  # OpenSSL 3.5.5 s_client, ALPN h2 and http/1.1 (an X25519MLKEM768 share)
+  "160301061c0100061803037d23b9d7e96da40a99f0cea9e21c63a6d2ec6a108f5e38b03fa73888b5bfc430209728965ceb795d06f0f1fa6796f5a02467b6667ff3877ae8623d8ac34d828d27003c130213031301c02cc030009fcca9cca8ccaac02bc02f009ec024c028006bc023c0270067c00ac0140039c009c0130033009d009c003d003c0035002f01000593ff010001000000000e000c00000966757a7a2e74657374000b000403000102000a0012001011ec001d0017001e0018001901000101002300000010000e000c02683208687474702f312e310016000000170000000d0036003409050906090404030503060308070808081a081b081c0809080a080b080408050806040105010601030303010302040205020602002b00050403040303002d00020101003304ea04e811ec04c09a539bd8663462215a76a09eba94279b368d24da6e9e1cca823cb469d4778d240efcdac879474e7af7a66178a19a381f43f1ca84d739b4652f88c24e023145af8490a426bd6128b99868629cf295ceacc1d42974da48b6d4b95225c4019e3a1e2718cb5423583dc5646fd550f966170e833ad95428270a96d3bc5c975b579d6a224718c25440cd261198fd97b61657236e74287e0157d88669f86957da484936e6b07f2c8d83dc376676372e39cde983323fe72dd672b93c782218a878495261a2a549dbf54c9fd1608da20f300025c3ecb9be3a09830c2c8afcc871c3802d93152c991a7bca9ea679380a5a9da4b531342950873c1848988348680f9b6b1b7d2aa219f17da278071b393a62d06ab4a218b63982540cba9f8caf53fba50995b6faa377e49054fda05343a7a441822ccf069be3e3bf4a91bf40625e9f364189f176a2f7adca005c90405ea715bf364099f380b408c79b4c782860b4b90d675257005d87777acc503c51a3aec5a4ac51b0b61ec5bd81b7060b541ecfda3d932a525e20576869897d914fafc8c0c930942f203ff3b74dad941938c56cba050cd8a96371da579238868a38ad9cd8c92072263b47470559488bd08f2bac34904824efeb66de77863d7926e7d93cb1c5c31c4c5f5cd397e2d12cb023445d825c8d842745f1afb001a689a37b6afbc754379d309aadc972b7d1729abd0c89b95367e6ba9ba55510a6794c863450ae7703b0e881f2d9638bac3071e01e108008ab28b9fe9958c1680728a224299782fb28b6eb8b04f703c665d3c2eb597a8fe88b85188f00f8048572b8a43320b98b89a8c49f2b571255f227470c46caab0c1229a6145921be5b96ac054e3ea5a21e20a20962bdc2714d3a090b93875581a0420832ad271b97e736c67eac9653361918e87f950477676b957e3325aaf1089f74bddfdc779ff11a42f93202f054d60ca520509f0239a616762999363e357b792a01be073101c013b4edb7ae06dc6ade4600f491ac7a1a0f2ea6b66290c3e3876f2f317c8f58cb44a8188241313f85bf666471ef1800cb83cd000aaf864c9528e01de48917fbc2453e629111ca7ca0307545f6a7cf4c677bb3b17d3b60884027d9767708ab2e0d015ae1da2194707c35b14c0e1218d74094c97c677d33a40a92798ad0ca5ab89faf958a5a58293aa8432a6904c2159187e0576f248c9381b2ffa3658d4accdb24682cdb01f490a376f6c8ce1bb5b1ea59d8872fca9a8112db5c7384a035a6a8f3775a8e943015990f2aa4b1f2ca64a0eb38327a1627387914f4adfcd7be5dcb59de03bc4f250d77f1ac2b4c4a14b985bcea076b07b45f05202c3367126b9803e304cbfa575b3751e7f225104495348b55191355f3094273d51e0016c143240d5a0c660c125a7c6152a3568382603096423827753af537902caa4ea5b62194462b9b8053829071d90cba5620737ba4892340c987eacf2f93bf1c737d15b7b586242574a34f8e7867109897c4040081476489639884154e00e61b00757a694cb2b28c26e41c8abae667f7224a2cca879c490eafa22187d93d707c3f7cb92378b31e9b658bc51b2e131214cf668a120ccdcda56338849031782530712695586e3e2268836ae3f651b5f1ad429f7fac3065dfd23f1ed15df3dfac36e3f03b00abab24180802afe12e1d83e8aa9dbb903558ba0c12c32eaea06d5aa6e73703846b001d002043ed091dca3c4c92201c013beca8700c08f36286f3b634188a64c7a98337cb4a001b00050400010003",
+  # OpenSSL 3.5.5 s_client -tls1_3 -groups P-256:X25519
+  "16030101120100010e03038aa45fe3de0bf7b4a6df6250dbb51c529310b635ba27f0d6497bd89294d47574208dac55ad9ffc5eaea38a73ff60a50758e13cb51c9c6074228695ea0504a55b010006130213031301010000bf0000000e000c00000966757a7a2e74657374000b000403000102000a000600040017001d002300000016000000170000000d002a002809050906090404030503060308070808081a081b081c0809080a080b080408050806040105010601002b0003020304002d000201010033004700450017004104c5cdbb12f4feefd77e613aed6b15bc62b81e4cc78c223f5a59a52ff4b177d7a0fad4c63a321b097bb995a32f8ba661c05b75c80f832b0ec4ffa2a276b8a73c8c001b00050400010003",
+  # Python 3.14 ssl, ALPN h2 and http/1.1
+  "160301061c0100061803031b0d59c504a024c2f43c59c271cfb241d83adf1a2d74b01084f023328706712020d8da98bbfdd33b1fb42224b87e784a1a5430962e159e9a76abd5b2255a37ae75003c130213031301c02cc030009fcca9cca8ccaac02bc02f009ec024c028006bc023c0270067c00ac0140039c009c0130033009d009c003d003c0035002f01000593ff010001000000000e000c00000966757a7a2e74657374000b000403000102000a0012001011ec001d0017001e0018001901000101002300000010000e000c02683208687474702f312e310016000000170000000d0036003409050906090404030503060308070808081a081b081c0809080a080b080408050806040105010601030303010302040205020602002b00050403040303002d00020101003304ea04e811ec04c0692a7a94b297d27b4ad5529c39003caa897d34c160dbc043cdba447153506d2c7dae2863217b30dff806a9b54729e74cc8419846a127c22c445f397772d172bdc65b69f2522edb819bc93a94e3ce6a80cdb9eb90fe53c4b7f98c7f643c695024a765cb40863e51ac4f23b2ae8d76bfe4029de5e735a814592d9434e72c06a1d79b99ac2260a1094aa636d2901670d1ba11e02dbe25317b8744b8512b3881079869372ef775bd4515df510753b32d35f8b92371cf2878617ebb5f8957307ddb462f138caed814bd96569f6966ea51135c280567a56b3ec090524ba0e95aa686d1cd1f7551d537371fbb85e8328eccab99abd05c43db0ab1140b84778e97f01203d170c8254f0757b8588295e82c9b584a4015e08e9ea242b97b406e3c8fd4638761523f2b6892af634a644a248d41b8b4b097fed1212a22685a572177c8863e2b4afb2425df78308815cfebb921ea38a5c0104666f7b298dbcff811cb17834fc21524dd642562464e52048a854305d3384f5787b25c35ccb5895027b10285911c48175da1eb2bf90b276f330edd7b8b9ff7a3f8c32261586241231e65a65d9ea98ea8665f44c3104df4b56b3a4ff8360c2bcb5598f835c279ce07171abff09bcb4620e675a6b04038a7711bf404ba88534f64c61ceed36f7f7b98e2238dac97774fd9320d130dcef1800a575b50327e29b9835b71c963f57bb65685ca878b5cf473442a93fd1190710802f8b15e8d2854d7db75bf01c68ba33d11025c33f29849fc305b37b2fb98317421b770e067657257b4924096b5ba9d370f4c650102ec2a2ff00af31b3d6559ad28d3090055c3e646291d161a85047e75a10b2219487a148a753239267301e283c1c158b86dc5b1da6301349417b91156e49abb2dd55bc46a1ee81146fce44aac013838bc29f071a28e94ce6dfc331aac3588f01e0d531b0477674cfa0e90519709f11b6c07cd9550a8630149a783a866c8289e28861f7c95b7e3844a5338df3b2671e473230a3ffba674f78b0eb3363c89c51721c6103dfcb0aaf79ea099041241660701660cc592734b96500a87c2a49ce3ec35d8646c31776c061546fa973699759618c5627ce623fefa1295309358fa0e032b73d918772fc497683382d5231ac7a72028565d2383641991ce1e829d2c9c217c467985f1b51f73973b7b002b2777a5f6cc06302aa6068b7138c8af22230080b5bd08b4d1c95689f583cc67aff48282363c604709673fc5521374240f756643b264eaf43e1d43622d63a95ba84a1077a85e563306a93b9a44a2547694299b5efcf0b1d4b38f90b76169a86bb969ae331581b2360b7144769a769c83a4135439b03ee259b4a010e9b00a8a2bcfa9801135e312297a857b20b72b05913b3455b14373a4048f65e2155d27691dea12a04ca456f304f9d48a55a4cb749325102010516708e9529ccb370b48d774be314d6ed1ba6c29a44a53828e845b2f28c02dfb19b2645fd0029917b52575311503e8b118779407f724eec8bc64d420c0949dedd13b869350b8185e8dda2dca3689f5ba02aac65ac224396854170f3c82a7e4c7d185c9a52018b7481dec1026bdb82c1d4ac5326771135504a0f93382c06ecd0b4cd90620367f05dd6c9d688ed1d1a53dd3800ebb3782188303e1541a3545370ffa970f250b5c748c739e47c376945c3661b7c32eb62bfc7b5de9111f8574f721b9a12154001d00201f7f941f48bea76498c2a761dab79c51db25fdc33de241a0c4fed6d843cda057001b00050400010003",
+  # curl over OpenSSL 3.5.5
+  "160301061c0100061803038e50092a0360abed033362853af03cd0d67fd048f7dde8324d92e193825549fd2016dcdd1d9f81cba0ea7f78a0992d772ca842cadc6f7c24a7eae7cdf247dd6638003c130213031301c02cc030009fcca9cca8ccaac02bc02f009ec024c028006bc023c0270067c00ac0140039c009c0130033009d009c003d003c0035002f01000593ff010001000000000e000c00000966757a7a2e74657374000b000403000102000a0012001011ec001d0017001e00180019010001010010000e000c02683208687474702f312e31001600000017000000310000000d0036003409050906090404030503060308070808081a081b081c0809080a080b080408050806040105010601030303010302040205020602002b00050403040303002d00020101003304ea04e811ec04c050995a179c1108315ae3e9488e915ef1f3a544192d3452aa03ca0547ab303346619118283281029e16c89ea1bf4abc57f191751810bb76a8c69a99214bb68292ca95ae9c0815b278b27a74415c22c044cb8b761d831787ebf53b5c507333ac7e5c66a29f8c97d669ca421656e6b22d8df5b8bf82121b950a93bbc71edbad6494537523b58c263ba9d19423e6765dcab5c0962d31a56582d70d23a87dc52602d943a840d32e06219ba2650e0435a9d8416c4e7c381151322f98541653b78a621e11d049110aa8fcd14a5f269f146c10f5d947cba8549084985312b098e9258d794be66289dda905373c0d6a187b6b5c7250164d43b0499f9846967bc2a1919129673bfcd47436b34714f680cad827e9c6a8757666333aa2488b15aa638bfbdb2845ba94983791ae50223e8b041c307fa50986a3fa5ddc7b2b2bc77a51aaa54c096334379515c534b471b8b941159fc7caddd5a31e57c27b1581bbc667fa868f6c579c3c77232c109a2127b7dbb2b277035953482a15a112d8cc853d5b4c7bcaa28a13ab6f2b6c30d934d8661990f7b658393bea8835fc32353e94a1a0d64009d95a9702abad1b446f797d3512c79dc6315b81cb131700abca3a98537fc907a6ab8541e8613eb05a1ef5408c8db63e2d48c6bd73604b816df299b0987072eba9a70f53a1a9a32cfc136894f8a77d18be53b91ca1150318a6ad341542636500660a21b24b5d2be9096d191a142502c059b294757f90a7725e7b7e40515205601f63b76065d0bb06884f7e9a4d41023159006febc273b2a8b542cba010134dd2458853e03cf0657cd15c365284a620763a3da15f6330882fa9a05f290578ec527fe4c63c8c06ba8695a73ab61e258f970bacb6cb394c21ce66156cd6149c5c4c2fc7ab496af427b2b57f15d91409e7b97273ab81d5b94b2cc6e40921da769963949fe5da20cfb67935c141b1aa606b84b2b0925dcf86cadc2b2d75505dba072b7c762f53ea8575302bf541038148b74e605415aaa74e03595bd753b7006faab27662b766ba0c207b39693da1455516307d2a7bc93844238585c91aa60d74505863c842ea5f0fecaee19ccfccb43f53863a41b1216c7bae66ec23b8465e9ffb249ea02e3568b37a162c20278d22dc442ac624a033177622230f2156a60b3253377c33f60502132b7d68cafc861b61b5be56e49f90cba36f177a1c261bbf70c474f9432d7a3f66f1752bc0a2192cac0538894a216bac273b537c342b9341ba88c59d8662ee48a548369e9d80774723384a82899f4556472b8325f7b95b68b2341768b9f56b9b101e43f75047578dfff6a34a089098ca86b0707cbc882ae051ab5c12a9b81a7bc20a07a907993a200817587af2408bb79a5d7a480864c20426c20e721c3c218772175aaf94048348d277265b18410438b1c79d6d34b2733a11e1baa2f99255e35a2e74e0142f327685da797bd878f35538508c4e8da14fd88404dd26489d51c2a0e735265c3d61b83b99316a94f88578f50173695ca10a60641228277a174f652e33419bed222825fb9604a711391686bdc96be1986647024c44562697e2c1ca751202c66811410bd2b1b70606705a113f15dc9d88872687339f2bea0a4f580462e9e1e0dff5b24ba1894c99afd0ee7590910b635761f2c27ee5c0446c7e9f24c9cfd0d599f5971b0e820a48a9b62d0b8d18af19d4b42a9b6fa004811a001d00205cf641a07b33d6614b9a88fc07913829fe3ac8072ac382172d5cc83577a2a764001b00050400010003",
+  # Node 24.21 tls.connect, ALPN h2
+  "16030106360100063203034ed3e1994a62d17827b5fe189ea3b76c3ccd03978e50242db81b7a45bb8b1e622039674aacdd6ea2f6796c02ae13fae616c8795d1b7c45718ed1a4b8b67b7ae5f00068130213031301c02fc02bc030c02c009ec0270067c028006b00a3009fcca9cca8ccaac0adc09fc05dc061c057c05300a2c0acc09ec05cc060c056c052c024006ac0230040c00ac01400390038c009c01300330032009dc09dc051009cc09cc050003d003c0035002f01000581ff010001000000000e000c00000966757a7a2e74657374000b000403000102000a0012001011ec001d0017001e0018001901000101002300000010000500030268320016000000170000000d0036003409050906090404030503060308070808081a081b081c0809080a080b080408050806040105010601030303010302040205020602002b00050403040303002d00020101003304ea04e811ec04c03d6c379ea2c6811c5707c80a31b121a1e34aa8394b72dbb2973677b7a1ba95f23660e086174c0e9fdc3eb76b20150c4224bb3401dabc5fc1765fa55eee26a38b6a04f889173e92928fdaabebf13ab3a10ef59c1e62d3a02f8b299e08080d6b0ce6f82bb7f91e27fc58fe23a452a76ba7936357c462e77932faaa621a63021ef4ca397c9fd6788318a7187d06394aa04f87e54283ab2010aa69daf04d4a445d7c2acb5a863222f60251cb83748c5b4e702092c8b0bff720480734b3f578921180ba789d70bb2b4b522bec1b4a3902526131681a652b206b0b90309690657527cbad76e62deac74cd2a23759339c7a4905d2ca1ea43a1e5910cf4ff91171a86372b27b39790b702717c8cb5bf821593dbbc1782453793000aaa53b31289c694a52688607ccd583a16b461b6106a8d93408125684828650452e16a929074541157862f6606ff08594868a483b1031bae75da948ad70b3b8b523c2a4a5a58d86162a7249f6d0626df54c4fe77683c85551f8129277712f76b2af583ab14c5eea727f0bc07fbc66847255be0c8c13a900917fc08f4564194bd828b2c54181f8a23b008da428898a6ac5009daac6c6b4ee55975ab05d2ac154538b7356d317487a11cdf3437ee017d9aa9479b424bee405fbb244a08359d9777fb34a2809732ec94432ab6a9c5b24726041a7478b156ab28206289377160f7fcb6954b278bd10a486e239bbf39104b299e0a392a88c29450a3f404ab471eb5334fc2cace5ac60b70f58d61fd60137f0ea54ddc8a6e6a93c1c617e9ea67cbff895912b1606067c95ea4101d55d6367c8d14334001ab52f913f2440a348610926144f2f772d3b30699c9773c8085a5419ab62a76aaec0c4ab933600cd490b16871bb00d23a16fc3f51c8493cc0c27312fdc21451b6dae38573ac097d8960af434793cb46d3e257109f99be28abb541a32d4ab19217419f4f621b55c1c3dc1c8ca3459c0049f6158929f49b149fcc8329a3955881f7830cc87788b7de0b7d5acb0f5090a8ab39926f5b4a66bc135f587a23b9368bb757bf9584d329549a87bb92508f1a95ee646a603680a5c1472f31a7038465ad5903b7a993643517f96b0a84c255b7adb3c4a9a9135787ae2e21cf31b81cf95952a597d82685ee18127bfb70801094500aaae27897ff2a49ce136700df98a667231c4f2803e725f0ad043cfba904b255387993bbae00a84ea7300c939aae1ba894c545660c5db569939210f022c59986911353615105a8d5486701f4cb49364002c9898ca25b5f9fb29dc8c71915610dfc29a56b169a78b646e30a72389b7c006b9fdea8852d72a0251137fd54a9df344283a7eb19932239019af3aa5c64c1570f5b3ff0b4f2d1a9c8c4a535b5411caecceaa0b2c435b7c63a8baf07a4a7e9b44b211be237433de6218046b4e84c82075b409479741310516fe917ac91c7fc3613ab49a43ffaa712bfbc805085a58cc0314334bf512020a782dfcb9abcf48ac589b14d8b2c81f91753256b4e7719bdc5c5273cb198ee5a185c7ad2c83644ac78edaaa438fab0b743840d45c4e2ad17875ab91ec6753b9a56cfa1a642bd07f00e704ca8bc955d63b5006cf7ffb271c215c2e89a18030a4cf1f72f40658ba096fdac3f6d9f62b1d5809c4f4623505746ca5b06cb498c8eb012bd333a725b45abaed1f95c509ac424c1977706adb194360222101f131f638001d0020d56b58ad4b62633542d11e9e4f0e1bba2956034a421cecc9e7f4cf803b03b477",
+]
+SERVER_MESSAGES = [
+  # ServerHello, OpenSSL s_server -tls1_3 (X25519MLKEM768)
+  "020004b603039e0f2f188c08cedba456a0151efca96cca5730e985fe00d7ef35a988309bd288209728965ceb795d06f0f1fa6796f5a02467b6667ff3877ae8623d8ac34d828d27130200046e002b000203040033046411ec046094167410ccab9a2583fa3ebc0f418172af08f8e01dfb8fcc477da6b22dcf05741291ab99d41ef684f0d65bcc6914ea27fcbcf263b76bd47a354532762d3964c3e4fb4ea3ede01e790c97f7725869eaeea5495aa922a0e4bb95643d5082edaffed891da72677fcca22182154f66693e5b7c34259780e38d3f278c524446c258c0c01a7469d15e5c468698650dd6258a06941cd944226eef266e1e6ef10fad2639f7f06868178052b166b227ff7ea752eadfaf46fea5c41b57441164984e78a79c8b1d9ca8cb1e109c194b8553f9cd3c9a074d49e037c52137a5ed34e41a795488044e72b4cf0bd289e7a134841b6ade2d0ee31c6b9d60f50f944f82d2f54beebdbd465fe0edce9d4c7d1e6877afe747c220ede250551143fb647e8dbd457f8583106883f4969598d500b89981bbfcad34e9dfa3c7a704c17774c65796bd118930f2144d838252df83e700342a82b44a5e22ada7e15eb0eb5805c3483082d85ffd448748b8a9402230e5269310bb945426df63f1ceda0682094231990d3d242f20e815cafc2f1503db2ebb4dd736f8fb1e66e6d3faa542a87505769e5c95cfaf268d16ec1c9b064e05c754d814edee94eede2b5ae44cc6888a785381310f1df34f362206c07b28ba4a1c414ba85c89082ab9dc015f9f108930ae435bf8ba82ec6053c79ab499b4cc6e7cc37941064dd885a254296bc4d4c280e54b0e1988213cecf1c5fa770751a45a54b3af9e0abf5613126986cf4179e9d875717b46cb856d12724d13c237ed79b83b6bc209691afe1017097b3323b7e7e6d1783faf0e5ebd425c2dbc192c4858000f4196ef44b22951e391065f876684ed7c3d40655d624cb507d2e8de174680446dbdbd87829f8e25235610bb569e08bd943044c43c36e0c7b0c8aa8e1a124c50f76920452bfd6e6c38d99096f75302cecb1c429bee8bed868e0abf3c7b8cbc5e1094f4cb718b71a6869d4b44b197581b67a50117cac55224ba0cce2af999095667313167f4d293420c2734f3625764a3d3f7eab9c88946817e0b66d05a90803a74842b528ba14cd84afbc9a23f26ef4d6c99d33b8152d463e3a1537e587cb4d92a4f10b93a494fef8ca695c876439567901fc640e8a2f364c4a017bddf0d6d1638e6b0e289b76c78318529fe8ac0122cce01747b12e1f475db6813842f17c50e8d87f8d0b39d3aff94e4ea33801bb7b43db1b1975797fbccb0f0ad3ea5fb6de33837fb0c5382b8227576ef2d872ccbb7b6b100a86dbef627217110ae9db0467631f2b3a66ce40e6127701750440cf64b71c9639b345b76beb499079c8da54e12ba62dae26d9baf697f231293389ec5e69c2d6b890a933ddc1f392a78aeda051930b6be447c0edd2c9385255b24a1c2a32d265380c36911276d7894f296020dcb38750f5f89c8a16bcd32b8dbbebb4cc19ebdb1a7ace9c88971e5f9093eb359885fd9c9fa50dde2f8056dfd50fac5e2e63452789f5142089898c79af9eaca3c2ed75060ecaba0f642a8a62e60ac7d1dfb63e586bc8dfc855cca080d298e0b1abb62bbf398a97a4fbe1b2adefbe2fc27571ba4d8bccb852b45",
+  # ServerHello, OpenSSL s_server -tls1_3 -groups X25519
+  "02000076030338441bb437b02fd2a886d5827e26480bd7ae7ff9a6fedff12f9922eddbaef7f4209728965ceb795d06f0f1fa6796f5a02467b6667ff3877ae8623d8ac34d828d27130200002e002b0002030400330024001d0020e46701c2f265ec22e22b89980e6f98e6e4b4c40a38bee0e4749e503a95956c10",
+  # HelloRetryRequest, OpenSSL s_server -groups X25519 to a P-256 share
+  "020000540303cf21ad74e59a6111be1d8c021e65b891c2a211167abb8c5e079e09e2c8a8339c208dac55ad9ffc5eaea38a73ff60a50758e13cb51c9c6074228695ea0504a55b01130200000c002b0002030400330002001d",
+  # TLS 1.2 flight, OpenSSL s_server -tls1_2, P-256 key
+  "0200003d03035719b36b7cb1723b3394fe67c338f895379d23ebf7745a1dc5966859bfc9412e00c02c000015ff01000100000b0004030001020023000000170000",
+  # TLS 1.2 flight, OpenSSL s_server -tls1_2, P-256 key
+  "0b0001b70001b40001b1308201ad3082015fa003020102020103300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30243112301006035504030c0966757a7a2e74657374310e300c060355040a0c05502d3235363059301306072a8648ce3d020106082a8648ce3d030107034200044acd003bc97c606b76f4109e082cfc361209122f942e9558bcc8970e1e3aa632e46750f7fc89cdf174912813c6d997e89aa0b721ae3c3cbd0a1e5652a9703312a38196308193301d0603551d0e04160414ff575bfa1f580f0ecbff2fed4dbe4407f3c150e5301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b65700341001ee12e2f4554effc2d658e694878303f7fe92928bf63e7db04da8260c577aae0e5c5d114cc8ef0fdaab3fdea3694f70cd1f7276c7b1836c5ef08d7cf58a3c108",
+  # TLS 1.2 flight, OpenSSL s_server -tls1_2, P-256 key
+  "0c00007003001d20a32f9ce6dec77b028276909906baabcbc041fc01bcc7530df7ac3c6ef21bd949040300483046022100fe3001efd2a87bf70d1c3936241e8cf39cdd6ac869b087d2e42a2473b219c5b6022100ad0a6deaa219b7695f57d4d9bf3ce9a06eaa04b22ae26991f5a15a2b1048a84d",
+  # TLS 1.2 flight, OpenSSL s_server -tls1_2, P-256 key
+  "0e000000",
+  # TLS 1.2 flight with a CertificateRequest, Ed25519 key
+  "0200003d0303d91912932922b59f33a8ab515d597f6e65656837b03ba21f67d03a4a4946998000c02c000015ff01000100000b0004030001020023000000170000",
+  # TLS 1.2 flight with a CertificateRequest, Ed25519 key
+  "0b0001780001750001723082016e30820120a003020102020102300506032b657030143112301006035504030c0946757a7a20526f6f74301e170d3235303130313030303030305a170d3435303130313030303030305a30143112301006035504030c0966757a7a2e74657374302a300506032b65700321007fc71c44df1a089f4322e5a7dd03ef64fed0164490819aa2236ea7d4b552c8fba38196308193301d0603551d0e04160414d2780a2e2b99d3a1c8d027b498befbae72ebcdf2301f0603551d2304183016801497ae92205c7302b9b25c2c7219607c7f767904fc300c0603551d130101ff04023000300e0603551d0f0101ff040403020780301d0603551d250416301406082b0601050507030106082b0601050507030230140603551d11040d300b820966757a7a2e74657374300506032b6570034100b6c428830f0b30218d3fe05a43c4b2110f9797356a58d361c0ebc499910287ea3dc5ebc7260c117d8258db51ee3ed2a7c125a0f1f6cf3fb42032f4543ae65b08",
+  # TLS 1.2 flight with a CertificateRequest, Ed25519 key
+  "0c00006803001d2021a78133b0d94761114d8bdaff04a2db022d7a5addda14fa50a0addc4cfd7f5108070040339aed01081ad7ce7e1570eaceae717efbb197361078ba68ec2a74496a5a08112ee9da60a2a0322a28a9156e785d9ce2889b988f5898cbbfcb67c76a0267d006",
+  # TLS 1.2 flight with a CertificateRequest, Ed25519 key
+  "0d000030030102400028040305030603080708080809080a080b0804080508060401050106010303030103020402050206020000",
+  # TLS 1.2 flight with a CertificateRequest, Ed25519 key
+  "0e000000",
+]

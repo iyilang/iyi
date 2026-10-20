@@ -29,6 +29,9 @@
 # The two things that pick by a secret bit are a mask: the Montgomery
 # ladder's swap (`cswap`) and the window lookup in a scalar multiplication,
 # which reads all sixteen entries and keeps one with `&` and `|`.
+# bench/ct_timing.sh, `X25519.shared` with one peer key, a fixed private
+# key against random ones: |t| = 1.6 to 7.3 over 100,000 (under 10 is no
+# leak seen; the machine was shared).
 #
 # X25519 is the RFC 7748 §5 ladder over the clamped scalar, 255 steps. The
 # peer's u-coordinate has its top bit masked and is otherwise taken as it

@@ -77,6 +77,9 @@
 # 1.16 to 1.33 and 6.5 to 6.9 before std/big's one-pass Montgomery
 # product and 5-bit window).
 #
+# bench/ct_timing.sh, `sign_pss` with one 2048-bit key, a fixed message
+# against random ones: |t| = 0.8 to 1.9 over 20,000 signatures.
+#
 # Pure computation: std/big's arithmetic, std/digest's hashes, std/crypto's
 # HMAC, std/base64 for PEM.
 

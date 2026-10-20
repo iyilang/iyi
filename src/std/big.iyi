@@ -25,6 +25,27 @@
 # Int32 rule. `hash` mixes every limb with wrapping arithmetic, so any size
 # hashes.
 #
+# `inverse_mod_secret`'s constant time, read off the assembly of a
+# --release x86_64 build (the whole of `BigInt#inverse_mod_secret`, into
+# which `Montgomery#inverse`, `negate`, `borrow_of`, `equal_mask` and
+# `bits_of` are inlined, and `Montgomery#into_range`, which is not).
+# Before the rounds: the modulus' checks, `%`, `Montgomery.new` and
+# `Montgomery.words`, whose branches and loops follow the sizes of x and
+# m - x's length shows there, as with `pow_mod_secret`'s base. In the
+# rounds every conditional jump compares a counter (the round, j against
+# n, the 31 steps, the vector loops' trip counts against n, n against 0
+# and 2) or is an overflow check on one; every load and store indexes by
+# such a counter or by n - 1, the word at the longer length being taken
+# by a masked read of every word, not by an index; each choice is an and,
+# an or or an xor of a mask, no cmov. `into_range`'s 21 jumps compare its
+# counters and n alone. After the rounds: the test that b is 1 branches,
+# which is the answer's nil and public, and `BigInt.new` trims the
+# answer's leading zero limbs, which shows how many it has.
+# bench/ct_timing.sh, x = (m - 1) / 2 against random x modulo 2048 bits:
+# |t| = 2.4 to 3.4 over 50,000 to 100,000 inversions (under 10 is no
+# leak seen), where the extended Euclid's algorithm std/rsa had reached
+# |t| = 317 to 403 on 2,000 to 5,000.
+#
 # BigDecimal is `value * 10^-scale` with an exact BigInt value. `+ - *` are
 # exact. `/` is the one operation that can be inexact: `div(other, precision)`
 # answers the quotient rounded half away from zero to `precision` fractional

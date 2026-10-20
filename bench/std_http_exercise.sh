@@ -774,6 +774,183 @@ PY
 fi
 
 echo
+echo "== latency on loopback: Nagle off, and a flight in one write (bench/std_http_latency.iyi)"
+# Nagle's algorithm holds a small write back while an earlier one is
+# unacknowledged, and a peer's delayed ACK holds the acknowledgement 40 ms
+# at least on Linux: std/socket now sets TCP_NODELAY on every connected
+# and accepted TCP socket, and std/tls writes a flight of records in one
+# write. Each line is the median of 50 GETs, built --release, under 15
+# ms: with Nagle on, a GET whose answer the server streams on a kept
+# connection - the head, then a chunk - took 41 ms here, and a TLS client
+# whose ChangeCipherSpec and Finished went as two writes 47 ms with its
+# socket's Nagle on, where each took 1 ms or less; 15 ms leaves a slow
+# runner that much more and stays well under the least stall. Then
+# OpenSSL's s_server as the server and curl as the client, each beside
+# std/http, and on Linux, where strace is there to ask, what both ends
+# write in one handshake: no ChangeCipherSpec written alone. Then copies
+# of the modules with Nagle left on, the client's flight in two writes
+# and the server's, each caught at the line that names it.
+LATENCY_SELF="plain http://, std/http at both ends, a GET on a new connection
+plain http://, a kept connection, an answer the server streams
+https://, std/http at both ends, a GET on a new connection
+https://, a kept connection, an answer the server streams
+https://, Nagle on at the client, its handshake and a GET"
+LATENCY_SSERVER="https:// to s_server, a GET on a new connection
+https:// to s_server, Nagle on at the client, its handshake and a GET"
+LATENCY_CURL="curl to std/http's https:// server, a GET on a new connection"
+LATENCY_ALONE="no ChangeCipherSpec written alone, at either end, as strace saw the writes"
+latency_openssl=yes
+latency_curl=yes
+latency_strace=no
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) latency_openssl=no; latency_curl=no ;;
+  Linux) command -v strace >/dev/null 2>&1 && strace -f -qq -e trace=write -o /dev/null true >/dev/null 2>&1 && latency_strace=yes ;;
+esac
+LATENCY_OPENSSL=openssl
+for candidate in /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
+  if [ -x "$candidate" ]; then
+    LATENCY_OPENSSL="$candidate"
+    break
+  fi
+done
+if [ -z "$PY" ] || ! command -v "$LATENCY_OPENSSL" >/dev/null 2>&1 || ! "$LATENCY_OPENSSL" version 2>/dev/null | grep -q '^OpenSSL '; then
+  latency_openssl=no
+fi
+command -v curl >/dev/null 2>&1 || latency_curl=no
+# latency_run <binary>: every line the binary and its peers answer.
+latency_run() {
+  local bin="$1" port pid
+  timeout 120 "$bin" self "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" "$WORK/tls/root.pem" 50 2>&1
+  if [ "$latency_openssl" = yes ]; then
+    port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+    "$LATENCY_OPENSSL" s_server -accept "127.0.0.1:$port" -www -tls1_3 -cert "$WORK/tls/leaf.pem" -key "$WORK/tls/leaf.key" \
+      >"$WORK/latency-s_server.log" 2>&1 </dev/null &
+    pid=$!
+    for _ in $(seq 1 50); do
+      "$PY" -c "import socket; socket.create_connection(('127.0.0.1', $port), 1).close()" 2>/dev/null && break
+      sleep 0.1
+    done
+    timeout 120 "$bin" s_server "$port" "$WORK/tls/root.pem" 50 2>&1
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  fi
+  if [ "$latency_curl" = yes ]; then
+    rm -f "$WORK/latency.port"
+    "$bin" serve "$WORK/latency.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" >/dev/null 2>&1 &
+    pid=$!
+    for _ in $(seq 1 100); do
+      [ -s "$WORK/latency.port" ] && break
+      sleep 0.1
+    done
+    port="$(cat "$WORK/latency.port" 2>/dev/null)"
+    # A curl that could not speak to the server answers 000 in no time,
+    # which is no latency: only 200s are counted, and all 50 must be.
+    for _ in $(seq 1 51); do
+      curl -s -o /dev/null -w '%{http_code} %{time_total}\n' --max-time 10 --cacert "$WORK/tls/root.pem" "https://localhost:$port/"
+    done | tail -50 | awk '$1 == "200" { print $2 }' | sort -n | awk -v label="$LATENCY_CURL" '{ t[NR] = $1 * 1000 } END {
+      m = NR > 0 ? t[int(NR / 2) + 1] : 0
+      if (NR != 50) printf "%s: %d of 50 answered 200\n", label, NR
+      else if (m < 15) printf "%s: under 15 ms (median %.2f ms of %d)\n", label, m, NR
+      else printf "%s: %.2f ms, past 15 ms (the median of %d)\n", label, m, NR }'
+    curl -s -o /dev/null --max-time 10 --cacert "$WORK/tls/root.pem" "https://localhost:$port/quit"
+    wait "$pid" 2>/dev/null
+  fi
+  if [ "$latency_strace" = yes ]; then
+    strace -f -qq -e trace=sendto,write -o "$WORK/latency.trace" timeout 60 "$bin" once "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" "$WORK/tls/root.pem" >/dev/null 2>&1
+    echo "$LATENCY_ALONE: $(grep -c '"\\24\\3\\3\\0\\1\\1", 6' "$WORK/latency.trace")"
+  fi
+}
+# latency_held <output> <label>: whether the line for <label> is there and
+# under the bound (or, for the strace line, counts none).
+latency_held() {
+  local line
+  line="$(printf '%s\n' "$1" | grep -m1 -F "$2: ")"
+  [ -n "$line" ] || return 1
+  if [ "$2" = "$LATENCY_ALONE" ]; then
+    [ "$line" = "$LATENCY_ALONE: 0" ]
+  else
+    printf '%s' "$line" | grep -q ': under 15 ms '
+  fi
+}
+if [ ! -s "$WORK/tls/root.pem" ]; then
+  echo "  skipped: the https:// section above made no certificates (no python3 with ssl and cryptography)"
+elif ! "$IYI" build --release -o "$WORK/latency" "$REPO/bench/std_http_latency.iyi" >"$WORK/latency.build" 2>&1; then
+  echo "  bench/std_http_latency.iyi did not build"
+  sed -n '1,8p' "$WORK/latency.build"
+  status=1
+else
+  latency_labels="$LATENCY_SELF"
+  [ "$latency_openssl" = yes ] && latency_labels="$latency_labels
+$LATENCY_SSERVER"
+  [ "$latency_curl" = yes ] && latency_labels="$latency_labels
+$LATENCY_CURL"
+  [ "$latency_strace" = yes ] && latency_labels="$latency_labels
+$LATENCY_ALONE"
+  said="$(latency_run "$WORK/latency")"
+  printf '%s\n' "$said" | sed 's/^/  /'
+  while IFS= read -r label; do
+    if ! latency_held "$said" "$label"; then
+      echo "  FAIL $label"
+      status=1
+    fi
+  done <<EOF
+$latency_labels
+EOF
+  [ "$latency_openssl" = yes ] || echo "  no OpenSSL (LibreSSL is not it) with python3 here, or Windows, whose s_server this gate does not drive: s_server goes unasked"
+  [ "$latency_curl" = yes ] || echo "  no curl here, or Windows, whose curl does not take this gate's root by --cacert: curl goes unasked"
+  [ "$latency_strace" = yes ] || echo "  no strace that runs here (it is Linux's, and a container may forbid ptrace): the writes go uncounted, and so does the server's flight"
+  # latency_breaks <label> <module> <old> <new> <line>: the program over a
+  # copy of <module> with <old> made <new> must fail at <line>.
+  latency_breaks() {
+    local label="$1" module="$2" old="$3" new="$4" line="$5" got
+    if ! printf '%s\n' "$latency_labels" | grep -qxF "$line"; then
+      echo "  $label: skipped, as the check that names it is"
+      return
+    fi
+    rm -rf "$WORK/latencybreak" && mkdir -p "$WORK/latencybreak/std"
+    if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module" "$WORK/latencybreak/std/$module" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not unique")
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+    then
+      echo "  $label: the patch did not apply"
+      status=1
+      return
+    fi
+    if ! IYI_PATH="$WORK/latencybreak${PSEP}$IYI_PATH" "$IYI" build --release -o "$WORK/latency-broken" "$REPO/bench/std_http_latency.iyi" >"$WORK/latency-broken.build" 2>&1; then
+      echo "  $label: the broken copy did not build"
+      sed -n '1,6p' "$WORK/latency-broken.build" | sed 's/^/    /'
+      status=1
+      return
+    fi
+    got="$(latency_run "$WORK/latency-broken")"
+    if latency_held "$got" "$line"; then
+      echo "  $label: not caught at \"$line\""
+      status=1
+    else
+      echo "  $label: caught: $(printf '%s\n' "$got" | grep -m1 -F "$line: " | cut -c1-120)"
+    fi
+  }
+  latency_breaks "TCP sockets left with Nagle on" socket.iyi \
+    '    __sys_set_nodelay(fd, true) unless family == AF_UNIX
+  end' '    nil
+  end' "plain http://, a kept connection, an answer the server streams"
+  latency_breaks "the client's ChangeCipherSpec and Finished in two writes" tls.iyi \
+    '    sent = send_protected(TlsRecords::HANDSHAKE, finished)
+    return sent if sent
+    sent = release' '    sent = release
+    return sent if sent
+    sent = send_protected(TlsRecords::HANDSHAKE, finished)' "https://, Nagle on at the client, its handshake and a GET"
+  latency_breaks "the server's ServerHello and flight in separate writes" tls.iyi \
+    '    # write.
+    hold' '    # write.
+    nil' "$LATENCY_ALONE"
+fi
+
+echo
 echo "== HTTP/2: the server and the client together (bench/http2_exercise.iyi)"
 # h2c with prior knowledge both ways: every shape of body through the
 # windows, gzip, cookies, a redirect, 200 requests on one connection, and

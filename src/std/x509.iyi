@@ -13,7 +13,11 @@
 # issuer and subject (kept as their DER, which is what a chain matches),
 # validity, key, signature, and the extensions a chain is checked by -
 # basicConstraints, keyUsage, extKeyUsage, subjectAltName's DNS names and
-# IP addresses, nameConstraints, and the key identifiers. An extension
+# IP addresses, nameConstraints, and the key identifiers - and two that
+# OCSP stapling reads (std/ocsp, std/tls): the TLS Feature extension (RFC
+# 7633), whose status_request is "must staple", and id-pkix-ocsp-nocheck
+# (RFC 6960). Revocation itself is std/ocsp's: a chain checked here is
+# not asked whether any certificate in it was revoked. An extension
 # that appears twice is refused. One that is critical and not among these
 # is kept by name, and a chain through its certificate is refused: RFC
 # 5280 section 4.2 says a certificate with a critical extension it does
@@ -127,6 +131,16 @@ pub struct Certificate
   getter other_constraints : Bool
   getter subject_key_id : Array(UInt8)?
   getter authority_key_id : Array(UInt8)?
+  # The subjectPublicKey BIT STRING's bytes, as written: what an OCSP
+  # CertID's issuerKeyHash and a responder's byKey are hashes of (RFC
+  # 6960 section 4.1.1).
+  getter public_key_bits : Array(UInt8)
+  # The TLS Feature extension's features (RFC 7633), nil when absent:
+  # 5, status_request, is "must staple".
+  getter tls_features : Array(Int32)?
+  # Whether id-pkix-ocsp-nocheck is here (RFC 6960 section 4.2.2.2.1): an
+  # OCSP responder's certificate saying its own status is not asked.
+  getter ocsp_nocheck : Bool
   # Critical extensions this does not understand, by OID.
   getter unhandled_critical : Array(String)
   @signature_parameters : DerValue?
@@ -139,7 +153,7 @@ pub struct Certificate
                  @issuer : Array(UInt8), @subject : Array(UInt8), @subject_name : String, @issuer_name : String,
                  @not_before : Time, @not_after : Time, @public_key : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey,
                  @signature_algorithm : String, @signature_parameters : DerValue?, @signature : Array(UInt8),
-                 extensions : X509Extensions)
+                 @public_key_bits : Array(UInt8), extensions : X509Extensions)
     @basic_constraints = extensions.basic_constraints
     @ca = extensions.ca
     @path_length = extensions.path_length
@@ -155,6 +169,8 @@ pub struct Certificate
     @subject_key_id = extensions.subject_key_id
     @authority_key_id = extensions.authority_key_id
     @unhandled_critical = extensions.unhandled_critical
+    @tls_features = extensions.tls_features
+    @ocsp_nocheck = extensions.ocsp_nocheck
   end
 
   # The certificate *der* holds (RFC 5280 section 4.1).
@@ -190,6 +206,7 @@ pub struct Certificate
     not_before = X509Asn1.time(validity[0].time)!
     not_after = X509Asn1.time(validity[1].time)!
     key = X509Keys.read(tbs[at + 5])!
+    key_bits = X509Asn1.bytes(X509Asn1.values(tbs[at + 5].sequence)![1].bit_string)!
     extensions = X509Extensions.new
     rest = at + 6
     # RFC 5280 section 4.1: issuerUniqueID [1], subjectUniqueID [2] and
@@ -215,7 +232,7 @@ pub struct Certificate
     end
     signature = X509Asn1.bytes(outer[2].bit_string)!
     Certificate.new(der, outer[0].raw, version, serial, issuer.raw, subject.raw, subject_name, issuer_name,
-      not_before, not_after, key, signature_algorithm, parameters, signature, extensions)
+      not_before, not_after, key, signature_algorithm, parameters, signature, key_bits, extensions)
   end
 
   # Every CERTIFICATE block in a PEM text, read; the first one that is not
@@ -245,43 +262,14 @@ pub struct Certificate
 
   # Why *issuer*'s key did not make this certificate's signature, or nil.
   def signature_error(issuer : Certificate) : String?
-    key = issuer.public_key
-    case @signature_algorithm
-    when X509Oids::SHA256_RSA, X509Oids::SHA384_RSA, X509Oids::SHA512_RSA
-      return "#{@signature_algorithm} with parameters that are not NULL" unless X509Keys.null_or_absent?(@signature_parameters)
-      return "an RSA signature under #{issuer.subject_name}'s #{X509Keys.kind(key)} key" unless key.is_a?(RsaPublicKey)
-      hash = case @signature_algorithm
-             when X509Oids::SHA256_RSA then RsaHash::SHA256
-             when X509Oids::SHA384_RSA then RsaHash::SHA384
-             else                           RsaHash::SHA512
-             end
-      return nil if key.verify_pkcs1v15(hash, @tbs, @signature)
-    when X509Oids::RSA_PSS
-      return "an RSA signature under #{issuer.subject_name}'s #{X509Keys.kind(key)} key" unless key.is_a?(RsaPublicKey)
-      parameters = @signature_parameters
-      return "RSASSA-PSS without its parameters" unless parameters
-      pss = X509Keys.pss(parameters)
-      return pss if pss.is_a?(String)
-      return nil if key.verify_pss(pss[0], @tbs, @signature, salt_length: pss[1])
-    when X509Oids::ECDSA_SHA256, X509Oids::ECDSA_SHA384, X509Oids::ECDSA_SHA512
-      return "#{@signature_algorithm} with parameters" unless @signature_parameters.nil?
-      return "an ECDSA signature under #{issuer.subject_name}'s #{X509Keys.kind(key)} key" unless key.is_a?(EcdsaPublicKey)
-      hash = case @signature_algorithm
-             when X509Oids::ECDSA_SHA256 then EcdsaHash::SHA256
-             when X509Oids::ECDSA_SHA384 then EcdsaHash::SHA384
-             else                             EcdsaHash::SHA512
-             end
-      return nil if key.verify(hash, @tbs, @signature)
-    when X509Oids::ED25519
-      return "#{@signature_algorithm} with parameters" unless @signature_parameters.nil?
-      return "an Ed25519 signature under #{issuer.subject_name}'s #{X509Keys.kind(key)} key" unless key.is_a?(Ed25519PublicKey)
-      return nil if key.verify(@tbs, @signature)
-    when X509Oids::SHA1_RSA, X509Oids::ECDSA_SHA1
-      return "#{@subject_name} is signed under SHA-1, which is refused"
-    else
-      return "#{@subject_name} is signed under #{@signature_algorithm}, which this does not check"
-    end
-    "#{@subject_name}'s signature is not #{issuer.subject_name}'s"
+    X509.signature_error(issuer.public_key, @signature_algorithm, @signature_parameters, @tbs, @signature, @subject_name, issuer.subject_name)
+  end
+
+  # Whether the TLS Feature extension (RFC 7633) asks for status_request:
+  # a certificate that must be shown with a stapled OCSP response.
+  def must_staple? : Bool
+    features = @tls_features
+    !features.nil? && features.includes?(5)
   end
 
   # Whether *host* is a name this certificate is for: a DNS name or an IP
@@ -320,6 +308,54 @@ pub struct X509
   # (OpenSSL 3.5.5), so the two part only between 1990 and 2047 bits.
   # std/rsa itself reads keys down to 1024 bits.
   MIN_RSA_BITS = 2048
+
+  # Why *key*, *signer*'s, did not make *signature* over *signed* under
+  # *algorithm* (an OID) and its *parameters*, or nil; *what* names what
+  # was signed, for the sentence. A certificate's signature is checked
+  # here, and an OCSP response's (std/ocsp).
+  def self.signature_error(key : RsaPublicKey | EcdsaPublicKey | Ed25519PublicKey, algorithm : String, parameters : DerValue?,
+                           signed : Array(UInt8), signature : Array(UInt8), what : String, signer : String) : String?
+    case algorithm
+    when X509Oids::SHA256_RSA, X509Oids::SHA384_RSA, X509Oids::SHA512_RSA
+      return "#{algorithm} with parameters that are not NULL" unless X509Keys.null_or_absent?(parameters)
+      return "an RSA signature under #{signer}'s #{X509Keys.kind(key)} key" unless key.is_a?(RsaPublicKey)
+      hash = case algorithm
+             when X509Oids::SHA256_RSA then RsaHash::SHA256
+             when X509Oids::SHA384_RSA then RsaHash::SHA384
+             else                           RsaHash::SHA512
+             end
+      return nil if key.verify_pkcs1v15(hash, signed, signature)
+    when X509Oids::RSA_PSS
+      return "an RSA signature under #{signer}'s #{X509Keys.kind(key)} key" unless key.is_a?(RsaPublicKey)
+      return "RSASSA-PSS without its parameters" unless parameters
+      pss = X509Keys.pss(parameters)
+      return pss if pss.is_a?(String)
+      return nil if key.verify_pss(pss[0], signed, signature, salt_length: pss[1])
+    when X509Oids::ECDSA_SHA256, X509Oids::ECDSA_SHA384, X509Oids::ECDSA_SHA512
+      return "#{algorithm} with parameters" unless parameters.nil?
+      return "an ECDSA signature under #{signer}'s #{X509Keys.kind(key)} key" unless key.is_a?(EcdsaPublicKey)
+      hash = case algorithm
+             when X509Oids::ECDSA_SHA256 then EcdsaHash::SHA256
+             when X509Oids::ECDSA_SHA384 then EcdsaHash::SHA384
+             else                             EcdsaHash::SHA512
+             end
+      return nil if key.verify(hash, signed, signature)
+    when X509Oids::ED25519
+      return "#{algorithm} with parameters" unless parameters.nil?
+      return "an Ed25519 signature under #{signer}'s #{X509Keys.kind(key)} key" unless key.is_a?(Ed25519PublicKey)
+      return nil if key.verify(signed, signature)
+    when X509Oids::SHA1_RSA, X509Oids::ECDSA_SHA1
+      return "#{what} is signed under SHA-1, which is refused"
+    else
+      return "#{what} is signed under #{algorithm}, which this does not check"
+    end
+    "#{what}'s signature is not #{signer}'s"
+  end
+
+  # Why *certificate*'s RSA key is under `MIN_RSA_BITS`, or nil.
+  def self.weak_key_error(certificate : Certificate) : String?
+    weak_key(certificate)
+  end
 
   # The DER of every block labelled *label* in a PEM text - `"CERTIFICATE"`
   # or `"PRIVATE KEY"` - each checked to be base64 before it is decoded.
@@ -505,6 +541,9 @@ struct X509Oids
   SERVER_AUTH            = "1.3.6.1.5.5.7.3.1"
   CLIENT_AUTH            = "1.3.6.1.5.5.7.3.2"
   ANY_EXTENDED_KEY_USAGE = "2.5.29.37.0"
+  OCSP_SIGNING           = "1.3.6.1.5.5.7.3.9"
+  OCSP_NOCHECK           = "1.3.6.1.5.5.7.48.1.5"
+  TLS_FEATURE            = "1.3.6.1.5.5.7.1.24"
 end
 
 # What a chain is checked for: a TLS server's certificate or a client's
@@ -544,6 +583,8 @@ class X509Extensions
   property subject_key_id : Array(UInt8)? = nil
   property authority_key_id : Array(UInt8)? = nil
   property unhandled_critical : Array(String) = [] of String
+  property tls_features : Array(Int32)? = nil
+  property ocsp_nocheck : Bool = false
 
   def initialize
   end
@@ -576,6 +617,21 @@ class X509Extensions
         end
       when X509Oids::CERTIFICATE_POLICIES
         X509Asn1.values(inner.sequence)!
+      when X509Oids::TLS_FEATURE
+        # RFC 7633 section 6: Features ::= SEQUENCE OF INTEGER, each a TLS
+        # extension's number.
+        features = [] of Int32
+        X509Asn1.values(inner.sequence)!.each do |feature|
+          number = X509Asn1.int(feature.integer)!
+          return X509Error.new("a TLS feature of #{number}, which names no extension") if number < 0 || number > 65535
+          features << number.to_i32
+        end
+        @tls_features = features
+      when X509Oids::OCSP_NOCHECK
+        # RFC 6960 section 4.2.2.2.1: its value is NULL.
+        null = inner.null
+        return X509Error.new("an id-pkix-ocsp-nocheck that is not NULL: #{null.message}") if null.is_a?(Asn1Error)
+        @ocsp_nocheck = true
       else
         @unhandled_critical << oid if critical
       end

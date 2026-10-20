@@ -509,7 +509,7 @@ prove_broken "the first candidate issuer only" "a decoy intermediate under the s
         return nil'
 prove_broken "SHA-1 taken" "a leaf signed under SHA-1: expected a refusal" \
   '    when X509Oids::SHA1_RSA, X509Oids::ECDSA_SHA1
-      return "#{@subject_name} is signed under SHA-1, which is refused"' '    when X509Oids::SHA1_RSA, X509Oids::ECDSA_SHA1
+      return "#{what} is signed under SHA-1, which is refused"' '    when X509Oids::SHA1_RSA, X509Oids::ECDSA_SHA1
       return nil'
 prove_broken "a wildcard for any number of labels" "a wildcard for two labels: expected a refusal" \
   '      return host[dot + 1, host.size - dot - 1] == rest' '      return host.ends_with?("." + rest)'
@@ -538,10 +538,12 @@ prove_broken "the purpose passed over: serverAuth asked of every chain" "a leaf 
 prove_broken "an Ed25519 key's parameters taken" "an Ed25519 key whose algorithm carries parameters refused" \
   '      return X509Error.new("an Ed25519 key with parameters, which RFC 8410 says are absent") unless algorithm.size == 1' ''
 prove_broken "an Ed25519 signature unchecked" "an Ed25519 leaf signed by another key under the root's name: expected a refusal" \
-  '      return nil if key.verify(@tbs, @signature)' '      return nil'
+  '      return nil if key.verify(signed, signature)' '      return nil'
 prove_broken "an Ed25519 signature's parameters taken" "an Ed25519 signature whose algorithm carries parameters: expected a refusal" \
   '    when X509Oids::ED25519
-      return "#{@signature_algorithm} with parameters" unless @signature_parameters.nil?' '    when X509Oids::ED25519'
+      return "#{algorithm} with parameters" unless parameters.nil?
+      return "an Ed25519 signature under' '    when X509Oids::ED25519
+      return "an Ed25519 signature under'
 prove_broken "a search for a chain without a bound" "seven intermediates signing each other: refused with" \
   '  MAX_SIGNATURE_CHECKS = 100' '  MAX_SIGNATURE_CHECKS = 1_000_000'
 prove_broken "an Ed25519 key off the curve taken" "an Ed25519 key off the curve refused" \

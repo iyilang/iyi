@@ -2450,7 +2450,7 @@ prove_broken "a NewSessionTicket cut short taken" "ticket-bad:" \
 prove_broken "the client's resumption master secret short of its Finished" "FAIL resumed by OpenSSL's tickets, the default suites" \
   '    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript + finished)' '    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript)' client-resume
 prove_broken "a second ClientHello's binder without the HelloRetryRequest" "FAIL resumed by OpenSSL's tickets, secp256r1 alone" \
-  '      hello = client_hello(random, session, group, share, cookie, @transcript)' '      hello = client_hello(random, session, group, share, cookie, [] of UInt8)' client-resume
+  '      hello = client_hello(random, session, shares, cookie, @transcript)' '      hello = client_hello(random, session, shares, cookie, [] of UInt8)' client-resume
 prove_broken "a binder that does not match taken" "FAIL resume-bad-binder " \
   '      unless Subtle.constant_time_compare(offer.binders[index], @schedule.binder(ticket.psk, transcript))' '      if false' server
 prove_broken "a ticket under another hash's suite taken" "FAIL resume-other-hash " \

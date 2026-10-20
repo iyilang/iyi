@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- **bench/std_fuzz_exercise.sh: the readers of std/asn1, std/x509,
+  std/tls, std/http and std/hpack fuzzed.** Seeds - certificates, PEM,
+  recorded and built TLS 1.3 and 1.2 handshakes, records, HTTP/1.1
+  heads, HTTP/2 frames, HPACK blocks - are mutated by a seeded `Random`
+  (bit flips, bytes in and out, truncation, lengths set to their bounds,
+  splices of two seeds, DER trees and TLS messages and HTTP/2 frames
+  changed a unit at a time) and fed to each module's public entry in
+  process, the handshakes and HTTP over a loopback connection with a
+  scripted peer that signs and seals what the template says. Every input
+  must answer a value or an error value, within a time bound and an
+  allocation bound. Long runs read 1,140,000 inputs; the two module
+  defects they found are fixed below and kept as regression inputs whose
+  fixes, undone in a copy, the gate catches. x509 is set beside Python's
+  cryptography (4,000 certificates: 3,853 alike; the rest judged against
+  RFC 5280 in the exercise's header, three leniencies there left to
+  refuse) and HPACK beside Python's hpack (4,000 alike). 4,000 inputs
+  of each pure target by default, `FUZZ_ITERATIONS` for more.
+
 ### Fixed
 
 - **std/asn1: a UniversalString whose character has its top bit set is

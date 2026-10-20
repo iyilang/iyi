@@ -74,6 +74,8 @@ SUITES12 = {
 }
 OFFER12 = (0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8)
 SIGALGS12 = (0x0807, 0x0403, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601)
+# TLS 1.2's groups, as the server names the one it agreed ("group=...").
+GROUPS12 = {0x1d: "X25519", 0x17: "secp256r1"}
 SENTINEL12 = b"DOWNGRD\x01"
 KEY_KIND = "ed25519"
 
@@ -1299,6 +1301,9 @@ def scenario12(c, name):
         got += data
     text = got.decode(errors="replace")
     assert "TLSv1.2" in text and SUITES12[suite][0] in text, f"the server says it agreed {text.splitlines()[-1]!r}"
+    # The group the server says it agreed is the one its ServerKeyExchange
+    # named (`named_group`, in TLS 1.2 as in 1.3).
+    assert f"group={GROUPS12[group]} " in text, f"the server names its group {text.split('group=')[-1].split()[0]!r}, not {GROUPS12[group]}"
     return "held", text, SUITES12[suite][0]
 
 

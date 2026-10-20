@@ -2588,6 +2588,10 @@ prove_broken "TLS_FALLBACK_SCSV unchecked" "FAIL 12-fallback " \
   '    if offer.suites.includes?(0x5600)' '    if false' server12
 prove_broken "ec_point_formats without uncompressed points taken" "FAIL 12-formats " \
   '      return TlsError.new("ec_point_formats without uncompressed points", TlsAlert::ILLEGAL_PARAMETER) unless listed.includes?(0_u8)' '' server12
+# named_group in TLS 1.2 too: the group the ServerKeyExchange named.
+prove_broken "the TLS 1.2 server's group left unnamed" "FAIL 12-ok " \
+  '    @named_group = group_name(group)
+    @cipher_suite = TlsSuites.name(@suite)' '    @cipher_suite = TlsSuites.name(@suite)' server12
 prove_broken "a P-256 certificate shown to a client whose groups leave its curve out" "FAIL 12-p256-no-curve " \
   '    if (groups = offer.groups) && identity.leaf.public_key.is_a?(EcdsaPublicKey) && !groups.includes?(GROUP_SECP256R1)' '    if false' server12
 prove_broken "PKCS #1 v1.5 put before RSA-PSS" "FAIL 12-ok " \

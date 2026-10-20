@@ -4193,6 +4193,7 @@ pub class TlsServer < TlsConnection
     judged = judge12(offer)
     return judged if judged.is_a?(TlsError)
     group, scheme = judged
+    @named_group = group_name(group)
     @cipher_suite = TlsSuites.name(@suite)
     @schedule = TlsKeySchedule.new(TlsSuites.sha384?(@suite))
     @server_name = offer.server_name

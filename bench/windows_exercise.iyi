@@ -4,7 +4,8 @@
 #   ./bin/iyi build --cross-compile --target x86_64-windows-msvc bench/windows_exercise.iyi
 #
 # Proves allocation, size classes, header layout, TEB and PE root discovery,
-# callee-saved register spilling, sweep reclamation, and address reuse.
+# callee-saved register spilling, sweep reclamation, and address reuse;
+# and that a fiber stack back from the pool keeps its frames.
 
 {% if flag?(:gc_none) || flag?(:gc_boehm) %}
   puts "windows: collector not enabled (-Dgc_none or -Dgc_boehm)"
@@ -64,6 +65,52 @@
       Seen.add(ptr)
       i = i + 1_u64
     end
+  end
+
+  # Where the frames below hand their buffers' addresses, so the compiler
+  # keeps every byte in memory across the calls rather than answering
+  # the comparisons from what it stored.
+  class StackSink
+    @@kept = 0_u64
+
+    @[NoInline]
+    def self.keep(address : UInt64) : Nil
+      @@kept = @@kept ^ address
+    end
+  end
+
+  # *depth* frames of a kilobyte each, every byte *marker* across the
+  # calls below it, then a frame past a page at the bottom: the bytes of
+  # the kilobytes that did not survive, counted on the way back up.
+  @[NoInline]
+  def self.stack_layers(depth : Int32, marker : UInt8) : Int32
+    pad = uninitialized UInt8[1024]
+    bytes = pointerof(pad).as(Pointer(UInt8))
+    i = 0
+    while i < 1024
+      bytes[i] = marker
+      i = i + 1
+    end
+    StackSink.keep(bytes.address)
+    lost = depth > 0 ? stack_layers(depth - 1, marker) : stack_big_frame
+    StackSink.keep(bytes.address)
+    i = 0
+    while i < 1024
+      lost = lost + 1 if bytes[i] != marker
+      i = i + 1
+    end
+    lost
+  end
+
+  # 16 KB of locals: a frame Windows' compilers open with `__chkstk`.
+  @[NoInline]
+  def self.stack_big_frame : Int32
+    big = uninitialized UInt8[16384]
+    bytes = pointerof(big).as(Pointer(UInt8))
+    bytes[0] = 1_u8
+    bytes[16383] = 1_u8
+    StackSink.keep(bytes.address)
+    bytes[0] == 1_u8 && bytes[16383] == 1_u8 ? 0 : 1
   end
   {% if flag?(:win32) %}
     puts "platform: windows-x86_64"
@@ -254,6 +301,33 @@
 
   raise "reuse: reclaimed address not reused" if reused == 0_u64
   puts "reuse: reclaimed addresses reused"
+
+  # 6. A fiber stack back from the pool keeps every byte of its frames.
+  #    The first task grows a fresh stack past 120 KB and dies, and the
+  #    pool hands that stack to the second, which fills 40 frames of a
+  #    kilobyte each and opens a 16 KB frame under them, the kind MSVC's
+  #    `__chkstk` opens by writing a zero to each page from the TEB's
+  #    StackLimit down. A stack settled with the limit a fresh one has,
+  #    above the pages the first task left committed, had those zeros
+  #    land in the second task's live frames: `bench/std_fuzz_exercise.iyi`
+  #    died of a memory fault at tls-client seed 8 on every Windows run.
+  grown = -1
+  group do |g|
+    first = g.spawn { stack_layers(120, 0xA5_u8) }
+    got = first.value
+    grown = got if got.is_a?(Int32)
+    0
+  end
+  reused_stack = -1
+  group do |g|
+    second = g.spawn { stack_layers(40, 0x5A_u8) }
+    got = second.value
+    reused_stack = got if got.is_a?(Int32)
+    0
+  end
+  raise "fibers: a fresh stack lost #{grown} bytes of its frames" unless grown == 0
+  raise "fibers: a stack back from the pool lost #{reused_stack} bytes of its frames to a frame past a page" unless reused_stack == 0
+  puts "fibers: a stack back from the pool kept every byte of its frames"
 
   puts "windows exercise: every check passed"
 {% end %}

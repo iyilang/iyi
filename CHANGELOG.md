@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A fiber stack back from the pool keeps its frames on Windows.** A
+  stack a finished task handed back was settled for the next task with
+  the StackLimit a fresh one has, above the pages the first task had
+  grown into. MSVC's `__chkstk` opens a frame past a page by writing a
+  zero to each page from that limit down, so a frame of that size cleared
+  the first byte of every page between the stale limit and itself, in the
+  live frames of the task running there: `bench/std_fuzz_exercise.iyi`
+  died of a memory fault, or of an illegal instruction, at tls-client
+  seed 8 on every Windows run, where a debugger saw `__chkstk` turn a
+  return address's last byte from 0x66 to 0x00 (CI job 118465323370). A
+  stack now carries the limit its last task died with, and
+  `bench/windows_exercise.iyi` holds a reused stack's frames to every
+  byte, with a copy of the runtime that settles the old way refused.
+
 ## 0.18.0 — 2026-10-18
 
 **iyi's own library reaches the network by itself: TLS 1.3 at both ends,

@@ -5,7 +5,8 @@
 #
 # Verifies clean cross-compilation for Windows x86_64, reads the stopped
 # thread's register spill out of the object, runs the exercise on the host,
-# and proves the checks can fail when the collector is broken.
+# and proves the checks can fail when the collector is broken, or a
+# fiber stack back from the pool is settled with a stale StackLimit.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -65,7 +66,7 @@ else
   status=1
 fi
 
-for check in "allocation:" "strings:" "stack:" "globals:" "registers:" "survival:" "sweep:" "reuse:" "windows exercise: every check passed"; do
+for check in "allocation:" "strings:" "stack:" "globals:" "registers:" "survival:" "sweep:" "reuse:" "fibers:" "windows exercise: every check passed"; do
   if grep -q "$check" "$WORK/host.out"; then
     echo "  verified: $check"
   else
@@ -624,15 +625,23 @@ esac
 echo
 echo "== Proving Checks Can Fail =="
 
+# $5, when given, is the runtime file the script patches; the prelude
+# otherwise.
 prove_fails_host() {
   local label="$1"
   local dir="$2"
   local phrase="$3"
   local script="$4"
+  local file="${5:-prelude.iyi}"
 
   mkdir -p "$WORK/$dir/iyi"
   cp -R "$REPO/src/iyi/." "$WORK/$dir/iyi/"
-  awk "$script" "$REPO/src/iyi/prelude.iyi" > "$WORK/$dir/iyi/prelude.iyi"
+  awk "$script" "$REPO/src/iyi/$file" > "$WORK/$dir/iyi/$file"
+  if cmp -s "$REPO/src/iyi/$file" "$WORK/$dir/iyi/$file"; then
+    echo "  $label: the patch changed nothing"
+    status=1
+    return
+  fi
   if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build \
        -o "$WORK/$dir/program" "$REPO/bench/windows_exercise.iyi" \
        >"$WORK/$dir/build.log" 2>&1; then
@@ -682,6 +691,18 @@ prove_fails_host "global root check" noglobals "survival: global root" \
 # Failure test 3: Break register spill
 prove_fails_host "register spill check" nospill "registers: hidden value not found in register spill" \
   '{ if ($0 ~ /def self\.spill_registers/) { print; print "  return"; getline; next } print }'
+
+# Failure test 4: a stack back from the pool settled with a fresh stack's
+# StackLimit, as every one was. Only Windows has the TEB word and the
+# `__chkstk` that writes under it, so elsewhere the patch changes nothing
+# the exercise can see.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails_host "a pooled stack's StackLimit" stalelimit "fibers: a stack back from the pool lost" \
+      '{ sub(/Pointer\(UInt64\)\.new\(saved \+ 8_u64\)\.value = Pointer\(UInt64\)\.new\(top - 16_u64\)\.value/, "Pointer(UInt64).new(saved + 8_u64).value = top - INITIAL_COMMIT"); print }' \
+      concurrency.iyi ;;
+  *) echo "  a pooled stack's StackLimit: Windows' TEB and its __chkstk, proved there" ;;
+esac
 
 echo
 if [ "$status" -eq 0 ]; then

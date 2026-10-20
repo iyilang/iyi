@@ -2531,7 +2531,9 @@ prove_broken "a resumption under another hash's suite taken" "resume-hash:" \
 prove_broken "a Certificate taken in a resumed handshake" "resume-cert:" \
   '    return server_finished(message, server_secret) if @resumed' '    return server_finished(message, server_secret) if @resumed && message[0] != 11_u8' scenarios
 prove_broken "tickets kept past the session's limit" "ticket-many:" \
-  '    @tickets.shift if @tickets.size > MAX_TICKETS' '' scenarios
+  '    while @tickets.size > @limit
+      @tickets.shift
+    end' '' scenarios
 prove_broken "a ticket past 16 KiB kept" "ticket-huge:" \
   '    return nil if lifetime == 0_i64 || ticket.size > TlsSession::MAX_TICKET' '    return nil if lifetime == 0_i64' scenarios
 prove_broken "a NewSessionTicket cut short taken" "ticket-bad:" \

@@ -188,7 +188,8 @@
 # ticket of another hash's suite. A server that passes it over is answered
 # by a full handshake; one that takes an identity not offered, or takes it
 # under another hash's suite, or sends a certificate after, is refused. A
-# session holds eight tickets at most, each of 16 KiB at most.
+# session holds eight tickets at most, or the fewer it was made for, each
+# of 16 KiB at most. std/http's `HTTPClient` holds one for each origin.
 #
 # TLS 1.2 at the server, and only when asked: `config.min_version =
 # TlsVersion::TLS12` on a `TlsServerConfig`, for the clients that never
@@ -2548,8 +2549,12 @@ pub class TlsSession
   PSK_DHE_KE = 1_u8
 
   @tickets : Array(TlsHeldTicket) = [] of TlsHeldTicket
+  @limit : Int32
 
-  def initialize
+  # A session holding at most *limit* tickets, held to 0 ..
+  # `MAX_TICKETS`: std/http's `HTTPClient` keeps fewer for each origin.
+  def initialize(limit : Int32 = MAX_TICKETS)
+    @limit = limit < 0 ? 0 : (limit > MAX_TICKETS ? MAX_TICKETS : limit)
   end
 
   # How many tickets are held.
@@ -2575,10 +2580,12 @@ pub class TlsSession
     nil
   end
 
-  # *ticket* held, the oldest gone past `MAX_TICKETS`.
+  # *ticket* held, the oldest gone past the session's limit.
   def keep(ticket : TlsHeldTicket) : Nil
     @tickets << ticket
-    @tickets.shift if @tickets.size > MAX_TICKETS
+    while @tickets.size > @limit
+      @tickets.shift
+    end
   end
 end
 

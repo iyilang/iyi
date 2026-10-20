@@ -774,6 +774,191 @@ PY
 fi
 
 echo
+echo "== TLS resumption: an HTTPClient's tickets (bench/std_http_resume.iyi)"
+# A second connection to an origin resumes by a ticket the first was sent:
+# std/http's own server says so (`Request#tls_resumed?`), and so does
+# OpenSSL's s_server, whose -www page reads "Reused, TLSv1.3" as the tls
+# gate reads it. Whom a ticket goes to is read from what the server did
+# with the ClientHello and from the ClientHello's own bytes: three of the
+# iyi server's listeners share the keys their tickets are sealed under,
+# so a ticket one origin sent, offered to another, would resume there;
+# and s_server -msg prints every ClientHello it read, whose extensions
+# say whether it carried a ticket (pre_shared_key, 41) or asked to send
+# early data (early_data, 42). After `HTTP.tls_config`'s roots are
+# assigned again - the same root, in an array of its own - the next
+# connection is a full handshake that offers no ticket, and under roots
+# that do not reach the server it is refused, where a ticket would have
+# skipped the check. The limits: four tickets an origin by default of the
+# eight a server sends, two when asked, room for two origins at two each,
+# and none when none are kept. No early data: s_server takes 0-RTT under
+# -early_data and its tickets allow it, but no ClientHello asks. Then
+# copies of the module with the sessions kept under the origin alone (the
+# configuration ignored), a ticket offered to any origin, no session
+# handed to the handshake, early data sent, and each origin's limit and
+# the total left out, each caught at the line that names it.
+RESUME_SELF="same origin: resumed=no then resumed=yes, the response says true, 1 resumed
+another origin: resumed=no then resumed=yes
+new roots: resumed=no then resumed=yes
+other roots: HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=http gate root, the issuer of CN=localhost (bad_certificate)
+an origin's tickets: 4 of 8 by default, 2 of 8 when 2 are asked for
+tickets in all: 4 held over four origins, 0 of the two oldest, then resumed=no at the oldest and resumed=yes at the newest
+none kept: resumed=no then resumed=no, 0 held
+kept: resumed=no, 1 made, 1 reused"
+RESUME_SSERVER="s_server: New then Reused, the response says true
+s_server under new roots: New then Reused
+s_server read ClientHellos with: no ticket, a ticket, no ticket, a ticket; early data asked in 0, EndOfEarlyData 0"
+# macOS's `openssl` is LibreSSL; Homebrew's OpenSSL 3 is asked where it is
+# installed, as the tls gate does. Windows' s_server is not driven here,
+# and neither is LibreSSL's, should it be the one found: its s_server
+# reads the gate's flags and prints its -msg dump as OpenSSL's does by
+# no promise this gate has checked.
+OPENSSL=openssl
+for candidate in /opt/homebrew/opt/openssl@3/bin/openssl /usr/local/opt/openssl@3/bin/openssl; do
+  if [ -x "$candidate" ]; then
+    OPENSSL="$candidate"
+    break
+  fi
+done
+resume_openssl=yes
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT) resume_openssl=no ;;
+esac
+if [ -z "$PY" ] || ! command -v "$OPENSSL" >/dev/null 2>&1 || ! "$OPENSSL" version 2>/dev/null | grep -q '^OpenSSL '; then
+  resume_openssl=no
+fi
+# resume_run <binary> <self|s_server|both>: the binary's `self` lines;
+# and its `s_server` lines against OpenSSL's server, then what that
+# server read: each ClientHello's extensions, from its -msg dump.
+resume_run() {
+  local bin="$1" which="$2" port pid log="$WORK/resume-s_server.log"
+  if [ "$which" != s_server ]; then
+    timeout 60 "$bin" self "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1
+  fi
+  [ "$which" != self ] && [ "$resume_openssl" = yes ] || return 0
+  port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+  "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -msg -tls1_3 -early_data -cert "$WORK/tls/leaf.pem" -key "$WORK/tls/leaf.key" \
+    >"$log" 2>&1 </dev/null &
+  pid=$!
+  for _ in $(seq 1 50); do
+    grep -q ACCEPT "$log" && break
+    sleep 0.1
+  done
+  timeout 60 "$bin" s_server "$port" "$WORK/tls/root.pem" 2>&1
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  "$PY" - "$log" <<'PY'
+import re, sys
+lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+hellos = []
+i = 0
+while i < len(lines):
+    if lines[i].startswith("<<<") and lines[i].endswith(", ClientHello"):
+        data = bytearray()
+        i += 1
+        while i < len(lines) and re.fullmatch(r"\s+[0-9a-f]{2}( [0-9a-f]{2})*\s*", lines[i]):
+            data += bytes.fromhex(lines[i].replace(" ", ""))
+            i += 1
+        hellos.append(bytes(data))
+        continue
+    i += 1
+def extensions(m):
+    # The handshake header, version and random; then the session ID,
+    # the suites and the compression methods, each led by its length.
+    at = 4 + 2 + 32
+    at += 1 + m[at]
+    at += 2 + int.from_bytes(m[at:at + 2], "big")
+    at += 1 + m[at]
+    end = at + 2 + int.from_bytes(m[at:at + 2], "big")
+    at += 2
+    found = []
+    while at + 4 <= end:
+        found.append(int.from_bytes(m[at:at + 2], "big"))
+        at += 4 + int.from_bytes(m[at + 2:at + 4], "big")
+    return found
+seen = [extensions(h) for h in hellos]
+tickets = ", ".join("a ticket" if 41 in e else "no ticket" for e in seen)
+early = sum(1 for e in seen if 42 in e)
+ended = sum(1 for line in lines if line.endswith(", EndOfEarlyData"))
+print(f"s_server read ClientHellos with: {tickets}; early data asked in {early}, EndOfEarlyData {ended}")
+PY
+}
+if [ ! -s "$WORK/tls/root.pem" ]; then
+  echo "  skipped: the https:// section above made no certificates (no python3 with ssl and cryptography)"
+elif ! "$IYI" build -o "$WORK/resume" "$REPO/bench/std_http_resume.iyi" >"$WORK/resume.build" 2>&1; then
+  echo "  bench/std_http_resume.iyi did not build"
+  sed -n '1,8p' "$WORK/resume.build"
+  status=1
+else
+  resume_expected="$RESUME_SELF"
+  [ "$resume_openssl" = yes ] && resume_expected="$RESUME_SELF
+$RESUME_SSERVER"
+  said=$(resume_run "$WORK/resume" both)
+  if [ "$said" = "$resume_expected" ]; then
+    printf '%s\n' "$said" | sed 's/^/  /'
+    [ "$resume_openssl" = yes ] || echo "  no OpenSSL (LibreSSL is not it) with python3 here, or Windows, whose s_server this gate does not drive: s_server goes unasked, and so does the check that no early data is sent"
+  else
+    echo "  the client's resumption is not the expected one:"
+    printf '%s\n' "$said" | sed 's/^/    got:  /'
+    printf '%s\n' "$resume_expected" | sed 's/^/    want: /'
+    status=1
+  fi
+  # resume_breaks <label> <old> <new> <line>: the program over a copy of
+  # std/http with <old> made <new> must answer the line starting with
+  # <line> otherwise than the module does.
+  resume_breaks() {
+    local label="$1" old="$2" new="$3" line="$4" which=self want got
+    case "$line" in
+      s_server*)
+        which=s_server
+        if [ "$resume_openssl" != yes ]; then
+          echo "  $label: skipped, no OpenSSL here to read the ClientHello"
+          return
+        fi
+        ;;
+    esac
+    rm -rf "$WORK/resumebreak" && mkdir -p "$WORK/resumebreak/std"
+    if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/http.iyi" "$WORK/resumebreak/std/http.iyi" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not unique")
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+    then
+      echo "  $label: the patch did not apply"
+      status=1
+      return
+    fi
+    if ! IYI_PATH="$WORK/resumebreak${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/resume-broken" "$REPO/bench/std_http_resume.iyi" >"$WORK/resume-broken.build" 2>&1; then
+      echo "  $label: the broken copy did not build"
+      sed -n '1,6p' "$WORK/resume-broken.build" | sed 's/^/    /'
+      status=1
+      return
+    fi
+    want="$(printf '%s\n' "$resume_expected" | grep -m1 "^$line")"
+    got="$(resume_run "$WORK/resume-broken" "$which" | grep -m1 "^$line")"
+    if [ -n "$got" ] && [ "$got" != "$want" ]; then
+      echo "  $label: caught at \"$line\": $(printf '%s' "$got" | cut -c1-110)"
+    else
+      echo "  $label: not caught at \"$line\" (it answered \"$got\")"
+      status=1
+    fi
+  }
+  resume_breaks "sessions kept under the origin alone, the configuration ignored" \
+    '      elsif held.under.same?(tls)' '      elsif true' "new roots"
+  resume_breaks "a ticket offered to another origin" \
+    '      if held.origin != origin' '      if false' "another origin"
+  resume_breaks "resumption never attempted" \
+    'TlsClient::HANDSHAKE_TIMEOUT_MS, session)' 'TlsClient::HANDSHAKE_TIMEOUT_MS, nil)' "same origin"
+  resume_breaks "early data (0-RTT) sent with a ticket" \
+    'TlsClient::HANDSHAKE_TIMEOUT_MS, session)' 'TlsClient::HANDSHAKE_TIMEOUT_MS, session, "GET / HTTP/1.0\r\n\r\n")' "s_server read ClientHellos"
+  resume_breaks "an origin's tickets unbounded by the client" \
+    'TlsSession.new(@origin_tickets)' 'TlsSession.new' "an origin's tickets"
+  resume_breaks "the tickets in all unbounded" \
+    '    while kept.size >= room' '    while false' "tickets in all"
+fi
+
+echo
 echo "== HTTP/2: the server and the client together (bench/http2_exercise.iyi)"
 # h2c with prior knowledge both ways: every shape of body through the
 # windows, gzip, cookies, a redirect, 200 requests on one connection, and

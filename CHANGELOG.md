@@ -196,8 +196,9 @@
   4.2.10 forbids - `TlsClient#early_data` (`TlsEarlyData`) says Accepted,
   Resent, Late or Withheld. It fails a TLS 1.2 ServerHello after early
   data (appendix D.3). std/http takes none - its server passes
-  `early_data: false` whatever the config allows - and sends none, as its
-  client keeps no session: HTTP cannot tell a request safe to replay.
+  `early_data: false` whatever the config allows - and sends none: its
+  client resumes sessions but never sends early data, as HTTP cannot
+  tell a request safe to replay.
   Held by `bench/std_tls_exercise.sh`: RFC 8448's early traffic secret,
   its "ABCDEF" and EndOfEarlyData records sealed byte for byte, the
   Finished and resumption secret after them; the guard's single use,
@@ -216,6 +217,41 @@
   it, another ALPN, an acceptance of nothing sent); and seventeen broken
   copies, among them a replay taken, early data delivered as 1-RTT, the
   size limit, freshness window, ALPN and suite checks ignored.
+- **std/http's `HTTPClient` resumes TLS sessions by the tickets servers
+  send it.** Each `https://` origin - scheme, host and port, whichever
+  proxy's tunnel is between - has a `TlsSession` in the client, kept under
+  the `HTTP.tls_config` its tickets came under by the same identity
+  (`TlsMadeUnder`) that already kept a pooled connection from carrying a
+  request made under another configuration; a new connection to the
+  origin hands it to the handshake, and the server's new tickets go into
+  it. A resumed handshake checks no certificate, so a ticket is never
+  offered to another origin nor under another trust store or identity:
+  after `HTTP.tls_config=`, or roots or an identity assigned in place, the
+  next connection is a full handshake, and the origin's tickets from
+  under the old configuration are dropped. At most `origin_tickets` (4)
+  are kept an origin and `tickets` (256) in all - as many origins as that
+  leaves room for, the one longest unused dropped first; 0 keeps none.
+  `TlsSession.new(limit)` holds a session to fewer than its eight.
+  0-RTT stays off: no early data goes with a ticket, whatever it allows.
+  `HTTPClient#connections_resumed`, `#tickets_held`,
+  `Response#tls_resumed?` and, at the server, `Request#tls_resumed?` say
+  what was kept and used. Measured with `bench/std_http_resume.iyi
+  --release` on a 12-core machine other jobs shared, medians of 200, the
+  median of three runs: the handshake took 0.96 ms full and 0.51 resumed
+  against std/http's server, 1.03 and 0.57 against OpenSSL 3.5's
+  s_server; a GET on a new connection took 82.98 ms and 82.00 against
+  std/http's server, 42.04 and 40.96 against s_server, nearly all of it
+  waits that are not the handshake's (curl's GET to the same iyi server
+  took 42 ms, to s_server 2). Held by `bench/std_http_exercise.sh`: a
+  second connection resumed as std/http's server and s_server's page
+  ("Reused, TLSv1.3") both say; a ticket from one origin not offered to
+  another whose server would take it; after the roots change, a full
+  handshake whose ClientHello, as s_server's `-msg` dump shows it, has no
+  pre_shared_key, and other roots refused; the limits; no ClientHello
+  asking for early data from s_server, whose tickets allow it; and six
+  broken copies (the configuration ignored, a ticket offered to any
+  origin, no session handed over, early data sent, each limit left out),
+  each caught at the line that names it.
 - **std/mlkem: ML-KEM-768 (FIPS 203), the post-quantum key-encapsulation
   mechanism, written in iyi and constant-time on its secrets.**
   `MlKem768PrivateKey.from_seed(d || z)` is Algorithm 16's key

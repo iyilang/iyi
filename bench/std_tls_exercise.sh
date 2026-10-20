@@ -2593,7 +2593,9 @@ prove_broken "the TLS 1.2 server's group left unnamed" "FAIL 12-ok " \
   '    @named_group = group_name(group)
     @cipher_suite = TlsSuites.name(@suite)' '    @cipher_suite = TlsSuites.name(@suite)' server12
 prove_broken "a P-256 certificate shown to a client whose groups leave its curve out" "FAIL 12-p256-no-curve " \
-  '    if (groups = offer.groups) && identity.leaf.public_key.is_a?(EcdsaPublicKey) && !groups.includes?(GROUP_SECP256R1)' '    if false' server12
+  '      unless groups.includes?(curve)
+        return "the client'"'"'s supported_groups leave out' '      if false
+        return "the client'"'"'s supported_groups leave out' server12
 prove_broken "PKCS #1 v1.5 put before RSA-PSS" "FAIL 12-ok " \
   '    pss = scheme_for(offered)' '    pss = @rsa ? nil : scheme_for(offered)' server12
 prove_broken "an RSA key that never signs under PKCS #1 v1.5" "FAIL 12-pkcs1 " \

@@ -113,6 +113,17 @@ SCENARIOS = {
     "ticket-many": "twenty NewSessionTickets before the echo",
     "ticket-huge": "a NewSessionTicket whose ticket is 16,385 bytes, over two records",
     "ticket-bad": "a NewSessionTicket cut short",
+    # Early data: the first connection's ticket allows 1024 bytes (4 for
+    # early-small, none for early-unoffered); the second's early data is
+    # taken (early: read to EndOfEarlyData under the early keys, echoed as
+    # "early:..."), refused and passed over (early-refused, and early-alpn,
+    # which chooses h2 where the ticket's protocol was http/1.1), must not
+    # come (early-small), or is "taken" though none came (early-unoffered).
+    "early": "early data taken",
+    "early-refused": "early data refused and passed over",
+    "early-small": "a ticket allowing 4 bytes, for 5 of early data",
+    "early-alpn": "early data under an http/1.1 ticket, h2 chosen and the early data refused",
+    "early-unoffered": "early_data in EncryptedExtensions with no early data sent",
 }
 
 # The tickets issued, by their bytes: (PSK, suite, age_add, when).
@@ -332,7 +343,7 @@ class Conn:
             return
         suite = {"aes256": 0x1302, "chacha": 0x1303, "suite-unoffered": 0x1304}.get(s, 0x1301)
         psk = None
-        if s.startswith("resume") and 41 in exts:
+        if s.startswith(("resume", "early")) and 41 in exts:
             judged = self.judge_psk(ch, exts)
             if isinstance(judged, int):
                 self.sock.sendall(plain(21, bytes([2, judged])))
@@ -424,6 +435,14 @@ class Conn:
             ee_ext += ext(16, struct.pack(">H", 7) + b"\x06spdy/3")
         if s == "unsolicited-ext":
             ee_ext += ext(0xff01, b"")
+        if s == "early-alpn" and alpn:
+            # http/1.1 for the ticket, h2 for the connection that resumes.
+            ee_ext += ext(16, struct.pack(">H", 9) + b"\x08http/1.1") if psk is None else ext(16, struct.pack(">H", 3) + b"\x02h2")
+        if psk is not None and s == "early-small" and 42 in exts:
+            self.sock.sendall(plain(21, bytes([2, 47])))
+            return
+        if psk is not None and s in ("early", "early-unoffered"):
+            ee_ext += ext(42, b"")
         if s == "sni-ack-data":
             ee_ext += ext(0, b"\x00")
         messages = [message(8, struct.pack(">H", len(ee_ext)) + ee_ext)]
@@ -495,7 +514,7 @@ class Conn:
             self.sock.sendall(writer.seal(22, flight, corrupt=(s == "bad-record-mac")))
         if s in ("bad-finished", "bad-cv", "cv-pkcs1", "cv-wrong-curve", "unsolicited-ext", "alpn-unoffered",
                  "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs", "cert-many", "ku-no-sign",
-                 "certreq-context", "cert-entry-ext", "sni-ack-data") or (psk is not None and s == "resume-cert"):
+                 "certreq-context", "cert-entry-ext", "sni-ack-data") or (psk is not None and s in ("resume-cert", "early-unoffered")):
             return
 
         master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))
@@ -503,6 +522,25 @@ class Conn:
         s_ap = schedule.derive(master, b"s ap traffic", transcript)
         # The client's flight: its ChangeCipherSpec, then under c_hs.
         expected_client = transcript
+        early_data = b""
+        if psk is not None and s == "early":
+            # The early data, under the client's early traffic keys over the
+            # ClientHello, to EndOfEarlyData, which joins the transcript.
+            early_reader = Cipher(schedule, schedule.derive(schedule.extract(bytes(schedule.size), psk), b"c e traffic", ch))
+            while True:
+                header, body = self.record()
+                if header[0] == 20:
+                    continue
+                type_, data = early_reader.open(header, body)
+                if type_ == 23:
+                    early_data += data
+                    continue
+                assert type_ == 22 and data == message(5, b""), "no EndOfEarlyData after the early data"
+                break
+            expected_client += message(5, b"")
+        # Early data refused: what does not open under the handshake keys
+        # is passed over (section 4.2.10).
+        skipping = psk is not None and 42 in exts and s != "early"
         answered = False
         verified = False
         # Alerts go under the server's application keys: its own Finished
@@ -518,7 +556,12 @@ class Conn:
                 header, body = self.record()
                 if header[0] == 20:
                     continue
-                type_, data = reader.open(header, body)
+                try:
+                    type_, data = reader.open(header, body)
+                except Exception:
+                    if skipping:
+                        continue
+                    raise
                 assert type_ == 22, f"a record of type {type_} in the client's flight"
                 assert len(data) <= 16384, f"a record of {len(data)} bytes of content, past 2^14"
                 pending += data
@@ -575,7 +618,9 @@ class Conn:
             self.sock.sendall(writer.seal(22, message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04abcd\x00\x00")))
         if s == "ticket-bad":
             self.sock.sendall(writer.seal(22, message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04ab")))
-        if (s.startswith("resume") and psk is None) or s in ("ticket-many", "ticket-huge"):
+        if early_data:
+            self.sock.sendall(writer.seal(23, b"early:" + early_data))
+        if (s.startswith(("resume", "early")) and psk is None) or s in ("ticket-many", "ticket-huge"):
             # Real tickets: each PSK from the resumption master secret, over
             # the handshake to the client's Finished, and its nonce.
             res_master = schedule.derive(master, b"res master", expected_client + content)
@@ -585,7 +630,10 @@ class Conn:
                 ticket = os.urandom(16385 if s == "ticket-huge" else 32)
                 age_add = int.from_bytes(os.urandom(4), "big")
                 TICKETS[ticket] = (schedule.expand_label(res_master, b"resumption", nonce, schedule.size), suite, age_add, time.monotonic())
-                nst = message(4, struct.pack(">IIB", 3600, age_add, len(nonce)) + nonce + struct.pack(">H", len(ticket)) + ticket + b"\x00\x00")
+                allows = {"early-small": 4, "early-unoffered": 0}.get(s, 1024 if s.startswith("early") else 0)
+                extensions = ext(42, struct.pack(">I", allows)) if allows else b""
+                nst = message(4, struct.pack(">IIB", 3600, age_add, len(nonce)) + nonce + struct.pack(">H", len(ticket)) + ticket +
+                              struct.pack(">H", len(extensions)) + extensions)
                 for k in range(0, len(nst), 16384):
                     out += writer.seal(22, nst[k:k + 16384])
             self.sock.sendall(out)

@@ -169,6 +169,53 @@
   The scripted client's early-data scenarios now send a well-formed
   pre_shared_key: its identity's length said 5 for a 6-byte name, which
   the server passed over until it read pre_shared_key.
+- **std/tls sends and takes early data (0-RTT, RFC 8446 sections 2.3,
+  4.2.10 and 8), opt-in at both ends, behind a replay guard.** A server
+  whose `TlsServerConfig#max_early_data` is set (0 unless set, 256 KiB at
+  most) announces it in its tickets' early_data extension and takes a
+  resumed ClientHello's early data only for its first identity, under the
+  ticket's own suite and ALPN protocol, without a HelloRetryRequest, while
+  the ticket age the client gives is within 10 s of the server's own
+  count, and once: `TlsReplayGuard` keeps each taken ClientHello's binder
+  for two windows (the most a fresh replay can trail its original by) and
+  refuses one it holds, or any while it holds `capacity` (65,536 unless
+  set) - it fails closed. Its header says what it does not prevent: a
+  client that sends a request again after a broken connection runs it
+  twice, so only what is safe twice may come early; tickets and the guard
+  live in one process, so no other server takes them. `TlsServer.over`
+  answers once the server's Finished is out; `read_early` reads the early
+  data apart from `read`, which never returns it; a write goes at once
+  (0.5-RTT); `finish` - which `read` calls - reads EndOfEarlyData and the
+  client's Finished. Early data past the ticket's allowance is refused
+  with unexpected_message, a record that does not open with
+  bad_record_mac, a Finished where EndOfEarlyData belongs with
+  unexpected_message. A client given `early_data:` sends it with the
+  ClientHello when its ticket allows that much, then EndOfEarlyData when
+  it was taken; otherwise it sends it after the handshake, except when
+  the server chose another ALPN protocol than the ticket's, which section
+  4.2.10 forbids - `TlsClient#early_data` (`TlsEarlyData`) says Accepted,
+  Resent, Late or Withheld. It fails a TLS 1.2 ServerHello after early
+  data (appendix D.3). std/http takes none - its server passes
+  `early_data: false` whatever the config allows - and sends none, as its
+  client keeps no session: HTTP cannot tell a request safe to replay.
+  Held by `bench/std_tls_exercise.sh`: RFC 8448's early traffic secret,
+  its "ABCDEF" and EndOfEarlyData records sealed byte for byte, the
+  Finished and resumption secret after them; the guard's single use,
+  capacity, two windows and freshness on a clock the exercise sets;
+  OpenSSL 3.5's `s_client -early_data` sending GET / to the server on
+  each of its four keys ("Early data was accepted", answered from the
+  early data before the client's Finished); the client's early data to
+  `s_server -early_data` ("Early data received"), to one that takes none
+  (sent late) and through a HelloRetryRequest (sent again); the std/tls
+  client's GET / taken early by the std/tls server; twelve scripted-client
+  scenarios against the server (taken, a request answered at 0.5-RTT, a
+  replay of the same bytes refused, 16,385 bytes past 16,384, a stale
+  age, another ALPN, another suite, the ticket second, a HelloRetryRequest,
+  a bad record, a Finished early, a ticket that allows none) and five
+  scripted-server ones against the client (taken, refused, too small for
+  it, another ALPN, an acceptance of nothing sent); and seventeen broken
+  copies, among them a replay taken, early data delivered as 1-RTT, the
+  size limit, freshness window, ALPN and suite checks ignored.
 
 ### Changed
 

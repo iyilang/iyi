@@ -41,8 +41,8 @@
 # application keys. There is no way to turn any of this off. A server that
 # asks for a certificate is sent `TlsConfig#identity`'s chain and a
 # CertificateVerify when its request names the identity's scheme, and an
-# empty Certificate otherwise, which section 4.4.2 allows. Resumption is
-# below; 0-RTT is not here: no early data is sent.
+# empty Certificate otherwise, which section 4.4.2 allows. Resumption and
+# early data are below.
 #
 # TLS 1.2 at the client, and only when asked: `config.min_version =
 # TlsVersion::TLS12`. It is here for the servers that never moved past
@@ -114,8 +114,9 @@
 # constant-time ECDH, its point checked to be on the curve. A ClientHello
 # with a share in neither is asked again (HelloRetryRequest, no cookie)
 # for X25519, or for secp256r1 where X25519 is not among its groups.
-# Early data is refused: its records are passed over, up to sixteen of the
-# largest, as section 4.2.10 says.
+# Early data a server does not take - none unless asked for, below - is
+# passed over, up to sixteen of the largest records, as section 4.2.10
+# says.
 # With `client_roots` the server asks for a client's certificate, checks
 # its chain for clientAuth and its CertificateVerify, and refuses a client
 # that sends none (certificate_required) unless `client_required` is
@@ -188,6 +189,28 @@
 # 1.2 handshake measured as the 1.3 ones above, in one run here beside
 # 1.3's under other load: 0.67 ms with an Ed25519 key (1.3: 0.74), 0.71
 # with P-256 (0.81), 1.79 with RSA-2048 (1.88), 7.85 with RSA-4096 (7.76).
+# Early data (0-RTT, RFC 8446 sections 2.3, 4.2.10 and 8), opt-in at both
+# ends. A server whose `max_early_data` is set (0 unless set, at most 256
+# KiB) says so in its tickets, and takes a resumed ClientHello's early
+# data only for its first identity, under the ticket's own suite and
+# protocol, with no HelloRetryRequest, while the ticket age the client
+# gives is within 10 s of the server's own count since the ticket went,
+# and once: `TlsReplayGuard` records each ClientHello whose early data is
+# taken by its binder for two windows, and refuses one it holds, or any
+# when it is full (65,536 by default). Taken, the handshake answers once
+# the server's Finished is out: `TlsServer#read_early` reads the early
+# data - never `read`, so a program can tell what may be a replay - a
+# write goes at once (0.5-RTT), and `finish`, which `read` calls, reads
+# EndOfEarlyData and the client's Finished; past the ticket's allowance
+# is unexpected_message, a record that does not open bad_record_mac.
+# What the guard does not do is in its own comment: chiefly, a client
+# that sends a request again after a broken connection runs it twice, so
+# only what is safe twice may come early. A client given `early_data:`
+# sends it with the ClientHello when its ticket allows that much,
+# EndOfEarlyData after the server's flight when it was taken, and
+# otherwise sends it after the handshake - unless the server chose
+# another protocol than the ticket's, for which section 4.2.10 forbids
+# that; `TlsClient#early_data` says which. std/http takes and sends none.
 #
 # A record is at most 2^14 bytes of content, as section 5.1 holds both
 # sides to, and a TLS 1.3 record's inner plaintext - content type and
@@ -301,6 +324,27 @@ pub enum TlsVersion
   TLS13
 end
 
+# What became of the early data a client was given (`TlsClient.connect`'s
+# *early_data*).
+pub enum TlsEarlyData
+  # None was given.
+  Unused
+  # Sent with the ClientHello and taken by the server (0-RTT): a replay of
+  # it may be taken too, where the server's guard does not reach (RFC 8446
+  # section 8).
+  Accepted
+  # Sent with the ClientHello, refused, and sent again after the
+  # handshake, which chose the protocol it was written for.
+  Resent
+  # Not sent early - no ticket allowed it, or not that much of it - and
+  # sent after the handshake.
+  Late
+  # Sent with the ClientHello and refused, and not sent again: the server
+  # chose another protocol by ALPN than the ticket's, for which section
+  # 4.2.10 forbids sending it again unasked. The caller decides.
+  Withheld
+end
+
 # What a connection is checked against and offers.
 pub class TlsConfig
   # The roots a server's chain must reach; the system's when nil, read
@@ -408,6 +452,12 @@ pub class TlsKeySchedule
   # secret (section 4.6.1): one ticket's, and no other's.
   def resumption_psk(secret : Array(UInt8), nonce : Array(UInt8)) : Array(UInt8)
     expand_label(secret, "resumption", nonce, @hash_size)
+  end
+
+  # The client's early traffic secret (section 7.1), over the ClientHello
+  # alone: what 0-RTT data and EndOfEarlyData go under.
+  def early_traffic(psk : Array(UInt8), hello : Array(UInt8)) : Array(UInt8)
+    derive_secret(early_secret(psk), "c e traffic", hello)
   end
 
   # A Finished message's verify_data under *secret* (section 4.4.4).
@@ -1444,6 +1494,19 @@ pub class TlsClient < TlsConnection
   @session : TlsSession?
   # The ticket this ClientHello offers, if it offers one.
   @offered : TlsHeldTicket? = nil
+  # What the caller gave to send early, and what came of it: whether the
+  # ClientHello offered it (early_data, and the records after it), whether
+  # the server's EncryptedExtensions took it, and the key it went under.
+  @early_bytes : Array(UInt8)? = nil
+  @early_sent : Bool = false
+  @early_taken : Bool = false
+  @early_writer : TlsRecordCipher? = nil
+  # Whether a HelloRetryRequest came, after which nothing is early.
+  @retried : Bool = false
+  # The protocol the early data was sent for: its ticket's.
+  @early_alpn : String? = nil
+  # What became of the early data given to `connect` or `over`.
+  getter early_data : TlsEarlyData = TlsEarlyData::Unused
 
   SIGNATURE_SCHEMES = [0x0403, 0x0503, 0x0603, 0x0807, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601]
 
@@ -1478,20 +1541,35 @@ pub class TlsClient < TlsConnection
   # A connection to *host* on *port*, its handshake done and the server's
   # certificate checked for *host* - or, with a *session* that holds a
   # ticket for *host*, resumed, and the tickets the server sends kept there.
-  def self.connect(host : String, port : Int32, config : TlsConfig = TlsConfig.new, timeout_ms : Int32 = -1, session : TlsSession? = nil) : TlsClient | TlsError
+  # *early_data* goes with the ClientHello (0-RTT, RFC 8446 section 2.3)
+  # when the ticket taken allows that much, and after the handshake when it
+  # did not, or the server refused it - unless the server then chose
+  # another protocol by ALPN than the ticket's, which section 4.2.10 says
+  # it must not be resent for; `early_data` says which. Early data can be
+  # replayed by whoever sees it (section 8): send nothing early that is not
+  # safe to run twice.
+  def self.connect(host : String, port : Int32, config : TlsConfig = TlsConfig.new, timeout_ms : Int32 = -1, session : TlsSession? = nil,
+                   early_data : String | Array(UInt8) | Nil = nil) : TlsClient | TlsError
     socket = IyiSocket.connect(host, port, timeout_ms)
     return TlsError.new("could not connect to #{host}:#{port}: #{socket.message}") if socket.is_a?(SocketError)
     return TlsError.new("the connection to #{host}:#{port} was cancelled") unless socket.is_a?(IyiSocket)
-    over(socket, host, config, timeout_ms > 0 ? timeout_ms : HANDSHAKE_TIMEOUT_MS, session)
+    over(socket, host, config, timeout_ms > 0 ? timeout_ms : HANDSHAKE_TIMEOUT_MS, session, early_data)
   end
 
   # The handshake over a connected *socket*, for *host*, done within
-  # *timeout_ms* (none when 0); a *session* as for `connect`.
-  def self.over(socket : IyiSocket, host : String, config : TlsConfig = TlsConfig.new, timeout_ms : Int32 = HANDSHAKE_TIMEOUT_MS, session : TlsSession? = nil) : TlsClient | TlsError
+  # *timeout_ms* (none when 0); *session* and *early_data* as for
+  # `connect`.
+  def self.over(socket : IyiSocket, host : String, config : TlsConfig = TlsConfig.new, timeout_ms : Int32 = HANDSHAKE_TIMEOUT_MS, session : TlsSession? = nil,
+                early_data : String | Array(UInt8) | Nil = nil) : TlsClient | TlsError
     client = TlsClient.new(socket, host, config, session)
+    client.early_bytes = early_data.is_a?(String) ? TlsBytes.of(early_data) : early_data
     problem = client.within(timeout_ms) { client.handshake }
     return client.fail(problem) if problem
     client
+  end
+
+  protected def early_bytes=(bytes : Array(UInt8)?) : Array(UInt8)?
+    @early_bytes = bytes
   end
 
   # --- The handshake (section 4) ---
@@ -1500,6 +1578,37 @@ pub class TlsClient < TlsConnection
     name = TlsClient.server_name_for(@host)
     return name if name.is_a?(TlsError)
     @name = name
+    problem = shake
+    return problem if problem
+    deliver_early
+  end
+
+  # The early data given, after the handshake: nothing more when the
+  # server took it, nothing when it refused it for a protocol not the
+  # ticket's (section 4.2.10), and written now otherwise.
+  private def deliver_early : TlsError?
+    data = @early_bytes
+    return nil unless data
+    if @early_taken
+      @early_data = TlsEarlyData::Accepted
+      return nil
+    end
+    if @early_sent
+      # Section 4.2.10: never sent again unasked for another protocol than
+      # the one it was written for, the ticket's.
+      if @early_alpn != @alpn_protocol
+        @early_data = TlsEarlyData::Withheld
+        return nil
+      end
+      @early_data = TlsEarlyData::Resent
+    else
+      @early_data = TlsEarlyData::Late
+    end
+    sent = write(data)
+    sent.is_a?(TlsError) ? sent : nil
+  end
+
+  private def shake : TlsError?
     private_key = Random::Secure.random_bytes(32)
     public_key = TlsBytes.of(X25519.public_key(private_key))
     random = Random::Secure.random_bytes(32)
@@ -1509,15 +1618,28 @@ pub class TlsClient < TlsConnection
     if held = @session
       @offered = held.take(@host, TlsTime.now_ms)
     end
+    # Early data goes when the ticket allows that much (section 4.6.1's
+    # max_early_data_size), and not otherwise.
+    if (data = @early_bytes) && (offered = @offered) && !data.empty? && data.size <= offered.max_early_data
+      @early_sent = true
+      @early_alpn = offered.alpn
+    end
     hello = client_hello(random, session, group, public_key, nil, [] of UInt8)
     sent = send_plain(TlsRecords::HANDSHAKE, hello, first: true)
     return sent if sent
     @transcript = hello.dup
+    if @early_sent
+      sent = send_early(hello)
+      return sent if sent
+    end
 
     server = handshake_message(plain: true)
     return server if server.is_a?(TlsError)
     reply = server_hello(server, session)
     return reply if reply.is_a?(TlsError)
+    # Appendix D.3: a client that sent early data fails a connection on a
+    # ServerHello of TLS 1.2, which never reads it.
+    return TlsError.new("a TLS 1.2 ServerHello to a ClientHello that sent early data", TlsAlert::PROTOCOL_VERSION) if reply.tls12 && @early_sent
     # A server that chose TLS 1.2 takes that handshake from here.
     return handshake12(hello, server, random, reply) if reply.tls12
     if reply.retry
@@ -1525,6 +1647,7 @@ pub class TlsClient < TlsConnection
       # first ClientHello (section 4.4.1), and the second carries the
       # cookie, and a secp256r1 share when that is what was asked for.
       cookie = reply.cookie
+      @retried = true
       return TlsError.new("a HelloRetryRequest asking for nothing new", TlsAlert::ILLEGAL_PARAMETER) unless cookie || reply.named_group != 0
       @schedule = TlsKeySchedule.new(reply.suite == TlsSuites::AES_256_GCM)
       first = @schedule.hash(hello)
@@ -1607,11 +1730,21 @@ pub class TlsClient < TlsConnection
     @exporter_secret = @schedule.derive_secret(master, "exp master", @transcript)
 
     # The client's flight: a ChangeCipherSpec for middleboxes (appendix
-    # D.4); if a certificate was asked for, the identity's with its
-    # CertificateVerify when the request takes its scheme, an empty
-    # Certificate otherwise (section 4.4.2 allows it); and Finished.
-    sent = send_plain(TlsRecords::CHANGE_CIPHER_SPEC, [1_u8], first: false)
-    return sent if sent
+    # D.4), unless it went with the early data; EndOfEarlyData under the
+    # early keys when the server took them (section 4.5); if a certificate
+    # was asked for, the identity's with its CertificateVerify when the
+    # request takes its scheme, an empty Certificate otherwise (section
+    # 4.4.2 allows it); and Finished.
+    unless @early_sent
+      sent = send_plain(TlsRecords::CHANGE_CIPHER_SPEC, [1_u8], first: false)
+      return sent if sent
+    end
+    if @early_taken && (early = @early_writer)
+      ended = TlsBytes.message(5, [] of UInt8)
+      sent = put(early.seal(TlsRecords::HANDSHAKE, ended))
+      return sent if sent
+      @transcript = @transcript + ended
+    end
     if (context = @certificate_request)
       identity = @config.identity
       scheme = identity ? identity.scheme_for(@requested_schemes) : nil
@@ -1647,12 +1780,36 @@ pub class TlsClient < TlsConnection
     nil
   end
 
+  # The early data, after the ClientHello (section 4.2.10): a
+  # ChangeCipherSpec for middleboxes first, which appendix D.4 puts here
+  # when there is early data, then the data under the client's early
+  # traffic keys - the ticket's suite's, from its PSK over this
+  # ClientHello - in records of at most 2^14 bytes.
+  private def send_early(hello : Array(UInt8)) : TlsError?
+    offered = @offered
+    data = @early_bytes
+    return nil unless offered && data
+    schedule = TlsKeySchedule.new(TlsSuites.sha384?(offered.suite))
+    writer = TlsRecordCipher.new(offered.suite, schedule, schedule.early_traffic(offered.psk, hello))
+    @early_writer = writer
+    records = [TlsRecords::CHANGE_CIPHER_SPEC, 3_u8, 3_u8, 0_u8, 1_u8, 1_u8]
+    at = 0
+    while at < data.size
+      size = data.size - at
+      size = TlsRecords::MAX_PLAINTEXT if size > TlsRecords::MAX_PLAINTEXT
+      records.concat(writer.seal(TlsRecords::APPLICATION_DATA, data[at, size]))
+      at = at + size
+    end
+    put(records)
+  end
+
   # A NewSessionTicket (section 4.6.1), judged whole, and kept in the
   # session when there is one: its PSK from its nonce, with the host, the
-  # suite, the protocol and the certificates of this connection. A ticket
-  # whose lifetime is zero, or past `TlsSession::MAX_TICKET` bytes, is
-  # passed over; a lifetime past seven days, which section 4.6.1 forbids a
-  # server, is held to seven.
+  # suite, the protocol and the certificates of this connection, and the
+  # early data its early_data extension allows (none without one). A
+  # ticket whose lifetime is zero, or past `TlsSession::MAX_TICKET` bytes,
+  # is passed over; a lifetime past seven days, which section 4.6.1
+  # forbids a server, is held to seven.
   private def ticket_received(message : Array(UInt8)) : TlsError?
     reader = TlsReader.new(message[4, message.size - 4])
     lifetime = reader.u32
@@ -1662,20 +1819,25 @@ pub class TlsClient < TlsConnection
     list = TlsReader.new(reader.bytes(reader.u16))
     return TlsError.new("a NewSessionTicket cut short", TlsAlert::DECODE_ERROR) if reader.short? || !reader.done? || ticket.empty?
     seen = [] of Int32
+    early = 0_i64
     until list.done?
       type = list.u16
-      list.bytes(list.u16)
+      data = list.bytes(list.u16)
       return TlsError.new("NewSessionTicket extensions cut short", TlsAlert::DECODE_ERROR) if list.short?
       return TlsError.new("extension #{type} twice in a NewSessionTicket", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
-      # Section 4.6.1: an extension a client does not know is passed over.
       seen << type
+      # Section 4.6.1: an extension a client does not know is passed over.
+      next unless type == 42
+      field = TlsReader.new(data)
+      early = field.u32
+      return TlsError.new("a NewSessionTicket's early_data cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
     end
     session = @session
     return nil unless session
     return nil if lifetime == 0_i64 || ticket.size > TlsSession::MAX_TICKET
     lifetime = TlsSession::MAX_LIFETIME if lifetime > TlsSession::MAX_LIFETIME
     psk = @schedule.resumption_psk(@resumption_secret, nonce)
-    session.keep(TlsHeldTicket.new(ticket, psk, @suite, TlsTime.now_ms, lifetime * 1000_i64, age_add, @host, @alpn_protocol, @peer_certificates))
+    session.keep(TlsHeldTicket.new(ticket, psk, @suite, TlsTime.now_ms, lifetime * 1000_i64, age_add, @host, @alpn_protocol, @peer_certificates, early))
     nil
   end
 
@@ -1811,6 +1973,9 @@ pub class TlsClient < TlsConnection
     extensions = extensions + TlsBytes.extension(44, TlsBytes.u16(cookie.size) + cookie) if cookie
     offered = @offered
     return TlsBytes.message(1, body + TlsBytes.u16(extensions.size) + extensions) unless offered
+    # early_data in the first ClientHello alone: never after a
+    # HelloRetryRequest (section 4.2.10).
+    extensions = extensions + TlsBytes.extension(42, [] of UInt8) if @early_sent && !@retried
     extensions = extensions + TlsBytes.extension(45, [1_u8, TlsSession::PSK_DHE_KE])
     # The ticket's age as this side counts it, from its arrival, added to
     # its age_add modulo 2^32 (section 4.2.11.1).
@@ -1986,6 +2151,13 @@ pub class TlsClient < TlsConnection
       when 16
         problem = alpn_answer(data)
         return problem if problem
+      when 42
+        # The server takes the early data (section 4.2.10): only what this
+        # ClientHello sent, and only resuming by its first identity.
+        return TlsError.new("an early_data acceptance where none was sent", TlsAlert::UNSUPPORTED_EXTENSION) unless @early_sent && !@retried
+        return TlsError.new("an early_data acceptance with a body", TlsAlert::DECODE_ERROR) unless data.empty?
+        return TlsError.new("early data taken without the ticket it was sent under", TlsAlert::ILLEGAL_PARAMETER) unless @resumed
+        @early_taken = true
       else
         return TlsError.new("extension #{type} in EncryptedExtensions, which was not offered", TlsAlert::UNSUPPORTED_EXTENSION)
       end
@@ -2296,7 +2468,8 @@ end
 
 # One ticket a client holds: the server's bytes, and the PSK, suite,
 # arrival (monotonic ms), lifetime, age_add, host, protocol and
-# certificates of the connection it came on.
+# certificates of the connection it came on, and the most early data it
+# allows (0 for none).
 pub class TlsHeldTicket
   getter ticket : Array(UInt8)
   getter psk : Array(UInt8)
@@ -2307,9 +2480,10 @@ pub class TlsHeldTicket
   getter host : String
   getter alpn : String?
   getter peer_certificates : Array(Certificate)
+  getter max_early_data : Int64
 
   def initialize(@ticket : Array(UInt8), @psk : Array(UInt8), @suite : Int32, @received_ms : Int64, @lifetime_ms : Int64,
-                 @age_add : Int64, @host : String, @alpn : String?, @peer_certificates : Array(Certificate))
+                 @age_add : Int64, @host : String, @alpn : String?, @peer_certificates : Array(Certificate), @max_early_data : Int64 = 0_i64)
   end
 end
 
@@ -2555,12 +2729,32 @@ pub class TlsServerConfig
   property ticket_lifetime : Int32 = 7200
   # The keys this server's tickets are sealed under.
   getter ticket_keys : TlsTicketKeys = TlsTicketKeys.new
+  # The most early data (0-RTT, RFC 8446 section 2.3) a ticket lets a
+  # client send with its ClientHello, which `TlsServer#read_early` reads
+  # apart from what `read` does: none when 0, as unless set, and at most
+  # `MAX_EARLY_DATA`. Early data can be replayed: `replay_guard` refuses
+  # what it can (see `TlsReplayGuard` for what it does not), and what
+  # comes early must still be safe to act on twice.
+  property max_early_data : Int32 = 0
+  # What refuses early data a server has taken before (RFC 8446 section 8).
+  getter replay_guard : TlsReplayGuard = TlsReplayGuard.new
 
   # The most NewSessionTickets one handshake sends; the most bytes one may
   # carry, the client's certificates in it (a server that would seal more
   # sends no ticket for that connection).
   MAX_TICKETS =    8
   MAX_TICKET  = 8192
+  # The most early data a ticket may allow: sixteen full records, the
+  # most a server that refuses it passes over (`TlsServer::EARLY_ALLOWANCE`).
+  MAX_EARLY_DATA = 16 * TlsRecords::MAX_PLAINTEXT
+
+  # `max_early_data`, held to 0 .. `MAX_EARLY_DATA`.
+  def early_limit : Int64
+    limit = @max_early_data.to_i64
+    limit = 0_i64 if limit < 0
+    limit = MAX_EARLY_DATA.to_i64 if limit > MAX_EARLY_DATA
+    limit
+  end
 
   def initialize(@identity : TlsIdentity)
   end
@@ -2714,6 +2908,81 @@ pub class TlsTicketKeys
   end
 end
 
+# What keeps a server from taking the same early data twice (RFC 8446
+# sections 8.2 and 8.3). A ClientHello's early data is taken only if it is
+# fresh - the ticket age the client gives is within `WINDOW_MS` of the
+# time this server counts since it issued the ticket - and only once:
+# each ClientHello whose early data is taken is recorded by its PSK
+# binder, which nobody without the ticket's PSK can make for another
+# ClientHello, and a ClientHello whose binder is recorded has its early
+# data refused (its handshake goes on, the data then sent after it). A
+# replay that is still fresh comes within two windows of its original, so
+# a binder is held that long and then dropped; with `capacity` held, early
+# data is refused until some are - the guard fails closed. A refusal costs
+# the client a round trip, never its request.
+#
+# What it does not do. It holds in this process, as the ticket keys do, so
+# a ticket - and the early data under it - is taken by no other server
+# and by no later run of this one; servers that shared ticket keys would
+# need to share this too, and neither is offered. It cannot stop a client
+# from sending the same request again after a connection whose early data
+# was taken broke before the answer came (appendix E.5), so what comes
+# early must be safe to run twice; and taking early data at all lets
+# whoever recorded the ClientHello replay it within the window to a server
+# that has not seen it - none, here.
+pub class TlsReplayGuard
+  WINDOW_MS = 10000_i64
+  getter capacity : Int32
+  # The binders held, oldest first from `@head`, each with when it was
+  # recorded; and the same as a set.
+  @binders : Array(String) = [] of String
+  @times : Array(Int64) = [] of Int64
+  @head : Int32 = 0
+  @held : Hash(String, Bool) = {} of String => Bool
+
+  def initialize(@capacity : Int32 = 65536)
+  end
+
+  # How many binders are held.
+  def size : Int32
+    @binders.size - @head
+  end
+
+  # Whether early data may be taken, at *now_ms* (monotonic), for a
+  # ClientHello whose PSK binder is *binder*: not one held already, and not
+  # past `capacity`. It is recorded when it may.
+  def admit(binder : Array(UInt8), now_ms : Int64) : Bool
+    drop(now_ms)
+    key = TlsBytes.hex(binder)
+    return false if @held.has_key?(key)
+    return false if size >= @capacity
+    @held[key] = true
+    @binders << key
+    @times << now_ms
+    true
+  end
+
+  # Whether a ticket age the client gives, *client_ms*, and this server's
+  # count since it issued the ticket, *server_ms*, are within the window.
+  def self.fresh?(client_ms : Int64, server_ms : Int64) : Bool
+    gap = server_ms - client_ms
+    gap = -gap if gap < 0
+    gap <= WINDOW_MS
+  end
+
+  # The binders recorded two windows ago and more, dropped.
+  private def drop(now_ms : Int64) : Nil
+    while @head < @binders.size && now_ms - @times[@head] > 2_i64 * WINDOW_MS
+      @held.delete(@binders[@head])
+      @head = @head + 1
+    end
+    return unless @head > 1024 && @head * 2 > @binders.size
+    @binders = @binders[@head, @binders.size - @head]
+    @times = @times[@head, @times.size - @head]
+    @head = 0
+  end
+end
+
 # The session a server's ticket seals, for a resumption to take up: the
 # suite, when it was issued (monotonic ms) and for how long (seconds),
 # its age_add, the PSK, the name the client asked for, the protocol
@@ -2731,19 +3000,21 @@ pub class TlsTicket
   getter identity : Int32
   getter chain : Array(Array(UInt8))
   getter authenticated_ms : Int64
+  getter max_early_data : Int64
 
   VERSION = 1_u8
 
   def initialize(@suite : Int32, @issued_ms : Int64, @lifetime : Int64, @age_add : Int64, @psk : Array(UInt8),
-                 @server_name : String?, @alpn : String?, @identity : Int32, @chain : Array(Array(UInt8)), @authenticated_ms : Int64)
+                 @server_name : String?, @alpn : String?, @identity : Int32, @chain : Array(Array(UInt8)), @authenticated_ms : Int64,
+                 @max_early_data : Int64 = 0_i64)
   end
 
   def encode : Array(UInt8)
     name = TlsBytes.of(@server_name || "")
     protocol = TlsBytes.of(@alpn || "")
     out = [VERSION] + TlsBytes.u16(@suite) + TlsBytes.u64(@issued_ms) + TlsBytes.u64(@authenticated_ms) + TlsBytes.u32(@lifetime) +
-          TlsBytes.u32(@age_add) + [@psk.size.to_u8] + @psk + [name.size.to_u8] + name + [protocol.size.to_u8] + protocol +
-          [@identity.to_u8, @chain.size.to_u8]
+          TlsBytes.u32(@age_add) + TlsBytes.u32(@max_early_data) + [@psk.size.to_u8] + @psk + [name.size.to_u8] + name +
+          [protocol.size.to_u8] + protocol + [@identity.to_u8, @chain.size.to_u8]
     @chain.each { |der| out = out + TlsBytes.u24(der.size) + der }
     out
   end
@@ -2757,6 +3028,7 @@ pub class TlsTicket
     authenticated = reader.u64
     lifetime = reader.u32
     age_add = reader.u32
+    early = reader.u32
     psk = reader.bytes(reader.u8)
     name = reader.bytes(reader.u8)
     protocol = reader.bytes(reader.u8)
@@ -2765,7 +3037,7 @@ pub class TlsTicket
     reader.u8.times { chain << reader.bytes(reader.u24) }
     return nil if reader.short? || !reader.done? || version != VERSION.to_i32
     TlsTicket.new(suite, issued, lifetime, age_add, psk, name.empty? ? nil : TlsBytes.text(name),
-      protocol.empty? ? nil : TlsBytes.text(protocol), identity, chain, authenticated)
+      protocol.empty? ? nil : TlsBytes.text(protocol), identity, chain, authenticated, early)
   end
 
   # The session *ticket* seals, opened by *keys* at *now_ms*: nil when no
@@ -2931,12 +3203,39 @@ pub class TlsServer < TlsConnection
 
   # The handshake with the client on *socket*. A handshake that fails
   # sends the client the alert its error names, and the socket is closed.
-  def self.over(socket : IyiSocket, config : TlsServerConfig, timeout_ms : Int32 = HANDSHAKE_TIMEOUT_MS) : TlsServer | TlsError
+  # Where the config allows early data (`max_early_data`) and *early_data*
+  # is true, a ClientHello's early data may be taken: then the handshake
+  # answers once this side's Finished is sent, `read_early` reads the
+  # early data, a write goes at once (0.5-RTT), and `finish` - which
+  # `read` calls - reads the client's Finished.
+  def self.over(socket : IyiSocket, config : TlsServerConfig, timeout_ms : Int32 = HANDSHAKE_TIMEOUT_MS, early_data : Bool = true) : TlsServer | TlsError
     server = TlsServer.new(socket, config)
+    server.takes_early = early_data
     problem = server.within(timeout_ms) { server.handshake }
     return problem if problem
     server
   end
+
+  protected def takes_early=(takes : Bool) : Bool
+    @takes_early = takes
+  end
+
+  # Whether early data may be taken on this connection; whether it was;
+  # whether the client's EndOfEarlyData is still to come, and its Finished;
+  # what the ticket lets it send, and how much it has; and what came early
+  # and is not read yet.
+  @takes_early : Bool = true
+  @early_taken : Bool = false
+  @early_open : Bool = false
+  @awaiting : Bool = false
+  @early_limit : Int64 = 0_i64
+  @early_read : Int64 = 0_i64
+  @early_unread : Array(UInt8) = [] of UInt8
+  # The secrets the client's flight is read and checked with, kept while
+  # the early data comes.
+  @client_handshake : Array(UInt8) = [] of UInt8
+  @master : Array(UInt8) = [] of UInt8
+  @client_application : Array(UInt8) = [] of UInt8
 
   # --- The handshake (section 4), the server's half ---
 
@@ -2945,6 +3244,114 @@ pub class TlsServer < TlsConnection
     problem = shake
     fail(problem) if problem
     problem
+  end
+
+  # Whether the client's early data was taken (0-RTT): `read_early` reads
+  # it, and `read` never does.
+  def early_data? : Bool
+    @early_taken
+  end
+
+  # Up to *max* bytes of the early data the client sent with its
+  # ClientHello, "" once it has all been read, or when none was taken.
+  # Early data may be a replay (RFC 8446 section 8; `TlsReplayGuard` says
+  # what this server refuses and what it cannot), which is why it is read
+  # here and never by `read`: a program can tell it from what came after
+  # the handshake, and act on it only where twice is safe.
+  def read_early(max : Int32 = 16384) : String | TlsError
+    raise "a TLS read of #{max} bytes: at least 1" if max < 1
+    timeout = @socket.read_timeout_ms
+    within(timeout && timeout > 0 ? timeout : 0) { read_early_now(max) }
+  end
+
+  private def read_early_now(max : Int32) : String | TlsError
+    while @early_unread.empty?
+      return "" unless @early_open
+      got = early_record
+      if got.is_a?(TlsError)
+        return got if got.timed_out? || got.cancelled?
+        return fail(got)
+      end
+      @early_unread.concat(got) if got
+    end
+    size = @early_unread.size < max ? @early_unread.size : max
+    chunk = @early_unread[0, size]
+    @early_unread = @early_unread[size, @early_unread.size - size]
+    TlsBytes.text(chunk)
+  end
+
+  # The rest of a handshake whose early data was taken: the early data not
+  # yet read, kept for `read_early`, then EndOfEarlyData and the client's
+  # Finished. Nil once the handshake is done, at once when nothing was
+  # early. `read` calls it first; a server that answers early data before
+  # the client's Finished calls it before it closes.
+  def finish : TlsError?
+    return nil unless @awaiting
+    return TlsError.new("the connection is closed") if @closed
+    timeout = @socket.read_timeout_ms
+    within(timeout && timeout > 0 ? timeout : 0) { finish_now }
+  end
+
+  private def finish_now : TlsError?
+    while @early_open
+      got = early_record
+      return fail(got) if got.is_a?(TlsError)
+      @early_unread.concat(got) if got
+    end
+    problem = client_flight
+    return fail(problem) if problem
+    @awaiting = false
+    nil
+  end
+
+  # Up to *max* bytes the client sent after the handshake - never its early
+  # data, which `read_early` reads - the handshake finished first.
+  def read(max : Int32 = 16384) : String | TlsError
+    problem = finish
+    return problem if problem
+    super(max)
+  end
+
+  # The next of the client's early records (section 4.2.10): its data,
+  # counted against what the ticket allows; or nil at EndOfEarlyData, which
+  # ends them and moves the reader to the client's handshake keys.
+  private def early_record : Array(UInt8)? | TlsError
+    while true
+      record = next_record
+      return record if record.is_a?(TlsError)
+      type, content = record
+      case type
+      when TlsRecords::APPLICATION_DATA
+        @early_read = @early_read + content.size
+        # Section 4.6.1: more than max_early_data_size is unexpected_message.
+        if @early_read > @early_limit
+          return TlsError.new("#{@early_read} bytes of early data, past the #{@early_limit} its ticket allows", TlsAlert::UNEXPECTED_MESSAGE)
+        end
+        return content unless content.empty?
+      when TlsRecords::HANDSHAKE
+        return TlsError.new("an empty handshake record", TlsAlert::UNEXPECTED_MESSAGE) if content.empty?
+        add_handshake(content)
+        message = take_handshake
+        return message if message.is_a?(TlsError)
+        next unless message
+        unless message[0] == 5_u8 && message.size == 4
+          return TlsError.new("#{TlsBytes.handshake_name(message[0])} where EndOfEarlyData belongs", TlsAlert::UNEXPECTED_MESSAGE)
+        end
+        # Section 5.1: the keys change after it, so nothing follows it in
+        # its record.
+        return TlsError.new("handshake bytes after EndOfEarlyData in its record", TlsAlert::UNEXPECTED_MESSAGE) unless handshake_left == 0
+        @transcript = @transcript + message
+        @reader = TlsRecordCipher.new(@suite, @schedule, @client_handshake)
+        @early_open = false
+        return nil
+      when TlsRecords::ALERT
+        answer = alert(content)
+        return answer || TlsError.new("the client closed during the handshake")
+      else
+        return TlsError.new("a record of type #{type} among the early data", TlsAlert::UNEXPECTED_MESSAGE)
+      end
+    end
+    nil
   end
 
   private def shake : TlsError?
@@ -2963,6 +3370,8 @@ pub class TlsServer < TlsConnection
     @transcript = hello
 
     group = offer.chosen_group
+    # A HelloRetryRequest refuses any early data (section 4.2.10).
+    retried = group == 0
     if group == 0
       # HelloRetryRequest (section 4.1.4) for a group the client supports
       # and sent no share for, X25519 before secp256r1. The transcript
@@ -3003,6 +3412,7 @@ pub class TlsServer < TlsConnection
     return taken if taken.is_a?(TlsError)
     psk = nil.as(Array(UInt8)?)
     psk_identity = -1
+    early_secret = nil.as(Array(UInt8)?)
     if taken
       ticket, psk_identity, chain = taken
       psk = ticket.psk
@@ -3010,6 +3420,14 @@ pub class TlsServer < TlsConnection
       @authenticated_ms = ticket.authenticated_ms
       @identity = @config.identity_at(ticket.identity) || @identity
       @peer_certificates = chain
+      if offer.early_data && !retried && take_early?(ticket, psk_identity, offer)
+        # Taken: read under the client's early traffic keys, over this
+        # ClientHello alone, until EndOfEarlyData - none passed over.
+        @early_taken = true
+        @early_limit = ticket.max_early_data
+        @early_left = 0
+        early_secret = @schedule.early_traffic(ticket.psk, hello)
+      end
     elsif (unshown = offer.unshown)
       return unshown
     end
@@ -3052,7 +3470,9 @@ pub class TlsServer < TlsConnection
     return sent if sent
 
     master = @schedule.master_secret(handshake_secret)
-    client_application = @schedule.derive_secret(master, "c ap traffic", @transcript)
+    @master = master
+    @client_handshake = client_secret
+    @client_application = @schedule.derive_secret(master, "c ap traffic", @transcript)
     server_application = @schedule.derive_secret(master, "s ap traffic", @transcript)
     @exporter_secret = @schedule.derive_secret(master, "exp master", @transcript)
     # This side's Finished is sent: what it writes from here, an alert
@@ -3060,11 +3480,23 @@ pub class TlsServer < TlsConnection
     # reads it.
     @writer = TlsRecordCipher.new(@suite, @schedule, server_application)
     @write_secret = server_application
+    if early = early_secret
+      # The early data is read as the program asks (`read_early`), and
+      # the client's Finished after it (`finish`).
+      @reader = TlsRecordCipher.new(@suite, @schedule, early)
+      @early_open = true
+      @awaiting = true
+      return nil
+    end
+    client_flight
+  end
 
-    # The client's Certificate and CertificateVerify when one was asked for,
-    # then its Finished, under its handshake keys; asked for none, a
-    # Certificate is out of place. A resumption asks for none (section
-    # 4.3.2): the ticket carries the certificates the first handshake took.
+  # The client's Certificate and CertificateVerify when one was asked for,
+  # then its Finished, under its handshake keys; asked for none, a
+  # Certificate is out of place. A resumption asks for none (section
+  # 4.3.2): the ticket carries the certificates the first handshake took.
+  # Then the application keys, and the tickets.
+  private def client_flight : TlsError?
     message = handshake_message(plain: false)
     return message if message.is_a?(TlsError)
     if (roots = @config.client_roots) && !@resumed
@@ -3074,7 +3506,7 @@ pub class TlsServer < TlsConnection
       return message if message.is_a?(TlsError)
     end
     return TlsError.new("#{TlsBytes.handshake_name(message[0])} where the client's Finished belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 20_u8
-    expected = @schedule.finished(client_secret, @transcript)
+    expected = @schedule.finished(@client_handshake, @transcript)
     unless Subtle.constant_time_compare(message[4, message.size - 4], expected)
       return TlsError.new("the client's Finished does not match the handshake", TlsAlert::DECRYPT_ERROR)
     end
@@ -3082,11 +3514,25 @@ pub class TlsServer < TlsConnection
     @handshaking = false
     @early_left = 0
     @transcript = @transcript + message
-    @resumption_secret = @schedule.derive_secret(master, "res master", @transcript)
+    @resumption_secret = @schedule.derive_secret(@master, "res master", @transcript)
 
-    @reader = TlsRecordCipher.new(@suite, @schedule, client_application)
-    @read_secret = client_application
+    @reader = TlsRecordCipher.new(@suite, @schedule, @client_application)
+    @read_secret = @client_application
     send_tickets
+  end
+
+  # Whether a ClientHello's early data is taken (section 4.2.10): this
+  # server takes early data and this connection may, the ticket allows it,
+  # it is the first identity's, under the ticket's own suite and protocol,
+  # fresh, and not taken before (`TlsReplayGuard`, which records it).
+  private def take_early?(ticket : TlsTicket, index : Int32, offer : TlsOffer) : Bool
+    return false unless @takes_early && @config.early_limit > 0 && ticket.max_early_data > 0
+    return false unless index == 0
+    return false unless ticket.suite == @suite
+    return false unless ticket.alpn == @alpn_protocol
+    now = TlsTime.now_ms
+    return false unless TlsReplayGuard.fresh?((offer.identities[index][1] - ticket.age_add) & 0xFFFFFFFF_i64, now - ticket.issued_ms)
+    @config.replay_guard.admit(offer.binders[index], now)
   end
 
   # CertificateRequest when a client's certificate is asked for, then
@@ -3153,9 +3599,11 @@ pub class TlsServer < TlsConnection
   # client's Finished and under the application keys: `tickets` of them,
   # each with a nonce of its own and the PSK that makes, its age_add drawn
   # at random, sealed with this connection's suite, name, protocol,
-  # identity and client certificates. A resumption does not stretch the
-  # first handshake's checks past a lifetime (as section 4.6.1 recommends
-  # a limit on): its tickets live what is left of that, and none goes once
+  # identity and client certificates - and, where this connection may take
+  # early data, the most a client may send with it, its early_data
+  # extension saying so. A resumption does not stretch the first
+  # handshake's checks past a lifetime (as section 4.6.1 recommends a
+  # limit on): its tickets live what is left of that, and none goes once
   # it is over.
   private def send_tickets : TlsError?
     count = @config.tickets
@@ -3167,16 +3615,18 @@ pub class TlsServer < TlsConnection
     lifetime = @config.lifetime_ms // 1000_i64 if lifetime > @config.lifetime_ms // 1000_i64
     chain = @peer_certificates.map { |certificate| certificate.raw }
     identity = @config.identity_index(@identity)
+    early = @takes_early ? @config.early_limit : 0_i64
+    extensions = early > 0 ? TlsBytes.extension(42, TlsBytes.u32(early)) : [] of UInt8
     flight = [] of UInt8
     count.times do |i|
       nonce = TlsBytes.u32(0_i64) + TlsBytes.u32(i.to_i64)
       age_add = TlsReader.new(Random::Secure.random_bytes(4)).u32
       psk = @schedule.resumption_psk(@resumption_secret, nonce)
-      state = TlsTicket.new(@suite, now, lifetime, age_add, psk, @server_name, @alpn_protocol, identity, chain, @authenticated_ms)
+      state = TlsTicket.new(@suite, now, lifetime, age_add, psk, @server_name, @alpn_protocol, identity, chain, @authenticated_ms, early)
       sealed = @config.ticket_keys.seal(state.encode, now, @config.lifetime_ms)
       return nil if sealed.size > TlsServerConfig::MAX_TICKET
       flight.concat(TlsBytes.message(4, TlsBytes.u32(lifetime) + TlsBytes.u32(age_add) + [nonce.size.to_u8] + nonce +
-                                        TlsBytes.u16(sealed.size) + sealed + TlsBytes.u16(0)))
+                                        TlsBytes.u16(sealed.size) + sealed + TlsBytes.u16(extensions.size) + extensions))
     end
     send_flight(flight)
   end
@@ -3472,8 +3922,11 @@ pub class TlsServer < TlsConnection
     nil
   end
 
+  # EncryptedExtensions: the protocol ALPN chose, and early_data when the
+  # client's early data is taken (section 4.2.10).
   private def encrypted_extensions : Array(UInt8)
     extensions = alpn_answer
+    extensions = extensions + TlsBytes.extension(42, [] of UInt8) if @early_taken
     TlsBytes.message(8, TlsBytes.u16(extensions.size) + extensions)
   end
 
@@ -3877,6 +4330,7 @@ struct TlsBytes
     when  1_u8 then "ClientHello"
     when  2_u8 then "ServerHello"
     when  4_u8 then "NewSessionTicket"
+    when  5_u8 then "EndOfEarlyData"
     when  8_u8 then "EncryptedExtensions"
     when 11_u8 then "Certificate"
     when 12_u8 then "ServerKeyExchange"

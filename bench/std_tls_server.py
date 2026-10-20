@@ -96,6 +96,10 @@ SCENARIOS = {
     "cert-entry-ext": "a certificate entry with a status_request extension nobody asked for",
     "sni-ack-data": "a server_name acknowledgement that is not empty",
     "user-canceled": "a user_canceled warning before the echo",
+    "padded-max": "the echo padded to 2^14 + 1 bytes of inner plaintext, the most section 5.4 allows",
+    "padded-over": "the echo padded to 2^14 + 2 bytes of inner plaintext, one past section 5.4's limit",
+    "split-by-data": "half a NewSessionTicket, then the echo inside it, then the rest",
+    "split-by-close": "half a NewSessionTicket, then close_notify",
 }
 
 NOW = dt.datetime.now(dt.timezone.utc)
@@ -190,8 +194,8 @@ class Cipher:
             n[11 - i] ^= (self.seq >> (8 * i)) & 0xFF
         return bytes(n)
 
-    def seal(self, type_, content, corrupt=False):
-        inner = content + bytes([type_])
+    def seal(self, type_, content, corrupt=False, pad=0):
+        inner = content + bytes([type_]) + bytes(pad)
         header = bytes([23, 3, 3]) + struct.pack(">H", len(inner) + 16)
         sealed = bytearray(self.aead.encrypt(self.nonce(), inner, header))
         if corrupt:
@@ -598,6 +602,24 @@ class Conn:
                 assert type_ == 23
                 data += content
             data += f" keyupdates={updates} asked={asked}".encode()
+        if s in ("padded-max", "padded-over"):
+            echo = b"echo:" + data
+            pad = 16384 + 1 - len(echo) - 1 + (1 if s == "padded-over" else 0)
+            self.sock.sendall(writer.seal(23, echo, pad=pad))
+            self.sock.sendall(writer.seal(21, b"\x01\x00"))
+            return
+        if s in ("split-by-data", "split-by-close"):
+            # Section 5.1: no record of another type between a handshake
+            # message's pieces.
+            ticket = message(4, struct.pack(">IIB", 3600, 1, 4) + b"tick" + b"\x00\x04abcd\x00\x00")
+            self.sock.sendall(writer.seal(22, ticket[:6]))
+            if s == "split-by-close":
+                self.sock.sendall(writer.seal(21, b"\x01\x00"))
+                return
+            self.sock.sendall(writer.seal(23, b"echo:" + data))
+            self.sock.sendall(writer.seal(22, ticket[6:]))
+            self.sock.sendall(writer.seal(21, b"\x01\x00"))
+            return
         if s == "big":
             payload = b"echo:" + data + bytes(i % 251 for i in range(40000 - 5 - len(data)))
             for k in range(0, len(payload), 16384):

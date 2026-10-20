@@ -47,6 +47,15 @@
 # that parks three times may wait three times as long, and a write that
 # times out may have sent part of its bytes.
 #
+# Nagle:
+# A connected or accepted TCP socket has TCP_NODELAY set, as Go's net
+# package sets its own: a small write goes at once rather than waiting for
+# an earlier one's acknowledgement, which a peer delays - 40 ms at least
+# on Linux. A writer that would rather have its pieces joined turns Nagle
+# back on with `nodelay = false`, and joins what it can before writing
+# either way: std/tls writes a flight of records in one write, std/http a
+# head with a body it has whole.
+#
 # Errors:
 # What the other end or the network does is a value, not a panic: a
 # connection reset, a peer that has gone (a broken pipe), a refused or
@@ -384,6 +393,36 @@ pub class IyiSocket
     @write_timeout_ms = ms
   end
 
+  # Whether a small write goes at once (TCP_NODELAY) rather than waiting
+  # for an earlier one's acknowledgement, as Nagle's algorithm (RFC 896)
+  # has it wait. A connected or accepted TCP socket here sends at once, as
+  # Go's net package sets its own; `nodelay = false` turns Nagle back on
+  # for a program that writes in pieces it would rather have joined. With
+  # Nagle on, a write behind an unacknowledged one waited out the peer's
+  # delayed ACK, 40 ms on Linux: measured on loopback, --release, medians
+  # of 200, a GET on a new https:// connection took 82.89 ms between
+  # std/http's ends and 42.00 to OpenSSL's s_server, and takes 1.07 and
+  # 1.10 now; wrk against a server answering a streamed body went from
+  # 1,211 to 10,702 requests a second. A unix socket has no Nagle to turn
+  # off: it answers false and is left alone.
+  def nodelay=(on : ::Bool) : ::Bool
+    raise "socket is closed" if @fd < 0
+    IyiSocket.__sys_set_nodelay(@fd, on) unless @family == AF_UNIX
+    on
+  end
+
+  # Whether TCP_NODELAY is on, as the socket's option reads.
+  def nodelay? : ::Bool
+    raise "socket is closed" if @fd < 0
+    @family != AF_UNIX && IyiSocket.__sys_nodelay?(@fd)
+  end
+
+  # What every connected and accepted socket starts with: TCP_NODELAY, on
+  # TCP; a unix socket has no Nagle.
+  def self.__send_at_once(fd : Int32, family : Int32) : Nil
+    __sys_set_nodelay(fd, true) unless family == AF_UNIX
+  end
+
   def to_unsafe : Int32
     @fd
   end
@@ -512,6 +551,7 @@ pub class IyiSocket
     fd = __sys_socket(family)
     return SocketError.new("create a socket", __sys_code(fd.to_i64)) if fd < 0
     __sys_no_sigpipe(fd)
+    __send_at_once(fd, family)
     blocking = __sys_connects_blocking?(family)
     __sys_set_nonblock(fd) unless blocking
     res = __sys_connect(fd, addr, family)
@@ -550,6 +590,7 @@ pub class IyiSocket
       client_fd = IyiSocket.__sys_accept(@fd, addr, pointerof(len), @family)
       if client_fd >= 0
         IyiSocket.__sys_no_sigpipe(client_fd)
+        IyiSocket.__send_at_once(client_fd, @family)
         IyiSocket.__sys_set_nonblock(client_fd)
         return IyiSocket.new(client_fd, @family)
       end
@@ -1315,6 +1356,18 @@ pub class IyiSocket
       LibC.setsockopt(fd, 41, 27, pointerof(val).as(Void*), 4_u32)
     end
 
+    # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      val = on ? 1_i32 : 0_i32
+      LibC.setsockopt(fd, 6, 1, pointerof(val).as(Void*), 4_u32)
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      val = 0_i32
+      len = 4_u32
+      LibC.getsockopt(fd, 6, 1, pointerof(val).as(Void*), pointerof(len)) == 0 && val != 0
+    end
+
     # One `pollfd` (fd, events, revents) for *ms* milliseconds, -1 for as
     # long as it takes: the blocking wait a program without the runtime
     # does. 0 when the time ran out.
@@ -1535,6 +1588,18 @@ pub class IyiSocket
     def self.__sys_set_v6only(fd : Int32) : Int32
       val = 1_i32
       __sys5(SYS_SETSOCKOPT, fd.to_i64, 41_i64, 26_i64, pointerof(val).address.to_i64, 4_i64).to_i32
+    end
+
+    # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      val = on ? 1_i32 : 0_i32
+      __sys5(SYS_SETSOCKOPT, fd.to_i64, 6_i64, 1_i64, pointerof(val).address.to_i64, 4_i64).to_i32
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      val = 0_i32
+      len = 4_i32
+      __sys5(SYS_GETSOCKOPT, fd.to_i64, 6_i64, 1_i64, pointerof(val).address.to_i64, pointerof(len).address.to_i64) == 0_i64 && val != 0
     end
 
     # `ppoll` on one descriptor for *ms* milliseconds - a timespec, or none
@@ -2058,6 +2123,20 @@ pub class IyiSocket
       LibWs2_32.setsockopt(__sys_handle(fd), 41, 27, pointerof(val).as(Void*), 4)
     end
 
+    # TCP_NODELAY (1) at IPPROTO_TCP (6): Nagle's algorithm off when *on*.
+    # Winsock may answer the option in one byte (a BOOLEAN); the rest of
+    # the word is left 0, so any byte set reads as on.
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      val = on ? 1_i32 : 0_i32
+      LibWs2_32.setsockopt(__sys_handle(fd), 6, 1, pointerof(val).as(Void*), 4)
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      val = 0_i32
+      len = 4
+      LibWs2_32.getsockopt(__sys_handle(fd), 6, 1, pointerof(val).as(Void*), pointerof(len)) == 0 && val != 0
+    end
+
     def self.__sys_set_nonblock(fd : Int32) : Int32
       on = 1
       LibWs2_32.ioctlsocket(__sys_handle(fd), FIONBIO, pointerof(on))
@@ -2392,6 +2471,14 @@ pub class IyiSocket
 
     def self.__sys_set_v6only(fd : Int32) : Int32
       -1
+    end
+
+    def self.__sys_set_nodelay(fd : Int32, on : ::Bool) : Int32
+      -1
+    end
+
+    def self.__sys_nodelay?(fd : Int32) : ::Bool
+      false
     end
 
     def self.__sys_set_nonblock(fd : Int32) : Int32

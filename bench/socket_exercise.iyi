@@ -87,6 +87,20 @@ raise "remote_port: #{conn.remote_port.inspect}, not #{client.local_port}" unles
 raise "remote_address: the client's #{client.remote_address.inspect}" unless client.remote_address == "127.0.0.1" && client.remote_port == port
 puts "remote_address: ok"
 
+# Nagle's algorithm off at both ends of a TCP connection, as the socket's
+# own TCP_NODELAY option reads back (`getsockopt`): the connected end and
+# the accepted one, as Go's net package leaves its own. On, a write
+# behind an unacknowledged one waited out the peer's delayed ACK, 40 ms
+# on Linux, and every new https:// connection between std/http's ends
+# paid it twice. `nodelay = false` turns Nagle back on, and true off.
+raise "nodelay: the connected end has Nagle on (TCP_NODELAY reads 0)" unless client.nodelay?
+raise "nodelay: the accepted end has Nagle on (TCP_NODELAY reads 0)" unless conn.nodelay?
+client.nodelay = false
+raise "nodelay: TCP_NODELAY still set after nodelay = false" if client.nodelay?
+client.nodelay = true
+raise "nodelay: TCP_NODELAY not set again after nodelay = true" unless client.nodelay?
+puts "nodelay: ok"
+
 # A connect waits at most `timeout_ms` for its handshake. A listener whose
 # backlog of one is full and never accepted: Linux drops the SYNs past it,
 # and a connect without a limit waited the kernel's two minutes of

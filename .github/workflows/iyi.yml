@@ -1587,10 +1587,12 @@ jobs:
   # Every module's own exercise on darwin, in four shards
   # (bench/std_siblings.sh), each building its own compiler from the same
   # cached static LLVM: as one step of the job above they ran it past its
-  # hundred and twenty minutes, seventy of them in that step alone.
+  # hundred and twenty minutes, seventy of them in that step alone. A
+  # shard has a hundred and five: on integration/0.19 shard 4 was cut off
+  # at seventy-five, std/http alone 27 minutes of it and std/big 14.
   darwin-std-siblings:
     runs-on: macos-14
-    timeout-minutes: 75
+    timeout-minutes: 105
     strategy:
       fail-fast: false
       matrix:

@@ -37,6 +37,11 @@
 # chain and the inlined field), ECDH 69 (89), against 14 and 28 from
 # Python's `cryptography` (OpenSSL).
 #
+# bench/ct_timing.sh, `sign` with one key, a fixed message against random
+# ones: |t| = 3.8 to 6.0 over 100,000 signatures. It put this at 16 to 24
+# before `P256BaseTable.pick`'s selectors were hidden from LLVM, which had
+# made them a branch on each nonce digit (see there).
+#
 # The nonce is RFC 6979's: HMAC over the hash the signature names, from
 # the private key and the message's hash, so one key and one message give
 # one signature and no random source is trusted with the key. Where the
@@ -770,6 +775,8 @@ struct P256BaseTable
   ENTRIES = 257
 
   @@table = Pointer(P256Num).new(0_u64)
+  # 0, read by `pick` through an atomic load (see there).
+  @@opaque = Atomic(UInt64).new(0_u64)
 
   def self.get : Pointer(P256Num)
     return @@table if @@table.address != 0_u64
@@ -819,23 +826,29 @@ struct P256BaseTable
   # Row *row*'s entry for the signed digit *digit* (-8 to 8, in two's
   # complement): every entry of the row read and all but |digit|'s masked
   # away, negated by a mask when the digit is, and the identity (0 : 1 : 0)
-  # for zero.
+  # for zero. Each selector is xored with a zero read by an atomic load,
+  # which LLVM cannot see the value of: with the selectors as they were,
+  # a --release build tested the digit against 1 to 8 with a conditional
+  # jump each (`xor`, `dec`, `js`), a branch on the nonce's digits, and
+  # bench/ct_timing.sh put P-256 signing at |t| = 16 to 24 over 100,000
+  # signatures, fixed message against random.
   def self.pick(table : Pointer(P256Num), row : Int32, digit : UInt64) : P256Point
     f = P256Modulus.field
-    negative = digit.unsafe_shr(63)
+    zero = @@opaque.get
+    negative = digit.unsafe_shr(63) ^ zero
     index = (digit ^ (0_u64 &- negative)) &+ negative
     x = P256Num.zero
     y = P256Num.zero
     base = table + (row * 16).to_i64
     j = 1
     while j <= 8
-      bit = ((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63)
+      bit = ((j.to_u64 ^ index) &- 1_u64).unsafe_shr(63) ^ zero
       x = P256Num.choose(bit, base[2 * j - 2], x)
       y = P256Num.choose(bit, base[2 * j - 1], y)
       j = j + 1
     end
     y = P256Num.choose(negative, f.sub(P256Num.zero, y), y)
-    nonzero = (index | (0_u64 &- index)).unsafe_shr(63)
+    nonzero = (index | (0_u64 &- index)).unsafe_shr(63) ^ zero
     P256Point.new(x, P256Num.choose(nonzero, y, f.one), P256Num.choose(nonzero, f.one, P256Num.zero))
   end
 

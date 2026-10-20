@@ -73,9 +73,11 @@ SUITES12 = {
     0xcca8: ("TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256", True, 32, True, "sha256"),
 }
 OFFER12 = (0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9, 0xcca8)
-SIGALGS12 = (0x0807, 0x0403, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601)
-# TLS 1.2's groups, as the server names the one it agreed ("group=...").
-GROUPS12 = {0x1d: "X25519", 0x17: "secp256r1"}
+SIGALGS12 = (0x0807, 0x0403, 0x0503, 0x0804, 0x0805, 0x0806, 0x0401, 0x0501, 0x0601)
+# TLS 1.2's groups, as the server names the one it agreed ("group=..."),
+# and the curves of the two that are ECDH's.
+GROUPS12 = {0x1d: "X25519", 0x17: "secp256r1", 0x18: "secp384r1"}
+CURVES12 = {0x17: ec.SECP256R1, 0x18: ec.SECP384R1}
 SENTINEL12 = b"DOWNGRD\x01"
 KEY_KIND = "ed25519"
 
@@ -281,7 +283,13 @@ TLS12 = {
     "12-aes256": ("TLS 1.2, AES-256-GCM alone: the PRF over SHA-384", ("held", "_AES_256_GCM_SHA384")),
     "12-chacha": ("TLS 1.2, ChaCha20-Poly1305 alone", ("held", "_CHACHA20_POLY1305_SHA256")),
     "12-client-order": ("TLS 1.2, ChaCha20 offered before AES-128: the client's order", ("held", "_CHACHA20_POLY1305_SHA256")),
-    "12-p256": ("TLS 1.2, secp256r1 alone among the groups", ("held", "TLSv1.2")),
+    # A client's groups must hold an ECDSA key's curve (RFC 8422 section
+    # 5.1.1): secp256r1 alone shuts out a P-384 key, secp384r1 alone a P-256
+    # one.
+    "12-p256": ("TLS 1.2, secp256r1 alone among the groups",
+                {"ed25519": ("held", "TLSv1.2"), "p256": ("held", "TLSv1.2"), "p384": ("alert", 40), "rsa": ("held", "TLSv1.2")}),
+    "12-p384": ("TLS 1.2, secp384r1 alone among the groups",
+                {"ed25519": ("held", "TLSv1.2"), "p256": ("alert", 40), "p384": ("held", "TLSv1.2"), "rsa": ("held", "TLSv1.2")}),
     "12-no-groups": ("TLS 1.2 with no supported_groups: secp256r1", ("held", "TLSv1.2")),
     "12-legacy": ("no supported_versions, legacy_version TLS 1.2", ("held", "TLSv1.2")),
     "12-alpn": ("TLS 1.2, ALPN http/1.1 then h2: the server's order", ("held", "alpn=h2")),
@@ -300,7 +308,7 @@ TLS12 = {
     "12-other-kind": ("TLS 1.2 with the suites of the other kind of key alone", ("alert", 40)),
     "12-no-sigalgs": ("TLS 1.2 without signature_algorithms", ("alert", 40)),
     "12-p256-no-curve": ("TLS 1.2, X25519 alone among the groups",
-                         {"ed25519": ("held", "TLSv1.2"), "p256": ("alert", 40), "rsa": ("held", "TLSv1.2")}),
+                         {"ed25519": ("held", "TLSv1.2"), "p256": ("alert", 40), "p384": ("alert", 40), "rsa": ("held", "TLSv1.2")}),
     "12-formats": ("ec_point_formats without uncompressed points", ("alert", 47)),
     "12-tls11": ("TLS 1.1 alone", ("alert", 70)),
     "12-bad-point": ("a ClientKeyExchange point of small order", ("alert", 47)),
@@ -1064,7 +1072,7 @@ class Cipher12:
         return type_, data
 
 
-def client_hello12(session, suites=OFFER12, groups=(0x1d, 0x17), sigalgs=SIGALGS12, versions=(0x0303,), alpn=None, sni="localhost",
+def client_hello12(session, suites=OFFER12, groups=(0x1d, 0x17, 0x18), sigalgs=SIGALGS12, versions=(0x0303,), alpn=None, sni="localhost",
                    ems=True, reneg=b"\x00", formats=b"\x01\x00", legacy=b"\x03\x03"):
     """A ClientHello offering TLS 1.2: a session ticket asked for, which no
     resumption answers."""
@@ -1120,6 +1128,7 @@ def scenario12(c, name):
     if name == "12-chacha": kw["suites"] = (0xcca9, 0xcca8)
     if name == "12-client-order": kw["suites"] = (0xcca9, 0xcca8, 0xc02b, 0xc02f)
     if name == "12-p256": kw["groups"] = (0x17,)
+    if name == "12-p384": kw["groups"] = (0x18,)
     if name == "12-no-groups": kw["groups"] = None
     if name == "12-legacy": kw["versions"] = None
     if name == "12-alpn": kw["alpn"] = ["http/1.1", "h2"]
@@ -1127,8 +1136,8 @@ def scenario12(c, name):
         kw["reneg"] = None
         kw["suites"] = OFFER12 + (0x00ff,)
     if name == "12-no-reneg": kw["reneg"] = None
-    if name == "12-pss-first": kw["sigalgs"] = (0x0401, 0x0805, 0x0804, 0x0807, 0x0403)
-    if name == "12-pkcs1": kw["sigalgs"] = (0x0601, 0x0401, 0x0807, 0x0403)
+    if name == "12-pss-first": kw["sigalgs"] = (0x0401, 0x0805, 0x0804, 0x0807, 0x0403, 0x0503)
+    if name == "12-pkcs1": kw["sigalgs"] = (0x0601, 0x0401, 0x0807, 0x0403, 0x0503)
     if name == "12-no-ems": kw["ems"] = False
     if name == "12-reneg-data": kw["reneg"] = b"\x0c" + os.urandom(12)
     if name == "12-fallback": kw["suites"] = OFFER12 + (0x5600,)
@@ -1189,13 +1198,17 @@ def scenario12(c, name):
     params = body[:4 + body[3]]
     scheme = int.from_bytes(body[4 + body[3]:6 + body[3]], "big")
     signature = body[8 + body[3]:]
-    wanted_group = 0x17 if name in ("12-p256", "12-no-groups") else 0x1d
+    wanted_group = {"12-p256": 0x17, "12-no-groups": 0x17, "12-p384": 0x18}.get(name, 0x1d)
     assert group == wanted_group, f"ECDHE in group {group:#x}, where {wanted_group:#x} belongs"
     sigalgs = kw.get("sigalgs", SIGALGS12)
     if isinstance(public, rsa.RSAPublicKey):
         wanted = next((s for s in sigalgs if s in PSS), None) or next(s for s in sigalgs if s in PKCS1)
+    elif isinstance(public, ed25519.Ed25519PublicKey):
+        wanted = 0x0807
     else:
-        wanted = 0x0807 if isinstance(public, ed25519.Ed25519PublicKey) else 0x0403
+        # A P-384 key signs under ecdsa_secp384r1_sha384, the one scheme of
+        # its own, though TLS 1.2's ECDSA schemes name a hash and no curve.
+        wanted = 0x0503 if isinstance(public.curve, ec.SECP384R1) else 0x0403
     assert scheme == wanted, f"a ServerKeyExchange under {scheme:#06x}, where {wanted:#06x} belongs"
     verify12(public, scheme, client_random + server_random + params, signature)
     transcript += ske
@@ -1232,9 +1245,10 @@ def scenario12(c, name):
         presented = message(11, len(entries).to_bytes(3, "big") + entries)
         flight += presented
         transcript += presented
-    if group == 0x17:
-        mine = ec.generate_private_key(ec.SECP256R1())
-        shared = mine.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), point))
+    if group in CURVES12:
+        curve = CURVES12[group]()
+        mine = ec.generate_private_key(curve)
+        shared = mine.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(curve, point))
         public_point = mine.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
     else:
         mine = x25519.X25519PrivateKey.generate()

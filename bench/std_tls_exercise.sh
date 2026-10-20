@@ -1446,22 +1446,23 @@ echo
 echo "== TLS 1.2 at the server, when asked"
 # The server told to speak TLS 1.2 too (`TlsServerConfig#min_version =
 # TlsVersion::TLS12`, the exercise's serve mode under TLS_MIN_VERSION=1.2;
-# the section above holds the default to 1.3 alone), on the Ed25519, P-256
-# and 2048-bit RSA keys made above: bench/std_tls_client.py's TLS12
+# the section above holds the default to 1.3 alone), on the Ed25519, P-256,
+# P-384 and 2048-bit RSA keys made above: bench/std_tls_client.py's TLS12
 # scenarios - every 1.2 handshake checked step by step, or one rule broken
 # and the alert named - and three of TLS 1.3's, still answered in 1.3.
 # Then OpenSSL's s_client pinned to 1.2 (-tls1_2): each suite of the key's
-# kind, ALPN, the group, RSA's schemes, a client without the extended
-# master secret (-no_ems, where this OpenSSL has it) and one falling back
-# (-fallback_scsv) refused, the exporter against OpenSSL's, a renegotiation
-# ("R") refused with no_renegotiation; Python's ssl with maximum_version
-# TLSv1_2, each suite of the key's kind; curl and Node held to 1.2; the
-# std/tls client, which offers 1.3 and is answered in it, and the copies
-# built above that offer 1.2 alone - the downgrade sentinel refused, and
-# with the check removed, a 1.2 connection. Then client certificates in
-# 1.2: the scripted client's MTLS12 scenarios, s_client presenting each
-# kind, Python's ssl and the std/tls client's copy presenting one, and
-# none refused.
+# kind, ALPN, the group - secp384r1 alone too, which a P-256 key refuses
+# as a P-384 key refuses secp256r1 alone - RSA's schemes, a client without
+# the extended master secret (-no_ems, where this OpenSSL has it) and one
+# falling back (-fallback_scsv) refused, the exporter against OpenSSL's, a
+# renegotiation ("R") refused with no_renegotiation; Python's ssl with
+# maximum_version TLSv1_2, each suite of the key's kind; curl and Node held
+# to 1.2; the std/tls client, which offers 1.3 and is answered in it, and
+# the copies built above that offer 1.2 alone - the downgrade sentinel
+# refused, and with the check removed, a 1.2 connection. Then client
+# certificates in 1.2: the scripted client's MTLS12 scenarios, s_client
+# presenting each kind, Python's ssl and the std/tls client's copy
+# presenting one, and none refused.
 # server12_round <binary> [scripted|all]: the binary serving, a line each,
 # "FAIL" before what did not hold; `scripted` asks the scripted client
 # alone.
@@ -1555,10 +1556,11 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
     print(s.version(), s.cipher()[0], data.decode().split("\r\n\r\n")[1].strip())
 ' "$port" "$SRV/roots.pem" "$@"
   }
-  for kind in ed25519 p256 rsa2048; do
+  for kind in ed25519 p256 p384 rsa2048; do
     case "$kind" in
       ed25519) dir="$SRV" flag=() ;;
       p256) dir="$SRV/p256" flag=(--p256) ;;
+      p384) dir="$SRV/p384" flag=(--p384) ;;
       *) dir="$SRV/rsa2048" flag=(--rsa) ;;
     esac
     start12 "$dir"
@@ -1574,12 +1576,24 @@ with ctx.wrap_socket(socket.create_connection(("127.0.0.1", int(sys.argv[1])), t
         done
         ask12 "OpenSSL, TLS 1.2, $kind, ALPN" "name=localhost alpn=h2 TLS_ECDHE_" sclient12 -tls1_2 -alpn h2,http/1.1
         ask12 "OpenSSL, TLS 1.2, $kind, X25519 first" "Temp Key: X25519" sclient12 -tls1_2
-        ask12 "OpenSSL, TLS 1.2, $kind, secp256r1 alone" "Temp Key: ECDH, prime256v1" sclient12 -tls1_2 -groups P-256
-        if [ "$kind" = p256 ]; then
-          ask12 "OpenSSL, TLS 1.2, p256, groups without secp256r1, the certificate's curve" "SSL alert number 40" sclient12 -tls1_2 -groups X25519
-        else
-          ask12 "OpenSSL, TLS 1.2, $kind, X25519 alone" "Temp Key: X25519" sclient12 -tls1_2 -groups X25519
-        fi
+        # An ECDSA key's curve must be among the client's groups (RFC 8422
+        # section 5.1.1).
+        case "$kind" in
+          p256)
+            ask12 "OpenSSL, TLS 1.2, p256, secp256r1 alone" "Temp Key: ECDH, prime256v1" sclient12 -tls1_2 -groups P-256
+            ask12 "OpenSSL, TLS 1.2, p256, groups without secp256r1, the certificate's curve" "SSL alert number 40" sclient12 -tls1_2 -groups X25519
+            ask12 "OpenSSL, TLS 1.2, p256, secp384r1 alone, without the certificate's curve" "SSL alert number 40" sclient12 -tls1_2 -groups P-384
+            ;;
+          p384)
+            ask12 "OpenSSL, TLS 1.2, p384, secp384r1 alone" "Temp Key: ECDH, secp384r1" sclient12 -tls1_2 -groups P-384
+            ask12 "OpenSSL, TLS 1.2, p384, groups without secp384r1, the certificate's curve" "SSL alert number 40" sclient12 -tls1_2 -groups X25519:P-256
+            ;;
+          *)
+            ask12 "OpenSSL, TLS 1.2, $kind, secp256r1 alone" "Temp Key: ECDH, prime256v1" sclient12 -tls1_2 -groups P-256
+            ask12 "OpenSSL, TLS 1.2, $kind, secp384r1 alone" "Temp Key: ECDH, secp384r1" sclient12 -tls1_2 -groups P-384
+            ask12 "OpenSSL, TLS 1.2, $kind, X25519 alone" "Temp Key: X25519" sclient12 -tls1_2 -groups X25519
+            ;;
+        esac
         case "$kind" in
           rsa*)
             ask12 "OpenSSL, TLS 1.2, RSA, RSA-PSS and PKCS #1 v1.5: RSA-PSS" "scheme rsa_pss_rsae_sha256" scheme12 RSA-PSS+SHA256:RSA+SHA256
@@ -2688,6 +2702,18 @@ prove_broken "a P-256 certificate shown to a client whose groups leave its curve
   '      unless groups.includes?(curve)
         return "the client'"'"'s supported_groups leave out' '      if false
         return "the client'"'"'s supported_groups leave out' server12
+# The same check, caught where the client lists the other curve alone: a
+# P-256 certificate for secp384r1, a P-384 one for secp256r1.
+prove_broken "a P-256 certificate shown to a client offering secp384r1 alone" "FAIL 12-p384 " \
+  '      unless groups.includes?(curve)
+        return "the client'"'"'s supported_groups leave out' '      if false
+        return "the client'"'"'s supported_groups leave out' server12
+prove_broken "a P-384 certificate shown to a client offering secp256r1 alone" "FAIL 12-p256 " \
+  '      unless groups.includes?(curve)
+        return "the client'"'"'s supported_groups leave out' '      if false
+        return "the client'"'"'s supported_groups leave out' server12
+prove_broken "secp384r1 left out of TLS 1.2's groups" "FAIL 12-p384 " \
+  '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1, GROUP_SECP384R1]' '  GROUPS12 = [GROUP_X25519, GROUP_SECP256R1]' server12
 prove_broken "PKCS #1 v1.5 put before RSA-PSS" "FAIL 12-ok " \
   '    pss = scheme_for(offered)' '    pss = @rsa ? nil : scheme_for(offered)' server12
 prove_broken "an RSA key that never signs under PKCS #1 v1.5" "FAIL 12-pkcs1 " \

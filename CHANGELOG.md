@@ -323,6 +323,21 @@
   HelloRequest, the echo, the rest) and `tls12-oversize`, which the std/tls
   client refuses by name. Four broken copies - the split rule waived for
   1.2 alone, and `open12`'s limit dropped, at each end - are caught.
+- **`bench/std_tls_exercise.sh` asks the TLS 1.2 server in secp384r1 and
+  on a P-384 key.** The scripted client offers secp384r1 and
+  ecdsa_secp384r1_sha384 in 1.2 and agrees ECDH in secp384r1; its new
+  `12-p384` lists secp384r1 alone, held on the Ed25519, P-384 and RSA keys
+  and refused by the P-256 one (alert 40), as `12-p256` is now by the
+  P-384 key and `12-p256-no-curve` by both ECDSA keys; a P-384 key's
+  ServerKeyExchange must be under 0x0503. The gate's TLS 1.2 server round
+  adds the P-384 key - the scripted client, OpenSSL, Python's ssl, curl,
+  Node and the std/tls client - and asks OpenSSL for secp384r1 alone on
+  every key ("Temp Key: ECDH, secp384r1"), refused by the P-256 key as
+  secp256r1 alone and X25519 are by the P-384 one. Three broken copies:
+  secp384r1 dropped from `GROUPS12` (`12-p384`), and the check of the
+  client's groups against the key's curve removed, caught now by `12-p384`
+  on the P-256 key and `12-p256` on the P-384 key as well as by
+  `12-p256-no-curve`.
 
 ### Changed
 

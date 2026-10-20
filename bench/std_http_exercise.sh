@@ -1048,7 +1048,7 @@ echo "== a close while the client still sends (RFC 9112 section 9.6)"
 # told to insist on) within half a second of the answer's last byte, not
 # the second a server that never shuts its half lingers for.
 cat >"$WORK/close.py" <<'PY'
-import http.client, os, select, shutil, socket, ssl, subprocess, sys, time
+import concurrent.futures, http.client, os, select, shutil, socket, ssl, subprocess, sys, time
 
 # close.py PORT RUNS ROOT|- [CASE...]
 port, runs = int(sys.argv[1]), int(sys.argv[2])
@@ -1189,46 +1189,64 @@ if CURL:
         f.write(b"u" * UP)
     cases["curl, Connection: close"] = lambda: by_curl(True)
     cases["curl, a body past MAX_DRAIN"] = lambda: by_curl(False)
-failures = 0
-for name, case in cases.items():
-    first = None
-    lost = 0
+# Only the cases named, when some are (a broken copy is held to the one
+# that names it); each case on a thread of its own, its runs one after
+# another: the cases share the server and nothing else.
+named = sys.argv[4:]
+chosen = [(name, case) for name, case in cases.items() if not named or name in named]
+
+
+def verdict(item):
+    name, case = item
+    first, lost = None, 0
     for _ in range(runs):
         got = case()
         if got:
             lost += 1
             first = first or got
     if lost:
-        failures += 1
-        print("  FAIL: %s: %d of %d runs: %s" % (name, lost, runs, first))
-    else:
-        print("  %s: %d of %d whole, no reset, the end at once" % (name, runs, runs))
+        return False, "  FAIL: %s: %d of %d runs: %s" % (name, lost, runs, first)
+    return True, "  %s: %d of %d whole, no reset, the end at once" % (name, runs, runs)
+
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(chosen))) as pool:
+    verdicts = list(pool.map(verdict, chosen))
+for _, line in verdicts:
+    print(line)
 if not CURL:
     print("  curl is not installed; its cases skipped")
-sys.exit(1 if failures else 0)
+sys.exit(0 if verdicts and all(held for held, _ in verdicts) else 1)
 PY
-# close_round <binary> <runs> [chain key root]: the cases against that
-# binary's serve-close, plain or over TLS; fails when any case does.
+# close_round <tag> <binary> <runs> <plain|tls> [case...]: the cases (or
+# those named) against that binary's serve-close, its port file and log
+# named by <tag> so that rounds run beside each other; fails when any
+# case does.
 close_round() {
-  local bin="$1" runs="$2" chain="${3:-}" key="${4:-}" root="${5:--}" cpid cport code=0
-  rm -f "$WORK/close.port"
-  if [ -n "$chain" ]; then
-    "$bin" serve-close "$WORK/close.port" "$chain" "$key" >"$WORK/close-serve.log" 2>&1 &
+  local tag="$1" bin="$2" runs="$3" over="$4" cpid cport code=0 root=-
+  shift 4
+  rm -f "$WORK/close-$tag.port"
+  if [ "$over" = tls ]; then
+    "$bin" serve-close "$WORK/close-$tag.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" >"$WORK/close-$tag.log" 2>&1 &
+    root="$WORK/tls/root.pem"
   else
-    "$bin" serve-close "$WORK/close.port" >"$WORK/close-serve.log" 2>&1 &
+    "$bin" serve-close "$WORK/close-$tag.port" >"$WORK/close-$tag.log" 2>&1 &
   fi
   cpid=$!
   for _ in $(seq 1 100); do
-    [ -s "$WORK/close.port" ] && break
+    [ -s "$WORK/close-$tag.port" ] && break
     sleep 0.1
   done
-  cport="$(cat "$WORK/close.port" 2>/dev/null || echo 1)"
-  timeout -k 5 600 "$PY" "$WORK/close.py" "$cport" "$runs" "$root" || code=1
+  cport="$(cat "$WORK/close-$tag.port" 2>/dev/null || echo 1)"
+  timeout -k 5 600 "$PY" "$WORK/close.py" "$cport" "$runs" "$root" "$@" || code=1
   kill "$cpid" 2>/dev/null
   wait "$cpid" 2>/dev/null
   return "$code"
 }
-CLOSE_RUNS="${CLOSE_RUNS:-20}"
+# Five runs a case by default, CLOSE_RUNS= for more: closed at once, the
+# old server lost every run of every case but two in 50 (above), so five
+# catch it many times over, and each broken copy below is caught in 3 of
+# 3 runs of the case that names it.
+CLOSE_RUNS="${CLOSE_RUNS:-5}"
 # The --release build serves: a lingering close reads past what the
 # client still sends for a second at most, and the plain build's TLS
 # drains 8 MiB in 0.21 s on Linux (x86-64), the release build's in 0.04
@@ -1242,11 +1260,21 @@ if [ "$h2_built" -ne 1 ] || [ -z "$PY" ]; then
   echo "  skipped: no server built, or no python3 to be the client"
 else
   close_ready=1
+  # Plain and over TLS beside each other, each with its own server.
+  { close_round plain "$CLOSE_BIN" "$CLOSE_RUNS" plain >"$WORK/close-plain.out" 2>&1; echo $? >"$WORK/close-plain.code"; } &
+  round_pids=$!
+  if [ -s "$WORK/tls/p256.pem" ]; then
+    { close_round tls "$CLOSE_BIN" "$CLOSE_RUNS" tls >"$WORK/close-tls.out" 2>&1; echo $? >"$WORK/close-tls.code"; } &
+    round_pids="$round_pids $!"
+  fi
+  wait $round_pids
   echo "  plain, $CLOSE_RUNS runs a case:"
-  close_round "$CLOSE_BIN" "$CLOSE_RUNS" || status=1
+  cat "$WORK/close-plain.out"
+  [ "$(cat "$WORK/close-plain.code")" = 0 ] || status=1
   if [ -s "$WORK/tls/p256.pem" ]; then
     echo "  over std/tls (TLS 1.3, the P-256 leaf), $CLOSE_RUNS runs a case:"
-    close_round "$CLOSE_BIN" "$CLOSE_RUNS" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" "$WORK/tls/root.pem" || status=1
+    cat "$WORK/close-tls.out"
+    [ "$(cat "$WORK/close-tls.code")" = 0 ] || status=1
   else
     echo "  over TLS: skipped, no certificates (no python3 with cryptography to make them)"
   fi
@@ -1303,27 +1331,27 @@ print(" ".join(said))
 PY
 # client_close_round <binary> [tls]: the iyi client's close against the
 # Python server above; prints what each end saw.
-client_close_round() {
-  local bin="$1" over="${2:-}" spid sport base
-  rm -f "$WORK/cserve.port"
+client_close_round() { # client_close_round <binary> [tls] [tag]
+  local bin="$1" over="${2:-}" tag="${3:-cserve}" spid sport
+  rm -f "$WORK/$tag.port"
   if [ -n "$over" ]; then
-    "$PY" "$WORK/close_server.py" "$WORK/cserve.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" >"$WORK/cserve.out" 2>&1 &
+    "$PY" "$WORK/close_server.py" "$WORK/$tag.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" >"$WORK/$tag.sout" 2>&1 &
   else
-    "$PY" "$WORK/close_server.py" "$WORK/cserve.port" >"$WORK/cserve.out" 2>&1 &
+    "$PY" "$WORK/close_server.py" "$WORK/$tag.port" >"$WORK/$tag.sout" 2>&1 &
   fi
   spid=$!
   for _ in $(seq 1 100); do
-    [ -s "$WORK/cserve.port" ] && break
+    [ -s "$WORK/$tag.port" ] && break
     sleep 0.1
   done
-  sport="$(cat "$WORK/cserve.port" 2>/dev/null || echo 1)"
+  sport="$(cat "$WORK/$tag.port" 2>/dev/null || echo 1)"
   if [ -n "$over" ]; then
     timeout -k 5 60 "$bin" close-client "https://localhost:$sport" "$WORK/tls/root.pem" 2>&1
   else
     timeout -k 5 60 "$bin" close-client "http://127.0.0.1:$sport" 2>&1
   fi
   wait "$spid"
-  cat "$WORK/cserve.out"
+  cat "$WORK/$tag.sout"
 }
 # client_close_holds <output>: the client waited for the server's end, a
 # second at most, and the server saw a clean close.
@@ -2678,54 +2706,79 @@ h2_frames_breaks "a broken body's 400 closed on at once" linger_body \
             return true' '            refuse(conn.transport, body)
             return false' \
   'a broken chunk, more sent after the answer'
-# The lingering close broken, in std/http or under it in std/tls: the
-# close cases, three runs each, must fail at the one named - and the
-# client's own close where that is what is named.
-close_breaks() { # close_breaks <label> <name> <module> <old> <new> <plain|tls|client|client-tls> <case>
-  local label="$1" name="$2" module="$3" old="$4" new="$5" over="$6" case_name="$7" got
-  if [ "$close_ready" -ne 1 ] || { case "$over" in *tls) true ;; *) false ;; esac && [ ! -s "$WORK/tls/p256.pem" ]; }; then
-    echo "  $label: skipped with the close cases"
+# The lingering close broken, in std/http or under it in std/tls: the case
+# that names the break, three runs, must fail - and the client's own close
+# where that is named. The copies are built one after another (they share
+# the compiler's cache) and run MUT_JOBS at a time, each against servers
+# of its own; the answers are printed in order once all have ended.
+close_n=0
+close_pids=""
+mkdir -p "$WORK/closeres"
+close_judged() { # close_judged <n> <label> <name> <plain|tls|-> <case> <client|client-tls|->
+  local n="$1" label="$2" name="$3" over="$4" case_name="$5" client="$6" got said=""
+  if [ "$over" != - ]; then
+    close_round "$name" "$WORK/$name.bin" 3 "$over" "$case_name" >"$WORK/$name.out" 2>&1
+    if grep -qF -- "FAIL: $case_name:" "$WORK/$name.out"; then
+      said="  $label: caught: $(grep -m1 -F -- "FAIL: $case_name:" "$WORK/$name.out" | sed 's/^ *FAIL: //' | cut -c1-150)"
+    else
+      printf '%s\n' "  $label: the close cases did not fail at \"$case_name\"" "$(tail -4 "$WORK/$name.out" | sed 's/^/    /')" >"$WORK/closeres/$n"
+      touch "$WORK/closeres/failed"
+      return
+    fi
+  fi
+  if [ "$client" != - ]; then
+    got="$(client_close_round "$WORK/$name.bin" "${client#client}" "$name-c")"
+    if client_close_holds "$got"; then
+      printf '%s\n' "  $label: the client's close held on a broken copy: $(printf '%s' "$got" | tr '\n' ' ')" >"$WORK/closeres/$n"
+      touch "$WORK/closeres/failed"
+      return
+    fi
+    said="${said:+$said
+}  $label: caught at the client's close: $(printf '%s' "$got" | tr '\n' ' ' | cut -c1-140)"
+  fi
+  printf '%s\n' "$said" >"$WORK/closeres/$n"
+}
+close_breaks() { # close_breaks <label> <name> <module> <old> <new> <plain|tls|-> <case> [client|client-tls]
+  local label="$1" name="$2" module="$3" old="$4" new="$5" over="$6" case_name="$7" client="${8:--}" pid running
+  close_n=$((close_n + 1))
+  if [ "$close_ready" -ne 1 ] || { case "$over$client" in *tls*) true ;; *) false ;; esac && [ ! -s "$WORK/tls/p256.pem" ]; }; then
+    echo "  $label: skipped with the close cases" >"$WORK/closeres/$close_n"
     return
   elif ! h2_patched "$name" "$old" "$new" "$module"; then
-    echo "  $label: the broken copy did not build"
-    sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
-    status=1
+    printf '%s\n' "  $label: the broken copy did not build" "$(sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /')" >"$WORK/closeres/$close_n"
+    touch "$WORK/closeres/failed"
     return
   fi
-  case "$over" in
-    plain) close_round "$WORK/$name.bin" 3 >"$WORK/$name.out" 2>&1 ;;
-    tls) close_round "$WORK/$name.bin" 3 "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" "$WORK/tls/root.pem" >"$WORK/$name.out" 2>&1 ;;
-    client | client-tls)
-      got="$(client_close_round "$WORK/$name.bin" "${over#client}")"
-      if client_close_holds "$got"; then
-        echo "  $label: the client's close held on a broken copy: $(printf '%s' "$got" | tr '\n' ' ')"
-        status=1
-      else
-        echo "  $label: caught at the client's close: $(printf '%s' "$got" | tr '\n' ' ' | cut -c1-140)"
-      fi
-      return
-      ;;
-  esac
-  if grep -qF -- "FAIL: $case_name:" "$WORK/$name.out"; then
-    echo "  $label: caught: $(grep -m1 -F -- "FAIL: $case_name:" "$WORK/$name.out" | sed 's/^ *FAIL: //' | cut -c1-150)"
-  else
-    echo "  $label: the close cases did not fail at \"$case_name\""
-    tail -4 "$WORK/$name.out" | sed 's/^/    /'
-    status=1
-  fi
+  close_judged "$close_n" "$label" "$name" "$over" "$case_name" "$client" &
+  close_pids="$close_pids $!"
+  while :; do
+    running=""
+    for pid in $close_pids; do
+      kill -0 "$pid" 2>/dev/null && running="$running $pid"
+    done
+    close_pids="$running"
+    [ "$(echo $close_pids | wc -w)" -lt "$MUT_JOBS" ] && break
+    sleep 0.2
+  done
+}
+close_breaks_report() {
+  local pid n=1
+  for pid in $close_pids; do
+    wait "$pid"
+  done
+  while [ "$n" -le "$close_n" ]; do
+    cat "$WORK/closeres/$n"
+    n=$((n + 1))
+  done
+  [ -e "$WORK/closeres/failed" ] && status=1
+  return 0
 }
 close_breaks "the linger removed: a close at once" close_nolinger http.iyi \
   '    else
       linger
     end' '    else
       @socket.close
-    end' plain 'http.client, Connection: close'
-close_breaks "the linger removed, at the client" close_nolinger_client http.iyi \
-  '    else
-      linger
-    end' '    else
-      @socket.close
-    end' client ''
+    end' plain 'http.client, Connection: close' client
 close_breaks "close_write skipped: the sending half never shut" close_nohalf http.iyi \
   '    socket.close_write
 ' '' plain 'Python reading as it sends, Connection: close'
@@ -2740,7 +2793,7 @@ close_breaks "TLS: the client closing at once" close_client_tls http.iyi \
       stream.close
     else' '    elsif stream = @stream
       close_now
-    else' client-tls ''
+    else' - - client-tls
 h2_frames_breaks "HEADERS on a closed stream passed over" h2_stale \
   '          mode = @reset_lately.includes?(id) ? IGNORED_BLOCK : STALE_BLOCK' '          mode = IGNORED_BLOCK' \
   'HEADERS on a closed stream'
@@ -2880,6 +2933,8 @@ proxy_breaks "an upgrade sent past its proxy" proxy_upgrade_direct \
 proxy_breaks "a ws:// handshake sent to the proxy in absolute form" proxy_upgrade_absolute \
   'tunneled = !route.nil? && (secure || !upgrade.nil?)' 'tunneled = !route.nil? && secure'
 
+# The lingering close's copies, started above beside what came after.
+close_breaks_report
 echo
 if [ "$status" -eq 0 ]; then
   echo "the std/http exercise holds"

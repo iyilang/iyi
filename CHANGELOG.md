@@ -474,8 +474,9 @@
   closed at once. After the fix every case answered whole in 50 runs of
   50, plain and over TLS. `bench/std_http_exercise.sh`'s "a close while
   the client still sends" holds it: Python reading as it sends, Python's
-  http.client, 200 pipelined requests and curl, 20 runs of each, plain
-  and over std/tls, every answer whole, no reset, and the end within half
+  http.client, 200 pipelined requests and curl, 5 runs of each
+  (`CLOSE_RUNS=` for more), the cases side by side, plain and over
+  std/tls, every answer whole, no reset, and the end within half
   a second of the answer; and the client's close against a Python server
   that holds its end back 300 ms. Broken copies are caught by name: the
   linger removed (http.client reset, and the client's close returning at

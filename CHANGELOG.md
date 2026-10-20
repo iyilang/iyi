@@ -446,6 +446,14 @@
 
 ### Fixed
 
+- **std/bzip2's Huffman tables stay inside their memory whatever the
+  code lengths.** The fast table was filled from the lengths after one
+  check - that they do not over-subscribe the code space - and without
+  it a table could be written past its end. The check still refuses
+  such a stream by name; the fill is now held to the table too, so the
+  check is no longer what keeps memory safe. Found by the gate's copy of
+  the module with the check taken out, which on Windows died of a
+  memory fault instead of failing at the check that names it.
 - **A fiber stack back from the pool keeps its frames on Windows.** A
   stack a finished task handed back was settled for the next task with
   the StackLimit a fresh one has, above the pages the first task had

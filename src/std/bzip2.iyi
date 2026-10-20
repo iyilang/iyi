@@ -216,6 +216,12 @@ class Bzip2Table
         c = @first[len] + at - @offs[len]
         from = c << (FAST - len)
         to = (c + 1) << (FAST - len)
+        # Held to the table even where the lengths would carry it past:
+        # the over-subscription check above is what refuses such lengths,
+        # and memory stays the table's without it. A copy of this module
+        # with that check taken out wrote past `@fast` and died of a memory
+        # fault on Windows, where the gate means to see it refused.
+        to = 1 << FAST if to > (1 << FAST)
         while from < to
           @fast[from] = (i << 5) | len
           from = from + 1

@@ -101,7 +101,11 @@ SCENARIOS = {
     "slow-echo": "the echo a second and a half late",
     "client-rekey": "the client's records read across its KeyUpdates, counted",
     "certreq-context": "a CertificateRequest with a request context, in the handshake",
-    "cert-entry-ext": "a certificate entry with a status_request extension nobody asked for",
+    "cert-entry-ext": "a certificate entry with a signed_certificate_timestamp extension nobody asked for",
+    "staple-garbage": "a stapled OCSP response that is DER and no OCSPResponse",
+    "staple-type": "a CertificateStatus of status_type 2, where ocsp (1) was asked for",
+    "staple-empty": "a CertificateStatus whose OCSPResponse is empty",
+    "staple-twice": "the leaf's entry with status_request twice",
     "sni-ack-data": "a server_name acknowledgement that is not empty",
     "user-canceled": "a user_canceled warning before the echo",
     "padded-max": "the echo padded to 2^14 + 1 bytes of inner plaintext, the most section 5.4 allows",
@@ -591,8 +595,17 @@ class Conn:
         leaf = {"wrong-host": self.pki.wrong_host, "expired": self.pki.expired, "untrusted": self.pki.untrusted,
                 "ku-no-sign": self.pki.no_sign}.get(s, self.pki.leaves[kind])
         sent = (leaf, self.pki.inter) * (6 if s == "cert-many" else 1)
-        entry_ext = b"\x00\x04" + ext(5, b"") if s == "cert-entry-ext" else b"\x00\x00"
-        entries = b"" if s == "cert-empty" else b"".join(len(der(c)).to_bytes(3, "big") + der(c) + entry_ext for c in sent)
+        # Extensions on the leaf's entry (on every entry for cert-entry-ext):
+        # signed_certificate_timestamp, which nobody asked for, and the
+        # status_request staples the client did ask for, broken one way each.
+        leaf_ext = {"cert-entry-ext": ext(18, b""),
+                    "staple-garbage": ext(5, b"\x01" + (5).to_bytes(3, "big") + b"\x30\x03\x02\x01\x00"),
+                    "staple-type": ext(5, b"\x02" + (3).to_bytes(3, "big") + b"abc"),
+                    "staple-empty": ext(5, b"\x01\x00\x00\x00"),
+                    "staple-twice": ext(5, b"\x01\x00\x00\x01\x00") * 2}.get(s, b"")
+        entry_ext = [leaf_ext if i == 0 or s == "cert-entry-ext" else b"" for i in range(len(sent))]
+        entries = b"" if s == "cert-empty" else b"".join(len(der(c)).to_bytes(3, "big") + der(c) + len(e).to_bytes(2, "big") + e
+                                                         for c, e in zip(sent, entry_ext))
         messages.append(message(11, b"\x00" + len(entries).to_bytes(3, "big") + entries))
         if s == "cert-empty":
             messages.append(message(15, b"\x04\x03\x00\x00"))
@@ -646,7 +659,8 @@ class Conn:
             self.sock.sendall(writer.seal(22, flight, corrupt=(s == "bad-record-mac")))
         if s in ("bad-finished", "bad-cv", "cv-pkcs1", "cv-wrong-curve", "unsolicited-ext", "alpn-unoffered",
                  "wrong-host", "untrusted", "expired", "bad-record-mac", "cert-empty", "certreq-no-sigalgs", "cert-many", "ku-no-sign",
-                 "certreq-context", "cert-entry-ext", "sni-ack-data") or (psk is not None and s in ("resume-cert", "early-unoffered")):
+                 "certreq-context", "cert-entry-ext", "sni-ack-data", "staple-garbage", "staple-type", "staple-empty",
+                 "staple-twice") or (psk is not None and s in ("resume-cert", "early-unoffered")):
             return
 
         master = schedule.extract(schedule.derive(hs, b"derived", b""), bytes(schedule.size))

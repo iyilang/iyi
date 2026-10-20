@@ -41,9 +41,10 @@
 # the server refuses an encapsulation key that fails FIPS 203's modulus
 # check. The client sends the hybrid's share by default, beside X25519's,
 # one X25519 key in both, as OpenSSL 3.5, Chrome and Firefox do (SPEC.md's
-# decision #18 says why): the ClientHello grows by 1,222 bytes, from 186
-# to 1,408 as OpenSSL's s_server read it, and the client spends an ML-KEM
-# key pair and a decapsulation (std/mlkem's header has their times).
+# decision #18 says why): the ClientHello grows by 1,222 bytes, from 197
+# to 1,419 as OpenSSL 3.5's s_server read it for localhost, and the client
+# spends an ML-KEM key pair and a decapsulation (std/mlkem's header has
+# their times).
 # `TlsConfig#post_quantum = false` offers X25519, secp256r1 and secp384r1
 # alone. The
 # server takes X25519MLKEM768 whenever the client lists it, asking for its
@@ -250,6 +251,32 @@
 # another protocol than the ticket's, for which section 4.2.10 forbids
 # that; `TlsClient#early_data` says which. std/http takes and sends none.
 #
+# OCSP stapling (RFC 6066's status_request; RFC 8446 section 4.4.2.1),
+# both ends. Every ClientHello asks for a staple - OCSP, no responder
+# named - and one that comes is checked by std/ocsp once the chain is: in
+# TLS 1.3 the leaf's CertificateEntry carries it, in 1.2 a
+# CertificateStatus after the Certificate, which the ServerHello's empty
+# status_request must have announced. It must be a response for the leaf,
+# signed by the leaf's issuer or a responder the issuer delegated to, and
+# current at the time certificates are checked at, five minutes either
+# way; `ocsp_response` and `ocsp_status` are on the connection. Revoked is
+# refused with certificate_revoked; unknown, a response that is not one or
+# is not current or not the issuer's, with bad_certificate_status_response
+# - RFC 8446 section 6.2's alert for it. A server that staples nothing is
+# taken by default, since most send none; `TlsConfig#require_staple`
+# refuses one, and so does a leaf whose TLS Feature extension
+# (RFC 7633) names status_request ("must staple"), each with
+# bad_certificate_status_response. An entry extension other than
+# status_request is refused (unsupported_extension), and an intermediate's
+# status, which 1.3 lets a server send, is read and not judged. This is
+# stapling alone: no CRL is read and no responder is asked over the
+# network (std/ocsp's header). The server staples what
+# `TlsServerConfig#staple` was given for each identity - an OCSPResponse
+# with a SingleResponse for the identity's leaf, refused otherwise - to a
+# client whose ClientHello asks, in either version; a staple past its
+# nextUpdate is not sent, since a client that checks it would refuse the
+# handshake, and a fresh one is the caller's to fetch and hand in again.
+#
 # A record is at most 2^14 bytes of content, as section 5.1 holds both
 # sides to, and a TLS 1.3 record's inner plaintext - content type and
 # padding in it - at most 2^14 + 1 (section 5.4); a handshake message
@@ -281,6 +308,7 @@ import std/p384::{P384PrivateKey}
 import std/curve25519::{X25519, Ed25519, Ed25519PublicKey, CurveError}
 import std/mlkem::{MlKem768, MlKem768PrivateKey, MlKemError}
 import std/asn1::{Der, Asn1Error}
+import std/ocsp::{OcspResponse, OcspSingleResponse, OcspCertStatus, OcspError, Ocsp}
 import std/aead::{AesGcm, ChaCha20Poly1305, AeadError}
 import std/crypto::{HMAC, HKDF, Subtle}
 import std/digest::{SHA256, SHA384}
@@ -408,6 +436,13 @@ pub class TlsConfig
   # Chrome and Firefox have it; off, the ClientHello offers X25519 and
   # secp256r1 alone.
   property post_quantum : Bool = true
+  # Whether a server's certificate must come with a stapled OCSP response
+  # (RFC 6066's status_request, asked for by every ClientHello): with it,
+  # a server that staples none is refused (bad_certificate_status_response),
+  # as one whose certificate carries the TLS Feature extension's
+  # status_request (RFC 7633, "must staple") always is. Off by default: a
+  # staple that comes is checked either way (the module's header).
+  property require_staple : Bool = false
 
   def initialize
   end
@@ -758,6 +793,11 @@ pub abstract class TlsConnection
   # The chain the peer's certificate was checked through, leaf first: the
   # server's, for a client; the client's, for a server that asked for one.
   getter peer_certificates : Array(Certificate) = [] of Certificate
+  # The OCSP response stapled to the server's certificate (RFC 6066, RFC
+  # 8446 section 4.4.2.1) and the status it gives - for a client, checked
+  # (std/ocsp); for a server, the one it sent. Nil when none was.
+  getter ocsp_response : OcspResponse? = nil
+  getter ocsp_status : OcspCertStatus? = nil
   # Whether the handshake resumed a session by a ticket's PSK (RFC 8446
   # section 2.2), with no certificate sent: `peer_certificates` are then the
   # ones the first handshake checked.
@@ -1999,6 +2039,8 @@ pub class TlsClient < TlsConnection
     return TlsError.new("#{TlsBytes.handshake_name(message[0])} where Certificate belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 11_u8
     chain = certificates(message)
     return chain if chain.is_a?(TlsError)
+    problem = judge_staple
+    return problem if problem
     @transcript = @transcript + message
 
     message = handshake_message(plain: false)
@@ -2054,6 +2096,9 @@ pub class TlsClient < TlsConnection
     schemes = [] of UInt8
     SIGNATURE_SCHEMES.each { |s| schemes = schemes + TlsBytes.u16(s) }
     extensions = extensions + TlsBytes.extension(13, TlsBytes.u16(schemes.size) + schemes)
+    # status_request (RFC 6066 section 8): OCSP, no responder named and no
+    # request extensions - a stapled response asked of every server.
+    extensions = extensions + TlsBytes.extension(5, [1_u8, 0_u8, 0_u8, 0_u8, 0_u8])
     # TLS 1.3, then 1.2 when it is asked for.
     extensions = extensions + TlsBytes.extension(43, tls12 ? [4_u8, 3_u8, 4_u8, 3_u8, 3_u8] : [2_u8, 3_u8, 4_u8])
     entries = [] of UInt8
@@ -2218,6 +2263,11 @@ pub class TlsClient < TlsConnection
       when 23
         return TlsError.new("an extended_master_secret answer that is not empty", TlsAlert::DECODE_ERROR) unless data.empty?
         extended = true
+      when 5
+        # RFC 6066 section 8: an empty status_request says a
+        # CertificateStatus may follow the Certificate.
+        return TlsError.new("a status_request answer that is not empty", TlsAlert::DECODE_ERROR) unless data.empty?
+        @status_acked = true
       when 0xff01
         # RFC 5746 section 3.4: on a first handshake the server's
         # renegotiated_connection is empty.
@@ -2314,9 +2364,8 @@ pub class TlsClient < TlsConnection
       der = list.bytes(list.u24)
       entry_extensions = @tls12 ? [] of UInt8 : list.bytes(list.u16)
       return TlsError.new("a Certificate message cut short", TlsAlert::DECODE_ERROR) if list.short?
-      # Section 4.4.2: an entry's extensions answer the ClientHello's, and
-      # this client asks for none (no status_request, no SCT).
-      return TlsError.new("a certificate entry with extensions nobody asked for", TlsAlert::UNSUPPORTED_EXTENSION) unless entry_extensions.empty?
+      problem = entry_status(entry_extensions, chain.empty?)
+      return problem if problem
       certificate = Certificate.parse(der)
       return TlsError.new("the server's certificate #{chain.size}: #{certificate.message}", TlsAlert::BAD_CERTIFICATE) if certificate.is_a?(X509Error)
       chain << certificate
@@ -2330,6 +2379,75 @@ pub class TlsClient < TlsConnection
     return TlsError.new("the server's certificate is not trusted: #{verified.message}", TlsAlert::BAD_CERTIFICATE) if verified.is_a?(X509Error)
     @peer_certificates = verified
     chain
+  end
+
+  # The OCSP response the leaf's entry carried (TLS 1.3) or a
+  # CertificateStatus did (TLS 1.2), until `judge_staple` reads it; and
+  # whether a TLS 1.2 ServerHello said one may come.
+  @stapled : Array(UInt8)? = nil
+  @status_acked : Bool = false
+
+  # A certificate entry's extensions (section 4.4.2): each once, and
+  # status_request alone, the one this ClientHello asks for (section
+  # 4.4.2.1), its CertificateStatus read. The leaf's (*leaf*) is kept for
+  # `judge_staple`; another certificate's is read and passed over, as the
+  # module's header says.
+  private def entry_status(extensions : Array(UInt8), leaf : Bool) : TlsError?
+    list = TlsReader.new(extensions)
+    seen = [] of Int32
+    until list.done?
+      type = list.u16
+      data = list.bytes(list.u16)
+      return TlsError.new("a certificate entry's extensions cut short", TlsAlert::DECODE_ERROR) if list.short?
+      return TlsError.new("extension #{type} twice in a certificate entry", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)
+      seen << type
+      return TlsError.new("a certificate entry with extension #{type}, which nobody asked for", TlsAlert::UNSUPPORTED_EXTENSION) unless type == 5
+      staple = TlsClient.certificate_status(data)
+      return staple if staple.is_a?(TlsError)
+      @stapled = staple if leaf
+    end
+    nil
+  end
+
+  # A CertificateStatus's body (RFC 6066 section 8): status_type ocsp (1),
+  # then the OCSPResponse's DER, which is not empty.
+  def self.certificate_status(data : Array(UInt8)) : Array(UInt8) | TlsError
+    field = TlsReader.new(data)
+    type = field.u8
+    response = field.bytes(field.u24)
+    return TlsError.new("a CertificateStatus cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done? || response.empty?
+    return TlsError.new("a CertificateStatus of type #{type}, where ocsp (1) was asked for", TlsAlert::ILLEGAL_PARAMETER) unless type == 1
+    response
+  end
+
+  # The stapled response judged, the chain checked (std/ocsp): the status
+  # it gives the leaf, signed by the leaf's issuer or a responder it
+  # delegated to, current at the time certificates are checked at. Revoked
+  # is certificate_revoked; a response that cannot be taken, one that says
+  # unknown, and none where `require_staple` or the leaf's TLS Feature
+  # extension (RFC 7633) asks for one are bad_certificate_status_response.
+  private def judge_staple : TlsError?
+    leaf = @peer_certificates[0]
+    der = @stapled
+    unless der
+      if leaf.must_staple?
+        return TlsError.new("#{leaf.subject_name} must come with a stapled OCSP response (its TLS Feature extension, RFC 7633), and none came", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE)
+      end
+      return TlsError.new("no OCSP response was stapled to #{leaf.subject_name}, and require_staple asks for one", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE) if @config.require_staple
+      return nil
+    end
+    response = OcspResponse.parse(der)
+    return TlsError.new("the stapled OCSP response: #{response.message}", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE) if response.is_a?(OcspError)
+    verdict = response.verify(leaf, @peer_certificates[1], @config.now || Time.utc)
+    return TlsError.new("the stapled OCSP response: #{verdict.message}", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE) if verdict.is_a?(OcspError)
+    @ocsp_response = response
+    @ocsp_status = verdict.status
+    if verdict.status == OcspCertStatus::Revoked
+      reason = verdict.single.revocation_reason
+      return TlsError.new("#{leaf.subject_name} is revoked, its stapled OCSP response says: since #{verdict.single.revocation_time}#{reason ? ", " + Ocsp.reason_name(reason) : ""}", TlsAlert::CERTIFICATE_REVOKED)
+    end
+    return TlsError.new("the stapled OCSP response does not know #{leaf.subject_name}: its status is unknown", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE) if verdict.status == OcspCertStatus::Unknown
+    nil
   end
 
   # --- TLS 1.2 (RFC 5246, RFC 7627, RFC 5746, RFC 8422) ---
@@ -2369,8 +2487,21 @@ pub class TlsClient < TlsConnection
       return TlsError.new("the server's certificate does not allow digitalSignature, which a ServerKeyExchange is", TlsAlert::BAD_CERTIFICATE)
     end
 
+    # A CertificateStatus (RFC 6066 section 8) when the ServerHello said
+    # one may come, which a server may still leave out; then the stapled
+    # response judged, or its absence.
     message = message12
     return message if message.is_a?(TlsError)
+    if message[0] == 22_u8 && @status_acked
+      staple = TlsClient.certificate_status(message[4, message.size - 4])
+      return staple if staple.is_a?(TlsError)
+      @stapled = staple
+      @transcript = @transcript + message
+      message = message12
+      return message if message.is_a?(TlsError)
+    end
+    problem = judge_staple
+    return problem if problem
     return TlsError.new("#{TlsBytes.handshake_name(message[0])} where ServerKeyExchange belongs", TlsAlert::UNEXPECTED_MESSAGE) unless message[0] == 12_u8
     exchange = server_key_exchange(message, leaf, client_random + server_random)
     return exchange if exchange.is_a?(TlsError)
@@ -2629,6 +2760,11 @@ pub class TlsIdentity
   @p256 : P256PrivateKey?
   @p384 : P384PrivateKey?
   @rsa : RsaPrivateKey?
+  # The OCSP response a server staples for this chain (`TlsServerConfig#staple`),
+  # its DER and the SingleResponse for the leaf.
+  getter ocsp_staple : Array(UInt8)? = nil
+  @ocsp_response : OcspResponse? = nil
+  @ocsp_single : OcspSingleResponse? = nil
 
   ED25519        = 0x0807
   P256           = 0x0403
@@ -2642,6 +2778,34 @@ pub class TlsIdentity
   RSA_PKCS1 = [0x0401, 0x0501, 0x0601]
 
   def initialize(@chain : Array(Array(UInt8)), @leaf : Certificate, @schemes : Array(Int32), @seed : Array(UInt8)?, @p256 : P256PrivateKey?, @p384 : P384PrivateKey?, @rsa : RsaPrivateKey?)
+  end
+
+  # *der* kept as this chain's OCSP response, to be stapled for a client
+  # that asks: refused unless it is an OCSPResponse std/ocsp reads, with a
+  # SingleResponse for the leaf - its serial number and its issuer name's
+  # hash. Its signature and times are the client's to check; this server
+  # only leaves one past its nextUpdate unsent.
+  def staple(der : Array(UInt8)) : TlsError?
+    response = OcspResponse.parse(der)
+    return TlsError.new("the OCSP response: #{response.message}") if response.is_a?(OcspError)
+    single = response.responses.find { |s| s.cert_id.serial == @leaf.serial && s.cert_id.issuer_name_hash == s.cert_id.hash.digest(@leaf.issuer) }
+    return TlsError.new("the OCSP response has no SingleResponse for #{@leaf.subject_name}") unless single
+    @ocsp_staple = der
+    @ocsp_response = response
+    @ocsp_single = single
+    nil
+  end
+
+  # The response to staple at *now*, with what it says; nil when there is
+  # none, or it is past its nextUpdate.
+  def staple_at(now : Time) : {Array(UInt8), OcspResponse, OcspSingleResponse}?
+    der = @ocsp_staple
+    response = @ocsp_response
+    single = @ocsp_single
+    return nil unless der && response && single
+    next_update = single.next_update
+    return nil if next_update && next_update < now
+    {der, response, single}
   end
 
   # The chain in *certificates*' CERTIFICATE blocks, leaf first, and the
@@ -2910,6 +3074,15 @@ pub class TlsServerConfig
   def add_identity(identity : TlsIdentity) : TlsServerConfig
     @others << identity
     self
+  end
+
+  # *der*, an OCSP response for *identity*'s leaf, stapled to its
+  # certificate for a client that asks (RFC 6066's status_request; in TLS
+  # 1.3 the leaf's CertificateEntry carries it, in 1.2 a CertificateStatus):
+  # see `TlsIdentity#staple` for what is refused. A later call replaces it,
+  # as a server fetching fresh responses would.
+  def staple(der : Array(UInt8), identity : TlsIdentity = @identity) : TlsError?
+    identity.staple(der)
   end
 
   # The identity a client asking for *name*, taking signatures under
@@ -3318,6 +3491,8 @@ class TlsOffer
   property binders_size : Int32 = 0
   property psk_modes : Array(UInt8) = [] of UInt8
   property unshown : TlsError? = nil
+  # Whether the client asked for an OCSP staple (status_request, ocsp).
+  property status_request : Bool = false
 
   def initialize(@session : Array(UInt8), @suites : Array(Int32), @hybrid : Array(UInt8)?, @x25519 : Array(UInt8)?, @p256 : Array(UInt8)?,
                  @p384 : Array(UInt8)?, @groups : Array(Int32), @alpn : Array(String)?, @server_name : String?, @early_data : Bool)
@@ -3367,6 +3542,9 @@ class TlsOffer12
   def initialize(@random : Array(UInt8), @suites : Array(Int32), @schemes : Array(Int32)?, @groups : Array(Int32)?, @alpn : Array(String)?,
                  @server_name : String?, @extended_master_secret : Array(UInt8)?, @renegotiation_info : Array(UInt8)?, @point_formats : Array(UInt8)?)
   end
+
+  # Whether the client asked for an OCSP staple (status_request, ocsp).
+  property status_request : Bool = false
 end
 
 # A connection from a client, its handshake done: TLS 1.3 as a server -
@@ -3614,6 +3792,7 @@ pub class TlsServer < TlsConnection
     peer = offer.share(group)
     return TlsError.new("no #{group_name(group)} share", TlsAlert::ILLEGAL_PARAMETER) unless peer
     @server_name = offer.server_name
+    @status_requested = offer.status_request
     problem = agree_alpn(offer.alpn)
     return problem if problem
     taken = accept_psk(offer, hello)
@@ -3911,6 +4090,7 @@ pub class TlsServer < TlsConnection
     binders = [] of Array(UInt8)
     binders_size = 0
     psk_modes = nil
+    status_request = false
     # Sets, not lists: a ClientHello of 64 KiB holds 16,384 empty
     # extensions, and a list asked of each would be their square.
     seen = {} of Int32 => Bool
@@ -4009,8 +4189,20 @@ pub class TlsServer < TlsConnection
         extended = data
       when 0xff01
         renegotiation = data
+      when 5
+        # status_request (RFC 6066 section 8): its type, and for ocsp (1)
+        # the responders and request extensions, which a staple fetched
+        # before the client came cannot answer and are passed over. Another
+        # type is passed over too, as one this server does not know.
+        kind = field.u8
+        if kind == 1
+          field.bytes(field.u16)
+          field.bytes(field.u16)
+          return TlsError.new("a status_request cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
+          status_request = true
+        end
       else
-        # Every other extension - padding, status_request and whatever a
+        # Every other extension - padding, signed_certificate_timestamp and whatever a
         # client adds - is passed over, as section 4.2 says a server does
         # with what it does not use.
       end
@@ -4024,7 +4216,11 @@ pub class TlsServer < TlsConnection
       return TlsError.new(@config.min_version == TlsVersion::TLS12 ? "the client speaks neither TLS 1.3 nor 1.2" : "the client does not speak TLS 1.3", TlsAlert::PROTOCOL_VERSION)
     end
     return TlsError.new("a ClientHello whose compression methods are not null alone", TlsAlert::ILLEGAL_PARAMETER) unless compression == [0_u8]
-    return TlsOffer12.new(random, suites, schemes, groups, alpn, server_name, extended, renegotiation, formats) if tls12
+    if tls12
+      offer12 = TlsOffer12.new(random, suites, schemes, groups, alpn, server_name, extended, renegotiation, formats)
+      offer12.status_request = status_request
+      return offer12
+    end
     return TlsError.new("the client offers no cipher suite this server has", TlsAlert::HANDSHAKE_FAILURE) unless suites.any? { |s| SUITES.includes?(s) }
     # Section 4.2.9: a PSK offered with no modes to use it in is refused.
     return TlsError.new("a pre_shared_key without psk_key_exchange_modes", TlsAlert::MISSING_EXTENSION) if psk_modes.nil? && !identities.empty?
@@ -4070,6 +4266,7 @@ pub class TlsServer < TlsConnection
       end
     end
     offer = TlsOffer.new(session, suites, hybrid, x25519, p256, p384, groups, alpn, server_name, early)
+    offer.status_request = status_request
     offer.identities = identities
     offer.binders = binders
     offer.binders_size = binders_size
@@ -4167,10 +4364,31 @@ pub class TlsServer < TlsConnection
     TlsBytes.extension(16, TlsBytes.u16(names.size) + names)
   end
 
+  # Certificate (section 4.4.2): the identity's chain, the leaf's entry
+  # carrying its OCSP staple (section 4.4.2.1) when the client asked for
+  # one and there is one current.
   private def certificate_message : Array(UInt8)
     entries = [] of UInt8
-    @identity.chain.each { |der| entries = entries + TlsBytes.u24(der.size) + der + [0_u8, 0_u8] }
+    staple = current_staple
+    @identity.chain.each_with_index do |der, i|
+      status = i == 0 && staple ? TlsBytes.extension(5, [1_u8] + TlsBytes.u24(staple.size) + staple) : [] of UInt8
+      entries = entries + TlsBytes.u24(der.size) + der + TlsBytes.u16(status.size) + status
+    end
     TlsBytes.message(11, [0_u8] + TlsBytes.u24(entries.size) + entries)
+  end
+
+  # Whether the client asked for an OCSP staple.
+  @status_requested : Bool = false
+
+  # The identity's OCSP response, when the client asked for one and it is
+  # not past its nextUpdate; kept as this connection's when it is sent.
+  private def current_staple : Array(UInt8)?
+    return nil unless @status_requested
+    held = @identity.staple_at(@config.now || Time.utc)
+    return nil unless held
+    @ocsp_response = held[1]
+    @ocsp_status = held[2].status
+    held[0]
   end
 
   # CertificateVerify (section 4.4.3) under the key's scheme: 64 spaces,
@@ -4206,6 +4424,7 @@ pub class TlsServer < TlsConnection
     @cipher_suite = TlsSuites.name(@suite)
     @schedule = TlsKeySchedule.new(TlsSuites.sha384?(@suite))
     @server_name = offer.server_name
+    @status_requested = offer.status_request
     problem = agree_alpn(offer.alpn)
     return problem if problem
 
@@ -4226,10 +4445,15 @@ pub class TlsServer < TlsConnection
     answers = answers + TlsBytes.extension(0xff01, [0_u8]) if offer.renegotiation_info || offer.suites.includes?(0x00FF)
     answers = answers + TlsBytes.extension(11, [1_u8, 0_u8]) if offer.point_formats
     answers = answers + alpn_answer
+    # The OCSP staple (RFC 6066 section 8): an empty status_request in the
+    # ServerHello, and a CertificateStatus after the Certificate.
+    staple = current_staple
+    answers = answers + TlsBytes.extension(5, [] of UInt8) if staple
     server_hello = TlsBytes.message(2, [3_u8, 3_u8] + random + [0_u8] + TlsBytes.u16(@suite) + [0_u8] + TlsBytes.u16(answers.size) + answers)
     entries = [] of UInt8
     @identity.chain.each { |der| entries = entries + TlsBytes.u24(der.size) + der }
     certificate = TlsBytes.message(11, TlsBytes.u24(entries.size) + entries)
+    certificate = certificate + TlsBytes.message(22, [1_u8] + TlsBytes.u24(staple.size) + staple) if staple
     # RFC 8422 section 5.4: a named curve, the point, and the identity's
     # signature over the client's random, this side's and the two.
     params = [3_u8] + TlsBytes.u16(group) + [point.size.to_u8] + point

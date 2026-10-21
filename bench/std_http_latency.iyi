@@ -2,6 +2,7 @@
 # request/response latency that Nagle's algorithm and a peer's delayed
 # ACK put 40 ms into.
 #
+#   ./bin/iyi run bench/std_http_latency.iyi
 #   ./bin/iyi run bench/std_http_latency.iyi self CHAIN.pem KEY.pem ROOT.pem COUNT
 #   ./bin/iyi run bench/std_http_latency.iyi s_server PORT ROOT.pem COUNT
 #   ./bin/iyi run bench/std_http_latency.iyi serve PORTFILE CHAIN.pem KEY.pem
@@ -16,7 +17,8 @@
 # on new connections and with Nagle back on. Each line says whether the
 # median of COUNT was under `BOUND_MS`, and what it was. `serve` is the
 # TLS server for curl, until a GET of /quit. `once` is one TLS GET with
-# both ends in this program, for a tracer to count their writes.
+# both ends in this program, for a tracer to count their writes. With no
+# arguments it checks, alone, what the end of the file says.
 #
 # The bound, 15 ms: the wait a stall adds is the peer's delayed ACK,
 # which is 40 ms at least on Linux (its TCP_DELACK_MIN). Built --release
@@ -190,5 +192,43 @@ if mode == "serve"
   exit 0
 end
 
-puts "usage: std_http_latency (self | s_server | serve | once) ..."
-exit 2
+# No arguments: what holds with nothing but this program, as CI's runs of
+# every bench program ask - TCP_NODELAY read back on a connected and an
+# accepted socket, and an answer the server streams on a kept connection,
+# in the clear, under the bound - its lines properties alone, no port or
+# time, so a run reads the same everywhere. Over TLS a debug build's
+# handshake is too slow on a shared runner to hold to the bound; the gate
+# times that built --release.
+unless mode.empty?
+  puts "usage: std_http_latency [self | s_server | serve | once] ..."
+  exit 2
+end
+listener = IyiSocket.listen("127.0.0.1", 0)
+client = IyiSocket.connect("127.0.0.1", listener.local_port).or_panic
+accepted = listener.accept.or_panic
+raise "nodelay: the connected socket has Nagle on (TCP_NODELAY reads 0)" unless client.nodelay?
+raise "nodelay: the accepted socket has Nagle on (TCP_NODELAY reads 0)" unless accepted.nodelay?
+client.nodelay = false
+raise "nodelay: TCP_NODELAY still set after nodelay = false" if client.nodelay?
+client.close
+accepted.close
+puts "nodelay: TCP_NODELAY set on the connected and the accepted socket, and cleared by nodelay = false"
+streamed = [] of Int64
+group do |g|
+  g.spawn do
+    Server.serve(listener) do |req|
+      listener.close if req.path == "/stop"
+      answer(req.path)
+    end
+    0
+  end
+  g.spawn do
+    streamed = gets("http://127.0.0.1:#{listener.local_port}/stream", 30, 1)
+    HTTP.get("http://127.0.0.1:#{listener.local_port}/stop")
+    0
+  end
+end
+median = median_ns(streamed)
+raise "a streamed answer on a kept connection: #{ms(median)}, past #{BOUND_MS} ms (the median of #{streamed.size})" unless median < BOUND_MS.to_i64 * 1000000_i64
+puts "a streamed answer on a kept connection: under #{BOUND_MS} ms, the median of #{streamed.size}"
+puts "ALL CHECKS PASSED"

@@ -885,7 +885,10 @@
   ChangeCipherSpec written alone by either end; copies with Nagle left
   on (41 ms), the client's flight in two writes (42 ms with Nagle on) and
   the server's in separate writes (two lone ChangeCipherSpecs) are each
-  caught at the line that names it.
+  caught at the line that names it. Run with no arguments, as CI runs
+  every bench program, `bench/std_http_latency.iyi` checks alone
+  TCP_NODELAY at both ends and the streamed answer under the bound, and
+  ends ALL CHECKS PASSED; the copy with Nagle left on fails it too.
 - **std/http closes a connection by lingering, so an answer is no
   longer lost to a client still sending (RFC 9112 section 9.6).** A
   server that closed with the client's bytes unread - a body the block

@@ -869,10 +869,13 @@ jobs:
       - name: The numbers the docs quote from a measurement
         run: python3 bench/measured_numbers.py
 
+  # Ninety minutes: it took 50 and 52 on master, 59 on integration/0.20
+  # with its new modules, and was cut off at sixty there (job
+  # 119218729131).
   std:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     container:
       image: crystallang/crystal:1.21.0-build
     name: "The native standard library and its module exercises"

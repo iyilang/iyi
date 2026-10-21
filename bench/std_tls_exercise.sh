@@ -34,7 +34,10 @@
 # across suites, schemes, groups, -no_ems, -fallback_scsv, a renegotiation
 # and the exporter, Python's ssl, curl and Node held to 1.2, the std/tls
 # client answered in 1.3 and its 1.2-alone copy meeting the downgrade
-# sentinel; client certificates in 1.2. It shows an
+# sentinel; client certificates in 1.2. Then OCSP stapling: the client
+# against s_server -status_file's good, revoked, unknown and broken
+# staples and none, in 1.3 and 1.2, must-staple and require_staple, and
+# the server stapling for s_client -status and the std/tls client. It shows an
 # error value's sentence through `.or_panic`, reads the module with `iyi
 # doc`, checks the formatting, typechecks the exercise for five targets and
 # builds it from its artifacts, and proves on broken copies of the module
@@ -1776,6 +1779,212 @@ else
 fi
 
 echo
+echo "== OCSP stapling (RFC 6066, RFC 8446 section 4.4.2.1, RFC 7633)"
+# A CA of its own and leaves under it - one good, one revoked, one its
+# responder does not know, one that must staple (TLS Feature
+# status_request) - with responses `openssl ocsp -index` makes, from the
+# CA and from a delegated responder, and three Python's cryptography
+# makes: one past its nextUpdate, one signed by another key under the
+# CA's name, and one for another certificate. The std/tls client against
+# OpenSSL's s_server stapling each (-status_file), in TLS 1.3 and 1.2: a
+# good staple's status on the connection, a revoked one refused with
+# certificate_revoked, an unknown or an invalid one with
+# bad_certificate_status_response, each alert as s_server read it; no
+# staple taken by default, refused under require_staple, and refused for
+# the must-staple leaf. Then the std/tls server stapling (TlsServerConfig
+# #staple) to OpenSSL's s_client -status in TLS 1.3 and 1.2, which shows
+# the response; to s_client without -status, which is sent none; and to
+# the std/tls client. A staple past its nextUpdate is not sent, and one
+# for another certificate is refused by the config.
+# stapling_round <binary> [client|server|all]: the binary against
+# OpenSSL, a line each, "FAIL" on the ones that are not as they should be.
+OCSP_PKI="$WORK/ocsp"
+stapling_ready=no
+if [ "$windows" = yes ] || ! command -v "$OPENSSL" >/dev/null 2>&1 || [ -z "$PY" ] || ! [ -s "${PKI:-/nonexistent}/p256.pem" ] ||
+   ! "$OPENSSL" s_server -help 2>&1 | grep -q -- '-status_file' || ! "$PY" -c 'from cryptography.x509 import ocsp' >/dev/null 2>&1; then
+  echo "  no OpenSSL with s_server -status_file, or no python cryptography with x509.ocsp, here (or Windows), so stapling goes unasked"
+else
+  mkdir -p "$OCSP_PKI"
+  if (
+    cd "$OCSP_PKI" || exit 1
+    printf '[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=Staple Root\n[v3]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n' >ca.cnf
+    "$OPENSSL" req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout ca.key -out ca.pem -days 30 -config ca.cnf -extensions v3 || exit 1
+    leaf='subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n'
+    for name in good revoked unknown must responder; do
+      printf '[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=%s\n' "$name.staple.test" >"$name.cnf"
+      case $name in
+        must) printf "${leaf}tlsfeature=status_request\n" >"$name.ext" ;;
+        responder) printf 'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=OCSPSigning\nnoCheck=ignored\n' >"$name.ext" ;;
+        *) printf "$leaf" >"$name.ext" ;;
+      esac
+      "$OPENSSL" req -new -config "$name.cnf" -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$name.key" -out "$name.csr" &&
+        "$OPENSSL" x509 -req -in "$name.csr" -CA ca.pem -CAkey ca.key -CAcreateserial -out "$name.pem" -days 20 -extfile "$name.ext" || exit 1
+    done
+    "$PY" - <<'PY' || exit 1
+import datetime as d, subprocess
+from cryptography import x509
+from cryptography.x509 import ocsp
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+now = d.datetime.now(d.timezone.utc)
+day = d.timedelta(days=1)
+load = lambda n: x509.load_pem_x509_certificate(open(f"{n}.pem", "rb").read())
+ca, good, revoked = load("ca"), load("good"), load("revoked")
+ca_key = serialization.load_pem_private_key(open("ca.key", "rb").read(), None)
+def entry(state, cert, revocation=""):
+    return "\t".join([state, cert.not_valid_after_utc.strftime("%y%m%d%H%M%SZ"), revocation, format(cert.serial_number, "X"),
+                      "unknown", "/CN=" + cert.subject.rfc4514_string()[3:]]) + "\n"
+with open("index.txt", "w", newline="\n") as f:
+    f.write(entry("V", good) + entry("R", revoked, (now - day).strftime("%y%m%d%H%M%SZ") + ",keyCompromise") + entry("V", load("must")))
+def build(name, cert, key=ca_key, signer=ca, this=now - d.timedelta(hours=1), nxt=now + day):
+    b = (ocsp.OCSPResponseBuilder().add_response(cert=cert, issuer=ca, algorithm=hashes.SHA1(), cert_status=ocsp.OCSPCertStatus.GOOD,
+         this_update=this, next_update=nxt, revocation_time=None, revocation_reason=None).responder_id(ocsp.OCSPResponderEncoding.NAME, signer))
+    open(name, "wb").write(b.sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.DER))
+build("expired.resp", good, this=now - 10 * day, nxt=now - 3 * day)
+other_key = ec.generate_private_key(ec.SECP256R1())
+impostor = (x509.CertificateBuilder().subject_name(ca.subject).issuer_name(ca.subject).public_key(other_key.public_key())
+            .serial_number(7).not_valid_before(now - day).not_valid_after(now + 9 * day).sign(other_key, hashes.SHA256()))
+build("forged.resp", good, key=other_key, signer=impostor)
+PY
+    for name in good revoked unknown must; do
+      "$OPENSSL" ocsp -issuer ca.pem -cert "$name.pem" -no_nonce -reqout "$name.req" &&
+        "$OPENSSL" ocsp -index index.txt -CA ca.pem -rsigner ca.pem -rkey ca.key -reqin "$name.req" -respout "$name.resp" -ndays 1 || exit 1
+    done
+    "$OPENSSL" ocsp -index index.txt -CA ca.pem -rsigner responder.pem -rkey responder.key -reqin good.req -respout delegated.resp -ndays 1 || exit 1
+    for name in good revoked must; do
+      mkdir -p "serve-$name" && cp "$name.pem" "serve-$name/chain.pem" && cp "$name.key" "serve-$name/key.pem" && : >"serve-$name/no-early"
+    done
+    cp good.resp serve-good/staple.der && cp revoked.resp serve-revoked/staple.der && cp must.resp serve-must/staple.der
+    mkdir -p serve-expired serve-wrong
+    cp good.pem serve-expired/chain.pem && cp good.key serve-expired/key.pem && cp expired.resp serve-expired/staple.der
+    cp good.pem serve-wrong/chain.pem && cp good.key serve-wrong/key.pem && cp revoked.resp serve-wrong/staple.der
+  ) >"$WORK/ocsp-pki.log" 2>&1; then
+    stapling_ready=yes
+  else
+    echo "  FAIL the stapling PKI was not made: $(tail -3 "$WORK/ocsp-pki.log" | tr '\n' ' ')"
+    status=1
+  fi
+fi
+stapling_round() {
+  local bin="$1" scope="${2:-all}" failed=0 port pid got log
+  local O="$OCSP_PKI"
+  # staple_client <label> <want> [!<not wanted>] [<env>] -- <s_server args...>
+  staple_client() {
+    local label="$1" want="$2" alert="$3" env="$4"
+    shift 4
+    log="$CW/s_server-staple.log"
+    port="$(free_port)"
+    "$OPENSSL" s_server -accept "127.0.0.1:$port" -www "$@" >"$log" 2>&1 </dev/null &
+    pid=$!
+    wait_port "$port"
+    # shellcheck disable=SC2086
+    got="$(env $env "$bin" get "$port" "$O/ca.pem" localhost 2>&1)"
+    # Whether this s_server staples at all here, asked of s_client -status
+    # on the same server, for an alert it may never be put to (below).
+    local sent=yes
+    if [ "${alert%\?}" != "$alert" ]; then
+      printf 'GET / HTTP/1.0\r\n\r\n' | "$OPENSSL" s_client -connect "127.0.0.1:$port" -servername localhost -status -ign_eof 2>&1 |
+        grep -q 'OCSP Response Status' || sent=no
+    fi
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    # A <want> of re:<pattern> is an extended regular expression: the group
+    # agreed is whatever this OpenSSL has (X25519 in 3.0, the hybrid from
+    # 3.5), and is not what these cases are about.
+    local how=-F
+    case "$want" in re:*) how=-E want="${want#re:}" ;; esac
+    if printf '%s' "$got" | grep -q $how -e "$want" && { [ "$alert" = - ] || grep -q "alert number ${alert%\?}" "$log"; }; then
+      echo "  $label: $got$([ "$alert" = - ] || echo ", and s_server read alert ${alert%\?}")"
+    elif [ "$sent" = no ] && printf '%s' "$got" | grep -q '^HTTP/1.0 200 ' && ! printf '%s' "$got" | grep -q 'staple='; then
+      # An alert ending in ? is one s_server may never be put to: where
+      # s_client -status reads no response from it either, it sent none,
+      # and the client rightly took the connection unstapled. Where it
+      # sends one, the client must refuse it, as above.
+      echo "  $label: this s_server staples nothing for it (s_client -status read none), so the client had none to refuse; the scripted server's staple-other-cert holds the refusal"
+    else
+      echo "  FAIL $label: $got; s_server: $(grep -i 'alert\|error' "$log" | head -2 | tr '\n' ' ')"
+      failed=1
+    fi
+  }
+  # staple_served <label> <dir> <want> <unwanted or -> <client: iyi [env] | s_client args...>:
+  # the server's directory copied to this round's own, where it writes its
+  # port, since broken copies run side by side.
+  staple_served() {
+    local label="$1" from="$O/$2" dir="$CW/staple-$2" want="$3" unwanted="$4" out
+    shift 4
+    rm -rf "$dir" && cp -R "$from" "$dir"
+    TLS_MIN_VERSION=1.2 "$bin" serve "$dir" 1 >"$CW/serve-staple.log" 2>&1 &
+    pid=$!
+    for _ in $(seq 1 100); do [ -s "$dir/port" ] && break; sleep 0.1; done
+    port="$(cat "$dir/port" 2>/dev/null || echo 1)"
+    if [ "$1" = iyi ]; then
+      shift
+      # shellcheck disable=SC2086
+      out="$(env ${1:-} "$bin" get "$port" "$O/ca.pem" localhost 2>&1)"
+    else
+      out="$(printf 'GET / HTTP/1.0\r\n\r\n' | "$OPENSSL" s_client -connect "127.0.0.1:$port" -servername localhost -CAfile "$O/ca.pem" -ign_eof "$@" 2>&1 | tr -d '\r')"
+    fi
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    # A <want> of re:<pattern> is an extended regular expression.
+    local how=-F
+    case "$want" in re:*) how=-E want="${want#re:}" ;; esac
+    if printf '%s\n' "$out" | grep -q $how -e "$want" && { [ "$unwanted" = - ] || ! printf '%s\n' "$out" | grep -qF -e "$unwanted"; }; then
+      echo "  $label: $(printf '%s\n' "$out" | grep $how -e "$want" | head -1 | sed 's/^ *//')"
+    else
+      echo "  FAIL $label: $(printf '%s\n' "$out" | grep -i 'OCSP\|Cert Status\|staple\|refused\|alert\|error' | head -4 | tr '\n' ' ')"
+      failed=1
+    fi
+  }
+  if [ "$scope" != server ]; then
+    staple_client "a good staple, TLS 1.3" "re:TLSv1\.3 group=[^ ]+ staple=good$" - "" -tls1_3 -cert "$O/good.pem" -key "$O/good.key" -status_file "$O/good.resp"
+    staple_client "a good staple, TLS 1.2" "re:TLSv1\.2 group=[^ ]+ staple=good$" - "TLS_MIN_VERSION=1.2" -tls1_2 -cert "$O/good.pem" -key "$O/good.key" -status_file "$O/good.resp"
+    staple_client "a delegated responder's staple" "staple=good" - "" -tls1_3 -cert "$O/good.pem" -key "$O/good.key" -status_file "$O/delegated.resp"
+    staple_client "a revoked staple, TLS 1.3" "is revoked, its stapled OCSP response says: since" 44 "" -tls1_3 -cert "$O/revoked.pem" -key "$O/revoked.key" -status_file "$O/revoked.resp"
+    staple_client "a revoked staple, TLS 1.2" "keyCompromise (certificate_revoked)" 44 "TLS_MIN_VERSION=1.2" -tls1_2 -cert "$O/revoked.pem" -key "$O/revoked.key" -status_file "$O/revoked.resp"
+    staple_client "an unknown staple" "its status is unknown (bad_certificate_status_response)" 113 "" -tls1_3 -cert "$O/unknown.pem" -key "$O/unknown.key" -status_file "$O/unknown.resp"
+    # OpenSSL 3.6.3's s_server, on darwin's runner, did not send a response
+    # for another certificate, where 3.5.5's, 3.0.15's and 1.1.1w's did.
+    staple_client "a staple for another certificate" "ocsp: no response here is for CN=revoked.staple.test" "113?" "" -tls1_3 -cert "$O/revoked.pem" -key "$O/revoked.key" -status_file "$O/good.resp"
+    staple_client "a staple past its nextUpdate" "ocsp: a response past its nextUpdate" 113 "" -tls1_3 -cert "$O/good.pem" -key "$O/good.key" -status_file "$O/expired.resp"
+    staple_client "a staple signed by another key under the CA's name" "ocsp: the OCSP response's signature is not CN=Staple Root's" 113 "TLS_MIN_VERSION=1.2" -tls1_2 -cert "$O/good.pem" -key "$O/good.key" -status_file "$O/forged.resp"
+    staple_client "no staple, by default" "re:^HTTP/1\.0 200 .* TLSv1\.3 group=[^ ]+$" - "" -tls1_3 -cert "$O/good.pem" -key "$O/good.key"
+    if printf '%s' "$got" | grep -q 'staple='; then echo "  FAIL no staple, by default: a status where none came: $got"; failed=1; fi
+    staple_client "no staple, require_staple" "and require_staple asks for one (bad_certificate_status_response)" 113 "TLS_REQUIRE_STAPLE=1" -tls1_3 -cert "$O/good.pem" -key "$O/good.key"
+    staple_client "a must-staple leaf without a staple, TLS 1.3" "(its TLS Feature extension, RFC 7633), and none came (bad_certificate_status_response)" 113 "" -tls1_3 -cert "$O/must.pem" -key "$O/must.key"
+    staple_client "a must-staple leaf without a staple, TLS 1.2" "(its TLS Feature extension, RFC 7633), and none came (bad_certificate_status_response)" 113 "TLS_MIN_VERSION=1.2" -tls1_2 -cert "$O/must.pem" -key "$O/must.key"
+    staple_client "a must-staple leaf with its staple" "staple=good" - "" -tls1_3 -cert "$O/must.pem" -key "$O/must.key" -status_file "$O/must.resp"
+  fi
+  if [ "$scope" != client ]; then
+    staple_served "s_client -status, TLS 1.3" serve-good "Cert Status: good" - -status -tls1_3
+    staple_served "s_client -status, TLS 1.2" serve-good "Cert Status: good" - -status -tls1_2
+    staple_served "s_client without -status, sent none" serve-good "resumed=no" "stapled=" -tls1_3
+    staple_served "the std/tls client and server" serve-good "staple=good" - iyi
+    staple_served "the std/tls client, a must-staple leaf served with its staple, require_staple" serve-must "staple=good" - iyi TLS_REQUIRE_STAPLE=1
+    staple_served "a revoked staple served, the std/tls client refusing it" serve-revoked "(certificate_revoked)" - iyi
+    staple_served "a revoked staple served, as s_client -status reads it" serve-revoked "Cert Status: revoked" - -status -tls1_3
+    # s_client's sentence for no staple: "OCSP response: no response sent"
+    # to OpenSSL 3.5 and earlier, "OCSP responses: no responses sent" to 3.6.
+    staple_served "a staple past its nextUpdate is not sent" serve-expired "re:OCSP responses?: no responses? sent" "Cert Status" -status -tls1_3
+    staple_served "a staple for another certificate refused by the config" serve-wrong "resumed=no" "stapled=" -tls1_3
+    if grep -qF "staple refused: tls: the OCSP response has no SingleResponse for CN=good.staple.test" "$CW/serve-staple.log"; then
+      echo "  ... and the server said: $(head -1 "$CW/serve-staple.log")"
+    else
+      echo "  FAIL a staple for another certificate refused by the config: $(head -1 "$CW/serve-staple.log")"
+      failed=1
+    fi
+  fi
+  return $failed
+}
+if [ "$stapling_ready" = yes ]; then
+  echo "  $("$OPENSSL" version)"
+  if ! stapling_round "$WORK/tls-release" >"$WORK/stapling.out" 2>&1; then
+    status=1
+  fi
+  cat "$WORK/stapling.out"
+fi
+
+echo
 echo "== a handshake's time, by the server's key (--release; measured, not checked)"
 # Python's ssl makes full TLS 1.3 handshakes with the exercise's server,
 # one after another over loopback, and closes each: the median wall time
@@ -1984,7 +2193,9 @@ echo "== proving the checks can fail when the module is broken"
 # client resuming by OpenSSL's tickets (`client-resume`); the client
 # sending early data to OpenSSL's server (`client-early`); or
 # X25519MLKEM768 against OpenSSL, the client before s_server
-# (`client-hybrid`) or the server before s_client (`server-hybrid`).
+# (`client-hybrid`) or the server before s_client (`server-hybrid`); or
+# OCSP stapling with OpenSSL, the client before s_server -status_file
+# (`ocsp-client`) or the server before s_client -status (`ocsp-server`).
 mutations=0
 # A scenario's break is caught by the scenario failing, by name - "FAILED:
 # <scenario>: " - whether the broken client then holds a connection or
@@ -2073,6 +2284,10 @@ prove_copy() {
       client_hybrid "$W/tlsx" >"$W/mut.out" 2>&1
       rc=$?
       ;;
+    ocsp-client | ocsp-server)
+      stapling_round "$W/tlsx" "${mode#ocsp-}" >"$W/mut.out" 2>&1
+      rc=$?
+      ;;
     *)
       mkdir -p "$W/srv"
       local keys="$SRV" flag=() pid
@@ -2129,6 +2344,7 @@ prove_broken() {
      { { [ "$mode" = server ] || [ "$mode" = server-p256 ] || [ "$mode" = server-p384 ] || [ "$mode" = server-rsa ] || [ "$mode" = server-mtls ] || [ "$mode" = server-mtls-optional ] || [ "$mode" = config ] || [ "$mode" = server12 ] || [ "$mode" = server12-interop ]; } && [ "$served" = no ]; } ||
      { { [ "$mode" = client-alert ] || [ "$mode" = client-export ] || [ "$mode" = client-sni ] || [ "$mode" = client12 ] || [ "$mode" = client-resume ] || [ "$mode" = client-early ] || [ "$mode" = client-hybrid ]; } && ! [ -s "${PKI:-/nonexistent}/p256.pem" ]; } ||
      { { [ "$mode" = client-hybrid ] || [ "$mode" = server-hybrid ]; } && [ "$hybrid_openssl" != yes ]; } ||
+     { { [ "$mode" = ocsp-client ] || [ "$mode" = ocsp-server ]; } && [ "$stapling_ready" != yes ]; } ||
      { [ "$mode" = server-hybrid ] && [ "$served" = no ]; }; then
     mutation_said "$n" "  no scripted peer or python3 here, so the $1 proof is unmeasured"
     return
@@ -2230,7 +2446,15 @@ prove_broken "key_update(true) sent as a KeyUpdate asking nothing" "client-rekey
 prove_broken "a CertificateRequest's context taken in the handshake" "certreq-context:" \
   '    return TlsError.new("a CertificateRequest with a request context in the handshake", TlsAlert::ILLEGAL_PARAMETER) unless context.empty?' '' scenarios
 prove_broken "a certificate entry's extensions passed over" "cert-entry-ext:" \
-  '      return TlsError.new("a certificate entry with extensions nobody asked for", TlsAlert::UNSUPPORTED_EXTENSION) unless entry_extensions.empty?' '' scenarios
+  '      return TlsError.new("a certificate entry with extension #{type}, which nobody asked for", TlsAlert::UNSUPPORTED_EXTENSION) unless type == 5' '' scenarios
+prove_broken "a CertificateStatus of another type taken" "staple-type:" \
+  '    return TlsError.new("a CertificateStatus of type #{type}, where ocsp (1) was asked for", TlsAlert::ILLEGAL_PARAMETER) unless type == 1' '' scenarios
+prove_broken "an empty CertificateStatus taken" "staple-empty:" \
+  ' if field.short? || !field.done? || response.empty?' ' if field.short? || !field.done?' scenarios
+prove_broken "a stapled response for another certificate taken" "staple-other-cert:" \
+  '    return TlsError.new("the stapled OCSP response: #{verdict.message}", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE) if verdict.is_a?(OcspError)' '    return nil if verdict.is_a?(OcspError)' scenarios
+prove_broken "status_request twice in an entry taken" "staple-twice:" \
+  '      return TlsError.new("extension #{type} twice in a certificate entry", TlsAlert::ILLEGAL_PARAMETER) if seen.includes?(type)' '' scenarios
 prove_broken "a server_name acknowledgement with something in it taken" "sni-ack-data:" \
   '    return TlsError.new("a server_name acknowledgement that is not empty", TlsAlert::DECODE_ERROR) unless data.empty?' '' scenarios
 prove_broken "user_canceled after the handshake taken as an end" "user-canceled:" \
@@ -2824,6 +3048,44 @@ if [ "$windows" = no ] && command -v "$OPENSSL" >/dev/null 2>&1; then
 else
   echo "  no openssl here (or Windows), so the server's TLS 1.2 exporter proof is unmeasured"
 fi
+# OCSP stapling: the client's judgement against OpenSSL's s_server
+# stapling, then the server's stapling against s_client -status.
+prove_broken "a revoked staple taken" "FAIL a revoked staple, TLS 1.3" \
+  '    if verdict.status == OcspCertStatus::Revoked' '    if false' ocsp-client
+prove_broken "an unknown staple taken" "FAIL an unknown staple" \
+  '    return TlsError.new("the stapled OCSP response does not know #{leaf.subject_name}: its status is unknown", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE) if verdict.status == OcspCertStatus::Unknown' '' ocsp-client
+prove_broken "an invalid staple taken" "FAIL a staple signed by another key under the CA's name" \
+  '    return TlsError.new("the stapled OCSP response: #{verdict.message}", TlsAlert::BAD_CERTIFICATE_STATUS_RESPONSE) if verdict.is_a?(OcspError)' '    return nil if verdict.is_a?(OcspError)' ocsp-client
+prove_broken "the TLS 1.3 staple never judged" "FAIL a revoked staple, TLS 1.3" \
+  '    problem = judge_staple
+    return problem if problem
+    @transcript = @transcript + message' '    @transcript = @transcript + message' ocsp-client
+prove_broken "the TLS 1.2 staple never judged" "FAIL a revoked staple, TLS 1.2" \
+  '    problem = judge_staple
+    return problem if problem
+    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where ServerKeyExchange belongs"' '    return TlsError.new("#{TlsBytes.handshake_name(message[0])} where ServerKeyExchange belongs"' ocsp-client
+prove_broken "no staple taken under must-staple" "FAIL a must-staple leaf without a staple, TLS 1.3" \
+  '      if leaf.must_staple?' '      if false' ocsp-client
+prove_broken "require_staple passed over" "FAIL no staple, require_staple" \
+  ' if @config.require_staple
+      return nil' ' if false
+      return nil' ocsp-client
+prove_broken "status_request not asked for" "FAIL a good staple, TLS 1.3" \
+  '    extensions = extensions + TlsBytes.extension(5, [1_u8, 0_u8, 0_u8, 0_u8, 0_u8])' '' ocsp-client
+prove_broken "a TLS 1.2 ServerHello's status_request not heard" "FAIL a good staple, TLS 1.2" \
+  '        @status_acked = true' '' ocsp-client
+prove_broken "the server staples nothing in TLS 1.3" "FAIL s_client -status, TLS 1.3" \
+  '      status = i == 0 && staple ?' '      status = i < 0 && staple ?' ocsp-server
+prove_broken "the server's TLS 1.2 CertificateStatus left out" "FAIL s_client -status, TLS 1.2" \
+  '    certificate = certificate + TlsBytes.message(22, [1_u8] + TlsBytes.u24(staple.size) + staple) if staple' '' ocsp-server
+prove_broken "the server's TLS 1.2 status_request answer left out" "FAIL s_client -status, TLS 1.2" \
+  '    answers = answers + TlsBytes.extension(5, [] of UInt8) if staple' '' ocsp-server
+prove_broken "a staple sent to a client that did not ask" "FAIL s_client without -status, sent none" \
+  '    return nil unless @status_requested' '' ocsp-server
+prove_broken "a staple past its nextUpdate sent" "FAIL a staple past its nextUpdate is not sent" \
+  '    return nil if next_update && next_update < now' '' ocsp-server
+prove_broken "a staple for another certificate kept by the config" "FAIL a staple for another certificate refused by the config" \
+  '    return TlsError.new("the OCSP response has no SingleResponse for #{@leaf.subject_name}") unless single' '' ocsp-server
 mutations_report
 echo
 if [ "$status" -eq 0 ]; then

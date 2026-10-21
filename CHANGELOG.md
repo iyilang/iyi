@@ -110,6 +110,66 @@
   shortest form, which std/asn1 reads back; std/acme's gate holds both to
   OpenSSL and Python's cryptography, and std/x509's own gate still holds
   its 35 broken copies.
+- **std/ocsp: OCSP responses read and checked (RFC 6960), and requests
+  built, in iyi.** `OcspResponse.parse` reads an OCSPResponse - its
+  responseStatus, and for a successful one the responder by name or key
+  hash, producedAt, each SingleResponse's CertID, status (good, revoked
+  with its time and CRLReason, unknown), thisUpdate and nextUpdate, the
+  nonce, the signature and the certificates carried - and refuses what is
+  not RFC 6960's DER with an `OcspError` naming it (an unsuccessful
+  status is one too, carrying the status). `verify(leaf, issuer, now)`
+  checks what OpenSSL's `ocsp -verify` checks, in its order: the
+  signature, by the issuer or by a delegated responder the response
+  carries (issued and signed by the issuer, id-kp-OCSPSigning itself, valid
+  then, digitalSignature if it has keyUsage), through std/x509's signature
+  checks; a SingleResponse for the leaf's CertID; and its time, five
+  minutes either way, a response without nextUpdate taken for a day. A
+  responder's id-pkix-ocsp-nocheck is accepted, and its own status never
+  asked. `Ocsp.request` writes a request byte for byte as `openssl ocsp
+  -no_nonce -reqout` does under SHA-1 and SHA-256, and as Python's
+  OCSPRequestBuilder does with a nonce. No CRLs and no fetching: stapling
+  only (SPEC.md decision #18). std/x509 reads the TLS Feature extension
+  (RFC 7633; `Certificate#must_staple?`), id-pkix-ocsp-nocheck and the
+  key's BIT STRING (`public_key_bits`, what CertIDs hash), and its
+  signature check is `X509.signature_error`, which std/ocsp shares. New
+  gate `bench/std_ocsp_exercise.sh`: 59 responses Python's cryptography
+  built or written by hand in DER, each verdict held to the one written,
+  every truncation and flipped byte of two refused; the same vectors judged
+  by OpenSSL, 44 alike, 4 refused by both for reasons that differ, and 10
+  parting where written down (std/ocsp holding to DER, to RFC 5280's
+  critical extensions and keyUsage, and refusing SHA-1) - whether a
+  response is taken is held exactly, the reason for a refusal not, since
+  OpenSSL builds differ in which check refuses first; 20 judgments of `openssl ocsp -index` responses - from the CA,
+  delegated, by key id, without the responder's certificate, two at once,
+  SHA-256 CertIDs, RSA, RSA-PSS and P-384 - each OpenSSL's own; 29
+  responses Python builds at run time each judged as OpenSSL judges them
+  but one (no nextUpdate, three days old); every response read field by
+  field as Python's `load_der_ocsp_response` reads it, 8 refused here
+  that Python reads, each named; and 32 broken copies caught by name.
+
+- **std/tls staples OCSP responses, both ends (RFC 6066, RFC 8446
+  section 4.4.2.1, RFC 7633).** Every ClientHello asks for a staple
+  (status_request, 9 bytes: 197 and 1,419 bytes now as OpenSSL 3.5's
+  s_server read them, without and with the X25519MLKEM768 share); one that
+  comes - in TLS 1.3 on the leaf's CertificateEntry, in 1.2 as a
+  CertificateStatus the ServerHello announced - is checked by std/ocsp
+  once the chain is, and `ocsp_response` and `ocsp_status` are on the
+  connection. Revoked is refused with certificate_revoked; unknown, a
+  response that does not hold, and no staple where `TlsConfig
+  #require_staple` or a must-staple leaf asks for one, with
+  bad_certificate_status_response. `TlsServerConfig#staple(der,
+  identity)` gives an identity a response, refused unless it has a
+  SingleResponse for the identity's leaf; it is stapled to a client that
+  asks, in either version, and not once past its nextUpdate.
+  `bench/std_tls_exercise.sh` holds it to OpenSSL: the client against
+  `s_server -status_file` in TLS 1.3 and 1.2 (good, delegated, revoked,
+  unknown, another certificate's, expired, forged, none, required and
+  must-staple, each alert as s_server read it) and the server against
+  `s_client -status`, which shows the response, and the std/tls client;
+  the scripted server's four broken staples; and 18 more broken copies.
+  The scripted server's cert-entry-ext scenario sends an SCT, since a
+  status_request entry is now one asked for.
+
 - **Tasks run across cores: `g.spawn_parallel { }` starts a task on a
   pool of worker threads (SPEC.md III.4.13).** The pool starts at the
   first parallel spawn with as many workers as the cores the process may

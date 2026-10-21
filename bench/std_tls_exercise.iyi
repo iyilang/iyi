@@ -123,7 +123,12 @@ SCENARIOS = [
   {"ku-no-sign", false, "does not allow digitalSignature, which a CertificateVerify is (bad_certificate)"},
   {"keyupdate-bad", true, "read: a KeyUpdate asking 2 (illegal_parameter)"},
   {"certreq-context", false, "a CertificateRequest with a request context in the handshake (illegal_parameter)"},
-  {"cert-entry-ext", false, "a certificate entry with extensions nobody asked for (unsupported_extension)"},
+  {"cert-entry-ext", false, "a certificate entry with extension 18, which nobody asked for (unsupported_extension)"},
+  {"staple-garbage", false, "the stapled OCSP response: ocsp: asn1: expected an ENUMERATED, found INTEGER"},
+  {"staple-type", false, "a CertificateStatus of type 2, where ocsp (1) was asked for (illegal_parameter)"},
+  {"staple-empty", false, "a CertificateStatus cut short (decode_error)"},
+  {"staple-twice", false, "extension 5 twice in a certificate entry (illegal_parameter)"},
+  {"staple-other-cert", false, "the stapled OCSP response: ocsp: no response here is for CN=leaf, serial"},
   {"sni-ack-data", false, "a server_name acknowledgement that is not empty (decode_error)"},
   {"user-canceled", true, ""},
   {"padded-max", true, ""},
@@ -405,6 +410,7 @@ if args.size > 0 && args[0] == "get"
   config.identity = TlsIdentity.from_pem(File.read(args[5]), File.read(args[6])).or_panic if args.size > 6
   config.min_version = TlsVersion::TLS12 if ENV["TLS_MIN_VERSION"]? == "1.2"
   config.post_quantum = false if ENV["TLS_POST_QUANTUM"]? == "0"
+  config.require_staple = true if ENV["TLS_REQUIRE_STAPLE"]? == "1"
   socket = IyiSocket.connect("127.0.0.1", args[1].to_i)
   unless socket.is_a?(IyiSocket)
     puts "no connection"
@@ -420,7 +426,9 @@ if args.size > 0 && args[0] == "get"
   label = ENV["TLS_EXPORT"]?
   exported = label ? " exported=#{hex_of(conn.export_keying_material(label, [] of UInt8, 16))}" : ""
   got = drain(conn)
-  puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}#{exported} #{conn.version} group=#{conn.named_group}"
+  # The stapled OCSP response's status, when one came.
+  stapled = (status = conn.ocsp_status) ? " staple=#{status.word}" : ""
+  puts "#{got.lines.first? || got} #{conn.cipher_suite} alpn=#{conn.alpn_protocol || "-"}#{exported} #{conn.version} group=#{conn.named_group}#{stapled}"
   conn.close
   exit 0
 end
@@ -516,7 +524,8 @@ end
 def agreed(conn : TlsServer, early : String = "") : String
   peer = conn.peer_certificates.empty? ? "-" : conn.peer_certificates[0].subject_name
   exported = hex_of(conn.export_keying_material("EXPERIMENTAL iyi", [] of UInt8, 16))
-  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer} shown=#{conn.identity.leaf.subject_name} exported=#{exported} #{conn.version} group=#{conn.named_group} early=#{early.inspect} resumed=#{conn.resumed? ? "yes" : "no"}"
+  stapled = (status = conn.ocsp_status) ? " stapled=#{status.word}" : ""
+  "name=#{conn.server_name || "-"} alpn=#{conn.alpn_protocol || "-"} #{conn.cipher_suite} peer=#{peer} shown=#{conn.identity.leaf.subject_name} exported=#{exported} #{conn.version} group=#{conn.named_group} early=#{early.inspect} resumed=#{conn.resumed? ? "yes" : "no"}#{stapled}"
 end
 
 # Early data, read apart from the rest as far as a whole request, which is
@@ -563,6 +572,15 @@ if args.size > 0 && args[0] == "serve"
   if File.file?(args[1] + "/client-roots.pem")
     config.client_roots = Certificate.from_pem(File.read(args[1] + "/client-roots.pem")).or_panic
     config.client_required = !File.file?(args[1] + "/client-optional")
+  end
+  # DIR/staple.der: an OCSP response stapled for a client that asks.
+  if File.file?(args[1] + "/staple.der")
+    held = File.read(args[1] + "/staple.der")
+    problem = config.staple(Array(UInt8).new(held.bytesize) { |i| held.to_unsafe[i] })
+    if problem
+      puts "staple refused: #{problem.message}"
+      STDOUT.flush
+    end
   end
   listener = IyiSocket.listen("127.0.0.1", 0)
   File.write(args[1] + "/port", listener.local_port.to_s)

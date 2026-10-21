@@ -161,16 +161,32 @@
   # Placement: parallel tasks run on the pool, not on the spawning thread,
   # on more than one worker, and each stays on the thread that started it
   # across every park - a sleep and a channel handoff from the main thread.
+  #
+  # Every task, as it starts, counts itself and then keeps its worker busy
+  # - spinning, never parking - until a second task has started. A worker
+  # takes from the pool only when it has nothing to run, so while the first
+  # task spins its worker takes no other, and the second can only start on
+  # another worker: nothing here depends on how fast a build drains the
+  # queue before the other workers wake, which an optimised build on a
+  # runner once did, all 16 on one worker. Waited for 10 s at most, and
+  # named if it never comes; one worker running all of them still fails.
   def placement(watch : Int32) : Nil
     watched("placement", watch) do
       main_thread = thread_here
       pings = Channel(Int32).new
+      arrived = Tally.new
       seen = [] of UInt64
       group do |g|
         handles = [] of IyiTask(Tuple(UInt64, UInt64, UInt64))
         16.times do |i|
           task = g.spawn_parallel do
             first = thread_here
+            arrived.add(1_i64)
+            held = __iyi_monotonic_ns
+            while arrived.count < 2_i64
+              fail("placement: a parallel task spun 10000 ms on its worker and no second task started on another") if elapsed_ms(held) >= 10000_i64
+              IyiThread.spin_pause
+            end
             spin(2_000_000_i64, (i + 1).to_u64)
             sleep(2)
             second = thread_here

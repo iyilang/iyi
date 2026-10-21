@@ -1,0 +1,230 @@
+# TLS resumption in std/http's client, exercised: the tickets an
+# `HTTPClient` keeps, and whom it offers them to.
+#
+#   ./bin/iyi run bench/std_http_resume.iyi self CHAIN.pem KEY.pem ROOT.pem OTHER_ROOT.pem
+#   ./bin/iyi run bench/std_http_resume.iyi s_server PORT ROOT.pem
+#   ./bin/iyi run bench/std_http_resume.iyi serve PORTFILE CHAIN.pem KEY.pem
+#   ./bin/iyi run bench/std_http_resume.iyi speed PORT ROOT.pem COUNT
+#
+# `self` runs std/http's own TLS server on four listeners and the client
+# against them in one program; each answer is "resumed=yes" or
+# "resumed=no", as the server's `Request#tls_resumed?` says. Three of the
+# listeners share one `TlsServerConfig`, and with it the keys its tickets
+# are sealed under, so a ticket one origin sent would be taken by
+# another: the server resuming is what proves a ticket was offered. The
+# fourth sends eight tickets a handshake. CHAIN is a leaf for localhost
+# and the root that signed it, ROOT that root, OTHER_ROOT one that signs
+# nothing the server sends. Each line is one check, for
+# bench/std_http_exercise.sh to compare.
+#
+# `s_server` is the client against OpenSSL's `s_server -www` on PORT,
+# whose page says "New, TLSv1.3" or "Reused, TLSv1.3".
+#
+# `serve` and `speed` are the measurement: the server on one listener,
+# and COUNT handshakes with a server on PORT at localhost, full and
+# resumed by turns - std/tls's handshake alone, then a GET on a new
+# connection through an `HTTPClient` - their medians printed.
+
+module bench/std_http_resume
+
+import std/http::{HTTP, HTTPClient, HTTPError, Request, Response, Server}
+import std/socket::{IyiSocket, SocketError}
+import std/tls::{TlsClient, TlsConfig, TlsError, TlsServerConfig, TlsSession}
+import std/x509::{Certificate}
+import std/file::{File}
+
+# What the server said of the connection, or why there is no answer.
+def said(got : Response | HTTPError | SocketError | Cancelled) : String
+  case got
+  in Response
+    got.body
+  in HTTPError
+    got.message
+  in SocketError
+    got.message
+  in Cancelled
+    "cancelled"
+  end
+end
+
+# What s_server's page says of the session: "New" or "Reused", or the
+# failure.
+def page(got : Response | HTTPError | SocketError | Cancelled) : String
+  return said(got) unless got.is_a?(Response)
+  body = got.body
+  return "Reused" if body.includes?("Reused, TLSv1.3")
+  return "New" if body.includes?("New, TLSv1.3")
+  "neither: #{body.size} bytes"
+end
+
+def answer(req : Request) : Response
+  Response.new(200, req.tls_resumed? ? "resumed=yes" : "resumed=no")
+end
+
+def median(samples : Array(Int64)) : String
+  sorted = samples.sorted
+  ns = sorted[sorted.size // 2]
+  "#{ns // 1000000_i64}.#{(ns % 1000000_i64 // 1000_i64).to_s.rjust(3, '0')} ms"
+end
+
+# One TLS handshake with the server on *port*, under *session* when one
+# is given, and how long it took (ns); then a request read to its end,
+# which takes the tickets the server sends after the handshake. A
+# handshake under a session that holds a ticket must resume, and one
+# under none must not.
+def shake(port : Int32, config : TlsConfig, session : TlsSession?) : Int64
+  offered = (held = session) ? held.size > 0 : false
+  started = __iyi_monotonic_ns
+  tls = TlsClient.connect("localhost", port, config, session: session)
+  took = __iyi_monotonic_ns - started
+  raise "no handshake: #{tls.message}" if tls.is_a?(TlsError)
+  raise "resumed #{tls.resumed?} with a ticket offered #{offered}" unless tls.resumed? == offered
+  tls.write("GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+  while true
+    got = tls.read
+    break if got.is_a?(TlsError) || got.empty?
+  end
+  tls.close
+  took
+end
+
+args = Program.args
+mode = args.size > 0 ? args[0] : ""
+
+if mode == "self"
+  shared = TlsServerConfig.from_pem(File.read(args[1]), File.read(args[2])).or_panic
+  generous = TlsServerConfig.from_pem(File.read(args[1]), File.read(args[2])).or_panic
+  generous.tickets = 8
+  listeners = [IyiSocket.listen("127.0.0.1", 0), IyiSocket.listen("127.0.0.1", 0), IyiSocket.listen("127.0.0.1", 0), IyiSocket.listen("127.0.0.1", 0)]
+  bases = listeners.map { |l| "https://localhost:#{l.local_port}/" }
+  origins = listeners.map { |l| "https://localhost:#{l.local_port}" }
+  roots = Certificate.from_pem(File.read(args[3])).or_panic
+  other = Certificate.from_pem(File.read(args[4])).or_panic
+  group do |g|
+    listeners.each_with_index do |listener, i|
+      g.spawn do
+        Server.serve(listener, tls: i == 3 ? generous : shared) do |req|
+          listener.close if req.path == "/stop"
+          answer(req)
+        end
+        0
+      end
+    end
+    g.spawn do
+      config = TlsConfig.new
+      config.roots = roots
+      config.alpn = ["http/1.1"]
+      HTTP.tls_config = config
+      # A new connection for every request: none is kept to be reused.
+      client = HTTPClient.new(idle: 0)
+      first = client.get(bases[0])
+      second = client.get(bases[0])
+      resumed = second.is_a?(Response) && second.tls_resumed?
+      puts "same origin: #{said(first)} then #{said(second)}, the response says #{resumed}, #{client.connections_resumed} resumed"
+      puts "another origin: #{said(client.get(bases[1]))} then #{said(client.get(bases[1]))}"
+      # The same root, in an array of its own: the roots changed in place.
+      config.roots = Certificate.from_pem(File.read(args[3])).or_panic
+      puts "new roots: #{said(client.get(bases[0]))} then #{said(client.get(bases[0]))}"
+      config.roots = other
+      puts "other roots: #{said(client.get(bases[0]))}"
+      config.roots = roots
+      # A server that sends eight tickets a handshake.
+      plenty = HTTPClient.new(idle: 0)
+      plenty.get(bases[3])
+      few = HTTPClient.new(idle: 0, origin_tickets: 2, tickets: 4)
+      few.get(bases[3])
+      puts "an origin's tickets: #{plenty.tickets_held(origins[3])} of 8 by default, #{few.tickets_held(origins[3])} of 8 when 2 are asked for"
+      # Room for two origins at two each: the third drops the oldest.
+      few.get(bases[0])
+      few.get(bases[1])
+      few.get(bases[2])
+      held = few.tickets_held
+      dropped = few.tickets_held(origins[3]) + few.tickets_held(origins[0])
+      puts "tickets in all: #{held} held over four origins, #{dropped} of the two oldest, then #{said(few.get(bases[0]))} at the oldest and #{said(few.get(bases[2]))} at the newest"
+      none = HTTPClient.new(idle: 0, tickets: 0)
+      puts "none kept: #{said(none.get(bases[0]))} then #{said(none.get(bases[0]))}, #{none.tickets_held} held"
+      # A kept connection still carries the next request, and says the
+      # handshake it was made by.
+      pooled = HTTPClient.new
+      pooled.get(bases[2])
+      kept = pooled.get(bases[2])
+      puts "kept: #{said(kept)}, #{pooled.connections_made} made, #{pooled.connections_reused} reused"
+      pooled.close
+      bases.each { |base| HTTP.get(base + "stop") }
+      0
+    end
+  end
+  exit 0
+end
+
+if mode == "s_server"
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  config.alpn = ["http/1.1"]
+  HTTP.tls_config = config
+  base = "https://localhost:#{args[1]}/"
+  # Ten seconds a read: a broken copy that confuses s_server fails rather
+  # than waits.
+  client = HTTPClient.new(idle: 0, timeout_ms: 10000)
+  first = client.get(base)
+  second = client.get(base)
+  resumed = second.is_a?(Response) && second.tls_resumed?
+  puts "s_server: #{page(first)} then #{page(second)}, the response says #{resumed}"
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  puts "s_server under new roots: #{page(client.get(base))} then #{page(client.get(base))}"
+  exit 0
+end
+
+if mode == "serve"
+  config = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1], listener.local_port.to_s)
+  Server.serve(listener, tls: config) do |req|
+    listener.close if req.path == "/quit"
+    answer(req)
+  end
+  exit 0
+end
+
+if mode == "speed"
+  port = args[1].to_i
+  base = "https://localhost:#{port}/"
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(File.read(args[2])).or_panic
+  config.alpn = ["http/1.1"]
+  HTTP.tls_config = config
+  count = args[3].to_i
+  # The handshake alone, as the client makes it: std/tls's, with the
+  # session an `HTTPClient` would hand it or none.
+  session = TlsSession.new
+  shake(port, config, nil)
+  shake(port, config, session)
+  full_shakes = [] of Int64
+  resumed_shakes = [] of Int64
+  count.times do
+    full_shakes << shake(port, config, nil)
+    resumed_shakes << shake(port, config, session)
+  end
+  puts "the handshake, #{count} each: full #{median(full_shakes)}, resumed #{median(resumed_shakes)}"
+  # And a GET on a new connection, the handshake and all.
+  full = HTTPClient.new(idle: 0, tickets: 0)
+  resuming = HTTPClient.new(idle: 0)
+  # The first of each warms the code and, for the second, takes tickets.
+  full.get(base).or_panic
+  resuming.get(base).or_panic
+  fulls = [] of Int64
+  resumes = [] of Int64
+  count.times do
+    started = __iyi_monotonic_ns
+    full.get(base).or_panic
+    fulls << __iyi_monotonic_ns - started
+    started = __iyi_monotonic_ns
+    resuming.get(base).or_panic
+    resumes << __iyi_monotonic_ns - started
+  end
+  puts "a GET on a new connection, #{count} each: full #{median(fulls)}, resumed #{median(resumes)} (#{resuming.connections_resumed} of #{count} resumed, #{full.connections_resumed} of the full)"
+  exit 0
+end
+
+puts "usage: std_http_resume (self | s_server | serve | speed) ..."
+exit 2

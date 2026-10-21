@@ -20,7 +20,10 @@
 # coding itself; a `jar:` (std/cookie's `CookieJar`) keeps what
 # `Set-Cookie` sets and sends it back. Each `HTTP` request is a
 # connection of its own; an `HTTPClient` keeps the connections its
-# answers leave open and sends the next request to that server over one.
+# answers leave open and sends the next request to that server over one,
+# and keeps the TLS tickets `https://` servers send it, so that a new
+# connection to one resumes its session rather than checking its
+# certificate again (`HTTPClient` says how they are kept and bounded).
 # Response headers are read by name without regard to case, a field on
 # several lines is one field with its values joined by ", "
 # (`header_values` keeps the lines apart, as a `Set-Cookie` must be
@@ -70,9 +73,12 @@
 # `https://` request presents `HTTP.tls_config`'s `identity` when asked.
 # No early data (0-RTT), either way: a server here takes none whatever its
 # config allows - its clients send the request again after the handshake -
-# and the client keeps no session, so it sends none. A request that runs
-# twice when replayed (a POST) must never go early, and HTTP cannot tell
-# a GET with side effects from one without.
+# and the client, which resumes sessions by the tickets it keeps, sends
+# none with them, whatever a ticket allows. A request that runs twice
+# when replayed (a POST) must never go early, and HTTP cannot tell a GET
+# with side effects from one without. That is decided here, not left to
+# a setting. `Request#tls_resumed?` and `Response#tls_resumed?` say
+# whether the connection under them was resumed.
 #
 # **Errors are values.** What the other end does wrong - a malformed head,
 # a body cut short, a broken chunk, a corrupt gzip - is an `HTTPError`
@@ -133,7 +139,7 @@
 module std/http
 
 import std/socket::{IyiSocket, Resolver, SocketError}
-import std/tls::{TlsClient, TlsConfig, TlsConnection, TlsError, TlsIdentity, TlsServer, TlsServerConfig, TlsVersion}
+import std/tls::{TlsClient, TlsConfig, TlsConnection, TlsError, TlsIdentity, TlsServer, TlsServerConfig, TlsSession, TlsVersion}
 import std/x509::{Certificate}
 import std/uri::{URI, Params}
 import std/mime::{MIME}
@@ -265,6 +271,12 @@ class Conn
 
   def failure : Cancelled | SocketError | Nil
     @failure
+  end
+
+  # Whether the connection's TLS handshake resumed a session by a ticket
+  # rather than checking certificates afresh; false in the clear.
+  def resumed? : Bool
+    (stream = @stream) ? stream.resumed? : false
   end
 
   # Whether the other end closed its side.
@@ -589,7 +601,9 @@ end
 # apart by `object_id`, and the references are held, so an address freed
 # and handed to a new configuration is never taken for the old one.
 # Certificates added to the same roots array in place are not seen: such
-# an array is still the same object.
+# an array is still the same object. An `HTTPClient`'s TLS tickets are
+# kept under it the same way: a ticket skips the certificate check, so one
+# taken under one trust store or identity is never offered under another.
 class TlsMadeUnder
   @config : TlsConfig
   @roots : Array(Certificate)?
@@ -635,6 +649,11 @@ pub class TlsStream
   # the server's, at a client; the client's, at a server that asked.
   def peer_certificates : Array(Certificate)
     @tls.peer_certificates
+  end
+
+  # Whether the handshake resumed a session (`TlsConnection#resumed?`).
+  def resumed? : Bool
+    @tls.resumed?
   end
 
   # Up to *count* bytes into *buffer*: 0 once the peer closed with
@@ -1236,6 +1255,7 @@ pub class Request
   # under `serve(tls:)` with `client_roots` set, the certificate the
   # client presented; empty otherwise.
   property peer_certificates : Array(Certificate) = [] of Certificate
+  @tls_resumed : Bool = false
   @reader : BodyReader
   @text : String?
 
@@ -1248,6 +1268,17 @@ pub class Request
   # A request whose body is still on the connection.
   def initialize(@method : String, @path : String, @query : String?, @headers : Hash(String, String), @version : String, @reader : BodyReader, @remote_address : String? = nil)
     @text = nil
+  end
+
+  # Whether the TLS connection the request came over resumed a session by
+  # a ticket, under `serve(tls:)`: its `peer_certificates` are then the
+  # ticket's. False in the clear.
+  def tls_resumed? : Bool
+    @tls_resumed
+  end
+
+  def tls_resumed=(resumed : Bool) : Bool
+    @tls_resumed = resumed
   end
 
   def header(name : String) : String?
@@ -1339,6 +1370,7 @@ pub class Response
   @reader : BodyReader?
   @url : String?
   @decoded : Bool
+  @tls_resumed : Bool = false
 
   def initialize(@status : Int32, @reason : String, @headers : Hash(String, String), @body : String, @apart : Hash(String, Array(String))? = nil)
     @source = nil
@@ -1436,6 +1468,17 @@ pub class Response
   # are gone from the headers then.
   def decoded? : Bool
     @decoded
+  end
+
+  # Whether the `https://` connection the answer came over resumed a TLS
+  # session by a ticket an `HTTPClient` kept, rather than a full
+  # handshake; false in the clear and for one a program made.
+  def tls_resumed? : Bool
+    @tls_resumed
+  end
+
+  def tls_resumed=(resumed : Bool) : Bool
+    @tls_resumed = resumed
   end
 
   # The body: whole. Inside `HTTP.open`'s block it is read here, the first
@@ -1811,6 +1854,7 @@ pub struct Server
             return false
           end
         end
+        req.tls_resumed = conn.resumed?
         req.peer_certificates = peer
         response = handler.call(req)
         # Writing the answer waits as the client reads it, a pause at a time.
@@ -1898,6 +1942,7 @@ pub struct Server
           break
         end
       end
+      req.tls_resumed = conn.resumed?
       req.peer_certificates = peer
       response = handler.call(req)
       conn.no_deadline
@@ -2300,6 +2345,7 @@ class Exchange
 
   def initialize(@conn : Conn, @response : Response, @client : HTTPClient? = nil, @key : String = "", @keep : Bool = false)
     @reader = @response.body_io
+    @response.tls_resumed = @conn.resumed?
   end
 
   # The connection closed, or handed back to its client once the body has
@@ -2365,6 +2411,32 @@ end
 # client of its own with both, so its server is checked against the roots
 # it was given and reached at the address it was given.
 #
+# A client resumes TLS sessions (RFC 8446 §2.2): the tickets an
+# `https://` server sends are kept for its origin - scheme, host and
+# port, whichever proxy's tunnel they came through - under the
+# `HTTP.tls_config` they came under (`TlsMadeUnder`, as a kept connection
+# is), and a new connection to that origin offers the newest, each once.
+# A resumed handshake checks no certificate - the ticket stands for the
+# check the first one made - so a ticket is never offered to another
+# origin, nor under another configuration: after `HTTP.tls_config=`, or
+# roots or an identity assigned in place, the next connection is a full
+# handshake checked against the new roots, and that origin's tickets from
+# under the old one are dropped. At most *origin_tickets* are kept an
+# origin - 4 by default, so that as many connections as *idle* keeps by
+# default can resume at once, where std/tls's server and OpenSSL's send 2
+# a handshake - and *tickets* in all, 256 by default: as many origins as
+# that leaves room for at *origin_tickets* each, the one longest unused
+# dropped first. 0 for either keeps none, and nothing resumes. `close`
+# leaves them. Nothing goes early (0-RTT), whatever a ticket allows: the
+# module's header says why. `connections_resumed`, `tickets_held` and
+# `Response#tls_resumed?` say what was kept and used. What it saves, by
+# bench/std_http_resume.iyi built --release on a 12-core machine other
+# jobs shared (medians of 200, the middle of three runs): the handshake
+# took 0.96 ms full and 0.51 resumed against std/http's server, 1.03 and
+# 0.57 against OpenSSL 3.5's s_server - and a GET on a new connection,
+# which waits about 40 ms at each iyi end that is not the handshake's,
+# 82.98 ms and 82.00, and 42.04 and 40.96.
+#
 # Over HTTP/2 - `https://` where ALPN chose `h2`, or `http://` with
 # *prior_knowledge* (h2c, RFC 9113 §3.3) - a kept connection carries the
 # next request on a new stream, until the server says GOAWAY.
@@ -2374,6 +2446,11 @@ pub class HTTPClient
   @timeout_ms : Int32
   @made : Int32
   @reused : Int32
+  @resumed : Int32
+  # The tickets kept, an origin's together, the one used last at the end.
+  @sessions : Array(HeldSession)
+  @origin_tickets : Int32
+  @tickets : Int32
   # `http://` spoken as HTTP/2 from the first byte, without asking: for a
   # server known to take it.
   getter prior_knowledge : Bool
@@ -2390,15 +2467,21 @@ pub class HTTPClient
   getter resolver : Resolver?
 
   # *timeout_ms* and *proxy* are `HTTP.open`'s, for every request the
-  # client sends.
+  # client sends; *tls* and *resolver* are this client's own (above);
+  # *origin_tickets* and *tickets* bound the TLS tickets kept, by origin
+  # and in all.
   def initialize(idle : Int32 = 4, @timeout_ms : Int32 = 0, @prior_knowledge : Bool = false, @proxy : String? = nil,
-                 @tls : TlsConfig? = nil, @resolver : Resolver? = nil)
+                 @tls : TlsConfig? = nil, @resolver : Resolver? = nil, @origin_tickets : Int32 = 4, @tickets : Int32 = 256)
     raise "HTTP: a client keeps 0 or more idle connections, not #{idle}" if idle < 0
     raise "HTTP: a timeout of #{@timeout_ms} ms" if @timeout_ms < 0
+    raise "HTTP: a client keeps 0 to #{TlsSession::MAX_TICKETS} tickets an origin, not #{@origin_tickets}" if @origin_tickets < 0 || @origin_tickets > TlsSession::MAX_TICKETS
+    raise "HTTP: a client keeps 0 or more tickets, not #{@tickets}" if @tickets < 0
     @idle = {} of String => Array(Conn)
     @limit = idle
     @made = 0
     @reused = 0
+    @resumed = 0
+    @sessions = [] of HeldSession
   end
 
   # Connections this client has opened, and requests sent over one it
@@ -2409,6 +2492,23 @@ pub class HTTPClient
 
   def connections_reused : Int32
     @reused
+  end
+
+  # Connections this client opened whose TLS handshake resumed a session
+  # by a ticket it kept.
+  def connections_resumed : Int32
+    @resumed
+  end
+
+  # The TLS tickets held for *origin* - `https://host:port`, the host in
+  # lower case and the port written even where it is 443 - or for every
+  # origin when nil.
+  def tickets_held(origin : String? = nil) : Int32
+    count = 0
+    @sessions.each do |held|
+      count = count + held.session.size if origin.nil? || held.origin == origin
+    end
+    count
   end
 
   def request(method : String, url : String, headers : Hash(String, String) = {} of String => String, body : String | IyiIO = "", redirects : Int32 = 10, jar : CookieStore? = nil, decompress : Bool = true) : Response | Cancelled | SocketError | HTTPError
@@ -2479,6 +2579,38 @@ pub class HTTPClient
     @made = @made + 1
   end
 
+  protected def resumed : Nil
+    @resumed = @resumed + 1
+  end
+
+  # The session a new connection to *origin* under *tls* offers a ticket
+  # from and keeps the server's new ones in; nil when the client keeps
+  # none. The origin's tickets from under another configuration are
+  # dropped, never offered: keyed by origin alone, a ticket taken under
+  # roots that trusted the server resumed under roots that would have
+  # refused it, with no certificate checked. The session handed out is
+  # the newest used; past the room *tickets* leaves, the oldest goes.
+  protected def session_for(origin : String, tls : TlsConfig) : TlsSession?
+    room = @origin_tickets > 0 ? @tickets // @origin_tickets : 0
+    return nil if room == 0
+    kept = [] of HeldSession
+    found = nil.as(HeldSession?)
+    @sessions.each do |held|
+      if held.origin != origin
+        kept << held
+      elsif held.under.same?(tls)
+        found = held
+      end
+    end
+    held = found || HeldSession.new(origin, TlsMadeUnder.new(tls), TlsSession.new(@origin_tickets))
+    while kept.size >= room
+      kept.shift
+    end
+    kept << held
+    @sessions = kept
+    held.session
+  end
+
   protected def give_back(key : String, conn : Conn) : Nil
     waiting = @idle[key]? || [] of Conn
     if waiting.size >= @limit
@@ -2487,6 +2619,17 @@ pub class HTTPClient
     end
     waiting << conn
     @idle[key] = waiting
+  end
+end
+
+# The tickets an `HTTPClient` keeps for one origin, and the configuration
+# they were taken under.
+class HeldSession
+  getter origin : String
+  getter under : TlsMadeUnder
+  getter session : TlsSession
+
+  def initialize(@origin : String, @under : TlsMadeUnder, @session : TlsSession)
   end
 end
 
@@ -2896,6 +3039,8 @@ pub struct HTTP
     end
     head = same_name?(method, "HEAD")
     key = (secure ? "https://" : "http://") + host.downcase + ":" + port.to_s
+    # What a TLS ticket is kept for: the origin, whichever proxy is between.
+    origin = key
     dial_host = host
     dial_port = port
     target = path
@@ -2970,8 +3115,17 @@ pub struct HTTP
             offered.identity = under.identity
             offered.alpn = ["http/1.1"]
           end
-          tls = TlsClient.over(socket, host, offered, timeout_ms > 0 ? timeout_ms : TlsClient::HANDSHAKE_TIMEOUT_MS)
+          # The tickets a client keeps for this origin under this
+          # configuration (`HTTPClient#session_for`); an upgrade, which no
+          # client carries, keeps none. Nothing goes early (0-RTT), whatever
+          # a ticket allows: the module's header says why.
+          session = nil.as(TlsSession?)
+          if keeping = client
+            session = keeping.session_for(origin, tls_config) unless upgrade
+          end
+          tls = TlsClient.over(socket, host, offered, timeout_ms > 0 ? timeout_ms : TlsClient::HANDSHAKE_TIMEOUT_MS, session)
           return HTTPError.new(tls.message) if tls.is_a?(TlsError)
+          client.resumed if client && tls.resumed?
           conn = Conn.new(socket, stream: TlsStream.new(tls, host))
           conn.made_under = TlsMadeUnder.new(under)
           speaks_h2 = upgrade.nil? && tls.alpn_protocol == "h2"

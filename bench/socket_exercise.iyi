@@ -650,6 +650,15 @@ puts "timeout: ok"
 # object's address kept the object alive. The address is sent hidden
 # behind a key, and computed and checked in frames of their own, so only
 # the reader's stack could hold it bare.
+#
+# It is sent twice, sixteen bytes. A frame over a page probes it: the
+# function steps the stack pointer down a page and stores a zero word
+# there before using it (issue #130). With the buffer inlined into
+# `IyiSocket#read`, that frame is 4,408 bytes on Linux x86_64 and its one
+# probe store lands on the buffer's first eight bytes, so a reader that
+# came back for its next read zeroed the one copy of the address before
+# it parked, and the broken copy below passed. A store is one aligned
+# word, so it can wipe one copy and not both.
 class Victim
   @a = 0_i64
   @b = 0_i64
@@ -667,8 +676,8 @@ end
 
 @[NoInline]
 def victim_bytes(word : UInt64) : String
-  String.new(8) do |buffer|
-    8.times { |i| buffer[i] = ((word ^ VICTIM_KEY).unsafe_shr((8 * i).to_u64) & 0xFF_u64).to_u8 }
+  String.new(16) do |buffer|
+    16.times { |i| buffer[i] = ((word ^ VICTIM_KEY).unsafe_shr((8 * (i % 8)).to_u64) & 0xFF_u64).to_u8 }
   end
 end
 
@@ -696,7 +705,7 @@ group do |g|
   g.spawn do
     reader = k_server.accept.or_panic
     got = reader.read(64).or_panic
-    raise "retain: the reader got #{got.bytesize} bytes, not the 8 sent" unless got.bytesize == 8
+    raise "retain: the reader got #{got.bytesize} bytes, not the 16 sent" unless got.bytesize == 16
     reader.read(64).or_panic
     reader.close
     0

@@ -521,6 +521,13 @@
   version's write rule are caught at those scenarios. The drain decrypts
   what it reads, to see the close_notify: 8 MiB took 0.04 s in a release
   build and 0.21 s in a plain one.
+- **P-256 signing no longer branches on the nonce's digits.** The
+  fixed-base table read is masked in the source, and in a release build
+  LLVM turned it into a conditional jump per entry on the digit: a timing
+  leak of the secret nonce. The selectors now pass through an atomic load
+  of zero, as std/big's do, and the release assembly of the lookup has no
+  jump on the digit. Found by `bench/ct_timing.sh`'s Welch's t-test: |t|
+  of 16 to 24 over 100,000 signatures before, 3.8 to 6.0 after.
 - **std/bzip2's Huffman tables stay inside their memory whatever the
   code lengths.** The fast table was filled from the lengths after one
   check - that they do not over-subscribe the code space - and without

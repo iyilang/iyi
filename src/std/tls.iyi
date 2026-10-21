@@ -1130,11 +1130,14 @@ pub abstract class TlsConnection
   # yet to write, so after this a 1.2 connection reads what was already
   # on its way, then the peer's close_notify. An error when the alert or
   # the shutdown could not be made, or when the socket was already closed
-  # under the connection; the connection is still to be closed.
+  # under the connection; the connection is still to be closed. A flight
+  # still held (`hold`) is a handshake cut short, and is dropped, as
+  # `fail` drops it: the close_notify goes alone.
   def close_write : TlsError?
     return TlsError.new("the connection is closed") if closed?
     return nil if @write_closed
     @write_closed = true
+    @held = nil
     sent = send_protected(TlsRecords::ALERT, [1_u8, 0_u8])
     return sent if sent
     return TlsError.new("the socket under the connection is closed") if @socket.closed?
@@ -1700,8 +1703,8 @@ pub abstract class TlsConnection
   # of its own, behind Nagle's algorithm, a client's Finished waited for
   # the server to acknowledge its ChangeCipherSpec, which a server waiting
   # for the Finished delays: 40 ms on Linux. std/socket now turns Nagle
-  # off; this is the other half, fewer writes. `fail` drops what is held,
-  # a flight cut short, and sends its alert alone.
+  # off; this is the other half, fewer writes. `fail` and `close_write`
+  # drop what is held, a flight cut short, and send their alert alone.
   @held : Array(UInt8)? = nil
 
   private def hold : Nil

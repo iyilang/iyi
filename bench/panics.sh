@@ -762,9 +762,25 @@ done
 # program finished as if nothing had happened: this check printed "the
 # dive came back" there. The compiler now has every frame touch its pages
 # top down (`iyi_probe_stack`), and Windows' `__chkstk` always did, so
-# the guard is the first page past the end anything touches. The floor
-# is mapped by address, so a run whose layout has something there already
-# says so and is run again rather than proving nothing.
+# the guard is the first page past the end anything touches.
+#
+# The writable memory differs by platform. On Linux and darwin it is a
+# floor mapped by address directly under the stack, and a run whose
+# layout has something there already says so and is run again rather
+# than proving nothing. Windows never has room there: `VirtualAlloc`
+# hands out reservations from the bottom up, so the addresses under a
+# fiber's stack were taken before it was made, and the floor was refused
+# in ten runs of ten on the runner. But a Windows fiber stack carries its
+# own writable memory under the guard: the 16 KB of committed slack at
+# the bottom of the reservation, the fault handler's room
+# (`IyiFiber#map_stack`), which the kernel's growth never reaches. So
+# there the task walks down in frames under a page, which grow the stack
+# through the guard page as any thread's grows, until one 64 KiB frame
+# from where it stands would end in the middle of that room, and then
+# takes that frame. `__chkstk` probes it from StackLimit down, the guard
+# page is the first page touched past the committed stack, and the
+# kernel answers STATUS_STACK_OVERFLOW; a frame that skipped the probes
+# would have written only committed memory and come back.
 cat > "$work/overrun.iyi" <<'EOF'
 module overrun
 
@@ -778,30 +794,47 @@ def plunge(n : Int32) : Int32
   plunge(n - 1) + low.value.to_i32
 end
 
-# 128 KiB of writable memory directly under this fiber's stack, where a
-# frame that stepped over the guard page lands.
-def floor_under(base : UInt64) : Bool
-  size = 131072_u64
-  {% if flag?(:win32) %}
-    LibC.VirtualAlloc(Pointer(Void).new(base - size), size, 0x3000_i32, 4_i32).address == base - size
-  {% elsif flag?(:darwin) %}
-    LibC.mmap(Pointer(Void).new(base - size), size, 3, 4098, -1, 0_i64).address == base - size
-  {% else %}
-    # MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE: there or nowhere.
-    __iyi_conc_syscall6(IYI_SYS_MMAP, (base - size).to_i64, size.to_i64, 3_i64, 0x100022_i64, -1_i64, 0_i64) == (base - size).to_i64
-  {% end %}
-end
+{% if flag?(:win32) %}
+  # Down in frames under a page, each touched, until a 64 KiB frame from
+  # here would end at *target*; then that frame.
+  def descend(target : UInt64) : Int32
+    pad = uninitialized StaticArray(UInt8, 512)
+    here = pointerof(pad).as(Pointer(UInt8))
+    here.value = 1_u8
+    return plunge(0) if here.address - 65536_u64 <= target
+    descend(target) + here.value.to_i32
+  end
+{% else %}
+  # 128 KiB of writable memory directly under this fiber's stack, where a
+  # frame that stepped over the guard page lands.
+  def floor_under(base : UInt64) : Bool
+    size = 131072_u64
+    {% if flag?(:darwin) %}
+      LibC.mmap(Pointer(Void).new(base - size), size, 3, 4098, -1, 0_i64).address == base - size
+    {% else %}
+      # MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE: there or nowhere.
+      __iyi_conc_syscall6(IYI_SYS_MMAP, (base - size).to_i64, size.to_i64, 3_i64, 0x100022_i64, -1_i64, 0_i64) == (base - size).to_i64
+    {% end %}
+  end
+{% end %}
 
 group do |g|
   g.spawn do
     base = IyiScheduler.current_stack_top - IyiFiber::STACK_BYTES
-    if floor_under(base)
-      # Five such frames are about 64 KiB past a 256 KiB stack: inside
-      # the floor.
-      puts "the dive came back: #{plunge(4)}"
-    else
-      puts "no room under the stack for the floor"
-    end
+    {% if flag?(:win32) %}
+      # The middle of the committed room: the uncommitted wall page is at
+      # `base`, and the room is GUARD_SLACK and a page above it.
+      room = base + IyiFiber::PAGE + (IyiFiber::GUARD_SLACK + IyiFiber::PAGE) // 2_u64
+      puts "the dive came back: #{descend(room)}"
+    {% else %}
+      if floor_under(base)
+        # Five such frames are about 64 KiB past a 256 KiB stack: inside
+        # the floor.
+        puts "the dive came back: #{plunge(4)}"
+      else
+        puts "no room under the stack for the floor"
+      end
+    {% end %}
   end
 end
 EOF

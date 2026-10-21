@@ -44,6 +44,72 @@
   read, a DoH ID not 0, and an `HTTPClient`'s own TLS configuration or
   resolver ignored.
 
+- **std/acme: an ACME client (RFC 8555), so an iyi server gets its own
+  certificate.** `AcmeClient.new(directory, key)` reads the directory;
+  every request after it is a JWS in the flattened JSON serialization,
+  its protected header `alg`, `nonce`, `url` and `jwk` for newAccount
+  alone and `kid` after it, a read POST-as-GET. Nonces are used once,
+  newNonce asked when none is held, and a `badNonce` answer sent again
+  with the nonce it carried, ten times at most (`bad_nonce_retries`
+  counts them). Keys are std/x509's new `SigningKey`: ES256 and ES384
+  through std/p256 and std/p384 with the signature as R || S at the
+  curve's width, not DER; RS256 through std/rsa's PKCS #1 v1.5; EdDSA on
+  Ed25519 for a server that takes it. The `jwk` is RFC 7638's canonical
+  form and the key authorization `token.thumbprint`. `register` (contact,
+  `termsOfServiceAgreed`, `onlyReturnExisting`), `roll_key` (keyChange,
+  the inner JWS under the new key), `new_order` for DNS names,
+  `authorization`, `respond`, `wait_authorization`, `finalize` (a PKCS
+  #10 request std/x509 writes for the order's names and signs with the
+  certificate's key, then the order polled to `valid`) and `certificate`
+  (the chain as PEM, each block read by std/x509). http-01:
+  `AcmeHttp01` answers `/.well-known/acme-challenge/<token>` from a
+  std/http server's block. dns-01: `dns_txt(token)` and
+  `AcmeClient.dns_name(domain)`. tls-alpn-01 (RFC 8737):
+  `AcmeTlsAlpn01.certificate` is the self-signed certificate with its one
+  dNSName and the critical id-pe-acmeIdentifier extension, and
+  `AcmeTlsAlpn01.config` a std/tls server config that shows it to a
+  client offering `acme-tls/1`. Polls wait what Retry-After says,
+  seconds or an HTTP-date, `poll_ms` when there is none; every wait
+  stops at `max_polls` and `wait_ms`, a Retry-After past what is left
+  ends it at once, and every exchange is bounded by `timeout_ms` and its
+  answer by a megabyte. An answer of 400 or more is an `AcmeError` naming
+  the problem document's type and detail (RFC 7807), its subproblems
+  each with their identifier. Not done: external account binding,
+  renewal scheduling and ARI, revocation, account deactivation, newAuthz,
+  IP identifiers, alternate chains, profiles. `bench/std_acme_exercise.sh`
+  holds it to RFC 7638's and RFC 8037's thumbprints, RFC 7515 A.2's RS256
+  and RFC 8037's EdDSA signatures byte for byte and A.3's ES256 as R ||
+  S, base64url without padding, OpenSSL's `req -verify` and Python's
+  `load_der_x509_csr` on its requests, both on the tls-alpn-01
+  certificate and Python's `ssl` in a handshake under `acme-tls/1`, a
+  server in the exercise that holds it to RFC 8555 and breaks the
+  protocol one rule at a time (a problem document, a badNonce, a
+  Retry-After of two seconds against a poll interval of half of one, a
+  key rollover, an invalid challenge, waits past their polls and their
+  time), and - where Go is there to build it - Let's Encrypt's Pebble:
+  whole orders by http-01 (served by std/http), dns-01 (through
+  pebble-challtestsrv) and tls-alpn-01 (served by std/tls), with 30% of
+  nonces refused (24 and 22 sent again in two runs here), an ES384 and
+  an RS256 account, the RS256 account rolled over to P-256, a blocked
+  name's problem and EdDSA's refusal, each of the five chains verified
+  by std/x509 against Pebble's root and by `openssl verify`. Thirteen
+  broken copies are caught by name, among them a nonce reused, the
+  thumbprint over non-canonical JSON, a DER signature, a jwk where the
+  kid belongs, Retry-After ignored, a problem document taken as success
+  and the request signed by another key. The Linux module-exercise
+  shards set Go up for it; elsewhere it runs where the runner has Go.
+- **std/x509 writes and signs: `X509.request` (PKCS #10) and
+  `X509.self_signed`.** A `SigningKey` - P-256 or P-384 (`SigningKey.p256`
+  and `.p384` draw one), RSA, or Ed25519, or any of them `from_pem` -
+  signs under ecdsa-with-SHA256 or -SHA384, sha256WithRSAEncryption or
+  Ed25519, in constant time. A request carries CN=<the first name> (an
+  empty subject past 64 bytes) and the names as subjectAltName in an
+  extensionRequest; a self-signed certificate carries subjectAltName and
+  the caller's `X509Extension`s, critical or not. Names are refused
+  unless they are ASCII host names. The DER is written in its one
+  shortest form, which std/asn1 reads back; std/acme's gate holds both to
+  OpenSSL and Python's cryptography, and std/x509's own gate still holds
+  its 35 broken copies.
 - **Tasks run across cores: `g.spawn_parallel { }` starts a task on a
   pool of worker threads (SPEC.md III.4.13).** The pool starts at the
   first parallel spawn with as many workers as the cores the process may

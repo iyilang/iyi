@@ -789,7 +789,10 @@ echo "== latency on loopback: Nagle off, and a flight in one write (bench/std_ht
 # std/http, and on Linux, where strace is there to ask, what both ends
 # write in one handshake: no ChangeCipherSpec written alone. Then copies
 # of the modules with Nagle left on, the client's flight in two writes
-# and the server's, each caught at the line that names it.
+# and the server's, each caught at the line that names it. The program
+# with no arguments - what CI's run of every bench program sees - checks
+# TCP_NODELAY on both ends and the streamed answer alone, and the copy
+# with Nagle left on must fail it too.
 LATENCY_SELF="plain http://, std/http at both ends, a GET on a new connection
 plain http://, a kept connection, an answer the server streams
 https://, std/http at both ends, a GET on a new connection
@@ -899,10 +902,20 @@ EOF
   [ "$latency_openssl" = yes ] || echo "  no OpenSSL (LibreSSL is not it) with python3 here, or Windows, whose s_server this gate does not drive: s_server goes unasked"
   [ "$latency_curl" = yes ] || echo "  no curl here, or Windows, whose curl does not take this gate's root by --cacert: curl goes unasked"
   [ "$latency_strace" = yes ] || echo "  no strace that runs here (it is Linux's, and a container may forbid ptrace): the writes go uncounted, and so does the server's flight"
-  # latency_breaks <label> <module> <old> <new> <line>: the program over a
-  # copy of <module> with <old> made <new> must fail at <line>.
+  # The program alone, with no arguments, as CI runs every bench program.
+  "$WORK/latency" >"$WORK/latency-alone.out" 2>&1
+  alone=$?
+  if [ "$alone" -eq 0 ] && grep -qx 'ALL CHECKS PASSED' "$WORK/latency-alone.out"; then
+    echo "  with no arguments: $(grep -v 'ALL CHECKS PASSED' "$WORK/latency-alone.out" | tr '\n' ';' | sed 's/;$//; s/;/; /g')"
+  else
+    echo "  FAIL with no arguments, exit $alone: $(tail -2 "$WORK/latency-alone.out" | tr '\n' ' ')"
+    status=1
+  fi
+  # latency_breaks <label> <module> <old> <new> <line> [alone]: the program
+  # over a copy of <module> with <old> made <new> must fail at <line>, and
+  # with "alone" its run with no arguments must fail too.
   latency_breaks() {
-    local label="$1" module="$2" old="$3" new="$4" line="$5" got
+    local label="$1" module="$2" old="$3" new="$4" line="$5" alone="${6:-}" got
     if ! printf '%s\n' "$latency_labels" | grep -qxF "$line"; then
       echo "  $label: skipped, as the check that names it is"
       return
@@ -933,11 +946,19 @@ PY
     else
       echo "  $label: caught: $(printf '%s\n' "$got" | grep -m1 -F "$line: " | cut -c1-120)"
     fi
+    if [ "$alone" = alone ]; then
+      if "$WORK/latency-broken" >"$WORK/latency-broken-alone.out" 2>&1; then
+        echo "  $label: not caught with no arguments"
+        status=1
+      else
+        echo "  $label: caught with no arguments: $(grep -m1 'panic' "$WORK/latency-broken-alone.out" | sed 's/^iyi: panic: //' | cut -c1-110)"
+      fi
+    fi
   }
   latency_breaks "TCP sockets left with Nagle on" socket.iyi \
     '    __sys_set_nodelay(fd, true) unless family == AF_UNIX
   end' '    nil
-  end' "plain http://, a kept connection, an answer the server streams"
+  end' "plain http://, a kept connection, an answer the server streams" alone
   latency_breaks "the client's ChangeCipherSpec and Finished in two writes" tls.iyi \
     '    sent = send_protected(TlsRecords::HANDSHAKE, finished)
     return sent if sent

@@ -485,7 +485,10 @@
   ChangeCipherSpec written alone by either end; copies with Nagle left
   on (41 ms), the client's flight in two writes (42 ms with Nagle on) and
   the server's in separate writes (two lone ChangeCipherSpecs) are each
-  caught at the line that names it.
+  caught at the line that names it. Run with no arguments, as CI runs
+  every bench program, `bench/std_http_latency.iyi` checks alone
+  TCP_NODELAY at both ends and the streamed answer under the bound, and
+  ends ALL CHECKS PASSED; the copy with Nagle left on fails it too.
 - **P-256 signing no longer branches on the nonce's digits.** The
   fixed-base table read is masked in the source, and in a release build
   LLVM turned it into a conditional jump per entry on the digit: a timing

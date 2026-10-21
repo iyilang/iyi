@@ -1,15 +1,20 @@
 # Exercises std/secure_dns: a `Resolver` asking DNS over TLS and DNS over
-# HTTPS upstreams, against bench/std_dns_encrypted_server.py.
+# HTTPS upstreams, against bench/std_secure_dns_server.py.
 #
-#     ./bin/iyi run bench/std_dns_encrypted_exercise.iyi -- WORKDIR
+#     ./bin/iyi run bench/std_secure_dns_exercise.iyi -- WORKDIR
 #
 # WORKDIR is the scripted servers': their ports and the test root they
 # chain to (see the server's header for the zone and the names that
 # misbehave). Each section prints "<name>: ok", or "<name>: skipped: why"
 # where the server has no HTTP/2; each answer the zone gives is printed as
 # "answer <via> <type> <name> <values>", which the gate asks dig for too.
+#
+# Without WORKDIR only the wire section runs, which needs no server: that
+# is how bench/std_exercise.sh runs every exercise, from source and from
+# artifacts, and compares what the two print - so nothing printed before
+# the stop names a port or a time.
 
-module bench/std_dns_encrypted_exercise
+module bench/std_secure_dns_exercise
 
 import std/dns::{DnsError, DnsMessage, DnsRecord}
 import std/socket::{DnsUpstream, IPAddress, IPv4Address, IPv6Address, IyiSocket, Resolver, SocketError}
@@ -99,6 +104,27 @@ def stats(resolver : Resolver) : Hash(String, Int32)
   read
 end
 
+# --- The wire, with no network ---
+
+strings = DnsRecord.character_strings(Bytes.new(8) { |i| [5_u8, 104_u8, 101_u8, 108_u8, 108_u8, 111_u8, 1_u8, 33_u8][i] })
+check strings == ["hello", "!"], "a TXT record's character-strings: #{strings.inspect}"
+check DnsRecord.character_strings(Bytes.new(3) { |i| [5_u8, 104_u8, 101_u8][i] }).nil?, "a character-string running past the data is refused"
+query = DnsMessage.query(0_u16, "a.zone.test", DnsRecord::A)
+check DnsMessage.ends_at(query) == query.size, "a query ends where its question does: #{DnsMessage.ends_at(query)} of #{query.size}"
+longer = Bytes.new(query.size + 3) { |i| i < query.size ? query[i] : 0_u8 }
+check DnsMessage.ends_at(longer) == query.size, "bytes after a message are not the message's: #{DnsMessage.ends_at(longer)}"
+check DnsMessage.ends_at(query[0, query.size - 1]) == -1, "a question cut short runs past the bytes"
+# The oracle is Python's base64.urlsafe_b64encode of the same 29 bytes,
+# "AAABAAABAAAAAAAAAWEEem9uZQR0ZXN0AAABAAE=", without its "=".
+parameter = DnsOverHttps.base64url(String.new(query.size) { |into| into.copy_from(query.to_unsafe, query.size) })
+same "AAABAAABAAAAAAAAAWEEem9uZQR0ZXN0AAABAAE", parameter, "the dns parameter is base64url without padding (RFC 8484 4.1)"
+puts "wire: ok"
+
+if Program.args.empty?
+  puts "no server directory given: the sections over the network are bench/std_secure_dns_exercise.sh's"
+  exit 0
+end
+
 dir = Program.args[0]
 dot_port = File.read(dir + "/dot.port").to_i
 doh_port = File.read(dir + "/doh.port").to_i
@@ -119,13 +145,6 @@ https.alpn = ["h2", "http/1.1"]
 # refusal it turns into an answer.
 plain = Resolver.new(["127.0.0.1:#{udp_port}"], timeout_ms: 3000, attempts: 1)
 bare = Resolver.new([] of String, timeout_ms: 3000, attempts: 1)
-
-# --- The wire, with no network ---
-
-strings = DnsRecord.character_strings(Bytes.new(8) { |i| [5_u8, 104_u8, 101_u8, 108_u8, 108_u8, 111_u8, 1_u8, 33_u8][i] })
-check strings == ["hello", "!"], "a TXT record's character-strings: #{strings.inspect}"
-check DnsRecord.character_strings(Bytes.new(3) { |i| [5_u8, 104_u8, 101_u8][i] }).nil?, "a character-string running past the data is refused"
-puts "wire: ok"
 
 # --- DNS over TLS ---
 
@@ -192,9 +211,6 @@ puts "doh_post: ok"
 
 doh_get = DnsOverHttps.new("https://127.0.0.1:#{doh_port}/dns-query", config: https, method: "GET")
 answers("doh-get", bare.encrypted(doh_get))
-query = DnsMessage.query(0_u16, "a.zone.test", DnsRecord::A)
-parameter = DnsOverHttps.base64url(String.new(query.size) { |into| into.copy_from(query.to_unsafe, query.size) })
-same "AAABAAABAAAAAAAAAWEEem9uZQR0ZXN0AAABAAE", parameter, "the dns parameter is base64url without padding (RFC 8484 4.1)"
 puts "doh_get: ok"
 
 same "id=0", show_txt(over_https.txt("id.zone.test")), "a POST's query has the ID 0 (RFC 8484 4.1)"

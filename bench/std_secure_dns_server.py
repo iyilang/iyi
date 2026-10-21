@@ -1,6 +1,6 @@
-"""Scripted encrypted DNS servers for bench/std_dns_encrypted_exercise.sh.
+"""Scripted encrypted DNS servers for bench/std_secure_dns_exercise.sh.
 
-    python3 bench/std_dns_encrypted_server.py WORKDIR
+    python3 bench/std_secure_dns_server.py WORKDIR
 
 Makes a test CA and a server certificate for `dns.test` and 127.0.0.1
 (WORKDIR/ca.pem is the root a client trusts), then answers one fixed zone,

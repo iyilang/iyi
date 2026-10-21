@@ -1135,7 +1135,7 @@ pub abstract class TlsConnection
   # still held (`hold`) is a handshake cut short, and is dropped, as
   # `fail` drops it: the close_notify goes alone.
   def close_write : TlsError?
-    return TlsError.new("the connection is closed") if closed?
+    return TlsError.new("the connection is closed") if @closed
     return nil if @write_closed
     @write_closed = true
     @held = nil

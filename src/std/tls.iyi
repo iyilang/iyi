@@ -1159,6 +1159,7 @@ pub abstract class TlsConnection
   # from the client's buffer before it is read - a client refused for its
   # certificate would read "reset", not why.
   protected def fail(error : TlsError) : TlsError
+    @held = nil
     code = error.alert
     if code && !@closed && !@socket.closed?
       content = [code == TlsAlert::NO_RENEGOTIATION ? 1_u8 : 2_u8, code]
@@ -1551,7 +1552,33 @@ pub abstract class TlsConnection
     put(writer.seal(type, content))
   end
 
+  # Records put between `hold` and `release` go out in one write: a flight
+  # of several records - a client's ChangeCipherSpec and Finished, a
+  # server's ServerHello, ChangeCipherSpec and encrypted flight - leaves
+  # in as few segments as hold it rather than a write each. Each a write
+  # of its own, behind Nagle's algorithm, a client's Finished waited for
+  # the server to acknowledge its ChangeCipherSpec, which a server waiting
+  # for the Finished delays: 40 ms on Linux. std/socket now turns Nagle
+  # off; this is the other half, fewer writes. `fail` drops what is held,
+  # a flight cut short, and sends its alert alone.
+  @held : Array(UInt8)? = nil
+
+  private def hold : Nil
+    @held = [] of UInt8
+  end
+
+  private def release : TlsError?
+    held = @held
+    @held = nil
+    return nil if held.nil? || held.empty?
+    put(held)
+  end
+
   private def put(bytes : Array(UInt8)) : TlsError?
+    if held = @held
+      held.concat(bytes)
+      return nil
+    end
     sent = @socket.write(TlsBytes.text(bytes))
     return TlsError.new("the write to #{@place} failed: #{sent.message}") if sent.is_a?(SocketError)
     return TlsError.new("the write to #{@place} was cancelled") unless sent.is_a?(Int32)
@@ -1712,6 +1739,8 @@ pub class TlsClient < TlsConnection
     end
     shares << {GROUP_X25519, public_key}
     hello = client_hello(random, session, shares, nil, [] of UInt8)
+    # The ClientHello and any early data after it, in one write.
+    hold
     sent = send_plain(TlsRecords::HANDSHAKE, hello, first: true)
     return sent if sent
     @transcript = hello.dup
@@ -1719,6 +1748,8 @@ pub class TlsClient < TlsConnection
       sent = send_early(hello)
       return sent if sent
     end
+    sent = release
+    return sent if sent
 
     server = handshake_message(plain: true)
     return server if server.is_a?(TlsError)
@@ -1834,6 +1865,7 @@ pub class TlsClient < TlsConnection
     # was asked for, the identity's with its CertificateVerify when the
     # request takes its scheme, an empty Certificate otherwise (section
     # 4.4.2 allows it); and Finished.
+    hold
     unless @early_sent
       sent = send_plain(TlsRecords::CHANGE_CIPHER_SPEC, [1_u8], first: false)
       return sent if sent
@@ -1869,6 +1901,8 @@ pub class TlsClient < TlsConnection
     end
     finished = TlsBytes.message(20, @schedule.finished(client_secret, @transcript))
     sent = send_protected(TlsRecords::HANDSHAKE, finished)
+    return sent if sent
+    sent = release
     return sent if sent
     @resumption_secret = @schedule.derive_secret(master, "res master", @transcript + finished)
 
@@ -3666,6 +3700,9 @@ pub class TlsServer < TlsConnection
     end
     @named_group = group_name(group)
     reply = server_hello(Random::Secure.random_bytes(32), offer.session, group, public, psk_identity)
+    # The ServerHello, a ChangeCipherSpec and the encrypted flight, in one
+    # write.
+    hold
     sent = send_plain(TlsRecords::HANDSHAKE, reply, first: false)
     return sent if sent
     sent = middlebox_ccs(offer)
@@ -3687,6 +3724,8 @@ pub class TlsServer < TlsConnection
     finished = TlsBytes.message(20, @schedule.finished(server_secret, @transcript))
     @transcript = @transcript + finished
     sent = send_flight(flight + finished)
+    return sent if sent
+    sent = release
     return sent if sent
 
     master = @schedule.master_secret(handshake_secret)

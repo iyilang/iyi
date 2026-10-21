@@ -80,7 +80,7 @@ fi
 
 echo
 echo "== every socket check reported"
-phrases="connect_accept message_exchange short_read closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream"
+phrases="connect_accept message_exchange short_read nodelay closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
   Linux) phrases="$phrases reset_after_chunk" ;;
@@ -91,7 +91,7 @@ for phrase in $phrases; do
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout and stream all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, nodelay, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout and stream all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -210,6 +210,15 @@ prove_fails "a socket read that takes all it may read from the heap" heapread "s
 # The peer's name asked of this end: `getsockname` for `getpeername`.
 prove_fails "the peer's address read from this end" peername "remote_port:" \
   '{ sub(/return nil if IyiSocket.__sys_getpeername\(@fd, addr, pointerof\(len\)\) < 0$/, "return nil if IyiSocket.__sys_getsockname(@fd, addr, pointerof(len)) < 0"); print }'
+
+# Nagle left on: at the connected end, at the accepted end, and a
+# `nodelay = false` that sets nothing.
+prove_fails "a connected socket left with Nagle on" nagleconnect "nodelay: the connected end" \
+  '{ sub(/^    __send_at_once\(fd, family\)$/, ""); print }'
+prove_fails "an accepted socket left with Nagle on" nagleaccept "nodelay: the accepted end" \
+  '{ sub(/^        IyiSocket.__send_at_once\(client_fd, @family\)$/, ""); print }'
+prove_fails "nodelay = false that sets nothing" naglesetter "nodelay: TCP_NODELAY still set" \
+  '{ sub(/^    IyiSocket.__sys_set_nodelay\(@fd, on\) unless @family == AF_UNIX$/, ""); print }'
 
 # 5. A write to a gone peer panicking, as it did
 prove_fails "a gone peer is a panic" panicwrite "cannot write to socket" \

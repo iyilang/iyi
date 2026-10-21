@@ -586,6 +586,46 @@
   memory before its served section, and prints how long that took: 6,301
   and 2,354 ms on two loaded runners, after which the timed check took
   0.6 ms on both.
+- **A new `https://` connection between std/http's ends no longer waits
+  80 ms, nor 40 ms to another server: std/socket sets TCP_NODELAY, and
+  std/tls writes a flight in one write.** The TLS client wrote its
+  ChangeCipherSpec and Finished as two writes; under Nagle's algorithm
+  the Finished waited for the first to be acknowledged, and the server,
+  waiting for the Finished, delayed that ACK 40 ms (strace showed the
+  Finished leave 40 ms after the ChangeCipherSpec, and so did the
+  server's read of it); std/http's server then wrote its tickets and its
+  answer apart and waited 40 ms more for the client's ACK. Every
+  connected and accepted TCP socket now has TCP_NODELAY, as Go's net
+  package sets its own, through each platform's own call (the raw
+  syscall on Linux, libSystem's `setsockopt` on darwin, ws2_32's on
+  Windows); `IyiSocket#nodelay=` turns Nagle back on, and `nodelay?`
+  reads the option. std/tls writes the client's ChangeCipherSpec,
+  Certificate, CertificateVerify and Finished in one write, the server's
+  ServerHello, ChangeCipherSpec and encrypted flight in one, and a
+  ClientHello with its early data in one. A streamed answer on a kept
+  connection - the head, then each chunk - waited 40 ms per answer the
+  same way. Measured on loopback, --release, medians of 200, the middle
+  of three runs, before and after: a GET on a new connection over TLS
+  82.89 ms to 1.07 between std/http's ends and 42.00 to 1.10 from its
+  client to OpenSSL's s_server; curl to std/http's TLS server 1.89 to
+  1.72 and over plain HTTP 0.129 to 0.128 ms; std/http's client over
+  plain HTTP 0.119 to 0.108 on a new connection and 0.062 to 0.058 on a
+  kept one, and over a kept TLS connection 0.114 to 0.059. wrk -t2 -c50
+  against `bench/std_http_server.iyi` answered 76,241 to 79,063
+  requests a second for a whole body and 1,211 to 10,702 for a streamed
+  one (middle of three, 5 s each). Held by `bench/socket_exercise.sh`
+  (TCP_NODELAY read back by `getsockopt` on a connected and an accepted
+  socket, and `nodelay = false` reading back off; copies that leave
+  either end with Nagle on, or a setter that sets nothing, caught) and
+  by `bench/std_http_exercise.sh`'s loopback latency section
+  (`bench/std_http_latency.iyi`, --release): the median of 50 GETs under
+  15 ms - plain and TLS on new connections, a streamed answer on a kept
+  connection, a TLS client with Nagle back on, the same against s_server,
+  curl against std/http's TLS server - and, where strace runs, no
+  ChangeCipherSpec written alone by either end; copies with Nagle left
+  on (41 ms), the client's flight in two writes (42 ms with Nagle on) and
+  the server's in separate writes (two lone ChangeCipherSpecs) are each
+  caught at the line that names it.
 - **std/bzip2's Huffman tables stay inside their memory whatever the
   code lengths.** The fast table was filled from the lengths after one
   check - that they do not over-subscribe the code space - and without

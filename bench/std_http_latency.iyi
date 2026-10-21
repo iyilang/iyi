@@ -1,0 +1,194 @@
+# How long a small GET takes over loopback, std/http at either end: the
+# request/response latency that Nagle's algorithm and a peer's delayed
+# ACK put 40 ms into.
+#
+#   ./bin/iyi run bench/std_http_latency.iyi self CHAIN.pem KEY.pem ROOT.pem COUNT
+#   ./bin/iyi run bench/std_http_latency.iyi s_server PORT ROOT.pem COUNT
+#   ./bin/iyi run bench/std_http_latency.iyi serve PORTFILE CHAIN.pem KEY.pem
+#   ./bin/iyi run bench/std_http_latency.iyi once CHAIN.pem KEY.pem ROOT.pem
+#
+# `self` runs std/http's server, plain and over TLS, and its client
+# against them in one program: COUNT GETs each on a new connection, COUNT
+# on a kept one of an answer the server streams (its head, then a chunk,
+# each a write), and COUNT over TLS from a client whose socket has Nagle
+# back on (`nodelay = false`), its handshake std/tls's over that socket.
+# `s_server` is the client against OpenSSL's `s_server -www` on PORT,
+# on new connections and with Nagle back on. Each line says whether the
+# median of COUNT was under `BOUND_MS`, and what it was. `serve` is the
+# TLS server for curl, until a GET of /quit. `once` is one TLS GET with
+# both ends in this program, for a tracer to count their writes.
+#
+# The bound, 15 ms: the wait a stall adds is the peer's delayed ACK,
+# which is 40 ms at least on Linux (its TCP_DELACK_MIN). Built --release
+# here, a GET on a new TLS connection took about 1 ms (medians of 50 from
+# 0.97 to 1.15 ms), and the broken copies the gate makes 41 and 42 ms.
+# 15 ms leaves a slow runner more than ten times this machine's time and
+# stays well under the least stall.
+
+module bench/std_http_latency
+
+import std/http::{HTTP, HTTPClient, Response, Server}
+import std/socket::{IyiSocket}
+import std/tls::{TlsClient, TlsConfig, TlsError, TlsServerConfig}
+import std/x509::{Certificate}
+import std/file::{File}
+
+BOUND_MS = 15
+
+def median_ns(samples : Array(Int64)) : Int64
+  sorted = samples.sorted
+  sorted[sorted.size // 2]
+end
+
+def ms(ns : Int64) : String
+  "#{ns // 1000000_i64}.#{(ns % 1000000_i64 // 10000_i64).to_s.rjust(2, '0')} ms"
+end
+
+# The line for *label*: under the bound, or past it, and the median.
+def report(label : String, samples : Array(Int64)) : Nil
+  median = median_ns(samples)
+  if median < BOUND_MS.to_i64 * 1000000_i64
+    puts "#{label}: under #{BOUND_MS} ms (median #{ms(median)} of #{samples.size})"
+  else
+    puts "#{label}: #{ms(median)}, past #{BOUND_MS} ms (the median of #{samples.size})"
+  end
+end
+
+# COUNT GETs of *url*, timed: each on a new connection, or with *idle*
+# all on the one the first made.
+def gets(url : String, count : Int32, idle : Int32 = 0) : Array(Int64)
+  client = HTTPClient.new(idle: idle, timeout_ms: 10000)
+  client.get(url).or_panic
+  samples = [] of Int64
+  count.times do
+    started = __iyi_monotonic_ns
+    client.get(url).or_panic
+    samples << __iyi_monotonic_ns - started
+  end
+  raise "#{url}: #{client.connections_made} connections for #{count + 1} GETs on a kept one" if idle > 0 && client.connections_made != 1
+  client.close
+  samples
+end
+
+# The server's answer for *path*: "ok" whole, or for /stream the same as
+# the block writes it - the head, then a chunk, then the last chunk, each
+# a write of its own. On a kept connection, past the start where the
+# kernel acknowledges at once, the chunk behind the head waited under
+# Nagle for the client's delayed ACK.
+def answer(path : String) : Response
+  return Response.new(200, "ok") unless path == "/stream"
+  Response.stream(200) do |w|
+    w.write("ok")
+    nil
+  end
+end
+
+# One GET over TLS to *port* at localhost from a socket with Nagle on:
+# the handshake and the request and answer, until the server closes. A
+# client flight in several writes waits on Nagle here for the server's
+# delayed ACK.
+def nagle_get(port : Int32, config : TlsConfig) : Int64
+  started = __iyi_monotonic_ns
+  socket = IyiSocket.connect("127.0.0.1", port).or_panic
+  socket.nodelay = false
+  socket.read_timeout_ms = 10000
+  tls = TlsClient.over(socket, "localhost", config)
+  raise "no handshake: #{tls.message}" if tls.is_a?(TlsError)
+  tls.write("GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+  heard = ""
+  while true
+    got = tls.read
+    break if got.is_a?(TlsError) || got.empty?
+    heard = heard + got
+  end
+  took = __iyi_monotonic_ns - started
+  tls.close
+  raise "no answer: #{heard.inspect}" unless heard.starts_with?("HTTP/1.")
+  took
+end
+
+def nagle_gets(port : Int32, config : TlsConfig, count : Int32) : Array(Int64)
+  nagle_get(port, config)
+  samples = [] of Int64
+  count.times { samples << nagle_get(port, config) }
+  samples
+end
+
+def client_config(root : String) : TlsConfig
+  config = TlsConfig.new
+  config.roots = Certificate.from_pem(File.read(root)).or_panic
+  config.alpn = ["http/1.1"]
+  config
+end
+
+def server_config(chain : String, key : String) : TlsServerConfig
+  config = TlsServerConfig.from_pem(File.read(chain), File.read(key)).or_panic
+  config.alpn = ["http/1.1"]
+  config
+end
+
+args = Program.args
+mode = args.size > 0 ? args[0] : ""
+
+if mode == "self" || mode == "once"
+  secure = server_config(args[1], args[2])
+  config = client_config(args[3])
+  HTTP.tls_config = config
+  count = mode == "self" ? args[4].to_i : 0
+  plain = IyiSocket.listen("127.0.0.1", 0)
+  tls = IyiSocket.listen("127.0.0.1", 0)
+  group do |g|
+    g.spawn do
+      Server.serve(plain) do |req|
+        plain.close if req.path == "/stop"
+        answer(req.path)
+      end
+      0
+    end
+    g.spawn do
+      Server.serve(tls, tls: secure) do |req|
+        tls.close if req.path == "/stop"
+        answer(req.path)
+      end
+      0
+    end
+    g.spawn do
+      if mode == "once"
+        HTTP.get("https://localhost:#{tls.local_port}/").or_panic
+      else
+        report("plain http://, std/http at both ends, a GET on a new connection", gets("http://127.0.0.1:#{plain.local_port}/", count))
+        report("plain http://, a kept connection, an answer the server streams", gets("http://127.0.0.1:#{plain.local_port}/stream", count, 1))
+        report("https://, std/http at both ends, a GET on a new connection", gets("https://localhost:#{tls.local_port}/", count))
+        report("https://, a kept connection, an answer the server streams", gets("https://localhost:#{tls.local_port}/stream", count, 1))
+        report("https://, Nagle on at the client, its handshake and a GET", nagle_gets(tls.local_port, config, count))
+      end
+      HTTP.get("http://127.0.0.1:#{plain.local_port}/stop")
+      HTTP.get("https://localhost:#{tls.local_port}/stop")
+      0
+    end
+  end
+  exit 0
+end
+
+if mode == "s_server"
+  port = args[1].to_i
+  config = client_config(args[2])
+  HTTP.tls_config = config
+  count = args[3].to_i
+  report("https:// to s_server, a GET on a new connection", gets("https://localhost:#{port}/", count))
+  report("https:// to s_server, Nagle on at the client, its handshake and a GET", nagle_gets(port, config, count))
+  exit 0
+end
+
+if mode == "serve"
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1], listener.local_port.to_s)
+  Server.serve(listener, tls: server_config(args[2], args[3])) do |req|
+    listener.close if req.path == "/quit"
+    Response.new(200, "ok")
+  end
+  exit 0
+end
+
+puts "usage: std_http_latency (self | s_server | serve | once) ..."
+exit 2

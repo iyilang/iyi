@@ -176,8 +176,8 @@ end
 #
 # Under `serve`, *listener* and *idle*: no read starts once the listener
 # is closed, and every read waits with the connection in *idle*, for
-# `serve` to close when the listener closes - one partway through a
-# request as much as one between requests.
+# `serve` to end (`close_for_stop`) when the listener closes - one partway
+# through a request as much as one between requests.
 class Conn
   @socket : IyiSocket
   @data : Pointer(UInt8)
@@ -190,7 +190,9 @@ class Conn
   @ended : Bool
   @failure : Cancelled | SocketError | Nil
   @listener : IyiSocket?
-  @idle : Hash(UInt64, IyiSocket)?
+  @idle : Hash(UInt64, Conn)?
+  # Handed to an upgrade's protocol (`held`), which writes when it likes.
+  @handed_over : Bool = false
   # When what is being read must have arrived by (monotonic ns, 0 for no
   # such time) and what it is, and how long one read may wait otherwise.
   @deadline : Int64 = 0_i64
@@ -207,7 +209,7 @@ class Conn
 
   ROOM = 16384
 
-  def initialize(@socket : IyiSocket, @listener : IyiSocket? = nil, @idle : Hash(UInt64, IyiSocket)? = nil, @stream : TlsStream? = nil)
+  def initialize(@socket : IyiSocket, @listener : IyiSocket? = nil, @idle : Hash(UInt64, Conn)? = nil, @stream : TlsStream? = nil)
     @capacity = ROOM
     @data = Pointer(UInt8).malloc(@capacity.to_u64)
     @start = 0
@@ -219,6 +221,27 @@ class Conn
 
   def socket : IyiSocket
     @socket
+  end
+
+  # How long a stopping server's close_notify may wait to be written: a
+  # client that reads nothing, its socket's buffer full, holds the stop
+  # this long and no longer.
+  STOP_WRITE_MS = 100
+
+  # What `serve` does to a connection waiting in a read when its listener
+  # closes: over TLS, close_notify, then the socket closed (`TlsConnection
+  # #close`), so a client reads the end of the connection rather than a
+  # truncation; in the clear, the socket closed. Either ends the read. A
+  # connection an upgrade handed over is the protocol's to write on, from
+  # its own task, and has its socket closed alone. The socket closed under
+  # it, the connection's own task finds it so: TLS answers that it is
+  # closed, and HTTP/2's GOAWAY, after a read that failed, is not written.
+  def close_for_stop : Nil
+    if (stream = @stream) && !@handed_over && !@socket.closed?
+      @socket.write_timeout_ms = STOP_WRITE_MS
+      stream.close
+    end
+    @socket.close
   end
 
   # What a request is written to: TLS over the socket, or the socket.
@@ -287,7 +310,7 @@ class Conn
       @socket.read_timeout_ms = left.to_i32
     end
     if idle = @idle
-      idle[@socket.object_id] = @socket
+      idle[@socket.object_id] = self
     end
     stream = @stream
     got = stream ? stream.read(@data + @stop.to_i64, @capacity - @stop) : @socket.read(@data + @stop.to_i64, @capacity - @stop)
@@ -443,17 +466,20 @@ class Conn
   # client that stayed kept `serve` from returning after its listener was
   # closed, for as long as it stayed. Go's server does not wait for a
   # connection it handed over; this one cannot leave a task behind, so it
-  # closes the connection under the protocol, whose next read or write
-  # answers that it closed. A listener closed before the block starts
-  # closes the connection at once.
+  # closes the connection under the protocol, whose next read answers that
+  # it closed, and whose `closed?` says so: `IyiSocket#write` refuses a
+  # closed socket by panicking, so a protocol asks first, as std/websocket
+  # does, while over TLS a write answers it as an error too. A listener
+  # closed before the block starts closes the connection at once.
   def held(& : -> Nil) : Nil
     idle = @idle
     listener = @listener
     if idle && listener
+      @handed_over = true
       if listener.closed?
         @socket.close
       else
-        idle[@socket.object_id] = @socket
+        idle[@socket.object_id] = self
       end
     end
     yield
@@ -1513,7 +1539,7 @@ pub struct Server
     raise "HTTP: a timeout of #{timeout_ms} ms" if timeout_ms < 0
     raise "HTTP: a request timeout of #{request_timeout_ms} ms" if request_timeout_ms < 0
     raise "HTTP: at most #{max_connections} connections" if max_connections < 0
-    idle = {} of UInt64 => IyiSocket
+    idle = {} of UInt64 => Conn
     # A place per connection served: a send waits while every one is held.
     slots = max_connections > 0 ? Channel(Int32).new(max_connections) : nil
     group do |g|
@@ -1538,7 +1564,9 @@ pub struct Server
           spawn_handler(g, client, handler, listener, idle, stream_bodies, compress, timeout_ms, tls, request_timeout_ms, slots)
         end
       end
-      idle.each { |_, waiting| waiting.close }
+      # A copy: a stop's close_notify may wait, and other connections'
+      # tasks leave the set meanwhile.
+      idle.values.each { |waiting| waiting.close_for_stop }
       0
     end
   end
@@ -1573,7 +1601,7 @@ pub struct Server
   # Go's server does. Unread, the panic reached `serve`'s group, which
   # cancelled every other connection and the accept loop and panicked "a
   # task panicked": one request whose block failed took the server down.
-  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, IyiSocket), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, tls : TlsServerConfig?, request_timeout_ms : Int32, slots : Channel(Int32)?) : Nil
+  private def self.spawn_handler(g : IyiGroup, client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket, idle : Hash(UInt64, Conn), stream_bodies : Bool, compress : Bool, timeout_ms : Int32, tls : TlsServerConfig?, request_timeout_ms : Int32, slots : Channel(Int32)?) : Nil
     g.spawn do
       group do |own|
         served = own.spawn do
@@ -1596,7 +1624,7 @@ pub struct Server
   # connection that opens with HTTP/2's preface is served as HTTP/2. Under
   # *tls* the handshake comes first, and the connection ends with
   # close_notify.
-  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, IyiSocket)? = nil, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 0, tls : TlsServerConfig? = nil, request_timeout_ms : Int32 = 0) : Nil
+  def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, Conn)? = nil, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 0, tls : TlsServerConfig? = nil, request_timeout_ms : Int32 = 0) : Nil
     defer client.close
     unless config = tls
       serve_connection(client, nil, handler, listener, idle, stream_bodies, compress, timeout_ms, request_timeout_ms)
@@ -1626,7 +1654,7 @@ pub struct Server
     head
   end
 
-  private def self.serve_connection(client : IyiSocket, stream : TlsStream?, handler : Proc(Request, Response), listener : IyiSocket?, idle : Hash(UInt64, IyiSocket)?, stream_bodies : Bool, compress : Bool, timeout_ms : Int32, request_timeout_ms : Int32) : Nil
+  private def self.serve_connection(client : IyiSocket, stream : TlsStream?, handler : Proc(Request, Response), listener : IyiSocket?, idle : Hash(UInt64, Conn)?, stream_bodies : Bool, compress : Bool, timeout_ms : Int32, request_timeout_ms : Int32) : Nil
     conn = Conn.new(client, listener, idle, stream)
     conn.gap = timeout_ms if timeout_ms > 0
     remote = client.remote_address

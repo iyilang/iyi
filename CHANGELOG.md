@@ -446,6 +446,34 @@
 
 ### Fixed
 
+- **A TLS server stopped while a client keeps a connection to it no longer
+  panics, and ends that connection with close_notify.** `Server.serve`
+  closes the sockets of the connections it waits on when its listener
+  closes. A kept-alive TLS connection's own task then sent close_notify
+  on that closed socket, and `IyiSocket#write`, which refuses a closed
+  socket by panicking, printed "iyi: panic: socket is closed" while the
+  program went on to exit 0: once each for a kept HTTP/1.1 and a kept
+  HTTP/2 connection over TLS, and once more for a TLS upgrade's protocol
+  writing its goodbye. Python's ssl, holding such a connection with
+  `suppress_ragged_eofs=False`, read an end without close_notify
+  (SSLEOFError). Now a stopping server sends close_notify on each TLS
+  connection waiting between requests and then closes it
+  (`Conn#close_for_stop`, the write held to 100 ms against a client that
+  reads nothing); one an upgrade handed over is its protocol's to write
+  on and is closed alone, as before. std/tls takes a socket closed under
+  a connection for the connection's end: `TlsConnection#closed?` says so,
+  and a read, a write, a KeyUpdate or close_notify answers a `TlsError`
+  instead of reaching the socket - so a wss:// protocol that asks
+  `closed?` before its goodbye, as std/websocket does, is told.
+  `IyiSocket#write`'s own contract is unchanged. Held by
+  `bench/std_http_exercise.sh` with `bench/std_http_stop.iyi`: std/http's
+  clients keeping HTTP/1.1 and HTTP/2 over TLS, HTTP/1.1 and h2c in the
+  clear, and an upgrade each way, while the server stops - exit 0, no
+  panic printed, both upgrades told "closed" - and Python's ssl reading
+  close_notify on its kept connection; copies without the write's check
+  (a panic printed), with `closed?` blind to the socket (the TLS
+  upgrade's goodbye written, and refused) and with a stop that sends no
+  close_notify (SSLEOFError) are each caught there.
 - **P-256 signing no longer branches on the nonce's digits.** The
   fixed-base table read is masked in the source, and in a release build
   LLVM turned it into a conditional jump per entry on the digit: a timing

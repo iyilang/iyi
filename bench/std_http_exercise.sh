@@ -789,10 +789,12 @@ echo "== latency on loopback: Nagle off, and a flight in one write (bench/std_ht
 # std/http, and on Linux, where strace is there to ask, what both ends
 # write in one handshake: no ChangeCipherSpec written alone. Then copies
 # of the modules with Nagle left on, the client's flight in two writes
-# and the server's, each caught at the line that names it. The program
-# with no arguments - what CI's run of every bench program sees - checks
-# TCP_NODELAY on both ends and the streamed answer alone, and the copy
-# with Nagle left on must fail it too.
+# and the server's, each caught at the line that names it on Linux. The
+# program with no arguments - what CI's run of every bench program sees -
+# checks TCP_NODELAY on both ends and the streamed answer alone, and the
+# copy with Nagle left on must fail it too, on every platform. Where the
+# loopback shows no stall to time (darwin's, and not known of Windows'),
+# a copy timing does not catch is said to be unmeasured there.
 LATENCY_SELF="plain http://, std/http at both ends, a GET on a new connection
 plain http://, a kept connection, an answer the server streams
 https://, std/http at both ends, a GET on a new connection
@@ -805,6 +807,17 @@ LATENCY_ALONE="no ChangeCipherSpec written alone, at either end, as strace saw t
 latency_openssl=yes
 latency_curl=yes
 latency_strace=no
+# Whether a stall shows in time here: Linux's loopback delays an ACK 40 ms
+# at least, which is the stall these checks time; darwin's showed none -
+# every check held on the CI runner with Nagle left on, and with the
+# client's flight in two writes (job 119078193573) - and Windows' is not
+# known to. Elsewhere a broken copy timing does not catch is said to be
+# unmeasured there, never caught, and the Nagle copy is held by the
+# TCP_NODELAY check, which reads the option on every platform.
+latency_timing=no
+case "$(uname -s)" in
+  Linux) latency_timing=yes ;;
+esac
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) latency_openssl=no; latency_curl=no ;;
   Linux) command -v strace >/dev/null 2>&1 && strace -f -qq -e trace=write -o /dev/null true >/dev/null 2>&1 && latency_strace=yes ;;
@@ -912,8 +925,10 @@ EOF
     status=1
   fi
   # latency_breaks <label> <module> <old> <new> <line> [alone]: the program
-  # over a copy of <module> with <old> made <new> must fail at <line>, and
-  # with "alone" its run with no arguments must fail too.
+  # over a copy of <module> with <old> made <new> must fail at <line> -
+  # where a stall shows in time (`latency_timing`); elsewhere a copy it
+  # does not catch there is unmeasured - and with "alone" its run with no
+  # arguments must fail too, on every platform.
   latency_breaks() {
     local label="$1" module="$2" old="$3" new="$4" line="$5" alone="${6:-}" got
     if ! printf '%s\n' "$latency_labels" | grep -qxF "$line"; then
@@ -940,7 +955,9 @@ PY
       return
     fi
     got="$(latency_run "$WORK/latency-broken")"
-    if latency_held "$got" "$line"; then
+    if latency_held "$got" "$line" && [ "$latency_timing" != yes ]; then
+      echo "  $label: unmeasured at \"$line\": this $(uname -s) loopback shows no stall to time, as Linux's delayed ACK does"
+    elif latency_held "$got" "$line"; then
       echo "  $label: not caught at \"$line\""
       status=1
     else

@@ -1,0 +1,132 @@
+# A server stopped while clients hold connections to it: std/http's
+# `serve` closes them, and nothing panics.
+#
+#   ./bin/iyi run bench/std_http_stop.iyi self CHAIN.pem KEY.pem ROOT.pem
+#   ./bin/iyi run bench/std_http_stop.iyi serve PORTFILE CHAIN.pem KEY.pem
+#
+# `self` runs std/http's server over TLS (ALPN h2 and http/1.1) and in
+# the clear in one program, and clients that keep a connection to each:
+# HTTP/1.1 and HTTP/2 over TLS, HTTP/1.1 and h2c in the clear, and an
+# upgrade over each whose block reads until the connection ends and then
+# writes once more. Then both listeners close, by a request, with every
+# one of those connections still open, and the program says what each
+# connection's protocol was told and that it stopped. A panic anywhere is
+# printed by the task it happened in; bench/std_http_exercise.sh reads
+# the output for one, and for the exit code.
+#
+# `serve` is the TLS server alone, HTTP/1.1, until a GET of /stop, for a
+# client the gate writes in Python to hold a connection to while it stops.
+
+module bench/std_http_stop
+
+import std/http::{HTTP, HTTPClient, Request, Response, Server, TlsStream}
+import std/socket::{IyiSocket, SocketError}
+import std/tls::{TlsConfig, TlsServerConfig}
+import std/x509::{Certificate}
+import std/file::{File}
+
+# The block an upgrade hands the connection to: it reads until the
+# connection ends - the server's stop closes it under the block - and
+# then says goodbye, as std/websocket does: it asks `closed?` first, since
+# `IyiSocket#write` refuses a closed socket by panicking, and writes only
+# to a connection that is not. What it found goes in *said*: "closed"
+# from both, the TLS stream's `closed?` reading the socket under it.
+def hold_until_closed(socket : IyiSocket | TlsStream, said : Array(String)) : Nil
+  while true
+    got = socket.read(4096)
+    break unless got.is_a?(String) && !got.empty?
+  end
+  if socket.closed?
+    said << "closed"
+    return
+  end
+  wrote = socket.write("bye")
+  said << (wrote.is_a?(Int32) ? "wrote #{wrote}" : wrote.is_a?(SocketError) ? "a SocketError" : "cancelled")
+  nil
+end
+
+def answer(req : Request, said : Array(String)) : Response
+  if req.path == "/upgrade"
+    return Response.upgrade({"Upgrade" => "hold", "Connection" => "Upgrade"}) { |socket, _| hold_until_closed(socket, said) }
+  end
+  Response.new(200, req.version)
+end
+
+args = Program.args
+mode = args.size > 0 ? args[0] : ""
+
+if mode == "self"
+  secure = TlsServerConfig.from_pem(File.read(args[1]), File.read(args[2])).or_panic
+  secure.alpn = ["h2", "http/1.1"]
+  roots = Certificate.from_pem(File.read(args[3])).or_panic
+  h1 = TlsConfig.new
+  h1.roots = roots
+  h1.alpn = ["http/1.1"]
+  h2 = TlsConfig.new
+  h2.roots = roots
+  h2.alpn = ["h2", "http/1.1"]
+  tls = IyiSocket.listen("127.0.0.1", 0)
+  plain = IyiSocket.listen("127.0.0.1", 0)
+  secure_base = "https://localhost:#{tls.local_port}"
+  plain_base = "http://127.0.0.1:#{plain.local_port}"
+  said = [] of String
+  group do |g|
+    g.spawn do
+      Server.serve(tls, tls: secure) do |req|
+        tls.close if req.path == "/stop"
+        answer(req, said)
+      end
+      0
+    end
+    g.spawn do
+      Server.serve(plain) do |req|
+        plain.close if req.path == "/stop"
+        answer(req, said)
+      end
+      0
+    end
+    g.spawn do
+      HTTP.tls_config = h1
+      over_h1 = HTTPClient.new
+      first = over_h1.get(secure_base + "/").or_panic
+      HTTP.tls_config = h2
+      over_h2 = HTTPClient.new
+      second = over_h2.get(secure_base + "/").or_panic
+      in_clear = HTTPClient.new
+      in_clear.get(plain_base + "/").or_panic
+      h2c = HTTPClient.new(prior_knowledge: true)
+      third = h2c.get(plain_base + "/").or_panic
+      puts "kept: TLS #{first.body}, TLS #{second.body}, clear #{in_clear.get(plain_base + "/").or_panic.body}, clear #{third.body}"
+      HTTP.tls_config = h1
+      upgraded = [HTTP.upgrade(secure_base + "/upgrade", "hold").or_panic, HTTP.upgrade(plain_base + "/upgrade", "hold").or_panic]
+      puts "upgraded: #{upgraded.map { |u| u.response.status }.join(" and ")}"
+      HTTP.get(secure_base + "/stop").or_panic
+      HTTP.get(plain_base + "/stop").or_panic
+      upgraded.each { |u| u.socket.close }
+      over_h1.close
+      over_h2.close
+      in_clear.close
+      h2c.close
+      0
+    end
+  end
+  puts "the upgrades' last writes: #{said.sorted.join(", ")}"
+  puts "stopped"
+  exit 0
+end
+
+if mode == "serve"
+  secure = TlsServerConfig.from_pem(File.read(args[2]), File.read(args[3])).or_panic
+  secure.alpn = ["http/1.1"]
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write(args[1], listener.local_port.to_s)
+  Server.serve(listener, tls: secure) do |req|
+    listener.close if req.path == "/stop"
+    Response.new(200, "ok")
+  end
+  puts "stopped"
+  exit 0
+end
+
+puts "usage: std_http_stop (self | serve) ..."
+exit 2

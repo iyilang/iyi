@@ -951,6 +951,152 @@ PY
 fi
 
 echo
+echo "== a server stopped while clients hold connections (bench/std_http_stop.iyi)"
+# `serve` closes the connections it waits on when its listener closes. A
+# kept-alive TLS client while the server stopped printed "iyi: panic:
+# socket is closed" - the connection's own task then sent close_notify on
+# the socket the stop had closed - and the program went on to exit 0, so
+# only its output said so; a TLS upgrade's protocol that wrote its goodbye
+# panicked the same way. Now a stopping server sends close_notify on each
+# TLS connection waiting between requests before it closes the socket,
+# and std/tls answers a socket closed under it as the connection's end
+# (`closed?`, and a `TlsError` from a write) instead of reaching
+# `IyiSocket#write`, whose refusal of a closed socket is a panic. Held
+# here: std/http's clients keeping HTTP/1.1 and HTTP/2 over TLS, HTTP/1.1
+# and h2c in the clear, and an upgrade each way whose block reads until
+# the stop and asks `closed?` before it says goodbye, as std/websocket
+# does - no panic printed, exit 0, both upgrades told "closed"; and
+# Python's ssl, holding a kept-alive connection with
+# `suppress_ragged_eofs=False` while the server stops, reading
+# close_notify rather than an end without one (SSLEOFError, which it read
+# before). Then copies of the modules without the write's check, with
+# `closed?` blind to the socket, and with a stop that sends no
+# close_notify, each caught at the line that names it.
+STOP_EXPECTED="kept: TLS HTTP/1.1, TLS HTTP/2, clear HTTP/1.1, clear HTTP/2
+upgraded: 101 and 101
+the upgrades' last writes: closed, closed
+stopped
+exit 0
+kept connection: HTTP/1.1 200 OK, then on the server's stop: close_notify
+the TLS server: stopped, exit 0
+panics printed: 0"
+# stop_run <binary>: what the binary's `self` printed and how it exited,
+# what Python read on its kept connection while the binary's `serve`
+# stopped and how that ended, and the number of panics printed by either
+# (their lines, and the "at" line a panic's place is printed on, apart).
+stop_run() {
+  local bin="$1" code pid
+  timeout 120 "$bin" self "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" "$WORK/tls/root.pem" >"$WORK/stop-self.out" 2>&1
+  code=$?
+  grep -v -e 'panic' -e '^  at ' "$WORK/stop-self.out"
+  echo "exit $code"
+  rm -f "$WORK/stop.port"
+  "$bin" serve "$WORK/stop.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" >"$WORK/stop-serve.out" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 600); do
+    [ -s "$WORK/stop.port" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  timeout 60 "$PY" - "$(cat "$WORK/stop.port" 2>/dev/null)" "$WORK/tls/root.pem" <<'PY'
+import socket, ssl, sys
+port, root = int(sys.argv[1]), sys.argv[2]
+context = ssl.create_default_context(cafile=root)
+def connect():
+    raw = socket.create_connection(("127.0.0.1", port), 10)
+    return context.wrap_socket(raw, server_hostname="localhost", suppress_ragged_eofs=False)
+def status(s, request):
+    s.sendall(request)
+    got = b""
+    while b"\r\n\r\n" not in got or not got.endswith(b"ok"):
+        piece = s.recv(4096)
+        if not piece:
+            break
+        got += piece
+    return got.split(b"\r\n", 1)[0].decode()
+kept = connect()
+first = status(kept, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+status(connect(), b"GET /stop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+try:
+    end = kept.recv(4096)
+    said = "close_notify" if end == b"" else f"{len(end)} bytes more"
+except ssl.SSLEOFError:
+    said = "an end without close_notify (SSLEOFError)"
+except OSError as e:
+    said = type(e).__name__
+print(f"kept connection: {first}, then on the server's stop: {said}")
+PY
+  wait "$pid"
+  code=$?
+  echo "the TLS server: $(grep -v -e 'panic' -e '^  at ' "$WORK/stop-serve.out" | tr '\n' ' ' | sed 's/ $//'), exit $code"
+  echo "panics printed: $(cat "$WORK/stop-self.out" "$WORK/stop-serve.out" | grep -c 'panic')"
+}
+if [ ! -s "$WORK/tls/root.pem" ]; then
+  echo "  skipped: the https:// section above made no certificates (no python3 with ssl and cryptography)"
+elif ! "$IYI" build -o "$WORK/stop" "$REPO/bench/std_http_stop.iyi" >"$WORK/stop.build" 2>&1; then
+  echo "  bench/std_http_stop.iyi did not build"
+  sed -n '1,8p' "$WORK/stop.build"
+  status=1
+else
+  said="$(stop_run "$WORK/stop")"
+  if [ "$said" = "$STOP_EXPECTED" ]; then
+    printf '%s\n' "$said" | sed 's/^/  /'
+  else
+    echo "  a server stopped under its clients did not stop cleanly:"
+    printf '%s\n' "$said" | sed 's/^/    got:  /'
+    printf '%s\n' "$STOP_EXPECTED" | sed 's/^/    want: /'
+    status=1
+  fi
+  # stop_breaks <label> <module> <old> <new> <line>: the program over a
+  # copy of <module> with <old> made <new> must answer the line starting
+  # with <line> otherwise than the modules do.
+  stop_breaks() {
+    local label="$1" module="$2" old="$3" new="$4" line="$5" want got
+    rm -rf "$WORK/stopbreak" && mkdir -p "$WORK/stopbreak/std"
+    if ! OLD="$old" NEW="$new" "$PY" - "$REPO/src/std/$module" "$WORK/stopbreak/std/$module" <<'PY'
+import os, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+if src.count(os.environ["OLD"]) != 1:
+    raise SystemExit("patch site missing or not unique")
+open(sys.argv[2], "w", encoding="utf-8", newline="\n").write(src.replace(os.environ["OLD"], os.environ["NEW"], 1))
+PY
+    then
+      echo "  $label: the patch did not apply"
+      status=1
+      return
+    fi
+    if ! IYI_PATH="$WORK/stopbreak${PSEP}$IYI_PATH" "$IYI" build -o "$WORK/stop-broken" "$REPO/bench/std_http_stop.iyi" >"$WORK/stop-broken.build" 2>&1; then
+      echo "  $label: the broken copy did not build"
+      sed -n '1,6p' "$WORK/stop-broken.build" | sed 's/^/    /'
+      status=1
+      return
+    fi
+    want="$(printf '%s\n' "$STOP_EXPECTED" | grep -m1 "^$line")"
+    # Read whole first: a grep that stops at its line would close the pipe
+    # under the rest of the run, Python's print among it.
+    got="$(stop_run "$WORK/stop-broken")"
+    got="$(printf '%s\n' "$got" | grep -m1 "^$line")"
+    if [ -n "$got" ] && [ "$got" != "$want" ]; then
+      echo "  $label: caught at \"$line\": $got"
+    else
+      echo "  $label: not caught at \"$line\" (it answered \"$got\")"
+      status=1
+    fi
+  }
+  stop_breaks "a record written on a socket closed under the connection" tls.iyi \
+    '    return TlsError.new("the socket under the connection is closed") if @socket.closed?
+    sent = @socket.write' '    sent = @socket.write' "panics printed"
+  stop_breaks "closed? blind to the socket under the connection" tls.iyi \
+    '    @closed || @socket.closed?' '    @closed' "the upgrades' last writes"
+  stop_breaks "a stop that sends no close_notify" http.iyi \
+    '      stream.close
+    end
+    @socket.close' '      nil
+    end
+    @socket.close' "kept connection"
+fi
+
+echo
 echo "== HTTP/2: the server and the client together (bench/http2_exercise.iyi)"
 # h2c with prior knowledge both ways: every shape of body through the
 # windows, gzip, cookies, a redirect, 200 requests on one connection, and

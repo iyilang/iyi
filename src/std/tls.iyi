@@ -154,6 +154,13 @@
 # Early data a server does not take - none unless asked for, below - is
 # passed over, up to sixteen of the largest records, as section 4.2.10
 # says.
+# An `identity_source` on the config, when set, is asked first, on each
+# ClientHello with signature_algorithms, for the identity to show: given
+# the server_name and the ALPN protocols the client offered, it answers
+# an identity, nil for the config's own choice, or an error that refuses
+# the handshake with the alert it names. std/autocert's manager is one,
+# answering certificates it gets from an ACME CA as they are asked for,
+# and tls-alpn-01's challenge certificate (RFC 8737) on the same listener.
 # With `client_roots` the server asks for a client's certificate, checks
 # its chain for clientAuth and its CertificateVerify, and refuses a client
 # that sends none (certificate_required) unless `client_required` is
@@ -3059,6 +3066,20 @@ pub class TlsServerConfig
   # More identities, each shown to a client that asks by server_name (RFC
   # 6066) for a host its certificate names; `identity` to any other.
   getter others : Array(TlsIdentity) = [] of TlsIdentity
+  # Asked first, in TLS 1.3 and 1.2, for the identity a client is shown:
+  # given the host the client named by server_name (nil when it named
+  # none) and the protocols its ALPN offered (nil when it offered none).
+  # An identity it answers is shown where one of `others` would have been
+  # - so a scheme of its key the client takes, and in 1.2 a suite and a
+  # curve for it, or the client is refused as for `identity`; nil leaves
+  # the choice to `others` and `identity` as without it; an error refuses
+  # the handshake, the client sent the alert that error names. Asked of
+  # each ClientHello that lists signature_algorithms - a second one after
+  # a HelloRetryRequest too, and one offering a ticket, which may yet come
+  # to a full handshake; a resumption shows no certificate, and its ticket
+  # counts the session as `identity`'s (`identity_index`). The handshake
+  # waits for it, and its timeout counts that time. Not asked when nil.
+  property identity_source : Proc(String?, Array(String)?, TlsIdentity | TlsError | Nil)? = nil
   # The oldest version this server speaks: TLS 1.3 by default, and then a
   # client that does not offer it is refused (protocol_version); `TLS12`
   # answers a client that offers 1.2 and not 1.3 in 1.2, held to what the
@@ -4269,6 +4290,11 @@ pub class TlsServer < TlsConnection
     unshown = nil.as(TlsError?)
     if schemes
       chosen = @config.identity_for(server_name, schemes)
+      if source = @config.identity_source
+        given = source.call(server_name, alpn)
+        return given if given.is_a?(TlsError)
+        chosen = given.scheme_for(schemes) ? given : nil if given
+      end
       if chosen
         @identity = chosen
         @scheme = chosen.scheme_for(schemes) || 0
@@ -4617,6 +4643,14 @@ pub class TlsServer < TlsConnection
   # config's `others` that names the host asked for and can answer it, else
   # `identity` if it can; or why the client is refused.
   private def identity12(offer : TlsOffer12, schemes : Array(Int32)) : TlsIdentity | TlsError
+    if source = @config.identity_source
+      given = source.call(offer.server_name, offer.alpn)
+      return given if given.is_a?(TlsError)
+      if given
+        refused = refusal12(given, offer, schemes)
+        return refused ? TlsError.new(refused, TlsAlert::HANDSHAKE_FAILURE) : given
+      end
+    end
     if (name = offer.server_name)
       @config.others.each { |other| return other if other.leaf.matches_host?(name) && refusal12(other, offer, schemes).nil? }
     end

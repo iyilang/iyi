@@ -1,0 +1,228 @@
+# Exercises std/autocert.
+#
+# With no argument, or a directory to keep its cache in: the directory
+# cache read, written over and refused a key that is not a file's name;
+# the host policy refusing a name before the CA is asked, counted at a
+# listener that stands where the CA's directory would be; a failure
+# remembered, so the next handshake asks nothing; when a certificate is
+# due for renewal; tls-alpn-01's certificate shown under acme-tls/1 alone
+# and http-01's answer on port 80.
+#
+# The modes the gate script drives (bench/std_autocert_client.py):
+#   challenge-serve DIR
+#       an HTTPS server whose manager holds a tls-alpn-01 challenge for
+#       alpn.autocert.example, on a port written to DIR/port, its key
+#       authorization to DIR/alpn.txt, until it is stopped;
+#   serve DIRECTORY MINICA CACHE TLS_PORT HTTP_PORT HOSTS CHALLENGES READY
+#       an HTTPS server on TLS_PORT whose manager gets certificates for
+#       HOSTS (by commas) from the ACME server at DIRECTORY - trusted by
+#       MINICA - by CHALLENGES in that order, answers http-01 on
+#       HTTP_PORT, keeps them in CACHE and renews them; READY written
+#       once it listens. It answers every request with the count of
+#       orders and renewals it has made.
+
+import std/autocert::{AutocertManager, AutocertDirCache, AutocertError, AutocertHeld}
+import std/x509::{Certificate, SigningKey, X509Error}
+import std/ecdsa::{EcdsaPublicKey, EcdsaCurve}
+import std/http::{HTTP, Request, Response, Server}
+import std/socket::{IyiSocket}
+import std/tls::{TlsConfig, TlsError, TlsIdentity, TlsVersion}
+import std/file::{File}
+import std/dir::{Dir}
+import std/random::{Random}
+import std/time::{Time, Span}
+
+ACME_IDENTIFIER = "1.3.6.1.5.5.7.1.31"
+
+def check(cond : Bool, label : String) : Nil
+  raise "ASSERTION FAILED: #{label}" unless cond
+end
+
+# A listener standing where a CA's directory would be: every connection
+# counted and closed unanswered.
+class Counter
+  property connections : Int32 = 0
+end
+
+def local_checks(dir : String) : Nil
+  puts "== the directory cache"
+  cache = AutocertDirCache.new(dir)
+  check cache.get("absent.example").nil?, "a key not in the cache is nil"
+  check cache.put("entry.example", "first").nil?, "the cache made its directory and wrote an entry"
+  check cache.get("entry.example") == "first", "an entry reads back"
+  check cache.put("entry.example", "second").nil?, "an entry is written over"
+  check cache.get("entry.example") == "second", "an entry written over reads back as the new one"
+  check Dir.entries(dir).select { |e| e != "." && e != ".." } == ["entry.example"], "no temporary file is left beside an entry: #{Dir.entries(dir)}"
+  ["../escape", "a/b", "", "..", "a\\b"].each do |bad|
+    check cache.put(bad, "x").is_a?(AutocertError), "#{bad.inspect} is refused as a cache key"
+  end
+  check cache.delete("entry.example").nil? && cache.get("entry.example").nil?, "a deleted entry is gone"
+  puts "  read, written over by rename, deleted, and keys that are not a file's name refused"
+
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  counter = Counter.new
+  directory = "http://127.0.0.1:#{listener.local_port}/directory"
+  group do |g|
+    g.spawn do
+      while true
+        socket = listener.accept
+        break unless socket.is_a?(IyiSocket)
+        counter.connections = counter.connections + 1
+        socket.close
+      end
+      0
+    end
+    g.spawn do
+      policy_checks(dir, directory, counter)
+      listener.close
+      0
+    end
+  end
+
+  puts "\n== when a certificate is due"
+  manager = AutocertManager.new(directory, cache, ["a.autocert.example"])
+  start = Time.utc(2026, 1, 1).to_unix_ms
+  day = 86400000_i64
+  check manager.renew_time(start, start + 90_i64 * day) == start + 60_i64 * day, "a 90-day certificate is due 30 days before its end"
+  check manager.renew_time(start, start + 30000_i64) == start + 20000_i64, "a 30-second certificate is due two thirds into its life"
+  manager.renew_before = Span.days(7)
+  check manager.renew_time(start, start + 90_i64 * day) == start + 83_i64 * day, "renew_before of seven days: due 7 days before the end"
+  puts "  90 days: 30 before the end; 30 seconds: at 20; renew_before of 7 days: 7 before the end"
+
+  puts "\n== tls-alpn-01 beside the certificates, http-01 on port 80"
+  name = "alpn.autocert.example"
+  alpn = AutocertManager.new(directory, cache, [name])
+  check alpn.add_challenge(name, "tok-1", "tok-1.thumbprint").nil?, "the tls-alpn-01 challenge put up"
+  shown = alpn.identity_for(name, ["acme-tls/1"])
+  check shown.is_a?(TlsIdentity) && shown.leaf.unhandled_critical.includes?(ACME_IDENTIFIER) && shown.leaf.dns_names == [name],
+    "a client offering acme-tls/1 alone is shown the challenge certificate"
+  [["http/1.1"], ["acme-tls/1", "http/1.1"], ["h2", "acme-tls/1"]].each do |offered|
+    other = alpn.identity_for(name, offered)
+    check !(other.is_a?(TlsIdentity) && other.leaf.unhandled_critical.includes?(ACME_IDENTIFIER)),
+      "a challenge certificate is shown under acme-tls/1 alone, not to a client offering #{offered.join(", ")}"
+  end
+  check alpn.identity_for("other.autocert.example", ["acme-tls/1"]).is_a?(TlsError), "acme-tls/1 for a name with no challenge up is refused"
+  none = {} of String => String
+  answered = alpn.answer(Request.new("GET", "/.well-known/acme-challenge/tok-1", nil, none, ""))
+  check !answered.nil? && answered.status == 200 && answered.body == "tok-1.thumbprint", "http-01's token answered on port 80 with its key authorization"
+  check alpn.answer(Request.new("GET", "/", nil, none, "")).nil?, "another path on port 80 is the program's own"
+  alpn.remove_challenge(name, "tok-1")
+  check alpn.identity_for(name, ["acme-tls/1"]).is_a?(TlsError), "a challenge taken down is no longer shown"
+  config = alpn.tls_config(["h2", "http/1.1"])
+  check config.alpn == ["h2", "http/1.1", "acme-tls/1"], "tls_config speaks acme-tls/1 after the program's protocols"
+  puts "  the challenge certificate under acme-tls/1 alone, refused beside other protocols, http-01's answer, both taken down"
+end
+
+def policy_checks(dir : String, directory : String, counter : Counter) : Nil
+  puts "\n== the host policy, before the CA"
+  cache = AutocertDirCache.new(dir)
+  manager = AutocertManager.new(directory, cache, ["a.autocert.example", "Bücher.Autocert.Example."])
+  refused = manager.identity_for("evil.autocert.example", ["http/1.1"])
+  check refused.is_a?(TlsError) && refused.message.includes?("not a name this manager answers for") && counter.connections == 0 && manager.orders == 0,
+    "a disallowed name is refused before the CA is asked: #{refused}, #{counter.connections} connections to the CA"
+  check manager.identity_for(nil, ["http/1.1"]).is_a?(TlsError) && counter.connections == 0, "a client naming no host is refused before the CA is asked"
+  check cache.get(AutocertManager::ACCOUNT_KEY).nil?, "no account key is made for a refused name"
+  puts "  evil.autocert.example refused with no connection to the CA: #{refused}"
+
+  allowed = manager.identity_for("A.autocert.example", ["http/1.1"])
+  check allowed.is_a?(TlsError) && counter.connections > 0, "an allowed name, in another case, is ordered: the CA asked #{counter.connections} times"
+  unicode = manager.identity_for("xn--bcher-kva.autocert.example", nil)
+  check unicode.is_a?(TlsError) && !unicode.message.includes?("not a name this manager answers for"), "a Unicode name in the list is allowed by its A-labels: #{unicode}"
+  puts "  an allowed name asks the CA (#{counter.connections} connections), a Unicode one by its A-labels"
+
+  puts "\n== a failure remembered"
+  asked = counter.connections
+  again = manager.identity_for("a.autocert.example", ["http/1.1"])
+  check again.is_a?(TlsError) && counter.connections == asked, "a failed name's next handshake is refused at once, the CA not asked again: #{counter.connections} against #{asked}"
+  check allowed.is_a?(TlsError) && again.is_a?(TlsError) && again.message == allowed.message, "the failure remembered is the one the order ended with"
+  stored = cache.get(AutocertManager::ACCOUNT_KEY)
+  check stored.is_a?(String), "the account key was made and cached before the CA was asked"
+  key = SigningKey.from_pem(stored.as(String))
+  public = key.is_a?(SigningKey) ? key.public_key : nil
+  check public.is_a?(EcdsaPublicKey) && public.curve == EcdsaCurve::P256, "the cached account key reads back as a P-256 key"
+  puts "  remembered: #{again}"
+end
+
+def challenge_serve(dir : String) : Nil
+  name = "alpn.autocert.example"
+  authorization = "tok-alpn.thumbprint"
+  manager = AutocertManager.new("http://127.0.0.1:1/directory", AutocertDirCache.new("#{dir}/cache"), [name])
+  manager.add_challenge(name, "tok-alpn", authorization)
+  listener = IyiSocket.listen("127.0.0.1", 0)
+  File.write("#{dir}/alpn.txt", "#{name} #{authorization}\n")
+  File.write("#{dir}/port", listener.local_port.to_s)
+  Server.serve(listener, tls: manager.tls_config) { |r| Response.new(200, "not a challenge") }
+end
+
+# A listener on *port*. A second server binds the ports the first one
+# let go of, and where the system may hold them a while after - Windows
+# can, under the SO_EXCLUSIVEADDRUSE std/socket sets there, while the old
+# listener's connections sit in TIME_WAIT - the bind is tried again,
+# every half second for a minute.
+def listen_again(port : Int32) : IyiSocket
+  tries = 0
+  while true
+    bound = nil.as(IyiSocket?)
+    why = ""
+    group do |g|
+      task = g.spawn { IyiSocket.listen("127.0.0.1", port) }
+      got = task.value
+      if got.is_a?(IyiSocket)
+        bound = got
+      else
+        why = got.message
+      end
+      0
+    end
+    if done = bound
+      return done
+    end
+    tries = tries + 1
+    raise "the port #{port} was not bound in a minute: #{why}" if tries >= 120
+    sleep(500)
+  end
+  raise "unreachable"
+end
+
+def serve(args : Array(String)) : Nil
+  directory, minica, cache_dir, tls_port, http_port, hosts, challenges, ready = args[1], args[2], args[3], args[4].to_i, args[5].to_i, args[6], args[7], args[8]
+  trust = TlsConfig.new
+  trust.roots = Certificate.from_pem(File.read(minica)).or_panic
+  trust.alpn = ["http/1.1"]
+  HTTP.tls_config = trust
+  manager = AutocertManager.new(directory, AutocertDirCache.new(cache_dir), hosts.split(","))
+  manager.accept_terms = true
+  manager.email = "autocert@iyi-autocert.example"
+  manager.challenges = challenges.split(",")
+  config = manager.tls_config
+  config.min_version = TlsVersion::TLS12
+  tls_listener = listen_again(tls_port)
+  http_listener = listen_again(http_port)
+  File.write(ready, "ready\n")
+  puts "listening on #{tls_port} and #{http_port}"
+  group do |g|
+    g.spawn do
+      manager.run
+      0
+    end
+    g.spawn do
+      Server.serve(http_listener) { |r| manager.answer(r) || Response.new(404, "not a challenge") }
+      0
+    end
+    Server.serve(tls_listener, tls: config) { |r| Response.new(200, "orders #{manager.orders} renewals #{manager.renewals}\n") }
+    0
+  end
+end
+
+args = Program.args
+if args.size > 1 && args[0] == "challenge-serve"
+  challenge_serve(args[1])
+  exit 0
+end
+if args.size > 8 && args[0] == "serve"
+  serve(args)
+  exit 0
+end
+dir = args.size > 0 ? args[0] : "#{Dir.tempdir}/iyi-autocert-#{Random::Secure.random_bytes(6).map { |x| (x < 16_u8 ? "0" : "") + x.to_s(16) }.join("")}"
+local_checks(dir)
+puts "\nALL CHECKS PASSED"

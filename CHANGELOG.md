@@ -44,6 +44,61 @@
   read, a DoH ID not 0, and an `HTTPClient`'s own TLS configuration or
   resolver ignored.
 
+- **std/autocert: an HTTPS server that gets and renews its own
+  certificates, Go's autocert over std/acme.** `AutocertManager.new(directory,
+  cache, hosts)`'s `tls_config` is a std/tls server config that asks the
+  manager for each handshake's certificate by server_name: the first
+  handshake for a name with none held takes one from the cache, or orders
+  one (a P-256 key, one name) while it waits. Names outside `hosts` - or
+  `host_policy`, which replaces the list - are refused (unrecognized_name)
+  before the cache or the CA is asked, each compared as server_name
+  carries it: A-labels, no trailing dot, lower case. Handshakes for a name
+  whose order is running wait for it (`wait_ms`, a minute unless set)
+  instead of placing their own; a failed order is remembered and its name
+  refused at once for `retry_ms`, doubling to an hour. tls-alpn-01 is
+  answered by the same listener - `acme-tls/1` is added to its protocols
+  and a client offering it alone is shown the challenge certificate while
+  the order runs, a client offering anything beside it never is - and
+  http-01 on port 80 by `answer(request)`, tried in `challenges`' order,
+  a fresh order for the next when one's authorization fails. `run`, in a
+  task of the caller's group until `stop`, renews each certificate held
+  `renew_before` (thirty days) before its end, or two thirds into a life no
+  longer than that, under a new key, swaps it in for the handshakes after,
+  and retries a failure after `retry_ms`, doubling. The cache is a trait
+  (`AutocertCache`: get, put, delete); `AutocertDirCache` keeps the
+  account key under `acme_account+key` and each name's key and chain as
+  PEM under the name, in a directory made 0700, each entry written to a
+  file created 0600 and renamed over the old. Not done: ACME Renewal
+  Information, renewal jitter, RSA certificates beside ECDSA ones,
+  external account binding, deactivating authorizations a failed order
+  left pending, revocation, dns-01 and wildcards, several names on one
+  certificate. `bench/std_autocert_exercise.sh` holds it to Python's
+  `ssl` and `cryptography` and, where Go is there to build it, to two of
+  Let's Encrypt's Pebbles: a chain verified to Pebble's root in TLS 1.3
+  and 1.2, tls-alpn-01 answered with no http-01 fetch in Pebble's log; a
+  disallowed name refused with no newOrder in the log; ten first
+  handshakes at once verifying one certificate from one order; a name
+  Pebble blocks asked for once in three handshakes; a second process
+  showing the first's serials with no order; http-01 fetched from port
+  80; the cache's files 0600 and its keys read by `cryptography`; and from
+  a Pebble issuing for 24 seconds, the renewed serial seen 5.9 to 6.9
+  seconds before the first certificate ended, in five runs here, and in
+  the cache. Eight broken copies are caught by name - the host policy
+  ignored, no single flight, the cache not read, renewal never scheduled,
+  the challenge certificate shown beside other protocols, a key written
+  0644, and std/tls's identity source left unasked in 1.3 and in 1.2;
+  where Pebble is not running, the four whose checks order from it say
+  so. The gate took 1m55s here.
+- **std/tls: `TlsServerConfig#identity_source`, the identity chosen per
+  ClientHello by the program.** A proc given the client's server_name and
+  ALPN offer, asked first in TLS 1.3 and 1.2, that answers the identity to
+  show, nil for the config's own choice (`others` by name, then
+  `identity`), or a `TlsError` that refuses the handshake with its alert.
+  An identity it answers is held to the client's schemes, and in 1.2 to
+  its suites and curves, as `others` are; a resumption shows none, its
+  ticket counting the session as `identity`'s. It is how std/autocert
+  shows tls-alpn-01's certificate beside the certificates it serves on
+  one listener, which std/acme's header said std/tls could not do.
 - **std/acme: an ACME client (RFC 8555), so an iyi server gets its own
   certificate.** `AcmeClient.new(directory, key)` reads the directory;
   every request after it is a JWS in the flattened JSON serialization,

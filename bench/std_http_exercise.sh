@@ -790,8 +790,8 @@ echo "== TLS resumption: an HTTPClient's tickets (bench/std_http_resume.iyi)"
 # that do not reach the server it is refused, where a ticket would have
 # skipped the check. The limits: four tickets an origin by default of the
 # eight a server sends, two when asked, room for two origins at two each,
-# and none when none are kept. No early data: s_server takes 0-RTT under
-# -early_data and its tickets allow it, but no ClientHello asks. Then
+# and none when none are kept. No early data: s_server's tickets allow
+# 16 KiB of it (-max_early_data), but no ClientHello asks. Then
 # copies of the module with the sessions kept under the origin alone (the
 # configuration ignored), a ticket offered to any origin, no session
 # handed to the handshake, early data sent, and each origin's limit and
@@ -824,21 +824,39 @@ fi
 # resume_run <binary> <self|s_server|both>: the binary's lines with no
 # arguments;
 # and its `s_server` lines against OpenSSL's server, then what that
-# server read: each ClientHello's extensions, from its -msg dump.
+# server read: each ClientHello's extensions, from its -msg dump. Only
+# flags OpenSSL 3.0 takes, as the Linux CI container's 3.0.13 does:
+# -early_data, which makes s_server read 0-RTT itself, is refused there
+# beside -www ("Can't use -early_data in combination with -www"), and
+# s_server exited before it listened; -max_early_data puts the allowance
+# in its tickets all the same, which is what a client would send under,
+# and 3.0 then turns the early data down and resumes. A server that never
+# listens is said so, its output with it - "s_server never listened" -
+# for the caller to skip by, not to pass.
 resume_run() {
-  local bin="$1" which="$2" port pid log="$WORK/resume-s_server.log"
+  local bin="$1" which="$2" port pid log="$WORK/resume-s_server.log" listening=no
   if [ "$which" != s_server ]; then
     timeout 60 "$bin" 2>&1
   fi
   [ "$which" != self ] && [ "$resume_openssl" = yes ] || return 0
   port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-  "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -msg -tls1_3 -early_data -cert "$WORK/tls/leaf.pem" -key "$WORK/tls/leaf.key" \
+  "$OPENSSL" s_server -accept "127.0.0.1:$port" -www -msg -tls1_3 -max_early_data 16384 -cert "$WORK/tls/leaf.pem" -key "$WORK/tls/leaf.key" \
     >"$log" 2>&1 </dev/null &
   pid=$!
-  for _ in $(seq 1 50); do
-    grep -q ACCEPT "$log" && break
+  for _ in $(seq 1 100); do
+    if grep -q ACCEPT "$log"; then
+      listening=yes
+      break
+    fi
+    kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
   done
+  if [ "$listening" = no ]; then
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    echo "s_server never listened: $("$OPENSSL" version 2>&1 | head -1); it said: $(head -5 "$log" | tr '\n' ' ')"
+    return 0
+  fi
   timeout 60 "$bin" s_server "$port" "$WORK/tls/root.pem" 2>&1
   kill "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null
@@ -886,11 +904,18 @@ elif ! "$IYI" build -o "$WORK/resume" "$REPO/bench/std_http_resume.iyi" >"$WORK/
   status=1
 else
   said=$(resume_run "$WORK/resume" both)
+  unasked="no OpenSSL here (LibreSSL is not it) with python3, or Windows, whose s_server this gate does not drive"
+  if [ "$resume_openssl" = yes ] && printf '%s\n' "$said" | grep -q '^s_server never listened'; then
+    # Said, and skipped: what OpenSSL refused is in its own words.
+    unasked="$(printf '%s\n' "$said" | grep -m1 '^s_server never listened')"
+    said="$(printf '%s\n' "$said" | grep -v '^s_server never listened')"
+    resume_openssl=no
+  fi
   servers="$(printf '%s\n' "$said" | grep '^s_server')"
   if printf '%s\n' "$said" | grep -qx 'ALL CHECKS PASSED' && ! printf '%s\n' "$said" | grep -q '^FAIL' &&
      { [ "$resume_openssl" != yes ] || [ "$servers" = "$RESUME_SSERVER" ]; }; then
     printf '%s\n' "$said" | sed 's/^/  /'
-    [ "$resume_openssl" = yes ] || echo "  no OpenSSL (LibreSSL is not it) with python3 here, or Windows, whose s_server this gate does not drive: s_server goes unasked, and so does the check that no early data is sent"
+    [ "$resume_openssl" = yes ] || echo "  $unasked: s_server goes unasked, and so does the check that no early data is sent"
   else
     echo "  the client's resumption is not the expected one:"
     printf '%s\n' "$said" | sed 's/^/    got:  /'

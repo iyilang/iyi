@@ -853,6 +853,32 @@
 
 ### Fixed
 
+- **A rebuild that writes and reads artifacts links when a
+  `derive serializable` type lives in a module importing a package
+  (#134).** The second `iyi build --emit-iyimod mods --use-iyimod mods`
+  ended on an undefined `*Lib::Thing::Item#to_json<Std::Json::Builder>:Nil`
+  (LNK2019 on Windows), referenced from `std/json`'s artifact. A def with
+  an untyped parameter, `std/json`'s `write_or_null(val, b : Builder)`,
+  travelled as a header, so the first build's instantiation at `Item`
+  went into `std/json`'s object code and called `Item#to_json` from
+  there; the package has no artifact, so the second build compiled
+  `lib/thing` from source, and nothing in it called `to_json`. Such a def
+  is now the caller's to compile, as a `forall` def is: its body travels,
+  the producer compiles each instantiation into the unit that called it,
+  and `std/json`'s object code names no `Item`. A parameter written as a
+  trait, a module or a class with subclasses is the same edge with a
+  bound: `kit/lib`'s `area_of(x : Shape)` called at `lib/thing`'s `Tri`
+  left `Lib::Thing::Tri#area` undefined in a later program that no longer
+  called it, and its instantiations are now the caller's too. Asked of the
+  def as written, so a record's `new(kind: …)`, whose named-argument
+  expansion has untyped parameters, keeps its symbol; `iyi bind`'s fill
+  build keeps the old answer, since a boundary declares such a parameter
+  at the type its keep file passes. SPEC.md IV.1g records the choice, and
+  the case it leaves to III.6: a value held as a trait, whose dispatch
+  names every implementor the producing build had. The `untyped` and
+  `bounded` cases of `bench/samples_roundtrip.sh` build the two layouts
+  twice each; the old compiler's second build failed to link in both.
+
 - **`bench/std_tls_exercise.sh` no longer times Python's first
   certificate check on a Windows runner against the server's handshake
   deadline.** The first Python ssl handshake against the Ed25519 server

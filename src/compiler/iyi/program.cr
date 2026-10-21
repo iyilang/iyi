@@ -379,6 +379,15 @@ module Iyi
     # unless `--emit-iyimod` asked for artifacts.
     getter iyi_exported_owners = Set(Type).new
 
+    # iyi: true when the owners above are a `--iyi-keep` namespace, the fill
+    # build `iyi bind` runs. A boundary's declarations write every parameter
+    # at the type the keep file instantiates it at, so a parameter the shard
+    # left untyped or wrote as a trait has one symbol and the producer
+    # defines it; an `--emit-iyimod` artifact writes the parameter as it was
+    # written, and the instantiations are the caller's
+    # (`IyiMod.untyped_parameter?`, `IyiMod.open_parameter?`).
+    property? iyi_fills_boundary = false
+
     # iyi: true when this program was built against iyi's own prelude.
     #
     # `require` is refused in a `.iyi` file because there is no standard

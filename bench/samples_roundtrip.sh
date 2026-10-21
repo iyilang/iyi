@@ -789,5 +789,128 @@ else
   done
 fi
 
+# And a def with an untyped parameter, which is a `forall` nobody named:
+# its instantiations are the caller's (SPEC.md IV.1g, issue #134). The
+# layout is the issue's: `lib/thing` derives `serializable` and imports a
+# package, so it has no artifact to be read from and every build compiles
+# it from source, while `std/json` beside it is read from its artifact.
+# Built twice, each build writing and reading the same directory, the way
+# an incremental loop runs. `std/json`'s `write_or_null(val, b : Builder)`
+# stayed behind as a header and its instantiation at `Item` went into
+# `std/json`'s `JSON` unit, which called `Item#to_json`: the second build
+# linked that unit, compiled `lib/thing` from source with nothing of its
+# own calling `to_json`, and the link ended on
+# `*Lib::Thing::Item#to_json<Std::Json::Builder>:Nil`.
+PKG="$WORK/untyped"
+mkdir -p "$PKG/pkg" "$PKG/lib"
+printf 'module art2\n\nrequire example.com/pkg v0.1.0\n\nreplace example.com/pkg => ./pkg\n' > "$PKG/iyi.mod"
+printf 'module example.com/pkg\n' > "$PKG/pkg/iyi.mod"
+printf 'module pkg\n\npub def label : String\n  "item"\nend\n' > "$PKG/pkg/pkg.iyi"
+cat > "$PKG/lib/thing.iyi" <<'IYI'
+module lib/thing
+
+import std/json::{JSON, serializable}
+import example.com/pkg
+
+pub struct Item
+  getter name : String
+
+  derive serializable
+
+  def initialize
+    @name = Pkg.label
+  end
+end
+IYI
+cat > "$PKG/lib/render.iyi" <<'IYI'
+module lib/render
+
+import std/json::{JSON}
+import lib/thing::{Item}
+
+pub def render : String
+  JSON.to_json([Item.new])
+end
+IYI
+printf 'module main\n\nimport lib/render::{render}\n\nputs render\n' > "$PKG/main.iyi"
+untyped_ok=1
+for build in first second; do
+  if ! (cd "$PKG" && "$IYI" build --emit-iyimod mods --use-iyimod mods -o "$build" main.iyi) > "$PKG/$build.log" 2>&1; then
+    echo "untyped: the $build build writing and reading artifacts failed"
+    grep -m3 -E "error|Error|undefined" "$PKG/$build.log"
+    untyped_ok=0
+  elif [ "$("$PKG/$build" 2>&1 | tr -d '\r')" != '[{"name":"item"}]' ]; then
+    echo "untyped: the $build build printed '$("$PKG/$build" 2>&1)'"
+    untyped_ok=0
+  fi
+done
+if [ "$untyped_ok" = 1 ]; then
+  echo "untyped: a serializable type in a module importing a package builds twice from std/json's artifact"
+else
+  status=1
+fi
+
+# And a parameter written as a trait, which is a bounded `forall` nobody
+# named. `kit/lib`'s `area_of(x : Shape)` called at `lib/thing`'s `Tri`
+# put `area_of<Lib::Thing::Tri>` in `kit/lib`'s unit, calling `Tri#area`.
+# The next program, in the same directory, imports both and no longer calls
+# `area_of`: `kit/lib` is read from its artifact, `lib/thing` is compiled
+# from source, nothing compiles `Tri#area`, and the link ended on
+# `*Lib::Thing::Tri#area:Int32`.
+BOUND="$WORK/bounded"
+mkdir -p "$BOUND/kit" "$BOUND/lib"
+cp -r "$PKG/iyi.mod" "$PKG/pkg" "$BOUND/"
+cat > "$BOUND/kit/lib.iyi" <<'IYI'
+module kit/lib
+
+pub trait Shape
+  abstract def area : Int32
+end
+
+pub def area_of(x : Shape) : Int32
+  x.area + 1
+end
+IYI
+cat > "$BOUND/lib/thing.iyi" <<'IYI'
+module lib/thing
+
+import kit/lib::{Shape}
+import example.com/pkg
+
+pub struct Tri
+  getter name : String
+
+  def initialize
+    @name = Pkg.label
+  end
+end
+
+impl Shape for Tri
+  def area : Int32
+    @name.size
+  end
+end
+IYI
+printf 'module main\n\nimport kit/lib::{area_of}\nimport lib/thing::{Tri}\n\nputs area_of(Tri.new)\n' > "$BOUND/first.iyi"
+printf 'module main\n\nimport kit/lib::{area_of}\nimport lib/thing::{Tri}\n\nputs Tri.new.name\n' > "$BOUND/second.iyi"
+bounded_ok=1
+for build in first second; do
+  expected=5
+  [ "$build" = second ] && expected=item
+  if ! (cd "$BOUND" && "$IYI" build --emit-iyimod mods --use-iyimod mods -o "$build" "$build.iyi") > "$BOUND/$build.log" 2>&1; then
+    echo "bounded: the $build program writing and reading artifacts failed"
+    grep -m3 -E "error|Error|undefined" "$BOUND/$build.log"
+    bounded_ok=0
+  elif [ "$("$BOUND/$build" 2>&1 | tr -d '\r')" != "$expected" ]; then
+    echo "bounded: the $build program printed '$("$BOUND/$build" 2>&1)'"
+    bounded_ok=0
+  fi
+done
+if [ "$bounded_ok" = 1 ]; then
+  echo "bounded: a trait-typed parameter's instantiation at another module's type stays out of kit/lib's artifact"
+else
+  status=1
+fi
+
 echo "workdir $WORK"
 exit $status

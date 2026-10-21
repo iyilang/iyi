@@ -23787,7 +23787,7 @@ the same flags.
 
 - **`samples/iyi/calc`: a language, in the language.** Three modules — a
   scanner, a parser and an evaluator — reading a program from standard input,
-  written against iyi's own 22,456-line library and nothing else. Every other
+  written against iyi's own 22,509-line library and nothing else. Every other
   sample is a page long, and a language that has only been used for pages has
   not been used.
 

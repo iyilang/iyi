@@ -43,7 +43,6 @@
   exchange, an idle connection kept, a DoH status or `Content-Type` not
   read, a DoH ID not 0, and an `HTTPClient`'s own TLS configuration or
   resolver ignored.
-
 - **std/autocert: an HTTPS server that gets and renews its own
   certificates, Go's autocert over std/acme.** `AutocertManager.new(directory,
   cache, hosts)`'s `tls_config` is a std/tls server config that asks the
@@ -201,7 +200,6 @@
   but one (no nextUpdate, three days old); every response read field by
   field as Python's `load_der_ocsp_response` reads it, 8 refused here
   that Python reads, each named; and 32 broken copies caught by name.
-
 - **std/tls staples OCSP responses, both ends (RFC 6066, RFC 8446
   section 4.4.2.1, RFC 7633).** Every ClientHello asks for a staple
   (status_request, 9 bytes: 197 and 1,419 bytes now as OpenSSL 3.5's
@@ -224,7 +222,6 @@
   the scripted server's four broken staples; and 18 more broken copies.
   The scripted server's cert-entry-ext scenario sends an SCT, since a
   status_request entry is now one asked for.
-
 - **Tasks run across cores: `g.spawn_parallel { }` starts a task on a
   pool of worker threads (SPEC.md III.4.13).** The pool starts at the
   first parallel spawn with as many workers as the cores the process may

@@ -64,8 +64,8 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 22,509 lines, of which 4,634 are the library held to the 4,650 ceiling (6,647 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 127,376 lines, none of it written in iyi |
-| artifact format | `.iyimod` v56, checksum per section |
+| compiler | 127,610 lines, none of it written in iyi |
+| artifact format | `.iyimod` v57, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
 
@@ -1028,9 +1028,9 @@ Checking it moved two things and left the shape alone.
 
 | | Crystal 0.1.0 (2014-06-18) | iyi today |
 |---|---|---|
-| Compiler | 24,984 lines, **written in Crystal** | 127,376 lines, Crystal, forked |
+| Compiler | 24,984 lines, **written in Crystal** | 127,610 lines, Crystal, forked |
 | Library | 8,161 lines (3,551 of it core) | 22,509-line own prelude + 121,112 in std |
-| Specs | 21,146 lines | 14,895 for iyi |
+| Specs | 21,146 lines | 15,029 for iyi |
 | Samples | 24 **programs** | 8 **explanations**, a first half hour, and `calc`, a language |
 | History | 3,165 commits over 21 months | 266 |
 | Own status line | *"pre-alpha: we are still designing the language"* | design largely settled, 0.2.0 released, a language written in it |
@@ -4813,7 +4813,34 @@ The decisions:
    packages that each have a `util` have `Pa::Util` and `Pb::Util` rather
    than one type both define. A module whose path already begins with the
    name - `iyi_web/dsl` in `iyi-web` - is where it was, and inside the
-   package `Colors` still means its own, by lexical lookup.
+   package `Colors` still means its own, by lexical lookup. **The name is
+   the same in the package's own build** (#132): a program whose root
+   holds an `iyi.mod` is that package, and its own modules - the files at
+   `<root>/<module path>.iyi` - live under the name too. `codec.iyi` of
+   `github.com/x/iyi-web` was `::Codec` built there and `::IyiWeb::Codec`
+   built in a consumer, and a `pub macro`, which expands in the caller's
+   file and so has to name a module absolutely, had no spelling that
+   built in both. The other answer the issue offered - a macro's absolute
+   paths resolved against the package that defined it - was not taken: it
+   keeps two names for one module and moves the second one into a rule
+   about where text was written, which a reader of `::Codec` cannot see.
+   One function (`Parser.iyi_package_segments`) forms the name in both
+   builds, from the manifest's path and the in-package path, so the
+   layouts agree by construction: `codec` and `iyi_web/codec` are
+   `IyiWeb::Codec`, `web/codec` is `IyiWeb::Web::Codec`, and the package
+   `example.test/x/web` checked out in any directory is `Web::Codec`. An
+   artifact records the name it was written under (`.iyimod` v57), so
+   `--use-iyimod` reads it back the same, and a manifest that renames the
+   package makes it stale. The old name compiled, so it still does where
+   it did - in the package's own build, a `::Codec` or a bare `Codec`
+   nothing else answers resolves to `IyiWeb::Codec` - with a warning that
+   names the new spelling, in the package's build, before a consumer
+   meets the refusal; `iyi fix` makes the edit where a file writes it,
+   and a macro's warning names the macro and the line it is defined on.
+   What changes without a warning is what a type's name prints:
+   `IyiWeb::Codec` in both builds. One consequence is the package rule's
+   own, now in both builds: a package holding `codec.iyi` and
+   `iyi_web/codec.iyi` names both `IyiWeb::Codec`.
 2. **A package's short imports resolve in its own checkout, or fail.** Not
    passed along to the program's roots: a dependency reaching the
    consumer's modules through a name collision is the accident isolation

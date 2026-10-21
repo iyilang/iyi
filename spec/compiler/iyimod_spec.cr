@@ -193,6 +193,21 @@ describe Iyi::IyiMod do
     end
   end
 
+  # A package's own build names its modules under the package's name, and
+  # `module app/greeter` alone does not say so (SPEC.md III.7, #132).
+  it "round-trips the package name the module's types live under" do
+    with_temporary_file do |path|
+      artifact = sample_artifact
+      Iyi::IyiMod.write artifact, path
+      Iyi::IyiMod.read(path).package_name.should eq ""
+      Iyi::IyiMod.read_summary(path).package_name.should eq ""
+      artifact.package_name = "iyi_web"
+      Iyi::IyiMod.write artifact, path
+      Iyi::IyiMod.read(path).package_name.should eq "iyi_web"
+      Iyi::IyiMod.read_summary(path).package_name.should eq "iyi_web"
+    end
+  end
+
   # Atomic replacement is the property IV.1 picks a single-file container for:
   # a half-written artifact that a later build reads as valid is the worst
   # failure a cache has, because it is wrong and nothing about it looks broken.

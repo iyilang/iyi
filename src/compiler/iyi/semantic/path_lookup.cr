@@ -33,9 +33,20 @@ module Iyi
     #
     # If the path is global (for example ::Foo::Bar), the search starts at
     # the top level.
+    #
+    # iyi: a path that reaches the root for a module of the program's own
+    # package by the name it had before it lived under the package's name
+    # is answered from there, and warned about here, where the path's
+    # location is (`Program#iyi_moved_package_item`).
     def lookup_path(path : Path, lookup_in_namespace = true, include_private = false, location = path.location) : Type | ASTNode | Nil
       location = nil if path.global?
-      (path.global? ? program : self).lookup_path(path.names, lookup_in_namespace, include_private, location)
+      program.iyi_moved_package_hit = false
+      found = (path.global? ? program : self).lookup_path(path.names, lookup_in_namespace, include_private, location)
+      if found && program.iyi_moved_package_hit
+        program.iyi_moved_package_hit = false
+        program.iyi_warn_moved_package_path(path)
+      end
+      found
     end
 
     # :ditto:
@@ -222,8 +233,57 @@ module Iyi
         return item
       end
 
-      super
+      super || iyi_moved_package_item(name)
     end
+
+    # iyi: *name* at the root, where a module of the program's own package
+    # was before the package's own build named it as a consumer's does
+    # (`iyi_root_package`, SPEC.md III.7): `Codec` of `codec.iyi` in
+    # `iyi-web` is `IyiWeb::Codec` in both builds now. The old spelling
+    # compiled, in this build only, so it still resolves - here, at the
+    # root, where a lookup that would have found it then arrives - and
+    # `Type#lookup_path` warns where it is written. Nil for every other
+    # name, at one set lookup.
+    private def iyi_moved_package_item(name : String) : Type?
+      return nil unless @iyi_moved_package_heads.includes?(name)
+      return nil unless package = iyi_root_package_name
+      found = types[package.camelcase]?.try(&.types?.try(&.[name]?))
+      @iyi_moved_package_hit = true if found
+      found
+    end
+
+    # Whether a lookup since the flag was cleared answered from
+    # `iyi_moved_package_item`.
+    property iyi_moved_package_hit = false
+
+    # The warning for *path*, which reached a module of the program's own
+    # package by its old name: once where it is written, with the edit `iyi
+    # fix` makes - a `pub macro` that writes it fails in every consumer,
+    # and its author hears it from their own build first.
+    def iyi_warn_moved_package_path(path : Path) : Nil
+      return unless (location = path.location) && (package = iyi_root_package_name)
+      return unless @iyi_moved_package_warned.add?({location.filename.to_s, location.line_number, location.column_number})
+
+      prefix = package.camelcase
+      first = path.names.first
+      lead = path.global? ? "::" : ""
+      written = "#{lead}#{path.names.join("::")}"
+      named = "#{lead}#{prefix}::#{path.names.join("::")}"
+      message = "`#{written}` is `#{named}`: the package's own modules live under its name in its own " \
+                "build, as they do in a consumer's (SPEC.md III.7). The old spelling still resolves here " \
+                "and nowhere else - a build that requires this package has no `#{lead}#{first}` - so write `#{named}`"
+      if (file = location.filename).is_a?(VirtualFile) && (defined = file.macro.location)
+        message += ". It is written in macro `#{file.macro.name}`, defined at " \
+                   "#{Iyi.relative_filename(defined.filename.to_s)}:#{defined.line_number}, which is where the edit goes"
+      else
+        message += "; `iyi fix` makes the edit"
+      end
+      report = TypeException.for_node(path, message, suggestion: "#{lead}#{prefix}::#{first}", size: lead.size + first.size)
+      report.warning = true
+      warnings.add_report(report, location)
+    end
+
+    @iyi_moved_package_warned = Set({String, Int32, Int32}).new
   end
 
   module GenericType

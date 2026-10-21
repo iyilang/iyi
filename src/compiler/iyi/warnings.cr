@@ -64,6 +64,15 @@ module Iyi
       @reports << report
     end
 
+    # A warning built by its raise site, which carries more than a node and
+    # a message: an edit (`TypeException#suggestion`) for `iyi fix`.
+    def add_report(report : CodeError, location : Location?)
+      return unless @level.all?
+      return if ignore_warning_due_to_location?(location)
+
+      @reports << report
+    end
+
     def report(io : IO)
       unless @reports.empty?
         @reports.each do |report|

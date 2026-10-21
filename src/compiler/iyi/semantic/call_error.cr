@@ -64,11 +64,14 @@ class Iyi::Path
     # iyi: a package module reached by the name it had before 0.15.2, when
     # a package's modules stopped sharing one namespace: `Colors` of
     # `example.com/liba/colors` is `Liba::Colors` now. The first segment is
-    # the edit, so `iyi fix` moves a program across.
-    if !global? && (moved = iyi_package_module_name(type.program, names.first))
-      self.raise("undefined constant #{self}\n`#{names.first}` is `#{moved}`: a package's modules live under " \
+    # the edit, so `iyi fix` moves a program across. `::Colors` too: a
+    # package's `pub macro` that names its module absolutely, built in a
+    # consumer, is where that spelling meets this.
+    if moved = iyi_package_module_name(type.program, names.first)
+      lead = global? ? "::" : ""
+      self.raise("undefined constant #{self}\n`#{lead}#{names.first}` is `#{lead}#{moved}`: a package's modules live under " \
                  "the package's name, so two packages' modules of one name are two modules (SPEC.md III.7). " \
-                 "Did you mean '#{moved}'?", suggestion: moved, size: names.first.size)
+                 "Did you mean '#{lead}#{moved}'?", suggestion: "#{lead}#{moved}", size: lead.size + names.first.size)
     end
 
     # iyi: the name is usually not missing, it is out of reach - a type a

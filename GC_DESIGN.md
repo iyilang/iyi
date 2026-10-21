@@ -759,6 +759,32 @@ also what makes a hand-freed chunk safe from the sweep of its own
 epoch; and the sweep's own loop tests the parity first, two tests for
 a dead chunk where it was three.
 
+That covers a chunk freed in its own epoch, and not one the last mark
+kept and the program freed before the lazy sweep of its arena reached
+it: such a chunk wears the last epoch's parity, and a slice walking past
+it reads its entry, then its colour, and writes the entry back. A free
+between the two reads left it looking allocated before the mark and
+white, dead, and the slice linked it into its batch while it sat on the
+freeing thread's list, handed out twice; a free between the read and
+the write lost its free flag to the survivor's restamp. Windows' CI
+printed a kept chunk lost and then a memory fault. `free` reads the
+entry's parity now, without the lock - a slice restamping it beside the
+read has passed the chunk - and a chunk of the last parity is listed
+under the lock with no slice of its arena in flight, a claim standing
+waited out off the lock (`IyiHeap.free_unswept`); a chunk of the
+current parity takes the cache's path as before, an alloc+free pair 3.4
+ns before the look and 3.5 after, release. Under a mark there is none of
+the last parity: the debt is paid before the first stop and the epoch
+turns at the last. `bench/concurrent_mark.sh`'s bursts of frees free 64
+chunks the mark kept as soon as a slice of their arena is in flight: on
+four cores beside two busy loops the plain build faulted in 4 runs of
+1,000 and the release build in 108, and none of either after. The window
+is a few instructions, so the gate also runs the program on a copy of
+the prelude whose slice waits up to 100 us at each kept chunk of a
+kilobyte or more and exits by name if the entry changes under it; with
+the old free put back that copy failed by name in 200 runs of 200, plain
+and release alike.
+
 Two more levers on that garbage were tried in the second cycle and
 are not in the tree. A prefetch of a shaded object's line at its push:
 a million-node tree marked in 14.2 ms alone against 14.5 with it, the

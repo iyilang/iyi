@@ -341,6 +341,55 @@
 
 ### Changed
 
+- **`IyiSocket.connect` races a name's addresses: Happy Eyeballs v2
+  (RFC 8305).** A name with more than one address was tried one address
+  after another, IPv4 first, each with the whole timeout, so a host whose
+  first address dropped SYNs cost all of `timeout_ms` - or the kernel's
+  two minutes of retries, unbounded - before its second was tried. Now
+  the first address is tried, the next 250 ms later (section 5's
+  recommended Connection Attempt Delay) without waiting for the first to
+  fail, or at once when an attempt fails; the first handshake to finish
+  wins, and every other attempt is cancelled and its socket closed before
+  `connect` answers. The order is `IyiSocket.attempt_order`'s (section
+  4): IPv6 first when the machine has a route to the name's first IPv6
+  address, asked by connecting a UDP socket, which sends nothing, and the
+  families alternating. Each attempt is a task in a group the caller
+  opens, so a cancelled caller cancels every attempt. `timeout_ms` bounds
+  the whole connect now, not each address's handshake, and a connect
+  that fails at every address is one `SocketError` naming each address
+  in the order tried and how its attempt ended (`SocketError#tried`):
+  `cannot connect to example.com:443: [2001:db8::1]:443 timed out;
+  192.0.2.1:443 connection refused`, where it answered the first
+  address's failure alone. `localhost` is raced the same way, 127.0.0.1
+  first, which replaces the retry at ::1 after a refusal: Windows, which
+  takes 2 s to refuse a connect, reached a ::1-only listener in 2017 ms
+  that way. A name with one address, and an address, connect as they
+  did. A and AAAA are still asked one after the other: section 3's
+  parallel queries would save the AAAA round trip, 5 to 65 ms uncached
+  here, and are left out (std/socket's `Resolver` says why). std/http,
+  std/websocket, std/smtp and std/tls connect through it and assumed no
+  order. `bench/std_dns_exercise.sh` holds it, plain and release, with a
+  hosts-file resolver and loopback listeners: a name whose first address
+  is a listener with a full backlog connected through its second,
+  127.0.0.1, in 250 ms under a 5,000 ms bound; ::1 is taken before
+  127.0.0.1; every address refused is one error naming both in order;
+  twenty races at once leave /proc/self/fd's count where it was; a
+  400 ms bound ends in 401 ms with two attempts timed out and the third
+  address never tried; a caller cancelled 600 ms in answers `Cancelled`
+  in 601 ms with every attempt's socket closed. Broken copies are caught
+  by name: the attempt delay an hour (5,006 ms), the delay ignored
+  (1 ms), a losing attempt's socket left open (16 descriptors before, 36
+  after), the error naming the last address alone, IPv4 first whatever
+  the routes say, and a refusal that waits for the delay to start the
+  next address (250 ms). `bench/socket_exercise.sh` adds `localhost`
+  refused at both addresses, and `localhost` raced ::1 first; on Windows
+  it also holds a ::1-only listener to under 1,500 ms through
+  `localhost`, and proves it with the delay an hour. A section that needs
+  IPv6, or a backlog that fills, says it was skipped where the machine
+  has neither.
+  The race costs a task: a loopback connect, accept and close took
+  19.3 us through `localhost` and 16.2 us to 127.0.0.1, which is not
+  raced (best of eight rounds of 1,000, release).
 - **Faster pure-iyi cryptography, constant time kept.** Measured with
   `--release` on one x86_64 QEMU machine (AES-NI, no carry-less multiply)
   that other jobs shared, the best of five, set beside Python's

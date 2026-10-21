@@ -652,6 +652,7 @@ module Iyi
       type = program.types?.try &.[]?(root)
       return unless type.is_a?(ModuleType)
 
+      program.iyi_fills_boundary = true
       program.iyi_exported_owners << type
       collect_iyi_owners type, program.iyi_exported_owners
     end
@@ -2580,7 +2581,11 @@ module Iyi
     # def's already does: the consumer compiles it at the types it asked for,
     # and there is no symbol to miss. The producer's own narrow instantiation
     # stays in the object code for its own callers; the two have different
-    # names and do not collide.
+    # names and do not collide. Where the parameter admits a type it does not
+    # name — a trait, a class with subclasses — that instantiation is private
+    # to the unit that called it instead (`IyiMod.open_parameter?`), because
+    # the type may be another module's and the module's own unit would then
+    # call into code nothing ties it to (issue #134).
     #
     # Three places the declaration can be wider than what this build
     # compiled, and a symbol carries all three:

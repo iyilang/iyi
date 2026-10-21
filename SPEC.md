@@ -7240,6 +7240,88 @@ Both belong to IV.1g's rule rather than beside it: "a module's own code is the
 object files named after the types it declares" is what makes them missing, and
 what makes the type ids above missing was the same sentence.
 
+**A parameter with no type is a `forall` nobody named, so its instantiations
+are the caller's too** (issue #134). A program whose `lib/thing` derives
+`serializable` and imports a package, built twice with `--emit-iyimod mods
+--use-iyimod mods`, linked the first time and the second time ended on an
+undefined `*Lib::Thing::Item#to_json<Std::Json::Builder>:Nil`, referenced from
+`std/json`'s `JSON` unit. `nm` on that unit, unpacked from the artifact: it
+defined `write_or_null<Lib::Thing::Item, Std::Json::Builder>` and
+`write_value<Lib::Thing::Item, Std::Json::Builder>`, and named `Item#to_json`
+undefined. `write_or_null(val, b : Builder)` writes no type for `val`, so it
+travelled as a header and the first build's instantiations at its own types
+went into `std/json`'s unit as global symbols. The package has no artifact, so
+`lib/thing`'s was stale and the second build compiled it from source, and its
+`Item` unit held `new` and `initialize` and no `to_json`: the one caller was
+machine code that build did not compile.
+
+IV.3's staleness walk is why nothing saw it coming. An artifact is refused
+when anything it imports is, so `lib/render`'s object code, which also calls
+into `Item`, never links against a `lib/thing` compiled from source.
+`std/json` imports nothing of `lib/thing`'s, so nothing the walk reads says
+its object code points there: an instantiation at the caller's type is an
+edge running against the DAG. Three ways to close it, and the rule is the
+one IV.1g already gave `forall` and blocks:
+
+- *Record the outward references and rebuild `std/json` when their module
+  compiles from source.* That makes a library's artifact a fact about the
+  program that wrote it, stale in every program without a `lib/thing` — the
+  shape `forall` already ruled out, when `Lib::Box2::Box(Q4::Meters)` in a
+  library's type ids refused every other program at the import.
+- *Make the source build emit the callee.* It answers this link and not the
+  next program's, which has no `Item` at all; and a program serialising a type
+  the producer never saw was refused at the call already, because the
+  artifact "has no symbol" for `write_or_null` at that type.
+- *The caller instantiates.* **Built.** A def with an untyped parameter
+  carries its body in `MonoBodies`, the producer compiles each instantiation
+  into the unit that called it, private to that unit
+  (`IyiMod.untyped_parameter?`), and the consumer compiles its own. The
+  issue's program builds twice and prints `[{"name":"item"}]` both times, and
+  `std/json`'s `JSON` unit names no `Item` (`bench/samples_roundtrip.sh`,
+  `untyped`).
+
+The caller's unit is a safe home because the caller holds the value. Its type
+is named in the caller's own code or arrives through something it imports, so
+the caller's module reaches the type's module along imports, directly or not,
+and the walk refuses the caller's artifact whenever that module compiles from
+source. A caller that holds the value only as an untyped or `forall`
+parameter is itself the caller's, and the question moves up a frame.
+
+**A parameter written as a trait is the same edge with a bound on it.**
+`kit/lib`'s `area_of(x : Shape)`, called at `lib/thing`'s `Tri`, put
+`area_of<Lib::Thing::Tri>` in `kit/lib`'s unit; a second program in the same
+directory that imports both and no longer calls `area_of` ended its link on
+`*Lib::Thing::Tri#area:Int32`. Such a body already travelled, because a
+consumer keys its call on the declaration (`iyi_widened_parameters?`), and the
+producer's own instantiations stayed global for its own callers. Where the
+written type admits a type it does not name — a trait or module, a class
+with subclasses or its `.class`, a union holding one — they are now the
+caller's as well (`IyiMod.open_parameter?`; `bench/samples_roundtrip.sh`,
+`bounded`). A union of types it names admits nothing else and keeps its
+symbols where they were.
+
+What the caller's-unit argument does not reach is a value held *as* a trait:
+its dispatch enumerates every implementor the producing build had, wherever
+the code holding it is. `kit/lib`'s `total(xs : Array(Shape)) : Int32`,
+summing `x.area`, travelled as a header and its unit called
+`Lib::Thing::Tri#area` from the dispatch. Two programs laid out as above,
+the first calling `total` and the second not, ended the second link on that
+symbol with this rule as without it. That is III.6's open set, a
+whole-program answer whichever unit holds it, and it is left to that rule
+rather than answered here.
+
+Each is asked of the def as it was *written*. A call with named arguments
+instantiates an expansion the compiler wrote, whose parameters carry no
+restriction whatever the written ones said, and asking the expansion made a
+record's `new(kind: …)` the caller's: `webapp` from its artifacts was then
+refused on `FilterDefinition#initialize`. Neither applies in `iyi bind`'s
+fill build, whose boundary declares such a parameter at the type its keep
+file passes, so the producer's symbol is the one a consumer calls. And an
+impl's method keeps a trait-typed parameter's symbols in its module's unit:
+the top-level pass decides whether its body travels from the written text,
+before any type resolves, so one on a type its module declares travels as a
+header, and a consumer calls the symbol.
+
 **And one thing none of the five reaches, which was expected to be a missing
 object file and turned out to be a missing number.** A module's body
 instantiates prelude generics at its own types. The router's builds an

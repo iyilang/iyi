@@ -853,6 +853,44 @@
 
 ### Fixed
 
+- **`Math.max` and `Math.min` take two integers, of any width, and any
+  pair `<` compares; a call with a literal no longer reads the literal
+  where the call failed on another argument (#136).** They had a Float64
+  and a Float32 overload only, and `Math.max(2, x)` with `x : Int32` said
+  "ambiguous call, implicit cast of 2 matches all of Float64, Float32",
+  as did `Math.max(2, 5)`. Each is now one overload, `(a : T, b : T)`:
+  two doubles or two singles keep the old answers, the number when one
+  side is NaN and -0.0 below 0.0, and every other type compares with `<`
+  and answers the first argument on a tie, as the other library's
+  untyped `Math.max` does. An integer overload beside the float ones
+  would have tied with them wherever an integer variable can widen to a
+  double. `Math.max(2, page - 1)` is the Int32 2, `Math.max(2, 2.5)` the
+  Float64 2.5, and `Math.max(n, 0.5)` with `n : Int32` a Float64 as
+  before; `Math.max(n, m)` with `n : Int32` and `m : Int16`, which
+  widened both to Float64 and answered 5.0, is now the Int32 5.
+  `Math.copysign` takes any two numbers as Float64s, as the other
+  library's does: `copysign(3, -1)` was the same ambiguous call. Three
+  compiler faults were under the message. A literal records each type an
+  overload casts it to, and the record is what calls a call ambiguous;
+  an overload that failed on another argument left its record, so the
+  Float32 overload, which `x` rules out, made the Float64 one look tied
+  (the record is now put back when an overload fails). The mismatch
+  message took a literal cast to the parameter's type for a mismatch, so
+  `Math.max(2, x)` with `x : Int64` said "expected argument #1 ... not
+  Int32" about the `2`; it now names argument #2 and the Int64. And a
+  free variable was bound by the first argument restricted to it, so
+  `Math.gcd(4, n)` with `n : Int64` bound T to Int32 and refused `n`
+  while `Math.gcd(n, 4)` was an Int64; an overload with free variables
+  that fails in the written order is now tried with each later argument
+  bound first, so T is the first argument's type the others cast to, and
+  a call that matched before keeps its type. `bench/std_math_exercise`
+  checks integer max and min, Int64's ends, negatives, UInt8s, a literal
+  either side of an Int64 and a UInt8, an integer beside a double,
+  Strings and `copysign(3, -1)`, and catches three more broken copies: max
+  and min answering the other argument, and max of doubles compared
+  without the NaN rule. `spec/compiler/semantic/iyi_spec.cr` holds the
+  three compiler cases and that `pick(2, 5)` against a Float64 and a
+  Float32 overload is still ambiguous.
 - **`bench/std_tls_exercise.sh` no longer times Python's first
   certificate check on a Windows runner against the server's handshake
   deadline.** The first Python ssl handshake against the Ed25519 server

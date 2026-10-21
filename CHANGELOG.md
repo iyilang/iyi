@@ -446,6 +446,22 @@
 
 ### Fixed
 
+- **`bench/std_tls_exercise.sh` no longer times Python's first
+  certificate check on a Windows runner against the server's handshake
+  deadline.** The first Python ssl handshake against the Ed25519 server
+  failed twice on Windows CI (jobs 117686264720 and 118404949498): the
+  server's deadline ran out waiting for the client's Finished, and
+  Python's `sendall` met the reset (10053). The server and the runtime
+  were not at fault: traced on the same clock, the server's flight
+  reached Python within a millisecond and every wait of the runtime's woke
+  promptly, while Python's own step from its Certificate to its
+  CertificateVerify took up to 1,598 ms on runners replaying those
+  shards, against 0.4 to 1.1 ms once warm. That step is the first read of
+  OpenSSL's X.509 code from disk on the runner. The gate now reads
+  Python's `_ssl`, libssl and libcrypto in and runs one handshake over
+  memory before its served section, and prints how long that took: 6,301
+  and 2,354 ms on two loaded runners, after which the timed check took
+  0.6 ms on both.
 - **P-256 signing no longer branches on the nonce's digits.** The
   fixed-base table read is masked in the source, and in a release build
   LLVM turned it into a conditional jump per entry on the digit: a timing

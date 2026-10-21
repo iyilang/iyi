@@ -574,9 +574,12 @@ if args.size > 0 && args[0] == "serve"
     end
     socket.read_timeout_ms = 15000
     # Five seconds to finish a handshake, so a peer that drips one in is
-    # cut off while the gate waits. Three were too few for the first
-    # handshake of Python 3.14's ssl on a fresh Windows runner, once: the
-    # same client's next three, against the other keys, were in time.
+    # cut off while the gate waits. The first Python ssl client on a
+    # Windows runner once took longer than three, and once longer than
+    # five: its own first certificate check, reading its TLS library from
+    # disk. The gate now has Python read that library in before any
+    # server here times it (bench/std_tls_exercise.sh says what was
+    # measured).
     conn = TlsServer.over(socket, config, 5000)
     if conn.is_a?(TlsError)
       puts "refused: #{conn.message}"

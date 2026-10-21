@@ -884,4 +884,94 @@ assert_text("2024-07-01 14:00:00 +02:00", parsed(Time.parse("2024-07-01 12:00 +0
 assert_text("2024-07-01 14:00:00 +02:00", parsed(Time::Format.new("%s", cet).parse("1719835200"), "seconds at a location").to_s, "%s in a location")
 puts "  a skipped hour read past, a repeated one read as the first, days on the wall clock, and a parse at a location"
 
+puts "\n== Windows zone information"
+
+# `Location.local` on Windows reads a TIME_ZONE_INFORMATION; these are
+# made by hand from the values Microsoft's registry holds for each zone
+# (its TZI: Bias, StandardBias, DaylightBias and the two SYSTEMTIME
+# dates), and every transition from 2024 to 2030 is Python's zoneinfo's
+# for the IANA zone the Windows one maps to. Bias is minutes west of UTC
+# and signed, so every zone east of UTC has a negative one: Turkey's -180
+# was read as 4294967116 and `Location.local` panicked, issue #133.
+def windows_le(bytes : Array(UInt8), value : Int64, width : Int32) : Nil
+  bits = value < 0_i64 ? value + 4294967296_i64 : value
+  width.times do |i|
+    bytes << ((bits >> (8 * i)) & 255_i64).to_u8
+  end
+end
+
+# A SYSTEMTIME of {wYear, wMonth, wDayOfWeek, wDay, wHour}, the rest 0,
+# after a WCHAR[32] name.
+def windows_part(bytes : Array(UInt8), name : String, date : {Int32, Int32, Int32, Int32, Int32}) : Nil
+  32.times do |i|
+    windows_le(bytes, i < name.bytesize ? name.to_unsafe[i].to_i64 : 0_i64, 2)
+  end
+  windows_le(bytes, date[0].to_i64, 2)
+  windows_le(bytes, date[1].to_i64, 2)
+  windows_le(bytes, date[2].to_i64, 2)
+  windows_le(bytes, date[3].to_i64, 2)
+  windows_le(bytes, date[4].to_i64, 2)
+  windows_le(bytes, 0_i64, 6)
+end
+
+def windows_zone(bias : Int64, standard : String, std_date : {Int32, Int32, Int32, Int32, Int32}, std_bias : Int64, daylight : String, dst_date : {Int32, Int32, Int32, Int32, Int32}, dst_bias : Int64) : String
+  bytes = [] of UInt8
+  windows_le(bytes, bias, 4)
+  windows_part(bytes, standard, std_date)
+  windows_le(bytes, std_bias, 4)
+  windows_part(bytes, daylight, dst_date)
+  windows_le(bytes, dst_bias, 4)
+  String.new(bytes.size) { |buf| buf.copy_from(bytes.to_unsafe, bytes.size) }
+end
+
+none = {0, 0, 0, 0, 0}
+turkey = location(Location.read_windows_zone("Turkey", windows_zone(-180_i64, "Turkey Standard Time", none, 0_i64, "Turkey Daylight Time", none, -60_i64)), "Turkey, east of UTC")
+india = location(Location.read_windows_zone("India", windows_zone(-330_i64, "India Standard Time", none, 0_i64, "India Daylight Time", none, -60_i64)), "India, a half hour")
+utc = location(Location.read_windows_zone("UTC", windows_zone(0_i64, "Coordinated Universal Time", none, 0_i64, "Coordinated Universal Time", none, 0_i64)), "UTC")
+[{turkey, 10800, "+03"}, {india, 19800, "+0530"}, {utc, 0, "+00"}].each do |row|
+  [1704067200_i64, 1719835200_i64, 1893456000_i64].each do |unix|
+    zone = row[0].lookup(unix)
+    assert_true(zone.offset == row[1] && zone.name == row[2] && !zone.dst?, "#{row[0].name} at #{unix} is #{row[2]} #{row[1]}, not #{zone.name} #{zone.offset} #{zone.dst?}")
+  end
+end
+# Summer by a rule each year: Eastern's from the second Sunday of March at
+# 02:00 to the first of November at 02:00; Newfoundland's the same at
+# 3:30 west; AUS Eastern's, south of the equator, from October's first
+# Sunday at 02:00 to April's first at 03:00.
+eastern = location(Location.read_windows_zone("Eastern", windows_zone(300_i64, "Eastern Standard Time", {0, 11, 0, 1, 2}, 0_i64, "Eastern Daylight Time", {0, 3, 0, 2, 2}, -60_i64)), "Eastern, west of UTC with a summer")
+newfoundland = location(Location.read_windows_zone("Newfoundland", windows_zone(210_i64, "Newfoundland Standard Time", {0, 11, 0, 1, 2}, 0_i64, "Newfoundland Daylight Time", {0, 3, 0, 2, 2}, -60_i64)), "Newfoundland, a half hour with a summer")
+sydney_windows = location(Location.read_windows_zone("AUS Eastern", windows_zone(-600_i64, "AUS Eastern Standard Time", {0, 4, 0, 1, 3}, 0_i64, "AUS Eastern Daylight Time", {0, 10, 0, 1, 2}, -60_i64)), "AUS Eastern, a summer over New Year")
+[
+  {eastern, -18000, "-05", -14400, "-04", [1710054000_i64, 1730613600_i64, 1741503600_i64, 1762063200_i64, 1772953200_i64, 1793512800_i64, 1805007600_i64, 1825567200_i64, 1836457200_i64, 1857016800_i64, 1867906800_i64, 1888466400_i64, 1899356400_i64, 1919916000_i64]},
+  {newfoundland, -12600, "-0330", -9000, "-0230", [1710048600_i64, 1730608200_i64, 1741498200_i64, 1762057800_i64, 1772947800_i64, 1793507400_i64, 1805002200_i64, 1825561800_i64, 1836451800_i64, 1857011400_i64, 1867901400_i64, 1888461000_i64, 1899351000_i64, 1919910600_i64]},
+  {sydney_windows, 36000, "+10", 39600, "+11", [1712419200_i64, 1728144000_i64, 1743868800_i64, 1759593600_i64, 1775318400_i64, 1791043200_i64, 1806768000_i64, 1822492800_i64, 1838217600_i64, 1853942400_i64, 1869667200_i64, 1885996800_i64, 1901721600_i64, 1917446400_i64]},
+].each do |row|
+  loc = row[0]
+  # Sydney's year begins in summer, the others' in winter.
+  summer = loc.lookup(1704067200_i64).dst?
+  assert_true(summer == (row[1] == 36000), "#{loc.name} on New Year's Day 2024 #{summer ? "is" : "is not"} in summer")
+  row[5].each do |unix|
+    before = loc.lookup(unix - 1_i64)
+    after = loc.lookup(unix)
+    assert_true(before.dst? == summer && after.dst? == !summer, "#{loc.name} changes summer at #{unix}")
+    summer = !summer
+    [before, after].each do |zone|
+      offset = zone.dst? ? row[3] : row[1]
+      name = zone.dst? ? row[4] : row[2]
+      assert_true(zone.offset == offset && zone.name == name, "#{loc.name} near #{unix} is #{name} #{offset}, not #{zone.name} #{zone.offset}")
+    end
+  end
+end
+# A date with a year is that year's alone, not a rule, so no summer.
+dated = location(Location.read_windows_zone("Dated", windows_zone(300_i64, "Eastern Standard Time", {2024, 11, 0, 1, 2}, 0_i64, "Eastern Daylight Time", {2024, 3, 0, 2, 2}, -60_i64)), "a dated summer")
+assert_true(dated.lookup(1719835200_i64).offset == -18000 && !dated.lookup(1719835200_i64).dst?, "a dated summer is read as none")
+location_refused(Location.read_windows_zone("Short", "abc"), "3 bytes, not 172", "three bytes")
+location_refused(Location.read_windows_zone("Month 13", windows_zone(300_i64, "", {0, 13, 0, 1, 2}, 0_i64, "", {0, 3, 0, 2, 2}, -60_i64)), "the standard date is not a date", "a thirteenth month")
+location_refused(Location.read_windows_zone("Far", windows_zone(-2147483648_i64, "", none, 0_i64, "", none, 0_i64)), "a day or more from UTC", "the least LONG")
+# This machine's own zone, read the way the platform reads it - on
+# Windows, GetTimeZoneInformation - answers within UTC-12 and UTC+14.
+here = Location.local.lookup(Time.utc.to_unix)
+assert_true(here.offset >= -43200 && here.offset <= 50400, "the local zone's offset is a sane one")
+puts "  east and west of UTC, half hours, summers both sides of the equator, a dated summer and bytes that are no zone; the local zone"
+
 puts "\nALL CHECKS PASSED"

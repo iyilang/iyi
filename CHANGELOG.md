@@ -853,6 +853,21 @@
 
 ### Fixed
 
+- **`Location.local` no longer panics with `arithmetic overflow` on
+  Windows in a zone east of UTC, or in one with daylight time** (#133).
+  `TIME_ZONE_INFORMATION`'s `Bias`, `StandardBias` and `DaylightBias` are
+  signed LONGs, and they were read unsigned and then converted: Turkey's
+  Bias of -180 was 4294967116 and the conversion panicked, so
+  `Time.local` ended the program unless `TZ` was set. They are read as
+  the 32 bits' two's complement now. The decoding is
+  `Location.read_windows_zone(name, bytes)`, pure and public, so
+  `bench/std_time_exercise.iyi` feeds it hand-made structs for Turkey,
+  India, UTC, Eastern, Newfoundland and AUS Eastern on every platform and
+  checks each offset, name and 2024-2030 transition against Python's
+  zoneinfo; a broken copy reading the bias unsigned is caught. Bytes that
+  are no zone - the wrong size, a thirteenth month, a bias of a day or
+  more - are a `LocationError`, and `Location.local` answers UTC for them.
+
 - **`bench/std_tls_exercise.sh` no longer times Python's first
   certificate check on a Windows runner against the server's handshake
   deadline.** The first Python ssl handshake against the Ed25519 server

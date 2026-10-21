@@ -917,46 +917,87 @@ pub class Location
       fun GetTimeZoneInformation(information : UInt8*) : UInt32
     end
 
-    # TIME_ZONE_INFORMATION is 172 bytes: the bias in minutes west of UTC,
-    # then the standard name, date and bias, then the daylight ones. A date
-    # with a year of 0 is a rule - the wDay'th wDayOfWeek of wMonth, 5 the
-    # last - which is a POSIX `Mm.w.d`; one with a month of 0 is no summer.
-    # A date with a year is a single year's, which is not a rule at all, and
-    # it is read as no summer rather than as every year's.
     private def self.windows_local : Location
       info = Pointer(UInt8).malloc(172_u64)
       return UTC if LibKernel32.GetTimeZoneInformation(info) == 0xFFFFFFFF_u32
-      bias = u32_le(info, 0).to_i32
-      std_offset = -(bias + u32_le(info, 84).to_i32) * 60
-      dst_offset = -(bias + u32_le(info, 168).to_i32) * 60
-      std_name = TzRule.offset_name(std_offset)
-      dst_name = TzRule.offset_name(dst_offset)
-      begins = windows_date(info, 152)
-      ends = windows_date(info, 68)
-      rule = if begins && ends
-               TzRule.new(std_name, std_offset, dst_name, dst_offset, begins, ends, true)
-             else
-               TzRule.fixed(std_name, std_offset)
-             end
-      Location.new("Local", [Zone.new(std_name, std_offset, false)], [] of Int64, [] of Int32, rule)
-    end
-
-    private def self.windows_date(info : Pointer(UInt8), at : Int32) : TzDate?
-      year = u16_le(info, at)
-      month = u16_le(info, at + 2)
-      return nil if year != 0 || month == 0
-      time = u16_le(info, at + 8) * 3600 + u16_le(info, at + 10) * 60 + u16_le(info, at + 12)
-      TzDate.new(0, month, u16_le(info, at + 6), u16_le(info, at + 4), time)
-    end
-
-    private def self.u16_le(p : Pointer(UInt8), at : Int32) : Int32
-      p[at].to_i32 | (p[at + 1].to_i32 << 8)
-    end
-
-    private def self.u32_le(p : Pointer(UInt8), at : Int32) : UInt32
-      p[at].to_u32 | (p[at + 1].to_u32 << 8) | (p[at + 2].to_u32 << 16) | (p[at + 3].to_u32 << 24)
+      read = read_windows_zone("Local", String.new(172) { |buf| buf.copy_from(info, 172) })
+      read.is_a?(Location) ? read : UTC
     end
   {% end %}
+
+  # A location from the 172 bytes of a Windows TIME_ZONE_INFORMATION, which
+  # is what `Location.local` reads on Windows; it is pure so that every
+  # platform can check the decoding with bytes made by hand. The struct is
+  # the bias in minutes west of UTC (UTC = local + bias), then the standard
+  # name, date and bias, then the daylight ones, all little-endian. The
+  # three biases are signed LONGs: a zone east of UTC has a negative Bias
+  # (Turkey's is -180) and a summer usually a DaylightBias of -60, so each
+  # is read as the 32 bits' two's complement. Read as unsigned and then
+  # converted, as it once was, -180 was 4294967116 and the conversion
+  # panicked with an arithmetic overflow, issue #133.
+  #
+  # A date with a year of 0 is a rule - the wDay'th wDayOfWeek of wMonth,
+  # 5 the last, at the wall time then in force - which is a POSIX
+  # `Mm.w.d/time`; one with a month of 0 is no summer. A date with a year
+  # is a single year's, which is not a rule at all, and it is read as no
+  # summer rather than as every year's. The names are the offset's, `+03`
+  # or `-05`, as tzdata writes a zone it has no letters for: the struct's
+  # own are Windows' long names, "Turkey Standard Time", which are not
+  # abbreviations and are localised.
+  def self.read_windows_zone(name : String, data : String) : Location | LocationError
+    size = data.bytesize
+    return LocationError.new("#{name}: not a TIME_ZONE_INFORMATION: #{size} bytes, not 172") if size != 172
+    info = data.to_unsafe
+    bias = s32_le(info, 0)
+    std_offset = -(bias + s32_le(info, 84)) * 60
+    dst_offset = -(bias + s32_le(info, 168)) * 60
+    begins = windows_date(info, 152)
+    ends = windows_date(info, 68)
+    return LocationError.new("#{name}: the daylight date is not a date") if begins.is_a?(LocationError)
+    return LocationError.new("#{name}: the standard date is not a date") if ends.is_a?(LocationError)
+    summer = !begins.nil? && !ends.nil?
+    # A day or more from UTC is no zone; refusing it also keeps the
+    # offsets within an Int32 for any bytes at all. DaylightBias is only
+    # looked at when there is a summer to use it.
+    if std_offset.abs >= 86400_i64 || (summer && dst_offset.abs >= 86400_i64)
+      return LocationError.new("#{name}: a bias of #{bias} minutes is a day or more from UTC")
+    end
+    std_name = TzRule.offset_name(std_offset.to_i32)
+    rule = if begins && ends
+             TzRule.new(std_name, std_offset.to_i32, TzRule.offset_name(dst_offset.to_i32), dst_offset.to_i32, begins, ends, true)
+           else
+             TzRule.fixed(std_name, std_offset.to_i32)
+           end
+    Location.new(name, [Zone.new(std_name, std_offset.to_i32, false)], [] of Int64, [] of Int32, rule)
+  end
+
+  # The SYSTEMTIME at *at*: wYear, wMonth, wDayOfWeek, wDay, wHour,
+  # wMinute, wSecond, wMilliseconds, each an unsigned WORD. Nil is no rule;
+  # an error is fields no day has.
+  private def self.windows_date(info : Pointer(UInt8), at : Int32) : TzDate | LocationError | Nil
+    year = u16_le(info, at)
+    month = u16_le(info, at + 2)
+    return nil if year != 0 || month == 0
+    weekday = u16_le(info, at + 4)
+    week = u16_le(info, at + 6)
+    hour = u16_le(info, at + 8)
+    minute = u16_le(info, at + 10)
+    second = u16_le(info, at + 12)
+    if month > 12 || weekday > 6 || week < 1 || week > 5 || hour > 23 || minute > 59 || second > 59
+      return LocationError.new("not a date")
+    end
+    TzDate.new(0, month, week, weekday, hour * 3600 + minute * 60 + second)
+  end
+
+  private def self.u16_le(p : Pointer(UInt8), at : Int32) : Int32
+    p[at].to_i32 | (p[at + 1].to_i32 << 8)
+  end
+
+  # A signed little-endian LONG, from the 32 bits' two's complement.
+  private def self.s32_le(p : Pointer(UInt8), at : Int32) : Int64
+    value = p[at].to_i64 | (p[at + 1].to_i64 << 8) | (p[at + 2].to_i64 << 16) | (p[at + 3].to_i64 << 24)
+    value >= 2147483648_i64 ? value - 4294967296_i64 : value
+  end
 
   private def self.zone_directories : Array(String)
     directories = [] of String

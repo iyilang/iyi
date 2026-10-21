@@ -454,7 +454,7 @@ step "failure proof: a free outside the allocator's bracket puts a dropped list 
 mkdir -p unbracketed/iyi
 cp "$REPO"/src/iyi/*.iyi unbracketed/iyi/
 awk '/^          write64\(table\.address &\+ CACHE_INSIDE, read64\(table\.address &\+ CACHE_INSIDE\) &\+ 1_u64\)$/ { entered = 1; next }
-  prev ~ /^          table\[index\] = head$/ && /^          leave\(table\)$/ { left = 1; prev = $0; next }
+  prev ~ /^          end$/ && /^          leave\(table\)$/ { left = 1; prev = $0; next }
   { prev = $0; print } END { if (!entered || !left) exit 3 }' \
   "$REPO/src/iyi/prelude.iyi" > unbracketed/iyi/prelude.iyi || { echo "the bracket this proof removes from free is not in the prelude any more"; exit 1; }
 if ! IYI_PATH="$WORK/unbracketed${PSEP}$REPO/src" "$IYI" build freed.iyi -o freed-unbracketed > build-unbracketed.log 2>&1; then

@@ -615,6 +615,14 @@
   checks every value where it is set, so From and Date are the only gaps,
   and `msg.from` and `msg.date` already answer whether they are set.
 
+- **`Certificate` (std/x509) is a class, not a struct.** It is 472
+  bytes of fields that nothing writes after `Certificate.parse`, and a
+  struct was copied whole into every array slot, block argument and
+  union it passed through - in a debug build each copy a stack slot of
+  its own, which is most of what ran a task out of stack in issue #130.
+  Sharing a certificate is not observable, and `==` still compares two by
+  their DER (and `hash` hashes it), as the struct's field-by-field `==`
+  did.
 - **`IyiSocket.connect` races a name's addresses: Happy Eyeballs v2
   (RFC 8305).** A name with more than one address was tried one address
   after another, IPv4 first, each with the whole timeout, so a host whose
@@ -928,6 +936,45 @@
   copies write a union as one type (the issue's error back), drop the enum
   members where a union is written, and drop the `Int32` member where one
   is read. std/json still writes no `Time`, alone or in a union.
+- **A frame larger than a page no longer steps over a fiber stack's guard
+  page (issue #130): every function the compiler emits on Linux and
+  darwin probes its frame.** A fiber's stack has one 4 KiB guard page
+  under it, and a frame is carved with one `sub`; a larger frame written
+  first at its low end landed past the guard, in whatever was mapped
+  under the stack, and the program went on with that memory overwritten.
+  On Linux a task whose stack had 128 KiB of writable memory placed under
+  it ran five 64 KiB frames deep and finished, in each of the 19 runs of
+  20 that could place that memory. Each
+  function now carries LLVM's `"probe-stack"="inline-asm"`: a frame over
+  a page is touched a page at a time from the top before it is used, so
+  the guard is the first page past the end anything touches and the
+  overrun is `iyi: panic: stack overflow`, as a deep recursion is.
+  Windows already had this: there a frame over a page calls `__chkstk`,
+  which touches each page under the TEB's StackLimit in order, and the
+  attribute is not set. Frames of a page or less are unchanged, and a
+  P-256 signature check timed the same in `--release` (54 and 51 us
+  before, 53 and 53 after; two runs, each the best of five rounds of
+  200). `bench/panics.sh`
+  holds a 64 KiB frame over writable memory under a fiber's stack to the
+  stack-overflow sentence, on Linux, darwin and Windows.
+- **A debug build's chain check takes a third of the stack it did, and
+  the issue's program runs 46 frames down in a task where it ran 27
+  (issue #130).** In a debug build every value an expression makes is a
+  stack slot of its own, and `Certificate`, a 472-byte struct, was copied
+  into one wherever it passed: `Certificate.parse`'s frame was 31,832
+  bytes, `X509.grow`'s 13,640, and the issue's padding frames 8,360, of
+  which 3,344 were for the two certificates they named. `Certificate` is
+  a class now (see
+  Changed), and `EcdsaP256.check` is three frames rather than one of
+  4,696 bytes. Measured on Linux x86_64 in a task, `X509.verify` of a
+  two-certificate P-256 chain took 35,608 bytes of stack and takes
+  11,768, and `Certificate#signed_by?` 14,456 and 10,680; the issue's
+  program ran 27 frames down in a task before overflowing and runs 46.
+  The issue's figure of 230 KB for one check was mostly those padding
+  frames, which held 8 KB each rather than the 1 KB they were written
+  as. `bench/std_x509_exercise.iyi` checks the issue's signature and
+  chain inside a task 32 such frames down, which the old code could not
+  do past 16 and 15.
 - **`bench/std_tls_exercise.sh` no longer times Python's first
   certificate check on a Windows runner against the server's handshake
   deadline.** The first Python ssl handshake against the Ed25519 server

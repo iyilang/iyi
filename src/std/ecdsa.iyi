@@ -634,10 +634,28 @@ struct EcdsaP256
 
   # Whether u1·G + u2·Q is a point whose x is r modulo n, as
   # `EcdsaPlane#check` answers it.
+  #
+  # In three frames rather than one, for a debug build's stack: there each
+  # point and number an expression makes is a stack slot of its own for
+  # the whole call, and with the table, the sum and the comparison in one
+  # method its frame was 4,696 bytes, under every point addition the sum
+  # makes. Split, `check` is 1,096 and `sum` 2,480 (Linux x86_64), and the
+  # table's slots are gone before the sum starts.
   def self.check(group : EcdsaGroup, u1 : BigInt, u2 : BigInt, qx : BigInt, qy : BigInt, r : BigInt) : Bool
     g_digits = EcdsaWnaf.digits(u1, 32, G_WIDTH)
     q_digits = EcdsaWnaf.digits(u2, 32, Q_WIDTH)
     return false unless g_digits && q_digits
+    acc = sum(g_digits, q_digits, odd_multiples(qx, qy), g_table(group))
+    return false if acc.z.zero?
+    zz = EcdsaP256Num.square(acc.z)
+    return true if EcdsaP256Num.mul(EcdsaP256Num.enter(r), zz) == acc.x
+    other = r + group.n
+    return false unless other < group.p
+    EcdsaP256Num.mul(EcdsaP256Num.enter(other), zz) == acc.x
+  end
+
+  # Q, 3Q, ... 15Q for the key (*qx*, *qy*), Jacobian.
+  private def self.odd_multiples(qx : BigInt, qy : BigInt) : Pointer(EcdsaP256Point)
     q = EcdsaP256Point.new(EcdsaP256Num.enter(qx), EcdsaP256Num.enter(qy), EcdsaP256Num.one)
     twice = q.double
     odd = Pointer(EcdsaP256Point).malloc(8_u64)
@@ -647,7 +665,13 @@ struct EcdsaP256
       odd[i] = odd[i - 1].add(twice)
       i = i + 1
     end
-    table = g_table(group)
+    odd
+  end
+
+  # The sum the two scalars' digits name: a doubling a digit, and an
+  # addition of Q's multiple in *odd* and G's in *table* where a digit
+  # is not zero.
+  private def self.sum(g_digits : Array(Int32), q_digits : Array(Int32), odd : Pointer(EcdsaP256Point), table : Pointer(EcdsaP256Num)) : EcdsaP256Point
     acc = EcdsaP256Point.identity
     i = g_digits.size - 1
     while i > 0 && g_digits[i] == 0 && q_digits[i] == 0
@@ -669,12 +693,7 @@ struct EcdsaP256
       end
       i = i - 1
     end
-    return false if acc.z.zero?
-    zz = EcdsaP256Num.square(acc.z)
-    return true if EcdsaP256Num.mul(EcdsaP256Num.enter(r), zz) == acc.x
-    other = r + group.n
-    return false unless other < group.p
-    EcdsaP256Num.mul(EcdsaP256Num.enter(other), zz) == acc.x
+    acc
   end
 
   # G, 3G, ... 63G as affine x and y, entry j's x at 2j and y at 2j + 1

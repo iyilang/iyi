@@ -774,6 +774,7 @@ module Iyi
       @modules.each do |name, info|
         mod = info.mod
         push_debug_info_metadata(mod) unless @debug.none?
+        iyi_probe_stack(mod)
 
         mod.dump if dump_all_llvm || dump_llvm_regex.try &.matches?(name)
 
@@ -787,6 +788,32 @@ module Iyi
         dump_type_info(type_info_path)
       end
       dump_type_id if ENV["IYI_DUMP_TYPE_ID"]? == "1"
+    end
+
+    # iyi: every function this unit defines touches its frame a page at a
+    # time, top down, before it uses any of it, so running off the end of a
+    # stack faults on the guard page under it rather than past it.
+    #
+    # A fiber's stack has one guard page (`IyiFiber#map_stack`), and a frame
+    # is carved with one `sub rsp`; a frame larger than the page, written
+    # first at its low end, stepped over the guard into whatever mapping lay
+    # below, which is often another fiber's stack or the heap, and the
+    # program went on with that memory overwritten. Inline probes are LLVM's
+    # (`"probe-stack"="inline-asm"`): a loop of `sub $4096, %rsp` and a store
+    # to the new top, so the guard is the first page past the end anything
+    # touches whatever the frame's size, and the fault arrives within a page
+    # of the stack pointer, where `IyiStackGuard` names it a stack overflow.
+    #
+    # Not on Windows: there a frame over a page already calls `__chkstk`,
+    # which touches each page below the TEB's StackLimit in order, and
+    # LLVM's x86 backend reads the attribute there as the name of the probe
+    # function to call. Not on wasm32, whose stack is not paged.
+    private def iyi_probe_stack(mod : LLVM::Module) : Nil
+      return if @program.has_flag?("win32") || @program.has_flag?("wasm32")
+      mod.functions.each do |func|
+        next if func.basic_blocks.empty?
+        func.add_attribute "probe-stack", value: "inline-asm"
+      end
     end
 
     def visit(node : Annotation)

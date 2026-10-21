@@ -64,7 +64,7 @@ own reference accepts.
 | front end, `hello.iyi` | **0.036 s** against the 0.050 s target: MET |
 | starting the compiler and doing nothing | 0.018 s of that |
 | iyi's own prelude | 22,509 lines, of which 4,634 are the library held to the 4,650 ceiling (6,647 with every platform's floor, which the ceiling stopped counting after Windows); the rest is the collector, the scheduler and the float printer, which 0.1.0's prelude got from libgc, pthreads and libc |
-| compiler | 127,376 lines, none of it written in iyi |
+| compiler | 127,403 lines, none of it written in iyi |
 | artifact format | `.iyimod` v56, checksum per section |
 | samples | 27 programs, of which 12 rebuild from artifacts with their modules' source deleted |
 | what runs in CI | iyi's specs, Crystal's 13,798 compiler examples, the standard library's, the CLI's, the samples, nine targets iyi's own prelude type-checks for, seven whose own-prelude emitted objects are audited for undefined symbols, the tarball |
@@ -2261,9 +2261,17 @@ language already had:
   committed page carrying PAGE_GUARD with 16 KB of committed slack beneath
   it (`IyiFiber#map_stack`) — the handler runs on the stack that faulted
   and that slack is what it stands on, measured at 2,872 bytes used of the
-  16,384. `bench/panics.sh` holds it on the main stack, a fiber's and a
-  thread's, on every platform with a runtime, and holds the wild pointer
-  apart.
+  16,384. A guard page catches a frame only if the frame touches it, and
+  a frame is carved with one `sub`: one larger than the page, written
+  first at its low end, stepped over the guard into whatever lay under
+  the stack and the program went on (issue #130). So every function the
+  compiler emits touches its frame a page at a time from the top before
+  it uses it — LLVM's inline stack probes on Linux and darwin, and on
+  Windows the `__chkstk` call every frame over a page already makes —
+  and the guard is the first page past the end anything touches.
+  `bench/panics.sh` holds it on the main stack, a fiber's and a
+  thread's, on every platform with a runtime, holds a 64 KiB frame over
+  writable memory to the same sentence, and holds the wild pointer apart.
 
 The residue the first cut recorded — overflow trapping straight to a
 process exit because a `fun` cannot reach scheduler state — closed the

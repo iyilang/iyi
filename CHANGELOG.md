@@ -603,6 +603,18 @@
 
 ### Changed
 
+- **std/mail and std/smtp say that a message needs a Date (#137).**
+  `Mail::Message#to_s` has always panicked with `mail: a message has no
+  Date` (and `no From`), and `SmtpClient#send` with it, but the docs listed
+  the Date beside the optional Message-ID. std/mail's header and `to_s`'s
+  comment now say a From and a Date are required (`msg.date =
+  Mail.date(...)`), the Message-ID is optional, and which panics `to_s`
+  raises; both `send` overloads say which mistakes panic and that every
+  other failure is an `SmtpError`. std_smtp's gate refuses a message with
+  no Date through `send`. No `Mail::Message#valid?` was added: std/mail
+  checks every value where it is set, so From and Date are the only gaps,
+  and `msg.from` and `msg.date` already answer whether they are set.
+
 - **`IyiSocket.connect` races a name's addresses: Happy Eyeballs v2
   (RFC 8305).** A name with more than one address was tried one address
   after another, IPv4 first, each with the whole timeout, so a host whose

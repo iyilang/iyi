@@ -1140,20 +1140,35 @@ def pipelined():
     return exchange(connect(), first + rest, pause=(len(first), 0.02))
 
 
+# The body handed over 256 KiB at a time, each piece's handing-over
+# timed: a failure says how much of the body the server took, and when it
+# stopped taking it - a server that stopped reading strands http.client
+# in its send, which it finishes before it reads.
 def sent_first(close):
     if ctx:
         c = http.client.HTTPSConnection("localhost", port, context=ctx, timeout=20)
     else:
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    began = time.monotonic()
+    sent = [0, began]
+    piece = b"u" * 262144
+
+    def body():
+        while sent[0] < UP:
+            yield piece
+            sent[0] += len(piece)
+            sent[1] = time.monotonic()
+
     try:
-        c.request("POST", "/ignore?n=%d%s" % (N, "&close=1" if close else ""), body=b"u" * UP)
+        c.request("POST", "/ignore?n=%d%s" % (N, "&close=1" if close else ""), body=body(), headers={"Content-Length": str(UP)})
         r = c.getresponse()
-        body = r.read()
+        got = r.read()
     except OSError as e:
-        return "%s from http.client" % type(e).__name__
+        return "%s from http.client, %d of %d bytes sent, the last %.2f s in, %.2f s before the error" % (
+            type(e).__name__, sent[0], UP, sent[1] - began, time.monotonic() - sent[1])
     finally:
         c.close()
-    return None if r.status == 200 and body == want else "answered %d, %d bytes" % (r.status, len(body))
+    return None if r.status == 200 and got == want else "answered %d, %d bytes" % (r.status, len(got))
 
 
 CURL = shutil.which("curl")
@@ -1196,17 +1211,21 @@ named = sys.argv[4:]
 chosen = [(name, case) for name, case in cases.items() if not named or name in named]
 
 
+# The slowest run's time goes with the verdict, for a runner whose
+# closes come near the bounds to show it.
 def verdict(item):
     name, case = item
-    first, lost = None, 0
+    first, lost, slowest = None, 0, 0.0
     for _ in range(runs):
+        began = time.monotonic()
         got = case()
+        slowest = max(slowest, time.monotonic() - began)
         if got:
             lost += 1
             first = first or got
     if lost:
         return False, "  FAIL: %s: %d of %d runs: %s" % (name, lost, runs, first)
-    return True, "  %s: %d of %d whole, no reset, the end at once" % (name, runs, runs)
+    return True, "  %s: %d of %d whole, no reset, the end at once (the slowest %.2f s)" % (name, runs, runs, slowest)
 
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(chosen))) as pool:
@@ -1247,8 +1266,8 @@ close_round() {
 # catch it many times over, and each broken copy below is caught in 3 of
 # 3 runs of the case that names it.
 CLOSE_RUNS="${CLOSE_RUNS:-5}"
-# The --release build serves: a lingering close reads past what the
-# client still sends for a second at most, and the plain build's TLS
+# The --release build serves: a lingering close waits a second at most
+# for what the client still sends, and the plain build's TLS
 # drains 8 MiB in 0.21 s on Linux (x86-64), the release build's in 0.04
 # s - a Windows runner's plain build nearer the second than a check that
 # must hold every run should stand. The broken copies below are plain

@@ -368,8 +368,9 @@ Each with where it holds.
   end, and Content-Length and chunked bodies cut short are errors.
 - **Closing.** `close` sends close_notify, shuts the socket's sending
   half, and reads past what the peer still sends - to its close_notify or
-  the socket's end, for at most a second and 64 MiB, so a peer cannot
-  hold a close longer - before the socket closes; `abort` closes at once.
+  the socket's end, while it comes within a second, for at most ten
+  seconds and 64 MiB, so a peer cannot hold a close longer - before the
+  socket closes; `abort` closes at once.
   Nothing is sent after this side's close_notify, an alert included, and
   in TLS 1.2 nothing is written after the peer's (RFC 5246 section
   7.2.1).

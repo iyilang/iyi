@@ -461,10 +461,11 @@
   pipelined requests; past the megabyte a kept connection reads past,
   every curl run ended in a reset. Now a connection the server wrote last
   on shuts its sending half (close_notify first over TLS), reads and
-  drops what the client still sends until it closes - a second and 64
-  MiB (`Server::MAX_BODY`) at most, `Conn::LINGER_MS` and
-  `LINGER_BYTES`, so a closing connection holds its task and its place
-  among `max_connections` no longer - and then closes: nginx's
+  drops what the client still sends until it closes - while it comes a
+  second apart at most (`Conn::LINGER_GAP_MS`), for ten seconds
+  (`LINGER_MS`) and 64 MiB (`LINGER_BYTES`, `Server::MAX_BODY`) at most,
+  so a closing connection holds its task and its place among
+  `max_connections` no longer - and then closes: nginx's
   lingering_close; Go's server half-closes the same way and then sleeps
   500 ms without reading. HTTP/2 does the same after its GOAWAY. A
   connection that timed out, or whose client said `close` and sent
@@ -488,14 +489,23 @@
   (77,515 before), clients that say `close` 59,096 (57,685), and a
   server that says `close` to clients that did not 46,714 (62,328) - the
   price of each such close's half-close and its wait, parked, for the
-  client's end.
+  client's end. The first cut bounded the whole linger to one second,
+  and a body slower than that to arrive was cut off: over TLS on a
+  Windows runner Python's http.client waited out its 20 s timeout in
+  every run (CI job 118872747607), and on Linux, the server's CPU shared
+  with six busy loops, it was reset with 4.75 to 7.25 of its 8 MiB
+  sent in six runs; with nginx's two bounds - a gap between reads
+  (lingering_timeout) and a whole (lingering_time) - every run there was
+  whole, the slowest in 5.3 s. http.client's case now says, when it
+  fails, how much of the body it had sent and when.
 - **std/tls closes gracefully (RFC 8446 section 6.1).**
   `TlsConnection#close_write` sends close_notify and shuts the socket's
   sending half (`IyiSocket#close_write`), and reading goes on until the
   peer's own close_notify; `write` and `key_update` are refused after
   it. `close` is `close_write`, then what the peer still sends read and
-  dropped until its close_notify or the socket's end - `DRAIN_MS`, a
-  second, and `DRAIN_BYTES`, 64 MiB, at most - and then the socket
+  dropped until its close_notify or the socket's end - while it comes a
+  second apart at most (`DRAIN_GAP_MS`), for ten seconds (`DRAIN_MS`)
+  and 64 MiB (`DRAIN_BYTES`) at most - and then the socket
   closed, where it closed at once after its close_notify and a peer
   still sending was reset. Nothing is waited for once the peer's
   close_notify has come. `abort` still closes at once. TLS 1.2 has no

@@ -52,9 +52,10 @@
 # says `close`, a body left unread past that megabyte, a refusal, a
 # GOAWAY - closes by lingering (RFC 9112 §9.6): the sending half shut
 # (close_notify first over TLS), what the client still sends read and
-# dropped until it closes, for a second and 64 MiB at most, then the
-# socket closed - so the reset a close with unread bytes would be cannot
-# take the answer from a client still sending. A client that said
+# dropped until it closes, while it comes a second apart at most, for
+# ten seconds and 64 MiB at most, then the socket closed - so the reset a
+# close with unread bytes would be cannot take the answer from a client
+# still sending. A client that said
 # `close` and sent nothing past its request is closed at once. The
 # client closes its connections the same way.
 # The socket parks under the runtime, so a slow client costs one fiber;
@@ -508,18 +509,26 @@ class Conn
     end
   end
 
-  # The lingering close's bounds. The time bounds how long a close holds
-  # its task, and a server's connection its place among *max_connections*,
-  # against a peer that neither stops sending nor closes: Go's server
-  # waits 500 ms after its half-close (`rstAvoidanceDelay`), nginx up to
-  # 30 s (lingering_time). The bytes are enough for the largest request
-  # body the server takes (`Server::MAX_BODY`) to finish arriving: a
-  # client that sends its whole body before it reads, as Python's
-  # http.client does, is otherwise reset partway and never reads the
-  # answer waiting for it. A client that has read the answer and closed
-  # ends it at once: on loopback, a round trip.
-  LINGER_BYTES = Server::MAX_BODY
-  LINGER_MS    = 1000
+  # The lingering close's bounds, nginx's two: each read waits at most
+  # `LINGER_GAP_MS` for more (lingering_timeout, 5 s there), and the whole
+  # linger lasts at most `LINGER_MS` (lingering_time, 30 s there) - so a
+  # close holds its task, and a server's connection its place among
+  # *max_connections*, for at most ten seconds, and that only for a client
+  # that goes on sending at least every second; one that stops sending,
+  # or closes, ends it within a second. A bound on the whole alone was
+  # wrong: at one second in all, a body slower than that to arrive was
+  # cut off, and Python's http.client, which sends its whole body before
+  # it reads, never read its answer - over TLS on a Windows runner it
+  # waited out its timeout in every run (CI job 118872747607), and on
+  # Linux, the server's CPU shared with six busy loops, it was reset with
+  # 4.75 to 7.25 of its 8 MiB sent. Go's server waits 500
+  # ms after its half-close without reading (`rstAvoidanceDelay`). The
+  # bytes are enough for the largest request body the server takes
+  # (`Server::MAX_BODY`) to finish arriving. A client that has read the
+  # answer and closed ends it at once: on loopback, a round trip.
+  LINGER_BYTES  = Server::MAX_BODY
+  LINGER_GAP_MS =  1000
+  LINGER_MS     = 10000
 
   private def linger : Nil
     socket = @socket
@@ -530,7 +539,7 @@ class Conn
     while left > 0
       wait = (until_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
       break if wait <= 0
-      socket.read_timeout_ms = wait.to_i32
+      socket.read_timeout_ms = wait < LINGER_GAP_MS ? wait.to_i32 : LINGER_GAP_MS
       got = socket.read(@data, @capacity)
       break unless got.is_a?(Int32) && got > 0
       left = left - got

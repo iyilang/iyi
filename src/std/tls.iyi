@@ -261,9 +261,10 @@
 # Closing (section 6.1). `close_write` sends close_notify and shuts the
 # socket's sending half, and reading goes on to the peer's own
 # close_notify. `close` is that, then what the peer still sends read and
-# dropped - until its close_notify or the socket's end, for a second and
-# 64 MiB at most - and the socket closed, so unread bytes do not turn the
-# close into a reset that takes from the peer what it had not yet read.
+# dropped - until its close_notify or the socket's end, while it comes a
+# second apart at most, for ten seconds and 64 MiB at most - and the
+# socket closed, so unread bytes do not turn the close into a reset that
+# takes from the peer what it had not yet read.
 # `abort` closes the socket at once. In TLS 1.2 a close_notify ends both
 # ways (RFC 5246 section 7.2.1): once the peer's has come, `write` is
 # refused.
@@ -1096,9 +1097,10 @@ pub abstract class TlsConnection
 
   # The connection ended: `close_write` - close_notify, then the sending
   # half shut - and what the peer still sends read and dropped, until its
-  # close_notify or the socket's end, for at most `DRAIN_BYTES` and
-  # `DRAIN_MS` in all; then the socket closed. A socket closed with bytes
-  # unread in it is reset rather than ended, and the reset takes from the
+  # close_notify or the socket's end, as long as it keeps coming
+  # (`DRAIN_GAP_MS`), `DRAIN_MS` and `DRAIN_BYTES` at most; then the
+  # socket closed. A socket closed with bytes unread in it is reset rather
+  # than ended, and the reset takes from the
   # peer what it had received and not yet read: closed at once on a
   # request body it had not read, an HTTPS server lost its whole answer to
   # Python's http.client in each of 50 runs, and curl the end of it in
@@ -1119,16 +1121,20 @@ pub abstract class TlsConnection
     @socket.close unless @socket.closed?
   end
 
-  # What `close` reads past. The time bounds how long a close holds its
-  # task, and the connection's place among a server's, against a peer
-  # that neither stops sending nor closes: Go's server waits 500 ms after
-  # its half-close, nginx up to 30 s (lingering_time). The bytes are
-  # enough for a request body of std/http's largest (`Server::MAX_BODY`,
-  # 64 MiB) to finish arriving: a client that sends its whole body before
-  # it reads, as Python's http.client does, is otherwise reset partway
-  # and never reads the answer waiting for it.
-  DRAIN_BYTES = 67108864
-  DRAIN_MS    =     1000
+  # What `close` reads past, under nginx's two bounds: each record waited
+  # for at most `DRAIN_GAP_MS` (lingering_timeout, 5 s there), the whole
+  # drain at most `DRAIN_MS` (lingering_time, 30 s there). A close holds
+  # its task, and the connection's place among a server's, for at most
+  # ten seconds, and that only against a peer that goes on sending at
+  # least every second; one that stops, or closes, ends it within a
+  # second. One second in all was too little: a body still arriving was
+  # cut off, and the peer, sending it before it read, was reset or left
+  # waiting for its answer. Go's server waits 500 ms after its half-close
+  # without reading. The bytes are enough for a request body of
+  # std/http's largest (`Server::MAX_BODY`, 64 MiB) to finish arriving.
+  DRAIN_BYTES  = 67108864
+  DRAIN_GAP_MS =     1000
+  DRAIN_MS     =    10000
 
   private def drain : Nil
     until_ns = Time.monotonic_nanoseconds.to_i64 + DRAIN_MS.to_i64 * 1000000_i64
@@ -1136,7 +1142,7 @@ pub abstract class TlsConnection
     while left > 0 && !@eof && !@closed
       wait = (until_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
       break if wait <= 0
-      got = within(wait.to_i32) { read_now(16384) }
+      got = within(wait < DRAIN_GAP_MS ? wait.to_i32 : DRAIN_GAP_MS) { read_now(16384) }
       break unless got.is_a?(String) && !got.empty?
       left = left - got.bytesize
     end

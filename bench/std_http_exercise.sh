@@ -1048,20 +1048,25 @@ echo "== a close while the client still sends (RFC 9112 section 9.6)"
 # told to insist on) within half a second of the answer's last byte, not
 # the second a server that never shuts its half lingers for.
 cat >"$WORK/close.py" <<'PY'
-import concurrent.futures, http.client, os, select, shutil, socket, ssl, subprocess, sys, time
+import http.client, os, select, shutil, socket, ssl, subprocess, sys, time
 
 # close.py PORT RUNS ROOT|- [CASE...]
 port, runs = int(sys.argv[1]), int(sys.argv[2])
 root = None if sys.argv[3] == "-" else sys.argv[3]
 N, UP = 1000000, 8 * 1024 * 1024
 want = bytes((i * 31 + 7) & 255 for i in range(N))
+# How long any one wait of a client here may stall before the case fails:
+# a server lingers on a client that keeps sending, and a read of its
+# waits a second at most for more, so a stall of five is a failure - and
+# a failing case costs five seconds, not the twenty a run once did.
+STALL = 5
 ctx = ssl.create_default_context(cafile=root) if root else None
 host = "localhost" if root else "127.0.0.1"
 here = os.path.dirname(os.path.abspath(__file__))
 
 
 def connect():
-    raw = socket.create_connection(("127.0.0.1", port), timeout=20)
+    raw = socket.create_connection(("127.0.0.1", port), timeout=STALL)
     # An end with no close_notify raises SSLEOFError rather than reading
     # as an end.
     return ctx.wrap_socket(raw, server_hostname="localhost", suppress_ragged_eofs=False) if ctx else raw
@@ -1082,13 +1087,14 @@ def judged(data):
 
 # Reads to the end while *out* is sent, in one thread: an SSL object is
 # not to be used from two at once. Whether the answer came whole, and how
-# long after its last byte the end came.
+# long after its last byte the end came; given up once nothing has moved
+# either way for STALL seconds.
 def exchange(s, out, pause=None):
     out = memoryview(out)
     s.setblocking(False)
     data, at, broke, last, ended = b"", 0, None, None, None
-    started = time.monotonic()
-    while time.monotonic() < started + 20:
+    started = moved = time.monotonic()
+    while time.monotonic() < moved + STALL:
         if pause and at >= pause[0] and time.monotonic() < started + pause[1]:
             sending = False
         else:
@@ -1101,7 +1107,7 @@ def exchange(s, out, pause=None):
                     ended = time.monotonic()
                     break
                 data += more
-                last = time.monotonic()
+                last = moved = time.monotonic()
             except (ssl.SSLWantReadError, ssl.SSLWantWriteError, BlockingIOError):
                 pass
             except OSError as e:
@@ -1110,6 +1116,7 @@ def exchange(s, out, pause=None):
         if w and sending:
             try:
                 at += s.send(out[at:at + 65536])
+                moved = time.monotonic()
             except (ssl.SSLWantReadError, ssl.SSLWantWriteError, BlockingIOError):
                 pass
             except OSError as e:
@@ -1117,11 +1124,11 @@ def exchange(s, out, pause=None):
     s.close()
     bad = judged(data)
     if bad:
-        return bad + (", no end in 20 s" if ended is None else "")
+        return bad + (", nothing for %d s" % STALL if ended is None else "")
     if broke:
         return "the answer whole, but the send was refused: " + broke
     if ended is None:
-        return "the answer whole, and no end in 20 s"
+        return "the answer whole, and nothing for %d s" % STALL
     if last is not None and ended - last > 0.5:
         return "the end %.2f s after the answer" % (ended - last)
     return None
@@ -1140,15 +1147,25 @@ def pipelined():
     return exchange(connect(), first + rest, pause=(len(first), 0.02))
 
 
-# The body handed over 256 KiB at a time, each piece's handing-over
-# timed: a failure says how much of the body the server took, and when it
-# stopped taking it - a server that stopped reading strands http.client
-# in its send, which it finishes before it reads.
+# http.client sends its whole body before it reads a byte, and the server
+# writes its answer before it reads past the body, so the answer here is
+# SMALL: one past what the sockets' buffers hold leaves each end waiting
+# for the other to read, whatever the close does. Windows' loopback held
+# less than the megabyte the other cases answer - http.client's send
+# stalled with 768 KiB of 8 MiB sent, plain and over TLS, the server
+# still writing its answer (CI job 118970480233) - and Linux's does at 16
+# MB, the same stall with 1.75 MiB sent. The reset this case is for comes
+# at any size. The body goes 256 KiB at a time, each piece's handing-over
+# timed: a failure says how much of it the server took, and when.
+SMALL = 8192
+small = want[:SMALL]
+
+
 def sent_first(close):
     if ctx:
-        c = http.client.HTTPSConnection("localhost", port, context=ctx, timeout=20)
+        c = http.client.HTTPSConnection("localhost", port, context=ctx, timeout=STALL)
     else:
-        c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=STALL)
     began = time.monotonic()
     sent = [0, began]
     piece = b"u" * 262144
@@ -1160,7 +1177,7 @@ def sent_first(close):
             sent[1] = time.monotonic()
 
     try:
-        c.request("POST", "/ignore?n=%d%s" % (N, "&close=1" if close else ""), body=body(), headers={"Content-Length": str(UP)})
+        c.request("POST", "/ignore?n=%d%s" % (SMALL, "&close=1" if close else ""), body=body(), headers={"Content-Length": str(UP)})
         r = c.getresponse()
         got = r.read()
     except OSError as e:
@@ -1168,7 +1185,7 @@ def sent_first(close):
             type(e).__name__, sent[0], UP, sent[1] - began, time.monotonic() - sent[1])
     finally:
         c.close()
-    return None if r.status == 200 and got == want else "answered %d, %d bytes" % (r.status, len(got))
+    return None if r.status == 200 and got == small else "answered %d, %d bytes" % (r.status, len(got))
 
 
 CURL = shutil.which("curl")
@@ -1176,7 +1193,8 @@ upload = os.path.join(here, "close-up.bin")
 
 
 def by_curl(close):
-    args = [CURL, "-sS", "--http1.1", "-H", "Expect:", "--data-binary", "@" + upload, "-o", "-"]
+    args = [CURL, "-sS", "--http1.1", "-H", "Expect:", "--data-binary", "@" + upload, "-o", "-",
+            "--connect-timeout", str(STALL), "--speed-time", str(STALL), "--speed-limit", "1"]
     url = "/ignore?n=%d%s" % (N, "&close=1" if close else "")
     if root:
         # Schannel (Windows' curl) asks a revocation list the gate's own
@@ -1186,7 +1204,10 @@ def by_curl(close):
         args += ["--cacert", root, "--resolve", "localhost:%d:127.0.0.1" % port, "https://localhost:%d%s" % (port, url)]
     else:
         args.append("http://127.0.0.1:%d%s" % (port, url))
-    out = subprocess.run(args, capture_output=True, timeout=60)
+    try:
+        out = subprocess.run(args, capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return "curl still running after 30 s"
     if out.returncode != 0 or out.stdout != want:
         return "curl exited %d with %d bytes: %s" % (out.returncode, len(out.stdout), out.stderr.decode(errors="replace").strip()[:80])
     return None
@@ -1205,33 +1226,32 @@ if CURL:
     cases["curl, Connection: close"] = lambda: by_curl(True)
     cases["curl, a body past MAX_DRAIN"] = lambda: by_curl(False)
 # Only the cases named, when some are (a broken copy is held to the one
-# that names it); each case on a thread of its own, its runs one after
-# another: the cases share the server and nothing else.
+# that names it), one after another: on the cases' own threads, Windows'
+# curl over TLS waited out its minute once (CI job 118970480233), where
+# one at a time it had held - and the round's every case takes a second.
 named = sys.argv[4:]
 chosen = [(name, case) for name, case in cases.items() if not named or name in named]
 
 
-# The slowest run's time goes with the verdict, for a runner whose
-# closes come near the bounds to show it.
-def verdict(item):
-    name, case = item
-    first, lost, slowest = None, 0, 0.0
-    for _ in range(runs):
+# A case stops at its first failure, which is what it says; the slowest
+# run's time goes with a case that held, for a runner whose closes come
+# near the bounds to show it.
+def verdict(name, case):
+    slowest = 0.0
+    for run in range(runs):
         began = time.monotonic()
         got = case()
         slowest = max(slowest, time.monotonic() - began)
         if got:
-            lost += 1
-            first = first or got
-    if lost:
-        return False, "  FAIL: %s: %d of %d runs: %s" % (name, lost, runs, first)
+            return False, "  FAIL: %s: run %d of %d: %s" % (name, run + 1, runs, got)
     return True, "  %s: %d of %d whole, no reset, the end at once (the slowest %.2f s)" % (name, runs, runs, slowest)
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(chosen))) as pool:
-    verdicts = list(pool.map(verdict, chosen))
-for _, line in verdicts:
-    print(line)
+verdicts = []
+for name, case in chosen:
+    verdicts.append(verdict(name, case))
+    print(verdicts[-1][1])
+    sys.stdout.flush()
 if not CURL:
     print("  curl is not installed; its cases skipped")
 sys.exit(0 if verdicts and all(held for held, _ in verdicts) else 1)
@@ -1263,8 +1283,8 @@ close_round() {
 }
 # Five runs a case by default, CLOSE_RUNS= for more: closed at once, the
 # old server lost every run of every case but two in 50 (above), so five
-# catch it many times over, and each broken copy below is caught in 3 of
-# 3 runs of the case that names it.
+# catch it many times over, and each broken copy below fails the first of
+# its three runs of the case that names it.
 CLOSE_RUNS="${CLOSE_RUNS:-5}"
 # The --release build serves: a lingering close waits a second at most
 # for what the client still sends, and the plain build's TLS

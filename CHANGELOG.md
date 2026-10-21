@@ -497,7 +497,18 @@
   sent in six runs; with nginx's two bounds - a gap between reads
   (lingering_timeout) and a whole (lingering_time) - every run there was
   whole, the slowest in 5.3 s. http.client's case now says, when it
-  fails, how much of the body it had sent and when.
+  fails, how much of the body it had sent and when - and that said the
+  rest: on Windows it stalled with 768 KiB of 8 MiB sent, plain and over
+  TLS, the server still writing its megabyte of answer. http.client
+  reads nothing until its body is sent, and the server writes its answer
+  before it reads past the body, so an answer past what the sockets'
+  buffers hold leaves each end waiting on the other whatever the close
+  does - Windows' loopback holds less than a megabyte, Linux's stalls
+  the same at 16 MB. That case's answer is 8 KiB now; the reset it is
+  for comes at any size. A client in this section gives up after five
+  seconds of no progress (curl too), and a case stops at its first
+  failure, so a failing case costs seconds: the run that found this
+  waited 20 s a run and took its job to the 90-minute cap.
 - **std/tls closes gracefully (RFC 8446 section 6.1).**
   `TlsConnection#close_write` sends close_notify and shuts the socket's
   sending half (`IyiSocket#close_write`), and reading goes on until the

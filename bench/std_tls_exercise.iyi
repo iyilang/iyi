@@ -580,10 +580,21 @@ if args.size > 0 && args[0] == "serve"
     config.client_roots = Certificate.from_pem(File.read(args[1] + "/client-roots.pem")).or_panic
     config.client_required = !File.file?(args[1] + "/client-optional")
   end
+  # DIR/sourced: the identity shown is the one `identity_source` answers,
+  # read from the same files into a TlsIdentity of its own - as
+  # std/autocert's manager answers what it got - and DIR/staple.der is
+  # stapled to that identity alone, not to the config's.
+  sourced = nil.as(TlsIdentity?)
+  if File.file?(args[1] + "/sourced")
+    own = TlsIdentity.from_pem(File.read(args[1] + "/chain.pem"), File.read(args[1] + "/key.pem")).or_panic
+    sourced = own
+    config.identity_source = ->(name : String?, offered : Array(String)?) { own.as(TlsIdentity | TlsError | Nil) }
+  end
   # DIR/staple.der: an OCSP response stapled for a client that asks.
   if File.file?(args[1] + "/staple.der")
     held = File.read(args[1] + "/staple.der")
-    problem = config.staple(Array(UInt8).new(held.bytesize) { |i| held.to_unsafe[i] })
+    der = Array(UInt8).new(held.bytesize) { |i| held.to_unsafe[i] }
+    problem = (chosen = sourced) ? config.staple(der, chosen) : config.staple(der)
     if problem
       puts "staple refused: #{problem.message}"
       STDOUT.flush

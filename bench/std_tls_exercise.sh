@@ -1795,7 +1795,9 @@ echo "== OCSP stapling (RFC 6066, RFC 8446 section 4.4.2.1, RFC 7633)"
 # #staple) to OpenSSL's s_client -status in TLS 1.3 and 1.2, which shows
 # the response; to s_client without -status, which is sent none; and to
 # the std/tls client. A staple past its nextUpdate is not sent, and one
-# for another certificate is refused by the config.
+# for another certificate is refused by the config. An identity that
+# `identity_source` answers, as std/autocert's manager does, is sent with
+# the staple given to it, where the config's own identity has none.
 # stapling_round <binary> [client|server|all]: the binary against
 # OpenSSL, a line each, "FAIL" on the ones that are not as they should be.
 OCSP_PKI="$WORK/ocsp"
@@ -1858,6 +1860,7 @@ PY
     mkdir -p serve-expired serve-wrong
     cp good.pem serve-expired/chain.pem && cp good.key serve-expired/key.pem && cp expired.resp serve-expired/staple.der
     cp good.pem serve-wrong/chain.pem && cp good.key serve-wrong/key.pem && cp revoked.resp serve-wrong/staple.der
+    cp -R serve-good serve-sourced && : >serve-sourced/sourced
   ) >"$WORK/ocsp-pki.log" 2>&1; then
     stapling_ready=yes
   else
@@ -1960,6 +1963,10 @@ stapling_round() {
     staple_served "s_client -status, TLS 1.2" serve-good "Cert Status: good" - -status -tls1_2
     staple_served "s_client without -status, sent none" serve-good "resumed=no" "stapled=" -tls1_3
     staple_served "the std/tls client and server" serve-good "staple=good" - iyi
+    # The identity an identity_source answers (std/autocert's way) carries
+    # its own staple, the config's identity none.
+    staple_served "an identity_source's identity, its own staple, TLS 1.3" serve-sourced "Cert Status: good" - -status -tls1_3
+    staple_served "an identity_source's identity, its own staple, TLS 1.2" serve-sourced "Cert Status: good" - -status -tls1_2
     staple_served "the std/tls client, a must-staple leaf served with its staple, require_staple" serve-must "staple=good" - iyi TLS_REQUIRE_STAPLE=1
     staple_served "a revoked staple served, the std/tls client refusing it" serve-revoked "(certificate_revoked)" - iyi
     staple_served "a revoked staple served, as s_client -status reads it" serve-revoked "Cert Status: revoked" - -status -tls1_3
@@ -3088,6 +3095,8 @@ prove_broken "a staple past its nextUpdate sent" "FAIL a staple past its nextUpd
   '    return nil if next_update && next_update < now' '' ocsp-server
 prove_broken "a staple for another certificate kept by the config" "FAIL a staple for another certificate refused by the config" \
   '    return TlsError.new("the OCSP response has no SingleResponse for #{@leaf.subject_name}") unless single' '' ocsp-server
+prove_broken "the config's identity's staple sent for an identity_source's" "FAIL an identity_source's identity, its own staple, TLS 1.3" \
+  '    held = @identity.staple_at(@config.now || Time.utc)' '    held = @config.identity.staple_at(@config.now || Time.utc)' ocsp-server
 # The close (RFC 8446 section 6.1, RFC 5246 section 7.2.1), against the
 # scripted client's close-half, peer-close and 12-peer-close.
 prove_broken "the server's close without its drain: closed at its close_notify" "FAIL close-half " \

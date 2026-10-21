@@ -213,13 +213,16 @@
   bad_certificate_status_response. `TlsServerConfig#staple(der,
   identity)` gives an identity a response, refused unless it has a
   SingleResponse for the identity's leaf; it is stapled to a client that
-  asks, in either version, and not once past its nextUpdate.
+  asks, in either version, and not once past its nextUpdate; an identity
+  `TlsServerConfig#identity_source` answers, as std/autocert's manager
+  does, is sent with its own staple.
   `bench/std_tls_exercise.sh` holds it to OpenSSL: the client against
   `s_server -status_file` in TLS 1.3 and 1.2 (good, delegated, revoked,
   unknown, another certificate's, expired, forged, none, required and
   must-staple, each alert as s_server read it) and the server against
-  `s_client -status`, which shows the response, and the std/tls client;
-  the scripted server's four broken staples; and 18 more broken copies.
+  `s_client -status`, which shows the response, and the std/tls client,
+  with the config's identity and with one an identity source answers;
+  the scripted server's four broken staples; and 19 more broken copies.
   The scripted server's cert-entry-ext scenario sends an SCT, since a
   status_request entry is now one asked for.
 - **Tasks run across cores: `g.spawn_parallel { }` starts a task on a

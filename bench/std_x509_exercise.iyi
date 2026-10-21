@@ -402,19 +402,36 @@ raise "ASSERTION FAILED: seven intermediates signing each other: expected a refu
 check fan.message.includes?("within 100 signature checks"), "seven intermediates signing each other: refused with #{fan.message.inspect}"
 puts "  seven intermediates signing each other: given up within 100 signature checks"
 
-puts "== a P-256 chain checked inside a task, 32 frames down"
+puts "== a P-256 chain checked inside a task, 100 frames down"
 
 # Issue #130's program, run as the issue ran it: a P-256 signature and
 # then the chain checked inside a task, in a debug build (which is what
 # this exercise is with no argument), under frames that each hold a
-# kilobyte array. A task has 256 KiB of stack, and the issue's ran out
-# 24 such frames down over the signature and 13 over the chain. Most of
-# it was the struct `Certificate`, 472 bytes copied into a slot of its
-# own wherever one passed: one of the frames below was 13,352 bytes on
-# Linux x86_64 for the certificates it names, and is 5,176 now that
-# `Certificate` is a class. There a task held 16 frames over the
-# signature and 15 over the chain before, and holds 46 and 45 now, so
-# 32 fails the old code and leaves room in the new.
+# kilobyte array and name the certificates. A task has 256 KiB of stack,
+# and the issue's ran out 24 such frames down over the signature and 13
+# over the chain. Most of it was the struct `Certificate`, 472 bytes
+# copied into a slot of its own wherever one passed, these frames
+# included: each was 9,400 bytes on Linux x86_64 for a kilobyte of
+# array, and is 1,240 now that `Certificate` is a class. There a task
+# held 24 frames over the signature and 22 over the chain before, and
+# holds 196 and 195 now.
+#
+# The array is left uninitialized and written through a pointer, because
+# the issue's `StaticArray(UInt8, 1000).new` measures the compiler and
+# not this module: in a debug build on aarch64 the value it returns is
+# copied a byte at a time through stack slots, and the issue's own frame
+# is 10,912 bytes on darwin arm64 against 5,104 on Windows. That is past
+# std/x509's reach, and it ran the darwin runner out of stack at 32 of
+# the issue's frames before any check began. These frames are the same
+# size everywhere: 1,240 bytes on Linux x86_64, 1,232 on darwin arm64
+# and 1,280 on Windows x64, read from the prologues. A hundred of them
+# hold at least the 122,496 bytes the issue's 24 frames hold on Windows,
+# its platform, and 128,000 at most; the check under them took 11,768
+# bytes of a task's stack measured on Linux x86_64. That leaves about
+# 115 KB of a Linux task's 252 KiB, about 100 KB of the 240 darwin's 16
+# KiB guard pages leave, and an estimated 70 KB on Windows, where the
+# handler's room, the wall page under it and the thread's 16 KB
+# guarantee come off the 256 first. The old code held 24 at most.
 STACK_PEM = <<-PEM
   -----BEGIN CERTIFICATE-----
   MIIBXzCCAQSgAwIBAgIUPN1DS8oKjquMc4XpqC7od8xbWWYwCgYIKoZIzj0EAwIw
@@ -438,18 +455,19 @@ STACK_PEM = <<-PEM
   -----END CERTIFICATE-----
   PEM
 STACK_CERTS = Certificate.from_pem(STACK_PEM).or_panic
-STACK_DEPTH = 32
+STACK_DEPTH = 100
 
 # *depth* frames of a kilobyte array each, then the signature (*chain*
 # false) or the chain from the leaf to the root (*chain* true).
 def stacked(depth : Int32, chain : Bool) : Bool
-  pad = StaticArray(UInt8, 1000).new
-  pad[depth % 1000] = 1_u8
+  pad = uninitialized StaticArray(UInt8, 1000)
+  mark = pointerof(pad).as(Pointer(UInt8))
+  mark[depth % 1000] = 1_u8
   if depth == 0
     return STACK_CERTS[1].signed_by?(STACK_CERTS[0]) unless chain
     return X509.verify(STACK_CERTS[1], [] of Certificate, [STACK_CERTS[0]], nil, Time.utc(2027, 1, 1)).is_a?(Array(Certificate))
   end
-  stacked(depth - 1, chain) && pad[depth % 1000] == 1_u8
+  stacked(depth - 1, chain) && mark[depth % 1000] == 1_u8
 end
 
 group do |g|

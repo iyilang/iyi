@@ -898,8 +898,14 @@
   The issue's figure of 230 KB for one check was mostly those padding
   frames, which held 8 KB each rather than the 1 KB they were written
   as. `bench/std_x509_exercise.iyi` checks the issue's signature and
-  chain inside a task 32 such frames down, which the old code could not
-  do past 16 and 15.
+  chain inside a task under 100 frames that each hold a kilobyte array
+  and name the certificates, as the issue's did - 124 to 128 KB of
+  stack on Linux, darwin and Windows, at least what the issue's 24
+  frames hold on Windows - where the old code held 24 such frames at
+  most. The issue's own `StaticArray(UInt8, 1000).new` frame is 10,912
+  bytes on darwin arm64 in a debug build, against 5,104 on Windows: the
+  compiler copies that returned value a byte at a time through stack
+  slots on aarch64, which this change does not touch.
 - **`bench/std_tls_exercise.sh` no longer times Python's first
   certificate check on a Windows runner against the server's handshake
   deadline.** The first Python ssl handshake against the Ed25519 server

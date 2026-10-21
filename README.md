@@ -448,11 +448,14 @@ finds all three beside itself, so there is nothing to configure and no
 binary — a static minimal build from `scripts/build-static-llvm.sh`, the same
 recipe on Linux and darwin — so `lib/` is libgc (and libstdc++ on Linux) and
 nothing else, and the package is tens of megabytes because a compiler is,
-not because it is carrying a shared LLVM's closure. The one thing it does
+not because it is carrying a shared LLVM's closure. The Linux tarball needs
+glibc 2.31 or newer — Ubuntu 20.04, Debian 11, RHEL 9 and anything later —
+because it is built on Ubuntu 20.04; 0.18.0 was built on 24.04 and stopped
+on 22.04 with `GLIBC_2.38' not found`. The one thing it does
 not bring is a C toolchain, because iyi links through `cc`; CI proves the
-rest by unpacking the tarball in a bare image with nothing but `gcc` in it
-and building a program there, and on darwin by `otool -L` naming nothing
-outside the package but `/usr/lib` and `/System`.
+rest by unpacking the tarball in a bare Ubuntu 20.04 image with nothing but
+`gcc` in it and building a program there, and on darwin by `otool -L`
+naming nothing outside the package but `/usr/lib` and `/System`.
 
 **On Windows the same release is a zip, and the one prerequisite is the
 build tools.** 0.14.0 was the first release to publish it, and

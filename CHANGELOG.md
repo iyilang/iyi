@@ -446,6 +446,18 @@
 
 ### Fixed
 
+- **The Linux tarball starts on glibc 2.31 and newer, not only on 2.38
+  and newer.** 0.18.0's `bin/iyi` was linked in
+  `crystallang/crystal:1.21.0-build`, which is Ubuntu 24.04, and asked
+  the loader for `fmod` and `__isoc23_strtol` at GLIBC_2.38 and
+  `arc4random` at 2.36, as did the libstdc++ it carried; on Ubuntu 22.04
+  `install.sh` stopped at "`GLIBC_2.38' not found" before `main`. The
+  tarball is built in `ubuntu:20.04` now, from Crystal's static 1.21.0
+  bootstrap and a static LLVM built in the same image (cached under its
+  own key, so 24.04's archive is never restored onto it), and CI's clean
+  room runs it in a bare `ubuntu:20.04` rather than 24.04, where 0.18.0
+  passed.
+
 - **P-256 signing no longer branches on the nonce's digits.** The
   fixed-base table read is masked in the source, and in a release build
   LLVM turned it into a conditional jump per entry on the digit: a timing

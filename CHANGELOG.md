@@ -1032,6 +1032,32 @@
   arguments, as CI runs every bench program, `bench/std_http_stop.iyi`
   holds the iyi half alone, under a test PKI of its own: a std/tls client
   waiting on the stop reads close_notify, as Python's ssl does.
+- **A chunk freed by the program while the lazy sweep walks past it is
+  not handed out twice.** A chunk the last mark kept, freed before the
+  sweep of its arena reached it, went straight onto the thread's own
+  list while a sweep slice on another thread could be between reading
+  its entry and its colour: the slice took it for an unmarked object,
+  dead, and linked it into its batch as well. Freed between the slice's
+  read and its write, it lost its free flag instead. Windows' CI printed
+  "run 2 of 10 lost a chunk kept beside chunks freed" and then died of a
+  memory fault. Such a free now takes the runtime lock and waits out any
+  slice of that arena in flight; every other free keeps the lock-free
+  path, one load dearer (an alloc+free pair 3.4 ns before, 3.5 after,
+  release). Measured on four cores beside two busy loops with
+  `bench/concurrent_mark.sh`'s bursts of frees, which now free chunks a
+  mark kept while a slice of their arena is in flight: the plain build
+  faulted in 4 runs of 1,000 and the release build in 108 of 1,000, and
+  0 of 1,000 each after. The gate also runs that program on a copy of
+  the prelude whose sweep waits at each kept chunk of a kilobyte or
+  more, and proves the copy with the old free fails by name.
+
+- **P-256 signing no longer branches on the nonce's digits.** The
+  fixed-base table read is masked in the source, and in a release build
+  LLVM turned it into a conditional jump per entry on the digit: a timing
+  leak of the secret nonce. The selectors now pass through an atomic load
+  of zero, as std/big's do, and the release assembly of the lookup has no
+  jump on the digit. Found by `bench/ct_timing.sh`'s Welch's t-test: |t|
+  of 16 to 24 over 100,000 signatures before, 3.8 to 6.0 after.
 - **std/bzip2's Huffman tables stay inside their memory whatever the
   code lengths.** The fast table was filled from the lengths after one
   check - that they do not over-subscribe the code space - and without

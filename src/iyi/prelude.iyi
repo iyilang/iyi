@@ -3264,8 +3264,10 @@ require "./file"
       # `realloc`'s old chunk, and the exercises' hand-frees, come from the
       # thread that will allocate next, and a grow-by-doubling loop that
       # paid two lock cycles per step measured 61 ns an alloc+free pair
-      # against 27 with the chunk kept local. The sweep does not come
-      # through here; it has `free_batch`, to the centre.
+      # against 27 with the chunk kept local. A chunk the last mark kept
+      # and its arena's sweep has not reached yet is the exception, and
+      # takes the lock (`free_unswept`). The sweep does not come through
+      # here; it has `free_batch`, to the centre.
       def self.free(pointer : Void*) : Nil
         return if pointer.address == 0
         arena = arena_of(pointer.address)
@@ -3282,19 +3284,34 @@ require "./file"
           # as an index. `bench/concurrent_mark.sh`'s bursts of frees faulted
           # or lost a chunk in 25 runs of 30.
           write64(table.address &+ CACHE_INSIDE, read64(table.address &+ CACHE_INSIDE) &+ 1_u64)
-          # Free, white, and this epoch's: on the cache's list until the
-          # next pause drops it, and the sweep of its arena leaves a free
-          # chunk of the current parity alone (`sweep_slice`).
-          # A free chunk's colour is white (`shade_word` refuses it by
-          # its entry): an object freed black under a mark would be
-          # black again when the chunk came back, and read as marked by
-          # the sweep after the next mark.
           slot = chunk_index(arena, head)
-          write8(arena + META + slot * META_ENTRY, CARVED_FLAG | FREE_FLAG | IyiMark.epoch_flag)
-          write8(read64(arena + OFF_MARKS) + slot, IyiMark::WHITE)
-          write64(head + OFF_LINK, table[index])
-          write64(head + OFF_INDEX, slot)
-          table[index] = head
+          # The last epoch's parity: the last mark kept this chunk and the
+          # lazy sweep of its arena has not reached it, and a slice walking
+          # past it beside this thread reads its entry and then its colour,
+          # and writes the entry back. Freed between the slice's two reads,
+          # it read as allocated before the mark and white - unmarked,
+          # dead - and the slice linked it into its batch while it sat on
+          # this cache's list: handed out twice. Freed between the read and
+          # the write, it lost its free flag to the survivor's restamp.
+          # `bench/concurrent_mark.sh`'s bursts of frees, whose aged chunks
+          # are freed while a slice of their arena is in flight, on four
+          # cores beside two busy loops: the plain build faulted in 4 runs
+          # of 1,000 and the release build in 108 of 1,000, and a copy
+          # whose restamp is a compare-and-set saw a free land before it in
+          # 102 of 1,000. Such a chunk is freed under the lock with no
+          # slice of its arena in flight, and none faulted in 1,000 of each.
+          # The entry is read here without the lock: a slice that restamps
+          # it beside this read has passed the chunk, and one that has not
+          # leaves the last parity to read. The look costs the cache's path
+          # a load - an alloc+free pair 3.4 ns before it and 3.5 after, a
+          # `realloc` step 12.0 and 12.2, release. In a mark there is none
+          # of these chunks: the debt is paid before the first stop, and
+          # the epoch turns at the last.
+          if read8(arena + META + slot * META_ENTRY) & EPOCH_FLAG != IyiMark.epoch_flag
+            free_unswept(arena, head, slot, table, index)
+          else
+            list_freed(arena, head, slot, table, index)
+          end
           leave(table)
         else
           # A large chunk under a running mark stays mapped and listed, and
@@ -3310,6 +3327,42 @@ require "./file"
           free_large(pointer.address - HEADER) if LibIyiGCTable.__iyi_marking == 0_u8
           unlock
         end
+      end
+
+      # Free, white, and this epoch's: on the cache's list until the next
+      # pause drops it, and the sweep of its arena leaves a free chunk of
+      # the current parity alone (`sweep_slice`). A free chunk's colour is
+      # white (`shade_word` refuses it by its entry): an object freed
+      # black under a mark would be black again when the chunk came back,
+      # and read as marked by the sweep after the next mark.
+      @[AlwaysInline]
+      def self.list_freed(arena : UInt64, head : UInt64, slot : UInt64, table : Pointer(UInt64), index : Int32) : Nil
+        write8(arena + META + slot * META_ENTRY, CARVED_FLAG | FREE_FLAG | IyiMark.epoch_flag)
+        write8(read64(arena + OFF_MARKS) + slot, IyiMark::WHITE)
+        write64(head + OFF_LINK, table[index])
+        write64(head + OFF_INDEX, slot)
+        table[index] = head
+      end
+
+      # A chunk the last mark kept, freed before its arena's sweep reached
+      # it. A slice is claimed and let go under the lock, so with the lock
+      # held and no claim of this epoch on the arena nothing walks it until
+      # the unlock; a claim standing is waited out off the lock, which the
+      # slice's end wants. A claim of an older epoch is a walker parked
+      # after its slice (`release_claim`), and the pause's own sweep takes
+      # none, with this thread stopped. The lock's spin parks for a pause,
+      # whose sweep may turn the epoch and drop the list: both are read
+      # after it.
+      @[NoInline]
+      def self.free_unswept(arena : UInt64, head : UInt64, slot : UInt64, table : Pointer(UInt64), index : Int32) : Nil
+        lock
+        while read64(arena + OFF_SWEEPING) == IyiMark.epoch
+          unlock
+          IyiMark.spin_pause
+          lock
+        end
+        list_freed(arena, head, slot, table, index)
+        unlock
       end
 
       # Every free list emptied, under the lock with every thread stopped:

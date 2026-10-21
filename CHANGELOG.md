@@ -974,7 +974,11 @@
   for comes at any size. A client in this section gives up after five
   seconds of no progress (curl too), and a case stops at its first
   failure, so a failing case costs seconds: the run that found this
-  waited 20 s a run and took its job to the 90-minute cap.
+  waited 20 s a run and took its job to the 90-minute cap. A curl case
+  that fails says what curl saw: the last lines of its `-v
+  --trace-time` trace and its `-w` timings, `--max-time 15` stopping it
+  before the gate's 30 s do - once on Windows, over TLS, a run waited
+  out the 30 s with nothing to show (CI job 119211068616).
 - **std/tls closes gracefully (RFC 8446 section 6.1).**
   `TlsConnection#close_write` sends close_notify and shuts the socket's
   sending half (`IyiSocket#close_write`), and reading goes on until the

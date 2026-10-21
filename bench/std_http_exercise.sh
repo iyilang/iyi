@@ -1782,9 +1782,26 @@ CURL = shutil.which("curl")
 upload = os.path.join(here, "close-up.bin")
 
 
+# curl's own account goes with a failure: its -v trace, each line timed
+# (--trace-time), the last of it - where it was and what it waited on -
+# and its -w timings, with --max-time stopping it before the gate does so
+# that it says why. Once on Windows, over TLS, a run waited out the 30 s
+# the gate gave it with nothing to show (CI job 119211068616).
+TRACED = ("* ", "< HTTP", "> POST", "> GET")
+
+
+def curl_said(err, tail=8):
+    lines = [l for l in (err or b"").decode(errors="replace").splitlines()
+             if l.split(" ", 1)[-1].startswith(TRACED) or "close notify" in l.lower() or "upload completely" in l]
+    return " | ".join(l.strip() for l in lines[-tail:])
+
+
 def by_curl(close):
-    args = [CURL, "-sS", "--http1.1", "-H", "Expect:", "--data-binary", "@" + upload, "-o", "-",
-            "--connect-timeout", str(STALL), "--speed-time", str(STALL), "--speed-limit", "1"]
+    got = os.path.join(here, "curl-body-%d.bin" % port)
+    args = [CURL, "-sS", "-v", "--trace-time", "--http1.1", "-H", "Expect:", "--data-binary", "@" + upload, "-o", got,
+            "-w", "code=%{http_code} connect=%{time_connect} tls=%{time_appconnect} first=%{time_starttransfer} "
+                  "total=%{time_total} up=%{size_upload} down=%{size_download} exit=%{exitcode}",
+            "--connect-timeout", str(STALL), "--speed-time", str(STALL), "--speed-limit", "1", "--max-time", "15"]
     url = "/ignore?n=%d%s" % (N, "&close=1" if close else "")
     if root:
         # Schannel (Windows' curl) asks a revocation list the gate's own
@@ -1794,14 +1811,17 @@ def by_curl(close):
         args += ["--cacert", root, "--resolve", "localhost:%d:127.0.0.1" % port, "https://localhost:%d%s" % (port, url)]
     else:
         args.append("http://127.0.0.1:%d%s" % (port, url))
+    began = time.monotonic()
     try:
         out = subprocess.run(args, capture_output=True, timeout=30)
-    except subprocess.TimeoutExpired:
-        return "curl still running after 30 s"
-    if out.returncode != 0 or out.stdout != want:
-        return "curl exited %d with %d bytes: %s" % (out.returncode, len(out.stdout), out.stderr.decode(errors="replace").strip()[:80])
+    except subprocess.TimeoutExpired as e:
+        held = os.path.getsize(got) if os.path.exists(got) else 0
+        return "curl still running after 30 s, %d bytes of the answer in; its trace: %s" % (held, curl_said(e.stderr))
+    body = open(got, "rb").read() if os.path.exists(got) else b""
+    if out.returncode != 0 or body != want:
+        return "curl exited %d after %.2f s with %d bytes: %s; its trace: %s" % (
+            out.returncode, time.monotonic() - began, len(body), out.stdout.decode(errors="replace"), curl_said(out.stderr))
     return None
-
 
 cases = {
     "Python reading as it sends, Connection: close": lambda: as_sent(True),

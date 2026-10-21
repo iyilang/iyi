@@ -1078,7 +1078,10 @@ elif ! "$IYI" build -o "$WORK/stop" "$REPO/bench/std_http_stop.iyi" >"$WORK/stop
   sed -n '1,8p' "$WORK/stop.build"
   status=1
 else
-  said="$(stop_run "$WORK/stop")"
+  # Without carriage returns: on Windows, python's print and the program's
+  # puts end lines with them, and the same five lines then compared unequal
+  # (integration/0.20, job 119456003554).
+  said="$(stop_run "$WORK/stop" | tr -d '\r')"
   if [ "$said" = "$STOP_EXPECTED" ]; then
     grep -v 'ALL CHECKS PASSED' "$WORK/stop-self.out" | sed 's/^/  /'
     printf '%s\n' "$said" | sed 's/^/  /'

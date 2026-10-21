@@ -764,14 +764,16 @@ done
 # top down (`iyi_probe_stack`), and Windows' `__chkstk` always did, so
 # the guard is the first page past the end anything touches.
 #
-# The writable memory differs by platform. On Linux and darwin it is a
-# floor mapped by address directly under the stack, and a run whose
-# layout has something there already says so and is run again rather
-# than proving nothing. Windows never has room there: `VirtualAlloc`
-# hands out reservations from the bottom up, so the addresses under a
-# fiber's stack were taken before it was made, and the floor was refused
-# in ten runs of ten on the runner. But a Windows fiber stack carries its
-# own writable memory under the guard: the 16 KB of committed slack at
+# The writable memory comes from no free address space under a stack:
+# a floor mapped by address under the runtime's own stack was refused in
+# ten runs of ten on the Windows and darwin runners, where something else
+# is always mapped there. On Linux and darwin the program makes the stack
+# itself - one mapping of 128 KiB of floor, the guard page and 256 KiB of
+# stack, the guard `mprotect`ed as `IyiFiber#map_stack` does (16 KiB of
+# it on darwin arm64, whose pages are that size) - and hands it to the
+# scheduler's pool, so the task it spawns next runs on it; the task
+# checks that it did. On Windows a fiber stack carries its own writable
+# memory under the guard: the 16 KB of committed slack at
 # the bottom of the reservation, the fault handler's room
 # (`IyiFiber#map_stack`), which the kernel's growth never reaches. So
 # there the task walks down in frames under a page, which grow the stack
@@ -805,56 +807,63 @@ end
     descend(target) + here.value.to_i32
   end
 {% else %}
-  # 128 KiB of writable memory directly under this fiber's stack, where a
-  # frame that stepped over the guard page lands.
-  def floor_under(base : UInt64) : Bool
-    size = 131072_u64
+  # A fiber stack of the runtime's shape with 128 KiB of writable floor
+  # under its guard page, all one mapping: its base, as the pool holds it.
+  def floored_stack : UInt64
+    floor = 131072_u64
+    size = floor + IyiFiber::STACK_BYTES
+    base = 0_u64
     {% if flag?(:darwin) %}
-      LibC.mmap(Pointer(Void).new(base - size), size, 3, 4098, -1, 0_i64).address == base - size
+      region = LibC.mmap(Pointer(Void).new(0_u64), size, 3, 4098, -1, 0_i64).address
+      raise "the floored stack's mmap failed" if region &+ 1_u64 == 0_u64
+      base = region + floor
+      raise "the floored stack's guard failed" if LibC.mprotect(Pointer(Void).new(base), IyiFiber::PAGE, 0) != 0
     {% else %}
-      # MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE: there or nowhere.
-      __iyi_conc_syscall6(IYI_SYS_MMAP, (base - size).to_i64, size.to_i64, 3_i64, 0x100022_i64, -1_i64, 0_i64) == (base - size).to_i64
+      mapped = __iyi_conc_syscall6(IYI_SYS_MMAP, 0_i64, size.to_i64, 3_i64, 34_i64, -1_i64, 0_i64)
+      raise "the floored stack's mmap failed" if mapped < 0 && mapped >= -4095
+      base = mapped.to_u64 + floor
+      raise "the floored stack's guard failed" if __iyi_conc_syscall3(IYI_SYS_MPROTECT, base.to_i64, IyiFiber::PAGE.to_i64, 0_i64) != 0
     {% end %}
+    base
   end
 {% end %}
 
-group do |g|
-  g.spawn do
-    base = IyiScheduler.current_stack_top - IyiFiber::STACK_BYTES
-    {% if flag?(:win32) %}
+{% if flag?(:win32) %}
+  group do |g|
+    g.spawn do
+      base = IyiScheduler.current_stack_top - IyiFiber::STACK_BYTES
       # The middle of the committed room: the uncommitted wall page is at
       # `base`, and the room is GUARD_SLACK and a page above it.
       room = base + IyiFiber::PAGE + (IyiFiber::GUARD_SLACK + IyiFiber::PAGE) // 2_u64
       puts "the dive came back: #{descend(room)}"
-    {% else %}
-      if floor_under(base)
+    end
+  end
+{% else %}
+  base = floored_stack
+  IyiScheduler.give_stack(base)
+  group do |g|
+    g.spawn do
+      if IyiScheduler.current_stack_top != base + IyiFiber::STACK_BYTES
+        puts "the task ran on a stack other than the floored one"
+      else
         # Five such frames are about 64 KiB past a 256 KiB stack: inside
         # the floor.
         puts "the dive came back: #{plunge(4)}"
-      else
-        puts "no room under the stack for the floor"
       end
-    {% end %}
+    end
   end
-end
+{% end %}
 EOF
 "$IYI" build -o "$work/overrun_bin" "$work/overrun.iyi" > "$work/overrun.log" 2>&1 ||
   fail "the overrun program did not build: $(cat "$work/overrun.log")"
-placed=0
-for again in 1 2 3 4 5 6 7 8 9 10; do
-  set +e
-  out=$("$work/overrun_bin" 2>&1)
-  code=$?
-  set -e
-  [ "$out" = "no room under the stack for the floor" ] && continue
-  placed=1
-  [ "$code" = 1 ] || fail "a frame larger than the guard page exited $code, wanted 1: $out"
-  [ "$out" = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion" ] ||
-    fail "a frame larger than the guard page said:
+set +e
+out=$("$work/overrun_bin" 2>&1)
+code=$?
+set -e
+[ "$code" = 1 ] || fail "a frame larger than the guard page exited $code, wanted 1: $out"
+[ "$out" = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion" ] ||
+  fail "a frame larger than the guard page said:
 $out"
-  break
-done
-[ "$placed" = 1 ] || fail "ten runs found no room under a fiber's stack for the floor"
 step "a frame larger than the guard page is a stack overflow, not a write under the stack"
 # The repeats catch a thread's missing guarantee only now and then: the
 # room it leaves was enough on this machine's CPUs and not always on the

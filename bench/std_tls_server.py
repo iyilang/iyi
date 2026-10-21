@@ -936,6 +936,42 @@ def main():
         threading.Thread(target=serve_one, args=(sock, pki), daemon=True).start()
 
 
+# The close. What the client still sends once a scenario is done is read
+# and dropped first, until the client closes, for at most LINGER_BYTES and
+# LINGER_SECONDS in all, as std/tls's own server lingers after an alert:
+# the second write of early-refused and early-small, whose echo is of the
+# first alone, and the alert a client answers a refusal with. A close with
+# it unread is a reset, which can take from the client what it has not
+# yet read: when the second write landed after the read that took the
+# first, early-small read "echo:hello" and then "the connection was reset
+# by the peer" where the close_notify belonged (Windows, CI job
+# 118946639209). This side's half ends first, a FIN after the
+# close_notify, so the client reads the end of the stream while the rest
+# is drained. shutdown(SHUT_RDWR) ended the reading half too, which on
+# Windows alone resets a connection with data waiting or still to come.
+LINGER_BYTES = 65536
+LINGER_SECONDS = 1.0
+
+
+def close_gracefully(sock):
+    try:
+        sock.shutdown(socket.SHUT_WR)
+        deadline = time.monotonic() + LINGER_SECONDS
+        left = LINGER_BYTES
+        while left > 0:
+            wait = deadline - time.monotonic()
+            if wait <= 0:
+                break
+            sock.settimeout(wait)
+            got = sock.recv(min(left, 16384))
+            if not got:
+                break
+            left -= len(got)
+    except OSError:
+        pass
+    sock.close()
+
+
 def serve_one(sock, pki):
     sock.settimeout(10)
     try:
@@ -943,11 +979,7 @@ def serve_one(sock, pki):
     except Exception as e:
         print(f"server: {type(e).__name__}: {e}", file=sys.stderr)
     finally:
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        sock.close()
+        close_gracefully(sock)
 
 
 if __name__ == "__main__":

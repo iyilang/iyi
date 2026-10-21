@@ -283,6 +283,53 @@ module Iyi
     # which is every program until it writes one.
     property iyi_mod_table = [] of {String, String}
 
+    # iyi: the program's own package — `{module path, directory}` of the
+    # `iyi.mod` at its root (`Compiler.entry_root_of`) — when it has one.
+    # A package's modules live under its name in a consumer's build
+    # (III.7), and they live there in the package's own build too:
+    # `codec.iyi` of `github.com/x/iyi-web` is `IyiWeb::Codec` in both, so
+    # a `pub macro` that names it absolutely names it in both. It was
+    # `::Codec` in its own build, and no spelling worked in both.
+    property iyi_root_package : {String, String}? = nil
+
+    # The name the program's own modules live under: the manifest's last
+    # segment (`Mod::ModFile.package_name`), or nil.
+    def iyi_root_package_name : String?
+      @iyi_root_package.try { |(path, _)| Mod::ModFile.package_name(path) }
+    end
+
+    # The module paths of the program's own package read under its name -
+    # from source or from an artifact - with that name, so the rest of the
+    # compiler maps a path to its type the way the parse did. An artifact
+    # carries the name it was written under (`IyiMod::Artifact#package_name`).
+    getter iyi_module_packages = {} of String => String
+
+    # The package name *module_path* lives under in this build, when the
+    # module is one of the program's own package's: the file it is read
+    # from is `<package root>/<module_path>.iyi`. A module on `IYI_PATH`,
+    # std's included, is not the package's, and nor is a dependency's,
+    # which `SemanticVisitor#resolve_package` names by its own manifest.
+    def iyi_root_package_name_for(module_path : String, filename : String) : String?
+      return nil unless (root = @iyi_root_package) && (name = iyi_root_package_name)
+      return nil if module_path.includes?('.')
+      return nil unless Iyi.same_file?(File.join(root[1], "#{module_path}.iyi"), filename)
+      name
+    end
+
+    # Records that *module_path* was read under *package*, and answers it:
+    # what the parser is handed.
+    def iyi_record_module_package(module_path : String, package : String?) : String?
+      return nil unless package
+      @iyi_module_packages[module_path] = package
+      # The root name this module had before its own package's build named
+      # it so (`Program#iyi_moved_package_item`).
+      head = module_path.partition('/')[0]
+      @iyi_moved_package_heads << head.camelcase if package == iyi_root_package_name && head != package
+      package
+    end
+
+    @iyi_moved_package_heads = Set(String).new
+
     # iyi: editor buffers, keyed by the absolute path the file would have —
     # `iyi lsp` compiles what the person sees, saved or not. Consulted in
     # exactly two places: `resolve_import` counts an overridden path as
@@ -861,13 +908,18 @@ module Iyi
     # indistinguishable from any other ancestor.
     getter iyi_impls = {} of String => Array(IyiMod::ImplRecord)
 
-    # iyi: the type a module path denotes — `"app/greeter"` to `App::Greeter`.
+    # iyi: the type a module path denotes — `"app/greeter"` to `App::Greeter`,
+    # and a module of the program's own package under the package's name
+    # (`iyi_module_packages`), as its header was parsed.
     #
     # Resolved by segment rather than remembered, which is only safe because
     # IV.6 #6 made the path-to-name mapping injective: two module paths cannot
-    # denote one type, so this lookup cannot answer for the wrong module.
+    # denote one type, so this lookup cannot answer for the wrong module. The
+    # package rule has one exception, the same in every build: `iyi-web`
+    # holding both `codec.iyi` and `iyi_web/codec.iyi` names both `IyiWeb::Codec`.
     def iyi_module_type(module_path : String) : ModuleType?
-      module_path.split('/').reduce(self.as(ModuleType?)) do |scope, segment|
+      segments = Parser.iyi_package_segments(@iyi_module_packages[module_path]?, module_path.split('/'))
+      segments.reduce(self.as(ModuleType?)) do |scope, segment|
         return nil unless scope
         scope.types?.try(&.[]?(segment.camelcase)).as?(ModuleType)
       end

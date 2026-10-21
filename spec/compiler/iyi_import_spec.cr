@@ -1271,3 +1271,122 @@ describe "Iyi::UsingRewrite" do
     rewrite.call(once).should be_nil
   end
 end
+
+# iyi: a package's modules have one name in every build (SPEC.md III.7, #132).
+# A package's modules live under its name in a consumer's build; they were at
+# the root in the package's own, so a `pub macro` that names one absolutely -
+# it expands in the caller's file - had no spelling that built in both. Each
+# layout below is built twice, as the program (the package's own `inside.iyi`)
+# and as a requirement (`app.iyi`, through `replace`), and the module has to
+# be the same type in both.
+private IYI_PACKAGE_LAYOUTS = [
+  # A module at the package's root.
+  {package: "github.com/x/iyi-web", dir: "lib", path: "codec", name: "IyiWeb::Codec", old: "Codec"},
+  # One directory down.
+  {package: "github.com/x/iyi-web", dir: "lib", path: "web/codec", name: "IyiWeb::Web::Codec", old: "Web::Codec"},
+  # One directory down, named like the package: where it always was.
+  {package: "github.com/x/iyi-web", dir: "lib", path: "iyi_web/codec", name: "IyiWeb::Codec", old: "IyiWeb::Codec"},
+  # A package whose name is not its directory's.
+  {package: "example.test/x/web", dir: "checkout", path: "codec", name: "Web::Codec", old: "Codec"},
+]
+
+# Writes the issue's two projects under the current directory: the package
+# in *dir*, whose `dsl` holds `pub macro loud` naming the module as
+# *written*, and `app`, which requires it as `web` and replaces it with *dir*.
+private def write_iyi_package_layout(layout, written : String) : Nil
+  dir = layout[:dir]
+  Dir.mkdir_p(File.join(dir, File.dirname(layout[:path])))
+  Dir.mkdir_p("app")
+  File.write(File.join(dir, "iyi.mod"), "module #{layout[:package]}\n")
+  File.write(File.join(dir, "#{layout[:path]}.iyi"), "module #{layout[:path]}\n\npub def shout(s : String) : String\n  s\nend\n")
+  File.write(File.join(dir, "dsl.iyi"), "module dsl\n\npub import #{layout[:path]}\n\npub macro loud(x)\n  #{written}.shout({{ x }})\nend\n")
+  File.write(File.join(dir, "inside.iyi"), "module inside\n\nimport dsl::*\n\nloud(\"inside\")\n")
+  File.write("app/iyi.mod", "module app\n\nrequire #{layout[:package]} v0.1.0 as web\n\nreplace #{layout[:package]} => ../#{dir}\n")
+  File.write("app/app.iyi", "module app\n\nimport web/dsl::*\n\nloud(\"consumer\")\n")
+end
+
+private def compile_iyi_package_file(file : String, emit : String? = nil, use : String? = nil) : {Iyi::Compiler::Result, Iyi::Compiler}
+  compiler = Iyi::Compiler.new
+  compiler.no_codegen = true
+  compiler.prelude = "empty"
+  compiler.color = false
+  compiler.emit_iyimod = emit
+  compiler.use_iyimod = use
+  path = File.expand_path(file)
+  {compiler.compile(Iyi::Compiler::Source.new(path, File.read(path)), "unused"), compiler}
+end
+
+private def iyi_package_module(result : Iyi::Compiler::Result, name : String) : String?
+  result.program.lookup_path(name.split("::")).as?(Iyi::ModuleType).try(&.to_s)
+end
+
+describe "Semantic: a package's modules, one name in every build" do
+  IYI_PACKAGE_LAYOUTS.each do |layout|
+    absolute = "::#{layout[:name]}"
+
+    it "names #{layout[:path]} of #{layout[:package]} #{layout[:name]} in the package's own build and in a consumer's" do
+      with_tempdir("iyi_package_names") do
+        write_iyi_package_layout(layout, absolute)
+        inside, _ = compile_iyi_package_file(File.join(layout[:dir], "inside.iyi"))
+        consumer, _ = compile_iyi_package_file("app/app.iyi")
+        iyi_package_module(inside, layout[:name]).should eq(layout[:name])
+        iyi_package_module(consumer, layout[:name]).should eq(layout[:name])
+        unless layout[:old] == layout[:name]
+          # Nothing at the root by the old name: it was the module's.
+          inside.program.types[layout[:old].split("::").first]?.should be_nil
+        end
+      end
+    end
+
+    it "expands `pub macro loud` naming #{absolute} through artifacts of the package's own build" do
+      with_tempdir("iyi_package_artifacts") do
+        write_iyi_package_layout(layout, absolute)
+        mods = File.expand_path("mods")
+        Dir.mkdir_p(mods)
+        compile_iyi_package_file(File.join(layout[:dir], "inside.iyi"), emit: mods)
+        File.read(File.join(mods, "#{layout[:path]}.iyimod")).should_not be_empty
+        read, _ = compile_iyi_package_file(File.join(layout[:dir], "inside.iyi"), use: mods)
+        read.program.iyi_artifact_modules.values.sort.should eq(["dsl", layout[:path]].sort)
+        iyi_package_module(read, layout[:name]).should eq(layout[:name])
+      end
+    end
+
+    unless layout[:old] == layout[:name]
+      it "still builds the package with `::#{layout[:old]}`, the name it had there, and warns with the edit" do
+        with_tempdir("iyi_package_old_name") do
+          write_iyi_package_layout(layout, "::#{layout[:old]}")
+          _, compiler = compile_iyi_package_file(File.join(layout[:dir], "inside.iyi"))
+          compiler.warnings.infos.join.should contain("`::#{layout[:old]}` is `#{absolute}`")
+
+          # Written in the package's file rather than a macro's expansion,
+          # the warning carries the edit `iyi fix` makes.
+          File.write(File.join(layout[:dir], "direct.iyi"), "import #{layout[:path]}\n\n::#{layout[:old]}.shout(\"direct\")\n")
+          _, compiler = compile_iyi_package_file(File.join(layout[:dir], "direct.iyi"))
+          report = compiler.warnings.reports.first.as(Iyi::TypeException)
+          report.suggestion.should eq("::#{layout[:name].split("::").first}::#{layout[:old].split("::").first}")
+        end
+      end
+
+      it "refuses `::#{layout[:old]}` in a consumer, as it always did, naming #{absolute}" do
+        with_tempdir("iyi_package_old_consumer") do
+          write_iyi_package_layout(layout, "::#{layout[:old]}")
+          error = expect_raises(Iyi::CodeError) { compile_iyi_package_file("app/app.iyi") }
+          error.to_s.should contain("undefined constant ::#{layout[:old]}")
+        end
+      end
+    end
+  end
+
+  # The old name is answered only where a lookup reaches the root, as it was:
+  # a generic's own `T` stops the walk there, so a package module `t.iyi`
+  # does not become what `T` means inside `Box(T)`.
+  it "leaves a type parameter named like a package module alone" do
+    with_tempdir("iyi_package_type_parameter") do
+      File.write("iyi.mod", "module example.test/x/kit\n")
+      File.write("t.iyi", "module t\n\npub def one : Int32\n  1\nend\n")
+      File.write("inside.iyi", "module inside\n\nimport t\n\nclass Box(T)\n  def get(x : T) : T\n    x\n  end\nend\n")
+      _, compiler = compile_iyi_package_file("inside.iyi")
+      compiler.warnings.infos.join.should_not contain("`T` is")
+    end
+  end
+end

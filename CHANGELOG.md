@@ -1013,6 +1013,30 @@
   without the NaN rule. `spec/compiler/semantic/iyi_spec.cr` holds the
   three compiler cases and that `pick(2, 5)` against a Float64 and a
   Float32 overload is still ambiguous.
+- **A package's module has one name in the package's own build and in a
+  consumer's, so a `pub macro` can name it (#132).** A consumer's build
+  puts a package's modules under the package's name, and the package's
+  own build put them at the root: `codec.iyi` of `github.com/x/iyi-web`
+  was `::Codec` in `iyi run inside.iyi` and `::IyiWeb::Codec` in the
+  application requiring it, so a `pub macro` - which expands in the
+  caller's file and so names a module absolutely - had no spelling that
+  built in both, and a library had to keep its modules in `iyi_web/`.
+  A program whose root holds an `iyi.mod` now names its own modules the
+  way a consumer does, through the same function: `codec` and
+  `iyi_web/codec` are `IyiWeb::Codec`, `web/codec` is
+  `IyiWeb::Web::Codec`, in both builds. A `.iyimod` records the package
+  name it was written under (format v57), so `--use-iyimod` reads a
+  module back under the same name, and a manifest that renames the
+  package makes the artifact stale. `::Codec`, or a bare `Codec` nothing
+  else answers, still builds the package, as `IyiWeb::Codec`, with a
+  warning naming the new spelling, which `iyi fix` writes where a file
+  says it; inside a macro the warning names the macro and its line.
+  In a consumer, `::Codec` is refused naming `::IyiWeb::Codec`, as `Codec`
+  already was. What a type's name prints is `IyiWeb::Codec` in both
+  builds now. `spec/compiler/iyi_import_spec.cr` builds the issue's two
+  projects in four layouts, from source and from artifacts, and
+  `bench/packages_resolve.sh` runs the first one end to end, `iyi fix`
+  included.
 - **`bench/std_tls_exercise.sh` no longer times Python's first
   certificate check on a Windows runner against the server's handshake
   deadline.** The first Python ssl handshake against the Ed25519 server

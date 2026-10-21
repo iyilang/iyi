@@ -518,14 +518,18 @@ class Iyi::TopLevelVisitor < Iyi::SemanticVisitor
     if (current = @iyi_package_stack.last?) && File.file?(File.join(current[1], "#{written}.iyi"))
       return iyi_package_segments(current[0], segments).map(&.camelcase)
     end
+    # And a module of the program's own package: the import this names was
+    # read before it, under the name it recorded (`Program#iyi_module_packages`).
+    if @iyi_package_stack.empty? && (package = @program.iyi_module_packages[written]?)
+      return Parser.iyi_package_segments(package, segments).map(&.camelcase)
+    end
     segments.map(&.camelcase)
   end
 
   # A package module's namespace: under the package's name, unless its path
-  # begins with it already (`Parser#iyi_package_name`).
+  # begins with it already (`Parser.iyi_package_segments`).
   private def iyi_package_segments(prefix : String, inner : Array(String)) : Array(String)
-    package = Mod::ModFile.package_name(prefix)
-    package && inner.first? != package ? [package] + inner : inner
+    Parser.iyi_package_segments(Mod::ModFile.package_name(prefix), inner)
   end
 
   # Whether `written` is reachable from `from`'s own imports: every

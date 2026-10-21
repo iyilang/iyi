@@ -2,12 +2,12 @@
 # Exercises std/secure_dns: a `Resolver` asking DNS over TLS and DNS over
 # HTTPS upstreams instead of plaintext servers.
 #
-#     bash bench/std_dns_encrypted_exercise.sh
+#     bash bench/std_secure_dns_exercise.sh
 #
-# The servers are bench/std_dns_encrypted_server.py, Python's ssl and
+# The servers are bench/std_secure_dns_server.py, Python's ssl and
 # http.server answering a fixed zone under a test root they make (and
 # HTTP/2 through the `h2` package where it imports). The gate runs
-# bench/std_dns_encrypted_exercise.iyi against them, plain and --release;
+# bench/std_secure_dns_exercise.iyi against them, plain and --release;
 # asks dig the same questions over the same servers (`+tls`, `+https`,
 # `+https-get`) and holds the two to the same answers, which is what shows
 # the scripted servers speak the protocols and not merely what the iyi
@@ -54,7 +54,7 @@ status=0
 export IYI_PATH="$REPO/src"
 SRV="$WORK/servers"
 mkdir -p "$SRV"
-"$PY" "$REPO/bench/std_dns_encrypted_server.py" "$SRV" >"$WORK/server.log" 2>&1 &
+"$PY" "$REPO/bench/std_secure_dns_server.py" "$SRV" >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 200); do
   [ -f "$SRV/ready" ] && break
@@ -74,7 +74,7 @@ fi
 build_and_run() {
   local label="$1" name="$2"
   shift 2
-  if ! "$IYI" build "$@" -o "$WORK/$name" "$REPO/bench/std_dns_encrypted_exercise.iyi" \
+  if ! "$IYI" build "$@" -o "$WORK/$name" "$REPO/bench/std_secure_dns_exercise.iyi" \
        >"$WORK/$name.build.log" 2>&1; then
     echo "$label: build failed"
     tail -12 "$WORK/$name.build.log"
@@ -243,7 +243,7 @@ PY
     return
   fi
   if ! IYI_PATH="$WORK/$dir${PSEP}$REPO/src" "$IYI" build -o "$WORK/$dir/program" \
-       "$REPO/bench/std_dns_encrypted_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
+       "$REPO/bench/std_secure_dns_exercise.iyi" >"$WORK/$dir/build.log" 2>&1; then
     echo "  $label: the broken copy did not build"
     sed -n '1,8p' "$WORK/$dir/build.log"
     status=1
@@ -270,7 +270,7 @@ breaks "the length prefix dropped" noprefix "the encrypted resolver asks over TL
   '      framed << (query.size >> 8).to_u8
       framed << (query.size & 255).to_u8
 ' ''
-breaks "the dns parameter sent with its padding" padded "doh-get: an A record" secure_dns.iyi \
+breaks "the dns parameter sent with its padding" padded "the dns parameter is base64url without padding" secure_dns.iyi \
   '    while size > 0 && text.to_unsafe[size - 1] == 61_u8
       size = size - 1
     end

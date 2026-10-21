@@ -30,8 +30,8 @@
   keeps no cache, so `Cache-Control` is not read. `Resolver#txt` reads
   TXT records over any transport (`DnsRecord.character_strings`), and
   `HTTPClient.new` takes `tls:` and `resolver:` of its own.
-  `bench/std_dns_encrypted_exercise.sh` runs the resolver against
-  `bench/std_dns_encrypted_server.py` - Python's ssl and http.server, and
+  `bench/std_secure_dns_exercise.sh` runs the resolver against
+  `bench/std_secure_dns_server.py` - Python's ssl and http.server, and
   HTTP/2 through the `h2` package when it imports - answering a fixed zone
   under a test root, plain and release; asks `dig +tls`, `+https` and
   `+https-get` the same questions of the same servers and holds the

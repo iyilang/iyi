@@ -971,24 +971,26 @@ echo "== a server stopped while clients hold connections (bench/std_http_stop.iy
 # close_notify rather than an end without one (SSLEOFError, which it read
 # before). Then copies of the modules without the write's check, with
 # `closed?` blind to the socket, and with a stop that sends no
-# close_notify, each caught at the line that names it.
-STOP_EXPECTED="kept: TLS HTTP/1.1, TLS HTTP/2, clear HTTP/1.1, clear HTTP/2
-upgraded: 101 and 101
-the upgrades' last writes: closed, closed
-stopped
+# close_notify, each caught at the line that names it. The iyi half is
+# the program run with no arguments, as CI runs every bench program: it
+# holds what each of its lines should say, under a test PKI of its own -
+# a std/tls client among its own clients, reading close_notify as Python
+# does - and names one that is not so with "FAIL <line>:".
+STOP_EXPECTED="ALL CHECKS PASSED
 exit 0
 kept connection: HTTP/1.1 200 OK, then on the server's stop: close_notify
 the TLS server: stopped, exit 0
 panics printed: 0"
-# stop_run <binary>: what the binary's `self` printed and how it exited,
+# stop_run <binary>: the binary's ALL CHECKS PASSED or FAIL lines with no
+# arguments and how it exited,
 # what Python read on its kept connection while the binary's `serve`
 # stopped and how that ended, and the number of panics printed by either
 # (their lines, and the "at" line a panic's place is printed on, apart).
 stop_run() {
   local bin="$1" code pid
-  timeout 120 "$bin" self "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" "$WORK/tls/root.pem" >"$WORK/stop-self.out" 2>&1
+  timeout 120 "$bin" >"$WORK/stop-self.out" 2>&1
   code=$?
-  grep -v -e 'panic' -e '^  at ' "$WORK/stop-self.out"
+  grep -e '^FAIL ' -e '^ALL CHECKS PASSED$' "$WORK/stop-self.out"
   echo "exit $code"
   rm -f "$WORK/stop.port"
   "$bin" serve "$WORK/stop.port" "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" >"$WORK/stop-serve.out" 2>&1 &
@@ -1040,6 +1042,7 @@ elif ! "$IYI" build -o "$WORK/stop" "$REPO/bench/std_http_stop.iyi" >"$WORK/stop
 else
   said="$(stop_run "$WORK/stop")"
   if [ "$said" = "$STOP_EXPECTED" ]; then
+    grep -v 'ALL CHECKS PASSED' "$WORK/stop-self.out" | sed 's/^/  /'
     printf '%s\n' "$said" | sed 's/^/  /'
   else
     echo "  a server stopped under its clients did not stop cleanly:"
@@ -1048,8 +1051,9 @@ else
     status=1
   fi
   # stop_breaks <label> <module> <old> <new> <line>: the program over a
-  # copy of <module> with <old> made <new> must answer the line starting
-  # with <line> otherwise than the modules do.
+  # copy of <module> with <old> made <new> must fail at <line>: say
+  # "FAIL <line>:" itself, or answer the gate's line starting with <line>
+  # otherwise than the modules do.
   stop_breaks() {
     local label="$1" module="$2" old="$3" new="$4" line="$5" want got
     rm -rf "$WORK/stopbreak" && mkdir -p "$WORK/stopbreak/std"
@@ -1072,6 +1076,7 @@ PY
       return
     fi
     want="$(printf '%s\n' "$STOP_EXPECTED" | grep -m1 "^$line")"
+    [ -n "$want" ] || line="FAIL $line"
     # Read whole first: a grep that stops at its line would close the pipe
     # under the rest of the run, Python's print among it.
     got="$(stop_run "$WORK/stop-broken")"
@@ -1094,6 +1099,12 @@ PY
     @socket.close' '      nil
     end
     @socket.close' "kept connection"
+  stop_breaks "a stop that sends no close_notify, as a std/tls client reads it" http.iyi \
+    '      stream.close
+    end
+    @socket.close' '      nil
+    end
+    @socket.close' "the waiting std/tls client, on the stop"
 fi
 
 echo

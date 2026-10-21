@@ -991,7 +991,10 @@
   close_notify on its kept connection; copies without the write's check
   (a panic printed), with `closed?` blind to the socket (the TLS
   upgrade's goodbye written, and refused) and with a stop that sends no
-  close_notify (SSLEOFError) are each caught there.
+  close_notify (SSLEOFError) are each caught there. Run with no
+  arguments, as CI runs every bench program, `bench/std_http_stop.iyi`
+  holds the iyi half alone, under a test PKI of its own: a std/tls client
+  waiting on the stop reads close_notify, as Python's ssl does.
 - **std/bzip2's Huffman tables stay inside their memory whatever the
   code lengths.** The fast table was filled from the lengths after one
   check - that they do not over-subscribe the code space - and without

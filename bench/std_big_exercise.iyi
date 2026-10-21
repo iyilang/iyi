@@ -462,6 +462,66 @@ end
 raise "pow_mod_secret: modulo 1" unless 5.to_big.pow_mod_secret(3.to_big, BigInt.one).zero?
 raise "pow_mod_secret: a negative base" unless (-(2.to_big)).pow_mod_secret(3.to_big, m31) == m31 - 8
 
+# inverse_mod_secret: 2^(len - 1), the value the binary GCD takes every
+# one of its 2 len - 1 steps on, at every length from 2 to 700 bits; the
+# rounds that leave a negative; x times the answer is 1 modulo m, and nil
+# exactly where x and m share a factor; then a thousand cases for
+# python's pow(x, -1, m).
+(2..700).each do |length|
+  m = pow_cases.odd(length)
+  x = BigInt.one << (length - 1)
+  inverse = x.inverse_mod_secret(m)
+  raise "inverse_mod_secret: 2^(len - 1), which takes every step, modulo #{length} bits" unless inverse && (x * inverse) % m == 1
+end
+# The stand-ins mislead when x and m agree in their top 33 bits and differ
+# below them: alike in their low 31 bits too, a round takes m from x and
+# leaves a negative; x's low bits past m's, the negative is swapped into b.
+# 3000 random inversions up to 700 bits left neither.
+[96, 128, 200, 1024, 2048].each do |length|
+  high = ((BigInt.one << 32) + 0x12345.to_big) << (length - 33)
+  m = high + (0x5555.to_big << 31) + 0x10000001.to_big
+  [high + (0x1111.to_big << 31) + 0x10000001.to_big, high + (0x1111.to_big << 31) + 0x7FFFFFF1.to_big].each do |x|
+    inverse = x.inverse_mod_secret(m)
+    raise "inverse_mod_secret: a round that leaves a negative, modulo #{length} bits" unless inverse && (x * inverse) % m == 1
+    puts "inverse: #{x.to_s(16)} #{m.to_s(16)} = #{inverse.to_s(16)}"
+  end
+end
+inverse_cases = 0
+refused_inverses = 0
+300.times do |i|
+  m = pow_cases.odd(1 + pow_cases.below(i < 250 ? 700 : 4100))
+  m = m * 3.to_big if i % 7 == 3
+  x = pow_cases.bits(pow_cases.below(m.to_s(2).size + 1)) % m
+  x = x // 3.to_big * 3.to_big if i % 7 == 3
+  inverse = x.inverse_mod_secret(m)
+  if x.gcd(m) != 1
+    raise "inverse_mod_secret: nil exactly when x shares a factor with the modulus, #{m.to_s(2).size} bits" unless inverse.nil?
+    refused_inverses = refused_inverses + 1
+  else
+    raise "inverse_mod_secret: x times its inverse is 1, modulo #{m.to_s(2).size} bits" unless inverse && (x * inverse) % m == 1 && !inverse.negative? && inverse < m
+  end
+  inverse_cases = inverse_cases + 1
+end
+raise "inverse_mod_secret: modulo 1" unless 5.to_big.inverse_mod_secret(BigInt.one) == BigInt.zero
+raise "inverse_mod_secret: a negative x" unless (-(2.to_big)).inverse_mod_secret(m31) == (m31 - 1) // 2
+raise "inverse_mod_secret: 0 has none" unless BigInt.zero.inverse_mod_secret(m127).nil?
+1000.times do |i|
+  bits = i % 10 == 0 ? 1 + pow_cases.below(4096) : 1 + pow_cases.below(1100)
+  m = pow_cases.odd(bits)
+  m = m * 5.to_big if i % 9 == 2
+  x = pow_cases.bits(pow_cases.below(m.to_s(2).size + 1)) % m
+  x = x // 5.to_big * 5.to_big if i % 9 == 2
+  x = BigInt.zero if i % 50 == 7
+  x = BigInt.one if i % 50 == 8
+  x = m - 1 if i % 50 == 9
+  x = BigInt.one << (m.to_s(2).size - 1) if i % 50 == 10
+  x = x + m if i % 40 == 11
+  x = -x if i % 13 == 4
+  inverse = x.inverse_mod_secret(m)
+  puts "inverse: #{x.to_s(16)} #{m.to_s(16)} = #{inverse ? inverse.to_s(16) : "none"}"
+end
+puts "    modular inverses: inverse_mod_secret #{inverse_cases} times against its own product (#{refused_inverses} sharing a factor), 2^(len - 1) modulo every length from 2 to 700 bits, 1000 cases for python"
+
 # Thousands of cases for python's `pow(b, e, m)`, printed in hex: moduli of
 # 1 to 4096 bits, odd and even, exponents 0, 1 and up to 4096 bits, bases
 # of 0, past the modulus and negative. Most are under 1024 bits, where the

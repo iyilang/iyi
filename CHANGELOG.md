@@ -374,6 +374,81 @@
   entry still read, masked); blinding is unchanged. std/digest runs SHA-2 eight rounds a pass with the
   names turned. Tried and dropped, slower here: Poly1305 in 44-bit limbs,
   and ChaCha20 four blocks at a time.
+- **RSA-2048 signatures a quarter faster and P-256 signature checks
+  nearly four times faster, constant time kept on every secret; and
+  `BigInt#inverse_mod_secret(mod)`, a modular inverse in constant
+  time.** Measured with `--release` on the x86_64 QEMU machine above,
+  shared with other jobs (load 6 to 8), the best of several runs,
+  before and after in the same run beside Python's `cryptography`:
+
+  | | before | after | OpenSSL |
+  |---|---|---|---|
+  | RSA-2048 PSS sign (best of 8 runs of 50) | 1,062 us | 784 us | 479 us |
+  | P-256 verify (best of 5 runs of 200) | 196 us | 53 us | 42 us |
+  | `pow_mod_secret`, 1024-bit exponent and modulus | 338 us | 312 us | - |
+  | 1024-bit Montgomery product / square (quieter run) | 237 / 241 ns | 220 / 222 ns | - |
+  | 2048-bit inverse (Euclid / binary GCD) | 234 us | 64 us | - |
+
+  std/big's Montgomery product sums by columns into three words held in
+  registers (FIPS) where it loaded and stored a word of t for every
+  product, and its square takes the off-diagonal products by columns,
+  doubles them, and adds q_(k-1) m_1 last in each reduction column.
+  `inverse_mod_secret` is Pornin's optimised binary GCD (ePrint
+  2020/972, 31 steps on 64-bit stand-ins a round, every choice a mask);
+  std/rsa takes off its blinding with it, where the extended Euclid's
+  algorithm took about a fifth of a signature and followed r's
+  quotients, and std/ecdsa inverts s with it (2.5 us at 256 bits, where
+  Fermat took 10). P-256 verification has its own path in std/ecdsa:
+  four limbs in registers reduced in p's shape (std/p256's field, which
+  std/ecdsa cannot import), and u2·Q + u1·G in width-5 and width-7
+  non-adjacent form, the odd multiples of G made once and kept affine.
+  A full handshake with Python's ssl, the median of 100 (the gate's
+  run): RSA-2048 1.47 ms in TLS 1.3 (X25519) and 1.41 in 1.2, against
+  1.88 and 1.79 in the run quoted above; RSA-4096 5.78 and 5.85 (7.76,
+  7.85); P-256 0.57 and 0.62. Tried and dropped, slower here: the 16-word
+  product fully unrolled by a macro (622 ns), a P-256 square of its own
+  (67 us a check against 52), the column sums split in two (no faster).
+  Left as they were: P-384 and P-521 still read their scalars' bits one
+  at a time, and Karatsuba was not tried at 1024 bits, where the product
+  is already at this machine's cost per multiply. Held by the gates:
+  1,010 inverses against Python's `pow(x, -1, m)`, 2^(len - 1) at every
+  length to 700 bits, the rounds that leave a negative, and ten new
+  broken copies in `bench/std_big_exercise.sh`; P-256 signatures from
+  keys 1 and n - 1 that meet the doubling and the identity in the new
+  path, P-384's for the old, and ten new broken copies in
+  `bench/std_ecdsa_exercise.sh`; one more in `bench/std_rsa_exercise.sh`.
+- **P-256 signing no longer branches on its nonce's digits, and
+  `bench/ct_timing.sh` times std's secret paths.** The tool is a
+  dudect-style check (Welch's t between a fixed input and random ones,
+  interleaved, with percentile crops): it found P-256 signing at |t| = 16
+  to 24 over 100,000 signatures, and the --release assembly of
+  `P256BaseTable.pick` showed why - LLVM had made its masked table read
+  a conditional jump per entry on the digit. The selectors are xored with
+  a zero read by an atomic load now, as std/big's are; |t| = 3.8 to 6.0.
+  On one shared machine (load 6 to 8): `inverse_mod_secret` 3.3 over
+  100,000, `sign_pss` 0.8 over 20,000, P-256 signing 3.8 over 100,000,
+  X25519 7.3 over 100,000; the extended Euclid inverse std/rsa had, run
+  as the leak the tool must see, 403 over 5,000. It fails past 10 and is
+  not run by CI, whose shared runners are too noisy for that line.
+  std/big's header records the assembly audit of `inverse_mod_secret`.
+  The tool also times P-384 signing (|t| 1.7 over 50,000), Ed25519
+  signing (4.2 over 100,000), ML-KEM-768 decapsulation (valid against
+  tampered ciphertexts 2.1, one key against others 6.3, over 50,000) and
+  the AEADs' tag checks (a tag wrong in its first byte against its last:
+  AES-GCM 2.0, ChaCha20-Poly1305 4.9, over 100,000), and the --release
+  assembly of P-384's table selection, ML-KEM's re-encryption compare
+  and key selection, curve25519's swaps and table reads and the tag
+  compares has no branch on a secret: nothing there needed the P-256 fix.
+  X25519 reran at 2.0 to 5.0. Later runs put P-256 signing back at |t| =
+  10 to 19 with `pick` branch-free; timed a step at a time, every secret
+  step is flat (r and s together 3.0 to 5.3 over 100,000) and the DER
+  encoding of the public r and s is the signal (100 to 212 alone), with
+  where an input lives adding more (std/p256's header has the numbers).
+  The driver now times P-256 against messages whose r and s match the
+  fixed one's DER lengths.
+  `bench/ct_timing.iyi` run with no argument, as CI runs every bench
+  program, checks itself instead: Welch's t against Python's `statistics`
+  on six fixed samples and every target run 40 times with no bound.
 - **`Server.serve` serves at most 1,024 connections at once and wants a
   whole request within five minutes.** It accepted every connection, and
   past the head's `timeout_ms` a body was bounded per read alone, so one
@@ -462,13 +537,6 @@
   memory before its served section, and prints how long that took: 6,301
   and 2,354 ms on two loaded runners, after which the timed check took
   0.6 ms on both.
-- **P-256 signing no longer branches on the nonce's digits.** The
-  fixed-base table read is masked in the source, and in a release build
-  LLVM turned it into a conditional jump per entry on the digit: a timing
-  leak of the secret nonce. The selectors now pass through an atomic load
-  of zero, as std/big's do, and the release assembly of the lookup has no
-  jump on the digit. Found by `bench/ct_timing.sh`'s Welch's t-test: |t|
-  of 16 to 24 over 100,000 signatures before, 3.8 to 6.0 after.
 - **std/bzip2's Huffman tables stay inside their memory whatever the
   code lengths.** The fast table was filled from the lengths after one
   check - that they do not over-subscribe the code space - and without

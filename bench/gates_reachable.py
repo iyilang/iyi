@@ -54,6 +54,11 @@ TOOLS = {
     # "What a migration would need, measured"; the application is not in
     # this repository, so there is no tree here to point it at.
     "migrate_count.py",
+    # `bash bench/ct_timing.sh` times std's secret paths dudect-style and
+    # fails loudly past |t| = 10. Run by hand on a quiet machine: on a
+    # shared CI runner other jobs' load reaches |t| = 10 with nothing
+    # leaking, so no workflow runs it.
+    "ct_timing.sh",
 }
 
 

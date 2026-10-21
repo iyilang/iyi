@@ -81,6 +81,15 @@
 # Refused with a sentence, as the caller's own misuse: a seed that is not
 # 64 bytes and an m that is not 32.
 
+# bench/ct_timing.sh, `decapsulate`: one key's valid ciphertext against
+# ciphertexts with one bit flipped, which take the implicit rejection,
+# |t| = 2.1 to 2.4 over 50,000; one key and its ciphertext against 64
+# other keys and theirs, |t| = 5.2 to 6.3 over 50,000 (under 10 is no
+# leak seen, on a machine at load 8 to 11). The --release assembly of
+# `decapsulate` reads every ciphertext byte in the re-encryption compare
+# with no early exit and keeps K or K-bar by masks; its conditional jumps
+# compare loop counters, constants and pointer ranges.
+
 module std/mlkem
 
 import std/digest::{SHA3_256, SHA3_512, SHAKE128, SHAKE256}

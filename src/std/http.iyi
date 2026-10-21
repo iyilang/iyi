@@ -239,9 +239,13 @@ class Conn
   STOP_WRITE_MS = 100
 
   # What `serve` does to a connection waiting in a read when its listener
-  # closes: over TLS, close_notify, then the socket closed (`TlsConnection
-  # #close`), so a client reads the end of the connection rather than a
-  # truncation; in the clear, the socket closed. Either ends the read. A
+  # closes: over TLS, close_notify and the sending half shut
+  # (`TlsConnection#close_write`), then the socket closed, so a client
+  # reads the end of the connection rather than a truncation; in the
+  # clear, the socket closed. Either ends the read. Not the lingering
+  # close (`close`): the stop ends each waiting connection in turn, and a
+  # drain of up to `TlsConnection::DRAIN_MS` each, against a client that
+  # keeps sending, would hold the stop that long per connection. A
   # connection an upgrade handed over is the protocol's to write on, from
   # its own task, and has its socket closed alone. The socket closed under
   # it, the connection's own task finds it so: TLS answers that it is
@@ -249,7 +253,7 @@ class Conn
   def close_for_stop : Nil
     if (stream = @stream) && !@handed_over && !@socket.closed?
       @socket.write_timeout_ms = STOP_WRITE_MS
-      stream.close
+      stream.close_write
     end
     @socket.close
   end

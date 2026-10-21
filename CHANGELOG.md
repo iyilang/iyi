@@ -933,9 +933,12 @@
   writing its goodbye. Python's ssl, holding such a connection with
   `suppress_ragged_eofs=False`, read an end without close_notify
   (SSLEOFError). Now a stopping server sends close_notify on each TLS
-  connection waiting between requests and then closes it
+  connection waiting between requests, shuts its sending half
+  (`TlsConnection#close_write`) and then closes it
   (`Conn#close_for_stop`, the write held to 100 ms against a client that
-  reads nothing); one an upgrade handed over is its protocol's to write
+  reads nothing) - without the drain of the lingering close, which could
+  hold the stop up to ten seconds for each connection whose client keeps
+  sending; one an upgrade handed over is its protocol's to write
   on and is closed alone, as before. std/tls takes a socket closed under
   a connection for the connection's end: `TlsConnection#closed?` says so,
   and a read, a write, a KeyUpdate or close_notify answers a `TlsError`

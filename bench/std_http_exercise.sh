@@ -1089,7 +1089,7 @@ PY
   stop_breaks "closed? blind to the socket under the connection" tls.iyi \
     '    @closed || @socket.closed?' '    @closed' "the upgrades' last writes"
   stop_breaks "a stop that sends no close_notify" http.iyi \
-    '      stream.close
+    '      stream.close_write
     end
     @socket.close' '      nil
     end

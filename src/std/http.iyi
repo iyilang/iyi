@@ -122,7 +122,7 @@
 
 module std/http
 
-import std/socket::{IyiSocket, SocketError}
+import std/socket::{IyiSocket, Resolver, SocketError}
 import std/tls::{TlsClient, TlsConfig, TlsConnection, TlsError, TlsIdentity, TlsServer, TlsServerConfig, TlsVersion}
 import std/x509::{Certificate}
 import std/uri::{URI, Params}
@@ -2232,6 +2232,12 @@ end
 # `HTTP.tls_config` it was made with, and handed only to a request made
 # under the same one (`TlsMadeUnder`): after `HTTP.tls_config=` the next
 # request makes a connection of its own, checked against the new roots.
+# A client made with *tls* uses that configuration instead of
+# `HTTP.tls_config`, and one made with *resolver* finds its hosts by it
+# instead of `Resolver.system` - an encrypted resolver, or a hosts text
+# that pins a name to an address: std/secure_dns's `DnsOverHttps` is a
+# client of its own with both, so its server is checked against the roots
+# it was given and reached at the address it was given.
 #
 # Over HTTP/2 - `https://` where ALPN chose `h2`, or `http://` with
 # *prior_knowledge* (h2c, RFC 9113 §3.3) - a kept connection carries the
@@ -2248,10 +2254,19 @@ pub class HTTPClient
   # The proxy every request goes through, `HTTP.open`'s *proxy*; its
   # connections are kept under it.
   getter proxy : String?
+  # What this client's `https://` requests are checked against and offer,
+  # instead of `HTTP.tls_config`: roots of its own, or ALPN's `h2` first.
+  getter tls : TlsConfig?
+  # What turns a host name into addresses for this client's connections,
+  # instead of `Resolver.system`: encrypted upstreams, or a hosts text
+  # alone that pins a name to an address, as std/secure_dns's
+  # `DnsOverHttps` pins its server's.
+  getter resolver : Resolver?
 
   # *timeout_ms* and *proxy* are `HTTP.open`'s, for every request the
   # client sends.
-  def initialize(idle : Int32 = 4, @timeout_ms : Int32 = 0, @prior_knowledge : Bool = false, @proxy : String? = nil)
+  def initialize(idle : Int32 = 4, @timeout_ms : Int32 = 0, @prior_knowledge : Bool = false, @proxy : String? = nil,
+                 @tls : TlsConfig? = nil, @resolver : Resolver? = nil)
     raise "HTTP: a client keeps 0 or more idle connections, not #{idle}" if idle < 0
     raise "HTTP: a timeout of #{@timeout_ms} ms" if @timeout_ms < 0
     @idle = {} of String => Array(Conn)
@@ -2789,14 +2804,22 @@ pub struct HTTP
     # have been closed by the server before it answered.
     retry = body.is_a?(String) && (head || same_name?(method, "GET") || same_name?(method, "PUT") || same_name?(method, "DELETE") || same_name?(method, "OPTIONS") || same_name?(method, "TRACE"))
     refused_before = false
+    # The client's own TLS configuration and resolver, when it has them.
+    under = tls_config
+    through = nil.as(Resolver?)
+    if keeping = client
+      under = keeping.tls || under
+      through = keeping.resolver
+    end
     while true
       conn = nil.as(Conn?)
       if keeping = client
-        conn = keeping.take(key, secure ? tls_config : nil) unless upgrade
+        conn = keeping.take(key, secure ? under : nil) unless upgrade
       end
       reused = !conn.nil?
       unless conn
-        socket = IyiSocket.connect(dial_host, dial_port, timeout_ms > 0 ? timeout_ms : -1)!
+        wait = timeout_ms > 0 ? timeout_ms : -1
+        socket = (through ? IyiSocket.connect(dial_host, dial_port, through, wait) : IyiSocket.connect(dial_host, dial_port, wait))!
         client.made if client
         if tunneled && (via = route)
           unopened = tunnel(socket, via, named + ":" + port.to_s, tunnel_credential, timeout_ms, secure)
@@ -2811,20 +2834,20 @@ pub struct HTTP
             socket.read_timeout_ms = timeout_ms
             socket.write_timeout_ms = timeout_ms
           end
-          offered = tls_config
+          offered = under
           if upgrade
             # An upgrade is HTTP/1.1's: ALPN offers that alone, as RFC
             # 8441's way over HTTP/2 (an extended CONNECT) is not here.
             offered = TlsConfig.new
-            offered.roots = tls_config.roots
-            offered.now = tls_config.now
-            offered.identity = tls_config.identity
+            offered.roots = under.roots
+            offered.now = under.now
+            offered.identity = under.identity
             offered.alpn = ["http/1.1"]
           end
           tls = TlsClient.over(socket, host, offered, timeout_ms > 0 ? timeout_ms : TlsClient::HANDSHAKE_TIMEOUT_MS)
           return HTTPError.new(tls.message) if tls.is_a?(TlsError)
           conn = Conn.new(socket, stream: TlsStream.new(tls, host))
-          conn.made_under = TlsMadeUnder.new(tls_config)
+          conn.made_under = TlsMadeUnder.new(under)
           speaks_h2 = upgrade.nil? && tls.alpn_protocol == "h2"
         else
           conn = Conn.new(socket)

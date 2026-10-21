@@ -4,6 +4,46 @@
 
 ### Added
 
+- **Encrypted DNS: a `Resolver` can ask DNS over TLS (RFC 7858) and DNS
+  over HTTPS (RFC 8484) instead of plaintext servers.** std/secure_dns has
+  the two upstreams: `DnsOverTls.new(name, address)` connects to the
+  address on port 853 and checks the certificate for the name (RFC 8310's
+  strict profile), frames each message with its two-byte length, keeps
+  one connection for every exchange until it sits idle `idle_ms`, sends
+  A and AAAA in one write and matches the answers by ID in any order, and
+  resumes with the tickets the server sent; `DnsOverHttps.new(url,
+  address)` POSTs `application/dns-message` or GETs with the `dns`
+  parameter in base64url without padding, with the ID 0, through an
+  `HTTPClient` of its own that offers `h2` first and keeps its
+  connection. `resolver.encrypted(upstreams)` (or
+  `Resolver.encrypted(upstreams)` for the machine's hosts file and
+  search list) is the resolver that asks them, and
+  `IyiSocket.connect(host, port, resolver)` connects through it. Its
+  plaintext servers are never asked unless the program passes
+  `plaintext_fallback: true`, and then only when no upstream could be:
+  falling back by default would hand the question the program meant to
+  keep private to the path. An answer over either is refused when its ID
+  or question is not the query's, when it has TC set, when its frame holds
+  bytes past the message, or when the connection ends inside it; a DoH
+  answer also when its status is not 200, its `Content-Type` is not
+  `application/dns-message`, or its body is past 65535 bytes. std/dns
+  keeps no cache, so `Cache-Control` is not read. `Resolver#txt` reads
+  TXT records over any transport (`DnsRecord.character_strings`), and
+  `HTTPClient.new` takes `tls:` and `resolver:` of its own.
+  `bench/std_dns_encrypted_exercise.sh` runs the resolver against
+  `bench/std_dns_encrypted_server.py` - Python's ssl and http.server, and
+  HTTP/2 through the `h2` package when it imports - answering a fixed zone
+  under a test root, plain and release; asks `dig +tls`, `+https` and
+  `+https-get` the same questions of the same servers and holds the
+  answers equal (dig's DoH is HTTP/2's alone, so without `h2` only `+tls`
+  is compared); and catches fourteen broken copies at the check that
+  names each: the server's name not checked, the length prefix dropped,
+  the `dns` parameter padded, the ID not matched over TLS, the plaintext
+  servers asked unasked, TC or trailing bytes taken, a connection per
+  exchange, an idle connection kept, a DoH status or `Content-Type` not
+  read, a DoH ID not 0, and an `HTTPClient`'s own TLS configuration or
+  resolver ignored.
+
 - **Tasks run across cores: `g.spawn_parallel { }` starts a task on a
   pool of worker threads (SPEC.md III.4.13).** The pool starts at the
   first parallel spawn with as many workers as the cores the process may

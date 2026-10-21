@@ -31,7 +31,11 @@
 #
 # What it does not do: no EDNS(0), so a UDP answer is at most 512 bytes and
 # a larger one comes back truncated and is asked again over TCP; no cache,
-# so every lookup asks; no DNSSEC validation; no reverse lookups.
+# so every lookup asks - and so a DNS over HTTPS answer's `Cache-Control`
+# and every record's TTL go unread; no DNSSEC validation; no reverse
+# lookups. The encrypted transports, DNS over TLS and over HTTPS, are
+# std/secure_dns's, for the same reason the plaintext ones are
+# std/socket's: they talk, and this module only reads and writes bytes.
 
 module std/dns
 
@@ -117,7 +121,7 @@ pub struct DnsError
   def reason : String
     said = case @kind
            when NOT_FOUND      then "the name does not exist (NXDOMAIN)"
-           when NO_ADDRESS     then "the name has no address"
+           when NO_ADDRESS     then @detail.empty? ? "the name has no address" : "the name has #{@detail}"
            when SERVER_FAILURE then "the name server failed (SERVFAIL)"
            when REFUSED        then "the name server refused the query (#{@detail})"
            when TIMED_OUT      then "no name server answered in time"
@@ -242,6 +246,7 @@ end
 pub struct DnsRecord
   A     =  1
   CNAME =  5
+  TXT   = 16
   AAAA  = 28
   IN    =  1
 
@@ -256,6 +261,23 @@ pub struct DnsRecord
   getter target : String
 
   def initialize(@name : String, @type : Int32, @record_class : Int32, @ttl : UInt32, @data : Bytes, @target : String)
+  end
+
+  # The character-strings of a TXT record's data (RFC 1035 3.3.14), each
+  # a length byte and that many bytes; nil when the last one runs past the
+  # data. A record holds one or more, and `Resolver#txt` joins them, as
+  # SPF (RFC 7208 3.3) and DKIM read a record of several.
+  def self.character_strings(data : Bytes) : Array(String)?
+    found = [] of String
+    raw = data.to_unsafe
+    at = 0
+    while at < data.size
+      length = raw[at].to_i32
+      return nil if at + 1 + length > data.size
+      found << String.new(length) { |into| into.copy_from(raw + at + 1, length) }
+      at = at + 1 + length
+    end
+    found
   end
 end
 
@@ -348,6 +370,36 @@ pub struct DnsMessage
   def self.id_of(packet : Bytes) : Int32
     return -1 if packet.size < 12
     (packet[0].to_i32 << 8) | packet[1].to_i32
+  end
+
+  # Where the message at the start of *packet* ends: past its header, its
+  # questions and every record of its three sections, as their counts
+  # say; -1 when they run past the bytes or a name cannot be read. Over a
+  # stream the frame is the message, so an answer whose frame holds bytes
+  # past this point is refused as oversized there (`Resolver`'s encrypted
+  # upstreams); a datagram is not held to it.
+  def self.ends_at(packet : Bytes) : Int32
+    size = packet.size
+    return -1 if size < 12
+    raw = packet.to_unsafe
+    questions = u16(raw, 4)
+    records = u16(raw, 6) + u16(raw, 8) + u16(raw, 10)
+    at = 12
+    index = 0
+    while index < questions + records
+      read = read_name(packet, at)
+      return -1 if read.nil?
+      at = read[1]
+      if index < questions
+        at = at + 4
+      else
+        return -1 if at + 10 > size
+        at = at + 10 + u16(raw, at + 8)
+      end
+      return -1 if at > size
+      index = index + 1
+    end
+    at
   end
 
   # The message in *packet*: its header, its one question, and - unless it

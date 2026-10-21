@@ -4937,4 +4937,82 @@ describe "Semantic: iyi" do
       end
     end
   end
+
+  # #136. A literal records each type it can be cast to while the overloads
+  # are tried, and that record is what calls a call ambiguous; the
+  # mismatch message is computed per argument. Both read the literal where
+  # the call failed on another argument.
+  describe "what a call with a literal says" do
+    float_pair = <<-CODE
+      def pick(a : Float64, b : Float64)
+        a
+      end
+
+      def pick(a : Float32, b : Float32)
+        a
+      end
+
+      CODE
+
+    it "takes the one overload the variable allows, not calling the literal ambiguous" do
+      # It was "ambiguous call, implicit cast of 2 matches all of Float64,
+      # Float32": the Float32 overload, which `x` rules out, had recorded
+      # Float32 for the literal before `x` failed it.
+      assert_type(float_pair + <<-CODE) { float64 }
+        x = 3
+        pick(2, x)
+        CODE
+    end
+
+    it "names the argument no overload takes" do
+      # It was "expected argument #1 to 'pick' to be Float32 or Float64,
+      # not Int32", about the literal both overloads take.
+      assert_error(float_pair + <<-CODE, "expected argument #2 to 'pick' to be Float32 or Float64, not Int64")
+        x = 3_i64
+        pick(2, x)
+        CODE
+    end
+
+    it "still calls a literal ambiguous when two overloads take the call" do
+      assert_error(float_pair + <<-CODE, "ambiguous call, implicit cast of 2 matches all of Float64, Float32")
+        pick(2, 5)
+        CODE
+    end
+
+    it "lets a literal before a variable take the type the variable binds" do
+      # It bound T to Int32 and refused the Int64, where `same(n, 2)` was
+      # an Int64.
+      assert_type(<<-CODE) { int64 }
+        def same(a : T, b : T) : T forall T
+          b
+        end
+
+        n = 3_i64
+        same(2, n)
+        CODE
+    end
+
+    it "keeps the written order's type where it matches" do
+      assert_type(<<-CODE) { int64 }
+        def same(a : T, b : T) : T forall T
+          b
+        end
+
+        x = 3
+        same(1_i64, x)
+        CODE
+    end
+
+    it "refuses a pair neither of which casts to the other" do
+      assert_error(<<-CODE, "expected argument #2 to 'same' to be Int64, not UInt64")
+        def same(a : T, b : T) : T forall T
+          b
+        end
+
+        x = 3_i64
+        y = 4_u64
+        same(x, y)
+        CODE
+    end
+  end
 end

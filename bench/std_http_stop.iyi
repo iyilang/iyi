@@ -1,18 +1,22 @@
 # A server stopped while clients hold connections to it: std/http's
-# `serve` closes them, and nothing panics.
+# `serve` closes them, over TLS with close_notify, and nothing panics.
 #
-#   ./bin/iyi run bench/std_http_stop.iyi self CHAIN.pem KEY.pem ROOT.pem
+#   ./bin/iyi run bench/std_http_stop.iyi
 #   ./bin/iyi run bench/std_http_stop.iyi serve PORTFILE CHAIN.pem KEY.pem
 #
-# `self` runs std/http's server over TLS (ALPN h2 and http/1.1) and in
-# the clear in one program, and clients that keep a connection to each:
-# HTTP/1.1 and HTTP/2 over TLS, HTTP/1.1 and h2c in the clear, and an
-# upgrade over each whose block reads until the connection ends and then
-# writes once more. Then both listeners close, by a request, with every
-# one of those connections still open, and the program says what each
-# connection's protocol was told and that it stopped. A panic anywhere is
-# printed by the task it happened in; bench/std_http_exercise.sh reads
-# the output for one, and for the exit code.
+# With no arguments it runs std/http's server over TLS (ALPN h2 and
+# http/1.1, under the test PKI below) and in the clear in one program,
+# and clients that keep a connection to each: HTTP/1.1 and HTTP/2 over
+# TLS, HTTP/1.1 and h2c in the clear, a std/tls client that sent one
+# request and waits for the next answer, and an upgrade over each whose
+# block reads until the connection ends and then says goodbye. Then both
+# listeners close, by a request, with every one of those connections
+# still open, and each line says what a connection was told: the waiting
+# TLS client close_notify, the upgrades that they are closed. A line
+# that is not what it should be is followed by "FAIL <check>: <found>,
+# not <wanted>", and the run ends "ALL CHECKS PASSED" or exits 1. A
+# panic anywhere is printed by the task it happened in, which no check
+# here can see: bench/std_http_exercise.sh counts them in the output.
 #
 # `serve` is the TLS server alone, HTTP/1.1, until a GET of /stop, for a
 # client the gate writes in Python to hold a connection to while it stops.
@@ -21,9 +25,36 @@ module bench/std_http_stop
 
 import std/http::{HTTP, HTTPClient, Request, Response, Server, TlsStream}
 import std/socket::{IyiSocket, SocketError}
-import std/tls::{TlsConfig, TlsServerConfig}
+import std/tls::{TlsClient, TlsConfig, TlsError, TlsServerConfig}
 import std/x509::{Certificate}
 import std/file::{File}
+
+# A test PKI of this program's own, for the run with no arguments: a root
+# and a leaf for localhost it signed, Ed25519, valid from 2025 to 9999 so
+# that no clock retires them.
+# The leaf's key is in the open on purpose: it guards nothing but this
+# test. Made once with Python's cryptography.
+LEAF_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBQzCB9qADAgECAgEDMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowFDESMBAGA1UEAwwJ\n" \
+           "bG9jYWxob3N0MCowBQYDK2VwAyEAOeskudtTVi76JObK6QHqJy6M7PaEu/aLlC5H\n" \
+           "B5OLks+jZjBkMBQGA1UdEQQNMAuCCWxvY2FsaG9zdDAMBgNVHRMBAf8EAjAAMB0G\n" \
+           "A1UdDgQWBBQN8ZJay/U7zf07disj78hKukvGAjAfBgNVHSMEGDAWgBSNjkTWVhBs\n" \
+           "a874Ao2cPFX4w4saajAFBgMrZXADQQAcAgj9qe58GnzceRkYfxyfNHxmqWOgDJkn\n" \
+           "b3rO1pz+8OCRioO1P+BhFa1FR/FMHSH9bOFEKfXfy3Nwr+y+GkMM\n" \
+           "-----END CERTIFICATE-----\n"
+ROOT_PEM = "-----BEGIN CERTIFICATE-----\n" \
+           "MIIBJDCB16ADAgECAgEBMAUGAytlcDAZMRcwFQYDVQQDDA5peWkgYmVuY2ggcm9v\n" \
+           "dDAgFw0yNTAxMDEwMDAwMDBaGA85OTk5MTIzMTIzNTk1OVowGTEXMBUGA1UEAwwO\n" \
+           "aXlpIGJlbmNoIHJvb3QwKjAFBgMrZXADIQCQIEeX9suXr4DL8DiLdBUfoWaJU+Hv\n" \
+           "7JhN3IpqspsuOqNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYw\n" \
+           "HQYDVR0OBBYEFI2ORNZWEGxrzvgCjZw8VfjDixpqMAUGAytlcANBAFEfpUf437+b\n" \
+           "PwJvPGD/gB0zIegp6+3cJzF42Tx6Hj8tIJgdtXVKA58EXmitGetqb788+xoJ49My\n" \
+           "4Wc3L1uxxAI=\n" \
+           "-----END CERTIFICATE-----\n"
+KEY_PEM = "-----BEGIN PRIVATE KEY-----\n" \
+          "MC4CAQAwBQYDK2VwBCIEIOYKs3OzEJYJ/j+ZQYLoAU929MQeanF9kupAR9HpeHJ8\n" \
+          "-----END PRIVATE KEY-----\n"
 
 # The block an upgrade hands the connection to: it reads until the
 # connection ends - the server's stop closes it under the block - and
@@ -55,10 +86,34 @@ end
 args = Program.args
 mode = args.size > 0 ? args[0] : ""
 
-if mode == "self"
-  secure = TlsServerConfig.from_pem(File.read(args[1]), File.read(args[2])).or_panic
+# One check's line, *label* and what was found; and when it is not
+# *wanted*, a FAIL line naming the check, what was found and what
+# should have been.
+def check(label : String, got : String, wanted : String, failures : Array(String)) : Nil
+  puts "#{label}: #{got}"
+  return if got == wanted
+  puts "FAIL #{label}: #{got}, not #{wanted}"
+  failures << label
+end
+
+# A std/tls client's request, and its answer read whole - a head and a
+# body of 8 bytes, "HTTP/1.1" - so that the server waits for the next.
+def asked(tls : TlsClient) : String
+  tls.write("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+  heard = ""
+  until heard.ends_with?("\r\n\r\nHTTP/1.1")
+    got = tls.read
+    return "no answer: #{got.message}" if got.is_a?(TlsError)
+    return "no answer: the connection ended" if got.empty?
+    heard = heard + got
+  end
+  heard.split("\r\n").first
+end
+
+if mode.empty?
+  secure = TlsServerConfig.from_pem(LEAF_PEM + ROOT_PEM, KEY_PEM).or_panic
   secure.alpn = ["h2", "http/1.1"]
-  roots = Certificate.from_pem(File.read(args[3])).or_panic
+  roots = Certificate.from_pem(ROOT_PEM).or_panic
   h1 = TlsConfig.new
   h1.roots = roots
   h1.alpn = ["http/1.1"]
@@ -70,6 +125,7 @@ if mode == "self"
   secure_base = "https://localhost:#{tls.local_port}"
   plain_base = "http://127.0.0.1:#{plain.local_port}"
   said = [] of String
+  failures = [] of String
   group do |g|
     g.spawn do
       Server.serve(tls, tls: secure) do |req|
@@ -96,12 +152,19 @@ if mode == "self"
       in_clear.get(plain_base + "/").or_panic
       h2c = HTTPClient.new(prior_knowledge: true)
       third = h2c.get(plain_base + "/").or_panic
-      puts "kept: TLS #{first.body}, TLS #{second.body}, clear #{in_clear.get(plain_base + "/").or_panic.body}, clear #{third.body}"
+      check("kept", "TLS #{first.body}, TLS #{second.body}, clear #{in_clear.get(plain_base + "/").or_panic.body}, clear #{third.body}",
+        "TLS HTTP/1.1, TLS HTTP/2, clear HTTP/1.1, clear HTTP/2", failures)
+      waiting = TlsClient.connect("localhost", tls.local_port, h1, 10000).or_panic
+      check("a std/tls client's request", asked(waiting), "HTTP/1.1 200 OK", failures)
       HTTP.tls_config = h1
       upgraded = [HTTP.upgrade(secure_base + "/upgrade", "hold").or_panic, HTTP.upgrade(plain_base + "/upgrade", "hold").or_panic]
-      puts "upgraded: #{upgraded.map { |u| u.response.status }.join(" and ")}"
+      check("upgraded", upgraded.map { |u| u.response.status }.join(" and "), "101 and 101", failures)
       HTTP.get(secure_base + "/stop").or_panic
       HTTP.get(plain_base + "/stop").or_panic
+      ended = waiting.read
+      check("the waiting std/tls client, on the stop", ended.is_a?(TlsError) ? ended.message : (ended.empty? ? "close_notify" : "#{ended.bytesize} bytes more"),
+        "close_notify", failures)
+      waiting.close
       upgraded.each { |u| u.socket.close }
       over_h1.close
       over_h2.close
@@ -110,8 +173,9 @@ if mode == "self"
       0
     end
   end
-  puts "the upgrades' last writes: #{said.sorted.join(", ")}"
-  puts "stopped"
+  check("the upgrades' last writes", said.sorted.join(", "), "closed, closed", failures)
+  exit 1 unless failures.empty?
+  puts "ALL CHECKS PASSED"
   exit 0
 end
 
@@ -128,5 +192,5 @@ if mode == "serve"
   exit 0
 end
 
-puts "usage: std_http_stop (self | serve) ..."
+puts "usage: std_http_stop [serve PORTFILE CHAIN.pem KEY.pem]"
 exit 2

@@ -803,7 +803,10 @@ pub class IyiSocket
   # A connect to *addr*, waiting at most *ms* milliseconds for the
   # handshake (-1: as long as the kernel does). The resolver's TCP query
   # and `connect` to an address are its callers with a bound; a race's
-  # attempts wait as the kernel does, and the race keeps the bound.
+  # attempts wait as the kernel does, and the race keeps the bound. The
+  # bound reaches `__sys_connect` as well as the wait after it, because
+  # on Windows that call is the wait: it parks in `ConnectEx` until the
+  # handshake is over.
   def self.connect_to(addr : Pointer(UInt8), family : Int32, peer : String, ms : Int32 = -1) : IyiSocket | Cancelled | SocketError
     fd = __sys_socket(family)
     return SocketError.new("create a socket", __sys_code(fd.to_i64)) if fd < 0
@@ -811,7 +814,7 @@ pub class IyiSocket
     __send_at_once(fd, family)
     blocking = __sys_connects_blocking?(family)
     __sys_set_nonblock(fd) unless blocking
-    res = __sys_connect(fd, addr, family)
+    res = __sys_connect(fd, addr, family, ms)
     if res < 0 && !__sys_in_progress?(res)
       code = __sys_code(res.to_i64)
       __sys_close(fd)
@@ -1565,7 +1568,8 @@ pub class IyiSocket
       LibC.accept(fd, addr.as(Void*), addrlen)
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+    # *ms* is `connect_to`'s wait's: the call answers EINPROGRESS at once.
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       LibC.connect(fd, addr.as(Void*), __sys_addr_size(family))
     end
 
@@ -1674,7 +1678,7 @@ pub class IyiSocket
     end
 
     def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
-      __sys_connect(fd, addr, family)
+      __sys_connect(fd, addr, family, -1)
     end
 
     def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
@@ -1802,7 +1806,8 @@ pub class IyiSocket
       __sys3(SYS_ACCEPT, fd.to_i64, addr.address.to_i64, addrlen.address.to_i64).to_i32
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+    # *ms* is `connect_to`'s wait's: the call answers EINPROGRESS at once.
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       __sys3(SYS_CONNECT, fd.to_i64, addr.address.to_i64, __sys_addr_size(family)).to_i32
     end
 
@@ -1911,7 +1916,7 @@ pub class IyiSocket
     end
 
     def self.__sys_dgram_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
-      __sys_connect(fd, addr, family)
+      __sys_connect(fd, addr, family, -1)
     end
 
     def self.__sys_dgram_send(fd : Int32, buf : Pointer(UInt8), len : UInt64) : Int64
@@ -2231,7 +2236,15 @@ pub class IyiSocket
       client.unsafe_to_i32
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+    # The handshake is waited for here, inside `ConnectEx`, so *ms* bounds
+    # this park: the deadline cancels the operation (the poller's
+    # `wake_expired_sleepers`) and the cancellation's completion is what
+    # wakes this frame, so the OVERLAPPED and `sent` are no longer the
+    # kernel's when the park returns. Without the bound the park lasted as
+    # long as the kernel's own SYN retries, and `connect_to`'s wait, which
+    # holds *ms* on the POSIX arms, came after it was all over: issue #131
+    # measured 21043 ms for a 2000 ms bound to an address that drops SYNs.
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       s = __sys_handle(fd)
       return -WSAEWOULDBLOCK if IyiScheduler.current.cancelled
       # `ConnectEx` is TCP's alone: a unix socket connects with the plain
@@ -2255,7 +2268,7 @@ pub class IyiSocket
       if answered == 0
         err = LibWs2_32.WSAGetLastError
         return -err if err != ERROR_IO_PENDING
-        parked = IyiScheduler.park_overlapped_current
+        parked = IyiScheduler.park_overlapped_current(ms)
         # A cancelled task answers Winsock's "under way", which for a connect
         # is WSAEWOULDBLOCK: the shared `connect` above then waits, and
         # `wait_writable` answers `Cancelled` for a cancelled task, which is
@@ -2273,7 +2286,13 @@ pub class IyiSocket
         # is 0 whether it succeeded or failed, so the operation's own result
         # is the only thing that knows: WSAECONNREFUSED comes back as -10061
         # and the shared `connect` refuses it by name.
+        #
+        # A handshake that finished before the deadline's cancel reached it
+        # is a connection whatever the clock says; one the cancel ended is
+        # the bound running out, and answers WSAETIMEDOUT, the code the
+        # POSIX arms' timed-out wait gives the same connect.
         result = __sys_overlapped_result(s, ov)
+        return -WSAETIMEDOUT if result < 0_i64 && IyiScheduler.current.timed_out
         return result.to_i32 if result < 0_i64
       end
       LibWs2_32.setsockopt(s, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, Pointer(Void).new(0_u64), 0)
@@ -2702,7 +2721,7 @@ pub class IyiSocket
       -1
     end
 
-    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32) : Int32
+    def self.__sys_connect(fd : Int32, addr : Pointer(UInt8), family : Int32, ms : Int32) : Int32
       -1
     end
 

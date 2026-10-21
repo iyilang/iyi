@@ -129,6 +129,43 @@ puts "nodelay: ok"
   puts "connect_timeout: ok"
 {% end %}
 
+# The bound holds for the handshake on every platform, wherever the
+# connect waits for it. On Windows it waits inside `ConnectEx`, and that
+# park had no deadline: a connect to 10.255.255.1, which nothing answers,
+# with a 2000 ms bound answered "timed out" after the kernel's own 21 s
+# of SYN retries (#131). An answer that came well past its bound, or a
+# timeout that came before it, fails here; an answer before the bound
+# that is not a timeout is the network's, and leaves this endpoint
+# unable to show the bound.
+def connect_bound(host : String, port : Int32, bound : Int32) : Nil
+  started = __iyi_monotonic_ns
+  tried = IyiSocket.connect(host, port, timeout_ms: bound)
+  took = (__iyi_monotonic_ns - started) // 1000000_i64
+  raise "connect_bound: a connect to #{host} was cancelled" if tried.is_a?(Cancelled)
+  tried.close if tried.is_a?(IyiSocket)
+  timed_out = tried.is_a?(SocketError) && tried.timed_out?
+  answer = tried.is_a?(SocketError) ? tried.message : "connected"
+  raise "connect_bound: a #{bound} ms bound on a connect to #{host}:#{port} answered after #{took} ms: #{answer}" if took >= bound + 1000
+  raise "connect_bound: a #{bound} ms bound on a connect to #{host}:#{port} timed out early, after #{took} ms" if timed_out && took < bound
+end
+
+# The issue's own: 10.255.255.1 is private and routed nowhere, so its
+# SYNs are dropped wherever no network answers for it. On Linux
+# (x86-64), where `connect_to`'s wait already held the bound, it timed
+# out after 2002 ms on the machine this was written on.
+connect_bound("10.255.255.1", 5432, 2000)
+{% if flag?(:win32) %}
+  # And one this exercise controls: Windows retries a connect a port
+  # refuses for about 2 s before it gives up (8c, `localhost_v6`), so a
+  # 500 ms bound on a loopback port nobody holds runs out first, network
+  # or none.
+  unheld = IyiSocket.listen("127.0.0.1", 0)
+  unheld_port = unheld.local_port
+  unheld.close
+  connect_bound("127.0.0.1", unheld_port, 500)
+{% end %}
+puts "connect_bound: ok"
+
 # 4. Closed peer detection (EOF)
 client.close
 raise "closed_peer: client close failed" unless client.closed?

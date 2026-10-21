@@ -2337,10 +2337,13 @@ jobs:
   # and the foundation before them, they ran past this job's ninety minutes.
   # A shard has ninety too: shard 3 took 49 to 58 minutes in green runs and
   # was cut off at sixty on master, and a branch whose std/tls gate grew
-  # took shard 2 past sixty-five.
+  # took shard 2 past sixty-five. Two hours, and fifty minutes a sibling:
+  # with two broken copies at a time on Windows (below), std/http's broken
+  # copies alone took 1,479 s there (integration/0.20, job 119078192918),
+  # past the thirty-five a sibling had.
   windows-std-siblings:
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -2394,6 +2397,7 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           MUT_JOBS: "2"
+          SIBLING_MINUTES: "50"
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 
   # The gates the Linux job runs that no Windows job did: the runtime's

@@ -26,7 +26,7 @@ import std/x509::{Certificate, SigningKey, X509Error}
 import std/ecdsa::{EcdsaPublicKey, EcdsaCurve}
 import std/http::{HTTP, Request, Response, Server}
 import std/socket::{IyiSocket}
-import std/tls::{TlsConfig, TlsError, TlsIdentity, TlsVersion}
+import std/tls::{TlsConfig, TlsError, TlsIdentity, TlsVersion, TlsAlert}
 import std/file::{File}
 import std/dir::{Dir}
 import std/random::{Random}
@@ -120,15 +120,20 @@ def policy_checks(dir : String, directory : String, counter : Counter) : Nil
   refused = manager.identity_for("evil.autocert.example", ["http/1.1"])
   check refused.is_a?(TlsError) && refused.message.includes?("not a name this manager answers for") && counter.connections == 0 && manager.orders == 0,
     "a disallowed name is refused before the CA is asked: #{refused}, #{counter.connections} connections to the CA"
+  check refused.is_a?(TlsError) && refused.alert == TlsAlert::UNRECOGNIZED_NAME, "a disallowed name is refused with unrecognized_name: #{refused}"
   check manager.identity_for(nil, ["http/1.1"]).is_a?(TlsError) && counter.connections == 0, "a client naming no host is refused before the CA is asked"
   check cache.get(AutocertManager::ACCOUNT_KEY).nil?, "no account key is made for a refused name"
-  puts "  evil.autocert.example refused with no connection to the CA: #{refused}"
+  # What is printed is the same on every run and platform: no port, no
+  # count, no wording of the system's; the details are asserted above.
+  puts "  evil.autocert.example refused with unrecognized_name, the CA not asked"
 
   allowed = manager.identity_for("A.autocert.example", ["http/1.1"])
   check allowed.is_a?(TlsError) && counter.connections > 0, "an allowed name, in another case, is ordered: the CA asked #{counter.connections} times"
+  check allowed.is_a?(TlsError) && allowed.alert == TlsAlert::INTERNAL_ERROR && allowed.message.includes?("the CA's directory"),
+    "an allowed name the CA cannot be reached for is refused with internal_error, naming the directory: #{allowed}"
   unicode = manager.identity_for("xn--bcher-kva.autocert.example", nil)
   check unicode.is_a?(TlsError) && !unicode.message.includes?("not a name this manager answers for"), "a Unicode name in the list is allowed by its A-labels: #{unicode}"
-  puts "  an allowed name asks the CA (#{counter.connections} connections), a Unicode one by its A-labels"
+  puts "  an allowed name asks the CA, and is refused with internal_error when the CA answers nothing; a Unicode one is allowed by its A-labels"
 
   puts "\n== a failure remembered"
   asked = counter.connections
@@ -140,7 +145,7 @@ def policy_checks(dir : String, directory : String, counter : Counter) : Nil
   key = SigningKey.from_pem(stored.as(String))
   public = key.is_a?(SigningKey) ? key.public_key : nil
   check public.is_a?(EcdsaPublicKey) && public.curve == EcdsaCurve::P256, "the cached account key reads back as a P-256 key"
-  puts "  remembered: #{again}"
+  puts "  the next handshake is refused with the same error, the CA not asked again; the account key cached, P-256"
 end
 
 def challenge_serve(dir : String) : Nil

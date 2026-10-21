@@ -275,9 +275,9 @@ mkdir -p "$WORK/r1"
 if (cd "$WORK/r1" && "$IYI" build --emit-iyimod mods -o from-source "$REPO/bench/std_autocert_exercise.iyi" &&
   "$IYI" build --use-iyimod mods -o from-artifact "$REPO/bench/std_autocert_exercise.iyi") >"$WORK/r1/build.log" 2>&1; then
   local_run "$WORK/r1/from-artifact" "$WORK/r1/cache" "$WORK/r1/artifact.out"
-  # The ports the CA's stand-in listened on differ run to run.
-  if grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out" &&
-    cmp -s <(sed 's/127\.0\.0\.1:[0-9]*/PORT/g' "$WORK/plain.out") <(sed 's/127\.0\.0\.1:[0-9]*/PORT/g' "$WORK/r1/artifact.out"); then
+  # Compared byte for byte: the exercise prints no port, count or wording
+  # of the system's, which differ run to run and platform to platform.
+  if grep -q "ALL CHECKS PASSED" "$WORK/r1/artifact.out" && cmp -s "$WORK/plain.out" "$WORK/r1/artifact.out"; then
     echo "  built from its artifacts, the exercise prints what it prints from source"
   else
     echo "  FAIL: from its artifacts the exercise prints otherwise:"

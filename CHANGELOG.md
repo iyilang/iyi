@@ -902,6 +902,32 @@
   holds with 500 ms, which Windows takes about 2 s to refuse; the copy
   without the bound fails it on Windows, and on Linux and darwin it is
   the same program.
+- **`JSON.to_json` writes a union-typed value, and `JSON.from_json` reads
+  one (#135).** `JSON.to_json(1.as(Int32 | String))`, an
+  `Array(Int32 | String)` and a `Hash(String, Int32 | String)` did not
+  build ("undefined method 'to_json' for Int32 (compile-time type is
+  (Int32 | String))"), so JWT claims such as `{"sub" => "1", "sv" => 0,
+  "exp" => 1792618239_i64}` could not be encoded: the union reached
+  `write_value`'s `ToJSON` overload as one type. A union is now written by
+  the member it holds, through that member's own overload, called as
+  `Object#__json_write` so it runs as the member's own type: an enum, a
+  float, a bool, a derived or `ToJSON` type, an array, a hash and an `Any`
+  each write as they do alone. Naming the members in a macro on `Union`
+  was tried first; from std/json that refused `Std::Time::Time` as not
+  imported (SPEC.md R-1) and a program's private type as an undefined
+  constant. Reading picks the member by the kind of value there, in
+  Crystal's order for integers (`Int64`, `UInt64`, `Int32`, `UInt8`, then
+  `Float64`), an array into the `Array` member, an object into the `Hash`
+  member and the rest into the one other member. Crystal tries each member
+  until one does not raise; with no rescue to go back with, a union that
+  would need that, such as two derived types or two arrays, is refused
+  when it is compiled, naming them. `bench/std_json_exercise.sh` checks
+  the issue's cases, JWT claims both ways, every kind of member against
+  hand-written text and against each member written alone, union fields of
+  a derived type, two refusals and the compile-time refusal; its broken
+  copies write a union as one type (the issue's error back), drop the enum
+  members where a union is written, and drop the `Int32` member where one
+  is read. std/json still writes no `Time`, alone or in a union.
 - **`bench/std_tls_exercise.sh` no longer times Python's first
   certificate check on a Windows runner against the server's handshake
   deadline.** The first Python ssl handshake against the Ed25519 server

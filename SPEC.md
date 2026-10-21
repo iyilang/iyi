@@ -1341,6 +1341,21 @@ the way another module would, which R-2 refuses for one that is not
 `pub`. crystal-metric's port wrote the reader and the writer by hand
 field by field for want of it; `bench/std_json_exercise.sh` holds it.
 
+**A union is written as the member it holds and read by the kind of value
+there.** `JSON.write_value` calls `Object#__json_write` on a union, a method
+that runs as the member's own type and hands `self` back to the overload that
+member has alone. The members are never named from `std/json`: a name is
+looked up where it is written, and from there `Std::Time::Time` was refused as
+not imported (R-1) and a program's private type was not found. Reading cannot
+do what Crystal's `Union.new` does, try each member and keep the first that
+does not raise, because there is no rescue to go back with. It reads a boolean
+into `Bool`, an integer into the first of `Int64`, `UInt64`, `Int32`, `UInt8`
+that holds it and then `Float64`, a string into `String`, an array into the
+one `Array` member, an object into the one `Hash` member, and anything else
+into the one other member. A union with two of a kind beyond the scalars,
+such as two derived types or two arrays, is refused when it is compiled
+instead of guessed at. `bench/std_json_exercise.sh` holds both directions.
+
 **The `Order` case is built.** A field's type arrives as a type, not a name, so
 `field[:type] <= ToJSON` is the question above, asked and answered. The type,
 the trait and the impl may all belong to another module and arrive from its

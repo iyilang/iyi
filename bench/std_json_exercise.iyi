@@ -13,6 +13,8 @@
 #     object's key order does not matter), `dig` and `dig?` walk paths.
 #   * Every prelude scalar, arrays, hashes and a `ToJSON` type write through
 #     `JSON.to_json`; `from_json` reads them back and refuses what does not fit.
+#   * A union is written as the member it holds, alone or in an array, a
+#     hash or a derived type's field, and read by the kind of value there.
 #   * Every malformed input is refused with its exact sentence and location.
 #   * A corpus, re-emitted compact and pretty, for the shell gate to compare
 #     against another implementation byte for byte.
@@ -701,6 +703,62 @@ group do |g|
 end
 assert_true not_a_shade.includes?("\"purple\" is no ") && not_a_shade.includes?("member (light, dark_red, http_blue)"), "a name no member has, refused naming them: #{not_a_shade}"
 puts "  JSON::Field: a key, ignored either way, a nil left out, a converter; enums by name and value, flags as arrays, a name refused"
+
+# ---------------------------------------------------------------------------
+# Unions
+# ---------------------------------------------------------------------------
+
+# A union is written by the member it holds, through that member's own
+# writer, and read by the kind of value there. `JSON.to_json` of a union
+# did not build (issue #135): the union reached the `ToJSON` overload
+# whole, and `to_json` was asked of an `Int32`.
+struct Grant
+  getter sub : String | Int64
+  getter scope : Array(String) | String | Nil
+  getter level : Shade | Int32
+
+  derive serializable
+end
+
+puts "\n== unions"
+assert_text "[1,\"x\"]", JSON.to_json([1, "x"] of Int32 | String), "an Array(Int32 | String)"
+assert_text "1", JSON.to_json(1.as(Int32 | String)), "an Int32 | String holding 1"
+assert_text "\"x\"", JSON.to_json("x".as(Int32 | String)), "an Int32 | String holding \"x\""
+assert_text "{\"a\":1,\"b\":\"x\"}", JSON.to_json({"a" => 1, "b" => "x"} of String => Int32 | String), "a Hash(String, Int32 | String)"
+assert_text "[1,null]", JSON.to_json([1, nil] of Int32 | Nil), "an Array(Int32 | Nil), as before"
+claims = {"sub" => "1", "sv" => 0, "exp" => 1792618239_i64} of String => String | Int32 | Int64
+claims_text = JSON.to_json(claims)
+assert_text "{\"sub\":\"1\",\"sv\":0,\"exp\":1792618239}", claims_text, "JWT claims, a Hash(String, String | Int32 | Int64)"
+read_claims = JSON.from_json(claims_text, Hash(String, String | Int32 | Int64))
+assert_true read_claims["sub"] == "1" && read_claims["sv"].is_a?(Int64) && read_claims["sv"] == 0 && read_claims["exp"] == 1792618239_i64, "JWT claims read back, an integer into Int64, the member the other library tries first"
+assert_text claims_text, JSON.to_json(read_claims), "and written as they were"
+
+# Every kind of member, each written as it is written alone.
+mixed = [Shade::DarkRed, Access::Read | Access::Exec, 2.5, true, nil, "s", 200_u8, 18446744073709551615_u64, -9_i64, 7,
+         Point.new(1, 0.5), Place.new(0.5, 1.0, "u", nil), [1, 2], {"k" => [true]}, JSON.parse("[null]")] of Shade | Access | Float64 | Bool | Nil | String | UInt8 | UInt64 | Int64 | Int32 | Point | Place | Array(Int32) | Hash(String, Array(Bool)) | Any
+alone = [JSON.to_json(Shade::DarkRed), JSON.to_json(Access::Read | Access::Exec), JSON.to_json(2.5), JSON.to_json(true), JSON.to_json(nil), JSON.to_json("s"),
+         JSON.to_json(200_u8), JSON.to_json(18446744073709551615_u64), JSON.to_json(-9_i64), JSON.to_json(7), JSON.to_json(Point.new(1, 0.5)),
+         JSON.to_json(Place.new(0.5, 1.0, "u", nil)), JSON.to_json([1, 2]), JSON.to_json({"k" => [true]}), JSON.to_json(JSON.parse("[null]"))]
+assert_text "[\"dark_red\",[\"read\",\"exec\"],2.5,true,null,\"s\",200,18446744073709551615,-9,7,{\"x\":1,\"y\":0.5},{\"x\":0.5,\"y\":1.0,\"name\":\"u\",\"note\":null},[1,2],{\"k\":[true]},[null]]", JSON.to_json(mixed), "enums, a float, a bool, nil, a string, integers, a ToJSON type, a derived type, an array, a hash and an Any as members"
+assert_text "[#{alone.join(",")}]", JSON.to_json(mixed), "each member written as it is alone"
+
+# Read by the kind of value there, the integers in the other library's
+# order: Int64, UInt64, Int32, UInt8, then Float64.
+mixed_read = JSON.from_json(%([true, 7, -7, 5000000000, 18446744073709551615, 2.5, "s", [1], {"k": [false]}, null]), Array(Bool | Int32 | UInt64 | Float64 | String | Array(Int32) | Hash(String, Array(Bool)) | Nil))
+assert_text "[true,7,-7,5000000000,18446744073709551615,2.5,\"s\",[1],{\"k\":[false]},null]", JSON.to_json(mixed_read), "every member read by the kind of value there, an integer into the first integer member that holds it"
+assert_true mixed_read[1].is_a?(UInt64) && mixed_read[2].is_a?(Int32) && mixed_read[3].is_a?(UInt64) && mixed_read[4].is_a?(UInt64) && mixed_read[5].is_a?(Float64), "7 into UInt64, -7 into Int32, past Int64 into UInt64, 2.5 into Float64"
+widened = JSON.from_json("[1, 5000000000]", Array(Int32 | Float64))
+assert_true widened[0].is_a?(Int32) && widened[1].is_a?(Float64), "an integer past Int32 into Float64"
+assert_text "[1,5000000000.0]", JSON.to_json(widened), "and written as the Float64 it is"
+shades = JSON.from_json(%(["http_blue", 2]), Array(Int32 | Shade))
+assert_true shades[0] == Shade::HTTPBlue && shades[1].is_a?(Int32), "a string into the enum, an integer into Int32"
+grant = Grant.from_json(%({"sub": 42, "scope": ["read", "write"], "level": "dark_red"}))
+assert_true grant.sub == 42_i64 && grant.scope.is_a?(Array(String)) && grant.level == Shade::DarkRed, "a derived type's union fields read by the kind of value there"
+assert_text "{\"sub\":42,\"scope\":[\"read\",\"write\"],\"level\":\"dark_red\"}", grant.to_json, "and written by the member each holds"
+assert_text "{\"sub\":\"ada\",\"scope\":\"all\",\"level\":3}", Grant.from_json(%({"sub": "ada", "scope": "all", "level": 3})).to_json, "the other members of each"
+assert_text "{\"sub\":\"b\",\"scope\":null,\"level\":1}", Grant.from_json(%({"sub": "b", "scope": null, "level": 1})).to_json, "and a nil"
+puts "  written as the member held: scalars, enums, ToJSON and derived types, arrays, hashes, an Any; JWT claims both ways"
+puts "  read by the kind of value there, integers in the other library's order, into fields of a derived type"
 
 # ---------------------------------------------------------------------------
 # Refusals

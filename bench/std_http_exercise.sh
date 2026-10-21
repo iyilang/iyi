@@ -1253,10 +1253,18 @@ https_checks() {
   for alpn in h2,http/1.1 http/1.1; do
     local version="HTTP/2"
     [ "$alpn" = http/1.1 ] && version="HTTP/1.1"
-    got="$(timeout -k 5 60 "$H2BIN" tls-get "$base" "$WORK/tls/root.pem" "$alpn" 2>&1 | tr '\n' '|')"
+    got="$(timeout -k 5 "${HTTPS_GET_SECONDS:-60}" "$H2BIN" tls-get "$base" "$WORK/tls/root.pem" "$alpn" 2>&1 | tr '\n' '|')"
     want="echo 200 GET /echo x=1 $version host=localhost:$tport length=0 fnv=cbf29ce484222325 x=iyi|big 200 1000000 true|post 200 true|connections 1|"
     [ "$got" = "$want" ] || https_fail "the iyi client offering $alpn: $got"
   done
+  # A broken copy is caught at its first failure, and the clients after
+  # it only wait out their timeouts against a server that cannot answer
+  # them: "the TLS handshake skipped" spent 684 s of the gate there.
+  if [ -n "${HTTPS_FIRST_FAIL:-}" ] && [ "$failed" -gt 0 ]; then
+    kill "$tpid" 2>/dev/null
+    wait "$tpid" 2>/dev/null
+    return $failed
+  fi
   if curl_asked "$kind"; then
     local c=(curl -sS --cacert "$WORK/tls/root.pem" --resolve "localhost:$tport:127.0.0.1")
     got="$("${c[@]}" -H 'X-Test: curl' -w ' <%{http_version}>' "$base/echo?x=1" 2>&1)"
@@ -1807,7 +1815,7 @@ proxy_round() {
   local bin="$1" alpn="$2" v="$3" got want
   proxy_up
   # Without CRs: Python writes the proxy's log with CRLF on Windows.
-  got="$(timeout -k 5 120 "$bin" "$PPORT" "$HPORT" "$SPORT" "$WORK/tls/root.pem" "$alpn" 2>&1; echo --; tr -d '\r' <"$WORK/proxy.log")"
+  got="$(timeout -k 5 "${PROXY_ROUND_SECONDS:-120}" "$bin" "$PPORT" "$HPORT" "$SPORT" "$WORK/tls/root.pem" "$alpn" 2>&1; echo --; tr -d '\r' <"$WORK/proxy.log")"
   want="$(proxy_expected "$v")"
   proxy_down
   if [ "$got" = "$want" ]; then
@@ -2362,7 +2370,7 @@ https_breaks() { # https_breaks <label> <name> <old> <new>
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
-  elif https_checks "$WORK/$name.bin" "$WORK/tls/ed.pem" "$WORK/tls/ed.key" ed >"$WORK/$name.out" 2>&1; then
+  elif HTTPS_FIRST_FAIL=1 HTTPS_GET_SECONDS=20 https_checks "$WORK/$name.bin" "$WORK/tls/ed.pem" "$WORK/tls/ed.key" ed >"$WORK/$name.out" 2>&1; then
     echo "  $label: the HTTPS checks passed on a broken server"
     status=1
   else
@@ -2465,7 +2473,9 @@ PY
     echo "  $label: the broken copy did not build"
     sed -n '1,6p' "$WORK/$name.log" | sed 's/^/    /'
     status=1
-  elif proxy_round "$WORK/$name.bin" http/1.1 HTTP/1.1 >"$WORK/$name.out" 2>&1; then
+  # Twenty seconds for a broken copy, which fails where it fails: without
+  # a tunnel the client waited out all 120 (123 s of the gate).
+  elif PROXY_ROUND_SECONDS=20 proxy_round "$WORK/$name.bin" http/1.1 HTTP/1.1 >"$WORK/$name.out" 2>&1; then
     echo "  $label: the proxy round passed on a broken client"
     status=1
   else

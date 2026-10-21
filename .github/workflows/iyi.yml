@@ -2380,10 +2380,16 @@ jobs:
         run: |
           python -m pip install -q cryptography pillow
           python3 --version
+      # Two broken copies at a time, not four: three Windows shards lost
+      # their runner ("lost communication with the server") deep into a
+      # shard holding std/tls or std/http, whose copies build and serve four
+      # at once on a 4-core runner (jobs 118492675680, 118598972995,
+      # 118855592816); none of the Linux or darwin shards did.
       - name: The module exercises of this shard, on Windows
         shell: bash
         env:
           PYTHONUNBUFFERED: "1"
+          MUT_JOBS: "2"
         run: bash bench/std_siblings.sh ${{ matrix.shard }} 4
 
   # The gates the Linux job runs that no Windows job did: the runtime's

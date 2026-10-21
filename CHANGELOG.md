@@ -847,6 +847,81 @@
   on (41 ms), the client's flight in two writes (42 ms with Nagle on) and
   the server's in separate writes (two lone ChangeCipherSpecs) are each
   caught at the line that names it.
+- **std/http closes a connection by lingering, so an answer is no
+  longer lost to a client still sending (RFC 9112 section 9.6).** A
+  server that closed with the client's bytes unread - a body the block
+  never read, pipelined requests behind an answer that says `close`, the
+  rest of a refused request - made the kernel reset the connection, and
+  the reset threw away what the server had yet to send (Linux) or what
+  the client had yet to read (Windows). Closed at once, in 50 runs of
+  each case on Linux (`bench/http2_exercise.iyi serve-close`, a 1 MB
+  answer to an 8 MiB body it does not read), Python's http.client lost
+  the answer in every run, plain and over TLS, its send reset before it
+  read; under `Connection: close` a client reading as it sent lost the
+  end of the answer in every run, as did curl and the first of 200
+  pipelined requests; past the megabyte a kept connection reads past,
+  every curl run ended in a reset. Now a connection the server wrote last
+  on shuts its sending half (close_notify first over TLS), reads and
+  drops what the client still sends until it closes - while it comes a
+  second apart at most (`Conn::LINGER_GAP_MS`), for ten seconds
+  (`LINGER_MS`) and 64 MiB (`LINGER_BYTES`, `Server::MAX_BODY`) at most,
+  so a closing connection holds its task and its place among
+  `max_connections` no longer - and then closes: nginx's
+  lingering_close; Go's server half-closes the same way and then sleeps
+  500 ms without reading. HTTP/2 does the same after its GOAWAY. A
+  connection that timed out, or whose client said `close` and sent
+  nothing past its request, closes at once, as nothing of the client's
+  is left to come. The client closes the same way: an idle connection
+  half-closed and its server's end awaited, an answer abandoned partway
+  closed at once. After the fix every case answered whole in 50 runs of
+  50, plain and over TLS. `bench/std_http_exercise.sh`'s "a close while
+  the client still sends" holds it: Python reading as it sends, Python's
+  http.client, 200 pipelined requests and curl, 5 runs of each
+  (`CLOSE_RUNS=` for more), the cases side by side, plain and over
+  std/tls, every answer whole, no reset, and the end within half
+  a second of the answer; and the client's close against a Python server
+  that holds its end back 300 ms. Broken copies are caught by name: the
+  linger removed (http.client reset, and the client's close returning at
+  once), the sending half never shut (the end a second late), TLS's
+  drain removed, TLS's close without close_notify, and the client
+  closing TLS at once; the three refusals' and the GOAWAY's own copies
+  now break the new sites. Measured with `wrk -t2 -c50 -d5s`, release,
+  median of three beside the old code: keep-alive requests 76,230 req/s
+  (77,515 before), clients that say `close` 59,096 (57,685), and a
+  server that says `close` to clients that did not 46,714 (62,328) - the
+  price of each such close's half-close and its wait, parked, for the
+  client's end. The first cut bounded the whole linger to one second,
+  and a body slower than that to arrive was cut off: over TLS on a
+  Windows runner Python's http.client waited out its 20 s timeout in
+  every run (CI job 118872747607), and on Linux, the server's CPU shared
+  with six busy loops, it was reset with 4.75 to 7.25 of its 8 MiB
+  sent in six runs; with nginx's two bounds - a gap between reads
+  (lingering_timeout) and a whole (lingering_time) - every run there was
+  whole, the slowest in 5.3 s. http.client's case now says, when it
+  fails, how much of the body it had sent and when.
+- **std/tls closes gracefully (RFC 8446 section 6.1).**
+  `TlsConnection#close_write` sends close_notify and shuts the socket's
+  sending half (`IyiSocket#close_write`), and reading goes on until the
+  peer's own close_notify; `write` and `key_update` are refused after
+  it. `close` is `close_write`, then what the peer still sends read and
+  dropped until its close_notify or the socket's end - while it comes a
+  second apart at most (`DRAIN_GAP_MS`), for ten seconds (`DRAIN_MS`)
+  and 64 MiB (`DRAIN_BYTES`) at most - and then the socket
+  closed, where it closed at once after its close_notify and a peer
+  still sending was reset. Nothing is waited for once the peer's
+  close_notify has come. `abort` still closes at once. TLS 1.2 has no
+  half-close: RFC 5246 section 7.2.1 has a close_notify answered by one's
+  own and the connection closed, pending writes discarded, so once a 1.2
+  peer's close_notify has been read `write` is refused; in 1.3 it goes
+  on. `bench/std_tls_client.py` holds the server to it: close-half (the
+  socket's end within half a second of the server's close_notify, and
+  records sent after it read past, not reset), peer-close (1.3: written
+  to after this side's close_notify), 12-peer-close (1.2: nothing but
+  the server's close_notify after this side's) and 12-close-half.
+  Broken copies of the drain, the half-close, the close_notify and each
+  version's write rule are caught at those scenarios. The drain decrypts
+  what it reads, to see the close_notify: 8 MiB took 0.04 s in a release
+  build and 0.21 s in a plain one.
 - **std/bzip2's Huffman tables stay inside their memory whatever the
   code lengths.** The fast table was filled from the lengths after one
   check - that they do not over-subscribe the code space - and without

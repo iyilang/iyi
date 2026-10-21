@@ -48,6 +48,16 @@
 # pattern as Go's ServeMux does, std/fileserver answers them from a
 # directory, std/sse streams events, and std/websocket takes a
 # connection over.
+# A connection the server closes after writing to it - an answer that
+# says `close`, a body left unread past that megabyte, a refusal, a
+# GOAWAY - closes by lingering (RFC 9112 §9.6): the sending half shut
+# (close_notify first over TLS), what the client still sends read and
+# dropped until it closes, while it comes a second apart at most, for
+# ten seconds and 64 MiB at most, then the socket closed - so the reset a
+# close with unread bytes would be cannot take the answer from a client
+# still sending. A client that said
+# `close` and sent nothing past its request is closed at once. The
+# client closes its connections the same way.
 # The socket parks under the runtime, so a slow client costs one fiber;
 # the listener's `close` ends `serve`. With `tls:` a `TlsServerConfig`
 # (std/tls's server: TLS 1.3, and 1.2 when its `min_version` asks; an
@@ -460,17 +470,81 @@ class Conn
     idle.delete(@socket.object_id) if idle
   end
 
-  # A connection speaking HTTP/2 says GOAWAY first, so the other end knows
-  # no request was lost in the close.
+  # The connection ended from this side (RFC 9112 section 9.6): GOAWAY
+  # first over HTTP/2, so the other end knows no request was lost in the
+  # close; then, while the other end has not ended its half, a lingering
+  # close - this side's sending half shut (close_notify first over TLS,
+  # `TlsConnection#close`), and what the other end still sends read and
+  # dropped until it closes, for at most `LINGER_BYTES` and `LINGER_MS`,
+  # before the socket closes. A socket closed with bytes unread in it is
+  # reset rather than ended, and the reset takes from the other end what
+  # it had received and not yet read: a server that closed at once on a
+  # request body it had not read lost its whole answer to Python's
+  # http.client in each of 50 runs, and the end of it to curl in each of
+  # 50 (bench/std_http_exercise.sh, "a close while the client still
+  # sends"). nginx's lingering_close is this; Go's server half-closes the
+  # same way (closeWriteAndWait) and then waits without reading. A
+  # connection that ended or failed is closed at once (`close_now`).
   def close : Nil
     if h2 = @h2
       h2.goaway
     end
-    if stream = @stream
+    if @ended || !@failure.nil?
+      close_now
+    elsif stream = @stream
       stream.close
+    else
+      linger
+    end
+  end
+
+  # Closed with nothing waited for: over TLS the close_notify still goes
+  # first.
+  def close_now : Nil
+    if stream = @stream
+      stream.close_write
+      stream.abort
     else
       @socket.close
     end
+  end
+
+  # The lingering close's bounds, nginx's two: each read waits at most
+  # `LINGER_GAP_MS` for more (lingering_timeout, 5 s there), and the whole
+  # linger lasts at most `LINGER_MS` (lingering_time, 30 s there) - so a
+  # close holds its task, and a server's connection its place among
+  # *max_connections*, for at most ten seconds, and that only for a client
+  # that goes on sending at least every second; one that stops sending,
+  # or closes, ends it within a second. A bound on the whole alone was
+  # wrong: at one second in all, a body slower than that to arrive was
+  # cut off, and Python's http.client, which sends its whole body before
+  # it reads, never read its answer - over TLS on a Windows runner it
+  # waited out its timeout in every run (CI job 118872747607), and on
+  # Linux, the server's CPU shared with six busy loops, it was reset with
+  # 4.75 to 7.25 of its 8 MiB sent. Go's server waits 500
+  # ms after its half-close without reading (`rstAvoidanceDelay`). The
+  # bytes are enough for the largest request body the server takes
+  # (`Server::MAX_BODY`) to finish arriving. A client that has read the
+  # answer and closed ends it at once: on loopback, a round trip.
+  LINGER_BYTES  = Server::MAX_BODY
+  LINGER_GAP_MS =  1000
+  LINGER_MS     = 10000
+
+  private def linger : Nil
+    socket = @socket
+    return if socket.closed?
+    socket.close_write
+    until_ns = Time.monotonic_nanoseconds.to_i64 + LINGER_MS.to_i64 * 1000000_i64
+    left = LINGER_BYTES
+    while left > 0
+      wait = (until_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
+      break if wait <= 0
+      socket.read_timeout_ms = wait < LINGER_GAP_MS ? wait.to_i32 : LINGER_GAP_MS
+      got = socket.read(@data, @capacity)
+      break unless got.is_a?(Int32) && got > 0
+      left = left - got
+    end
+    socket.close
   end
 end
 
@@ -582,8 +656,24 @@ pub class TlsStream
     sent
   end
 
+  # close_notify, the sending half shut, and what the peer still sends
+  # read past for a bounded time before the socket closes
+  # (`TlsConnection#close`).
   def close : Nil
     @tls.close
+  end
+
+  # close_notify and the sending half shut; reads go on until the peer's
+  # own (`TlsConnection#close_write`).
+  def close_write : SocketError?
+    shut = @tls.close_write
+    return SocketError.layered("close the writing to #{@host}", shut.message) if shut
+    nil
+  end
+
+  # The socket closed at once, nothing sent or read first.
+  def abort : Nil
+    @tls.abort
   end
 
   def closed? : Bool
@@ -1444,7 +1534,8 @@ pub struct Server
   MAX_BODY = 67108864
   # What a streaming block may leave unread and still have the connection
   # kept: the rest is read past up to this much, and past it the
-  # connection is closed rather than read for as long as the client sends.
+  # connection is closed rather than read for as long as the client sends
+  # - by lingering, which reads on for at most `Conn::LINGER_MS`.
   MAX_DRAIN = 1048576
   # A string body shorter than this goes uncompressed: the gzip envelope
   # and the fixed code cost more than they save under it.
@@ -1595,7 +1686,13 @@ pub struct Server
   # came in one read are read where they lie, one after another. A
   # connection that opens with HTTP/2's preface is served as HTTP/2. Under
   # *tls* the handshake comes first, and the connection ends with
-  # close_notify.
+  # close_notify. A connection this side wrote last on - an answer, a
+  # refusal, a GOAWAY - closes by lingering (`Conn#close`), so the reset
+  # a close with the client's bytes unread is cannot take what was
+  # written from the client before it reads it. One that timed out or was
+  # cancelled, with nothing of this side's waiting to be read, closes at
+  # once, and so does one whose client said `close` and sent nothing past
+  # its request (`serve_h1`).
   def self.handle(client : IyiSocket, handler : Proc(Request, Response), listener : IyiSocket? = nil, idle : Hash(UInt64, IyiSocket)? = nil, stream_bodies : Bool = false, compress : Bool = false, timeout_ms : Int32 = 0, tls : TlsServerConfig? = nil, request_timeout_ms : Int32 = 0) : Nil
     defer client.close
     unless config = tls
@@ -1610,7 +1707,6 @@ pub struct Server
     secured = TlsServer.over(client, config, timeout_ms > 0 ? timeout_ms : TlsServer::HANDSHAKE_TIMEOUT_MS, early_data: false)
     return if secured.is_a?(TlsError)
     serve_connection(client, TlsStream.new(secured, "the client"), handler, listener, idle, stream_bodies, compress, timeout_ms, request_timeout_ms)
-    secured.close
   end
 
   # When a request whose wait began at *started* (monotonic ns) must have
@@ -1635,10 +1731,13 @@ pub struct Server
     conn.deadline_at(until_head(started, timeout_ms, until_whole(started, request_timeout_ms)))
     preface = h2_preface?(conn)
     conn.no_deadline
-    if preface
-      serve_h2(conn, handler, stream_bodies, compress, remote, peer, timeout_ms, request_timeout_ms)
-      return
-    end
+    wrote_last = preface ? serve_h2(conn, handler, stream_bodies, compress, remote, peer, timeout_ms, request_timeout_ms) : serve_h1(conn, handler, stream_bodies, compress, remote, peer, timeout_ms, request_timeout_ms)
+    wrote_last ? conn.close : conn.close_now
+  end
+
+  # HTTP/1.1's requests on *conn*, one after another: whether this side
+  # wrote last - an answer or a refusal - when they end.
+  private def self.serve_h1(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?, peer : Array(Certificate), timeout_ms : Int32, request_timeout_ms : Int32) : Bool
     while true
       started = Time.monotonic_nanoseconds.to_i64
       whole = until_whole(started, request_timeout_ms)
@@ -1647,17 +1746,15 @@ pub struct Server
       conn.no_deadline
       case got
       in Nil
-        return
+        return false
       in HTTPError
         refuse(conn.transport, got)
-        linger(client)
-        return
+        return true
       in String
         parsed = parse_head(got)
         if parsed.is_a?(HTTPError)
           refuse(conn.transport, parsed)
-          linger(client)
-          return
+          return true
         end
         head = parsed
         # The body, read here or by the block, is the request's too.
@@ -1673,29 +1770,42 @@ pub struct Server
           in HTTPError
             # A client that went is not answered; one that sent a body that
             # is not one is told why.
-            unless conn.ended?
-              refuse(conn.transport, body)
-              linger(client)
-            end
-            return
+            return false if conn.ended?
+            refuse(conn.transport, body)
+            return true
           in Cancelled
-            return
+            return false
           in SocketError
-            return
+            return false
           end
         end
         req.peer_certificates = peer
         response = handler.call(req)
         # Writing the answer waits as the client reads it, a pause at a time.
         conn.no_deadline
-        return unless answered?(conn, response, req, head.close, compress)
+        unless answered?(conn, response, req, head.close, compress)
+          # A client that said `close` sends no further request (RFC 9112
+          # section 9.6): its request read whole and nothing after it,
+          # nothing of the client's is left to come, and the close waits
+          # for nothing - as nginx's lingering_close waits only where more
+          # may come. Any other close, the server's own choice, may meet a
+          # client still sending.
+          return !(said_close?(head, req) && reader.finished? && conn.available == 0)
+        end
         next if reader.finished?
         conn.deadline_at(whole, "read a request") if whole > 0_i64
         drained = reader.drain(MAX_DRAIN.to_i64)
         conn.no_deadline
-        return unless drained
+        return true unless drained
       end
     end
+  end
+
+  # Whether the client said this request is its last: `Connection: close`,
+  # or HTTP/1.0 without keep-alive.
+  private def self.said_close?(head : RequestHead, req : Request) : Bool
+    said = req.header("Connection") || ""
+    HTTP.has_token?(said, "close") || (head.version == "HTTP/1.0" && !HTTP.has_token?(said, "keep-alive"))
   end
 
   # Whether the connection opens with HTTP/2's preface, taken if it does:
@@ -1722,10 +1832,11 @@ pub struct Server
   # to *timeout_ms* and *request_timeout_ms* as over HTTP/1.1, counted
   # from when the wait began; the connection's every frame is read under
   # them meanwhile, so a peer that drips any stream's frames, or PINGs to
-  # look alive, is cut off with the rest.
-  private def self.serve_h2(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?, peer : Array(Certificate), timeout_ms : Int32, request_timeout_ms : Int32) : Nil
+  # look alive, is cut off with the rest. It ends with GOAWAY, so this side
+  # wrote last: true.
+  private def self.serve_h2(conn : Conn, handler : Proc(Request, Response), stream_bodies : Bool, compress : Bool, remote : String?, peer : Array(Certificate), timeout_ms : Int32, request_timeout_ms : Int32) : Bool
     h2 = H2Connection.new(conn, true, MAX_BODY.to_i64)
-    return unless h2.start
+    return true unless h2.start
     while true
       started = Time.monotonic_nanoseconds.to_i64
       whole = until_whole(started, request_timeout_ms)
@@ -1763,29 +1874,7 @@ pub struct Server
       break unless answered
     end
     h2.goaway
-    linger(conn.socket) if h2.failure.is_a?(HTTPError)
-  end
-
-  LINGER_BYTES = 65536
-  LINGER_MS    =  1000
-
-  # What a refused client goes on sending, read and dropped until it
-  # closes - at most `LINGER_BYTES` and `LINGER_MS` in all - before the
-  # close: a close with its bytes unread is a reset, which can take the
-  # refusal (a 4xx answer, GOAWAY) from the client's buffer before it is
-  # read, as macOS's does.
-  private def self.linger(socket : IyiSocket) : Nil
-    return if socket.closed?
-    until_ns = Time.monotonic_nanoseconds.to_i64 + LINGER_MS.to_i64 * 1000000_i64
-    left = LINGER_BYTES
-    while left > 0
-      wait = (until_ns - Time.monotonic_nanoseconds.to_i64) // 1000000_i64
-      break if wait <= 0
-      socket.read_timeout_ms = wait.to_i32
-      got = socket.read(left < 16384 ? left : 16384)
-      break unless got.is_a?(String) && !got.empty?
-      left = left - got.bytesize
-    end
+    true
   end
 
   # The body *head* promises, read from *conn*: under the server's limit,
@@ -2185,7 +2274,10 @@ class Exchange
   # been read to its end - what the caller left of it read past, up to
   # 64 KiB, and the connection closed past that, as Go's client does. An
   # HTTP/2 answer left unread past that is cancelled on its stream alone,
-  # and the connection goes back while it can take another request.
+  # and the connection goes back while it can take another request. A
+  # connection closed with its answer read whole lingers (`Conn#close`);
+  # one closed on an answer still coming is closed at once, and the reset
+  # that is tells the server to stop sending it.
   def close : Nil
     client = @client
     if h2 = @conn.h2
@@ -2200,8 +2292,10 @@ class Exchange
     end
     if client && @keep && !@conn.ended? && @reader.drain(65536_i64) && @conn.available == 0
       client.give_back(@key, @conn)
-    else
+    elsif @conn.ended? || @reader.finished?
       @conn.close
+    else
+      @conn.close_now
     end
   end
 end
@@ -2891,7 +2985,8 @@ pub struct HTTP
       end
       failed = send_request(conn.transport, method, target, host_line, sent, body, connection)
       if failed
-        conn.close
+        # Nothing of this side's is left to be read: closed at once.
+        conn.close_now
         next if reused && retry
         return failed
       end
@@ -2904,7 +2999,8 @@ pub struct HTTP
         end
         return HTTPError.new("the connection ended before an answer")
       end
-      conn.close unless answer.is_a?(Exchange)
+      # An answer that is not one: what follows it is not waited for.
+      conn.close_now unless answer.is_a?(Exchange)
       return answer
     end
   end

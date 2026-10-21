@@ -906,7 +906,7 @@ pub abstract class TlsConnection
 
   private def read_now(max : Int32) : String | TlsError
     return "" if @eof
-    return TlsError.new("the connection is closed") if @closed
+    return TlsError.new("the connection is closed") if closed?
     while true
       record = next_record
       if record.is_a?(TlsError)
@@ -960,7 +960,7 @@ pub abstract class TlsConnection
 
   # Sends *data*, in records of at most 2^14 bytes; answers its size.
   def write(data : String | Array(UInt8)) : Int32 | TlsError
-    return TlsError.new("the connection is closed") if @closed
+    return TlsError.new("the connection is closed") if closed?
     bytes = data.is_a?(String) ? TlsBytes.of(data) : data
     at = 0
     while at < bytes.size
@@ -987,7 +987,7 @@ pub abstract class TlsConnection
   # `key_limit`, for a program that wants it sooner. TLS 1.2 has no
   # KeyUpdate: there it is a `TlsError`, and the connection stays open.
   def key_update(request : Bool = false) : TlsError?
-    return TlsError.new("the connection is closed") if @closed
+    return TlsError.new("the connection is closed") if closed?
     return TlsError.new("a KeyUpdate asked of a TLS 1.2 connection, which has none") if @tls12
     problem = send_key_update(request)
     return fail(problem) if problem
@@ -1049,7 +1049,8 @@ pub abstract class TlsConnection
     @schedule.expand_label(secret, "exporter", @schedule.hash(context), length)
   end
 
-  # close_notify, then the socket closed.
+  # close_notify, then the socket closed; only the close, when the socket
+  # was already closed under the connection.
   def close : Nil
     return if @closed
     send_protected(TlsRecords::ALERT, [1_u8, 0_u8])
@@ -1062,8 +1063,14 @@ pub abstract class TlsConnection
     @socket.close unless @socket.closed?
   end
 
+  # Whether the connection is over: closed, or its socket closed under
+  # it - std/http's server closes the sockets of the connections it waits
+  # on when it stops, a connection handed over by an upgrade among them -
+  # after which a read or a write answers that it is closed rather than
+  # reaching the socket, whose own read and write refuse a closed socket
+  # by panicking.
   def closed? : Bool
-    @closed
+    @closed || @socket.closed?
   end
 
   # How long a read or a write of the connection under it may wait.
@@ -1551,7 +1558,12 @@ pub abstract class TlsConnection
     put(writer.seal(type, content))
   end
 
+  # Every record goes out here. A socket already closed under the
+  # connection is the connection's end, not a write this side should not
+  # have tried: close_notify from a `close` after the socket went, an
+  # alert, a KeyUpdate, all answer it as a `TlsError`.
   private def put(bytes : Array(UInt8)) : TlsError?
+    return TlsError.new("the socket under the connection is closed") if @socket.closed?
     sent = @socket.write(TlsBytes.text(bytes))
     return TlsError.new("the write to #{@place} failed: #{sent.message}") if sent.is_a?(SocketError)
     return TlsError.new("the write to #{@place} was cancelled") unless sent.is_a?(Int32)

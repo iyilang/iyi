@@ -880,6 +880,28 @@
   are no zone - the wrong size, a thirteenth month, a bias of a day or
   more - are a `LocationError`, and `Location.local` answers UTC for them.
 
+- **On Windows, `IyiSocket.connect` to an address keeps its `timeout_ms`
+  (#131).** The handshake is waited for inside `ConnectEx`, and that park
+  had no deadline, so the bound was read only by a wait that came after
+  the kernel had given up: a connect to 10.255.255.1, which nothing
+  answers, with a 2000 ms bound answered "timed out" after 21,043 ms on
+  the reporter's machine. The park now carries the bound; at the deadline
+  the scheduler cancels the `ConnectEx` with `CancelIoEx` and the
+  cancellation's completion wakes the connect, so its OVERLAPPED is never
+  left to the kernel, and the connect answers a `SocketError` whose
+  `timed_out?` is true. A handshake that finished before the cancel
+  reached it is a connection, and a cancelled task still answers
+  `Cancelled`. A name with one address, and the resolver's TCP query, went
+  the same way and are bounded the same. Linux and darwin were not
+  affected: their connect answers "in progress" at once and the wait after
+  it holds the bound (10.255.255.1 with 2000 ms timed out after 2,002 ms
+  on Linux, x86-64). The workaround of running the connect in a task and
+  cancelling it at the deadline, as iyi-pg does for `connect_timeout`, is
+  no longer needed. `bench/socket_exercise` connects to 10.255.255.1 with
+  2000 ms on every platform and, on Windows, to a loopback port nobody
+  holds with 500 ms, which Windows takes about 2 s to refuse; the copy
+  without the bound fails it on Windows, and on Linux and darwin it is
+  the same program.
 - **`bench/std_tls_exercise.sh` no longer times Python's first
   certificate check on a Windows runner against the server's handshake
   deadline.** The first Python ssl handshake against the Ed25519 server

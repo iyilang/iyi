@@ -80,7 +80,7 @@ fi
 
 echo
 echo "== every socket check reported"
-phrases="connect_accept message_exchange short_read nodelay closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream"
+phrases="connect_accept message_exchange short_read nodelay connect_bound closed_peer close_write ipv6 localhost localhost_v6 localhost_race unix timeout closed_under_read stream"
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT) phrases="$phrases backlog" ;;
   Linux) phrases="$phrases reset_after_chunk" ;;
@@ -91,7 +91,7 @@ for phrase in $phrases; do
     status=1
   }
 done
-[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, nodelay, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout and stream all reported ok"
+[ "$status" -eq 0 ] && echo "  connect_accept, message_exchange, short_read, nodelay, connect_bound, closed_peer, close_write, ipv6, localhost, localhost_v6, localhost_race, unix, timeout and stream all reported ok"
 
 echo
 echo "== the same program with optimisation on (--release)"
@@ -238,6 +238,20 @@ case "$(uname -s)" in
       '{ sub(/ATTEMPT_DELAY_MS = 250/, "ATTEMPT_DELAY_MS = 3600000"); print }' ;;
   *)
     echo "  localhost's ::1 waiting for 127.0.0.1's refusal: Windows' 2 s refusal shows it, proved there" ;;
+esac
+
+# 5d. A connect whose handshake wait has no deadline, as Windows' had:
+#     `ConnectEx` parked until the kernel gave up, 2 s for a loopback port
+#     nobody holds against a 500 ms bound and 21 s for 10.255.255.1
+#     against 2000 ms. The POSIX arms' call answers "in progress" at once
+#     and never reads the bound it is handed, so on Linux and darwin this
+#     copy is the same program and nothing can catch it there.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    prove_fails "a ConnectEx parked without the connect's bound" connectunbound "connect_bound:" \
+      '{ sub(/res = __sys_connect\(fd, addr, family, ms\)/, "res = __sys_connect(fd, addr, family, -1)"); print }' ;;
+  *)
+    echo "  a ConnectEx parked without the connect's bound: the POSIX arms' connect never waits, proved on Windows" ;;
 esac
 
 # 6. The write without MSG_NOSIGNAL: on Linux the kernel's SIGPIPE ends the

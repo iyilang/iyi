@@ -441,14 +441,15 @@
 - **std/http's `HTTPClient` resumes TLS sessions by the tickets servers
   send it.** Each `https://` origin - scheme, host and port, whichever
   proxy's tunnel is between - has a `TlsSession` in the client, kept under
-  the `HTTP.tls_config` its tickets came under by the same identity
-  (`TlsMadeUnder`) that already kept a pooled connection from carrying a
+  the TLS configuration its tickets came under - the client's own `tls:`,
+  or else `HTTP.tls_config` - by the same identity (`TlsMadeUnder`) that already kept a pooled connection from carrying a
   request made under another configuration; a new connection to the
   origin hands it to the handshake, and the server's new tickets go into
   it. A resumed handshake checks no certificate, so a ticket is never
   offered to another origin nor under another trust store or identity:
-  after `HTTP.tls_config=`, or roots or an identity assigned in place, the
-  next connection is a full handshake, and the origin's tickets from
+  after `HTTP.tls_config=`, or roots or an identity assigned in place in
+  either configuration, the next connection is a full handshake, and the
+  origin's tickets from
   under the old configuration are dropped. At most `origin_tickets` (4)
   are kept an origin and `tickets` (256) in all - as many origins as that
   leaves room for, the one longest unused dropped first; 0 keeps none.
@@ -468,10 +469,12 @@
   ("Reused, TLSv1.3") both say; a ticket from one origin not offered to
   another whose server would take it; after the roots change, a full
   handshake whose ClientHello, as s_server's `-msg` dump shows it, has no
-  pre_shared_key, and other roots refused; the limits; no ClientHello
-  asking for early data from s_server, whose tickets allow it; and six
-  broken copies (the configuration ignored, a ticket offered to any
-  origin, no session handed over, early data sent, each limit left out),
+  pre_shared_key, and other roots refused, in `HTTP.tls_config` and in a
+  client's own `tls:`; the limits; no ClientHello asking for early data
+  from s_server, whose tickets allow it; and seven broken copies (the
+  configuration ignored, a client's own `tls:` passed over for
+  `HTTP.tls_config`, a ticket offered to any origin, no session handed
+  over, early data sent, each limit left out),
   each caught at the line that names it.
 - **std/mlkem: ML-KEM-768 (FIPS 203), the post-quantum key-encapsulation
   mechanism, written in iyi and constant-time on its secrets.**

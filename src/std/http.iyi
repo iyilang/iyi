@@ -2413,13 +2413,15 @@ end
 #
 # A client resumes TLS sessions (RFC 8446 §2.2): the tickets an
 # `https://` server sends are kept for its origin - scheme, host and
-# port, whichever proxy's tunnel they came through - under the
-# `HTTP.tls_config` they came under (`TlsMadeUnder`, as a kept connection
-# is), and a new connection to that origin offers the newest, each once.
+# port, whichever proxy's tunnel they came through - under the TLS
+# configuration they came under, the client's own *tls* or else
+# `HTTP.tls_config` (`TlsMadeUnder`, as a kept connection is), and a new
+# connection to that origin offers the newest, each once.
 # A resumed handshake checks no certificate - the ticket stands for the
 # check the first one made - so a ticket is never offered to another
 # origin, nor under another configuration: after `HTTP.tls_config=`, or
-# roots or an identity assigned in place, the next connection is a full
+# roots or an identity assigned in place - in `HTTP.tls_config` or in the
+# client's own *tls* - the next connection is a full
 # handshake checked against the new roots, and that origin's tickets from
 # under the old one are dropped. At most *origin_tickets* are kept an
 # origin - 4 by default, so that as many connections as *idle* keeps by
@@ -3121,7 +3123,7 @@ pub struct HTTP
           # a ticket allows: the module's header says why.
           session = nil.as(TlsSession?)
           if keeping = client
-            session = keeping.session_for(origin, tls_config) unless upgrade
+            session = keeping.session_for(origin, under) unless upgrade
           end
           tls = TlsClient.over(socket, host, offered, timeout_ms > 0 ? timeout_ms : TlsClient::HANDSHAKE_TIMEOUT_MS, session)
           return HTTPError.new(tls.message) if tls.is_a?(TlsError)

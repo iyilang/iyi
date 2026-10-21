@@ -1111,18 +1111,22 @@ echo "== TLS resumption: an HTTPClient's tickets (bench/std_http_resume.iyi)"
 # assigned again - the same root, in an array of its own - the next
 # connection is a full handshake that offers no ticket, and under roots
 # that do not reach the server it is refused, where a ticket would have
-# skipped the check. The limits: four tickets an origin by default of the
+# skipped the check; the same for a client made with a TLS configuration
+# of its own (`tls:`), whose roots are assigned while `HTTP.tls_config`
+# stays. The limits: four tickets an origin by default of the
 # eight a server sends, two when asked, room for two origins at two each,
 # and none when none are kept. No early data: s_server takes 0-RTT under
 # -early_data and its tickets allow it, but no ClientHello asks. Then
 # copies of the module with the sessions kept under the origin alone (the
-# configuration ignored), a ticket offered to any origin, no session
+# configuration ignored), under `HTTP.tls_config` where the client has a
+# configuration of its own, a ticket offered to any origin, no session
 # handed to the handshake, early data sent, and each origin's limit and
 # the total left out, each caught at the line that names it.
 RESUME_SELF="same origin: resumed=no then resumed=yes, the response says true, 1 resumed
 another origin: resumed=no then resumed=yes
 new roots: resumed=no then resumed=yes
 other roots: HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=http gate root, the issuer of CN=localhost (bad_certificate)
+own tls: resumed=no then resumed=yes, then under other roots: HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=http gate root, the issuer of CN=localhost (bad_certificate)
 an origin's tickets: 4 of 8 by default, 2 of 8 when 2 are asked for
 tickets in all: 4 held over four origins, 0 of the two oldest, then resumed=no at the oldest and resumed=yes at the newest
 none kept: resumed=no then resumed=no, 0 held
@@ -1269,6 +1273,8 @@ PY
   }
   resume_breaks "sessions kept under the origin alone, the configuration ignored" \
     '      elsif held.under.same?(tls)' '      elsif true' "new roots"
+  resume_breaks "a client's own tls: passed over, its tickets kept under HTTP.tls_config" \
+    'session_for(origin, under)' 'session_for(origin, tls_config)' "own tls"
   resume_breaks "a ticket offered to another origin" \
     '      if held.origin != origin' '      if false' "another origin"
   resume_breaks "resumption never attempted" \

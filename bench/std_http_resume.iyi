@@ -128,6 +128,18 @@ if mode == "self"
       config.roots = other
       puts "other roots: #{said(client.get(bases[0]))}"
       config.roots = roots
+      # A client with a TLS configuration of its own (`tls:`): its tickets
+      # are kept under that one, so roots assigned there in place make the
+      # next connection a full handshake, refused under roots that do not
+      # reach the server, while `HTTP.tls_config` is unchanged.
+      mine = TlsConfig.new
+      mine.roots = roots
+      mine.alpn = ["http/1.1"]
+      own = HTTPClient.new(idle: 0, tls: mine)
+      before = said(own.get(bases[0]))
+      again = said(own.get(bases[0]))
+      mine.roots = other
+      puts "own tls: #{before} then #{again}, then under other roots: #{said(own.get(bases[0]))}"
       # A server that sends eight tickets a handshake.
       plenty = HTTPClient.new(idle: 0)
       plenty.get(bases[3])

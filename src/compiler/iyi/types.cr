@@ -1751,6 +1751,21 @@ module Iyi
     # All matches. It's nil if `@match` is an exact match.
     @all_matches : Set(Type)?
 
+    # iyi: the matches as they stood before an overload was tried, put back
+    # when that overload fails on another argument (`Type#lookup_matches_without_parents`).
+    @saved_match : Type?
+    @saved_all_matches : Set(Type)?
+
+    def save_matches : Nil
+      @saved_match = @match
+      @saved_all_matches = @all_matches.dup
+    end
+
+    def restore_matches : Nil
+      @match = @saved_match
+      @all_matches = @saved_all_matches
+    end
+
     def set_exact_match(type)
       @match = type
       @all_matches = nil

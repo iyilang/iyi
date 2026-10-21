@@ -920,6 +920,15 @@ class Iyi::Call
   private def check_argument_type_mismatch(def_arg, index_or_name, arg_type, match_context, arguments_type_mismatch)
     restricted = arg_type.restrict(def_arg, match_context)
 
+    # iyi: a literal, or a number variable, that the parameter takes by a
+    # cast is not where the call fails. Its restriction is the cast's type
+    # and never its own, so the comparison below called it a partial match:
+    # `max(2, x)` with `x : Int64` against `(Float64, Float64)` and
+    # `(Float32, Float32)` said "expected argument #1 ... to be Float32 or
+    # Float64, not Int32" about the `2` both overloads take, and nothing
+    # about the `x` neither does.
+    return if restricted && arg_type.is_a?(AutocastType)
+
     arg_type = arg_type.remove_literal
     return if restricted == arg_type
 

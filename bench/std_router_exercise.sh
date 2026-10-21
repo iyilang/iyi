@@ -5,7 +5,10 @@
 #
 # Where a Go toolchain of 1.22 or later runs (`go` on the path, or `GO=`
 # naming one), the exercise's routing tables are handed to Go's own
-# `http.ServeMux` and its answers compared line for line.
+# `http.ServeMux` and its answers compared line for line: exactly under
+# Go 1.26 or later, whose redirects the router follows, and under 1.22 to
+# 1.25 with their 301 redirects read as the router's 307, the one
+# difference, which the gate names.
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,11 +35,13 @@ done
 # 1.22. A version manager's shim that has no version chosen answers
 # `go version` with an error, so each candidate is run, not looked for.
 GO_BIN=""
+GO_MINOR=""
 for candidate in "${GO:-}" go /usr/local/go/bin/go "$HOME"/.local/share/mise/installs/go/*/bin/go; do
   [ -n "$candidate" ] || continue
   minor=$("$candidate" version 2>/dev/null | sed -n 's/^go version go1\.\([0-9]*\).*/\1/p')
   if [ -n "$minor" ] && [ "$minor" -ge 22 ]; then
     GO_BIN="$candidate"
+    GO_MINOR="$minor"
     break
   fi
 done
@@ -224,8 +229,8 @@ func main() {
 				switch rec.Code {
 				case 200:
 					got = rec.Body.String()
-				case 301:
-					got = "301 " + rec.Header().Get("Location")
+				case 301, 302, 303, 307, 308:
+					got = strconv.Itoa(rec.Code) + " " + rec.Header().Get("Location")
 				case 405:
 					got = "405 " + rec.Header().Get("Allow")
 				default:
@@ -259,18 +264,37 @@ GO
     "$WORK/router-plain" table > "$WORK/table.txt"
     grep -v '^A ' "$WORK/table.txt" > "$WORK/table.in"
     grep '^A ' "$WORK/table.txt" > "$WORK/table.ours"
+    go_version="$("$GO_BIN" version | cut -d' ' -f3)"
+    counts="$(grep -c '^R ' "$WORK/table.in") requests, $(grep -c '^C ' "$WORK/table.in") pairs registered in turn, $(grep -c '^V ' "$WORK/table.in") patterns read"
     if ! (cd "$WORK/mux" && GOTOOLCHAIN=local GOFLAGS= "$GO_BIN" run main.go) < "$WORK/table.in" > "$WORK/table.go" 2> "$WORK/go.err"; then
       echo "  Go did not run:"
       sed -n '1,8p' "$WORK/go.err"
       status=1
-    elif ! diff "$WORK/table.ours" "$WORK/table.go" > "$WORK/table.diff"; then
-      echo "  Go answers differently (ours <, Go's >):"
-      sed 's/^/    /' "$WORK/table.diff"
-      status=1
+    elif [ "$GO_MINOR" -ge 26 ]; then
+      # The router follows Go 1.26 and later, so every answer is the same.
+      if ! diff "$WORK/table.ours" "$WORK/table.go" > "$WORK/table.diff"; then
+        echo "  Go answers differently (ours <, Go's >):"
+        sed 's/^/    /' "$WORK/table.diff"
+        status=1
+      else
+        printf '  %s (%s): %s - every answer the same\n' "$go_version" "$GO_BIN" "$counts"
+      fi
     else
-      printf '  %s (%s): %s requests, %s pairs registered in turn, %s patterns read - every answer the same\n' \
-        "$("$GO_BIN" version | cut -d' ' -f3)" "$GO_BIN" \
-        "$(grep -c '^R ' "$WORK/table.in")" "$(grep -c '^C ' "$WORK/table.in")" "$(grep -c '^V ' "$WORK/table.in")"
+      # Go 1.22 to 1.25 answer the mux's own redirects with 301 where 1.26
+      # and this router answer 307. That status is the one difference
+      # allowed: Go's 301s are read as 307s, and every other answer, the
+      # redirect's Location among them, must be the same - so a 301 of
+      # the router's own still fails here.
+      sed 's/ => 301 / => 307 /' "$WORK/table.go" > "$WORK/table.go307"
+      moved=$(grep -c ' => 301 ' "$WORK/table.go")
+      if ! diff "$WORK/table.ours" "$WORK/table.go307" > "$WORK/table.diff"; then
+        echo "  Go answers differently (ours <, Go's with its 301s read as 307s >):"
+        sed 's/^/    /' "$WORK/table.diff"
+        status=1
+      else
+        printf '  %s (%s): %s - every answer the same but the status of %s redirects, which %s answers 301 Moved Permanently and this router, as Go 1.26 does, 307 Temporary Redirect, to the same Location\n' \
+          "$go_version" "$GO_BIN" "$counts" "$moved" "$go_version"
+      fi
     fi
   fi
 fi
@@ -316,15 +340,15 @@ check(r.status == 405 and r.getheader("Allow") == "GET, HEAD, POST", f"405: {r.s
 r, body = ask("POST", "/")
 check(r.status == 405 and r.getheader("Allow") == "GET, HEAD", f"405 for /: {r.status} {r.getheader('Allow')}")
 r, body = ask("GET", "/static")
-check(r.status == 301 and r.getheader("Location") == "/static/", f"301: {r.status} {r.getheader('Location')}")
+check(r.status == 307 and r.getheader("Location") == "/static/", f"307: {r.status} {r.getheader('Location')}")
 r, body = ask("GET", "/static?x=1")
-check(r.status == 301 and r.getheader("Location") == "/static/?x=1", f"301 with a query: {r.getheader('Location')}")
+check(r.status == 307 and r.getheader("Location") == "/static/?x=1", f"307 with a query: {r.getheader('Location')}")
 r, body = ask("HEAD", "/static")
-check(r.status == 301 and r.getheader("Location") == "/static/" and body == b"", f"HEAD redirected: {r.status}")
+check(r.status == 307 and r.getheader("Location") == "/static/" and body == b"", f"HEAD redirected: {r.status}")
 r, body = ask("GET", "/static/a/b")
 check(r.status == 200 and body == b"static /static/a/b", f"a subtree: {body!r}")
 r, body = ask("GET", "/a/../users/2")
-check(r.status == 301 and r.getheader("Location") == "/users/2", f"a path cleaned: {r.status} {r.getheader('Location')}")
+check(r.status == 307 and r.getheader("Location") == "/users/2", f"a path cleaned: {r.status} {r.getheader('Location')}")
 r, body = ask("GET", "/")
 check(r.status == 200 and body == b"home", f"/{{$}}: {body!r}")
 r, body = ask("GET", "/missing")
@@ -332,7 +356,7 @@ check(r.status == 404, f"404: {r.status}")
 r, body = ask("GET", "/%zz")
 check(r.status == 400, f"400: {r.status}")
 ask("GET", "/stop")
-print("  a wildcard decoded, HEAD of a GET pattern, POST, two 405s with Allow, three 301s, a cleaned path, {$}, 404, 400" if not bad else "  Python disagrees")
+print("  a wildcard decoded, HEAD of a GET pattern, POST, two 405s with Allow, three 307s, a cleaned path, {$}, 404, 400" if not bad else "  Python disagrees")
 sys.exit(1 if bad else 0)
 PY
   then
@@ -394,6 +418,8 @@ prove_broken "a subtree's root not redirected" "routed GET any.example /static" 
 prove_broken "an unclean path routed as it is" "routed GET any.example /a/../index.html" \
   '    return Router.redirect(path, req.query) unless path == raw
 ' ''
+prove_broken "a redirect answered 301, as Go before 1.26" "routed GET any.example /static" \
+  'Response.new(307, "", {"Location" => target})' 'Response.new(301, "", {"Location" => target})'
 prove_broken "Allow without HEAD" "routed PATCH any.example /items/7" \
   'methods << "HEAD" if methods.includes?("GET") && !methods.includes?("HEAD")' ''
 prove_broken "wildcard values left encoded" "a pattern's wildcards" \

@@ -830,6 +830,27 @@
   slow scenarios. On Linux x86-64 with 12 threads the gate took 511
   seconds, from 1537, with all 236 copies caught.
 
+- **std/router redirects with 307 Temporary Redirect, as Go 1.26's
+  `ServeMux` does, not 301.** Both of the router's own redirects - `/x`
+  to a registered `/x/`, and a path with `.`, `..` or `//` to its cleaned
+  form - answer 307 with the same `Location`, the query kept. Go's
+  reasons, given when it made the change: a client may turn a POST it is
+  sent on by a 301 into a GET and drop its body, where a 307 is sent again
+  as it was; and a client may keep a permanent redirect for good, though
+  the redirect is the mux's and a pattern registered later may answer the
+  path. Go's release notes name the trailing-slash redirect; its
+  `server.go` answers the cleaned path with 307 too, and the router
+  follows the code. The status is fixed, not an option.
+  `bench/std_router_exercise.sh` reads `go version`: under Go 1.26 or
+  later Go's answers must be the router's line for line; under 1.22 to
+  1.25 Go's 301s are read as 307s, the gate prints a sentence naming
+  that difference and how many redirects it covers, and any other
+  difference still fails. Go's program prints every redirect's status
+  with its `Location`, so a target is compared under either Go, and a
+  copy of the router that answers 301 is among the broken copies the gate
+  must catch. CI's Go "stable" (go1.27.3) had failed the gate on each of
+  the tables' 13 redirects, the router answering 301.
+
 ### Fixed
 
 - **`bench/std_tls_exercise.sh` no longer times Python's first

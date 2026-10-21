@@ -49,9 +49,10 @@ def router_of(patterns : Array(String)) : Router
   router
 end
 
-# A router's answer in one line: the handler's body for a 200, the
-# `Location` of a 301, the `Allow` of a 405, the status otherwise. The
-# gate's Go program writes Go's `ServeMux`'s answers the same way.
+# A router's answer in one line: the handler's body for a 200, a
+# redirect's status and `Location`, the `Allow` of a 405, the status
+# otherwise. The gate's Go program writes Go's `ServeMux`'s answers the
+# same way.
 def describe(router : Router, method : String, host : String, target : String) : String
   path = target
   query = nil.as(String?)
@@ -61,10 +62,10 @@ def describe(router : Router, method : String, host : String, target : String) :
   end
   got = router.call(Request.new(method, path, query, {"Host" => host}, ""))
   case got.status
-  when 200 then got.body
-  when 301 then "301 " + (got.header("Location") || "")
-  when 405 then "405 " + (got.header("Allow") || "")
-  else          got.status.to_s
+  when 200                     then got.body
+  when 301, 302, 303, 307, 308 then got.status.to_s + " " + (got.header("Location") || "")
+  when 405                     then "405 " + (got.header("Allow") || "")
+  else                              got.status.to_s
   end
 end
 
@@ -101,7 +102,7 @@ MAIN_REQUESTS = [
   {"GET", "any.example", "/static/app.js", "GET /static/|"},
   {"HEAD", "any.example", "/static/app.js", "GET /static/|"},
   {"POST", "any.example", "/static/app.js", "/|"},
-  {"GET", "any.example", "/static", "301 /static/"},
+  {"GET", "any.example", "/static", "307 /static/"},
   {"POST", "any.example", "/static", "/|"},
   {"GET", "example.com", "/anything", "example.com/|"},
   {"GET", "example.com", "/", "example.com/{$}|"},
@@ -109,12 +110,12 @@ MAIN_REQUESTS = [
   {"GET", "example.com", "/index.html", "example.com/|"},
   {"GET", "any.example", "/b/mybucket/o/a/b/c.txt", "/b/{bucket}/o/{objectname...}|bucket=mybucket,objectname=a/b/c.txt"},
   {"GET", "any.example", "/b/x/o/", "/b/{bucket}/o/{objectname...}|bucket=x,objectname="},
-  {"GET", "any.example", "/b/x/o", "301 /b/x/o/"},
+  {"GET", "any.example", "/b/x/o", "307 /b/x/o/"},
   {"GET", "any.example", "/images/thumbnails/a.png", "/images/thumbnails/|"},
   {"GET", "any.example", "/images/a.png", "/images/|"},
-  {"GET", "any.example", "/images", "301 /images/"},
-  {"GET", "any.example", "/images?size=2", "301 /images/?size=2"},
-  {"GET", "any.example", "/images/thumbnails", "301 /images/thumbnails/"},
+  {"GET", "any.example", "/images", "307 /images/"},
+  {"GET", "any.example", "/images?size=2", "307 /images/?size=2"},
+  {"GET", "any.example", "/images/thumbnails", "307 /images/thumbnails/"},
   {"GET", "any.example", "/docs", "/docs|"},
   {"GET", "any.example", "/docs/x", "/docs/|"},
   {"GET", "any.example", "/", "/{$}|"},
@@ -135,16 +136,16 @@ MAIN_REQUESTS = [
   {"GET", "any.example", "/u/x", "/u/{x}|x=x"},
   {"GET", "any.example", "/u/", "/|"},
   {"GET", "any.example", "/u", "/|"},
-  {"GET", "any.example", "/files", "301 /files/"},
+  {"GET", "any.example", "/files", "307 /files/"},
   {"GET", "any.example", "/files/", "/files/{path...}|path="},
   {"GET", "any.example", "/files/a/b%20c/d", "/files/{path...}|path=a/b c/d"},
   {"GET", "any.example", "/files/%2e%2e/x", "/files/{path...}|path=../x"},
-  {"GET", "any.example", "/a/../index.html", "301 /index.html"},
-  {"GET", "any.example", "//index.html", "301 /index.html"},
-  {"GET", "any.example", "/images/./x", "301 /images/x"},
-  {"GET", "any.example", "/images/..", "301 /"},
-  {"GET", "any.example", "/x/..?q=1", "301 /?q=1"},
-  {"GET", "any.example", "/../../index.html", "301 /index.html"},
+  {"GET", "any.example", "/a/../index.html", "307 /index.html"},
+  {"GET", "any.example", "//index.html", "307 /index.html"},
+  {"GET", "any.example", "/images/./x", "307 /images/x"},
+  {"GET", "any.example", "/images/..", "307 /"},
+  {"GET", "any.example", "/x/..?q=1", "307 /?q=1"},
+  {"GET", "any.example", "/../../index.html", "307 /index.html"},
   {"GET", "any.example", "/%zz", "400"},
 ]
 
@@ -169,7 +170,7 @@ API_REQUESTS = [
   {"GET", "any.example", "/form", "405 POST"},
   {"POST", "any.example", "/a/b", "POST /a/{x}|x=b"},
   {"PUT", "any.example", "/a/b", "405 GET, HEAD, POST"},
-  {"GET", "any.example", "/only", "301 /only/"},
+  {"GET", "any.example", "/only", "307 /only/"},
   {"POST", "any.example", "/only", "405 GET, HEAD"},
   {"DELETE", "any.example", "/nope/", "404"},
   {"POST", "any.example", "/only/x", "405 GET, HEAD"},
@@ -433,7 +434,7 @@ group do |g|
     wrong = HTTP.delete(base + "/users/1").or_panic
     assert_true wrong.status == 405 && wrong.header("Allow") == "GET, HEAD", "a DELETE is 405 with Allow: #{wrong.status} #{wrong.header("Allow")}"
     moved = HTTP.request("GET", base + "/static?v=1", redirects: 0).or_panic
-    assert_true moved.status == 301 && moved.header("Location") == "/static/?v=1", "a subtree's root redirected: #{moved.status} #{moved.header("Location")}"
+    assert_true moved.status == 307 && moved.header("Location") == "/static/?v=1", "a subtree's root redirected: #{moved.status} #{moved.header("Location")}"
     followed = HTTP.get(base + "/static").or_panic
     assert_true followed.status == 200 && followed.body == "static /static/", "and followed: #{followed.body}"
     assert_true HTTP.get(base + "/missing").or_panic.status == 404, "no pattern is 404"
@@ -441,6 +442,6 @@ group do |g|
     0
   end
 end
-puts "  a wildcard, a HEAD, a 405 with Allow, a 301 read and followed, a 404"
+puts "  a wildcard, a HEAD, a 405 with Allow, a 307 read and followed, a 404"
 
 puts "\nALL CHECKS PASSED"

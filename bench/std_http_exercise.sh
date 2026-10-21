@@ -795,15 +795,10 @@ echo "== TLS resumption: an HTTPClient's tickets (bench/std_http_resume.iyi)"
 # copies of the module with the sessions kept under the origin alone (the
 # configuration ignored), a ticket offered to any origin, no session
 # handed to the handshake, early data sent, and each origin's limit and
-# the total left out, each caught at the line that names it.
-RESUME_SELF="same origin: resumed=no then resumed=yes, the response says true, 1 resumed
-another origin: resumed=no then resumed=yes
-new roots: resumed=no then resumed=yes
-other roots: HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=http gate root, the issuer of CN=localhost (bad_certificate)
-an origin's tickets: 4 of 8 by default, 2 of 8 when 2 are asked for
-tickets in all: 4 held over four origins, 0 of the two oldest, then resumed=no at the oldest and resumed=yes at the newest
-none kept: resumed=no then resumed=no, 0 held
-kept: resumed=no, 1 made, 1 reused"
+# the total left out, each caught at the line that names it. The iyi
+# server's half is the program run with no arguments, as CI runs every
+# bench program: it holds what each line should say, under a test PKI of
+# its own, and names a line that is not so with "FAIL <line>:".
 RESUME_SSERVER="s_server: New then Reused, the response says true
 s_server under new roots: New then Reused
 s_server read ClientHellos with: no ticket, a ticket, no ticket, a ticket; early data asked in 0, EndOfEarlyData 0"
@@ -826,13 +821,14 @@ esac
 if [ -z "$PY" ] || ! command -v "$OPENSSL" >/dev/null 2>&1 || ! "$OPENSSL" version 2>/dev/null | grep -q '^OpenSSL '; then
   resume_openssl=no
 fi
-# resume_run <binary> <self|s_server|both>: the binary's `self` lines;
+# resume_run <binary> <self|s_server|both>: the binary's lines with no
+# arguments;
 # and its `s_server` lines against OpenSSL's server, then what that
 # server read: each ClientHello's extensions, from its -msg dump.
 resume_run() {
   local bin="$1" which="$2" port pid log="$WORK/resume-s_server.log"
   if [ "$which" != s_server ]; then
-    timeout 60 "$bin" self "$WORK/tls/p256.pem" "$WORK/tls/leaf.key" "$WORK/tls/root.pem" "$WORK/tls/other.pem" 2>&1
+    timeout 60 "$bin" 2>&1
   fi
   [ "$which" != self ] && [ "$resume_openssl" = yes ] || return 0
   port="$("$PY" -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
@@ -889,24 +885,24 @@ elif ! "$IYI" build -o "$WORK/resume" "$REPO/bench/std_http_resume.iyi" >"$WORK/
   sed -n '1,8p' "$WORK/resume.build"
   status=1
 else
-  resume_expected="$RESUME_SELF"
-  [ "$resume_openssl" = yes ] && resume_expected="$RESUME_SELF
-$RESUME_SSERVER"
   said=$(resume_run "$WORK/resume" both)
-  if [ "$said" = "$resume_expected" ]; then
+  servers="$(printf '%s\n' "$said" | grep '^s_server')"
+  if printf '%s\n' "$said" | grep -qx 'ALL CHECKS PASSED' && ! printf '%s\n' "$said" | grep -q '^FAIL' &&
+     { [ "$resume_openssl" != yes ] || [ "$servers" = "$RESUME_SSERVER" ]; }; then
     printf '%s\n' "$said" | sed 's/^/  /'
     [ "$resume_openssl" = yes ] || echo "  no OpenSSL (LibreSSL is not it) with python3 here, or Windows, whose s_server this gate does not drive: s_server goes unasked, and so does the check that no early data is sent"
   else
     echo "  the client's resumption is not the expected one:"
     printf '%s\n' "$said" | sed 's/^/    got:  /'
-    printf '%s\n' "$resume_expected" | sed 's/^/    want: /'
+    [ "$resume_openssl" = yes ] && printf '%s\n' "$RESUME_SSERVER" | sed 's/^/    want: /'
     status=1
   fi
   # resume_breaks <label> <old> <new> <line>: the program over a copy of
-  # std/http with <old> made <new> must answer the line starting with
-  # <line> otherwise than the module does.
+  # std/http with <old> made <new> must fail at <line>: say "FAIL <line>:"
+  # with no arguments, or answer s_server's line otherwise than the module
+  # does.
   resume_breaks() {
-    local label="$1" old="$2" new="$3" line="$4" which=self want got
+    local label="$1" old="$2" new="$3" line="$4" which=self want got said
     case "$line" in
       s_server*)
         which=s_server
@@ -935,8 +931,15 @@ PY
       status=1
       return
     fi
-    want="$(printf '%s\n' "$resume_expected" | grep -m1 "^$line")"
-    got="$(resume_run "$WORK/resume-broken" "$which" | grep -m1 "^$line")"
+    # Read whole first: a grep that stops at its line would close the pipe
+    # under the rest of the run.
+    said="$(resume_run "$WORK/resume-broken" "$which")"
+    got="$(printf '%s\n' "$said" | grep -m1 "^$line")"
+    if [ "$which" = self ]; then
+      printf '%s\n' "$said" | grep -q "^FAIL $line:" && want="" || want="$got"
+    else
+      want="$(printf '%s\n' "$RESUME_SSERVER" | grep -m1 "^$line")"
+    fi
     if [ -n "$got" ] && [ "$got" != "$want" ]; then
       echo "  $label: caught at \"$line\": $(printf '%s' "$got" | cut -c1-110)"
     else

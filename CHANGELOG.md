@@ -251,7 +251,9 @@
   asking for early data from s_server, whose tickets allow it; and six
   broken copies (the configuration ignored, a ticket offered to any
   origin, no session handed over, early data sent, each limit left out),
-  each caught at the line that names it.
+  each caught at the line that names it. `bench/std_http_resume.iyi`
+  holds the iyi server's half alone, under a test PKI of its own, when
+  run with no arguments, as CI runs every bench program.
 - **std/mlkem: ML-KEM-768 (FIPS 203), the post-quantum key-encapsulation
   mechanism, written in iyi and constant-time on its secrets.**
   `MlKem768PrivateKey.from_seed(d || z)` is Algorithm 16's key

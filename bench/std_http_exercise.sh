@@ -1100,7 +1100,7 @@ PY
     end
     @socket.close' "kept connection"
   stop_breaks "a stop that sends no close_notify, as a std/tls client reads it" http.iyi \
-    '      stream.close
+    '      stream.close_write
     end
     @socket.close' '      nil
     end

@@ -753,6 +753,76 @@ for where in main fiber thread; do
 $out"
   done
 done
+# A frame larger than the guard page, on a fiber's stack, with writable
+# memory under the guard: the overrun is the same sentence, never a quiet
+# write into whatever lies below (issue #130). A frame is carved with one
+# `sub`, and this one is written first at its low end, 64 KiB below the
+# frame above it - over a 4 KiB guard page in one step. Without stack
+# probes on Linux it landed in the memory under the stack, and the
+# program finished as if nothing had happened: this check printed "the
+# dive came back" there. The compiler now has every frame touch its pages
+# top down (`iyi_probe_stack`), and Windows' `__chkstk` always did, so
+# the guard is the first page past the end anything touches. The floor
+# is mapped by address, so a run whose layout has something there already
+# says so and is run again rather than proving nothing.
+cat > "$work/overrun.iyi" <<'EOF'
+module overrun
+
+# 64 KiB of frame, written first at its lowest byte, the one farthest
+# from the frame above.
+def plunge(n : Int32) : Int32
+  room = uninitialized StaticArray(UInt8, 65536)
+  low = pointerof(room).as(Pointer(UInt8))
+  low.value = 1_u8
+  return 1 if n == 0
+  plunge(n - 1) + low.value.to_i32
+end
+
+# 128 KiB of writable memory directly under this fiber's stack, where a
+# frame that stepped over the guard page lands.
+def floor_under(base : UInt64) : Bool
+  size = 131072_u64
+  {% if flag?(:win32) %}
+    LibC.VirtualAlloc(Pointer(Void).new(base - size), size, 0x3000_i32, 4_i32).address == base - size
+  {% elsif flag?(:darwin) %}
+    LibC.mmap(Pointer(Void).new(base - size), size, 3, 4098, -1, 0_i64).address == base - size
+  {% else %}
+    # MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE: there or nowhere.
+    __iyi_conc_syscall6(IYI_SYS_MMAP, (base - size).to_i64, size.to_i64, 3_i64, 0x100022_i64, -1_i64, 0_i64) == (base - size).to_i64
+  {% end %}
+end
+
+group do |g|
+  g.spawn do
+    base = IyiScheduler.current_stack_top - IyiFiber::STACK_BYTES
+    if floor_under(base)
+      # Five such frames are about 64 KiB past a 256 KiB stack: inside
+      # the floor.
+      puts "the dive came back: #{plunge(4)}"
+    else
+      puts "no room under the stack for the floor"
+    end
+  end
+end
+EOF
+"$IYI" build -o "$work/overrun_bin" "$work/overrun.iyi" > "$work/overrun.log" 2>&1 ||
+  fail "the overrun program did not build: $(cat "$work/overrun.log")"
+placed=0
+for again in 1 2 3 4 5 6 7 8 9 10; do
+  set +e
+  out=$("$work/overrun_bin" 2>&1)
+  code=$?
+  set -e
+  [ "$out" = "no room under the stack for the floor" ] && continue
+  placed=1
+  [ "$code" = 1 ] || fail "a frame larger than the guard page exited $code, wanted 1: $out"
+  [ "$out" = "iyi: panic: stack overflow: the stack ran out, which is infinite or very deep recursion" ] ||
+    fail "a frame larger than the guard page said:
+$out"
+  break
+done
+[ "$placed" = 1 ] || fail "ten runs found no room under a fiber's stack for the floor"
+step "a frame larger than the guard page is a stack overflow, not a write under the stack"
 # The repeats catch a thread's missing guarantee only now and then: the
 # room it leaves was enough on this machine's CPUs and not always on the
 # runners'. What the guarantee is can be asked, though - a call with 0

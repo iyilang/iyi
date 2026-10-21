@@ -530,7 +530,7 @@ class IyiFiber
 
   # 256 KiB of stack and one guard page under it, so running off the end
   # is a fault at a page rather than a quiet corruption of a neighbour's
-  # chunk.
+  # chunk: every frame probes its pages top down (`iyi_probe_stack`).
   STACK_BYTES = 262144_u64
   PAGE        =   4096_u64
 

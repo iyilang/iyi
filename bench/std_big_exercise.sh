@@ -569,8 +569,10 @@ prove_fails() {
     return
   fi
   if ! grep -q "$phrase" "$WORK/$dir/out"; then
-    echo "  $label: failed, but not at expected check (expected '$phrase')"
-    sed -n '$p' "$WORK/$dir/out"
+    # Fifteen lines, not one: a panic's backtrace on darwin ends at dyld's
+    # `start`, and that last line alone said nothing of what had failed.
+    echo "  $label: failed, but not at expected check (expected '$phrase', exit $exit_code); its last 15 lines:"
+    tail -n 15 "$WORK/$dir/out" | sed 's/^/    /'
     status=1
     return
   fi

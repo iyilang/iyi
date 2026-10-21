@@ -111,7 +111,20 @@ impl Error for X509Error
   end
 end
 
-pub struct Certificate
+# A class, not a struct, for the stack's sake. Thirty-odd fields make 472
+# bytes, and a struct is copied whole into every array slot, block
+# argument and union it passes through. In a debug build each copy is a
+# stack slot of its own, and a TLS handshake inside a task ran out of
+# its 256 KiB (issue #130). Measured on Linux x86_64, a struct made
+# `Certificate.parse`'s frame 31,832 bytes (each `!` and early return
+# makes a `Certificate | X509Error`), `X509.grow`'s 13,640 and
+# `issuer_error`'s 6,184; a class makes them 5,224, 296 and 368. With
+# `EcdsaP256.check` split as well (std/ecdsa), `X509.verify` of a
+# two-certificate P-256 chain in a task went from 35,608 bytes of stack
+# to 11,768. Nothing in a certificate is written after `parse`, so
+# sharing one is not observable, and two are equal when they are the
+# same DER, as two structs were when every field was.
+pub class Certificate
   # The whole certificate as it was read, and its signed part.
   getter raw : Array(UInt8)
   getter tbs : Array(UInt8)
@@ -192,6 +205,15 @@ pub struct Certificate
     @unhandled_critical = extensions.unhandled_critical
     @tls_features = extensions.tls_features
     @ocsp_nocheck = extensions.ocsp_nocheck
+  end
+
+  # The same certificate: the same DER, from which every field is read.
+  def ==(other : Certificate) : Bool
+    @raw == other.raw
+  end
+
+  def hash : Int32
+    @raw.hash
   end
 
   # The certificate *der* holds (RFC 5280 section 4.1).

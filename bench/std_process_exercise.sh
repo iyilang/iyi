@@ -125,7 +125,7 @@ for phrase in "arguments came back as they went" \
               "one variable given and one removed, for the child alone" \
               "none read, and this program carries on" \
               "written straight to the terminal" \
-              "a sibling ticked all its ticks while the child slept" \
+              "a sibling ticked while the child slept" \
               "answered Cancelled, with its child ended" \
               "three lines answered one at a time while the child ran" \
               "the child's Process.pid is the handle's pid" \

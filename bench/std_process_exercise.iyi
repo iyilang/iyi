@@ -427,7 +427,11 @@ group do |g|
   puts "== the wait parks"
   # The child's output is this program's own, so the only wait is for its
   # end: a wait that held the thread would let the sibling tick none of
-  # its ticks before the child had ended.
+  # its ticks before the child had ended. One tick tells the two apart, and
+  # the bound asks no more: at five, a Windows runner busy with two other
+  # builds ticked three times in the 800 ms (the v0.19.0 tag's run, job
+  # 119825970286), and a broken copy that should have hung later failed
+  # here instead.
   ticks = 0
   ticks_at_end = -1
   group do |h|
@@ -446,8 +450,8 @@ group do |g|
       0
     end
   end
-  fail("a sibling ticked #{ticks_at_end} times of 10 while the child ran") unless ticks_at_end >= 5
-  puts "  a sibling ticked all its ticks while the child slept"
+  fail("a sibling ticked #{ticks_at_end} times of 10 while the child ran") unless ticks_at_end >= 1
+  puts "  a sibling ticked while the child slept"
 
   puts "== a cancelled run ends its child"
   outcome = ""

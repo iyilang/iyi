@@ -418,11 +418,15 @@ puts "== a P-256 chain checked inside a task, 100 frames down"
 #
 # The array is left uninitialized and written through a pointer, because
 # the issue's `StaticArray(UInt8, 1000).new` measures the compiler and
-# not this module: in a debug build on aarch64 the value it returns is
+# not this module: in a debug build on aarch64 the value it returned was
 # copied a byte at a time through stack slots, and the issue's own frame
-# is 10,912 bytes on darwin arm64 against 5,104 on Windows. That is past
+# was 10,912 bytes on darwin arm64 against 5,104 on Windows. That was past
 # std/x509's reach, and it ran the darwin runner out of stack at 32 of
-# the issue's frames before any check began. These frames are the same
+# the issue's frames before any check began. A value over 128 bytes is
+# copied from memory to memory now, and the issue's frame is 2,064 bytes
+# on darwin arm64, 2,024 on Linux x86_64 and 2,056 on Windows x64 (callee
+# saves included, the return address not), a second kilobyte for the
+# slot `new` returns into. These frames are the same
 # size everywhere: 1,240 bytes on Linux x86_64, 1,232 on darwin arm64
 # and 1,280 on Windows x64, read from the prologues. A hundred of them
 # hold at least the 122,496 bytes the issue's 24 frames hold on Windows,

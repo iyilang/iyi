@@ -1002,10 +1002,9 @@ class Iyi::CodeGenVisitor
       call_arg = check_proc_is_not_closure(call_arg, field_type)
     end
 
-    value = to_rhs call_arg, field_type
     field_pointer = yield(field_type)
     iyi_with_write_barrier(field_pointer, field_type) do
-      store value, field_pointer
+      store_value call_arg, field_type, field_pointer
     end
 
     original_call_arg
@@ -1156,7 +1155,7 @@ class Iyi::CodeGenVisitor
       proc_arg_type = proc_type.arg_types[i]
       target_def_arg_type = target_def.args[i].type
       args[i] = arg = upcast args[i], proc_arg_type, target_def_arg_type
-      closure_args << to_rhs(arg, proc_arg_type)
+      closure_args << (passed_indirectly?(proc_arg_type) ? arg : to_rhs(arg, proc_arg_type))
     end
 
     fun_ptr = builder.extract_value closure_ptr, 0

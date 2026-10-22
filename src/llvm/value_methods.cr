@@ -67,6 +67,10 @@ module LLVM::ValueMethods
     LibLLVM.set_dll_storage_class(self, storage_class)
   end
 
+  def visibility=(visibility)
+    LibLLVM.set_visibility(self, visibility)
+  end
+
   def call_convention=(call_convention)
     LibLLVM.set_instruction_call_convention(self, call_convention)
   end

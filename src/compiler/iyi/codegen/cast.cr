@@ -93,7 +93,7 @@ class Iyi::CodeGenVisitor
         if target_type.nil_type?
           value
         else
-          store to_rhs(value, target_type), target_pointer
+          store_value value, target_type, target_pointer
         end
       else
         assign_distinct target_pointer, target_type, value_type, value
@@ -153,7 +153,7 @@ class Iyi::CodeGenVisitor
         casted_value = cast_to_pointer(union_value_ptr, type_needing_cast)
         compatible_ptr = alloca llvm_compatible_type
         assign(compatible_ptr, compatible_type, type_needing_cast, casted_value)
-        store_in_union target_type, target_pointer, compatible_type, load(llvm_compatible_type, compatible_ptr)
+        store_in_union target_type, target_pointer, compatible_type, compatible_ptr
         br exit_label
 
         position_at_end doesnt_match_label
@@ -206,14 +206,17 @@ class Iyi::CodeGenVisitor
       end
     end
 
-    value = to_rhs(value, value_type)
     store_in_union target_type, target_pointer, value_type, value
   end
 
   def assign_distinct(target_pointer, target_type : VirtualType, value_type : MixedUnionType, value)
     union_value_ptr = union_value(llvm_type(value_type), value)
     casted_value = cast_to_pointer(union_value_ptr, target_type)
-    store load(llvm_type(target_type), casted_value), target_pointer
+    if passed_indirectly?(target_type)
+      copy_value target_pointer, casted_value, target_type
+    else
+      store load(llvm_type(target_type), casted_value), target_pointer
+    end
   end
 
   def assign_distinct(target_pointer, target_type : VirtualType, value_type : Type, value)
@@ -475,8 +478,7 @@ class Iyi::CodeGenVisitor
       value_ptr = aggregate_index(value_struct_type, value, index)
       loaded_value = to_lhs(value_ptr, value_tuple_type)
       downcasted_value = downcast(loaded_value, target_tuple_type, value_tuple_type, true)
-      downcasted_value = to_rhs(downcasted_value, target_tuple_type)
-      store downcasted_value, target_ptr
+      store_value downcasted_value, target_tuple_type, target_ptr, fresh: true
       index += 1
     end
     target_pointer
@@ -493,8 +495,7 @@ class Iyi::CodeGenVisitor
       target_index = to_type.name_index(entry.name).not_nil!
       target_index_type = to_type.name_type(entry.name)
       downcasted_value = downcast(value_at_index, target_index_type, entry.type, true)
-      downcasted_value = to_rhs(downcasted_value, target_index_type)
-      store downcasted_value, aggregate_index(target_struct_type, target_pointer, target_index)
+      store_value downcasted_value, target_index_type, aggregate_index(target_struct_type, target_pointer, target_index), fresh: true
     end
     target_pointer
   end
@@ -662,7 +663,7 @@ class Iyi::CodeGenVisitor
     end
 
     union_ptr = alloca(llvm_type(to_type))
-    store_in_union(to_type, union_ptr, from_type, to_rhs(value, from_type))
+    store_in_union(to_type, union_ptr, from_type, value, fresh: true)
     union_ptr
   end
 

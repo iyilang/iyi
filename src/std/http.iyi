@@ -139,7 +139,7 @@
 module std/http
 
 import std/socket::{IyiSocket, Resolver, SocketError}
-import std/tls::{TlsClient, TlsConfig, TlsConnection, TlsError, TlsIdentity, TlsServer, TlsServerConfig, TlsSession, TlsVersion}
+import std/tls::{TlsClient, TlsConfig, TlsConnection, TlsError, TlsMadeUnder, TlsServer, TlsServerConfig, TlsSession}
 import std/x509::{Certificate}
 import std/uri::{URI, Params}
 import std/mime::{MIME}
@@ -587,46 +587,6 @@ class Conn
       left = left - got
     end
     socket.close
-  end
-end
-
-# The `TlsConfig` an `https://` connection was made under, and the parts of
-# it that decide whom the connection trusts and what it presented: the
-# roots, the identity, the time certificates were checked at and the
-# oldest version spoken. A kept connection is handed out only for a
-# request whose `HTTP.tls_config` is the same object holding the same
-# ones, so a connection checked against one trust store never carries a
-# request made under another - set by `HTTP.tls_config=`, or by assigning
-# `roots` or `identity` on the configuration in place. Objects are told
-# apart by `object_id`, and the references are held, so an address freed
-# and handed to a new configuration is never taken for the old one.
-# Certificates added to the same roots array in place are not seen: such
-# an array is still the same object. An `HTTPClient`'s TLS tickets are
-# kept under it the same way: a ticket skips the certificate check, so one
-# taken under one trust store or identity is never offered under another.
-class TlsMadeUnder
-  @config : TlsConfig
-  @roots : Array(Certificate)?
-  @identity : TlsIdentity?
-  @now : Time?
-  @min_version : TlsVersion
-
-  def initialize(@config : TlsConfig)
-    @roots = @config.roots
-    @identity = @config.identity
-    @now = @config.now
-    @min_version = @config.min_version
-  end
-
-  def same?(config : TlsConfig) : Bool
-    return false unless @config.object_id == config.object_id
-    roots = config.roots
-    held = @roots
-    return false unless held.nil? ? roots.nil? : (!roots.nil? && held.object_id == roots.object_id)
-    identity = config.identity
-    mine = @identity
-    return false unless mine.nil? ? identity.nil? : (!identity.nil? && mine.object_id == identity.object_id)
-    @now == config.now && @min_version == config.min_version
   end
 end
 
@@ -2420,15 +2380,18 @@ end
 # A resumed handshake checks no certificate - the ticket stands for the
 # check the first one made - so a ticket is never offered to another
 # origin, nor under another configuration: after `HTTP.tls_config=`, or
-# roots or an identity assigned in place - in `HTTP.tls_config` or in the
-# client's own *tls* - the next connection is a full
-# handshake checked against the new roots, and that origin's tickets from
-# under the old one are dropped. At most *origin_tickets* are kept an
-# origin - 4 by default, so that as many connections as *idle* keeps by
-# default can resume at once, where std/tls's server and OpenSSL's send 2
-# a handshake - and *tickets* in all, 256 by default: as many origins as
-# that leaves room for at *origin_tickets* each, the one longest unused
-# dropped first. 0 for either keeps none, and nothing resumes. `close`
+# roots, an identity, `now`, `min_version` or `require_staple` assigned
+# in place - in `HTTP.tls_config` or in the client's own *tls* - the next
+# connection is a full handshake under the new ones, and that origin's
+# tickets from under the old one are dropped. (std/tls's `TlsSession`
+# holds each ticket to its configuration too; this client drops them
+# where that one would only pass them over.) At most *origin_tickets* are
+# kept an origin - 4 by default, so that as many connections as *idle*
+# keeps by default can resume at once, where std/tls's server and
+# OpenSSL's send 2 a handshake - and *tickets* in all, 256 by default: as
+# many origins as that leaves room for at *origin_tickets* each, the one
+# longest unused dropped first. 0 for either keeps none, and nothing
+# resumes. `close`
 # leaves them. Nothing goes early (0-RTT), whatever a ticket allows: the
 # module's header says why. `connections_resumed`, `tickets_held` and
 # `Response#tls_resumed?` say what was kept and used. What it saves, by
@@ -2588,10 +2551,9 @@ pub class HTTPClient
   # The session a new connection to *origin* under *tls* offers a ticket
   # from and keeps the server's new ones in; nil when the client keeps
   # none. The origin's tickets from under another configuration are
-  # dropped, never offered: keyed by origin alone, a ticket taken under
-  # roots that trusted the server resumed under roots that would have
-  # refused it, with no certificate checked. The session handed out is
-  # the newest used; past the room *tickets* leaves, the oldest goes.
+  # dropped, not left to take room that `TlsSession` would never offer
+  # them from. The session handed out is the newest used; past the room
+  # *tickets* leaves, the oldest goes.
   protected def session_for(origin : String, tls : TlsConfig) : TlsSession?
     room = @origin_tickets > 0 ? @tickets // @origin_tickets : 0
     return nil if room == 0

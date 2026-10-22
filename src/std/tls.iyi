@@ -1749,6 +1749,15 @@ pub class TlsClient < TlsConnection
   @session : TlsSession?
   # The ticket this ClientHello offers, if it offers one.
   @offered : TlsHeldTicket? = nil
+  # With a session, set when the handshake starts: the port the socket is
+  # connected to (0 over a unix socket, which has none) and the
+  # configuration as it then stood, which the tickets this connection
+  # receives are kept under (`TlsSession`).
+  @port : Int32 = 0
+  @made_under : TlsMadeUnder? = nil
+  # When the certificates this session rests on were checked (monotonic
+  # ms): this handshake's, or the full one's that a resumption carries on.
+  @authenticated_ms : Int64 = TlsTime.now_ms
   # What the caller gave to send early, and what came of it: whether the
   # ClientHello offered it (early_data, and the records after it), whether
   # the server's EncryptedExtensions took it, and the key it went under.
@@ -1795,7 +1804,8 @@ pub class TlsClient < TlsConnection
 
   # A connection to *host* on *port*, its handshake done and the server's
   # certificate checked for *host* - or, with a *session* that holds a
-  # ticket for *host*, resumed, and the tickets the server sends kept there.
+  # ticket for *host* and *port* under *config* (`TlsSession` says which
+  # fit), resumed, and the tickets the server sends kept there.
   # *early_data* goes with the ClientHello (0-RTT, RFC 8446 section 2.3)
   # when the ticket taken allows that much, and after the handshake when it
   # did not, or the server refused it - unless the server then chose
@@ -1870,7 +1880,9 @@ pub class TlsClient < TlsConnection
     session = Random::Secure.random_bytes(32)
     ephemeral = nil.as(P256PrivateKey | P384PrivateKey | Nil)
     if held = @session
-      @offered = held.take(@host, TlsTime.now_ms)
+      @port = @socket.unix? ? 0 : (@socket.remote_port || 0)
+      @made_under = TlsMadeUnder.new(@config)
+      @offered = held.take(@host, @port, @config, TlsTime.now_ms)
     end
     # Early data goes when the ticket allows that much (section 4.6.1's
     # max_early_data_size), and not otherwise.
@@ -1973,6 +1985,7 @@ pub class TlsClient < TlsConnection
       psk = offered.psk
       @resumed = true
       @peer_certificates = offered.peer_certificates
+      @authenticated_ms = offered.authenticated_ms
     end
 
     if key = ephemeral
@@ -2089,11 +2102,12 @@ pub class TlsClient < TlsConnection
 
   # A NewSessionTicket (section 4.6.1), judged whole, and kept in the
   # session when there is one: its PSK from its nonce, with the host, the
-  # suite, the protocol and the certificates of this connection, and the
-  # early data its early_data extension allows (none without one). A
-  # ticket whose lifetime is zero, or past `TlsSession::MAX_TICKET` bytes,
-  # is passed over; a lifetime past seven days, which section 4.6.1
-  # forbids a server, is held to seven.
+  # port, the configuration, the suite, the protocol and the certificates
+  # of this connection, when they were checked (on a resumed connection,
+  # by the full handshake it resumed), and the early data its early_data
+  # extension allows (none without one). A ticket whose lifetime is zero,
+  # or past `TlsSession::MAX_TICKET` bytes, is passed over; a lifetime past
+  # seven days, which section 4.6.1 forbids a server, is held to seven.
   private def ticket_received(message : Array(UInt8)) : TlsError?
     reader = TlsReader.new(message[4, message.size - 4])
     lifetime = reader.u32
@@ -2117,11 +2131,13 @@ pub class TlsClient < TlsConnection
       return TlsError.new("a NewSessionTicket's early_data cut short", TlsAlert::DECODE_ERROR) if field.short? || !field.done?
     end
     session = @session
-    return nil unless session
+    under = @made_under
+    return nil unless session && under
     return nil if lifetime == 0_i64 || ticket.size > TlsSession::MAX_TICKET
     lifetime = TlsSession::MAX_LIFETIME if lifetime > TlsSession::MAX_LIFETIME
     psk = @schedule.resumption_psk(@resumption_secret, nonce)
-    session.keep(TlsHeldTicket.new(ticket, psk, @suite, TlsTime.now_ms, lifetime * 1000_i64, age_add, @host, @alpn_protocol, @peer_certificates, early))
+    session.keep(TlsHeldTicket.new(ticket, psk, @suite, TlsTime.now_ms, lifetime * 1000_i64, age_add, @host, @port, under, @alpn_protocol,
+      @peer_certificates, @authenticated_ms, early))
     nil
   end
 
@@ -2802,16 +2818,76 @@ class TlsServerHello
   end
 end
 
+# The `TlsConfig` a client connection was made under, and the parts of it
+# that decide whom the connection trusts and what it presented: the
+# roots, the identity, the time certificates were checked at, the oldest
+# version spoken and whether an OCSP staple was required. Whatever was
+# made under it - a `TlsSession`'s ticket, std/http's kept connection -
+# is used again only under a configuration that is the same object
+# holding the same ones, so what one trust store, identity or staple rule
+# checked is never carried under another: set by assigning a new
+# configuration, or by assigning `roots`, `identity`, `now`,
+# `min_version` or `require_staple` on it in place. Objects are told
+# apart by `object_id`, and the references are held, so an address freed
+# and handed to a new configuration is never taken for the old one.
+# Certificates added to the same roots array in place are not seen: such
+# an array is still the same object. One definition serves std/tls and
+# std/http, so the two cannot come to compare different parts.
+pub class TlsMadeUnder
+  @config : TlsConfig
+  @roots : Array(Certificate)?
+  @identity : TlsIdentity?
+  @now : Time?
+  @min_version : TlsVersion
+  @require_staple : Bool
+
+  def initialize(@config : TlsConfig)
+    @roots = @config.roots
+    @identity = @config.identity
+    @now = @config.now
+    @min_version = @config.min_version
+    @require_staple = @config.require_staple
+  end
+
+  def same?(config : TlsConfig) : Bool
+    return false unless @config.object_id == config.object_id
+    roots = config.roots
+    held = @roots
+    return false unless held.nil? ? roots.nil? : (!roots.nil? && held.object_id == roots.object_id)
+    identity = config.identity
+    mine = @identity
+    return false unless mine.nil? ? identity.nil? : (!identity.nil? && mine.object_id == identity.object_id)
+    @now == config.now && @min_version == config.min_version && @require_staple == config.require_staple
+  end
+end
+
 # What a client keeps to resume a server's sessions (RFC 8446 section
 # 2.2): the tickets its NewSessionTickets carry, each with the PSK its
 # nonce makes. The caller holds it and hands it to `TlsClient.connect` or
 # `over`; there is no store of the process's own. A connection offers the
-# newest ticket for its host still within its lifetime and takes it out,
-# for a ticket goes out once (appendix C.4): two resumptions are not tied
-# together by it. A ticket is offered only to the host it came from -
-# section 4.6.1 has a client resume only for a name the first handshake's
-# certificate was checked for - and its chain is the resumed connection's
-# `peer_certificates`.
+# newest ticket that fits it, and takes it out, for a ticket goes out once
+# (appendix C.4): two resumptions are not tied together by it. A resumed
+# handshake checks no certificate - the ticket stands for the check the
+# first one made, and its chain is the resumed connection's
+# `peer_certificates` - so a ticket fits only a connection that check
+# would stand for:
+# - to the host and port it came from: section 4.6.1 has a client resume
+#   only for a name the first handshake's certificate was checked for, and
+#   a ticket offered to another port names the client to whatever server
+#   listens there;
+# - under the configuration it came under (`TlsMadeUnder`): one session
+#   shared by two configurations resumed the first one's ticket under the
+#   second, its roots, `now` and `require_staple` never applied, and with
+#   mutual TLS the server took the ticket's client certificate for the
+#   connection's, so a connection made under identity B was identity A's;
+# - while the server's certificate is valid at the configuration's `now`
+#   (the clock's when nil), as Go's client has it: a session past its
+#   leaf's notAfter is a full handshake, which refuses it;
+# - within its lifetime, and within seven days (`MAX_LIFETIME`, section
+#   4.6.1's most) of the full handshake that checked those certificates,
+#   however many resumptions came between: a server that sent fresh
+#   tickets on every resumed connection otherwise kept the session alive
+#   for as long as the client came back.
 pub class TlsSession
   # The most tickets held: past it, the oldest goes.
   MAX_TICKETS = 8
@@ -2837,18 +2913,23 @@ pub class TlsSession
     @tickets.size
   end
 
-  # The newest ticket for *host* not past its lifetime at *now_ms* (by the
-  # monotonic clock), taken out; those past their lifetimes go too.
-  def take(host : String, now_ms : Int64) : TlsHeldTicket?
-    @tickets = @tickets.select { |held| now_ms - held.received_ms < held.lifetime_ms }
+  # The newest ticket for *host* and *port* under *config* (the class's
+  # header says which fit), taken out, at *now_ms* by the monotonic clock.
+  # Those past their lifetimes or seven days from their full handshake go
+  # too, and so does one that fits but whose server certificate has
+  # expired.
+  def take(host : String, port : Int32, config : TlsConfig, now_ms : Int64) : TlsHeldTicket?
+    @tickets = @tickets.select { |held| now_ms - held.received_ms < held.lifetime_ms && now_ms - held.authenticated_ms < MAX_LIFETIME * 1000_i64 }
+    checked_at = config.now || Time.utc
     at = @tickets.size - 1
     while at >= 0
       held = @tickets[at]
-      if held.host == host
+      if held.host == host && held.port == port && held.under.same?(config)
         kept = [] of TlsHeldTicket
         @tickets.each_with_index { |other, i| kept << other unless i == at }
         @tickets = kept
-        return held
+        leaf = held.peer_certificates[0]?
+        return held unless leaf && checked_at > leaf.not_after
       end
       at = at - 1
     end
@@ -2865,8 +2946,10 @@ pub class TlsSession
 end
 
 # One ticket a client holds: the server's bytes, and the PSK, suite,
-# arrival (monotonic ms), lifetime, age_add, host, protocol and
-# certificates of the connection it came on, and the most early data it
+# arrival (monotonic ms), lifetime, age_add, host, port, configuration,
+# protocol and certificates of the connection it came on, when the full
+# handshake that checked those certificates was made (monotonic ms; a
+# resumption's tickets carry the first one's), and the most early data it
 # allows (0 for none).
 pub class TlsHeldTicket
   getter ticket : Array(UInt8)
@@ -2876,12 +2959,16 @@ pub class TlsHeldTicket
   getter lifetime_ms : Int64
   getter age_add : Int64
   getter host : String
+  getter port : Int32
+  getter under : TlsMadeUnder
   getter alpn : String?
   getter peer_certificates : Array(Certificate)
+  getter authenticated_ms : Int64
   getter max_early_data : Int64
 
   def initialize(@ticket : Array(UInt8), @psk : Array(UInt8), @suite : Int32, @received_ms : Int64, @lifetime_ms : Int64,
-                 @age_add : Int64, @host : String, @alpn : String?, @peer_certificates : Array(Certificate), @max_early_data : Int64 = 0_i64)
+                 @age_add : Int64, @host : String, @port : Int32, @under : TlsMadeUnder, @alpn : String?,
+                 @peer_certificates : Array(Certificate), @authenticated_ms : Int64, @max_early_data : Int64 = 0_i64)
   end
 end
 
@@ -3479,7 +3566,14 @@ end
 # its age_add, the PSK, the name the client asked for, the protocol
 # chosen, the identity shown (`TlsServerConfig#identity_index`), the
 # client's certificates (DER, leaf first), and when the first handshake
-# checked the certificates the session rests on (monotonic ms).
+# checked the certificates the session rests on (monotonic ms). The name's
+# length is two bytes and the identity's place four: in version 1 each
+# was one, and a name past 255 bytes, which the ClientHello then let
+# through, sealed a ticket that never opened, and a place past 255 among
+# `others` wrapped round. The PSK (48 bytes at most), the protocol (one
+# byte long in ALPN itself) and the chain's count - a chain of 256
+# certificates is far past `TlsServerConfig::MAX_TICKET`, which no ticket
+# is sent beyond - keep one byte.
 pub class TlsTicket
   getter suite : Int32
   getter issued_ms : Int64
@@ -3493,7 +3587,7 @@ pub class TlsTicket
   getter authenticated_ms : Int64
   getter max_early_data : Int64
 
-  VERSION = 1_u8
+  VERSION = 2_u8
 
   def initialize(@suite : Int32, @issued_ms : Int64, @lifetime : Int64, @age_add : Int64, @psk : Array(UInt8),
                  @server_name : String?, @alpn : String?, @identity : Int32, @chain : Array(Array(UInt8)), @authenticated_ms : Int64,
@@ -3504,8 +3598,8 @@ pub class TlsTicket
     name = TlsBytes.of(@server_name || "")
     protocol = TlsBytes.of(@alpn || "")
     out = [VERSION] + TlsBytes.u16(@suite) + TlsBytes.u64(@issued_ms) + TlsBytes.u64(@authenticated_ms) + TlsBytes.u32(@lifetime) +
-          TlsBytes.u32(@age_add) + TlsBytes.u32(@max_early_data) + [@psk.size.to_u8] + @psk + [name.size.to_u8] + name +
-          [protocol.size.to_u8] + protocol + [@identity.to_u8, @chain.size.to_u8]
+          TlsBytes.u32(@age_add) + TlsBytes.u32(@max_early_data) + [@psk.size.to_u8] + @psk + TlsBytes.u16(name.size) + name +
+          [protocol.size.to_u8] + protocol + TlsBytes.u32(@identity.to_i64) + [@chain.size.to_u8]
     @chain.each { |der| out = out + TlsBytes.u24(der.size) + der }
     out
   end
@@ -3521,14 +3615,14 @@ pub class TlsTicket
     age_add = reader.u32
     early = reader.u32
     psk = reader.bytes(reader.u8)
-    name = reader.bytes(reader.u8)
+    name = reader.bytes(reader.u16)
     protocol = reader.bytes(reader.u8)
-    identity = reader.u8
+    identity = reader.u32
     chain = [] of Array(UInt8)
     reader.u8.times { chain << reader.bytes(reader.u24) }
-    return nil if reader.short? || !reader.done? || version != VERSION.to_i32
+    return nil if reader.short? || !reader.done? || version != VERSION.to_i32 || identity > 0x7FFFFFFF_i64
     TlsTicket.new(suite, issued, lifetime, age_add, psk, name.empty? ? nil : TlsBytes.text(name),
-      protocol.empty? ? nil : TlsBytes.text(protocol), identity, chain, authenticated, early)
+      protocol.empty? ? nil : TlsBytes.text(protocol), identity.to_i32, chain, authenticated, early)
   end
 
   # The session *ticket* seals, opened by *keys* at *now_ms*: nil when no
@@ -3733,6 +3827,9 @@ pub class TlsServer < TlsConnection
   # The early data passed over when a client sends it unasked for: the
   # most a server that takes none need allow (section 4.2.10).
   EARLY_ALLOWANCE = 16 * TlsRecords::MAX_CIPHERTEXT
+  # The longest server_name taken, in bytes: a DNS name written out
+  # without its trailing dot (see where the ClientHello is read).
+  MAX_HOST_NAME = 253
 
   def initialize(socket : IyiSocket, @config : TlsServerConfig)
     super(socket, "the client", "the client")
@@ -3855,8 +3952,9 @@ pub class TlsServer < TlsConnection
   end
 
   # The next of the client's early records (section 4.2.10): its data,
-  # counted against what the ticket allows; or nil at EndOfEarlyData, which
-  # ends them and moves the reader to the client's handshake keys.
+  # counted against the less of what the ticket allows and what
+  # `max_early_data` allows now; or nil at EndOfEarlyData, which ends them
+  # and moves the reader to the client's handshake keys.
   private def early_record : Array(UInt8)? | TlsError
     while true
       record = next_record
@@ -3871,7 +3969,7 @@ pub class TlsServer < TlsConnection
         @early_read = @early_read + content.size
         # Section 4.6.1: more than max_early_data_size is unexpected_message.
         if @early_read > @early_limit
-          return TlsError.new("#{@early_read} bytes of early data, past the #{@early_limit} its ticket allows", TlsAlert::UNEXPECTED_MESSAGE)
+          return TlsError.new("#{@early_read} bytes of early data, past the #{@early_limit} allowed", TlsAlert::UNEXPECTED_MESSAGE)
         end
         return content unless content.empty?
       when TlsRecords::HANDSHAKE
@@ -3974,9 +4072,12 @@ pub class TlsServer < TlsConnection
       @peer_certificates = chain
       if offer.early_data && !retried && take_early?(ticket, psk_identity, offer)
         # Taken: read under the client's early traffic keys, over this
-        # ClientHello alone, until EndOfEarlyData - none passed over.
+        # ClientHello alone, until EndOfEarlyData - none passed over - and
+        # no more of it than the ticket allows or `max_early_data` allows
+        # now: a ticket issued before the limit was lowered kept the
+        # allowance it was issued with for as long as it lived.
         @early_taken = true
-        @early_limit = ticket.max_early_data
+        @early_limit = ticket.max_early_data < @config.early_limit ? ticket.max_early_data : @config.early_limit
         @early_left = 0
         early_secret = @schedule.early_traffic(ticket.psk, hello)
       end
@@ -4283,10 +4384,19 @@ pub class TlsServer < TlsConnection
           return TlsError.new("a server_name cut short", TlsAlert::DECODE_ERROR) if names.short? || name.empty?
           next unless kind == 0
           # RFC 6066 section 3: one host_name, ASCII - a byte past 0x7E or
-          # below 0x21 is no host's - and without the trailing dot.
+          # below 0x21 is no host's - and without the trailing dot. Its
+          # HostName may be 65535 bytes, but it is "the fully qualified DNS
+          # hostname": RFC 1035 section 2.3.4 holds a name to 255 bytes on
+          # the wire, its length bytes and final root label among them,
+          # which is 253 written out without the trailing dot. A longer one
+          # is no host's, and was sealed into a ticket whose one-byte
+          # length cut it short (`TlsTicket`).
           return TlsError.new("a server_name with two host names", TlsAlert::ILLEGAL_PARAMETER) if server_name
           unless name.all? { |b| b > 0x20_u8 && b < 0x7F_u8 } && name[name.size - 1] != 0x2E_u8
             return TlsError.new("a server_name that is not a host name", TlsAlert::DECODE_ERROR)
+          end
+          if name.size > MAX_HOST_NAME
+            return TlsError.new("a server_name of #{name.size} bytes, past the #{MAX_HOST_NAME} a host name has", TlsAlert::DECODE_ERROR)
           end
           server_name = TlsBytes.text(name)
         end

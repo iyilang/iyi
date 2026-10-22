@@ -69,7 +69,11 @@
 # sha256WithRSAEncryption (std/rsa, PKCS #1 v1.5) or Ed25519
 # (std/curve25519), each in constant time. The DER is written in its one
 # shortest form (`X509Der`), what std/asn1 reads back. No CA is made here:
-# no basicConstraints, keyUsage or key identifiers are written.
+# no basicConstraints, keyUsage or key identifiers are written. RFC 5280's
+# bounds hold on what is written: a common name of 64 characters at most
+# (a request leaves a longer first name out of its subject, a self-signed
+# certificate refuses it), and a serial that is positive and 20 octets
+# at most.
 # bench/std_acme_exercise.sh holds both to OpenSSL and Python's
 # cryptography.
 #
@@ -427,6 +431,11 @@ pub struct X509
     X509Error.new("no certificate here issued #{leaf.issuer_name}, the issuer of #{leaf.subject_name}")
   end
 
+  # The longest common name RFC 5280 allows (ub-common-name, appendix A.1).
+  MAX_COMMON_NAME = 64
+  # The most octets a serial's INTEGER may hold (RFC 5280 section 4.1.2.2).
+  MAX_SERIAL_OCTETS = 20
+
   # A certificate *key* signs for itself (RFC 5280 section 4.1), as its
   # DER: version 3, *serial* (sixteen random bytes when nil), the subject
   # and issuer both CN=<the first name>, valid from *not_before* to
@@ -434,18 +443,37 @@ pub struct X509
   # dNSNames, then *extensions* in order. No basicConstraints and no
   # keyUsage: what this writes is a certificate shown for a name, as RFC
   # 8737's tls-alpn-01 shows one, not a CA's.
+  #
+  # A first name longer than `MAX_COMMON_NAME` is refused, not cut or left
+  # out of the subject: a common name holds 64 characters at most, and a
+  # subject without one would be empty, which a self-signed certificate's
+  # issuer - the same name - must not be (section 4.1.2.4). `request`,
+  # whose subject is no issuer, leaves the CN out instead. *serial* is the
+  # big-endian magnitude of a positive number: refused when it is zero or
+  # when its INTEGER, a sign byte put before a top bit that is set, runs
+  # past `MAX_SERIAL_OCTETS` (section 4.1.2.2). The sixteen bytes drawn
+  # when it is nil write 17 octets at most and are drawn again in the
+  # 2^-128 chance they are all zero.
   def self.self_signed(key : SigningKey, names : Array(String), not_before : Time, not_after : Time,
                        serial : Array(UInt8)? = nil, extensions : Array(X509Extension) = [] of X509Extension) : Array(UInt8) | X509Error
     alt = X509Der.alt_names(names)!
     return X509Error.new("a certificate valid until #{not_after}, before it is valid from #{not_before}") if not_after < not_before
-    number = serial || Random::Secure.random_bytes(16)
-    return X509Error.new("a serial of #{number.size} bytes, where RFC 5280 allows 1 to 20") unless number.size > 0 && number.size <= 20
+    if names[0].bytesize > MAX_COMMON_NAME
+      return X509Error.new("#{names[0]} is #{names[0].bytesize} characters, past the #{MAX_COMMON_NAME} RFC 5280 allows a common name, and a self-signed certificate's subject cannot be left empty")
+    end
+    number = serial || X509Der.random_serial
+    return X509Error.new("a serial of 0, where RFC 5280 asks a positive number") unless number.any? { |b| b != 0_u8 }
+    octets = X509Der.integer_content(number)
+    if octets.size > MAX_SERIAL_OCTETS
+      return X509Error.new("a serial whose INTEGER is #{octets.size} octets, past the #{MAX_SERIAL_OCTETS} RFC 5280 allows")
+    end
+    written_serial = X509Der.tlv(0x02_u8, octets)
     name = X509Der.name(names[0])
     written = [X509Der.extension(X509Oids::SUBJECT_ALT_NAME, false, alt)]
     extensions.each { |e| written << X509Der.extension(e.oid, e.critical, e.value) }
     tbs = X509Der.sequence([
       X509Der.explicit(0, X509Der.integer([2_u8])),
-      X509Der.integer(number),
+      written_serial,
       key.algorithm_identifier,
       name,
       X509Der.sequence([X509Der.time(not_before), X509Der.time(not_after)]),
@@ -464,7 +492,7 @@ pub struct X509
   # issues for (RFC 8555 section 7.4).
   def self.request(key : SigningKey, names : Array(String)) : Array(UInt8) | X509Error
     alt = X509Der.alt_names(names)!
-    subject = names[0].bytesize <= 64 ? X509Der.name(names[0]) : X509Der.sequence([] of Array(UInt8))
+    subject = names[0].bytesize <= MAX_COMMON_NAME ? X509Der.name(names[0]) : X509Der.sequence([] of Array(UInt8))
     requested = X509Der.sequence([X509Der.extension(X509Oids::SUBJECT_ALT_NAME, false, alt)])
     attribute = X509Der.sequence([X509Der.oid(X509Oids::EXTENSION_REQUEST), X509Der.set([requested])])
     info = X509Der.sequence([
@@ -1422,13 +1450,27 @@ struct X509Der
   # A non-negative INTEGER from its big-endian bytes: leading zeros taken
   # off, and one put back where the top bit would read as a sign.
   def self.integer(magnitude : Array(UInt8)) : Array(UInt8)
+    tlv(0x02_u8, integer_content(magnitude))
+  end
+
+  # What `integer` writes inside its tag and length.
+  def self.integer_content(magnitude : Array(UInt8)) : Array(UInt8)
     at = 0
     while at < magnitude.size - 1 && magnitude[at] == 0_u8
       at = at + 1
     end
     body = magnitude.empty? ? [0_u8] : magnitude[at, magnitude.size - at]
-    body = [0_u8] + body if body[0] >= 0x80_u8
-    tlv(0x02_u8, body)
+    body[0] >= 0x80_u8 ? [0_u8] + body : body
+  end
+
+  # Sixteen bytes of the system's entropy, not all zero: a serial that
+  # `integer` writes in 17 octets at most, positive.
+  def self.random_serial : Array(UInt8)
+    while true
+      drawn = Random::Secure.random_bytes(16)
+      return drawn if drawn.any? { |b| b != 0_u8 }
+    end
+    raise "unreachable"
   end
 
   def self.unsigned(value : BigInt) : Array(UInt8)

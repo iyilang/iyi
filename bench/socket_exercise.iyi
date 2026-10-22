@@ -459,6 +459,11 @@ unix = IyiSocket.listen_unix(unix_path)
 raise "unix: the listener is at #{unix.local_address.inspect}" unless unix.local_address == unix_path
 unix_client = IyiSocket.connect_unix(unix_path).or_panic
 unix_conn = unix.accept.or_panic
+# Both unix ends say so, and a TCP end does not: std/tls reads a port
+# only where there is one.
+unless unix_client.unix? && unix_conn.unix? && !client.unix? && !conn.unix?
+  raise "unix?: the unix ends say #{unix_client.unix?} and #{unix_conn.unix?}, the TCP ends #{client.unix?} and #{conn.unix?}"
+end
 unix_client.write("over a path")
 heard_unix = unix_conn.read(64).or_panic
 raise "unix: the server read #{heard_unix.inspect}" unless heard_unix == "over a path"

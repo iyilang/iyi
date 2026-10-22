@@ -28,6 +28,19 @@ most that were read before the first of them was answered (pipelining);
 `/status-500` answers 500 and `/wrong-type` a good answer as text/plain;
 a GET whose `dns` parameter has padding is refused 400, as RFC 8484 4.1
 says the parameter has none.
+
+EDNS(0), as a real server speaks it: a query with an OPT record is
+answered with one (RFC 6891 6.1.1), and that OPT record holds a Padding
+option bringing the answer to a multiple of 468 octets when the query's
+had one (RFC 7830 4, RFC 8467 4.1). An NXDOMAIN answer carries the zone's
+SOA in its authority section. `badvers` answers BADVERS (16): 0 in the
+header and 1 in the OPT record's extended RCODE. Every query is judged
+against RFC 7830 and RFC 8467 4.1's client policy - one OPT record owned
+by the root, version 0, one Padding option of zero bytes, the message a
+multiple of 128 octets - and counted per transport; `padding` (TXT) says
+the counts since it was last asked, this query included, as
+"queries=N edns=E unpadded=U", followed by " first=<why>" for the first
+query that was not padded, and starts the counts again.
 """
 import base64
 import datetime as dt
@@ -70,6 +83,10 @@ ZONE = {
 
 LOCK = threading.Lock()
 TLS_CONNECTIONS = [0]
+# transport -> [queries, with an OPT record, not padded, first fault]
+PADDING = {}
+QUERY_BLOCK = 128
+ANSWER_BLOCK = 468
 
 
 def wire_name(name):
@@ -105,6 +122,98 @@ def read_question(query):
     return ident, flags, ".".join(labels).lower(), qtype, query[12:at + 4]
 
 
+def read_opt(query, question):
+    """The query's OPT record, read past *question*: None when it has
+    none, else (owner byte, payload size, TTL, data, a fault or None)."""
+    an, ns, ar = struct.unpack(">HHH", query[6:12])
+    at = 12 + len(question)
+    if an or ns or ar == 0:
+        return None
+    if ar != 1:
+        return (0, 0, 0, b"", "%d additional records, not one OPT record" % ar)
+    if at + 11 > len(query):
+        return (0, 0, 0, b"", "an additional record running past the message")
+    owner = query[at]
+    rtype, payload, ttl, length = struct.unpack(">HHIH", query[at + 1:at + 11])
+    if rtype != 41:
+        return None
+    data = query[at + 11:]
+    if len(data) != length:
+        return (owner, payload, ttl, data, "an OPT record of %d data bytes with %d after it" % (length, len(data)))
+    return (owner, payload, ttl, data, None)
+
+
+def options_of(data):
+    """The EDNS options in an OPT record's data, [(code, bytes)], or None
+    when one runs past it."""
+    found = []
+    while data:
+        if len(data) < 4:
+            return None
+        code, length = struct.unpack(">HH", data[:4])
+        if len(data) < 4 + length:
+            return None
+        found.append((code, data[4:4 + length]))
+        data = data[4 + length:]
+    return found
+
+
+def padding_fault(query, question):
+    """Why *query* is not padded as RFC 7830 and RFC 8467 4.1 have a
+    client pad it, or None when it is."""
+    opt = read_opt(query, question)
+    if opt is None:
+        return "no OPT record"
+    owner, payload, ttl, data, fault = opt
+    if fault:
+        return fault
+    if owner != 0:
+        return "an OPT record not owned by the root"
+    if ttl >> 16:
+        return "extended RCODE or version %d, not 0" % (ttl >> 16)
+    # RFC 7830 4: a padded message no longer than the payload size it
+    # states, which RFC 6891 6.2.3 reads as 512 when it says less.
+    if len(query) > max(payload, 512):
+        return "%d bytes, past the payload size of %d" % (len(query), payload)
+    options = options_of(data)
+    if options is None:
+        return "an option running past the OPT record"
+    codes = [code for code, _ in options]
+    if 12 not in codes:
+        return "no Padding option"
+    if codes.count(12) > 1:
+        return "two Padding options"
+    # RFC 8467 3: the last option applied, so it is the one that ends it.
+    if codes[-1] != 12:
+        return "a Padding option that is not the last"
+    if any(options[-1][1]):
+        return "padding bytes that are not zero"
+    if len(query) % QUERY_BLOCK:
+        return "%d bytes, not a multiple of %d" % (len(query), QUERY_BLOCK)
+    return None
+
+
+def judge(query, question, transport):
+    """The query counted against its transport's padding."""
+    fault = padding_fault(query, question)
+    with LOCK:
+        seen = PADDING.setdefault(transport, [0, 0, 0, None])
+        seen[0] += 1
+        if read_opt(query, question) is not None:
+            seen[1] += 1
+        if fault:
+            seen[2] += 1
+            if seen[3] is None:
+                seen[3] = fault
+
+
+def padding_report(transport):
+    with LOCK:
+        seen = PADDING.pop(transport, [0, 0, 0, None])
+    said = "queries=%d edns=%d unpadded=%d" % tuple(seen[:3])
+    return said + (" first=" + seen[3] if seen[3] else "")
+
+
 def rdata(rtype, data):
     if rtype == A:
         return ipaddress.IPv4Address(data).packed
@@ -121,9 +230,12 @@ def answer(query, transport, stats=None):
     if read is None:
         return struct.pack(">HHHHHH", struct.unpack(">H", query[:2])[0] if len(query) >= 2 else 0, 0x8001, 0, 0, 0, 0)
     ident, flags, name, qtype, question = read
+    judge(query, question, transport)
+    opt = read_opt(query, question)
     rd = flags & 0x0100
     records = []
     rcode = 0
+    extended = 0
     tc = 0
     if name == "transport.zone.test" and qtype == TXT:
         records = [(name, TXT, [transport])]
@@ -131,6 +243,10 @@ def answer(query, transport, stats=None):
         records = [(name, TXT, [stats() if stats else "connections=0"])]
     elif name == "id.zone.test" and qtype == TXT:
         records = [(name, TXT, ["id=%d" % ident])]
+    elif name == "padding.zone.test" and qtype == TXT:
+        records = [(name, TXT, [padding_report(transport)])]
+    elif name == "badvers.zone.test" and opt is not None:
+        extended = 1
     elif name in ZONE:
         target = name
         for _ in range(8):
@@ -150,12 +266,26 @@ def answer(query, transport, stats=None):
         rcode = 5
     if name == "wrong-id.zone.test":
         ident ^= 0x5555
-    head = struct.pack(">HHHHHH", ident, 0x8400 | 0x0080 | rd | tc | rcode, 1, len(records), 0, 0)
     body = question
     for owner, rtype, data in records:
         value = rdata(rtype, data)
         body += wire_name(owner) + struct.pack(">HHIH", rtype, 1, 300, len(value)) + value
-    return head + body
+    authority = b""
+    if rcode == 3:
+        soa = wire_name("ns.zone.test") + wire_name("hostmaster.zone.test") + struct.pack(">IIIII", 1, 3600, 600, 86400, 300)
+        authority = wire_name("zone.test") + struct.pack(">HHIH", 6, 1, 300, len(soa)) + soa
+    additional = b""
+    if opt is not None:
+        options = options_of(opt[3]) or []
+        data = b""
+        if any(code == 12 for code, _ in options):
+            unpadded = 12 + len(body) + len(authority) + 11 + 4
+            pad = -unpadded % ANSWER_BLOCK
+            data = struct.pack(">HH", 12, pad) + b"\x00" * pad
+        additional = b"\x00" + struct.pack(">HHIH", 41, 1232, extended << 24, len(data)) + data
+    head = struct.pack(">HHHHHH", ident, 0x8400 | 0x0080 | rd | tc | rcode, 1, len(records),
+                       1 if authority else 0, 1 if additional else 0)
+    return head + body + authority + additional
 
 
 def make_pki(work):

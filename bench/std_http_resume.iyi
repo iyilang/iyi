@@ -17,7 +17,8 @@
 # time - and one that is not what it should be is followed by "FAIL
 # <check>: <found>, not <wanted>"; the run ends "ALL CHECKS PASSED" or
 # exits 1. CI runs it so, as it runs every bench program, and
-# bench/std_http_exercise.sh with its broken copies of std/http.
+# bench/std_http_exercise.sh with its broken copies of std/http and of
+# what it takes from std/tls.
 #
 # `s_server` is the client against OpenSSL's `s_server -www` on PORT,
 # whose page says "New, TLSv1.3" or "Reused, TLSv1.3".
@@ -171,27 +172,38 @@ if mode.empty?
       resumed = second.is_a?(Response) && second.tls_resumed?
       check("same origin", "#{said(first)} then #{said(second)}, the response says #{resumed}, #{client.connections_resumed} resumed",
         "resumed=no then resumed=yes, the response says true, 1 resumed", failures)
-      check("another origin", "#{said(client.get(bases[1]))} then #{said(client.get(bases[1]))}", "resumed=no then resumed=yes", failures)
+      # Another origin keeps tickets of its own: std/tls offers a ticket only
+      # to the port it came from, so one origin's in another's session would
+      # resume nothing, but they would take its room.
+      elsewhere = said(client.get(bases[1]))
+      check("another origin", "#{elsewhere}, #{client.tickets_held(origins[1])} held, then #{said(client.get(bases[1]))}", "resumed=no, 2 held, then resumed=yes", failures)
       # The same root, in an array of its own: the roots changed in place.
+      # The origin's tickets from before go, not kept beside the new ones
+      # (std/tls would only pass them over): the server's two are held.
       config.roots = Certificate.from_pem(ROOT_PEM).or_panic
-      check("new roots", "#{said(client.get(bases[0]))} then #{said(client.get(bases[0]))}", "resumed=no then resumed=yes", failures)
+      renewed = said(client.get(bases[0]))
+      check("new roots", "#{renewed}, #{client.tickets_held(origins[0])} held, then #{said(client.get(bases[0]))}", "resumed=no, 2 held, then resumed=yes", failures)
       config.roots = other
       check("other roots", said(client.get(bases[0])),
         "HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=iyi bench root, the issuer of CN=localhost (bad_certificate)", failures)
       config.roots = roots
       # A client with a TLS configuration of its own (`tls:`): its tickets
-      # are kept under that one, so roots assigned there in place make the
-      # next connection a full handshake, refused under roots that do not
-      # reach the server, while `HTTP.tls_config` is unchanged.
+      # are kept under that one, so roots assigned in `HTTP.tls_config`
+      # leave them be, and roots assigned there in place make the next
+      # connection a full handshake, refused under roots that do not reach
+      # the server, while `HTTP.tls_config` is unchanged.
       mine = TlsConfig.new
       mine.roots = roots
       mine.alpn = ["http/1.1"]
       own = HTTPClient.new(idle: 0, tls: mine)
       before = said(own.get(bases[0]))
       again = said(own.get(bases[0]))
+      config.roots = Certificate.from_pem(ROOT_PEM).or_panic
+      still = said(own.get(bases[0]))
+      config.roots = roots
       mine.roots = other
-      check("own tls", "#{before} then #{again}, then under other roots: #{said(own.get(bases[0]))}",
-        "resumed=no then resumed=yes, then under other roots: HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=iyi bench root, the issuer of CN=localhost (bad_certificate)", failures)
+      check("own tls", "#{before} then #{again}, then #{still} after HTTP.tls_config's roots, then under other roots: #{said(own.get(bases[0]))}",
+        "resumed=no then resumed=yes, then resumed=yes after HTTP.tls_config's roots, then under other roots: HTTP: tls: the server's certificate is not trusted: x509: no certificate here issued CN=iyi bench root, the issuer of CN=localhost (bad_certificate)", failures)
       # A server that sends eight tickets a handshake.
       plenty = HTTPClient.new(idle: 0)
       plenty.get(bases[3])
@@ -215,6 +227,14 @@ if mode.empty?
       pooled.get(bases[2])
       kept = pooled.get(bases[2])
       check("kept", "#{said(kept)}, #{pooled.connections_made} made, #{pooled.connections_reused} reused", "resumed=no, 1 made, 1 reused", failures)
+      # `require_staple` set in place: the kept connection, made without a
+      # staple, carries nothing more, and the new one is refused for want
+      # of one, as std/http's server sends none.
+      config.require_staple = true
+      unstapled = said(pooled.get(bases[2]))
+      config.require_staple = false
+      check("staple", "#{unstapled}, #{pooled.connections_made} made, #{pooled.connections_reused} reused",
+        "HTTP: tls: no OCSP response was stapled to CN=localhost, and require_staple asks for one (bad_certificate_status_response), 2 made, 1 reused", failures)
       pooled.close
       bases.each { |base| HTTP.get(base + "stop") }
       0

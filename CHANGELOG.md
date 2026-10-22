@@ -16,6 +16,8 @@
   no key opens on the outer, with retry_configs. A client turned down
   checks the certificate for the public_name and ends with ech_required,
   the `TlsError`'s `retry_configs` the server's list.
+  A ticket that comes over ECH is kept for the inner name, port and
+  configuration (the session binding), and sought by them inside.
   `TlsConnection#ech_accepted?`, `TlsServer#outer_server_name`; GREASE
   ECH without a config unless `TlsConfig#ech_grease` is off.
   `TlsServerConfig#groups` orders the key exchange groups a server takes.
@@ -26,7 +28,7 @@
   for each of the server's refusals and both confirmations, a scripted
   server for the client's, Go's crypto/tls client and server
   (`bench/std_tls_ech_oracle.go`, where Go 1.24 or later is here) each way
-  through a HelloRetryRequest, and 41 broken copies caught.
+  through a HelloRetryRequest, and 42 broken copies caught.
 
 - **std/hpke: Hybrid Public Key Encryption (RFC 9180), the building
   block of TLS Encrypted Client Hello and Oblivious HTTP, written in iyi
@@ -74,6 +76,150 @@
   XORed in, a sequence not incremented, a psk_id or info not bound, the
   all-zero X25519 check removed from std/curve25519, and AuthEncap
   without the sender's key, are each caught at the check that names it.
+
+### Fixed
+
+- **DNS over TLS and DNS over HTTPS queries are padded (RFC 7830), so a
+  name's length no longer shows through the encryption.** A query was a
+  12-byte header and the question, 18 bytes plus the name's, and TLS adds
+  a fixed overhead, so an on-path observer read the name's length off
+  every DoT record and DoH body. Every query a `Resolver` gives an
+  encrypted upstream now carries an EDNS(0) OPT record (payload size
+  1232, version 0) holding a Padding option of zero bytes that brings the
+  message to a multiple of 128 octets, RFC 8467 4.1's policy for a
+  client: a name of up to 95 characters goes out as 128 bytes, up to 223
+  as 256, and longer as 384, over TLS and over HTTPS, POST and GET alike.
+  Plaintext queries carry no OPT record, as before: RFC 7830 6 forbids
+  padding in the clear. `bench/std_secure_dns_exercise.sh` pads a query
+  for every name length from 1 to 253 and checks each byte of it, and its
+  scripted servers judge every query each transport brings them - one
+  OPT record owned by the root, one Padding option, last, of zero bytes,
+  a multiple of 128 - and count them; the gate holds that judge to dig's
+  `+padding=128`, which it passes, and to dig's unpadded query, which it
+  refuses. A broken copy that sends queries unpadded and one that does
+  not round to the block are caught. Found by the 0.19.0 PKI review.
+
+- **An answer's OPT record is read for the upper bits of its RCODE.** A
+  padded query has an OPT record, so a server answers with one (RFC 6891
+  6.1.1), and an answer of BADVERS (16) has 0 in its header's four RCODE
+  bits and 1 in its OPT record: read from the header alone, as every
+  answer was, it would be NOERROR with no records, "the name has no
+  address". `DnsMessage#rcode` is the whole twelve-bit RCODE now, and
+  BADVERS is a refusal (`refused?`) that names itself.
+  `bench/std_dns_exercise.sh` reads hand-made answers with an SOA in the
+  authority section and an OPT record in the additional one, and
+  `bench/std_secure_dns_exercise.sh`'s servers answer a query that has an
+  OPT record with one, padded to 468 octets when the query is padded, and
+  `badvers.zone.test` with BADVERS; a broken copy of std/dns reading the
+  header alone is caught by the std/dns gate.
+
+- **std/acme requires HTTPS (RFC 8555 section 6.1).** Every URL is
+  `https://` or refused by an `AcmeError` naming it, before anything is
+  sent: `AcmeClient.new`'s directory and `account_url`, each URL the
+  directory names, the account's and the order's Location, and every URL
+  an object carries, as it is asked. Over plaintext an on-path attacker
+  could act as the CA. `bench/std_acme_exercise.sh`'s scripted server is
+  HTTPS now, under a test PKI of its own, and five broken copies are
+  caught, one per site.
+
+- **std/autocert checks a chain to its roots before it keeps or shows
+  it.** `AutocertManager#roots`, the system's unless set, is what a chain
+  the CA issues, or the cache holds, must reach (std/x509's `verify`, for
+  the name); a chain from any other CA is refused with internal_error and
+  not cached. The gate shows a cached chain under the root that issued it,
+  refuses it under another, and has a manager that trusts only Pebble's
+  minica refuse what Pebble issues.
+
+- **std/autocert: a handshake waits for an order no longer than its
+  deadline.** Its wait is cut to what is left of the handshake's time
+  (and to `wait_ms`), where it was `wait_ms`, 60 s by default, past the
+  30 s handshake deadline. While `run` runs, orders run in its group, so
+  one outlives the handshake that asked and the handshakes after it take
+  its certificate; without `run`, the order is cancelled at the deadline,
+  not remembered as a failure, and the next handshake starts it again.
+  Against a CA that never answers, a handshake given 1 s ends within the
+  gate's 3 s bound with `run` and without. `run` also ends when its task
+  is cancelled, as `stop` ends it, and cancels the orders it runs.
+
+- **std/x509: `X509.self_signed` holds to RFC 5280's bounds.** A first
+  name over 64 characters (ub-common-name) is refused: the subject is the
+  issuer of a self-signed certificate and may not be left empty, so the
+  CN cannot be dropped as `X509.request` drops it. A caller's serial is
+  refused when it is zero or when its INTEGER, sign byte included, runs
+  past 20 octets (a 20-byte serial with its top bit set was written in
+  21). The sixteen random bytes drawn when none is given are drawn again
+  if all zero. std/acme's tls-alpn-01 certificate therefore refuses a
+  domain over 64 characters; http-01 or dns-01 proves one.
+
+- **A std/tls client's `TlsSession` offers a ticket only where the check
+  it stands for would hold.** It matched tickets by host alone: one
+  session shared by two `TlsConfig`s resumed the first one's ticket under
+  the second, whose roots, `now` and `require_staple` were never applied;
+  with mutual TLS the server took the ticket's client certificate, so a
+  connection made under identity B was identity A's; and a ticket for
+  `host:443` went to `host:8443`. A ticket now fits the host and port it
+  came from (read off the socket; 0 over a unix socket) under the
+  configuration it came under, compared by `TlsMadeUnder` - std/http's
+  rule, moved into std/tls so that the two compare the same parts.
+
+- **std/http's kept connections and tickets are held to
+  `require_staple`.** Set in place on `HTTP.tls_config`, it was not
+  compared: a kept connection made without a staple carried the next
+  request, and a ticket resumed without one. `TlsMadeUnder` compares it
+  beside the roots, identity, `now` and `min_version`.
+
+- **A client does not resume a session past its server's certificate or
+  past seven days.** A ticket whose leaf's notAfter has passed at the
+  configuration's `now` is dropped, as Go's client drops it; and a ticket
+  received on a resumed connection keeps the time of the full handshake
+  it resumed, so a server that sends fresh tickets on every resumption
+  no longer stretches the session past RFC 8446 section 4.6.1's seven
+  days from it.
+
+- **A std/tls server declines early data on a resumed connection whose
+  ticket allows more than `max_early_data` now.** Lowering the limit left
+  tickets issued before it with the allowance they were issued with, for
+  as long as they lived; the early data is skipped as any declined early
+  data is, and the client sends it again after the handshake, so a client
+  keeping to the ticket's allowance is never cut off.
+
+- **A std/tls server refuses a server_name past 253 bytes**
+  (decode_error), the longest a DNS name written without its trailing
+  dot can be (RFC 1035 section 2.3.4, RFC 6066 section 3); one longer
+  sealed a ticket that never opened, its length kept in a byte. The
+  ticket state's name length is two bytes and the identity's place among
+  `others` four (`TlsTicket::VERSION` 2), so neither wraps.
+
+Each is checked by `bench/std_tls_exercise.iyi`, whose run with no
+argument now also connects a client and a server of its own on loopback,
+and caught by a broken copy in `bench/std_tls_exercise.sh`;
+`require_staple` and the tickets an `HTTPClient` drops are checked by
+`bench/std_http_resume.iyi` too.
+
+### Changed
+
+- **`DnsMessage.parse` walks the authority and additional sections.** It
+  read the header, the question and the answers and stopped; it now reads
+  past them to find the OPT record, so a message whose authority or
+  additional records run past its bytes, that has two OPT records (RFC
+  6891 6.1.1), or whose OPT record is owned by a name other than the root
+  is `malformed?`, over UDP as over a stream. `DnsMessage.query` takes a
+  `block`, the length to pad to; `DnsMessage::PADDING_BLOCK` is 128.
+
+- **std/tls: `TlsServerConfig#identity_source` is given the milliseconds
+  left of the handshake's deadline** as a third argument (`Int32?`, nil
+  when the handshake has none), so a source that waits can stay within
+  it. A proc of two arguments is now one of three.
+
+- **`TlsSession#take(host, port, config, now_ms)`** takes the port and
+  the `TlsConfig` a ticket must fit, and `TlsHeldTicket` carries the
+  port, the configuration (`TlsMadeUnder`, now public in std/tls) and
+  the time of its full handshake (`authenticated_ms`).
+
+- **`IyiSocket#unix?`** says whether a socket is a unix one, which has
+  no port for `remote_port` to read; std/tls asks it before keying a
+  ticket by port. `bench/socket_exercise.iyi` checks it at both kinds of
+  end, and a broken copy is caught.
 
 ## 0.19.0 — 2026-10-22
 

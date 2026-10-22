@@ -84,7 +84,7 @@ fi
 
 echo
 echo "== every x509 section reported"
-for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded"; do
+for phrase in "== chains Python's cryptography made" "== hosts matched" "== certificates that are not certificates" "== Ed25519 (RFC 8410)" "== RSA keys under 2048 bits" "== a client's certificate (X509Purpose::Client)" "== a search for a chain, bounded" "== certificates written (X509.self_signed)"; do
   if ! grep -q "$phrase" "$WORK/x509-plain.out" 2>/dev/null; then
     echo "  missing section: $phrase"
     status=1
@@ -572,6 +572,14 @@ prove_broken "an empty RelativeDistinguishedName taken" "an empty RDN refused: a
   '      return X509Error.new("an empty RelativeDistinguishedName") if attributes.empty?' ''
 prove_broken "a name constraint's mask with a hole taken" "a name constraint's mask with a hole refused: accepted" \
   '          unless X509Names.prefix_mask?(range[range.size // 2, range.size // 2])' '          if false'
+# X509.self_signed held to RFC 5280's bounds: each break below is the
+# module as it was before the 0.19.0 PKI review's finding 4.
+prove_broken "a common name over 64 characters written" "a first name of 65 characters refused" \
+  '    if names[0].bytesize > MAX_COMMON_NAME' '    if false'
+prove_broken "a serial's length judged before its sign byte" "a 20-byte serial with its top bit set refused" \
+  '    if octets.size > MAX_SERIAL_OCTETS' '    if number.size > MAX_SERIAL_OCTETS'
+prove_broken "a zero serial taken" "a zero serial refused" \
+  '    return X509Error.new("a serial of 0, where RFC 5280 asks a positive number") unless number.any? { |b| b != 0_u8 }' ''
 
 echo
 if [ "$status" -eq 0 ]; then

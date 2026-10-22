@@ -55,6 +55,21 @@
 # keeps no cache, so `Cache-Control` and the answer's TTLs are not read:
 # every lookup asks, over this transport as over UDP.
 #
+# Padding: TLS hides a query's bytes and not its length, and a query's
+# length is the name's plus a constant, so the resolver pads every query
+# it gives an upstream (`DnsMessage.query` with
+# `DnsMessage::PADDING_BLOCK`): an EDNS(0) OPT record with a Padding
+# option of zero bytes (RFC 7830) brings each one to a multiple of 128
+# octets, RFC 8467 4.1's policy for a client. A query is 33 bytes and its
+# name's characters before padding, so a name of up to 95 characters goes
+# out as 128 bytes, up to 223 as 256, and a longer one as 384. The
+# transports send what they are given, the same padded message over TLS
+# and over HTTPS, as the body of a POST and in a GET's `dns` parameter
+# alike. A server that follows RFC 8467 pads its answers too (to 468
+# octets); that is the server's to do, and an answer is read the same
+# either way: its OPT record is read for the RCODE's upper bits (std/dns)
+# and its options are not.
+#
 # The server's own name: `DnsOverHttps` with an address connects there and
 # checks the certificate for the URL's host; without one, a host that is a
 # name is found by the system's resolver - the one question asked in the

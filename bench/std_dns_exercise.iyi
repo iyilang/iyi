@@ -106,6 +106,55 @@ def aaaa_data(last : Int32) : Array(UInt8)
   data
 end
 
+# An OPT record (RFC 6891 6.1.2) at the end of *buf*, owned by *owner*:
+# payload size 1232, *extended* as the extended RCODE, and a Padding
+# option (RFC 7830) of *padding* zero bytes - an answer's OPT record as a
+# server that pads (RFC 8467 4.1) writes it.
+def add_opt(buf : Array(UInt8), owner : Array(UInt8), extended : Int32, padding : Int32) : Nil
+  owner.each { |byte| buf << byte }
+  push16(buf, 41)
+  push16(buf, 1232)
+  buf << extended.to_u8
+  buf << 0_u8
+  push16(buf, 0)
+  push16(buf, 4 + padding)
+  push16(buf, 12)
+  push16(buf, padding)
+  index = 0
+  while index < padding
+    buf << 0_u8
+    index = index + 1
+  end
+end
+
+# The zone's SOA record's data: two names and five numbers.
+def soa_data : Array(UInt8)
+  data = wire_name("ns.test")
+  wire_name("hostmaster.test").each { |byte| data << byte }
+  [1, 3600, 600, 86400, 300].each do |value|
+    push16(data, value >> 16)
+    push16(data, value & 0xFFFF)
+  end
+  data
+end
+
+# An AAAA answer to *query* with an SOA in its authority section and an
+# OPT record in its additional section: header RCODE *rcode*, the OPT
+# record's *extended*, and *opts* OPT records owned by *owner*.
+def edns_answer(query : Bytes, rcode : Int32, extended : Int32, opts : Int32, owner : Array(UInt8)) : Bytes
+  buf = answer_head(query, rcode, 1)
+  buf[9] = 1_u8
+  buf[11] = opts.to_u8
+  add_record(buf, QUESTION, DnsRecord::AAAA, aaaa_data(1))
+  add_record(buf, wire_name("Test"), 6, soa_data)
+  index = 0
+  while index < opts
+    add_opt(buf, owner, extended, 300)
+    index = index + 1
+  end
+  bytes_of(buf)
+end
+
 def show(got : Array(IPAddress) | DnsError | Cancelled) : String
   case got
   in Array(IPAddress)
@@ -184,6 +233,40 @@ bounded = ResolvConf.parse("options ndots:40 timeout:0 attempts:9\n")
 check bounded.ndots == 15 && bounded.timeout_ms == 1000 && bounded.attempts == 5, "options held to glibc's bounds"
 same "10.0.0.7 ::7", HostsFile.lookup("127.0.0.1 localhost\n10.0.0.7 Box box.lan # c\n#10.0.0.8 box\n::7\tbox.\n", "BOX").join(" "), "hosts lines, in order, any case"
 puts "codec: ok"
+
+# EDNS(0): a padded query's bytes, written out by hand from RFC 6891
+# 6.1.2 and RFC 7830 3 - the 24 bytes above with ARCOUNT 1, then the OPT
+# record (root, type 41, payload 1232, TTL 0, 93 bytes of data) holding
+# Padding (12) of 89 zero bytes, 128 in all (RFC 8467 4.1).
+padded = DnsMessage.query(0xBEEF_u16, "a.Test.", DnsRecord::AAAA, DnsMessage::PADDING_BLOCK)
+same "128", padded.size.to_s, "a padded query's size"
+expected = [0xBE, 0xEF, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 97, 4, 84, 101, 115, 116, 0, 0, 28, 0, 1,
+            0, 0, 41, 0x04, 0xD0, 0, 0, 0, 0, 0, 93, 0, 12, 0, 89]
+index = 0
+while index < padded.size
+  wanted = index < expected.size ? expected[index] : 0
+  check padded[index] == wanted.to_u8, "padded query byte #{index}: #{padded[index]} where #{wanted}"
+  index = index + 1
+end
+check DnsMessage.ends_at(padded) == 128, "a padded query ends where its padding does"
+# Answers as a server that speaks EDNS(0) writes them.
+answered = DnsMessage.parse(edns_answer(query, 0, 0, 1, [0_u8]))
+check answered.is_a?(DnsMessage) && answered.rcode == 0 && answered.answers.size == 1, "an answer with an SOA and an OPT record reads: #{answered.is_a?(DnsError) ? answered.message : answered.rcode}"
+badvers = DnsMessage.parse(edns_answer(query, 0, 1, 1, [0_u8]))
+check badvers.is_a?(DnsMessage) && badvers.rcode == DnsMessage::RCODE_BADVERS, "the OPT record's extended RCODE over the header's: BADVERS (16), not NOERROR: #{badvers.is_a?(DnsError) ? badvers.message : badvers.rcode}"
+if badvers.is_a?(DnsMessage)
+  said = Resolver.read_rcode(badvers, "a.test", "here")
+  check said.is_a?(DnsError) && said.refused? && said.detail == "BADVERS", "BADVERS is the server's refusal, named"
+end
+twice = DnsMessage.parse(edns_answer(query, 0, 0, 2, [0_u8]))
+check twice.is_a?(DnsError) && twice.malformed?, "two OPT records are refused (RFC 6891 6.1.1)"
+owned = DnsMessage.parse(edns_answer(query, 0, 0, 1, wire_name("Test")))
+check owned.is_a?(DnsError) && owned.malformed?, "an OPT record owned by a name, not the root, is refused (RFC 6891 6.1.2)"
+claimed = edns_answer(query, 0, 0, 1, [0_u8])
+claimed[11] = 2_u8
+short_of = DnsMessage.parse(claimed)
+check short_of.is_a?(DnsError) && short_of.malformed?, "an additional section shorter than its count is refused"
+puts "edns: ok"
 
 # --- A name server in this process ---
 

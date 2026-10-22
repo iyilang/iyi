@@ -358,6 +358,10 @@ prove_fails "an IPv6 socket made as IPv4" badfamily "cannot bind socket to \[::1
 #    again.
 prove_fails "a unix listener's file left behind" unixleft "cannot bind socket to .*the address is in use" \
   '{ sub(/__iyi_unlink\(IyiSocket.c_path\(path\)\)/, "IyiSocket.c_path(path)"); print }'
+# A unix socket that says it is not one, which std/tls would then ask the
+# port of.
+prove_fails "a unix socket taken for TCP" unixtcp "unix?: the unix ends say false" \
+  '{ sub(/^    @family == AF_UNIX$/, "    false"); print }'
 
 # 10. A read whose deadline passes and which waits on regardless.
 prove_fails "a read timeout not kept" untimed "timeout: the read answered" \

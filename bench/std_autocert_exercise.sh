@@ -6,22 +6,27 @@
 #
 # The exercise holds the directory cache, the host policy refusing a name
 # before a listener standing for the CA is reached, a failure remembered,
-# when a certificate is due, and tls-alpn-01's certificate shown under
-# acme-tls/1 alone; it runs plain and --release. Python then reads the
-# cache it wrote (os.stat's modes, cryptography's keys) and makes
-# handshakes with the challenge certificate up (bench/std_autocert_client.py).
-# Where Go is here to build Let's Encrypt's Pebble, an HTTPS server in the
-# exercise gets its certificates from it while Python's ssl connects: a
-# chain verified to Pebble's root, TLS 1.2 too; a name the policy refuses
-# with no order in Pebble's log; ten first handshakes at once making one
+# a cached chain shown under the roots that issued it and refused under
+# others, a handshake's wait for an order cut to its deadline against a
+# CA that never answers (with `run`, the order going on for the next
+# handshake; without, cancelled and not remembered), when a certificate
+# is due, and tls-alpn-01's certificate shown under acme-tls/1 alone; it
+# runs plain and --release. Python then reads the cache it wrote
+# (os.stat's modes, cryptography's keys) and makes handshakes with the
+# challenge certificate up (bench/std_autocert_client.py). Where Go is
+# here to build Let's Encrypt's Pebble, an HTTPS server in the exercise
+# gets its certificates from it while Python's ssl connects: a chain
+# verified to Pebble's root, TLS 1.2 too; a name the policy refuses with
+# no order in Pebble's log; ten first handshakes at once making one
 # order; a name Pebble refuses asked for once in three handshakes; a
 # second process taking the first's certificates from the cache with no
-# order; http-01 answered on port 80; the cache's modes; and from a second
+# order; http-01 answered on port 80; the cache's modes; from a second
 # Pebble that issues certificates for 24 seconds, a renewal seen as a new
-# serial before the first certificate ends. Then `iyi doc`, the
-# formatting, five targets, the artifacts, and broken copies of
-# std/autocert and of std/tls's identity source, each caught at the
-# check that names it.
+# serial before the first certificate ends; and a manager that trusts
+# only Pebble's minica refusing the chain Pebble issues, not caching it.
+# Then `iyi doc`, the formatting, five targets, the artifacts, and broken
+# copies of std/autocert and of std/tls's identity source, each caught at
+# the check that names it.
 #
 # Where Pebble runs in CI: the Linux module-exercise shards, whose job
 # sets Go up for it (`actions/setup-go`); darwin's and Windows' runners
@@ -101,6 +106,7 @@ fi
 echo
 echo "== every section reported"
 for phrase in "== the directory cache" "== the host policy, before the CA" "== a failure remembered" \
+  "== chains checked to the manager's roots" "== a handshake's wait cut to its deadline" \
   "== when a certificate is due" "== tls-alpn-01 beside the certificates"; do
   if ! grep -qF "$phrase" "$WORK/plain.out" 2>/dev/null; then
     echo "  MISSING: $phrase"
@@ -324,7 +330,7 @@ prove_broken() {
       fi
       ;;
   esac
-  rm -rf "$WORK/patched" "$WORK/mutant-cache" "$WORK/mutant-alpn" "$WORK/pebble/cache" "$WORK/pebble/renew-cache" "$WORK/pebble/root-"*.pem
+  rm -rf "$WORK/patched" "$WORK/mutant-cache" "$WORK/mutant-alpn" "$WORK/pebble/cache" "$WORK/pebble/renew-cache" "$WORK/pebble/unknown-cache" "$WORK/pebble/root-"*.pem
   mkdir -p "$WORK/patched/std"
   if ! OLD="$5" NEW="$6" "$PY" - <<PY
 import os
@@ -378,15 +384,29 @@ prove_broken autocert "the challenge certificate shown beside other protocols" "
 prove_broken autocert "a private key written world-readable" "cache files are 0600" cache \
   'File.open(temporary, "w", perm: 0o600)' 'File.open(temporary, "w", perm: 0o644)'
 prove_broken autocert "no single flight: each handshake its own order" "ten concurrent first connections create one order" ten \
-  '    if flight = @flights[key]?' '    if flight = nil.as(AutocertFlight?)'
+  '    if running = @flights[name]?' '    if running = nil.as(AutocertFlight?)'
 prove_broken autocert "the cache not read" "the cache survives a restart: no new order" restart \
   '    text = @cache.get(name)' '    text = nil.as(String?)'
 prove_broken autocert "renewal never scheduled" "a renewal before expiry: new handshakes see a new serial" renewal \
-  '          renew(name, held)' '          nil'
+  '              renew(name, due, flight)' '              nil'
 prove_broken tls "std/tls's identity source not asked in TLS 1.3" "under acme-tls/1 alone the challenge certificate is shown" alpn \
-  '        given = source.call(server_name, alpn)' '        given = nil.as(TlsIdentity | TlsError | Nil)'
+  '        given = source.call(server_name, alpn, left_ms)' '        given = nil.as(TlsIdentity | TlsError | Nil)'
 prove_broken tls "std/tls's identity source not asked in TLS 1.2" "a TLS 1.2 client is shown the same certificate" first \
-  '      given = source.call(offer.server_name, offer.alpn)' '      given = nil.as(TlsIdentity | TlsError | Nil)'
+  '      given = source.call(offer.server_name, offer.alpn, left_ms)' '      given = nil.as(TlsIdentity | TlsError | Nil)'
+# Each break below is the module as it was before the 0.19.0 PKI
+# review's findings 2 and 3, one rule at a time.
+prove_broken autocert "a cached chain kept unchecked" "a cached chain from a CA the manager does not trust is not shown" local \
+  '    verified = X509.verify(identity.leaf, chain[1, chain.size - 1], trust!, name)' '    verified = chain'
+prove_broken autocert "an issued chain kept unchecked" "a chain from a CA the manager does not trust is refused, not cached" unknown \
+  '    verified = X509.verify(identity.leaf, chain[1, chain.size - 1], trust!, name)' '    verified = chain'
+prove_broken autocert "a handshake's wait not cut to its deadline" "without run, a handshake waiting for an order ends by its" local \
+  '    cut = left_ms ? left_ms < limit : false' '    cut = false'
+prove_broken autocert "an order run in the handshake that asked, with run running" "with run, the order goes on past its handshake" local \
+  '    if @running' '    if false'
+prove_broken autocert "an order cancelled at the deadline remembered as a failure" "without run, an order cancelled at the deadline is not remembered as a failure" local \
+  '      return made if flight.abandoned' ''
+prove_broken tls "std/tls's identity source not told the time left" "without run, a handshake waiting for an order ends by its" local \
+  '    return nil if @deadline_ns == 0_i64' '    return nil'
 
 echo
 if [ "$status" -eq 0 ]; then

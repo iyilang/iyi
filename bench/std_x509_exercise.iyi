@@ -19,7 +19,7 @@
 #   roots FILE    a PEM bundle, each certificate read and written out:
 #                 `index version ca pathlen keyusage eku dns self`.
 
-import std/x509::{Certificate, X509, X509Error, X509Purpose}
+import std/x509::{Certificate, X509, X509Error, X509Purpose, SigningKey}
 import std/static_array
 import std/time::{Time}
 import std/file::{File}
@@ -481,5 +481,32 @@ group do |g|
   check chain.value == true, "the chain from the leaf to the root, checked in a task #{STACK_DEPTH} frames down"
 end
 puts "  a signature and a chain checked inside a task #{STACK_DEPTH} frames of a kilobyte array down"
+
+# What X509.self_signed writes is held to RFC 5280's bounds: a common name
+# of 64 characters at most (ub-common-name), a longer one refused, since a
+# self-signed certificate's subject is its issuer and must not be empty;
+# and a serial that is positive and 20 octets at most (section 4.1.2.2),
+# counted after the sign byte a set top bit takes.
+puts "== certificates written (X509.self_signed)"
+writer = SigningKey.p256
+from = Time.utc(2026, 1, 1)
+to = Time.utc(2026, 2, 1)
+name64 = "a" * 52 + ".example.com"
+name65 = "a" * 53 + ".example.com"
+at64 = X509.self_signed(writer, [name64], from, to)
+check at64.is_a?(Array(UInt8)) && Certificate.parse(at64).or_panic.subject_name == "CN=#{name64}",
+  "a first name of 64 characters is the common name: #{at64.is_a?(X509Error) ? at64.message : "written"}"
+over = X509.self_signed(writer, [name65], from, to)
+check over.is_a?(X509Error) && over.message.includes?("past the 64"), "a first name of 65 characters refused: #{over.is_a?(X509Error) ? over.message : "written"}"
+signed = X509.self_signed(writer, ["a.example.com"], from, to, Array(UInt8).new(20, 0xFF_u8))
+check signed.is_a?(X509Error) && signed.message.includes?("21 octets"), "a 20-byte serial with its top bit set refused: #{signed.is_a?(X509Error) ? signed.message : "written"}"
+widest = X509.self_signed(writer, ["a.example.com"], from, to, [0x7F_u8] + Array(UInt8).new(19, 0xFF_u8))
+check widest.is_a?(Array(UInt8)) && Certificate.parse(widest).or_panic.serial.size == 20, "a 20-byte serial with its top bit clear is written in 20 octets"
+zero = X509.self_signed(writer, ["a.example.com"], from, to, [0_u8, 0_u8])
+check zero.is_a?(X509Error) && zero.message.includes?("positive"), "a zero serial refused: #{zero.is_a?(X509Error) ? zero.message : "written"}"
+drawn = (1..32).map { Certificate.parse(X509.self_signed(writer, ["a.example.com"], from, to).or_panic).or_panic.serial }
+check drawn.all? { |s| s.size <= 17 && s[0] < 0x80_u8 && s.any? { |b| b != 0_u8 } }, "32 drawn serials are positive and 17 octets at most"
+check drawn.uniq.size == 32, "32 drawn serials are 32 different numbers"
+puts "  a 64-character common name written and a 65-character one refused; serials positive and 20 octets at most, drawn ones distinct"
 
 puts "\nALL CHECKS PASSED"

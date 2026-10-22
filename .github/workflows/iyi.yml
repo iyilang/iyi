@@ -2761,22 +2761,56 @@ jobs:
           mkdir -p room && tar -xzf dist/*.tar.gz -C room
           IYI="$PWD/room/bin/iyi" bash bench/wasm32_exercise.sh
 
+  # Built on the oldest glibc it promises, not on the image the other jobs
+  # use. A binary asks the loader for the newest symbol version its build
+  # machine's headers and libraries handed it, and 0.18.0's came out of
+  # `crystallang/crystal:1.21.0-build`, which is Ubuntu 24.04: `fmod` at
+  # GLIBC_2.38, `__isoc23_strtol` (24.04's headers rename `strtol` to it),
+  # `arc4random` at 2.36, and a bundled libstdc++ asking for the same. It
+  # died on Ubuntu 22.04 before `main`, with `GLIBC_2.38' not found`, and
+  # every gate passed it because each one ran on 24.04. glibc is backward
+  # compatible only: what links on 20.04 (2.31) runs on 20.04, Debian 11,
+  # RHEL 9 and everything newer, so 20.04 is the floor and `clean-room`
+  # runs the tarball there.
+  #
+  # Nothing from the `build` job crosses over: its `.build/crystal` is a
+  # 24.04 binary and cannot start here. The bootstrap is Crystal's own
+  # static Linux release, the one that image unpacks into `/usr`, and the
+  # fork's compiler is built from it here before `iyi` is.
   binary:
-    needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     container:
-      image: crystallang/crystal:1.21.0-build
+      image: ubuntu:20.04
     name: "The iyi binary and its tarball"
+    # The gates below build `--crystal` programs out of the tarball, and
+    # Crystal's library links `-lgc`: 20.04's libgc-dev is bdwgc 7.6, which
+    # lacks `GC_get_my_stackbottom` and `GC_set_stackbottom`, so `-lgc`
+    # resolves to the 8.x `libgc.a` Crystal's bootstrap put in
+    # `/usr/lib/crystal`, as the 24.04 image's libgc-dev answered it before.
+    env:
+      LIBRARY_PATH: /usr/lib/crystal
     steps:
+      # Before the checkout, so it is a git checkout: without git on the
+      # PATH `actions/checkout` downloads a snapshot, and the Makefile reads
+      # the commit and SOURCE_DATE_EPOCH out of git. `lld` because the
+      # Makefile links with `ld.lld` when there is one, as the 24.04 image
+      # did: GNU ld drops the `-lstdc++` Crystal names before LLVM's
+      # archives (`--as-needed`, nothing needs it yet) and then cannot
+      # resolve `operator new` for them. `pkg-config` and `libyaml-dev` are
+      # for the `--crystal` sample's `require "yaml"`.
+      - name: The floor's toolchain and Crystal's bootstrap
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            build-essential lld git curl ca-certificates xz-utils \
+            pkg-config libyaml-dev > /dev/null
+          curl -fsSL https://github.com/crystal-lang/crystal/releases/download/1.21.0/crystal-1.21.0-1-linux-x86_64.tar.gz \
+            | tar -xz -C /usr --strip-components=1
+          crystal --version
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v5
-        with:
-          name: crystal
-          path: .build
-      - run: chmod +x .build/crystal
 
       # The tarball's LLVM is the static minimal one, built by
       # `scripts/build-static-llvm.sh` — Crystal's own recipe, measured
@@ -2785,26 +2819,38 @@ jobs:
       # reaches, every optional dependency OFF — so the 179 MB closure the
       # package used to carry (libLLVM and its libedit, libxml2, libicu,
       # libncursesw, libzstd) never comes into existence, and `lib/` is
-      # libgc and libstdc++ at 3.4 MB. Built here, in this container,
+      # libstdc++ alone. Built here, in this container,
       # because a static archive must be linked by the glibc it was compiled
       # against — an archive built on a newer machine is a link error or a
       # silent binary-for-newer-glibc on this one. Cached on the recipe
-      # file's own hash and the runner's platform: editing the recipe is
-      # what invalidates the cache, the platform token keeps a darwin
-      # archive from ever being restored here (keys are repository-wide,
-      # not per runner), and the roughly-an-hour build is paid once per
-      # recipe change, not per push.
+      # file's own hash, the runner's platform and this job's image: editing
+      # the recipe is what invalidates the cache, the platform token keeps a
+      # darwin archive from ever being restored here (keys are
+      # repository-wide, not per runner), and the image token keeps the
+      # archive 24.04 built — GLIBC_2.38 in every object — from being
+      # restored onto the floor. The image is written twice, here and in
+      # `container:`, because a container's image cannot read `env`. The
+      # roughly-an-hour build is paid once per recipe change, not per push.
       - name: Restore the static LLVM
         id: llvm-cache
         uses: actions/cache@v4
         with:
           path: /tmp/llvm-static
-          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-static-llvm.sh') }}
+          key: llvm-static-${{ runner.os }}-${{ runner.arch }}-ubuntu20.04-${{ hashFiles('scripts/build-static-llvm.sh') }}
+      # 20.04's cmake is 3.16 and LLVM 20 asks for 3.20: Kitware's own
+      # build, which runs on any glibc this old, and only on a miss. LLVM's
+      # cmake also wants python3, which the bare image does not have.
       - name: Build the static LLVM (cache miss)
         if: steps.llvm-cache.outputs.cache-hit != 'true'
         run: |
-          apt-get update -qq && apt-get install -y -qq cmake curl xz-utils > /dev/null
-          bash scripts/build-static-llvm.sh /tmp/llvm-static
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 > /dev/null
+          mkdir -p /opt/cmake
+          curl -fsSL https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-linux-x86_64.tar.gz \
+            | tar -xz -C /opt/cmake --strip-components=1
+          PATH="/opt/cmake/bin:$PATH" bash scripts/build-static-llvm.sh /tmp/llvm-static
+
+      - name: Build the compiler on the floor
+        run: make crystal LLVM_CONFIG=/tmp/llvm-static/bin/llvm-config
 
       # `iyi-tarball` alone, and the missing word is the whole of it. The target
       # carries `release := 1` and make applies that to what it builds *for this
@@ -2812,7 +2858,7 @@ jobs:
       # found it up to date by file times and refused to package it. Which is
       # the guard working: an unoptimised release is what it was added to stop.
       - name: Build `iyi` and package it
-        run: make -o .build/crystal iyi-tarball LLVM_CONFIG=/tmp/llvm-static/bin/llvm-config
+        run: make iyi-tarball LLVM_CONFIG=/tmp/llvm-static/bin/llvm-config
 
       # What a person who downloads it does: unpack it somewhere else and run a
       # program. Nothing here may need this checkout, a IYI_PATH, or a
@@ -2911,9 +2957,11 @@ jobs:
   # in the environment that built it — where the libLLVM it linked against
   # is exactly the one it needs, so "unpack somewhere else and run" proved
   # the library path and nothing about the loader. This unpacks it in a
-  # bare `ubuntu:24.04` with a C toolchain and nothing else: no LLVM, no
+  # bare `ubuntu:20.04` with a C toolchain and nothing else: no LLVM, no
   # no bootstrap compiler, no iyi. If the package lacks what the loader wants,
-  # this is where it says so.
+  # this is where it says so. 20.04 because it is the glibc the `binary` job
+  # promises (2.31): 0.18.0 passed this room on 24.04 and could not start
+  # on 22.04, every symbol it asked for being one 24.04 has.
   #
   # `gcc` is installed on purpose and it is the honest prerequisite: iyi
   # links through `cc`, so a machine that cannot compile C cannot finish
@@ -2945,7 +2993,7 @@ jobs:
         run: |
           printf 'module hi\n\nputs "hello from a machine with nothing on it"\n' \
             > room/hi.iyi
-          docker run --rm -v "$PWD/room:/iyi" ubuntu:24.04 sh -c '
+          docker run --rm -v "$PWD/room:/iyi" ubuntu:20.04 sh -c '
             set -e
             apt-get update -qq && apt-get install -y -qq gcc > /dev/null
             /iyi/bin/iyi version

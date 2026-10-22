@@ -36,6 +36,31 @@ limit=$(( ${SIBLING_MINUTES:-35} * 60 ))
 bounded=""
 command -v timeout >/dev/null 2>&1 && bounded="timeout -k 30 $limit"
 
+# Each sibling's lowest available memory and most swap in use, read from
+# /proc/meminfo every two seconds while it runs (Linux has it, and so does
+# the MSYS bash the Windows jobs run this under). Windows shards have lost
+# their runner ("lost communication with the server") six times (jobs
+# 118492675680, 118598972995, 118855592816, 119406415714, 119550880710
+# and 119648405209), and such a job keeps no log; these lines, from the
+# shards that finish, say which siblings bring a runner nearest to the end
+# of its memory.
+trace=""
+if [ -r /proc/meminfo ]; then
+  trace="$(mktemp)"
+  total=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+  echo "== memory: $total MB here; each sibling's lowest available and most swap follow it"
+else
+  echo "== memory: no /proc/meminfo here, so no sibling's memory is traced"
+fi
+sample_memory() {
+  while :; do
+    awk '/^(MemFree|MemAvailable|SwapTotal|SwapFree):/ { v[$1] = $2 }
+      END { a = ("MemAvailable:" in v) ? v["MemAvailable:"] : v["MemFree:"]
+            print int(a / 1024), int((v["SwapTotal:"] - v["SwapFree:"]) / 1024) }' /proc/meminfo >>"$trace"
+    sleep 2
+  done
+}
+
 status=0
 place=0
 ran=""
@@ -46,8 +71,20 @@ for sibling in "$REPO"/bench/std_*_exercise.sh; do
   [ $(((place - 1) % shards + 1)) -eq "$shard" ] || continue
   ran="$ran $(basename "$sibling" .sh)"
   echo "-- running sibling: $(basename "$sibling")"
+  sampler=""
+  if [ -n "$trace" ]; then
+    : >"$trace"
+    sample_memory &
+    sampler=$!
+  fi
   $bounded bash "$sibling"
   code=$?
+  if [ -n "$sampler" ]; then
+    kill "$sampler" 2>/dev/null
+    wait "$sampler" 2>/dev/null
+    awk 'NR == 1 || $1 < low { low = $1 } $2 > swap { swap = $2 }
+      END { if (NR) printf "   memory: lowest available %d MB, swap in use at most %d MB\n", low, swap }' "$trace"
+  fi
   if [ "$code" -eq 124 ] || [ "$code" -eq 137 ]; then
     echo "FAIL: sibling $(basename "$sibling") had not finished in $((limit / 60)) minutes, and was stopped"
     status=1
@@ -57,6 +94,7 @@ for sibling in "$REPO"/bench/std_*_exercise.sh; do
   fi
 done
 
+[ -n "$trace" ] && rm -f "$trace"
 echo
 echo "== shard $shard of $shards: $(echo $ran | wc -w | tr -d ' ') of $place sibling exercises"
 [ -n "$ran" ] || echo "  (none in this shard)"
